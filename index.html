@@ -1619,11 +1619,27 @@ $('btnCropCancel').onclick=()=>{
 };
 
 $('btnCropSave').onclick=async()=>{
+  // Režim přihlášky — jen ulož oříznutý blob, nenahrávej zatím
+  if(window._cropMode==='app' && appCropper){
+    appCropper.getCroppedCanvas({ width:800, height:400 }).toBlob((blob)=>{
+      appCroppedBlob=blob;
+      $('cropOv').style.display='none';
+      appCropper.destroy(); appCropper=null;
+      window._cropMode=null;
+      // Ukáž náhled v přihlášce
+      const url=URL.createObjectURL(blob);
+      $('caPhotoExisting').style.display='flex';
+      $('caPhotoPreview').style.backgroundImage=`url('${url}')`;
+      $('caPhotoExisting').querySelector('div:nth-child(2)').textContent='✓ Nová fotka připravena';
+      $('caPhotoNew').style.display='none';
+      toast('✅ Fotka oříznuta');
+    }, 'image/jpeg', 0.9);
+    return;
+  }
+  // Režim avatar (původní)
   if(!cropper){ return; }
   toast('📤 Nahrávám fotku...');
   $('cropOv').style.display='none';
-
-  // Získej oříznutý obrázek jako blob
   cropper.getCroppedCanvas({ width:800, height:400 }).toBlob(async(blob)=>{
     try {
       const fileName=`${currentUser.id}-avatar-${Date.now()}.jpg`;
@@ -1886,6 +1902,36 @@ $('caPhotoChange').onclick=()=>{
   $('caPhotoNew').style.display='block';
 };
 
+// Ořez fotky v coach přihlášce
+let appCropper=null;
+let appCroppedBlob=null;
+
+$('caPhoto').onchange=(e)=>{
+  const file=e.target.files[0];
+  if(!file){ return; }
+  if(file.size > 5*1024*1024){ toast('⚠️ Foto je větší než 5 MB'); return; }
+
+  const reader=new FileReader();
+  reader.onload=(ev)=>{
+    $('cropImg').src=ev.target.result;
+    $('cropOv').style.display='flex';
+    if(appCropper) appCropper.destroy();
+    if(cropper){ cropper.destroy(); cropper=null; }
+    appCropper=new Cropper($('cropImg'), {
+      aspectRatio: 2/1,
+      viewMode: 1,
+      dragMode: 'move',
+      autoCropArea: 0.9,
+      background: false,
+    });
+    // přepni save tlačítko na režim přihlášky
+    window._cropMode='app';
+  };
+  reader.readAsDataURL(file);
+  e.target.value='';
+};
+  
+
 // Zavření formuláře přihlášky
 $('btnCloseCoachApp').onclick=()=>closeSheet('shCoachApp');
 
@@ -1900,7 +1946,7 @@ $('btnSubmitCoachApp').onclick=async()=>{
   const rateIn=parseInt($('caRateInperson').value)||null;
   const rateOn=parseInt($('caRateOnline').value)||null;
   const videoFile=$('caVideo').files[0];
-  const photoFile=$('caPhoto').files[0];
+  const photoFile=appCroppedBlob || $('caPhoto').files[0];
 
   if(!bio||!city){ toast('⚠️ Vyplň bio a město'); return; }
   if(!rateIn && !rateOn){ toast('⚠️ Vyplň aspoň jednu cenu'); return; }
@@ -1919,10 +1965,9 @@ $('btnSubmitCoachApp').onclick=async()=>{
     // Nahraj profilovou fotku (pokud je nová), jinak ponech existující
     let photoUrl=currentUser.photo_url || null;
     if(photoFile){
-      if(photoFile.size > 5*1024*1024){ throw new Error('Foto je větší než 5 MB'); }
       btn.textContent='Nahrávám fotku...';
-      const photoName=`${currentUser.id}-photo-${Date.now()}.${photoFile.name.split('.').pop()}`;
-      const { error: pErr } = await supaClient.storage.from('coach-photos').upload(photoName, photoFile);
+      const photoName=`${currentUser.id}-photo-${Date.now()}.jpg`;
+      const { error: pErr } = await supaClient.storage.from('coach-photos').upload(photoName, photoFile, { contentType:'image/jpeg' });
       if(pErr) throw pErr;
       const { data: pUrlData } = supaClient.storage.from('coach-photos').getPublicUrl(photoName);
       photoUrl=pUrlData.publicUrl;
@@ -1944,6 +1989,7 @@ await supaClient.from('profiles').update({
     }).eq('id', currentUser.id);
 
     currentUser.coach_status='pending';
+    appCroppedBlob=null;
     closeSheet('shCoachApp');
     updateRoleUI();
     toast('🎉 Přihláška odeslána! Ozveme se do 48h.');
