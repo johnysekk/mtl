@@ -31,7 +31,7 @@ export default async function handler(req, res) {
           destination: coachId,
         },
       },
-     success_url: `https://${req.headers.host}/?platba=ok&slot=${req.query.slotId || ''}`,
+     success_url: `https://${req.headers.host}/?platba=ok&slot=${req.query.slotId || ''}&session={CHECKOUT_SESSION_ID}`,
       cancel_url: `https://${req.headers.host}/?platba=zruseno`,
     });
 
