@@ -712,6 +712,9 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
       <div class="sec-lbl" style="margin-top:20px;">Moje termíny</div>
       <div id="coachSlotsList"></div>
 
+<div class="sec-lbl" style="margin-top:20px;">Nadcházející rezervace</div>
+      <div id="coachBookingsList"></div>
+      
       <div class="sec-lbl" style="margin-top:20px;">Výdělky</div>
       <div class="prow-group">
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💰</div><div class="prow-lbl">Tento měsíc</div></div><span class="prow-val" id="coachEarnings">0 Kč</span></div>
@@ -2087,6 +2090,66 @@ async function loadMessages(){
 
 let realtimeChannel=null;
 
+  async function loadCoachBookings(){
+  if(!currentUser) return;
+  const list=$('coachBookingsList');
+  if(!list) return;
+  list.innerHTML='<p style="color:var(--light);font-size:13px;padding:10px 0;">Načítám...</p>';
+  const { data } = await supaClient
+    .from('bookings').select('*')
+    .eq('coach_id', currentUser.id)
+    .eq('status','active')
+    .order('training_date',{ascending:true});
+
+  if(!data || !data.length){
+    list.innerHTML='<p style="color:var(--light);font-size:13px;padding:10px 0;">Žádné nadcházející rezervace.</p>';
+    return;
+  }
+  list.innerHTML='';
+  data.forEach(b=>{
+    const el=document.createElement('div');
+    el.style.cssText='background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;';
+    el.innerHTML=`
+      <div style="font-size:15px;font-weight:700;color:var(--dark);">📅 ${b.training_date} · ${b.training_time}</div>
+      <div style="font-size:13px;color:var(--mid);margin:4px 0 10px;">${b.amount} Kč</div>
+      <button class="coachCancelBtn" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-slot="${b.slot_id}" data-student="${b.student_id}" data-date="${b.training_date}" data-time="${b.training_time}" style="width:100%;padding:10px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">Zrušit (100% vrácení studentovi)</button>
+    `;
+    list.appendChild(el);
+  });
+
+  list.querySelectorAll('.coachCancelBtn').forEach(btn=>{
+    btn.onclick=()=>coachCancelBooking(btn.dataset);
+  });
+}
+
+async function coachCancelBooking(d){
+  if(!confirm('Opravdu zrušit tuto rezervaci? Studentovi se vrátí 100% částky.')) return;
+  try {
+    // Refund 100% (hoursUntil=999 → vždy 100%)
+    if(d.pi && d.pi!=='null'){
+      const r = await fetch(`/api/cancel?paymentIntent=${d.pi}&amount=${d.amt}&hoursUntil=999`);
+      const j = await r.json();
+      if(j.error){ toast('⚠️ Chyba refundu: '+j.error); return; }
+      toast(`✅ Zrušeno. Studentovi vráceno: ${j.refunded} Kč`);
+    } else {
+      toast('✅ Rezervace zrušena');
+    }
+    // Uvolni slot
+    await supaClient.from('slots').update({ booked:false, student:null }).eq('id', d.slot);
+    // Booking cancelled
+    await supaClient.from('bookings').update({ status:'cancelled' }).eq('id', d.id);
+    // Notifikace studentovi
+    await supaClient.from('notifications').insert({
+      user_id: d.student, type:'cancelled', read:false,
+      message:`❌ Tvůj kouč zrušil lekci na ${d.date} v ${d.time}. Vrátili jsme ti 100% částky (${d.amt} Kč).`
+    });
+    loadCoachBookings();
+  } catch(e){
+    console.error('Coach cancel error:', e);
+    toast('⚠️ Chyba při rušení');
+  }
+}
+
 function subscribeRealtime(){
   if(!currentUser) return;
   if(realtimeChannel) supaClient.removeChannel(realtimeChannel);
@@ -2230,6 +2293,7 @@ $('modeCoach').onclick=()=>{
   $('modeCoach').classList.add('active');
   $('modeStudent').classList.remove('active');
   loadCoachSlots();
+  loadCoachBookings();
 };
 
 // Coach slot management
