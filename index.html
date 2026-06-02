@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <html lang="cs">
 <head>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.js"></script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>MTL Coaches</title>
@@ -771,6 +773,16 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
 
     <button id="btnSubmitCoachApp" style="width:100%;padding:16px;background:var(--red);color:#fff;border:none;border-radius:14px;font-size:16px;font-weight:700;cursor:pointer;font-family:'DM Sans';">Odeslat přihlášku →</button>
   </div>
+</div>
+
+<!-- CROP OVERLAY -->
+<div id="cropOv" style="display:none;position:fixed;inset:0;z-index:9998;background:rgba(0,0,0,.95);flex-direction:column;align-items:center;justify-content:center;padding:20px;max-width:430px;left:50%;transform:translateX(-50%);">
+  <div style="font-family:'Bebas Neue';font-size:24px;color:#fff;letter-spacing:.05em;margin-bottom:16px;">Ořízni fotku</div>
+  <div style="width:100%;max-width:340px;max-height:60vh;overflow:hidden;border-radius:12px;background:#000;margin-bottom:20px;">
+    <img id="cropImg" style="max-width:100%;display:block;">
+  </div>
+  <button id="btnCropSave" style="width:100%;max-width:340px;padding:15px;background:var(--red);color:#fff;border:none;border-radius:14px;font-size:16px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:10px;">Použít fotku</button>
+  <button id="btnCropCancel" style="width:100%;max-width:340px;padding:13px;background:transparent;color:rgba(255,255,255,.6);border:none;font-size:15px;cursor:pointer;font-family:'DM Sans';">Zrušit</button>
 </div>
   
 <!-- SETTINGS -->
@@ -1544,31 +1556,62 @@ $('btnVid').onclick=()=>toast('▶️ Přehrávám certifikační video...');
   // Klik na avatar → otevři výběr fotky
 $('meAvatar').onclick=()=>$('meAvatarInput').click();
 
-$('meAvatarInput').onchange=async(e)=>{
+let cropper=null;
+
+$('meAvatarInput').onchange=(e)=>{
   const file=e.target.files[0];
   if(!file){ return; }
   if(file.size > 5*1024*1024){ toast('⚠️ Foto je větší než 5 MB'); return; }
   if(!currentUser){ toast('⚠️ Nejprve se přihlas'); return; }
 
+  // Načti obrázek do ořezávače
+  const reader=new FileReader();
+  reader.onload=(ev)=>{
+    $('cropImg').src=ev.target.result;
+    $('cropOv').style.display='flex';
+    if(cropper) cropper.destroy();
+    cropper=new Cropper($('cropImg'), {
+      aspectRatio: 1,        // čtverec
+      viewMode: 1,
+      dragMode: 'move',
+      autoCropArea: 0.9,
+      background: false,
+    });
+  };
+  reader.readAsDataURL(file);
+  e.target.value=''; // reset ať jde nahrát stejný soubor znovu
+};
+
+$('btnCropCancel').onclick=()=>{
+  $('cropOv').style.display='none';
+  if(cropper){ cropper.destroy(); cropper=null; }
+};
+
+$('btnCropSave').onclick=async()=>{
+  if(!cropper){ return; }
   toast('📤 Nahrávám fotku...');
-  try {
-    const fileName=`${currentUser.id}-avatar-${Date.now()}.${file.name.split('.').pop()}`;
-    const { error: upErr } = await supaClient.storage.from('coach-photos').upload(fileName, file);
-    if(upErr) throw upErr;
-    const { data: urlData } = supaClient.storage.from('coach-photos').getPublicUrl(fileName);
-    const photoUrl=urlData.publicUrl;
+  $('cropOv').style.display='none';
 
-    // Ulož do profilu
-    await supaClient.from('profiles').update({ photo_url: photoUrl }).eq('id', currentUser.id);
-    currentUser.photo_url=photoUrl;
+  // Získej oříznutý obrázek jako blob
+  cropper.getCroppedCanvas({ width:600, height:600 }).toBlob(async(blob)=>{
+    try {
+      const fileName=`${currentUser.id}-avatar-${Date.now()}.jpg`;
+      const { error: upErr } = await supaClient.storage.from('coach-photos').upload(fileName, blob, { contentType:'image/jpeg' });
+      if(upErr) throw upErr;
+      const { data: urlData } = supaClient.storage.from('coach-photos').getPublicUrl(fileName);
+      const photoUrl=urlData.publicUrl;
 
-    // Zobraz hned v avataru
-    setAvatar(photoUrl);
-    toast('✅ Fotka nahrána!');
-  } catch(err){
-    console.error('Avatar upload error:', err);
-    toast('⚠️ Chyba při nahrávání');
-  }
+      await supaClient.from('profiles').update({ photo_url: photoUrl }).eq('id', currentUser.id);
+      currentUser.photo_url=photoUrl;
+      setAvatar(photoUrl);
+      toast('✅ Fotka nahrána!');
+    } catch(err){
+      console.error('Avatar upload error:', err);
+      toast('⚠️ Chyba při nahrávání');
+    } finally {
+      if(cropper){ cropper.destroy(); cropper=null; }
+    }
+  }, 'image/jpeg', 0.9);
 };
 
 function setAvatar(url){
