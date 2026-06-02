@@ -729,7 +729,7 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
       </div>
       <div class="sec-lbl">Moje rezervace</div>
       <div class="prow-group">
-        <div class="prow" id="meBook1"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">📅</div><div class="prow-lbl">Nadcházející</div></div><div style="display:flex;align-items:center;gap:8px;"><span class="prow-val">2 hodiny</span><span class="prow-arr">›</span></div></div>
+        <div class="prow" id="meBook1" style="cursor:pointer;"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">📅</div><div class="prow-lbl">Nadcházející</div></div><div style="display:flex;align-items:center;gap:8px;"><span class="prow-val" id="bookCount">0</span><span class="prow-arr">›</span></div></div>>
         <div class="prow" id="meBook2"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">📖</div><div class="prow-lbl">Historie</div></div><div style="display:flex;align-items:center;gap:8px;"><span class="prow-val">8 hodin</span><span class="prow-arr">›</span></div></div>
       </div>
     </div>
@@ -834,6 +834,21 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
   <div style="display:flex;gap:8px;padding:12px 16px;border-top:1px solid var(--border);background:var(--surf);">
     <input id="chatInput" type="text" placeholder="Napiš zprávu..." style="flex:1;padding:12px 14px;border:1.5px solid var(--border);border-radius:99px;font-size:16px;font-family:'DM Sans';">
     <button id="btnSendMsg" style="width:46px;height:46px;border-radius:50%;background:var(--red);color:#fff;border:none;font-size:18px;cursor:pointer;flex-shrink:0;">➤</button>
+  </div>
+</div>
+
+<!-- MOJE REZERVACE -->
+<div class="sheet" id="shBookings" style="z-index:86;">
+  <div class="shdr">
+    <div class="shdr-title">Moje rezervace</div>
+    <button class="btn-close" id="btnCloseBookings">✕</button>
+  </div>
+  <div style="padding:16px 20px;" id="bookingsList"></div>
+  <div style="padding:0 20px 20px;font-size:12px;color:var(--light);line-height:1.6;">
+    <strong>Storno podmínky:</strong><br>
+    16+ hodin předem → 100% zpět<br>
+    Méně než 16 hodin → 50% zpět<br>
+    Po termínu / no-show → bez vrácení
   </div>
 </div>
   
@@ -1364,7 +1379,7 @@ function hideMatch(){ $('matchOv').classList.remove('open'); }
 // ════════════════════════════════════════
 // SHEETS
 // ════════════════════════════════════════
-const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMe','shSettings','shCoachApp','shAdmin','shNotif','shChat'];
+const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMe','shSettings','shCoachApp','shAdmin','shNotif','shChat','shBookings'];
 
 function openSheet(id){
   SHEETS.forEach(s=>{ if(s!==id) $(s).classList.remove('open'); });
@@ -1874,6 +1889,9 @@ $('meLogout').onclick=async()=>{
   $('btnNotif').onclick=()=>{ openSheet('shNotif'); loadNotifications(); };
 $('btnCloseNotif').onclick=()=>closeSheet('shNotif');
 
+  $('meBook1').onclick=()=>{ openSheet('shBookings'); loadBookings(); };
+$('btnCloseBookings').onclick=()=>closeSheet('shBookings');
+
 async function loadNotifications(){
   if(!currentUser) return;
   const list=$('notifList');
@@ -2066,6 +2084,71 @@ async function loadMessages(){
 }
 
   let realtimeChannel=null;
+
+  async function loadBookings(){
+  if(!currentUser) return;
+  const list=$('bookingsList');
+  list.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;">Načítám...</p>';
+  const { data } = await supaClient
+    .from('bookings').select('*')
+    .eq('student_id', currentUser.id)
+    .eq('status','active')
+    .order('training_date',{ascending:true});
+
+  if(!data || !data.length){
+    list.innerHTML='<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">Žádné aktivní rezervace.</p>';
+    return;
+  }
+  list.innerHTML='';
+  data.forEach(b=>{
+    const dt=new Date(`${b.training_date}T${b.training_time}:00`);
+    const hours=(dt - new Date())/(1000*60*60);
+    let refundInfo = hours>=16 ? '100% zpět' : hours>=0 ? '50% zpět' : 'bez vrácení';
+
+    const el=document.createElement('div');
+    el.style.cssText='background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px;';
+    el.innerHTML=`
+      <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.04em;">${b.coach_name}</div>
+      <div style="font-size:14px;color:var(--mid);margin:4px 0;">📅 ${b.training_date} · ${b.training_time}</div>
+      <div style="font-size:13px;color:var(--dark);margin-bottom:12px;">${b.amount} Kč · Při zrušení teď: <strong>${refundInfo}</strong></div>
+      <button class="cancelBtn" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-slot="${b.slot_id}" data-date="${b.training_date}" data-time="${b.training_time}" style="width:100%;padding:11px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">Zrušit rezervaci</button>
+    `;
+    list.appendChild(el);
+  });
+
+  // Napoj zrušení
+  list.querySelectorAll('.cancelBtn').forEach(btn=>{
+    btn.onclick=()=>cancelBooking(btn.dataset);
+  });
+}
+
+async function cancelBooking(d){
+  const dt=new Date(`${d.date}T${d.time}:00`);
+  const hours=(dt - new Date())/(1000*60*60);
+  const refundInfo = hours>=16 ? '100%' : hours>=0 ? '50%' : '0%';
+
+  if(!confirm(`Opravdu zrušit rezervaci? Vrátíme ti ${refundInfo} částky.`)) return;
+
+  try {
+    // Refund přes Stripe
+    if(d.pi && d.pi!=='null'){
+      const r = await fetch(`/api/cancel?paymentIntent=${d.pi}&amount=${d.amt}&hoursUntil=${hours}`);
+      const j = await r.json();
+      if(j.error){ toast('⚠️ Chyba refundu: '+j.error); return; }
+      toast(`✅ Zrušeno. Vráceno: ${j.refunded} Kč`);
+    } else {
+      toast('✅ Rezervace zrušena');
+    }
+    // Uvolni slot
+    await supaClient.from('slots').update({ booked:false, student:null }).eq('id', d.slot);
+    // Označ booking jako zrušený
+    await supaClient.from('bookings').update({ status:'cancelled' }).eq('id', d.id);
+    loadBookings();
+  } catch(e){
+    console.error('Cancel error:', e);
+    toast('⚠️ Chyba při rušení');
+  }
+}
 
 function subscribeRealtime(){
   if(!currentUser) return;
