@@ -386,6 +386,7 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
 <div class="hdr">
   <div class="logo">MTL <span>COACHES</span></div>
 <div class="hdr-r">
+    <div class="icon-btn" id="btnNotif" title="Notifikace" style="position:relative;">🔔<span id="notifBadge" style="display:none;position:absolute;top:-2px;right:-2px;background:var(--red);color:#fff;font-size:10px;font-weight:700;min-width:18px;height:18px;border-radius:99px;align-items:center;justify-content:center;padding:0 4px;border:2px solid var(--bg);">0</span></div>
     <div class="icon-btn" id="btnAdmin" title="Founder Admin" style="display:none;position:relative;">👑<span id="adminBadge" style="display:none;position:absolute;top:-2px;right:-2px;background:var(--red);color:#fff;font-size:10px;font-weight:700;min-width:18px;height:18px;border-radius:99px;display:none;align-items:center;justify-content:center;padding:0 4px;border:2px solid var(--bg);">0</span></div>
     <div class="icon-btn" id="btnCoach" title="Staň se MTL Certified koučem">🎖️</div>
     <div class="icon-btn" id="btnSettings" title="Nastavení">⚙️</div>
@@ -813,6 +814,15 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
     <div class="sec-lbl">Žádosti o MTL Certified</div>
     <div id="adminList"></div>
   </div>
+</div>
+
+<!-- NOTIFIKACE -->
+<div class="sheet" id="shNotif" style="z-index:86;">
+  <div class="shdr">
+    <div class="shdr-title">Notifikace</div>
+    <button class="btn-close" id="btnCloseNotif">✕</button>
+  </div>
+  <div style="padding:16px 20px;" id="notifList"></div>
 </div>
   
 <!-- SETTINGS -->
@@ -1342,7 +1352,7 @@ function hideMatch(){ $('matchOv').classList.remove('open'); }
 // ════════════════════════════════════════
 // SHEETS
 // ════════════════════════════════════════
-const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMe','shSettings','shCoachApp','shAdmin'];
+const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMe','shSettings','shCoachApp','shAdmin','shNotif'];
 
 function openSheet(id){
   SHEETS.forEach(s=>{ if(s!==id) $(s).classList.remove('open'); });
@@ -1704,6 +1714,45 @@ $('meLogout').onclick=async()=>{
   location.reload();
 };
 
+  $('btnNotif').onclick=()=>{ openSheet('shNotif'); loadNotifications(); };
+$('btnCloseNotif').onclick=()=>closeSheet('shNotif');
+
+async function loadNotifications(){
+  if(!currentUser) return;
+  const list=$('notifList');
+  list.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;">Načítám...</p>';
+  const { data } = await supaClient
+    .from('notifications').select('*').eq('user_id', currentUser.id)
+    .order('created_at',{ascending:false});
+
+  if(!data || !data.length){
+    list.innerHTML='<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">Žádné notifikace.</p>';
+    return;
+  }
+  list.innerHTML='';
+  data.forEach(n=>{
+    const d=new Date(n.created_at);
+    const el=document.createElement('div');
+    el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;`;
+    el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${n.message}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}</div>`;
+    list.appendChild(el);
+  });
+  // Označ jako přečtené
+  await supaClient.from('notifications').update({ read:true }).eq('user_id', currentUser.id).eq('read', false);
+  updateNotifBadge();
+}
+
+async function updateNotifBadge(){
+  if(!currentUser) return;
+  const { data } = await supaClient
+    .from('notifications').select('id').eq('user_id', currentUser.id).eq('read', false);
+  const count=(data||[]).length;
+  const badge=$('notifBadge');
+  if(!badge) return;
+  if(count>0){ badge.textContent=count; badge.style.display='flex'; }
+  else { badge.style.display='none'; }
+}
+
   // Admin tlačítko
 $('btnAdmin').onclick=()=>{ openSheet('shAdmin'); loadPendingCoaches(); };
 $('btnCloseAdmin').onclick=()=>closeSheet('shAdmin');
@@ -1776,6 +1825,10 @@ async function loadPendingCoaches(){
   list.querySelectorAll('.adminApprove').forEach(btn=>{
     btn.onclick=async()=>{
       await supaClient.from('profiles').update({ coach_status:'approved' }).eq('id', btn.dataset.id);
+      await supaClient.from('notifications').insert({
+        user_id: btn.dataset.id, type:'approved',
+        message:'🎖️ Gratulujeme! Byl jsi schválen jako MTL Certified Coach. Tvůj profil je teď živý v nabídce.'
+      });
       toast('✅ Kouč schválen!');
       loadPendingCoaches();
       updateAdminBadge();
@@ -1783,7 +1836,13 @@ async function loadPendingCoaches(){
   });
   list.querySelectorAll('.adminReject').forEach(btn=>{
     btn.onclick=async()=>{
+      const reason=prompt('Důvod zamítnutí (uvidí ho kouč):', 'Certifikační video nesplňuje požadavky.');
+      if(reason===null) return; // zrušil
       await supaClient.from('profiles').update({ coach_status:'rejected' }).eq('id', btn.dataset.id);
+      await supaClient.from('notifications').insert({
+        user_id: btn.dataset.id, type:'rejected',
+        message:`❌ Tvoje přihláška nebyla schválena. Důvod: ${reason}`
+      });
       toast('Zamítnuto');
       loadPendingCoaches();
       updateAdminBadge();
@@ -2073,6 +2132,7 @@ function enterApp(){
   fillUserProfile();
   updateRoleUI();
   if(currentUser.role==='founder'){ $('btnAdmin').style.display='flex'; updateAdminBadge(); }
+  updateNotifBadge();
   loadCoaches();
 }
 function fillUserProfile(){
