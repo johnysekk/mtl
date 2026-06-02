@@ -22,12 +22,19 @@ export default async function handler(req, res) {
     const refundAmount = Math.round(amt * 100 * refundPct); // v haléřích
 
     // Vytvoř refund
-    const refund = await stripe.refunds.create({
+    const refundParams = {
       payment_intent: paymentIntent,
       amount: refundAmount,
-      // při 100% refundu vrátit i aplikační poplatek (MTL provizi)
-      refund_application_fee: refundPct === 1.0,
-    });
+    };
+    // při 100% refundu vrátit i MTL provizi a obrátit transfer ke koučovi
+    if(refundPct === 1.0){
+      refundParams.refund_application_fee = true;
+      refundParams.reverse_transfer = true;
+    } else {
+      // při částečném refundu obrátit poměrnou část transferu
+      refundParams.reverse_transfer = true;
+    }
+    const refund = await stripe.refunds.create(refundParams);
 
     res.status(200).json({ refunded: refundAmount/100, pct: refundPct*100, refundId: refund.id });
   } catch (err) {
