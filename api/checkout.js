@@ -6,9 +6,12 @@ export default async function handler(req, res) {
   try {
     const { coachId, coachName, amount } = req.query;
 
-    // amount je v Kč, Stripe chce haléře (×100)
+    if (!coachId || !amount) {
+      return res.status(400).json({ error: 'Chybí coachId nebo amount' });
+    }
+
     const amountInHaler = Math.round(parseInt(amount) * 100);
-    const applicationFee = Math.round(amountInHaler * 0.10); // 10% provize MTL
+    const applicationFee = Math.round(amountInHaler * 0.10); // 10% MTL provize
 
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
@@ -23,6 +26,7 @@ export default async function handler(req, res) {
       }],
       payment_intent_data: {
         application_fee_amount: applicationFee,
+        on_behalf_of: coachId,              // ← kouč = merchant of record, Stripe fee jde z jeho podílu
         transfer_data: {
           destination: coachId,
         },
