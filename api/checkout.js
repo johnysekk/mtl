@@ -10,8 +10,9 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Chybí coachId nebo amount' });
     }
 
-    const amountInHaler = Math.round(parseInt(amount) * 100);
-    const applicationFee = Math.round(amountInHaler * 0.15); // 15% MTL provize
+    const rate = parseInt(amount);                          // cena kouče (jeho rate)
+    const amountInHaler = Math.round(rate * 1.10 * 100);    // student platí rate +10%
+    const applicationFee = Math.round(rate * 0.20 * 100);   // MTL = 20% z rate (10% student + 10% kouč)
 
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
