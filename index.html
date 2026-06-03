@@ -1435,7 +1435,7 @@ function hideMatch(){ $('matchOv').classList.remove('open'); }
 // ════════════════════════════════════════
 // SHEETS
 // ════════════════════════════════════════
-const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMe','shSettings','shCoachApp','shAdmin','shNotif','shChat','shBookings'];
+const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMe','shSettings','shCoachApp','shAdmin','shNotif','shChat','shBookings','shDiary'];
 
 function openSheet(id){
   SHEETS.forEach(s=>{ if(s!==id) $(s).classList.remove('open'); });
@@ -2193,6 +2193,150 @@ let realtimeChannel=null;
   });
 }
 
+  let diaryYear, diaryMonth;
+let diarySlots = [], diaryBookings = [];
+const MONTH_NAMES = ['Leden','Únor','Březen','Duben','Květen','Červen','Červenec','Srpen','Září','Říjen','Listopad','Prosinec'];
+
+async function openDiary(){
+  const now = new Date();
+  diaryYear = now.getFullYear();
+  diaryMonth = now.getMonth();
+  openSheet('shDiary');
+  await loadDiaryData();
+  renderDiary();
+}
+
+async function loadDiaryData(){
+  if(!currentUser) return;
+  // všechny moje sloty + aktivní rezervace
+  const { data: slots } = await supaClient.from('slots').select('*').eq('coach_profile_id', currentUser.id);
+  const { data: books } = await supaClient.from('bookings').select('*').eq('coach_id', currentUser.id).eq('status','active');
+  diarySlots = slots || [];
+  diaryBookings = books || [];
+}
+
+function renderDiary(){
+  $('diaryMonth').textContent = `${MONTH_NAMES[diaryMonth]} ${diaryYear}`;
+  const grid = $('diaryGrid');
+  grid.innerHTML = '';
+  $('diaryDayDetail').innerHTML = '';
+
+  // Souhrn měsíce
+  const monthBookings = diaryBookings.filter(b=>{
+    const d = new Date(b.training_date);
+    return d.getFullYear()===diaryYear && d.getMonth()===diaryMonth;
+  });
+  const monthFreeSlots = diarySlots.filter(s=>{
+    const d = new Date(s.date);
+    return d.getFullYear()===diaryYear && d.getMonth()===diaryMonth && !s.booked;
+  });
+  const earnings = monthBookings.reduce((sum,b)=>sum+(b.amount||0),0);
+  const summary = document.createElement('div');
+  summary.style.cssText='grid-column:1/-1;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;font-size:13px;color:var(--dark);text-align:center;';
+  summary.innerHTML = `<strong>${monthBookings.length}</strong> lekcí · <strong>${earnings} Kč</strong> · <strong>${monthFreeSlots.length}</strong> volných termínů`;
+  grid.appendChild(summary);
+
+  // Mřížka dní
+  const firstDay = new Date(diaryYear, diaryMonth, 1);
+  let startOffset = firstDay.getDay() - 1; // Po=0
+  if(startOffset < 0) startOffset = 6; // neděle
+  const daysInMonth = new Date(diaryYear, diaryMonth+1, 0).getDate();
+  const today = new Date();
+  const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+
+  // prázdné buňky před prvním dnem
+  for(let i=0;i<startOffset;i++){
+    const empty = document.createElement('div');
+    grid.appendChild(empty);
+  }
+
+  for(let day=1; day<=daysInMonth; day++){
+    const dateStr = `${diaryYear}-${String(diaryMonth+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+    const hasBooking = diaryBookings.some(b=>b.training_date===dateStr);
+    const hasFreeSlot = diarySlots.some(s=>s.date===dateStr && !s.booked);
+    const isToday = dateStr===todayStr;
+
+    const cell = document.createElement('div');
+    cell.style.cssText=`aspect-ratio:1;display:flex;flex-direction:column;align-items:center;justify-content:center;border-radius:10px;cursor:pointer;font-size:14px;position:relative;${isToday?'border:2px solid var(--dark);font-weight:700;':'border:1px solid var(--border);'}background:var(--surf);`;
+    let dots = '';
+    if(hasBooking) dots += '<span style="width:6px;height:6px;border-radius:50%;background:var(--red);display:inline-block;"></span>';
+    if(hasFreeSlot) dots += '<span style="width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;margin-left:2px;"></span>';
+    cell.innerHTML = `<span>${day}</span><span style="display:flex;height:8px;margin-top:2px;">${dots}</span>`;
+    cell.onclick = ()=>showDiaryDay(dateStr);
+    grid.appendChild(cell);
+  }
+}
+
+function showDiaryDay(dateStr){
+  const detail = $('diaryDayDetail');
+  const [y,m,d] = dateStr.split('-');
+  const dayBookings = diaryBookings.filter(b=>b.training_date===dateStr).sort((a,b)=>a.training_time.localeCompare(b.training_time));
+  const dayFreeSlots = diarySlots.filter(s=>s.date===dateStr && !s.booked).sort((a,b)=>a.time.localeCompare(b.time));
+
+  let html = `<div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.04em;margin-bottom:12px;">${parseInt(d)}. ${MONTH_NAMES[parseInt(m)-1]}</div>`;
+
+  if(!dayBookings.length && !dayFreeSlots.length){
+    html += '<p style="color:var(--light);font-size:14px;">Žádné termíny ani rezervace.</p>';
+  }
+
+  dayBookings.forEach(b=>{
+    html += `
+      <div style="background:#FFF0F0;border:1px solid #FFD0D0;border-radius:12px;padding:12px;margin-bottom:8px;">
+        <div style="font-size:15px;font-weight:700;color:var(--dark);">🥊 ${b.training_time} · Rezervace</div>
+        <div style="font-size:13px;color:var(--mid);margin:4px 0 8px;">${b.amount} Kč</div>
+        <button class="diaryMsgBtn" data-student="${b.student_id}" style="padding:8px 14px;background:var(--dark);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans';">💬 Napsat studentovi</button>
+      </div>`;
+  });
+
+  dayFreeSlots.forEach(s=>{
+    html += `
+      <div style="background:#F0FBF0;border:1px solid #C0E8C0;border-radius:12px;padding:12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
+        <div style="font-size:15px;font-weight:600;color:var(--dark);">⏰ ${s.time} · Volný termín</div>
+        <button class="diaryDelSlot" data-id="${s.id}" style="padding:6px 10px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;font-family:'DM Sans';">Smazat</button>
+      </div>`;
+  });
+
+  // Rychlé přidání termínu
+  html += `<button id="diaryAddSlot" data-date="${dateStr}" style="width:100%;padding:11px;background:var(--surf);border:1.5px dashed var(--border);border-radius:10px;font-size:14px;font-weight:600;color:var(--mid);cursor:pointer;font-family:'DM Sans';margin-top:4px;">+ Přidat termín na tento den</button>`;
+
+  detail.innerHTML = html;
+
+  // Napoj tlačítka
+  detail.querySelectorAll('.diaryMsgBtn').forEach(btn=>{
+    btn.onclick = ()=>openChatWithStudent(btn.dataset.student);
+  });
+  detail.querySelectorAll('.diaryDelSlot').forEach(btn=>{
+    btn.onclick = async ()=>{
+      await supaClient.from('slots').delete().eq('id', btn.dataset.id);
+      toast('Termín smazán');
+      await loadDiaryData(); renderDiary();
+    };
+  });
+  $('diaryAddSlot').onclick = async ()=>{
+    const time = prompt('Čas termínu (např. 18:00):', '18:00');
+    if(!time) return;
+    // formát na 2 číslice
+    const t = time.trim().match(/^(\d{1,2}):(\d{2})$/);
+    if(!t){ toast('⚠️ Špatný formát času'); return; }
+    const formatted = `${t[1].padStart(2,'0')}:${t[2]}`;
+    await supaClient.from('slots').insert({ coach_profile_id: currentUser.id, date: dateStr, time: formatted, booked:false });
+    toast('✅ Termín přidán');
+    await loadDiaryData(); renderDiary(); showDiaryDay(dateStr);
+  };
+}
+
+async function openChatWithStudent(studentId){
+  // najdi konverzaci student-kouč
+  const { data } = await supaClient.from('conversations').select('*')
+    .eq('student_id', studentId).eq('coach_id', currentUser.id);
+  if(data && data.length){
+    closeSheet('shDiary');
+    openChat(data[0]);
+  } else {
+    toast('Konverzace zatím neexistuje');
+  }
+}
+
 async function coachCancelBooking(d){
   if(!confirm('Opravdu zrušit tuto rezervaci? Studentovi se vrátí 100% částky.')) return;
   const reason = prompt('Důvod zrušení (volitelné, uvidí ho student):', '') || '';
@@ -2515,6 +2659,11 @@ $('caPhoto').onchange=(e)=>{
 
 // Zavření formuláře přihlášky
 $('btnCloseCoachApp').onclick=()=>closeSheet('shCoachApp');
+
+  $('btnOpenDiary').onclick = openDiary;
+$('btnCloseDiary').onclick = ()=>closeSheet('shDiary');
+$('diaryPrev').onclick = ()=>{ diaryMonth--; if(diaryMonth<0){ diaryMonth=11; diaryYear--; } renderDiary(); };
+$('diaryNext').onclick = ()=>{ diaryMonth++; if(diaryMonth>11){ diaryMonth=0; diaryYear++; } renderDiary(); };
 
 // Odeslání přihlášky
 $('btnSubmitCoachApp').onclick=async()=>{
