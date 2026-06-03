@@ -11,7 +11,7 @@ export default async function handler(req, res) {
     }
 
     const amountInHaler = Math.round(parseInt(amount) * 100);
-    const applicationFee = Math.round(amountInHaler * 0.10); // 10% MTL provize
+    const applicationFee = Math.round(amountInHaler * 0.15); // 15% MTL provize
 
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
@@ -26,7 +26,7 @@ export default async function handler(req, res) {
       }],
       payment_intent_data: {
         application_fee_amount: applicationFee,
-        on_behalf_of: coachId,              // ← kouč = merchant of record, Stripe fee jde z jeho podílu
+        on_behalf_of: coachId,              // kouč = merchant of record (země/výpis), Stripe fee platí platforma
         transfer_data: {
           destination: coachId,
         },
