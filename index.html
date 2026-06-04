@@ -2600,12 +2600,14 @@ async function loadNotifications(){
     const isCoachInperson = n.type==='booking' && n.message.includes('Nová rezervace');
     const isCoachOnline = n.type==='booking' && n.message.includes('Nová online objednávka');
     const isOnlineDone = n.type==='online';
-    const clickable = ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone;
+    const isMtlContact = n.type==='system' && (n.message.includes('pozastaven') || n.message.includes('certifikace byla odebrána'));
+    const clickable = ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact;
     let linkLabel = 'otevřít ›';
     if(isBookingConfirm) linkLabel = 'přidat do kalendáře ›';
     else if(isCoachInperson) linkLabel = 'otevřít v diáři ›';
     else if(isCoachOnline) linkLabel = 'otevřít online feedback ›';
     else if(n.type==='dispute' && currentUser.role!=='founder' && n.message.includes('nedorazil na trénink')) linkLabel = 'reagovat na hlášení ›';
+    else if(isMtlContact) linkLabel = 'napsat MTL ›';
     el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;${clickable?'cursor:pointer;':''}`;
     el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${n.message}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}${clickable?` · <span style="color:var(--blue);font-weight:600;">${linkLabel}</span>`:''}</div>`;
     if(clickable){
@@ -2620,6 +2622,7 @@ async function loadNotifications(){
         else if(isOnlineDone){ openOnline('student'); }
         else if(n.type==='dispute' && currentUser.role==='founder') openOnline('founder');
         else if(n.type==='dispute' && n.message.includes('nedorazil na trénink')){ const md=n.message.match(/#(\d+)/); if(md) openNoShowRespond(md[1]); else openOnline('coach'); }
+        else if(isMtlContact){ messageMtlAsCoach(); }
         else if(n.type==='refund_request' && currentUser.role==='founder' && n.message.includes('Žádost o refund')) openOnline('founder');
         else openOnline('coach');
       };
@@ -2803,15 +2806,29 @@ async function loadAdminCoachList(){
           <div style="flex:1;min-width:0;"><div style="font-size:15px;font-weight:700;color:var(--dark);">${c.name||'Kouč'}</div><div style="font-size:12px;color:var(--mid);">${c.city||''} · ⭐ ${c.rating||'—'} (${c.reviews||0})</div></div>
         </div>
         ${c.suspend_reason?`<div style="font-size:12px;color:var(--red);margin-top:8px;">Důvod: ${c.suspend_reason}</div>`:''}
-        <div style="display:flex;gap:8px;margin-top:10px;">
-          <button class="adminCoachDash" data-id="${c.id}" data-name="${c.name||'Kouč'}" style="flex:1;padding:9px;background:var(--bg);border:1px solid var(--border);border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">📊 Dashboard</button>
-          <button class="adminRestore" data-id="${c.id}" data-name="${c.name||'Kouč'}" style="flex:1;padding:9px;background:var(--green);color:#fff;border:none;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">✅ Obnovit</button>
+        <button class="adminCoachDash" data-id="${c.id}" data-name="${c.name||'Kouč'}" style="width:100%;margin-top:10px;padding:9px;background:var(--bg);border:1px solid var(--border);border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">📊 Dashboard</button>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button class="adminRestore" data-id="${c.id}" data-name="${c.name||'Kouč'}" style="flex:1;padding:9px;background:var(--green);color:#fff;border:none;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">↩️ Vrátit ze záhrobí</button>
+          <button class="adminRevoke" data-id="${c.id}" data-name="${c.name||'Kouč'}" style="flex:1;padding:9px;background:#FEECEC;color:var(--red);border:1px solid #FFD0D0;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">🚫 Odebrat certifikaci</button>
         </div>`;
       list.appendChild(el);
     });
     list.querySelectorAll('.adminCoachDash').forEach(b=>b.onclick=()=>openCoachStats(b.dataset.id, b.dataset.name));
     list.querySelectorAll('.adminRestore').forEach(b=>b.onclick=async()=>{ await toggleCoachSuspend(b.dataset.id, 'suspended', b.dataset.name); });
+    list.querySelectorAll('.adminRevoke').forEach(b=>b.onclick=()=>revokeCoachCert(b.dataset.id, b.dataset.name));
   }
+}
+
+async function revokeCoachCert(coachId, name){
+  if(!confirm(`Odebrat MTL certifikaci kouči ${name||''}? Přijde o status MTL Certified, zmizí ze žebříčku i nabídky a musel by požádat znovu.`)) return;
+  const reason = (prompt('Důvod odebrání certifikace (povinné — uvidí ho kouč):','')||'').trim();
+  if(!reason){ toast('⚠️ Důvod je povinný'); return; }
+  const { error } = await supaClient.from('profiles').update({ coach_status:'rejected', suspend_reason:null }).eq('id', coachId);
+  if(error){ toast('⚠️ '+error.message); return; }
+  await supaClient.from('notifications').insert({ user_id: coachId, type:'system', read:false, message:`🚫 Tvoje MTL certifikace byla odebrána. Důvod: ${reason} — pokud to chceš řešit, napiš nám.` });
+  toast('🚫 Certifikace odebrána');
+  loadCoaches();
+  loadAdminCoachList();
 }
 
 async function openCoachStats(coachId, coachName){
