@@ -3391,7 +3391,8 @@ const MIN_RATE = { CZK: 300, EUR: 14, USD: 15 };
 async function fillRateEditor(){
   if(!currentUser) return;
   // načti čerstvý profil ať jsou ceny aktuální
-  const { data: prof } = await supaClient.from('profiles').select('rate_inperson, rate_online, currency').eq('id', currentUser.id).single();
+  const { data: prof, error: profErr } = await supaClient.from('profiles').select('rate_inperson, rate_online, currency, currency_inperson, currency_online, online_format, online_desc, inperson_desc').eq('id', currentUser.id).single();
+  if(profErr){ console.error('fillRateEditor select error:', profErr); }
   if(prof){
     currentUser.rate_inperson = prof.rate_inperson;
     currentUser.rate_online = prof.rate_online;
@@ -3447,7 +3448,8 @@ $('btnSaveRates').onclick=async()=>{
   const btn=$('btnSaveRates');
   btn.textContent='Ukládám...'; btn.disabled=true;
   try {
-    await supaClient.from('profiles').update({ rate_inperson: rateIn, rate_online: rateOn, currency: currIn, currency_inperson: currIn, currency_online: currOn, online_format: $('editOnlineFormat').value || null, online_desc: $('editOnlineDesc').value.trim() || null, inperson_desc: $('editInpersonDesc').value.trim() || null }).eq('id', currentUser.id);
+    const { error } = await supaClient.from('profiles').update({ rate_inperson: rateIn, rate_online: rateOn, currency: currIn, currency_inperson: currIn, currency_online: currOn, online_format: $('editOnlineFormat').value || null, online_desc: $('editOnlineDesc').value.trim() || null, inperson_desc: $('editInpersonDesc').value.trim() || null }).eq('id', currentUser.id);
+    if(error){ console.error('Save rates error:', error); toast('⚠️ '+(error.message||'Chyba při ukládání cen')); btn.textContent='Uložit ceny'; btn.disabled=false; return; }
     currentUser.rate_inperson = rateIn;
     currentUser.rate_online = rateOn;
     currentUser.currency = currIn;
@@ -3841,6 +3843,9 @@ async function showPaidPopup(){
         let paymentIntent = null;
         if(sessionId){ try { const r=await fetch(`/api/session?sessionId=${sessionId}`); const j=await r.json(); paymentIntent=j.paymentIntent||null; } catch(e){ console.error('Session fetch error:', e); } }
         const { data: coachProf } = await supaClient.from('profiles').select('name, online_format').eq('id', coachId).single();
+        // je tohle první online objednávka u tohoto kouče?
+        const { data: priorOnline } = await supaClient.from('bookings').select('id').eq('student_id', currentUser.id).eq('coach_id', coachId).eq('type','online');
+        const isFirstOrder = !priorOnline || priorOnline.length===0;
         const today = new Date().toISOString().slice(0,10);
         await supaClient.from('bookings').insert({
           slot_id: null, student_id: currentUser.id, coach_id: coachId,
@@ -3852,14 +3857,22 @@ async function showPaidPopup(){
         await supaClient.from('notifications').insert({ user_id: coachId, type:'booking', read:false, message:`🌐 Nová online objednávka! ${currentUser.name||'Student'} si koupil online coaching${coachProf?.online_format?' ('+coachProf.online_format+')':''}. Částka: ${amount} ${sym}. Ozvi se mu v chatu.` });
         await supaClient.from('notifications').insert({ user_id: currentUser.id, type:'booking', read:false, message:`✅ Online coaching objednán! Napiš ${coachProf?.name||'kouči'} do chatu a pošli odkaz na svůj klip. 🥊` });
         updateNotifBadge();
-        // konverzace + instrukční zpráva (vždy při objednávce)
+        // konverzace
         let { data: conv } = await supaClient.from('conversations').select('*').eq('student_id', currentUser.id).eq('coach_id', coachId);
         if(!conv || !conv.length){
           const { data: created } = await supaClient.from('conversations').insert({ student_id: currentUser.id, coach_id: coachId, coach_name: coachProf?.name||'Kouč', student_name: currentUser.name||'Student' }).select();
           conv = created;
         }
         if(conv && conv.length){
-          await supaClient.from('messages').insert({ conversation_id: conv[0].id, sender_id: coachId, text:'👋 Díky za objednávku online coachingu! Natoč svůj tréninkový klip, nahraj ho na YouTube jako „Unlisted" (neveřejné) a pošli mi sem odkaz. Já ti zpátky pošlu detailní video rozbor přes Loom. 🥊', read:false });
+          // instrukční zpráva jen u PRVNÍ objednávky (pak už student ví co dělat)
+          if(isFirstOrder){
+            const fmt = coachProf?.online_format || '';
+            let responsePart;
+            if(fmt.includes('Text')) responsePart = 'Pošlu ti zpět detailní písemný rozbor.';
+            else if(fmt.includes('Video')) responsePart = 'Pošlu ti zpět detailní video rozbor přes Loom.';
+            else responsePart = 'Pošlu ti zpět detailní rozbor.';
+            await supaClient.from('messages').insert({ conversation_id: conv[0].id, sender_id: coachId, text:`👋 Díky za objednávku online coachingu! Natoč svůj tréninkový klip, nahraj ho na YouTube jako „Unlisted" (neveřejné) a pošli mi sem odkaz. ${responsePart} 🥊`, read:false });
+          }
           setTimeout(()=>openChat(conv[0]), 800);
         }
       } catch(e){ console.error('Online booking error:', e); }
