@@ -12,6 +12,7 @@ export default async function handler(req, res) {
       slotId,            // pro in-person
       online,            // '1' pro online coaching (bez slotu)
       coachProfileId,    // profiles.id kouče (pro online booking)
+      fmt,               // formát/tier online objednávky (label)
     } = req.query;
 
     if (!coachId || !amount) {
@@ -35,13 +36,13 @@ export default async function handler(req, res) {
     // success_url podle typu objednávky
     let successUrl;
     if (isOnline) {
-      successUrl = `${proto}://${host}/?platba=ok&online=1&coach=${encodeURIComponent(coachProfileId || '')}&amount=${rate}&currency=${currency}&session={CHECKOUT_SESSION_ID}`;
+      successUrl = `${proto}://${host}/?platba=ok&online=1&coach=${encodeURIComponent(coachProfileId || '')}&amount=${rate}&currency=${currency}&fmt=${encodeURIComponent(fmt || '')}&session={CHECKOUT_SESSION_ID}`;
     } else {
       successUrl = `${proto}://${host}/?platba=ok&slot=${encodeURIComponent(slotId || '')}&session={CHECKOUT_SESSION_ID}`;
     }
 
     const productName = isOnline
-      ? `Online coaching — ${coachName || 'Kouč'}`
+      ? `Online coaching${fmt ? ' — ' + fmt : ''} — ${coachName || 'Kouč'}`
       : `Lekce s ${coachName || 'Kouč'}`;
 
     const session = await stripe.checkout.sessions.create({
