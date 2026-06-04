@@ -1601,7 +1601,7 @@ async function loadCoachReviews(coachId){
   if(!box) return;
   box.innerHTML = '<p style="font-size:13px;color:var(--light);">Načítám...</p>';
   const { data } = await supaClient.from('bookings')
-    .select('rating, review, created_at, student_id, coach_confirmed')
+    .select('rating, review, created_at, student_id, coach_confirmed, type')
     .eq('coach_id', coachId)
     .not('rating','is',null)
     .order('created_at',{ascending:false});
@@ -1619,9 +1619,12 @@ async function loadCoachReviews(coachId){
     const display = parts.length>1 ? `${parts[0]} ${parts[1][0]}.` : parts[0];
     const stars = '⭐'.repeat(r.rating);
     const when = timeAgo(r.created_at);
+    const typeBadge = r.type==='online'
+      ? '<span style="font-size:11px;font-weight:600;color:var(--blue);background:#E8F0FF;border-radius:6px;padding:1px 6px;margin-left:6px;">🌐 Online</span>'
+      : '<span style="font-size:11px;font-weight:600;color:var(--mid);background:var(--bg);border-radius:6px;padding:1px 6px;margin-left:6px;">📍 In-person</span>';
     const disputed = (r.coach_confirmed===false) ? ' <span style="color:var(--light);font-size:11px;">· kouč nepotvrdil že lekce proběhla</span>' : '';
     html += `<div class="review">
-      <div class="review-head"><div class="review-name">${display}</div><div class="review-meta">${stars} · ${when}${disputed}</div></div>
+      <div class="review-head"><div class="review-name">${display}${typeBadge}</div><div class="review-meta">${stars} · ${when}${disputed}</div></div>
       ${r.review ? `<p class="review-text">"${r.review}"</p>` : ''}
     </div>`;
   });
@@ -3789,16 +3792,18 @@ async function recalcCoachStudents(coachId){
     .eq('coach_id', coachId).eq('student_confirmed', true).eq('coach_confirmed', true);
   const rows = data||[];
   const uniq = new Set(rows.map(r=>r.student_id));
-  // online: vyřízené (doručené) feedbacky
-  const { data: onl } = await supaClient.from('bookings').select('student_id')
+  // online: vyřízené (doručené) feedbacky — počítáme podle formátu (balíček 4 = 4)
+  const { data: onl } = await supaClient.from('bookings').select('student_id, online_format')
     .eq('coach_id', coachId).eq('type','online').eq('fulfilled', true);
   const onlineRows = onl||[];
   const onlineUniq = new Set(onlineRows.map(r=>r.student_id));
+  const feedbackCount = fmt => { const mm=(fmt||'').match(/\d+/); return mm ? parseInt(mm[0]) : 1; };
+  const onlineFeedbacks = onlineRows.reduce((s,r)=>s+feedbackCount(r.online_format), 0);
   await supaClient.from('profiles').update({
     students: uniq.size,
     lessons_done: rows.length,
     online_students: onlineUniq.size,
-    online_feedbacks: onlineRows.length
+    online_feedbacks: onlineFeedbacks
   }).eq('id', coachId);
 }
 
@@ -4067,7 +4072,8 @@ async function showPaidPopup(){
           slot_id: null, student_id: currentUser.id, coach_id: coachId,
           coach_name: coachProf?.name || 'Kouč', payment_intent: paymentIntent,
           amount: amount, training_date: today, training_time: null,
-          status: 'active', type: 'online', currency: currency
+          status: 'active', type: 'online', currency: currency,
+          online_format: coachProf?.online_format || null
         });
         const sym = currency==='EUR'?'€':currency==='USD'?'$':'Kč';
         await supaClient.from('notifications').insert({ user_id: coachId, type:'booking', read:false, message:`🌐 Nová online objednávka! ${currentUser.name||'Student'} si koupil online coaching${coachProf?.online_format?' ('+coachProf.online_format+')':''}. Částka: ${amount} ${sym}. Ozvi se mu v chatu.` });
