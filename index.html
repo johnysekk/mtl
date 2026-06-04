@@ -2216,6 +2216,8 @@ $('btnCoach').onclick=()=>{
   if(!currentUser){ toast('⚠️ Nejprve se přihlas'); return; }
   const st = currentUser.coach_status;
   if(st==='approved'){ toast('🎖️ Už jsi MTL Certified kouč!'); return; }
+  if(st==='suspended'){ toast('⛔ Tvůj kouč účet je pozastavený. Napiš MTL pro vyřešení.'); return; }
+  if(st==='banned'){ toast('🚫 Tvůj přístup ke koučování byl trvale zablokován. Napiš MTL.'); return; }
   if(st==='pending'){ toast('⏳ Tvoje přihláška se zpracovává.'); return; }
   $('btnBecomeCoachApply').onclick();
 };
@@ -2602,7 +2604,7 @@ async function loadNotifications(){
     const isCoachInperson = n.type==='booking' && n.message.includes('Nová rezervace');
     const isCoachOnline = n.type==='booking' && n.message.includes('Nová online objednávka');
     const isOnlineDone = n.type==='online';
-    const isMtlContact = n.type==='system' && (n.message.includes('pozastaven') || n.message.includes('certifikace byla odebrána'));
+    const isMtlContact = n.type==='system' && (n.message.includes('pozastaven') || n.message.includes('certifikace byla odebrána') || n.message.includes('trvale zablokován'));
     const clickable = ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact;
     let linkLabel = 'otevřít ›';
     if(isBookingConfirm) linkLabel = 'přidat do kalendáře ›';
@@ -2721,6 +2723,7 @@ async function loadPendingCoaches(){
     const card=document.createElement('div');
     card.style.cssText='background:var(--surf);border:1px solid var(--border);border-radius:16px;padding:16px;margin-bottom:14px;';
     card.innerHTML=`
+      ${c.suspend_reason?`<div style="background:#FEECEC;border:1px solid #FFD0D0;border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:var(--red);"><strong>⚠️ Tomuto koučovi už byla licence odebrána</strong><div style="color:var(--mid);margin-top:3px;">Důvod: ${c.suspend_reason}</div></div>`:''}
       <div style="font-family:'Bebas Neue';font-size:22px;letter-spacing:.04em;margin-bottom:2px;">${c.name||'Bez jména'}</div>
       <div style="font-size:13px;color:var(--mid);margin-bottom:10px;">📍 ${c.city||'—'} · ${c.years||0} let praxe · ${c.fights||0} zápasů</div>
       <p style="font-size:13px;color:var(--mid);line-height:1.5;margin-bottom:10px;">${c.bio||''}</p>
@@ -2736,7 +2739,7 @@ async function loadPendingCoaches(){
   // Napoj tlačítka
   list.querySelectorAll('.adminApprove').forEach(btn=>{
     btn.onclick=async()=>{
-      await supaClient.from('profiles').update({ coach_status:'approved' }).eq('id', btn.dataset.id);
+      await supaClient.from('profiles').update({ coach_status:'approved', suspend_reason:null }).eq('id', btn.dataset.id);
       // Notifikace koučovi
       await supaClient.from('notifications').insert({
         user_id: btn.dataset.id, type:'approved', read:false,
@@ -2822,13 +2825,18 @@ async function loadAdminCoachList(){
 }
 
 async function revokeCoachCert(coachId, name){
-  if(!confirm(`Odebrat MTL certifikaci kouči ${name||''}? Přijde o status MTL Certified, zmizí ze žebříčku i nabídky a musel by požádat znovu.`)) return;
+  if(!confirm(`Odebrat MTL certifikaci kouči ${name||''}? Přijde o status MTL Certified, zmizí ze žebříčku i nabídky.`)) return;
   const reason = (prompt('Důvod odebrání certifikace (povinné — uvidí ho kouč):','')||'').trim();
   if(!reason){ toast('⚠️ Důvod je povinný'); return; }
-  const { error } = await supaClient.from('profiles').update({ coach_status:'rejected', suspend_reason:null }).eq('id', coachId);
+  const permanent = confirm('Má jít o TRVALÝ ban?\n\nOK = trvalý ban (kouč už NIKDY nebude moct požádat znovu)\nZrušit = běžné odebrání (časem může požádat znovu, u žádosti uvidíš historii)');
+  const status = permanent ? 'banned' : 'rejected';
+  const { error } = await supaClient.from('profiles').update({ coach_status: status, suspend_reason: reason }).eq('id', coachId);
   if(error){ toast('⚠️ '+error.message); return; }
-  await supaClient.from('notifications').insert({ user_id: coachId, type:'system', read:false, message:`🚫 Tvoje MTL certifikace byla odebrána. Důvod: ${reason} — pokud to chceš řešit, napiš nám.` });
-  toast('🚫 Certifikace odebrána');
+  const msg = permanent
+    ? `🚫 Tvůj přístup ke koučování na MTL byl trvale zablokován. Důvod: ${reason} — pokud to chceš řešit, napiš nám.`
+    : `🚫 Tvoje MTL certifikace byla odebrána. Důvod: ${reason} — časem můžeš požádat znovu; pokud to chceš řešit, napiš nám.`;
+  await supaClient.from('notifications').insert({ user_id: coachId, type:'system', read:false, message: msg });
+  toast(permanent ? '🚫 Kouč trvale zablokován' : '🚫 Certifikace odebrána');
   loadCoaches();
   loadAdminCoachList();
 }
@@ -2960,7 +2968,7 @@ async function messageCoachAsFounder(coachId){
 
 function isChatBlockedForMe(conv){
   const cs = currentUser && currentUser.coach_status;
-  if(cs!=='suspended' && cs!=='rejected') return false;        // jen pozastavení / odebraní
+  if(cs!=='suspended' && cs!=='rejected' && cs!=='banned') return false; // pozastavení / odebraní / zablokovaní
   return conv.coach_id===currentUser.id && conv.student_id !== FOUNDER_UUID; // blokuj jen chaty, kde jsem kouč studenta (ne MTL, ne když jsem klient jiného kouče)
 }
 
@@ -3943,8 +3951,10 @@ function applyCertUI(){
   const approved = currentUser && currentUser.coach_status==='approved';
   const lbl=$('meCertLabel'); if(lbl) lbl.style.display = approved ? 'inline-block' : 'none';
   const box=$('approvedBox'); if(box) box.style.display = (approved && !approvedDismissed()) ? 'block' : 'none';
-  // 🎖️ "Staň se koučem" v hlavičce — schovej schválenému koučovi, vrať při odebrání licence
-  const bc=$('btnCoach'); if(bc) bc.style.display = approved ? 'none' : 'flex';
+  // 🎖️ "Staň se koučem" v hlavičce — schovej schválenému/pozastavenému/zablokovanému, vrať jen když může (re)žádat
+  const cs = currentUser && currentUser.coach_status;
+  const hideMedal = ['approved','suspended','banned'].includes(cs);
+  const bc=$('btnCoach'); if(bc) bc.style.display = hideMedal ? 'none' : 'flex';
 }
 function fillUserProfile(){
   if(!currentUser) return;
