@@ -722,6 +722,7 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
       </div>
       <button id="btnOpenDiary" style="width:100%;padding:16px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">📅 Diář & výdělky</button>
       <button id="btnPreviewProfile" style="width:100%;padding:13px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-top:10px;">👁️ Jak mě vidí studenti</button>
+      <button id="btnOnlineFeedback" style="width:100%;padding:13px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-top:10px;">🌐 Online feedback <span id="onlinePendingBadge" style="display:none;background:var(--red);color:#fff;border-radius:10px;padding:1px 7px;font-size:12px;margin-left:6px;">0</span></button>
     <div class="sec-lbl" style="margin-top:24px;">Moje ceny</div>
       <div id="rateDisplay" style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:12px;">
         <div id="rateDisplayText" style="font-size:14px;color:var(--dark);line-height:1.8;"></div>
@@ -774,6 +775,7 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
       <div class="prow-group">
         <div class="prow" id="meBook1" style="cursor:pointer;"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">📅</div><div class="prow-lbl">Nadcházející</div></div><div style="display:flex;align-items:center;gap:8px;"><span class="prow-val" id="bookCount">0</span><span class="prow-arr">›</span></div></div>>
         <div class="prow" id="meBook2"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">📖</div><div class="prow-lbl">Historie</div></div><div style="display:flex;align-items:center;gap:8px;"><span class="prow-val" id="histCount">0</span><span class="prow-arr">›</span></div></div>
+        <div class="prow" id="meOnline" style="cursor:pointer;"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🌐</div><div class="prow-lbl">Online coaching</div></div><div style="display:flex;align-items:center;gap:8px;"><span class="prow-val" id="onlineCount">0</span><span class="prow-arr">›</span></div></div>
       </div>
     </div>
 
@@ -954,6 +956,15 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
     <button class="btn-close" id="btnCloseCoachStats" style="background:#333;color:#fff;">✕</button>
   </div>
   <div style="padding:20px;" id="coachStatsBody"></div>
+</div>
+
+<!-- ONLINE COACHING (kouč i student) -->
+<div class="sheet" id="shOnline" style="z-index:86;">
+  <div class="shdr">
+    <div class="shdr-title" id="onlineTitle">Online coaching</div>
+    <button class="btn-close" id="btnCloseOnline">✕</button>
+  </div>
+  <div style="padding:16px 20px;" id="onlineList"></div>
 </div>
 
 <!-- NOTIFIKACE -->
@@ -1710,7 +1721,7 @@ function hideMatch(){ $('matchOv').classList.remove('open'); }
 // ════════════════════════════════════════
 // SHEETS
 // ════════════════════════════════════════
-const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMe','shSettings','shCoachApp','shAdmin','shNotif','shChat','shBookings','shDiary','shCoachStats'];
+const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMe','shSettings','shCoachApp','shAdmin','shNotif','shChat','shBookings','shDiary','shCoachStats','shOnline'];
 
 function openSheet(id){
   SHEETS.forEach(s=>{ if(s!==id) $(s).classList.remove('open'); });
@@ -2240,6 +2251,8 @@ $('meEdit1').onclick=async()=>{
 $('meEdit2').onclick=()=>toast('Email je propojený s tvým účtem a nelze ho zde měnit.');
 $('meEdit3').onclick=()=>{ closeSheet('shMe'); openCityInput(); };
 $('meBook2').onclick=()=>{ openSheet('shBookings'); loadBookings('past'); };
+$('meOnline').onclick=()=>{ openOnline('student'); };
+$('btnCloseOnline').onclick=()=>closeSheet('shOnline');
 $('meSettings').onclick=()=>openSheet('shSettings');
 $('meLogout').onclick=async()=>{
   await supaClient.auth.signOut();
@@ -2461,7 +2474,7 @@ async function renderCoachAnalytics(coachId, containerId){
   const { data: prof } = await supaClient.from('profiles').select('rating, reviews').eq('id', coachId).single();
   const all = allB || [];
   const now = new Date();
-  const isPast = b => new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`) < now;
+  const isPast = b => b.type==='online' ? !!b.fulfilled : (new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`) < now);
 
   const active = all.filter(b=>b.status==='active');
   const cancelled = all.filter(b=>b.status==='cancelled');
@@ -2843,12 +2856,8 @@ function subscribeRealtime(){
     .order('training_date',{ascending: mode==='upcoming'});
 
   const now = new Date();
-  const all = data || [];
+  const all = (data || []).filter(b=>b.type!=='online'); // online má vlastní sekci
   const filtered = all.filter(b=>{
-    if(b.type==='online'){
-      // online: aktivní (nehodnocené) → upcoming; hodnocené → past
-      return mode==='upcoming' ? !b.rated : !!b.rated;
-    }
     const dt=new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`);
     return mode==='upcoming' ? dt>=now : dt<now;
   });
@@ -3152,6 +3161,7 @@ $('btnCloseCoachApp').onclick=()=>closeSheet('shCoachApp');
 
   $('btnOpenDiary').onclick = openDiary;
   $('btnPreviewProfile').onclick = ()=>{ closeSheet('shMe'); openProfileById(currentUser.id); };
+  $('btnOnlineFeedback').onclick = ()=>{ closeSheet('shMe'); openOnline('coach'); };
 $('btnCloseDiary').onclick = ()=>closeSheet('shDiary');
 $('diaryPrev').onclick = ()=>{ diaryMonth--; if(diaryMonth<0){ diaryMonth=11; diaryYear--; } renderDiary(); };
 $('diaryNext').onclick = ()=>{ diaryMonth++; if(diaryMonth>11){ diaryMonth=0; diaryYear++; } renderDiary(); };
@@ -3318,6 +3328,8 @@ function enterApp(){
   updateMsgsBadge();
   updateBookCount();
   updateCoachSummary();
+  if(typeof updateOnlinePending==='function') updateOnlinePending();
+  if(typeof updateOnlineCount==='function') updateOnlineCount();
   if(typeof fillRateEditor==='function' && currentUser.coach_status==='approved') fillRateEditor();
   subscribeRealtime();
   loadCoaches();
@@ -3375,6 +3387,12 @@ if(status==='approved'){
   function isPastLesson(b){
   const dt = new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`);
   return dt < new Date();
+}
+
+// "Realizováno" = započítat do proběhlých výdělků. Online až po vyřízení (fulfilled).
+function isRealized(b){
+  if(b.type==='online') return !!b.fulfilled;
+  return isPastLesson(b);
 }
 
   function resetDiaryTabs(){
@@ -3540,8 +3558,8 @@ function renderBars(byMonth, color, overlayByMonth){
 
 async function renderEarnings(){
   const tab = $('diaryEarnTab');
-  const upcoming = diaryBookings.filter(b=>!isPastLesson(b));
-  const past = diaryBookings.filter(isPastLesson);
+  const upcoming = diaryBookings.filter(b=>!isRealized(b));
+  const past = diaryBookings.filter(isRealized);
   const expected = upcoming.reduce((s,b)=>s+(b.amount||0)*COACH_SHARE,0);
   const earned = past.reduce((s,b)=>s+(b.amount||0)*COACH_SHARE,0);
   const earnedByMonth = groupByMonth(past, b=>(b.amount||0)*COACH_SHARE);
@@ -3568,7 +3586,7 @@ async function renderCoachAnalyticsCompact(coachId, containerId){
   const { data: prof } = await supaClient.from('profiles').select('rating, reviews').eq('id', coachId).single();
   const all = allB || [];
   const now = new Date();
-  const isPast = b => new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`) < now;
+  const isPast = b => b.type==='online' ? !!b.fulfilled : (new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`) < now);
   const active = all.filter(b=>b.status==='active');
   const cancelled = all.filter(b=>b.status==='cancelled');
   const happened = active.filter(isPast);
@@ -3605,8 +3623,8 @@ async function renderMtl(){
   const mtlRef50 = cancelledAll.filter(b=>b.refund_pct===50).length;
   const mtlRef0 = cancelledAll.filter(b=>b.refund_pct===0).length;
   const estFee = b => (b.actual_stripe_fee!=null) ? b.actual_stripe_fee : ((b.amount||0)*1.10*0.03 + 6);
-  const past = all.filter(isPastLesson);
-  const upcoming = all.filter(b=>!isPastLesson(b));
+  const past = all.filter(isRealized);
+  const upcoming = all.filter(b=>!isRealized(b));
 
   const realGross = past.reduce((s,b)=>s+(b.amount||0)*1.10,0);
   const realCommission = past.reduce((s,b)=>s+(b.amount||0)*COMMISSION,0);
@@ -3678,20 +3696,19 @@ async function checkPastLessons(){
     .eq('student_id', currentUser.id).eq('status','active').is('rating', null);
   (sb||[]).forEach(b=>{
     const isOnline = b.type==='online';
+    if(isOnline){ if(b.fulfilled && !b.rated) _rateQueue.push({type:'student', booking:b, online:true}); return; }
     const dt = new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`);
-    const cut = isOnline ? cutoffOnline : cutoff;
-    if(dt < cut && !b.rated) _rateQueue.push({type:'student', booking:b, online:isOnline});
+    if(dt < cutoff && !b.rated) _rateQueue.push({type:'student', booking:b, online:false});
   });
 
   // KOUČ: proběhlé lekce co ještě nepotvrdil
   const { data: cb } = await supaClient.from('bookings').select('*')
     .eq('coach_id', currentUser.id).eq('status','active');
   (cb||[]).forEach(b=>{
+    if(b.type==='online') return; // online kouč potvrzuje přes "Vyřízeno", ne tady
     if(b.student_id === currentUser.id) return; // self-booking (test) — neptat se dvakrát
-    const isOnline = b.type==='online';
     const dt = new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`);
-    const cut = isOnline ? cutoffOnline : cutoff;
-    if(dt < cut && !b.confirm_asked) _rateQueue.push({type:'coach', booking:b, online:isOnline});
+    if(dt < cutoff && !b.confirm_asked) _rateQueue.push({type:'coach', booking:b, online:false});
   });
 
   showNextRate();
@@ -3737,13 +3754,15 @@ async function rateConfirmYes(){
 }
 
 async function recalcCoachStudents(coachId){
-  // lekce potvrzené OBĚMA stranami
+  // celkové: lekce potvrzené OBĚMA stranami
   const { data } = await supaClient.from('bookings').select('student_id, type')
     .eq('coach_id', coachId).eq('student_confirmed', true).eq('coach_confirmed', true);
   const rows = data||[];
   const uniq = new Set(rows.map(r=>r.student_id));
-  // online subset
-  const onlineRows = rows.filter(r=>r.type==='online');
+  // online: vyřízené (doručené) feedbacky
+  const { data: onl } = await supaClient.from('bookings').select('student_id')
+    .eq('coach_id', coachId).eq('type','online').eq('fulfilled', true);
+  const onlineRows = onl||[];
   const onlineUniq = new Set(onlineRows.map(r=>r.student_id));
   await supaClient.from('profiles').update({
     students: uniq.size,
@@ -3751,6 +3770,127 @@ async function recalcCoachStudents(coachId){
     online_students: onlineUniq.size,
     online_feedbacks: onlineRows.length
   }).eq('id', coachId);
+}
+
+// ════ ONLINE COACHING SPRÁVA ════
+function curSym(c){ return c==='EUR'?'€':c==='USD'?'$':'Kč'; }
+
+async function openOnline(role){
+  window._onlineRole = role;
+  $('onlineTitle').textContent = role==='coach' ? '🌐 Online feedback' : '🌐 Moje online objednávky';
+  openSheet('shOnline');
+  renderOnlineList(role);
+}
+
+async function renderOnlineList(role){
+  const list = $('onlineList');
+  list.innerHTML = '<p style="text-align:center;color:var(--light);padding:30px;">Načítám...</p>';
+  const col = role==='coach' ? 'coach_id' : 'student_id';
+  const { data } = await supaClient.from('bookings').select('*')
+    .eq(col, currentUser.id).eq('type','online')
+    .order('created_at',{ascending:false});
+  const all = data || [];
+  if(!all.length){ list.innerHTML = `<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">${role==='coach'?'Zatím žádné online objednávky.':'Zatím sis neobjednal online coaching.'}</p>`; return; }
+  list.innerHTML = '';
+  for(const b of all){
+    const sym = curSym(b.currency);
+    let statusLbl, statusColor;
+    if(b.status==='cancelled'){ statusLbl='↩️ Vráceno'; statusColor='var(--light)'; }
+    else if(b.fulfilled){ statusLbl='✅ Vyřízeno'; statusColor='var(--green)'; }
+    else { statusLbl='⏳ Čeká na zpracování'; statusColor='var(--orange)'; }
+    // jméno protistrany
+    let otherName = role==='coach' ? '' : b.coach_name;
+    if(role==='coach'){
+      const { data: sp } = await supaClient.from('profiles').select('name').eq('id', b.student_id).single();
+      otherName = sp?.name || 'Student';
+    }
+    const el = document.createElement('div');
+    el.style.cssText='background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px;';
+    let actions = '';
+    if(role==='coach' && b.status!=='cancelled' && !b.fulfilled){
+      actions = `
+        <div style="display:flex;gap:8px;margin-top:12px;">
+          <button class="onMsg" data-other="${b.student_id}" style="flex:1;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💬 Napsat</button>
+          <button class="onDone" data-id="${b.id}" data-coach="${b.coach_id}" style="flex:1;padding:10px;background:var(--green);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">✅ Vyřízeno</button>
+        </div>
+        <button class="onRefund" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-student="${b.student_id}" style="width:100%;margin-top:8px;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">↩️ Vrátit peníze</button>`;
+    } else if(role==='student' && b.status!=='cancelled' && !b.fulfilled){
+      actions = `<button class="onReqRefund" data-id="${b.id}" data-coach="${b.coach_id}" style="width:100%;margin-top:10px;padding:10px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">Požádat o vrácení peněz</button>`;
+    }
+    const dateOrdered = (b.created_at||'').slice(0,10);
+    el.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:start;">
+        <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.04em;">${otherName}</div>
+        <div style="font-size:12px;font-weight:700;color:${statusColor};">${statusLbl}</div>
+      </div>
+      <div style="font-size:13px;color:var(--mid);margin:4px 0;">🌐 Online coaching · ${b.amount} ${sym}</div>
+      <div style="font-size:12px;color:var(--light);">Objednáno ${dateOrdered}</div>
+      ${actions}
+    `;
+    list.appendChild(el);
+  }
+  // napoj akce
+  list.querySelectorAll('.onMsg').forEach(btn=>btn.onclick=()=>{ closeSheet('shOnline'); openChatWithStudent(btn.dataset.other); });
+  list.querySelectorAll('.onDone').forEach(btn=>btn.onclick=()=>markOnlineDone(btn.dataset.id, btn.dataset.coach));
+  list.querySelectorAll('.onRefund').forEach(btn=>btn.onclick=()=>refundOnline(btn.dataset));
+  list.querySelectorAll('.onReqRefund').forEach(btn=>btn.onclick=()=>requestRefundOnline(btn.dataset.id, btn.dataset.coach));
+}
+
+async function markOnlineDone(bookingId, coachId){
+  if(!confirm('Označit jako vyřízeno? Tím potvrdíš že jsi feedback doručil.')) return;
+  const { error } = await supaClient.from('bookings').update({ fulfilled:true, coach_confirmed:true, confirm_asked:true }).eq('id', bookingId);
+  if(error){ toast('⚠️ '+error.message); return; }
+  // notifikace studentovi
+  const { data: bk } = await supaClient.from('bookings').select('student_id').eq('id', bookingId).single();
+  if(bk){ await supaClient.from('notifications').insert({ user_id: bk.student_id, type:'online', read:false, message:'✅ Tvůj kouč označil online feedback jako vyřízený. Mrkni do chatu a klidně ohodnoť. 🥊' }); }
+  await recalcCoachStudents(coachId);
+  toast('✅ Označeno jako vyřízeno');
+  renderOnlineList('coach');
+  updateOnlinePending();
+}
+
+async function refundOnline(d){
+  if(!confirm('Vrátit studentovi peníze? Tato akce je nevratná.')) return;
+  const reason = prompt('Důvod vrácení (nepovinné, uvidí ho student):','') || '';
+  try {
+    if(d.pi && d.pi!=='null'){
+      const r = await fetch(`/api/cancel?paymentIntent=${d.pi}&amount=${d.amt}&hoursUntil=999`);
+      const j = await r.json();
+      if(j.error){ toast('⚠️ Chyba refundu: '+j.error); return; }
+    }
+    await supaClient.from('bookings').update({ status:'cancelled', refund_pct:100 }).eq('id', d.id);
+    await supaClient.from('notifications').insert({ user_id: d.student, type:'cancelled', read:false, message:`↩️ Kouč ti vrátil peníze za online coaching (${d.amt}).${reason?' Důvod: '+reason:''}` });
+    toast('✅ Peníze vráceny');
+    renderOnlineList('coach');
+    updateOnlinePending();
+  } catch(e){ console.error('Refund error:', e); toast('⚠️ Chyba při vrácení'); }
+}
+
+async function requestRefundOnline(bookingId, coachId){
+  const reason = prompt('Proč žádáš o vrácení peněz? (nepovinné)','') || '';
+  // notifikace koučovi + founderovi
+  await supaClient.from('notifications').insert({ user_id: coachId, type:'refund_request', read:false, message:`↩️ ${currentUser.name||'Student'} žádá o vrácení peněz za online coaching (rezervace #${bookingId}).${reason?' Důvod: '+reason:''} Vyřiď to v sekci Online feedback.` });
+  await supaClient.from('notifications').insert({ user_id:'7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type:'refund_request', read:false, message:`↩️ Žádost o refund (online #${bookingId}): ${currentUser.name||'Student'} ↔ kouč.${reason?' Důvod: '+reason:''}` });
+  toast('✅ Žádost odeslána kouči');
+}
+
+async function updateOnlinePending(){
+  if(!currentUser) return;
+  const badge = $('onlinePendingBadge');
+  if(!badge) return;
+  const { data } = await supaClient.from('bookings').select('id')
+    .eq('coach_id', currentUser.id).eq('type','online').eq('status','active').eq('fulfilled', false);
+  const n = (data||[]).length;
+  badge.textContent = n;
+  badge.style.display = n>0 ? 'inline-block' : 'none';
+}
+
+async function updateOnlineCount(){
+  if(!currentUser) return;
+  const el = $('onlineCount');
+  if(!el) return;
+  const { data } = await supaClient.from('bookings').select('id').eq('student_id', currentUser.id).eq('type','online');
+  el.textContent = (data||[]).length;
 }
 
 async function rateConfirmNo(){
