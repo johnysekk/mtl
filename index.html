@@ -946,6 +946,7 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
     <div id="adminList"></div>
     <div class="sec-lbl" style="margin-top:24px;">Všichni kouči — dashboardy</div>
     <div id="adminCoachList"></div>
+    <button id="btnAdminOnline" style="width:100%;margin-top:16px;padding:14px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">🌐 Online objednávky & refund žádosti</button>
   </div>
 </div>
 
@@ -2290,8 +2291,17 @@ async function loadNotifications(){
   data.forEach(n=>{
     const d=new Date(n.created_at);
     const el=document.createElement('div');
-    el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;`;
-    el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${n.message}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}</div>`;
+    // proklik u online/refund/spor notifikací
+    const clickable = ['refund_request','online','dispute'].includes(n.type);
+    el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;${clickable?'cursor:pointer;':''}`;
+    el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${n.message}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}${clickable?' · <span style="color:var(--blue);font-weight:600;">otevřít ›</span>':''}</div>`;
+    if(clickable){
+      el.onclick=()=>{
+        closeSheet('shNotif');
+        if(n.type==='refund_request' && currentUser.role==='founder' && n.message.includes('Žádost o refund')) openOnline('founder');
+        else openOnline('coach');
+      };
+    }
     list.appendChild(el);
   });
   // Označ jako přečtené
@@ -2344,6 +2354,7 @@ async function updateNotifBadge(){
 $('btnAdmin').onclick=()=>{ openSheet('shAdmin'); loadPendingCoaches(); };
 $('btnCloseAdmin').onclick=()=>closeSheet('shAdmin');
 $('btnCloseCoachStats').onclick=()=>closeSheet('shCoachStats');
+$('btnAdminOnline').onclick=()=>{ closeSheet('shAdmin'); openOnline('founder'); };
 
 async function updateAdminBadge(){
   if(!currentUser || currentUser.role!=='founder') return;
@@ -2471,10 +2482,16 @@ async function renderCoachAnalytics(coachId, containerId){
   box.innerHTML='<p style="text-align:center;color:var(--light);padding:20px;">Načítám...</p>';
 
   const { data: allB } = await supaClient.from('bookings').select('*').eq('coach_id', coachId);
-  const { data: prof } = await supaClient.from('profiles').select('rating, reviews').eq('id', coachId).single();
+  const { data: prof } = await supaClient.from('profiles').select('rating, reviews, coach_status, name').eq('id', coachId).single();
   const all = allB || [];
   const now = new Date();
   const isPast = b => b.type==='online' ? !!b.fulfilled : (new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`) < now);
+
+  // anti-scam signály
+  const onlineAll = all.filter(b=>b.type==='online');
+  const onlineFulfilled = onlineAll.filter(b=>b.fulfilled).length;
+  const onlineRefunded = onlineAll.filter(b=>b.status==='cancelled').length;
+  const refundRequests = all.filter(b=>b.refund_requested && b.status!=='cancelled').length;
 
   const active = all.filter(b=>b.status==='active');
   const cancelled = all.filter(b=>b.status==='cancelled');
@@ -2517,10 +2534,31 @@ async function renderCoachAnalytics(coachId, containerId){
       <button id="csOpenProfile" style="flex:1;padding:13px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">👤 Profil & recenze</button>
       <button id="csMessage" style="flex:1;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💬 Napsat koučovi</button>
     </div>
+    <div class="sec-lbl" style="margin-top:20px;">Kontrola (anti-scam)</div>
+    <div class="prow-group">
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🌐</div><div class="prow-lbl">Online objednáno</div></div><span class="prow-val">${onlineAll.length}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">✅</div><div class="prow-lbl">Online vyřízeno</div></div><span class="prow-val">${onlineFulfilled}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">⚠️</div><div class="prow-lbl">Otevřené žádosti o refund</div></div><span class="prow-val" style="${refundRequests>0?'color:var(--red);':''}">${refundRequests}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">↩️</div><div class="prow-lbl">Vráceno (online)</div></div><span class="prow-val">${onlineRefunded}</span></div>
+    </div>
+    <button id="csSuspend" style="width:100%;margin-top:16px;padding:13px;background:${prof?.coach_status==='approved'?'#FEECEC':'#F0FBF0'};color:${prof?.coach_status==='approved'?'var(--red)':'var(--green)'};border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${prof?.coach_status==='approved'?'⛔ Pozastavit kouče':'✅ Obnovit kouče'}</button>
   `;
   // napoj tlačítka
   const op=$('csOpenProfile'); if(op) op.onclick=()=>openProfileById(coachId);
   const ms=$('csMessage'); if(ms) ms.onclick=()=>messageCoachAsFounder(coachId);
+  const sus=$('csSuspend'); if(sus) sus.onclick=()=>toggleCoachSuspend(coachId, prof?.coach_status, prof?.name);
+}
+
+async function toggleCoachSuspend(coachId, status, name){
+  const suspend = status==='approved';
+  if(!confirm(suspend ? `Pozastavit kouče ${name||''}? Zmizí z nabídky a nepůjde u něj rezervovat.` : `Obnovit kouče ${name||''}? Vrátí se do nabídky.`)) return;
+  const newStatus = suspend ? 'rejected' : 'approved';
+  const { error } = await supaClient.from('profiles').update({ coach_status: newStatus }).eq('id', coachId);
+  if(error){ toast('⚠️ '+error.message); return; }
+  await supaClient.from('notifications').insert({ user_id: coachId, type:'system', read:false, message: suspend ? '⛔ Tvůj kouč profil byl dočasně pozastaven administrátorem MTL. Ozvi se nám.' : '✅ Tvůj kouč profil byl obnoven. Jsi opět v nabídce!' });
+  toast(suspend ? '⛔ Kouč pozastaven' : '✅ Kouč obnoven');
+  loadCoaches();
+  renderCoachAnalytics(coachId, 'coachStatsBody');
 }
 
 function openProfileById(coachId){
@@ -3777,7 +3815,7 @@ function curSym(c){ return c==='EUR'?'€':c==='USD'?'$':'Kč'; }
 
 async function openOnline(role){
   window._onlineRole = role;
-  $('onlineTitle').textContent = role==='coach' ? '🌐 Online feedback' : '🌐 Moje online objednávky';
+  $('onlineTitle').textContent = role==='coach' ? '🌐 Online feedback' : role==='founder' ? '🌐 Online objednávky (MTL)' : '🌐 Moje online objednávky';
   openSheet('shOnline');
   renderOnlineList(role);
 }
@@ -3785,52 +3823,64 @@ async function openOnline(role){
 async function renderOnlineList(role){
   const list = $('onlineList');
   list.innerHTML = '<p style="text-align:center;color:var(--light);padding:30px;">Načítám...</p>';
-  const col = role==='coach' ? 'coach_id' : 'student_id';
-  const { data } = await supaClient.from('bookings').select('*')
-    .eq(col, currentUser.id).eq('type','online')
-    .order('created_at',{ascending:false});
-  const all = data || [];
-  if(!all.length){ list.innerHTML = `<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">${role==='coach'?'Zatím žádné online objednávky.':'Zatím sis neobjednal online coaching.'}</p>`; return; }
+  let query = supaClient.from('bookings').select('*').eq('type','online').order('created_at',{ascending:false});
+  if(role==='coach') query = query.eq('coach_id', currentUser.id);
+  else if(role==='student') query = query.eq('student_id', currentUser.id);
+  // founder = všechny online objednávky
+  const { data } = await query;
+  let all = data || [];
+  // founder: nahoru ty s žádostí o refund / nevyřízené
+  if(role==='founder') all.sort((a,b)=> (b.refund_requested?1:0)-(a.refund_requested?1:0));
+  if(!all.length){ list.innerHTML = `<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">${role==='coach'?'Zatím žádné online objednávky.':role==='founder'?'Žádné online objednávky.':'Zatím sis neobjednal online coaching.'}</p>`; return; }
   list.innerHTML = '';
   for(const b of all){
     const sym = curSym(b.currency);
     let statusLbl, statusColor;
     if(b.status==='cancelled'){ statusLbl='↩️ Vráceno'; statusColor='var(--light)'; }
     else if(b.fulfilled){ statusLbl='✅ Vyřízeno'; statusColor='var(--green)'; }
-    else { statusLbl='⏳ Čeká na zpracování'; statusColor='var(--orange)'; }
-    // jméno protistrany
-    let otherName = role==='coach' ? '' : b.coach_name;
-    if(role==='coach'){
+    else { statusLbl='⏳ Čeká'; statusColor='var(--orange)'; }
+    // jména stran
+    let topName = '';
+    if(role==='student'){ topName = b.coach_name; }
+    else {
       const { data: sp } = await supaClient.from('profiles').select('name').eq('id', b.student_id).single();
-      otherName = sp?.name || 'Student';
+      const studentName = sp?.name || 'Student';
+      if(role==='founder'){ topName = `${studentName} → ${b.coach_name}`; }
+      else { topName = studentName; }
     }
     const el = document.createElement('div');
     el.style.cssText='background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px;';
+    // žádost o refund (badge + důvod)
+    let refundReq = '';
+    if(b.refund_requested && b.status!=='cancelled'){
+      refundReq = `<div style="background:#FEECEC;border-radius:10px;padding:9px 12px;margin-top:10px;font-size:13px;color:var(--red);"><strong>↩️ Student žádá o vrácení peněz</strong>${b.refund_reason?`<div style="color:var(--mid);margin-top:3px;">Důvod: ${b.refund_reason}</div>`:''}</div>`;
+    }
     let actions = '';
-    if(role==='coach' && b.status!=='cancelled' && !b.fulfilled){
-      actions = `
-        <div style="display:flex;gap:8px;margin-top:12px;">
-          <button class="onMsg" data-other="${b.student_id}" style="flex:1;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💬 Napsat</button>
-          <button class="onDone" data-id="${b.id}" data-coach="${b.coach_id}" style="flex:1;padding:10px;background:var(--green);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">✅ Vyřízeno</button>
-        </div>
-        <button class="onRefund" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-student="${b.student_id}" style="width:100%;margin-top:8px;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">↩️ Vrátit peníze</button>`;
+    const canManage = (role==='coach' || role==='founder');
+    if(canManage && b.status!=='cancelled' && !b.fulfilled){
+      actions += `<div style="display:flex;gap:8px;margin-top:12px;">
+          <button class="onMsg" data-other="${b.student_id}" data-coach="${b.coach_id}" style="flex:1;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💬 Napsat</button>`;
+      if(role==='coach') actions += `<button class="onDone" data-id="${b.id}" data-coach="${b.coach_id}" style="flex:1;padding:10px;background:var(--green);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">✅ Vyřízeno</button>`;
+      actions += `</div>
+        <button class="onRefund" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-student="${b.student_id}" style="width:100%;margin-top:8px;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">↩️ Vrátit peníze${role==='founder'?' (founder)':''}</button>`;
     } else if(role==='student' && b.status!=='cancelled' && !b.fulfilled){
-      actions = `<button class="onReqRefund" data-id="${b.id}" data-coach="${b.coach_id}" style="width:100%;margin-top:10px;padding:10px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">Požádat o vrácení peněz</button>`;
+      actions = b.refund_requested ? '<div style="font-size:12px;color:var(--light);margin-top:10px;">Žádost o vrácení odeslána.</div>'
+        : `<button class="onReqRefund" data-id="${b.id}" data-coach="${b.coach_id}" style="width:100%;margin-top:10px;padding:10px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">Požádat o vrácení peněz</button>`;
     }
     const dateOrdered = (b.created_at||'').slice(0,10);
     el.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:start;">
-        <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.04em;">${otherName}</div>
-        <div style="font-size:12px;font-weight:700;color:${statusColor};">${statusLbl}</div>
+        <div style="font-family:'Bebas Neue';font-size:19px;letter-spacing:.04em;">${topName}</div>
+        <div style="font-size:12px;font-weight:700;color:${statusColor};white-space:nowrap;">${statusLbl}</div>
       </div>
-      <div style="font-size:13px;color:var(--mid);margin:4px 0;">🌐 Online coaching · ${b.amount} ${sym}</div>
+      <div style="font-size:13px;color:var(--mid);margin:4px 0;">🌐 Online · ${b.amount} ${sym} · <span style="color:var(--light);">rezervace #${b.id}</span></div>
       <div style="font-size:12px;color:var(--light);">Objednáno ${dateOrdered}</div>
+      ${refundReq}
       ${actions}
     `;
     list.appendChild(el);
   }
-  // napoj akce
-  list.querySelectorAll('.onMsg').forEach(btn=>btn.onclick=()=>{ closeSheet('shOnline'); openChatWithStudent(btn.dataset.other); });
+  list.querySelectorAll('.onMsg').forEach(btn=>btn.onclick=()=>{ closeSheet('shOnline'); if(role==='founder') messageCoachAsFounder(btn.dataset.coach); else openChatWithStudent(btn.dataset.other); });
   list.querySelectorAll('.onDone').forEach(btn=>btn.onclick=()=>markOnlineDone(btn.dataset.id, btn.dataset.coach));
   list.querySelectorAll('.onRefund').forEach(btn=>btn.onclick=()=>refundOnline(btn.dataset));
   list.querySelectorAll('.onReqRefund').forEach(btn=>btn.onclick=()=>requestRefundOnline(btn.dataset.id, btn.dataset.coach));
@@ -3845,7 +3895,7 @@ async function markOnlineDone(bookingId, coachId){
   if(bk){ await supaClient.from('notifications').insert({ user_id: bk.student_id, type:'online', read:false, message:'✅ Tvůj kouč označil online feedback jako vyřízený. Mrkni do chatu a klidně ohodnoť. 🥊' }); }
   await recalcCoachStudents(coachId);
   toast('✅ Označeno jako vyřízeno');
-  renderOnlineList('coach');
+  renderOnlineList(window._onlineRole || 'coach');
   updateOnlinePending();
 }
 
@@ -3858,20 +3908,23 @@ async function refundOnline(d){
       const j = await r.json();
       if(j.error){ toast('⚠️ Chyba refundu: '+j.error); return; }
     }
-    await supaClient.from('bookings').update({ status:'cancelled', refund_pct:100 }).eq('id', d.id);
-    await supaClient.from('notifications').insert({ user_id: d.student, type:'cancelled', read:false, message:`↩️ Kouč ti vrátil peníze za online coaching (${d.amt}).${reason?' Důvod: '+reason:''}` });
+    await supaClient.from('bookings').update({ status:'cancelled', refund_pct:100, refund_requested:false }).eq('id', d.id);
+    await supaClient.from('notifications').insert({ user_id: d.student, type:'cancelled', read:false, message:`↩️ Byly ti vráceny peníze za online coaching (${d.amt}).${reason?' Důvod: '+reason:''}` });
     toast('✅ Peníze vráceny');
-    renderOnlineList('coach');
+    renderOnlineList(window._onlineRole || 'coach');
     updateOnlinePending();
   } catch(e){ console.error('Refund error:', e); toast('⚠️ Chyba při vrácení'); }
 }
 
 async function requestRefundOnline(bookingId, coachId){
   const reason = prompt('Proč žádáš o vrácení peněz? (nepovinné)','') || '';
+  // ulož žádost na booking (ať ji kouč/founder vidí)
+  await supaClient.from('bookings').update({ refund_requested:true, refund_reason: reason || null }).eq('id', bookingId);
   // notifikace koučovi + founderovi
   await supaClient.from('notifications').insert({ user_id: coachId, type:'refund_request', read:false, message:`↩️ ${currentUser.name||'Student'} žádá o vrácení peněz za online coaching (rezervace #${bookingId}).${reason?' Důvod: '+reason:''} Vyřiď to v sekci Online feedback.` });
   await supaClient.from('notifications').insert({ user_id:'7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type:'refund_request', read:false, message:`↩️ Žádost o refund (online #${bookingId}): ${currentUser.name||'Student'} ↔ kouč.${reason?' Důvod: '+reason:''}` });
   toast('✅ Žádost odeslána kouči');
+  if(window._onlineRole) renderOnlineList(window._onlineRole);
 }
 
 async function updateOnlinePending(){
