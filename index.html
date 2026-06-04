@@ -788,8 +788,8 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
 
     <div class="sec-lbl">Zkušenosti</div>
     <div style="display:flex;gap:10px;margin-bottom:16px;">
-      <input id="caYears" type="number" placeholder="Roky praxe" style="flex:1;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';">
-      <input id="caFights" type="number" placeholder="Počet zápasů" style="flex:1;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';">
+      <input id="caYears" type="number" placeholder="Roky praxe" style="flex:1;min-width:0;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';box-sizing:border-box;">
+      <input id="caFights" type="number" placeholder="Počet zápasů" style="flex:1;min-width:0;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';box-sizing:border-box;">
     </div>
 
     <div class="sec-lbl">Ceny — vyplň aspoň jednu</div>
@@ -917,7 +917,7 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
 <!-- MOJE REZERVACE -->
 <div class="sheet" id="shBookings" style="z-index:86;">
   <div class="shdr">
-    <div class="shdr-title">Moje rezervace</div>
+    <div class="shdr-title" id="bookingsTitle">Moje rezervace</div>
     <button class="btn-close" id="btnCloseBookings">✕</button>
   </div>
   <div style="padding:16px 20px;" id="bookingsList"></div>
@@ -1478,21 +1478,28 @@ async function loadCoachReviews(coachId){
   const box = $('profReviews');
   if(!box) return;
   box.innerHTML = '<p style="font-size:13px;color:var(--light);">Načítám...</p>';
-  // recenze = proběhlé bookingy s ratingem, kde kouč nezpochybnil
   const { data } = await supaClient.from('bookings')
-    .select('rating, review, created_at, student_id, coach_confirmed, student_name')
+    .select('rating, review, created_at, student_id, coach_confirmed')
     .eq('coach_id', coachId)
     .not('rating','is',null)
     .order('created_at',{ascending:false});
   const reviews = (data||[]).filter(r=>r.rating);
   if(!reviews.length){ box.innerHTML = '<p style="font-size:13px;color:var(--light);">Zatím žádné recenze. Buď první!</p>'; return; }
+  // dohledej jména studentů z profiles
+  const ids = [...new Set(reviews.map(r=>r.student_id))];
+  const { data: profs } = await supaClient.from('profiles').select('id, name').in('id', ids);
+  const nameMap = {};
+  (profs||[]).forEach(p=>{ nameMap[p.id]=p.name; });
   let html='';
   reviews.forEach(r=>{
+    const full = nameMap[r.student_id] || 'Student';
+    const parts = full.trim().split(/\s+/);
+    const display = parts.length>1 ? `${parts[0]} ${parts[1][0]}.` : parts[0];
     const stars = '⭐'.repeat(r.rating);
     const when = timeAgo(r.created_at);
     const disputed = (r.coach_confirmed===false) ? ' <span style="color:var(--light);font-size:11px;">· kouč nepotvrdil že lekce proběhla</span>' : '';
     html += `<div class="review">
-      <div class="review-head"><div class="review-name">${r.student_name || 'Student'}</div><div class="review-meta">${stars} · ${when}${disputed}</div></div>
+      <div class="review-head"><div class="review-name">${display}</div><div class="review-meta">${stars} · ${when}${disputed}</div></div>
       ${r.review ? `<p class="review-text">"${r.review}"</p>` : ''}
     </div>`;
   });
@@ -2043,7 +2050,7 @@ $('meEdit1').onclick=async()=>{
 };
 $('meEdit2').onclick=()=>toast('Email je propojený s tvým účtem a nelze ho zde měnit.');
 $('meEdit3').onclick=()=>{ closeSheet('shMe'); openCityInput(); };
-$('meBook2').onclick=()=>{ openSheet('shBookings'); loadBookings(); };
+$('meBook2').onclick=()=>{ openSheet('shBookings'); loadBookings('past'); };
 $('meSettings').onclick=()=>openSheet('shSettings');
 $('meLogout').onclick=async()=>{
   await supaClient.auth.signOut();
@@ -2055,7 +2062,7 @@ $('meLogout').onclick=async()=>{
   $('btnNotif').onclick=()=>{ openSheet('shNotif'); loadNotifications(); };
 $('btnCloseNotif').onclick=()=>closeSheet('shNotif');
 
-  $('meBook1').onclick=()=>{ openSheet('shBookings'); loadBookings(); };
+  $('meBook1').onclick=()=>{ openSheet('shBookings'); loadBookings('upcoming'); };
 $('btnCloseBookings').onclick=()=>closeSheet('shBookings');
 
   $('btnContinueCoachApply').onclick=()=>{
@@ -2523,7 +2530,9 @@ function subscribeRealtime(){
     .subscribe();
 }
 
-  async function loadBookings(){
+  async function loadBookings(mode){
+  // mode: 'upcoming' (výchozí) nebo 'past'
+  mode = mode || 'upcoming';
   if(!currentUser) return;
   const list=$('bookingsList');
   list.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;">Načítám...</p>';
@@ -2531,35 +2540,51 @@ function subscribeRealtime(){
     .from('bookings').select('*')
     .eq('student_id', currentUser.id)
     .eq('status','active')
-    .order('training_date',{ascending:true});
+    .order('training_date',{ascending: mode==='upcoming'});
 
-  if(!data || !data.length){
-    list.innerHTML='<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">Žádné aktivní rezervace.</p>';
+  const now = new Date();
+  const all = data || [];
+  const filtered = all.filter(b=>{
+    const dt=new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`);
+    return mode==='upcoming' ? dt>=now : dt<now;
+  });
+
+  // titulek sheetu
+  const titleEl = $('bookingsTitle');
+  if(titleEl) titleEl.textContent = mode==='upcoming' ? 'Nadcházející lekce' : 'Historie lekcí';
+
+  if(!filtered.length){
+    list.innerHTML=`<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">${mode==='upcoming'?'Žádné nadcházející lekce.':'Žádné proběhlé lekce.'}</p>`;
     return;
   }
-    
-// Aktualizuj počet u "Nadcházející"
-  const cnt=$('bookCount');
-  if(cnt) cnt.textContent=data.length;
-    
-  list.innerHTML='';
-  data.forEach(b=>{
-    const dt=new Date(`${b.training_date}T${b.training_time}:00`);
-    const hours=(dt - new Date())/(1000*60*60);
-    let refundInfo = hours>=16 ? '100% zpět' : hours>=0 ? '50% zpět' : 'bez vrácení';
 
+  list.innerHTML='';
+  filtered.forEach(b=>{
+    const dt=new Date(`${b.training_date}T${b.training_time}:00`);
+    const hours=(dt - now)/(1000*60*60);
+    const refundInfo = hours>=16 ? '100% zpět' : hours>=0 ? '50% zpět' : 'bez vrácení';
     const el=document.createElement('div');
     el.style.cssText='background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px;';
-    el.innerHTML=`
-      <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.04em;">${b.coach_name}</div>
-      <div style="font-size:14px;color:var(--mid);margin:4px 0;">📅 ${b.training_date} · ${b.training_time}</div>
-      <div style="font-size:13px;color:var(--dark);margin-bottom:12px;">${b.amount} Kč · Při zrušení teď: <strong>${refundInfo}</strong></div>
-      <button class="cancelBtn" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-slot="${b.slot_id}" data-date="${b.training_date}" data-time="${b.training_time}" style="width:100%;padding:11px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">Zrušit rezervaci</button>
-    `;
+    if(mode==='upcoming'){
+      el.innerHTML=`
+        <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.04em;">${b.coach_name}</div>
+        <div style="font-size:14px;color:var(--mid);margin:4px 0;">📅 ${b.training_date} · ${b.training_time}</div>
+        <div style="font-size:13px;color:var(--dark);margin-bottom:12px;">${b.amount} Kč · Při zrušení teď: <strong>${refundInfo}</strong></div>
+        <button class="cancelBtn" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-slot="${b.slot_id}" data-date="${b.training_date}" data-time="${b.training_time}" style="width:100%;padding:11px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">Zrušit rezervaci</button>
+      `;
+    } else {
+      // proběhlé — bez zrušení, jen info
+      const rated = b.rating ? ` · ${'⭐'.repeat(b.rating)}` : '';
+      el.innerHTML=`
+        <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.04em;">${b.coach_name}</div>
+        <div style="font-size:14px;color:var(--mid);margin:4px 0;">📅 ${b.training_date} · ${b.training_time}</div>
+        <div style="font-size:13px;color:var(--light);">Proběhlo${rated}</div>
+      `;
+    }
     list.appendChild(el);
   });
 
-  // Napoj zrušení
+  // Napoj zrušení (jen upcoming)
   list.querySelectorAll('.cancelBtn').forEach(btn=>{
     btn.onclick=()=>cancelBooking(btn.dataset);
   });
@@ -2625,11 +2650,13 @@ $('chatInput').addEventListener('keydown',e=>{ if(e.key==='Enter') sendMessage()
   document.body.classList.remove('coach-mode');
   $('modeStudent').classList.add('active');
   $('modeCoach').classList.remove('active');
+  if($('approvedBox') && currentUser.coach_status==='approved') $('approvedBox').style.display='block';
 };
 $('modeCoach').onclick=()=>{
   document.body.classList.add('coach-mode');
   $('modeCoach').classList.add('active');
   $('modeStudent').classList.remove('active');
+  if($('approvedBox')) $('approvedBox').style.display='none';
   updateCoachSummary();
   fillRateEditor();
 };
@@ -3263,8 +3290,9 @@ async function checkPastLessons(){
   const { data: cb } = await supaClient.from('bookings').select('*')
     .eq('coach_id', currentUser.id).eq('status','active');
   (cb||[]).forEach(b=>{
+    if(b.student_id === currentUser.id) return; // self-booking (test) — neptat se dvakrát
     const dt = new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`);
-    if(dt < cutoff && b.coach_confirmed===null && !b.confirm_asked) _rateQueue.push({type:'coach', booking:b});
+    if(dt < cutoff && !b.confirm_asked) _rateQueue.push({type:'coach', booking:b});
   });
 
   showNextRate();
@@ -3321,13 +3349,14 @@ async function rateSubmit(){
   const b = _rateCurrent.booking;
   if(_rateStars<1){ toast('⚠️ Vyber počet hvězd'); return; }
   const review = $('rateReview').value.trim() || null;
-  await supaClient.from('bookings').update({
-    rating:_rateStars, review:review, rated:true,
-    student_name: currentUser.name || 'Student'
-  }).eq('id', b.id);
-  // přepočet průměru kouče
-  await recalcCoachRating(b.coach_id);
-  toast('✅ Děkujeme za hodnocení!');
+  try {
+    const { error } = await supaClient.from('bookings').update({
+      rating:_rateStars, review:review, rated:true
+    }).eq('id', b.id);
+    if(error){ console.error('Rating save error:', error); toast('⚠️ Chyba při ukládání hodnocení'); return; }
+    await recalcCoachRating(b.coach_id);
+    toast('✅ Děkujeme za hodnocení!');
+  } catch(e){ console.error('Rating error:', e); toast('⚠️ Chyba'); return; }
   showNextRate();
 }
 
@@ -3386,6 +3415,12 @@ async function showPaidPopup(){
             user_id: slotData.coach_profile_id, type:'booking', read:false,
             message:`📅 Nová rezervace! ${currentUser.name || 'Student'} si rezervoval lekci na ${slotData.date} v ${slotData.time}. Částka: ${amount} ${sym}.`
           });
+          // Notifikace studentovi — potvrzení rezervace
+          await supaClient.from('notifications').insert({
+            user_id: currentUser.id, type:'booking', read:false,
+            message:`✅ Rezervace potvrzena! Lekce s ${coachProf?.name || 'koučem'} ${slotData.date} v ${slotData.time}. Platba proběhla úspěšně. 🥊`
+          });
+          updateNotifBadge();
           
           // Konverzace
           await ensureConversation(slotData.coach_profile_id);
