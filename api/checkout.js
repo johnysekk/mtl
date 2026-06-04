@@ -4,40 +4,71 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 export default async function handler(req, res) {
   try {
-    const { coachId, coachName, amount } = req.query;
+    const {
+      coachId,           // Stripe connected account (acct_...)
+      coachName,
+      amount,            // koučova cena (jeho podíl 100 %)
+      currency = 'CZK',  // CZK | EUR | USD
+      slotId,            // pro in-person
+      online,            // '1' pro online coaching (bez slotu)
+      coachProfileId,    // profiles.id kouče (pro online booking)
+    } = req.query;
 
     if (!coachId || !amount) {
       return res.status(400).json({ error: 'Chybí coachId nebo amount' });
     }
 
-    const rate = parseInt(amount);                          // cena kouče (jeho rate)
-    const amountInHaler = Math.round(rate * 1.10 * 100);    // student platí rate +10%
-    const applicationFee = Math.round(rate * 0.20 * 100);   // MTL = 20% z rate (10% student + 10% kouč)
+    const rate = parseInt(amount, 10);
+    const cur = String(currency).toLowerCase(); // stripe chce malá písmena
+    const COMMISSION = 0.20;   // 20 % z ceny = provize MTL
+    const STUDENT_MARKUP = 1.10; // student platí +10 %
+
+    // Stripe minor units (×100 platí pro CZK i EUR i USD)
+    const unitAmount = Math.round(rate * STUDENT_MARKUP * 100);
+    const applicationFee = Math.round(rate * COMMISSION * 100);
+
+    const host = req.headers.host;
+    const proto = host && host.includes('localhost') ? 'http' : 'https';
+
+    const isOnline = String(online) === '1';
+
+    // success_url podle typu objednávky
+    let successUrl;
+    if (isOnline) {
+      successUrl = `${proto}://${host}/?platba=ok&online=1&coach=${encodeURIComponent(coachProfileId || '')}&amount=${rate}&currency=${currency}&session={CHECKOUT_SESSION_ID}`;
+    } else {
+      successUrl = `${proto}://${host}/?platba=ok&slot=${encodeURIComponent(slotId || '')}&session={CHECKOUT_SESSION_ID}`;
+    }
+
+    const productName = isOnline
+      ? `Online coaching — ${coachName || 'Kouč'}`
+      : `Lekce s ${coachName || 'Kouč'}`;
 
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       payment_method_types: ['card'],
-      line_items: [{
-        price_data: {
-          currency: 'czk',
-          product_data: { name: `Trénink — ${coachName || 'MTL Coach'}` },
-          unit_amount: amountInHaler,
+      line_items: [
+        {
+          price_data: {
+            currency: cur,
+            product_data: { name: productName },
+            unit_amount: unitAmount,
+          },
+          quantity: 1,
         },
-        quantity: 1,
-      }],
+      ],
       payment_intent_data: {
         application_fee_amount: applicationFee,
-        on_behalf_of: coachId,              // kouč = merchant of record (země/výpis), Stripe fee platí platforma
-        transfer_data: {
-          destination: coachId,
-        },
+        on_behalf_of: coachId,
+        transfer_data: { destination: coachId },
       },
-     success_url: `https://${req.headers.host}/?platba=ok&slot=${req.query.slotId || ''}&session={CHECKOUT_SESSION_ID}`,
-      cancel_url: `https://${req.headers.host}/?platba=zruseno`,
+      success_url: successUrl,
+      cancel_url: `${proto}://${host}/`,
     });
 
     res.redirect(303, session.url);
   } catch (err) {
+    console.error('Checkout error:', err);
     res.status(500).json({ error: err.message });
   }
 }
