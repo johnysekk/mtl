@@ -1333,6 +1333,7 @@ async function loadCoaches() {
       certVideo: c.cert_video_url || null,
       rating: c.rating || '5.0',
       reviews: c.reviews || 0,
+      textReviews: c.text_reviews || 0,
       students: c.students || 0,
       lessonsDone: c.lessons_done || 0,
       onlineStudents: c.online_students || 0,
@@ -1444,8 +1445,8 @@ function scoreParts(c){
   const volIp=Math.min(Math.log10(ip+1)*18, 20);     // in-person až 20
   const volOn=Math.min(Math.log10(on+1)*16, 14);     // online až 14
   const volume=Math.round(Math.min(volIp+volOn, 30)); // celkem cap 30
-  const engage=Math.round(Math.min(n*0.6, 15));      // až 15
-  return { quality, volume, engage, br:br.toFixed(2), ip, on, lessons:ip+on, reviews:n, total: quality+volume+engage };
+  const engage=Math.round(Math.min((+(c.textReviews||0))*1.3, 15)); // až 15 — jen psané recenze
+  return { quality, volume, engage, br:br.toFixed(2), ip, on, lessons:ip+on, reviews:n, treviews:+(c.textReviews||0), total: quality+volume+engage };
 }
 function mtlScore(c){ return scoreParts(c).total; }   // ~0..100
 function tierOf(s){
@@ -1468,7 +1469,7 @@ function scoreBreakdownHtml(c){
       <div style="font-size:13px;font-weight:800;margin-bottom:12px;color:var(--dark);">Jak se počítá skóre<span style="float:right;font-family:'Bebas Neue';font-size:20px;letter-spacing:.02em;">${p.total} / 100</span></div>
       ${bar('⭐ Kvalita', p.quality, 55, `Z hodnocení studentů (Ø ${p.br}/5), vážené počtem recenzí — pár hvězd od jednoho studenta nepřebije ověřené kouče se stovkami lekcí.`, '#C65A00')}
       ${bar('🥊 Zkušenost', p.volume, 30, `Z ${p.ip} lekcí naživo a ${p.on} online feedbacků — počítáno logaritmicky a zvlášť (naživo váží o něco víc), aby šlo jen onlinem dojít max do určité hranice a veteráni nezablokovali žebříček.`, '#2F6FED')}
-      ${bar('🔥 Aktivita', p.engage, 15, `Z ${p.reviews} ${p.reviews===1?'recenze':'recenzí'} — odměňuje kouče, kteří reálně trénují a sbírají zpětnou vazbu.`, '#B8860B')}
+      ${bar('🔥 Aktivita', p.engage, 15, `Z ${p.treviews} ${p.treviews===1?'psané recenze':'psaných recenzí'} — odměňuje kouče, kteří sbírají reálnou napsanou zpětnou vazbu (samotné hvězdičky bez textu se sem nepočítají).`, '#B8860B')}
       <div style="font-size:11px;color:var(--light);line-height:1.45;border-top:1px solid var(--border);padding-top:9px;margin-top:3px;">⚠️ No-shows a spory se trestají nepřímo: sporná lekce se nezapočítá do zkušenosti a sráží hodnocení.</div>
     </div>`;
 }
@@ -1898,8 +1899,9 @@ async function loadCoachReviews(coachId){
     .eq('coach_id', coachId)
     .not('rating','is',null)
     .order('created_at',{ascending:false});
-  const reviews = (data||[]).filter(r=>r.rating);
-  if(!reviews.length){ box.innerHTML = '<p style="font-size:13px;color:var(--light);">Zatím žádné hodnocení.</p>'; return; }
+  const allReviews = (data||[]).filter(r=>r.rating);
+  if(!allReviews.length){ box.innerHTML = '<p style="font-size:13px;color:var(--light);">Zatím žádné hodnocení.</p>'; return; }
+  const reviews = allReviews.slice(0,5);   // jen 5 nejčerstvějších (výkon + nepřetéká)
   // dohledej jména studentů z profiles
   const ids = [...new Set(reviews.map(r=>r.student_id))];
   const { data: profs } = await supaClient.from('profiles').select('id, name').in('id', ids);
@@ -1921,6 +1923,7 @@ async function loadCoachReviews(coachId){
       ${r.review ? `<p class="review-text">"${r.review}"</p>` : ''}
     </div>`;
   });
+  if(allReviews.length>5) html += `<p style="font-size:12px;color:var(--light);text-align:center;padding:6px 0;">+ ${allReviews.length-5} dalších hodnocení</p>`;
   box.innerHTML = html;
 }
 
@@ -1929,6 +1932,7 @@ function timeAgo(iso){
   const d = new Date(iso), now = new Date();
   const days = Math.floor((now-d)/86400000);
   if(days<1) return 'dnes';
+  if(days===1) return 'včera';
   if(days<7) return `před ${days} dny`;
   if(days<30) return `před ${Math.floor(days/7)} týdny`;
   if(days<365) return `před ${Math.floor(days/30)} měsíci`;
@@ -4825,17 +4829,19 @@ async function rateSubmit(){
 }
 
 async function recalcCoachRating(coachId){
-  const { data } = await supaClient.from('bookings').select('rating, student_id, created_at')
+  const { data } = await supaClient.from('bookings').select('rating, review, student_id, created_at')
     .eq('coach_id', coachId).not('rating','is',null).order('created_at',{ascending:false});
   const rated = (data||[]).filter(r=>r.rating);
   if(!rated.length) return;
   // ANTI-GAMING: jeden hlas na unikátního studenta (poslední rating daného studenta)
   const perStudent = {};
-  rated.forEach(r=>{ if(!(r.student_id in perStudent)) perStudent[r.student_id] = r.rating; });
-  const votes = Object.values(perStudent);
+  rated.forEach(r=>{ if(!(r.student_id in perStudent)) perStudent[r.student_id] = r; });
+  const votes = Object.values(perStudent).map(r=>r.rating);
   const avg = votes.reduce((a,b)=>a+b,0)/votes.length;
+  // psané recenze = unikátní studenti s textem
+  const textReviews = Object.values(perStudent).filter(r=>r.review && r.review.trim()).length;
   await supaClient.from('profiles').update({
-    rating: avg.toFixed(1), reviews: votes.length
+    rating: avg.toFixed(1), reviews: votes.length, text_reviews: textReviews
   }).eq('id', coachId);
 }
   
