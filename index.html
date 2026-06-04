@@ -1468,6 +1468,7 @@ function scrollToOffers(){
 // Přidání lekce do kalendáře (univerzální .ics — iOS Kalendář / Google / Outlook)
 function addToCalendar(b){
   if(!b || !b.training_date){ toast('⚠️ Tato rezervace nemá termín'); return; }
+  if(!b.title) b.title = `🥊 Muay Thai trénink — ${b.coach_name||'kouč'}`;
   window._calBooking = b;
   $('calChooseOv').style.display = 'flex';
 }
@@ -1482,7 +1483,7 @@ function calGoogle(){
   const pad = n => String(n).padStart(2,'0');
   // Google chce UTC se Z
   const g = d => `${d.getUTCFullYear()}${pad(d.getUTCMonth()+1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}00Z`;
-  const title = `🥊 Muay Thai trénink — ${b.coach_name||'kouč'}`;
+  const title = b.title || `🥊 Muay Thai trénink — ${b.coach_name||'kouč'}`;
   const url = `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(title)}&dates=${g(start)}/${g(end)}&details=${encodeURIComponent('Rezervováno přes Muay Thai Lab. Be More. 🥊')}`;
   window.open(url, '_blank');
   $('calChooseOv').style.display='none';
@@ -1493,7 +1494,7 @@ function calIcs(){
   const pad = n => String(n).padStart(2,'0');
   const fmt = d => `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}00`;
   const fmtUTC = d => `${d.getUTCFullYear()}${pad(d.getUTCMonth()+1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
-  const title = `🥊 Muay Thai trénink — ${b.coach_name||'kouč'}`;
+  const title = b.title || `🥊 Muay Thai trénink — ${b.coach_name||'kouč'}`;
   const ics = [
     'BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Muay Thai Lab//CS','CALSCALE:GREGORIAN','METHOD:PUBLISH',
     'BEGIN:VEVENT',
@@ -2415,13 +2416,20 @@ async function loadNotifications(){
     const el=document.createElement('div');
     // proklik u online/refund/spor notifikací
     const isBookingConfirm = n.type==='booking' && n.message.includes('Rezervace potvrzena');
-    const clickable = ['refund_request','online','dispute'].includes(n.type) || isBookingConfirm;
+    const isCoachBooking = n.type==='booking' && (n.message.includes('Nová rezervace') || n.message.includes('Nová online objednávka'));
+    const isOnlineDone = n.type==='online';
+    const clickable = ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachBooking || isOnlineDone;
+    let linkLabel = 'otevřít ›';
+    if(isBookingConfirm) linkLabel = 'přidat do kalendáře ›';
+    else if(isCoachBooking) linkLabel = 'otevřít diář ›';
     el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;${clickable?'cursor:pointer;':''}`;
-    el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${n.message}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}${clickable?` · <span style="color:var(--blue);font-weight:600;">${isBookingConfirm?'přidat do kalendáře ›':'otevřít ›'}</span>`:''}</div>`;
+    el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${n.message}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}${clickable?` · <span style="color:var(--blue);font-weight:600;">${linkLabel}</span>`:''}</div>`;
     if(clickable){
       el.onclick=()=>{
         closeSheet('shNotif');
         if(isBookingConfirm){ openSheet('shBookings'); loadBookings('upcoming'); }
+        else if(isCoachBooking){ openDiary(); }
+        else if(isOnlineDone){ openOnline('student'); }
         else if(n.type==='refund_request' && currentUser.role==='founder' && n.message.includes('Žádost o refund')) openOnline('founder');
         else openOnline('coach');
       };
@@ -2889,6 +2897,7 @@ function showDiaryDay(dateStr){
           <button class="diaryMsgBtn" data-student="${b.student_id}" style="flex:1;padding:8px;background:var(--dark);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans';">💬 Napsat</button>
           <button class="diaryCancelBtn" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-slot="${b.slot_id}" data-student="${b.student_id}" data-date="${b.training_date}" data-time="${b.training_time}" style="flex:1;padding:8px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans';">Zrušit</button>
         </div>
+        <button class="diaryCalBtn" data-id="${b.id}" data-student="${b.student_id}" data-date="${b.training_date}" data-time="${b.training_time}" style="width:100%;margin-top:8px;padding:8px;background:#F0FBF0;color:#006040;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans';">📅 Přidat do kalendáře</button>
       </div>`;
   });
 
@@ -2908,6 +2917,13 @@ function showDiaryDay(dateStr){
   // Napoj tlačítka
   detail.querySelectorAll('.diaryMsgBtn').forEach(btn=>{
     btn.onclick = ()=>openChatWithStudent(btn.dataset.student);
+  });
+  detail.querySelectorAll('.diaryCalBtn').forEach(btn=>{
+    btn.onclick = async ()=>{
+      let name = 'student';
+      try { const { data } = await supaClient.from('profiles').select('name').eq('id', btn.dataset.student).single(); if(data&&data.name) name=data.name; } catch(e){}
+      addToCalendar({ id:btn.dataset.id, training_date:btn.dataset.date, training_time:btn.dataset.time, title:`🥊 Muay Thai lekce — ${name}` });
+    };
   });
 
 detail.querySelectorAll('.diaryCancelBtn').forEach(btn=>{
@@ -2999,6 +3015,18 @@ async function openChatWithStudent(studentId){
     .eq('student_id', studentId).eq('coach_id', currentUser.id);
   if(data && data.length){
     closeSheet('shDiary');
+    openChat(data[0]);
+  } else {
+    toast('Konverzace zatím neexistuje');
+  }
+}
+
+async function openChatWithCoach(coachId){
+  // student → kouč
+  const { data } = await supaClient.from('conversations').select('*')
+    .eq('student_id', currentUser.id).eq('coach_id', coachId);
+  if(data && data.length){
+    closeSheet('shOnline');
     openChat(data[0]);
   } else {
     toast('Konverzace zatím neexistuje');
@@ -4029,9 +4057,15 @@ function showNextRate(){
       ? `Proběhlo online coaching s ${b.coach_name||'koučem'}? Potvrď a ohodnoť.`
       : `Lekce s ${b.coach_name||'koučem'} (${dateStr}). Potvrď a ohodnoť.`;
   } else {
-    $('rateLessonInfo').textContent = isOnline
-      ? `Online coaching se studentem. Potvrď že proběhlo.`
-      : `Tvoje lekce se studentem (${dateStr}). Potvrď že proběhla.`;
+    if(isOnline){
+      $('rateLessonInfo').textContent = `Online coaching se studentem. Potvrď že proběhlo.`;
+    } else {
+      $('rateLessonInfo').textContent = `Tvoje lekce (${dateStr}). Potvrď že proběhla.`;
+      // dofetch jméno studenta
+      supaClient.from('profiles').select('name').eq('id', b.student_id).single().then(({data})=>{
+        if(data && data.name) $('rateLessonInfo').textContent = `Tvoje lekce se studentem ${data.name} (${dateStr}). Potvrď že proběhla.`;
+      });
+    }
   }
   $('rateOv').style.display='flex';
 }
@@ -4065,12 +4099,13 @@ async function recalcCoachStudents(coachId){
   const onlineUniq = new Set(onlineRows.map(r=>r.student_id));
   const feedbackCount = fmt => { const mm=(fmt||'').match(/\d+/); return mm ? parseInt(mm[0]) : 1; };
   const onlineFeedbacks = onlineRows.reduce((s,r)=>s+feedbackCount(r.online_format), 0);
-  await supaClient.from('profiles').update({
+  const { error } = await supaClient.from('profiles').update({
     students: uniq.size,
     lessons_done: rows.length,
     online_students: onlineUniq.size,
     online_feedbacks: onlineFeedbacks
   }).eq('id', coachId);
+  if(error){ console.error('recalcCoachStudents error:', error); toast('⚠️ Statistiky: '+error.message); }
 }
 
 // ════ ONLINE COACHING SPRÁVA ════
@@ -4129,6 +4164,12 @@ async function renderOnlineList(role){
     } else if(role==='student' && b.status!=='cancelled' && !b.fulfilled){
       actions = b.refund_requested ? '<div style="font-size:13px;color:var(--orange);font-weight:600;background:#FFF8E6;border-radius:10px;padding:10px 12px;margin-top:10px;">⏳ Zažádáno o vrácení — čeká se na vyřízení</div>'
         : `<button class="onReqRefund" data-id="${b.id}" data-coach="${b.coach_id}" style="width:100%;margin-top:10px;padding:10px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">Požádat o vrácení peněz</button>`;
+    } else if(role==='student' && b.fulfilled){
+      actions = `<div style="display:flex;gap:8px;margin-top:12px;">
+        <button class="onChatCoach" data-coach="${b.coach_id}" style="flex:1;padding:10px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💬 Chat s koučem</button>`
+        + (!b.rated ? `<button class="onRate" data-id="${b.id}" data-coach="${b.coach_name}" style="flex:1;padding:10px;background:#FFB800;color:#1a1a1a;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">⭐ Ohodnotit</button>` : '')
+        + `</div>`
+        + (b.rated ? '<div style="font-size:12px;color:var(--light);margin-top:8px;">Hodnoceno ✓</div>' : '');
     }
     const dateOrdered = (b.created_at||'').slice(0,10);
     el.innerHTML = `
@@ -4147,6 +4188,13 @@ async function renderOnlineList(role){
   list.querySelectorAll('.onDone').forEach(btn=>btn.onclick=()=>markOnlineDone(btn.dataset.id, btn.dataset.coach));
   list.querySelectorAll('.onRefund').forEach(btn=>btn.onclick=()=>refundOnline(btn.dataset));
   list.querySelectorAll('.onReqRefund').forEach(btn=>btn.onclick=()=>requestRefundOnline(btn.dataset.id, btn.dataset.coach));
+  list.querySelectorAll('.onChatCoach').forEach(btn=>btn.onclick=()=>openChatWithCoach(btn.dataset.coach));
+  list.querySelectorAll('.onRate').forEach(btn=>btn.onclick=()=>rateOnlineNow(btn.dataset.id, btn.dataset.coach));
+}
+
+function rateOnlineNow(bookingId, coachName){
+  _rateQueue = [{ type:'student', online:true, booking:{ id:bookingId, coach_name:coachName, type:'online' } }];
+  showNextRate();
 }
 
 async function markOnlineDone(bookingId, coachId){
@@ -4308,7 +4356,7 @@ async function showPaidPopup(){
           const sym = bkCurr==='EUR'?'€':bkCurr==='USD'?'$':'Kč';
           await supaClient.from('notifications').insert({
             user_id: slotData.coach_profile_id, type:'booking', read:false,
-            message:`📅 Nová rezervace! ${currentUser.name || 'Student'} si rezervoval lekci na ${slotData.date} v ${slotData.time}. Částka: ${amount} ${sym}.`
+            message:`📅 Nová rezervace! ${currentUser.name || 'Student'} si rezervoval lekci na ${slotData.date} v ${slotData.time}. Dostaneš: ${Math.round(amount*0.9)} ${sym}.`
           });
           // Notifikace studentovi — potvrzení rezervace
           await supaClient.from('notifications').insert({
@@ -4350,7 +4398,7 @@ async function showPaidPopup(){
           online_format: orderFmt
         });
         const sym = currency==='EUR'?'€':currency==='USD'?'$':'Kč';
-        await supaClient.from('notifications').insert({ user_id: coachId, type:'booking', read:false, message:`🌐 Nová online objednávka! ${currentUser.name||'Student'} si koupil online coaching${orderFmt?' ('+orderFmt+')':''}. Částka: ${amount} ${sym}. Ozvi se mu v chatu.` });
+        await supaClient.from('notifications').insert({ user_id: coachId, type:'booking', read:false, message:`🌐 Nová online objednávka! ${currentUser.name||'Student'} si koupil online coaching${orderFmt?' ('+orderFmt+')':''}. Dostaneš: ${Math.round(amount*0.9)} ${sym}. Ozvi se mu v chatu.` });
         await supaClient.from('notifications').insert({ user_id: currentUser.id, type:'booking', read:false, message:`✅ Online coaching objednán! Napiš ${coachProf?.name||'kouči'} do chatu a pošli odkaz na svůj klip. 🥊` });
         updateNotifBadge();
         // konverzace
