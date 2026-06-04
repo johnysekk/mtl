@@ -1465,6 +1465,18 @@ function scrollToOffers(){
   }, 400);
 }
 
+async function loadIpSlotPreview(coachId){
+  try {
+    const { data } = await supaClient.from('slots').select('date, time').eq('coach_profile_id', coachId).eq('booked', false);
+    const minTime = new Date(Date.now() + 16*60*60*1000);
+    const valid = (data||[]).filter(s=>new Date(`${s.date}T${s.time}:00`) >= minTime);
+    const el = $('ipSlotPreview');
+    if(!el) return;
+    if(valid.length===0){ el.style.background='#FFF0E6'; el.style.color='var(--orange)'; el.textContent='📅 Kouč teď nemá volné termíny — zkus napsat nebo se vrať později.'; }
+    else { el.textContent = `📅 ${valid.length} ${valid.length===1?'volný termín':valid.length<5?'volné termíny':'volných termínů'} k rezervaci`; }
+  } catch(e){ const el=$('ipSlotPreview'); if(el) el.style.display='none'; }
+}
+
 // Přidání lekce do kalendáře (univerzální .ics — iOS Kalendář / Google / Outlook)
 function addToCalendar(b){
   if(!b || !b.training_date){ toast('⚠️ Tato rezervace nemá termín'); return; }
@@ -1757,8 +1769,10 @@ function renderOffers(c){
     const sym = symOf(c.currencyInperson);
     const studentPays = Math.round(c.rateInperson * 1.10);
     const detail = (c.inpersonDesc ? `<p style="font-size:13px;color:var(--mid);line-height:1.5;margin-top:8px;">${c.inpersonDesc}</p>` : '<p style="font-size:13px;color:var(--light);margin-top:8px;">Trénink 1-na-1 naživo.</p>')
+      + (isSelf ? '' : `<div id="ipSlotPreview" style="font-size:13px;font-weight:600;color:#006040;background:#F0FBF0;border-radius:8px;padding:8px 12px;margin-top:10px;">📅 Načítám volné termíny…</div>`)
       + (isSelf ? '' : `<button class="offer-cta" data-offer="inperson" style="width:100%;margin-top:12px;padding:12px;background:var(--red);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">Vybrat termín →</button>`);
     html += offerCard('inperson', '📍', 'In-person session', `${studentPays} ${sym}`, detail);
+    if(!isSelf) loadIpSlotPreview(c.id);
   }
   // Online
   if(c.rateOnline){
@@ -2416,19 +2430,26 @@ async function loadNotifications(){
     const el=document.createElement('div');
     // proklik u online/refund/spor notifikací
     const isBookingConfirm = n.type==='booking' && n.message.includes('Rezervace potvrzena');
-    const isCoachBooking = n.type==='booking' && (n.message.includes('Nová rezervace') || n.message.includes('Nová online objednávka'));
+    const isCoachInperson = n.type==='booking' && n.message.includes('Nová rezervace');
+    const isCoachOnline = n.type==='booking' && n.message.includes('Nová online objednávka');
     const isOnlineDone = n.type==='online';
-    const clickable = ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachBooking || isOnlineDone;
+    const clickable = ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone;
     let linkLabel = 'otevřít ›';
     if(isBookingConfirm) linkLabel = 'přidat do kalendáře ›';
-    else if(isCoachBooking) linkLabel = 'otevřít diář ›';
+    else if(isCoachInperson) linkLabel = 'otevřít v diáři ›';
+    else if(isCoachOnline) linkLabel = 'otevřít online feedback ›';
     el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;${clickable?'cursor:pointer;':''}`;
     el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${n.message}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}${clickable?` · <span style="color:var(--blue);font-weight:600;">${linkLabel}</span>`:''}</div>`;
     if(clickable){
-      el.onclick=()=>{
+      el.onclick=async()=>{
         closeSheet('shNotif');
         if(isBookingConfirm){ openSheet('shBookings'); loadBookings('upcoming'); }
-        else if(isCoachBooking){ openDiary(); }
+        else if(isCoachInperson){
+          const dm = n.message.match(/(\d{4}-\d{2}-\d{2})/);
+          await openDiary();
+          if(dm) setTimeout(()=>{ if(typeof goToDiaryDate==='function') goToDiaryDate(dm[1]); }, 300);
+        }
+        else if(isCoachOnline){ openOnline('coach'); }
         else if(isOnlineDone){ openOnline('student'); }
         else if(n.type==='refund_request' && currentUser.role==='founder' && n.message.includes('Žádost o refund')) openOnline('founder');
         else openOnline('coach');
@@ -2821,6 +2842,14 @@ async function loadDiaryData(){
   const { data: books } = await supaClient.from('bookings').select('*').eq('coach_id', currentUser.id).eq('status','active');
   diarySlots = slots || [];
   diaryBookings = books || [];
+}
+
+function goToDiaryDate(dateStr){
+  const p = (dateStr||'').split('-').map(Number);
+  if(p.length<3) return;
+  diaryYear = p[0]; diaryMonth = p[1]-1;
+  renderDiary();
+  showDiaryDay(dateStr);
 }
 
 function renderDiary(){
