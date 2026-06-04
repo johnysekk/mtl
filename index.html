@@ -717,17 +717,23 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
       </div>
       <button id="btnOpenDiary" style="width:100%;padding:16px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">📅 Otevřít diář</button>
     <div class="sec-lbl" style="margin-top:24px;">Moje ceny</div>
-      <select id="editCurrency" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';margin-bottom:12px;">
-        <option value="CZK">CZK — Kč</option>
-        <option value="EUR">EUR — €</option>
-        <option value="USD">USD — $</option>
-      </select>
-      <input id="editRateInperson" type="number" placeholder="Cena za in-person hodinu" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';margin-bottom:6px;">
-      <div id="editBreakInperson" style="display:none;font-size:13px;color:var(--mid);background:#F0FBF0;border-radius:8px;padding:8px 12px;margin-bottom:12px;"></div>
-      <input id="editRateOnline" type="number" placeholder="Cena za online video feedback" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';margin-bottom:6px;">
-      <div id="editBreakOnline" style="display:none;font-size:13px;color:var(--mid);background:#F0FBF0;border-radius:8px;padding:8px 12px;margin-bottom:12px;"></div>
-      <button id="btnSaveRates" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">Uložit ceny</button>
-    </div>
+      <div id="rateDisplay" style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:12px;">
+        <div id="rateDisplayText" style="font-size:14px;color:var(--dark);line-height:1.8;"></div>
+        <button id="btnEditRates" style="margin-top:10px;padding:9px 16px;background:var(--bg);border:none;border-radius:8px;font-size:13px;font-weight:600;color:var(--dark);cursor:pointer;font-family:'DM Sans';">Změnit ceny</button>
+      </div>
+      <div id="rateEditor" style="display:none;">
+        <select id="editCurrency" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';margin-bottom:12px;">
+          <option value="CZK">CZK — Kč</option>
+          <option value="EUR">EUR — €</option>
+          <option value="USD">USD — $</option>
+        </select>
+        <input id="editRateInperson" type="number" placeholder="Cena za in-person hodinu" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';margin-bottom:6px;">
+        <div id="editBreakInperson" style="display:none;font-size:13px;color:var(--mid);background:#F0FBF0;border-radius:8px;padding:8px 12px;margin-bottom:12px;"></div>
+        <input id="editRateOnline" type="number" placeholder="Cena za online video feedback" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';margin-bottom:6px;">
+        <div id="editBreakOnline" style="display:none;font-size:13px;color:var(--mid);background:#F0FBF0;border-radius:8px;padding:8px 12px;margin-bottom:12px;"></div>
+        <p style="font-size:12px;color:var(--mid);line-height:1.5;background:#E8F0FF;border-radius:10px;padding:11px 13px;margin-bottom:12px;">Jak to funguje: necháváš si <strong>90 % své ceny</strong>. MTL si bere 10 % a dalších 10 % připočítává studentovi — z toho ti přivádíme nové klienty, zpracováváme a chráníme platby a držíme platformu v chodu.</p>
+        <button id="btnSaveRates" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">Uložit ceny</button>
+      </div>
 
     <!-- ═══ STUDENT MODE ═══ -->
     <div class="student-only">
@@ -2712,6 +2718,9 @@ $('btnSubmitCoachApp').onclick=async()=>{
 
   if(!bio||!city){ toast('⚠️ Vyplň bio a město'); return; }
   if(!rateIn && !rateOn){ toast('⚠️ Vyplň aspoň jednu cenu'); return; }
+  const MIN = { CZK:300, EUR:14, USD:15 }[currency] || 300;
+  if(rateIn && rateIn < MIN){ toast(`⚠️ Minimální cena je ${MIN} ${currency}`); return; }
+  if(rateOn && rateOn < MIN){ toast(`⚠️ Minimální cena je ${MIN} ${currency}`); return; }
   if(!videoFile){ toast('⚠️ Nahraj certifikační video'); return; }
   if(!currentUser.stripe_account){ toast('⚠️ Nejprve připoj Stripe účet'); return; }
   if(videoFile.size > 50*1024*1024){ toast('⚠️ Video je větší než 50 MB'); return; }
@@ -2927,14 +2936,37 @@ function showPriceBreakdown(inputId, breakId){
 }
 
   // Předvyplň ceny při vstupu do coach mode
-function fillRateEditor(){
+const MIN_RATE = { CZK: 300, EUR: 14, USD: 15 };
+
+async function fillRateEditor(){
   if(!currentUser) return;
-  if($('editCurrency') && currentUser.currency) $('editCurrency').value = currentUser.currency;
+  // načti čerstvý profil ať jsou ceny aktuální
+  const { data: prof } = await supaClient.from('profiles').select('rate_inperson, rate_online, currency').eq('id', currentUser.id).single();
+  if(prof){
+    currentUser.rate_inperson = prof.rate_inperson;
+    currentUser.rate_online = prof.rate_online;
+    currentUser.currency = prof.currency;
+  }
+  const curr = currentUser.currency || 'CZK';
+  const sym = curr==='EUR'?'€':curr==='USD'?'$':'Kč';
+  // Display text
+  let txt = '';
+  if(currentUser.rate_inperson) txt += `<div>🥊 In-person: <strong>${currentUser.rate_inperson} ${sym}</strong> <span style="color:var(--light);">(dostaneš ${Math.round(currentUser.rate_inperson*0.9)} ${sym})</span></div>`;
+  if(currentUser.rate_online) txt += `<div>🌐 Online: <strong>${currentUser.rate_online} ${sym}</strong> <span style="color:var(--light);">(dostaneš ${Math.round(currentUser.rate_online*0.9)} ${sym})</span></div>`;
+  if(!txt) txt = '<div style="color:var(--light);">Zatím nemáš nastavené ceny.</div>';
+  if($('rateDisplayText')) $('rateDisplayText').innerHTML = txt;
+  // Editor pre-fill
+  if($('editCurrency')) $('editCurrency').value = curr;
   if($('editRateInperson')) $('editRateInperson').value = currentUser.rate_inperson || '';
   if($('editRateOnline')) $('editRateOnline').value = currentUser.rate_online || '';
+}
+
+$('btnEditRates').onclick=()=>{
+  $('rateDisplay').style.display='none';
+  $('rateEditor').style.display='block';
   showPriceBreakdown('editRateInperson','editBreakInperson');
   showPriceBreakdown('editRateOnline','editBreakOnline');
-}
+};
 
 $('editRateInperson').addEventListener('input', ()=>showPriceBreakdown('editRateInperson','editBreakInperson'));
 $('editRateOnline').addEventListener('input', ()=>showPriceBreakdown('editRateOnline','editBreakOnline'));
@@ -2947,18 +2979,22 @@ $('btnSaveRates').onclick=async()=>{
   const rateIn = parseInt($('editRateInperson').value) || null;
   const rateOn = parseInt($('editRateOnline').value) || null;
   const curr = $('editCurrency').value;
+  const min = MIN_RATE[curr] || 300;
   if(!rateIn && !rateOn){ toast('⚠️ Vyplň aspoň jednu cenu'); return; }
+  if(rateIn && rateIn < min){ toast(`⚠️ Minimální cena je ${min} ${curr}`); return; }
+  if(rateOn && rateOn < min){ toast(`⚠️ Minimální cena je ${min} ${curr}`); return; }
   const btn=$('btnSaveRates');
   btn.textContent='Ukládám...'; btn.disabled=true;
   try {
-    await supaClient.from('profiles').update({
-      rate_inperson: rateIn, rate_online: rateOn, currency: curr
-    }).eq('id', currentUser.id);
+    await supaClient.from('profiles').update({ rate_inperson: rateIn, rate_online: rateOn, currency: curr }).eq('id', currentUser.id);
     currentUser.rate_inperson = rateIn;
     currentUser.rate_online = rateOn;
     currentUser.currency = curr;
     toast('✅ Ceny uloženy');
-    loadCoaches(); // ať se projeví na kartě
+    $('rateEditor').style.display='none';
+    $('rateDisplay').style.display='block';
+    fillRateEditor();
+    loadCoaches();
   } catch(e){ console.error('Save rates error:', e); toast('⚠️ Chyba'); }
   finally { btn.textContent='Uložit ceny'; btn.disabled=false; }
 };
