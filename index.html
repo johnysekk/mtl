@@ -556,6 +556,12 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
       <div class="stat-box"><div class="stat-num" id="pStudents">—</div><div class="stat-lbl">Studentů</div></div>
       <div class="stat-box"><div class="stat-num" id="pLessons">—</div><div class="stat-lbl">Lekcí proběhlo</div></div>
     </div>
+    <div class="sec-lbl" style="margin-top:20px;">MTL Žebříček</div>
+    <div id="profRankRow" style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:13px;cursor:pointer;">
+      <div id="profRankLabel" style="font-weight:700;font-size:14px;"></div>
+      <div style="display:flex;align-items:center;gap:8px;"><div id="profRankScore" style="font-family:'Bebas Neue';font-size:22px;"></div><span id="profRankToggle" style="font-size:12px;color:var(--blue);font-weight:600;white-space:nowrap;">rozpad ›</span></div>
+    </div>
+    <div id="profScoreBreak" style="display:none;margin-top:8px;"></div>
     <div id="pOnlineStatsWrap" style="display:none;margin-top:-12px;margin-bottom:24px;">
       <div style="font-size:12px;font-weight:600;color:var(--blue);margin-bottom:8px;">🌐 Online coaching</div>
       <div class="stat-grid" style="margin-bottom:0;">
@@ -1414,17 +1420,18 @@ function buildFiltered(){
 }
 
 // ──────────── RANKING ────────────
-function mtlScore(c){
+function scoreParts(c){
   const m=4.3, C=5;                                  // Bayesovský prior
   const n=+(c.reviews||0);
   const avg=parseFloat(c.rating)||0;
-  const br=(C*m + avg*n)/(C+n);                       // 0..5, málo recenzí → táhne k průměru
-  const quality=(br/5)*55;                            // až 55
+  const br=(C*m + avg*n)/(C+n);                       // 0..5
+  const quality=Math.round((br/5)*55);               // až 55
   const vol=(+(c.lessonsDone||0))+(+(c.onlineFeedbacks||0));
-  const volume=Math.min(Math.log10(vol+1)*20, 30);    // log → veterán nezabetonuje
-  const engage=Math.min(n*0.6, 15);                   // až 15
-  return Math.round(quality+volume+engage);           // ~0..100
+  const volume=Math.round(Math.min(Math.log10(vol+1)*20, 30)); // až 30
+  const engage=Math.round(Math.min(n*0.6, 15));      // až 15
+  return { quality, volume, engage, br:br.toFixed(2), lessons:vol, reviews:n, total: quality+volume+engage };
 }
+function mtlScore(c){ return scoreParts(c).total; }   // ~0..100
 function tierOf(s){
   if(s>=85) return {label:'Mistr',    color:'#B8860B', bg:'#FFF7E0', emoji:'🏆'};
   if(s>=70) return {label:'Veterán',  color:'#2F6FED', bg:'#EEF4FF', emoji:'🥇'};
@@ -1432,6 +1439,23 @@ function tierOf(s){
   return        {label:'Nováček',  color:'#777777', bg:'#F0F0F0', emoji:'🔰'};
 }
 function isNewCoach(c){ return (+(c.lessonsDone||0))+(+(c.onlineFeedbacks||0)) < 3 && (+(c.reviews||0))===0; }
+
+function scoreBreakdownHtml(c){
+  const p=scoreParts(c);
+  const bar=(label,val,max,desc,color)=>`
+    <div style="margin-bottom:11px;">
+      <div style="display:flex;justify-content:space-between;font-size:13px;font-weight:700;color:var(--dark);"><span>${label}</span><span style="color:${color};">${val} / ${max}</span></div>
+      <div style="height:6px;background:var(--border);border-radius:6px;margin:5px 0;overflow:hidden;"><div style="height:100%;width:${Math.round(val/max*100)}%;background:${color};border-radius:6px;"></div></div>
+      <div style="font-size:11px;color:var(--light);line-height:1.45;">${desc}</div>
+    </div>`;
+  return `<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:14px;text-align:left;">
+      <div style="font-size:13px;font-weight:800;margin-bottom:12px;color:var(--dark);">Jak se počítá skóre<span style="float:right;font-family:'Bebas Neue';font-size:20px;letter-spacing:.02em;">${p.total} / 100</span></div>
+      ${bar('⭐ Kvalita', p.quality, 55, `Z hodnocení studentů (Ø ${p.br}/5), vážené počtem recenzí — pár hvězd od jednoho studenta nepřebije ověřené kouče se stovkami lekcí.`, '#C65A00')}
+      ${bar('🥊 Zkušenost', p.volume, 30, `Z ${p.lessons} odtrénovaných lekcí a online feedbacků, logaritmicky — každá další lekce přidá míň, aby veteráni nezablokovali žebříček napořád.`, '#2F6FED')}
+      ${bar('🔥 Aktivita', p.engage, 15, `Z ${p.reviews} ${p.reviews===1?'recenze':'recenzí'} — odměňuje kouče, kteří reálně trénují a sbírají zpětnou vazbu.`, '#B8860B')}
+      <div style="font-size:11px;color:var(--light);line-height:1.45;border-top:1px solid var(--border);padding-top:9px;margin-top:3px;">⚠️ No-shows a spory se trestají nepřímo: sporná lekce se nezapočítá do zkušenosti a sráží hodnocení.</div>
+    </div>`;
+}
 
 let _lbScope='city';
 function openLeaderboard(scope){ _lbScope = scope||'city'; openSheet('shLeaderboard'); setLbTab(); renderLeaderboard(); }
@@ -1468,18 +1492,23 @@ function renderLeaderboard(){
     const me=(currentUser && (c.id===currentUser.id||c.profileId===currentUser.id));
     const medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':`#${i+1}`;
     const ava = c.photo?`<img src="${c.photo}" style="width:46px;height:46px;border-radius:12px;object-fit:cover;">`:`<div style="width:46px;height:46px;border-radius:12px;background:var(--dark);display:flex;align-items:center;justify-content:center;font-size:22px;">${c.emoji||'🥋'}</div>`;
-    const el=document.createElement('div');
-    el.style.cssText=`display:flex;align-items:center;gap:12px;padding:11px;border-radius:14px;margin-bottom:8px;cursor:pointer;background:${me?'#FFF8E6':'var(--surf)'};border:1px solid ${me?'#FFD98A':'var(--border)'};`;
-    el.innerHTML=`
+    const cont=document.createElement('div'); cont.style.marginBottom='8px';
+    const row=document.createElement('div');
+    row.style.cssText=`display:flex;align-items:center;gap:12px;padding:11px;border-radius:14px;cursor:pointer;background:${me?'#FFF8E6':'var(--surf)'};border:1px solid ${me?'#FFD98A':'var(--border)'};`;
+    row.innerHTML=`
       <div style="font-family:'Bebas Neue';font-size:20px;min-width:36px;text-align:center;color:var(--mid);">${medal}</div>
       ${ava}
       <div style="flex:1;min-width:0;">
         <div style="font-weight:700;font-size:14px;display:flex;align-items:center;gap:6px;">${c.name}${isNewCoach(c)?'<span style="font-size:10px;background:#EEF4FF;color:var(--blue);padding:1px 6px;border-radius:6px;font-weight:700;">NOVÝ</span>':''}</div>
         <div style="font-size:12px;color:var(--mid);">${t.emoji} ${t.label} · ⭐ ${c.rating} · ${(+(c.lessonsDone||0))+(+(c.onlineFeedbacks||0))} lekcí</div>
       </div>
-      <div style="font-family:'Bebas Neue';font-size:22px;color:${t.color};">${c._score}</div>`;
-    el.onclick=()=>{ const real=COACHES.find(x=>x.id===c.id); if(real){ closeSheet('shLeaderboard'); openProfile(real); } };
-    wrap.appendChild(el);
+      <div style="font-family:'Bebas Neue';font-size:22px;color:${t.color};">${c._score}</div>
+      <button class="lbInfo" title="Rozpad skóre" style="width:26px;height:26px;border-radius:50%;border:1px solid var(--border);background:var(--bg);color:var(--mid);font-size:13px;font-weight:700;cursor:pointer;flex-shrink:0;">ⓘ</button>`;
+    const brk=document.createElement('div'); brk.style.cssText='display:none;margin-top:6px;'; brk.innerHTML=scoreBreakdownHtml(c);
+    row.querySelector('.lbInfo').onclick=(e)=>{ e.stopPropagation(); brk.style.display = brk.style.display==='none'?'block':'none'; };
+    row.onclick=()=>{ const real=COACHES.find(x=>x.id===c.id); if(real){ closeSheet('shLeaderboard'); openProfile(real); } };
+    cont.appendChild(row); cont.appendChild(brk);
+    wrap.appendChild(cont);
   });
 }
 
@@ -1787,6 +1816,16 @@ if(c.photo){
     const t=tierOf(mtlScore(c)); const pt=$('profTier');
     pt.textContent = `${t.emoji} ${t.label}${isNewCoach(c)?' · nový kouč':''}`;
     pt.style.background=t.bg; pt.style.color=t.color; pt.style.display='block';
+  }
+  if($('profRankRow')){
+    const sc=mtlScore(c), tt=tierOf(sc);
+    $('profRankLabel').innerHTML = `${tt.emoji} ${tt.label}`;
+    $('profRankScore').textContent = sc;
+    $('profRankScore').style.color = tt.color;
+    $('profScoreBreak').innerHTML = scoreBreakdownHtml(c);
+    $('profScoreBreak').style.display='none';
+    $('profRankToggle').textContent='rozpad ›';
+    $('profRankRow').onclick=()=>{ const b=$('profScoreBreak'); const op=b.style.display==='none'; b.style.display=op?'block':'none'; $('profRankToggle').textContent=op?'skrýt ▴':'rozpad ›'; };
   }
   let locTxt=c.loc;
   if(c.gym) locTxt+=` · ${c.gym}`;
