@@ -1155,6 +1155,14 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
       <button id="rateSubmit" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">Odeslat hodnocení</button>
       <button id="rateSkip" style="width:100%;padding:10px;background:transparent;color:var(--light);border:none;font-size:13px;cursor:pointer;font-family:'DM Sans';margin-top:6px;">Přeskočit</button>
     </div>
+    <div id="rateStepDispute" style="display:none;">
+      <div style="font-size:44px;margin-bottom:8px;">⚖️</div>
+      <div style="font-family:'Bebas Neue';font-size:24px;letter-spacing:.04em;color:var(--dark);line-height:1.1;margin-bottom:4px;">Nedostal jsi feedback?</div>
+      <p style="font-size:13px;color:var(--mid);margin-bottom:14px;">Kouč to označil jako vyřízené, ale tys nic nedostal? Nahlas to a MTL to s vámi vyřeší.</p>
+      <textarea id="disputeReason" placeholder="Popiš co se stalo (povinné)..." style="width:100%;min-height:70px;padding:12px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';margin-bottom:14px;resize:vertical;box-sizing:border-box;"></textarea>
+      <button id="btnSubmitDispute" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">⚖️ Řešit rozpor</button>
+      <button id="btnCloseDispute" style="width:100%;padding:10px;background:transparent;color:var(--light);border:none;font-size:13px;cursor:pointer;font-family:'DM Sans';margin-top:6px;">Zavřít</button>
+    </div>
   </div>
 </div>
 
@@ -2450,6 +2458,7 @@ async function loadNotifications(){
         }
         else if(isCoachOnline){ openOnline('coach'); }
         else if(isOnlineDone){ openOnline('student'); }
+        else if(n.type==='dispute' && currentUser.role==='founder') openOnline('founder');
         else if(n.type==='refund_request' && currentUser.role==='founder' && n.message.includes('Žádost o refund')) openOnline('founder');
         else openOnline('coach');
       };
@@ -3368,6 +3377,8 @@ $('btnApply').onclick=()=>{ closeSheet('shCoach'); $('btnBecomeCoachApply').oncl
 // Rating overlay handlery
 $('rateYes').onclick=rateConfirmYes;
 $('rateNo').onclick=rateConfirmNo;
+if($('btnSubmitDispute')) $('btnSubmitDispute').onclick=submitDispute;
+if($('btnCloseDispute')) $('btnCloseDispute').onclick=()=>{ $('rateStepDispute').style.display='none'; showNextRate(); };
 $('rateSubmit').onclick=rateSubmit;
 $('rateSkip').onclick=async()=>{
   // přeskočit hodnocení = jen označit jako vyřízené
@@ -4087,6 +4098,7 @@ function showNextRate(){
   const b = _rateCurrent.booking;
   $('rateStep1').style.display='block';
   $('rateStep2').style.display='none';
+  if($('rateStepDispute')) $('rateStepDispute').style.display='none';
   $('rateReview').value='';
   document.querySelectorAll('#rateStars span').forEach(s=>s.textContent='☆');
   const isOnline = _rateCurrent.online;
@@ -4187,10 +4199,12 @@ async function renderOnlineList(role){
     }
     const el = document.createElement('div');
     el.style.cssText='background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px;';
-    // žádost o refund (badge + důvod)
+    // žádost o refund / spor (badge + důvod)
     let refundReq = '';
     if(b.refund_requested && b.status!=='cancelled'){
-      refundReq = `<div style="background:#FEECEC;border-radius:10px;padding:9px 12px;margin-top:10px;font-size:13px;color:var(--red);"><strong>↩️ Student žádá o vrácení peněz</strong>${b.refund_reason?`<div style="color:var(--mid);margin-top:3px;">Důvod: ${b.refund_reason}</div>`:''}</div>`;
+      const isDispute = b.fulfilled;
+      const head = isDispute ? '⚖️ SPOR — student tvrdí, že feedback nebyl doručen' : '↩️ Student žádá o vrácení peněz';
+      refundReq = `<div style="background:#FEECEC;border-radius:10px;padding:9px 12px;margin-top:10px;font-size:13px;color:var(--red);"><strong>${head}</strong>${b.refund_reason?`<div style="color:var(--mid);margin-top:3px;">Důvod: ${b.refund_reason.replace('(SPOR) ','')}</div>`:''}</div>`;
     }
     let actions = '';
     const canManage = (role==='coach' || role==='founder');
@@ -4201,15 +4215,28 @@ async function renderOnlineList(role){
       actions += `</div>
         <button class="onRefund" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-curr="${b.currency||'CZK'}" data-student="${b.student_id}" style="width:100%;margin-top:8px;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">↩️ Vrátit peníze${role==='founder'?' (founder)':''}</button>`;
       if(b.refund_requested) actions += `<button class="onDeny" data-id="${b.id}" data-student="${b.student_id}" style="width:100%;margin-top:8px;padding:9px;background:var(--bg);color:var(--mid);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">✖️ Nevyhovět žádosti o refund</button>`;
+    } else if(canManage && b.status!=='cancelled' && b.fulfilled && b.refund_requested){
+      // SPOR (kouč označil vyřízeno, student nesouhlasí)
+      actions += `<div style="display:flex;gap:8px;margin-top:12px;">`;
+      if(role==='founder') actions += `<button class="onMsg" data-coach="${b.coach_id}" data-founder="1" style="flex:1;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💬 Kouč</button>`;
+      actions += `<button class="onMsgStudent" data-student="${b.student_id}" style="flex:1;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💬 Student</button></div>`;
+      actions += `<button class="onRefund" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-curr="${b.currency||'CZK'}" data-student="${b.student_id}" style="width:100%;margin-top:8px;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">↩️ Vrátit peníze</button>`;
+      actions += `<button class="onDeny" data-id="${b.id}" data-student="${b.student_id}" style="width:100%;margin-top:8px;padding:9px;background:var(--bg);color:var(--mid);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">✖️ Zamítnout spor</button>`;
     } else if(role==='student' && b.status!=='cancelled' && !b.fulfilled){
       actions = b.refund_requested ? '<div style="font-size:13px;color:var(--orange);font-weight:600;background:#FFF8E6;border-radius:10px;padding:10px 12px;margin-top:10px;">⏳ Zažádáno o vrácení — čeká se na vyřízení</div>'
         : `<button class="onReqRefund" data-id="${b.id}" data-coach="${b.coach_id}" style="width:100%;margin-top:10px;padding:10px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">Požádat o vrácení peněz</button>`;
     } else if(role==='student' && b.fulfilled){
-      actions = `<div style="display:flex;gap:8px;margin-top:12px;">
-        <button class="onChatCoach" data-coach="${b.coach_id}" style="flex:1;padding:10px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💬 Chat s koučem</button>`
-        + (!b.rated ? `<button class="onRate" data-id="${b.id}" data-coach="${b.coach_name}" style="flex:1;padding:10px;background:#FFB800;color:#1a1a1a;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">⭐ Ohodnotit</button>` : '')
-        + `</div>`
-        + (b.rated ? '<div style="font-size:12px;color:var(--light);margin-top:8px;">Hodnoceno ✓</div>' : '');
+      if(b.refund_requested){
+        actions = `<div style="display:flex;gap:8px;margin-top:12px;"><button class="onChatCoach" data-coach="${b.coach_id}" style="flex:1;padding:10px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💬 Chat s koučem</button></div>
+          <div style="font-size:13px;color:var(--orange);font-weight:600;background:#FFF8E6;border-radius:10px;padding:10px 12px;margin-top:8px;">⚖️ Spor nahlášen — MTL to řeší</div>`;
+      } else {
+        actions = `<div style="display:flex;gap:8px;margin-top:12px;">
+          <button class="onChatCoach" data-coach="${b.coach_id}" style="flex:1;padding:10px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💬 Chat s koučem</button>`
+          + (!b.rated ? `<button class="onRate" data-id="${b.id}" data-coach="${b.coach_name}" style="flex:1;padding:10px;background:#FFB800;color:#1a1a1a;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">⭐ Ohodnotit</button>` : '')
+          + `</div>`
+          + `<button class="onDispute" data-id="${b.id}" data-coach="${b.coach_id}" style="width:100%;margin-top:8px;padding:9px;background:var(--bg);color:var(--mid);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">⚠️ Nedostal jsem feedback — řešit rozpor</button>`
+          + (b.rated ? '<div style="font-size:12px;color:var(--light);margin-top:8px;">Hodnoceno ✓</div>' : '');
+      }
     }
     const dateOrdered = (b.created_at||'').slice(0,10);
     let amtTxt;
@@ -4235,6 +4262,35 @@ async function renderOnlineList(role){
   list.querySelectorAll('.onReqRefund').forEach(btn=>btn.onclick=()=>requestRefundOnline(btn.dataset.id, btn.dataset.coach));
   list.querySelectorAll('.onChatCoach').forEach(btn=>btn.onclick=()=>openChatWithCoach(btn.dataset.coach));
   list.querySelectorAll('.onRate').forEach(btn=>btn.onclick=()=>rateOnlineNow(btn.dataset.id, btn.dataset.coach));
+  list.querySelectorAll('.onMsgStudent').forEach(btn=>btn.onclick=()=>{ closeSheet('shOnline'); if(role==='founder') messageStudentAsFounder(btn.dataset.student); else openChatWithStudent(btn.dataset.student); });
+  list.querySelectorAll('.onDispute').forEach(btn=>btn.onclick=()=>disputeOnline(btn.dataset.id, btn.dataset.coach));
+}
+
+async function messageStudentAsFounder(studentId){
+  if(!currentUser || currentUser.role!=='founder'){ toast('⚠️ Jen pro foundera'); return; }
+  const { data: stu } = await supaClient.from('profiles').select('name').eq('id', studentId).single();
+  // konverzace founder(jako "kouč" v záznamu) ↔ student
+  let { data: conv } = await supaClient.from('conversations').select('*')
+    .eq('student_id', studentId).eq('coach_id', currentUser.id);
+  if(!conv || !conv.length){
+    const { data: created } = await supaClient.from('conversations').insert({
+      student_id: studentId, coach_id: currentUser.id,
+      coach_name: 'MTL Support', student_name: stu?.name || 'Student'
+    }).select();
+    conv = created;
+  }
+  if(conv && conv.length){ openChat(conv[0]); }
+}
+
+async function disputeOnline(bookingId, coachId){
+  const reason = (prompt('Popiš co se stalo — nedostal jsi feedback? (povinné)','')||'').trim();
+  if(!reason){ toast('⚠️ Důvod je povinný'); return; }
+  const { error } = await supaClient.from('bookings').update({ refund_requested:true, refund_reason:'(SPOR) '+reason }).eq('id', bookingId);
+  if(error){ toast('⚠️ '+error.message); return; }
+  await supaClient.from('notifications').insert({ user_id: coachId, type:'dispute', read:false, message:`⚖️ ${currentUser.name||'Student'} nahlásil spor: tvrdí, že online feedback (rezervace #${bookingId}) nebyl doručen. Důvod: ${reason}` });
+  await supaClient.from('notifications').insert({ user_id:'7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type:'dispute', read:false, message:`⚖️ SPOR (online #${bookingId}): ${currentUser.name||'Student'} (student) ↔ kouč tvrdí nedoručení. Důvod: ${reason} — vyřeš v korunce → Online objednávky.` });
+  toast('⚖️ Spor nahlášen — MTL to vyřeší');
+  if(window._onlineRole) renderOnlineList(window._onlineRole);
 }
 
 function rateOnlineNow(bookingId, coachName){
@@ -4330,8 +4386,33 @@ async function rateConfirmNo(){
       message:`⚠️ Spor: kouč ${currentUser.name || 'Kouč'} označil lekci z ${b.training_date} ${b.training_time||''} jako neproběhlou (rezervace #${b.id}). Otevři dashboard kouče v adminu.`
     });
   } else {
+    // student řekl neproběhlo
+    if(_rateCurrent.online){
+      // online: kouč tvrdí vyřízeno, student ne → nabídni řešení sporu
+      $('rateStep1').style.display='none';
+      $('rateStep2').style.display='none';
+      $('rateStepDispute').style.display='block';
+      if($('disputeReason')) $('disputeReason').value='';
+      return;
+    }
     await supaClient.from('bookings').update({ student_confirmed:false, rated:true }).eq('id', b.id);
   }
+  showNextRate();
+}
+
+async function submitDispute(){
+  const b = _rateCurrent && _rateCurrent.booking;
+  if(!b){ $('rateStepDispute').style.display='none'; $('rateOv').style.display='none'; return; }
+  const reason = ($('disputeReason').value||'').trim();
+  if(!reason){ toast('⚠️ Popiš prosím co se stalo'); return; }
+  // dispute = fulfilled + refund_requested (founder to uvidí jako spor)
+  const { error } = await supaClient.from('bookings').update({ refund_requested:true, refund_reason:'(SPOR) '+reason, rated:true, student_confirmed:false }).eq('id', b.id);
+  if(error){ toast('⚠️ '+error.message); return; }
+  // notifikace koučovi + founderovi
+  await supaClient.from('notifications').insert({ user_id: b.coach_id, type:'dispute', read:false, message:`⚖️ ${currentUser.name||'Student'} nahlásil spor: tvrdí, že online feedback (rezervace #${b.id}) nebyl doručen. Důvod: ${reason}` });
+  await supaClient.from('notifications').insert({ user_id:'7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type:'dispute', read:false, message:`⚖️ SPOR (online #${b.id}): ${currentUser.name||'Student'} (student) ↔ kouč tvrdí nedoručení feedbacku. Důvod: ${reason} — vyřeš v korunce → Online objednávky.` });
+  toast('⚖️ Spor nahlášen — MTL to vyřeší');
+  $('rateStepDispute').style.display='none';
   showNextRate();
 }
 
