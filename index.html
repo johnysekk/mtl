@@ -576,6 +576,7 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
     </div>
     <div class="sec-lbl">Recenze studentů</div>
     <div id="profReviews"></div>
+    <button id="btnProfCoachStats" style="display:none;width:100%;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-top:8px;">📊 Dashboard kouče (founder)</button>
   </div>
   <div class="connect-bar">
     <div>
@@ -889,7 +890,18 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
   <div style="padding:20px;">
     <div class="sec-lbl">Žádosti o MTL Certified</div>
     <div id="adminList"></div>
+    <div class="sec-lbl" style="margin-top:24px;">Všichni kouči — dashboardy</div>
+    <div id="adminCoachList"></div>
   </div>
+</div>
+
+<!-- DASHBOARD KOUČE (founder pohled) -->
+<div class="sheet" id="shCoachStats" style="z-index:87;">
+  <div class="shdr" style="background:var(--dark);border-color:#333;">
+    <div class="shdr-title" id="coachStatsTitle" style="color:#fff;">Dashboard kouče</div>
+    <button class="btn-close" id="btnCloseCoachStats" style="background:#333;color:#fff;">✕</button>
+  </div>
+  <div style="padding:20px;" id="coachStatsBody"></div>
 </div>
 
 <!-- NOTIFIKACE -->
@@ -1471,6 +1483,14 @@ if(c.photo){
   if($('btnVid')) $('btnVid').style.display='';
   window._curCoachVideo = c.certVideo || null;
   loadCoachReviews(c.profileId);
+  // founder tlačítko na dashboard kouče
+  const fb = $('btnProfCoachStats');
+  if(fb){
+    if(currentUser && currentUser.role==='founder'){
+      fb.style.display='block';
+      fb.onclick=()=>openCoachStats(c.profileId, c.name);
+    } else { fb.style.display='none'; }
+  }
   openSheet('shProfile');
 }
 
@@ -1529,7 +1549,7 @@ function hideMatch(){ $('matchOv').classList.remove('open'); }
 // ════════════════════════════════════════
 // SHEETS
 // ════════════════════════════════════════
-const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMe','shSettings','shCoachApp','shAdmin','shNotif','shChat','shBookings','shDiary'];
+const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMe','shSettings','shCoachApp','shAdmin','shNotif','shChat','shBookings','shDiary','shCoachStats'];
 
 function openSheet(id){
   SHEETS.forEach(s=>{ if(s!==id) $(s).classList.remove('open'); });
@@ -2141,6 +2161,7 @@ async function updateNotifBadge(){
   // Admin tlačítko
 $('btnAdmin').onclick=()=>{ openSheet('shAdmin'); loadPendingCoaches(); };
 $('btnCloseAdmin').onclick=()=>closeSheet('shAdmin');
+$('btnCloseCoachStats').onclick=()=>closeSheet('shCoachStats');
 
 async function updateAdminBadge(){
   if(!currentUser || currentUser.role!=='founder') return;
@@ -2158,6 +2179,7 @@ async function updateAdminBadge(){
 }
   
 async function loadPendingCoaches(){
+  loadAdminCoachList();
   const list=$('adminList');
   list.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;">Načítám...</p>';
   const { data, error } = await supaClient
@@ -2234,7 +2256,82 @@ async function loadPendingCoaches(){
   });
 }
 
-  let activeConv=null;
+// ════ ANALYTIKA KOUČE ════
+async function loadAdminCoachList(){
+  const list=$('adminCoachList');
+  if(!list) return;
+  list.innerHTML='<p style="color:var(--light);font-size:13px;">Načítám...</p>';
+  const { data } = await supaClient.from('profiles').select('id, name, photo_url, rating, reviews, city').eq('coach_status','approved');
+  const coaches = data||[];
+  if(!coaches.length){ list.innerHTML='<p style="color:var(--light);font-size:13px;">Zatím žádní schválení kouči.</p>'; return; }
+  list.innerHTML='';
+  coaches.forEach(c=>{
+    const el=document.createElement('div');
+    el.style.cssText='display:flex;align-items:center;gap:12px;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;cursor:pointer;';
+    el.innerHTML=`
+      <div style="width:44px;height:44px;border-radius:50%;background:#333 ${c.photo_url?`url('${c.photo_url}') center/cover`:''};flex-shrink:0;"></div>
+      <div style="flex:1;"><div style="font-size:15px;font-weight:700;color:var(--dark);">${c.name||'Kouč'}</div><div style="font-size:12px;color:var(--mid);">${c.city||''} · ⭐ ${c.rating||'—'} (${c.reviews||0})</div></div>
+      <div style="font-size:13px;font-weight:600;color:var(--blue);">Dashboard ›</div>`;
+    el.onclick=()=>openCoachStats(c.id, c.name);
+    list.appendChild(el);
+  });
+}
+
+async function openCoachStats(coachId, coachName){
+  $('coachStatsTitle').textContent = `📊 ${coachName||'Kouč'}`;
+  openSheet('shCoachStats');
+  renderCoachAnalytics(coachId, 'coachStatsBody');
+}
+
+async function renderCoachAnalytics(coachId, containerId){
+  const box=$(containerId);
+  if(!box) return;
+  box.innerHTML='<p style="text-align:center;color:var(--light);padding:20px;">Načítám...</p>';
+
+  const { data: allB } = await supaClient.from('bookings').select('*').eq('coach_id', coachId);
+  const { data: prof } = await supaClient.from('profiles').select('rating, reviews').eq('id', coachId).single();
+  const all = allB || [];
+  const now = new Date();
+  const isPast = b => new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`) < now;
+
+  const active = all.filter(b=>b.status==='active');
+  const cancelled = all.filter(b=>b.status==='cancelled');
+  const happened = active.filter(isPast);
+  const upcoming = active.filter(b=>!isPast(b));
+  const ref100 = cancelled.filter(b=>b.refund_pct===100).length;
+  const ref50 = cancelled.filter(b=>b.refund_pct===50).length;
+  const ref0 = cancelled.filter(b=>b.refund_pct===0).length;
+
+  // výdělky kouče (NET = 90% z proběhlých)
+  const earnedNet = happened.reduce((s,b)=>s+(b.amount||0)*0.90,0);
+  const expectedNet = upcoming.reduce((s,b)=>s+(b.amount||0)*0.90,0);
+  const grossHappened = happened.reduce((s,b)=>s+(b.amount||0)*1.10,0);
+
+  box.innerHTML = `
+    <div class="sec-lbl">Rezervace</div>
+    <div class="prow-group" style="margin-bottom:16px;">
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">📋</div><div class="prow-lbl">Celkem rezervací</div></div><span class="prow-val">${all.length}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">✅</div><div class="prow-lbl">Proběhlé</div></div><span class="prow-val">${happened.length}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">📅</div><div class="prow-lbl">Nadcházející</div></div><span class="prow-val">${upcoming.length}</span></div>
+    </div>
+    <div class="sec-lbl">Storna a refundy</div>
+    <div class="prow-group" style="margin-bottom:16px;">
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">↩️</div><div class="prow-lbl">Vráceno 100%</div></div><span class="prow-val">${ref100}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">↩️</div><div class="prow-lbl">Vráceno 50%</div></div><span class="prow-val">${ref50}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">↩️</div><div class="prow-lbl">Bez vrácení (0%)</div></div><span class="prow-val">${ref0}</span></div>
+    </div>
+    <div class="sec-lbl">Hodnocení</div>
+    <div class="prow-group" style="margin-bottom:16px;">
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">⭐</div><div class="prow-lbl">Průměr</div></div><span class="prow-val">${prof?.rating || '—'}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">💬</div><div class="prow-lbl">Počet recenzí</div></div><span class="prow-val">${prof?.reviews || 0}</span></div>
+    </div>
+    <div class="sec-lbl">Výdělek (90%)</div>
+    <div class="prow-group">
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💰</div><div class="prow-lbl">Vyděláno (proběhlo)</div></div><span class="prow-val">${Math.round(earnedNet)} Kč</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">⏳</div><div class="prow-lbl">Očekávané</div></div><span class="prow-val">${Math.round(expectedNet)} Kč</span></div>
+    </div>
+  `;
+}
 
 async function openChat(conv){
   activeConv=conv;
@@ -2482,7 +2579,7 @@ async function coachCancelBooking(d){
     // Uvolni slot
     await supaClient.from('slots').update({ booked:false, student:null }).eq('id', d.slot);
     // Booking cancelled
-    await supaClient.from('bookings').update({ status:'cancelled' }).eq('id', d.id);
+    await supaClient.from('bookings').update({ status:'cancelled', refund_pct: 100 }).eq('id', d.id);
     // Notifikace studentovi
     await supaClient.from('notifications').insert({
       user_id: d.student, type:'cancelled', read:false,
@@ -2613,7 +2710,8 @@ async function cancelBooking(d){
     // Uvolni slot
     await supaClient.from('slots').update({ booked:false, student:null }).eq('id', d.slot);
     // Označ booking jako zrušený
-    await supaClient.from('bookings').update({ status:'cancelled' }).eq('id', d.id);
+    const refundPct = hours>=16 ? 100 : hours>=0 ? 50 : 0;
+    await supaClient.from('bookings').update({ status:'cancelled', refund_pct: refundPct }).eq('id', d.id);
     // Notifikace koučovi o zrušení
     const { data: bk } = await supaClient.from('bookings').select('coach_id').eq('id', d.id).single();
     if(bk){
@@ -3215,6 +3313,33 @@ async function renderEarnings(){
     </div>
     <div style="font-size:12px;color:var(--light);margin-bottom:4px;">Vyděláno po měsících:</div>
     ${renderBars(earnedByMonth, 'var(--green)')}
+    <div id="myStatsBox" style="margin-top:20px;"></div>
+  `;
+  // doplň statistiky (rezervace, storna, hodnocení)
+  renderCoachAnalyticsCompact(currentUser.id, 'myStatsBox');
+}
+
+async function renderCoachAnalyticsCompact(coachId, containerId){
+  const box=$(containerId);
+  if(!box) return;
+  const { data: allB } = await supaClient.from('bookings').select('*').eq('coach_id', coachId);
+  const { data: prof } = await supaClient.from('profiles').select('rating, reviews').eq('id', coachId).single();
+  const all = allB || [];
+  const now = new Date();
+  const isPast = b => new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`) < now;
+  const active = all.filter(b=>b.status==='active');
+  const cancelled = all.filter(b=>b.status==='cancelled');
+  const happened = active.filter(isPast);
+  const upcoming = active.filter(b=>!isPast(b));
+  box.innerHTML = `
+    <div class="sec-lbl">Statistiky</div>
+    <div class="prow-group" style="margin-bottom:16px;">
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">📋</div><div class="prow-lbl">Rezervací celkem</div></div><span class="prow-val">${all.length}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">✅</div><div class="prow-lbl">Proběhlé</div></div><span class="prow-val">${happened.length}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">📅</div><div class="prow-lbl">Nadcházející</div></div><span class="prow-val">${upcoming.length}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">↩️</div><div class="prow-lbl">Zrušené</div></div><span class="prow-val">${cancelled.length}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">⭐</div><div class="prow-lbl">Hodnocení</div></div><span class="prow-val">${prof?.rating || '—'} (${prof?.reviews || 0})</span></div>
+    </div>
   `;
 }
 
@@ -3343,7 +3468,7 @@ async function rateConfirmNo(){
     // notifikace founderovi o sporu
     await supaClient.from('notifications').insert({
       user_id:'7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type:'dispute', read:false,
-      message:`⚠️ Kouč označil lekci jako neproběhlou (booking #${b.id}). Zkontroluj případný spor.`
+      message:`⚠️ Spor: kouč ${currentUser.name || 'Kouč'} označil lekci z ${b.training_date} ${b.training_time||''} jako neproběhlou (rezervace #${b.id}). Otevři dashboard kouče v adminu.`
     });
   } else {
     await supaClient.from('bookings').update({ student_confirmed:false, rated:true }).eq('id', b.id);
