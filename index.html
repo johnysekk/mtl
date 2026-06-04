@@ -1157,10 +1157,10 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
     </div>
     <div id="rateStepDispute" style="display:none;">
       <div style="font-size:44px;margin-bottom:8px;">⚖️</div>
-      <div style="font-family:'Bebas Neue';font-size:24px;letter-spacing:.04em;color:var(--dark);line-height:1.1;margin-bottom:4px;">Nedostal jsi feedback?</div>
-      <p style="font-size:13px;color:var(--mid);margin-bottom:14px;">Kouč to označil jako vyřízené, ale tys nic nedostal? Nahlas to a MTL to s vámi vyřeší.</p>
+      <div id="disputeTitle" style="font-family:'Bebas Neue';font-size:24px;letter-spacing:.04em;color:var(--dark);line-height:1.1;margin-bottom:4px;">Nedostal jsi feedback?</div>
+      <p id="disputeDesc" style="font-size:13px;color:var(--mid);margin-bottom:14px;">Kouč to označil jako vyřízené, ale tys nic nedostal? Nahlas to a MTL to s vámi vyřeší.</p>
       <textarea id="disputeReason" placeholder="Popiš co se stalo (povinné)..." style="width:100%;min-height:70px;padding:12px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';margin-bottom:14px;resize:vertical;box-sizing:border-box;"></textarea>
-      <button id="btnSubmitDispute" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">⚖️ Řešit rozpor</button>
+      <button id="btnSubmitDispute" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">⚠️ Nahlásit</button>
       <button id="btnCloseDispute" style="width:100%;padding:10px;background:transparent;color:var(--light);border:none;font-size:13px;cursor:pointer;font-family:'DM Sans';margin-top:6px;">Zavřít</button>
     </div>
   </div>
@@ -3205,10 +3205,14 @@ function subscribeRealtime(){
     } else {
       // proběhlé — bez zrušení, jen info
       const rated = b.rating ? ` · ${'⭐'.repeat(b.rating)}` : '';
+      const reported = b.refund_requested && (b.refund_reason||'').includes('NO-SHOW');
       el.innerHTML=`
         <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.04em;">${b.coach_name}</div>
         <div style="font-size:14px;color:var(--mid);margin:4px 0;">📅 ${b.training_date} · ${b.training_time}</div>
-        <div style="font-size:13px;color:var(--light);">Proběhlo${rated}</div>
+        ${reported
+          ? '<div style="font-size:13px;color:var(--red);font-weight:600;">🚨 Nahlášeno: kouč nedorazil — MTL to řeší</div>'
+          : `<div style="font-size:13px;color:var(--light);margin-bottom:8px;">Proběhlo${rated}</div>
+             <button class="noShowBtn" data-id="${b.id}" data-coach="${b.coach_id}" data-name="${b.coach_name}" style="width:100%;padding:9px;background:var(--bg);color:var(--mid);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans';">⚠️ Kouč nedorazil? Nahlásit</button>`}
       `;
     }
     list.appendChild(el);
@@ -3222,6 +3226,22 @@ function subscribeRealtime(){
   list.querySelectorAll('.calBtn').forEach(btn=>{
     btn.onclick=()=>addToCalendar({ id:btn.dataset.id, coach_name:btn.dataset.coach, training_date:btn.dataset.date, training_time:btn.dataset.time });
   });
+  // Napoj nahlášení no-show (Historie)
+  list.querySelectorAll('.noShowBtn').forEach(btn=>{
+    btn.onclick=()=>reportNoShowPrompt(btn.dataset.id, btn.dataset.coach, btn.dataset.name);
+  });
+}
+
+function reportNoShowPrompt(bookingId, coachId, coachName){
+  _rateQueue = [];
+  _rateCurrent = { type:'student', online:false, booking:{ id:bookingId, coach_id:coachId, coach_name:coachName, type:'inperson' } };
+  if($('disputeTitle')) $('disputeTitle').textContent = 'Kouč nedorazil?';
+  if($('disputeDesc')) $('disputeDesc').textContent = 'Přišel jsi na trénink a kouč nedorazil bez domluvy? Nahlas to — MTL zajistí nápravu.';
+  if($('disputeReason')) $('disputeReason').value = '';
+  $('rateStep1').style.display='none';
+  $('rateStep2').style.display='none';
+  $('rateStepDispute').style.display='block';
+  $('rateOv').style.display='flex';
 }
 
 async function cancelBooking(d){
@@ -4178,11 +4198,46 @@ async function renderOnlineList(role){
   // founder = všechny online objednávky
   const { data } = await query;
   let all = data || [];
-  // founder: nahoru ty s žádostí o refund / nevyřízené
-  if(role==='founder') all.sort((a,b)=> (b.refund_requested?1:0)-(a.refund_requested?1:0));
+  // founder: přidej i in-person no-show hlášení a dej žádosti/spory nahoru
+  if(role==='founder'){
+    const { data: inp } = await supaClient.from('bookings').select('*').eq('type','inperson').eq('refund_requested', true).order('created_at',{ascending:false});
+    all = [...(inp||[]), ...all];
+    all.sort((a,b)=> (b.refund_requested?1:0)-(a.refund_requested?1:0));
+  }
   if(!all.length){ list.innerHTML = `<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">${role==='coach'?'Zatím žádné online objednávky.':role==='founder'?'Žádné online objednávky.':'Zatím sis neobjednal online coaching.'}</p>`; return; }
   list.innerHTML = '';
   for(const b of all){
+    if(role==='founder' && b.type==='inperson'){
+      // in-person NO-SHOW hlášení
+      const { data: sp } = await supaClient.from('profiles').select('name').eq('id', b.student_id).single();
+      const studentName = sp?.name || 'Student';
+      const r2 = (b.refund_reason||'').replace('(NO-SHOW) ','');
+      const sym2 = curSym(b.currency);
+      const elN = document.createElement('div');
+      const resolved = b.status==='cancelled';
+      elN.style.cssText=`background:${resolved?'var(--surf)':'#FEECEC'};border:1px solid ${resolved?'var(--border)':'#FFD0D0'};border-radius:14px;padding:16px;margin-bottom:12px;`;
+      let act = '';
+      if(!resolved){
+        act = `<div style="display:flex;gap:8px;margin-top:12px;">
+            <button class="onMsgStudent" data-student="${b.student_id}" style="flex:1;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💬 Student</button>
+            <button class="onMsg" data-coach="${b.coach_id}" style="flex:1;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💬 Kouč</button>
+          </div>
+          <button class="onRefund" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-curr="${b.currency||'CZK'}" data-student="${b.student_id}" style="width:100%;margin-top:8px;padding:9px;background:var(--red);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">↩️ Vrátit peníze studentovi</button>
+          <button class="onCoachDash" data-coach="${b.coach_id}" data-name="${b.coach_name}" style="width:100%;margin-top:8px;padding:9px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">📊 Dashboard kouče (pozastavit / cert)</button>
+          <button class="onDeny" data-id="${b.id}" data-student="${b.student_id}" style="width:100%;margin-top:8px;padding:9px;background:var(--bg);color:var(--mid);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">✖️ Zamítnout hlášení</button>`;
+      }
+      elN.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:start;gap:8px;">
+          <div style="font-family:'Bebas Neue';font-size:18px;letter-spacing:.03em;">${studentName} (student) → ${b.coach_name} (kouč)</div>
+          <div style="font-size:12px;font-weight:700;color:${resolved?'var(--light)':'var(--red)'};white-space:nowrap;">${resolved?'↩️ Vyřešeno':'🚨 NO-SHOW'}</div>
+        </div>
+        <div style="font-size:13px;color:var(--mid);margin:4px 0;">📍 In-person · ${b.training_date} ${b.training_time||''} · ${b.amount} ${sym2} <span style="color:var(--light);">(sazba kouče)</span> · rezervace #${b.id}</div>
+        ${!resolved?`<div style="background:#fff;border-radius:10px;padding:9px 12px;margin-top:8px;font-size:13px;color:var(--red);"><strong>🚨 Kouč nedorazil na trénink</strong>${r2?`<div style="color:var(--mid);margin-top:3px;">Důvod: ${r2}</div>`:''}</div>`:''}
+        ${act}
+      `;
+      list.appendChild(elN);
+      continue;
+    }
     const sym = curSym(b.currency);
     let statusLbl, statusColor;
     if(b.status==='cancelled'){ statusLbl='↩️ Vráceno'; statusColor='var(--light)'; }
@@ -4264,6 +4319,7 @@ async function renderOnlineList(role){
   list.querySelectorAll('.onRate').forEach(btn=>btn.onclick=()=>rateOnlineNow(btn.dataset.id, btn.dataset.coach));
   list.querySelectorAll('.onMsgStudent').forEach(btn=>btn.onclick=()=>{ closeSheet('shOnline'); if(role==='founder') messageStudentAsFounder(btn.dataset.student); else openChatWithStudent(btn.dataset.student); });
   list.querySelectorAll('.onDispute').forEach(btn=>btn.onclick=()=>disputeOnline(btn.dataset.id, btn.dataset.coach));
+  list.querySelectorAll('.onCoachDash').forEach(btn=>btn.onclick=()=>{ closeSheet('shOnline'); openCoachStats(btn.dataset.coach, btn.dataset.name); });
 }
 
 async function messageStudentAsFounder(studentId){
@@ -4386,16 +4442,19 @@ async function rateConfirmNo(){
       message:`⚠️ Spor: kouč ${currentUser.name || 'Kouč'} označil lekci z ${b.training_date} ${b.training_time||''} jako neproběhlou (rezervace #${b.id}). Otevři dashboard kouče v adminu.`
     });
   } else {
-    // student řekl neproběhlo
-    if(_rateCurrent.online){
-      // online: kouč tvrdí vyřízeno, student ne → nabídni řešení sporu
-      $('rateStep1').style.display='none';
-      $('rateStep2').style.display='none';
-      $('rateStepDispute').style.display='block';
-      if($('disputeReason')) $('disputeReason').value='';
-      return;
-    }
+    // student řekl neproběhlo → nabídni nahlášení (online: nedoručený feedback / in-person: no-show)
+    const online = _rateCurrent.online;
+    if($('disputeTitle')) $('disputeTitle').textContent = online ? 'Nedostal jsi feedback?' : 'Kouč nedorazil?';
+    if($('disputeDesc')) $('disputeDesc').textContent = online
+      ? 'Kouč to označil jako vyřízené, ale tys nic nedostal? Nahlas to a MTL to s vámi vyřeší.'
+      : 'Přišel jsi na trénink a kouč nedorazil bez domluvy? Nahlas to — MTL zajistí nápravu. Pokud jste se domluvili jinak, dej Zavřít.';
+    if($('disputeReason')) $('disputeReason').value='';
+    // ať se znovu neptá
     await supaClient.from('bookings').update({ student_confirmed:false, rated:true }).eq('id', b.id);
+    $('rateStep1').style.display='none';
+    $('rateStep2').style.display='none';
+    $('rateStepDispute').style.display='block';
+    return;
   }
   showNextRate();
 }
@@ -4405,13 +4464,19 @@ async function submitDispute(){
   if(!b){ $('rateStepDispute').style.display='none'; $('rateOv').style.display='none'; return; }
   const reason = ($('disputeReason').value||'').trim();
   if(!reason){ toast('⚠️ Popiš prosím co se stalo'); return; }
-  // dispute = fulfilled + refund_requested (founder to uvidí jako spor)
-  const { error } = await supaClient.from('bookings').update({ refund_requested:true, refund_reason:'(SPOR) '+reason, rated:true, student_confirmed:false }).eq('id', b.id);
+  const online = _rateCurrent.online;
+  const tag = online ? '(SPOR) ' : '(NO-SHOW) ';
+  const { error } = await supaClient.from('bookings').update({ refund_requested:true, refund_reason: tag+reason, rated:true, student_confirmed:false }).eq('id', b.id);
   if(error){ toast('⚠️ '+error.message); return; }
-  // notifikace koučovi + founderovi
-  await supaClient.from('notifications').insert({ user_id: b.coach_id, type:'dispute', read:false, message:`⚖️ ${currentUser.name||'Student'} nahlásil spor: tvrdí, že online feedback (rezervace #${b.id}) nebyl doručen. Důvod: ${reason}` });
-  await supaClient.from('notifications').insert({ user_id:'7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type:'dispute', read:false, message:`⚖️ SPOR (online #${b.id}): ${currentUser.name||'Student'} (student) ↔ kouč tvrdí nedoručení feedbacku. Důvod: ${reason} — vyřeš v korunce → Online objednávky.` });
-  toast('⚖️ Spor nahlášen — MTL to vyřeší');
+  const coachMsg = online
+    ? `⚖️ ${currentUser.name||'Student'} nahlásil spor: online feedback (rezervace #${b.id}) nebyl doručen. Důvod: ${reason}`
+    : `⚠️ ${currentUser.name||'Student'} nahlásil, že jsi nedorazil na trénink (rezervace #${b.id}). Důvod: ${reason} — ozvi se nám.`;
+  const founderMsg = online
+    ? `⚖️ SPOR (online #${b.id}): ${currentUser.name||'Student'} (student) ↔ kouč tvrdí nedoručení feedbacku. Důvod: ${reason} — vyřeš v korunce → Online objednávky.`
+    : `🚨 NO-SHOW (in-person #${b.id}): ${currentUser.name||'Student'} tvrdí, že kouč nedorazil na trénink. Důvod: ${reason} — vyřeš v korunce → Online objednávky.`;
+  await supaClient.from('notifications').insert({ user_id: b.coach_id, type:'dispute', read:false, message: coachMsg });
+  await supaClient.from('notifications').insert({ user_id:'7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type:'dispute', read:false, message: founderMsg });
+  toast(online ? '⚖️ Spor nahlášen — MTL to vyřeší' : '🚨 No-show nahlášen — MTL to vyřeší');
   $('rateStepDispute').style.display='none';
   showNextRate();
 }
