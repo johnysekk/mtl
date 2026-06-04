@@ -2776,11 +2776,13 @@ async function loadAdminCoachList(){
   const list=$('adminCoachList');
   if(!list) return;
   list.innerHTML='<p style="color:var(--light);font-size:13px;">Načítám...</p>';
-  const { data } = await supaClient.from('profiles').select('id, name, photo_url, rating, reviews, city').eq('coach_status','approved');
+  const { data } = await supaClient.from('profiles').select('id, name, photo_url, rating, reviews, city, coach_status, suspend_reason').in('coach_status',['approved','suspended']);
   const coaches = data||[];
-  if(!coaches.length){ list.innerHTML='<p style="color:var(--light);font-size:13px;">Zatím žádní schválení kouči.</p>'; return; }
+  const approved = coaches.filter(c=>c.coach_status==='approved');
+  const suspended = coaches.filter(c=>c.coach_status==='suspended');
   list.innerHTML='';
-  coaches.forEach(c=>{
+  if(!approved.length && !suspended.length){ list.innerHTML='<p style="color:var(--light);font-size:13px;">Zatím žádní kouči.</p>'; return; }
+  approved.forEach(c=>{
     const el=document.createElement('div');
     el.style.cssText='display:flex;align-items:center;gap:12px;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;cursor:pointer;';
     el.innerHTML=`
@@ -2790,6 +2792,26 @@ async function loadAdminCoachList(){
     el.onclick=()=>openCoachStats(c.id, c.name);
     list.appendChild(el);
   });
+  if(suspended.length){
+    const hdr=document.createElement('div'); hdr.className='sec-lbl'; hdr.style.marginTop='22px'; hdr.textContent='⛔ Pozastavení'; list.appendChild(hdr);
+    suspended.forEach(c=>{
+      const el=document.createElement('div');
+      el.style.cssText='background:#FEECEC;border:1px solid #FFD0D0;border-radius:12px;padding:12px;margin-bottom:8px;';
+      el.innerHTML=`
+        <div style="display:flex;align-items:center;gap:12px;">
+          <div style="width:44px;height:44px;border-radius:50%;background:#333 ${c.photo_url?`url('${c.photo_url}') center/cover`:''};flex-shrink:0;filter:grayscale(1);"></div>
+          <div style="flex:1;min-width:0;"><div style="font-size:15px;font-weight:700;color:var(--dark);">${c.name||'Kouč'}</div><div style="font-size:12px;color:var(--mid);">${c.city||''} · ⭐ ${c.rating||'—'} (${c.reviews||0})</div></div>
+        </div>
+        ${c.suspend_reason?`<div style="font-size:12px;color:var(--red);margin-top:8px;">Důvod: ${c.suspend_reason}</div>`:''}
+        <div style="display:flex;gap:8px;margin-top:10px;">
+          <button class="adminCoachDash" data-id="${c.id}" data-name="${c.name||'Kouč'}" style="flex:1;padding:9px;background:var(--bg);border:1px solid var(--border);border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">📊 Dashboard</button>
+          <button class="adminRestore" data-id="${c.id}" data-name="${c.name||'Kouč'}" style="flex:1;padding:9px;background:var(--green);color:#fff;border:none;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">✅ Obnovit</button>
+        </div>`;
+      list.appendChild(el);
+    });
+    list.querySelectorAll('.adminCoachDash').forEach(b=>b.onclick=()=>openCoachStats(b.dataset.id, b.dataset.name));
+    list.querySelectorAll('.adminRestore').forEach(b=>b.onclick=async()=>{ await toggleCoachSuspend(b.dataset.id, 'suspended', b.dataset.name); });
+  }
 }
 
 async function openCoachStats(coachId, coachName){
@@ -2877,19 +2899,20 @@ async function toggleCoachSuspend(coachId, status, name){
     if(!confirm(`Pozastavit kouče ${name||''}? Zmizí z nabídky a nepůjde u něj rezervovat.`)) return;
     const reason = (prompt('Důvod pozastavení (povinné — uvidí ho kouč):','')||'').trim();
     if(!reason){ toast('⚠️ Důvod je povinný'); return; }
-    const { error } = await supaClient.from('profiles').update({ coach_status:'rejected' }).eq('id', coachId);
-    if(error){ toast('⚠️ '+error.message); return; }
+    const { error } = await supaClient.from('profiles').update({ coach_status:'suspended', suspend_reason: reason }).eq('id', coachId);
+    if(error){ toast('⚠️ '+error.message+' — chybí sloupec suspend_reason?'); return; }
     await supaClient.from('notifications').insert({ user_id: coachId, type:'system', read:false, message:`⛔ Tvůj kouč profil byl pozastaven administrátorem MTL. Důvod: ${reason} — ozvi se nám pro vyřešení.` });
     toast('⛔ Kouč pozastaven');
   } else {
     if(!confirm(`Obnovit kouče ${name||''}? Vrátí se do nabídky.`)) return;
-    const { error } = await supaClient.from('profiles').update({ coach_status:'approved' }).eq('id', coachId);
+    const { error } = await supaClient.from('profiles').update({ coach_status:'approved', suspend_reason: null }).eq('id', coachId);
     if(error){ toast('⚠️ '+error.message); return; }
     await supaClient.from('notifications').insert({ user_id: coachId, type:'system', read:false, message:'✅ Tvůj kouč profil byl obnoven. Jsi opět v nabídce!' });
     toast('✅ Kouč obnoven');
   }
   loadCoaches();
   renderCoachAnalytics(coachId, 'coachStatsBody');
+  loadAdminCoachList();
 }
 
 function openProfileById(coachId){
