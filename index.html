@@ -1166,6 +1166,23 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
   </div>
 </div>
 
+<!-- COACH REAKCE NA HLÁŠENÍ NO-SHOW -->
+<div id="noShowRespondOv" style="position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.92);display:none;flex-direction:column;align-items:center;justify-content:center;padding:28px;z-index:99999;text-align:center;">
+  <div style="background:var(--bg);border-radius:20px;padding:26px 22px;max-width:360px;width:100%;">
+    <div style="font-size:42px;margin-bottom:8px;">⚖️</div>
+    <div style="font-family:'Bebas Neue';font-size:24px;letter-spacing:.04em;color:var(--dark);line-height:1.1;margin-bottom:6px;">Reagovat na hlášení</div>
+    <p id="nsrClaim" style="font-size:13px;color:var(--mid);margin-bottom:14px;line-height:1.5;"></p>
+    <textarea id="nsrText" placeholder="Tvoje verze — co se reálně stalo (povinné u nesouhlasu)..." style="width:100%;min-height:64px;padding:12px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';margin-bottom:12px;resize:vertical;box-sizing:border-box;"></textarea>
+    <button id="nsrAccept" style="width:100%;padding:13px;background:var(--green);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">✅ Přiznávám — napravím to</button>
+    <button id="nsrContest" style="width:100%;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">❌ Nesouhlasím — poslat moji verzi MTL</button>
+    <div style="display:flex;gap:8px;margin-bottom:8px;">
+      <button id="nsrMsgStudent" style="flex:1;padding:11px;background:var(--bg);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💬 Student</button>
+      <button id="nsrMsgMtl" style="flex:1;padding:11px;background:var(--bg);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💬 MTL</button>
+    </div>
+    <button id="nsrClose" style="width:100%;padding:10px;background:transparent;color:var(--light);border:none;font-size:13px;cursor:pointer;font-family:'DM Sans';">Zavřít</button>
+  </div>
+</div>
+
 <!-- GPS OVERLAY -->
 <div class="gps-ov" id="gpsOv">
   <div class="gps-sh">
@@ -2446,6 +2463,7 @@ async function loadNotifications(){
     if(isBookingConfirm) linkLabel = 'přidat do kalendáře ›';
     else if(isCoachInperson) linkLabel = 'otevřít v diáři ›';
     else if(isCoachOnline) linkLabel = 'otevřít online feedback ›';
+    else if(n.type==='dispute' && currentUser.role!=='founder' && n.message.includes('nedorazil na trénink')) linkLabel = 'reagovat na hlášení ›';
     el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;${clickable?'cursor:pointer;':''}`;
     el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${n.message}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}${clickable?` · <span style="color:var(--blue);font-weight:600;">${linkLabel}</span>`:''}</div>`;
     if(clickable){
@@ -2459,6 +2477,7 @@ async function loadNotifications(){
         else if(isCoachOnline){ openOnline('coach'); }
         else if(isOnlineDone){ openOnline('student'); }
         else if(n.type==='dispute' && currentUser.role==='founder') openOnline('founder');
+        else if(n.type==='dispute' && n.message.includes('nedorazil na trénink')){ const md=n.message.match(/#(\d+)/); if(md) openNoShowRespond(md[1]); else openOnline('coach'); }
         else if(n.type==='refund_request' && currentUser.role==='founder' && n.message.includes('Žádost o refund')) openOnline('founder');
         else openOnline('coach');
       };
@@ -3069,6 +3088,45 @@ async function openChatWithStudent(studentId){
   }
 }
 
+let _nsrBooking = null;
+const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+
+async function openNoShowRespond(bookingId){
+  const { data } = await supaClient.from('bookings').select('*').eq('id', bookingId).single();
+  if(!data){ toast('⚠️ Rezervace nenalezena'); return; }
+  _nsrBooking = data;
+  const reason = (data.refund_reason||'').replace('(NO-SHOW) ','').replace('(SPOR) ','');
+  $('nsrClaim').innerHTML = `Student nahlásil, že jsi nedorazil na trénink <strong>${data.training_date||''} ${data.training_time||''}</strong> (rezervace #${data.id}).${reason?`<br><span style="color:var(--red);">„${reason}"</span>`:''}<br><br>Dej nám svoji verzi — pomůže nám to spravedlivě rozhodnout.`;
+  $('nsrText').value = '';
+  $('noShowRespondOv').style.display = 'flex';
+}
+
+async function nsrSubmit(accepted){
+  if(!_nsrBooking){ $('noShowRespondOv').style.display='none'; return; }
+  const txt = ($('nsrText').value||'').trim();
+  if(!accepted && !txt){ toast('⚠️ Popiš prosím svoji verzi'); return; }
+  const resp = accepted ? ('(PŘIZNÁNO) '+(txt||'Kouč přiznal — napraví se studentem.')) : ('(NESOUHLAS) '+txt);
+  const { error } = await supaClient.from('bookings').update({ coach_response: resp }).eq('id', _nsrBooking.id);
+  if(error){ toast('⚠️ '+error.message+' — chybí sloupec coach_response?'); return; }
+  const head = accepted ? '✅ Kouč přiznal no-show a chce napravit' : '❌ Kouč nesouhlasí s hlášením';
+  await supaClient.from('notifications').insert({ user_id: FOUNDER_UUID, type:'dispute', read:false, message:`${head} (in-person #${_nsrBooking.id}). Verze kouče: ${txt||'(bez textu)'} — vyřeš v korunce → Online objednávky.` });
+  toast('Odesláno MTL ✓');
+  $('noShowRespondOv').style.display='none';
+}
+
+async function messageMtlAsCoach(){
+  let { data: conv } = await supaClient.from('conversations').select('*')
+    .eq('student_id', FOUNDER_UUID).eq('coach_id', currentUser.id);
+  if(!conv || !conv.length){
+    const { data: created } = await supaClient.from('conversations').insert({
+      student_id: FOUNDER_UUID, coach_id: currentUser.id,
+      coach_name: currentUser.name || 'Kouč', student_name: 'MTL Support'
+    }).select();
+    conv = created;
+  }
+  if(conv && conv.length){ $('noShowRespondOv').style.display='none'; openChat(conv[0]); }
+}
+
 async function openChatWithCoach(coachId){
   // student → kouč
   const { data } = await supaClient.from('conversations').select('*')
@@ -3399,6 +3457,11 @@ $('rateYes').onclick=rateConfirmYes;
 $('rateNo').onclick=rateConfirmNo;
 if($('btnSubmitDispute')) $('btnSubmitDispute').onclick=submitDispute;
 if($('btnCloseDispute')) $('btnCloseDispute').onclick=()=>{ $('rateStepDispute').style.display='none'; showNextRate(); };
+if($('nsrAccept')) $('nsrAccept').onclick=()=>nsrSubmit(true);
+if($('nsrContest')) $('nsrContest').onclick=()=>nsrSubmit(false);
+if($('nsrMsgStudent')) $('nsrMsgStudent').onclick=()=>{ $('noShowRespondOv').style.display='none'; if(_nsrBooking) openChatWithStudent(_nsrBooking.student_id); };
+if($('nsrMsgMtl')) $('nsrMsgMtl').onclick=messageMtlAsCoach;
+if($('nsrClose')) $('nsrClose').onclick=()=>{ $('noShowRespondOv').style.display='none'; };
 $('rateSubmit').onclick=rateSubmit;
 $('rateSkip').onclick=async()=>{
   // přeskočit hodnocení = jen označit jako vyřízené
@@ -4233,6 +4296,7 @@ async function renderOnlineList(role){
         </div>
         <div style="font-size:13px;color:var(--mid);margin:4px 0;">📍 In-person · ${b.training_date} ${b.training_time||''} · ${b.amount} ${sym2} <span style="color:var(--light);">(sazba kouče)</span> · rezervace #${b.id}</div>
         ${!resolved?`<div style="background:#fff;border-radius:10px;padding:9px 12px;margin-top:8px;font-size:13px;color:var(--red);"><strong>🚨 Kouč nedorazil na trénink</strong>${r2?`<div style="color:var(--mid);margin-top:3px;">Důvod: ${r2}</div>`:''}</div>`:''}
+        ${(!resolved && b.coach_response)?`<div style="background:#EEF4FF;border-radius:10px;padding:9px 12px;margin-top:8px;font-size:13px;color:var(--blue);"><strong>🗣️ Verze kouče</strong><div style="color:var(--mid);margin-top:3px;">${b.coach_response.replace('(PŘIZNÁNO) ','✅ ').replace('(NESOUHLAS) ','❌ ')}</div></div>`:''}
         ${act}
       `;
       list.appendChild(elN);
@@ -4470,7 +4534,7 @@ async function submitDispute(){
   if(error){ toast('⚠️ '+error.message); return; }
   const coachMsg = online
     ? `⚖️ ${currentUser.name||'Student'} nahlásil spor: online feedback (rezervace #${b.id}) nebyl doručen. Důvod: ${reason}`
-    : `⚠️ ${currentUser.name||'Student'} nahlásil, že jsi nedorazil na trénink (rezervace #${b.id}). Důvod: ${reason} — ozvi se nám.`;
+    : `⚠️ ${currentUser.name||'Student'} nahlásil, že jsi nedorazil na trénink (rezervace #${b.id}). Důvod: ${reason} — klikni a reaguj.`;
   const founderMsg = online
     ? `⚖️ SPOR (online #${b.id}): ${currentUser.name||'Student'} (student) ↔ kouč tvrdí nedoručení feedbacku. Důvod: ${reason} — vyřeš v korunce → Online objednávky.`
     : `🚨 NO-SHOW (in-person #${b.id}): ${currentUser.name||'Student'} tvrdí, že kouč nedorazil na trénink. Důvod: ${reason} — vyřeš v korunce → Online objednávky.`;
