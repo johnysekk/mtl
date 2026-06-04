@@ -4200,6 +4200,7 @@ async function renderOnlineList(role){
       if(role==='coach') actions += `<button class="onDone" data-id="${b.id}" data-coach="${b.coach_id}" style="flex:1;padding:10px;background:var(--green);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">✅ Vyřízeno</button>`;
       actions += `</div>
         <button class="onRefund" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-curr="${b.currency||'CZK'}" data-student="${b.student_id}" style="width:100%;margin-top:8px;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">↩️ Vrátit peníze${role==='founder'?' (founder)':''}</button>`;
+      if(b.refund_requested) actions += `<button class="onDeny" data-id="${b.id}" data-student="${b.student_id}" style="width:100%;margin-top:8px;padding:9px;background:var(--bg);color:var(--mid);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">✖️ Nevyhovět žádosti o refund</button>`;
     } else if(role==='student' && b.status!=='cancelled' && !b.fulfilled){
       actions = b.refund_requested ? '<div style="font-size:13px;color:var(--orange);font-weight:600;background:#FFF8E6;border-radius:10px;padding:10px 12px;margin-top:10px;">⏳ Zažádáno o vrácení — čeká se na vyřízení</div>'
         : `<button class="onReqRefund" data-id="${b.id}" data-coach="${b.coach_id}" style="width:100%;margin-top:10px;padding:10px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">Požádat o vrácení peněz</button>`;
@@ -4212,9 +4213,9 @@ async function renderOnlineList(role){
     }
     const dateOrdered = (b.created_at||'').slice(0,10);
     let amtTxt;
-    if(role==='coach') amtTxt = `${Math.round(b.amount*0.90)} ${sym} <span style="color:var(--light);">(tvůj podíl)</span>`;
+    if(role==='coach') amtTxt = `${Math.round(b.amount*0.90)} ${sym}`;
     else if(role==='student') amtTxt = `${Math.round(b.amount*1.10)} ${sym}`;
-    else amtTxt = `${Math.round(b.amount*1.10)} ${sym} <span style="color:var(--light);">(zaplaceno)</span>`;
+    else amtTxt = `${b.amount} ${sym} <span style="color:var(--light);">(sazba kouče)</span>`;
     el.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:start;">
         <div style="font-family:'Bebas Neue';font-size:19px;letter-spacing:.04em;">${topName}</div>
@@ -4230,6 +4231,7 @@ async function renderOnlineList(role){
   list.querySelectorAll('.onMsg').forEach(btn=>btn.onclick=()=>{ closeSheet('shOnline'); if(role==='founder') messageCoachAsFounder(btn.dataset.coach); else openChatWithStudent(btn.dataset.other); });
   list.querySelectorAll('.onDone').forEach(btn=>btn.onclick=()=>markOnlineDone(btn.dataset.id, btn.dataset.coach));
   list.querySelectorAll('.onRefund').forEach(btn=>btn.onclick=()=>refundOnline(btn.dataset));
+  list.querySelectorAll('.onDeny').forEach(btn=>btn.onclick=()=>denyRefundOnline(btn.dataset.id, btn.dataset.student));
   list.querySelectorAll('.onReqRefund').forEach(btn=>btn.onclick=()=>requestRefundOnline(btn.dataset.id, btn.dataset.coach));
   list.querySelectorAll('.onChatCoach').forEach(btn=>btn.onclick=()=>openChatWithCoach(btn.dataset.coach));
   list.querySelectorAll('.onRate').forEach(btn=>btn.onclick=()=>rateOnlineNow(btn.dataset.id, btn.dataset.coach));
@@ -4238,6 +4240,20 @@ async function renderOnlineList(role){
 function rateOnlineNow(bookingId, coachName){
   _rateQueue = [{ type:'student', online:true, booking:{ id:bookingId, coach_name:coachName, type:'online' } }];
   showNextRate();
+}
+
+async function denyRefundOnline(bookingId, studentId){
+  const reason = (prompt('Důvod zamítnutí žádosti o refund (povinné — uvidí ho student):','')||'').trim();
+  if(!reason){ toast('⚠️ Důvod je povinný'); return; }
+  const { error } = await supaClient.from('bookings').update({ refund_requested:false, refund_reason:null }).eq('id', bookingId);
+  if(error){ toast('⚠️ '+error.message); return; }
+  await supaClient.from('notifications').insert({ user_id: studentId, type:'system', read:false, message:`❌ Tvá žádost o vrácení peněz (rezervace #${bookingId}) byla zamítnuta. Důvod: ${reason}` });
+  // info founderovi (pokud zamítl kouč)
+  if(currentUser.role!=='founder'){
+    await supaClient.from('notifications').insert({ user_id:'7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type:'system', read:false, message:`ℹ️ Kouč zamítl žádost o refund (online #${bookingId}). Důvod: ${reason}` });
+  }
+  toast('Žádost zamítnuta');
+  renderOnlineList(window._onlineRole||'coach');
 }
 
 async function markOnlineDone(bookingId, coachId){
@@ -4271,15 +4287,16 @@ async function refundOnline(d){
 }
 
 async function requestRefundOnline(bookingId, coachId){
-  const reason = prompt('Proč žádáš o vrácení peněz? (nepovinné)','') || '';
+  const reason = (prompt('Proč žádáš o vrácení peněz? (povinné)','')||'').trim();
+  if(!reason){ toast('⚠️ Důvod je povinný'); return; }
   // ulož žádost na booking (ať ji kouč/founder vidí a ať se zamkne tlačítko)
-  const { error } = await supaClient.from('bookings').update({ refund_requested:true, refund_reason: reason || null }).eq('id', bookingId);
+  const { error } = await supaClient.from('bookings').update({ refund_requested:true, refund_reason: reason }).eq('id', bookingId);
   if(error){ console.error('Refund request error:', error); toast('⚠️ '+(error.message||'Chyba')); return; }
   const { data: coachP } = await supaClient.from('profiles').select('name').eq('id', coachId).single();
   const coachName = coachP?.name || 'kouč';
   // notifikace koučovi + founderovi
-  await supaClient.from('notifications').insert({ user_id: coachId, type:'refund_request', read:false, message:`↩️ ${currentUser.name||'Student'} žádá o vrácení peněz za online coaching (rezervace #${bookingId}).${reason?' Důvod: '+reason:''} Vyřiď to v sekci Online feedback.` });
-  await supaClient.from('notifications').insert({ user_id:'7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type:'refund_request', read:false, message:`↩️ Žádost o refund (online #${bookingId}): ${currentUser.name||'Student'} (student) → ${coachName} (kouč).${reason?' Důvod: '+reason:''}` });
+  await supaClient.from('notifications').insert({ user_id: coachId, type:'refund_request', read:false, message:`↩️ ${currentUser.name||'Student'} žádá o vrácení peněz za online coaching (rezervace #${bookingId}). Důvod: ${reason} Vyřiď to v sekci Online feedback.` });
+  await supaClient.from('notifications').insert({ user_id:'7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type:'refund_request', read:false, message:`↩️ Žádost o refund (online #${bookingId}): ${currentUser.name||'Student'} (student) → ${coachName} (kouč). Důvod: ${reason}` });
   toast('✅ Žádost odeslána');
   if(window._onlineRole) renderOnlineList(window._onlineRole);
 }
