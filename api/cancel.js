@@ -26,7 +26,7 @@ export default async function handler(req, res) {
     // procenta Z ZAPLACENÉHO (student) a kolik si kouč nechá (z paid)
     let studentPct, coachKeepPct;
     if (hours >= 900)      { studentPct = 1.00; coachKeepPct = 0;    } // kouč ruší → student 100 %
-    else if (hours >= 16)  { studentPct = 0.95; coachKeepPct = 0;    } // 95 %
+    else if (hours >= 16)  { studentPct = 0.93; coachKeepPct = 0;    } // 93 %
     else if (hours >= 0)   { studentPct = 0.50; coachKeepPct = 0.45; } // 50 %
     else                   { studentPct = 0;    coachKeepPct = 0;    } // no-show
 
