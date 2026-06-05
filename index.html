@@ -1129,6 +1129,10 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
       <div class="srow" id="sLoc"><div class="srow-l"><div class="sicon" style="background:#E8F0FF;">📍</div><div class="slbl">Moje poloha</div></div><div class="sval" id="vLoc">Nenastavena</div></div>
       <div class="srow" id="sLang"><div class="srow-l"><div class="sicon" style="background:#E8F0FF;">🌍</div><div class="slbl">Jazyk</div></div><div class="sval" id="vLang" data-noi18n>Čeština</div></div>
     </div>
+    <div class="sec-lbl">Notifikace</div>
+    <div class="sgrp">
+      <div class="srow" id="sAvailNotif"><div class="srow-l"><div class="sicon" style="background:#FFF8E6;">🔔</div><div class="slbl">Dostupnost koučů</div></div><div class="sval" id="vAvailNotif">Zapnuto</div></div>
+    </div>
     <div class="sec-lbl">Zobrazení koučů</div>
     <div class="sgrp">
       <div class="srow" id="sType"><div class="srow-l"><div class="sicon" style="background:#FEECEC;">🥊</div><div class="slbl">Typ koučování</div></div><div class="sval" id="vType">Vše</div></div>
@@ -2483,6 +2487,7 @@ $('btnCoach').onclick=()=>{
   $('btnBecomeCoachApply').onclick();
 };
 $('btnSettings').onclick=()=>openSheet('shSettings');
+if($('sAvailNotif')) $('sAvailNotif').onclick=()=>setAvailNotifMute(!availNotifMuted());
 setTimeout(()=>{
   if(LANG==='en'){
     const vl=$('vLang'); if(vl) vl.textContent='English';
@@ -2861,10 +2866,21 @@ async function loadNotifications(){
     .order('created_at',{ascending:false});
 
   if(!data || !data.length){
-    list.innerHTML='<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">Žádné notifikace.</p>';
+    list.innerHTML='';
+    const mb0=document.createElement('button');
+    mb0.id='btnMuteAvail'; mb0.style.cssText='width:100%;padding:10px;margin-bottom:12px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:600;color:var(--mid);cursor:pointer;font-family:\'DM Sans\';';
+    mb0.onclick=()=>setAvailNotifMute(!availNotifMuted());
+    list.appendChild(mb0);
+    list.insertAdjacentHTML('beforeend','<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">Žádné notifikace.</p>');
+    updateAvailNotifUI();
     return;
   }
   list.innerHTML='';
+  const mb=document.createElement('button');
+  mb.id='btnMuteAvail'; mb.style.cssText='width:100%;padding:10px;margin-bottom:12px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:600;color:var(--mid);cursor:pointer;font-family:\'DM Sans\';';
+  mb.onclick=()=>setAvailNotifMute(!availNotifMuted());
+  list.appendChild(mb);
+  updateAvailNotifUI();
   data.forEach(n=>{
     const d=new Date(n.created_at);
     const el=document.createElement('div');
@@ -4329,15 +4345,21 @@ async function setAvail(status){
   if(status==='available' && (prev==='holiday' || prev==='booked')){
     const { data: favs } = await supaClient.from('favorites').select('student_id').eq('coach_id', currentUser.id);
     const students = [...new Set((favs||[]).map(f=>f.student_id))].filter(id=>id && id!==currentUser.id);
+    // odfiltruj studenty, co si ztišili notifikace o dostupnosti
+    let allowed = students;
     if(students.length){
-      const rows = students.map(sid=>({ user_id: sid, type:'fav_available', coach_id: currentUser.id, message:`🟢 ${currentUser.name||'Tvůj oblíbený kouč'} je zase dostupný! Můžeš si rezervovat trénink.`, read:false }));
+      const { data: prefs } = await supaClient.from('profiles').select('id, mute_avail_notif').in('id', students);
+      allowed = students.filter(sid=>{ const p=(prefs||[]).find(x=>x.id===sid); return !(p && p.mute_avail_notif); });
+    }
+    if(allowed.length){
+      const rows = allowed.map(sid=>({ user_id: sid, type:'fav_available', coach_id: currentUser.id, message:`🟢 ${currentUser.name||'Tvůj oblíbený kouč'} je zase dostupný! Můžeš si rezervovat trénink.`, read:false }));
       let { error: nErr } = await supaClient.from('notifications').insert(rows);
       if(nErr){ // fallback bez coach_id (kdyby sloupec chyběl) — aspoň ať echo dorazí
-        const rows2 = students.map(sid=>({ user_id: sid, type:'system', message:`🟢 ${currentUser.name||'Tvůj oblíbený kouč'} je zase dostupný! Můžeš si rezervovat trénink.`, read:false }));
+        const rows2 = allowed.map(sid=>({ user_id: sid, type:'system', message:`🟢 ${currentUser.name||'Tvůj oblíbený kouč'} je zase dostupný! Můžeš si rezervovat trénink.`, read:false }));
         const r2 = await supaClient.from('notifications').insert(rows2); nErr = r2.error;
       }
       if(nErr){ toast('⚠️ '+nErr.message); }
-      toast(`${labels[status]} · ${students.length} ${czPlural(students.length,'student dostal','studenti dostali','studentů dostalo')} echo`);
+      toast(`${labels[status]} · ${allowed.length} ${czPlural(allowed.length,'student dostal','studenti dostali','studentů dostalo')} echo`);
       return;
     }
   }
@@ -4352,6 +4374,19 @@ function setAvailUI(){
     b.style.color = on ? '#fff' : 'var(--mid)';
   });
 }
+function availNotifMuted(){ return !!(currentUser && currentUser.mute_avail_notif); }
+async function setAvailNotifMute(muted){
+  if(!currentUser){ toast('⚠️ Nejdřív se přihlas'); return; }
+  currentUser.mute_avail_notif = muted;
+  updateAvailNotifUI();
+  const { error } = await supaClient.from('profiles').update({ mute_avail_notif: muted }).eq('id', currentUser.id);
+  if(error){ toast('⚠️ '+error.message); return; }
+  toast(muted ? '🔕 Notifikace o dostupnosti ztišeny' : '🔔 Notifikace o dostupnosti zapnuty');
+}
+function updateAvailNotifUI(){
+  const v=$('vAvailNotif'); if(v) v.textContent = availNotifMuted() ? 'Vypnuto' : 'Zapnuto';
+  const b=$('btnMuteAvail'); if(b) b.textContent = availNotifMuted() ? '🔔 Zapnout notifikace o dostupnosti koučů' : '🔕 Ztišit notifikace o dostupnosti koučů';
+}
 function applyCertUI(){
   const approved = currentUser && currentUser.coach_status==='approved';
   const lbl=$('meCertLabel'); if(lbl) lbl.style.display = approved ? 'inline-block' : 'none';
@@ -4364,6 +4399,7 @@ function applyCertUI(){
 }
 function fillUserProfile(){
   if(!currentUser) return;
+  updateAvailNotifUI();
   // Jméno
   const nameEl = document.querySelector('#meEdit1 .prow-val');
   if(nameEl && currentUser.name) nameEl.textContent = currentUser.name;
