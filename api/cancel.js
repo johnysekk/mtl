@@ -3,15 +3,15 @@ import Stripe from 'stripe';
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 // ── MTL Coaches — storno / refund (destination charge) ──
-// Model: refund se počítá z toho, co student REÁLNĚ zaplatil (base × 1.10).
-//   • Student ruší 16h+   → student 95 % zaplaceného, kouč 0, MTL si nechá 5 % (pokryje Stripe fee)
-//   • Student ruší <16h   → student 50 %, kouč si nechá 45 % (kompenzace), MTL 5 %
-//   • Kouč ruší (sentinel hoursUntil>=900) → student 100 %, kouč 0 (MTL nese fee, je to vina kouče)
+// Refund se počítá z toho, co student REÁLNĚ zaplatil (base × 1.10 — markup je vždy 10 %).
+//   • Student ruší 16h+   → student 93 %, kouč 0, MTL ~7 % (pokryje Stripe fee)
+//   • Student ruší <16h   → student 50 %, kouč si nechá 45 % zaplaceného, MTL ~5 %
+//   • Kouč ruší (sentinel hoursUntil>=900) → student 100 %, kouč 0 (MTL nese fee)
 //   • No-show / po termínu → 0
 //
-// `amount` = ZÁKLADNÍ cena kouče (base) uložená u rezervace.
-const STUDENT_MARKUP = 1.10; // co student platí navíc nad base
-const COACH_SHARE    = 0.95; // podíl kouče ze base (musí sedět s checkout.js)
+// Koučův podíl se NEPOČÍTÁ z konstanty — reverzuje se podle REÁLNÉHO transferu,
+// který koučovi odešel (95 % i founding 97 % tak funguje automaticky / grandfathered).
+const STUDENT_MARKUP = 1.10; // markup studenta (vždy 10 %, founding mění jen cut)
 
 export default async function handler(req, res) {
   try {
@@ -19,11 +19,9 @@ export default async function handler(req, res) {
     if (!paymentIntent) { return res.status(400).json({ error: 'Chybí payment intent' }); }
 
     const base = parseInt(amount, 10);
-    const paid = base * STUDENT_MARKUP;        // co student reálně zaplatil
-    const coachShare = base * COACH_SHARE;     // co kouč původně dostal
+    const paid = base * STUDENT_MARKUP; // co student reálně zaplatil
     const hours = parseFloat(hoursUntil);
 
-    // procenta Z ZAPLACENÉHO (student) a kolik si kouč nechá (z paid)
     let studentPct, coachKeepPct;
     if (hours >= 900)      { studentPct = 1.00; coachKeepPct = 0;    } // kouč ruší → student 100 %
     else if (hours >= 16)  { studentPct = 0.93; coachKeepPct = 0;    } // 93 %
@@ -34,9 +32,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ refunded: 0, pct: 0, message: 'Žádný refund (no-show / po termínu)' });
     }
 
-    // částky v haléřích
-    const refundToStudent  = Math.round(paid * studentPct * 100);
-    const reverseFromCoach = Math.round((coachShare - paid * coachKeepPct) * 100); // co stáhnout koučovi
+    const refundToStudent = Math.round(paid * studentPct * 100); // haléře
 
     // najdi transfer ke koučovi
     let transferId = null;
@@ -46,8 +42,7 @@ export default async function handler(req, res) {
       transferId = charge && charge.transfer ? charge.transfer : null;
     } catch (e) { console.error('PI retrieve:', e.message); }
 
-    // 1) refund studentovi — MTL si nechává provizi (refund_application_fee: false),
-    //    koučův podíl stáhneme ručně níž (přesně), ne proporčně
+    // 1) refund studentovi — MTL si nechává provizi; koučův podíl reverzneme ručně
     const refund = await stripe.refunds.create({
       payment_intent: paymentIntent,
       amount: refundToStudent,
@@ -55,12 +50,24 @@ export default async function handler(req, res) {
       reverse_transfer: transferId ? false : true, // fallback když transfer nenajdeme
     });
 
-    // 2) stáhni koučův podíl
+    // 2) reverze koučova podílu podle REÁLNÉHO transferu
     let reversed = 0;
-    if (transferId && reverseFromCoach > 0) {
+    if (transferId) {
       try {
-        const rev = await stripe.transfers.createReversal(transferId, { amount: reverseFromCoach });
-        reversed = (rev.amount || 0) / 100;
+        if (coachKeepPct === 0) {
+          // 16h+ / kouč ruší → kouč 0: reverzni CELÝ transfer (bez amount = celý)
+          const rev = await stripe.transfers.createReversal(transferId);
+          reversed = (rev.amount || 0) / 100;
+        } else {
+          // <16h → kouč si nechá paid×coachKeepPct; reverzni zbytek z reálného transferu
+          const tr = await stripe.transfers.retrieve(transferId);
+          const coachKeepHal = Math.round(paid * coachKeepPct * 100);
+          const reverseHal = Math.max((tr.amount || 0) - coachKeepHal, 0);
+          if (reverseHal > 0) {
+            const rev = await stripe.transfers.createReversal(transferId, { amount: reverseHal });
+            reversed = (rev.amount || 0) / 100;
+          }
+        }
       } catch (e) { console.error('transfer reversal:', e.message); }
     }
 
