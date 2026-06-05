@@ -7,6 +7,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>MTL Coaches</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,wght@0,400;0,500;0,600;0,700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 
 <style>
@@ -1021,7 +1023,21 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
     <div class="sec-lbl" style="margin-top:24px;">Všichni kouči — dashboardy</div>
     <div id="adminCoachList"></div>
     <button id="btnAdminOnline" style="width:100%;margin-top:16px;padding:14px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">🌐 Online objednávky & refund žádosti</button>
+    <button id="btnAdminMap" style="width:100%;margin-top:10px;padding:14px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">🗺️ Mapa uživatelů</button>
   </div>
+</div>
+
+<!-- FOUNDER MAPA -->
+<div class="sheet" id="shFounderMap" style="z-index:88;display:flex;flex-direction:column;">
+  <div class="shdr" style="background:var(--dark);border-color:#333;">
+    <div class="shdr-title" style="color:#fff;">🗺️ Mapa uživatelů</div>
+    <button class="btn-close" id="btnCloseFounderMap" style="background:#333;color:#fff;">✕</button>
+  </div>
+  <div style="display:flex;gap:16px;padding:10px 20px;font-size:13px;font-weight:600;flex-shrink:0;align-items:center;background:var(--surf);border-bottom:1px solid var(--border);">
+    <span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:12px;border-radius:50%;background:var(--red);display:inline-block;"></span> Kouči <span id="mapCoachCount" style="color:var(--mid);">0</span></span>
+    <span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:12px;border-radius:50%;background:#2F6FED;display:inline-block;"></span> Studenti <span id="mapStudentCount" style="color:var(--mid);">0</span></span>
+  </div>
+  <div id="founderMap" style="flex:1;width:100%;"></div>
 </div>
 
 <!-- DASHBOARD KOUČE (founder pohled) -->
@@ -2269,8 +2285,17 @@ function onLocSet(){
   $('locText').textContent=`📍 ${userLoc.city} — kouči seřazeni dle vzdálenosti`;
   $('vLoc').textContent=userLoc.city;
   fillUserProfile();
+  persistMyLocation();
   init();
   toast(`📍 Poloha: ${userLoc.city}`);
+}
+function persistMyLocation(){
+  if(!currentUser || !userLoc) return;
+  if(currentUser.coach_status==='approved') return; // kouč má souřadnice z přihlášky (jeho trénovací město)
+  const upd = { city_lat:userLoc.lat, city_lng:userLoc.lng };
+  if(userLoc.city) upd.city = userLoc.city;
+  if(userLoc.country) upd.country = userLoc.country;
+  supaClient.from('profiles').update(upd).eq('id', currentUser.id);
 }
 
 function requestGps(){
@@ -2878,6 +2903,43 @@ $('btnAdmin').onclick=()=>{ openSheet('shAdmin'); loadPendingCoaches(); };
 $('btnCloseAdmin').onclick=()=>closeSheet('shAdmin');
 $('btnCloseCoachStats').onclick=()=>closeSheet('shCoachStats');
 $('btnAdminOnline').onclick=()=>{ closeSheet('shAdmin'); openOnline('founder'); };
+if($('btnAdminMap')) $('btnAdminMap').onclick=()=>{ closeSheet('shAdmin'); openFounderMap(); };
+if($('btnCloseFounderMap')) $('btnCloseFounderMap').onclick=()=>closeSheet('shFounderMap');
+
+let _founderMap=null, _mapLayer=null;
+function openFounderMap(){
+  openSheet('shFounderMap');
+  setTimeout(initFounderMap, 250); // počkej na layout sheetu
+}
+async function initFounderMap(){
+  if(typeof L==='undefined'){ toast('⚠️ Mapa se nenačetla (Leaflet)'); return; }
+  if(!_founderMap){
+    _founderMap = L.map('founderMap').setView([49.8, 15.5], 6); // střed ČR
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution:'© OpenStreetMap', maxZoom:19 }).addTo(_founderMap);
+  } else {
+    _founderMap.invalidateSize();
+  }
+  if(_mapLayer) _founderMap.removeLayer(_mapLayer);
+  _mapLayer = L.layerGroup().addTo(_founderMap);
+  const { data } = await supaClient.from('profiles').select('id, name, city, country, city_lat, city_lng, coach_status');
+  let coaches=0, students=0; const bounds=[];
+  (data||[]).forEach(p=>{
+    const lat=parseFloat(p.city_lat), lng=parseFloat(p.city_lng);
+    if(isNaN(lat) || isNaN(lng)) return;
+    const isCoach = p.coach_status==='approved';
+    if(isCoach) coaches++; else students++;
+    const color = isCoach ? '#E11' : '#2F6FED';
+    const jt = ()=> (Math.random()-0.5)*0.02; // jemný jitter ať se tečky z jednoho města nepřekrývají
+    const la=lat+jt(), ln=lng+jt();
+    bounds.push([la,ln]);
+    L.circleMarker([la,ln], { radius:7, color:'#fff', weight:1.5, fillColor:color, fillOpacity:0.9 })
+      .bindPopup(`<b>${p.name||'—'}</b><br>${isCoach?'🥊 Kouč':'🙋 Student'}${p.city?'<br>📍 '+p.city:''}${p.country?', '+p.country:''}`)
+      .addTo(_mapLayer);
+  });
+  if($('mapCoachCount')) $('mapCoachCount').textContent=coaches;
+  if($('mapStudentCount')) $('mapStudentCount').textContent=students;
+  if(bounds.length) _founderMap.fitBounds(bounds, { padding:[40,40], maxZoom:11 });
+}
 
 async function updateAdminBadge(){
   if(!currentUser || currentUser.role!=='founder') return;
@@ -2992,7 +3054,7 @@ async function loadAdminCoachList(){
   const list=$('adminCoachList');
   if(!list) return;
   list.innerHTML='<p style="color:var(--light);font-size:13px;">Načítám...</p>';
-  const { data } = await supaClient.from('profiles').select('id, name, photo_url, rating, reviews, city, coach_status, suspend_reason, avail_status').in('coach_status',['approved','suspended']);
+  const { data } = await supaClient.from('profiles').select('id, name, photo_url, rating, reviews, city, country, coach_status, suspend_reason, avail_status').in('coach_status',['approved','suspended']);
   const coaches = data||[];
   const approved = coaches.filter(c=>c.coach_status==='approved');
   const suspended = coaches.filter(c=>c.coach_status==='suspended');
@@ -3003,7 +3065,7 @@ async function loadAdminCoachList(){
     el.style.cssText='display:flex;align-items:center;gap:12px;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;cursor:pointer;';
     el.innerHTML=`
       <div style="width:44px;height:44px;border-radius:50%;background:#333 ${c.photo_url?`url('${c.photo_url}') center/cover`:''};flex-shrink:0;"></div>
-      <div style="flex:1;"><div style="font-size:15px;font-weight:700;color:var(--dark);">${c.name||'Kouč'}${c.avail_status==='holiday'?' <span style="font-size:12px;">🌴</span>':c.avail_status==='booked'?' <span style="font-size:12px;">🔒</span>':''}</div><div style="font-size:12px;color:var(--mid);">${c.city||''} · ⭐ ${c.rating||'—'} (${c.reviews||0})${c.avail_status==='holiday'?' · na dovolené':c.avail_status==='booked'?' · plně obsazeno':''}</div></div>
+      <div style="flex:1;"><div style="font-size:15px;font-weight:700;color:var(--dark);">${c.name||'Kouč'}${c.avail_status==='holiday'?' <span style="font-size:12px;">🌴</span>':c.avail_status==='booked'?' <span style="font-size:12px;">🔒</span>':''}</div><div style="font-size:12px;color:var(--mid);">📍 ${c.city||'—'}${c.country?', '+c.country:''} · ⭐ ${c.rating||'—'} (${c.reviews||0})${c.avail_status==='holiday'?' · na dovolené':c.avail_status==='booked'?' · plně obsazeno':''}</div></div>
       <div style="font-size:13px;font-weight:600;color:var(--blue);">Dashboard ›</div>`;
     el.onclick=()=>openCoachStats(c.id, c.name);
     list.appendChild(el);
