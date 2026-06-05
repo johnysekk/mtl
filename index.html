@@ -1445,6 +1445,7 @@ async function loadCoaches() {
       bg: '#0d1a2e',
       loc: c.city || '',
       country: c.country || null,
+      countryCode: c.country_code || null,
       avail: c.avail_status || 'available',
       gym: c.gym || '',
       coords: (c.city_lat && c.city_lng) ? {lat:c.city_lat, lng:c.city_lng} : null,
@@ -1710,6 +1711,8 @@ function fillCard(p, c){
 
   // Location line
   let locTxt = c.loc;
+  const _fl = flagOf(c.countryCode);
+  if(_fl) locTxt += ` ${_fl}`; else if(c.country) locTxt += `, ${c.country}`;
   if(c.gym && c.tags.some(t=>t.includes('In-person'))) locTxt += ` · ${c.gym}`;
   $(p+'Loc').textContent = locTxt;
 
@@ -2005,6 +2008,8 @@ if(c.photo){
     $('profRankRow').onclick=()=>{ const b=$('profScoreBreak'); const op=b.style.display==='none'; b.style.display=op?'block':'none'; $('profRankToggle').textContent=op?'Skrýt ▴':'Rozbalit ›'; };
   }
   let locTxt=c.loc;
+  const _pfl = flagOf(c.countryCode);
+  if(_pfl) locTxt+=` ${_pfl}`; else if(c.country) locTxt+=`, ${c.country}`;
   if(c.gym) locTxt+=` · ${c.gym}`;
   if(userLoc&&c.distKm!==null&&c.tags.some(t=>t.includes('In-person'))) locTxt+=` · ${c.distKm.toFixed(1)} km`;
   $('profLoc').textContent=locTxt;
@@ -2098,6 +2103,7 @@ async function loadCoachReviews(coachId){
 }
 
 function czPlural(n, one, few, many){ n=Math.abs(+n)||0; if(n===1) return one; if(n>=2&&n<=4) return few; return many; }
+function flagOf(cc){ if(!cc||cc.length!==2) return ''; cc=cc.toUpperCase(); if(!/^[A-Z]{2}$/.test(cc)) return ''; return String.fromCodePoint(0x1F1E6 + cc.charCodeAt(0)-65, 0x1F1E6 + cc.charCodeAt(1)-65); }
 function timeAgo(iso){
   if(!iso) return '';
   const d = new Date(iso), now = new Date();
@@ -3054,8 +3060,26 @@ async function loadAdminCoachList(){
   const list=$('adminCoachList');
   if(!list) return;
   list.innerHTML='<p style="color:var(--light);font-size:13px;">Načítám...</p>';
-  const { data } = await supaClient.from('profiles').select('id, name, photo_url, rating, reviews, city, country, coach_status, suspend_reason, avail_status').in('coach_status',['approved','suspended']);
+  const { data } = await supaClient.from('profiles').select('id, name, photo_url, rating, reviews, city, country, country_code, city_lat, city_lng, coach_status, suspend_reason, avail_status').in('coach_status',['approved','suspended']);
   const coaches = data||[];
+  // Lazy backfill země u koučů, co ji nemají (z uložených souřadnic) — doběhne jednou
+  const missing = coaches.filter(c=> (!c.country || !c.country_code) && c.city_lat && c.city_lng);
+  if(missing.length){
+    (async()=>{
+      for(const c of missing){
+        try{
+          const r=await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&addressdetails=1&lat=${c.city_lat}&lon=${c.city_lng}`);
+          const j=await r.json();
+          const cn=j.address && j.address.country;
+          const cc=j.address && j.address.country_code;
+          const upd={}; if(cn) upd.country=cn; if(cc) upd.country_code=cc;
+          if(Object.keys(upd).length) await supaClient.from('profiles').update(upd).eq('id',c.id);
+        }catch(e){}
+        await new Promise(res=>setTimeout(res,1100)); // Nominatim rate limit
+      }
+      loadAdminCoachList(); // překresli s doplněnými zeměmi
+    })();
+  }
   const approved = coaches.filter(c=>c.coach_status==='approved');
   const suspended = coaches.filter(c=>c.coach_status==='suspended');
   list.innerHTML='';
@@ -4097,16 +4121,16 @@ $('btnSubmitCoachApp').onclick=async()=>{
     }
 
     btn.textContent='Hledám město...';
-    let lat=null,lng=null,countryName=null;
+    let lat=null,lng=null,countryName=null,countryCode=null;
     try {
       const geo=await fetch(`https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q=${encodeURIComponent(city)}`);
       const geoData=await geo.json();
-      if(geoData && geoData.length){ lat=parseFloat(geoData[0].lat); lng=parseFloat(geoData[0].lon); countryName=geoData[0].address && geoData[0].address.country || null; }
+      if(geoData && geoData.length){ lat=parseFloat(geoData[0].lat); lng=parseFloat(geoData[0].lon); countryName=geoData[0].address && geoData[0].address.country || null; countryCode=geoData[0].address && geoData[0].address.country_code || null; }
     } catch(e){ console.error('Geocode error',e); }
 
     btn.textContent='Odesílám...';
 await supaClient.from('profiles').update({
-      coach_status:'pending', bio, city, city_lat:lat, city_lng:lng, country: countryName,
+      coach_status:'pending', bio, city, city_lat:lat, city_lng:lng, country: countryName, country_code: countryCode,
       rate_inperson:rateIn, rate_online:rateOn, currency, currency_inperson:currency, currency_online:currencyOnline, years, fights,
       online_tiers: caTiers.length?JSON.stringify(caTiers):null,
       online_format: caTiers[0]?caTiers[0].label:null,
