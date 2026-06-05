@@ -11,7 +11,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 //
 // `amount` = ZÁKLADNÍ cena kouče (base) uložená u rezervace.
 const STUDENT_MARKUP = 1.10; // co student platí navíc nad base
-const COACH_SHARE    = 0.90; // podíl kouče ze base (musí sedět s checkout.js)
+const COACH_SHARE    = 0.95; // podíl kouče ze base (musí sedět s checkout.js)
 
 export default async function handler(req, res) {
   try {

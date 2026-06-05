@@ -21,7 +21,7 @@ export default async function handler(req, res) {
 
     const rate = parseInt(amount, 10);
     const cur = String(currency).toLowerCase(); // stripe chce malá písmena
-    const COMMISSION = 0.20;   // 20 % z ceny = provize MTL
+    const COMMISSION = 0.15;   // 15 % z base = provize MTL (5% cut z kouče + 10% markup studentovi)
     const STUDENT_MARKUP = 1.10; // student platí +10 %
 
     // Stripe minor units (×100 platí pro CZK i EUR i USD)
