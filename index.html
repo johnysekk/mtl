@@ -1034,7 +1034,14 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
         <option value="USD">USD $</option>
       </select>
     </div>
-    <p style="font-size:12px;color:var(--light);line-height:1.4;margin-bottom:24px;">Toto je základní cena, kterou dostane gym. Student vidí cenu +3 %.</p>
+    <div id="gymPriceBreakdown" style="background:#F0FBF0;border-radius:12px;padding:13px 15px;margin-bottom:12px;font-size:13px;line-height:1.7;color:var(--mid);">
+      <div style="font-weight:700;color:var(--dark);margin-bottom:4px;">Jak se cena rozpadne</div>
+      <div style="display:flex;justify-content:space-between;"><span>Student zaplatí (+3 %)</span><strong id="gpStudent" data-noi18n style="color:var(--dark);">—</strong></div>
+      <div style="display:flex;justify-content:space-between;"><span>Tobě (gymu) připadne (97 %)</span><strong id="gpGym" data-noi18n style="color:#006040;">—</strong></div>
+      <div style="display:flex;justify-content:space-between;"><span>Z toho MTL provize (6 %)</span><strong id="gpMtl" data-noi18n style="color:var(--light);">—</strong></div>
+    </div>
+    <p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:8px;">💳 Stripe poplatek se strhne z podílu gymu z každé platby — přibližně 1,4 % + 6 Kč u evropských karet, až ~2,9 % + 6 Kč u zahraničních (max cca 5 %).</p>
+    <p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:24px;">↩️ Refund drop-inu: když student zruší 6+ h předem, dostane 93 % zpět a gym si nechá zbytek. Později nebo no-show → bez vrácení.</p>
 
     <div class="sec-lbl" style="font-size:18px;font-family:'Bebas Neue';letter-spacing:.04em;">Krok 3 — Fotky prostor (povinné)</div>
     <p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:14px;">Nahraj fotky všech prostor — ukážou se na profilu gymu a slouží ke kontrole kvality. Prvních 6 je povinných.</p>
@@ -2092,7 +2099,15 @@ const I18N = { en: {
   "Stripe připojen":"Stripe connected",
   "Bez Stripe":"No Stripe",
   "⚠️ Bez fotek":"⚠️ No photos",
-  "✅ Gym schválen!":"✅ Gym approved!"
+  "✅ Gym schválen!":"✅ Gym approved!",
+  "Jak se cena rozpadne":"Price breakdown",
+  "Student zaplatí (+3 %)":"Student pays (+3%)",
+  "Tobě (gymu) připadne (97 %)":"You (the gym) get (97%)",
+  "Z toho MTL provize (6 %)":"Of which MTL commission (6%)",
+  "💳 Stripe poplatek se strhne z podílu gymu z každé platby — přibližně 1,4 % + 6 Kč u evropských karet, až ~2,9 % + 6 Kč u zahraničních (max cca 5 %).":"💳 The Stripe fee is taken from the gym's share of each payment — roughly 1.4% + 6 Kč for European cards, up to ~2.9% + 6 Kč for international ones (max ~5%).",
+  "↩️ Refund drop-inu: když student zruší 6+ h předem, dostane 93 % zpět a gym si nechá zbytek. Později nebo no-show → bez vrácení.":"↩️ Drop-in refund: if a student cancels 6+ h ahead, they get 93% back and the gym keeps the rest. Later or no-show → no refund.",
+  "Refundy — otevřít ve Stripe":"Refunds — open in Stripe",
+  "Zatím žádné refundy.":"No refunds yet."
 }};
 let LANG; try{ LANG = localStorage.getItem('mtl_lang') || 'en'; }catch(e){ LANG='en'; }
 function t(cs){ const d=I18N[LANG]; return (d && d[cs]!=null) ? d[cs] : cs; }
@@ -3445,8 +3460,21 @@ function openGymApp(){
   let acct=null; try{ acct=localStorage.getItem('mtl_gym_acct'); }catch(e){}
   if(acct){ $('gymStripeStatus').style.display='flex'; $('gymStripeConnect').style.display='none'; }
   else { $('gymStripeStatus').style.display='none'; $('gymStripeConnect').style.display='block'; }
+  updateGymPriceBreakdown();
   openSheet('shGymApp');
 }
+
+function updateGymPriceBreakdown(){
+  const p = parseFloat($('gymDropinPrice') && $('gymDropinPrice').value) || 0;
+  const cur = ($('gymCurrency') && $('gymCurrency').value) || 'CZK';
+  const sym = cur==='CZK'?'Kč':cur==='EUR'?'€':'$';
+  const fmt = v => `${(Math.round(v*100)/100)} ${sym}`;
+  if($('gpStudent')) $('gpStudent').textContent = p ? fmt(p*1.03) : '—';
+  if($('gpGym'))     $('gpGym').textContent     = p ? fmt(p*0.97) : '—';
+  if($('gpMtl'))     $('gpMtl').textContent     = p ? fmt(p*0.06) : '—';
+}
+if($('gymDropinPrice')) $('gymDropinPrice').addEventListener('input', updateGymPriceBreakdown);
+if($('gymCurrency')) $('gymCurrency').addEventListener('change', updateGymPriceBreakdown);
 
 if($('meGymApply')) $('meGymApply').onclick = ()=>{ closeSheet('shMe'); openGymApp(); };
 if($('btnCloseGymApp')) $('btnCloseGymApp').onclick = ()=>closeSheet('shGymApp');
@@ -6003,6 +6031,19 @@ async function renderMtl(){
   const mtlRef100 = cancelledAll.filter(b=>b.refund_pct===100).length;
   const mtlRef50 = cancelledAll.filter(b=>b.refund_pct===50).length;
   const mtlRef0 = cancelledAll.filter(b=>b.refund_pct===0).length;
+  // Seznam refundů s prokliky do Stripe (payment page ukáže rozpad refundu)
+  // POZN: až přejdeš na Stripe LIVE, smaž '/test' z URL níže.
+  const refundRows = cancelledAll
+    .filter(b=>b.payment_intent && b.payment_intent!=='null')
+    .sort((a,b)=>(b.created_at||'').localeCompare(a.created_at||''))
+    .slice(0,40)
+    .map(b=>{
+      const pct = b.refund_pct!=null ? b.refund_pct+'%' : '—';
+      const who = b.coach_name || '—';
+      const when = b.training_date || (b.created_at||'').slice(0,10);
+      const url = `https://dashboard.stripe.com/test/payments/${b.payment_intent}`;
+      return `<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F4F4F5;">↩️</div><div class="prow-lbl">${who} · ${when} · ${pct}</div></div><a href="${url}" target="_blank" rel="noopener" style="font-size:12px;font-weight:700;color:var(--blue);text-decoration:none;flex-shrink:0;">Stripe ↗</a></div>`;
+    }).join('');
   const estFee = b => (b.actual_stripe_fee!=null) ? b.actual_stripe_fee : ((b.amount||0)*1.10*0.03 + 6);
   const past = all.filter(isRealized);
   const upcoming = all.filter(b=>!isRealized(b));
@@ -6039,6 +6080,8 @@ async function renderMtl(){
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">↩️</div><div class="prow-lbl">${L('Vráceno 50%')}</div></div><span class="prow-val">${mtlRef50}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">↩️</div><div class="prow-lbl">${L('Bez vrácení (0%)')}</div></div><span class="prow-val">${mtlRef0}</span></div>
     </div>
+    <div class="sec-lbl">${L('Refundy — otevřít ve Stripe')}</div>
+    <div class="prow-group" style="margin-bottom:16px;">${refundRows || `<p style="font-size:13px;color:var(--light);padding:10px 14px;">${L('Zatím žádné refundy.')}</p>`}</div>
     <div style="font-size:12px;color:var(--light);margin-bottom:4px;">${L('Reálný čistý zisk po měsících:')}</div>
     ${renderBars(netByMonth, 'var(--green)')}
     <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:12px;">${L('Stripe fee skutečný kde dostupný, jinak odhad. Zrušené lekce se nepočítají do zisku. DPH řeš s účetní.')}</p>
