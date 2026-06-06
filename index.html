@@ -2012,6 +2012,8 @@ const I18N = { en: {
   "Získej MTL Certified badge":"Get the MTL Certified badge",
   "Staň se koučem":"Become a coach",
   "Platba proběhla úspěšně. Kouč dostal tvoji rezervaci a brzy se ti ozve. 🥊":"Payment successful. The coach got your booking and will be in touch soon. 🥊",
+  "REZERVACE":"BOOKING",
+  "POTVRZENA!":"CONFIRMED!",
   "Proběhla lekce?":"Did the lesson happen?",
   "$9/měsíc · prvních 100, pak $19":"$9/month · first 100, then $19",
   "Max. vzdálenost":"Max distance",
@@ -3102,6 +3104,12 @@ function renderOffers(c){
   const symOf = x => x==='EUR'?'€':x==='USD'?'$':'Kč';
   const isSelf = currentUser && (c.id===currentUser.id || c.profileId===currentUser.id);
   let html='';
+  // referral kredit — malý nápis nad nabídkami
+  if(!isSelf && currentUser && (currentUser.student_credits||0)>0){
+    const n = currentUser.student_credits;
+    const czW = n===1?'bod':((n>=2&&n<=4)?'body':'bodů');
+    html += `<div style="background:#F0FBF0;border:1px solid #CDEBD6;border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13px;font-weight:600;color:#006040;text-align:center;">${LANG==='en' ? `🎁 You have ${n} referral ${n===1?'credit':'credits'} — 10% off applies to this lesson` : `🎁 Máš ${n} referral ${czW} — na tuhle lekci se uplatní 10% sleva`}</div>`;
+  }
   // efektivní online tiery (fallback na legacy single)
   const onlineTiersEff = (c.onlineTiers && c.onlineTiers.length) ? c.onlineTiers : (c.rateOnline ? [{label:c.onlineFormat||'Online coaching', qty:1, price:c.rateOnline}] : []);
   // In-person
@@ -5715,29 +5723,40 @@ async function handleReferralAfterBooking(coachId){
       const nc = Math.max(0,((cp&&cp.coach_credits)||0)-1);
       await supaClient.from('profiles').update({ coach_credits: nc }).eq('id', coachId);
     }
-    // 2) odměna za studentský referral (první placená lekce pozvaného)
-    if(currentUser && currentUser.referred_by && !currentUser.referral_rewarded){
-      const { data: myb } = await supaClient.from('bookings').select('id').eq('student_id', currentUser.id);
-      if(myb && myb.length===1){
-        const { data: rf } = await supaClient.from('profiles').select('student_credits').eq('id', currentUser.referred_by).single();
-        await supaClient.from('profiles').update({ student_credits: ((rf&&rf.student_credits)||0)+1 }).eq('id', currentUser.referred_by);
-        await supaClient.from('profiles').update({ student_credits: (currentUser.student_credits||0)+1, referral_rewarded:true }).eq('id', currentUser.id);
-        currentUser.student_credits = (currentUser.student_credits||0)+1;
-        currentUser.referral_rewarded = true;
-        await supaClient.from('notifications').insert({ user_id: currentUser.referred_by, type:'referral', read:false, data: JSON.stringify({ kind:'referral_reward_student', who: currentUser.name||'' }), message:`🎁 Tvůj pozvaný ${currentUser.name||'kamarád'} si dal první lekci! Máš +1 slevu 10 % na další lekci.` });
-        toast(L('🎁 Sleva 10 % na další lekci je tvoje!'));
+    // 2) odměna za studentský referral — čerstvý stav z DB; one-time přes referral_rewarded
+    if(currentUser){
+      const { data: me } = await supaClient.from('profiles').select('referred_by, referral_rewarded, student_credits').eq('id', currentUser.id).single();
+      console.log('[referral] student check:', me);
+      if(me && me.referred_by && !me.referral_rewarded){
+        // flag nastav PRVNÍ (zabrání nekonečnému připisování); když sloupec chybí → error, grant se neprovede
+        const { error: fErr } = await supaClient.from('profiles').update({ referral_rewarded:true }).eq('id', currentUser.id);
+        if(fErr){ console.error('[referral] ⚠️ referral_rewarded sloupec asi chybí v DB:', fErr.message); }
+        else {
+          await supaClient.from('profiles').update({ student_credits: (me.student_credits||0)+1 }).eq('id', currentUser.id);
+          currentUser.student_credits = (me.student_credits||0)+1;
+          currentUser.referral_rewarded = true;
+          const { data: rf } = await supaClient.from('profiles').select('student_credits').eq('id', me.referred_by).single();
+          await supaClient.from('profiles').update({ student_credits: ((rf&&rf.student_credits)||0)+1 }).eq('id', me.referred_by);
+          await supaClient.from('notifications').insert({ user_id: me.referred_by, type:'referral', read:false, data: JSON.stringify({ kind:'referral_reward_student', who: currentUser.name||'' }), message:`🎁 Tvůj pozvaný ${currentUser.name||'kamarád'} si dal první lekci! Máš +1 slevu 10 % na další lekci.` });
+          if(typeof fillReferral==='function') fillReferral();
+          toast(L('🎁 Sleva 10 % na další lekci je tvoje!'));
+          console.log('[referral] ✅ student reward: +1 pro pozvaného', currentUser.id, 'i pro zvoucího', me.referred_by);
+        }
       }
     }
-    // 3) odměna za koučský referral (první rezervace pozvaného kouče)
+    // 3) odměna za koučský referral — pozvaný kouč dostal rezervaci
     if(coachId){
       const { data: cprof } = await supaClient.from('profiles').select('referred_by, referral_rewarded, name').eq('id', coachId).single();
+      console.log('[referral] coach check:', cprof);
       if(cprof && cprof.referred_by && !cprof.referral_rewarded){
-        const { data: cb } = await supaClient.from('bookings').select('id').eq('coach_id', coachId);
-        if(cb && cb.length===1){
+        const { error: fErr } = await supaClient.from('profiles').update({ referral_rewarded:true }).eq('id', coachId);
+        if(fErr){ console.error('[referral] ⚠️ referral_rewarded sloupec asi chybí v DB:', fErr.message); }
+        else {
           const { data: rf } = await supaClient.from('profiles').select('coach_credits').eq('id', cprof.referred_by).single();
           await supaClient.from('profiles').update({ coach_credits: ((rf&&rf.coach_credits)||0)+3 }).eq('id', cprof.referred_by);
-          await supaClient.from('profiles').update({ referral_rewarded:true }).eq('id', coachId);
           await supaClient.from('notifications').insert({ user_id: cprof.referred_by, type:'referral', read:false, data: JSON.stringify({ kind:'referral_reward_coach', who: cprof.name||'' }), message:`🎁 Tvůj pozvaný kouč ${cprof.name||''} dostal první rezervaci! Máš 3 lekce s 0% provizí — necháš si 100 %.` });
+          if(typeof fillReferral==='function') fillReferral();
+          console.log('[referral] ✅ coach reward: +3 coach_credits pro zvoucího', cprof.referred_by);
         }
       }
     }
