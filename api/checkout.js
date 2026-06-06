@@ -17,6 +17,7 @@ export default async function handler(req, res) {
       nomarkup,          // '1' = referral sleva: student platí bez 10% markupu (1.00)
       credit,            // 'student' | 'coach' | 'none' — který referral kredit se použil
       studentId,         // profiles.id studenta (pro webhook → vytvoření bookingu)
+      disc,              // disciplína rezervace (pro 1% ambassador atribuci)
     } = req.query;
 
     if (!coachId || !amount) {
@@ -68,6 +69,7 @@ export default async function handler(req, res) {
         booking_currency: currency,
         online_fmt: fmt || '',
         coach_name: coachName || '',
+        discipline: disc || '',
       },
       line_items: [
         {

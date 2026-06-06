@@ -51,12 +51,17 @@ async function payGymAmbassador(discCsv, base, currency, idemKey) {
     );
   } catch (e) { console.error('payGymAmbassador', e); }
 }
-async function payAmbassador(coachId, amount, currency) {
+async function payAmbassador(coachId, amount, currency, disc) {
   try {
     if (!coachId || !amount || amount <= 0) return;
-    const cps = await sbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=disciplines`);
     let discs = [];
-    try { const cp = cps[0]; discs = cp && cp.disciplines ? (typeof cp.disciplines === 'string' ? JSON.parse(cp.disciplines) : cp.disciplines) : []; } catch (e) {}
+    if (disc) { discs = [disc]; }
+    else {
+      const cps = await sbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=disciplines`);
+      try { const cp = cps[0]; discs = cp && cp.disciplines ? (typeof cp.disciplines === 'string' ? JSON.parse(cp.disciplines) : cp.disciplines) : []; } catch (e) {}
+      // jen pokud má kouč JEDINOU disciplínu (jinak neznáme atribuci)
+      if (Array.isArray(discs) && discs.length > 1) return;
+    }
     if (!Array.isArray(discs) || !discs.length) return;
     // NOTE: při škále filtrovat na straně DB; zatím prosté načtení profilů.
     const ambs = await sbGet(`profiles?select=id,stripe_account,verify_disciplines`);
@@ -84,7 +89,14 @@ export default async function handler(req, res) {
   try {
     const buf = await rawBody(req);
     const sig = req.headers['stripe-signature'];
-    event = stripe.webhooks.constructEvent(buf, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    // Dva endpointy (tvůj účet + connected/gym) = dva podpisové klíče. Zkus oba.
+    const secrets = [process.env.STRIPE_WEBHOOK_SECRET, process.env.STRIPE_WEBHOOK_SECRET_CONNECT].filter(Boolean);
+    let lastErr = null;
+    for (const sec of secrets) {
+      try { event = stripe.webhooks.constructEvent(buf, sig, sec); lastErr = null; break; }
+      catch (e) { lastErr = e; }
+    }
+    if (!event) throw (lastErr || new Error('No webhook secret configured'));
   } catch (err) {
     console.error('Webhook signature failed:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -111,26 +123,26 @@ export default async function handler(req, res) {
                 slot_id: slot.id, student_id: m.student_id || null, coach_id: slot.coach_profile_id,
                 coach_name: m.coach_name || 'Kouč', payment_intent: pi, amount,
                 training_date: slot.date, training_time: slot.time,
-                status: 'active', type: 'inperson', currency,
+                status: 'active', type: 'inperson', currency, discipline: m.discipline || null,
               });
               if (slot.coach_profile_id) await sbPost('notifications', {
                 user_id: slot.coach_profile_id, type: 'booking', read: false,
                 message: `📅 Nová rezervace (potvrzeno platbou) na ${slot.date} ${slot.time}.`,
               });
-              await payAmbassador(slot.coach_profile_id, amount, currency);
+              await payAmbassador(slot.coach_profile_id, amount, currency, m.discipline);
             }
           } else if (m.booking_type === 'online' && m.coach_profile_id) {
             await sbPost('bookings', {
               slot_id: null, student_id: m.student_id || null, coach_id: m.coach_profile_id,
               coach_name: m.coach_name || 'Kouč', payment_intent: pi, amount,
               training_date: new Date().toISOString().slice(0, 10), training_time: null,
-              status: 'active', type: 'online', currency, online_format: m.online_fmt || null,
+              status: 'active', type: 'online', currency, online_format: m.online_fmt || null, discipline: m.discipline || null,
             });
             await sbPost('notifications', {
               user_id: m.coach_profile_id, type: 'booking', read: false,
               message: `🌐 Nová online objednávka (potvrzeno platbou).`,
             });
-            await payAmbassador(m.coach_profile_id, amount, currency);
+            await payAmbassador(m.coach_profile_id, amount, currency, m.discipline);
           }
         }
       } else if (m.mtl_payment_type === 'drop_in' || m.mtl_payment_type === 'membership') {
