@@ -51,7 +51,7 @@ export default async function handler(req, res) {
         payment_intent_data: {
           application_fee_amount: applicationFee, // jde MTL; Stripe fee strhne Stripe z podílu gymu
         },
-        success_url: `${proto}://${host}/?gym_pay=ok&booking=${encodeURIComponent(bookingId || '')}&session={CHECKOUT_SESSION_ID}`,
+        success_url: `${proto}://${host}/?gym_pay=ok&booking=${encodeURIComponent(bookingId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
         cancel_url: `${proto}://${host}/`,
       },
       { stripeAccount: gymAccount } // ← DIRECT CHARGE: charge vzniká na účtu gymu
