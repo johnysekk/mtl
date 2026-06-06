@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-Q · gym drop-in reschedule + cancel (6h, same discipline) -->
+<!-- MTL build: 2026-06-07-R · drop-in reschedule capacity + 2x limit -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -3988,12 +3988,13 @@ async function loadMyMemberships(){
       const hrs=(dt-now)/(1000*60*60);
       const canChange = hrs>=6;
       const discTag = (b.discipline && isMultiDiscipline()) ? ` · ${disciplineEmoji(b.discipline)} ${disciplineLabel(b.discipline)}` : '';
+      const rc = b.reschedule_count||0; const canResched = canChange && rc < 2;
       const windowTxt = canChange ? (LANG==='en'?'Free reschedule / 93% refund (6+ h before)':'Přesun zdarma / 93 % zpět (6+ h před lekcí)') : (LANG==='en'?'Less than 6 h before — no change/refund':'Méně než 6 h před lekcí — bez změny/vrácení');
       return `<div style="background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px;">
         <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.03em;color:var(--dark);">${escapeHtml(b.gym_name||'Gym')}</div>
         <div style="font-size:14px;color:var(--mid);margin:2px 0;">📍 ${b.class_name?escapeHtml(b.class_name)+' · ':''}${b.class_date} ${b.class_time||''}${discTag}</div>
-        <div style="font-size:12px;color:${canChange?'#006040':'var(--light)'};margin-bottom:12px;">${windowTxt}</div>
-        ${canChange?`<button class="gymReschedBtn" data-id="${b.id}" style="width:100%;padding:11px;background:#E8F0FF;color:var(--blue);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">${LANG==='en'?'🔄 Reschedule to another class':'🔄 Přesunout na jinou lekci'}</button>
+        <div style="font-size:12px;color:${canChange?'#006040':'var(--light)'};margin-bottom:12px;">${windowTxt}${rc>0?` · ${LANG==='en'?`reschedules used ${rc}/2`:`přesunů ${rc}/2`}`:''}</div>
+        ${canChange?`${canResched?`<button class="gymReschedBtn" data-id="${b.id}" style="width:100%;padding:11px;background:#E8F0FF;color:var(--blue);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">${LANG==='en'?'🔄 Reschedule to another class':'🔄 Přesunout na jinou lekci'}</button>`:`<div style="font-size:12px;color:var(--light);text-align:center;margin-bottom:8px;">${LANG==='en'?'Max reschedules used (2/2)':'Limit přesunů využit (2/2)'}</div>`}
         <button class="gymDropCancelBtn" data-id="${b.id}" style="width:100%;padding:11px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Cancel (93% back)':'Zrušit (93 % zpět)'}</button>`:''}
       </div>`;
     }).join('');
@@ -4013,11 +4014,18 @@ async function openGymReschedule(b){
   if(list) list.innerHTML = `<p style="text-align:center;color:var(--light);padding:40px;">${L('Načítám časy...')}</p>`;
   $('rescheduleOv').classList.add('open');
   let gym=null;
-  try{ const { data:g } = await supaClient.from('gyms').select('id, name, schedule, disciplines, currency').eq('id', b.gym_id).single(); gym=g; }catch(e){}
+  try{ const { data:g } = await supaClient.from('gyms').select('id, name, schedule, disciplines, currency, capacity').eq('id', b.gym_id).single(); gym=g; }catch(e){}
   let sched=[]; try{ sched = (gym&&typeof gym.schedule==='string')?JSON.parse(gym.schedule):((gym&&gym.schedule)||[]); }catch(e){}
   const occs = upcomingClasses(sched, 21);
   const now=new Date();
   const minTime=new Date(now.getTime()+6*60*60*1000); // aspoň 6h dopředu
+  // obsazenost cílových lekcí (rezervace + aktivní drop-iny) pro kontrolu kapacity
+  const today2 = new Date().toISOString().slice(0,10);
+  const countMap={};
+  if(gym && gym.capacity){
+    try{ const { data: rv } = await supaClient.from('gym_class_reservations').select('class_date,class_time,class_name').eq('gym_id', b.gym_id).gte('class_date', today2); (rv||[]).forEach(r=>{ const k=`${r.class_date}|${r.class_time}|${r.class_name||''}`; countMap[k]=(countMap[k]||0)+1; }); }catch(e){}
+    try{ const { data: db2 } = await supaClient.from('gym_bookings').select('class_date,class_time,class_name,id').eq('gym_id', b.gym_id).eq('status','active').gte('class_date', today2); (db2||[]).forEach(d=>{ if(String(d.id)===String(b.id)) return; const k=`${d.class_date}|${d.class_time}|${d.class_name||''}`; countMap[k]=(countMap[k]||0)+1; }); }catch(e){}
+  }
   const valid = occs.filter(o=>{
     const dt=new Date(`${o.date}T${(o.time||'00:00')}:00`);
     if(dt < minTime) return false;
@@ -4025,6 +4033,8 @@ async function openGymReschedule(b){
     if(b.discipline && o.disc && o.disc!==b.discipline) return false;
     // nevybírat ten samý termín
     if(o.date===b.class_date && o.time===b.class_time && (o.name||'')===(b.class_name||'')) return false;
+    // kapacita cílové lekce
+    if(gym && gym.capacity){ const k=`${o.date}|${o.time}|${o.name||''}`; if((countMap[k]||0) >= gym.capacity) return false; }
     return true;
   });
   if(!valid.length){
@@ -4049,6 +4059,7 @@ async function openGymReschedule(b){
 async function doGymReschedule(occ){
   const b = window._gymReschedBooking;
   if(!b) return;
+  if((b.reschedule_count||0) >= 2){ toast(LANG==='en'?'⚠️ You have used both reschedules for this drop-in.':'⚠️ Oba přesuny tohoto drop-inu jsou vyčerpané.'); return; }
   const dd=new Date(occ.date);
   const dayName=dowShort()[dd.getDay()];
   const newStr=`${dayName} ${dd.getDate()}.${dd.getMonth()+1}. · ${occ.time}`;
@@ -4056,7 +4067,20 @@ async function doGymReschedule(occ){
       ? `Move your drop-in to ${newStr}? No charge, no refund — just a new class.`
       : `Přesunout drop-in na ${newStr}? Bez poplatku, bez storna — jen jiná lekce.`)) return;
   try{
-    const patch = { class_name: occ.name||null, class_date: occ.date||null, class_time: occ.time||null };
+    // race re-check kapacity cílové lekce
+    try{
+      const { data:g } = await supaClient.from('gyms').select('capacity').eq('id', b.gym_id).single();
+      if(g && g.capacity){
+        const today3=new Date().toISOString().slice(0,10);
+        let cnt=0;
+        const { data: rv } = await supaClient.from('gym_class_reservations').select('id').eq('gym_id', b.gym_id).eq('class_date', occ.date).eq('class_time', occ.time).eq('class_name', occ.name||null);
+        cnt += (rv||[]).length;
+        const { data: db3 } = await supaClient.from('gym_bookings').select('id').eq('gym_id', b.gym_id).eq('status','active').eq('class_date', occ.date).eq('class_time', occ.time);
+        cnt += (db3||[]).filter(x=>String(x.id)!==String(b.id)).length;
+        if(cnt >= g.capacity){ toast(LANG==='en'?'⚠️ That class just filled up — pick another.':'⚠️ Tahle lekce se mezitím zaplnila — vyber jinou.'); openGymReschedule(b); return; }
+      }
+    }catch(e){}
+    const patch = { class_name: occ.name||null, class_date: occ.date||null, class_time: occ.time||null, reschedule_count: (b.reschedule_count||0)+1 };
     if(occ.disc){ patch.discipline = occ.disc; }
     await supaClient.from('gym_bookings').update(patch).eq('id', b.id);
     // notifikace gymu (best-effort)
