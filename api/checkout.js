@@ -15,6 +15,7 @@ export default async function handler(req, res) {
       fmt,               // formát/tier online objednávky (label)
       commission,        // appFee fraction (markup+cut); founding 0.13, jinak 0.15
       nomarkup,          // '1' = referral sleva: student platí bez 10% markupu (1.00)
+      credit,            // 'student' | 'coach' | 'none' — který referral kredit se použil
     } = req.query;
 
     if (!coachId || !amount) {
@@ -67,6 +68,12 @@ export default async function handler(req, res) {
         application_fee_amount: applicationFee,
         on_behalf_of: coachId,
         transfer_data: { destination: coachId },
+        metadata: {
+          credit_type: credit || 'none',                         // student / coach / none
+          coach_pct: (STUDENT_MARKUP - COMMISSION).toFixed(2),   // 1.00=kouč 100% (bonus), 0.97=founding, 0.95=běžně
+          commission_pct: COMMISSION.toFixed(2),
+          coach_name: coachName || '',
+        },
       },
       success_url: successUrl,
       cancel_url: `${proto}://${host}/`,
