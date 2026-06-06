@@ -28,6 +28,26 @@ async function sbPatch(table, filter, patch) {
   await fetch(`${SB}/rest/v1/${table}?${filter}`, { method: 'PATCH', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(patch) });
 }
 
+// MTL Ambassador 1% — pošle 1 % základu ambassadorovi dané disciplíny (z provize MTL).
+// Aktivuje se, jakmile existuje ambassador (profil s verify_disciplines + stripe_account).
+async function payAmbassador(coachId, amount, currency) {
+  try {
+    if (!coachId || !amount || amount <= 0) return;
+    const cps = await sbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=disciplines`);
+    let discs = [];
+    try { const cp = cps[0]; discs = cp && cp.disciplines ? (typeof cp.disciplines === 'string' ? JSON.parse(cp.disciplines) : cp.disciplines) : []; } catch (e) {}
+    if (!Array.isArray(discs) || !discs.length) return;
+    // NOTE: při škále filtrovat na straně DB; zatím prosté načtení profilů.
+    const ambs = await sbGet(`profiles?select=id,stripe_account,verify_disciplines`);
+    const amb = (ambs || []).find(a => a.id !== coachId && a.stripe_account && (() => {
+      try { const v = a.verify_disciplines ? (typeof a.verify_disciplines === 'string' ? JSON.parse(a.verify_disciplines) : a.verify_disciplines) : []; return Array.isArray(v) && v.some(x => discs.includes(x)); } catch (e) { return false; }
+    })());
+    if (!amb) return;
+    const cut = Math.round(amount * 0.01 * 100); // 1 % základu v minor units
+    if (cut > 0) await stripe.transfers.create({ amount: cut, currency: (currency || 'CZK').toLowerCase(), destination: amb.stripe_account, description: 'MTL Ambassador 1%' });
+  } catch (e) { console.error('payAmbassador', e); }
+}
+
 function rawBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -76,6 +96,7 @@ export default async function handler(req, res) {
                 user_id: slot.coach_profile_id, type: 'booking', read: false,
                 message: `📅 Nová rezervace (potvrzeno platbou) na ${slot.date} ${slot.time}.`,
               });
+              await payAmbassador(slot.coach_profile_id, amount, currency);
             }
           } else if (m.booking_type === 'online' && m.coach_profile_id) {
             await sbPost('bookings', {
@@ -88,6 +109,7 @@ export default async function handler(req, res) {
               user_id: m.coach_profile_id, type: 'booking', read: false,
               message: `🌐 Nová online objednávka (potvrzeno platbou).`,
             });
+            await payAmbassador(m.coach_profile_id, amount, currency);
           }
         }
       }
