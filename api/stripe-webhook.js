@@ -1,0 +1,112 @@
+// /api/stripe-webhook.js — Stripe webhook (záchranná síť, ať neunikne žádná platba)
+// Vyžaduje env: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+//
+// Nastavení ve Stripe Dashboard → Developers → Webhooks → Add endpoint:
+//   URL: https://app.muaythailab.co/api/stripe-webhook
+//   Events: checkout.session.completed, charge.refunded, charge.dispute.created
+//   Signing secret → ulož do env STRIPE_WEBHOOK_SECRET
+//
+// DŮLEŽITÉ: webhook musí číst RAW body (proto bodyParser:false), jinak selže ověření podpisu.
+
+import Stripe from 'stripe';
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+export const config = { api: { bodyParser: false } };
+
+const SB = process.env.SUPABASE_URL;
+const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const sbHeaders = { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json' };
+
+async function sbGet(path) {
+  const r = await fetch(`${SB}/rest/v1/${path}`, { headers: sbHeaders });
+  return r.ok ? r.json() : [];
+}
+async function sbPost(table, row) {
+  await fetch(`${SB}/rest/v1/${table}`, { method: 'POST', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(row) });
+}
+async function sbPatch(table, filter, patch) {
+  await fetch(`${SB}/rest/v1/${table}?${filter}`, { method: 'PATCH', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(patch) });
+}
+
+function rawBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (c) => (data += c));
+    req.on('end', () => resolve(Buffer.from(data)));
+    req.on('error', reject);
+  });
+}
+
+export default async function handler(req, res) {
+  if (req.method !== 'POST') return res.status(405).end();
+  let event;
+  try {
+    const buf = await rawBody(req);
+    const sig = req.headers['stripe-signature'];
+    event = stripe.webhooks.constructEvent(buf, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error('Webhook signature failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  try {
+    if (event.type === 'checkout.session.completed') {
+      const s = event.data.object;
+      const m = s.metadata || {};
+      // jen lekce koučů (gym jede direct-charge na účet gymu, ne přes platformu)
+      if (m.booking_type === 'inperson' || m.booking_type === 'online') {
+        const pi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id);
+        // IDEMPOTENCE: existuje už booking pro tento payment_intent?
+        const existing = pi ? await sbGet(`bookings?payment_intent=eq.${encodeURIComponent(pi)}&select=id`) : [];
+        if (!existing.length) {
+          const amount = parseInt(m.base_amount || '0', 10);
+          const currency = m.booking_currency || 'CZK';
+          if (m.booking_type === 'inperson' && m.slot_id) {
+            const slots = await sbGet(`slots?id=eq.${encodeURIComponent(m.slot_id)}&select=*`);
+            const slot = slots[0];
+            if (slot) {
+              await sbPatch('slots', `id=eq.${encodeURIComponent(m.slot_id)}`, { booked: true, student: m.student_id || null });
+              await sbPost('bookings', {
+                slot_id: slot.id, student_id: m.student_id || null, coach_id: slot.coach_profile_id,
+                coach_name: m.coach_name || 'Kouč', payment_intent: pi, amount,
+                training_date: slot.date, training_time: slot.time,
+                status: 'active', type: 'inperson', currency,
+              });
+              if (slot.coach_profile_id) await sbPost('notifications', {
+                user_id: slot.coach_profile_id, type: 'booking', read: false,
+                message: `📅 Nová rezervace (potvrzeno platbou) na ${slot.date} ${slot.time}.`,
+              });
+            }
+          } else if (m.booking_type === 'online' && m.coach_profile_id) {
+            await sbPost('bookings', {
+              slot_id: null, student_id: m.student_id || null, coach_id: m.coach_profile_id,
+              coach_name: m.coach_name || 'Kouč', payment_intent: pi, amount,
+              training_date: new Date().toISOString().slice(0, 10), training_time: null,
+              status: 'active', type: 'online', currency, online_format: m.online_fmt || null,
+            });
+            await sbPost('notifications', {
+              user_id: m.coach_profile_id, type: 'booking', read: false,
+              message: `🌐 Nová online objednávka (potvrzeno platbou).`,
+            });
+          }
+        }
+      }
+    } else if (event.type === 'charge.refunded') {
+      const ch = event.data.object;
+      const pi = typeof ch.payment_intent === 'string' ? ch.payment_intent : (ch.payment_intent && ch.payment_intent.id);
+      if (pi) {
+        const full = ch.amount_refunded >= ch.amount_captured;
+        const pct = ch.amount_captured ? Math.round((ch.amount_refunded / ch.amount_captured) * 100) : 100;
+        await sbPatch('bookings', `payment_intent=eq.${encodeURIComponent(pi)}`, full ? { status: 'cancelled', refund_pct: pct } : { refund_pct: pct });
+      }
+    } else if (event.type === 'charge.dispute.created') {
+      const d = event.data.object;
+      const pi = typeof d.payment_intent === 'string' ? d.payment_intent : (d.payment_intent && d.payment_intent.id);
+      if (pi) await sbPatch('bookings', `payment_intent=eq.${encodeURIComponent(pi)}`, { refund_requested: true, refund_reason: '(DISPUTE přes Stripe)' });
+    }
+    res.status(200).json({ received: true });
+  } catch (err) {
+    console.error('Webhook handler error:', err.message);
+    res.status(200).json({ received: true, error: err.message }); // 200, ať Stripe neretryuje donekonečna na našich chybách
+  }
+}
