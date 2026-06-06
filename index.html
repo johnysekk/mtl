@@ -1858,7 +1858,6 @@ const I18N = { en: {
   "⟳ Obnovuji...":"⟳ Refreshing...",
   "Stripe účet odpojen":"Stripe account disconnected",
   // ── Statistiky kouče (renderCoachAnalytics) ──
-  "Celkem rezervací":"Total bookings",
   "Storna a refundy":"Cancellations & refunds",
   "Průměr":"Average",
   "Počet recenzí":"Number of reviews",
@@ -1884,7 +1883,6 @@ const I18N = { en: {
   // ── Founder dashboard (renderMtl) ──
   "👑 MTL — reálné (proběhlé)":"👑 MTL — actual (completed)",
   "Obrat":"Turnover",
-  "Provize 20%":"Commission 20%",
   "Čistý zisk":"Net profit",
   "📅 Očekávané (nadcházející)":"📅 Expected (upcoming)",
   "Stripe fee (odhad)":"Stripe fee (estimate)",
@@ -3318,7 +3316,7 @@ function hideMatch(){ $('matchOv').classList.remove('open'); }
 // ════════════════════════════════════════
 // SHEETS
 // ════════════════════════════════════════
-const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMe','shSettings','shCoachApp','shAdmin','shNotif','shChat','shBookings','shDiary','shCoachStats','shOnline','shLeaderboard','shOpportunities'];
+const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMe','shSettings','shCoachApp','shAdmin','shNotif','shChat','shBookings','shDiary','shCoachStats','shGymStats','shFounderDash','shGyms','shGymProfile','shGymManage','shMemberships','shOnline','shLeaderboard','shOpportunities'];
 
 function openSheet(id){
   SHEETS.forEach(s=>{ if(s!==id) $(s).classList.remove('open'); });
@@ -3526,6 +3524,8 @@ async function renderGymManage(){
   try{ _gymSchedule = JSON.parse(g.schedule||'[]'); }catch(e){ _gymSchedule=[]; }
   const sym = g.currency==='EUR'?'€':g.currency==='USD'?'$':'Kč';
   box.innerHTML = `
+    <div class="sec-lbl">📊 ${LANG==='en'?'Overview':'Přehled'}</div>
+    <div id="mgStats" style="margin-bottom:20px;"><p style="color:var(--light);font-size:13px;">${L('Načítám...')}</p></div>
     <div class="sec-lbl">${LANG==='en'?'Drop-in price':'Cena drop-inu'}</div>
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;">
       <input id="mgDropin" type="number" inputmode="numeric" value="${g.dropin_price||''}" style="flex:1;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';">
@@ -3574,18 +3574,53 @@ async function saveGymManage(){
   toast(LANG==='en'?'✅ Saved':'✅ Uloženo');
 }
 async function loadGymManageBookings(){
-  const box=$('mgBookings'); if(!box||!_myGymData) return;
-  const { data: bks } = await supaClient.from('gym_bookings').select('*').eq('gym_id', _myGymData.id).eq('status','active').order('created_at',{ascending:false}).limit(20);
-  const { data: mbs } = await supaClient.from('gym_memberships').select('*').eq('gym_id', _myGymData.id).in('status',['active','cancelling']).order('created_at',{ascending:false}).limit(20);
-  const sym = _myGymData.currency==='EUR'?'€':_myGymData.currency==='USD'?'$':'Kč';
-  const drops=bks||[], mems=mbs||[]; let html='';
+  if(!_myGymData) return;
+  const { data: bks } = await supaClient.from('gym_bookings').select('*').eq('gym_id', _myGymData.id).eq('status','active').order('created_at',{ascending:false});
+  const { data: mbs } = await supaClient.from('gym_memberships').select('*').eq('gym_id', _myGymData.id).in('status',['active','cancelling']).order('created_at',{ascending:false});
+  const drops=bks||[], mems=mbs||[];
+  const cur=_myGymData.currency||'CZK';
+  const sym = cur==='EUR'?'€':cur==='USD'?'$':'Kč';
+  const f=v=>`${fmtPrice(v,cur)} ${sym}`;
+  // ── PŘEHLED (dashboard majitele — BEZ MTL provize) ──
+  const stats=$('mgStats');
+  if(stats){
+    const dropBase=drops.reduce((s,b)=>s+(b.amount||0),0);
+    const dropTurnover=dropBase*1.03, dropGym=dropBase*0.97;
+    const cancelling=mems.filter(m=>m.status==='cancelling').length;
+    const memMRR=mems.reduce((s,m)=>s+(m.amount||0),0), memGym=memMRR*0.95;
+    const dropFee=drops.reduce((s,b)=>s+((b.amount||0)*1.03*0.019+6),0);
+    const memFeeMo=mems.reduce((s,m)=>s+((m.amount||0)*0.019+6),0);
+    const dropNet=Math.max(0,dropGym-dropFee), memNetMo=Math.max(0,memGym-memFeeMo);
+    stats.innerHTML=`
+      <div style="font-size:12px;font-weight:700;color:var(--mid);margin:2px 0 6px;">🥊 ${LANG==='en'?'Drop-ins':'Drop-iny'}</div>
+      <div class="prow-group" style="margin-bottom:12px;">
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🥊</div><div class="prow-lbl">${LANG==='en'?'Sold':'Prodáno'}</div></div><span class="prow-val">${drops.length}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💳</div><div class="prow-lbl">${LANG==='en'?'Turnover':'Obrat'}</div></div><span class="prow-val">${f(dropTurnover)}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏋️</div><div class="prow-lbl">${LANG==='en'?'Your share (97%)':'Tvůj podíl (97 %)'}</div></div><span class="prow-val">${f(dropGym)}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF0E6;">💳</div><div class="prow-lbl">${LANG==='en'?'− Stripe fee (est.)':'− Stripe fee (odhad)'}</div></div><span class="prow-val">-${f(dropFee)}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💎</div><div class="prow-lbl">${LANG==='en'?'= Net (est.)':'= Net (odhad)'}</div></div><span class="prow-val" style="color:#006040;">${f(dropNet)}</span></div>
+      </div>
+      <div style="font-size:12px;font-weight:700;color:var(--mid);margin:2px 0 6px;">🎟️ ${LANG==='en'?'Membership':'Členství'}</div>
+      <div class="prow-group">
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🎟️</div><div class="prow-lbl">${LANG==='en'?'Active members':'Aktivní členové'}</div></div><span class="prow-val">${mems.length}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">📉</div><div class="prow-lbl">${LANG==='en'?'Cancelling':'Ruší se'}</div></div><span class="prow-val" style="${cancelling>0?'color:var(--red);':''}">${cancelling}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🔁</div><div class="prow-lbl">MRR</div></div><span class="prow-val">${f(memMRR)}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏋️</div><div class="prow-lbl">${LANG==='en'?'Your share / mo (95%)':'Tvůj podíl / měs (95 %)'}</div></div><span class="prow-val">${f(memGym)}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💎</div><div class="prow-lbl">${LANG==='en'?'= Net / mo (est.)':'= Net / měs (odhad)'}</div></div><span class="prow-val" style="color:#006040;">${f(memNetMo)}</span></div>
+      </div>
+      <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:8px;">${LANG==='en'?'Stripe fee is estimated (~1.9% + small fix); exact fee is in your Stripe dashboard. VAT with your accountant.':'Stripe fee je odhad (~1,9 % + drobný fix); přesný poplatek máš ve svém Stripe. DPH řeš s účetní.'}</p>
+    `;
+  }
+  // ── POSLEDNÍ REZERVACE (seznam) ──
+  const box=$('mgBookings'); if(!box) return;
+  let html='';
   if(mems.length){
     html += `<div style="font-size:12px;font-weight:700;color:var(--mid);margin:6px 0;">🎟️ ${LANG==='en'?'Members':'Členové'} (${mems.length})</div>`;
-    html += mems.map(m=>`<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px;"><span>${m.student_name||'Student'}${m.status==='cancelling'?` <span style="color:var(--light);font-size:12px;">(${LANG==='en'?'cancelling':'ruší se'})</span>`:''}</span><strong>${fmtPrice((m.amount||0)*0.95, m.currency)} ${sym}/${LANG==='en'?'mo':'měs'}</strong></div>`).join('');
+    html += mems.slice(0,20).map(m=>`<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px;"><span>${m.student_name||'Student'}${m.status==='cancelling'?` <span style="color:var(--light);font-size:12px;">(${LANG==='en'?'cancelling':'ruší se'})</span>`:''}</span><strong>${fmtPrice((m.amount||0)*0.95, m.currency)} ${sym}/${LANG==='en'?'mo':'měs'}</strong></div>`).join('');
   }
   if(drops.length){
     html += `<div style="font-size:12px;font-weight:700;color:var(--mid);margin:12px 0 6px;">🥊 ${LANG==='en'?'Drop-ins':'Drop-iny'} (${drops.length})</div>`;
-    html += drops.map(b=>`<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px;"><span>${b.student_name||'Student'}${b.class_name?' · '+b.class_name:''}${b.class_date?' · '+b.class_date+' '+(b.class_time||''):''}</span><strong>${fmtPrice((b.amount||0)*0.97, b.currency)} ${sym}</strong></div>`).join('');
+    html += drops.slice(0,20).map(b=>`<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px;"><span>${b.student_name||'Student'}${b.class_name?' · '+b.class_name:''}${b.class_date?' · '+b.class_date+' '+(b.class_time||''):''}</span><strong>${fmtPrice((b.amount||0)*0.97, b.currency)} ${sym}</strong></div>`).join('');
   }
   if(!html) html=`<p style="color:var(--light);font-size:13px;">${LANG==='en'?'No bookings yet.':'Zatím žádné rezervace.'}</p>`;
   box.innerHTML=html;
@@ -4787,6 +4822,7 @@ async function renderGymAnalytics(gymId, containerId){
   const dropBase = drops.reduce((s,b)=>s+(b.amount||0),0);
   const dropTurnover = dropBase*1.03, dropGym = dropBase*0.97, dropMtl = dropBase*0.06;
   const activeMems = mems.filter(m=>m.status==='active'||m.status==='cancelling');
+  const cancellingMems = mems.filter(m=>m.status==='cancelling').length;
   const memMonthly = activeMems.reduce((s,m)=>s+(m.amount||0),0);
   const memGymMo = memMonthly*0.95, memMtlMo = memMonthly*0.05;
   const fmt=v=>`${fmtPrice(v,cur)} ${sym}`;
@@ -4802,14 +4838,10 @@ async function renderGymAnalytics(gymId, containerId){
     <div class="sec-lbl">${LANG==='en'?'Membership':'Členství'}</div>
     <div class="prow-group" style="margin-bottom:16px;">
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🎟️</div><div class="prow-lbl">${LANG==='en'?'Active members':'Aktivní členové'}</div></div><span class="prow-val">${activeMems.length}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">📉</div><div class="prow-lbl">${LANG==='en'?'Cancelling (churn)':'Ruší se (churn)'}</div></div><span class="prow-val" style="${cancellingMems>0?'color:var(--red);':''}">${cancellingMems}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🔁</div><div class="prow-lbl">${LANG==='en'?'Monthly recurring (MRR)':'Měsíčně (MRR)'}</div></div><span class="prow-val">${fmt(memMonthly)}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏋️</div><div class="prow-lbl">${LANG==='en'?'Gym / mo (95%)':'Gymu / měs (95 %)'}</div></div><span class="prow-val">${fmt(memGymMo)}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">👑</div><div class="prow-lbl">${LANG==='en'?'MTL / mo (5%)':'MTL / měs (5 %)'}</div></div><span class="prow-val" style="color:var(--red);">${fmt(memMtlMo)}</span></div>
-    </div>
-    <div class="sec-lbl">${LANG==='en'?'MTL commission':'MTL provize'}</div>
-    <div class="prow-group">
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">👑</div><div class="prow-lbl">${LANG==='en'?'Drop-in fees (to date)':'Z drop-inů (dosud)'}</div></div><span class="prow-val" style="color:var(--red);">${fmt(dropMtl)}</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">👑</div><div class="prow-lbl">${LANG==='en'?'Membership fees / mo':'Z členství / měs'}</div></div><span class="prow-val" style="color:var(--red);">${fmt(memMtlMo)}</span></div>
     </div>
   `;
 }
@@ -4842,45 +4874,69 @@ async function renderFounderDash(){
   const box=$('founderDashBody'); if(!box) return;
   box.innerHTML=`<p style="color:var(--light);padding:20px;">${L('Načítám...')}</p>`;
   const [rb, rgb, rgm, rc, rg] = await Promise.all([
-    supaClient.from('bookings').select('amount, status').eq('status','active'),
-    supaClient.from('gym_bookings').select('amount, status').eq('status','active'),
-    supaClient.from('gym_memberships').select('amount, status'),
-    supaClient.from('profiles').select('id, name, photo_url, city, country').eq('coach_status','approved'),
-    supaClient.from('gyms').select('id, name, city, country, photos, membership_price').eq('status','approved')
+    supaClient.from('bookings').select('amount, status, created_at'),
+    supaClient.from('gym_bookings').select('amount, status, created_at'),
+    supaClient.from('gym_memberships').select('amount, status, created_at'),
+    supaClient.from('profiles').select('id, name, photo_url, city, country, created_at').eq('coach_status','approved'),
+    supaClient.from('gyms').select('id, name, city, country, photos, membership_price, created_at').eq('status','approved')
   ]);
   const B=rb.data||[], GB=rgb.data||[], GM=rgm.data||[], coaches=rc.data||[], gyms=rg.data||[];
-  let coachBase=0; B.forEach(b=>coachBase+=(b.amount||0));
-  const mtlCoach=coachBase*0.15;                 // odhad (founding/kredity to mírně sníží)
-  let dropBase=0; GB.forEach(b=>dropBase+=(b.amount||0));
-  const dropTurnover=dropBase*1.03, mtlDrop=dropBase*0.06;
+  const Bact=B.filter(b=>b.status==='active'), GBact=GB.filter(b=>b.status==='active');
+  const estFee = b => (b.amount||0)*1.10*0.03 + 6; // odhad Stripe fee (MTL ho nese jen u lekcí koučů)
+  let coachBase=0; Bact.forEach(b=>coachBase+=(b.amount||0));
+  const mtlCoachGross = coachBase*0.15;            // odhad (founding/kredity mírně sníží)
+  const coachStripe = Bact.reduce((s,b)=>s+estFee(b),0);
+  const coachNet = mtlCoachGross - coachStripe;
+  let dropBase=0; GBact.forEach(b=>dropBase+=(b.amount||0));
+  const dropTurnover=dropBase*1.03, mtlDrop=dropBase*0.06; // gym nese Stripe fee → MTL net = celá provize
   const activeMem=GM.filter(m=>m.status==='active'||m.status==='cancelling');
+  const cancellingMem=GM.filter(m=>m.status==='cancelling').length;
   let memMRR=0; activeMem.forEach(m=>memMRR+=(m.amount||0));
-  const mtlMemMo=memMRR*0.05;
-  const oneOff=mtlCoach+mtlDrop;
+  const mtlMemMo=memMRR*0.05, mtlARR=mtlMemMo*12;
+  const oneOffNet = coachNet + mtlDrop;            // čistý zisk z jednorázových (dosud)
+  const mk=(()=>{ const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; })();
+  const inMonth = x => (x.created_at||'').slice(0,7)===mk;
+  const newCoaches=coaches.filter(inMonth).length, newMembers=activeMem.filter(inMonth).length;
+  const lessonsMonth=Bact.filter(inMonth).length, dropsMonth=GBact.filter(inMonth).length;
+  const mtlMonth = Bact.filter(inMonth).reduce((s,b)=>s+(b.amount||0)*0.15,0)
+                 + GBact.filter(inMonth).reduce((s,b)=>s+(b.amount||0)*0.06,0)
+                 + activeMem.filter(inMonth).reduce((s,m)=>s+(m.amount||0)*0.05,0);
   const fmt=v=>`${Math.round(v)} Kč`;
   const coachRows = coaches.length ? coaches.map(c=>`<div class="fdCoachRow" data-id="${c.id}" data-name="${(c.name||'').replace(/"/g,'&quot;')}" style="display:flex;align-items:center;gap:12px;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:11px;margin-bottom:8px;cursor:pointer;"><div style="width:40px;height:40px;border-radius:50%;background:#333 ${c.photo_url?`url('${c.photo_url}') center/cover`:''};flex-shrink:0;"></div><div style="flex:1;min-width:0;"><div style="font-size:14px;font-weight:700;color:var(--dark);">${c.name||'Kouč'}</div><div style="font-size:12px;color:var(--mid);">📍 ${c.city||'—'}${c.country?', '+c.country:''}</div></div><div style="font-size:13px;font-weight:600;color:var(--blue);">${L('Dashboard ›')}</div></div>`).join('') : `<p style="color:var(--light);font-size:13px;">${LANG==='en'?'No coaches yet.':'Zatím žádní kouči.'}</p>`;
   const gymRows = gyms.length ? gyms.map(g=>{ let ph=''; try{ ph=(JSON.parse(g.photos||'[]'))[0]||''; }catch(e){} return `<div class="fdGymRow" data-id="${g.id}" data-name="${(g.name||'').replace(/"/g,'&quot;')}" style="display:flex;align-items:center;gap:12px;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:11px;margin-bottom:8px;cursor:pointer;"><div style="width:40px;height:40px;border-radius:10px;background:#333 ${ph?`url('${ph}') center/cover`:''};flex-shrink:0;"></div><div style="flex:1;min-width:0;"><div style="font-size:14px;font-weight:700;color:var(--dark);">${g.name||'Gym'}</div><div style="font-size:12px;color:var(--mid);">📍 ${g.city||'—'}${g.country?', '+g.country:''}${g.membership_price?(LANG==='en'?' · 🎟️':' · 🎟️'):''}</div></div><div style="font-size:13px;font-weight:600;color:var(--blue);">${L('Dashboard ›')}</div></div>`; }).join('') : `<p style="color:var(--light);font-size:13px;">${LANG==='en'?'No gyms yet.':'Zatím žádné gymy.'}</p>`;
   box.innerHTML = `
-    <div class="sec-lbl">${LANG==='en'?'MTL commission':'MTL provize'}</div>
+    <div class="sec-lbl">${LANG==='en'?'MTL net profit':'MTL čistý zisk'}</div>
     <div class="prow-group" style="margin-bottom:16px;">
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">👑</div><div class="prow-lbl">${LANG==='en'?'One-off fees (to date)':'Jednorázové (dosud)'}</div></div><span class="prow-val" style="color:var(--red);">${fmt(oneOff)}</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🔁</div><div class="prow-lbl">${LANG==='en'?'Recurring / mo (memberships)':'Recurring / měs (členství)'}</div></div><span class="prow-val" style="color:var(--red);">${fmt(mtlMemMo)}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💎</div><div class="prow-lbl">${LANG==='en'?'One-off net (to date)':'Jednorázový net (dosud)'}</div></div><span class="prow-val" style="color:#006040;">${fmt(oneOffNet)}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🔁</div><div class="prow-lbl">${LANG==='en'?'Recurring net / mo':'Recurring net / měs'}</div></div><span class="prow-val" style="color:#006040;">${fmt(mtlMemMo)}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">📈</div><div class="prow-lbl">${LANG==='en'?'MTL ARR (recurring ×12)':'MTL ARR (recurring ×12)'}</div></div><span class="prow-val">${fmt(mtlARR)}</span></div>
+    </div>
+    <div class="sec-lbl">${LANG==='en'?'This month':'Tento měsíc'}</div>
+    <div class="prow-group" style="margin-bottom:16px;">
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">👑</div><div class="prow-lbl">${LANG==='en'?'MTL fees this month':'MTL provize tento měsíc'}</div></div><span class="prow-val" style="color:var(--red);">${fmt(mtlMonth)}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🆕</div><div class="prow-lbl">${LANG==='en'?'New coaches':'Noví kouči'}</div></div><span class="prow-val">${newCoaches}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🎟️</div><div class="prow-lbl">${LANG==='en'?'New members':'Noví členové'}</div></div><span class="prow-val">${newMembers}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🥊</div><div class="prow-lbl">${LANG==='en'?'Lessons / drop-ins':'Lekcí / drop-inů'}</div></div><span class="prow-val">${lessonsMonth} / ${dropsMonth}</span></div>
     </div>
     <div class="sec-lbl">${LANG==='en'?'Coaches':'Kouči'}</div>
     <div class="prow-group" style="margin-bottom:10px;">
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🥊</div><div class="prow-lbl">${LANG==='en'?'Lessons (active)':'Lekcí (aktivních)'}</div></div><span class="prow-val">${B.length}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🥊</div><div class="prow-lbl">${LANG==='en'?'Lessons (active)':'Lekcí (aktivních)'}</div></div><span class="prow-val">${Bact.length}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💳</div><div class="prow-lbl">${LANG==='en'?'Turnover (students paid)':'Obrat (zaplaceno)'}</div></div><span class="prow-val">${fmt(coachBase*1.10)}</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">👑</div><div class="prow-lbl">${LANG==='en'?'MTL fee (≈15%)':'MTL provize (≈15 %)'}</div></div><span class="prow-val" style="color:var(--red);">${fmt(mtlCoach)}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">👑</div><div class="prow-lbl">${LANG==='en'?'MTL fee (≈15%)':'MTL provize (≈15 %)'}</div></div><span class="prow-val" style="color:var(--red);">${fmt(mtlCoachGross)}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF0E6;">💳</div><div class="prow-lbl">${LANG==='en'?'− Stripe fees (est.)':'− Stripe fee (odhad)'}</div></div><span class="prow-val">-${fmt(coachStripe)}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💎</div><div class="prow-lbl">${LANG==='en'?'= Coach net':'= Net z koučů'}</div></div><span class="prow-val" style="color:#006040;">${fmt(coachNet)}</span></div>
     </div>
     <div id="fdCoaches" style="margin-bottom:18px;">${coachRows}</div>
     <div class="sec-lbl">${LANG==='en'?'Gyms':'Gymy'}</div>
     <div class="prow-group" style="margin-bottom:10px;">
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🥊</div><div class="prow-lbl">${LANG==='en'?'Drop-ins':'Drop-iny'}</div></div><span class="prow-val">${GB.length}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🥊</div><div class="prow-lbl">${LANG==='en'?'Drop-ins':'Drop-iny'}</div></div><span class="prow-val">${GBact.length}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💳</div><div class="prow-lbl">${LANG==='en'?'Drop-in turnover':'Obrat drop-inů'}</div></div><span class="prow-val">${fmt(dropTurnover)}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🎟️</div><div class="prow-lbl">${LANG==='en'?'Active members':'Aktivní členové'}</div></div><span class="prow-val">${activeMem.length}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">📉</div><div class="prow-lbl">${LANG==='en'?'Cancelling (churn)':'Ruší se (churn)'}</div></div><span class="prow-val" style="${cancellingMem>0?'color:var(--red);':''}">${cancellingMem}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🔁</div><div class="prow-lbl">${LANG==='en'?'Membership MRR':'Členství MRR'}</div></div><span class="prow-val">${fmt(memMRR)}</span></div>
     </div>
     <div id="fdGyms">${gymRows}</div>
+    <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:14px;">${LANG==='en'?'Coach fee is an estimate (≈15%); founding/referral lower it slightly. Gyms bear their own Stripe fees, so gym fees are net. Amounts summed nominally across currencies. VAT with your accountant.':'Provize koučů je odhad (≈15 %); founding/referral ji mírně sníží. Gymy nesou vlastní Stripe fee, takže gym provize jsou net. Částky sečteny nominálně napříč měnami. DPH řeš s účetní.'}</p>
   `;
   box.querySelectorAll('.fdCoachRow').forEach(r=>r.onclick=()=>openCoachStats(r.dataset.id, r.dataset.name));
   box.querySelectorAll('.fdGymRow').forEach(r=>r.onclick=()=>openGymStats(r.dataset.id, r.dataset.name));
@@ -4921,11 +4977,12 @@ async function renderCoachAnalytics(coachId, containerId){
   const earnedNet = happened.reduce((s,b)=>s+(b.amount||0)*cpct,0);
   const expectedNet = upcoming.reduce((s,b)=>s+(b.amount||0)*cpct,0);
   const grossHappened = happened.reduce((s,b)=>s+(b.amount||0)*1.10,0);
+  const cancelRate = all.length ? Math.round(cancelled.length/all.length*100) : 0;
+  const mtlFromCoach = active.reduce((s,b)=>s+(b.amount||0)*0.15,0); // odhad hrubé provize MTL z tohoto kouče
 
   box.innerHTML = `
     <div class="sec-lbl">${LANG==='en'?'Bookings':'Rezervace'}</div>
     <div class="prow-group" style="margin-bottom:16px;">
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">📋</div><div class="prow-lbl">${L('Celkem rezervací')}</div></div><span class="prow-val">${all.length}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">✅</div><div class="prow-lbl">${L('Proběhlé')}</div></div><span class="prow-val">${happened.length}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">📅</div><div class="prow-lbl">${L('Nadcházející')}</div></div><span class="prow-val">${upcoming.length}</span></div>
     </div>
@@ -4934,6 +4991,7 @@ async function renderCoachAnalytics(coachId, containerId){
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">↩️</div><div class="prow-lbl">${L('Vráceno 100%')}</div></div><span class="prow-val">${ref100}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">↩️</div><div class="prow-lbl">${L('Vráceno 50%')}</div></div><span class="prow-val">${ref50}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">↩️</div><div class="prow-lbl">${L('Bez vrácení (0%)')}</div></div><span class="prow-val">${ref0}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">📉</div><div class="prow-lbl">${LANG==='en'?'Cancellation rate':'Míra storn'}</div></div><span class="prow-val" style="${cancelRate>=25?'color:var(--red);':''}">${cancelRate}%</span></div>
     </div>
     <div class="sec-lbl">${L('Hodnocení')}</div>
     <div class="prow-group" style="margin-bottom:16px;">
@@ -4945,6 +5003,7 @@ async function renderCoachAnalytics(coachId, containerId){
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💰</div><div class="prow-lbl">${L('Vyděláno (proběhlo)')}</div></div><span class="prow-val">${Math.round(earnedNet)} Kč</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">⏳</div><div class="prow-lbl">${L('Očekávané')}</div></div><span class="prow-val">${Math.round(expectedNet)} Kč</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">💎</div><div class="prow-lbl">${L('Očekávané celkem')}</div></div><span class="prow-val">${Math.round(earnedNet+expectedNet)} Kč</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">👑</div><div class="prow-lbl">${LANG==='en'?'MTL fee from this coach (≈15%)':'MTL provize z tohoto kouče (≈15 %)'}</div></div><span class="prow-val" style="color:var(--red);">${Math.round(mtlFromCoach)} Kč</span></div>
     </div>
     <div style="display:flex;gap:10px;margin-top:20px;">
       <button id="csOpenProfile" style="flex:1;padding:13px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${L('👤 Profil & recenze')}</button>
@@ -6680,34 +6739,12 @@ async function renderMtl(){
       return `<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F4F4F5;">↩️</div><div class="prow-lbl">${who} · ${when} · ${pct}</div></div><a href="${url}" target="_blank" rel="noopener" style="font-size:12px;font-weight:700;color:var(--blue);text-decoration:none;flex-shrink:0;">Stripe ↗</a></div>`;
     }).join('');
   const estFee = b => (b.actual_stripe_fee!=null) ? b.actual_stripe_fee : ((b.amount||0)*1.10*0.03 + 6);
-  const past = all.filter(isRealized);
-  const upcoming = all.filter(b=>!isRealized(b));
-
-  const realGross = past.reduce((s,b)=>s+(b.amount||0)*1.10,0);
-  const realCommission = past.reduce((s,b)=>s+(b.amount||0)*COMMISSION,0);
-  const realFees = past.reduce((s,b)=>s+estFee(b),0);
-  const realNet = realCommission - realFees;
-  const expGross = upcoming.reduce((s,b)=>s+(b.amount||0)*1.10,0);
-  const expCommission = upcoming.reduce((s,b)=>s+(b.amount||0)*COMMISSION,0);
-  const expFees = upcoming.reduce((s,b)=>s+estFee(b),0);
-  const expectedNet = expCommission - expFees;
-  const netByMonth = groupByMonth(past, b=>(b.amount||0)*COMMISSION - estFee(b));
 
   tab.innerHTML = `
-    <div class="sec-lbl">${L('👑 MTL — reálné (proběhlé)')}</div>
-    <div class="prow-group" style="margin-bottom:16px;">
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🔄</div><div class="prow-lbl">${L('Obrat')}</div></div><span class="prow-val">${Math.round(realGross)} Kč</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">📈</div><div class="prow-lbl">${L('Provize 20%')}</div></div><span class="prow-val">${Math.round(realCommission)} Kč</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF0E6;">💳</div><div class="prow-lbl">${L('Stripe fee')}</div></div><span class="prow-val">-${Math.round(realFees)} Kč</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💎</div><div class="prow-lbl">${L('Čistý zisk')}</div></div><span class="prow-val">${Math.round(realNet)} Kč</span></div>
-    </div>
-    <div class="sec-lbl">${L('📅 Očekávané (nadcházející)')}</div>
-    <div class="prow-group" style="margin-bottom:16px;">
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🔄</div><div class="prow-lbl">${L('Obrat')}</div></div><span class="prow-val">${Math.round(expGross)} Kč</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">📈</div><div class="prow-lbl">${L('Provize 20%')}</div></div><span class="prow-val">${Math.round(expCommission)} Kč</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF0E6;">💳</div><div class="prow-lbl">${L('Stripe fee (odhad)')}</div></div><span class="prow-val">-${Math.round(expFees)} Kč</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">⏳</div><div class="prow-lbl">${L('Očekávaný čistý zisk')}</div></div><span class="prow-val">${Math.round(expectedNet)} Kč</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">💎</div><div class="prow-lbl">${L('Očekávaný čistý zisk celkem')}</div></div><span class="prow-val">${Math.round(realNet+expectedNet)} Kč</span></div>
+    <div style="background:#FFF8E6;border:1px solid #F2D98E;border-radius:14px;padding:14px 16px;margin-bottom:18px;">
+      <div style="font-weight:800;color:var(--dark);font-size:14px;margin-bottom:2px;">👑 ${LANG==='en'?'Full numbers are in Founder Dashboard':'Kompletní čísla jsou ve Founder Dashboardu'}</div>
+      <div style="font-size:12px;color:var(--mid);line-height:1.4;margin-bottom:10px;">${LANG==='en'?'Net profit, this-month growth, MRR/ARR and per-coach / per-gym dashboards.':'Čistý zisk, růst za měsíc, MRR/ARR i dashboardy jednotlivých koučů a gymů.'}</div>
+      <button id="mtlOpenFounderDash" style="width:100%;padding:11px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Open Founder Dashboard →':'Otevřít Founder Dashboard →'}</button>
     </div>
     <div class="sec-lbl">${L('Storna napříč MTL')}</div>
     <div class="prow-group" style="margin-bottom:16px;">
@@ -6717,10 +6754,9 @@ async function renderMtl(){
     </div>
     <div class="sec-lbl">${L('Refundy — otevřít ve Stripe')}</div>
     <div class="prow-group" style="margin-bottom:16px;">${refundRows || `<p style="font-size:13px;color:var(--light);padding:10px 14px;">${L('Zatím žádné refundy.')}</p>`}</div>
-    <div style="font-size:12px;color:var(--light);margin-bottom:4px;">${L('Reálný čistý zisk po měsících:')}</div>
-    ${renderBars(netByMonth, 'var(--green)')}
-    <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:12px;">${L('Stripe fee skutečný kde dostupný, jinak odhad. Zrušené lekce se nepočítají do zisku. DPH řeš s účetní.')}</p>
+    <p style="font-size:11px;color:var(--light);line-height:1.5;">${L('Klikni na „Stripe ↗" pro rozpad refundu na payment page. Až přejdeš na LIVE, smaž /test z URL v kódu.')}</p>
   `;
+  const ofd=$('mtlOpenFounderDash'); if(ofd) ofd.onclick=()=>{ openSheet('shFounderDash'); renderFounderDash(); };
 }
   
   async function updateBookCount(){
