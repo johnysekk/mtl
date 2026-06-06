@@ -21,6 +21,7 @@ export default async function handler(req, res) {
       income,            // 'main' | 'side' — jak si to gym SÁM zařadil (ne daňová rada)
       memberName,        // jméno studenta
       payee,             // komu reálně jde platba (kouč nebo gym) — pro export účetní
+      disc,              // disciplíny gymu (pro Ambassador 0,5%)
     } = req.query;
 
     if (!gymAccount || !amount) {
@@ -59,6 +60,9 @@ export default async function handler(req, res) {
             mtl_income: income || 'side',           // zařazení deklaruje prodejce (gym)
             gym_name: gymName || '',
             mtl_payee: payee || gymName || '',
+            mtl_disc: disc || '',
+            mtl_base: String(P),
+            mtl_currency: cur,
             member_name: memberName || '',
           },
         },

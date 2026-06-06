@@ -30,6 +30,27 @@ async function sbPatch(table, filter, patch) {
 
 // MTL Ambassador 1% — pošle 1 % základu ambassadorovi dané disciplíny (z provize MTL).
 // Aktivuje se, jakmile existuje ambassador (profil s verify_disciplines + stripe_account).
+// MTL Ambassador 0,5 % z GYM skupinových lekcí (z čisté provize MTL — gym nese Stripe fee).
+// Gym jede direct charge na účtu gymu; application_fee MTL končí na platform balance,
+// odkud pošleme 0,5 % základu ambassadorovi dané disciplíny (transfer mezi účty = bez Stripe fee).
+// Vyžaduje: webhook nasazený + naslouchání Connect eventům (event.account je u gym plateb).
+async function payGymAmbassador(discCsv, base, currency, idemKey) {
+  try {
+    if (!base || base <= 0) return;
+    const discs = (discCsv || '').split(',').filter(Boolean);
+    if (!discs.length) return;
+    const ambs = await sbGet(`profiles?select=id,stripe_account,verify_disciplines`);
+    const amb = (ambs || []).find(a => a.stripe_account && (() => {
+      try { const v = a.verify_disciplines ? (typeof a.verify_disciplines === 'string' ? JSON.parse(a.verify_disciplines) : a.verify_disciplines) : []; return Array.isArray(v) && v.some(x => discs.includes(x)); } catch (e) { return false; }
+    })());
+    if (!amb) return;
+    const cut = Math.round(base * 0.005 * 100); // 0,5 % základu v minor units
+    if (cut > 0) await stripe.transfers.create(
+      { amount: cut, currency: (currency || 'czk').toLowerCase(), destination: amb.stripe_account, description: 'MTL Ambassador 0.5% (gym)' },
+      idemKey ? { idempotencyKey: 'gymamb_' + idemKey } : undefined
+    );
+  } catch (e) { console.error('payGymAmbassador', e); }
+}
 async function payAmbassador(coachId, amount, currency) {
   try {
     if (!coachId || !amount || amount <= 0) return;
@@ -112,6 +133,9 @@ export default async function handler(req, res) {
             await payAmbassador(m.coach_profile_id, amount, currency);
           }
         }
+      } else if (m.mtl_payment_type === 'drop_in' || m.mtl_payment_type === 'membership') {
+        // GYM skupinová lekce (direct charge na účtu gymu) → 0,5 % ambassadorovi disciplíny
+        await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id);
       }
     } else if (event.type === 'charge.refunded') {
       const ch = event.data.object;
