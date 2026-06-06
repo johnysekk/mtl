@@ -3450,7 +3450,7 @@ async function loadGymsList(){
   }).join('');
   box.querySelectorAll('.gymCard').forEach(c=>{ c.onclick=()=>{ const g=gyms.find(x=>x.id===c.dataset.id); if(g) openGymProfile(g); }; });
 }
-function openGymProfile(g){
+async function openGymProfile(g){
   window._currentGym = g;
   if($('gymProfTitle')) $('gymProfTitle').textContent = g.name || 'Gym';
   const sym = g.currency==='EUR'?'€':g.currency==='USD'?'$':'Kč';
@@ -3463,12 +3463,48 @@ function openGymProfile(g){
   const amenIcons = Object.keys(AMEN_VIEW).filter(k=>amenObj[k]).map(k=>{ const a=AMEN_VIEW[k]; return `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--surf);border:1px solid var(--border);border-radius:999px;padding:5px 11px;font-size:13px;color:var(--dark);margin:0 6px 6px 0;">${a[0]} ${LANG==='en'?a[1]:a[2]}</span>`; }).join('');
   const amenBlock = amenIcons ? `<div style="margin-bottom:16px;">${amenIcons}</div>` : '';
   const capBlock = g.capacity ? `<div style="font-size:13px;color:var(--mid);margin-bottom:12px;">👥 ${LANG==='en'?`Up to ${g.capacity} per group class`:`Až ${g.capacity} ve skupinové lekci`}</div>` : '';
-  const membBlock = (g.membership_price>0) ? `
-    <div style="background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:16px;">
-      <div style="font-size:13px;color:var(--mid);">${g.membership_name || (LANG==='en'?'Monthly membership':'Měsíční členství')}</div>
-      <div style="font-family:'Bebas Neue';font-size:34px;color:var(--dark);letter-spacing:.02em;">${fmtPrice(g.membership_price, g.currency)} ${sym}<span style="font-size:15px;color:var(--light);font-family:'DM Sans';font-weight:600;"> / ${LANG==='en'?'mo':'měs'}</span></div>
-      ${isMine ? '' : `<button id="btnSubGym" style="width:100%;margin-top:10px;padding:14px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Become a member →':'Stát se členem →'}</button>`}
-    </div>` : '';
+  // načti moje členství + rezervace
+  let myMemb=null, myAccess=['all'];
+  const today=new Date().toISOString().slice(0,10);
+  let countMap={}, mineSet=new Set();
+  if(currentUser && !isMine){
+    try{
+      const { data: mbs } = await supaClient.from('gym_memberships').select('*').eq('student_id', currentUser.id).eq('gym_id', g.id).in('status',['active','cancelling']).limit(1);
+      if(mbs && mbs.length){ myMemb=mbs[0]; try{ const pa = myMemb.plan_access ? (typeof myMemb.plan_access==='string'?JSON.parse(myMemb.plan_access):myMemb.plan_access) : null; myAccess = (pa&&pa.length)?pa:['all']; }catch(e){ myAccess=['all']; } }
+    }catch(e){}
+  }
+  try{
+    const { data: resvAll } = await supaClient.from('gym_class_reservations').select('*').eq('gym_id', g.id).gte('class_date', today);
+    (resvAll||[]).forEach(r=>{ const k=`${r.class_date}|${r.class_time}|${r.class_name}`; countMap[k]=(countMap[k]||0)+1; if(currentUser&&r.student_id===currentUser.id) mineSet.add(k); });
+  }catch(e){}
+  const plans = gymMembPlans(g);
+  const plansBlock = plans.length ? `
+    <div class="sec-lbl" style="margin-top:4px;">${LANG==='en'?'Memberships':'Členství'}</div>
+    ${plans.map((p,pi)=>`<div style="background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:14px;margin-bottom:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;">
+        <div style="font-size:14px;font-weight:700;color:var(--dark);">${p.name}</div>
+        <div style="font-family:'Bebas Neue';font-size:26px;color:var(--dark);white-space:nowrap;">${fmtPrice(p.price, g.currency)} ${sym}<span style="font-size:13px;color:var(--light);font-family:'DM Sans';font-weight:600;"> /${LANG==='en'?'mo':'měs'}</span></div>
+      </div>
+      <div style="font-size:12px;color:var(--mid);margin-top:2px;">${LANG==='en'?'Covers: ':'Pokrývá: '}${accessLabel(p.access)}</div>
+      ${isMine?'':(myMemb?'':`<button class="subPlanBtn" data-pi="${pi}" style="width:100%;margin-top:10px;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Become a member →':'Stát se členem →'}</button>`)}
+    </div>`).join('')}
+    ${myMemb?`<div style="font-size:12px;color:var(--green);font-weight:700;margin:-2px 0 14px;">✅ ${LANG==='en'?'You are a member here — book covered classes free below.':'Tady jsi člen — rezervuj si pokryté lekce níže zdarma.'}</div>`:''}` : '';
+  const dn=dayNames();
+  let sch=[]; try{ sch=JSON.parse(g.schedule||'[]'); }catch(e){}
+  const occs=upcomingClasses(sch,7);
+  const occBtn=(o)=>{
+    const k=`${o.date}|${o.time}|${o.name}`;
+    const count=countMap[k]||0, cap=g.capacity||0;
+    const covered = myMemb && planCovers({access:myAccess}, o.level);
+    const capTxt = cap ? `<span style="color:var(--light);font-size:12px;"> · ${count}/${cap}</span>` : '';
+    if(mineSet.has(k)) return { cap:capTxt, btn:`<button class="unresvBtn" data-name="${(o.name||'').replace(/"/g,'&quot;')}" data-date="${o.date}" data-time="${o.time}" style="background:#E8F5EE;color:#006040;border:1px solid #A8E6C0;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${LANG==='en'?'Reserved ✓':'Rezervováno ✓'}</button>` };
+    if(covered){
+      if(cap && count>=cap) return { cap:capTxt, btn:`<span style="color:var(--light);font-size:13px;font-weight:700;white-space:nowrap;">${LANG==='en'?'Full':'Plno'}</span>` };
+      return { cap:capTxt, btn:`<button class="resvBtn" data-name="${(o.name||'').replace(/"/g,'&quot;')}" data-date="${o.date}" data-time="${o.time}" data-level="${o.level||'all'}" style="background:#006040;color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${LANG==='en'?'Reserve free':'Rezervovat zdarma'}</button>` };
+    }
+    return { cap:capTxt, btn:`<button class="bookClassBtn" data-name="${(o.name||'').replace(/"/g,'&quot;')}" data-date="${o.date}" data-time="${o.time}" style="background:var(--red);color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${LANG==='en'?'Book':'Rezervovat'}</button>` };
+  };
+  const schedBlock = (isMine||!occs.length) ? '' : `<div style="margin-top:12px;">${occs.slice(0,14).map(o=>{ const dd=new Date(o.date); const b=occBtn(o); const lvl=(o.level&&o.level!=='all')?` · <span style="color:var(--mid);">${levelLabel(o.level)}</span>`:''; return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:#fff;border:1px solid var(--border);border-radius:10px;padding:9px 12px;margin-bottom:6px;"><div style="font-size:13px;min-width:0;"><strong>${o.name}</strong>${lvl}<div style="color:var(--mid);font-size:12px;">${dn[dd.getDay()]} ${o.time} · ${dd.getDate()}.${dd.getMonth()+1}.${b.cap}</div></div>${b.btn}</div>`; }).join('')}</div>`;
   $('gymProfContent').innerHTML = `
     ${gallery}
     <div style="font-size:14px;color:var(--mid);margin-bottom:4px;">📍 ${g.address?g.address+', ':''}${g.city||''}</div>
@@ -3478,33 +3514,64 @@ function openGymProfile(g){
     <div style="background:#F0FBF0;border:1px solid #CDEBD6;border-radius:14px;padding:16px;margin-bottom:16px;">
       <div style="font-size:13px;color:var(--mid);">${LANG==='en'?'Drop-in session':'Jednorázová lekce (drop-in)'}</div>
       <div style="font-family:'Bebas Neue';font-size:34px;color:#006040;letter-spacing:.02em;">${studentPays} ${sym}</div>
-      ${(()=>{ let sch=[]; try{ sch=JSON.parse(g.schedule||'[]'); }catch(e){} const occs=upcomingClasses(sch,7); if(isMine||!occs.length) return ''; const dn=dayNames(); return `<div style="margin-top:12px;">${occs.slice(0,12).map(o=>{ const dd=new Date(o.date); return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:#fff;border:1px solid var(--border);border-radius:10px;padding:9px 12px;margin-bottom:6px;"><div style="font-size:13px;min-width:0;"><strong>${o.name}</strong><div style="color:var(--mid);font-size:12px;">${dn[dd.getDay()]} ${o.time} · ${dd.getDate()}.${dd.getMonth()+1}.</div></div><button class="bookClassBtn" data-name="${(o.name||'').replace(/"/g,'&quot;')}" data-date="${o.date}" data-time="${o.time}" style="background:var(--red);color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${LANG==='en'?'Book':'Rezervovat'}</button></div>`; }).join('')}</div>`; })()}
+      ${schedBlock}
       ${isMine ? '' : `<button id="btnBookGym" style="width:100%;margin-top:10px;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Book drop-in (any class) →':'Rezervovat drop-in (kterákoliv třída) →'}</button>`}
     </div>
-    ${membBlock}
+    ${plansBlock}
     ${isMine ? `<p style="text-align:center;color:var(--light);font-size:13px;">${LANG==='en'?'This is your gym.':'Tohle je tvůj gym.'}</p>` : ''}
   `;
   if(!isMine){
     const bb=$('btnBookGym'); if(bb) bb.onclick=()=>bookGymDropin(g);
-    const sb=$('btnSubGym'); if(sb) sb.onclick=()=>subscribeGymMembership(g);
+    $('gymProfContent').querySelectorAll('.subPlanBtn').forEach(b=>{ b.onclick=()=>subscribeGymMembership(g, plans[+b.dataset.pi]); });
     $('gymProfContent').querySelectorAll('.bookClassBtn').forEach(b=>{ b.onclick=()=>bookGymDropin(g, {name:b.dataset.name, date:b.dataset.date, time:b.dataset.time}); });
+    $('gymProfContent').querySelectorAll('.resvBtn').forEach(b=>{ b.onclick=()=>reserveClass(g, {name:b.dataset.name, date:b.dataset.date, time:b.dataset.time, level:b.dataset.level}, myMemb); });
+    $('gymProfContent').querySelectorAll('.unresvBtn').forEach(b=>{ b.onclick=()=>unreserveClass(g, {name:b.dataset.name, date:b.dataset.date, time:b.dataset.time}); });
   }
   openSheet('shGymProfile');
 }
-async function subscribeGymMembership(g){
+async function reserveClass(g, occ, myMemb){
+  if(!currentUser){ toast(L('⚠️ Nejdřív se přihlas')); return; }
+  try{
+    // kapacita
+    if(g.capacity){
+      const { data: ex } = await supaClient.from('gym_class_reservations').select('id').eq('gym_id', g.id).eq('class_date', occ.date).eq('class_time', occ.time).eq('class_name', occ.name);
+      if(ex && ex.length>=g.capacity){ toast(LANG==='en'?'⚠️ This class is full':'⚠️ Tahle lekce je plná'); return; }
+    }
+    const { error } = await supaClient.from('gym_class_reservations').insert({
+      gym_id:g.id, gym_name:g.name||'Gym', student_id:currentUser.id, student_name:currentUser.name||'Student',
+      class_name:occ.name||null, class_date:occ.date||null, class_time:occ.time||null, class_level:occ.level||'all',
+      membership_id: myMemb?myMemb.id:null
+    });
+    if(error){ toast('⚠️ '+error.message); return; }
+    toast(LANG==='en'?'✅ Reserved':'✅ Rezervováno');
+    openGymProfile(g);
+  }catch(e){ console.error('reserveClass',e); toast('⚠️ '+e.message); }
+}
+async function unreserveClass(g, occ){
+  if(!currentUser) return;
+  try{
+    await supaClient.from('gym_class_reservations').delete().eq('gym_id', g.id).eq('student_id', currentUser.id).eq('class_date', occ.date).eq('class_time', occ.time).eq('class_name', occ.name);
+    toast(LANG==='en'?'Reservation cancelled':'Rezervace zrušena');
+    openGymProfile(g);
+  }catch(e){ console.error('unreserveClass',e); toast('⚠️ '+e.message); }
+}
+async function subscribeGymMembership(g, plan){
   if(!currentUser){ toast(L('⚠️ Nejdřív se přihlas')); return; }
   if(!g.stripe_account){ toast(L('⚠️ Gym nemá nastavené platby')); return; }
+  if(!plan){ const pl=gymMembPlans(g); plan=pl[0]; }
+  if(!plan){ toast(L('⚠️ Gym nemá nastavené členství')); return; }
   if(!confirm(LANG==='en'
-    ? `Become a member of ${g.name}? You'll be charged ${fmtPrice(g.membership_price, g.currency)} every month. Cancel anytime.`
-    : `Stát se členem ${g.name}? Bude ti účtováno ${fmtPrice(g.membership_price, g.currency)} každý měsíc. Zrušit můžeš kdykoliv.`)) return;
+    ? `Become a member of ${g.name} (${plan.name})? You'll be charged ${fmtPrice(plan.price, g.currency)} every month. Cancel anytime.`
+    : `Stát se členem ${g.name} (${plan.name})? Bude ti účtováno ${fmtPrice(plan.price, g.currency)} každý měsíc. Zrušit můžeš kdykoliv.`)) return;
   toast(L('💳 Přesměrovávám na platbu...'));
   try {
     const { data: mb, error } = await supaClient.from('gym_memberships').insert({
       gym_id: g.id, gym_name: g.name||'Gym', student_id: currentUser.id, student_name: currentUser.name||'Student',
-      amount: g.membership_price||0, currency: g.currency||'CZK', status:'pending'
+      amount: plan.price||0, currency: g.currency||'CZK', status:'pending',
+      plan_name: plan.name||null, plan_access: JSON.stringify((plan.access&&plan.access.length)?plan.access:['all'])
     }).select().single();
     if(error){ toast('⚠️ '+error.message); return; }
-    const url = `/api/membership-checkout?gymAccount=${encodeURIComponent(g.stripe_account)}&gymName=${encodeURIComponent(g.name||'')}&planName=${encodeURIComponent(g.membership_name||'Membership')}&amount=${g.membership_price||0}&currency=${g.currency||'CZK'}&interval=month&membershipId=${encodeURIComponent(mb.id)}`;
+    const url = `/api/membership-checkout?gymAccount=${encodeURIComponent(g.stripe_account)}&gymName=${encodeURIComponent(g.name||'')}&planName=${encodeURIComponent(plan.name||'Membership')}&amount=${plan.price||0}&currency=${g.currency||'CZK'}&interval=month&membershipId=${encodeURIComponent(mb.id)}`;
     setTimeout(()=>{ window.location.href = url; }, 500);
   } catch(e){ console.error('subscribeGymMembership', e); toast('⚠️ '+e.message); }
 }
@@ -3560,7 +3627,7 @@ async function cancelMembership(id, gymId, subId){
     } else { toast('⚠️ '+(j.error||'')); }
   }catch(e){ console.error('cancelMembership', e); toast('⚠️ '+e.message); }
 }
-let _myGymData = null, _gymSchedule = [];
+let _myGymData = null, _gymSchedule = [], _gymPlans = [];
 async function checkGymOwnership(){
   if(!currentUser){ if($('meGymManage')) $('meGymManage').style.display='none'; return; }
   const { data } = await supaClient.from('gyms').select('*').eq('owner_id', currentUser.id).eq('status','approved').limit(1);
@@ -3575,7 +3642,7 @@ function upcomingClasses(schedule, days){
     const dow=date.getDay();
     (schedule||[]).filter(c=>Number(c.day)===dow).forEach(c=>{
       if(d===0){ const [h,mi]=String(c.time||'00:00').split(':').map(Number); const ct=new Date(date); ct.setHours(h||0,mi||0,0,0); if(ct<now) return; }
-      out.push({ name:c.name, date:date.toISOString().slice(0,10), time:c.time });
+      out.push({ name:c.name, date:date.toISOString().slice(0,10), time:c.time, level:c.level||'all' });
     });
   }
   out.sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time));
@@ -3716,6 +3783,7 @@ async function renderGymManage(){
   if(!_myGymData){ box.innerHTML=`<p style="color:var(--light);text-align:center;padding:20px;">${LANG==='en'?'No approved gym found.':'Žádný schválený gym.'}</p>`; return; }
   const g=_myGymData;
   try{ _gymSchedule = JSON.parse(g.schedule||'[]'); }catch(e){ _gymSchedule=[]; }
+  _gymPlans = gymMembPlans(g).map(p=>({ id:p.id, name:p.name, price:p.price, access:(p.access||['all']).slice() }));
   const sym = g.currency==='EUR'?'€':g.currency==='USD'?'$':'Kč';
   box.innerHTML = `
     <div class="sec-lbl">📊 ${LANG==='en'?'Overview':'Přehled'}</div>
@@ -3726,13 +3794,15 @@ async function renderGymManage(){
       <input id="mgDropin" type="number" inputmode="numeric" value="${g.dropin_price||''}" style="flex:1;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';">
       <div style="color:var(--mid);font-weight:700;">${sym}</div>
     </div>
-    <div class="sec-lbl">${LANG==='en'?'Monthly membership':'Měsíční členství'}</div>
-    <input id="mgMembName" type="text" value="${(g.membership_name||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Membership name':'Název členství'}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';margin-bottom:8px;">
-    <input id="mgMembPrice" type="number" inputmode="numeric" value="${g.membership_price||''}" placeholder="${LANG==='en'?'Price / month':'Cena / měsíc'}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';margin-bottom:10px;">
-    <div id="mgMembBreak" style="background:#F0FBF0;border-radius:12px;padding:11px 14px;margin-bottom:16px;font-size:13px;line-height:1.7;color:var(--mid);display:none;"></div>
+    <div class="sec-lbl">${LANG==='en'?'Membership plans':'Varianty členství'}</div>
+    <p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:8px;">${LANG==='en'?'Offer one or more monthly plans. Each plan lets members freely book the class levels it covers.':'Nabídni jednu nebo víc měsíčních variant. Každá umožní členům zdarma rezervovat lekce úrovní, které pokrývá.'}</p>
+    <div id="mgPlans"></div>
+    <button id="mgAddPlan" style="width:100%;padding:11px;background:var(--bg);border:1px dashed var(--border);border-radius:10px;font-weight:600;color:var(--dark);cursor:pointer;font-family:'DM Sans';margin-bottom:16px;">+ ${LANG==='en'?'Add plan':'Přidat variantu'}</button>
     <div class="sec-lbl">${LANG==='en'?'Weekly class schedule':'Týdenní rozvrh tříd'}</div>
     <div id="mgSchedule"></div>
     <button id="mgAddClass" style="width:100%;padding:11px;background:var(--bg);border:1px dashed var(--border);border-radius:10px;font-weight:600;color:var(--dark);cursor:pointer;font-family:'DM Sans';margin-bottom:16px;">+ ${LANG==='en'?'Add class':'Přidat třídu'}</button>
+    <div class="sec-lbl">📋 ${LANG==='en'?'Upcoming class reservations':'Rezervace na lekce'}</div>
+    <div id="mgRoster" style="margin-bottom:16px;"><p style="color:var(--light);font-size:13px;">${L('Načítám...')}</p></div>
     <button id="mgSave" style="width:100%;padding:15px;background:var(--red);color:#fff;border:none;border-radius:14px;font-size:16px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:24px;">${LANG==='en'?'Save changes':'Uložit změny'}</button>
     <div class="sec-lbl">👥 ${LANG==='en'?'Team coaches':'Tým — kouči'}</div>
     <p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:8px;">${LANG==='en'?'Invite coaches to your gym. They confirm, then appear here and you can open their dashboard.':'Pozvi kouče do svého gymu. Potvrdí to, pak se objeví tady a uvidíš jejich dashboard.'}</p>
@@ -3746,15 +3816,37 @@ async function renderGymManage(){
     <div id="mgBookings"><p style="color:var(--light);font-size:13px;">${L('Načítám...')}</p></div>
   `;
   renderScheduleEditor();
-  updateMgMembBreak();
-  if($('mgMembPrice')) $('mgMembPrice').addEventListener('input', updateMgMembBreak);
-  $('mgAddClass').onclick=()=>{ _gymSchedule.push({day:1, time:'18:00', name:''}); renderScheduleEditor(); };
+  renderPlansEditor();
+  if($('mgAddPlan')) $('mgAddPlan').onclick=()=>{ _gymPlans.push({ id:'p'+Date.now().toString(36), name:'', price:0, access:['all'] }); renderPlansEditor(); };
+  $('mgAddClass').onclick=()=>{ _gymSchedule.push({day:1, time:'18:00', name:'', level:'all'}); renderScheduleEditor(); };
   $('mgSave').onclick=saveGymManage;
   if($('gtSearchBtn')) $('gtSearchBtn').onclick=gtSearchCoaches;
   if($('mgGymLb')) $('mgGymLb').onclick=()=>openGymLeaderboard('city');
   if($('gtSearch')) $('gtSearch').addEventListener('keydown', e=>{ if(e.key==='Enter') gtSearchCoaches(); });
   loadGymTeam();
+  loadGymRoster();
   loadGymManageBookings();
+}
+async function loadGymRoster(){
+  const box=$('mgRoster'); if(!box||!_myGymData) return;
+  const occs=upcomingClasses(_gymSchedule,7);
+  const today=new Date().toISOString().slice(0,10);
+  let rs=[]; try{ const { data: resv } = await supaClient.from('gym_class_reservations').select('*').eq('gym_id', _myGymData.id).gte('class_date', today); rs=resv||[]; }catch(e){}
+  if(!occs.length){ box.innerHTML=`<p style="color:var(--light);font-size:13px;">${LANG==='en'?'No classes scheduled.':'Žádné naplánované lekce.'}</p>`; return; }
+  const dn=dayNames(); const cap=_myGymData.capacity||0;
+  box.innerHTML=occs.slice(0,20).map((o,i)=>{
+    const list=rs.filter(r=>r.class_date===o.date&&r.class_time===o.time&&r.class_name===o.name);
+    const dd=new Date(o.date);
+    const lvl=(o.level&&o.level!=='all')?` · ${levelLabel(o.level)}`:'';
+    return `<div style="border:1px solid var(--border);border-radius:12px;padding:11px;margin-bottom:8px;">
+      <div class="rosterHead" data-i="${i}" style="display:flex;justify-content:space-between;align-items:center;${list.length?'cursor:pointer;':''}">
+        <div style="font-size:13px;"><strong>${o.name}</strong>${lvl}<div style="color:var(--mid);font-size:12px;">${dn[dd.getDay()]} ${o.time} · ${dd.getDate()}.${dd.getMonth()+1}.</div></div>
+        <div style="font-weight:700;font-size:14px;color:${cap&&list.length>=cap?'var(--red)':'var(--dark)'};">${list.length}${cap?`/${cap}`:''} 👥</div>
+      </div>
+      ${list.length?`<div class="rosterList" data-i="${i}" style="display:none;margin-top:8px;border-top:1px solid var(--border);padding-top:8px;">${list.map(r=>`<div style="font-size:13px;color:var(--dark);padding:3px 0;">• ${r.student_name||'Člen'}</div>`).join('')}</div>`:''}
+    </div>`;
+  }).join('');
+  box.querySelectorAll('.rosterHead').forEach(h=>h.onclick=()=>{ const l=box.querySelector(`.rosterList[data-i="${h.dataset.i}"]`); if(l) l.style.display=l.style.display==='none'?'block':'none'; });
 }
 function updateMgMembBreak(){
   if(!_myGymData) return;
@@ -3765,40 +3857,105 @@ function updateMgMembBreak(){
   box.style.display = p>0 ? 'block' : 'none';
   if(p<=0){ box.innerHTML=''; return; }
   const fmt = v => `${fmtPrice(v, cur)} ${sym}`;
+  const r = v => Math.round(v*100)/100;
+  const fmtRange = (a,b) => `~${r(a)}–${r(b)} ${sym}`;
   const fixed = cur==='CZK' ? 6 : 0.3;
-  const stripe = p*0.019 + fixed;
+  const feeLow = p*0.014 + fixed, feeHigh = p*0.029 + fixed;
+  const gymGross = p*0.95;
   box.innerHTML = `
     <div style="display:flex;justify-content:space-between;"><span>${LANG==='en'?'Student pays / mo':'Student platí / měsíc'}</span><strong style="color:var(--dark);">${fmt(p)}</strong></div>
     <div style="display:flex;justify-content:space-between;"><span>− ${LANG==='en'?'MTL fee (5%)':'MTL provize (5 %)'}</span><strong style="color:var(--light);">−${fmt(p*0.05)}</strong></div>
-    <div style="display:flex;justify-content:space-between;"><span>= ${LANG==='en'?'Your share (95%)':'Tvůj podíl (95 %)'}</span><strong style="color:var(--dark);">${fmt(p*0.95)}</strong></div>
-    <div style="display:flex;justify-content:space-between;"><span>− ${LANG==='en'?'Stripe fee (est.)':'Stripe fee (odhad)'}</span><strong style="color:var(--light);">−${fmt(stripe)}</strong></div>
-    <div style="display:flex;justify-content:space-between;border-top:1px solid #CDEBD6;margin-top:5px;padding-top:5px;"><span style="font-weight:700;color:var(--dark);">= ${LANG==='en'?'You keep / mo':'Reálně ti zůstane / měs'}</span><strong style="color:#006040;">${fmt(Math.max(0, p*0.95 - stripe))}</strong></div>`;
+    <div style="display:flex;justify-content:space-between;"><span>= ${LANG==='en'?'Your share (95%)':'Tvůj podíl (95 %)'}</span><strong style="color:var(--dark);">${fmt(gymGross)}</strong></div>
+    <div style="display:flex;justify-content:space-between;"><span>− ${LANG==='en'?'Stripe fee (est.)':'Stripe fee (odhad)'}</span><strong style="color:var(--light);">−${fmtRange(feeLow,feeHigh).slice(1)}</strong></div>
+    <div style="display:flex;justify-content:space-between;border-top:1px solid #CDEBD6;margin-top:5px;padding-top:5px;"><span style="font-weight:700;color:var(--dark);">= ${LANG==='en'?'You keep / mo':'Reálně ti zůstane / měs'}</span><strong style="color:#006040;">${fmtRange(Math.max(0,gymGross-feeHigh),Math.max(0,gymGross-feeLow))}</strong></div>`;
+}
+const CLASS_LEVELS = [
+  {v:'all', cs:'Všichni', en:'All levels'},
+  {v:'beginner', cs:'Začátečníci', en:'Beginners'},
+  {v:'advanced', cs:'Pokročilí', en:'Advanced'},
+  {v:'fighter', cs:'Závodníci', en:'Fighters'},
+  {v:'kids', cs:'Děti', en:'Kids'},
+  {v:'women', cs:'Ženy', en:'Women'},
+  {v:'sparring', cs:'Sparring', en:'Sparring'}
+];
+function levelLabel(v){ const o=CLASS_LEVELS.find(x=>x.v===v)||CLASS_LEVELS[0]; return LANG==='en'?o.en:o.cs; }
+function gymMembPlans(g){
+  let plans=[];
+  try{ plans = g.membership_plans ? (typeof g.membership_plans==='string'?JSON.parse(g.membership_plans):g.membership_plans) : []; }catch(e){ plans=[]; }
+  if(Array.isArray(plans) && plans.length) return plans;
+  if(g.membership_price>0) return [{ id:'legacy', name:g.membership_name||(LANG==='en'?'Monthly membership':'Měsíční členství'), price:g.membership_price, access:['all'] }];
+  return [];
+}
+function planCovers(plan, level){
+  const a = (plan && plan.access && plan.access.length) ? plan.access : ['all'];
+  return a.includes('all') || a.includes(level||'all');
+}
+function accessLabel(access){
+  if(!access || !access.length || access.includes('all')) return LANG==='en'?'All classes':'Všechny lekce';
+  return access.map(levelLabel).join(', ');
+}
+function togglePlanAccess(i,v){
+  const p=_gymPlans[i]; if(!p) return;
+  let a=(p.access&&p.access.length)?p.access.slice():['all'];
+  if(v==='all'){ a=['all']; }
+  else { a=a.filter(x=>x!=='all'); if(a.includes(v)) a=a.filter(x=>x!==v); else a.push(v); if(!a.length) a=['all']; }
+  p.access=a; renderPlansEditor();
+}
+function renderPlansEditor(){
+  const box=$('mgPlans'); if(!box) return;
+  if(!_gymPlans.length){ box.innerHTML=`<p style="color:var(--light);font-size:13px;margin-bottom:10px;">${LANG==='en'?'No plans yet. Add one below.':'Zatím žádné varianty. Přidej níže.'}</p>`; return; }
+  const cur=(_myGymData&&_myGymData.currency)||'CZK'; const sym=cur==='EUR'?'€':cur==='USD'?'$':'Kč';
+  const fixed=cur==='CZK'?6:0.3;
+  box.innerHTML=_gymPlans.map((p,i)=>{
+    const access=(p.access&&p.access.length)?p.access:['all'];
+    const chipOpts=[{v:'all',cs:'Všechny',en:'All'}].concat(CLASS_LEVELS.filter(l=>l.v!=='all'));
+    const chips=chipOpts.map(o=>{ const on = o.v==='all' ? access.includes('all') : access.includes(o.v); return `<span class="planChip" data-i="${i}" data-v="${o.v}" style="display:inline-block;padding:6px 10px;margin:3px;border-radius:14px;font-size:12px;font-weight:600;cursor:pointer;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'transparent'};color:${on?'#fff':'var(--mid)'};">${LANG==='en'?o.en:o.cs}</span>`; }).join('');
+    const price=parseFloat(p.price)||0; const net=Math.max(0, price*0.95-(price*0.029+fixed)); const netLow=Math.max(0, price*0.95-(price*0.029+fixed)); const netHigh=Math.max(0, price*0.95-(price*0.014+fixed));
+    return `<div style="border:1px solid var(--border);border-radius:12px;padding:10px;margin-bottom:10px;">
+      <div style="display:flex;gap:6px;margin-bottom:6px;">
+        <input class="planName" data-i="${i}" type="text" value="${(p.name||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Plan name (e.g. Advanced)':'Název (např. Pokročilí)'}" style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';">
+        <button class="planDel" data-i="${i}" style="padding:8px 11px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-weight:700;cursor:pointer;">✕</button>
+      </div>
+      <input class="planPrice" data-i="${i}" type="number" inputmode="numeric" value="${p.price||''}" placeholder="${LANG==='en'?'Price / month':'Cena / měsíc'}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';margin-bottom:6px;">
+      <div style="font-size:11px;color:var(--light);margin-bottom:2px;">${LANG==='en'?'Covers classes:':'Pokrývá lekce:'}</div>
+      <div style="margin-bottom:4px;">${chips}</div>
+      ${price>0?`<div style="font-size:11px;color:var(--mid);">${LANG==='en'?'You keep ~':'Zůstane ti ~'}${Math.round(netHigh)}–${Math.round(netLow)} ${sym}/${LANG==='en'?'mo':'měs'} ${LANG==='en'?'(after MTL 5% + Stripe)':'(po MTL 5 % + Stripe)'}</div>`:''}
+    </div>`;
+  }).join('');
+  box.querySelectorAll('.planName').forEach(el=>el.oninput=()=>{ _gymPlans[+el.dataset.i].name=el.value; });
+  box.querySelectorAll('.planPrice').forEach(el=>{ el.oninput=()=>{ _gymPlans[+el.dataset.i].price=parseInt(el.value)||0; }; el.onchange=()=>{ renderPlansEditor(); }; });
+  box.querySelectorAll('.planDel').forEach(el=>el.onclick=()=>{ _gymPlans.splice(+el.dataset.i,1); renderPlansEditor(); });
+  box.querySelectorAll('.planChip').forEach(el=>el.onclick=()=>{ togglePlanAccess(+el.dataset.i, el.dataset.v); });
 }
 function renderScheduleEditor(){
   const box=$('mgSchedule'); if(!box) return;
   const days=dayNames();
   if(!_gymSchedule.length){ box.innerHTML=`<p style="color:var(--light);font-size:13px;margin-bottom:10px;">${LANG==='en'?'No classes yet.':'Zatím žádné třídy.'}</p>`; return; }
   box.innerHTML = _gymSchedule.map((c,i)=>`
-    <div style="display:flex;gap:6px;margin-bottom:8px;align-items:center;">
-      <select class="schDay" data-i="${i}" style="width:72px;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${days.map((d,di)=>`<option value="${di}" ${di===Number(c.day)?'selected':''}>${d}</option>`).join('')}</select>
-      <input class="schTime" data-i="${i}" type="time" value="${c.time||'18:00'}" style="width:92px;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';">
-      <input class="schName" data-i="${i}" type="text" value="${(c.name||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Class':'Třída'}" style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';">
-      <button class="schDel" data-i="${i}" style="padding:8px 11px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-weight:700;cursor:pointer;">✕</button>
+    <div style="border:1px solid var(--border);border-radius:12px;padding:8px;margin-bottom:8px;">
+      <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center;">
+        <select class="schDay" data-i="${i}" style="width:72px;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${days.map((d,di)=>`<option value="${di}" ${di===Number(c.day)?'selected':''}>${d}</option>`).join('')}</select>
+        <input class="schTime" data-i="${i}" type="time" value="${c.time||'18:00'}" style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';">
+        <button class="schDel" data-i="${i}" style="padding:8px 11px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-weight:700;cursor:pointer;">✕</button>
+      </div>
+      <input class="schName" data-i="${i}" type="text" value="${(c.name||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Class name':'Název třídy'}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';margin-bottom:6px;">
+      <select class="schLevel" data-i="${i}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${CLASS_LEVELS.map(o=>`<option value="${o.v}" ${o.v===(c.level||'all')?'selected':''}>${LANG==='en'?o.en:o.cs}</option>`).join('')}</select>
     </div>`).join('');
   box.querySelectorAll('.schDay').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].day=+el.value; });
   box.querySelectorAll('.schTime').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].time=el.value; });
   box.querySelectorAll('.schName').forEach(el=>el.oninput=()=>{ _gymSchedule[+el.dataset.i].name=el.value; });
+  box.querySelectorAll('.schLevel').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].level=el.value; });
   box.querySelectorAll('.schDel').forEach(el=>el.onclick=()=>{ _gymSchedule.splice(+el.dataset.i,1); renderScheduleEditor(); });
 }
 async function saveGymManage(){
   if(!_myGymData) return;
   const dropin = parseInt($('mgDropin').value)||_myGymData.dropin_price;
-  const membName = $('mgMembName').value.trim()||null;
-  const membPrice = parseInt($('mgMembPrice').value)||null;
+  const plans = _gymPlans.filter(p=>p.name && p.name.trim() && (parseInt(p.price)||0)>0).map(p=>({ id:p.id||('p'+Math.random().toString(36).slice(2)), name:p.name.trim(), price:parseInt(p.price)||0, access:(p.access&&p.access.length)?p.access:['all'] }));
+  const first = plans[0]||null;
   const sched = JSON.stringify(_gymSchedule.filter(c=>c.name && c.name.trim()));
-  const { error } = await supaClient.from('gyms').update({ dropin_price:dropin, membership_name:membName, membership_price:membPrice, schedule:sched }).eq('id', _myGymData.id);
+  const { error } = await supaClient.from('gyms').update({ dropin_price:dropin, membership_plans:JSON.stringify(plans), membership_name:first?first.name:null, membership_price:first?first.price:null, schedule:sched }).eq('id', _myGymData.id);
   if(error){ toast('⚠️ '+error.message); return; }
-  _myGymData.dropin_price=dropin; _myGymData.membership_name=membName; _myGymData.membership_price=membPrice; _myGymData.schedule=sched;
+  _myGymData.dropin_price=dropin; _myGymData.membership_plans=JSON.stringify(plans); _myGymData.membership_name=first?first.name:null; _myGymData.membership_price=first?first.price:null; _myGymData.schedule=sched;
   toast(LANG==='en'?'✅ Saved':'✅ Uloženo');
 }
 async function loadGymManageBookings(){
@@ -4152,14 +4309,18 @@ function updateGymMembBreakdown(){
   const sym = cur==='CZK'?'Kč':cur==='EUR'?'€':'$';
   const box = $('gymMembBreakdown');
   if(box) box.style.display = p>0 ? 'block' : 'none';
+  const r = v => Math.round(v*100)/100;
   const fmt = v => `${fmtPrice(v, cur)} ${sym}`;
+  const fmtRange = (a,b) => `~${r(a)}–${r(b)} ${sym}`;
   const fixed = cur==='CZK' ? 6 : 0.3;
-  const stripe = p ? (p*0.019 + fixed) : 0;
+  const feeLow = p ? (p*0.014 + fixed) : 0;   // evropská karta
+  const feeHigh = p ? (p*0.029 + fixed) : 0;  // zahraniční karta
+  const gymGross = p*0.95;
   if($('gmStudent')) $('gmStudent').textContent = p ? fmt(p) : '—';
   if($('gmMtl'))     $('gmMtl').textContent     = p ? '−'+fmt(p*0.05) : '—';
-  if($('gmGym'))     $('gmGym').textContent     = p ? fmt(p*0.95) : '—';
-  if($('gmStripe'))  $('gmStripe').textContent  = p ? '−'+fmt(stripe) : '—';
-  if($('gmNet'))     $('gmNet').textContent     = p ? fmt(Math.max(0, p*0.95 - stripe)) : '—';
+  if($('gmGym'))     $('gmGym').textContent     = p ? fmt(gymGross) : '—';
+  if($('gmStripe'))  $('gmStripe').textContent  = p ? '−'+fmtRange(feeLow, feeHigh).slice(1) : '—';
+  if($('gmNet'))     $('gmNet').textContent     = p ? fmtRange(Math.max(0,gymGross-feeHigh), Math.max(0,gymGross-feeLow)) : '—';
 }
 if($('gymMembPrice')) $('gymMembPrice').addEventListener('input', updateGymMembBreakdown);
 if($('gymCurrency')) $('gymCurrency').addEventListener('change', updateGymMembBreakdown);
