@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-T · ambassador month filter + Stripe payouts link -->
+<!-- MTL build: 2026-06-07-U · PWA icon + ambassador roster + revoke-cert flow + gym suspend -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -14,6 +14,11 @@
 <meta name="theme-color" content="#E8001D">
 <meta name="robots" content="noindex,nofollow,noarchive,nosnippet">
 <meta name="googlebot" content="noindex,nofollow">
+<link rel="manifest" href="manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="MTL">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -2595,6 +2600,12 @@ const NOTIF_T = {
   gym_dropin_rescheduled: (d)=> LANG==='en'
     ? `🔄 ${d.student||'A student'} moved their drop-in from ${d.oldDate} ${d.oldTime||''} to ${d.newDate} ${d.newTime}.`
     : `🔄 ${d.student||'Student'} přesunul drop-in z ${d.oldDate} ${d.oldTime||''} na ${d.newDate} ${d.newTime}.`,
+  cert_revoke_request: (d)=> LANG==='en'
+    ? `🚩 ${d.who||'An ambassador'} flagged ${d.target_name||''} (${d.target_type==='gym'?'gym':'coach'}) for certification review — see Founder Dashboard.`
+    : `🚩 ${d.who||'Ambassador'} žádá o odebrání certifikace: ${d.target_name||''} (${d.target_type==='gym'?'gym':'kouč'}) — viz Founder Dashboard.`,
+  cert_revoke_result: (d)=> LANG==='en'
+    ? (d.outcome==='suspended' ? `✅ ${d.target_name||''} was suspended (hidden from the deck).` : d.outcome==='cert_revoked' ? `✅ Certification revoked for ${d.target_name||''}.` : `ℹ️ Your revoke request for ${d.target_name||''} was reviewed — no action taken.`)
+    : (d.outcome==='suspended' ? `✅ ${d.target_name||''} byl suspendován (skryt z decku).` : d.outcome==='cert_revoked' ? `✅ Odebrána certifikace: ${d.target_name||''}.` : `ℹ️ Tvoje žádost o odebrání u ${d.target_name||''} byla posouzena — bez zásahu.`),
   gym_dropin_booked: (d)=> LANG==='en'
     ? `🏋️ New drop-in! ${d.student||'A student'} bought a drop-in session. You'll receive ${d.amt} ${d.sym}.`
     : `🏋️ Nový drop-in! ${d.student||'Student'} si koupil drop-in lekci. Tobě připadne ${d.amt} ${d.sym}.`,
@@ -3763,7 +3774,7 @@ async function loadGymsList(){
   box.innerHTML = `<p style="text-align:center;color:var(--light);padding:20px;">${L('Načítám...')}</p>`;
   const { data, error } = await supaClient.from('gyms').select('*').eq('status','approved').order('created_at',{ascending:false});
   if(error){ box.innerHTML = `<p style="color:var(--red);padding:20px;">${error.message}</p>`; return; }
-  const gyms = data || [];
+  const gyms = (data || []).filter(g=>!g.suspended);
   const gymsF = (isMultiDiscipline() && _deckDisc) ? gyms.filter(g=>parseDisc(g.disciplines).includes(_deckDisc)) : gyms;
   if(!gymsF.length){ box.innerHTML = `<p style="text-align:center;color:var(--light);padding:30px;">${LANG==='en'?'No certified gyms yet — check back soon.':'Zatím žádné certifikované gymy — koukni později.'}</p>`; return; }
   box.innerHTML = gymsF.map(g=>{
@@ -4379,12 +4390,12 @@ async function renderGymLeaderboard(){
   const list=$('gymLbList'); if(!list) return;
   list.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;font-size:14px;">${L('Načítám...')}</p>`;
   const [rg, rgb, rgm, rgc] = await Promise.all([
-    supaClient.from('gyms').select('id, name, city, country, photos, owner_id').eq('status','approved'),
+    supaClient.from('gyms').select('id, name, city, country, photos, owner_id, suspended').eq('status','approved'),
     supaClient.from('gym_bookings').select('gym_id, status').eq('status','active'),
     supaClient.from('gym_memberships').select('gym_id, status'),
     supaClient.from('gym_coaches').select('gym_id, status').eq('status','active')
   ]);
-  const gyms=rg.data||[], gb=rgb.data||[], gm=rgm.data||[], gc=rgc.data||[];
+  const gyms=(rg.data||[]).filter(g=>!g.suspended), gb=rgb.data||[], gm=rgm.data||[], gc=rgc.data||[];
   const stat={}; gyms.forEach(g=>stat[g.id]={members:0,drops:0,coaches:0,churn:0});
   gb.forEach(b=>{ if(stat[b.gym_id]) stat[b.gym_id].drops++; });
   gm.forEach(m=>{ if(!stat[m.gym_id]) return; if(m.status==='active'||m.status==='cancelling') stat[m.gym_id].members++; if(m.status==='cancelling') stat[m.gym_id].churn++; });
@@ -6126,6 +6137,53 @@ async function loadAdminGymList(){
     list.appendChild(el);
   });
 }
+async function renderFdRevokes(){
+  const sec=$('fdRevokeSec'); if(!sec) return;
+  const EN=LANG==='en';
+  try{
+    const { data } = await supaClient.from('revoke_requests').select('*').eq('status','pending').order('created_at',{ascending:false});
+    const reqs=data||[];
+    if(!reqs.length){ sec.innerHTML=''; return; }
+    let html='<div class="sec-lbl" style="color:var(--red);">🚩 '+(EN?'Revoke requests':'Žádosti o odebrání certifikace')+' ('+reqs.length+')</div>';
+    html += reqs.map(r=>{
+      const isGym=r.target_type==='gym';
+      const mainBtn = isGym
+        ? '<button class="fdRevAct" data-act="suspend" data-req="'+r.id+'" data-tt="gym" data-tid="'+r.target_id+'" data-name="'+escapeHtml(r.target_name||'').replace(/"/g,'&quot;')+'" data-rb="'+(r.requested_by||'')+'" style="flex:1;padding:9px;background:var(--red);color:#fff;border:none;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Suspend (hide from deck)':'Suspendovat (skrýt z decku)')+'</button>'
+        : '<button class="fdRevAct" data-act="revoke" data-req="'+r.id+'" data-tt="coach" data-tid="'+r.target_id+'" data-name="'+escapeHtml(r.target_name||'').replace(/"/g,'&quot;')+'" data-rb="'+(r.requested_by||'')+'" style="flex:1;padding:9px;background:var(--red);color:#fff;border:none;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Revoke certification':'Odebrat certifikaci')+'</button>';
+      return '<div style="background:#FFF6F5;border:1px solid rgba(232,0,29,.22);border-radius:12px;padding:12px;margin-bottom:8px;">'
+        +'<div style="font-size:14px;font-weight:700;color:var(--dark);">'+(isGym?'🏋️ ':'🥊 ')+escapeHtml(r.target_name||'')+'</div>'
+        +'<div style="font-size:12px;color:var(--mid);margin:2px 0 6px;">'+(EN?'Flagged by ':'Nahlásil ')+escapeHtml(r.requester_name||'Ambassador')+'</div>'
+        +'<div style="font-size:13px;color:var(--dark);background:#fff;border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px;line-height:1.5;">&ldquo;'+escapeHtml(r.reason||'')+'&rdquo;</div>'
+        +'<div style="display:flex;gap:8px;">'+mainBtn
+        +'<button class="fdRevAct" data-act="dismiss" data-req="'+r.id+'" data-rb="'+(r.requested_by||'')+'" data-name="'+escapeHtml(r.target_name||'').replace(/"/g,'&quot;')+'" style="flex:1;padding:9px;background:var(--surf);color:var(--mid);border:1px solid var(--border);border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Dismiss':'Zamítnout')+'</button>'
+        +'</div></div>';
+    }).join('');
+    sec.innerHTML=html;
+    sec.querySelectorAll('.fdRevAct').forEach(b=>b.onclick=()=>founderResolveRevoke(b.dataset));
+  }catch(e){ console.error('renderFdRevokes', e); sec.innerHTML=''; }
+}
+async function founderResolveRevoke(d){
+  const EN=LANG==='en';
+  const act=d.act;
+  const confirmMsg = act==='suspend' ? (EN?('Suspend "'+d.name+'"? It disappears from the deck but bookings, memberships, owner and coaches keep working.'):('Suspendovat „'+d.name+'"? Zmizí z decku, ale rezervace, členství, owner i kouči běží dál.'))
+    : act==='revoke' ? (EN?('Revoke certification for "'+d.name+'"? They will no longer appear as MTL Certified.'):('Odebrat certifikaci „'+d.name+'"? Přestane se zobrazovat jako MTL Certified.'))
+    : (EN?'Dismiss this request?':'Zamítnout tuto žádost?');
+  if(!confirm(confirmMsg)) return;
+  try{
+    let outcome='dismissed';
+    if(act==='suspend'){ await supaClient.from('gyms').update({ suspended:true }).eq('id', d.tid); outcome='suspended'; }
+    else if(act==='revoke'){ await supaClient.from('profiles').update({ coach_status:'rejected' }).eq('id', d.tid); outcome='cert_revoked'; }
+    await supaClient.from('revoke_requests').update({ status:'resolved', outcome }).eq('id', d.req);
+    if(d.rb){
+      const msg = outcome==='suspended' ? ('✅ '+(d.name||'')+' byl suspendován (skryt z decku).')
+        : outcome==='cert_revoked' ? ('✅ Odebrána certifikace: '+(d.name||'')+'.')
+        : ('ℹ️ Tvoje žádost o odebrání u '+(d.name||'')+' byla posouzena — bez zásahu.');
+      try{ await supaClient.from('notifications').insert({ user_id:d.rb, type:'system', read:false, data: JSON.stringify({ kind:'cert_revoke_result', outcome, target_name:d.name||'' }), message:msg }); }catch(e){}
+    }
+    toast(EN?'✅ Done':'✅ Hotovo');
+    renderFdRevokes();
+  }catch(e){ console.error('founderResolveRevoke', e); toast('⚠️ '+e.message); }
+}
 let _fdData=null, _fdMonth=null;
 function fdMonthList(){ const a=[]; const d=new Date(); for(let i=0;i<12;i++){ const m=new Date(d.getFullYear(), d.getMonth()-i, 1); const ym=`${m.getFullYear()}-${String(m.getMonth()+1).padStart(2,'0')}`; const lbl=m.toLocaleDateString(LANG==='en'?'en-US':'cs-CZ',{month:'long',year:'numeric'}); a.push({ym,lbl}); } return a; }
 const EU_CC = new Set(['AT','BE','BG','HR','CY','DK','EE','FI','FR','DE','GR','EL','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SK','SI','ES','SE']);
@@ -6198,6 +6256,7 @@ async function renderFounderDash(){
   const gymRows = gyms.length ? gyms.map(g=>{ const ph=gymFirstPhoto(g.photos); return `<div class="fdGymRow" data-id="${g.id}" data-name="${(g.name||'').replace(/"/g,'&quot;')}" style="display:flex;align-items:center;gap:12px;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:11px;margin-bottom:8px;cursor:pointer;"><div style="width:40px;height:40px;border-radius:10px;background:#333 ${ph?`url('${ph}') center/cover`:''};flex-shrink:0;"></div><div style="flex:1;min-width:0;"><div style="font-size:14px;font-weight:700;color:var(--dark);">${g.name||'Gym'}</div><div style="font-size:12px;color:var(--mid);">📍 ${g.city||'—'}${g.country?', '+g.country:''}${g.membership_price?(LANG==='en'?' · 🎟️':' · 🎟️'):''}</div></div><div style="font-size:13px;font-weight:600;color:var(--blue);">${L('Dashboard ›')}</div></div>`; }).join('') : `<p style="color:var(--light);font-size:13px;">${LANG==='en'?'No gyms yet.':'Zatím žádné gymy.'}</p>`;
   box.innerHTML = `
     <div id="fdDiscPanel"></div>
+    <div id="fdRevokeSec" style="margin-bottom:14px;"></div>
     <div style="background:linear-gradient(135deg,#FFD54A,#F5A623);color:#3a2a00;border-radius:14px;padding:14px 16px;margin-bottom:18px;">
       <div style="font-size:13px;font-weight:800;">🏆 ${LANG==='en'?'Founding Coach spots':'Founding Coach místa'}</div>
       <div style="font-size:24px;font-weight:800;line-height:1.1;margin-top:3px;">${_fdFoundingLeft} / ${_foundingCap} ${LANG==='en'?'left':'zbývá'}</div>
@@ -6240,6 +6299,7 @@ async function renderFounderDash(){
     <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:14px;">${LANG==='en'?'Coach fee is an estimate (≈15%); founding/referral lower it slightly. Gyms bear their own Stripe fees, so gym fees are net. Amounts summed nominally across currencies. VAT with your accountant.':'Provize koučů je odhad (≈15 %); founding/referral ji mírně sníží. Gymy nesou vlastní Stripe fee, takže gym provize jsou net. Částky sečteny nominálně napříč měnami. DPH řeš s účetní.'}</p>
   `;
   renderFdMonth();
+  if(typeof renderFdRevokes==='function') renderFdRevokes();
   const sel=$('fdMonthSel'); if(sel) sel.onchange=()=>{ _fdMonth=sel.value; renderFdMonth(); };
   const tc=$('fdToggleCoaches'); if(tc) tc.onclick=()=>{ const el=$('fdCoaches'); const open=el.style.display!=='none'; el.style.display=open?'none':'block'; const ar=$('fdArrowC'); if(ar) ar.textContent=open?'›':'⌄'; };
   const tg=$('fdToggleGyms'); if(tg) tg.onclick=()=>{ const el=$('fdGyms'); const open=el.style.display!=='none'; el.style.display=open?'none':'block'; const ar=$('fdArrowG'); if(ar) ar.textContent=open?'›':'⌄'; };
@@ -6476,6 +6536,41 @@ async function recomputeCertLevel(coachId){
     return lvl;
   }catch(e){ console.error('recomputeCertLevel', e); }
 }
+async function renderAmbRoster(mine){
+  const sec=$('ambRosterSec'); if(!sec) return;
+  mine = mine || myVerifyList();
+  sec.innerHTML='<p style="color:var(--light);font-size:13px;padding:6px 0;">'+L('Načítám...')+'</p>';
+  const EN = LANG==='en';
+  try{
+    const { data: coaches } = await supaClient.from('profiles').select('id, name, city, disciplines, photo_url').eq('coach_status','approved');
+    const myC=(coaches||[]).filter(c=>c.id!==currentUser.id && parseDisc(c.disciplines).some(x=>mine.includes(x)));
+    const { data: gyms } = await supaClient.from('gyms').select('id, name, city, disciplines, suspended').eq('status','approved');
+    const myG=(gyms||[]).filter(g=>parseDisc(g.disciplines).some(x=>mine.includes(x)));
+    let html='<div class="sec-lbl">'+(EN?'My coaches & gyms':'Moji kouči & gymy')+'</div>'
+      + '<p style="font-size:11px;color:var(--light);line-height:1.5;margin:-4px 0 10px;">'+(EN?'Active in your discipline. You can flag one for the founder to review (revoke certification or suspend).':'Aktivní ve tvojí disciplíně. Můžeš nahlásit founderovi k posouzení (odebrání certifikace nebo suspendace).')+'</p>';
+    if(!myC.length && !myG.length){ sec.innerHTML=html+'<p style="color:var(--light);font-size:13px;">'+(EN?'No coaches or gyms in your discipline yet.':'Zatím žádní kouči ani gymy ve tvojí disciplíně.')+'</p>'; return; }
+    const row=(type,id,name,city,extra)=>'<div style="display:flex;align-items:center;gap:10px;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:11px;margin-bottom:8px;">'
+      +'<div style="flex:1;min-width:0;"><div style="font-size:14px;font-weight:700;color:var(--dark);">'+escapeHtml(name||(type==="gym"?"Gym":"Kouč"))+(extra||'')+'</div><div style="font-size:12px;color:var(--mid);">'+(type==='gym'?'🏋️ ':'📍 ')+escapeHtml(city||'—')+'</div></div>'
+      +'<button class="ambRevokeBtn" data-type="'+type+'" data-id="'+id+'" data-name="'+escapeHtml(name||'').replace(/"/g,'&quot;')+'" style="flex-shrink:0;padding:8px 12px;background:#FEECEC;color:var(--red);border:none;border-radius:9px;font-size:12px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';white-space:nowrap;">'+(EN?'⚠️ Flag':'⚠️ Nahlásit')+'</button></div>';
+    if(myC.length){ html+='<div style="font-size:12px;color:var(--mid);font-weight:700;margin:6px 0 4px;">🥊 '+(EN?'Coaches':'Kouči')+'</div>'+myC.map(c=>row('coach',c.id,c.name,c.city,'')).join(''); }
+    if(myG.length){ html+='<div style="font-size:12px;color:var(--mid);font-weight:700;margin:12px 0 4px;">🏋️ '+(EN?'Gyms':'Gymy')+'</div>'+myG.map(g=>row('gym',g.id,g.name,g.city,(g.suspended?' <span style=\'color:var(--red);font-size:11px;\'>· '+(EN?'suspended':'suspendováno')+'</span>':''))).join(''); }
+    sec.innerHTML=html;
+    sec.querySelectorAll('.ambRevokeBtn').forEach(b=>b.onclick=()=>requestRevoke(b.dataset.type, b.dataset.id, b.dataset.name));
+  }catch(e){ console.error('renderAmbRoster', e); sec.innerHTML='<p style="color:var(--red);font-size:13px;">'+e.message+'</p>'; }
+}
+async function requestRevoke(type, id, name){
+  const EN = LANG==='en';
+  const reason = prompt(EN?('Why should certification be revoked for '+(name||'')+'? (required)'):('Proč odebrat certifikaci: '+(name||'')+'? (povinné)'));
+  if(reason===null) return;
+  if(!reason.trim()){ toast(EN?'⚠️ A reason is required':'⚠️ Důvod je povinný'); return; }
+  try{
+    await supaClient.from('revoke_requests').insert({ target_type:type, target_id:id, target_name:name||null, requested_by:currentUser.id, requester_name:currentUser.name||null, reason:reason.trim(), status:'pending' });
+    await supaClient.from('notifications').insert({ user_id: FOUNDER_UUID, type:'system', read:false,
+      data: JSON.stringify({ kind:'cert_revoke_request', target_type:type, target_name:name||'', who: currentUser.name||'' }),
+      message:('🚩 '+(currentUser.name||'Ambassador')+' žádá o odebrání certifikace: '+(name||'')+' ('+(type==='gym'?'gym':'kouč')+'). Důvod: '+reason.trim()) });
+    toast(EN?'✅ Sent to the founder for review':'✅ Odesláno founderovi k posouzení');
+  }catch(e){ console.error('requestRevoke', e); toast('⚠️ '+e.message); }
+}
 let _ambMonth='all';
 async function openAmbassadorDashboard(){
   openSheet('shAmbDash');
@@ -6527,7 +6622,8 @@ async function openAmbassadorDashboard(){
       + '<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🏋️</div><div class="prow-lbl">'+(LANG==='en'?'Gym drop-ins + memberships · 0.5%':'Gym drop-iny + permanentky · 0,5 %')+'</div></div><span class="prow-val">'+Math.round(gymCut)+' Kč</span></div>'
       + '<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🎓</div><div class="prow-lbl">'+(LANG==='en'?'Coaches you cover':'Kouči pod tebou')+'</div></div><span class="prow-val">'+coverCount+'</span></div>'
       + '<p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:14px;">'+(LANG==='en'?'Computed from real paid bookings (cancelled excluded, partial refunds deducted), attributed by the booked discipline. Once the payout webhook is live these are paid to your Stripe automatically. Amounts summed nominally across currencies.':'Spočítáno z reálných zaplacených rezervací (zrušené pryč, částečné refundy odečteny), přiřazeno podle disciplíny rezervace. Po nasazení výplatního webhooku ti chodí na Stripe automaticky. Částky sečteny nominálně napříč měnami.')+'</p>'
-      + '<div id="ambReqSec" style="margin-top:24px;"></div>';
+      + '<div id="ambReqSec" style="margin-top:24px;"></div>'
+      + '<div id="ambRosterSec" style="margin-top:24px;"></div>';
     // pending certification requests (sloučeno do dashboardu)
     const reqSec=$('ambReqSec');
     if(reqSec){
@@ -6551,6 +6647,7 @@ async function openAmbassadorDashboard(){
       }catch(e){ toast('⚠️ '+e.message); }
       sbtn.disabled=false; sbtn.textContent=orig;
     };
+    if(typeof renderAmbRoster==='function') renderAmbRoster(mine);
   }catch(e){ console.error('openAmbassadorDashboard', e); body.innerHTML='<p style="color:var(--red);padding:20px;">'+e.message+'</p>'; }
 }
 async function openDiscQueue(){
