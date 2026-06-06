@@ -18,6 +18,9 @@ export default async function handler(req, res) {
       currency = 'CZK',
       interval = 'month',// 'month' | 'year'
       membershipId,      // id záznamu v DB (pro success callback)
+      income,            // 'main' | 'side' — jak si to gym SÁM zařadil (ne daňová rada)
+      memberName,        // jméno studenta
+      payee,             // komu reálně jde platba (kouč nebo gym) — pro export účetní
     } = req.query;
 
     if (!gymAccount || !amount) {
@@ -48,6 +51,14 @@ export default async function handler(req, res) {
         ],
         subscription_data: {
           application_fee_percent: MTL_PERCENT, // MTL bere 5 % z každého invoicu; Stripe fee nese gym
+          metadata: {
+            mtl_payment_type: 'membership',
+            mtl_plan: planName || 'Membership',
+            mtl_income: income || 'side',           // zařazení deklaruje prodejce (gym)
+            gym_name: gymName || '',
+            mtl_payee: payee || gymName || '',
+            member_name: memberName || '',
+          },
         },
         success_url: `${proto}://${host}/?gym_sub=ok&membership=${encodeURIComponent(membershipId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
         cancel_url: `${proto}://${host}/`,

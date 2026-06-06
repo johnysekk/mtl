@@ -18,6 +18,9 @@ export default async function handler(req, res) {
       amount,            // ZÁKLADNÍ cena drop-inu (gym ji zadává)
       currency = 'CZK',  // měna gymu (settluje ve své měně)
       bookingId,         // id rezervace v DB (pro success callback)
+      income,            // 'main' | 'side' — jak si to gym SÁM zařadil (ne daňová rada)
+      memberName,        // jméno studenta
+      payee,             // komu reálně jde platba (kouč nebo gym) — pro export účetní
     } = req.query;
 
     if (!gymAccount || !amount) {
@@ -50,6 +53,14 @@ export default async function handler(req, res) {
         ],
         payment_intent_data: {
           application_fee_amount: applicationFee, // jde MTL; Stripe fee strhne Stripe z podílu gymu
+          metadata: {
+            mtl_payment_type: 'drop_in',
+            mtl_plan: className || 'Drop-in',
+            mtl_income: income || 'side',           // zařazení deklaruje prodejce (gym)
+            gym_name: gymName || '',
+            mtl_payee: payee || gymName || '',
+            member_name: memberName || '',
+          },
         },
         success_url: `${proto}://${host}/?gym_pay=ok&booking=${encodeURIComponent(bookingId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
         cancel_url: `${proto}://${host}/`,
