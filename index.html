@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-S · noindex + invite-code gate (private beta) -->
+<!-- MTL build: 2026-06-07-T · ambassador month filter + Stripe payouts link -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -6476,6 +6476,7 @@ async function recomputeCertLevel(coachId){
     return lvl;
   }catch(e){ console.error('recomputeCertLevel', e); }
 }
+let _ambMonth='all';
 async function openAmbassadorDashboard(){
   openSheet('shAmbDash');
   if($('ambDashTitle')) $('ambDashTitle').textContent='🎓 Ambassador Dashboard';
@@ -6483,37 +6484,42 @@ async function openAmbassadorDashboard(){
   body.innerHTML='<p style="color:var(--light);text-align:center;padding:20px;">'+L('Načítám...')+'</p>';
   const mine=myVerifyList();
   if(!mine.length){ body.innerHTML='<p style="color:var(--light);text-align:center;padding:24px;">'+(LANG==='en'?'You are not an ambassador yet.':'Zatím nejsi ambassador.')+'</p>'; return; }
+  const inAmbM = x => _ambMonth==='all' ? true : ((x.created_at||'').slice(0,7)===_ambMonth);
   try{
     const hasStripe=!!(currentUser && currentUser.stripe_account);
     // kouči — atribuce 1% PODLE disciplíny rezervace (fallback: kouč s jedinou disciplínou)
     const { data: coaches } = await supaClient.from('profiles').select('id, disciplines').eq('coach_status','approved');
     const coachDiscMap={}; (coaches||[]).forEach(c=>{ coachDiscMap[c.id]=parseDisc(c.disciplines); });
     const coverCount=(coaches||[]).filter(c=>c.id!==currentUser.id && (coachDiscMap[c.id]||[]).some(x=>mine.includes(x))).length;
-    const { data: bks } = await supaClient.from('bookings').select('amount, coach_id, status, refund_pct, discipline').eq('status','active');
+    const { data: bks } = await supaClient.from('bookings').select('amount, coach_id, status, refund_pct, discipline, created_at').eq('status','active');
     let coachCut=0, coachLessons=0, coachTurnover=0;
-    (bks||[]).forEach(b=>{ let disc=b.discipline; if(!disc){ const dl=coachDiscMap[b.coach_id]||[]; if(dl.length===1) disc=dl[0]; } if(disc && mine.includes(disc)){ const a=netAmt(b); coachCut+=a*0.01; coachTurnover+=a; coachLessons++; } });
+    (bks||[]).filter(inAmbM).forEach(b=>{ let disc=b.discipline; if(!disc){ const dl=coachDiscMap[b.coach_id]||[]; if(dl.length===1) disc=dl[0]; } if(disc && mine.includes(disc)){ const a=netAmt(b); coachCut+=a*0.01; coachTurnover+=a; coachLessons++; } });
     // gym drop-iny v mých disciplínách
-    const { data: gbs } = await supaClient.from('gym_bookings').select('amount, discipline, status').eq('status','active');
+    const { data: gbs } = await supaClient.from('gym_bookings').select('amount, discipline, status, created_at').eq('status','active');
     let gymCut=0, gymLessons=0, gymTurnover=0;
-    (gbs||[]).forEach(b=>{ if(b.discipline && mine.includes(b.discipline)){ const a=(b.amount||0); gymCut+=a*0.005; gymTurnover+=a; gymLessons++; } });
+    (gbs||[]).filter(inAmbM).forEach(b=>{ if(b.discipline && mine.includes(b.discipline)){ const a=(b.amount||0); gymCut+=a*0.005; gymTurnover+=a; gymLessons++; } });
     // permanentky tagované disciplínou
     let memCut=0, memCount=0, memTurnover=0;
     try{
-      const { data: gms } = await supaClient.from('gym_memberships').select('amount, discipline, status').eq('status','active');
-      (gms||[]).forEach(m=>{ if(m.discipline && mine.includes(m.discipline)){ const a=(m.amount||0); memCut+=a*0.005; memTurnover+=a; memCount++; } });
+      const { data: gms } = await supaClient.from('gym_memberships').select('amount, discipline, status, created_at').eq('status','active');
+      (gms||[]).filter(inAmbM).forEach(m=>{ if(m.discipline && mine.includes(m.discipline)){ const a=(m.amount||0); memCut+=a*0.005; memTurnover+=a; memCount++; } });
     }catch(e){}
     gymCut+=memCut; gymTurnover+=memTurnover;
     const totalTurnover=Math.round(coachTurnover+gymTurnover);
     const total=Math.round(coachCut+gymCut);
     const discLabels=mine.map(v=>disciplineEmoji(v)+' '+disciplineLabel(v)).join(' · ');
+    const monthOpts = '<option value="all"'+(_ambMonth==='all'?' selected':'')+'>'+(LANG==='en'?'All time':'Vše')+'</option>' + fdMonthList().map(m=>'<option value="'+m.ym+'"'+(m.ym===_ambMonth?' selected':'')+'>'+m.lbl+'</option>').join('');
+    const heroLbl = _ambMonth==='all' ? (LANG==='en'?'Total earned (so far)':'Vyděláno celkem (zatím)') : (LANG==='en'?'Earned this month':'Vyděláno za měsíc');
+    const stripeBtn = hasStripe ? '<button id="ambStripeBtn" style="width:100%;padding:13px;background:#635BFF;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-bottom:16px;">💳 '+(LANG==='en'?'Open my Stripe — balance & payouts →':'Otevřít můj Stripe — zůstatek a výplaty →')+'</button>' : '';
     const stripeBox = hasStripe
-      ? '<div style="background:#F0FBF0;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:16px;font-size:13px;color:#006040;font-weight:600;">✅ '+(LANG==='en'?'Stripe connected — cuts are paid out automatically.':'Stripe připojen — cuty se vyplácí automaticky.')+'</div>'
-      : '<div style="background:#FFF8E6;border:1px solid #F5C842;border-radius:12px;padding:12px 14px;margin-bottom:16px;font-size:13px;color:#8a6d00;font-weight:600;">⚠️ '+(LANG==='en'?'Connect your Stripe (in your coach profile) to receive these payouts.':'Připoj si Stripe (ve svém kouč profilu), ať ti můžou cuty chodit.')+'</div>';
+      ? '<div style="background:#F0FBF0;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-size:13px;color:#006040;font-weight:600;">✅ '+(LANG==='en'?'Stripe connected — cuts are paid out automatically.':'Stripe připojen — cuty se vyplácí automaticky.')+'</div>'
+      : '<div style="background:#FFF8E6;border:1px solid #F5C842;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-size:13px;color:#8a6d00;font-weight:600;">⚠️ '+(LANG==='en'?'Connect your Stripe (in your coach profile) to receive these payouts.':'Připoj si Stripe (ve svém kouč profilu), ať ti můžou cuty chodit.')+'</div>';
     body.innerHTML =
       '<div style="font-size:12px;color:var(--mid);margin-bottom:10px;">'+(LANG==='en'?'You certify':'Certifikuješ')+': <strong>'+discLabels+'</strong></div>'
-      + stripeBox
+      + stripeBox + stripeBtn
+      + '<select id="ambMonthSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:\'DM Sans\';background:#fff;margin-bottom:12px;">'+monthOpts+'</select>'
       + '<div style="background:#0f2233;border-radius:16px;padding:18px;margin-bottom:16px;color:#fff;text-align:center;">'
-      + '<div style="font-size:12px;color:#9fb4cc;">'+(LANG==='en'?'Total earned (so far)':'Vyděláno celkem (zatím)')+'</div>'
+      + '<div style="font-size:12px;color:#9fb4cc;">'+heroLbl+'</div>'
       + '<div style="font-size:34px;font-weight:800;line-height:1.1;margin-top:4px;">'+total+' Kč</div>'
       + '<div style="font-size:11px;color:#9fb4cc;margin-top:6px;line-height:1.4;">'+(LANG==='en'?'Paid out weekly, just like your private lessons with students.':'Vyplácí se formou týdenní výplaty, stejně jako za tvé soukromé lekce se studenty.')+'</div></div>'
       + '<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">📊</div><div class="prow-lbl">'+(LANG==='en'?'Total turnover from your discipline':'Celkem obrat z tvojí disciplíny')+'</div></div><span class="prow-val">'+totalTurnover+' Kč</span></div>'
@@ -6533,6 +6539,18 @@ async function openAmbassadorDashboard(){
           : '<p style="color:var(--light);font-size:13px;padding:4px 0;">'+(LANG==='en'?'No pending requests.':'Žádné čekající žádosti.')+'</p>');
       reqSec.querySelectorAll('.discQRow').forEach(el=>el.onclick=()=>openDiscReview(el.dataset.id));
     }
+    const msel=$('ambMonthSel'); if(msel) msel.onchange=()=>{ _ambMonth=msel.value; openAmbassadorDashboard(); };
+    const sbtn=$('ambStripeBtn'); if(sbtn) sbtn.onclick=async()=>{
+      sbtn.disabled=true; const orig=sbtn.textContent; sbtn.textContent=L('Načítám...');
+      try{
+        const { data: sess } = await supaClient.auth.getSession();
+        const tok = sess && sess.session && sess.session.access_token;
+        const r = await fetch('/api/stripe-login-link', { headers: tok?{ Authorization:'Bearer '+tok }:{} });
+        const j = await r.json();
+        if(j && j.url){ window.open(j.url, '_blank'); } else { toast('⚠️ '+((j&&j.error)||'Stripe')); }
+      }catch(e){ toast('⚠️ '+e.message); }
+      sbtn.disabled=false; sbtn.textContent=orig;
+    };
   }catch(e){ console.error('openAmbassadorDashboard', e); body.innerHTML='<p style="color:var(--red);padding:20px;">'+e.message+'</p>'; }
 }
 async function openDiscQueue(){
