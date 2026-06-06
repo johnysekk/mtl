@@ -13,9 +13,10 @@ export default async function handler(req, res) {
       online,            // '1' pro online coaching (bez slotu)
       coachProfileId,    // profiles.id kouče (pro online booking)
       fmt,               // formát/tier online objednávky (label)
-      commission,        // appFee fraction (markup+cut); founding 0.13, jinak 0.15
+      commission,        // appFee fraction (markup+cut); founding 0.12, jinak 0.17
       nomarkup,          // '1' = referral sleva: student platí bez 10% markupu (1.00)
       credit,            // 'student' | 'coach' | 'none' — který referral kredit se použil
+      studentId,         // profiles.id studenta (pro webhook → vytvoření bookingu)
     } = req.query;
 
     if (!coachId || !amount) {
@@ -24,9 +25,11 @@ export default async function handler(req, res) {
 
     const rate = parseInt(amount, 10);
     const cur = String(currency).toLowerCase(); // stripe chce malá písmena
-    // appFee fraction = markup (10%) + cut (5% běžně / 3% founding). Pojistka 0.03–0.25.
-    let COMMISSION = commission ? parseFloat(commission) : 0.15;
-    if (!(COMMISSION >= 0.03 && COMMISSION <= 0.25)) COMMISSION = 0.15;
+    // appFee fraction = markup (10%) + cut (7% běžně / 2% founding).
+    // Při referral kreditu (waiver markupu) je to jen cut: 0.07 běžně / 0.02 founding.
+    // Pojistka 0.02–0.25 (musí pustit i founding+kredit 0.02).
+    let COMMISSION = commission ? parseFloat(commission) : 0.17;
+    if (!(COMMISSION >= 0.02 && COMMISSION <= 0.25)) COMMISSION = 0.17;
     // referral sleva pro studenta = waiver markupu (1.00 místo 1.10); appFee pak jen cut
     const STUDENT_MARKUP = (String(nomarkup) === '1') ? 1.00 : 1.10;
 
@@ -54,6 +57,17 @@ export default async function handler(req, res) {
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       payment_method_types: ['card'],
+      // session-level metadata — čte je stripe-webhook.js, aby spolehlivě vytvořil booking
+      metadata: {
+        booking_type: isOnline ? 'online' : 'inperson',
+        student_id: studentId || '',
+        slot_id: slotId || '',
+        coach_profile_id: coachProfileId || '',
+        base_amount: String(rate),
+        booking_currency: currency,
+        online_fmt: fmt || '',
+        coach_name: coachName || '',
+      },
       line_items: [
         {
           price_data: {
@@ -70,7 +84,7 @@ export default async function handler(req, res) {
         transfer_data: { destination: coachId },
         metadata: {
           credit_type: credit || 'none',                         // student / coach / none
-          coach_pct: (STUDENT_MARKUP - COMMISSION).toFixed(2),   // 1.00=kouč 100% (bonus), 0.97=founding, 0.95=běžně
+          coach_pct: (STUDENT_MARKUP - COMMISSION).toFixed(2),   // 1.00=kouč 100% (bonus), 0.98=founding, 0.93=běžně
           commission_pct: COMMISSION.toFixed(2),
           coach_name: coachName || '',
         },
