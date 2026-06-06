@@ -14,6 +14,7 @@ export default async function handler(req, res) {
       coachProfileId,    // profiles.id kouče (pro online booking)
       fmt,               // formát/tier online objednávky (label)
       commission,        // appFee fraction (markup+cut); founding 0.13, jinak 0.15
+      nomarkup,          // '1' = referral sleva: student platí bez 10% markupu (1.00)
     } = req.query;
 
     if (!coachId || !amount) {
@@ -22,10 +23,11 @@ export default async function handler(req, res) {
 
     const rate = parseInt(amount, 10);
     const cur = String(currency).toLowerCase(); // stripe chce malá písmena
-    // appFee fraction = markup (10%) + cut (5% běžně / 3% founding). Pojistka 0.05–0.25.
+    // appFee fraction = markup (10%) + cut (5% běžně / 3% founding). Pojistka 0.03–0.25.
     let COMMISSION = commission ? parseFloat(commission) : 0.15;
-    if (!(COMMISSION >= 0.05 && COMMISSION <= 0.25)) COMMISSION = 0.15;
-    const STUDENT_MARKUP = 1.10; // student platí +10 %
+    if (!(COMMISSION >= 0.03 && COMMISSION <= 0.25)) COMMISSION = 0.15;
+    // referral sleva pro studenta = waiver markupu (1.00 místo 1.10); appFee pak jen cut
+    const STUDENT_MARKUP = (String(nomarkup) === '1') ? 1.00 : 1.10;
 
     // Stripe minor units (×100 platí pro CZK i EUR i USD)
     const unitAmount = Math.round(rate * STUDENT_MARKUP * 100);

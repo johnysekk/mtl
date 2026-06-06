@@ -19,7 +19,6 @@ export default async function handler(req, res) {
     if (!paymentIntent) { return res.status(400).json({ error: 'Chybí payment intent' }); }
 
     const base = parseInt(amount, 10);
-    const paid = base * STUDENT_MARKUP; // co student reálně zaplatil
     const hours = parseFloat(hoursUntil);
 
     let studentPct, coachKeepPct;
@@ -32,15 +31,16 @@ export default async function handler(req, res) {
       return res.status(200).json({ refunded: 0, pct: 0, message: 'Žádný refund (no-show / po termínu)' });
     }
 
-    const refundToStudent = Math.round(paid * studentPct * 100); // haléře
-
-    // najdi transfer ke koučovi
-    let transferId = null;
+    // skutečně zaplacená částka z charge (řeší referral slevy, founding i coach kredit) — nikdy nevrátíme víc, než student zaplatil
+    let transferId = null, paidHal = Math.round(base * STUDENT_MARKUP * 100);
     try {
       const pi = await stripe.paymentIntents.retrieve(paymentIntent, { expand: ['latest_charge'] });
       const charge = pi && pi.latest_charge;
+      if (charge && charge.amount) paidHal = charge.amount; // reálně zaplaceno (haléře/centy)
       transferId = charge && charge.transfer ? charge.transfer : null;
     } catch (e) { console.error('PI retrieve:', e.message); }
+
+    const refundToStudent = Math.round(paidHal * studentPct); // haléře
 
     // 1) refund studentovi — MTL si nechává provizi; koučův podíl reverzneme ručně
     const refund = await stripe.refunds.create({
@@ -61,7 +61,7 @@ export default async function handler(req, res) {
         } else {
           // <16h → kouč si nechá paid×coachKeepPct; reverzni zbytek z reálného transferu
           const tr = await stripe.transfers.retrieve(transferId);
-          const coachKeepHal = Math.round(paid * coachKeepPct * 100);
+          const coachKeepHal = Math.round(paidHal * coachKeepPct);
           const reverseHal = Math.max((tr.amount || 0) - coachKeepHal, 0);
           if (reverseHal > 0) {
             const rev = await stripe.transfers.createReversal(transferId, { amount: reverseHal });
