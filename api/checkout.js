@@ -33,9 +33,10 @@ export default async function handler(req, res) {
     // referral sleva pro studenta = waiver markupu (1.00 místo 1.10); appFee pak jen cut
     const STUDENT_MARKUP = (String(nomarkup) === '1') ? 1.00 : 1.10;
 
-    // Stripe minor units (×100 platí pro CZK i EUR i USD)
-    const unitAmount = Math.round(rate * STUDENT_MARKUP * 100);
-    const applicationFee = Math.round(rate * COMMISSION * 100);
+    // Stripe minor units. CZK = celé koruny (zaokrouhlit DOLŮ, žádné haléře); EUR/USD = centy.
+    const isCZK = String(currency || 'CZK').toUpperCase() === 'CZK';
+    const unitAmount     = isCZK ? Math.floor(rate * STUDENT_MARKUP) * 100 : Math.round(rate * STUDENT_MARKUP * 100);
+    const applicationFee = isCZK ? Math.floor(rate * COMMISSION)    * 100 : Math.round(rate * COMMISSION    * 100);
 
     const host = req.headers.host;
     const proto = host && host.includes('localhost') ? 'http' : 'https';

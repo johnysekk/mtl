@@ -31,9 +31,10 @@ export default async function handler(req, res) {
     const P = parseInt(amount, 10);
     const cur = String(currency).toLowerCase();
 
-    // minor units (×100 pro CZK/EUR/USD)
-    const unitAmount     = Math.round(P * STUDENT_MARKUP * 100); // co zaplatí student
-    const applicationFee = Math.round(P * MTL_TAKE * 100);       // čistá provize MTL
+    // minor units. CZK = celé koruny (DOLŮ); EUR/USD = centy.
+    const isCZK = cur === 'czk';
+    const unitAmount     = isCZK ? Math.floor(P * STUDENT_MARKUP) * 100 : Math.round(P * STUDENT_MARKUP * 100); // co zaplatí student
+    const applicationFee = isCZK ? Math.floor(P * MTL_TAKE)       * 100 : Math.round(P * MTL_TAKE       * 100); // čistá provize MTL
 
     const host = req.headers.host;
     const proto = host && host.includes('localhost') ? 'http' : 'https';
