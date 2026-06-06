@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-P · per-discipline pricing + per-booking discipline + ambassador turnover -->
+<!-- MTL build: 2026-06-07-Q · gym drop-in reschedule + cancel (6h, same discipline) -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -736,7 +736,7 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
 
 <!-- MY MEMBERSHIPS -->
 <div class="sheet" id="shMemberships" style="z-index:87;">
-  <div class="shdr"><div class="shdr-title">🎟️ Moje členství</div><button class="btn-close" id="btnCloseMemberships">✕</button></div>
+  <div class="shdr"><div class="shdr-title" data-noi18n id="membDropTitle">🎟️ Členství &amp; drop-iny</div><button class="btn-close" id="btnCloseMemberships">✕</button></div>
   <div id="membershipsContent" style="padding:16px 20px;"></div>
 </div>
 
@@ -2589,6 +2589,9 @@ const NOTIF_T = {
   referral_tier_unlocked: (d)=> LANG==='en'
     ? `🏆 10 coach referrals! You've permanently unlocked 95% on every lesson (instead of 93%).`
     : `🏆 10 koučských referralů! Odemkl jsi natrvalo 95 % z každé lekce (místo 93 %).`,
+  gym_dropin_rescheduled: (d)=> LANG==='en'
+    ? `🔄 ${d.student||'A student'} moved their drop-in from ${d.oldDate} ${d.oldTime||''} to ${d.newDate} ${d.newTime}.`
+    : `🔄 ${d.student||'Student'} přesunul drop-in z ${d.oldDate} ${d.oldTime||''} na ${d.newDate} ${d.newTime}.`,
   gym_dropin_booked: (d)=> LANG==='en'
     ? `🏋️ New drop-in! ${d.student||'A student'} bought a drop-in session. You'll receive ${d.amt} ${d.sym}.`
     : `🏋️ Nový drop-in! ${d.student||'Student'} si koupil drop-in lekci. Tobě připadne ${d.amt} ${d.sym}.`,
@@ -3951,23 +3954,147 @@ async function bookGymDropin(g, occ){
 async function loadMyMemberships(){
   const box=$('membershipsContent');
   if(!box) return;
+  if($('membDropTitle')) $('membDropTitle').textContent = LANG==='en' ? '🎟️ Memberships & drop-ins' : '🎟️ Členství & drop-iny';
   if(!currentUser){ box.innerHTML=`<p style="text-align:center;color:var(--light);padding:20px;">${L('⚠️ Nejdřív se přihlas')}</p>`; return; }
   box.innerHTML=`<p style="text-align:center;color:var(--light);padding:20px;">${L('Načítám...')}</p>`;
   const { data } = await supaClient.from('gym_memberships').select('*').eq('student_id', currentUser.id).in('status',['active','cancelling']).order('created_at',{ascending:false});
   const ms = data||[];
-  if(!ms.length){ box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${LANG==='en'?'No active memberships.':'Žádná aktivní členství.'}</p>`; return; }
-  box.innerHTML = ms.map(m=>{
-    const sym = m.currency==='EUR'?'€':m.currency==='USD'?'$':'Kč';
-    const cancelling = m.status==='cancelling';
-    return `<div style="background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px;">
-      <div style="font-family:'Bebas Neue';font-size:22px;letter-spacing:.03em;color:var(--dark);">${m.gym_name||'Gym'}</div>
-      <div style="font-size:14px;color:var(--mid);margin:2px 0 10px;">${fmtPrice(m.amount||0, m.currency)} ${sym} / ${LANG==='en'?'mo':'měs'}</div>
-      ${cancelling
-        ? `<div style="font-size:13px;color:var(--light);">${LANG==='en'?'Cancels at period end.':'Zruší se na konci období.'}</div>`
-        : `<button class="cancelMembBtn" data-id="${m.id}" data-gym="${m.gym_id}" data-sub="${m.stripe_subscription||''}" style="width:100%;padding:11px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Cancel membership':'Zrušit členství'}</button>`}
-    </div>`;
-  }).join('');
+  let html='';
+  if(ms.length){
+    html += `<div class="sec-lbl">${LANG==='en'?'Memberships':'Členství'}</div>`;
+    html += ms.map(m=>{
+      const sym = m.currency==='EUR'?'€':m.currency==='USD'?'$':'Kč';
+      const cancelling = m.status==='cancelling';
+      return `<div style="background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px;">
+        <div style="font-family:'Bebas Neue';font-size:22px;letter-spacing:.03em;color:var(--dark);">${escapeHtml(m.gym_name||'Gym')}</div>
+        <div style="font-size:14px;color:var(--mid);margin:2px 0 10px;">${fmtPrice(m.amount||0, m.currency)} ${sym} / ${LANG==='en'?'mo':'měs'}</div>
+        ${cancelling
+          ? `<div style="font-size:13px;color:var(--light);">${LANG==='en'?'Cancels at period end.':'Zruší se na konci období.'}</div>`
+          : `<button class="cancelMembBtn" data-id="${m.id}" data-gym="${m.gym_id}" data-sub="${m.stripe_subscription||''}" style="width:100%;padding:11px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Cancel membership':'Zrušit členství'}</button>`}
+      </div>`;
+    }).join('');
+  }
+  // ── Nadcházející drop-iny ──
+  const today = new Date().toISOString().slice(0,10);
+  let drops=[];
+  try{ const { data: dd } = await supaClient.from('gym_bookings').select('*').eq('student_id', currentUser.id).eq('status','active').gte('class_date', today).order('class_date',{ascending:true}); drops=dd||[]; }catch(e){}
+  const now=new Date();
+  const upDrops=drops.filter(b=>{ if(!b.class_date) return false; const dt=new Date(`${b.class_date}T${(b.class_time||'00:00')}:00`); return dt>=now; });
+  if(upDrops.length){
+    html += `<div class="sec-lbl" style="margin-top:18px;">${LANG==='en'?'Upcoming drop-ins':'Nadcházející drop-iny'}</div>`;
+    html += upDrops.map(b=>{
+      const sym = b.currency==='EUR'?'€':b.currency==='USD'?'$':'Kč';
+      const dt=new Date(`${b.class_date}T${(b.class_time||'00:00')}:00`);
+      const hrs=(dt-now)/(1000*60*60);
+      const canChange = hrs>=6;
+      const discTag = (b.discipline && isMultiDiscipline()) ? ` · ${disciplineEmoji(b.discipline)} ${disciplineLabel(b.discipline)}` : '';
+      const windowTxt = canChange ? (LANG==='en'?'Free reschedule / 93% refund (6+ h before)':'Přesun zdarma / 93 % zpět (6+ h před lekcí)') : (LANG==='en'?'Less than 6 h before — no change/refund':'Méně než 6 h před lekcí — bez změny/vrácení');
+      return `<div style="background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px;">
+        <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.03em;color:var(--dark);">${escapeHtml(b.gym_name||'Gym')}</div>
+        <div style="font-size:14px;color:var(--mid);margin:2px 0;">📍 ${b.class_name?escapeHtml(b.class_name)+' · ':''}${b.class_date} ${b.class_time||''}${discTag}</div>
+        <div style="font-size:12px;color:${canChange?'#006040':'var(--light)'};margin-bottom:12px;">${windowTxt}</div>
+        ${canChange?`<button class="gymReschedBtn" data-id="${b.id}" style="width:100%;padding:11px;background:#E8F0FF;color:var(--blue);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">${LANG==='en'?'🔄 Reschedule to another class':'🔄 Přesunout na jinou lekci'}</button>
+        <button class="gymDropCancelBtn" data-id="${b.id}" style="width:100%;padding:11px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Cancel (93% back)':'Zrušit (93 % zpět)'}</button>`:''}
+      </div>`;
+    }).join('');
+  }
+  if(!html){ box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${LANG==='en'?'No memberships or upcoming drop-ins.':'Žádná členství ani nadcházející drop-iny.'}</p>`; return; }
+  box.innerHTML = html;
   box.querySelectorAll('.cancelMembBtn').forEach(b=>{ b.onclick=()=>cancelMembership(b.dataset.id, b.dataset.gym, b.dataset.sub); });
+  box.querySelectorAll('.gymReschedBtn').forEach(b=>{ b.onclick=()=>openGymReschedule(upDrops.find(x=>String(x.id)===String(b.dataset.id))); });
+  box.querySelectorAll('.gymDropCancelBtn').forEach(b=>{ b.onclick=()=>cancelGymDropin(upDrops.find(x=>String(x.id)===String(b.dataset.id))); });
+}
+async function openGymReschedule(b){
+  if(!b){ return; }
+  closeAllSheets();
+  window._gymReschedBooking = b;
+  if($('rescheduleTitle')) $('rescheduleTitle').textContent = (LANG==='en'?'Reschedule drop-in':'Přesunout drop-in')+(b.gym_name?' — '+b.gym_name:'');
+  const list = $('rescheduleList');
+  if(list) list.innerHTML = `<p style="text-align:center;color:var(--light);padding:40px;">${L('Načítám časy...')}</p>`;
+  $('rescheduleOv').classList.add('open');
+  let gym=null;
+  try{ const { data:g } = await supaClient.from('gyms').select('id, name, schedule, disciplines, currency').eq('id', b.gym_id).single(); gym=g; }catch(e){}
+  let sched=[]; try{ sched = (gym&&typeof gym.schedule==='string')?JSON.parse(gym.schedule):((gym&&gym.schedule)||[]); }catch(e){}
+  const occs = upcomingClasses(sched, 21);
+  const now=new Date();
+  const minTime=new Date(now.getTime()+6*60*60*1000); // aspoň 6h dopředu
+  const valid = occs.filter(o=>{
+    const dt=new Date(`${o.date}T${(o.time||'00:00')}:00`);
+    if(dt < minTime) return false;
+    // stejná disciplína (když je u rezervace určená)
+    if(b.discipline && o.disc && o.disc!==b.discipline) return false;
+    // nevybírat ten samý termín
+    if(o.date===b.class_date && o.time===b.class_time && (o.name||'')===(b.class_name||'')) return false;
+    return true;
+  });
+  if(!valid.length){
+    if(list) list.innerHTML = `<p style="text-align:center;color:var(--light);padding:40px;">${LANG==='en'?'No other class of the same discipline in the next 3 weeks (6+ h ahead). Try later or cancel.':'Žádná jiná lekce stejné disciplíny v příštích 3 týdnech (6+ h dopředu). Zkus to později nebo zruš.'}</p>`;
+    return;
+  }
+  if(list){
+    list.innerHTML='';
+    valid.forEach(o=>{
+      const dd=new Date(o.date);
+      const dayName=dowShort()[dd.getDay()];
+      const dateStr=`${dayName} ${dd.getDate()}.${dd.getMonth()+1}.`;
+      const discTag = (o.disc && isMultiDiscipline()) ? ` · ${disciplineEmoji(o.disc)} ${disciplineLabel(o.disc)}` : '';
+      const el=document.createElement('div');
+      el.className='slot-item';
+      el.innerHTML=`<div><div class="slot-date">${dateStr}${o.name?' · '+escapeHtml(o.name):''}${discTag}</div><div class="slot-time">${o.time}</div></div><div class="slot-arrow">→</div>`;
+      el.onclick=()=>doGymReschedule(o);
+      list.appendChild(el);
+    });
+  }
+}
+async function doGymReschedule(occ){
+  const b = window._gymReschedBooking;
+  if(!b) return;
+  const dd=new Date(occ.date);
+  const dayName=dowShort()[dd.getDay()];
+  const newStr=`${dayName} ${dd.getDate()}.${dd.getMonth()+1}. · ${occ.time}`;
+  if(!confirm(LANG==='en'
+      ? `Move your drop-in to ${newStr}? No charge, no refund — just a new class.`
+      : `Přesunout drop-in na ${newStr}? Bez poplatku, bez storna — jen jiná lekce.`)) return;
+  try{
+    const patch = { class_name: occ.name||null, class_date: occ.date||null, class_time: occ.time||null };
+    if(occ.disc){ patch.discipline = occ.disc; }
+    await supaClient.from('gym_bookings').update(patch).eq('id', b.id);
+    // notifikace gymu (best-effort)
+    try{
+      const { data:g } = await supaClient.from('gyms').select('owner_id').eq('id', b.gym_id).single();
+      if(g && g.owner_id){
+        await supaClient.from('notifications').insert({ user_id: g.owner_id, type:'system', read:false,
+          data: JSON.stringify({ kind:'gym_dropin_rescheduled', student: currentUser.name||'Student', oldDate:b.class_date, oldTime:b.class_time, newDate:occ.date, newTime:occ.time }),
+          message:`🔄 ${currentUser.name||'Student'} přesunul drop-in z ${b.class_date} ${b.class_time||''} na ${occ.date} ${occ.time}.` });
+      }
+    }catch(e){}
+    $('rescheduleOv').classList.remove('open');
+    window._gymReschedBooking=null;
+    toast(LANG==='en'?'✅ Drop-in moved!':'✅ Drop-in přesunut!');
+    loadMyMemberships();
+  }catch(e){ console.error('doGymReschedule', e); toast('⚠️ '+e.message); }
+}
+async function cancelGymDropin(b){
+  if(!b) return;
+  const now=new Date();
+  const dt=new Date(`${b.class_date}T${(b.class_time||'00:00')}:00`);
+  if((dt-now)/(1000*60*60) < 6){ toast(LANG==='en'?'⚠️ Less than 6 h before — no refund. You can still just not show up.':'⚠️ Méně než 6 h před lekcí — bez vrácení.'); return; }
+  if(!confirm(LANG==='en'?'Cancel this drop-in? You get 93% back; the gym keeps the rest.':'Zrušit tento drop-in? Vrátí se ti 93 %, zbytek si nechá gym.')) return;
+  try{
+    if(!b.payment_intent){ await supaClient.from('gym_bookings').update({ status:'cancelled' }).eq('id', b.id); toast(LANG==='en'?'✅ Cancelled.':'✅ Zrušeno.'); loadMyMemberships(); return; }
+    const { data:g } = await supaClient.from('gyms').select('stripe_account').eq('id', b.gym_id).single();
+    if(!g || !g.stripe_account){ toast(L('⚠️ Chyba')); return; }
+    const isCZK = String(b.currency||'CZK').toUpperCase()==='CZK';
+    const grossPaid = (b.amount||0)*1.03;           // student platí base × 1,03 (drop-in markup)
+    const refundAmt = isCZK ? Math.floor(grossPaid*0.93) : Math.round(grossPaid*0.93*100)/100;
+    const r = await fetch(`/api/gym-refund?gymAccount=${encodeURIComponent(g.stripe_account)}&paymentIntent=${encodeURIComponent(b.payment_intent)}&amount=${refundAmt}`);
+    const j = await r.json();
+    if(j && (j.refunded!=null || j.id)){
+      await supaClient.from('gym_bookings').update({ status:'cancelled' }).eq('id', b.id);
+      toast(LANG==='en'?'✅ Cancelled — 93% refunded.':'✅ Zrušeno — 93 % vráceno.');
+      loadMyMemberships();
+    } else { toast('⚠️ '+((j&&j.error)||'')); }
+  }catch(e){ console.error('cancelGymDropin', e); toast('⚠️ '+e.message); }
 }
 async function cancelMembership(id, gymId, subId){
   if(!subId){ toast(L('⚠️ Chyba')); return; }
