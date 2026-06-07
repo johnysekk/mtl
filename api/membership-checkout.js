@@ -22,6 +22,7 @@ export default async function handler(req, res) {
       memberName,        // jméno studenta
       payee,             // komu reálně jde platba (kouč nebo gym) — pro export účetní
       disc,              // disciplíny gymu (pro Ambassador 0,5%)
+      access,            // štítky pokryté permicí (pro export účetní)
     } = req.query;
 
     if (!gymAccount || !amount) {
@@ -43,7 +44,7 @@ export default async function handler(req, res) {
           {
             price_data: {
               currency: cur,
-              product_data: { name: `${planName || 'Membership'} — ${gymName || 'MTL Gym'}` },
+              product_data: { name: `${planName || 'Membership'}${access ? ' ['+access+']' : ''} — ${gymName || 'MTL Gym'}` },
               unit_amount: Math.round(P * 100), // bez markupu
               recurring: { interval: ivl },
             },
@@ -55,6 +56,7 @@ export default async function handler(req, res) {
           metadata: {
             mtl_payment_type: 'membership',
             mtl_plan: planName || 'Membership',
+            mtl_access: access || '',
             mtl_income: income || 'side',           // zařazení deklaruje prodejce (gym)
             gym_name: gymName || '',
             mtl_payee: payee || gymName || '',

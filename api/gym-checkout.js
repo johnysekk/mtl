@@ -22,6 +22,7 @@ export default async function handler(req, res) {
       memberName,        // jméno studenta
       payee,             // komu reálně jde platba (kouč nebo gym) — pro export účetní
       disc,              // disciplíny gymu (pro Ambassador 0,5%)
+      level,             // štítek lekce (např. beginner/advanced) — pro export účetní
     } = req.query;
 
     if (!gymAccount || !amount) {
@@ -55,9 +56,11 @@ export default async function handler(req, res) {
         ],
         payment_intent_data: {
           application_fee_amount: applicationFee, // jde MTL; Stripe fee strhne Stripe z podílu gymu
+          description: `${className || 'Drop-in'}${level ? ' ['+level+']' : ''} — ${gymName || 'MTL Gym'} (drop-in)`,
           metadata: {
             mtl_payment_type: 'drop_in',
             mtl_plan: className || 'Drop-in',
+            mtl_level: level || '',
             mtl_income: income || 'side',           // zařazení deklaruje prodejce (gym)
             gym_name: gymName || '',
             mtl_payee: payee || gymName || '',
