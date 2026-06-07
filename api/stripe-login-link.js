@@ -59,20 +59,24 @@ export default async function handler(req, res) {
     if (debug) return res.status(200).json({ uid: uid ? uid.slice(0, 8) + '…' : null, diag });
     if (!uid) return res.status(401).json({ error: `Neplatné přihlášení · whoami=${diag.whoami} auth=${diag.auth} sub=${diag.decoded.sub ? 'ok' : 'none'}${dec.expired ? ' (token vypršel — odhlas se a přihlas znovu)' : ''}` });
 
-    const svcHeaders = { apikey: SVC, Authorization: `Bearer ${SVC}` };
+    // Legacy JWT service key (eyJ…) jde jako Bearer; nový sb_secret_… jen jako apikey.
+    const svcHeaders = (SVC.startsWith('eyJ')) ? { apikey: SVC, Authorization: `Bearer ${SVC}` } : { apikey: SVC };
     const gymId = req.query.gymId;
     let acct = null;
 
     if (gymId) {
       const gRes = await fetch(`${SB}/rest/v1/gyms?id=eq.${encodeURIComponent(gymId)}&select=owner_id,stripe_account`, { headers: svcHeaders });
-      const g = (await gRes.json())[0];
-      if (!g) return res.status(404).json({ error: 'Gym nenalezen' });
+      let garr = []; try { garr = await gRes.json(); } catch(e){}
+      const g = Array.isArray(garr) ? garr[0] : null;
+      if (!g) return res.status(404).json({ error: `Gym nenalezen (db=${gRes.status})` });
       if (g.owner_id !== uid) return res.status(403).json({ error: 'Nejsi vlastník tohoto gymu' });
       acct = g.stripe_account;
     } else {
       const pRes = await fetch(`${SB}/rest/v1/profiles?id=eq.${encodeURIComponent(uid)}&select=stripe_account`, { headers: svcHeaders });
-      const p = (await pRes.json())[0];
+      let parr = []; try { parr = await pRes.json(); } catch(e){}
+      const p = Array.isArray(parr) ? parr[0] : null;
       acct = p && p.stripe_account;
+      if (!acct) return res.status(400).json({ error: `Žádný připojený Stripe účet (db=${pRes.status}${Array.isArray(parr)?' n='+parr.length:' err'})` });
     }
 
     if (!acct) return res.status(400).json({ error: 'Žádný připojený Stripe účet' });
