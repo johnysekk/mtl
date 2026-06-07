@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-BQ · robust EP activation (poll+re-render coach view); coach-earnings Stripe-fee breakdown; payout copy fix; reverted proactive payout-connect outside team; added "Můj gym tým" button (next to Manage my gym) + dedicated shMyTeams sheet -->
+<!-- MTL build: 2026-06-07-BR · coach schedule saves without name (name from category/level), no longer silently dropped; notify gym owner on new class w/ click-through to that day; EP activation now webhook-independent (verifies session server-side, self-activates + sends partner_granted notification) -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -2664,6 +2664,9 @@ const NOTIF_T = {
   partner_granted: (d)=> LANG==='en'
     ? `⭐ You've been granted the Exclusive MTL Partner rate — you now keep 98% of your price! 🥊`
     : `⭐ Byla ti udělena sazba Exclusive MTL Partner — od teď si necháváš 98 % své ceny! 🥊`,
+  gym_class_added: (d)=>{ const dn=(typeof dayNames==='function'?dayNames():[])[Number(d.day)]||''; return LANG==='en'
+    ? `📅 ${d.coach||'A coach'} added a class “${d.className||''}” (${dn} ${d.time||''}) to your gym schedule.`
+    : `📅 ${d.coach||'Kouč'} přidal lekci „${d.className||''}" (${dn} ${d.time||''}) do rozvrhu tvého gymu.`; },
   ambassador_granted: (d)=> LANG==='en'
     ? `🎓 You are now an MTL Ambassador for ${d.disc||'a discipline'} — you can certify coaches in it.`
     : `🎓 Stal ses MTL Ambassadorem pro ${d.disc||'disciplínu'} — můžeš certifikovat kouče v této disciplíně.`,
@@ -4882,10 +4885,25 @@ async function saveCoachSchedule(){
   let fresh=[];
   try{ const { data: g } = await supaClient.from('gyms').select('schedule').eq('id', _csGymId).single(); fresh = g&&g.schedule ? (typeof g.schedule==='string'?JSON.parse(g.schedule):g.schedule) : []; }catch(e){ fresh=[]; }
   const others=(fresh||[]).filter(c=>c.coach!==currentUser.id);
-  const mine=_csSched.filter(c=>c.name && c.name.trim()).map(c=>({ day:Number(c.day)||0, time:c.time||'18:00', name:c.name.trim(), level:c.level||'all', coach:currentUser.id, coachName:currentUser.name||null }));
+  const oldMine=(fresh||[]).filter(c=>c.coach===currentUser.id);
+  const mine=_csSched.map(c=>{ const nm=(c.name&&c.name.trim())?c.name.trim():levelLabel(c.level||'all'); return { day:Number(c.day)||0, time:c.time||'18:00', name:nm, level:c.level||'all', coach:currentUser.id, coachName:currentUser.name||null }; });
   const { error } = await supaClient.from('gyms').update({ schedule: JSON.stringify(others.concat(mine)) }).eq('id', _csGymId);
   if(error){ toast('⚠️ '+error.message); return; }
   toast(LANG==='en'?'✅ Saved':'✅ Uloženo');
+  // Notifikace gym ownerovi o nově přidaných lekcích (s proklikem na den v rozvrhu)
+  try{
+    const newOnes=mine.filter(m=> !oldMine.some(o=> Number(o.day)===m.day && (o.time||'')===(m.time||'') && (o.name||'')===(m.name||'')));
+    if(newOnes.length){
+      const { data: gg } = await supaClient.from('gyms').select('owner_id, name').eq('id', _csGymId).single();
+      const ownerId=gg&&gg.owner_id;
+      if(ownerId && ownerId!==currentUser.id){
+        for(const nc of newOnes){
+          await supaClient.from('notifications').insert({ user_id: ownerId, type:'system', read:false, data: JSON.stringify({ kind:'gym_class_added', coach: currentUser.name||'Kouč', className: nc.name, day: nc.day, time: nc.time }), message:`📅 ${currentUser.name||'Kouč'} přidal lekci „${nc.name}" do rozvrhu tvého gymu.` });
+        }
+        try{ updateNotifBadge(); }catch(e){}
+      }
+    }
+  }catch(e){}
   closeSheet('shCoachSched');
 }
 async function openCoachEarnings(gymId, gymName){
@@ -6743,13 +6761,15 @@ async function loadNotifications(){
     const isDropMine = k==='gym_dropin_mine';
     const isExcused = k==='gym_member_excused';
     const isPartnerGranted = k==='partner_granted';
-    const clickable = ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isExcused || isPartnerGranted;
+    const isGymClassAdded = k==='gym_class_added';
+    const clickable = ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isExcused || isPartnerGranted || isGymClassAdded;
     let linkLabel = L('otevřít ›');
     if(isMembCancel) linkLabel = LANG==='en'?'view members ›':'zobrazit členy ›';
     else if(isMembMine) linkLabel = LANG==='en'?'open gym ›':'otevřít gym ›';
     else if(isDropMine) linkLabel = LANG==='en'?'view ›':'zobrazit ›';
     else if(isExcused) linkLabel = LANG==='en'?'reply ›':'odpovědět ›';
     else if(isPartnerGranted) linkLabel = LANG==='en'?'view my benefits ›':'zobrazit výhody ›';
+    else if(isGymClassAdded) linkLabel = LANG==='en'?'open schedule ›':'otevřít rozvrh ›';
     if(linkLabel) linkLabel = linkLabel.charAt(0).toUpperCase()+linkLabel.slice(1);
     if(isBookingConfirm) linkLabel = L('přidat do kalendáře ›');
     else if(isSlotOpen) linkLabel = L('rezervovat ›');
@@ -6784,6 +6804,7 @@ async function loadNotifications(){
         else if(isExcused){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.student_id){ messageGymMember(dd.student_id, dd.member||''); } else { toast(L('⚠️ Chyba')); } }catch(e){ toast(L('⚠️ Chyba')); } }
         else if(isPartnerGranted){ closeAllSheets&&closeAllSheets(); setNav&&setNav('ni-me'); openSheet('shMe'); setTimeout(()=>{ const mc=$('modeCoach'); if(mc) mc.click(); setTimeout(()=>{ const t=$('partnerBadge')||$('foundingCoachBadge'); if(t) t.scrollIntoView({behavior:'smooth',block:'center'}); }, 250); }, 250); }
         else if(isDropMine){ openSheet('shMemberships'); loadMyMemberships(); }
+        else if(isGymClassAdded){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.day!=null) _schedSelDow=Number(dd.day); if($('meGymManage')){ openSheet('shGymManage'); renderGymManage(); setTimeout(()=>{ if(window._gmShowTab) window._gmShowTab(0); if(dd.day!=null && typeof renderScheduleEditor==='function'){ _schedSelDow=Number(dd.day); renderScheduleEditor(); } }, 220); } }catch(e){} }
         else openOnline('coach');
       };
     }
@@ -10930,18 +10951,31 @@ async function showPaidPopup(){
     return;
   }
   if(params.get('partner_sub') === 'ok'){
+    const sid=params.get('session');
     history.replaceState({},'',location.pathname);
     let _t=0; while(!currentUser && _t<25){ await new Promise(r=>setTimeout(r,200)); _t++; }
     toast(LANG==='en'?'⭐ Welcome, Exclusive MTL Partner!':'⭐ Vítej, Exclusive MTL Partnere!');
     if(currentUser){
       const applyEP=()=>{ currentUser.partner=true; try{ if(typeof applyCertUI==='function') applyCertUI(); }catch(e){} try{ if(typeof fillRateEditor==='function') fillRateEditor(); }catch(e){} try{ if($('partnerBadge')){ $('partnerBadge').style.display='block'; $('partnerBadge').innerHTML=epRatesCardHTML(true,true); } if($('foundingCoachBadge')) $('foundingCoachBadge').style.display='none'; }catch(e){} };
-      // webhook nastaví profiles.partner=true; pollujeme až ~12 s a po nastavení překreslíme Kouč view
-      let done=false;
-      for(let i=0;i<8 && !done;i++){
-        try{ const { data: me } = await supaClient.from('profiles').select('partner').eq('id', currentUser.id).single(); if(me && me.partner){ applyEP(); done=true; break; } }catch(e){}
-        await new Promise(r=>setTimeout(r,1500));
+      // 1) krátce počkáme, jestli to nestihl webhook (vyhneme se duplicitní notifikaci)
+      let isPartner=false;
+      for(let i=0;i<3 && !isPartner;i++){
+        try{ const { data: me } = await supaClient.from('profiles').select('partner').eq('id', currentUser.id).single(); if(me && me.partner){ isPartner=true; break; } }catch(e){}
+        await new Promise(r=>setTimeout(r,1200));
       }
-      if(!done) toast(LANG==='en'?'Payment received — Partner status activates within a minute.':'Platba přijata — Partner status se aktivuje do minuty.');
+      // 2) když webhook nedojel (sandbox apod.), ověříme platbu přes server a Partnera zapneme sami + pošleme notifikaci s proklikem
+      if(!isPartner && sid){
+        try{
+          const r=await fetch(`/api/session?sessionId=${encodeURIComponent(sid)}`); const j=await r.json();
+          if(j && (j.subscription || j.customer)){
+            await supaClient.from('profiles').update({ partner:true, partner_sub:j.subscription||null, stripe_customer:j.customer||null }).eq('id', currentUser.id);
+            await supaClient.from('notifications').insert({ user_id: currentUser.id, type:'system', read:false, data: JSON.stringify({ kind:'partner_granted' }), message:'⭐ Teď jsi Exclusive MTL Partner! Z lekcí si necháváš 98 %, student platí jen +8 %, a u gymu platíš 4 % / 2 %. 🥊' });
+            isPartner=true;
+          }
+        }catch(e){}
+      }
+      if(isPartner){ applyEP(); }
+      else toast(LANG==='en'?'Payment received — Partner status activates within a minute.':'Platba přijata — Partner status se aktivuje do minuty.');
     }
     try{ updateNotifBadge(); }catch(e){}
   }
