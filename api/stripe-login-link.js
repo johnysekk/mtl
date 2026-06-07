@@ -74,10 +74,12 @@ export default async function handler(req, res) {
       if (g.owner_id !== uid) return res.status(403).json({ error: 'Nejsi vlastník tohoto gymu' });
       acct = g.stripe_account;
     } else {
-      const pRes = await fetch(`${SB}/rest/v1/profiles?id=eq.${encodeURIComponent(uid)}&select=stripe_account`, { headers: svcHeaders });
+      const payout = String(req.query.payout || '') === '1';
+      const sel = payout ? 'gym_payout_account' : 'stripe_account';
+      const pRes = await fetch(`${SB}/rest/v1/profiles?id=eq.${encodeURIComponent(uid)}&select=${sel}`, { headers: svcHeaders });
       let parr = []; try { parr = await pRes.json(); } catch(e){}
       const p = Array.isArray(parr) ? parr[0] : null;
-      acct = p && p.stripe_account;
+      acct = p && p[sel];
       if (!acct) return res.status(400).json({ error: `Žádný připojený Stripe účet (db=${pRes.status}${Array.isArray(parr)?' n='+parr.length:' err'})` });
     }
 
