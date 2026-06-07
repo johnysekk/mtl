@@ -814,7 +814,7 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
     <div class="coach-only">
       <div id="foundingCoachBadge" style="display:none;background:linear-gradient(135deg,#FFD54A,#F5A623);color:#3a2a00;border-radius:12px;padding:12px 16px;margin-bottom:18px;font-weight:800;font-size:14px;text-align:center;">🏆 Founding Coach — necháváš si 98 %!<div style="font-size:11px;font-weight:600;opacity:.72;margin-top:3px;">Běžná sazba (nezakladatelé): 93 %</div></div>
       <div id="partnerBadge" style="display:none;margin-bottom:18px;"></div>
-      <button id="btnCancelPartner" style="display:none;width:100%;padding:10px;background:transparent;color:var(--light);border:none;font-size:12.5px;font-weight:600;cursor:pointer;font-family:'DM Sans';margin:-10px 0 16px;text-decoration:underline;">Zrušit Exclusive Partnera</button>
+      <button id="btnCancelPartner" style="display:none;width:100%;padding:10px;background:transparent;color:var(--light);border:none;font-size:12.5px;font-weight:600;cursor:pointer;font-family:'DM Sans';margin:-10px 0 16px;text-decoration:underline;">Zrušit výhody Exclusive Partnera</button>
       <div class="sec-lbl">Tvůj přehled</div>
       <div class="prow-group" style="margin-bottom:20px;">
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💰</div><div class="prow-lbl">Tento měsíc</div></div><span class="prow-val" id="coachEarnings">0 Kč</span></div>
@@ -2424,6 +2424,7 @@ const I18N = { en: {
   "Najdi kouče poblíž":"Find a coach nearby",
   "Získej MTL Certified badge":"Get the MTL Certified badge",
   "Staň se koučem":"Become a coach",
+  "Zrušit výhody Exclusive Partnera":"Cancel Exclusive Partner benefits",
   "Můj gym tým":"My gym team",
   "🤝 Můj gym tým":"🤝 My gym team",
   "Kolik lidí teď pravidelně trénuješ?":"How many people do you currently train regularly?",
@@ -2686,6 +2687,9 @@ const NOTIF_T = {
   ep_cancelled: (d)=> LANG==='en'
     ? `⭐❌ ${d.coach||'A coach'} cancelled Exclusive MTL Partner.`
     : `⭐❌ ${d.coach||'Kouč'} zrušil Exclusive MTL Partnera.`,
+  attend_reminder: (d)=> LANG==='en'
+    ? `📋 Mark attendance for the class that just finished${d.className?' — '+d.className:''}${d.time?' ('+d.time+')':''}.`
+    : `📋 Doplň docházku na proběhlou lekci${d.className?' '+d.className:''}${d.time?' ('+d.time+')':''}.`,
   ambassador_granted: (d)=> LANG==='en'
     ? `🎓 You are now an MTL Ambassador for ${d.disc||'a discipline'} — you can certify coaches in it.`
     : `🎓 Stal ses MTL Ambassadorem pro ${d.disc||'disciplínu'} — můžeš certifikovat kouče v této disciplíně.`,
@@ -4247,10 +4251,7 @@ async function openGymProfile(g){
     if(_myRating){ _canRate=true; }
     else { try{
       const { count: ac } = await supaClient.from('gym_attendance').select('id',{count:'exact',head:true}).eq('gym_id', g.id).eq('student_id', currentUser.id);
-      if(ac>0) _canRate=true;
-      else { const { count: bc } = await supaClient.from('gym_bookings').select('id',{count:'exact',head:true}).eq('gym_id', g.id).eq('student_id', currentUser.id);
-        if(bc>0) _canRate=true;
-        else { const { count: mc } = await supaClient.from('gym_memberships').select('id',{count:'exact',head:true}).eq('gym_id', g.id).eq('student_id', currentUser.id); if(mc>0) _canRate=true; } }
+      if((ac||0)>=2) _canRate=true;   // jen po 2+ docházkách ručně označených gymem
     }catch(e){} }
   }
   const _rstars=(n)=>'★'.repeat(Math.round(n))+'☆'.repeat(5-Math.round(n));
@@ -4408,7 +4409,23 @@ function openExcuse(g, occ){
   $('excuseOv').classList.add('open');
 }
 function closeExcuse(){ const o=$('excuseOv'); if(o) o.classList.remove('open'); _excuseCtx=null; }
-async function releaseClass(g, occ){ openExcuse(g, occ); }
+async function releaseClass(g, occ){
+  if(!currentUser) return;
+  // anti-spam: pokud už student jednou uvedl důvod pro TUHLE konkrétní lekci, podruhé už ne → tiché uvolnění
+  try{
+    const { data: ex } = await supaClient.from('gym_excuses').select('id').eq('gym_id',g.id).eq('student_id',currentUser.id).eq('class_name',occ.name||null).eq('class_date',occ.date||null).eq('class_time',occ.time||null).limit(1);
+    if(ex && ex.length){ return doSilentRelease(g, occ); }
+  }catch(e){}
+  openExcuse(g, occ);
+}
+async function doSilentRelease(g, occ){
+  try{
+    await supaClient.from('gym_class_reservations').delete().eq('gym_id', g.id).eq('student_id', currentUser.id).eq('class_date', occ.date).eq('class_time', occ.time).eq('class_name', occ.name);
+    await supaClient.from('gym_class_reservations').insert({ gym_id:g.id, student_id:currentUser.id, student_name:currentUser.name||'Student', class_name:occ.name||null, class_date:occ.date||null, class_time:occ.time||null, status:'released' });
+    toast(LANG==='en'?'✅ Spot released':'✅ Místo uvolněno');
+    openGymProfile(g);
+  }catch(e){ console.error('doSilentRelease',e); toast('⚠️ '+e.message); }
+}
 async function doRelease(){
   if(!_excuseCtx||!currentUser) return;
   const { g, occ } = _excuseCtx;
@@ -4433,6 +4450,8 @@ async function doRelease(){
       }
     }catch(e){}
     toast(reason?(LANG==='en'?'✅ Spot released — coach notified':'✅ Místo uvolněno — kouč ví'):(LANG==='en'?'✅ Spot released':'✅ Místo uvolněno'));
+    // anti-spam marker: důvod pro tuhle lekci jde uvést jen jednou
+    if(reason){ try{ await supaClient.from('gym_excuses').insert({ gym_id:g.id, student_id:currentUser.id, class_name:occ.name||null, class_date:occ.date||null, class_time:occ.time||null }); }catch(e){} }
     openGymProfile(g);
   }catch(e){ console.error('doRelease',e); toast('⚠️ '+e.message); }
 }
@@ -4795,6 +4814,27 @@ async function checkGymOwnership(){
   if($('meGymManage')) $('meGymManage').style.display = approved.length ? 'flex' : 'none';
   if($('meGymManageLbl')) $('meGymManageLbl').textContent = approved.length>1 ? (LANG==='en'?'Manage my gyms':'Spravovat moje gymy') : (LANG==='en'?'Manage my gym':'Spravovat můj gym');
   if($('meGymApplyLbl')) $('meGymApplyLbl').textContent = approved.length ? (LANG==='en'?'Apply another MTL Certified gym':'Přihlásit další MTL Certified gym') : (LANG==='en'?'Apply gym as MTL Certified':'Přihlásit gym jako MTL Certified');
+  if(_myGymData){ try{ checkAttendanceReminders(); }catch(e){} }
+}
+// Připomínka doplnit docházku: lekce, co začaly >=2 h zpět (dnes), bez označené docházky.
+// Bez cronu — kontroluje se při otevření appky majitelem gymu; jedna připomínka na lekci.
+async function checkAttendanceReminders(){
+  if(!_myGymData || !currentUser) return;
+  let sch=[]; try{ sch = _myGymData.schedule ? (typeof _myGymData.schedule==='string'?JSON.parse(_myGymData.schedule):_myGymData.schedule) : []; }catch(e){}
+  if(!sch.length) return;
+  const now=new Date(); const today=now.toISOString().slice(0,10); const dow=now.getDay();
+  const due = sch.filter(c=>{ if(Number(c.day)!==dow) return false; const t=String(c.time||'').split(':'); const h=Number(t[0]), m=Number(t[1]||0); if(isNaN(h)) return false; const start=new Date(now); start.setHours(h,m,0,0); const diff=(now-start)/3600000; return diff>=2 && diff<=12; });
+  if(!due.length) return;
+  let attSet=new Set(), remSet=new Set();
+  try{ const { data: att } = await supaClient.from('gym_attendance').select('class_name,class_time').eq('gym_id',_myGymData.id).eq('class_date',today); (att||[]).forEach(a=>attSet.add(`${a.class_time}|${a.class_name||''}`)); }catch(e){}
+  try{ const { data: rems } = await supaClient.from('notifications').select('data').eq('user_id',currentUser.id).gte('created_at', new Date(Date.now()-2*864e5).toISOString()); (rems||[]).forEach(r=>{ try{ const dd=JSON.parse(r.data||'{}'); if(dd.kind==='attend_reminder') remSet.add(`${dd.date}|${dd.time}|${dd.className||''}`); }catch(e){} }); }catch(e){}
+  let sent=false;
+  for(const c of due){
+    if(attSet.has(`${c.time}|${c.name||''}`)) continue;            // už nějaká docházka označená
+    if(remSet.has(`${today}|${c.time}|${c.name||''}`)) continue;   // už připomenuto
+    try{ await supaClient.from('notifications').insert({ user_id:currentUser.id, type:'system', read:false, data: JSON.stringify({ kind:'attend_reminder', gym_id:_myGymData.id, className:c.name||'', date:today, time:c.time||'', day:dow }), message:`📋 Doplň docházku na proběhlou lekci ${c.name||''} (${c.time||''}).` }); sent=true; }catch(e){}
+  }
+  if(sent){ try{ updateNotifBadge(); }catch(e){} }
 }
 function dayNames(){ return LANG==='en' ? ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'] : ['Ne','Po','Út','St','Čt','Pá','So']; }
 var _gymTeamCoaches = [];
@@ -5069,11 +5109,11 @@ function openEPCancel(){
       <b>${LANG==='en'?'Cancelling Exclusive Partner reverts your rates to standard:':'Zrušením Exclusive Partnera se ti sazby vrátí na standard:'}</b><br>
       ${LANG==='en'?'• Lessons: you keep 93% (was 98%), student pays +10% (was +8%).':'• Z lekcí si necháš 93 % (místo 98 %), student platí +10 % (místo +8 %).'}<br>
       ${LANG==='en'?'• Gym: 5% on memberships, 3% on drop-ins (was 4% / 2%).':'• U gymu platíš 5 % z členství a 3 % z jednorázových (místo 4 % / 2 %).'}<br>
-      ${LANG==='en'?'Your $49/mo subscription is cancelled; existing gym memberships re-rate from the next invoice.':'Předplatné $49/měs se zruší; existující gym členství se přepočítají od příští faktury.'}
+      ${LANG==='en'?'Your $49/mo subscription is cancelled. From the next payment, all monthly memberships at your gym go back to a 5% MTL fee (instead of 4%).':'Předplatné $49/měs se zruší. Všechna měsíční členství u tvého gymu budou mít od příští platby zase 5% provizi MTL (místo 4%).'}
     </div>
     <label style="font-size:13px;font-weight:700;color:var(--dark);display:block;margin-bottom:6px;">${LANG==='en'?'Why are you cancelling? (required)':'Proč rušíš? (povinné)'}</label>
-    <textarea id="epCancelReason" rows="3" maxlength="500" placeholder="${LANG==='en'?'Your honest reason helps us improve.':'Tvůj upřímný důvod nám pomůže to zlepšit.'}" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';font-size:14px;resize:none;margin-bottom:14px;"></textarea>
-    <button id="epCancelConfirm" style="width:100%;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">${LANG==='en'?'Cancel Exclusive Partner':'Zrušit Exclusive Partnera'}</button>
+    <textarea id="epCancelReason" rows="3" maxlength="500" placeholder="${LANG==='en'?'Your honest reason helps us improve.':'Tvůj upřímný důvod nám pomůže službu zlepšit.'}" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';font-size:14px;resize:none;margin-bottom:14px;"></textarea>
+    <button id="epCancelConfirm" style="width:100%;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">${LANG==='en'?'Cancel Exclusive Partner benefits':'Zrušit výhody Exclusive Partnera'}</button>
     <button id="epCancelBack" style="width:100%;padding:11px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Keep my Partner status':'Nechat si Partnera'}</button>`;
   if($('epCancelBack')) $('epCancelBack').onclick=()=>closeSheet('shEPCancel');
   if($('epCancelConfirm')) $('epCancelConfirm').onclick=doEPCancel;
@@ -5094,7 +5134,7 @@ async function doEPCancel(){
     try{ updateNotifBadge(); }catch(e){}
     toast(LANG==='en'?'✅ Cancelled':'✅ Zrušeno');
     showEPRateStep(cancId);
-  }catch(e){ toast('⚠️ '+(e.message||'')); if(btn){ btn.disabled=false; btn.textContent=LANG==='en'?'Cancel Exclusive Partner':'Zrušit Exclusive Partnera'; } }
+  }catch(e){ toast('⚠️ '+(e.message||'')); if(btn){ btn.disabled=false; btn.textContent=LANG==='en'?'Cancel Exclusive Partner benefits':'Zrušit výhody Exclusive Partnera'; } }
 }
 function showEPRateStep(cancId){
   const b=$('epCancelBody'); if(!b) return;
@@ -6923,7 +6963,8 @@ async function loadNotifications(){
     const isGymClassAdded = k==='gym_class_added';
     const isGymRatePrompt = k==='gym_rate_prompt';
     const isEpCancelled = k==='ep_cancelled';
-    const clickable = ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isExcused || isPartnerGranted || isGymClassAdded || isGymRatePrompt || isEpCancelled;
+    const isAttendReminder = k==='attend_reminder';
+    const clickable = ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isExcused || isPartnerGranted || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder;
     let linkLabel = L('otevřít ›');
     if(isMembCancel) linkLabel = LANG==='en'?'view members ›':'zobrazit členy ›';
     else if(isMembMine) linkLabel = LANG==='en'?'open gym ›':'otevřít gym ›';
@@ -6933,6 +6974,7 @@ async function loadNotifications(){
     else if(isGymClassAdded) linkLabel = LANG==='en'?'open schedule ›':'otevřít rozvrh ›';
     else if(isGymRatePrompt) linkLabel = LANG==='en'?'rate ›':'ohodnotit ›';
     else if(isEpCancelled) linkLabel = LANG==='en'?'view feedback ›':'zobrazit zpětnou vazbu ›';
+    else if(isAttendReminder) linkLabel = LANG==='en'?'mark attendance ›':'doplnit docházku ›';
     if(linkLabel) linkLabel = linkLabel.charAt(0).toUpperCase()+linkLabel.slice(1);
     if(isBookingConfirm) linkLabel = L('přidat do kalendáře ›');
     else if(isSlotOpen) linkLabel = L('rezervovat ›');
@@ -6970,6 +7012,7 @@ async function loadNotifications(){
         else if(isGymClassAdded){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.day!=null) _schedSelDow=Number(dd.day); if($('meGymManage')){ openSheet('shGymManage'); renderGymManage(); setTimeout(()=>{ if(window._gmShowTab) window._gmShowTab(0); if(dd.day!=null && typeof renderScheduleEditor==='function'){ _schedSelDow=Number(dd.day); renderScheduleEditor(); } }, 220); } }catch(e){} }
         else if(isGymRatePrompt){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data: gg }=await supaClient.from('gyms').select('*').eq('id',dd.gym_id).single(); if(gg){ await openGymProfile(gg); setTimeout(()=>{ const f=$('gymRateForm'); if(f){ f.style.display='block'; f.scrollIntoView({behavior:'smooth',block:'center'}); } }, 300); } else toast(L('⚠️ Gym nenalezen')); } }catch(e){ toast(L('⚠️ Gym nenalezen')); } }
         else if(isEpCancelled){ openEPFeedback(); }
+        else if(isAttendReminder){ if($('meGymManage')){ openSheet('shGymManage'); renderGymManage(); setTimeout(()=>{ if(window._gmShowTab) window._gmShowTab(3); const rb=$('mgRoster'); if(rb) rb.scrollIntoView({behavior:'smooth',block:'start'}); }, 280); } }
         else openOnline('coach');
       };
     }
