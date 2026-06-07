@@ -74,6 +74,25 @@ async function payAmbassador(coachId, amount, currency, disc) {
   } catch (e) { console.error('payAmbassador', e); }
 }
 
+// Přepíše application_fee_percent na VŠECH aktivních membership subscriptions
+// gymů vlastněných daným uživatelem (Partner: 4 %, jinak 5 %). Aplikuje se na
+// BUDOUCÍ faktury; minulé zůstávají. Nemění, co platí člen — jen MTL cut.
+async function rerateGymMemberships(ownerId, pct) {
+  try {
+    const gyms = await sbGet(`gyms?owner_id=eq.${encodeURIComponent(ownerId)}&select=id,stripe_account`);
+    for (const g of gyms || []) {
+      if (!g.stripe_account) continue;
+      const mems = await sbGet(`gym_memberships?gym_id=eq.${encodeURIComponent(g.id)}&status=in.(active,cancelling)&select=stripe_subscription`);
+      for (const m of mems || []) {
+        if (!m.stripe_subscription) continue;
+        try {
+          await stripe.subscriptions.update(m.stripe_subscription, { application_fee_percent: pct }, { stripeAccount: g.stripe_account });
+        } catch (e) { console.error('rerate sub', m.stripe_subscription, e.message); }
+      }
+    }
+  } catch (e) { console.error('rerateGymMemberships', e); }
+}
+
 function rawBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -148,6 +167,17 @@ export default async function handler(req, res) {
       } else if (m.mtl_payment_type === 'drop_in' || m.mtl_payment_type === 'membership') {
         // GYM skupinová lekce (direct charge na účtu gymu) → 0,5 % ambassadorovi disciplíny
         await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id);
+      } else if (m.mtl_payment_type === 'partner_sub') {
+        // Exclusive MTL Partner subscription zaplacena → zapni partner sazby
+        const uid = m.user_id || s.client_reference_id;
+        const sub = typeof s.subscription === 'string' ? s.subscription : (s.subscription && s.subscription.id);
+        const cust = typeof s.customer === 'string' ? s.customer : (s.customer && s.customer.id);
+        if (uid) {
+          await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: true, partner_sub: sub || null, stripe_customer: cust || null });
+          await rerateGymMemberships(uid, 4); // existující členství → 4 % od příští faktury
+          await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Teď jsi Exclusive MTL Partner! Z lekcí si necháváš 98 %, student platí jen +8 %, a u gymu platíš 4 % / 2 %. 🥊' });
+          await sbPost('notifications', { user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'system', read: false, message: `⭐ Nový Exclusive MTL Partner (user ${uid}).` });
+        }
       }
     } else if (event.type === 'charge.refunded') {
       const ch = event.data.object;
@@ -156,6 +186,16 @@ export default async function handler(req, res) {
         const full = ch.amount_refunded >= ch.amount_captured;
         const pct = ch.amount_captured ? Math.round((ch.amount_refunded / ch.amount_captured) * 100) : 100;
         await sbPatch('bookings', `payment_intent=eq.${encodeURIComponent(pi)}`, full ? { status: 'cancelled', refund_pct: pct } : { refund_pct: pct });
+      }
+    } else if (event.type === 'customer.subscription.deleted') {
+      // Exclusive MTL Partner zrušen / neuhrazen → vypni partner sazby
+      const sub = event.data.object;
+      const rows = await sbGet(`profiles?partner_sub=eq.${encodeURIComponent(sub.id)}&select=id`);
+      const uid = rows[0] && rows[0].id;
+      if (uid) {
+        await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: false, partner_sub: null });
+        await rerateGymMemberships(uid, 5); // zpět na 5 % od příští faktury
+        await sbPost('notifications', { user_id: uid, type: 'system', read: false, message: '⭐ Tvoje Exclusive MTL Partner předplatné skončilo — sazby se vrátily na standard (93 % / +10 %, gym 5 % / 3 %).' });
       }
     } else if (event.type === 'charge.dispute.created') {
       const d = event.data.object;
