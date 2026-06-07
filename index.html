@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-Z · Stripe auth fix (anon) + gym_name fix + class/membership renames + membership details+resume + multi-gym labels -->
+<!-- MTL build: 2026-06-07-AA · Stripe whoami/auth fix + gym analytics (month filter + member metrics) + recurring classes + drop-in→single class rename -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4181,6 +4181,7 @@ async function cancelMembership(id, gymId, subId){
     const j = await r.json();
     if(j.ok){
       await supaClient.from('gym_memberships').update({ status:'cancelling' }).eq('id', id);
+      try{ await supaClient.from('gym_memberships').update({ cancelled_at: new Date().toISOString() }).eq('id', id); }catch(e){}
       toast(LANG==='en'?'✅ Will cancel at period end.':'✅ Zruší se na konci období.');
       loadMyMemberships();
     } else { toast('⚠️ '+(j.error||'')); }
@@ -4196,11 +4197,13 @@ async function resumeMembership(id, gymId, subId){
     const j = await r.json();
     if(j.ok){
       await supaClient.from('gym_memberships').update({ status:'active' }).eq('id', id);
+      try{ await supaClient.from('gym_memberships').update({ cancelled_at: null }).eq('id', id); }catch(e){}
       toast(LANG==='en'?'✅ Membership resumed.':'✅ Členství zase běží.');
       loadMyMemberships();
     } else { toast('⚠️ '+(j.error||'')); }
   }catch(e){ console.error('resumeMembership', e); toast('⚠️ '+e.message); }
 }
+let _myGymData = null, _gymSchedule = [], _gymPlans = [], _gymOrgForm = 'profit', _gymDropinIncome = 'side', _gymMonth = null;
 async function checkGymOwnership(){
   if(!currentUser){ if($('meGymManage')) $('meGymManage').style.display='none'; return; }
   const { data } = await supaClient.from('gyms').select('*').eq('owner_id', currentUser.id).eq('status','approved').order('created_at',{ascending:true});
@@ -4515,7 +4518,20 @@ async function renderGymManage(){
     <button id="mgAddPlan" style="width:100%;padding:11px;background:var(--bg);border:1px dashed var(--border);border-radius:10px;font-weight:600;color:var(--dark);cursor:pointer;font-family:'DM Sans';margin-bottom:16px;">+ ${LANG==='en'?'Add plan':'Přidat variantu'}</button>
     <div class="sec-lbl">${LANG==='en'?'Weekly class schedule':'Týdenní rozvrh tříd'}</div>
     <div id="mgSchedule"></div>
-    <button id="mgAddClass" style="width:100%;padding:11px;background:var(--bg);border:1px dashed var(--border);border-radius:10px;font-weight:600;color:var(--dark);cursor:pointer;font-family:'DM Sans';margin-bottom:16px;">+ ${LANG==='en'?'Add class':'Přidat třídu'}</button>
+    <button id="mgAddClass" style="width:100%;padding:11px;background:var(--bg);border:1px dashed var(--border);border-radius:10px;font-weight:600;color:var(--dark);cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">+ ${LANG==='en'?'Add class':'Přidat třídu'}</button>
+    <button id="mgAddRepeat" style="width:100%;padding:11px;background:var(--bg);border:1px dashed var(--border);border-radius:10px;font-weight:600;color:var(--dark);cursor:pointer;font-family:'DM Sans';margin-bottom:10px;">📅 ${LANG==='en'?'Add recurring (multiple days)':'Přidat opakovaně (více dní)'}</button>
+    <div id="mgRepeatPanel" style="display:none;border:1.5px solid var(--border);border-radius:12px;padding:12px;margin-bottom:16px;background:var(--surf);">
+      <div style="font-size:13px;font-weight:700;color:var(--dark);margin-bottom:8px;">📅 ${LANG==='en'?'Recurring class':'Opakovaná lekce'}</div>
+      <input id="rpName" type="text" placeholder="${LANG==='en'?'Class name':'Název třídy'}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';margin-bottom:6px;">
+      <div style="display:flex;gap:6px;margin-bottom:6px;">
+        <input id="rpTime" type="time" value="18:00" style="flex:1;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';">
+        <select id="rpLevel" style="flex:1;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${CLASS_LEVELS.map(o=>`<option value="${o.v}">${LANG==='en'?o.en:o.cs}</option>`).join('')}</select>
+      </div>
+      ${isMultiDiscipline()?`<select id="rpDisc" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;margin-bottom:6px;">${activeDisciplines().map(o=>`<option value="${o.v}">${o.emoji} ${LANG==='en'?o.en:o.cs}</option>`).join('')}</select>`:''}
+      <div style="font-size:12px;color:var(--mid);margin:6px 0 4px;">${LANG==='en'?'Which days? Each becomes its own class you can fine-tune.':'Které dny? Z každého vznikne samostatná lekce, kterou pak doladíš.'}</div>
+      <div id="rpDays" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;">${[1,2,3,4,5,6,0].map(di=>`<label style="display:flex;align-items:center;gap:5px;padding:6px 10px;border:1.5px solid var(--border);border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;background:#fff;"><input type="checkbox" class="rpDay" value="${di}" style="width:15px;height:15px;"> ${dayNames()[di]}</label>`).join('')}</div>
+      <button id="rpCreate" style="width:100%;padding:11px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Create classes':'Vytvořit lekce'}</button>
+    </div>
     <div class="sec-lbl">📋 ${LANG==='en'?'Upcoming class reservations':'Rezervace na lekce'}</div>
     <div id="mgRoster" style="margin-bottom:16px;"><p style="color:var(--light);font-size:13px;">${L('Načítám...')}</p></div>
     <div class="sec-lbl">📜 ${LANG==='en'?'Terms & club rules':'Podmínky a pravidla klubu'}</div>
@@ -4542,6 +4558,22 @@ async function renderGymManage(){
   document.querySelectorAll('.orgFormBtn').forEach(b=>b.onclick=()=>{ _gymOrgForm=b.dataset.v; setOrgFormUI(); renderPlansEditor(); loadGymManageBookings(); });
   if($('mgAddPlan')) $('mgAddPlan').onclick=()=>{ _gymPlans.push({ id:'p'+Date.now().toString(36), name:'', price:0, access:['all'] }); renderPlansEditor(); };
   $('mgAddClass').onclick=()=>{ _gymSchedule.push({day:1, time:'18:00', name:'', level:'all', disc:(isMultiDiscipline()?defaultDiscipline():null)}); renderScheduleEditor(); };
+  if($('mgAddRepeat')) $('mgAddRepeat').onclick=()=>{ const pn=$('mgRepeatPanel'); if(pn) pn.style.display = pn.style.display==='none' ? 'block' : 'none'; };
+  if($('rpCreate')) $('rpCreate').onclick=()=>{
+    const name=($('rpName')&&$('rpName').value.trim())||'';
+    const time=($('rpTime')&&$('rpTime').value)||'18:00';
+    const level=($('rpLevel')&&$('rpLevel').value)||'all';
+    const disc=isMultiDiscipline()?(($('rpDisc')&&$('rpDisc').value)||defaultDiscipline()):null;
+    const days=Array.from(document.querySelectorAll('.rpDay:checked')).map(c=>+c.value);
+    if(!name){ toast(LANG==='en'?'⚠️ Enter a class name':'⚠️ Zadej název třídy'); return; }
+    if(!days.length){ toast(LANG==='en'?'⚠️ Pick at least one day':'⚠️ Vyber aspoň jeden den'); return; }
+    days.forEach(d=>{ _gymSchedule.push({ day:d, time, name, level, disc }); });
+    if($('rpName')) $('rpName').value='';
+    document.querySelectorAll('.rpDay:checked').forEach(c=>c.checked=false);
+    const pn=$('mgRepeatPanel'); if(pn) pn.style.display='none';
+    renderScheduleEditor();
+    toast(LANG==='en'?`✅ ${days.length} classes added`:`✅ Přidáno ${days.length} lekcí`);
+  };
   $('mgSave').onclick=saveGymManage;
   if($('gtSearchBtn')) $('gtSearchBtn').onclick=gtSearchCoaches;
   if($('mgGymLb')) $('mgGymLb').onclick=()=>openGymLeaderboard('city');
@@ -4758,49 +4790,80 @@ async function loadGymManageBookings(){
   // ── PŘEHLED (dashboard majitele — BEZ MTL provize) ──
   const stats=$('mgStats');
   if(stats){
-    const dropBase=drops.reduce((s,b)=>s+netAmt(b),0);
+    // init měsíc (default aktuální)
+    if(!_gymMonth){ const d=new Date(); _gymMonth=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; }
+    const isMonth = _gymMonth!=='all';
+    const inGM = x => _gymMonth==='all' ? true : ((x.created_at||'').slice(0,7)===_gymMonth);
+    const beforeGM = x => _gymMonth!=='all' && ((x.created_at||'').slice(0,10) < (_gymMonth+'-01'));
+    const cancelledInGM = m => _gymMonth!=='all' && m.cancelled_at && (String(m.cancelled_at).slice(0,7)===_gymMonth);
+    const monthLabel = _gymMonth==='all' ? (LANG==='en'?'all time':'celkem') : (()=>{ const mm=fdMonthList().find(x=>x.ym===_gymMonth); return mm?mm.lbl:_gymMonth; })();
+    const monthOpts = '<option value="all"'+(_gymMonth==='all'?' selected':'')+'>'+(LANG==='en'?'All time':'Vše')+'</option>' + fdMonthList().map(m=>'<option value="'+m.ym+'"'+(m.ym===_gymMonth?' selected':'')+'>'+m.lbl+'</option>').join('');
+    // jednorázové lekce (drop-iny) — filtr měsíce
+    const dropsM = drops.filter(inGM);
+    const dropBase=dropsM.reduce((s,b)=>s+netAmt(b),0);
     const dropTurnover=dropBase*1.03, dropGym=dropBase*0.97;
-    const cancelling=mems.filter(m=>m.status==='cancelling').length;
+    const dropFee=dropsM.reduce((s,b)=>s+(netAmt(b)*1.03*0.019+6),0);
+    const dropNet=Math.max(0,dropGym-dropFee);
+    // členství
+    const activeNow = mems.filter(m=>m.status==='active');
+    const cancellingNow = mems.filter(m=>m.status==='cancelling');
     const memMRR=mems.reduce((s,m)=>s+(m.amount||0),0), memGym=memMRR*0.95;
-    const dropFee=drops.reduce((s,b)=>s+(netAmt(b)*1.03*0.019+6),0);
     const memFeeMo=mems.reduce((s,m)=>s+((m.amount||0)*0.019+6),0);
-    const dropNet=Math.max(0,dropGym-dropFee), memNetMo=Math.max(0,memGym-memFeeMo);
+    const memNetMo=Math.max(0,memGym-memFeeMo);
+    const newThis = mems.filter(inGM);
+    const cancelThis = mems.filter(cancelledInGM);
+    const baseMembers = mems.filter(m=> m.status==='active' && beforeGM(m));
+    const baseMRR = baseMembers.reduce((s,m)=>s+(m.amount||0),0);
+    const newMRRnet = newThis.filter(m=>m.status==='active').reduce((s,m)=>s+(m.amount||0),0) - cancelThis.reduce((s,m)=>s+(m.amount||0),0);
+    const signed = v => (v>=0?'+':'')+f(Math.abs(v)).replace(/^/, v<0?'-':'');
+    // income split
     const planIncomeByName={}; gymMembPlans(_myGymData).forEach(p=>{ planIncomeByName[p.name]=p.income||'main'; });
     const dropIncome = _myGymData.dropin_income==='main' ? 'main' : 'side';
     let npMain=0, npSide=0; if(dropIncome==='main') npMain+=dropGym; else npSide+=dropGym;
     mems.forEach(m=>{ const inc=planIncomeByName[m.plan_name]||'main'; if(inc==='side') npSide+=(m.amount||0)*0.95; else npMain+=(m.amount||0)*0.95; });
-    // ── rozpad dle disciplíny (jen u multi-disciplínového gymu) ──
+    // rozpad dle disciplíny (multi-disc gym)
     let discBlock='';
     const gymDiscs=parseDisc(_myGymData.disciplines);
     if(gymDiscs.length>1){
       const dm={};
-      drops.forEach(b=>{ const d=b.discipline||'other'; (dm[d]=dm[d]||{drop:0,dn:0,mem:0,mn:0}); dm[d].drop+=netAmt(b)*1.03*0.97; dm[d].dn++; });
+      dropsM.forEach(b=>{ const d=b.discipline||'other'; (dm[d]=dm[d]||{drop:0,dn:0,mem:0,mn:0}); dm[d].drop+=netAmt(b)*1.03*0.97; dm[d].dn++; });
       mems.forEach(x=>{ const d=x.discipline||'other'; (dm[d]=dm[d]||{drop:0,dn:0,mem:0,mn:0}); dm[d].mem+=(x.amount||0)*0.95; dm[d].mn++; });
       const keys=Object.keys(dm);
       if(keys.length){
         discBlock=`<div style="font-size:12px;font-weight:700;color:var(--mid);margin:14px 0 6px;">🥋 ${LANG==='en'?'By discipline':'Podle disciplíny'}</div><div class="prow-group">`
-          + keys.map(k=>{ const lbl=k==='other'?(LANG==='en'?'Other / untagged':'Ostatní / neoznačené'):(disciplineEmoji(k)+' '+disciplineLabel(k)); const tot=dm[k].drop+dm[k].mem; return `<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F3FF;">🥋</div><div class="prow-lbl">${lbl} <span style="color:var(--light);font-size:12px;">(${dm[k].dn}× drop · ${dm[k].mn}× ${LANG==='en'?'mem':'člen'})</span></div></div><span class="prow-val" style="color:#006040;">${f(tot)}</span></div>`; }).join('')
-          + `</div><p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:6px;">${LANG==='en'?'Your net share by sport (drop-ins 97% + memberships 95%). Memberships with no tagged sport sit under “Other”.':'Tvůj čistý podíl podle sportu (drop-iny 97 % + členství 95 %). Členství bez označeného sportu jsou v „Ostatní".'}</p>`;
+          + keys.map(k=>{ const lbl=k==='other'?(LANG==='en'?'Other / untagged':'Ostatní / neoznačené'):(disciplineEmoji(k)+' '+disciplineLabel(k)); const tot=dm[k].drop+dm[k].mem; return `<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F3FF;">🥋</div><div class="prow-lbl">${lbl} <span style="color:var(--light);font-size:12px;">(${dm[k].dn}× ${LANG==='en'?'class':'lekce'} · ${dm[k].mn}× ${LANG==='en'?'mem':'člen'})</span></div></div><span class="prow-val" style="color:#006040;">${f(tot)}</span></div>`; }).join('')
+          + `</div>`;
       }
     }
     stats.innerHTML=`
-      <div style="font-size:12px;font-weight:700;color:var(--mid);margin:2px 0 6px;">🥊 ${LANG==='en'?'Drop-ins':'Drop-iny'}</div>
+      <select id="mgMonthSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:14px;">${monthOpts}</select>
+      <div style="font-size:12px;font-weight:700;color:var(--mid);margin:2px 0 6px;">🥊 ${LANG==='en'?'Single classes':'Jednorázové lekce'} <span style="color:var(--light);font-weight:600;">· ${monthLabel}</span></div>
       <div class="prow-group" style="margin-bottom:12px;">
-        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🥊</div><div class="prow-lbl">${LANG==='en'?'Sold':'Prodáno'}</div></div><span class="prow-val">${drops.length}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🥊</div><div class="prow-lbl">${LANG==='en'?'Sold':'Prodáno'}</div></div><span class="prow-val">${dropsM.length}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💳</div><div class="prow-lbl">${LANG==='en'?'Turnover':'Obrat'}</div></div><span class="prow-val">${f(dropTurnover)}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏋️</div><div class="prow-lbl">${LANG==='en'?'Your share (97%)':'Tvůj podíl (97 %)'}</div></div><span class="prow-val">${f(dropGym)}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF0E6;">💳</div><div class="prow-lbl">${LANG==='en'?'− Stripe fee (est.)':'− Stripe fee (odhad)'}</div></div><span class="prow-val">-${f(dropFee)}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💎</div><div class="prow-lbl">${LANG==='en'?'= Net (est.)':'= Net (odhad)'}</div></div><span class="prow-val" style="color:#006040;">${f(dropNet)}</span></div>
       </div>
       <div style="font-size:12px;font-weight:700;color:var(--mid);margin:2px 0 6px;">🎟️ ${LANG==='en'?'Membership':'Členství'}</div>
+      <div class="prow-group" style="margin-bottom:10px;">
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🎟️</div><div class="prow-lbl">${LANG==='en'?'Active members':'Aktivní členové'}</div></div><span class="prow-val">${activeNow.length}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">📉</div><div class="prow-lbl">${LANG==='en'?'Cancelling':'Ruší se'}</div></div><span class="prow-val" style="${cancellingNow.length>0?'color:var(--red);':''}">${cancellingNow.length}</span></div>
+        ${isMonth?`
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🟢</div><div class="prow-lbl">${LANG==='en'?'Joined this month':'Tento měsíc přibylo'}</div></div><span class="prow-val" style="color:#006040;">+${newThis.length}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">🔻</div><div class="prow-lbl">${LANG==='en'?'Cancelled this month':'Tento měsíc ruší'}</div></div><span class="prow-val" style="${cancelThis.length>0?'color:var(--red);':''}">${cancelThis.length?'-':''}${cancelThis.length}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">👥</div><div class="prow-lbl">${LANG==='en'?'Base (continuing)':'Base (pokračující)'}</div></div><span class="prow-val">${baseMembers.length}</span></div>`:''}
+      </div>
+      <div style="font-size:12px;font-weight:700;color:var(--mid);margin:2px 0 6px;">🔁 ${LANG==='en'?'Recurring revenue (MRR)':'Opakovaný příjem (MRR)'}</div>
       <div class="prow-group">
-        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🎟️</div><div class="prow-lbl">${LANG==='en'?'Active members':'Aktivní členové'}</div></div><span class="prow-val">${mems.length}</span></div>
-        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">📉</div><div class="prow-lbl">${LANG==='en'?'Cancelling':'Ruší se'}</div></div><span class="prow-val" style="${cancelling>0?'color:var(--red);':''}">${cancelling}</span></div>
-        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🔁</div><div class="prow-lbl">MRR</div></div><span class="prow-val">${f(memMRR)}</span></div>
+        ${isMonth?`
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">👥</div><div class="prow-lbl">${LANG==='en'?'Base MRR (continuing)':'Base MRR (pokračující)'}</div></div><span class="prow-val">${f(baseMRR)}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:${newMRRnet>=0?'#F0FBF0':'#FEECEC'};">${newMRRnet>=0?'📈':'📉'}</div><div class="prow-lbl">${LANG==='en'?'Net new MRR this month':'Nové MRR tento měsíc (net)'}</div></div><span class="prow-val" style="color:${newMRRnet>=0?'#006040':'var(--red)'};">${newMRRnet>=0?'+':'-'}${f(Math.abs(newMRRnet))}</span></div>`:''}
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🔁</div><div class="prow-lbl">${LANG==='en'?'Total MRR':'Celkem MRR'}</div></div><span class="prow-val">${f(memMRR)}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏋️</div><div class="prow-lbl">${LANG==='en'?'Your share / mo (95%)':'Tvůj podíl / měs (95 %)'}</div></div><span class="prow-val">${f(memGym)}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💎</div><div class="prow-lbl">${LANG==='en'?'= Net / mo (est.)':'= Net / měs (odhad)'}</div></div><span class="prow-val" style="color:#006040;">${f(memNetMo)}</span></div>
       </div>
-      <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:8px;">${LANG==='en'?'Stripe fee is estimated (~1.9% + small fix); exact fee is in your Stripe dashboard. VAT with your accountant.':'Stripe fee je odhad (~1,9 % + drobný fix); přesný poplatek máš ve svém Stripe. DPH řeš s účetní.'}</p>
+      <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:8px;">${LANG==='en'?'“This month” = members who joined / cancelled in the selected month. MRR counts everyone still paying (incl. those cancelling, until their period ends). Stripe fee estimated; exact in your Stripe. VAT with your accountant.':'„Tento měsíc" = členové, co přibyli / zrušili ve vybraném měsíci. MRR počítá všechny, co ještě platí (vč. rušících, dokud jim neskončí období). Stripe fee odhad; přesně ve tvém Stripe. DPH řeš s účetní.'}</p>
       ${discBlock}
       ${_gymOrgForm==='nonprofit'?`
       <div style="font-size:12px;font-weight:700;color:var(--mid);margin:14px 0 6px;">🤝 ${LANG==='en'?'Income split (orientational)':'Rozdělení příjmů (orientační)'}</div>
@@ -4808,8 +4871,9 @@ async function loadGymManageBookings(){
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🟢</div><div class="prow-lbl">${LANG==='en'?'Main activity (contributions)':'Hlavní činnost (příspěvky)'}</div></div><span class="prow-val">${f(npMain)}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF0E6;">🟠</div><div class="prow-lbl">${LANG==='en'?'Side activity (services / drop-ins)':'Vedlejší (služby / drop-iny)'}</div></div><span class="prow-val">${f(npSide)}</span></div>
       </div>
-      <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:6px;">${LANG==='en'?'Categorized by you, the gym — MTL does not determine the tax category. Orientational only; use Stripe for exact records and discuss tax treatment with your accountant.':'Zařazení určuješ ty (gym) — MTL daňovou kategorii neurčuje. Jen orientační; přesné podklady ber ze Stripe a daňové zařazení řeš s účetní.'}</p>`:''}
+      <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:6px;">${LANG==='en'?'Categorized by you, the gym — MTL does not determine the tax category. Orientational only.':'Zařazení určuješ ty (gym) — MTL daňovou kategorii neurčuje. Jen orientační.'}</p>`:''}
     `;
+    const msel=$('mgMonthSel'); if(msel) msel.onchange=()=>{ _gymMonth=msel.value; loadGymManageBookings(); };
   }
   // ── POSLEDNÍ REZERVACE (seznam) ──
   const box=$('mgBookings'); if(!box) return;
@@ -4819,7 +4883,7 @@ async function loadGymManageBookings(){
     html += mems.slice(0,20).map(m=>`<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px;"><span>${m.student_name||'Student'}${m.status==='cancelling'?` <span style="color:var(--light);font-size:12px;">(${LANG==='en'?'cancelling':'ruší se'})</span>`:''}</span><strong>${fmtPrice((m.amount||0)*0.95, m.currency)} ${sym}/${LANG==='en'?'mo':'měs'}</strong></div>`).join('');
   }
   if(drops.length){
-    html += `<div style="font-size:12px;font-weight:700;color:var(--mid);margin:12px 0 6px;">🥊 ${LANG==='en'?'Drop-ins':'Drop-iny'} (${drops.length})</div>`;
+    html += `<div style="font-size:12px;font-weight:700;color:var(--mid);margin:12px 0 6px;">🥊 ${LANG==='en'?'Single classes':'Jednorázové lekce'} (${drops.length})</div>`;
     html += drops.slice(0,20).map(b=>`<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:14px;"><span>${b.student_name||'Student'}${b.class_name?' · '+b.class_name:''}${b.class_date?' · '+b.class_date+' '+(b.class_time||''):''}</span><strong>${fmtPrice((b.amount||0)*0.97, b.currency)} ${sym}</strong></div>`).join('');
   }
   if(!html) html=`<p style="color:var(--light);font-size:13px;">${LANG==='en'?'No bookings yet.':'Zatím žádné rezervace.'}</p>`;
