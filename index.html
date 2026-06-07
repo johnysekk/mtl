@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-AC · Stripe key-type fix+diag · tab/row swaps · settings logout · gym LB score breakdown · class label dropdowns · invite inline resolve -->
+<!-- MTL build: 2026-06-07-AD · auto-reservation by label (release/rejoin + capacity + roster) · Stripe URL hardcode · reschedule notifies class coach -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -2608,6 +2608,9 @@ const NOTIF_T = {
   gym_dropin_rescheduled: (d)=> LANG==='en'
     ? `🔄 ${d.student||'A student'} moved their drop-in from ${d.oldDate} ${d.oldTime||''} to ${d.newDate} ${d.newTime}.`
     : `🔄 ${d.student||'Student'} přesunul drop-in z ${d.oldDate} ${d.oldTime||''} na ${d.newDate} ${d.newTime}.`,
+  gym_class_attendee: (d)=> LANG==='en'
+    ? `🥊 ${d.student||'A student'} ${d.how==='reschedule'?'moved to':'booked'} your class ${d.className||''} (${d.date||''} ${d.time||''}).`
+    : `🥊 ${d.student||'Student'} ${d.how==='reschedule'?'se přesunul na':'si koupil'} tvou lekci ${d.className||''} (${d.date||''} ${d.time||''}).`,
   cert_revoke_request: (d)=> LANG==='en'
     ? `🚩 ${d.who||'An ambassador'} flagged ${d.target_name||''} (${d.target_type==='gym'?'gym':'coach'}) for certification review — see Founder Dashboard.`
     : `🚩 ${d.who||'Ambassador'} žádá o odebrání certifikace: ${d.target_name||''} (${d.target_type==='gym'?'gym':'kouč'}) — viz Founder Dashboard.`,
@@ -3852,16 +3855,31 @@ async function openGymProfile(g){
   let myMemb=null, myAccess=['all'];
   const today=new Date().toISOString().slice(0,10);
   let countMap={}, mineSet=new Set();
+  let _resvAll=[], _dropAll=[], _gymMembers=[], _releasedMine=new Set();
   if(currentUser && !isMine){
     try{
       const { data: mbs } = await supaClient.from('gym_memberships').select('*').eq('student_id', currentUser.id).eq('gym_id', g.id).in('status',['active','cancelling']).limit(1);
       if(mbs && mbs.length){ myMemb=mbs[0]; try{ const pa = myMemb.plan_access ? (typeof myMemb.plan_access==='string'?JSON.parse(myMemb.plan_access):myMemb.plan_access) : null; myAccess = (pa&&pa.length)?pa:['all']; }catch(e){ myAccess=['all']; } }
     }catch(e){}
   }
+  // membership pokrývá danou lekci? (štítek + případně kouč)
+  const membAccessOf=(m)=>{ try{ const pa = m.plan_access ? (typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access) : null; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
+  const membCovers=(m,o)=> planCovers({access:membAccessOf(m)}, o.level||'all') && ((o.coach||null)===(m.coach_id||null));
   try{
     const { data: resvAll } = await supaClient.from('gym_class_reservations').select('*').eq('gym_id', g.id).gte('class_date', today);
-    (resvAll||[]).forEach(r=>{ const k=`${r.class_date}|${r.class_time}|${r.class_name}`; countMap[k]=(countMap[k]||0)+1; if(currentUser&&r.student_id===currentUser.id) mineSet.add(k); });
+    _resvAll=resvAll||[];
   }catch(e){}
+  try{
+    const { data: dr } = await supaClient.from('gym_bookings').select('class_date,class_time,class_name,status').eq('gym_id', g.id).eq('status','active').gte('class_date', today);
+    _dropAll=dr||[];
+  }catch(e){}
+  try{
+    const { data: gm } = await supaClient.from('gym_memberships').select('student_id,plan_access,coach_id,status').eq('gym_id', g.id).in('status',['active','cancelling']);
+    _gymMembers=gm||[];
+  }catch(e){}
+  const relKey=(r)=>`${r.class_date}|${r.class_time}|${r.class_name}`;
+  const isReleased=(sid,k)=> _resvAll.some(r=> r.student_id===sid && relKey(r)===k && r.status==='released');
+  _resvAll.forEach(r=>{ if(r.status==='released') return; const k=relKey(r); if(currentUser&&r.student_id===currentUser.id) mineSet.add(k); });
   const plans = gymMembPlans(g);
   const plansBlock = plans.length ? `
     <div class="sec-lbl" style="margin-top:4px;">${LANG==='en'?'Memberships':'Členství'}</div>
@@ -3874,21 +3892,31 @@ async function openGymProfile(g){
       ${p.coachName?`<div style="font-size:12px;color:var(--blue);font-weight:600;margin-top:2px;">${LANG==='en'?'With ':'Vede '}${escapeHtml(p.coachName)}</div>`:''}
       ${isMine?'':(myMemb?'':`<button class="subPlanBtn" data-pi="${pi}" style="width:100%;margin-top:10px;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Become a member →':'Stát se členem →'}</button>`)}
     </div>`).join('')}
-    ${myMemb?`<div style="font-size:12px;color:var(--green);font-weight:700;margin:-2px 0 14px;">✅ ${LANG==='en'?'You are a member here — book covered classes free below.':'Tady jsi člen — rezervuj si pokryté lekce níže zdarma.'}</div>`:''}` : '';
+    ${myMemb?`<div style="font-size:12px;color:var(--green);font-weight:700;margin:-2px 0 14px;">✅ ${LANG==='en'?'You are a member — your covered classes are auto-reserved below. Tap to release a spot.':'Jsi člen — pokryté lekce máš níže automaticky rezervované. Klepnutím uvolníš místo.'}</div>`:''}` : '';
   const dn=dayNames();
   let sch=[]; try{ sch=JSON.parse(g.schedule||'[]'); }catch(e){}
   const occs=upcomingClasses(sch,7);
   const occBtn=(o)=>{
     const k=`${o.date}|${o.time}|${o.name}`;
-    const count=countMap[k]||0, cap=g.capacity||0;
-    const covered = myMemb && ((o.coach||null)===(myMemb.coach_id||null)) && planCovers({access:myAccess}, o.level);
-    const capTxt = cap ? `<span style="color:var(--light);font-size:12px;"> · ${count}/${cap}</span>` : '';
-    if(mineSet.has(k)) return { cap:capTxt, btn:`<button class="unresvBtn" data-name="${(o.name||'').replace(/"/g,'&quot;')}" data-date="${o.date}" data-time="${o.time}" style="background:#E8F5EE;color:#006040;border:1px solid #A8E6C0;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${LANG==='en'?'Reserved ✓':'Rezervováno ✓'}</button>` };
-    if(covered){
-      if(cap && count>=cap) return { cap:capTxt, btn:`<span style="color:var(--light);font-size:13px;font-weight:700;white-space:nowrap;">${LANG==='en'?'Full':'Plno'}</span>` };
-      return { cap:capTxt, btn:`<button class="resvBtn" data-name="${(o.name||'').replace(/"/g,'&quot;')}" data-date="${o.date}" data-time="${o.time}" data-level="${o.level||'all'}" data-coach="${o.coach||''}" style="background:#006040;color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${LANG==='en'?'Reserve free':'Rezervovat zdarma'}</button>` };
+    const cap=g.capacity||0;
+    const autoMembers=_gymMembers.filter(m=> membCovers(m,o) && !isReleased(m.student_id,k));
+    const autoIds=new Set(autoMembers.map(m=>m.student_id));
+    const dropCount=_dropAll.filter(d=>`${d.class_date}|${d.class_time}|${d.class_name}`===k).length;
+    const explicitCount=_resvAll.filter(r=> r.status!=='released' && relKey(r)===k && !autoIds.has(r.student_id)).length;
+    const count=autoMembers.length + dropCount + explicitCount;
+    const capTxt = cap ? `<span style="color:${count>=cap?'var(--red)':'var(--light)'};font-size:12px;"> · ${count}/${cap}</span>` : '';
+    const full = `<span style="color:var(--light);font-size:13px;font-weight:700;white-space:nowrap;">${LANG==='en'?'Full':'Plno'}</span>`;
+    const da = `data-name="${(o.name||'').replace(/"/g,'&quot;')}" data-date="${o.date}" data-time="${o.time}" data-level="${o.level||'all'}" data-coach="${o.coach||''}"`;
+    const iCover = !!(myMemb && membCovers(myMemb, o));
+    if(iCover){
+      const iReleased = isReleased(currentUser.id, k);
+      if(!iReleased) return { cap:capTxt, btn:`<button class="releaseBtn" ${da} style="background:#E8F5EE;color:#006040;border:1px solid #A8E6C0;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${LANG==='en'?'Going ✓ · release':'Jdeš ✓ · uvolnit'}</button>` };
+      if(cap && count>=cap) return { cap:capTxt, btn:full };
+      return { cap:capTxt, btn:`<button class="rejoinBtn" ${da} style="background:#006040;color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${LANG==='en'?'Reserve back':'Rezervovat zpět'}</button>` };
     }
-    return { cap:capTxt, btn:`<button class="bookClassBtn" data-name="${(o.name||'').replace(/"/g,'&quot;')}" data-date="${o.date}" data-time="${o.time}" data-coach="${o.coach||''}" data-coachname="${(o.coachName||'').replace(/"/g,'&quot;')}" data-disc="${o.disc||''}" style="background:var(--red);color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${LANG==='en'?'Book':'Rezervovat'}</button>` };
+    if(mineSet.has(k)) return { cap:capTxt, btn:`<button class="unresvBtn" ${da} style="background:#E8F5EE;color:#006040;border:1px solid #A8E6C0;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${LANG==='en'?'Reserved ✓':'Rezervováno ✓'}</button>` };
+    if(cap && count>=cap) return { cap:capTxt, btn:full };
+    return { cap:capTxt, btn:`<button class="bookClassBtn" ${da} data-coachname="${(o.coachName||'').replace(/"/g,'&quot;')}" data-disc="${o.disc||''}" style="background:var(--red);color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${LANG==='en'?'Book':'Rezervovat'}</button>` };
   };
   const occRow=(o)=>{ const dd=new Date(o.date); const b=occBtn(o); const lvl=(o.level&&o.level!=='all')?` · <span style="color:var(--mid);">${levelLabel(o.level)}</span>`:''; const led=o.coachName?` · <span style="color:var(--blue);font-weight:600;">${LANG==='en'?'with ':'vede '}${escapeHtml(o.coachName)}</span>`:''; return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:#fff;border:1px solid var(--border);border-radius:10px;padding:9px 12px;margin-bottom:6px;"><div style="font-size:13px;min-width:0;"><strong>${o.name}</strong>${lvl}<div style="color:var(--mid);font-size:12px;">${dn[dd.getDay()]} ${o.time} · ${dd.getDate()}.${dd.getMonth()+1}.${b.cap}${led}</div></div>${b.btn}</div>`; };
   const levelsPresent = CLASS_LEVELS.map(l=>l.v).filter(v=> occs.some(o=>(o.level||'all')===v));
@@ -3924,8 +3952,42 @@ async function openGymProfile(g){
     $('gymProfContent').querySelectorAll('.bookClassBtn').forEach(b=>{ b.onclick=()=>gymTermsGate(g, ()=>bookGymDropin(g, {name:b.dataset.name, date:b.dataset.date, time:b.dataset.time, coach:b.dataset.coach||null, coachName:b.dataset.coachname||null, disc:b.dataset.disc||null})); });
     $('gymProfContent').querySelectorAll('.resvBtn').forEach(b=>{ b.onclick=()=>reserveClass(g, {name:b.dataset.name, date:b.dataset.date, time:b.dataset.time, level:b.dataset.level, coach:b.dataset.coach||null}, myMemb); });
     $('gymProfContent').querySelectorAll('.unresvBtn').forEach(b=>{ b.onclick=()=>unreserveClass(g, {name:b.dataset.name, date:b.dataset.date, time:b.dataset.time}); });
+    $('gymProfContent').querySelectorAll('.releaseBtn').forEach(b=>{ b.onclick=()=>releaseClass(g, {name:b.dataset.name, date:b.dataset.date, time:b.dataset.time, level:b.dataset.level, coach:b.dataset.coach||null}); });
+    $('gymProfContent').querySelectorAll('.rejoinBtn').forEach(b=>{ b.onclick=()=>rejoinClass(g, {name:b.dataset.name, date:b.dataset.date, time:b.dataset.time, level:b.dataset.level, coach:b.dataset.coach||null}); });
   }
   openSheet('shGymProfile');
+}
+async function releaseClass(g, occ){
+  if(!currentUser) return;
+  try{
+    // smaž případné existující záznamy pro tuto lekci a vlož 'released'
+    await supaClient.from('gym_class_reservations').delete().eq('gym_id', g.id).eq('student_id', currentUser.id).eq('class_date', occ.date).eq('class_time', occ.time).eq('class_name', occ.name);
+    await supaClient.from('gym_class_reservations').insert({ gym_id:g.id, student_id:currentUser.id, student_name:currentUser.name||'Student', class_name:occ.name||null, class_date:occ.date||null, class_time:occ.time||null, status:'released' });
+    toast(LANG==='en'?'✅ Spot released':'✅ Místo uvolněno');
+    openGymProfile(g);
+  }catch(e){ console.error('releaseClass',e); toast('⚠️ '+e.message); }
+}
+async function rejoinClass(g, occ){
+  if(!currentUser) return;
+  try{
+    // kontrola kapacity před návratem
+    if(g.capacity){
+      const today=new Date().toISOString().slice(0,10);
+      const [rv, db] = await Promise.all([
+        supaClient.from('gym_class_reservations').select('student_id,status').eq('gym_id',g.id).eq('class_date',occ.date).eq('class_time',occ.time).eq('class_name',occ.name||null),
+        supaClient.from('gym_bookings').select('id').eq('gym_id',g.id).eq('status','active').eq('class_date',occ.date).eq('class_time',occ.time)
+      ]);
+      const released=new Set((rv.data||[]).filter(r=>r.status==='released').map(r=>r.student_id));
+      const { data: gm } = await supaClient.from('gym_memberships').select('student_id,plan_access,coach_id').eq('gym_id',g.id).in('status',['active','cancelling']);
+      const accOf=(m)=>{ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
+      const autoCnt=(gm||[]).filter(m=> planCovers({access:accOf(m)}, occ.level||'all') && ((occ.coach||null)===(m.coach_id||null)) && !released.has(m.student_id) && m.student_id!==currentUser.id).length;
+      const cnt = autoCnt + 1 + (db.data||[]).length; // +1 = já zpět
+      if(cnt > g.capacity){ toast(LANG==='en'?'⚠️ This class is full now.':'⚠️ Tahle lekce je teď plná.'); return; }
+    }
+    await supaClient.from('gym_class_reservations').delete().eq('gym_id', g.id).eq('student_id', currentUser.id).eq('class_date', occ.date).eq('class_time', occ.time).eq('class_name', occ.name);
+    toast(LANG==='en'?'✅ Reserved again':'✅ Zase rezervováno');
+    openGymProfile(g);
+  }catch(e){ console.error('rejoinClass',e); toast('⚠️ '+e.message); }
 }
 async function reserveClass(g, occ, myMemb){
   if(!currentUser){ toast(L('⚠️ Nejdřív se přihlas')); return; }
@@ -4154,6 +4216,14 @@ async function doGymReschedule(occ){
         await supaClient.from('notifications').insert({ user_id: g.owner_id, type:'system', read:false,
           data: JSON.stringify({ kind:'gym_dropin_rescheduled', student: currentUser.name||'Student', oldDate:b.class_date, oldTime:b.class_time, newDate:occ.date, newTime:occ.time }),
           message:`🔄 ${currentUser.name||'Student'} přesunul drop-in z ${b.class_date} ${b.class_time||''} na ${occ.date} ${occ.time}.` });
+      }
+    }catch(e){}
+    // notifikace kouči nové lekce (vede ji) — best-effort
+    try{
+      if(occ.coach && occ.coach!==currentUser.id){
+        await supaClient.from('notifications').insert({ user_id: occ.coach, type:'system', read:false,
+          data: JSON.stringify({ kind:'gym_class_attendee', student: currentUser.name||'Student', className: occ.name||'', date:occ.date, time:occ.time, how:'reschedule' }),
+          message:`🥊 ${currentUser.name||'Student'} se přesunul na tvou lekci ${occ.name||''} (${occ.date} ${occ.time}).` });
       }
     }catch(e){}
     $('rescheduleOv').classList.remove('open');
@@ -4626,19 +4696,36 @@ async function loadGymRoster(){
   const box=$('mgRoster'); if(!box||!_myGymData) return;
   const occs=upcomingClasses(_gymSchedule,7);
   const today=new Date().toISOString().slice(0,10);
-  let rs=[]; try{ const { data: resv } = await supaClient.from('gym_class_reservations').select('*').eq('gym_id', _myGymData.id).gte('class_date', today); rs=resv||[]; }catch(e){}
+  let rs=[], drops=[], mems=[];
+  try{ const { data } = await supaClient.from('gym_class_reservations').select('*').eq('gym_id', _myGymData.id).gte('class_date', today); rs=data||[]; }catch(e){}
+  try{ const { data } = await supaClient.from('gym_bookings').select('student_name,class_date,class_time,class_name,status').eq('gym_id', _myGymData.id).eq('status','active').gte('class_date', today); drops=data||[]; }catch(e){}
+  try{ const { data } = await supaClient.from('gym_memberships').select('student_id,student_name,plan_access,coach_id,status').eq('gym_id', _myGymData.id).in('status',['active','cancelling']); mems=data||[]; }catch(e){}
   if(!occs.length){ box.innerHTML=`<p style="color:var(--light);font-size:13px;">${LANG==='en'?'No classes scheduled.':'Žádné naplánované lekce.'}</p>`; return; }
   const dn=dayNames(); const cap=_myGymData.capacity||0;
+  const accOf=(m)=>{ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
+  const rk=(r)=>`${r.class_date}|${r.class_time}|${r.class_name}`;
+  const tagPill=(t,c)=>`<span style="font-size:10px;font-weight:700;color:${c};background:${c}1a;border-radius:6px;padding:1px 6px;margin-left:6px;">${t}</span>`;
   box.innerHTML=occs.slice(0,20).map((o,i)=>{
-    const list=rs.filter(r=>r.class_date===o.date&&r.class_time===o.time&&r.class_name===o.name);
+    const k=`${o.date}|${o.time}|${o.name}`;
+    const releasedIds=new Set(rs.filter(r=>r.status==='released'&&rk(r)===k).map(r=>r.student_id));
+    const auto=mems.filter(m=> planCovers({access:accOf(m)}, o.level||'all') && ((o.coach||null)===(m.coach_id||null)) && !releasedIds.has(m.student_id));
+    const autoIds=new Set(auto.map(m=>m.student_id));
+    const dropList=drops.filter(d=>`${d.class_date}|${d.class_time}|${d.class_name}`===k);
+    const explicit=rs.filter(r=> r.status!=='released' && rk(r)===k && !autoIds.has(r.student_id));
+    const attendees=[
+      ...auto.map(m=>({name:m.student_name||(LANG==='en'?'Member':'Člen'), pill:tagPill(LANG==='en'?'member':'členství','#006040')})),
+      ...explicit.map(r=>({name:r.student_name||(LANG==='en'?'Member':'Člen'), pill:tagPill(LANG==='en'?'reserved':'rezervace','#1E6FD9')})),
+      ...dropList.map(d=>({name:d.student_name||'Student', pill:tagPill('drop-in','#C0392B')}))
+    ];
+    const n=attendees.length;
     const dd=new Date(o.date);
     const lvl=(o.level&&o.level!=='all')?` · ${levelLabel(o.level)}`:'';
     return `<div style="border:1px solid var(--border);border-radius:12px;padding:11px;margin-bottom:8px;">
-      <div class="rosterHead" data-i="${i}" style="display:flex;justify-content:space-between;align-items:center;${list.length?'cursor:pointer;':''}">
+      <div class="rosterHead" data-i="${i}" style="display:flex;justify-content:space-between;align-items:center;${n?'cursor:pointer;':''}">
         <div style="font-size:13px;"><strong>${o.name}</strong>${lvl}<div style="color:var(--mid);font-size:12px;">${dn[dd.getDay()]} ${o.time} · ${dd.getDate()}.${dd.getMonth()+1}.</div></div>
-        <div style="font-weight:700;font-size:14px;color:${cap&&list.length>=cap?'var(--red)':'var(--dark)'};">${list.length}${cap?`/${cap}`:''} 👥</div>
+        <div style="font-weight:700;font-size:14px;color:${cap&&n>=cap?'var(--red)':'var(--dark)'};">${n}${cap?`/${cap}`:''} 👥</div>
       </div>
-      ${list.length?`<div class="rosterList" data-i="${i}" style="display:none;margin-top:8px;border-top:1px solid var(--border);padding-top:8px;">${list.map(r=>`<div style="font-size:13px;color:var(--dark);padding:3px 0;">• ${r.student_name||'Člen'}</div>`).join('')}</div>`:''}
+      ${n?`<div class="rosterList" data-i="${i}" style="display:none;margin-top:8px;border-top:1px solid var(--border);padding-top:8px;">${attendees.map(a=>`<div style="font-size:13px;color:var(--dark);padding:3px 0;">• ${a.name}${a.pill}</div>`).join('')}</div>`:''}
     </div>`;
   }).join('');
   box.querySelectorAll('.rosterHead').forEach(h=>h.onclick=()=>{ const l=box.querySelector(`.rosterList[data-i="${h.dataset.i}"]`); if(l) l.style.display=l.style.display==='none'?'block':'none'; });
