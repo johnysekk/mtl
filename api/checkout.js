@@ -18,6 +18,7 @@ export default async function handler(req, res) {
       credit,            // 'student' | 'coach' | 'none' — který referral kredit se použil
       studentId,         // profiles.id studenta (pro webhook → vytvoření bookingu)
       disc,              // disciplína rezervace (pro 1% ambassador atribuci)
+      markup,            // student markup multiplikátor: 1.10 běžně, 1.08 Exclusive Partner
     } = req.query;
 
     if (!coachId || !amount) {
@@ -32,7 +33,10 @@ export default async function handler(req, res) {
     let COMMISSION = commission ? parseFloat(commission) : 0.17;
     if (!(COMMISSION >= 0.02 && COMMISSION <= 0.25)) COMMISSION = 0.17;
     // referral sleva pro studenta = waiver markupu (1.00 místo 1.10); appFee pak jen cut
-    const STUDENT_MARKUP = (String(nomarkup) === '1') ? 1.00 : 1.10;
+    // Exclusive Partner: markup 1.08 (student platí míň). Pojistka 1.00–1.10.
+    let MK = markup ? parseFloat(markup) : 1.10;
+    if (!(MK >= 1.00 && MK <= 1.10)) MK = 1.10;
+    const STUDENT_MARKUP = (String(nomarkup) === '1') ? 1.00 : MK;
 
     // Stripe minor units. CZK = celé koruny (zaokrouhlit DOLŮ, žádné haléře); EUR/USD = centy.
     const isCZK = String(currency || 'CZK').toUpperCase() === 'CZK';
