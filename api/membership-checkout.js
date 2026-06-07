@@ -23,6 +23,7 @@ export default async function handler(req, res) {
       payee,             // komu reálně jde platba (kouč nebo gym) — pro export účetní
       disc,              // disciplíny gymu (pro Ambassador 0,5%)
       access,            // štítky pokryté permicí (pro export účetní)
+      partner,           // '1' = gym owner je Exclusive MTL Partner → 4 % místo 5 %
     } = req.query;
 
     if (!gymAccount || !amount) {
@@ -32,6 +33,7 @@ export default async function handler(req, res) {
     const P = parseInt(amount, 10);
     const cur = String(currency).toLowerCase();
     const ivl = interval === 'year' ? 'year' : 'month';
+    const FEE_PCT = (String(partner) === '1') ? 4 : MTL_PERCENT; // Partner gym: 4 %
 
     const host = req.headers.host;
     const proto = host && host.includes('localhost') ? 'http' : 'https';
@@ -52,7 +54,7 @@ export default async function handler(req, res) {
           },
         ],
         subscription_data: {
-          application_fee_percent: MTL_PERCENT, // MTL bere 5 % z každého invoicu; Stripe fee nese gym
+          application_fee_percent: FEE_PCT, // MTL bere 5 % (Partner gym 4 %) z každého invoicu; Stripe fee nese gym
           metadata: {
             mtl_payment_type: 'membership',
             mtl_plan: planName || 'Membership',

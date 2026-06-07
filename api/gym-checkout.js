@@ -23,6 +23,7 @@ export default async function handler(req, res) {
       payee,             // komu reálně jde platba (kouč nebo gym) — pro export účetní
       disc,              // disciplíny gymu (pro Ambassador 0,5%)
       level,             // štítek lekce (např. beginner/advanced) — pro export účetní
+      partner,           // '1' = gym owner je Exclusive MTL Partner → 2/2 místo 3/3
     } = req.query;
 
     if (!gymAccount || !amount) {
@@ -31,11 +32,14 @@ export default async function handler(req, res) {
 
     const P = parseInt(amount, 10);
     const cur = String(currency).toLowerCase();
+    const isPartner = (String(partner) === '1');
+    const MK   = isPartner ? 1.02 : STUDENT_MARKUP; // Partner gym: student markup 2 %
+    const TAKE = isPartner ? 0.04 : MTL_TAKE;       // Partner gym: 2 % markup + 2 % cut
 
     // minor units. CZK = celé koruny (DOLŮ); EUR/USD = centy.
     const isCZK = cur === 'czk';
-    const unitAmount     = isCZK ? Math.floor(P * STUDENT_MARKUP) * 100 : Math.round(P * STUDENT_MARKUP * 100); // co zaplatí student
-    const applicationFee = isCZK ? Math.floor(P * MTL_TAKE)       * 100 : Math.round(P * MTL_TAKE       * 100); // čistá provize MTL
+    const unitAmount     = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100); // co zaplatí student
+    const applicationFee = isCZK ? Math.floor(P * TAKE) * 100 : Math.round(P * TAKE * 100); // čistá provize MTL
 
     const host = req.headers.host;
     const proto = host && host.includes('localhost') ? 'http' : 'https';
