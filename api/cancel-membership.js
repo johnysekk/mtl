@@ -8,27 +8,19 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 export default async function handler(req, res) {
   try {
     const { subscriptionId, gymAccount, immediate, resume } = req.query;
-    if (!subscriptionId || !gymAccount) {
-      return res.status(400).json({ error: 'Chybí subscriptionId nebo gymAccount' });
+    if (!subscriptionId) {
+      return res.status(400).json({ error: 'Chybí subscriptionId' });
     }
+    // gymAccount volitelný: gym členství žije na connected accountu; EP ($49/mo) na platformě (bez gymAccount)
+    const opts = gymAccount ? { stripeAccount: gymAccount } : undefined;
 
     let sub;
     if (String(resume) === '1') {
-      // zrušení zrušení — předplatné zase poběží dál
-      sub = await stripe.subscriptions.update(
-        subscriptionId,
-        { cancel_at_period_end: false },
-        { stripeAccount: gymAccount }
-      );
+      sub = await stripe.subscriptions.update(subscriptionId, { cancel_at_period_end: false }, opts);
     } else if (String(immediate) === '1') {
-      sub = await stripe.subscriptions.cancel(subscriptionId, { stripeAccount: gymAccount });
+      sub = await stripe.subscriptions.cancel(subscriptionId, opts);
     } else {
-      // zruší na konci období — student dochodí zaplacené
-      sub = await stripe.subscriptions.update(
-        subscriptionId,
-        { cancel_at_period_end: true },
-        { stripeAccount: gymAccount }
-      );
+      sub = await stripe.subscriptions.update(subscriptionId, { cancel_at_period_end: true }, opts);
     }
 
     res.status(200).json({
