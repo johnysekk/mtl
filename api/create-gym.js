@@ -12,19 +12,20 @@ export default async function handler(req, res) {
     const proto = host && host.includes('localhost') ? 'http' : 'https';
 
     // (volitelné) předvyplň zemi/e-mail z query, jinak je gym zadá v onboardingu
-    const { email, country, gymProfileId } = req.query;
+    const { email, country, gymProfileId, for: forRole } = req.query;
+    const isCoach = String(forRole) === 'coach';
 
     const account = await stripe.accounts.create({
       type: 'standard',
       ...(email ? { email } : {}),
       ...(country ? { country: String(country).toUpperCase() } : {}),
-      metadata: { mtl_role: 'gym', gym_profile_id: gymProfileId || '' },
+      metadata: { mtl_role: isCoach ? 'coach_payout' : 'gym', gym_profile_id: gymProfileId || '' },
     });
 
     const link = await stripe.accountLinks.create({
       account: account.id,
-      refresh_url: `${proto}://${host}/?gym_stripe=refresh`,
-      return_url: `${proto}://${host}/?gym_stripe=done&acct=${account.id}`,
+      refresh_url: `${proto}://${host}/?${isCoach ? 'coach_payout=refresh' : 'gym_stripe=refresh'}`,
+      return_url: `${proto}://${host}/?${isCoach ? 'coach_payout=done' : 'gym_stripe=done'}&acct=${account.id}`,
       type: 'account_onboarding',
     });
 
