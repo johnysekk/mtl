@@ -16,9 +16,11 @@ function decodeSub(token) {
 export default async function handler(req, res) {
   const diag = { whoami: null, auth: null, decoded: null, method: null };
   try {
-    let SB = (process.env.SUPABASE_URL || URL_FALLBACK).trim().replace(/\/+$/, '');
-    if (!/^https?:\/\//.test(SB)) SB = 'https://' + SB;
-    if (!SB.includes('.supabase.co')) SB = URL_FALLBACK;
+    // URL projektu je veřejná a známá — natvrdo, ať nás netrápí špatná/zdvojená env hodnota.
+    let SB = URL_FALLBACK;
+    const envU = (process.env.SUPABASE_URL || '').trim().replace(/\/+$/, '');
+    // env použij jen když je to čistá …supabase.co základna bez další cesty
+    if (/^https:\/\/[a-z0-9-]+\.supabase\.co$/.test(envU)) SB = envU;
     const SVC = process.env.SUPABASE_SERVICE_ROLE_KEY;
     const ANON = process.env.SUPABASE_ANON_KEY || ANON_FALLBACK;
     const auth = req.headers.authorization || '';
