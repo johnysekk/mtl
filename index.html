@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-W · Stripe proklik (coach+gym) + login-link fix + earnings in-person/online + by-discipline -->
+<!-- MTL build: 2026-06-07-X · form draft persistence (coach+gym) + gym upload fix (size check + real error) -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -5034,35 +5034,72 @@ function renderGymPhotoSlots(){
   document.querySelectorAll('.gpInp').forEach(inp=>{
     inp.onchange=async()=>{
       const file=inp.files[0]; if(!file) return;
+      if(!/^image\//.test(file.type||'')){ toast(LANG==='en'?'⚠️ Please pick an image file':'⚠️ Vyber prosím obrázek'); inp.value=''; return; }
+      if(file.size > 5*1024*1024){ toast(L('⚠️ Foto je větší než 5 MB')+' ('+(file.size/1048576).toFixed(1)+' MB)'); inp.value=''; return; }
       const group=inp.dataset.group, k=inp.dataset.k;
       inp.disabled=true;
       try{
-        const fileName=`${currentUser.id}-${group}-${k}-${Date.now()}.${file.name.split('.').pop()}`;
-        const { error }=await supaClient.storage.from('gym-photos').upload(fileName,file);
+        const ext=(file.name.split('.').pop()||'jpg').toLowerCase().replace(/[^a-z0-9]/g,'')||'jpg';
+        const fileName=`${currentUser.id}-${group}-${k}-${Date.now()}.${ext}`;
+        const { error }=await supaClient.storage.from('gym-photos').upload(fileName,file,{ contentType:file.type||'image/jpeg', upsert:false });
         if(error) throw error;
         const { data }=supaClient.storage.from('gym-photos').getPublicUrl(fileName);
         const url=data.publicUrl;
         (group==='showcase'?gymShowcaseUrls:group==='facility'?gymFacilityUrls:gymAmenityUrls)[k]=url;
         const prev=$(group==='amenity'?`gp_amenity_${k}`:`gp_${group}_${k}`);
         if(prev){ prev.style.backgroundImage=`url('${url}')`; prev.style.display='block'; }
+        if(typeof saveGymDraft==='function') saveGymDraft();
         toast(L('✅ Fotka nahrána!'));
-      }catch(e){ console.error('gym photo',e); toast(L('⚠️ Chyba při nahrávání')); }
+      }catch(e){ console.error('gym photo',e); toast(L('⚠️ Chyba při nahrávání')+': '+((e&&(e.message||e.error||e.statusCode))||'')); }
       inp.disabled=false;
     };
   });
 }
 
+const GYM_DRAFT_KEY='mtl_gym_draft';
+function gymDraftFields(){ return ['gymName','gymCity','gymAddress','gymHeadCoach','gymDesc','gymDropinPrice','gymCurrency','gymMembName','gymMembPrice','gymCapacity']; }
+function saveGymDraft(){
+  try{
+    if(!$('shGymApp') || !$('shGymApp').classList.contains('open')) return;
+    const d={ v:{}, disc:_gymDisc, show:gymShowcaseUrls, fac:gymFacilityUrls, amen:gymAmenityUrls, claimed:gymAmenityClaimed, ts:Date.now() };
+    gymDraftFields().forEach(id=>{ const el=$(id); if(el) d.v[id]=el.value; });
+    localStorage.setItem(GYM_DRAFT_KEY, JSON.stringify(d));
+  }catch(e){}
+}
+function clearGymDraft(){ try{ localStorage.removeItem(GYM_DRAFT_KEY); }catch(e){} }
+function gymDraftExists(){ try{ return !!localStorage.getItem(GYM_DRAFT_KEY); }catch(e){ return false; } }
+function loadGymDraft(){
+  try{
+    const raw=localStorage.getItem(GYM_DRAFT_KEY); if(!raw) return false;
+    const d=JSON.parse(raw); if(!d) return false;
+    gymDraftFields().forEach(id=>{ const el=$(id); if(el && d.v && d.v[id]!=null) el.value=d.v[id]; });
+    if(Array.isArray(d.disc)&&d.disc.length) _gymDisc=d.disc.slice();
+    gymShowcaseUrls=d.show||{}; gymFacilityUrls=d.fac||{}; gymAmenityUrls=d.amen||{}; gymAmenityClaimed=d.claimed||{};
+    return true;
+  }catch(e){ return false; }
+}
+function applyGymDraftPreviews(){
+  try{
+    Object.keys(gymShowcaseUrls).forEach(k=>{ const p=$('gp_showcase_'+k); if(p && gymShowcaseUrls[k]){ p.style.backgroundImage="url('"+gymShowcaseUrls[k]+"')"; p.style.display='block'; } });
+    Object.keys(gymFacilityUrls).forEach(k=>{ const p=$('gp_facility_'+k); if(p && gymFacilityUrls[k]){ p.style.backgroundImage="url('"+gymFacilityUrls[k]+"')"; p.style.display='block'; } });
+    Object.keys(gymAmenityClaimed).forEach(k=>{ if(gymAmenityClaimed[k]){ const cb=document.querySelector('.gpAmen[data-k="'+k+'"]'); if(cb){ cb.checked=true; const ph=document.querySelector('.gpAmenPhoto[data-k="'+k+'"]'); if(ph) ph.style.display='block'; } } });
+    Object.keys(gymAmenityUrls).forEach(k=>{ const p=$('gp_amenity_'+k); if(p && gymAmenityUrls[k]){ p.style.backgroundImage="url('"+gymAmenityUrls[k]+"')"; p.style.display='block'; } });
+  }catch(e){}
+}
 function openGymApp(){
   if(!currentUser){ toast(L('⚠️ Nejprve se přihlas')); return; }
   gymShowcaseUrls={}; gymFacilityUrls={}; gymAmenityUrls={}; gymAmenityClaimed={};
+  const hadDraft=loadGymDraft();
   renderGymPhotoSlots();
   let acct=null; try{ acct=localStorage.getItem('mtl_gym_acct'); }catch(e){}
   if(acct){ $('gymStripeStatus').style.display='flex'; $('gymStripeConnect').style.display='none'; }
   else { $('gymStripeStatus').style.display='none'; $('gymStripeConnect').style.display='block'; }
   updateGymPriceBreakdown();
-  _gymDisc=[defaultDiscipline()];
+  if(typeof updateGymMembBreakdown==='function') updateGymMembBreakdown();
+  if(!hadDraft) _gymDisc=[defaultDiscipline()];
   if(isMultiDiscipline()){ if($('gymDiscBlock')) $('gymDiscBlock').style.display='block'; renderDiscChips('gymDisc', _gymDisc); }
   else { if($('gymDiscBlock')) $('gymDiscBlock').style.display='none'; }
+  if(hadDraft){ applyGymDraftPreviews(); toast(LANG==='en'?'↩︎ Draft restored':'↩︎ Rozpracované obnoveno'); }
   openSheet('shGymApp');
 }
 
@@ -5085,6 +5122,10 @@ function updateGymPriceBreakdown(){
 }
 if($('gymDropinPrice')) $('gymDropinPrice').addEventListener('input', updateGymPriceBreakdown);
 if($('gymCurrency')) $('gymCurrency').addEventListener('change', updateGymPriceBreakdown);
+if($('shGymApp')){
+  ['input','change'].forEach(ev=>$('shGymApp').addEventListener(ev, ()=>{ if(typeof saveGymDraft==='function') setTimeout(saveGymDraft,30); }));
+  $('shGymApp').addEventListener('click', (e)=>{ if(e.target.closest('#gymDisc')) setTimeout(()=>{ if(typeof saveGymDraft==='function') saveGymDraft(); },60); });
+}
 function updateGymMembBreakdown(){
   const p = parseFloat($('gymMembPrice') && $('gymMembPrice').value) || 0;
   const cur = ($('gymCurrency') && $('gymCurrency').value) || 'CZK';
@@ -5180,6 +5221,7 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
     } catch(e){}
 
     try{ localStorage.removeItem('mtl_gym_acct'); }catch(e){}
+    clearGymDraft();
     gymShowcaseUrls={}; gymFacilityUrls={}; gymAmenityUrls={}; gymAmenityClaimed={};
     toast(L('✅ Přihláška gymu odeslána!'));
     closeSheet('shGymApp');
@@ -7887,6 +7929,34 @@ function setupCoachAppPhoto(){
   else { if($('caDiscBlock')) $('caDiscBlock').style.display='none'; _caDisc=[defaultDiscipline()]; }
   if(typeof updateCertVidInstructions==='function') updateCertVidInstructions(_caDisc[0]);
   const at=$('caAddTier'); if(at) at.onclick=()=>addTierRow('caOnlineTiers');
+  // obnova rozpracované přihlášky (text + výběry; foto/video se kvůli bezpečnosti prohlížeče musí vybrat znovu)
+  try{
+    const raw=localStorage.getItem(COACH_DRAFT_KEY);
+    if(raw){ const d=JSON.parse(raw)||{};
+      coachDraftFields().forEach(id=>{ const el=$(id); if(el && d.v && d.v[id]!=null) el.value=d.v[id]; });
+      if(Array.isArray(d.specs)) renderSpecChips('caSpecs', d.specs);
+      if(Array.isArray(d.langs)) renderLangChips('caLangs', d.langs);
+      if(Array.isArray(d.disc)&&d.disc.length){ _caDisc=d.disc.slice(); if(isMultiDiscipline()) renderDiscChipsSingle('caDisc', _caDisc, updateCertVidInstructions); if(typeof updateCertVidInstructions==='function') updateCertVidInstructions(_caDisc[0]); }
+      toast(LANG==='en'?'↩︎ Draft restored':'↩︎ Rozpracované obnoveno');
+    }
+  }catch(e){}
+}
+const COACH_DRAFT_KEY='mtl_coach_draft';
+function coachDraftFields(){ return ['caBio','caCity','caGym','caYears','caFights','caRateInperson','caCurrency','caInpersonDesc','caCurrencyOnline','caOnlineDesc']; }
+function saveCoachDraft(){
+  try{
+    if(!$('shCoachApp') || !$('shCoachApp').classList.contains('open')) return;
+    const d={ v:{}, disc:_caDisc, ts:Date.now() };
+    coachDraftFields().forEach(id=>{ const el=$(id); if(el) d.v[id]=el.value; });
+    try{ d.specs=collectSpecs('caSpecs'); }catch(e){}
+    try{ d.langs=collectLangs('caLangs'); }catch(e){}
+    localStorage.setItem(COACH_DRAFT_KEY, JSON.stringify(d));
+  }catch(e){}
+}
+function clearCoachDraft(){ try{ localStorage.removeItem(COACH_DRAFT_KEY); }catch(e){} }
+if($('shCoachApp')){
+  ['input','change'].forEach(ev=>$('shCoachApp').addEventListener(ev, ()=>{ if(typeof saveCoachDraft==='function') setTimeout(saveCoachDraft,30); }));
+  $('shCoachApp').addEventListener('click',(e)=>{ if(e.target.closest('#caDisc')||e.target.closest('#caSpecs')||e.target.closest('#caLangs')||e.target.closest('#caOnlineTiers')) setTimeout(()=>{ if(typeof saveCoachDraft==='function') saveCoachDraft(); },60); });
 }
 
 // Tlačítko "Změnit" fotku
@@ -8046,6 +8116,7 @@ await supaClient.from('notifications').insert({
     });
     
     appCroppedBlob=null;
+    clearCoachDraft();
     closeSheet('shCoachApp');
     updateRoleUI();
     toast(L('🎉 Přihláška odeslána! Ozveme se do 48h.'));
