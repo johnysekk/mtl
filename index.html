@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-AI · drop-in date fix · save requires class name · membership join toast+notif · switch/buy other plan · richer coach gym-team dash -->
+<!-- MTL build: 2026-06-07-AJ · drop-in FK fix (class_id null) · save w/o class name · 4-tab gym manage (+Members) · gym info change requests w/ Founder approval -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -2618,6 +2618,12 @@ const NOTIF_T = {
   gym_membership_mine: (d)=> LANG==='en'
     ? `🎟️ You're a member of ${d.gym_name||'the gym'}! Covered classes are auto-reserved.`
     : `🎟️ Jsi člen ${d.gym_name||'gymu'}! Pokryté lekce máš automaticky rezervované.`,
+  gym_change_request: (d)=> LANG==='en'
+    ? `✏️ ${d.gym_name||'A gym'} requests an info change (${d.fields||''}) — review in Founder Dashboard.`
+    : `✏️ ${d.gym_name||'Gym'} žádá o změnu údajů (${d.fields||''}) — schval ve Founder dashboardu.`,
+  gym_change_result: (d)=> LANG==='en'
+    ? `${d.approved?'✅':'❌'} MTL ${d.approved?'approved':'rejected'} your info change for ${d.gym_name||'your gym'}.`
+    : `${d.approved?'✅':'❌'} MTL ${d.approved?'schválil':'zamítl'} změnu údajů u ${d.gym_name||'tvého gymu'}.`,
   cert_revoke_request: (d)=> LANG==='en'
     ? `🚩 ${d.who||'An ambassador'} flagged ${d.target_name||''} (${d.target_type==='gym'?'gym':'coach'}) for certification review — see Founder Dashboard.`
     : `🚩 ${d.who||'Ambassador'} žádá o odebrání certifikace: ${d.target_name||''} (${d.target_type==='gym'?'gym':'kouč'}) — viz Founder Dashboard.`,
@@ -4061,10 +4067,9 @@ async function bookGymDropin(g, occ){
   if(!payee.account){ toast(LANG==='en'?'⚠️ The coach/gym for this class has no payments set up yet':'⚠️ Kouč/gym u této lekce zatím nemá nastavené platby'); return; }
   toast(L('💳 Přesměrovávám na platbu...'));
   try {
-    let _cid; try{ _cid = (crypto&&crypto.randomUUID)?crypto.randomUUID():('c'+Date.now()+Math.random().toString(36).slice(2)); }catch(e){ _cid='c'+Date.now()+Math.random().toString(36).slice(2); }
     const _today = new Date().toISOString().slice(0,10);
     const rec = {
-      gym_id: g.id, student_id: currentUser.id, class_id: _cid,
+      gym_id: g.id, student_id: currentUser.id,
       amount: g.dropin_price||0, currency: g.currency||'CZK', status:'pending',
       date: (occ&&occ.date)||_today, time: (occ&&occ.time)||'18:00'
     };
@@ -4625,10 +4630,15 @@ async function renderGymManage(){
   await loadGymTeamCoaches();
   const sym = g.currency==='EUR'?'€':g.currency==='USD'?'$':'Kč';
   box.innerHTML = `
-    <div style="display:flex;gap:6px;margin-bottom:16px;">
-      <button id="gmTabSchedBtn" style="flex:1;padding:10px 4px;border:none;border-radius:10px;background:var(--dark);color:#fff;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">📅 ${LANG==='en'?'Schedule':'Rozvrh'}</button>
-      <button id="gmTabSetBtn" style="flex:1;padding:10px 4px;border:1px solid var(--border);border-radius:10px;background:var(--surf);color:var(--dark);font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">⚙️ ${LANG==='en'?'Settings':'Nastavení'}</button>
-      <button id="gmTabDashBtn" style="flex:1;padding:10px 4px;border:1px solid var(--border);border-radius:10px;background:var(--surf);color:var(--dark);font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">📊 ${LANG==='en'?'Dashboard':'Dashboard'}</button>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:16px;">
+      <button id="gmTabSchedBtn" style="padding:11px 4px;border:none;border-radius:10px;background:var(--dark);color:#fff;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;">📅 ${LANG==='en'?'Schedule':'Rozvrh'}</button>
+      <button id="gmTabSetBtn" style="padding:11px 4px;border:1px solid var(--border);border-radius:10px;background:var(--surf);color:var(--dark);font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;">⚙️ ${LANG==='en'?'Settings':'Nastavení'}</button>
+      <button id="gmTabMembBtn" style="padding:11px 4px;border:1px solid var(--border);border-radius:10px;background:var(--surf);color:var(--dark);font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;">👥 ${LANG==='en'?'Members':'Členové'}</button>
+      <button id="gmTabDashBtn" style="padding:11px 4px;border:1px solid var(--border);border-radius:10px;background:var(--surf);color:var(--dark);font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;">📊 ${LANG==='en'?'Dashboard':'Dashboard'}</button>
+    </div>
+    <div id="gmMembTab" style="display:none;">
+      <div class="sec-lbl">👥 ${LANG==='en'?'Members':'Stálí členové'}</div>
+      <div id="mgMembers"><p style="color:var(--light);font-size:13px;">${L('Načítám...')}</p></div>
     </div>
     <div id="gmSchedTab">    <div class="sec-lbl">${LANG==='en'?'Weekly class schedule':'Týdenní rozvrh tříd'}</div>
     <div id="mgSchedule"></div>
@@ -4682,6 +4692,21 @@ async function renderGymManage(){
     <p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:8px;">${LANG==='en'?'Optional. Shown to members before they pay — they must agree to continue. Good for house rules, cancellation policy, code of conduct, what to bring.':'Nepovinné. Zobrazí se členovi před platbou — musí odsouhlasit, aby mohl pokračovat. Hodí se na pravidla chování, storno podmínky, co si vzít na trénink.'}</p>
     <input id="mgTermsTitle" type="text" value="${(_myGymData.terms_title||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Title (e.g. Club rules)':'Nadpis (např. Pravidla klubu)'}" style="width:100%;box-sizing:border-box;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';margin-bottom:8px;">
     <textarea id="mgTermsText" rows="5" placeholder="${LANG==='en'?'Your terms / rules here…':'Sem napiš podmínky / pravidla…'}" style="width:100%;box-sizing:border-box;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';line-height:1.5;resize:vertical;margin-bottom:16px;">${(_myGymData.terms_text||'').replace(/</g,'&lt;')}</textarea>
+    <div class="sec-lbl">✏️ ${LANG==='en'?'Request info change (needs MTL approval)':'Žádost o změnu údajů (schvaluje MTL)'}</div>
+    <div style="border:1px solid var(--border);border-radius:14px;padding:13px;margin-bottom:20px;background:var(--surf);">
+      <p style="font-size:12px;color:var(--mid);margin:0 0 10px;line-height:1.5;">${LANG==='en'?'Name, address, city and capacity are verified — changes go to MTL for approval. State a reason.':'Název, adresa, město a kapacita jsou ověřené — změny schvaluje MTL. Uveď důvod.'}</p>
+      <label style="font-size:12px;font-weight:700;color:var(--mid);">${LANG==='en'?'Gym name':'Název gymu'}</label>
+      <input id="gcName" type="text" value="${(_myGymData.name||'').replace(/"/g,'&quot;')}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';margin:4px 0 8px;">
+      <label style="font-size:12px;font-weight:700;color:var(--mid);">${LANG==='en'?'Address':'Adresa'}</label>
+      <input id="gcAddress" type="text" value="${(_myGymData.address||'').replace(/"/g,'&quot;')}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';margin:4px 0 8px;">
+      <label style="font-size:12px;font-weight:700;color:var(--mid);">${LANG==='en'?'City':'Město'}</label>
+      <input id="gcCity" type="text" value="${(_myGymData.city||'').replace(/"/g,'&quot;')}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';margin:4px 0 8px;">
+      <label style="font-size:12px;font-weight:700;color:var(--mid);">${LANG==='en'?'Capacity (per class)':'Kapacita (na lekci)'}</label>
+      <input id="gcCapacity" type="number" min="1" value="${_myGymData.capacity||''}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';margin:4px 0 8px;">
+      <label style="font-size:12px;font-weight:700;color:var(--mid);">${LANG==='en'?'Reason (required)':'Důvod (povinný)'}</label>
+      <textarea id="gcReason" rows="2" placeholder="${LANG==='en'?'Why the change?':'Proč ta změna?'}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';margin:4px 0 10px;resize:vertical;"></textarea>
+      <button id="gcSubmit" style="width:100%;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Submit for approval':'Odeslat ke schválení'}</button>
+    </div>
     <button id="mgSave" style="width:100%;padding:15px;background:var(--red);color:#fff;border:none;border-radius:14px;font-size:16px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:24px;">${LANG==='en'?'Save changes':'Uložit změny'}</button>
     <div class="sec-lbl">👥 ${LANG==='en'?'Team coaches':'Tým — kouči'}</div>
     <p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:8px;">${LANG==='en'?'Invite coaches to your gym. They confirm, then appear here and you can open their dashboard.':'Pozvi kouče do svého gymu. Potvrdí to, pak se objeví tady a uvidíš jejich dashboard.'}</p>
@@ -4718,17 +4743,48 @@ async function renderGymManage(){
     toast(LANG==='en'?`✅ ${days.length} classes added`:`✅ Přidáno ${days.length} lekcí`);
   };
   $('mgSave').onclick=saveGymManage;
+  if($('gcSubmit')) $('gcSubmit').onclick=submitGymChangeRequest;
   if($('gtSearchBtn')) $('gtSearchBtn').onclick=gtSearchCoaches;
   if($('mgGymLb')) $('mgGymLb').onclick=()=>openGymLeaderboard('city');
-  (function(){ const tabs=[['gmTabSchedBtn','gmSchedTab'],['gmTabSetBtn','gmSetTab'],['gmTabDashBtn','gmDash']];
-    const els=tabs.map(([b,p])=>({b:$(b),p:$(p)})); if(els.some(x=>!x.b||!x.p)) return;
-    const show=k=>{ els.forEach((x,idx)=>{ const on=idx===k; x.p.style.display=on?'block':'none'; x.b.style.background=on?'var(--dark)':'var(--surf)'; x.b.style.color=on?'#fff':'var(--dark)'; x.b.style.border=on?'none':'1px solid var(--border)'; }); };
-    els.forEach((x,idx)=>x.b.onclick=()=>show(idx)); show(0); })();
+  (function(){ const tabs=[['gmTabSchedBtn','gmSchedTab'],['gmTabSetBtn','gmSetTab'],['gmTabMembBtn','gmMembTab'],['gmTabDashBtn','gmDash']];
+    const els=tabs.map(([b,p])=>({b:$(b),p:$(p),pid:p})); if(els.some(x=>!x.b||!x.p)) return;
+    const show=k=>{ els.forEach((x,idx)=>{ const on=idx===k; x.p.style.display=on?'block':'none'; x.b.style.background=on?'var(--dark)':'var(--surf)'; x.b.style.color=on?'#fff':'var(--dark)'; x.b.style.border=on?'none':'1px solid var(--border)'; }); if(els[k].pid==='gmMembTab' && typeof renderGymMembers==='function') renderGymMembers(); };
+    els.forEach((x,idx)=>x.b.onclick=()=>show(idx)); show(0); window._gmShowTab=show; })();
   if($('mgStripeBtn')) $('mgStripeBtn').onclick=()=>openMyStripe(g.id);
   if($('gtSearch')) $('gtSearch').addEventListener('keydown', e=>{ if(e.key==='Enter') gtSearchCoaches(); });
   loadGymTeam();
   loadGymRoster();
   loadGymManageBookings();
+}
+async function renderGymMembers(){
+  const box=$('mgMembers'); if(!box||!_myGymData) return;
+  const EN=LANG==='en';
+  let mems=[];
+  try{ const { data } = await supaClient.from('gym_memberships').select('*').eq('gym_id',_myGymData.id).in('status',['active','cancelling']).order('created_at',{ascending:true}); mems=data||[]; }catch(e){}
+  if(!mems.length){ box.innerHTML=`<p style="color:var(--light);font-size:13px;">${EN?'No members yet.':'Zatím žádní členové.'}</p>`; return; }
+  const active=mems.filter(m=>m.status==='active'), cancelling=mems.filter(m=>m.status==='cancelling');
+  const accOf=(m)=>{ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
+  const card=(m)=>{ const acc=accessLabel(accOf(m)); const since=m.created_at?new Date(m.created_at).toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric'}):''; const ends=m.period_end?new Date(m.period_end).toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric'}):''; const cancel=m.status==='cancelling';
+    return `<div style="border:1px solid ${cancel?'#F3C9C0':'var(--border)'};border-radius:12px;padding:11px 13px;margin-bottom:8px;background:${cancel?'#FEF6F4':'#fff'};">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
+        <div style="min-width:0;">
+          <div style="font-weight:700;font-size:14px;">${escapeHtml(m.student_name||(EN?'Member':'Člen'))}</div>
+          <div style="font-size:12px;color:var(--mid);">${m.plan_name?escapeHtml(m.plan_name)+' · ':''}<span style="color:#006040;font-weight:600;">${acc}</span></div>
+          ${since?`<div style="font-size:11px;color:var(--light);">${EN?'member since':'člen od'} ${since}</div>`:''}
+        </div>
+        <div style="text-align:right;white-space:nowrap;">
+          <div style="font-weight:700;font-size:13px;">${fmtPrice(m.amount||0,m.currency||'CZK')}<span style="color:var(--light);font-size:11px;">/${EN?'mo':'měs'}</span></div>
+          ${cancel?`<div style="font-size:11px;color:var(--red);font-weight:600;">${EN?'ends':'končí'} ${ends||'—'}</div>`:`<div style="font-size:11px;color:#006040;font-weight:600;">${EN?'active':'aktivní'}</div>`}
+        </div>
+      </div>
+    </div>`; };
+  let html=`<div style="display:flex;gap:8px;margin-bottom:12px;">
+    <div style="flex:1;background:#F0FBF0;border:1px solid #CDEBD6;border-radius:12px;padding:11px;text-align:center;"><div style="font-family:'Bebas Neue';font-size:26px;color:#006040;">${active.length}</div><div style="font-size:11px;color:var(--mid);">${EN?'Active':'Aktivní'}</div></div>
+    <div style="flex:1;background:#FEF0EE;border:1px solid #F3C9C0;border-radius:12px;padding:11px;text-align:center;"><div style="font-family:'Bebas Neue';font-size:26px;color:var(--red);">${cancelling.length}</div><div style="font-size:11px;color:var(--mid);">${EN?'Cancelling':'Ruší se'}</div></div>
+  </div>`;
+  if(active.length){ html+=`<div style="font-size:12px;font-weight:700;color:var(--mid);margin:6px 0;">✅ ${EN?'Active members':'Aktivní členové'}</div>`+active.map(card).join(''); }
+  if(cancelling.length){ html+=`<div style="font-size:12px;font-weight:700;color:var(--mid);margin:12px 0 6px;">📉 ${EN?'Cancelling':'Rušící členové'}</div>`+cancelling.map(card).join(''); }
+  box.innerHTML=html;
 }
 async function loadGymRoster(){
   const box=$('mgRoster'); if(!box||!_myGymData) return;
@@ -4966,19 +5022,31 @@ function renderScheduleEditor(){
   box.querySelectorAll('.schCoach').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; it.coach=el.value||null; const c=_gymTeamCoaches.find(x=>x.id===el.value); it.coachName=c?c.name:null; });
   box.querySelectorAll('.schDel').forEach(el=>el.onclick=()=>{ _gymSchedule.splice(+el.dataset.i,1); _schedEdit=-1; renderScheduleEditor(); });
 }
+async function submitGymChangeRequest(){
+  if(!_myGymData) return;
+  const reason=($('gcReason')&&$('gcReason').value.trim())||'';
+  if(!reason){ toast(LANG==='en'?'⚠️ Reason is required':'⚠️ Důvod je povinný'); return; }
+  const cur={ name:_myGymData.name||'', address:_myGymData.address||'', city:_myGymData.city||'', capacity:_myGymData.capacity||null };
+  const next={ name:($('gcName')&&$('gcName').value.trim())||'', address:($('gcAddress')&&$('gcAddress').value.trim())||'', city:($('gcCity')&&$('gcCity').value.trim())||'', capacity:($('gcCapacity')&&parseInt($('gcCapacity').value))||null };
+  const changes={};
+  ['name','address','city','capacity'].forEach(k=>{ if(String(next[k]||'')!==String(cur[k]||'')) changes[k]={from:cur[k],to:next[k]}; });
+  if(!Object.keys(changes).length){ toast(LANG==='en'?'⚠️ No changes detected':'⚠️ Žádná změna nezadána'); return; }
+  try{
+    await supaClient.from('gym_change_requests').insert({ gym_id:_myGymData.id, owner_id:currentUser.id, gym_name:_myGymData.name||'', changes, reason, status:'pending' });
+    // notifikace founderovi
+    try{ await supaClient.from('notifications').insert({ user_id: FOUNDER_UUID, type:'system', read:false, data: JSON.stringify({ kind:'gym_change_request', gym_name:_myGymData.name||'', fields:Object.keys(changes).join(', ') }), message:`✏️ ${_myGymData.name||'Gym'} žádá o změnu údajů (${Object.keys(changes).join(', ')}) — schval v Founder dashboardu.` }); }catch(e){}
+    toast(LANG==='en'?'✅ Sent to MTL for approval':'✅ Odesláno MTL ke schválení');
+    if($('gcReason')) $('gcReason').value='';
+  }catch(e){ console.error('submitGymChangeRequest',e); toast('⚠️ '+e.message); }
+}
 async function saveGymManage(){
   if(!_myGymData) return;
-  // každá lekce v rozvrhu musí mít název (jinak by se tiše zahodila)
-  if(_gymSchedule.some(c=> !(c.name && String(c.name).trim()))){
-    toast(LANG==='en'?'⚠️ Every class needs a name (or remove the empty one)':'⚠️ Každá lekce musí mít název (nebo prázdnou smaž)');
-    return;
-  }
   const dropin = parseInt($('mgDropin').value)||_myGymData.dropin_price;
   const plans = _gymPlans.filter(p=>p.name && p.name.trim() && (parseInt(p.price)||0)>0).map(p=>({ id:p.id||('p'+Math.random().toString(36).slice(2)), name:p.name.trim(), price:parseInt(p.price)||0, access:(p.access&&p.access.length)?p.access:['all'], income:p.income||'main', coach:p.coach||null, coachName:p.coachName||null, disc:p.disc||null }));
   const first = plans[0]||null;
   const termsTitle = ($('mgTermsTitle')&&$('mgTermsTitle').value.trim())||null;
   const termsText = ($('mgTermsText')&&$('mgTermsText').value.trim())||null;
-  const sched = JSON.stringify(_gymSchedule.filter(c=>c.name && c.name.trim()));
+  const sched = JSON.stringify(_gymSchedule.map(c=>({ ...c, name: (c.name&&String(c.name).trim()) ? c.name.trim() : levelLabel(c.level||'all') })));
   const patch = { dropin_price:dropin, membership_plans:JSON.stringify(plans), membership_name:first?first.name:null, membership_price:first?first.price:null, schedule:sched, terms_title:termsTitle, terms_text:termsText, org_form:_gymOrgForm, dropin_income:_gymDropinIncome };
   if(isMultiDiscipline()){ const dd=(_gymMgDisc&&_gymMgDisc.length)?_gymMgDisc:[defaultDiscipline()]; patch.disciplines=JSON.stringify(dd); _myGymData.disciplines=patch.disciplines; }
   const { error } = await supaClient.from('gyms').update(patch).eq('id', _myGymData.id);
@@ -6029,7 +6097,7 @@ async function loadNotifications(){
         else if(n.type==='dispute' && n.message.includes('nedorazil na trénink')){ const md=n.message.match(/#(\d+)/); if(md) openNoShowRespond(md[1]); else openOnline('coach'); }
         else if(isMtlContact){ messageMtlAsCoach(); }
         else if(n.type==='refund_request' && currentUser.role==='founder' && n.message.includes('Žádost o refund')) openOnline('founder');
-        else if(isMembCancel){ let role='owner'; try{ role=(JSON.parse(n.data||'{}').role)||'owner'; }catch(e){} if(role==='coach'){ openCoachStats(currentUser.id, currentUser.name||''); } else if($('meGymManage')){ openSheet('shGymManage'); renderGymManage(); } else { openCoachStats(currentUser.id, currentUser.name||''); } }
+        else if(isMembCancel){ let role='owner'; try{ role=(JSON.parse(n.data||'{}').role)||'owner'; }catch(e){} if(role==='coach'){ openCoachStats(currentUser.id, currentUser.name||''); } else if($('meGymManage')){ openSheet('shGymManage'); renderGymManage(); setTimeout(()=>{ if(window._gmShowTab) window._gmShowTab(2); }, 150); } else { openCoachStats(currentUser.id, currentUser.name||''); } }
         else if(isMembMine){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data: g }=await supaClient.from('gyms').select('*').eq('id',dd.gym_id).single(); if(g) openGymProfile(g); else toast(L('⚠️ Gym nenalezen')); } }catch(e){ toast(L('⚠️ Gym nenalezen')); } }
         else openOnline('coach');
       };
@@ -6577,6 +6645,46 @@ async function renderFdRevokes(){
     sec.querySelectorAll('.fdUnsuspend').forEach(b=>b.onclick=()=>founderUnsuspend(b.dataset.id, b.dataset.name));
   }catch(e){ console.error('renderFdRevokes', e); sec.innerHTML=''; }
 }
+async function renderFdGymChanges(){
+  const sec=$('fdChangeSec'); if(!sec) return;
+  const EN=LANG==='en';
+  try{
+    const { data } = await supaClient.from('gym_change_requests').select('*').eq('status','pending').order('created_at',{ascending:false});
+    const reqs=data||[];
+    if(!reqs.length){ sec.innerHTML=''; return; }
+    const flbl={name:EN?'Name':'Název',address:EN?'Address':'Adresa',city:EN?'City':'Město',capacity:EN?'Capacity':'Kapacita'};
+    sec.innerHTML='<div class="sec-lbl">✏️ '+(EN?'Gym info change requests':'Žádosti o změnu údajů gymu')+' ('+reqs.length+')</div>'
+    + reqs.map(r=>{
+      let ch={}; try{ ch=typeof r.changes==='string'?JSON.parse(r.changes):r.changes; }catch(e){}
+      const rows=Object.keys(ch||{}).map(k=>'<div style="font-size:13px;margin:2px 0;"><b>'+(flbl[k]||k)+':</b> <span style="color:var(--light);text-decoration:line-through;">'+escapeHtml(String((ch[k]&&ch[k].from)??'—'))+'</span> → <span style="color:#006040;font-weight:700;">'+escapeHtml(String((ch[k]&&ch[k].to)??'—'))+'</span></div>').join('');
+      return '<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;">'
+        +'<div style="font-size:14px;font-weight:700;">🏋️ '+escapeHtml(r.gym_name||'Gym')+'</div>'
+        +'<div style="margin:6px 0;background:#fff;border:1px solid var(--border);border-radius:8px;padding:8px 10px;">'+rows+'</div>'
+        +'<div style="font-size:13px;color:var(--dark);background:#fff;border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px;line-height:1.5;">&ldquo;'+escapeHtml(r.reason||'')+'&rdquo;</div>'
+        +'<div style="display:flex;gap:8px;">'
+        +'<button class="fdChAct" data-act="approve" data-id="'+r.id+'" style="flex:1;padding:9px;background:#006040;color:#fff;border:none;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Approve & apply':'Schválit a použít')+'</button>'
+        +'<button class="fdChAct" data-act="reject" data-id="'+r.id+'" style="flex:1;padding:9px;background:var(--surf);color:var(--mid);border:1px solid var(--border);border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Reject':'Zamítnout')+'</button>'
+        +'</div></div>';
+    }).join('');
+    sec.querySelectorAll('.fdChAct').forEach(b=>b.onclick=()=>founderResolveGymChange(b.dataset.id, b.dataset.act));
+  }catch(e){ console.error('renderFdGymChanges',e); sec.innerHTML=''; }
+}
+async function founderResolveGymChange(id, act){
+  const EN=LANG==='en';
+  try{
+    const { data: r } = await supaClient.from('gym_change_requests').select('*').eq('id',id).single();
+    if(!r) return;
+    let ch={}; try{ ch=typeof r.changes==='string'?JSON.parse(r.changes):r.changes; }catch(e){}
+    if(act==='approve'){
+      const patch={}; Object.keys(ch||{}).forEach(k=>{ patch[k]=ch[k].to; });
+      if(Object.keys(patch).length){ const { error } = await supaClient.from('gyms').update(patch).eq('id', r.gym_id); if(error){ toast('⚠️ '+error.message); return; } }
+    }
+    await supaClient.from('gym_change_requests').update({ status: act==='approve'?'approved':'rejected', decided_at: new Date().toISOString() }).eq('id', id);
+    if(r.owner_id){ try{ await supaClient.from('notifications').insert({ user_id:r.owner_id, type:'system', read:false, data: JSON.stringify({ kind:'gym_change_result', gym_name:r.gym_name||'', approved: act==='approve' }), message: act==='approve' ? `✅ MTL schválil změnu údajů u ${r.gym_name||'tvého gymu'}.` : `❌ MTL zamítl změnu údajů u ${r.gym_name||'tvého gymu'}.` }); }catch(e){} }
+    toast(act==='approve'?(EN?'✅ Approved & applied':'✅ Schváleno a použito'):(EN?'Rejected':'Zamítnuto'));
+    renderFdGymChanges();
+  }catch(e){ console.error('founderResolveGymChange',e); toast('⚠️ '+e.message); }
+}
 async function founderResolveRevoke(d){
   const EN=LANG==='en';
   const act=d.act;
@@ -6684,6 +6792,7 @@ async function renderFounderDash(){
   box.innerHTML = `
     <div id="fdDiscPanel"></div>
     <div id="fdRevokeSec" style="margin-bottom:14px;"></div>
+    <div id="fdChangeSec" style="margin-bottom:14px;"></div>
     ${isMultiDiscipline()?`<div class="sec-lbl">${LANG==='en'?'Filter by sport':'Filtr podle sportu'}</div><select id="fdDiscSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:${_fdDisc!=='all'?'6px':'18px'};">${discOpts}</select>${_fdDisc!=='all'?`<p style="font-size:11px;color:var(--blue);font-weight:600;line-height:1.5;margin-bottom:16px;">${LANG==='en'?'📊 All metrics below are filtered to this sport.':'📊 Všechny metriky níže jsou filtrované na tento sport.'}</p>`:''}`:''}
     <div style="background:linear-gradient(135deg,#FFD54A,#F5A623);color:#3a2a00;border-radius:14px;padding:14px 16px;margin-bottom:18px;">
       <div style="font-size:13px;font-weight:800;">🏆 ${LANG==='en'?'Founding Coach spots':'Founding Coach místa'}</div>
@@ -6728,6 +6837,7 @@ async function renderFounderDash(){
   `;
   renderFdMonth();
   if(typeof renderFdRevokes==='function') renderFdRevokes();
+  if(typeof renderFdGymChanges==='function') renderFdGymChanges();
   const sel=$('fdMonthSel'); if(sel) sel.onchange=()=>{ _fdMonth=sel.value; renderFdMonth(); };
   const dsel=$('fdDiscSel'); if(dsel) dsel.onchange=()=>{ _fdDisc=dsel.value; renderFounderDash(); };
   const tc=$('fdToggleCoaches'); if(tc) tc.onclick=()=>{ const el=$('fdCoaches'); const open=el.style.display!=='none'; el.style.display=open?'none':'block'; const ar=$('fdArrowC'); if(ar) ar.textContent=open?'›':'⌄'; };
