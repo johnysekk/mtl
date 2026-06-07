@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-AG · drop-in fix (class_id) · CZ drop-in→jednorázová · i18n fixes (lang re-render) · 3-tab gym manage + weekly calendar · Stripe metadata (tags) for export -->
+<!-- MTL build: 2026-06-07-AH · membership end date (student+owner+coach) · cancel notifies owner+coach w/ click-through -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -2612,6 +2612,9 @@ const NOTIF_T = {
   gym_class_attendee: (d)=> LANG==='en'
     ? `🥊 ${d.student||'A student'} ${d.how==='reschedule'?'moved to':'booked'} your class ${d.className||''} (${d.date||''} ${d.time||''}).`
     : `🥊 ${d.student||'Student'} ${d.how==='reschedule'?'se přesunul na':'si koupil'} tvou lekci ${d.className||''} (${d.date||''} ${d.time||''}).`,
+  gym_membership_cancelled: (d)=> LANG==='en'
+    ? `📉 ${d.member||'A student'} cancelled membership${d.plan?' ('+d.plan+')':''}${d.period_end?' — ends '+new Date(d.period_end).toLocaleDateString('en-GB'):''}.`
+    : `📉 ${d.member||'Student'} zrušil členství${d.plan?' ('+d.plan+')':''}${d.period_end?' — končí '+new Date(d.period_end).toLocaleDateString('cs-CZ'):''}.`,
   cert_revoke_request: (d)=> LANG==='en'
     ? `🚩 ${d.who||'An ambassador'} flagged ${d.target_name||''} (${d.target_type==='gym'?'gym':'coach'}) for certification review — see Founder Dashboard.`
     : `🚩 ${d.who||'Ambassador'} žádá o odebrání certifikace: ${d.target_name||''} (${d.target_type==='gym'?'gym':'kouč'}) — viz Founder Dashboard.`,
@@ -4104,7 +4107,7 @@ async function loadMyMemberships(){
           <span style="color:var(--light);font-size:18px;">›</span>
         </div>
         ${cancelling
-          ? `<div style="font-size:13px;color:var(--red);margin-bottom:8px;">${LANG==='en'?'⏳ Cancels at the end of the paid period.':'⏳ Zruší se na konci zaplaceného období.'}</div>
+          ? `<div style="font-size:13px;color:var(--red);margin-bottom:8px;">${LANG==='en'?'⏳ Cancels at the end of the paid period.':'⏳ Zruší se na konci zaplaceného období.'}${m.period_end?`<br><span style="color:var(--mid);font-weight:600;">${LANG==='en'?'Active until':'Aktivní do'}: ${new Date(m.period_end).toLocaleString(LANG==='en'?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric',hour:'2-digit',minute:'2-digit'})}</span>`:''}</div>
              <button class="resumeMembBtn" data-id="${m.id}" data-gym="${m.gym_id}" data-sub="${m.stripe_subscription||''}" style="width:100%;padding:11px;background:#E8F5EE;color:#006040;border:1px solid #A8E6C0;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'↩︎ Resume membership':'↩︎ Zrušit zrušení členství'}</button>`
           : `<button class="cancelMembBtn" data-id="${m.id}" data-gym="${m.gym_id}" data-sub="${m.stripe_subscription||''}" style="width:100%;padding:11px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Cancel membership':'Zrušit členství'}</button>`}
       </div>`;
@@ -4272,13 +4275,26 @@ async function cancelMembership(id, gymId, subId){
   if(!subId){ toast(L('⚠️ Chyba')); return; }
   if(!confirm(LANG==='en'?'Cancel this membership at the end of the paid period?':'Zrušit členství na konci zaplaceného období?')) return;
   try{
-    const { data: gym } = await supaClient.from('gyms').select('stripe_account').eq('id', gymId).single();
+    const { data: gym } = await supaClient.from('gyms').select('stripe_account, owner_id, name').eq('id', gymId).single();
     if(!gym || !gym.stripe_account){ toast(L('⚠️ Chyba')); return; }
     const r = await fetch(`/api/cancel-membership?subscriptionId=${encodeURIComponent(subId)}&gymAccount=${encodeURIComponent(gym.stripe_account)}`);
     const j = await r.json();
     if(j.ok){
+      const periodEndIso = j.current_period_end ? new Date(j.current_period_end*1000).toISOString() : null;
       await supaClient.from('gym_memberships').update({ status:'cancelling' }).eq('id', id);
       try{ await supaClient.from('gym_memberships').update({ cancelled_at: new Date().toISOString() }).eq('id', id); }catch(e){}
+      if(periodEndIso){ try{ await supaClient.from('gym_memberships').update({ period_end: periodEndIso }).eq('id', id); }catch(e){} }
+      // notifikace ownerovi + kouči (proklik do členské sekce)
+      try{
+        const { data: mb } = await supaClient.from('gym_memberships').select('coach_id,plan_name').eq('id',id).single();
+        const endTxt = periodEndIso ? new Date(periodEndIso).toLocaleString(LANG==='en'?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
+        const dataFor=(role)=>JSON.stringify({ kind:'gym_membership_cancelled', member: currentUser.name||'Student', plan:(mb&&mb.plan_name)||'', gym_name: gym.name||'', period_end: periodEndIso, gym_id: gymId, role });
+        const msg = LANG==='en'
+          ? `📉 ${currentUser.name||'A student'} cancelled membership${(mb&&mb.plan_name)?' ('+mb.plan_name+')':''}${endTxt?' — ends '+endTxt:''}.`
+          : `📉 ${currentUser.name||'Student'} zrušil členství${(mb&&mb.plan_name)?' ('+mb.plan_name+')':''}${endTxt?' — končí '+endTxt:''}.`;
+        if(gym.owner_id){ await supaClient.from('notifications').insert({ user_id:gym.owner_id, type:'system', read:false, data:dataFor('owner'), message:msg }); }
+        if(mb && mb.coach_id && mb.coach_id!==gym.owner_id){ await supaClient.from('notifications').insert({ user_id:mb.coach_id, type:'system', read:false, data:dataFor('coach'), message:msg }); }
+      }catch(e){}
       toast(LANG==='en'?'✅ Will cancel at period end.':'✅ Zruší se na konci období.');
       loadMyMemberships();
     } else { toast('⚠️ '+(j.error||'')); }
@@ -5033,6 +5049,7 @@ async function loadGymManageBookings(){
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">🔻</div><div class="prow-lbl">${LANG==='en'?'Cancelled this month':'Tento měsíc ruší'}</div></div><span class="prow-val" style="${cancelThis.length>0?'color:var(--red);':''}">${cancelThis.length?'-':''}${cancelThis.length}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">👥</div><div class="prow-lbl">${LANG==='en'?'Base (continuing)':'Base (pokračující)'}</div></div><span class="prow-val">${baseMembers.length}</span></div>`:''}
       </div>
+      ${cancellingNow.length?`<div style="font-size:12px;font-weight:700;color:var(--mid);margin:10px 0 6px;">📉 ${LANG==='en'?'Cancelling members':'Rušící členové'}</div><div class="prow-group">${cancellingNow.map(m=>`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">🎟️</div><div class="prow-lbl">${escapeHtml(m.student_name||(LANG==='en'?'Member':'Člen'))}${m.plan_name?` <span style="color:var(--light);font-size:12px;">· ${escapeHtml(m.plan_name)}</span>`:''}</div></div><span class="prow-val" style="font-size:12px;color:var(--red);white-space:nowrap;">${m.period_end?(LANG==='en'?'ends ':'končí ')+new Date(m.period_end).toLocaleDateString(LANG==='en'?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric'}):(LANG==='en'?'cancelling':'ruší se')}</span></div>`).join('')}</div>`:''}
       <div style="font-size:12px;font-weight:700;color:var(--mid);margin:2px 0 6px;">🔁 ${LANG==='en'?'Recurring revenue (MRR)':'Opakovaný příjem (MRR)'}</div>
       <div class="prow-group">
         ${isMonth?`
@@ -5966,8 +5983,10 @@ async function loadNotifications(){
     const isFavAvail = n.type==='fav_available';
     const isSlotOpen = k==='slot_open';
     const isDiscReq = k==='disc_request' || k==='disc_review';
-    const clickable = ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen;
+    const isMembCancel = k==='gym_membership_cancelled';
+    const clickable = ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel;
     let linkLabel = L('otevřít ›');
+    if(isMembCancel) linkLabel = LANG==='en'?'view members ›':'zobrazit členy ›';
     if(isBookingConfirm) linkLabel = L('přidat do kalendáře ›');
     else if(isSlotOpen) linkLabel = L('rezervovat ›');
     else if(isDiscReq) linkLabel = (k==='disc_review') ? L('posoudit ›') : L('otevřít žádost ›');
@@ -5996,6 +6015,7 @@ async function loadNotifications(){
         else if(n.type==='dispute' && n.message.includes('nedorazil na trénink')){ const md=n.message.match(/#(\d+)/); if(md) openNoShowRespond(md[1]); else openOnline('coach'); }
         else if(isMtlContact){ messageMtlAsCoach(); }
         else if(n.type==='refund_request' && currentUser.role==='founder' && n.message.includes('Žádost o refund')) openOnline('founder');
+        else if(isMembCancel){ let role='owner'; try{ role=(JSON.parse(n.data||'{}').role)||'owner'; }catch(e){} if(role==='coach'){ openCoachStats(currentUser.id, currentUser.name||''); } else if($('meGymManage')){ openSheet('shGymManage'); renderGymManage(); } else { openCoachStats(currentUser.id, currentUser.name||''); } }
         else openOnline('coach');
       };
     }
@@ -7121,19 +7141,21 @@ async function renderCoachGymSection(coachId){
   try{
     const [rb, rm] = await Promise.all([
       supaClient.from('gym_bookings').select('amount,status,coach_id').eq('coach_id', coachId).eq('status','active'),
-      supaClient.from('gym_memberships').select('amount,status,coach_id').eq('coach_id', coachId).in('status',['active','cancelling'])
+      supaClient.from('gym_memberships').select('amount,status,coach_id,student_name,plan_name,period_end').eq('coach_id', coachId).in('status',['active','cancelling'])
     ]);
     const drops=rb.data||[], mems=rm.data||[];
     if(!drops.length && !mems.length){ sec.innerHTML=''; return; }
     const dropEarn=drops.reduce((s,b)=>s+(b.amount||0)*1.03*0.97,0);
     const memEarn=mems.reduce((s,m)=>s+(m.amount||0)*0.95,0);
+    const cancelling=mems.filter(m=>m.status==='cancelling');
+    const cancelHtml = cancelling.length ? '<div style="font-size:12px;font-weight:700;color:var(--mid);margin:12px 0 6px;">📉 '+(EN?'Cancelling':'Rušící členové')+'</div><div class="prow-group">'+cancelling.map(m=>'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">🎟️</div><div class="prow-lbl">'+escapeHtml(m.student_name||(EN?'Member':'Člen'))+(m.plan_name?' <span style="color:var(--light);font-size:12px;">· '+escapeHtml(m.plan_name)+'</span>':'')+'</div></div><span class="prow-val" style="font-size:12px;color:var(--red);white-space:nowrap;">'+(m.period_end?(EN?'ends ':'končí ')+new Date(m.period_end).toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric'}):(EN?'cancelling':'ruší se'))+'</span></div>').join('')+'</div>' : '';
     sec.innerHTML = '<div class="sec-lbl" style="margin-top:18px;">🏋️ '+(EN?'From the gym (team)':'Z gymu (tým)')+'</div>'
       +'<div class="prow-group">'
       +'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🥊</div><div class="prow-lbl">'+(EN?'Gym classes (drop-ins)':'Lekce v gymu (jednorázové lekce)')+'</div></div><span class="prow-val">'+drops.length+'</span></div>'
       +'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💰</div><div class="prow-lbl">'+(EN?'Drop-in earnings (~97%)':'Výdělek z jednorázových lekcí (~97 %)')+'</div></div><span class="prow-val" style="color:#006040;">'+Math.round(dropEarn)+' Kč</span></div>'
       +'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🎟️</div><div class="prow-lbl">'+(EN?'Members on my plans':'Členů na mých variantách')+'</div></div><span class="prow-val">'+mems.length+'</span></div>'
       +'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🔁</div><div class="prow-lbl">'+(EN?'Membership MRR (~95%)':'MRR z členství (~95 %)')+'</div></div><span class="prow-val" style="color:#006040;">'+Math.round(memEarn)+' Kč</span></div>'
-      +'</div><p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:6px;">'+(EN?'Classes & plans where a gym set you as the payee. Paid out to your Stripe.':'Lekce a varianty, kde tě gym nastavil jako příjemce. Vyplácí se na tvůj Stripe.')+'</p>';
+      +'</div><p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:6px;">'+(EN?'Classes & plans where a gym set you as the payee. Paid out to your Stripe.':'Lekce a varianty, kde tě gym nastavil jako příjemce. Vyplácí se na tvůj Stripe.')+'</p>'+cancelHtml;
   }catch(e){ console.error('renderCoachGymSection',e); sec.innerHTML=''; }
 }
 async function renderCoachAnalytics(coachId, containerId){
