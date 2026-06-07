@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-AS · attendance check-in + member training counter + milestones · win-back (drifting members) · excuse-reply via chat · coach 95% upsell -->
+<!-- MTL build: 2026-06-07-AT · one-tap excuse replies (get-well/holiday/see-you) · member detail stats for owner/coach -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -1753,6 +1753,14 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
   </div>
 </div>
 
+<div class="picker-ov" id="memberDetailOv" onclick="if(event.target===this)closeMemberDetail()">
+  <div class="picker-sh">
+    <div class="picker-title" id="mdTitle">—</div>
+    <div id="mdBody" style="padding:0 20px 8px;"></div>
+    <div class="picker-cancel" onclick="closeMemberDetail()">Zavřít</div>
+  </div>
+</div>
+
 </div><!-- .app -->
 
 <script>
@@ -2721,6 +2729,7 @@ const NOTIF_T = {
   gym_attend_milestone: (d)=> LANG==='en'
     ? `🎉 ${d.n}th training at ${d.gym_name||'the gym'}! Great work — keep it up. 🥊`
     : `🎉 ${d.n}. trénink v ${d.gym_name||'gymu'}! Skvělá práce, jen tak dál. 🥊`,
+  gym_coach_wish: (d)=>{ const w={getwell:{cs:'ti přeje brzké uzdravení 🙏',en:'wishes you a speedy recovery 🙏'},holiday:{cs:'ti přeje hezkou dovolenou ☀️',en:'wishes you a great holiday ☀️'},seeyou:{cs:'se těší na tvůj příští trénink 💪',en:'looks forward to your next session 💪'}}; const wt=w[d.wish]?(LANG==='en'?w[d.wish].en:w[d.wish].cs):''; return (LANG==='en'?`🥊 Your coach ${d.coach||''} ${wt}`:`🥊 Tvůj kouč ${d.coach||''} ${wt}`); },
   gym_change_request: (d)=> LANG==='en'
     ? `✏️ ${d.gym_name||'A gym'} requests an info change (${d.fields||''}) — review in Founder Dashboard.`
     : `✏️ ${d.gym_name||'Gym'} žádá o změnu údajů (${d.fields||''}) — schval ve Founder dashboardu.`,
@@ -4127,7 +4136,7 @@ async function doRelease(){
       if(notifyId && notifyId!==currentUser.id){
         const dd=occ.date?new Date(occ.date):null; const dstr=dd?`${dd.getDate()}.${dd.getMonth()+1}.`:'';
         await supaClient.from('notifications').insert({ user_id:notifyId, type:'system', read:false,
-          data: JSON.stringify({ kind:'gym_member_excused', member:currentUser.name||'Člen', student_id:currentUser.id, className:occ.name||'', date:occ.date||'', time:occ.time||'', reason:reason||'' }),
+          data: JSON.stringify({ kind:'gym_member_excused', member:currentUser.name||'Člen', student_id:currentUser.id, reasonKey:_excuseSel||'', className:occ.name||'', date:occ.date||'', time:occ.time||'', reason:reason||'' }),
           message:`📋 ${currentUser.name||'Člen'} se omluvil z lekce ${occ.name||''} (${dstr} ${occ.time||''})${reason?' — '+reason:''}.` });
       }
     }catch(e){}
@@ -4931,7 +4940,7 @@ async function renderGymMembers(){
   const active=mems.filter(m=>m.status==='active'), cancelling=mems.filter(m=>m.status==='cancelling');
   const accOf=(m)=>{ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
   const card=(m)=>{ const acc=accessLabel(accOf(m)); const since=m.created_at?new Date(m.created_at).toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric'}):''; const ends=m.period_end?new Date(m.period_end).toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric'}):''; const cancel=m.status==='cancelling';
-    return `<div style="border:1px solid ${cancel?'#F3C9C0':'var(--border)'};border-radius:12px;padding:11px 13px;margin-bottom:8px;background:${cancel?'#FEF6F4':'#fff'};">
+    return `<div class="mbCard" data-sid="${m.student_id}" data-name="${(m.student_name||'').replace(/"/g,'&quot;')}" style="border:1px solid ${cancel?'#F3C9C0':'var(--border)'};border-radius:12px;padding:11px 13px;margin-bottom:8px;background:${cancel?'#FEF6F4':'#fff'};cursor:pointer;">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
         <div style="min-width:0;">
           <div style="font-weight:700;font-size:14px;">${escapeHtml(m.student_name||(EN?'Member':'Člen'))}</div>
@@ -4951,6 +4960,7 @@ async function renderGymMembers(){
   if(active.length){ html+=`<div style="font-size:12px;font-weight:700;color:var(--mid);margin:6px 0;">✅ ${EN?'Active members':'Aktivní členové'}</div>`+active.map(card).join(''); }
   if(cancelling.length){ html+=`<div style="font-size:12px;font-weight:700;color:var(--mid);margin:12px 0 6px;">📉 ${EN?'Cancelling':'Rušící členové'}</div>`+cancelling.map(card).join(''); }
   box.innerHTML=html;
+  box.querySelectorAll('.mbCard').forEach(c=>c.onclick=()=>openGymMemberDetail(c.dataset.sid, c.dataset.name));
   // ── Win-back: členové, kteří dlouho nedorazili ──
   try{
     const { data: aa } = await supaClient.from('gym_attendance').select('student_id,class_date').eq('gym_id',_myGymData.id);
@@ -6310,6 +6320,25 @@ async function loadNotifications(){
       return;
     }
     // proklik u online/refund/spor notifikací (preferuj kind, fallback na text)
+    if(k==='gym_member_excused'){
+      const dd=(()=>{ try{ return JSON.parse(n.data||'{}'); }catch(e){ return {}; } })();
+      const rk=dd.reasonKey||'';
+      let wishKey=null, wishLabel='';
+      if(rk==='nemoc'||rk==='zraneni'){ wishKey='getwell'; wishLabel=LANG==='en'?'🙏 Wish speedy recovery':'🙏 Popřát brzké uzdravení'; }
+      else if(rk==='dovolena'){ wishKey='holiday'; wishLabel=LANG==='en'?'☀️ Wish a great holiday':'☀️ Popřát hezkou dovolenou'; }
+      else if(rk==='prace'){ wishKey='seeyou'; wishLabel=LANG==='en'?'💪 See you next time':'💪 Uvidíme se příště'; }
+      el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;`;
+      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${notifText(n)}</p>
+        <div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}</div>
+        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
+          ${wishKey?`<button class="exWish" style="flex:1;min-width:150px;padding:10px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${wishLabel}</button>`:''}
+          <button class="exMsg" style="flex:1;min-width:100px;padding:10px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'✍️ Message':'✍️ Napsat'}</button>
+        </div>`;
+      const wb=el.querySelector('.exWish'); if(wb) wb.onclick=()=>{ wb.disabled=true; wb.style.opacity='.5'; wb.style.pointerEvents='none'; coachSendWish(n, dd, wishKey); };
+      const mb2=el.querySelector('.exMsg'); if(mb2) mb2.onclick=()=>{ if(dd.student_id) messageGymMember(dd.student_id, dd.member||''); else toast(L('⚠️ Chyba')); };
+      list.appendChild(el);
+      return;
+    }
     const isBookingConfirm = k ? k==='booking_confirm' : (n.type==='booking' && n.message.includes('Rezervace potvrzena'));
     const isCoachInperson = k ? k==='coach_new_inperson' : (n.type==='booking' && n.message.includes('Nová rezervace'));
     const isCoachOnline = k ? k==='coach_new_online' : (n.type==='booking' && n.message.includes('Nová online objednávka'));
@@ -8076,6 +8105,50 @@ async function openChatWithStudent(studentId){
   } else {
     toast(L('Konverzace zatím neexistuje'));
   }
+}
+function closeMemberDetail(){ const o=$('memberDetailOv'); if(o) o.classList.remove('open'); }
+async function openGymMemberDetail(sid, name){
+  if(!sid||!_myGymData) return;
+  const EN=LANG==='en';
+  if($('mdTitle')) $('mdTitle').textContent=name||(EN?'Member':'Člen');
+  const body=$('mdBody'); if(body) body.innerHTML=`<p style="text-align:center;color:var(--light);padding:20px;">${L('Načítám...')}</p>`;
+  $('memberDetailOv').classList.add('open');
+  let mems=[], att=[], drops=[];
+  try{ const { data } = await supaClient.from('gym_memberships').select('*').eq('gym_id',_myGymData.id).eq('student_id',sid).order('created_at',{ascending:true}); mems=data||[]; }catch(e){}
+  try{ const { data } = await supaClient.from('gym_attendance').select('class_date,class_name').eq('gym_id',_myGymData.id).eq('student_id',sid); att=data||[]; }catch(e){}
+  try{ const { data } = await supaClient.from('gym_bookings').select('id,status').eq('gym_id',_myGymData.id).eq('student_id',sid); drops=data||[]; }catch(e){}
+  const fmtD=(d)=>d?new Date(d).toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric'}):'—';
+  const accOf=(m)=>{ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
+  const totalTrain=att.length;
+  const lastSeen=att.length?att.map(a=>a.class_date).sort().slice(-1)[0]:null;
+  const sinceTs=mems.length?Math.min(...mems.map(m=>new Date(m.created_at||Date.now()).getTime())):null;
+  const monthsMember = sinceTs?Math.max(0,Math.round((Date.now()-sinceTs)/(86400000*30.4))):0;
+  const stat=(ic,lbl,val,col)=>`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">${ic}</div><div class="prow-lbl">${lbl}</div></div><span class="prow-val"${col?` style="color:${col};"`:''}>${val}</span></div>`;
+  let html=`<div class="prow-group">`
+    +stat('🥋', EN?'Trainings attended (total)':'Odtrénováno (celkem)', totalTrain, '#7A3FBF')
+    +stat('🥊', EN?'Single classes bought':'Jednorázových lekcí', drops.length)
+    +stat('📅', EN?'Member for':'Členem už', monthsMember+(EN?(monthsMember===1?' month':' months'):' měs.'))
+    +stat('👀', EN?'Last attended':'Naposledy byl', fmtD(lastSeen))
+    +`</div>`;
+  if(mems.length){
+    html+=`<div style="font-size:12px;font-weight:700;color:var(--mid);margin:12px 0 6px;">🎟️ ${EN?'Memberships':'Členství'}</div>`;
+    html+=mems.map(m=>{ const st=m.status; const stTxt=st==='active'?(EN?'active':'aktivní'):st==='cancelling'?(EN?'cancelling':'ruší se'):(EN?'ended':'ukončeno'); const stCol=st==='active'?'#006040':st==='cancelling'?'var(--red)':'var(--light)';
+      return `<div style="border:1px solid var(--border);border-radius:12px;padding:11px 13px;margin-bottom:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="font-size:14px;font-weight:700;">${escapeHtml(m.plan_name||(EN?'Membership':'Členství'))} <span style="font-size:11px;color:#006040;background:#E8F5EE;border:1px solid #A8E6C0;border-radius:8px;padding:1px 7px;">${accessLabel(accOf(m))}</span></div><span style="font-size:12px;font-weight:700;color:${stCol};">${stTxt}</span></div>
+        <div style="font-size:12px;color:var(--mid);margin-top:5px;line-height:1.7;">${EN?'Started':'Začátek'}: ${fmtD(m.created_at)}${m.period_end?`<br>${st==='cancelling'?(EN?'Ends':'Končí'):(EN?'Renews/ended':'Obnova/konec')}: ${fmtD(m.period_end)}`:''}<br>${EN?'Price':'Cena'}: ${fmtPrice(m.amount||0,m.currency)} ${m.currency==='EUR'?'€':m.currency==='USD'?'$':'Kč'}/${EN?'mo':'měs'}</div>
+      </div>`; }).join('');
+  } else { html+=`<p style="font-size:13px;color:var(--light);padding:6px 0;">${EN?'No memberships — drop-ins only.':'Bez členství — jen jednorázové lekce.'}</p>`; }
+  html+=`<button id="mdMsgBtn" style="width:100%;padding:13px;margin-top:10px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'✍️ Message '+(name||'member'):'✍️ Napsat '+(name||'členovi')}</button>`;
+  if(body) body.innerHTML=html;
+  const mb=$('mdMsgBtn'); if(mb) mb.onclick=()=>{ closeMemberDetail(); messageGymMember(sid, name); };
+}
+async function coachSendWish(n, dd, wishKey){
+  try{
+    if(dd && dd.student_id){ await supaClient.from('notifications').insert({ user_id:dd.student_id, type:'system', read:false, data: JSON.stringify({ kind:'gym_coach_wish', coach: (currentUser&&currentUser.name)||'Kouč', wish: wishKey }), message:`🥊 ${(currentUser&&currentUser.name)||'Kouč'}` }); }
+    try{ await supaClient.from('notifications').update({ read:true }).eq('id', n.id); }catch(e){}
+    toast(LANG==='en'?'✅ Sent to student':'✅ Odesláno studentovi');
+    loadNotifications();
+  }catch(e){ console.error('coachSendWish',e); toast('⚠️ '+e.message); }
 }
 async function messageGymMember(studentId, studentName){
   if(!studentId||!currentUser){ toast(L('⚠️ Chyba')); return; }
