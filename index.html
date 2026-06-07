@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-AE · drop-in booking fix (student_name) · why-book-MTL section · membership plan label · drop-in add-to-calendar -->
+<!-- MTL build: 2026-06-07-AF · gym schedule as weekly diary grid (day-grouped, tap-to-edit, per-day add) · Stripe fee note (EEA vs intl cards) -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4295,7 +4295,7 @@ async function resumeMembership(id, gymId, subId){
     } else { toast('⚠️ '+(j.error||'')); }
   }catch(e){ console.error('resumeMembership', e); toast('⚠️ '+e.message); }
 }
-let _myGymData = null, _gymSchedule = [], _gymPlans = [], _gymOrgForm = 'profit', _gymDropinIncome = 'side', _gymMonth = null;
+let _myGymData = null, _gymSchedule = [], _gymPlans = [], _gymOrgForm = 'profit', _gymDropinIncome = 'side', _gymMonth = null, _schedEdit = -1;
 async function checkGymOwnership(){
   if(!currentUser){ if($('meGymManage')) $('meGymManage').style.display='none'; return; }
   const { data } = await supaClient.from('gyms').select('*').eq('owner_id', currentUser.id).eq('status','approved').order('created_at',{ascending:true});
@@ -4878,9 +4878,9 @@ function renderPlansEditor(){
 function renderScheduleEditor(){
   const box=$('mgSchedule'); if(!box) return;
   const days=dayNames();
-  if(!_gymSchedule.length){ box.innerHTML=`<p style="color:var(--light);font-size:13px;margin-bottom:10px;">${LANG==='en'?'No classes yet.':'Zatím žádné třídy.'}</p>`; return; }
-  box.innerHTML = _gymSchedule.map((c,i)=>`
-    <div style="border:1px solid var(--border);border-radius:12px;padding:8px;margin-bottom:8px;">
+  const order=[1,2,3,4,5,6,0];
+  const editFields=(c,i)=>`
+    <div style="margin-top:8px;border-top:1px dashed var(--border);padding-top:8px;">
       <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center;">
         <select class="schDay" data-i="${i}" style="width:72px;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${days.map((d,di)=>`<option value="${di}" ${di===Number(c.day)?'selected':''}>${d}</option>`).join('')}</select>
         <input class="schTime" data-i="${i}" type="time" value="${c.time||'18:00'}" style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';">
@@ -4890,14 +4890,40 @@ function renderScheduleEditor(){
       <select class="schLevel" data-i="${i}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${CLASS_LEVELS.map(o=>`<option value="${o.v}" ${o.v===(c.level||'all')?'selected':''}>${LANG==='en'?o.en:o.cs}</option>`).join('')}</select>
       ${isMultiDiscipline()?`<select class="schDisc" data-i="${i}" style="width:100%;box-sizing:border-box;padding:10px;margin-top:6px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${activeDisciplines().map(o=>`<option value="${o.v}" ${o.v===(c.disc||defaultDiscipline())?'selected':''}>${o.emoji} ${LANG==='en'?o.en:o.cs}</option>`).join('')}</select>`:''}
       ${payeeSelectHtml('schCoach', i, c.coach)}
-    </div>`).join('');
-  box.querySelectorAll('.schDay').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].day=+el.value; });
-  box.querySelectorAll('.schTime').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].time=el.value; });
+    </div>`;
+  let html='';
+  order.forEach(di=>{
+    const idxs=_gymSchedule.map((c,i)=>({c,i})).filter(x=>Number(x.c.day)===di).sort((a,b)=>String(a.c.time||'').localeCompare(String(b.c.time||'')));
+    html+=`<div style="margin-bottom:12px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;">
+        <div style="font-weight:800;font-size:13px;color:var(--dark);letter-spacing:.02em;">${days[di]} <span style="color:var(--light);font-weight:600;">(${idxs.length})</span></div>
+        <button class="schAddDay" data-day="${di}" style="font-size:12px;font-weight:700;color:var(--blue);background:none;border:none;cursor:pointer;font-family:'DM Sans';">+ ${LANG==='en'?'Add':'Přidat'}</button>
+      </div>`;
+    if(!idxs.length){ html+=`<div style="font-size:12px;color:var(--light);padding:2px 0 2px;">${LANG==='en'?'No classes':'Žádné lekce'}</div>`; }
+    idxs.forEach(({c,i})=>{
+      const open = i===_schedEdit;
+      const lvl=(c.level&&c.level!=='all')?` · ${levelLabel(c.level)}`:'';
+      const led=c.coachName?` · 👤 ${escapeHtml(c.coachName)}`:'';
+      html+=`<div style="border:1px solid ${open?'var(--dark)':'var(--border)'};border-radius:12px;padding:9px 11px;margin-bottom:6px;background:${open?'var(--surf)':'#fff'};">
+        <div class="schCardOpen" data-i="${i}" style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;gap:8px;">
+          <div style="font-size:13px;min-width:0;"><strong>${c.time||'--:--'}</strong> · ${c.name?escapeHtml(c.name):`<span style="color:var(--light);">${LANG==='en'?'(no name)':'(bez názvu)'}</span>`}<span style="color:var(--mid);font-size:12px;">${lvl}${led}</span></div>
+          <span style="color:var(--light);font-size:14px;flex-shrink:0;">${open?'▴':'✎'}</span>
+        </div>
+        ${open?editFields(c,i):''}
+      </div>`;
+    });
+    html+=`</div>`;
+  });
+  box.innerHTML=html;
+  box.querySelectorAll('.schCardOpen').forEach(el=>el.onclick=()=>{ const i=+el.dataset.i; _schedEdit=(_schedEdit===i?-1:i); renderScheduleEditor(); });
+  box.querySelectorAll('.schAddDay').forEach(el=>el.onclick=()=>{ const day=+el.dataset.day; _gymSchedule.push({day, time:'18:00', name:'', level:'all', disc:(isMultiDiscipline()?defaultDiscipline():null)}); _schedEdit=_gymSchedule.length-1; renderScheduleEditor(); });
+  box.querySelectorAll('.schDay').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].day=+el.value; renderScheduleEditor(); });
+  box.querySelectorAll('.schTime').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].time=el.value; renderScheduleEditor(); });
   box.querySelectorAll('.schName').forEach(el=>el.oninput=()=>{ _gymSchedule[+el.dataset.i].name=el.value; });
   box.querySelectorAll('.schLevel').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].level=el.value; });
   box.querySelectorAll('.schDisc').forEach(el=>{ const it=_gymSchedule[+el.dataset.i]; if(!it.disc) it.disc=el.value||defaultDiscipline(); el.onchange=()=>{ _gymSchedule[+el.dataset.i].disc=el.value; }; });
   box.querySelectorAll('.schCoach').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; it.coach=el.value||null; const c=_gymTeamCoaches.find(x=>x.id===el.value); it.coachName=c?c.name:null; });
-  box.querySelectorAll('.schDel').forEach(el=>el.onclick=()=>{ _gymSchedule.splice(+el.dataset.i,1); renderScheduleEditor(); });
+  box.querySelectorAll('.schDel').forEach(el=>el.onclick=()=>{ _gymSchedule.splice(+el.dataset.i,1); _schedEdit=-1; renderScheduleEditor(); });
 }
 async function saveGymManage(){
   if(!_myGymData) return;
@@ -4998,7 +5024,7 @@ async function loadGymManageBookings(){
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏋️</div><div class="prow-lbl">${LANG==='en'?'Your share / mo (95%)':'Tvůj podíl / měs (95 %)'}</div></div><span class="prow-val">${f(memGym)}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💎</div><div class="prow-lbl">${LANG==='en'?'= Net / mo (est.)':'= Net / měs (odhad)'}</div></div><span class="prow-val" style="color:#006040;">${f(memNetMo)}</span></div>
       </div>
-      <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:8px;">${LANG==='en'?'“This month” = members who joined / cancelled in the selected month. MRR counts everyone still paying (incl. those cancelling, until their period ends). Stripe fee estimated; exact in your Stripe. VAT with your accountant.':'„Tento měsíc" = členové, co přibyli / zrušili ve vybraném měsíci. MRR počítá všechny, co ještě platí (vč. rušících, dokud jim neskončí období). Stripe fee odhad; přesně ve tvém Stripe. DPH řeš s účetní.'}</p>
+      <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:8px;">${LANG==='en'?'“This month” = members who joined / cancelled in the selected month. MRR counts everyone still paying (incl. those cancelling, until their period ends). Stripe fee is estimated (~1.5% + 6 Kč for EEA cards; international/test cards up to ~3.25% + 6 Kč); exact in your Stripe. VAT with your accountant.':'„Tento měsíc" = členové, co přibyli / zrušili ve vybraném měsíci. MRR počítá všechny, co ještě platí (vč. rušících, dokud jim neskončí období). Stripe fee je odhad (~1,5 % + 6 Kč u EEA karet; zahraniční/testovací karty až ~3,25 % + 6 Kč); přesně ve tvém Stripe. DPH řeš s účetní.'}</p>
       ${discBlock}
       ${_gymOrgForm==='nonprofit'?`
       <div style="font-size:12px;font-weight:700;color:var(--mid);margin:14px 0 6px;">🤝 ${LANG==='en'?'Income split (orientational)':'Rozdělení příjmů (orientační)'}</div>
