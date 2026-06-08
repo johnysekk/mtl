@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-BW · attendance reminder now goes to the CLASS coach (owner or team coach), dedup via attend_reminders; team coach gets a markable attendance roster (shCoachRoster/loadCoachRoster) on the SAME gym_attendance data, reachable from the reminder + "Doplnit docházku" in earnings; coach Tinder swipe-right just opens profile (no auto-scroll) + card no longer sticks after close; EP feedback button now translates in EN -->
+<!-- MTL build: 2026-06-07-BX · EP cancel now actually cancels in Stripe (fetched subscription id from DB; verifies cancel before clearing benefits; keeps partner_sub so webhook re-rates memberships to 5%); deck country filter (sCountry, populated from coaches present) for global online-coach discovery; gyms capture timezone for accurate cron; cron-attendance.js endpoint (TZ-aware, shared dedup) + vercel.json -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -1578,6 +1578,7 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
     <div class="sgrp">
       <div class="srow" id="sType"><div class="srow-l"><div class="sicon" style="background:#FEECEC;">🥊</div><div class="slbl">Typ koučování</div></div><div class="sval" id="vType">Vše</div></div>
       <div class="srow" id="sCoachLang"><div class="srow-l"><div class="sicon" style="background:#E8F0FF;">🗣️</div><div class="slbl">Jazyk kouče</div></div><div class="sval" id="vCoachLang">Vše</div></div>
+      <div class="srow" id="sCountry"><div class="srow-l"><div class="sicon" style="background:#EAF7EE;">🌍</div><div class="slbl">Země kouče</div></div><div class="sval" id="vCountry">Vše</div></div>
       <div class="srow" id="sDist"><div class="srow-l"><div class="sicon" style="background:#F5F2EE;">📏</div><div class="slbl">Max. vzdálenost</div></div><div class="sval" id="vDist">50 km</div></div>
       <div class="srow" id="sPrice"><div class="srow-l"><div class="sicon" style="background:#F0FBF0;">💰</div><div class="slbl">Cenové rozpětí / hod</div></div><div class="sval" id="vPrice">Bez limitu</div></div>
       <div id="setDiscWrap" style="display:none;padding:12px 16px 6px;"><div class="slbl" id="setDiscLabel" data-noi18n style="font-weight:700;margin-bottom:8px;">🥋 Preferovaný sport</div><div id="setDisc" style="display:flex;flex-wrap:wrap;gap:6px;"></div></div>
@@ -3079,6 +3080,7 @@ let lastCoach = null;
 let activeFilter = 'all';
 let priceLimit = null;   // null | number | 99999 for 2000+
 let _deckLang = null;    // null | lang key (filtr jazyka kouče)
+let _deckCountry = null; // null | country name (filtr země — hlavně pro online coaching napříč světem)
 let maxDistKm = null;    // null | number
 let userLoc = null;      // {lat,lng,city}
 let searchQuery = '';    // search text
@@ -3126,6 +3128,9 @@ function buildFiltered(){
 
   // Coach teaching-language filter
   if(_deckLang){ list=list.filter(c=>(c.langs||[]).includes(_deckLang)); }
+
+  // Country filter (zejm. pro online coaching — najdi kouče z konkrétní země kdekoli na světě)
+  if(_deckCountry){ list=list.filter(c=>(c.country||'')===_deckCountry); }
 
   // Tag filter
   if(activeFilter==='online')    list=list.filter(c=>c.tags.some(t=>t.includes('Online')));
@@ -5141,8 +5146,18 @@ async function doEPCancel(){
   if(!reason){ toast(LANG==='en'?'Please add a reason':'Uveď prosím důvod'); return; }
   const btn=$('epCancelConfirm'); if(btn){ btn.disabled=true; btn.textContent=L('Ruším...'); }
   try{
-    if(currentUser.partner_sub){ try{ await fetch(`/api/cancel-membership?subscriptionId=${encodeURIComponent(currentUser.partner_sub)}&immediate=1`); }catch(e){} }
-    try{ await supaClient.from('profiles').update({ partner:false, partner_sub:null }).eq('id', currentUser.id); }catch(e){}
+    // subscription id vytáhni z DB (currentUser ho nemá načtený → dřív se cancel přeskakoval a Stripe sub zůstal aktivní)
+    let subId=currentUser.partner_sub;
+    if(!subId){ try{ const { data: pr } = await supaClient.from('profiles').select('partner_sub').eq('id', currentUser.id).single(); subId=pr&&pr.partner_sub; }catch(e){} }
+    let cancelOk=!subId; // žádná subscription = nic ke zrušení
+    if(subId){ try{ const r=await fetch(`/api/cancel-membership?subscriptionId=${encodeURIComponent(subId)}&immediate=1`); const j=await r.json(); cancelOk=!!(j&&j.ok); }catch(e){} }
+    if(!cancelOk){
+      toast(LANG==='en'?'⚠️ Could not cancel in Stripe — try again or contact support.':'⚠️ Nepodařilo se zrušit ve Stripe — zkus to znovu nebo napiš podpoře.');
+      if(btn){ btn.disabled=false; btn.textContent=LANG==='en'?'Cancel Exclusive Partner benefits':'Zrušit výhody Exclusive Partnera'; }
+      return; // partner_sub NEMAŽEME → jde retry
+    }
+    // partner=false hned kvůli UI; partner_sub NEMAZAT — webhook (customer.subscription.deleted) ho najde, přepočítá členství zpět na 5 % a vynuluje
+    try{ await supaClient.from('profiles').update({ partner:false }).eq('id', currentUser.id); }catch(e){}
     currentUser.partner=false;
     let cancId=null;
     try{ const { data: cc } = await supaClient.from('ep_cancellations').insert({ user_id:currentUser.id, user_name:currentUser.name||null, reason }).select('id').single(); cancId=cc&&cc.id; }catch(e){}
@@ -5882,6 +5897,7 @@ async function saveGymManage(){
   const _gdesc = ($('mgDescription')&&$('mgDescription').value.trim())||null; patch.description=_gdesc; _myGymData.description=_gdesc;
   const _gfy = parseInt($('mgFounded')&&$('mgFounded').value)||null; patch.founded_year=_gfy; _myGymData.founded_year=_gfy;
   if(isMultiDiscipline()){ const dd=(_gymMgDisc&&_gymMgDisc.length)?_gymMgDisc:[defaultDiscipline()]; patch.disciplines=JSON.stringify(dd); _myGymData.disciplines=patch.disciplines; }
+  try{ patch.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || _myGymData.timezone || null; _myGymData.timezone=patch.timezone; }catch(e){}
   const { error } = await supaClient.from('gyms').update(patch).eq('id', _myGymData.id);
   if(error){ toast('⚠️ '+error.message); return; }
   _myGymData.dropin_price=dropin; _myGymData.membership_plans=JSON.stringify(plans); _myGymData.membership_name=first?first.name:null; _myGymData.membership_price=first?first.price:null; _myGymData.schedule=sched; _myGymData.terms_title=termsTitle; _myGymData.terms_text=termsText; _myGymData.org_form=_gymOrgForm; _myGymData.dropin_income=_gymDropinIncome;
@@ -6129,6 +6145,7 @@ async function confirmCity(){
 // ════════════════════════════════════════
 const PICKERS={
   lang:{title:'Jazyk',valEl:'vLang',opts:['Čeština','English'],sel:'Čeština'},
+  country:{title:'Země kouče',valEl:'vCountry',opts:['Vše'],sel:'Vše'},
   type:{title:'Typ koučování',valEl:'vType',opts:['Vše','🌐 Pouze online','📍 Pouze in-person'],sel:'Vše'},
   coachLang:{title:'Jazyk kouče',valEl:'vCoachLang',opts:['Vše','🇨🇿 Čeština','🇬🇧 English','🇸🇰 Slovenčina','🇩🇪 Deutsch','🇪🇸 Español','🇫🇷 Français','🇮🇹 Italiano','🇵🇱 Polski','🇵🇹 Português','🇷🇺 Русский','🇺🇦 Українська','🇹🇭 ไทย'],sel:'Vše'},
   dist:{title:'Max. vzdálenost',valEl:'vDist',opts:['10 km','25 km','50 km','100 km','Celá ČR','Celý svět'],sel:'50 km'},
@@ -6174,6 +6191,11 @@ function selectOpt(key,val){
   if(key==='coachLang'){
     const o=LANG_OPTS.find(x=>x.lbl===val); _deckLang=o?o.k:null;
     init(); toast(LANG==='en'?`🗣️ Coach language: ${val}`:`🗣️ Jazyk kouče: ${val}`);
+  }
+
+  if(key==='country'){
+    _deckCountry=(val==='Vše'||val==='All')?null:val;
+    init(); toast(LANG==='en'?`🌍 Country: ${val}`:`🌍 Země: ${val}`);
   }
 
   if(key==='dist'){
@@ -6493,6 +6515,7 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
       capacity,
       stripe_account: acct,
       dropin_price: price, currency, status:'pending',
+      timezone: (Intl.DateTimeFormat().resolvedOptions().timeZone || null),
       membership_name: (($('gymMembName')&&$('gymMembName').value.trim())||null),
       membership_price: (parseInt($('gymMembPrice')&&$('gymMembPrice').value)||null)
     }).select('id').single();
@@ -6575,7 +6598,7 @@ document.querySelectorAll('.pill').forEach(p=>{
 });
 
 // Empty state reset
-$('btnReset').onclick=()=>{ priceLimit=null; maxDistKm=null; activeFilter='all'; _deckLang=null; try{ PICKERS.coachLang.sel='Vše'; }catch(e){} if($('vCoachLang'))$('vCoachLang').textContent='Vše'; document.querySelectorAll('.pill').forEach(x=>x.classList.toggle('active',x.dataset.f==='all')); init(); };
+$('btnReset').onclick=()=>{ priceLimit=null; maxDistKm=null; activeFilter='all'; _deckLang=null; _deckCountry=null; try{ PICKERS.coachLang.sel='Vše'; PICKERS.country.sel='Vše'; }catch(e){} if($('vCoachLang'))$('vCoachLang').textContent='Vše'; if($('vCountry'))$('vCountry').textContent='Vše'; document.querySelectorAll('.pill').forEach(x=>x.classList.toggle('active',x.dataset.f==='all')); init(); };
 
 // Card profile button
 $('btnProfile').onclick=e=>{ e.stopPropagation(); const c=filtered[idx]; if(c && c.isGym){ openGymProfile(c.g); return; } openProfile(); };
@@ -9455,6 +9478,14 @@ $('sLoc').onclick=()=>openCityInput();
 $('sLang').onclick=()=>openPicker('lang');
 $('sType').onclick=()=>openPicker('type');
 if($('sCoachLang')) $('sCoachLang').onclick=()=>openPicker('coachLang');
+if($('sCountry')) $('sCountry').onclick=()=>{
+  const set=new Set(); (COACHES||[]).forEach(c=>{ if(c.country) set.add(c.country); });
+  const list=[...set].sort((a,b)=>a.localeCompare(b));
+  PICKERS.country.opts=['Vše',...list];
+  PICKERS.country.sel=_deckCountry||'Vše';
+  if(list.length) openPicker('country');
+  else toast(LANG==='en'?'No coaches have a country set yet.':'Zatím žádný kouč nemá vyplněnou zemi.');
+};
 $('sDist').onclick=()=>openPicker('dist');
 $('sPrice').onclick=()=>openPicker('price');
 
