@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-BZ · Ambassador application now notifies Founder (crown) on submit (kind ambassador_app, click→shAmbApps) + dedicated Founder sheet shAmbApps listing every application with full info (socials+followers, credibility, why) reachable from crown button; "Země kouče" now translates in EN (Coach country) -->
+<!-- MTL build: 2026-06-07-CA · Ambassador approve/reject (with reason) in crown shAmbApps + applicant result notification + approve opens coach profile; main_discipline (settings picker if >1 disc, orders disciplines main-first); leaderboard now ranks PER discipline when filtered (per-discipline lessons from bookings.discipline) -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -2732,6 +2732,9 @@ const NOTIF_T = {
   ambassador_app: (d)=> LANG==='en'
     ? `🎓 New Ambassador application: ${d.name||''} — ${d.discipline||''}`
     : `🎓 Nová Ambassador přihláška: ${d.name||''} — ${d.discipline||''}`,
+  amb_result: (d)=> d.approved
+    ? (LANG==='en' ? `🎓 You're approved as MTL Ambassador${d.discipline?' for '+d.discipline:''}! We'll be in touch soon.` : `🎓 Byl jsi schválen jako MTL Ambassador${d.discipline?' pro '+d.discipline:''}! Brzy se ti ozveme.`)
+    : (LANG==='en' ? `🎓 Your Ambassador application wasn't approved this time${d.reason?': '+d.reason:'.'}` : `🎓 Tvoje Ambassador přihláška teď nebyla schválena${d.reason?': '+d.reason:'.'}`),
   ambassador_granted: (d)=> LANG==='en'
     ? `🎓 You are now an MTL Ambassador for ${d.disc||'a discipline'} — you can certify coaches in it.`
     : `🎓 Stal ses MTL Ambassadorem pro ${d.disc||'disciplínu'} — můžeš certifikovat kouče v této disciplíně.`,
@@ -3073,7 +3076,8 @@ async function loadCoaches() {
       rateOnline: c.rate_online || null,
       founding: !!c.founding,
       partner: !!c.partner,
-      disciplines: parseDisc(c.disciplines),
+      disciplines: orderMainFirst(parseDisc(c.disciplines), c.main_discipline),
+      mainDiscipline: c.main_discipline||null,
       certLevel: c.cert_level || 'certified',
       coachCredits: c.coach_credits || 0,
       referralUnlocked: false,
@@ -3276,7 +3280,7 @@ function setLbTab(){
 function flagEmoji(cc){ if(!cc||cc.length!==2) return ''; const A=0x1F1E6; const a=cc.toUpperCase().charCodeAt(0)-65, b=cc.toUpperCase().charCodeAt(1)-65; if(a<0||a>25||b<0||b>25) return ''; return String.fromCodePoint(A+a, A+b); }
 function gymFirstPhoto(pj){ try{ const x=JSON.parse(pj||'[]')[0]; return x?(typeof x==='string'?x:(x.url||'')):''; }catch(e){ return ''; } }
 function gymPhotoList(pj){ try{ return JSON.parse(pj||'[]').map(x=>typeof x==='string'?x:((x&&x.url)||'')).filter(Boolean); }catch(e){ return []; } }
-function renderLeaderboard(){
+async function renderLeaderboard(){
   const myCity=((currentUser&&currentUser.city)||(userLoc&&userLoc.city)||'').toLowerCase().trim();
   const myCountry=((currentUser&&currentUser.country)||(userLoc&&userLoc.country)||'').toLowerCase().trim();
   let list=[...COACHES].map(c=>({...c,_score:mtlScore(c)}));
@@ -3286,7 +3290,13 @@ function renderLeaderboard(){
     list=list.filter(c=>{ const cc=(c.country||'').toLowerCase().trim(); return !cc || cc===myCountry; }); // kouč bez uložené země = zahrnut (fallback)
   }
   // world = bez filtru
-  if(_lbDisc){ list=list.filter(c=>(c.disciplines||[]).includes(_lbDisc)); }
+  if(_lbDisc){
+    list=list.filter(c=>(c.disciplines||[]).includes(_lbDisc));
+    // separátní ranking PODLE disciplíny: skóre se počítá z lekcí odučených v té disciplíně (z bookings.discipline)
+    const dscLes={};
+    try{ const { data: bk } = await supaClient.from('bookings').select('coach_id, discipline, status'); (bk||[]).forEach(b=>{ if(b.discipline===_lbDisc && b.status!=='refunded' && b.status!=='cancelled'){ dscLes[b.coach_id]=(dscLes[b.coach_id]||0)+1; } }); }catch(e){}
+    list.forEach(c=>{ const n=dscLes[c.id]||dscLes[c.profileId]||0; c._dscLessons=n; c._score=mtlScore({...c, lessonsDone:n, onlineFeedbacks:0}); });
+  }
   list.sort((a,b)=>b._score-a._score);
   const mineBox=$('lbMine'); mineBox.innerHTML='';
   if(currentUser && currentUser.coach_status==='approved'){
@@ -3316,7 +3326,7 @@ function renderLeaderboard(){
       ${ava}
       <div style="flex:1;min-width:0;">
         <div style="font-weight:700;font-size:14px;display:flex;align-items:center;gap:6px;">${escapeHtml(c.name)}${c.countryCode?` <span title="${c.country||''}">${flagEmoji(c.countryCode)}</span>`:''}${isNewCoach(c)?`<span style="font-size:10px;background:#EEF4FF;color:var(--blue);padding:1px 6px;border-radius:6px;font-weight:700;">${L('NOVÝ')}</span>`:''}</div>
-        <div style="font-size:12px;color:var(--mid);">${t.emoji} ${L(t.label)} · ⭐ ${c.rating} · ${(+(c.lessonsDone||0))+(+(c.onlineFeedbacks||0))} ${LANG==='en'?'lessons':'lekcí'}</div>
+        <div style="font-size:12px;color:var(--mid);">${t.emoji} ${L(t.label)} · ⭐ ${c.rating} · ${_lbDisc ? (c._dscLessons||0) : ((+(c.lessonsDone||0))+(+(c.onlineFeedbacks||0)))} ${LANG==='en'?'lessons':'lekcí'}${_lbDisc?` ${disciplineEmoji(_lbDisc)}`:''}</div>
       </div>
       <div style="font-family:'Bebas Neue';font-size:22px;color:${t.color};">${c._score}</div>
       <button class="lbInfo" title="Rozpad skóre" style="width:26px;height:26px;border-radius:50%;border:1px solid var(--border);background:var(--bg);color:var(--mid);font-size:13px;font-weight:700;cursor:pointer;flex-shrink:0;">ⓘ</button>`;
@@ -5239,6 +5249,22 @@ async function openEPFeedback(){
     </div>`; }).join('');
   }catch(e){ b.innerHTML=`<p style="color:var(--red);padding:16px;">⚠️ ${e.message}</p>`; }
 }
+async function ambDecideApp(id, uid, disc, approve){
+  const en=LANG==='en';
+  let reason='';
+  if(!approve){
+    reason=(prompt(en?'Reason for rejection (sent to the applicant):':'Důvod zamítnutí (pošle se uchazeči):','')||'').trim();
+    if(reason===''){ return; } // zrušeno
+  } else {
+    if(!confirm(en?'Approve this ambassador application?':'Schválit tuhle ambassador přihlášku?')) return;
+  }
+  try{ await supaClient.from('ambassador_applications').update({ status: approve?'approved':'rejected', decision_reason: approve?null:reason }).eq('id', id); }catch(e){ toast('⚠️ '+(e.message||'')); return; }
+  // notifikace uchazeči o výsledku
+  if(uid){ try{ await supaClient.from('notifications').insert({ user_id: uid, type:'system', read:false, data: JSON.stringify({ kind:'amb_result', approved:!!approve, discipline:disc||'', reason: approve?'':reason }), message: approve ? `🎓 Gratulujeme — byl jsi schválen jako MTL Ambassador!` : `🎓 Tvoje Ambassador přihláška nebyla schválena.` }); }catch(e){} }
+  toast(approve?(en?'✅ Approved':'✅ Schváleno'):(en?'Rejected':'Zamítnuto'));
+  openAmbApps(); // re-render
+  if(approve && uid){ try{ closeSheet('shAmbApps'); openProfileById(uid); toast(en?'Assign the discipline & enable Ambassador in their coach dashboard.':'Přiřaď disciplínu a zapni Ambassadora v jeho dashboardu kouče.'); }catch(e){} }
+}
 async function openAmbApps(){
   openSheet('shAmbApps');
   const b=$('ambAppsBody'); if(!b) return;
@@ -5257,13 +5283,24 @@ async function openAmbApps(){
       if(s.other) items.push(`🔗 ${esc(s.other)}`);
       return items.length?`<div style="font-size:12.5px;color:var(--dark);line-height:1.8;margin-bottom:8px;">${items.join('<br>')}</div>`:'';
     };
-    b.innerHTML=rows.map(r=>{ const d=new Date(r.created_at); return `<div style="border:1px solid var(--border);border-radius:12px;padding:13px;margin-bottom:10px;">
+    b.innerHTML=rows.map(r=>{ const d=new Date(r.created_at); const st=r.status||'new'; return `<div style="border:1px solid var(--border);border-radius:12px;padding:13px;margin-bottom:10px;">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:2px;"><div style="font-size:15px;font-weight:800;color:var(--dark);">${esc(r.name||'—')}</div><span style="font-size:11px;font-weight:800;color:#0f2233;background:#9fe6b4;border-radius:8px;padding:2px 8px;white-space:nowrap;">🎓 ${esc(r.discipline||'')}</span></div>
       <div style="font-size:11px;color:var(--light);margin-bottom:8px;">${r.country?esc(r.country)+' · ':''}${d.getDate()}.${d.getMonth()+1}.${d.getFullYear()}</div>
       ${soc(r.socials)}
       ${r.credibility?`<div style="font-size:13px;color:var(--dark);margin-bottom:6px;"><b>${en?'Credibility:':'Kredibilita:'}</b> ${esc(r.credibility)}</div>`:''}
-      ${r.why?`<div style="font-size:13px;color:var(--mid);background:var(--surf);border-radius:8px;padding:8px 10px;line-height:1.5;">${esc(r.why)}</div>`:''}
+      ${r.why?`<div style="font-size:13px;color:var(--mid);background:var(--surf);border-radius:8px;padding:8px 10px;line-height:1.5;margin-bottom:10px;">${esc(r.why)}</div>`:''}
+      ${st==='approved'
+        ? `<div style="display:flex;gap:8px;align-items:center;"><span style="font-size:12px;font-weight:800;color:#006040;background:#E8F5EE;border-radius:8px;padding:5px 10px;">✅ ${en?'Approved':'Schváleno'}</span>${r.user_id?`<button class="ambOpenProf" data-uid="${r.user_id}" style="flex:1;padding:9px;background:var(--dark);color:#fff;border:none;border-radius:9px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${en?'Open coach profile →':'Otevřít profil kouče →'}</button>`:''}</div>`
+        : st==='rejected'
+        ? `<div style="font-size:12px;font-weight:800;color:var(--red);background:#FEECEC;border-radius:8px;padding:5px 10px;display:inline-block;">✖️ ${en?'Rejected':'Zamítnuto'}${r.decision_reason?` <span style="font-weight:600;color:var(--mid);">— ${esc(r.decision_reason)}</span>`:''}</div>`
+        : `<div style="display:flex;gap:8px;">
+            <button class="ambApprove" data-id="${r.id}" data-uid="${r.user_id||''}" data-disc="${esc(r.discipline||'')}" style="flex:1;padding:11px;background:#006040;color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:800;cursor:pointer;font-family:'DM Sans';">✅ ${en?'Approve':'Schválit'}</button>
+            <button class="ambReject" data-id="${r.id}" data-uid="${r.user_id||''}" style="flex:1;padding:11px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:13px;font-weight:800;cursor:pointer;font-family:'DM Sans';">✖️ ${en?'Reject':'Zamítnout'}</button>
+          </div>`}
     </div>`; }).join('');
+    b.querySelectorAll('.ambOpenProf').forEach(x=>x.onclick=()=>{ closeSheet('shAmbApps'); openProfileById(x.dataset.uid); });
+    b.querySelectorAll('.ambApprove').forEach(x=>x.onclick=()=>ambDecideApp(x.dataset.id, x.dataset.uid, x.dataset.disc, true));
+    b.querySelectorAll('.ambReject').forEach(x=>x.onclick=()=>ambDecideApp(x.dataset.id, x.dataset.uid, '', false));
   }catch(e){ b.innerHTML=`<p style="color:var(--red);padding:16px;">⚠️ ${e.message}</p>`; }
 }
 let _glDisc=null;
@@ -5740,6 +5777,7 @@ function defaultDiscipline(){ const a=activeDisciplines(); return a.length?a[0].
 function disciplineLabel(v){ const o=DISCIPLINES.find(x=>x.v===v); return o?(LANG==='en'?o.en:o.cs):v; }
 function disciplineEmoji(v){ const o=DISCIPLINES.find(x=>x.v===v); return o?o.emoji:''; }
 function parseDisc(raw){ try{ const d=raw?(typeof raw==='string'?JSON.parse(raw):raw):null; return (Array.isArray(d)&&d.length)?d:[defaultDiscipline()]; }catch(e){ return [defaultDiscipline()]; } }
+function orderMainFirst(arr, main){ if(!Array.isArray(arr)) return arr; if(!main||!arr.includes(main)) return arr; return [main, ...arr.filter(d=>d!==main)]; }
 function discBadgesHtml(raw){ if(!isMultiDiscipline()) return ''; const ds=parseDisc(raw); return ds.map(v=>`<span style="display:inline-block;background:#1f2937;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;margin-right:4px;">${disciplineEmoji(v)} ${disciplineLabel(v)}</span>`).join(''); }
 // Multi-select chip picker tied to a state array (mutated by reference)
 function renderDiscChipsSingle(containerId, stateArr, onChange){
@@ -10646,7 +10684,7 @@ const MIN_RATE = { CZK: 250, EUR: 10, USD: 10 };
 async function fillRateEditor(){
   if(!currentUser) return;
   // načti čerstvý profil ať jsou ceny aktuální
-  const { data: prof, error: profErr } = await supaClient.from('profiles').select('rate_inperson, rate_online, currency, currency_inperson, currency_online, online_format, online_desc, inperson_desc, online_tiers, founding, partner, discipline_rates, disciplines').eq('id', currentUser.id).single();
+  const { data: prof, error: profErr } = await supaClient.from('profiles').select('rate_inperson, rate_online, currency, currency_inperson, currency_online, online_format, online_desc, inperson_desc, online_tiers, founding, partner, discipline_rates, disciplines, main_discipline').eq('id', currentUser.id).single();
   if(profErr){ console.error('fillRateEditor select error:', profErr); }
   if(prof){
     currentUser.founding = !!prof.founding; currentUser.partner = !!prof.partner;
@@ -10664,6 +10702,7 @@ async function fillRateEditor(){
     currentUser.currency_online = prof.currency_online || prof.currency;
     currentUser.online_tiers = prof.online_tiers;
     try{ currentUser.discipline_rates = (typeof prof.discipline_rates==='string')?JSON.parse(prof.discipline_rates):(prof.discipline_rates||null); }catch(e){ currentUser.discipline_rates=null; }
+    currentUser.main_discipline = prof.main_discipline || null;
     if(prof.disciplines){ try{ currentUser.disciplines = parseDisc(prof.disciplines); }catch(e){} }
   }
   const curr = currentUser.currency || 'CZK';
@@ -10708,7 +10747,10 @@ function renderDiscRateEditor(){
   if(discs.length<2){ box.innerHTML=''; box.style.display='none'; return; }
   box.style.display='block';
   const dr=currentUser.discipline_rates||{};
-  box.innerHTML = '<div style="font-size:12px;color:var(--mid);margin-bottom:6px;line-height:1.4;">'+(LANG==='en'?'Per-discipline price (optional — overrides the base price above):':'Cena podle disciplíny (nepovinné — přebije základní cenu výše):')+'</div>'
+  const _mainSel = currentUser.main_discipline && discs.includes(currentUser.main_discipline) ? currentUser.main_discipline : discs[0];
+  box.innerHTML = '<div style="font-size:12px;color:var(--mid);margin-bottom:5px;line-height:1.4;font-weight:700;">'+(LANG==='en'?'⭐ Main discipline (shown first on your profile):':'⭐ Hlavní disciplína (zobrazí se první na profilu):')+'</div>'
+   + '<select id="editMainDisc" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-family:\'DM Sans\';font-size:14px;background:#fff;margin-bottom:14px;">'+discs.map(d=>`<option value="${d}" ${d===_mainSel?'selected':''}>${disciplineEmoji(d)} ${disciplineLabel(d)}</option>`).join('')+'</select>'
+   + '<div style="font-size:12px;color:var(--mid);margin-bottom:6px;line-height:1.4;">'+(LANG==='en'?'Per-discipline price (optional — overrides the base price above):':'Cena podle disciplíny (nepovinné — přebije základní cenu výše):')+'</div>'
    + discs.map(d=>`<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;"><span style="font-size:13px;width:150px;flex-shrink:0;">${disciplineEmoji(d)} ${disciplineLabel(d)}</span><input id="dr_${d}" type="number" inputmode="numeric" value="${(dr&&dr[d])||''}" placeholder="${currentUser.rate_inperson||(LANG==='en'?'base':'základní')}" style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';"></div>`).join('');
 }
 
@@ -10731,8 +10773,9 @@ $('btnSaveRates').onclick=async()=>{
   try {
     const _drObj={}; (currentUser.disciplines||[]).forEach(d=>{ const el=$('dr_'+d); if(el){ const v=parseInt(el.value)||0; if(v>0) _drObj[d]=v; } });
     const _drJSON = Object.keys(_drObj).length ? JSON.stringify(_drObj) : null;
-    const { error } = await supaClient.from('profiles').update({ rate_inperson: rateIn, rate_online: rateOn, currency: currIn, currency_inperson: currIn, currency_online: currOn, online_tiers: tiers.length?JSON.stringify(tiers):null, online_format: tiers[0]?tiers[0].label:null, online_desc: $('editOnlineDesc').value.trim() || null, inperson_desc: $('editInpersonDesc').value.trim() || null, specializations: JSON.stringify(collectSpecs('editSpecs')), languages: JSON.stringify(collectLangs('editLangs')), discipline_rates: _drJSON }).eq('id', currentUser.id);
-    currentUser.discipline_rates = _drObj;
+    const _mainD = ($('editMainDisc') && $('editMainDisc').value) || currentUser.main_discipline || ((currentUser.disciplines||[])[0]) || null;
+    const { error } = await supaClient.from('profiles').update({ rate_inperson: rateIn, rate_online: rateOn, currency: currIn, currency_inperson: currIn, currency_online: currOn, online_tiers: tiers.length?JSON.stringify(tiers):null, online_format: tiers[0]?tiers[0].label:null, online_desc: $('editOnlineDesc').value.trim() || null, inperson_desc: $('editInpersonDesc').value.trim() || null, specializations: JSON.stringify(collectSpecs('editSpecs')), languages: JSON.stringify(collectLangs('editLangs')), discipline_rates: _drJSON, main_discipline: _mainD }).eq('id', currentUser.id);
+    currentUser.discipline_rates = _drObj; currentUser.main_discipline = _mainD;
     if(error){ console.error('Save rates error:', error); toast('⚠️ '+(error.message||(LANG==='en'?'Error saving prices':'Chyba při ukládání cen'))); btn.textContent=L('Uložit ceny'); btn.disabled=false; return; }
     currentUser.rate_inperson = rateIn;
     currentUser.rate_online = rateOn;
