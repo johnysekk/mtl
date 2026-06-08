@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-DG | Sheets remember parent: close (x) returns to previous screen instead of the deck. Attendance cannot be marked for classes that have not started yet. Attendance-reminder notification opens that class attendance directly. FAQ reschedule corrected (1:1 = free slot 16h ahead; drop-in = 6h ahead, up to 2x); BJJ item reframed. Online coaching enforces per-currency minimum (250/10/10) with red warning + blocks next step. FAQ restyled as colored accordions; Write-to-us in a card. -->
+<!-- MTL build: 2026-06-07-DH | Notification deep-links: clicking a notification that jumps into a section now returns to the deck (home) on close, not a blank intermediate screen (fixed attendance reminder showing empty MANAGE GYM). Profile rate editor: per-discipline price list no longer duplicates the main discipline (its price = the base rate above); per-discipline inputs (in-person + online) now show the same green/red minimum-price breakdown as the application and block saving below the minimum. Gym Dashboard > Settings drop-in price now enforces the gym minimum with a red warning + blocks save, matching the gym application. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -5643,6 +5643,7 @@ async function renderGymManage(){
       <input id="mgDropin" type="number" inputmode="numeric" value="${g.dropin_price||''}" style="flex:1;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';">
       <div style="color:var(--mid);font-weight:700;">${sym}</div>
     </div>
+    <div id="mgDropinBreak" style="display:none;font-size:11.5px;line-height:1.4;border-radius:9px;padding:7px 10px;margin-top:-8px;margin-bottom:16px;"></div>
     <div id="mgDropinIncomeRow" style="display:none;margin-top:-8px;margin-bottom:16px;">
       <div style="font-size:11px;color:var(--light);margin-bottom:2px;">${LANG==='en'?'Drop-in income type:':'Druh příjmu z jednorázové lekce:'}</div>
       <div id="mgDropinIncomeChips"></div>
@@ -5734,6 +5735,8 @@ async function renderGymManage(){
     toast(LANG==='en'?`✅ ${days.length} classes added`:`✅ Přidáno ${days.length} lekcí`);
   };
   $('mgSave').onclick=saveGymManage;
+  if($('mgDropin')) $('mgDropin').addEventListener('input', updateMgDropinBreak);
+  if(typeof updateMgDropinBreak==='function') updateMgDropinBreak();
   if($('gcSubmit')) $('gcSubmit').onclick=submitGymChangeRequest;
   if($('gtSearchBtn')) $('gtSearchBtn').onclick=gtSearchCoaches;
   if($('mgGymLb')) $('mgGymLb').onclick=()=>openGymLeaderboard('city');
@@ -6325,9 +6328,23 @@ async function submitGymChangeRequest(){
     if($('gcReason')) $('gcReason').value='';
   }catch(e){ console.error('submitGymChangeRequest',e); toast('⚠️ '+e.message); }
 }
+function updateMgDropinBreak(){
+  const b=$('mgDropinBreak'); if(!b||!_myGymData) return;
+  const p=parseFloat($('mgDropin')&&$('mgDropin').value)||0;
+  const cur=_myGymData.currency||'CZK';
+  if(p<=0){ b.style.display='none'; b.dataset.belowMin=''; return; }
+  const sym=cur==='EUR'?'€':cur==='USD'?'$':'Kč'; const min=(typeof MIN_GYM!=='undefined'?(MIN_GYM[cur]||0):0);
+  const f=v=>cur==='CZK'?String(Math.round(v)):v.toFixed(2);
+  b.style.display='block';
+  if(min && p<min){ b.dataset.belowMin='1'; b.style.background='#FEECEC'; b.style.color='var(--red)'; b.style.fontWeight='700'; b.innerHTML=(LANG==='en'?('⚠️ Minimum drop-in price is '+min+' '+sym+'. Below this you cannot save.'):('⚠️ Minimální cena jednorázové lekce je '+min+' '+sym+'. Pod tím nejde uložit.')); return; }
+  const isP=!!(currentUser&&currentUser.partner); const gymR=isP?0.98:0.97, mkR=isP?1.02:1.03;
+  b.dataset.belowMin=''; b.style.background='#F0FBF0'; b.style.color='#0A7A4F'; b.style.fontWeight='600';
+  b.innerHTML='💰 '+(LANG==='en'?('Student pays '+f(p*mkR)+' '+sym+' · You get '+f(p*gymR)+' '+sym):('Student zaplatí '+f(p*mkR)+' '+sym+' · Tobě zůstane '+f(p*gymR)+' '+sym));
+}
 async function saveGymManage(){
   if(!_myGymData) return;
   const dropin = parseInt($('mgDropin').value)||_myGymData.dropin_price;
+  { const _gc=_myGymData.currency||'CZK'; if(dropin && (typeof MIN_GYM!=='undefined') && dropin < (MIN_GYM[_gc]||0)){ toast(LANG==='en'?('⚠️ Drop-in price is below the minimum ('+(MIN_GYM[_gc]||0)+' '+_gc+').'):('⚠️ Cena jednorázové lekce je pod minimem ('+(MIN_GYM[_gc]||0)+' '+_gc+').')); return; } }
   const plans = _gymPlans.filter(p=>p.name && p.name.trim() && (parseInt(p.price)||0)>0).map(p=>({ id:p.id||('p'+Math.random().toString(36).slice(2)), name:p.name.trim(), price:parseInt(p.price)||0, access:(p.access&&p.access.length)?p.access:['all'], income:p.income||'main', coach:p.coach||null, coachName:p.coachName||null, disc:p.disc||null, lead:p.lead||null, leadName:p.leadName||null }));
   const first = plans[0]||null;
   const termsTitle = ($('mgTermsTitle')&&$('mgTermsTitle').value.trim())||null;
@@ -7577,7 +7594,7 @@ async function loadNotifications(){
         else if(isGymClassAdded){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.day!=null) _schedSelDow=Number(dd.day); if($('meGymManage')){ openSheet('shGymManage'); renderGymManage(); setTimeout(()=>{ if(window._gmShowTab) window._gmShowTab(0); if(dd.day!=null && typeof renderScheduleEditor==='function'){ _schedSelDow=Number(dd.day); renderScheduleEditor(); } }, 220); } }catch(e){} }
         else if(isGymRatePrompt){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data: gg }=await supaClient.from('gyms').select('*').eq('id',dd.gym_id).single(); if(gg){ await openGymProfile(gg); setTimeout(()=>{ const f=$('gymRateForm'); if(f){ f.style.display='block'; f.scrollIntoView({behavior:'smooth',block:'center'}); } }, 300); } else toast(L('⚠️ Gym nenalezen')); } }catch(e){ toast(L('⚠️ Gym nenalezen')); } }
         else if(isEpCancelled){ openEPFeedback(); }
-        else if(isAttendReminder){ try{ const dd=JSON.parse(n.data||'{}'); const gid=dd.gym_id; const owns=gid&&((window._myGyms||[]).some(g=>g.id===gid)||(_myGymData&&_myGymData.id===gid)); if(owns){ openSheet('shGymManage'); if(!(_myGymData&&_myGymData.id===gid)){ try{ await renderGymManage(); }catch(e){} } const sc=(_gymSchedule||[]).find(c=>String(c.time)===String(dd.time)&&((c.name||'')===(dd.className||''))); openClassAttendance({ date:dd.date, time:dd.time, name:dd.className||'', level:sc?(sc.level||'all'):'all', coach:sc?(sc.coach||null):null, coachName:sc?(sc.coachName||''):'', disc:sc?(sc.disc||null):null }); } else if(gid){ openSheet('shCoachRoster'); loadCoachRoster(gid, dd.gym_name||''); } }catch(e){} }
+        else if(isAttendReminder){ try{ const dd=JSON.parse(n.data||'{}'); const gid=dd.gym_id; const owns=gid&&((window._myGyms||[]).some(g=>g.id===gid)||(_myGymData&&_myGymData.id===gid)); if(owns){ if(!(_myGymData&&_myGymData.id===gid)){ try{ await renderGymManage(); }catch(e){} } const sc=(_gymSchedule||[]).find(c=>String(c.time)===String(dd.time)&&((c.name||'')===(dd.className||''))); openClassAttendance({ date:dd.date, time:dd.time, name:dd.className||'', level:sc?(sc.level||'all'):'all', coach:sc?(sc.coach||null):null, coachName:sc?(sc.coachName||''):'', disc:sc?(sc.disc||null):null }); _sheetParent['shClassAttend']=null; } else if(gid){ openSheet('shCoachRoster'); loadCoachRoster(gid, dd.gym_name||''); _sheetParent['shCoachRoster']=null; } }catch(e){} }
         else if(isAmbApp){ openAmbApps(); }
         else if(isAmbGranted){ if(typeof openAmbassadorDashboard==='function') openAmbassadorDashboard(); }
         else if(isCoachRefAdmin){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.refId) openCoachStats(dd.refId, dd.refName||''); }catch(e){} }
@@ -11461,15 +11478,25 @@ function renderDiscRateEditor(){
   box.innerHTML = '<div style="font-size:12px;color:var(--mid);margin-bottom:5px;line-height:1.4;font-weight:700;">'+(LANG==='en'?'⭐ Main discipline (shown first on your profile):':'⭐ Hlavní disciplína (zobrazí se první na profilu):')+'</div>'
    + '<select id="editMainDisc" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-family:\'DM Sans\';font-size:14px;background:#fff;margin-bottom:14px;">'+discs.map(d=>`<option value="${d}" ${d===_mainSel?'selected':''}>${disciplineEmoji(d)} ${disciplineLabel(d)}</option>`).join('')+'</select>'
    + '<div style="font-size:12px;color:var(--mid);margin-bottom:6px;line-height:1.4;">'+(LANG==='en'?'Per-discipline price (optional — overrides the base price). Left = in-person, right = online:':'Cena podle disciplíny (nepovinné — přebije základní cenu). Vlevo in-person, vpravo online:')+'</div>'
-   + discs.map(d=>`<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;"><span style="font-size:13px;width:110px;flex-shrink:0;">${disciplineEmoji(d)} ${disciplineLabel(d)}</span><input id="dr_${d}" type="number" inputmode="numeric" value="${(dr&&dr[d])||''}" placeholder="${LANG==='en'?'in-person':'in-person'}" style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';"><input id="dro_${d}" type="number" inputmode="numeric" value="${(dro&&dro[d])||''}" placeholder="${LANG==='en'?'online':'online'}" style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';"></div>`).join('')
+   + discs.map(d=>`<div id="drrow_${d}" style="margin-bottom:7px;${d===_mainSel?'display:none;':''}"><div style="display:flex;gap:6px;align-items:center;"><span style="font-size:13px;width:110px;flex-shrink:0;">${disciplineEmoji(d)} ${disciplineLabel(d)}</span><input id="dr_${d}" type="number" inputmode="numeric" value="${(dr&&dr[d])||''}" placeholder="in-person" style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';"><input id="dro_${d}" type="number" inputmode="numeric" value="${(dro&&dro[d])||''}" placeholder="online" style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';"></div><div style="display:flex;gap:6px;margin-top:3px;"><div id="drbi_${d}" style="flex:1;display:none;font-size:10.5px;line-height:1.3;border-radius:7px;padding:4px 7px;"></div><div id="drbo_${d}" style="flex:1;display:none;font-size:10.5px;line-height:1.3;border-radius:7px;padding:4px 7px;"></div></div></div>`).join('')
    + '<div style="font-size:12px;color:var(--mid);margin:16px 0 6px;line-height:1.4;">'+(LANG==='en'?'Experience per discipline (optional — shown on your profile when that discipline is selected): fights · years':'Zkušenosti podle disciplíny (nepovinné — zobrazí se na profilu při zvolení dané disciplíny): zápasů · let')+'</div>'
    + discs.map(d=>{ const _ds=(currentUser.disc_stats&&currentUser.disc_stats[d])||{}; return `<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;"><span style="font-size:13px;width:130px;flex-shrink:0;">${disciplineEmoji(d)} ${disciplineLabel(d)}</span><input id="dsf_${d}" type="number" inputmode="numeric" value="${_ds.fights!=null?_ds.fights:''}" placeholder="${LANG==='en'?'fights':'zápasů'}" style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';"><input id="dsy_${d}" type="number" inputmode="numeric" value="${_ds.years!=null?_ds.years:''}" placeholder="${LANG==='en'?'years':'let'}" style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';"></div>`; }).join('');
+  (function(){ const upd=(d)=>{ if(typeof updateDiscBreak==='function') updateDiscBreak(d); }; discs.forEach(d=>{ const a=$('dr_'+d),b=$('dro_'+d); if(a)a.addEventListener('input',()=>upd(d)); if(b)b.addEventListener('input',()=>upd(d)); upd(d); }); const mm=$('editMainDisc'); if(mm){ mm.addEventListener('change',()=>{ const v=mm.value; discs.forEach(d=>{ const r=$('drrow_'+d); if(r) r.style.display=(d===v)?'none':''; }); }); } })();
+}
+
+function updateDiscBreak(d){
+  const pct=(typeof myKeepPct==='function')?myKeepPct():0.93;
+  const curIn=($('editCurrency')&&$('editCurrency').value)||'CZK';
+  const curOn=($('editCurrencyOnline')&&$('editCurrencyOnline').value)||'CZK';
+  const draw=(id,val,cur,min)=>{ const b=$(id); if(!b)return; const v=parseFloat(val)||0; if(v<=0){ b.style.display='none'; b.dataset.belowMin=''; return; } const sym=cur==='EUR'?'€':cur==='USD'?'$':'Kč'; const f=x=>cur==='CZK'?String(Math.round(x)):x.toFixed(2); b.style.display='block'; if(min&&v<min){ b.dataset.belowMin='1'; b.style.background='#FEECEC'; b.style.color='var(--red)'; b.style.fontWeight='700'; b.innerHTML='⚠️ Min '+min+' '+sym; } else { b.dataset.belowMin=''; b.style.background='#F0FBF0'; b.style.color='#0A7A4F'; b.style.fontWeight='600'; b.innerHTML='💰 '+(LANG==='en'?'You get ':'Dostaneš ')+f(v*pct)+' '+sym; } };
+  draw('drbi_'+d, $('dr_'+d)&&$('dr_'+d).value, curIn, (typeof MIN_RATE!=='undefined'?(MIN_RATE[curIn]||0):0));
+  draw('drbo_'+d, $('dro_'+d)&&$('dro_'+d).value, curOn, (typeof MIN_RATE_ONLINE!=='undefined'?(MIN_RATE_ONLINE[curOn]||0):0));
 }
 
 $('editRateInperson').addEventListener('input', ()=>showPriceBreakdown('editRateInperson','editBreakInperson'));
 $('editRateOnline').addEventListener('input', ()=>showPriceBreakdown('editRateOnline','editBreakOnline'));
-$('editCurrency').addEventListener('change', ()=>{ showPriceBreakdown('editRateInperson','editBreakInperson'); });
-$('editCurrencyOnline').addEventListener('change', ()=>{ document.querySelectorAll('#editOnlineTiers .tier-wrap').forEach(w=>updateTierBreak(w,'editCurrencyOnline')); });
+$('editCurrency').addEventListener('change', ()=>{ showPriceBreakdown('editRateInperson','editBreakInperson'); (currentUser.disciplines||[]).forEach(d=>{ if(typeof updateDiscBreak==='function') updateDiscBreak(d); }); });
+$('editCurrencyOnline').addEventListener('change', ()=>{ document.querySelectorAll('#editOnlineTiers .tier-wrap').forEach(w=>updateTierBreak(w,'editCurrencyOnline')); (currentUser.disciplines||[]).forEach(d=>{ if(typeof updateDiscBreak==='function') updateDiscBreak(d); }); });
 
 $('btnSaveRates').onclick=async()=>{
   const rateIn = parseInt($('editRateInperson').value) || null;
@@ -11480,12 +11507,14 @@ $('btnSaveRates').onclick=async()=>{
   if(!rateIn && !rateOn){ toast(L('⚠️ Vyplň aspoň jednu cenu')); return; }
   if(rateIn && rateIn < (MIN_RATE[currIn]||250)){ toast(LANG==='en'?`⚠️ Minimum in-person price is ${MIN_RATE[currIn]||250} ${currIn}`:`⚠️ Minimální in-person cena je ${MIN_RATE[currIn]||250} ${currIn}`); return; }
   if(rateOn && rateOn < (MIN_RATE_ONLINE[currOn]||250)){ toast(LANG==='en'?`⚠️ Minimum online price is ${MIN_RATE_ONLINE[currOn]||250} ${currOn}`:`⚠️ Minimální online cena je ${MIN_RATE_ONLINE[currOn]||250} ${currOn}`); return; }
+  const _mainChk = ($('editMainDisc') && $('editMainDisc').value) || currentUser.main_discipline || ((currentUser.disciplines||[])[0]) || null;
+  { let _bD=null,_bM=0,_bC=''; (currentUser.disciplines||[]).forEach(d=>{ if(d===_mainChk)return; const i=$('dr_'+d),o=$('dro_'+d); const vi=i?parseInt(i.value)||0:0,vo=o?parseInt(o.value)||0:0; if(vi>0&&vi<(MIN_RATE[currIn]||0)){_bD=d;_bM=MIN_RATE[currIn];_bC=currIn;} if(vo>0&&vo<(MIN_RATE_ONLINE[currOn]||0)){_bD=d;_bM=MIN_RATE_ONLINE[currOn];_bC=currOn;} }); if(_bD){ toast(LANG==='en'?('⚠️ '+disciplineLabel(_bD)+' price is below the minimum ('+_bM+' '+_bC+').'):('⚠️ Cena u '+disciplineLabel(_bD)+' je pod minimem ('+_bM+' '+_bC+').')); return; } }
   const btn=$('btnSaveRates');
   btn.textContent=L('Ukládám...'); btn.disabled=true;
   try {
-    const _drObj={}; (currentUser.disciplines||[]).forEach(d=>{ const el=$('dr_'+d); if(el){ const v=parseInt(el.value)||0; if(v>0) _drObj[d]=v; } });
+    const _drObj={}; (currentUser.disciplines||[]).forEach(d=>{ if(d===_mainChk)return; const el=$('dr_'+d); if(el){ const v=parseInt(el.value)||0; if(v>0) _drObj[d]=v; } });
     const _drJSON = Object.keys(_drObj).length ? JSON.stringify(_drObj) : null;
-    const _droObj={}; (currentUser.disciplines||[]).forEach(d=>{ const el=$('dro_'+d); if(el){ const v=parseInt(el.value)||0; if(v>0) _droObj[d]=v; } }); const _droJSON = Object.keys(_droObj).length ? JSON.stringify(_droObj) : null;
+    const _droObj={}; (currentUser.disciplines||[]).forEach(d=>{ if(d===_mainChk)return; const el=$('dro_'+d); if(el){ const v=parseInt(el.value)||0; if(v>0) _droObj[d]=v; } }); const _droJSON = Object.keys(_droObj).length ? JSON.stringify(_droObj) : null;
     const _dsObj={}; (currentUser.disciplines||[]).forEach(d=>{ const fe=$('dsf_'+d), ye=$('dsy_'+d); const f=(fe&&fe.value!=='')?parseInt(fe.value):null; const y=(ye&&ye.value!=='')?parseInt(ye.value):null; if((f!=null&&!isNaN(f))||(y!=null&&!isNaN(y))){ _dsObj[d]={}; if(f!=null&&!isNaN(f))_dsObj[d].fights=f; if(y!=null&&!isNaN(y))_dsObj[d].years=y; } });
     const _mainD = ($('editMainDisc') && $('editMainDisc').value) || currentUser.main_discipline || ((currentUser.disciplines||[])[0]) || null;
     const { error } = await supaClient.from('profiles').update({ rate_inperson: rateIn, rate_online: rateOn, currency: currIn, currency_inperson: currIn, currency_online: currOn, online_tiers: tiers.length?JSON.stringify(tiers):null, online_format: tiers[0]?tiers[0].label:null, online_desc: $('editOnlineDesc').value.trim() || null, inperson_desc: $('editInpersonDesc').value.trim() || null, specializations: JSON.stringify(collectSpecs('editSpecs')), languages: JSON.stringify(collectLangs('editLangs')), discipline_rates: _drJSON, discipline_rates_online: _droJSON, main_discipline: _mainD, disc_stats: _dsObj }).eq('id', currentUser.id);
