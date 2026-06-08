@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-DM | Team-coach notification (you can now manage your own classes) is now clickable and deep-links straight into that gym\u0027s schedule editor. Corrected the payout note in the My Teams area: group-class payments can now go directly to you (based on each class\u0027s Paid-to setting in the schedule), instead of stating it as already happening. -->
+<!-- MTL build: 2026-06-07-DN | Per-coach pricing (part 1: proposal + approval loop). A team coach with schedule permission can now propose their OWN drop-in price + membership plans for their classes, in My classes (shCoachSched), with full breakdown/min-price/Founder-tip mechanics mirroring the gym owner. Submitting saves a pending gym_coach_pricing row and notifies the owner. The owner gets a clickable notification opening a new Coach pricing requests sheet (also linked from Settings > Team coaches) to Approve / Decline (with reason); the coach is notified of the decision. NOTE: applying approved prices to actual bookings + showing them on the gym profile is the next build. Requires latest mtl-schema.sql (new gym_coach_pricing table). -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -1441,7 +1441,13 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
     <div id="coachSchedList"></div>
     <button id="coachSchedAdd" style="width:100%;padding:11px;background:transparent;color:var(--dark);border:1.5px dashed var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:14px;">+ Přidat lekci</button>
     <button id="coachSchedSave" style="width:100%;padding:14px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">Uložit</button>
+    <div id="cpSection" style="margin-top:24px;border-top:1px solid var(--border);padding-top:18px;display:none;"></div>
   </div>
+</div>
+
+<div class="sheet" id="shCoachPricing" style="z-index:89;">
+  <div class="shdr"><div class="shdr-title" id="cprTitle" data-noi18n>Žádosti o ceny</div><button class="btn-close" id="btnCloseCpr"></button></div>
+  <div style="padding:18px 20px;"><div id="cprBody"></div></div>
 </div>
 
 <div class="sheet" id="shEPCancel" style="z-index:90;">
@@ -2882,6 +2888,9 @@ const NOTIF_T = {
   gym_team_declined: (d)=> LANG==='en' ? `${d.coach_name} declined the team invite.` : `${d.coach_name} odmítl/a pozvánku do týmu.`,
   gym_team_removed: (d)=> LANG==='en' ? `${d.gym_name} removed you from their team.` : `${d.gym_name} tě odebral/a ze svého týmu.`,
   gym_team_left: (d)=> LANG==='en' ? `${d.coach_name} left your gym team.` : `${d.coach_name} opustil/a tým tvého gymu.`,
+  coach_pricing_request: (d)=> LANG==='en' ? `\ud83d\udcb0 ${d.coach_name||'A coach'} proposed their own pricing for their classes — review it.` : `\ud83d\udcb0 ${d.coach_name||'Kouč'} navrhuje vlastní ceny pro své lekce — zkontroluj to.`,
+  coach_pricing_approved: (d)=> LANG==='en' ? `\u2705 ${d.gym_name||'The gym'} approved your pricing — it is now live for your classes.` : `\u2705 ${d.gym_name||'Gym'} schválil tvé ceny — jsou teď aktivní u tvých lekcí.`,
+  coach_pricing_rejected: (d)=> LANG==='en' ? `\u274c ${d.gym_name||'The gym'} declined your pricing${d.reason?': '+d.reason:''}.` : `\u274c ${d.gym_name||'Gym'} zamítl tvé ceny${d.reason?': '+d.reason:''}.`,
   coach_decertified: (d)=> d.permanent
     ? (LANG==='en' ? `🚫 Your coaching access on MTL has been permanently blocked. Reason: ${d.reason} — if you'd like to discuss it, message us.` : `🚫 Tvůj přístup ke koučování na MTL byl trvale zablokován. Důvod: ${d.reason} — pokud to chceš řešit, napiš nám.`)
     : (LANG==='en' ? `🚫 Your MTL certification has been removed. Reason: ${d.reason} — you can reapply later; if you'd like to discuss it, message us.` : `🚫 Tvoje MTL certifikace byla odebrána. Důvod: ${d.reason} — časem můžeš požádat znovu; pokud to chceš řešit, napiš nám.`),
@@ -4303,7 +4312,7 @@ function hideMatch(){ $('matchOv').classList.remove('open'); }
 // ════════════════════════════════════════
 // SHEETS
 // ════════════════════════════════════════
-const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMe','shSettings','shCoachApp','shAddDisc','shDiscReview','shAmbDash','shAdmin','shNotif','shChat','shBookings','shDiary','shCoachStats','shCoachSched','shCoachEarn','shGymStats','shFounderDash','shGymLb','shGyms','shGymProfile','shGymManage','shMemberships','shTerms','shPrivacy','shOnline','shLeaderboard','shOpportunities','shMyTeams','shEPCancel','shEPFeedback','shCoachRoster','shAmbApply','shAmbApps','shSupport','shMilestones','shClassAttend'];
+const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMe','shSettings','shCoachApp','shAddDisc','shDiscReview','shAmbDash','shAdmin','shNotif','shChat','shBookings','shDiary','shCoachStats','shCoachSched','shCoachEarn','shGymStats','shFounderDash','shGymLb','shGyms','shGymProfile','shGymManage','shMemberships','shTerms','shPrivacy','shOnline','shLeaderboard','shOpportunities','shMyTeams','shEPCancel','shEPFeedback','shCoachRoster','shAmbApply','shAmbApps','shSupport','shMilestones','shClassAttend','shCoachPricing'];
 
 let _sheetParent={};
 function openSheet(id){
@@ -5199,6 +5208,122 @@ function openTeamCoachStats(coachId, coachName){
   renderCoachAnalyticsCompact(coachId, 'coachStatsBody');
 }
 var _csGymId=null, _csGym=null, _csSched=[];
+let _cpDropin='', _cpCurrency='CZK', _cpPlans=[], _cpStatus=null, _cpReason=null;
+let _cprGymId=null;
+async function openCoachPricingRequests(gymId){
+  _cprGymId=gymId; openSheet('shCoachPricing');
+  if($('cprTitle')) $('cprTitle').textContent=(LANG==='en'?'Coach pricing requests':'\u017d\u00e1dosti o ceny');
+  if($('btnCloseCpr')) $('btnCloseCpr').onclick=()=>closeSheet('shCoachPricing');
+  const box=$('cprBody'); if(box) box.innerHTML='<p style="text-align:center;color:var(--light);padding:24px;">'+L('Na\u010d\u00edt\u00e1m...')+'</p>';
+  try{
+    const { data } = await supaClient.from('gym_coach_pricing').select('*').eq('gym_id', gymId).order('created_at',{ascending:false});
+    const rows=data||[]; const symf=c=>c==='EUR'?'\u20ac':c==='USD'?'$':'K\u010d';
+    if(!rows.length){ box.innerHTML='<p style="color:var(--light);font-size:13px;padding:8px 0;line-height:1.5;">'+(LANG==='en'?'No coach pricing proposals yet. When a team coach submits their own drop-in / membership prices, they show up here for approval.':'Zat\u00edm \u017e\u00e1dn\u00e9 n\u00e1vrhy cen od kou\u010d\u016f. Kdy\u017e n\u011bkter\u00fd kou\u010d v t\u00fdmu po\u0161le sv\u00e9 ceny, objev\u00ed se tady ke schv\u00e1len\u00ed.')+'</p>'; return; }
+    box.innerHTML=rows.map(r=>{ let plans=[]; try{ plans=(typeof r.plans==='string'?JSON.parse(r.plans):r.plans)||[]; }catch(e){}
+      const stB=r.status==='approved'?'<span style="color:#006040;font-weight:700;font-size:12px;">\u2705 '+(LANG==='en'?'approved':'schv\u00e1leno')+'</span>':r.status==='rejected'?'<span style="color:var(--red);font-weight:700;font-size:12px;">\u274c '+(LANG==='en'?'rejected':'zam\u00edtnuto')+'</span>':'<span style="color:#9A5B00;font-weight:700;font-size:12px;">\u23f3 '+(LANG==='en'?'pending':'\u010dek\u00e1')+'</span>';
+      const dropTxt=r.dropin_price?((LANG==='en'?'Drop-in: ':'Drop-in: ')+(r.currency==='CZK'?Math.floor(r.dropin_price):Number(r.dropin_price).toFixed(2))+' '+symf(r.currency)):'';
+      const plansTxt=plans.length?plans.map(pl=>escapeHtml(pl.name)+' \u2014 '+(r.currency==='CZK'?Math.floor(pl.price):Number(pl.price).toFixed(2))+' '+symf(r.currency)+'/'+(LANG==='en'?'mo':'m\u011bs')+' ('+accessLabel(pl.access)+')').join('<br>'):(LANG==='en'?'\u2014 no membership plans':'\u2014 bez variant \u010dlenstv\u00ed');
+      const act=r.status==='pending'?'<div style="display:flex;gap:8px;margin-top:11px;"><button class="cprApprove" data-id="'+r.id+'" style="flex:1;padding:11px;background:#006040;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(LANG==='en'?'Approve':'Schv\u00e1lit')+'</button><button class="cprReject" data-id="'+r.id+'" style="flex:1;padding:11px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(LANG==='en'?'Decline':'Zam\u00edtnout')+'</button></div>':'';
+      return '<div style="border:1px solid var(--border);border-radius:14px;padding:13px;margin-bottom:10px;background:var(--surf);"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:7px;"><div style="font-size:14px;font-weight:800;">'+escapeHtml(r.coach_name||'Coach')+'</div>'+stB+'</div>'+(dropTxt?'<div style="font-size:13px;color:var(--mid);margin-bottom:3px;">'+dropTxt+'</div>':'')+'<div style="font-size:12.5px;color:var(--mid);line-height:1.6;">'+plansTxt+'</div>'+(r.reason?'<div style="font-size:11.5px;color:var(--light);margin-top:6px;">'+(LANG==='en'?'Your note: ':'Tvoje pozn\u00e1mka: ')+escapeHtml(r.reason)+'</div>':'')+act+'</div>';
+    }).join('');
+    box.querySelectorAll('.cprApprove').forEach(b=>b.onclick=()=>approveCoachPricing(b.dataset.id));
+    box.querySelectorAll('.cprReject').forEach(b=>b.onclick=()=>rejectCoachPricing(b.dataset.id));
+  }catch(e){ box.innerHTML='<p style="color:var(--red);padding:16px;font-size:13px;">\u26a0\ufe0f '+e.message+'</p>'; }
+}
+async function approveCoachPricing(id){
+  try{ const { data: r } = await supaClient.from('gym_coach_pricing').update({ status:'approved', decided_at:new Date().toISOString(), reason:null }).eq('id', id).select().single();
+    if(r){ try{ const { data:g } = await supaClient.from('gyms').select('name').eq('id', r.gym_id).single(); await supaClient.from('notifications').insert({ user_id:r.coach_id, type:'system', read:false, data: JSON.stringify({ kind:'coach_pricing_approved', gym_id:r.gym_id, gym_name:(g&&g.name)||'' }), message:'\u2705 Tv\u00e9 ceny byly schv\u00e1leny.' }); }catch(e){} }
+    toast(LANG==='en'?'\u2705 Approved':'\u2705 Schv\u00e1leno'); if(_cprGymId) openCoachPricingRequests(_cprGymId);
+  }catch(e){ toast('\u26a0\ufe0f '+e.message); }
+}
+async function rejectCoachPricing(id){
+  const reason=(prompt(LANG==='en'?'Reason for declining (optional):':'D\u016fvod zam\u00edtnut\u00ed (nepovinn\u00e9):')||'').trim();
+  try{ const { data: r } = await supaClient.from('gym_coach_pricing').update({ status:'rejected', decided_at:new Date().toISOString(), reason:reason||null }).eq('id', id).select().single();
+    if(r){ try{ const { data:g } = await supaClient.from('gyms').select('name').eq('id', r.gym_id).single(); await supaClient.from('notifications').insert({ user_id:r.coach_id, type:'system', read:false, data: JSON.stringify({ kind:'coach_pricing_rejected', gym_id:r.gym_id, gym_name:(g&&g.name)||'', reason:reason||'' }), message:'\u274c Tv\u00e9 ceny byly zam\u00edtnuty.' }); }catch(e){} }
+    toast(LANG==='en'?'Declined':'Zam\u00edtnuto'); if(_cprGymId) openCoachPricingRequests(_cprGymId);
+  }catch(e){ toast('\u26a0\ufe0f '+e.message); }
+}
+function updateCpDropinBreak(){
+  const b=$('cpDropinBreak'); if(!b) return;
+  const cur=_cpCurrency||'CZK'; const sym=cur==='EUR'?'\u20ac':cur==='USD'?'$':'K\u010d';
+  const pp=parseFloat($('cpDropin')&&$('cpDropin').value)||0;
+  if(pp<=0){ b.style.display='none'; b.dataset.belowMin=''; return; }
+  const min=(typeof MIN_GYM!=='undefined')?(MIN_GYM[cur]||0):0;
+  const f=v=>cur==='CZK'?String(Math.floor(v)):v.toFixed(2);
+  b.style.display='block';
+  if(min && pp<min){ b.dataset.belowMin='1'; b.style.background='#FEECEC'; b.style.color='var(--red)'; b.style.fontWeight='700'; b.innerHTML=(LANG==='en'?('\u26a0\ufe0f Minimum drop-in price is '+min+' '+sym):('\u26a0\ufe0f Minim\u00e1ln\u00ed cena jednor\u00e1zov\u00e9 lekce je '+min+' '+sym)); return; }
+  const isP=!!(currentUser&&currentUser.partner); const keep=isP?0.98:0.97, mk=isP?1.02:1.03;
+  b.dataset.belowMin=''; b.style.background='#F0FBF0'; b.style.color='#0A7A4F'; b.style.fontWeight='600';
+  b.innerHTML='\ud83d\udcb0 '+(LANG==='en'?('Student pays '+f(pp*mk)+' '+sym+' \u00b7 You get '+f(pp*keep)+' '+sym):('Student zaplat\u00ed '+f(pp*mk)+' '+sym+' \u00b7 Tob\u011b z\u016fstane '+f(pp*keep)+' '+sym));
+}
+function updateCpPlanBreak(i){
+  const box=$('cpPlanBreak_'+i); if(!box) return;
+  const cur=_cpCurrency||'CZK'; const sym=cur==='EUR'?'\u20ac':cur==='USD'?'$':'K\u010d';
+  const fixed=cur==='CZK'?6:0.3; const price=parseFloat(_cpPlans[i]&&_cpPlans[i].price)||0;
+  const _isP=!!(currentUser&&currentUser.partner); const _keepR=_isP?0.96:0.95;
+  const netLow=Math.max(0, price*_keepR-(price*0.029+fixed)); const netHigh=Math.max(0, price*_keepR-(price*0.014+fixed));
+  const fmtK=v=>cur==='CZK'?String(Math.floor(v)):v.toFixed(2);
+  const min=(typeof MIN_MEMB!=='undefined')?(MIN_MEMB[cur]||0):0;
+  if(price<=0){ box.style.display='none'; box.dataset.belowMin=''; return; }
+  box.style.display='block';
+  if(min && price<min){ box.dataset.belowMin='1'; box.style.background='#FEECEC'; box.style.color='var(--red)'; box.style.fontWeight='700'; box.innerHTML=(LANG==='en'?('\u26a0\ufe0f Minimum membership price is '+min+' '+sym+'/mo'):('\u26a0\ufe0f Minim\u00e1ln\u00ed cena \u010dlenstv\u00ed je '+min+' '+sym+'/m\u011bs')); }
+  else { box.dataset.belowMin=''; box.style.background='#F0FBF0'; box.style.color='#0A7A4F'; box.style.fontWeight='600'; box.innerHTML='\ud83d\udcb0 '+(LANG==='en'?'You keep ~':'Z\u016fstane ti ~')+fmtK(netHigh)+'\u2013'+fmtK(netLow)+' '+sym+'/'+(LANG==='en'?'mo':'m\u011bs'); }
+}
+function renderCpPlans(){
+  const box=$('cpPlans'); if(!box) return;
+  if(!_cpPlans.length){ box.innerHTML='<p style="color:var(--light);font-size:13px;margin-bottom:10px;">'+(LANG==='en'?'No plans yet (optional).':'Zat\u00edm \u017e\u00e1dn\u00e9 varianty (nepovinn\u00e9).')+'</p>'; return; }
+  const chipOpts=[{v:'all',cs:'V\u0161echny',en:'All'}].concat(CLASS_LEVELS.filter(l=>l.v!=='all'));
+  box.innerHTML=_cpPlans.map((p,i)=>{
+    const access=(p.access&&p.access.length)?p.access:['all'];
+    const chips=chipOpts.map(o=>{ const on=o.v==='all'?access.includes('all'):access.includes(o.v); return '<span class="cpChip" data-i="'+i+'" data-v="'+o.v+'" style="display:inline-block;padding:6px 10px;margin:3px;border-radius:14px;font-size:12px;font-weight:600;cursor:pointer;border:1.5px solid '+(on?'var(--dark)':'var(--border)')+';background:'+(on?'var(--dark)':'transparent')+';color:'+(on?'#fff':'var(--mid)')+';">'+(LANG==='en'?o.en:o.cs)+'</span>'; }).join('');
+    return '<div style="border:1px solid var(--border);border-radius:12px;padding:10px;margin-bottom:10px;"><div style="display:flex;gap:6px;margin-bottom:6px;"><input class="cpPName" data-i="'+i+'" type="text" value="'+((p.name||'').replace(/"/g,'&quot;'))+'" placeholder="'+(LANG==='en'?'Plan name':'N\u00e1zev varianty')+'" style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:\'DM Sans\';"><button class="cpPDel" data-i="'+i+'" style="padding:8px 11px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-weight:700;cursor:pointer;">\u2715</button></div><input class="cpPPrice" data-i="'+i+'" type="number" inputmode="numeric" value="'+(p.price||'')+'" placeholder="'+(LANG==='en'?'Price / month':'Cena / m\u011bs\u00edc')+'" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:\'DM Sans\';margin-bottom:6px;"><div id="cpPlanBreak_'+i+'" style="display:none;font-size:11.5px;line-height:1.4;border-radius:9px;padding:7px 10px;margin-bottom:8px;"></div><div style="font-size:11px;color:var(--light);margin-bottom:2px;">'+(LANG==='en'?'Covers classes:':'Pokr\u00fdv\u00e1 lekce:')+'</div><div>'+chips+'</div></div>';
+  }).join('');
+  box.querySelectorAll('.cpPName').forEach(el=>el.oninput=()=>{ _cpPlans[+el.dataset.i].name=el.value; });
+  box.querySelectorAll('.cpPPrice').forEach(el=>{ el.oninput=()=>{ const i=+el.dataset.i; _cpPlans[i].price=parseFloat(el.value)||0; updateCpPlanBreak(i); }; });
+  box.querySelectorAll('.cpPDel').forEach(el=>el.onclick=()=>{ _cpPlans.splice(+el.dataset.i,1); renderCpPlans(); });
+  box.querySelectorAll('.cpChip').forEach(el=>el.onclick=()=>{ const i=+el.dataset.i, v=el.dataset.v; let a=(_cpPlans[i].access&&_cpPlans[i].access.length)?_cpPlans[i].access.slice():['all']; if(v==='all'){ a=['all']; } else { a=a.filter(x=>x!=='all'); if(a.includes(v)) a=a.filter(x=>x!==v); else a.push(v); if(!a.length) a=['all']; } _cpPlans[i].access=a; renderCpPlans(); });
+  _cpPlans.forEach((p,i)=>updateCpPlanBreak(i));
+}
+function renderCpEditor(){
+  const sec=$('cpSection'); if(!sec) return; sec.style.display='block';
+  let st='';
+  if(_cpStatus==='pending') st='<div style="background:#FFF4E5;color:#9A5B00;border:1px solid #FACC8A;border-radius:10px;padding:9px 12px;margin-bottom:12px;font-size:12px;line-height:1.5;">\u23f3 '+(LANG==='en'?'Waiting for the gym owner to approve. You can edit & resubmit any time.':'\u010cek\u00e1 na schv\u00e1len\u00ed majitelem gymu. Upravit a poslat znovu m\u016f\u017ee\u0161 kdykoliv.')+'</div>';
+  else if(_cpStatus==='approved') st='<div style="background:#E8F5EE;color:#006040;border:1px solid #A8E6C0;border-radius:10px;padding:9px 12px;margin-bottom:12px;font-size:12px;line-height:1.5;">\u2705 '+(LANG==='en'?'Approved \u2014 live for your classes. Editing & resubmitting needs approval again.':'Schv\u00e1leno \u2014 aktivn\u00ed u tv\u00fdch lekc\u00ed. \u00darava a nov\u00e9 odesl\u00e1n\u00ed zase pot\u0159ebuje schv\u00e1len\u00ed.')+'</div>';
+  else if(_cpStatus==='rejected') st='<div style="background:#FEECEC;color:var(--red);border:1px solid #F5B5B5;border-radius:10px;padding:9px 12px;margin-bottom:12px;font-size:12px;line-height:1.5;">\u274c '+(LANG==='en'?'Rejected':'Zam\u00edtnuto')+(_cpReason?' \u2014 '+escapeHtml(_cpReason):'')+'</div>';
+  const tip='<p style="font-size:11.5px;color:#7a5b00;line-height:1.5;background:#FFFBEF;border:1px solid #F0E0A8;border-radius:9px;padding:7px 10px;margin-bottom:16px;">'+(LANG==='en'?'\ud83d\udca1 MTL Founder tip: set your price to what you normally charge.':'\ud83d\udca1 Tip od Foundera MTL: nastav cenu na to, co b\u011b\u017en\u011b bere\u0161.')+'</p>';
+  sec.innerHTML='<div class="sec-lbl">\ud83d\udcb0 '+(LANG==='en'?'My pricing for this gym':'Moje ceny v tomto gymu')+'</div>'+st
+    +'<p style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:12px;">'+(LANG==='en'?'Set your own drop-in price and membership plans for your classes. Sent to the gym owner for approval \u2014 nothing goes live until approved.':'Nastav si vlastn\u00ed cenu jednor\u00e1zov\u00e9 lekce a varianty \u010dlenstv\u00ed pro sv\u00e9 lekce. Ode\u0161le se majiteli ke schv\u00e1len\u00ed \u2014 ne\u017e to schv\u00e1l\u00ed, nic se nespust\u00ed.')+'</p>'
+    +'<div class="sec-lbl">'+(LANG==='en'?'Drop-in price':'Cena jednor\u00e1zov\u00e9 lekce')+'</div>'
+    +'<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;"><input id="cpDropin" type="number" inputmode="numeric" value="'+(_cpDropin||'')+'" style="flex:1;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:\'DM Sans\';"><select id="cpCurrency" style="width:108px;padding:13px 8px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:\'DM Sans\';background:#fff;"><option value="CZK"'+(_cpCurrency==='CZK'?' selected':'')+'>CZK K\u010d</option><option value="EUR"'+(_cpCurrency==='EUR'?' selected':'')+'>EUR \u20ac</option><option value="USD"'+(_cpCurrency==='USD'?' selected':'')+'>USD $</option></select></div>'
+    +'<div id="cpDropinBreak" style="display:none;font-size:11.5px;line-height:1.4;border-radius:9px;padding:7px 10px;margin-bottom:8px;"></div>'+tip
+    +'<div class="sec-lbl">'+(LANG==='en'?'Membership plans':'Varianty \u010dlenstv\u00ed')+'</div>'
+    +'<div id="cpPlans"></div>'
+    +'<button id="cpAddPlan" style="width:100%;padding:11px;background:var(--bg);border:1px dashed var(--border);border-radius:10px;font-weight:600;color:var(--dark);cursor:pointer;font-family:\'DM Sans\';margin-bottom:8px;">+ '+(LANG==='en'?'Add plan':'P\u0159idat variantu')+'</button>'+tip
+    +'<button id="cpSubmit" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(LANG==='en'?'Submit for approval':'Odeslat ke schv\u00e1len\u00ed')+'</button>';
+  if($('cpDropin')) $('cpDropin').oninput=()=>{ _cpDropin=$('cpDropin').value; updateCpDropinBreak(); };
+  if($('cpCurrency')) $('cpCurrency').onchange=()=>{ _cpCurrency=$('cpCurrency').value; updateCpDropinBreak(); renderCpPlans(); };
+  if($('cpAddPlan')) $('cpAddPlan').onclick=()=>{ _cpPlans.push({ id:'cp'+Date.now().toString(36), name:'', price:0, access:['all'] }); renderCpPlans(); };
+  if($('cpSubmit')) $('cpSubmit').onclick=submitCoachPricing;
+  renderCpPlans(); updateCpDropinBreak();
+}
+async function submitCoachPricing(){
+  if(!_csGymId||!currentUser) return;
+  const cur=_cpCurrency||'CZK'; const dropin=parseFloat($('cpDropin')&&$('cpDropin').value)||0;
+  if(dropin>0 && (MIN_GYM[cur]||0) && dropin<MIN_GYM[cur]){ toast(LANG==='en'?('\u26a0\ufe0f Drop-in price is below the minimum ('+MIN_GYM[cur]+' '+cur+').'):('\u26a0\ufe0f Cena jednor\u00e1zov\u00e9 lekce je pod minimem ('+MIN_GYM[cur]+' '+cur+').')); return; }
+  const plans=_cpPlans.filter(p=>p.name&&p.name.trim()&&(parseFloat(p.price)||0)>0).map(p=>({ id:p.id||('cp'+Math.random().toString(36).slice(2)), name:p.name.trim(), price:parseFloat(p.price)||0, access:(p.access&&p.access.length)?p.access:['all'] }));
+  const badP=plans.find(p=>(MIN_MEMB[cur]||0) && p.price<MIN_MEMB[cur]);
+  if(badP){ toast(LANG==='en'?('\u26a0\ufe0f "'+badP.name+'" is below the membership minimum ('+MIN_MEMB[cur]+' '+cur+'/mo).'):('\u26a0\ufe0f "'+badP.name+'" je pod minimem \u010dlenstv\u00ed ('+MIN_MEMB[cur]+' '+cur+'/m\u011bs).')); return; }
+  if(dropin<=0 && !plans.length){ toast(LANG==='en'?'\u26a0\ufe0f Set a drop-in price or at least one plan':'\u26a0\ufe0f Nastav cenu drop-inu nebo aspo\u0148 jednu variantu'); return; }
+  const btn=$('cpSubmit'); if(btn){ btn.disabled=true; btn.textContent=L('Odes\u00edl\u00e1m...'); }
+  try{
+    const row={ gym_id:_csGymId, coach_id:currentUser.id, coach_name:currentUser.name||'Coach', dropin_price:dropin||null, currency:cur, plans:JSON.stringify(plans), status:'pending', reason:null, decided_at:null };
+    const { error } = await supaClient.from('gym_coach_pricing').upsert(row, { onConflict:'gym_id,coach_id' });
+    if(error){ toast('\u26a0\ufe0f '+error.message); if(btn){ btn.disabled=false; btn.textContent=L('Odeslat ke schv\u00e1len\u00ed'); } return; }
+    try{ const { data: g } = await supaClient.from('gyms').select('owner_id, name').eq('id', _csGymId).single(); if(g&&g.owner_id){ await supaClient.from('notifications').insert({ user_id:g.owner_id, type:'system', read:false, data: JSON.stringify({ kind:'coach_pricing_request', gym_id:_csGymId, gym_name:g.name||'', coach_id:currentUser.id, coach_name:currentUser.name||'Coach' }), message:'\ud83d\udcb0 '+(currentUser.name||'Kou\u010d')+' navrhuje vlastn\u00ed ceny pro sv\u00e9 lekce \u2014 schval/zam\u00edtni.' }); } }catch(e){}
+    _cpStatus='pending'; _cpReason=null; renderCpEditor();
+    toast(LANG==='en'?'\u2705 Sent for approval':'\u2705 Odesl\u00e1no ke schv\u00e1len\u00ed');
+  }catch(e){ toast('\u26a0\ufe0f '+e.message); if(btn){ btn.disabled=false; btn.textContent=L('Odeslat ke schv\u00e1len\u00ed'); } }
+}
 async function openCoachScheduleEditor(gymId, gymName){
   _csGymId=gymId;
   if($('coachSchedTitle')) $('coachSchedTitle').textContent = (LANG==='en'?'My classes — ':'Moje lekce — ')+(gymName||'Gym');
@@ -5211,9 +5336,11 @@ async function openCoachScheduleEditor(gymId, gymName){
     _csSched = (sch||[]).filter(c=>c.coach===currentUser.id).map(c=>({ day:Number(c.day)||0, time:c.time||'18:00', name:c.name||'', level:c.level||'all' }));
     const sym=(_csGym&&_csGym.currency==='EUR')?'€':(_csGym&&_csGym.currency==='USD')?'$':'Kč';
     if($('coachSchedHint')) $('coachSchedHint').textContent = (LANG==='en'
-      ? `Add the classes you teach here — payments for them go to your Stripe account. The drop-in price is set gym-wide (${_csGym?_csGym.dropin_price:'?'} ${sym}).`
-      : `Přidej lekce, které tu vedeš — platby za ně chodí na tvůj Stripe účet. Cena jednorázové lekce je společná pro celý gym (${_csGym?_csGym.dropin_price:'?'} ${sym}).`);
+      ? `Add the classes you teach here — payments for them go to your Stripe account (set Paid to: you on each class in the gym schedule). You can also propose your own drop-in & membership prices below — the gym owner approves them.`
+      : `Přidej lekce, které tu vedeš — platby za ně chodí na tvůj Stripe účet (u lekce v rozvrhu nastav Platba: kouč). Níže si můžeš navrhnout i vlastní ceny za drop-in a členství — schvaluje je majitel gymu.`);
     renderCoachSchedEditor();
+    try{ const { data: cp } = await supaClient.from('gym_coach_pricing').select('*').eq('gym_id', gymId).eq('coach_id', currentUser.id).maybeSingle(); if(cp){ _cpDropin=cp.dropin_price||''; _cpCurrency=cp.currency||(_csGym&&_csGym.currency)||'CZK'; try{ _cpPlans=(typeof cp.plans==='string'?JSON.parse(cp.plans):cp.plans)||[]; }catch(e){ _cpPlans=[]; } _cpStatus=cp.status||null; _cpReason=cp.reason||null; } else { _cpDropin=''; _cpCurrency=(_csGym&&_csGym.currency)||'CZK'; _cpPlans=[]; _cpStatus=null; _cpReason=null; } }catch(e){ _cpDropin=''; _cpPlans=[]; _cpStatus=null; }
+    renderCpEditor();
   }catch(e){ console.error('openCoachScheduleEditor',e); toast('⚠️ '+e.message); }
 }
 function renderCoachSchedEditor(){
@@ -5698,6 +5825,7 @@ async function renderGymManage(){
     </div>
     <div id="gtResults" style="margin-bottom:10px;"></div>
     <div id="gtTeam" style="margin-bottom:8px;"></div>
+    <button id="mgCoachPricingBtn" style="width:100%;padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:12px;font-weight:700;color:var(--dark);cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">💰 ${LANG==='en'?'Coach pricing requests':'Žádosti o ceny od koučů'}</button>
     </div></details>
     <details class="setSec"><summary>✏️ ${LANG==='en'?'Request info change':'Žádost o změnu údajů'}</summary><div class="setBody">
     <div style="font-size:11.5px;color:var(--light);margin-bottom:8px;">${LANG==='en'?'Needs MTL approval':'Schvaluje MTL'}</div>
@@ -5762,6 +5890,7 @@ async function renderGymManage(){
     toast(LANG==='en'?`✅ ${days.length} classes added`:`✅ Přidáno ${days.length} lekcí`);
   };
   document.querySelectorAll('.mgSaveSec').forEach(b=>b.onclick=saveGymManage);
+  if($('mgCoachPricingBtn')) $('mgCoachPricingBtn').onclick=()=>openCoachPricingRequests(_myGymData.id);
   if($('mgDropin')) $('mgDropin').addEventListener('input', updateMgDropinBreak);
   if($('mgCurrency')) $('mgCurrency').addEventListener('change', ()=>{ _myGymData.currency=$('mgCurrency').value; if(typeof updateMgDropinBreak==='function') updateMgDropinBreak(); if(typeof renderPlansEditor==='function') renderPlansEditor(); });
   if(typeof updateMgDropinBreak==='function') updateMgDropinBreak();
@@ -7585,7 +7714,7 @@ async function loadNotifications(){
     const isAmbApp = k==='ambassador_app';
     const isAmbGranted = k==='ambassador_granted';
     const isCoachRefAdmin = k==='coach_ref_grant' || k==='coach_ref_permanent_admin' || k==='ep_month_expired';
-    const clickable = ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isExcused || isPartnerGranted || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on';
+    const clickable = ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isExcused || isPartnerGranted || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected';
     let linkLabel = L('otevřít ›');
     if(isMembCancel) linkLabel = LANG==='en'?'view members ›':'zobrazit členy ›';
     else if(isMembMine) linkLabel = LANG==='en'?'open gym ›':'otevřít gym ›';
@@ -7610,6 +7739,8 @@ async function loadNotifications(){
     else if(isMtlContact) linkLabel = L('napsat MTL ›');
     else if(k==='cert_recommend'||k==='new_listing') linkLabel = LANG==='en'?'open profile ›':'otevřít profil ›';
     else if(k==='schedule_perm_on') linkLabel = LANG==='en'?'manage classes ›':'spravovat lekce ›';
+    else if(k==='coach_pricing_request') linkLabel = LANG==='en'?'review ›':'zkontrolovat ›';
+    else if(k==='coach_pricing_approved'||k==='coach_pricing_rejected') linkLabel = LANG==='en'?'open ›':'otevřít ›';
     el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;${clickable?'cursor:pointer;':''}`;
     el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${notifText(n)}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}${clickable?` · <span style="color:var(--blue);font-weight:600;">${linkLabel}</span>`:''}</div>`;
     if(clickable){
@@ -7641,6 +7772,8 @@ async function loadNotifications(){
         else if(isEpCancelled){ openEPFeedback(); }
         else if(isAttendReminder){ try{ const dd=JSON.parse(n.data||'{}'); const gid=dd.gym_id; const owns=gid&&((window._myGyms||[]).some(g=>g.id===gid)||(_myGymData&&_myGymData.id===gid)); if(owns){ if(!(_myGymData&&_myGymData.id===gid)){ try{ await renderGymManage(); }catch(e){} } const sc=(_gymSchedule||[]).find(c=>String(c.time)===String(dd.time)&&((c.name||'')===(dd.className||''))); openClassAttendance({ date:dd.date, time:dd.time, name:dd.className||'', level:sc?(sc.level||'all'):'all', coach:sc?(sc.coach||null):null, coachName:sc?(sc.coachName||''):'', disc:sc?(sc.disc||null):null }); _sheetParent['shClassAttend']=null; } else if(gid){ openSheet('shCoachRoster'); loadCoachRoster(gid, dd.gym_name||''); _sheetParent['shCoachRoster']=null; } }catch(e){} }
         else if(k==='schedule_perm_on'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ openCoachScheduleEditor(dd.gym_id, dd.gym_name||'Gym'); _sheetParent['shCoachSched']=null; } }catch(e){} }
+        else if(k==='coach_pricing_request'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ openCoachPricingRequests(dd.gym_id); _sheetParent['shCoachPricing']=null; } }catch(e){} }
+        else if(k==='coach_pricing_approved'||k==='coach_pricing_rejected'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ openCoachScheduleEditor(dd.gym_id, dd.gym_name||'Gym'); _sheetParent['shCoachSched']=null; } }catch(e){} }
         else if(isAmbApp){ openAmbApps(); }
         else if(isAmbGranted){ if(typeof openAmbassadorDashboard==='function') openAmbassadorDashboard(); }
         else if(isCoachRefAdmin){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.refId) openCoachStats(dd.refId, dd.refName||''); }catch(e){} }
