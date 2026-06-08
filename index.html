@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-CA · Ambassador approve/reject (with reason) in crown shAmbApps + applicant result notification + approve opens coach profile; main_discipline (settings picker if >1 disc, orders disciplines main-first); leaderboard now ranks PER discipline when filtered (per-discipline lessons from bookings.discipline) -->
+<!-- MTL build: 2026-06-07-CB · earnings disclaimer on coach/gym/founder/ambassador dashboards; ambassador removal now asks reason + notifies coach (verified: clearing verify_disciplines stops all future 1%/0.5% payouts); PHASE 2 slots per discipline: slots.discipline column, coach tags new slots by discipline (chip selector in diary if >1), in-person slot preview + booking slot list filter by selected discipline -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -2738,6 +2738,9 @@ const NOTIF_T = {
   ambassador_granted: (d)=> LANG==='en'
     ? `🎓 You are now an MTL Ambassador for ${d.disc||'a discipline'} — you can certify coaches in it.`
     : `🎓 Stal ses MTL Ambassadorem pro ${d.disc||'disciplínu'} — můžeš certifikovat kouče v této disciplíně.`,
+  ambassador_revoked: (d)=> LANG==='en'
+    ? `🎓 Your MTL Ambassador status for ${d.disc||'a discipline'} was removed.${d.reason?' Reason: '+d.reason:''} You'll no longer receive the ambassador revenue share.`
+    : `🎓 Tvůj status MTL Ambassadora pro ${d.disc||'disciplínu'} byl odebrán.${d.reason?' Důvod: '+d.reason:''} Už ti nebude chodit ambassador podíl z tržeb.`,
   disc_request: (d)=> LANG==='en'
     ? `🙋 ${d.coach||'A coach'} requests a new discipline: ${d.disc||''}`
     : `🙋 ${d.coach||'Kouč'} žádá o novou disciplínu: ${d.disc||''}`,
@@ -3572,11 +3575,12 @@ function scrollToOffers(){
   }, 400);
 }
 
-async function loadIpSlotPreview(coachId){
+async function loadIpSlotPreview(coachId, disc){
   try {
-    const { data } = await supaClient.from('slots').select('date, time').eq('coach_profile_id', coachId).eq('booked', false);
+    const { data } = await supaClient.from('slots').select('date, time, discipline').eq('coach_profile_id', coachId).eq('booked', false);
     const minTime = new Date(Date.now() + 16*60*60*1000);
-    const valid = (data||[]).filter(s=>new Date(`${s.date}T${s.time}:00`) >= minTime);
+    let valid = (data||[]).filter(s=>new Date(`${s.date}T${s.time}:00`) >= minTime);
+    if(disc) valid = valid.filter(s=>!s.discipline || s.discipline===disc);
     const el = $('ipSlotPreview');
     if(!el) return;
     if(valid.length===0){ el.style.background='#FFF0E6'; el.style.color='var(--orange)'; el.textContent=L('📅 Kouč teď nemá vypsané termíny — v rezervaci si můžeš nechat dát vědět.'); }
@@ -3722,8 +3726,10 @@ const { data, error } = await supaClient
   // Filtruj sloty které jsou aspoň 16h v budoucnu
   const now = new Date();
   const minTime = new Date(now.getTime() + 16*60*60*1000); // teď + 16 hodin
+  const _bd = _bookDisc || null;
   const validSlots = (data||[]).filter(slot=>{
     const slotDateTime = new Date(`${slot.date}T${slot.time}:00`);
+    if(_bd && slot.discipline && slot.discipline!==_bd) return false; // jen termíny dané disciplíny (netagované = pro jakoukoli)
     return slotDateTime >= minTime;
   });
 
@@ -4007,7 +4013,7 @@ function renderOffers(c){
       + (isSelf ? '' : `<div id="ipSlotPreview" style="font-size:13px;font-weight:600;color:#006040;background:#F0FBF0;border-radius:8px;padding:8px 12px;margin-top:10px;">${L('📅 Načítám volné termíny…')}</div>`)
       + (isSelf ? '' : `<button class="offer-cta" data-offer="inperson" style="width:100%;margin-top:12px;padding:12px;background:var(--red);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${L('Vybrat termín →')}</button>`);
     html += offerCard('inperson', '📍', L('In-person session'), `${studentPays} ${sym}`, detail);
-    if(!isSelf) loadIpSlotPreview(c.id);
+    if(!isSelf) loadIpSlotPreview(c.id, _bookDisc);
   }
   // Online
   if(c.rateOnline){
@@ -4063,6 +4069,7 @@ function renderOffers(c){
       const head = chip.closest('.offer-card').querySelector('.offer-head .offer-lbl'); // no-op safeguard
       const priceEl = chip.closest('.offer-card').querySelector('.offer-head div div:nth-child(2)');
       if(priceEl) priceEl.textContent = fmtPrice(r*mkup(c), c.currencyInperson)+' '+sym;
+      try{ loadIpSlotPreview(c.id, _bookDisc); }catch(e){}
     };
   });
   box.querySelectorAll('.offer-cta').forEach(btn=>{
@@ -5076,6 +5083,7 @@ async function saveCoachSchedule(){
   }catch(e){}
   closeSheet('shCoachSched');
 }
+function earningsDisclaimer(){ return `<p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:16px;padding:10px 12px;background:var(--surf);border-radius:10px;">ℹ️ ${LANG==='en'?'While we do our best to show your earnings as accurately as possible, the only place to find real, actual numbers will always be your Stripe Dashboard.':'I když se snažíme zobrazovat tvé výdělky co nejpřesněji, jediné místo se skutečnými, reálnými čísly bude vždy tvůj Stripe Dashboard.'}</p>`; }
 async function openCoachEarnings(gymId, gymName){
   if($('coachEarnTitle')) $('coachEarnTitle').textContent=(LANG==='en'?'Revenue & attendance — ':'Tržby a docházka — ')+(gymName||'Gym');
   openSheet('shCoachEarn');
@@ -5116,6 +5124,7 @@ async function openCoachEarnings(gymId, gymName){
       <button id="ceMarkAtt" style="width:100%;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:16px;">📋 ${LANG==='en'?'Mark attendance':'Doplnit docházku'}</button>
       <div class="sec-lbl">${LANG==='en'?'Upcoming attendance':'Nadcházející docházka'}</div>
       ${occ.length? occ.map(o=>{ const dd=new Date(o.date); return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:#fff;border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:6px;"><div style="font-size:13px;min-width:0;"><strong>${escapeHtml(o.name)}</strong><div style="color:var(--mid);font-size:12px;">${dn[dd.getDay()]} ${o.time} · ${dd.getDate()}.${dd.getMonth()+1}.</div></div><div style="text-align:right;white-space:nowrap;font-size:12px;"><div style="font-weight:700;color:var(--dark);">${o.paid+o.free} ${LANG==='en'?'people':'lidí'}</div><div style="color:var(--light);">${o.paid} ${LANG==='en'?'paid':'platba'} · ${o.free} ${LANG==='en'?'members':'členů'}</div></div></div>`; }).join('') : `<p style="color:var(--light);font-size:13px;padding:10px 0;">${LANG==='en'?'No upcoming reservations yet.':'Zatím žádné nadcházející rezervace.'}</p>`}
+      ${earningsDisclaimer()}
     `;
     const mb=$('ceMarkAtt'); if(mb) mb.onclick=()=>{ openSheet('shCoachRoster'); loadCoachRoster(gymId, gymName); };
   }catch(e){ console.error('openCoachEarnings',e); const b=$('coachEarnBody'); if(b) b.innerHTML=`<p style="color:var(--red);padding:20px;">⚠️ ${e.message}</p>`; }
@@ -6118,6 +6127,7 @@ async function loadGymManageBookings(){
       <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:6px;">${LANG==='en'?'Categorized by you, the gym — MTL does not determine the tax category. Orientational only.':'Zařazení určuješ ty (gym) — MTL daňovou kategorii neurčuje. Jen orientační.'}</p>`:''}
 
       ${cancellingNow.length?`<div style="font-size:13px;font-weight:800;color:var(--mid);margin:18px 0 8px;">📉 ${LANG==='en'?'Cancelling members':'Rušící členové'}</div><div class="prow-group">${cancellingNow.map(m=>`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">🎟️</div><div class="prow-lbl">${escapeHtml(m.student_name||(LANG==='en'?'Member':'Člen'))}${m.plan_name?` <span style="color:var(--light);font-size:12px;">· ${escapeHtml(m.plan_name)}</span>`:''}</div></div><span class="prow-val" style="font-size:12px;color:var(--red);white-space:nowrap;">${m.period_end?(LANG==='en'?'ends ':'končí ')+new Date(m.period_end).toLocaleDateString(LANG==='en'?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric'}):(LANG==='en'?'cancelling':'ruší se')}</span></div>`).join('')}</div>`:''}
+      ${earningsDisclaimer()}
     `;
     const msel=$('mgMonthSel'); if(msel) msel.onchange=()=>{ _gymMonth=msel.value; loadGymManageBookings(); };
     stats.querySelectorAll('.dashSecHdr').forEach((h,i)=>{ const g=h.nextElementSibling; const arr=h.querySelector('.dashAccArr'); if(g){ g.style.display='none'; if(arr) arr.style.transform='rotate(-90deg)'; } h.onclick=()=>{ if(!g) return; const closed=g.style.display==='none'; g.style.display=closed?'':'none'; if(arr) arr.style.transform=closed?'':'rotate(-90deg)'; }; });
@@ -7951,6 +7961,7 @@ async function renderFounderDash(){
     <div id="fdGyms" style="display:none;">${gymRows}</div>
     <button id="fdGymLb" style="width:100%;padding:13px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-top:8px;">🏆 ${LANG==='en'?'Gym leaderboard':'Žebříček gymů'}</button>
     <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:14px;">${LANG==='en'?'Coach fee is an estimate (≈15%); founding/referral lower it slightly. Gyms bear their own Stripe fees, so gym fees are net. Amounts summed nominally across currencies. VAT with your accountant.':'Provize koučů je odhad (≈15 %); founding/referral ji mírně sníží. Gymy nesou vlastní Stripe fee, takže gym provize jsou net. Částky sečteny nominálně napříč měnami. DPH řeš s účetní.'}</p>
+    ${earningsDisclaimer()}
   `;
   renderFdMonth();
   if(typeof renderFdRevokes==='function') renderFdRevokes();
@@ -8408,6 +8419,7 @@ async function openAmbassadorDashboard(){
       + '<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🏋️</div><div class="prow-lbl">'+(LANG==='en'?'Gym drop-ins + memberships · 0.5%':'Gym jednorázové lekce + permanentky · 0,5 %')+'</div></div><span class="prow-val">'+Math.round(gymCut)+' Kč</span></div>'
       + '<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🎓</div><div class="prow-lbl">'+(LANG==='en'?'Coaches you cover':'Kouči pod tebou')+'</div></div><span class="prow-val">'+coverCount+'</span></div>'
       + '<p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:14px;">'+(LANG==='en'?'Computed from real paid bookings (cancelled excluded, partial refunds deducted), attributed by the booked discipline. Once the payout webhook is live these are paid to your Stripe automatically. Amounts summed nominally across currencies.':'Spočítáno z reálných zaplacených rezervací (zrušené pryč, částečné refundy odečteny), přiřazeno podle disciplíny rezervace. Po nasazení výplatního webhooku ti chodí na Stripe automaticky. Částky sečteny nominálně napříč měnami.')+'</p>'
+      + earningsDisclaimer()
       + '<div id="ambReqSec" style="margin-top:24px;"></div>'
       + '<div id="ambRosterSec" style="margin-top:24px;"></div>';
     // pending certification requests (sloučeno do dashboardu)
@@ -8474,6 +8486,11 @@ async function denyDiscRequest(coachId){
 }
 async function toggleCoachVerify(coachId, disc, cur){
   try{
+    let reason='';
+    if(cur){
+      reason=(prompt(LANG==='en'?'Reason for removing Ambassador status (the coach will see it):':'Důvod odebrání statusu Ambassadora (kouč ho uvidí):','')||'').trim();
+      if(reason===''){ return; } // zrušeno → neodebíráme
+    }
     const { data: p } = await supaClient.from('profiles').select('verify_disciplines').eq('id', coachId).single();
     let vd=[]; try{ vd=p&&p.verify_disciplines?(typeof p.verify_disciplines==='string'?JSON.parse(p.verify_disciplines):p.verify_disciplines):[]; if(!Array.isArray(vd)) vd=[]; }catch(e){ vd=[]; }
     if(cur){ vd=vd.filter(x=>x!==disc); } else { if(!vd.includes(disc)) vd.push(disc); }
@@ -8482,6 +8499,7 @@ async function toggleCoachVerify(coachId, disc, cur){
     if(!cur && !_certifiableDisc.includes(disc)) _certifiableDisc.push(disc);
     toast(!cur ? (LANG==='en'?('🎓 Can now certify '+disciplineLabel(disc)):('🎓 Může certifikovat '+disciplineLabel(disc))) : (LANG==='en'?'Removed':'Odebráno'));
     if(!cur){ try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'system', read:false, data: JSON.stringify({kind:'ambassador_granted', disc:disciplineLabel(disc)}), message:('🎓 Stal ses MTL Ambassadorem pro '+disciplineLabel(disc)+' — můžeš certifikovat kouče v této disciplíně.') }); }catch(e){} }
+    else { try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'system', read:false, data: JSON.stringify({kind:'ambassador_revoked', disc:disciplineLabel(disc), reason}), message:('🎓 Tvůj status MTL Ambassadora pro '+disciplineLabel(disc)+' byl odebrán. Důvod: '+reason+' Už ti nebude chodit ambassador podíl z tržeb.') }); }catch(e){} }
     renderCoachAnalytics(coachId, 'coachStatsBody');
   }catch(e){ console.error('toggleCoachVerify', e); toast('⚠️ '+e.message); }
 }
@@ -8934,6 +8952,14 @@ function showDiaryDay(dateStr){
       </div>`;
   });
 
+  // Disciplína pro nové termíny (jen multi-disc kouč)
+  const _ddiscs=(currentUser&&currentUser.disciplines||[]).filter(d=>activeDisciplines().some(a=>a.v===d));
+  if(_ddiscs.length>1){
+    if(!window._diarySlotDisc || !_ddiscs.includes(window._diarySlotDisc)) window._diarySlotDisc=(currentUser.main_discipline&&_ddiscs.includes(currentUser.main_discipline))?currentUser.main_discipline:_ddiscs[0];
+    html += `<div style="font-size:11px;color:var(--light);margin:10px 0 4px;">${LANG==='en'?'Discipline for new slots:':'Disciplína pro nové termíny:'}</div><div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;">`
+      + _ddiscs.map(d=>{ const on=d===window._diarySlotDisc; return `<span class="ddiscChip" data-d="${d}" style="cursor:pointer;border:1.5px solid ${on?'var(--red)':'var(--border)'};background:${on?'#FEECEC':'transparent'};color:${on?'var(--red)':'var(--mid)'};border-radius:14px;padding:5px 10px;font-size:12px;font-weight:600;">${disciplineEmoji(d)} ${disciplineLabel(d)}</span>`; }).join('')
+      + `</div>`;
+  }
   // Rychlé přidání termínu
   html += `<button id="diaryAddSlot" data-date="${dateStr}" style="width:100%;padding:11px;background:var(--surf);border:1.5px dashed var(--border);border-radius:10px;font-size:14px;font-weight:600;color:var(--mid);cursor:pointer;font-family:'DM Sans';margin-top:4px;">${LANG==='en'?'+ Add a slot on this day':'+ Přidat termín na tento den'}</button>`;
 
@@ -8965,6 +8991,7 @@ detail.querySelectorAll('.diaryCancelBtn').forEach(btn=>{
       await loadDiaryData(); renderDiary();
     };
   });
+  detail.querySelectorAll('.ddiscChip').forEach(ch=>ch.onclick=()=>{ window._diarySlotDisc=ch.dataset.d; detail.querySelectorAll('.ddiscChip').forEach(x=>{ const on=x.dataset.d===window._diarySlotDisc; x.style.border='1.5px solid '+(on?'var(--red)':'var(--border)'); x.style.background=on?'#FEECEC':'transparent'; x.style.color=on?'var(--red)':'var(--mid)'; }); });
   $('diaryAddSlot').onclick = async ()=>{
     const time = prompt(LANG==='en'?'Slot time (e.g. 18:00):':'Čas termínu (např. 18:00):', '18:00');
     if(!time) return;
@@ -8972,7 +8999,7 @@ detail.querySelectorAll('.diaryCancelBtn').forEach(btn=>{
     const t = time.trim().match(/^(\d{1,2}):(\d{2})$/);
     if(!t){ toast(L('⚠️ Špatný formát času')); return; }
     const formatted = `${t[1].padStart(2,'0')}:${t[2]}`;
-    await supaClient.from('slots').insert({ coach_profile_id: currentUser.id, date: dateStr, time: formatted, booked:false });
+    await supaClient.from('slots').insert({ coach_profile_id: currentUser.id, date: dateStr, time: formatted, booked:false, discipline: (window._diarySlotDisc||(currentUser&&currentUser.main_discipline)||((currentUser&&currentUser.disciplines&&currentUser.disciplines[0]))||null) });
     toast(L('✅ Termín přidán'));
     notifySlotWatchers();
     await loadDiaryData(); renderDiary(); showDiaryDay(dateStr);
@@ -9024,7 +9051,7 @@ async function bulkCreateSlots(){
   for(let d=new Date(start); d<=end; d.setDate(d.getDate()+1)){
     if(!days.includes(d.getDay())) continue;
     const ds = d.toISOString().slice(0,10);
-    times.forEach(t=>{ if(!existing.has(`${ds}T${t}`)) rows.push({ coach_profile_id: currentUser.id, date: ds, time: t, booked:false }); });
+    times.forEach(t=>{ if(!existing.has(`${ds}T${t}`)) rows.push({ coach_profile_id: currentUser.id, date: ds, time: t, booked:false, discipline: (window._diarySlotDisc||(currentUser&&currentUser.main_discipline)||((currentUser&&currentUser.disciplines&&currentUser.disciplines[0]))||null) }); });
   }
   if(!rows.length){ toast(L('Žádné nové termíny (možná už existují)')); btn.textContent=L('Vytvořit termíny'); btn.disabled=false; return; }
   const { error } = await supaClient.from('slots').insert(rows);
