@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-CS · class & membership discipline pickers now restricted to disciplines the gym actually teaches (schDisc + planDisc → _gymMgDisc). Custom class/membership tags: gym owner can add a free-text custom tag on a membership plan (➕ Custom chip) which then appears as a selectable class type — works on the existing free-string access/level field + string matching (no schema, per-gym, scales). levelLabel renders unknown tags raw. -->
+<!-- MTL build: 2026-06-07-CT · Cold/drifting-member win-back upgraded: threshold now 14 days, graded (14+ cooling amber, 30+/never at-risk red), shared computeCold/coldItemHtml helpers. Memberships gain a LEAD coach (Led-by selector in plan editor, distinct from payee) → lead_coach_id/name; coach Gym dashboard now shows a cold-members list filtered to members THEY lead. Settings toggle (mute_cold_notif, default ON) for owner+coach; deduped weekly in-app reminder via maybeNotifyCold + NOTIF_T.cold_members. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -1588,6 +1588,7 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
     <div class="sec-lbl">Notifikace</div>
     <div class="sgrp">
       <div class="srow" id="sAvailNotif"><div class="srow-l"><div class="sicon" style="background:#FFF8E6;">🔔</div><div class="slbl">Dostupnost koučů</div></div><div class="sval" id="vAvailNotif">Zapnuto</div></div>
+      <div class="srow" id="sColdNotif"><div class="srow-l"><div class="sicon" style="background:#FFF8E6;">👋</div><div class="slbl">Připomínky chladnoucích členů</div></div><div class="sval" id="vColdNotif">Zapnuto</div></div>
     </div>
     <div class="sec-lbl">Zobrazení koučů</div>
     <div class="sgrp">
@@ -2303,6 +2304,7 @@ const I18N = { en: {
   "Jazyk":"Language",
   "Notifikace":"Notifications",
   "Dostupnost koučů":"Coach availability",
+  "Připomínky chladnoucích členů":"Drifting-member reminders",
   "Zobrazení koučů":"Coach display",
   "Typ koučování":"Coaching type",
   "Vše":"All",
@@ -2414,6 +2416,7 @@ const I18N = { en: {
   "Tvoje hodnocení pomáhá ostatním.":"Your rating helps others.",
   "Ochrana proti zrušení":"Cancellation protection",
   "Dostupnost koučů":"Coach availability",
+  "Připomínky chladnoucích členů":"Drifting-member reminders",
   "🥊 Kouč":"🥊 Coach",
   "📱 Google Kalendář":"📱 Google Calendar",
   "Zobrazíme ti in-person kouče ve tvém okolí.":"We'll show you in-person coaches in your area.",
@@ -2734,6 +2737,9 @@ const NOTIF_T = {
   ep_cancelled: (d)=> LANG==='en'
     ? `⭐❌ ${d.coach||'A coach'} cancelled Exclusive MTL Partner.`
     : `⭐❌ ${d.coach||'Kouč'} zrušil Exclusive MTL Partnera.`,
+  cold_members: (d)=> LANG==='en'
+    ? `👋 ${d.count||'Some'} member(s) at ${d.gym_name||'your gym'} haven't trained in 2+ weeks — a quick message often brings them back.`
+    : `👋 ${d.count||'Někteří'} člen(ů) v ${d.gym_name||'tvém gymu'} netrénovalo 2+ týdny — krátká zpráva je často vrátí.`,
   attend_reminder: (d)=> LANG==='en'
     ? `📋 Mark attendance for the class that just finished${d.className?' — '+d.className:''}${d.time?' ('+d.time+')':''}.`
     : `📋 Doplň docházku na proběhlou lekci${d.className?' '+d.className:''}${d.time?' ('+d.time+')':''}.`,
@@ -4660,6 +4666,7 @@ async function subscribeGymMembership(g, plan){
     if(error){ toast('⚠️ '+error.message); return; }
     if(payee.coachId){ try{ await supaClient.from('gym_memberships').update({ coach_id: payee.coachId }).eq('id', mb.id); }catch(e){} }
     if(plan.disc){ try{ await supaClient.from('gym_memberships').update({ discipline: plan.disc }).eq('id', mb.id); }catch(e){} }
+    { const _lid=plan.lead||payee.coachId||null; const _lnm=plan.lead?(plan.leadName||null):(payee.coachId?payee.name:null); if(_lid){ try{ await supaClient.from('gym_memberships').update({ lead_coach_id:_lid, lead_coach_name:_lnm }).eq('id', mb.id); }catch(e){} } }
     const url = `/api/pay?type=membership&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&planName=${encodeURIComponent(plan.name||'Membership')}&amount=${plan.price||0}&currency=${g.currency||'CZK'}&interval=month&membershipId=${encodeURIComponent(mb.id)}&income=${encodeURIComponent(plan.income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&access=${encodeURIComponent(((plan.access&&plan.access.length)?plan.access:['all']).join(','))}&disc=${encodeURIComponent(plan.disc||'')}&partner=${_gymOwnerPartner?1:0}${(window._gymRef && window._gymRef.gym===g.id && (g.member_ref_pct||0)>0) ? ('&refPct='+g.member_ref_pct+'&refUser='+encodeURIComponent(window._gymRef.ref||'')) : ''}`;
     setTimeout(()=>{ window.location.href = url; }, 500);
   } catch(e){ console.error('subscribeGymMembership', e); toast('⚠️ '+e.message); }
@@ -5008,6 +5015,13 @@ function payeeSelectHtml(cls, idx, curCoach){
     .concat(connected.map(c=>`<option value="${c.id}" ${c.id===curCoach?'selected':''}>${(c.name||'').replace(/"/g,'&quot;')}</option>`)).join('');
   return `<div style="font-size:11px;color:var(--light);margin:6px 0 2px;">${LANG==='en'?'Paid to:':'Platba komu:'}</div><select class="${cls}" data-i="${idx}" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${opts}</select><div style="font-size:10.5px;color:var(--light);margin-top:3px;line-height:1.45;">${LANG==='en'?'Default: the gym gets paid and you settle with coaches yourselves. Only coaches who connected their own Stripe can be paid directly.':'Výchozí: platba jde gymu a trenéry vyplácíš ty. Přímo zaplatit jde jen koučům, kteří si připojili vlastní Stripe.'}</div>`;
 }
+function leadSelectHtml(cls, idx, curLead){
+  const coaches=(_gymTeamCoaches||[]);
+  if(!coaches.length) return '';
+  const opts=['<option value="">'+(LANG==='en'?'You (owner)':'Ty (majitel)')+'</option>']
+    .concat(coaches.map(c=>`<option value="${c.id}" ${c.id===curLead?'selected':''}>${(c.name||'').replace(/"/g,'&quot;')}</option>`)).join('');
+  return `<div style="font-size:11px;color:var(--light);margin:6px 0 2px;">${LANG==='en'?'Led by (teaches & looks after these members):':'Vede (učí a stará se o tyto členy):'}</div><select class="${cls}" data-i="${idx}" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${opts}</select>`;
+}
 function upcomingClasses(schedule, days){
   days = days||7; const out=[]; const now=new Date();
   for(let d=0; d<days; d++){
@@ -5199,6 +5213,19 @@ async function openCoachEarnings(gymId, gymName){
       ${earningsDisclaimer()}
     `;
     const mb=$('ceMarkAtt'); if(mb) mb.onclick=()=>{ openSheet('shCoachRoster'); loadCoachRoster(gymId, gymName); };
+    try{
+      const { data: lm } = await supaClient.from('gym_memberships').select('*').eq('gym_id',gymId).or('lead_coach_id.eq.'+me+',and(lead_coach_id.is.null,coach_id.eq.'+me+')').in('status',['active','cancelling']);
+      const { data: aa } = await supaClient.from('gym_attendance').select('student_id,class_date').eq('gym_id',gymId);
+      const last={}; (aa||[]).forEach(a=>{ if(!last[a.student_id]||a.class_date>last[a.student_id]) last[a.student_id]=a.class_date; });
+      const cold=computeCold(lm||[], last);
+      if(cold.length){
+        const wb=document.createElement('div');
+        wb.innerHTML=`<div style="font-size:12px;font-weight:700;color:#B26A00;margin:18px 0 4px;">👋 ${LANG==='en'?'Your members — reach out':'Tvoji členové — ozvi se'} (${cold.length})</div><p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:0 0 8px;">${LANG==='en'?'These members of yours have not trained in 2+ weeks. Red = 30+ days / never.':'Tihle tvoji členové netrénovali 2+ týdny. Červená = 30+ dní / nikdy.'}</p>`+cold.map(coldItemHtml).join('');
+        body.appendChild(wb);
+        body.querySelectorAll('.wbMsg').forEach(b=>b.onclick=()=>messageGymMember(b.dataset.sid, b.dataset.name));
+        maybeNotifyCold(cold.length, gymName);
+      }
+    }catch(e){ console.error('coachCold',e); }
   }catch(e){ console.error('openCoachEarnings',e); const b=$('coachEarnBody'); if(b) b.innerHTML=`<p style="color:var(--red);padding:20px;">⚠️ ${e.message}</p>`; }
 }
 async function toggleCoachSchedulePerm(linkId, coachId, coachName, cur){
@@ -5467,7 +5494,7 @@ async function renderGymManage(){
   if(!_myGymData){ box.innerHTML=`<p style="color:var(--light);text-align:center;padding:20px;">${LANG==='en'?'No approved gym found.':'Žádný schválený gym.'}</p>`; return; }
   const g=_myGymData;
   try{ _gymSchedule = JSON.parse(g.schedule||'[]'); }catch(e){ _gymSchedule=[]; }
-  _gymPlans = gymMembPlans(g).map(p=>({ id:p.id, name:p.name, price:p.price, access:(p.access||['all']).slice(), income:p.income||'main', coach:p.coach||null, coachName:p.coachName||null }));
+  _gymPlans = gymMembPlans(g).map(p=>({ id:p.id, name:p.name, price:p.price, access:(p.access||['all']).slice(), income:p.income||'main', coach:p.coach||null, coachName:p.coachName||null, disc:p.disc||null, lead:p.lead||null, leadName:p.leadName||null }));
   _gymOrgForm = g.org_form==='nonprofit' ? 'nonprofit' : 'profit';
   _gymDropinIncome = g.dropin_income==='main' ? 'main' : 'side';
   await loadGymTeamCoaches();
@@ -5640,6 +5667,33 @@ async function renderGymManage(){
   loadGymManageBookings();
 }
 let _gmMembLvl=null;
+function computeCold(members, lastMap){
+  const now=Date.now(), DAY=86400000; const out=[];
+  (members||[]).forEach(m=>{
+    const memberAge=(now-new Date(m.created_at||now).getTime())/DAY;
+    if(memberAge<14) return;
+    const ls=lastMap[m.student_id];
+    if(!ls){ out.push({m, days:Math.round(memberAge), never:true}); return; }
+    const d=(now-new Date(ls).getTime())/DAY;
+    if(d>14) out.push({m, days:Math.round(d), never:false, ls});
+  });
+  return out.sort((a,b)=>b.days-a.days);
+}
+function coldItemHtml(it){
+  const EN=LANG==='en'; const red = it.never || it.days>=30;
+  const bd=red?'#F3C9C0':'#F0D9B0', bg=red?'#FEF6F4':'#FFFAF0', tag=red?(EN?'at risk':'možná odchází'):(EN?'cooling':'chladne'), tagcol=red?'var(--red)':'#B26A00';
+  const lsTxt = it.never?(EN?'never attended':'nikdy nedorazil'):(it.ls?new Date(it.ls).toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric'}):'');
+  return `<div style="display:flex;align-items:center;gap:8px;border:1px solid ${bd};background:${bg};border-radius:12px;padding:10px 12px;margin-bottom:7px;"><div style="flex:1;min-width:0;"><div style="font-size:14px;font-weight:700;">${escapeHtml(it.m.student_name||(EN?'Member':'Člen'))} <span style="font-size:10.5px;font-weight:800;color:${tagcol};">· ${tag}</span></div><div style="font-size:11.5px;color:var(--light);">${EN?'last seen':'naposledy'}: ${lsTxt} · ${it.days} ${EN?'days':'dní'}</div></div><button class="wbMsg" data-sid="${it.m.student_id}" data-name="${(it.m.student_name||'').replace(/"/g,'&quot;')}" style="flex-shrink:0;padding:8px 14px;background:var(--dark);color:#fff;border:none;border-radius:9px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'Message':'Napsat'}</button></div>`;
+}
+async function maybeNotifyCold(count, gymName){
+  if(coldNotifMuted()||!count||!currentUser) return;
+  try{
+    const since=new Date(Date.now()-7*86400000).toISOString();
+    const { data: rec } = await supaClient.from('notifications').select('data').eq('user_id',currentUser.id).gte('created_at',since).limit(60);
+    if((rec||[]).some(n=>{ try{ return JSON.parse(n.data||'{}').kind==='cold_members'; }catch(e){ return false; } })) return;
+    await supaClient.from('notifications').insert({ user_id:currentUser.id, type:'system', read:false, data: JSON.stringify({kind:'cold_members', count:count, gym_name:gymName||''}), message:(LANG==='en'?`👋 ${count} member(s) haven't trained in a while.`:`👋 ${count} člen(ů) dlouho netrénovalo.`) });
+  }catch(e){}
+}
 async function renderGymMembers(){
   const box=$('mgMembers'); if(!box||!_myGymData) return;
   const EN=LANG==='en';
@@ -5676,21 +5730,15 @@ async function renderGymMembers(){
   try{
     const { data: aa } = await supaClient.from('gym_attendance').select('student_id,class_date').eq('gym_id',_myGymData.id);
     const last={}; (aa||[]).forEach(a=>{ if(!last[a.student_id]||a.class_date>last[a.student_id]) last[a.student_id]=a.class_date; });
-    const now=Date.now(), DAY=86400000;
-    const inactive=active.filter(m=>{
-      const memberAge=(now-new Date(m.created_at||now).getTime())/DAY;
-      if(memberAge<14) return false; // nový člen — nech mu čas
-      const ls=last[m.student_id];
-      if(!ls) return true; // nikdy nedorazil
-      return (now-new Date(ls).getTime())/DAY > 21; // 3+ týdny pauza
-    });
+    const inactive=computeCold(active, last);
     if(inactive.length){
       const wb=document.createElement('div');
       wb.innerHTML=`<div style="font-size:12px;font-weight:700;color:#B26A00;margin:16px 0 4px;">👋 ${EN?'Reach out — drifting members':'Ozvi se — možná odcházejí'} (${inactive.length})</div>
-        <p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:0 0 8px;">${EN?'No check-in for 3+ weeks. A quick message often brings them back.':'3+ týdny bez příchodu. Krátká zpráva je často vrátí.'}</p>`
-        +inactive.map(m=>{ const ls=last[m.student_id]; const lsTxt=ls?new Date(ls).toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric'}):(EN?'never':'nikdy'); return `<div style="display:flex;align-items:center;gap:8px;border:1px solid #F0D9B0;background:#FFFaf0;border-radius:12px;padding:10px 12px;margin-bottom:7px;"><div style="flex:1;min-width:0;"><div style="font-size:14px;font-weight:700;">${escapeHtml(m.student_name||(EN?'Member':'Člen'))}</div><div style="font-size:11.5px;color:var(--light);">${EN?'last seen':'naposledy'}: ${lsTxt}</div></div><button class="wbMsg" data-sid="${m.student_id}" data-name="${(m.student_name||'').replace(/"/g,'&quot;')}" style="flex-shrink:0;padding:8px 14px;background:var(--dark);color:#fff;border:none;border-radius:9px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'Message':'Napsat'}</button></div>`; }).join('');
+        <p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:0 0 8px;">${EN?'No check-in for 2+ weeks. A quick message often brings them back. Red = 30+ days / never.':'2+ týdny bez příchodu. Krátká zpráva je často vrátí. Červená = 30+ dní / nikdy.'}</p>`
+        +inactive.map(coldItemHtml).join('');
       box.appendChild(wb);
       box.querySelectorAll('.wbMsg').forEach(b=>b.onclick=()=>messageGymMember(b.dataset.sid, b.dataset.name));
+      maybeNotifyCold(inactive.length, _myGymData.name);
     }
   }catch(e){ console.error('winback',e); }
 }
@@ -5986,6 +6034,7 @@ function renderPlansEditor(){
       <div style="margin-bottom:4px;">${chips}</div>
       ${_gymOrgForm==='nonprofit'?`<div style="font-size:11px;color:var(--light);margin:6px 0 2px;">${LANG==='en'?'Income type:':'Druh příjmu:'}</div><div style="margin-bottom:4px;">${[{v:'main',cs:'Hlavní (příspěvek)',en:'Main (contribution)'},{v:'side',cs:'Vedlejší (služba)',en:'Side (service)'}].map(o=>{ const on=(p.income||'main')===o.v; return `<span class="planIncome" data-i="${i}" data-v="${o.v}" style="display:inline-block;padding:6px 10px;margin:3px;border-radius:14px;font-size:12px;font-weight:600;cursor:pointer;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'transparent'};color:${on?'#fff':'var(--mid)'};">${LANG==='en'?o.en:o.cs}</span>`; }).join('')}</div>`:''}
       ${payeeSelectHtml('planCoach', i, p.coach)}
+      ${leadSelectHtml('planLead', i, p.lead)}
       ${isMultiDiscipline()?(()=>{ const spec=!!(p.disc); return `<div style="font-size:11px;color:var(--light);margin:6px 0 2px;">${LANG==='en'?'Sport / discipline:':'Sport / disciplína:'}</div><div style="margin-bottom:4px;"><span class="planDiscMode" data-i="${i}" data-mode="all" style="display:inline-block;padding:6px 12px;margin:3px 3px 3px 0;border-radius:14px;font-size:12px;font-weight:600;cursor:pointer;border:1.5px solid ${!spec?'var(--dark)':'var(--border)'};background:${!spec?'var(--dark)':'transparent'};color:${!spec?'#fff':'var(--mid)'};">🌐 ${LANG==='en'?'All sports':'Všechny sporty'}</span><span class="planDiscMode" data-i="${i}" data-mode="specific" style="display:inline-block;padding:6px 12px;margin:3px;border-radius:14px;font-size:12px;font-weight:600;cursor:pointer;border:1.5px solid ${spec?'var(--dark)':'var(--border)'};background:${spec?'var(--dark)':'transparent'};color:${spec?'#fff':'var(--mid)'};">${LANG==='en'?'Choose specific':'Vybrat konkrétní'}</span></div><select class="planDisc" data-i="${i}" style="display:${spec?'block':'none'};width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;margin-bottom:4px;">${activeDisciplines().filter(o=>!(_gymMgDisc&&_gymMgDisc.length)||_gymMgDisc.includes(o.v)).map(o=>`<option value="${o.v}" ${o.v===(p.disc||'')?'selected':''}>${o.emoji} ${LANG==='en'?o.en:o.cs}</option>`).join('')}</select>`; })():''}
       ${price>0?`<div style="font-size:11px;color:var(--mid);">${LANG==='en'?'You keep ~':'Zůstane ti ~'}${Math.round(netHigh)}–${Math.round(netLow)} ${sym}/${LANG==='en'?'mo':'měs'} ${LANG==='en'?`(after MTL ${_isP?4:5}% + Stripe)`:`(po MTL ${_isP?4:5} % + Stripe)`}</div>`:''}
     </div>`;
@@ -5997,6 +6046,7 @@ function renderPlansEditor(){
   box.querySelectorAll('.planAddTag').forEach(el=>el.onclick=()=>addCustomPlanTag(+el.dataset.i));
   box.querySelectorAll('.planIncome').forEach(el=>el.onclick=()=>{ _gymPlans[+el.dataset.i].income=el.dataset.v; renderPlansEditor(); });
   box.querySelectorAll('.planCoach').forEach(el=>el.onchange=()=>{ const it=_gymPlans[+el.dataset.i]; it.coach=el.value||null; const c=_gymTeamCoaches.find(x=>x.id===el.value); it.coachName=c?c.name:null; });
+  box.querySelectorAll('.planLead').forEach(el=>el.onchange=()=>{ const it=_gymPlans[+el.dataset.i]; it.lead=el.value||null; const c=_gymTeamCoaches.find(x=>x.id===el.value); it.leadName=c?c.name:null; });
   box.querySelectorAll('.planDiscMode').forEach(el=>el.onclick=()=>{ const it=_gymPlans[+el.dataset.i]; if(el.dataset.mode==='all'){ it.disc=null; } else if(!it.disc){ const ds=activeDisciplines(); it.disc=ds.length?ds[0].v:null; } renderPlansEditor(); });
   box.querySelectorAll('.planDisc').forEach(el=>el.onchange=()=>{ _gymPlans[+el.dataset.i].disc=el.value||null; });
 }
@@ -6082,7 +6132,7 @@ async function submitGymChangeRequest(){
 async function saveGymManage(){
   if(!_myGymData) return;
   const dropin = parseInt($('mgDropin').value)||_myGymData.dropin_price;
-  const plans = _gymPlans.filter(p=>p.name && p.name.trim() && (parseInt(p.price)||0)>0).map(p=>({ id:p.id||('p'+Math.random().toString(36).slice(2)), name:p.name.trim(), price:parseInt(p.price)||0, access:(p.access&&p.access.length)?p.access:['all'], income:p.income||'main', coach:p.coach||null, coachName:p.coachName||null, disc:p.disc||null }));
+  const plans = _gymPlans.filter(p=>p.name && p.name.trim() && (parseInt(p.price)||0)>0).map(p=>({ id:p.id||('p'+Math.random().toString(36).slice(2)), name:p.name.trim(), price:parseInt(p.price)||0, access:(p.access&&p.access.length)?p.access:['all'], income:p.income||'main', coach:p.coach||null, coachName:p.coachName||null, disc:p.disc||null, lead:p.lead||null, leadName:p.leadName||null }));
   const first = plans[0]||null;
   const termsTitle = ($('mgTermsTitle')&&$('mgTermsTitle').value.trim())||null;
   const termsText = ($('mgTermsText')&&$('mgTermsText').value.trim())||null;
@@ -6426,8 +6476,10 @@ $('btnCoach').onclick=()=>{
   if(st==='pending'){ toast(L('⏳ Tvoje přihláška se zpracovává.')); return; }
   $('btnBecomeCoachApply').onclick();
 };
-$('btnSettings').onclick=()=>openSheet('shSettings');
+function refreshSettingsToggles(){ const c=$('vColdNotif'); if(c) c.textContent=coldNotifMuted()?L('Vypnuto'):L('Zapnuto'); const a=$('vAvailNotif'); if(a) a.textContent=availNotifMuted()?L('Vypnuto'):L('Zapnuto'); }
+$('btnSettings').onclick=()=>{ refreshSettingsToggles(); openSheet('shSettings'); };
 if($('sAvailNotif')) $('sAvailNotif').onclick=()=>setAvailNotifMute(!availNotifMuted());
+if($('sColdNotif')) $('sColdNotif').onclick=()=>setColdNotifMute(!coldNotifMuted());
 
 // ── MTL Opportunities ──
 const MTL_OPP = {
@@ -7134,7 +7186,7 @@ $('meEdit3').onclick=()=>{ closeSheet('shMe'); openCityInput(); };
 $('meBook2').onclick=()=>{ openSheet('shBookings'); loadBookings('past'); };
 $('meOnline').onclick=()=>{ openOnline('student'); };
 $('btnCloseOnline').onclick=()=>closeSheet('shOnline');
-$('meSettings').onclick=()=>openSheet('shSettings');
+$('meSettings').onclick=()=>{ refreshSettingsToggles(); openSheet('shSettings'); };
 if($('meFounderDash')) $('meFounderDash').onclick=()=>{ openSheet('shFounderDash'); renderFounderDash(); };
 if($('meAmbDash')) $('meAmbDash').onclick=()=>openAmbassadorDashboard();
 if($('btnCloseFounderDash')) $('btnCloseFounderDash').onclick=()=>closeSheet('shFounderDash');
@@ -10647,6 +10699,13 @@ function setAvailUI(){
     b.style.background = on ? 'var(--dark)' : 'transparent';
     b.style.color = on ? '#fff' : 'var(--mid)';
   });
+}
+function coldNotifMuted(){ return !!(currentUser && currentUser.mute_cold_notif); }
+async function setColdNotifMute(muted){
+  if(!currentUser) return;
+  currentUser.mute_cold_notif = muted;
+  const v=$('vColdNotif'); if(v) v.textContent = muted ? L('Vypnuto') : L('Zapnuto');
+  try{ await supaClient.from('profiles').update({ mute_cold_notif: muted }).eq('id', currentUser.id); }catch(e){}
 }
 function availNotifMuted(){ return !!(currentUser && currentUser.mute_avail_notif); }
 async function setAvailNotifMute(muted){
