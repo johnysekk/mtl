@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-DO | Favorites now shows Gyms first (left tab + default), so a member can jump to their gym fastest. Team-coach holiday status is now visible: a palm icon next to the coach name in the owner Team coaches list, and a Team-at-gym line in My gym team showing the other active team coaches (with palm if on holiday) - which also confirms teammates are listed to each other. -->
+<!-- MTL build: 2026-06-07-DP | Per-coach pricing (part 2: applied to bookings). Gym profile now loads approved gym_coach_pricing. A team coach class shows and charges THAT coach\u0027s drop-in price (their currency), not the gym-wide one - price shown on the Book button and used in bookGymDropin; payment routes to the coach via existing payee resolution. The coach\u0027s approved membership plans now appear on the gym profile alongside the gym\u0027s (with their currency + With-coach label), and subscribing charges/records in the coach\u0027s currency and routes payment to the coach. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4459,6 +4459,8 @@ function gymTermsGate(g, onAgree){
 async function openGymProfile(g){
   if(g && g.id){ try{ const { data: full } = await supaClient.from('gyms').select('*').eq('id', g.id).single(); if(full) g=full; }catch(e){} }
   window._currentGym = g;
+  window._gymCoachPricing = {};
+  try{ if(g&&g.id){ const { data: _cps } = await supaClient.from('gym_coach_pricing').select('*').eq('gym_id', g.id).eq('status','approved'); (_cps||[]).forEach(cp=>{ window._gymCoachPricing[cp.coach_id]=cp; }); } }catch(e){}
   if($('gymProfTitle')) $('gymProfTitle').textContent = g.name || 'Gym';
   const sym = g.currency==='EUR'?'€':g.currency==='USD'?'$':'Kč';
   const base = g.dropin_price||0;
@@ -4535,12 +4537,14 @@ async function openGymProfile(g){
   const isReleased=(sid,k)=> _resvAll.some(r=> r.student_id===sid && relKey(r)===k && r.status==='released');
   _resvAll.forEach(r=>{ if(r.status==='released') return; const k=relKey(r); if(currentUser&&r.student_id===currentUser.id) mineSet.add(k); });
   const plans = gymMembPlans(g);
-  const plansBlock = plans.length ? `
+  let _coachPlans=[]; try{ Object.values(window._gymCoachPricing||{}).forEach(cp=>{ let pl=[]; try{ pl=(typeof cp.plans==='string'?JSON.parse(cp.plans):cp.plans)||[]; }catch(e){} pl.forEach(pp=>_coachPlans.push(Object.assign({}, pp, { coach:cp.coach_id, coachName:cp.coach_name, lead:cp.coach_id, leadName:cp.coach_name, _cur:cp.currency }))); }); }catch(e){}
+  const plansAll = plans.concat(_coachPlans);
+  const plansBlock = plansAll.length ? `
     <div class="sec-lbl" style="margin-top:4px;">${LANG==='en'?'Memberships':'Členství'}</div>
-    ${plans.map((p,pi)=>`<div style="background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:14px;margin-bottom:10px;">
+    ${plansAll.map((p,pi)=>`<div style="background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:14px;margin-bottom:10px;">
       <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;">
         <div style="font-size:14px;font-weight:700;color:var(--dark);">${p.name}</div>
-        <div style="font-family:'Bebas Neue';font-size:26px;color:var(--dark);white-space:nowrap;">${fmtPrice(p.price, g.currency)} ${sym}<span style="font-size:13px;color:var(--light);font-family:'DM Sans';font-weight:600;"> /${LANG==='en'?'mo':'měs'}</span></div>
+        <div style="font-family:'Bebas Neue';font-size:26px;color:var(--dark);white-space:nowrap;">${fmtPrice(p.price, p._cur||g.currency)} ${symOf(p._cur||g.currency)}<span style="font-size:13px;color:var(--light);font-family:'DM Sans';font-weight:600;"> /${LANG==='en'?'mo':'měs'}</span></div>
       </div>
       <div style="font-size:12px;color:var(--mid);margin-top:2px;">${LANG==='en'?'Covers: ':'Pokrývá: '}${accessLabel(p.access)}</div>
       ${p.coachName?`<div style="font-size:12px;color:var(--blue);font-weight:600;margin-top:2px;">${LANG==='en'?'With ':'Vede '}${escapeHtml(p.coachName)}</div>`:''}
@@ -4574,7 +4578,7 @@ async function openGymProfile(g){
     }
     if(mineSet.has(k)) return { cap:capTxt, btn:`<button class="unresvBtn" ${da} style="background:#E8F5EE;color:#006040;border:1px solid #A8E6C0;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${LANG==='en'?'Reserved ✓':'Rezervováno ✓'}</button>` };
     if(cap && count>=cap) return { cap:capTxt, btn:full };
-    return { cap:capTxt, btn:`<button class="bookClassBtn" ${da} data-coachname="${(o.coachName||'').replace(/"/g,'&quot;')}" data-disc="${o.disc||''}" style="background:var(--red);color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${LANG==='en'?'Book':'Rezervovat'}</button>` };
+    return { cap:capTxt, btn:`<button class="bookClassBtn" ${da} data-coachname="${(o.coachName||'').replace(/"/g,'&quot;')}" data-disc="${o.disc||''}" style="background:var(--red);color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${LANG==='en'?'Book':'Rezervovat'} · ${(()=>{ const cp=(window._gymCoachPricing||{})[o.coach]; const dp=(cp&&cp.dropin_price)?cp.dropin_price:(g.dropin_price||0); const dc=(cp&&cp.dropin_price)?(cp.currency||g.currency):g.currency; return fmtPrice(dp*1.03, dc); })()}</button>` };
   };
   const occRow=(o)=>{ const dd=new Date(o.date); const b=occBtn(o); const lvl=(o.level&&o.level!=='all')?` · <span style="color:var(--mid);">${levelLabel(o.level)}</span>`:''; const _lead=o.coachName||_gymOwnerName; const led=_lead?` · <span style="color:var(--blue);font-weight:600;">${LANG==='en'?'with ':'vede '}${escapeHtml(_lead)}</span>`:''; return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:#fff;border:1px solid var(--border);border-radius:10px;padding:9px 12px;margin-bottom:6px;"><div style="font-size:13px;min-width:0;"><strong>${o.name}</strong>${lvl}<div style="color:var(--mid);font-size:12px;">${dn[dd.getDay()]} ${o.time} · ${dd.getDate()}.${dd.getMonth()+1}.${b.cap}${led}</div></div>${b.btn}</div>`; };
   const levelsPresent = CLASS_LEVELS.map(l=>l.v).filter(v=> occs.some(o=>(o.level||'all')===v));
@@ -4614,7 +4618,7 @@ async function openGymProfile(g){
   if(!isMine){
     const bb=$('btnBookGym'); if(bb) bb.onclick=()=>gymTermsGate(g, ()=>bookGymDropin(g));
     $('gymProfContent').querySelectorAll('.lvlHead').forEach(h=>h.onclick=()=>{ const v=h.dataset.v; const body=$('gymProfContent').querySelector('.lvlBody[data-v="'+v+'"]'); const arr=$('gymProfContent').querySelector('.lvlArr[data-v="'+v+'"]'); if(!body) return; const open=body.style.display==='none'; body.style.display=open?'block':'none'; if(arr) arr.style.transform=open?'rotate(180deg)':'none'; });
-    $('gymProfContent').querySelectorAll('.subPlanBtn').forEach(b=>{ b.onclick=()=>gymTermsGate(g, ()=>subscribeGymMembership(g, plans[+b.dataset.pi])); });
+    $('gymProfContent').querySelectorAll('.subPlanBtn').forEach(b=>{ b.onclick=()=>gymTermsGate(g, ()=>subscribeGymMembership(g, plansAll[+b.dataset.pi])); });
     const _grBtn=$('gymProfContent').querySelector('.gymRefShareBtn'); if(_grBtn) _grBtn.onclick=async()=>{ if(!currentUser) return; const link=location.origin+'/?gym='+g.id+'&gymref='+currentUser.id; const msg=(LANG==='en'?`Join ${g.name} on MTL — you get ${g.member_ref_pct}% off your first month! 🥊 `:`Přidej se do ${g.name} na MTL — máš ${g.member_ref_pct}% slevu na první měsíc! 🥊 `); if(navigator.share){ try{ await navigator.share({ title:g.name||'MTL', text:msg, url:link }); }catch(e){} } else { try{ navigator.clipboard.writeText(link); }catch(e){} toast(L('✅ Odkaz zkopírován')); } };
     $('gymProfContent').querySelectorAll('.bookClassBtn').forEach(b=>{ b.onclick=()=>gymTermsGate(g, ()=>bookGymDropin(g, {name:b.dataset.name, date:b.dataset.date, time:b.dataset.time, coach:b.dataset.coach||null, coachName:b.dataset.coachname||null, disc:b.dataset.disc||null})); });
     $('gymProfContent').querySelectorAll('.resvBtn').forEach(b=>{ b.onclick=()=>reserveClass(g, {name:b.dataset.name, date:b.dataset.date, time:b.dataset.time, level:b.dataset.level, coach:b.dataset.coach||null}, myMemb); });
@@ -4754,13 +4758,13 @@ async function subscribeGymMembership(g, plan){
   const payee = await resolveGymPayee(g, plan);
   if(!payee.account){ toast(LANG==='en'?'⚠️ The coach/gym for this plan has no payments set up yet':'⚠️ Kouč/gym u této nabídky zatím nemá nastavené platby'); return; }
   if(!confirm(LANG==='en'
-    ? `Become a member of ${g.name} (${plan.name})? You'll be charged ${fmtPrice(plan.price, g.currency)} every month. Cancel anytime.`
-    : `Stát se členem ${g.name} (${plan.name})? Bude ti účtováno ${fmtPrice(plan.price, g.currency)} každý měsíc. Zrušit můžeš kdykoliv.`)) return;
+    ? `Become a member of ${g.name} (${plan.name})? You'll be charged ${fmtPrice(plan.price, plan._cur||g.currency)} every month. Cancel anytime.`
+    : `Stát se členem ${g.name} (${plan.name})? Bude ti účtováno ${fmtPrice(plan.price, plan._cur||g.currency)} každý měsíc. Zrušit můžeš kdykoliv.`)) return;
   toast(L('💳 Přesměrovávám na platbu...'));
   try {
     const { data: mb, error } = await supaClient.from('gym_memberships').insert({
       gym_id: g.id, gym_name: g.name||'Gym', student_id: currentUser.id, student_name: currentUser.name||'Student',
-      amount: plan.price||0, currency: g.currency||'CZK', status:'pending',
+      amount: plan.price||0, currency: (plan._cur||g.currency||'CZK'), status:'pending',
       plan_name: plan.name||null, plan_access: JSON.stringify((plan.access&&plan.access.length)?plan.access:['all'])
     }).select().single();
     if(error){ toast('⚠️ '+error.message); return; }
@@ -4768,12 +4772,14 @@ async function subscribeGymMembership(g, plan){
     if(plan.disc){ try{ await supaClient.from('gym_memberships').update({ discipline: plan.disc }).eq('id', mb.id); }catch(e){} }
     { const _lid=plan.lead||payee.coachId||null; const _lnm=plan.lead?(plan.leadName||null):(payee.coachId?payee.name:null); if(_lid){ try{ await supaClient.from('gym_memberships').update({ lead_coach_id:_lid, lead_coach_name:_lnm }).eq('id', mb.id); }catch(e){} } }
     let _gymOwnerPartner=false; try{ if(g.owner_id){ const { data: ow } = await supaClient.from('profiles').select('partner').eq('id', g.owner_id).single(); _gymOwnerPartner=!!(ow&&ow.partner); } }catch(e){}
-    const url = `/api/pay?type=membership&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&planName=${encodeURIComponent(plan.name||'Membership')}&amount=${plan.price||0}&currency=${g.currency||'CZK'}&interval=month&membershipId=${encodeURIComponent(mb.id)}&income=${encodeURIComponent(plan.income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&access=${encodeURIComponent(((plan.access&&plan.access.length)?plan.access:['all']).join(','))}&disc=${encodeURIComponent(plan.disc||'')}&partner=${_gymOwnerPartner?1:0}${(window._gymRef && window._gymRef.gym===g.id && (g.member_ref_pct||0)>0) ? ('&refPct='+g.member_ref_pct+'&refUser='+encodeURIComponent(window._gymRef.ref||'')) : ''}`;
+    const url = `/api/pay?type=membership&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&planName=${encodeURIComponent(plan.name||'Membership')}&amount=${plan.price||0}&currency=${plan._cur||g.currency||'CZK'}&interval=month&membershipId=${encodeURIComponent(mb.id)}&income=${encodeURIComponent(plan.income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&access=${encodeURIComponent(((plan.access&&plan.access.length)?plan.access:['all']).join(','))}&disc=${encodeURIComponent(plan.disc||'')}&partner=${_gymOwnerPartner?1:0}${(window._gymRef && window._gymRef.gym===g.id && (g.member_ref_pct||0)>0) ? ('&refPct='+g.member_ref_pct+'&refUser='+encodeURIComponent(window._gymRef.ref||'')) : ''}`;
     setTimeout(()=>{ window.location.href = url; }, 500);
   } catch(e){ console.error('subscribeGymMembership', e); toast('⚠️ '+e.message); }
 }
 async function bookGymDropin(g, occ){
   if(!currentUser){ toast(L('⚠️ Nejdřív se přihlas')); return; }
+  let _dp=g.dropin_price||0, _dcur=g.currency||'CZK';
+  if(occ && occ.coach){ try{ const { data: _cp } = await supaClient.from('gym_coach_pricing').select('dropin_price,currency').eq('gym_id',g.id).eq('coach_id',occ.coach).eq('status','approved').maybeSingle(); if(_cp && _cp.dropin_price){ _dp=_cp.dropin_price; _dcur=_cp.currency||_dcur; } }catch(e){} }
   const payee = await resolveGymPayee(g, occ);
   if(!payee.account){ toast(LANG==='en'?'⚠️ The coach/gym for this class has no payments set up yet':'⚠️ Kouč/gym u této lekce zatím nemá nastavené platby'); return; }
   toast(L('💳 Přesměrovávám na platbu...'));
@@ -4781,7 +4787,7 @@ async function bookGymDropin(g, occ){
     const _today = new Date().toISOString().slice(0,10);
     const rec = {
       gym_id: g.id, student_id: currentUser.id,
-      amount: g.dropin_price||0, currency: g.currency||'CZK', status:'pending',
+      amount: _dp, currency: _dcur, status:'pending',
       date: (occ&&occ.date)||_today, time: (occ&&occ.time)||'18:00'
     };
     if(occ){ rec.class_name = occ.name||null; rec.class_date = occ.date||null; rec.class_time = occ.time||null; }
@@ -4793,7 +4799,7 @@ async function bookGymDropin(g, occ){
     const _dropDisc = (occ&&occ.disc) ? occ.disc : (parseDisc(g.disciplines)[0]||null);
     if(_dropDisc){ try{ await supaClient.from('gym_bookings').update({ discipline: _dropDisc }).eq('id', bk.id); }catch(e){} }
     let _gymOwnerPartner=false; try{ if(g.owner_id){ const { data: ow } = await supaClient.from('profiles').select('partner').eq('id', g.owner_id).single(); _gymOwnerPartner=!!(ow&&ow.partner); } }catch(e){}
-    const url = `/api/pay?type=gym&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&className=${encodeURIComponent(occ&&occ.name?occ.name:'Drop-in')}&amount=${g.dropin_price||0}&currency=${g.currency||'CZK'}&bookingId=${encodeURIComponent(bk.id)}&income=${encodeURIComponent(g.dropin_income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&level=${encodeURIComponent((occ&&occ.level)||'')}&disc=${encodeURIComponent((occ&&occ.disc)?occ.disc:parseDisc(g.disciplines).join(','))}&partner=${_gymOwnerPartner?1:0}`;
+    const url = `/api/pay?type=gym&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&className=${encodeURIComponent(occ&&occ.name?occ.name:'Drop-in')}&amount=${_dp}&currency=${_dcur}&bookingId=${encodeURIComponent(bk.id)}&income=${encodeURIComponent(g.dropin_income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&level=${encodeURIComponent((occ&&occ.level)||'')}&disc=${encodeURIComponent((occ&&occ.disc)?occ.disc:parseDisc(g.disciplines).join(','))}&partner=${_gymOwnerPartner?1:0}`;
     setTimeout(()=>{ window.location.href = url; }, 500);
   } catch(e){ console.error('bookGymDropin', e); toast('⚠️ '+e.message); }
 }
