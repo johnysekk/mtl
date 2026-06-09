@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-FP | Events nav move plus team-coach permission toggles. The bottom-nav Favorites tab became Události/Events (a new shEvents sheet with a coming-soon empty state); Favorites moved to a heart icon in the top header bar. In the gym Team coaches list each active coach now has two compact pill toggles, both default off: a tent icon for can_create_events and a glove icon for can_request_fighters, each updating the gym_coaches row via a generic toggleCoachPerm and toasting the change. Schema adds can_request_fighters on gym_coaches (can_create_events was already added). Deploy index; add the can_request_fighters column. -->
+<!-- MTL build: 2026-06-07-FQ | Event creation (gym owner). The Events tab shows a Create event button for gym owners that opens a new shEventCreate sheet: type, title, description, multi-discipline chips, venue (defaults to the gym), start/end datetime, capacity, and ticket price. The price shows a live owner breakdown (buyer pays base x1.04 normal / x1.02 EP, MTL fee shown as 8% normal or 4% EP, minus the gyms Stripe fee range, equals net) and enforces a minimum ticket price (450 CZK / 22 USD / 20 EUR): below it the warning turns red and Save is disabled. A Looking for fighters toggle reveals a fighter-info note. Saving inserts into events with status approved for an owner (live) or pending for a team coach (awaiting approval, wired next). Money routes to the gym Stripe as merchant of record. Deploy index only. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -752,6 +752,12 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
 <div class="sheet" id="shEvents">
   <div class="shdr"><div class="shdr-title" data-noi18n>🥊 Události</div><button class="btn-close" id="btnCloseEvents">✕</button></div>
   <div id="eventsContent" style="padding:16px 20px;"></div>
+</div>
+
+<!-- EVENT CREATE -->
+<div class="sheet" id="shEventCreate">
+  <div class="shdr"><div class="shdr-title" data-noi18n>🥊 Nová událost</div><button class="btn-close" id="btnCloseEventCreate">✕</button></div>
+  <div id="eventCreateContent" style="padding:16px 20px;"></div>
 </div>
 
 <!-- GYMS DISCOVERY -->
@@ -4368,7 +4374,7 @@ function hideMatch(){ $('matchOv').classList.remove('open'); }
 // ════════════════════════════════════════
 // SHEETS
 // ════════════════════════════════════════
-const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shEvents','shMe','shSettings','shCoachApp','shAddDisc','shDiscReview','shAmbDash','shAdmin','shNotif','shChat','shBookings','shDiary','shCoachStats','shCoachSched','shCoachEarn','shGymStats','shFounderDash','shGymLb','shGyms','shGymProfile','shGymManage','shMemberships','shTerms','shPrivacy','shOnline','shLeaderboard','shOpportunities','shMyTeams','shEPCancel','shEPFeedback','shCoachRoster','shAmbApply','shAmbApps','shSupport','shMilestones','shClassAttend','shCoachPricing','shReception','shCoachSettings','shGymTeamView'];
+const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shEvents','shEventCreate','shMe','shSettings','shCoachApp','shAddDisc','shDiscReview','shAmbDash','shAdmin','shNotif','shChat','shBookings','shDiary','shCoachStats','shCoachSched','shCoachEarn','shGymStats','shFounderDash','shGymLb','shGyms','shGymProfile','shGymManage','shMemberships','shTerms','shPrivacy','shOnline','shLeaderboard','shOpportunities','shMyTeams','shEPCancel','shEPFeedback','shCoachRoster','shAmbApply','shAmbApps','shSupport','shMilestones','shClassAttend','shCoachPricing','shReception','shCoachSettings','shGymTeamView'];
 
 let _sheetParent={};
 function openSheet(id){
@@ -4385,7 +4391,86 @@ function closeSheet(id){
   if(par && $(par)) $(par).classList.add('open');
 }
 function openEvents(){ openSheet('shEvents'); renderEvents(); }
-function renderEvents(){ const box=$('eventsContent'); if(!box) return; box.innerHTML=`<div style="text-align:center;padding:40px 16px;color:var(--light);"><div style="font-size:40px;margin-bottom:10px;">🥊</div><div style="font-weight:700;color:var(--dark);margin-bottom:6px;">${LANG==='en'?'No events near you yet':'Zatím tu nejsou žádné události'}</div><div style="font-size:13px;line-height:1.5;">${LANG==='en'?'Fight nights, seminars and camps from gyms will show up here. Coming soon.':'Fight nights, semináře a kempy od gymů se objeví tady. Už brzy.'}</div></div>`; }
+function renderEvents(){
+  const box=$('eventsContent'); if(!box) return;
+  const canCreate = (window._myGyms&&window._myGyms.length);
+  const createBtn = canCreate ? `<button id="evCreateBtn" style="width:100%;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:16px;">+ ${LANG==='en'?'Create event':'Vytvořit událost'}</button>` : '';
+  box.innerHTML = createBtn + `<div style="text-align:center;padding:40px 16px;color:var(--light);"><div style="font-size:40px;margin-bottom:10px;">🥊</div><div style="font-weight:700;color:var(--dark);margin-bottom:6px;">${LANG==='en'?'No events near you yet':'Zatím tu nejsou žádné události'}</div><div style="font-size:13px;line-height:1.5;">${LANG==='en'?'Fight nights, seminars and camps will show up here.':'Fight nights, semináře a kempy se objeví tady.'}</div></div>`;
+  if($('evCreateBtn')) $('evCreateBtn').onclick=openEventCreate;
+}
+function openEventCreate(){
+  const g=_myGymData; if(!g){ toast(LANG==='en'?'⚠️ No gym selected':'⚠️ Není vybraný gym'); return; }
+  const cur=g.currency||'CZK';
+  const isOwner = g.owner_id===currentUser.id;
+  window._evDisc=[];
+  const inp="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';margin-bottom:12px;";
+  const lbl="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:5px;";
+  $('eventCreateContent').innerHTML=`
+    <div style="${lbl}">${LANG==='en'?'Type':'Typ'}</div>
+    <select id="evType" style="${inp}">${EVENT_TYPES.map(t=>`<option value="${t.v}">${t.emoji} ${LANG==='en'?t.en:t.cs}</option>`).join('')}</select>
+    <div style="${lbl}">${LANG==='en'?'Title':'Název'}</div>
+    <input id="evTitle" type="text" style="${inp}" placeholder="${LANG==='en'?'e.g. Amateur Fight Night vol. 3':'např. Amatérská fight night vol. 3'}">
+    <div style="${lbl}">${LANG==='en'?'Description':'Popis'}</div>
+    <textarea id="evDesc" rows="3" style="${inp}resize:vertical;" placeholder="${LANG==='en'?'What is it, who is it for, what to bring…':'Co to je, pro koho, co si vzít…'}"></textarea>
+    <div style="${lbl}">${LANG==='en'?'Disciplines':'Disciplíny'}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">${activeDisciplines().map(d=>`<span class="evDiscChip" data-v="${d.v}" style="padding:7px 11px;border-radius:99px;border:1.5px solid var(--border);font-size:12px;font-weight:600;cursor:pointer;background:var(--surf);color:var(--dark);">${d.emoji} ${LANG==='en'?d.en:d.cs}</span>`).join('')}</div>
+    <div style="${lbl}">${LANG==='en'?'Venue (optional, defaults to your gym)':'Místo (nepovinné, jinak tvůj gym)'}</div>
+    <input id="evVenue" type="text" style="${inp}" placeholder="${(g.name||'').replace(/"/g,'&quot;')}">
+    <div style="display:flex;gap:10px;"><div style="flex:1;min-width:0;"><div style="${lbl}">${LANG==='en'?'Starts':'Začátek'}</div><input id="evStart" type="datetime-local" style="${inp}"></div><div style="flex:1;min-width:0;"><div style="${lbl}">${LANG==='en'?'Ends':'Konec'}</div><input id="evEnd" type="datetime-local" style="${inp}"></div></div>
+    <div style="${lbl}">${LANG==='en'?'Capacity (optional)':'Kapacita (nepovinné)'}</div>
+    <input id="evCap" type="number" min="0" style="${inp}" placeholder="${LANG==='en'?'e.g. 60':'např. 60'}">
+    <div style="${lbl}">${LANG==='en'?'Ticket price':'Cena lístku'} (${cur})</div>
+    <input id="evPrice" type="number" min="0" style="${inp}margin-bottom:4px;" placeholder="${MIN_EVENT[cur]||450}">
+    <div id="evMinWarn" style="display:none;color:var(--red);font-size:12px;font-weight:700;margin-bottom:8px;"></div>
+    <div id="evBreakdown" style="display:none;border-radius:12px;padding:12px;font-size:13px;line-height:1.7;margin-bottom:12px;"></div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;margin-bottom:10px;cursor:pointer;"><input type="checkbox" id="evSeek" style="width:18px;height:18px;"> 🥊 ${LANG==='en'?'Looking for fighters':'Hledáme fightery'}</label>
+    <textarea id="evFighterInfo" rows="2" style="${inp}display:none;resize:vertical;" placeholder="${LANG==='en'?'What fighters you want (weight, level, rules…)':'Jaké fightery chceš (váha, úroveň, pravidla…)'}"></textarea>
+    ${isOwner?'':`<p style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:10px;">${LANG==='en'?'Your gym owner reviews and approves this before it goes live.':'Majitel gymu to před zveřejněním schválí.'}</p>`}
+    <button id="evSave" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${isOwner?(LANG==='en'?'Publish event':'Zveřejnit událost'):(LANG==='en'?'Send for approval':'Odeslat ke schválení')}</button>`;
+  $('evPrice').oninput=updateEventBreakdown;
+  $('evSeek').onchange=()=>{ $('evFighterInfo').style.display=$('evSeek').checked?'block':'none'; };
+  document.querySelectorAll('.evDiscChip').forEach(c=>c.onclick=()=>{ const v=c.dataset.v; if(window._evDisc.includes(v)){ window._evDisc=window._evDisc.filter(x=>x!==v); c.style.background='var(--surf)'; c.style.borderColor='var(--border)'; c.style.color='var(--dark)'; } else { window._evDisc.push(v); c.style.background='var(--red)'; c.style.borderColor='var(--red)'; c.style.color='#fff'; } });
+  $('evSave').onclick=saveEvent;
+  updateEventBreakdown();
+  openSheet('shEventCreate');
+}
+function updateEventBreakdown(){
+  const g=_myGymData; const cur=(g&&g.currency)||'CZK';
+  const sym=cur==='CZK'?'Kč':cur==='EUR'?'€':'$';
+  const base=parseFloat($('evPrice')&&$('evPrice').value)||0;
+  const min=MIN_EVENT[cur]||MIN_EVENT.CZK;
+  const warn=$('evMinWarn'), save=$('evSave'), box=$('evBreakdown');
+  const tooLow = base>0 && base<min;
+  if(warn){ warn.style.display=tooLow?'block':'none'; if(tooLow) warn.textContent=(LANG==='en'?`Minimum is ${min} ${cur}`:`Minimální cena je ${min} ${cur}`); }
+  if(save){ save.disabled=tooLow; save.style.opacity=tooLow?'0.45':'1'; save.style.cursor=tooLow?'not-allowed':'pointer'; }
+  if(!box) return;
+  box.style.display = base>0 ? 'block' : 'none';
+  const isEP=!!(currentUser&&currentUser.partner);
+  box.style.background = isEP?'#FBF3D8':'#F0FBF0';
+  const markup=isEP?1.02:1.04, keep=isEP?0.98:0.96;
+  const r=v=>Math.round(v*100)/100;
+  const buyer=base*markup, net=base*keep, fee=buyer-net;
+  const fixed=cur==='CZK'?6:0.3;
+  const sLow=base?(buyer*0.014+fixed):0, sHigh=base?(buyer*0.029+fixed):0;
+  box.innerHTML=`<div style="display:flex;justify-content:space-between;"><span>${LANG==='en'?'Buyer pays':'Kupující zaplatí'}</span><b>${r(buyer)} ${sym}</b></div><div style="display:flex;justify-content:space-between;color:var(--mid);"><span>MTL ${isEP?'4%':'8%'}</span><span>−${r(fee)} ${sym}</span></div><div style="display:flex;justify-content:space-between;color:var(--mid);font-size:12px;"><span>${LANG==='en'?'Stripe (you)':'Stripe (ty)'}</span><span>~−${r(sLow)}–${r(sHigh)} ${sym}</span></div><div style="display:flex;justify-content:space-between;border-top:1px solid rgba(0,0,0,.1);margin-top:6px;padding-top:6px;"><span>${LANG==='en'?'You net':'Tobě zůstane'}</span><b style="color:#006040;">~${r(net-sHigh)}–${r(net-sLow)} ${sym}</b></div>`;
+}
+async function saveEvent(){
+  const g=_myGymData; if(!g){ toast('⚠️'); return; }
+  const cur=g.currency||'CZK';
+  const base=parseFloat($('evPrice').value)||0;
+  const min=MIN_EVENT[cur]||MIN_EVENT.CZK;
+  const title=($('evTitle').value||'').trim();
+  if(!title){ toast(LANG==='en'?'⚠️ Add a title':'⚠️ Doplň název'); return; }
+  if(!$('evStart').value){ toast(LANG==='en'?'⚠️ Pick a start date':'⚠️ Vyber datum začátku'); return; }
+  if(base>0 && base<min){ toast(LANG==='en'?`⚠️ Minimum price is ${min} ${cur}`:`⚠️ Minimální cena je ${min} ${cur}`); return; }
+  const isOwner = g.owner_id===currentUser.id;
+  const row={ gym_id:g.id, created_by:currentUser.id, status: isOwner?'approved':'pending', type:$('evType').value||'other', title, description:($('evDesc').value||'').trim()||null, disciplines: JSON.stringify(window._evDisc||[]), city: g.city||null, country: g.country||null, venue:($('evVenue').value||'').trim()||null, city_lat: g.city_lat||null, city_lng: g.city_lng||null, starts_at: new Date($('evStart').value).toISOString(), ends_at: $('evEnd').value ? new Date($('evEnd').value).toISOString() : null, capacity: parseInt($('evCap').value)||null, ticket_price: base, currency: cur, seeking_fighters: !!$('evSeek').checked, fighter_info: ($('evFighterInfo').value||'').trim()||null };
+  const sv=$('evSave'); if(sv){ sv.disabled=true; sv.textContent='…'; }
+  const { error } = await supaClient.from('events').insert(row);
+  if(error){ toast('⚠️ '+error.message); if(sv){ sv.disabled=false; } return; }
+  toast(isOwner ? (LANG==='en'?'✅ Event published':'✅ Událost zveřejněna') : (LANG==='en'?'✅ Sent for approval':'✅ Odesláno ke schválení'));
+  closeSheet('shEventCreate'); renderEvents();
+}
 function closeAllSheets(){ _sheetParent={}; SHEETS.forEach(s=>$(s).classList.remove('open')); }
 
 // ════════════════════════════════════════
@@ -7726,6 +7811,7 @@ $('ni-find').onclick=()=>{ setNav('ni-find'); closeAllSheets(); setDeckMode('coa
 $('ni-gyms').onclick=()=>{ setNav('ni-gyms'); closeAllSheets(); setDeckMode('gyms'); };
 $('ni-events').onclick=()=>{ setNav('ni-events'); closeAllSheets(); openEvents(); };
 $('btnCloseEvents').onclick=()=>{ closeSheet('shEvents'); setNav('ni-find'); };
+$('btnCloseEventCreate').onclick=()=>{ closeSheet('shEventCreate'); };
 $('btnFavs').onclick=()=>{ renderFavs(); openSheet('shFavs'); ensureGymsLoaded().then(()=>{ if($('shFavs').classList.contains('open')) renderFavs(); }); };
 $('ni-msgs').onclick=()=>{ setNav('ni-msgs'); openSheet('shMsgs'); loadConversations(); };
 $('ni-me').onclick=()=>{ setNav('ni-me'); openSheet('shMe'); };
@@ -12107,7 +12193,9 @@ function renderSpecChips(containerId, selected){
 function collectSpecs(containerId){ const c=$(containerId); if(!c) return []; return [...c.querySelectorAll('.spec-chip.on')].map(e=>e.dataset.spec); }
 
   // Předvyplň ceny při vstupu do coach mode
-const MIN_RATE = { CZK: 450, EUR: 20, USD: 25 }; const MIN_RATE_ONLINE = { CZK: 250, EUR: 10, USD: 10 }; const MIN_GYM = { CZK: 200, EUR: 10, USD: 12 }; const MIN_MEMB = { CZK: 1400, EUR: 80, USD: 100 };
+const MIN_RATE = { CZK: 450, EUR: 20, USD: 25 }; const MIN_RATE_ONLINE = { CZK: 250, EUR: 10, USD: 10 }; const MIN_EVENT = { CZK: 450, EUR: 20, USD: 22 };
+const EVENT_TYPES=[{v:'fight_night',cs:'Fight night',en:'Fight night',emoji:'🥊'},{v:'seminar',cs:'Seminář',en:'Seminar',emoji:'🎓'},{v:'camp',cs:'Kemp',en:'Camp',emoji:'🏕️'},{v:'open_mat',cs:'Open mat',en:'Open mat',emoji:'🤼'},{v:'grading',cs:'Zkoušky',en:'Grading',emoji:'🎗️'},{v:'competition',cs:'Soutěž',en:'Competition',emoji:'🏆'},{v:'other',cs:'Jiné',en:'Other',emoji:'📌'}];
+const MIN_GYM = { CZK: 200, EUR: 10, USD: 12 }; const MIN_MEMB = { CZK: 1400, EUR: 80, USD: 100 };
 
 async function fillRateEditor(){
   if(!currentUser) return;
