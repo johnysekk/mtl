@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-DX | MTL Opportunities hero heading changed from SPREAD MUAY THAI to SPREADING MARTIAL ARTS ACROSS THE WORLD, and now localises (CZ: SIRIME BOJOVA UMENI PO SVETE) via JS on open. -->
+<!-- MTL build: 2026-06-07-DX | Reception card (Stripe) drop-in. Each class in reception check-in now also has a Card (via app) button: it creates a pending drop-in for that student (not the receptionist), routes payment to the class coach/gym via the normal payee logic (MTL fee applies), and opens the card screen on the reception device. After a successful payment the return handler marks the booking active AND auto-records the students attendance for that class, then reopens reception. Cash (Paid in person) and Free remain. Drop-in confirmation notification now correctly goes to the booked student, not the logged-in device user. Needs latest mtl-schema.sql (gym_bookings.reception_checkin). -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -6443,6 +6443,7 @@ function openRecCheckin(r){
       return '<div style="border:1px solid var(--border);border-radius:12px;padding:11px 12px;margin-bottom:8px;">'
         +'<div style="font-weight:700;font-size:14px;color:var(--dark);">'+escapeHtml(o.name||(LANG==='en'?'Class':'Lekce'))+'</div>'
         +'<div style="font-size:12px;color:var(--mid);margin:2px 0 8px;">'+(o.time||'')+who+' \u00b7 '+(typeof levelLabel==='function'?levelLabel(o.level||'all'):(o.level||''))+'</div>'
+        +'<button class="recCardBtn" data-i="'+i+'" style="width:100%;padding:10px;background:#635BFF;color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-bottom:6px;">💳 '+(LANG==='en'?'Card (via app)':'Kartou (přes appku)')+'</button>'
         +'<div style="display:flex;gap:8px;">'
         +'<button class="recPayBtn" data-i="'+i+'" style="flex:1;padding:10px;background:#006040;color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(LANG==='en'?'Paid in person':'Zaplaceno na m\u00edst\u011b')+' \u00b7 '+fmtPrice(pr.dp,pr.dcur)+' '+symf(pr.dcur)+'</button>'
         +'<button class="recFreeBtn" data-i="'+i+'" style="padding:10px 12px;background:var(--surf);color:var(--mid);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(LANG==='en'?'Free':'Zdarma')+'</button>'
@@ -6453,6 +6454,26 @@ function openRecCheckin(r){
   if($('recBackBtn')) $('recBackBtn').onclick=()=>renderReceptionList(($('recSearch')&&$('recSearch').value)||'');
   list.querySelectorAll('.recPayBtn').forEach(b=>b.onclick=()=>recDoCheckin(_recTodayClasses[+b.dataset.i], true));
   list.querySelectorAll('.recFreeBtn').forEach(b=>b.onclick=()=>recDoCheckin(_recTodayClasses[+b.dataset.i], false));
+  list.querySelectorAll('.recCardBtn').forEach(b=>b.onclick=()=>recDoCheckinCard(_recTodayClasses[+b.dataset.i]));
+}
+async function recDoCheckinCard(occ){
+  const r=_recCheckinMember, g=_recGym; if(!r||!g||!occ) return;
+  let _dp=g.dropin_price||0, _dcur=g.currency||'CZK';
+  if(occ.coach){ try{ const { data:_cp }=await supaClient.from('gym_coach_pricing').select('dropin_price,currency').eq('gym_id',g.id).eq('coach_id',occ.coach).eq('status','approved').maybeSingle(); if(_cp&&_cp.dropin_price){ _dp=_cp.dropin_price; _dcur=_cp.currency||_dcur; } }catch(e){} }
+  const payee = await resolveGymPayee(g, occ);
+  if(!payee.account){ toast(LANG==='en'?'The coach/gym has no payments set up yet':'Kouč/gym zatím nemá nastavené platby'); return; }
+  if(!confirm((LANG==='en'?'Card payment for ':'Platba kartou za ')+(r.student_name||'')+' · '+(occ.name||'')+(LANG==='en'?'? The card screen opens here; attendance is marked automatically after payment.':'? Otevře se platební obrazovka; docházka se zapíše automaticky po zaplacení.'))) return;
+  toast(LANG==='en'?'⏳ Opening payment…':'⏳ Otevírám platbu…');
+  try{
+    const _today=new Date().toISOString().slice(0,10);
+    const disc=occ.disc||((typeof parseDisc==='function'?parseDisc(g.disciplines):[])[0]||null);
+    const rec={ gym_id:g.id, student_id:r.student_id, student_name:r.student_name||'Student', gym_name:g.name||'Gym', amount:_dp, currency:_dcur, status:'pending', reception_checkin:true, date:occ.date||_today, time:occ.time||'18:00', class_name:occ.name||null, class_date:occ.date||null, class_time:occ.time||null, level:occ.level||'all', coach_id:payee.coachId||(occ.coach||null), discipline:disc };
+    const { data: bk, error } = await supaClient.from('gym_bookings').insert(rec).select().single();
+    if(error){ toast('⚠️ '+error.message); return; }
+    let _gymOwnerPartner=false; try{ if(g.owner_id){ const { data: ow }=await supaClient.from('profiles').select('partner').eq('id',g.owner_id).single(); _gymOwnerPartner=!!(ow&&ow.partner); } }catch(e){}
+    const url=`/api/pay?type=gym&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&className=${encodeURIComponent(occ.name||'Drop-in')}&amount=${_dp}&currency=${_dcur}&bookingId=${encodeURIComponent(bk.id)}&income=${encodeURIComponent(g.dropin_income||'side')}&memberName=${encodeURIComponent(r.student_name||'')}&payee=${encodeURIComponent(payee.name||'')}&level=${encodeURIComponent(occ.level||'')}&disc=${encodeURIComponent(disc||'')}&partner=${_gymOwnerPartner?1:0}`;
+    setTimeout(()=>{ window.location.href=url; }, 400);
+  }catch(e){ console.error('recDoCheckinCard',e); toast('⚠️ '+e.message); }
 }
 async function recDoCheckin(occ, charge){
   const r=_recCheckinMember, g=_recGym; if(!r||!g||!occ) return;
@@ -12636,8 +12657,9 @@ async function showPaidPopup(){
           // notifikace kouči, který lekci vede (pokud není owner)
           try{ if(gb.coach_id && gb.coach_id!==(gym&&gym.owner_id)){ await supaClient.from('notifications').insert({ user_id: gb.coach_id, type:'system', read:false, data: JSON.stringify({ kind:'gym_class_attendee', student: currentUser?.name||'Student', className: gb.class_name||'', date: gb.class_date||'', time: gb.class_time||'', how:'book' }), message:`🥊 ${currentUser?.name||'Student'} si koupil tvou lekci ${gb.class_name||''} (${gb.class_date||''} ${gb.class_time||''}).` }); } }catch(e){}
           // notifikace studentovi s proklikem do „Moje členství a tréninky v gymech"
-          try{ if(currentUser){ await supaClient.from('notifications').insert({ user_id: currentUser.id, type:'system', read:false, data: JSON.stringify({ kind:'gym_dropin_mine', gym_name:(gym&&gym.name)||gb.gym_name||'', className: gb.class_name||'', date: gb.class_date||'', time: gb.class_time||'' }), message:`✅ ${LANG==='en'?'Booked':'Zarezervováno'}: ${gb.class_name||(LANG==='en'?'class':'lekce')}${gb.class_date?' · '+gb.class_date+' '+(gb.class_time||''):''} — ${(gym&&gym.name)||gb.gym_name||''}` }); updateNotifBadge(); } }catch(e){}
-          toast(LANG==='en'?'✅ Drop-in booked! See you at the gym. 🥊':'✅ Jednorázová lekce zarezervována! Uvidíme se v gymu. 🥊');
+          try{ if(gb.student_id){ await supaClient.from('notifications').insert({ user_id: gb.student_id, type:'system', read:false, data: JSON.stringify({ kind:'gym_dropin_mine', gym_name:(gym&&gym.name)||gb.gym_name||'', className: gb.class_name||'', date: gb.class_date||'', time: gb.class_time||'' }), message:`✅ ${LANG==='en'?'Booked':'Zarezervováno'}: ${gb.class_name||(LANG==='en'?'class':'lekce')}${gb.class_date?' · '+gb.class_date+' '+(gb.class_time||''):''} — ${(gym&&gym.name)||gb.gym_name||''}` }); updateNotifBadge(); } }catch(e){}
+          if(gb.reception_checkin){ try{ await supaClient.from('gym_attendance').insert({ gym_id:gb.gym_id, student_id:gb.student_id, student_name:gb.student_name||null, class_name:gb.class_name||null, class_date:gb.class_date||null, class_time:gb.class_time||null, coach_id:gb.coach_id||null, discipline:gb.discipline||null, marked_by:currentUser?currentUser.id:null }); }catch(e){} toast(LANG==='en'?'✅ Paid by card & checked in':'✅ Zaplaceno kartou a odbaveno'); try{ if(gb.gym_id) openReception(gb.gym_id); }catch(e){} }
+          else { toast(LANG==='en'?'✅ Drop-in booked! See you at the gym. 🥊':'✅ Jednorázová lekce zarezervována! Uvidíme se v gymu. 🥊'); }
         }
       } catch(e){ console.error('gym_pay handler', e); }
     }
