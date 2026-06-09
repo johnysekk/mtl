@@ -110,8 +110,8 @@ async function gymCheckout(req, res) {
   const P = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
   const isPartner = (String(partner) === '1');
-  const MK   = isPartner ? 1.02 : GYM_STUDENT_MARKUP;
-  const TAKE = isPartner ? 0.04 : GYM_MTL_TAKE;
+  const MK   = isPartner ? 1.01 : GYM_STUDENT_MARKUP;
+  const TAKE = isPartner ? 0.02 : GYM_MTL_TAKE;
 
   const isCZK = cur === 'czk';
   const unitAmount     = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);
@@ -167,7 +167,7 @@ async function membershipCheckout(req, res) {
   const P = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
   const ivl = interval === 'year' ? 'year' : 'month';
-  const FEE_PCT = (String(partner) === '1') ? 4 : MEMB_MTL_PERCENT;
+  const FEE_PCT = (String(partner) === '1') ? 3 : MEMB_MTL_PERCENT;
 
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
