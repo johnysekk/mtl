@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-EA | Fixes. Reception: the non-user drop-in button is now a permanent button in the sheet (no longer only after typing) and is renamed to Jednorazova lekce in Czech; fixed the empty today-class list (schedule jsonb was being JSON.parsed even when already an array). Schedule editor: removed the confusing duplicate Add class (Pridat tridu) button; restyled Add a class; the open lesson form now has a clear Save class (Ulozit lekci) button that persists to the DB for both new and existing classes (so edits no longer rely on the section Save changes button). No schema or serverless change. -->
+<!-- MTL build: 2026-06-07-EB | Fixes. (1) Walk-in guest drop-in failed with null student_id NOT NULL violation: schema now makes gym_bookings.student_id nullable (RE-RUN mtl-schema.sql), and the guest landing/return screens force a white background so the messages are readable. (2) Drop-in payout notification was wrong (hardcoded gym base price x0.97, ignored partner): now uses the booking actual amount and the partner-aware keep rate 0.98/0.97 so it matches the price editor. (3) Reception: removed the Back button from the class picker; it now appears only on the QR screen. (4) Coach price-requests sheet close button was missing its X glyph. (5) Online coaching stats now react to the discipline filter on the coach profile. No serverless change. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -1449,7 +1449,7 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
 </div>
 
 <div class="sheet" id="shCoachPricing" style="z-index:89;">
-  <div class="shdr"><div class="shdr-title" id="cprTitle" data-noi18n>Žádosti o ceny</div><button class="btn-close" id="btnCloseCpr"></button></div>
+  <div class="shdr"><div class="shdr-title" id="cprTitle" data-noi18n>Žádosti o ceny</div><button class="btn-close" id="btnCloseCpr">✕</button></div>
   <div style="padding:18px 20px;"><div id="cprBody"></div></div>
 </div>
 
@@ -3991,7 +3991,7 @@ function finishDrag(){
 // ════════════════════════════════════════
 // PROFILE SHEET
 // ════════════════════════════════════════
-function _renderProfRank(c, disc, discLes, discStu){
+function _renderProfRank(c, disc, discLes, discStu, discOnFb, discOnStu){
   let cc=c;
   if(disc){ const dr=(c.discRatings&&c.discRatings[disc]); const dl=(discLes&&discLes[disc])||0; cc={...c, rating:(dr?dr.avg:c.rating), reviews:(dr?dr.count:c.reviews), lessonsDone:dl, onlineFeedbacks:0}; }
   const sc=mtlScore(cc), tt=tierOf(sc);
@@ -4004,6 +4004,8 @@ function _renderProfRank(c, disc, discLes, discStu){
   if($('pYears')) $('pYears').textContent = disc ? ((ds&&ds.years!=null&&ds.years!=='')?ds.years:'—') : (c.years||0);
   if($('pStudents')) $('pStudents').textContent = disc ? ((discStu&&discStu[disc])||0) : (c.students||0);
   if($('pLessons')) $('pLessons').textContent = disc ? ((discLes&&discLes[disc])||0) : (c.lessonsDone||0);
+  if($('pOnlineStudents')) $('pOnlineStudents').textContent = disc ? ((discOnStu&&discOnStu[disc])||0) : (c.onlineStudents||0);
+  if($('pOnlineFeedbacks')) $('pOnlineFeedbacks').textContent = disc ? ((discOnFb&&discOnFb[disc])||0) : (c.onlineFeedbacks||0);
 }
 function openProfile(coachObj){
   const c = coachObj || filtered[idx];
@@ -4036,9 +4038,9 @@ if(c.photo){
   if($('profRankRow')){
     $('profRankToggle').textContent=L('Rozbalit ›');
     $('profRankRow').onclick=()=>{ const b=$('profScoreBreak'); const op=b.style.display==='none'; b.style.display=op?'block':'none'; $('profRankToggle').textContent=op?(LANG==='en'?'Hide ▴':'Skrýt ▴'):(LANG==='en'?'Show ›':'Rozbalit ›'); };
-    const _discLes={}, _discStu={};
-    try{ supaClient.from('bookings').select('discipline, status, student_id').eq('coach_id', c.profileId||c.id).then(({data})=>{ const seen={}; (data||[]).forEach(b=>{ if(b.discipline && b.status!=='refunded' && b.status!=='cancelled'){ _discLes[b.discipline]=(_discLes[b.discipline]||0)+1; const k=b.discipline+'|'+b.student_id; if(b.student_id && !seen[k]){ seen[k]=1; _discStu[b.discipline]=(_discStu[b.discipline]||0)+1; } } }); }); }catch(e){}
-    _renderProfRank(c, null, _discLes, _discStu);
+    const _discLes={}, _discStu={}, _discOnFb={}, _discOnStu={};
+    try{ supaClient.from('bookings').select('discipline, status, student_id, type, fulfilled').eq('coach_id', c.profileId||c.id).then(({data})=>{ const seen={}, seenOn={}; (data||[]).forEach(b=>{ if(b.discipline && b.status!=='refunded' && b.status!=='cancelled'){ _discLes[b.discipline]=(_discLes[b.discipline]||0)+1; const k=b.discipline+'|'+b.student_id; if(b.student_id && !seen[k]){ seen[k]=1; _discStu[b.discipline]=(_discStu[b.discipline]||0)+1; } if(b.type==='online'){ if(b.fulfilled) _discOnFb[b.discipline]=(_discOnFb[b.discipline]||0)+1; const ko=b.discipline+'|'+b.student_id; if(b.student_id && !seenOn[ko]){ seenOn[ko]=1; _discOnStu[b.discipline]=(_discOnStu[b.discipline]||0)+1; } } } }); }); }catch(e){}
+    _renderProfRank(c, null, _discLes, _discStu, _discOnFb, _discOnStu);
     const sel=$('profDiscSel'); const discs=(c.disciplines||[]);
     if(sel){
       if(discs.length>1){
@@ -4046,7 +4048,7 @@ if(c.photo){
         const mk=(label,val)=>`<div class="pdSel" data-d="${val||''}" style="font-size:12px;font-weight:700;cursor:pointer;padding:6px 12px;border-radius:14px;border:1.5px solid var(--border);background:transparent;color:var(--mid);">${label}</div>`;
         sel.innerHTML = mk(LANG==='en'?'🌐 Overall':'🌐 Celkově','') + discs.map(d=>mk(disciplineEmoji(d)+' '+disciplineLabel(d), d)).join('');
         const setActive=(node)=>{ sel.querySelectorAll('.pdSel').forEach(n=>{ n.style.background='transparent'; n.style.color='var(--mid)'; n.style.borderColor='var(--border)'; }); node.style.background='var(--dark)'; node.style.color='#fff'; node.style.borderColor='var(--dark)'; };
-        sel.querySelectorAll('.pdSel').forEach(n=>{ n.onclick=()=>{ setActive(n); _renderProfRank(c, n.dataset.d||null, _discLes, _discStu); }; });
+        sel.querySelectorAll('.pdSel').forEach(n=>{ n.onclick=()=>{ setActive(n); _renderProfRank(c, n.dataset.d||null, _discLes, _discStu, _discOnFb, _discOnStu); }; });
         const first=sel.querySelector('.pdSel'); if(first) setActive(first);
       } else { sel.style.display='none'; sel.innerHTML=''; }
     }
@@ -6496,7 +6498,7 @@ function openGuestDropin(){
   const list=$('recList'); const g=_recGym; if(!list||!g) return;
   _recTodayClasses=_todayGymClasses(g);
   const symf=(x)=>x==='EUR'?'€':x==='USD'?'$':'Kč';
-  let html='<button id="recBackBtn" style="background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:8px 12px;font-size:13px;font-weight:700;cursor:pointer;color:var(--dark);margin-bottom:10px;">← '+(LANG==='en'?'Back':'Zpět')+'</button>';
+  let html='';
   html+='<div style="font-weight:800;font-size:15px;color:var(--dark);margin-bottom:2px;">'+(LANG==='en'?'Walk-in drop-in (no app)':'Jednorázová lekce pro neuživatele')+'</div>';
   html+='<p style="font-size:12px;color:var(--light);margin-bottom:10px;">'+(LANG==='en'?'Pick the class, then let the visitor scan the QR.':'Vyber lekci a nech návštěvníka naskenovat QR.')+'</p>';
   if(!_recTodayClasses.length){ html+='<p style="color:var(--light);padding:10px;">'+(LANG==='en'?'No classes scheduled today.':'Dnes nejsou žádné lekce v rozvrhu.')+'</p>'; }
@@ -12739,6 +12741,7 @@ async function showPaidPopup(){
     }
   }
   if(params.get('guest_pay')==='1'){
+    document.body.style.background='#fff'; document.body.style.color='#111';
     try{
       const gymId=params.get('gym'), cls=params.get('cls')||'Drop-in', date=params.get('date'), time=params.get('time'), coach=params.get('coach')||null, level=params.get('level')||'all', disc=params.get('disc')||null, amt=parseInt(params.get('amt')||'0',10)||0, cur=params.get('cur')||'CZK', tok=params.get('tok')||('g'+Date.now());
       const { data: g } = await supaClient.from('gyms').select('*').eq('id', gymId).single();
@@ -12755,6 +12758,7 @@ async function showPaidPopup(){
     }catch(e){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">'+(e.message||'error')+'</p>'; return; }
   }
   if(params.get('guest_drop')==='ok'){
+    document.body.style.background='#fff'; document.body.style.color='#111';
     const bookingId=params.get('booking'), sessionId=params.get('session'), gAcct=params.get('acct');
     let email=null, name=null, pi=null;
     if(sessionId){ try{ const r=await fetch('/api/session?sessionId='+sessionId+(gAcct?'&gymAccount='+encodeURIComponent(gAcct):'')); const j=await r.json(); email=j.customerEmail||null; name=j.customerName||null; pi=j.paymentIntent||null; }catch(e){} }
@@ -12781,8 +12785,10 @@ async function showPaidPopup(){
         if(gb){
           const { data: gym } = await supaClient.from('gyms').select('owner_id, name, dropin_price, currency').eq('id', gb.gym_id).single();
           if(gym && gym.owner_id){
-            const sym = gym.currency==='EUR'?'€':gym.currency==='USD'?'$':'Kč';
-            const gymGets = fmtPrice((gym.dropin_price||0)*0.97, gym.currency);
+            const _ncur = gb.currency||gym.currency;
+            const sym = _ncur==='EUR'?'€':_ncur==='USD'?'$':'Kč';
+            let _ownerPartner=false; try{ const { data: _ow } = await supaClient.from('profiles').select('partner').eq('id', gym.owner_id).single(); _ownerPartner=!!(_ow&&_ow.partner); }catch(e){}
+            const gymGets = fmtPrice((gb.amount||gym.dropin_price||0)*(_ownerPartner?0.98:0.97), _ncur);
             await supaClient.from('notifications').insert({ user_id: gym.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'gym_dropin_booked', student: currentUser?.name||'Student', amt: gymGets, sym }), message:`🏋️ Nová jednorázová lekce! ${currentUser?.name||'Student'} si koupil jednorázovou lekci. Tobě připadne ${gymGets} ${sym}.` });
             updateNotifBadge();
           }
