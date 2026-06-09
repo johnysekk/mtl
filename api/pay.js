@@ -102,7 +102,7 @@ async function coachCheckout(req, res) {
 async function gymCheckout(req, res) {
   const {
     gymAccount, gymName, className, amount, currency = 'CZK', bookingId,
-    income, memberName, payee, disc, level, partner,
+    income, memberName, payee, disc, level, partner, guest, token,
   } = req.query;
 
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
@@ -143,8 +143,11 @@ async function gymCheckout(req, res) {
           member_name: memberName || '',
         },
       },
-      success_url: `${proto}://${host}/?gym_pay=ok&booking=${encodeURIComponent(bookingId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
+      success_url: (String(guest)==='1')
+        ? `${proto}://${host}/?guest_drop=ok&booking=${encodeURIComponent(bookingId || '')}&acct=${encodeURIComponent(gymAccount)}&token=${encodeURIComponent(token || '')}&session={CHECKOUT_SESSION_ID}`
+        : `${proto}://${host}/?gym_pay=ok&booking=${encodeURIComponent(bookingId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
       cancel_url: `${proto}://${host}/`,
+      ...(String(guest)==='1' ? { customer_creation: 'always' } : {}),
     },
     { stripeAccount: gymAccount }
   );
@@ -156,7 +159,7 @@ async function gymCheckout(req, res) {
 async function membershipCheckout(req, res) {
   const {
     gymAccount, gymName, planName, amount, currency = 'CZK', interval = 'month',
-    membershipId, income, memberName, payee, disc, access, partner,
+    membershipId, income, memberName, payee, disc, access, partner, refPct, refUser,
   } = req.query;
 
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
@@ -168,6 +171,20 @@ async function membershipCheckout(req, res) {
 
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
+
+  // Gym member referral: new member gets a one-time first-month discount.
+  // Coupon is created on the CONNECTED account (charges are direct on the gym).
+  let discounts;
+  const refPctN = parseInt(refPct, 10) || 0;
+  if (refPctN > 0 && refPctN <= 100) {
+    try {
+      const coupon = await stripe.coupons.create(
+        { percent_off: refPctN, duration: 'once', name: `MTL referral -${refPctN}%` },
+        { stripeAccount: gymAccount }
+      );
+      discounts = [{ coupon: coupon.id }];
+    } catch (e) { console.error('referral coupon failed', e && e.message); }
+  }
 
   const session = await stripe.checkout.sessions.create(
     {
@@ -189,9 +206,12 @@ async function membershipCheckout(req, res) {
           mtl_base: String(P),
           mtl_currency: cur,
           member_name: memberName || '',
+          mtl_ref_user: refUser || '',
+          mtl_ref_pct: String(refPctN || 0),
         },
       },
-      success_url: `${proto}://${host}/?gym_sub=ok&membership=${encodeURIComponent(membershipId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
+      ...(discounts ? { discounts } : {}),
+      success_url: `${proto}://${host}/?gym_sub=ok&membership=${encodeURIComponent(membershipId || '')}&acct=${encodeURIComponent(gymAccount)}&refuser=${encodeURIComponent(refUser || '')}&refpct=${encodeURIComponent(refPctN || 0)}&session={CHECKOUT_SESSION_ID}`,
       cancel_url: `${proto}://${host}/`,
     },
     { stripeAccount: gymAccount }
