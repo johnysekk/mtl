@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-FB | Accounting option A (context layer, not authoritative). Added on-screen disclaimer under the coach CSV export, and a gym-owner CSV export in the gym bookings dashboard (drop-ins as real transactions + active memberships labelled as current monthly rate, with Gross / MTL fee / Net, TOTAL row, and an in-file disclaimer that the Stripe Dashboard is the authoritative source for tax and actual recurring charges). Self-contained (fetches the gym data fresh). Needs deploy of index only. -->
+<!-- MTL build: 2026-06-07-FC | Student payment confirmation (doklad). New showReceipt(b) opens a printable Payment confirmation (NOT a tax invoice): seller = the gym/coach (named as provider), buyer = the student, item/date/amount/Stripe payment ref, with a footer stating it is a payment confirmation not a tax invoice, the provider is the seller of record, and Stripe holds the authoritative record. A Receipt button was added to drop-in cards (wired via upDrops). Reusable for 1:1/online history next. Keeps MTL as agent, not seller. Needs deploy of index only. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4927,7 +4927,7 @@ async function loadMyMemberships(){
         <div style="font-size:14px;color:var(--mid);margin:2px 0;">📍 ${b.class_name?escapeHtml(b.class_name)+' · ':''}${b.class_date} ${b.class_time||''}${discTag}</div>
         <div style="display:inline-block;font-size:11px;font-weight:700;color:#006040;background:#E8F5EE;border:1px solid #A8E6C0;border-radius:8px;padding:2px 9px;margin-bottom:8px;">✅ ${LANG==='en'?'Reserved':'Rezervováno'}</div>
         <div style="font-size:12px;color:${canChange?'#006040':'var(--light)'};margin-bottom:12px;">${windowTxt}${rc>0?` · ${LANG==='en'?`reschedules used ${rc}/2`:`přesunů ${rc}/2`}`:''}</div>
-        <button class="gymDropCalBtn" data-id="${b.id}" style="width:100%;padding:11px;background:#F0FBF0;color:#006040;border:1px solid #CDEBD6;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">📅 ${LANG==='en'?'Add to calendar':'Přidat do kalendáře'}</button>
+        <button class="gymDropCalBtn" data-id="${b.id}" style="width:100%;padding:11px;background:#F0FBF0;color:#006040;border:1px solid #CDEBD6;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">📅 ${LANG==='en'?'Add to calendar':'Přidat do kalendáře'}</button><button class="gymReceiptBtn" data-id="${b.id}" style="width:100%;padding:11px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">🧾 ${LANG==='en'?'Receipt':'Doklad'}</button>
         ${canChange?`${canResched?`<button class="gymReschedBtn" data-id="${b.id}" style="width:100%;padding:11px;background:#E8F0FF;color:var(--blue);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">${LANG==='en'?'🔄 Reschedule to another class':'🔄 Přesunout na jinou lekci'}</button>`:`<div style="font-size:12px;color:var(--light);text-align:center;margin-bottom:8px;">${LANG==='en'?'Max reschedules used (2/2)':'Limit přesunů využit (2/2)'}</div>`}
         <button class="gymDropCancelBtn" data-id="${b.id}" style="width:100%;padding:11px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Cancel (93% back)':'Zrušit (93 % zpět)'}</button>`:''}
       </div>`;
@@ -4941,6 +4941,7 @@ async function loadMyMemberships(){
   box.querySelectorAll('.membGymHead').forEach(el=>{ el.onclick=()=>{ const g=(window._membGymMap||{})[el.dataset.gym]; if(g) openGymProfile(g); else toast(L('⚠️ Gym se nepodařilo načíst')); }; });
   box.querySelectorAll('.resumeMembBtn').forEach(b=>{ b.onclick=()=>resumeMembership(b.dataset.id, b.dataset.gym, b.dataset.sub); });
   box.querySelectorAll('.gymReschedBtn').forEach(b=>{ b.onclick=()=>openGymReschedule(upDrops.find(x=>String(x.id)===String(b.dataset.id))); });
+  box.querySelectorAll('.gymReceiptBtn').forEach(btn=>{ btn.onclick=()=>{ const b=upDrops.find(x=>String(x.id)===String(btn.dataset.id)); if(b) showReceipt(b); }; });
   box.querySelectorAll('.gymDropCalBtn').forEach(btn=>{ btn.onclick=()=>{ const b=upDrops.find(x=>String(x.id)===String(btn.dataset.id)); if(!b) return; addToCalendar({ training_date:b.class_date, training_time:b.class_time, id:b.id, title:`🥊 ${b.class_name||(LANG==='en'?'Class':'Lekce')} — ${b.gym_name||'Gym'}` }); }; });
   box.querySelectorAll('.gymDropCancelBtn').forEach(b=>{ b.onclick=()=>cancelGymDropin(upDrops.find(x=>String(x.id)===String(b.dataset.id))); });
   box.querySelectorAll('.membRelBtn').forEach(b=>{ b.onclick=()=>{ const g=(window._membGymMap||{})[b.dataset.gym]; const occ=((window._membUpc&&window._membUpc[b.dataset.gym])||[])[+b.dataset.i]; if(!g||!occ) return; if(b.dataset.rel==='1'){ if(typeof rejoinClass==='function') rejoinClass(g, occ); } else { if(typeof releaseClass==='function') releaseClass(g, occ); } }; });
@@ -12258,6 +12259,33 @@ function renderBars(byMonth, color, overlayByMonth){
   return bars;
 }
 
+function showReceipt(b){
+  try{
+    if(!b) return; const EN=LANG==='en';
+    const esc=(typeof escapeHtml==='function')?escapeHtml:(x=>String(x==null?'':x));
+    const seller=b.gym_name||b.coach_name||(EN?'Provider':'Poskytovatel');
+    const buyer=(currentUser&&(currentUser.name||currentUser.email))||(EN?'Customer':'Zákazník');
+    const date=b.class_date||b.training_date||(b.created_at||'').slice(0,10)||'';
+    const time=b.class_time||b.training_time||'';
+    const item=b.gym_name?(b.class_name||(EN?'Drop-in class':'Jednorázová lekce')):(b.type==='online'?(EN?'Online coaching':'Online kočink'):(EN?'1:1 lesson':'Lekce 1:1'));
+    const disc=b.discipline||''; const amt=b.amount||0; const cur=b.currency||'CZK';
+    const sym=cur==='CZK'?'Kč':cur==='EUR'?'€':'$'; const ref=b.payment_intent||'';
+    const html=`<!doctype html><html><head><meta charset="utf-8"><title>${EN?'Payment confirmation':'Potvrzení o platbě'}</title>`
+      +`<style>body{font-family:-apple-system,Arial,sans-serif;color:#1a1a1a;max-width:600px;margin:30px auto;padding:0 20px;line-height:1.5}h1{font-size:22px;margin:0 0 2px;letter-spacing:.04em}.muted{color:#777;font-size:13px}.row{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #eee;font-size:14px}.row span:first-child{color:#777}.tot{font-weight:700;font-size:16px;border-top:2px solid #1a1a1a;margin-top:8px;padding-top:10px;border-bottom:none}.note{font-size:11px;color:#999;margin-top:26px;line-height:1.6;border-top:1px solid #eee;padding-top:12px}.btn{margin-top:22px;padding:12px 20px;background:#1a1a1a;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}@media print{.btn{display:none}}</style></head><body>`
+      +`<h1>MTL</h1><div class="muted">${EN?'Payment confirmation':'Potvrzení o platbě'}</div>`
+      +`<div style="margin-top:22px">`
+      +`<div class="row"><span>${EN?'Provider (seller)':'Poskytovatel (prodejce)'}</span><strong>${esc(seller)}</strong></div>`
+      +`<div class="row"><span>${EN?'Customer':'Zákazník'}</span><strong>${esc(buyer)}</strong></div>`
+      +`<div class="row"><span>${EN?'Item':'Položka'}</span><strong>${esc(item)}${disc?' · '+esc(disc):''}</strong></div>`
+      +`<div class="row"><span>${EN?'Date':'Datum'}</span><strong>${esc(date)}${time?' '+esc(time):''}</strong></div>`
+      +(ref?`<div class="row"><span>${EN?'Payment ref (Stripe)':'Reference platby (Stripe)'}</span><strong>${esc(ref)}</strong></div>`:'')
+      +`<div class="row tot"><span>${EN?'Amount paid':'Zaplaceno'}</span><span>${amt} ${sym}</span></div></div>`
+      +`<div class="note">${EN?'This is a payment confirmation, not a tax invoice. The seller of the service is the provider named above; for a formal tax document please contact them. The authoritative record of this payment is in Stripe. Generated via the MTL platform.':'Toto je potvrzení o platbě, nikoli daňový doklad. Prodejcem služby je výše uvedený poskytovatel; o formální daňový doklad požádej jeho. Závazný záznam o této platbě je ve Stripe. Vygenerováno přes platformu MTL.'}</div>`
+      +`<button class="btn" onclick="window.print()">${EN?'Print / Save PDF':'Tisk / Uložit PDF'}</button></body></html>`;
+    const w=window.open('','_blank'); if(!w){ toast(EN?'Allow pop-ups to view the receipt':'Povol vyskakovací okna pro zobrazení dokladu'); return; }
+    w.document.write(html); w.document.close();
+  }catch(e){ console.error('showReceipt', e); toast('⚠️ '+e.message); }
+}
 async function exportGymCsv(){
   try{
     if(!_myGymData || !_myGymData.id){ toast('⚠️'); return; }
