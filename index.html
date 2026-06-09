@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-EX | Real referral discount + 2 coupons. The student referral reward is now a genuine ~10 percent discount instead of ~5: when a student with a credit books a normal coach, the client just flags credit=student (no longer reduces commission client-side) and pay.js sets the student price to exactly the coach keep and the MTL application fee to zero, so the student pays about 10 percent less, MTL earns nothing on that lesson, and the coach is completely untouched at 95 percent. Does not apply to founding/partner coaches. A successful referral now grants 2 coupons each to both the inviter and the invited (was 1). No student-facing mention of any markup anywhere. Needs deploy of index + pay.js. -->
+<!-- MTL build: 2026-06-07-FB | Accounting option A (context layer, not authoritative). Added on-screen disclaimer under the coach CSV export, and a gym-owner CSV export in the gym bookings dashboard (drop-ins as real transactions + active memberships labelled as current monthly rate, with Gross / MTL fee / Net, TOTAL row, and an in-file disclaimer that the Stripe Dashboard is the authoritative source for tax and actual recurring charges). Self-contained (fetches the gym data fresh). Needs deploy of index only. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -7060,8 +7060,10 @@ async function loadGymManageBookings(){
     html += drops.slice(0,20).map(b=>`<div style="padding:8px 0;border-bottom:1px solid var(--border);font-size:14px;"><div style="display:flex;justify-content:space-between;"><span>${b.student_name||'Student'}${b.class_name?' · '+b.class_name:''}${b.class_date?' · '+b.class_date+' '+(b.class_time||''):''}</span><strong>${fmtPrice((b.amount||0)*(b.gym_keep_pct!=null?b.gym_keep_pct:(isEP?0.99:0.97)), b.currency)} ${sym}</strong></div>${(b.payment_intent && b.status!=='cancelled' && b.status!=='refunded')?`<button class="gymOwnerRefundBtn" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-curr="${b.currency||'CZK'}" data-gym="${b.gym_id}" data-student="${(b.student_name||'').replace(/"/g,'')}" style="margin-top:6px;padding:6px 11px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'↩ Refund student':'↩ Vrátit studentovi'}</button>`:''}</div>`).join('');
   }
   if(!html) html=`<p style="color:var(--light);font-size:13px;">${LANG==='en'?'No bookings yet.':'Zatím žádné rezervace.'}</p>`;
+  if(html && !/No bookings yet|žádné rezervace/.test(html)){ html += `<button id="gymCsvBtn" style="width:100%;padding:12px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-top:14px;">${LANG==='en'?'⬇ Export for accountant (CSV)':'⬇ Export pro účetní (CSV)'}</button><p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:8px;">${LANG==='en'?'Summary of your MTL activity (estimate). Your Stripe Dashboard is the authoritative source for tax.':'Souhrn tvé MTL aktivity (odhad). Závazný zdroj pro daňe je tvůj Stripe Dashboard.'}</p>`; }
   box.innerHTML=html;
   box.querySelectorAll('.gymOwnerRefundBtn').forEach(btn=>btn.onclick=()=>gymOwnerRefund(btn));
+  { const _g=box.querySelector('#gymCsvBtn'); if(_g) _g.onclick=()=>exportGymCsv(); }
 }
 function setNav(id){
   ['ni-find','ni-gyms','ni-favs','ni-msgs','ni-me'].forEach(n=>$(n).classList.remove('active'));
@@ -9250,7 +9252,7 @@ async function openMyStripe(gymId, payout){
     const r = await fetch('/api/stripe-login-link'+qs, { headers:{ Authorization:'Bearer '+tok } });
     const j = await r.json();
     if(j && j.url){
-      if(j.type==='standard'){ toast(LANG==='en'?'Opening Stripe — log in with your own account':'Otevírám Stripe — přihlas se svým účtem'); }
+      if(j.type==='standard'){ toast(LANG==='en'?'Opening Stripe — log in with YOUR account (the email you connected with). Seeing a different account? Log out of Stripe first.':'Otevírám Stripe — přihlas se SVÝM účtem (e-mail, kterým jsi propojil). Vidíš jiný účet? Odhlas se ze Stripe.'); }
       window.open(j.url, '_blank');
     } else { toast('⚠️ '+((j&&j.error)||'Stripe')); }
   }catch(e){ console.error('openMyStripe', e); toast('⚠️ '+e.message); }
@@ -12256,6 +12258,60 @@ function renderBars(byMonth, color, overlayByMonth){
   return bars;
 }
 
+async function exportGymCsv(){
+  try{
+    if(!_myGymData || !_myGymData.id){ toast('⚠️'); return; }
+    const gid=_myGymData.id; const curr=(_myGymData.currency||'CZK'); const EN=LANG==='en';
+    const esc=v=>{ const t=String(v==null?'':v); return /[",\n;]/.test(t)?'"'+t.replace(/"/g,'""')+'"':t; };
+    const { data: drops } = await supaClient.from('gym_bookings').select('*').eq('gym_id', gid);
+    const { data: mems } = await supaClient.from('gym_memberships').select('*').eq('gym_id', gid);
+    const hdr=[EN?'Date':'Datum',EN?'Student':'Student',EN?'Type':'Typ',EN?'Discipline':'Disciplina',EN?'Gross':'Hrube',EN?'MTL fee':'MTL poplatek',EN?'Net':'Ciste',EN?'Currency':'Mena'];
+    const lines=[hdr.join(',')]; let tG=0,tF=0,tN=0;
+    (drops||[]).filter(b=>b.status!=='cancelled'&&b.status!=='refunded').forEach(b=>{
+      const amt=b.amount||0; const keep=(b.gym_keep_pct!=null?b.gym_keep_pct:0.97); const net=Math.round(amt*keep*100)/100; const fee=Math.round((amt-net)*100)/100; tG+=amt;tF+=fee;tN+=net;
+      lines.push([esc(b.class_date||(b.created_at||'').slice(0,10)||''),esc(b.student_name||''),'Drop-in',esc(b.discipline||''),amt,fee,net,esc(b.currency||curr)].join(','));
+    });
+    (mems||[]).filter(m=>m.status==='active'||m.status==='cancelling').forEach(m=>{
+      const amt=m.amount||0; const keep=(m.gym_keep_pct!=null?m.gym_keep_pct:0.95); const net=Math.round(amt*keep*100)/100; const fee=Math.round((amt-net)*100)/100; tG+=amt;tF+=fee;tN+=net;
+      lines.push([esc((m.period_end||'').slice(0,10)),esc(m.student_name||''),EN?'Membership (monthly)':'Clenstvi (mesicne)',esc(m.discipline||''),amt,fee,net,esc(m.currency||curr)].join(','));
+    });
+    lines.push('');
+    lines.push([esc(EN?'TOTAL':'CELKEM'),'','','',Math.round(tG*100)/100,Math.round(tF*100)/100,Math.round(tN*100)/100,esc(curr)].join(','));
+    lines.push('');
+    lines.push(esc(EN?'Summary of MTL activity (estimate). Drop-ins are individual transactions; memberships show the current monthly rate. Your Stripe Dashboard is the authoritative source for tax and actual recurring charges.':'Souhrn MTL aktivity (odhad). Drop-iny jsou jednotlive transakce; clenstvi ukazuje aktualni mesicni sazbu. Zavazny zdroj pro dane a skutecne opakovane platby je tvuj Stripe Dashboard.'));
+    const csv='\ufeff'+lines.join('\n'); const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
+    const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='mtl-gym-ucetnictvi-'+new Date().toISOString().slice(0,10)+'.csv';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+    toast(EN?'✓ CSV exported':'✓ CSV vyexportováno');
+  }catch(e){ console.error('exportGymCsv', e); toast('⚠️ '+e.message); }
+}
+function exportCoachCsv(rows, curr){
+  try{
+    const esc=v=>{ const t=String(v==null?'':v); return /[",\n;]/.test(t) ? '"'+t.replace(/"/g,'""')+'"' : t; };
+    const EN=LANG==='en';
+    const hdr=[EN?'Date':'Datum',EN?'Student':'Student',EN?'Type':'Typ',EN?'Discipline':'Disciplina',EN?'Gross':'Hrube',EN?'MTL fee':'MTL poplatek',EN?'Net':'Ciste',EN?'Currency':'Mena'];
+    const lines=[hdr.join(',')];
+    let tG=0,tF=0,tN=0;
+    (rows||[]).forEach(b=>{
+      const amt=b.amount||0; const keep=(b.coach_keep_pct!=null?b.coach_keep_pct:myKeepPct());
+      const net=Math.round(amt*keep*100)/100; const fee=Math.round((amt-net)*100)/100;
+      tG+=amt; tF+=fee; tN+=net;
+      const date=b.training_date||(b.created_at||'').slice(0,10)||'';
+      const type=b.type==='online'?'Online':'1:1';
+      lines.push([esc(date),esc(b.student_name||''),esc(type),esc(b.discipline||''),amt,fee,net,esc(b.currency||curr||'CZK')].join(','));
+    });
+    lines.push('');
+    lines.push([esc(EN?'TOTAL':'CELKEM'),'','','',Math.round(tG*100)/100,Math.round(tF*100)/100,Math.round(tN*100)/100,esc(curr||'CZK')].join(','));
+    lines.push('');
+    lines.push(esc(EN?'Estimate from MTL data. Your Stripe Dashboard is the authoritative source for tax/accounting.':'Odhad z dat MTL. Závazný zdroj pro daňe/účetnictví je tvůj Stripe Dashboard.'));
+    const csv='\ufeff'+lines.join('\n');
+    const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
+    const url=URL.createObjectURL(blob); const a=document.createElement('a');
+    a.href=url; a.download='mtl-ucetnictvi-'+new Date().toISOString().slice(0,10)+'.csv';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+    toast(EN?'✓ CSV exported':'✓ CSV vyexportováno');
+  }catch(e){ console.error('exportCoachCsv', e); toast('⚠️ '+e.message); }
+}
 async function renderEarnings(){
   const tab = $('diaryEarnTab');
   const myPct = myKeepPct();
@@ -12296,10 +12352,13 @@ async function renderEarnings(){
     <div style="font-size:12px;color:var(--light);margin-bottom:4px;">${L('Vyděláno po měsících:')}</div>
     ${renderBars(earnedByMonth, 'var(--green)')}
     ${partnerBlock}
+    <button id="csvExportBtn" style="width:100%;padding:12px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-top:16px;">${LANG==='en'?'⬇ Export for accountant (CSV)':'⬇ Export pro účetní (CSV)'}</button>
+    <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:8px;">${LANG==='en'?'Summary of your MTL activity (estimate). Your Stripe Dashboard is the authoritative source for tax.':'Souhrn tvé MTL aktivity (odhad). Závazný zdroj pro daňe je tvůj Stripe Dashboard.'}</p>
     <div id="myStatsBox" style="margin-top:20px;"></div>
   `;
   // doplň statistiky (rezervace, storna, hodnocení)
   tab.querySelectorAll('.partnerLearnBtn').forEach(b=>b.onclick=openPartnerInfo);
+  { const _csv=tab.querySelector('#csvExportBtn'); if(_csv) _csv.onclick=()=>exportCoachCsv(past, curr); }
   renderCoachAnalyticsCompact(currentUser.id, 'myStatsBox');
 }
 
