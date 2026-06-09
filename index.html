@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-DV | Milestones: an in-person 1:1 lesson now counts as Trained only after BOTH sides confirm it happened (student_confirmed and coach_confirmed), not just once the time passed. MTL Opportunities copy de-Muay-Thai-fied: spread martial arts across the world, and from your first punch to running your own gym. The big Become an MTL Verified Coach card is now dismissible with an X (remembered locally); non-coaches can still reach it via MTL Opportunities. -->
+<!-- MTL build: 2026-06-07-DW | Reception on-the-spot drop-in check-in. Reception now searches ANY app user by name (not just members) and shows their membership status (valid / no-payment / no-membership). Each person has Check in to a class, which lists todays classes from the schedule with the per-class coach and drop-in price (the coachs own price if approved). Paid in person records a drop-in booking marked paid_in_person (cash/terminal, no Stripe fee, base price) AND auto-checks the students attendance for that exact class+coach; Free records attendance only (covered/comped). Duplicate check-in is guarded. Needs latest mtl-schema.sql (gym_bookings.paid_in_person). -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -6354,47 +6354,118 @@ const CLASS_LEVELS = [
 ];
 function levelLabel(v){ if(!v) return LANG==='en'?'All levels':'Všichni'; const o=CLASS_LEVELS.find(x=>x.v===v); if(o) return LANG==='en'?o.en:o.cs; return v; }
 let _recMembers=[]; let _recGymId=null;
+let _recGym=null, _recCoachPricing={}, _recRows=[], _recCheckinMember=null, _recTodayClasses=[];
 async function openReception(gymId, gymName){
-  _recGymId=gymId;
+  _recGymId=gymId; _recCheckinMember=null;
   openSheet('shReception');
   const nm=gymName||(window._myGymData&&_myGymData.name)||'';
   const t=$('recTitle'); if(t) t.textContent=(LANG==='en'?'Reception':'Recepce')+(nm?' \u00b7 '+nm:'');
-  const sb=$('recSearch'); if(sb){ sb.placeholder=(LANG==='en'?'Search member by name\u2026':'Hledat \u010dlena podle jm\u00e9na\u2026'); sb.value=''; sb.oninput=()=>renderReceptionList(sb.value); }
+  const sb=$('recSearch'); if(sb){ sb.placeholder=(LANG==='en'?'Search anyone by name\u2026':'Hledat kohokoli podle jm\u00e9na\u2026'); sb.value=''; sb.oninput=()=>renderReceptionList(sb.value); }
   const list=$('recList'); if(list) list.innerHTML='<p style="color:var(--light);padding:14px;text-align:center;">\u2026</p>';
   if($('btnCloseRec')) $('btnCloseRec').onclick=()=>closeSheet('shReception');
-  try{
-    const { data } = await supaClient.from('gym_memberships').select('*').eq('gym_id', gymId).in('status',['active','cancelling']).order('student_name',{ascending:true});
-    _recMembers = data||[];
-  }catch(e){ _recMembers=[]; }
-  const h=$('recHint'); if(h) h.textContent=(LANG==='en'?_recMembers.length+' member(s) with a membership':_recMembers.length+' \u010dlen\u016f s \u010dlenstv\u00edm');
+  _recGym=null; _recCoachPricing={};
+  try{ const { data: g } = await supaClient.from('gyms').select('*').eq('id', gymId).single(); _recGym=g||null; }catch(e){}
+  try{ const { data: cps } = await supaClient.from('gym_coach_pricing').select('coach_id,dropin_price,currency,status').eq('gym_id', gymId).eq('status','approved'); (cps||[]).forEach(cp=>{ _recCoachPricing[cp.coach_id]=cp; }); }catch(e){}
+  try{ const { data } = await supaClient.from('gym_memberships').select('*').eq('gym_id', gymId).in('status',['active','cancelling']).order('student_name',{ascending:true}); _recMembers = data||[]; }catch(e){ _recMembers=[]; }
+  const h=$('recHint'); if(h) h.textContent=(LANG==='en'?'Type a name to find anyone, or pick a current member below':'Napi\u0161 jm\u00e9no pro vyhled\u00e1n\u00ed kohokoli, nebo vyber \u010dlena n\u00ed\u017ee');
   renderReceptionList('');
 }
 function recStatus(m){
+  if(!m) return { valid:false, expired:false, pe:null, none:true };
   const now=Date.now();
   const pe=m.period_end?new Date(m.period_end).getTime():null;
   const expired = pe!==null && pe<now;
   const valid = (m.status==='active'||m.status==='cancelling') && !expired;
   return { valid, expired, pe };
 }
-function renderReceptionList(filter){
+function _recBadge(st){
+  if(st.valid) return '<span style="background:#E8F5EE;color:#006040;border:1px solid #A8E6C0;border-radius:999px;padding:5px 11px;font-size:12px;font-weight:800;white-space:nowrap;">\u2705 '+(LANG==='en'?'Valid':'Plat\u00ed')+'</span>';
+  const lbl = st.none ? (LANG==='en'?'No membership':'Bez \u010dlenstv\u00ed') : (st.expired?(LANG==='en'?'Expired':'Vypr\u0161elo'):(LANG==='en'?'No payment':'Nezaplaceno'));
+  return '<span style="background:#FEECEC;color:var(--red);border:1px solid #F7C5C5;border-radius:999px;padding:5px 11px;font-size:12px;font-weight:800;white-space:nowrap;">\u26d4 '+lbl+'</span>';
+}
+function _recRowHtml(r){
+  const m=r._memb; const st=recStatus(m);
+  const dl=(LANG==='en'?'en-GB':'cs-CZ');
+  const until = st.pe ? ((LANG==='en'?'until ':'do ')+new Date(st.pe).toLocaleDateString(dl)) : '';
+  const lv = (m && typeof accessLabel==='function') ? accessLabel(m.plan_access) : '';
+  const meta=[(m&&m.plan_name)||'', lv, until].filter(Boolean).join(' \u00b7 ');
+  return '<div style="border:1px solid var(--border);border-radius:13px;padding:13px 14px;margin-bottom:9px;background:'+(st.valid?'#F6FFFB':'#FFF7F7')+';">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;"><div style="font-weight:800;font-size:15.5px;color:var(--dark);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escapeHtml(r.student_name||'\u2014')+'</div>'+_recBadge(st)+'</div>'
+    +(meta?'<div style="font-size:12px;color:var(--mid);margin-top:5px;">'+escapeHtml(meta)+'</div>':'')
+    +'<button class="recCheckinBtn" data-sid="'+r.student_id+'" style="margin-top:10px;width:100%;padding:10px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(LANG==='en'?'Check in to a class \u2192':'Odbavit na lekci \u2192')+'</button>'
+    +'</div>';
+}
+async function renderReceptionList(filter){
   const list=$('recList'); if(!list) return;
-  const f=(filter||'').trim().toLowerCase();
-  const rows=_recMembers.filter(m=>!f || (m.student_name||'').toLowerCase().indexOf(f)>=0);
-  if(!rows.length){ list.innerHTML='<p style="color:var(--light);padding:18px;text-align:center;">'+(LANG==='en'?'No members found':'Nikdo nenalezen')+'</p>'; return; }
-  list.innerHTML=rows.map(m=>{
-    const st=recStatus(m);
-    const dl=(LANG==='en'?'en-GB':'cs-CZ');
-    const until = st.pe ? ((LANG==='en'?'until ':'do ')+new Date(st.pe).toLocaleDateString(dl)) : '';
-    const lv = (typeof accessLabel==='function') ? accessLabel(m.plan_access) : '';
-    const badge = st.valid
-      ? '<span style="background:#E8F5EE;color:#006040;border:1px solid #A8E6C0;border-radius:999px;padding:5px 11px;font-size:12px;font-weight:800;white-space:nowrap;">\u2705 '+(LANG==='en'?'Valid':'Plat\u00ed')+'</span>'
-      : '<span style="background:#FEECEC;color:var(--red);border:1px solid #F7C5C5;border-radius:999px;padding:5px 11px;font-size:12px;font-weight:800;white-space:nowrap;">\u26d4 '+(st.expired?(LANG==='en'?'Expired':'Vypr\u0161elo'):(LANG==='en'?'No payment':'Nezaplaceno'))+'</span>';
-    const meta=[m.plan_name||'', lv, until].filter(Boolean).join(' \u00b7 ');
-    return '<div style="border:1px solid var(--border);border-radius:13px;padding:13px 14px;margin-bottom:9px;background:'+(st.valid?'#F6FFFB':'#FFF7F7')+';">'
-      +'<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;"><div style="font-weight:800;font-size:15.5px;color:var(--dark);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escapeHtml(m.student_name||'\u2014')+'</div>'+badge+'</div>'
-      +(meta?'<div style="font-size:12px;color:var(--mid);margin-top:5px;">'+escapeHtml(meta)+'</div>':'')
-      +'</div>';
-  }).join('');
+  _recCheckinMember=null;
+  const f=(filter||'').trim();
+  let rows=[];
+  if(f.length>=2){
+    list.innerHTML='<p style="color:var(--light);padding:14px;text-align:center;">\u2026</p>';
+    let users=[];
+    try{ const { data } = await supaClient.from('profiles').select('id,name').ilike('name','%'+f+'%').limit(15); users=data||[]; }catch(e){}
+    let mmap={};
+    if(users.length){ try{ const ids=users.map(u=>u.id); const { data: ms } = await supaClient.from('gym_memberships').select('*').eq('gym_id',_recGymId).in('student_id',ids).in('status',['active','cancelling']); (ms||[]).forEach(mm=>{ mmap[mm.student_id]=mm; }); }catch(e){} }
+    rows=users.map(u=>({ student_id:u.id, student_name:u.name, _memb:mmap[u.id]||null }));
+  } else {
+    rows=(_recMembers||[]).map(m=>({ student_id:m.student_id, student_name:m.student_name, _memb:m }));
+  }
+  _recRows=rows;
+  if(!rows.length){ list.innerHTML='<p style="color:var(--light);padding:18px;text-align:center;">'+(LANG==='en'?'Nobody found':'Nikdo nenalezen')+'</p>'; return; }
+  list.innerHTML=rows.map(_recRowHtml).join('');
+  list.querySelectorAll('.recCheckinBtn').forEach(b=>b.onclick=()=>{ const r=_recRows.find(x=>String(x.student_id)===b.dataset.sid); if(r) openRecCheckin(r); });
+}
+function _todayGymClasses(g){
+  let sch=[]; try{ sch=JSON.parse(g.schedule||'[]'); }catch(e){ sch=[]; }
+  const now=new Date(); const dow=now.getDay(); const ds=now.toISOString().slice(0,10);
+  return (sch||[]).filter(c=>Number(c.day)===dow).map(c=>({ name:c.name||'', date:ds, time:c.time||'18:00', level:c.level||'all', coach:c.coach||null, coachName:c.coachName||null, disc:c.disc||null })).sort((a,b)=>String(a.time).localeCompare(String(b.time)));
+}
+function _recPrice(occ){
+  const g=_recGym||{}; const cp=(_recCoachPricing||{})[occ.coach];
+  const dp=(cp&&cp.dropin_price)?cp.dropin_price:(g.dropin_price||0);
+  const dcur=(cp&&cp.dropin_price)?(cp.currency||g.currency||'CZK'):(g.currency||'CZK');
+  return { dp, dcur };
+}
+function openRecCheckin(r){
+  _recCheckinMember=r;
+  const list=$('recList'); const g=_recGym; if(!list||!g) return;
+  _recTodayClasses=_todayGymClasses(g);
+  const symf=(x)=>x==='EUR'?'\u20ac':x==='USD'?'$':'K\u010d';
+  let html='<button id="recBackBtn" style="background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:8px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';color:var(--dark);margin-bottom:10px;">\u2190 '+(LANG==='en'?'Back':'Zp\u011bt')+'</button>';
+  html+='<div style="font-weight:800;font-size:15px;color:var(--dark);margin-bottom:4px;">'+(LANG==='en'?'Check in: ':'Odbavit: ')+escapeHtml(r.student_name||'')+'</div>';
+  const st=recStatus(r._memb); html+='<div style="margin-bottom:12px;">'+_recBadge(st)+'</div>';
+  if(!_recTodayClasses.length){ html+='<p style="color:var(--light);padding:10px;">'+(LANG==='en'?'No classes scheduled today.':'Dnes nejsou \u017e\u00e1dn\u00e9 lekce v rozvrhu.')+'</p>'; }
+  else {
+    html+='<div style="font-size:12px;color:var(--light);margin-bottom:8px;">'+(LANG==='en'?'Today\u2019s classes':'Dne\u0161n\u00ed lekce')+'</div>';
+    html+=_recTodayClasses.map((o,i)=>{
+      const pr=_recPrice(o);
+      const who=o.coachName?(' \u00b7 '+escapeHtml(o.coachName)):'';
+      return '<div style="border:1px solid var(--border);border-radius:12px;padding:11px 12px;margin-bottom:8px;">'
+        +'<div style="font-weight:700;font-size:14px;color:var(--dark);">'+escapeHtml(o.name||(LANG==='en'?'Class':'Lekce'))+'</div>'
+        +'<div style="font-size:12px;color:var(--mid);margin:2px 0 8px;">'+(o.time||'')+who+' \u00b7 '+(typeof levelLabel==='function'?levelLabel(o.level||'all'):(o.level||''))+'</div>'
+        +'<div style="display:flex;gap:8px;">'
+        +'<button class="recPayBtn" data-i="'+i+'" style="flex:1;padding:10px;background:#006040;color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(LANG==='en'?'Paid in person':'Zaplaceno na m\u00edst\u011b')+' \u00b7 '+fmtPrice(pr.dp,pr.dcur)+' '+symf(pr.dcur)+'</button>'
+        +'<button class="recFreeBtn" data-i="'+i+'" style="padding:10px 12px;background:var(--surf);color:var(--mid);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(LANG==='en'?'Free':'Zdarma')+'</button>'
+        +'</div></div>';
+    }).join('');
+  }
+  list.innerHTML=html;
+  if($('recBackBtn')) $('recBackBtn').onclick=()=>renderReceptionList(($('recSearch')&&$('recSearch').value)||'');
+  list.querySelectorAll('.recPayBtn').forEach(b=>b.onclick=()=>recDoCheckin(_recTodayClasses[+b.dataset.i], true));
+  list.querySelectorAll('.recFreeBtn').forEach(b=>b.onclick=()=>recDoCheckin(_recTodayClasses[+b.dataset.i], false));
+}
+async function recDoCheckin(occ, charge){
+  const r=_recCheckinMember, g=_recGym; if(!r||!g||!occ) return;
+  const pr=_recPrice(occ); const symf=(x)=>x==='EUR'?'\u20ac':x==='USD'?'$':'K\u010d';
+  const disc=occ.disc||((typeof parseDisc==='function'?parseDisc(g.disciplines):[])[0]||null);
+  try{ const { data: ex } = await supaClient.from('gym_attendance').select('id').eq('gym_id',g.id).eq('student_id',r.student_id).eq('class_date',occ.date).eq('class_time',occ.time).limit(1); if(ex&&ex.length){ if(!confirm(LANG==='en'?'Already checked in for this class. Add again?':'Na tuto lekci u\u017e je odbaven/a. P\u0159idat znovu?')) return; } }catch(e){}
+  if(charge){
+    if(!confirm((LANG==='en'?'Charge ':'Na\u00fa\u010dtovat ')+(r.student_name||'')+' \u00b7 '+(occ.name||'')+' \u00b7 '+fmtPrice(pr.dp,pr.dcur)+' '+symf(pr.dcur)+(LANG==='en'?' \u2014 paid in person (cash/terminal)?':' \u2014 zaplaceno na m\u00edst\u011b (hotov\u011b/termin\u00e1l)?'))) return;
+    try{ await supaClient.from('gym_bookings').insert({ gym_id:g.id, student_id:r.student_id, student_name:r.student_name||null, gym_name:g.name||null, amount:pr.dp, currency:pr.dcur, status:'active', paid_in_person:true, date:occ.date, time:occ.time, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, level:occ.level||'all', coach_id:occ.coach||null, discipline:disc }); }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
+  }
+  try{ await supaClient.from('gym_attendance').insert({ gym_id:g.id, student_id:r.student_id, student_name:r.student_name||null, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, coach_id:occ.coach||null, discipline:disc, marked_by:currentUser?currentUser.id:null }); }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
+  toast(charge?(LANG==='en'?'\u2705 Paid & checked in':'\u2705 Zaplaceno a odbaveno'):(LANG==='en'?'\u2705 Checked in':'\u2705 Odbaveno'));
+  renderReceptionList(($('recSearch')&&$('recSearch').value)||'');
 }
 async function recpSearchUsers(){
   const q=($('recpSearch')&&$('recpSearch').value.trim())||'';
