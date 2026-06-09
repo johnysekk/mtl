@@ -38,10 +38,10 @@ async function coachCheckout(req, res) {
 
   const rate = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
-  let COMMISSION = commission ? parseFloat(commission) : 0.17;
-  if (!(COMMISSION >= 0.02 && COMMISSION <= 0.25)) COMMISSION = 0.17;
-  let MK = markup ? parseFloat(markup) : 1.10;
-  if (!(MK >= 1.00 && MK <= 1.10)) MK = 1.10;
+  let COMMISSION = commission ? parseFloat(commission) : 0.10;
+  if (!(COMMISSION >= 0.02 && COMMISSION <= 0.25)) COMMISSION = 0.10;
+  let MK = markup ? parseFloat(markup) : 1.05;
+  if (!(MK >= 1.00 && MK <= 1.10)) MK = 1.05;
   const STUDENT_MARKUP = (String(nomarkup) === '1') ? 1.00 : MK;
 
   const isCZK = String(currency || 'CZK').toUpperCase() === 'CZK';

@@ -175,7 +175,7 @@ export default async function handler(req, res) {
         if (uid) {
           await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: true, partner_sub: sub || null, stripe_customer: cust || null });
           await rerateGymMemberships(uid, 3); // existující členství → 3 % od příští faktury (Exclusive Partner)
-          await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Teď jsi Exclusive MTL Partner! Z lekcí si necháváš 99 %, student platí jen +7 %, a u gymu si necháváš 99 % z jednorázovek a 97 % z členství. 🥊' });
+          await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Teď jsi Exclusive MTL Partner! Z lekcí si necháváš 99 %, student platí jen +3 %, a u gymu si necháváš 99 % z jednorázovek a 97 % z členství. 🥊' });
           await sbPost('notifications', { user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'system', read: false, message: `⭐ Nový Exclusive MTL Partner (user ${uid}).` });
         }
       }
@@ -195,7 +195,7 @@ export default async function handler(req, res) {
       if (uid) {
         await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: false, partner_sub: null });
         await rerateGymMemberships(uid, 5); // zpět na 5 % od příští faktury
-        await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_ended' }), message: '⭐ Teď už nejsi Exclusive MTL Partner. Děkujeme za tvoji přízeň! Sazby se vrátily na standard (kouč 93 % / student +10 %, gym jednorázovky 97 %, členství 95 %).' });
+        await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_ended' }), message: '⭐ Teď už nejsi Exclusive MTL Partner. Děkujeme za tvoji přízeň! Sazby se vrátily na standard (kouč 95 % / student +5 %, gym jednorázovky 97 %, členství 95 %).' });
       }
     } else if (event.type === 'charge.dispute.created') {
       const d = event.data.object;

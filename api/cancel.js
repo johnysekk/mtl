@@ -19,7 +19,7 @@ async function sbGet(path) {
 //   Student ruší <16h   → student 50 %
 //   Kouč ruší (hoursUntil>=900) → student 100 %
 //   No-show / po termínu → 0
-const STUDENT_MARKUP = 1.10;
+const STUDENT_MARKUP = 1.05;
 
 export default async function handler(req, res) {
   try {
