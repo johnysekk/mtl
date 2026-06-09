@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-DZ | Member check-in QR. In My gym memberships, each membership has a Show check-in QR button: it shows a QR encoding a check-in URL (gym + the members id). Reception scans it with their phones native camera (the QR is a URL, no custom scanner needed) which opens the app, verifies the viewer is gym staff (owner or active coach), then opens that members check-in (pick todays class, then Free for covered members or Card). Attendance is recorded as before. No schema or serverless change for this part. -->
+<!-- MTL build: 2026-06-07-EA | Fixes. Reception: the non-user drop-in button is now a permanent button in the sheet (no longer only after typing) and is renamed to Jednorazova lekce in Czech; fixed the empty today-class list (schedule jsonb was being JSON.parsed even when already an array). Schedule editor: removed the confusing duplicate Add class (Pridat tridu) button; restyled Add a class; the open lesson form now has a clear Save class (Ulozit lekci) button that persists to the DB for both new and existing classes (so edits no longer rely on the section Save changes button). No schema or serverless change. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -1458,6 +1458,7 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
   <div style="padding:14px 18px;display:flex;flex-direction:column;height:100%;box-sizing:border-box;">
     <input id="recSearch" type="text" autocomplete="off" style="width:100%;box-sizing:border-box;padding:14px 16px;border:1px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';margin-bottom:6px;">
     <div id="recHint" style="font-size:12px;color:var(--light);margin-bottom:10px;"></div>
+    <button id="recGuestBtnFixed" data-noi18n style="width:100%;padding:12px;background:#0f2233;color:#fff;border:none;border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;margin-bottom:12px;display:none;"></button>
     <div id="recList" style="overflow-y:auto;flex:1;"></div>
   </div>
 </div>
@@ -5784,7 +5785,6 @@ async function renderGymManage(){
     </div>
     <div id="gmSchedTab">    <div class="sec-lbl">${LANG==='en'?'Weekly class schedule':'Týdenní rozvrh tříd'}</div>
     <div id="mgSchedule"></div>
-    <button id="mgAddClass" style="width:100%;padding:11px;background:var(--bg);border:1px dashed var(--border);border-radius:10px;font-weight:600;color:var(--dark);cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">+ ${LANG==='en'?'Add class':'Přidat třídu'}</button>
     <button id="mgAddRepeat" style="width:100%;padding:11px;background:var(--bg);border:1px dashed var(--border);border-radius:10px;font-weight:600;color:var(--dark);cursor:pointer;font-family:'DM Sans';margin-bottom:10px;">📅 ${LANG==='en'?'Add recurring (multiple days)':'Přidat opakovaně (více dní)'}</button>
     <div id="mgRepeatPanel" style="display:none;border:1.5px solid var(--border);border-radius:12px;padding:12px;margin-bottom:16px;background:var(--surf);">
       <div style="font-size:13px;font-weight:700;color:var(--dark);margin-bottom:8px;">📅 ${LANG==='en'?'Recurring class':'Opakovaná lekce'}</div>
@@ -5926,7 +5926,6 @@ async function renderGymManage(){
   box.querySelectorAll('.partnerLearnBtn').forEach(b=>b.onclick=openPartnerInfo);
   document.querySelectorAll('.orgFormBtn').forEach(b=>b.onclick=()=>{ _gymOrgForm=b.dataset.v; setOrgFormUI(); renderPlansEditor(); loadGymManageBookings(); });
   if($('mgAddPlan')) $('mgAddPlan').onclick=()=>{ _gymPlans.push({ id:'p'+Date.now().toString(36), name:'', price:0, access:['all'] }); renderPlansEditor(); };
-  $('mgAddClass').onclick=()=>{ _gymSchedule.push({day:1, time:'18:00', name:'', level:'all', disc:(isMultiDiscipline()?defaultDiscipline():null)}); renderScheduleEditor(); };
   if($('mgAddRepeat')) $('mgAddRepeat').onclick=()=>{ const pn=$('mgRepeatPanel'); if(pn) pn.style.display = pn.style.display==='none' ? 'block' : 'none'; };
   if($('rpCreate')) $('rpCreate').onclick=()=>{
     const name=($('rpName')&&$('rpName').value.trim())||'';
@@ -6371,6 +6370,7 @@ async function openReception(gymId, gymName){
   try{ const { data: cps } = await supaClient.from('gym_coach_pricing').select('coach_id,dropin_price,currency,status').eq('gym_id', gymId).eq('status','approved'); (cps||[]).forEach(cp=>{ _recCoachPricing[cp.coach_id]=cp; }); }catch(e){}
   try{ const { data } = await supaClient.from('gym_memberships').select('*').eq('gym_id', gymId).in('status',['active','cancelling']).order('student_name',{ascending:true}); _recMembers = data||[]; }catch(e){ _recMembers=[]; }
   const h=$('recHint'); if(h) h.textContent=(LANG==='en'?'Type a name to find anyone, or pick a current member below':'Napi\u0161 jm\u00e9no pro vyhled\u00e1n\u00ed kohokoli, nebo vyber \u010dlena n\u00ed\u017ee');
+  const gb=$('recGuestBtnFixed'); if(gb){ gb.textContent='👤 '+(LANG==='en'?'Drop-in for a non-user (no app)':'Jednorázová lekce pro neuživatele (bez appky)'); gb.style.display='block'; gb.onclick=openGuestDropin; }
   renderReceptionList('');
 }
 function recStatus(m){
@@ -6414,13 +6414,11 @@ async function renderReceptionList(filter){
     rows=(_recMembers||[]).map(m=>({ student_id:m.student_id, student_name:m.student_name, _memb:m }));
   }
   _recRows=rows;
-  const _guestBtn='<button id="recGuestBtn" style="width:100%;padding:12px;background:#0f2233;color:#fff;border:none;border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;margin-bottom:12px;">👤 '+(LANG==='en'?'Drop-in for a non-user (no app)':'Drop-in pro neuživatele (bez appky)')+'</button>';
-  list.innerHTML=_guestBtn+(rows.length?rows.map(_recRowHtml).join(''):'<p style="color:var(--light);padding:14px;text-align:center;">'+(LANG==='en'?'Nobody found — use the button above for a walk-in':'Nikdo nenalezen — pro walk-in použij tlačítko nahoře')+'</p>');
-  if($('recGuestBtn')) $('recGuestBtn').onclick=openGuestDropin;
+  list.innerHTML=(rows.length?rows.map(_recRowHtml).join(''):'<p style="color:var(--light);padding:14px;text-align:center;">'+(LANG==='en'?'Nobody found — type a name, or use the button at the top for a walk-in':'Nikdo nenalezen — napiš jméno, nebo použij tlačítko nahoře pro jednorázovou lekci')+'</p>');
   list.querySelectorAll('.recCheckinBtn').forEach(b=>b.onclick=()=>{ const r=_recRows.find(x=>String(x.student_id)===b.dataset.sid); if(r) openRecCheckin(r); });
 }
 function _todayGymClasses(g){
-  let sch=[]; try{ sch=JSON.parse(g.schedule||'[]'); }catch(e){ sch=[]; }
+  let sch=[]; try{ sch=(typeof g.schedule==='string')?JSON.parse(g.schedule||'[]'):(g.schedule||[]); }catch(e){ sch=[]; }
   const now=new Date(); const dow=now.getDay(); const ds=now.toISOString().slice(0,10);
   return (sch||[]).filter(c=>Number(c.day)===dow).map(c=>({ name:c.name||'', date:ds, time:c.time||'18:00', level:c.level||'all', coach:c.coach||null, coachName:c.coachName||null, disc:c.disc||null })).sort((a,b)=>String(a.time).localeCompare(String(b.time)));
 }
@@ -6499,7 +6497,7 @@ function openGuestDropin(){
   _recTodayClasses=_todayGymClasses(g);
   const symf=(x)=>x==='EUR'?'€':x==='USD'?'$':'Kč';
   let html='<button id="recBackBtn" style="background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:8px 12px;font-size:13px;font-weight:700;cursor:pointer;color:var(--dark);margin-bottom:10px;">← '+(LANG==='en'?'Back':'Zpět')+'</button>';
-  html+='<div style="font-weight:800;font-size:15px;color:var(--dark);margin-bottom:2px;">'+(LANG==='en'?'Walk-in drop-in (no app)':'Drop-in pro neuživatele')+'</div>';
+  html+='<div style="font-weight:800;font-size:15px;color:var(--dark);margin-bottom:2px;">'+(LANG==='en'?'Walk-in drop-in (no app)':'Jednorázová lekce pro neuživatele')+'</div>';
   html+='<p style="font-size:12px;color:var(--light);margin-bottom:10px;">'+(LANG==='en'?'Pick the class, then let the visitor scan the QR.':'Vyber lekci a nech návštěvníka naskenovat QR.')+'</p>';
   if(!_recTodayClasses.length){ html+='<p style="color:var(--light);padding:10px;">'+(LANG==='en'?'No classes scheduled today.':'Dnes nejsou žádné lekce v rozvrhu.')+'</p>'; }
   else { html+=_recTodayClasses.map((o,i)=>{ const pr=_recPrice(o); const who=o.coachName?(' · '+escapeHtml(o.coachName)):''; return '<button class="recGuestClsBtn" data-i="'+i+'" style="display:block;width:100%;text-align:left;border:1px solid var(--border);border-radius:12px;padding:11px 12px;margin-bottom:8px;background:var(--surf);cursor:pointer;"><div style="font-weight:700;font-size:14px;color:var(--dark);">'+escapeHtml(o.name||(LANG==='en'?'Class':'Lekce'))+'</div><div style="font-size:12px;color:var(--mid);margin-top:2px;">'+(o.time||'')+who+' · '+fmtPrice(pr.dp,pr.dcur)+' '+symf(pr.dcur)+'</div></button>'; }).join(''); }
@@ -6730,6 +6728,17 @@ function renderPlansEditor(){
   box.querySelectorAll('.planDiscMode').forEach(el=>el.onclick=()=>{ const it=_gymPlans[+el.dataset.i]; if(el.dataset.mode==='all'){ it.disc=null; } else if(!it.disc){ const ds=activeDisciplines(); it.disc=ds.length?ds[0].v:null; } renderPlansEditor(); });
   box.querySelectorAll('.planDisc').forEach(el=>el.onchange=()=>{ _gymPlans[+el.dataset.i].disc=el.value||null; });
 }
+async function saveScheduleOnly(){
+  if(!_myGymData) return;
+  const sched = JSON.stringify(_gymSchedule.map(c=>({ ...c, name: (c.name&&String(c.name).trim()) ? c.name.trim() : levelLabel(c.level||'all') })));
+  try{
+    const { error } = await supaClient.from('gyms').update({ schedule: sched }).eq('id', _myGymData.id);
+    if(error){ toast('⚠️ '+error.message); return; }
+    _myGymData.schedule=sched;
+    toast(LANG==='en'?'✅ Class saved':'✅ Lekce uložena');
+    _schedEdit=-1; renderScheduleEditor();
+  }catch(e){ toast('⚠️ '+(e.message||'error')); }
+}
 function renderScheduleEditor(){
   const box=$('mgSchedule'); if(!box) return;
   const days=dayNames();
@@ -6749,6 +6758,7 @@ function renderScheduleEditor(){
       <select class="schLevel" data-i="${i}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${CLASS_LEVELS.concat(gymCustomTags().map(t=>({v:t,cs:t,en:t}))).map(o=>`<option value="${o.v}" ${o.v===(c.level||'all')?'selected':''}>${LANG==='en'?o.en:o.cs}</option>`).join('')}</select>
       ${isMultiDiscipline()?`<select class="schDisc" data-i="${i}" style="width:100%;box-sizing:border-box;padding:10px;margin-top:6px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${activeDisciplines().filter(o=>!(_gymMgDisc&&_gymMgDisc.length)||_gymMgDisc.includes(o.v)).map(o=>{ const _gd=(_gymMgDisc&&_gymMgDisc.length); const _sel=(c.disc && (!_gd||_gymMgDisc.includes(c.disc))) ? c.disc : ((_gd&&_gymMgDisc[0])||defaultDiscipline()); return `<option value="${o.v}" ${o.v===_sel?'selected':''}>${o.emoji} ${LANG==='en'?o.en:o.cs}</option>`; }).join('')}</select>`:''}
       ${c.coachOwned ? `<div style="font-size:11px;color:var(--light);margin:6px 0 2px;">${LANG==='en'?'Paid to:':'Platba komu:'}</div><div style="padding:9px 11px;border:1.5px solid #A8E6C0;background:#F0FBF0;border-radius:10px;font-size:13px;font-weight:700;color:#006040;">🔒 ${escapeHtml(c.coachName||(LANG==='en'?'Coach':'Kouč'))}</div><div style="font-size:10.5px;color:var(--light);margin-top:3px;line-height:1.45;">${LANG==='en'?'This class was set up by the coach with their own pricing — payment goes to them and cannot be changed here.':'Tuto lekci si nastavil kouč s vlastním ceníkem — platba jde jemu a nelze ji tu změnit.'}</div>` : payeeSelectHtml('schCoach', i, c.coach)}
+      <button class="schSaveCls" data-i="${i}" style="width:100%;margin-top:10px;padding:11px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;">💾 ${LANG==='en'?'Save class':'Uložit lekci'}</button>
     </div>`;
   const rangeLbl=`${weekDates[0].getDate()}.${weekDates[0].getMonth()+1}. – ${weekDates[6].getDate()}.${weekDates[6].getMonth()+1}.`;
   let html=`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
@@ -6767,7 +6777,7 @@ function renderScheduleEditor(){
   const idxs=_gymSchedule.map((c,i)=>({c,i})).filter(x=>Number(x.c.day)===_schedSelDow).sort((a,b)=>String(a.c.time||'').localeCompare(String(b.c.time||'')));
   html+=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
       <div style="font-weight:800;font-size:14px;letter-spacing:.02em;">${days[_schedSelDow]} <span style="color:var(--light);font-weight:600;">(${idxs.length})</span></div>
-      <button id="schAddSel" style="font-size:13px;font-weight:700;color:var(--blue);background:none;border:none;cursor:pointer;font-family:'DM Sans';">+ ${LANG==='en'?'Add class':'Přidat lekci'}</button>
+      <button id="schAddSel" style="font-size:13px;font-weight:700;color:#fff;background:var(--blue);border:none;border-radius:9px;padding:7px 13px;cursor:pointer;">+ ${LANG==='en'?'Add a class':'Přidat lekci'}</button>
     </div>`;
   if(!idxs.length) html+=`<div style="font-size:13px;color:var(--light);padding:6px 0 10px;">${LANG==='en'?'No classes on this day.':'V tento den žádné lekce.'}</div>`;
   idxs.forEach(({c,i})=>{ const open=i===_schedEdit; const lvl=(c.level&&c.level!=='all')?` · ${levelLabel(c.level)}`:''; const led=c.coachName?` · 👤 ${escapeHtml(c.coachName)}`:'';
@@ -6793,6 +6803,7 @@ function renderScheduleEditor(){
   box.querySelectorAll('.schDisc').forEach(el=>{ const it=_gymSchedule[+el.dataset.i]; if(!it.disc) it.disc=el.value||defaultDiscipline(); el.onchange=()=>{ _gymSchedule[+el.dataset.i].disc=el.value; }; });
   box.querySelectorAll('.schCoach').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; it.coach=el.value||null; const c=_gymTeamCoaches.find(x=>x.id===el.value); it.coachName=c?c.name:null; });
   box.querySelectorAll('.schDel').forEach(el=>el.onclick=()=>{ _gymSchedule.splice(+el.dataset.i,1); _schedEdit=-1; renderScheduleEditor(); });
+  box.querySelectorAll('.schSaveCls').forEach(el=>el.onclick=()=>saveScheduleOnly());
 }
 async function submitGymChangeRequest(){
   if(!_myGymData) return;
