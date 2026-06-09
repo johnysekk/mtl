@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-FD | Accounting exports made accurate + extended. Coach and gym CSV now show Gross as the amount the student actually paid (base times the platform markup: coach 1.03 partner / 1.05 other; gym drop-in 1.02 partner / 1.03; memberships have no markup), MTL fee is the full platform take (Gross minus Net), Net is the provider keep, and a new MTL percent column shows the effective platform rate. CSV filenames are language-aware (accounting vs ucetnictvi). New exportCoachGymCsv plus an Export button in openCoachEarnings lets a team coach export the classes they led at a gym, clearly labelled informational because the gym is the payee. Needs deploy of index only. -->
+<!-- MTL build: 2026-06-07-FG | Added paid_to flag to gym booking records so earnings can be split exactly between coach-as-payee and gym-as-payee going forward. Set on all insert paths: drop-in, reception check-in, guest pay, and membership store paid_to = coach when the lead coach has a payout account else gym; the in-person (cash) insert stores in_person. Requires a new paid_to text column on gym_bookings and gym_memberships in Supabase. Old rows have null; the exact historical split can be wired once rows carry the flag. Needs deploy of index only. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4815,7 +4815,7 @@ async function subscribeGymMembership(g, plan){
   toast(L('💳 Přesměrovávám na platbu...'));
   try {
     const { data: mb, error } = await supaClient.from('gym_memberships').insert({
-      gym_id: g.id, gym_name: g.name||'Gym', student_id: currentUser.id, student_name: currentUser.name||'Student',
+      gym_id: g.id, gym_name: g.name||'Gym', student_id: currentUser.id, student_name: currentUser.name||'Student', paid_to: payee.coachId?'coach':'gym',
       amount: plan.price||0, currency: (plan._cur||g.currency||'CZK'), status:'pending',
       plan_name: plan.name||null, plan_access: JSON.stringify((plan.access&&plan.access.length)?plan.access:['all'])
     }).select().single();
@@ -4839,7 +4839,7 @@ async function bookGymDropin(g, occ){
   try {
     const _today = new Date().toISOString().slice(0,10);
     const rec = {
-      gym_id: g.id, student_id: currentUser.id,
+      gym_id: g.id, student_id: currentUser.id, paid_to: payee.coachId?'coach':'gym',
       amount: _dp, currency: _dcur, status:'pending',
       date: (occ&&occ.date)||_today, time: (occ&&occ.time)||'18:00'
     };
@@ -5489,7 +5489,7 @@ async function openCoachEarnings(gymId, gymName){
     const { data: mbs } = await supaClient.from('gym_memberships').select('*').eq('gym_id',gymId).eq('coach_id',me).in('status',['active','cancelling']);
     const { data: res } = await supaClient.from('gym_class_reservations').select('*').eq('gym_id',gymId).eq('coach_id',me);
     const drops=bks||[], mems=mbs||[], rsv=res||[];
-    const _ceP=!!(currentUser&&currentUser.partner); const dropMine=drops.reduce((s,b)=>s+netAmt(b)*(b.gym_keep_pct!=null?b.gym_keep_pct:(_ceP?0.99:0.97)),0);
+    const _ceP=!!(currentUser&&currentUser.partner); const _paysCoach=!!(currentUser&&currentUser.gym_payout_account); const dropMine=drops.reduce((s,b)=>s+netAmt(b)*(b.gym_keep_pct!=null?b.gym_keep_pct:(_ceP?0.99:0.97)),0);
     const memMine=mems.reduce((s,m)=>s+(m.amount||0)*(m.gym_keep_pct!=null?m.gym_keep_pct:(_ceP?0.97:0.95)),0);
     const feeEst=drops.reduce((s,b)=>s+(netAmt(b)*1.03*0.019+6),0)+mems.reduce((s,m)=>s+((m.amount||0)*0.019+6),0);
     const grossTotal=dropMine+memMine, netTotal=Math.max(0,grossTotal-feeEst);
@@ -5503,17 +5503,17 @@ async function openCoachEarnings(gymId, gymName){
     const f=v=>`${fmtPrice(v,cur)} ${sym}`;
     body=$('coachEarnBody'); if(!body) return;
     body.innerHTML=`
-      <div class="sec-lbl">${LANG==='en'?'Your revenue (your classes)':'Tvoje tržby (tvoje lekce)'}</div>
+      <div class="sec-lbl">${_paysCoach?(LANG==='en'?'Your revenue · your classes':'Tvoje tržby · tvoje lekce'):(LANG==='en'?'Generated for the gym · your classes':'Vygenerováno pro gym · tvoje lekce')}</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:8px;">
         <div style="background:#F0FBF0;border:1px solid #CDEBD6;border-radius:12px;padding:14px;"><div style="font-size:12px;color:var(--mid);">${LANG==='en'?'Drop-ins':'Jednorázové lekce'} (${drops.length})</div><div style="font-family:'Bebas Neue';font-size:28px;color:#006040;">${f(dropMine)}</div></div>
         <div style="background:#EEF4FF;border:1px solid #CFE0FF;border-radius:12px;padding:14px;"><div style="font-size:12px;color:var(--mid);">${LANG==='en'?'Memberships / mo':'Členství / měs'} (${mems.length})</div><div style="font-family:'Bebas Neue';font-size:28px;color:var(--blue);">${f(memMine)}</div></div>
       </div>
       <div class="prow-group" style="margin-bottom:10px;">
-        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏋️</div><div class="prow-lbl">${LANG==='en'?'Gross profit':'Hrubý zisk'}</div></div><span class="prow-val">${f(grossTotal)}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏋️</div><div class="prow-lbl">${LANG==='en'?'Gross · students paid':'Hrubě · zaplatili studenti'}</div></div><span class="prow-val">${f(grossTotal)}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF0E6;">💳</div><div class="prow-lbl">${LANG==='en'?'− Stripe fee (est.)':'− Stripe fee (odhad)'}</div></div><span class="prow-val">-${f(feeEst)}</span></div>
-        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💎</div><div class="prow-lbl">${LANG==='en'?'= Net (est.)':'= Net (odhad)'}</div></div><span class="prow-val" style="color:#006040;">${f(netTotal)}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💎</div><div class="prow-lbl">${_paysCoach?(LANG==='en'?'= Net (est.)':'= Net (odhad)'):(LANG==='en'?'= Gym net (est.)':'= Čistě gymu (odhad)')}</div></div><span class="prow-val" style="color:#006040;">${f(netTotal)}</span></div>
       </div>
-      <p style="font-size:11px;color:var(--light);margin-bottom:18px;line-height:1.5;">${LANG==='en'?'Payments land directly in your Stripe account; you cover the Stripe processing fee (estimate above), MTL takes its commission. VAT with your accountant.':'Platby chodí přímo na tvůj Stripe účet; Stripe poplatek neseš ty (odhad výše), MTL si bere provizi. DPH řeš s účetní.'}</p>
+      <p style="font-size:11px;color:var(--light);margin-bottom:18px;line-height:1.5;">${_paysCoach?(LANG==='en'?'Payments for these classes go to your connected Stripe account; MTL takes its commission (you bear the Stripe fee). VAT with your accountant.':'Platby za tyto lekce chodí na tvůj připojený Stripe účet; MTL si bere provizi (Stripe poplatek neseš ty). DPH řeš s účetním.'):(LANG==='en'?'These classes are paid to the gym Stripe account; MTL takes its commission (Stripe fee borne by the gym). Your own pay is arranged with the gym, off-platform. VAT with your accountant.':'Tyto lekce se platí na Stripe účet gymu; MTL si bere provizi (Stripe poplatek nese gym). Tvoji vlastní odměnu řešíš s gymem, mimo platformu. DPH řeš s účetním.')}</p>
       <button id="ceMarkAtt" style="width:100%;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:16px;">📋 ${LANG==='en'?'Mark attendance':'Doplnit docházku'}</button>
       <div class="sec-lbl">${LANG==='en'?'Upcoming attendance':'Nadcházející docházka'}</div>
       ${occ.length? occ.map(o=>{ const dd=new Date(o.date); return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:#fff;border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:6px;"><div style="font-size:13px;min-width:0;"><strong>${escapeHtml(o.name)}</strong><div style="color:var(--mid);font-size:12px;">${dn[dd.getDay()]} ${o.time} · ${dd.getDate()}.${dd.getMonth()+1}.</div></div><div style="text-align:right;white-space:nowrap;font-size:12px;"><div style="font-weight:700;color:var(--dark);">${o.paid+o.free} ${LANG==='en'?'people':'lidí'}</div><div style="color:var(--light);">${o.paid} ${LANG==='en'?'paid':'platba'} · ${o.free} ${LANG==='en'?'members':'členů'}</div></div></div>`; }).join('') : `<p style="color:var(--light);font-size:13px;padding:10px 0;">${LANG==='en'?'No upcoming reservations yet.':'Zatím žádné nadcházející rezervace.'}</p>`}
@@ -6601,7 +6601,7 @@ async function recDoCheckinCard(occ){
   try{
     const _today=new Date().toISOString().slice(0,10);
     const disc=occ.disc||((typeof parseDisc==='function'?parseDisc(g.disciplines):[])[0]||null);
-    const rec={ gym_id:g.id, student_id:r.student_id, student_name:r.student_name||'Student', gym_name:g.name||'Gym', amount:_dp, currency:_dcur, status:'pending', reception_checkin:true, date:occ.date||_today, time:occ.time||'18:00', class_name:occ.name||null, class_date:occ.date||null, class_time:occ.time||null, level:occ.level||'all', coach_id:payee.coachId||(occ.coach||null), discipline:disc };
+    const rec={ gym_id:g.id, student_id:r.student_id, student_name:r.student_name||'Student', gym_name:g.name||'Gym', paid_to:payee.coachId?'coach':'gym', amount:_dp, currency:_dcur, status:'pending', reception_checkin:true, date:occ.date||_today, time:occ.time||'18:00', class_name:occ.name||null, class_date:occ.date||null, class_time:occ.time||null, level:occ.level||'all', coach_id:payee.coachId||(occ.coach||null), discipline:disc };
     const { data: bk, error } = await supaClient.from('gym_bookings').insert(rec).select().single();
     if(error){ toast('⚠️ '+error.message); return; }
     let _gymOwnerPartner=false; try{ const _ppid=(payee&&payee.coachId)||g.owner_id; if(_ppid){ const { data: ow }=await supaClient.from('profiles').select('partner').eq('id',_ppid).single(); _gymOwnerPartner=!!(ow&&ow.partner); } }catch(e){}
@@ -6617,7 +6617,7 @@ async function recDoCheckin(occ, charge){
   try{ const { data: ex } = await supaClient.from('gym_attendance').select('id').eq('gym_id',g.id).eq('student_id',r.student_id).eq('class_date',occ.date).eq('class_time',occ.time).limit(1); if(ex&&ex.length){ if(!confirm(LANG==='en'?'Already checked in for this class. Add again?':'Na tuto lekci u\u017e je odbaven/a. P\u0159idat znovu?')) return; } }catch(e){}
   if(charge){
     if(!confirm((LANG==='en'?'Charge ':'Na\u00fa\u010dtovat ')+(r.student_name||'')+' \u00b7 '+(occ.name||'')+' \u00b7 '+fmtPrice(pr.dp,pr.dcur)+' '+symf(pr.dcur)+(LANG==='en'?' \u2014 paid in person (cash/terminal)?':' \u2014 zaplaceno na m\u00edst\u011b (hotov\u011b/termin\u00e1l)?'))) return;
-    try{ await supaClient.from('gym_bookings').insert({ gym_id:g.id, student_id:r.student_id, student_name:r.student_name||null, gym_name:g.name||null, amount:pr.dp, currency:pr.dcur, status:'active', paid_in_person:true, date:occ.date, time:occ.time, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, level:occ.level||'all', coach_id:occ.coach||null, discipline:disc }); }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
+    try{ await supaClient.from('gym_bookings').insert({ gym_id:g.id, student_id:r.student_id, student_name:r.student_name||null, gym_name:g.name||null, amount:pr.dp, currency:pr.dcur, status:'active', paid_in_person:true, paid_to:'in_person', date:occ.date, time:occ.time, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, level:occ.level||'all', coach_id:occ.coach||null, discipline:disc }); }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
   }
   try{ await supaClient.from('gym_attendance').insert({ gym_id:g.id, student_id:r.student_id, student_name:r.student_name||null, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, coach_id:occ.coach||null, discipline:disc, marked_by:currentUser?currentUser.id:null }); }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
   toast(charge?(LANG==='en'?'\u2705 Paid & checked in':'\u2705 Zaplaceno a odbaveno'):(LANG==='en'?'\u2705 Checked in':'\u2705 Odbaveno'));
@@ -12330,7 +12330,8 @@ function exportCoachGymCsv(drops, mems, cur, gymName){
     });
     lines.push(''); lines.push([esc(EN?'TOTAL':'CELKEM'),'','','',Math.round(tG*100)/100,esc(cur||'CZK')].join(','));
     lines.push('');
-    lines.push(esc(EN?('Classes you led at '+(gymName||'the gym')+'. The gym is the payee and receives the payment; your pay is settled with the gym (off-platform). Informational only, not your direct MTL income; your Stripe Dashboard is authoritative.'):('Lekce, ktere jsi vedl v '+(gymName||'gymu')+'. Payee je gym a dostava platbu; tvoje odmena se vyrovnava s gymem (mimo platformu). Pouze informativni, neni to tvuj primy prijem z MTL; zavazny zdroj je tvuj Stripe Dashboard.')));
+    const _pc=!!(currentUser&&currentUser.gym_payout_account);
+    lines.push(esc(_pc?(EN?('Classes you led at '+(gymName||'the gym')+'. Payments for these go to your connected Stripe account; MTL takes its commission. Your Stripe Dashboard is the authoritative source.'):('Lekce, ktere jsi vedl v '+(gymName||'gymu')+'. Platby za ne chodi na tvuj pripojeny Stripe ucet; MTL si bere provizi. Zavazny zdroj je tvuj Stripe Dashboard.')):(EN?('Classes you led at '+(gymName||'the gym')+'. The gym is the payee and receives the payment; your pay is settled with the gym (off-platform). Informational only, not your direct MTL income; your Stripe Dashboard is authoritative.'):('Lekce, ktere jsi vedl v '+(gymName||'gymu')+'. Payee je gym a dostava platbu; tvoje odmena se vyrovnava s gymem (mimo platformu). Pouze informativni, neni to tvuj primy prijem z MTL; zavazny zdroj je tvuj Stripe Dashboard.'))));
     const csv='\ufeff'+lines.join('\n'); const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
     const url=URL.createObjectURL(blob); const a=document.createElement('a');
     a.href=url; a.download=(EN?'mtl-gymteam-':'mtl-gymtym-')+new Date().toISOString().slice(0,10)+'.csv';
@@ -13032,7 +13033,7 @@ async function showPaidPopup(){
       if(!g){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">Gym not found.</p>'; return; }
       const payee = await resolveGymPayee(g, {coach});
       if(!payee.account){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">Payments not set up for this class yet.</p>'; return; }
-      const rec={ gym_id:gymId, amount:amt, currency:cur, status:'pending', reception_checkin:true, guest_token:tok, date:date, time:time, class_name:cls, class_date:date, class_time:time, level:level, coach_id:payee.coachId||coach||null, discipline:disc, gym_name:g.name||'Gym' };
+      const rec={ gym_id:gymId, paid_to:payee.coachId?'coach':'gym', amount:amt, currency:cur, status:'pending', reception_checkin:true, guest_token:tok, date:date, time:time, class_name:cls, class_date:date, class_time:time, level:level, coach_id:payee.coachId||coach||null, discipline:disc, gym_name:g.name||'Gym' };
       const { data: bk, error } = await supaClient.from('gym_bookings').insert(rec).select().single();
       if(error){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">'+error.message+'</p>'; return; }
       let _gp=false; try{ const _ppid=(payee&&payee.coachId)||g.owner_id; if(_ppid){ const { data: ow }=await supaClient.from('profiles').select('partner').eq('id',_ppid).single(); _gp=!!(ow&&ow.partner); } }catch(e){}
