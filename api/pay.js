@@ -42,7 +42,14 @@ async function coachCheckout(req, res) {
   if (!(COMMISSION >= 0.02 && COMMISSION <= 0.25)) COMMISSION = 0.10;
   let MK = markup ? parseFloat(markup) : 1.05;
   if (!(MK >= 1.00 && MK <= 1.10)) MK = 1.05;
-  const STUDENT_MARKUP = (String(nomarkup) === '1') ? 1.00 : MK;
+  let STUDENT_MARKUP = MK;
+  if (String(credit) === 'student') {
+    // Referral reward: student pays exactly the coach's keep, MTL takes 0, coach untouched (~10% off)
+    STUDENT_MARKUP = Math.max(0, MK - COMMISSION);
+    COMMISSION = 0;
+  } else if (String(nomarkup) === '1') {
+    STUDENT_MARKUP = 1.00;
+  }
 
   const isCZK = String(currency || 'CZK').toUpperCase() === 'CZK';
   const unitAmount     = isCZK ? Math.floor(rate * STUDENT_MARKUP) * 100 : Math.round(rate * STUDENT_MARKUP * 100);
