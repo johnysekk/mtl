@@ -54,9 +54,9 @@ async function coachCheckout(req, res) {
 
   let successUrl;
   if (isOnline) {
-    successUrl = `${proto}://${host}/?platba=ok&online=1&coach=${encodeURIComponent(coachProfileId || '')}&amount=${rate}&currency=${currency}&fmt=${encodeURIComponent(fmt || '')}&session={CHECKOUT_SESSION_ID}`;
+    successUrl = `${proto}://${host}/?platba=ok&online=1&coach=${encodeURIComponent(coachProfileId || '')}&amount=${rate}&currency=${currency}&fmt=${encodeURIComponent(fmt || '')}&acct=${encodeURIComponent(coachId)}&session={CHECKOUT_SESSION_ID}`;
   } else {
-    successUrl = `${proto}://${host}/?platba=ok&slot=${encodeURIComponent(slotId || '')}&session={CHECKOUT_SESSION_ID}`;
+    successUrl = `${proto}://${host}/?platba=ok&slot=${encodeURIComponent(slotId || '')}&acct=${encodeURIComponent(coachId)}&session={CHECKOUT_SESSION_ID}`;
   }
 
   const productName = isOnline
@@ -82,8 +82,6 @@ async function coachCheckout(req, res) {
     ],
     payment_intent_data: {
       application_fee_amount: applicationFee,
-      on_behalf_of: coachId,
-      transfer_data: { destination: coachId },
       metadata: {
         credit_type: credit || 'none',
         coach_pct: (STUDENT_MARKUP - COMMISSION).toFixed(2),
@@ -93,7 +91,7 @@ async function coachCheckout(req, res) {
     },
     success_url: successUrl,
     cancel_url: `${proto}://${host}/`,
-  });
+  }, { stripeAccount: coachId });
 
   res.redirect(303, session.url);
 }
