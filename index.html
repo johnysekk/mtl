@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-DY | Walk-in drop-in for non-app-users. In Reception, Drop-in for a non-user lets staff pick todays class and show a QR. The visitor scans it on their phone, the app creates a pending guest drop-in and sends them to Stripe (no login). After paying, we read their email+name from Stripe, mark the booking paid, and email them a magic link to finish signing up. When they log in, the booking is attributed to them and their attendance for that class is recorded automatically (propagates to gym, stats, milestones). No cash. Needs pay.js + session.js redeploy and latest mtl-schema.sql (gym_bookings.guest_email/guest_name/guest_token). -->
+<!-- MTL build: 2026-06-07-DZ | Member check-in QR. In My gym memberships, each membership has a Show check-in QR button: it shows a QR encoding a check-in URL (gym + the members id). Reception scans it with their phones native camera (the QR is a URL, no custom scanner needed) which opens the app, verifies the viewer is gym staff (owner or active coach), then opens that members check-in (pick todays class, then Free for covered members or Card). Attendance is recorded as before. No schema or serverless change for this part. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4876,6 +4876,7 @@ async function loadMyMemberships(){
           ? `<div style="font-size:13px;color:var(--red);margin-bottom:8px;">${LANG==='en'?'⏳ Cancels at the end of the paid period.':'⏳ Zruší se na konci zaplaceného období.'}${m.period_end?`<br><span style="color:var(--mid);font-weight:600;">${LANG==='en'?'Active until':'Aktivní do'}: ${new Date(m.period_end).toLocaleString(LANG==='en'?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric',hour:'2-digit',minute:'2-digit'})}</span>`:''}</div>
              <button class="resumeMembBtn" data-id="${m.id}" data-gym="${m.gym_id}" data-sub="${m.stripe_subscription||''}" style="width:100%;padding:11px;background:#E8F5EE;color:#006040;border:1px solid #A8E6C0;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'↩︎ Resume membership':'↩︎ Zrušit zrušení členství'}</button>`
           : `<button class="cancelMembBtn" data-id="${m.id}" data-gym="${m.gym_id}" data-sub="${m.stripe_subscription||''}" style="width:100%;padding:11px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Cancel membership':'Zrušit členství'}</button>`}
+        <button class="membQrBtn" data-gym="${m.gym_id}" data-gname="${escapeHtml(m.gym_name||(g&&g.name)||'Gym')}" style="width:100%;margin-top:8px;padding:11px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;">📲 ${LANG==='en'?'Show check-in QR':'Ukázat check-in QR'}</button>
       </div>`;
     }).join('');
   }
@@ -4908,6 +4909,7 @@ async function loadMyMemberships(){
   if(!html){ box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${LANG==='en'?'No memberships or upcoming drop-ins.':'Žádná členství ani nadcházející jednorázové lekce.'}</p>`; return; }
   box.innerHTML = html;
   box.querySelectorAll('.cancelMembBtn').forEach(b=>{ b.onclick=()=>cancelMembership(b.dataset.id, b.dataset.gym, b.dataset.sub); });
+  box.querySelectorAll('.membQrBtn').forEach(b=>{ b.onclick=()=>showMemberCheckinQR(b.dataset.gym, b.dataset.gname); });
   box.querySelectorAll('.membGymHead').forEach(el=>{ el.onclick=()=>{ const g=(window._membGymMap||{})[el.dataset.gym]; if(g) openGymProfile(g); else toast(L('⚠️ Gym se nepodařilo načíst')); }; });
   box.querySelectorAll('.resumeMembBtn').forEach(b=>{ b.onclick=()=>resumeMembership(b.dataset.id, b.dataset.gym, b.dataset.sub); });
   box.querySelectorAll('.gymReschedBtn').forEach(b=>{ b.onclick=()=>openGymReschedule(upDrops.find(x=>String(x.id)===String(b.dataset.id))); });
@@ -6472,6 +6474,24 @@ async function finalizeGuestBookings(){
     }
     toast(LANG==='en'?'✅ Your gym training has been added to your profile':'✅ Tvůj trénink v gymu byl přidán do profilu');
   }catch(e){ console.error('finalizeGuestBookings', e); }
+}
+function showMemberCheckinQR(gymId, gname){
+  if(!currentUser) return;
+  const url=location.origin+'/?checkin=1&gym='+encodeURIComponent(gymId)+'&sid='+encodeURIComponent(currentUser.id);
+  let ov=document.getElementById('memberQrOv');
+  if(!ov){ ov=document.createElement('div'); ov.id='memberQrOv'; ov.style.cssText='position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:24px;'; document.body.appendChild(ov); }
+  ov.innerHTML='<div style="background:#fff;border-radius:20px;padding:24px;max-width:340px;width:100%;text-align:center;">'
+    +'<div style="font-weight:800;font-size:17px;color:#111;margin-bottom:4px;">'+(LANG==='en'?'Check-in QR':'Check-in QR')+'</div>'
+    +'<div style="font-size:13px;color:#666;margin-bottom:14px;">'+escapeHtml(gname||'')+'</div>'
+    +'<div id="memberQrBox" style="display:inline-flex;justify-content:center;align-items:center;padding:14px;background:#fff;border:1px solid #eee;border-radius:16px;min-height:220px;min-width:220px;"></div>'
+    +'<p style="font-size:12px;color:#888;line-height:1.5;margin:14px 0 16px;">'+(LANG==='en'?'Show this at reception to check in to your class.':'Ukaž na recepci pro odbavení na lekci.')+'</p>'
+    +'<button id="memberQrClose" style="width:100%;padding:12px;background:#111;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;">'+(LANG==='en'?'Close':'Zavřít')+'</button>'
+    +'</div>';
+  ov.style.display='flex';
+  const box=document.getElementById('memberQrBox');
+  if(box){ box.innerHTML=''; try{ if(window.QRCode){ new QRCode(box,{text:url,width:220,height:220,correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined)}); } else { box.innerHTML='<p style="font-size:10px;word-break:break-all;max-width:240px;">'+url+'</p>'; } }catch(e){ box.innerHTML='<p style="font-size:10px;word-break:break-all;max-width:240px;">'+url+'</p>'; } }
+  const cb=document.getElementById('memberQrClose'); if(cb) cb.onclick=()=>{ ov.style.display='none'; };
+  ov.onclick=(e)=>{ if(e.target===ov) ov.style.display='none'; };
 }
 function openGuestDropin(){
   _recCheckinMember=null;
@@ -12687,6 +12707,26 @@ async function recalcCoachRating(coachId){
 async function showPaidPopup(){
   const params = new URLSearchParams(window.location.search);
   try{ const _gru=params.get('gymref'), _grg=params.get('gym'); if(_gru&&_grg){ window._gymRef={gym:_grg, ref:_gru}; } }catch(e){}
+  if(params.get('checkin')==='1'){
+    const _cgym=params.get('gym'), _csid=params.get('sid');
+    let _ct=0; while(!currentUser && _ct<25){ await new Promise(r=>setTimeout(r,200)); _ct++; }
+    window.history.replaceState({}, '', location.pathname);
+    if(currentUser && _cgym && _csid){
+      let _staff=false;
+      try{ const { data: gg } = await supaClient.from('gyms').select('owner_id').eq('id',_cgym).single(); if(gg&&gg.owner_id===currentUser.id) _staff=true; }catch(e){}
+      if(!_staff){ try{ const { data: gc } = await supaClient.from('gym_coaches').select('id').eq('gym_id',_cgym).eq('coach_id',currentUser.id).eq('status','active').limit(1); if(gc&&gc.length) _staff=true; }catch(e){} }
+      if(_staff){
+        try{
+          await openReception(_cgym);
+          let _nm=''; let _mb=null;
+          try{ const { data: pr } = await supaClient.from('profiles').select('name').eq('id',_csid).single(); _nm=(pr&&pr.name)||''; }catch(e){}
+          try{ const { data: ms } = await supaClient.from('gym_memberships').select('*').eq('gym_id',_cgym).eq('student_id',_csid).in('status',['active','cancelling']).limit(1); if(ms&&ms.length) _mb=ms[0]; }catch(e){}
+          openRecCheckin({ student_id:_csid, student_name:_nm, _memb:_mb });
+        }catch(e){ console.error('checkin', e); }
+        return;
+      } else { toast(LANG==='en'?'Only gym staff can scan check-in codes.':'Check-in kódy může skenovat jen personál gymu.'); }
+    }
+  }
   if(params.get('guest_pay')==='1'){
     try{
       const gymId=params.get('gym'), cls=params.get('cls')||'Drop-in', date=params.get('date'), time=params.get('time'), coach=params.get('coach')||null, level=params.get('level')||'all', disc=params.get('disc')||null, amt=parseInt(params.get('amt')||'0',10)||0, cur=params.get('cur')||'CZK', tok=params.get('tok')||('g'+Date.now());
