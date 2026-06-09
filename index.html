@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-DX | Reception card (Stripe) drop-in. Each class in reception check-in now also has a Card (via app) button: it creates a pending drop-in for that student (not the receptionist), routes payment to the class coach/gym via the normal payee logic (MTL fee applies), and opens the card screen on the reception device. After a successful payment the return handler marks the booking active AND auto-records the students attendance for that class, then reopens reception. Cash (Paid in person) and Free remain. Drop-in confirmation notification now correctly goes to the booked student, not the logged-in device user. Needs latest mtl-schema.sql (gym_bookings.reception_checkin). -->
+<!-- MTL build: 2026-06-07-DY | Walk-in drop-in for non-app-users. In Reception, Drop-in for a non-user lets staff pick todays class and show a QR. The visitor scans it on their phone, the app creates a pending guest drop-in and sends them to Stripe (no login). After paying, we read their email+name from Stripe, mark the booking paid, and email them a magic link to finish signing up. When they log in, the booking is attributed to them and their attendance for that class is recorded automatically (propagates to gym, stats, milestones). No cash. Needs pay.js + session.js redeploy and latest mtl-schema.sql (gym_bookings.guest_email/guest_name/guest_token). -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -22,6 +22,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>window.Leaflet = window.L;</script>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,wght@0,400;0,500;0,600;0,700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 
@@ -6411,8 +6412,9 @@ async function renderReceptionList(filter){
     rows=(_recMembers||[]).map(m=>({ student_id:m.student_id, student_name:m.student_name, _memb:m }));
   }
   _recRows=rows;
-  if(!rows.length){ list.innerHTML='<p style="color:var(--light);padding:18px;text-align:center;">'+(LANG==='en'?'Nobody found':'Nikdo nenalezen')+'</p>'; return; }
-  list.innerHTML=rows.map(_recRowHtml).join('');
+  const _guestBtn='<button id="recGuestBtn" style="width:100%;padding:12px;background:#0f2233;color:#fff;border:none;border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;margin-bottom:12px;">👤 '+(LANG==='en'?'Drop-in for a non-user (no app)':'Drop-in pro neuživatele (bez appky)')+'</button>';
+  list.innerHTML=_guestBtn+(rows.length?rows.map(_recRowHtml).join(''):'<p style="color:var(--light);padding:14px;text-align:center;">'+(LANG==='en'?'Nobody found — use the button above for a walk-in':'Nikdo nenalezen — pro walk-in použij tlačítko nahoře')+'</p>');
+  if($('recGuestBtn')) $('recGuestBtn').onclick=openGuestDropin;
   list.querySelectorAll('.recCheckinBtn').forEach(b=>b.onclick=()=>{ const r=_recRows.find(x=>String(x.student_id)===b.dataset.sid); if(r) openRecCheckin(r); });
 }
 function _todayGymClasses(g){
@@ -6455,6 +6457,54 @@ function openRecCheckin(r){
   list.querySelectorAll('.recPayBtn').forEach(b=>b.onclick=()=>recDoCheckin(_recTodayClasses[+b.dataset.i], true));
   list.querySelectorAll('.recFreeBtn').forEach(b=>b.onclick=()=>recDoCheckin(_recTodayClasses[+b.dataset.i], false));
   list.querySelectorAll('.recCardBtn').forEach(b=>b.onclick=()=>recDoCheckinCard(_recTodayClasses[+b.dataset.i]));
+}
+async function finalizeGuestBookings(){
+  if(!currentUser||!currentUser.email) return;
+  try{
+    const { data: bks } = await supaClient.from('gym_bookings').select('*').eq('guest_email', currentUser.email).is('student_id', null).eq('status','active');
+    if(!bks||!bks.length) return;
+    for(const b of bks){
+      try{
+        await supaClient.from('gym_bookings').update({ student_id: currentUser.id, student_name: currentUser.name||b.guest_name||null }).eq('id', b.id);
+        const { data: ex } = await supaClient.from('gym_attendance').select('id').eq('gym_id',b.gym_id).eq('student_id',currentUser.id).eq('class_date',b.class_date).eq('class_time',b.class_time).limit(1);
+        if(!(ex&&ex.length)){ await supaClient.from('gym_attendance').insert({ gym_id:b.gym_id, student_id:currentUser.id, student_name:currentUser.name||b.guest_name||null, class_name:b.class_name||null, class_date:b.class_date||null, class_time:b.class_time||null, coach_id:b.coach_id||null, discipline:b.discipline||null, marked_by:currentUser.id }); }
+      }catch(e){}
+    }
+    toast(LANG==='en'?'✅ Your gym training has been added to your profile':'✅ Tvůj trénink v gymu byl přidán do profilu');
+  }catch(e){ console.error('finalizeGuestBookings', e); }
+}
+function openGuestDropin(){
+  _recCheckinMember=null;
+  const list=$('recList'); const g=_recGym; if(!list||!g) return;
+  _recTodayClasses=_todayGymClasses(g);
+  const symf=(x)=>x==='EUR'?'€':x==='USD'?'$':'Kč';
+  let html='<button id="recBackBtn" style="background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:8px 12px;font-size:13px;font-weight:700;cursor:pointer;color:var(--dark);margin-bottom:10px;">← '+(LANG==='en'?'Back':'Zpět')+'</button>';
+  html+='<div style="font-weight:800;font-size:15px;color:var(--dark);margin-bottom:2px;">'+(LANG==='en'?'Walk-in drop-in (no app)':'Drop-in pro neuživatele')+'</div>';
+  html+='<p style="font-size:12px;color:var(--light);margin-bottom:10px;">'+(LANG==='en'?'Pick the class, then let the visitor scan the QR.':'Vyber lekci a nech návštěvníka naskenovat QR.')+'</p>';
+  if(!_recTodayClasses.length){ html+='<p style="color:var(--light);padding:10px;">'+(LANG==='en'?'No classes scheduled today.':'Dnes nejsou žádné lekce v rozvrhu.')+'</p>'; }
+  else { html+=_recTodayClasses.map((o,i)=>{ const pr=_recPrice(o); const who=o.coachName?(' · '+escapeHtml(o.coachName)):''; return '<button class="recGuestClsBtn" data-i="'+i+'" style="display:block;width:100%;text-align:left;border:1px solid var(--border);border-radius:12px;padding:11px 12px;margin-bottom:8px;background:var(--surf);cursor:pointer;"><div style="font-weight:700;font-size:14px;color:var(--dark);">'+escapeHtml(o.name||(LANG==='en'?'Class':'Lekce'))+'</div><div style="font-size:12px;color:var(--mid);margin-top:2px;">'+(o.time||'')+who+' · '+fmtPrice(pr.dp,pr.dcur)+' '+symf(pr.dcur)+'</div></button>'; }).join(''); }
+  list.innerHTML=html;
+  if($('recBackBtn')) $('recBackBtn').onclick=()=>renderReceptionList(($('recSearch')&&$('recSearch').value)||'');
+  list.querySelectorAll('.recGuestClsBtn').forEach(b=>b.onclick=()=>showGuestQR(_recTodayClasses[+b.dataset.i]));
+}
+function showGuestQR(occ){
+  const g=_recGym; const list=$('recList'); if(!g||!list||!occ) return;
+  const pr=_recPrice(occ);
+  const tok='g'+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+  const url=location.origin+'/?guest_pay=1&gym='+encodeURIComponent(g.id)+'&cls='+encodeURIComponent(occ.name||'Drop-in')+'&date='+encodeURIComponent(occ.date)+'&time='+encodeURIComponent(occ.time)+'&coach='+encodeURIComponent(occ.coach||'')+'&level='+encodeURIComponent(occ.level||'all')+'&disc='+encodeURIComponent(occ.disc||'')+'&amt='+pr.dp+'&cur='+pr.dcur+'&tok='+tok;
+  const symf=(x)=>x==='EUR'?'€':x==='USD'?'$':'Kč';
+  list.innerHTML='<button id="recBackBtn" style="background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:8px 12px;font-size:13px;font-weight:700;cursor:pointer;color:var(--dark);margin-bottom:12px;">← '+(LANG==='en'?'Back':'Zpět')+'</button>'
+    +'<div style="text-align:center;">'
+    +'<div style="font-weight:800;font-size:15px;color:var(--dark);margin:4px 0;">'+escapeHtml(occ.name||(LANG==='en'?'Class':'Lekce'))+' · '+(occ.time||'')+'</div>'
+    +'<div style="font-size:14px;color:#006040;font-weight:800;margin-bottom:6px;">'+fmtPrice(pr.dp,pr.dcur)+' '+symf(pr.dcur)+'</div>'
+    +'<p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:14px;">'+(LANG==='en'?'Let the visitor scan this. They pay by card and get an email to finish signing up — their attendance is recorded once they complete it.':'Nech návštěvníka naskenovat. Zaplatí kartou a přijde mu e‑mail na dokončení registrace — docházka se zapíše po jejím dokončení.')+'</p>'
+    +'<div id="recQrBox" style="display:inline-flex;justify-content:center;align-items:center;padding:14px;background:#fff;border:1px solid var(--border);border-radius:16px;"></div>'
+    +'</div>';
+  if($('recBackBtn')) $('recBackBtn').onclick=()=>openGuestDropin();
+  const box=$('recQrBox'); if(box){ box.innerHTML='';
+    try{ if(window.QRCode){ new QRCode(box, { text:url, width:220, height:220, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { box.innerHTML='<p style="font-size:10px;word-break:break-all;max-width:240px;">'+url+'</p>'; } }
+    catch(e){ box.innerHTML='<p style="font-size:10px;word-break:break-all;max-width:240px;">'+url+'</p>'; }
+  }
 }
 async function recDoCheckinCard(occ){
   const r=_recCheckinMember, g=_recGym; if(!r||!g||!occ) return;
@@ -11600,6 +11650,7 @@ function fillUserProfile(){
   if(typeof fillReferral==='function') fillReferral();
   if(typeof loadMyTeams==='function') loadMyTeams();
   if(typeof loadMyReception==='function') loadMyReception();
+  if(typeof finalizeGuestBookings==='function') finalizeGuestBookings();
   if($('meFounderGroup')) $('meFounderGroup').style.display = (currentUser.role==='founder') ? 'block' : 'none';
   if($('meAmbGroup')) $('meAmbGroup').style.display = (typeof myVerifyList==='function' && myVerifyList().length) ? 'block' : 'none';
   if($('meStripe')) $('meStripe').style.display = (currentUser && currentUser.stripe_account) ? 'flex' : 'none';
@@ -12636,6 +12687,36 @@ async function recalcCoachRating(coachId){
 async function showPaidPopup(){
   const params = new URLSearchParams(window.location.search);
   try{ const _gru=params.get('gymref'), _grg=params.get('gym'); if(_gru&&_grg){ window._gymRef={gym:_grg, ref:_gru}; } }catch(e){}
+  if(params.get('guest_pay')==='1'){
+    try{
+      const gymId=params.get('gym'), cls=params.get('cls')||'Drop-in', date=params.get('date'), time=params.get('time'), coach=params.get('coach')||null, level=params.get('level')||'all', disc=params.get('disc')||null, amt=parseInt(params.get('amt')||'0',10)||0, cur=params.get('cur')||'CZK', tok=params.get('tok')||('g'+Date.now());
+      const { data: g } = await supaClient.from('gyms').select('*').eq('id', gymId).single();
+      if(!g){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">Gym not found.</p>'; return; }
+      const payee = await resolveGymPayee(g, {coach});
+      if(!payee.account){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">Payments not set up for this class yet.</p>'; return; }
+      const rec={ gym_id:gymId, amount:amt, currency:cur, status:'pending', reception_checkin:true, guest_token:tok, date:date, time:time, class_name:cls, class_date:date, class_time:time, level:level, coach_id:payee.coachId||coach||null, discipline:disc, gym_name:g.name||'Gym' };
+      const { data: bk, error } = await supaClient.from('gym_bookings').insert(rec).select().single();
+      if(error){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">'+error.message+'</p>'; return; }
+      let _gp=false; try{ if(g.owner_id){ const { data: ow }=await supaClient.from('profiles').select('partner').eq('id',g.owner_id).single(); _gp=!!(ow&&ow.partner); } }catch(e){}
+      const url='/api/pay?type=gym&guest=1&token='+encodeURIComponent(tok)+'&gymAccount='+encodeURIComponent(payee.account)+'&gymName='+encodeURIComponent(g.name||'')+'&className='+encodeURIComponent(cls)+'&amount='+amt+'&currency='+cur+'&bookingId='+encodeURIComponent(bk.id)+'&income='+encodeURIComponent(g.dropin_income||'side')+'&payee='+encodeURIComponent(payee.name||'')+'&level='+encodeURIComponent(level)+'&disc='+encodeURIComponent(disc||'')+'&partner='+(_gp?1:0);
+      document.body.innerHTML='<div style="padding:50px 24px;text-align:center;font-family:sans-serif;color:#111;"><div style="font-size:30px;margin-bottom:10px;">💳</div><p>'+(LANG==='en'?'Redirecting to secure payment…':'Přesměrovávám na zabezpečenou platbu…')+'</p></div>';
+      window.location.href=url; return;
+    }catch(e){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">'+(e.message||'error')+'</p>'; return; }
+  }
+  if(params.get('guest_drop')==='ok'){
+    const bookingId=params.get('booking'), sessionId=params.get('session'), gAcct=params.get('acct');
+    let email=null, name=null, pi=null;
+    if(sessionId){ try{ const r=await fetch('/api/session?sessionId='+sessionId+(gAcct?'&gymAccount='+encodeURIComponent(gAcct):'')); const j=await r.json(); email=j.customerEmail||null; name=j.customerName||null; pi=j.paymentIntent||null; }catch(e){} }
+    if(bookingId){ try{ await supaClient.from('gym_bookings').update({ status:'active', payment_intent:pi, guest_email:email, guest_name:name, student_name:name }).eq('id', bookingId); }catch(e){} }
+    let sent=false; if(email){ try{ await supaClient.auth.signInWithOtp({ email, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } }); sent=true; }catch(e){} }
+    document.body.innerHTML='<div style="padding:48px 24px;text-align:center;font-family:sans-serif;color:#111;max-width:420px;margin:0 auto;">'
+      +'<div style="font-size:40px;margin-bottom:10px;">✅</div>'
+      +'<h2 style="font-size:20px;margin:0 0 10px;">'+(LANG==='en'?'Payment received!':'Platba proběhla!')+'</h2>'
+      +'<p style="font-size:14px;line-height:1.6;color:#444;">'+(sent?(LANG==='en'?('We sent an email to '+(email||'you')+'. Open it, log in to finish your registration, and your training today will be recorded automatically.'):('Poslali jsme e‑mail na '+(email||'tebe')+'. Otevři ho, přihlaš se a dokonči registraci — dnešní trénink se ti automaticky zapíše.')):(LANG==='en'?'Your payment is done. Ask reception to help you finish signing up.':'Platba je hotová. Recepce ti pomůže dokončit registraci.'))+'</p>'
+      +'<p style="font-size:12px;color:#888;margin-top:18px;">MTL Coaches</p></div>';
+    window.history.replaceState({}, '', location.pathname);
+    return;
+  }
   if(params.get('gym_pay') === 'ok'){
     const bookingId = params.get('booking');
     const sessionId = params.get('session');
