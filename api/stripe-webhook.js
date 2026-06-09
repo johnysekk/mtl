@@ -201,6 +201,21 @@ export default async function handler(req, res) {
       const d = event.data.object;
       const pi = typeof d.payment_intent === 'string' ? d.payment_intent : (d.payment_intent && d.payment_intent.id);
       if (pi) await sbPatch('bookings', `payment_intent=eq.${encodeURIComponent(pi)}`, { refund_requested: true, refund_reason: '(DISPUTE přes Stripe)' });
+    } else if (event.type === 'invoice.paid') {
+      // Renewal of a membership subscription on a connected (gym) account -> extend the period
+      const inv = event.data.object;
+      const sub = typeof inv.subscription === 'string' ? inv.subscription : (inv.subscription && inv.subscription.id);
+      if (sub) {
+        let periodEnd = null;
+        try { const line = inv.lines && inv.lines.data && inv.lines.data[0]; if (line && line.period && line.period.end) periodEnd = new Date(line.period.end * 1000).toISOString(); } catch (e) {}
+        const patch = { status: 'active' };
+        if (periodEnd) patch.period_end = periodEnd;
+        await sbPatch('gym_memberships', `stripe_subscription=eq.${encodeURIComponent(sub)}`, patch);
+      }
+    } else if (event.type === 'invoice.payment_failed') {
+      const inv = event.data.object;
+      const sub = typeof inv.subscription === 'string' ? inv.subscription : (inv.subscription && inv.subscription.id);
+      if (sub) await sbPatch('gym_memberships', `stripe_subscription=eq.${encodeURIComponent(sub)}`, { status: 'past_due' });
     }
     res.status(200).json({ received: true });
   } catch (err) {
