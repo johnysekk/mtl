@@ -174,8 +174,8 @@ export default async function handler(req, res) {
         const cust = typeof s.customer === 'string' ? s.customer : (s.customer && s.customer.id);
         if (uid) {
           await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: true, partner_sub: sub || null, stripe_customer: cust || null });
-          await rerateGymMemberships(uid, 4); // existující členství → 4 % od příští faktury
-          await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Teď jsi Exclusive MTL Partner! Z lekcí si necháváš 98 %, student platí jen +8 %, a u gymu platíš 4 % / 2 %. 🥊' });
+          await rerateGymMemberships(uid, 3); // existující členství → 3 % od příští faktury (Exclusive Partner)
+          await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Teď jsi Exclusive MTL Partner! Z lekcí si necháváš 99 %, student platí jen +7 %, a u gymu si necháváš 99 % z jednorázovek a 97 % z členství. 🥊' });
           await sbPost('notifications', { user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'system', read: false, message: `⭐ Nový Exclusive MTL Partner (user ${uid}).` });
         }
       }
@@ -195,7 +195,7 @@ export default async function handler(req, res) {
       if (uid) {
         await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: false, partner_sub: null });
         await rerateGymMemberships(uid, 5); // zpět na 5 % od příští faktury
-        await sbPost('notifications', { user_id: uid, type: 'system', read: false, message: '⭐ Tvoje Exclusive MTL Partner předplatné skončilo — sazby se vrátily na standard (93 % / +10 %, gym 5 % / 3 %).' });
+        await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_ended' }), message: '⭐ Teď už nejsi Exclusive MTL Partner. Děkujeme za tvoji přízeň! Sazby se vrátily na standard (kouč 93 % / student +10 %, gym jednorázovky 97 %, členství 95 %).' });
       }
     } else if (event.type === 'charge.dispute.created') {
       const d = event.data.object;
