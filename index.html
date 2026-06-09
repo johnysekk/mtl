@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-EB | Fixes. (1) Walk-in guest drop-in failed with null student_id NOT NULL violation: schema now makes gym_bookings.student_id nullable (RE-RUN mtl-schema.sql), and the guest landing/return screens force a white background so the messages are readable. (2) Drop-in payout notification was wrong (hardcoded gym base price x0.97, ignored partner): now uses the booking actual amount and the partner-aware keep rate 0.98/0.97 so it matches the price editor. (3) Reception: removed the Back button from the class picker; it now appears only on the QR screen. (4) Coach price-requests sheet close button was missing its X glyph. (5) Online coaching stats now react to the discipline filter on the coach profile. No serverless change. -->
+<!-- MTL build: 2026-06-07-EC | Per-class member check-in QR + notif fix. (1) Drop-in payout notification: when the class is led by a coach who has their own payout account (the coach is the payee), the owner now gets a no-amount notice that the payment goes to the coach, instead of a wrong you-will-receive amount. (2) Per-class QR: in My gym memberships, each membership now lists its next upcoming classes (next 7 days), each with its own check-in QR; scanning it opens the reception check-in pre-filtered to exactly that class. The general per-gym QR button is kept as a fallback. No schema or serverless change. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -3027,6 +3027,9 @@ const NOTIF_T = {
   gym_dropin_booked: (d)=> LANG==='en'
     ? `🏋️ New drop-in! ${d.student||'A student'} bought a drop-in session. You'll receive ${d.amt} ${d.sym}.`
     : `🏋️ Nová jednorázová lekce! ${d.student||'Student'} si koupil jednorázovou lekci. Tobě připadne ${d.amt} ${d.sym}.`,
+  gym_dropin_booked_coach: (d)=> LANG==='en'
+    ? `🏋️ New drop-in at your gym! ${d.student||'A student'} booked ${d.coach||'a coach'}'s class — the payment goes to the coach.`
+    : `🏋️ Nová jednorázová lekce ve tvém gymu! ${d.student||'Student'} si koupil lekci kouče ${d.coach||''} — platba jde kouči.`,
   coach_hq: (d)=> LANG==='en'
     ? `🎓 Welcome to MTL! We've unlocked MTL Coaches HQ for you — tap to open it in MTL Opportunities.`
     : `🎓 Vítej mezi MTL kouči! Odemkli jsme ti MTL Coaches HQ — klepni a otevři ho v MTL Příležitostech.`,
@@ -4859,6 +4862,7 @@ async function loadMyMemberships(){
       const sym = m.currency==='EUR'?'€':m.currency==='USD'?'$':'Kč';
       const cancelling = m.status==='cancelling';
       const g = gymMap[m.gym_id];
+      let _occs=[]; try{ const _sch=g?(typeof g.schedule==='string'?JSON.parse(g.schedule||'[]'):(g.schedule||[])):[]; _occs=upcomingClasses(_sch,7).slice(0,6); }catch(e){} window._membUpc=window._membUpc||{}; window._membUpc[m.gym_id]=_occs;
       const ph = g ? gymFirstPhoto(g.photos) : null;
       const _pacc = (()=>{ try{ return typeof m.plan_access==='string'?JSON.parse(m.plan_access):(m.plan_access||['all']); }catch(e){ return ['all']; } })();
       const _accBadge = `<span style="display:inline-block;font-size:11px;font-weight:700;color:#006040;background:#E8F5EE;border:1px solid #A8E6C0;border-radius:8px;padding:1px 7px;margin-left:6px;">${accessLabel(_pacc)}</span>`;
@@ -4880,6 +4884,7 @@ async function loadMyMemberships(){
              <button class="resumeMembBtn" data-id="${m.id}" data-gym="${m.gym_id}" data-sub="${m.stripe_subscription||''}" style="width:100%;padding:11px;background:#E8F5EE;color:#006040;border:1px solid #A8E6C0;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'↩︎ Resume membership':'↩︎ Zrušit zrušení členství'}</button>`
           : `<button class="cancelMembBtn" data-id="${m.id}" data-gym="${m.gym_id}" data-sub="${m.stripe_subscription||''}" style="width:100%;padding:11px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Cancel membership':'Zrušit členství'}</button>`}
         <button class="membQrBtn" data-gym="${m.gym_id}" data-gname="${escapeHtml(m.gym_name||(g&&g.name)||'Gym')}" style="width:100%;margin-top:8px;padding:11px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;">📲 ${LANG==='en'?'Show check-in QR':'Ukázat check-in QR'}</button>
+        ${(window._membUpc&&window._membUpc[m.gym_id]&&window._membUpc[m.gym_id].length)?(`<div style="font-size:11px;color:var(--light);margin:10px 0 4px;">${LANG==='en'?'Per-class check-in QR:':'QR na konkrétní lekci:'}</div>`+window._membUpc[m.gym_id].map((o,i)=>`<button class="membQrClsBtn" data-gym="${m.gym_id}" data-gname="${escapeHtml(m.gym_name||(g&&g.name)||'Gym')}" data-i="${i}" style="display:block;width:100%;text-align:left;border:1px solid var(--border);border-radius:10px;padding:8px 11px;margin-bottom:6px;background:#fff;cursor:pointer;font-size:12.5px;color:var(--dark);">📲 ${dowShort()[new Date(o.date).getDay()]} ${new Date(o.date).getDate()}.${new Date(o.date).getMonth()+1}. · ${o.time||''} · ${escapeHtml(o.name||'')}</button>`).join('')):''}
       </div>`;
     }).join('');
   }
@@ -4913,6 +4918,7 @@ async function loadMyMemberships(){
   box.innerHTML = html;
   box.querySelectorAll('.cancelMembBtn').forEach(b=>{ b.onclick=()=>cancelMembership(b.dataset.id, b.dataset.gym, b.dataset.sub); });
   box.querySelectorAll('.membQrBtn').forEach(b=>{ b.onclick=()=>showMemberCheckinQR(b.dataset.gym, b.dataset.gname); });
+  box.querySelectorAll('.membQrClsBtn').forEach(b=>{ b.onclick=()=>{ const occ=((window._membUpc&&window._membUpc[b.dataset.gym])||[])[+b.dataset.i]; showMemberCheckinQR(b.dataset.gym, b.dataset.gname, occ); }; });
   box.querySelectorAll('.membGymHead').forEach(el=>{ el.onclick=()=>{ const g=(window._membGymMap||{})[el.dataset.gym]; if(g) openGymProfile(g); else toast(L('⚠️ Gym se nepodařilo načíst')); }; });
   box.querySelectorAll('.resumeMembBtn').forEach(b=>{ b.onclick=()=>resumeMembership(b.dataset.id, b.dataset.gym, b.dataset.sub); });
   box.querySelectorAll('.gymReschedBtn').forEach(b=>{ b.onclick=()=>openGymReschedule(upDrops.find(x=>String(x.id)===String(b.dataset.id))); });
@@ -6430,10 +6436,10 @@ function _recPrice(occ){
   const dcur=(cp&&cp.dropin_price)?(cp.currency||g.currency||'CZK'):(g.currency||'CZK');
   return { dp, dcur };
 }
-function openRecCheckin(r){
+function openRecCheckin(r, targetOcc){
   _recCheckinMember=r;
   const list=$('recList'); const g=_recGym; if(!list||!g) return;
-  _recTodayClasses=_todayGymClasses(g);
+  _recTodayClasses = targetOcc ? [targetOcc] : _todayGymClasses(g);
   const symf=(x)=>x==='EUR'?'\u20ac':x==='USD'?'$':'K\u010d';
   let html='<button id="recBackBtn" style="background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:8px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';color:var(--dark);margin-bottom:10px;">\u2190 '+(LANG==='en'?'Back':'Zp\u011bt')+'</button>';
   html+='<div style="font-weight:800;font-size:15px;color:var(--dark);margin-bottom:4px;">'+(LANG==='en'?'Check in: ':'Odbavit: ')+escapeHtml(r.student_name||'')+'</div>';
@@ -6475,14 +6481,15 @@ async function finalizeGuestBookings(){
     toast(LANG==='en'?'✅ Your gym training has been added to your profile':'✅ Tvůj trénink v gymu byl přidán do profilu');
   }catch(e){ console.error('finalizeGuestBookings', e); }
 }
-function showMemberCheckinQR(gymId, gname){
+function showMemberCheckinQR(gymId, gname, occ){
   if(!currentUser) return;
-  const url=location.origin+'/?checkin=1&gym='+encodeURIComponent(gymId)+'&sid='+encodeURIComponent(currentUser.id);
+  let url=location.origin+'/?checkin=1&gym='+encodeURIComponent(gymId)+'&sid='+encodeURIComponent(currentUser.id);
+  if(occ){ url+='&cls='+encodeURIComponent(occ.name||'')+'&date='+encodeURIComponent(occ.date||'')+'&time='+encodeURIComponent(occ.time||'')+'&coach='+encodeURIComponent(occ.coach||'')+'&level='+encodeURIComponent(occ.level||'all')+'&disc='+encodeURIComponent(occ.disc||''); }
   let ov=document.getElementById('memberQrOv');
   if(!ov){ ov=document.createElement('div'); ov.id='memberQrOv'; ov.style.cssText='position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:24px;'; document.body.appendChild(ov); }
   ov.innerHTML='<div style="background:#fff;border-radius:20px;padding:24px;max-width:340px;width:100%;text-align:center;">'
     +'<div style="font-weight:800;font-size:17px;color:#111;margin-bottom:4px;">'+(LANG==='en'?'Check-in QR':'Check-in QR')+'</div>'
-    +'<div style="font-size:13px;color:#666;margin-bottom:14px;">'+escapeHtml(gname||'')+'</div>'
+    +'<div style="font-size:13px;color:#666;margin-bottom:14px;">'+escapeHtml(gname||'')+(occ?(' · '+escapeHtml(occ.name||'')+(occ.time?(' '+occ.time):'')):'')+'</div>'
     +'<div id="memberQrBox" style="display:inline-flex;justify-content:center;align-items:center;padding:14px;background:#fff;border:1px solid #eee;border-radius:16px;min-height:220px;min-width:220px;"></div>'
     +'<p style="font-size:12px;color:#888;line-height:1.5;margin:14px 0 16px;">'+(LANG==='en'?'Show this at reception to check in to your class.':'Ukaž na recepci pro odbavení na lekci.')+'</p>'
     +'<button id="memberQrClose" style="width:100%;padding:12px;background:#111;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;">'+(LANG==='en'?'Close':'Zavřít')+'</button>'
@@ -12722,6 +12729,7 @@ async function showPaidPopup(){
   try{ const _gru=params.get('gymref'), _grg=params.get('gym'); if(_gru&&_grg){ window._gymRef={gym:_grg, ref:_gru}; } }catch(e){}
   if(params.get('checkin')==='1'){
     const _cgym=params.get('gym'), _csid=params.get('sid');
+    const _ccls=params.get('cls'), _cdate=params.get('date'), _ctime=params.get('time'), _ccoach=params.get('coach')||null, _clevel=params.get('level')||'all', _cdisc=params.get('disc')||null;
     let _ct=0; while(!currentUser && _ct<25){ await new Promise(r=>setTimeout(r,200)); _ct++; }
     window.history.replaceState({}, '', location.pathname);
     if(currentUser && _cgym && _csid){
@@ -12734,7 +12742,8 @@ async function showPaidPopup(){
           let _nm=''; let _mb=null;
           try{ const { data: pr } = await supaClient.from('profiles').select('name').eq('id',_csid).single(); _nm=(pr&&pr.name)||''; }catch(e){}
           try{ const { data: ms } = await supaClient.from('gym_memberships').select('*').eq('gym_id',_cgym).eq('student_id',_csid).in('status',['active','cancelling']).limit(1); if(ms&&ms.length) _mb=ms[0]; }catch(e){}
-          openRecCheckin({ student_id:_csid, student_name:_nm, _memb:_mb });
+          const _tOcc=_ccls?{ name:_ccls, date:_cdate, time:_ctime, coach:_ccoach||null, level:_clevel||'all', disc:_cdisc||null, coachName:null }:null;
+          openRecCheckin({ student_id:_csid, student_name:_nm, _memb:_mb }, _tOcc);
         }catch(e){ console.error('checkin', e); }
         return;
       } else { toast(LANG==='en'?'Only gym staff can scan check-in codes.':'Check-in kódy může skenovat jen personál gymu.'); }
@@ -12787,9 +12796,15 @@ async function showPaidPopup(){
           if(gym && gym.owner_id){
             const _ncur = gb.currency||gym.currency;
             const sym = _ncur==='EUR'?'€':_ncur==='USD'?'$':'Kč';
-            let _ownerPartner=false; try{ const { data: _ow } = await supaClient.from('profiles').select('partner').eq('id', gym.owner_id).single(); _ownerPartner=!!(_ow&&_ow.partner); }catch(e){}
-            const gymGets = fmtPrice((gb.amount||gym.dropin_price||0)*(_ownerPartner?0.98:0.97), _ncur);
-            await supaClient.from('notifications').insert({ user_id: gym.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'gym_dropin_booked', student: currentUser?.name||'Student', amt: gymGets, sym }), message:`🏋️ Nová jednorázová lekce! ${currentUser?.name||'Student'} si koupil jednorázovou lekci. Tobě připadne ${gymGets} ${sym}.` });
+            let _coachPayee=false, _coachNm='';
+            if(gb.coach_id && gb.coach_id!==gym.owner_id){ try{ const { data: _cp } = await supaClient.from('profiles').select('name, gym_payout_account').eq('id', gb.coach_id).single(); if(_cp && _cp.gym_payout_account){ _coachPayee=true; _coachNm=_cp.name||''; } }catch(e){} }
+            if(_coachPayee){
+              await supaClient.from('notifications').insert({ user_id: gym.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'gym_dropin_booked_coach', student: currentUser?.name||'Student', coach:_coachNm }), message:`🏋️ Nová jednorázová lekce ve tvém gymu! ${currentUser?.name||'Student'} si koupil lekci kouče ${_coachNm}. Platba jde kouči.` });
+            } else {
+              let _ownerPartner=false; try{ const { data: _ow } = await supaClient.from('profiles').select('partner').eq('id', gym.owner_id).single(); _ownerPartner=!!(_ow&&_ow.partner); }catch(e){}
+              const gymGets = fmtPrice((gb.amount||gym.dropin_price||0)*(_ownerPartner?0.98:0.97), _ncur);
+              await supaClient.from('notifications').insert({ user_id: gym.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'gym_dropin_booked', student: currentUser?.name||'Student', amt: gymGets, sym }), message:`🏋️ Nová jednorázová lekce! ${currentUser?.name||'Student'} si koupil jednorázovou lekci. Tobě připadne ${gymGets} ${sym}.` });
+            }
             updateNotifBadge();
           }
           // notifikace kouči, který lekci vede (pokud není owner)
