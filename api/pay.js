@@ -164,7 +164,7 @@ async function gymCheckout(req, res) {
 // ───────────────────────── GYM membership (direct charge subscription) ─────────────────────────
 // ───────────────────────── EVENT TICKET (flat 6% = 3% markup + 3% cut, no partner discount) ─────────────────────────
 async function eventCheckout(req, res) {
-  const { gymAccount, eventTitle, tierName, amount, currency = 'CZK', ticketId, buyerName, qty } = req.query;
+  const { gymAccount, eventTitle, tierName, amount, currency = 'CZK', ticketId, buyerName, qty, qrToken, eventId } = req.query;
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
   const P = parseInt(amount, 10);
   const Q = Math.max(1, parseInt(qty, 10) || 1);
@@ -193,7 +193,17 @@ async function eventCheckout(req, res) {
           mtl_currency: cur,
           buyer_name: buyerName || '',
           ticket_id: ticketId || '',
+          qr_token: qrToken || '',
+          mtl_event_id: eventId || '',
         },
+      },
+      metadata: {
+        mtl_payment_type: 'event_ticket',
+        ticket_id: ticketId || '',
+        qr_token: qrToken || '',
+        mtl_event_id: eventId || '',
+        mtl_event: eventTitle || '',
+        buyer_name: buyerName || '',
       },
       success_url: `${proto}://${host}/?event_pay=ok&ticket=${encodeURIComponent(ticketId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
       cancel_url: `${proto}://${host}/`,

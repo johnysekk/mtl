@@ -102,6 +102,25 @@ function rawBody(req) {
   });
 }
 
+// ── Event ticket email (Resend). Needs env: RESEND_API_KEY, optional TICKET_EMAIL_FROM, PUBLIC_URL ──
+async function sendTicketEmail(s, m) {
+  const key = process.env.RESEND_API_KEY; if (!key) return;
+  const email = (s.customer_details && s.customer_details.email) || s.customer_email; if (!email) return;
+  const qtok = m.qr_token || ''; const evId = m.mtl_event_id || ''; if (!qtok || !evId) return;
+  const origin = process.env.PUBLIC_URL || 'https://app.muaythailab.co';
+  const checkinUrl = `${origin}/?evcheckin=1&ev=${encodeURIComponent(evId)}&tok=${encodeURIComponent(qtok)}`;
+  const qrImg = `https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=8&data=${encodeURIComponent(checkinUrl)}`;
+  const title = m.mtl_event || 'your event';
+  const html = `<div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto;color:#111;">`
+    + `<h2 style="margin:0 0 6px;">\uD83C\uDF9F\uFE0F ${title}</h2>`
+    + `<p style="color:#444;">Your ticket is confirmed. Show this QR code at the door:</p>`
+    + `<p style="text-align:center;margin:18px 0;"><img src="${qrImg}" width="240" height="240" alt="Ticket QR" style="border:1px solid #eee;border-radius:12px;"></p>`
+    + `<p style="text-align:center;color:#888;font-size:13px;">You can also open your ticket anytime in the MTL Coaches app under My events.</p>`
+    + `<p style="text-align:center;"><a href="${origin}" style="color:#E8001D;font-weight:bold;text-decoration:none;">Open MTL Coaches \u2192</a></p></div>`;
+  const from = process.env.TICKET_EMAIL_FROM || 'MTL Coaches <tickets@muaythailab.co>';
+  await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from, to: email, subject: `\uD83C\uDF9F\uFE0F Your ticket \u2014 ${title}`, html }) });
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
   let event;
@@ -183,6 +202,7 @@ export default async function handler(req, res) {
         if (m.ticket_id) {
           const pi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id);
           await sbPatch('event_tickets', `id=eq.${encodeURIComponent(m.ticket_id)}`, { status: 'paid', stripe_ref: pi });
+          try { await sendTicketEmail(s, m); } catch (e) { console.error('ticket email', e.message); }
         }
       }
     } else if (event.type === 'charge.refunded') {
