@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-FW | Event pricing polish plus webhook backstop. The create form now has a currency selector (CZK/EUR/USD, default the gym currency) next to the Ticket variants header, tracked in window._evCur and threaded through the variant breakdowns, save and validation. Each variant breakdown was reformatted to match the coach pricing card exactly: a green line You get <net> · Buyer pays <buyer>, then a smaller Stripe fee (est.) ~low-high · after Stripe ~netLow-netHigh, paid from your share — check with your accountant; the below-minimum case is the same red bold message. stripe-webhook.js gained an event_ticket branch: on checkout.session.completed it patches the event_tickets row (by ticket_id) to paid with the payment intent, as a backstop if the buyer closes the tab before the return redirect. Deploy index and stripe-webhook.js. -->
+<!-- MTL build: 2026-06-07-FX | Poster ratio fix plus fighter requests. Posters now crop at 4:3 and both the card and detail image containers use aspect-ratio 4/3 (and the create-form preview), so cover no longer mis-crops the poster. Fighter requests (increment 5): when an event is seeking fighters, the Suggest a fighter button shows only to coaches whose gym gave them can_request_fighters (checked on the Events tab into window._canReqF). It opens a modal form — fighter name, age, number of fights, discipline, weight, optional note — that inserts a fighter_requests row and notifies the organizer. Gym owners see a Fighter requests section on the Events tab listing pending requests (fighter details, discipline, coach, event) with Accept and Decline, each updating the request and notifying the coach. Deploy index only. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4404,6 +4404,7 @@ function renderEvents(){
 }
 async function renderEventsAsync(box){
   const elig = await eventEligibleGyms();
+  try{ const {data:cr}=await supaClient.from('gym_coaches').select('gym_id').eq('coach_id',currentUser.id).eq('status','active').eq('can_request_fighters',true); window._canReqF=!!(cr&&cr.length); window._reqFGym=(cr&&cr[0]&&cr[0].gym_id)||null; }catch(e){ window._canReqF=false; }
   let top='';
   if(elig.length){ top += `<button id="evCreateBtn" style="width:100%;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:16px;">+ ${LANG==='en'?'Create event':'Vytvořit událost'}</button>`; }
   const ownedIds=(window._myGyms||[]).map(g=>g.id);
@@ -4433,10 +4434,14 @@ async function renderEventsAsync(box){
       feed += `<div style="text-align:center;padding:40px 16px;color:var(--light);"><div style="font-size:40px;margin-bottom:10px;">🥊</div><div style="font-weight:700;color:var(--dark);margin-bottom:6px;">${LANG==='en'?'No events near you yet':'Zatím tu nejsou žádné události'}</div><div style="font-size:13px;line-height:1.5;">${LANG==='en'?'Fight nights, seminars and camps will show up here.':'Fight nights, semináře a kempy se objeví tady.'}</div></div>`;
     }
   }catch(e){}
-  box.innerHTML = top + pendRows + feed;
+  let fightReqRows='';
+  if(ownedIds.length){ try{ const { data:myEvs } = await supaClient.from('events').select('id,title').in('gym_id', ownedIds); const evIds=(myEvs||[]).map(e=>e.id); const evTitle={}; (myEvs||[]).forEach(e=>evTitle[e.id]=e.title); if(evIds.length){ const { data:fr } = await supaClient.from('fighter_requests').select('*').in('event_id', evIds).eq('status','pending').order('created_at',{ascending:true}); if(fr&&fr.length){ fightReqRows = `<div style="font-size:12px;font-weight:700;color:var(--mid);margin:4px 0 8px;">🥊 ${LANG==='en'?'Fighter requests':'Žádosti fighterů'}</div>` + fr.map(f=>`<div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;"><div style="font-weight:700;">${escapeHtml(f.fighter_name||'')} <span style="font-size:12px;color:var(--mid);font-weight:400;">${f.weight_kg?f.weight_kg+' kg':''}${f.fights_count!=null?' · '+f.fights_count+(LANG==='en'?' fights':' zápasů'):''}${f.fighter_age?' · '+f.fighter_age+(LANG==='en'?' y':' let'):''}</span></div><div style="font-size:12px;color:var(--mid);margin-bottom:8px;">${f.discipline?disciplineEmoji(f.discipline)+' '+disciplineLabel(f.discipline)+' · ':''}${escapeHtml(f.coach_name||'')} → ${escapeHtml(evTitle[f.event_id]||'')}${f.note?'<br>'+escapeHtml(f.note):''}</div><div style="display:flex;gap:8px;"><button class="frAccept" data-id="${f.id}" data-coach="${f.coach_id||''}" data-fn="${escapeHtml(f.fighter_name||'')}" style="flex:1;padding:9px;background:#E8F5EE;color:#006040;border:1px solid #A8E6C0;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">✓ ${LANG==='en'?'Accept':'Přijmout'}</button><button class="frDecline" data-id="${f.id}" data-coach="${f.coach_id||''}" data-fn="${escapeHtml(f.fighter_name||'')}" style="flex:1;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">✕ ${LANG==='en'?'Decline':'Odmítnout'}</button></div></div>`).join('') + `<div style="height:12px;"></div>`; } } }catch(e){} }
+  box.innerHTML = top + pendRows + fightReqRows + feed;
   if($('evCreateBtn')) $('evCreateBtn').onclick=()=>{ if(elig.length===1) openEventCreate(elig[0]); else openEventGymPick(elig); };
   box.querySelectorAll('.evApprove').forEach(b=>b.onclick=()=>approveEvent(b.dataset.id, b.dataset.coach, b.dataset.title));
   box.querySelectorAll('.evReject').forEach(b=>b.onclick=()=>rejectEvent(b.dataset.id, b.dataset.coach, b.dataset.title));
+  box.querySelectorAll('.frAccept').forEach(b=>b.onclick=()=>acceptFighter(b.dataset.id, b.dataset.coach, b.dataset.fn));
+  box.querySelectorAll('.frDecline').forEach(b=>b.onclick=()=>declineFighter(b.dataset.id, b.dataset.coach, b.dataset.fn));
   box.querySelectorAll('.evFilterChip').forEach(c=>c.onclick=()=>{ window._evFilterDisc=c.dataset.v; renderEvents(); });
   box.querySelectorAll('.evCard').forEach(c=>c.onclick=()=>{ const ev=(window._evList||[]).find(x=>String(x.id)===String(c.dataset.id)); if(ev) openEventView(ev); });
 }
@@ -4475,7 +4480,7 @@ async function openEventCreate(gym){
   const lbl="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:5px;";
   $('eventCreateContent').innerHTML=`
     <div style="${lbl}">${LANG==='en'?'Poster (optional)':'Poster (nepovinné)'}</div>
-    <div id="evPosterPv" style="display:none;width:100%;height:170px;border-radius:12px;background-size:cover;background-position:center;margin-bottom:8px;background-color:#eee;"></div>
+    <div id="evPosterPv" style="display:none;width:100%;aspect-ratio:4/3;border-radius:12px;background-size:cover;background-position:center;margin-bottom:8px;background-color:#eee;"></div>
     <button type="button" id="evPosterBtn" style="width:100%;padding:11px;background:var(--surf);border:1px dashed var(--border);border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:12px;">📷 ${LANG==='en'?'Add poster':'Přidat poster'}</button>
     <input type="file" id="evPosterInput" accept="image/*" style="display:none;">
     <div style="${lbl}">${LANG==='en'?'Type':'Typ'}</div>
@@ -4501,7 +4506,7 @@ async function openEventCreate(gym){
     ${isOwner?'':`<p style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:10px;">${LANG==='en'?'Your gym owner reviews and approves this before it goes live.':'Majitel gymu to před zveřejněním schválí.'}</p>`}
     <button id="evSave" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${isOwner?(LANG==='en'?'Publish event':'Zveřejnit událost'):(LANG==='en'?'Send for approval':'Odeslat ke schválení')}</button>`;
   $('evPosterBtn').onclick=()=>$('evPosterInput').click();
-  $('evPosterInput').onchange=async(e)=>{ const file=e.target.files&&e.target.files[0]; if(!file) return; const blob=await cropImage(file, 3/4); e.target.value=''; if(!blob) return; toast(L('⬆️ Nahrávám...')); try{ const fileName=`${currentUser.id}-event-${Date.now()}.jpg`; const { error }=await supaClient.storage.from('gym-photos').upload(fileName, blob, { contentType:'image/jpeg', upsert:false }); if(error){ toast('⚠️ '+error.message); return; } const { data }=supaClient.storage.from('gym-photos').getPublicUrl(fileName); window._evPoster=data.publicUrl; const pv=$('evPosterPv'); if(pv){ pv.style.backgroundImage=`url('${data.publicUrl}')`; pv.style.display='block'; } toast(LANG==='en'?'✅ Poster added':'✅ Poster nahrán'); }catch(err){ toast('⚠️'); } };
+  $('evPosterInput').onchange=async(e)=>{ const file=e.target.files&&e.target.files[0]; if(!file) return; const blob=await cropImage(file, 4/3); e.target.value=''; if(!blob) return; toast(L('⬆️ Nahrávám...')); try{ const fileName=`${currentUser.id}-event-${Date.now()}.jpg`; const { error }=await supaClient.storage.from('gym-photos').upload(fileName, blob, { contentType:'image/jpeg', upsert:false }); if(error){ toast('⚠️ '+error.message); return; } const { data }=supaClient.storage.from('gym-photos').getPublicUrl(fileName); window._evPoster=data.publicUrl; const pv=$('evPosterPv'); if(pv){ pv.style.backgroundImage=`url('${data.publicUrl}')`; pv.style.display='block'; } toast(LANG==='en'?'✅ Poster added':'✅ Poster nahrán'); }catch(err){ toast('⚠️'); } };
   $('evSeek').onchange=()=>{ $('evFighterInfo').style.display=$('evSeek').checked?'block':'none'; };
   document.querySelectorAll('.evDiscChip').forEach(c=>c.onclick=()=>{ const v=c.dataset.v; if(window._evDisc.includes(v)){ window._evDisc=window._evDisc.filter(x=>x!==v); c.style.background='var(--surf)'; c.style.borderColor='var(--border)'; c.style.color='var(--dark)'; } else { window._evDisc.push(v); c.style.background='var(--red)'; c.style.borderColor='var(--red)'; c.style.color='#fff'; } });
   renderEvTiers();
@@ -4587,7 +4592,7 @@ function eventCardHtml(ev){
   const bg = ev.poster ? `background-image:url('${ev.poster}');` : 'background:linear-gradient(135deg,#E8001D,#7A0010);';
   const discTags = ds.slice(0,4).map(v=>disciplineEmoji(v)).join(' ');
   return `<div class="evCard" data-id="${ev.id}" style="border:1px solid var(--border);border-radius:14px;overflow:hidden;margin-bottom:12px;cursor:pointer;background:#fff;">
-    <div style="height:150px;background-size:cover;background-position:center;${bg}position:relative;">
+    <div style="aspect-ratio:4/3;background-size:cover;background-position:center;${bg}position:relative;">
       <span style="position:absolute;top:10px;left:10px;background:rgba(0,0,0,.6);color:#fff;font-size:11px;font-weight:700;padding:4px 9px;border-radius:99px;">${t.emoji} ${LANG==='en'?t.en:t.cs}</span>
       ${ev.seeking_fighters?`<span style="position:absolute;top:10px;right:10px;background:var(--red);color:#fff;font-size:10px;font-weight:800;padding:4px 9px;border-radius:99px;">🥊 ${LANG==='en'?'Fighters wanted':'Hledá fightery'}</span>`:''}
     </div>
@@ -4610,7 +4615,7 @@ function openEventView(ev){
   const bg = ev.poster ? `background-image:url('${ev.poster}');` : 'background:linear-gradient(135deg,#E8001D,#7A0010);';
   const discRow = ds.map(v=>`<span style="font-size:12px;font-weight:600;background:var(--surf);border:1px solid var(--border);padding:4px 10px;border-radius:99px;">${disciplineEmoji(v)} ${disciplineLabel(v)}</span>`).join(' ');
   $('eventViewContent').innerHTML=`
-    <div style="height:200px;background-size:cover;background-position:center;${bg}position:relative;"><span style="position:absolute;top:12px;left:12px;background:rgba(0,0,0,.6);color:#fff;font-size:12px;font-weight:700;padding:5px 11px;border-radius:99px;">${t.emoji} ${LANG==='en'?t.en:t.cs}</span></div>
+    <div style="aspect-ratio:4/3;background-size:cover;background-position:center;${bg}position:relative;"><span style="position:absolute;top:12px;left:12px;background:rgba(0,0,0,.6);color:#fff;font-size:12px;font-weight:700;padding:5px 11px;border-radius:99px;">${t.emoji} ${LANG==='en'?t.en:t.cs}</span></div>
     <div style="padding:16px 20px;">
       <div style="font-weight:800;font-size:20px;margin-bottom:8px;">${escapeHtml(ev.title||'')}</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">${discRow}</div>
@@ -4618,7 +4623,7 @@ function openEventView(ev){
       <div style="margin-bottom:14px;">${tiersHtml}</div>
       ${ev.description?`<p style="font-size:14px;line-height:1.6;color:var(--mid);white-space:pre-wrap;margin-bottom:16px;">${escapeHtml(ev.description)}</p>`:''}
       <button id="evBuyBtn" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:${ev.seeking_fighters?'8px':'0'};">🎟️ ${(tiers.some(x=>x.price>0))?(LANG==='en'?'Get ticket':'Koupit lístek'):(LANG==='en'?'RSVP':'Přihlásit se')}</button>
-      ${ev.seeking_fighters?`<button id="evFighterBtn" style="width:100%;padding:13px;background:var(--surf);border:1.5px solid var(--red);color:var(--red);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">🥊 ${LANG==='en'?'Suggest a fighter':'Navrhnout fightera'}</button>${ev.fighter_info?`<p style="font-size:12px;color:var(--mid);line-height:1.5;margin-top:8px;">${escapeHtml(ev.fighter_info)}</p>`:''}`:''}
+      ${(ev.seeking_fighters && window._canReqF)?`<button id="evFighterBtn" style="width:100%;padding:13px;background:var(--surf);border:1.5px solid var(--red);color:var(--red);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">🥊 ${LANG==='en'?'Suggest a fighter':'Navrhnout fightera'}</button>${ev.fighter_info?`<p style="font-size:12px;color:var(--mid);line-height:1.5;margin-top:8px;">${escapeHtml(ev.fighter_info)}</p>`:''}`:''}
     </div>`;
   if($('evBuyBtn')) $('evBuyBtn').onclick=()=>buyEventTicket(ev);
   if($('evFighterBtn')) $('evFighterBtn').onclick=()=>suggestFighter(ev);
@@ -4657,7 +4662,49 @@ async function doEventCheckout(ev, tier){
   const url=`/api/pay?type=event&gymAccount=${encodeURIComponent(acct)}&eventTitle=${encodeURIComponent(ev.title||'Event')}&tierName=${encodeURIComponent((tier&&tier.name)||'')}&amount=${base}&currency=${cur}&ticketId=${encodeURIComponent(ticketId||'')}&buyerName=${encodeURIComponent(currentUser.name||'')}`;
   window.location.href=url;
 }
-function suggestFighter(ev){ toast(LANG==='en'?'Fighter request coming next 🥊':'Žádost fightera už brzy 🥊'); }
+function suggestFighter(ev){
+  if(!currentUser){ toast(L('⚠️ Nejprve se přihlas')); return; }
+  if(!window._canReqF){ toast(LANG==='en'?'⚠️ Only coaches allowed by their gym can suggest fighters':'⚠️ Fightery můžou navrhovat jen kouči s povolením od gymu'); return; }
+  let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){} if(!ds.length) ds=activeDisciplines().map(d=>d.v);
+  const inp="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:'DM Sans';margin-bottom:10px;";
+  const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:240;display:flex;align-items:flex-end;justify-content:center;';
+  ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px 18px 0 0;padding:20px;max-height:88vh;overflow-y:auto;">
+    <div style="font-size:17px;font-weight:800;margin-bottom:4px;">🥊 ${LANG==='en'?'Suggest a fighter':'Navrhnout fightera'}</div>
+    <div style="font-size:12px;color:var(--mid);margin-bottom:14px;">${escapeHtml(ev.title||'')}</div>
+    <input id="frName" type="text" placeholder="${LANG==='en'?'Fighter name':'Jméno fightera'}" style="${inp}">
+    <div style="display:flex;gap:10px;"><input id="frAge" type="number" min="0" placeholder="${LANG==='en'?'Age':'Věk'}" style="${inp}"><input id="frFights" type="number" min="0" placeholder="${LANG==='en'?'# fights':'Počet zápasů'}" style="${inp}"></div>
+    <select id="frDisc" style="${inp}">${ds.map(v=>`<option value="${v}">${disciplineEmoji(v)} ${disciplineLabel(v)}</option>`).join('')}</select>
+    <input id="frWeight" type="number" min="0" step="0.1" placeholder="${LANG==='en'?'Weight to fight at (kg)':'Váha pro zápas (kg)'}" style="${inp}">
+    <textarea id="frNote" rows="2" placeholder="${LANG==='en'?'Note (optional)':'Poznámka (nepovinné)'}" style="${inp}resize:vertical;"></textarea>
+    <button id="frSubmit" style="width:100%;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Send request':'Odeslat žádost'}</button>
+    <button id="frCancel" style="width:100%;margin-top:8px;padding:10px;background:transparent;border:none;color:var(--light);font-weight:600;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Cancel':'Zrušit'}</button>
+  </div>`;
+  document.body.appendChild(ov); const close=()=>ov.remove();
+  ov.querySelector('#frCancel').onclick=close; ov.onclick=(e)=>{ if(e.target===ov) close(); };
+  ov.querySelector('#frSubmit').onclick=async()=>{
+    const name=(ov.querySelector('#frName').value||'').trim();
+    if(!name){ toast(LANG==='en'?'⚠️ Add fighter name':'⚠️ Doplň jméno fightera'); return; }
+    const row={ event_id:ev.id, coach_id:currentUser.id, coach_name:currentUser.name||'', gym_id: window._reqFGym||null, fighter_name:name, fighter_age: parseInt(ov.querySelector('#frAge').value)||null, fights_count: parseInt(ov.querySelector('#frFights').value)||null, discipline: ov.querySelector('#frDisc').value||null, weight_kg: parseFloat(ov.querySelector('#frWeight').value)||null, note:(ov.querySelector('#frNote').value||'').trim()||null, status:'pending' };
+    const btn=ov.querySelector('#frSubmit'); btn.disabled=true; btn.textContent='…';
+    const { error }=await supaClient.from('fighter_requests').insert(row);
+    if(error){ toast('⚠️ '+error.message); btn.disabled=false; btn.textContent=(LANG==='en'?'Send request':'Odeslat žádost'); return; }
+    if(ev.created_by){ try{ await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'fighter_request', event_id:ev.id, title:ev.title}), message:'🥊 '+(currentUser.name||'Kouč')+(LANG==='en'?` suggested a fighter for "${ev.title}"`:` navrhl fightera na „${ev.title}"`) }); }catch(e){} }
+    close(); toast(LANG==='en'?'✅ Fighter suggested':'✅ Fighter navržen');
+  };
+}
+async function acceptFighter(id, coachId, fn){
+  const { error }=await supaClient.from('fighter_requests').update({status:'accepted'}).eq('id',id);
+  if(error){ toast('⚠️ '+error.message); return; }
+  if(coachId){ try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'system', read:false, data:JSON.stringify({kind:'fighter_accepted'}), message:'✅ '+(LANG==='en'?`Fighter ${fn} was accepted`:`Fighter ${fn} byl přijat`) }); }catch(e){} }
+  toast(LANG==='en'?'✅ Accepted':'✅ Přijato'); renderEvents();
+}
+async function declineFighter(id, coachId, fn){
+  if(!confirm(LANG==='en'?`Decline ${fn}?`:`Odmítnout ${fn}?`)) return;
+  const { error }=await supaClient.from('fighter_requests').update({status:'declined'}).eq('id',id);
+  if(error){ toast('⚠️ '+error.message); return; }
+  if(coachId){ try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'system', read:false, data:JSON.stringify({kind:'fighter_declined'}), message:'❌ '+(LANG==='en'?`Fighter ${fn} was not selected`:`Fighter ${fn} nebyl vybrán`) }); }catch(e){} }
+  toast(LANG==='en'?'Declined':'Odmítnuto'); renderEvents();
+}
 function closeAllSheets(){ _sheetParent={}; SHEETS.forEach(s=>$(s).classList.remove('open')); }
 
 // ════════════════════════════════════════
