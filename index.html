@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-GD | Two fixes. Coach profile when on holiday or fully booked: removed the duplicate discount banner that sat right under the fully-booked notice (kept only the one inside the in-person offer block), and that remaining discount line plus the slot-availability line now show only when the coach is actually available. Events visual unification with Coaches and Gyms: poster crop and display changed from 4:3 to 2:1, the swipe card rebuilt to the same coach/gym card layout (2:1 image at top with type badge, title and date/location/distance overlaid, body with discipline tags, description and price footer), the event detail image switched to the same 2:1 header, and the deck filter is now two rows like the coach deck: a Change-sport pill (opens the sport picker) plus a row of event-type chips, filtering by both sport and type. Gym tags and the refund/pricing build are next. Deploy index only. -->
+<!-- MTL build: 2026-06-07-GE | Gym tags. Gyms can now carry the same audience tags used on gym classes (Beginners, Advanced, Fighters, Kids, Women, Sparring from CLASS_LEVELS). Added a tag multi-select to the gym application form and to the gym profile editor, saved to a new gyms.tags column on create and update. The Gyms deck now shows a tag-filter row under the Change-sport control (only in gym mode) that filters the deck by tag, mirroring the coach tag pills for a consistent style, and gym cards display their tags. New column gyms.tags (text JSON) in mtl-schema.sql, deploy index plus add the column in Supabase. Refund and per-type pricing build is next. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -498,6 +498,7 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
   <div class="pill" data-f="advanced">📈 Pokročilí</div>
   <div class="pill" data-f="fighter">🏆 Závodníci</div>
 </div>
+<div class="filters" id="gymTagFilters" style="display:none;"></div>
 
 <!-- CARD STACK -->
 <div class="stack">
@@ -1231,6 +1232,10 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
       <p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:8px;">Co se u vás trénuje? Můžeš vybrat víc.</p>
       <div id="gymDisc" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:16px;"></div>
     </div>
+
+    <div class="sec-lbl">Pro koho / štítky</div>
+    <p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:8px;">Pro koho gym je? Vyber, co sedí.</p>
+    <div id="gymTags" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:16px;"></div>
 
     <div class="sec-lbl">Město</div>
     <input id="gymCity" type="text" placeholder="Město (např. Brno)" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';margin-bottom:16px;">
@@ -3693,7 +3698,7 @@ async function ensureGymsLoaded(force){
         city: g.city||'', country: g.country||'', countryCode:(g.country_code||'').toUpperCase(),
         disciplines: parseDisc(g.disciplines),
         dropin: g.dropin_price||0, memb: g.membership_price||0, ownerId:g.owner_id||null, ownerPartner:false,
-        currency: g.currency||'CZK', coords };
+        currency: g.currency||'CZK', tags: parseTags(g.tags), coords };
     });
     try{ const _oids=[...new Set(gyms.map(x=>x.owner_id).filter(Boolean))]; if(_oids.length){ const { data:_ow } = await supaClient.from('profiles').select('id,partner').in('id',_oids); const _opm={}; (_ow||[]).forEach(o=>_opm[o.id]=!!o.partner); GYMS.forEach(c=>{ if(c.ownerId) c.ownerPartner=!!_opm[c.ownerId]; }); } }catch(e){}
     try{ const _gids=gyms.map(x=>x.id).filter(Boolean); if(_gids.length){ const { data:_acp } = await supaClient.from('gym_coach_pricing').select('gym_id,coach_id,dropin_price').eq('status','approved').in('gym_id',_gids); const _cpg={}; const _cids2=new Set(); (_acp||[]).forEach(cp=>{ if(cp.dropin_price>0){ (_cpg[cp.gym_id]=_cpg[cp.gym_id]||[]).push(cp); _cids2.add(cp.coach_id); } }); let _cpm={}; if(_cids2.size){ const { data:_cpp } = await supaClient.from('profiles').select('id,partner').in('id',[..._cids2]); (_cpp||[]).forEach(pp=>{_cpm[pp.id]=!!pp.partner;}); } GYMS.forEach(c=>{ const _o=[]; if(c.dropin>0) _o.push(c.dropin*gdMul(c.ownerPartner)); (_cpg[c.id]||[]).forEach(cp=>_o.push(cp.dropin_price*gdMul(_cpm[cp.coach_id]))); if(_o.length){ c.priceFrom=Math.min(..._o); c.priceMulti=(new Set(_o.map(x=>Math.round(x))).size)>1; } }); } }catch(e){}
@@ -3707,6 +3712,7 @@ function buildGymFiltered(){
   /* vlastní gymy zůstávají v decku (owner/tým si může rezervovat lekci) */
   list.forEach(g=>{ g.distKm = (userLoc && g.coords) ? haversine(userLoc.lat,userLoc.lng,g.coords.lat,g.coords.lng) : null; });
   if(isMultiDiscipline() && _deckDisc){ list=list.filter(g=>g.disciplines.includes(_deckDisc)); }
+  if(_gymTagFilter){ list=list.filter(g=>(g.tags||[]).includes(_gymTagFilter)); }
   if(searchQuery){ const q=searchQuery.toLowerCase(); list=list.filter(g=> g.name.toLowerCase().includes(q) || g.city.toLowerCase().includes(q)); }
   if(userLoc) list.sort((a,b)=>((a.distKm==null?9e9:a.distKm)-(b.distKm==null?9e9:b.distKm)));
   return list;
@@ -3735,6 +3741,7 @@ function fillGymCard(p,c){
   }
   const tagsEl=$(p+'Tags'); tagsEl.innerHTML='';
   c.disciplines.forEach(v=>{ const el=document.createElement('div'); el.className='tag'; el.style.cssText='background:#1f2937;color:#fff;'; el.textContent=`${disciplineEmoji(v)} ${disciplineLabel(v)}`; tagsEl.appendChild(el); });
+  (c.tags||[]).forEach(v=>{ const el=document.createElement('div'); el.className='tag tag-style'; el.textContent=levelLabel(v); tagsEl.appendChild(el); });
   if(c.dropin){ const el=document.createElement('div'); el.className='tag tag-style'; el.textContent='🥊 '+(LANG==='en'?'Drop-in':'Jednorázové'); tagsEl.appendChild(el); }
   if(c.memb){ const el=document.createElement('div'); el.className='tag tag-style'; el.textContent='🎟️ '+(LANG==='en'?'Membership':'Členství'); tagsEl.appendChild(el); }
   const bioEl=$(p+'Bio'); if(bioEl) bioEl.textContent = (c.g.bio || c.g.description || '');
@@ -3744,6 +3751,7 @@ async function setDeckMode(m){
   if(_deckMode===m){ if(m==='gyms') await ensureGymsLoaded(); return; }
   _deckMode=m;
   const tf=$('tagFilters'); if(tf) tf.style.display = m==='gyms'?'none':'';
+  const gtf=$('gymTagFilters'); if(gtf){ gtf.style.display = m==='gyms'?'':'none'; if(m==='gyms') renderGymTagFilters(); }
   const yep=$('lblYep'); if(yep) yep.textContent = m==='gyms'?(LANG==='en'?'TRAIN':'TRÉNOVAT'):(LANG==='en'?'TRAIN':'TRÉNOVAT');
   const si=$('searchInp'); if(si){ si.value=''; si.placeholder = m==='gyms'?(LANG==='en'?'Search gym or city...':'Hledat gym nebo město...'):(LANG==='en'?'Search coach, city or gym...':'Hledat kouče, město nebo gym...'); }
   searchQuery='';
@@ -6453,6 +6461,7 @@ async function renderGymManage(){
     <div id="gmSetTab" style="display:none;">
     <details class="setSec"><summary>🏠 ${LANG==='en'?'Gym profile':'Profil gymu'}</summary><div class="setBody">
     ${isMultiDiscipline()?`<div class="sec-lbl">🥋 ${LANG==='en'?'Sports / disciplines':'Sporty / disciplíny'}</div><p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:8px;">${LANG==='en'?'Which sports are taught at this gym? You can pick several.':'Které sporty se v gymu učí? Můžeš vybrat víc.'}</p><div id="mgDisc" style="margin-bottom:18px;"></div>`:''}
+    <div class="sec-lbl">${LANG==='en'?'Tags / who it is for':'Pro koho / štítky'}</div><p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:8px;">${LANG==='en'?'Pick who this gym is for.':'Pro koho gym je? Vyber, co sedí.'}</p><div id="mgTags" style="margin-bottom:18px;"></div>
     <div class="sec-lbl">${LANG==='en'?'Gym description':'Popis gymu'}</div>
     <p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:8px;">${LANG==='en'?'Shown on your gym card in the deck — a few lines about the gym, the vibe and who it is for.':'Zobrazí se na kartě gymu v decku — pár vět o gymu, atmosféře a pro koho je.'}</p>
     <textarea id="mgDescription" rows="4" placeholder="${LANG==='en'?'A few sentences about the gym…':'Pár vět o gymu…'}" style="width:100%;box-sizing:border-box;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';line-height:1.5;resize:vertical;margin-bottom:14px;">${(_myGymData.description||'').replace(/</g,'&lt;')}</textarea>
@@ -6564,8 +6573,9 @@ async function renderGymManage(){
       toast(LANG==='en'?'✅ Photo added':'✅ Fotka přidána');
     }catch(err){ toast('⚠️ '+(err.message||'error')); }
   };
-  _gymMgDisc = parseDisc(g.disciplines);
+  _gymMgDisc = parseDisc(g.disciplines); _gymMgTags = parseTags(g.tags);
   if(isMultiDiscipline() && $('mgDisc')) renderDiscChips('mgDisc', _gymMgDisc);
+  if($('mgTags')) renderTagChips('mgTags', _gymMgTags);
   setOrgFormUI();
   box.querySelectorAll('.partnerLearnBtn').forEach(b=>b.onclick=openPartnerInfo);
   document.querySelectorAll('.orgFormBtn').forEach(b=>b.onclick=()=>{ _gymOrgForm=b.dataset.v; setOrgFormUI(); renderPlansEditor(); loadGymManageBookings(); });
@@ -6964,6 +6974,19 @@ function parseDisc(raw){ try{ const d=raw?(typeof raw==='string'?JSON.parse(raw)
 function orderMainFirst(arr, main){ if(!Array.isArray(arr)) return arr; if(!main||!arr.includes(main)) return arr; return [main, ...arr.filter(d=>d!==main)]; }
 function discBadgesHtml(raw){ if(!isMultiDiscipline()) return ''; const ds=parseDisc(raw); return ds.map(v=>`<span style="display:inline-block;background:#1f2937;color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;margin-right:4px;">${disciplineEmoji(v)} ${disciplineLabel(v)}</span>`).join(''); }
 // Multi-select chip picker tied to a state array (mutated by reference)
+function parseTags(raw){ try{ return raw?(typeof raw==='string'?JSON.parse(raw):raw):[]; }catch(e){ return []; } }
+function renderTagChips(containerId, stateArr){
+  const box=$(containerId); if(!box) return;
+  const tags=CLASS_LEVELS.filter(l=>l.v!=='all');
+  box.innerHTML=tags.map(d=>{ const on=stateArr.includes(d.v); return `<span class="tchip" data-cid="${containerId}" data-v="${d.v}" style="display:inline-block;padding:7px 12px;margin:3px;border-radius:16px;font-size:13px;font-weight:600;cursor:pointer;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'transparent'};color:${on?'#fff':'var(--mid)'};">${LANG==='en'?d.en:d.cs}</span>`; }).join('');
+  box.querySelectorAll('.tchip').forEach(el=>el.onclick=()=>{ const v=el.dataset.v; const i=stateArr.indexOf(v); if(i>=0) stateArr.splice(i,1); else stateArr.push(v); renderTagChips(containerId, stateArr); });
+}
+function renderGymTagFilters(){
+  const box=$('gymTagFilters'); if(!box) return;
+  const tags=[{v:null,lbl:(LANG==='en'?'All':'Vše')}].concat(CLASS_LEVELS.filter(l=>l.v!=='all').map(l=>({v:l.v,lbl:(LANG==='en'?l.en:l.cs)})));
+  box.innerHTML=tags.map(t=>`<div class="pill${((_gymTagFilter||null)===t.v)?' active':''}" data-gt="${t.v==null?'':t.v}">${t.lbl}</div>`).join('');
+  box.querySelectorAll('.pill').forEach(el=>el.onclick=()=>{ _gymTagFilter = el.dataset.gt||null; renderGymTagFilters(); init(); });
+}
 function renderDiscChipsSingle(containerId, stateArr, onChange){
   const box=$(containerId); if(!box) return;
   if(!stateArr.length) stateArr.push(defaultDiscipline());
@@ -6975,7 +6998,7 @@ function renderDiscChips(containerId, stateArr){
   box.innerHTML=activeDisciplines().map(d=>{ const on=stateArr.includes(d.v); return `<span class="dchip" data-cid="${containerId}" data-v="${d.v}" style="display:inline-block;padding:7px 12px;margin:3px;border-radius:16px;font-size:13px;font-weight:600;cursor:pointer;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'transparent'};color:${on?'#fff':'var(--mid)'};">${d.emoji} ${LANG==='en'?d.en:d.cs}</span>`; }).join('');
   box.querySelectorAll('.dchip').forEach(el=>el.onclick=()=>{ const v=el.dataset.v; const i=stateArr.indexOf(v); if(i>=0) stateArr.splice(i,1); else stateArr.push(v); if(!stateArr.length) stateArr.push(v); renderDiscChips(containerId, stateArr); });
 }
-var _caDisc=[], _gymDisc=[], _deckDisc=null, _gymMgDisc=[];
+var _caDisc=[], _gymDisc=[], _deckDisc=null, _gymMgDisc=[], _gymTags=[], _gymMgTags=[], _gymTagFilter=null;
 var ACTIVE_DISC=null;
 var _certifiableDisc=['muay_thai'];
 var _adminFilter='all';
@@ -7516,6 +7539,7 @@ async function saveGymManage(){
   const _gfy = parseInt($('mgFounded')&&$('mgFounded').value)||null; patch.founded_year=_gfy; _myGymData.founded_year=_gfy;
   const _mrp = Math.max(0, Math.min(100, parseInt($('mgMemberRefPct')&&$('mgMemberRefPct').value)||0)); patch.member_ref_pct=_mrp; _myGymData.member_ref_pct=_mrp;
   if(isMultiDiscipline()){ const dd=(_gymMgDisc&&_gymMgDisc.length)?_gymMgDisc:[defaultDiscipline()]; patch.disciplines=JSON.stringify(dd); _myGymData.disciplines=patch.disciplines; }
+  patch.tags=JSON.stringify(_gymMgTags||[]); _myGymData.tags=patch.tags;
   try{ patch.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || _myGymData.timezone || null; _myGymData.timezone=patch.timezone; }catch(e){}
   const _oldWaiverText=_myGymData.terms_text||null;
   if((termsText||'').trim() && !($('mgWaiverAuthor')&&$('mgWaiverAuthor').checked)){ toast(LANG==='en'?'⚠️ Confirm you are the author first':'⚠️ Potvrď, že jsi autorem dokumentu'); return; }
@@ -7671,7 +7695,7 @@ async function loadGymManageBookings(){
 function enterEventsMode(){
   _deckMode='events';
   document.querySelectorAll('.stack,.actions,.search-wrap').forEach(el=>{ if(el) el.style.display='none'; });
-  ['tagFilters','discFilters','locBar'].forEach(id=>{ if($(id)) $(id).style.display='none'; });
+  ['tagFilters','discFilters','locBar','gymTagFilters'].forEach(id=>{ if($(id)) $(id).style.display='none'; });
   const ev=$('eventsView'); if(ev){ ev.style.display='block'; renderEventsAsync(ev); }
 }
 function exitEventsMode(){
@@ -7980,7 +8004,7 @@ function gymDraftFields(){ return ['gymName','gymCity','gymAddress','gymHeadCoac
 function saveGymDraft(){
   try{
     if(!$('shGymApp') || !$('shGymApp').classList.contains('open')) return;
-    const d={ v:{}, disc:_gymDisc, show:gymShowcaseUrls, fac:gymFacilityUrls, amen:gymAmenityUrls, claimed:gymAmenityClaimed, step:_gaStep, ts:Date.now() };
+    const d={ v:{}, disc:_gymDisc, tags:_gymTags, show:gymShowcaseUrls, fac:gymFacilityUrls, amen:gymAmenityUrls, claimed:gymAmenityClaimed, step:_gaStep, ts:Date.now() };
     gymDraftFields().forEach(id=>{ const el=$(id); if(el) d.v[id]=el.value; });
     localStorage.setItem(GYM_DRAFT_KEY, JSON.stringify(d));
   }catch(e){}
@@ -8010,6 +8034,7 @@ function loadGymDraft(){
     const d=JSON.parse(raw); if(!d) return false;
     gymDraftFields().forEach(id=>{ const el=$(id); if(el && d.v && d.v[id]!=null) el.value=d.v[id]; });
     if(Array.isArray(d.disc)&&d.disc.length) _gymDisc=d.disc.slice();
+    if(Array.isArray(d.tags)) _gymTags=d.tags.slice();
     gymShowcaseUrls=d.show||{}; gymFacilityUrls=d.fac||{}; gymAmenityUrls=d.amen||{}; gymAmenityClaimed=d.claimed||{};
     return true;
   }catch(e){ return false; }
@@ -8032,9 +8057,10 @@ function openGymApp(){
   else { $('gymStripeStatus').style.display='none'; $('gymStripeConnect').style.display='block'; }
   updateGymPriceBreakdown();
   if(typeof updateGymMembBreakdown==='function') updateGymMembBreakdown();
-  if(!hadDraft) _gymDisc=[defaultDiscipline()];
+  if(!hadDraft){ _gymDisc=[defaultDiscipline()]; _gymTags=[]; }
   if(isMultiDiscipline()){ if($('gymDiscBlock')) $('gymDiscBlock').style.display='block'; renderDiscChips('gymDisc', _gymDisc); }
   else { if($('gymDiscBlock')) $('gymDiscBlock').style.display='none'; }
+  renderTagChips('gymTags', _gymTags);
   if(hadDraft){ applyGymDraftPreviews(); toast(LANG==='en'?'↩︎ Draft restored':'↩︎ Rozpracované obnoveno'); }
   openSheet('shGymApp');
   try{ let st=1; if(hadDraft){ const raw=localStorage.getItem(GYM_DRAFT_KEY); const d=raw?JSON.parse(raw):null; st=(d&&d.step)||1; } gaGoStep(st); }catch(e){ try{ gaGoStep(1); }catch(_){} }
@@ -8170,7 +8196,7 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
       membership_price: (parseInt($('gymMembPrice')&&$('gymMembPrice').value)||null)
     }).select('id').single();
     if(error){ toast('⚠️ '+error.message); btn.textContent=L('Odeslat přihlášku gymu →'); btn.disabled=false; return; }
-    if(newGym && newGym.id){ try{ const dd=(_gymDisc&&_gymDisc.length)?_gymDisc:[defaultDiscipline()]; await supaClient.from('gyms').update({ disciplines: JSON.stringify(dd) }).eq('id', newGym.id); }catch(e){} }
+    if(newGym && newGym.id){ try{ const dd=(_gymDisc&&_gymDisc.length)?_gymDisc:[defaultDiscipline()]; await supaClient.from('gyms').update({ disciplines: JSON.stringify(dd), tags: JSON.stringify(_gymTags||[]) }).eq('id', newGym.id); }catch(e){} }
 
     try {
       const _gd=(_gymDisc&&_gymDisc.length)?_gymDisc:[defaultDiscipline()]; const _gdl=_gd.map(x=>disciplineLabel(x)).join(', '); const _gid=(newGym&&newGym.id)||null;
