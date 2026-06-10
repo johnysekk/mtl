@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-FV | Event ticket checkout. pay.js gained a type=event branch (direct charge on the chosen payee account, buyer pays base x1.03, MTL application fee 6 percent of base x qty, metadata mtl_payment_type event_ticket, success returns event_pay=ok with the ticket id). In the detail view, Get ticket now runs the real flow: one variant goes straight to checkout, multiple show a Choose ticket picker; the payee account is resolved from payout_coach_id (the coach gym_payout_account) or else the gym stripe_account. A free/RSVP variant inserts a paid zero-amount ticket and notifies the organizer with no Stripe. Paid tickets insert a pending event_tickets row then redirect to Stripe; on return event_pay=ok confirms the ticket to paid, stores the payment intent and notifies the organizer that a ticket sold. Deploy index and pay.js. -->
+<!-- MTL build: 2026-06-07-FW | Event pricing polish plus webhook backstop. The create form now has a currency selector (CZK/EUR/USD, default the gym currency) next to the Ticket variants header, tracked in window._evCur and threaded through the variant breakdowns, save and validation. Each variant breakdown was reformatted to match the coach pricing card exactly: a green line You get <net> · Buyer pays <buyer>, then a smaller Stripe fee (est.) ~low-high · after Stripe ~netLow-netHigh, paid from your share — check with your accountant; the below-minimum case is the same red bold message. stripe-webhook.js gained an event_ticket branch: on checkout.session.completed it patches the event_tickets row (by ticket_id) to paid with the payment intent, as a backstop if the buyer closes the tab before the return redirect. Deploy index and stripe-webhook.js. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4462,6 +4462,7 @@ async function openEventCreate(gym){
   const g = gym || _myGymData; if(!g){ toast(LANG==='en'?'⚠️ No gym':'⚠️ Není gym'); return; }
   window._evGym=g; window._evPoster=''; window._evDisc=[]; window._evTiers=[{name:'',price:''}];
   const cur=g.currency||'CZK';
+  window._evCur=cur;
   const isOwner = g.owner_id===currentUser.id;
   let payees=[{id:'gym', name:(g.name||'Gym')+(LANG==='en'?' (default)':' (výchozí)'), account:g.stripe_account||null}];
   try{
@@ -4492,7 +4493,7 @@ async function openEventCreate(gym){
     <input id="evCap" type="number" min="0" style="${inp}" placeholder="${LANG==='en'?'e.g. 60':'např. 60'}">
     <div style="${lbl}">${LANG==='en'?'Money goes to (Stripe account)':'Peníze přijdou na (Stripe účet)'}</div>
     <select id="evPayee" style="${inp}">${payees.map(pp=>`<option value="${pp.id}">${escapeHtml(pp.name)}${pp.account?'':(LANG==='en'?' — not connected':' — nepřipojeno')}</option>`).join('')}</select>
-    <div style="${lbl}">${LANG==='en'?'Ticket variants':'Varianty lístků'} (${cur})</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;"><div style="${lbl}margin-bottom:0;">${LANG==='en'?'Ticket variants':'Varianty lístků'}</div><select id="evCur" style="padding:8px 10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';font-size:13px;background:#fff;">${['CZK','EUR','USD'].map(cc=>`<option value="${cc}" ${cc===cur?'selected':''}>${cc}</option>`).join('')}</select></div>
     <div id="evTiers"></div>
     <button type="button" id="evAddTier" style="width:100%;padding:10px;background:var(--surf);border:1px dashed var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:14px;font-size:13px;">+ ${LANG==='en'?'Add variant':'Přidat variantu'}</button>
     <label style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;margin-bottom:10px;cursor:pointer;"><input type="checkbox" id="evSeek" style="width:18px;height:18px;"> 🥊 ${LANG==='en'?'Looking for fighters':'Hledáme fightery'}</label>
@@ -4505,12 +4506,13 @@ async function openEventCreate(gym){
   document.querySelectorAll('.evDiscChip').forEach(c=>c.onclick=()=>{ const v=c.dataset.v; if(window._evDisc.includes(v)){ window._evDisc=window._evDisc.filter(x=>x!==v); c.style.background='var(--surf)'; c.style.borderColor='var(--border)'; c.style.color='var(--dark)'; } else { window._evDisc.push(v); c.style.background='var(--red)'; c.style.borderColor='var(--red)'; c.style.color='#fff'; } });
   renderEvTiers();
   $('evAddTier').onclick=()=>{ window._evTiers.push({name:'',price:''}); renderEvTiers(); };
+  $('evCur').onchange=()=>{ window._evCur=$('evCur').value; renderEvTiers(); };
   $('evSave').onclick=saveEvent;
   openSheet('shEventCreate');
 }
 function renderEvTiers(){
   const wrap=$('evTiers'); if(!wrap) return;
-  const cur=(window._evGym&&window._evGym.currency)||'CZK';
+  const cur=window._evCur||(window._evGym&&window._evGym.currency)||'CZK';
   wrap.innerHTML=(window._evTiers||[]).map((t,i)=>`<div style="border:1px solid var(--border);border-radius:12px;padding:10px;margin-bottom:10px;"><div style="display:flex;gap:8px;margin-bottom:8px;"><input class="evTierName" data-i="${i}" type="text" value="${(t.name||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Name (e.g. Standing)':'Název (např. Na stání)'}" style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';font-size:14px;"><input class="evTierPrice" data-i="${i}" type="number" min="0" value="${t.price||''}" placeholder="${MIN_EVENT[cur]||450}" style="width:92px;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';font-size:14px;">${(window._evTiers.length>1)?`<button class="evTierDel" data-i="${i}" style="background:#FEECEC;color:var(--red);border:none;border-radius:10px;width:40px;cursor:pointer;font-size:15px;flex-shrink:0;">✕</button>`:''}</div><div id="evTierBd${i}"></div></div>`).join('');
   wrap.querySelectorAll('.evTierName').forEach(el=>el.oninput=()=>{ window._evTiers[+el.dataset.i].name=el.value; });
   wrap.querySelectorAll('.evTierPrice').forEach(el=>el.oninput=()=>{ window._evTiers[+el.dataset.i].price=el.value; updateTierBd(+el.dataset.i); evCheckSave(); });
@@ -4520,28 +4522,27 @@ function renderEvTiers(){
 }
 function updateTierBd(i){
   const box=$('evTierBd'+i); if(!box) return;
-  const cur=(window._evGym&&window._evGym.currency)||'CZK';
+  const cur=window._evCur||(window._evGym&&window._evGym.currency)||'CZK';
   const sym=cur==='CZK'?'Kč':cur==='EUR'?'€':'$';
   const base=parseFloat(window._evTiers[i]&&window._evTiers[i].price)||0;
   const min=MIN_EVENT[cur]||MIN_EVENT.CZK;
   if(base<=0){ box.innerHTML=''; return; }
-  if(base<min){ box.innerHTML=`<div style="color:var(--red);font-size:12px;font-weight:700;">${LANG==='en'?`Minimum is ${min} ${cur}`:`Minimální cena je ${min} ${cur}`}</div>`; return; }
-  const markup=1.03, keep=0.97;
+  if(base<min){ box.innerHTML=`<div style="color:var(--red);font-size:12px;font-weight:700;line-height:1.4;">${LANG==='en'?`⚠️ Minimum price is <strong>${min} ${cur}</strong>. You cannot continue below this.`:`⚠️ Minimální cena je <strong>${min} ${cur}</strong>. Pod tuto částku nejde pokračovat.`}</div>`; return; }
   const r=v=>Math.round(v*100)/100;
-  const buyer=base*markup, net=base*keep, fee=buyer-net;
-  const fixed=cur==='CZK'?6:0.3;
-  const sLow=buyer*0.014+fixed, sHigh=buyer*0.029+fixed;
-  box.innerHTML=`<div style="background:#F0FBF0;border-radius:10px;padding:10px;font-size:12.5px;line-height:1.7;"><div style="display:flex;justify-content:space-between;"><span>${LANG==='en'?'Buyer pays':'Kupující zaplatí'}</span><b>${r(buyer)} ${sym}</b></div><div style="display:flex;justify-content:space-between;color:var(--mid);"><span>MTL 6% (3%+3%)</span><span>−${r(fee)} ${sym}</span></div><div style="display:flex;justify-content:space-between;color:var(--mid);"><span>Stripe processing fee</span><span>~−${r(sLow)}–${r(sHigh)} ${sym}</span></div><div style="display:flex;justify-content:space-between;border-top:1px solid rgba(0,0,0,.08);margin-top:5px;padding-top:5px;"><span>${LANG==='en'?'You net':'Tobě zůstane'}</span><b style="color:#006040;">~${r(net-sHigh)}–${r(net-sLow)} ${sym}</b></div></div>`;
+  const buyer=base*1.03, net=base*0.97;
+  const fix=cur==='CZK'?6:0.3;
+  const flo=buyer*0.014+fix, fhi=buyer*0.029+fix, nlo=net-fhi, nhi=net-flo;
+  box.innerHTML=`<div style="background:#F0FBF0;color:#0a6b43;border-radius:10px;padding:10px;font-size:13px;line-height:1.5;">`+(LANG==='en'?`💰 You get <strong>${r(net)} ${sym}</strong> · Buyer pays <strong>${r(buyer)} ${sym}</strong>`:`💰 Ty dostaneš <strong>${r(net)} ${sym}</strong> · Kupující zaplatí <strong>${r(buyer)} ${sym}</strong>`)+(LANG==='en'?`<div style="font-size:11px;color:#5a7a66;margin-top:6px;line-height:1.4;">⚡ Stripe fee (est.) ~${r(flo)}–${r(fhi)} ${sym} · after Stripe ~${r(nlo)}–${r(nhi)} ${sym}. Paid from your share — check with your accountant.</div>`:`<div style="font-size:11px;color:#5a7a66;margin-top:6px;line-height:1.4;">⚡ Stripe fee (odhad) ~${r(flo)}–${r(fhi)} ${sym} · po Stripe ~${r(nlo)}–${r(nhi)} ${sym}. Platí se z tvého podílu — prober s účetním.</div>`)+`</div>`;
 }
 function evCheckSave(){
-  const cur=(window._evGym&&window._evGym.currency)||'CZK';
+  const cur=window._evCur||(window._evGym&&window._evGym.currency)||'CZK';
   const min=MIN_EVENT[cur]||MIN_EVENT.CZK;
   const bad=(window._evTiers||[]).some(t=>{ const pp=parseFloat(t.price)||0; return pp>0 && pp<min; });
   const sv=$('evSave'); if(sv){ sv.disabled=bad; sv.style.opacity=bad?'0.45':'1'; sv.style.cursor=bad?'not-allowed':'pointer'; }
 }
 async function saveEvent(){
   const g=window._evGym||_myGymData; if(!g){ toast('⚠️'); return; }
-  const cur=g.currency||'CZK';
+  const cur=window._evCur||g.currency||'CZK';
   const min=MIN_EVENT[cur]||MIN_EVENT.CZK;
   const title=($('evTitle').value||'').trim();
   if(!title){ toast(LANG==='en'?'⚠️ Add a title':'⚠️ Doplň název'); return; }
