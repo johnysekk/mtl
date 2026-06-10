@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-GI | Event waiver / clickwrap, mirroring the gym waiver. The create/edit form has a Participation terms field pre-filled from a per-type template (a stronger combat-risk waiver for Fight night and Competition, a lighter participation waiver for the rest, in the app language); it auto-refills when the type changes unless the organizer has edited it, and is stored in a new events.waiver_text column. Before paying for or RSVPing to an event, a clickwrap sheet shows the terms with an I-agree checkbox and an Agree-and-continue button, gating buyEventTicket so checkout only proceeds after consent. Deploy index plus add events.waiver_text in Supabase. -->
+<!-- MTL build: 2026-06-07-GJ | Gym profile now has a Past events section. When a gym has past events (approved or cancelled, start time in the past) a tappable Past events (count) button appears under the rating block; it opens a sheet listing those events newest-first with poster/type/date, cancelled ones dimmed, and tapping a row opens the existing event detail. Index only, no schema change. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -5166,6 +5166,16 @@ async function gymTermsGate(g, onAgree){
   go.onclick=async()=>{ if(!cb.checked) return; try{ if(currentUser&&currentUser.id) await supaClient.from('waiver_acceptances').insert({ gym_id:g.id, version:_wv, student_id:currentUser.id, student_name:currentUser.name||null, body_hash:_waiverHash((g.terms_title||'')+'|'+(g.terms_text||'')), accepted_at:new Date().toISOString() }); }catch(e){} ov.remove(); onAgree(); };
   ov.onclick=(e)=>{ if(e.target===ov) ov.remove(); };
 }
+async function openGymPastEvents(gid, gname){
+  const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:260;display:flex;align-items:flex-end;justify-content:center;';
+  ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px 18px 0 0;padding:20px;max-height:84vh;overflow-y:auto;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;"><div style="font-size:17px;font-weight:800;color:var(--dark);">🎪 ${LANG==='en'?'Past events':'Uspořádané akce'}${gname?` · ${escapeHtml(gname)}`:''}</div><button id="gpeClose" style="background:var(--surf);border:none;border-radius:50%;width:32px;height:32px;font-size:15px;cursor:pointer;flex-shrink:0;">\u2715</button></div><div id="gpeList"><p style="color:var(--light);text-align:center;padding:20px;">\u2026</p></div></div>`;
+  document.body.appendChild(ov); const close=()=>ov.remove(); ov.onclick=(e)=>{ if(e.target===ov) close(); }; ov.querySelector('#gpeClose').onclick=close;
+  let evs=[]; try{ const { data } = await supaClient.from('events').select('*').eq('gym_id', gid).lt('starts_at', new Date().toISOString()).in('status',['approved','cancelled']).order('starts_at',{ascending:false}).limit(50); evs=data||[]; }catch(e){}
+  const box=ov.querySelector('#gpeList'); if(!box) return;
+  if(!evs.length){ box.innerHTML=`<p style="color:var(--light);text-align:center;padding:20px;">${LANG==='en'?'No past events yet.':'Zatím žádné proběhlé akce.'}</p>`; return; }
+  box.innerHTML=evs.map(ev=>{ const t=EVENT_TYPES.find(x=>x.v===ev.type)||{emoji:'📌',cs:'',en:''}; const dt=ev.starts_at?new Date(ev.starts_at).toLocaleDateString(LANG==='en'?'en-GB':'cs-CZ',{day:'numeric',month:'short',year:'numeric'}):''; const cancelled=ev.status==='cancelled'; return `<button class="gpeRow" data-id="${ev.id}" style="width:100%;text-align:left;display:flex;align-items:center;gap:12px;padding:12px;background:var(--surf);border:1px solid var(--border);border-radius:12px;margin-bottom:8px;cursor:pointer;font-family:&quot;DM Sans&quot;;${cancelled?'opacity:.6;':''}"><div style="width:54px;height:40px;border-radius:8px;flex-shrink:0;background:#000${ev.poster?` url('${ev.poster}') center/cover`:''};display:flex;align-items:center;justify-content:center;font-size:18px;">${ev.poster?'':t.emoji}</div><div style="min-width:0;flex:1;"><div style="font-weight:700;color:var(--dark);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(ev.title||'')}</div><div style="font-size:12px;color:var(--mid);">${t.emoji} ${LANG==='en'?(t.en||''):(t.cs||'')} \u00b7 \ud83d\udcc5 ${dt}${cancelled?` \u00b7 ${LANG==='en'?'cancelled':'zrušeno'}`:''}</div></div><span style="color:var(--light);flex-shrink:0;">\u2192</span></button>`; }).join('');
+  box.querySelectorAll('.gpeRow').forEach(r=>r.onclick=()=>{ const ev=evs.find(x=>String(x.id)===String(r.dataset.id)); if(ev){ close(); openEventView(ev); } });
+}
 async function openGymProfile(g){
   if(g && g.id){ try{ const { data: full } = await supaClient.from('gyms').select('*').eq('id', g.id).single(); if(full) g=full; }catch(e){} }
   window._currentGym = g;
@@ -5306,11 +5316,13 @@ async function openGymProfile(g){
       <div class="lvlBody" data-v="${v}" style="display:none;padding:8px 10px 4px;">${items.map(occRow).join('')}</div>
     </div>`;
   }).join('') + `</div>`;
+  let _pastEvCount=0; try{ const { count } = await supaClient.from('events').select('id',{count:'exact',head:true}).eq('gym_id', g.id).lt('starts_at', new Date().toISOString()).in('status',['approved','cancelled']); _pastEvCount=count||0; }catch(e){}
   $('gymProfContent').innerHTML = `
     ${gallery}
     <div style="font-size:14px;color:var(--mid);margin-bottom:4px;">📍 ${g.address?g.address+', ':''}${g.city||''}</div>
     ${statsStrip}
     ${ratingBlock}
+    ${_pastEvCount>0?`<button id="gymPastEvBtn" data-gid="${g.id}" data-gname="${escapeHtml(g.name||'')}" style="width:100%;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:13px 14px;background:var(--surf);border:1px solid var(--border);border-radius:12px;margin:4px 0 14px;cursor:pointer;font-family:&quot;DM Sans&quot;;"><span style="font-weight:700;color:var(--dark);">🎪 ${LANG==='en'?'Past events':'Uspořádané akce'} <span style="color:var(--light);font-weight:600;">(${_pastEvCount})</span></span><span style="color:var(--light);">→</span></button>`:''}
     ${g.description?`<p style="font-size:14px;color:var(--dark);line-height:1.6;margin:10px 0 16px;">${escapeHtml(g.description)}</p>`:''}
     ${capBlock}
     ${amenBlock}
@@ -5331,6 +5343,7 @@ async function openGymProfile(g){
   `;
   {
     const bb=$('btnBookGym'); if(bb) bb.onclick=()=>gymTermsGate(g, ()=>bookGymDropin(g));
+    const _pe=$('gymPastEvBtn'); if(_pe) _pe.onclick=()=>openGymPastEvents(_pe.dataset.gid, _pe.dataset.gname);
     $('gymProfContent').querySelectorAll('.lvlHead').forEach(h=>h.onclick=()=>{ const v=h.dataset.v; const body=$('gymProfContent').querySelector('.lvlBody[data-v="'+v+'"]'); const arr=$('gymProfContent').querySelector('.lvlArr[data-v="'+v+'"]'); if(!body) return; const open=body.style.display==='none'; body.style.display=open?'block':'none'; if(arr) arr.style.transform=open?'rotate(180deg)':'none'; });
     $('gymProfContent').querySelectorAll('.subPlanBtn').forEach(b=>{ b.onclick=()=>{ const sel=plansAll[+b.dataset.pi]; if(myMemb && sel && sel.coach && myMemb.coach_id && sel.coach===myMemb.coach_id){ if(!confirm(LANG==='en'?'If you want a different class level with the same coach, talk to them first. Continue anyway?':'Pokud chceš navštěvovat jinou úroveň lekcí u stejného kouče, zkus se s ním nejdřív domluvit. Přesto pokračovat?')) return; } gymTermsGate(g, ()=>subscribeGymMembership(g, sel)); }; });
     const _grBtn=$('gymProfContent').querySelector('.gymRefShareBtn'); if(_grBtn) _grBtn.onclick=async()=>{ if(!currentUser) return; const link=location.origin+'/?gym='+g.id+'&gymref='+currentUser.id; const msg=(LANG==='en'?`Join ${g.name} on MTL — you get ${g.member_ref_pct}% off your first month! 🥊 `:`Přidej se do ${g.name} na MTL — máš ${g.member_ref_pct}% slevu na první měsíc! 🥊 `); if(navigator.share){ try{ await navigator.share({ title:g.name||'MTL', text:msg, url:link }); }catch(e){} } else { try{ navigator.clipboard.writeText(link); }catch(e){} toast(L('✅ Odkaz zkopírován')); } };
