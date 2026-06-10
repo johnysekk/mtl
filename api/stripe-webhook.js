@@ -243,7 +243,9 @@ export default async function handler(req, res) {
         const full = ch.amount_refunded >= ch.amount_captured;
         const pct = ch.amount_captured ? Math.round((ch.amount_refunded / ch.amount_captured) * 100) : 100;
         await sbPatch('bookings', `payment_intent=eq.${encodeURIComponent(pi)}`, full ? { status: 'cancelled', refund_pct: pct } : { refund_pct: pct });
-        try { await sbPatch('transactions', `payment_intent=eq.${encodeURIComponent(pi)}`, { status: full ? 'refunded' : 'partial_refund', refund_amount: ch.amount_refunded }); } catch (e) {}
+        let mtlFeeRefunded = 0;
+        try { if (ch.application_fee) { const afId = typeof ch.application_fee === 'string' ? ch.application_fee : ch.application_fee.id; const af = await stripe.applicationFees.retrieve(afId); mtlFeeRefunded = af.amount_refunded || 0; } } catch (e) { console.error('appfee refund', e.message); }
+        try { await sbPatch('transactions', `payment_intent=eq.${encodeURIComponent(pi)}`, { status: full ? 'refunded' : 'partial_refund', refund_amount: ch.amount_refunded, mtl_fee_refunded: mtlFeeRefunded }); } catch (e) {}
       }
     } else if (event.type === 'customer.subscription.deleted') {
       // Exclusive MTL Partner zrušen / neuhrazen → vypni partner sazby
