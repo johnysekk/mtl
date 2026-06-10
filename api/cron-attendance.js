@@ -48,7 +48,7 @@ export default async function handler(req, res) {
   try {
     const gyms = await sbGet('gyms?status=eq.approved&select=id,name,owner_id,schedule,timezone');
     const mutedRem = new Set(((await sbGet('profiles?mute_class_reminder=eq.true&select=id')) || []).map(pp => pp.id));
-    let created = 0;
+    let created = 0; let purged = 0; let purgedG = 0;
     for (const gym of gyms) {
       let sch = [];
       try { sch = gym.schedule ? (typeof gym.schedule === 'string' ? JSON.parse(gym.schedule) : gym.schedule) : []; } catch (e) {}
@@ -143,7 +143,23 @@ export default async function handler(req, res) {
       }
     } catch (e) { console.error('cron 1:1 reminder', e.message); }
 
-    res.status(200).json({ ok: true, gyms: gyms.length, created });
+    // ── Purge accounts/gyms past the 30-day deletion grace (anonymize PII, keep rows for booking/accounting FK integrity) ──
+    try {
+      const cutoff = new Date(Date.now() - 30 * 864e5).toISOString();
+      const delProfiles = await sbGet(`profiles?deleted_at=lt.${encodeURIComponent(cutoff)}&purged_at=is.null&select=id`);
+      for (const pr of (delProfiles || [])) {
+        await sbPatch('profiles', `id=eq.${pr.id}`, { name: 'Deleted user', photo: null, bio: null, coach_status: 'deleted', purged_at: new Date().toISOString() });
+        try { await fetch(`${SB}/auth/v1/admin/users/${pr.id}`, { method: 'DELETE', headers: sbHeaders }); } catch (e) {}
+        purged++;
+      }
+      const delGyms = await sbGet(`gyms?deleted_at=lt.${encodeURIComponent(cutoff)}&purged_at=is.null&select=id`);
+      for (const g of (delGyms || [])) {
+        await sbPatch('gyms', `id=eq.${g.id}`, { name: 'Deleted gym', photos: null, description: null, status: 'deleted', purged_at: new Date().toISOString() });
+        purgedG++;
+      }
+    } catch (e) { console.error('cron purge', e.message); }
+
+    res.status(200).json({ ok: true, gyms: gyms.length, created, purged, purgedG });
   } catch (err) {
     console.error('cron-attendance error:', err.message);
     res.status(200).json({ ok: false, error: err.message });
