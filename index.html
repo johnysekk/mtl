@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-FQ | Event creation (gym owner). The Events tab shows a Create event button for gym owners that opens a new shEventCreate sheet: type, title, description, multi-discipline chips, venue (defaults to the gym), start/end datetime, capacity, and ticket price. The price shows a live owner breakdown (buyer pays base x1.04 normal / x1.02 EP, MTL fee shown as 8% normal or 4% EP, minus the gyms Stripe fee range, equals net) and enforces a minimum ticket price (450 CZK / 22 USD / 20 EUR): below it the warning turns red and Save is disabled. A Looking for fighters toggle reveals a fighter-info note. Saving inserts into events with status approved for an owner (live) or pending for a team coach (awaiting approval, wired next). Money routes to the gym Stripe as merchant of record. Deploy index only. -->
+<!-- MTL build: 2026-06-07-FR | Event creation completed. Added an optional poster upload (reuses cropImage 3:4 then uploads to the gym-photos bucket, with a preview). The create button now appears for anyone eligible: gym owners and team coaches whose can_create_events flag is on (eventEligibleGyms gathers owned gyms plus active team gyms with the flag). If more than one eligible gym, a picker chooses which gym the event is for; openEventCreate now takes that gym via window._evGym so a coach can propose for the right gym. A coach saving creates a pending event and notifies the gym owner. The Events tab now shows owners a Pending approval list (proposer name + date) with Approve and Reject buttons; approving sets the event live and reject sets it rejected, each notifying the coach. Deploy index only. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4393,19 +4393,62 @@ function closeSheet(id){
 function openEvents(){ openSheet('shEvents'); renderEvents(); }
 function renderEvents(){
   const box=$('eventsContent'); if(!box) return;
-  const canCreate = (window._myGyms&&window._myGyms.length);
-  const createBtn = canCreate ? `<button id="evCreateBtn" style="width:100%;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:16px;">+ ${LANG==='en'?'Create event':'Vytvořit událost'}</button>` : '';
-  box.innerHTML = createBtn + `<div style="text-align:center;padding:40px 16px;color:var(--light);"><div style="font-size:40px;margin-bottom:10px;">🥊</div><div style="font-weight:700;color:var(--dark);margin-bottom:6px;">${LANG==='en'?'No events near you yet':'Zatím tu nejsou žádné události'}</div><div style="font-size:13px;line-height:1.5;">${LANG==='en'?'Fight nights, seminars and camps will show up here.':'Fight nights, semináře a kempy se objeví tady.'}</div></div>`;
-  if($('evCreateBtn')) $('evCreateBtn').onclick=openEventCreate;
+  box.innerHTML=`<div style="text-align:center;padding:40px;color:var(--light);">…</div>`;
+  renderEventsAsync(box);
 }
-function openEventCreate(){
-  const g=_myGymData; if(!g){ toast(LANG==='en'?'⚠️ No gym selected':'⚠️ Není vybraný gym'); return; }
+async function renderEventsAsync(box){
+  const elig = await eventEligibleGyms();
+  let html='';
+  if(elig.length){ html += `<button id="evCreateBtn" style="width:100%;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:16px;">+ ${LANG==='en'?'Create event':'Vytvořit událost'}</button>`; }
+  const ownedIds=(window._myGyms||[]).map(g=>g.id);
+  let pendRows='';
+  if(ownedIds.length){
+    try{
+      const { data:pend } = await supaClient.from('events').select('*').in('gym_id', ownedIds).eq('status','pending').order('created_at',{ascending:true});
+      if(pend && pend.length){
+        const props={}; const cids=[...new Set(pend.map(e=>e.created_by).filter(Boolean))];
+        if(cids.length){ const { data:pr } = await supaClient.from('profiles').select('id,name').in('id',cids); (pr||[]).forEach(x=>props[x.id]=x.name); }
+        pendRows = `<div style="font-size:12px;font-weight:700;color:var(--mid);margin:4px 0 8px;">⏳ ${LANG==='en'?'Pending approval':'Čeká na schválení'}</div>` + pend.map(ev=>`<div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;"><div style="font-weight:700;margin-bottom:2px;">${escapeHtml(ev.title||'')}</div><div style="font-size:12px;color:var(--mid);margin-bottom:8px;">${escapeHtml(props[ev.created_by]||(LANG==='en'?'Coach':'Kouč'))} · ${(ev.starts_at||'').slice(0,10)}</div><div style="display:flex;gap:8px;"><button class="evApprove" data-id="${ev.id}" data-coach="${ev.created_by||''}" data-title="${escapeHtml(ev.title||'')}" style="flex:1;padding:9px;background:#E8F5EE;color:#006040;border:1px solid #A8E6C0;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">✓ ${LANG==='en'?'Approve':'Schválit'}</button><button class="evReject" data-id="${ev.id}" data-coach="${ev.created_by||''}" data-title="${escapeHtml(ev.title||'')}" style="flex:1;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">✕ ${LANG==='en'?'Reject':'Zamítnout'}</button></div></div>`).join('') + `<div style="height:8px;"></div>`;
+      }
+    }catch(e){}
+  }
+  html += pendRows + `<div style="text-align:center;padding:40px 16px;color:var(--light);"><div style="font-size:40px;margin-bottom:10px;">🥊</div><div style="font-weight:700;color:var(--dark);margin-bottom:6px;">${LANG==='en'?'No events near you yet':'Zatím tu nejsou žádné události'}</div><div style="font-size:13px;line-height:1.5;">${LANG==='en'?'Fight nights, seminars and camps will show up here.':'Fight nights, semináře a kempy se objeví tady.'}</div></div>`;
+  box.innerHTML=html;
+  if($('evCreateBtn')) $('evCreateBtn').onclick=()=>{ if(elig.length===1) openEventCreate(elig[0]); else openEventGymPick(elig); };
+  box.querySelectorAll('.evApprove').forEach(b=>b.onclick=()=>approveEvent(b.dataset.id, b.dataset.coach, b.dataset.title));
+  box.querySelectorAll('.evReject').forEach(b=>b.onclick=()=>rejectEvent(b.dataset.id, b.dataset.coach, b.dataset.title));
+}
+async function eventEligibleGyms(){
+  if(!currentUser) return [];
+  const out=[]; const seen={};
+  (window._myGyms||[]).forEach(g=>{ if(!seen[g.id]){ seen[g.id]=1; out.push(g); } });
+  try{
+    const { data:links } = await supaClient.from('gym_coaches').select('gym_id').eq('coach_id', currentUser.id).eq('status','active').eq('can_create_events', true);
+    const ids=(links||[]).map(l=>l.gym_id).filter(id=>!seen[id]);
+    if(ids.length){ const { data:gs } = await supaClient.from('gyms').select('*').in('id', ids).eq('status','approved'); (gs||[]).forEach(g=>{ if(!seen[g.id]){ seen[g.id]=1; out.push(g); } }); }
+  }catch(e){}
+  return out;
+}
+function openEventGymPick(elig){
+  const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;display:flex;align-items:flex-end;justify-content:center;';
+  const rows=elig.map(g=>`<button class="egpRow" data-id="${g.id}" style="width:100%;text-align:left;padding:13px;background:var(--surf);border:1px solid var(--border);border-radius:12px;margin-bottom:8px;cursor:pointer;font-family:'DM Sans';font-weight:700;color:var(--dark);">${escapeHtml(g.name||'Gym')}<div style="font-size:12px;font-weight:400;color:var(--light);">${escapeHtml([g.city,g.country].filter(Boolean).join(', '))}</div></button>`).join('');
+  ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px 18px 0 0;padding:20px;max-height:80vh;overflow-y:auto;"><div style="font-size:17px;font-weight:800;margin-bottom:12px;">${LANG==='en'?'Create event for':'Vytvořit událost pro'}</div>${rows}<button id="egpCancel" style="width:100%;margin-top:4px;padding:11px;background:transparent;border:none;color:var(--light);font-weight:600;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Cancel':'Zrušit'}</button></div>`;
+  document.body.appendChild(ov); const close=()=>ov.remove(); ov.onclick=(e)=>{ if(e.target===ov) close(); }; ov.querySelector('#egpCancel').onclick=close;
+  ov.querySelectorAll('.egpRow').forEach(r=>r.onclick=()=>{ const g=elig.find(x=>String(x.id)===String(r.dataset.id)); close(); if(g) openEventCreate(g); });
+}
+function openEventCreate(gym){
+  const g = gym || _myGymData; if(!g){ toast(LANG==='en'?'⚠️ No gym':'⚠️ Není gym'); return; }
+  window._evGym=g; window._evPoster='';
   const cur=g.currency||'CZK';
   const isOwner = g.owner_id===currentUser.id;
   window._evDisc=[];
   const inp="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';margin-bottom:12px;";
   const lbl="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:5px;";
   $('eventCreateContent').innerHTML=`
+    <div style="${lbl}">${LANG==='en'?'Poster (optional)':'Poster (nepovinné)'}</div>
+    <div id="evPosterPv" style="display:none;width:100%;height:170px;border-radius:12px;background-size:cover;background-position:center;margin-bottom:8px;background-color:#eee;"></div>
+    <button type="button" id="evPosterBtn" style="width:100%;padding:11px;background:var(--surf);border:1px dashed var(--border);border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:12px;">📷 ${LANG==='en'?'Add poster':'Přidat poster'}</button>
+    <input type="file" id="evPosterInput" accept="image/*" style="display:none;">
     <div style="${lbl}">${LANG==='en'?'Type':'Typ'}</div>
     <select id="evType" style="${inp}">${EVENT_TYPES.map(t=>`<option value="${t.v}">${t.emoji} ${LANG==='en'?t.en:t.cs}</option>`).join('')}</select>
     <div style="${lbl}">${LANG==='en'?'Title':'Název'}</div>
@@ -4427,6 +4470,8 @@ function openEventCreate(){
     <textarea id="evFighterInfo" rows="2" style="${inp}display:none;resize:vertical;" placeholder="${LANG==='en'?'What fighters you want (weight, level, rules…)':'Jaké fightery chceš (váha, úroveň, pravidla…)'}"></textarea>
     ${isOwner?'':`<p style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:10px;">${LANG==='en'?'Your gym owner reviews and approves this before it goes live.':'Majitel gymu to před zveřejněním schválí.'}</p>`}
     <button id="evSave" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${isOwner?(LANG==='en'?'Publish event':'Zveřejnit událost'):(LANG==='en'?'Send for approval':'Odeslat ke schválení')}</button>`;
+  $('evPosterBtn').onclick=()=>$('evPosterInput').click();
+  $('evPosterInput').onchange=async(e)=>{ const file=e.target.files&&e.target.files[0]; if(!file) return; const blob=await cropImage(file, 3/4); e.target.value=''; if(!blob) return; toast(L('⬆️ Nahrávám...')); try{ const fileName=`${currentUser.id}-event-${Date.now()}.jpg`; const { error }=await supaClient.storage.from('gym-photos').upload(fileName, blob, { contentType:'image/jpeg', upsert:false }); if(error){ toast('⚠️ '+error.message); return; } const { data }=supaClient.storage.from('gym-photos').getPublicUrl(fileName); window._evPoster=data.publicUrl; const pv=$('evPosterPv'); if(pv){ pv.style.backgroundImage=`url('${data.publicUrl}')`; pv.style.display='block'; } toast(LANG==='en'?'✅ Poster added':'✅ Poster nahrán'); }catch(err){ toast('⚠️'); } };
   $('evPrice').oninput=updateEventBreakdown;
   $('evSeek').onchange=()=>{ $('evFighterInfo').style.display=$('evSeek').checked?'block':'none'; };
   document.querySelectorAll('.evDiscChip').forEach(c=>c.onclick=()=>{ const v=c.dataset.v; if(window._evDisc.includes(v)){ window._evDisc=window._evDisc.filter(x=>x!==v); c.style.background='var(--surf)'; c.style.borderColor='var(--border)'; c.style.color='var(--dark)'; } else { window._evDisc.push(v); c.style.background='var(--red)'; c.style.borderColor='var(--red)'; c.style.color='#fff'; } });
@@ -4435,7 +4480,7 @@ function openEventCreate(){
   openSheet('shEventCreate');
 }
 function updateEventBreakdown(){
-  const g=_myGymData; const cur=(g&&g.currency)||'CZK';
+  const g=window._evGym||_myGymData; const cur=(g&&g.currency)||'CZK';
   const sym=cur==='CZK'?'Kč':cur==='EUR'?'€':'$';
   const base=parseFloat($('evPrice')&&$('evPrice').value)||0;
   const min=MIN_EVENT[cur]||MIN_EVENT.CZK;
@@ -4455,7 +4500,7 @@ function updateEventBreakdown(){
   box.innerHTML=`<div style="display:flex;justify-content:space-between;"><span>${LANG==='en'?'Buyer pays':'Kupující zaplatí'}</span><b>${r(buyer)} ${sym}</b></div><div style="display:flex;justify-content:space-between;color:var(--mid);"><span>MTL ${isEP?'4%':'8%'}</span><span>−${r(fee)} ${sym}</span></div><div style="display:flex;justify-content:space-between;color:var(--mid);font-size:12px;"><span>${LANG==='en'?'Stripe (you)':'Stripe (ty)'}</span><span>~−${r(sLow)}–${r(sHigh)} ${sym}</span></div><div style="display:flex;justify-content:space-between;border-top:1px solid rgba(0,0,0,.1);margin-top:6px;padding-top:6px;"><span>${LANG==='en'?'You net':'Tobě zůstane'}</span><b style="color:#006040;">~${r(net-sHigh)}–${r(net-sLow)} ${sym}</b></div>`;
 }
 async function saveEvent(){
-  const g=_myGymData; if(!g){ toast('⚠️'); return; }
+  const g=window._evGym||_myGymData; if(!g){ toast('⚠️'); return; }
   const cur=g.currency||'CZK';
   const base=parseFloat($('evPrice').value)||0;
   const min=MIN_EVENT[cur]||MIN_EVENT.CZK;
@@ -4464,12 +4509,26 @@ async function saveEvent(){
   if(!$('evStart').value){ toast(LANG==='en'?'⚠️ Pick a start date':'⚠️ Vyber datum začátku'); return; }
   if(base>0 && base<min){ toast(LANG==='en'?`⚠️ Minimum price is ${min} ${cur}`:`⚠️ Minimální cena je ${min} ${cur}`); return; }
   const isOwner = g.owner_id===currentUser.id;
-  const row={ gym_id:g.id, created_by:currentUser.id, status: isOwner?'approved':'pending', type:$('evType').value||'other', title, description:($('evDesc').value||'').trim()||null, disciplines: JSON.stringify(window._evDisc||[]), city: g.city||null, country: g.country||null, venue:($('evVenue').value||'').trim()||null, city_lat: g.city_lat||null, city_lng: g.city_lng||null, starts_at: new Date($('evStart').value).toISOString(), ends_at: $('evEnd').value ? new Date($('evEnd').value).toISOString() : null, capacity: parseInt($('evCap').value)||null, ticket_price: base, currency: cur, seeking_fighters: !!$('evSeek').checked, fighter_info: ($('evFighterInfo').value||'').trim()||null };
+  const row={ gym_id:g.id, created_by:currentUser.id, status: isOwner?'approved':'pending', type:$('evType').value||'other', title, description:($('evDesc').value||'').trim()||null, poster: window._evPoster||null, disciplines: JSON.stringify(window._evDisc||[]), city: g.city||null, country: g.country||null, venue:($('evVenue').value||'').trim()||null, city_lat: g.city_lat||null, city_lng: g.city_lng||null, starts_at: new Date($('evStart').value).toISOString(), ends_at: $('evEnd').value ? new Date($('evEnd').value).toISOString() : null, capacity: parseInt($('evCap').value)||null, ticket_price: base, currency: cur, seeking_fighters: !!$('evSeek').checked, fighter_info: ($('evFighterInfo').value||'').trim()||null };
   const sv=$('evSave'); if(sv){ sv.disabled=true; sv.textContent='…'; }
   const { error } = await supaClient.from('events').insert(row);
   if(error){ toast('⚠️ '+error.message); if(sv){ sv.disabled=false; } return; }
+  if(!isOwner && g.owner_id){ try{ await supaClient.from('notifications').insert({ user_id:g.owner_id, type:'system', read:false, data: JSON.stringify({ kind:'event_proposal', gym_id:g.id, title }), message:'🥊 '+(currentUser.name||'Kouč')+(LANG==='en'?' proposed an event — review it.':' navrhl událost — schval ji.') }); }catch(e){} }
   toast(isOwner ? (LANG==='en'?'✅ Event published':'✅ Událost zveřejněna') : (LANG==='en'?'✅ Sent for approval':'✅ Odesláno ke schválení'));
   closeSheet('shEventCreate'); renderEvents();
+}
+async function approveEvent(id, coachId, title){
+  const { error } = await supaClient.from('events').update({ status:'approved' }).eq('id', id);
+  if(error){ toast('⚠️ '+error.message); return; }
+  if(coachId){ try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'system', read:false, data: JSON.stringify({ kind:'event_approved', title }), message:'✅ '+(LANG==='en'?`Your event "${title}" was approved`:`Tvoje událost „${title}" byla schválena`) }); }catch(e){} }
+  toast(LANG==='en'?'✅ Approved':'✅ Schváleno'); renderEvents();
+}
+async function rejectEvent(id, coachId, title){
+  if(!confirm(LANG==='en'?`Reject "${title}"?`:`Zamítnout „${title}"?`)) return;
+  const { error } = await supaClient.from('events').update({ status:'rejected' }).eq('id', id);
+  if(error){ toast('⚠️ '+error.message); return; }
+  if(coachId){ try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'system', read:false, data: JSON.stringify({ kind:'event_rejected', title }), message:'❌ '+(LANG==='en'?`Your event "${title}" was not approved`:`Tvoje událost „${title}" nebyla schválena`) }); }catch(e){} }
+  toast(LANG==='en'?'Rejected':'Zamítnuto'); renderEvents();
 }
 function closeAllSheets(){ _sheetParent={}; SHEETS.forEach(s=>$(s).classList.remove('open')); }
 
