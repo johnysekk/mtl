@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-GA | Events deck cleaned to match Coaches and Gyms: removed the create-event button and the Browse / My events toggle, so the Events tab is now just the discipline filter plus the swipe deck. All My-events functions moved into the profile card under a new Moje udalosti section: Nadchazejici (jdu) and Historie akcí open shMyEv listing my tickets and RSVPs as cards (poster, date, green you-have-a-ticket line) that open the event detail; my suggested fighters with status show under upcoming. A third row Tvorba a sprava udalosti appears only for gym owners and coaches with permission and opens shMyEvManage (create button plus my hosted events with Edit, pending approvals, and fighter requests). Event detail now async-checks for an existing ticket and shows a green Already-have-a-ticket box instead of the buy button (and an ended note for past events). Refund flow not built yet, pending decision. Deploy index only. -->
+<!-- MTL build: 2026-06-07-GB | Event city is now mandatory at creation and editing. The create/edit form has a required City field (defaults to the gym city) above the optional Venue. On save the city is geocoded via CITY_COORDS then Nominatim into city, country, city_lat and city_lng (new geocodeCity helper), and these are written on both insert and update. The Events swipe deck now sorts by distance from the user location when known (events without coordinates fall to the end, otherwise by date), and each swipe card shows the distance in km next to the location. Refund flow and the events-into-gym-leaderboard idea are still proposals, not built. Deploy index only. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4429,6 +4429,7 @@ async function renderEventsAsync(box){
     const today=new Date(); today.setHours(0,0,0,0);
     const { data:evs } = await supaClient.from('events').select('*').eq('status','approved').gte('starts_at', today.toISOString()).order('starts_at',{ascending:true}).limit(100);
     window._evList = evs||[];
+    if(typeof userLoc!=='undefined' && userLoc && userLoc.lat){ window._evList.forEach(e=>{ e._dist=(e.city_lat&&e.city_lng)?haversine(userLoc.lat,userLoc.lng,e.city_lat,e.city_lng):null; }); window._evList.sort((a,b)=>{ if(a._dist==null&&b._dist==null) return new Date(a.starts_at)-new Date(b.starts_at); if(a._dist==null) return 1; if(b._dist==null) return -1; return a._dist-b._dist; }); }
     const fd = window._evFilterDisc||'all';
     if(window._evList.length){
       const chips=['all'].concat(activeDisciplines().map(d=>d.v));
@@ -4543,6 +4544,8 @@ async function openEventCreate(gym, ev){
     <textarea id="evDesc" rows="3" style="${inp}resize:vertical;" placeholder="${LANG==='en'?'What is it, who is it for, what to bring…':'Co to je, pro koho, co si vzít…'}"></textarea>
     <div style="${lbl}">${LANG==='en'?'Disciplines':'Disciplíny'}</div>
     <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">${activeDisciplines().map(d=>`<span class="evDiscChip" data-v="${d.v}" style="padding:7px 11px;border-radius:99px;border:1.5px solid var(--border);font-size:12px;font-weight:600;cursor:pointer;background:var(--surf);color:var(--dark);">${d.emoji} ${LANG==='en'?d.en:d.cs}</span>`).join('')}</div>
+    <div style="${lbl}">${LANG==='en'?'City *':'Město konání *'}</div>
+    <input id="evCity" type="text" style="${inp}" placeholder="${(g.city||'').replace(/"/g,'&quot;')}" value="${(g.city||'').replace(/"/g,'&quot;')}">
     <div style="${lbl}">${LANG==='en'?'Venue (optional, defaults to your gym)':'Místo (nepovinné, jinak tvůj gym)'}</div>
     <input id="evVenue" type="text" style="${inp}" placeholder="${(g.name||'').replace(/"/g,'&quot;')}">
     <div style="display:flex;gap:10px;"><div style="flex:1;min-width:0;"><div style="${lbl}">${LANG==='en'?'Starts':'Začátek'}</div><input id="evStart" type="datetime-local" style="${inp}"></div><div style="flex:1;min-width:0;"><div style="${lbl}">${LANG==='en'?'Ends':'Konec'}</div><input id="evEnd" type="datetime-local" style="${inp}"></div></div>
@@ -4567,7 +4570,7 @@ async function openEventCreate(gym, ev){
   $('evSave').onclick=saveEvent;
   { const _ti=document.querySelector('#shEventCreate .shdr-title'); if(_ti) _ti.textContent = ev?(LANG==='en'?'Edit event':'Upravit událost'):(LANG==='en'?'New event':'Nová událost'); }
   if(ev){
-    $('evType').value=ev.type||'other'; $('evTitle').value=ev.title||''; $('evDesc').value=ev.description||''; $('evVenue').value=ev.venue||'';
+    $('evType').value=ev.type||'other'; $('evTitle').value=ev.title||''; $('evDesc').value=ev.description||''; $('evVenue').value=ev.venue||''; if($('evCity')) $('evCity').value=ev.city||'';
     if($('evStart')) $('evStart').value=toLocalInput(ev.starts_at); if($('evEnd')) $('evEnd').value=toLocalInput(ev.ends_at);
     $('evCap').value=ev.capacity||''; if($('evPayee')) $('evPayee').value=ev.payout_coach_id||'gym'; if($('evCur')) $('evCur').value=window._evCur;
     $('evSeek').checked=!!ev.seeking_fighters; if(ev.seeking_fighters) $('evFighterInfo').style.display='block'; $('evFighterInfo').value=ev.fighter_info||'';
@@ -4606,6 +4609,12 @@ function evCheckSave(){
   const bad=(window._evTiers||[]).some(t=>{ const pp=parseFloat(t.price)||0; return pp>0 && pp<min; });
   const sv=$('evSave'); if(sv){ sv.disabled=bad; sv.style.opacity=bad?'0.45':'1'; sv.style.cursor=bad?'not-allowed':'pointer'; }
 }
+async function geocodeCity(val){
+  if(!val) return null;
+  try{ const m=Object.entries(CITY_COORDS).find(([c])=>c.toLowerCase()===val.toLowerCase()); if(m) return {lat:m[1].lat,lng:m[1].lng,country:null}; }catch(e){}
+  try{ const res=await fetch(`https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q=${encodeURIComponent(val)}`); const data=await res.json(); if(data&&data.length){ return { lat:parseFloat(data[0].lat), lng:parseFloat(data[0].lon), country:(data[0].address&&data[0].address.country)||null }; } }catch(e){}
+  return null;
+}
 async function saveEvent(){
   const g=window._evGym||_myGymData; if(!g){ toast('⚠️'); return; }
   const cur=window._evCur||g.currency||'CZK';
@@ -4613,6 +4622,8 @@ async function saveEvent(){
   const title=($('evTitle').value||'').trim();
   if(!title){ toast(LANG==='en'?'⚠️ Add a title':'⚠️ Doplň název'); return; }
   if(!$('evStart').value){ toast(LANG==='en'?'⚠️ Pick a start date':'⚠️ Vyber datum začátku'); return; }
+  const cityVal=(($('evCity')&&$('evCity').value)||'').trim();
+  if(!cityVal){ toast(LANG==='en'?'⚠️ Add the event city':'⚠️ Doplň město konání'); return; }
   let tiers=(window._evTiers||[]).map(t=>({ name:(t.name||'').trim(), price:parseFloat(t.price)||0 })).filter(t=>t.name||t.price>0);
   if(!tiers.length) tiers=[{name:(LANG==='en'?'Entry':'Vstupné'), price:0}];
   for(const t of tiers){ if(t.price>0 && t.price<min){ toast(LANG==='en'?`⚠️ Minimum price is ${min} ${cur}`:`⚠️ Minimální cena je ${min} ${cur}`); return; } if(!t.name) t.name=(LANG==='en'?'Ticket':'Lístek'); }
@@ -4620,10 +4631,12 @@ async function saveEvent(){
   const payeeSel=($('evPayee')&&$('evPayee').value)||'gym';
   const payout_coach_id = payeeSel==='gym' ? null : payeeSel;
   const isOwner = g.owner_id===currentUser.id;
-  const row={ gym_id:g.id, created_by:currentUser.id, status: isOwner?'approved':'pending', type:$('evType').value||'other', title, description:($('evDesc').value||'').trim()||null, poster: window._evPoster||null, disciplines: JSON.stringify(window._evDisc||[]), city: g.city||null, country: g.country||null, venue:($('evVenue').value||'').trim()||null, city_lat: g.city_lat||null, city_lng: g.city_lng||null, starts_at: new Date($('evStart').value).toISOString(), ends_at: $('evEnd').value ? new Date($('evEnd').value).toISOString() : null, capacity: parseInt($('evCap').value)||null, ticket_price: priceMin, ticket_tiers: JSON.stringify(tiers), payout_coach_id, currency: cur, seeking_fighters: !!$('evSeek').checked, fighter_info: ($('evFighterInfo').value||'').trim()||null };
+  let _geo=await geocodeCity(cityVal);
+  if(!_geo && g.city_lat && g.city_lng && String(g.city||'').toLowerCase()===cityVal.toLowerCase()) _geo={lat:g.city_lat,lng:g.city_lng,country:g.country};
+  const row={ gym_id:g.id, created_by:currentUser.id, status: isOwner?'approved':'pending', type:$('evType').value||'other', title, description:($('evDesc').value||'').trim()||null, poster: window._evPoster||null, disciplines: JSON.stringify(window._evDisc||[]), city: cityVal, country: (_geo&&_geo.country)||g.country||null, venue:($('evVenue').value||'').trim()||null, city_lat: (_geo&&_geo.lat)||null, city_lng: (_geo&&_geo.lng)||null, starts_at: new Date($('evStart').value).toISOString(), ends_at: $('evEnd').value ? new Date($('evEnd').value).toISOString() : null, capacity: parseInt($('evCap').value)||null, ticket_price: priceMin, ticket_tiers: JSON.stringify(tiers), payout_coach_id, currency: cur, seeking_fighters: !!$('evSeek').checked, fighter_info: ($('evFighterInfo').value||'').trim()||null };
   const sv=$('evSave'); if(sv){ sv.disabled=true; sv.textContent='…'; }
   if(window._evEditing){
-    const upd={ type:row.type, title:row.title, description:row.description, poster:row.poster, disciplines:row.disciplines, venue:row.venue, starts_at:row.starts_at, ends_at:row.ends_at, capacity:row.capacity, ticket_price:row.ticket_price, ticket_tiers:row.ticket_tiers, payout_coach_id:row.payout_coach_id, currency:row.currency, seeking_fighters:row.seeking_fighters, fighter_info:row.fighter_info };
+    const upd={ type:row.type, title:row.title, description:row.description, poster:row.poster, disciplines:row.disciplines, venue:row.venue, city:row.city, country:row.country, city_lat:row.city_lat, city_lng:row.city_lng, starts_at:row.starts_at, ends_at:row.ends_at, capacity:row.capacity, ticket_price:row.ticket_price, ticket_tiers:row.ticket_tiers, payout_coach_id:row.payout_coach_id, currency:row.currency, seeking_fighters:row.seeking_fighters, fighter_info:row.fighter_info };
     const { error:e2 } = await supaClient.from('events').update(upd).eq('id', window._evEditing.id);
     if(e2){ toast('⚠️ '+e2.message); if(sv){ sv.disabled=false; } return; }
     toast(LANG==='en'?'✅ Saved':'✅ Uloženo'); closeSheet('shEventCreate'); renderEvents(); return;
@@ -4744,7 +4757,7 @@ function swipeCardHtml(ev){
     </div>
     <div style="padding:14px;flex-shrink:0;">
       <div style="font-weight:800;font-size:16px;margin-bottom:4px;">${escapeHtml(ev.title||'')} <span style="font-size:12px;">${discTags}</span></div>
-      <div style="font-size:12px;color:var(--mid);display:flex;justify-content:space-between;gap:8px;align-items:center;"><span style="min-width:0;">📅 ${dt}${loc?` · 📍 ${escapeHtml(loc)}`:''}</span><b style="color:var(--dark);white-space:nowrap;">${price}</b></div>
+      <div style="font-size:12px;color:var(--mid);display:flex;justify-content:space-between;gap:8px;align-items:center;"><span style="min-width:0;">📅 ${dt}${loc?` · 📍 ${escapeHtml(loc)}`:''}${(ev._dist!=null)?` · ${Math.round(ev._dist)} km`:''}</span><b style="color:var(--dark);white-space:nowrap;">${price}</b></div>
     </div>
   </div>`;
 }
@@ -4789,7 +4802,7 @@ function eventCardHtml(ev){
     </div>
     <div style="padding:12px;">
       <div style="font-weight:800;font-size:15px;margin-bottom:4px;">${escapeHtml(ev.title||'')} <span style="font-size:12px;">${discTags}</span></div>
-      <div style="font-size:12px;color:var(--mid);display:flex;justify-content:space-between;gap:8px;align-items:center;"><span style="min-width:0;">📅 ${dt}${loc?` · 📍 ${escapeHtml(loc)}`:''}</span><b style="color:var(--dark);white-space:nowrap;">${price}</b></div>
+      <div style="font-size:12px;color:var(--mid);display:flex;justify-content:space-between;gap:8px;align-items:center;"><span style="min-width:0;">📅 ${dt}${loc?` · 📍 ${escapeHtml(loc)}`:''}${(ev._dist!=null)?` · ${Math.round(ev._dist)} km`:''}</span><b style="color:var(--dark);white-space:nowrap;">${price}</b></div>
     </div>
   </div>`;
 }
