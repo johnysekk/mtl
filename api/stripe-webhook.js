@@ -178,6 +178,12 @@ export default async function handler(req, res) {
           await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Teď jsi Exclusive MTL Partner! Z lekcí si necháváš 99 %, student platí jen +3 %, a u gymu si necháváš 99 % z jednorázovek a 97 % z členství. 🥊' });
           await sbPost('notifications', { user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'system', read: false, message: `⭐ Nový Exclusive MTL Partner (user ${uid}).` });
         }
+      } else if (m.mtl_payment_type === 'event_ticket') {
+        // Event ticket (direct charge on payee account) — backstop confirm if user closed tab before redirect
+        if (m.ticket_id) {
+          const pi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id);
+          await sbPatch('event_tickets', `id=eq.${encodeURIComponent(m.ticket_id)}`, { status: 'paid', stripe_ref: pi });
+        }
       }
     } else if (event.type === 'charge.refunded') {
       const ch = event.data.object;
