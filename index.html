@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-FY | My events hub plus event editing. The Events tab gained a Browse / My events toggle. Browse is the approved-events feed with the discipline filter and the create button. My events has two parts: Hosting (events I created or that belong to my gyms, each with a status badge and an Edit button, plus the pending-approval list and fighter-request list moved here from Browse) and Going (my tickets/RSVPs and the fighter requests I sent, with their status). Editing reuses openEventCreate(gym, ev): it prefills every field (poster preview, type, title, description, disciplines chips, venue, start/end via a new toLocalInput, capacity, payee, currency, tiers, seeking-fighters + note), retitles the sheet to Edit event and the button to Save changes, and saveEvent updates the row instead of inserting. Deploy index only. -->
+<!-- MTL build: 2026-06-07-FZ | Events Browse is now a Tinder-style swipe deck reusing the same swipe physics as the coach and gym decks (translateX plus rotate, threshold 90, snap-back, corner labels). One event card at a time with a faded peek of the next card behind it. Swipe left to skip to the next event, swipe right to open the detail (and advance), tap to open the detail. At the end of the stack it shows a done state with a Start over button. Changing the discipline filter resets the position to the top. The My events view and editing from FY are unchanged. Deploy index only. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4420,7 +4420,8 @@ async function renderEventsAsync(box){
         const chips=['all'].concat(activeDisciplines().map(d=>d.v));
         html += `<div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;margin-bottom:12px;">`+chips.map(v=>{ const on=(fd===v); const lbl=v==='all'?(LANG==='en'?'All':'Vše'):(disciplineEmoji(v)+' '+disciplineLabel(v)); return `<span class="evFilterChip" data-v="${v}" style="white-space:nowrap;padding:7px 12px;border-radius:99px;font-size:12px;font-weight:700;cursor:pointer;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'var(--surf)'};color:${on?'#fff':'var(--dark)'};">${lbl}</span>`; }).join('')+`</div>`;
         const list=window._evList.filter(ev=>{ if(fd==='all') return true; let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){} return ds.includes(fd); });
-        html += list.length ? list.map(ev=>eventCardHtml(ev)).join('') : `<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;">${LANG==='en'?'No events in this discipline.':'Žádné události v této disciplíně.'}</p>`;
+        window._evFiltered = list; if(window._evIdx==null) window._evIdx=0;
+        html += list.length ? `<div id="evDeck" style="position:relative;height:430px;margin-top:2px;"></div>` : `<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;">${LANG==='en'?'No events in this discipline.':'Žádné události v této disciplíně.'}</p>`;
       } else {
         html += `<div style="text-align:center;padding:40px 16px;color:var(--light);"><div style="font-size:40px;margin-bottom:10px;">🥊</div><div style="font-weight:700;color:var(--dark);margin-bottom:6px;">${LANG==='en'?'No events near you yet':'Zatím tu nejsou žádné události'}</div><div style="font-size:13px;line-height:1.5;">${LANG==='en'?'Fight nights, seminars and camps will show up here.':'Fight nights, semináře a kempy se objeví tady.'}</div></div>`;
       }
@@ -4432,8 +4433,9 @@ async function renderEventsAsync(box){
   box.querySelectorAll('.evVTab').forEach(b=>b.onclick=()=>{ window._evView=b.dataset.v; renderEvents(); });
   if(view==='browse'){
     if($('evCreateBtn')) $('evCreateBtn').onclick=()=>{ if(elig.length===1) openEventCreate(elig[0]); else openEventGymPick(elig); };
-    box.querySelectorAll('.evFilterChip').forEach(c=>c.onclick=()=>{ window._evFilterDisc=c.dataset.v; renderEvents(); });
+    box.querySelectorAll('.evFilterChip').forEach(c=>c.onclick=()=>{ window._evFilterDisc=c.dataset.v; window._evIdx=0; renderEvents(); });
     box.querySelectorAll('.evCard').forEach(c=>c.onclick=()=>{ const ev=(window._evList||[]).find(x=>String(x.id)===String(c.dataset.id)); if(ev) openEventView(ev); });
+    if($('evDeck')) evRenderSwipe();
   } else {
     box.querySelectorAll('.evApprove').forEach(b=>b.onclick=()=>approveEvent(b.dataset.id, b.dataset.coach, b.dataset.title));
     box.querySelectorAll('.evReject').forEach(b=>b.onclick=()=>rejectEvent(b.dataset.id, b.dataset.coach, b.dataset.title));
@@ -4647,6 +4649,51 @@ async function rejectEvent(id, coachId, title){
   toast(LANG==='en'?'Rejected':'Zamítnuto'); renderEvents();
 }
 function evTiersOf(ev){ let t=[]; try{ t=JSON.parse(ev.ticket_tiers||'[]'); }catch(e){} if(!t.length) t=[{name:'',price:ev.ticket_price||0}]; return t; }
+function swipeCardHtml(ev){
+  const cur=ev.currency||'CZK'; const sym=cur==='CZK'?'Kč':cur==='EUR'?'€':'$';
+  let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){}
+  const t=EVENT_TYPES.find(x=>x.v===ev.type)||{emoji:'📌',cs:'Akce',en:'Event'};
+  const dt = ev.starts_at ? new Date(ev.starts_at).toLocaleString(LANG==='en'?'en-US':'cs-CZ',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}) : '';
+  const tiers=evTiersOf(ev); const minP=Math.min.apply(null,tiers.map(x=>x.price||0)); const multi=tiers.length>1;
+  const price = minP>0 ? `${multi?(LANG==='en'?'from ':'od '):''}${fmtPrice(minP*1.03,cur)} ${sym}` : (LANG==='en'?'Free':'Zdarma');
+  const loc = ev.venue || [ev.city,ev.country].filter(Boolean).join(', ');
+  const bg = ev.poster ? `background-image:url('${ev.poster}');` : 'background:linear-gradient(135deg,#E8001D,#7A0010);';
+  const discTags = ds.slice(0,4).map(v=>disciplineEmoji(v)).join(' ');
+  return `<div style="height:100%;display:flex;flex-direction:column;border:1px solid var(--border);border-radius:16px;overflow:hidden;background:#fff;box-shadow:0 6px 18px rgba(0,0,0,.10);">
+    <div style="flex:1;min-height:0;background-size:cover;background-position:center;${bg}position:relative;">
+      <span style="position:absolute;top:12px;left:12px;background:rgba(0,0,0,.6);color:#fff;font-size:11px;font-weight:700;padding:4px 9px;border-radius:99px;">${t.emoji} ${LANG==='en'?t.en:t.cs}</span>
+      ${ev.seeking_fighters?`<span style="position:absolute;top:12px;right:12px;background:var(--red);color:#fff;font-size:10px;font-weight:800;padding:4px 9px;border-radius:99px;">🥊 ${LANG==='en'?'Fighters wanted':'Hledá fightery'}</span>`:''}
+    </div>
+    <div style="padding:14px;flex-shrink:0;">
+      <div style="font-weight:800;font-size:16px;margin-bottom:4px;">${escapeHtml(ev.title||'')} <span style="font-size:12px;">${discTags}</span></div>
+      <div style="font-size:12px;color:var(--mid);display:flex;justify-content:space-between;gap:8px;align-items:center;"><span style="min-width:0;">📅 ${dt}${loc?` · 📍 ${escapeHtml(loc)}`:''}</span><b style="color:var(--dark);white-space:nowrap;">${price}</b></div>
+    </div>
+  </div>`;
+}
+function evRenderSwipe(){
+  const deck=$('evDeck'); if(!deck) return;
+  const list=window._evFiltered||[]; let idx=window._evIdx||0;
+  if(idx>=list.length){
+    deck.innerHTML=`<div style="text-align:center;padding:60px 16px;color:var(--light);"><div style="font-size:40px;">✅</div><div style="font-weight:700;color:var(--dark);margin:8px 0 14px;">${LANG==='en'?'That is all for now':'To je zatím vše'}</div><button id="evDeckReset" style="padding:10px 18px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Start over':'Od začátku'}</button></div>`;
+    const rb=$('evDeckReset'); if(rb) rb.onclick=()=>{ window._evIdx=0; evRenderSwipe(); }; return;
+  }
+  const cur=list[idx], nxt=list[idx+1];
+  deck.innerHTML = (nxt?`<div style="position:absolute;inset:0;transform:scale(.96) translateY(10px);opacity:.55;pointer-events:none;">${swipeCardHtml(nxt)}</div>`:'')
+    + `<div id="evSwipeCard" style="position:absolute;inset:0;will-change:transform;cursor:grab;">${swipeCardHtml(cur)}<div id="evLblSkip" style="position:absolute;top:20px;left:18px;border:3px solid #888;color:#888;font-weight:800;padding:3px 10px;border-radius:8px;transform:rotate(-16deg);opacity:0;font-size:18px;">${LANG==='en'?'SKIP':'DALŠÍ'}</div><div id="evLblView" style="position:absolute;top:20px;right:18px;border:3px solid var(--red);color:var(--red);font-weight:800;padding:3px 10px;border-radius:8px;transform:rotate(16deg);opacity:0;font-size:18px;">${LANG==='en'?'VIEW':'DETAIL'}</div></div>`;
+  const card=$('evSwipeCard'); let sx=0,dx=0,drag=false,moved=false;
+  const apply=x=>{ card.style.transform=`translateX(${x}px) rotate(${x*.06}deg)`; const sk=$('evLblSkip'),vw=$('evLblView'); const o=Math.min(1,Math.abs(x)/90); if(sk)sk.style.opacity=x<-15?o:0; if(vw)vw.style.opacity=x>15?o:0; };
+  const finish=()=>{ const sk=$('evLblSkip'),vw=$('evLblView'); if(sk)sk.style.opacity=0; if(vw)vw.style.opacity=0;
+    if(!moved){ openEventView(cur); dx=0; return; }
+    if(dx>90){ card.style.transition='transform .25s ease-out'; card.style.transform='translateX(440px) rotate(22deg)'; setTimeout(()=>{ window._evIdx=idx+1; openEventView(cur); evRenderSwipe(); },180); }
+    else if(dx<-90){ card.style.transition='transform .25s ease-out'; card.style.transform='translateX(-440px) rotate(-22deg)'; setTimeout(()=>{ window._evIdx=idx+1; evRenderSwipe(); },180); }
+    else { card.style.transition='transform .3s cubic-bezier(.34,1.56,.64,1)'; card.style.transform=''; setTimeout(()=>{ if(card) card.style.transition=''; },300); }
+    dx=0;
+  };
+  card.addEventListener('touchstart',e=>{ sx=e.touches[0].clientX; dx=0; drag=true; moved=false; },{passive:true});
+  card.addEventListener('touchmove',e=>{ if(!drag)return; dx=e.touches[0].clientX-sx; if(Math.abs(dx)>6){ moved=true; e.preventDefault(); } apply(dx); },{passive:false});
+  card.addEventListener('touchend',()=>{ drag=false; finish(); });
+  card.addEventListener('mousedown',e=>{ sx=e.clientX; dx=0; moved=false; const mm=ev=>{ dx=ev.clientX-sx; if(Math.abs(dx)>6) moved=true; apply(dx); }; const mu=()=>{ document.removeEventListener('mousemove',mm); document.removeEventListener('mouseup',mu); finish(); }; document.addEventListener('mousemove',mm); document.addEventListener('mouseup',mu); });
+}
 function eventCardHtml(ev){
   const cur=ev.currency||'CZK'; const sym=cur==='CZK'?'Kč':cur==='EUR'?'€':'$';
   let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){}
