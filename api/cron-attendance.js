@@ -7,6 +7,8 @@
 // + Druhý pass: připomínka studentovi ~4 h před začátkem GYM lekce / drop-inu (TZ gymu). Dedup přes reminder_sent na řádku.
 //   1:1 lekce (coach + student) řeší tenhle cron přes profiles.timezone (TZ kouče) + client-side fallback. Respektuje mute_class_reminder / mute_coach_lesson_reminder.
 
+import Stripe from 'stripe';
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = process.env.SUPABASE_URL;
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const sbHeaders = { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json' };
@@ -48,7 +50,7 @@ export default async function handler(req, res) {
   try {
     const gyms = await sbGet('gyms?status=eq.approved&select=id,name,owner_id,schedule,timezone');
     const mutedRem = new Set(((await sbGet('profiles?mute_class_reminder=eq.true&select=id')) || []).map(pp => pp.id));
-    let created = 0; let purged = 0; let purgedG = 0;
+    let created = 0; let purged = 0; let purgedG = 0; let autoRefunded = 0;
     for (const gym of gyms) {
       let sch = [];
       try { sch = gym.schedule ? (typeof gym.schedule === 'string' ? JSON.parse(gym.schedule) : gym.schedule) : []; } catch (e) {}
@@ -143,6 +145,22 @@ export default async function handler(req, res) {
       }
     } catch (e) { console.error('cron 1:1 reminder', e.message); }
 
+    // ── Dispute auto-refund: online disputes routed to the coach, past the 3-day deadline, still open => refund student 100% and close ──
+    try {
+      const nowISO = new Date().toISOString();
+      const od = await sbGet(`bookings?dispute_handler=eq.coach&dispute_status=eq.open&dispute_deadline=lt.${encodeURIComponent(nowISO)}&select=id,coach_id,student_id,payment_intent,gym_id`);
+      for (const b of (od || [])) {
+        let acct = null;
+        if (b.gym_id) { const g = await sbGet(`gyms?id=eq.${b.gym_id}&select=stripe_account`); acct = g[0] && g[0].stripe_account; }
+        if (!acct && b.coach_id) { const c = await sbGet(`profiles?id=eq.${b.coach_id}&select=stripe_account`); acct = c[0] && c[0].stripe_account; }
+        if (acct && b.payment_intent) { try { await stripe.refunds.create({ payment_intent: b.payment_intent, refund_application_fee: true }, { stripeAccount: acct }); } catch (e) { console.error('dispute refund', b.id, e.message); } }
+        await sbPatch('bookings', `id=eq.${b.id}`, { dispute_status: 'refunded', status: 'refunded', refund_requested: false });
+        if (b.student_id) await sbPost('notifications', { user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'dispute_auto_refunded', id: b.id }), message: `\u21a9\ufe0f Spor #${b.id}: kouč nereagoval ve lhůtě, vrátili jsme ti 100 %.` });
+        if (b.coach_id) await sbPost('notifications', { user_id: b.coach_id, type: 'system', read: false, data: JSON.stringify({ kind: 'dispute_auto_refunded_coach', id: b.id }), message: `\u21a9\ufe0f Spor #${b.id}: lhůta vypršela bez reakce, studentovi se automaticky vrátilo 100 %.` });
+        autoRefunded++;
+      }
+    } catch (e) { console.error('cron dispute auto-refund', e.message); }
+
     // ── Purge accounts/gyms past the 30-day deletion grace (anonymize PII, keep rows for booking/accounting FK integrity) ──
     try {
       const cutoff = new Date(Date.now() - 30 * 864e5).toISOString();
@@ -159,7 +177,7 @@ export default async function handler(req, res) {
       }
     } catch (e) { console.error('cron purge', e.message); }
 
-    res.status(200).json({ ok: true, gyms: gyms.length, created, purged, purgedG });
+    res.status(200).json({ ok: true, gyms: gyms.length, created, purged, purgedG, autoRefunded });
   } catch (err) {
     console.error('cron-attendance error:', err.message);
     res.status(200).json({ ok: false, error: err.message });

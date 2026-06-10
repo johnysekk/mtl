@@ -121,6 +121,33 @@ async function sendTicketEmail(s, m) {
   await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from, to: email, subject: `\uD83C\uDF9F\uFE0F Your ticket \u2014 ${title}`, html }) });
 }
 
+// Records ONE row per Stripe payment into the transactions ledger, with EXACT fees from the charge's balance_transaction.
+async function recordTransaction(acct, pi, fields) {
+  if (!pi) return;
+  try {
+    const ex = await sbGet(`transactions?payment_intent=eq.${encodeURIComponent(pi)}&select=id`);
+    if (ex && ex.length) return;
+    let gross = fields.gross != null ? fields.gross : null, stripeFee = null, mtlFee = null, net = null, currency = fields.currency || null, chargeId = null;
+    if (acct) {
+      try {
+        const intent = await stripe.paymentIntents.retrieve(pi, { expand: ['latest_charge.balance_transaction'] }, { stripeAccount: acct });
+        const ch = intent && intent.latest_charge;
+        if (ch) {
+          chargeId = ch.id; gross = ch.amount; currency = ch.currency; mtlFee = ch.application_fee_amount || 0;
+          const bt = ch.balance_transaction;
+          if (bt) { stripeFee = bt.fee; net = bt.net - mtlFee; } else if (gross != null) { net = gross - mtlFee; }
+        }
+      } catch (e) { console.error('recordTransaction fee', e.message); }
+    }
+    await sbPost('transactions', {
+      payment_intent: pi, charge_id: chargeId, payee_account: acct || null, type: fields.type,
+      member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null,
+      gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, net_amount: net, currency,
+      status: 'paid', created_at: new Date().toISOString(),
+    });
+  } catch (e) { console.error('recordTransaction', e.message); }
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
   let event;
@@ -168,6 +195,7 @@ export default async function handler(req, res) {
                 message: `📅 Nová rezervace (potvrzeno platbou) na ${slot.date} ${slot.time}.`,
               });
               await payAmbassador(slot.coach_profile_id, amount, currency, m.discipline);
+              await recordTransaction(event.account, pi, { type: 'coach_inperson', member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', gross: amount, currency });
             }
           } else if (m.booking_type === 'online' && m.coach_profile_id) {
             await sbPost('bookings', {
@@ -181,11 +209,13 @@ export default async function handler(req, res) {
               message: `🌐 Nová online objednávka (potvrzeno platbou).`,
             });
             await payAmbassador(m.coach_profile_id, amount, currency, m.discipline);
+            await recordTransaction(event.account, pi, { type: 'coach_online', member_id: m.student_id, coach_id: m.coach_profile_id, plan: m.online_fmt || 'Online', gross: amount, currency });
           }
         }
       } else if (m.mtl_payment_type === 'drop_in' || m.mtl_payment_type === 'membership') {
         // GYM skupinová lekce (direct charge na účtu gymu) → 0,5 % ambassadorovi disciplíny
         await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id);
+        if (m.mtl_payment_type === 'drop_in') { const dpi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id); if (dpi) await recordTransaction(event.account, dpi, { type: 'drop_in', member_id: m.student_id || m.member_id, gym_id: m.gym_id, coach_id: m.coach_profile_id || m.coach_id, plan: m.mtl_plan || 'Drop-in', currency: m.mtl_currency || 'CZK' }); }
       } else if (m.mtl_payment_type === 'partner_sub') {
         // Exclusive MTL Partner subscription zaplacena → zapni partner sazby
         const uid = m.user_id || s.client_reference_id;
@@ -202,6 +232,7 @@ export default async function handler(req, res) {
         if (m.ticket_id) {
           const pi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id);
           await sbPatch('event_tickets', `id=eq.${encodeURIComponent(m.ticket_id)}`, { status: 'paid', stripe_ref: pi });
+          await recordTransaction(event.account, pi, { type: 'event_ticket', member_id: m.student_id || m.buyer_id, gym_id: m.gym_id, coach_id: m.payout_coach_id, plan: m.mtl_event || 'Event', currency: m.mtl_currency });
           try { await sendTicketEmail(s, m); } catch (e) { console.error('ticket email', e.message); }
         }
       }
@@ -212,6 +243,7 @@ export default async function handler(req, res) {
         const full = ch.amount_refunded >= ch.amount_captured;
         const pct = ch.amount_captured ? Math.round((ch.amount_refunded / ch.amount_captured) * 100) : 100;
         await sbPatch('bookings', `payment_intent=eq.${encodeURIComponent(pi)}`, full ? { status: 'cancelled', refund_pct: pct } : { refund_pct: pct });
+        try { await sbPatch('transactions', `payment_intent=eq.${encodeURIComponent(pi)}`, { status: full ? 'refunded' : 'partial_refund', refund_amount: ch.amount_refunded }); } catch (e) {}
       }
     } else if (event.type === 'customer.subscription.deleted') {
       // Exclusive MTL Partner zrušen / neuhrazen → vypni partner sazby
@@ -237,6 +269,7 @@ export default async function handler(req, res) {
         const patch = { status: 'active' };
         if (periodEnd) patch.period_end = periodEnd;
         await sbPatch('gym_memberships', `stripe_subscription=eq.${encodeURIComponent(sub)}`, patch);
+        try { const ipi = typeof inv.payment_intent === 'string' ? inv.payment_intent : (inv.payment_intent && inv.payment_intent.id); const mem = (await sbGet(`gym_memberships?stripe_subscription=eq.${encodeURIComponent(sub)}&select=*`))[0]; if (ipi && mem) await recordTransaction(event.account, ipi, { type: 'membership', member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency }); } catch (e) { console.error('record membership', e.message); }
       }
     } else if (event.type === 'invoice.payment_failed') {
       const inv = event.data.object;
