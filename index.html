@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-GQ | Three fixes. (1) Unified filter chips: the .pill class now matches the Events type-chip size and style (padding 7x12, font-size 12, weight 700, pill radius) so Coaches, Gyms and Events filter chips are the same height everywhere. (2) Change-sport is now shared across all three decks: the Events sport picker writes the same _deckDisc variable the coach/gym decks use (mapping All<->null) and persists pref_discipline, so switching sport on any deck carries to the others. (3) Bottom action bar / nav clipping on iOS: switched the app shell height from 100dvh (which iOS can over-report) to 100svh (the small viewport, always fits with browser UI shown); combined with the now-shorter filter chips the action row and nav always fit. Index only. -->
+<!-- MTL build: 2026-06-07-GS | Finishes account/profile deletion. (cron-attendance.js) Added a daily purge pass: profiles with deleted_at older than 30 days and not yet purged get their PII anonymized (name->Deleted user, photo/bio nulled, coach_status=deleted, purged_at set) and their Supabase auth user deleted so login is impossible; gyms past 30 days are anonymized too (name->Deleted gym, photos/description nulled, status=deleted, purged_at). Rows are kept (not dropped) to preserve booking/accounting/Stripe FK integrity. (index) checkAuth now signs out a purged account instead of offering restore; gym list (loadGymsList) and the gym leaderboard now filter out deleted gyms (coach deck + coach leaderboard already filtered). Deploy index + cron-attendance.js + add profiles.purged_at and gyms.purged_at. Permanent-deletion retention/Stripe-account closure to confirm with accountant/lawyer. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -1731,6 +1731,12 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
       <div class="srow" id="sPrivacy"><div class="srow-l"><div class="sicon" style="background:#F5F2EE;">🔒</div><div class="slbl">Ochrana osobních údajů (GDPR)</div></div><div class="sval">›</div></div>
     </div>
     <button id="setLogout" style="width:100%;padding:14px;background:#FEECEC;color:var(--red);border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin:8px 0 16px;">🚪 Odhlásit se</button>
+    <div id="dangerZone" style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:8px;">
+      <div style="font-size:11px;font-weight:700;color:var(--light);letter-spacing:.08em;margin-bottom:10px;">⚠️ NEBEZPEČNÁ ZÓNA</div>
+      <button id="setDelCoach" style="display:none;width:100%;padding:12px;background:var(--surf);color:var(--red);border:1px solid #F3C9C0;border-radius:11px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">Smazat profil kouče</button>
+      <button id="setDelGym" style="display:none;width:100%;padding:12px;background:var(--surf);color:var(--red);border:1px solid #F3C9C0;border-radius:11px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">Smazat profil gymu</button>
+      <button id="setDelAccount" style="width:100%;padding:12px;background:#FEECEC;color:var(--red);border:none;border-radius:11px;font-size:14px;font-weight:800;cursor:pointer;font-family:'DM Sans';">Zrušit celý účet</button>
+    </div>
     <div style="text-align:center;font-size:12px;color:var(--light);padding:8px 0 40px;">MTL Coaches v1.0 · <span style="color:var(--red);font-weight:600;">Be More.</span></div>
   </div>
 </div>
@@ -3262,7 +3268,8 @@ async function loadCoaches() {
   const { data, error } = await supaClient
     .from('profiles')
     .select('*')
-    .eq('coach_status', 'approved');
+    .eq('coach_status', 'approved')
+    .is('deleted_at', null);
 
   if (error) { console.error('Supabase error:', error); toast(L('⚠️ Chyba načítání')); return; }
 
@@ -3715,7 +3722,7 @@ async function ensureGymsLoaded(force){
   if(_gymsLoaded && !force){ return; }
   try{
     const { data } = await supaClient.from('gyms').select('*').eq('status','approved');
-    const gyms=(data||[]).filter(g=>!g.suspended);
+    const gyms=(data||[]).filter(g=>!g.suspended && !g.deleted_at);
     GYMS=gyms.map(g=>{
       const coords = (g.city_lat!=null && g.city_lng!=null) ? {lat:+g.city_lat,lng:+g.city_lng} : null;
       return { isGym:true, g, id:g.id, name:g.name||'Gym', certLevel:(g.cert_level||'verified'),
@@ -5147,7 +5154,7 @@ async function loadGymsList(){
   box.innerHTML = `<p style="text-align:center;color:var(--light);padding:20px;">${L('Načítám...')}</p>`;
   const { data, error } = await supaClient.from('gyms').select('*').eq('status','approved').order('created_at',{ascending:false});
   if(error){ box.innerHTML = `<p style="color:var(--red);padding:20px;">${error.message}</p>`; return; }
-  const gyms = (data || []).filter(g=>!g.suspended);
+  const gyms = (data || []).filter(g=>!g.suspended && !g.deleted_at);
   const gymsF = (isMultiDiscipline() && _deckDisc) ? gyms.filter(g=>parseDisc(g.disciplines).includes(_deckDisc)) : gyms;
   if(!gymsF.length){ box.innerHTML = `<p style="text-align:center;color:var(--light);padding:30px;">${LANG==='en'?'No certified gyms yet — check back soon.':'Zatím žádné certifikované gymy — koukni později.'}</p>`; return; }
   try{ const _oids2=[...new Set(gymsF.map(x=>x.owner_id).filter(Boolean))]; if(_oids2.length){ const { data:_ow2 } = await supaClient.from('profiles').select('id,partner').in('id',_oids2); const _opm2={}; (_ow2||[]).forEach(o=>_opm2[o.id]=!!o.partner); gymsF.forEach(x=>{ x._op=!!_opm2[x.owner_id]; }); } }catch(e){}
@@ -6503,7 +6510,7 @@ async function renderGymLeaderboard(){
   list.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;font-size:14px;">${L('Načítám...')}</p>`;
   const d30=new Date(Date.now()-30*864e5).toISOString().slice(0,10);
   const [rg, rgb, rgm, rgc, rgr] = await Promise.all([
-    supaClient.from('gyms').select('id, name, city, country, photos, owner_id, suspended, disciplines').eq('status','approved'),
+    supaClient.from('gyms').select('id, name, city, country, photos, owner_id, suspended, disciplines').eq('status','approved').is('deleted_at', null),
     supaClient.from('gym_bookings').select('gym_id, status').eq('status','active').gte('class_date', d30),
     supaClient.from('gym_memberships').select('gym_id, status'),
     supaClient.from('gym_coaches').select('gym_id, status').eq('status','active'),
@@ -8091,7 +8098,7 @@ $('btnCoach').onclick=()=>{
   $('btnBecomeCoachApply').onclick();
 };
 function refreshSettingsToggles(){ const c=$('vColdNotif'); if(c) c.textContent=coldNotifMuted()?L('Vypnuto'):L('Zapnuto'); const a=$('vAvailNotif'); if(a) a.textContent=availNotifMuted()?L('Vypnuto'):L('Zapnuto'); const r=$('vClassRem'); if(r) r.textContent=classReminderMuted()?L('Vypnuto'):L('Zapnuto'); const cr=$('vCoachRem'); if(cr) cr.textContent=coachLessonReminderMuted()?L('Vypnuto'):L('Zapnuto'); const _me=currentUser||{}; const _coach=_me.coach_status==='approved'; const _gym=!!(window._myGyms&&window._myGyms.length)||_me.role==='founder'; if($('sCoachRem')) $('sCoachRem').style.display=_coach?'':'none'; if($('sColdNotif')) $('sColdNotif').style.display=_gym?'':'none'; }
-$('btnSettings').onclick=()=>{ refreshSettingsToggles(); openSheet('shSettings'); };
+$('btnSettings').onclick=()=>{ refreshSettingsToggles(); if(typeof setupDangerZone==='function') setupDangerZone(); openSheet('shSettings'); };
 if($('sAvailNotif')) $('sAvailNotif').onclick=()=>setAvailNotifMute(!availNotifMuted());
 if($('sColdNotif')) $('sColdNotif').onclick=()=>setColdNotifMute(!coldNotifMuted());
 if($('sClassRem')) $('sClassRem').onclick=()=>setClassReminderMute(!classReminderMuted());
@@ -8836,7 +8843,7 @@ $('meEdit3').onclick=()=>{ closeSheet('shMe'); openCityInput(); };
 $('meBook2').onclick=()=>{ openSheet('shBookings'); loadBookings('past'); };
 $('meOnline').onclick=()=>{ openOnline('student'); };
 $('btnCloseOnline').onclick=()=>closeSheet('shOnline');
-$('meSettings').onclick=()=>{ refreshSettingsToggles(); openSheet('shSettings'); };
+$('meSettings').onclick=()=>{ refreshSettingsToggles(); if(typeof setupDangerZone==='function') setupDangerZone(); openSheet('shSettings'); };
 if($('meMilestones')) $('meMilestones').onclick=()=>openMilestones();
 if($('btnCloseMilestones')) $('btnCloseMilestones').onclick=()=>closeSheet('shMilestones');
 if($('btnCloseClassAttend')) $('btnCloseClassAttend').onclick=()=>{ _classAttendOpen=false; closeSheet('shClassAttend'); };
@@ -8862,6 +8869,9 @@ $('meLogout').onclick=async()=>{
   location.reload();
 };
 if($('setLogout')) $('setLogout').onclick=async()=>{ await supaClient.auth.signOut(); currentUser=null; document.body.classList.remove('coach-mode'); location.reload(); };
+if($('setDelAccount')) $('setDelAccount').onclick=()=>openDeleteFlow('account');
+if($('setDelCoach')) $('setDelCoach').onclick=()=>openDeleteFlow('coach');
+if($('setDelGym')) $('setDelGym').onclick=()=>openGymDeletePicker();
 
   $('btnNotif').onclick=()=>{ openSheet('shNotif'); loadNotifications(); };
   if($('btnLeaderboard')) $('btnLeaderboard').onclick=()=>openLeaderboard('city');
@@ -13100,9 +13110,36 @@ async function checkAuth(){
   const { data } = await supaClient.auth.getSession();
   if(data.session){
     const { data: prof } = await supaClient.from('profiles').select('*').eq('id', data.session.user.id).single();
+    if(prof && prof.purged_at){ try{ await supaClient.auth.signOut(); }catch(e){} return; }
+    if(prof && prof.deleted_at){ openRestorePrompt(prof); return; }
     currentUser=prof||{ id:data.session.user.id, role:'student' };
     enterApp();
   }
+}
+function setupDangerZone(){ const dc=$('setDelCoach'); if(dc) dc.style.display=(currentUser && currentUser.coach_status==='approved')?'block':'none'; const dg=$('setDelGym'); if(dg) dg.style.display=((window._myGyms||[]).length)?'block':'none'; }
+function openGymDeletePicker(){ const gyms=window._myGyms||[]; if(!gyms.length){ toast(LANG==='en'?'No gym to delete':'Žádný gym ke smazání'); return; } if(gyms.length===1){ openDeleteFlow('gym', gyms[0].id, gyms[0].name); return; }
+  const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99998;display:flex;align-items:flex-end;justify-content:center;'; ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px 18px 0 0;padding:20px;"><div style="font-size:16px;font-weight:800;margin-bottom:12px;">${LANG==='en'?'Which gym?':'Který gym?'}</div>`+gyms.map(g=>`<button class="gdPick" data-id="${g.id}" data-name="${escapeHtml(g.name||'')}" style="width:100%;text-align:left;padding:13px;background:var(--surf);border:1px solid var(--border);border-radius:12px;margin-bottom:8px;cursor:pointer;font-family:'DM Sans';font-weight:700;">${escapeHtml(g.name||'Gym')}</button>`).join('')+`</div>`; document.body.appendChild(ov); ov.onclick=(e)=>{ if(e.target===ov) ov.remove(); }; ov.querySelectorAll('.gdPick').forEach(b=>b.onclick=()=>{ ov.remove(); openDeleteFlow('gym', b.dataset.id, b.dataset.name); }); }
+function openDeleteFlow(kind, gymId, gymName){
+  const titles={ account:(LANG==='en'?'Delete your account':'Zrušit celý účet'), coach:(LANG==='en'?'Delete coach profile':'Smazat profil kouče'), gym:(LANG==='en'?'Delete gym profile':'Smazat profil gymu') };
+  const what = kind==='account'?(LANG==='en'?'your whole account':'celý tvůj účet') : kind==='coach'?(LANG==='en'?'your coach profile':'tvůj profil kouče') : (gymName||'gym');
+  const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;display:flex;align-items:flex-end;justify-content:center;';
+  ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px 18px 0 0;padding:22px;max-height:86vh;overflow-y:auto;"><div style="font-size:18px;font-weight:800;color:var(--red);margin-bottom:10px;">\u26a0\ufe0f ${titles[kind]}</div><div style="font-size:14px;line-height:1.6;color:var(--dark);margin-bottom:14px;">${LANG==='en'?`This hides ${what} from everywhere immediately. You have <b>30 days</b> to restore it \u2014 just log back in. After 30 days it is permanently deleted.`:`Tímto se ${what} okamžitě skryje odevšud. Máš <b>30 dní</b> na obnovu \u2014 stačí se znovu přihlásit. Po 30 dnech se trvale smaže.`}</div><div style="font-size:13px;font-weight:700;color:var(--mid);margin-bottom:6px;">${LANG==='en'?'Why are you leaving? (optional)':'Proč odcházíš? (nepovinné)'}</div><textarea id="delReason" rows="3" style="width:100%;box-sizing:border-box;padding:11px;border:1px solid var(--border);border-radius:10px;font-family:'DM Sans';font-size:14px;resize:none;margin-bottom:14px;"></textarea><div style="display:flex;gap:8px;"><button id="delCancel" style="flex:1;padding:13px;background:var(--surf);border:1px solid var(--border);border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';color:var(--dark);">${LANG==='en'?'Keep it':'Nechat'}</button><button id="delGo" style="flex:1;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-weight:800;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Delete':'Smazat'}</button></div></div>`;
+  document.body.appendChild(ov); const close=()=>ov.remove(); ov.onclick=(e)=>{ if(e.target===ov) close(); }; ov.querySelector('#delCancel').onclick=close;
+  ov.querySelector('#delGo').onclick=async()=>{ const reason=(ov.querySelector('#delReason').value||'').trim()||null; const btn=ov.querySelector('#delGo'); btn.disabled=true; btn.textContent=L('Mažu...');
+    try{
+      if(kind==='account'){ await supaClient.from('profiles').update({deleted_at:new Date().toISOString(), delete_reason:reason}).eq('id',currentUser.id); toast(LANG==='en'?'Account scheduled for deletion.':'Účet naplánován ke smazání.'); try{ await supaClient.auth.signOut(); }catch(e){} setTimeout(()=>location.reload(),1200); return; }
+      if(kind==='coach'){ await supaClient.from('profiles').update({coach_status:'deleted', coach_deleted_at:new Date().toISOString(), delete_reason:reason}).eq('id',currentUser.id); currentUser.coach_status='deleted'; toast(LANG==='en'?'Coach profile removed.':'Profil kouče smazán.'); close(); if(typeof updateRoleUI==='function') updateRoleUI(); if(typeof setupDangerZone==='function') setupDangerZone(); return; }
+      if(kind==='gym'){ await supaClient.from('gyms').update({deleted_at:new Date().toISOString(), delete_reason:reason}).eq('id',gymId); if(window._myGyms) window._myGyms=window._myGyms.filter(x=>String(x.id)!==String(gymId)); toast(LANG==='en'?'Gym profile removed.':'Profil gymu smazán.'); close(); if(typeof setupDangerZone==='function') setupDangerZone(); return; }
+    }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); btn.disabled=false; btn.textContent=LANG==='en'?'Delete':'Smazat'; }
+  };
+}
+function openRestorePrompt(prof){
+  const days=Math.max(0, 30-Math.floor((Date.now()-new Date(prof.deleted_at).getTime())/864e5));
+  const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:var(--bg);z-index:99999;display:flex;align-items:center;justify-content:center;padding:28px;';
+  ov.innerHTML=`<div style="text-align:center;max-width:340px;"><div style="font-size:46px;margin-bottom:14px;">\uD83D\uDC4B</div><div style="font-size:20px;font-weight:800;color:var(--dark);margin-bottom:8px;">${LANG==='en'?'Welcome back':'Vítej zpátky'}</div><div style="font-size:14px;line-height:1.6;color:var(--mid);margin-bottom:20px;">${LANG==='en'?`Your account is scheduled for deletion (<b>${days} days</b> left). Restore it and pick up where you left off?`:`Tvůj účet je naplánován ke smazání (zbývá <b>${days} dní</b>). Obnovit a pokračovat?`}</div><button id="restoreGo" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:'DM Sans';margin-bottom:10px;">${LANG==='en'?'Restore my account':'Obnovit účet'}</button><button id="restoreNo" style="width:100%;padding:13px;background:var(--surf);color:var(--mid);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Log out':'Odhlásit se'}</button></div>`;
+  document.body.appendChild(ov);
+  ov.querySelector('#restoreGo').onclick=async()=>{ try{ await supaClient.from('profiles').update({deleted_at:null, delete_reason:null}).eq('id',prof.id); }catch(e){} prof.deleted_at=null; currentUser=prof; ov.remove(); enterApp(); toast(LANG==='en'?'✅ Account restored':'✅ Účet obnoven'); };
+  ov.querySelector('#restoreNo').onclick=async()=>{ try{ await supaClient.auth.signOut(); }catch(e){} location.reload(); };
 }
 checkAuth();
 
