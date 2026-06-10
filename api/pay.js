@@ -20,6 +20,7 @@ export default async function handler(req, res) {
     if (type === 'gym')        return await gymCheckout(req, res);
     if (type === 'membership') return await membershipCheckout(req, res);
     if (type === 'partner')    return await partnerCheckout(req, res);
+    if (type === 'event')      return await eventCheckout(req, res);
     return res.status(400).json({ error: 'Neznámý type: ' + type });
   } catch (err) {
     console.error('pay error [' + type + ']:', err);
@@ -161,6 +162,47 @@ async function gymCheckout(req, res) {
 }
 
 // ───────────────────────── GYM membership (direct charge subscription) ─────────────────────────
+// ───────────────────────── EVENT TICKET (flat 6% = 3% markup + 3% cut, no partner discount) ─────────────────────────
+async function eventCheckout(req, res) {
+  const { gymAccount, eventTitle, tierName, amount, currency = 'CZK', ticketId, buyerName, qty } = req.query;
+  if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
+  const P = parseInt(amount, 10);
+  const Q = Math.max(1, parseInt(qty, 10) || 1);
+  const cur = String(currency).toLowerCase();
+  const MK = 1.03, TAKE = 0.06;
+  const isCZK = cur === 'czk';
+  const unit = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);
+  const fee  = isCZK ? Math.floor(P * TAKE) * 100 : Math.round(P * TAKE * 100);
+  const host = req.headers.host;
+  const proto = host && host.includes('localhost') ? 'http' : 'https';
+  const session = await stripe.checkout.sessions.create(
+    {
+      mode: 'payment',
+      payment_method_types: ['card'],
+      line_items: [
+        { price_data: { currency: cur, product_data: { name: `${eventTitle || 'Event'}${tierName ? ' — ' + tierName : ''}` }, unit_amount: unit }, quantity: Q },
+      ],
+      payment_intent_data: {
+        application_fee_amount: fee * Q,
+        description: `${eventTitle || 'Event'}${tierName ? ' [' + tierName + ']' : ''} (MTL event ticket)`,
+        metadata: {
+          mtl_payment_type: 'event_ticket',
+          mtl_event: eventTitle || '',
+          mtl_tier: tierName || '',
+          mtl_base: String(P),
+          mtl_currency: cur,
+          buyer_name: buyerName || '',
+          ticket_id: ticketId || '',
+        },
+      },
+      success_url: `${proto}://${host}/?event_pay=ok&ticket=${encodeURIComponent(ticketId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${proto}://${host}/`,
+    },
+    { stripeAccount: gymAccount } // DIRECT CHARGE on the chosen payee account (gym or coach)
+  );
+  res.redirect(303, session.url);
+}
+
 async function membershipCheckout(req, res) {
   const {
     gymAccount, gymName, planName, amount, currency = 'CZK', interval = 'month',
