@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-GE | Gym tags. Gyms can now carry the same audience tags used on gym classes (Beginners, Advanced, Fighters, Kids, Women, Sparring from CLASS_LEVELS). Added a tag multi-select to the gym application form and to the gym profile editor, saved to a new gyms.tags column on create and update. The Gyms deck now shows a tag-filter row under the Change-sport control (only in gym mode) that filters the deck by tag, mirroring the coach tag pills for a consistent style, and gym cards display their tags. New column gyms.tags (text JSON) in mtl-schema.sql, deploy index plus add the column in Supabase. Refund and per-type pricing build is next. -->
+<!-- MTL build: 2026-06-07-GG | Event refunds and per-type pricing. New per-type config sets minimum prices and free-allowed and default refund mode per event type (Fight night and Competition non-refundable, Seminar/Camp cutoff-based, Open mat/Grading always refundable, etc). The create/edit form now has a Free-entry toggle (hidden for fight nights), uses the per-type minimum in the live price breakdown and on save, and a Refund-policy selector (Non-refundable / up to 7,14,30 days before / Always) with a plain-language hint, defaulted by type and stored in new columns events.refund_policy and events.refund_days. Execution reuses the existing gym-refund endpoint (event tickets are direct charges with a stored payment intent): organizers get a Cancel-event-and-refund-all button in the event detail (100% refund to every paid ticket, app fee reversed, tickets marked refunded, buyers notified, event cancelled), and buyers get a Cancel-ticket button when policy and timing allow (93% back, ticket cancelled, organizer notified). Deploy index plus add events.refund_policy and events.refund_days in Supabase. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -570,6 +570,9 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
   </div>
 </div>
 
+<!-- EVENTS MAIN VIEW -->
+<div id="eventsView" style="display:none;padding:8px 16px 16px;"></div>
+
 <!-- ACTIONS -->
 <div class="actions">
   <button class="act act-pass" id="btnPass">
@@ -588,9 +591,6 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
     <span class="ai">👤</span><span class="al">Profil</span>
   </button>
 </div>
-
-<!-- EVENTS MAIN VIEW -->
-<div id="eventsView" style="display:none;padding:8px 16px 16px;"></div>
 
 <!-- BOTTOM NAV -->
 <div class="nav">
@@ -4447,7 +4447,7 @@ async function renderEventsAsync(box){
       html += `<div style="margin-bottom:8px;"><span id="evSportBtn" class="pill" style="cursor:pointer;font-weight:700;display:inline-block;">${sportLbl} · ${LANG==='en'?'Change sport':'Změnit sport'} ▾</span></div>`;
       const tChips=[{v:'all',lbl:(LANG==='en'?'All':'Vše'),emoji:''}].concat(EVENT_TYPES.map(t=>({v:t.v,lbl:(LANG==='en'?t.en:t.cs),emoji:t.emoji})));
       html += `<div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;margin-bottom:12px;">`+tChips.map(c=>{ const on=(ft===c.v); return `<span class="evTypeChip" data-v="${c.v}" style="white-space:nowrap;padding:7px 12px;border-radius:99px;font-size:12px;font-weight:700;cursor:pointer;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'var(--surf)'};color:${on?'#fff':'var(--dark)'};">${c.emoji?c.emoji+' ':''}${c.lbl}</span>`; }).join('')+`</div>`;
-      const list=window._evList.filter(ev=>{ if(fd!=='all'){ let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){} if(!ds.includes(fd)) return false; } if(ft!=='all' && ev.type!==ft) return false; return true; });
+      const q=window._evSearch||''; const list=window._evList.filter(ev=>{ if(fd!=='all'){ let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){} if(!ds.includes(fd)) return false; } if(ft!=='all' && ev.type!==ft) return false; if(q){ const hay=((ev.title||'')+' '+(ev.city||'')+' '+(ev.venue||'')+' '+(ev.country||'')).toLowerCase(); if(!hay.includes(q)) return false; } return true; });
       window._evFiltered = list; if(window._evIdx==null) window._evIdx=0;
       html += list.length ? `<div id="evDeck" style="position:relative;height:430px;margin-top:2px;"></div>` : `<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;">${LANG==='en'?'No events in this discipline.':'Žádné události v této disciplíně.'}</p>`;
     } else {
@@ -4525,6 +4525,9 @@ function openEventGymPick(elig){
   document.body.appendChild(ov); const close=()=>ov.remove(); ov.onclick=(e)=>{ if(e.target===ov) close(); }; ov.querySelector('#egpCancel').onclick=close;
   ov.querySelectorAll('.egpRow').forEach(r=>r.onclick=()=>{ const g=elig.find(x=>String(x.id)===String(r.dataset.id)); close(); if(g) openEventCreate(g); });
 }
+function evApplyFree(){ const free=$('evFree')&&$('evFree').checked; if($('evPaidSection')) $('evPaidSection').style.display = free?'none':'block'; }
+function evRefundHint(){ const v=$('evRefund')&&$('evRefund').value; const h=$('evRefundHint'); if(!h) return; h.textContent = v==='none'?(LANG==='en'?'No buyer refunds. Full refund only if you cancel the event.':'Bez storna kupujícím. Plná náhrada jen když akci zrušíš ty.') : v==='anytime'?(LANG==='en'?'Buyers can cancel anytime (93% back).':'Kupující může stornovat kdykoliv (93 % zpět).') : (LANG==='en'?'Buyers get 93% back before the cutoff, nothing after. You can always cancel the event for a full refund.':'Kupující dostane 93 % zpět před limitem, poté nic. Ty můžeš akci kdykoliv zrušit s plnou náhradou.'); }
+function evApplyType(){ const t=($('evType')&&$('evType').value)||'other'; const cfg=evTypeCfg(t); if($('evFreeRow')) $('evFreeRow').style.display=cfg.freeOk?'flex':'none'; if(!cfg.freeOk && $('evFree')) $('evFree').checked=false; evApplyFree(); if($('evRefund')) $('evRefund').value = cfg.refund==='none'?'none':(cfg.refund==='anytime'?'anytime':'d7'); evRefundHint(); (window._evTiers||[]).forEach((_,i)=>updateTierBd(i)); }
 function toLocalInput(iso){ if(!iso) return ''; const d=new Date(iso); const z=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}T${z(d.getHours())}:${z(d.getMinutes())}`; }
 async function openEventCreate(gym, ev){
   const g = gym || _myGymData; if(!g){ toast(LANG==='en'?'⚠️ No gym':'⚠️ Není gym'); return; }
@@ -4567,11 +4570,17 @@ async function openEventCreate(gym, ev){
     <input id="evCap" type="number" min="0" style="${inp}" placeholder="${LANG==='en'?'e.g. 60':'např. 60'}">
     <div style="${lbl}">${LANG==='en'?'Money goes to (Stripe account)':'Peníze přijdou na (Stripe účet)'}</div>
     <select id="evPayee" style="${inp}">${payees.map(pp=>`<option value="${pp.id}">${escapeHtml(pp.name)}${pp.account?'':(LANG==='en'?' — not connected':' — nepřipojeno')}</option>`).join('')}</select>
+    <label id="evFreeRow" style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;margin-bottom:10px;cursor:pointer;"><input type="checkbox" id="evFree" style="width:18px;height:18px;"> ${LANG==='en'?'Free entry':'Vstup zdarma'}</label>
+    <div id="evPaidSection">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;"><div style="${lbl}margin-bottom:0;">${LANG==='en'?'Ticket variants':'Varianty lístků'}</div><select id="evCur" style="padding:8px 10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';font-size:13px;background:#fff;">${['CZK','EUR','USD'].map(cc=>`<option value="${cc}" ${cc===cur?'selected':''}>${cc}</option>`).join('')}</select></div>
     <div id="evTiers"></div>
     <button type="button" id="evAddTier" style="width:100%;padding:10px;background:var(--surf);border:1px dashed var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:14px;font-size:13px;">+ ${LANG==='en'?'Add variant':'Přidat variantu'}</button>
+    </div>
     <label style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;margin-bottom:10px;cursor:pointer;"><input type="checkbox" id="evSeek" style="width:18px;height:18px;"> 🥊 ${LANG==='en'?'Looking for fighters':'Hledáme fightery'}</label>
     <textarea id="evFighterInfo" rows="2" style="${inp}display:none;resize:vertical;" placeholder="${LANG==='en'?'What fighters you want (weight, level, rules…)':'Jaké fightery chceš (váha, úroveň, pravidla…)'}"></textarea>
+    <div style="${lbl}">${LANG==='en'?'Refund policy':'Refundace'}</div>
+    <select id="evRefund" style="${inp}"><option value="none">${LANG==='en'?'Non-refundable':'Nevratné'}</option><option value="d7">${LANG==='en'?'Refundable up to 7 days before':'Vratné do 7 dní před akcí'}</option><option value="d14">${LANG==='en'?'Refundable up to 14 days before':'Vratné do 14 dní před akcí'}</option><option value="d30">${LANG==='en'?'Refundable up to 30 days before':'Vratné do 30 dní před akcí'}</option><option value="anytime">${LANG==='en'?'Always refundable':'Vždy vratné'}</option></select>
+    <p id="evRefundHint" style="font-size:11px;color:var(--mid);line-height:1.5;margin:-6px 0 12px;"></p>
     ${isOwner?'':`<p style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:10px;">${LANG==='en'?'Your gym owner reviews and approves this before it goes live.':'Majitel gymu to před zveřejněním schválí.'}</p>`}
     <button id="evSave" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${window._evEditing?(LANG==='en'?'Save changes':'Uložit změny'):(isOwner?(LANG==='en'?'Publish event':'Zveřejnit událost'):(LANG==='en'?'Send for approval':'Odeslat ke schválení'))}</button>`;
   $('evPosterBtn').onclick=()=>$('evPosterInput').click();
@@ -4581,6 +4590,10 @@ async function openEventCreate(gym, ev){
   renderEvTiers();
   $('evAddTier').onclick=()=>{ window._evTiers.push({name:'',price:''}); renderEvTiers(); };
   $('evCur').onchange=()=>{ window._evCur=$('evCur').value; renderEvTiers(); };
+  if($('evType')) $('evType').onchange=evApplyType;
+  if($('evFree')) $('evFree').onchange=evApplyFree;
+  if($('evRefund')) $('evRefund').onchange=evRefundHint;
+  evApplyType();
   $('evSave').onclick=saveEvent;
   { const _ti=document.querySelector('#shEventCreate .shdr-title'); if(_ti) _ti.textContent = ev?(LANG==='en'?'Edit event':'Upravit událost'):(LANG==='en'?'New event':'Nová událost'); }
   if(ev){
@@ -4590,6 +4603,9 @@ async function openEventCreate(gym, ev){
     $('evSeek').checked=!!ev.seeking_fighters; if(ev.seeking_fighters) $('evFighterInfo').style.display='block'; $('evFighterInfo').value=ev.fighter_info||'';
     if(ev.poster){ const pv=$('evPosterPv'); if(pv){ pv.style.backgroundImage=`url('${ev.poster}')`; pv.style.display='block'; } }
     document.querySelectorAll('.evDiscChip').forEach(c=>{ if((window._evDisc||[]).includes(c.dataset.v)){ c.style.background='var(--red)'; c.style.borderColor='var(--red)'; c.style.color='#fff'; } });
+    const _allFree=(window._evTiers||[]).every(t=>!(parseFloat(t.price)>0)); if($('evFree')) $('evFree').checked=_allFree && evTypeCfg(ev.type).freeOk;
+    if($('evRefund')) $('evRefund').value = ev.refund_policy==='anytime'?'anytime':(ev.refund_policy==='until_days'?('d'+(ev.refund_days||7)):'none');
+    evApplyFree(); evRefundHint();
   }
   openSheet('shEventCreate');
 }
@@ -4608,7 +4624,7 @@ function updateTierBd(i){
   const cur=window._evCur||(window._evGym&&window._evGym.currency)||'CZK';
   const sym=cur==='CZK'?'Kč':cur==='EUR'?'€':'$';
   const base=parseFloat(window._evTiers[i]&&window._evTiers[i].price)||0;
-  const min=MIN_EVENT[cur]||MIN_EVENT.CZK;
+  const min=evMinFor(($('evType')&&$('evType').value)||'other', cur);
   if(base<=0){ box.innerHTML=''; return; }
   if(base<min){ box.innerHTML=`<div style="color:var(--red);font-size:12px;font-weight:700;line-height:1.4;">${LANG==='en'?`⚠️ Minimum price is <strong>${min} ${cur}</strong>. You cannot continue below this.`:`⚠️ Minimální cena je <strong>${min} ${cur}</strong>. Pod tuto částku nejde pokračovat.`}</div>`; return; }
   const r=v=>Math.round(v*100)/100;
@@ -4632,25 +4648,28 @@ async function geocodeCity(val){
 async function saveEvent(){
   const g=window._evGym||_myGymData; if(!g){ toast('⚠️'); return; }
   const cur=window._evCur||g.currency||'CZK';
-  const min=MIN_EVENT[cur]||MIN_EVENT.CZK;
+  const _etype=($('evType')&&$('evType').value)||'other';
+  const min=evMinFor(_etype, cur);
+  const isFree = $('evFree') && $('evFree').checked && evTypeCfg(_etype).freeOk;
   const title=($('evTitle').value||'').trim();
   if(!title){ toast(LANG==='en'?'⚠️ Add a title':'⚠️ Doplň název'); return; }
   if(!$('evStart').value){ toast(LANG==='en'?'⚠️ Pick a start date':'⚠️ Vyber datum začátku'); return; }
   const cityVal=(($('evCity')&&$('evCity').value)||'').trim();
   if(!cityVal){ toast(LANG==='en'?'⚠️ Add the event city':'⚠️ Doplň město konání'); return; }
-  let tiers=(window._evTiers||[]).map(t=>({ name:(t.name||'').trim(), price:parseFloat(t.price)||0 })).filter(t=>t.name||t.price>0);
+  let tiers = isFree ? [{name:(LANG==='en'?'Free entry':'Vstup zdarma'), price:0}] : (window._evTiers||[]).map(t=>({ name:(t.name||'').trim(), price:parseFloat(t.price)||0 })).filter(t=>t.name||t.price>0);
   if(!tiers.length) tiers=[{name:(LANG==='en'?'Entry':'Vstupné'), price:0}];
   for(const t of tiers){ if(t.price>0 && t.price<min){ toast(LANG==='en'?`⚠️ Minimum price is ${min} ${cur}`:`⚠️ Minimální cena je ${min} ${cur}`); return; } if(!t.name) t.name=(LANG==='en'?'Ticket':'Lístek'); }
   const priceMin=Math.min.apply(null, tiers.map(t=>t.price));
   const payeeSel=($('evPayee')&&$('evPayee').value)||'gym';
   const payout_coach_id = payeeSel==='gym' ? null : payeeSel;
   const isOwner = g.owner_id===currentUser.id;
+  const _rv=($('evRefund')&&$('evRefund').value)||'none'; let refund_policy='none', refund_days=null; if(_rv==='anytime') refund_policy='anytime'; else if(_rv[0]==='d'){ refund_policy='until_days'; refund_days=parseInt(_rv.slice(1))||7; }
   let _geo=await geocodeCity(cityVal);
   if(!_geo && g.city_lat && g.city_lng && String(g.city||'').toLowerCase()===cityVal.toLowerCase()) _geo={lat:g.city_lat,lng:g.city_lng,country:g.country};
-  const row={ gym_id:g.id, created_by:currentUser.id, status: isOwner?'approved':'pending', type:$('evType').value||'other', title, description:($('evDesc').value||'').trim()||null, poster: window._evPoster||null, disciplines: JSON.stringify(window._evDisc||[]), city: cityVal, country: (_geo&&_geo.country)||g.country||null, venue:($('evVenue').value||'').trim()||null, city_lat: (_geo&&_geo.lat)||null, city_lng: (_geo&&_geo.lng)||null, starts_at: new Date($('evStart').value).toISOString(), ends_at: $('evEnd').value ? new Date($('evEnd').value).toISOString() : null, capacity: parseInt($('evCap').value)||null, ticket_price: priceMin, ticket_tiers: JSON.stringify(tiers), payout_coach_id, currency: cur, seeking_fighters: !!$('evSeek').checked, fighter_info: ($('evFighterInfo').value||'').trim()||null };
+  const row={ gym_id:g.id, created_by:currentUser.id, status: isOwner?'approved':'pending', type:$('evType').value||'other', title, description:($('evDesc').value||'').trim()||null, poster: window._evPoster||null, disciplines: JSON.stringify(window._evDisc||[]), city: cityVal, country: (_geo&&_geo.country)||g.country||null, venue:($('evVenue').value||'').trim()||null, city_lat: (_geo&&_geo.lat)||null, city_lng: (_geo&&_geo.lng)||null, starts_at: new Date($('evStart').value).toISOString(), ends_at: $('evEnd').value ? new Date($('evEnd').value).toISOString() : null, capacity: parseInt($('evCap').value)||null, ticket_price: priceMin, ticket_tiers: JSON.stringify(tiers), payout_coach_id, currency: cur, seeking_fighters: !!$('evSeek').checked, fighter_info: ($('evFighterInfo').value||'').trim()||null, refund_policy, refund_days };
   const sv=$('evSave'); if(sv){ sv.disabled=true; sv.textContent='…'; }
   if(window._evEditing){
-    const upd={ type:row.type, title:row.title, description:row.description, poster:row.poster, disciplines:row.disciplines, venue:row.venue, city:row.city, country:row.country, city_lat:row.city_lat, city_lng:row.city_lng, starts_at:row.starts_at, ends_at:row.ends_at, capacity:row.capacity, ticket_price:row.ticket_price, ticket_tiers:row.ticket_tiers, payout_coach_id:row.payout_coach_id, currency:row.currency, seeking_fighters:row.seeking_fighters, fighter_info:row.fighter_info };
+    const upd={ type:row.type, title:row.title, description:row.description, poster:row.poster, disciplines:row.disciplines, venue:row.venue, city:row.city, country:row.country, city_lat:row.city_lat, city_lng:row.city_lng, starts_at:row.starts_at, ends_at:row.ends_at, capacity:row.capacity, ticket_price:row.ticket_price, ticket_tiers:row.ticket_tiers, payout_coach_id:row.payout_coach_id, currency:row.currency, seeking_fighters:row.seeking_fighters, fighter_info:row.fighter_info, refund_policy:row.refund_policy, refund_days:row.refund_days };
     const { error:e2 } = await supaClient.from('events').update(upd).eq('id', window._evEditing.id);
     if(e2){ toast('⚠️ '+e2.message); if(sv){ sv.disabled=false; } return; }
     toast(LANG==='en'?'✅ Saved':'✅ Uloženo'); closeSheet('shEventCreate'); renderEvents(); return;
@@ -4778,6 +4797,12 @@ function swipeCardHtml(ev){
     </div>
   </div>`;
 }
+function evDeckCur(){ return (window._evFiltered||[])[window._evIdx||0]||null; }
+function evDeckSkip(){ const l=window._evFiltered||[]; if((window._evIdx||0) < l.length){ window._evIdx=(window._evIdx||0)+1; evRenderSwipe(); } }
+function evDeckBack(){ window._evIdx=Math.max(0,(window._evIdx||0)-1); evRenderSwipe(); }
+function evDeckAttend(){ const c=evDeckCur(); if(c) openEventView(c); }
+function evDeckDetail(){ const c=evDeckCur(); if(c) openEventView(c); }
+function evDeckSave(){ const c=evDeckCur(); if(!c) return; let favs=[]; try{ favs=JSON.parse(localStorage.getItem('mtl_ev_favs')||'[]'); }catch(e){} const i=favs.indexOf(c.id); if(i>=0){ favs.splice(i,1); toast(LANG==='en'?'Removed from saved':'Odebráno z uložených'); } else { favs.push(c.id); toast(LANG==='en'?'⭐ Event saved':'⭐ Akce uložena'); } try{ localStorage.setItem('mtl_ev_favs', JSON.stringify(favs)); }catch(e){} }
 function evRenderSwipe(){
   const deck=$('evDeck'); if(!deck) return;
   const list=window._evFiltered||[]; let idx=window._evIdx||0;
@@ -4823,6 +4848,32 @@ function eventCardHtml(ev){
     </div>
   </div>`;
 }
+function evBuyerCanCancel(ev){ if(!ev) return false; const pol=ev.refund_policy||'none'; if(pol==='none') return false; if(pol==='anytime') return true; if(pol==='until_days'){ const days=ev.refund_days||7; if(!ev.starts_at) return false; return (Date.now() < new Date(ev.starts_at).getTime() - days*86400000); } return false; }
+async function evResolveAcct(ev){ let acct=null; try{ if(ev.payout_coach_id){ const {data:pr}=await supaClient.from('profiles').select('gym_payout_account').eq('id',ev.payout_coach_id).single(); acct=(pr&&pr.gym_payout_account)||null; } if(!acct){ const {data:g}=await supaClient.from('gyms').select('stripe_account').eq('id',ev.gym_id).single(); acct=(g&&g.stripe_account)||null; } }catch(e){} return acct; }
+async function evCancelEvent(ev){
+  if(!confirm(LANG==='en'?'Cancel this event and refund everyone 100%? This cannot be undone.':'Zrušit akci a vrátit všem 100 %? Nelze vzít zpět.')) return;
+  toast(LANG==='en'?'⏳ Cancelling & refunding…':'⏳ Ruším a vracím peníze…');
+  const acct=await evResolveAcct(ev); let okc=0, fail=0;
+  try{ const { data:tks } = await supaClient.from('event_tickets').select('*').eq('event_id',ev.id).eq('status','paid');
+    for(const t of (tks||[])){
+      if(t.amount>0 && t.stripe_ref && acct){ try{ const r=await fetch(`/api/gym-refund?gymAccount=${encodeURIComponent(acct)}&paymentIntent=${encodeURIComponent(t.stripe_ref)}&refundApp=1`); const j=await r.json(); if(j&&j.id) okc++; else fail++; }catch(e){ fail++; } }
+      try{ await supaClient.from('event_tickets').update({status:'refunded'}).eq('id',t.id); }catch(e){}
+      if(t.buyer_id){ try{ await supaClient.from('notifications').insert({ user_id:t.buyer_id, type:'system', read:false, data:JSON.stringify({kind:'event_cancelled',event_id:ev.id,title:ev.title}), message:'❌ '+(LANG==='en'?`Event "${ev.title}" was cancelled — you were refunded.`:`Akce „${ev.title}“ byla zrušena — peníze ti byly vráceny.`) }); }catch(e){} }
+    }
+  }catch(e){}
+  try{ await supaClient.from('events').update({status:'cancelled'}).eq('id',ev.id); }catch(e){}
+  toast(LANG==='en'?`✅ Cancelled. Refunded ${okc}${fail?(', '+fail+' failed'):''}.`:`✅ Zrušeno. Vráceno ${okc}${fail?(', '+fail+' selhalo'):''}.`); closeSheet('shEventView'); if(typeof renderMyEvManage==='function') renderMyEvManage();
+}
+async function evCancelTicket(ev, tk){
+  if(!tk){ return; } if(!evBuyerCanCancel(ev)){ toast(LANG==='en'?'⚠️ This ticket is non-refundable':'⚠️ Tento lístek je nevratný'); return; }
+  if(!confirm(LANG==='en'?'Cancel your ticket? You get 93% back.':'Stornovat lístek? Dostaneš 93 % zpět.')) return;
+  toast(LANG==='en'?'⏳ Refunding…':'⏳ Vracím peníze…');
+  const acct=await evResolveAcct(ev);
+  if(tk.amount>0 && tk.stripe_ref && acct){ const amt=Math.round(tk.amount*0.93*100)/100; try{ const r=await fetch(`/api/gym-refund?gymAccount=${encodeURIComponent(acct)}&paymentIntent=${encodeURIComponent(tk.stripe_ref)}&amount=${amt}`); const j=await r.json(); if(!(j&&j.id)){ toast('⚠️ '+((j&&j.error)||'refund failed')); return; } }catch(e){ toast('⚠️'); return; } }
+  try{ await supaClient.from('event_tickets').update({status:'cancelled'}).eq('id',tk.id); }catch(e){}
+  if(ev.created_by){ try{ await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'event_ticket_cancelled',event_id:ev.id,title:ev.title}), message:'↩️ '+(LANG==='en'?`A ticket for "${ev.title}" was cancelled`:`Lístek na „${ev.title}“ byl stornován`) }); }catch(e){} }
+  toast(LANG==='en'?'✅ Cancelled. 93% refunded.':'✅ Stornováno. Vráceno 93 %.'); closeSheet('shEventView');
+}
 async function openEventView(ev){
   window._evViewing=ev;
   const cur=ev.currency||'CZK'; const sym=cur==='CZK'?'Kč':cur==='EUR'?'€':'$';
@@ -4846,11 +4897,14 @@ async function openEventView(ev){
       <div style="font-size:14px;color:var(--dark);line-height:1.7;margin-bottom:10px;">📅 ${dt}${endt}<br>📍 ${escapeHtml(loc||'')}${ev.capacity?`<br>👥 ${LANG==='en'?'Capacity':'Kapacita'}: ${ev.capacity}`:''}</div>
       <div style="margin-bottom:14px;">${tiersHtml}</div>
       ${ev.description?`<p style="font-size:14px;line-height:1.6;color:var(--mid);white-space:pre-wrap;margin-bottom:16px;">${escapeHtml(ev.description)}</p>`:''}
-      ${ myTk ? `<div style="background:#F0FBF0;border:1px solid #A8E6C0;border-radius:12px;padding:14px;text-align:center;margin-bottom:${ev.seeking_fighters?'8px':'0'};"><div style="font-weight:800;color:#006040;font-size:15px;">✅ ${myTk.amount>0?(LANG==='en'?'You already have a ticket':'Už máš lístek'):(LANG==='en'?'You are on the list':'Jsi na seznamu')}</div>${myTk.amount>0?`<div style="font-size:12px;color:var(--mid);margin-top:3px;">${myTk.amount} ${sym}${myTk.status==='pending'?' · '+(LANG==='en'?'payment pending':'platba čeká'):''}</div>`:''}</div>` : (isPast ? `<div style="text-align:center;color:var(--light);font-size:13px;padding:10px;">${LANG==='en'?'This event has ended':'Akce už proběhla'}</div>` : `<button id="evBuyBtn" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:${ev.seeking_fighters?'8px':'0'};">🎟️ ${(tiers.some(x=>x.price>0))?(LANG==='en'?'Get ticket':'Koupit lístek'):(LANG==='en'?'RSVP':'Přihlásit se')}</button>`) }
+      ${ myTk ? `<div style="background:#F0FBF0;border:1px solid #A8E6C0;border-radius:12px;padding:14px;text-align:center;margin-bottom:${ev.seeking_fighters?'8px':'0'};"><div style="font-weight:800;color:#006040;font-size:15px;">✅ ${myTk.amount>0?(LANG==='en'?'You already have a ticket':'Už máš lístek'):(LANG==='en'?'You are on the list':'Jsi na seznamu')}</div>${myTk.amount>0?`<div style="font-size:12px;color:var(--mid);margin-top:3px;">${myTk.amount} ${sym}${myTk.status==='pending'?' · '+(LANG==='en'?'payment pending':'platba čeká'):''}</div>`:''}</div>${(typeof evBuyerCanCancel==='function'&&evBuyerCanCancel(ev)&&!isPast&&myTk.amount>0)?`<button id="evStornoBtn" style="width:100%;margin-top:8px;padding:11px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;color:var(--mid);cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Cancel ticket (93% back)':'Stornovat lístek (93 % zpět)'}</button>`:''}</div>` : (isPast ? `<div style="text-align:center;color:var(--light);font-size:13px;padding:10px;">${LANG==='en'?'This event has ended':'Akce už proběhla'}</div>` : `<button id="evBuyBtn" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:${ev.seeking_fighters?'8px':'0'};">🎟️ ${(tiers.some(x=>x.price>0))?(LANG==='en'?'Get ticket':'Koupit lístek'):(LANG==='en'?'RSVP':'Přihlásit se')}</button>`) }
       ${(ev.seeking_fighters && window._canReqF)?`<button id="evFighterBtn" style="width:100%;padding:13px;background:var(--surf);border:1.5px solid var(--red);color:var(--red);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">🥊 ${LANG==='en'?'Suggest a fighter':'Navrhnout fightera'}</button>${ev.fighter_info?`<p style="font-size:12px;color:var(--mid);line-height:1.5;margin-top:8px;">${escapeHtml(ev.fighter_info)}</p>`:''}`:''}
+      ${(currentUser && (ev.created_by===currentUser.id || (window._myGyms||[]).some(g=>String(g.id)===String(ev.gym_id))) && ev.status!=='cancelled' && !isPast)?`<button id="evCancelEventBtn" style="width:100%;margin-top:10px;padding:12px;background:#FEECEC;border:1px solid #F3C9C0;color:var(--red);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Cancel event & refund all':'Zrušit akci a vrátit vše'}</button>`:''}
     </div>`;
   if($('evBuyBtn')) $('evBuyBtn').onclick=()=>buyEventTicket(ev);
   if($('evFighterBtn')) $('evFighterBtn').onclick=()=>suggestFighter(ev);
+  if($('evStornoBtn')) $('evStornoBtn').onclick=()=>evCancelTicket(ev, myTk);
+  if($('evCancelEventBtn')) $('evCancelEventBtn').onclick=()=>evCancelEvent(ev);
   openSheet('shEventView');
 }
 function buyEventTicket(ev){
@@ -7694,14 +7748,19 @@ async function loadGymManageBookings(){
 }
 function enterEventsMode(){
   _deckMode='events';
-  document.querySelectorAll('.stack,.actions,.search-wrap').forEach(el=>{ if(el) el.style.display='none'; });
+  const st=document.querySelector('.stack'); if(st) st.style.display='none';
   ['tagFilters','discFilters','locBar','gymTagFilters'].forEach(id=>{ if($(id)) $(id).style.display='none'; });
+  const _go=$('btnGo'); if(_go){ const ai=_go.querySelector('.ai'),al=_go.querySelector('.al'); if(ai)ai.textContent='🎟️'; if(al)al.textContent=(LANG==='en'?'Attend':'Zúčastnit se'); }
+  const _inf=$('btnInfo'); if(_inf){ const ai=_inf.querySelector('.ai'),al=_inf.querySelector('.al'); if(ai)ai.textContent='👁️'; if(al)al.textContent='Detail'; }
+  const si=$('searchInp'); if(si){ si.placeholder=(LANG==='en'?'Search event or city...':'Hledat akci nebo město...'); si.value=window._evSearch||''; } if($('searchClear')) $('searchClear').classList.toggle('show',(window._evSearch||'').length>0);
   const ev=$('eventsView'); if(ev){ ev.style.display='block'; renderEventsAsync(ev); }
 }
 function exitEventsMode(){
   const ev=$('eventsView'); if(ev) ev.style.display='none';
-  document.querySelectorAll('.stack,.actions,.search-wrap').forEach(el=>{ if(el) el.style.display=''; });
+  const st=document.querySelector('.stack'); if(st) st.style.display='';
   ['tagFilters','locBar'].forEach(id=>{ if($(id)) $(id).style.display=''; });
+  const _go=$('btnGo'); if(_go){ const ai=_go.querySelector('.ai'),al=_go.querySelector('.al'); if(ai)ai.textContent='🥊'; if(al)al.textContent=(LANG==='en'?'Train':'Trénovat'); }
+  const _inf=$('btnInfo'); if(_inf){ const ai=_inf.querySelector('.ai'),al=_inf.querySelector('.al'); if(ai)ai.textContent='👤'; if(al)al.textContent=(LANG==='en'?'Profile':'Profil'); }
 }
 function setNav(id){
   ['ni-find','ni-gyms','ni-events','ni-msgs','ni-me'].forEach(n=>$(n).classList.remove('active'));
@@ -8252,11 +8311,13 @@ $('btnChangeLoc').onclick=()=>openCityInput();
 
 // Search
 $('searchInp').addEventListener('input',e=>{
+  if(_deckMode==='events'){ window._evSearch=e.target.value.trim().toLowerCase(); $('searchClear').classList.toggle('show', e.target.value.trim().length>0); window._evIdx=0; renderEventsAsync($('eventsView')); return; }
   searchQuery=e.target.value.trim();
   $('searchClear').classList.toggle('show', searchQuery.length>0);
   init();
 });
 $('searchClear').onclick=()=>{
+  if(_deckMode==='events'){ window._evSearch=''; $('searchInp').value=''; $('searchClear').classList.remove('show'); window._evIdx=0; renderEventsAsync($('eventsView')); return; }
   searchQuery='';
   $('searchInp').value='';
   $('searchClear').classList.remove('show');
@@ -8281,10 +8342,10 @@ $('btnReset').onclick=()=>{ priceLimit=null; maxDistKm=null; activeFilter='all';
 $('btnProfile').onclick=e=>{ e.stopPropagation(); const c=filtered[idx]; if(c && c.isGym){ openGymProfile(c.g); return; } openProfile(); };
 
 // Action buttons
-$('btnPass').onclick=doPass;
-$('btnUndo').onclick=doUndo;
-$('btnGo').onclick=doGo;
-$('btnSave').onclick=doSave;
+$('btnPass').onclick=()=>{ if(_deckMode==='events') return evDeckSkip(); doPass(); };
+$('btnUndo').onclick=()=>{ if(_deckMode==='events') return evDeckBack(); doUndo(); };
+$('btnGo').onclick=()=>{ if(_deckMode==='events') return evDeckAttend(); doGo(); };
+$('btnSave').onclick=()=>{ if(_deckMode==='events') return evDeckSave(); doSave(); };
 (function(){
   const SAVE_RE=/save|uložit|ulož/i; const SAVE_IDS=['btnSave','btnSaveRates','coachSchedSave','mgSave']; const dirty=new Set();
   function blockOf(el){ let n=el.parentElement; while(n){ try{ const bs=n.querySelectorAll('button'); for(const x of bs){ if(SAVE_IDS.includes(x.id)||SAVE_RE.test(x.textContent||'')) return n; } }catch(e){} n=n.parentElement; } return null; }
@@ -8293,7 +8354,7 @@ $('btnSave').onclick=doSave;
   document.addEventListener('change',onEdit,true);
   document.addEventListener('click',function(e){ const x=e.target&&e.target.closest&&e.target.closest('button'); if(x&&(SAVE_IDS.includes(x.id)||SAVE_RE.test(x.textContent||''))) dirty.clear(); },true);
 })();
-$('btnInfo').onclick=doInfo;
+$('btnInfo').onclick=()=>{ if(_deckMode==='events') return evDeckDetail(); doInfo(); };
 
 // Bottom nav
 $('ni-find').onclick=()=>{ setNav('ni-find'); closeAllSheets(); exitEventsMode(); setDeckMode('coaches'); };
@@ -12690,6 +12751,9 @@ function collectSpecs(containerId){ const c=$(containerId); if(!c) return []; re
   // Předvyplň ceny při vstupu do coach mode
 const MIN_RATE = { CZK: 450, EUR: 20, USD: 25 }; const MIN_RATE_ONLINE = { CZK: 250, EUR: 10, USD: 10 }; const MIN_EVENT = { CZK: 450, EUR: 20, USD: 22 };
 const EVENT_TYPES=[{v:'fight_night',cs:'Fight night',en:'Fight night',emoji:'🥊'},{v:'competition',cs:'Soutěž',en:'Competition',emoji:'🏆'},{v:'seminar',cs:'Seminář',en:'Seminar',emoji:'🎓'},{v:'camp',cs:'Kemp',en:'Camp',emoji:'🏕️'},{v:'open_mat',cs:'Open mat',en:'Open mat',emoji:'🤼'},{v:'grading',cs:'Zkoušky',en:'Grading',emoji:'🎗️'},{v:'other',cs:'Jiné',en:'Other',emoji:'📌'}];
+const EVENT_TYPE_CFG={ fight_night:{min:{CZK:450,EUR:20,USD:22},freeOk:false,refund:'none'}, competition:{min:{CZK:150,EUR:6,USD:7},freeOk:true,refund:'none'}, seminar:{min:{CZK:450,EUR:20,USD:22},freeOk:true,refund:'until_days'}, camp:{min:{CZK:450,EUR:20,USD:22},freeOk:true,refund:'until_days'}, open_mat:{min:{CZK:100,EUR:4,USD:5},freeOk:true,refund:'anytime'}, grading:{min:{CZK:200,EUR:8,USD:9},freeOk:true,refund:'anytime'}, other:{min:{CZK:100,EUR:4,USD:5},freeOk:true,refund:'until_days'} };
+function evTypeCfg(t){ return EVENT_TYPE_CFG[t]||EVENT_TYPE_CFG.other; }
+function evMinFor(t,cur){ const c=evTypeCfg(t); return (c.min&&c.min[cur])||c.min.CZK||0; }
 const MIN_GYM = { CZK: 200, EUR: 10, USD: 12 }; const MIN_MEMB = { CZK: 1400, EUR: 80, USD: 100 };
 
 async function fillRateEditor(){
