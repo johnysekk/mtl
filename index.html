@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-FU | Event commission changed to a flat 6 percent for everyone. Markup is now x1.03 and the gym keeps 97 percent, so MTL takes 6 percent (3 percent markup plus 3 percent cut); the Exclusive Partner discount was removed for events, so partners pay the same rate. The per-variant breakdown label reads MTL 6% (3%+3%), and the card from-price and the detail variant prices use x1.03. Deploy index only. -->
+<!-- MTL build: 2026-06-07-FV | Event ticket checkout. pay.js gained a type=event branch (direct charge on the chosen payee account, buyer pays base x1.03, MTL application fee 6 percent of base x qty, metadata mtl_payment_type event_ticket, success returns event_pay=ok with the ticket id). In the detail view, Get ticket now runs the real flow: one variant goes straight to checkout, multiple show a Choose ticket picker; the payee account is resolved from payout_coach_id (the coach gym_payout_account) or else the gym stripe_account. A free/RSVP variant inserts a paid zero-amount ticket and notifies the organizer with no Stripe. Paid tickets insert a pending event_tickets row then redirect to Stripe; on return event_pay=ok confirms the ticket to paid, stores the payment intent and notifies the organizer that a ticket sold. Deploy index and pay.js. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4623,7 +4623,39 @@ function openEventView(ev){
   if($('evFighterBtn')) $('evFighterBtn').onclick=()=>suggestFighter(ev);
   openSheet('shEventView');
 }
-function buyEventTicket(ev){ toast(LANG==='en'?'Ticket checkout coming next 🎟️':'Checkout lístku už brzy 🎟️'); }
+function buyEventTicket(ev){
+  if(!currentUser){ toast(L('⚠️ Nejprve se přihlas')); return; }
+  const tiers=evTiersOf(ev);
+  if(tiers.length>1){ openTierPick(ev, tiers); return; }
+  doEventCheckout(ev, tiers[0]);
+}
+function openTierPick(ev, tiers){
+  const cur=ev.currency||'CZK'; const sym=cur==='CZK'?'Kč':cur==='EUR'?'€':'$';
+  const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:240;display:flex;align-items:flex-end;justify-content:center;';
+  const rows=tiers.map((t,i)=>`<button class="tpRow" data-i="${i}" style="width:100%;display:flex;justify-content:space-between;align-items:center;padding:14px;background:var(--surf);border:1px solid var(--border);border-radius:12px;margin-bottom:8px;cursor:pointer;font-family:'DM Sans';"><span style="font-weight:700;color:var(--dark);">${escapeHtml(t.name||(LANG==='en'?'Ticket':'Lístek'))}</span><b>${(t.price>0)?`${fmtPrice(t.price*1.03,cur)} ${sym}`:(LANG==='en'?'Free':'Zdarma')}</b></button>`).join('');
+  ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px 18px 0 0;padding:20px;max-height:80vh;overflow-y:auto;"><div style="font-size:17px;font-weight:800;margin-bottom:12px;">${LANG==='en'?'Choose ticket':'Vyber lístek'}</div>${rows}<button id="tpCancel" style="width:100%;margin-top:4px;padding:11px;background:transparent;border:none;color:var(--light);font-weight:600;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Cancel':'Zrušit'}</button></div>`;
+  document.body.appendChild(ov); const close=()=>ov.remove(); ov.onclick=(e)=>{ if(e.target===ov) close(); }; ov.querySelector('#tpCancel').onclick=close;
+  ov.querySelectorAll('.tpRow').forEach(r=>r.onclick=()=>{ const t=tiers[+r.dataset.i]; close(); doEventCheckout(ev, t); });
+}
+async function doEventCheckout(ev, tier){
+  const cur=ev.currency||'CZK';
+  const base=(tier&&tier.price)||0;
+  let acct=null;
+  try{
+    if(ev.payout_coach_id){ const { data:pr } = await supaClient.from('profiles').select('gym_payout_account').eq('id', ev.payout_coach_id).single(); acct=(pr&&pr.gym_payout_account)||null; }
+    if(!acct){ const { data:g } = await supaClient.from('gyms').select('stripe_account').eq('id', ev.gym_id).single(); acct=(g&&g.stripe_account)||null; }
+  }catch(e){}
+  if(base<=0){
+    try{ await supaClient.from('event_tickets').insert({ event_id:ev.id, buyer_id:currentUser.id, buyer_name:currentUser.name||'', qty:1, amount:0, currency:cur, status:'paid' }); if(ev.created_by){ await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'event_rsvp', event_id:ev.id, title:ev.title}), message:'🎟️ '+(currentUser.name||'Někdo')+(LANG==='en'?` is coming to "${ev.title}"`:` přijde na „${ev.title}"`) }); } }catch(e){}
+    toast(LANG==='en'?'🎟️ You are on the list!':'🎟️ Jsi na seznamu!'); closeSheet('shEventView'); return;
+  }
+  if(!acct){ toast(LANG==='en'?'⚠️ This event cannot take payments yet':'⚠️ Tato událost zatím nepřijímá platby'); return; }
+  const buyerPays=Math.round(base*1.03*100)/100;
+  let ticketId=null;
+  try{ const { data:t } = await supaClient.from('event_tickets').insert({ event_id:ev.id, buyer_id:currentUser.id, buyer_name:currentUser.name||'', qty:1, amount:buyerPays, currency:cur, status:'pending' }).select().single(); ticketId=t&&t.id; }catch(e){ toast('⚠️ '+(e.message||'')); return; }
+  const url=`/api/pay?type=event&gymAccount=${encodeURIComponent(acct)}&eventTitle=${encodeURIComponent(ev.title||'Event')}&tierName=${encodeURIComponent((tier&&tier.name)||'')}&amount=${base}&currency=${cur}&ticketId=${encodeURIComponent(ticketId||'')}&buyerName=${encodeURIComponent(currentUser.name||'')}`;
+  window.location.href=url;
+}
 function suggestFighter(ev){ toast(LANG==='en'?'Fighter request coming next 🥊':'Žádost fightera už brzy 🥊'); }
 function closeAllSheets(){ _sheetParent={}; SHEETS.forEach(s=>$(s).classList.remove('open')); }
 
@@ -13423,6 +13455,23 @@ async function showPaidPopup(){
           else { toast(LANG==='en'?'✅ Drop-in booked! See you at the gym. 🥊':'✅ Jednorázová lekce zarezervována! Uvidíme se v gymu. 🥊'); }
         }
       } catch(e){ console.error('gym_pay handler', e); }
+    }
+    window.history.replaceState({}, '', window.location.pathname);
+    return;
+  }
+  if(params.get('event_pay') === 'ok'){
+    const ticketId=params.get('ticket'); const sessionId=params.get('session'); const acct=params.get('acct');
+    let _t=0; while(!currentUser && _t<25){ await new Promise(r=>setTimeout(r,200)); _t++; }
+    if(ticketId){
+      let pi=null;
+      if(sessionId){ try{ const r=await fetch(`/api/session?sessionId=${sessionId}${acct?'&gymAccount='+encodeURIComponent(acct):''}`); const j=await r.json(); pi=j.paymentIntent||null; }catch(e){} }
+      try{
+        const { data:tk } = await supaClient.from('event_tickets').update({ status:'paid', stripe_ref: pi }).eq('id', ticketId).select().single();
+        if(tk){
+          try{ const { data:ev } = await supaClient.from('events').select('created_by,title').eq('id', tk.event_id).single(); if(ev&&ev.created_by){ await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'event_ticket_sold', event_id:tk.event_id, title:ev.title}), message:'🎟️ '+(LANG==='en'?`Ticket sold for "${ev.title}"`:`Prodán lístek na „${ev.title}"`) }); } }catch(e){}
+          toast(LANG==='en'?'🎟️ Ticket confirmed! See you there.':'🎟️ Lístek potvrzen! Uvidíme se tam.');
+        }
+      }catch(e){ console.error('event_pay handler', e); }
     }
     window.history.replaceState({}, '', window.location.pathname);
     return;
