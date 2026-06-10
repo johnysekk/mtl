@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-FX | Poster ratio fix plus fighter requests. Posters now crop at 4:3 and both the card and detail image containers use aspect-ratio 4/3 (and the create-form preview), so cover no longer mis-crops the poster. Fighter requests (increment 5): when an event is seeking fighters, the Suggest a fighter button shows only to coaches whose gym gave them can_request_fighters (checked on the Events tab into window._canReqF). It opens a modal form — fighter name, age, number of fights, discipline, weight, optional note — that inserts a fighter_requests row and notifies the organizer. Gym owners see a Fighter requests section on the Events tab listing pending requests (fighter details, discipline, coach, event) with Accept and Decline, each updating the request and notifying the coach. Deploy index only. -->
+<!-- MTL build: 2026-06-07-FY | My events hub plus event editing. The Events tab gained a Browse / My events toggle. Browse is the approved-events feed with the discipline filter and the create button. My events has two parts: Hosting (events I created or that belong to my gyms, each with a status badge and an Edit button, plus the pending-approval list and fighter-request list moved here from Browse) and Going (my tickets/RSVPs and the fighter requests I sent, with their status). Editing reuses openEventCreate(gym, ev): it prefills every field (poster preview, type, title, description, disciplines chips, venue, start/end via a new toLocalInput, capacity, payee, currency, tiers, seeking-fighters + note), retitles the sheet to Edit event and the button to Save changes, and saveEvent updates the row instead of inserting. Deploy index only. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4403,47 +4403,93 @@ function renderEvents(){
   renderEventsAsync(box);
 }
 async function renderEventsAsync(box){
+  const view = window._evView || 'browse';
+  const tab=(v,lbl)=>`<button class="evVTab" data-v="${v}" style="flex:1;padding:9px;border:none;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;background:${view===v?'var(--dark)':'transparent'};color:${view===v?'#fff':'var(--dark)'};">${lbl}</button>`;
+  let html=`<div style="display:flex;gap:4px;margin-bottom:14px;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:4px;">${tab('browse',LANG==='en'?'Browse':'Procházet')}${tab('mine',LANG==='en'?'My events':'Moje akce')}</div>`;
   const elig = await eventEligibleGyms();
   try{ const {data:cr}=await supaClient.from('gym_coaches').select('gym_id').eq('coach_id',currentUser.id).eq('status','active').eq('can_request_fighters',true); window._canReqF=!!(cr&&cr.length); window._reqFGym=(cr&&cr[0]&&cr[0].gym_id)||null; }catch(e){ window._canReqF=false; }
-  let top='';
-  if(elig.length){ top += `<button id="evCreateBtn" style="width:100%;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:16px;">+ ${LANG==='en'?'Create event':'Vytvořit událost'}</button>`; }
   const ownedIds=(window._myGyms||[]).map(g=>g.id);
-  let pendRows='';
+  if(view==='browse'){
+    if(elig.length){ html += `<button id="evCreateBtn" style="width:100%;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:16px;">+ ${LANG==='en'?'Create event':'Vytvořit událost'}</button>`; }
+    try{
+      const today=new Date(); today.setHours(0,0,0,0);
+      const { data:evs } = await supaClient.from('events').select('*').eq('status','approved').gte('starts_at', today.toISOString()).order('starts_at',{ascending:true}).limit(100);
+      window._evList = evs||[];
+      const fd = window._evFilterDisc||'all';
+      if(window._evList.length){
+        const chips=['all'].concat(activeDisciplines().map(d=>d.v));
+        html += `<div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;margin-bottom:12px;">`+chips.map(v=>{ const on=(fd===v); const lbl=v==='all'?(LANG==='en'?'All':'Vše'):(disciplineEmoji(v)+' '+disciplineLabel(v)); return `<span class="evFilterChip" data-v="${v}" style="white-space:nowrap;padding:7px 12px;border-radius:99px;font-size:12px;font-weight:700;cursor:pointer;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'var(--surf)'};color:${on?'#fff':'var(--dark)'};">${lbl}</span>`; }).join('')+`</div>`;
+        const list=window._evList.filter(ev=>{ if(fd==='all') return true; let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){} return ds.includes(fd); });
+        html += list.length ? list.map(ev=>eventCardHtml(ev)).join('') : `<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;">${LANG==='en'?'No events in this discipline.':'Žádné události v této disciplíně.'}</p>`;
+      } else {
+        html += `<div style="text-align:center;padding:40px 16px;color:var(--light);"><div style="font-size:40px;margin-bottom:10px;">🥊</div><div style="font-weight:700;color:var(--dark);margin-bottom:6px;">${LANG==='en'?'No events near you yet':'Zatím tu nejsou žádné události'}</div><div style="font-size:13px;line-height:1.5;">${LANG==='en'?'Fight nights, seminars and camps will show up here.':'Fight nights, semináře a kempy se objeví tady.'}</div></div>`;
+      }
+    }catch(e){}
+  } else {
+    html += await renderEventsMine(ownedIds);
+  }
+  box.innerHTML=html;
+  box.querySelectorAll('.evVTab').forEach(b=>b.onclick=()=>{ window._evView=b.dataset.v; renderEvents(); });
+  if(view==='browse'){
+    if($('evCreateBtn')) $('evCreateBtn').onclick=()=>{ if(elig.length===1) openEventCreate(elig[0]); else openEventGymPick(elig); };
+    box.querySelectorAll('.evFilterChip').forEach(c=>c.onclick=()=>{ window._evFilterDisc=c.dataset.v; renderEvents(); });
+    box.querySelectorAll('.evCard').forEach(c=>c.onclick=()=>{ const ev=(window._evList||[]).find(x=>String(x.id)===String(c.dataset.id)); if(ev) openEventView(ev); });
+  } else {
+    box.querySelectorAll('.evApprove').forEach(b=>b.onclick=()=>approveEvent(b.dataset.id, b.dataset.coach, b.dataset.title));
+    box.querySelectorAll('.evReject').forEach(b=>b.onclick=()=>rejectEvent(b.dataset.id, b.dataset.coach, b.dataset.title));
+    box.querySelectorAll('.frAccept').forEach(b=>b.onclick=()=>acceptFighter(b.dataset.id, b.dataset.coach, b.dataset.fn));
+    box.querySelectorAll('.frDecline').forEach(b=>b.onclick=()=>declineFighter(b.dataset.id, b.dataset.coach, b.dataset.fn));
+    box.querySelectorAll('.evMineCard').forEach(c=>c.onclick=()=>{ const ev=(window._mineHosted||[]).find(x=>String(x.id)===String(c.dataset.id)); if(ev) openEventView(ev); });
+    box.querySelectorAll('.evEditBtn').forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); const ev=(window._mineHosted||[]).find(x=>String(x.id)===String(b.dataset.id)); if(!ev) return; const g=(window._myGyms||[]).find(x=>String(x.id)===String(ev.gym_id))||(window._evGymCache&&window._evGymCache[ev.gym_id]); openEventCreate(g||_myGymData, ev); });
+  }
+}
+async function renderEventsMine(ownedIds){
+  let html='';
+  let hosted=[];
+  try{
+    const { data:mine } = await supaClient.from('events').select('*').eq('created_by', currentUser.id).order('starts_at',{ascending:true});
+    (mine||[]).forEach(e=>hosted.push(e));
+    if(ownedIds.length){ const { data:gymEvs } = await supaClient.from('events').select('*').in('gym_id', ownedIds).order('starts_at',{ascending:true}); (gymEvs||[]).forEach(e=>{ if(!hosted.find(x=>x.id===e.id)) hosted.push(e); }); }
+  }catch(e){}
+  window._mineHosted=hosted;
+  // gym cache for edit (gyms not among owned)
+  window._evGymCache=window._evGymCache||{};
+  try{ const need=[...new Set(hosted.map(e=>e.gym_id).filter(id=>id && !ownedIds.includes(id) && !window._evGymCache[id]))]; if(need.length){ const { data:gs } = await supaClient.from('gyms').select('*').in('id', need); (gs||[]).forEach(g=>window._evGymCache[g.id]=g); } }catch(e){}
+  const stLbl=st=>st==='approved'?(LANG==='en'?'Live':'Live'):st==='pending'?(LANG==='en'?'Pending':'Čeká'):st==='rejected'?(LANG==='en'?'Rejected':'Zamítnuto'):st;
+  const stCol=st=>st==='approved'?'#006040':st==='pending'?'#B85C00':'var(--red)';
+  html += `<div style="font-size:13px;font-weight:800;color:var(--dark);margin:0 0 10px;">📋 ${LANG==='en'?'Hosting':'Pořádám'}</div>`;
+  if(hosted.length){
+    html += hosted.map(ev=>{ const dt=ev.starts_at?new Date(ev.starts_at).toLocaleString(LANG==='en'?'en-US':'cs-CZ',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):''; return `<div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;"><div class="evMineCard" data-id="${ev.id}" style="cursor:pointer;"><div style="font-weight:700;">${escapeHtml(ev.title||'')} <span style="font-size:11px;font-weight:700;color:${stCol(ev.status)};">• ${stLbl(ev.status)}</span></div><div style="font-size:12px;color:var(--mid);margin:2px 0 8px;">📅 ${dt}</div></div><button class="evEditBtn" data-id="${ev.id}" style="padding:7px 12px;background:var(--surf);border:1px solid var(--border);border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">✏️ ${LANG==='en'?'Edit':'Upravit'}</button></div>`; }).join('');
+  } else { html += `<p style="font-size:13px;color:var(--light);margin-bottom:14px;">${LANG==='en'?'You are not hosting any events yet.':'Zatím nepořádáš žádné události.'}</p>`; }
+  // pending approvals + fighter requests for owned gyms
   if(ownedIds.length){
     try{
       const { data:pend } = await supaClient.from('events').select('*').in('gym_id', ownedIds).eq('status','pending').order('created_at',{ascending:true});
-      if(pend && pend.length){
-        const props={}; const cids=[...new Set(pend.map(e=>e.created_by).filter(Boolean))];
-        if(cids.length){ const { data:pr } = await supaClient.from('profiles').select('id,name').in('id',cids); (pr||[]).forEach(x=>props[x.id]=x.name); }
-        pendRows = `<div style="font-size:12px;font-weight:700;color:var(--mid);margin:4px 0 8px;">⏳ ${LANG==='en'?'Pending approval':'Čeká na schválení'}</div>` + pend.map(ev=>`<div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;"><div style="font-weight:700;margin-bottom:2px;">${escapeHtml(ev.title||'')}</div><div style="font-size:12px;color:var(--mid);margin-bottom:8px;">${escapeHtml(props[ev.created_by]||(LANG==='en'?'Coach':'Kouč'))} · ${(ev.starts_at||'').slice(0,10)}</div><div style="display:flex;gap:8px;"><button class="evApprove" data-id="${ev.id}" data-coach="${ev.created_by||''}" data-title="${escapeHtml(ev.title||'')}" style="flex:1;padding:9px;background:#E8F5EE;color:#006040;border:1px solid #A8E6C0;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">✓ ${LANG==='en'?'Approve':'Schválit'}</button><button class="evReject" data-id="${ev.id}" data-coach="${ev.created_by||''}" data-title="${escapeHtml(ev.title||'')}" style="flex:1;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">✕ ${LANG==='en'?'Reject':'Zamítnout'}</button></div></div>`).join('') + `<div style="height:12px;"></div>`;
+      if(pend&&pend.length){ const props={}; const cids=[...new Set(pend.map(e=>e.created_by).filter(Boolean))]; if(cids.length){ const { data:pr } = await supaClient.from('profiles').select('id,name').in('id',cids); (pr||[]).forEach(x=>props[x.id]=x.name); }
+        html += `<div style="font-size:12px;font-weight:700;color:var(--mid);margin:14px 0 8px;">⏳ ${LANG==='en'?'Pending approval':'Čeká na schválení'}</div>` + pend.map(ev=>`<div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;"><div style="font-weight:700;margin-bottom:2px;">${escapeHtml(ev.title||'')}</div><div style="font-size:12px;color:var(--mid);margin-bottom:8px;">${escapeHtml(props[ev.created_by]||'')} · ${(ev.starts_at||'').slice(0,10)}</div><div style="display:flex;gap:8px;"><button class="evApprove" data-id="${ev.id}" data-coach="${ev.created_by||''}" data-title="${escapeHtml(ev.title||'')}" style="flex:1;padding:9px;background:#E8F5EE;color:#006040;border:1px solid #A8E6C0;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">✓ ${LANG==='en'?'Approve':'Schválit'}</button><button class="evReject" data-id="${ev.id}" data-coach="${ev.created_by||''}" data-title="${escapeHtml(ev.title||'')}" style="flex:1;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">✕ ${LANG==='en'?'Reject':'Zamítnout'}</button></div></div>`).join('');
+      }
+      const { data:myEvs } = await supaClient.from('events').select('id,title').in('gym_id', ownedIds);
+      const evIds=(myEvs||[]).map(e=>e.id); const evTitle={}; (myEvs||[]).forEach(e=>evTitle[e.id]=e.title);
+      if(evIds.length){ const { data:fr } = await supaClient.from('fighter_requests').select('*').in('event_id', evIds).eq('status','pending').order('created_at',{ascending:true});
+        if(fr&&fr.length){ html += `<div style="font-size:12px;font-weight:700;color:var(--mid);margin:14px 0 8px;">🥊 ${LANG==='en'?'Fighter requests':'Žádosti fighterů'}</div>` + fr.map(f=>`<div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;"><div style="font-weight:700;">${escapeHtml(f.fighter_name||'')} <span style="font-size:12px;color:var(--mid);font-weight:400;">${f.weight_kg?f.weight_kg+' kg':''}${f.fights_count!=null?' · '+f.fights_count+(LANG==='en'?' fights':' zápasů'):''}${f.fighter_age?' · '+f.fighter_age+(LANG==='en'?' y':' let'):''}</span></div><div style="font-size:12px;color:var(--mid);margin-bottom:8px;">${f.discipline?disciplineEmoji(f.discipline)+' '+disciplineLabel(f.discipline)+' · ':''}${escapeHtml(f.coach_name||'')} → ${escapeHtml(evTitle[f.event_id]||'')}${f.note?'<br>'+escapeHtml(f.note):''}</div><div style="display:flex;gap:8px;"><button class="frAccept" data-id="${f.id}" data-coach="${f.coach_id||''}" data-fn="${escapeHtml(f.fighter_name||'')}" style="flex:1;padding:9px;background:#E8F5EE;color:#006040;border:1px solid #A8E6C0;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">✓ ${LANG==='en'?'Accept':'Přijmout'}</button><button class="frDecline" data-id="${f.id}" data-coach="${f.coach_id||''}" data-fn="${escapeHtml(f.fighter_name||'')}" style="flex:1;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">✕ ${LANG==='en'?'Decline':'Odmítnout'}</button></div></div>`).join(''); }
       }
     }catch(e){}
   }
-  let feed='';
+  // GOING
+  html += `<div style="font-size:13px;font-weight:800;color:var(--dark);margin:20px 0 10px;">🎟️ ${LANG==='en'?'Going':'Jdu'}</div>`;
+  let goingHtml='';
   try{
-    const today=new Date(); today.setHours(0,0,0,0);
-    const { data:evs } = await supaClient.from('events').select('*').eq('status','approved').gte('starts_at', today.toISOString()).order('starts_at',{ascending:true}).limit(100);
-    window._evList = evs||[];
-    const fd = window._evFilterDisc||'all';
-    if(window._evList.length){
-      const chips = ['all'].concat(activeDisciplines().map(d=>d.v));
-      feed += `<div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;margin-bottom:12px;">` + chips.map(v=>{ const on=(fd===v); const lbl = v==='all'?(LANG==='en'?'All':'Vše'):(disciplineEmoji(v)+' '+disciplineLabel(v)); return `<span class="evFilterChip" data-v="${v}" style="white-space:nowrap;padding:7px 12px;border-radius:99px;font-size:12px;font-weight:700;cursor:pointer;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'var(--surf)'};color:${on?'#fff':'var(--dark)'};">${lbl}</span>`; }).join('') + `</div>`;
-      const list = window._evList.filter(ev=>{ if(fd==='all') return true; let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){} return ds.includes(fd); });
-      feed += list.length ? list.map(ev=>eventCardHtml(ev)).join('') : `<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;">${LANG==='en'?'No events in this discipline.':'Žádné události v této disciplíně.'}</p>`;
-    } else {
-      feed += `<div style="text-align:center;padding:40px 16px;color:var(--light);"><div style="font-size:40px;margin-bottom:10px;">🥊</div><div style="font-weight:700;color:var(--dark);margin-bottom:6px;">${LANG==='en'?'No events near you yet':'Zatím tu nejsou žádné události'}</div><div style="font-size:13px;line-height:1.5;">${LANG==='en'?'Fight nights, seminars and camps will show up here.':'Fight nights, semináře a kempy se objeví tady.'}</div></div>`;
+    const { data:tk } = await supaClient.from('event_tickets').select('*').eq('buyer_id', currentUser.id).neq('status','cancelled').order('created_at',{ascending:false});
+    if(tk&&tk.length){ const eids=[...new Set(tk.map(t=>t.event_id).filter(Boolean))]; const et={}; if(eids.length){ const { data:evs } = await supaClient.from('events').select('id,title,starts_at').in('id',eids); (evs||[]).forEach(e=>et[e.id]=e); }
+      goingHtml += tk.map(t=>{ const e=et[t.event_id]||{}; const cur=t.currency||'CZK'; const sym=cur==='CZK'?'Kč':cur==='EUR'?'€':'$'; const dt=e.starts_at?new Date(e.starts_at).toLocaleString(LANG==='en'?'en-US':'cs-CZ',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):''; return `<div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="min-width:0;"><div style="font-weight:700;">🎟️ ${escapeHtml(e.title||'')}</div><div style="font-size:12px;color:var(--mid);">${dt}${t.status==='pending'?' · '+(LANG==='en'?'unpaid':'nezaplaceno'):''}</div></div><b style="white-space:nowrap;">${t.amount>0?(t.amount+' '+sym):(LANG==='en'?'RSVP':'RSVP')}</b></div>`; }).join('');
+    }
+    const { data:mfr } = await supaClient.from('fighter_requests').select('*').eq('coach_id', currentUser.id).order('created_at',{ascending:false});
+    if(mfr&&mfr.length){ const eids=[...new Set(mfr.map(f=>f.event_id).filter(Boolean))]; const et={}; if(eids.length){ const { data:evs } = await supaClient.from('events').select('id,title').in('id',eids); (evs||[]).forEach(e=>et[e.id]=e.title); }
+      goingHtml += mfr.map(f=>{ const col=f.status==='accepted'?'#006040':f.status==='declined'?'var(--red)':'#B85C00'; const lbl=f.status==='accepted'?(LANG==='en'?'Accepted':'Přijat'):f.status==='declined'?(LANG==='en'?'Declined':'Odmítnut'):(LANG==='en'?'Pending':'Čeká'); return `<div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;"><div style="font-weight:700;">🥊 ${escapeHtml(f.fighter_name||'')} <span style="font-size:12px;font-weight:700;color:${col};">• ${lbl}</span></div><div style="font-size:12px;color:var(--mid);">${escapeHtml(et[f.event_id]||'')}</div></div>`; }).join('');
     }
   }catch(e){}
-  let fightReqRows='';
-  if(ownedIds.length){ try{ const { data:myEvs } = await supaClient.from('events').select('id,title').in('gym_id', ownedIds); const evIds=(myEvs||[]).map(e=>e.id); const evTitle={}; (myEvs||[]).forEach(e=>evTitle[e.id]=e.title); if(evIds.length){ const { data:fr } = await supaClient.from('fighter_requests').select('*').in('event_id', evIds).eq('status','pending').order('created_at',{ascending:true}); if(fr&&fr.length){ fightReqRows = `<div style="font-size:12px;font-weight:700;color:var(--mid);margin:4px 0 8px;">🥊 ${LANG==='en'?'Fighter requests':'Žádosti fighterů'}</div>` + fr.map(f=>`<div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;"><div style="font-weight:700;">${escapeHtml(f.fighter_name||'')} <span style="font-size:12px;color:var(--mid);font-weight:400;">${f.weight_kg?f.weight_kg+' kg':''}${f.fights_count!=null?' · '+f.fights_count+(LANG==='en'?' fights':' zápasů'):''}${f.fighter_age?' · '+f.fighter_age+(LANG==='en'?' y':' let'):''}</span></div><div style="font-size:12px;color:var(--mid);margin-bottom:8px;">${f.discipline?disciplineEmoji(f.discipline)+' '+disciplineLabel(f.discipline)+' · ':''}${escapeHtml(f.coach_name||'')} → ${escapeHtml(evTitle[f.event_id]||'')}${f.note?'<br>'+escapeHtml(f.note):''}</div><div style="display:flex;gap:8px;"><button class="frAccept" data-id="${f.id}" data-coach="${f.coach_id||''}" data-fn="${escapeHtml(f.fighter_name||'')}" style="flex:1;padding:9px;background:#E8F5EE;color:#006040;border:1px solid #A8E6C0;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">✓ ${LANG==='en'?'Accept':'Přijmout'}</button><button class="frDecline" data-id="${f.id}" data-coach="${f.coach_id||''}" data-fn="${escapeHtml(f.fighter_name||'')}" style="flex:1;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">✕ ${LANG==='en'?'Decline':'Odmítnout'}</button></div></div>`).join('') + `<div style="height:12px;"></div>`; } } }catch(e){} }
-  box.innerHTML = top + pendRows + fightReqRows + feed;
-  if($('evCreateBtn')) $('evCreateBtn').onclick=()=>{ if(elig.length===1) openEventCreate(elig[0]); else openEventGymPick(elig); };
-  box.querySelectorAll('.evApprove').forEach(b=>b.onclick=()=>approveEvent(b.dataset.id, b.dataset.coach, b.dataset.title));
-  box.querySelectorAll('.evReject').forEach(b=>b.onclick=()=>rejectEvent(b.dataset.id, b.dataset.coach, b.dataset.title));
-  box.querySelectorAll('.frAccept').forEach(b=>b.onclick=()=>acceptFighter(b.dataset.id, b.dataset.coach, b.dataset.fn));
-  box.querySelectorAll('.frDecline').forEach(b=>b.onclick=()=>declineFighter(b.dataset.id, b.dataset.coach, b.dataset.fn));
-  box.querySelectorAll('.evFilterChip').forEach(c=>c.onclick=()=>{ window._evFilterDisc=c.dataset.v; renderEvents(); });
-  box.querySelectorAll('.evCard').forEach(c=>c.onclick=()=>{ const ev=(window._evList||[]).find(x=>String(x.id)===String(c.dataset.id)); if(ev) openEventView(ev); });
+  html += goingHtml || `<p style="font-size:13px;color:var(--light);">${LANG==='en'?'No tickets or fighter requests yet.':'Zatím žádné lístky ani žádosti.'}</p>`;
+  return html;
 }
 async function eventEligibleGyms(){
   if(!currentUser) return [];
@@ -4463,10 +4509,15 @@ function openEventGymPick(elig){
   document.body.appendChild(ov); const close=()=>ov.remove(); ov.onclick=(e)=>{ if(e.target===ov) close(); }; ov.querySelector('#egpCancel').onclick=close;
   ov.querySelectorAll('.egpRow').forEach(r=>r.onclick=()=>{ const g=elig.find(x=>String(x.id)===String(r.dataset.id)); close(); if(g) openEventCreate(g); });
 }
-async function openEventCreate(gym){
+function toLocalInput(iso){ if(!iso) return ''; const d=new Date(iso); const z=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}T${z(d.getHours())}:${z(d.getMinutes())}`; }
+async function openEventCreate(gym, ev){
   const g = gym || _myGymData; if(!g){ toast(LANG==='en'?'⚠️ No gym':'⚠️ Není gym'); return; }
-  window._evGym=g; window._evPoster=''; window._evDisc=[]; window._evTiers=[{name:'',price:''}];
-  const cur=g.currency||'CZK';
+  window._evEditing = ev||null;
+  window._evGym=g;
+  let _eds=[], _ets=[{name:'',price:''}];
+  if(ev){ try{_eds=JSON.parse(ev.disciplines||'[]');}catch(e){} try{ const tt=JSON.parse(ev.ticket_tiers||'[]'); _ets = tt.length?tt:[{name:'',price:ev.ticket_price||''}]; }catch(e){ _ets=[{name:'',price:ev.ticket_price||''}]; } }
+  window._evPoster = ev?(ev.poster||''):''; window._evDisc=_eds; window._evTiers=_ets;
+  const cur = ev?(ev.currency||g.currency||'CZK'):(g.currency||'CZK');
   window._evCur=cur;
   const isOwner = g.owner_id===currentUser.id;
   let payees=[{id:'gym', name:(g.name||'Gym')+(LANG==='en'?' (default)':' (výchozí)'), account:g.stripe_account||null}];
@@ -4504,7 +4555,7 @@ async function openEventCreate(gym){
     <label style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;margin-bottom:10px;cursor:pointer;"><input type="checkbox" id="evSeek" style="width:18px;height:18px;"> 🥊 ${LANG==='en'?'Looking for fighters':'Hledáme fightery'}</label>
     <textarea id="evFighterInfo" rows="2" style="${inp}display:none;resize:vertical;" placeholder="${LANG==='en'?'What fighters you want (weight, level, rules…)':'Jaké fightery chceš (váha, úroveň, pravidla…)'}"></textarea>
     ${isOwner?'':`<p style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:10px;">${LANG==='en'?'Your gym owner reviews and approves this before it goes live.':'Majitel gymu to před zveřejněním schválí.'}</p>`}
-    <button id="evSave" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${isOwner?(LANG==='en'?'Publish event':'Zveřejnit událost'):(LANG==='en'?'Send for approval':'Odeslat ke schválení')}</button>`;
+    <button id="evSave" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${window._evEditing?(LANG==='en'?'Save changes':'Uložit změny'):(isOwner?(LANG==='en'?'Publish event':'Zveřejnit událost'):(LANG==='en'?'Send for approval':'Odeslat ke schválení'))}</button>`;
   $('evPosterBtn').onclick=()=>$('evPosterInput').click();
   $('evPosterInput').onchange=async(e)=>{ const file=e.target.files&&e.target.files[0]; if(!file) return; const blob=await cropImage(file, 4/3); e.target.value=''; if(!blob) return; toast(L('⬆️ Nahrávám...')); try{ const fileName=`${currentUser.id}-event-${Date.now()}.jpg`; const { error }=await supaClient.storage.from('gym-photos').upload(fileName, blob, { contentType:'image/jpeg', upsert:false }); if(error){ toast('⚠️ '+error.message); return; } const { data }=supaClient.storage.from('gym-photos').getPublicUrl(fileName); window._evPoster=data.publicUrl; const pv=$('evPosterPv'); if(pv){ pv.style.backgroundImage=`url('${data.publicUrl}')`; pv.style.display='block'; } toast(LANG==='en'?'✅ Poster added':'✅ Poster nahrán'); }catch(err){ toast('⚠️'); } };
   $('evSeek').onchange=()=>{ $('evFighterInfo').style.display=$('evSeek').checked?'block':'none'; };
@@ -4513,6 +4564,15 @@ async function openEventCreate(gym){
   $('evAddTier').onclick=()=>{ window._evTiers.push({name:'',price:''}); renderEvTiers(); };
   $('evCur').onchange=()=>{ window._evCur=$('evCur').value; renderEvTiers(); };
   $('evSave').onclick=saveEvent;
+  { const _ti=document.querySelector('#shEventCreate .shdr-title'); if(_ti) _ti.textContent = ev?(LANG==='en'?'Edit event':'Upravit událost'):(LANG==='en'?'New event':'Nová událost'); }
+  if(ev){
+    $('evType').value=ev.type||'other'; $('evTitle').value=ev.title||''; $('evDesc').value=ev.description||''; $('evVenue').value=ev.venue||'';
+    if($('evStart')) $('evStart').value=toLocalInput(ev.starts_at); if($('evEnd')) $('evEnd').value=toLocalInput(ev.ends_at);
+    $('evCap').value=ev.capacity||''; if($('evPayee')) $('evPayee').value=ev.payout_coach_id||'gym'; if($('evCur')) $('evCur').value=window._evCur;
+    $('evSeek').checked=!!ev.seeking_fighters; if(ev.seeking_fighters) $('evFighterInfo').style.display='block'; $('evFighterInfo').value=ev.fighter_info||'';
+    if(ev.poster){ const pv=$('evPosterPv'); if(pv){ pv.style.backgroundImage=`url('${ev.poster}')`; pv.style.display='block'; } }
+    document.querySelectorAll('.evDiscChip').forEach(c=>{ if((window._evDisc||[]).includes(c.dataset.v)){ c.style.background='var(--red)'; c.style.borderColor='var(--red)'; c.style.color='#fff'; } });
+  }
   openSheet('shEventCreate');
 }
 function renderEvTiers(){
@@ -4561,6 +4621,12 @@ async function saveEvent(){
   const isOwner = g.owner_id===currentUser.id;
   const row={ gym_id:g.id, created_by:currentUser.id, status: isOwner?'approved':'pending', type:$('evType').value||'other', title, description:($('evDesc').value||'').trim()||null, poster: window._evPoster||null, disciplines: JSON.stringify(window._evDisc||[]), city: g.city||null, country: g.country||null, venue:($('evVenue').value||'').trim()||null, city_lat: g.city_lat||null, city_lng: g.city_lng||null, starts_at: new Date($('evStart').value).toISOString(), ends_at: $('evEnd').value ? new Date($('evEnd').value).toISOString() : null, capacity: parseInt($('evCap').value)||null, ticket_price: priceMin, ticket_tiers: JSON.stringify(tiers), payout_coach_id, currency: cur, seeking_fighters: !!$('evSeek').checked, fighter_info: ($('evFighterInfo').value||'').trim()||null };
   const sv=$('evSave'); if(sv){ sv.disabled=true; sv.textContent='…'; }
+  if(window._evEditing){
+    const upd={ type:row.type, title:row.title, description:row.description, poster:row.poster, disciplines:row.disciplines, venue:row.venue, starts_at:row.starts_at, ends_at:row.ends_at, capacity:row.capacity, ticket_price:row.ticket_price, ticket_tiers:row.ticket_tiers, payout_coach_id:row.payout_coach_id, currency:row.currency, seeking_fighters:row.seeking_fighters, fighter_info:row.fighter_info };
+    const { error:e2 } = await supaClient.from('events').update(upd).eq('id', window._evEditing.id);
+    if(e2){ toast('⚠️ '+e2.message); if(sv){ sv.disabled=false; } return; }
+    toast(LANG==='en'?'✅ Saved':'✅ Uloženo'); closeSheet('shEventCreate'); renderEvents(); return;
+  }
   const { error } = await supaClient.from('events').insert(row);
   if(error){ toast('⚠️ '+error.message); if(sv){ sv.disabled=false; } return; }
   if(!isOwner && g.owner_id){ try{ await supaClient.from('notifications').insert({ user_id:g.owner_id, type:'system', read:false, data: JSON.stringify({ kind:'event_proposal', gym_id:g.id, title }), message:'🥊 '+(currentUser.name||'Kouč')+(LANG==='en'?' proposed an event — review it.':' navrhl událost — schval ji.') }); }catch(e){} }
