@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-HL | Fixes + ledger MTL-fee. (A) BUG: founder-admin btnAllCoaches/btnAllGyms showed the literal ${LANG...} because they were static HTML, not a JS template literal — replaced with plain CS labels (Vsichni kouci / Vsechny gymy) + EN MAP entries. (D) Pushed the Zadosti o MTL Certified sections down (margin-top:30px) so they are not glued to the Ambassador prihlasky button. (B) LEDGER: _txEff now returns eM; gym Dashboard drop-in breakdown shows a new - MTL fee (MTL poplatek, dropMtlL) row ABOVE - Stripe fee, then = Net (Gross -> -MTL -> -Stripe -> Net, all exact from ledger). (C) LOGOUT: meLogout + setLogout no longer log out instantly; they open a styled confirm overlay logoutConfirm (Skutecne odhlasit?) with Zrusit (closes, back to Settings) and Potvrdit (doLogout: signOut+reload). Saved levels/gamification idea to memory. Index only. -->
+<!-- MTL build: 2026-06-07-HN | Logout bug + events spacing + per-coach widget. (1) doLogout is now async and AWAITS supaClient.auth.signOut() before location.reload() — previously it reloaded before signOut finished, so the still-valid session re-logged the user in instantly. (2) Events deck: evDeck margin-top 2px->0 so the chips->card gap (10px) matches the Gyms deck exactly (.filters padding-bottom:10px). (3) PER-COACH WIDGET in gym Dashboard: under the month selector there is now a coach <select> (mgCoachSel) listing active team coaches from gym_coaches (names from profiles, EXCLUDING coaches who own their own gym via gyms.owner_id). Picking a coach + month renders mgCoachEarn = that coach lessons real ledger earnings for the gym (transactions filtered by coach_id + month, refund-adjusted): Gross -> -MTL -> -Stripe -> Net (earned you). Works with the month selector (both reload loadGymManageBookings). Degrades gracefully (shows none) if coach_id is not yet on the tx. Index only. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -3767,6 +3767,7 @@ function init(){
 // ════════════════════════════════════════
 let _deckMode='coaches';
 let _gymCancelling=[];
+var _gymCoachSel='';
 let _gymTagFilter=null;
 let GYMS=[];
 let _gymsLoaded=false;
@@ -4550,7 +4551,7 @@ async function renderEventsAsync(box){
       html += `<div style="display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;padding-bottom:2px;margin-bottom:10px;">`+_tch.map(c=>{ const on=(ft===c.v); return `<div class="evTypeChip pill${on?' active':''}" data-v="${c.v}">${c.emoji?c.emoji+' ':''}${c.lbl}</div>`; }).join('')+`</div>`;
       const _sq=((typeof searchQuery!=='undefined'?searchQuery:'')||'').toLowerCase(); const list=window._evList.filter(ev=>{ if(fd!=='all'){ let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){} if(!ds.includes(fd)) return false; } if(ft!=='all' && ev.type!==ft) return false; if(_sq){ const hay=((ev.title||'')+' '+(ev.venue||'')+' '+(ev.city||'')+' '+(ev.country||'')).toLowerCase(); if(!hay.includes(_sq)) return false; } return true; });
       window._evFiltered = list; if(window._evIdx==null) window._evIdx=0;
-      html += list.length ? `<div id="evDeck" style="position:relative;flex:1;min-height:280px;margin-top:2px;"></div>` : `<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;">${LANG==='en'?'No events in this discipline.':'Žádné události v této disciplíně.'}</p>`;
+      html += list.length ? `<div id="evDeck" style="position:relative;flex:1;min-height:280px;margin-top:0;"></div>` : `<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;">${LANG==='en'?'No events in this discipline.':'Žádné události v této disciplíně.'}</p>`;
     } else {
       html += `<div style="text-align:center;padding:40px 16px;color:var(--light);"><div style="font-size:40px;margin-bottom:10px;">🥊</div><div style="font-weight:700;color:var(--dark);margin-bottom:6px;">${LANG==='en'?'No events near you yet':'Zatím tu nejsou žádné události'}</div><div style="font-size:13px;line-height:1.5;">${LANG==='en'?'Fight nights, seminars and camps will show up here.':'Fight nights, semináře a kempy se objeví tady.'}</div></div>`;
     }
@@ -7107,6 +7108,7 @@ var _caDisc=[], _gymDisc=[], _deckDisc=null, _gymMgDisc=[];
 var ACTIVE_DISC=null;
 var _certifiableDisc=['muay_thai'];
 var _adminFilter='all';
+var _admCountry='',_admCity='',_admCert='all',_admGCountry='',_admGCity='',_admGCert='all';
 async function loadFounderConfig(){
   try{ const { data } = await supaClient.from('profiles').select('active_disciplines').eq('id', FOUNDER_UUID).single(); if(data && data.active_disciplines){ const a=typeof data.active_disciplines==='string'?JSON.parse(data.active_disciplines):data.active_disciplines; if(Array.isArray(a)&&a.length) ACTIVE_DISC=a; } }catch(e){}
   try{ const { data: vs } = await supaClient.from('profiles').select('verify_disciplines'); const set=new Set(['muay_thai']); (vs||[]).forEach(r=>{ try{ const a=r.verify_disciplines?(typeof r.verify_disciplines==='string'?JSON.parse(r.verify_disciplines):r.verify_disciplines):[]; (Array.isArray(a)?a:[]).forEach(x=>set.add(x)); }catch(e){} }); _certifiableDisc=[...set]; }catch(e){}
@@ -7659,6 +7661,17 @@ async function loadGymManageBookings(){
   const { data: mbs } = await supaClient.from('gym_memberships').select('*').eq('gym_id', _myGymData.id).in('status',['active','cancelling']).order('created_at',{ascending:false});
   const drops=bks||[], mems=mbs||[];
   let _gymTx=[]; try{ const { data: txd } = await supaClient.from('transactions').select('*').eq('gym_id', _myGymData.id); _gymTx=txd||[]; }catch(e){}
+  let _gymTeamCoaches=[];
+  try{
+    const { data: links } = await supaClient.from('gym_coaches').select('coach_id').eq('gym_id', _myGymData.id).eq('status','active');
+    const cids=[...new Set((links||[]).map(l=>l.coach_id).filter(Boolean))];
+    if(cids.length){
+      const { data: profs } = await supaClient.from('profiles').select('id,name').in('id', cids);
+      let ownerSet=new Set();
+      try{ const { data: owned } = await supaClient.from('gyms').select('owner_id').in('owner_id', cids); ownerSet=new Set((owned||[]).map(o=>o.owner_id)); }catch(e){}
+      _gymTeamCoaches=(profs||[]).filter(pr=>!ownerSet.has(pr.id)).map(pr=>({id:pr.id,name:pr.name||'Kouč'})).sort((a,b)=>a.name.localeCompare(b.name));
+    }
+  }catch(e){}
   const cur=_myGymData.currency||'CZK';
   const sym = cur==='EUR'?'€':cur==='USD'?'$':'Kč';
   const f=v=>`${fmtPrice(v,cur)} ${sym}`;
@@ -7693,7 +7706,16 @@ async function loadGymManageBookings(){
     const _txM=(_gymTx||[]).filter(inGM);
     const _txDrop=_txM.filter(r=>r.type==='drop_in').map(_txEff), _txMem=_txM.filter(r=>r.type==='membership').map(_txEff);
     const dropGymL=_txDrop.reduce((s,e)=>s+e.eG,0)/100, dropMtlL=_txDrop.reduce((s,e)=>s+e.eM,0)/100, dropFeeL=_txDrop.reduce((s,e)=>s+e.st,0)/100, dropNetL=_txDrop.reduce((s,e)=>s+e.eN,0)/100;
-    const memNetL=_txMem.reduce((s,e)=>s+e.eN,0)/100;
+    const memGrossL=_txMem.reduce((s,e)=>s+e.eG,0)/100, memMtlL=_txMem.reduce((s,e)=>s+e.eM,0)/100, memFeeL=_txMem.reduce((s,e)=>s+e.st,0)/100, memNetL=_txMem.reduce((s,e)=>s+e.eN,0)/100;
+    // ── per-coach earnings (gym owner view, real ledger by coach_id) ──
+    let _coachEarnHtml='';
+    if(_gymCoachSel){
+      const _cName=((_gymTeamCoaches||[]).find(c=>c.id===_gymCoachSel)||{}).name||'Kouč';
+      const _cTx=_txM.filter(r=>r.coach_id===_gymCoachSel).map(_txEff);
+      if(!_cTx.length){ _coachEarnHtml='<p style="font-size:12px;color:var(--light);padding:6px 0 2px;">'+(LANG==='en'?'No paid lessons from this coach this month.':'Žádné zaplacené lekce od tohoto kouče v tomto měsíci.')+'</p>'; }
+      else { const cg=_cTx.reduce((s,e)=>s+e.eG,0)/100, cm=_cTx.reduce((s,e)=>s+e.eM,0)/100, cs=_cTx.reduce((s,e)=>s+e.st,0)/100, cn=_cTx.reduce((s,e)=>s+e.eN,0)/100;
+        _coachEarnHtml='<div style="background:#F5F3FF;border:1px solid #E5DEFF;border-radius:12px;padding:12px 14px;"><div style="font-weight:800;font-size:13px;margin-bottom:8px;">👤 '+escapeHtml(_cName)+' · '+_cTx.length+'× '+(LANG==='en'?'paid':'placeno')+'</div>'+'<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;"><span>'+(LANG==='en'?'Gross':'Hrubě')+'</span><b>'+f(cg)+'</b></div>'+'<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;color:var(--mid);"><span>− MTL '+(LANG==='en'?'fee':'poplatek')+'</span><span>-'+f(cm)+'</span></div>'+'<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;color:var(--mid);"><span>− Stripe fee</span><span>-'+f(cs)+'</span></div>'+'<div style="display:flex;justify-content:space-between;font-size:14px;font-weight:800;color:#006040;border-top:1px solid #E5DEFF;padding-top:6px;margin-top:4px;"><span>'+(LANG==='en'?'Net (earned you)':'Net (vydělal ti)')+'</span><span>'+f(cn)+'</span></div></div>'; }
+    }
     const payingNow = memsM; // pořád platí (vč. rušících do konce období)
     const newThis = mems.filter(inGM);
     const cancelThis = mems.filter(cancelledInGM);
@@ -7731,12 +7753,12 @@ async function loadGymManageBookings(){
       }
     }
     stats.innerHTML=`
-      <select id="mgMonthSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:14px;">${monthOpts}</select>
+      <select id="mgMonthSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:10px;">${monthOpts}</select>
+      ${(_gymTeamCoaches&&_gymTeamCoaches.length)?`<select id="mgCoachSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:&quot;DM Sans&quot;;background:#fff;margin-bottom:10px;"><option value="">${LANG==='en'?'— Earnings per coach —':'— Výdělek podle kouče —'}</option>${_gymTeamCoaches.map(c=>`<option value="${c.id}"${_gymCoachSel===c.id?' selected':''}>${escapeHtml(c.name)}</option>`).join('')}</select><div id="mgCoachEarn" style="margin-bottom:14px;">${_coachEarnHtml}</div>`:''}
 
       <p style="font-size:11px;color:#0A7A4F;background:#F0FBF0;border-radius:8px;padding:8px 10px;margin-bottom:10px;">💳 ${LANG==='en'?'Earnings = real Stripe payments (exact, after refunds).':'Výdělky = reálné platby ze Stripe (přesné, po refundech).'}</p>
       <div class="dashSecHdr" style="font-size:14px;font-weight:800;color:var(--dark);margin:10px 0 8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">🥊 ${LANG==='en'?'Single classes':'Jednorázové lekce'} <span style="color:var(--light);font-weight:600;font-size:12px;">· ${monthLabel}</span><span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;">▾</span></div>
       <div class="prow-group" style="margin-bottom:12px;">
-        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🥊</div><div class="prow-lbl">${LANG==='en'?'Sold':'Prodáno'}</div></div><span class="prow-val">${dropsM.length}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏋️</div><div class="prow-lbl">${LANG==='en'?'Gross profit':'Hrubý zisk'}</div></div><span class="prow-val">${f(dropGymL)}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">🏛️</div><div class="prow-lbl">${LANG==='en'?'− MTL fee':'− MTL poplatek'}</div></div><span class="prow-val">-${f(dropMtlL)}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF0E6;">💳</div><div class="prow-lbl">${LANG==='en'?'− Stripe fee':'− Stripe fee'}</div></div><span class="prow-val">-${f(dropFeeL)}</span></div>
@@ -7748,7 +7770,10 @@ async function loadGymManageBookings(){
         ${isMonth?`
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">👥</div><div class="prow-lbl">${LANG==='en'?'Base MRR (continuing)':'Base MRR (pokračující)'}</div></div><span class="prow-val">${f(baseMRR)}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:${newMRRnet>=0?'#F0FBF0':'#FEECEC'};">${newMRRnet>=0?'📈':'📉'}</div><div class="prow-lbl">${LANG==='en'?'Net new MRR this month':'Nové MRR tento měsíc'}</div></div><span class="prow-val" style="color:${newMRRnet>=0?'#006040':'var(--red)'};">${newMRRnet>=0?'+':'-'}${f(Math.abs(newMRRnet))}</span></div>`:''}
-        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💎</div><div class="prow-lbl">${LANG==='en'?'= Collected this month':'= Vybráno tento měsíc'}</div></div><span class="prow-val" style="color:#006040;">${f(memNetL)}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏋️</div><div class="prow-lbl">${LANG==='en'?'Gross collected':'Hrubě vybráno'}</div></div><span class="prow-val">${f(memGrossL)}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">🏛️</div><div class="prow-lbl">${LANG==='en'?'− MTL fee':'− MTL poplatek'}</div></div><span class="prow-val">-${f(memMtlL)}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF0E6;">💳</div><div class="prow-lbl">${LANG==='en'?'− Stripe fee':'− Stripe fee'}</div></div><span class="prow-val">-${f(memFeeL)}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💎</div><div class="prow-lbl">${LANG==='en'?'= Net (collected this month)':'= Net (vybráno tento měsíc)'}</div></div><span class="prow-val" style="color:#006040;">${f(memNetL)}</span></div>
       </div>
 
       <div class="dashSecHdr" style="font-size:14px;font-weight:800;color:var(--dark);margin:10px 0 8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">🎟️ ${LANG==='en'?'Membership':'Členství'}<span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;">▾</span></div>
@@ -7784,6 +7809,7 @@ async function loadGymManageBookings(){
 
     `;
     const msel=$('mgMonthSel'); if(msel) msel.onchange=()=>{ _gymMonth=msel.value; loadGymManageBookings(); };
+    const csel=$('mgCoachSel'); if(csel) csel.onchange=()=>{ _gymCoachSel=csel.value; loadGymManageBookings(); };
     stats.querySelectorAll('.dashSecHdr').forEach((h,i)=>{ const g=h.nextElementSibling; const arr=h.querySelector('.dashAccArr'); if(g){ g.style.display='none'; if(arr) arr.style.transform='rotate(-90deg)'; } h.onclick=()=>{ if(!g) return; const closed=g.style.display==='none'; g.style.display=closed?'':'none'; if(arr) arr.style.transform=closed?'':'rotate(-90deg)'; }; });
   }
   // ── POSLEDNÍ REZERVACE (seznam) ──
@@ -8778,7 +8804,7 @@ if($('btnCloseMemberships')) $('btnCloseMemberships').onclick=()=>closeSheet('sh
 if($('btnCopyRef')) $('btnCopyRef').onclick=()=>{ const t=$('refLink').textContent; if(t&&t!=='—'){ try{ navigator.clipboard.writeText(t); }catch(e){} toast(L('✅ Odkaz zkopírován')); } };
 if($('btnShareRef')) $('btnShareRef').onclick=async()=>{ const t=$('refLink').textContent; if(!t||t==='—') return; const msg = LANG==='en' ? 'Join me on MTL Coaches — find your coach! 🎁 You get 10% off your next session. ' : 'Přidej se ke mně na MTL Coaches — najdi si kouče! 🎁 Máš slevu 10 % na svůj příští trénink. '; if(navigator.share){ try{ await navigator.share({ title:'Muay Thai Lab', text:msg, url:t }); }catch(e){} } else { try{ navigator.clipboard.writeText(t); }catch(e){} toast(L('✅ Odkaz zkopírován')); } };
 if($('refInfoToggle')) $('refInfoToggle').onclick=()=>{ const d=$('refInfoDetail'), t=$('refInfoToggle'); if(!d) return; const open=d.style.display!=='none'; if(open){ d.style.display='none'; t.textContent=LANG==='en'?'ⓘ How it works':'ⓘ Jak to přesně funguje'; } else { d.innerHTML = LANG==='en' ? '<b>1.</b> Share your link with a coach.<br><b>2.</b> They sign up with it and get approved.<br><b>3.</b> Once they complete <b>3 paid lessons</b> (genuinely active), you earn <b>1 free month of Exclusive Partner (99%)</b>.<br><b>4.</b> Reach <b>10 active referred coaches</b> → Exclusive Partner (99%) <b>permanently</b>.<br>We notify you at every step.' : '<b>1.</b> Pošli svůj odkaz kouči.<br><b>2.</b> Zaregistruje se přes něj a je schválen.<br><b>3.</b> Jakmile odučí <b>3 zaplacené lekce</b> (reálně aktivní), získáš <b>měsíc Exclusive Partnera (99 %) zdarma</b>.<br><b>4.</b> Při <b>10 aktivních přivedených koučích</b> → Exclusive Partner (99 %) <b>natrvalo</b>.<br>O každém kroku ti přijde notifikace.'; d.style.display='block'; t.textContent=LANG==='en'?'ⓘ Hide':'ⓘ Skrýt'; } };
-function doLogout(){ try{ supaClient.auth.signOut(); }catch(e){} currentUser=null; document.body.classList.remove('coach-mode'); location.reload(); }
+async function doLogout(){ try{ await supaClient.auth.signOut(); }catch(e){} currentUser=null; document.body.classList.remove('coach-mode'); location.reload(); }
 function showLogoutConfirm(){ const o=$('logoutConfirm'); if(o) o.style.display='flex'; }
 if($('logoutCancel')) $('logoutCancel').onclick=()=>{ const o=$('logoutConfirm'); if(o) o.style.display='none'; };
 if($('logoutConfirmBtn')) $('logoutConfirmBtn').onclick=doLogout;
@@ -9348,7 +9374,7 @@ async function loadAdminCoachList(){
   const list=$('adminCoachList');
   if(!list) return;
   list.innerHTML=`<p style="color:var(--light);font-size:13px;">${L('Načítám...')}</p>`;
-  const { data } = await supaClient.from('profiles').select('id, name, photo_url, rating, reviews, city, country, country_code, city_lat, city_lng, coach_status, suspend_reason, avail_status, verify_disciplines').in('coach_status',['approved','suspended']);
+  const { data } = await supaClient.from('profiles').select('id, name, photo_url, rating, reviews, city, country, country_code, city_lat, city_lng, coach_status, suspend_reason, avail_status, verify_disciplines, cert_level').in('coach_status',['approved','suspended']);
   const coaches = data||[];
   // Lazy backfill země u koučů, co ji nemají (z uložených souřadnic) — doběhne jednou
   const missing = coaches.filter(c=> (!c.country || !c.country_code) && c.city_lat && c.city_lng);
@@ -9373,6 +9399,12 @@ async function loadAdminCoachList(){
   let approved = coaches.filter(c=>c.coach_status==='approved');
   if(_adminFilter==='amb') approved = approved.filter(isAmb);
   else if(_adminFilter==='ep') approved = approved.filter(isEP);
+  const _allAppr=coaches.filter(c=>c.coach_status==='approved');
+  const _ctrys=[...new Set(_allAppr.map(c=>c.country).filter(Boolean))].sort();
+  const _cits=[...new Set(_allAppr.filter(c=>!_admCountry||c.country===_admCountry).map(c=>c.city).filter(Boolean))].sort();
+  if(_admCountry) approved=approved.filter(c=>(c.country||'')===_admCountry);
+  if(_admCity) approved=approved.filter(c=>(c.city||'')===_admCity);
+  if(_admCert==='certified') approved=approved.filter(c=>c.cert_level==='certified'); else if(_admCert==='verified') approved=approved.filter(c=>c.cert_level!=='certified');
   const suspended = _adminFilter==='all' ? coaches.filter(c=>c.coach_status==='suspended') : [];
   list.innerHTML='';
   {
@@ -9384,6 +9416,13 @@ async function loadAdminCoachList(){
     if($('ffAll')) $('ffAll').onclick=()=>{ _adminFilter='all'; loadAdminCoachList(); };
     if($('ffAmb')) $('ffAmb').onclick=()=>{ _adminFilter='amb'; loadAdminCoachList(); };
     if($('ffEP')) $('ffEP').onclick=()=>{ _adminFilter='ep'; loadAdminCoachList(); };
+    const fb2=document.createElement('div'); fb2.style.cssText='display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center;';
+    fb2.innerHTML='<select id="ffCountry" style="padding:7px 10px;border:1px solid var(--border);border-radius:10px;font-size:12px;font-family:&quot;DM Sans&quot;;background:var(--surf);color:var(--dark);max-width:46%;"><option value="">'+(LANG==='en'?'All countries':'Všechny země')+'</option>'+_ctrys.map(x=>'<option value="'+escapeHtml(x)+'"'+(_admCountry===x?' selected':'')+'>'+escapeHtml(x)+'</option>').join('')+'</select>'+'<select id="ffCity" style="padding:7px 10px;border:1px solid var(--border);border-radius:10px;font-size:12px;font-family:&quot;DM Sans&quot;;background:var(--surf);color:var(--dark);max-width:46%;"><option value="">'+(LANG==='en'?'All cities':'Všechna města')+'</option>'+_cits.map(x=>'<option value="'+escapeHtml(x)+'"'+(_admCity===x?' selected':'')+'>'+escapeHtml(x)+'</option>').join('')+'</select>'+'<span id="ffVer" class="pill '+(_admCert==='verified'?'active':'')+'" style="cursor:pointer;font-weight:700;">☑️ Verified</span>'+'<span id="ffCert" class="pill '+(_admCert==='certified'?'active':'')+'" style="cursor:pointer;font-weight:700;">✅ Certified</span>';
+    list.appendChild(fb2);
+    if($('ffCountry')) $('ffCountry').onchange=()=>{ _admCountry=$('ffCountry').value; _admCity=''; loadAdminCoachList(); };
+    if($('ffCity')) $('ffCity').onchange=()=>{ _admCity=$('ffCity').value; loadAdminCoachList(); };
+    if($('ffVer')) $('ffVer').onclick=()=>{ _admCert=_admCert==='verified'?'all':'verified'; loadAdminCoachList(); };
+    if($('ffCert')) $('ffCert').onclick=()=>{ _admCert=_admCert==='certified'?'all':'certified'; loadAdminCoachList(); };
   }
   if(!approved.length && !suspended.length){ const e=document.createElement('p'); e.style.cssText='color:var(--light);font-size:13px;'; e.textContent=L(_adminFilter==='ep'?'Zatím žádní Exclusive partneři.':_adminFilter==='amb'?'Zatím žádní ambassadoři.':'Zatím žádní kouči.'); list.appendChild(e); return; }
   approved.forEach(c=>{
@@ -9496,11 +9535,25 @@ async function loadAdminGymList(){
   const list=$('adminGymDashList');
   if(!list) return;
   list.innerHTML=`<p style="color:var(--light);font-size:13px;">${L('Načítám...')}</p>`;
-  const { data } = await supaClient.from('gyms').select('id, name, city, country, photos, status, dropin_price, membership_price, currency').eq('status','approved').order('created_at',{ascending:false});
+  const { data } = await supaClient.from('gyms').select('id, name, city, country, photos, status, dropin_price, membership_price, currency, cert_level').eq('status','approved').order('created_at',{ascending:false});
   const gyms=data||[];
   if(!gyms.length){ list.innerHTML=`<p style="color:var(--light);font-size:13px;">${LANG==='en'?'No gyms yet.':'Zatím žádné gymy.'}</p>`; return; }
+  const _gctry=[...new Set(gyms.map(x=>x.country).filter(Boolean))].sort();
+  const _gcit=[...new Set(gyms.filter(x=>!_admGCountry||x.country===_admGCountry).map(x=>x.city).filter(Boolean))].sort();
+  let gymsF=gyms.slice();
+  if(_admGCountry) gymsF=gymsF.filter(x=>(x.country||'')===_admGCountry);
+  if(_admGCity) gymsF=gymsF.filter(x=>(x.city||'')===_admGCity);
+  if(_admGCert==='certified') gymsF=gymsF.filter(x=>x.cert_level==='certified'); else if(_admGCert==='verified') gymsF=gymsF.filter(x=>x.cert_level!=='certified');
   list.innerHTML='';
-  gyms.forEach(g=>{
+  const gfb=document.createElement('div'); gfb.style.cssText='display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;align-items:center;';
+  gfb.innerHTML='<select id="gfCountry" style="padding:7px 10px;border:1px solid var(--border);border-radius:10px;font-size:12px;font-family:&quot;DM Sans&quot;;background:var(--surf);color:var(--dark);max-width:46%;"><option value="">'+(LANG==='en'?'All countries':'Všechny země')+'</option>'+_gctry.map(x=>'<option value="'+escapeHtml(x)+'"'+(_admGCountry===x?' selected':'')+'>'+escapeHtml(x)+'</option>').join('')+'</select>'+'<select id="gfCity" style="padding:7px 10px;border:1px solid var(--border);border-radius:10px;font-size:12px;font-family:&quot;DM Sans&quot;;background:var(--surf);color:var(--dark);max-width:46%;"><option value="">'+(LANG==='en'?'All cities':'Všechna města')+'</option>'+_gcit.map(x=>'<option value="'+escapeHtml(x)+'"'+(_admGCity===x?' selected':'')+'>'+escapeHtml(x)+'</option>').join('')+'</select>'+'<span id="gfVer" class="pill '+(_admGCert==='verified'?'active':'')+'" style="cursor:pointer;font-weight:700;">☑️ Verified</span>'+'<span id="gfCert" class="pill '+(_admGCert==='certified'?'active':'')+'" style="cursor:pointer;font-weight:700;">✅ Certified</span>';
+  list.appendChild(gfb);
+  if($('gfCountry')) $('gfCountry').onchange=()=>{ _admGCountry=$('gfCountry').value; _admGCity=''; loadAdminGymList(); };
+  if($('gfCity')) $('gfCity').onchange=()=>{ _admGCity=$('gfCity').value; loadAdminGymList(); };
+  if($('gfVer')) $('gfVer').onclick=()=>{ _admGCert=_admGCert==='verified'?'all':'verified'; loadAdminGymList(); };
+  if($('gfCert')) $('gfCert').onclick=()=>{ _admGCert=_admGCert==='certified'?'all':'certified'; loadAdminGymList(); };
+  if(!gymsF.length){ const e=document.createElement('p'); e.style.cssText='color:var(--light);font-size:13px;'; e.textContent=(LANG==='en'?'No gyms match.':'Žádné gymy neodpovídají.'); list.appendChild(e); return; }
+  gymsF.forEach(g=>{
     const photo=gymFirstPhoto(g.photos);
     const el=document.createElement('div');
     el.style.cssText='display:flex;align-items:center;gap:12px;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;cursor:pointer;';
