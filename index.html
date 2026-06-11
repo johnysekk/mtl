@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-IP | B: team coach can now view the FULL gym schedule read-only. shCoachSched gets Moje lekce / Cely rozvrh toggle (_csView,_csFullSched). Full=all classes grouped by day (time-end range, level, coach), own highlighted with you marker, add/save hidden. Mine=existing editable. Attendance stays own-only via reminder/roster. Builds on A. Index only. -->
+<!-- MTL build: 2026-06-07-IQ | C: group classes a coach teaches now propagate into the coach Diary (shDiary) read-only. loadDiaryData loads diaryClasses from the coach active team gyms schedules (coach===me). Calendar cells get a blue dot on class days; day detail lists each class read-only (time-end range, gym, level, you-teach). Plus: event DETAIL now shows Address on its own line right after Venue. Builds on A (_classEnd). Index only. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4970,7 +4970,7 @@ async function openEventView(ev){
     <div style="padding:16px 20px;">
       <div style="font-weight:800;font-size:20px;margin-bottom:8px;">${escapeHtml(ev.title||'')}</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">${discRow}</div>
-      <div style="font-size:14px;color:var(--dark);line-height:1.7;margin-bottom:10px;">📅 ${dt}${endt}<br>📍 ${escapeHtml(loc||'')}${ev.capacity?`<br>👥 ${LANG==='en'?'Capacity':'Kapacita'}: ${ev.capacity}`:''}</div>
+      <div style="font-size:14px;color:var(--dark);line-height:1.7;margin-bottom:10px;">📅 ${dt}${endt}<br>📍 ${escapeHtml(loc||'')}${ev.address?`<br>🗺️ ${escapeHtml(ev.address)}`:''}${ev.capacity?`<br>👥 ${LANG==='en'?'Capacity':'Kapacita'}: ${ev.capacity}`:''}</div>
       <div style="margin-bottom:14px;">${tiersHtml}</div>
       ${ev.description?`<p style="font-size:14px;line-height:1.6;color:var(--mid);white-space:pre-wrap;margin-bottom:16px;">${escapeHtml(ev.description)}</p>`:''}
       ${ myTk ? `<div style="background:#F0FBF0;border:1px solid #A8E6C0;border-radius:12px;padding:14px;text-align:center;margin-bottom:${ev.seeking_fighters?'8px':'0'};"><div style="font-weight:800;color:#006040;font-size:15px;">✅ ${myTk.amount>0?(LANG==='en'?'You already have a ticket':'Už máš lístek'):(LANG==='en'?'You are on the list':'Jsi na seznamu')}</div>${myTk.amount>0?`<div style="font-size:12px;color:var(--mid);margin-top:3px;">${myTk.amount} ${sym}${myTk.status==='pending'?' · '+(LANG==='en'?'payment pending':'platba čeká'):''}</div>`:''}</div>` : (isPast ? `<div style="text-align:center;color:var(--light);font-size:13px;padding:10px;">${LANG==='en'?'This event has ended':'Akce už proběhla'}</div>` : `<button id="evBuyBtn" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:${ev.seeking_fighters?'8px':'0'};">🎟️ ${(tiers.some(x=>x.price>0))?(LANG==='en'?'Get ticket':'Koupit lístek'):(LANG==='en'?'RSVP':'Přihlásit se')}</button>`) }
@@ -10899,7 +10899,7 @@ let realtimeChannel=null;
 }
 
   let diaryYear, diaryMonth;
-let diarySlots = [], diaryBookings = [];
+let diarySlots = [], diaryBookings = [], diaryClasses = [];
 const MONTH_NAMES = ['Leden','Únor','Březen','Duben','Květen','Červen','Červenec','Srpen','Září','Říjen','Listopad','Prosinec'];
 const MONTH_NAMES_EN = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 function monthName(i){ return (LANG==='en'?MONTH_NAMES_EN:MONTH_NAMES)[i]; }
@@ -10925,6 +10925,16 @@ async function loadDiaryData(){
   const { data: books } = await supaClient.from('bookings').select('*').eq('coach_id', currentUser.id).eq('status','active');
   diarySlots = slots || [];
   diaryBookings = books || [];
+  // skupinovky, ktere kouc vede (read-only z gym rozvrhu)
+  diaryClasses = [];
+  try{
+    const { data:links } = await supaClient.from('gym_coaches').select('gym_id').eq('coach_id', currentUser.id).eq('status','active');
+    const gids=[...new Set((links||[]).map(l=>l.gym_id).filter(Boolean))];
+    if(gids.length){
+      const { data:gs } = await supaClient.from('gyms').select('id,name,schedule').in('id', gids);
+      (gs||[]).forEach(g=>{ let sc=[]; try{ sc=(typeof g.schedule==='string')?JSON.parse(g.schedule||'[]'):(g.schedule||[]); }catch(e){ sc=[]; } (sc||[]).filter(c=>c.coach===currentUser.id).forEach(c=>{ diaryClasses.push({ gymId:g.id, gymName:g.name||'', day:Number(c.day)||0, time:c.time||'18:00', dur:Number(c.dur)||60, name:c.name||'', level:c.level||'all' }); }); });
+    }
+  }catch(e){ diaryClasses=[]; }
 }
 
 function goToDiaryDate(dateStr){
@@ -10994,6 +11004,8 @@ function renderDiary(){
     const dateStr = `${diaryYear}-${String(diaryMonth+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
     const hasBooking = diaryBookings.some(b=>b.training_date===dateStr && b.type!=='online');
     const hasFreeSlot = diarySlots.some(s=>s.date===dateStr && !s.booked);
+    const _cdow = new Date(diaryYear,diaryMonth,day).getDay();
+    const hasClass = diaryClasses.some(c=>Number(c.day)===_cdow);
     const isToday = dateStr===todayStr;
 
     const cell = document.createElement('div');
@@ -11001,6 +11013,7 @@ function renderDiary(){
     let dots = '';
     if(hasBooking) dots += '<span style="width:6px;height:6px;border-radius:50%;background:var(--red);display:inline-block;"></span>';
     if(hasFreeSlot) dots += '<span style="width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;margin-left:2px;"></span>';
+    if(hasClass) dots += '<span style="width:6px;height:6px;border-radius:50%;background:#1E6FD9;display:inline-block;margin-left:2px;"></span>';
     cell.innerHTML = `<span>${day}</span><span style="display:flex;height:8px;margin-top:2px;">${dots}</span>`;
     cell.onclick = ()=>showDiaryDay(dateStr);
     grid.appendChild(cell);
@@ -11013,13 +11026,19 @@ function showDiaryDay(dateStr){
   const [y,m,d] = dateStr.split('-');
   const dayBookings = diaryBookings.filter(b=>b.training_date===dateStr && b.type!=='online' && (!window._diaryFilterDisc || b.discipline===window._diaryFilterDisc)).sort((a,b)=>(a.training_time||'').localeCompare(b.training_time||''));
   const dayFreeSlots = diarySlots.filter(s=>s.date===dateStr && !s.booked && (!window._diaryFilterDisc || s.discipline===window._diaryFilterDisc)).sort((a,b)=>a.time.localeCompare(b.time));
+  const _ddow = new Date(+y,+m-1,+d).getDay();
+  const dayClasses = diaryClasses.filter(c=>Number(c.day)===_ddow).sort((a,b)=>String(a.time||'').localeCompare(String(b.time||'')));
 
   let html = `<div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.04em;margin-bottom:12px;">${LANG==='en'?`${monthName(parseInt(m)-1)} ${parseInt(d)}`:`${parseInt(d)}. ${MONTH_NAMES[parseInt(m)-1]}`}</div>`;
 
-  if(!dayBookings.length && !dayFreeSlots.length){
+  if(!dayBookings.length && !dayFreeSlots.length && !dayClasses.length){
     html += `<p style="color:var(--light);font-size:14px;">${L('Žádné termíny ani rezervace.')}</p>`;
   }
 
+  dayClasses.forEach(c=>{
+    const _end=c.dur?('–'+_classEnd(c.time,c.dur)):'';
+    html += `<div style="background:#EEF4FF;border:1px solid #C5D9F5;border-radius:12px;padding:12px;margin-bottom:8px;"><div style="font-size:15px;font-weight:700;color:#1E5FB8;">🥊 ${c.time}${_end} · ${c.name?escapeHtml(c.name):(LANG==='en'?'Group class':'Skupinovka')}</div><div style="font-size:12px;color:var(--mid);margin-top:3px;">${escapeHtml(c.gymName||'')}${c.level&&c.level!=='all'?' · '+levelLabel(c.level):''} · ${LANG==='en'?'you teach (read-only)':'vedeš (jen čtení)'}</div></div>`;
+  });
   dayBookings.forEach(b=>{
     html += `
       <div style="background:#FFF0F0;border:1px solid #FFD0D0;border-radius:12px;padding:12px;margin-bottom:8px;">
