@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-IS | (1) Past-lock: in gym owner schedule editor, days before today are read-only (no edit fields, lock icon, no Add button) - attendance still openable. (2) Leader vs payee split: new leader/leaderName field set by a Kdo vede lekci selector (owner or team coach); coach stays the payee (Platba komu). Diary propagation, full-schedule view, occ builders, attendance and the owner card now use leader||coach (payee no longer affects the diary). Owner-as-leader shows by name in gym schedule + coach diary. (3) Diary blue card text -> vedes (lze upravovat v sekci Gymu). (4) Blue Skupinovka dot added to diary legend. Index only. -->
+<!-- MTL build: 2026-06-07-IT | Exclusive Partner CANCEL = grace flow. doEPCancel no longer flips partner=false instantly: it sets cancel_at_period_end via /api/cancel-membership (no new serverless), stores partner_cancelling + partner_period_end, keeps partner=true (99%) until period end. EP rates card shows a red CANCELLING banner with Active until date+time. The cancel link turns into Reactivate Subscription - Keep Benefits (doEPReactivate -> resume=1). Login guard flips partner off once past period_end (webhook also handles it). Needs DDL: profiles.partner_cancelling bool, profiles.partner_period_end timestamptz. Index only. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -6359,30 +6359,44 @@ async function doEPCancel(){
   if(!reason){ toast(LANG==='en'?'Please add a reason':'Uveď prosím důvod'); return; }
   const btn=$('epCancelConfirm'); if(btn){ btn.disabled=true; btn.textContent=(LANG==='en'?'Cancelling…':'Ruším…'); }
   try{
-    // subscription id vytáhni z DB (currentUser ho nemá načtený → dřív se cancel přeskakoval a Stripe sub zůstal aktivní)
     let subId=currentUser.partner_sub;
     if(!subId){ try{ const { data: pr } = await supaClient.from('profiles').select('partner_sub').eq('id', currentUser.id).single(); subId=pr&&pr.partner_sub; }catch(e){} }
-    let cancelOk=!subId; // žádná subscription = nic ke zrušení
-    if(subId){ try{ const r=await fetch(`/api/cancel-membership?subscriptionId=${encodeURIComponent(subId)}&immediate=1`); const j=await r.json(); cancelOk=!!(j&&j.ok); }catch(e){} }
-    if(!cancelOk){
-      // Stripe nepotvrdil (např. stará/neexistující test subscription) — neuvězni uživatele:
-      // sniž lokálně, partner_sub NECH (webhook/founder dořeší) a upozorni foundera na ruční zrušení.
-      try{ await supaClient.from('notifications').insert({ user_id:'7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type:'system', read:false, message:'⚠️ RUČNÍ zrušení Stripe nutné — Exclusive Partner sub '+(subId||'?')+' / user '+currentUser.id+' ('+(currentUser.name||'')+'). Důvod: '+reason }); }catch(e){}
-      toast(LANG==='en'?"⚠️ Stripe didn't confirm — flagged for manual cancellation. Your benefits are now off.":'⚠️ Stripe nepotvrdil — označeno k ručnímu zrušení. Výhody jsou teď vypnuté.');
+    let periodEndIso=null;
+    if(subId){ try{ const r=await fetch(`/api/cancel-membership?subscriptionId=${encodeURIComponent(subId)}`); const j=await r.json(); if(j&&j.ok&&j.current_period_end){ periodEndIso=new Date(j.current_period_end*1000).toISOString(); } }catch(e){} }
+    if(!periodEndIso){
+      periodEndIso=new Date(Date.now()+30*86400000).toISOString();
+      try{ await supaClient.from('notifications').insert({ user_id:'7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type:'system', read:false, message:'⚠️ RUČNÍ cancel_at_period_end nutný — Exclusive Partner sub '+(subId||'?')+' / user '+currentUser.id+' ('+(currentUser.name||'')+'). Důvod: '+reason }); }catch(e){}
     }
-    // partner=false hned kvůli UI; partner_sub NEMAZAT — webhook (customer.subscription.deleted) ho najde, přepočítá členství zpět na 5 % a vynuluje
-    try{ await supaClient.from('profiles').update({ partner:false }).eq('id', currentUser.id); }catch(e){}
-    currentUser.partner=false;
-    try{ await supaClient.from('notifications').insert({ user_id:currentUser.id, type:'system', read:false, data: JSON.stringify({kind:'partner_ended'}), message:(LANG==='en'?'⭐ Your Exclusive MTL Partner benefits were removed. Thank you for your trust and support!':'⭐ Výhody Exclusive MTL Partnera byly odebrány. Děkujeme za tvoji důvěru a podporu!') }); if(typeof updateNotifBadge==='function') updateNotifBadge(); }catch(e){}
+    try{ await supaClient.from('profiles').update({ partner_cancelling:true, partner_period_end:periodEndIso }).eq('id', currentUser.id); }catch(e){}
+    currentUser.partner_cancelling=true; currentUser.partner_period_end=periodEndIso;
     let cancId=null;
     try{ const { data: cc } = await supaClient.from('ep_cancellations').insert({ user_id:currentUser.id, user_name:currentUser.name||null, reason }).select('id').single(); cancId=cc&&cc.id; }catch(e){}
-    try{ if($('partnerBadge')) $('partnerBadge').style.display='none'; if($('btnCancelPartner')) $('btnCancelPartner').style.display='none'; if($('btnBecomePartner')) $('btnBecomePartner').style.display='block'; if(typeof fillRateEditor==='function') fillRateEditor(); if(typeof applyCertUI==='function') applyCertUI(); }catch(e){}
-    // notifikace koučovi o úspěšném zrušení posílá webhook (customer.subscription.deleted) — neduplikujeme
-    try{ await supaClient.from('notifications').insert({ user_id:'7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type:'system', read:false, data: JSON.stringify({ kind:'ep_cancelled', coach: currentUser.name||'Kouč' }), message:`⭐❌ ${currentUser.name||'Kouč'} zrušil Exclusive MTL Partnera.` }); }catch(e){}
+    try{ await supaClient.from('notifications').insert({ user_id:'7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type:'system', read:false, data: JSON.stringify({ kind:'ep_cancel_scheduled', coach: currentUser.name||'', period_end: periodEndIso }), message:'📉 '+(currentUser.name||'Kouč')+' naplánoval zrušení Exclusive Partnera (běží do konce období).' }); }catch(e){}
+    try{ if($('partnerBadge')&&typeof epRatesCardHTML==='function'){ $('partnerBadge').style.display='block'; $('partnerBadge').innerHTML=epRatesCardHTML(true,true); } if(typeof paintPartnerCancelBtn==='function') paintPartnerCancelBtn(); }catch(e){}
     try{ updateNotifBadge(); }catch(e){}
-    toast(LANG==='en'?'✅ Cancelled':'✅ Zrušeno');
+    toast(LANG==='en'?'✅ Will cancel at period end — benefits stay until then.':'✅ Zruší se na konci období — výhody platí do té doby.');
     showEPRateStep(cancId);
   }catch(e){ toast('⚠️ '+(e.message||'')); if(btn){ btn.disabled=false; btn.textContent=LANG==='en'?'Cancel Exclusive Partner benefits':'Zrušit výhody Exclusive Partnera'; } }
+}
+async function doEPReactivate(){
+  if(!currentUser) return;
+  if(!confirm(LANG==='en'?'Reactivate your Exclusive Partner subscription and keep your benefits?':'Obnovit předplatné Exclusive Partnera a zachovat výhody?')) return;
+  try{
+    let subId=currentUser.partner_sub;
+    if(!subId){ try{ const { data: pr } = await supaClient.from('profiles').select('partner_sub').eq('id', currentUser.id).single(); subId=pr&&pr.partner_sub; }catch(e){} }
+    if(subId){ try{ await fetch(`/api/cancel-membership?resume=1&subscriptionId=${encodeURIComponent(subId)}`); }catch(e){} }
+    try{ await supaClient.from('profiles').update({ partner_cancelling:false, partner_period_end:null }).eq('id', currentUser.id); }catch(e){}
+    currentUser.partner_cancelling=false; currentUser.partner_period_end=null;
+    try{ if($('partnerBadge')&&typeof epRatesCardHTML==='function'){ $('partnerBadge').style.display='block'; $('partnerBadge').innerHTML=epRatesCardHTML(true,true); } if(typeof paintPartnerCancelBtn==='function') paintPartnerCancelBtn(); }catch(e){}
+    try{ updateNotifBadge(); }catch(e){}
+    toast(LANG==='en'?'✅ Subscription reactivated — benefits kept.':'✅ Předplatné obnoveno — výhody zachovány.');
+  }catch(e){ toast('⚠️ '+(e.message||'')); }
+}
+function paintPartnerCancelBtn(){
+  const b=$('btnCancelPartner'); if(!b) return;
+  const can=!!(currentUser&&currentUser.partner_cancelling);
+  if(can){ b.textContent=(LANG==='en'?'Reactivate Subscription — Keep Benefits':'Obnovit předplatné — zachovat výhody'); b.style.color='#006040'; b.style.fontWeight='800'; b.style.textDecoration='none'; b.style.fontSize='13.5px'; }
+  else { b.textContent=(LANG==='en'?'Cancel Exclusive Partner benefits':'Zrušit výhody Exclusive Partnera'); b.style.color='var(--light)'; b.style.fontWeight='600'; b.style.textDecoration='underline'; b.style.fontSize='12.5px'; }
 }
 function showEPRateStep(cancId){
   const b=$('epCancelBody'); if(!b) return;
@@ -11202,10 +11216,13 @@ function epRatesCardHTML(showCoach, showGym){
   const EN=LANG==='en';
   const cell=(lbl,partner,normal)=>`<div style="flex:1;background:rgba(244,216,122,.08);border:1px solid rgba(232,194,74,.35);border-radius:10px;padding:8px 10px;min-width:0;"><div style="font-size:10px;color:#E8C24A;font-weight:700;margin-bottom:2px;">${lbl}</div><div style="font-size:14px;color:#fff;font-weight:800;line-height:1;">${partner}</div><div style="font-size:9.5px;color:rgba(255,255,255,.45);margin-top:2px;"><span style="text-decoration:line-through;">${normal}</span></div></div>`;
   const sub=(t)=>`<div style="font-size:10px;color:rgba(255,255,255,.55);font-weight:700;letter-spacing:.05em;margin-bottom:5px;">${t}</div>`;
+  const _epCanc=!!(currentUser&&currentUser.partner_cancelling&&currentUser.partner_period_end);
+  const _epEnd=_epCanc?new Date(currentUser.partner_period_end).toLocaleString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric',hour:'2-digit',minute:'2-digit'}):'';
+  const _epBanner=_epCanc?`<div style="background:rgba(229,0,29,.14);border:1px solid rgba(229,0,29,.5);border-radius:9px;padding:7px 10px;margin-bottom:10px;"><div style="font-size:10px;color:#ff9a9a;font-weight:800;letter-spacing:.05em;margin-bottom:2px;">${EN?'CANCELLING':'RUŠÍ SE'}</div><div style="font-size:12px;color:#ffd6d6;font-weight:700;">${EN?'Active until':'Aktivní do'}: ${_epEnd}</div></div>`:'';
   let inner=`<div style="display:flex;align-items:center;gap:7px;margin-bottom:10px;"><span style="font-size:17px;">⭐</span><div style="font-family:'Bebas Neue';font-size:18px;letter-spacing:.05em;color:#F4D87A;">EXCLUSIVE MTL PARTNER</div></div>`;
   if(showCoach){ inner+=sub(EN?'COACH RATES':'SAZBY KOUČE')+`<div style="display:flex;gap:7px;margin-bottom:${showGym?'11px':'0'};">`+cell(EN?'You keep':'Tvůj podíl','99 %','95 %')+cell(EN?'Student markup':'Student markup','+3 %','+5 %')+`</div>`; }
   if(showGym){ inner+=sub(EN?'GYM RATES':'SAZBY GYMU')+`<div style="display:flex;gap:7px;">`+cell(EN?'Memberships':'Členství','3 %','5 %')+cell(EN?'Drop-ins':'Jednorázové','1 % / 1 %','3 % / 3 %')+`</div>`; }
-  return `<div style="background:linear-gradient(135deg,#171717,#2c2c2c);border:1.5px solid #E8C24A;border-radius:14px;padding:13px 15px;box-shadow:0 6px 20px rgba(0,0,0,.18);">${inner}</div>`;
+  return `<div style="background:linear-gradient(135deg,#171717,#2c2c2c);border:1.5px solid #E8C24A;border-radius:14px;padding:13px 15px;box-shadow:0 6px 20px rgba(0,0,0,.18);">${_epBanner}${inner}</div>`;
 }
 function openPartnerInfo(){
   const EN=LANG==='en';
@@ -12313,7 +12330,7 @@ if($('btnSubmitAddDisc')) $('btnSubmitAddDisc').onclick=submitAddDisc;
   $('btnOpenDiary').onclick = openDiary;
   $('btnPreviewProfile').onclick = ()=>{ closeSheet('shMe'); openProfileById(currentUser.id); };
   if($('btnBecomePartner')) $('btnBecomePartner').onclick = openPartnerInfo;
-  if($('btnCancelPartner')) $('btnCancelPartner').onclick = openEPCancel;
+  if($('btnCancelPartner')) $('btnCancelPartner').onclick = ()=>{ if(currentUser&&currentUser.partner_cancelling){ doEPReactivate(); } else { openEPCancel(); } };
   if($('btnCloseEPCancel')) $('btnCloseEPCancel').onclick = ()=>closeSheet('shEPCancel');
   if($('btnCloseEPFeedback')) $('btnCloseEPFeedback').onclick = ()=>closeSheet('shEPFeedback');
   if($('btnCloseAmbApps')) $('btnCloseAmbApps').onclick = ()=>closeSheet('shAmbApps');
@@ -12989,9 +13006,10 @@ function applyCertUI(){
   const cs = currentUser && currentUser.coach_status;
   const hideMedal = ['approved','suspended','banned'].includes(cs);
   const bc=$('btnCoach'); if(bc) bc.style.display = hideMedal ? 'none' : 'flex';
-  if($('btnCoachSettings')) $('btnCoachSettings').innerHTML = (LANG==='en'?'⚙️ Coach settings':'⚙️ Nastavení kouče'); if($('mePartnerStrip')){ const _ps=$('mePartnerStrip'); const _canP=!!(currentUser && !currentUser.partner && (currentUser.coach_status==='approved'||currentUser.gym_official||(window._myGyms&&window._myGyms.length))); if(_canP){ _ps.style.display='block'; _ps.innerHTML = (LANG==='en'?'⭐ Go Exclusive MTL Partner — keep 99%, only $49/mo →':'⭐ Staň se Exclusive MTL Partnerem — nech si 99 %, jen $49/měs →'); } else { _ps.style.display='none'; } }
+  if($('btnCoachSettings')) $('btnCoachSettings').innerHTML = (LANG==='en'?'⚙️ Coach settings':'⚙️ Nastavení kouče'); if(currentUser&&currentUser.partner&&currentUser.partner_cancelling&&currentUser.partner_period_end&&new Date(currentUser.partner_period_end)<new Date()){ currentUser.partner=false; currentUser.partner_cancelling=false; try{ supaClient.from('profiles').update({partner:false,partner_cancelling:false}).eq('id',currentUser.id); }catch(e){} }
+  if($('mePartnerStrip')){ const _ps=$('mePartnerStrip'); const _canP=!!(currentUser && !currentUser.partner && (currentUser.coach_status==='approved'||currentUser.gym_official||(window._myGyms&&window._myGyms.length))); if(_canP){ _ps.style.display='block'; _ps.innerHTML = (LANG==='en'?'⭐ Go Exclusive MTL Partner — keep 99%, only $49/mo →':'⭐ Staň se Exclusive MTL Partnerem — nech si 99 %, jen $49/měs →'); } else { _ps.style.display='none'; } }
   if($('btnBecomePartner')) $('btnBecomePartner').style.display = (currentUser&&currentUser.partner) ? 'none' : 'block';
-  if($('btnCancelPartner')) $('btnCancelPartner').style.display = (currentUser&&currentUser.partner) ? 'block' : 'none';
+  if($('btnCancelPartner')){ $('btnCancelPartner').style.display = (currentUser&&currentUser.partner) ? 'block' : 'none'; if(typeof paintPartnerCancelBtn==='function') paintPartnerCancelBtn(); }
   if($('foundingCoachBadge')) $('foundingCoachBadge').style.display = (currentUser&&currentUser.founding&&!currentUser.partner) ? 'block' : 'none';
   if($('partnerBadge')){ $('partnerBadge').style.display=(currentUser&&currentUser.partner)?'block':'none'; if(currentUser&&currentUser.partner&&typeof epRatesCardHTML==='function') $('partnerBadge').innerHTML=epRatesCardHTML(true,true); }
   setAvailUI();
@@ -13262,7 +13280,7 @@ async function fillRateEditor(){
     if($('foundingCoachBadge')) $('foundingCoachBadge').style.display = (prof.founding && !prof.partner) ? 'block' : 'none';
     if($('partnerBadge')){ $('partnerBadge').style.display = prof.partner ? 'block' : 'none'; if(prof.partner) $('partnerBadge').innerHTML = epRatesCardHTML(true, true); }
     if($('mePartnerStrip')){ const _ps=$('mePartnerStrip'); const _canP=!!(!prof.partner && (prof.coach_status==='approved'||prof.gym_official||(window._myGyms&&window._myGyms.length))); if(_canP){ _ps.style.display='block'; _ps.innerHTML = (LANG==='en'?'⭐ Go Exclusive MTL Partner — keep 99%, only $49/mo →':'⭐ Staň se Exclusive MTL Partnerem — nech si 99 %, jen $49/měs →'); } else { _ps.style.display='none'; } }
-    if($('btnCancelPartner')) $('btnCancelPartner').style.display = prof.partner ? 'block' : 'none';
+    if($('btnCancelPartner')){ $('btnCancelPartner').style.display = prof.partner ? 'block' : 'none'; if(typeof paintPartnerCancelBtn==='function') paintPartnerCancelBtn(); }
     if($('btnBecomePartner')) $('btnBecomePartner').style.display = prof.partner ? 'none' : 'block';
     currentUser.rate_inperson = prof.rate_inperson;
     currentUser.rate_online = prof.rate_online;
