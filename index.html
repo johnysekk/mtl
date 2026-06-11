@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-IW | Founder Dashboard: new Exclusive Partner memberships section showing exact Gross / Stripe fee / Net per currency (from /api/partner-revenue, which reads Stripe balance transactions of all partner_sub subscriptions). Plus a Podklady pro ucetni CSV export of that data. New serverless /api/partner-revenue.js required. Also: Rate difference calculator added to the Become Exclusive Partner overlay (Standard green vs Partner gold breakdown in CZK/USD/EUR). Index + new serverless. -->
+<!-- MTL build: 2026-06-07-IW2 | Rate calculator redesigned to model: input Your gross profit -> two cards (STANDARD green / EXCLUSIVE PARTNER gold) each = Gross - MTL fee(5%/1%) - Stripe fee(~3% flat) = NET, + black highlight +4%/lesson selling EP. Founder Dashboard partner-revenue section now has a month dropdown (All time + 12 months, _fdPartnerMonth) wired to /api/partner-revenue?month=YYYY-MM. Podklady CSV export now combines partner memberships per currency + coach commissions (fdMonthStats) for the selected month + disclaimer. Endpoint partner-revenue.js gained ?month filter. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -9948,6 +9948,7 @@ async function renderFounderDash(){
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">📈</div><div class="prow-lbl">${LANG==='en'?'MTL ARR (recurring ×12)':'MTL ARR (recurring ×12)'}</div></div><span class="prow-val">${fmt(mtlARR)}</span></div>
     </div>
     <div class="sec-lbl">${LANG==='en'?'Exclusive Partner memberships ($49/mo · exact from Stripe)':'Exclusive Partner členství ($49/měs · přesně ze Stripe)'}</div>
+    <select id="fdPartnerMonth" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:'DM Sans';background:#fff;margin-bottom:8px;"><option value="all">${LANG==='en'?'All time':'Vše'}</option>${fdMonthList().map(m=>`<option value="${m.ym}" ${m.ym===_fdPartnerMonth?'selected':''}>${m.lbl}</option>`).join('')}</select>
     <div id="fdPartnerRev" style="margin-bottom:8px;"><p style="color:var(--light);font-size:12px;padding:6px 0;">${L('Načítám...')}</p></div>
     <button id="fdExportPartner" style="width:100%;padding:12px;background:#171717;color:#F4D87A;border:1.5px solid #E8C24A;border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:18px;">📄 ${LANG==='en'?'Accounting export (CSV)':'Podklady pro účetní (CSV)'}</button>
     <div class="sec-lbl">${LANG==='en'?'By month':'Po měsících'}</div>
@@ -9992,32 +9993,42 @@ async function renderFounderDash(){
   box.querySelectorAll('.fdCoachRow').forEach(r=>r.onclick=()=>openCoachStats(r.dataset.id, r.dataset.name));
   box.querySelectorAll('.fdGymRow').forEach(r=>r.onclick=()=>openGymStats(r.dataset.id, r.dataset.name));
   renderFounderDisciplines();
-  if(typeof loadFounderPartnerRevenue==='function') loadFounderPartnerRevenue();
-  { const _ep=$('fdExportPartner'); if(_ep) _ep.onclick=_founderPartnerExport; }
+  if(typeof loadFounderPartnerRevenue==='function') loadFounderPartnerRevenue(_fdPartnerMonth);
+  { const _ep=$('fdExportPartner'); if(_ep) _ep.onclick=_founderPartnerExport; const _pm=$('fdPartnerMonth'); if(_pm) _pm.onchange=()=>loadFounderPartnerRevenue(_pm.value); }
 }
-let _fdPartnerData=null;
-async function loadFounderPartnerRevenue(){
+let _fdPartnerData=null, _fdPartnerMonth='all';
+async function loadFounderPartnerRevenue(month){
+  if(month!==undefined) _fdPartnerMonth=month;
+  const m=_fdPartnerMonth||'all';
   const box=$('fdPartnerRev'); if(!box) return;
+  box.innerHTML=`<p style="color:var(--light);font-size:12px;padding:6px 0;">${L('Načítám...')}</p>`;
   try{
-    const r=await fetch('/api/partner-revenue'); const j=await r.json();
+    const r=await fetch('/api/partner-revenue'+(m&&m!=='all'?('?month='+encodeURIComponent(m)):'')); const j=await r.json();
     if(!j||!j.ok){ box.innerHTML=`<p style="color:var(--light);font-size:12px;">${LANG==='en'?'Could not load (endpoint not deployed yet?).':'Nelze načíst (endpoint ještě nenasazen?).'}</p>`; _fdPartnerData=null; return; }
     _fdPartnerData=j; const cur=j.byCurrency||{}; const keys=Object.keys(cur);
     const f=(v,c)=>fmtPrice(Math.round(v*100)/100, c);
     let rows='';
-    if(!keys.length){ rows=`<p style="color:var(--light);font-size:12px;padding:6px 0;">${LANG==='en'?'No partner payments yet.':'Zatím žádné platby partnerů.'}</p>`; }
+    if(!keys.length){ rows=`<p style="color:var(--light);font-size:12px;padding:6px 0;">${LANG==='en'?'No partner payments in this period.':'V tomto období žádné platby partnerů.'}</p>`; }
     else { rows=keys.map(c=>{ const d=cur[c]; return `<div style="background:linear-gradient(135deg,#FFF7E0,#FBEFC4);border:1.5px solid #E8C24A;border-radius:12px;padding:12px 14px;margin-bottom:8px;"><div style="font-weight:800;font-size:13px;color:#8a6a12;margin-bottom:6px;">${c} · ${d.count} ${LANG==='en'?'payments':'plateb'}</div><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:3px;"><span style="color:var(--mid);">${LANG==='en'?'Gross':'Hrubé'}</span><b>${f(d.gross,c)}</b></div><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:3px;color:var(--mid);"><span>− Stripe fee</span><span>${f(d.fee,c)}</span></div><div style="display:flex;justify-content:space-between;font-size:14px;font-weight:800;color:#006040;border-top:1px solid #E8C24A;padding-top:5px;margin-top:3px;"><span>= Net</span><span>${f(d.net,c)}</span></div></div>`; }).join(''); }
     box.innerHTML=`${rows}<p style="font-size:11px;color:var(--light);line-height:1.5;">${(j.partners||0)+' '+(LANG==='en'?'partner subscription(s). Net = settled amount after Stripe fees, exact from Stripe balance transactions.':'partnerských předplatných. Net = vypořádaná částka po Stripe fees, přesně ze Stripe balance transactions.')}</p>`;
   }catch(e){ box.innerHTML=`<p style="color:var(--light);font-size:12px;">${LANG==='en'?'Could not load.':'Nelze načíst.'}</p>`; }
 }
 function _founderPartnerExport(){
-  const EN=LANG==='en'; const j=_fdPartnerData;
+  const EN=LANG==='en'; const j=_fdPartnerData; const month=_fdPartnerMonth||'all';
   const esc=v=>{ const x=String(v==null?'':v); return /[",;\n]/.test(x)?('"'+x.replace(/"/g,'""')+'"'):x; };
-  const H=[EN?'Currency':'Měna', EN?'Payments':'Plateb', EN?'Gross':'Hrubé', 'Stripe fee', 'Net'];
-  const out=[H.join(';')];
-  if(j&&j.byCurrency){ Object.keys(j.byCurrency).forEach(c=>{ const d=j.byCurrency[c]; out.push([c, d.count, (Math.round(d.gross*100)/100), (Math.round(d.fee*100)/100), (Math.round(d.net*100)/100)].map(esc).join(';')); }); }
+  const rd=v=>Math.round(v*100)/100;
+  const out=[];
+  out.push(esc(EN?'MTL accounting export':'MTL podklady pro účetní')+';'+esc(month==='all'?(EN?'all time':'vše'):month));
+  out.push('');
+  out.push(esc(EN?'EXCLUSIVE PARTNER MEMBERSHIPS':'EXCLUSIVE PARTNER ČLENSTVÍ'));
+  out.push([EN?'Currency':'Měna',EN?'Payments':'Plateb',EN?'Gross':'Hrubé','Stripe fee','Net'].map(esc).join(';'));
+  if(j&&j.byCurrency){ Object.keys(j.byCurrency).forEach(c=>{ const d=j.byCurrency[c]; out.push([c,d.count,rd(d.gross),rd(d.fee),rd(d.net)].map(esc).join(';')); }); }
+  else { out.push(esc(EN?'(no data)':'(žádná data)')); }
+  if(month!=='all' && typeof fdMonthStats==='function'){ const sst=fdMonthStats(month); if(sst){ out.push(''); out.push(esc(EN?'COACH COMMISSIONS (this month, estimate)':'PROVIZE Z LEKCÍ (tento měsíc, odhad)')); out.push([EN?'MTL fee gross':'MTL provize hrubá',EN?'Stripe fee (est)':'Stripe fee (odhad)',EN?'Net':'Net',EN?'Lessons':'Lekcí'].map(esc).join(';')); out.push([rd(sst.gross),rd(sst.stripe),rd(sst.net),sst.lessons].map(esc).join(';')); } }
+  out.push(''); out.push(esc(EN?'Note: estimate. Stripe Dashboard is authoritative. Discuss VAT/tax with your accountant.':'Pozn.: odhad. Závazný je Stripe Dashboard. DPH/daně řeš s účetní.'));
   const csv='\ufeff'+out.join('\n');
   const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'}); const url=URL.createObjectURL(blob);
-  const a=document.createElement('a'); a.href=url; a.download='MTL_podklady_partner_'+new Date().toISOString().slice(0,10)+'.csv'; a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
+  const a=document.createElement('a'); a.href=url; a.download='MTL_podklady_'+(month==='all'?'vse':month)+'.csv'; a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
   toast(EN?'✅ CSV exported':'✅ CSV vyexportováno');
 }
 function renderFounderDisciplines(){
@@ -11286,13 +11297,14 @@ function renderRateCalc(){
   const sym=_rcCur==='CZK'?'Kč':_rcCur==='USD'?'$':'€';
   const base=parseFloat(($('rcPrice')&&$('rcPrice').value)||'0')||0;
   const r=v=>fmtPrice(Math.round(v*100)/100, _rcCur);
-  const card=(title,col,bg,brd,keepMul,payMul)=>`<div style="background:${bg};border:1.5px solid ${brd};border-radius:14px;padding:13px 15px;margin-bottom:10px;"><div style="font-weight:800;font-size:12px;letter-spacing:.04em;color:${col};margin-bottom:8px;">${title}</div><div style="display:flex;justify-content:space-between;font-size:14px;margin-bottom:5px;"><span style="color:var(--mid);">${EN?'You keep':'Ty dostaneš'}</span><b style="color:${col};">${r(base*keepMul)} ${sym}</b></div><div style="display:flex;justify-content:space-between;font-size:14px;"><span style="color:var(--mid);">${EN?'Student pays':'Student zaplatí'}</span><b>${r(base*payMul)} ${sym}</b></div></div>`;
+  const STRIPE=0.03;
   const body=$('rcBody'); if(!body) return;
-  if(base<=0){ body.innerHTML=`<p style="text-align:center;color:var(--light);font-size:13px;padding:8px 0;">${EN?'Enter a price above.':'Zadej cenu výše.'}</p>`; return; }
-  const diffKeep=base*0.99-base*0.95, diffPay=base*1.05-base*1.03;
-  body.innerHTML=card('STANDARD','#0a6b43','#F0FBF0','#C0E8C0',0.95,1.05)
-    +card('EXCLUSIVE MTL PARTNER','#8a6a12','linear-gradient(135deg,#FFF7E0,#FBEFC4)','#E8C24A',0.99,1.03)
-    +`<div style="background:#171717;border-radius:12px;padding:11px 14px;text-align:center;"><div style="font-size:12px;color:#F4D87A;font-weight:700;line-height:1.5;">${EN?'As a Partner you keep':'Jako Partner dostaneš navíc'} <b>+${r(diffKeep)} ${sym}</b>${EN?' more, and your student pays':' a student zaplatí'} <b>−${r(diffPay)} ${sym}</b>${EN?' less per lesson.':' méně za lekci.'}</div></div>`;
+  if(base<=0){ body.innerHTML=`<p style="text-align:center;color:var(--light);font-size:13px;padding:8px 0;">${EN?'Enter your gross profit per lesson above.':'Zadej svůj hrubý výdělek za lekci výše.'}</p>`; return; }
+  const card=(title,col,bg,brd,mtlPct)=>{ const mtl=base*mtlPct, stp=base*STRIPE, net=base-mtl-stp; return `<div style="background:${bg};border:1.5px solid ${brd};border-radius:14px;padding:13px 15px;margin-bottom:10px;"><div style="font-weight:800;font-size:12px;letter-spacing:.04em;color:${col};margin-bottom:9px;">${title}</div><div style="display:flex;justify-content:space-between;font-size:13.5px;margin-bottom:4px;"><span style="color:var(--mid);">${EN?'Your gross profit':'Tvůj hrubý výdělek'}</span><b>${r(base)} ${sym}</b></div><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;color:var(--mid);"><span>− ${EN?'MTL fee':'MTL poplatek'} (${Math.round(mtlPct*100)} %)</span><span>−${r(mtl)} ${sym}</span></div><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px;color:var(--mid);"><span>− Stripe fee (~3 %)</span><span>−${r(stp)} ${sym}</span></div><div style="display:flex;justify-content:space-between;font-size:15px;font-weight:800;color:${col};border-top:1.5px solid ${brd};padding-top:7px;"><span>${EN?'You NET':'Ty NET'}</span><span>${r(net)} ${sym}</span></div></div>`; };
+  const diff=base*0.04;
+  body.innerHTML=card(EN?'STANDARD':'STANDARD','#0a6b43','#F0FBF0','#C0E8C0',0.05)
+    +card('EXCLUSIVE MTL PARTNER','#8a6a12','linear-gradient(135deg,#FFF7E0,#FBEFC4)','#E8C24A',0.01)
+    +`<div style="background:#171717;border-radius:12px;padding:12px 14px;text-align:center;"><div style="font-size:13px;color:#F4D87A;font-weight:800;line-height:1.5;">${EN?'As a Partner you keep':'Jako Partner si necháš navíc'} <span style="font-size:16px;">+${r(diff)} ${sym}</span> ${EN?'more on every lesson':'na každé lekci'}</div><div style="font-size:11px;color:#bbb;margin-top:5px;line-height:1.5;">${EN?'You keep 99% instead of 95%. Stripe fee ~3% (flat estimate). EP is $49/mo — it pays for itself once you train regularly.':'Necháš si 99 % místo 95 %. Stripe fee ~3 % (plošný odhad). EP stojí $49/měs — vrátí se ti, jakmile trénuješ pravidelně.'}</div></div>`;
 }
 function openPartnerInfo(){
   const EN=LANG==='en';
