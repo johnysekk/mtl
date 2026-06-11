@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-IG | Event tickets: paid tickets in My events > Upcoming (going) now have a Show my QR button that opens an overlay with a scannable QR (encodes /?etk=<ticketId>), mirroring the gym member check-in QR. Holder shows it at the event entrance. NOTE: the entrance-scan/validation side (reading ?etk, marking attended) is NOT built yet - this is the holder display first, as requested. Index only. -->
+<!-- MTL build: 2026-06-07-II | Event ticket QR now emailed to the buyer immediately via Resend. New serverless /api/ticket-email.js (ESM, service-role, Resend) builds a branded email with a scannable QR image (qrserver, encodes /?etk=ticketId) and sends to the buyer profile email. Wired fire-and-forget from both purchase paths: free RSVP (capture inserted id) and card payment (after status->paid on return). Index + serverless. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4986,7 +4986,7 @@ async function doEventCheckout(ev, tier){
     if(!acct){ const { data:g } = await supaClient.from('gyms').select('stripe_account').eq('id', ev.gym_id).single(); acct=(g&&g.stripe_account)||null; }
   }catch(e){}
   if(base<=0){
-    try{ await supaClient.from('event_tickets').insert({ event_id:ev.id, buyer_id:currentUser.id, buyer_name:currentUser.name||'', qty:1, amount:0, currency:cur, status:'paid' }); if(ev.created_by){ await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'event_rsvp', event_id:ev.id, title:ev.title}), message:'🎟️ '+(currentUser.name||'Někdo')+(LANG==='en'?` is coming to "${ev.title}"`:` přijde na „${ev.title}"`) }); } }catch(e){}
+    try{ const { data:_frt } = await supaClient.from('event_tickets').insert({ event_id:ev.id, buyer_id:currentUser.id, buyer_name:currentUser.name||'', qty:1, amount:0, currency:cur, status:'paid' }).select('id').single(); if(_frt&&_frt.id){ try{ fetch('/api/ticket-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticketId:_frt.id})}); }catch(e){} } if(ev.created_by){ await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'event_rsvp', event_id:ev.id, title:ev.title}), message:'🎟️ '+(currentUser.name||'Někdo')+(LANG==='en'?` is coming to "${ev.title}"`:` přijde na „${ev.title}"`) }); } }catch(e){}
     toast(LANG==='en'?'🎟️ You are on the list!':'🎟️ Jsi na seznamu!'); closeSheet('shEventView'); return;
   }
   if(!acct){ toast(LANG==='en'?'⚠️ This event cannot take payments yet':'⚠️ Tato událost zatím nepřijímá platby'); return; }
@@ -11195,16 +11195,16 @@ async function computeMyXP(){
   var me=currentUser; var out={student:0,coach:0,gym:0,d:{}};
   if(!me) return out;
   var isPhys=function(b){ return b.type!=='online' && b.status==='active' && b.student_confirmed===true && b.coach_confirmed===true; };
-  try{ var r=await supaClient.from('bookings').select('type,status,student_confirmed,coach_confirmed').eq('student_id',me.id); var bk=(r&&r.data)||[]; var s1=bk.filter(isPhys).length; var sg=0; try{ var g=await supaClient.from('gym_attendance').select('id').eq('student_id',me.id); sg=((g&&g.data)||[]).length; }catch(e){} out.student=s1*10+sg; out.d.s1=s1; out.d.sg=sg; }catch(e){}
-  if(me.coach_status==='approved'){ try{ var r2=await supaClient.from('bookings').select('type,status,student_confirmed,coach_confirmed').eq('coach_id',me.id); var cb=(r2&&r2.data)||[]; var c1=cb.filter(isPhys).length; var cev=0; try{ var ce=await supaClient.from('events').select('id',{count:'exact',head:true}).eq('created_by',me.id).eq('status','approved'); cev=ce.count||0; }catch(e){} out.coach=c1*2+cev*50; out.d.c1=c1; out.d.cev=cev; }catch(e){} }
-  try{ var mg=await supaClient.from('gyms').select('id').eq('owner_id',me.id).eq('status','approved'); var gg=(mg&&mg.data)||[]; if(gg.length){ var gid=gg[0].id; var cls=0; try{ var ga=await supaClient.from('gym_attendance').select('class_date,class_time').eq('gym_id',gid); var set=new Set(((ga&&ga.data)||[]).map(function(a){return (a.class_date||'')+'|'+(a.class_time||'');})); set.delete('|'); cls=set.size; }catch(e){} var gev=0; try{ var ge=await supaClient.from('events').select('id',{count:'exact',head:true}).eq('gym_id',gid).eq('status','approved'); gev=ge.count||0; }catch(e){} out.gym=cls+gev*50; out.d.cls=cls; out.d.gev=gev; out.d.gid=gid; } }catch(e){}
+  try{ var r=await supaClient.from('bookings').select('type,status,student_confirmed,coach_confirmed').eq('student_id',me.id); var bk=(r&&r.data)||[]; var s1=bk.filter(isPhys).length; var sg=0; try{ var g=await supaClient.from('gym_attendance').select('id').eq('student_id',me.id); sg=((g&&g.data)||[]).length; }catch(e){} out.student=s1*10+sg*2; out.d.s1=s1; out.d.sg=sg; }catch(e){}
+  if(me.coach_status==='approved'){ try{ var r2=await supaClient.from('bookings').select('type,status,student_confirmed,coach_confirmed').eq('coach_id',me.id); var cb=(r2&&r2.data)||[]; var c1=cb.filter(isPhys).length; var cev=0; try{ var ce=await supaClient.from('events').select('id',{count:'exact',head:true}).eq('created_by',me.id).eq('status','approved').lt('starts_at', new Date().toISOString()); cev=ce.count||0; }catch(e){} out.coach=c1*2+cev*50; out.d.c1=c1; out.d.cev=cev; }catch(e){} }
+  try{ var mg=await supaClient.from('gyms').select('id').eq('owner_id',me.id).eq('status','approved'); var gg=(mg&&mg.data)||[]; if(gg.length){ var gid=gg[0].id; var cls=0; try{ var ga=await supaClient.from('gym_attendance').select('class_date,class_time').eq('gym_id',gid); var set=new Set(((ga&&ga.data)||[]).map(function(a){return (a.class_date||'')+'|'+(a.class_time||'');})); set.delete('|'); cls=set.size; }catch(e){} var gev=0; try{ var ge=await supaClient.from('events').select('id',{count:'exact',head:true}).eq('gym_id',gid).eq('status','approved').lt('starts_at', new Date().toISOString()); gev=ge.count||0; }catch(e){} out.gym=cls+gev*50; out.d.cls=cls; out.d.gev=gev; out.d.gid=gid; } }catch(e){}
   return out;
 }
 window._lvlXpCache=window._lvlXpCache||{};
 async function computeXPFor(id, role){
   if(!id) return 0; var ck=role+':'+id; if(window._lvlXpCache[ck]!=null) return window._lvlXpCache[ck]; var xp=0;
-  try{ if(role==='gym'){ var cls=0; try{ var ga=await supaClient.from('gym_attendance').select('class_date,class_time').eq('gym_id',id); var set=new Set(((ga&&ga.data)||[]).map(function(a){return (a.class_date||'')+'|'+(a.class_time||'');})); set.delete('|'); cls=set.size; }catch(e){} var gev=0; try{ var ge=await supaClient.from('events').select('id',{count:'exact',head:true}).eq('gym_id',id).eq('status','approved'); gev=ge.count||0; }catch(e){} xp=cls+gev*50; }
-    else { var r=await supaClient.from('bookings').select('type,status,student_confirmed,coach_confirmed').eq('coach_id',id); var cb=(r&&r.data)||[]; var c1=cb.filter(function(b){return b.type!=='online'&&b.status==='active'&&b.student_confirmed===true&&b.coach_confirmed===true;}).length; var cev=0; try{ var ce=await supaClient.from('events').select('id',{count:'exact',head:true}).eq('created_by',id).eq('status','approved'); cev=ce.count||0; }catch(e){} xp=c1*2+cev*50; }
+  try{ if(role==='gym'){ var cls=0; try{ var ga=await supaClient.from('gym_attendance').select('class_date,class_time').eq('gym_id',id); var set=new Set(((ga&&ga.data)||[]).map(function(a){return (a.class_date||'')+'|'+(a.class_time||'');})); set.delete('|'); cls=set.size; }catch(e){} var gev=0; try{ var ge=await supaClient.from('events').select('id',{count:'exact',head:true}).eq('gym_id',id).eq('status','approved').lt('starts_at', new Date().toISOString()); gev=ge.count||0; }catch(e){} xp=cls+gev*50; }
+    else { var r=await supaClient.from('bookings').select('type,status,student_confirmed,coach_confirmed').eq('coach_id',id); var cb=(r&&r.data)||[]; var c1=cb.filter(function(b){return b.type!=='online'&&b.status==='active'&&b.student_confirmed===true&&b.coach_confirmed===true;}).length; var cev=0; try{ var ce=await supaClient.from('events').select('id',{count:'exact',head:true}).eq('created_by',id).eq('status','approved').lt('starts_at', new Date().toISOString()); cev=ce.count||0; }catch(e){} xp=c1*2+cev*50; }
   }catch(e){}
   window._lvlXpCache[ck]=xp; return xp;
 }
@@ -11245,7 +11245,7 @@ async function openLevel(){
   var xp=await computeMyXP(); var html='';
   var _xpRow=function(lbl,cnt,per){ return '<div style="display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:5px 0;border-bottom:1px solid var(--border);"><span style="color:var(--mid);">'+lbl+'</span><span style="font-weight:700;color:var(--dark);white-space:nowrap;">'+cnt+' × '+per+' = +'+(cnt*per)+' XP</span></div>'; };
   var _roleBlock=function(barHtml,rowsHtml){ return '<details style="margin-bottom:2px;"><summary style="list-style:none;cursor:pointer;">'+barHtml+'<div style="text-align:center;font-size:10.5px;color:var(--light);margin:-5px 0 8px;">'+(EN?'▾ tap for XP breakdown':'▾ ťukni pro rozpad XP')+'</div></summary><div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:4px 14px 9px;margin:-2px 0 12px;">'+rowsHtml+'</div></details>'; };
-  var _sRows=_xpRow(EN?'Physical 1:1 lessons':'Fyzické 1:1 lekce',xp.d.s1||0,10)+_xpRow(EN?'Group class attendances':'Skupinové docházky',xp.d.sg||0,1);
+  var _sRows=_xpRow(EN?'Physical 1:1 lessons':'Fyzické 1:1 lekce',xp.d.s1||0,10)+_xpRow(EN?'Group class attendances':'Skupinové docházky',xp.d.sg||0,2);
   html+=_roleBlock(levelBarHtml(xp.student, EN?'Student':'Student','🧑'), _sRows);
   if(currentUser&&currentUser.coach_status==='approved'){ var _cRows=_xpRow(EN?'Physical 1:1 taught':'Odučené fyzické 1:1',xp.d.c1||0,2)+_xpRow(EN?'Events hosted':'Uspořádané akce',xp.d.cev||0,50); html+=_roleBlock(levelBarHtml(xp.coach, EN?'Coach':'Kouč','🥊'), _cRows); }
   if(xp.d.gid){ var _gRows=_xpRow(EN?'Group classes held':'Odučené skupinovky',xp.d.cls||0,1)+_xpRow(EN?'Events hosted':'Uspořádané akce',xp.d.gev||0,50); html+=_roleBlock(levelBarHtml(xp.gym, EN?'Gym':'Gym','🏋️'), _gRows); }
@@ -11259,7 +11259,7 @@ async function openLevel(){
   // info: calc logic
   var calc='<div style="font-size:12.5px;color:var(--mid);line-height:1.6;">'
     +'<b>'+(EN?'Only physical lessons count':'Počítají se jen fyzické lekce')+'</b> ('+(EN?'online is excluded':'online se nepočítá')+').<br>'
-    +'🥊 <b>Student:</b> '+(EN?'physical 1:1 lesson = +10 XP, group class = +1 XP':'fyzická 1:1 lekce = +10 XP, skupinovka = +1 XP')+'<br>'
+    +'🥊 <b>Student:</b> '+(EN?'physical 1:1 lesson = +10 XP, group class = +2 XP':'fyzická 1:1 lekce = +10 XP, skupinovka = +2 XP')+'<br>'
     +'🥋 <b>'+(EN?'Coach':'Kouč')+':</b> '+(EN?'physical 1:1 taught = +2 XP':'odučená fyzická 1:1 = +2 XP')+', '+(EN?'each hosted event':'každá uspořádaná událost')+' = <b>+50 XP</b><br>'
     +'🏋️ <b>Gym:</b> '+(EN?'each group class held':'každá odučená skupinovka')+' = <b>+1 XP</b>, '+(EN?'each hosted event':'každá uspořádaná událost')+' = <b>+50 XP</b><br><br>'
     +(EN?'Levels are summed across all disciplines. Formula: XP for level L = ⌊3 × (L−1)^1.5⌋, max level 80.':'Levely se sčítají napříč disciplínami. Vzorec: XP pro úroveň L = ⌊3 × (L−1)^1.5⌋, max úroveň 80.')+'</div>';
@@ -14282,6 +14282,7 @@ async function showPaidPopup(){
       try{
         const { data:tk } = await supaClient.from('event_tickets').update({ status:'paid', stripe_ref: pi }).eq('id', ticketId).select().single();
         if(tk){
+          try{ fetch('/api/ticket-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticketId:tk.id})}); }catch(e){}
           try{ const { data:ev } = await supaClient.from('events').select('created_by,title').eq('id', tk.event_id).single(); if(ev&&ev.created_by){ await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'event_ticket_sold', event_id:tk.event_id, title:ev.title}), message:'🎟️ '+(LANG==='en'?`Ticket sold for "${ev.title}"`:`Prodán lístek na „${ev.title}"`) }); } }catch(e){}
           toast(LANG==='en'?'🎟️ Ticket confirmed! See you there.':'🎟️ Lístek potvrzen! Uvidíme se tam.');
         }
