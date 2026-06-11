@@ -34,6 +34,16 @@ export default async function handler(req, res) {
 
     const subs = (profs || []).filter(p => p.partner_sub);
 
+    // Optional ?month=YYYY-MM filter (by invoice creation date).
+    const month = (req.query && req.query.month) || '';
+    let createdFilter = null;
+    if (/^\d{4}-\d{2}$/.test(month)) {
+      const [y, m] = month.split('-').map(Number);
+      const gte = Math.floor(Date.UTC(y, m - 1, 1) / 1000);
+      const lte = Math.floor(Date.UTC(y, m, 1) / 1000) - 1;
+      createdFilter = { gte, lte };
+    }
+
     const byCurrency = {}; // CUR -> { gross, fee, net, count }
     const add = (cur, g, f, n) => {
       const c = (cur || 'usd').toUpperCase();
@@ -56,6 +66,7 @@ export default async function handler(req, res) {
             subscription: p.partner_sub,
             status: 'paid',
             limit: 100,
+            ...(createdFilter ? { created: createdFilter } : {}),
             ...(starting_after ? { starting_after } : {}),
           });
         } catch (e) {
@@ -98,6 +109,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       ok: true,
+      month: month || 'all',
       partners: subs.length,
       payments,
       byCurrency,
