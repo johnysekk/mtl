@@ -9,8 +9,8 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 // Každá větev je 1:1 přenesená logika z původního souboru — nic se nemění.
 // ════════════════════════════════════════════════════════════════════════
 
-const GYM_STUDENT_MARKUP = 1.03;  // drop-in: student +3 %
-const GYM_MTL_TAKE       = 0.06;  // drop-in: MTL hrubá provize 6 %
+const GYM_STUDENT_MARKUP = 1.00;  // no markup
+const GYM_MTL_TAKE       = 0.05;  // drop-in: MTL provize 5 %
 const MEMB_MTL_PERCENT   = 5;     // membership: 5 % z invoicu
 
 export default async function handler(req, res) {
@@ -39,10 +39,9 @@ async function coachCheckout(req, res) {
 
   const rate = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
-  let COMMISSION = commission ? parseFloat(commission) : 0.10;
+  let COMMISSION = commission ? parseFloat(commission) : 0.05;
   if (!(COMMISSION >= 0.02 && COMMISSION <= 0.25)) COMMISSION = 0.10;
-  let MK = markup ? parseFloat(markup) : 1.05;
-  if (!(MK >= 1.00 && MK <= 1.10)) MK = 1.05;
+  let MK = 1.00; // no markup — student pays exactly the listed price
   let STUDENT_MARKUP = MK;
   if (String(credit) === 'student') {
     // Referral reward: student pays exactly the coach's keep, MTL takes 0, coach untouched (~10% off)
@@ -116,8 +115,8 @@ async function gymCheckout(req, res) {
   const P = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
   const isPartner = (String(partner) === '1');
-  const MK   = isPartner ? 1.01 : GYM_STUDENT_MARKUP;
-  const TAKE = isPartner ? 0.02 : GYM_MTL_TAKE;
+  const MK   = 1.00;
+  const TAKE = GYM_MTL_TAKE; // flat 5%
 
   const isCZK = cur === 'czk';
   const unitAmount     = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);
@@ -169,7 +168,7 @@ async function eventCheckout(req, res) {
   const P = parseInt(amount, 10);
   const Q = Math.max(1, parseInt(qty, 10) || 1);
   const cur = String(currency).toLowerCase();
-  const MK = 1.03, TAKE = 0.06;
+  const MK = 1.00, TAKE = 0.05;
   const isCZK = cur === 'czk';
   const unit = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);
   const fee  = isCZK ? Math.floor(P * TAKE) * 100 : Math.round(P * TAKE * 100);
@@ -224,7 +223,7 @@ async function membershipCheckout(req, res) {
   const P = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
   const ivl = interval === 'year' ? 'year' : 'month';
-  const FEE_PCT = (String(partner) === '1') ? 3 : MEMB_MTL_PERCENT;
+  const FEE_PCT = MEMB_MTL_PERCENT; // flat 5%
 
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
@@ -277,8 +276,11 @@ async function membershipCheckout(req, res) {
   res.redirect(303, session.url);
 }
 
-// ───────────────────────── Exclusive MTL Partner ($49/mo, platform account) ─────────────────────────
+// ───────────────────────── Exclusive MTL Partner ($99/mo, platform account) ─────────────────────────
 async function partnerCheckout(req, res) {
+  // Exclusive Partner discontinued — flat 5% for everyone. No subscription is sold.
+  return res.status(410).json({ error: 'Exclusive Partner byl ukončen — platí jednotná sazba 5 %.' });
+  /* eslint-disable no-unreachable */
   const { userId, email } = req.query;
   if (!userId) return res.status(400).json({ error: 'Chybí userId' });
 
@@ -291,7 +293,7 @@ async function partnerCheckout(req, res) {
     client_reference_id: userId,
     customer_email: email || undefined,
     line_items: [
-      { price_data: { currency: 'usd', product_data: { name: 'Exclusive MTL Partner — coach & gym rates' }, unit_amount: 4900, recurring: { interval: 'month' } }, quantity: 1 },
+      { price_data: { currency: 'usd', product_data: { name: 'Exclusive MTL Partner — coach & gym rates' }, unit_amount: 9900, recurring: { interval: 'month' } }, quantity: 1 },
     ],
     subscription_data: { metadata: { mtl_payment_type: 'partner_sub', user_id: userId } },
     metadata: { mtl_payment_type: 'partner_sub', user_id: userId },
