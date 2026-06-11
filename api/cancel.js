@@ -13,13 +13,13 @@ async function sbGet(path) {
 // ── MTL Coaches — storno / refund (DIRECT charge na účtu kouče) ──
 // Lekce 1:1 je teď direct charge: platba i poplatek MTL žijí na connected
 // účtu kouče. Refund se proto vystaví NA účtu kouče a refund_application_fee
-// vrací poměrnou část MTL provize → student dostane svoje %, zbytek nesou
+// vrací poměrnou část MTL provize → student dostane svoje %, gym/kouč si nechá zbytek (pokryje Stripe), MTL i kouč nesou
 // kouč i MTL poměrně (žádný transfer reversal, žádný záporný zůstatek navíc).
-//   Student ruší 16h+  → student 93 %
+//   Student ruší 16h+  → student 95 %
 //   Student ruší <16h   → student 50 %
 //   Kouč ruší (hoursUntil>=900) → student 100 %
 //   No-show / po termínu → 0
-const STUDENT_MARKUP = 1.05;
+const STUDENT_MARKUP = 1.00; // no markup — student pays listed price
 
 export default async function handler(req, res) {
   try {
@@ -31,7 +31,7 @@ export default async function handler(req, res) {
 
     let studentPct;
     if (hours >= 900)      studentPct = 1.00; // kouč ruší → student 100 %
-    else if (hours >= 16)  studentPct = 0.93; // 93 %
+    else if (hours >= 16)  studentPct = 0.95; // 95 % (5% cancellation fee covers Stripe)
     else if (hours >= 0)   studentPct = 0.50; // 50 %
     else                   studentPct = 0;    // no-show
 
