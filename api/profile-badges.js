@@ -10,8 +10,8 @@
 //
 // GET /api/profile-badges?token=MTL3X9KQ2
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_PROJECT_URL || 'https://iqeovcvchtyfwtyzpqrh.supabase.co';
+const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SECRET || process.env.SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
 
 // ---- level math (mirror of index.html: K=2.7, cap 80) ----
 function xpForLevel(L){ if(L<=1) return 0; if(L>80) L=80; return Math.floor(3*Math.pow(L-1,1.5)); }
@@ -39,7 +39,7 @@ module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cache-Control', 's-maxage=120, stale-while-revalidate=600');
   try{
-    if(!SUPABASE_URL || !SERVICE_KEY){ res.status(500).json({ error: 'server not configured' }); return; }
+    if(!SUPABASE_URL || !SERVICE_KEY){ res.status(500).json({ error: 'server not configured', hint: 'Set a Supabase SERVICE ROLE key env var (tried SUPABASE_SERVICE_ROLE_KEY / SUPABASE_SERVICE_KEY / SUPABASE_SECRET / SERVICE_ROLE_KEY / SUPABASE_KEY)' }); return; }
     const token = String((req.query && req.query.token) || '').trim();
     if(!token || !/^[A-Za-z0-9]{4,40}$/.test(token)){ res.status(400).json({ error: 'bad token' }); return; }
 
