@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-IN | Attendance (Docházka): for a PAST class occurrence with no attendance yet, a "Did this class take place?" banner appears with Yes (check in attendees below) / No (logs gym_class_log status=cancelled + removes the attend_reminder + closes). Existing attendance-reminder + check-in flow reused. Note: events have no delete path so past-event XP is already safe. Index only. Needs gym_class_log table. -->
+<!-- MTL build: 2026-06-07-IP | B: team coach can now view the FULL gym schedule read-only. shCoachSched gets Moje lekce / Cely rozvrh toggle (_csView,_csFullSched). Full=all classes grouped by day (time-end range, level, coach), own highlighted with you marker, add/save hidden. Mine=existing editable. Attendance stays own-only via reminder/roster. Builds on A. Index only. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -5918,7 +5918,7 @@ function upcomingClasses(schedule, days){
     const dow=date.getDay();
     (schedule||[]).filter(c=>Number(c.day)===dow).forEach(c=>{
       if(d===0){ const [h,mi]=String(c.time||'00:00').split(':').map(Number); const ct=new Date(date); ct.setHours(h||0,mi||0,0,0); if(ct<now) return; }
-      out.push({ name:c.name, date:date.toISOString().slice(0,10), time:c.time, level:c.level||'all', coach:c.coach||null, coachName:c.coachName||null, disc:c.disc||null });
+      out.push({ name:c.name, date:date.toISOString().slice(0,10), time:c.time, dur:Number(c.dur)||60, level:c.level||'all', coach:c.coach||null, coachName:c.coachName||null, disc:c.disc||null });
     });
   }
   out.sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time));
@@ -5996,7 +5996,7 @@ function openTeamCoachStats(coachId, coachName){
   openSheet('shCoachStats');
   renderCoachAnalyticsCompact(coachId, 'coachStatsBody');
 }
-var _csGymId=null, _csGym=null, _csSched=[];
+var _csGymId=null, _csGym=null, _csSched=[], _csView='mine', _csFullSched=[];
 let _cpDropin='', _cpCurrency='CZK', _cpPlans=[], _cpStatus=null, _cpReason=null;
 let _cprGymId=null;
 async function openCoachPricingRequests(gymId){
@@ -6122,7 +6122,8 @@ async function openCoachScheduleEditor(gymId, gymName){
     const { data: g } = await supaClient.from('gyms').select('id, name, currency, dropin_price, schedule').eq('id', gymId).single();
     _csGym=g||null;
     let sch=[]; try{ sch = g&&g.schedule ? (typeof g.schedule==='string'?JSON.parse(g.schedule):g.schedule) : []; }catch(e){ sch=[]; }
-    _csSched = (sch||[]).filter(c=>c.coach===currentUser.id).map(c=>({ day:Number(c.day)||0, time:c.time||'18:00', name:c.name||'', level:c.level||'all' }));
+    _csSched = (sch||[]).filter(c=>c.coach===currentUser.id).map(c=>({ day:Number(c.day)||0, time:c.time||'18:00', name:c.name||'', level:c.level||'all', dur:Number(c.dur)||60 }));
+    _csFullSched = (sch||[]).map(c=>({ day:Number(c.day)||0, time:c.time||'18:00', name:c.name||'', level:c.level||'all', dur:Number(c.dur)||60, coach:c.coach||null, coachName:c.coachName||null })); _csView='mine';
     const sym=(_csGym&&_csGym.currency==='EUR')?'€':(_csGym&&_csGym.currency==='USD')?'$':'Kč';
     if($('coachSchedHint')) $('coachSchedHint').textContent = (LANG==='en'
       ? `Add the classes you teach here. The gym owner controls payout routing and approves schedule changes — you cannot change who gets paid. You can also propose your own drop-in & membership prices below; the gym owner approves them.`
@@ -6135,12 +6136,23 @@ async function openCoachScheduleEditor(gymId, gymName){
 function renderCoachSchedEditor(){
   const box=$('coachSchedList'); if(!box) return;
   const days=dayNames();
-  if(!_csSched.length){ box.innerHTML=`<p style="color:var(--light);font-size:13px;margin-bottom:10px;">${LANG==='en'?'No classes yet. Add one below.':'Zatím žádné lekce. Přidej níže.'}</p>`; return; }
-  box.innerHTML=_csSched.map((c,i)=>`
+  const _csTg=`<div style="display:flex;gap:6px;margin-bottom:12px;"><button id="csViewMine" style="flex:1;padding:9px;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;border:1.5px solid var(--border);${_csView!=='full'?'background:var(--dark);color:#fff;border-color:var(--dark);':'background:#fff;color:var(--dark);'}">${LANG==='en'?'My classes':'Moje lekce'}</button><button id="csViewFull" style="flex:1;padding:9px;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;border:1.5px solid var(--border);${_csView==='full'?'background:var(--dark);color:#fff;border-color:var(--dark);':'background:#fff;color:var(--dark);'}">${LANG==='en'?'Full schedule':'Celý rozvrh'}</button></div>`;
+  const _csWire=()=>{ if($('csViewMine')) $('csViewMine').onclick=()=>{ _csView='mine'; renderCoachSchedEditor(); }; if($('csViewFull')) $('csViewFull').onclick=()=>{ _csView='full'; renderCoachSchedEditor(); }; };
+  if(_csView==='full'){
+    if($('coachSchedAdd')) $('coachSchedAdd').style.display='none'; if($('coachSchedSave')) $('coachSchedSave').style.display='none';
+    let _fi='';
+    for(let _d=0; _d<7; _d++){ const _dc=(_csFullSched||[]).filter(c=>Number(c.day)===_d).sort((a,b)=>String(a.time||'').localeCompare(String(b.time||''))); if(!_dc.length) continue; _fi+=`<div style="font-family:'Bebas Neue';font-size:16px;letter-spacing:.03em;margin:12px 0 6px;color:var(--mid);">${days[_d]}</div>`+_dc.map(c=>{ const _mine=c.coach===currentUser.id; const _lvl=(c.level&&c.level!=='all')?` · ${levelLabel(c.level)}`:''; const _led=c.coachName?` · 👤 ${escapeHtml(c.coachName)}`:''; const _rng=`${c.time||'--:--'}${c.dur?('–'+_classEnd(c.time,c.dur)):''}`; return `<div style="border:1px solid ${_mine?'var(--dark)':'var(--border)'};border-radius:11px;padding:9px 11px;margin-bottom:6px;background:${_mine?'var(--surf)':'#fff'};"><div style="font-size:13px;"><strong>${_rng}</strong> · ${c.name?escapeHtml(c.name):`<span style="color:var(--light);">${LANG==='en'?'(no name)':'(bez názvu)'}</span>`}<span style="color:var(--mid);font-size:12px;">${_lvl}${_led}</span>${_mine?` <span style="color:var(--dark);font-size:11px;font-weight:700;">· ${LANG==='en'?'you':'ty'}</span>`:''}</div></div>`; }).join(''); }
+    if(!_fi) _fi=`<p style="color:var(--light);font-size:13px;">${LANG==='en'?'No classes in the schedule yet.':'V rozvrhu zatím nejsou žádné lekce.'}</p>`;
+    box.innerHTML=_csTg+`<p style="font-size:12px;color:var(--mid);margin-bottom:6px;">${LANG==='en'?'Read-only view of the whole gym schedule. Your own classes are highlighted — manage them in “My classes”.':'Náhled celého rozvrhu gymu (jen ke čtení). Tvoje lekce jsou zvýrazněné — spravuješ je v „Moje lekce“.'}</p>`+_fi;
+    _csWire(); return;
+  }
+  if($('coachSchedAdd')) $('coachSchedAdd').style.display=''; if($('coachSchedSave')) $('coachSchedSave').style.display='';
+  if(!_csSched.length){ box.innerHTML=_csTg+`<p style="color:var(--light);font-size:13px;margin-bottom:10px;">${LANG==='en'?'No classes yet. Add one below.':'Zatím žádné lekce. Přidej níže.'}</p>`; _csWire(); return; }
+  box.innerHTML=_csTg+_csSched.map((c,i)=>`
     <div style="border:1px solid var(--border);border-radius:12px;padding:8px;margin-bottom:8px;">
       <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center;">
         <select class="csDay" data-i="${i}" style="width:72px;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${days.map((d,di)=>`<option value="${di}" ${di===Number(c.day)?'selected':''}>${d}</option>`).join('')}</select>
-        <input class="csTime" data-i="${i}" type="time" value="${c.time||'18:00'}" style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';">
+        <input class="csTime" data-i="${i}" type="time" value="${c.time||'18:00'}" style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';"><input class="csDur" data-i="${i}" type="number" min="15" step="5" value="${c.dur||60}" title="${LANG==='en'?'Length (min)':'Délka (min)'}" style="width:58px;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';">
         <button class="csDel" data-i="${i}" style="padding:8px 11px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-weight:700;cursor:pointer;">✕</button>
       </div>
       <input class="csName" data-i="${i}" type="text" value="${(c.name||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Class name':'Název lekce'}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';margin-bottom:6px;">
@@ -6148,9 +6160,11 @@ function renderCoachSchedEditor(){
     </div>`).join('');
   box.querySelectorAll('.csDay').forEach(el=>el.onchange=()=>{ _csSched[+el.dataset.i].day=+el.value; });
   box.querySelectorAll('.csTime').forEach(el=>el.onchange=()=>{ _csSched[+el.dataset.i].time=el.value; });
+  box.querySelectorAll('.csDur').forEach(el=>el.onchange=()=>{ _csSched[+el.dataset.i].dur=Number(el.value)||60; });
   box.querySelectorAll('.csName').forEach(el=>el.oninput=()=>{ _csSched[+el.dataset.i].name=el.value; });
   box.querySelectorAll('.csLevel').forEach(el=>el.onchange=()=>{ _csSched[+el.dataset.i].level=el.value; });
   box.querySelectorAll('.csDel').forEach(el=>el.onclick=()=>{ _csSched.splice(+el.dataset.i,1); renderCoachSchedEditor(); });
+  _csWire();
 }
 async function saveCoachSchedule(){
   if(!_csGymId) return;
@@ -6158,7 +6172,7 @@ async function saveCoachSchedule(){
   try{ const { data: g } = await supaClient.from('gyms').select('schedule').eq('id', _csGymId).single(); fresh = g&&g.schedule ? (typeof g.schedule==='string'?JSON.parse(g.schedule):g.schedule) : []; }catch(e){ fresh=[]; }
   const others=(fresh||[]).filter(c=>c.coach!==currentUser.id);
   const oldMine=(fresh||[]).filter(c=>c.coach===currentUser.id);
-  const mine=_csSched.map(c=>{ const nm=(c.name&&c.name.trim())?c.name.trim():levelLabel(c.level||'all'); return { day:Number(c.day)||0, time:c.time||'18:00', name:nm, level:c.level||'all', coach:currentUser.id, coachName:currentUser.name||null, coachOwned:true }; });
+  const mine=_csSched.map(c=>{ const nm=(c.name&&c.name.trim())?c.name.trim():levelLabel(c.level||'all'); return { day:Number(c.day)||0, time:c.time||'18:00', name:nm, level:c.level||'all', dur:Number(c.dur)||60, coach:currentUser.id, coachName:currentUser.name||null, coachOwned:true }; });
   const { error } = await supaClient.from('gyms').update({ schedule: JSON.stringify(others.concat(mine)) }).eq('id', _csGymId);
   if(error){ toast('⚠️ '+error.message); return; }
   toast(LANG==='en'?'✅ Saved':'✅ Uloženo');
@@ -6743,7 +6757,7 @@ async function renderGymManage(){
     const days=Array.from(document.querySelectorAll('.rpDay:checked')).map(c=>+c.value);
     if(!name){ toast(LANG==='en'?'⚠️ Enter a class name':'⚠️ Zadej název třídy'); return; }
     if(!days.length){ toast(LANG==='en'?'⚠️ Pick at least one day':'⚠️ Vyber aspoň jeden den'); return; }
-    days.forEach(d=>{ _gymSchedule.push({ day:d, time, name, level, disc }); });
+    days.forEach(d=>{ _gymSchedule.push({ day:d, time, name, level, disc, dur:60 }); });
     if($('rpName')) $('rpName').value='';
     document.querySelectorAll('.rpDay:checked').forEach(c=>c.checked=false);
     const pn=$('mgRepeatPanel'); if(pn) pn.style.display='none';
@@ -7020,7 +7034,7 @@ async function openClassAttendance(occ){
   const lvl=(occ.level&&occ.level!=='all')?` · ${levelLabel(occ.level)}`:'';
   let html=`<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:12px;">
     <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.03em;color:var(--dark);">${escapeHtml(occ.name||(EN?'Class':'Lekce'))}${lvl}</div>
-    <div style="font-size:13px;color:var(--mid);margin-top:2px;">${dn[dd.getDay()]} ${dd.getDate()}.${dd.getMonth()+1}. · ${occ.time||''}${occ.coachName?` · 👤 ${escapeHtml(occ.coachName)}`:''}</div>
+    <div style="font-size:13px;color:var(--mid);margin-top:2px;">${dn[dd.getDay()]} ${dd.getDate()}.${dd.getMonth()+1}. · ${occ.time||''}${occ.dur?('–'+_classEnd(occ.time,occ.dur)):''}${occ.coachName?` · 👤 ${escapeHtml(occ.coachName)}`:''}</div>
     ${!started?`<div style="font-size:11.5px;color:#9A5B00;background:#FFF4E5;border-radius:8px;padding:6px 9px;margin-top:8px;">${EN?'⏳ This class has not started yet. You can mark attendance once it begins.':'⏳ Lekce ještě neproběhla. Docházku doplníš až po jejím začátku.'}</div>`:(isPast?`<div style="font-size:11.5px;color:#9A5B00;background:#FFF4E5;border-radius:8px;padding:6px 9px;margin-top:8px;">${EN?'Past class — mark who actually attended.':'Proběhlá lekce — doplň, kdo reálně dorazil.'}</div>`:'')}
   </div>`;
   const hasAtt=att.some(a=>String(a.class_time||'')===String(occ.time||'') && (a.class_name||'')===(occ.name||''));
@@ -7282,10 +7296,11 @@ async function renderReceptionList(filter){
   list.innerHTML=(rows.length?rows.map(_recRowHtml).join(''):'<p style="color:var(--light);padding:14px;text-align:center;">'+(LANG==='en'?'Nobody found — type a name, or use the button at the top for a walk-in':'Nikdo nenalezen — napiš jméno, nebo použij tlačítko nahoře pro jednorázovou lekci')+'</p>');
   list.querySelectorAll('.recCheckinBtn').forEach(b=>b.onclick=()=>{ const r=_recRows.find(x=>String(x.student_id)===b.dataset.sid); if(r) openRecCheckin(r); });
 }
+function _classEnd(t, dur){ try{ var pp=String(t||'18:00').split(':'); var tot=((+pp[0]||0)*60+(+pp[1]||0))+(Number(dur)||60); var eh=Math.floor((tot%1440)/60), em=tot%60; return String(eh).padStart(2,'0')+':'+String(em).padStart(2,'0'); }catch(e){ return ''; } }
 function _todayGymClasses(g){
   let sch=[]; try{ sch=(typeof g.schedule==='string')?JSON.parse(g.schedule||'[]'):(g.schedule||[]); }catch(e){ sch=[]; }
   const now=new Date(); const dow=now.getDay(); const ds=now.toISOString().slice(0,10);
-  return (sch||[]).filter(c=>Number(c.day)===dow).map(c=>({ name:c.name||'', date:ds, time:c.time||'18:00', level:c.level||'all', coach:c.coach||null, coachName:c.coachName||null, disc:c.disc||null })).sort((a,b)=>String(a.time).localeCompare(String(b.time)));
+  return (sch||[]).filter(c=>Number(c.day)===dow).map(c=>({ name:c.name||'', date:ds, time:c.time||'18:00', dur:Number(c.dur)||60, level:c.level||'all', coach:c.coach||null, coachName:c.coachName||null, disc:c.disc||null })).sort((a,b)=>String(a.time).localeCompare(String(b.time)));
 }
 function gdMul(op){ return op?1.01:1.03; }
 function _recPrice(occ){
@@ -7654,7 +7669,7 @@ function renderScheduleEditor(){
     <div style="margin-top:8px;border-top:1px dashed var(--border);padding-top:8px;">
       <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center;">
         <select class="schDay" data-i="${i}" style="width:72px;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${days.map((d,di)=>`<option value="${di}" ${di===Number(c.day)?'selected':''}>${d}</option>`).join('')}</select>
-        <input class="schTime" data-i="${i}" type="time" value="${c.time||'18:00'}" style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';">
+        <input class="schTime" data-i="${i}" type="time" value="${c.time||'18:00'}" style="flex:1;min-width:0;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';"><input class="schDur" data-i="${i}" type="number" min="15" step="5" value="${c.dur||60}" title="${LANG==='en'?'Length (min)':'Délka (min)'}" style="width:58px;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';">
         <button class="schDel" data-i="${i}" style="padding:8px 11px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-weight:700;cursor:pointer;">✕</button>
       </div>
       <input class="schName" data-i="${i}" type="text" value="${(c.name||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Class name':'Název třídy'}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';margin-bottom:6px;">
@@ -7686,7 +7701,7 @@ function renderScheduleEditor(){
   idxs.forEach(({c,i})=>{ const open=i===_schedEdit; const lvl=(c.level&&c.level!=='all')?` · ${levelLabel(c.level)}`:''; const led=c.coachName?` · 👤 ${escapeHtml(c.coachName)}`:'';
     html+=`<div style="border:1px solid ${open?'var(--dark)':'var(--border)'};border-radius:12px;padding:9px 11px;margin-bottom:6px;background:${open?'var(--surf)':'#fff'};">
       <div class="schCardOpen" data-i="${i}" style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;gap:8px;">
-        <div style="font-size:13px;min-width:0;"><strong>${c.time||'--:--'}</strong> · ${c.name?escapeHtml(c.name):`<span style="color:var(--light);">${LANG==='en'?'(no name)':'(bez názvu)'}</span>`}<span style="color:var(--mid);font-size:12px;">${lvl}${led}</span></div>
+        <div style="font-size:13px;min-width:0;"><strong>${c.time||'--:--'}${c.dur?('–'+_classEnd(c.time,c.dur)):''}</strong> · ${c.name?escapeHtml(c.name):`<span style="color:var(--light);">${LANG==='en'?'(no name)':'(bez názvu)'}</span>`}<span style="color:var(--mid);font-size:12px;">${lvl}${led}</span></div>
         <button class="schAtt" data-i="${i}" style="flex-shrink:0;padding:5px 9px;background:#EEF2F6;color:#1E6FD9;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">📋 ${LANG==='en'?'Attendance':'Docházka'}</button>
         <span style="color:var(--light);font-size:14px;flex-shrink:0;">${open?'▴':'✎'}</span>
       </div>
@@ -7696,11 +7711,12 @@ function renderScheduleEditor(){
   if($('schPrev')) $('schPrev').onclick=()=>{ _schedWeek--; renderScheduleEditor(); };
   if($('schNext')) $('schNext').onclick=()=>{ _schedWeek++; renderScheduleEditor(); };
   box.querySelectorAll('.schDayCell').forEach(el=>el.onclick=()=>{ _schedSelDow=+el.dataset.dow; _schedEdit=-1; renderScheduleEditor(); });
-  if($('schAddSel')) $('schAddSel').onclick=()=>{ _gymSchedule.push({day:_schedSelDow, time:'18:00', name:'', level:'all', disc:(isMultiDiscipline()?defaultDiscipline():null)}); _schedEdit=_gymSchedule.length-1; renderScheduleEditor(); };
+  if($('schAddSel')) $('schAddSel').onclick=()=>{ _gymSchedule.push({day:_schedSelDow, time:'18:00', name:'', level:'all', dur:60, disc:(isMultiDiscipline()?defaultDiscipline():null)}); _schedEdit=_gymSchedule.length-1; renderScheduleEditor(); };
   box.querySelectorAll('.schCardOpen').forEach(el=>el.onclick=()=>{ const i=+el.dataset.i; _schedEdit=(_schedEdit===i?-1:i); renderScheduleEditor(); });
   box.querySelectorAll('.schAtt').forEach(el=>el.onclick=(e)=>{ e.stopPropagation(); const i=+el.dataset.i; const c=_gymSchedule[i]; if(!c) return; const sd=weekDates.find(d=>d.getDay()===_schedSelDow)||weekDates[0]; const ds=`${sd.getFullYear()}-${String(sd.getMonth()+1).padStart(2,'0')}-${String(sd.getDate()).padStart(2,'0')}`; openClassAttendance({ date:ds, time:c.time, name:c.name||'', level:c.level||'all', coach:c.coach||null, coachName:c.coachName||'', disc:c.disc||null }); });
   box.querySelectorAll('.schDay').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].day=+el.value; _schedSelDow=+el.value; renderScheduleEditor(); });
   box.querySelectorAll('.schTime').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].time=el.value; renderScheduleEditor(); });
+  box.querySelectorAll('.schDur').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].dur=Number(el.value)||60; });
   box.querySelectorAll('.schName').forEach(el=>el.oninput=()=>{ _gymSchedule[+el.dataset.i].name=el.value; });
   box.querySelectorAll('.schLevel').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].level=el.value; });
   box.querySelectorAll('.schDisc').forEach(el=>{ const it=_gymSchedule[+el.dataset.i]; if(!it.disc) it.disc=el.value||defaultDiscipline(); el.onchange=()=>{ _gymSchedule[+el.dataset.i].disc=el.value; }; });
@@ -9201,7 +9217,7 @@ if($('btnFoundingToggle')) $('btnFoundingToggle').onclick=toggleFoundingWindow;
 $('btnCloseAdmin').onclick=()=>closeSheet('shAdmin');
 $('btnCloseCoachStats').onclick=()=>closeSheet('shCoachStats');
 if($('btnCloseCoachSched')) $('btnCloseCoachSched').onclick=()=>closeSheet('shCoachSched');
-if($('coachSchedAdd')) $('coachSchedAdd').onclick=()=>{ _csSched.push({day:1,time:'18:00',name:'',level:'all'}); renderCoachSchedEditor(); };
+if($('coachSchedAdd')) $('coachSchedAdd').onclick=()=>{ _csSched.push({day:1,time:'18:00',name:'',level:'all',dur:60}); renderCoachSchedEditor(); };
 if($('coachSchedSave')) $('coachSchedSave').onclick=saveCoachSchedule;
 if($('btnCloseCoachEarn')) $('btnCloseCoachEarn').onclick=()=>closeSheet('shCoachEarn');
 if($('btnCloseCoachRoster')) $('btnCloseCoachRoster').onclick=()=>closeSheet('shCoachRoster');
