@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-HZ | XP rebalance: xpForLevel multiplier back to 3.0 (index+calc text+serverless). Student physical 1:1 = +10 XP (gym attendance still +1); Coach physical 1:1 taught = +2 XP (events +50). Updated computeMyXP, computeXPFor, breakdown rows, calc text. Share button copy-only (no native share sheet) via copyAchievementsLink(); SAME button added to Achievements/Milestones sheet. Shared-profile ROUTING FIX: maybeSharedProfileRoute now runs on global DOMContentLoaded (was only inside enterApp = post-login, so anonymous visitors saw nothing) and shows for everyone; landing CTA adapts (logged-in = Back to app, else Join the game). Ambassador milestone tiers lowered to start at 100 coaches / 10 gyms / 500 bookings / 250 online (they already count ONLY the ambassadors verify_disciplines). Index + serverless. -->
+<!-- MTL build: 2026-06-07-IB | (1) FIXED shared-profile landing never showing: maybeSharedProfileRoute() call was inside the cookie-consent IIFE AFTER "if(ok) return;" so for anyone who already accepted cookies it never ran -> only login flashed. Moved to its own top-level IIFE with readyState guard (runs for everyone, anonymous included). Added console.warn diagnostics when /api/profile-badges fails (most likely: serverless not deployed or env vars missing). (2) Referral/share code collision-proofing: genUniqueReferralCode() now makes MTL+10 base36 (36^10 ~ 3.7e15, vs old MTL+6 ~ 2.2e9 which collides ~230x at 1M users) AND checks the DB for uniqueness before assigning (retry up to 6x, timestamp fallback). Existing MTL+6 codes stay valid. RECOMMEND a UNIQUE constraint on profiles.referral_code. Index only. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4559,6 +4559,7 @@ async function renderEventsAsync(box){
     const today=new Date(); today.setHours(0,0,0,0);
     const { data:evs } = await supaClient.from('events').select('*').eq('status','approved').gte('starts_at', today.toISOString()).order('starts_at',{ascending:true}).limit(100);
     window._evList = evs||[];
+    try{ var _gids=[...new Set((window._evList||[]).map(e=>e.gym_id).filter(Boolean))]; var _uids=[...new Set((window._evList||[]).map(e=>e.created_by).filter(Boolean))]; var _gm={}, _um={}; if(_gids.length){ var _gr=await supaClient.from('gyms').select('id,name').in('id',_gids); (_gr&&_gr.data||[]).forEach(g=>_gm[g.id]=g.name); } if(_uids.length){ var _ur=await supaClient.from('profiles').select('id,name').in('id',_uids); (_ur&&_ur.data||[]).forEach(u=>_um[u.id]=u.name); } window._evList.forEach(e=>{ e._gymName=_gm[e.gym_id]||null; e._creatorName=_um[e.created_by]||null; }); }catch(e){}
     const fd = _deckDisc||'all';
     if(window._evList.length){
       const _spLbl = _deckDisc ? (disciplineEmoji(_deckDisc)+' '+disciplineLabel(_deckDisc)) : (LANG==='en'?'🌐 All sports':'🌐 Vše');
@@ -4876,7 +4877,7 @@ function swipeCardHtml(ev){
     <div class="cimg" style="${bg}">
       <div class="cgrad"></div>
       <div class="ctop"><div class="bdg-cert" style="background:rgba(0,0,0,.6);letter-spacing:.04em;">${t.emoji} ${LANG==='en'?t.en:t.cs}</div>${ev.seeking_fighters?`<div class="bdg-fights" style="background:var(--red);">🥊 ${LANG==='en'?'Fighters':'Fighteři'}</div>`:''}</div>
-      <div class="cbot"><div class="cname">${escapeHtml(ev.title||'')}</div><div class="cloc">📅 ${dt}${loc?` · 📍 ${escapeHtml(loc)}`:''}${distTxt}</div></div>
+      <div class="cbot"><div class="cname">${escapeHtml(ev.title||'')}</div><div class="cloc">📅 ${dt}${loc?` · 📍 ${escapeHtml(loc)}`:''}${distTxt}</div>${(ev._gymName||ev._creatorName)?`<div class="cloc" style="margin-top:2px;">🏟️ ${escapeHtml(ev._gymName||'')}${ev._creatorName?` · 👤 ${escapeHtml(ev._creatorName)}`:''}</div>`:''}</div>
     </div>
     <div class="cbody">
       <div class="ctags">${discTags}</div>
@@ -5955,8 +5956,8 @@ async function loadGymTeam(){
   const ids=rows.map(r=>r.coach_id);
   const { data: profs } = await supaClient.from('profiles').select('id, name, photo_url, city, avail_status').in('id', ids);
   const pmap={}; (profs||[]).forEach(p=>pmap[p.id]=p);
-  box.innerHTML=rows.map(r=>{ const p=pmap[r.coach_id]||{}; const active=r.status==='active'; return `<div ${active?`class="gtTeamRow" data-id="${r.coach_id}" data-name="${(p.name||'').replace(/"/g,'&quot;')}"`:''} style="display:flex;align-items:center;gap:10px;padding:10px;border:1px solid var(--border);border-radius:10px;margin-bottom:6px;${active?'cursor:pointer;':''}"><div style="width:34px;height:34px;border-radius:50%;background:#333 ${p.photo_url?`url('${p.photo_url}') center/cover`:''};flex-shrink:0;"></div><div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:700;">${p.name||'Kouč'}${p.avail_status==='holiday'?' 🌴':(p.avail_status==='booked'?' 🔒':'')}</div><div style="font-size:11px;color:${active?'var(--green)':'var(--mid)'};">${active?(LANG==='en'?'In team · tap for dashboard':'V týmu · klikni na dashboard'):(LANG==='en'?'Invited (pending)':'Pozván (čeká)')}</div></div>${active?`<button class="gtSchedBtn" data-id="${r.coach_id}" data-name="${(p.name||'').replace(/"/g,'&quot;')}" data-link="${r.id}" data-on="${r.can_manage_schedule?1:0}" style="padding:7px 9px;background:${r.can_manage_schedule?'#E8F5EE':'var(--surf)'};color:${r.can_manage_schedule?'#006040':'var(--mid)'};border:1px solid ${r.can_manage_schedule?'#A8E6C0':'var(--border)'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">📅 ${r.can_manage_schedule?(LANG==='en'?'Schedule ✓':'Rozvrh ✓'):(LANG==='en'?'Schedule':'Rozvrh')}</button>`:''}${active?`<button class="gtEventBtn" data-link="${r.id}" data-on="${r.can_create_events?1:0}" title="${LANG==='en'?'Can create events':'Může vytvářet události'}" style="padding:7px 9px;background:${r.can_create_events?'#EEF0FF':'var(--surf)'};color:${r.can_create_events?'#3535B0':'var(--mid)'};border:1px solid ${r.can_create_events?'#C7CCFF':'var(--border)'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">🎪${r.can_create_events?' ✓':''}</button><button class="gtFighterBtn" data-link="${r.id}" data-on="${r.can_request_fighters?1:0}" title="${LANG==='en'?'Can send fighter requests':'Může posílat přihlášky fighterů'}" style="padding:7px 9px;background:${r.can_request_fighters?'#FFF0E8':'var(--surf)'};color:${r.can_request_fighters?'#B85C00':'var(--mid)'};border:1px solid ${r.can_request_fighters?'#FFD2B0':'var(--border)'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">🥊${r.can_request_fighters?' ✓':''}</button>`:''}<button class="gtRemoveBtn" data-id="${r.coach_id}" data-name="${(p.name||'').replace(/"/g,'&quot;')}" style="padding:7px 10px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;">${LANG==='en'?'Remove':'Odebrat'}</button></div>`; }).join('');
-  box.querySelectorAll('.gtTeamRow').forEach(r=>r.onclick=(e)=>{ if(e.target.classList.contains('gtRemoveBtn')||e.target.classList.contains('gtSchedBtn')) return; openTeamCoachStats(r.dataset.id, r.dataset.name); });
+  box.innerHTML=rows.map(r=>{ const p=pmap[r.coach_id]||{}; const active=r.status==='active'; return `<div ${active?`class="gtTeamRow" data-id="${r.coach_id}" data-name="${(p.name||'').replace(/"/g,'&quot;')}"`:''} style="padding:10px;border:1px solid var(--border);border-radius:10px;margin-bottom:6px;${active?'cursor:pointer;':''}"><div style="display:flex;align-items:center;gap:10px;"><div style="width:34px;height:34px;border-radius:50%;background:#333 ${p.photo_url?`url('${p.photo_url}') center/cover`:''};flex-shrink:0;"></div><div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:700;">${p.name||'Kouč'}${p.avail_status==='holiday'?' 🌴':(p.avail_status==='booked'?' 🔒':'')}</div><div style="font-size:11px;color:${active?'var(--green)':'var(--mid)'};">${active?(LANG==='en'?'In team · tap for dashboard':'V týmu · klikni na dashboard'):(LANG==='en'?'Invited (pending)':'Pozván (čeká)')}</div></div></div><div style="display:flex;flex-wrap:wrap;gap:7px;margin-top:10px;">${active?`<button class="gtSchedBtn" data-id="${r.coach_id}" data-name="${(p.name||'').replace(/"/g,'&quot;')}" data-link="${r.id}" data-on="${r.can_manage_schedule?1:0}" style="padding:7px 9px;background:${r.can_manage_schedule?'#E8F5EE':'var(--surf)'};color:${r.can_manage_schedule?'#006040':'var(--mid)'};border:1px solid ${r.can_manage_schedule?'#A8E6C0':'var(--border)'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">📅 ${r.can_manage_schedule?(LANG==='en'?'Schedule ✓':'Rozvrh ✓'):(LANG==='en'?'Schedule':'Rozvrh')}</button>`:''}${active?`<button class="gtEventBtn" data-link="${r.id}" data-on="${r.can_create_events?1:0}" title="${LANG==='en'?'Can create events':'Může vytvářet události'}" style="padding:7px 9px;background:${r.can_create_events?'#EEF0FF':'var(--surf)'};color:${r.can_create_events?'#3535B0':'var(--mid)'};border:1px solid ${r.can_create_events?'#C7CCFF':'var(--border)'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">🎪${r.can_create_events?' ✓':''}</button><button class="gtFighterBtn" data-link="${r.id}" data-on="${r.can_request_fighters?1:0}" title="${LANG==='en'?'Can send fighter requests':'Může posílat přihlášky fighterů'}" style="padding:7px 9px;background:${r.can_request_fighters?'#FFF0E8':'var(--surf)'};color:${r.can_request_fighters?'#B85C00':'var(--mid)'};border:1px solid ${r.can_request_fighters?'#FFD2B0':'var(--border)'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">🥊${r.can_request_fighters?' ✓':''}</button>`:''}<button class="gtRemoveBtn" data-id="${r.coach_id}" data-name="${(p.name||'').replace(/"/g,'&quot;')}" style="padding:7px 10px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;">${LANG==='en'?'Remove':'Odebrat'}</button></div></div>`; }).join('');
+  box.querySelectorAll('.gtTeamRow').forEach(r=>r.onclick=(e)=>{ if(e.target.closest('button')) return; openTeamCoachStats(r.dataset.id, r.dataset.name); });
   box.querySelectorAll('.gtSchedBtn').forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); toggleCoachSchedulePerm(b.dataset.link, b.dataset.id, b.dataset.name, b.dataset.on==='1'); });
   box.querySelectorAll('.gtRemoveBtn').forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); gymTeamRemove(b.dataset.id, b.dataset.name); });
   box.querySelectorAll('.gtEventBtn').forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); toggleCoachPerm(b.dataset.link, 'can_create_events', b.dataset.on==='1'); });
@@ -11171,8 +11172,8 @@ async function copyAchievementsLink(){ try{ if(typeof ensureReferral==='function
 async function openSharedProfile(token){
   var ov=$('sharedProfileOverlay'); if(!ov) return; var EN=LANG==='en';
   ov.style.display='block'; ov.innerHTML='<div style="min-height:100vh;display:flex;align-items:center;justify-content:center;color:#F4D87A;font-family:&quot;DM Sans&quot;;">'+L('Načítám...')+'</div>';
-  var data=null; try{ var r=await fetch('/api/profile-badges?token='+encodeURIComponent(token)); if(r.ok) data=await r.json(); }catch(e){}
-  if(!data||data.error){ ov.style.display='none'; return; }
+  var data=null; try{ var r=await fetch('/api/profile-badges?token='+encodeURIComponent(token)); if(r.ok){ data=await r.json(); } else { console.warn('[MTL share] /api/profile-badges HTTP '+r.status+' — deploy api/profile-badges.js + set SUPABASE_URL & SUPABASE_SERVICE_ROLE_KEY'); } }catch(e){ console.warn('[MTL share] profile-badges fetch failed', e); }
+  if(!data||data.error){ console.warn('[MTL share] no profile data for token (endpoint missing or token not found)', data); ov.style.display='none'; return; }
   var _li=false; try{ var _s=await supaClient.auth.getSession(); _li=!!(_s&&_s.data&&_s.data.session); }catch(e){}
   var roleLbl={student:(EN?'Student':'Student'),coach:(EN?'Coach':'Kouč'),gym:(EN?'Gym':'Gym')}; var roleIcon={student:'🧑',coach:'🥊',gym:'🏋️'};
   var lvls=(data.levels||[]).map(function(l){ var c=levelColor(l.level); return '<div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.05);border:1px solid '+c.bg+';border-radius:12px;padding:9px 12px;margin-bottom:8px;"><span style="font-size:16px;">'+(roleIcon[l.role]||'')+'</span><span style="flex:1;text-align:left;font-weight:700;color:#fff;font-size:13px;">'+(roleLbl[l.role]||l.role)+'</span><span style="background:'+c.bg+';color:#fff;font-weight:800;font-size:12px;border-radius:8px;padding:4px 10px;">'+(EN?'Level ':'Úroveň ')+l.level+'</span></div>'; }).join('');
@@ -12517,9 +12518,9 @@ if($('supSend')) $('supSend').onclick=()=>submitSupport();
   btn.onclick=()=>{ try{ localStorage.setItem('mtl_cookie_ok','1'); }catch(e){} bar.remove(); };
   bar.appendChild(txt); bar.appendChild(btn);
   document.addEventListener('DOMContentLoaded',()=>document.body.appendChild(bar));
-  document.addEventListener('DOMContentLoaded',function(){ if(typeof maybeSharedProfileRoute==='function') maybeSharedProfileRoute(); });
   if(document.body) document.body.appendChild(bar);
 })();
+(function(){ function _run(){ if(typeof maybeSharedProfileRoute==='function') maybeSharedProfileRoute(); } if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded',_run); } else { _run(); } })();
 
 // Submit
 if($('authMagic')) $('authMagic').onclick=async()=>{
@@ -12571,6 +12572,11 @@ if(typeof loadFounderConfig==='function'){ loadFounderConfig().then(()=>{ if(typ
   $('authEmail').addEventListener('input',()=>{ $('authError').style.display='none'; });
 $('authPass').addEventListener('input',()=>{ $('authError').style.display='none'; });
 
+async function genUniqueReferralCode(){
+  var CS='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  for(var i=0;i<6;i++){ var code='MTL'; for(var k=0;k<10;k++) code+=CS[Math.floor(Math.random()*36)]; try{ var r=await supaClient.from('profiles').select('id').eq('referral_code',code).limit(1); if(!r||!r.data||!r.data.length) return code; }catch(e){ return code; } }
+  return 'MTL'+Date.now().toString(36).toUpperCase()+Math.floor(Math.random()*1296).toString(36).toUpperCase();
+}
 async function ensureReferral(){
   if(!currentUser) return;
   try{
@@ -12580,7 +12586,7 @@ async function ensureReferral(){
     }
     try{ const { data: rt } = await supaClient.from('profiles').select('coach_ref_score, coach_ref_unlocked').eq('id', currentUser.id).single(); if(rt){ currentUser.coach_ref_score=rt.coach_ref_score||0; currentUser.coach_ref_unlocked=!!rt.coach_ref_unlocked; } }catch(e){}
     if(!currentUser.referral_code){
-      const code='MTL'+Math.random().toString(36).slice(2,8).toUpperCase();
+      const code=await genUniqueReferralCode();
       const { error } = await supaClient.from('profiles').update({ referral_code: code }).eq('id', currentUser.id);
       if(!error) currentUser.referral_code=code;
     }
