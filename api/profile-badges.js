@@ -14,7 +14,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 // ---- level math (mirror of index.html: K=2.7, cap 80) ----
-function xpForLevel(L){ if(L<=1) return 0; if(L>80) L=80; return Math.floor(2.7*Math.pow(L-1,1.5)); }
+function xpForLevel(L){ if(L<=1) return 0; if(L>80) L=80; return Math.floor(3*Math.pow(L-1,1.5)); }
 function levelOf(xp){ xp=Math.max(0,Math.round(xp||0)); let lvl=1; for(let L=80;L>=1;L--){ if(xp>=xpForLevel(L)){ lvl=L; break; } } return lvl; }
 
 // tiny REST helper against Supabase (service role bypasses RLS — safe, server-only)
@@ -57,7 +57,7 @@ module.exports = async (req, res) => {
     const s1 = sBk.length;
     const sGa = await sb('gym_attendance?student_id=eq.' + id + '&select=id');
     const sg = sGa.length;
-    const studentXp = s1 + sg;
+    const studentXp = s1*10 + sg;
 
     // distinct sports + coaches (for milestones)
     const sportSet = new Set(); sBk.forEach(b => { if(b.discipline) sportSet.add(b.discipline); });
@@ -69,7 +69,7 @@ module.exports = async (req, res) => {
         '&status=eq.active&type=neq.online&student_confirmed=eq.true&coach_confirmed=eq.true&select=id');
       c1 = cBk.length;
       cev = await sbCount('events?created_by=eq.' + id + '&status=eq.approved&select=id');
-      coachXp = c1 + cev * 50;
+      coachXp = c1*2 + cev * 50;
     }
 
     // 4) GYM (owned) — distinct classes held + events hosted*50
