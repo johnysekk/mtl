@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-IV | Diary 1:1 slot creation reworked to match the schedule flow: inline form with discipline (multi-disc only), Start time and End time pickers; removed the discipline chips above the old Add button and the prompt() time entry. New slots store end_time (graceful fallback insert if column missing). Free-slot display shows the time range. Needs DDL: slots.end_time text. Index only. -->
+<!-- MTL build: 2026-06-07-IW | Founder Dashboard: new Exclusive Partner memberships section showing exact Gross / Stripe fee / Net per currency (from /api/partner-revenue, which reads Stripe balance transactions of all partner_sub subscriptions). Plus a Podklady pro ucetni CSV export of that data. New serverless /api/partner-revenue.js required. Also: Rate difference calculator added to the Become Exclusive Partner overlay (Standard green vs Partner gold breakdown in CZK/USD/EUR). Index + new serverless. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -2040,7 +2040,25 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
     <div id="piBody" style="padding:8px 20px 4px;"></div>
     <div style="padding:6px 20px max(20px,env(safe-area-inset-bottom));">
       <button id="piCta" style="width:100%;padding:14px;background:#171717;color:#F4D87A;border:1.5px solid #E8C24A;border-radius:12px;font-weight:800;font-size:15px;cursor:pointer;font-family:'DM Sans';">⭐</button>
+      <button id="piCalc" onclick="openRateCalc()" style="width:100%;margin-top:10px;padding:12px;background:#fff;color:var(--dark);border:1.5px solid #E8C24A;border-radius:12px;font-weight:700;font-size:14px;cursor:pointer;font-family:'DM Sans';" data-noi18n>📊 Rate difference calculator</button>
       <div onclick="closePartnerInfo()" style="text-align:center;margin-top:12px;font-size:14px;color:var(--mid);cursor:pointer;font-weight:600;">Zavřít</div>
+    </div>
+  </div>
+</div>
+
+<div class="picker-ov" id="rateCalcOv" onclick="if(event.target===this)closeRateCalc()">
+  <div class="picker-sh">
+    <div style="padding:22px 20px 6px;text-align:center;">
+      <div style="font-family:'Bebas Neue';font-size:23px;letter-spacing:.04em;color:var(--dark);" id="rcTitle" data-noi18n>RATE DIFFERENCE CALCULATOR</div>
+      <div style="font-size:12px;color:var(--mid);margin-top:2px;" id="rcHint"></div>
+    </div>
+    <div style="padding:8px 20px 4px;">
+      <div id="rcCurRow" style="display:flex;gap:6px;margin-bottom:10px;"></div>
+      <input id="rcPrice" type="number" min="0" inputmode="decimal" placeholder="0" oninput="if(typeof renderRateCalc==='function')renderRateCalc()" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:12px;font-size:18px;font-weight:700;font-family:'DM Sans';text-align:center;margin-bottom:14px;">
+      <div id="rcBody"></div>
+    </div>
+    <div style="padding:6px 20px max(20px,env(safe-area-inset-bottom));">
+      <div onclick="closeRateCalc()" id="rcClose" style="text-align:center;font-size:14px;color:var(--mid);cursor:pointer;font-weight:600;">Zavřít</div>
     </div>
   </div>
 </div>
@@ -9929,6 +9947,9 @@ async function renderFounderDash(){
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🔁</div><div class="prow-lbl">${LANG==='en'?'Recurring net / mo':'Recurring net / měs'}</div></div><span class="prow-val" style="color:#006040;">${fmt(mtlMemMo)}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">📈</div><div class="prow-lbl">${LANG==='en'?'MTL ARR (recurring ×12)':'MTL ARR (recurring ×12)'}</div></div><span class="prow-val">${fmt(mtlARR)}</span></div>
     </div>
+    <div class="sec-lbl">${LANG==='en'?'Exclusive Partner memberships ($49/mo · exact from Stripe)':'Exclusive Partner členství ($49/měs · přesně ze Stripe)'}</div>
+    <div id="fdPartnerRev" style="margin-bottom:8px;"><p style="color:var(--light);font-size:12px;padding:6px 0;">${L('Načítám...')}</p></div>
+    <button id="fdExportPartner" style="width:100%;padding:12px;background:#171717;color:#F4D87A;border:1.5px solid #E8C24A;border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:18px;">📄 ${LANG==='en'?'Accounting export (CSV)':'Podklady pro účetní (CSV)'}</button>
     <div class="sec-lbl">${LANG==='en'?'By month':'Po měsících'}</div>
     <select id="fdMonthSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:10px;">${monthOpts}</select>
     <div class="prow-group" id="fdMonthBox" style="margin-bottom:6px;"></div>
@@ -9971,6 +9992,33 @@ async function renderFounderDash(){
   box.querySelectorAll('.fdCoachRow').forEach(r=>r.onclick=()=>openCoachStats(r.dataset.id, r.dataset.name));
   box.querySelectorAll('.fdGymRow').forEach(r=>r.onclick=()=>openGymStats(r.dataset.id, r.dataset.name));
   renderFounderDisciplines();
+  if(typeof loadFounderPartnerRevenue==='function') loadFounderPartnerRevenue();
+  { const _ep=$('fdExportPartner'); if(_ep) _ep.onclick=_founderPartnerExport; }
+}
+let _fdPartnerData=null;
+async function loadFounderPartnerRevenue(){
+  const box=$('fdPartnerRev'); if(!box) return;
+  try{
+    const r=await fetch('/api/partner-revenue'); const j=await r.json();
+    if(!j||!j.ok){ box.innerHTML=`<p style="color:var(--light);font-size:12px;">${LANG==='en'?'Could not load (endpoint not deployed yet?).':'Nelze načíst (endpoint ještě nenasazen?).'}</p>`; _fdPartnerData=null; return; }
+    _fdPartnerData=j; const cur=j.byCurrency||{}; const keys=Object.keys(cur);
+    const f=(v,c)=>fmtPrice(Math.round(v*100)/100, c);
+    let rows='';
+    if(!keys.length){ rows=`<p style="color:var(--light);font-size:12px;padding:6px 0;">${LANG==='en'?'No partner payments yet.':'Zatím žádné platby partnerů.'}</p>`; }
+    else { rows=keys.map(c=>{ const d=cur[c]; return `<div style="background:linear-gradient(135deg,#FFF7E0,#FBEFC4);border:1.5px solid #E8C24A;border-radius:12px;padding:12px 14px;margin-bottom:8px;"><div style="font-weight:800;font-size:13px;color:#8a6a12;margin-bottom:6px;">${c} · ${d.count} ${LANG==='en'?'payments':'plateb'}</div><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:3px;"><span style="color:var(--mid);">${LANG==='en'?'Gross':'Hrubé'}</span><b>${f(d.gross,c)}</b></div><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:3px;color:var(--mid);"><span>− Stripe fee</span><span>${f(d.fee,c)}</span></div><div style="display:flex;justify-content:space-between;font-size:14px;font-weight:800;color:#006040;border-top:1px solid #E8C24A;padding-top:5px;margin-top:3px;"><span>= Net</span><span>${f(d.net,c)}</span></div></div>`; }).join(''); }
+    box.innerHTML=`${rows}<p style="font-size:11px;color:var(--light);line-height:1.5;">${(j.partners||0)+' '+(LANG==='en'?'partner subscription(s). Net = settled amount after Stripe fees, exact from Stripe balance transactions.':'partnerských předplatných. Net = vypořádaná částka po Stripe fees, přesně ze Stripe balance transactions.')}</p>`;
+  }catch(e){ box.innerHTML=`<p style="color:var(--light);font-size:12px;">${LANG==='en'?'Could not load.':'Nelze načíst.'}</p>`; }
+}
+function _founderPartnerExport(){
+  const EN=LANG==='en'; const j=_fdPartnerData;
+  const esc=v=>{ const x=String(v==null?'':v); return /[",;\n]/.test(x)?('"'+x.replace(/"/g,'""')+'"'):x; };
+  const H=[EN?'Currency':'Měna', EN?'Payments':'Plateb', EN?'Gross':'Hrubé', 'Stripe fee', 'Net'];
+  const out=[H.join(';')];
+  if(j&&j.byCurrency){ Object.keys(j.byCurrency).forEach(c=>{ const d=j.byCurrency[c]; out.push([c, d.count, (Math.round(d.gross*100)/100), (Math.round(d.fee*100)/100), (Math.round(d.net*100)/100)].map(esc).join(';')); }); }
+  const csv='\ufeff'+out.join('\n');
+  const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'}); const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download='MTL_podklady_partner_'+new Date().toISOString().slice(0,10)+'.csv'; a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
+  toast(EN?'✅ CSV exported':'✅ CSV vyexportováno');
 }
 function renderFounderDisciplines(){
   const box=$('fdDiscPanel'); if(!box) return;
@@ -11228,6 +11276,23 @@ function epRatesCardHTML(showCoach, showGym){
   if(showCoach){ inner+=sub(EN?'COACH RATES':'SAZBY KOUČE')+`<div style="display:flex;gap:7px;margin-bottom:${showGym?'11px':'0'};">`+cell(EN?'You keep':'Tvůj podíl','99 %','95 %')+cell(EN?'Student markup':'Student markup','+3 %','+5 %')+`</div>`; }
   if(showGym){ inner+=sub(EN?'GYM RATES':'SAZBY GYMU')+`<div style="display:flex;gap:7px;">`+cell(EN?'Memberships':'Členství','3 %','5 %')+cell(EN?'Drop-ins':'Jednorázové','1 % / 1 %','3 % / 3 %')+`</div>`; }
   return `<div style="background:linear-gradient(135deg,#171717,#2c2c2c);border:1.5px solid #E8C24A;border-radius:14px;padding:13px 15px;box-shadow:0 6px 20px rgba(0,0,0,.18);">${_epBanner}${inner}</div>`;
+}
+let _rcCur='CZK';
+function closeRateCalc(){ const o=$('rateCalcOv'); if(o) o.classList.remove('open'); }
+function openRateCalc(){ const EN=LANG==='en'; if($('rcTitle')) $('rcTitle').textContent=EN?'RATE DIFFERENCE CALCULATOR':'KALKULAČKA ROZDÍLU SAZEB'; if($('rcHint')) $('rcHint').textContent=EN?'Enter a 1:1 lesson price to compare':'Zadej cenu soukromé lekce a porovnej'; if($('rcClose')) $('rcClose').textContent=EN?'Close':'Zavřít'; _rcCur='CZK'; if($('rcPrice')) $('rcPrice').value=''; renderRateCalc(); $('rateCalcOv').classList.add('open'); setTimeout(()=>{ if($('rcPrice')) $('rcPrice').focus(); },150); }
+function renderRateCalc(){
+  const EN=LANG==='en';
+  const curRow=$('rcCurRow'); if(curRow){ curRow.innerHTML=['CZK','USD','EUR'].map(c=>{ const on=c===_rcCur; return `<button class="rcCurBtn" data-c="${c}" style="flex:1;padding:9px;border-radius:9px;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'#fff'};color:${on?'#fff':'var(--dark)'};font-weight:700;font-family:'DM Sans';font-size:13px;cursor:pointer;">${c}</button>`; }).join(''); curRow.querySelectorAll('.rcCurBtn').forEach(b=>b.onclick=()=>{ _rcCur=b.dataset.c; renderRateCalc(); }); }
+  const sym=_rcCur==='CZK'?'Kč':_rcCur==='USD'?'$':'€';
+  const base=parseFloat(($('rcPrice')&&$('rcPrice').value)||'0')||0;
+  const r=v=>fmtPrice(Math.round(v*100)/100, _rcCur);
+  const card=(title,col,bg,brd,keepMul,payMul)=>`<div style="background:${bg};border:1.5px solid ${brd};border-radius:14px;padding:13px 15px;margin-bottom:10px;"><div style="font-weight:800;font-size:12px;letter-spacing:.04em;color:${col};margin-bottom:8px;">${title}</div><div style="display:flex;justify-content:space-between;font-size:14px;margin-bottom:5px;"><span style="color:var(--mid);">${EN?'You keep':'Ty dostaneš'}</span><b style="color:${col};">${r(base*keepMul)} ${sym}</b></div><div style="display:flex;justify-content:space-between;font-size:14px;"><span style="color:var(--mid);">${EN?'Student pays':'Student zaplatí'}</span><b>${r(base*payMul)} ${sym}</b></div></div>`;
+  const body=$('rcBody'); if(!body) return;
+  if(base<=0){ body.innerHTML=`<p style="text-align:center;color:var(--light);font-size:13px;padding:8px 0;">${EN?'Enter a price above.':'Zadej cenu výše.'}</p>`; return; }
+  const diffKeep=base*0.99-base*0.95, diffPay=base*1.05-base*1.03;
+  body.innerHTML=card('STANDARD','#0a6b43','#F0FBF0','#C0E8C0',0.95,1.05)
+    +card('EXCLUSIVE MTL PARTNER','#8a6a12','linear-gradient(135deg,#FFF7E0,#FBEFC4)','#E8C24A',0.99,1.03)
+    +`<div style="background:#171717;border-radius:12px;padding:11px 14px;text-align:center;"><div style="font-size:12px;color:#F4D87A;font-weight:700;line-height:1.5;">${EN?'As a Partner you keep':'Jako Partner dostaneš navíc'} <b>+${r(diffKeep)} ${sym}</b>${EN?' more, and your student pays':' a student zaplatí'} <b>−${r(diffPay)} ${sym}</b>${EN?' less per lesson.':' méně za lekci.'}</div></div>`;
 }
 function openPartnerInfo(){
   const EN=LANG==='en';
