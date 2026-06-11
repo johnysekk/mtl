@@ -35,7 +35,7 @@ async function sbCount(path){
   return isNaN(n) ? 0 : n;
 }
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cache-Control', 's-maxage=120, stale-while-revalidate=600');
   try{
@@ -122,4 +122,4 @@ module.exports = async (req, res) => {
   }catch(e){
     res.status(500).json({ error: 'server error' });
   }
-};
+}
