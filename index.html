@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-IR | Schedule editors (gym owner + team coach) now have labels above each field (Day / Start / End) and the duration field is replaced by an END-TIME picker (same time-picker flow); dur still stored internally via _endToDur. Full schedule (Cely rozvrh) day headers now show the next occurrence date (e.g. PO 16.6.). Czech typo Urava->Uprava in coach pricing approved status. Index only. -->
+<!-- MTL build: 2026-06-07-IS | (1) Past-lock: in gym owner schedule editor, days before today are read-only (no edit fields, lock icon, no Add button) - attendance still openable. (2) Leader vs payee split: new leader/leaderName field set by a Kdo vede lekci selector (owner or team coach); coach stays the payee (Platba komu). Diary propagation, full-schedule view, occ builders, attendance and the owner card now use leader||coach (payee no longer affects the diary). Owner-as-leader shows by name in gym schedule + coach diary. (3) Diary blue card text -> vedes (lze upravovat v sekci Gymu). (4) Blue Skupinovka dot added to diary legend. Index only. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -1355,6 +1355,7 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
     <div style="display:flex;gap:14px;margin-top:12px;margin-bottom:4px;font-size:12px;color:var(--mid);">
       <div style="display:flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;border-radius:50%;background:var(--red);display:inline-block;"></span> Rezervace</div>
       <div style="display:flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;border-radius:50%;background:var(--green);display:inline-block;"></span> Volný termín</div>
+      <div style="display:flex;align-items:center;gap:5px;"><span style="width:10px;height:10px;border-radius:50%;background:#1E6FD9;display:inline-block;"></span> Skupinovka</div>
     </div>
     <div id="diaryDayDetail" style="margin-top:20px;"></div>
       </div><!-- /diaryCalTab -->
@@ -2223,6 +2224,7 @@ const I18N = { en: {
   "💰 Výdělky":"💰 Earnings",
   "🔁 Hromadné / opakované termíny":"🔁 Bulk / recurring slots",
   "Rezervace":"Booked",
+  "Skupinovka":"Group class",
   "Volný termín":"Open slot",
   "Po":"Mon","Út":"Tue","St":"Wed","Čt":"Thu","Pá":"Fri","So":"Sat","Ne":"Sun",
   "📅 Přidat do kalendáře":"📅 Add to calendar",
@@ -5911,6 +5913,13 @@ function leadSelectHtml(cls, idx, curLead){
     .concat(coaches.map(c=>`<option value="${c.id}" ${c.id===curLead?'selected':''}>${(c.name||'').replace(/"/g,'&quot;')}</option>`)).join('');
   return `<div style="font-size:11px;color:var(--light);margin:6px 0 2px;">${LANG==='en'?'Led by (teaches & looks after these members):':'Vede (učí a stará se o tyto členy):'}</div><select class="${cls}" data-i="${idx}" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${opts}</select>`;
 }
+function classLeadSelectHtml(cls, idx, curLead){
+  const oid=(_myGymData&&_myGymData.owner_id)||(currentUser&&currentUser.id)||'';
+  const coaches=(_gymTeamCoaches||[]);
+  const opts=[`<option value="${oid}" ${(!curLead||curLead===oid)?'selected':''}>${LANG==='en'?'You (owner)':'Ty (majitel)'}</option>`]
+    .concat(coaches.map(c=>`<option value="${c.id}" ${c.id===curLead?'selected':''}>${(c.name||'').replace(/"/g,'&quot;')}</option>`)).join('');
+  return `<div style="font-size:11px;color:var(--light);margin:8px 0 2px;font-weight:600;">${LANG==='en'?'Who leads the class:':'Kdo vede lekci:'}</div><select class="${cls}" data-i="${idx}" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${opts}</select>`;
+}
 function upcomingClasses(schedule, days){
   days = days||7; const out=[]; const now=new Date();
   for(let d=0; d<days; d++){
@@ -5918,7 +5927,7 @@ function upcomingClasses(schedule, days){
     const dow=date.getDay();
     (schedule||[]).filter(c=>Number(c.day)===dow).forEach(c=>{
       if(d===0){ const [h,mi]=String(c.time||'00:00').split(':').map(Number); const ct=new Date(date); ct.setHours(h||0,mi||0,0,0); if(ct<now) return; }
-      out.push({ name:c.name, date:date.toISOString().slice(0,10), time:c.time, dur:Number(c.dur)||60, level:c.level||'all', coach:c.coach||null, coachName:c.coachName||null, disc:c.disc||null });
+      out.push({ name:c.name, date:date.toISOString().slice(0,10), time:c.time, dur:Number(c.dur)||60, level:c.level||'all', coach:(c.leader||c.coach)||null, coachName:(c.leaderName||c.coachName)||null, disc:c.disc||null });
     });
   }
   out.sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time));
@@ -6123,7 +6132,7 @@ async function openCoachScheduleEditor(gymId, gymName){
     _csGym=g||null;
     let sch=[]; try{ sch = g&&g.schedule ? (typeof g.schedule==='string'?JSON.parse(g.schedule):g.schedule) : []; }catch(e){ sch=[]; }
     _csSched = (sch||[]).filter(c=>c.coach===currentUser.id).map(c=>({ day:Number(c.day)||0, time:c.time||'18:00', name:c.name||'', level:c.level||'all', dur:Number(c.dur)||60 }));
-    _csFullSched = (sch||[]).map(c=>({ day:Number(c.day)||0, time:c.time||'18:00', name:c.name||'', level:c.level||'all', dur:Number(c.dur)||60, coach:c.coach||null, coachName:c.coachName||null })); _csView='mine';
+    _csFullSched = (sch||[]).map(c=>({ day:Number(c.day)||0, time:c.time||'18:00', name:c.name||'', level:c.level||'all', dur:Number(c.dur)||60, coach:(c.leader||c.coach)||null, coachName:(c.leaderName||c.coachName)||null })); _csView='mine';
     const sym=(_csGym&&_csGym.currency==='EUR')?'€':(_csGym&&_csGym.currency==='USD')?'$':'Kč';
     if($('coachSchedHint')) $('coachSchedHint').textContent = (LANG==='en'
       ? `Add the classes you teach here. The gym owner controls payout routing and approves schedule changes — you cannot change who gets paid. You can also propose your own drop-in & membership prices below; the gym owner approves them.`
@@ -6173,7 +6182,7 @@ async function saveCoachSchedule(){
   try{ const { data: g } = await supaClient.from('gyms').select('schedule').eq('id', _csGymId).single(); fresh = g&&g.schedule ? (typeof g.schedule==='string'?JSON.parse(g.schedule):g.schedule) : []; }catch(e){ fresh=[]; }
   const others=(fresh||[]).filter(c=>c.coach!==currentUser.id);
   const oldMine=(fresh||[]).filter(c=>c.coach===currentUser.id);
-  const mine=_csSched.map(c=>{ const nm=(c.name&&c.name.trim())?c.name.trim():levelLabel(c.level||'all'); return { day:Number(c.day)||0, time:c.time||'18:00', name:nm, level:c.level||'all', dur:Number(c.dur)||60, coach:currentUser.id, coachName:currentUser.name||null, coachOwned:true }; });
+  const mine=_csSched.map(c=>{ const nm=(c.name&&c.name.trim())?c.name.trim():levelLabel(c.level||'all'); return { day:Number(c.day)||0, time:c.time||'18:00', name:nm, level:c.level||'all', dur:Number(c.dur)||60, leader:currentUser.id, leaderName:currentUser.name||null, coach:currentUser.id, coachName:currentUser.name||null, coachOwned:true }; });
   const { error } = await supaClient.from('gyms').update({ schedule: JSON.stringify(others.concat(mine)) }).eq('id', _csGymId);
   if(error){ toast('⚠️ '+error.message); return; }
   toast(LANG==='en'?'✅ Saved':'✅ Uloženo');
@@ -7302,7 +7311,7 @@ function _endToDur(s,e){ try{ const a=String(s||'18:00').split(':'),b=String(e||
 function _todayGymClasses(g){
   let sch=[]; try{ sch=(typeof g.schedule==='string')?JSON.parse(g.schedule||'[]'):(g.schedule||[]); }catch(e){ sch=[]; }
   const now=new Date(); const dow=now.getDay(); const ds=now.toISOString().slice(0,10);
-  return (sch||[]).filter(c=>Number(c.day)===dow).map(c=>({ name:c.name||'', date:ds, time:c.time||'18:00', dur:Number(c.dur)||60, level:c.level||'all', coach:c.coach||null, coachName:c.coachName||null, disc:c.disc||null })).sort((a,b)=>String(a.time).localeCompare(String(b.time)));
+  return (sch||[]).filter(c=>Number(c.day)===dow).map(c=>({ name:c.name||'', date:ds, time:c.time||'18:00', dur:Number(c.dur)||60, level:c.level||'all', coach:(c.leader||c.coach)||null, coachName:(c.leaderName||c.coachName)||null, disc:c.disc||null })).sort((a,b)=>String(a.time).localeCompare(String(b.time)));
 }
 function gdMul(op){ return op?1.01:1.03; }
 function _recPrice(occ){
@@ -7678,7 +7687,7 @@ function renderScheduleEditor(){
       <input class="schName" data-i="${i}" type="text" value="${(c.name||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Class name':'Název třídy'}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';margin-bottom:6px;">
       <select class="schLevel" data-i="${i}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${CLASS_LEVELS.concat(gymCustomTags().map(t=>({v:t,cs:t,en:t}))).map(o=>`<option value="${o.v}" ${o.v===(c.level||'all')?'selected':''}>${LANG==='en'?o.en:o.cs}</option>`).join('')}</select>
       ${isMultiDiscipline()?`<select class="schDisc" data-i="${i}" style="width:100%;box-sizing:border-box;padding:10px;margin-top:6px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${activeDisciplines().filter(o=>!(_gymMgDisc&&_gymMgDisc.length)||_gymMgDisc.includes(o.v)).map(o=>{ const _gd=(_gymMgDisc&&_gymMgDisc.length); const _sel=(c.disc && (!_gd||_gymMgDisc.includes(c.disc))) ? c.disc : ((_gd&&_gymMgDisc[0])||defaultDiscipline()); return `<option value="${o.v}" ${o.v===_sel?'selected':''}>${o.emoji} ${LANG==='en'?o.en:o.cs}</option>`; }).join('')}</select>`:''}
-      ${c.coachOwned ? `<div style="font-size:11px;color:var(--light);margin:6px 0 2px;">${LANG==='en'?'Paid to:':'Platba komu:'}</div><div style="padding:9px 11px;border:1.5px solid #A8E6C0;background:#F0FBF0;border-radius:10px;font-size:13px;font-weight:700;color:#006040;">🔒 ${escapeHtml(c.coachName||(LANG==='en'?'Coach':'Kouč'))}</div><div style="font-size:10.5px;color:var(--light);margin-top:3px;line-height:1.45;">${LANG==='en'?'This class was set up by the coach with their own pricing — payment goes to them and cannot be changed here.':'Tuto lekci si nastavil kouč s vlastním ceníkem — platba jde jemu a nelze ji tu změnit.'}</div>` : payeeSelectHtml('schCoach', i, c.coach)}
+      ${c.coachOwned ? `<div style="font-size:11px;color:var(--light);margin:6px 0 2px;">${LANG==='en'?'Paid to:':'Platba komu:'}</div><div style="padding:9px 11px;border:1.5px solid #A8E6C0;background:#F0FBF0;border-radius:10px;font-size:13px;font-weight:700;color:#006040;">🔒 ${escapeHtml(c.coachName||(LANG==='en'?'Coach':'Kouč'))}</div><div style="font-size:10.5px;color:var(--light);margin-top:3px;line-height:1.45;">${LANG==='en'?'This class was set up by the coach with their own pricing — payment goes to them and cannot be changed here.':'Tuto lekci si nastavil kouč s vlastním ceníkem — platba jde jemu a nelze ji tu změnit.'}</div>` : classLeadSelectHtml('schLead', i, c.leader||c.coach)+payeeSelectHtml('schCoach', i, c.coach)}
       <button class="schSaveCls" data-i="${i}" style="width:100%;margin-top:10px;padding:11px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;">💾 ${LANG==='en'?'Save class':'Uložit lekci'}</button>
     </div>`;
   const rangeLbl=`${weekDates[0].getDate()}.${weekDates[0].getMonth()+1}. – ${weekDates[6].getDate()}.${weekDates[6].getMonth()+1}.`;
@@ -7696,27 +7705,28 @@ function renderScheduleEditor(){
     </button>`; });
   html+=`</div>`;
   const idxs=_gymSchedule.map((c,i)=>({c,i})).filter(x=>Number(x.c.day)===_schedSelDow).sort((a,b)=>String(a.c.time||'').localeCompare(String(b.c.time||'')));
+  const _today0=new Date(); _today0.setHours(0,0,0,0); const _selDate=(weekDates.find(d=>d.getDay()===_schedSelDow)||weekDates[0]||new Date()); const _selPast=_selDate < _today0;
   html+=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
       <div style="font-weight:800;font-size:14px;letter-spacing:.02em;">${days[_schedSelDow]} <span style="color:var(--light);font-weight:600;">(${idxs.length})</span></div>
-      <button id="schAddSel" style="font-size:13px;font-weight:700;color:#fff;background:var(--blue);border:none;border-radius:9px;padding:7px 13px;cursor:pointer;">+ ${LANG==='en'?'Add a class':'Přidat lekci'}</button>
+      ${_selPast?`<span style="font-size:12px;color:var(--light);font-weight:600;">🔒 ${LANG==='en'?'Past — read only':'Proběhlé — jen čtení'}</span>`:`<button id="schAddSel" style="font-size:13px;font-weight:700;color:#fff;background:var(--blue);border:none;border-radius:9px;padding:7px 13px;cursor:pointer;">+ ${LANG==='en'?'Add a class':'Přidat lekci'}</button>`}
     </div>`;
   if(!idxs.length) html+=`<div style="font-size:13px;color:var(--light);padding:6px 0 10px;">${LANG==='en'?'No classes on this day.':'V tento den žádné lekce.'}</div>`;
-  idxs.forEach(({c,i})=>{ const open=i===_schedEdit; const lvl=(c.level&&c.level!=='all')?` · ${levelLabel(c.level)}`:''; const led=c.coachName?` · 👤 ${escapeHtml(c.coachName)}`:'';
+  idxs.forEach(({c,i})=>{ const open=i===_schedEdit; const lvl=(c.level&&c.level!=='all')?` · ${levelLabel(c.level)}`:''; const _ldn=c.leaderName||c.coachName; const led=_ldn?` · 👤 ${escapeHtml(_ldn)}`:'';
     html+=`<div style="border:1px solid ${open?'var(--dark)':'var(--border)'};border-radius:12px;padding:9px 11px;margin-bottom:6px;background:${open?'var(--surf)':'#fff'};">
       <div class="schCardOpen" data-i="${i}" style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;gap:8px;">
         <div style="font-size:13px;min-width:0;"><strong>${c.time||'--:--'}${c.dur?('–'+_classEnd(c.time,c.dur)):''}</strong> · ${c.name?escapeHtml(c.name):`<span style="color:var(--light);">${LANG==='en'?'(no name)':'(bez názvu)'}</span>`}<span style="color:var(--mid);font-size:12px;">${lvl}${led}</span></div>
         <button class="schAtt" data-i="${i}" style="flex-shrink:0;padding:5px 9px;background:#EEF2F6;color:#1E6FD9;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">📋 ${LANG==='en'?'Attendance':'Docházka'}</button>
-        <span style="color:var(--light);font-size:14px;flex-shrink:0;">${open?'▴':'✎'}</span>
+        <span style="color:var(--light);font-size:14px;flex-shrink:0;">${_selPast?'🔒':(open?'▴':'✎')}</span>
       </div>
-      ${open?editFields(c,i):''}
+      ${(open&&!_selPast)?editFields(c,i):''}
     </div>`; });
   box.innerHTML=html;
   if($('schPrev')) $('schPrev').onclick=()=>{ _schedWeek--; renderScheduleEditor(); };
   if($('schNext')) $('schNext').onclick=()=>{ _schedWeek++; renderScheduleEditor(); };
   box.querySelectorAll('.schDayCell').forEach(el=>el.onclick=()=>{ _schedSelDow=+el.dataset.dow; _schedEdit=-1; renderScheduleEditor(); });
   if($('schAddSel')) $('schAddSel').onclick=()=>{ _gymSchedule.push({day:_schedSelDow, time:'18:00', name:'', level:'all', dur:60, disc:(isMultiDiscipline()?defaultDiscipline():null)}); _schedEdit=_gymSchedule.length-1; renderScheduleEditor(); };
-  box.querySelectorAll('.schCardOpen').forEach(el=>el.onclick=()=>{ const i=+el.dataset.i; _schedEdit=(_schedEdit===i?-1:i); renderScheduleEditor(); });
-  box.querySelectorAll('.schAtt').forEach(el=>el.onclick=(e)=>{ e.stopPropagation(); const i=+el.dataset.i; const c=_gymSchedule[i]; if(!c) return; const sd=weekDates.find(d=>d.getDay()===_schedSelDow)||weekDates[0]; const ds=`${sd.getFullYear()}-${String(sd.getMonth()+1).padStart(2,'0')}-${String(sd.getDate()).padStart(2,'0')}`; openClassAttendance({ date:ds, time:c.time, name:c.name||'', level:c.level||'all', coach:c.coach||null, coachName:c.coachName||'', disc:c.disc||null }); });
+  box.querySelectorAll('.schCardOpen').forEach(el=>el.onclick=()=>{ if(_selPast) return; const i=+el.dataset.i; _schedEdit=(_schedEdit===i?-1:i); renderScheduleEditor(); });
+  box.querySelectorAll('.schAtt').forEach(el=>el.onclick=(e)=>{ e.stopPropagation(); const i=+el.dataset.i; const c=_gymSchedule[i]; if(!c) return; const sd=weekDates.find(d=>d.getDay()===_schedSelDow)||weekDates[0]; const ds=`${sd.getFullYear()}-${String(sd.getMonth()+1).padStart(2,'0')}-${String(sd.getDate()).padStart(2,'0')}`; openClassAttendance({ date:ds, time:c.time, name:c.name||'', level:c.level||'all', coach:(c.leader||c.coach)||null, coachName:(c.leaderName||c.coachName)||'', disc:c.disc||null }); });
   box.querySelectorAll('.schDay').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].day=+el.value; _schedSelDow=+el.value; renderScheduleEditor(); });
   box.querySelectorAll('.schTime').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].time=el.value; renderScheduleEditor(); });
   box.querySelectorAll('.schEnd').forEach(el=>el.onchange=()=>{ const _i=+el.dataset.i; _gymSchedule[_i].dur=_endToDur(_gymSchedule[_i].time, el.value); renderScheduleEditor(); });
@@ -7724,6 +7734,7 @@ function renderScheduleEditor(){
   box.querySelectorAll('.schLevel').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].level=el.value; });
   box.querySelectorAll('.schDisc').forEach(el=>{ const it=_gymSchedule[+el.dataset.i]; if(!it.disc) it.disc=el.value||defaultDiscipline(); el.onchange=()=>{ _gymSchedule[+el.dataset.i].disc=el.value; }; });
   box.querySelectorAll('.schCoach').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; it.coach=el.value||null; const c=_gymTeamCoaches.find(x=>x.id===el.value); it.coachName=c?c.name:null; });
+  box.querySelectorAll('.schLead').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; const oid=(_myGymData&&_myGymData.owner_id)||(currentUser&&currentUser.id); it.leader=el.value||oid; if(it.leader===oid){ it.leaderName=(currentUser&&currentUser.name)||(LANG==='en'?'Owner':'Majitel'); } else { const cc=_gymTeamCoaches.find(x=>x.id===it.leader); it.leaderName=cc?cc.name:null; } renderScheduleEditor(); });
   box.querySelectorAll('.schDel').forEach(el=>el.onclick=()=>{ _gymSchedule.splice(+el.dataset.i,1); _schedEdit=-1; renderScheduleEditor(); });
   box.querySelectorAll('.schSaveCls').forEach(el=>el.onclick=()=>saveScheduleOnly());
 }
@@ -10935,7 +10946,7 @@ async function loadDiaryData(){
     const gids=[...new Set((links||[]).map(l=>l.gym_id).filter(Boolean))];
     if(gids.length){
       const { data:gs } = await supaClient.from('gyms').select('id,name,schedule').in('id', gids);
-      (gs||[]).forEach(g=>{ let sc=[]; try{ sc=(typeof g.schedule==='string')?JSON.parse(g.schedule||'[]'):(g.schedule||[]); }catch(e){ sc=[]; } (sc||[]).filter(c=>c.coach===currentUser.id).forEach(c=>{ diaryClasses.push({ gymId:g.id, gymName:g.name||'', day:Number(c.day)||0, time:c.time||'18:00', dur:Number(c.dur)||60, name:c.name||'', level:c.level||'all' }); }); });
+      (gs||[]).forEach(g=>{ let sc=[]; try{ sc=(typeof g.schedule==='string')?JSON.parse(g.schedule||'[]'):(g.schedule||[]); }catch(e){ sc=[]; } (sc||[]).filter(c=>(c.leader||c.coach)===currentUser.id).forEach(c=>{ diaryClasses.push({ gymId:g.id, gymName:g.name||'', day:Number(c.day)||0, time:c.time||'18:00', dur:Number(c.dur)||60, name:c.name||'', level:c.level||'all' }); }); });
     }
   }catch(e){ diaryClasses=[]; }
 }
@@ -11040,7 +11051,7 @@ function showDiaryDay(dateStr){
 
   dayClasses.forEach(c=>{
     const _end=c.dur?('–'+_classEnd(c.time,c.dur)):'';
-    html += `<div style="background:#EEF4FF;border:1px solid #C5D9F5;border-radius:12px;padding:12px;margin-bottom:8px;"><div style="font-size:15px;font-weight:700;color:#1E5FB8;">🥊 ${c.time}${_end} · ${c.name?escapeHtml(c.name):(LANG==='en'?'Group class':'Skupinovka')}</div><div style="font-size:12px;color:var(--mid);margin-top:3px;">${escapeHtml(c.gymName||'')}${c.level&&c.level!=='all'?' · '+levelLabel(c.level):''} · ${LANG==='en'?'you teach (read-only)':'vedeš (jen čtení)'}</div></div>`;
+    html += `<div style="background:#EEF4FF;border:1px solid #C5D9F5;border-radius:12px;padding:12px;margin-bottom:8px;"><div style="font-size:15px;font-weight:700;color:#1E5FB8;">🥊 ${c.time}${_end} · ${c.name?escapeHtml(c.name):(LANG==='en'?'Group class':'Skupinovka')}</div><div style="font-size:12px;color:var(--mid);margin-top:3px;">${escapeHtml(c.gymName||'')}${c.level&&c.level!=='all'?' · '+levelLabel(c.level):''} · ${LANG==='en'?'you teach (manage in the Gym section)':'vedeš (lze upravovat v sekci Gymu)'}</div></div>`;
   });
   dayBookings.forEach(b=>{
     html += `
