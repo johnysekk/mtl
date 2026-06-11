@@ -57,22 +57,25 @@ export default async function handler(req, res) {
     const s1 = sBk.length;
     const sGa = await sb('gym_attendance?student_id=eq.' + id + '&select=id');
     const sg = sGa.length;
-    const studentXp = s1*10 + sg;
+    const studentXp = s1*10 + sg*2;
 
     // distinct sports + coaches (for milestones)
     const sportSet = new Set(); sBk.forEach(b => { if(b.discipline) sportSet.add(b.discipline); });
 
-    // 3) COACH — physical 1:1 taught + events hosted*50
+    const NOW = encodeURIComponent(new Date().toISOString());
+    // 3) COACH — physical 1:1 taught + group classes taught + events hosted*40
     let coachXp = 0, c1 = 0, cev = 0;
     if(isCoach){
       const cBk = await sb('bookings?coach_id=eq.' + id +
         '&status=eq.active&type=neq.online&student_confirmed=eq.true&coach_confirmed=eq.true&select=id');
       c1 = cBk.length;
-      cev = await sbCount('events?created_by=eq.' + id + '&status=eq.approved&select=id');
-      coachXp = c1*2 + cev * 50;
+      cev = await sbCount('events?created_by=eq.' + id + '&status=eq.approved&starts_at=lt.' + NOW + '&select=id');
+      const cga = await sb('gym_attendance?coach_id=eq.' + id + '&select=class_date,class_time,gym_id');
+      const cset = new Set((cga||[]).map(a => (a.gym_id||'')+'|'+(a.class_date||'')+'|'+(a.class_time||''))); cset.delete('||');
+      coachXp = c1*2 + cset.size + cev * 40;
     }
 
-    // 4) GYM (owned) — distinct classes held + events hosted*50
+    // 4) GYM (owned) — distinct classes held + events hosted*40
     let gymXp = 0, ownsGym = false, gymName = null, cls = 0, gev = 0;
     const myG = await sb('gyms?owner_id=eq.' + id + '&status=eq.approved&select=id,name&limit=1');
     if(myG && myG.length){
@@ -81,8 +84,8 @@ export default async function handler(req, res) {
       const ga = await sb('gym_attendance?gym_id=eq.' + gid + '&select=class_date,class_time');
       const set = new Set(ga.map(a => (a.class_date||'') + '|' + (a.class_time||''))); set.delete('|');
       cls = set.size;
-      gev = await sbCount('events?gym_id=eq.' + gid + '&status=eq.approved&select=id');
-      gymXp = cls + gev * 50;
+      gev = await sbCount('events?gym_id=eq.' + gid + '&status=eq.approved&starts_at=lt.' + NOW + '&select=id');
+      gymXp = cls + gev * 40;
     }
 
     // 5) levels payload (only roles the person actually has)

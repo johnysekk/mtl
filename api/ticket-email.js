@@ -1,0 +1,87 @@
+// MTL — /api/ticket-email  (ESM, same style as pay.js / profile-badges.js)
+// Sends the buyer their event ticket as an email with a scannable QR (encodes /?etk=<ticketId>).
+// Called fire-and-forget from the app right after a ticket becomes paid (free RSVP or card).
+export default async function handler(req, res) {
+  try {
+    const ticketId =
+      (req.query && req.query.ticketId) ||
+      (req.body && (typeof req.body === 'string' ? JSON.parse(req.body || '{}').ticketId : req.body.ticketId));
+    if (!ticketId) { res.status(400).json({ error: 'missing ticketId' }); return; }
+
+    const SUPABASE_URL = process.env.SUPABASE_URL || 'https://iqeovcvchtyfwtyzpqrh.supabase.co';
+    const SERVICE_KEY =
+      process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY ||
+      process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SECRET ||
+      process.env.SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
+    const RESEND_KEY = process.env.RESEND_API_KEY || process.env.RESEND_KEY;
+    if (!SERVICE_KEY || !RESEND_KEY) { res.status(500).json({ error: 'server not configured' }); return; }
+
+    const APP_URL = process.env.APP_URL || 'https://app.mtlcoaches.co';
+    const MAIL_FROM = process.env.MAIL_FROM || 'MTL Coaches <noreply@mtlcoaches.co>';
+    const sb = (path) => fetch(SUPABASE_URL + '/rest/v1/' + path, {
+      headers: { apikey: SERVICE_KEY, Authorization: 'Bearer ' + SERVICE_KEY }
+    }).then(r => r.json()).catch(() => null);
+
+    // ticket
+    const tkArr = await sb('event_tickets?id=eq.' + encodeURIComponent(ticketId) + '&select=*');
+    const tk = (tkArr && tkArr[0]) || null;
+    if (!tk) { res.status(404).json({ error: 'ticket not found' }); return; }
+
+    // event
+    const evArr = await sb('events?id=eq.' + encodeURIComponent(tk.event_id) + '&select=title,starts_at,venue,city,country');
+    const ev = (evArr && evArr[0]) || {};
+
+    // buyer email (profile first, fall back to ticket buyer_email if present)
+    let email = tk.buyer_email || null, name = tk.buyer_name || '';
+    if (tk.buyer_id) {
+      const pArr = await sb('profiles?id=eq.' + encodeURIComponent(tk.buyer_id) + '&select=email,name');
+      const prof = (pArr && pArr[0]) || {};
+      if (prof.email) email = prof.email;
+      if (prof.name) name = prof.name;
+    }
+    if (!email) { res.status(200).json({ ok: false, reason: 'no email' }); return; }
+
+    // QR (image so it renders in email — encodes the check-in URL)
+    const checkinUrl = APP_URL + '/?etk=' + encodeURIComponent(ticketId);
+    const qrImg = 'https://api.qrserver.com/v1/create-qr-code/?size=260x260&margin=8&data=' + encodeURIComponent(checkinUrl);
+
+    let dt = '';
+    try { if (ev.starts_at) dt = new Date(ev.starts_at).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch (e) {}
+    const venue = [ev.venue, ev.city, ev.country].filter(Boolean).join(', ');
+    const esc = (x) => String(x || '').replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+    const title = esc(ev.title || 'MTL Event');
+
+    const html =
+      '<div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto;background:#0c0c0c;border-radius:18px;overflow:hidden;color:#fff;">' +
+      '<div style="padding:26px 24px 8px;text-align:center;">' +
+      '<div style="font-size:13px;letter-spacing:.16em;color:#F4D87A;font-weight:700;">MTL COACHES</div>' +
+      '<div style="font-size:22px;font-weight:800;margin:10px 0 2px;">🎟️ ' + title + '</div>' +
+      (dt ? '<div style="font-size:14px;color:#c9c9c9;margin-top:6px;">' + esc(dt) + '</div>' : '') +
+      (venue ? '<div style="font-size:13px;color:#9a9a9a;margin-top:2px;">' + esc(venue) + '</div>' : '') +
+      '</div>' +
+      '<div style="background:#fff;margin:18px 22px;border-radius:16px;padding:18px;text-align:center;">' +
+      '<img src="' + qrImg + '" width="220" height="220" alt="Ticket QR" style="display:block;margin:0 auto;border-radius:10px;" />' +
+      '<div style="color:#111;font-size:13px;font-weight:700;margin-top:12px;">' + (name ? esc(name) : 'Your ticket') + '</div>' +
+      '<div style="color:#888;font-size:12px;margin-top:4px;">Show this QR at the event entrance to check in.</div>' +
+      '</div>' +
+      '<div style="padding:4px 24px 26px;text-align:center;color:#7a7a7a;font-size:11px;line-height:1.5;">' +
+      'Ticket ID: ' + esc(ticketId) + '<br/>If the QR doesn’t load, open: <a href="' + checkinUrl + '" style="color:#F4D87A;">' + esc(checkinUrl) + '</a>' +
+      '</div></div>';
+
+    const rRes = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + RESEND_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: MAIL_FROM,
+        to: [email],
+        subject: '🎟️ Your ticket — ' + (ev.title || 'MTL Event'),
+        html
+      })
+    });
+    const rJson = await rRes.json().catch(() => ({}));
+    if (!rRes.ok) { res.status(502).json({ error: 'resend failed', detail: rJson }); return; }
+    res.status(200).json({ ok: true, id: rJson.id });
+  } catch (e) {
+    res.status(500).json({ error: 'server error' });
+  }
+}
