@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-07-IW2 | Rate calculator redesigned to model: input Your gross profit -> two cards (STANDARD green / EXCLUSIVE PARTNER gold) each = Gross - MTL fee(5%/1%) - Stripe fee(~3% flat) = NET, + black highlight +4%/lesson selling EP. Founder Dashboard partner-revenue section now has a month dropdown (All time + 12 months, _fdPartnerMonth) wired to /api/partner-revenue?month=YYYY-MM. Podklady CSV export now combines partner memberships per currency + coach commissions (fdMonthStats) for the selected month + disclaimer. Endpoint partner-revenue.js gained ?month filter. -->
+<!-- MTL build: 2026-06-07-IX | Event ticket QR check-in. In "Tvorba & sprava" each hosted event now has: a "Skenovat listky" button (approved events up to 36h after start) opening a fullscreen camera scanner (BarcodeDetector native, jsQR CDN fallback for iOS) that reads the ticket QR (?etk= URL or raw id), validates the ticket belongs to that event + is paid + not already in, sets event_tickets.checked_in_at, toasts the buyer name, vibrates, loops with 4s debounce; and a "Kdo dorazil" button (past events) opening an attendance sheet listing paid tickets with checked-in time + count. DDL: ALTER TABLE event_tickets ADD COLUMN IF NOT EXISTS checked_in_at timestamptz; -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4628,7 +4628,18 @@ async function renderEventsMine(ownedIds){
   const stCol=st=>st==='approved'?'#006040':st==='pending'?'#B85C00':'var(--red)';
   html += `<div style="font-size:13px;font-weight:800;color:var(--dark);margin:0 0 10px;">📋 ${LANG==='en'?'Hosting':'Pořádám'}</div>`;
   if(hosted.length){
-    html += hosted.map(ev=>{ const dt=ev.starts_at?new Date(ev.starts_at).toLocaleString(LANG==='en'?'en-US':'cs-CZ',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):''; return `<div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;"><div class="evMineCard" data-id="${ev.id}" style="cursor:pointer;"><div style="font-weight:700;">${escapeHtml(ev.title||'')} <span style="font-size:11px;font-weight:700;color:${stCol(ev.status)};">• ${stLbl(ev.status)}</span></div><div style="font-size:12px;color:var(--mid);margin:2px 0 8px;">📅 ${dt}</div></div><button class="evEditBtn" data-id="${ev.id}" style="padding:7px 12px;background:var(--surf);border:1px solid var(--border);border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">✏️ ${LANG==='en'?'Edit':'Upravit'}</button></div>`; }).join('');
+    html += hosted.map(ev=>{
+      const dt=ev.starts_at?new Date(ev.starts_at).toLocaleString(LANG==='en'?'en-US':'cs-CZ',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):'';
+      const _sms=ev.starts_at?new Date(ev.starts_at).getTime():0;
+      const _appr=ev.status==='approved';
+      const _scanOk=_appr&&_sms&&_sms>Date.now()-36*3600*1000;
+      const _revOk=_appr&&_sms&&_sms<Date.now();
+      const _t=escapeHtml(ev.title||'');
+      let _btns=`<button class="evEditBtn" data-id="${ev.id}" style="padding:7px 12px;background:var(--surf);border:1px solid var(--border);border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">✏️ ${LANG==='en'?'Edit':'Upravit'}</button>`;
+      if(_scanOk) _btns+=`<button class="evScanBtn" data-id="${ev.id}" data-title="${_t}" style="padding:7px 12px;background:#171717;color:#fff;border:none;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">📷 ${LANG==='en'?'Scan tickets':'Skenovat lístky'}</button>`;
+      if(_revOk) _btns+=`<button class="evAttBtn" data-id="${ev.id}" data-title="${_t}" style="padding:7px 12px;background:var(--surf);border:1px solid var(--border);border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">✓ ${LANG==='en'?'Who came':'Kdo dorazil'}</button>`;
+      return `<div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;"><div class="evMineCard" data-id="${ev.id}" style="cursor:pointer;"><div style="font-weight:700;">${_t} <span style="font-size:11px;font-weight:700;color:${stCol(ev.status)};">• ${stLbl(ev.status)}</span></div><div style="font-size:12px;color:var(--mid);margin:2px 0 8px;">📅 ${dt}</div></div><div style="display:flex;flex-wrap:wrap;gap:6px;">${_btns}</div></div>`;
+    }).join('');
   } else { html += `<p style="font-size:13px;color:var(--light);margin-bottom:14px;">${LANG==='en'?'You are not hosting any events yet.':'Zatím nepořádáš žádné události.'}</p>`; }
   // pending approvals + fighter requests for owned gyms
   if(ownedIds.length){
@@ -4895,12 +4906,119 @@ async function renderMyEvManage(){
   }
   box.innerHTML=html;
   if($('myEvCreate')) $('myEvCreate').onclick=()=>{ if(elig.length===1) openEventCreate(elig[0]); else openEventGymPick(elig); };
+  box.querySelectorAll('.evScanBtn').forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); openTicketScanner(b.dataset.id, b.dataset.title); });
+  box.querySelectorAll('.evAttBtn').forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); openEventAttendance(b.dataset.id, b.dataset.title); });
   box.querySelectorAll('.evApprove').forEach(b=>b.onclick=()=>approveEvent(b.dataset.id,b.dataset.coach,b.dataset.title));
   box.querySelectorAll('.evReject').forEach(b=>b.onclick=()=>rejectEvent(b.dataset.id,b.dataset.coach,b.dataset.title));
   box.querySelectorAll('.frAccept').forEach(b=>b.onclick=()=>acceptFighter(b.dataset.id,b.dataset.coach,b.dataset.fn));
   box.querySelectorAll('.frDecline').forEach(b=>b.onclick=()=>declineFighter(b.dataset.id,b.dataset.coach,b.dataset.fn));
   box.querySelectorAll('.evMineCard').forEach(c=>c.onclick=()=>{ const ev=(window._mineHosted||[]).find(x=>String(x.id)===String(c.dataset.id)); if(ev) openEventView(ev); });
   box.querySelectorAll('.evEditBtn').forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); const ev=(window._mineHosted||[]).find(x=>String(x.id)===String(b.dataset.id)); if(!ev) return; const g=(window._myGyms||[]).find(x=>String(x.id)===String(ev.gym_id))||(window._evGymCache&&window._evGymCache[ev.gym_id]); openEventCreate(g||_myGymData, ev); });
+}
+let _tkScan={stream:null,raf:null,det:null,active:false,seen:{},evId:null,count:0,video:null,canvas:null};
+async function openTicketScanner(evId, title){
+  const EN=LANG==='en';
+  let ov=document.getElementById('tkScanOv');
+  if(!ov){
+    ov=document.createElement('div'); ov.id='tkScanOv';
+    ov.style.cssText='position:fixed;inset:0;z-index:400;background:#000;display:none;flex-direction:column;';
+    ov.innerHTML=`<div style="position:relative;flex:1;overflow:hidden;"><video id="tkScanVid" playsinline muted style="width:100%;height:100%;object-fit:cover;"></video><div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;"><div style="width:240px;height:240px;border:3px solid #fff;border-radius:20px;box-shadow:0 0 0 9999px rgba(0,0,0,.45);"></div></div><div id="tkScanTitle" style="position:absolute;top:max(16px,env(safe-area-inset-top));left:0;right:0;text-align:center;color:#fff;font-weight:800;font-size:15px;text-shadow:0 1px 4px rgba(0,0,0,.6);padding:0 16px;"></div></div><div style="background:#111;padding:14px 18px max(18px,env(safe-area-inset-bottom));"><div id="tkScanStatus" style="color:#fff;text-align:center;font-size:14px;font-weight:700;min-height:20px;margin-bottom:8px;"></div><div id="tkScanCount" style="color:#7CFFB0;text-align:center;font-size:13px;font-weight:700;min-height:18px;margin-bottom:12px;"></div><button id="tkScanClose" style="width:100%;padding:13px;background:#fff;color:#111;border:none;border-radius:12px;font-weight:800;font-size:15px;cursor:pointer;font-family:'DM Sans';">${EN?'Done':'Hotovo'}</button></div>`;
+    document.body.appendChild(ov);
+    document.getElementById('tkScanClose').onclick=closeTicketScanner;
+  }
+  _tkScan.evId=evId; _tkScan.seen={}; _tkScan.count=0;
+  document.getElementById('tkScanTitle').textContent=(EN?'Scanning · ':'Skenuji · ')+(title||'');
+  document.getElementById('tkScanStatus').style.color='#fff';
+  document.getElementById('tkScanStatus').textContent=EN?'Point the camera at the ticket QR':'Namiř kameru na QR lístku';
+  document.getElementById('tkScanCount').textContent='';
+  ov.style.display='flex';
+  const vid=document.getElementById('tkScanVid'); _tkScan.video=vid;
+  try{
+    _tkScan.stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}}});
+    vid.srcObject=_tkScan.stream; await vid.play();
+  }catch(e){ const st=document.getElementById('tkScanStatus'); if(st){ st.style.color='#FF8080'; st.textContent=(EN?'Camera unavailable: ':'Kamera nedostupná: ')+e.message; } return; }
+  _tkScan.active=true; _tkScan.det=null;
+  if('BarcodeDetector' in window){ try{ _tkScan.det=new BarcodeDetector({formats:['qr_code']}); }catch(e){ _tkScan.det=null; } }
+  if(_tkScan.det){ _scanLoopNative(); }
+  else { await _ensureJsQR(); _scanLoopJsQR(); }
+}
+function _scanLoopNative(){
+  if(!_tkScan.active) return;
+  _tkScan.det.detect(_tkScan.video).then(codes=>{ if(codes&&codes.length){ _onScanText(codes[0].rawValue); } }).catch(()=>{});
+  _tkScan.raf=requestAnimationFrame(()=>setTimeout(_scanLoopNative,180));
+}
+function _ensureJsQR(){
+  return new Promise(res=>{
+    if(window.jsQR) return res();
+    const sc=document.createElement('script'); sc.src='https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
+    sc.onload=()=>res(); sc.onerror=()=>res(); document.head.appendChild(sc);
+  });
+}
+function _scanLoopJsQR(){
+  if(!_tkScan.active) return;
+  const v=_tkScan.video;
+  if(window.jsQR && v && v.readyState===4){
+    if(!_tkScan.canvas) _tkScan.canvas=document.createElement('canvas');
+    const cv=_tkScan.canvas, w=v.videoWidth, h=v.videoHeight;
+    if(w&&h){ cv.width=w; cv.height=h; const cx=cv.getContext('2d',{willReadFrequently:true}); cx.drawImage(v,0,0,w,h); try{ const img=cx.getImageData(0,0,w,h); const code=window.jsQR(img.data,w,h); if(code&&code.data){ _onScanText(code.data); } }catch(e){} }
+  }
+  _tkScan.raf=requestAnimationFrame(()=>setTimeout(_scanLoopJsQR,120));
+}
+function _onScanText(text){
+  if(!text) return;
+  let id=String(text).trim();
+  const m=String(text).match(/[?&]etk=([^&\s]+)/); if(m){ id=decodeURIComponent(m[1]); }
+  if(!id) return;
+  const now=Date.now();
+  if(_tkScan.seen[id] && now-_tkScan.seen[id]<4000) return;
+  _tkScan.seen[id]=now;
+  _processTicketCheckin(id);
+}
+function _scanBuzz(ok){ try{ if(navigator.vibrate) navigator.vibrate(ok?60:[40,40,40]); }catch(e){} }
+async function _processTicketCheckin(id){
+  const EN=LANG==='en'; const st=document.getElementById('tkScanStatus'); if(!st) return;
+  try{
+    const { data:tk } = await supaClient.from('event_tickets').select('*').eq('id',id).maybeSingle();
+    if(!tk){ st.style.color='#FF8080'; st.textContent=EN?'❌ Invalid ticket':'❌ Neplatný lístek'; _scanBuzz(false); return; }
+    if(String(tk.event_id)!==String(_tkScan.evId)){ st.style.color='#FFC04D'; st.textContent=EN?'⚠️ Ticket for another event':'⚠️ Lístek na jinou akci'; _scanBuzz(false); return; }
+    if(tk.status!=='paid'){ st.style.color='#FFC04D'; st.textContent=EN?'⚠️ Ticket not paid':'⚠️ Lístek nezaplacen'; _scanBuzz(false); return; }
+    if(tk.checked_in_at){ const tm=new Date(tk.checked_in_at).toLocaleTimeString(LANG==='en'?'en-US':'cs-CZ',{hour:'2-digit',minute:'2-digit'}); st.style.color='#FFC04D'; st.textContent=(EN?'⚠️ Already in: ':'⚠️ Už odbaven: ')+(tk.buyer_name||'')+' ('+tm+')'; _scanBuzz(false); return; }
+    const { error } = await supaClient.from('event_tickets').update({ checked_in_at:new Date().toISOString() }).eq('id',id);
+    if(error){ st.style.color='#FF8080'; st.textContent='❌ '+error.message; return; }
+    _tkScan.count++;
+    st.style.color='#7CFFB0'; st.textContent=(EN?'✅ Checked in: ':'✅ Odbaveno: ')+(tk.buyer_name||(EN?'guest':'host'));
+    const cc=document.getElementById('tkScanCount'); if(cc) cc.textContent=(EN?'Checked in this session: ':'Odbaveno teď: ')+_tkScan.count;
+    _scanBuzz(true);
+  }catch(e){ st.style.color='#FF8080'; st.textContent='❌ '+e.message; }
+}
+function closeTicketScanner(){
+  _tkScan.active=false;
+  if(_tkScan.raf) cancelAnimationFrame(_tkScan.raf);
+  try{ if(_tkScan.stream) _tkScan.stream.getTracks().forEach(t=>t.stop()); }catch(e){}
+  _tkScan.stream=null;
+  const ov=document.getElementById('tkScanOv'); if(ov) ov.style.display='none';
+}
+async function openEventAttendance(evId, title){
+  const EN=LANG==='en';
+  let ov=document.getElementById('evAttOv');
+  if(!ov){
+    ov=document.createElement('div'); ov.id='evAttOv';
+    ov.style.cssText='position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.5);display:none;align-items:flex-end;';
+    ov.onclick=(e)=>{ if(e.target===ov) ov.style.display='none'; };
+    ov.innerHTML=`<div style="width:100%;max-height:85vh;background:#fff;border-radius:20px 20px 0 0;display:flex;flex-direction:column;"><div style="padding:18px 20px 8px;display:flex;justify-content:space-between;align-items:center;"><div id="evAttTitle" style="font-weight:800;font-size:16px;"></div><button id="evAttClose" style="background:none;border:none;font-size:24px;cursor:pointer;color:var(--mid);line-height:1;">×</button></div><div id="evAttBody" style="padding:0 20px 24px;overflow:auto;"></div></div>`;
+    document.body.appendChild(ov);
+    document.getElementById('evAttClose').onclick=()=>{ ov.style.display='none'; };
+  }
+  document.getElementById('evAttTitle').textContent=title||(EN?'Attendance':'Docházka');
+  const body=document.getElementById('evAttBody'); body.innerHTML=`<p style="color:var(--light);padding:20px 0;">${L('Načítám...')}</p>`;
+  ov.style.display='flex';
+  try{
+    const { data:tks } = await supaClient.from('event_tickets').select('*').eq('event_id',evId).eq('status','paid').order('checked_in_at',{ascending:false});
+    const list=tks||[]; const inCount=list.filter(t=>t.checked_in_at).length;
+    let rows=list.map(t=>{ const isIn=!!t.checked_in_at; const tm=isIn?new Date(t.checked_in_at).toLocaleTimeString(LANG==='en'?'en-US':'cs-CZ',{hour:'2-digit',minute:'2-digit'}):''; return `<div style="display:flex;justify-content:space-between;align-items:center;padding:11px 0;border-bottom:1px solid var(--border);"><span style="font-size:14px;${isIn?'':'color:var(--mid);'}">${escapeHtml(t.buyer_name||(EN?'Guest':'Host'))}</span><span style="font-size:13px;font-weight:700;color:${isIn?'#006040':'var(--light)'};">${isIn?('✅ '+tm):(EN?'⬜ not in':'⬜ nedorazil')}</span></div>`; }).join('');
+    if(!list.length) rows=`<p style="color:var(--light);padding:14px 0;">${EN?'No paid tickets.':'Žádné zaplacené lístky.'}</p>`;
+    body.innerHTML=`<div style="background:var(--surf);border-radius:12px;padding:12px 14px;margin-bottom:12px;font-weight:800;font-size:15px;text-align:center;">${inCount} / ${list.length} ${EN?'checked in':'dorazilo'}</div>${rows}`;
+  }catch(e){ body.innerHTML=`<p style="color:var(--red);padding:14px 0;">${e.message}</p>`; }
 }
 function swipeCardHtml(ev){
   const cur=ev.currency||'CZK'; const sym=cur==='CZK'?'Kč':cur==='EUR'?'€':'$';
