@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-11-KS | Onboarding now REQUIRES a VAT/Tax ID (IČO/DIČ) right under the Connect-Stripe button on the last step of BOTH coach and gym forms. New inputs caTaxId / gymTaxId: blocks the Stripe-connect click AND the gym submit if empty (toast + focus). Persisted in the coach/gym localStorage draft so it survives the Stripe redirect; saved to DB (profiles.tax_id for coach at connect; gyms.tax_id for gym post-insert, both in try/catch so a missing column never breaks onboarding). NEEDS SCHEMA: ALTER TABLE profiles ADD COLUMN tax_id text; ALTER TABLE gyms ADD COLUMN tax_id text; -->
+<!-- MTL build: 2026-06-11-KT | VAT/Tax ID gate MOVED from Stripe-connect to application submit. Coach + gym can now connect Stripe WITHOUT filling VAT; only the application submit (btnSubmitCoachApp / btnSubmitGymApp) is blocked when the field is empty. Coach tax_id saved at submit (resilient try/catch). NOTE: in-app tax_id is stored to DB only - it does NOT auto-prefill the EP Stripe checkout (Stripe collects its own tax id via tax_id_collection). NEEDS SCHEMA: profiles.tax_id text + gyms.tax_id text. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -8748,10 +8748,9 @@ if($('btnCloseGymApp')) $('btnCloseGymApp').onclick = ()=>closeSheet('shGymApp')
 
 if($('gymStripeNote')) $('gymStripeNote').textContent = LANG==='en'?'In Stripe, choose whether you collect money as a sole trader (OSVČ) or a company (Gym: usually a company, but decide based on your situation. You can use an existing account.)':'Ve Stripe urči, zda vybíráš peníze jako OSVČ nebo právnická osoba (Gym: většinou právnická osoba, ale urči dle své situace. Lze použít už existující účet.)';
 if($('gymTaxId')) $('gymTaxId').placeholder = LANG==='en'?'Gym VAT / Tax ID (or IČO) — required':'DIČ / IČO gymu — povinné';
-if($('gymTaxHint')) $('gymTaxHint').textContent = LANG==='en'?'Required before connecting payouts — used for invoicing and tax compliance.':'Povinné před propojením výplat — slouží pro fakturaci a daňovou evidenci.';
+if($('gymTaxHint')) $('gymTaxHint').textContent = LANG==='en'?'Required to submit your application — used for invoicing and tax compliance.':'Povinné pro odeslání přihlášky — slouží pro fakturaci a daňovou evidenci.';
 if($('gymStripeConnect')) $('gymStripeConnect').onclick = async ()=>{
   const btn=$('gymStripeConnect');
-  const _gtx=($('gymTaxId')&&$('gymTaxId').value.trim())||''; if(!_gtx){ toast(LANG==='en'?'⚠️ Enter the gym VAT / tax ID first':'⚠️ Nejprve vyplň DIČ / IČO gymu'); if($('gymTaxId')) $('gymTaxId').focus(); return; }
   btn.textContent=L('Vytvářím...'); btn.disabled=true;
   try {
     const r = await fetch(`/api/create-gym?gymProfileId=${encodeURIComponent(currentUser.id)}`);
@@ -12699,13 +12698,11 @@ $('caPhoto').onchange=(e)=>{
 
 if($('caStripeNote')) $('caStripeNote').textContent = LANG==='en'?'In Stripe, choose whether you collect money as a sole trader (OSVČ) or a company (Coach: usually a sole trader, but decide based on your situation. You can use an existing account.)':'Ve Stripe urči, zda vybíráš peníze jako OSVČ nebo právnická osoba (Kouč: většinou OSVČ, ale urči dle své situace. Lze použít už existující účet.)';
   if($('caTaxId')) $('caTaxId').placeholder = LANG==='en'?'VAT / Tax ID (sole traders: IČO) — required':'DIČ / IČO (OSVČ: IČO) — povinné';
-  if($('caTaxHint')) $('caTaxHint').textContent = LANG==='en'?'Required before connecting payouts — used for invoicing and tax compliance.':'Povinné před propojením výplat — slouží pro fakturaci a daňovou evidenci.';
+  if($('caTaxHint')) $('caTaxHint').textContent = LANG==='en'?'Required to submit your application — used for invoicing and tax compliance.':'Povinné pro odeslání přihlášky — slouží pro fakturaci a daňovou evidenci.';
   if($('caTaxId') && currentUser && currentUser.tax_id && !$('caTaxId').value) $('caTaxId').value=currentUser.tax_id;
   $('caStripeConnect').onclick=async()=>{
   const btn=$('caStripeConnect');
-  const _tx=($('caTaxId')&&$('caTaxId').value.trim())||''; if(!_tx){ toast(LANG==='en'?'⚠️ Enter your VAT / tax ID first':'⚠️ Nejprve vyplň DIČ / IČO'); if($('caTaxId')) $('caTaxId').focus(); return; }
   btn.textContent=L('Vytvářím...'); btn.disabled=true;
-  try{ await supaClient.from('profiles').update({ tax_id:_tx }).eq('id', currentUser.id); currentUser.tax_id=_tx; }catch(e){}
   try {
     const r = await fetch('/api/create-coach');
     const j = await r.json();
@@ -12782,6 +12779,7 @@ $('btnSubmitCoachApp').onclick=async()=>{
   if(videoFile.size > 50*1024*1024){ toast(L('⚠️ Video je větší než 50 MB')); return; }
 
   const btn=$('btnSubmitCoachApp');
+  const _catx=($('caTaxId')&&$('caTaxId').value.trim())||''; if(!_catx){ toast(LANG==='en'?'⚠️ Enter your VAT / tax ID first':'⚠️ Nejprve vyplň DIČ / IČO'); try{ caGoStep(3); }catch(e){} if($('caTaxId')) $('caTaxId').focus(); return; }
   btn.textContent=L('Nahrávám video...'); btn.disabled=true;
 
   try {
@@ -12822,7 +12820,7 @@ await supaClient.from('profiles').update({
       cert_video_url:videoUrl, photo_url:photoUrl
     }).eq('id', currentUser.id);
 
-    currentUser.coach_status='approved'; currentUser.cert_level='verified';
+    currentUser.coach_status='approved'; currentUser.cert_level='verified'; try{ if(_catx) await supaClient.from('profiles').update({ tax_id:_catx }).eq('id', currentUser.id); currentUser.tax_id=_catx; }catch(e){}
     currentUser.specializations = JSON.stringify(collectSpecs('caSpecs'));
     currentUser.languages = JSON.stringify(collectLangs('caLangs'));
     try{ const dd=(_caDisc&&_caDisc.length)?_caDisc:[defaultDiscipline()]; await supaClient.from('profiles').update({ disciplines: JSON.stringify(dd) }).eq('id', currentUser.id); currentUser.disciplines=JSON.stringify(dd); }catch(e){}
