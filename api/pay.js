@@ -112,6 +112,7 @@ async function gymCheckout(req, res) {
   const {
     gymAccount, gymName, className, amount, currency = 'CZK', bookingId,
     income, memberName, payee, disc, level, partner, guest, token, founding, credit, refDisc,
+    gymId, studentId, coachId,
   } = req.query;
 
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
@@ -143,6 +144,7 @@ async function gymCheckout(req, res) {
       payment_method_types: ['card'],
       billing_address_collection: 'required',
       tax_id_collection: { enabled: true },
+      metadata: { mtl_payment_type: 'drop_in', gym_id: gymId || '', student_id: studentId || '', coach_id: coachId || '', mtl_plan: className || 'Drop-in', mtl_currency: cur },
       line_items: [
         { price_data: { currency: cur, product_data: { name: `${className || 'Drop-in lekce'} — ${gymName || 'MTL Gym'}` }, unit_amount: unitAmount }, quantity: 1 },
       ],
@@ -309,7 +311,6 @@ async function partnerCheckout(req, res) {
     billing_address_collection: 'required',
     tax_id_collection: { enabled: true, required: 'if_supported' },
     client_reference_id: userId,
-    customer_email: email || undefined,
     line_items: [
       { price_data: { currency: 'usd', product_data: { name: 'Exclusive MTL Partner — coach & gym rates' }, unit_amount: 49900, recurring: { interval: 'month' } }, quantity: 1 },
     ],
