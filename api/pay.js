@@ -32,7 +32,7 @@ export default async function handler(req, res) {
 async function coachCheckout(req, res) {
   const {
     coachId, coachName, amount, currency = 'CZK', slotId, online,
-    coachProfileId, fmt, commission, nomarkup, credit, studentId, disc, markup,
+    coachProfileId, fmt, commission, nomarkup, credit, studentId, disc, markup, refDisc,
   } = req.query;
 
   if (!coachId || !amount) return res.status(400).json({ error: 'Chybí coachId nebo amount' });
@@ -44,8 +44,10 @@ async function coachCheckout(req, res) {
   let MK = 1.00; // no markup — student pays exactly the listed price
   let STUDENT_MARKUP = MK;
   if (String(credit) === 'student') {
-    // Referral reward: student pays exactly the coach's keep, MTL takes 0, coach untouched (~10% off)
-    STUDENT_MARKUP = Math.max(0, MK - COMMISSION);
+    // Referral reward: MTL waives its whole fee; the provider funds the rest of the discount.
+    let d = refDisc ? parseFloat(refDisc) : COMMISSION;
+    if (!(d >= 0 && d <= 0.5)) d = COMMISSION;
+    STUDENT_MARKUP = Math.max(0, MK - d);
     COMMISSION = 0;
   } else if (String(nomarkup) === '1') {
     STUDENT_MARKUP = 1.00;
