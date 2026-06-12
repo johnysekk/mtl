@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-11-KX | Referral DROP-IN redemption: bookGymDropin now computes a referral discount when the student has points (hybrid 20% if no prior non-cancelled drop-in at this gym, else 10%) gated on gym.referral_optin!==false (default ON), stores mtl_credit_used/mtl_ref_disc and passes &credit=student&refDisc to /api/pay?type=gym. pay.js gymCheckout honors credit+refDisc (MTL waives its whole TAKE 1/2/4%, gym or coach payee funds the rest; student pays 1-refDisc). gym_pay=ok success calls handleReferralAfterBooking() to decrement the used student credit. Drop-in price badge UI not added yet (student sees discount at Stripe). -->
+<!-- MTL build: 2026-06-11-KY | referral_optin toggle pt1 (GYM): gym manage UI has a "Referral slevy" checkbox (mgReferralOptin, default ON via referral_optin!==false) under Member referral; saveGymManage writes gyms.referral_optin in a SEPARATE guarded update (missing column wont break save). Gyms load via select(*) so g.referral_optin flows to drop-in gating. COACHES map in loadCoaches now carries referral_optin so coach 1:1/online gating respects it. NEEDS SCHEMA: profiles.referral_optin bool default true + gyms.referral_optin bool default true. TODO next: coach toggle UI in shCoachSettings accordion + guarded save. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -3432,6 +3432,7 @@ async function loadCoaches() {
     return {
       id: c.id,                          // uuid
       profileId: c.id,
+      referral_optin: c.referral_optin,  // referral discount toggle (default ON when null)
       name: c.name || 'Kouč',
       emoji: c.emoji || '🥋',
       photo: c.photo_url || null,
@@ -6981,6 +6982,8 @@ async function renderGymManage(){
     <div class="sec-lbl">${LANG==='en'?'Member referral':'Referral pro členy'}</div>
     <p style="font-size:12px;color:var(--mid);line-height:1.5;margin:0 0 8px;">${LANG==='en'?'Let your members invite friends. Both the new member (first month) and the inviting member (one month, if they train here) get this % off — both come out of your share. 0 = off.':'Nech členy zvát kamarády. Tato % slevy dostane nový člen (první měsíc) i člen, který pozval (jeden měsíc, pokud tu trénuje) — obojí jde z tvého podílu. 0 = vypnuto.'}</p>
     <input id="mgMemberRefPct" type="number" min="0" max="100" value="${_myGymData.member_ref_pct||0}" style="width:100%;padding:13px;border:1px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';margin-bottom:20px;" />
+    <div class="sec-lbl" style="margin-top:4px;">${LANG==='en'?'Referral discounts':'Referral slevy'}</div>
+    <label style="display:flex;align-items:flex-start;gap:10px;font-size:13px;cursor:pointer;color:var(--dark);line-height:1.45;margin-bottom:20px;"><input type="checkbox" id="mgReferralOptin" ${_myGymData.referral_optin!==false?'checked':''} style="width:20px;height:20px;flex-shrink:0;margin-top:1px;"> <span>${LANG==='en'?'Offer referral discounts on drop-ins to students who have referral points (10\u201320% off their first class here). MTL waives its whole fee; the rest comes from your share \u2014 a one-time cost to win a new student.':'Nab\u00edzet referral slevu na jednor\u00e1zov\u00e9 lekce student\u016fm s referral body (10\u201320 % z prvn\u00ed lekce u tebe). MTL odpust\u00ed celou svou provizi; zbytek jde z tvého pod\u00edlu \u2014 jednor\u00e1zov\u00fd n\u00e1klad na z\u00edsk\u00e1n\u00ed nov\u00e9ho studenta.'}</span></label>
     <button id="mgSave" class="mgSaveSec" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-top:8px;">${LANG==='en'?'Save changes':'Uložit změny'}</button>
     </div></details>
     <details class="setSec"><summary>📜 ${LANG==='en'?'Terms, club rules & waiver':'Podmínky, pravidla klubu a souhlas'}</summary><div class="setBody">
@@ -8125,6 +8128,7 @@ async function saveGymManage(){
   if((termsText||'').trim() && !($('mgWaiverAuthor')&&$('mgWaiverAuthor').checked)){ toast(LANG==='en'?'⚠️ Confirm you are the author first':'⚠️ Potvrď, že jsi autorem dokumentu'); return; }
   const { error } = await supaClient.from('gyms').update(patch).eq('id', _myGymData.id);
   if(error){ toast('⚠️ '+error.message); return; }
+  try{ if($('mgReferralOptin')){ const _ro=!!$('mgReferralOptin').checked; await supaClient.from('gyms').update({ referral_optin:_ro }).eq('id', _myGymData.id); _myGymData.referral_optin=_ro; } }catch(e){ console.warn('referral_optin col missing?', e); }
   if((termsText||'').trim()){ const _ch=(termsText!==_oldWaiverText)||!(_myGymData.waiver_version); if(_ch){ const _nv=(_myGymData.waiver_version||0)+1; const _h=_waiverHash((termsTitle||'')+'|'+termsText); try{ await supaClient.from('waiver_versions').insert({ gym_id:_myGymData.id, version:_nv, title:termsTitle||null, body:termsText, body_hash:_h, author_confirmed:true }); await supaClient.from('gyms').update({ waiver_version:_nv, waiver_author_confirmed_at:new Date().toISOString() }).eq('id', _myGymData.id); _myGymData.waiver_version=_nv; }catch(e){ console.warn('waiver ver', e); } } }
   _myGymData.dropin_price=dropin; _myGymData.membership_plans=JSON.stringify(plans); _myGymData.membership_name=first?first.name:null; _myGymData.membership_price=first?first.price:null; _myGymData.schedule=sched; _myGymData.terms_title=termsTitle; _myGymData.terms_text=termsText; _myGymData.org_form=_gymOrgForm; _myGymData.dropin_income=_gymDropinIncome;
   toast(LANG==='en'?'✅ Saved':'✅ Uloženo');
