@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-11-KV | REFERRAL DISCOUNT OVERHAUL step 1 (coach 1:1 + online). pay.js type=coach now honors a refDisc param: on a referral redemption (credit=student) MTL waives its WHOLE 4% fee and the provider funds the rest, so student pays (1-refDisc). index computes the hybrid rate per booking: 20% if the student has never had a non-cancelled lesson with this coach (acquisition), else 10% (retention) - via a bookings query (coach_id+student_id). selectSlot made async for the query. Per-provider toggle hooked via c.referral_optin!==false (default ON; the settings UI + loading the field comes next). Founding/Partner coaches still excluded. STILL TODO: drop-in/gym redemption, referral_optin settings UI + select, award non-cancelled gating, stale 5% message cleanup, 12mo expiry. -->
+<!-- MTL build: 2026-06-11-KW | Referral overhaul cont.: (1) Founding/Partner coaches NO LONGER excluded from referral discount - it applies to them too, they just fund more of it from their share (acquisition cost). pay.js already waives the WHOLE MTL fee (1%/2%/4%) and the provider funds down to (1-discount). Card badges now toggle-based (referral_optin) instead of tier-based, wording 10-20% not 5%. (2) Build B: the immediate on-payment referral award was REMOVED from handleReferralAfterBooking; +2 points now granted by the new daily cron /api/referral-cron.js only AFTER the invitee first 1:1 (bookings.training_date) or drop-in (gym_bookings.date) lesson is past and status=active (not cancelled/refunded). Decrement-on-redemption stays. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4193,7 +4193,7 @@ async function selectSlot(slot, c){
   const amount = discRate(c, bookDisc) || c.rateInperson || c.rateNum || 1200;
   const curr = c.currencyInperson || 'CZK';
   let comm = c.partner?0.01:0.04, nomarkup=1, creditUsed='';
-  if(currentUser && (currentUser.student_credits||0)>0 && !c.founding && !c.partner && (c.referral_optin!==false)){ creditUsed='student'; /* referral redemption: MTL waives its 4%, provider funds the rest (20% new provider / 10% one already trained with) */ }
+  if(currentUser && (currentUser.student_credits||0)>0 && (c.referral_optin!==false)){ creditUsed='student'; /* referral redemption: MTL waives its WHOLE fee (4%/2%/1%); provider funds the rest (20% new / 10% existing). Applies to founding/partner too (their acquisition cost). */ }
   else if((c.coachCredits||0)>0){ comm=0.04; creditUsed='coach'; }
   try{ localStorage.setItem('mtl_credit_used', creditUsed); }catch(e){}
   let _refD=0.20; if(creditUsed==='student' && currentUser){ try{ const { data:_pb } = await supaClient.from('bookings').select('status').eq('coach_id', c.profileId||c.id).eq('student_id', currentUser.id).limit(20); if(_pb && _pb.some(b=>b.status!=='refunded'&&b.status!=='cancelled')) _refD=0.10; }catch(e){ _refD=0.10; } }
@@ -4441,8 +4441,8 @@ function renderOffers(c){
   if(!isSelf && currentUser && (currentUser.student_credits||0)>0){
     const n = currentUser.student_credits;
     const czW = n===1?'bod':((n>=2&&n<=4)?'body':'bodů');
-    const _cpApplies = !(c.founding||c.partner);
-    html += `<div style="background:${_cpApplies?'#F0FBF0':'#FFF4E6'};border:1px solid ${_cpApplies?'#CDEBD6':'#FAD9A8'};border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13px;font-weight:600;color:${_cpApplies?'#006040':'#9a6b00'};text-align:center;">${_cpApplies ? (LANG==='en' ? `🎁 You have ${n} referral ${n===1?'credit':'credits'} — 5% off applies to this lesson` : `🎁 Máš ${n} referral ${czW} — na tuhle lekci se uplatní 5% sleva`) : (LANG==='en' ? `🎁 This coach has an exclusive rate — your 5% discount can't be used here; it's saved for your next coach` : `🎁 Tento kouč má exkluzivní sazbu — 5% sleva se tu neuplatní, zůstává ti na dalšího kouče`)}</div>`;
+    const _cpApplies = (c.referral_optin!==false);
+    html += `<div style="background:${_cpApplies?'#F0FBF0':'#FFF4E6'};border:1px solid ${_cpApplies?'#CDEBD6':'#FAD9A8'};border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:13px;font-weight:600;color:${_cpApplies?'#006040':'#9a6b00'};text-align:center;">${_cpApplies ? (LANG==='en' ? `🎁 You have ${n} referral ${n===1?'point':'points'} — referral discount applies here (10–20% off)` : `🎁 Máš ${n} referral ${czW} — sleva se tu uplatní (10–20 %)`) : (LANG==='en' ? `🎁 This coach has referral discounts off — your points are saved for your next coach` : `🎁 Tento kouč má referral slevy vypnuté — body si necháváš na dalšího kouče`)}</div>`;
   }
   // efektivní online tiery (fallback na legacy single)
   const onlineTiersEff = (c.onlineTiers && c.onlineTiers.length) ? c.onlineTiers : (c.rateOnline ? [{label:c.onlineFormat||(LANG==='en'?'Online coaching':'Online koučing'), qty:1, price:c.rateOnline}] : []);
@@ -4463,7 +4463,7 @@ function renderOffers(c){
     const detail = (c.inpersonDesc ? `<p style="font-size:13px;color:var(--mid);line-height:1.5;margin-top:8px;">${c.inpersonDesc}</p>` : `<p style="font-size:13px;color:var(--light);margin-top:8px;">${L('Trénink 1-na-1 naživo.')}</p>`)
       + discPicker
       + (isSelf ? '' : `<div id="ipSlotPreview" style="font-size:13px;font-weight:600;color:#006040;background:#F0FBF0;border-radius:8px;padding:8px 12px;margin-top:10px;">${L('📅 Načítám volné termíny…')}</div>`)
-      + (isSelf || !(currentUser && (currentUser.student_credits||0)>0) ? '' : `<div style="font-size:12px;font-weight:600;border-radius:8px;padding:7px 11px;margin-top:8px;${(c.founding||c.partner)?'background:#FFF4E6;color:#9a6b00;':'background:#F0FBF0;color:#006040;'}">${(c.founding||c.partner) ? '🎁 '+(LANG==='en'?"This coach has an exclusive rate, so your 5% discount doesn't apply here — it's saved for your next coach.":'Tento kouč má exkluzivní sazbu, takže tady tvou 5% slevu uplatnit nelze — zůstává ti na dalšího kouče.') : '🎁 '+(LANG==='en'?'Your 5% referral discount applies here!':'Tvoje 5% referral sleva tady platí!')}</div>`)
+      + (isSelf || !(currentUser && (currentUser.student_credits||0)>0) ? '' : `<div style="font-size:12px;font-weight:600;border-radius:8px;padding:7px 11px;margin-top:8px;${(c.referral_optin===false)?'background:#FFF4E6;color:#9a6b00;':'background:#F0FBF0;color:#006040;'}">${(c.referral_optin===false) ? '🎁 '+(LANG==='en'?"This coach has referral discounts turned off, so your points are saved for your next coach.":'Tento kouč má referral slevy vypnuté, body si necháváš na dalšího kouče.') : '🎁 '+(LANG==='en'?'Your referral discount applies here (10–20% off)!':'Tvoje referral sleva tady platí (10–20 %)!')}</div>`)
       + (isSelf ? '' : `<button class="offer-cta" data-offer="inperson" style="width:100%;margin-top:12px;padding:12px;background:var(--red);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${L('Vybrat termín →')}</button>`);
     html += offerCard('inperson', '📍', L('In-person session'), `${studentPays} ${sym}`, detail);
     if(!isSelf) loadIpSlotPreview(c.id, _bookDisc);
@@ -4586,7 +4586,7 @@ async function startOnlineBooking(c, tier, disc){
     : 'Refund: při zrušení dostaneš 95 % zpět. Pokud kouč nedodá, dostaneš 100 %.\n\nPokračovat na platbu?')) return;
   toast(L('💳 Přesměrovávám na platbu...'));
   let comm = c.partner?0.01:0.04, nomarkup=1, creditUsed='';
-  if(currentUser && (currentUser.student_credits||0)>0 && !c.founding && !c.partner && (c.referral_optin!==false)){ creditUsed='student'; /* referral redemption: MTL waives its 4%, provider funds the rest (20% new provider / 10% one already trained with) */ }
+  if(currentUser && (currentUser.student_credits||0)>0 && (c.referral_optin!==false)){ creditUsed='student'; /* referral redemption: MTL waives its WHOLE fee (4%/2%/1%); provider funds the rest (20% new / 10% existing). Applies to founding/partner too (their acquisition cost). */ }
   else if((c.coachCredits||0)>0){ comm=0.04; creditUsed='coach'; }
   try{ localStorage.setItem('mtl_credit_used', creditUsed); }catch(e){}
   let _refD=0.20; if(creditUsed==='student' && currentUser){ try{ const { data:_pb } = await supaClient.from('bookings').select('status').eq('coach_id', c.profileId||c.id).eq('student_id', currentUser.id).limit(20); if(_pb && _pb.some(b=>b.status!=='refunded'&&b.status!=='cancelled')) _refD=0.10; }catch(e){ _refD=0.10; } }
@@ -13209,27 +13209,10 @@ async function handleReferralAfterBooking(coachId){
       const nc = Math.max(0,((cp&&cp.coach_credits)||0)-1);
       await supaClient.from('profiles').update({ coach_credits: nc }).eq('id', coachId);
     }
-    // 2) odměna za studentský referral — čerstvý stav z DB; one-time přes referral_rewarded
-    if(currentUser){
-      const { data: me } = await supaClient.from('profiles').select('referred_by, referral_rewarded, student_credits').eq('id', currentUser.id).single();
-      console.log('[referral] student check:', me);
-      if(me && me.referred_by && !me.referral_rewarded){
-        // flag nastav PRVNÍ (zabrání nekonečnému připisování); když sloupec chybí → error, grant se neprovede
-        const { error: fErr } = await supaClient.from('profiles').update({ referral_rewarded:true }).eq('id', currentUser.id);
-        if(fErr){ console.error('[referral] ⚠️ referral_rewarded sloupec asi chybí v DB:', fErr.message); }
-        else {
-          await supaClient.from('profiles').update({ student_credits: (me.student_credits||0)+2 }).eq('id', currentUser.id);
-          currentUser.student_credits = (me.student_credits||0)+2;
-          currentUser.referral_rewarded = true;
-          const { data: rf } = await supaClient.from('profiles').select('student_credits').eq('id', me.referred_by).single();
-          await supaClient.from('profiles').update({ student_credits: ((rf&&rf.student_credits)||0)+2 }).eq('id', me.referred_by);
-          await supaClient.from('notifications').insert({ user_id: me.referred_by, type:'referral', read:false, data: JSON.stringify({ kind:'referral_reward_student', who: currentUser.name||'' }), message:`🎁 Tvůj pozvaný ${currentUser.name||'kamarád'} si dal první lekci! Máš +1 slevu 5 % na další lekci.` });
-          if(typeof fillReferral==='function') fillReferral();
-          toast(L('🎁 Sleva 10 % na další lekci je tvoje!'));
-          console.log('[referral] ✅ student reward: +1 pro pozvaného', currentUser.id, 'i pro zvoucího', me.referred_by);
-        }
-      }
-    }
+    // 2) Student referral reward MOVED to the daily cron (referral-cron.js):
+    //    +2 points to invitee + referrer only AFTER the invitee's first 1:1/drop-in
+    //    is past and NOT cancelled/refunded. (Award-on-completion, not on payment.)
+
     // 3) Coach-recruits-coach referral — pozvaný kouč po 3 potvrzených lekcích = aktivní → zvoucí má měsíc EP zdarma; 10 = EP natrvalo
     if(coachId){
       const { data: cprof } = await supaClient.from('profiles').select('referred_by, ref_coach_qualified, ref_coach_lessons, name').eq('id', coachId).single();
