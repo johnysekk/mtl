@@ -111,7 +111,7 @@ async function coachCheckout(req, res) {
 async function gymCheckout(req, res) {
   const {
     gymAccount, gymName, className, amount, currency = 'CZK', bookingId,
-    income, memberName, payee, disc, level, partner, guest, token, founding,
+    income, memberName, payee, disc, level, partner, guest, token, founding, credit, refDisc,
   } = req.query;
 
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
@@ -120,10 +120,18 @@ async function gymCheckout(req, res) {
   const cur = String(currency).toLowerCase();
   const isPartner = (String(partner) === '1');
   const MK   = 1.00;
-  const TAKE = (String(partner)==='1') ? 0.01 : ((String(founding)==='1') ? 0.02 : GYM_MTL_TAKE); // EP 1%, founding 2%, else flat 4%
+  let STUDENT_MK = MK;
+  let TAKE = (String(partner)==='1') ? 0.01 : ((String(founding)==='1') ? 0.02 : GYM_MTL_TAKE); // EP 1%, founding 2%, else flat 4%
+  if (String(credit) === 'student') {
+    // Referral reward on a drop-in: MTL waives its whole fee; the gym/coach funds the rest of the discount.
+    let d = refDisc ? parseFloat(refDisc) : TAKE;
+    if (!(d >= 0 && d <= 0.5)) d = TAKE;
+    STUDENT_MK = Math.max(0, MK - d);
+    TAKE = 0;
+  }
 
   const isCZK = cur === 'czk';
-  const unitAmount     = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);
+  const unitAmount     = isCZK ? Math.floor(P * STUDENT_MK) * 100 : Math.round(P * STUDENT_MK * 100);
   const applicationFee = isCZK ? Math.floor(P * TAKE) * 100 : Math.round(P * TAKE * 100);
 
   const host = req.headers.host;
@@ -152,6 +160,7 @@ async function gymCheckout(req, res) {
           mtl_base: String(P),
           mtl_currency: cur,
           member_name: memberName || '',
+          mtl_credit: credit || 'none',
         },
       },
       success_url: (String(guest)==='1')
