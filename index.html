@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-11-KW | Referral overhaul cont.: (1) Founding/Partner coaches NO LONGER excluded from referral discount - it applies to them too, they just fund more of it from their share (acquisition cost). pay.js already waives the WHOLE MTL fee (1%/2%/4%) and the provider funds down to (1-discount). Card badges now toggle-based (referral_optin) instead of tier-based, wording 10-20% not 5%. (2) Build B: the immediate on-payment referral award was REMOVED from handleReferralAfterBooking; +2 points now granted by the new daily cron /api/referral-cron.js only AFTER the invitee first 1:1 (bookings.training_date) or drop-in (gym_bookings.date) lesson is past and status=active (not cancelled/refunded). Decrement-on-redemption stays. -->
+<!-- MTL build: 2026-06-11-KX | Referral DROP-IN redemption: bookGymDropin now computes a referral discount when the student has points (hybrid 20% if no prior non-cancelled drop-in at this gym, else 10%) gated on gym.referral_optin!==false (default ON), stores mtl_credit_used/mtl_ref_disc and passes &credit=student&refDisc to /api/pay?type=gym. pay.js gymCheckout honors credit+refDisc (MTL waives its whole TAKE 1/2/4%, gym or coach payee funds the rest; student pays 1-refDisc). gym_pay=ok success calls handleReferralAfterBooking() to decrement the used student credit. Drop-in price badge UI not added yet (student sees discount at Stripe). -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -5789,7 +5789,14 @@ async function bookGymDropin(g, occ, _child){
     if(_dropDisc){ try{ await supaClient.from('gym_bookings').update({ discipline: _dropDisc }).eq('id', bk.id); }catch(e){} }
     let _gymOwnerPartner=false, _ownerFounding=false; try{ const _ppid=(payee&&payee.coachId)||g.owner_id; if(_ppid){ const { data: ow } = await supaClient.from('profiles').select('partner, founding').eq('id', _ppid).single(); _gymOwnerPartner=!!(ow&&ow.partner); _ownerFounding=!!(ow&&ow.founding); } }catch(e){}
     try{ if(bk&&bk.id) await supaClient.from('gym_bookings').update({gym_keep_pct:((typeof _gymOwnerPartner!=='undefined'&&_gymOwnerPartner)||(typeof _gp!=='undefined'&&_gp))?0.99:(_ownerFounding?0.98:0.96)}).eq('id',bk.id); }catch(e){}
-    const url = `/api/pay?type=gym&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&className=${encodeURIComponent(occ&&occ.name?occ.name:'Drop-in')}&amount=${_dp}&currency=${_dcur}&bookingId=${encodeURIComponent(bk.id)}&income=${encodeURIComponent(g.dropin_income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&level=${encodeURIComponent((occ&&occ.level)||'')}&disc=${encodeURIComponent((occ&&occ.disc)?occ.disc:parseDisc(g.disciplines).join(','))}&partner=${_gymOwnerPartner?1:0}`;
+    let _dropCreditUsed='', _dropRefD=0.20;
+    if(currentUser && (currentUser.student_credits||0)>0 && (g.referral_optin!==false)){
+      _dropCreditUsed='student'; /* referral redemption on a drop-in: MTL waives its whole fee, gym/coach funds the rest (20% new gym / 10% one already trained with) */
+      try{ const { data:_pb } = await supaClient.from('gym_bookings').select('status').eq('gym_id', g.id).eq('student_id', currentUser.id).limit(20); if(_pb && _pb.some(b=>b.status!=='refunded'&&b.status!=='cancelled')) _dropRefD=0.10; }catch(e){ _dropRefD=0.10; }
+    }
+    try{ localStorage.setItem('mtl_credit_used', _dropCreditUsed); }catch(e){}
+    try{ localStorage.setItem('mtl_ref_disc', String(_dropRefD)); }catch(e){}
+    const url = `/api/pay?type=gym&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&className=${encodeURIComponent(occ&&occ.name?occ.name:'Drop-in')}&amount=${_dp}&currency=${_dcur}&bookingId=${encodeURIComponent(bk.id)}&income=${encodeURIComponent(g.dropin_income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&level=${encodeURIComponent((occ&&occ.level)||'')}&disc=${encodeURIComponent((occ&&occ.disc)?occ.disc:parseDisc(g.disciplines).join(','))}&partner=${_gymOwnerPartner?1:0}&credit=${_dropCreditUsed||'none'}&refDisc=${_dropRefD}`;
     setTimeout(()=>{ window.location.href = url; }, 500);
   } catch(e){ console.error('bookGymDropin', e); toast('⚠️ '+e.message); }
 }
@@ -14753,6 +14760,7 @@ async function showPaidPopup(){
       try {
         const { data: gb } = await supaClient.from('gym_bookings').update({ status:'active', payment_intent: paymentIntent }).eq('id', bookingId).select().single();
         if(gb){
+          try{ await handleReferralAfterBooking(); }catch(e){}
           const { data: gym } = await supaClient.from('gyms').select('owner_id, name, dropin_price, currency').eq('id', gb.gym_id).single();
           if(gym && gym.owner_id){
             const _ncur = gb.currency||gym.currency;
