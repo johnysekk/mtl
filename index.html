@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-11-LC | Event ticket: on event_pay=ok the BUYER now also gets a bell notification (kind event_ticket_mine) that on click opens Upcoming events (openMyEv upcoming) - added isTicketMine to notif clickable+linkLabel+route. Refund disclaimer shown for paid, non-past events under the ticket box / buy button: "Tickets are non-refundable. A full refund is issued only if the organizer cancels the event." NEXT: part 3 referral Yes/No switch (coach under Availability, gym under gym XP above tabs) replacing KY/KZ UIs; part 2 roster strikethrough; optional clickwrap checkbox. -->
+<!-- MTL build: 2026-06-11-LD | (A) DASHBOARD MRR FIX: epMul ignored founding (isEP?0.99:0.96) so a founding gym saw base 96% (2304) not 98% (2352). Now memGym/baseMRR/newMRRnet use per-membership m.gym_keep_pct (fallback epMul, which is now founding-aware). Added transparency note: MRR is membership revenue minus MTL fee, BEFORE Stripe processing fees (~1.4-2.9%, deducted by Stripe); Stripe dashboard is source of truth. (B) Event ticket CLICKWRAP: paid doEventCheckout now routes through showTicketClickwrap overlay (non-refundable checkbox gating the Continue-to-payment button) before checkout; covers single-tier and multi-tier paths. TODO: events revenue not in gym dashboard yet; part 3 referral switch; part 2 roster strikethrough. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -5204,9 +5204,28 @@ function openTierPick(ev, tiers){
   document.body.appendChild(ov); const close=()=>ov.remove(); ov.onclick=(e)=>{ if(e.target===ov) close(); }; ov.querySelector('#tpCancel').onclick=close;
   ov.querySelectorAll('.tpRow').forEach(r=>r.onclick=()=>{ const t=tiers[+r.dataset.i]; close(); doEventCheckout(ev, t); });
 }
-async function doEventCheckout(ev, tier){
+function showTicketClickwrap(ev, tier){
+  const cur=ev.currency||'CZK'; const sym=cur==='CZK'?'Kč':cur==='EUR'?'€':'$'; const EN=LANG==='en';
+  const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:250;display:flex;align-items:flex-end;justify-content:center;';
+  ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px 18px 0 0;padding:20px;">
+    <div style="font-size:17px;font-weight:800;margin-bottom:6px;">${EN?'Before you pay':'Než zaplatíš'}</div>
+    <div style="font-size:13px;color:var(--mid);line-height:1.55;margin-bottom:14px;">${EN?'Ticket':'Lístek'}: <b>${escapeHtml(tier.name||(EN?'Ticket':'Lístek'))}</b> · ${fmtPrice(tier.price||0,cur)} ${sym}</div>
+    <label style="display:flex;align-items:flex-start;gap:10px;font-size:13px;cursor:pointer;color:var(--dark);line-height:1.5;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:14px;"><input type="checkbox" id="cwChk" style="width:20px;height:20px;flex-shrink:0;margin-top:1px;"> <span>${EN?'I understand this ticket is non-refundable. A full refund is issued only if the organizer cancels the event.':'Beru na vědomí, že tento lístek je nevratný. 100% refundace jen pokud akci zruší pořadatel.'}</span></label>
+    <button id="cwConfirm" disabled style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';opacity:.5;">${EN?'Continue to payment':'Pokračovat na platbu'}</button>
+    <button id="cwCancel" style="width:100%;margin-top:6px;padding:11px;background:transparent;border:none;color:var(--light);font-weight:600;cursor:pointer;font-family:'DM Sans';">${EN?'Cancel':'Zrušit'}</button>
+  </div>`;
+  document.body.appendChild(ov);
+  const close=()=>ov.remove();
+  ov.onclick=(e)=>{ if(e.target===ov) close(); };
+  ov.querySelector('#cwCancel').onclick=close;
+  const chk=ov.querySelector('#cwChk'), btn=ov.querySelector('#cwConfirm');
+  chk.onchange=()=>{ btn.disabled=!chk.checked; btn.style.opacity=chk.checked?'1':'.5'; };
+  btn.onclick=()=>{ if(!chk.checked) return; close(); doEventCheckout(ev, tier, true); };
+}
+async function doEventCheckout(ev, tier, _confirmed){
   const cur=ev.currency||'CZK';
   const base=(tier&&tier.price)||0;
+  if(base>0 && !_confirmed){ return showTicketClickwrap(ev, tier); }
   let acct=null;
   try{
     if(ev.payout_coach_id){ const { data:pr } = await supaClient.from('profiles').select('gym_payout_account').eq('id', ev.payout_coach_id).single(); acct=(pr&&pr.gym_payout_account)||null; }
@@ -8175,9 +8194,9 @@ async function loadGymManageBookings(){
     const activeNow = mems.filter(m=>m.status==='active');
     const cancellingNow = mems.filter(m=>m.status==='cancelling');
     _gymCancelling = cancellingNow.slice();
-    const epMul = isEP?0.99:0.96;
+    const epMul = isEP?0.99:((currentUser&&currentUser.founding)?0.98:0.96);
     const memsM = _gymMonth==='all' ? mems.filter(m=>m.status==='active'||m.status==='cancelling') : mems.filter(m => (inGM(m)||beforeGM(m)) && !(m.cancelled_at && String(m.cancelled_at).slice(0,7) < _gymMonth));
-    const memMRR=memsM.reduce((s,m)=>s+(m.amount||0),0), memGym=memMRR*epMul;
+    const memMRR=memsM.reduce((s,m)=>s+(m.amount||0),0), memGym=memsM.reduce((s,m)=>s+(m.amount||0)*(m.gym_keep_pct!=null?m.gym_keep_pct:epMul),0);
     const memFeeMo=memsM.reduce((s,m)=>s+((m.amount||0)*0.019+6),0);
     const memNetMo=Math.max(0,memGym-memFeeMo);
     // ── LEDGER (skutečné platby ze Stripe, refund-adjusted) ──
@@ -8199,12 +8218,12 @@ async function loadGymManageBookings(){
     const newThis = mems.filter(inGM);
     const cancelThis = mems.filter(cancelledInGM);
     const baseMembers = mems.filter(m=> (m.status==='active'||m.status==='cancelling') && beforeGM(m));
-    const baseMRR = baseMembers.reduce((s,m)=>s+(m.amount||0),0)*epMul;
+    const baseMRR = baseMembers.reduce((s,m)=>s+(m.amount||0)*(m.gym_keep_pct!=null?m.gym_keep_pct:epMul),0);
     // nové = co přišli tento měsíc a ZŮSTÁVAJÍ; ztráta = jen pokračující z minula, co teď zrušili.
     // Kdo přišel A hned ruší v témž měsíci → nepočítá se ani do plusu, ani do mínusu (net 0).
     const newStaying = newThis.filter(m=>m.status==='active');
     const churnedFromBase = mems.filter(m=> beforeGM(m) && cancelledInGM(m));
-    const newMRRnet = (newStaying.reduce((s,m)=>s+(m.amount||0),0) - churnedFromBase.reduce((s,m)=>s+(m.amount||0),0))*epMul;
+    const newMRRnet = newStaying.reduce((s,m)=>s+(m.amount||0)*(m.gym_keep_pct!=null?m.gym_keep_pct:epMul),0) - churnedFromBase.reduce((s,m)=>s+(m.amount||0)*(m.gym_keep_pct!=null?m.gym_keep_pct:epMul),0);
     const startBase = baseMembers.length + churnedFromBase.length;
     const churnRate = startBase>0 ? Math.round((churnedFromBase.length/startBase)*100) : 0;
     const retentionRate = 100 - churnRate;
@@ -8270,7 +8289,7 @@ async function loadGymManageBookings(){
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:${netMemGrowth>=0?'#F0FBF0':'#FEECEC'};">${netMemGrowth>=0?'📈':'📉'}</div><div class="prow-lbl">${LANG==='en'?'Net member growth':'Čistý růst členů'}</div></div><span class="prow-val" style="color:${netMemGrowth>=0?'#006040':'var(--red)'};">${netMemGrowth>=0?'+':''}${netMemGrowth}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💗</div><div class="prow-lbl">${LANG==='en'?'Retention rate':'Míra udržení'}</div></div><span class="prow-val" style="color:#006040;">${retentionRate}%</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:${churnRate>0?'#FEECEC':'#F0FBF0'};">🔄</div><div class="prow-lbl">${LANG==='en'?'Churn rate':'Míra odchodů'}</div></div><span class="prow-val" style="${churnRate>0?'color:var(--red);':''}">${churnRate}%</span></div>
-        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:${mrrGrowthPct>=0?'#F0FBF0':'#FEECEC'};">📊</div><div class="prow-lbl">${LANG==='en'?'MRR growth':'Růst MRR'}</div></div><span class="prow-val" style="color:${mrrGrowthPct>=0?'#006040':'var(--red)'};">${mrrGrowthPct>=0?'+':''}${mrrGrowthPct}%</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:${mrrGrowthPct>=0?'#F0FBF0':'#FEECEC'};">📊</div><div class="prow-lbl">${LANG==='en'?'MRR growth':'Růst MRR'}</div></div><span class="prow-val" style="color:${mrrGrowthPct>=0?'#006040':'var(--red)'};">${mrrGrowthPct>=0?'+':''}${mrrGrowthPct}%</span></div><div style="font-size:10.5px;color:var(--light);line-height:1.45;padding:4px 4px 8px;">${LANG==='en'?'MRR = membership revenue minus the MTL fee, before Stripe payment-processing fees (~1.4–2.9%, deducted by Stripe). Your Stripe dashboard is the source of truth for exact payouts.':'MRR = příjem z členství minus MTL poplatek, PŘED platebním poplatkem Stripe (~1,4–2,9 %, strhává Stripe). Přesné výplaty jsou autoritativně ve Stripe.'}</div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">💰</div><div class="prow-lbl">${LANG==='en'?'Avg revenue / member':'Prům. tržba / člen'}</div></div><span class="prow-val">${f(avgRevMember)}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🥊</div><div class="prow-lbl">${LANG==='en'?'Drop-ins this month':'Jednorázové tento měsíc'}</div></div><span class="prow-val">${dropsM.length}</span></div>
       </div>`:''}
