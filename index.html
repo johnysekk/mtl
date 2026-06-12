@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-11-KU | HOTFIX login: removed a top-level reference to currentUser (in the coach Stripe-connect setup, added in KS) that hit the Temporal Dead Zone (currentUser is a let declared later) and threw "Cannot access currentUser before initialization", which halted the rest of the top-level script so the login handlers never wired. The tax-id field still persists across the Stripe redirect via the localStorage draft. -->
+<!-- MTL build: 2026-06-11-KV | REFERRAL DISCOUNT OVERHAUL step 1 (coach 1:1 + online). pay.js type=coach now honors a refDisc param: on a referral redemption (credit=student) MTL waives its WHOLE 4% fee and the provider funds the rest, so student pays (1-refDisc). index computes the hybrid rate per booking: 20% if the student has never had a non-cancelled lesson with this coach (acquisition), else 10% (retention) - via a bookings query (coach_id+student_id). selectSlot made async for the query. Per-provider toggle hooked via c.referral_optin!==false (default ON; the settings UI + loading the field comes next). Founding/Partner coaches still excluded. STILL TODO: drop-in/gym redemption, referral_optin settings UI + select, award non-cancelled gating, stale 5% message cleanup, 12mo expiry. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -953,7 +953,7 @@ html,body{height:100%;overflow:hidden;background:#222;font-family:'DM Sans',sans
         <div class="prow" id="meEdit1"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">👤</div><div class="prow-lbl">Jméno</div></div><div style="display:flex;align-items:center;gap:8px;"><span class="prow-val">Jan Novák</span><span class="prow-arr">›</span></div></div><div class="prow" id="meHealth"><div class="prow-l"><div class="prow-icon" style="background:#FFF0F0;">🩹</div><div class="prow-lbl">Zdravotní omezení</div></div><div style="display:flex;align-items:center;gap:8px;"><span class="prow-val" id="meHealthVal"></span><span class="prow-arr">›</span></div></div>
         <div class="prow" id="meEdit3"><div class="prow-l"><div class="prow-icon" style="background:#FFF0E6;">📍</div><div class="prow-lbl">Lokace</div></div><div style="display:flex;align-items:center;gap:8px;"><span class="prow-val">Praha, CZ</span><span class="prow-arr">›</span></div></div>
       </div>
-      <div id="mePartnerStrip" onclick="if(typeof openPartnerInfo==='function')openPartnerInfo()" style="display:none;background:linear-gradient(135deg,#FFEFB0 0%,#F5B922 48%,#D98A0E 100%);color:#3a2400;border:1.5px solid #E0A93A;border-radius:13px;padding:12px 14px;margin:6px 0 18px;font-weight:800;font-size:13.5px;letter-spacing:.01em;text-align:center;cursor:pointer;box-shadow:0 5px 18px rgba(217,138,14,.42),inset 0 1px 0 rgba(255,255,255,.55);"></div>
+      <div id="mePartnerStrip" onclick="if(typeof openPartnerInfo==='function')openPartnerInfo()" style="display:none;background:linear-gradient(135deg,#FFEFB0 0%,#F5B922 48%,#D98A0E 100%);color:#3a2400;border:1.5px solid #E0A93A;border-radius:13px;padding:8px 14px;margin:6px 0 16px;font-weight:800;font-size:13px;letter-spacing:.01em;text-align:center;cursor:pointer;box-shadow:0 5px 18px rgba(217,138,14,.42),inset 0 1px 0 rgba(255,255,255,.55);"></div>
       <div class="sec-lbl">Můj trénink</div>
       <div class="prow-group">
         <div class="prow" id="meBook1" style="cursor:pointer;"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">📅</div><div class="prow-lbl">Nadcházející</div></div><div style="display:flex;align-items:center;gap:8px;"><span class="prow-val" id="bookCount">0</span><span class="prow-arr">›</span></div></div>
@@ -4182,7 +4182,7 @@ const { data, error } = await supaClient
   });
 }
 
-function selectSlot(slot, c){
+async function selectSlot(slot, c){
   if(!c.stripeAccount){
     toast(L('⚠️ Kouč nemá nastavené platby'));
     return;
@@ -4193,11 +4193,13 @@ function selectSlot(slot, c){
   const amount = discRate(c, bookDisc) || c.rateInperson || c.rateNum || 1200;
   const curr = c.currencyInperson || 'CZK';
   let comm = c.partner?0.01:0.04, nomarkup=1, creditUsed='';
-  if(currentUser && (currentUser.student_credits||0)>0 && !c.founding && !c.partner){ creditUsed='student'; /* student platí 100% (ušetří markup), kouč pořád 95 %, MTL si nechá 5 %; na founding/partner se NEUPLATNÍ (nulová marže) */ }
+  if(currentUser && (currentUser.student_credits||0)>0 && !c.founding && !c.partner && (c.referral_optin!==false)){ creditUsed='student'; /* referral redemption: MTL waives its 4%, provider funds the rest (20% new provider / 10% one already trained with) */ }
   else if((c.coachCredits||0)>0){ comm=0.04; creditUsed='coach'; }
   try{ localStorage.setItem('mtl_credit_used', creditUsed); }catch(e){}
+  let _refD=0.20; if(creditUsed==='student' && currentUser){ try{ const { data:_pb } = await supaClient.from('bookings').select('status').eq('coach_id', c.profileId||c.id).eq('student_id', currentUser.id).limit(20); if(_pb && _pb.some(b=>b.status!=='refunded'&&b.status!=='cancelled')) _refD=0.10; }catch(e){ _refD=0.10; } }
+  try{ localStorage.setItem('mtl_ref_disc', String(_refD)); }catch(e){}
   try{ localStorage.setItem('mtl_book_disc', bookDisc||''); localStorage.setItem('mtl_book_amount', String(amount)); }catch(e){}
-  const url = `/api/pay?type=coach&coachId=${encodeURIComponent(c.stripeAccount)}&coachName=${encodeURIComponent(c.name)}&amount=${amount}&currency=${curr}&slotId=${slot.id}&commission=${comm}&nomarkup=${nomarkup}&credit=${creditUsed||'none'}&studentId=${currentUser?currentUser.id:''}&disc=${encodeURIComponent(bookDisc||'')}&markup=${c.partner?1.00:1.00}`;
+  const url = `/api/pay?type=coach&coachId=${encodeURIComponent(c.stripeAccount)}&coachName=${encodeURIComponent(c.name)}&amount=${amount}&currency=${curr}&slotId=${slot.id}&commission=${comm}&nomarkup=${nomarkup}&credit=${creditUsed||'none'}&studentId=${currentUser?currentUser.id:''}&refDisc=${_refD}&disc=${encodeURIComponent(bookDisc||'')}&markup=${c.partner?1.00:1.00}`;
   setTimeout(()=>{ window.location.href = url; }, 600);
 }
 
@@ -4584,10 +4586,12 @@ async function startOnlineBooking(c, tier, disc){
     : 'Refund: při zrušení dostaneš 95 % zpět. Pokud kouč nedodá, dostaneš 100 %.\n\nPokračovat na platbu?')) return;
   toast(L('💳 Přesměrovávám na platbu...'));
   let comm = c.partner?0.01:0.04, nomarkup=1, creditUsed='';
-  if(currentUser && (currentUser.student_credits||0)>0 && !c.founding && !c.partner){ creditUsed='student'; /* student platí 100% (ušetří markup), kouč pořád 95 %, MTL si nechá 5 %; na founding/partner se NEUPLATNÍ (nulová marže) */ }
+  if(currentUser && (currentUser.student_credits||0)>0 && !c.founding && !c.partner && (c.referral_optin!==false)){ creditUsed='student'; /* referral redemption: MTL waives its 4%, provider funds the rest (20% new provider / 10% one already trained with) */ }
   else if((c.coachCredits||0)>0){ comm=0.04; creditUsed='coach'; }
   try{ localStorage.setItem('mtl_credit_used', creditUsed); }catch(e){}
-  const url = `/api/pay?type=coach&coachId=${encodeURIComponent(c.stripeAccount)}&coachName=${encodeURIComponent(c.name)}&amount=${rate}&currency=${curr}&online=1&coachProfileId=${encodeURIComponent(c.profileId)}&fmt=${encodeURIComponent(fmt)}&commission=${comm}&nomarkup=${nomarkup}&credit=${creditUsed||'none'}&studentId=${currentUser?currentUser.id:''}&markup=${c.partner?1.00:1.00}&disc=${encodeURIComponent(disc||_bookDisc||'')}`;
+  let _refD=0.20; if(creditUsed==='student' && currentUser){ try{ const { data:_pb } = await supaClient.from('bookings').select('status').eq('coach_id', c.profileId||c.id).eq('student_id', currentUser.id).limit(20); if(_pb && _pb.some(b=>b.status!=='refunded'&&b.status!=='cancelled')) _refD=0.10; }catch(e){ _refD=0.10; } }
+  try{ localStorage.setItem('mtl_ref_disc', String(_refD)); }catch(e){}
+  const url = `/api/pay?type=coach&coachId=${encodeURIComponent(c.stripeAccount)}&coachName=${encodeURIComponent(c.name)}&amount=${rate}&currency=${curr}&online=1&coachProfileId=${encodeURIComponent(c.profileId)}&fmt=${encodeURIComponent(fmt)}&commission=${comm}&nomarkup=${nomarkup}&credit=${creditUsed||'none'}&studentId=${currentUser?currentUser.id:''}&refDisc=${_refD}&markup=${c.partner?1.00:1.00}&disc=${encodeURIComponent(disc||_bookDisc||'')}`;
   setTimeout(()=>{ window.location.href = url; }, 600);
 }
 
@@ -11589,31 +11593,32 @@ function closeRateCalc(){ const o=$('rateCalcOv'); if(o) o.classList.remove('ope
 function openRateCalc(){
   const EN=LANG==='en';
   if($('rcTitle')) $('rcTitle').textContent=EN?'MARGIN DIFFERENCE':'ROZDÍL V MARŽI';
-  if($('rcHint')) $('rcHint').textContent=EN?'Pick a type, enter your monthly turnover':'Vyber typ a zadej měsíční obrat';
+  if($('rcHint')) $('rcHint').textContent=EN?'Enter your monthly turnover':'Zadej měsíční obrat';
   if($('rcClose')) $('rcClose').textContent=EN?'Close':'Zavřít';
   if($('rcPrice')){ $('rcPrice').value=''; $('rcPrice').setAttribute('placeholder', EN?'e.g. 30000':'např. 30000'); }
   _rcCur='CZK'; _rcType='1:1'; renderRateCalc(); $('rateCalcOv').classList.add('open'); setTimeout(()=>{ if($('rcPrice')) $('rcPrice').focus(); },150);
 }
 function renderRateCalc(){
   const EN=LANG==='en';
-  const RT={ '1:1':{std:0.04, ep:0.01, cs:'Soukromé 1:1', en:'1:1 lessons'}, 'drop':{std:0.04, ep:0.01, cs:'Drop-in', en:'Drop-in'}, 'memb':{std:0.04, ep:0.01, cs:'Členství', en:'Memberships'} };
-  const typeRow=$('rcCurRow');
-  if(typeRow){ typeRow.innerHTML=Object.keys(RT).map(k=>{ const on=k===_rcType; return `<button class="rcTypeBtn" data-k="${k}" style="flex:1;padding:9px 4px;border-radius:9px;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'#fff'};color:${on?'#fff':'var(--dark)'};font-weight:700;font-family:'DM Sans';font-size:12px;cursor:pointer;">${EN?RT[k].en:RT[k].cs}</button>`; }).join(''); typeRow.querySelectorAll('.rcTypeBtn').forEach(b=>b.onclick=()=>{ _rcType=b.dataset.k; renderRateCalc(); }); }
+  const rt={std:0.04, ep:0.01};
+  const typeRow=$('rcCurRow'); if(typeRow){ typeRow.innerHTML=''; typeRow.style.display='none'; }
   const sym=_rcCur==='CZK'?'Kč':_rcCur==='USD'?'$':'€';
   const base=parseFloat(($('rcPrice')&&$('rcPrice').value)||'0')||0;
   const r=v=>fmtPrice(Math.round(v*100)/100, _rcCur);
-  const STRIPE=0.03, rt=RT[_rcType];
   const body=$('rcBody'); if(!body) return;
   const curHtml=`<div style="display:flex;gap:6px;margin-bottom:12px;">`+['CZK','USD','EUR'].map(c=>{ const on=c===_rcCur; return `<button class="rcCurBtn" data-c="${c}" style="flex:1;padding:8px;border-radius:9px;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'#fff'};color:${on?'#fff':'var(--dark)'};font-weight:700;font-family:'DM Sans';font-size:12px;cursor:pointer;">${c}</button>`; }).join('')+`</div>`;
   const wireCur=()=>body.querySelectorAll('.rcCurBtn').forEach(b=>b.onclick=()=>{ _rcCur=b.dataset.c; renderRateCalc(); });
   if(base<=0){ body.innerHTML=curHtml+`<p style="text-align:center;color:var(--light);font-size:13px;padding:8px 0;">${EN?'Enter your expected monthly turnover above.':'Zadej očekávaný měsíční obrat výše.'}</p>`; wireCur(); return; }
-  const blk=(label,accent,pct)=>{ const mtl=base*pct, stp=base*STRIPE, net=base-mtl-stp; return `<div style="padding:11px 0;border-top:1px solid var(--border);"><div style="font-size:12px;font-weight:800;letter-spacing:.02em;color:${accent};margin-bottom:7px;">${label}</div><div style="display:flex;justify-content:space-between;font-size:12px;color:var(--mid);margin-bottom:3px;"><span>− ${EN?'MTL commission':'Provize MTL'} (${Math.round(pct*100)} %)</span><span>−${r(mtl)} ${sym}</span></div><div style="display:flex;justify-content:space-between;font-size:12px;color:var(--mid);margin-bottom:6px;"><span>− Stripe fee (${EN?'est.':'odhad'} 3 %)</span><span>−${r(stp)} ${sym}</span></div><div style="display:flex;justify-content:space-between;font-size:14.5px;font-weight:800;color:${accent};"><span>${EN?'Your share':'Tvůj podíl'}</span><span>${r(net)} ${sym}</span></div></div>`; };
+  const blk=(label,accent,pct)=>{ const mtl=base*pct, net=base-mtl; return `<div style="padding:11px 0;border-top:1px solid var(--border);"><div style="font-size:12px;font-weight:800;letter-spacing:.02em;color:${accent};margin-bottom:7px;">${label}</div><div style="display:flex;justify-content:space-between;font-size:12px;color:var(--mid);margin-bottom:6px;"><span>− ${EN?'MTL commission':'Provize MTL'} (${Math.round(pct*100)} %)</span><span>−${r(mtl)} ${sym}</span></div><div style="display:flex;justify-content:space-between;font-size:14.5px;font-weight:800;color:${accent};"><span>${EN?'Your share':'Tvůj podíl'}</span><span>${r(net)} ${sym}</span></div></div>`; };
   const diff=base*(rt.std-rt.ep);
+  const epCost=_rcCur==='CZK'?11500:_rcCur==='EUR'?460:499;
+  const worth=diff>epCost;
   body.innerHTML=curHtml
     +blk(EN?'Standard rate':'Standardní sazba','var(--dark)',rt.std)
     +blk('EXCLUSIVE PARTNER','#8a6a12',rt.ep)
     +`<div style="text-align:center;font-size:13px;font-weight:800;color:#8a6a12;padding:13px 0 2px;border-top:1px solid var(--border);">${EN?'As a Partner you keep':'Jako Partner ti zbyde'} +${r(diff)} ${sym} ${EN?'more / month':'navíc / měsíc'}</div>`
-    +`<p style="font-size:10.5px;color:var(--light);line-height:1.55;margin-top:9px;">${EN?`MTL commission 4%→1% (Standard→Partner) on every payment — lessons, memberships, drop-ins. Stripe ~3% flat estimate. Estimates — Stripe Dashboard is authoritative.`:`Provize MTL 4 %→1 % (Standard→Partner) u každé platby — lekce, členství, drop-iny. Stripe ~3 % plošný odhad. Odhady — závazný je Stripe Dashboard.`}</p>`;
+    +`<div style="text-align:center;margin-top:10px;padding:11px 12px;border-radius:11px;background:${worth?'#F0FBF0':'#FDECEC'};border:1px solid ${worth?'#CDEBD6':'#F5C6C6'};"><div style="font-size:12px;color:var(--mid);margin-bottom:4px;">${EN?'Is subscribing to Exclusive Partner worth it?':'Vyplatí se předplatit si Exclusive Partner výhody?'}</div><div style="font-size:16.5px;font-weight:800;color:${worth?'#067647':'#C0392B'};">${worth?(EN?'Yes ✅':'Ano ✅'):(EN?'Not yet ❌':'Zatím ne ❌')}</div></div>`
+    +`<p style="font-size:10.5px;color:var(--light);line-height:1.55;margin-top:9px;">${EN?`MTL commission 4%→1% (Standard→Partner) on every payment — lessons, memberships, drop-ins. Exclusive Partner costs $499/mo; "worth it" weighs your monthly fee saving against that cost. Estimates — Stripe Dashboard is authoritative.`:`Provize MTL 4 %→1 % (Standard→Partner) u každé platby — lekce, členství, drop-iny. Exclusive Partner stojí $499/měs; „vyplatí se" porovnává tvou měsíční úsporu na provizi proti tomu. Odhady — závazný je Stripe Dashboard.`}</p>`;
   wireCur();
 }
 function openPartnerInfo(){
@@ -13405,7 +13410,7 @@ function applyCertUI(){
   const hideMedal = ['approved','suspended','banned'].includes(cs);
   const bc=$('btnCoach'); if(bc) bc.style.display = hideMedal ? 'none' : 'flex';
   if($('btnCoachSettings')) $('btnCoachSettings').innerHTML = (LANG==='en'?'⚙️ Coach settings':'⚙️ Nastavení kouče'); if(currentUser&&currentUser.partner&&currentUser.partner_cancelling&&currentUser.partner_period_end&&new Date(currentUser.partner_period_end)<new Date()){ currentUser.partner=false; currentUser.partner_cancelling=false; try{ supaClient.from('profiles').update({partner:false,partner_cancelling:false}).eq('id',currentUser.id); }catch(e){} }
-  if($('mePartnerStrip')){ const _ps=$('mePartnerStrip'); const _canP=!!(currentUser && !currentUser.partner && (currentUser.coach_status==='approved'||currentUser.gym_official||(window._myGyms&&window._myGyms.length))); if(_canP){ _ps.style.display='block'; _ps.innerHTML = (LANG==='en'?'⭐ Go Exclusive MTL Partner — keep 99%, only $499/mo →':'⭐ Staň se Exclusive MTL Partnerem — nech si 99 %, jen $499/měs →'); } else { _ps.style.display='none'; } }
+  if($('mePartnerStrip')){ const _ps=$('mePartnerStrip'); const _canP=!!(currentUser && !currentUser.partner && (currentUser.coach_status==='approved'||currentUser.gym_official||(window._myGyms&&window._myGyms.length))); if(_canP){ _ps.style.display='block'; _ps.innerHTML = (LANG==='en'?'⭐ Become Exclusive MTL Partner → keep 99%':'⭐ Staň se Exclusive MTL Partnerem → nech si 99 %'); } else { _ps.style.display='none'; } }
   if($('btnBecomePartner')) $('btnBecomePartner').style.display = (currentUser&&currentUser.partner) ? 'none' : 'block';
   if($('btnCancelPartner')){ $('btnCancelPartner').style.display = (currentUser&&currentUser.partner) ? 'block' : 'none'; if(typeof paintPartnerCancelBtn==='function') paintPartnerCancelBtn(); }
   if($('foundingCoachBadge')) $('foundingCoachBadge').style.display = (currentUser&&currentUser.founding&&!currentUser.partner) ? 'block' : 'none';
@@ -13675,7 +13680,7 @@ async function fillRateEditor(){
     currentUser.founding = !!prof.founding; currentUser.partner = !!prof.partner;
     if($('foundingCoachBadge')) $('foundingCoachBadge').style.display = (prof.founding && !prof.partner) ? 'block' : 'none';
     if($('partnerBadge')){ $('partnerBadge').style.display = prof.partner ? 'block' : 'none'; if(prof.partner) $('partnerBadge').innerHTML = epRatesCardHTML(true, true); }
-    if($('mePartnerStrip')){ const _ps=$('mePartnerStrip'); const _canP=!!(!prof.partner && (prof.coach_status==='approved'||prof.gym_official||(window._myGyms&&window._myGyms.length))); if(_canP){ _ps.style.display='block'; _ps.innerHTML = (LANG==='en'?'⭐ Go Exclusive MTL Partner — keep 99%, only $499/mo →':'⭐ Staň se Exclusive MTL Partnerem — nech si 99 %, jen $499/měs →'); } else { _ps.style.display='none'; } }
+    if($('mePartnerStrip')){ const _ps=$('mePartnerStrip'); const _canP=!!(!prof.partner && (prof.coach_status==='approved'||prof.gym_official||(window._myGyms&&window._myGyms.length))); if(_canP){ _ps.style.display='block'; _ps.innerHTML = (LANG==='en'?'⭐ Become Exclusive MTL Partner → keep 99%':'⭐ Staň se Exclusive MTL Partnerem → nech si 99 %'); } else { _ps.style.display='none'; } }
     if($('btnCancelPartner')){ $('btnCancelPartner').style.display = prof.partner ? 'block' : 'none'; if(typeof paintPartnerCancelBtn==='function') paintPartnerCancelBtn(); }
     if($('btnBecomePartner')) $('btnBecomePartner').style.display = prof.partner ? 'none' : 'block';
     currentUser.rate_inperson = prof.rate_inperson;
