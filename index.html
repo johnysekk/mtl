@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-11-LE | Part 3: referral_optin moved to a Yes/No switch (Active/Holiday/Full style) + info popup. COACH: removed KZ shCoachSettings accordion; new STUDENT REFERRALS? switch under Availability in shMe (meRefToggle, paintRefSwitch sets text/highlight from currentUser.referral_optin, called in setAvailUI; saves profiles.referral_optin guarded; meRefInfoBtn toggles explainer). GYM: removed KY checkbox; switch under gym XP above tabs in renderGymManage (gmRefToggle inline state from _myGymData.referral_optin, wired after tab IIFE; saves gyms.referral_optin guarded; gmRefInfoBtn toggles explainer). NEEDS SCHEMA profiles.referral_optin + gyms.referral_optin bool default true. -->
+<!-- MTL build: 2026-06-11-LI | ROOT-CAUSE FIX: gym drop-ins were never recorded in the transactions ledger. pay.js gymCheckout put metadata only in payment_intent_data.metadata, but the webhook reads SESSION metadata - so mtl_payment_type was undefined and the drop_in branch never fired (dashboard did not move, accounting export empty). FIX: gymCheckout now sets session-level metadata {mtl_payment_type:drop_in, gym_id, student_id, coach_id, mtl_plan, mtl_currency} + accepts gymId/studentId/coachId; client drop-in URLs (student 5826, coach-roster 7829, guest 14798) now pass gymId/studentId/coachId. ALSO unlocked EP email (removed customer_email from partnerCheckout; linking is via client_reference_id+metadata user_id). NOTE: requires webhook deployed+configured in Stripe (test mode) or nothing records. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -5823,7 +5823,7 @@ async function bookGymDropin(g, occ, _child){
     }
     try{ localStorage.setItem('mtl_credit_used', _dropCreditUsed); }catch(e){}
     try{ localStorage.setItem('mtl_ref_disc', String(_dropRefD)); }catch(e){}
-    const url = `/api/pay?type=gym&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&className=${encodeURIComponent(occ&&occ.name?occ.name:'Drop-in')}&amount=${_dp}&currency=${_dcur}&bookingId=${encodeURIComponent(bk.id)}&income=${encodeURIComponent(g.dropin_income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&level=${encodeURIComponent((occ&&occ.level)||'')}&disc=${encodeURIComponent((occ&&occ.disc)?occ.disc:parseDisc(g.disciplines).join(','))}&partner=${_gymOwnerPartner?1:0}&credit=${_dropCreditUsed||'none'}&refDisc=${_dropRefD}`;
+    const url = `/api/pay?type=gym&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&className=${encodeURIComponent(occ&&occ.name?occ.name:'Drop-in')}&amount=${_dp}&currency=${_dcur}&bookingId=${encodeURIComponent(bk.id)}&income=${encodeURIComponent(g.dropin_income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&level=${encodeURIComponent((occ&&occ.level)||'')}&disc=${encodeURIComponent((occ&&occ.disc)?occ.disc:parseDisc(g.disciplines).join(','))}&partner=${_gymOwnerPartner?1:0}&credit=${_dropCreditUsed||'none'}&refDisc=${_dropRefD}&gymId=${encodeURIComponent(g.id)}&studentId=${currentUser?currentUser.id:''}&coachId=${encodeURIComponent((occ&&occ.coach)||'')}`;
     setTimeout(()=>{ window.location.href = url; }, 500);
   } catch(e){ console.error('bookGymDropin', e); toast('⚠️ '+e.message); }
 }
@@ -5929,6 +5929,7 @@ async function openGymReschedule(b){
   let ownerName=''; try{ if(gym&&gym.owner_id){ const { data:ow } = await supaClient.from('profiles').select('name').eq('id', gym.owner_id).single(); ownerName=(ow&&ow.name)||''; } }catch(e){}
   let sched=[]; try{ sched = (gym&&typeof gym.schedule==='string')?JSON.parse(gym.schedule):((gym&&gym.schedule)||[]); }catch(e){}
   const occs = upcomingClasses(sched, 21);
+  let _cxSet=new Set(); try{ const { data:_cxl } = await supaClient.from('gym_class_log').select('class_date,class_time,class_name').eq('gym_id', b.gym_id).eq('status','cancelled'); (_cxl||[]).forEach(c=>_cxSet.add(`${c.class_date}|${c.class_time||''}|${c.class_name||''}`)); }catch(e){}
   const now=new Date();
   const minTime=new Date(now.getTime()+6*60*60*1000); // aspoň 6h dopředu
   // obsazenost cílových lekcí (rezervace + aktivní jednorázové lekce) pro kontrolu kapacity
@@ -5941,6 +5942,7 @@ async function openGymReschedule(b){
   const valid = occs.filter(o=>{
     const dt=new Date(`${o.date}T${(o.time||'00:00')}:00`);
     if(dt < minTime) return false;
+    if(_cxSet.has(`${o.date}|${o.time||''}|${o.name||''}`)) return false; // skip classes marked not held
     // stejná disciplína (když je u rezervace určená)
     if(b.discipline && o.disc && o.disc!==b.discipline) return false;
     // stejný štítek/úroveň (např. Pokročilí → jen Pokročilí), když je známý
@@ -6640,8 +6642,8 @@ function openEPCancel(){
   b.innerHTML=`
     <div style="background:#FFF4E5;border:1px solid #F5D9A8;border-radius:12px;padding:14px;margin-bottom:14px;font-size:13px;color:#7a4a00;line-height:1.65;">
       <b>${LANG==='en'?'When your Exclusive Partner period runs out, your rates go back to standard:':'Až doběhne tvé Exclusive Partner období, sazby se ti vrátí na standard:'}</b><br>
-      ${LANG==='en'?'• Lessons: you keep 96% (was 97%) — students pay the listed price either way.':'• Z lekcí si necháš 96 % (místo 97 %) — student platí uvedenou cenu tak jako tak.'}<br>
-      ${LANG==='en'?'• Gym: 7% on memberships and drop-ins (was 3%).':'• U gymu platíš 7 % z členství i jednorázových (místo 3 %).'}<br>
+      ${LANG==='en'?'• Lessons: you keep 96% (you kept 99% as a Partner) — students pay the listed price either way.':'• Z lekcí si necháš 96 % (jako Partner sis nechal 99 %) — student platí uvedenou cenu tak jako tak.'}<br>
+      ${LANG==='en'?'• Gym memberships & drop-ins: 4% MTL fee (was 1%).':'• U gymu: 4 % z členství i jednorázových (jako Partner 1 %).'}<br>
       ${LANG==='en'?'Your $499/mo subscription stops renewing — but your benefits stay active until the end of the current paid period. After that, monthly memberships at your gym go back to a 4% MTL fee (instead of 1%).':'Předplatné $499/měs se přestane obnovovat — výhody ti ale zůstávají až do konce aktuálního zaplaceného období. Poté budou všechna měsíční členství u tvého gymu mít zase 4% provizi MTL (místo 1%).'}
     </div>
     <label style="font-size:13px;font-weight:700;color:var(--dark);display:block;margin-bottom:6px;">${LANG==='en'?'Why are you cancelling? (required)':'Proč rušíš? (povinné)'}</label>
@@ -7824,7 +7826,7 @@ async function recDoCheckinCard(occ){
     if(error){ toast('⚠️ '+error.message); return; }
     let _gymOwnerPartner=false, _ownerFounding=false; try{ const _ppid=(payee&&payee.coachId)||g.owner_id; if(_ppid){ const { data: ow }=await supaClient.from('profiles').select('partner, founding').eq('id',_ppid).single(); _gymOwnerPartner=!!(ow&&ow.partner); _ownerFounding=!!(ow&&ow.founding); } }catch(e){}
     try{ if(bk&&bk.id) await supaClient.from('gym_bookings').update({gym_keep_pct:((typeof _gymOwnerPartner!=='undefined'&&_gymOwnerPartner)||(typeof _gp!=='undefined'&&_gp))?0.99:(_ownerFounding?0.98:0.96)}).eq('id',bk.id); }catch(e){}
-    const url=`/api/pay?type=gym&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&className=${encodeURIComponent(occ.name||'Drop-in')}&amount=${_dp}&currency=${_dcur}&bookingId=${encodeURIComponent(bk.id)}&income=${encodeURIComponent(g.dropin_income||'side')}&memberName=${encodeURIComponent(r.student_name||'')}&payee=${encodeURIComponent(payee.name||'')}&level=${encodeURIComponent(occ.level||'')}&disc=${encodeURIComponent(disc||'')}&partner=${_gymOwnerPartner?1:0}`;
+    const url=`/api/pay?type=gym&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&className=${encodeURIComponent(occ.name||'Drop-in')}&amount=${_dp}&currency=${_dcur}&bookingId=${encodeURIComponent(bk.id)}&income=${encodeURIComponent(g.dropin_income||'side')}&memberName=${encodeURIComponent(r.student_name||'')}&payee=${encodeURIComponent(payee.name||'')}&level=${encodeURIComponent(occ.level||'')}&disc=${encodeURIComponent(disc||'')}&partner=${_gymOwnerPartner?1:0}&gymId=${encodeURIComponent(g.id)}&studentId=${encodeURIComponent(r.student_id||'')}&coachId=${encodeURIComponent((occ&&occ.coach)||'')}`;
     try{ const { data:_exA } = await supaClient.from('gym_attendance').select('id').eq('gym_id',g.id).eq('student_id',r.student_id).eq('class_date',occ.date).eq('class_time',occ.time); if(!(_exA&&_exA.length)){ await supaClient.from('gym_attendance').insert({ gym_id:g.id, student_id:r.student_id, student_name:r.student_name||null, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, coach_id:occ.coach||null, discipline:disc, marked_by:currentUser?currentUser.id:null }); } }catch(e){}
     _showRecPayQR(location.origin+url, r.student_name||'', occ.name||''); toast(LANG==='en'?'✅ Attendance recorded — QR ready to pay':'✅ Docházka zapsaná — QR k platbě připraven');
   }catch(e){ console.error('recDoCheckinCard',e); toast('⚠️ '+e.message); }
@@ -8170,6 +8172,7 @@ async function loadGymManageBookings(){
   const { data: mbs } = await supaClient.from('gym_memberships').select('*').eq('gym_id', _myGymData.id).in('status',['active','cancelling']).order('created_at',{ascending:false});
   const drops=bks||[], mems=mbs||[];
   let _gymTx=[]; try{ const { data: txd } = await supaClient.from('transactions').select('*').eq('gym_id', _myGymData.id); _gymTx=txd||[]; }catch(e){}
+  let _gymEvTix=[]; try{ const { data:_evs } = await supaClient.from('events').select('id').eq('gym_id', _myGymData.id); const _evIds=(_evs||[]).map(e=>e.id); if(_evIds.length){ const { data:_tix } = await supaClient.from('event_tickets').select('amount,currency,status,created_at,event_id').in('event_id', _evIds).eq('status','paid'); _gymEvTix=_tix||[]; } }catch(e){}
   let _gymTeamCoaches=[];
   try{
     const { data: links } = await supaClient.from('gym_coaches').select('coach_id').eq('gym_id', _myGymData.id).eq('status','active');
@@ -8194,6 +8197,14 @@ async function loadGymManageBookings(){
     const beforeGM = x => _gymMonth!=='all' && ((x.created_at||'').slice(0,10) < (_gymMonth+'-01'));
     const cancelledInGM = m => _gymMonth!=='all' && m.cancelled_at && (String(m.cancelled_at).slice(0,7)===_gymMonth);
     const monthLabel = _gymMonth==='all' ? (LANG==='en'?'all time':'celkem') : (()=>{ const mm=fdMonthList().find(x=>x.ym===_gymMonth); return mm?mm.lbl:_gymMonth; })();
+    const _evCur=_myGymData.currency||'CZK';
+    const evTixM=_gymEvTix.filter(t=>(!t.currency||t.currency===_evCur) && (_gymMonth==='all'?true:((t.created_at||'').slice(0,7)===_gymMonth)));
+    const _evTake=(currentUser&&currentUser.partner)?0.01:((currentUser&&currentUser.founding)?0.02:0.04);
+    const evGross=evTixM.reduce((s,t)=>s+(t.amount||0),0);
+    const evMtl=evGross*_evTake;
+    const evFeeEst=evTixM.reduce((s,t)=>s+((t.amount||0)*0.019+6),0);
+    const evNet=Math.max(0, evGross-evMtl-evFeeEst);
+    const evCount=evTixM.length;
     const monthOpts = '<option value="all"'+(_gymMonth==='all'?' selected':'')+'>'+(LANG==='en'?'All time':'Vše')+'</option>' + fdMonthList().map(m=>'<option value="'+m.ym+'"'+(m.ym===_gymMonth?' selected':'')+'>'+m.lbl+'</option>').join('');
     // jednorázové lekce (jednorázové lekce) — filtr měsíce
     const dropsM = drops.filter(inGM);
@@ -8265,7 +8276,7 @@ async function loadGymManageBookings(){
       <select id="mgMonthSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:10px;">${monthOpts}</select>
       ${(_gymTeamCoaches&&_gymTeamCoaches.length)?`<select id="mgCoachSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:&quot;DM Sans&quot;;background:#fff;margin-bottom:10px;"><option value="">${LANG==='en'?'— Earnings per coach —':'— Výdělek podle kouče —'}</option>${_gymTeamCoaches.map(c=>`<option value="${c.id}"${_gymCoachSel===c.id?' selected':''}>${escapeHtml(c.name)}</option>`).join('')}</select><div id="mgCoachEarn" style="margin-bottom:14px;">${_coachEarnHtml}</div>`:''}
 
-      <p style="font-size:11px;color:#0A7A4F;background:#F0FBF0;border-radius:8px;padding:8px 10px;margin-bottom:10px;">💳 ${LANG==='en'?'Earnings = real Stripe payments (exact, after refunds).':'Výdělky = reálné platby ze Stripe (přesné, po refundech).'}</p>
+      <p style="font-size:11px;color:#0A7A4F;background:#F0FBF0;border-radius:8px;padding:8px 10px;margin-bottom:10px;">💳 ${LANG==='en'?'Collected earnings (classes &amp; memberships) = real Stripe payments, exact after refunds. The MRR projections below are estimates.':'Vybrané výdělky (lekce a členství) = reálné platby ze Stripe, přesné po refundech. MRR projekce níže jsou odhad.'}</p>
       <div class="dashSecHdr" style="font-size:14px;font-weight:800;color:var(--dark);margin:10px 0 8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">🥊 ${LANG==='en'?'Single classes':'Jednorázové lekce'} <span style="color:var(--light);font-weight:600;font-size:12px;">· ${monthLabel}</span><span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;">▾</span></div>
       <div class="prow-group" style="margin-bottom:12px;">
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏛️</div><div class="prow-lbl">${LANG==='en'?'Gross profit':'Hrubý zisk'}</div></div><span class="prow-val">${f(dropGymL)}</span></div>
@@ -8277,14 +8288,22 @@ async function loadGymManageBookings(){
       <div class="dashSecHdr" style="font-size:14px;font-weight:800;color:var(--dark);margin:10px 0 8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">🔁 ${LANG==='en'?'Monthly memberships':'Měsíční členství'}<span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;">▾</span></div>
       <div class="prow-group" style="margin-bottom:12px;">
         ${isMonth?`
-        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">👥</div><div class="prow-lbl">${LANG==='en'?'Base MRR (continuing)':'Base MRR (pokračující)'}</div></div><span class="prow-val">${f(baseMRR)}</span></div>
-        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:${newMRRnet>=0?'#F0FBF0':'#FEECEC'};">${newMRRnet>=0?'📈':'📉'}</div><div class="prow-lbl">${LANG==='en'?'Net new MRR this month':'Nové MRR tento měsíc'}</div></div><span class="prow-val" style="color:${newMRRnet>=0?'#006040':'var(--red)'};">${newMRRnet>=0?'+':'-'}${f(Math.abs(newMRRnet))}</span></div>`:''}
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">👥</div><div class="prow-lbl">${LANG==='en'?'Base MRR (continuing, est.)':'Base MRR (pokračující, odhad)'}</div></div><span class="prow-val">${f(baseMRR)}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:${newMRRnet>=0?'#F0FBF0':'#FEECEC'};">${newMRRnet>=0?'📈':'📉'}</div><div class="prow-lbl">${LANG==='en'?'Net new MRR this month (est.)':'Nové MRR tento měsíc (odhad)'}</div></div><span class="prow-val" style="color:${newMRRnet>=0?'#006040':'var(--red)'};">${newMRRnet>=0?'+':'-'}${f(Math.abs(newMRRnet))}</span></div>`:''}
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏛️</div><div class="prow-lbl">${LANG==='en'?'Gross collected':'Hrubě vybráno'}</div></div><span class="prow-val">${f(memGrossL)}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">🏛️</div><div class="prow-lbl">${LANG==='en'?'− MTL fee':'− MTL poplatek'}</div></div><span class="prow-val">-${f(memMtlL)}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF0E6;">💳</div><div class="prow-lbl">${LANG==='en'?'− Stripe fee':'− Stripe fee'}</div></div><span class="prow-val">-${f(memFeeL)}</span></div>
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💎</div><div class="prow-lbl">${LANG==='en'?'= Net (collected this month)':'= Net (vybráno tento měsíc)'}</div></div><span class="prow-val" style="color:#006040;">${f(memNetL)}</span></div>
       </div>
 
+      ${evGross>0?`<div class="dashSecHdr" style="font-size:14px;font-weight:800;color:var(--dark);margin:10px 0 8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">🎪 ${LANG==='en'?'Events (tickets)':'Akce (lístky)'}<span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;">▾</span></div>
+      <div class="prow-group" style="margin-bottom:12px;">
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#EEF0FF;">🎟️</div><div class="prow-lbl">${LANG==='en'?'Tickets sold':'Prodané lístky'}</div></div><span class="prow-val">${evCount}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏛️</div><div class="prow-lbl">${LANG==='en'?'Gross':'Hrubě'}</div></div><span class="prow-val">${f(evGross)}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">🏛️</div><div class="prow-lbl">${LANG==='en'?'− MTL fee':'− MTL poplatek'}</div></div><span class="prow-val">-${f(evMtl)}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF0E6;">💳</div><div class="prow-lbl">${LANG==='en'?'− Stripe fee (est.)':'− Stripe fee (odhad)'}</div></div><span class="prow-val">-${f(evFeeEst)}</span></div>
+        <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💎</div><div class="prow-lbl">${LANG==='en'?'= Net (est.)':'= Net (odhad)'}</div></div><span class="prow-val" style="color:#006040;">${f(evNet)}</span></div>
+      </div>`:''}
       <div class="dashSecHdr" style="font-size:14px;font-weight:800;color:var(--dark);margin:10px 0 8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">🎟️ ${LANG==='en'?'Membership':'Členství'}<span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;">▾</span></div>
       <div class="prow-group" style="margin-bottom:12px;">
         <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🎟️</div><div class="prow-lbl">${LANG==='en'?'Active members':'Aktivní členové'}</div></div><span class="prow-val">${payingNow.length}</span></div>
@@ -14776,7 +14795,7 @@ async function showPaidPopup(){
       if(error){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">'+error.message+'</p>'; return; }
       let _gp=false, _ownerFounding=false; try{ const _ppid=(payee&&payee.coachId)||g.owner_id; if(_ppid){ const { data: ow }=await supaClient.from('profiles').select('partner, founding').eq('id',_ppid).single(); _gp=!!(ow&&ow.partner); _ownerFounding=!!(ow&&ow.founding); } }catch(e){}
       try{ if(bk&&bk.id) await supaClient.from('gym_bookings').update({gym_keep_pct:((typeof _gymOwnerPartner!=='undefined'&&_gymOwnerPartner)||(typeof _gp!=='undefined'&&_gp))?0.99:(_ownerFounding?0.98:0.96)}).eq('id',bk.id); }catch(e){}
-      const url='/api/pay?type=gym&guest=1&founding='+(_ownerFounding?1:0)+'&token='+encodeURIComponent(tok)+'&gymAccount='+encodeURIComponent(payee.account)+'&gymName='+encodeURIComponent(g.name||'')+'&className='+encodeURIComponent(cls)+'&amount='+amt+'&currency='+cur+'&bookingId='+encodeURIComponent(bk.id)+'&income='+encodeURIComponent(g.dropin_income||'side')+'&payee='+encodeURIComponent(payee.name||'')+'&level='+encodeURIComponent(level)+'&disc='+encodeURIComponent(disc||'')+'&partner='+(_gp?1:0);
+      const url='/api/pay?type=gym&guest=1&founding='+(_ownerFounding?1:0)+'&token='+encodeURIComponent(tok)+'&gymAccount='+encodeURIComponent(payee.account)+'&gymName='+encodeURIComponent(g.name||'')+'&className='+encodeURIComponent(cls)+'&amount='+amt+'&currency='+cur+'&bookingId='+encodeURIComponent(bk.id)+'&income='+encodeURIComponent(g.dropin_income||'side')+'&payee='+encodeURIComponent(payee.name||'')+'&level='+encodeURIComponent(level)+'&disc='+encodeURIComponent(disc||'')+'&partner='+(_gp?1:0)+'&gymId='+encodeURIComponent(g.id)+'&coachId='+encodeURIComponent(coach||'');
       document.body.innerHTML='<div style="padding:50px 24px;text-align:center;font-family:sans-serif;color:#111;"><div style="font-size:30px;margin-bottom:10px;">💳</div><p>'+(LANG==='en'?'Redirecting to secure payment…':'Přesměrovávám na zabezpečenou platbu…')+'</p></div>';
       window.location.href=url; return;
     }catch(e){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">'+(e.message||'error')+'</p>'; return; }
