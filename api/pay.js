@@ -284,11 +284,8 @@ async function membershipCheckout(req, res) {
   res.redirect(303, session.url);
 }
 
-// ───────────────────────── Exclusive MTL Partner ($99/mo, platform account) ─────────────────────────
+// ───────────────────────── Exclusive MTL Partner ($499/mo, platform account) ─────────────────────────
 async function partnerCheckout(req, res) {
-  // Exclusive Partner discontinued — flat 5% for everyone. No subscription is sold.
-  return res.status(410).json({ error: 'Exclusive Partner byl ukončen — platí jednotná sazba 5 %.' });
-  /* eslint-disable no-unreachable */
   const { userId, email } = req.query;
   if (!userId) return res.status(400).json({ error: 'Chybí userId' });
 
