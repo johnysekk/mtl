@@ -42,14 +42,26 @@ async function recordTransaction(acct, pi, fields) {
           if (typeof ch === 'string') ch = await stripe.charges.retrieve(ch, { expand: ['balance_transaction'] }, { stripeAccount: acct });
         }
         if (ch && typeof ch === 'object') {
-          chargeId = ch.id; gross = ch.amount; currency = ch.currency || currency; mtlFee = ch.application_fee_amount || 0;
-          // resolve balance_transaction explicitly too (can be a string id)
+          chargeId = ch.id; currency = ch.currency || currency;
           let bt = ch.balance_transaction;
           if (typeof bt === 'string') { try { bt = await stripe.balanceTransactions.retrieve(bt, { stripeAccount: acct }); } catch (e) {} }
-          // For direct charges: bt.fee = Stripe processing fee, bt.net = gross - Stripe fee.
-          // The MTL application fee is deducted separately, so the connected account's true net = bt.net - mtlFee.
-          if (bt && typeof bt === 'object') { stripeFee = bt.fee; net = bt.net - mtlFee; }
-          else if (gross != null) { net = gross - mtlFee; }
+          if (bt && typeof bt === 'object') {
+            // Direct charges: connected-account balance_transaction.fee is the COMBINED fee
+            // (Stripe processing + our application fee); .net already nets BOTH out.
+            // Split them via fee_details so we can report each separately. net = bt.net (no extra subtraction).
+            gross = bt.amount; net = bt.net; currency = bt.currency || currency;
+            let sFee = 0, aFee = 0;
+            if (Array.isArray(bt.fee_details)) {
+              for (const fd of bt.fee_details) {
+                if (fd.type === 'stripe_fee') sFee += fd.amount;
+                else if (fd.type === 'application_fee') aFee += fd.amount;
+              }
+            }
+            if (sFee === 0 && aFee === 0) { aFee = ch.application_fee_amount || 0; sFee = (bt.fee || 0) - aFee; }
+            stripeFee = sFee; mtlFee = aFee;
+          } else {
+            gross = ch.amount; mtlFee = ch.application_fee_amount || 0; net = gross - mtlFee;
+          }
         }
       } catch (e) { console.error('recordTransaction fee', e.message); return { status: 'fee-error:' + e.message }; }
     }
@@ -102,7 +114,7 @@ export default async function handler(req, res) {
       if (!txType) _tx = { recorded: false, reason: 'no mtl_payment_type / booking_type in the session metadata — redeploy pay.js (LX/LY) and make a NEW payment; old sessions have no metadata' };
       else if (!payId) _tx = { recorded: false, reason: 'could not resolve a payment id from the session (subscription invoice may lack payment_intent/charge on this API version)', txType };
       else if (!gymAccount) _tx = { recorded: false, reason: 'no gymAccount/acct passed to /api/session', txType, payId };
-      else { const r = await recordTransaction(gymAccount, payId, { type: txType, ...f }); _tx = { recorded: ['recorded','updated','exists'].includes(r.status), ...r, txType, payId, gymAccount }; }
+      else { const r = await recordTransaction(gymAccount, payId, { type: txType, ...f }); _tx = { recorded: ['recorded','updated','exists'].includes(r.status), ...r, txType, payId, gymAccount, gymId: f.gym_id, memberId: f.member_id }; }
     } catch (e) { _tx = { recorded: false, reason: 'exception: ' + e.message }; }
 
     res.status(200).json({

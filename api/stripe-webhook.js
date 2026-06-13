@@ -139,10 +139,25 @@ async function recordTransaction(acct, pi, fields) {
           if (typeof ch === 'string') ch = await stripe.charges.retrieve(ch, { expand: ['balance_transaction'] }, { stripeAccount: acct });
         }
         if (ch && typeof ch === 'object') {
-          chargeId = ch.id; gross = ch.amount; currency = ch.currency; mtlFee = ch.application_fee_amount || 0;
+          chargeId = ch.id; currency = ch.currency;
           let bt = ch.balance_transaction;
           if (typeof bt === 'string') { try { bt = await stripe.balanceTransactions.retrieve(bt, { stripeAccount: acct }); } catch (e) {} }
-          if (bt && typeof bt === 'object') { stripeFee = bt.fee; net = bt.net - mtlFee; } else if (gross != null) { net = gross - mtlFee; }
+          if (bt && typeof bt === 'object') {
+            // Direct charges: bt.fee is COMBINED (Stripe + application fee); bt.net already nets both.
+            // Split via fee_details; net = bt.net (no extra subtraction of the app fee).
+            gross = bt.amount; net = bt.net; currency = bt.currency || currency;
+            let sFee = 0, aFee = 0;
+            if (Array.isArray(bt.fee_details)) {
+              for (const fd of bt.fee_details) {
+                if (fd.type === 'stripe_fee') sFee += fd.amount;
+                else if (fd.type === 'application_fee') aFee += fd.amount;
+              }
+            }
+            if (sFee === 0 && aFee === 0) { aFee = ch.application_fee_amount || 0; sFee = (bt.fee || 0) - aFee; }
+            stripeFee = sFee; mtlFee = aFee;
+          } else {
+            gross = ch.amount; mtlFee = ch.application_fee_amount || 0; net = gross - mtlFee;
+          }
         }
       } catch (e) { console.error('recordTransaction fee', e.message); }
     }
