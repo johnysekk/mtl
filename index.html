@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-13-LY | TRANSACTION RECORDING via session.js (webhook-independent). Root problem: if the Stripe webhook does not deliver connected-account events, NOTHING reaches the transactions table (drop-in AND membership both showed 0 vs real Stripe payments). FIX: session.js (which the client already calls in every payment-success handler with sessionId + connected account) now RECORDS the transaction itself with EXACT fees (retrieves the session, reads metadata, gets payment_intent for payment-mode / first invoice payment_intent|charge for subscription, calls recordTransaction — idempotent on payment_intent, handles ch_ ids). Covers drop_in, membership, event_ticket (mtl_payment_type) and coach 1:1/online (booking_type). All success handlers (gym_pay, gym_sub, event_pay, guest_drop, platba) pass acct -> all types now record regardless of webhook config. REFERRAL: XP lowered +10 -> +5 per successful referral (computeMyXP + profile-badges.js); XP breakdown row now ALWAYS shows (was gated >0, why Petr never saw it) + per=5; static How-XP text now lists "successful referral = +5 XP"; removed the "Separate from your training Levels" clause (referrals DO count into XP now); gating on referral_rewarded (= after referred user completed a real lesson) already in place for both XP and milestones. NOTIFS: gym-owner drop-in + membership notifications now show the GROSS price the STUDENT PAID (not gym net after MTL fee) with new wording "Gratulujeme! Student X si prave zakoupil ... za <price>". -->
+<!-- MTL build: 2026-06-13-LZ | session.js now returns a _tx DIAGNOSTIC {recorded, status/reason, txType, payId, gymAccount} so we can see exactly why a transaction did/did not record; client logs it to console ([MTL tx · drop-in] / [MTL tx · membership]). recordTransaction returns recorded|exists|no-pi|error. NOTE on architecture: webhook (Stripe->server, LX) is the canonical/robust path (catches closed-browser, renewals, refunds); session.js recording (LY) is a POST-payment backstop that pulls REAL Stripe fees (retrieves session+charge+balance_transaction) so its data IS accurate, but it is missed if the user closes the tab before redirect — both are idempotent so they coexist. Notifications: added deep-link routing on click for gym_dropin_booked/gym_member_joined (->gym manage), gym_dropin_mine/gym_membership_mine (->gym profile), event_ticket_sold/event_ticket_mine (->event view); event ticket-sold notification reworded to "Gratulujeme! Student X si prave zakoupil listek na <title> za <price>". TODO next: rewrite the coach 1:1 notification (lives in stripe-webhook.js) to the same student-paid wording + diary deep-link. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -9564,6 +9564,9 @@ async function loadNotifications(){
         else if(isCoachRefAdmin){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.refId) openCoachStats(dd.refId, dd.refName||''); }catch(e){} }
         else if((function(){ try{ return (JSON.parse(n.data||'{}').kind)==='coach_hq'; }catch(e){ return false; } })()){ if(typeof openOpportunities==='function') openOpportunities(); }
         else if(k==='cert_recommend'||k==='new_listing'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.target_type==='gym' && dd.target_id){ const { data: g }=await supaClient.from('gyms').select('*').eq('id',dd.target_id).single(); if(g) openGymProfile(g); else toast(L('⚠️ Gym nenalezen')); } else if(dd.target_id){ if(typeof openCoachStats==='function') openCoachStats(dd.target_id, dd.target_name||''); else if(typeof openProfileById==='function') openProfileById(dd.target_id); } }catch(e){} }
+        else if(k==='gym_dropin_booked'||k==='gym_member_joined'){ try{ openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); }catch(e){} }
+        else if(k==='gym_dropin_mine'||k==='gym_membership_mine'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data:g }=await supaClient.from('gyms').select('*').eq('id',dd.gym_id).single(); if(g) openGymProfile(g); } }catch(e){} }
+        else if(k==='event_ticket_sold'||k==='event_ticket_mine'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.event_id){ const { data:ev }=await supaClient.from('events').select('*').eq('id',dd.event_id).single(); if(ev) openEventView(ev); } }catch(e){} }
         else openOnline('coach');
       };
     }
@@ -14865,7 +14868,7 @@ async function showPaidPopup(){
     let _t=0; while(!currentUser && _t<25){ await new Promise(r=>setTimeout(r,200)); _t++; }
     if(bookingId){
       let paymentIntent=null;
-      if(sessionId){ try{ const r=await fetch(`/api/session?sessionId=${sessionId}${gAcct?'&gymAccount='+encodeURIComponent(gAcct):''}`); const j=await r.json(); paymentIntent=j.paymentIntent||null; }catch(e){} }
+      if(sessionId){ try{ const r=await fetch(`/api/session?sessionId=${sessionId}${gAcct?'&gymAccount='+encodeURIComponent(gAcct):''}`); const j=await r.json(); paymentIntent=j.paymentIntent||null; console.log('[MTL tx · drop-in]', j._tx); }catch(e){} }
       try {
         const { data: gb } = await supaClient.from('gym_bookings').update({ status:'active', payment_intent: paymentIntent }).eq('id', bookingId).select().single();
         if(gb){
@@ -14907,7 +14910,7 @@ async function showPaidPopup(){
         const { data:tk } = await supaClient.from('event_tickets').update({ status:'paid', stripe_ref: pi }).eq('id', ticketId).select().single();
         if(tk){
           try{ fetch('/api/ticket-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticketId:tk.id})}); }catch(e){}
-          try{ const { data:ev } = await supaClient.from('events').select('created_by,title').eq('id', tk.event_id).single(); if(ev&&ev.created_by){ await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'event_ticket_sold', event_id:tk.event_id, title:ev.title}), message:'🎟️ '+(LANG==='en'?`Ticket sold for "${ev.title}"`:`Prodán lístek na „${ev.title}"`) }); } }catch(e){}
+          try{ const { data:ev } = await supaClient.from('events').select('created_by,title').eq('id', tk.event_id).single(); if(ev&&ev.created_by){ const _evPaid=(tk.amount||tk.price); const _evP=_evPaid?(' '+(LANG==='en'?'for ':'za ')+fmtPrice(_evPaid, tk.currency||'CZK')):''; await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'event_ticket_sold', event_id:tk.event_id, title:ev.title}), message:'🎟️ '+(LANG==='en'?`Congrats! ${currentUser?.name||'Someone'} just bought a ticket for "${ev.title}"${_evP}.`:`Gratulujeme! Student ${currentUser?.name||''} si právě zakoupil lístek na „${ev.title}"${_evP}.`) }); } }catch(e){}
           try{ if(currentUser){ await supaClient.from('notifications').insert({ user_id: currentUser.id, type:'system', read:false, data: JSON.stringify({ kind:'event_ticket_mine', event_id: tk.event_id }), message:'🎟️ '+(LANG==='en'?'Ticket confirmed — find it in Upcoming events':'Lístek potvrzen — najdeš ho v Nadcházejících akcích') }); updateNotifBadge(); } }catch(e){}
           toast(LANG==='en'?'🎟️ Ticket confirmed! See you there.':'🎟️ Lístek potvrzen! Uvidíme se tam.');
         }
@@ -14953,7 +14956,7 @@ async function showPaidPopup(){
     let _t=0; while(!currentUser && _t<25){ await new Promise(r=>setTimeout(r,200)); _t++; }
     if(membershipId){
       let subId=null;
-      if(sessionId){ try{ const r=await fetch(`/api/session?sessionId=${sessionId}${gAcct?'&gymAccount='+encodeURIComponent(gAcct):''}`); const j=await r.json(); subId=j.subscription||null; }catch(e){} }
+      if(sessionId){ try{ const r=await fetch(`/api/session?sessionId=${sessionId}${gAcct?'&gymAccount='+encodeURIComponent(gAcct):''}`); const j=await r.json(); subId=j.subscription||null; console.log('[MTL tx · membership]', j._tx); }catch(e){} }
       try {
         const { data: mb } = await supaClient.from('gym_memberships').update({ status:'active', stripe_subscription: subId }).eq('id', membershipId).select().single();
         if(mb){
