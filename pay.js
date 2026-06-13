@@ -10,8 +10,8 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 // ════════════════════════════════════════════════════════════════════════
 
 const GYM_STUDENT_MARKUP = 1.00;  // no markup
-const GYM_MTL_TAKE       = 0.05;  // drop-in: MTL provize 5 %
-const MEMB_MTL_PERCENT   = 5;     // membership: 5 % z invoicu
+const GYM_MTL_TAKE       = 0.025;  // drop-in: MTL provize 2,5 %
+const MEMB_MTL_PERCENT   = 2.5;     // membership: 2,5 % z invoicu
 
 export default async function handler(req, res) {
   const type = String(req.query.type || 'coach');
@@ -32,20 +32,22 @@ export default async function handler(req, res) {
 async function coachCheckout(req, res) {
   const {
     coachId, coachName, amount, currency = 'CZK', slotId, online,
-    coachProfileId, fmt, commission, nomarkup, credit, studentId, disc, markup,
+    coachProfileId, fmt, commission, nomarkup, credit, studentId, disc, markup, refDisc,
   } = req.query;
 
   if (!coachId || !amount) return res.status(400).json({ error: 'Chybí coachId nebo amount' });
 
   const rate = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
-  let COMMISSION = commission ? parseFloat(commission) : 0.05;
+  let COMMISSION = commission ? parseFloat(commission) : 0.025;
   if (!(COMMISSION >= 0.02 && COMMISSION <= 0.25)) COMMISSION = 0.10;
   let MK = 1.00; // no markup — student pays exactly the listed price
   let STUDENT_MARKUP = MK;
   if (String(credit) === 'student') {
-    // Referral reward: student pays exactly the coach's keep, MTL takes 0, coach untouched (~10% off)
-    STUDENT_MARKUP = Math.max(0, MK - COMMISSION);
+    // Referral reward: MTL waives its whole fee; the provider funds the rest of the discount.
+    let d = refDisc ? parseFloat(refDisc) : COMMISSION;
+    if (!(d >= 0 && d <= 0.5)) d = COMMISSION;
+    STUDENT_MARKUP = Math.max(0, MK - d);
     COMMISSION = 0;
   } else if (String(nomarkup) === '1') {
     STUDENT_MARKUP = 1.00;
@@ -73,6 +75,8 @@ async function coachCheckout(req, res) {
   const session = await stripe.checkout.sessions.create({
     mode: 'payment',
     payment_method_types: ['card'],
+    billing_address_collection: 'required',
+    tax_id_collection: { enabled: true },
     metadata: {
       booking_type: isOnline ? 'online' : 'inperson',
       student_id: studentId || '',
@@ -107,7 +111,8 @@ async function coachCheckout(req, res) {
 async function gymCheckout(req, res) {
   const {
     gymAccount, gymName, className, amount, currency = 'CZK', bookingId,
-    income, memberName, payee, disc, level, partner, guest, token, founding,
+    income, memberName, payee, disc, level, partner, guest, token, founding, credit, refDisc,
+    gymId, studentId, coachId,
   } = req.query;
 
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
@@ -116,10 +121,18 @@ async function gymCheckout(req, res) {
   const cur = String(currency).toLowerCase();
   const isPartner = (String(partner) === '1');
   const MK   = 1.00;
-  const TAKE = (String(founding)==='1') ? 0.02 : GYM_MTL_TAKE; // founding gym 2%, else flat 5%
+  let STUDENT_MK = MK;
+  let TAKE = (String(partner)==='1') ? 0.01 : GYM_MTL_TAKE; // EP 1%, else flat 2,5%
+  if (String(credit) === 'student') {
+    // Referral reward on a drop-in: MTL waives its whole fee; the gym/coach funds the rest of the discount.
+    let d = refDisc ? parseFloat(refDisc) : TAKE;
+    if (!(d >= 0 && d <= 0.5)) d = TAKE;
+    STUDENT_MK = Math.max(0, MK - d);
+    TAKE = 0;
+  }
 
   const isCZK = cur === 'czk';
-  const unitAmount     = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);
+  const unitAmount     = isCZK ? Math.floor(P * STUDENT_MK) * 100 : Math.round(P * STUDENT_MK * 100);
   const applicationFee = isCZK ? Math.floor(P * TAKE) * 100 : Math.round(P * TAKE * 100);
 
   const host = req.headers.host;
@@ -129,6 +142,9 @@ async function gymCheckout(req, res) {
     {
       mode: 'payment',
       payment_method_types: ['card'],
+      billing_address_collection: 'required',
+      tax_id_collection: { enabled: true },
+      metadata: { mtl_payment_type: 'drop_in', gym_id: gymId || '', student_id: studentId || '', coach_id: coachId || '', mtl_plan: className || 'Drop-in', mtl_currency: cur },
       line_items: [
         { price_data: { currency: cur, product_data: { name: `${className || 'Drop-in lekce'} — ${gymName || 'MTL Gym'}` }, unit_amount: unitAmount }, quantity: 1 },
       ],
@@ -146,6 +162,7 @@ async function gymCheckout(req, res) {
           mtl_base: String(P),
           mtl_currency: cur,
           member_name: memberName || '',
+          mtl_credit: credit || 'none',
         },
       },
       success_url: (String(guest)==='1')
@@ -163,12 +180,12 @@ async function gymCheckout(req, res) {
 // ───────────────────────── GYM membership (direct charge subscription) ─────────────────────────
 // ───────────────────────── EVENT TICKET (flat 6% = 3% markup + 3% cut, no partner discount) ─────────────────────────
 async function eventCheckout(req, res) {
-  const { gymAccount, eventTitle, tierName, amount, currency = 'CZK', ticketId, buyerName, qty, qrToken, eventId, founding } = req.query;
+  const { gymAccount, eventTitle, tierName, amount, currency = 'CZK', ticketId, buyerName, qty, qrToken, eventId, founding, partner } = req.query;
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
   const P = parseInt(amount, 10);
   const Q = Math.max(1, parseInt(qty, 10) || 1);
   const cur = String(currency).toLowerCase();
-  const MK = 1.00, TAKE = (String(founding)==='1') ? 0.02 : 0.05;
+  const MK = 1.00, TAKE = (String(partner)==='1') ? 0.01 : 0.025;
   const isCZK = cur === 'czk';
   const unit = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);
   const fee  = isCZK ? Math.floor(P * TAKE) * 100 : Math.round(P * TAKE * 100);
@@ -178,6 +195,8 @@ async function eventCheckout(req, res) {
     {
       mode: 'payment',
       payment_method_types: ['card'],
+      billing_address_collection: 'required',
+      tax_id_collection: { enabled: true },
       line_items: [
         { price_data: { currency: cur, product_data: { name: `${eventTitle || 'Event'}${tierName ? ' — ' + tierName : ''}` }, unit_amount: unit }, quantity: Q },
       ],
@@ -223,7 +242,7 @@ async function membershipCheckout(req, res) {
   const P = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
   const ivl = interval === 'year' ? 'year' : 'month';
-  const FEE_PCT = (String(founding)==='1') ? 2 : MEMB_MTL_PERCENT; // founding gym 2%, else flat 5%
+  const FEE_PCT = (String(partner)==='1') ? 1 : MEMB_MTL_PERCENT; // EP 1%, else flat 2,5%
 
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
@@ -246,6 +265,8 @@ async function membershipCheckout(req, res) {
     {
       mode: 'subscription',
       payment_method_types: ['card'],
+      billing_address_collection: 'required',
+      tax_id_collection: { enabled: true },
       line_items: [
         { price_data: { currency: cur, product_data: { name: `${planName || 'Membership'}${access ? ' [' + access + ']' : ''} — ${gymName || 'MTL Gym'}` }, unit_amount: Math.round(P * 100), recurring: { interval: ivl } }, quantity: 1 },
       ],
@@ -276,11 +297,8 @@ async function membershipCheckout(req, res) {
   res.redirect(303, session.url);
 }
 
-// ───────────────────────── Exclusive MTL Partner ($99/mo, platform account) ─────────────────────────
+// ───────────────────────── Exclusive MTL Partner ($499/mo, platform account) ─────────────────────────
 async function partnerCheckout(req, res) {
-  // Exclusive Partner discontinued — flat 5% for everyone. No subscription is sold.
-  return res.status(410).json({ error: 'Exclusive Partner byl ukončen — platí jednotná sazba 5 %.' });
-  /* eslint-disable no-unreachable */
   const { userId, email } = req.query;
   if (!userId) return res.status(400).json({ error: 'Chybí userId' });
 
@@ -290,8 +308,9 @@ async function partnerCheckout(req, res) {
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
     payment_method_types: ['card'],
+    billing_address_collection: 'required',
+    tax_id_collection: { enabled: true, required: 'if_supported' },
     client_reference_id: userId,
-    customer_email: email || undefined,
     line_items: [
       { price_data: { currency: 'usd', product_data: { name: 'Exclusive MTL Partner — coach & gym rates' }, unit_amount: 9900, recurring: { interval: 'month' } }, quantity: 1 },
     ],
@@ -299,7 +318,7 @@ async function partnerCheckout(req, res) {
     metadata: { mtl_payment_type: 'partner_sub', user_id: userId },
     success_url: `${proto}://${host}/?partner_sub=ok&session={CHECKOUT_SESSION_ID}`,
     cancel_url: `${proto}://${host}/`,
-  });
+  }, { apiVersion: '2024-09-30.acacia' });
 
   res.redirect(303, session.url);
 }
