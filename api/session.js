@@ -10,12 +10,18 @@ async function sbGet(path) {
   catch (e) { return []; }
 }
 async function sbPost(path, body) {
-  try { await fetch(`${SB}/rest/v1/${path}`, { method: 'POST', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(body) }); }
-  catch (e) { console.error('sbPost', e.message); }
+  try {
+    const r = await fetch(`${SB}/rest/v1/${path}`, { method: 'POST', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(body) });
+    if (!r.ok) { const t = await r.text().catch(() => ''); console.error('sbPost', r.status, t); return { ok: false, status: r.status, error: t.slice(0, 300) }; }
+    return { ok: true, status: r.status };
+  } catch (e) { console.error('sbPost', e.message); return { ok: false, status: 0, error: e.message }; }
 }
 async function sbPatch(path, body) {
-  try { await fetch(`${SB}/rest/v1/${path}`, { method: 'PATCH', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(body) }); }
-  catch (e) { console.error('sbPatch', e.message); }
+  try {
+    const r = await fetch(`${SB}/rest/v1/${path}`, { method: 'PATCH', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(body) });
+    if (!r.ok) { const t = await r.text().catch(() => ''); console.error('sbPatch', r.status, t); return { ok: false, status: r.status, error: t.slice(0, 300) }; }
+    return { ok: true, status: r.status };
+  } catch (e) { console.error('sbPatch', e.message); return { ok: false, status: 0, error: e.message }; }
 }
 
 // Record a transaction with EXACT Stripe fees (idempotent on payment_intent).
@@ -72,8 +78,13 @@ async function recordTransaction(acct, pi, fields) {
       member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null,
       gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, net_amount: net, currency, status: 'paid',
     };
-    if (existing) { await sbPatch(`transactions?payment_intent=eq.${encodeURIComponent(pi)}`, row); return { status: 'updated', gross, stripeFee, mtlFee, net }; }
-    await sbPost('transactions', { payment_intent: pi, ...row, created_at: new Date().toISOString() });
+    if (existing) {
+      const pr = await sbPatch(`transactions?payment_intent=eq.${encodeURIComponent(pi)}`, row);
+      if (pr && pr.ok === false) return { status: 'update-failed', http: pr.status, dberror: pr.error, gross, stripeFee, mtlFee, net };
+      return { status: 'updated', gross, stripeFee, mtlFee, net };
+    }
+    const ir = await sbPost('transactions', { payment_intent: pi, ...row, created_at: new Date().toISOString() });
+    if (ir && ir.ok === false) return { status: 'insert-failed', http: ir.status, dberror: ir.error, gross, stripeFee, mtlFee, net };
     return { status: 'recorded', gross, stripeFee, mtlFee, net };
   } catch (e) { console.error('recordTransaction', e.message); return { status: 'error:' + e.message }; }
 }

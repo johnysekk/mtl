@@ -22,10 +22,14 @@ async function sbGet(path) {
   return r.ok ? r.json() : [];
 }
 async function sbPost(table, row) {
-  await fetch(`${SB}/rest/v1/${table}`, { method: 'POST', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(row) });
+  const r = await fetch(`${SB}/rest/v1/${table}`, { method: 'POST', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(row) });
+  if (!r.ok) { const t = await r.text().catch(() => ''); console.error('sbPost', table, r.status, t); return { ok: false, status: r.status, error: t }; }
+  return { ok: true, status: r.status };
 }
 async function sbPatch(table, filter, patch) {
-  await fetch(`${SB}/rest/v1/${table}?${filter}`, { method: 'PATCH', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(patch) });
+  const r = await fetch(`${SB}/rest/v1/${table}?${filter}`, { method: 'PATCH', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(patch) });
+  if (!r.ok) { const t = await r.text().catch(() => ''); console.error('sbPatch', table, r.status, t); return { ok: false, status: r.status, error: t }; }
+  return { ok: true, status: r.status };
 }
 
 // MTL Ambassador 0,5% — pošle 0,5 % základu ambassadorovi dané disciplíny (z provize MTL).
