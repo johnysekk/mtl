@@ -312,7 +312,7 @@ async function partnerCheckout(req, res) {
     tax_id_collection: { enabled: true, required: 'if_supported' },
     client_reference_id: userId,
     line_items: [
-      { price_data: { currency: 'usd', product_data: { name: 'Exclusive MTL Partner — coach & gym rates' }, unit_amount: 19900, recurring: { interval: 'month' } }, quantity: 1 },
+      { price_data: { currency: 'usd', product_data: { name: 'Exclusive MTL Partner — coach & gym rates' }, unit_amount: 9900, recurring: { interval: 'month' } }, quantity: 1 },
     ],
     subscription_data: { metadata: { mtl_payment_type: 'partner_sub', user_id: userId } },
     metadata: { mtl_payment_type: 'partner_sub', user_id: userId },
