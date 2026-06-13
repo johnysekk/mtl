@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-13-ME | ROOT CAUSE FOUND: the INSERT into transactions was silently failing. sbPost never checked the HTTP response, so a 400 (table missing newer columns like stripe_fee/mtl_fee/net_amount/payee_account/charge_id) was swallowed and recordTransaction still returned recorded:true -> console LIED, table stayed empty, dashboard collected rows = 0 (RLS is OFF, so that was never the cause). FIX: (1) session.js sbPost/sbPatch now check r.ok and return {ok,status,error}; recordTransaction returns status insert-failed/update-failed with the real Postgres error (surfaces in console _tx as status+dberror) instead of a fake recorded:true. (2) stripe-webhook.js sbPost/sbPatch now log failures too. (3) transactions.sql: create-if-missing + ALTER ADD COLUMN IF NOT EXISTS for every column the recorder writes + unique index on payment_intent + gym/coach/member indexes. RUN transactions.sql, redeploy session.js + stripe-webhook.js, make a NEW payment -> console _tx should say recorded with no dberror, and the dashboard ledger should populate. -->
+<!-- MTL build: 2026-06-13-MF | REAL insert error surfaced: http 404 PGRST125 "Invalid path specified in request URL" — NOT a missing column (the table exists; the dashboard reads it). The server builds the URL manually as ${SB}/rest/v1/transactions, so a malformed SUPABASE_URL (trailing slash, or a /rest/v1 suffix -> doubled /rest/v1/rest/v1 -> PGRST125) makes every manual fetch 404. FIX: normalize SB in session.js + stripe-webhook.js + gym-transactions.js: SUPABASE_URL stripped of trailing slashes and a trailing /rest/v1. Also session.js sbPost now returns the attempted url and recordTransaction surfaces it as dburl in the insert-failed _tx so we can see the exact URL if it still fails. Founder reset confirmation word changed from VYNULOVAT to 123. AFTER: redeploy the 3 serverless files + index, make a NEW payment -> _tx should be recorded with no dberror and the dashboard ledger populates; if still failing, the _tx.dburl shows the exact (still-wrong) URL. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -12094,8 +12094,8 @@ const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 const FOUNDER_RESET_TABLES=['transactions','bookings','gym_bookings','gym_memberships','gym_attendance','gym_class_reservations','gym_excuses','event_tickets','event_ratings','gym_ratings','notifications','messages','conversations','referral_credits'];
 async function founderResetStats(){
   if(!currentUser || currentUser.id!==FOUNDER_UUID){ toast('Jen founder.'); return; }
-  const a1=prompt('⚠️ NEVRATNĚ smaže VŠECHNY statistiky a aktivitu (transakce, rezervace, členství, docházku, vstupenky, hodnocení, NOTIFIKACE i CHAT/zprávy mezi kouči a studenty) napříč všemi dashboardy. Profily koučů a gymů zůstanou.\n\nNapiš VYNULOVAT pro potvrzení:');
-  if(a1!=='VYNULOVAT'){ toast('Zrušeno.'); return; }
+  const a1=prompt('⚠️ NEVRATNĚ smaže VŠECHNY statistiky a aktivitu (transakce, rezervace, členství, docházku, vstupenky, hodnocení, NOTIFIKACE i CHAT/zprávy mezi kouči a studenty) napříč všemi dashboardy. Profily koučů a gymů zůstanou.\n\nNapiš 123 pro potvrzení:');
+  if(a1!=='123'){ toast('Zrušeno.'); return; }
   toast('Mažu…');
   const ok=[], fail=[];
   for(const t of FOUNDER_RESET_TABLES){
