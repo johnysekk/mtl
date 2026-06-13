@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-13-MC | FEE SPLIT FIX (session.js + stripe-webhook.js recordTransaction). For DIRECT charges the connected-account balance_transaction.fee is the COMBINED fee (Stripe processing + our application fee) and bt.net already nets BOTH out. Previous build reported stripeFee = bt.fee (the combined total) and net = bt.net - mtlFee (double-subtracting the app fee). Now: parse bt.fee_details, sum type=stripe_fee into stripeFee and type=application_fee into mtlFee, gross = bt.amount, net = bt.net (NO extra subtraction). Fallback when fee_details absent: mtlFee = charge.application_fee_amount, stripeFee = bt.fee - mtlFee. So the dashboard shows Stripe fee and MTL fee separately + the true net. NOTE: old test rows keep the previous wrong split (self-heal only fixed NULL-gross rows) - a founder reset clears test data, new payments are correct. -->
+<!-- MTL build: 2026-06-13-ME | ROOT CAUSE FOUND: the INSERT into transactions was silently failing. sbPost never checked the HTTP response, so a 400 (table missing newer columns like stripe_fee/mtl_fee/net_amount/payee_account/charge_id) was swallowed and recordTransaction still returned recorded:true -> console LIED, table stayed empty, dashboard collected rows = 0 (RLS is OFF, so that was never the cause). FIX: (1) session.js sbPost/sbPatch now check r.ok and return {ok,status,error}; recordTransaction returns status insert-failed/update-failed with the real Postgres error (surfaces in console _tx as status+dberror) instead of a fake recorded:true. (2) stripe-webhook.js sbPost/sbPatch now log failures too. (3) transactions.sql: create-if-missing + ALTER ADD COLUMN IF NOT EXISTS for every column the recorder writes + unique index on payment_intent + gym/coach/member indexes. RUN transactions.sql, redeploy session.js + stripe-webhook.js, make a NEW payment -> console _tx should say recorded with no dberror, and the dashboard ledger should populate. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -8189,7 +8189,16 @@ async function loadGymManageBookings(){
   const { data: bks } = await supaClient.from('gym_bookings').select('*').eq('gym_id', _myGymData.id).eq('status','active').order('created_at',{ascending:false});
   const { data: mbs } = await supaClient.from('gym_memberships').select('*').eq('gym_id', _myGymData.id).in('status',['active','cancelling']).order('created_at',{ascending:false});
   const drops=bks||[], mems=mbs||[];
-  let _gymTx=[]; try{ const { data: txd, error: txErr } = await supaClient.from('transactions').select('*').eq('gym_id', _myGymData.id); _gymTx=txd||[]; try{ console.log('[MTL gymTx]', { myGymId:_myGymData.id, count:_gymTx.length, error:txErr&&txErr.message, rows:_gymTx.slice(0,8).map(t=>({type:t.type, gym_id:t.gym_id, gross:t.gross_amount, created:t.created_at})) }); }catch(e){} }catch(e){}
+  let _gymTx=[];
+  try{
+    let _tok=''; try{ const _s=await supaClient.auth.getSession(); _tok=(_s&&_s.data&&_s.data.session&&_s.data.session.access_token)||''; }catch(e){}
+    const _r=await fetch('/api/gym-transactions?gymId='+encodeURIComponent(_myGymData.id), { headers: { 'x-access-token': _tok } });
+    const _j=await _r.json().catch(()=>({}));
+    _gymTx=(_j&&_j.transactions)||[];
+    try{ console.log('[MTL gymTx]', { via:'service-role', myGymId:_myGymData.id, httpStatus:_r.status, count:_gymTx.length, err:_j&&_j.error, rows:_gymTx.slice(0,8).map(t=>({type:t.type, gym_id:t.gym_id, gross:t.gross_amount, created:t.created_at})) }); }catch(e){}
+  }catch(e){ console.log('[MTL gymTx] endpoint failed', e&&e.message); }
+  // fallback to the (RLS-subject) client read only if the endpoint returned nothing — keeps the dashboard working before the endpoint is deployed
+  if(!_gymTx.length){ try{ const { data: txd } = await supaClient.from('transactions').select('*').eq('gym_id', _myGymData.id); if(txd&&txd.length){ _gymTx=txd; console.log('[MTL gymTx] client-fallback', _gymTx.length); } }catch(e){} }
   let _gymEvTix=[]; try{ const { data:_evs } = await supaClient.from('events').select('id').eq('gym_id', _myGymData.id); const _evIds=(_evs||[]).map(e=>e.id); if(_evIds.length){ const { data:_tix } = await supaClient.from('event_tickets').select('amount,currency,status,created_at,event_id').in('event_id', _evIds).eq('status','paid'); _gymEvTix=_tix||[]; } }catch(e){}
   let _gymTeamCoaches=[];
   try{
