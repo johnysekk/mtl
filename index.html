@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-13-LX | MEMBERSHIP TRANSACTION RECORDING FIX (real root cause). Bug: membershipCheckout set ONLY subscription_data.metadata, never SESSION-level metadata -> webhook checkout.session.completed saw no mtl_payment_type for memberships and did nothing; recording relied solely on invoice.paid via a gym_memberships?stripe_subscription lookup that FAILS on the first invoice (fires before the client links the subscription) -> first membership payment never recorded -> gym ledger + accounting export all zero while Stripe shows the real payment. FIX across 3 files: (1) client subscribeGymMembership URL now passes gymId + studentId. (2) pay.js membershipCheckout adds SESSION-level metadata (mtl_payment_type=membership, gym_id, student_id, membership_id, plan, disc, base, currency, ref) AND adds gym_id/student_id/membership_id to subscription_data.metadata. (3) webhook: checkout.session.completed membership branch now links the subscription to the gym_membership row (by membership_id) AND records the FIRST payment immediately with EXACT fees (fetch session.invoice -> payment_intent/charge -> recordTransaction), independent of timing; recordTransaction now also handles charge ids (ch_) via charges.retrieve, and is idempotent on payment_intent so invoice.paid renewals never duplicate. STILL REQUIRES the Stripe webhook endpoint to listen to events on CONNECTED accounts (direct charges fire on the gym account). Also: founder reset now clears referral state (referral_credits table + profiles.referred_by/referral_rewarded/student_credits/coach_credits) so referral XP/points zero out; shared-profile explainer rewritten generic (no inviter name, avoids declension breakage). -->
+<!-- MTL build: 2026-06-13-LY | TRANSACTION RECORDING via session.js (webhook-independent). Root problem: if the Stripe webhook does not deliver connected-account events, NOTHING reaches the transactions table (drop-in AND membership both showed 0 vs real Stripe payments). FIX: session.js (which the client already calls in every payment-success handler with sessionId + connected account) now RECORDS the transaction itself with EXACT fees (retrieves the session, reads metadata, gets payment_intent for payment-mode / first invoice payment_intent|charge for subscription, calls recordTransaction — idempotent on payment_intent, handles ch_ ids). Covers drop_in, membership, event_ticket (mtl_payment_type) and coach 1:1/online (booking_type). All success handlers (gym_pay, gym_sub, event_pay, guest_drop, platba) pass acct -> all types now record regardless of webhook config. REFERRAL: XP lowered +10 -> +5 per successful referral (computeMyXP + profile-badges.js); XP breakdown row now ALWAYS shows (was gated >0, why Petr never saw it) + per=5; static How-XP text now lists "successful referral = +5 XP"; removed the "Separate from your training Levels" clause (referrals DO count into XP now); gating on referral_rewarded (= after referred user completed a real lesson) already in place for both XP and milestones. NOTIFS: gym-owner drop-in + membership notifications now show the GROSS price the STUDENT PAID (not gym net after MTL fee) with new wording "Gratulujeme! Student X si prave zakoupil ... za <price>". -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -3246,8 +3246,8 @@ const NOTIF_T = {
     ? (d.outcome==='suspended' ? `✅ ${d.target_name||''} was suspended (hidden from the deck).` : d.outcome==='cert_revoked' ? `✅ Certification revoked for ${d.target_name||''}.` : `ℹ️ Your revoke request for ${d.target_name||''} was reviewed — no action taken.`)
     : (d.outcome==='suspended' ? `✅ ${d.target_name||''} byl suspendován (skryt z decku).` : d.outcome==='cert_revoked' ? `✅ Odebrána certifikace: ${d.target_name||''}.` : `ℹ️ Tvoje žádost o odebrání u ${d.target_name||''} byla posouzena — bez zásahu.`),
   gym_dropin_booked: (d)=> LANG==='en'
-    ? `🏛️ New drop-in! ${d.student||'A student'} bought a drop-in session. You'll receive ${d.amt} ${d.sym}.`
-    : `🏛️ Nová jednorázová lekce! ${d.student||'Student'} si koupil jednorázovou lekci. Tobě připadne ${d.amt} ${d.sym}.`,
+    ? `🏛️ Congrats! ${d.student||'A student'} just bought a drop-in session for ${d.amt} ${d.sym}.`
+    : `🏛️ Gratulujeme! Student ${d.student||''} si právě zakoupil jednorázovou lekci za ${d.amt} ${d.sym}.`,
   gym_dropin_booked_coach: (d)=> LANG==='en'
     ? `🏛️ New drop-in at your gym! ${d.student||'A student'} booked ${d.coach||'a coach'}'s class — the payment goes to the coach.`
     : `🏛️ Nová jednorázová lekce ve tvém gymu! ${d.student||'Student'} si koupil lekci kouče ${d.coach||''} — platba jde kouči.`,
@@ -3258,8 +3258,8 @@ const NOTIF_T = {
     ? `🎁 Thanks for the invite — ${d.student||'someone'} joined ${d.gym_name||'a gym'} through your link!${d.pct?` If you're a member there, your next month is ${d.pct}% off too.`:''}`
     : `🎁 Díky za pozvánku — ${d.student||'někdo'} se přes tvůj odkaz přidal do ${d.gym_name||'gymu'}!${d.pct?` Pokud tam máš členství, máš příští měsíc taky ${d.pct}% levnější.`:''}`,
   gym_member_joined: (d)=> LANG==='en'
-    ? `🎟️ New member! ${d.student||'A student'} subscribed to your membership. You'll receive ${d.amt} ${d.sym}/mo.`
-    : `🎟️ Nový člen! ${d.student||'Student'} si předplatil členství. Tobě připadne ${d.amt} ${d.sym}/měs.`
+    ? `🎟️ Congrats! ${d.student||'A student'} just bought a membership for ${d.amt} ${d.sym}/mo.`
+    : `🎟️ Gratulujeme! Student ${d.student||''} si právě zakoupil členství za ${d.amt} ${d.sym}/měs.`
 };
 function notifText(n){
   try{
@@ -11806,7 +11806,7 @@ async function computeMyXP(){
   if(!me) return out;
   var isPhys=function(b){ return b.type!=='online' && b.status==='active' && b.student_confirmed===true && b.coach_confirmed===true; };
   try{ var r=await supaClient.from('bookings').select('type,status,student_confirmed,coach_confirmed').eq('student_id',me.id); var bk=(r&&r.data)||[]; var s1=bk.filter(isPhys).length; var sg=0; try{ var g=await supaClient.from('gym_attendance').select('id').eq('student_id',me.id); sg=((g&&g.data)||[]).length; }catch(e){} out.student=s1*10+sg*2; out.d.s1=s1; out.d.sg=sg; }catch(e){}
-  try{ var rf=await supaClient.from('profiles').select('id',{count:'exact',head:true}).eq('referred_by',me.id).eq('referral_rewarded',true); var rfn=rf.count||0; out.student+=rfn*10; out.d.ref=rfn; }catch(e){}
+  try{ var rf=await supaClient.from('profiles').select('id',{count:'exact',head:true}).eq('referred_by',me.id).eq('referral_rewarded',true); var rfn=rf.count||0; out.student+=rfn*5; out.d.ref=rfn; }catch(e){}
   if(me.coach_status==='approved'){ try{ var r2=await supaClient.from('bookings').select('type,status,student_confirmed,coach_confirmed').eq('coach_id',me.id); var cb=(r2&&r2.data)||[]; var c1=cb.filter(isPhys).length; var cev=0; try{ var ce=await supaClient.from('events').select('id',{count:'exact',head:true}).eq('created_by',me.id).eq('status','approved').lt('starts_at', new Date().toISOString()); cev=ce.count||0; }catch(e){} var ccls=0; try{ var cga=await supaClient.from('gym_attendance').select('class_date,class_time,gym_id').eq('coach_id',me.id); var cset=new Set(((cga&&cga.data)||[]).map(function(a){return (a.gym_id||'')+'|'+(a.class_date||'')+'|'+(a.class_time||'');})); cset.delete('||'); ccls=cset.size; }catch(e){} out.coach=c1*2+cev*40+ccls; out.d.c1=c1; out.d.cev=cev; out.d.ccls=ccls; }catch(e){} }
   try{ var mg=await supaClient.from('gyms').select('id').eq('owner_id',me.id).eq('status','approved'); var gg=(mg&&mg.data)||[]; if(gg.length){ var gid=gg[0].id; var cls=0; try{ var ga=await supaClient.from('gym_attendance').select('class_date,class_time').eq('gym_id',gid); var set=new Set(((ga&&ga.data)||[]).map(function(a){return (a.class_date||'')+'|'+(a.class_time||'');})); set.delete('|'); cls=set.size; }catch(e){} var gev=0; try{ var ge=await supaClient.from('events').select('id',{count:'exact',head:true}).eq('gym_id',gid).eq('status','approved').lt('starts_at', new Date().toISOString()); gev=ge.count||0; }catch(e){} out.gym=cls+gev*40; out.d.cls=cls; out.d.gev=gev; out.d.gid=gid; } }catch(e){}
   return out;
@@ -11859,7 +11859,7 @@ async function openLevel(){
   var xp=await computeMyXP(); var html='';
   var _xpRow=function(lbl,cnt,per){ return '<div style="display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:5px 0;border-bottom:1px solid var(--border);"><span style="color:var(--mid);">'+lbl+'</span><span style="font-weight:700;color:var(--dark);white-space:nowrap;">'+cnt+' × '+per+' = +'+(cnt*per)+' XP</span></div>'; };
   var _roleBlock=function(barHtml,rowsHtml){ return '<details style="margin-bottom:2px;"><summary style="list-style:none;cursor:pointer;">'+barHtml+'<div style="text-align:center;font-size:10.5px;color:var(--light);margin:-5px 0 8px;">'+(EN?'▾ tap for XP breakdown':'▾ ťukni pro rozpad XP')+'</div></summary><div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:4px 14px 9px;margin:-2px 0 12px;">'+rowsHtml+'</div></details>'; };
-  var _sRows=_xpRow(EN?'Physical 1:1 lessons':'Fyzické 1:1 lekce',xp.d.s1||0,10)+_xpRow(EN?'Group class attendances':'Skupinové docházky',xp.d.sg||0,2)+((xp.d.ref||0)?_xpRow(EN?'Successful referrals':'Úspěšné referraly',xp.d.ref,10):'');
+  var _sRows=_xpRow(EN?'Physical 1:1 lessons':'Fyzické 1:1 lekce',xp.d.s1||0,10)+_xpRow(EN?'Group class attendances':'Skupinové docházky',xp.d.sg||0,2)+_xpRow(EN?'Successful referrals':'Úspěšné referraly',xp.d.ref||0,5);
   html+=_roleBlock(levelBarHtml(xp.student, EN?'Student':'Student','🧑'), _sRows);
   if(currentUser&&currentUser.coach_status==='approved'){ var _cRows=_xpRow(EN?'Physical 1:1 taught':'Odučené fyzické 1:1',xp.d.c1||0,2)+_xpRow(EN?'Group classes taught':'Odučené skupinovky',xp.d.ccls||0,1)+_xpRow(EN?'Events hosted':'Uspořádané akce',xp.d.cev||0,40); html+=_roleBlock(levelBarHtml(xp.coach, EN?'Coach':'Kouč','🥊'), _cRows); }
   if(xp.d.gid){ var _gRows=_xpRow(EN?'Group classes held':'Odučené skupinovky',xp.d.cls||0,1)+_xpRow(EN?'Events hosted':'Uspořádané akce',xp.d.gev||0,40); html+=_roleBlock(levelBarHtml(xp.gym, EN?'Gym':'Gym','🏛️'), _gRows); }
@@ -11873,7 +11873,7 @@ async function openLevel(){
   // info: calc logic
   var calc='<div style="font-size:12.5px;color:var(--mid);line-height:1.6;">'
     +'<b>'+(EN?'Only physical lessons count':'Počítají se jen fyzické lekce')+'</b> ('+(EN?'online is excluded':'online se nepočítá')+').<br>'
-    +'🥊 <b>Student:</b> '+(EN?'physical 1:1 lesson = +10 XP, group class = +2 XP':'fyzická 1:1 lekce = +10 XP, skupinovka = +2 XP')+'<br>'
+    +'🥊 <b>Student:</b> '+(EN?'physical 1:1 lesson = +10 XP, group class = +2 XP, successful referral = +5 XP':'fyzická 1:1 lekce = +10 XP, skupinovka = +2 XP, úspěšný referral = +5 XP')+'<br>'
     +'🥋 <b>'+(EN?'Coach':'Kouč')+':</b> '+(EN?'physical 1:1 = +2 XP, group class taught = +1 XP':'odučená fyzická 1:1 = +2 XP, odučená skupinovka = +1 XP')+', '+(EN?'each hosted event':'každá uspořádaná událost')+' = <b>+40 XP</b><br>'
     +'🏛️ <b>Gym:</b> '+(EN?'each group class held':'každá odučená skupinovka')+' = <b>+1 XP</b>, '+(EN?'each hosted event':'každá uspořádaná událost')+' = <b>+40 XP</b><br><br>'
     +(EN?'Levels are summed across all disciplines. Formula: XP for level L = ⌊3 × (L−1)^1.5⌋, max level 80.':'Levely se sčítají napříč disciplínami. Vzorec: XP pro úroveň L = ⌊3 × (L−1)^1.5⌋, max úroveň 80.')+'</div>';
@@ -11925,7 +11925,7 @@ async function openMilestones(){
     const refCount=_refN||0;
     rInner += '<div style=\"display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;\">'+counter('🤝', EN?'invited':'pozvaných', refCount)+'</div>';
     rInner += tiers('ref','🤝',EN?'invited':'pozvaných',refCount,[1,3,5,10,25,50,100]);
-    rInner += '<p style=\"font-size:11px;color:var(--light);line-height:1.5;margin-top:10px;\">'+(EN?'Unlocked when someone you invited completes their first paid lesson. Separate from your training Levels.':'Odemkne se, když člověk, kterého jsi pozval, absolvuje první zaplacenou lekci. Nezávisí na tréninkových Levelech.')+'</p>';
+    rInner += '<p style=\"font-size:11px;color:var(--light);line-height:1.5;margin-top:10px;\">'+(EN?'Unlocked when someone you invited completes their first paid lesson.':'Odemkne se, když člověk, kterého jsi pozval, absolvuje první zaplacenou lekci.')+'</p>';
   }catch(e){}
   html+=wrap('🤝 '+(EN?'Referral milestones':'Referral milníky'), rInner, false);
 
@@ -14880,8 +14880,8 @@ async function showPaidPopup(){
               await supaClient.from('notifications').insert({ user_id: gym.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'gym_dropin_booked_coach', student: currentUser?.name||'Student', coach:_coachNm }), message:`🏛️ Nová jednorázová lekce ve tvém gymu! ${currentUser?.name||'Student'} si koupil lekci kouče ${_coachNm}. Platba jde kouči.` });
             } else {
               let _ownerPartner=false; try{ const { data: _ow } = await supaClient.from('profiles').select('partner').eq('id', gym.owner_id).single(); _ownerPartner=!!(_ow&&_ow.partner); }catch(e){}
-              const gymGets = fmtPrice((gb.amount||gym.dropin_price||0)*(_ownerPartner?0.99:0.965), _ncur);
-              await supaClient.from('notifications').insert({ user_id: gym.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'gym_dropin_booked', student: currentUser?.name||'Student', amt: gymGets, sym }), message:`🏛️ Nová jednorázová lekce! ${currentUser?.name||'Student'} si koupil jednorázovou lekci. Tobě připadne ${gymGets} ${sym}.` });
+              const studentPaid = fmtPrice(gb.amount||gym.dropin_price||0, _ncur);
+              await supaClient.from('notifications').insert({ user_id: gym.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'gym_dropin_booked', student: currentUser?.name||'Student', amt: studentPaid, sym }), message:`🏛️ ${LANG==='en'?`Congrats! ${currentUser?.name||'A student'} just bought a drop-in session for ${studentPaid} ${sym}.`:`Gratulujeme! Student ${currentUser?.name||''} si právě zakoupil jednorázovou lekci za ${studentPaid} ${sym}.`}` });
             }
             updateNotifBadge();
           }
@@ -14960,8 +14960,8 @@ async function showPaidPopup(){
           const { data: gym } = await supaClient.from('gyms').select('owner_id, name, membership_price, currency').eq('id', mb.gym_id).single();
           if(gym && gym.owner_id){
             const sym = gym.currency==='EUR'?'€':gym.currency==='USD'?'$':'Kč';
-            const gymGets = fmtPrice((gym.membership_price||0)*(mb.gym_keep_pct!=null?mb.gym_keep_pct:0.965), gym.currency);
-            await supaClient.from('notifications').insert({ user_id: gym.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'gym_member_joined', student: currentUser?.name||'Student', amt: gymGets, sym }), message:`🎟️ Nový člen! ${currentUser?.name||'Student'} si předplatil členství. Tobě připadne ${gymGets} ${sym}/měs.` });
+            const studentPaid = fmtPrice(mb.amount||gym.membership_price||0, gym.currency);
+            await supaClient.from('notifications').insert({ user_id: gym.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'gym_member_joined', student: currentUser?.name||'Student', amt: studentPaid, sym }), message:`🎟️ ${LANG==='en'?`Congrats! ${currentUser?.name||'A student'} just bought a membership for ${studentPaid} ${sym}/mo.`:`Gratulujeme! Student ${currentUser?.name||''} si právě zakoupil členství za ${studentPaid} ${sym}/měs.`}` });
             updateNotifBadge();
           }
           try{ const _refU=params.get('refuser'), _refP=parseInt(params.get('refpct'))||0; if(_refU && _refP>0 && _refU!==currentUser?.id){ await supaClient.from('notifications').insert({ user_id:_refU, type:'system', read:false, data: JSON.stringify({ kind:'gym_ref_thanks', gym_name:(gym&&gym.name)||mb.gym_name||'', student: currentUser?.name||'Student', pct:_refP }), message:'🎁 Někoho jsi přivedl do gymu — díky!' }); if(mb&&mb.gym_id&&gAcct){ fetch(`/api/session?sessionId=${encodeURIComponent(sessionId||'')}&gymAccount=${encodeURIComponent(gAcct)}&refUser=${encodeURIComponent(_refU)}&refPct=${_refP}&gymId=${encodeURIComponent(mb.gym_id)}`).catch(()=>{}); } } }catch(e){}
