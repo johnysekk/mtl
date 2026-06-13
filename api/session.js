@@ -13,57 +13,57 @@ async function sbPost(path, body) {
   try { await fetch(`${SB}/rest/v1/${path}`, { method: 'POST', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(body) }); }
   catch (e) { console.error('sbPost', e.message); }
 }
+async function sbPatch(path, body) {
+  try { await fetch(`${SB}/rest/v1/${path}`, { method: 'PATCH', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(body) }); }
+  catch (e) { console.error('sbPatch', e.message); }
+}
 
 // Record a transaction with EXACT Stripe fees (idempotent on payment_intent).
 // Backstop so the ledger is correct even if the Stripe webhook isn't delivering
 // connected-account events. Mirrors stripe-webhook.js recordTransaction.
 async function recordTransaction(acct, pi, fields) {
-  if (!pi) return 'no-pi';
+  if (!pi) return { status: 'no-pi' };
   try {
-    const ex = await sbGet(`transactions?payment_intent=eq.${encodeURIComponent(pi)}&select=id`);
-    if (ex && ex.length) return 'exists'; // already recorded (webhook or a previous call)
+    // idempotent, but FIX rows that were previously saved with null money
+    const ex = await sbGet(`transactions?payment_intent=eq.${encodeURIComponent(pi)}&select=id,gross_amount`);
+    const existing = ex && ex.length ? ex[0] : null;
+    if (existing && existing.gross_amount != null) return { status: 'exists', gross: existing.gross_amount };
+
     let gross = null, stripeFee = null, mtlFee = null, net = null, currency = fields.currency || null, chargeId = null;
     if (acct) {
       try {
+        // resolve the CHARGE object explicitly (expand can return latest_charge as a string id)
         let ch = null;
-        if (String(pi).startsWith('ch_')) { ch = await stripe.charges.retrieve(pi, { expand: ['balance_transaction'] }, { stripeAccount: acct }); }
-        else { const intent = await stripe.paymentIntents.retrieve(pi, { expand: ['latest_charge.balance_transaction'] }, { stripeAccount: acct }); ch = intent && intent.latest_charge; }
-        if (ch) {
-          chargeId = ch.id; gross = ch.amount; currency = ch.currency; mtlFee = ch.application_fee_amount || 0;
-          const bt = ch.balance_transaction;
-          if (bt) { stripeFee = bt.fee; net = bt.net - mtlFee; } else if (gross != null) { net = gross - mtlFee; }
+        if (String(pi).startsWith('ch_')) {
+          ch = await stripe.charges.retrieve(pi, { expand: ['balance_transaction'] }, { stripeAccount: acct });
+        } else {
+          const intent = await stripe.paymentIntents.retrieve(pi, { expand: ['latest_charge.balance_transaction'] }, { stripeAccount: acct });
+          ch = intent && intent.latest_charge;
+          if (typeof ch === 'string') ch = await stripe.charges.retrieve(ch, { expand: ['balance_transaction'] }, { stripeAccount: acct });
         }
-      } catch (e) { console.error('recordTransaction fee', e.message); }
+        if (ch && typeof ch === 'object') {
+          chargeId = ch.id; gross = ch.amount; currency = ch.currency || currency; mtlFee = ch.application_fee_amount || 0;
+          // resolve balance_transaction explicitly too (can be a string id)
+          let bt = ch.balance_transaction;
+          if (typeof bt === 'string') { try { bt = await stripe.balanceTransactions.retrieve(bt, { stripeAccount: acct }); } catch (e) {} }
+          // For direct charges: bt.fee = Stripe processing fee, bt.net = gross - Stripe fee.
+          // The MTL application fee is deducted separately, so the connected account's true net = bt.net - mtlFee.
+          if (bt && typeof bt === 'object') { stripeFee = bt.fee; net = bt.net - mtlFee; }
+          else if (gross != null) { net = gross - mtlFee; }
+        }
+      } catch (e) { console.error('recordTransaction fee', e.message); return { status: 'fee-error:' + e.message }; }
     }
-    await sbPost('transactions', {
-      payment_intent: pi, charge_id: chargeId, payee_account: acct || null, type: fields.type,
-      member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null,
-      gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, net_amount: net, currency,
-      status: 'paid', created_at: new Date().toISOString(),
-    });
-    return 'recorded';
-  } catch (e) { console.error('recordTransaction', e.message); return 'error:' + e.message; }
-}
+    if (gross == null) return { status: 'no-charge-data', payId: pi };
 
-// Gym member referral – reward the referrer (option A):
-// the referrer gets the SAME % off ONE upcoming month on their own running
-// membership at the same gym (one-time coupon, paid from the gym's share).
-// Fully guarded: silently no-ops if the referrer has no active subscription there.
-async function rewardReferrer({ refUser, refPct, gymId, gymAccount }) {
-  const pct = parseInt(refPct, 10) || 0;
-  if (!refUser || !gymId || !gymAccount || pct <= 0 || pct > 100) return;
-  try {
-    const rows = await sbGet(
-      `gym_memberships?student_id=eq.${encodeURIComponent(refUser)}&gym_id=eq.${encodeURIComponent(gymId)}&status=in.(active,cancelling)&select=stripe_subscription&order=created_at.desc&limit=1`
-    );
-    const sub = rows && rows[0] && rows[0].stripe_subscription;
-    if (!sub) return; // referrer isn't a paying member here → nothing to discount
-    const coupon = await stripe.coupons.create(
-      { percent_off: pct, duration: 'once', name: `MTL referral reward -${pct}%` },
-      { stripeAccount: gymAccount }
-    );
-    await stripe.subscriptions.update(sub, { coupon: coupon.id }, { stripeAccount: gymAccount });
-  } catch (e) { console.error('rewardReferrer failed', e && e.message); }
+    const row = {
+      charge_id: chargeId, payee_account: acct || null, type: fields.type,
+      member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null,
+      gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, net_amount: net, currency, status: 'paid',
+    };
+    if (existing) { await sbPatch(`transactions?payment_intent=eq.${encodeURIComponent(pi)}`, row); return { status: 'updated', gross, stripeFee, mtlFee, net }; }
+    await sbPost('transactions', { payment_intent: pi, ...row, created_at: new Date().toISOString() });
+    return { status: 'recorded', gross, stripeFee, mtlFee, net };
+  } catch (e) { console.error('recordTransaction', e.message); return { status: 'error:' + e.message }; }
 }
 
 // Vrátí detaily checkout session.
@@ -102,7 +102,7 @@ export default async function handler(req, res) {
       if (!txType) _tx = { recorded: false, reason: 'no mtl_payment_type / booking_type in the session metadata — redeploy pay.js (LX/LY) and make a NEW payment; old sessions have no metadata' };
       else if (!payId) _tx = { recorded: false, reason: 'could not resolve a payment id from the session (subscription invoice may lack payment_intent/charge on this API version)', txType };
       else if (!gymAccount) _tx = { recorded: false, reason: 'no gymAccount/acct passed to /api/session', txType, payId };
-      else { const st = await recordTransaction(gymAccount, payId, { type: txType, ...f }); _tx = { recorded: (st === 'recorded' || st === 'exists'), status: st, txType, payId, gymAccount }; }
+      else { const r = await recordTransaction(gymAccount, payId, { type: txType, ...f }); _tx = { recorded: ['recorded','updated','exists'].includes(r.status), ...r, txType, payId, gymAccount }; }
     } catch (e) { _tx = { recorded: false, reason: 'exception: ' + e.message }; }
 
     res.status(200).json({

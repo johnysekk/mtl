@@ -136,11 +136,13 @@ async function recordTransaction(acct, pi, fields) {
         } else {
           const intent = await stripe.paymentIntents.retrieve(pi, { expand: ['latest_charge.balance_transaction'] }, { stripeAccount: acct });
           ch = intent && intent.latest_charge;
+          if (typeof ch === 'string') ch = await stripe.charges.retrieve(ch, { expand: ['balance_transaction'] }, { stripeAccount: acct });
         }
-        if (ch) {
+        if (ch && typeof ch === 'object') {
           chargeId = ch.id; gross = ch.amount; currency = ch.currency; mtlFee = ch.application_fee_amount || 0;
-          const bt = ch.balance_transaction;
-          if (bt) { stripeFee = bt.fee; net = bt.net - mtlFee; } else if (gross != null) { net = gross - mtlFee; }
+          let bt = ch.balance_transaction;
+          if (typeof bt === 'string') { try { bt = await stripe.balanceTransactions.retrieve(bt, { stripeAccount: acct }); } catch (e) {} }
+          if (bt && typeof bt === 'object') { stripeFee = bt.fee; net = bt.net - mtlFee; } else if (gross != null) { net = gross - mtlFee; }
         }
       } catch (e) { console.error('recordTransaction fee', e.message); }
     }
