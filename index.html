@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-13-MF | REAL insert error surfaced: http 404 PGRST125 "Invalid path specified in request URL" — NOT a missing column (the table exists; the dashboard reads it). The server builds the URL manually as ${SB}/rest/v1/transactions, so a malformed SUPABASE_URL (trailing slash, or a /rest/v1 suffix -> doubled /rest/v1/rest/v1 -> PGRST125) makes every manual fetch 404. FIX: normalize SB in session.js + stripe-webhook.js + gym-transactions.js: SUPABASE_URL stripped of trailing slashes and a trailing /rest/v1. Also session.js sbPost now returns the attempted url and recordTransaction surfaces it as dburl in the insert-failed _tx so we can see the exact URL if it still fails. Founder reset confirmation word changed from VYNULOVAT to 123. AFTER: redeploy the 3 serverless files + index, make a NEW payment -> _tx should be recorded with no dberror and the dashboard ledger populates; if still failing, the _tx.dburl shows the exact (still-wrong) URL. -->
+<!-- MTL build: 2026-06-13-MG | Transactions now record + read correctly (SUPABASE_URL was dirty -> PGRST125; normalized). THREE dashboard/schedule fixes: (1) gym dashboard numbers now show 2 decimals (locale-aware: comma in CS, dot in EN) so fees match Stripe exactly (-87,50 MTL / -87,75 Stripe / 2 324,75 net) instead of floored -87. (2) "Base MRR (Gross)" and "MRR change (Gross)" were multiplying by the gym keep_pct (0.965) -> showed 2412 for a 2500 plan; now they use the raw amount = the price the student actually pays (2500), matching the (Gross) label. mrrGrowthPct ratio unchanged. (3) WEEKLY SCHEDULE strikethrough: loadGymRoster built occurrences via upcomingClasses() which is FUTURE-only, so a class marked "not held" (a PAST occurrence) vanished from the schedule and could never show struck through. upcomingClasses now takes an optional backDays param; the roster looks back 4 days and keeps future/today fully + past occurrences ONLY when they are not-held (cancelled), so recently not-held classes appear struck through with the "neproběhlo" badge without cluttering the view with past held classes. Founder reset confirmation word is 123. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -6186,14 +6186,14 @@ function classLeadSelectHtml(cls, idx, curLead){
     .concat(coaches.map(c=>`<option value="${c.id}" ${c.id===curLead?'selected':''}>${(c.name||'').replace(/"/g,'&quot;')}</option>`)).join('');
   return `<div style="font-size:11px;color:var(--light);margin:8px 0 2px;font-weight:600;">${LANG==='en'?'Who leads the class:':'Kdo vede lekci:'}</div><select class="${cls}" data-i="${idx}" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${opts}</select>`;
 }
-function upcomingClasses(schedule, days){
-  days = days||7; const out=[]; const now=new Date();
-  for(let d=0; d<days; d++){
+function upcomingClasses(schedule, days, backDays){
+  days = days||7; backDays = backDays||0; const out=[]; const now=new Date();
+  for(let d=-backDays; d<days; d++){
     const date=new Date(now); date.setDate(now.getDate()+d);
     const dow=date.getDay();
     const _ld=date.getFullYear()+'-'+String(date.getMonth()+1).padStart(2,'0')+'-'+String(date.getDate()).padStart(2,'0');
     (schedule||[]).filter(c=> c.once ? (c.date===_ld) : (Number(c.day)===dow)).forEach(c=>{
-      if(d===0){ const [h,mi]=String(c.time||'00:00').split(':').map(Number); const ct=new Date(date); ct.setHours(h||0,mi||0,0,0); if(ct<now) return; }
+      if(d===0 && !backDays){ const [h,mi]=String(c.time||'00:00').split(':').map(Number); const ct=new Date(date); ct.setHours(h||0,mi||0,0,0); if(ct<now) return; }
       out.push({ name:c.name, cancelled:!!(typeof window!=='undefined'&&window._cancelledOcc&&window._cancelledOcc.has(date.toISOString().slice(0,10)+'|'+(c.time||'')+'|'+(c.name||''))), date:date.toISOString().slice(0,10), time:c.time, dur:Number(c.dur)||60, level:c.level||'all', coach:(c.leader||c.coach)||null, coachName:(c.leaderName||c.coachName)||null, disc:c.disc||null, kids:((!!c.kids)||(c.level==='kids')), ageMin:(c.ageMin!=null?c.ageMin:null), ageMax:(c.ageMax!=null?c.ageMax:null), parentReq:!!c.parentReq, cancelled: !!(window._cancelledOcc && window._cancelledOcc.has(date.toISOString().slice(0,10)+'|'+(c.time||'')+'|'+(c.name||''))) });
     });
   }
@@ -7289,8 +7289,8 @@ async function renderGymMembers(){
 async function loadGymRoster(){
   const box=$('mgRoster'); if(!box||!_myGymData) return;
   window._cancelledOcc = new Set(); try{ const { data:_cd } = await supaClient.from('gym_class_log').select('class_date,class_time,class_name').eq('gym_id', _myGymData.id).eq('status','cancelled'); (_cd||[]).forEach(c=>window._cancelledOcc.add(`${c.class_date}|${c.class_time||''}|${c.class_name||''}`)); }catch(e){}
-  const occs=upcomingClasses(_gymSchedule,7);
   const today=new Date().toISOString().slice(0,10);
+  const occs=upcomingClasses(_gymSchedule,7,4).filter(o=> o.date>=today || o.cancelled); // show recent NOT-HELD classes struck through
   let rs=[], drops=[], mems=[], att=[];
   try{ const { data } = await supaClient.from('gym_class_reservations').select('*').eq('gym_id', _myGymData.id).gte('class_date', today); rs=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_bookings').select('student_id,student_name,class_date,class_time,class_name,status').eq('gym_id', _myGymData.id).eq('status','active').gte('class_date', today); drops=data||[]; }catch(e){}
@@ -8213,7 +8213,7 @@ async function loadGymManageBookings(){
   }catch(e){}
   const cur=_myGymData.currency||'CZK';
   const sym = cur==='EUR'?'€':cur==='USD'?'$':'Kč';
-  const f=v=>`${fmtPrice(v,cur)} ${sym}`;
+  const f=v=>`${(Number(v)||0).toLocaleString(LANG==='en'?'en-GB':'cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2})} ${sym}`;
   // ── PŘEHLED (dashboard majitele — BEZ MTL provize) ──
   const stats=$('mgStats');
   if(stats){
@@ -8268,12 +8268,12 @@ async function loadGymManageBookings(){
     const newThis = mems.filter(inGM);
     const cancelThis = mems.filter(cancelledInGM);
     const baseMembers = mems.filter(m=> (m.status==='active'||m.status==='cancelling') && beforeGM(m));
-    const baseMRR = baseMembers.reduce((s,m)=>s+(m.amount||0)*(m.gym_keep_pct!=null?m.gym_keep_pct:epMul),0);
+    const baseMRR = baseMembers.reduce((s,m)=>s+(m.amount||0),0); // Gross (price the student pays)
     // nové = co přišli tento měsíc a ZŮSTÁVAJÍ; ztráta = jen pokračující z minula, co teď zrušili.
     // Kdo přišel A hned ruší v témž měsíci → nepočítá se ani do plusu, ani do mínusu (net 0).
     const newStaying = newThis.filter(m=>m.status==='active');
     const churnedFromBase = mems.filter(m=> beforeGM(m) && cancelledInGM(m));
-    const newMRRnet = newStaying.reduce((s,m)=>s+(m.amount||0)*(m.gym_keep_pct!=null?m.gym_keep_pct:epMul),0) - churnedFromBase.reduce((s,m)=>s+(m.amount||0)*(m.gym_keep_pct!=null?m.gym_keep_pct:epMul),0);
+    const newMRRnet = newStaying.reduce((s,m)=>s+(m.amount||0),0) - churnedFromBase.reduce((s,m)=>s+(m.amount||0),0); // Gross (price the student pays)
     const startBase = baseMembers.length + churnedFromBase.length;
     const churnRate = startBase>0 ? Math.round((churnedFromBase.length/startBase)*100) : 0;
     const retentionRate = 100 - churnRate;
