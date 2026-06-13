@@ -2,7 +2,7 @@ import Stripe from 'stripe';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// ── Exclusive MTL Partner — $499/mo subscription na PLATFORMOVÉM účtu MTL ──
+// ── Exclusive MTL Partner — $199/mo subscription na PLATFORMOVÉM účtu MTL ──
 // (MTL účtuje kouči/gym ownerovi přímo; není to Connect/direct-charge.)
 // Po zaplacení stripe-webhook.js (checkout.session.completed, mtl_payment_type=partner_sub)
 // nastaví profiles.partner = true. Při zrušení (customer.subscription.deleted) → partner = false.
@@ -26,7 +26,7 @@ export default async function handler(req, res) {
           price_data: {
             currency: 'usd',
             product_data: { name: 'Exclusive MTL Partner — coach & gym rates' },
-            unit_amount: 49900, // $499.00
+            unit_amount: 19900, // $199.00
             recurring: { interval: 'month' },
           },
           quantity: 1,

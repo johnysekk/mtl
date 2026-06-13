@@ -10,8 +10,8 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 // ════════════════════════════════════════════════════════════════════════
 
 const GYM_STUDENT_MARKUP = 1.00;  // no markup
-const GYM_MTL_TAKE       = 0.04;  // drop-in: MTL provize 4 %
-const MEMB_MTL_PERCENT   = 4;     // membership: 4 % z invoicu
+const GYM_MTL_TAKE       = 0.025;  // drop-in: MTL provize 2,5 %
+const MEMB_MTL_PERCENT   = 2.5;     // membership: 2,5 % z invoicu
 
 export default async function handler(req, res) {
   const type = String(req.query.type || 'coach');
@@ -39,7 +39,7 @@ async function coachCheckout(req, res) {
 
   const rate = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
-  let COMMISSION = commission ? parseFloat(commission) : 0.04;
+  let COMMISSION = commission ? parseFloat(commission) : 0.025;
   if (!(COMMISSION >= 0.02 && COMMISSION <= 0.25)) COMMISSION = 0.10;
   let MK = 1.00; // no markup — student pays exactly the listed price
   let STUDENT_MARKUP = MK;
@@ -185,7 +185,7 @@ async function eventCheckout(req, res) {
   const P = parseInt(amount, 10);
   const Q = Math.max(1, parseInt(qty, 10) || 1);
   const cur = String(currency).toLowerCase();
-  const MK = 1.00, TAKE = (String(partner)==='1') ? 0.01 : ((String(founding)==='1') ? 0.02 : 0.04);
+  const MK = 1.00, TAKE = (String(partner)==='1') ? 0.01 : ((String(founding)==='1') ? 0.02 : 0.025);
   const isCZK = cur === 'czk';
   const unit = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);
   const fee  = isCZK ? Math.floor(P * TAKE) * 100 : Math.round(P * TAKE * 100);
@@ -312,7 +312,7 @@ async function partnerCheckout(req, res) {
     tax_id_collection: { enabled: true, required: 'if_supported' },
     client_reference_id: userId,
     line_items: [
-      { price_data: { currency: 'usd', product_data: { name: 'Exclusive MTL Partner — coach & gym rates' }, unit_amount: 49900, recurring: { interval: 'month' } }, quantity: 1 },
+      { price_data: { currency: 'usd', product_data: { name: 'Exclusive MTL Partner — coach & gym rates' }, unit_amount: 19900, recurring: { interval: 'month' } }, quantity: 1 },
     ],
     subscription_data: { metadata: { mtl_payment_type: 'partner_sub', user_id: userId } },
     metadata: { mtl_payment_type: 'partner_sub', user_id: userId },
