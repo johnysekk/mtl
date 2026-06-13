@@ -122,7 +122,7 @@ async function gymCheckout(req, res) {
   const isPartner = (String(partner) === '1');
   const MK   = 1.00;
   let STUDENT_MK = MK;
-  let TAKE = (String(partner)==='1') ? 0.01 : ((String(founding)==='1') ? 0.02 : GYM_MTL_TAKE); // EP 1%, founding 2%, else flat 4%
+  let TAKE = (String(partner)==='1') ? 0.01 : GYM_MTL_TAKE; // EP 1%, else flat 2,5%
   if (String(credit) === 'student') {
     // Referral reward on a drop-in: MTL waives its whole fee; the gym/coach funds the rest of the discount.
     let d = refDisc ? parseFloat(refDisc) : TAKE;
@@ -185,7 +185,7 @@ async function eventCheckout(req, res) {
   const P = parseInt(amount, 10);
   const Q = Math.max(1, parseInt(qty, 10) || 1);
   const cur = String(currency).toLowerCase();
-  const MK = 1.00, TAKE = (String(partner)==='1') ? 0.01 : ((String(founding)==='1') ? 0.02 : 0.025);
+  const MK = 1.00, TAKE = (String(partner)==='1') ? 0.01 : 0.025;
   const isCZK = cur === 'czk';
   const unit = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);
   const fee  = isCZK ? Math.floor(P * TAKE) * 100 : Math.round(P * TAKE * 100);
@@ -242,7 +242,7 @@ async function membershipCheckout(req, res) {
   const P = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
   const ivl = interval === 'year' ? 'year' : 'month';
-  const FEE_PCT = (String(partner)==='1') ? 1 : ((String(founding)==='1') ? 2 : MEMB_MTL_PERCENT); // EP 1%, founding 2%, else flat 4%
+  const FEE_PCT = (String(partner)==='1') ? 1 : MEMB_MTL_PERCENT; // EP 1%, else flat 2,5%
 
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
