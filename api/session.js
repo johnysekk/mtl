@@ -18,10 +18,10 @@ async function sbPost(path, body) {
 // Backstop so the ledger is correct even if the Stripe webhook isn't delivering
 // connected-account events. Mirrors stripe-webhook.js recordTransaction.
 async function recordTransaction(acct, pi, fields) {
-  if (!pi) return;
+  if (!pi) return 'no-pi';
   try {
     const ex = await sbGet(`transactions?payment_intent=eq.${encodeURIComponent(pi)}&select=id`);
-    if (ex && ex.length) return; // already recorded (webhook or a previous call)
+    if (ex && ex.length) return 'exists'; // already recorded (webhook or a previous call)
     let gross = null, stripeFee = null, mtlFee = null, net = null, currency = fields.currency || null, chargeId = null;
     if (acct) {
       try {
@@ -41,7 +41,8 @@ async function recordTransaction(acct, pi, fields) {
       gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, net_amount: net, currency,
       status: 'paid', created_at: new Date().toISOString(),
     });
-  } catch (e) { console.error('recordTransaction', e.message); }
+    return 'recorded';
+  } catch (e) { console.error('recordTransaction', e.message); return 'error:' + e.message; }
 }
 
 // Gym member referral – reward the referrer (option A):
@@ -84,6 +85,7 @@ export default async function handler(req, res) {
     // Record the transaction from the session metadata (idempotent). This guarantees the
     // ledger + accounting export are correct even when the Stripe webhook isn't delivering
     // connected-account events. Direct charges live on the connected (gym/coach) account.
+    let _tx = { recorded: false, reason: 'handler did not run' };
     try {
       const m = session.metadata || {};
       let payId = (session.payment_intent && (typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent.id)) || null;
@@ -97,8 +99,11 @@ export default async function handler(req, res) {
       else if (m.mtl_payment_type === 'drop_in') { txType = 'drop_in'; f.member_id = m.student_id || m.member_id; f.gym_id = m.gym_id; f.coach_id = m.coach_id || m.coach_profile_id || null; f.plan = m.mtl_plan || 'Drop-in'; }
       else if (m.mtl_payment_type === 'event_ticket') { txType = 'event_ticket'; f.member_id = m.student_id || m.buyer_id; f.gym_id = m.gym_id; f.coach_id = m.payout_coach_id || null; f.plan = m.mtl_event || 'Event'; }
       else if (m.booking_type === 'inperson' || m.booking_type === 'online') { txType = (m.booking_type === 'online') ? 'coach_online' : 'coach_inperson'; f.member_id = m.student_id; f.coach_id = m.coach_profile_id; f.plan = m.online_fmt || 'Lekce 1:1'; f.currency = m.booking_currency || session.currency; }
-      if (txType && payId && gymAccount) await recordTransaction(gymAccount, payId, { type: txType, ...f });
-    } catch (e) { console.error('session recordTransaction', e.message); }
+      if (!txType) _tx = { recorded: false, reason: 'no mtl_payment_type / booking_type in the session metadata — redeploy pay.js (LX/LY) and make a NEW payment; old sessions have no metadata' };
+      else if (!payId) _tx = { recorded: false, reason: 'could not resolve a payment id from the session (subscription invoice may lack payment_intent/charge on this API version)', txType };
+      else if (!gymAccount) _tx = { recorded: false, reason: 'no gymAccount/acct passed to /api/session', txType, payId };
+      else { const st = await recordTransaction(gymAccount, payId, { type: txType, ...f }); _tx = { recorded: (st === 'recorded' || st === 'exists'), status: st, txType, payId, gymAccount }; }
+    } catch (e) { _tx = { recorded: false, reason: 'exception: ' + e.message }; }
 
     res.status(200).json({
       paymentIntent: session.payment_intent || null,
@@ -106,6 +111,7 @@ export default async function handler(req, res) {
       customer: session.customer || null,
       customerEmail: (session.customer_details && session.customer_details.email) || session.customer_email || null,
       customerName: (session.customer_details && session.customer_details.name) || null,
+      _tx,
     });
   } catch (err) {
     console.error('session error:', err);
