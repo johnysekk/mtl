@@ -2,7 +2,7 @@ import Stripe from 'stripe';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-const SB = process.env.SUPABASE_URL;
+const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const sbHeaders = { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json' };
 async function sbGet(path) {
@@ -10,11 +10,12 @@ async function sbGet(path) {
   catch (e) { return []; }
 }
 async function sbPost(path, body) {
+  const url = `${SB}/rest/v1/${path}`;
   try {
-    const r = await fetch(`${SB}/rest/v1/${path}`, { method: 'POST', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(body) });
-    if (!r.ok) { const t = await r.text().catch(() => ''); console.error('sbPost', r.status, t); return { ok: false, status: r.status, error: t.slice(0, 300) }; }
+    const r = await fetch(url, { method: 'POST', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(body) });
+    if (!r.ok) { const t = await r.text().catch(() => ''); console.error('sbPost', r.status, url, t); return { ok: false, status: r.status, error: t.slice(0, 300), url }; }
     return { ok: true, status: r.status };
-  } catch (e) { console.error('sbPost', e.message); return { ok: false, status: 0, error: e.message }; }
+  } catch (e) { console.error('sbPost', e.message); return { ok: false, status: 0, error: e.message, url }; }
 }
 async function sbPatch(path, body) {
   try {
@@ -84,7 +85,7 @@ async function recordTransaction(acct, pi, fields) {
       return { status: 'updated', gross, stripeFee, mtlFee, net };
     }
     const ir = await sbPost('transactions', { payment_intent: pi, ...row, created_at: new Date().toISOString() });
-    if (ir && ir.ok === false) return { status: 'insert-failed', http: ir.status, dberror: ir.error, gross, stripeFee, mtlFee, net };
+    if (ir && ir.ok === false) return { status: 'insert-failed', http: ir.status, dberror: ir.error, dburl: ir.url, gross, stripeFee, mtlFee, net };
     return { status: 'recorded', gross, stripeFee, mtlFee, net };
   } catch (e) { console.error('recordTransaction', e.message); return { status: 'error:' + e.message }; }
 }
