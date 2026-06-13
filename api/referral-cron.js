@@ -41,6 +41,24 @@ export default async function handler(req, res) {
 
   try {
     const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const nowIso = new Date().toISOString();
+
+    // ── EXPIRE referral credits older than 12 months (unconsumed) ──
+    let expiredPts = 0;
+    try {
+      const exp = await sb(`referral_credits?consumed=is.false&expires_at=lt.${nowIso}&select=user_id&limit=5000`);
+      const byUser = {};
+      for (const r of (exp || [])) byUser[r.user_id] = (byUser[r.user_id] || 0) + 1;
+      for (const uid of Object.keys(byUser)) {
+        const n = byUser[uid];
+        await sb(`referral_credits?user_id=eq.${uid}&consumed=is.false&expires_at=lt.${nowIso}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ consumed: true }) });
+        const pr = await sb(`profiles?id=eq.${uid}&select=student_credits&limit=1`);
+        const cur = (pr && pr[0] && pr[0].student_credits) || 0;
+        await sb(`profiles?id=eq.${uid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ student_credits: Math.max(0, cur - n) }) });
+        await sb(`notifications`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: uid, type: 'referral', read: false, data: JSON.stringify({ kind: 'referral_expired', n }), message: `\u231B ${n} referral ${n === 1 ? 'bod vypr\u0161el' : 'bod\u016F vypr\u0161elo'} (star\u0161\u00ED ne\u017E 12 m\u011Bs\u00EDc\u016F).` }]) });
+        expiredPts += n;
+      }
+    } catch (e) { /* don't block awards */ }
 
     // invitees who were referred and not yet rewarded
     const invitees = await sb(
@@ -78,6 +96,16 @@ export default async function handler(req, res) {
         body: JSON.stringify({ student_credits: rc + 2 }),
       });
 
+      // log the 4 new credit points for 12-month expiry (earned_at defaults to now())
+      const _exp = new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString();
+      await sb(`referral_credits`, {
+        method: 'POST', prefer: 'return=minimal',
+        body: JSON.stringify([
+          { user_id: inv.id, expires_at: _exp }, { user_id: inv.id, expires_at: _exp },
+          { user_id: inv.referred_by, expires_at: _exp }, { user_id: inv.referred_by, expires_at: _exp },
+        ]),
+      });
+
       // notify both
       await sb(`notifications`, {
         method: 'POST',
@@ -99,7 +127,7 @@ export default async function handler(req, res) {
       awarded++;
     }
 
-    return res.status(200).json({ ok: true, checked, awarded });
+    return res.status(200).json({ ok: true, checked, awarded, expiredPts });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }

@@ -10,8 +10,8 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 // ════════════════════════════════════════════════════════════════════════
 
 const GYM_STUDENT_MARKUP = 1.00;  // no markup
-const GYM_MTL_TAKE       = 0.025;  // drop-in: MTL provize 2,5 %
-const MEMB_MTL_PERCENT   = 2.5;     // membership: 2,5 % z invoicu
+const GYM_MTL_TAKE       = 0.035;  // drop-in: MTL provize 3,5 %
+const MEMB_MTL_PERCENT   = 3.5;     // membership: 3,5 % z invoicu
 
 export default async function handler(req, res) {
   const type = String(req.query.type || 'coach');
@@ -39,7 +39,7 @@ async function coachCheckout(req, res) {
 
   const rate = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
-  let COMMISSION = commission ? parseFloat(commission) : 0.025;
+  let COMMISSION = commission ? parseFloat(commission) : 0.035;
   if (!(COMMISSION >= 0.02 && COMMISSION <= 0.25)) COMMISSION = 0.10;
   let MK = 1.00; // no markup — student pays exactly the listed price
   let STUDENT_MARKUP = MK;
@@ -180,12 +180,12 @@ async function gymCheckout(req, res) {
 // ───────────────────────── GYM membership (direct charge subscription) ─────────────────────────
 // ───────────────────────── EVENT TICKET (flat 6% = 3% markup + 3% cut, no partner discount) ─────────────────────────
 async function eventCheckout(req, res) {
-  const { gymAccount, eventTitle, tierName, amount, currency = 'CZK', ticketId, buyerName, qty, qrToken, eventId, founding, partner } = req.query;
+  const { gymAccount, eventTitle, tierName, amount, currency = 'CZK', ticketId, buyerName, qty, qrToken, eventId, founding, partner, disc, gymId, payoutCoachId } = req.query;
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
   const P = parseInt(amount, 10);
   const Q = Math.max(1, parseInt(qty, 10) || 1);
   const cur = String(currency).toLowerCase();
-  const MK = 1.00, TAKE = (String(partner)==='1') ? 0.01 : 0.025;
+  const MK = 1.00, TAKE = (String(partner)==='1') ? 0.01 : 0.035;
   const isCZK = cur === 'czk';
   const unit = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);
   const fee  = isCZK ? Math.floor(P * TAKE) * 100 : Math.round(P * TAKE * 100);
@@ -222,6 +222,11 @@ async function eventCheckout(req, res) {
         mtl_event_id: eventId || '',
         mtl_event: eventTitle || '',
         buyer_name: buyerName || '',
+        mtl_disc: disc || '',
+        mtl_base: String(P * Q),
+        mtl_currency: cur,
+        gym_id: gymId || '',
+        payout_coach_id: payoutCoachId || '',
       },
       success_url: `${proto}://${host}/?event_pay=ok&ticket=${encodeURIComponent(ticketId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
       cancel_url: `${proto}://${host}/`,
