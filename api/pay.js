@@ -240,6 +240,7 @@ async function membershipCheckout(req, res) {
   const {
     gymAccount, gymName, planName, amount, currency = 'CZK', interval = 'month',
     membershipId, income, memberName, payee, disc, access, partner, refPct, refUser, founding,
+    gymId, studentId,
   } = req.query;
 
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
@@ -272,6 +273,18 @@ async function membershipCheckout(req, res) {
       payment_method_types: ['card'],
       billing_address_collection: 'required',
       tax_id_collection: { enabled: true },
+      metadata: {
+        mtl_payment_type: 'membership',
+        gym_id: gymId || '',
+        student_id: studentId || '',
+        membership_id: membershipId || '',
+        mtl_plan: planName || 'Membership',
+        mtl_disc: disc || '',
+        mtl_base: String(P),
+        mtl_currency: cur,
+        mtl_ref_user: refUser || '',
+        mtl_ref_pct: String(refPctN || 0),
+      },
       line_items: [
         { price_data: { currency: cur, product_data: { name: `${planName || 'Membership'}${access ? ' [' + access + ']' : ''} — ${gymName || 'MTL Gym'}` }, unit_amount: Math.round(P * 100), recurring: { interval: ivl } }, quantity: 1 },
       ],
@@ -279,6 +292,9 @@ async function membershipCheckout(req, res) {
         application_fee_percent: FEE_PCT,
         metadata: {
           mtl_payment_type: 'membership',
+          gym_id: gymId || '',
+          student_id: studentId || '',
+          membership_id: membershipId || '',
           mtl_plan: planName || 'Membership',
           mtl_access: access || '',
           mtl_income: income || 'side',

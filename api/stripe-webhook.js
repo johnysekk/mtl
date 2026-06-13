@@ -130,8 +130,13 @@ async function recordTransaction(acct, pi, fields) {
     let gross = fields.gross != null ? fields.gross : null, stripeFee = null, mtlFee = null, net = null, currency = fields.currency || null, chargeId = null;
     if (acct) {
       try {
-        const intent = await stripe.paymentIntents.retrieve(pi, { expand: ['latest_charge.balance_transaction'] }, { stripeAccount: acct });
-        const ch = intent && intent.latest_charge;
+        let ch = null;
+        if (String(pi).startsWith('ch_')) {
+          ch = await stripe.charges.retrieve(pi, { expand: ['balance_transaction'] }, { stripeAccount: acct });
+        } else {
+          const intent = await stripe.paymentIntents.retrieve(pi, { expand: ['latest_charge.balance_transaction'] }, { stripeAccount: acct });
+          ch = intent && intent.latest_charge;
+        }
         if (ch) {
           chargeId = ch.id; gross = ch.amount; currency = ch.currency; mtlFee = ch.application_fee_amount || 0;
           const bt = ch.balance_transaction;
@@ -216,6 +221,18 @@ export default async function handler(req, res) {
         // GYM skupinová lekce (direct charge na účtu gymu) → 0,5 % ambassadorovi disciplíny
         await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id);
         if (m.mtl_payment_type === 'drop_in') { const dpi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id); if (dpi) await recordTransaction(event.account, dpi, { type: 'drop_in', member_id: m.student_id || m.member_id, gym_id: m.gym_id, coach_id: m.coach_profile_id || m.coach_id, plan: m.mtl_plan || 'Drop-in', currency: m.mtl_currency || 'CZK' }); }
+        else {
+          // MEMBERSHIP (subscription): link the subscription to the row + record the FIRST payment NOW,
+          // independent of client timing / the gym_memberships lookup (which used to fail on the first invoice).
+          const sub = typeof s.subscription === 'string' ? s.subscription : (s.subscription && s.subscription.id);
+          if (m.membership_id && sub) { try { await sbPatch('gym_memberships', `id=eq.${encodeURIComponent(m.membership_id)}`, { stripe_subscription: sub, status: 'active' }); } catch (e) { console.error('link sub', e.message); } }
+          try {
+            const invId = typeof s.invoice === 'string' ? s.invoice : (s.invoice && s.invoice.id);
+            let payId = null;
+            if (invId) { const invObj = await stripe.invoices.retrieve(invId, { stripeAccount: event.account }); payId = (typeof invObj.payment_intent === 'string' ? invObj.payment_intent : (invObj.payment_intent && invObj.payment_intent.id)) || (typeof invObj.charge === 'string' ? invObj.charge : (invObj.charge && invObj.charge.id)); }
+            if (payId) await recordTransaction(event.account, payId, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id, plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK' });
+          } catch (e) { console.error('record membership at checkout', e.message); }
+        }
       } else if (m.mtl_payment_type === 'partner_sub') {
         // Exclusive MTL Partner subscription zaplacena → zapni partner sazby
         const uid = m.user_id || s.client_reference_id;

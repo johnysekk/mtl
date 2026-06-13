@@ -57,7 +57,8 @@ export default async function handler(req, res) {
     const s1 = sBk.length;
     const sGa = await sb('gym_attendance?student_id=eq.' + id + '&select=id');
     const sg = sGa.length;
-    const studentXp = s1*10 + sg*2;
+    let refN = 0; try { const rf = await sb('profiles?referred_by=eq.' + id + '&referral_rewarded=eq.true&select=id'); refN = (rf||[]).length; } catch(e){}
+    const studentXp = s1*10 + sg*2 + refN*10;
 
     // distinct sports + coaches (for milestones)
     const sportSet = new Set(); sBk.forEach(b => { if(b.discipline) sportSet.add(b.discipline); });
