@@ -28,7 +28,7 @@ async function sbPatch(table, filter, patch) {
   await fetch(`${SB}/rest/v1/${table}?${filter}`, { method: 'PATCH', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(patch) });
 }
 
-// MTL Ambassador 1% — pošle 1 % základu ambassadorovi dané disciplíny (z provize MTL).
+// MTL Ambassador 0,5% — pošle 0,5 % základu ambassadorovi dané disciplíny (z provize MTL).
 // Aktivuje se, jakmile existuje ambassador (profil s verify_disciplines + stripe_account).
 // MTL Ambassador 0,5 % z GYM skupinových lekcí (z čisté provize MTL — gym nese Stripe fee).
 // Gym jede direct charge na účtu gymu; application_fee MTL končí na platform balance,
@@ -51,7 +51,7 @@ async function payGymAmbassador(discCsv, base, currency, idemKey) {
     );
   } catch (e) { console.error('payGymAmbassador', e); }
 }
-async function payAmbassador(coachId, amount, currency, disc) {
+async function payAmbassador(coachId, amount, currency, disc, idemKey) {
   try {
     if (!coachId || !amount || amount <= 0) return;
     let discs = [];
@@ -69,8 +69,8 @@ async function payAmbassador(coachId, amount, currency, disc) {
       try { const v = a.verify_disciplines ? (typeof a.verify_disciplines === 'string' ? JSON.parse(a.verify_disciplines) : a.verify_disciplines) : []; return Array.isArray(v) && v.some(x => discs.includes(x)); } catch (e) { return false; }
     })());
     if (!amb) return;
-    const cut = Math.round(amount * 0.01 * 100); // 1 % základu v minor units
-    if (cut > 0) await stripe.transfers.create({ amount: cut, currency: (currency || 'CZK').toLowerCase(), destination: amb.stripe_account, description: 'MTL Ambassador 1%' });
+    const cut = Math.round(amount * 0.005 * 100); // 0,5 % základu v minor units
+    if (cut > 0) await stripe.transfers.create({ amount: cut, currency: (currency || 'CZK').toLowerCase(), destination: amb.stripe_account, description: 'MTL Ambassador 0.5%' }, idemKey ? { idempotencyKey: 'amb_' + idemKey } : undefined);
   } catch (e) { console.error('payAmbassador', e); }
 }
 
@@ -194,7 +194,7 @@ export default async function handler(req, res) {
                 user_id: slot.coach_profile_id, type: 'booking', read: false,
                 message: `📅 Nová rezervace (potvrzeno platbou) na ${slot.date} ${slot.time}.`,
               });
-              await payAmbassador(slot.coach_profile_id, amount, currency, m.discipline);
+              await payAmbassador(slot.coach_profile_id, amount, currency, m.discipline, pi);
               await recordTransaction(event.account, pi, { type: 'coach_inperson', member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', gross: amount, currency });
             }
           } else if (m.booking_type === 'online' && m.coach_profile_id) {
@@ -208,7 +208,7 @@ export default async function handler(req, res) {
               user_id: m.coach_profile_id, type: 'booking', read: false,
               message: `🌐 Nová online objednávka (potvrzeno platbou).`,
             });
-            await payAmbassador(m.coach_profile_id, amount, currency, m.discipline);
+            await payAmbassador(m.coach_profile_id, amount, currency, m.discipline, pi);
             await recordTransaction(event.account, pi, { type: 'coach_online', member_id: m.student_id, coach_id: m.coach_profile_id, plan: m.online_fmt || 'Online', gross: amount, currency });
           }
         }
