@@ -9,6 +9,40 @@ async function sbGet(path) {
   try { const r = await fetch(`${SB}/rest/v1/${path}`, { headers: sbHeaders }); return r.ok ? r.json() : []; }
   catch (e) { return []; }
 }
+async function sbPost(path, body) {
+  try { await fetch(`${SB}/rest/v1/${path}`, { method: 'POST', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(body) }); }
+  catch (e) { console.error('sbPost', e.message); }
+}
+
+// Record a transaction with EXACT Stripe fees (idempotent on payment_intent).
+// Backstop so the ledger is correct even if the Stripe webhook isn't delivering
+// connected-account events. Mirrors stripe-webhook.js recordTransaction.
+async function recordTransaction(acct, pi, fields) {
+  if (!pi) return;
+  try {
+    const ex = await sbGet(`transactions?payment_intent=eq.${encodeURIComponent(pi)}&select=id`);
+    if (ex && ex.length) return; // already recorded (webhook or a previous call)
+    let gross = null, stripeFee = null, mtlFee = null, net = null, currency = fields.currency || null, chargeId = null;
+    if (acct) {
+      try {
+        let ch = null;
+        if (String(pi).startsWith('ch_')) { ch = await stripe.charges.retrieve(pi, { expand: ['balance_transaction'] }, { stripeAccount: acct }); }
+        else { const intent = await stripe.paymentIntents.retrieve(pi, { expand: ['latest_charge.balance_transaction'] }, { stripeAccount: acct }); ch = intent && intent.latest_charge; }
+        if (ch) {
+          chargeId = ch.id; gross = ch.amount; currency = ch.currency; mtlFee = ch.application_fee_amount || 0;
+          const bt = ch.balance_transaction;
+          if (bt) { stripeFee = bt.fee; net = bt.net - mtlFee; } else if (gross != null) { net = gross - mtlFee; }
+        }
+      } catch (e) { console.error('recordTransaction fee', e.message); }
+    }
+    await sbPost('transactions', {
+      payment_intent: pi, charge_id: chargeId, payee_account: acct || null, type: fields.type,
+      member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null,
+      gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, net_amount: net, currency,
+      status: 'paid', created_at: new Date().toISOString(),
+    });
+  } catch (e) { console.error('recordTransaction', e.message); }
+}
 
 // Gym member referral – reward the referrer (option A):
 // the referrer gets the SAME % off ONE upcoming month on their own running
@@ -46,6 +80,25 @@ export default async function handler(req, res) {
     if (refUser && refPct && gymId && gymAccount) {
       await rewardReferrer({ refUser, refPct, gymId, gymAccount });
     }
+
+    // Record the transaction from the session metadata (idempotent). This guarantees the
+    // ledger + accounting export are correct even when the Stripe webhook isn't delivering
+    // connected-account events. Direct charges live on the connected (gym/coach) account.
+    try {
+      const m = session.metadata || {};
+      let payId = (session.payment_intent && (typeof session.payment_intent === 'string' ? session.payment_intent : session.payment_intent.id)) || null;
+      if (!payId) {
+        let invId = (session.invoice && (typeof session.invoice === 'string' ? session.invoice : session.invoice.id)) || null;
+        if (!invId && session.subscription) { try { const sub = await stripe.subscriptions.retrieve(typeof session.subscription === 'string' ? session.subscription : session.subscription.id, opts); invId = sub.latest_invoice && (typeof sub.latest_invoice === 'string' ? sub.latest_invoice : sub.latest_invoice.id); } catch (e) {} }
+        if (invId) { try { const inv = await stripe.invoices.retrieve(invId, opts); payId = (inv.payment_intent && (typeof inv.payment_intent === 'string' ? inv.payment_intent : inv.payment_intent.id)) || (inv.charge && (typeof inv.charge === 'string' ? inv.charge : inv.charge.id)); } catch (e) {} }
+      }
+      let txType = null; const f = { currency: m.mtl_currency || session.currency };
+      if (m.mtl_payment_type === 'membership') { txType = 'membership'; f.member_id = m.student_id; f.gym_id = m.gym_id; f.plan = m.mtl_plan || 'Membership'; }
+      else if (m.mtl_payment_type === 'drop_in') { txType = 'drop_in'; f.member_id = m.student_id || m.member_id; f.gym_id = m.gym_id; f.coach_id = m.coach_id || m.coach_profile_id || null; f.plan = m.mtl_plan || 'Drop-in'; }
+      else if (m.mtl_payment_type === 'event_ticket') { txType = 'event_ticket'; f.member_id = m.student_id || m.buyer_id; f.gym_id = m.gym_id; f.coach_id = m.payout_coach_id || null; f.plan = m.mtl_event || 'Event'; }
+      else if (m.booking_type === 'inperson' || m.booking_type === 'online') { txType = (m.booking_type === 'online') ? 'coach_online' : 'coach_inperson'; f.member_id = m.student_id; f.coach_id = m.coach_profile_id; f.plan = m.online_fmt || 'Lekce 1:1'; f.currency = m.booking_currency || session.currency; }
+      if (txType && payId && gymAccount) await recordTransaction(gymAccount, payId, { type: txType, ...f });
+    } catch (e) { console.error('session recordTransaction', e.message); }
 
     res.status(200).json({
       paymentIntent: session.payment_intent || null,
