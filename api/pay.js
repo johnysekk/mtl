@@ -55,7 +55,7 @@ async function coachCheckout(req, res) {
 
   const isCZK = String(currency || 'CZK').toUpperCase() === 'CZK';
   const unitAmount     = isCZK ? Math.floor(rate * STUDENT_MARKUP) * 100 : Math.round(rate * STUDENT_MARKUP * 100);
-  const applicationFee = isCZK ? Math.floor(rate * COMMISSION)    * 100 : Math.round(rate * COMMISSION    * 100);
+  const applicationFee = Math.round(rate * COMMISSION * 100); // exact pct (was floored to whole CZK -> under-charged)
 
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
@@ -133,7 +133,7 @@ async function gymCheckout(req, res) {
 
   const isCZK = cur === 'czk';
   const unitAmount     = isCZK ? Math.floor(P * STUDENT_MK) * 100 : Math.round(P * STUDENT_MK * 100);
-  const applicationFee = isCZK ? Math.floor(P * TAKE) * 100 : Math.round(P * TAKE * 100);
+  const applicationFee = Math.round(P * TAKE * 100); // exact pct (was floored to whole CZK -> 8.75 became 8)
 
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
@@ -188,7 +188,7 @@ async function eventCheckout(req, res) {
   const MK = 1.00, TAKE = (String(partner)==='1') ? 0.01 : 0.035;
   const isCZK = cur === 'czk';
   const unit = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);
-  const fee  = isCZK ? Math.floor(P * TAKE) * 100 : Math.round(P * TAKE * 100);
+  const fee  = Math.round(P * TAKE * 100); // exact pct (was floored to whole CZK)
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
   const session = await stripe.checkout.sessions.create(
