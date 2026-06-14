@@ -45,13 +45,13 @@ export default async function handler(req, res) {
 
     // 1) resolve profile by referral_code
     const prof = await sb('profiles?referral_code=eq.' + encodeURIComponent(token) +
-      '&select=id,name,photo_url,belts,coach_status,cert_level&limit=1');
+      '&select=id,name,photo_url,belts,coach_status,cert_level,verify_disciplines&limit=1');
     if(!prof || !prof.length){ res.status(404).json({ error: 'not found' }); return; }
     const me = prof[0];
     const id = me.id;
     const isCoach = me.coach_status === 'approved';
     const isFounder = (id === '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c');
-    let isAmbassador = false; try { const amb = await sb('ambassador_applications?user_id=eq.' + id + '&status=eq.approved&select=id&limit=1'); isAmbassador = !!(amb && amb.length); } catch(e){}
+    let isAmbassador = false; try { const v = me.verify_disciplines ? (typeof me.verify_disciplines==='string'?JSON.parse(me.verify_disciplines):me.verify_disciplines) : []; isAmbassador = Array.isArray(v) && v.length>0; } catch(e){}
 
     // 2) STUDENT — physical 1:1 confirmed + gym attendances
     const sBk = await sb('bookings?student_id=eq.' + id +
