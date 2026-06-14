@@ -307,7 +307,7 @@ export default async function handler(req, res) {
       if (sub) {
         let periodEnd = null;
         try { const line = inv.lines && inv.lines.data && inv.lines.data[0]; if (line && line.period && line.period.end) periodEnd = new Date(line.period.end * 1000).toISOString(); } catch (e) {}
-        const patch = { status: 'active' };
+        const patch = { status: 'active', payment_status: 'ok', payment_failed_at: null, last_invoice_url: null };
         if (periodEnd) patch.period_end = periodEnd;
         await sbPatch('gym_memberships', `stripe_subscription=eq.${encodeURIComponent(sub)}`, patch);
         try { const ipi = (typeof inv.payment_intent === 'string' ? inv.payment_intent : (inv.payment_intent && inv.payment_intent.id)) || (typeof inv.charge === 'string' ? inv.charge : (inv.charge && inv.charge.id)); const mem = (await sbGet(`gym_memberships?stripe_subscription=eq.${encodeURIComponent(sub)}&select=*`))[0]; if (ipi && mem) await recordTransaction(event.account, ipi, { type: 'membership', member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency }); } catch (e) { console.error('record membership', e.message); }
@@ -315,7 +315,10 @@ export default async function handler(req, res) {
     } else if (event.type === 'invoice.payment_failed') {
       const inv = event.data.object;
       const sub = typeof inv.subscription === 'string' ? inv.subscription : (inv.subscription && inv.subscription.id);
-      if (sub) await sbPatch('gym_memberships', `stripe_subscription=eq.${encodeURIComponent(sub)}`, { status: 'past_due' });
+      if (sub) {
+        await sbPatch('gym_memberships', `stripe_subscription=eq.${encodeURIComponent(sub)}`, { payment_status: 'past_due', payment_failed_at: new Date().toISOString(), last_invoice_url: inv.hosted_invoice_url || null });
+        try { const mem = (await sbGet(`gym_memberships?stripe_subscription=eq.${encodeURIComponent(sub)}&select=*`))[0]; if (mem && (mem.student_id || mem.member_id)) await sbPost('notifications', { user_id: mem.student_id || mem.member_id, type: 'system', read: false, data: JSON.stringify({ kind: 'membership_payment_failed', url: inv.hosted_invoice_url || '', gym_id: mem.gym_id }), message: '⚠️ Platba členství ' + (mem.plan_name || '') + ' se nezdařila. Aktualizuj kartu / zaplať odkaz v appce.' }); } catch (e) { console.error('notify failed pay', e.message); }
+      }
     }
     res.status(200).json({ received: true });
   } catch (err) {
