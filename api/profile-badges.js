@@ -50,6 +50,8 @@ export default async function handler(req, res) {
     const me = prof[0];
     const id = me.id;
     const isCoach = me.coach_status === 'approved';
+    const isFounder = (id === '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c');
+    let isAmbassador = false; try { const amb = await sb('ambassador_applications?user_id=eq.' + id + '&status=eq.approved&select=id&limit=1'); isAmbassador = !!(amb && amb.length); } catch(e){}
 
     // 2) STUDENT — physical 1:1 confirmed + gym attendances
     const sBk = await sb('bookings?student_id=eq.' + id +
@@ -106,6 +108,8 @@ export default async function handler(req, res) {
     add(sportSet.size>=3,'🌍','Tried 3 sports','Vyzkoušel 3 sporty');
     add(c1>=10,          '💯','10 lessons taught','10 odučených');
     add(c1>=250,         '🏆','250 lessons taught','250 odučených');
+    add(isFounder,'👑','MTL Founder','MTL Founder');
+    add(isAmbassador,'⭐','MTL Ambassador','MTL Ambassador');
     add(me.cert_level==='certified','🏅','MTL Certified','MTL Certified');
     add(cev+gev>=1,      '🎪','Hosted an event','Uspořádal akci');
     add(cls>=100,        '🏋️','100 classes held','100 odučených skupinovek');
@@ -118,6 +122,8 @@ export default async function handler(req, res) {
       name: me.name || 'Athlete',
       photo: me.photo_url || null,
       certified: me.cert_level === 'certified',
+      founder: isFounder,
+      ambassador: isAmbassador,
       levels,
       milestones: M,
       headline: { trainings: totalTrain, taught: c1, classes: cls, events: cev + gev, sports: sportSet.size },
