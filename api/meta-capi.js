@@ -50,6 +50,17 @@ export default async function handler(req, res) {
              || (req.socket && req.socket.remoteAddress) || '';
     const ua = req.headers['user-agent'] || '';
 
+    // Tag the lead level so muaythailab.cz vs pokrocili.muaythailab.cz are distinguishable in Meta.
+    // Explicit lead_level wins; otherwise infer from the source domain. Never overrides a provided content_name.
+    if (!custom_data.content_name) {
+      if (b.lead_level) custom_data.content_name = String(b.lead_level);
+      else {
+        const _src = String(event_source_url || req.headers.referer || '').toLowerCase();
+        if (_src.includes('pokrocili')) custom_data.content_name = 'pokrocili';
+        else if (_src.includes('muaythailab')) custom_data.content_name = 'zaklad';
+      }
+    }
+
     const user_data = {};
     if (email)      user_data.em = [sha256(email)];
     if (phone)      user_data.ph = [sha256(String(phone).replace(/[^0-9]/g, ''))]; // digits only, incl. country code
