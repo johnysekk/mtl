@@ -127,7 +127,36 @@ export default async function handler(req, res) {
       awarded++;
     }
 
-    return res.status(200).json({ ok: true, checked, awarded, expiredPts });
+
+    // ── GYM-OWNER recruit activation ──
+    // A referred gym owner becomes "active" after 2 distinct months of real gym revenue.
+    // (Coaches activate in-app after 5 paid lessons/classes; this pass covers gym owners.)
+    // ref_coach_qualified is the single idempotency flag → counts once per user even if
+    // they are both a coach and a gym owner (whichever path qualifies first wins).
+    let gymActivated = 0;
+    try {
+      const cand = await sb(`profiles?referred_by=not.is.null&ref_coach_qualified=not.is.true&select=id,referred_by,name&limit=500`);
+      for (const c of (cand || [])) {
+        const gy = await sb(`gyms?owner_id=eq.${c.id}&status=eq.approved&select=id&limit=1`);
+        const gymId = gy && gy[0] && gy[0].id;
+        if (!gymId) continue; // no gym → coach path handles activation in-app
+        const tx = await sb(`transactions?gym_id=eq.${gymId}&select=created_at&limit=1000`);
+        const months = new Set((tx || []).map(t => (t.created_at || '').slice(0, 7)).filter(Boolean));
+        if (months.size < 2) continue; // needs 2 distinct months of real revenue
+        // qualify (set flag FIRST for idempotency), then bump referrer
+        await sb(`profiles?id=eq.${c.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ ref_coach_qualified: true }) });
+        const ref = await sb(`profiles?id=eq.${c.referred_by}&select=coach_ref_score,name&limit=1`);
+        const newScore = ((ref && ref[0] && ref[0].coach_ref_score) || 0) + 1;
+        await sb(`profiles?id=eq.${c.referred_by}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ coach_ref_score: newScore }) });
+        let msg = `\uD83C\uDF89 Tv\u016Fj pozvan\u00FD gym ${c.name || ''} je te\u010F aktivn\u00ED! M\u00E1\u0161 ${newScore} aktivn\u00EDch p\u0159iveden\u00FDch. \uD83E\uDD4A`;
+        if (newScore === 3) msg = `\uD83D\uDDE1\uFE0F 3 aktivn\u00ED p\u0159iveden\u00ED! Odemkl jsi SHIKAI rate \u2014 nech\u00E1v\u00E1\u0161 si 97 % (provize jen 3 %). \uD83E\uDD4A`;
+        else if (newScore === 10) msg = `\uD83D\uDD25 10 aktivn\u00EDch p\u0159iveden\u00FDch! Odemkl jsi BANKAI rate \u2014 nech\u00E1v\u00E1\u0161 si 98 % (provize jen 2 %). \uD83C\uDFC6`;
+        await sb(`notifications`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: c.referred_by, type: 'referral', read: false, data: JSON.stringify({ kind: 'coach_ref_qualified', who: c.name || '', score: newScore }), message: msg }]) });
+        gymActivated++;
+      }
+    } catch (e) { /* don't block the response */ }
+
+    return res.status(200).json({ ok: true, checked, awarded, expiredPts, gymActivated });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
