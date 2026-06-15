@@ -157,7 +157,57 @@ export default async function handler(req, res) {
       }
     } catch (e) { /* don't block the response */ }
 
-    return res.status(200).json({ ok: true, checked, awarded, expiredPts, gymActivated });
+
+    // ── MTL LEAGUE: champions (season rollover) + momentum ──
+    let champions = 0, momentum = 0;
+    try {
+      const now = new Date();
+      const curQ = Math.floor(now.getUTCMonth() / 3) + 1, curY = now.getUTCFullYear();
+      const curStart = new Date(Date.UTC(curY, (curQ - 1) * 3, 1));
+      const prevEnd = new Date(curStart.getTime() - 1);
+      const prevQ = Math.floor(prevEnd.getUTCMonth() / 3) + 1, prevY = prevEnd.getUTCFullYear();
+      const prevStart = new Date(Date.UTC(prevY, (prevQ - 1) * 3, 1)).toISOString();
+      const prevSeason = `Q${prevQ} ${prevY}`;
+      const dayOfQ = Math.floor((now - curStart) / 86400000);
+
+      // CHAMPIONS — once, in the first days of a new quarter, award prev-quarter top 3.
+      if (dayOfQ <= 5) {
+        const done = await sb(`league_titles?season=eq.${encodeURIComponent(prevSeason)}&select=id&limit=1`);
+        if (!done || !done.length) {
+          const rows = await sb(`coach_ref_log?qualified_at=gte.${prevStart}&qualified_at=lt.${curStart.toISOString()}&select=referrer_id&limit=5000`);
+          const cc = {}; (rows || []).forEach(r => { if (r.referrer_id) cc[r.referrer_id] = (cc[r.referrer_id] || 0) + 1; });
+          const top = Object.entries(cc).map(([id, n]) => ({ id, n: Number(n) })).sort((a, b) => b.n - a.n).slice(0, 3);
+          for (let i = 0; i < top.length; i++) {
+            const medal = i === 0 ? '\uD83E\uDD47' : i === 1 ? '\uD83E\uDD48' : '\uD83E\uDD49';
+            await sb(`league_titles`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: top[i].id, season: prevSeason, rank: i + 1, points: top[i].n }]) });
+            await sb(`notifications`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: top[i].id, type: 'referral', read: false, data: JSON.stringify({ kind: 'league_champion', season: prevSeason, rank: i + 1 }), message: `${medal} MTL League ${prevSeason}: skon\u010Dil jsi #${i + 1}! Z\u00EDskal jsi \u0161ampionsk\u00FD odznak. \uD83C\uDFC6` }]) });
+            champions++;
+          }
+        }
+      }
+
+      // MOMENTUM — snapshot current-quarter ranks, notify climbers / overtaken (opt-in).
+      const curRows = await sb(`coach_ref_log?qualified_at=gte.${curStart.toISOString()}&select=referrer_id&limit=5000`);
+      const ccur = {}; (curRows || []).forEach(r => { if (r.referrer_id) ccur[r.referrer_id] = (ccur[r.referrer_id] || 0) + 1; });
+      const ranked = Object.entries(ccur).map(([id, n]) => ({ id, n: Number(n) })).sort((a, b) => b.n - a.n);
+      for (let i = 0; i < ranked.length; i++) {
+        const id = ranked[i].id, newRank = i + 1;
+        const pr = await sb(`profiles?id=eq.${id}&select=league_last_rank,league_notif_optin&limit=1`);
+        const last = pr && pr[0] ? pr[0].league_last_rank : null;
+        const optin = !(pr && pr[0] && pr[0].league_notif_optin === false);
+        await sb(`profiles?id=eq.${id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ league_last_rank: newRank }) });
+        if (!optin || last == null) continue;
+        if (newRank < last && newRank <= 10) {
+          await sb(`notifications`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: id, type: 'referral', read: false, data: JSON.stringify({ kind: 'league_climb', rank: newRank }), message: `\uD83D\uDCC8 Posunul ses na #${newRank} v MTL League! Dr\u017E tempo. \uD83E\uDD4A` }]) });
+          momentum++;
+        } else if (newRank > last && last <= 10) {
+          await sb(`notifications`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: id, type: 'referral', read: false, data: JSON.stringify({ kind: 'league_drop', rank: newRank }), message: `\uD83D\uDCC9 Spadl jsi na #${newRank} v MTL League \u2014 n\u011Bkdo t\u011B p\u0159edb\u011Bhl. P\u0159ive\u010F kou\u010De a vra\u0165 se nahoru!` }]) });
+          momentum++;
+        }
+      }
+    } catch (e) { /* don't block */ }
+
+    return res.status(200).json({ ok: true, checked, awarded, expiredPts, gymActivated, champions, momentum });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
