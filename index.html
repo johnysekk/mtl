@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-15-PH | GRACE piece 2: gym member detail shows tolerated (grace) visits logged while the membership was past due, with Doúčtovat (settlement=billed) and Odepsat (settled, written_off). Member-facing payable (piece 3) + dashboard (piece 4) next. -->
+<!-- MTL build: 2026-06-15-PI | GRACE piece 3: members see a "Doplatek k úhradě" banner in My Memberships for tolerated visits the gym billed (settlement=billed); paying settles them as N x drop-in via gymCheckout (grace=1, locked label, direct charge), and the grace_pay success handler marks the grace_visits charged + notifies the owner. Recorded as a normal drop_in transaction. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -6075,18 +6075,45 @@ async function loadMyMemberships(){
       </div>`;
     }).join('');
   }
+  // GRACE — outstanding settlement for tolerated visits the gym billed
+  try{
+    const { data: _gv } = await supaClient.from('grace_visits').select('gym_id').eq('student_id',currentUser.id).eq('settled',false).eq('settlement','billed');
+    if(_gv && _gv.length){
+      const _byGym={}; _gv.forEach(v=>{ _byGym[v.gym_id]=(_byGym[v.gym_id]||0)+1; });
+      let _gh='';
+      Object.keys(_byGym).forEach(gid=>{ const g=gymMap[gid]; if(!g) return; const n=_byGym[gid]; const dp=g.dropin_price||0; const cur=g.currency||'CZK'; const sym=cur==='EUR'?'€':cur==='USD'?'$':'Kč'; const amt=n*dp;
+        _gh += `<div style="background:#FFF7EE;border:1px solid #F3C9A0;border-radius:14px;padding:15px;margin-bottom:12px;"><div style="font-weight:800;color:#9A5B00;font-size:14px;margin-bottom:4px;">💳 ${LANG==='en'?'Settlement due':'Doplatek k úhradě'} — ${escapeHtml(g.name||'Gym')}</div><div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:10px;">${LANG==='en'?(n+' tolerated check-in(s) while your membership was past due. Settle as '+n+'× drop-in.'):(n+' tolerovaných příchodů, když byla tvá permanentka po splatnosti. Doplať jako '+n+'× jednorázovku.')}</div><button class="graceDoplatekBtn" data-gym="${gid}" style="width:100%;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💳 ${LANG==='en'?'Pay':'Zaplatit'} ${fmtPrice(amt,cur)} ${sym}</button></div>`;
+      });
+      html = _gh + html;
+    }
+  }catch(e){}
   if(!html){ box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${LANG==='en'?'No memberships or upcoming drop-ins.':'Žádná členství ani nadcházející jednorázové lekce.'}</p>`; return; }
   box.innerHTML = html;
   box.querySelectorAll('.cancelMembBtn').forEach(b=>{ b.onclick=()=>cancelMembership(b.dataset.id, b.dataset.gym, b.dataset.sub); });
   box.querySelectorAll('.membQrBtn').forEach(b=>{ b.onclick=()=>showMemberCheckinQR(b.dataset.gym, b.dataset.gname); });
   box.querySelectorAll('.membQrClsBtn').forEach(b=>{ b.onclick=()=>{ const occ=((window._membUpc&&window._membUpc[b.dataset.gym])||[])[+b.dataset.i]; showMemberCheckinQR(b.dataset.gym, b.dataset.gname, occ); }; });
   box.querySelectorAll('.membGymHead').forEach(el=>{ el.onclick=()=>{ const g=(window._membGymMap||{})[el.dataset.gym]; if(g) openGymProfile(g); else toast(L('⚠️ Gym se nepodařilo načíst')); }; });
+  box.querySelectorAll('.graceDoplatekBtn').forEach(b=>{ b.onclick=()=>payGraceDoplatek(b.dataset.gym); });
   box.querySelectorAll('.resumeMembBtn').forEach(b=>{ b.onclick=()=>resumeMembership(b.dataset.id, b.dataset.gym, b.dataset.sub); });
   box.querySelectorAll('.gymReschedBtn').forEach(b=>{ b.onclick=()=>openGymReschedule(upDrops.find(x=>String(x.id)===String(b.dataset.id))); });
   box.querySelectorAll('.gymReceiptBtn').forEach(btn=>{ btn.onclick=()=>{ const b=upDrops.find(x=>String(x.id)===String(btn.dataset.id)); if(b) showReceipt(b); }; });
   box.querySelectorAll('.gymDropCalBtn').forEach(btn=>{ btn.onclick=()=>{ const b=upDrops.find(x=>String(x.id)===String(btn.dataset.id)); if(!b) return; addToCalendar({ training_date:b.class_date, training_time:b.class_time, id:b.id, title:`🥊 ${b.class_name||(LANG==='en'?'Class':'Lekce')} — ${b.gym_name||'Gym'}` }); }; });
   box.querySelectorAll('.gymDropCancelBtn').forEach(b=>{ b.onclick=()=>cancelGymDropin(upDrops.find(x=>String(x.id)===String(b.dataset.id))); });
   box.querySelectorAll('.membRelBtn').forEach(b=>{ b.onclick=()=>{ const g=(window._membGymMap||{})[b.dataset.gym]; const occ=((window._membUpc&&window._membUpc[b.dataset.gym])||[])[+b.dataset.i]; if(!g||!occ) return; if(b.dataset.rel==='1'){ if(typeof rejoinClass==='function') rejoinClass(g, occ); } else { if(typeof releaseClass==='function') releaseClass(g, occ); } }; });
+}
+async function payGraceDoplatek(gymId){
+  let g=(window._membGymMap||{})[gymId];
+  if(!g){ try{ const { data } = await supaClient.from('gyms').select('*').eq('id',gymId).single(); g=data; }catch(e){} }
+  if(!g){ toast('⚠️'); return; }
+  let n=0; try{ const { count } = await supaClient.from('grace_visits').select('id',{count:'exact',head:true}).eq('student_id',currentUser.id).eq('gym_id',gymId).eq('settled',false).eq('settlement','billed'); n=count||0; }catch(e){}
+  if(!n){ toast(LANG==='en'?'Nothing to settle':'Nic k doplacení'); if(typeof loadMyMemberships==='function') loadMyMemberships(); return; }
+  const dp=g.dropin_price||0; if(!dp){ toast(LANG==='en'?'⚠️ Gym has no drop-in price set':'⚠️ Gym nemá nastavenou cenu drop-inu'); return; }
+  const amt=n*dp, cur=g.currency||'CZK';
+  const payee=await resolveGymPayee(g, null);
+  if(!payee || !payee.account){ toast(LANG==='en'?'⚠️ Gym has no payments set up':'⚠️ Gym nemá nastavené platby'); return; }
+  let _op=false; try{ const { data: ow } = await supaClient.from('profiles').select('partner').eq('id', g.owner_id).single(); _op=!!(ow&&ow.partner); }catch(e){}
+  const label = LANG==='en' ? 'Settlement for tolerated visits (lapsed membership)' : 'Doplatek za tolerované příchody při propadlé a neuhrazené permanentce';
+  location.href = `/api/pay?type=gym&grace=1&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&className=${encodeURIComponent(label)}&amount=${amt}&currency=${cur}&gymId=${encodeURIComponent(gymId)}&studentId=${encodeURIComponent(currentUser.id)}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(g.name||'')}&income=${encodeURIComponent(g.dropin_income||'side')}&partner=${_op?1:0}&disc=${encodeURIComponent(parseDisc(g.disciplines).join(','))}`;
 }
 async function openGymReschedule(b){
   if(!b){ return; }
@@ -15345,6 +15372,20 @@ async function showPaidPopup(){
       +'<p style="font-size:12px;color:#888;margin-top:18px;">MTL Coaches</p></div>';
     window.history.replaceState({}, '', location.pathname);
     return;
+  }
+  if(params.get('grace_pay')==='ok'){
+    const sessionId=params.get('session'); const gAcct=params.get('acct'); const gid=params.get('gracegym');
+    let _t=0; while(!currentUser && _t<25){ await new Promise(r=>setTimeout(r,200)); _t++; }
+    if(sessionId){ try{ const r=await fetch(`/api/session?sessionId=${sessionId}${gAcct?'&gymAccount='+encodeURIComponent(gAcct):''}`); const j=await r.json(); console.log('[MTL tx · grace]', j._tx); }catch(e){} }
+    if(gid && currentUser){
+      try{
+        await supaClient.from('grace_visits').update({ settled:true, settlement:'charged', settled_at:new Date().toISOString() }).eq('gym_id',gid).eq('student_id',currentUser.id).eq('settled',false).eq('settlement','billed');
+        const { data: _gym } = await supaClient.from('gyms').select('owner_id,name').eq('id',gid).single();
+        if(_gym && _gym.owner_id){ await supaClient.from('notifications').insert({ user_id:_gym.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'grace_settled', student: currentUser?.name||'Student' }), message:`💳 ${LANG==='en'?((currentUser?.name||'A member')+' paid the settlement for tolerated visits.'):((currentUser?.name||'Člen')+' uhradil doplatek za tolerované příchody.')}` }); updateNotifBadge(); }
+        toast(LANG==='en'?'✅ Settlement paid — thank you!':'✅ Doplatek uhrazen — díky!');
+      }catch(e){ console.error('grace_pay',e); }
+    }
+    window.history.replaceState({}, '', window.location.pathname);
   }
   if(params.get('gym_pay') === 'ok'){
     const bookingId = params.get('booking');
