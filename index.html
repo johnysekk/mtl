@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-15-ON | Events leaderboard server-side: replaced the per-event ticket + rating raw-row fetches with one event_lb_agg(uuid[]) RPC that counts attendance + sums ratings in the DB. Recency-decay scoring, city/country filter, render and openEventView (full event objects) unchanged. -->
+<!-- MTL build: 2026-06-15-OO | Gym dashboard server-side: renderGymAnalytics replaced fetch-all gym_bookings + gym_memberships per gym with one gym_dash_stats RPC returning 5 aggregates (drops count+turnover, active members, churn, MRR) in the DB. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -10347,30 +10347,30 @@ async function renderGymAnalytics(gymId, containerId){
   box.innerHTML=`<p style="color:var(--light);padding:20px;">${L('Načítám...')}</p>`;
   const { data: gym } = await supaClient.from('gyms').select('*').eq('id', gymId).single();
   const _self = !!(currentUser && gym && gym.owner_id===currentUser.id);
-  const { data: bks } = await supaClient.from('gym_bookings').select('*').eq('gym_id', gymId).eq('status','active');
-  const { data: mbs } = await supaClient.from('gym_memberships').select('*').eq('gym_id', gymId);
-  const drops=bks||[], mems=(mbs||[]).filter(m=>m.paid_to!=='coach');
+  const { data: _ds } = await supaClient.rpc('gym_dash_stats',{ p_gym_id: gymId });
+  const _st = (_ds&&_ds[0])||{};
+  const dropsCount = Number(_st.drops_count)||0;
   const cur = (gym&&gym.currency)||'CZK';
   const sym = cur==='EUR'?'€':cur==='USD'?'$':'Kč';
-  const dropBase = drops.reduce((s,b)=>s+(b.amount||0),0);
+  const dropBase = Number(_st.drops_sum)||0;
   const dropTurnover = dropBase*1, dropGym = dropBase*0.965, dropMtl = dropBase*0.035;
-  const activeMems = mems.filter(m=>m.status==='active'||m.status==='cancelling');
-  const cancellingMems = mems.filter(m=>m.status==='cancelling').length;
-  const memMonthly = activeMems.reduce((s,m)=>s+(m.amount||0),0);
+  const activeMemCount = Number(_st.active_members)||0;
+  const cancellingMems = Number(_st.cancelling)||0;
+  const memMonthly = Number(_st.mem_monthly)||0;
   const memGymMo = memMonthly*0.965, memMtlMo = memMonthly*0.035;
   const fmt=v=>`${fmtPrice(v,cur)} ${sym}`;
   box.innerHTML = `
     <div style="font-size:13px;color:var(--mid);margin-bottom:14px;">📍 ${gym?.city||''}${gym?.country?', '+gym.country:''}</div>
     <div class="sec-lbl">${LANG==='en'?'Drop-ins':'Jednorázové lekce'}</div>
     <div class="prow-group" style="margin-bottom:16px;">
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🥊</div><div class="prow-lbl">${LANG==='en'?'Drop-ins sold':'Prodaných jednorázových lekcí'}</div></div><span class="prow-val">${drops.length}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🥊</div><div class="prow-lbl">${LANG==='en'?'Drop-ins sold':'Prodaných jednorázových lekcí'}</div></div><span class="prow-val">${dropsCount}</span></div>
       ${_self?`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💳</div><div class="prow-lbl">${LANG==='en'?'Drop-in turnover':'Obrat jednorázových lekcí'}</div></div><span class="prow-val">${fmt(dropTurnover)}</span></div>`:''}
       ${_self?`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏛️</div><div class="prow-lbl">${LANG==='en'?'Gym share (96.5%)':'Gymu (96,5 %)'}</div></div><span class="prow-val">${fmt(dropGym)}</span></div>`:''}
       ${_self?`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">👑</div><div class="prow-lbl">${LANG==='en'?'MTL fee (6%)':'MTL provize (6 %)'}</div></div><span class="prow-val" style="color:var(--red);">${fmt(dropMtl)}</span></div>`:''}
     </div>
     <div class="sec-lbl">${LANG==='en'?'Membership':'Členství'}</div>
     <div class="prow-group" style="margin-bottom:16px;">
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🎟️</div><div class="prow-lbl">${LANG==='en'?'Active members':'Aktivní členové'}</div></div><span class="prow-val">${activeMems.length}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🎟️</div><div class="prow-lbl">${LANG==='en'?'Active members':'Aktivní členové'}</div></div><span class="prow-val">${activeMemCount}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">📉</div><div class="prow-lbl">${LANG==='en'?'Cancelling (churn)':'Ruší se (churn)'}</div></div><span class="prow-val" style="${cancellingMems>0?'color:var(--red);':''}">${cancellingMems}</span></div>
       ${_self?`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🔁</div><div class="prow-lbl">${LANG==='en'?'Monthly recurring (MRR)':'Měsíčně (MRR)'}</div></div><span class="prow-val">${fmt(memMonthly)}</span></div>`:''}
       ${_self?`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏛️</div><div class="prow-lbl">${LANG==='en'?'Gym / mo (96.5%)':'Gymu / měs (96,5 %)'}</div></div><span class="prow-val">${fmt(memGymMo)}</span></div>`:''}
