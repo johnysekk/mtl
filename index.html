@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-15-OQ | Notifications paginated: loads 30 at a time (.range) with a Load more button instead of fetching every notification ever. Mute button + mark-as-read only on first page; append keeps existing items. First real list pagination. -->
+<!-- MTL build: 2026-06-15-OS | Chat paginated (cursor-based): loads newest 30 messages, fetches older 30 on scroll-up (created_at < oldest shown) and prepends while preserving scroll position. Robust to realtime new messages. Replaces loading every message in a thread. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -1878,8 +1878,8 @@ body.dashmode .mode-switch{display:none!important}
 <div class="sheet" id="shMtlLeague" style="z-index:87;">
   <div class="shdr"><div class="shdr-title" id="mlTitle">🏆 MTL League</div><button class="btn-close" id="btnCloseMtlLeague">✕</button></div>
   <div style="padding:16px 20px;">
-    <div style="background:linear-gradient(135deg,#1a1410,#2a1f17);border:1px solid #C9A227;border-radius:16px;padding:18px;margin-bottom:14px;">
-      <div id="mlHeroTitle" style="font-family:'Bebas Neue';font-size:30px;letter-spacing:.04em;color:#C9A227;line-height:1;">MTL LEAGUE</div>
+    <div style="background:linear-gradient(135deg,#1a0e0e,#2a1414);border:1px solid var(--red);border-radius:16px;padding:18px;margin-bottom:14px;">
+      <div id="mlHeroTitle" style="font-family:'Bebas Neue';font-size:30px;letter-spacing:.04em;color:var(--red);line-height:1;">MTL LEAGUE</div>
       <div id="mlSeason" data-noi18n style="font-size:13px;font-weight:800;color:#fff;margin:4px 0 10px;">—</div>
       <p id="mlIntro" data-noi18n style="font-size:12.5px;color:#d8cfc2;line-height:1.55;margin:0;"></p>
     </div>
@@ -8866,7 +8866,7 @@ async function _mlLoad(){
       titles.forEach(t=>{ if(!bySeason[t.season]){ bySeason[t.season]=[]; seasons.push(t.season); } bySeason[t.season].push(t); });
       let hh='<div style="font-size:12px;font-weight:800;color:var(--mid);letter-spacing:.04em;margin-bottom:8px;">🏆 '+(EN?'HALL OF FAME':'SÍŇ SLÁVY')+'</div>';
       seasons.slice(0,3).forEach(se=>{
-        hh+='<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:11px 13px;margin-bottom:8px;"><div style="font-size:12px;font-weight:800;color:#C9A227;margin-bottom:5px;">'+escapeHtml(se)+'</div>';
+        hh+='<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:11px 13px;margin-bottom:8px;"><div style="font-size:12px;font-weight:800;color:var(--red);margin-bottom:5px;">'+escapeHtml(se)+'</div>';
         bySeason[se].sort((a,b)=>a.rank-b.rank).forEach(t=>{ const medal=t.rank===1?'🥇':t.rank===2?'🥈':'🥉'; const me=currentUser&&t.user_id===currentUser.id; hh+='<div style="font-size:13px;padding:2px 0;'+(me?'font-weight:800;color:var(--red);':'')+'">'+medal+' '+escapeHtml(tinfo[t.user_id]||'—')+' · '+t.points+' '+(EN?'pts':'b.')+'</div>'; });
         hh+='</div>';
       });
@@ -8886,7 +8886,7 @@ function _mlRender(){
     const me=currentUser&&r.id===currentUser.id;
     const nm=(info[r.id]&&info[r.id].name)||'—'; const ph=(info[r.id]&&info[r.id].photo)||''; const ct=(info[r.id]&&info[r.id].city)||'';
     html+='<div style="display:flex;align-items:center;gap:11px;padding:11px 12px;border-radius:12px;margin-bottom:6px;border:1px solid '+(me?'var(--red)':'var(--border)')+';background:'+(me?'#FFF5F5':'var(--surf)')+';">'
-      +'<div style="width:30px;text-align:center;font-weight:800;font-size:15px;color:'+(i<3?'#C9A227':'var(--mid)')+';flex-shrink:0;">'+medal(i)+'</div>'
+      +'<div style="width:30px;text-align:center;font-weight:800;font-size:15px;color:'+(i<3?'var(--red)':'var(--mid)')+';flex-shrink:0;">'+medal(i)+'</div>'
       +'<div style="width:34px;height:34px;border-radius:50%;flex-shrink:0;background:#E8E5DF '+(ph?("url(\'"+ph+"\') center/cover"):'')+';"></div>'
       +'<div style="flex:1;min-width:0;"><div style="font-weight:700;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escapeHtml(nm)+(me?(' <span style="color:var(--red);font-size:11px;">'+(EN?'(you)':'(ty)')+'</span>'):'')+'</div>'+(ct&&_mlScope==='global'?('<div style="font-size:11px;color:var(--light);">📍 '+escapeHtml(ct)+'</div>'):'')+'</div>'
       +'<div style="font-family:\'Bebas Neue\';font-size:20px;color:var(--dark);flex-shrink:0;">'+r.n+'</div>'
@@ -11630,32 +11630,46 @@ async function openChat(conv){
   await loadMessages();
 }
 
-async function loadMessages(){
+let _chatOldest=null, _chatHasMore=false, _chatLoading=false; const _CHAT_PAGE=30;
+function _chatBubble(m){
+  const mine = m.sender_id===currentUser.id;
+  const bubble=document.createElement('div');
+  bubble.style.cssText=`max-width:75%;padding:10px 14px;border-radius:16px;font-size:14px;line-height:1.4;${mine?'align-self:flex-end;background:var(--red);color:#fff;border-bottom-right-radius:4px;':'align-self:flex-start;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-bottom-left-radius:4px;'}`;
+  bubble.textContent=m.text;
+  return bubble;
+}
+async function loadMessages(older){
   if(!activeConv) return;
   const box=$('chatMessages');
-  box.innerHTML='';
-  const { data } = await supaClient
-    .from('messages').select('*')
-    .eq('conversation_id', activeConv.id)
-    .order('created_at',{ascending:true});
-
-  if(!data || !data.length){
+  if(_chatLoading) return;
+  if(!older){ box.innerHTML=''; _chatOldest=null; _chatHasMore=false; }
+  _chatLoading=true;
+  let q = supaClient.from('messages').select('*').eq('conversation_id', activeConv.id).order('created_at',{ascending:false}).limit(_CHAT_PAGE);
+  if(older && _chatOldest) q = q.lt('created_at', _chatOldest);
+  const { data } = await q;
+  const page=(data||[]).slice().reverse();
+  if(!older && !page.length){
     box.innerHTML=`<p style="text-align:center;color:var(--light);font-size:13px;padding:20px;">${L('Zatím žádné zprávy. Napiš první!')}</p>`;
-    return;
+    _chatLoading=false; return;
   }
-  data.forEach(m=>{
-    const mine = m.sender_id===currentUser.id;
-    const bubble=document.createElement('div');
-    bubble.style.cssText=`max-width:75%;padding:10px 14px;border-radius:16px;font-size:14px;line-height:1.4;${mine?'align-self:flex-end;background:var(--red);color:#fff;border-bottom-right-radius:4px;':'align-self:flex-start;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-bottom-left-radius:4px;'}`;
-    bubble.textContent=m.text;
-    box.appendChild(bubble);
-  });
-  box.scrollTop=box.scrollHeight;
-  // Označ příchozí zprávy jako přečtené
-  await supaClient.from('messages').update({ read:true })
-    .eq('conversation_id', activeConv.id)
-    .neq('sender_id', currentUser.id);
-  updateMsgsBadge();
+  if(page.length){
+    if(older){
+      const prevH=box.scrollHeight, prevT=box.scrollTop;
+      const frag=document.createDocumentFragment();
+      page.forEach(m=>frag.appendChild(_chatBubble(m)));
+      box.insertBefore(frag, box.firstChild);
+      box.scrollTop = box.scrollHeight - prevH + prevT;
+    } else {
+      page.forEach(m=>box.appendChild(_chatBubble(m)));
+      box.scrollTop=box.scrollHeight;
+      await supaClient.from('messages').update({ read:true }).eq('conversation_id', activeConv.id).neq('sender_id', currentUser.id);
+      updateMsgsBadge();
+    }
+    _chatOldest = page[0].created_at;
+    _chatHasMore = !!(data && data.length===_CHAT_PAGE);
+  }
+  if(!older){ box.onscroll=()=>{ if(box.scrollTop<60 && _chatHasMore && !_chatLoading) loadMessages(true); }; }
+  _chatLoading=false;
 }
 
 let realtimeChannel=null;
@@ -12155,7 +12169,7 @@ async function openSharedProfile(token){
     : data.certified ? {t:'MTL Certified',e:'🏅',bg:'rgba(244,216,122,.14)',bd:'rgba(244,216,122,.45)',c:'#F4D87A'} : null;
   h+='<div style="font-size:24px;font-weight:800;color:#fff;margin-bottom:'+(_badge?'8px':'18px')+';">'+escapeHtml(data.name||'')+'</div>';
   if(_badge) h+='<div style="display:inline-block;font-size:12px;font-weight:800;color:'+_badge.c+';background:'+_badge.bg+';border:1px solid '+_badge.bd+';border-radius:20px;padding:5px 13px;margin-bottom:18px;">'+_badge.e+' '+_badge.t+'</div>';
-  h+='<div style="font-size:13px;color:rgba(255,255,255,.72);line-height:1.55;background:rgba(244,216,122,.08);border:1px solid rgba(244,216,122,.26);border-radius:14px;padding:13px 15px;margin:2px 0 22px;text-align:left;">'+(EN?('The member above earned these achievements in the world of MTL. Join and finish your first training — you <b style="color:#F4D87A;">both get 2 referral points</b> (each worth up to 20% off a session). 🥊'):('Člen MTL výše nasbíral tyto úspěchy ve světě MTL. Přidej se a absolvuj první trénink — <b style="color:#F4D87A;">oba dostanete 2 referral body</b> (na jeden až 20 % sleva na trénink). 🥊'))+'</div>';
+  h+='<div style="font-size:13px;color:rgba(255,255,255,.72);line-height:1.55;background:rgba(244,216,122,.08);border:1px solid rgba(244,216,122,.26);border-radius:14px;padding:13px 15px;margin:2px 0 22px;text-align:left;">'+(EN?('The member above earned these achievements in the world of MTL. Join and finish your first training — you <b style="color:#F4D87A;">both get 2 referral points</b> (each worth up to 20% off a training session). 🥊'):('Člen výše nasbíral tyto úspěchy ve světě MTL. Přidej se, absolvuj první trénink — a <b style="color:#F4D87A;">oba dostanete 2 referral body</b> (na jeden bod dostaneš až 20 % slevu na trénink). 🥊'))+'</div>';
   if(_fb) h+='<div style="font-size:14px;color:rgba(255,255,255,.62);line-height:1.55;margin:2px 0 22px;">'+(EN?'Find your coach or gym, train, and watch your levels climb.':'Najdi svého kouče nebo gym, trénuj a sleduj, jak ti rostou levely.')+'</div>';
   if(lvls) h+='<div style="margin-bottom:18px;">'+lvls+'</div>';
   if(mils) h+='<div style="margin-bottom:8px;font-size:11px;letter-spacing:.1em;color:rgba(255,255,255,.45);font-weight:700;">'+(EN?'ACHIEVEMENTS UNLOCKED':'ODEMČENÉ ÚSPĚCHY')+'</div><div style="margin-bottom:24px;">'+mils+'</div>';
