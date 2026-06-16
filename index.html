@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-15-OL | Referral link carries inviter active app language (l= param); shared-profile landing reads it and renders in that language before showing. Referral code confirmed already 13 chars (MTL+10 random, ~3.7e15 combos), no change needed. -->
+<!-- MTL build: 2026-06-15-OM | Gyms leaderboard server-side: replaced 4 fetch-all queries (gym_memberships/gym_bookings/gym_coaches/gym_ratings, all rows) with one gym_lb_stats RPC that aggregates per-gym in the DB (GROUP BY). Scoring (gymLbScore), event recency, and city/country/discipline filtering unchanged. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -6958,20 +6958,14 @@ async function renderGymLeaderboard(){
   const list=$('gymLbList'); if(!list) return;
   list.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;font-size:14px;">${L('Načítám...')}</p>`;
   const d30=new Date(Date.now()-30*864e5).toISOString().slice(0,10);
-  const [rg, rgb, rgm, rgc, rgr, rge] = await Promise.all([
+  const [rg, rge, rstat] = await Promise.all([
     supaClient.from('gyms').select('id, name, city, country, photos, owner_id, suspended, disciplines').eq('status','approved').is('deleted_at', null),
-    supaClient.from('gym_bookings').select('gym_id, status').eq('status','active').gte('class_date', d30),
-    supaClient.from('gym_memberships').select('gym_id, status'),
-    supaClient.from('gym_coaches').select('gym_id, status').eq('status','active'),
-    supaClient.from('gym_ratings').select('gym_id, rating'),
-    supaClient.from('events').select('id, gym_id, starts_at').eq('status','approved').lt('starts_at', new Date().toISOString())
+    supaClient.from('events').select('id, gym_id, starts_at').eq('status','approved').lt('starts_at', new Date().toISOString()),
+    supaClient.rpc('gym_lb_stats',{ p_drop_since: d30 })
   ]);
-  const gyms=(rg.data||[]).filter(g=>!g.suspended), gb=rgb.data||[], gm=rgm.data||[], gc=rgc.data||[], gr=rgr.data||[];
+  const gyms=(rg.data||[]).filter(g=>!g.suspended);
   const stat={}; gyms.forEach(g=>stat[g.id]={members:0,drops:0,coaches:0,churn:0,ratingSum:0,ratingCount:0,ratingAvg:0});
-  gb.forEach(b=>{ if(stat[b.gym_id]) stat[b.gym_id].drops++; });
-  gm.forEach(m=>{ if(!stat[m.gym_id]) return; if(m.status==='active'||m.status==='cancelling') stat[m.gym_id].members++; if(m.status==='cancelling') stat[m.gym_id].churn++; });
-  gc.forEach(c=>{ if(stat[c.gym_id]) stat[c.gym_id].coaches++; });
-  gr.forEach(r=>{ if(stat[r.gym_id]){ stat[r.gym_id].ratingSum+=(r.rating||0); stat[r.gym_id].ratingCount++; } });
+  (rstat.data||[]).forEach(s=>{ const t=stat[s.gym_id]; if(!t) return; t.members=Number(s.members)||0; t.churn=Number(s.churn)||0; t.drops=Number(s.drops_30d)||0; t.coaches=Number(s.coaches)||0; t.ratingSum=Number(s.rating_sum)||0; t.ratingCount=Number(s.rating_count)||0; });
   const _evts=rge.data||[]; const _eids=_evts.map(e=>e.id);
   let _etk=[], _err=[];
   if(_eids.length){ try{ const [_rtk,_rrt]=await Promise.all([ supaClient.from('event_tickets').select('event_id,status').in('event_id',_eids).eq('status','paid'), supaClient.from('event_ratings').select('event_id,rating').in('event_id',_eids) ]); _etk=_rtk.data||[]; _err=_rrt.data||[]; }catch(e){} }
@@ -8856,13 +8850,12 @@ async function _mlLoad(){
   let _streak=0; try{ if(currentUser){ const { data:sp }=await supaClient.from('profiles').select('league_streak').eq('id',currentUser.id).single(); _streak=(sp&&sp.league_streak)||0; currentUser.league_streak=_streak; } }catch(e){}
   if($('mlStreak')){ if(_streak>0){ $('mlStreak').style.display='block'; const _u=EN?('Streak: '+_streak+' season'+(_streak>1?'s':'')+' in a row'):('Série: '+(_streak===1?'1 sezóna':(_streak>=2&&_streak<=4?_streak+' sezóny':_streak+' sezón'))+' v řadě'); $('mlStreak').textContent='🔥 '+_u; } else $('mlStreak').style.display='none'; }
   if($('mlBoard')) $('mlBoard').innerHTML = '<div style="text-align:center;color:var(--light);padding:20px;font-size:13px;">…</div>';
-  let rows=[];
-  try{ const { data }=await supaClient.from('coach_ref_log').select('referrer_id').gte('qualified_at', start); rows=data||[]; }
-  catch(e){ _mlData=null; if($('mlBoard')) $('mlBoard').innerHTML='<div style="text-align:center;color:var(--light);padding:22px;font-size:13px;">'+(EN?'League starts with the first activation this season.':'Liga začne první aktivací této sezóny.')+'</div>'; return; }
-  const counts={}; rows.forEach(r=>{ if(r.referrer_id) counts[r.referrer_id]=(counts[r.referrer_id]||0)+1; });
-  const ranked=Object.entries(counts).map(([id,n])=>({id,n:Number(n)})).sort((a,b)=>b.n-a.n);
-  const ids=ranked.slice(0,200).map(r=>r.id); let info={};
-  try{ if(ids.length){ const { data: profs }=await supaClient.from('profiles').select('id,name,photo_url,city').in('id',ids); (profs||[]).forEach(p=>info[p.id]={name:p.name||'—',photo:p.photo_url||'',city:(p.city||'').trim()}); } }catch(e){}
+  let ranked=[], info={};
+  try{
+    const { data, error }=await supaClient.rpc('league_top',{ p_start:start, p_limit:200 });
+    if(error) throw error;
+    (data||[]).forEach(r=>{ ranked.push({id:r.id,n:Number(r.n)}); info[r.id]={name:r.name||'—',photo:r.photo_url||'',city:(r.city||'').trim()}; });
+  }catch(e){ _mlData=null; if($('mlBoard')) $('mlBoard').innerHTML='<div style="text-align:center;color:var(--light);padding:22px;font-size:13px;">'+(EN?'League starts with the first activation this season.':'Liga začne první aktivací této sezóny.')+'</div>'; return; }
   _mlData={ranked, info}; _mlRender();
   // Hall of Fame
   try{
@@ -13585,7 +13578,7 @@ async function ensureReferral(){
       if(p){ currentUser.referral_code=p.referral_code; currentUser.referred_by=p.referred_by; currentUser.student_credits=p.student_credits||0; currentUser.coach_credits=p.coach_credits||0; currentUser.referral_rewarded=!!p.referral_rewarded; }
     }
     try{ const { data: rt } = await supaClient.from('profiles').select('coach_ref_score, coach_ref_unlocked').eq('id', currentUser.id).single(); if(rt){ currentUser.coach_ref_score=rt.coach_ref_score||0; currentUser.coach_ref_unlocked=!!rt.coach_ref_unlocked; } }catch(e){}
-    if(!currentUser.referral_code){
+    if(!currentUser.referral_code || (currentUser.referral_code||'').length < 13){
       const code=await genUniqueReferralCode();
       const { error } = await supaClient.from('profiles').update({ referral_code: code }).eq('id', currentUser.id);
       if(!error) currentUser.referral_code=code;
