@@ -112,7 +112,7 @@ async function gymCheckout(req, res) {
   const {
     gymAccount, gymName, className, amount, currency = 'CZK', bookingId,
     income, memberName, payee, disc, level, partner, guest, token, founding, credit, refDisc,
-    gymId, studentId, coachId,
+    gymId, studentId, coachId, grace,
   } = req.query;
 
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
@@ -165,7 +165,9 @@ async function gymCheckout(req, res) {
           mtl_credit: credit || 'none',
         },
       },
-      success_url: (String(guest)==='1')
+      success_url: (String(grace)==='1')
+        ? `${proto}://${host}/?grace_pay=ok&gracegym=${encodeURIComponent(gymId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`
+        : (String(guest)==='1')
         ? `${proto}://${host}/?guest_drop=ok&booking=${encodeURIComponent(bookingId || '')}&acct=${encodeURIComponent(gymAccount)}&token=${encodeURIComponent(token || '')}&session={CHECKOUT_SESSION_ID}`
         : `${proto}://${host}/?gym_pay=ok&booking=${encodeURIComponent(bookingId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
       cancel_url: `${proto}://${host}/`,
