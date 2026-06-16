@@ -180,7 +180,7 @@ export default async function handler(req, res) {
           for (let i = 0; i < top.length; i++) {
             const medal = i === 0 ? '\uD83E\uDD47' : i === 1 ? '\uD83E\uDD48' : '\uD83E\uDD49';
             await sb(`league_titles`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: top[i].id, season: prevSeason, rank: i + 1, points: top[i].n }]) });
-            await sb(`notifications`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: top[i].id, type: 'referral', read: false, data: JSON.stringify({ kind: 'league_champion', season: prevSeason, rank: i + 1 }), message: `${medal} MTL League ${prevSeason}: skon\u010Dil jsi #${i + 1}! Z\u00EDskal jsi \u0161ampionsk\u00FD odznak. \uD83C\uDFC6` }]) });
+            await sb(`notifications`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: top[i].id, type: 'referral', read: false, data: JSON.stringify({ kind: 'league_champion', season: prevSeason, rank: i + 1 }), message: `${medal} MTL Liga ${prevSeason}: skon\u010Dil jsi #${i + 1}! Z\u00EDskal jsi \u0161ampionsk\u00FD odznak. \uD83C\uDFC6` }]) });
             champions++;
           }
         }
@@ -198,10 +198,10 @@ export default async function handler(req, res) {
         await sb(`profiles?id=eq.${id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ league_last_rank: newRank }) });
         if (!optin || last == null) continue;
         if (newRank < last && newRank <= 10) {
-          await sb(`notifications`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: id, type: 'referral', read: false, data: JSON.stringify({ kind: 'league_climb', rank: newRank }), message: `\uD83D\uDCC8 Posunul ses na #${newRank} v MTL League! Dr\u017E tempo. \uD83E\uDD4A` }]) });
+          await sb(`notifications`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: id, type: 'referral', read: false, data: JSON.stringify({ kind: 'league_climb', rank: newRank }), message: `\uD83D\uDCC8 Posunul ses na #${newRank} v MTL Lize! Dr\u017E tempo. \uD83E\uDD4A` }]) });
           momentum++;
         } else if (newRank > last && last <= 10) {
-          await sb(`notifications`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: id, type: 'referral', read: false, data: JSON.stringify({ kind: 'league_drop', rank: newRank }), message: `\uD83D\uDCC9 Spadl jsi na #${newRank} v MTL League \u2014 n\u011Bkdo t\u011B p\u0159edb\u011Bhl. P\u0159ive\u010F kou\u010De a vra\u0165 se nahoru!` }]) });
+          await sb(`notifications`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: id, type: 'referral', read: false, data: JSON.stringify({ kind: 'league_drop', rank: newRank }), message: `\uD83D\uDCC9 Spadl jsi na #${newRank} v MTL Lize \u2014 n\u011Bkdo t\u011B p\u0159edb\u011Bhl. P\u0159ive\u010F kou\u010De a vra\u0165 se nahoru!` }]) });
           momentum++;
         }
       }
