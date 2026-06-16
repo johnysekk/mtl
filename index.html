@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-15-PE | Shared/referral profile card now GROUPS achievements by category (Platform / Student / Coach / Gym) with a subheading each, instead of one flat ACHIEVEMENTS UNLOCKED row. profile-badges.js tags every milestone with a cat. -->
+<!-- MTL build: 2026-06-15-PF | Member view now shows a per-member group-class attendance frequency (sessions/week from gym_member_frequency RPC over 30d, with a 90d trend arrow) as an objective "how serious is this student" signal: green >=3/wk, neutral 1-3, red <1/wk, grey = no data. Sortable column in the desktop table + a badge on the mobile member cards. Members/memberships only. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -7387,6 +7387,9 @@ async function renderGymMembers(){
   const EN=LANG==='en';
   let mems=[];
   try{ const { data } = await supaClient.from('gym_memberships').select('*').eq('gym_id',_myGymData.id).in('status',['active','cancelling']).order('created_at',{ascending:true}); mems=(data||[]).filter(m=>m.paid_to!=='coach'); }catch(e){}
+  // attendance frequency (group-class "seriousness" signal) per member
+  const _freqMap={}; try{ const { data:_fa } = await supaClient.rpc('gym_member_frequency',{ p_gym:_myGymData.id }); (_fa||[]).forEach(f=>{ _freqMap[f.student_id]={v30:+f.v30||0, v90:+f.v90||0}; }); }catch(e){}
+  const _attInfo=(m)=>{ const f=_freqMap[m.student_id]; const v30=f?f.v30:0, v90=f?f.v90:0; const perWeek=v30/4.345; const prev=(v90-v30)/8.69; const trend=(!f)?'':(perWeek>prev+0.25?' ↑':(perWeek<prev-0.25?' ↓':'')); let color='var(--light)'; if(f&&(v30>0||v90>0)){ color = perWeek>=3?'#006040':(perWeek>=1?'var(--mid)':'var(--red)'); } const num=(EN?perWeek.toFixed(1):perWeek.toFixed(1).replace('.',',')); const txt=(!f||(v30===0&&v90===0))?'—':(num+'×/'+(EN?'wk':'týd')+trend); return { perWeek, color, txt }; };
   if(!mems.length){ box.innerHTML=`<p style="color:var(--light);font-size:13px;">${EN?'No members yet.':'Zatím žádní členové.'}</p>`; return; }
   const active=mems.filter(m=>m.status==='active'), cancelling=mems.filter(m=>m.status==='cancelling');
   const accOf=(m)=>{ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
@@ -7394,24 +7397,25 @@ async function renderGymMembers(){
   const matchLvl=(m)=>{ if(!_gmMembLvl) return true; const a=accOf(m); return a.includes('all')||a.includes(_gmMembLvl); };
   const matchKid=(m)=>{ if(!window._gmMembKid) return true; const k=!!m.child_name; return window._gmMembKid==='kids'?k:!k; };
   const fActive=active.filter(m=>matchLvl(m)&&matchKid(m)), fCancel=cancelling.filter(m=>matchLvl(m)&&matchKid(m));
-  const compactCard=(m)=>{ const acc=accessLabel(accOf(m)); const cancel=m.status==='cancelling';
+  const compactCard=(m)=>{ const acc=accessLabel(accOf(m)); const cancel=m.status==='cancelling'; const ai=_attInfo(m);
     return `<div class="mbCard" data-sid="${m.student_id}" data-name="${(m.student_name||'').replace(/"/g,'&quot;')}" style="border:1px solid ${cancel?'#F3C9C0':'var(--border)'};border-radius:12px;padding:10px 11px;background:${cancel?'#FEF6F4':'#fff'};cursor:pointer;min-width:0;">
       <div style="font-weight:700;font-size:13.5px;line-height:1.2;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${m.child_name?('🧒 '+escapeHtml(m.child_name)+(m.child_age!=null?(' ('+m.child_age+')'):'')):escapeHtml(m.student_name||(EN?'Member':'Člen'))}</div>${m.child_name?`<div style="font-size:10.5px;color:var(--light);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${EN?'parent':'rodič'}: ${escapeHtml(m.student_name||'')}</div>`:''}
       <div style="font-size:11px;color:#006040;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${acc}</div>
       <div style="font-size:11px;color:${cancel?'var(--red)':'var(--light)'};margin-top:3px;">${cancel?(EN?'cancelling':'ruší se'):(EN?'active':'aktivní')} · ${fmtPrice(m.amount||0,m.currency||'CZK')}/${EN?'mo':'měs'}</div>
+      <div style="font-size:11px;font-weight:800;margin-top:3px;color:${ai.color};">🥊 ${ai.txt}</div>
     </div>`; };
   const grid=(arr)=>`<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">${arr.map(compactCard).join('')}</div>`;
   const _isDeskDash = document.body.classList.contains('dashmode') && window.innerWidth>=900;
   const _memTable=(arr)=>{
-    const cols=[['name',EN?'Name':'Jméno'],['plan',EN?'Plan':'Plán'],['mrr','MRR'],['status',EN?'Status':'Stav'],['joined',EN?'Joined':'Od']];
+    const cols=[['name',EN?'Name':'Jméno'],['plan',EN?'Plan':'Plán'],['att',EN?'Attendance':'Docházka'],['mrr','MRR'],['status',EN?'Status':'Stav'],['joined',EN?'Joined':'Od']];
     const head=cols.map(c=>`<th data-k="${c[0]}">${c[1]} <span class="mtSort">↕</span></th>`).join('');
     const rows=arr.map(m=>{
       const nm=m.child_name?('🧒 '+escapeHtml(m.child_name)+(m.child_age!=null?(' ('+m.child_age+')'):'')):escapeHtml(m.student_name||(EN?'Member':'Člen'));
-      const cancel=m.status==='cancelling'; const mrr=(m.amount||0);
+      const cancel=m.status==='cancelling'; const mrr=(m.amount||0); const ai=_attInfo(m);
       const jd=m.created_at?new Date(m.created_at):null;
       const jtxt=jd?jd.toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric'}):'—';
       const stav=cancel?(EN?'Cancelling':'Ruší se'):(EN?'Active':'Aktivní');
-      return `<tr class="mbCard mtRow" data-sid="${m.student_id||''}" data-name="${(m.student_name||'').replace(/"/g,'&quot;')}" data-vname="${escapeHtml((m.student_name||'')).toLowerCase()}" data-plan="${escapeHtml((m.plan_name||'')).toLowerCase()}" data-mrr="${mrr}" data-status="${cancel?1:0}" data-joined="${jd?jd.getTime():0}"><td style="font-weight:700;">${nm}</td><td style="color:var(--mid);">${escapeHtml(m.plan_name||'—')}</td><td style="font-weight:700;">${fmtPrice(mrr,m.currency||'CZK')}</td><td><span style="color:${cancel?'var(--red)':'#006040'};font-weight:700;font-size:12px;">${stav}</span></td><td style="color:var(--mid);">${jtxt}</td></tr>`;
+      return `<tr class="mbCard mtRow" data-sid="${m.student_id||''}" data-name="${(m.student_name||'').replace(/"/g,'&quot;')}" data-vname="${escapeHtml((m.student_name||'')).toLowerCase()}" data-plan="${escapeHtml((m.plan_name||'')).toLowerCase()}" data-mrr="${mrr}" data-status="${cancel?1:0}" data-joined="${jd?jd.getTime():0}" data-att="${ai.perWeek.toFixed(2)}"><td style="font-weight:700;">${nm}</td><td style="color:var(--mid);">${escapeHtml(m.plan_name||'—')}</td><td style="color:${ai.color};font-weight:800;">${ai.txt}</td><td style="font-weight:700;">${fmtPrice(mrr,m.currency||'CZK')}</td><td><span style="color:${cancel?'var(--red)':'#006040'};font-weight:700;font-size:12px;">${stav}</span></td><td style="color:var(--mid);">${jtxt}</td></tr>`;
     }).join('');
     return `<table class="mtTable"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
   };
@@ -7435,7 +7439,7 @@ async function renderGymMembers(){
   box.querySelectorAll('.gmLvlChip').forEach(c=>c.onclick=()=>{ _gmMembLvl=c.dataset.v||null; renderGymMembers(); });
   box.querySelectorAll('.gmKidChip').forEach(c=>c.onclick=()=>{ window._gmMembKid=c.dataset.v||null; renderGymMembers(); });
   box.querySelectorAll('.mbCard').forEach(c=>c.onclick=()=>openGymMemberDetail(c.dataset.sid, c.dataset.name));
-  box.querySelectorAll('.mtTable th').forEach(th=>th.onclick=()=>{ const k=th.dataset.k; const tb=th.closest('table').querySelector('tbody'); const rows=Array.prototype.slice.call(tb.querySelectorAll('tr')); const asc=th.dataset.dir!=='asc'; th.closest('thead').querySelectorAll('th').forEach(x=>{x.classList.remove('mtActive');x.removeAttribute('data-dir');}); th.dataset.dir=asc?'asc':'desc'; th.classList.add('mtActive'); const num=(k==='mrr'||k==='joined'||k==='status'); rows.sort((a,b)=>{ let av,bv; if(k==='name'){av=a.dataset.vname;bv=b.dataset.vname;} else if(k==='plan'){av=a.dataset.plan;bv=b.dataset.plan;} else {av=parseFloat(a.dataset[k])||0;bv=parseFloat(b.dataset[k])||0;} if(num) return asc?av-bv:bv-av; return asc?(av<bv?-1:av>bv?1:0):(av>bv?-1:av<bv?1:0); }); rows.forEach(r=>tb.appendChild(r)); });
+  box.querySelectorAll('.mtTable th').forEach(th=>th.onclick=()=>{ const k=th.dataset.k; const tb=th.closest('table').querySelector('tbody'); const rows=Array.prototype.slice.call(tb.querySelectorAll('tr')); const asc=th.dataset.dir!=='asc'; th.closest('thead').querySelectorAll('th').forEach(x=>{x.classList.remove('mtActive');x.removeAttribute('data-dir');}); th.dataset.dir=asc?'asc':'desc'; th.classList.add('mtActive'); const num=(k==='mrr'||k==='joined'||k==='status'||k==='att'); rows.sort((a,b)=>{ let av,bv; if(k==='name'){av=a.dataset.vname;bv=b.dataset.vname;} else if(k==='plan'){av=a.dataset.plan;bv=b.dataset.plan;} else {av=parseFloat(a.dataset[k])||0;bv=parseFloat(b.dataset[k])||0;} if(num) return asc?av-bv:bv-av; return asc?(av<bv?-1:av>bv?1:0):(av>bv?-1:av<bv?1:0); }); rows.forEach(r=>tb.appendChild(r)); });
   // ── Win-back: členové, kteří dlouho nedorazili ──
   try{
     const { data: aa } = await supaClient.rpc('gym_member_last_visit',{ p_gym_id:_myGymData.id });
