@@ -79,11 +79,12 @@ export default async function handler(req, res) {
     }
 
     // 4) GYM (owned) — distinct classes held + events hosted*40
-    let gymXp = 0, ownsGym = false, gymName = null, cls = 0, gev = 0;
+    let gymXp = 0, ownsGym = false, gymName = null, cls = 0, gev = 0, members = 0;
     const myG = await sb('gyms?owner_id=eq.' + id + '&status=eq.approved&select=id,name&limit=1');
     if(myG && myG.length){
       ownsGym = true; gymName = myG[0].name || null;
       const gid = myG[0].id;
+      const gm = await sb('gym_memberships?gym_id=eq.' + gid + '&status=in.(active,cancelling)&select=id'); members = (gm||[]).length;
       const ga = await sb('gym_attendance?gym_id=eq.' + gid + '&select=class_date,class_time');
       const set = new Set(ga.map(a => (a.class_date||'') + '|' + (a.class_time||''))); set.delete('|');
       cls = set.size;
@@ -101,18 +102,17 @@ export default async function handler(req, res) {
     const totalTrain = s1 + sg;
     const M = [];
     const add = (cond, emoji, en, cs) => { if(cond) M.push({ emoji, en, cs }); };
-    add(totalTrain>=1,   '🥊','First training','První trénink');
-    add(totalTrain>=25,  '🔥','25 trainings','25 tréninků');
-    add(totalTrain>=100, '🏆','100 trainings','100 tréninků');
-    add(totalTrain>=500, '💎','500 trainings','500 tréninků');
+    // newest/biggest tier only per cumulative track
+    const topAdd = (...tiers) => { let last=null; for(const t of tiers){ if(t[0]) last=t; } if(last) M.push({ emoji:last[1], en:last[2], cs:last[3] }); };
+    topAdd([totalTrain>=1,'🥊','First training','První trénink'],[totalTrain>=25,'🔥','25 trainings','25 tréninků'],[totalTrain>=100,'🏆','100 trainings','100 tréninků'],[totalTrain>=500,'💎','500 trainings','500 tréninků']);
     add(sportSet.size>=3,'🌍','Tried 3 sports','Vyzkoušel 3 sporty');
-    add(c1>=10,          '💯','10 lessons taught','10 odučených');
-    add(c1>=250,         '🏆','250 lessons taught','250 odučených');
+    topAdd([c1>=10,'💯','10 lessons taught','10 odučených'],[c1>=250,'🏆','250 lessons taught','250 odučených']);
+    topAdd([members>=1,'🏠','First member','První člen'],[members>=10,'📈','10 members','10 členů'],[members>=50,'📈','50 members','50 členů'],[members>=100,'📈','100 members','100 členů'],[members>=200,'🏆','200 members','200 členů']);
     add(isFounder,'👑','MTL Founder','MTL Founder');
     add(isAmbassador,'⭐','MTL Ambassador','MTL Ambassador');
     add(me.cert_level==='certified','🏅','MTL Certified','MTL Certified');
-    add(cev+gev>=1,      '🎪','Hosted an event','Uspořádal akci');
-    add(cls>=100,        '🏋️','100 classes held','100 odučených skupinovek');
+    add(cev+gev>=1,'🎪','Hosted an event','Uspořádal akci');
+    add(cls>=100,'🏋️','100 classes held','100 odučených skupinovek');
 
     // belts (best-effort, bjj only — same shape index.html uses)
     let belts = null;
