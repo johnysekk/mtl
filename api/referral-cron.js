@@ -148,8 +148,8 @@ export default async function handler(req, res) {
         const ref = await sb(`profiles?id=eq.${c.referred_by}&select=coach_ref_score,name&limit=1`);
         const newScore = ((ref && ref[0] && ref[0].coach_ref_score) || 0) + 1;
         await sb(`profiles?id=eq.${c.referred_by}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ coach_ref_score: newScore }) });
-        try { await sb(`coach_ref_log`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ referrer_id: c.referred_by, referred_id: c.id }]) }); } catch (e) {}
-        let msg = `\uD83C\uDF89 Tv\u016Fj pozvan\u00FD gym ${c.name || ''} je te\u010F aktivn\u00ED! M\u00E1\u0161 ${newScore} aktivn\u00EDch p\u0159iveden\u00FDch. \uD83E\uDD4A`;
+        try { await sb(`coach_ref_log`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ referrer_id: c.referred_by, referred_id: c.id, weight: 2 }]) }); } catch (e) {}
+        let msg = `\uD83C\uDF89 Tv\u016Fj pozvan\u00FD gym ${c.name || ''} je te\u010F aktivn\u00ED! +1 bod do MTL Ligy \uD83C\uDFC6 \u2014 m\u00E1\u0161 ${newScore} aktivn\u00EDch p\u0159iveden\u00FDch. \uD83E\uDD4A`;
         if (newScore === 3) msg = `\uD83D\uDDE1\uFE0F 3 aktivn\u00ED p\u0159iveden\u00ED! Odemkl jsi SHIKAI rate \u2014 nech\u00E1v\u00E1\u0161 si 97 % (provize jen 3 %). \uD83E\uDD4A`;
         else if (newScore === 10) msg = `\uD83D\uDD25 10 aktivn\u00EDch p\u0159iveden\u00FDch! Odemkl jsi BANKAI rate \u2014 nech\u00E1v\u00E1\u0161 si 98 % (provize jen 2 %). \uD83C\uDFC6`;
         await sb(`notifications`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: c.referred_by, type: 'referral', read: false, data: JSON.stringify({ kind: 'coach_ref_qualified', who: c.name || '', score: newScore }), message: msg }]) });
@@ -174,8 +174,8 @@ export default async function handler(req, res) {
       if (dayOfQ <= 5) {
         const done = await sb(`league_titles?season=eq.${encodeURIComponent(prevSeason)}&select=id&limit=1`);
         if (!done || !done.length) {
-          const rows = await sb(`coach_ref_log?qualified_at=gte.${prevStart}&qualified_at=lt.${curStart.toISOString()}&select=referrer_id&limit=5000`);
-          const cc = {}; (rows || []).forEach(r => { if (r.referrer_id) cc[r.referrer_id] = (cc[r.referrer_id] || 0) + 1; });
+          const rows = await sb(`coach_ref_log?qualified_at=gte.${prevStart}&qualified_at=lt.${curStart.toISOString()}&select=referrer_id,weight&limit=5000`);
+          const cc = {}; (rows || []).forEach(r => { if (r.referrer_id) cc[r.referrer_id] = (cc[r.referrer_id] || 0) + (r.weight || 1); });
           const top = Object.entries(cc).map(([id, n]) => ({ id, n: Number(n) })).sort((a, b) => b.n - a.n).slice(0, 3);
           for (let i = 0; i < top.length; i++) {
             const medal = i === 0 ? '\uD83E\uDD47' : i === 1 ? '\uD83E\uDD48' : '\uD83E\uDD49';
@@ -183,6 +183,18 @@ export default async function handler(req, res) {
             await sb(`notifications`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: top[i].id, type: 'referral', read: false, data: JSON.stringify({ kind: 'league_champion', season: prevSeason, rank: i + 1 }), message: `${medal} MTL Liga ${prevSeason}: skon\u010Dil jsi #${i + 1}! Z\u00EDskal jsi \u0161ampionsk\u00FD odznak. \uD83C\uDFC6` }]) });
             champions++;
           }
+          // STREAKS — once per rollover: +1 for everyone active in prev season, reset the rest.
+          try {
+            for (const sid of Object.keys(cc)) {
+              const spr = await sb(`profiles?id=eq.${sid}&select=league_streak,league_streak_best&limit=1`);
+              const cur = (spr && spr[0] && spr[0].league_streak) || 0;
+              const best = (spr && spr[0] && spr[0].league_streak_best) || 0;
+              const ns = cur + 1;
+              await sb(`profiles?id=eq.${sid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ league_streak: ns, league_streak_best: Math.max(best, ns) }) });
+            }
+            const hadStreak = await sb(`profiles?league_streak=gt.0&select=id&limit=2000`);
+            for (const pf of (hadStreak || [])) { if (!cc[pf.id]) { await sb(`profiles?id=eq.${pf.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ league_streak: 0 }) }); } }
+          } catch (e) {}
         }
       }
 
