@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-15-PB | MTL League: a referred gym is now worth +2 points (vs +1 for a coach) in the seasonal board only - the info dropdown states this; the weight lives in coach_ref_log.weight, summed by league_top RPC and by the cron champion rollover. Shikai/Bankai (coach_ref_score) stay +1 per activation, untouched. -->
+<!-- MTL build: 2026-06-15-PC | PostGIS deck-pagination wired: as the user nears the end of the deck (8 cards out) the next nearest page is prefetched via coaches_near offset and appended without resetting the swipe position, so dense areas scroll seamlessly past the first 150. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -3540,16 +3540,31 @@ async function loadCoaches() {
   const ulat = (userLoc&&userLoc.lat!=null) ? userLoc.lat : ((currentUser&&currentUser.city_lat!=null)?+currentUser.city_lat:null);
   const ulng = (userLoc&&userLoc.lng!=null) ? userLoc.lng : ((currentUser&&currentUser.city_lng!=null)?+currentUser.city_lng:null);
   const ucountry = (currentUser&&currentUser.country) || (userLoc&&userLoc.country) || null;
-  let _cq = supaClient.from('profiles').select('*').eq('coach_status','approved').is('deleted_at', null);
-  const _BOX = 6; // ~±6° ≈ regional radius; deck still distance-filters precisely client-side
-  if(ulat!=null && ulng!=null){ _cq = _cq.or('and(city_lat.gte.'+(ulat-_BOX)+',city_lat.lte.'+(ulat+_BOX)+',city_lng.gte.'+(ulng-_BOX)+',city_lng.lte.'+(ulng+_BOX)+'),city_lat.is.null').limit(2000); }
-  else if(ucountry){ _cq = _cq.eq('country', ucountry).limit(2000); }
-  else { _cq = _cq.limit(1000); }
-  const { data, error } = await _cq;
+  // PostGIS nearest-N (GiST-indexed) when we know the user's location; offset-paginated via load-more.
+  _coachCenter = (ulat!=null && ulng!=null) ? {lat:ulat, lng:ulng} : null;
+  _coachOffset = 0;
+  let data, error;
+  if(_coachCenter){
+    const r = await supaClient.rpc('coaches_near', { p_lat: ulat, p_lng: ulng, p_limit: _COACH_PAGE, p_offset: 0 });
+    data = r.data; error = r.error;
+    if(error){ // PostGIS not deployed yet -> graceful fallback to the old bounding box
+      const _BOX = 6; _coachCenter = null;
+      const fb = await supaClient.from('profiles').select('*').eq('coach_status','approved').is('deleted_at', null).or('and(city_lat.gte.'+(ulat-_BOX)+',city_lat.lte.'+(ulat+_BOX)+',city_lng.gte.'+(ulng-_BOX)+',city_lng.lte.'+(ulng+_BOX)+'),city_lat.is.null').limit(2000);
+      data = fb.data; error = fb.error;
+    }
+  } else if(ucountry){
+    const r = await supaClient.from('profiles').select('*').eq('coach_status','approved').is('deleted_at', null).eq('country', ucountry).limit(2000); data=r.data; error=r.error;
+  } else {
+    const r = await supaClient.from('profiles').select('*').eq('coach_status','approved').is('deleted_at', null).limit(1000); data=r.data; error=r.error;
+  }
 
   if (error) { console.error('Supabase error:', error); toast(L('⚠️ Chyba načítání')); return; }
 
-  COACHES = (data||[]).map((c) => {
+  COACHES = (data||[]).map(_mapCoachRow);
+  init();
+  loadFavorites();
+}
+function _mapCoachRow(c){
     // Sestav tagy podle toho co nabízí
     const tags = [];
     const cls = [];
@@ -3621,10 +3636,22 @@ async function loadCoaches() {
       onlineFeedbacks: c.online_feedbacks || 0,
       years: c.years || 0,
     };
-  });
+}
 
-  init();
-  loadFavorites();
+// PostGIS load-more: append the next nearest page (only when geo-centred). Returns true if it added coaches.
+async function loadMoreCoaches(){
+  if(!_coachCenter || _coachLoadingMore) return false;
+  _coachLoadingMore = true;
+  try{
+    const r = await supaClient.rpc('coaches_near', { p_lat:_coachCenter.lat, p_lng:_coachCenter.lng, p_limit:_COACH_PAGE, p_offset:_coachOffset+_COACH_PAGE });
+    if(r.error || !r.data || !r.data.length){ _coachLoadingMore=false; return false; }
+    _coachOffset += _COACH_PAGE;
+    const have = new Set(COACHES.map(c=>c.id));
+    const more = r.data.filter(c=>!have.has(c.id)).map(_mapCoachRow);
+    if(more.length){ COACHES = COACHES.concat(more); const _i=idx; filtered=buildFiltered(); idx=_i; renderCards(); }
+    _coachLoadingMore = false;
+    return more.length>0;
+  }catch(e){ _coachLoadingMore=false; return false; }
 }
 
 // ════════════════════════════════════════
@@ -3632,6 +3659,8 @@ async function loadCoaches() {
 // ════════════════════════════════════════
 let idx = 0;
 let filtered = [];
+let _coachCenter = null, _coachOffset = 0, _coachLoadingMore = false;
+const _COACH_PAGE = 150;   // nearest-N per page (PostGIS); load-more appends the next page
 let favorites = [];
 let _openProfileId = null;
 let lastCoach = null;
@@ -4104,7 +4133,7 @@ function doPass(){
   lastCoach=filtered[idx];
   const f=$('cardFront'); f.classList.add('fly-left');
   toast(L('⏭️ Přeskočeno'));
-  setTimeout(()=>{ idx++; renderCards(); }, 350);
+  setTimeout(()=>{ idx++; renderCards(); if(_coachCenter && idx>=filtered.length-8) loadMoreCoaches(); }, 350);
 }
 
 function doGo(){
