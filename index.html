@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-15-OM | Gyms leaderboard server-side: replaced 4 fetch-all queries (gym_memberships/gym_bookings/gym_coaches/gym_ratings, all rows) with one gym_lb_stats RPC that aggregates per-gym in the DB (GROUP BY). Scoring (gymLbScore), event recency, and city/country/discipline filtering unchanged. -->
+<!-- MTL build: 2026-06-15-ON | Events leaderboard server-side: replaced the per-event ticket + rating raw-row fetches with one event_lb_agg(uuid[]) RPC that counts attendance + sums ratings in the DB. Recency-decay scoring, city/country filter, render and openEventView (full event objects) unchanged. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -6944,8 +6944,7 @@ async function renderEventLeaderboard(){
   else if(_elScope==='country' && myCountry){ evs=evs.filter(e=>{ const c=(e.country||'').toLowerCase().trim(); return !c || c===myCountry; }); }
   if(!evs.length){ box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;font-size:14px;">${LANG==='en'?'No past events here yet.':'Zatím tu nejsou žádné proběhlé akce.'}</p>`; return; }
   const eids=evs.map(e=>e.id); const att={}, rsum={}, rcnt={}, gmap={};
-  try{ const { data:tk } = await supaClient.from('event_tickets').select('event_id,status').in('event_id',eids).eq('status','paid'); (tk||[]).forEach(t=>{ att[t.event_id]=(att[t.event_id]||0)+1; }); }catch(e){}
-  try{ const { data:rr } = await supaClient.from('event_ratings').select('event_id,rating').in('event_id',eids); (rr||[]).forEach(r=>{ rsum[r.event_id]=(rsum[r.event_id]||0)+(r.rating||0); rcnt[r.event_id]=(rcnt[r.event_id]||0)+1; }); }catch(e){}
+  try{ const { data:ag } = await supaClient.rpc('event_lb_agg',{ p_eids: eids }); (ag||[]).forEach(a=>{ att[a.event_id]=Number(a.attendance)||0; rsum[a.event_id]=Number(a.rating_sum)||0; rcnt[a.event_id]=Number(a.rating_count)||0; }); }catch(e){}
   try{ const gids=[...new Set(evs.map(e=>e.gym_id).filter(Boolean))]; if(gids.length){ const { data:gg } = await supaClient.from('gyms').select('id,name').in('id',gids); (gg||[]).forEach(g=>gmap[g.id]=g.name); } }catch(e){}
   const now=Date.now();
   evs.forEach(e=>{ const a=att[e.id]||0; const cnt=rcnt[e.id]||0; const avg=cnt?rsum[e.id]/cnt:0; const monthsAgo=e.starts_at?((now-new Date(e.starts_at).getTime())/(30*864e5)):99; const decay=monthsAgo<=6?1:Math.max(0.2,1-(monthsAgo-6)*0.1); const rf=cnt>0?(avg/5):0.6; e._att=a; e._avg=avg; e._rcnt=cnt; e._elScore=Math.round(a*rf*decay*10)/10; e._gymName=gmap[e.gym_id]||''; });
