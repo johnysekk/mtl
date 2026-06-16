@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-15-OV | MTL League entry button (My-profile prow) recoloured gold->red; League opens on "My city" scope by default; coach leaderboard cards now show a city pin like the gym leaderboard. -->
+<!-- MTL build: 2026-06-15-OX | Coaches leaderboard (overall) now server-side via coach_leaderboard RPC — truly global again (city/country/world all computed in the DB with the same Bayesian score, top 100), independent of the geo-bounded deck. Per-discipline board stays client-side. Tapping a coach not in the loaded set opens via openProfileById. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -1888,7 +1888,7 @@ body.dashmode .mode-switch{display:none!important}
       <div id="mlLink" data-noi18n style="flex:1;font-size:12px;color:var(--dark);word-break:break-all;font-family:monospace;">—</div>
       <button id="mlCopy" data-noi18n style="background:var(--dark);color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">Copy</button>
     </div>
-    <div id="mlScope" style="display:flex;gap:6px;margin-bottom:12px;">
+    <div id="mlScope" style="display:flex;gap:6px;margin-top:30px;margin-bottom:12px;">
       <button data-sc="city" style="flex:1;padding:9px 4px;border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';background:transparent;color:var(--mid);">📍 <span data-noi18n>Moje město</span></button>
       <button data-sc="global" style="flex:1;padding:9px 4px;border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';background:var(--dark);color:#fff;">🌍 <span data-noi18n>Svět</span></button>
     </div>
@@ -3804,16 +3804,20 @@ function gymPhotoList(pj){ try{ return JSON.parse(pj||'[]').map(x=>typeof x==='s
 async function renderLeaderboard(){
   const myCity=((currentUser&&currentUser.city)||(userLoc&&userLoc.city)||'').toLowerCase().trim();
   const myCountry=((currentUser&&currentUser.country)||(userLoc&&userLoc.country)||'').toLowerCase().trim();
-  let list=[...COACHES].map(c=>({...c,_score:mtlScore(c)}));
-  if(_lbScope==='city' && myCity){
-    list=list.filter(c=>{ const l=(c.loc||'').toLowerCase().trim(); return l && (l.includes(myCity)||myCity.includes(l)); });
-  } else if(_lbScope==='country' && myCountry){
-    list=list.filter(c=>{ const cc=(c.country||'').toLowerCase().trim(); return !cc || cc===myCountry; }); // kouč bez uložené země = zahrnut (fallback)
-  }
-  // world = bez filtru
-  if(_lbDisc){
+  let list;
+  if(!_lbDisc){
+    // overall ranking — server-side (truly global & scalable, same Bayesian score)
+    const { data:_lbd } = await supaClient.rpc('coach_leaderboard',{ p_scope:_lbScope, p_city:myCity||null, p_country:myCountry||null, p_limit:100 });
+    list=(_lbd||[]).map(r=>({ id:r.id, profileId:r.id, name:r.name, photo:r.photo_url, loc:r.city||'', country:r.country, countryCode:r.country_code, rating:r.rating, reviews:r.reviews, lessonsDone:r.lessons_done, onlineFeedbacks:r.online_feedbacks, textReviews:r.text_reviews, _score:r.score, tags:[] }));
+  } else {
+    // per-discipline ranking stays client-side (needs per-disc lesson/rating aggregation)
+    list=[...COACHES].map(c=>({...c,_score:mtlScore(c)}));
+    if(_lbScope==='city' && myCity){
+      list=list.filter(c=>{ const l=(c.loc||'').toLowerCase().trim(); return l && (l.includes(myCity)||myCity.includes(l)); });
+    } else if(_lbScope==='country' && myCountry){
+      list=list.filter(c=>{ const cc=(c.country||'').toLowerCase().trim(); return !cc || cc===myCountry; });
+    }
     list=list.filter(c=>(c.disciplines||[]).includes(_lbDisc));
-    // separátní ranking PODLE disciplíny: skóre se počítá z lekcí odučených v té disciplíně (z bookings.discipline)
     const dscLes={};
     try{ const { data: bk } = await supaClient.from('bookings').select('coach_id, discipline, status'); (bk||[]).forEach(b=>{ if(b.discipline===_lbDisc && b.status!=='refunded' && b.status!=='cancelled'){ dscLes[b.coach_id]=(dscLes[b.coach_id]||0)+1; } }); }catch(e){}
     list.forEach(c=>{ const n=dscLes[c.id]||dscLes[c.profileId]||0; c._dscLessons=n; const dr=(c.discRatings&&c.discRatings[_lbDisc]); c._score=mtlScore({...c, lessonsDone:n, onlineFeedbacks:0, rating:(dr?dr.avg:c.rating), reviews:(dr?dr.count:c.reviews)}); });
@@ -3853,7 +3857,7 @@ async function renderLeaderboard(){
       <button class="lbInfo" title="Rozpad skóre" style="width:26px;height:26px;border-radius:50%;border:1px solid var(--border);background:var(--bg);color:var(--mid);font-size:13px;font-weight:700;cursor:pointer;flex-shrink:0;">ⓘ</button>`;
     const brk=document.createElement('div'); brk.style.cssText='display:none;margin-top:6px;'; brk.innerHTML=scoreBreakdownHtml(_lbDisc ? {...c, lessonsDone:(c._dscLessons||0), onlineFeedbacks:0, rating:((c.discRatings&&c.discRatings[_lbDisc])?c.discRatings[_lbDisc].avg:c.rating), reviews:((c.discRatings&&c.discRatings[_lbDisc])?c.discRatings[_lbDisc].count:c.reviews)} : c);
     row.querySelector('.lbInfo').onclick=(e)=>{ e.stopPropagation(); brk.style.display = brk.style.display==='none'?'block':'none'; };
-    row.onclick=()=>{ const real=COACHES.find(x=>x.id===c.id); if(real){ closeSheet('shLeaderboard'); openProfile(real); } };
+    row.onclick=()=>{ const real=COACHES.find(x=>x.id===c.id); closeSheet('shLeaderboard'); if(real){ openProfile(real); } else if(typeof openProfileById==='function'){ openProfileById(c.id); } };
     cont.appendChild(row); cont.appendChild(brk);
     wrap.appendChild(cont);
   });
