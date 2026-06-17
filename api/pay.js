@@ -244,7 +244,7 @@ async function eventCheckout(req, res) {
 async function membershipCheckout(req, res) {
   const {
     gymAccount, gymName, planName, amount, currency = 'CZK', interval = 'month',
-    membershipId, income, memberName, payee, disc, access, partner, refPct, refUser, founding,
+    membershipId, income, memberName, payee, disc, access, partner, refPct, refUser, founding, acq,
     gymId, studentId,
   } = req.query;
 
@@ -253,7 +253,13 @@ async function membershipCheckout(req, res) {
   const P = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
   const ivl = interval === 'year' ? 'year' : 'month';
-  const FEE_PCT = (String(partner)==='1') ? 1 : MEMB_MTL_PERCENT; // EP 1%, else flat 2,5%
+  const FEE_PCT = (String(partner)==='1') ? 1 : MEMB_MTL_PERCENT; // EP 1%, else flat 3,5%
+  // MTL acquisition fee: when the app DEMONSTRABLY brought this member (organic deck/search
+  // discovery, acq=mtl_discovery), MTL takes 10% for the first 2 months, then a webhook drops
+  // it to the normal rate (a finder's fee for the acquisition). Monthly subs only.
+  const MTL_ACQ_PERCENT = 10;
+  const _isAcq = (String(acq) === 'mtl_discovery' && ivl === 'month' && String(partner) !== '1');
+  const FEE_NOW = _isAcq ? MTL_ACQ_PERCENT : FEE_PCT;
 
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
@@ -294,8 +300,10 @@ async function membershipCheckout(req, res) {
         { price_data: { currency: cur, product_data: { name: `${planName || 'Membership'}${access ? ' [' + access + ']' : ''} — ${gymName || 'MTL Gym'}` }, unit_amount: Math.round(P * 100), recurring: { interval: ivl } }, quantity: 1 },
       ],
       subscription_data: {
-        application_fee_percent: FEE_PCT,
+        application_fee_percent: FEE_NOW,
         metadata: {
+          mtl_acq: _isAcq ? '1' : '',
+          mtl_acq_base: String(FEE_PCT),
           mtl_payment_type: 'membership',
           gym_id: gymId || '',
           student_id: studentId || '',

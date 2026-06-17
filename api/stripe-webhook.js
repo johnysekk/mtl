@@ -311,6 +311,18 @@ export default async function handler(req, res) {
         if (periodEnd) patch.period_end = periodEnd;
         await sbPatch('gym_memberships', `stripe_subscription=eq.${encodeURIComponent(sub)}`, patch);
         try { const ipi = (typeof inv.payment_intent === 'string' ? inv.payment_intent : (inv.payment_intent && inv.payment_intent.id)) || (typeof inv.charge === 'string' ? inv.charge : (inv.charge && inv.charge.id)); const mem = (await sbGet(`gym_memberships?stripe_subscription=eq.${encodeURIComponent(sub)}&select=*`))[0]; if (ipi && mem) await recordTransaction(event.account, ipi, { type: 'membership', member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency }); } catch (e) { console.error('record membership', e.message); }
+        // MTL acquisition fee: the first renewal invoice (= month 2) of an app-attributed member
+        // has been paid -> the 2-month 10% window is over, drop the commission back to normal.
+        try {
+          if (inv.billing_reason === 'subscription_cycle') {
+            const s = await stripe.subscriptions.retrieve(sub, { stripeAccount: event.account });
+            if (s && s.metadata && s.metadata.mtl_acq === '1') {
+              const base = parseFloat(s.metadata.mtl_acq_base) || 3.5;
+              const md = Object.assign({}, s.metadata, { mtl_acq: 'done' });
+              await stripe.subscriptions.update(sub, { application_fee_percent: base, metadata: md }, { stripeAccount: event.account });
+            }
+          }
+        } catch (e) { console.error('mtl_acq flip', e.message); }
       }
     } else if (event.type === 'invoice.payment_failed') {
       const inv = event.data.object;
