@@ -18,6 +18,7 @@ export default async function handler(req, res) {
     const q = req.query || {};
     const b = (typeof req.body === 'object' && req.body) || {};
     const gymId = q.gymId || b.gymId;
+    const since = q.since || b.since || null;
     const token = req.headers['x-access-token'] || b.token ||
                   ((req.headers.authorization || '').replace(/^Bearer\s+/i, ''));
 
@@ -38,7 +39,8 @@ export default async function handler(req, res) {
     if (!grows.length || grows[0].owner_id !== uid) return res.status(403).json({ error: 'not owner' });
 
     // 3) read the gym's transactions via the service role (bypasses RLS)
-    const tres = await fetch(`${SB}/rest/v1/transactions?gym_id=eq.${encodeURIComponent(gymId)}&order=created_at.desc`, { headers: svc });
+    const sinceQ = since ? `&created_at=gte.${encodeURIComponent(since)}` : '';
+    const tres = await fetch(`${SB}/rest/v1/transactions?gym_id=eq.${encodeURIComponent(gymId)}${sinceQ}&order=created_at.desc`, { headers: svc });
     const tx = tres.ok ? await tres.json() : [];
 
     return res.status(200).json({ ok: true, count: tx.length, transactions: tx });
