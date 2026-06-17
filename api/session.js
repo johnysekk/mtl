@@ -25,6 +25,24 @@ async function sbPatch(path, body) {
   } catch (e) { console.error('sbPatch', e.message); return { ok: false, status: 0, error: e.message }; }
 }
 
+// Reward the member who invited a friend: apply the SAME percent discount, one time,
+// to the referrer's OWN active membership subscription at this gym (their next invoice).
+// Subscriptions live on the connected (gym) account, so the coupon is created there too.
+// No active membership => nothing to discount (the inviter isn't a paying member here).
+async function rewardReferrer({ refUser, refPct, gymId, gymAccount }) {
+  try {
+    const pct = Number(refPct);
+    if (!(pct > 0) || !refUser || !gymId || !gymAccount) return;
+    const rows = await sbGet(`gym_memberships?gym_id=eq.${encodeURIComponent(gymId)}&student_id=eq.${encodeURIComponent(refUser)}&status=in.(active,cancelling)&select=stripe_subscription&order=created_at.desc&limit=1`);
+    const subId = rows && rows[0] && rows[0].stripe_subscription;
+    if (!subId) return;
+    const opts = { stripeAccount: gymAccount };
+    const coupon = await stripe.coupons.create({ percent_off: Math.min(100, pct), duration: 'once', name: 'MTL referral reward', max_redemptions: 1 }, opts);
+    await stripe.subscriptions.update(subId, { coupon: coupon.id }, opts);
+    console.log('rewardReferrer ok', refUser, pct + '%', subId);
+  } catch (e) { console.error('rewardReferrer', e.message); }
+}
+
 // Record a transaction with EXACT Stripe fees (idempotent on payment_intent).
 // Backstop so the ledger is correct even if the Stripe webhook isn't delivering
 // connected-account events. Mirrors stripe-webhook.js recordTransaction.
