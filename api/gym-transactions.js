@@ -40,8 +40,17 @@ export default async function handler(req, res) {
 
     // 3) read the gym's transactions via the service role (bypasses RLS)
     const sinceQ = since ? `&created_at=gte.${encodeURIComponent(since)}` : '';
-    const tres = await fetch(`${SB}/rest/v1/transactions?gym_id=eq.${encodeURIComponent(gymId)}${sinceQ}&order=created_at.desc`, { headers: svc });
-    const tx = tres.ok ? await tres.json() : [];
+    // paginate so gyms with >1000 transactions in the window get ALL rows (PostgREST caps a page)
+    let tx = [];
+    const PAGE = 1000;
+    for (let off = 0; off <= 200000; off += PAGE) {
+      const tres = await fetch(`${SB}/rest/v1/transactions?gym_id=eq.${encodeURIComponent(gymId)}${sinceQ}&order=created_at.desc&limit=${PAGE}&offset=${off}`, { headers: svc });
+      if (!tres.ok) break;
+      const page = await tres.json();
+      if (!Array.isArray(page) || page.length === 0) break;
+      tx = tx.concat(page);
+      if (page.length < PAGE) break;
+    }
 
     return res.status(200).json({ ok: true, count: tx.length, transactions: tx });
   } catch (e) {
