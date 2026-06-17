@@ -55,8 +55,8 @@ export default async function handler(req, res) {
     const gid = encodeURIComponent(gymId);
     const [views, books, mems] = await Promise.all([
       pagedGet(`gym_views?gym_id=eq.${gid}&select=viewer_id,view_date,source,engaged`),
-      pagedGet(`gym_bookings?gym_id=eq.${gid}&select=student_id,created_at,status,amount`),
-      pagedGet(`gym_memberships?gym_id=eq.${gid}&select=student_id,created_at,status,amount`),
+      pagedGet(`gym_bookings?gym_id=eq.${gid}&select=student_id,created_at,status,amount,acq_source`),
+      pagedGet(`gym_memberships?gym_id=eq.${gid}&select=student_id,created_at,status,amount,acq_source`),
     ]);
 
     const now = new Date();
@@ -87,8 +87,8 @@ export default async function handler(req, res) {
 
     // purchases (exclude refunded/cancelled)
     const purchases = [];
-    books.forEach(x => { if (x.student_id && x.status !== 'refunded' && x.status !== 'cancelled') purchases.push({ sid: x.student_id, at: x.created_at || '', type: 'dropin', amt: Number(x.amount) || 0 }); });
-    mems.forEach(x => { if (x.student_id && x.status !== 'refunded' && x.status !== 'cancelled') purchases.push({ sid: x.student_id, at: x.created_at || '', type: 'membership', amt: Number(x.amount) || 0 }); });
+    books.forEach(x => { if (x.student_id && x.status !== 'refunded' && x.status !== 'cancelled') purchases.push({ sid: x.student_id, at: x.created_at || '', type: 'dropin', amt: Number(x.amount) || 0, acq: x.acq_source || '' }); });
+    mems.forEach(x => { if (x.student_id && x.status !== 'refunded' && x.status !== 'cancelled') purchases.push({ sid: x.student_id, at: x.created_at || '', type: 'membership', amt: Number(x.amount) || 0, acq: x.acq_source || '' }); });
 
     const firstBy = {};
     purchases.forEach(p => { if (!firstBy[p.sid] || p.at < firstBy[p.sid].at) firstBy[p.sid] = p; });
@@ -99,12 +99,15 @@ export default async function handler(req, res) {
     Object.values(firstBy).forEach(fp => { if (fp.type === 'dropin') { d2mBase++; if (memStudents.has(fp.sid)) d2mConv++; } });
     const d2mRate = d2mBase > 0 ? Math.round((d2mConv / d2mBase) * 100) : null;
 
-    // new via MTL (this month): first purchase this month + had an organic (deck/search) view on/before that day
+    // new via MTL (this month): FIRST purchase this month whose acquisition source (captured
+    // at join) is 'mtl_discovery'. Same field the per-member label reads => the number and the
+    // labels always agree. Falls back to an organic gym_views match for legacy rows (no acq_source).
     let newCount = 0, newRevenue = 0;
     Object.values(firstBy).forEach(fp => {
       if (ym(fp.at) !== thisM) return;
-      const ov = organicByViewer[fp.sid];
-      if (ov && ov <= (fp.at.slice(0, 10) || fp.at)) { newCount++; newRevenue += fp.amt; }
+      let isMtl = (fp.acq === 'mtl_discovery');
+      if (!fp.acq) { const ov = organicByViewer[fp.sid]; if (ov && ov <= (fp.at.slice(0, 10) || fp.at)) isMtl = true; }
+      if (isMtl) { newCount++; newRevenue += fp.amt; }
     });
 
     return res.status(200).json({
