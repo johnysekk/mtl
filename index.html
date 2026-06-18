@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-18-QBO | LOGIN polish: path step label -> "Choose your way" (EN); path-card previews append "..." when >3 disciplines in that path; "<- Back" moved to its own centered row above the chips; added "MTL - Be More" footer under the language flags. -->
+<!-- MTL build: 2026-06-18-QBP | TEAM INVITE-LINK: owner generates ONE shared revocable link per role (genInviteToken -> gyms.invite_token_team/recep, UI gtLinkBox/recpLinkBox); person opens /?join=TOKEN -> processPendingJoin (enterApp) looks up gym + inserts gym_coaches status=requested (is_reception per matched token); owner approves/declines in gtPending/recpPending. Self-leave already existed. Name-search kept for now. SCHEMA: gyms.invite_token_team + invite_token_recep. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -6788,6 +6788,89 @@ async function gtInvite(coachId, coachName){
   if($('gtSearch')) $('gtSearch').value='';
   loadGymTeam();
 }
+function _inviteBaseLink(token){ return (location.origin.replace('//dashboard.','//app.'))+'/?join='+token; }
+function _genJoinToken(){ var CS='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'; var t='TI'; for(var i=0;i<12;i++) t+=CS[Math.floor(Math.random()*36)]; return t; }
+async function genInviteToken(kind){
+  if(!_myGymData) return;
+  const col = kind==='recep' ? 'invite_token_recep' : 'invite_token_team';
+  const tok=_genJoinToken(); const upd={}; upd[col]=tok;
+  const { error } = await supaClient.from('gyms').update(upd).eq('id', _myGymData.id);
+  if(error){ toast('⚠️ '+error.message); return; }
+  _myGymData[col]=tok; renderInviteLink(kind);
+  toast(LANG==='en'?'Invite link ready':'Zvací odkaz připraven');
+}
+function renderInviteLink(kind){
+  const boxId = kind==='recep' ? 'recpLinkBox' : 'gtLinkBox';
+  const box=$(boxId); if(!box||!_myGymData) return;
+  const col = kind==='recep' ? 'invite_token_recep' : 'invite_token_team';
+  const tok=_myGymData[col];
+  const role = kind==='recep' ? (LANG==='en'?'receptionist':'recepčního') : (LANG==='en'?'coach/sensei':'kouče/senseie');
+  if(!tok){
+    box.innerHTML = `<button class="genInvBtn" data-k="${kind}" style="width:100%;padding:10px;background:var(--bg);border:1.5px dashed var(--border);border-radius:10px;font-weight:700;color:var(--dark);cursor:pointer;font-size:13px;">${LANG==='en'?'🔗 Create invite link':'🔗 Vytvořit zvací odkaz'}</button>`;
+  } else {
+    const link=_inviteBaseLink(tok);
+    box.innerHTML = `<div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px;">`
+      +`<div style="font-size:11px;color:var(--light);margin-bottom:6px;line-height:1.45;">${LANG==='en'?('Share this with your '+role+'. They request to join — you approve below.'):('Pošli tohle svému '+role+'. Požádá o vstup — ty ho níže schválíš.')}</div>`
+      +`<div style="font-size:11.5px;word-break:break-all;color:var(--dark);background:#fff;border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:8px;">${link}</div>`
+      +`<div style="display:flex;gap:8px;"><button class="invShareBtn" data-l="${link}" style="flex:1;padding:9px;background:var(--dark);color:#fff;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-size:12px;">${LANG==='en'?'📤 Share':'📤 Sdílet'}</button>`
+      +`<button class="invRegenBtn" data-k="${kind}" style="padding:9px 12px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-weight:700;cursor:pointer;font-size:12px;color:var(--mid);">${LANG==='en'?'↻ New':'↻ Nový'}</button></div></div>`;
+  }
+  box.querySelectorAll('.genInvBtn').forEach(b=>b.onclick=()=>genInviteToken(b.dataset.k));
+  box.querySelectorAll('.invRegenBtn').forEach(b=>b.onclick=()=>{ if(confirm(LANG==='en'?'Create a new link? The old one stops working.':'Vytvořit nový odkaz? Starý přestane fungovat.')) genInviteToken(b.dataset.k); });
+  box.querySelectorAll('.invShareBtn').forEach(b=>b.onclick=()=>{ const l=b.dataset.l; if(navigator.share){ navigator.share({url:l}).catch(()=>{}); } else { try{ navigator.clipboard.writeText(l); toast(LANG==='en'?'Link copied!':'Odkaz zkopírován!'); }catch(e){ toast(l); } } });
+}
+async function loadPending(kind){
+  const boxId = kind==='recep' ? 'recpPending' : 'gtPending';
+  const box=$(boxId); if(!box||!_myGymData) return;
+  const isRecep = kind==='recep';
+  const { data } = await supaClient.from('gym_coaches').select('id,coach_id,is_reception,created_at').eq('gym_id',_myGymData.id).eq('status','requested').order('created_at',{ascending:true});
+  const rows=(data||[]).filter(r=> !!r.is_reception===isRecep);
+  if(!rows.length){ box.innerHTML=''; return; }
+  const ids=rows.map(r=>r.coach_id);
+  const { data:profs } = await supaClient.from('profiles').select('id,name,photo_url,city').in('id', ids);
+  const pmap={}; (profs||[]).forEach(pr=>pmap[pr.id]=pr);
+  box.innerHTML = `<div style="font-size:12px;font-weight:800;color:var(--red);margin-bottom:6px;">${LANG==='en'?'Join requests':'Žádosti o vstup'} (${rows.length})</div>`
+   + rows.map(r=>{ const pr=pmap[r.coach_id]||{}; const av=pr.photo_url?`<img src="${pr.photo_url}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;flex-shrink:0;">`:`<div style="width:36px;height:36px;border-radius:50%;background:var(--surf);display:flex;align-items:center;justify-content:center;flex-shrink:0;">🥋</div>`;
+     return `<div style="display:flex;align-items:center;gap:9px;padding:8px;border:1px solid #FAD9A8;background:#FFF8EF;border-radius:10px;margin-bottom:6px;">${av}<div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:700;color:var(--dark);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(pr.name||'—')}</div>${pr.city?`<div style="font-size:11px;color:var(--mid);">${escapeHtml(pr.city)}</div>`:''}</div><button class="pApprove" data-id="${r.coach_id}" style="padding:7px 11px;background:#1c8c4a;color:#fff;border:none;border-radius:8px;font-weight:800;cursor:pointer;font-size:13px;">✓</button><button class="pDecline" data-id="${r.coach_id}" style="padding:7px 10px;background:var(--surf);color:var(--mid);border:1px solid var(--border);border-radius:8px;font-weight:800;cursor:pointer;font-size:13px;">✕</button></div>`;
+   }).join('');
+  box.querySelectorAll('.pApprove').forEach(b=>b.onclick=()=>approveJoin(b.dataset.id, kind));
+  box.querySelectorAll('.pDecline').forEach(b=>b.onclick=()=>declineJoin(b.dataset.id, kind));
+}
+async function approveJoin(coachId, kind){
+  if(!_myGymData) return;
+  const { error } = await supaClient.from('gym_coaches').update({ status:'active' }).eq('gym_id',_myGymData.id).eq('coach_id',coachId).eq('status','requested');
+  if(error){ toast('⚠️ '+error.message); return; }
+  try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'system', read:false, data:JSON.stringify({kind:'gym_team_approved', gym_name:_myGymData.name||'Gym'}), message:(LANG==='en'? `✅ You were added to ${_myGymData.name||'the gym'} team.` : `✅ Byl jsi přidán do týmu ${_myGymData.name||'gymu'}.`) }); }catch(e){}
+  toast(LANG==='en'?'Approved':'Schváleno');
+  loadPending(kind);
+  if(kind==='recep'){ if(typeof loadMyReception==='function') loadMyReception(); } else { if(typeof loadGymTeam==='function') loadGymTeam(); }
+}
+async function declineJoin(coachId, kind){
+  if(!_myGymData) return;
+  if(!confirm(LANG==='en'?'Decline this request?':'Zamítnout žádost?')) return;
+  await supaClient.from('gym_coaches').delete().eq('gym_id',_myGymData.id).eq('coach_id',coachId).eq('status','requested');
+  toast(LANG==='en'?'Declined':'Zamítnuto'); loadPending(kind);
+}
+async function processPendingJoin(){
+  let tok=null; try{ tok=localStorage.getItem('mtl_join'); }catch(e){}
+  if(!tok){ try{ tok=new URLSearchParams(location.search).get('join'); }catch(e){} }
+  if(!tok) return;
+  if(!currentUser){ try{ localStorage.setItem('mtl_join', tok); }catch(e){} return; }
+  try{ localStorage.removeItem('mtl_join'); }catch(e){}
+  let g=null, isRecep=false;
+  try{ const { data } = await supaClient.from('gyms').select('id,name,owner_id,invite_token_team,invite_token_recep').or('invite_token_team.eq.'+tok+',invite_token_recep.eq.'+tok).limit(1);
+    if(data&&data.length){ g=data[0]; isRecep=(g.invite_token_recep===tok); } }catch(e){}
+  if(!g){ toast(LANG==='en'?'Invite link invalid or expired':'Zvací odkaz neplatný nebo expirovaný'); return; }
+  if(g.owner_id===currentUser.id){ toast(LANG==='en'?"That's your own gym":'To je tvůj vlastní gym'); return; }
+  try{ const { data:ex } = await supaClient.from('gym_coaches').select('id,status').eq('gym_id',g.id).eq('coach_id',currentUser.id).limit(1);
+    if(ex&&ex.length){ toast(LANG==='en'?'You already requested or joined this team':'Už máš žádost nebo jsi v týmu'); return; } }catch(e){}
+  const role = isRecep ? (LANG==='en'?'receptionist':'recepční') : (LANG==='en'?'coach/sensei':'kouč/sensei');
+  if(!confirm(LANG==='en'?('Request to join '+(g.name||'this gym')+' as '+role+'?'):('Požádat o vstup do '+(g.name||'tohoto gymu')+' jako '+role+'?'))) return;
+  const { error } = await supaClient.from('gym_coaches').insert({ gym_id:g.id, coach_id:currentUser.id, status:'requested', is_reception:isRecep });
+  if(error){ toast('⚠️ '+error.message); return; }
+  try{ if(g.owner_id) await supaClient.from('notifications').insert({ user_id:g.owner_id, type:'system', read:false, data:JSON.stringify({kind:'gym_join_request', who:currentUser.name||'Někdo', is_reception:isRecep}), message:(LANG==='en'? ((currentUser.name||'Someone')+' wants to join your team') : ((currentUser.name||'Někdo')+' chce do tvého týmu')) }); }catch(e){}
+  toast(LANG==='en'?'Request sent — waiting for approval':'Žádost odeslána — čeká na schválení');
+}
 async function loadGymTeam(){
   const box=$('gtTeam'); if(!box||!_myGymData) return;
   const { data } = await supaClient.from('gym_coaches').select('*').eq('gym_id', _myGymData.id).in('status',['invited','active']).order('created_at',{ascending:false});
@@ -7567,6 +7650,8 @@ async function renderGymManage(){
       <input id="gtSearch" type="text" placeholder="${LANG==='en'?'Search coach by name':'Hledat kouče podle jména'}" style="flex:1;min-width:0;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:'DM Sans';">
       <button id="gtSearchBtn" style="padding:11px 14px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Search':'Hledat'}</button>
     </div>
+    <div id="gtLinkBox" style="margin-bottom:10px;"></div>
+    <div id="gtPending" style="margin-bottom:10px;"></div>
     <div id="gtResults" style="margin-bottom:10px;"></div>
     <div id="gtTeam" style="margin-bottom:8px;"></div>
     <button id="mgCoachPricingBtn" style="width:100%;padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:12px;font-weight:700;color:var(--dark);cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">💰 ${LANG==='en'?'Coach pricing requests':'Žádosti o ceny od koučů'}</button>
@@ -7577,7 +7662,9 @@ async function renderGymManage(){
         <input id="recpSearch" type="text" placeholder="${LANG==='en'?'Search user by name':'Hledat uživatele podle jména'}" style="flex:1;min-width:0;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:'DM Sans';">
         <button id="recpSearchBtn" style="padding:11px 14px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Search':'Hledat'}</button>
       </div>
-      <div id="recpResults" style="margin-bottom:8px;"></div>
+      <div id="recpLinkBox" style="margin-bottom:8px;"></div>
+        <div id="recpPending" style="margin-bottom:8px;"></div>
+        <div id="recpResults" style="margin-bottom:8px;"></div>
       <div id="recpList"></div>
     </div>
     </div></details>
@@ -7648,6 +7735,8 @@ async function renderGymManage(){
   { const _ms=$('gmMerchSec'); if(_ms) _ms.addEventListener('toggle',()=>{ if(_ms.open) renderGymMerchList(); }); }
   if($('mgReceptionBtn')) $('mgReceptionBtn').onclick=()=>openReception(_myGymData.id, _myGymData.name);
   if($('recpSearchBtn')) $('recpSearchBtn').onclick=recpSearchUsers;
+  if($('recpLinkBox')) renderInviteLink('recep');
+  if($('recpPending')) loadPending('recep');
   if($('recpSearch')) $('recpSearch').addEventListener('keydown', e=>{ if(e.key==='Enter') recpSearchUsers(); });
   loadRecpList();
   if($('mgDropin')) $('mgDropin').addEventListener('input', updateMgDropinBreak);
@@ -7655,6 +7744,8 @@ async function renderGymManage(){
   if(typeof updateMgDropinBreak==='function') updateMgDropinBreak();
   if($('gcSubmit')) $('gcSubmit').onclick=submitGymChangeRequest;
   if($('gtSearchBtn')) $('gtSearchBtn').onclick=gtSearchCoaches;
+  if($('gtLinkBox')) renderInviteLink('team');
+  if($('gtPending')) loadPending('team');
   if($('mgGymLb')) $('mgGymLb').onclick=()=>openGymLeaderboard('city');
   (function(){ const tabs=[['gmTabSchedBtn','gmSchedTab'],['gmTabSetBtn','gmSetTab'],['gmTabMembBtn','gmMembTab'],['gmTabDashBtn','gmDash']];
     const els=tabs.map(([b,p])=>({b:$(b),p:$(p),pid:p})); if(els.some(x=>!x.b||!x.p)) return;
@@ -14657,6 +14748,7 @@ function renderSettingsDisc(){
   const sel=$('setDiscSelect'); if(sel) sel.onchange=()=>save(sel.value);
 }
 function enterApp(){
+  try{ if(typeof processPendingJoin==='function') processPendingJoin(); }catch(e){}
   $('authScreen').style.display='none';
   if(isMultiDiscipline()){
     if(_deckDisc){ if(currentUser && currentUser.pref_discipline!==_deckDisc){ try{ supaClient.from('profiles').update({ pref_discipline:_deckDisc }).eq('id', currentUser.id); currentUser.pref_discipline=_deckDisc; }catch(e){} } }
@@ -16153,6 +16245,7 @@ async function recalcCoachRating(coachId){
 async function showPaidPopup(){
   const params = new URLSearchParams(window.location.search);
   try{ const _gru=params.get('gymref'), _grg=params.get('gym'); if(_gru&&_grg){ window._gymRef={gym:_grg, ref:_gru}; } }catch(e){}
+  try{ const _jt=params.get('join'); if(_jt){ try{ localStorage.setItem('mtl_join', _jt); }catch(e){} } }catch(e){}
   if(params.get('checkin')==='1'){
     const _cgym=params.get('gym'), _csid=params.get('sid'), _ctok=params.get('tok');
     const _ccls=params.get('cls'), _cdate=params.get('date'), _ctime=params.get('time'), _ccoach=params.get('coach')||null, _clevel=params.get('level')||'all', _cdisc=params.get('disc')||null;
