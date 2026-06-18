@@ -29,7 +29,8 @@ export default async function handler(req, res) {
 
     // bounding box (~30 km) then exact haversine filter
     const dLat = 0.32, dLng = 0.32 / Math.max(0.2, Math.cos(lat * Math.PI / 180));
-    const rows = await sbGet(`demand_signals?select=user_id,city,country,disciplines,lat,lng&lat=gte.${lat - dLat}&lat=lte.${lat + dLat}&lng=gte.${lng - dLng}&lng=lte.${lng + dLng}&limit=8000`);
+    const fresh = new Date(Date.now() - 180 * 86400000).toISOString(); // recency: ignore signals older than 180 days
+    const rows = await sbGet(`demand_signals?select=user_id,city,country,disciplines,lat,lng&created_at=gte.${fresh}&lat=gte.${lat - dLat}&lat=lte.${lat + dLat}&lng=gte.${lng - dLng}&lng=lte.${lng + dLng}&limit=8000`);
     const near = rows.filter(r => r.lat != null && r.lng != null && hav(lat, lng, +r.lat, +r.lng) <= RADIUS_KM);
 
     // unique people PER discipline + a representative city/country

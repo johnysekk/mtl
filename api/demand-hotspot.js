@@ -52,6 +52,10 @@ export default async function handler(req, res) {
     // Cluster by PROXIMITY (~30 km), not exact city string, so 'Brno' + 'Brno-stred'
     // + nearby villages collapse into one real hotspot. Greedy nearest-centroid pass.
     const CLUSTER_KM = 30;
+    // recency decay: a person's signal loses half its weight every 90 days and is ignored past 180.
+    const NOW = Date.now(), HALFLIFE = 90, MAXAGE = 180;
+    const recW = ms => { const a = (NOW - ms) / 86400000; return a > MAXAGE ? 0 : Math.pow(0.5, a / HALFLIFE); };
+    const peopleScore = umap => { let people = 0, score = 0; umap.forEach(ts => { const w = recW(ts); if (w > 0) { people++; score += w; } }); return { people, score: +score.toFixed(2) }; };
     const hav = (la1, lo1, la2, lo2) => {
       const R = 6371, toR = x => x * Math.PI / 180;
       const dLa = toR(la2 - la1), dLo = toR(lo2 - lo1);
@@ -71,20 +75,20 @@ export default async function handler(req, res) {
         for (const c of clusters) { const d = hav(lat, lng, c.lat, c.lng); if (d < bestD) { bestD = d; best = c; } }
         let c;
         if (best && bestD <= CLUSTER_KM) { c = best; }
-        else { c = { lat, lng, n: 0, users: new Set(), disc: {}, cities: {}, country, last: '' }; clusters.push(c); }
+        else { c = { lat, lng, n: 0, users: new Map(), disc: {}, cities: {}, country, last: '' }; clusters.push(c); }
         c.lat = (c.lat * c.n + lat) / (c.n + 1);
         c.lng = (c.lng * c.n + lng) / (c.n + 1);
         c.n++;
-        if (r.user_id) c.users.add(r.user_id);
+        if (r.user_id) { const _ts = new Date(r.created_at || 0).getTime(); if (_ts > (c.users.get(r.user_id) || 0)) c.users.set(r.user_id, _ts); }
         if (country && !c.country) c.country = country;
         if (city) c.cities[city] = (c.cities[city] || 0) + 1;
         if (r.created_at > c.last) c.last = r.created_at;
         addDisc(c.disc, r.disciplines);
       } else {
         const key = country + '|' + (city || '(unknown)');
-        if (!noCoord[key]) noCoord[key] = { city: city || '(unknown)', country, users: new Set(), disc: {}, last: '' };
+        if (!noCoord[key]) noCoord[key] = { city: city || '(unknown)', country, users: new Map(), disc: {}, last: '' };
         const m = noCoord[key];
-        if (r.user_id) m.users.add(r.user_id);
+        if (r.user_id) { const _ts = new Date(r.created_at || 0).getTime(); if (_ts > (m.users.get(r.user_id) || 0)) m.users.set(r.user_id, _ts); }
         if (r.created_at > m.last) m.last = r.created_at;
         addDisc(m.disc, r.disciplines);
       }
@@ -102,19 +106,20 @@ export default async function handler(req, res) {
       const dl = discList(c.disc);
       const topDisc = dl.length ? dl[0].v : null;
       const sup = supplyNear(c.lat, c.lng, topDisc);
+      const pp = peopleScore(c.users);
       return {
         city: (Object.entries(c.cities).sort((a, b) => b[1] - a[1])[0] || ['(area)'])[0],
-        country: c.country, people: c.users.size, disciplines: dl, last: c.last,
+        country: c.country, people: pp.people, score: pp.score, disciplines: dl, last: c.last,
         lat: +c.lat.toFixed(3), lng: +c.lng.toFixed(3),
         gyms_near: sup.near, gyms_near_disc: sup.nearDisc,
         underserved: sup.nearDisc === 0,   // nobody within 30km teaches what they most want
       };
     });
-    const fromNoCoord = Object.values(noCoord).map(m => ({
-      city: m.city, country: m.country, people: m.users.size, disciplines: discList(m.disc), last: m.last,
+    const fromNoCoord = Object.values(noCoord).map(m => { const pp = peopleScore(m.users); return {
+      city: m.city, country: m.country, people: pp.people, score: pp.score, disciplines: discList(m.disc), last: m.last,
       gyms_near: null, gyms_near_disc: null, underserved: false,
-    }));
-    const hotspots = fromClusters.concat(fromNoCoord).sort((a, b) => b.people - a.people).slice(0, 100);
+    }; });
+    const hotspots = fromClusters.concat(fromNoCoord).filter(h => h.people > 0).sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 100);
 
     return res.status(200).json({ ok: true, hotspots, total: rows.length });
   } catch (e) {
