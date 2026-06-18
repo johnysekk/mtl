@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-18-QBK | LOGIN layout A: path cards (Combat/Traditional) appear when 2+ categories active, tap reveals that path chips; combat-only launch skips path step (chips direct). Tagline person-first via roleTerm: traditional "Find your Karate sensei"/"Tvuj Karate sensei"; combat copy unchanged. -->
+<!-- MTL build: 2026-06-18-QBL | SENSEI IN DECK (traditional only; no-op at combat launch via tradActive gate): appendDojoSenseis surfaces active non-reception deck_visible gym_coaches members of TRADITIONAL dojos as dojoSensei cards (score-safe, deduped vs approved coaches); openProfile renders "-> dojo" CTA and btnBook opens the dojo instead of booking; deck card front/back show dojo name not price. gtSearchCoaches widened so a dojo can invite a non-coach account (invite still requires accept). SCHEMA: gym_coaches.deck_visible bool default true. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -3644,8 +3644,44 @@ async function loadCoaches() {
   if (error) { console.error('Supabase error:', error); toast(L('⚠️ Chyba načítání')); return; }
 
   COACHES = (data||[]).map(_mapCoachRow);
+  try{ await appendDojoSenseis(); }catch(e){ console.error('appendDojoSenseis',e); }
   init();
   loadFavorites();
+}
+async function appendDojoSenseis(){
+  if(!activeDisciplines().some(d=>discCat(d.v)==='traditional')) return;
+  const { data:links } = await supaClient.from('gym_coaches').select('coach_id, gym_id, is_reception, deck_visible').eq('status','active');
+  const vis=(links||[]).filter(l=>!l.is_reception && l.deck_visible!==false);
+  if(!vis.length) return;
+  const gymIds=[...new Set(vis.map(l=>l.gym_id))];
+  const { data:gyms2 } = await supaClient.from('gyms').select('*').in('id', gymIds).is('deleted_at', null);
+  const gymMap={}; (gyms2||[]).forEach(g=>{ gymMap[g.id]=g; });
+  const have=new Set(COACHES.map(c=>c.id));
+  const coachIds=[...new Set(vis.map(l=>l.coach_id))].filter(id=>!have.has(id));
+  if(!coachIds.length) return;
+  const { data:profs } = await supaClient.from('profiles').select('id,name,photo_url,bio,city,country,country_code,city_lat,city_lng,disciplines,main_discipline,emoji').in('id', coachIds).is('deleted_at', null);
+  const pm={}; (profs||[]).forEach(p=>{ pm[p.id]=p; });
+  const out={};
+  vis.forEach(l=>{
+    const g=gymMap[l.gym_id], p=pm[l.coach_id];
+    if(!g||!p) return;
+    const gdiscs=parseDisc(g.disciplines).filter(d=>discCat(d)==='traditional');
+    if(!gdiscs.length) return;
+    if(out[p.id]){ out[p.id].disciplines=[...new Set(out[p.id].disciplines.concat(gdiscs))]; return; }
+    out[p.id]={
+      id:p.id, profileId:p.id, dojoSensei:true, dojoId:g.id, dojoName:g.name||'Dojo', dojoGym:g,
+      name:p.name||roleTerm(gdiscs[0],false), emoji:p.emoji||'\u{1F94B}', photo:p.photo_url||null, bg:'#0d1a2e',
+      loc:p.city||g.city||'', country:p.country||g.country||null, countryCode:p.country_code||null,
+      coords:(p.city_lat&&p.city_lng)?{lat:p.city_lat,lng:p.city_lng}:((g.city_lat&&g.city_lng)?{lat:g.city_lat,lng:g.city_lng}:null),
+      bio:p.bio||'', tags:[], cls:[], langs:[], gym:g.name||'',
+      disciplines:gdiscs.slice(), mainDiscipline:gdiscs[0],
+      rate:'', rateNum:0, rateInperson:null, rateOnline:null, currency:'CZK',
+      certLevel:'verified', rating:'5.0', reviews:0, textReviews:0, lessonsDone:0, onlineFeedbacks:0,
+      students:0, years:0, fights:0, avail:'available', founding:false, partner:false, coachRefScore:0, disciplineRates:null
+    };
+  });
+  const cards=Object.values(out);
+  if(cards.length) COACHES=COACHES.concat(cards);
 }
 function _mapCoachRow(c){
     // Sestav tagy podle toho co nabízí
@@ -4233,7 +4269,7 @@ function fillCard(p, c){
   }
 
   if(p==='front'){
-    $('frontRate').innerHTML = `${c.rate} <span>${L('/hod')}</span>`;
+    $('frontRate').innerHTML = c.dojoSensei ? `<span style="font-size:.6em;color:var(--mid);font-weight:600;">${escapeHtml(c.dojoName||'Dojo')}</span>` : `${c.rate} <span>${L('/hod')}</span>`;
     $('frontRating').textContent = `⭐ ${c.rating} (${c.reviews})`;
     // Distance badge
     const db=$('frontDist');
@@ -4241,7 +4277,7 @@ function fillCard(p, c){
       db.textContent=`${c.distKm.toFixed(1)} km`; db.classList.add('show');
     } else { db.classList.remove('show'); }
   } else {
-    $('backRate').innerHTML = `${c.rate} <span>${L('/hod')}</span>`;
+    $('backRate').innerHTML = c.dojoSensei ? `<span style="font-size:.6em;color:var(--mid);font-weight:600;">${escapeHtml(c.dojoName||'Dojo')}</span>` : `${c.rate} <span>${L('/hod')}</span>`;
   }
 
   const certEl=$(p+'Cert');
@@ -4783,11 +4819,11 @@ if(c.photo){
   window._curCoachVideo = c.certVideo || null;
   window._profileCoach = c;
   loadCoachReviews(c.profileId);
-  renderOffers(c);
+  if(c.dojoSensei){ renderDojoSenseiCta(c); } else { renderOffers(c); }
   // náhled vlastního profilu → skrýt rezervaci
   const isSelf = currentUser && (c.id===currentUser.id || c.profileId===currentUser.id);
   if($('btnBook')) $('btnBook').style.display = isSelf ? 'none' : '';
-  try{ const bb=$('btnBook'); if(bb){ const bd=parseDisc(c.disciplines)[0]||(_deckDisc||defaultDiscipline()); bb.textContent=(LANG==='en'?'Book ':'Rezervovat ')+disciplineEmoji(bd); } }catch(e){}
+  try{ const bb=$('btnBook'); if(bb){ if(c.dojoSensei){ bb.textContent='→ '+(c.dojoName||(LANG==='en'?'their dojo':'jeho dojo')); bb.onclick=()=>{ try{ window._gymViewSrc='sensei'; openGymProfile(c.dojoGym); }catch(e){} }; } else { const bd=parseDisc(c.disciplines)[0]||(_deckDisc||defaultDiscipline()); bb.textContent=(LANG==='en'?'Book ':'Rezervovat ')+disciplineEmoji(bd); bb.onclick=()=>{ scrollToOffers(); }; } } }catch(e){}
   // founder tlačítko na dashboard kouče
   const fb = $('btnProfCoachStats');
   if(fb){
@@ -4870,6 +4906,18 @@ function timeAgo(iso){
   return `před ${Math.floor(days/365)} lety`;
 }
 
+function renderDojoSenseiCta(c){
+  const box=$('profOffers'); if(!box) return;
+  const nm=escapeHtml(c.dojoName||'Dojo');
+  const role=(typeof roleTerm==='function'?roleTerm(c.mainDiscipline,false):'Sensei');
+  box.innerHTML = `<div style="background:#F0FBF0;border:1px solid #CDEBD6;border-radius:14px;padding:16px;margin-bottom:12px;">`
+    +`<div style="font-size:13px;color:var(--mid);margin-bottom:4px;">${LANG==='en'?(role+' at'):(role+' v')}</div>`
+    +`<div style="font-family:'Bebas Neue';font-size:26px;color:#006040;letter-spacing:.02em;margin-bottom:8px;">${nm}</div>`
+    +`<div style="font-size:13px;color:var(--dark);line-height:1.5;margin-bottom:12px;">${LANG==='en'?'Train with this sensei through their dojo — classes, memberships and schedule are managed there.':'S tímto senseiem trénuješ přes jeho dojo — lekce, členství i rozvrh najdeš tam.'}</div>`
+    +`<button id="senseiGoDojo" style="width:100%;background:var(--dark);color:#fff;border:none;border-radius:12px;padding:13px;font-size:15px;font-weight:700;cursor:pointer;">${LANG==='en'?'→ Open '+nm:'→ Otevřít '+nm}</button>`
+    +`</div>`;
+  const b=$('senseiGoDojo'); if(b) b.onclick=()=>{ try{ window._gymViewSrc='sensei'; openGymProfile(c.dojoGym); }catch(e){} };
+}
 function renderOffers(c){
   const box = $('profOffers');
   if(!box) return;
@@ -6717,7 +6765,7 @@ async function gtSearchCoaches(){
   const box=$('gtResults'); if(!box) return;
   if(q.length<2){ box.innerHTML=`<p style="font-size:12px;color:var(--light);">${LANG==='en'?'Type at least 2 letters.':'Napiš aspoň 2 písmena.'}</p>`; return; }
   box.innerHTML=`<p style="font-size:12px;color:var(--light);">${L('Načítám...')}</p>`;
-  const { data } = await supaClient.from('profiles').select('id, name, city, photo_url').eq('coach_status','approved').ilike('name', `%${q}%`).limit(10);
+  const { data } = await supaClient.from('profiles').select('id, name, city, photo_url').is('deleted_at', null).ilike('name', `%${q}%`).limit(10);
   const coaches=(data||[]).filter(c=>c.id!==currentUser.id);
   if(!coaches.length){ box.innerHTML=`<p style="font-size:12px;color:var(--light);">${LANG==='en'?'No coaches found.':'Žádní kouči nenalezeni.'}</p>`; return; }
   box.innerHTML=coaches.map(c=>`<div style="display:flex;align-items:center;gap:10px;padding:9px;border:1px solid var(--border);border-radius:10px;margin-bottom:6px;"><div style="width:34px;height:34px;border-radius:50%;background:#333 ${c.photo_url?`url('${c.photo_url}') center/cover`:''};flex-shrink:0;"></div><div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:700;">${c.name||'Kouč'}</div><div style="font-size:11px;color:var(--mid);">📍 ${c.city||'—'}</div></div><button class="gtInviteBtn" data-id="${c.id}" data-name="${(c.name||'').replace(/"/g,'&quot;')}" style="padding:8px 12px;background:var(--dark);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;">${LANG==='en'?'Invite':'Pozvat'}</button></div>`).join('');
