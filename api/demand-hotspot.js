@@ -43,6 +43,12 @@ export default async function handler(req, res) {
 
     const rows = await pagedGet(`demand_signals?select=user_id,city,country,disciplines,created_at,lat,lng`);
 
+    // SUPPLY side: approved gyms with coords + the disciplines they teach.
+    const gymRows = await pagedGet(`gyms?status=eq.approved&select=id,disciplines,city_lat,city_lng`);
+    const gymPts = gymRows
+      .filter(g => g.city_lat != null && g.city_lng != null && isFinite(+g.city_lat) && isFinite(+g.city_lng))
+      .map(g => ({ lat: +g.city_lat, lng: +g.city_lng, disc: new Set((g.disciplines || '').split(',').map(x => x.trim()).filter(Boolean)) }));
+
     // Cluster by PROXIMITY (~30 km), not exact city string, so 'Brno' + 'Brno-stred'
     // + nearby villages collapse into one real hotspot. Greedy nearest-centroid pass.
     const CLUSTER_KM = 30;
@@ -85,13 +91,28 @@ export default async function handler(req, res) {
     });
 
     const discList = obj => Object.entries(obj).sort((a, b) => b[1] - a[1]).map(([v, n]) => ({ v, n }));
-    const fromClusters = clusters.map(c => ({
-      city: (Object.entries(c.cities).sort((a, b) => b[1] - a[1])[0] || ['(area)'])[0],
-      country: c.country, people: c.users.size, disciplines: discList(c.disc), last: c.last,
-      lat: +c.lat.toFixed(3), lng: +c.lng.toFixed(3),
-    }));
+    const supplyNear = (lat, lng, topDisc) => {
+      let near = 0, nearDisc = 0;
+      for (const g of gymPts) {
+        if (hav(lat, lng, g.lat, g.lng) <= CLUSTER_KM) { near++; if (topDisc && g.disc.has(topDisc)) nearDisc++; }
+      }
+      return { near, nearDisc };
+    };
+    const fromClusters = clusters.map(c => {
+      const dl = discList(c.disc);
+      const topDisc = dl.length ? dl[0].v : null;
+      const sup = supplyNear(c.lat, c.lng, topDisc);
+      return {
+        city: (Object.entries(c.cities).sort((a, b) => b[1] - a[1])[0] || ['(area)'])[0],
+        country: c.country, people: c.users.size, disciplines: dl, last: c.last,
+        lat: +c.lat.toFixed(3), lng: +c.lng.toFixed(3),
+        gyms_near: sup.near, gyms_near_disc: sup.nearDisc,
+        underserved: sup.nearDisc === 0,   // nobody within 30km teaches what they most want
+      };
+    });
     const fromNoCoord = Object.values(noCoord).map(m => ({
       city: m.city, country: m.country, people: m.users.size, disciplines: discList(m.disc), last: m.last,
+      gyms_near: null, gyms_near_disc: null, underserved: false,
     }));
     const hotspots = fromClusters.concat(fromNoCoord).sort((a, b) => b.people - a.people).slice(0, 100);
 
