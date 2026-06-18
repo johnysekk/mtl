@@ -111,7 +111,7 @@ async function coachCheckout(req, res) {
 async function gymCheckout(req, res) {
   const {
     gymAccount, gymName, className, amount, currency = 'CZK', bookingId,
-    income, memberName, payee, disc, level, partner, guest, token, founding, credit, refDisc,
+    income, memberName, payee, disc, level, partner, guest, token, founding, credit, refDisc, take,
     gymId, studentId, coachId, grace, merch, merchId, qty, variant, merchName,
   } = req.query;
 
@@ -122,7 +122,10 @@ async function gymCheckout(req, res) {
   const isPartner = (String(partner) === '1');
   const MK   = 1.00;
   let STUDENT_MK = MK;
-  let TAKE = (String(partner)==='1') ? 0.01 : GYM_MTL_TAKE; // EP 1%, else flat 2,5%
+  // owner's MTL League tier rate (Shikai 3% / Bankai 2%), passed from the client and range-validated.
+  let _tk = take ? parseFloat(take) : GYM_MTL_TAKE;
+  if (!(_tk >= 0.01 && _tk <= 0.05)) _tk = GYM_MTL_TAKE;
+  let TAKE = (String(partner)==='1') ? 0.01 : _tk; // EP 1%, else owner's tier rate (3.5/3/2%)
   if (String(credit) === 'student') {
     // Referral reward on a drop-in: MTL waives its whole fee; the gym/coach funds the rest of the discount.
     let d = refDisc ? parseFloat(refDisc) : TAKE;
@@ -244,7 +247,7 @@ async function eventCheckout(req, res) {
 async function membershipCheckout(req, res) {
   const {
     gymAccount, gymName, planName, amount, currency = 'CZK', interval = 'month',
-    membershipId, income, memberName, payee, disc, access, partner, refPct, refUser, founding, acq,
+    membershipId, income, memberName, payee, disc, access, partner, refPct, refUser, founding, acq, fee,
     gymId, studentId,
   } = req.query;
 
@@ -253,7 +256,10 @@ async function membershipCheckout(req, res) {
   const P = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
   const ivl = interval === 'year' ? 'year' : 'month';
-  const FEE_PCT = (String(partner)==='1') ? 1 : MEMB_MTL_PERCENT; // EP 1%, else flat 3,5%
+  // owner's MTL League tier rate (Shikai 3% / Bankai 2%), passed from the client and range-validated.
+  let _fp = fee ? parseFloat(fee) : MEMB_MTL_PERCENT;
+  if (!(_fp >= 1 && _fp <= 5)) _fp = MEMB_MTL_PERCENT;
+  const FEE_PCT = (String(partner)==='1') ? 1 : _fp; // EP 1%, else owner's tier rate (3.5/3/2%)
   // MTL acquisition fee: when the app DEMONSTRABLY brought this member (organic deck/search
   // discovery, acq=mtl_discovery), MTL takes 10% for the first 2 months, then a webhook drops
   // it to the normal rate (a finder's fee for the acquisition). Monthly subs only.
