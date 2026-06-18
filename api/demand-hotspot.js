@@ -51,7 +51,7 @@ export default async function handler(req, res) {
 
     // Cluster by PROXIMITY (~30 km), not exact city string, so 'Brno' + 'Brno-stred'
     // + nearby villages collapse into one real hotspot. Greedy nearest-centroid pass.
-    const CLUSTER_KM = 30;
+    const CLUSTER_KM = 25;
     // recency decay: a person's signal loses half its weight every 90 days and is ignored past 180.
     const NOW = Date.now(), HALFLIFE = 90, MAXAGE = 180;
     const recW = ms => { const a = (NOW - ms) / 86400000; return a > MAXAGE ? 0 : Math.pow(0.5, a / HALFLIFE); };

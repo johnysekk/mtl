@@ -11,7 +11,7 @@ async function sbGet(path) { try { const r = await fetch(`${SB}/rest/v1/${path}`
 async function sbPost(path, body) { try { const r = await fetch(`${SB}/rest/v1/${path}`, { method: 'POST', headers: { ...svc, Prefer: 'return=minimal' }, body: JSON.stringify(body) }); return r.ok; } catch (e) { return false; } }
 
 const THRESHOLD = 15;      // unique people wanting the SAME discipline within the radius
-const RADIUS_KM = 30;
+const RADIUS_KM = 25;
 const COOLDOWN_DAYS = 45;
 
 function hav(la1, lo1, la2, lo2) {
@@ -47,7 +47,7 @@ export default async function handler(req, res) {
       });
     });
 
-    const grid = Math.round(lat / 0.3) + '_' + Math.round(lng / 0.3);
+    const grid = Math.round(lat / 0.25) + '_' + Math.round(lng / 0.25);
     const since = new Date(Date.now() - COOLDOWN_DAYS * 86400000).toISOString();
     const cityAll = (Object.entries(cities).sort((a, b) => b[1] - a[1])[0] || [''])[0];
 
