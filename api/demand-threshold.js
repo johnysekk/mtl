@@ -29,8 +29,8 @@ export default async function handler(req, res) {
 
     // bounding box (~30 km) then exact haversine filter
     const dLat = 0.32, dLng = 0.32 / Math.max(0.2, Math.cos(lat * Math.PI / 180));
-    const fresh = new Date(Date.now() - 180 * 86400000).toISOString(); // recency: ignore signals older than 180 days
-    const rows = await sbGet(`demand_signals?select=user_id,city,country,disciplines,lat,lng&created_at=gte.${fresh}&lat=gte.${lat - dLat}&lat=lte.${lat + dLat}&lng=gte.${lng - dLng}&lng=lte.${lng + dLng}&limit=8000`);
+    const fresh = new Date(Date.now() - 120 * 86400000).toISOString(); // recency: ignore signals older than 120 days
+    const rows = await sbGet(`demand_signals?select=user_id,city,country,disciplines,lat,lng,source,opens&created_at=gte.${fresh}&lat=gte.${lat - dLat}&lat=lte.${lat + dLat}&lng=gte.${lng - dLng}&lng=lte.${lng + dLng}&limit=8000`);
     const near = rows.filter(r => r.lat != null && r.lng != null && hav(lat, lng, +r.lat, +r.lng) <= RADIUS_KM);
 
     // unique people PER discipline + a representative city/country
@@ -40,9 +40,10 @@ export default async function handler(req, res) {
     near.forEach(r => {
       const c = (r.city || '').trim(); if (c) cities[c] = (cities[c] || 0) + 1;
       if (r.country && !country) country = r.country;
+      const _strong = (r.source !== 'passive') || ((r.opens || 1) >= 3);
       (r.disciplines || '').split(',').map(x => x.trim()).filter(Boolean).forEach(d => {
         if (!byDisc[d]) byDisc[d] = { users: new Set(), cities: {} };
-        if (r.user_id) byDisc[d].users.add(r.user_id);
+        if (r.user_id && _strong) byDisc[d].users.add(r.user_id);
         if (c) byDisc[d].cities[c] = (byDisc[d].cities[c] || 0) + 1;
       });
     });
