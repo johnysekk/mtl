@@ -188,12 +188,16 @@ async function gymCheckout(req, res) {
 // ───────────────────────── GYM membership (direct charge subscription) ─────────────────────────
 // ───────────────────────── EVENT TICKET (flat 6% = 3% markup + 3% cut, no partner discount) ─────────────────────────
 async function eventCheckout(req, res) {
-  const { gymAccount, eventTitle, tierName, amount, currency = 'CZK', ticketId, buyerName, qty, qrToken, eventId, founding, partner, disc, gymId, payoutCoachId } = req.query;
+  const { gymAccount, eventTitle, tierName, amount, currency = 'CZK', ticketId, buyerName, qty, qrToken, eventId, founding, partner, disc, gymId, payoutCoachId, take } = req.query;
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
   const P = parseInt(amount, 10);
   const Q = Math.max(1, parseInt(qty, 10) || 1);
   const cur = String(currency).toLowerCase();
-  const MK = 1.00, TAKE = (String(partner)==='1') ? 0.01 : 0.035;
+  // owner's MTL League tier rate (Shikai 3% / Bankai 2%), passed from the client and range-validated.
+  const MK = 1.00;
+  let _etk = take ? parseFloat(take) : 0.035;
+  if (!(_etk >= 0.01 && _etk <= 0.05)) _etk = 0.035;
+  const TAKE = (String(partner)==='1') ? 0.01 : _etk; // EP 1%, else owner's tier rate (3.5/3/2%)
   const isCZK = cur === 'czk';
   const unit = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);
   const fee  = Math.round(P * TAKE * 100); // exact pct (was floored to whole CZK)
