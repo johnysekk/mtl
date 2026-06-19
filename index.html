@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-18-QDI | The mobile coach-view 'Dashboard kouce' button (btnCoachDash, added in QDG) was leaking onto the desktop dashboard Me page because it wasn't in the dashmode hide rule. Added body.dashmode #btnCoachDash to the display:none!important list, so on desktop the coach Dashboard lives ONLY in the left sidebar (Coach group), while on mobile it stays as the first button in the coach view. Routing was already fixed in QDH (founder controls gated with && !_self, so opening your own coach dashboard shows the clean coach-facing view, not the founder management view). -->
+<!-- MTL build: 2026-06-18-QDK | Coach self-dashboard now visually matches the Gym dashboard. Added the same green Net hero (linear-gradient #0A7A4F->#005A3C, identical sizing/labels/box-shadow as the gym dashHeroSingle) to the TOP of renderCoachAnalytics, shown only for _self (the coach viewing their own stats+earnings). _csFillNetHero queries the coach's own transactions (coach_id, gym_id null) for this month + last month and renders 'Ciste vybrano - <month>' with the real Stripe net and a trend arrow vs last month - same as the gym. This also aligns the headline number to real transactions (the coach earnings rows below remain a per-booking breakdown). Founder viewing another coach: no hero (earnings stay _self-gated). -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -12477,6 +12477,25 @@ async function renderCoachGymSection(coachId){
       +'<p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:6px;">'+(EN?'Classes & plans where a gym set you as the payee. Paid out to your Stripe.':'Lekce a varianty, kde tě gym nastavil jako příjemce. Vyplácí se na tvůj Stripe.')+'</p>'+cancelHtml;
   }catch(e){ console.error('renderCoachGymSection',e); sec.innerHTML=''; }
 }
+async function _csFillNetHero(coachId){
+  const box=$('csNetHero'); if(!box) return;
+  try{
+    const now=new Date(); const ym=now.toISOString().slice(0,7);
+    const lm=new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth()-1, 1)).toISOString().slice(0,7);
+    const since=new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth()-1, 1)).toISOString().slice(0,10);
+    const { data }=await supaClient.from('transactions').select('gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,stripe_fee,created_at,currency').eq('coach_id',coachId).is('gym_id',null).gte('created_at',since);
+    const rows=data||[]; if(!rows.length){ box.style.display='none'; return; }
+    const net=r=>Math.max(0,((r.gross_amount||0)-(r.refund_amount||0))-(r.stripe_fee||0)-(((r.mtl_fee||0)-(r.mtl_fee_refunded||0))));
+    const cur=(rows[0]&&rows[0].currency)||'CZK'; const sym=cur==='EUR'?'€':cur==='USD'?'$':'Kč';
+    const f=v=>{ try{ return Math.round(v).toLocaleString(LANG==='en'?'en-US':'cs-CZ')+' '+sym; }catch(e){ return Math.round(v)+' '+sym; } };
+    const sumM=mk=>rows.filter(r=>(r.created_at||'').slice(0,7)===mk).reduce((a,r)=>a+net(r),0)/100;
+    const thisNet=sumM(ym), prevNet=sumM(lm);
+    const trend=(prevNet>0)?Math.round((thisNet-prevNet)/prevNet*100):null;
+    const monthLabel=now.toLocaleDateString(LANG==='en'?'en-GB':'cs-CZ',{month:'long',year:'numeric'});
+    box.innerHTML='<div style="background:linear-gradient(135deg,#0A7A4F,#005A3C);border-radius:16px;padding:15px 18px;color:#fff;box-shadow:0 2px 10px rgba(0,96,64,.18);"><div style="font-size:11.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">'+(LANG==='en'?'Net collected':'Čistě vybráno')+' · '+monthLabel+'</div><div style="font-size:30px;font-weight:800;line-height:1.05;margin:5px 0 3px;">'+f(thisNet)+'</div>'+(trend!=null?('<div style="font-size:12.5px;font-weight:700;">'+(trend>=0?'▲':'▼')+' '+Math.abs(trend)+'% '+(LANG==='en'?'vs last month':'vs minulý měsíc')+'</div>'):('<div style="font-size:11px;opacity:.75;">'+(LANG==='en'?'real Stripe payments, after refunds':'reálné platby ze Stripe, po refundech')+'</div>'))+'</div>';
+  }catch(e){ try{ box.style.display='none'; }catch(_){} }
+}
+
 async function renderCoachAnalytics(coachId, containerId){
   const box=$(containerId);
   if(!box) return;
@@ -12524,6 +12543,7 @@ async function renderCoachAnalytics(coachId, containerId){
   const discRowsHtml=(hArr,uArr)=>{ const m={}; hArr.forEach(b=>{ const d=discOf(b)||'other'; (m[d]=m[d]||{e:0,n:0}); m[d].e+=netAmt(b)*cpct; m[d].n++; }); uArr.forEach(b=>{ const d=discOf(b)||'other'; (m[d]=m[d]||{e:0,n:0}); }); const keys=Object.keys(m); if(!keys.length) return `<div class="prow"><div class="prow-l"><div class="prow-lbl" style="color:var(--light);">${LANG==='en'?'No earnings yet.':'Zatím žádný výdělek.'}</div></div></div>`; return keys.map(k=>{ const lbl=k==='other'?(LANG==='en'?'Other':'Ostatní'):(disciplineEmoji(k)+' '+disciplineLabel(k)); return `<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F3FF;">🥋</div><div class="prow-lbl">${lbl} <span style="color:var(--light);font-size:12px;">(${m[k].n}${LANG==='en'?' done':' proběhlo'})</span></div></div><span class="prow-val">${Math.round(m[k].e)} Kč</span></div>`; }).join(''); };
 
   box.innerHTML = `
+    ${_self?'<div id="csNetHero" style="margin-bottom:10px;"></div>':''}
     ${(currentUser && ((currentUser.role==='founder'||currentUser.id===FOUNDER_UUID)&&!_self)) ? `
     <div style="background:#1f2937;border:1px solid #FFD54A;border-radius:12px;padding:12px 14px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:10px;">
       <div><div style="font-size:13px;font-weight:800;color:#FFD54A;">⭐ Exclusive MTL Partner</div><div style="font-size:11px;color:#cbd5e1;margin-top:2px;">${prof?.partner ? (LANG==='en'?'Coach has the 99% partner rate.':'Kouč má 99 % partner sazbu.')+(prof?.partner_until?(LANG==='en'?' · free month until '+new Date(prof.partner_until).toLocaleDateString('en-GB'):' · měsíc zdarma do '+new Date(prof.partner_until).toLocaleDateString('cs-CZ')):'') : (LANG==='en'?'Coach has the standard 96.5% rate.':'Kouč má běžnou 96,5 % sazbu.')}</div></div>
@@ -12629,6 +12649,7 @@ async function renderCoachAnalytics(coachId, containerId){
     if(tOn){ tOn.style.background=ip?'var(--surf)':'var(--dark)'; tOn.style.color=ip?'var(--dark)':'#fff'; tOn.style.border=ip?'1px solid var(--border)':'none'; } }
   if(tIp) tIp.onclick=()=>csShowTab(true);
   if(tOn) tOn.onclick=()=>csShowTab(false);
+  if(_self && typeof _csFillNetHero==='function') _csFillNetHero(coachId);
 }
 
 async function toggleCoachSuspend(coachId, status, name){
@@ -15963,11 +15984,13 @@ async function openFullDash(){
     +'<div style="font-size:12px;font-weight:800;color:var(--mid);margin:4px 0 8px;">'+(EN?'Open dashboard':'Otevřít dashboard')+'</div>'
     +'<div id="mdActions"></div>';
   if(both){ const an=$('mdAcctNote'); if(an) an.innerHTML=n.sameAcct?(EN?'☝ Coach + Gym use the <b>same</b> Stripe account — one entity, just split by activity.':'☝ Coach i Gym jdou na <b>stejný</b> Stripe účet — jedna entita, jen rozpad dle činnosti.'):(EN?'☝ Coach + Gym are <b>separate</b> Stripe accounts — file each entity separately.':'☝ Coach a Gym = <b>oddělené</b> Stripe účty — účtuj každou entitu zvlášť.'); }
-  const Bd='width:100%;padding:13px;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-bottom:9px;background:var(--dark);color:#fff;';
-  const Bs='width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-bottom:9px;background:var(--surf);color:var(--dark);';
-  let acts='';
-  if(n.hasCoach){ acts+='<button class="mdActBtn" data-act="coachdash" style="'+Bd+'">📊 '+(EN?'Coach dashboard':'Dashboard kouče')+'</button>'; acts+='<button class="mdActBtn" data-act="coachacc" style="'+Bs+'">📄 '+(EN?'Accounting — Coach (monthly, CSV)':'Podklady pro účetní — Kouč (měsíčně, CSV)')+'</button>'; }
-  if(n.hasGym){ acts+='<button class="mdActBtn" data-act="gymdash" style="'+Bd+'">🏛️ '+(EN?'Gym dashboard':'Dashboard gymu')+(both?'':'')+'</button>'; }
+  const Chip='flex:1;padding:14px 12px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';background:#fff;color:var(--dark);';
+  const Bs='width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-top:9px;background:var(--surf);color:var(--dark);';
+  let dashChips='';
+  if(n.hasCoach) dashChips+='<button class="mdActBtn" data-act="coachdash" style="'+Chip+'">📊 '+(EN?'Coach dashboard':'Dashboard kouče')+'</button>';
+  if(n.hasGym) dashChips+='<button class="mdActBtn" data-act="gymdash" style="'+Chip+'">🏛️ '+(EN?'Gym dashboard':'Dashboard gymu')+'</button>';
+  let acts='<div style="display:flex;gap:9px;">'+dashChips+'</div>';
+  if(n.hasCoach) acts+='<button class="mdActBtn" data-act="coachacc" style="'+Bs+'">📄 '+(EN?'Accounting — Coach (monthly, CSV)':'Podklady pro účetní — Kouč (měsíčně, CSV)')+'</button>';
   $('mdActions').innerHTML=acts;
   $('mdActions').querySelectorAll('.mdActBtn').forEach(b=>{ b.onclick=()=>{ const a=b.dataset.act;
     if(a==='coachdash'){ openCoachStats(currentUser.id, currentUser.name||(EN?'Coach':'Kouč')); }
