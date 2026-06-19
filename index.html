@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-18-QCQ | (1) Settings 'Filtr online koucing' -> 'Filtry osobni / online' toggle; now hides BOTH inperson+online deck chips when off + resets activeFilter off either; 'In-person' deck chip -> 'Osobni' (CZ). helpers renamed typeFiltersEnabled/applyTypeFilters (key mtl_typefilters). (2) Deck filter pill: on All shows 'Vybrat konkretni' (Choose specific), on specific shows 'Zmenit sport/umeni' (deck + events). (3) Student My-profile meOnline button hidden when type-filters off UNLESS online history (onlineCount>0); updateOnlineCount re-applies. (4) venueTerm applied to 'Pridat svuj gym' -> 'Pridat svuj dojang/dojo/kwoon...' via applyDeckTerms (DISC_TERMS already exists; roleTerm/venueTerm system in place for incremental rollout). -->
+<!-- MTL build: 2026-06-18-QCR | (1) BUG FIX: deck 'All sports/All arts' now category-scoped. When no specific discipline (_deckDisc null), coaches/gyms/events filter to prefCategory() disciplines only (was leaking both categories). Fixed in buildFiltered coaches + gyms + events filter. (2) Dashboard RELOAD: extracted doAppRefresh() from btnRefresh (re-fetches profile + re-renders -> coach toggling 'offers online' shows after refresh, no F5 needed); added Obnovit/Refresh item at top of dashboard sidebar, always visible. (3) Terminology: 'Pridat svuj gym' -> venueTerm (dojang/dojo/kwoon) via applyDeckTerms; rollout continues per-surface. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -3894,7 +3894,7 @@ function buildFiltered(){
   });
 
   // Discipline filter (only relevant when multiple sports are active)
-  if(isMultiDiscipline() && _deckDisc){ list=list.filter(c=>(c.disciplines||[]).includes(_deckDisc)); }
+  if(isMultiDiscipline()){ if(_deckDisc){ list=list.filter(c=>(c.disciplines||[]).includes(_deckDisc)); } else { const _pc=prefCategory(); list=list.filter(c=>(c.disciplines||[]).some(d=>discCat(d)===_pc)); } }
 
   // Coach teaching-language filter
   if(_deckLang){ list=list.filter(c=>(c.langs||[]).includes(_deckLang)); }
@@ -4437,7 +4437,7 @@ function buildGymFiltered(){
   let list=[...GYMS];
   /* vlastní gymy zůstávají v decku (owner/tým si může rezervovat lekci) */
   list.forEach(g=>{ g.distKm = (userLoc && g.coords) ? haversine(userLoc.lat,userLoc.lng,g.coords.lat,g.coords.lng) : null; });
-  if(isMultiDiscipline() && _deckDisc){ list=list.filter(g=>g.disciplines.includes(_deckDisc)); }
+  if(isMultiDiscipline()){ if(_deckDisc){ list=list.filter(g=>g.disciplines.includes(_deckDisc)); } else { const _pc=prefCategory(); list=list.filter(g=>(g.disciplines||[]).some(d=>discCat(d)===_pc)); } }
   if(_gymTagFilter){ list=list.filter(g=>(g.levels||[]).includes(_gymTagFilter)); }
   if(searchQuery){ const q=searchQuery.toLowerCase(); list=list.filter(g=> g.name.toLowerCase().includes(q) || g.city.toLowerCase().includes(q)); }
   if(userLoc) list.sort((a,b)=>((a.distKm==null?9e9:a.distKm)-(b.distKm==null?9e9:b.distKm)));
@@ -5203,7 +5203,7 @@ async function renderEventsAsync(box){
       const ft = window._evFilterType||'all';
       const _tch=[{v:'all',lbl:(LANG==='en'?'All':'Vše'),emoji:''}].concat(EVENT_TYPES.map(tt=>({v:tt.v,lbl:(LANG==='en'?tt.en:tt.cs),emoji:tt.emoji})));
       html += `<div style="display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;margin-bottom:10px;">`+_tch.map(c=>{ const on=(ft===c.v); return `<div class="evTypeChip pill${on?' active':''}" data-v="${c.v}">${c.emoji?c.emoji+' ':''}${c.lbl}</div>`; }).join('')+`</div>`;
-      const _sq=((typeof searchQuery!=='undefined'?searchQuery:'')||'').toLowerCase(); const list=window._evList.filter(ev=>{ if(fd!=='all'){ let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){} if(!ds.includes(fd)) return false; } if(ft!=='all' && ev.type!==ft) return false; if(_sq){ const hay=((ev.title||'')+' '+(ev.venue||'')+' '+(ev.city||'')+' '+(ev.country||'')).toLowerCase(); if(!hay.includes(_sq)) return false; } return true; });
+      const _sq=((typeof searchQuery!=='undefined'?searchQuery:'')||'').toLowerCase(); const list=window._evList.filter(ev=>{ if(fd!=='all'){ let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){} if(!ds.includes(fd)) return false; } else { let _eds=[]; try{ _eds=JSON.parse(ev.disciplines||'[]'); }catch(e){} const _epc=prefCategory(); if(_eds.length && !_eds.some(d=>discCat(d)===_epc)) return false; } if(ft!=='all' && ev.type!==ft) return false; if(_sq){ const hay=((ev.title||'')+' '+(ev.venue||'')+' '+(ev.city||'')+' '+(ev.country||'')).toLowerCase(); if(!hay.includes(_sq)) return false; } return true; });
       window._evFiltered = list; if(window._evIdx==null) window._evIdx=0;
       html += list.length ? `<div id="evDeck" style="position:relative;flex:1;min-height:280px;margin-top:0;"></div>` : `<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;">${LANG==='en'?'No events in this discipline.':'Žádné události v této disciplíně.'}</p>`;
     } else {
@@ -10850,13 +10850,10 @@ async function updateNotifBadge(){
   } catch(e){ console.error(e); toast(L('⚠️ Chyba')); }
 };
 
-  $('btnRefresh').onclick=async()=>{
-  const btn=$('btnRefresh');
-  btn.style.transition='transform .6s';
-  btn.style.transform='rotate(360deg)';
+  async function doAppRefresh(){
   toast(L('⟳ Obnovuji...'));
   await loadCoaches();
-    if(typeof updateCoachSummary==='function') await updateCoachSummary();
+  if(typeof updateCoachSummary==='function') await updateCoachSummary();
   await updateNotifBadge();
   if(currentUser && currentUser.role==='founder') await updateAdminBadge();
   if(currentUser){
@@ -10864,8 +10861,15 @@ async function updateNotifBadge(){
     if(prof){ currentUser=prof; updateRoleUI(); fillUserProfile(); }
   }
   if($('shNotif').classList.contains('open')) loadNotifications();
-  setTimeout(()=>{ btn.style.transform='rotate(0deg)'; btn.style.transition='none'; }, 600);
   toast('✅ Obnoveno');
+  }
+  window.doAppRefresh=doAppRefresh;
+  $('btnRefresh').onclick=async()=>{
+  const btn=$('btnRefresh');
+  btn.style.transition='transform .6s';
+  btn.style.transform='rotate(360deg)';
+  await doAppRefresh();
+  setTimeout(()=>{ btn.style.transform='rotate(0deg)'; btn.style.transition='none'; }, 600);
 };
 
   // Admin tlačítko
@@ -14974,6 +14978,7 @@ function buildDashSide(){
 
       const sb=document.createElement('div'); sb.id='dashSide';
       sb.innerHTML='<div style="font-family:\'Bebas Neue\';font-size:22px;letter-spacing:.05em;color:var(--red);margin-bottom:2px;line-height:1.05;">MARTIAL TRAINING LAB</div>'
+          +'<div id="dashReload" style="display:flex;align-items:center;gap:9px;padding:9px 12px;border-radius:10px;font-size:14px;font-weight:700;color:var(--dark);cursor:pointer;margin:10px 0 6px;background:var(--bg);">🔄 <span>'+(LANG==='en'?'Refresh':'Obnovit')+'</span></div>'
         +'<div style="font-size:12px;color:var(--mid);margin-bottom:22px;line-height:1.4;">'+_dashTagline()+'</div>'
         +'<div class="dsGroup" data-grp="general">🧩 <span>'+(LANG==='en'?'General':'Obecné')+'</span><span class="dsArr" style="transform:rotate(-90deg);">▾</span></div>'
         +'<div class="dsSub" id="dsSubGeneral" style="display:none;">'
@@ -15012,6 +15017,7 @@ function buildDashSide(){
       document.querySelectorAll('.shdr').forEach(function(h){ var _psh=h.closest('.sheet'); if(_psh && _psh.id==='shMe') return; if(!h.querySelector('.dashBackInline')){ var a=document.createElement('div'); a.className='dashBackInline'; a.textContent='←'; a.title=(LANG==='en'?'Back':'Zpět'); a.onclick=_dashBack; h.insertBefore(a,h.firstChild); } });
       sb.querySelectorAll('.dsGroup').forEach(g=>g.onclick=()=>{ const _gn=g.dataset.grp; const sub=document.getElementById('dsSub'+_gn.charAt(0).toUpperCase()+_gn.slice(1)); if(sub){ const op=sub.style.display!=='none'; sub.style.display=op?'none':'block'; const ar=g.querySelector('.dsArr'); if(ar) ar.style.transform=op?'rotate(-90deg)':'none'; } });
       sb.querySelectorAll('.dsItem').forEach(el=>el.onclick=()=>{ sb.querySelectorAll('.dsItem').forEach(x=>x.classList.remove('on')); el.classList.add('on'); _dashGo(el.dataset.act); });
+      if($('dashReload')) $('dashReload').onclick=async()=>{ const _r=$('dashReload'); _r.style.opacity='.5'; try{ if(typeof doAppRefresh==='function') await doAppRefresh(); }catch(e){} _r.style.opacity='1'; };
     
 }
 
