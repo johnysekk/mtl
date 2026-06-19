@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-18-QDE | In-app All-time + per-year net filters (not export-only). VERIFIED scaling first: transactions has idx_tx_gym_created (gym safe) but NO coach_id index -> shipped transactions-coach-index.sql adding idx_tx_coach_created on transactions(coach_id, created_at). REQUIRED before this is globally safe: without it every coach net query full-scans the global transactions table. With it, one user's All-time query is an index seek into only their own rows (Postgres MVCC, reads don't block reads) -> never slows other users globally; the 'may take longer' note covers only that user's own large-result render. Default net view = CURRENT MONTH everywhere (Me hero + dashboard). Header is now a select: This month / Last 12 months / Year 2025..2019 / All time. month+12m served instantly from the ~13-month cache; year/all-time trigger an on-demand targeted query (with loading state + a 'may take a longer time to load depending on your transaction history' note). Accounting CSV export kept alongside (view in-app OR download). -->
+<!-- MTL build: 2026-06-18-QDF | Net dashboard restructured to STOP reinventing - now routes to existing dashboards instead of custom breakdowns. (1) Hero net + dashboard header recolored to the same green (#0A7A4F->#005A3C) gradient + style as the gym dashboard hero. (2) shMoneyDash slimmed: green Net headline with period filter (This month default / 12m / per-year / All time, year+all on-demand with 'may take longer' note) + Coach/Gym net split sub-line, THEN buttons that open the EXISTING dashboards: 'Coach dashboard' -> openCoachStats(self), 'Gym dashboard' -> shGymManage tab 2 (gym picker if >1). Removed the duplicated 1:1/online/by-discipline/by-type breakdowns I had built. (3) Wired the coach side to the existing monthly openAccounting (coachId filter, month navigation + CSV) - previously only the gym had it via mgAccBtn. Online-net row no longer needs hiding since the breakdown moved to openAccounting, which only lists transaction types actually present. NOTE: standalone Coach dashboard entry on the Me page (parity with the gym button) + server-side aggregate RPCs for franchise/chain roll-ups and the Ambassador/Founder global queries are the next steps, not in this build. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -15926,11 +15926,10 @@ async function renderMeNetHero(){
   const isCoach=currentUser.coach_status==='approved'; const isGym=!!(window._myGyms&&window._myGyms.length);
   if(!isCoach&&!isGym){ box.style.display='none'; box.innerHTML=''; return; }
   box.style.display='block';
-  box.innerHTML='<div id="meNetHeroCard" style="background:linear-gradient(135deg,#1a1a1a,#2b2b2b);border-radius:16px;padding:17px 19px;margin-bottom:16px;cursor:pointer;"><div style="font-size:12px;font-weight:700;color:#bdbdbd;letter-spacing:.04em;">💰 '+(LANG==='en'?'Net collected':'Čistě vybráno')+' ('+(LANG==='en'?'this month':'tento měsíc')+')</div><div id="meNetHeroVal" style="font-family:\'Bebas Neue\';font-size:34px;color:#fff;letter-spacing:.02em;line-height:1.1;margin-top:2px;">…</div><div style="font-size:11px;color:#8a8a8a;margin-top:3px;">'+(LANG==='en'?'Real Stripe net · tap for full dashboard ›':'Reálný Stripe net · klikni pro celý přehled ›')+'</div></div>';
+  box.innerHTML='<div id="meNetHeroCard" style="background:linear-gradient(135deg,#0A7A4F,#005A3C);border-radius:16px;padding:15px 18px;margin-bottom:16px;cursor:pointer;color:#fff;box-shadow:0 2px 10px rgba(0,96,64,.18);"><div style="font-size:11.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">💰 '+(LANG==='en'?'Net collected':'Čistě vybráno')+' · '+(LANG==='en'?'this month':'tento měsíc')+'</div><div id="meNetHeroVal" style="font-size:30px;font-weight:800;line-height:1.05;margin:5px 0 3px;">…</div><div style="font-size:11px;opacity:.78;">'+(LANG==='en'?'real Stripe net · tap for dashboard ›':'reálný Stripe net · klikni pro dashboard ›')+'</div></div>';
   const card=$('meNetHeroCard'); if(card) card.onclick=()=>openFullDash();
   try{ const nn=await loadMyNet(); const tot=_netOfMonth(nn.coachTx)+_netOfMonth(nn.gymTx); const v=$('meNetHeroVal'); if(v) v.textContent=_netFmt(tot,nn.cur); }catch(e){ const v=$('meNetHeroVal'); if(v) v.textContent='—'; }
 }
-window._mdRole=null; window._mdPer=null; window._mdCur=null;
 async function _mdFetchRange(yr){
   const cols='id,type,discipline,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,stripe_fee,created_at,gym_id,coach_id,currency';
   const lo=yr?yr+'-01-01':null, hi=yr?(parseInt(yr,10)+1)+'-01-01':null;
@@ -15954,47 +15953,28 @@ async function openFullDash(){
   pOpts+='<option value="all">'+(EN?'All time':'Vše (celá historie)')+'</option>';
   body.innerHTML='<div id="mdHeader"></div>'
     +'<select id="mdPeriodSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-weight:700;font-family:\'DM Sans\';background:#fff;color:var(--dark);margin-bottom:7px;">'+pOpts+'</select>'
-    +'<div id="mdPerNote" style="font-size:11px;color:var(--light);line-height:1.5;margin-bottom:14px;display:none;"></div>'
-    +(both?'<div id="mdChips" style="display:flex;gap:8px;margin-bottom:10px;"></div><div id="mdAcctNote" style="font-size:11.5px;color:var(--mid);background:var(--surf);border-radius:9px;padding:8px 11px;margin-bottom:14px;line-height:1.45;"></div>':'')
-    +'<div id="mdRoleBody"></div>';
-  function setChipActive(role){ document.querySelectorAll('.mdChip').forEach(c=>{ const on=c.dataset.r===role; c.style.background=on?'var(--dark)':'transparent'; c.style.color=on?'#fff':'var(--mid)'; c.style.borderColor=on?'var(--dark)':'var(--border)'; }); }
+    +'<div id="mdPerNote" style="font-size:11px;color:var(--light);line-height:1.5;margin-bottom:12px;display:none;"></div>'
+    +(both?'<div id="mdAcctNote" style="font-size:11.5px;color:var(--mid);background:var(--surf);border-radius:9px;padding:8px 11px;margin-bottom:14px;line-height:1.45;"></div>':'')
+    +'<div style="font-size:12px;font-weight:800;color:var(--mid);margin:4px 0 8px;">'+(EN?'Open dashboard':'Otevřít dashboard')+'</div>'
+    +'<div id="mdActions"></div>';
+  if(both){ const an=$('mdAcctNote'); if(an) an.innerHTML=n.sameAcct?(EN?'☝ Coach + Gym use the <b>same</b> Stripe account — one entity, just split by activity.':'☝ Coach i Gym jdou na <b>stejný</b> Stripe účet — jedna entita, jen rozpad dle činnosti.'):(EN?'☝ Coach + Gym are <b>separate</b> Stripe accounts — file each entity separately.':'☝ Coach a Gym = <b>oddělené</b> Stripe účty — účtuj každou entitu zvlášť.'); }
+  const Bd='width:100%;padding:13px;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-bottom:9px;background:var(--dark);color:#fff;';
+  const Bs='width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-bottom:9px;background:var(--surf);color:var(--dark);';
+  let acts='';
+  if(n.hasCoach){ acts+='<button class="mdActBtn" data-act="coachdash" style="'+Bd+'">📊 '+(EN?'Coach dashboard':'Dashboard kouče')+'</button>'; acts+='<button class="mdActBtn" data-act="coachacc" style="'+Bs+'">📄 '+(EN?'Accounting — Coach (monthly, CSV)':'Podklady pro účetní — Kouč (měsíčně, CSV)')+'</button>'; }
+  if(n.hasGym){ acts+='<button class="mdActBtn" data-act="gymdash" style="'+Bd+'">🏛️ '+(EN?'Gym dashboard':'Dashboard gymu')+(both?'':'')+'</button>'; }
+  $('mdActions').innerHTML=acts;
+  $('mdActions').querySelectorAll('.mdActBtn').forEach(b=>{ b.onclick=()=>{ const a=b.dataset.act;
+    if(a==='coachdash'){ openCoachStats(currentUser.id, currentUser.name||(EN?'Coach':'Kouč')); }
+    else if(a==='coachacc'){ openAccounting({ coachId: currentUser.id }, (EN?'Accounting — ':'Podklady — ')+(currentUser.name||(EN?'Coach':'Kouč'))); }
+    else if(a==='gymdash'){ const gs=window._myGyms||[]; try{ closeSheet('shMoneyDash'); }catch(e){} if(gs.length>1 && typeof openGymPicker==='function'){ openGymPicker(); } else { try{ window._selectedGymId=(gs[0]&&gs[0].id)||null; if(typeof _myGymData!=='undefined' && !_myGymData) _myGymData=gs[0]||null; }catch(e){} openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); setTimeout(()=>{ try{ if(window._gmShowTab) window._gmShowTab(2); }catch(e){} },180); } }
+  }; });
   function paintHeader(){
     const {coachRows:cr,gymRows:gr,label}=window._mdCur;
     const cN=cr.reduce((a,r)=>a+_txNetEff(r),0)/100, gN=gr.reduce((a,r)=>a+_txNetEff(r),0)/100, tot=cN+gN;
-    $('mdHeader').innerHTML='<div style="background:linear-gradient(135deg,#1a1a1a,#2b2b2b);border-radius:16px;padding:18px 20px;margin-bottom:14px;"><div style="font-size:12px;font-weight:700;color:#bdbdbd;letter-spacing:.04em;">💰 '+(EN?'Net collected':'Čistě vybráno')+' ('+label+')</div><div style="font-family:\'Bebas Neue\';font-size:36px;color:#fff;line-height:1.1;margin-top:2px;">'+fmt(tot)+'</div><div style="font-size:11px;color:#8a8a8a;margin-top:3px;">'+(EN?'Real Stripe net, after Stripe + MTL fees':'Reálný Stripe net, po Stripe + MTL poplatcích')+'</div></div>';
-    if(both){ $('mdChips').innerHTML='<button class="mdChip" data-r="coach" style="flex:1;padding:11px;border-radius:10px;border:1.5px solid var(--border);background:transparent;color:var(--mid);font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">🥊 '+(EN?'Coach':'Kouč')+' · '+fmt(cN)+'</button><button class="mdChip" data-r="gym" style="flex:1;padding:11px;border-radius:10px;border:1.5px solid var(--border);background:transparent;color:var(--mid);font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">🏛️ Gym · '+fmt(gN)+'</button>'; document.querySelectorAll('.mdChip').forEach(c=>c.onclick=()=>{ window._mdRole=c.dataset.r; setChipActive(c.dataset.r); renderRole(); }); const note=$('mdAcctNote'); if(note) note.innerHTML=n.sameAcct?(EN?'☝ Coach + Gym use the <b>same</b> Stripe account — one entity, just split by activity.':'☝ Coach i Gym jdou na <b>stejný</b> Stripe účet — jedna entita, jen rozpad dle činnosti.'):(EN?'☝ Coach + Gym are <b>separate</b> Stripe accounts — file each entity separately.':'☝ Coach a Gym = <b>oddělené</b> Stripe účty — účtuj každou entitu zvlášť.'); }
+    let sub=''; if(both) sub='<div style="font-size:12px;opacity:.9;margin-top:6px;font-weight:600;">🥊 '+(EN?'Coach':'Kouč')+' '+fmt(cN)+'   ·   🏛️ Gym '+fmt(gN)+'</div>';
+    $('mdHeader').innerHTML='<div style="background:linear-gradient(135deg,#0A7A4F,#005A3C);border-radius:16px;padding:16px 19px;margin-bottom:12px;color:#fff;box-shadow:0 2px 10px rgba(0,96,64,.18);"><div style="font-size:11.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">💰 '+(EN?'Net collected':'Čistě vybráno')+' · '+label+'</div><div style="font-size:33px;font-weight:800;line-height:1.05;margin:5px 0 2px;">'+fmt(tot)+'</div>'+sub+'<div style="font-size:10.5px;opacity:.75;margin-top:3px;">'+(EN?'real Stripe net, after Stripe + MTL fees':'reálný Stripe net, po Stripe + MTL poplatcích')+'</div></div>';
   }
-  const expBlock=(kind)=>{ let yOpts=''; for(let y=yNow;y>=yNow-6;y--){ yOpts+='<option value="'+y+'">'+(EN?'Year ':'Rok ')+y+'</option>'; } yOpts+='<option value="all">'+(EN?'All time':'Vše (celá historie)')+'</option>'; return '<div style="border-top:1px solid var(--border);margin-top:16px;padding-top:14px;"><div style="font-size:13px;font-weight:800;margin-bottom:8px;">📄 '+(EN?'Accounting export (CSV)':'Podklady pro účetní (CSV)')+'</div><div style="display:flex;gap:8px;"><select id="mdExpYear" style="flex:1;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:13.5px;font-family:\'DM Sans\';background:#fff;color:var(--dark);">'+yOpts+'</select><button id="mdExpBtn" data-kind="'+kind+'" style="padding:11px 16px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';white-space:nowrap;">'+(EN?'Download':'Stáhnout')+'</button></div></div>'; };
-  function wireExp(){ const eb=$('mdExpBtn'); if(eb) eb.onclick=()=>_mdExport(eb.dataset.kind, ($('mdExpYear')||{}).value||String(yNow)); }
-  function renderCoach(){
-    const cr=window._mdCur.coachRows, eff=_txNetEff, isOn=r=>r.type==='online'||r.online===true;
-    const onNet=cr.filter(isOn).reduce((a,r)=>a+eff(r),0)/100, ipNet=cr.filter(r=>!isOn(r)).reduce((a,r)=>a+eff(r),0)/100, cTot=onNet+ipNet;
-    const byM={}; cr.forEach(r=>{ const m=(r.created_at||'').slice(0,7); if(m)byM[m]=(byM[m]||0)+eff(r)/100; });
-    const byD={}; cr.forEach(r=>{ const d=r.discipline||'other'; byD[d]=(byD[d]||0)+eff(r)/100; });
-    const dK=Object.keys(byD).filter(x=>byD[x]>0).sort((a,b)=>byD[b]-byD[a]); const multi=(typeof isMultiDiscipline==='function'&&isMultiDiscipline());
-    let h='<div class="prow-group" style="margin-bottom:14px;">'
-      +'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🥊</div><div class="prow-lbl">'+(EN?'1:1 in-person (net)':'1:1 osobně (net)')+'</div></div><span class="prow-val">'+fmt(ipNet)+'</span></div>'
-      +'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🌐</div><div class="prow-lbl">'+(EN?'Online (net)':'Online (net)')+'</div></div><span class="prow-val">'+fmt(onNet)+'</span></div>'
-      +'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">💰</div><div class="prow-lbl"><b>'+(EN?'Coach net total':'Kouč net celkem')+'</b></div></div><span class="prow-val" style="color:#006040;font-weight:800;">'+fmt(cTot)+'</span></div></div>';
-    if(multi&&dK.length>1){ h+='<div style="font-size:12px;font-weight:700;color:var(--mid);margin:4px 0 6px;">🥋 '+(EN?'By discipline':'Podle disciplíny')+'</div><div class="prow-group" style="margin-bottom:14px;">'+dK.map(x=>{ const lbl=x==='other'?(EN?'Other':'Ostatní'):((typeof disciplineEmoji==='function'?disciplineEmoji(x):'🥋')+' '+(typeof disciplineLabel==='function'?disciplineLabel(x):x)); return '<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F3FF;">🥋</div><div class="prow-lbl">'+lbl+'</div></div><span class="prow-val" style="color:#006040;">'+fmt(byD[x])+'</span></div>'; }).join('')+'</div>'; }
-    h+='<div style="font-size:12px;color:var(--light);margin-bottom:4px;">'+(EN?'Net by month':'Net po měsících')+'</div>'+(typeof renderBars==='function'?renderBars(byM,'var(--green)'):'');
-    h+=expBlock('coach');
-    h+='<div id="mdCoachStats" style="margin-top:18px;"></div>';
-    $('mdRoleBody').innerHTML=h; wireExp();
-    try{ if(typeof renderCoachAnalyticsCompact==='function') renderCoachAnalyticsCompact(currentUser.id,'mdCoachStats'); }catch(e){}
-  }
-  function renderGym(){
-    const gr=window._mdCur.gymRows, eff=_txNetEff;
-    const byT={}; gr.forEach(r=>{ const t=r.type||'other'; byT[t]=(byT[t]||0)+eff(r); });
-    const tL={drop_in:(EN?'Drop-ins':'Jednorázové'),membership:(EN?'Memberships':'Členství'),event_ticket:(EN?'Events':'Akce'),merch:'Merch'};
-    const gTot=gr.reduce((a,r)=>a+eff(r),0)/100;
-    let h='<div class="prow-group" style="margin-bottom:14px;">'+Object.keys(byT).sort((a,b)=>byT[b]-byT[a]).map(t=>'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💳</div><div class="prow-lbl">'+(tL[t]||t)+'</div></div><span class="prow-val">'+fmt(byT[t]/100)+'</span></div>').join('')+'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">💰</div><div class="prow-lbl"><b>'+(EN?'Gym net total':'Gym net celkem')+'</b></div></div><span class="prow-val" style="color:#006040;font-weight:800;">'+fmt(gTot)+'</span></div></div>';
-    h+='<button id="mdOpenGym" style="width:100%;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">📊 '+(EN?'Open full gym dashboard':'Otevřít plný gym dashboard')+'</button>';
-    h+=expBlock('gym');
-    $('mdRoleBody').innerHTML=h; wireExp();
-    const ob=$('mdOpenGym'); if(ob) ob.onclick=()=>{ try{ closeSheet('shMoneyDash'); }catch(e){} try{ if(!_myGymData) _myGymData=(window._myGyms&&window._myGyms[0])||null; }catch(e){} openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); setTimeout(()=>{ try{ if(window._gmShowTab) window._gmShowTab(2); }catch(e){} },180); };
-  }
-  function renderRole(){ const role=both?(window._mdRole||'coach'):(n.hasCoach?'coach':'gym'); if(both) setChipActive(role); if(role==='coach') renderCoach(); else renderGym(); }
   async function applyPeriod(val){
     window._mdPer=val; const note=$('mdPerNote');
     const onDemand=(val!=='month'&&val!=='12m');
@@ -16003,15 +15983,13 @@ async function openFullDash(){
     if(val==='month'){ const mk=_curMonthKey(); coachRows=n.coachTx.filter(r=>(r.created_at||'').slice(0,7)===mk); gymRows=n.gymTx.filter(r=>(r.created_at||'').slice(0,7)===mk); label=EN?'this month':'tento měsíc'; }
     else if(val==='12m'){ coachRows=n.coachTx; gymRows=n.gymTx; label=EN?'last 12 months':'posledních 12 měsíců'; }
     else {
-      $('mdHeader').innerHTML='<div style="background:linear-gradient(135deg,#1a1a1a,#2b2b2b);border-radius:16px;padding:18px 20px;margin-bottom:14px;text-align:center;color:#bdbdbd;font-size:13px;">'+L('Načítám...')+'</div>';
-      $('mdRoleBody').innerHTML='';
+      $('mdHeader').innerHTML='<div style="background:linear-gradient(135deg,#0A7A4F,#005A3C);border-radius:16px;padding:18px 20px;margin-bottom:12px;text-align:center;color:#dff5ea;font-size:13px;">'+L('Načítám...')+'</div>';
       const isAll=val==='all', yr=isAll?null:val.slice(1);
       try{ const got=await _mdFetchRange(yr); coachRows=got.coachRows; gymRows=got.gymRows; }
       catch(e){ $('mdHeader').innerHTML='<p style="color:#c0392b;padding:18px;text-align:center;font-size:13px;">⚠️ '+(e.message||'')+'</p>'; return; }
       label=isAll?(EN?'all time':'celá historie'):(EN?'year ':'rok ')+yr;
     }
-    window._mdCur={coachRows,gymRows,label};
-    paintHeader(); renderRole();
+    window._mdCur={coachRows,gymRows,label}; paintHeader();
   }
   const sel=$('mdPeriodSel'); if(sel){ sel.value='month'; sel.onchange=()=>applyPeriod(sel.value); }
   window._mdPer='month'; await applyPeriod('month');
