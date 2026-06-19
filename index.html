@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-18-QDW | (Task 3) Member referral in gym settings is checkbox-gated: a checkbox reveals the % field only when ticked (placeholder 'E.g. 10%'); save writes 0 when unticked. (Task 4) Acquisition attribution fix: current-member link now carries &own=1, persisted on load as localStorage mtl_owngym_<gymId>; _acqSrc returns 'direct' for those gyms first, so a gym's own existing members are never tagged mtl_discovery (no MTL acquisition cut) even if they later open the gym from the deck/search. Task 2 verified: schedule already has classLeadSelectHtml (who leads) + payeeSelectHtml (paid to); only the leader shows externally. Pending: per-occurrence single-date coach override; verify occ.coach=leader doesn't misroute drop-in payout. -->
+<!-- MTL build: 2026-06-18-QDX | Kid detail fix: (1) replaced invalid Python-style 8-hex unicode escapes (capital-U form, which JS rendered as literal text like 'U0001F94B') with real emoji in the kid-detail title + stat icons + belt-promotion notification. (2) Kid detail now loads the child's gym_memberships (student_id=parent + child_name) and shows each active/cancelling one with an 'End' button wired to ownerRemoveMember, which now also refreshes the open kid detail via window._mdKid. Before this a kid membership had no end option in the UI. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -13242,7 +13242,7 @@ async function ownerRemoveMember(mid, subId, mname){
     if(periodEndIso && !immediate){ await supaClient.from('gym_memberships').update({ status:'cancelling', cancelled_at:new Date().toISOString(), period_end:periodEndIso }).eq('id', mid); toast(EN?'✅ Will end at the paid period end.':'✅ Skončí na konci zaplaceného období.'); }
     else { await supaClient.from('gym_memberships').update({ status:'ended', cancelled_at:new Date().toISOString(), period_end:new Date().toISOString() }).eq('id', mid); toast(EN?'✅ Membership ended.':'✅ Členství ukončeno.'); }
     try{ const { data: mb }=await supaClient.from('gym_memberships').select('student_id,plan_name').eq('id',mid).single(); if(mb&&mb.student_id){ await supaClient.from('notifications').insert({ user_id:mb.student_id, type:'system', read:false, message:(EN?`Your membership${mb.plan_name?' ('+mb.plan_name+')':''} at ${_myGymData.name||'the gym'} was ended by the gym.`:`Tvé členství${mb.plan_name?' ('+mb.plan_name+')':''} v ${_myGymData.name||'gymu'} bylo ukončeno gymem.`) }); } }catch(e){}
-    if(window._mdSid) openGymMemberDetail(window._mdSid, window._mdName); if(typeof renderGymMembers==='function') renderGymMembers();
+    if(window._mdSid) openGymMemberDetail(window._mdSid, window._mdName); else if(window._mdKid) openGymKidDetail(window._mdKid.parentId, window._mdKid.childName); if(typeof renderGymMembers==='function') renderGymMembers();
   }catch(e){ toast('⚠️ '+(e.message||'')); }
 }
 async function openGymMemberDetail(sid, name){
@@ -13590,7 +13590,7 @@ function kidBeltHtml(_belts){
     const order=DISC_BELTS[disc]||[];
     out+=`<div style="font-size:12px;font-weight:700;color:var(--mid);margin:4px 0 6px;">${disciplineEmoji(disc)} ${disciplineLabel(disc)} ${EN?'belt':'p\u00e1sek'}</div>`;
     if(curBelt) out+=`<div style="margin-bottom:6px;">${beltBadgeHtml(curBelt,curStripes)}</div>`;
-    if(curBelt && announced!==curBelt){ out+=`<div style="margin-bottom:9px;"><span onclick="announceKidBelt('${disc}')" style="cursor:pointer;display:inline-block;background:var(--red);color:#fff;font-size:11.5px;font-weight:800;padding:6px 12px;border-radius:10px;">\U0001F4E3 ${EN?'Announce':'Ozn\u00e1mit'} ${beltLabel(curBelt)}</span> <span style="font-size:10.5px;color:var(--light);">${EN?'notifies the parent':'po\u0161le rodi\u010di notifikaci'}</span></div>`; }
+    if(curBelt && announced!==curBelt){ out+=`<div style="margin-bottom:9px;"><span onclick="announceKidBelt('${disc}')" style="cursor:pointer;display:inline-block;background:var(--red);color:#fff;font-size:11.5px;font-weight:800;padding:6px 12px;border-radius:10px;">📣 ${EN?'Announce':'Ozn\u00e1mit'} ${beltLabel(curBelt)}</span> <span style="font-size:10.5px;color:var(--light);">${EN?'notifies the parent':'po\u0161le rodi\u010di notifikaci'}</span></div>`; }
     else if(curBelt){ out+=`<div style="font-size:10.5px;color:var(--mid);margin-bottom:9px;">\u2713 ${EN?'announced':'ozn\u00e1meno'}</div>`; }
     out+=`<div style="font-size:11px;color:var(--light);margin-bottom:5px;">${EN?'Set the belt (silent until you announce):':'Nastav p\u00e1sek (potichu, dokud neozn\u00e1m\u00ed\u0161):'}</div>`;
     out+=`<div style="display:flex;flex-wrap:wrap;gap:5px;">${order.map(function(v){ const m=beltMeta(v); const on=curBelt===v; return `<span onclick="setKidBelt('${disc}','${v}',${curStripes})" style="cursor:pointer;font-size:11px;font-weight:800;padding:6px 11px;border-radius:12px;border:1.5px solid ${on?m.c:'var(--border)'};background:${on?m.c:'transparent'};color:${on?m.t:'var(--mid)'};">${EN?m.en:m.cs}</span>`; }).join('')}</div>`;
@@ -13605,22 +13605,24 @@ function _kidBeltsOf(c){ try{ return c&&c.belts?(typeof c.belts==='string'?JSON.
 async function openGymKidDetail(parentId, childName){
   const EN=LANG==='en'; if(!parentId||!_myGymData) return;
   window._mdSid=null; window._mdKid={parentId:parentId, childName:childName};
-  if($('mdTitle')) $('mdTitle').textContent='\U0001F9D2 '+childName;
+  if($('mdTitle')) $('mdTitle').textContent='🧒 '+childName;
   const body=$('mdBody'); if(body) body.innerHTML=`<p style="text-align:center;color:var(--light);padding:20px;">${L('Na\u010d\u00edt\u00e1m...')}</p>`;
   $('memberDetailOv').classList.add('open');
   let kids=[], child=null;
   try{ const { data:_pr } = await supaClient.from('profiles').select('children').eq('id',parentId).single(); kids=_pr&&_pr.children?(typeof _pr.children==='string'?JSON.parse(_pr.children):_pr.children):[]; child=(kids||[]).find(c=>c&&c.name===childName)||null; }catch(e){}
   const _belts=_kidBeltsOf(child);
   let n=0; try{ const { data:att } = await supaClient.from('gym_attendance').select('id').eq('gym_id',_myGymData.id).eq('student_id',parentId).eq('child_name',childName); n=(att||[]).length; }catch(e){}
+  let kmems=[]; try{ const { data:km } = await supaClient.from('gym_memberships').select('id,plan_name,price,currency,status,stripe_subscription').eq('gym_id',_myGymData.id).eq('student_id',parentId).eq('child_name',childName).in('status',['active','cancelling']); kmems=km||[]; }catch(e){}
+  const _kmHtml = kmems.length ? (`<div class="sec-lbl" style="margin:14px 0 6px;">${EN?'Membership':'Členství'}</div>`+kmems.map(m=>`<div style="border:1px solid var(--border);border-radius:11px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="min-width:0;"><div style="font-size:13.5px;font-weight:700;">${escapeHtml(m.plan_name||(EN?'Membership':'Členství'))}</div><div style="font-size:11.5px;color:var(--mid);">${m.status==='cancelling'?(EN?'Cancelling at period end':'Ukončuje se na konci období'):(EN?'Active':'Aktivní')}${m.price?(' · '+m.price+' '+(m.currency||'CZK')+'/'+(EN?'mo':'měs')):''}</div></div><button class="kidRemoveMember" data-mid="${m.id}" data-sub="${m.stripe_subscription||''}" style="flex-shrink:0;padding:8px 12px;background:#fff;border:1.5px solid var(--red);color:var(--red);border-radius:9px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'End':'Ukončit'}</button></div>`).join('')) : '';
   const li=levelInfo(n*2);
   let html=`<div class="prow-group">`
-    +`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">\U0001F94B</div><div class="prow-lbl">${EN?'Trainings attended':'Odtr\u00e9nov\u00e1no'}</div></div><span class="prow-val">${n}</span></div>`
+    +`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🥋</div><div class="prow-lbl">${EN?'Trainings attended':'Odtr\u00e9nov\u00e1no'}</div></div><span class="prow-val">${n}</span></div>`
     +`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF7E0;">\u2B50</div><div class="prow-lbl">${EN?'Level':'\u00darove\u0148'}</div></div><span class="prow-val">${li.level}</span></div>`
-    +((child&&child.age!=null&&child.age!=='')?`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">\U0001F382</div><div class="prow-lbl">${EN?'Age':'V\u011bk'}</div></div><span class="prow-val">${child.age}</span></div>`:'')
+    +((child&&child.age!=null&&child.age!=='')?`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">🎂</div><div class="prow-lbl">${EN?'Age':'V\u011bk'}</div></div><span class="prow-val">${child.age}</span></div>`:'')
     +`</div>`;
   if(!child){ html+=`<p style="color:var(--red);font-size:13px;">${EN?'Child not found.':'D\u00edt\u011b nenalezeno.'}</p>`; }
-  else { html+=`<div style="font-size:11.5px;color:var(--mid);background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:9px 11px;margin:4px 0 12px;line-height:1.45;">${EN?'Award belts to this child \u2014 announced belts appear on their public trophy-case.':'Uděluj tomuto d\u00edt\u011bti p\u00e1sky \u2014 ozn\u00e1men\u00e9 p\u00e1sky se objev\u00ed na jeho ve\u0159ejn\u00e9 vitr\u00edn\u011b.'}</div>`; const _bh=kidBeltHtml(_belts); html+= _bh || `<p style="color:var(--light);font-size:12.5px;">${EN?'This gym has no belt disciplines.':'Tento gym nem\u00e1 discipl\u00edny s p\u00e1sky.'}</p>`; }
-  if(body) body.innerHTML=html;
+  else { html+=_kmHtml; html+=`<div style="font-size:11.5px;color:var(--mid);background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:9px 11px;margin:4px 0 12px;line-height:1.45;">${EN?'Award belts to this child \u2014 announced belts appear on their public trophy-case.':'Uděluj tomuto d\u00edt\u011bti p\u00e1sky \u2014 ozn\u00e1men\u00e9 p\u00e1sky se objev\u00ed na jeho ve\u0159ejn\u00e9 vitr\u00edn\u011b.'}</div>`; const _bh=kidBeltHtml(_belts); html+= _bh || `<p style="color:var(--light);font-size:12.5px;">${EN?'This gym has no belt disciplines.':'Tento gym nem\u00e1 discipl\u00edny s p\u00e1sky.'}</p>`; }
+  if(body){ body.innerHTML=html; body.querySelectorAll('.kidRemoveMember').forEach(b=>{ b.onclick=()=>ownerRemoveMember(b.dataset.mid, b.dataset.sub, childName); }); }
 }
 async function setKidBelt(disc, belt, stripes){
   try{ const EN=LANG==='en'; const ctx=window._mdKid; if(!ctx) return; const key=beltKeyFor(disc);
@@ -13646,8 +13648,8 @@ async function announceKidBelt(disc){
     if(!confirm(EN?`Announce the ${beltLabel(bb.belt)} belt for ${ctx.childName}? The parent gets a celebration notification \u2014 it cannot be undone.`:`Ozn\u00e1mit ${beltLabel(bb.belt)} p\u00e1sek pro ${ctx.childName}? Rodi\u010d dostane oslavnou notifikaci \u2014 to u\u017e nejde vz\u00edt zp\u011bt.`)) return;
     bb.announced=bb.belt; kids[idx].belts=belts;
     await supaClient.from('profiles').update({ children:JSON.stringify(kids) }).eq('id',ctx.parentId);
-    try{ await supaClient.from('notifications').insert({ user_id:ctx.parentId, type:'system', read:false, data:JSON.stringify({kind:'kid_belt_promoted', child:ctx.childName, belt:bb.belt, disc:disc, gym:_myGymData?(_myGymData.name||''):''}), message:'\U0001F389 '+(EN?`${ctx.childName} promoted to ${beltLabel(bb.belt)} belt!`:`${ctx.childName} pov\u00fd\u0161en/a na ${beltLabel(bb.belt)} p\u00e1sek!`) }); }catch(e){}
-    toast(EN?'\U0001F389 Promotion announced':'\U0001F389 Pov\u00fd\u0161en\u00ed ozn\u00e1meno');
+    try{ await supaClient.from('notifications').insert({ user_id:ctx.parentId, type:'system', read:false, data:JSON.stringify({kind:'kid_belt_promoted', child:ctx.childName, belt:bb.belt, disc:disc, gym:_myGymData?(_myGymData.name||''):''}), message:'🎉 '+(EN?`${ctx.childName} promoted to ${beltLabel(bb.belt)} belt!`:`${ctx.childName} pov\u00fd\u0161en/a na ${beltLabel(bb.belt)} p\u00e1sek!`) }); }catch(e){}
+    toast(EN?'🎉 Promotion announced':'🎉 Pov\u00fd\u0161en\u00ed ozn\u00e1meno');
     openGymKidDetail(ctx.parentId, ctx.childName);
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
 }
