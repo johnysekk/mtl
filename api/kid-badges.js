@@ -55,7 +55,9 @@ export default async function handler(req, res){
       cat:'student', emoji:'\uD83E\uDD4B', en: m+' trainings', cs: m+' tr\u00e9nink\u016f'
     }));
 
-    const firstName = String(child.name || '').trim().split(/\s+/)[0] || '';
+    // child.firstName is set explicitly by the split first/last form;
+    // fall back to the first token of the full name for older records.
+    const firstName = String(child.firstName || child.name || '').trim().split(/\s+/)[0] || '';
 
     // belts: only ANNOUNCED ones are public (matches the in-app announce gate)
     let belts = [];
