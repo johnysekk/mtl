@@ -57,12 +57,23 @@ export default async function handler(req, res){
 
     const firstName = String(child.name || '').trim().split(/\s+/)[0] || '';
 
+    // belts: only ANNOUNCED ones are public (matches the in-app announce gate)
+    let belts = [];
+    try {
+      let bobj = child.belts;
+      if (typeof bobj === 'string') bobj = JSON.parse(bobj);
+      belts = Object.values(bobj || {})
+        .filter(b => b && b.belt && b.announced === b.belt)
+        .map(b => ({ belt: b.belt, stripes: b.stripes || 0, disc: b.disc || null }));
+    } catch (e) { belts = []; }
+
     return res.status(200).json({
       name: firstName,          // first name only (child safety)
       junior: true,
       certified: false,
       photo: null,
       levels: [{ role:'student', level }],
+      belts,
       milestones
     });
   }catch(e){
