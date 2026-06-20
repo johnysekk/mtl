@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-20-QFB | NEW gym-team-coach dashboard (renderGymTeamDash/openGymTeamDash) - per-gym, mirrors the 1:1 coach dashboard visually (gym selector + month selector, hero + 4 summary cards, drop-in net trend chart, collapsible accordions Drop-ins/Memberships/Students/Upcoming attendance in a 3-col desktop grid, action buttons My classes/Mark attendance/Gym team/Tickets/Share 1:1/payout connect-or-open-Stripe/Export). Money mirrors openCoachEarnings exactly (keepPct, MTL+Stripe fee, net). Entry points: mobile - the team mode-btn + shMyTeams title renamed Tym->Gym/Gymy by gym count, each gym card gets a full-width Overview button -> openGymTeamDash(gymId). Desktop - new Gym/Gymy nav group (shown when window._inGymTeam) with Overview -> openGymTeamDash; loadMyTeams rebuilds the sidebar when team-status changes so the group appears/disappears correctly. -->
+<!-- MTL build: 2026-06-20-QFC | (1) Gym-team dashboard now splits by payout account: a team coach WITH their own connected Stripe (gym_payout_account) sees EXACT net - hero 'Tvuj net', full breakdown gross->-MTL->-Stripe->net, net trend. A team coach WITHOUT it sees GROSS only - hero 'Vygenerovano pro gym' = drop-in gross + membership MRR, no fee/net rows (the gym collects; their pay is off-platform), gross trend; a note nudges connecting a payout account for exact net. Money still mirrors openCoachEarnings. (2) Removed the 'Podklady pro ucetni - Kouc' (coach accounting CSV) button from the Hero-Net money dash - accounting lives inside each specific coach/gym dashboard, wired to the right Stripe account. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -7371,6 +7371,10 @@ async function renderGymTeamDash(){
   const mFee=mems.reduce((s,m)=>s+((m.amount||0)*0.014+6),0);
   const mNet=Math.max(0,mKept-mFee);
   const netTotal=dNet+mNet;
+  const grossTotal=dPaid+mPaid;
+  // --- Stripe vs no-Stripe: with own payout account => exact net is theirs; without => only gross (gym collects, pay is off-platform) ---
+  const showNet=_paysCoach;
+  const headlineVal=showNet?netTotal:grossTotal;
   // --- students (unique attendees) ---
   const sCnt={}, sNm={};
   dropsSel.forEach(b=>{ const id=b.student_id||b.student_name; if(!id) return; sCnt[id]=(sCnt[id]||0)+1; if(b.student_name) sNm[id]=b.student_name; });
@@ -7383,9 +7387,9 @@ async function renderGymTeamDash(){
   rsv.forEach(r=>addAtt(r.class_name,r.class_date,r.class_time,false));
   const occ=Object.values(att).sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time));
   const dn=dayNames();
-  // --- trend (drop-in net by created_at month, last 6) ---
+  // --- trend (drop-in net OR gross by created_at month, last 6) ---
   let trend=null;
-  if(sel!=='all'){ const idx=months.findIndex(m=>m.ym===sel); const prev=months[idx+1]; if(prev){ const pn=drops.filter(b=>(b.created_at||'').slice(0,7)===prev.ym).reduce((s,b)=>s+Math.max(0,netAmt(b)*keepPct(b)-(netAmt(b)*0.014+6)),0); if(pn>0) trend=Math.round((dNet-pn)/pn*100); } }
+  if(showNet && sel!=='all'){ const idx=months.findIndex(m=>m.ym===sel); const prev=months[idx+1]; if(prev){ const pn=drops.filter(b=>(b.created_at||'').slice(0,7)===prev.ym).reduce((s,b)=>s+Math.max(0,netAmt(b)*keepPct(b)-(netAmt(b)*0.014+6)),0); if(pn>0) trend=Math.round((dNet-pn)/pn*100); } }
 
   // --- builders (same look as coach dashboard) ---
   const ARR='<span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;margin-left:10px;">▾</span>';
@@ -7393,21 +7397,23 @@ async function renderGymTeamDash(){
   const row=(em,bg,lab,val,vc)=>`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:${bg};">${em}</div><div class="prow-lbl">${lab}</div></div><span class="prow-val"${vc?` style="color:${vc};font-weight:700;"`:''}>${val}</span></div>`;
   const wrap=rows=>`<div class="prow-group" style="margin-bottom:12px;">${rows}</div>`;
 
-  const dropAcc = HDR('🥋',(EN?'Drop-in classes':'Jednorázové vstupy')+` <span style="color:var(--light);font-weight:600;font-size:12px;">· ${monthLabel}</span>`,`<span style="color:#006040;">${f(dNet)}</span>`)
-    + wrap(
-        row('💪','#F0FBF0',(EN?'Students paid':'Zaplatili studenti')+` <span style="color:var(--light);font-size:12px;">(${dropsSel.length})</span>`,f(dPaid))
-      + row('🏛️','#F5F2EE',(EN?'− MTL fee':'− MTL poplatek'),'-'+f(dMtl))
-      + row('💳','#FFF0E6',(EN?'− Stripe fee (est.)':'− Stripe fee (odhad)'),'-'+f(dFee))
-      + row('💎','#FFF8E6',`<b>${EN?'Net (est.)':'Net (odhad)'}</b>`,`<span style="color:#006040;font-weight:800;">${f(dNet)}</span>`)
-      + row('📐','#EEF4FF',(EN?'Ø net / class':'Ø net / lekce'),f(dropsSel.length?dNet/dropsSel.length:0))
-      );
-  const memAcc = HDR('🎟️',(EN?'Memberships':'Členství')+` <span style="color:var(--light);font-weight:600;font-size:12px;">· ${EN?'active / mo':'aktivní / měs'}</span>`,`<span style="color:var(--blue);">${f(mNet)}</span>`)
-    + wrap(
-        row('💪','#EEF4FF',(EN?'Members pay / mo':'Členové platí / měs')+` <span style="color:var(--light);font-size:12px;">(${mems.length})</span>`,f(mPaid))
-      + row('🏛️','#F5F2EE',(EN?'− MTL fee':'− MTL poplatek'),'-'+f(mMtl))
-      + row('💳','#FFF0E6',(EN?'− Stripe fee (est.)':'− Stripe fee (odhad)'),'-'+f(mFee))
-      + row('💎','#EEF4FF',`<b>${EN?'Net / mo (est.)':'Net / měs (odhad)'}</b>`,`<span style="color:var(--blue);font-weight:800;">${f(mNet)}</span>`)
-      );
+  // Drop-ins accordion
+  let dropRows = row('💪','#F0FBF0',(EN?'Students paid':'Zaplatili studenti')+` <span style="color:var(--light);font-size:12px;">(${dropsSel.length})</span>`,f(dPaid));
+  if(showNet){ dropRows += row('🏛️','#F5F2EE',(EN?'− MTL fee':'− MTL poplatek'),'-'+f(dMtl))
+    + row('💳','#FFF0E6',(EN?'− Stripe fee (est.)':'− Stripe fee (odhad)'),'-'+f(dFee))
+    + row('💎','#FFF8E6',`<b>${EN?'Net (est.)':'Net (odhad)'}</b>`,`<span style="color:#006040;font-weight:800;">${f(dNet)}</span>`)
+    + row('📐','#EEF4FF',(EN?'Ø net / class':'Ø net / lekce'),f(dropsSel.length?dNet/dropsSel.length:0)); }
+  else { dropRows += row('📐','#EEF4FF',(EN?'Ø gross / class':'Ø hrubě / lekce'),f(dropsSel.length?dPaid/dropsSel.length:0)); }
+  const dropAcc = HDR('🥋',(EN?'Drop-in classes':'Jednorázové vstupy')+` <span style="color:var(--light);font-weight:600;font-size:12px;">· ${monthLabel}</span>`,`<span style="color:${showNet?'#006040':'var(--dark)'};">${f(showNet?dNet:dPaid)}</span>`) + wrap(dropRows);
+
+  // Memberships accordion
+  let memRows = row('💪','#EEF4FF',(EN?'Members pay / mo':'Členové platí / měs')+` <span style="color:var(--light);font-size:12px;">(${mems.length})</span>`,f(mPaid));
+  if(showNet){ memRows += row('🏛️','#F5F2EE',(EN?'− MTL fee':'− MTL poplatek'),'-'+f(mMtl))
+    + row('💳','#FFF0E6',(EN?'− Stripe fee (est.)':'− Stripe fee (odhad)'),'-'+f(mFee))
+    + row('💎','#EEF4FF',`<b>${EN?'Net / mo (est.)':'Net / měs (odhad)'}</b>`,`<span style="color:var(--blue);font-weight:800;">${f(mNet)}</span>`); }
+  const memAcc = HDR('🎟️',(EN?'Memberships':'Členství')+` <span style="color:var(--light);font-weight:600;font-size:12px;">· ${EN?'active / mo':'aktivní / měs'}</span>`,`<span style="color:var(--blue);">${f(showNet?mNet:mPaid)}</span>`) + wrap(memRows);
+
+  // Students accordion
   let studentRows;
   if(!sDistinct){ studentRows=row('—','#F5F2EE',(EN?'No students yet':'Zatím žádní studenti'),'—'); }
   else{
@@ -7417,6 +7423,7 @@ async function renderGymTeamDash(){
       + sIds.sort((a,b)=>sCnt[b]-sCnt[a]).slice(0,40).map(id=>row(sCnt[id]>=2?'🔁':'👤',sCnt[id]>=2?'#F0FBF0':'#F5F2EE',escapeHtml(sNm[id]||(EN?'Student':'Student')),sCnt[id]+'×')).join('');
   }
   const studentsAcc = HDR('👥',(EN?'Students':'Studenti'),String(sDistinct)) + wrap(studentRows);
+  // Upcoming attendance accordion
   const attRows = occ.length
     ? occ.slice(0,40).map(o=>{ const dd=new Date(o.date); return row('📅','#F5F2EE',`${escapeHtml(o.name)} <span style="color:var(--light);font-size:11px;">· ${dn[dd.getDay()]} ${o.time} · ${dd.getDate()}.${dd.getMonth()+1}.</span>`,`${o.paid+o.free} ${EN?'ppl':'lidí'}`); }).join('')
     : row('—','#F5F2EE',(EN?'No upcoming reservations':'Žádné nadcházející rezervace'),'—');
@@ -7424,14 +7431,18 @@ async function renderGymTeamDash(){
 
   const gymSelHtml = teamGyms.length>1 ? `<select id="gtdGymSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:8px;">${teamGyms.map(g=>`<option value="${g.id}" ${g.id===_gtdGym?'selected':''}>🏛️ ${escapeHtml(g.name)}</option>`).join('')}</select>` : '';
   const monthSelHtml = `<select id="gtdMonthSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:10px;"><option value="all" ${sel==='all'?'selected':''}>${EN?'All time':'Vše'}</option>${months.map(m=>`<option value="${m.ym}" ${m.ym===sel?'selected':''}>${m.lbl}</option>`).join('')}</select>`;
-  const heroHtml = `<div class="dashHeroSingle" style="background:linear-gradient(135deg,#0A7A4F,#005A3C);border-radius:16px;padding:15px 18px;margin-bottom:10px;color:#fff;box-shadow:0 2px 10px rgba(0,96,64,.18);"><div style="font-size:11.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">${_paysCoach?(EN?'Your net · group classes':'Tvůj net · skupinovky'):(EN?'Net generated · group classes':'Net vygenerováno · skupinovky')} · ${monthLabel}</div><div style="font-size:30px;font-weight:800;line-height:1.05;margin:5px 0 3px;">${f(netTotal)}</div>${trend!=null?`<div style="font-size:12.5px;font-weight:700;">${trend>=0?'▲':'▼'} ${Math.abs(trend)}% ${EN?'vs last month':'vs minulý měsíc'}</div>`:`<div style="font-size:11px;opacity:.75;">${EN?'drop-ins (period) + active memberships / mo':'jednorázové (období) + aktivní členství / měs'}</div>`}</div>`;
+  const heroLbl = showNet ? (EN?'Your net · group classes':'Tvůj net · skupinovky') : (EN?'Generated for the gym · group classes':'Vygenerováno pro gym · skupinovky');
+  const heroSub = showNet
+    ? (trend!=null?`<div style="font-size:12.5px;font-weight:700;">${trend>=0?'▲':'▼'} ${Math.abs(trend)}% ${EN?'vs last month':'vs minulý měsíc'}</div>`:`<div style="font-size:11px;opacity:.75;">${EN?'drop-ins (period) + active memberships / mo':'jednorázové (období) + aktivní členství / měs'}</div>`)
+    : `<div style="font-size:11px;opacity:.85;">${EN?'gross — the gym collects; your pay is off-platform':'hrubě — vybírá gym; tvoji odměnu řešíš s gymem mimo platformu'}</div>`;
+  const heroHtml = `<div class="dashHeroSingle" style="background:linear-gradient(135deg,#0A7A4F,#005A3C);border-radius:16px;padding:15px 18px;margin-bottom:10px;color:#fff;box-shadow:0 2px 10px rgba(0,96,64,.18);"><div style="font-size:11.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">${heroLbl} · ${monthLabel}</div><div style="font-size:30px;font-weight:800;line-height:1.05;margin:5px 0 3px;">${f(headlineVal)}</div>${heroSub}</div>`;
   const cardsHtml = `<div class="dashCards">`
-    +`<div class="dashCardNet"><div style="font-size:10.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">${EN?'Net':'Net'}</div><div style="font-size:25px;font-weight:800;line-height:1.05;margin:5px 0 2px;">${f(netTotal)}</div><div style="font-size:10px;opacity:.78;">${monthLabel}</div></div>`
+    +`<div class="dashCardNet"><div style="font-size:10.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">${showNet?(EN?'Net':'Net'):(EN?'Gross':'Hrubě')}</div><div style="font-size:25px;font-weight:800;line-height:1.05;margin:5px 0 2px;">${f(headlineVal)}</div><div style="font-size:10px;opacity:.78;">${monthLabel}</div></div>`
     +`<div class="dashCard"><div class="dashCardLbl">${EN?'Drop-ins':'Vstupy'}</div><div class="dashCardVal">${dropsSel.length}</div></div>`
     +`<div class="dashCard"><div class="dashCardLbl">${EN?'Members':'Členů'}</div><div class="dashCardVal">${mems.length}</div></div>`
     +`<div class="dashCard"><div class="dashCardLbl">${EN?'Students':'Studentů'}</div><div class="dashCardVal">${sDistinct}</div></div>`
     +`</div>`;
-  const note = `<p style="font-size:11px;color:#0A7A4F;background:#F0FBF0;border-radius:8px;padding:8px 10px;margin-bottom:10px;">💳 ${_paysCoach?(EN?'Payments go to your connected payout account; MTL takes its commission, you bear the Stripe fee.':'Platby chodí na tvůj připojený výplatní účet; MTL si bere provizi, Stripe poplatek neseš ty.'):(EN?'These classes are paid to the gym; your own pay is arranged with the gym off-platform.':'Tyto lekce se platí gymu; tvoji vlastní odměnu řešíš s gymem mimo platformu.')}</p>`;
+  const note = `<p style="font-size:11px;color:#0A7A4F;background:#F0FBF0;border-radius:8px;padding:8px 10px;margin-bottom:10px;">💳 ${showNet?(EN?'Payments go to your connected payout account; MTL takes its commission, you bear the Stripe fee.':'Platby chodí na tvůj připojený výplatní účet; MTL si bere provizi, Stripe poplatek neseš ty.'):(EN?'These classes are paid to the gym; numbers are gross. Your own pay is arranged with the gym off-platform. Connect a payout account to get exact net.':'Tyto lekce se platí gymu; čísla jsou hrubá. Tvoji vlastní odměnu řešíš s gymem mimo platformu. Připoj výplatní účet a uvidíš přesný net.')}</p>`;
 
   // --- action buttons (pulled from the Team section) ---
   const _bs="width:100%;padding:13px;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:10px;";
@@ -7457,17 +7468,17 @@ async function renderGymTeamDash(){
   // accordions collapse (default closed)
   const stats=$('gtdStats');
   if(stats){ stats.querySelectorAll('.dashSecHdr').forEach((h)=>{ const g=h.nextElementSibling; const ar=h.querySelector('.dashAccArr'); if(g){ g.style.display='none'; if(ar) ar.style.transform='rotate(-90deg)'; } h.onclick=()=>{ if(!g) return; const closed=g.style.display==='none'; g.style.display=closed?'':'none'; if(ar) ar.style.transform=closed?'':'rotate(-90deg)'; }; }); }
-  // trend chart (drop-in net last 6 months)
+  // trend chart (drop-in net OR gross last 6 months)
   try{
     const ch=months.slice(0,6).reverse();
-    const chNet=ch.map(m=>Math.max(0,Math.round(drops.filter(b=>(b.created_at||'').slice(0,7)===m.ym).reduce((s,b)=>s+Math.max(0,netAmt(b)*keepPct(b)-(netAmt(b)*0.014+6)),0))));
-    const W=1000,H=120,pd=16,n=chNet.length; const max=Math.max.apply(null,chNet.concat([1]));
-    const pts=chNet.map((v,i)=>{ const x=pd+(i*(W-2*pd)/(n-1)); const y=H-22-(v/max)*(H-44); return [x,y]; });
+    const chVal=ch.map(m=>{ const md=drops.filter(b=>(b.created_at||'').slice(0,7)===m.ym); return Math.max(0,Math.round(md.reduce((s,b)=> s + (showNet?Math.max(0,netAmt(b)*keepPct(b)-(netAmt(b)*0.014+6)):netAmt(b)),0))); });
+    const W=1000,H=120,pd=16,n=chVal.length; const max=Math.max.apply(null,chVal.concat([1]));
+    const pts=chVal.map((v,i)=>{ const x=pd+(i*(W-2*pd)/(n-1)); const y=H-22-(v/max)*(H-44); return [x,y]; });
     const ln=pts.map((pp,i)=>(i?'L':'M')+pp[0].toFixed(1)+','+pp[1].toFixed(1)).join(' ');
     const ar=ln+' L'+pts[n-1][0].toFixed(1)+','+(H-22)+' L'+pts[0][0].toFixed(1)+','+(H-22)+' Z';
     const dots=pts.map(pp=>`<circle cx="${pp[0].toFixed(1)}" cy="${pp[1].toFixed(1)}" r="3" fill="#0A7A4F"/>`).join('');
     const lbls=ch.map((m,i)=>`<text x="${pts[i][0].toFixed(1)}" y="${H-5}" font-size="13" fill="#9a978f" text-anchor="middle">${m.lbl.slice(0,3)}</text>`).join('');
-    const el=$('gtdTrend'); if(el) el.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:baseline;margin:6px 0 4px;"><div style="font-size:13px;font-weight:800;color:var(--dark);">${EN?'Drop-in net · last 6 months':'Net skupinovek · posledních 6 měsíců'}</div><div style="font-size:18px;font-weight:800;color:#006040;">${f(chNet[n-1])}</div></div><svg viewBox="0 0 ${W} ${H}" width="100%" height="108" preserveAspectRatio="none"><defs><linearGradient id="gtdtg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0A7A4F" stop-opacity="0.16"/><stop offset="1" stop-color="#0A7A4F" stop-opacity="0"/></linearGradient></defs><path d="${ar}" fill="url(#gtdtg)"/><path d="${ln}" fill="none" stroke="#0A7A4F" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>${dots}${lbls}</svg>`;
+    const el=$('gtdTrend'); if(el) el.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:baseline;margin:6px 0 4px;"><div style="font-size:13px;font-weight:800;color:var(--dark);">${showNet?(EN?'Drop-in net · last 6 months':'Net skupinovek · posledních 6 měsíců'):(EN?'Drop-in gross · last 6 months':'Hrubé skupinovky · posledních 6 měsíců')}</div><div style="font-size:18px;font-weight:800;color:#006040;">${f(chVal[n-1])}</div></div><svg viewBox="0 0 ${W} ${H}" width="100%" height="108" preserveAspectRatio="none"><defs><linearGradient id="gtdtg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0A7A4F" stop-opacity="0.16"/><stop offset="1" stop-color="#0A7A4F" stop-opacity="0"/></linearGradient></defs><path d="${ar}" fill="url(#gtdtg)"/><path d="${ln}" fill="none" stroke="#0A7A4F" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>${dots}${lbls}</svg>`;
   }catch(e){}
   // buttons
   if($('gtdSchedBtn')) $('gtdSchedBtn').onclick=()=>openCoachScheduleEditor(_gtdGym, _gtdGymName);
@@ -16533,11 +16544,9 @@ async function openFullDash(){
   if(n.hasCoach) dashChips+='<button class="mdActBtn" data-act="coachdash" style="'+Chip+'">📊 '+(EN?'Coach dashboard':'Přehled kouče')+'</button>';
   if(n.hasGym) dashChips+='<button class="mdActBtn" data-act="gymdash" style="'+Chip+'">🏛️ '+(EN?'Gym dashboard':'Přehled gymu')+'</button>';
   let acts='<div style="display:flex;gap:9px;">'+dashChips+'</div>';
-  if(n.hasCoach) acts+='<button class="mdActBtn" data-act="coachacc" style="'+Bs+'">📄 '+(EN?'Accounting — Coach (monthly, CSV)':'Podklady pro účetní — Kouč (měsíčně, CSV)')+'</button>';
   $('mdActions').innerHTML=acts;
   $('mdActions').querySelectorAll('.mdActBtn').forEach(b=>{ b.onclick=()=>{ const a=b.dataset.act;
     if(a==='coachdash'){ openCoachDash(); }
-    else if(a==='coachacc'){ openAccounting({ coachId: currentUser.id }, (EN?'Accounting — ':'Podklady — ')+(currentUser.name||(EN?'Coach':'Kouč'))); }
     else if(a==='gymdash'){ window._gmInitTab=3; const gs=window._myGyms||[]; try{ closeSheet('shMoneyDash'); }catch(e){} if(gs.length>1 && typeof openGymPicker==='function'){ openGymPicker(); } else { try{ window._selectedGymId=(gs[0]&&gs[0].id)||null; if(typeof _myGymData!=='undefined' && !_myGymData) _myGymData=gs[0]||null; }catch(e){} openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); } }
   }; });
   function paintHeader(){
