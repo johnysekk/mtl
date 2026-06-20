@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-20-QET | Coach dashboard (renderCoachDash) rebuilt: bookings loaded up-front, ALL accordions always shown (even at 0), ordered by importance into 3-per-row desktop panels - Row1 money split (1:1 / Online / By discipline), Row2 people (Students / Growth+stickiness / Reliability+timing). New metrics: rebook rate, new->repeat, avg lessons/student, net/student, MoM net, MoM students, cancel/refund rate, rating+count, avg booking lead, busiest day, busiest time. -->
+<!-- MTL build: 2026-06-20-QEU | Coach dashboard labels rewritten to plain Czech/English (no jargon): stickiness/MoM/cancel-rate/lead-time all spelled out. Rating now GATED on real review count (currentUser.reviews>0) else dash. Added fill rate (offered slots that got booked) from slots table, loaded up-front in Promise.all. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -12620,11 +12620,12 @@ async function renderCoachDash(){
   if(!window._coachDashMonth) window._coachDashMonth=months[0].ym;
   const sel=window._coachDashMonth;
   const since=months[months.length-1].ym+'-01';
-  let tx=[], bk=[];
+  let tx=[], bk=[], sl=[];
   try{ const r=await Promise.all([
     supaClient.from('transactions').select('id,type,discipline,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,stripe_fee,created_at,currency,online').eq('coach_id',currentUser.id).is('gym_id',null).gte('created_at',since),
-    supaClient.from('bookings').select('student_id,student_name,status,created_at,training_date,training_time,type').eq('coach_id',currentUser.id)
-  ]); tx=(r[0]&&r[0].data)||[]; bk=(r[1]&&r[1].data)||[]; }catch(e){ console.log('[coachdash]',e&&e.message); }
+    supaClient.from('bookings').select('student_id,student_name,status,created_at,training_date,training_time,type').eq('coach_id',currentUser.id),
+    supaClient.from('slots').select('date,booked').eq('coach_profile_id',currentUser.id)
+  ]); tx=(r[0]&&r[0].data)||[]; bk=(r[1]&&r[1].data)||[]; sl=(r[2]&&r[2].data)||[]; }catch(e){ console.log('[coachdash]',e&&e.message); }
   const NET=r=>Math.max(0,((r.gross_amount||0)-(r.refund_amount||0))-(r.stripe_fee||0)-(((r.mtl_fee||0)-(r.mtl_fee_refunded||0))))/100;
   const GROSS=r=>((r.gross_amount||0)-(r.refund_amount||0))/100;
   const MTLF=r=>(((r.mtl_fee||0)-(r.mtl_fee_refunded||0)))/100;
@@ -12638,7 +12639,8 @@ async function renderCoachDash(){
   let trend=null;
   if(sel!=='all'){ const idx=months.findIndex(m=>m.ym===sel); const prev=months[idx+1]; if(prev){ const pn=tx.filter(r=>(r.created_at||'').slice(0,7)===prev.ym).reduce((a,r)=>a+NET(r),0); if(pn>0) trend=Math.round((heroNet-pn)/pn*100); } }
   const rating=currentUser.rating||null;
-  const ratingCount=currentUser.rating_count||currentUser.reviews_count||currentUser.review_count||currentUser.num_reviews||null;
+  const ratingCount=Number(currentUser.reviews||0);
+  const hasRating=!!(rating&&ratingCount>0);
   const lessons=selTx.length;
   const grp=(arr)=>({gross:arr.reduce((a,r)=>a+GROSS(r),0),mtl:arr.reduce((a,r)=>a+MTLF(r),0),st:arr.reduce((a,r)=>a+STF(r),0),net:arr.reduce((a,r)=>a+NET(r),0),n:arr.length});
   const ip=grp(selTx.filter(r=>!isOn(r))), on=grp(selTx.filter(isOn));
@@ -12680,6 +12682,9 @@ async function renderCoachDash(){
   const dayNames=EN?['Sun','Mon','Tue','Wed','Thu','Fri','Sat']:['Ne','Po','Út','St','Čt','Pá','So'];
   const topDow=dowK.length?dayNames[+dowK[0]]:'—';
   const topHr=hrK.length?(String(hrK[0]).padStart(2,'0')+':00'):'—';
+  const slSel=(sl||[]).filter(x=> sel==='all'?true:(x.date||'').slice(0,7)===sel);
+  const slPast=slSel.filter(x=>(x.date||'')<=tStr);
+  const fillRate=slPast.length? Math.round(slPast.filter(x=>x.booked===true).length/slPast.length*100):null;
 
   // ---------- builders ----------
   const ARR='<span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;margin-left:10px;">▾</span>';
@@ -12717,30 +12722,31 @@ async function renderCoachDash(){
   }
   const studentsAcc = HDR('👥',(EN?'Students':'Studenti'), String(distinct)) + wrap(studentRows);
 
-  const growthAcc = HDR('📈',(EN?'Growth &amp; stickiness':'Růst &amp; stickiness'),'')
+  const growthAcc = HDR('📈',(EN?'Growth &amp; retention':'Růst &amp; udržení'),'')
     + wrap(
-        row('🔁','#EEF4FF',(EN?'Rebook rate':'Rebook rate')+' <span style="color:var(--light);font-size:11px;">'+(EN?'(2+ lessons)':'(2+ lekce)')+'</span>', pct(rebook))
-      + row('🌱','#F0FBF0',(EN?'New → repeat':'Noví → opakovaně')+' <span style="color:var(--light);font-size:11px;">· '+monthLabel+'</span>', pct(newRepeat))
-      + row('🔂','#F5F2EE',(EN?'Ø lessons / student':'Ø lekcí / student'), distinct?avgSess.toFixed(1):'—')
-      + row('💸','#FFF8E6',(EN?'Net / student':'Net / student'), distinct?f(netPerStud):'—')
-      + row('📊','#F5F3FF',(EN?'MoM net':'MoM net'), arr(trend), arrC(trend))
-      + row('👥','#EEF4FF',(EN?'MoM students':'MoM studenti'), arr(momStud), arrC(momStud))
+        row('🔁','#EEF4FF',(EN?'Came back for another lesson (2+)':'Vrátili se na další lekci (2+ lekce)'), pct(rebook))
+      + row('🌱','#F0FBF0',(EN?'New students who came back':'Z nováčků se vrátilo')+' <span style="color:var(--light);font-size:11px;">· '+monthLabel+'</span>', pct(newRepeat))
+      + row('🔂','#F5F2EE',(EN?'Ø lessons per student':'Ø lekcí na studenta'), distinct?avgSess.toFixed(1):'—')
+      + row('💸','#FFF8E6',(EN?'Net earnings per student':'Čistý výdělek na studenta'), distinct?f(netPerStud):'—')
+      + row('📊','#F5F3FF',(EN?'Earnings vs last month':'Výdělek vs minulý měsíc'), arr(trend), arrC(trend))
+      + row('👥','#EEF4FF',(EN?'Active students vs last month':'Aktivní studenti vs minulý měsíc'), arr(momStud), arrC(momStud))
       );
 
-  const relAcc = HDR('🛡️',(EN?'Reliability &amp; timing':'Spolehlivost &amp; plánování'),'')
+  const relAcc = HDR('🛡️',(EN?'Reliability &amp; demand':'Spolehlivost &amp; vytížení'),'')
     + wrap(
-        row('🛡️','#F0FBF0',(EN?'Cancel / refund rate':'Cancel / refund rate')+' <span style="color:var(--light);font-size:11px;">('+allBk.length+')</span>', cancRate==null?'—':cancRate+'%', (cancRate!=null&&cancRate>=20)?'var(--red)':null)
-      + row('⭐','#FFF8E6',(EN?'Rating':'Hodnocení'), rating?(rating+(ratingCount?(' <span style="color:var(--light);font-size:11px;">('+ratingCount+')</span>'):'')):'—')
-      + row('⏳','#EEF4FF',(EN?'Avg booking lead':'Ø rezervace dopředu'), leadAvg==null?'—':(Math.round(leadAvg)+' '+(EN?'days':'dní')))
-      + row('📅','#F5F2EE',(EN?'Busiest day':'Nejvytíženější den'), topDow)
-      + row('🕐','#F5F3FF',(EN?'Busiest time':'Nejvytíženější čas'), topHr)
+        row('🛡️','#F0FBF0',(EN?'Cancelled / refunded bookings':'Zrušené / vrácené rezervace')+' <span style="color:var(--light);font-size:11px;">('+(EN?'of ':'z ')+allBk.length+')</span>', cancRate==null?'—':cancRate+'%', (cancRate!=null&&cancRate>=20)?'var(--red)':null)
+      + row('⭐','#FFF8E6',(EN?'Rating':'Hodnocení'), hasRating?(rating+' <span style="color:var(--light);font-size:11px;">('+ratingCount+')</span>'):'—')
+      + row('📦','#EEF4FF',(EN?'Offered slots that got booked':'Obsazenost nabízených slotů'), fillRate==null?'—':fillRate+'%')
+      + row('⏳','#F5F2EE',(EN?'How far ahead students book':'Jak dlouho dopředu rezervují'), leadAvg==null?'—':(Math.round(leadAvg)+' '+(EN?'days ahead':'dní předem')))
+      + row('📅','#F5F3FF',(EN?'Busiest day':'Nejvytíženější den'), topDow)
+      + row('🕐','#F5F2EE',(EN?'Busiest time':'Nejvytíženější čas'), topHr)
       );
 
   const heroHtml='<div class="dashHeroSingle" style="background:linear-gradient(135deg,#0A7A4F,#005A3C);border-radius:16px;padding:15px 18px;margin-bottom:10px;color:#fff;box-shadow:0 2px 10px rgba(0,96,64,.18);"><div style="font-size:11.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">'+(EN?'Net collected':'Čistě vybráno')+' · '+monthLabel+'</div><div style="font-size:30px;font-weight:800;line-height:1.05;margin:5px 0 3px;">'+f(heroNet)+'</div>'+(trend!=null?('<div style="font-size:12.5px;font-weight:700;">'+(trend>=0?'▲':'▼')+' '+Math.abs(trend)+'% '+(EN?'vs last month':'vs minulý měsíc')+'</div>'):('<div style="font-size:11px;opacity:.75;">'+(EN?'real Stripe payments, after refunds':'reálné platby ze Stripe, po refundech')+'</div>'))+'</div>';
   const cardsHtml='<div class="dashCards">'
     +'<div class="dashCardNet"><div style="font-size:10.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">'+(EN?'Net collected':'Čistě vybráno')+'</div><div style="font-size:25px;font-weight:800;line-height:1.05;margin:5px 0 2px;">'+f(heroNet)+'</div>'+(trend!=null?('<div style="font-size:11.5px;font-weight:700;">'+(trend>=0?'▲':'▼')+' '+Math.abs(trend)+'% '+(EN?'vs last mo.':'vs min.')+'</div>'):('<div style="font-size:10px;opacity:.78;">'+monthLabel+'</div>'))+'</div>'
-    +'<div class="dashCard"><div class="dashCardLbl">'+(EN?'Rebook':'Rebook')+'</div><div class="dashCardVal">'+(rebook!=null?(rebook+'%'):'—')+'</div></div>'
-    +'<div class="dashCard"><div class="dashCardLbl">'+(EN?'Rating':'Hodnocení')+'</div><div class="dashCardVal">'+(rating?('⭐ '+rating):'—')+'</div></div>'
+    +'<div class="dashCard"><div class="dashCardLbl">'+(EN?'Returning':'Vrací se')+'</div><div class="dashCardVal">'+(rebook!=null?(rebook+'%'):'—')+'</div></div>'
+    +'<div class="dashCard"><div class="dashCardLbl">'+(EN?'Rating':'Hodnocení')+'</div><div class="dashCardVal">'+(hasRating?('⭐ '+rating):'—')+'</div></div>'
     +'<div class="dashCard"><div class="dashCardLbl">'+(EN?'Lessons':'Lekcí')+'</div><div class="dashCardVal">'+lessons+'</div></div>'
     +'</div>';
   const note='<p style="font-size:11px;color:#0A7A4F;background:#F0FBF0;border-radius:8px;padding:8px 10px;margin-bottom:10px;">💳 '+(EN?'Collected earnings (1:1 &amp; online) = real Stripe payments, exact after refunds and MTL + Stripe fees.':'Vybrané výdělky (1:1 a online) = reálné platby ze Stripe, přesné po refundech a po MTL + Stripe poplatcích.')+'</p>';
