@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-18-QDZ | Gym dashboard label tweaks: 'Monthly memberships' shortened to 'Memberships' (Czech 'Mesicni clenstvi' -> 'Clenstvi') so large amounts fit without overlapping the value; removed the month/year indicator next to 'Single classes'. -->
+<!-- MTL build: 2026-06-18-QEB | Coach dashboard depth: acc() gained a force flag so the Online breakdown accordion now always shows for coaches who offer online (via _coachHasOnline()), not only when there were online sales this period. Added a Students accordion (distinct 1:1 students with per-student session counts, repeat-vs-new icon and last-seen date, sorted by sessions), filled by the existing bookings query which now also selects student_name + created_at; the returning-rate card and this list come from one query. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -6836,7 +6836,8 @@ function upcomingClasses(schedule, days, backDays){
     const _ld=date.getFullYear()+'-'+String(date.getMonth()+1).padStart(2,'0')+'-'+String(date.getDate()).padStart(2,'0');
     (schedule||[]).filter(c=> c.once ? (c.date===_ld) : (Number(c.day)===dow)).forEach(c=>{
       if(d===0 && !backDays){ const [h,mi]=String(c.time||'00:00').split(':').map(Number); const ct=new Date(date); ct.setHours(h||0,mi||0,0,0); if(ct<now) return; }
-      out.push({ name:c.name, cap:(c.cap!=null?Number(c.cap):null), cancelled:!!(typeof window!=='undefined'&&window._cancelledOcc&&window._cancelledOcc.has(date.toISOString().slice(0,10)+'|'+(c.time||'')+'|'+(c.name||''))), date:date.toISOString().slice(0,10), time:c.time, dur:Number(c.dur)||60, level:c.level||'all', coach:(c.coach||null), coachName:(c.coachName||null), leader:(c.leader||c.coach)||null, leaderName:(c.leaderName||c.coachName)||null, disc:c.disc||null, kids:((!!c.kids)||(c.level==='kids')), ageMin:(c.ageMin!=null?c.ageMin:null), ageMax:(c.ageMax!=null?c.ageMax:null), parentReq:!!c.parentReq, altPlace:(c.altPlace||null), altAddr:(c.altAddr||null), cancelled: !!(window._cancelledOcc && window._cancelledOcc.has(date.toISOString().slice(0,10)+'|'+(c.time||'')+'|'+(c.name||''))) });
+      const _ovK=date.toISOString().slice(0,10)+'|'+(c.time||'')+'|'+(c.name||''); const _ovR=(typeof window!=='undefined'&&window._occOverride&&window._occOverride[_ovK])||null;
+      out.push({ name:c.name, cap:(c.cap!=null?Number(c.cap):null), cancelled:!!(typeof window!=='undefined'&&window._cancelledOcc&&window._cancelledOcc.has(date.toISOString().slice(0,10)+'|'+(c.time||'')+'|'+(c.name||''))), date:date.toISOString().slice(0,10), time:c.time, dur:Number(c.dur)||60, level:c.level||'all', coach:(_ovR?_ovR.coach:(c.coach||null)), coachName:(_ovR?_ovR.coachName:(c.coachName||null)), leader:(_ovR?_ovR.leader:((c.leader||c.coach)||null)), leaderName:(_ovR?_ovR.leaderName:((c.leaderName||c.coachName)||null)), disc:c.disc||null, kids:((!!c.kids)||(c.level==='kids')), ageMin:(c.ageMin!=null?c.ageMin:null), ageMax:(c.ageMax!=null?c.ageMax:null), parentReq:!!c.parentReq, altPlace:(c.altPlace||null), altAddr:(c.altAddr||null), cancelled: !!(window._cancelledOcc && window._cancelledOcc.has(date.toISOString().slice(0,10)+'|'+(c.time||'')+'|'+(c.name||''))) });
     });
   }
   out.sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time));
@@ -8031,6 +8032,7 @@ async function renderGymMembers(){
 async function loadGymRoster(){
   const box=$('mgRoster'); if(!box||!_myGymData) return;
   window._cancelledOcc = new Set(); try{ const { data:_cd } = await supaClient.from('gym_class_log').select('class_date,class_time,class_name').eq('gym_id', _myGymData.id).eq('status','cancelled'); (_cd||[]).forEach(c=>window._cancelledOcc.add(`${c.class_date}|${c.class_time||''}|${c.class_name||''}`)); }catch(e){}
+  window._occOverride = {}; try{ const { data:_ov } = await supaClient.from('gym_class_overrides').select('*').eq('gym_id', _myGymData.id); (_ov||[]).forEach(o=>{ window._occOverride[o.class_date+'|'+(o.class_time||'')+'|'+(o.class_name||'')] = { coach:o.payee_coach_id||null, coachName:o.payee_coach_name||null, leader:o.lead_coach_id||o.payee_coach_id||null, leaderName:o.lead_coach_name||o.payee_coach_name||null }; }); }catch(e){}
   const today=new Date().toISOString().slice(0,10);
   const occs=upcomingClasses(_gymSchedule,7,4).filter(o=> o.date>=today); // jen nadcházející (minulé neproběhlé sem nepatří; plný rozvrh je v záložce Rozvrh)
   let rs=[], drops=[], mems=[], att=[];
@@ -8107,6 +8109,28 @@ async function toggleAttendance(d){
   }catch(e){ console.error('toggleAttendance',e); toast('⚠️ '+e.message); }
 }
 let _classAttendOpen=false;
+async function saveOccOverride(occ){
+  if(!_myGymData||!occ) return; const EN=LANG==='en';
+  const leadSel=$('ocOvLead')?$('ocOvLead').value:''; const paySel=$('ocOvPayee')?$('ocOvPayee').value:'';
+  const _tc=_gymTeamCoaches||[]; const leadCoach=_tc.find(c=>c.id===leadSel); const payCoach=_tc.find(c=>c.id===paySel);
+  const ownId=_myGymData.owner_id;
+  const lead_coach_id=leadSel||ownId; const lead_coach_name=leadCoach?leadCoach.name:((currentUser&&currentUser.name)||(EN?'Owner':'Majitel'));
+  const payee_coach_id=paySel||null; const payee_coach_name=payCoach?payCoach.name:null;
+  const key=occ.date+'|'+(occ.time||'')+'|'+(occ.name||'');
+  try{
+    await supaClient.from('gym_class_overrides').upsert({ gym_id:_myGymData.id, class_date:occ.date, class_time:occ.time||'', class_name:occ.name||'', lead_coach_id:lead_coach_id, lead_coach_name:lead_coach_name, payee_coach_id:payee_coach_id, payee_coach_name:payee_coach_name }, { onConflict:'gym_id,class_date,class_time,class_name' });
+    window._occOverride=window._occOverride||{}; window._occOverride[key]={ coach:payee_coach_id, coachName:payee_coach_name, leader:lead_coach_id, leaderName:lead_coach_name };
+    toast(EN?'✅ Saved for this date':'✅ Uloženo pro tento termín'); openClassAttendance(occ);
+  }catch(e){ toast('⚠️ '+(e.message||'')); }
+}
+async function resetOccOverride(occ){
+  if(!_myGymData||!occ) return; const EN=LANG==='en'; const key=occ.date+'|'+(occ.time||'')+'|'+(occ.name||'');
+  try{
+    await supaClient.from('gym_class_overrides').delete().eq('gym_id',_myGymData.id).eq('class_date',occ.date).eq('class_time',occ.time||'').eq('class_name',occ.name||'');
+    if(window._occOverride) delete window._occOverride[key];
+    toast(EN?'✅ Reset to default':'✅ Vráceno na výchozí'); openClassAttendance(occ);
+  }catch(e){ toast('⚠️ '+(e.message||'')); }
+}
 async function openClassAttendance(occ){
   if(!occ || !_myGymData) return;
   window._classAttendOcc=occ; _classAttendOpen=true;
@@ -8162,7 +8186,23 @@ async function openClassAttendance(occ){
     html+=attendees.map(attRow).join('');
     if(excused.length){ html+=`<div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:8px;"><div style="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:4px;">📋 ${EN?'Excused':'Omluveni'} (${excused.length})</div>${excused.map(r=>`<div style="font-size:13px;color:var(--dark);padding:3px 0;">• ${escapeHtml(r.student_name||(EN?'Member':'Člen'))}${r.reason?` <span style="color:var(--mid);">— ${escapeHtml(r.reason)}</span>`:''}</div>`).join('')}</div>`; }
   }
+  const _ocOwner = _myGymData && currentUser && _myGymData.owner_id===currentUser.id;
+  let _ocOvHtml='';
+  if(_ocOwner){
+    const _ovk2=occ.date+'|'+(occ.time||'')+'|'+(occ.name||'');
+    const _ovCur=(window._occOverride&&window._occOverride[_ovk2])||null;
+    const _scls=(_gymSchedule||[]).find(_c=>String(_c.time||'')===String(occ.time||'')&&((_c.name||'')===(occ.name||'')));
+    const _curLead=_ovCur?(_ovCur.leader||''):((_scls&&(_scls.leader||_scls.coach))||'');
+    const _curPayee=_ovCur?(_ovCur.coach||''):((_scls&&_scls.coach)||'');
+    const _tc=_gymTeamCoaches||[];
+    const _leadOpts=['<option value="">'+(EN?'You (owner)':'Ty (majitel)')+'</option>'].concat(_tc.map(_c=>'<option value="'+_c.id+'" '+(_c.id===_curLead?'selected':'')+'>'+(_c.name||'').replace(/"/g,'&quot;')+'</option>')).join('');
+    const _payOpts=['<option value="">'+(EN?'Gym (you)':'Gym (ty)')+'</option>'].concat(_tc.filter(_c=>_c.account).map(_c=>'<option value="'+_c.id+'" '+(_c.id===_curPayee?'selected':'')+'>'+(_c.name||'').replace(/"/g,'&quot;')+'</option>')).join('');
+    const _selSt='width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:10px;background:#fff;margin-bottom:4px;';
+    _ocOvHtml='<details style="margin-top:14px;border:1px solid var(--border);border-radius:12px;padding:0 12px;background:#fff;"><summary style="cursor:pointer;font-size:12.5px;font-weight:700;color:var(--dark);padding:11px 0;list-style:none;">⚙️ '+(EN?'Change coach / payee — just this date':'Změnit kouče / platbu — jen tento termín')+(_ovCur?' <span style="color:#C77800;">●</span>':'')+'</summary><div style="padding:2px 0 12px;"><div style="font-size:11px;color:var(--light);margin-bottom:3px;">'+(EN?'Who leads (this date only)':'Kdo vede (jen tento termín)')+'</div><select id="ocOvLead" style="'+_selSt+'">'+_leadOpts+'</select><div style="font-size:11px;color:var(--light);margin:8px 0 3px;">'+(EN?'Paid to (this date only)':'Platba komu (jen tento termín)')+'</div><select id="ocOvPayee" style="'+_selSt+'">'+_payOpts+'</select><button id="ocOvSave" style="width:100%;margin-top:8px;padding:11px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;">'+(EN?'Save for this date':'Uložit pro tento termín')+'</button>'+(_ovCur?'<button id="ocOvReset" style="width:100%;margin-top:6px;padding:9px;background:#fff;color:var(--red);border:1.5px solid var(--red);border-radius:10px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Reset to default':'Vrátit na výchozí')+'</button>':'')+'<div style="font-size:10.5px;color:var(--mid);margin-top:8px;line-height:1.45;">'+(EN?'Applies only to this one session. The price the student pays and the payout follow whoever is set as paid-to.':'Platí jen pro tento jeden termín. Cena i výplata jdou tomu, kdo je nastaven jako příjemce.')+'</div></div></details>';
+  }
+  html+=_ocOvHtml;
   box.innerHTML=html;
+  { const _s=$('ocOvSave'); if(_s) _s.onclick=function(){ saveOccOverride(occ); }; const _r=$('ocOvReset'); if(_r) _r.onclick=function(){ resetOccOverride(occ); }; }
   box.querySelectorAll('.caChk').forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); toggleAttendance(Object.assign({gymid:gid}, b.dataset)); });
   const _cahY=$('caHappenedYes'); if(_cahY) _cahY.onclick=async()=>{ try{ await supaClient.from('gym_class_log').insert({ gym_id:gid, class_date:occ.date, class_time:occ.time||null, class_name:occ.name||null, coach_id:occ.coach||null, status:'held', logged_by:currentUser?currentUser.id:null }); }catch(e){} try{ if(occ.coach && typeof bumpReferredCoachActivity==='function') bumpReferredCoachActivity(occ.coach); }catch(e){} const b=$('caHappenedBanner'); if(b) b.outerHTML='<div style="background:#F0FBF0;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-weight:700;font-size:14px;color:#006040;">'+(EN?'✅ Marked: class took place':'✅ Označeno: lekce proběhla')+'</div>'; toast(EN?'✅ Marked as held':'✅ Označeno jako proběhlá'); try{ if(typeof loadGymRoster==='function') loadGymRoster(); }catch(e){} };
   const _cahN=$('caHappenedNo'); if(_cahN) _cahN.onclick=()=>{ const _b=$('caHappenedBanner'); if(!_b) return; _b.innerHTML='<div style="font-weight:800;font-size:13.5px;margin-bottom:8px;color:var(--dark);">'+(EN?'Why did it not happen?':'Pro\u010d neprob\u011bhla?')+'</div>'+'<button id="caNhZero" style="width:100%;padding:11px;margin-bottom:6px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;text-align:left;font-family:DM Sans;line-height:1.35;">'+(EN?'It was on, but nobody came':'M\u011bla prob\u011bhnout, ale nikdo nep\u0159i\u0161el')+'</button>'+'<button id="caNhForgot" style="width:100%;padding:11px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;text-align:left;font-family:DM Sans;line-height:1.35;">'+(EN?'We forgot to cancel it (it should not have run)':'Zapomn\u011bli jsme ji zru\u0161it (nem\u011bla b\u00fdt)')+'</button>'; const _doLog=async(reason)=>{ try{ await supaClient.from('gym_class_log').insert({ gym_id:gid, class_date:occ.date, class_time:occ.time||null, class_name:occ.name||null, coach_id:occ.coach||null, status:'cancelled', reason:reason, logged_by:currentUser?currentUser.id:null }); }catch(e){} try{ await supaClient.from('attend_reminders').delete().eq('gym_id',gid).eq('class_date',occ.date).eq('class_time',occ.time||null).eq('class_name',occ.name||null); }catch(e){} try{ if(window._cancelledOcc) window._cancelledOcc.add(`${occ.date}|${occ.time||''}|${occ.name||''}`); }catch(e){} if(_b) _b.outerHTML='<div style="background:#FEECEC;border:1px solid #F3C9C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-weight:700;font-size:14px;color:var(--red);">'+(reason===String.fromCharCode(122,101,114,111)?(EN?'\u2715 Logged: nobody came':'\u2715 Zalogov\u00e1no: nikdo nep\u0159i\u0161el'):(EN?'\u2715 Logged: did not run':'\u2715 Zalogov\u00e1no: neprob\u011bhla'))+'</div>'; toast(EN?'\u2705 Logged':'\u2705 Zalogov\u00e1no'); try{ if(typeof loadGymRoster==='function') loadGymRoster(); }catch(e){} }; const _z=$('caNhZero'); if(_z) _z.onclick=()=>_doLog('zero'); const _f=$('caNhForgot'); if(_f) _f.onclick=()=>_doLog('forgot'); };
@@ -8502,7 +8542,7 @@ function _endToDur(s,e){ try{ const a=String(s||'18:00').split(':'),b=String(e||
 function _todayGymClasses(g){
   let sch=[]; try{ sch=(typeof g.schedule==='string')?JSON.parse(g.schedule||'[]'):(g.schedule||[]); }catch(e){ sch=[]; }
   const now=new Date(); const dow=now.getDay(); const ds=now.toISOString().slice(0,10);
-  return (sch||[]).filter(c=>Number(c.day)===dow).map(c=>({ name:c.name||'', date:ds, time:c.time||'18:00', dur:Number(c.dur)||60, level:c.level||'all', coach:(c.coach||null), coachName:(c.coachName||null), leader:(c.leader||c.coach)||null, leaderName:(c.leaderName||c.coachName)||null, disc:c.disc||null })).sort((a,b)=>String(a.time).localeCompare(String(b.time)));
+  return (sch||[]).filter(c=>Number(c.day)===dow).map(c=>{ const _ovR=(typeof window!=='undefined'&&window._occOverride&&window._occOverride[ds+'|'+(c.time||'')+'|'+(c.name||'')])||null; return ({ name:c.name||'', date:ds, time:c.time||'18:00', dur:Number(c.dur)||60, level:c.level||'all', coach:(_ovR?_ovR.coach:(c.coach||null)), coachName:(_ovR?_ovR.coachName:(c.coachName||null)), leader:(_ovR?_ovR.leader:((c.leader||c.coach)||null)), leaderName:(_ovR?_ovR.leaderName:((c.leaderName||c.coachName)||null)), disc:c.disc||null }); }).sort((a,b)=>String(a.time).localeCompare(String(b.time)));
 }
 function gdMul(op){ return op?1.00:1.00; }
 function _recPrice(occ){
@@ -12546,7 +12586,7 @@ async function renderCoachDash(){
   const ip=grp(selTx.filter(r=>!isOn(r))), on=grp(selTx.filter(isOn));
   const byD={}; selTx.forEach(r=>{ const d=r.discipline||'other'; (byD[d]=byD[d]||{net:0,n:0}); byD[d].net+=NET(r); byD[d].n++; });
   const dK=Object.keys(byD).filter(x=>byD[x].net>0).sort((a,b)=>byD[b].net-byD[a].net);
-  const acc=(emoji,title,g)=> (!g.n)?'' : ('<div class="dashSecHdr" style="font-size:14px;font-weight:800;color:var(--dark);margin:10px 0 8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">'+emoji+' '+title+' <span style="color:var(--light);font-weight:600;font-size:12px;">· '+monthLabel+'</span><span style="margin-left:auto;font-weight:800;color:#006040;font-size:14px;">'+f(g.net)+'</span><span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;margin-left:10px;">▾</span></div>'
+  const acc=(emoji,title,g,force)=> (!g.n && !force)?'' : ('<div class="dashSecHdr" style="font-size:14px;font-weight:800;color:var(--dark);margin:10px 0 8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">'+emoji+' '+title+' <span style="color:var(--light);font-weight:600;font-size:12px;">· '+monthLabel+'</span><span style="margin-left:auto;font-weight:800;color:#006040;font-size:14px;">'+f(g.net)+'</span><span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;margin-left:10px;">▾</span></div>'
     +'<div class="prow-group" style="margin-bottom:12px;">'
     +'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💪</div><div class="prow-lbl">'+(EN?'Gross collected':'Hrubě vybráno')+' <span style="color:var(--light);font-size:12px;">('+g.n+')</span></div></div><span class="prow-val">'+f(g.gross)+'</span></div>'
     +'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">🏛️</div><div class="prow-lbl">'+(EN?'− MTL fee':'− MTL poplatek')+'</div></div><span class="prow-val">-'+f(g.mtl)+'</span></div>'
@@ -12565,9 +12605,9 @@ async function renderCoachDash(){
   const note='<p style="font-size:11px;color:#0A7A4F;background:#F0FBF0;border-radius:8px;padding:8px 10px;margin-bottom:10px;">💳 '+(EN?'Collected earnings (1:1 &amp; online) = real Stripe payments, exact after refunds and MTL + Stripe fees.':'Vybrané výdělky (1:1 a online) = reálné platby ze Stripe, přesné po refundech a po MTL + Stripe poplatcích.')+'</p>';
   box.innerHTML='<select id="cdMonthSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:\'DM Sans\';background:#fff;margin-bottom:10px;">'+monthOpts+'</select>'
     +heroHtml+cardsHtml+note
-    +'<div id="cdStats">'+acc('🥊',(EN?'1:1 in-person':'1:1 osobně'),ip)+acc('🌐','Online',on)+discHtml+'<div id="cdTrend"></div></div>';
+    +'<div id="cdStats">'+acc('🥊',(EN?'1:1 in-person':'1:1 osobně'),ip)+acc('🌐','Online',on,_coachHasOnline())+discHtml+'<div class="dashSecHdr" style="font-size:14px;font-weight:800;color:var(--dark);margin:10px 0 8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">👥 '+(EN?'Students':'Studenti')+'<span id="cdStudentsCount" style="margin-left:auto;font-weight:800;color:var(--dark);font-size:14px;">…</span><span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;margin-left:10px;">▾</span></div><div class="prow-group" id="cdStudents" style="margin-bottom:12px;"><p style="font-size:12.5px;color:var(--light);padding:6px 2px;">'+L('Načítám...')+'</p></div>'+'<div id="cdTrend"></div></div>';
   const msel=$('cdMonthSel'); if(msel) msel.onchange=()=>{ window._coachDashMonth=msel.value; renderCoachDash(); };
-  (async()=>{ try{ const { data:bk }=await supaClient.from('bookings').select('student_id,status').eq('coach_id',currentUser.id); const valid=(bk||[]).filter(b=>b&&b.student_id&&b.status!=='refunded'&&b.status!=='cancelled'); const cnt={}; valid.forEach(b=>{ cnt[b.student_id]=(cnt[b.student_id]||0)+1; }); const distinct=Object.keys(cnt).length; const repeat=Object.keys(cnt).filter(k=>cnt[k]>=2).length; const el=$('cdRetVal'); if(el) el.textContent = distinct>=3 ? (Math.round(repeat/distinct*100)+'%') : '—'; }catch(e){ const el=$('cdRetVal'); if(el) el.textContent='—'; } })();
+  (async()=>{ try{ const { data:bk }=await supaClient.from('bookings').select('student_id,student_name,status,created_at').eq('coach_id',currentUser.id); const valid=(bk||[]).filter(b=>b&&b.student_id&&b.status!=='refunded'&&b.status!=='cancelled'); const cnt={},nm={},last={}; valid.forEach(b=>{ cnt[b.student_id]=(cnt[b.student_id]||0)+1; if(b.student_name) nm[b.student_id]=b.student_name; const d=(b.created_at||'').slice(0,10); if(d&&(!last[b.student_id]||d>last[b.student_id])) last[b.student_id]=d; }); const ids=Object.keys(cnt); const distinct=ids.length; const repeat=ids.filter(k=>cnt[k]>=2).length; const el=$('cdRetVal'); if(el) el.textContent = distinct>=3 ? (Math.round(repeat/distinct*100)+'%') : '—'; const sc=$('cdStudentsCount'); if(sc) sc.textContent=distinct; const sb=$('cdStudents'); if(sb){ if(!distinct){ sb.innerHTML='<p style="font-size:12.5px;color:var(--light);padding:6px 2px;">'+(EN?'No 1:1 students yet.':'Zatím žádní 1:1 studenti.')+'</p>'; } else { const sorted=ids.sort((a,b)=>cnt[b]-cnt[a]); sb.innerHTML=sorted.map(id=>{ const rp=cnt[id]>=2; return '<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:'+(rp?'#F0FBF0':'#F5F2EE')+';">'+(rp?'🔁':'👤')+'</div><div class="prow-lbl">'+escapeHtml(nm[id]||'Student')+(last[id]?' <span style="color:var(--light);font-size:11px;">· '+last[id]+'</span>':'')+'</div></div><span class="prow-val">'+cnt[id]+'×</span></div>'; }).join(''); } } }catch(e){ const el=$('cdRetVal'); if(el) el.textContent='—'; } })();
   const stats=$('cdStats');
   if(stats){ stats.querySelectorAll('.dashSecHdr').forEach((h)=>{ const g=h.nextElementSibling; const arr=h.querySelector('.dashAccArr'); if(g){ g.style.display='none'; if(arr) arr.style.transform='rotate(-90deg)'; } h.onclick=()=>{ if(!g) return; const closed=g.style.display==='none'; g.style.display=closed?'':'none'; if(arr) arr.style.transform=closed?'':'rotate(-90deg)'; }; }); }
   try{
