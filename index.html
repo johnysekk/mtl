@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-20-QEO | Events leaderboard sheet (shEventLb) is now a data-keep-emoji zone too (was missed) - its emoji no longer vanish when the toggle is off, matching the coach and gym leaderboards. -->
+<!-- MTL build: 2026-06-20-QER | (1) Emoji-off adoption confirm is now activity-based, not calendar-based: requires last_active - no_emoji_since >= 7 days (genuinely active 7+ days AFTER turning emoji off), so 'turn off, vanish 30 days, log in once' no longer counts as a 7-day adopter. (2) Removed the founder-only 'MTL' tab from the Coach Diary (renderMtl) - it had become effectively empty (3 low-signal metrics); tabMtl is now never shown. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -9842,7 +9842,7 @@ var _EMOJI_TEST=/\p{Extended_Pictographic}|[\u{1F1E6}-\u{1F1FF}]/u;
 function _emojiOff(){ try{ return localStorage.getItem('mtl_no_emoji')==='1'; }catch(e){ return false; } }
 function _setEmojiOff(v){ try{ localStorage.setItem('mtl_no_emoji', v?'1':'0'); }catch(e){} }
 function _stripEmojiStr(t){ return (t||'').replace(_EMOJI_RE,''); }
-function _stripNodeIfText(node){ try{ if(node.nodeType!==3) return; if(!_EMOJI_TEST.test(node.nodeValue)) return; var pe=node.parentElement; if(!pe) return; if(pe.closest&&pe.closest('[data-keep-emoji]')) return; if(_stripEmojiStr(pe.textContent||'').trim()==='') return; var nv=_stripEmojiStr(node.nodeValue); if(nv!==node.nodeValue) node.nodeValue=nv; }catch(e){} }
+function _stripNodeIfText(node){ try{ if(node.nodeType!==3) return; if(!_EMOJI_TEST.test(node.nodeValue)) return; var pe=node.parentElement; if(!pe) return; if(pe.closest&&pe.closest('[data-keep-emoji],.prow-icon,.sicon,.ni-icon,.icon-btn')) return; if(_stripEmojiStr(pe.textContent||'').trim()==='') return; var nv=_stripEmojiStr(node.nodeValue); if(nv!==node.nodeValue) node.nodeValue=nv; }catch(e){} }
 function _applyEmojiStrip(root){ if(!root) return; try{ if(root.nodeType===3){ _stripNodeIfText(root); return; } var w=document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null); var arr=[],n; while(n=w.nextNode()){ if(_EMOJI_TEST.test(n.nodeValue)) arr.push(n); } arr.forEach(_stripNodeIfText); }catch(e){} }
 var _emojiObs=null;
 var _emojiQ=[], _emojiTimer=null;
@@ -9850,10 +9850,32 @@ function _flushEmoji(){ _emojiTimer=null; if(!_emojiObs) return; _emojiObs.disco
 function _startEmojiObserver(){ if(_emojiObs||!_emojiOff()) return; _emojiObs=new MutationObserver(function(muts){ for(var i=0;i<muts.length;i++){ var an=muts[i].addedNodes; if(!an||!an.length) continue; for(var j=0;j<an.length;j++){ var nd=an[j]; if(nd.nodeType===1||nd.nodeType===3) _emojiQ.push(nd); } } if(!_emojiTimer) _emojiTimer=requestAnimationFrame(_flushEmoji); }); _emojiObs.observe(document.body,{childList:true,subtree:true}); }
 function _initEmojiPref(){ if(_emojiOff()){ try{ document.body.classList.add('no-emoji'); }catch(e){} _applyEmojiStrip(document.body); _startEmojiObserver(); } }
 (function(){ function _r(){ try{ _initEmojiPref(); }catch(e){} } if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded',_r); } else { _r(); } })();
+async function _emojiAccountSync(){
+  try{
+    if(!currentUser||!currentUser.id) return; var _id=currentUser.id;
+    // last_active: throttled once/day, fire-and-forget
+    try{ var _k='mtl_la_'+_id,_l=0; try{ _l=parseInt(localStorage.getItem(_k)||'0',10)||0; }catch(e){} if(Date.now()-_l>86400000){ try{ localStorage.setItem(_k,String(Date.now())); }catch(e){} supaClient.from('profiles').update({last_active:new Date().toISOString()}).eq('id',_id).then(function(){},function(){}); } }catch(e){}
+    // global sync: account is source of truth (skip entirely if column not deployed yet)
+    try{
+      var _ne=currentUser.no_emoji;
+      if(typeof _ne==='undefined'){ /* SQL not deployed -> keep per-device behavior */ }
+      else if(_ne===null){ // never set on account -> initialize from this device's current state
+        var _do=_emojiOff(); currentUser.no_emoji=_do; var _up={no_emoji:_do, no_emoji_since:_do?new Date().toISOString():null}; currentUser.no_emoji_since=_up.no_emoji_since;
+        supaClient.from('profiles').update(_up).eq('id',_id).then(function(){},function(){});
+      } else {
+        var _ao=_ne===true;
+        if(_ao && !_emojiOff()){ _setEmojiOff(true); try{ document.body.classList.add('no-emoji'); }catch(e){} _applyEmojiStrip(document.body); _startEmojiObserver(); try{ if(typeof refreshSettingsToggles==='function') refreshSettingsToggles(); }catch(e){} }
+        else if(!_ao && _emojiOff()){ _setEmojiOff(false); try{ document.body.classList.remove('no-emoji'); }catch(e){} if(_emojiObs){ try{ _emojiObs.disconnect(); }catch(e){} _emojiObs=null; } if(_emojiTimer){ try{ cancelAnimationFrame(_emojiTimer); }catch(e){} _emojiTimer=null; } try{ if(typeof buildDashSide==='function') buildDashSide(); }catch(e){} try{ if(typeof refreshSettingsToggles==='function') refreshSettingsToggles(); }catch(e){} }
+      }
+    }catch(e){}
+    // 7-day confirm (runs only because the user is active now), fire-and-forget
+    try{ if(currentUser.no_emoji===true && currentUser.no_emoji_confirmed!==true && currentUser.no_emoji_since && currentUser.last_active){ var _sc=new Date(currentUser.no_emoji_since).getTime(); var _la=new Date(currentUser.last_active).getTime(); if(_sc && _la && (_la-_sc>=604800000)){ currentUser.no_emoji_confirmed=true; supaClient.from('profiles').update({no_emoji_confirmed:true}).eq('id',_id).then(function(){},function(){}); } } }catch(e){}
+  }catch(e){}
+}
 function refreshSettingsToggles(){ const _eo=$('vNoEmoji'); if(_eo) _eo.textContent=_emojiOff()?L('Vypnuto'):L('Zapnuto'); var _ned=$('noEmojiDesc'); if(_ned) _ned.textContent=(LANG==='en'?'Turns emoji off for info & notifications — celebratory & gamification ones always stay':'Vypne emoji u informací a notifikací — oslavné a herní zůstávají vždy'); const _vt=$('vType'); if(_vt) _vt.textContent=typeFiltersEnabled()?L('Zapnuto'):L('Vypnuto'); const c=$('vColdNotif'); if(c) c.textContent=coldNotifMuted()?L('Vypnuto'):L('Zapnuto'); const a=$('vAvailNotif'); if(a) a.textContent=availNotifMuted()?L('Vypnuto'):L('Zapnuto'); const r=$('vClassRem'); if(r) r.textContent=classReminderMuted()?L('Vypnuto'):L('Zapnuto'); const cr=$('vCoachRem'); if(cr) cr.textContent=coachLessonReminderMuted()?L('Vypnuto'):L('Zapnuto'); const _me=currentUser||{}; const _coach=_me.coach_status==='approved'; const _gym=!!(window._myGyms&&window._myGyms.length)||_me.role==='founder'; if($('sCoachRem')) $('sCoachRem').style.display=_coach?'':'none'; if($('sColdNotif')) $('sColdNotif').style.display=_gym?'':'none'; const _nn=$('vNewListingNotif'); if(_nn) _nn.textContent=newListingMuted()?L('Vypnuto'):L('Zapnuto'); const _amb=(typeof myVerifyList==='function'&&myVerifyList().length>0)||_me.role==='founder'||_me.id===FOUNDER_UUID; if($('sNewListingNotif')) $('sNewListingNotif').style.display=_amb?'':'none'; const _ln=$('vLeagueNotif'); if(_ln) _ln.textContent=leagueNotifMuted()?L('Vypnuto'):L('Zapnuto'); if($('sLeagueNotif')) $('sLeagueNotif').style.display=(_coach||_gym||_me.role==='founder'||_me.id===FOUNDER_UUID)?'':'none'; try{ if(typeof renderSettingsDisc==='function') renderSettingsDisc(); }catch(e){} }
 if($('btnSettings')) $('btnSettings').onclick=()=>{ refreshSettingsToggles(); if(typeof setupDangerZone==='function') setupDangerZone(); openSheet('shSettings'); };
 if($('sAvailNotif')) $('sAvailNotif').onclick=()=>setAvailNotifMute(!availNotifMuted());
-if($('sNoEmoji')) $('sNoEmoji').onclick=()=>{ var now=!_emojiOff(); _setEmojiOff(now); if(now){ try{ document.body.classList.add('no-emoji'); }catch(e){} _applyEmojiStrip(document.body); _startEmojiObserver(); refreshSettingsToggles(); } else { try{ document.body.classList.remove('no-emoji'); }catch(e){} if(_emojiObs){ try{ _emojiObs.disconnect(); }catch(e){} _emojiObs=null; } if(_emojiTimer){ try{ cancelAnimationFrame(_emojiTimer); }catch(e){} _emojiTimer=null; } try{ if(typeof buildDashSide==='function') buildDashSide(); }catch(e){} refreshSettingsToggles(); } };
+if($('sNoEmoji')) $('sNoEmoji').onclick=()=>{ var now=!_emojiOff(); _setEmojiOff(now); try{ if(currentUser&&currentUser.id){ var _ep={no_emoji:now, no_emoji_since: now?new Date().toISOString():null}; currentUser.no_emoji=now; currentUser.no_emoji_since=_ep.no_emoji_since; supaClient.from('profiles').update(_ep).eq('id',currentUser.id).then(function(){},function(){}); } }catch(e){} if(now){ try{ document.body.classList.add('no-emoji'); }catch(e){} _applyEmojiStrip(document.body); _startEmojiObserver(); refreshSettingsToggles(); } else { try{ document.body.classList.remove('no-emoji'); }catch(e){} if(_emojiObs){ try{ _emojiObs.disconnect(); }catch(e){} _emojiObs=null; } if(_emojiTimer){ try{ cancelAnimationFrame(_emojiTimer); }catch(e){} _emojiTimer=null; } try{ if(typeof buildDashSide==='function') buildDashSide(); }catch(e){} refreshSettingsToggles(); } };
 if($('sColdNotif')) $('sColdNotif').onclick=()=>setColdNotifMute(!coldNotifMuted());
 if($('sNewListingNotif')) $('sNewListingNotif').onclick=()=>setNewListingMute(!newListingMuted());
 if($('sClassRem')) $('sClassRem').onclick=()=>setClassReminderMute(!classReminderMuted());
@@ -11803,6 +11825,15 @@ async function renderFounderDash(){
     <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:14px;">${LANG==='en'?'Coach fee is an estimate (≈15%); founding/referral lower it slightly. Gyms bear their own Stripe fees, so gym fees are net. Amounts summed nominally across currencies. VAT with your accountant.':'Provize koučů je odhad (≈15 %); founding/referral ji mírně sníží. Gymy nesou vlastní Stripe fee, takže gym provize jsou net. Částky sečteny nominálně napříč měnami. DPH řeš s účetní.'}</p>
     ${earningsDisclaimer()}
   `;
+  try{
+    var _emCut=new Date(Date.now()-30*86400000).toISOString();
+    var _emTot=await supaClient.from('profiles').select('id',{count:'exact',head:true});
+    var _emAct=await supaClient.from('profiles').select('id',{count:'exact',head:true}).gte('last_active',_emCut);
+    var _emOff=await supaClient.from('profiles').select('id',{count:'exact',head:true}).eq('no_emoji_confirmed',true).gte('last_active',_emCut);
+    var _emT=(_emTot&&_emTot.count)||0, _emA=(_emAct&&_emAct.count)||0, _emO=(_emOff&&_emOff.count)||0;
+    var _emPct=_emA?Math.round(_emO/_emA*1000)/10:0;
+    box.insertAdjacentHTML('beforeend', '<div class="sec-lbl">'+(LANG==='en'?'Product / Emoji off':'Produkt / Emoji vypnuto')+'</div><div class="prow-group" style="margin-bottom:16px;"><div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">\uD83D\uDC65</div><div class="prow-lbl">'+(LANG==='en'?'Registered total':'Registrovanych celkem')+'</div></div><span class="prow-val">'+_emT+'</span></div><div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">\u26A1</div><div class="prow-lbl">'+(LANG==='en'?'Active (30 days)':'Aktivnich (30 dni)')+'</div></div><span class="prow-val">'+_emA+'</span></div><div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">\uD83D\uDE36</div><div class="prow-lbl">'+(LANG==='en'?'Emoji off 7+ days':'Emoji vypnuto 7+ dni')+'</div></div><span class="prow-val">'+_emO+' &middot; '+_emPct+'%</span></div><div style="font-size:11px;color:var(--light);line-height:1.5;padding:2px 16px 4px;">'+(LANG==='en'?'% = share of ACTIVE accounts (last 30 days) who kept emoji off 7+ consecutive days. Inactive (30+ days) drop out of both numbers automatically.':'% = podil AKTIVNICH uctu (poslednich 30 dni), ktere maji emoji vypnute 7+ dni v kuse. Neaktivni (30+ dni) z obou cisel automaticky vypadnou.')+'</div></div>');
+  }catch(e){}
   renderFdMonth();
   if(typeof renderFdRevokes==='function') renderFdRevokes();
   if(typeof renderFdGymChanges==='function') renderFdGymChanges();
@@ -13002,7 +13033,7 @@ async function openDiary(){
   diaryYear = now.getFullYear();
   diaryMonth = now.getMonth();
   openSheet('shDiary');
-  if($('tabMtl')) $('tabMtl').style.display = (currentUser.role==='founder') ? 'block' : 'none';
+  if($('tabMtl')) $('tabMtl').style.display = 'none';
   await loadDiaryData();
   renderDiary();
 }
@@ -15198,6 +15229,7 @@ function renderSettingsDisc(){
 }
 function enterApp(){
   try{ if(typeof processPendingJoin==='function') processPendingJoin(); }catch(e){}
+  try{ if(typeof _emojiAccountSync==='function') _emojiAccountSync(); }catch(e){}
   $('authScreen').style.display='none';
   if(isMultiDiscipline()){
     if(_deckDisc){ if(currentUser && currentUser.pref_discipline!==_deckDisc){ try{ supaClient.from('profiles').update({ pref_discipline:_deckDisc }).eq('id', currentUser.id); currentUser.pref_discipline=_deckDisc; }catch(e){} } }
