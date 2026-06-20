@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-20-QES | Emoji-off tweaks: bottom nav icons (.ni-icon) now stay PERMANENT (removed from the hide rule; strip already preserves them) so the nav no longer collapses to bare text. Desktop dashboard top-bar refresh/settings now show TEXT ONLY when emoji off (.dashRefreshIcon hidden via CSS, emoji preserved for re-enable) - label was already there. -->
+<!-- MTL build: 2026-06-20-QET | Coach dashboard (renderCoachDash) rebuilt: bookings loaded up-front, ALL accordions always shown (even at 0), ordered by importance into 3-per-row desktop panels - Row1 money split (1:1 / Online / By discipline), Row2 people (Students / Growth+stickiness / Reliability+timing). New metrics: rebook rate, new->repeat, avg lessons/student, net/student, MoM net, MoM students, cancel/refund rate, rating+count, avg booking lead, busiest day, busiest time. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -12620,8 +12620,11 @@ async function renderCoachDash(){
   if(!window._coachDashMonth) window._coachDashMonth=months[0].ym;
   const sel=window._coachDashMonth;
   const since=months[months.length-1].ym+'-01';
-  let tx=[];
-  try{ const { data }=await supaClient.from('transactions').select('id,type,discipline,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,stripe_fee,created_at,currency,online').eq('coach_id',currentUser.id).is('gym_id',null).gte('created_at',since); tx=data||[]; }catch(e){ console.log('[coachdash]',e&&e.message); }
+  let tx=[], bk=[];
+  try{ const r=await Promise.all([
+    supaClient.from('transactions').select('id,type,discipline,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,stripe_fee,created_at,currency,online').eq('coach_id',currentUser.id).is('gym_id',null).gte('created_at',since),
+    supaClient.from('bookings').select('student_id,student_name,status,created_at,training_date,training_time,type').eq('coach_id',currentUser.id)
+  ]); tx=(r[0]&&r[0].data)||[]; bk=(r[1]&&r[1].data)||[]; }catch(e){ console.log('[coachdash]',e&&e.message); }
   const NET=r=>Math.max(0,((r.gross_amount||0)-(r.refund_amount||0))-(r.stripe_fee||0)-(((r.mtl_fee||0)-(r.mtl_fee_refunded||0))))/100;
   const GROSS=r=>((r.gross_amount||0)-(r.refund_amount||0))/100;
   const MTLF=r=>(((r.mtl_fee||0)-(r.mtl_fee_refunded||0)))/100;
@@ -12632,71 +12635,123 @@ async function renderCoachDash(){
   const monthLabel=sel==='all'?(EN?'all time':'celkem'):((months.find(m=>m.ym===sel)||{}).lbl||sel);
   const monthOpts='<option value="all"'+(sel==='all'?' selected':'')+'>'+(EN?'All time':'Vše')+'</option>'+months.map(m=>'<option value="'+m.ym+'"'+(m.ym===sel?' selected':'')+'>'+m.lbl+'</option>').join('');
   const heroNet=selTx.reduce((a,r)=>a+NET(r),0);
-  const grossTot=selTx.reduce((a,r)=>a+GROSS(r),0);
   let trend=null;
   if(sel!=='all'){ const idx=months.findIndex(m=>m.ym===sel); const prev=months[idx+1]; if(prev){ const pn=tx.filter(r=>(r.created_at||'').slice(0,7)===prev.ym).reduce((a,r)=>a+NET(r),0); if(pn>0) trend=Math.round((heroNet-pn)/pn*100); } }
-  const rating=currentUser.rating||null; const lessons=selTx.length;
+  const rating=currentUser.rating||null;
+  const ratingCount=currentUser.rating_count||currentUser.reviews_count||currentUser.review_count||currentUser.num_reviews||null;
+  const lessons=selTx.length;
   const grp=(arr)=>({gross:arr.reduce((a,r)=>a+GROSS(r),0),mtl:arr.reduce((a,r)=>a+MTLF(r),0),st:arr.reduce((a,r)=>a+STF(r),0),net:arr.reduce((a,r)=>a+NET(r),0),n:arr.length});
   const ip=grp(selTx.filter(r=>!isOn(r))), on=grp(selTx.filter(isOn));
   const byD={}; selTx.forEach(r=>{ const d=r.discipline||'other'; (byD[d]=byD[d]||{net:0,n:0}); byD[d].net+=NET(r); byD[d].n++; });
-  const dK=Object.keys(byD).filter(x=>byD[x].net>0).sort((a,b)=>byD[b].net-byD[a].net);
-  const acc=(emoji,title,g,force)=> (!g.n && !force)?'' : ('<div class="dashSecHdr" style="font-size:14px;font-weight:800;color:var(--dark);margin:10px 0 8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">'+emoji+' '+title+' <span style="color:var(--light);font-weight:600;font-size:12px;">· '+monthLabel+'</span><span style="margin-left:auto;font-weight:800;color:#006040;font-size:14px;">'+f(g.net)+'</span><span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;margin-left:10px;">▾</span></div>'
-    +'<div class="prow-group" style="margin-bottom:12px;">'
-    +'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💪</div><div class="prow-lbl">'+(EN?'Gross collected':'Hrubě vybráno')+' <span style="color:var(--light);font-size:12px;">('+g.n+')</span></div></div><span class="prow-val">'+f(g.gross)+'</span></div>'
-    +'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">🏛️</div><div class="prow-lbl">'+(EN?'− MTL fee':'− MTL poplatek')+'</div></div><span class="prow-val">-'+f(g.mtl)+'</span></div>'
-    +'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF0E6;">💳</div><div class="prow-lbl">'+(EN?'− Stripe fee':'− Stripe poplatky')+'</div></div><span class="prow-val">-'+f(g.st)+'</span></div>'
-    +'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">💰</div><div class="prow-lbl"><b>'+(EN?'Net':'Čistě (net)')+'</b></div></div><span class="prow-val" style="color:#006040;font-weight:800;">'+f(g.net)+'</span></div>'
-    +(g.n>1?'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#EEF4FF;">📐</div><div class="prow-lbl">'+(EN?'Ø net / lesson':'Ø net / lekce')+'</div></div><span class="prow-val">'+f(g.net/g.n)+'</span></div>':'')
-    +'</div>');
-  let discHtml='';
-  if(dK.length){ discHtml='<div class="dashSecHdr" style="font-size:14px;font-weight:800;color:var(--dark);margin:10px 0 8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">🥋 '+(EN?'By discipline':'Podle disciplíny')+'<span style="margin-left:auto;font-weight:800;color:#006040;font-size:14px;">'+f(dK.reduce((a,k)=>a+byD[k].net,0))+'</span><span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;margin-left:10px;">▾</span></div><div class="prow-group" style="margin-bottom:12px;">'+dK.map(k=>{ const lbl=k==='other'?(EN?'Other':'Ostatní'):((typeof disciplineEmoji==='function'?disciplineEmoji(k):'🥋')+' '+(typeof disciplineLabel==='function'?disciplineLabel(k):k)); return '<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F3FF;">🥋</div><div class="prow-lbl">'+lbl+' <span style="color:var(--light);font-size:12px;">('+byD[k].n+')</span></div></div><span class="prow-val" style="color:#006040;">'+f(byD[k].net)+'</span></div>'; }).join('')+'</div>'; }
+  const dK=Object.keys(byD).filter(x=>byD[x].n>0).sort((a,b)=>byD[b].net-byD[a].net);
+
+  // ---------- student / booking metrics ----------
+  const _now=new Date(); const _ymNow=_now.getFullYear()+'-'+String(_now.getMonth()+1).padStart(2,'0');
+  const pmonth=(sel==='all')?_ymNow:sel;
+  const _d60=new Date(_now.getTime()-60*86400000); const s60=_d60.getFullYear()+'-'+String(_d60.getMonth()+1).padStart(2,'0')+'-'+String(_d60.getDate()).padStart(2,'0');
+  const tStr=_now.getFullYear()+'-'+String(_now.getMonth()+1).padStart(2,'0')+'-'+String(_now.getDate()).padStart(2,'0');
+  const allBk=bk||[];
+  const cancN=allBk.filter(b=>b&&(b.status==='refunded'||b.status==='cancelled')).length;
+  const cancRate=allBk.length? Math.round(cancN/allBk.length*100):null;
+  const valid=allBk.filter(b=>b&&b.student_id&&b.status!=='refunded'&&b.status!=='cancelled');
+  const cnt={},nm={},lastT={},firstT={},mh={};
+  valid.forEach(b=>{ const sid=b.student_id; cnt[sid]=(cnt[sid]||0)+1; if(b.student_name) nm[sid]=b.student_name; const td=b.training_date||(b.created_at||'').slice(0,10); if(td){ if(!lastT[sid]||td>lastT[sid]) lastT[sid]=td; if(!firstT[sid]||td<firstT[sid]) firstT[sid]=td; (mh[sid]=mh[sid]||{})[td.slice(0,7)]=1; } });
+  const ids=Object.keys(cnt); const distinct=ids.length; const repeat=ids.filter(k=>cnt[k]>=2).length;
+  const active=ids.filter(k=>mh[k]&&mh[k][pmonth]).length;
+  const newC=ids.filter(k=>(firstT[k]||'').slice(0,7)===pmonth).length;
+  const dormant=ids.filter(k=>lastT[k]&&lastT[k]<s60).length;
+  const upcoming=valid.filter(b=>(b.training_date||'')>tStr).length;
+  const rebook=distinct>=3?Math.round(repeat/distinct*100):null;
+  const avgSess=distinct?(valid.length/distinct):0;
+  const cohort=(sel==='all')?ids:ids.filter(k=>(firstT[k]||'').slice(0,7)===pmonth);
+  const newRepeat=cohort.length>=3?Math.round(cohort.filter(k=>cnt[k]>=2).length/cohort.length*100):null;
+  const idxSel=months.findIndex(m=>m.ym===pmonth);
+  const prevYm=(idxSel>=0&&months[idxSel+1])?months[idxSel+1].ym:null;
+  const activePrev=prevYm?ids.filter(k=>mh[k]&&mh[k][prevYm]).length:0;
+  const momStud=(prevYm&&activePrev>0)?Math.round((active-activePrev)/activePrev*100):null;
+  const netPerStud=distinct?heroNet/distinct:0;
+  let leadSum=0,leadN=0;
+  valid.forEach(b=>{ if(b.training_date&&b.created_at){ const dd=(new Date(b.training_date+'T00:00:00').getTime()-new Date(b.created_at).getTime())/86400000; if(dd>=0&&dd<365){ leadSum+=dd; leadN++; } } });
+  const leadAvg=leadN?(leadSum/leadN):null;
+  const dow={},hrr={};
+  valid.forEach(b=>{ if(b.training_date){ const wd=new Date(b.training_date+'T00:00:00').getDay(); dow[wd]=(dow[wd]||0)+1; } if(b.training_time){ const h=parseInt(String(b.training_time).slice(0,2),10); if(!isNaN(h)) hrr[h]=(hrr[h]||0)+1; } });
+  const dowK=Object.keys(dow).sort((a,b)=>dow[b]-dow[a]);
+  const hrK=Object.keys(hrr).sort((a,b)=>hrr[b]-hrr[a]);
+  const dayNames=EN?['Sun','Mon','Tue','Wed','Thu','Fri','Sat']:['Ne','Po','Út','St','Čt','Pá','So'];
+  const topDow=dowK.length?dayNames[+dowK[0]]:'—';
+  const topHr=hrK.length?(String(hrK[0]).padStart(2,'0')+':00'):'—';
+
+  // ---------- builders ----------
+  const ARR='<span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;margin-left:10px;">▾</span>';
+  const HDR=(emoji,title,rightHtml)=>'<div class="dashSecHdr" style="font-size:14px;font-weight:800;color:var(--dark);margin:10px 0 8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">'+emoji+' '+title+'<span style="margin-left:auto;font-weight:800;font-size:14px;color:var(--dark);">'+(rightHtml||'')+'</span>'+ARR+'</div>';
+  const row=(em,bg,lab,val,vc)=>'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:'+bg+';">'+em+'</div><div class="prow-lbl">'+lab+'</div></div><span class="prow-val"'+(vc?' style="color:'+vc+';font-weight:700;"':'')+'>'+val+'</span></div>';
+  const wrap=rows=>'<div class="prow-group" style="margin-bottom:12px;">'+rows+'</div>';
+  const pct=v=>v==null?'—':(v+'%');
+  const arr=(v)=>v==null?'—':((v>=0?'▲ ':'▼ ')+Math.abs(v)+'%');
+  const arrC=(v)=>v==null?null:(v>=0?'#006040':'var(--red)');
+
+  const moneyAcc=(emoji,title,g)=> HDR(emoji,title+' <span style="color:var(--light);font-weight:600;font-size:12px;">· '+monthLabel+'</span>','<span style="color:#006040;">'+f(g.net)+'</span>')
+    + wrap(
+        row('💪','#F0FBF0',(EN?'Gross collected':'Hrubě vybráno')+' <span style="color:var(--light);font-size:12px;">('+g.n+')</span>',f(g.gross))
+      + row('🏛️','#F5F2EE',(EN?'− MTL fee':'− MTL poplatek'),'-'+f(g.mtl))
+      + row('💳','#FFF0E6',(EN?'− Stripe fee':'− Stripe poplatky'),'-'+f(g.st))
+      + row('💰','#FFF8E6','<b>'+(EN?'Net':'Čistě (net)')+'</b>','<span style="color:#006040;font-weight:800;">'+f(g.net)+'</span>')
+      + row('📐','#EEF4FF',(EN?'Ø net / lesson':'Ø net / lekce'),f(g.n?g.net/g.n:0))
+      );
+
+  const discRows = dK.length
+    ? dK.map(k=>{ const lbl=k==='other'?(EN?'Other':'Ostatní'):((typeof disciplineEmoji==='function'?disciplineEmoji(k):'🥋')+' '+(typeof disciplineLabel==='function'?disciplineLabel(k):k)); return row('🥋','#F5F3FF',lbl+' <span style="color:var(--light);font-size:12px;">('+byD[k].n+')</span>','<span style="color:#006040;">'+f(byD[k].net)+'</span>'); }).join('')
+    : row('—','#F5F2EE',(EN?'No data for this period':'Žádná data za období'),'—');
+  const discAcc = HDR('🥋',(EN?'By discipline':'Podle disciplíny'), dK.length?('<span style="color:#006040;">'+f(dK.reduce((a,k)=>a+byD[k].net,0))+'</span>'):'') + wrap(discRows);
+
+  let studentRows;
+  if(!distinct){ studentRows=row('—','#F5F2EE',(EN?'No students yet':'Zatím žádní studenti'),'—'); }
+  else{
+    const periodLbl=(sel==='all')?(EN?'this month':'tento měsíc'):monthLabel;
+    studentRows = row('🟢','#F0FBF0',(EN?'Active':'Aktivní')+' · '+periodLbl,active)
+      + row('✨','#FFF8E6',(EN?'New':'Noví')+' · '+periodLbl,'+'+newC)
+      + (upcoming>0?row('📅','#F5F2EE',(EN?'Upcoming booked':'Naplánováno'),upcoming):'')
+      + (dormant>0?row('🌙','#FEECEC',(EN?'Dormant (60+ days)':'Spící (60+ dní)'),dormant,'var(--red)'):'')
+      + '<div style="border-top:1px dashed var(--border);margin:8px 0 6px;"></div>'
+      + ids.sort((a,b)=>cnt[b]-cnt[a]).map(function(id){ const rp=cnt[id]>=2; const dz=lastT[id]&&lastT[id]<s60; return row(dz?'🌙':(rp?'🔁':'👤'), dz?'#FEECEC':(rp?'#F0FBF0':'#F5F2EE'), escapeHtml(nm[id]||'Student')+(lastT[id]?' <span style="color:var(--light);font-size:11px;">· '+lastT[id]+'</span>':''), cnt[id]+'×'); }).join('');
+  }
+  const studentsAcc = HDR('👥',(EN?'Students':'Studenti'), String(distinct)) + wrap(studentRows);
+
+  const growthAcc = HDR('📈',(EN?'Growth &amp; stickiness':'Růst &amp; stickiness'),'')
+    + wrap(
+        row('🔁','#EEF4FF',(EN?'Rebook rate':'Rebook rate')+' <span style="color:var(--light);font-size:11px;">'+(EN?'(2+ lessons)':'(2+ lekce)')+'</span>', pct(rebook))
+      + row('🌱','#F0FBF0',(EN?'New → repeat':'Noví → opakovaně')+' <span style="color:var(--light);font-size:11px;">· '+monthLabel+'</span>', pct(newRepeat))
+      + row('🔂','#F5F2EE',(EN?'Ø lessons / student':'Ø lekcí / student'), distinct?avgSess.toFixed(1):'—')
+      + row('💸','#FFF8E6',(EN?'Net / student':'Net / student'), distinct?f(netPerStud):'—')
+      + row('📊','#F5F3FF',(EN?'MoM net':'MoM net'), arr(trend), arrC(trend))
+      + row('👥','#EEF4FF',(EN?'MoM students':'MoM studenti'), arr(momStud), arrC(momStud))
+      );
+
+  const relAcc = HDR('🛡️',(EN?'Reliability &amp; timing':'Spolehlivost &amp; plánování'),'')
+    + wrap(
+        row('🛡️','#F0FBF0',(EN?'Cancel / refund rate':'Cancel / refund rate')+' <span style="color:var(--light);font-size:11px;">('+allBk.length+')</span>', cancRate==null?'—':cancRate+'%', (cancRate!=null&&cancRate>=20)?'var(--red)':null)
+      + row('⭐','#FFF8E6',(EN?'Rating':'Hodnocení'), rating?(rating+(ratingCount?(' <span style="color:var(--light);font-size:11px;">('+ratingCount+')</span>'):'')):'—')
+      + row('⏳','#EEF4FF',(EN?'Avg booking lead':'Ø rezervace dopředu'), leadAvg==null?'—':(Math.round(leadAvg)+' '+(EN?'days':'dní')))
+      + row('📅','#F5F2EE',(EN?'Busiest day':'Nejvytíženější den'), topDow)
+      + row('🕐','#F5F3FF',(EN?'Busiest time':'Nejvytíženější čas'), topHr)
+      );
+
   const heroHtml='<div class="dashHeroSingle" style="background:linear-gradient(135deg,#0A7A4F,#005A3C);border-radius:16px;padding:15px 18px;margin-bottom:10px;color:#fff;box-shadow:0 2px 10px rgba(0,96,64,.18);"><div style="font-size:11.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">'+(EN?'Net collected':'Čistě vybráno')+' · '+monthLabel+'</div><div style="font-size:30px;font-weight:800;line-height:1.05;margin:5px 0 3px;">'+f(heroNet)+'</div>'+(trend!=null?('<div style="font-size:12.5px;font-weight:700;">'+(trend>=0?'▲':'▼')+' '+Math.abs(trend)+'% '+(EN?'vs last month':'vs minulý měsíc')+'</div>'):('<div style="font-size:11px;opacity:.75;">'+(EN?'real Stripe payments, after refunds':'reálné platby ze Stripe, po refundech')+'</div>'))+'</div>';
   const cardsHtml='<div class="dashCards">'
     +'<div class="dashCardNet"><div style="font-size:10.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">'+(EN?'Net collected':'Čistě vybráno')+'</div><div style="font-size:25px;font-weight:800;line-height:1.05;margin:5px 0 2px;">'+f(heroNet)+'</div>'+(trend!=null?('<div style="font-size:11.5px;font-weight:700;">'+(trend>=0?'▲':'▼')+' '+Math.abs(trend)+'% '+(EN?'vs last mo.':'vs min.')+'</div>'):('<div style="font-size:10px;opacity:.78;">'+monthLabel+'</div>'))+'</div>'
-    +'<div class="dashCard"><div class="dashCardLbl">'+(EN?'Returning':'Vracející se')+'</div><div class="dashCardVal" id="cdRetVal">…</div></div>'
+    +'<div class="dashCard"><div class="dashCardLbl">'+(EN?'Rebook':'Rebook')+'</div><div class="dashCardVal">'+(rebook!=null?(rebook+'%'):'—')+'</div></div>'
     +'<div class="dashCard"><div class="dashCardLbl">'+(EN?'Rating':'Hodnocení')+'</div><div class="dashCardVal">'+(rating?('⭐ '+rating):'—')+'</div></div>'
     +'<div class="dashCard"><div class="dashCardLbl">'+(EN?'Lessons':'Lekcí')+'</div><div class="dashCardVal">'+lessons+'</div></div>'
     +'</div>';
   const note='<p style="font-size:11px;color:#0A7A4F;background:#F0FBF0;border-radius:8px;padding:8px 10px;margin-bottom:10px;">💳 '+(EN?'Collected earnings (1:1 &amp; online) = real Stripe payments, exact after refunds and MTL + Stripe fees.':'Vybrané výdělky (1:1 a online) = reálné platby ze Stripe, přesné po refundech a po MTL + Stripe poplatcích.')+'</p>';
+
   box.innerHTML='<select id="cdMonthSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:\'DM Sans\';background:#fff;margin-bottom:10px;">'+monthOpts+'</select>'
     +heroHtml+cardsHtml+note
-    +'<div id="cdStats">'+acc('🥊',(EN?'1:1 in-person':'1:1 osobně'),ip)+acc('🌐','Online',on,_coachHasOnline())+discHtml+'<div class="dashSecHdr" style="font-size:14px;font-weight:800;color:var(--dark);margin:10px 0 8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">👥 '+(EN?'Students':'Studenti')+'<span id="cdStudentsCount" style="margin-left:auto;font-weight:800;color:var(--dark);font-size:14px;">…</span><span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;margin-left:10px;">▾</span></div><div class="prow-group" id="cdStudents" style="margin-bottom:12px;"><p style="font-size:12.5px;color:var(--light);padding:6px 2px;">'+L('Načítám...')+'</p></div>'+'<div id="cdTrend"></div></div>';
+    +'<div id="cdStats">'+moneyAcc('🥊',(EN?'1:1 in-person':'1:1 osobně'),ip)+moneyAcc('🌐','Online',on)+discAcc+studentsAcc+growthAcc+relAcc+'<div id="cdTrend"></div></div>';
+
   const msel=$('cdMonthSel'); if(msel) msel.onchange=()=>{ window._coachDashMonth=msel.value; renderCoachDash(); };
-  (async()=>{ try{
-    const { data:bk }=await supaClient.from('bookings').select('student_id,student_name,status,created_at,training_date').eq('coach_id',currentUser.id);
-    const valid=(bk||[]).filter(b=>b&&b.student_id&&b.status!=='refunded'&&b.status!=='cancelled');
-    const _now=new Date(); const _ymNow=_now.getFullYear()+'-'+String(_now.getMonth()+1).padStart(2,'0');
-    const pmonth=(sel==='all')?_ymNow:sel;
-    const _d60=new Date(_now.getTime()-60*86400000); const s60=_d60.getFullYear()+'-'+String(_d60.getMonth()+1).padStart(2,'0')+'-'+String(_d60.getDate()).padStart(2,'0');
-    const tStr=_now.getFullYear()+'-'+String(_now.getMonth()+1).padStart(2,'0')+'-'+String(_now.getDate()).padStart(2,'0');
-    const cnt={},nm={},lastT={},firstT={},mh={};
-    valid.forEach(b=>{ const sid=b.student_id; cnt[sid]=(cnt[sid]||0)+1; if(b.student_name) nm[sid]=b.student_name; const td=b.training_date||(b.created_at||'').slice(0,10); if(td){ if(!lastT[sid]||td>lastT[sid]) lastT[sid]=td; if(!firstT[sid]||td<firstT[sid]) firstT[sid]=td; (mh[sid]=mh[sid]||{})[td.slice(0,7)]=1; } });
-    const ids=Object.keys(cnt); const distinct=ids.length; const repeat=ids.filter(k=>cnt[k]>=2).length;
-    const active=ids.filter(k=>mh[k]&&mh[k][pmonth]).length;
-    const newC=ids.filter(k=>(firstT[k]||'').slice(0,7)===pmonth).length;
-    const dormant=ids.filter(k=>lastT[k]&&lastT[k]<s60).length;
-    const upcoming=valid.filter(b=>(b.training_date||'')>tStr).length;
-    const el=$('cdRetVal'); if(el) el.textContent=distinct>=3?(Math.round(repeat/distinct*100)+'%'):'—';
-    const sc=$('cdStudentsCount'); if(sc) sc.textContent=distinct;
-    const sb=$('cdStudents');
-    if(sb){
-      if(!distinct){ sb.innerHTML='<p style="font-size:12.5px;color:var(--light);padding:6px 2px;">'+(EN?'No students yet.':'Zatím žádní studenti.')+'</p>'; }
-      else{
-        const periodLbl=(sel==='all')?(EN?'this month':'tento měsíc'):((months.find(m=>m.ym===sel)||{}).lbl||sel);
-        const sRow=function(em,bg,lab,val,vc){ return '<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:'+bg+';">'+em+'</div><div class="prow-lbl">'+lab+'</div></div><span class="prow-val"'+(vc?' style="color:'+vc+';"':'')+'>'+val+'</span></div>'; };
-        let strip=sRow('🟢','#F0FBF0',(EN?'Active':'Aktivní')+' · '+periodLbl,active);
-        strip+=sRow('✨','#FFF8E6',(EN?'New':'Noví')+' · '+periodLbl,'+'+newC);
-        strip+=sRow('🔁','#EEF4FF',(EN?'Returning rate':'Vracející se'),distinct>=3?(Math.round(repeat/distinct*100)+'%'):'—');
-        if(upcoming>0) strip+=sRow('📅','#F5F2EE',(EN?'Upcoming booked':'Naplánováno'),upcoming);
-        if(dormant>0) strip+=sRow('🌙','#FEECEC',(EN?'Dormant (60+ days)':'Spící (60+ dní)'),dormant,'var(--red)');
-        const sorted=ids.sort((a,b)=>cnt[b]-cnt[a]);
-        const listHtml=sorted.map(function(id){ const rp=cnt[id]>=2; const dz=lastT[id]&&lastT[id]<s60; return '<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:'+(dz?'#FEECEC':(rp?'#F0FBF0':'#F5F2EE'))+';">'+(dz?'🌙':(rp?'🔁':'👤'))+'</div><div class="prow-lbl">'+escapeHtml(nm[id]||'Student')+(lastT[id]?' <span style="color:var(--light);font-size:11px;">· '+lastT[id]+'</span>':'')+'</div></div><span class="prow-val">'+cnt[id]+'×</span></div>'; }).join('');
-        sb.innerHTML=strip+'<div style="border-top:1px dashed var(--border);margin:8px 0 6px;"></div>'+listHtml;
-      }
-    }
-  }catch(e){ const el=$('cdRetVal'); if(el) el.textContent='—'; } })();
   const stats=$('cdStats');
-  if(stats){ stats.querySelectorAll('.dashSecHdr').forEach((h)=>{ const g=h.nextElementSibling; const arr=h.querySelector('.dashAccArr'); if(g){ g.style.display='none'; if(arr) arr.style.transform='rotate(-90deg)'; } h.onclick=()=>{ if(!g) return; const closed=g.style.display==='none'; g.style.display=closed?'':'none'; if(arr) arr.style.transform=closed?'':'rotate(-90deg)'; }; }); }
+  if(stats){ stats.querySelectorAll('.dashSecHdr').forEach((h)=>{ const g=h.nextElementSibling; const ar=h.querySelector('.dashAccArr'); if(g){ g.style.display='none'; if(ar) ar.style.transform='rotate(-90deg)'; } h.onclick=()=>{ if(!g) return; const closed=g.style.display==='none'; g.style.display=closed?'':'none'; if(ar) ar.style.transform=closed?'':'rotate(-90deg)'; }; }); }
   try{
     const ch=months.slice(0,6).reverse();
     const chNet=ch.map(m=>Math.max(0,Math.round(tx.filter(r=>(r.created_at||'').slice(0,7)===m.ym).reduce((a,r)=>a+NET(r),0))));
