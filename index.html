@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-20-QEY | Coach dashboard now mirrors the Gym dashboard action buttons BELOW the accordions (same style), shown only when the coach has their own connected Stripe (currentUser.stripe_account): Open Stripe (balance & payouts) via openMyStripe(), Accounting export CSV via openAccounting({coachId,payeeAccount}) - label de-gym-ified (no 'for your accountant'), and Change payout account via coach onboarding re-run (/api/create-coach) - label de-gym-ified (no 'new company'). Reception + Cancelling-members intentionally omitted (gym-only). -->
+<!-- MTL build: 2026-06-20-QEZ | Coach dashboard action buttons (Stripe / Accounting export / Change payout account) now show for ALL coaches in the dashboard - removed the stripe_account gate, since every approved coach connected a payout account during onboarding (a gym-team member who is only a student never reaches this section). Change-payout-account now sets a localStorage swap flag; the Stripe onboarded-return handler reads it (or coach_status==='approved') and, for an existing coach, just toasts 'Payout account changed' + re-renders the dashboard instead of reopening the application form. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -12785,12 +12785,11 @@ async function renderCoachDash(){
     +'</div>';
   const note='<p style="font-size:11px;color:#0A7A4F;background:#F0FBF0;border-radius:8px;padding:8px 10px;margin-bottom:10px;">💳 '+(EN?'Collected earnings (1:1 &amp; online) = real Stripe payments, exact after refunds and MTL + Stripe fees.':'Vybrané výdělky (1:1 a online) = reálné platby ze Stripe, přesné po refundech a po MTL + Stripe poplatcích.')+'</p>';
 
-  const _hasStripe=!!(currentUser&&currentUser.stripe_account);
-  const btnsHtml=_hasStripe?('<div style="margin-top:18px;">'
+  const btnsHtml=('<div style="margin-top:18px;">'
     +'<button id="cdStripeBtn" style="width:100%;padding:13px;background:#635BFF;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-bottom:10px;">💳 '+(EN?'Open Stripe — balance & payouts →':'Otevřít Stripe — zůstatek a vyplacení →')+'</button>'
     +'<button id="cdAccBtn" style="width:100%;padding:13px;background:#EEF4FF;color:var(--blue);border:1px solid #CFE0FF;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-bottom:10px;">📒 '+(EN?'Accounting export (CSV)':'Účetní export (CSV)')+'</button>'
     +'<button id="cdStripeSwapBtn" style="width:100%;padding:13px;background:var(--surf);color:var(--mid);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-bottom:20px;">🔄 '+(EN?'Change payout account':'Změnit výplatní účet')+'</button>'
-    +'</div>'):'';
+    +'</div>');
   box.innerHTML='<select id="cdMonthSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:\'DM Sans\';background:#fff;margin-bottom:10px;">'+monthOpts+'</select>'
     +heroHtml+cardsHtml+note
     +'<div id="cdStats">'+moneyAcc('🥊',(EN?'1:1 in-person':'1:1 osobně'),ip)+moneyAcc('🌐','Online',on)+discAcc+studentsAcc+growthAcc+relAcc+'<div id="cdTrend"></div></div>'+btnsHtml;
@@ -12798,7 +12797,7 @@ async function renderCoachDash(){
   const msel=$('cdMonthSel'); if(msel) msel.onchange=()=>{ window._coachDashMonth=msel.value; renderCoachDash(); };
   if($('cdStripeBtn')) $('cdStripeBtn').onclick=()=>openMyStripe();
   if($('cdAccBtn')) $('cdAccBtn').onclick=()=>openAccounting({ coachId: currentUser.id, payeeAccount: currentUser.stripe_account }, (EN?'Accounting — ':'Podklady — ')+(currentUser.name||''));
-  if($('cdStripeSwapBtn')) $('cdStripeSwapBtn').onclick=async()=>{ if(!confirm(EN?'Change your payout account? You will go through Stripe onboarding again to connect a new account, and payouts will then go there.':'Změnit výplatní účet? Projdeš znovu Stripe onboardingem a připojíš nový účet — výplaty pak půjdou na něj.')) return; try{ const r=await fetch('/api/create-coach'); const j=await r.json(); if(j&&j.url){ window.location.href=j.url; } else { toast('⚠️ '+((j&&j.error)||'Stripe')); } }catch(e){ toast('⚠️ '+(e.message||'')); } };
+  if($('cdStripeSwapBtn')) $('cdStripeSwapBtn').onclick=async()=>{ if(!confirm(EN?'Change your payout account? You will go through Stripe onboarding again to connect a new account, and payouts will then go there.':'Změnit výplatní účet? Projdeš znovu Stripe onboardingem a připojíš nový účet — výplaty pak půjdou na něj.')) return; try{ try{ localStorage.setItem('mtl_coach_payout_swap','1'); }catch(_e){} const r=await fetch('/api/create-coach'); const j=await r.json(); if(j&&j.url){ window.location.href=j.url; } else { toast('⚠️ '+((j&&j.error)||'Stripe')); } }catch(e){ toast('⚠️ '+(e.message||'')); } };
   const stats=$('cdStats');
   if(stats){ stats.querySelectorAll('.dashSecHdr').forEach((h)=>{ const g=h.nextElementSibling; const ar=h.querySelector('.dashAccArr'); if(g){ g.style.display='none'; if(ar) ar.style.transform='rotate(-90deg)'; } h.onclick=()=>{ if(!g) return; const closed=g.style.display==='none'; g.style.display=closed?'':'none'; if(ar) ar.style.transform=closed?'':'rotate(-90deg)'; }; }); }
   try{
@@ -17424,11 +17423,18 @@ async function checkStripeReturn(){
     await supaClient.from('profiles').update({ stripe_account: acct }).eq('id', currentUser.id);
     currentUser.stripe_account = acct;
     window.history.replaceState({}, '', window.location.pathname);
-    toast(L('✅ Stripe účet připojen!'));
-    openSheet('shCoachApp');
-    setupCoachAppPhoto();
-    refreshStripeStatus();
-    try{ caGoStep(3); }catch(e){}
+    let _payoutSwap=false; try{ _payoutSwap=localStorage.getItem('mtl_coach_payout_swap')==='1'; }catch(e){}
+    if(_payoutSwap || currentUser.coach_status==='approved'){
+      try{ localStorage.removeItem('mtl_coach_payout_swap'); }catch(e){}
+      toast(LANG==='en'?'✅ Payout account changed':'✅ Výplatní účet změněn');
+      try{ if($('shCoachDash')&&$('shCoachDash').classList.contains('open')&&typeof renderCoachDash==='function') renderCoachDash(); }catch(e){}
+    } else {
+      toast(L('✅ Stripe účet připojen!'));
+      openSheet('shCoachApp');
+      setupCoachAppPhoto();
+      refreshStripeStatus();
+      try{ caGoStep(3); }catch(e){}
+    }
   }
 }
 
