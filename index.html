@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-20-QFD | STRIPE ARCHITECTURE FIX (no Express / no destination charges). (server) create-coach.js now creates a STANDARD connected account (was 'express' + capabilities) - the 1:1 coach AND the MTL Ambassador share profiles.stripe_account, so both are now Standard direct-charge accounts; Ambassador 0.5% keeps arriving via a separate transfer from the platform balance (not a destination charge). create-gym.js was already Standard; pay.js already does direct charges ({stripeAccount}+application_fee, no destination); stripe-login-link.js already routes Standard accounts to dashboard.stripe.com. (client) the gym-team dashboard 'Open my Stripe' button now opens the PAYOUT account (openMyStripe(null,true)) instead of the 1:1 account - that mismatch is why it landed on the Express page. Existing Express test accounts must be re-onboarded to become Standard. -->
+<!-- MTL build: 2026-06-20-QFE | CLOSED the payout-account-swap hole. All three Stripe onboarding return handlers (onboarded->profiles.stripe_account, coach_payout=done->gym_payout_account, gym_stripe=done->gyms.stripe_account) used to overwrite the account the moment Stripe hit the return_url - even if onboarding was abandoned and the new account was not charge-ready - which orphaned the old working account and could break student bookings (direct charge fails when charges_enabled=false). Now each return calls the NEW /api/account-status endpoint to check charges_enabled FIRST: if the new account is not charge-ready AND an old account exists, the swap is refused and the previous working account stays active (toast tells the user to finish verification). Initial connects (no old account) still proceed but warn if verification is unfinished. Needs account-status.js deployed. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -17452,7 +17452,7 @@ async function showPaidPopup(){
     const acct = params.get('acct');
     window.history.replaceState({}, '', window.location.pathname);
     if(acct){
-      const _saveCp=async()=>{ try{ await supaClient.from('profiles').update({ gym_payout_account: acct }).eq('id', currentUser.id); currentUser.gym_payout_account=acct; toast(LANG==='en'?'✅ Payout account connected':'✅ Výplatní účet připojen'); if(typeof loadMyTeams==='function') loadMyTeams(); }catch(e){ toast('⚠️ '+(e.message||'')); } };
+      const _saveCp=async()=>{ try{ const _old=currentUser.gym_payout_account||null; const _ready=await _acctReady(acct); if(!_ready && _old && _old!==acct){ toast(LANG==='en'?'⚠️ Onboarding not finished — your previous payout account stays active.':'⚠️ Onboarding nedokončen — tvůj původní výplatní účet zůstává aktivní.'); return; } await supaClient.from('profiles').update({ gym_payout_account: acct }).eq('id', currentUser.id); currentUser.gym_payout_account=acct; toast(_ready?(LANG==='en'?'✅ Payout account connected':'✅ Výplatní účet připojen'):(LANG==='en'?'✅ Connected — finish verification, otherwise group-class payments will fail':'✅ Připojeno — dokonči verifikaci, jinak ti platby za skupinovky nepůjdou')); if(typeof loadMyTeams==='function') loadMyTeams(); }catch(e){ toast('⚠️ '+(e.message||'')); } };
       let _t=0; const _w=setInterval(()=>{ _t++; if(currentUser){ clearInterval(_w); _saveCp(); } else if(_t>20){ clearInterval(_w); } }, 250);
     }
     return;
@@ -17462,7 +17462,7 @@ async function showPaidPopup(){
     let swapGym=null; try{ swapGym=localStorage.getItem('mtl_swap_gym'); }catch(e){}
     if(acct && swapGym){
       try{ localStorage.removeItem('mtl_swap_gym'); }catch(e){}
-      (async()=>{ try{ await supaClient.from('gyms').update({ stripe_account: acct }).eq('id', swapGym); if(window._myGyms){ const gg=window._myGyms.find(x=>String(x.id)===String(swapGym)); if(gg) gg.stripe_account=acct; } if(typeof _myGymData!=='undefined' && _myGymData && String(_myGymData.id)===String(swapGym)) _myGymData.stripe_account=acct; toast(LANG==='en'?'✅ Payout account changed':'✅ Výplatní účet změněn'); }catch(e){ toast('⚠️ '+(e.message||'')); } })();
+      (async()=>{ try{ const _gg0=(window._myGyms||[]).find(x=>String(x.id)===String(swapGym)); const _old=(_gg0&&_gg0.stripe_account)||null; const _ready=await _acctReady(acct); if(!_ready && _old && _old!==acct){ toast(LANG==='en'?'⚠️ Onboarding not finished — your gym\'s previous payout account stays active.':'⚠️ Onboarding nedokončen — původní výplatní účet gymu zůstává aktivní.'); return; } await supaClient.from('gyms').update({ stripe_account: acct }).eq('id', swapGym); if(window._myGyms){ const gg=window._myGyms.find(x=>String(x.id)===String(swapGym)); if(gg) gg.stripe_account=acct; } if(typeof _myGymData!=='undefined' && _myGymData && String(_myGymData.id)===String(swapGym)) _myGymData.stripe_account=acct; toast(_ready?(LANG==='en'?'✅ Payout account changed':'✅ Výplatní účet změněn'):(LANG==='en'?'✅ Connected — finish verification':'✅ Připojeno — dokonči verifikaci')); }catch(e){ toast('⚠️ '+(e.message||'')); } })();
       window.history.replaceState({}, '', window.location.pathname);
       return;
     }
@@ -17611,20 +17611,24 @@ async function showPaidPopup(){
   }
 }
 
+async function _acctReady(acct){ try{ const r=await fetch('/api/account-status?acct='+encodeURIComponent(acct)); const j=await r.json(); return !!(j&&j.charges_enabled); }catch(e){ return false; } }
 async function checkStripeReturn(){
   const params = new URLSearchParams(window.location.search);
   const acct = params.get('onboarded');
   if(acct && currentUser){
+    window.history.replaceState({}, '', window.location.pathname);
+    const _old = currentUser.stripe_account || null;
+    const _ready = await _acctReady(acct);
+    if(!_ready && _old && _old!==acct){ try{ localStorage.removeItem('mtl_coach_payout_swap'); }catch(e){} toast(LANG==='en'?'⚠️ Onboarding not finished — your previous payout account stays active. Finish Stripe verification to switch.':'⚠️ Onboarding nedokončen — tvůj původní výplatní účet zůstává aktivní. Dokonči verifikaci ve Stripe, pak se účet přepne.'); return; }
     await supaClient.from('profiles').update({ stripe_account: acct }).eq('id', currentUser.id);
     currentUser.stripe_account = acct;
-    window.history.replaceState({}, '', window.location.pathname);
     let _payoutSwap=false; try{ _payoutSwap=localStorage.getItem('mtl_coach_payout_swap')==='1'; }catch(e){}
     if(_payoutSwap || currentUser.coach_status==='approved'){
       try{ localStorage.removeItem('mtl_coach_payout_swap'); }catch(e){}
-      toast(LANG==='en'?'✅ Payout account changed':'✅ Výplatní účet změněn');
+      toast(_ready?(LANG==='en'?'✅ Payout account changed':'✅ Výplatní účet změněn'):(LANG==='en'?'✅ Stripe connected — finish verification, otherwise you cannot receive payments':'✅ Stripe připojen — dokonči verifikaci, jinak ti nepůjdou přijímat platby'));
       try{ if($('shCoachDash')&&$('shCoachDash').classList.contains('open')&&typeof renderCoachDash==='function') renderCoachDash(); }catch(e){}
     } else {
-      toast(L('✅ Stripe účet připojen!'));
+      toast(_ready?L('✅ Stripe účet připojen!'):(LANG==='en'?'✅ Stripe connected — finish verification':'✅ Stripe připojen — dokonči verifikaci'));
       openSheet('shCoachApp');
       setupCoachAppPhoto();
       refreshStripeStatus();
