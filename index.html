@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QFZ Plna autonomie grant - owner grants own-Stripe coach irreversible full autonomy (2x confirm + warning), gym_coaches.full_autonomy -->
+<!-- MTL build: QGA Me-net HERO fix - gym-team coach earnings counted (loadMyNet+mdFetchRange+export); gymTx filtered to gym payee; autonomy wording -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -7035,7 +7035,7 @@ async function openAutonomyGrant(coachId, coachName, linkId){
       <li>${EN?'Their own owner-style dashboard \u2014 their numbers only':'Vlastn\u00ed dashboard jako majitel \u2014 jen jeho \u010d\u00edsla'}</li>
       <li>${EN?'Their own members, memberships and classes, paid directly to their Stripe. You will NOT see this revenue.':'Vlastn\u00ed \u010dleny, \u010dlenstv\u00ed a lekce, placen\u00e9 p\u0159\u00edmo na jeho Stripe. Tyto p\u0159\u00edjmy NEuvid\u00ed\u0161.'}</li>
       <li>${EN?'Their own merch shop, reception, and prices & memberships':'Vlastn\u00ed merch eshop, recepci a ceny & \u010dlenstv\u00ed'}</li>
-      <li>${EN?'Stays in your team \u2014 your schedule & attendance still apply':'Z\u016fst\u00e1v\u00e1 v tv\u00e9m t\u00fdmu \u2014 tv\u016fj rozvrh & doch\u00e1zka plat\u00ed d\u00e1l'}</li>
+      <li>${EN?'Stays a normal coach on your team \u2014 still teaching your gym\u2019s scheduled classes, attendance tracked as before':'Z\u016fst\u00e1v\u00e1 norm\u00e1ln\u00edm kou\u010dem tv\u00e9ho t\u00fdmu \u2014 d\u00e1l u\u010d\u00ed lekce v rozvrhu gymu a po\u010d\u00edt\u00e1 se mu doch\u00e1zka jako dote\u010f'}</li>
     </ul>
     <div style="background:#FFF7E0;border:1px solid #F0E0A8;border-radius:11px;padding:12px 13px;font-size:12.5px;color:#7a5b00;line-height:1.55;margin-bottom:16px;">${EN?'This cannot be undone. The only way to remove a coach\u2019s full autonomy is to remove them from your gym team.':'Tohle je nevratn\u00e9. Plnou autonomii lze kou\u010di odebrat jedin\u00fdm zp\u016fsobem \u2014 odebr\u00e1n\u00edm z gym t\u00fdmu.'}</div>
     <div style="display:flex;gap:9px;">
@@ -16677,17 +16677,19 @@ async function loadMyNet(force){
   const me=currentUser;
   const empty={coachTx:[],gymTx:[],hasCoach:false,hasGym:false,cur:'CZK',sameAcct:false};
   if(!me) return empty;
-  const cols='id,type,discipline,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,stripe_fee,created_at,gym_id,coach_id,currency';
+  const cols='id,type,discipline,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,stripe_fee,created_at,gym_id,coach_id,currency,payee_account';
   const since=_net13Since();
   const hasCoach=me.coach_status==='approved';
   if(typeof window._myGyms==='undefined'||window._myGyms===null){ try{ if(typeof checkGymOwnership==='function') await checkGymOwnership(); }catch(e){} }
   const gyms=(window._myGyms||[]); const gymIds=gyms.map(g=>g.id);
   const hasGym=gymIds.length>0;
   let coachTx=[],gymTx=[];
-  try{ if(hasCoach){ const { data }=await supaClient.from('transactions').select(cols).eq('coach_id',me.id).is('gym_id',null).gte('created_at',since); coachTx=data||[]; } }catch(e){ console.log('[MTL net] coach',e&&e.message); }
-  try{ if(hasGym){ const { data }=await supaClient.from('transactions').select(cols).in('gym_id',gymIds).gte('created_at',since); gymTx=data||[]; } }catch(e){ console.log('[MTL net] gym',e&&e.message); }
+  const myAccts=[me.stripe_account,me.gym_payout_account].filter(Boolean);
+  const gymAccts=gyms.map(g=>g.stripe_account).filter(Boolean);
+  try{ if(hasCoach||me.gym_payout_account){ const { data }=await supaClient.from('transactions').select(cols).eq('coach_id',me.id).gte('created_at',since); coachTx=(data||[]).filter(r=>{ if(!r.gym_id) return true; if(gymIds.indexOf(r.gym_id)>=0) return false; return myAccts.length>0 && (!r.payee_account || myAccts.indexOf(r.payee_account)>=0); }); } }catch(e){ console.log('[MTL net] coach',e&&e.message); }
+  try{ if(hasGym){ const { data }=await supaClient.from('transactions').select(cols).in('gym_id',gymIds).gte('created_at',since); gymTx=(data||[]).filter(r=> !r.payee_account || gymAccts.indexOf(r.payee_account)>=0 ); } }catch(e){ console.log('[MTL net] gym',e&&e.message); }
   const cur=((coachTx[0]||gymTx[0]||{}).currency)||(me.currency)||'CZK';
-  const myAcct=me.stripe_account||null; const gymAccts=gyms.map(g=>g.stripe_account).filter(Boolean);
+  const myAcct=me.stripe_account||me.gym_payout_account||null;
   const sameAcct=!!(myAcct && gymAccts.length && gymAccts.indexOf(myAcct)>=0);
   window._myNetCache={coachTx,gymTx,hasCoach,hasGym,cur,sameAcct};
   return window._myNetCache;
@@ -16704,12 +16706,13 @@ async function renderMeNetHero(){
   try{ const nn=await loadMyNet(); const tot=_netOfMonth(nn.coachTx)+_netOfMonth(nn.gymTx); const v=$('meNetHeroVal'); if(v) v.textContent=_netFmt(tot,nn.cur); }catch(e){ const v=$('meNetHeroVal'); if(v) v.textContent='—'; }
 }
 async function _mdFetchRange(yr){
-  const cols='id,type,discipline,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,stripe_fee,created_at,gym_id,coach_id,currency';
+  const cols='id,type,discipline,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,stripe_fee,created_at,gym_id,coach_id,currency,payee_account';
   const lo=yr?yr+'-01-01':null, hi=yr?(parseInt(yr,10)+1)+'-01-01':null;
   let coachRows=[], gymRows=[];
   const n=window._myNetCache||{};
-  if(n.hasCoach){ let q=supaClient.from('transactions').select(cols).eq('coach_id',currentUser.id).is('gym_id',null); if(yr){ q=q.gte('created_at',lo).lt('created_at',hi); } const { data }=await q; coachRows=data||[]; }
-  if(n.hasGym){ const ids=(window._myGyms||[]).map(g=>g.id); let q=supaClient.from('transactions').select(cols).in('gym_id',ids); if(yr){ q=q.gte('created_at',lo).lt('created_at',hi); } const { data }=await q; gymRows=data||[]; }
+  const _myAccts=[currentUser.stripe_account,currentUser.gym_payout_account].filter(Boolean); const _myGymIds=(window._myGyms||[]).map(g=>g.id);
+  if(n.hasCoach||currentUser.gym_payout_account){ let q=supaClient.from('transactions').select(cols).eq('coach_id',currentUser.id); if(yr){ q=q.gte('created_at',lo).lt('created_at',hi); } const { data }=await q; coachRows=(data||[]).filter(r=>{ if(!r.gym_id) return true; if(_myGymIds.indexOf(r.gym_id)>=0) return false; return _myAccts.length>0 && (!r.payee_account || _myAccts.indexOf(r.payee_account)>=0); }); }
+  if(n.hasGym){ const ids=(window._myGyms||[]).map(g=>g.id); const _gymAccts=(window._myGyms||[]).map(g=>g.stripe_account).filter(Boolean); let q=supaClient.from('transactions').select(cols).in('gym_id',ids); if(yr){ q=q.gte('created_at',lo).lt('created_at',hi); } const { data }=await q; gymRows=(data||[]).filter(r=> !r.payee_account || _gymAccts.indexOf(r.payee_account)>=0 ); }
   return {coachRows,gymRows};
 }
 async function openFullDash(){
@@ -16772,12 +16775,14 @@ function _mdCsv(rows,cur,kind,plabel){ try{ const h=[['date','type','discipline'
 async function _mdExport(kind, year){
   const btn=$('mdExpBtn'); const _o=btn?btn.textContent:''; if(btn){ btn.disabled=true; btn.textContent='…'; }
   try{
-    const cols='id,type,discipline,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,stripe_fee,created_at,gym_id,coach_id,currency';
+    const cols='id,type,discipline,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,stripe_fee,created_at,gym_id,coach_id,currency,payee_account';
     let q=supaClient.from('transactions').select(cols);
-    if(kind==='coach') q=q.eq('coach_id',currentUser.id).is('gym_id',null);
+    if(kind==='coach') q=q.eq('coach_id',currentUser.id);
     else { const ids=(window._myGyms||[]).map(g=>g.id); q=q.in('gym_id',ids); }
     if(year!=='all'){ q=q.gte('created_at',year+'-01-01').lt('created_at',(parseInt(year,10)+1)+'-01-01'); }
-    const { data }=await q; const rows=data||[];
+    const { data }=await q; let rows=data||[];
+    if(kind==='coach'){ const _ma=[currentUser.stripe_account,currentUser.gym_payout_account].filter(Boolean); const _gi=(window._myGyms||[]).map(g=>g.id); rows=rows.filter(r=>{ if(!r.gym_id) return true; if(_gi.indexOf(r.gym_id)>=0) return false; return _ma.length>0 && (!r.payee_account || _ma.indexOf(r.payee_account)>=0); }); }
+    else { const _ga=(window._myGyms||[]).map(g=>g.stripe_account).filter(Boolean); rows=rows.filter(r=> !r.payee_account || _ga.indexOf(r.payee_account)>=0 ); }
     if(!rows.length){ toast(LANG==='en'?'No transactions for that period':'Žádné transakce za toto období'); }
     else { _mdCsv(rows, (currentUser&&currentUser.currency)||'CZK', kind, year); }
   }catch(e){ toast('⚠️ '+(e.message||'')); }
