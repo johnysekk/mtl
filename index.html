@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-20-QFH | Country picker is now MANDATORY + app-fee-safe. (1) Mandatory: no pre-selected default - the modal opens on a disabled placeholder and the Continue button stays disabled until the user actively selects a country (the choice is permanent/locked by Stripe, so blind-accepting a default was risky). The locale/profile guess is shown only as a '(tip)' label, not pre-chosen. (2) Removed Brazil, Thailand, Mexico, Malaysia from the list: verified that a non-resident (CZ) platform cannot auto-deduct application fees on direct charges for these - Brazil is blocked by Stripe outright; Thailand/Mexico/Malaysia are blocked by local rules (platforms must recover the fee via a separate monthly invoice). Onboarding them now would either fail the charge or leak the MTL commission. They get re-added once the monthly commission-invoice model (already on the roadmap) is built - Thailand is a priority given the Muay Thai market. -->
+<!-- MTL build: 2026-06-20-QFI | Gym-team coach DESKTOP sidebar now exposes the full team section set, not just Overview. The team actions (Earnings, My classes, Attendance, Gym team, Tickets, Stripe payouts) previously only existed as buttons buried at the bottom of the Overview page body on desktop, while mobile surfaced them in the Team flow. Added them as proper dsItem nav entries under the gym-team (gymteam) sidebar group, wired through _dashGo (gtearn/gtsched/gtatt/gtteam/gttickets/gtpayout). 'My classes' is shown only when the coach can manage schedule in at least one team gym (new window._gtCanSched flag set in loadMyTeams). New _gtdEnsureGym() resolves the coach's first active team gym so a section opened directly from the sidebar (without first opening Overview) still has _gtdGym/_gtdGymName set. Export/Share stay in the Overview body (Export needs in-page data, Share is a toggle). -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -3575,6 +3575,12 @@ async function _dashGo(t){ try{
   if(t==='diary'){ const b=$('btnOpenDiary'); if(b) b.click(); return; }
   if(t==='coachdash'){ openCoachDash(); return; }
   if(t==='gtddash'){ if(typeof openGymTeamDash==='function') openGymTeamDash(); return; }
+  if(t==='gtearn'){ if(await _gtdEnsureGym() && typeof openCoachEarnings==='function') openCoachEarnings(_gtdGym,_gtdGymName); return; }
+  if(t==='gtsched'){ if(await _gtdEnsureGym() && typeof openCoachScheduleEditor==='function') openCoachScheduleEditor(_gtdGym,_gtdGymName); return; }
+  if(t==='gtatt'){ if(await _gtdEnsureGym()){ openSheet('shCoachRoster'); if(typeof loadCoachRoster==='function') loadCoachRoster(_gtdGym,_gtdGymName); } return; }
+  if(t==='gtteam'){ if(await _gtdEnsureGym() && typeof openGymTeamView==='function') openGymTeamView(_gtdGym,_gtdGymName); return; }
+  if(t==='gttickets'){ if(await _gtdEnsureGym() && typeof openEventScanPicker==='function') openEventScanPicker(_gtdGym,_gtdGymName); return; }
+  if(t==='gtpayout'){ if(typeof openMyStripe==='function') openMyStripe(null,true); return; }
   if(t==='feedback'){ const b=$('btnOnlineFeedback'); if(b) b.click(); return; }
   if(t==='lbcoach'){ const b=$('btnLeaderboardCoach'); if(b) b.click(); return; }
   if(t==='lbgym'){ if(typeof openGymLeaderboard==='function') openGymLeaderboard('city'); return; }
@@ -7316,6 +7322,17 @@ async function openCoachEarnings(gymId, gymName){
   }catch(e){ console.error('openCoachEarnings',e); const b=$('coachEarnBody'); if(b) b.innerHTML=`<p style="color:var(--red);padding:20px;">⚠️ ${e.message}</p>`; }
 }
 let _gtdGym=null, _gtdMonth=null, _gtdGymName='';
+async function _gtdEnsureGym(){
+  if(_gtdGym) return true;
+  try{
+    const { data:gc } = await supaClient.from('gym_coaches').select('gym_id').eq('coach_id',currentUser.id).eq('status','active');
+    const gids=[...new Set((gc||[]).map(x=>x.gym_id).filter(Boolean))];
+    if(!gids.length) return false;
+    const { data:gg } = await supaClient.from('gyms').select('id,name').in('id',gids);
+    if(gg&&gg.length){ _gtdGym=gg[0].id; _gtdGymName=gg[0].name||''; return true; }
+  }catch(e){}
+  return false;
+}
 async function openGymTeamDash(gymId, gymName){
   if(gymId){ _gtdGym=gymId; _gtdGymName=gymName||''; }
   openSheet('shGymTeamDash');
@@ -7523,7 +7540,7 @@ async function loadMyTeams(){
   let { data, error:_mtErr } = await supaClient.from('gym_coaches').select('id, gym_id, status, can_manage_schedule, is_reception, share_availability').eq('coach_id', currentUser.id).eq('status','active');
   if(_mtErr){ const _r2=await supaClient.from('gym_coaches').select('id, gym_id, status, can_manage_schedule, is_reception').eq('coach_id', currentUser.id).eq('status','active'); data=_r2.data; }
   const rows=(data||[]).filter(r=>!r.is_reception);
-  window._inGymTeam = rows.length>0; window._gtTeamCount = rows.length;
+  window._inGymTeam = rows.length>0; window._gtTeamCount = rows.length; window._gtCanSched = rows.some(function(r){ return !!r.can_manage_schedule; });
   if($('meMyTeam')) $('meMyTeam').style.display = rows.length ? '' : 'none';
   { var _lblG=(rows.length>1)?(LANG==='en'?'Gyms':'Gymy'):(LANG==='en'?'Gym':'Gym'); var _l1=$('meMyTeamLbl'); if(_l1) _l1.textContent=_lblG; var _l2=$('mtSheetTitle'); if(_l2) _l2.textContent=_lblG; }
   try{ if((location.hostname||'').toLowerCase().split('.')[0]==='dashboard' && (!!document.getElementById('dsSubGymteam'))!==(!!window._inGymTeam) && typeof buildDashSide==='function') buildDashSide(); }catch(e){}
@@ -15652,6 +15669,12 @@ function buildDashSide(){
         +((window._inGymTeam)?('<div class="dsGroup" data-grp="gymteam">🏛️ <span>'+((window._gtTeamCount>1)?(LANG==='en'?'Gyms':'Gymy'):(LANG==='en'?'Gym':'Gym'))+'</span><span class="dsArr" style="transform:rotate(-90deg);">▾</span></div>'
           +'<div class="dsSub" id="dsSubGymteam" style="display:none;">'
             +'<div class="dsItem" data-act="gtddash">📊 <span>'+(LANG==='en'?'Overview':'Přehled')+'</span></div>'
+            +'<div class="dsItem" data-act="gtearn">💰 <span>'+(LANG==='en'?'Earnings':'Tržby')+'</span></div>'
+            +((window._gtCanSched)?('<div class="dsItem" data-act="gtsched">📅 <span>'+(LANG==='en'?'My classes':'Moje lekce')+'</span></div>'):'')
+            +'<div class="dsItem" data-act="gtatt">📋 <span>'+(LANG==='en'?'Attendance':'Docházka')+'</span></div>'
+            +'<div class="dsItem" data-act="gtteam">👥 <span>'+(LANG==='en'?'Gym team':'Gym tým')+'</span></div>'
+            +'<div class="dsItem" data-act="gttickets">📷 <span>'+(LANG==='en'?'Tickets':'Lístky')+'</span></div>'
+            +'<div class="dsItem" data-act="gtpayout">💳 <span>'+(LANG==='en'?'Stripe payouts':'Stripe výplaty')+'</span></div>'
           +'</div>'):'')
         +'<div style="height:1px;background:var(--border);margin:10px 4px;"></div>'
         +'<div class="dsItem" data-act="notif">🔔 <span>'+(LANG==='en'?'Notifications':'Notifikace')+'</span><span id="dashNotifBadge" style="display:none;margin-left:auto;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--red);color:#fff;font-size:11px;font-weight:800;align-items:center;justify-content:center;">0</span></div>'
