@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QGA Me-net HERO fix - gym-team coach earnings counted (loadMyNet+mdFetchRange+export); gymTx filtered to gym payee; autonomy wording -->
+<!-- MTL build: QGB gym-team coach dashboard replica - ledger numbers (real Stripe, _txEff) + owner wording + events/merch panels; redundant Students card & came-back row removed; owner untouched -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -7338,7 +7338,7 @@ async function renderGymTeamDash(){
   try{
     const { data:gc } = await supaClient.from('gym_coaches').select('gym_id, can_manage_schedule, share_availability, id').eq('coach_id',currentUser.id).eq('status','active').neq('is_reception',true);
     const gids=[...new Set((gc||[]).map(x=>x.gym_id).filter(Boolean))];
-    if(gids.length){ const { data:gg } = await supaClient.from('gyms').select('id,name,currency').in('id',gids); const gm={}; (gg||[]).forEach(g=>gm[g.id]=g); teamGyms=gids.map(id=>({ id, name:(gm[id]&&gm[id].name)||'Gym', currency:(gm[id]&&gm[id].currency)||'CZK', link:(gc||[]).find(x=>x.gym_id===id)||{} })); }
+    if(gids.length){ const { data:gg } = await supaClient.from('gyms').select('id,name,currency,stripe_account').in('id',gids); const gm={}; (gg||[]).forEach(g=>gm[g.id]=g); teamGyms=gids.map(id=>({ id, name:(gm[id]&&gm[id].name)||'Gym', currency:(gm[id]&&gm[id].currency)||'CZK', stripe_account:(gm[id]&&gm[id].stripe_account)||null, link:(gc||[]).find(x=>x.gym_id===id)||{} })); }
   }catch(e){ console.log('[gtd]',e&&e.message); }
   if(!teamGyms.length){ box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${EN?'You are not in any gym team yet.':'Zatím nejsi v žádném gym týmu.'}</p>`; return; }
   if(!_gtdGym || !teamGyms.some(g=>g.id===_gtdGym)) _gtdGym=teamGyms[0].id;
@@ -7362,25 +7362,30 @@ async function renderGymTeamDash(){
     drops=(r[0]&&r[0].data)||[]; mems=(r[1]&&r[1].data)||[]; rsv=(r[2]&&r[2].data)||[];
     const _want=(_gtdMode==='gross')?'gym':'coach'; drops=drops.filter(b=>(b.paid_to||'gym')===_want); mems=mems.filter(m=>(m.paid_to||'gym')===_want);
   }catch(e){ console.log('[gtd load]',e&&e.message); }
+  let _gtdTx=[];
+  try{ const { data:_txd }=await supaClient.from('transactions').select('id,type,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,stripe_fee,created_at,coach_id,gym_id,payee_account,currency').eq('coach_id',me).eq('gym_id',_gtdGym); _gtdTx=_txd||[]; }catch(e){ console.log('[gtd tx]',e&&e.message); }
   const _ceP=!!(currentUser&&currentUser.partner); const _paysCoach=!!(currentUser&&currentUser.gym_payout_account);
   const keepPct=x=>(x.gym_keep_pct!=null?x.gym_keep_pct:(_ceP?0.99:0.965));
   const inSel=r=> sel==='all'?true:((r.created_at||'').slice(0,7)===sel);
   const monthLabel=sel==='all'?(EN?'all time':'celkem'):((months.find(m=>m.ym===sel)||{}).lbl||sel);
   // --- drop-ins (period) ---
   const dropsSel=drops.filter(inSel);
-  const dPaid=dropsSel.reduce((s,b)=>s+netAmt(b),0);
-  const dKept=dropsSel.reduce((s,b)=>s+netAmt(b)*keepPct(b),0);
-  const dMtl=Math.max(0,dPaid-dKept);
-  const dFee=dropsSel.reduce((s,b)=>s+(netAmt(b)*0.014+6),0);
-  const dNet=Math.max(0,dKept-dFee);
-  // --- memberships (current active = MRR) ---
-  const mPaid=mems.reduce((s,m)=>s+(m.amount||0),0);
-  const mKept=mems.reduce((s,m)=>s+(m.amount||0)*keepPct(m),0);
-  const mMtl=Math.max(0,mPaid-mKept);
-  const mFee=mems.reduce((s,m)=>s+((m.amount||0)*0.014+6),0);
-  const mNet=Math.max(0,mKept-mFee);
-  const netTotal=dNet+mNet;
-  const grossTotal=dPaid+mPaid;
+  // --- LEDGER: real Stripe numbers (exact fees) — same _txEff math as gym owner ---
+  const _txEff=r=>{ const eG=(r.gross_amount||0)-(r.refund_amount||0); const eM=(r.mtl_fee||0)-(r.mtl_fee_refunded||0); const st=r.stripe_fee||0; return {eG,st,eM,eN:Math.max(0,eG-st-eM)}; };
+  const _wantAcct=(_gtdMode!=='gross')?(currentUser.gym_payout_account||currentUser.stripe_account||null):(gymObj.stripe_account||null);
+  const _txOk=r=> (!_wantAcct || !r.payee_account || String(r.payee_account).trim()===_wantAcct);
+  const _txSel=(_gtdTx||[]).filter(r=> inSel(r) && _txOk(r));
+  const _S=(a,k)=>a.reduce((s,e)=>s+e[k],0)/100;
+  const _eD=_txSel.filter(r=>r.type==='drop_in').map(_txEff);
+  const _eMm=_txSel.filter(r=>r.type==='membership').map(_txEff);
+  const _eEv=_txSel.filter(r=>r.type==='event_ticket').map(_txEff);
+  const _eMe=_txSel.filter(r=>r.type==='merch').map(_txEff);
+  const dPaid=_S(_eD,'eG'), dMtl=_S(_eD,'eM'), dFee=_S(_eD,'st'), dNet=_S(_eD,'eN');
+  const mPaid=_S(_eMm,'eG'), mMtl=_S(_eMm,'eM'), mFee=_S(_eMm,'st'), mNet=_S(_eMm,'eN');
+  const evGross=_S(_eEv,'eG'), evMtl=_S(_eEv,'eM'), evFee=_S(_eEv,'st'), evNet=_S(_eEv,'eN');
+  const merchGross=_S(_eMe,'eG'), merchMtl=_S(_eMe,'eM'), merchFee=_S(_eMe,'st'), merchNet=_S(_eMe,'eN');
+  const netTotal=dNet+mNet+evNet+merchNet;
+  const grossTotal=dPaid+mPaid+evGross+merchGross;
   // --- Stripe vs no-Stripe: with own payout account => exact net is theirs; without => only gross (gym collects, pay is off-platform) ---
   const showNet=(_gtdMode!=='gross');
   const headlineVal=showNet?netTotal:grossTotal;
@@ -7398,7 +7403,7 @@ async function renderGymTeamDash(){
   const dn=dayNames();
   // --- trend (drop-in net OR gross by created_at month, last 6) ---
   let trend=null;
-  if(showNet && sel!=='all'){ const idx=months.findIndex(m=>m.ym===sel); const prev=months[idx+1]; if(prev){ const pn=drops.filter(b=>(b.created_at||'').slice(0,7)===prev.ym).reduce((s,b)=>s+Math.max(0,netAmt(b)*keepPct(b)-(netAmt(b)*0.014+6)),0); if(pn>0) trend=Math.round((dNet-pn)/pn*100); } }
+  if(showNet && sel!=='all'){ const idx=months.findIndex(m=>m.ym===sel); const prev=months[idx+1]; if(prev){ const pn=(_gtdTx||[]).filter(r=>(r.created_at||'').slice(0,7)===prev.ym && _txOk(r) && (r.type==='drop_in'||r.type==='membership'||r.type==='event_ticket'||r.type==='merch')).reduce((s,r)=>{const e=_txEff(r);return s+e.eN;},0)/100; if(pn>0) trend=Math.round((netTotal-pn)/pn*100); } }
 
   // --- builders (same look as coach dashboard) ---
   const ARR='<span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;margin-left:10px;">▾</span>';
@@ -7407,27 +7412,34 @@ async function renderGymTeamDash(){
   const wrap=rows=>`<div class="prow-group" style="margin-bottom:12px;">${rows}</div>`;
 
   // Drop-ins accordion
-  let dropRows = row('💪','#F0FBF0',(EN?'Students paid':'Zaplatili studenti')+` <span style="color:var(--light);font-size:12px;">(${dropsSel.length})</span>`,f(dPaid));
+  let dropRows = row('🏛️','#F0FBF0',(EN?'Gross collected':'Hrubě vybráno')+` <span style="color:var(--light);font-size:12px;">(${dropsSel.length})</span>`,f(dPaid));
   if(showNet){ dropRows += row('🏛️','#F5F2EE',(EN?'− MTL fee':'− MTL poplatek'),'-'+f(dMtl))
-    + row('💳','#FFF0E6',(EN?'− Stripe fee (est.)':'− Stripe fee (odhad)'),'-'+f(dFee))
-    + row('💎','#FFF8E6',`<b>${EN?'Net (est.)':'Net (odhad)'}</b>`,`<span style="color:#006040;font-weight:800;">${f(dNet)}</span>`)
-    + row('📐','#EEF4FF',(EN?'Ø net / class':'Ø net / lekce'),f(dropsSel.length?dNet/dropsSel.length:0)); }
-  else { dropRows += row('📐','#EEF4FF',(EN?'Ø gross / class':'Ø hrubě / lekce'),f(dropsSel.length?dPaid/dropsSel.length:0)); }
+    + row('💳','#FFF0E6',(EN?'− Stripe fee':'− Stripe poplatek'),'-'+f(dFee))
+    + row('💎','#F0FBF0',`<b>${EN?'= Net (this month)':'= Čistě vybráno'}</b>`,`<span style="color:#006040;font-weight:800;">${f(dNet)}</span>`); }
   const dropAcc = HDR('🥋',(EN?'Drop-in classes':'Jednorázové vstupy')+` <span style="color:var(--light);font-weight:600;font-size:12px;">· ${monthLabel}</span>`,`<span style="color:${showNet?'#006040':'var(--dark)'};">${f(showNet?dNet:dPaid)}</span>`) + wrap(dropRows);
 
   // Memberships accordion
-  let memRows = row('💪','#EEF4FF',(EN?'Members pay / mo':'Členové platí / měs')+` <span style="color:var(--light);font-size:12px;">(${mems.length})</span>`,f(mPaid));
+  let memRows = row('🏛️','#EEF4FF',(EN?'Gross collected':'Hrubě vybráno')+` <span style="color:var(--light);font-size:12px;">(${mems.length})</span>`,f(mPaid));
   if(showNet){ memRows += row('🏛️','#F5F2EE',(EN?'− MTL fee':'− MTL poplatek'),'-'+f(mMtl))
-    + row('💳','#FFF0E6',(EN?'− Stripe fee (est.)':'− Stripe fee (odhad)'),'-'+f(mFee))
-    + row('💎','#EEF4FF',`<b>${EN?'Net / mo (est.)':'Net / měs (odhad)'}</b>`,`<span style="color:var(--blue);font-weight:800;">${f(mNet)}</span>`); }
-  const memAcc = HDR('🎟️',(EN?'Memberships':'Členství')+` <span style="color:var(--light);font-weight:600;font-size:12px;">· ${EN?'active / mo':'aktivní / měs'}</span>`,`<span style="color:var(--blue);">${f(showNet?mNet:mPaid)}</span>`) + wrap(memRows);
+    + row('💳','#FFF0E6',(EN?'− Stripe fee':'− Stripe poplatek'),'-'+f(mFee))
+    + row('💎','#EEF4FF',`<b>${EN?'= Net (this month)':'= Čistě vybráno'}</b>`,`<span style="color:var(--blue);font-weight:800;">${f(mNet)}</span>`); }
+  const memAcc = HDR('🎟️',(EN?'Memberships':'Členství')+` <span style="color:var(--light);font-weight:600;font-size:12px;">· ${monthLabel}</span>`,`<span style="color:var(--blue);">${f(showNet?mNet:mPaid)}</span>`) + wrap(memRows);
+  // Events accordion (only if any)
+  let evAcc='';
+  if(evGross>0){ let evRows=row('🎟️','#EEF0FF',(EN?'Gross collected':'Hrubě vybráno'),f(evGross));
+    if(showNet){ evRows+=row('🏛️','#F5F2EE',(EN?'− MTL fee':'− MTL poplatek'),'-'+f(evMtl))+row('💳','#FFF0E6',(EN?'− Stripe fee':'− Stripe poplatek'),'-'+f(evFee))+row('💎','#F0FBF0',`<b>${EN?'= Net (this month)':'= Čistě vybráno'}</b>`,`<span style="color:#006040;font-weight:800;">${f(evNet)}</span>`); }
+    evAcc=HDR('📅',(EN?'Events':'Akce / události')+` <span style="color:var(--light);font-weight:600;font-size:12px;">· ${monthLabel}</span>`,`<span style="color:${showNet?'#006040':'var(--dark)'};">${f(showNet?evNet:evGross)}</span>`)+wrap(evRows); }
+  // Merch accordion (only if any)
+  let merchAcc='';
+  if(merchGross>0){ let mcRows=row('🛍️','#FFF0E6',(EN?'Items sold (gross)':'Prodáno zboží (hrubě)'),f(merchGross));
+    if(showNet){ mcRows+=row('🏛️','#F5F2EE',(EN?'− MTL fee':'− MTL poplatek'),'-'+f(merchMtl))+row('💳','#FFF0E6',(EN?'− Stripe fee':'− Stripe poplatek'),'-'+f(merchFee))+row('💎','#F0FBF0',`<b>${EN?'= Net (this month)':'= Čistě vybráno'}</b>`,`<span style="color:#006040;font-weight:800;">${f(merchNet)}</span>`); }
+    merchAcc=HDR('🛍️',(EN?'Merch':'Merch')+` <span style="color:var(--light);font-weight:600;font-size:12px;">· ${monthLabel}</span>`,`<span style="color:${showNet?'#006040':'var(--dark)'};">${f(showNet?merchNet:merchGross)}</span>`)+wrap(mcRows); }
 
   // Students accordion
   let studentRows;
   if(!sDistinct){ studentRows=row('—','#F5F2EE',(EN?'No students yet':'Zatím žádní studenti'),'—'); }
   else{
     studentRows = row('🟢','#F0FBF0',(EN?'Unique students':'Unikátních studentů')+` <span style="color:var(--light);font-size:11px;">· ${monthLabel}</span>`,sDistinct)
-      + row('🔁','#EEF4FF',(EN?'Came back (2+ classes)':'Vrátili se (2+ lekce)'),sRepeat)
       + '<div style="border-top:1px dashed var(--border);margin:8px 0 6px;"></div>'
       + sIds.sort((a,b)=>sCnt[b]-sCnt[a]).slice(0,40).map(id=>row(sCnt[id]>=2?'🔁':'👤',sCnt[id]>=2?'#F0FBF0':'#F5F2EE',escapeHtml(sNm[id]||(EN?'Student':'Student')),sCnt[id]+'×')).join('');
   }
@@ -7440,16 +7452,15 @@ async function renderGymTeamDash(){
 
   const gymSelHtml = teamGyms.length>1 ? `<select id="gtdGymSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:8px;">${teamGyms.map(g=>`<option value="${g.id}" ${g.id===_gtdGym?'selected':''}>🏛️ ${escapeHtml(g.name)}</option>`).join('')}</select>` : '';
   const monthSelHtml = `<select id="gtdMonthSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:10px;"><option value="all" ${sel==='all'?'selected':''}>${EN?'All time':'Vše'}</option>${months.map(m=>`<option value="${m.ym}" ${m.ym===sel?'selected':''}>${m.lbl}</option>`).join('')}</select>`;
-  const heroLbl = showNet ? (EN?'Your net · group classes':'Tvůj net · skupinovky') : (EN?'Generated for the gym · group classes':'Vygenerováno pro gym · skupinovky');
+  const heroLbl = showNet ? (EN?'Net collected · this gym':'Čistě vybráno · tento gym') : (EN?'Generated for the gym':'Vygenerováno pro gym');
   const heroSub = showNet
-    ? (trend!=null?`<div style="font-size:12.5px;font-weight:700;">${trend>=0?'▲':'▼'} ${Math.abs(trend)}% ${EN?'vs last month':'vs minulý měsíc'}</div>`:`<div style="font-size:11px;opacity:.75;">${EN?'drop-ins (period) + active memberships / mo':'jednorázové (období) + aktivní členství / měs'}</div>`)
+    ? (trend!=null?`<div style="font-size:12.5px;font-weight:700;">${trend>=0?'▲':'▼'} ${Math.abs(trend)}% ${EN?'vs last month':'vs minulý měsíc'}</div>`:`<div style="font-size:11px;opacity:.75;">${EN?'real Stripe payments, after refunds':'reálné platby ze Stripe, po refundech'}</div>`)
     : `<div style="font-size:11px;opacity:.85;">${EN?'gross you generated for the gym (before fees)':'hrubě, co jsi vygeneroval gymu (před poplatky)'}</div>`;
   const heroHtml = `<div class="dashHeroSingle" style="background:linear-gradient(135deg,#0A7A4F,#005A3C);border-radius:16px;padding:15px 18px;margin-bottom:10px;color:#fff;box-shadow:0 2px 10px rgba(0,96,64,.18);"><div style="font-size:11.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">${heroLbl} · ${monthLabel}</div><div style="font-size:30px;font-weight:800;line-height:1.05;margin:5px 0 3px;">${f(headlineVal)}</div>${heroSub}</div>`;
   const cardsHtml = `<div class="dashCards">`
     +`<div class="dashCardNet"><div style="font-size:10.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">${showNet?(EN?'Net':'Net'):(EN?'Gross':'Hrubě')}</div><div style="font-size:25px;font-weight:800;line-height:1.05;margin:5px 0 2px;">${f(headlineVal)}</div><div style="font-size:10px;opacity:.78;">${monthLabel}</div></div>`
     +`<div class="dashCard"><div class="dashCardLbl">${EN?'Drop-ins':'Vstupy'}</div><div class="dashCardVal">${dropsSel.length}</div></div>`
     +`<div class="dashCard"><div class="dashCardLbl">${EN?'Members':'Členů'}</div><div class="dashCardVal">${mems.length}</div></div>`
-    +`<div class="dashCard"><div class="dashCardLbl">${EN?'Students':'Studentů'}</div><div class="dashCardVal">${sDistinct}</div></div>`
     +`</div>`;
   const note = `<p style="font-size:11px;color:#0A7A4F;background:#F0FBF0;border-radius:8px;padding:8px 10px;margin-bottom:10px;">💳 ${showNet?(EN?'Payments go to your connected payout account; MTL takes its commission, you bear the Stripe fee.':'Platby chodí na tvůj připojený výplatní účet; MTL si bere provizi, Stripe poplatek neseš ty.'):(EN?'These classes are collected by the gym — this is the gross volume you generated for it, before fees.':'Tyto lekce vybírá gym — tohle je hrubý objem, který jsi mu vygeneroval, před poplatky.')}</p>`;
 
@@ -7471,7 +7482,7 @@ async function renderGymTeamDash(){
   const _bothModes = !!(currentUser&&currentUser.gym_payout_account) && !!window._gtHasGymRevenue;
   const modeToggleHtml = _bothModes ? `<div style="display:flex;gap:6px;margin-bottom:10px;"><button id="gtdModeNet" style="flex:1;padding:9px;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';border:1px solid var(--border);background:${_gtdMode==='gross'?'var(--surf)':'var(--dark)'};color:${_gtdMode==='gross'?'var(--dark)':'#fff'};">${EN?'My net':'Můj net'}</button><button id="gtdModeGross" style="flex:1;padding:9px;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';border:1px solid var(--border);background:${_gtdMode==='gross'?'var(--dark)':'var(--surf)'};color:${_gtdMode==='gross'?'#fff':'var(--dark)'};">${EN?'For the gym':'Pro gym'}</button></div>` : '';
   box.innerHTML = modeToggleHtml + gymSelHtml + monthSelHtml + heroHtml + cardsHtml + note
-    + `<div id="gtdStats">` + dropAcc + memAcc + studentsAcc + attAcc + `<div id="gtdTrend"></div></div>` + btnsHtml;
+    + `<div id="gtdStats">` + dropAcc + memAcc + evAcc + merchAcc + studentsAcc + attAcc + `<div id="gtdTrend"></div></div>` + btnsHtml;
 
   // selectors
   const gs=$('gtdGymSel'); if(gs) gs.onchange=()=>{ _gtdGym=gs.value; renderGymTeamDash(); };
