@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-20-QFK | (FIX) Restored the 'let _gtdGym/_gtdMonth/_gtdGymName' declaration that QFJ's function-slice accidentally removed (it sat between openCoachEarnings and _gtdEnsureGym) - without it _gtdGym was read undeclared = runtime ReferenceError that would crash the gym-team dashboard; also added _gtdMode. (FEATURE) Split the gym-team Overview into TWO mode-keyed dashboards using gym_bookings/gym_memberships.paid_to, coach-scoped (coach_id=me): NET dashboard (paid_to='coach' - the coach's own connected-Stripe transactions, after MTL+Stripe) and GROSS dashboard (paid_to='gym' - the gross volume THIS coach generated for the gym via classes they lead, before fees, no fee/net rows). openGymTeamDash(gymId,gymName,mode) defaults to net if the coach has gym_payout_account else gross. Desktop sidebar now shows 'Prehled' (net) only when the coach has their own account, and 'Pro gym' (gross) when they have no account OR have >=1 gym-paid record (window._gtHasOwnAccount + _gtHasGymRevenue computed in loadMyTeams); 'Stripe payouts' nav shown only with own account. An in-dash net/gross toggle appears when both apply (covers mobile). Removed the off-platform wording from the gross copy per the all-payments-through-MTL directive. -->
+<!-- MTL build: 2026-06-21-QFM | Soukromky (1:N private sessions). Coach slots can now be 1:1..1:4 with one group total price. In the coach Diary quick-add-slot form: a session-type selector 1:1/1:2/1:3/1:4 (window._diarySlotCap) + a 'total price for the whole group' input shown only when capacity>1; the price is required for soukromky. Slot insert now carries capacity+price (with graceful fallback when those columns are missing, like end_time). Student-facing slot list and the coach Diary free-slot rows show a 'Soukromka 1:N - <price>' badge when capacity>1. Booking a soukromka pays the group total (slot.price) via the existing in-person /api/pay?type=coach direct-charge flow -> one payer books & pays for the group; participants settle among themselves off-platform; one charge = one MTL fee, refund via the existing single-booking policy (16h+ 95%, under 50%, coach-cancel 100%). Needs slots-soukromka.sql (ADD COLUMN capacity int default 1, price bigint). Normal 1:1 slots are unchanged (no capacity/price written when cap=1). -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -2005,6 +2005,7 @@ body.no-emoji [data-keep-emoji] .prow-icon,body.no-emoji [data-keep-emoji] .sico
 
 <div class="sheet" id="shMoneyDash" style="z-index:90;"><div class="shdr"><div class="shdr-title" data-noi18n>💰 Přehled výdělků</div><button class="btn-close" id="btnCloseMoneyDash">✕</button></div><div style="padding:16px 20px;" id="moneyDashBody"></div></div>
 <div class="sheet" id="shGymTeamDash" style="z-index:90;"><div class="shdr"><div class="shdr-title" id="gtdTitle" data-noi18n>🏛️ Přehled gymu</div><button class="btn-close" id="btnCloseGtd">✕</button></div><div style="padding:16px 20px;" id="gtdBody"></div></div>
+<div class="sheet" id="shCoachGymSet" style="z-index:91;"><div class="shdr"><div class="shdr-title" id="gtsTitle" data-noi18n>⚙️ Nastavení gymu</div><button class="btn-close" id="btnCloseGts">✕</button></div><div style="padding:16px 20px;" id="gtsBody"></div></div>
 <div class="sheet" id="shCoachDash" style="z-index:90;"><div class="shdr"><div class="shdr-title" id="coachDashTitle" data-noi18n>🥊 Přehled kouče</div><button class="btn-close" id="btnCloseCoachDash">✕</button></div><div style="padding:16px 20px;" id="coachDashBody"></div></div>
 <div class="sheet" id="shSupport">
   <div class="shdr"><div class="shdr-title" id="supTitle" data-noi18n>Podpora</div><button class="btn-close" id="btnCloseSupport">✕</button></div>
@@ -3574,7 +3575,7 @@ async function _dashGo(t){ try{
   if(t==='gtatt'){ if(await _gtdEnsureGym()){ openSheet('shCoachRoster'); if(typeof loadCoachRoster==='function') loadCoachRoster(_gtdGym,_gtdGymName); } return; }
   if(t==='gtteam'){ if(await _gtdEnsureGym() && typeof openGymTeamView==='function') openGymTeamView(_gtdGym,_gtdGymName); return; }
   if(t==='gttickets'){ if(await _gtdEnsureGym() && typeof openEventScanPicker==='function') openEventScanPicker(_gtdGym,_gtdGymName); return; }
-  if(t==='gtpayout'){ if(typeof openMyStripe==='function') openMyStripe(null,true); return; }
+  if(t==='gtset'){ if(typeof openCoachGymSettings==='function') openCoachGymSettings(); return; }
   if(t==='feedback'){ const b=$('btnOnlineFeedback'); if(b) b.click(); return; }
   if(t==='lbcoach'){ const b=$('btnLeaderboardCoach'); if(b) b.click(); return; }
   if(t==='lbgym'){ if(typeof openGymLeaderboard==='function') openGymLeaderboard('city'); return; }
@@ -4754,7 +4755,9 @@ const { data, error } = await supaClient
     const dateStr = `${dayName} ${d.getDate()}.${d.getMonth()+1}.`;
     const el = document.createElement('div');
     el.className = 'slot-item';
-    el.innerHTML = `<div><div class="slot-date">${dateStr}</div><div class="slot-time">${slot.time}</div></div><div class="slot-arrow">→</div>`;
+    const _scap=Number(slot.capacity)||1;
+    const _sk=_scap>1?`<div style="font-size:11px;font-weight:700;color:var(--red);margin-top:3px;">👥 ${LANG==='en'?'Private':'Soukromka'} 1:${_scap}${slot.price?(' · '+fmtPrice(slot.price, c.currencyInperson||'CZK')):''}</div>`:'';
+    el.innerHTML = `<div><div class="slot-date">${dateStr}</div><div class="slot-time">${slot.time}</div>${_sk}</div><div class="slot-arrow">→</div>`;
     el.onclick = ()=>selectSlot(slot, c);
     list.appendChild(el);
   });
@@ -4768,7 +4771,7 @@ async function selectSlot(slot, c){
   window._bookingSlot = slot;
   toast(L('💳 Přesměrovávám na platbu...'));
   const bookDisc = (_bookDisc && (c.disciplines||[]).includes(_bookDisc)) ? _bookDisc : ((c.disciplines&&c.disciplines[0])||null);
-  const amount = discRate(c, bookDisc) || c.rateInperson || c.rateNum || 1200;
+  const _scap=Number(slot.capacity)||1; const amount = (_scap>1 && slot.price) ? Number(slot.price) : (discRate(c, bookDisc) || c.rateInperson || c.rateNum || 1200);
   const curr = c.currencyInperson || 'CZK';
   let comm = c.partner?0.01:((c.coachRefScore||0)>=10?0.02:((c.coachRefScore||0)>=3?0.03:0.035)), nomarkup=1, creditUsed='';
   if(currentUser && (currentUser.student_credits||0)>0 && (c.referral_optin!==false)){ creditUsed='student'; /* referral redemption: MTL waives its WHOLE fee (3.5%/2%/1%); provider funds the rest (20% new / 10% existing). Applies to founding/partner too (their acquisition cost). */ }
@@ -5197,7 +5200,7 @@ function hideMatch(){ $('matchOv').classList.remove('open'); }
 // ════════════════════════════════════════
 // SHEETS
 // ════════════════════════════════════════
-const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMyKids','shEvents','shEventCreate','shEventView','shMyEv','shMyEvManage','shMe','shSettings','shCoachApp','shAddDisc','shDiscReview','shAmbDash','shAdmin','shNotif','shChat','shBookings','shDiary','shCoachStats','shCoachSched','shGymStats','shFounderDash','shGymLb','shEventLb','shGyms','shGymProfile','shGymManage','shAccounting','shMemberships','shTerms','shPrivacy','shOnline','shLeaderboard','shOpportunities','shMyTeams','shEPCancel','shEPFeedback','shCoachRoster','shAmbApply','shAmbApps','shAllCoaches','shAllGyms','shAmbCoaches','shAmbGyms','shCancelling','shInvite','shAccountMgmt','shMoneyDash','shCoachDash','shGymTeamDash','shSupport','shLevel','shMilestones','shClassAttend','shCoachPricing','shReception','shCoachSettings','shGymTeamView','shMtlLeague','shHotspotDetail'];
+const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMyKids','shEvents','shEventCreate','shEventView','shMyEv','shMyEvManage','shMe','shSettings','shCoachApp','shAddDisc','shDiscReview','shAmbDash','shAdmin','shNotif','shChat','shBookings','shDiary','shCoachStats','shCoachSched','shGymStats','shFounderDash','shGymLb','shEventLb','shGyms','shGymProfile','shGymManage','shAccounting','shMemberships','shTerms','shPrivacy','shOnline','shLeaderboard','shOpportunities','shMyTeams','shEPCancel','shEPFeedback','shCoachRoster','shAmbApply','shAmbApps','shAllCoaches','shAllGyms','shAmbCoaches','shAmbGyms','shCancelling','shInvite','shAccountMgmt','shMoneyDash','shCoachDash','shGymTeamDash','shCoachGymSet','shSupport','shLevel','shMilestones','shClassAttend','shCoachPricing','shReception','shCoachSettings','shGymTeamView','shMtlLeague','shHotspotDetail'];
 
 let _sheetParent={};
 function openSheet(id){
@@ -7460,6 +7463,71 @@ async function renderGymTeamDash(){
   } }catch(e){}
 }
 
+async function openCoachGymSettings(){
+  if(!(await _gtdEnsureGym())){ toast(LANG==='en'?'⚠️ You are not in any gym team':'⚠️ Nejsi v žádném gym týmu'); return; }
+  openSheet('shCoachGymSet');
+  await renderCoachGymSettings();
+}
+async function renderCoachGymSettings(){
+  const box=$('gtsBody'); if(!box||!currentUser) return;
+  const EN=LANG==='en';
+  box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${L('Načítám...')}</p>`;
+  // team gyms + per-gym schedule permission + full gym objects (for event creation)
+  let teamGyms=[];
+  try{
+    const { data:gc } = await supaClient.from('gym_coaches').select('gym_id, can_manage_schedule, id').eq('coach_id',currentUser.id).eq('status','active');
+    const links={}; (gc||[]).forEach(x=>{ if(x.gym_id) links[x.gym_id]=x; });
+    const gids=Object.keys(links);
+    if(gids.length){ const { data:gg } = await supaClient.from('gyms').select('id,name,currency,owner_id,stripe_account,schedule').in('id',gids); (gg||[]).forEach(g=>teamGyms.push(Object.assign({}, g, { _canSched: !!(links[g.id]||{}).can_manage_schedule }))); }
+  }catch(e){ console.log('[cgs]',e&&e.message); }
+  if(!teamGyms.length){ box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${EN?'You are not in any gym team yet.':'Zatím nejsi v žádném gym týmu.'}</p>`; return; }
+  if(!_gtdGym || !teamGyms.some(g=>g.id===_gtdGym)) _gtdGym=teamGyms[0].id;
+  const gym=teamGyms.find(g=>g.id===_gtdGym)||teamGyms[0];
+  _gtdGymName=gym.name;
+  if($('gtsTitle')) $('gtsTitle').textContent=(EN?'Gym settings':'Nastavení gymu')+(teamGyms.length>1?'':(' · '+gym.name));
+  const hasStripe=!!currentUser.gym_payout_account;
+  const canSched=!!gym._canSched;
+
+  const gymSel = teamGyms.length>1 ? `<select id="gtsGymSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:14px;">${teamGyms.map(g=>`<option value="${g.id}" ${g.id===_gtdGym?'selected':''}>${escapeHtml(g.name||'Gym')}</option>`).join('')}</select>` : '';
+  const sec=(emoji,title,bodyHtml)=>`<details class="setSec"><summary>${emoji} ${title}</summary><div class="setBody">${bodyHtml}</div></details>`;
+  const btn=(id,label,bg,col,bd)=>`<button id="${id}" style="width:100%;padding:13px;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';background:${bg};color:${col};border:${bd};">${label}</button>`;
+  const desc=t=>`<p style="font-size:12.5px;color:var(--light);line-height:1.55;margin-bottom:10px;">${t}</p>`;
+
+  let html=gymSel;
+  if(canSched){
+    html+=sec('🗓️',EN?'Schedule & classes':'Rozvrh & lekce',
+      desc(EN?'Manage the classes you teach at this gym and your weekly schedule.':'Spravuj lekce, které tu vedeš, a svůj týdenní rozvrh.')
+      + btn('gtsSched',EN?'Manage schedule & classes':'Spravovat rozvrh & lekce','var(--dark)','#fff','none'));
+  }
+  if(hasStripe){
+    html+=sec('💰',EN?'Your prices & memberships':'Vlastní ceny & členství',
+      desc(EN?'Set your own drop-in price and membership plans — students pay directly to your connected account.':'Nastav si vlastní cenu vstupu a varianty členství — studenti platí přímo na tvůj připojený účet.')
+      + btn('gtsPricing',EN?'Edit prices & memberships':'Upravit ceny & členství','var(--dark)','#fff','none'));
+  }
+  if(canSched){
+    html+=sec('📅',EN?'Events':'Akce / události',
+      desc(EN?'Create and manage events (seminars, smokers, fight cards) at this gym.':'Vytvoř a spravuj akce (semináře, smokery, galavečery) na tomhle gymu.')
+      + btn('gtsEvent',EN?'Create an event':'Vytvořit akci','var(--surf)','var(--dark)','1px solid var(--border)'));
+  }
+  let payoutBody;
+  if(hasStripe){
+    payoutBody = desc(EN?'Your payout account is connected. Group-class and your own-offer payments land here.':'Tvůj výplatní účet je připojený. Sem chodí platby za skupinovky a tvé vlastní nabídky.')
+      + btn('gtsOpenStripe',EN?'Open my Stripe (balance & payouts)':'Otevřít můj Stripe (zůstatek a výplaty)','#635BFF','#fff','none');
+  } else {
+    payoutBody = `<div style="background:#FFF7E0;border:1px solid #F0E0A8;border-radius:10px;padding:10px 12px;font-size:12.5px;color:#7a5b00;line-height:1.5;margin-bottom:10px;">${EN?'Connect a payout account to offer your own paid classes & memberships and get paid directly.':'Připoj výplatní účet, abys mohl nabízet vlastní placené lekce & členství a dostával platby přímo.'}</div>`
+      + btn('gtsConnect',EN?'Connect a payout account':'Připojit výplatní účet','#635BFF','#fff','none');
+  }
+  html+=sec('💳',EN?'Payout account':'Výplatní účet',payoutBody);
+
+  box.innerHTML=html;
+
+  const gs=$('gtsGymSel'); if(gs) gs.onchange=()=>{ _gtdGym=gs.value; renderCoachGymSettings(); };
+  if($('gtsSched')) $('gtsSched').onclick=()=>openCoachScheduleEditor(_gtdGym,_gtdGymName);
+  if($('gtsPricing')) $('gtsPricing').onclick=()=>openCoachScheduleEditor(_gtdGym,_gtdGymName);
+  if($('gtsEvent')) $('gtsEvent').onclick=()=>openEventCreate(gym);
+  if($('gtsOpenStripe')) $('gtsOpenStripe').onclick=()=>openMyStripe(null,true);
+  if($('gtsConnect')) $('gtsConnect').onclick=async()=>{ const _cc=await pickCountry(_guessCC()); if(!_cc) return; const bb=$('gtsConnect'); bb.textContent=L('Vytvářím...'); bb.disabled=true; try{ const r=await fetch(`/api/create-gym?for=coach&gymProfileId=${encodeURIComponent(currentUser.id)}&country=${_cc}`); const j=await r.json(); if(j.error){ toast('⚠️ '+j.error); bb.disabled=false; bb.textContent=(EN?'Connect a payout account':'Připojit výplatní účet'); return; } window.location.href=j.url; }catch(e){ toast(L('⚠️ Chyba připojení Stripe')); bb.disabled=false; } };
+}
 async function toggleCoachPerm(linkId, col, cur){
   const nv=!cur; const upd={}; upd[col]=nv;
   const { error } = await supaClient.from('gym_coaches').update(upd).eq('id', linkId);
@@ -10919,6 +10987,7 @@ if($('setDelAccount')) $('setDelAccount').onclick=()=>openDeleteFlow('account');
 if($('btnCloseMoneyDash')) $('btnCloseMoneyDash').onclick=()=>closeSheet('shMoneyDash');
 if($('btnCloseCoachDash')) $('btnCloseCoachDash').onclick=()=>closeSheet('shCoachDash');
 if($('btnCloseGtd')) $('btnCloseGtd').onclick=()=>closeSheet('shGymTeamDash');
+if($('btnCloseGts')) $('btnCloseGts').onclick=()=>closeSheet('shCoachGymSet');
 if($('setDelCoach')) $('setDelCoach').onclick=()=>openDeleteFlow('coach');
 if($('setDelGym')) $('setDelGym').onclick=()=>openGymDeletePicker();
 if($('setChangeEmail')) $('setChangeEmail').onclick=()=>openChangeEmail();
@@ -13484,7 +13553,7 @@ function showDiaryDay(dateStr){
   dayFreeSlots.forEach(s=>{
     html += `
       <div style="background:#F0FBF0;border:1px solid #C0E8C0;border-radius:12px;padding:12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
-        <div style="font-size:15px;font-weight:600;color:var(--dark);">⏰ ${s.time}${s.end_time?'–'+s.end_time:''} · ${L('Volný termín')}</div>
+        <div style="font-size:15px;font-weight:600;color:var(--dark);">⏰ ${s.time}${s.end_time?'–'+s.end_time:''} · ${(Number(s.capacity)||1)>1?('👥 '+(LANG==='en'?'Private':'Soukromka')+' 1:'+(Number(s.capacity)||1)+(s.price?(' · '+fmtPrice(s.price,(currentUser&&currentUser.currency)||'CZK')):'')):L('Volný termín')}</div>
         <button class="diaryDelSlot" data-id="${s.id}" style="padding:6px 10px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;font-family:'DM Sans';">${L('Smazat')}</button>
       </div>`;
   });
@@ -13498,6 +13567,8 @@ function showDiaryDay(dateStr){
   html += `<div style="border:1.5px dashed var(--border);border-radius:12px;padding:11px;margin-top:6px;"><div style="font-size:11px;color:var(--light);font-weight:600;margin-bottom:7px;">${LANG==='en'?'New 1:1 slot':'Nový termín na soukromku'}</div>`
     + (_ddiscs.length>1?`<select id="diarySlotDisc" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;margin-bottom:7px;">${discOptsHtml(_ddiscs, window._diarySlotDisc)}</select>`:'')
     + `<div style="display:flex;gap:6px;align-items:flex-end;margin-bottom:8px;"><div style="flex:1;"><div style="font-size:10px;color:var(--mid);margin-bottom:3px;font-weight:600;">${LANG==='en'?'Start':'Začátek'}</div><input id="diarySlotStart" type="time" value="18:00" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';"></div><div style="flex:1;"><div style="font-size:10px;color:var(--mid);margin-bottom:3px;font-weight:600;">${LANG==='en'?'End':'Konec'}</div><input id="diarySlotEnd" type="time" value="19:00" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';"></div></div>`
+    + `<div style="margin-bottom:8px;"><div style="font-size:10px;color:var(--mid);margin-bottom:3px;font-weight:600;">${LANG==='en'?'Session type':'Typ lekce'}</div><div id="diaryCapRow" style="display:flex;gap:5px;">${[1,2,3,4].map(function(n){return '<button type="button" class="diaryCapBtn" data-cap="'+n+'" style="flex:1;padding:8px 2px;border:1.5px solid var(--border);border-radius:9px;background:'+(n===(window._diarySlotCap||1)?'var(--dark)':'#fff')+';color:'+(n===(window._diarySlotCap||1)?'#fff':'var(--dark)')+';font-weight:700;font-size:13px;cursor:pointer;">1:'+n+'</button>';}).join('')}</div></div>`
+    + `<div id="diaryPriceWrap" style="display:${(window._diarySlotCap||1)>1?'block':'none'};margin-bottom:8px;"><div style="font-size:10px;color:var(--mid);margin-bottom:3px;font-weight:600;">${LANG==='en'?'Total price for the whole group':'Cena za celou skupinu'}</div><input id="diarySlotPrice" type="number" inputmode="numeric" placeholder="${LANG==='en'?'e.g. 1500':'např. 1500'}" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';"><div style="font-size:10.5px;color:var(--light);line-height:1.4;margin-top:4px;">${LANG==='en'?'One person books &amp; pays for the group; they settle up among themselves.':'Jeden zarezervuje a zaplatí za skupinu; mezi sebou se vyrovnají.'}</div></div>`
     + `<button id="diaryAddSlot" data-date="${dateStr}" style="width:100%;padding:11px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'+ Add slot':'+ Přidat termín'}</button></div>`;
 
   detail.innerHTML = html;
@@ -13528,6 +13599,7 @@ detail.querySelectorAll('.diaryCancelBtn').forEach(btn=>{
       await loadDiaryData(); renderDiary();
     };
   });
+  detail.querySelectorAll('.diaryCapBtn').forEach(function(btn){ btn.onclick=function(){ window._diarySlotCap=Number(btn.dataset.cap)||1; detail.querySelectorAll('.diaryCapBtn').forEach(function(b){ var on=Number(b.dataset.cap)===window._diarySlotCap; b.style.background=on?'var(--dark)':'#fff'; b.style.color=on?'#fff':'var(--dark)'; }); var pw=$('diaryPriceWrap'); if(pw) pw.style.display=(window._diarySlotCap>1)?'block':'none'; }; });
   $('diaryAddSlot').onclick = async ()=>{
     const start=($('diarySlotStart')&&$('diarySlotStart').value)||'';
     const end=($('diarySlotEnd')&&$('diarySlotEnd').value)||'';
@@ -13535,8 +13607,13 @@ detail.querySelectorAll('.diaryCancelBtn').forEach(btn=>{
     const disc=($('diarySlotDisc')&&$('diarySlotDisc').value)||window._diarySlotDisc||(currentUser&&currentUser.main_discipline)||((currentUser&&currentUser.disciplines&&currentUser.disciplines[0]))||null;
     if(disc) window._diarySlotDisc=disc;
     const base={ coach_profile_id: currentUser.id, date: dateStr, time: start, booked:false, discipline: disc };
+    const _cap=Number(window._diarySlotCap)||1;
+    const _priceRaw=($('diarySlotPrice')&&$('diarySlotPrice').value)||'';
+    const _price=(_cap>1)?Math.round(Number(_priceRaw)||0):null;
+    if(_cap>1 && !(_price>0)){ toast(L('⚠️ Zadej cenu za skupinu')); return; }
+    if(_cap>1){ base.capacity=_cap; base.price=_price; }
     let { error } = await supaClient.from('slots').insert(Object.assign({}, base, { end_time: (/^\d{2}:\d{2}$/.test(end)?end:null) }));
-    if(error && /end_time|column|schema/i.test(error.message||'')){ const r2=await supaClient.from('slots').insert(base); error=r2.error; }
+    if(error && /end_time|capacity|price|column|schema/i.test(error.message||'')){ let r2=await supaClient.from('slots').insert(base); if(r2.error && /capacity|price|column|schema/i.test(r2.error.message||'')){ r2=await supaClient.from('slots').insert({ coach_profile_id: currentUser.id, date: dateStr, time: start, booked:false, discipline: disc }); } error=r2.error; }
     if(error){ toast('⚠️ '+error.message); return; }
     toast(L('✅ Termín přidán'));
     notifySlotWatchers();
@@ -15613,7 +15690,7 @@ function buildDashSide(){
             +'<div class="dsItem" data-act="gtatt">📋 <span>'+(LANG==='en'?'Attendance':'Docházka')+'</span></div>'
             +'<div class="dsItem" data-act="gtteam">👥 <span>'+(LANG==='en'?'Gym team':'Gym tým')+'</span></div>'
             +'<div class="dsItem" data-act="gttickets">📷 <span>'+(LANG==='en'?'Tickets':'Lístky')+'</span></div>'
-            +((window._gtHasOwnAccount)?('<div class="dsItem" data-act="gtpayout">💳 <span>'+(LANG==='en'?'Stripe payouts':'Stripe výplaty')+'</span></div>'):'')
+            +'<div class="dsItem" data-act="gtset">⚙️ <span>'+(LANG==='en'?'Gym settings':'Nastavení gymu')+'</span></div>'
           +'</div>'):'')
         +'<div style="height:1px;background:var(--border);margin:10px 4px;"></div>'
         +'<div class="dsItem" data-act="notif">🔔 <span>'+(LANG==='en'?'Notifications':'Notifikace')+'</span><span id="dashNotifBadge" style="display:none;margin-left:auto;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--red);color:#fff;font-size:11px;font-weight:800;align-items:center;justify-content:center;">0</span></div>'
