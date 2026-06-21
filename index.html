@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QGJ fix QGI regression - bookings table has no capacity column so the insert was failing (no booking/student created); capacity removed from insert, set via best-effort update instead (needs bookings-capacity.sql migration) -->
+<!-- MTL build: QGK coach Prehled fix (renderCoachDash read transactions directly = RLS-blocked, now via /api/my-transactions) + perf: HERO net cached 60s TTL instead of force-fetch every Me render; caches invalidated after payment -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -13087,11 +13087,12 @@ async function renderCoachDash(){
   const sel=window._coachDashMonth;
   const since=months[months.length-1].ym+'-01';
   let tx=[], bk=[], sl=[];
+  const _mtCD = await _fetchMyTx();
+  tx = (_mtCD.coachTx||[]).filter(r=>!r.gym_id && (r.created_at||'')>=since);
   try{ const r=await Promise.all([
-    supaClient.from('transactions').select('id,type,discipline,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,stripe_fee,created_at,currency,online').eq('coach_id',currentUser.id).is('gym_id',null).gte('created_at',since),
     supaClient.from('bookings').select('student_id,student_name,status,created_at,training_date,training_time,type').eq('coach_id',currentUser.id),
     supaClient.from('slots').select('date,booked').eq('coach_profile_id',currentUser.id)
-  ]); tx=(r[0]&&r[0].data)||[]; bk=(r[1]&&r[1].data)||[]; sl=(r[2]&&r[2].data)||[]; }catch(e){ console.log('[coachdash]',e&&e.message); }
+  ]); bk=(r[0]&&r[0].data)||[]; sl=(r[1]&&r[1].data)||[]; }catch(e){ console.log('[coachdash]',e&&e.message); }
   const NET=r=>Math.max(0,((r.gross_amount||0)-(r.refund_amount||0))-(r.stripe_fee||0)-(((r.mtl_fee||0)-(r.mtl_fee_refunded||0))))/100;
   const GROSS=r=>((r.gross_amount||0)-(r.refund_amount||0))/100;
   const MTLF=r=>(((r.mtl_fee||0)-(r.mtl_fee_refunded||0)))/100;
@@ -16736,17 +16737,17 @@ function _netSym(c){ return c==='EUR'?'€':c==='USD'?'$':'Kč'; }
 function _netFmt(v,c){ try{ return Math.round(v).toLocaleString(LANG==='en'?'en-US':'cs-CZ')+' '+_netSym(c); }catch(e){ return Math.round(v)+' '+_netSym(c); } }
 function _curMonthKey(){ return new Date().toISOString().slice(0,7); }
 async function _fetchMyTx(force){
-  if(window._myTxCache && !force) return window._myTxCache;
+  if(window._myTxCache && !force && (Date.now()-(window._myTxCacheAt||0))<60000) return window._myTxCache;
   try{
     const _tok = await _freshTok();
     const r = await fetch('/api/my-transactions', { headers:{'x-access-token':_tok} });
     const j = await r.json().catch(()=>({}));
-    window._myTxCache = { coachTx:(j&&j.coachTx)||[], gymTx:(j&&j.gymTx)||[] };
+    window._myTxCache = { coachTx:(j&&j.coachTx)||[], gymTx:(j&&j.gymTx)||[] }; window._myTxCacheAt = Date.now();
   }catch(e){ console.log('[MTL myTx] endpoint failed', e&&e.message); window._myTxCache={coachTx:[],gymTx:[]}; }
   return window._myTxCache;
 }
 async function loadMyNet(force){
-  if(window._myNetCache && !force) return window._myNetCache;
+  if(window._myNetCache && !force && (Date.now()-(window._myNetCacheAt||0))<60000) return window._myNetCache;
   const me=currentUser;
   const empty={coachTx:[],gymTx:[],hasCoach:false,hasGym:false,cur:'CZK',sameAcct:false};
   if(!me) return empty;
@@ -16767,7 +16768,7 @@ async function loadMyNet(force){
   const cur=((coachTx[0]||gymTx[0]||{}).currency)||(me.currency)||'CZK';
   const myAcct=me.stripe_account||me.gym_payout_account||null;
   const sameAcct=!!(myAcct && gymAccts.length && gymAccts.indexOf(myAcct)>=0);
-  window._myNetCache={coachTx,gymTx,hasCoach,hasGym,cur,sameAcct};
+  window._myNetCache={coachTx,gymTx,hasCoach,hasGym,cur,sameAcct}; window._myNetCacheAt=Date.now();
   return window._myNetCache;
 }
 function _netOf12(rows){ return rows.reduce((a,r)=>a+_txNetEff(r),0)/100; }
@@ -16780,7 +16781,7 @@ async function renderMeNetHero(){
   box.style.display='block';
   box.innerHTML='<div id="meNetHeroCard" style="background:linear-gradient(135deg,#0A7A4F,#005A3C);border-radius:16px;padding:15px 18px;margin-bottom:16px;cursor:pointer;color:#fff;box-shadow:0 2px 10px rgba(0,96,64,.18);"><div style="font-size:11.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">💰 '+(LANG==='en'?'Net collected':'Čistě vybráno')+' · '+(LANG==='en'?'this month':'tento měsíc')+'</div><div id="meNetHeroVal" style="font-size:30px;font-weight:800;line-height:1.05;margin:5px 0 3px;">…</div><div style="font-size:11px;opacity:.78;">'+(LANG==='en'?'real Stripe net · tap for dashboard ›':'reálný Stripe net · klikni pro dashboard ›')+'</div></div>';
   const card=$('meNetHeroCard'); if(card) card.onclick=()=>openFullDash();
-  try{ const nn=await loadMyNet(true); const tot=_netOfMonth(nn.coachTx)+_netOfMonth(nn.gymTx); const v=$('meNetHeroVal'); if(v) v.textContent=_netFmt(tot,nn.cur); }catch(e){ const v=$('meNetHeroVal'); if(v) v.textContent='—'; }
+  try{ const nn=await loadMyNet(); const tot=_netOfMonth(nn.coachTx)+_netOfMonth(nn.gymTx); const v=$('meNetHeroVal'); if(v) v.textContent=_netFmt(tot,nn.cur); }catch(e){ const v=$('meNetHeroVal'); if(v) v.textContent='—'; }
 }
 async function _mdFetchRange(yr){
   const cols='id,type,discipline,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,stripe_fee,created_at,gym_id,coach_id,currency,payee_account';
@@ -17770,6 +17771,7 @@ async function showPaidPopup(){
         _piPre = _jj.paymentIntent || null;
       } catch(e){ console.error('Session record error:', e); }
     }
+    try{ window._myNetCache=null; window._myTxCache=null; }catch(e){}
     if(slotId){
       try {
         const { data: slotData } = await supaClient.from('slots').update({ booked: true, student: currentUser?.id }).eq('id', slotId).select().single();
