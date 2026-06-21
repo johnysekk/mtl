@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QGR student slot picker now shows price+currency for 1:1 (coach rate) and 1:N (slot group price) with proper currency symbol -->
+<!-- MTL build: QGT demand hotspot per-sport coverage - each discipline chip now shows green/red coverage (per-disc gyms within 25km computed client-side from approved gym coords); aggregate line replaced with total MTL gyms nearby + legend; card border red if any requested sport underserved -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4234,6 +4234,13 @@ function openHotspotDetail(h){
   _renderHotspotContacts();
 }
 async function _freshTok(){ try{ var _s=await supaClient.auth.getSession(); var ss=_s&&_s.data&&_s.data.session; if(ss){ var exp=ss.expires_at?ss.expires_at*1000:0; if(exp && exp < Date.now()+30000){ try{ var _r=await supaClient.auth.refreshSession(); ss=(_r&&_r.data&&_r.data.session)||ss; }catch(e){} } return (ss&&ss.access_token)||''; } }catch(e){} return ''; }
+async function _loadGymGeo(){
+  if(window._gymGeo) return window._gymGeo;
+  try{ var r=await supaClient.from('gyms').select('city_lat,city_lng,disciplines').eq('status','approved'); window._gymGeo=(r.data||[]).map(function(g){ return { lat:(g.city_lat!=null?+g.city_lat:null), lng:(g.city_lng!=null?+g.city_lng:null), discs:(typeof parseDisc==='function'?parseDisc(g.disciplines):[]) }; }).filter(function(g){ return g.lat!=null&&g.lng!=null; }); }catch(e){ window._gymGeo=[]; }
+  return window._gymGeo;
+}
+function _gymsNearDisc(lat,lng,disc){ if(lat==null||lng==null||!window._gymGeo) return null; var n=0; window._gymGeo.forEach(function(g){ if((g.discs||[]).indexOf(disc)<0) return; if(haversine(lat,lng,g.lat,g.lng)<=25) n++; }); return n; }
+function _gymsNearTotal(lat,lng){ if(lat==null||lng==null||!window._gymGeo) return null; var n=0; window._gymGeo.forEach(function(g){ if(haversine(lat,lng,g.lat,g.lng)<=25) n++; }); return n; }
 async function _loadDemandHotspots(){
   var box=document.getElementById('demandHotspotBox'); if(!box) return;
   box.innerHTML='<div style="font-size:13px;color:var(--mid);padding:8px 0;">'+(LANG==='en'?'Loading…':'Načítám…')+'</div>';
@@ -4248,16 +4255,18 @@ async function _loadDemandHotspots(){
     window._hcMap={};
     try{ var _hcr=await supaClient.from('hotspot_contacts').select('cluster_key,status'); (_hcr.data||[]).forEach(function(r){ var m=window._hcMap[r.cluster_key]||{count:0,sts:[]}; m.count++; m.sts.push(r.status); window._hcMap[r.cluster_key]=m; }); Object.keys(window._hcMap).forEach(function(k){ var m=window._hcMap[k]; m.status=_deriveHotspotStatus(m.sts); }); }catch(e){}
     var _ctrys=_hsAll.map(function(h){return h.country;}).filter(function(v,i,a){return v&&a.indexOf(v)===i;}).sort();
+    await _loadGymGeo();
     var _hsSrcFilter='all';
     var _renderHot=function(_cf){
     var html=(_cf?_hsAll.filter(function(h){return h.country===_cf;}):_hsAll.slice()).filter(function(h){ return _hsSrcFilter==='explicit'?((h.explicit||0)>0):true; }).sort(function(a,b){ if(!!b.underserved!==!!a.underserved) return (b.underserved?1:0)-(a.underserved?1:0); return b.people-a.people; }).map(function(h){
       var loc=h.city+(h.country?(', '+h.country):'');
-      var dtags=(h.disciplines||[]).slice(0,5).map(function(x){ var d=dmap[x.v]; var nm=d?(LANG==='en'?d.en:d.cs):x.v; return '<span style="display:inline-block;background:var(--surf);border:1px solid var(--border);border-radius:999px;padding:2px 8px;margin:2px 3px 0 0;font-size:11px;font-weight:700;">'+(d?d.emoji+' ':'')+nm+' · '+x.n+'</span>'; }).join('');
-      var _gn=h.gyms_near, _gd=h.gyms_near_disc, _und=h.underserved;
-      var _supTxt = (_gn==null) ? ''
-        : (_und
-            ? '<div style="margin-top:5px;font-size:12px;font-weight:700;color:#C0392B;">'+(LANG==='en'?('🎯 0 gyms teach this within 25 km'+(_gn?(' ('+_gn+' other gym'+(_gn>1?'s':'')+' nearby)'):'')):('🎯 do 25 km to nikdo neučí'+(_gn?(' ('+_gn+' jiných gymů poblíž)'):'')))+'</div>'
-            : '<div style="margin-top:5px;font-size:12px;color:var(--mid);">'+(LANG==='en'?('🏛️ '+_gd+' gym'+(_gd>1?'s':'')+' teach this within 25 km'):('🏛️ '+_gd+' gymů to učí do 25 km'))+'</div>');
+      var dtags=(h.disciplines||[]).slice(0,5).map(function(x){ var d=dmap[x.v]; var nm=d?(LANG==='en'?d.en:d.cs):x.v; var _cv=_gymsNearDisc(h.lat,h.lng,x.v); var _cvt=(_cv==null)?'':(_cv===0?' <span style="color:#C0392B;font-weight:800;" title="'+(LANG==='en'?'nobody teaches this within 25 km':'do 25 km to nikdo neučí')+'">🎯</span>':' <span style="color:#0A7A4F;font-weight:800;" title="'+(LANG==='en'?(_cv+' gym(s) teach this within 25 km'):(_cv+' gymů to učí do 25 km'))+'">🏛️'+_cv+'</span>'); return '<span style="display:inline-block;background:var(--surf);border:1px solid var(--border);border-radius:999px;padding:2px 8px;margin:2px 3px 0 0;font-size:11px;font-weight:700;">'+(d?d.emoji+' ':'')+nm+' · '+x.n+_cvt+'</span>'; }).join('');
+      var _gnTot=_gymsNearTotal(h.lat,h.lng);
+      var _und=(h.disciplines||[]).some(function(x){ return _gymsNearDisc(h.lat,h.lng,x.v)===0; });
+      var _supTxt = (_gnTot==null) ? ''
+        : (_gnTot===0
+            ? '<div style="margin-top:5px;font-size:12px;font-weight:700;color:#C0392B;">'+(LANG==='en'?'🎯 No MTL gym within 25 km — wide-open area':'🎯 Do 25 km žádný MTL gym — volné území')+'</div>'
+            : '<div style="margin-top:5px;font-size:12px;color:var(--mid);">🏛️ '+_gnTot+' '+(LANG==='en'?('MTL gym'+(_gnTot>1?'s':'')+' within 25 km'):('MTL '+(_gnTot===1?'gym':'gymů')+' do 25 km'))+' · '+(LANG==='en'?'🎯 = nobody teaches that sport nearby':'🎯 = ten sport nikdo blízko neučí')+'</div>');
       var _bd = _und ? '#E11' : 'var(--border)';
       var _hcs=(window._hcMap&&window._hcMap[h.cluster_key])||{count:0,status:'new'};
       return '<div class="hsCard" data-ck="'+(h.cluster_key||'')+'" style="border:1px solid '+_bd+';border-radius:12px;padding:11px 13px;margin-bottom:8px;cursor:pointer;"><div style="display:flex;justify-content:space-between;align-items:center;"><div style="font-weight:800;font-size:14px;">📍 '+escapeHtml(loc)+'</div><div style="font-weight:800;color:var(--red);font-size:16px;">'+h.people+'</div></div>'+(dtags?('<div style="margin-top:4px;">'+dtags+'</div>'):'')+'<div style="margin-top:3px;font-size:11px;color:var(--mid);">🙋 '+(h.explicit||0)+' · 👀 '+(h.passive||0)+(h.committed?(' · 🤝 '+h.committed):'')+'</div>'+_supTxt+'<div style="margin-top:7px;display:flex;justify-content:space-between;align-items:center;"><span style="font-size:11px;color:var(--mid);">'+(_hcs.count?('👥 '+_hcs.count+' '+(LANG==='en'?'contacted':'oslovených')):(LANG==='en'?'Tap to manage':'Klepni pro správu'))+'</span><span class="hsStat" data-st="'+_hcs.status+'" style="font-size:11px;font-weight:800;padding:3px 9px;border-radius:20px;"></span></div></div>';
@@ -12192,12 +12201,15 @@ async function renderFdReal(){
     }
     const data=window._fdRevData; const sel=window._fdRealMonth||'all';
     const acc={}; let cnt=0;
-    (data.months||[]).forEach(m=>{ if(sel!=='all' && m.ym!==sel) return; Object.keys(m.byCur||{}).forEach(cur=>{ const c=m.byCur[cur]; acc[cur]=acc[cur]||{net:0,count:0}; acc[cur].net+=(Number(c.mtl||0)-Number(c.refunded||0)); acc[cur].count+=Number(c.count||0); cnt+=Number(c.count||0); }); });
+    (data.months||[]).forEach(m=>{ if(sel!=='all' && m.ym!==sel) return; Object.keys(m.byCur||{}).forEach(cur=>{ const c=m.byCur[cur]; acc[cur]=acc[cur]||{gross:0,refunded:0,net:0,count:0}; acc[cur].gross+=Number(c.mtl||0); acc[cur].refunded+=Number(c.refunded||0); acc[cur].net+=(Number(c.mtl||0)-Number(c.refunded||0)); acc[cur].count+=Number(c.count||0); cnt+=Number(c.count||0); }); });
     const curs=Object.keys(acc).sort(); const symf=c=>c==='EUR'?'\u20ac':c==='USD'?'$':'K\u010d';
     const f2=(v,c)=> (c==='CZK'?Math.round(v/100).toLocaleString('cs-CZ'):(v/100).toFixed(2))+' '+symf(c);
     let h='';
     if(!curs.length){ h='<div class="prow"><div class="prow-l"><div class="prow-lbl">'+(EN?'No transactions in this period':'\u017d\u00e1dn\u00e9 transakce v tomto obdob\u00ed')+'</div></div><span class="prow-val">0</span></div>'; }
-    else curs.forEach(c=>{ h+='<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">\ud83d\udc8e</div><div class="prow-lbl">'+(EN?'MTL net':'MTL net')+' ('+c+')</div></div><span class="prow-val" style="color:#006040;">'+f2(acc[c].net,c)+'</span></div>'; });
+    else curs.forEach(c=>{ const a=acc[c]; const hasR=a.refunded>0;
+      h+='<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">\ud83d\udc8e</div><div class="prow-lbl">'+(EN?'MTL net':'MTL net')+' ('+c+')</div></div><span class="prow-val" style="color:#006040;font-weight:800;">'+f2(a.net,c)+'</span></div>';
+      if(hasR){ h+='<div style="font-size:11px;color:var(--light);padding:2px 16px 6px;">'+(EN?'gross ':'hrub\u011b ')+f2(a.gross,c)+(EN?' \u2212 refunded ':' \u2212 vr\u00e1ceno ')+f2(a.refunded,c)+'</div>'; }
+    });
     h+='<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">\ud83e\uddfe</div><div class="prow-lbl">'+(EN?'Transactions':'Transakc\u00ed')+'</div></div><span class="prow-val">'+cnt+'</span></div>';
     box.innerHTML=h;
   }catch(e){ box.innerHTML='<p style="color:var(--red);font-size:12px;">\u26a0\ufe0f '+e.message+'</p>'; }
@@ -12206,11 +12218,13 @@ async function fdRealExportCsv(){
   try{
     if(!window._fdRevData){ await renderFdReal(); }
     const data=window._fdRevData; if(!data){ toast('\u26a0\ufe0f'); return; } const EN=LANG==='en';
+    const sel=window._fdRealMonth||'all';
+    let _rows=(data.rows||[]); if(sel!=='all') _rows=_rows.filter(t=>(t.created_at||'').slice(0,7)===sel);
     const esc=v=>{ const t=String(v==null?'':v); return /[",\n;]/.test(t)?'"'+t.replace(/"/g,'""')+'"':t; };
     const head=['created_at','month','type','currency','gross','stripe_fee','mtl_fee','mtl_fee_refunded','mtl_net','net_amount','gym_id','coach_id','payment_intent'];
     const lines=[head.join(',')];
-    (data.rows||[]).forEach(t=>{ const mtlNet=(Number(t.mtl_fee||0)-Number(t.mtl_fee_refunded||0)); lines.push([esc(t.created_at||''),esc((t.created_at||'').slice(0,7)),esc(t.type||''),esc(t.currency||''),(Number(t.gross_amount||0)/100),(Number(t.stripe_fee||0)/100),(Number(t.mtl_fee||0)/100),(Number(t.mtl_fee_refunded||0)/100),(mtlNet/100),(Number(t.net_amount||0)/100),esc(t.gym_id||''),esc(t.coach_id||''),esc(t.payment_intent||'')].join(',')); });
-    const csv='\ufeff'+lines.join('\n'); const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='mtl-revenue-'+new Date().toISOString().slice(0,10)+'.csv'; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); toast(EN?'\u2713 CSV exported':'\u2713 CSV vyexportov\u00e1no');
+    _rows.forEach(t=>{ const mtlNet=(Number(t.mtl_fee||0)-Number(t.mtl_fee_refunded||0)); lines.push([esc(t.created_at||''),esc((t.created_at||'').slice(0,7)),esc(t.type||''),esc(t.currency||''),(Number(t.gross_amount||0)/100),(Number(t.stripe_fee||0)/100),(Number(t.mtl_fee||0)/100),(Number(t.mtl_fee_refunded||0)/100),(mtlNet/100),(Number(t.net_amount||0)/100),esc(t.gym_id||''),esc(t.coach_id||''),esc(t.payment_intent||'')].join(',')); });
+    const csv='\ufeff'+lines.join('\n'); const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='mtl-revenue-'+((window._fdRealMonth&&window._fdRealMonth!=='all')?window._fdRealMonth:'all')+'-'+new Date().toISOString().slice(0,10)+'.csv'; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); toast(EN?'\u2713 CSV exported':'\u2713 CSV vyexportov\u00e1no');
   }catch(e){ toast('\u26a0\ufe0f '+e.message); }
 }
 async function renderFounderDash(){
@@ -12267,48 +12281,27 @@ async function renderFounderDash(){
     <select id="fdRealMonth" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:10px;"><option value="all" ${window._fdRealMonth==='all'?'selected':''}>${LANG==='en'?'All time':'V\u0161e'}</option>${fdMonthList().map(m=>`<option value="${m.ym}" ${m.ym===window._fdRealMonth?'selected':''}>${m.lbl}</option>`).join('')}</select>
     <div class="prow-group" id="fdRealBox" style="margin-bottom:6px;"><p style="color:var(--light);font-size:12px;padding:6px 0;">${L('Na\u010d\u00edt\u00e1m...')}</p></div>
     <button id="fdRealExport" style="width:100%;padding:12px;background:#171717;color:#F4D87A;border:1.5px solid #E8C24A;border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">\ud83d\udcc4 ${LANG==='en'?'Export transactions (CSV)':'Export transakc\u00ed (CSV)'}</button>
-    <p style="font-size:11px;color:var(--light);line-height:1.5;margin-bottom:18px;">${LANG==='en'?'Real MTL commission (mtl_fee minus refunds) from the transactions ledger \u2014 the true profit, the same way a gym owner sees their net. Platform-wide, not sport-filtered. The estimates below are derived from bookings and are indicative only.':'Skute\u010dn\u00e1 provize MTL (mtl_fee m\u00ednus vr\u00e1cen\u00e9) z \u00fa\u010detn\u00edho ledgeru transakc\u00ed \u2014 opravdov\u00fd zisk, stejn\u011b jako gym owner vid\u00ed sv\u016fj net. Platform-wide, nefiltruje se podle sportu. Odhady n\u00ed\u017ee jsou z rezervac\u00ed a jen orienta\u010dn\u00ed.'}</p>
+    <p style="font-size:11px;color:var(--light);line-height:1.5;margin-bottom:18px;">${LANG==='en'?'Real MTL commission (mtl_fee minus refunds) from the transactions ledger \u2014 the true profit, the same way a gym owner sees their net. Platform-wide, not sport-filtered. The CSV exports the same ledger rows for the selected period.':'Skute\u010dn\u00e1 provize MTL (mtl_fee m\u00ednus vr\u00e1cen\u00e9) z \u00fa\u010detn\u00edho ledgeru transakc\u00ed \u2014 opravdov\u00fd zisk, stejn\u011b jako gym owner vid\u00ed sv\u016fj net. Platform-wide, nefiltruje se podle sportu. CSV exportuje ten sam\u00fd ledger za zvolen\u00e9 obdob\u00ed.'}</p>
     ${isMultiDiscipline()?`<div class="sec-lbl">${LANG==='en'?'Filter by sport':'Filtr podle sportu'}</div><select id="fdDiscSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:${_fdDisc!=='all'?'6px':'18px'};">${discOpts}</select>${_fdDisc!=='all'?`<p style="font-size:11px;color:var(--blue);font-weight:600;line-height:1.5;margin-bottom:16px;">${LANG==='en'?'📊 All metrics below are filtered to this sport.':'📊 Všechny metriky níže jsou filtrované na tento sport.'}</p>`:''}`:''}
-    <div class="sec-lbl">${LANG==='en'?'MTL net profit (estimate)':'MTL čistý zisk (odhad z rezervací)'}</div>
-    <div class="prow-group" style="margin-bottom:16px;">
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💎</div><div class="prow-lbl">${LANG==='en'?'One-off net (to date)':'Jednorázový net (dosud)'}</div></div><span class="prow-val" style="color:#006040;">${fmt(oneOffNet)}</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🔁</div><div class="prow-lbl">${LANG==='en'?'Recurring net / mo':'Recurring net / měs'}</div></div><span class="prow-val" style="color:#006040;">${fmt(mtlMemMo)}</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">📈</div><div class="prow-lbl">${LANG==='en'?'MTL ARR (recurring ×12)':'MTL ARR (recurring ×12)'}</div></div><span class="prow-val">${fmt(mtlARR)}</span></div>
-    </div>
     <div class="sec-lbl">${LANG==='en'?'Exclusive Partner memberships ($99/mo · exact from Stripe)':'Exclusive Partner členství ($99/měs · přesně ze Stripe)'}</div>
     <select id="fdPartnerMonth" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:'DM Sans';background:#fff;margin-bottom:8px;"><option value="all">${LANG==='en'?'All time':'Vše'}</option>${fdMonthList().map(m=>`<option value="${m.ym}" ${m.ym===_fdPartnerMonth?'selected':''}>${m.lbl}</option>`).join('')}</select>
     <div id="fdPartnerRev" style="margin-bottom:8px;"><p style="color:var(--light);font-size:12px;padding:6px 0;">${L('Načítám...')}</p></div>
     <button id="fdExportPartner" style="width:100%;padding:12px;background:#171717;color:#F4D87A;border:1.5px solid #E8C24A;border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:18px;">📄 ${LANG==='en'?'Accounting export (CSV)':'Podklady pro účetní (CSV)'}</button>
-    <div class="sec-lbl">${LANG==='en'?'By month':'Po měsících'}</div>
-    <select id="fdMonthSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:10px;">${monthOpts}</select>
-    <div class="prow-group" id="fdMonthBox" style="margin-bottom:6px;"></div>
-    <p style="font-size:11px;color:var(--light);line-height:1.5;margin-bottom:16px;">${LANG==='en'?'Booked in the selected month (lessons + drop-ins + newly started memberships). Stripe fee applies to coach lessons only.':'Vzniklo ve vybraném měsíci (lekce + jednorázové lekce + nově založená členství). Stripe fee jen u lekcí koučů.'}</p>
-    <div class="sec-lbl">${LANG==='en'?'EC Sales List — EU coaches (outside CZ)':'Souhrnné hlášení — EU kouči (mimo ČR)'}</div>
-    <div id="fdViesBox" style="margin-bottom:6px;"></div>
-    <p style="font-size:11px;color:var(--light);line-height:1.5;margin-bottom:16px;">${LANG==='en'?'The MTL commission charged to coaches established in other EU countries (3.5% / 1% — the part deducted from the coach), for the selected month. This is the figure for your EC Sales List (souhrnné hlášení). Confirm the agent/principal treatment with your accountant.':'Provize MTL účtovaná koučům usazeným v jiných zemích EU (3,5 % / 1 % — část sražená kouči), za vybraný měsíc. Tohle je částka do souhrnného hlášení. Zda jsi zprostředkovatel, či přeprodejce, ověř s účetní.'}</p>
     <div class="sec-lbl">${LANG==='en'?'Coaches':'Kouči'}</div>
     <div class="prow-group" style="margin-bottom:10px;">
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🥊</div><div class="prow-lbl">${LANG==='en'?'Lessons (active)':'Lekcí (aktivních)'}</div></div><span class="prow-val">${Bact.length}</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💳</div><div class="prow-lbl">${LANG==='en'?'Turnover (students paid)':'Obrat (zaplaceno)'}</div></div><span class="prow-val">${fmt(coachBase*1)}</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">👑</div><div class="prow-lbl">${LANG==='en'?'MTL fee (3.5%)':'MTL provize (3,5 %)'}</div></div><span class="prow-val" style="color:var(--red);">${fmt(mtlCoachGross)}</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF0E6;">💳</div><div class="prow-lbl">${LANG==='en'?'− Stripe fees (est.)':'− Stripe fee (odhad)'}</div></div><span class="prow-val">-${fmt(coachStripe)}</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💎</div><div class="prow-lbl">${LANG==='en'?'= Coach net':'= Net z koučů'}</div></div><span class="prow-val" style="color:#006040;">${fmt(coachNet)}</span></div>
     </div>
     <button id="fdToggleCoaches" style="width:100%;padding:13px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">🥊 ${LANG==='en'?'Show coaches':'Zobrazit kouče'} (${coaches.length}) <span id="fdArrowC">›</span></button>
     <div id="fdCoaches" style="display:none;margin-bottom:18px;">${coachRows}</div>
     <div class="sec-lbl">${LANG==='en'?'Gyms':'Gymy'}</div>
     <div class="prow-group" style="margin-bottom:10px;">
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🥊</div><div class="prow-lbl">${LANG==='en'?'Drop-ins':'Jednorázové vstupy'}</div></div><span class="prow-val">${GBact.length}</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💳</div><div class="prow-lbl">${LANG==='en'?'Drop-in turnover':'Obrat jednorázových vstupů'}</div></div><span class="prow-val">${fmt(dropTurnover)}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🎟️</div><div class="prow-lbl">${LANG==='en'?'Active members':'Aktivní členové'}</div></div><span class="prow-val">${activeMem.length}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">📉</div><div class="prow-lbl">${LANG==='en'?'Cancelling (churn)':'Ruší se (churn)'}</div></div><span class="prow-val" style="${cancellingMem>0?'color:var(--red);':''}">${cancellingMem}</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🔁</div><div class="prow-lbl">${LANG==='en'?'Membership MRR':'Členství MRR'}</div></div><span class="prow-val">${fmt(memMRR)}</span></div>
     </div>
     <button id="fdToggleGyms" style="width:100%;padding:13px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">🏛️ ${LANG==='en'?'Show gyms':'Zobrazit gymy'} (${gyms.length}) <span id="fdArrowG">›</span></button>
     <div id="fdGyms" style="display:none;">${gymRows}</div>
     <button id="fdGymLb" style="width:100%;padding:13px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-top:8px;">🏆 ${LANG==='en'?'Gym leaderboard':'Žebříček gymů'}</button>
-    <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:14px;">${LANG==='en'?'Coach fee is an estimate (≈15%); founding/referral lower it slightly. Gyms bear their own Stripe fees, so gym fees are net. Amounts summed nominally across currencies. VAT with your accountant.':'Provize koučů je odhad (≈15 %); founding/referral ji mírně sníží. Gymy nesou vlastní Stripe fee, takže gym provize jsou net. Částky sečteny nominálně napříč měnami. DPH řeš s účetní.'}</p>
-    ${earningsDisclaimer()}
   `;
   try{
     var _emCut=new Date(Date.now()-30*86400000).toISOString();
