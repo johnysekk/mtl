@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QGH RLS fix - transactions are RLS-blocked for browser client; route HERO net (loadMyNet), money dash (mdFetchRange/mdExport) and gym-team dash (gtdTx) through new service-role /api/my-transactions endpoint (coach_id=uid + owned gyms), same as gym dashboard uses gym-transactions -->
+<!-- MTL build: QGI 1to1 recording FIX - inperson checkout missing coachProfileId so session.js wrote coach_id=null (invisible); now passed. Plus 1toN group format in coach notif + student confirm + student upcoming; capacity stored on booking -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4790,7 +4790,7 @@ async function selectSlot(slot, c){
   let _refD=0.20; if(creditUsed==='student' && currentUser){ try{ const { data:_pb } = await supaClient.from('bookings').select('status').eq('coach_id', c.profileId||c.id).eq('student_id', currentUser.id).limit(20); if(_pb && _pb.some(b=>b.status!=='refunded'&&b.status!=='cancelled')) _refD=0.10; }catch(e){ _refD=0.10; } }
   try{ localStorage.setItem('mtl_ref_disc', String(_refD)); }catch(e){}
   try{ localStorage.setItem('mtl_book_disc', bookDisc||''); localStorage.setItem('mtl_book_amount', String(amount)); }catch(e){}
-  const url = `/api/pay?type=coach&coachId=${encodeURIComponent(c.stripeAccount)}&coachName=${encodeURIComponent(c.name)}&amount=${amount}&currency=${curr}&slotId=${slot.id}&commission=${comm}&nomarkup=${nomarkup}&credit=${creditUsed||'none'}&studentId=${currentUser?currentUser.id:''}&refDisc=${_refD}&disc=${encodeURIComponent(bookDisc||'')}&markup=${c.partner?1.00:1.00}`;
+  const url = `/api/pay?type=coach&coachId=${encodeURIComponent(c.stripeAccount)}&coachName=${encodeURIComponent(c.name)}&amount=${amount}&currency=${curr}&slotId=${slot.id}&coachProfileId=${encodeURIComponent(c.profileId||c.id)}&commission=${comm}&nomarkup=${nomarkup}&credit=${creditUsed||'none'}&studentId=${currentUser?currentUser.id:''}&refDisc=${_refD}&disc=${encodeURIComponent(bookDisc||'')}&markup=${c.partner?1.00:1.00}`;
   setTimeout(()=>{ window.location.href = url; }, 600);
 }
 
@@ -14673,6 +14673,7 @@ function subscribeRealtime(){
       el.innerHTML=`
         <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.04em;">${b.coach_name}</div>
         <div style="font-size:14px;color:var(--mid);margin:4px 0;">📅 ${b.training_date} · ${b.training_time}</div>
+        <div style="font-size:12px;font-weight:700;color:${(Number(b.capacity)||1)>1?'#6B4FBB':'var(--light)'};margin:2px 0 4px;">${(Number(b.capacity)||1)>1?('👥 '+(LANG==='en'?'Group':'Skupinová')+' 1:'+(Number(b.capacity)||1)):('🥊 1:1')}</div>
         <div style="font-size:13px;color:var(--dark);margin-bottom:12px;">${fmtPrice(b.amount*1, b.currency)} ${sym} · ${LANG==='en'?'If cancelled now':'Při zrušení teď'}: <strong>${refundInfo}</strong></div>
         <button class="calBtn" data-id="${b.id}" data-coach="${b.coach_name}" data-date="${b.training_date}" data-time="${b.training_time}" style="width:100%;padding:11px;background:#F0FBF0;color:#006040;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">${L('📅 Přidat do kalendáře')}</button>
         <button class="rescheduleBtn" data-id="${b.id}" data-slot="${b.slot_id}" data-coachid="${b.coach_id}" data-coachname="${b.coach_name}" data-date="${b.training_date}" data-time="${b.training_time}" style="width:100%;padding:11px;background:#E8F0FF;color:var(--blue);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">${L('🔄 Přesunout termín')}</button>
@@ -17799,6 +17800,7 @@ async function showPaidPopup(){
             training_time: slotData.time,
             status: 'active',
             type: 'inperson',
+            capacity: slotData.capacity || 1,
             currency: bkCurr,
             coach_keep_pct: (coachProf&&coachProf.partner)?0.99:((coachProf&&coachProf.founding)?0.965:0.965)
           }).select().single();
@@ -17808,16 +17810,19 @@ async function showPaidPopup(){
 // Notifikace koučovi o nové rezervaci
           const sym = bkCurr==='EUR'?'€':bkCurr==='USD'?'$':'Kč';
           const _amtStr = fmtPrice(amount*coachPctV, bkCurr);
+          const _scap = Number(slotData.capacity)||1;
+          const _sfmtLbl = '1:'+_scap;
+          const _sfmtNote = _scap>1 ? (' (skupinová '+_sfmtLbl+')') : '';
           await supaClient.from('notifications').insert({
             user_id: slotData.coach_profile_id, type:'booking', read:false,
-            data: JSON.stringify({ kind:'coach_new_inperson', student: currentUser.name||'Student', date: slotData.date, time: slotData.time, amt: _amtStr, sym, bonus: _coachBonus }),
-            message:`📅 Nová rezervace! ${currentUser.name || 'Student'} si rezervoval lekci na ${slotData.date} v ${slotData.time}. Dostaneš: ${_amtStr} ${sym}${_coachBonus?' (100 % — referral bonus 🎁)':''}.`
+            data: JSON.stringify({ kind:'coach_new_inperson', student: currentUser.name||'Student', date: slotData.date, time: slotData.time, amt: _amtStr, sym, bonus: _coachBonus, fmt: _sfmtLbl, cap: _scap }),
+            message:`📅 Nová rezervace${_sfmtNote}! ${currentUser.name || 'Student'} si rezervoval lekci ${_sfmtLbl} na ${slotData.date} v ${slotData.time}. Dostaneš: ${_amtStr} ${sym}${_coachBonus?' (100 % — referral bonus 🎁)':''}.`
           });
           // Notifikace studentovi — potvrzení rezervace
           await supaClient.from('notifications').insert({
             user_id: currentUser.id, type:'booking', read:false,
-            data: JSON.stringify({ kind:'booking_confirm', coach: coachProf?.name||'', date: slotData.date, time: slotData.time }),
-            message:`✅ Rezervace potvrzena! Lekce s ${coachProf?.name || 'koučem'} ${slotData.date} v ${slotData.time}. Platba proběhla úspěšně. 🥊`
+            data: JSON.stringify({ kind:'booking_confirm', coach: coachProf?.name||'', date: slotData.date, time: slotData.time, fmt: _sfmtLbl }),
+            message:`✅ Rezervace potvrzena! Lekce ${_sfmtLbl} s ${coachProf?.name || 'koučem'} ${slotData.date} v ${slotData.time}. Platba proběhla úspěšně. 🥊`
           });
           updateNotifBadge();
           await handleReferralAfterBooking(slotData.coach_profile_id);
