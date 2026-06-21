@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QGK coach Prehled fix (renderCoachDash read transactions directly = RLS-blocked, now via /api/my-transactions) + perf: HERO net cached 60s TTL instead of force-fetch every Me render; caches invalidated after payment -->
+<!-- MTL build: QGL real-net unification - notif (inperson+online) + diary now show REAL Stripe net (from /api/session _tx.net / stored actual_stripe_fee) instead of gross-minus-MTL estimate; session.js now records discipline (fixes Ostatni) -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -13703,7 +13703,7 @@ function showDiaryDay(dateStr){
     html += `
       <div style="background:#FFF0F0;border:1px solid #FFD0D0;border-radius:12px;padding:12px;margin-bottom:8px;">
         <div style="font-size:15px;font-weight:700;color:var(--dark);">${b.discipline?disciplineEmoji(b.discipline):'🥊'} ${b.training_time} · ${b.discipline&&isMultiDiscipline()?disciplineLabel(b.discipline):L('Rezervace')}</div>
-        <div style="font-size:13px;color:var(--mid);margin:4px 0 8px;">${fmtPrice((b.amount||0)*myPct, b.currency||'CZK')} ${b.currency==='EUR'?'€':b.currency==='USD'?'$':'Kč'}</div>
+        <div style="font-size:13px;color:var(--mid);margin:4px 0 8px;">${fmtPrice(Math.max(0,(b.amount||0)*myPct-((b.actual_stripe_fee||0)/100)), b.currency||'CZK')} ${b.currency==='EUR'?'€':b.currency==='USD'?'$':'Kč'}</div>
         <div style="display:flex;gap:8px;">
           <button class="diaryMsgBtn" data-student="${b.student_id}" style="flex:1;padding:8px;background:var(--dark);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans';">${L('💬 Napsat')}</button>
           <button class="diaryCancelBtn" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-slot="${b.slot_id}" data-student="${b.student_id}" data-date="${b.training_date}" data-time="${b.training_time}" style="flex:1;padding:8px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans';">${L('Zrušit')}</button>
@@ -17762,13 +17762,14 @@ async function showPaidPopup(){
     const slotId = params.get('slot');
     const sessionId = params.get('session');
     // ZAPIŠ TRANSAKCI BEZPODMÍNEČNĚ (server-side z metadat session) — odolné vůči currentUser race i online (bez slotu)
-    let _piPre = null;
+    let _piPre = null, _txNet = null, _txStripeFee = null;
     if(sessionId){
       try {
         const _acctQ = params.get('acct') ? '&gymAccount='+encodeURIComponent(params.get('acct')) : '';
         const _rr = await fetch(`/api/session?sessionId=${sessionId}${_acctQ}`);
         const _jj = await _rr.json();
         _piPre = _jj.paymentIntent || null;
+        if(_jj._tx){ if(typeof _jj._tx.net==='number') _txNet=_jj._tx.net; if(typeof _jj._tx.stripeFee==='number') _txStripeFee=_jj._tx.stripeFee; }
       } catch(e){ console.error('Session record error:', e); }
     }
     try{ window._myNetCache=null; window._myTxCache=null; }catch(e){}
@@ -17803,6 +17804,7 @@ async function showPaidPopup(){
             status: 'active',
             type: 'inperson',
             currency: bkCurr,
+            actual_stripe_fee: _txStripeFee,
             coach_keep_pct: (coachProf&&coachProf.partner)?0.99:((coachProf&&coachProf.founding)?0.965:0.965)
           }).select().single();
           if(_bookDiscLS && _bkRow && _bkRow.data){ try{ await supaClient.from('bookings').update({ discipline: _bookDiscLS }).eq('id', _bkRow.data.id); }catch(e){} }
@@ -17811,7 +17813,7 @@ async function showPaidPopup(){
 
 // Notifikace koučovi o nové rezervaci
           const sym = bkCurr==='EUR'?'€':bkCurr==='USD'?'$':'Kč';
-          const _amtStr = fmtPrice(amount*coachPctV, bkCurr);
+          const _amtStr = (_txNet!=null) ? fmtPrice(_txNet/100, bkCurr) : fmtPrice(amount*coachPctV, bkCurr);
           const _scap = Number(slotData.capacity)||1;
           const _sfmtLbl = '1:'+_scap;
           const _sfmtNote = _scap>1 ? (' (skupinová '+_sfmtLbl+')') : '';
@@ -17866,7 +17868,7 @@ async function showPaidPopup(){
           coach_keep_pct: (coachProf&&coachProf.partner)?0.99:((coachProf&&coachProf.founding)?0.965:0.965)
         });
         const sym = currency==='EUR'?'€':currency==='USD'?'$':'Kč';
-        const _amtStr = fmtPrice(amount*coachPctV, currency);
+        const _amtStr = (_txNet!=null) ? fmtPrice(_txNet/100, currency) : fmtPrice(amount*coachPctV, currency);
         await supaClient.from('notifications').insert({ user_id: coachId, type:'booking', read:false, data: JSON.stringify({ kind:'coach_new_online', student: currentUser.name||'Student', fmt: orderFmt||'', amt: _amtStr, sym, bonus: _coachBonus }), message:`🌐 Nová online objednávka! ${currentUser.name||'Student'} si koupil online coaching${orderFmt?' ('+orderFmt+')':''}. Dostaneš: ${_amtStr} ${sym}${_coachBonus?' (100 % — referral bonus 🎁)':''}. Ozvi se mu v chatu.` });
         await supaClient.from('notifications').insert({ user_id: currentUser.id, type:'booking', read:false, data: JSON.stringify({ kind:'online_ordered', coach: coachProf?.name||'' }), message:`✅ Online koučing objednán! Napiš ${coachProf?.name||'kouči'} do chatu a pošli odkaz na svůj klip. 🥊` });
         updateNotifBadge();
