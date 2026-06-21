@@ -46,8 +46,9 @@ export default async function handler(req, res) {
         const bk = await sbGet(`bookings?payment_intent=eq.${encodeURIComponent(paymentIntent)}&select=coach_id&limit=1`);
         const coachId = bk && bk[0] && bk[0].coach_id;
         if (coachId) {
-          const pr = await sbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=gym_payout_account&limit=1`);
-          coachAccount = (pr && pr[0] && pr[0].gym_payout_account) || null;
+          // 1:1 soukromka se účtuje na coachově stripe_account (NE gym_payout_account)
+          const pr = await sbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=stripe_account,gym_payout_account&limit=1`);
+          coachAccount = (pr && pr[0] && (pr[0].stripe_account || pr[0].gym_payout_account)) || null;
         }
       } catch (e) { console.error('coach acct lookup:', e.message); }
     }
