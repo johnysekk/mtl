@@ -169,6 +169,7 @@ async function recordTransaction(acct, pi, fields) {
       payment_intent: pi, charge_id: chargeId, payee_account: acct || null, type: fields.type,
       member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null,
       gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, net_amount: net, currency,
+      income_class: fields.income_class || null,
       status: 'paid', created_at: new Date().toISOString(),
     });
   } catch (e) { console.error('recordTransaction', e.message); }
@@ -241,7 +242,7 @@ export default async function handler(req, res) {
       } else if (m.mtl_payment_type === 'drop_in' || m.mtl_payment_type === 'membership') {
         // GYM skupinová lekce (direct charge na účtu gymu) → 0,5 % ambassadorovi disciplíny
         await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id);
-        if (m.mtl_payment_type === 'drop_in') { const dpi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id); if (dpi) await recordTransaction(event.account, dpi, { type: 'drop_in', member_id: m.student_id || m.member_id, gym_id: m.gym_id, coach_id: m.coach_profile_id || m.coach_id, plan: m.mtl_plan || 'Drop-in', currency: m.mtl_currency || 'CZK' }); }
+        if (m.mtl_payment_type === 'drop_in') { const dpi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id); if (dpi) await recordTransaction(event.account, dpi, { type: 'drop_in', member_id: m.student_id || m.member_id, gym_id: m.gym_id, coach_id: m.coach_profile_id || m.coach_id, plan: m.mtl_plan || 'Drop-in', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side' }); }
         else {
           // MEMBERSHIP (subscription): link the subscription to the row + record the FIRST payment NOW,
           // independent of client timing / the gym_memberships lookup (which used to fail on the first invoice).
@@ -251,7 +252,7 @@ export default async function handler(req, res) {
             const invId = typeof s.invoice === 'string' ? s.invoice : (s.invoice && s.invoice.id);
             let payId = null;
             if (invId) { const invObj = await stripe.invoices.retrieve(invId, { stripeAccount: event.account }); payId = (typeof invObj.payment_intent === 'string' ? invObj.payment_intent : (invObj.payment_intent && invObj.payment_intent.id)) || (typeof invObj.charge === 'string' ? invObj.charge : (invObj.charge && invObj.charge.id)); }
-            if (payId) await recordTransaction(event.account, payId, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id, plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK' });
+            if (payId) await recordTransaction(event.account, payId, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id, plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side' });
           } catch (e) { console.error('record membership at checkout', e.message); }
         }
       } else if (m.mtl_payment_type === 'partner_sub') {
@@ -270,7 +271,7 @@ export default async function handler(req, res) {
         if (m.ticket_id) {
           const pi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id);
           await sbPatch('event_tickets', `id=eq.${encodeURIComponent(m.ticket_id)}`, { status: 'paid', stripe_ref: pi });
-          await recordTransaction(event.account, pi, { type: 'event_ticket', member_id: m.student_id || m.buyer_id, gym_id: m.gym_id, coach_id: m.payout_coach_id, plan: m.mtl_event || 'Event', currency: m.mtl_currency || 'CZK' });
+          await recordTransaction(event.account, pi, { type: 'event_ticket', member_id: m.student_id || m.buyer_id, gym_id: m.gym_id, coach_id: m.payout_coach_id, plan: m.mtl_event || 'Event', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side' });
           await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id);
           try { await sendTicketEmail(s, m); } catch (e) { console.error('ticket email', e.message); }
         }
@@ -311,18 +312,6 @@ export default async function handler(req, res) {
         if (periodEnd) patch.period_end = periodEnd;
         await sbPatch('gym_memberships', `stripe_subscription=eq.${encodeURIComponent(sub)}`, patch);
         try { const ipi = (typeof inv.payment_intent === 'string' ? inv.payment_intent : (inv.payment_intent && inv.payment_intent.id)) || (typeof inv.charge === 'string' ? inv.charge : (inv.charge && inv.charge.id)); const mem = (await sbGet(`gym_memberships?stripe_subscription=eq.${encodeURIComponent(sub)}&select=*`))[0]; if (ipi && mem) await recordTransaction(event.account, ipi, { type: 'membership', member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency }); } catch (e) { console.error('record membership', e.message); }
-        // MTL acquisition fee: the first renewal invoice (= month 2) of an app-attributed member
-        // has been paid -> the 2-month 10% window is over, drop the commission back to normal.
-        try {
-          if (inv.billing_reason === 'subscription_cycle') {
-            const s = await stripe.subscriptions.retrieve(sub, { stripeAccount: event.account });
-            if (s && s.metadata && s.metadata.mtl_acq === '1') {
-              const base = parseFloat(s.metadata.mtl_acq_base) || 3.5;
-              const md = Object.assign({}, s.metadata, { mtl_acq: 'done' });
-              await stripe.subscriptions.update(sub, { application_fee_percent: base, metadata: md }, { stripeAccount: event.account });
-            }
-          }
-        } catch (e) { console.error('mtl_acq flip', e.message); }
       }
     } else if (event.type === 'invoice.payment_failed') {
       const inv = event.data.object;
