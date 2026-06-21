@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: 2026-06-20-QFF | openMyStripe now nudges legacy Express/Custom accounts: when stripe-login-link reports type='express'|'custom' it shows a toast telling the user to switch to a Standard account via 'Change payout account' (direct payments + own dashboard). Diagnosis of the 'Open Stripe still opens an Express page' report: the button (cdStripeBtn -> openMyStripe()) correctly opens the user's own 1:1 stripe_account; that account is simply a LEGACY Express account created by the old create-coach.js before the Standard fix - not a code bug. Resolution path: deploy the new create-coach.js + account-status.js, then re-onboard via 'Change payout account' so the account becomes Standard and Open Stripe routes to dashboard.stripe.com. -->
+<!-- MTL build: 2026-06-20-QFG | COUNTRY SELECTION before Stripe onboarding (global launch). Verified with Stripe: a connected account's country is set at creation and is PERMANENTLY LOCKED - the user cannot change it during the hosted onboarding, so the platform must collect it up front. New pickCountry() modal (all ~44 fully-supported Stripe Connect countries, default from currentUser.country/navigator locale/CZ) now runs before every account-creation call and passes ?country=ISO: coach application (caStripeConnect), coach payout swap (cdStripeSwapBtn), gym connect (gymStripeConnect), gym account swap (#gsGo), and gym-team coach payout (mtConnectPayout). create-coach.js / create-gym.js already accept ?country=. Cancelling the picker aborts cleanly before anything changes. Note: a few countries (e.g. Thailand) may have application-fee limitations on direct charges - confirm per-country if needed. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -7550,7 +7550,7 @@ async function loadMyTeams(){
     payoutWrap.innerHTML=`<button id="mtConnectPayout" style="width:100%;padding:12px;background:#635BFF;color:#fff;border:none;border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💳 ${LANG==='en'?'Connect a payout account (get paid for group classes)':'Připojit výplatní účet (dostávej platby za skupinovky)'}</button><div style="font-size:11px;color:var(--light);margin-top:5px;line-height:1.45;">${LANG==='en'?'Optional. Without it, the gym collects the money and pays you out.':'Nepovinné. Bez něj peníze bere gym, který tě pak vyplatí.'}</div>`;
   }
   box.appendChild(payoutWrap);
-  const cp=$('mtConnectPayout'); if(cp) cp.onclick=async()=>{ cp.textContent=L('Vytvářím...'); cp.disabled=true; try{ const r=await fetch(`/api/create-gym?for=coach&gymProfileId=${encodeURIComponent(currentUser.id)}`); const j=await r.json(); if(j.error){ toast('⚠️ '+j.error); cp.disabled=false; return; } window.location.href=j.url; }catch(e){ toast(L('⚠️ Chyba připojení Stripe')); cp.disabled=false; } };
+  const cp=$('mtConnectPayout'); if(cp) cp.onclick=async()=>{ const _cc=await pickCountry(_guessCC()); if(!_cc) return; cp.textContent=L('Vytvářím...'); cp.disabled=true; try{ const r=await fetch(`/api/create-gym?for=coach&gymProfileId=${encodeURIComponent(currentUser.id)}&country=${_cc}`); const j=await r.json(); if(j.error){ toast('⚠️ '+j.error); cp.disabled=false; return; } window.location.href=j.url; }catch(e){ toast(L('⚠️ Chyba připojení Stripe')); cp.disabled=false; } };
   const op=$('mtOpenPayout'); if(op) op.onclick=()=>openMyStripe(null, true);
 }
 async function leaveGymTeam(rowId, gymName, gymId){
@@ -10418,10 +10418,11 @@ if($('caVatPayer')) $('caVatPayer').onchange=function(){ var r=$('caVatRateRow')
 if($('gymNonprofit')) $('gymNonprofit').onchange=function(){ var h=$('gymNonprofitHint'); if(h) h.style.display=this.checked?'':'none'; };
 if($('gymLegalEntity')) $('gymLegalEntity').onchange=function(){ var w=$('gymNonprofitWrap'); if(w) w.style.display=this.checked?'':'none'; if(!this.checked){ var n=$('gymNonprofit'); if(n) n.checked=false; var h=$('gymNonprofitHint'); if(h) h.style.display='none'; } };
 if($('gymStripeConnect')) $('gymStripeConnect').onclick = async ()=>{
+  const _cc=await pickCountry(_guessCC()); if(!_cc) return;
   const btn=$('gymStripeConnect');
   btn.textContent=L('Vytvářím...'); btn.disabled=true;
   try {
-    const r = await fetch(`/api/create-gym?gymProfileId=${encodeURIComponent(currentUser.id)}`);
+    const r = await fetch(`/api/create-gym?gymProfileId=${encodeURIComponent(currentUser.id)}&country=${_cc}`);
     const j = await r.json();
     if(j.error){ toast('⚠️ '+j.error); btn.textContent=L('Připojit Stripe účet gymu →'); btn.disabled=false; return; }
     try{ _gaStep=3; saveGymDraft(); }catch(e){}
@@ -12426,7 +12427,7 @@ function openGymStripeSwap(gymId, gymName){
   const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;display:flex;align-items:flex-end;justify-content:center;';
   ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px 18px 0 0;padding:22px;max-height:86vh;overflow-y:auto;"><div style="font-size:18px;font-weight:800;color:var(--dark);margin-bottom:10px;">🔄 ${LANG==='en'?'Change payout account':'Změnit výplatní účet'}</div><div style="font-size:14px;line-height:1.6;color:var(--dark);margin-bottom:8px;">${LANG==='en'?`This connects a <b>new</b> Stripe account for <b>${escapeHtml(gymName||'this gym')}</b> (e.g. when switching from sole-trader to a company).`:`Připojí <b>nový</b> Stripe účet pro <b>${escapeHtml(gymName||'tento gym')}</b> (např. když přecházíš z OSVČ na s.r.o.).`}</div><ul style="font-size:13px;line-height:1.6;color:var(--mid);margin:0 0 16px;padding-left:18px;"><li>${LANG==='en'?'Your old account stays yours — withdraw any remaining balance there.':'Starý účet ti zůstane — případný zůstatek si z něj vyber.'}</li><li>${LANG==='en'?'New payments go to the new account.':'Nové platby půjdou na nový účet.'}</li><li>${LANG==='en'?'Let active memberships/bookings settle before switching.':'Aktivní členství/rezervace nech dojet, než přepneš.'}</li></ul><div style="display:flex;gap:8px;"><button id="gsCancel" style="flex:1;padding:13px;background:var(--surf);border:1px solid var(--border);border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';color:var(--dark);">${LANG==='en'?'Cancel':'Zrušit'}</button><button id="gsGo" style="flex:1;padding:13px;background:#635BFF;color:#fff;border:none;border-radius:12px;font-weight:800;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Connect new account →':'Připojit nový účet →'}</button></div></div>`;
   document.body.appendChild(ov); const close=()=>ov.remove(); ov.onclick=(e)=>{ if(e.target===ov) close(); }; ov.querySelector('#gsCancel').onclick=close;
-  ov.querySelector('#gsGo').onclick=async()=>{ const btn=ov.querySelector('#gsGo'); btn.disabled=true; btn.textContent=L('Vytvářím...'); try{ localStorage.setItem('mtl_swap_gym', String(gymId)); }catch(e){} try{ const r=await fetch(`/api/create-gym?gymProfileId=${encodeURIComponent(currentUser.id)}`); const j=await r.json(); if(j.error){ toast('⚠️ '+j.error); btn.disabled=false; btn.textContent=LANG==='en'?'Connect new account →':'Připojit nový účet →'; return; } window.location.href=j.url; }catch(e){ toast(L('⚠️ Chyba připojení Stripe')); btn.disabled=false; } };
+  ov.querySelector('#gsGo').onclick=async()=>{ const _cc=await pickCountry(_guessCC()); if(!_cc) return; const btn=ov.querySelector('#gsGo'); btn.disabled=true; btn.textContent=L('Vytvářím...'); try{ localStorage.setItem('mtl_swap_gym', String(gymId)); }catch(e){} try{ const r=await fetch(`/api/create-gym?gymProfileId=${encodeURIComponent(currentUser.id)}&country=${_cc}`); const j=await r.json(); if(j.error){ toast('⚠️ '+j.error); btn.disabled=false; btn.textContent=LANG==='en'?'Connect new account →':'Připojit nový účet →'; return; } window.location.href=j.url; }catch(e){ toast(L('⚠️ Chyba připojení Stripe')); btn.disabled=false; } };
 }
 let _acMonth=new Date().toISOString().slice(0,7); let _acFilter=null;
 function openAccounting(filter, title){ _acFilter=filter||{}; _acMonth=new Date().toISOString().slice(0,7); if($('acTitle')) $('acTitle').textContent=title||(LANG==='en'?'Accounting export':'Podklady pro účetní'); openSheet('shAccounting'); loadAccounting(); }
@@ -12462,6 +12463,52 @@ async function loadAccounting(){
 }
 function _acDisclaimer(){ const en=LANG==='en'; return `<div style="background:#FFF8E6;border:1px solid #F0DFA8;border-radius:12px;padding:13px 14px;margin-top:16px;font-size:12px;line-height:1.6;color:#7A5B00;">`+(en?`\uD83D\uDCC5 <b>Generate next month's export at the start of the following month</b>, so it contains everything (incl. late refunds).<br><br>\u2696\uFE0F Although these figures are pulled directly from Stripe, <b>we take no responsibility for their accuracy</b> and recommend handing them to your accountant <b>together with your Stripe statement for the month (1:1)</b>. Figures are records, not tax advice; VAT/tax with your accountant.`:`\uD83D\uDCC5 <b>Výpis za daný měsíc generuj až na začátku dalšího měsíce</b>, ať obsahuje všechno (vč. pozdních refundů).<br><br>\u2696\uFE0F I když jsou data tažena přímo ze Stripe, <b>neneseme odpovědnost za jejich správnost</b> a doporučujeme předat účetní <b>spolu s výpisem ze Stripe za daný měsíc (1:1)</b>. Jde o podklady, ne daňové poradenství; DPH/daně řeš s účetní.`)+`</div>`; }
 function _acExportCsv(rows, cur, mLbl){ const dec=cur==='CZK'?0:2; const num=v=>(v/100).toFixed(dec); const esc=v=>{ const x=String(v==null?'':v); return /["\n;,]/.test(x)?('"'+x.replace(/"/g,'""')+'"'):x; }; const H=['Datum','Typ','ID clena','Plan','Hrube','Stripe fee','Provize MTL','Net','Mena','Status']; const out=[H.join(';')]; rows.forEach(r=>{ out.push([ new Date(r.created_at).toISOString().slice(0,10), _acTypeLabel(r.type), (r.member_id?String(r.member_id).slice(0,8):''), r.plan||'', num(r._eG), num(r._st), num(r._eM), num(r._eN), cur, r.status||'paid' ].map(esc).join(';')); }); const blob=new Blob(['\uFEFF'+out.join('\n')],{type:'text/csv;charset=utf-8;'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='MTL_podklady_'+_acMonth+'.csv'; a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000); }
+// ── Stripe Connect: fully-supported countries (account country is set at creation & LOCKED forever) ──
+const MTL_STRIPE_COUNTRIES = [
+  ['AU','Austrálie','Australia'],['AT','Rakousko','Austria'],['BE','Belgie','Belgium'],['BR','Brazílie','Brazil'],
+  ['BG','Bulharsko','Bulgaria'],['CA','Kanada','Canada'],['HR','Chorvatsko','Croatia'],['CY','Kypr','Cyprus'],
+  ['CZ','Česko','Czech Republic'],['DK','Dánsko','Denmark'],['EE','Estonsko','Estonia'],['FI','Finsko','Finland'],
+  ['FR','Francie','France'],['DE','Německo','Germany'],['GI','Gibraltar','Gibraltar'],['GR','Řecko','Greece'],
+  ['HK','Hongkong','Hong Kong'],['HU','Maďarsko','Hungary'],['IE','Irsko','Ireland'],['IT','Itálie','Italy'],
+  ['JP','Japonsko','Japan'],['LV','Lotyšsko','Latvia'],['LI','Lichtenštejnsko','Liechtenstein'],['LT','Litva','Lithuania'],
+  ['LU','Lucembursko','Luxembourg'],['MY','Malajsie','Malaysia'],['MT','Malta','Malta'],['MX','Mexiko','Mexico'],
+  ['NL','Nizozemsko','Netherlands'],['NZ','Nový Zéland','New Zealand'],['NO','Norsko','Norway'],['PL','Polsko','Poland'],
+  ['PT','Portugalsko','Portugal'],['RO','Rumunsko','Romania'],['SG','Singapur','Singapore'],['SK','Slovensko','Slovakia'],
+  ['SI','Slovinsko','Slovenia'],['ES','Španělsko','Spain'],['SE','Švédsko','Sweden'],['CH','Švýcarsko','Switzerland'],
+  ['TH','Thajsko','Thailand'],['AE','SAE','United Arab Emirates'],['GB','Spojené království','United Kingdom'],['US','USA','United States'],
+];
+function _guessCC(){
+  try{ const u=(currentUser&&(currentUser.country||currentUser.cc))||''; if(u && MTL_STRIPE_COUNTRIES.some(c=>c[0]===String(u).toUpperCase())) return String(u).toUpperCase(); }catch(e){}
+  try{ const l=(navigator.language||'').split('-')[1]; if(l && MTL_STRIPE_COUNTRIES.some(c=>c[0]===l.toUpperCase())) return l.toUpperCase(); }catch(e){}
+  return 'CZ';
+}
+// Vrátí Promise<ISO kód | null>. null = uživatel zrušil. Zemi vybíráme PŘED vytvořením účtu,
+// protože Stripe ji k účtu zamkne natrvalo a ve Stripe onboardingu už nejde změnit.
+function pickCountry(defaultCC){
+  return new Promise(resolve=>{
+    const EN=LANG==='en'; const def=defaultCC||'CZ';
+    const opts=MTL_STRIPE_COUNTRIES
+      .slice().sort((a,b)=>(EN?a[2]:a[1]).localeCompare(EN?b[2]:b[1],EN?'en':'cs'))
+      .map(c=>`<option value="${c[0]}" ${c[0]===def?'selected':''}>${EN?c[2]:c[1]}</option>`).join('');
+    const ov=document.createElement('div');
+    ov.style.cssText='position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:20px;';
+    ov.innerHTML=`<div style="background:#fff;border-radius:16px;padding:22px;max-width:380px;width:100%;font-family:'DM Sans';box-shadow:0 10px 40px rgba(0,0,0,.25);">
+      <div style="font-size:17px;font-weight:800;margin-bottom:6px;color:var(--dark);">🌍 ${EN?'Your country':'Tvoje země'}</div>
+      <div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:14px;">${EN?'Pick the country where your bank account is. Stripe locks this to the account permanently — it cannot be changed later.':'Vyber zemi, kde máš bankovní účet. Stripe ji k účtu zamkne natrvalo — později už ji nezměníš.'}</div>
+      <select id="_pcSel" style="width:100%;padding:12px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:16px;">${opts}</select>
+      <div style="display:flex;gap:10px;">
+        <button id="_pcCancel" style="flex:1;padding:12px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'Cancel':'Zrušit'}</button>
+        <button id="_pcOk" style="flex:2;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'Continue to Stripe →':'Pokračovat na Stripe →'}</button>
+      </div>
+    </div>`;
+    document.body.appendChild(ov);
+    const close=(val)=>{ try{ document.body.removeChild(ov); }catch(e){} resolve(val); };
+    ov.querySelector('#_pcCancel').onclick=()=>close(null);
+    ov.querySelector('#_pcOk').onclick=()=>close(ov.querySelector('#_pcSel').value);
+    ov.onclick=(e)=>{ if(e.target===ov) close(null); };
+  });
+}
+
 async function openMyStripe(gymId, payout){
   try{
     const { data: sess } = await supaClient.auth.getSession();
@@ -12991,7 +13038,7 @@ async function renderCoachDash(){
   const msel=$('cdMonthSel'); if(msel) msel.onchange=()=>{ window._coachDashMonth=msel.value; renderCoachDash(); };
   if($('cdStripeBtn')) $('cdStripeBtn').onclick=()=>openMyStripe();
   if($('cdAccBtn')) $('cdAccBtn').onclick=()=>openAccounting({ coachId: currentUser.id, payeeAccount: currentUser.stripe_account }, (EN?'Accounting — ':'Podklady — ')+(currentUser.name||''));
-  if($('cdStripeSwapBtn')) $('cdStripeSwapBtn').onclick=async()=>{ if(!confirm(EN?'Change your payout account? You will go through Stripe onboarding again to connect a new account, and payouts will then go there.':'Změnit výplatní účet? Projdeš znovu Stripe onboardingem a připojíš nový účet — výplaty pak půjdou na něj.')) return; try{ try{ localStorage.setItem('mtl_coach_payout_swap','1'); }catch(_e){} const r=await fetch('/api/create-coach'); const j=await r.json(); if(j&&j.url){ window.location.href=j.url; } else { toast('⚠️ '+((j&&j.error)||'Stripe')); } }catch(e){ toast('⚠️ '+(e.message||'')); } };
+  if($('cdStripeSwapBtn')) $('cdStripeSwapBtn').onclick=async()=>{ if(!confirm(EN?'Change your payout account? You will go through Stripe onboarding again to connect a new account, and payouts will then go there.':'Změnit výplatní účet? Projdeš znovu Stripe onboardingem a připojíš nový účet — výplaty pak půjdou na něj.')) return; const _cc=await pickCountry(_guessCC()); if(!_cc) return; try{ try{ localStorage.setItem('mtl_coach_payout_swap','1'); }catch(_e){} const r=await fetch('/api/create-coach?country='+_cc); const j=await r.json(); if(j&&j.url){ window.location.href=j.url; } else { toast('⚠️ '+((j&&j.error)||'Stripe')); } }catch(e){ toast('⚠️ '+(e.message||'')); } };
   const stats=$('cdStats');
   if(stats){ stats.querySelectorAll('.dashSecHdr').forEach((h)=>{ const g=h.nextElementSibling; const ar=h.querySelector('.dashAccArr'); if(g){ g.style.display='none'; if(ar) ar.style.transform='rotate(-90deg)'; } h.onclick=()=>{ if(!g) return; const closed=g.style.display==='none'; g.style.display=closed?'':'none'; if(ar) ar.style.transform=closed?'':'rotate(-90deg)'; }; }); }
   try{
@@ -14938,10 +14985,11 @@ if($('caStripeNote')) $('caStripeNote').textContent = LANG==='en'?'In Stripe, ch
   if($('caVatId')) $('caVatId').onblur=function(){ mtlTaxVerify('vat','caVatId','caVatStatus'); };
   if($('caTaxId')) $('caTaxId').onblur=function(){ var v=($('caTaxId').value||'').replace(/\s/g,''); if(/^\d{8}$/.test(v)){ mtlTaxVerify('ico','caTaxId','caTaxStatus'); } else if($('caTaxStatus')){ $('caTaxStatus').textContent=''; } };
   $('caStripeConnect').onclick=async()=>{
+  const _cc=await pickCountry(_guessCC()); if(!_cc) return;
   const btn=$('caStripeConnect');
   btn.textContent=L('Vytvářím...'); btn.disabled=true;
   try {
-    const r = await fetch('/api/create-coach');
+    const r = await fetch('/api/create-coach?country='+_cc);
     const j = await r.json();
     if(j.error){ toast('⚠️ '+j.error); btn.textContent=L('Připojit Stripe účet →'); btn.disabled=false; return; }
     try{ _caStep=3; saveCoachDraft(); }catch(e){}
