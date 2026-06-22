@@ -51,7 +51,7 @@ export default async function handler(req, res) {
 
     // Cluster by PROXIMITY (~30 km), not exact city string, so 'Brno' + 'Brno-stred'
     // + nearby villages collapse into one real hotspot. Greedy nearest-centroid pass.
-    const CLUSTER_KM = 25;   // how demand signals group into one hotspot
+    const CLUSTER_KM = 20;   // how demand signals group into one hotspot
     const SUPPLY_KM = 20;    // gym-coverage radius (matches the app's hotspot coverage display)
     // recency decay: a person's signal loses half its weight every 90 days and is ignored past 180.
     const NOW = Date.now(), HALFLIFE = 60, MAXAGE = 120;
