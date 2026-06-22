@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QHJ. #1 CORRECTED: student counts now require a really-completed lesson (in-person both student_confirmed AND coach_confirmed / online fulfilled) BOTH on the coach dashboard (added the confirm fields to the bookings query; cnt/distinct now built from completed-only validDone) AND on the coach profile live recompute (moved the _done gate above the student/discipline tallies). #6 gym profile merch wrapped in a collapsible accordion (Omrknout merch gymu). #8 drop-in: load student_id with the occurrence drop-ins and, if the viewer already booked that slot, show a green Rezervovano button instead of letting them buy the same slot again. #11 reworded new-via-MTL sublabel -->
+<!-- MTL build: QHO founder earnings redesigned in the gym Prehled style. renderFdReal now renders from the real Stripe ledger (mtl-revenue rows): a dark/gold MTL net-profit hero for the selected month, two cards (transactions count + avg per transaction), and collapsible By-revenue-type accordions (Coach 1:1 / Online / Drop-ins / Memberships / Events / Merch / Other) each showing MTL net + count + avg, all start collapsed. Multi-currency summed nominally with an exact-in-CSV note. Falls back to a months-based net+count view if the deployed mtl-revenue.js does not yet return raw rows. fdRealBox container changed from prow-group to a plain div so the hero sits cleanly. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4927,6 +4927,7 @@ function openProfile(coachObj){
   const c = coachObj || filtered[idx];
   if(!c) return;
   _openProfileId = c.profileId || c.id;
+  try{ if(currentUser&&currentUser.id&&(c.profileId||c.id)&&(c.profileId||c.id)!==currentUser.id){ var _cid=c.profileId||c.id; var _cvsrc=window._coachViewSrc||'app'; window._coachViewSrc=null; supaClient.from('coach_views').upsert({ coach_id:_cid, viewer_id:currentUser.id, view_date:new Date().toISOString().slice(0,10), source:_cvsrc }, { onConflict:'coach_id,viewer_id,view_date' }).then(function(){},function(){}); if('IntersectionObserver' in window){ var _bb=$('btnBook'); if(_bb){ var _io2=new IntersectionObserver(function(ents){ for(var k=0;k<ents.length;k++){ if(ents[k].isIntersecting){ _io2.disconnect(); try{ supaClient.from('coach_views').update({engaged:true}).match({ coach_id:_cid, viewer_id:currentUser.id, view_date:new Date().toISOString().slice(0,10) }).then(function(){},function(){}); }catch(e){} break; } } }, { threshold:0.5 }); _io2.observe(_bb); } } } }catch(e){}
   $('profTitle').textContent=c.name;
   // MTL Certified vs Verified trust text
   const cib=$('certInfoBox'), cit=$('certInfoText'), cii=$('certInfoIcon');
@@ -7614,7 +7615,7 @@ async function renderGymTeamDash(){
   // trend chart (drop-in net OR gross last 6 months)
   try{
     const ch=months.slice(0,6).reverse();
-    const chVal=ch.map(m=>{ const md=drops.filter(b=>(b.created_at||'').slice(0,7)===m.ym); return Math.max(0,Math.round(md.reduce((s,b)=> s + (showNet?Math.max(0,netAmt(b)*keepPct(b)-(netAmt(b)*0.014+6)):netAmt(b)),0))); });
+    const chVal=ch.map(m=>{ const md=(_gtdTx||[]).filter(r=>(r.created_at||'').slice(0,7)===m.ym && _txOk(r) && r.type==='drop_in'); return Math.max(0, md.reduce((s,r)=>{ const e=_txEff(r); return s + (showNet? e.eN : e.eG)/100; },0)); });
     const W=1000,H=120,pd=16,n=chVal.length; const max=Math.max.apply(null,chVal.concat([1]));
     const pts=chVal.map((v,i)=>{ const x=pd+(i*(W-2*pd)/(n-1)); const y=H-22-(v/max)*(H-44); return [x,y]; });
     const ln=pts.map((pp,i)=>(i?'L':'M')+pp[0].toFixed(1)+','+pp[1].toFixed(1)).join(' ');
@@ -9999,7 +10000,7 @@ async function loadGymManageBookings(){
           var _tNow=new Date(); var _tMonths=[]; for(var _ti=5;_ti>=0;_ti--){ var _td=new Date(_tNow.getFullYear(),_tNow.getMonth()-_ti,1); _tMonths.push({ym:_td.getFullYear()+'-'+('0'+(_td.getMonth()+1)).slice(-2), lbl:_td.toLocaleDateString(LANG==='en'?'en-GB':'cs-CZ',{month:'short'})}); }
           var _tNet={}; _tMonths.forEach(function(m){_tNet[m.ym]=0;});
           (_gymTx||[]).forEach(function(r){ var ym=(r.created_at||'').slice(0,7); if(ym in _tNet){ try{ _tNet[ym]+=_txEff(r).eN/100; }catch(e){} } });
-          var _tVals=_tMonths.map(function(m){ return Math.max(0,Math.round(_tNet[m.ym])); });
+          var _tVals=_tMonths.map(function(m){ return Math.max(0,_tNet[m.ym]||0); });
           var _tMax=Math.max.apply(null,_tVals.concat([1])); var _W=1000,_H=120,_pd=16,_n=_tVals.length;
           var _pts=_tVals.map(function(v,i){ var x=_pd+(i*(_W-2*_pd)/(_n-1)); var y=_H-22-(v/_tMax)*(_H-44); return [x,y]; });
           var _ln=_pts.map(function(pp,i){return (i?'L':'M')+pp[0].toFixed(1)+','+pp[1].toFixed(1);}).join(' ');
@@ -12267,27 +12268,42 @@ async function renderFdReal(){
   const box=$('fdRealBox'); if(!box) return; const EN=LANG==='en';
   try{
     if(!window._fdRevData){
-      box.innerHTML='<p style="color:var(--light);font-size:12px;padding:6px 0;">'+L('Na\u010d\u00edt\u00e1m...')+'</p>';
+      box.innerHTML='<p style="color:var(--light);font-size:12px;padding:6px 0;">'+L('Načítám...')+'</p>';
       let _tok=''; try{ _tok=await _freshTok(); }catch(e){}
       const r=await fetch('/api/mtl-revenue',{ headers:{'x-access-token':_tok} });
       const j=await r.json().catch(()=>({}));
-      if(!j||!j.ok){ box.innerHTML='<p style="color:var(--red);font-size:12px;padding:6px 0;">\u26a0\ufe0f '+((j&&j.error)||'load failed')+'</p>'; return; }
+      if(!j||!j.ok){ box.innerHTML='<p style="color:var(--red);font-size:12px;padding:6px 0;">⚠️ '+((j&&j.error)||'load failed')+'</p>'; return; }
       window._fdRevData=j;
     }
     const data=window._fdRevData; const sel=window._fdRealMonth||'all';
-    const acc={}; let cnt=0;
-    (data.months||[]).forEach(m=>{ if(sel!=='all' && m.ym!==sel) return; Object.keys(m.byCur||{}).forEach(cur=>{ const c=m.byCur[cur]; acc[cur]=acc[cur]||{gross:0,refunded:0,net:0,count:0}; acc[cur].gross+=Number(c.mtl||0); acc[cur].refunded+=Number(c.refunded||0); acc[cur].net+=(Number(c.mtl||0)-Number(c.refunded||0)); acc[cur].count+=Number(c.count||0); cnt+=Number(c.count||0); }); });
-    const curs=Object.keys(acc).sort(); const symf=c=>c==='EUR'?'\u20ac':c==='USD'?'$':'K\u010d';
-    const f2=(v,c)=> (c==='CZK'?Math.round(v/100).toLocaleString('cs-CZ'):(v/100).toFixed(2))+' '+symf(c);
-    let h='';
-    if(!curs.length){ h='<div class="prow"><div class="prow-l"><div class="prow-lbl">'+(EN?'No transactions in this period':'\u017d\u00e1dn\u00e9 transakce v tomto obdob\u00ed')+'</div></div><span class="prow-val">0</span></div>'; }
-    else curs.forEach(c=>{ const a=acc[c]; const hasR=a.refunded>0;
-      h+='<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">\ud83d\udc8e</div><div class="prow-lbl">'+(EN?'MTL net':'MTL net')+' ('+c+')</div></div><span class="prow-val" style="color:#006040;font-weight:800;">'+f2(a.net,c)+'</span></div>';
-      if(hasR){ h+='<div style="font-size:11px;color:var(--light);padding:2px 16px 6px;">'+(EN?'gross ':'hrub\u011b ')+f2(a.gross,c)+(EN?' \u2212 refunded ':' \u2212 vr\u00e1ceno ')+f2(a.refunded,c)+'</div>'; }
-    });
-    h+='<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">\ud83e\uddfe</div><div class="prow-lbl">'+(EN?'Transactions':'Transakc\u00ed')+'</div></div><span class="prow-val">'+cnt+'</span></div>';
-    box.innerHTML=h;
-  }catch(e){ box.innerHTML='<p style="color:var(--red);font-size:12px;">\u26a0\ufe0f '+e.message+'</p>'; }
+    const mnet=r=>(Number(r.mtl_fee||0)-Number(r.mtl_fee_refunded||0));
+    const hasRows=!!(data.rows&&data.rows.length);
+    const rows=(data.rows||[]).filter(r=> sel==='all'?true:(r.created_at||'').slice(0,7)===sel);
+    let netTotal=0, cnt=0; const byCur={}, byType={};
+    if(hasRows){ rows.forEach(r=>{ const n=mnet(r); netTotal+=n; cnt++; const c=r.currency||'CZK'; byCur[c]=(byCur[c]||0)+n; const t=r.type||'other'; (byType[t]=byType[t]||{net:0,n:0}).net+=n; byType[t].n++; }); }
+    else { (data.months||[]).forEach(m=>{ if(sel!=='all'&&m.ym!==sel) return; Object.keys(m.byCur||{}).forEach(cur=>{ const c=m.byCur[cur]; const n=Number(c.mtl||0)-Number(c.refunded||0); netTotal+=n; cnt+=Number(c.count||0); byCur[cur]=(byCur[cur]||0)+n; }); }); }
+    const otherCur=Object.keys(byCur).filter(c=>c!=='CZK'&&byCur[c]>0);
+    const f=v=>Math.round(v/100).toLocaleString(EN?'en-GB':'cs-CZ')+' Kč';
+    const monthLabel = sel==='all'?(EN?'all time':'celkem'):(((typeof fdMonthList==='function'?fdMonthList():[]).find(m=>m.ym===sel)||{}).lbl||sel);
+    const ARR='<span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;margin-left:10px;">▾</span>';
+    const HDR=(em,title,right)=>'<div class="dashSecHdr" style="font-size:14px;font-weight:800;color:var(--dark);margin:10px 0 8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">'+em+' '+title+'<span style="margin-left:auto;font-weight:800;font-size:14px;color:#006040;">'+(right||'')+'</span>'+ARR+'</div>';
+    const row=(em,bg,lab,val,vc)=>'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:'+bg+';">'+em+'</div><div class="prow-lbl">'+lab+'</div></div><span class="prow-val"'+(vc?' style="color:'+vc+';font-weight:700;"':'')+'>'+val+'</span></div>';
+    const wrap=r=>'<div class="prow-group" style="margin-bottom:12px;">'+r+'</div>';
+    const hero='<div style="background:linear-gradient(135deg,#171717,#3a3a3a);border-radius:16px;padding:15px 18px;margin-bottom:10px;box-shadow:0 2px 10px rgba(0,0,0,.18);"><div style="font-size:11.5px;opacity:.9;font-weight:600;text-transform:uppercase;letter-spacing:.03em;color:#F4D87A;">👑 '+(EN?'MTL net profit':'MTL čistý zisk')+' · '+monthLabel+'</div><div style="font-size:30px;font-weight:800;line-height:1.05;margin:5px 0 3px;color:#fff;">'+f(netTotal)+'</div><div style="font-size:11px;opacity:.8;color:#F4D87A;">'+(EN?'real Stripe ledger (mtl_fee − refunds)':'reálný Stripe ledger (mtl_fee − refundy)')+'</div></div>';
+    const card=(lbl,val,vc)=>'<div style="flex:1;background:#fff;border:1px solid var(--border);border-radius:14px;padding:11px 13px;"><div style="font-size:10.5px;color:var(--mid);font-weight:600;text-transform:uppercase;letter-spacing:.02em;">'+lbl+'</div><div style="font-size:20px;font-weight:800;'+(vc?'color:'+vc+';':'')+'">'+val+'</div></div>';
+    const cards='<div style="display:flex;gap:8px;margin-bottom:10px;">'+card(EN?'Transactions':'Transakcí',String(cnt))+card(EN?'Ø / transaction':'Ø / transakci',f(cnt?netTotal/cnt:0),'#006040')+'</div>';
+    let typeAcc='';
+    if(hasRows){
+      const TYPES=[['coach_inperson','🥊',EN?'Coach 1:1':'Lekce 1:1'],['coach_online','🌐','Online'],['drop_in','🏛️',EN?'Drop-ins':'Jednorázové vstupy'],['membership','🎟️',EN?'Memberships':'Členství'],['event_ticket','🎪',EN?'Events':'Akce'],['merch','🛍️','Merch']];
+      const listed=[];
+      TYPES.forEach(function(tt){ const t=tt[0],em=tt[1],lbl=tt[2]; listed.push(t); const d=byType[t]; if(!d||d.n===0) return; typeAcc+=HDR(em,lbl+' <span style="color:var(--light);font-weight:600;font-size:12px;">· '+d.n+'×</span>',f(d.net))+wrap(row('💎','#F0FBF0','MTL net','<span style="color:#006040;font-weight:800;">'+f(d.net)+'</span>')+row('📐','#EEF4FF',(EN?'Ø / transaction':'Ø / transakci'),f(d.n?d.net/d.n:0))); });
+      const ok=Object.keys(byType).filter(t=>listed.indexOf(t)<0); const oNet=ok.reduce((a,t)=>a+byType[t].net,0); const oN=ok.reduce((a,t)=>a+byType[t].n,0);
+      if(oN>0){ typeAcc+=HDR('🧾',(EN?'Other':'Ostatní')+' <span style="color:var(--light);font-weight:600;font-size:12px;">· '+oN+'×</span>',f(oNet))+wrap(row('💎','#F0FBF0','MTL net','<span style="color:#006040;font-weight:800;">'+f(oNet)+'</span>')); }
+    }
+    const curNote = otherCur.length? '<div style="font-size:11px;color:var(--light);line-height:1.5;padding:4px 4px 0;">'+(EN?'Summed nominally across currencies':'Sečteno nominálně napříč měnami')+' · '+otherCur.map(c=>c+': '+(c==='EUR'?'€':c==='USD'?'$':'')+Math.round(byCur[c]/100)).join(' · ')+' '+(EN?'(exact split in CSV)':'(přesný rozpad v CSV)')+'</div>' : '';
+    box.innerHTML = hero + cards + (typeAcc? ('<div class="sec-lbl">'+(EN?'By revenue type':'Podle typu příjmu')+'</div>'+typeAcc):'') + curNote;
+    box.querySelectorAll('.dashSecHdr').forEach(function(h){ var g=h.nextElementSibling; var ar=h.querySelector('.dashAccArr'); if(g){ g.style.display='none'; if(ar) ar.style.transform='rotate(-90deg)'; } h.onclick=function(){ if(!g) return; var closed=g.style.display==='none'; g.style.display=closed?'':'none'; if(ar) ar.style.transform=closed?'':'rotate(-90deg)'; }; });
+  }catch(e){ box.innerHTML='<p style="color:var(--red);font-size:12px;">⚠️ '+e.message+'</p>'; }
 }
 async function fdRealExportCsv(){
   try{
@@ -12354,7 +12370,7 @@ async function renderFounderDash(){
     <div id="fdChangeSec" style="margin-bottom:14px;"></div>
     <div class="sec-lbl">\ud83d\udc8e ${LANG==='en'?'MTL net profit \u2014 real (ledger)':'MTL \u010dist\u00fd zisk \u2014 skute\u010dn\u00fd (ledger)'}</div>
     <select id="fdRealMonth" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:10px;"><option value="all" ${window._fdRealMonth==='all'?'selected':''}>${LANG==='en'?'All time':'V\u0161e'}</option>${fdMonthList().map(m=>`<option value="${m.ym}" ${m.ym===window._fdRealMonth?'selected':''}>${m.lbl}</option>`).join('')}</select>
-    <div class="prow-group" id="fdRealBox" style="margin-bottom:6px;"><p style="color:var(--light);font-size:12px;padding:6px 0;">${L('Na\u010d\u00edt\u00e1m...')}</p></div>
+    <div id="fdRealBox" style="margin-bottom:10px;"><p style="color:var(--light);font-size:12px;padding:6px 0;">${L('Na\u010d\u00edt\u00e1m...')}</p></div>
     <button id="fdRealExport" style="width:100%;padding:12px;background:#171717;color:#F4D87A;border:1.5px solid #E8C24A;border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">\ud83d\udcc4 ${LANG==='en'?'Export transactions (CSV)':'Export transakc\u00ed (CSV)'}</button>
     <p style="font-size:11px;color:var(--light);line-height:1.5;margin-bottom:18px;">${LANG==='en'?'Real MTL commission (mtl_fee minus refunds) from the transactions ledger \u2014 the true profit, the same way a gym owner sees their net. Platform-wide, not sport-filtered. The CSV exports the same ledger rows for the selected period.':'Skute\u010dn\u00e1 provize MTL (mtl_fee m\u00ednus vr\u00e1cen\u00e9) z \u00fa\u010detn\u00edho ledgeru transakc\u00ed \u2014 opravdov\u00fd zisk, stejn\u011b jako gym owner vid\u00ed sv\u016fj net. Platform-wide, nefiltruje se podle sportu. CSV exportuje ten sam\u00fd ledger za zvolen\u00e9 obdob\u00ed.'}</p>
     ${isMultiDiscipline()?`<div class="sec-lbl">${LANG==='en'?'Filter by sport':'Filtr podle sportu'}</div><select id="fdDiscSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:${_fdDisc!=='all'?'6px':'18px'};">${discOpts}</select>${_fdDisc!=='all'?`<p style="font-size:11px;color:var(--blue);font-weight:600;line-height:1.5;margin-bottom:16px;">${LANG==='en'?'📊 All metrics below are filtered to this sport.':'📊 Všechny metriky níže jsou filtrované na tento sport.'}</p>`:''}`:''}
@@ -12761,6 +12777,7 @@ let _acMonth=new Date().toISOString().slice(0,7); let _acFilter=null;
 function openAccounting(filter, title){ _acFilter=filter||{}; _acMonth=new Date().toISOString().slice(0,7); if($('acTitle')) $('acTitle').textContent=title||(LANG==='en'?'Accounting export':'Podklady pro účetní'); openSheet('shAccounting'); loadAccounting(); }
 function acShiftMonth(d){ const p=_acMonth.split('-').map(Number); const dt=new Date(Date.UTC(p[0], p[1]-1+d, 1)); _acMonth=dt.toISOString().slice(0,7); loadAccounting(); }
 function _acTypeLabel(t){ const en=LANG==='en'; const map={ coach_inperson:en?'1:1 lesson':'Lekce 1:1', coach_online:en?'Online 1:1':'Online 1:1', drop_in:(en?'Drop-in':'Jednorázový vstup'), membership:en?'Membership':'Členství', event_ticket:en?'Event':'Akce' }; return map[t]||(en?'Other':'Ostatní'); }
+function _acRowLabel(r){ const c=Number(r&&r._cap)||1; if(r&&r.type==='coach_inperson') return (LANG==='en'?('Lesson 1:'+c):('Lekce 1:'+c)); if(r&&r.type==='coach_online') return ('Online 1:'+c); return _acTypeLabel(r?r.type:''); }
 async function loadAccounting(){
   const body=$('acBody'); if(!body) return; body.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${L('Načítám...')}</p>`;
   const p=_acMonth.split('-').map(Number); const start=new Date(Date.UTC(p[0],p[1]-1,1)).toISOString(); const end=new Date(Date.UTC(p[0],p[1],1)).toISOString();
@@ -12769,13 +12786,13 @@ async function loadAccounting(){
   if(_acFilter.payeeAccount) q=q.eq('payee_account',_acFilter.payeeAccount);
   if(_acFilter.coachId) q=q.eq('coach_id',_acFilter.coachId);
   if(_acFilter.gymId) q=q.eq('gym_id',_acFilter.gymId);
-  let rows=[]; try{ const { data } = await q; rows=data||[]; }catch(e){}
+  let rows=[]; try{ const { data } = await q; rows=data||[]; }catch(e){} try{ const _cPIs=rows.filter(r=>(r.type==='coach_inperson'||r.type==='coach_online')&&r.payment_intent).map(r=>r.payment_intent); if(_cPIs.length){ const { data:_bcap } = await supaClient.from('bookings').select('payment_intent,capacity').in('payment_intent',_cPIs); const _cm={}; (_bcap||[]).forEach(b=>{ if(b.payment_intent) _cm[b.payment_intent]=Number(b.capacity)||1; }); rows.forEach(r=>{ r._cap=(r.payment_intent&&_cm[r.payment_intent])?_cm[r.payment_intent]:1; }); } }catch(e){}
   if(!rows.length){ body.innerHTML=`<p style="text-align:center;color:var(--light);padding:24px;font-size:14px;">${LANG==='en'?'No transactions this month.':'Tento měsíc žádné transakce.'}</p>`+_acDisclaimer(); return; }
   const cur=(rows[0].currency||'czk').toUpperCase(); const sym=cur==='EUR'?'€':cur==='USD'?'$':'Kč'; const dec=cur==='CZK'?0:2; const f=v=>(v/100).toLocaleString(LANG==='en'?'en-GB':'cs-CZ',{minimumFractionDigits:dec,maximumFractionDigits:dec})+' '+sym;
   let tG=0,tS=0,tM=0,tN=0; const byType={};
-  rows.forEach(r=>{ const ref=r.refund_amount||0, mref=r.mtl_fee_refunded||0; const eG=(r.gross_amount||0)-ref; const eM=(r.mtl_fee||0)-mref; const st=r.stripe_fee||0; const eN=eG-st-eM; r._eG=eG; r._eM=eM; r._st=st; r._eN=eN; r._ref=ref; tG+=eG; tS+=st; tM+=eM; tN+=eN; const t=r.type||'other'; if(!byType[t]) byType[t]={n:0,g:0,nt:0}; byType[t].n++; byType[t].g+=eG; byType[t].nt+=eN; });
-  const cats=Object.keys(byType).map(t=>`<div style="display:flex;justify-content:space-between;font-size:13px;padding:7px 0;border-bottom:1px solid var(--border);"><span style="color:var(--mid);">${_acTypeLabel(t)} (${byType[t].n})</span><span style="font-weight:700;">${f(byType[t].g)}</span></div>`).join('');
-  const lines=rows.map(r=>{ const d=new Date(r.created_at).toLocaleDateString(LANG==='en'?'en-GB':'cs-CZ',{day:'numeric',month:'numeric'}); const refBadge=r._ref?` <span style="color:var(--red);font-size:11px;">(${LANG==='en'?'refund':'refund'} -${f(r._ref)})</span>`:''; const mid=r.member_id?String(r.member_id).slice(0,8):'—'; return `<div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;padding:8px 0;border-bottom:1px solid var(--border);"><div style="min-width:0;"><div style="font-weight:600;">${_acTypeLabel(r.type)}${refBadge}</div><div style="color:var(--light);font-size:11px;">${d} \u00b7 ${escapeHtml(r.plan||'')} \u00b7 ID ${mid}</div></div><div style="text-align:right;white-space:nowrap;"><div style="font-weight:700;">${f(r._eG)}</div><div style="color:#006040;font-size:11px;">net ${f(r._eN)}</div></div></div>`; }).join('');
+  rows.forEach(r=>{ const ref=r.refund_amount||0, mref=r.mtl_fee_refunded||0; const eG=(r.gross_amount||0)-ref; const eM=(r.mtl_fee||0)-mref; const st=r.stripe_fee||0; const eN=eG-st-eM; r._eG=eG; r._eM=eM; r._st=st; r._eN=eN; r._ref=ref; tG+=eG; tS+=st; tM+=eM; tN+=eN; const t=_acRowLabel(r); if(!byType[t]) byType[t]={n:0,g:0,nt:0}; byType[t].n++; byType[t].g+=eG; byType[t].nt+=eN; });
+  const cats=Object.keys(byType).map(t=>`<div style="display:flex;justify-content:space-between;font-size:13px;padding:7px 0;border-bottom:1px solid var(--border);"><span style="color:var(--mid);">${t} (${byType[t].n})</span><span style="font-weight:700;">${f(byType[t].g)}</span></div>`).join('');
+  const lines=rows.map(r=>{ const d=new Date(r.created_at).toLocaleDateString(LANG==='en'?'en-GB':'cs-CZ',{day:'numeric',month:'numeric'}); const refBadge=r._ref?` <span style="color:var(--red);font-size:11px;">(${LANG==='en'?'refund':'refund'} -${f(r._ref)})</span>`:''; const mid=r.member_id?String(r.member_id).slice(0,8):'—'; return `<div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;padding:8px 0;border-bottom:1px solid var(--border);"><div style="min-width:0;"><div style="font-weight:600;">${_acRowLabel(r)}${refBadge}</div><div style="color:var(--light);font-size:11px;">${d} \u00b7 ${escapeHtml(r.plan||'')} \u00b7 ID ${mid}</div></div><div style="text-align:right;white-space:nowrap;"><div style="font-weight:700;">${f(r._eG)}</div><div style="color:#006040;font-size:11px;">net ${f(r._eN)}</div></div></div>`; }).join('');
   body.innerHTML=`
     <div class="prow-group" style="margin-bottom:12px;">
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">\uD83D\uDCB0</div><div class="prow-lbl">${LANG==='en'?'Gross (after refunds)':'Hrubě (po refundech)'}</div></div><span class="prow-val">${f(tG)}</span></div>
@@ -12790,7 +12807,7 @@ async function loadAccounting(){
   const eb=$('acExport'); if(eb) eb.onclick=()=>_acExportCsv(rows, cur, mLbl);
 }
 function _acDisclaimer(){ const en=LANG==='en'; return `<div style="background:#FFF8E6;border:1px solid #F0DFA8;border-radius:12px;padding:13px 14px;margin-top:16px;font-size:12px;line-height:1.6;color:#7A5B00;">`+(en?`\uD83D\uDCC5 <b>Generate next month's export at the start of the following month</b>, so it contains everything (incl. late refunds).<br><br>\u2696\uFE0F Although these figures are pulled directly from Stripe, <b>we take no responsibility for their accuracy</b> and recommend handing them to your accountant <b>together with your Stripe statement for the month (1:1)</b>. Figures are records, not tax advice; VAT/tax with your accountant.`:`\uD83D\uDCC5 <b>Výpis za daný měsíc generuj až na začátku dalšího měsíce</b>, ať obsahuje všechno (vč. pozdních refundů).<br><br>\u2696\uFE0F I když jsou data tažena přímo ze Stripe, <b>neneseme odpovědnost za jejich správnost</b> a doporučujeme předat účetní <b>spolu s výpisem ze Stripe za daný měsíc (1:1)</b>. Jde o podklady, ne daňové poradenství; DPH/daně řeš s účetní.`)+`</div>`; }
-function _acExportCsv(rows, cur, mLbl){ const dec=cur==='CZK'?0:2; const num=v=>(v/100).toFixed(dec); const esc=v=>{ const x=String(v==null?'':v); return /["\n;,]/.test(x)?('"'+x.replace(/"/g,'""')+'"'):x; }; const H=['Datum','Typ','ID clena','Plan','Hrube','Stripe fee','Provize MTL','Net','Mena','Status']; const out=[H.join(';')]; rows.forEach(r=>{ out.push([ new Date(r.created_at).toISOString().slice(0,10), _acTypeLabel(r.type), (r.member_id?String(r.member_id).slice(0,8):''), r.plan||'', num(r._eG), num(r._st), num(r._eM), num(r._eN), cur, r.status||'paid' ].map(esc).join(';')); }); const blob=new Blob(['\uFEFF'+out.join('\n')],{type:'text/csv;charset=utf-8;'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='MTL_podklady_'+_acMonth+'.csv'; a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000); }
+function _acExportCsv(rows, cur, mLbl){ const dec=cur==='CZK'?0:2; const num=v=>(v/100).toFixed(dec); const esc=v=>{ const x=String(v==null?'':v); return /["\n;,]/.test(x)?('"'+x.replace(/"/g,'""')+'"'):x; }; const H=['Datum','Typ','ID clena','Plan','Hrube','Stripe fee','Provize MTL','Net','Mena','Status']; const out=[H.join(';')]; rows.forEach(r=>{ out.push([ new Date(r.created_at).toISOString().slice(0,10), _acRowLabel(r), (r.member_id?String(r.member_id).slice(0,8):''), r.plan||'', num(r._eG), num(r._st), num(r._eM), num(r._eN), cur, r.status||'paid' ].map(esc).join(';')); }); const blob=new Blob(['\uFEFF'+out.join('\n')],{type:'text/csv;charset=utf-8;'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='MTL_podklady_'+_acMonth+'.csv'; a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000); }
 // ── Stripe Connect: fully-supported countries where a non-resident platform CAN auto-deduct an
 // application fee on direct charges. Brazil is excluded (Stripe blocks app fees for non-BR platforms);
 // Thailand, Mexico, Malaysia are excluded for launch (local rules block automatic app-fee deduction —
@@ -13228,13 +13245,14 @@ async function renderCoachDash(){
   if(!window._coachDashMonth) window._coachDashMonth=months[0].ym;
   const sel=window._coachDashMonth;
   const since=months[months.length-1].ym+'-01';
-  let tx=[], bk=[], sl=[];
+  let tx=[], bk=[], sl=[], cv=[];
   const _mtCD = await _fetchMyTx();
   tx = (_mtCD.coachTx||[]).filter(r=>!r.gym_id && (r.created_at||'')>=since);
   try{ const r=await Promise.all([
-    supaClient.from('bookings').select('student_id,student_name,status,created_at,training_date,training_time,type,student_confirmed,coach_confirmed,fulfilled').eq('coach_id',currentUser.id),
-    supaClient.from('slots').select('date,booked').eq('coach_profile_id',currentUser.id)
-  ]); bk=(r[0]&&r[0].data)||[]; sl=(r[1]&&r[1].data)||[]; }catch(e){ console.log('[coachdash]',e&&e.message); }
+    supaClient.from('bookings').select('student_id,student_name,status,created_at,training_date,training_time,type,student_confirmed,coach_confirmed,fulfilled,capacity,payment_intent,acq_source').eq('coach_id',currentUser.id),
+    supaClient.from('slots').select('date,booked').eq('coach_profile_id',currentUser.id),
+    supaClient.from('coach_views').select('viewer_id,view_date,engaged').eq('coach_id',currentUser.id)
+  ]); bk=(r[0]&&r[0].data)||[]; sl=(r[1]&&r[1].data)||[]; cv=(r[2]&&r[2].data)||[]; }catch(e){ console.log('[coachdash]',e&&e.message); }
   const NET=r=>Math.max(0,((r.gross_amount||0)-(r.refund_amount||0))-(r.stripe_fee||0)-(((r.mtl_fee||0)-(r.mtl_fee_refunded||0))))/100;
   const GROSS=r=>((r.gross_amount||0)-(r.refund_amount||0))/100;
   const MTLF=r=>(((r.mtl_fee||0)-(r.mtl_fee_refunded||0)))/100;
@@ -13367,9 +13385,25 @@ async function renderCoachDash(){
     +'<button id="cdAccBtn" style="width:100%;padding:13px;background:#EEF4FF;color:var(--blue);border:1px solid #CFE0FF;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-bottom:10px;">📒 '+(EN?'Accounting export (CSV)':'Účetní export (CSV)')+'</button>'
     +'<button id="cdStripeSwapBtn" style="width:100%;padding:13px;background:var(--surf);color:var(--mid);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-bottom:20px;">🔄 '+(EN?'Change payout account':'Změnit výplatní účet')+'</button>'
     +'</div>');
+  const _capMap={}; bk.forEach(b=>{ if(b.payment_intent) _capMap[b.payment_intent]=Number(b.capacity)||1; });
+  const _ipByCap={}; selTx.filter(r=>!isOn(r)).forEach(r=>{ const _c=(r.payment_intent&&_capMap[r.payment_intent])||1; (_ipByCap[_c]=_ipByCap[_c]||[]).push(r); });
+  const _ipCaps=Object.keys(_ipByCap).map(Number).sort((a,b)=>a-b);
+  const ipAccHtml = _ipCaps.length ? _ipCaps.map(cap=>moneyAcc('🥊',(EN?('1:'+cap+' in-person'):('1:'+cap+' osobně')),grp(_ipByCap[cap]))).join('') : moneyAcc('🥊',(EN?'1:1 in-person':'1:1 osobně'),ip);
+  const _cvSel=(cv||[]).filter(v=> sel==='all'?true:(v.view_date||'').slice(0,7)===sel);
+  const _opens=new Set(_cvSel.map(v=>v.viewer_id)).size;
+  const _engaged=new Set(_cvSel.filter(v=>v.engaged).map(v=>v.viewer_id)).size;
+  const _acqMap={}; bk.forEach(b=>{ if(b.payment_intent) _acqMap[b.payment_intent]=b.acq_source||null; });
+  const _mtlTx=selTx.filter(r=>_acqMap[r.payment_intent]==='mtl_discovery');
+  const _mtlStud=new Set(_mtlTx.map(r=>r.member_id||r.student_id)).size;
+  const _mtlNet=_mtlTx.reduce((a,r)=>a+NET(r),0);
+  const magnetRows = row('👀','#EEF4FF',(EN?'Profile opens':'Otevření profilu'),String(_opens))
+    + row('🔥','#FFF0E6',(EN?'Engaged (opened booking)':'Zaujatí (otevřeli rezervaci)'),String(_engaged))
+    + row('🧲','#F0FBF0',(EN?'New students via MTL':'Noví studenti přes MTL'),_mtlStud>0?(_mtlStud+' · '+f(_mtlNet)):'0')
+    + '<div style="font-size:10.5px;color:var(--light);line-height:1.45;padding:4px 6px 2px;">'+(EN?'Counts since this feature went live; grows as students discover you on MTL.':'Počítá se od spuštění této funkce; roste, jak tě studenti nacházejí na MTL.')+'</div>';
+  const magnetAcc = HDR('🧲',(EN?'Brought via the MTL App':'Přivedeno přes MTL appku'),'') + wrap(magnetRows);
   box.innerHTML='<select id="cdMonthSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:\'DM Sans\';background:#fff;margin-bottom:10px;">'+monthOpts+'</select>'
     +heroHtml+cardsHtml+note
-    +'<div id="cdStats">'+moneyAcc('🥊',(EN?'1:1 in-person':'1:1 osobně'),ip)+moneyAcc('🌐','Online',on)+discAcc+studentsAcc+growthAcc+relAcc+'<div id="cdTrend"></div></div>'+btnsHtml;
+    +'<div id="cdStats">'+ipAccHtml+moneyAcc('🌐','Online',on)+discAcc+studentsAcc+growthAcc+relAcc+magnetAcc+'<div id="cdTrend"></div></div>'+btnsHtml;
 
   const msel=$('cdMonthSel'); if(msel) msel.onchange=()=>{ window._coachDashMonth=msel.value; renderCoachDash(); };
   if($('cdStripeBtn')) $('cdStripeBtn').onclick=()=>openMyStripe();
@@ -13379,7 +13413,7 @@ async function renderCoachDash(){
   if(stats){ stats.querySelectorAll('.dashSecHdr').forEach((h)=>{ const g=h.nextElementSibling; const ar=h.querySelector('.dashAccArr'); if(g){ g.style.display='none'; if(ar) ar.style.transform='rotate(-90deg)'; } h.onclick=()=>{ if(!g) return; const closed=g.style.display==='none'; g.style.display=closed?'':'none'; if(ar) ar.style.transform=closed?'':'rotate(-90deg)'; }; }); }
   try{
     const ch=months.slice(0,6).reverse();
-    const chNet=ch.map(m=>Math.max(0,Math.round(tx.filter(r=>(r.created_at||'').slice(0,7)===m.ym).reduce((a,r)=>a+NET(r),0))));
+    const chNet=ch.map(m=>Math.max(0,tx.filter(r=>(r.created_at||'').slice(0,7)===m.ym).reduce((a,r)=>a+NET(r),0)));
     const W=1000,H=120,pd=16,n=chNet.length; const max=Math.max.apply(null,chNet.concat([1]));
     const pts=chNet.map((v,i)=>{ const x=pd+(i*(W-2*pd)/(n-1)); const y=H-22-(v/max)*(H-44); return [x,y]; });
     const ln=pts.map((pp,i)=>(i?'L':'M')+pp[0].toFixed(1)+','+pp[1].toFixed(1)).join(' ');
@@ -16830,31 +16864,7 @@ async function exportGymCsv(){
     toast(EN?'✓ CSV exported':'✓ CSV vyexportováno');
   }catch(e){ console.error('exportGymCsv', e); toast('⚠️ '+e.message); }
 }
-function exportCoachGymCsv(drops, mems, cur, gymName){
-  try{
-    const EN=LANG==='en';
-    const esc=v=>{ const t=String(v==null?'':v); return /[",\n;]/.test(t)?'"'+t.replace(/"/g,'""')+'"':t; };
-    const hdr=[EN?'Date':'Datum',EN?'Student':'Student',EN?'Type':'Typ',EN?'Discipline':'Disciplina',EN?'Gross (student paid)':'Hrube (zaplatil student)',EN?'Currency':'Mena'];
-    const lines=[hdr.join(',')]; let tG=0;
-    (drops||[]).filter(b=>b.status!=='cancelled'&&b.status!=='refunded').forEach(b=>{
-      const amt=b.amount||0; const keep=(b.gym_keep_pct!=null?b.gym_keep_pct:0.97); const markup=keep>=0.98?1.02:1.03; const gross=Math.round(amt*markup*100)/100; tG+=gross;
-      lines.push([esc(b.class_date||(b.created_at||'').slice(0,10)||''),esc(b.student_name||''),(EN?'Drop-in':'Jednorázový vstup'),esc(b.discipline||''),gross,esc(b.currency||cur||'CZK')].join(','));
-    });
-    (mems||[]).filter(m=>m.status==='active'||m.status==='cancelling').forEach(m=>{
-      const amt=m.amount||0; tG+=amt;
-      lines.push([esc((m.period_end||'').slice(0,10)),esc(m.student_name||''),EN?'Membership (monthly)':'Clenstvi (mesicne)',esc(m.discipline||''),amt,esc(m.currency||cur||'CZK')].join(','));
-    });
-    lines.push(''); lines.push([esc(EN?'TOTAL':'CELKEM'),'','','',Math.round(tG*100)/100,esc(cur||'CZK')].join(','));
-    lines.push('');
-    const _pc=!!(currentUser&&currentUser.gym_payout_account);
-    lines.push(esc(_pc?(EN?('Classes you led at '+(gymName||'the gym')+'. Payments for these go to your connected Stripe account; MTL takes its commission. Your Stripe Dashboard is the authoritative source.'):('Lekce, ktere jsi vedl v '+(gymName||'gymu')+'. Platby za ne chodi na tvuj pripojeny Stripe ucet; MTL si bere provizi. Zavazny zdroj je tvuj Stripe Dashboard.')):(EN?('Classes you led at '+(gymName||'the gym')+'. The gym is the payee and receives the payment; your pay is settled with the gym (off-platform). Informational only, not your direct MTL income; your Stripe Dashboard is authoritative.'):('Lekce, ktere jsi vedl v '+(gymName||'gymu')+'. Payee je gym a dostava platbu; tvoje odmena se vyrovnava s gymem (mimo platformu). Pouze informativni, neni to tvuj primy prijem z MTL; zavazny zdroj je tvuj Stripe Dashboard.'))));
-    const csv='\ufeff'+lines.join('\n'); const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
-    const url=URL.createObjectURL(blob); const a=document.createElement('a');
-    a.href=url; a.download=(EN?'mtl-gymteam-':'mtl-gymtym-')+new Date().toISOString().slice(0,10)+'.csv';
-    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
-    toast(EN?'✓ CSV exported':'✓ CSV vyexportováno');
-  }catch(e){ console.error('exportCoachGymCsv', e); toast('⚠️ '+e.message); }
-}
+function exportCoachGymCsv(){ /* old stale CSV thrown away - now routes to the unified accounting export, identical to gym owner + coach (pulls real Stripe numbers from transactions) */ try{ openAccounting({ coachId: currentUser.id, gymId: _gtdGym, payeeAccount: (currentUser.gym_payout_account||currentUser.stripe_account||null) }, (LANG==='en'?'Accounting - ':'Podklady - ')+(_gtdGymName||'')); }catch(e){ toast('⚠️ '+(e&&e.message||'')); } }
 function exportCoachCsv(rows, curr){
   try{
     const esc=v=>{ const t=String(v==null?'':v); return /[",\n;]/.test(t) ? '"'+t.replace(/"/g,'""')+'"' : t; };
@@ -17965,7 +17975,8 @@ async function showPaidPopup(){
             type: 'inperson',
             currency: bkCurr,
             actual_stripe_fee: _txStripeFee,
-            coach_keep_pct: (coachProf&&coachProf.partner)?0.99:((coachProf&&coachProf.founding)?0.965:0.965)
+            coach_keep_pct: (coachProf&&coachProf.partner)?0.99:((coachProf&&coachProf.founding)?0.965:0.965),
+            acq_source: (function(){ try{ return localStorage.getItem('mtl_owncoach_'+slotData.coach_profile_id)?'direct':'mtl_discovery'; }catch(e){ return 'mtl_discovery'; } })()
           }).select().single();
           if(_bookDiscLS && _bkRow && _bkRow.data){ try{ await supaClient.from('bookings').update({ discipline: _bookDiscLS }).eq('id', _bkRow.data.id); }catch(e){} }
           if(_bkRow && _bkRow.data && (Number(slotData.capacity)||1)>1){ try{ await supaClient.from('bookings').update({ capacity: Number(slotData.capacity)||1 }).eq('id', _bkRow.data.id); }catch(e){} }
@@ -18025,7 +18036,8 @@ async function showPaidPopup(){
           amount: amount, training_date: today, training_time: null,
           status: 'active', type: 'online', currency: currency,
           online_format: orderFmt,
-          coach_keep_pct: (coachProf&&coachProf.partner)?0.99:((coachProf&&coachProf.founding)?0.965:0.965)
+          coach_keep_pct: (coachProf&&coachProf.partner)?0.99:((coachProf&&coachProf.founding)?0.965:0.965),
+          acq_source: (function(){ try{ return localStorage.getItem('mtl_owncoach_'+coachId)?'direct':'mtl_discovery'; }catch(e){ return 'mtl_discovery'; } })()
         });
         const sym = currency==='EUR'?'€':currency==='USD'?'$':'Kč';
         const _amtStr = (_txNet!=null) ? fmtPrice(_txNet/100, currency) : fmtPrice(amount*coachPctV, currency);
