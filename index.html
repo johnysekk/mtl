@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QIL (1) team-coach dashboard Dochazka KPI - attendance at the coach OWN classes (his gym_class_reservations + his paid gym_bookings, selected month, grouped per occurrence date|time|name); fill-rate = attendees / (occurrences x capacity) where the capacity is matchable from the gym schedule JSON (now fetched), else shows the raw attendee count, else dash. 4th KPI card added after MRR matching the owner order Net/MRR/Dochazka/Active. NOTE classes+attendance are not coach-tagged in the data model so this scopes via the coach own bookings, not gym_attendance. (2) public gym profile: moved gpMerchSection ABOVE the coaches block (was directly above Proc rezervovat sec-lbl and visually crowding it) + added margins. -->
+<!-- MTL build: QIN coach profile now shows a "Trenuje v" (Trains at) section -- the gyms this coach is on the active team of (gym_coaches status active, non-reception), reciprocal to how the gym profile lists its coaches. Lazy async render into profGymsSection: horizontal scroll of gym cards (photo/name/city) each opening that gym profile via openGymProfile. Makes discovery bidirectional (student on a coach sees his gym -> opens -> can buy), which feeds the broad Brought-via-MTL attribution. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -738,6 +738,7 @@ body.no-emoji [data-keep-emoji] .prow-icon,body.no-emoji [data-keep-emoji] .sico
     <p class="bio-text" id="profBio">—</p>
     <div class="sec-lbl">Specializace</div>
     <div class="ctags" id="profTags" style="margin-bottom:24px;"></div>
+    <div id="profGymsSection"></div>
     <div class="sec-lbl">Proč rezervovat přes MTL</div>
     <div class="info-box" style="background:#E8F0FF;">
       <span style="font-size:20px;flex-shrink:0;">🛡️</span>
@@ -5017,6 +5018,20 @@ if(c.photo){
       fb.onclick=()=>openCoachStats(c.profileId, c.name);
     } else { fb.style.display='none'; }
   }
+  // "Trenuje v" -- gyms this coach is on the team of (reciprocal to coaches shown on the gym profile)
+  (async()=>{ try{ const _gs=$('profGymsSection'); if(!_gs) return; _gs.innerHTML='';
+    const _cid=c.profileId||c.id; if(!_cid) return;
+    const { data:_lk } = await supaClient.from('gym_coaches').select('gym_id').eq('coach_id',_cid).eq('status','active').neq('is_reception',true);
+    const _gids=[...new Set((_lk||[]).map(x=>x.gym_id).filter(Boolean))]; if(!_gids.length) return;
+    const { data:_gy } = await supaClient.from('gyms').select('id,name,city,photos,disciplines,status,currency,owner_id').in('id',_gids).eq('status','approved');
+    if(!_gy||!_gy.length) return;
+    window._profGymMap=window._profGymMap||{}; _gy.forEach(g=>{ window._profGymMap[g.id]=g; });
+    const _en=LANG==='en';
+    _gs.innerHTML='<div class="sec-lbl">'+(_en?'Trains at':'Trénuje v')+'</div><div style="display:flex;gap:12px;overflow-x:auto;padding-bottom:6px;margin-bottom:18px;">'
+      + _gy.map(g=>{ let _ph=''; try{ _ph=gymFirstPhoto(g.photos)||''; }catch(e){} const _img=_ph?('<div style="width:60px;height:60px;border-radius:12px;background:#1a1a1a;background-image:url('+_ph+');background-size:cover;background-position:center;margin:0 auto 6px;"></div>'):('<div style="width:60px;height:60px;border-radius:12px;background:linear-gradient(135deg,#0A7A4F,#005A3C);display:flex;align-items:center;justify-content:center;font-size:26px;margin:0 auto 6px;">\ud83c\udfdb\ufe0f</div>'); return '<div class="profGymCard" data-id="'+g.id+'" style="flex:0 0 auto;width:90px;text-align:center;cursor:pointer;">'+_img+'<div style="font-size:12.5px;font-weight:700;color:var(--dark);line-height:1.2;">'+escapeHtml(g.name||'Gym')+'</div>'+(g.city?'<div style="font-size:11px;color:var(--light);">'+escapeHtml(g.city)+'</div>':'')+'</div>'; }).join('')
+      + '</div>';
+    _gs.querySelectorAll('.profGymCard').forEach(el=>el.onclick=()=>{ const g=(window._profGymMap||{})[el.dataset.id]; if(g) openGymProfile(g); });
+  }catch(e){ console.log('[profGyms]',e&&e.message); } })();
   openSheet('shProfile');
 }
 
@@ -7559,7 +7574,22 @@ async function renderGymTeamDash(){
     + row('\ud83d\udd04',churnRate>0?'#FEECEC':'#F0FBF0',EN?'Churn rate':'M\u00edra odchod\u016f',churnRate+'%',churnRate>0?'var(--red)':null)
     + row(mrrGrowthPct>=0?'\ud83d\udcca':'\ud83d\udcc9',mrrGrowthPct>=0?'#F0FBF0':'#FEECEC',EN?'MRR growth':'R\u016fst MRR',(mrrGrowthPct>=0?'+':'')+mrrGrowthPct+'%',mrrGrowthPct>=0?'#006040':'var(--red)'); }
   const P_members = HDR('\ud83d\udc65',(EN?'Members':'\u010clenov\u00e9'),'') + wrap(_memb);
-  const _ownerPanels = P_drop + P_mem + P_mrr + P_ev + P_merch + P_members;
+  // ===== Brought via MTL (broad attribution: his profile opens + ANY of his members/drops sourced via MTL, regardless of view path) =====
+  let _cvOpens=0,_cvEng=0;
+  try{ const { data:_cv } = await supaClient.from('coach_views').select('viewer_id,view_date,engaged').eq('coach_id',me);
+    const _cvS=(_cv||[]).filter(v=> sel==='all'?true:((v.view_date||'').slice(0,7)===sel));
+    _cvOpens=new Set(_cvS.map(v=>v.viewer_id)).size; _cvEng=new Set(_cvS.filter(v=>v.engaged).map(v=>v.viewer_id)).size;
+  }catch(e){ console.log('[gtd cv]',e&&e.message); }
+  const _mtlMems=(mems||[]).filter(m=>inSel(m) && m.acq_source==='mtl_discovery');
+  const _mtlDrops=(drops||[]).filter(b=>inSel(b) && b.acq_source==='mtl_discovery');
+  const _mtlStud=new Set([..._mtlMems.map(m=>m.student_id),..._mtlDrops.map(b=>b.student_id)].filter(Boolean)).size;
+  const _mtlRev=_mtlMems.reduce((a,m)=>a+(m.amount||0),0)+_mtlDrops.reduce((a,b)=>a+(b.amount||0),0);
+  const _convRows = row('\ud83d\udc40','#EEF4FF',(EN?'Profile opens':'Otevření profilu'),String(_cvOpens))
+    + row('\ud83c\udfaf','#FFF0E6',(EN?'Engaged (opened booking)':'Zaujati (otevřeli rezervaci)'),String(_cvEng))
+    + row('\ud83e\uddf2','#F0FBF0',(EN?'New via MTL':'Noví přes MTL'), _mtlStud>0?(_mtlStud+' \u00b7 '+f(_mtlRev)):'0')
+    + '<div style="font-size:10.5px;color:var(--light);line-height:1.45;padding:4px 6px 2px;">'+(EN?'Anyone who bought from you after discovering you on MTL — via your profile or the gym\'s. Grows over time.':'Kdokoli, kdo u tebe nakoupil poté, co tě objevil přes MTL — přes tvůj profil nebo profil gymu. Roste v čase.')+'</div>';
+  const P_conv = HDR('\ud83e\uddf2',(EN?'Brought via the MTL App':'Přivedeno přes MTL appku'),'') + wrap(_convRows);
+  const _ownerPanels = P_drop + P_mem + P_mrr + P_ev + P_merch + P_members + P_conv;
   // Students accordion
   let studentRows;
   if(!sDistinct){ studentRows=row('—','#F5F2EE',(EN?'No students yet':'Zatím žádní studenti'),'—'); }
