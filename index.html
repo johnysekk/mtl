@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QIN coach profile now shows a "Trenuje v" (Trains at) section -- the gyms this coach is on the active team of (gym_coaches status active, non-reception), reciprocal to how the gym profile lists its coaches. Lazy async render into profGymsSection: horizontal scroll of gym cards (photo/name/city) each opening that gym profile via openGymProfile. Makes discovery bidirectional (student on a coach sees his gym -> opens -> can buy), which feeds the broad Brought-via-MTL attribution. -->
+<!-- MTL build: QIP coach merch CRUD for full-autonomy coaches. The owner merch CRUD (renderGymMerchList/openMerchForm/saveMerch) is now context-aware via _merchCtx: NULL = owner mode (renders into gymMerchContent, query .is(coach_id,null), saves coach_id=null - owner behaviour UNCHANGED), set = coach mode (renders into the new shCoachMerch sheet/coachMerchContent, query .eq(coach_id, me), saves coach_id=me + the gym_id from context + the coach payout currency). Helpers _mGd()/_mBox() pick gym-vs-coach scope. openCoachMerchManage(gymId,currency) opens the coach sheet. Entry: a My-merch button in the team dash, gated on gym_coaches.full_autonomy (now added to the gc select). Orders button hidden in coach mode. Needs coach-merch.sql (coach_id on gym_merch). NEXT: surface coach merch on the public profile + route the buy payout to the coach Stripe. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -2012,6 +2012,7 @@ body.no-emoji [data-keep-emoji] .prow-icon,body.no-emoji [data-keep-emoji] .sico
 </div>
 
 <div class="sheet" id="shMoneyDash" style="z-index:90;"><div class="shdr"><div class="shdr-title" data-noi18n>💰 Přehled výdělků</div><button class="btn-close" id="btnCloseMoneyDash">✕</button></div><div style="padding:16px 20px;" id="moneyDashBody"></div></div>
+<div class="sheet" id="shCoachMerch" style="z-index:91;"><div class="shdr"><div class="shdr-title" data-noi18n>🛍️ Můj merch</div><button class="btn-close" id="btnCloseCoachMerch">✕</button></div><div style="padding:16px 20px;" id="coachMerchContent"></div></div>
 <div class="sheet" id="shGymTeamDash" style="z-index:90;"><div class="shdr"><div class="shdr-title" id="gtdTitle" data-noi18n>🏛️ Přehled gymu</div><button class="btn-close" id="btnCloseGtd">✕</button></div><div style="padding:16px 20px;" id="gtdBody"></div></div>
 <div class="sheet" id="shCoachGymSet" style="z-index:91;"><div class="shdr"><div class="shdr-title" id="gtsTitle" data-noi18n>⚙️ Nastavení gymu</div><button class="btn-close" id="btnCloseGts">✕</button></div><div style="padding:16px 20px;" id="gtsBody"></div></div>
 <div class="sheet" id="shCoachDash" style="z-index:90;"><div class="shdr"><div class="shdr-title" id="coachDashTitle" data-noi18n>🥊 Přehled kouče</div><button class="btn-close" id="btnCloseCoachDash">✕</button></div><div style="padding:16px 20px;" id="coachDashBody"></div></div>
@@ -5295,7 +5296,7 @@ function hideMatch(){ $('matchOv').classList.remove('open'); }
 // ════════════════════════════════════════
 // SHEETS
 // ════════════════════════════════════════
-const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMyKids','shEvents','shEventCreate','shEventView','shMyEv','shMyEvManage','shMe','shSettings','shCoachApp','shAddDisc','shDiscReview','shAmbDash','shAdmin','shNotif','shChat','shBookings','shDiary','shCoachStats','shCoachSched','shGymStats','shFounderDash','shGymLb','shEventLb','shGyms','shGymProfile','shGymManage','shAccounting','shMemberships','shTerms','shPrivacy','shOnline','shLeaderboard','shOpportunities','shMyTeams','shEPCancel','shEPFeedback','shCoachRoster','shAmbApply','shAmbApps','shAllCoaches','shAllGyms','shAmbCoaches','shAmbGyms','shCancelling','shInvite','shAccountMgmt','shMoneyDash','shCoachDash','shGymTeamDash','shCoachGymSet','shSupport','shLevel','shMilestones','shClassAttend','shCoachPricing','shReception','shCoachSettings','shGymTeamView','shMtlLeague','shHotspotDetail','shFounderMap'];
+const SHEETS=['shProfile','shCoach','shMsgs','shFavs','shMyKids','shEvents','shEventCreate','shEventView','shMyEv','shMyEvManage','shMe','shSettings','shCoachApp','shAddDisc','shDiscReview','shAmbDash','shAdmin','shNotif','shChat','shBookings','shDiary','shCoachStats','shCoachSched','shGymStats','shFounderDash','shGymLb','shEventLb','shGyms','shGymProfile','shGymManage','shAccounting','shMemberships','shTerms','shPrivacy','shOnline','shLeaderboard','shOpportunities','shMyTeams','shEPCancel','shEPFeedback','shCoachRoster','shAmbApply','shAmbApps','shAllCoaches','shAllGyms','shAmbCoaches','shAmbGyms','shCancelling','shInvite','shAccountMgmt','shMoneyDash','shCoachDash','shGymTeamDash','shCoachMerch','shCoachGymSet','shSupport','shLevel','shMilestones','shClassAttend','shCoachPricing','shReception','shCoachSettings','shGymTeamView','shMtlLeague','shHotspotDetail','shFounderMap'];
 
 let _sheetParent={};
 function openSheet(id){
@@ -7428,7 +7429,7 @@ async function renderGymTeamDash(){
   // --- coach's team gyms (for selector) ---
   let teamGyms=[];
   try{
-    const { data:gc } = await supaClient.from('gym_coaches').select('gym_id, can_manage_schedule, share_availability, id').eq('coach_id',currentUser.id).eq('status','active').neq('is_reception',true);
+    const { data:gc } = await supaClient.from('gym_coaches').select('gym_id, can_manage_schedule, share_availability, full_autonomy, id').eq('coach_id',currentUser.id).eq('status','active').neq('is_reception',true);
     const gids=[...new Set((gc||[]).map(x=>x.gym_id).filter(Boolean))];
     if(gids.length){ const { data:gg } = await supaClient.from('gyms').select('id,name,currency,stripe_account,schedule').in('id',gids); const gm={}; (gg||[]).forEach(g=>gm[g.id]=g); teamGyms=gids.map(id=>({ id, name:(gm[id]&&gm[id].name)||'Gym', currency:(gm[id]&&gm[id].currency)||'CZK', stripe_account:(gm[id]&&gm[id].stripe_account)||null, schedule:(gm[id]&&gm[id].schedule)||null, link:(gc||[]).find(x=>x.gym_id===id)||{} })); }
   }catch(e){ console.log('[gtd]',e&&e.message); }
@@ -7580,10 +7581,10 @@ async function renderGymTeamDash(){
     const _cvS=(_cv||[]).filter(v=> sel==='all'?true:((v.view_date||'').slice(0,7)===sel));
     _cvOpens=new Set(_cvS.map(v=>v.viewer_id)).size; _cvEng=new Set(_cvS.filter(v=>v.engaged).map(v=>v.viewer_id)).size;
   }catch(e){ console.log('[gtd cv]',e&&e.message); }
+  // MEMBERSHIPS ONLY (the acquisition that MTL takes its finder's fee on; drop-ins are not an acquisition)
   const _mtlMems=(mems||[]).filter(m=>inSel(m) && m.acq_source==='mtl_discovery');
-  const _mtlDrops=(drops||[]).filter(b=>inSel(b) && b.acq_source==='mtl_discovery');
-  const _mtlStud=new Set([..._mtlMems.map(m=>m.student_id),..._mtlDrops.map(b=>b.student_id)].filter(Boolean)).size;
-  const _mtlRev=_mtlMems.reduce((a,m)=>a+(m.amount||0),0)+_mtlDrops.reduce((a,b)=>a+(b.amount||0),0);
+  const _mtlStud=new Set(_mtlMems.map(m=>m.student_id).filter(Boolean)).size;
+  const _mtlRev=_mtlMems.reduce((a,m)=>a+(m.amount||0),0);
   const _convRows = row('\ud83d\udc40','#EEF4FF',(EN?'Profile opens':'Otevření profilu'),String(_cvOpens))
     + row('\ud83c\udfaf','#FFF0E6',(EN?'Engaged (opened booking)':'Zaujati (otevřeli rezervaci)'),String(_cvEng))
     + row('\ud83e\uddf2','#F0FBF0',(EN?'New via MTL':'Noví přes MTL'), _mtlStud>0?(_mtlStud+' \u00b7 '+f(_mtlRev)):'0')
@@ -7646,6 +7647,7 @@ async function renderGymTeamDash(){
         ? `<button id="gtdPayoutBtn" style="${_bs}background:#635BFF;color:#fff;border:none;">💳 ${EN?'Open my Stripe (balance & payouts)':'Otevřít můj Stripe (zůstatek a vyplacení)'}</button>`
         : `<button id="gtdConnectPayout" style="${_bs}background:#635BFF;color:#fff;border:none;">💳 ${EN?'Connect a payout account (get paid for group classes)':'Připojit výplatní účet (platby za skupinovky)'}</button>`)
     + ((drops.length||mems.length)?`<button id="gtdExportBtn" style="${_bs}background:var(--surf);color:var(--dark);border:1px solid var(--border);">⬇ ${EN?'Export classes (CSV)':'Exportovat lekce (CSV)'}</button>`:'')
+    + (link.full_autonomy?`<button id="gtdMerchBtn" style="${_bs}background:var(--surf);color:var(--dark);border:1px solid var(--border);">🛍️ ${EN?'My merch':'Můj merch'}</button>`:'')
     + `</div>`;
 
   const _bothModes = !!(currentUser&&currentUser.gym_payout_account) && !!window._gtHasGymRevenue;
@@ -7682,6 +7684,7 @@ async function renderGymTeamDash(){
   if($('gtdPayoutBtn')) $('gtdPayoutBtn').onclick=()=>openMyStripe(null, true);
   if($('gtdConnectPayout')) $('gtdConnectPayout').onclick=()=>{ if(typeof connectGymPayout==='function') connectGymPayout(); else if($('mtConnectPayout')) $('mtConnectPayout').click(); };
   if($('gtdExportBtn')) $('gtdExportBtn').onclick=()=>exportCoachGymCsv(drops, mems, cur, _gtdGymName);
+  if($('gtdMerchBtn')) $('gtdMerchBtn').onclick=()=>openCoachMerchManage(_gtdGym, cur);
 
   // desktop: wrap accordions into 3-col grid + pull trend to top (same as coach dashboard)
   try{ if(document.body.classList.contains('dashmode') && window.innerWidth>=900 && stats){
@@ -9608,7 +9611,10 @@ async function saveGymManage(){
   _myGymData.dropin_price=dropin; _myGymData.membership_plans=JSON.stringify(plans); _myGymData.membership_name=first?first.name:null; _myGymData.membership_price=first?first.price:null; _myGymData.schedule=sched; _myGymData.terms_title=termsTitle; _myGymData.terms_text=termsText; _myGymData.org_form=_gymOrgForm; _myGymData.dropin_income=_gymDropinIncome;
   toast(LANG==='en'?'✅ Saved':'✅ Uloženo');
 }
-let _merchEditId=null, _merchPhoto=null;
+let _merchEditId=null, _merchPhoto=null, _merchCtx=null;
+function _mGd(){ return _merchCtx ? { id:_merchCtx.gymId, currency:_merchCtx.currency||'CZK' } : _myGymData; }
+function _mBox(){ return _merchCtx ? document.getElementById('coachMerchContent') : document.getElementById('gymMerchContent'); }
+function openCoachMerchManage(gymId, currency){ if(!gymId||!currentUser) return; _merchCtx={ gymId, coachId:currentUser.id, currency:currency||'CZK' }; openSheet('shCoachMerch'); var _b=document.getElementById('btnCloseCoachMerch'); if(_b) _b.onclick=function(){ _merchCtx=null; closeSheet('shCoachMerch'); }; renderGymMerchList(); }
 function _mInp(ph,val,id,type){ return `<input id="${id}" ${type?('type="'+type+'" min="0"'):''} placeholder="${ph||''}" value="${val!=null?val:''}" style="width:100%;padding:11px;border:1px solid var(--border);border-radius:10px;font-family:'DM Sans';font-size:14px;box-sizing:border-box;">`; }
 function _mLbl(t){ return `<label style="display:block;font-size:12px;font-weight:700;color:var(--mid);margin:0 0 5px;">${t}</label>`; }
 const MERCH_CATS=[
@@ -9626,15 +9632,17 @@ const MERCH_CATS=[
 function merchCatMeta(k){ return MERCH_CATS.find(c=>c.k===k)||MERCH_CATS[MERCH_CATS.length-1]; }
 function merchCatLabel(k){ if(!k) return ''; const c=merchCatMeta(k); return c.e+' '+(LANG==='en'?c.en:c.cs); }
 async function openGymMerchManage(){
+  _merchCtx=null;
   if(!_myGymData||!_myGymData.id){ toast('⚠️'); return; }
   const _ms=$('gmMerchSec'); if(_ms) _ms.open=true;
   renderGymMerchList();
 }
 async function renderGymMerchList(){
-  const box=$('gymMerchContent'); if(!box) return; const EN=LANG==='en';
+  const box=_mBox(); if(!box) return; const EN=LANG==='en';
+  const _gd=_mGd(); if(!_gd||!_gd.id) return;
   box.innerHTML=`<p style="text-align:center;color:var(--light);padding:20px;">${EN?'Loading…':'Načítám…'}</p>`;
-  let items=[]; try{ const { data }=await supaClient.from('gym_merch').select('*').eq('gym_id',_myGymData.id).order('sort',{ascending:true}).order('created_at',{ascending:true}); items=data||[]; }catch(e){}
-  const cur=_myGymData.currency||'CZK', sym=cur==='EUR'?'€':cur==='USD'?'$':'Kč';
+  let items=[]; try{ let _q=supaClient.from('gym_merch').select('*').eq('gym_id',_gd.id); _q=_merchCtx?_q.eq('coach_id',_merchCtx.coachId):_q.is('coach_id',null); const { data }=await _q.order('sort',{ascending:true}).order('created_at',{ascending:true}); items=data||[]; }catch(e){}
+  const cur=_gd.currency||'CZK', sym=cur==='EUR'?'€':cur==='USD'?'$':'Kč';
   let html=`<div style="display:flex;gap:8px;margin-bottom:14px;"><button id="merchAddBtn" style="flex:1;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">+ ${EN?'Add product':'Přidat produkt'}</button><button id="merchOrdersBtn" style="padding:13px 16px;background:var(--surf);border:1px solid var(--border);border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';color:var(--dark);">📦 ${EN?'Orders':'Objednávky'}</button></div>`;
   if(!items.length){ html+=`<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;line-height:1.5;">${EN?'No products yet. Add your first item — t-shirts, gloves, rashguards, anything your gym sells.':'Zatím žádné produkty. Přidej první kousek — trička, rukavice, rashguardy, cokoli, co gym prodává.'}</p>`; }
   items.forEach(m=>{ const stock=m.stock==null?(EN?'∞ skladem':'∞ in stock'):`${m.stock} ${EN?'in stock':'skladem'}`;
@@ -9642,13 +9650,14 @@ async function renderGymMerchList(){
   });
   box.innerHTML=html;
   const ab=$('merchAddBtn'); if(ab) ab.onclick=()=>openMerchForm(null,null);
-  const ob=$('merchOrdersBtn'); if(ob) ob.onclick=()=>renderMerchOrders();
+  const ob=$('merchOrdersBtn'); if(ob){ if(_merchCtx) ob.style.display='none'; else ob.onclick=()=>renderMerchOrders(); }
   box.querySelectorAll('.merchEdit').forEach(b=>{ b.onclick=()=>openMerchForm(b.dataset.id, items.find(x=>x.id===b.dataset.id)); });
 }
 function openMerchForm(id,m){
   _merchEditId=id; _merchPhoto=(m&&m.image_url)||null;
-  const box=$('gymMerchContent'); const EN=LANG==='en';
-  const cur=_myGymData.currency||'CZK', sym=cur==='EUR'?'€':cur==='USD'?'$':'Kč';
+  const box=_mBox(); const EN=LANG==='en';
+  const _gd=_mGd();
+  const cur=_gd.currency||'CZK', sym=cur==='EUR'?'€':cur==='USD'?'$':'Kč';
   box.innerHTML=`<button id="merchBackBtn" style="background:none;border:none;color:var(--mid);font-size:13px;cursor:pointer;margin-bottom:10px;padding:0;font-family:'DM Sans';">‹ ${EN?'Back':'Zpět'}</button>
     <div id="merchPhotoPv" style="width:100%;height:160px;border-radius:14px;margin-bottom:8px;display:flex;align-items:center;justify-content:center;font-size:32px;cursor:pointer;${_merchPhoto?`background:center/cover url('${_merchPhoto}');`:'background:#F0EDE8;'}">${_merchPhoto?'':'📷'}</div>
     <input type="file" id="merchPhotoInput" accept="image/*" style="display:none;">
@@ -9672,7 +9681,7 @@ async function saveMerch(){
   const EN=LANG==='en';
   const name=($('merchName').value||'').trim(); if(!name){ toast(EN?'⚠️ Name required':'⚠️ Zadej název'); return; }
   const stockV=$('merchStock').value; const stock=stockV===''?null:(parseInt(stockV)||0);
-  const row={ gym_id:_myGymData.id, name, description:($('merchDesc').value||'').trim()||null, price:parseInt($('merchPrice').value)||0, currency:_myGymData.currency||'CZK', image_url:_merchPhoto||null, variants:($('merchVariants').value||'').trim()||null, stock, category:(($('merchCat')&&$('merchCat').value)||'other'), active:$('merchActive').checked };
+  const _gd=_mGd(); const row={ gym_id:_gd.id, coach_id:(_merchCtx?_merchCtx.coachId:null), name, description:($('merchDesc').value||'').trim()||null, price:parseInt($('merchPrice').value)||0, currency:_gd.currency||'CZK', image_url:_merchPhoto||null, variants:($('merchVariants').value||'').trim()||null, stock, category:(($('merchCat')&&$('merchCat').value)||'other'), active:$('merchActive').checked };
   try{ if(_merchEditId){ await supaClient.from('gym_merch').update(row).eq('id',_merchEditId); } else { await supaClient.from('gym_merch').insert(row); } toast(EN?'✅ Saved':'✅ Uloženo'); renderGymMerchList(); }catch(e){ toast('⚠️ '+(e.message||'')); }
 }
 async function deleteMerch(id){ if(!confirm(LANG==='en'?'Delete this product?':'Smazat tento produkt?')) return; try{ await supaClient.from('gym_merch').delete().eq('id',id); toast(LANG==='en'?'🗑️ Deleted':'🗑️ Smazáno'); renderGymMerchList(); }catch(e){ toast('⚠️'); } }
