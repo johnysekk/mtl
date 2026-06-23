@@ -91,7 +91,7 @@ async function recordTransaction(acct, pi, fields) {
           const oid = gy && gy[0] && gy[0].owner_id;
           if (oid) { const op = await sbGet(`profiles?id=eq.${oid}&select=id,referred_by,welcome_free_until`); prov = op && op[0]; }
         }
-        if (prov && prov.referred_by) {
+        if (prov) {  // ALL new providers get the welcome (fair to non-referred); referral pull lives on the referrer's Liga ladder
           const nowMs = Date.now();
           let until = prov.welcome_free_until ? new Date(prov.welcome_free_until).getTime() : null;
           if (until == null) { // first sale -> open the 30-day welcome window once
