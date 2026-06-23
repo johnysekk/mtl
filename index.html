@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QHQ founder Exclusive Partner accordion + EP partner CSV. renderFdReal now appends an Exclusive Partner block under the by-type ledger breakdown (Events + Merch already there): a collapsible accordion showing real EP subscription net per currency + partners + payments (from /api/partner-revenue, separate from the mtl_fee ledger), and below it an EP-only CSV export. partner-revenue.js extended to return per-partner rows incl. billing fields (legal_name, tax_id=ICO, vat_id=DIC, billing_address, invoice_email); the CSV lists each partner with those invoicing details plus their gross/fee/net/payments per currency, with a client-side profiles fallback (billing only) if the endpoint has not been redeployed. -->
+<!-- MTL build: QHY biometric app-lock (Phase 2, Face ID/Touch ID to re-open the app). Opt-in toggle in Settings (sAppLock, shown only when a platform authenticator is available), for ALL roles. Enable = WebAuthn navigator.credentials.create (platform authenticator, userVerification required), stores the credential id in localStorage (per-device); on enterApp and on returning to foreground after >30s the appLockOverlay covers the app and calls navigator.credentials.get to trigger Face ID/fingerprint; success hides it. FAIL-SAFE by design: feature-detected so it never appears where unsupported; the Supabase session is untouched (this is unlock, not re-login); and the lock screen always offers "Log in again instead" which DISABLES the lock + signs out + reloads, so a broken/lost biometric can NEVER permanently trap a user. NOTE: WebAuthn cannot be exercised in the build container (no biometric hardware, needs the live HTTPS domain) - this is build -> test on a real device -> iterate, and auth deserves a careful review. Phase 3 (full passwordless passkey LOGIN via a serverless WebAuthn endpoint + Supabase session minting) is the next, larger piece. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -1841,6 +1841,7 @@ body.no-emoji [data-keep-emoji] .prow-icon,body.no-emoji [data-keep-emoji] .sico
     <div class="sec-lbl">Přizpůsobení</div>
     <div class="sgrp">
       <div class="srow" id="sNoEmoji"><div class="srow-l"><div class="sicon" style="background:#F5F2EE;">😶</div><div class="slbl">Emoji<div id="noEmojiDesc" data-noi18n style="font-size:11px;color:var(--mid);font-weight:400;margin-top:2px;line-height:1.3;max-width:240px;">Vypne emoji u informací a notifikací — oslavné a herní zůstávají vždy</div></div></div><div class="sval" id="vNoEmoji">Zapnuto</div></div>
+      <div class="srow" id="sAppLock" style="display:none;"><div class="srow-l"><div class="sicon" style="background:#EAF7EE;">🔒</div><div class="slbl">Zámek Face ID / otisk<div data-noi18n style="font-size:11px;color:var(--mid);font-weight:400;margin-top:2px;line-height:1.3;max-width:240px;">Po otevření appky vyžádá Face ID / otisk. Session zůstává — jen odemkneš.</div></div></div><div class="sval" id="vAppLock">Vypnuto</div></div>
     </div>
     <div class="sec-lbl" id="setDiscSecLbl" data-noi18n>Preferovaný sport</div>
     <div class="sgrp" id="setDiscSgrp" style="display:none;">
@@ -1873,6 +1874,7 @@ body.no-emoji [data-keep-emoji] .prow-icon,body.no-emoji [data-keep-emoji] .sico
 
 <!-- STORNO POLICY -->
 <div id="sharedProfileOverlay" style="display:none;position:fixed;inset:0;z-index:10001;overflow-y:auto;background:#0c0c0c;"></div>
+<div id="appLockOverlay" style="display:none;position:fixed;inset:0;z-index:10050;background:radial-gradient(120% 80% at 50% 0%,#1a1a1a,#000);flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:32px;box-sizing:border-box;"></div>
 <div id="logoutConfirm" style="display:none;position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.55);align-items:center;justify-content:center;padding:24px;">
   <div style="background:var(--bg);border-radius:18px;padding:24px;max-width:340px;width:100%;text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.25);">
     <div id="lcTitle" style="font-size:18px;font-weight:800;color:var(--dark);margin-bottom:6px;">Skutečně odhlásit?</div>
@@ -6284,6 +6286,7 @@ async function openGymProfile(g){
     ${capBlock}
     ${amenBlock}
     ${_coachesBlock}
+    <div id="gpEventsSection"></div>
     <div id="gpMerchSection"></div>
     <div class="sec-lbl">${LANG==='en'?'Why book through MTL':'Proč rezervovat přes MTL'}</div>
     ${(g.cert_level==='certified') ? `<div class="info-box" style="background:#FEECEC;"><span style="font-size:20px;flex-shrink:0;">✅</span><p style="color:var(--red);"><strong>MTL Certified Gym:</strong> ${LANG==='en'?'Passed a detailed quality check backed by MTL.':'Prošel detailní kontrolou kvality zaštítěnou MTL.'}</p></div>` : `<div class="info-box" style="background:#EEF2F6;"><span style="font-size:20px;flex-shrink:0;">☑️</span><p style="color:#475569;"><strong>MTL Verified Gym:</strong> ${LANG==='en'?'Listed on MTL with its space photos checked. Quality not yet assessed by MTL — see the photos and reviews.':'V nabídce MTL s ověřenými fotkami prostor. Kvalitu jsme zatím neposoudili — mrkni na fotky a recenze.'}</p></div>`}
@@ -6334,6 +6337,7 @@ async function openGymProfile(g){
   }
   openSheet('shGymProfile');
   loadGymMerchForProfile(g.id, g);
+  loadGymEventsForProfile(g.id, g);
 }
 const EXCUSE_REASONS=[{k:'nemoc',cs:'🤒 Nemoc',en:'🤒 Sick'},{k:'prace',cs:'💼 Práce',en:'💼 Work'},{k:'zraneni',cs:'🤕 Zranění',en:'🤕 Injury'},{k:'dovolena',cs:'🏖️ Dovolená',en:'🏖️ Holiday'},{k:'jine',cs:'✏️ Jiné',en:'✏️ Other'}];
 let _excuseCtx=null, _excuseSel=null;
@@ -6464,6 +6468,7 @@ function openChildPicker(info, cb){
 }
 function _acqSrc(g){ try{ if(localStorage.getItem('mtl_owngym_'+g.id)) return 'direct'; }catch(e){} try{ if(window._gymRef && window._gymRef.gym===g.id) return 'referral'; if(window._curGymOpenSrc && window._curGymOpenSrc.gym===g.id && (window._curGymOpenSrc.src==='deck'||window._curGymOpenSrc.src==='search')) return 'mtl_discovery'; }catch(e){} return 'direct'; }
 function _acqSrcCoach(c){ try{ var _id=(c&&(c.profileId||c.id))||''; if(localStorage.getItem('mtl_owncoach_'+_id)) return 'direct'; }catch(e){} return 'mtl_discovery'; }
+function _ownLink(){ try{ var base=location.origin.replace('//dashboard.','//app.')+'/?own=1'; var gid=(window._myGymData&&window._myGymData.id)||(window._myGyms&&window._myGyms[0]&&window._myGyms[0].id)||null; var cid=(currentUser&&currentUser.coach_status==='approved')?(currentUser.profileId||currentUser.id):null; if(gid) base+='&gym='+gid; if(cid) base+='&coach='+cid; return base; }catch(e){ return location.origin.replace('//dashboard.','//app.')+'/?own=1'; } }
 async function subscribeGymMembership(g, plan, _child){
   if(!currentUser){ toast(L('⚠️ Nejdřív se přihlas')); return; }
   if(!plan){ const pl=gymMembPlans(g); plan=pl[0]; }
@@ -7712,7 +7717,7 @@ async function renderCoachGymSettings(){
   const gs=$('gtsGymSel'); if(gs) gs.onchange=()=>{ _gtdGym=gs.value; renderCoachGymSettings(); };
   if($('gtsSched')) $('gtsSched').onclick=()=>openCoachScheduleEditor(_gtdGym,_gtdGymName);
   if($('gtsPricing')) $('gtsPricing').onclick=()=>openCoachScheduleEditor(_gtdGym,_gtdGymName);
-  if($('gtsMemberLink')) $('gtsMemberLink').onclick=()=>{ var l=location.origin.replace('//dashboard.','//app.')+'/?gym='+_gtdGym+'&own=1'; try{ navigator.clipboard.writeText(l); }catch(e){} toast(EN?'Link copied':'Odkaz zkopírován'); };
+  if($('gtsMemberLink')) $('gtsMemberLink').onclick=()=>{ var l=_ownLink(); try{ navigator.clipboard.writeText(l); }catch(e){} toast(EN?'Link copied':'Odkaz zkopírován'); };
   if($('gtsEvent')) $('gtsEvent').onclick=()=>openEventCreate(gym);
   if($('gtsOpenStripe')) $('gtsOpenStripe').onclick=()=>openMyStripe(null,true);
   if($('gtsConnect')) $('gtsConnect').onclick=async()=>{ const _cc=await pickCountry(_guessCC()); if(!_cc) return; const bb=$('gtsConnect'); bb.textContent=L('Vytvářím...'); bb.disabled=true; try{ const r=await fetch(`/api/create-gym?for=coach&gymProfileId=${encodeURIComponent(currentUser.id)}&country=${_cc}`); const j=await r.json(); if(j.error){ toast('⚠️ '+j.error); bb.disabled=false; bb.textContent=(EN?'Connect a payout account':'Připojit výplatní účet'); return; } window.location.href=j.url; }catch(e){ toast(L('⚠️ Chyba připojení Stripe')); bb.disabled=false; } };
@@ -8133,7 +8138,7 @@ async function renderGymManage(){
     </div></details>
     <details class="setSec" id="gmOwnStudentAcc"><summary>🔗 ${LANG==='en'?'Link for your existing members':'Odkaz pro vlastní stávající členy'}</summary><div class="setBody">
     <p style="font-size:12px;color:var(--mid);line-height:1.5;margin:0 0 8px;">${LANG==='en'?'Are your existing members switching to paying through MTL? Share THIS link with them. It tags them as YOUR members — not as new members brought by MTL — so MTL only takes its normal commission on them, not the higher acquisition fee charged on members MTL discovers for you via search. (The referral link above is for inviting brand-new people.)':'Přecházejí tví stávající členové na placení přes MTL? Sdílej jim TENHLE odkaz. Označí je jako TVÉ členy — ne jako nově přivedené přes MTL — takže si z jejich členství MTL bere jen běžnou provizi, ne vyšší akviziční poplatek, který platí u členů, které ti MTL sám najde přes vyhledávání. (Referral odkaz výše je na zvaní úplně nových lidí.)'}</p>
-    <button onclick="(function(){var l=location.origin.replace('//dashboard.','//app.')+'/?gym=${_myGymData.id}&own=1';try{navigator.clipboard.writeText(l);}catch(e){}toast('${LANG==='en'?'Link copied':'Odkaz zkopírován'}');})()" style="width:100%;padding:13px;background:#0f2233;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:20px;">📋 ${LANG==='en'?'Copy current-member link':'Zkopírovat odkaz pro stávající členy'}</button>
+    <button onclick="(function(){var l=_ownLink();try{navigator.clipboard.writeText(l);}catch(e){}toast('${LANG==='en'?'Link copied':'Odkaz zkopírován'}');})()" style="width:100%;padding:13px;background:#0f2233;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:20px;">📋 ${LANG==='en'?'Copy current-member link':'Zkopírovat odkaz pro stávající členy'}</button>
     </div></details>
     <details class="setSec"><summary>💰 ${LANG==='en'?'Pricing & membership':'Ceny & členství'}</summary><div class="setBody">
     <div class="sec-lbl">${LANG==='en'?'Drop-in price':'Cena jednorázového vstupu'}</div>
@@ -9640,6 +9645,32 @@ async function loadGymMerchForProfile(gymId, g){
   html+='</div></details>'; el.innerHTML=html;
   el.querySelectorAll('.merchBuyBtn').forEach(b=>{ if(!b.disabled) b.onclick=()=>buyMerch(b.dataset.id); });
 }
+async function loadGymEventsForProfile(gymId, g){
+  const el=$('gpEventsSection'); if(!el) return; el.innerHTML='';
+  let evs=[]; try{ const { data }=await supaClient.from('events').select('id,title,starts_at,city,venue,price,discipline,status,gym_id').eq('gym_id',gymId).eq('status','approved').order('starts_at',{ascending:false}).limit(60); evs=data||[]; }catch(e){}
+  if(!evs.length) return;
+  const EN=LANG==='en'; const sym=(g&&g.currency)==='EUR'?'€':(g&&g.currency)==='USD'?'$':'Kč'; const now=Date.now();
+  window._gpEvents=evs;
+  const MN=EN?['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']:['Led','Úno','Bře','Dub','Kvě','Čvn','Čvc','Srp','Zář','Říj','Lis','Pro'];
+  const monthLabel=ym=>{ const a=ym.split('-'); return MN[parseInt(a[1],10)-1]+' '+a[0]; };
+  const months=[...new Set(evs.map(e=>(e.starts_at||'').slice(0,7)).filter(Boolean))];
+  const card=(e,past)=>{ const d=new Date(e.starts_at); const ds=isNaN(d)?'':d.toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'short',year:'numeric'}); const ts=isNaN(d)?'':d.toLocaleTimeString(EN?'en-GB':'cs-CZ',{hour:'2-digit',minute:'2-digit'}); const em=disciplineEmoji(e.discipline||'')||'📅';
+    return '<div class="gpEvCard" data-id="'+e.id+'" style="display:flex;gap:11px;align-items:center;border:1px solid var(--border);border-radius:12px;padding:11px;margin-bottom:8px;cursor:pointer;opacity:'+(past?0.65:1)+';"><div style="font-size:22px;">'+em+'</div><div style="flex:1;min-width:0;"><div style="font-weight:800;font-size:13px;color:var(--dark);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escapeHtml(e.title||'')+'</div><div style="font-size:11.5px;color:var(--light);margin-top:2px;">'+ds+(ts?' · '+ts:'')+(e.city?' · '+escapeHtml(e.city):'')+'</div></div>'+(e.price?'<span style="font-size:12px;font-weight:800;color:var(--dark);white-space:nowrap;">'+e.price+' '+sym+'</span>':'')+'</div>'; };
+  const renderList=(sel)=>{ const list=evs.filter(e=> sel==='all'?true:(e.starts_at||'').slice(0,7)===sel);
+    const up=list.filter(e=>{ const t=new Date(e.starts_at).getTime(); return !isNaN(t)&&t>=now; }).sort((a,b)=>new Date(a.starts_at)-new Date(b.starts_at));
+    const pa=list.filter(e=>{ const t=new Date(e.starts_at).getTime(); return isNaN(t)||t<now; }).sort((a,b)=>new Date(b.starts_at)-new Date(a.starts_at));
+    let h='';
+    if(up.length) h+='<div style="font-size:10px;letter-spacing:.1em;color:var(--light);font-weight:800;margin:4px 0 7px;">'+(EN?'UPCOMING':'NADCHÁZEJÍCÍ')+'</div>'+up.map(e=>card(e,false)).join('');
+    if(pa.length) h+='<div style="font-size:10px;letter-spacing:.1em;color:var(--light);font-weight:800;margin:'+(up.length?'12px':'4px')+' 0 7px;">'+(EN?'PAST':'PROBĚHLÉ')+'</div>'+pa.map(e=>card(e,true)).join('');
+    if(!h) h='<p style="text-align:center;color:var(--light);padding:14px;font-size:13px;">'+(EN?'No events this month':'Žádné eventy v tomto měsíci')+'</p>';
+    return h; };
+  const chip=(val,lbl,sel)=>'<button class="gpEvM" data-m="'+val+'" style="flex:0 0 auto;padding:6px 12px;border-radius:20px;border:1px solid '+(sel?'var(--dark)':'var(--border)')+';background:'+(sel?'var(--dark)':'transparent')+';color:'+(sel?'#fff':'var(--mid)')+';font-size:12px;font-weight:700;cursor:pointer;font-family:&quot;DM Sans&quot;;white-space:nowrap;">'+lbl+'</button>';
+  const monthChips=chip('all',EN?'All':'Vše',true)+months.map(m=>chip(m,monthLabel(m),false)).join('');
+  el.innerHTML='<details style="margin-top:14px;border:1px solid var(--border);border-radius:14px;overflow:hidden;"><summary style="cursor:pointer;padding:13px 15px;font-weight:800;font-size:14px;">📅 '+(EN?'Gym events':'Eventy gymu')+' <span style="color:var(--light);font-weight:600;font-size:12px;">· '+evs.length+'</span></summary><div style="padding:10px 14px 6px;"><div style="display:flex;gap:7px;overflow-x:auto;padding-bottom:9px;margin-bottom:4px;">'+monthChips+'</div><div id="gpEvList">'+renderList('all')+'</div></div></details>';
+  const bindCards=()=>{ el.querySelectorAll('.gpEvCard').forEach(c=>{ c.onclick=()=>{ const ev=evs.find(x=>String(x.id)===String(c.dataset.id)); if(ev && typeof openEventView==='function') openEventView(ev); }; }); };
+  el.querySelectorAll('.gpEvM').forEach(b=>{ b.onclick=()=>{ const m=b.dataset.m; el.querySelectorAll('.gpEvM').forEach(x=>{ const sl=x.dataset.m===m; x.style.background=sl?'var(--dark)':'transparent'; x.style.color=sl?'#fff':'var(--mid)'; x.style.borderColor=sl?'var(--dark)':'var(--border)'; }); const lst=$('gpEvList'); if(lst){ lst.innerHTML=renderList(m); bindCards(); } }; });
+  bindCards();
+}
 async function buyMerch(merchId){
   if(!currentUser||!currentUser.id){ toast(LANG==='en'?'Sign in to buy':'Pro nákup se přihlas'); return; }
   const g=window._currentGym; const m=(window._gymMerchItems||[]).find(x=>x.id===merchId); if(!g||!m){ toast('⚠️'); return; }
@@ -10367,10 +10398,68 @@ async function _emojiAccountSync(){
     try{ if(currentUser.no_emoji===true && currentUser.no_emoji_confirmed!==true && currentUser.no_emoji_since && currentUser.last_active){ var _sc=new Date(currentUser.no_emoji_since).getTime(); var _la=new Date(currentUser.last_active).getTime(); if(_sc && _la && (_la-_sc>=604800000)){ currentUser.no_emoji_confirmed=true; supaClient.from('profiles').update({no_emoji_confirmed:true}).eq('id',_id).then(function(){},function(){}); } } }catch(e){}
   }catch(e){}
 }
-function refreshSettingsToggles(){ const _eo=$('vNoEmoji'); if(_eo) _eo.textContent=_emojiOff()?L('Vypnuto'):L('Zapnuto'); var _ned=$('noEmojiDesc'); if(_ned) _ned.textContent=(LANG==='en'?'Turns emoji off for info & notifications — celebratory & gamification ones always stay':'Vypne emoji u informací a notifikací — oslavné a herní zůstávají vždy'); const _vt=$('vType'); if(_vt) _vt.textContent=typeFiltersEnabled()?L('Zapnuto'):L('Vypnuto'); const c=$('vColdNotif'); if(c) c.textContent=coldNotifMuted()?L('Vypnuto'):L('Zapnuto'); const a=$('vAvailNotif'); if(a) a.textContent=availNotifMuted()?L('Vypnuto'):L('Zapnuto'); const r=$('vClassRem'); if(r) r.textContent=classReminderMuted()?L('Vypnuto'):L('Zapnuto'); const cr=$('vCoachRem'); if(cr) cr.textContent=coachLessonReminderMuted()?L('Vypnuto'):L('Zapnuto'); const _me=currentUser||{}; const _coach=_me.coach_status==='approved'; const _gym=!!(window._myGyms&&window._myGyms.length)||_me.role==='founder'; if($('sCoachRem')) $('sCoachRem').style.display=_coach?'':'none'; if($('sColdNotif')) $('sColdNotif').style.display=_gym?'':'none'; const _nn=$('vNewListingNotif'); if(_nn) _nn.textContent=newListingMuted()?L('Vypnuto'):L('Zapnuto'); const _amb=(typeof myVerifyList==='function'&&myVerifyList().length>0)||_me.role==='founder'||_me.id===FOUNDER_UUID; if($('sNewListingNotif')) $('sNewListingNotif').style.display=_amb?'':'none'; const _ln=$('vLeagueNotif'); if(_ln) _ln.textContent=leagueNotifMuted()?L('Vypnuto'):L('Zapnuto'); if($('sLeagueNotif')) $('sLeagueNotif').style.display=(_coach||_gym||_me.role==='founder'||_me.id===FOUNDER_UUID)?'':'none'; try{ if(typeof renderSettingsDisc==='function') renderSettingsDisc(); }catch(e){} }
+function refreshSettingsToggles(){ const _eo=$('vNoEmoji'); if(_eo) _eo.textContent=_emojiOff()?L('Vypnuto'):L('Zapnuto'); var _ned=$('noEmojiDesc'); if(_ned) _ned.textContent=(LANG==='en'?'Turns emoji off for info & notifications — celebratory & gamification ones always stay':'Vypne emoji u informací a notifikací — oslavné a herní zůstávají vždy'); const _vt=$('vType'); if(_vt) _vt.textContent=typeFiltersEnabled()?L('Zapnuto'):L('Vypnuto'); const c=$('vColdNotif'); if(c) c.textContent=coldNotifMuted()?L('Vypnuto'):L('Zapnuto'); const a=$('vAvailNotif'); if(a) a.textContent=availNotifMuted()?L('Vypnuto'):L('Zapnuto'); const r=$('vClassRem'); if(r) r.textContent=classReminderMuted()?L('Vypnuto'):L('Zapnuto'); const cr=$('vCoachRem'); if(cr) cr.textContent=coachLessonReminderMuted()?L('Vypnuto'):L('Zapnuto'); const _me=currentUser||{}; const _coach=_me.coach_status==='approved'; const _gym=!!(window._myGyms&&window._myGyms.length)||_me.role==='founder'; if($('sCoachRem')) $('sCoachRem').style.display=_coach?'':'none'; if($('sColdNotif')) $('sColdNotif').style.display=_gym?'':'none'; const _nn=$('vNewListingNotif'); if(_nn) _nn.textContent=newListingMuted()?L('Vypnuto'):L('Zapnuto'); const _amb=(typeof myVerifyList==='function'&&myVerifyList().length>0)||_me.role==='founder'||_me.id===FOUNDER_UUID; if($('sNewListingNotif')) $('sNewListingNotif').style.display=_amb?'':'none'; const _ln=$('vLeagueNotif'); if(_ln) _ln.textContent=leagueNotifMuted()?L('Vypnuto'):L('Zapnuto'); if($('sLeagueNotif')) $('sLeagueNotif').style.display=(_coach||_gym||_me.role==='founder'||_me.id===FOUNDER_UUID)?'':'none'; try{ if(typeof renderSettingsDisc==='function') renderSettingsDisc(); }catch(e){} try{ var _al=$('vAppLock'); if(_al) _al.textContent=(localStorage.getItem('mtl_applock')==='1')?L('Zapnuto'):L('Vypnuto'); if(typeof _biometricAvailable==='function') _biometricAvailable().then(function(ok){ if($('sAppLock')) $('sAppLock').style.display=ok?'':'none'; }); }catch(e){} }
 if($('btnSettings')) $('btnSettings').onclick=()=>{ refreshSettingsToggles(); if(typeof setupDangerZone==='function') setupDangerZone(); openSheet('shSettings'); };
 if($('sAvailNotif')) $('sAvailNotif').onclick=()=>setAvailNotifMute(!availNotifMuted());
 if($('sNoEmoji')) $('sNoEmoji').onclick=()=>{ var now=!_emojiOff(); _setEmojiOff(now); try{ if(currentUser&&currentUser.id){ var _ep={no_emoji:now, no_emoji_since: now?new Date().toISOString():null}; currentUser.no_emoji=now; currentUser.no_emoji_since=_ep.no_emoji_since; supaClient.from('profiles').update(_ep).eq('id',currentUser.id).then(function(){},function(){}); } }catch(e){} if(now){ try{ document.body.classList.add('no-emoji'); }catch(e){} _applyEmojiStrip(document.body); _startEmojiObserver(); refreshSettingsToggles(); } else { try{ document.body.classList.remove('no-emoji'); }catch(e){} if(_emojiObs){ try{ _emojiObs.disconnect(); }catch(e){} _emojiObs=null; } if(_emojiTimer){ try{ cancelAnimationFrame(_emojiTimer); }catch(e){} _emojiTimer=null; } try{ if(typeof buildDashSide==='function') buildDashSide(); }catch(e){} refreshSettingsToggles(); try{ if(typeof _emojiRerenderVisible==='function') _emojiRerenderVisible(); }catch(e){} } };
+// ---- App-lock (biometric, Phase 2) — FAIL-SAFE: feature-detected, opt-in, NEVER traps a user ----
+function _alB64(buf){ try{ return btoa(String.fromCharCode.apply(null, new Uint8Array(buf))); }catch(e){ return ''; } }
+function _alUB64(str){ try{ var b=atob(str); var u=new Uint8Array(b.length); for(var i=0;i<b.length;i++) u[i]=b.charCodeAt(i); return u; }catch(e){ return new Uint8Array(0); } }
+function _alRpId(){ try{ var h=location.hostname||''; var parts=h.split('.'); return parts.length>2 ? parts.slice(-2).join('.') : h; }catch(e){ return location.hostname; } }
+async function _biometricAvailable(){ try{ if(!window.PublicKeyCredential || !navigator.credentials || !navigator.credentials.create) return false; if(!PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable) return false; return await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable(); }catch(e){ return false; } }
+function _appLockOn(){ try{ return localStorage.getItem('mtl_applock')==='1' && !!localStorage.getItem('mtl_applock_cred'); }catch(e){ return false; } }
+async function _enableAppLock(){
+  var EN=LANG==='en';
+  if(!(await _biometricAvailable())){ toast(EN?'⚠️ Face ID / fingerprint not available here':'⚠️ Face ID / otisk tu není dostupný'); return false; }
+  try{
+    var ch=crypto.getRandomValues(new Uint8Array(32)); var uid=crypto.getRandomValues(new Uint8Array(16));
+    var cred=await navigator.credentials.create({ publicKey:{
+      challenge: ch, rp:{ name:'MTL', id:_alRpId() },
+      user:{ id: uid, name:(currentUser&&currentUser.email)||'mtl-user', displayName:(currentUser&&currentUser.name)||'MTL' },
+      pubKeyCredParams:[{type:'public-key',alg:-7},{type:'public-key',alg:-257}],
+      authenticatorSelection:{ authenticatorAttachment:'platform', userVerification:'required', residentKey:'preferred' },
+      timeout:60000, attestation:'none'
+    }});
+    if(!cred || !cred.rawId) throw new Error('no credential');
+    localStorage.setItem('mtl_applock_cred', _alB64(cred.rawId));
+    localStorage.setItem('mtl_applock','1');
+    return true;
+  }catch(e){ toast((EN?'⚠️ Could not enable lock: ':'⚠️ Nelze zapnout zámek: ')+((e&&e.message)||'')); return false; }
+}
+function _disableAppLock(){ try{ localStorage.removeItem('mtl_applock'); localStorage.removeItem('mtl_applock_cred'); }catch(e){} }
+async function _verifyAppLock(){
+  try{
+    var idb=localStorage.getItem('mtl_applock_cred'); if(!idb) return true;
+    var ch=crypto.getRandomValues(new Uint8Array(32));
+    var a=await navigator.credentials.get({ publicKey:{ challenge: ch, timeout:60000, userVerification:'required', rpId:_alRpId(), allowCredentials:[{ type:'public-key', id:_alUB64(idb), transports:['internal'] }] } });
+    return !!a;
+  }catch(e){ return false; }
+}
+function _showAppLock(){
+  var ov=document.getElementById('appLockOverlay'); if(!ov) return; var EN=LANG==='en';
+  ov.style.display='flex';
+  ov.innerHTML='<div style="font-size:54px;margin-bottom:16px;">🔒</div>'
+    +'<div style="font-family:&quot;Bebas Neue&quot;,sans-serif;font-size:26px;letter-spacing:.1em;color:#F4D87A;margin-bottom:6px;">MTL</div>'
+    +'<div style="color:#fff;font-size:16px;font-weight:700;margin-bottom:26px;">'+(EN?'Locked':'Zamčeno')+'</div>'
+    +'<button id="alkUnlock" style="width:100%;max-width:300px;padding:15px;background:#F4D87A;color:#1a1a1a;border:none;border-radius:14px;font-size:15px;font-weight:800;cursor:pointer;font-family:&quot;DM Sans&quot;,sans-serif;margin-bottom:14px;">'+(EN?'Unlock':'Odemknout')+'</button>'
+    +'<button id="alkLogout" style="background:none;border:none;color:rgba(255,255,255,.6);font-size:13px;text-decoration:underline;cursor:pointer;font-family:&quot;DM Sans&quot;,sans-serif;">'+(EN?'Log in again instead':'Raději se přihlásit znovu')+'</button>';
+  var tryUnlock=async function(){ var ok=await _verifyAppLock(); if(ok){ ov.style.display='none'; ov.innerHTML=''; } else { toast(EN?'Unlock failed — try again':'Odemčení selhalo — zkus to znovu'); } };
+  var bu=document.getElementById('alkUnlock'); if(bu) bu.onclick=tryUnlock;
+  var bl=document.getElementById('alkLogout'); if(bl) bl.onclick=async function(){ _disableAppLock(); try{ await supaClient.auth.signOut(); }catch(e){} try{ location.reload(); }catch(e){} };
+  setTimeout(tryUnlock, 150);
+}
+function _maybeAppLock(){ try{ if(_appLockOn()) _showAppLock(); }catch(e){} }
+// re-lock when returning to foreground after >30s in background
+var _alHiddenAt=0;
+document.addEventListener('visibilitychange', function(){
+  try{ if(document.visibilityState==='hidden'){ _alHiddenAt=Date.now(); } else if(document.visibilityState==='visible'){ if(_appLockOn() && currentUser && _alHiddenAt && (Date.now()-_alHiddenAt>30000)){ _showAppLock(); } } }catch(e){}
+});
+if(document.getElementById('sAppLock')) document.getElementById('sAppLock').onclick=async function(){
+  var EN=LANG==='en';
+  if(_appLockOn()){ _disableAppLock(); toast(EN?'🔓 App lock off':'🔓 Zámek vypnut'); }
+  else { var ok=await _enableAppLock(); if(ok) toast(EN?'🔒 App lock on — Face ID/fingerprint required to open':'🔒 Zámek zapnut — otevření vyžádá Face ID/otisk'); }
+  if(typeof refreshSettingsToggles==='function') refreshSettingsToggles();
+};
 if($('sColdNotif')) $('sColdNotif').onclick=()=>setColdNotifMute(!coldNotifMuted());
 if($('sNewListingNotif')) $('sNewListingNotif').onclick=()=>setNewListingMute(!newListingMuted());
 if($('sClassRem')) $('sClassRem').onclick=()=>setClassReminderMute(!classReminderMuted());
@@ -12283,7 +12372,7 @@ async function renderFdReal(){
     if(hasRows){ rows.forEach(r=>{ const n=mnet(r); netTotal+=n; cnt++; const c=r.currency||'CZK'; byCur[c]=(byCur[c]||0)+n; const t=r.type||'other'; (byType[t]=byType[t]||{net:0,n:0}).net+=n; byType[t].n++; }); }
     else { (data.months||[]).forEach(m=>{ if(sel!=='all'&&m.ym!==sel) return; Object.keys(m.byCur||{}).forEach(cur=>{ const c=m.byCur[cur]; const n=Number(c.mtl||0)-Number(c.refunded||0); netTotal+=n; cnt+=Number(c.count||0); byCur[cur]=(byCur[cur]||0)+n; }); }); }
     const otherCur=Object.keys(byCur).filter(c=>c!=='CZK'&&byCur[c]>0);
-    const f=v=>Math.round(v/100).toLocaleString(EN?'en-GB':'cs-CZ')+' Kč';
+    const f=v=>(v/100).toLocaleString(EN?'en-GB':'cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2})+' Kč';
     const monthLabel = sel==='all'?(EN?'all time':'celkem'):(((typeof fdMonthList==='function'?fdMonthList():[]).find(m=>m.ym===sel)||{}).lbl||sel);
     const ARR='<span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;margin-left:10px;">▾</span>';
     const HDR=(em,title,right)=>'<div class="dashSecHdr" style="font-size:14px;font-weight:800;color:var(--dark);margin:10px 0 8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">'+em+' '+title+'<span style="margin-left:auto;font-weight:800;font-size:14px;color:#006040;">'+(right||'')+'</span>'+ARR+'</div>';
@@ -12296,13 +12385,13 @@ async function renderFdReal(){
     if(hasRows){
       const TYPES=[['coach_inperson','🥊',EN?'Coach 1:1':'Lekce 1:1'],['coach_online','🌐','Online'],['drop_in','🏛️',EN?'Drop-ins':'Jednorázové vstupy'],['membership','🎟️',EN?'Memberships':'Členství'],['event_ticket','🎪',EN?'Events':'Akce'],['merch','🛍️','Merch']];
       const listed=[];
-      TYPES.forEach(function(tt){ const t=tt[0],em=tt[1],lbl=tt[2]; listed.push(t); const d=byType[t]; if(!d||d.n===0) return; typeAcc+=HDR(em,lbl+' <span style="color:var(--light);font-weight:600;font-size:12px;">· '+d.n+'×</span>',f(d.net))+wrap(row('💎','#F0FBF0','MTL net','<span style="color:#006040;font-weight:800;">'+f(d.net)+'</span>')+row('📐','#EEF4FF',(EN?'Ø / transaction':'Ø / transakci'),f(d.n?d.net/d.n:0))); });
+      TYPES.forEach(function(tt){ const t=tt[0],em=tt[1],lbl=tt[2]; listed.push(t); const d=byType[t]||{net:0,n:0}; typeAcc+=HDR(em,lbl+' <span style="color:var(--light);font-weight:600;font-size:12px;">· '+d.n+'×</span>',f(d.net))+wrap(row('💎','#F0FBF0','MTL net','<span style="color:#006040;font-weight:800;">'+f(d.net)+'</span>')+row('📐','#EEF4FF',(EN?'Ø / transaction':'Ø / transakci'),f(d.n?d.net/d.n:0))); });
       const ok=Object.keys(byType).filter(t=>listed.indexOf(t)<0); const oNet=ok.reduce((a,t)=>a+byType[t].net,0); const oN=ok.reduce((a,t)=>a+byType[t].n,0);
       if(oN>0){ typeAcc+=HDR('🧾',(EN?'Other':'Ostatní')+' <span style="color:var(--light);font-weight:600;font-size:12px;">· '+oN+'×</span>',f(oNet))+wrap(row('💎','#F0FBF0','MTL net','<span style="color:#006040;font-weight:800;">'+f(oNet)+'</span>')); }
     }
     const curNote = otherCur.length? '<div style="font-size:11px;color:var(--light);line-height:1.5;padding:4px 4px 0;">'+(EN?'Summed nominally across currencies':'Sečteno nominálně napříč měnami')+' · '+otherCur.map(c=>c+': '+(c==='EUR'?'€':c==='USD'?'$':'')+Math.round(byCur[c]/100)).join(' · ')+' '+(EN?'(exact split in CSV)':'(přesný rozpad v CSV)')+'</div>' : '';
     box.innerHTML = hero + cards + (typeAcc? ('<div class="sec-lbl">'+(EN?'By revenue type':'Podle typu příjmu')+'</div>'+typeAcc):'') + curNote;
-    box.insertAdjacentHTML('beforeend','<div id="fdEpWrap" style="margin-top:14px;"></div>'); _loadFdEp(sel);
+    box.insertAdjacentHTML('beforeend','<div id="fdEpWrap" style="margin-top:14px;"></div><div id="fdCostsWrap" style="margin-top:14px;"></div>'); _loadFdEp(sel); _loadFdCosts(sel);
     box.querySelectorAll('.dashSecHdr').forEach(function(h){ var g=h.nextElementSibling; var ar=h.querySelector('.dashAccArr'); if(g){ g.style.display='none'; if(ar) ar.style.transform='rotate(-90deg)'; } h.onclick=function(){ if(!g) return; var closed=g.style.display==='none'; g.style.display=closed?'':'none'; if(ar) ar.style.transform=closed?'':'rotate(-90deg)'; }; });
   }catch(e){ box.innerHTML='<p style="color:var(--red);font-size:12px;">⚠️ '+e.message+'</p>'; }
 }
@@ -12346,6 +12435,30 @@ async function _fdEpCsv(){
     (prows||[]).forEach(pp=>{ const bcr=pp.byCur||{}; const cs=Object.keys(bcr); const base=[pp.name,pp.legal_name,pp.tax_id,pp.vat_id,pp.billing_address,pp.invoice_email]; if(!cs.length){ lines.push(base.concat(['','','','']).map(esc).join(',')); } else cs.forEach(c=>{ const a=bcr[c]; lines.push(base.concat([c,a.gross,a.fee,a.net,a.count]).map(esc).join(',')); }); });
     const csv='\ufeff'+lines.join('\n'); const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='mtl-exclusive-partners.csv'; document.body.appendChild(a); a.click(); document.body.removeChild(a); setTimeout(()=>URL.revokeObjectURL(url),1500);
   }catch(e){ toast('⚠️ '+e.message); }
+}
+async function _loadFdCosts(sel){
+  const wrap=$('fdCostsWrap'); if(!wrap) return; const EN=LANG==='en';
+  try{
+    const f=v=>(v/100).toLocaleString(EN?'en-GB':'cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2})+' Kč';
+    let ambDisc=window._fdAmbDisc;
+    if(!ambDisc){ ambDisc=new Set(); try{ const { data:amb }=await supaClient.from('profiles').select('verify_disciplines').not('verify_disciplines','is',null); (amb||[]).forEach(pp=>{ let dd=pp.verify_disciplines; try{ if(typeof dd==='string') dd=JSON.parse(dd); }catch(e){ dd=[]; } (Array.isArray(dd)?dd:[]).forEach(d=>ambDisc.add(d)); }); }catch(e){} window._fdAmbDisc=ambDisc; }
+    let q=supaClient.from('transactions').select('discipline,gross_amount,created_at,status').neq('status','refunded');
+    if(sel&&sel!=='all'){ const st=sel+'-01'; const pr=sel.split('-').map(Number); const yy=pr[0], mm=pr[1]; const nxt=(mm===12)?((yy+1)+'-01-01'):(yy+'-'+String(mm+1).padStart(2,'0')+'-01'); q=q.gte('created_at',st).lt('created_at',nxt); }
+    let ambBase=0; try{ const { data:txs }=await q; (txs||[]).forEach(t=>{ const g=Number(t.gross_amount||0); if(t.discipline && ambDisc.has(t.discipline)) ambBase+=g; }); }catch(e){}
+    const ambCost=ambBase*0.005;
+    let heroNet=0; try{ const data=window._fdRevData; const rows=(data&&data.rows||[]).filter(r=> sel==='all'?true:(r.created_at||'').slice(0,7)===sel); heroNet=rows.reduce((a,r)=>a+(Number(r.mtl_fee||0)-Number(r.mtl_fee_refunded||0)),0); }catch(e){}
+    const trueNet=heroNet-ambCost;
+    const ARR='<span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;margin-left:10px;">▾</span>';
+    const HDR=(em,title,right)=>'<div class="dashSecHdr" style="font-size:14px;font-weight:800;color:var(--dark);margin:10px 0 8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">'+em+' '+title+'<span style="margin-left:auto;font-weight:800;font-size:14px;color:#c0392b;">'+(right||'')+'</span>'+ARR+'</div>';
+    const row=(em,bg,lab,val)=>'<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:'+bg+';">'+em+'</div><div class="prow-lbl">'+lab+'</div></div><span class="prow-val">'+val+'</span></div>';
+    const wrapG=h=>'<div class="prow-group" style="margin-bottom:8px;">'+h+'</div>';
+    const body = row('🎓','#FFF4E6',(EN?'Ambassador share (0.5% of turnover)':'Ambassador podíl (0,5 % z obratu)'),'<span style="color:#c0392b;font-weight:700;">− '+f(ambCost)+'</span>')
+      + row('🎁','#F0F7FF',(EN?'Referral discounts':'Referral slevy'),'<span style="color:var(--light);font-size:11.5px;">'+(EN?'fee waived — already 0 above':'provize prominuta — už 0 výše')+'</span>')
+      + row('💰','#F0FBF0',(EN?'Net after payouts':'Net po výplatách'),'<span style="color:#006040;font-weight:800;">'+f(trueNet)+'</span>');
+    wrap.innerHTML='<div class="sec-lbl">'+(EN?'MTL costs / payouts':'Výdaje / výplaty MTL')+'</div>'+HDR('💸',(EN?'Costs & payouts':'Výdaje a výplaty'),'− '+f(ambCost))+wrapG(body)
+      +'<p style="font-size:11px;color:var(--light);line-height:1.5;margin:2px 0 4px;">'+(EN?'Ambassador 0.5% is paid from MTL balance on turnover in disciplines that have an ambassador (on top of the commission ledger). Referral redemptions waive MTL\'s fee, so they already show as 0 in the net above — not deducted twice.':'Ambassador 0,5 % se platí z MTL balance z obratu v disciplínách, co mají ambassadora (navíc nad provizí). Referral promíjí provizi MTL → už je 0 v netu výše, neodečítá se dvakrát.')+'</p>';
+    wrap.querySelectorAll('.dashSecHdr').forEach(function(h){ var g=h.nextElementSibling; var ar=h.querySelector('.dashAccArr'); if(g){ g.style.display='none'; if(ar) ar.style.transform='rotate(-90deg)'; } h.onclick=function(){ if(!g) return; var cl=g.style.display==='none'; g.style.display=cl?'':'none'; if(ar) ar.style.transform=cl?'':'rotate(-90deg)'; }; });
+  }catch(e){ wrap.innerHTML=''; }
 }
 async function fdRealExportCsv(){
   try{
@@ -14255,7 +14368,7 @@ async function openSharedProfile(token, kidToken){
   var roleLbl={student:(EN?'Student':'Student'),coach:(EN?'Coach':'Kouč'),gym:(EN?'Gym':'Gym')}; var roleIcon={student:'🧑',coach:'🥊',gym:'🏛️'};
   var lvls=(data.levels||[]).map(function(l){ var c=levelColor(l.level); return '<div style="display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.05);border:1px solid '+c.bg+';border-radius:12px;padding:9px 12px;margin-bottom:8px;"><span style="font-size:16px;">'+(roleIcon[l.role]||'')+'</span><span style="flex:1;text-align:left;font-weight:700;color:#fff;font-size:13px;">'+(roleLbl[l.role]||l.role)+'</span><span style="background:'+c.bg+';color:#fff;font-weight:800;font-size:12px;border-radius:8px;padding:4px 10px;">'+(EN?'Level ':'Úroveň ')+l.level+'</span></div>'; }).join('');
   var _milChip=function(m){ return '<div style="display:inline-flex;align-items:center;gap:5px;background:rgba(244,216,122,.10);border:1px solid rgba(244,216,122,.4);border-radius:20px;padding:5px 11px;margin:0 5px 6px 0;font-size:11.5px;color:#F4D87A;font-weight:700;"><span>'+m.emoji+'</span>'+(EN?m.en:m.cs)+'</div>'; };
-  var _milCats=[['platform',EN?'Platform':'Platforma'],['student',EN?'Student':'Student'],['coach',EN?'Coach':'Kouč'],['gym',EN?'Gym':'Gym']];
+  var _milCats=[['platform',EN?'Platform':'Platforma'],['student',EN?'Student':'Student'],['discipline',EN?'By discipline':'Podle disciplíny'],['coach',EN?'Coach':'Kouč'],['gym',EN?'Gym':'Gym']];
   var mils=''; _milCats.forEach(function(_c){ var _g=(data.milestones||[]).filter(function(m){ return (m.cat||'platform')===_c[0]; }); if(_g.length){ mils+='<div style="margin:2px 0 6px;font-size:10px;letter-spacing:.12em;color:rgba(255,255,255,.42);font-weight:800;text-align:left;">'+_c[1].toUpperCase()+'</div><div style="margin-bottom:14px;text-align:left;">'+_g.map(_milChip).join('')+'</div>'; } });
   var photo=data.photo ? ('background:#1a1a1a url(&quot;'+data.photo+'&quot;) center/cover;') : 'background:linear-gradient(135deg,#2a2a2a,#111);';
   var h='<div style="min-height:100vh;background:radial-gradient(120% 80% at 50% 0%,#2a2200 0%,#0c0c0c 62%);padding:42px 22px 32px;box-sizing:border-box;"><div style="max-width:420px;margin:0 auto;text-align:center;">';
@@ -14324,7 +14437,7 @@ async function openMilestones(){
   const tiers=(prefix,emoji,unit,count,arr)=>{ let top=-1; arr.forEach((t,i)=>{ if(count>=t){ unlocked[prefix+'_'+t]=1; top=i; } }); const tt=top>=0?arr[top]:arr[0]; return badge(prefix+'_'+tt,emoji,tt.toLocaleString()+' '+unit,count>=tt); };
   const T_STUD=[100,500,1000,5000,25000,100000,500000], T_COACH=[100,200,500,1000,2000,5000,10000,20000,50000,100000], T_GYM=[10,20,50,100,200,500,1000,2000,5000,10000], T_BOOK=[500,1000,5000,25000,100000,500000], T_ONLINE=[250,500,2500,10000,50000];
   const now=new Date(); const isP=(b)=>b.type==='online'?!!b.fulfilled:(b.student_confirmed===true && b.coach_confirmed===true);
-  const isCoach = me.coach_status==='approved';
+  const isCoach = me.coach_status==='approved'; let _discCount={};
   let vd=[]; try{ vd=me.verify_disciplines?(typeof me.verify_disciplines==='string'?JSON.parse(me.verify_disciplines):me.verify_disciplines):[]; if(!Array.isArray(vd))vd=[]; }catch(e){ vd=[]; }
   const isAmb = vd.length>0;
   const isFounder = me.role==='founder'||me.id===FOUNDER_UUID;
@@ -14337,15 +14450,16 @@ async function openMilestones(){
   try{
     const { data: bk } = await supaClient.from('bookings').select('id,type,status,fulfilled,training_date,training_time,coach_id,discipline,student_confirmed,coach_confirmed').eq('student_id',me.id);
     const hp=(bk||[]).filter(b=>b.status==='active'&&isP(b)); const online=hp.filter(b=>b.type==='online').length; const coaches=new Set(hp.map(b=>b.coach_id).filter(Boolean)).size;
-    let gymTrain=0; const discSet=new Set(); const _noDiscGyms=new Set(); try{ const { data: ga } = await supaClient.from('gym_attendance').select('id,discipline,gym_id').eq('student_id',me.id); gymTrain=(ga||[]).length; (ga||[]).forEach(a=>{ if(a.discipline) discSet.add(a.discipline); else if(a.gym_id) _noDiscGyms.add(a.gym_id); }); }catch(e){}
+    let gymTrain=0; const discSet=new Set(); const _noDiscGyms=new Set(); try{ const { data: ga } = await supaClient.from('gym_attendance').select('id,discipline,gym_id').eq('student_id',me.id); gymTrain=(ga||[]).length; (ga||[]).forEach(a=>{ if(a.discipline){ discSet.add(a.discipline); _discCount[a.discipline]=(_discCount[a.discipline]||0)+1; } else if(a.gym_id) _noDiscGyms.add(a.gym_id); }); }catch(e){}
     if(_noDiscGyms.size){ try{ const { data: _gg } = await supaClient.from('gyms').select('id,disciplines').in('id',[..._noDiscGyms]); (_gg||[]).forEach(g2=>{ let dl=[]; try{ dl=g2.disciplines?(typeof g2.disciplines==='string'?JSON.parse(g2.disciplines):g2.disciplines):[]; }catch(e){} if(Array.isArray(dl)&&dl.length) discSet.add(dl[0]); }); }catch(e){} }
-    hp.forEach(b=>{ if(b.discipline) discSet.add(b.discipline); }); const sports=discSet.size;
-    const total=hp.length+gymTrain;
+    hp.forEach(b=>{ if(b.discipline){ discSet.add(b.discipline); _discCount[b.discipline]=(_discCount[b.discipline]||0)+1; } }); const sports=discSet.size;
+    const total=hp.filter(b=>b.type!=='online').length+gymTrain;
     sInner+=`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">${counter('🥊',EN?'trained':'odtrén.',total)}${counter('🧭',EN?'coaches':'koučů',coaches)}${counter('🌍',EN?'sports':'sportů',sports)}${counter('🌐',EN?'online':'online',online)}</div>`;
     try{ if(me._belts){ Object.keys(me._belts).forEach(function(k){ var bb=me._belts[k]; if(bb&&bb.belt){ sInner+=`<div style="margin-bottom:9px;">${beltBadgeHtml(bb.belt,bb.stripes)}${bb.disc?`<span style="font-size:11px;color:var(--light);margin-left:6px;">${disciplineLabel(bb.disc)}</span>`:''}${bb.gymName?`<span style="font-size:11px;color:var(--light);margin-left:8px;">${EN?'at ':'v '}${escapeHtml(bb.gymName)}</span>`:''}</div>`; } }); } }catch(e){}
-    sInner+=topOf([['s_first','🥊',EN?'First training':'První trénink',total>=1],['s_5','🔥',EN?'5 trainings':'5 tréninků',total>=5],['s_25','🔥',EN?'25 trainings':'25 tréninků',total>=25],['s_100','🏆',EN?'100 trainings':'100 tréninků',total>=100],['s_200','🏆',EN?'200 trainings':'200 tréninků',total>=200],['s_300','🏆',EN?'300 trainings':'300 tréninků',total>=300],['s_500','💎',EN?'500 trainings':'500 tréninků',total>=500],['s_1000','💎',EN?'1000 trainings':'1000 tréninků',total>=1000]])+badge('s_online','🌐',EN?'First online lesson':'První online lekce',online>=1)+topOf([['s_disc2','🌍',EN?'Tried 2 sports':'Vyzkoušel 2 sporty',sports>=2],['s_disc3','🌍',EN?'Tried 3 sports':'Vyzkoušel 3 sporty',sports>=3],['s_disc5','🌍',EN?'Tried 5 sports':'Vyzkoušel 5 sportů',sports>=5]])+topOf([['s_coach3','🧭',EN?'Trained with 3 coaches':'Trénoval se 3 kouči',coaches>=3],['s_coach5','🧭',EN?'Trained with 5 coaches':'Trénoval s 5+ kouči',coaches>=5]]);
+    sInner+=topOf([['s_first','🥊',EN?'First training':'První trénink',total>=1],['s_5','🔥',EN?'5 trainings':'5 tréninků',total>=5],['s_25','🔥',EN?'25 trainings':'25 tréninků',total>=25],['s_100','🏆',EN?'100 trainings':'100 tréninků',total>=100],['s_200','🏆',EN?'200 trainings':'200 tréninků',total>=200],['s_300','🏆',EN?'300 trainings':'300 tréninků',total>=300],['s_500','💎',EN?'500 trainings':'500 tréninků',total>=500],['s_1000','💎',EN?'1000 trainings':'1000 tréninků',total>=1000]])+topOf([['s_online1','🌐',EN?'First online lesson':'První online lekce',online>=1],['s_online5','🔥',EN?'5 online lessons':'5 online lekcí',online>=5],['s_online25','🏆',EN?'25 online lessons':'25 online lekcí',online>=25],['s_online100','💎',EN?'100 online lessons':'100 online lekcí',online>=100]])+topOf([['s_disc2','🌍',EN?'Tried 2 sports':'Vyzkoušel 2 sporty',sports>=2],['s_disc3','🌍',EN?'Tried 3 sports':'Vyzkoušel 3 sporty',sports>=3],['s_disc5','🌍',EN?'Tried 5 sports':'Vyzkoušel 5 sportů',sports>=5]])+topOf([['s_coach3','🧭',EN?'Trained with 3 coaches':'Trénoval se 3 kouči',coaches>=3],['s_coach5','🧭',EN?'Trained with 5 coaches':'Trénoval s 5+ kouči',coaches>=5]]);
   }catch(e){}
   html+=wrap('🥊 '+(EN?'Student milestones':'Studentské milníky'), sInner, false);
+  try{ const _dk=Object.keys(_discCount).filter(d=>_discCount[d]>0).sort((x,y)=>_discCount[y]-_discCount[x]); if(_dk.length){ const _dt=n=>n>=500?'💎':n>=100?'🏆':n>=25?'🔥':n>=5?'🔥':'🥊'; const _chips=_dk.map(d=>{ const n=_discCount[d]; const em=(typeof disciplineEmoji==='function'?disciplineEmoji(d):'🥋'); const lbl=(typeof disciplineLabel==='function'?disciplineLabel(d):d); return '<div style="display:flex;align-items:center;gap:9px;padding:8px 11px;border-radius:12px;margin-bottom:6px;border:1px solid #F5C842;background:#FFFBEF;"><div style="font-size:19px;">'+em+'</div><div style="flex:1;min-width:0;font-size:13px;font-weight:700;color:var(--dark);">'+lbl+'</div><span style="font-size:12.5px;font-weight:800;color:#9a7400;white-space:nowrap;">'+n+' '+(EN?(n===1?'training':'trainings'):'tréninků')+' '+_dt(n)+'</span></div>'; }).join(''); html+=drop('🥋 '+(EN?'By discipline':'Podle disciplíny'), _chips, false); } }catch(e){}
   // 🤝 Referral milníky — pro všechny role, ODDĚLENÉ od tréninkových Levelů (anti-gaming)
   let rInner='';
   try{
@@ -15984,6 +16098,7 @@ function enterApp(){
   try{ if(typeof processPendingJoin==='function') processPendingJoin(); }catch(e){}
   try{ if(typeof _emojiAccountSync==='function') _emojiAccountSync(); }catch(e){}
   $('authScreen').style.display='none';
+  try{ _maybeAppLock(); }catch(e){}
   if(isMultiDiscipline()){
     if(_deckDisc){ if(currentUser && currentUser.pref_discipline!==_deckDisc){ try{ supaClient.from('profiles').update({ pref_discipline:_deckDisc }).eq('id', currentUser.id); currentUser.pref_discipline=_deckDisc; }catch(e){} } }
     else if(currentUser && currentUser.pref_discipline){ _deckDisc = currentUser.pref_discipline; }
@@ -16548,7 +16663,7 @@ function openCoachSettings(){
   if($('csLblRates')) $('csLblRates').textContent = (LANG==='en'?'💰 My coaching rates':'💰 Moje ceny (soukromky)');
   if($('csLblOwnStudent')) $('csLblOwnStudent').textContent = (LANG==='en'?'🔗 Link for your own existing students':'🔗 Odkaz pro vlastní stávající studenty');
   if($('csOwnStudentDesc')) $('csOwnStudentDesc').textContent = (LANG==='en'?'Already training someone privately who is moving to booking through MTL? Send them THIS link BEFORE they book a session with you. It tags them as YOUR student, so MTL takes only its normal commission, not the one-time 10% acquisition fee charged on brand-new students MTL finds for you in the deck.':'Už někoho učíš a přechází na rezervace přes MTL? Pošli mu TENHLE odkaz, NEŽ si u tebe zarezervuje trénink. Označí ho jako TVÉHO studenta, takže si MTL bere jen běžnou provizi, ne jednorázový 10% akviziční poplatek, který platí u úplně nových studentů, které ti MTL najde v decku.');
-  try{ var _ocl=location.origin.replace('//dashboard.','//app.')+'/?coach='+(currentUser.profileId||currentUser.id)+'&own=1'; if($('csOwnStudentLink')) $('csOwnStudentLink').textContent=_ocl; var _ocb=$('csOwnStudentCopy'); if(_ocb){ _ocb.textContent=(LANG==='en'?'📋 Copy link':'📋 Zkopírovat odkaz'); _ocb.onclick=function(){ try{ navigator.clipboard.writeText(_ocl); }catch(e){} toast(LANG==='en'?'✅ Link copied':'✅ Odkaz zkopírován'); }; } }catch(e){}
+  try{ var _ocl=_ownLink(); if($('csOwnStudentLink')) $('csOwnStudentLink').textContent=_ocl; var _ocb=$('csOwnStudentCopy'); if(_ocb){ _ocb.textContent=(LANG==='en'?'📋 Copy link':'📋 Zkopírovat odkaz'); _ocb.onclick=function(){ try{ navigator.clipboard.writeText(_ocl); }catch(e){} toast(LANG==='en'?'✅ Link copied':'✅ Odkaz zkopírován'); }; } }catch(e){}
   if($('csBio')){ $('csBio').value = currentUser.bio||''; $('csBio').placeholder = LANG==='en'?'Tell students about yourself, your style and experience…':'Napiš něco o sobě, svém stylu a zkušenostech…'; }
   if($('csStatsLbl')) $('csStatsLbl').textContent = LANG==='en'?'Fights & years per sport (optional — shown on your profile)':'Zápasy a roky praxe podle sportu (nepovinné — zobrazí se na profilu)';
   if($('csSaveProfile')) $('csSaveProfile').textContent = LANG==='en'?'Save profile':'Uložit profil';
