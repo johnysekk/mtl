@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QIA TEMP DIAGNOSTIC for the app-lock biometric availability. The Settings app-lock row is forced visible and its value shows what the device reports about WebAuthn: PK (window.PublicKeyCredential present), cred (navigator.credentials.create present), fn (isUserVerifyingPlatformAuthenticatorAvailable present), uv (the awaited boolean / error). This is to find out exactly why the toggle hides on the iPhone (Safari + PWA) but shows on desktop. REVERT after diagnosis back to the QHY behaviour (hide row when _biometricAvailable() is false). -->
+<!-- MTL build: QIC Czech-locale money CSV fix (part 1: accounting Podklady + founder revenue). Root cause of the LibreOffice/Excel mis-summing: money cells used a DOT decimal (35.75), which Czech-locale spreadsheets read as TEXT (not a number) so they were skipped from sums, while whole numbers like 250 summed. Fix = the canonical Czech CSV: COMMA decimal + always 2 decimals + SEMICOLON field separator. New shared helper _czMoney(cents) -> "x,yy". _acExportCsv (Podklady pro ucetnictvi) now always 2-dec comma (was CZK 0-dec, dot) and no longer quotes on comma (semicolon-separated, so commas are safe unquoted -> numbers stay numeric). fdRealExportCsv (founder revenue) switched from comma-separator+dot-decimal to semicolon-separator + _czMoney on every money column. STILL TO CONVERT (part 2): _fdEpCsv, the other accounting/gym CSVs (~12597, ~17015, ~17043, _mdCsv ~17176) + serverless gym-transactions/my-transactions/mtl-revenue if they emit CSV. QIA diagnostic app-lock row still pending revert. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -12361,9 +12361,15 @@ async function renderFdReal(){
     if(!window._fdRevData){
       box.innerHTML='<p style="color:var(--light);font-size:12px;padding:6px 0;">'+L('Načítám...')+'</p>';
       let _tok=''; try{ _tok=await _freshTok(); }catch(e){}
-      const r=await fetch('/api/mtl-revenue',{ headers:{'x-access-token':_tok} });
-      const j=await r.json().catch(()=>({}));
-      if(!j||!j.ok){ box.innerHTML='<p style="color:var(--red);font-size:12px;padding:6px 0;">⚠️ '+((j&&j.error)||'load failed')+'</p>'; return; }
+      let r=await fetch('/api/mtl-revenue',{ headers:{'x-access-token':_tok} });
+      let j=await r.json().catch(()=>({}));
+      if((!j||!j.ok) && (r.status===401 || (j&&(j.error==='bad token'||j.error==='no token')))){
+        try{ await supaClient.auth.refreshSession(); }catch(e){}
+        try{ _tok=await _freshTok(); }catch(e){}
+        r=await fetch('/api/mtl-revenue',{ headers:{'x-access-token':_tok} });
+        j=await r.json().catch(()=>({}));
+      }
+      if(!j||!j.ok){ const _te=(j&&(j.error==='bad token'||j.error==='no token')); box.innerHTML='<p style="color:var(--red);font-size:12px;padding:6px 0;">⚠️ '+(_te?L('Sezení vypršelo — obnov stránku'):((j&&j.error)||'load failed'))+'</p>'; return; }
       window._fdRevData=j;
     }
     const data=window._fdRevData; const sel=window._fdRealMonth||'all';
@@ -12462,16 +12468,17 @@ async function _loadFdCosts(sel){
     wrap.querySelectorAll('.dashSecHdr').forEach(function(h){ var g=h.nextElementSibling; var ar=h.querySelector('.dashAccArr'); if(g){ g.style.display='none'; if(ar) ar.style.transform='rotate(-90deg)'; } h.onclick=function(){ if(!g) return; var cl=g.style.display==='none'; g.style.display=cl?'':'none'; if(ar) ar.style.transform=cl?'':'rotate(-90deg)'; }; });
   }catch(e){ wrap.innerHTML=''; }
 }
+function _czMoney(c){ return ((Number(c||0))/100).toFixed(2).replace('.',','); }
 async function fdRealExportCsv(){
   try{
     if(!window._fdRevData){ await renderFdReal(); }
     const data=window._fdRevData; if(!data){ toast('\u26a0\ufe0f'); return; } const EN=LANG==='en';
     const sel=window._fdRealMonth||'all';
     let _rows=(data.rows||[]); if(sel!=='all') _rows=_rows.filter(t=>(t.created_at||'').slice(0,7)===sel);
-    const esc=v=>{ const t=String(v==null?'':v); return /[",\n;]/.test(t)?'"'+t.replace(/"/g,'""')+'"':t; };
+    const esc=v=>{ const t=String(v==null?'':v); return /["\n;]/.test(t)?'"'+t.replace(/"/g,'""')+'"':t; };
     const head=['created_at','month','type','currency','gross','stripe_fee','mtl_fee','mtl_fee_refunded','mtl_net','net_amount','gym_id','coach_id','payment_intent'];
-    const lines=[head.join(',')];
-    _rows.forEach(t=>{ const mtlNet=(Number(t.mtl_fee||0)-Number(t.mtl_fee_refunded||0)); lines.push([esc(t.created_at||''),esc((t.created_at||'').slice(0,7)),esc(t.type||''),esc(t.currency||''),(Number(t.gross_amount||0)/100),(Number(t.stripe_fee||0)/100),(Number(t.mtl_fee||0)/100),(Number(t.mtl_fee_refunded||0)/100),(mtlNet/100),(Number(t.net_amount||0)/100),esc(t.gym_id||''),esc(t.coach_id||''),esc(t.payment_intent||'')].join(',')); });
+    const lines=[head.join(';')];
+    _rows.forEach(t=>{ const mtlNet=(Number(t.mtl_fee||0)-Number(t.mtl_fee_refunded||0)); lines.push([esc(t.created_at||''),esc((t.created_at||'').slice(0,7)),esc(t.type||''),esc(t.currency||''),_czMoney(t.gross_amount),_czMoney(t.stripe_fee),_czMoney(t.mtl_fee),_czMoney(t.mtl_fee_refunded),_czMoney(mtlNet),_czMoney(t.net_amount),esc(t.gym_id||''),esc(t.coach_id||''),esc(t.payment_intent||'')].join(';')); });
     const csv='\ufeff'+lines.join('\n'); const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='mtl-revenue-'+((window._fdRealMonth&&window._fdRealMonth!=='all')?window._fdRealMonth:'all')+'-'+new Date().toISOString().slice(0,10)+'.csv'; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); toast(EN?'\u2713 CSV exported':'\u2713 CSV vyexportov\u00e1no');
   }catch(e){ toast('\u26a0\ufe0f '+e.message); }
 }
@@ -12945,7 +12952,7 @@ async function loadAccounting(){
   const eb=$('acExport'); if(eb) eb.onclick=()=>_acExportCsv(rows, cur, mLbl);
 }
 function _acDisclaimer(){ const en=LANG==='en'; return `<div style="background:#FFF8E6;border:1px solid #F0DFA8;border-radius:12px;padding:13px 14px;margin-top:16px;font-size:12px;line-height:1.6;color:#7A5B00;">`+(en?`\uD83D\uDCC5 <b>Generate next month's export at the start of the following month</b>, so it contains everything (incl. late refunds).<br><br>\u2696\uFE0F Although these figures are pulled directly from Stripe, <b>we take no responsibility for their accuracy</b> and recommend handing them to your accountant <b>together with your Stripe statement for the month (1:1)</b>. Figures are records, not tax advice; VAT/tax with your accountant.`:`\uD83D\uDCC5 <b>Výpis za daný měsíc generuj až na začátku dalšího měsíce</b>, ať obsahuje všechno (vč. pozdních refundů).<br><br>\u2696\uFE0F I když jsou data tažena přímo ze Stripe, <b>neneseme odpovědnost za jejich správnost</b> a doporučujeme předat účetní <b>spolu s výpisem ze Stripe za daný měsíc (1:1)</b>. Jde o podklady, ne daňové poradenství; DPH/daně řeš s účetní.`)+`</div>`; }
-function _acExportCsv(rows, cur, mLbl){ const dec=cur==='CZK'?0:2; const num=v=>(v/100).toFixed(dec); const esc=v=>{ const x=String(v==null?'':v); return /["\n;,]/.test(x)?('"'+x.replace(/"/g,'""')+'"'):x; }; const H=['Datum','Typ','ID clena','Plan','Hrube','Stripe fee','Provize MTL','Net','Mena','Status']; const out=[H.join(';')]; rows.forEach(r=>{ out.push([ new Date(r.created_at).toISOString().slice(0,10), _acRowLabel(r), (r.member_id?String(r.member_id).slice(0,8):''), r.plan||'', num(r._eG), num(r._st), num(r._eM), num(r._eN), cur, r.status||'paid' ].map(esc).join(';')); }); const blob=new Blob(['\uFEFF'+out.join('\n')],{type:'text/csv;charset=utf-8;'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='MTL_podklady_'+_acMonth+'.csv'; a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000); }
+function _acExportCsv(rows, cur, mLbl){ const num=v=>_czMoney(v); const esc=v=>{ const x=String(v==null?'':v); return /["\n;]/.test(x)?('"'+x.replace(/"/g,'""')+'"'):x; }; const H=['Datum','Typ','ID clena','Plan','Hrube','Stripe fee','Provize MTL','Net','Mena','Status']; const out=[H.join(';')]; rows.forEach(r=>{ out.push([ new Date(r.created_at).toISOString().slice(0,10), _acRowLabel(r), (r.member_id?String(r.member_id).slice(0,8):''), r.plan||'', num(r._eG), num(r._st), num(r._eM), num(r._eN), cur, r.status||'paid' ].map(esc).join(';')); }); const blob=new Blob(['\uFEFF'+out.join('\n')],{type:'text/csv;charset=utf-8;'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='MTL_podklady_'+_acMonth+'.csv'; a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000); }
 // ── Stripe Connect: fully-supported countries where a non-resident platform CAN auto-deduct an
 // application fee on direct charges. Brazil is excluded (Stripe blocks app fees for non-BR platforms);
 // Thailand, Mexico, Malaysia are excluded for launch (local rules block automatic app-fee deduction —
@@ -16364,6 +16371,14 @@ function fillUserProfile(){
     else if(userLoc && userLoc.city) locEl.textContent = userLoc.city;
     else locEl.textContent = '—';
   }
+  // Settings "Moje poloha" + obnova in-memory userLoc z uložené polohy na profilu (po reopen)
+  try{
+    if($('vLoc')) $('vLoc').textContent = (currentUser.city || (userLoc&&userLoc.city) || L('Nenastavena'));
+    if((!userLoc || userLoc.lat==null) && currentUser.city_lat!=null){
+      userLoc={lat:+currentUser.city_lat, lng:(currentUser.city_lng!=null?+currentUser.city_lng:null), city:currentUser.city||'', country:currentUser.country||''};
+      if(currentUser.city && $('locBar')){ $('locBar').classList.add('show'); if($('locText')) $('locText').textContent=(LANG==='en'?('📍 '+currentUser.city+' — coaches sorted by distance'):('📍 '+currentUser.city+' — kouči seřazeni dle vzdálenosti')); }
+    }
+  }catch(e){}
   // Avatar
   if(currentUser.photo_url) setAvatar(currentUser.photo_url);
 }
