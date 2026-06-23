@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QIQ merch display + buy completed for coach merch. (1) loadGymMerchForProfile rewritten: coach merch already appears (same gym_id+active), and the list is now a HORIZONTAL SCROLL of compact 148px product cards (image/name/price/variant/buy) inside the Omrknout-merch-gymu accordion - handles 20 items without overwhelming the profile, no gym/coach split (coach briefs his own people). (2) buyMerch rewritten: if the item has coach_id -> charges on the COACH stripe (gym_payout_account||stripe_account), commission = the coach rate (partner 1% / ref 2-3% / else 3.5%), passes coachId so the order/tx is tagged; else unchanged (gym account + owner rate). A coach merch item whose coach has no payout account is blocked with a clear toast. -->
+<!-- MTL build: QIS kick-out portability (Byvaly gym / odpojeno). The coach team dashboard now ALSO surfaces gyms where he has coach-owned business (gym_memberships/gym_merch with his coach_id) but NO active gym_coaches link - i.e. gyms he was kicked from or left. (1) former-gym discovery added after the active teamGyms build (excludes active gyms, his own gyms, and hidden ones); (2) the gym selector marks them - odpojeno; (3) an amber banner Byvaly gym - odpojeno explains data+metrics STAY and offers two actions; (4) Prenest muj byznys -> _portCoachBusiness re-tags gym_id on his gym_memberships+gym_merch to a target gym (active full_autonomy gym or his own) - Stripe keeps charging on his account, only the venue label changes, history/transactions are NOT moved (metrics stay); (5) Skryt -> _hideFormerGym adds the gym to profiles.hidden_gyms (additive jsonb) - only hides, never deletes. merch_orders already follow the coach (filtered by coach_id, not gym_id). Needs kick-out-portability.sql (profiles.hidden_gyms). -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -7416,6 +7416,41 @@ async function _gtdEnsureGym(){
   }catch(e){}
   return false;
 }
+async function _hideFormerGym(gymId, gymName){
+  const EN=LANG==='en';
+  if(!confirm(EN?('Hide "'+(gymName||'this gym')+'" from your panel? Your data stays \u2014 this only hides it.'):('Skr\u00fdt \u201e'+(gymName||'tento gym')+'" z panelu? Tvoje data z\u016fstanou \u2014 jen se to schov\u00e1.'))) return;
+  try{
+    const cur=Array.isArray(currentUser.hidden_gyms)?currentUser.hidden_gyms.slice():[];
+    if(cur.indexOf(gymId)<0) cur.push(gymId);
+    await supaClient.from('profiles').update({ hidden_gyms:cur }).eq('id',currentUser.id);
+    currentUser.hidden_gyms=cur; if(_gtdGym===gymId) _gtdGym=null;
+    toast(EN?'Hidden from panel':'Schov\u00e1no z panelu'); renderGymTeamDash();
+  }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
+}
+async function _portCoachBusiness(fromGym){
+  const EN=LANG==='en'; const me=currentUser.id;
+  let targets=[];
+  try{
+    const { data:gc } = await supaClient.from('gym_coaches').select('gym_id, full_autonomy').eq('coach_id',me).eq('status','active');
+    const aIds=[...new Set((gc||[]).filter(x=>x.full_autonomy).map(x=>x.gym_id).filter(Boolean))];
+    const oIds=[...new Set((Array.isArray(window._myGyms)?window._myGyms:[]).map(g=>g.id))];
+    const allIds=[...new Set([...aIds,...oIds])].filter(id=>id!==fromGym.id);
+    if(allIds.length){ const { data:gg } = await supaClient.from('gyms').select('id,name').in('id',allIds); targets=(gg||[]).map(g=>({id:g.id,name:g.name||'Gym'})); }
+  }catch(e){}
+  if(!targets.length){ alert(EN?'You have no gym to move to. Join another gym with full autonomy, or create your own first.':'Nem\u00e1\u0161 kam p\u0159en\u00e9st. P\u0159ipoj se k jin\u00e9mu gymu s plnou autonomi\u00ed, nebo si nejd\u0159\u00edv vytvo\u0159 vlastn\u00ed.'); return; }
+  let pick=targets[0].id;
+  if(targets.length>1){
+    const msg=(EN?'Move to which gym?\n':'P\u0159en\u00e9st do kter\u00e9ho gymu?\n')+targets.map((t,i)=>(i+1)+') '+t.name).join('\n');
+    const ans=prompt(msg,'1'); const idx=parseInt(ans)-1; if(isNaN(idx)||idx<0||idx>=targets.length) return; pick=targets[idx].id;
+  } else { if(!confirm((EN?'Move your members & merch to ':'P\u0159en\u00e9st tv\u00e9 \u010dleny & merch do ')+targets[0].name+'?')) return; }
+  try{
+    await Promise.all([
+      supaClient.from('gym_memberships').update({ gym_id:pick }).eq('coach_id',me).eq('gym_id',fromGym.id),
+      supaClient.from('gym_merch').update({ gym_id:pick }).eq('coach_id',me).eq('gym_id',fromGym.id)
+    ]);
+    toast(EN?'\u2713 Business moved':'\u2713 Byznys p\u0159enesen'); if(_gtdGym===fromGym.id) _gtdGym=pick; renderGymTeamDash();
+  }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
+}
 async function openGymTeamDash(gymId, gymName, mode){
   if(gymId){ _gtdGym=gymId; _gtdGymName=gymName||''; }
   _gtdMode = (mode==='gross'||mode==='net') ? mode : ((currentUser&&currentUser.gym_payout_account) ? 'net' : 'gross');
@@ -7433,6 +7468,18 @@ async function renderGymTeamDash(){
     const gids=[...new Set((gc||[]).map(x=>x.gym_id).filter(Boolean))];
     if(gids.length){ const { data:gg } = await supaClient.from('gyms').select('id,name,currency,stripe_account,schedule').in('id',gids); const gm={}; (gg||[]).forEach(g=>gm[g.id]=g); teamGyms=gids.map(id=>({ id, name:(gm[id]&&gm[id].name)||'Gym', currency:(gm[id]&&gm[id].currency)||'CZK', stripe_account:(gm[id]&&gm[id].stripe_account)||null, schedule:(gm[id]&&gm[id].schedule)||null, link:(gc||[]).find(x=>x.gym_id===id)||{} })); }
   }catch(e){ console.log('[gtd]',e&&e.message); }
+  // --- former gyms: coach-owned business (memberships/merch) at gyms with NO active link (kicked out / left) ---
+  try{
+    const me2=currentUser.id; const _hidden=new Set(Array.isArray(currentUser.hidden_gyms)?currentUser.hidden_gyms:[]);
+    const _act=new Set(teamGyms.map(g=>g.id)); const _myOwn=new Set((Array.isArray(window._myGyms)?window._myGyms:[]).map(g=>g.id));
+    const [_fm,_fme]=await Promise.all([
+      supaClient.from('gym_memberships').select('gym_id').eq('coach_id',me2),
+      supaClient.from('gym_merch').select('gym_id').eq('coach_id',me2)
+    ]);
+    const _fset=new Set(); ((_fm&&_fm.data)||[]).forEach(r=>{ if(r.gym_id) _fset.add(r.gym_id); }); ((_fme&&_fme.data)||[]).forEach(r=>{ if(r.gym_id) _fset.add(r.gym_id); });
+    const _fonly=[..._fset].filter(id=> !_act.has(id) && !_myOwn.has(id) && !_hidden.has(id));
+    if(_fonly.length){ const { data:_fg }=await supaClient.from('gyms').select('id,name,currency,stripe_account,schedule').in('id',_fonly); (_fg||[]).forEach(g=>{ teamGyms.push({ id:g.id, name:g.name||'Gym', currency:g.currency||'CZK', stripe_account:g.stripe_account||null, schedule:g.schedule||null, link:{}, _former:true }); }); }
+  }catch(e){ console.log('[gtd former]',e&&e.message); }
   if(!teamGyms.length){ box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${EN?'You are not in any gym team yet.':'Zatím nejsi v žádném gym týmu.'}</p>`; return; }
   if(!_gtdGym || !teamGyms.some(g=>g.id===_gtdGym)) _gtdGym=teamGyms[0].id;
   const gymObj=teamGyms.find(g=>g.id===_gtdGym)||teamGyms[0];
@@ -7606,7 +7653,7 @@ async function renderGymTeamDash(){
     : row('—','#F5F2EE',(EN?'No upcoming reservations':'Žádné nadcházející rezervace'),'—');
   const attAcc = HDR('📋',(EN?'Upcoming attendance':'Nadcházející docházka'),occ.length?String(occ.reduce((s,o)=>s+o.paid+o.free,0)):'') + wrap(attRows);
 
-  const gymSelHtml = teamGyms.length>1 ? `<select id="gtdGymSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:8px;">${teamGyms.map(g=>`<option value="${g.id}" ${g.id===_gtdGym?'selected':''}>🏛️ ${escapeHtml(g.name)}</option>`).join('')}</select>` : '';
+  const gymSelHtml = teamGyms.length>1 ? `<select id="gtdGymSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:8px;">${teamGyms.map(g=>`<option value="${g.id}" ${g.id===_gtdGym?'selected':''}>🏛️ ${escapeHtml(g.name)}${g._former?(EN?' \u00b7 disconnected':' \u00b7 odpojeno'):''}</option>`).join('')}</select>` : '';
   const monthSelHtml = `<select id="gtdMonthSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:10px;"><option value="all" ${sel==='all'?'selected':''}>${EN?'All time':'Vše'}</option>${months.map(m=>`<option value="${m.ym}" ${m.ym===sel?'selected':''}>${m.lbl}</option>`).join('')}</select>`;
   const heroLbl = showNet ? (EN?'Net collected · this gym':'Čistě vybráno · tento gym') : (EN?'Generated for the gym':'Vygenerováno pro gym');
   const heroSub = showNet
@@ -7652,7 +7699,8 @@ async function renderGymTeamDash(){
 
   const _bothModes = !!(currentUser&&currentUser.gym_payout_account) && !!window._gtHasGymRevenue;
   const modeToggleHtml = _bothModes ? `<div style="display:flex;gap:6px;margin-bottom:10px;"><button id="gtdModeNet" style="flex:1;padding:9px;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';border:1px solid var(--border);background:${_gtdMode==='gross'?'var(--surf)':'var(--dark)'};color:${_gtdMode==='gross'?'var(--dark)':'#fff'};">${EN?'My net':'Můj net'}</button><button id="gtdModeGross" style="flex:1;padding:9px;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';border:1px solid var(--border);background:${_gtdMode==='gross'?'var(--dark)':'var(--surf)'};color:${_gtdMode==='gross'?'#fff':'var(--dark)'};">${EN?'For the gym':'Pro gym'}</button></div>` : '';
-  box.innerHTML = modeToggleHtml + gymSelHtml + monthSelHtml + heroHtml + cardsHtml + note
+  const _formerBanner = gymObj._former ? `<div style="background:#FFF4E5;border:1px solid #F0C674;border-radius:12px;padding:13px 15px;margin-bottom:12px;"><div style="font-weight:800;font-size:13px;color:#8a5a00;margin-bottom:4px;">\ud83d\udd0c ${EN?'Former gym \u00b7 disconnected':'B\u00fdval\u00fd gym \u00b7 odpojeno'}</div><div style="font-size:12px;color:#7a5a1a;line-height:1.5;margin-bottom:10px;">${EN?'You are no longer on this gym team, but all your data and metrics stay here. Your members keep being charged to your Stripe. You can move your active business (members & merch) to another gym, or hide this from your panel.':'U\u017e nejsi v t\u00fdmu tohoto gymu, ale v\u0161echna tvoje data a metriky tu z\u016fst\u00e1vaj\u00ed. Tv\u00fdm \u010dlen\u016fm se d\u00e1l strh\u00e1v\u00e1 na tv\u016fj Stripe. M\u016f\u017ee\u0161 p\u0159en\u00e9st sv\u016fj aktivn\u00ed byznys (\u010dleny & merch) do jin\u00e9ho gymu, nebo to schovat z panelu.'}</div><div style="display:flex;gap:8px;flex-wrap:wrap;"><button id="gtdPortBtn" style="flex:1;min-width:150px;padding:11px;border-radius:10px;border:none;background:#0A7A4F;color:#fff;font-weight:700;font-size:13px;cursor:pointer;font-family:'DM Sans';">${EN?'Move my business \u2192':'P\u0159en\u00e9st m\u016fj byznys \u2192'}</button><button id="gtdHideBtn" style="flex:0 0 auto;padding:11px 14px;border-radius:10px;border:1px solid #E0C080;background:transparent;color:#8a5a00;font-weight:700;font-size:13px;cursor:pointer;font-family:'DM Sans';">${EN?'Hide':'Skr\u00fdt'}</button></div></div>` : '';
+  box.innerHTML = modeToggleHtml + gymSelHtml + (gymObj._former?_formerBanner:'') + monthSelHtml + heroHtml + cardsHtml + note
     + `<div id="gtdStats">` + _ownerPanels + `<div id="gtdTrend"></div></div>` + btnsHtml;
 
   // selectors
@@ -7660,6 +7708,7 @@ async function renderGymTeamDash(){
   const ms=$('gtdMonthSel'); if(ms) ms.onchange=()=>{ _gtdMonth=ms.value; renderGymTeamDash(); };
   if($('gtdModeNet')) $('gtdModeNet').onclick=()=>{ _gtdMode='net'; renderGymTeamDash(); };
   if($('gtdModeGross')) $('gtdModeGross').onclick=()=>{ _gtdMode='gross'; renderGymTeamDash(); };
+  if(gymObj._former){ const _pb=$('gtdPortBtn'); if(_pb) _pb.onclick=()=>_portCoachBusiness(gymObj); const _hb=$('gtdHideBtn'); if(_hb) _hb.onclick=()=>_hideFormerGym(gymObj.id, gymObj.name); }
   // accordions collapse (default closed)
   const stats=$('gtdStats');
   if(stats){ stats.querySelectorAll('.dashSecHdr').forEach((h)=>{ const g=h.nextElementSibling; const ar=h.querySelector('.dashAccArr'); if(g){ g.style.display='none'; if(ar) ar.style.transform='rotate(-90deg)'; } h.onclick=()=>{ if(!g) return; const closed=g.style.display==='none'; g.style.display=closed?'':'none'; if(ar) ar.style.transform=closed?'':'rotate(-90deg)'; }; }); }
@@ -9041,7 +9090,7 @@ function _recPrice(occ){
 async function renderRecMerchOrders(){
   const box=$('recList'); if(!box) return; const EN=LANG==='en';
   box.innerHTML=`<p style="color:var(--light);padding:14px;text-align:center;">${EN?'Loading…':'Načítám…'}</p>`;
-  let orders=[]; try{ const { data }=await supaClient.from('merch_orders').select('*').eq('gym_id',_recGymId).eq('status','paid').order('created_at',{ascending:true}); orders=data||[]; }catch(e){}
+  let orders=[]; try{ const { data }=await supaClient.from('merch_orders').select('*').eq('gym_id',_recGymId).is('coach_id',null).eq('status','paid').order('created_at',{ascending:true}); orders=data||[]; }catch(e){}
   let html=`<button id="recMerchBack" style="background:none;border:none;color:var(--mid);font-size:13px;cursor:pointer;margin-bottom:12px;padding:0;font-family:'DM Sans';">‹ ${EN?'Back':'Zpět'}</button><div style="font-weight:800;font-size:15px;margin-bottom:10px;">📦 ${EN?'Merch to hand out':'Merch k výdeji'}</div>`;
   if(!orders.length){ html+=`<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;">${EN?'Nothing pending — all handed out. ✅':'Nic nečeká — vše vydáno. ✅'}</p>`; }
   orders.forEach(o=>{ const catL=o.category?merchCatLabel(o.category):'';
@@ -9650,7 +9699,7 @@ async function renderGymMerchList(){
   });
   box.innerHTML=html;
   const ab=$('merchAddBtn'); if(ab) ab.onclick=()=>openMerchForm(null,null);
-  const ob=$('merchOrdersBtn'); if(ob){ if(_merchCtx) ob.style.display='none'; else ob.onclick=()=>renderMerchOrders(); }
+  const ob=$('merchOrdersBtn'); if(ob){ ob.style.display=''; ob.onclick=()=>renderMerchOrders(); }
   box.querySelectorAll('.merchEdit').forEach(b=>{ b.onclick=()=>openMerchForm(b.dataset.id, items.find(x=>x.id===b.dataset.id)); });
 }
 function openMerchForm(id,m){
@@ -9744,23 +9793,24 @@ async function buyMerch(merchId){
 }
 let _merchOrdFilter='paid';
 async function renderMerchOrders(){
-  const box=$('gymMerchContent'); if(!box) return; const EN=LANG==='en';
+  const _coach=!!_merchCtx; const _gd=_mGd(); const box=_mBox(); if(!box) return; const EN=LANG==='en';
   box.innerHTML=`<p style="text-align:center;color:var(--light);padding:20px;">${EN?'Loading…':'Načítám…'}</p>`;
-  let orders=[]; try{ const { data }=await supaClient.from('merch_orders').select('*').eq('gym_id',_myGymData.id).order('created_at',{ascending:false}); orders=data||[]; }catch(e){}
-  const cur=_myGymData.currency||'CZK', sym=cur==='EUR'?'€':cur==='USD'?'$':'Kč';
+  let orders=[]; try{ let _q=supaClient.from('merch_orders').select('*'); _q=_coach?_q.eq('coach_id',_merchCtx.coachId):_q.eq('gym_id',_gd.id).is('coach_id',null); const { data }=await _q.order('created_at',{ascending:false}); orders=data||[]; }catch(e){}
+  const cur=(_gd&&_gd.currency)||'CZK', sym=cur==='EUR'?'€':cur==='USD'?'$':'Kč';
   const nNew=orders.filter(o=>o.status!=='fulfilled').length, nDone=orders.filter(o=>o.status==='fulfilled').length;
   const shown=orders.filter(o=> _merchOrdFilter==='fulfilled' ? o.status==='fulfilled' : o.status!=='fulfilled');
   const tab=(v,lbl,cnt)=>`<button class="merchOrdTab" data-v="${v}" style="flex:1;padding:9px;border:none;border-radius:9px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';background:${_merchOrdFilter===v?'var(--dark)':'var(--surf)'};color:${_merchOrdFilter===v?'#fff':'var(--mid)'};">${lbl}${cnt?(' ('+cnt+')'):''}</button>`;
-  let html=`<button id="merchBackBtn2" style="background:none;border:none;color:var(--mid);font-size:13px;cursor:pointer;margin-bottom:12px;padding:0;font-family:'DM Sans';">‹ ${EN?'Back to products':'Zpět na produkty'}</button>`;
+  let html=`<button id="merchBackBtn2" style="background:none;border:none;color:var(--mid);font-size:13px;cursor:pointer;margin-bottom:12px;padding:0;font-family:'DM Sans';">← ${EN?'Back to products':'Zpět na produkty'}</button>`;
   html+=`<div style="display:flex;gap:7px;margin-bottom:14px;">${tab('paid',EN?'New':'Nové',nNew)}${tab('fulfilled',EN?'Fulfilled':'Vyřízené',nDone)}</div>`;
   if(!shown.length){ html+=`<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;">${_merchOrdFilter==='fulfilled'?(EN?'No fulfilled orders yet.':'Zatím žádné vyřízené objednávky.'):(EN?'No new orders. 🎉':'Žádné nové objednávky. 🎉')}</p>`; }
   shown.forEach(o=>{ const done=o.status==='fulfilled';
-    html+=`<div style="border:1px solid var(--border);border-radius:12px;padding:11px;margin-bottom:9px;${done?'opacity:.7;':''}"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div style="min-width:0;"><div style="font-weight:700;font-size:13.5px;">${escapeHtml(o.item_name||'—')}${o.variant?` <span style="color:var(--mid);font-weight:500;">(${escapeHtml(o.variant)})</span>`:''}${o.qty>1?` ×${o.qty}`:''}</div><div style="font-size:12px;color:var(--mid);">${escapeHtml(o.buyer_name||'—')} · ${fmtPrice(o.amount,cur)} ${sym} · ${new Date(o.created_at).toLocaleDateString()}</div></div>${done?`<div style="display:flex;flex-direction:column;align-items:flex-end;gap:5px;"><span style="font-size:11px;color:var(--green);font-weight:700;white-space:nowrap;">✓ ${EN?'Done':'Vyřízeno'}</span><button class="merchRevert" data-id="${o.id}" style="background:none;border:none;color:var(--light);font-size:11px;cursor:pointer;font-family:'DM Sans';white-space:nowrap;padding:0;">↩ ${EN?'Undo':'Vrátit'}</button></div>`:`<button class="merchFulfill" data-id="${o.id}" data-sid="${o.student_id||''}" data-item="${escapeHtml(o.item_name||'')}" style="background:var(--dark);color:#fff;border:none;border-radius:8px;padding:6px 10px;font-size:11.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${EN?'Mark done':'Vyřídit'}</button>`}</div></div>`;
+    html+=`<div style="border:1px solid var(--border);border-radius:12px;padding:11px;margin-bottom:9px;${done?'opacity:.7;':''}"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div style="min-width:0;"><div style="font-weight:700;font-size:13.5px;">${escapeHtml(o.item_name||'')}${o.variant?` <span style="color:var(--mid);font-weight:500;">(${escapeHtml(o.variant)})</span>`:''}${o.qty>1?` ×${o.qty}`:''}</div><div style="font-size:12px;color:var(--mid);">${escapeHtml(o.buyer_name||'')} · ${fmtPrice(o.amount,cur)} ${sym} · ${new Date(o.created_at).toLocaleDateString()}</div></div>${done?`<div style="display:flex;flex-direction:column;align-items:flex-end;gap:5px;"><span style="font-size:11px;color:var(--green);font-weight:700;white-space:nowrap;">✓ ${EN?'Done':'Vyřízeno'}</span><button class="merchRevert" data-id="${o.id}" style="background:none;border:none;color:var(--light);font-size:11px;cursor:pointer;font-family:'DM Sans';white-space:nowrap;padding:0;">↩ ${EN?'Undo':'Vrátit'}</button></div>`:`<button class="merchFulfill" data-id="${o.id}" data-sid="${o.student_id||''}" data-item="${escapeHtml(o.item_name||'')}" style="background:var(--dark);color:#fff;border:none;border-radius:8px;padding:6px 10px;font-size:11.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${EN?'Mark done':'Vyřídit'}</button>`}</div></div>`;
   });
   box.innerHTML=html;
   $('merchBackBtn2').onclick=()=>renderGymMerchList();
   box.querySelectorAll('.merchOrdTab').forEach(b=>{ b.onclick=()=>{ _merchOrdFilter=b.dataset.v; renderMerchOrders(); }; });
-  box.querySelectorAll('.merchFulfill').forEach(b=>{ b.onclick=async()=>{ b.disabled=true; try{ await supaClient.from('merch_orders').update({status:'fulfilled'}).eq('id',b.dataset.id); await _notifyMerchFulfilled(b.dataset.sid, b.dataset.item, (_myGymData&&_myGymData.name)||'', b.dataset.id); toast(EN?'✅ Done — buyer notified':'✅ Vyřízeno — kupující upozorněn'); renderMerchOrders(); }catch(e){ toast('⚠️'); b.disabled=false; } }; });
+  const _pickup=_coach?((currentUser&&currentUser.name)||''):((_myGymData&&_myGymData.name)||'');
+  box.querySelectorAll('.merchFulfill').forEach(b=>{ b.onclick=async()=>{ b.disabled=true; try{ await supaClient.from('merch_orders').update({status:'fulfilled'}).eq('id',b.dataset.id); await _notifyMerchFulfilled(b.dataset.sid, b.dataset.item, _pickup, b.dataset.id); toast(EN?'✓ Done · buyer notified':'✓ Vyřízeno · kupující upozorněn'); renderMerchOrders(); }catch(e){ toast('⚠️'); b.disabled=false; } }; });
   box.querySelectorAll('.merchRevert').forEach(b=>{ b.onclick=async()=>{ b.disabled=true; try{ await supaClient.from('merch_orders').update({status:'paid'}).eq('id',b.dataset.id); renderMerchOrders(); }catch(e){ toast('⚠️'); b.disabled=false; } }; });
 }
 async function _notifyMerchFulfilled(studentId, item, gymName, orderId){
@@ -17969,10 +18019,10 @@ async function showPaidPopup(){
       try{
         const { data: prod } = await supaClient.from('gym_merch').select('*').eq('id',mid).single();
         if(prod){
-          await supaClient.from('merch_orders').insert({ gym_id:gid, merch_id:mid, student_id:currentUser.id, item_name:prod.name, qty, variant:variant||null, amount:(prod.price||0)*qty, currency:prod.currency||'CZK', status:'paid', buyer_name:currentUser.name||null, category:prod.category||null });
+          await supaClient.from('merch_orders').insert({ gym_id:gid, coach_id:prod.coach_id||null, merch_id:mid, student_id:currentUser.id, item_name:prod.name, qty, variant:variant||null, amount:(prod.price||0)*qty, currency:prod.currency||'CZK', status:'paid', buyer_name:currentUser.name||null, category:prod.category||null });
           if(prod.stock!=null){ const ns=Math.max(0,(prod.stock||0)-qty); await supaClient.from('gym_merch').update({ stock:ns }).eq('id',mid); }
           const { data: _gym } = await supaClient.from('gyms').select('owner_id,name').eq('id',gid).single();
-          if(_gym && _gym.owner_id){ await supaClient.from('notifications').insert({ user_id:_gym.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'merch_order', item:prod.name }), message:`🛍️ ${LANG==='en'?((currentUser?.name||'A member')+' bought '+prod.name+(variant?(' ('+variant+')'):'')):((currentUser?.name||'Člen')+' koupil '+prod.name+(variant?(' ('+variant+')'):''))}` }); if(typeof updateNotifBadge==='function') updateNotifBadge(); }
+          const _notifyTo=prod.coach_id||(_gym&&_gym.owner_id); if(_notifyTo){ await supaClient.from('notifications').insert({ user_id:_notifyTo, type:'booking', read:false, data: JSON.stringify({ kind:'merch_order', item:prod.name }), message:`🛍️ ${LANG==='en'?((currentUser?.name||'A member')+' bought '+prod.name+(variant?(' ('+variant+')'):'')):((currentUser?.name||'Člen')+' koupil '+prod.name+(variant?(' ('+variant+')'):''))}` }); if(typeof updateNotifBadge==='function') updateNotifBadge(); }
         }
         toast(LANG==='en'?'✅ Order placed — thank you!':'✅ Objednávka odeslána — díky!');
       }catch(e){ console.error('merch_pay',e); }
