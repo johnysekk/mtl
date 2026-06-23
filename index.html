@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QIW deck location subtitle is now deck-mode aware. New _setLocText() helper: gym deck -> "{city} - gymy serazeny dle vzdalenosti" / "gyms sorted by distance"; coach deck -> "{city} - kouci serazeni dle vzdalenosti a kvality" / "coaches sorted by distance & quality". Called from onLocSet (initial) AND setDeckMode (so switching Kouci<->Gymy updates the line). Was hardcoded to "kouci ... dle vzdalenosti" even on the gym deck. -->
+<!-- MTL build: QIX NEW-PROVIDER DECK BOOST (fair, all new providers, not just referred). Helper _isNewProvider(createdAt) = account younger than NEW_PROV_DAYS(30). COACH deck: +NEW_PROV_COACH_BOOST(15) added to _score in the sort (score is ~0..100, distance penalty up to 48, so +15 ~= being 12-13km closer / 15 pts better - a real nudge but a clearly better/closer coach still wins; works in online mode too). GYM deck (sorts purely by distance): boosted gym is sorted as if NEW_PROV_GYM_KM(12)km closer (virtual distance reduction) BUT fillGymCard still shows the REAL distKm (honest). coach object now carries createdAt (c.created_at via _mapCoachRow); gym uses its raw row c.g.created_at. Boost fades after 30 days. Companion: session.js welcome 0% flipped from referred-only to ALL new providers (fairness); referral pull stays on the referrer Liga ladder. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -3808,6 +3808,7 @@ function _mapCoachRow(c){
     return {
       id: c.id,                          // uuid
       profileId: c.id,
+      createdAt: c.created_at,           // new-provider deck boost window
       referral_optin: c.referral_optin,  // referral discount toggle (default ON when null)
       name: c.name || 'Kouč',
       emoji: c.emoji || '🥋',
@@ -3980,9 +3981,10 @@ function buildFiltered(){
   list.forEach(c=>{ if(c.avail==='holiday') c._score -= 100000; });  // dovolená propadne na konec
   const onlineMode = activeFilter==='online';
   list.sort((a,b)=>{
-    if(onlineMode || !userLoc) return b._score - a._score;
-    const ra = a._score - Math.min(a.distKm??40, 40)*1.2;
-    const rb = b._score - Math.min(b.distKm??40, 40)*1.2;
+    const ba=_isNewProvider(a.createdAt)?NEW_PROV_COACH_BOOST:0, bb=_isNewProvider(b.createdAt)?NEW_PROV_COACH_BOOST:0;
+    if(onlineMode || !userLoc) return (b._score+bb) - (a._score+ba);
+    const ra = (a._score+ba) - Math.min(a.distKm??40, 40)*1.2;
+    const rb = (b._score+bb) - Math.min(b.distKm??40, 40)*1.2;
     return rb - ra;
   });
 
@@ -4542,6 +4544,12 @@ function renderGymTagFilters(){
   box.innerHTML=tags.map(t=>`<div class="pill${((_gymTagFilter||null)===t.v)?' active':''}" data-gt="${t.v==null?'':t.v}">${t.e?t.e+' ':''}${t.lbl}</div>`).join('');
   box.querySelectorAll('.pill').forEach(el=>el.onclick=()=>{ _gymTagFilter=el.dataset.gt||null; renderGymTagFilters(); init(); });
 }
+// NEW-PROVIDER DECK BOOST: a modest, time-limited visibility leg-up so a brand-new provider can be
+// discovered before they have ratings/proximity advantage. NOT pay-to-win (cannot be bought, fades after
+// ~30 days). Kept small so a clearly better / much-closer provider still wins. Available to EVERY new
+// provider (fair), not only referred ones.
+const NEW_PROV_DAYS=30, NEW_PROV_COACH_BOOST=15, NEW_PROV_GYM_KM=12;
+function _isNewProvider(createdAt){ if(!createdAt) return false; const t=new Date(createdAt).getTime(); if(isNaN(t)) return false; return (Date.now()-t) < NEW_PROV_DAYS*86400000; }
 function buildGymFiltered(){
   let list=[...GYMS];
   /* vlastní gymy zůstávají v decku (owner/tým si může rezervovat lekci) */
@@ -4549,7 +4557,11 @@ function buildGymFiltered(){
   if(isMultiDiscipline()){ if(_deckDisc){ list=list.filter(g=>g.disciplines.includes(_deckDisc)); } else { const _pc=prefCategory(); list=list.filter(g=>(g.disciplines||[]).some(d=>discCat(d)===_pc)); } }
   if(_gymTagFilter){ list=list.filter(g=>(g.levels||[]).includes(_gymTagFilter)); }
   if(searchQuery){ const q=searchQuery.toLowerCase(); list=list.filter(g=> g.name.toLowerCase().includes(q) || g.city.toLowerCase().includes(q)); }
-  if(userLoc) list.sort((a,b)=>((a.distKm==null?9e9:a.distKm)-(b.distKm==null?9e9:b.distKm)));
+  if(userLoc) list.sort((a,b)=>{
+    const ea=(a.distKm==null?9e9:a.distKm) - (_isNewProvider(a.g&&a.g.created_at)?NEW_PROV_GYM_KM:0);
+    const eb=(b.distKm==null?9e9:b.distKm) - (_isNewProvider(b.g&&b.g.created_at)?NEW_PROV_GYM_KM:0);
+    return ea-eb;
+  });
   _gymLocalCount = userLoc ? list.filter(g=>g.distKm!=null && g.distKm<=GYM_LOCAL_KM).length : list.length;
   _deckExtended = false;
   // passive demand: if there are 0 gyms of the active discipline within 25km, log that gap silently
