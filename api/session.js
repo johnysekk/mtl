@@ -81,10 +81,12 @@ async function recordTransaction(acct, pi, fields) {
     try {
       if (!existing && mtlFee > 0) {
         let prov = null;
-        if (fields.coach_id) {
-          const cp = await sbGet(`profiles?id=eq.${fields.coach_id}&select=id,welcome_free_until,created_at,stripe_account,gym_payout_account`);
-          const c = cp && cp[0];
-          if (c && (c.stripe_account === acct || c.gym_payout_account === acct)) prov = c;
+        // Resolve the provider by the ACCOUNT that actually received the money — covers EVERY type
+        // (gym membership/drop-in/event paid to the gym owner, AND coach 1:1 / coach-owned membership /
+        // coach merch / coach group classes paid to a coach with their own Stripe).
+        if (acct) {
+          const pr2 = await sbGet(`profiles?or=(stripe_account.eq.${acct},gym_payout_account.eq.${acct})&select=id,welcome_free_until,created_at&limit=1`);
+          if (pr2 && pr2[0]) prov = pr2[0];
         }
         if (!prov && fields.gym_id) {
           const gy = await sbGet(`gyms?id=eq.${fields.gym_id}&select=owner_id`);
