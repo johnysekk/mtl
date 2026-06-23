@@ -74,10 +74,43 @@ async function recordTransaction(acct, pi, fields) {
     }
     if (gross == null) return { status: 'no-charge-data', payId: pi };
 
+    // WELCOME 0%: a REFERRED provider's first 30 days = MTL takes 0% (we refund our application fee
+    // back to them). The window opens at their FIRST sale (set once here) and is checked PER CHARGE, so a
+    // membership renewal that bills after 30 days pays the normal rate — it can NEVER become "0% forever".
+    let welcomeFreed = false;
+    try {
+      if (!existing && mtlFee > 0) {
+        let prov = null;
+        if (fields.coach_id) {
+          const cp = await sbGet(`profiles?id=eq.${fields.coach_id}&select=id,referred_by,welcome_free_until,stripe_account,gym_payout_account`);
+          const c = cp && cp[0];
+          if (c && (c.stripe_account === acct || c.gym_payout_account === acct)) prov = c;
+        }
+        if (!prov && fields.gym_id) {
+          const gy = await sbGet(`gyms?id=eq.${fields.gym_id}&select=owner_id`);
+          const oid = gy && gy[0] && gy[0].owner_id;
+          if (oid) { const op = await sbGet(`profiles?id=eq.${oid}&select=id,referred_by,welcome_free_until`); prov = op && op[0]; }
+        }
+        if (prov && prov.referred_by) {
+          const nowMs = Date.now();
+          let until = prov.welcome_free_until ? new Date(prov.welcome_free_until).getTime() : null;
+          if (until == null) { // first sale -> open the 30-day welcome window once
+            until = nowMs + 30 * 86400000;
+            await sbPatch(`profiles?id=eq.${prov.id}`, { welcome_free_until: new Date(until).toISOString() });
+          }
+          if (nowMs < until) {
+            const fees = await stripe.applicationFees.list({ charge: chargeId, limit: 1 });
+            const feeId = fees && fees.data && fees.data[0] && fees.data[0].id;
+            if (feeId) { await stripe.applicationFees.createRefund(feeId); welcomeFreed = true; }
+          }
+        }
+      }
+    } catch (e) { console.error('welcome 0% refund', e.message); }
+
     const row = {
       charge_id: chargeId, payee_account: acct || null, type: fields.type,
       member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null, discipline: fields.discipline || null,
-      gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, net_amount: net, currency, status: 'paid',
+      gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, mtl_fee_refunded: (welcomeFreed ? mtlFee : 0), net_amount: net, currency, status: 'paid',
       income_class: fields.income_class || null,
     };
     if (existing) {
