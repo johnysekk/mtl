@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QIU coach can cancel his OWN members membership with refund on his OWN Stripe - exactly like the gym owner. Coaches had no per-member UI (only aggregate), so added openCoachMembers (bottom-sheet listing his coach-owned active/cancelling gym_memberships where coach_id=me AND paid_to=coach, across gyms) + coachRemoveMember = clone of ownerRemoveMember reusing the same _pickCancelMode 3-option chooser (period end / immediate no-refund / immediate full 100% refund) but resolving the connected account to the COACH (gym_payout_account||stripe_account) so refund + MTL application_fee reversal hit the coach Stripe via cancel-membership.js immediate=1&refund=1. A My-members button shows in the team dashboard, gated on the coach having a payout account (_paysCoach). cancel-membership.js needed no change (it takes any connected account via gymAccount). -->
+<!-- MTL build: QIV gym leaderboard REBUILT as proposed (quality + brackets, not raw size). (A) gymLbScore now = retention*45 (biggest lever) + log2(active)*10 (size helps but never dominates) + rating*25 + drops*10 + coaches*8 + events*12 - so a small high-retention/well-rated gym can realistically out-rank a big churny one, and within the existing city x discipline filter (glDiscRow/_glDisc + city/country/world already present) the addressable race is winnable. Old formula was active*8 = pure-size-dominated. (B) info-box copy rewritten to explain retention-first + log-size + filter by city/discipline. (C) scoreBreak now surfaces Retention% prominently. (D) FOUNDING-#1 banner: when a city or discipline-filtered scope has <3 gyms, a gilded Zakladajici scena / Founding scene banner frames the #1 as a pioneer (being early is the prize) instead of a dead 1-of-1 board. Discipline split for gyms already existed (renderGlDiscChips) - confirmed, not rebuilt. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -8103,7 +8103,17 @@ async function renderEventLeaderboard(){
   box.innerHTML=evs.slice(0,50).map((e,i)=>{ const medal=i===0?'🥇':i===1?'🥈':i===2?'🥉':`#${i+1}`; const dt=e.starts_at?new Date(e.starts_at).toLocaleDateString(LANG==='en'?'en-GB':'cs-CZ',{day:'numeric',month:'short',year:'numeric'}):''; const em=(EVENT_TYPES.find(t=>t.v===e.type)||{emoji:'🎪'}).emoji; const av=e.poster?`<div style="width:46px;height:46px;border-radius:12px;background:#000 url('${e.poster}') center/cover;flex-shrink:0;"></div>`:`<div style="width:46px;height:46px;border-radius:12px;background:var(--dark);display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0;">${em}</div>`; return `<div class="elRow" data-id="${e.id}" style="display:flex;align-items:center;gap:12px;padding:11px;border-radius:14px;cursor:pointer;background:var(--surf);border:1px solid var(--border);margin-bottom:8px;"><div style="font-family:'Bebas Neue';font-size:20px;min-width:34px;text-align:center;color:var(--mid);">${medal}</div>${av}<div style="flex:1;min-width:0;"><div style="font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(e.title||'')}</div><div style="font-size:12px;color:var(--mid);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(e._gymName||'')}${e._gymName?' · ':''}${dt}</div><div style="font-size:12px;color:var(--mid);margin-top:2px;">👥 ${e._att}${e._rcnt?` · ⭐ ${e._avg.toFixed(1)} (${e._rcnt})`:''}</div></div><div style="font-family:'Bebas Neue';font-size:20px;color:var(--red);min-width:30px;text-align:right;">${e._elScore}</div></div>`; }).join('');
   box.querySelectorAll('.elRow').forEach(r=>r.onclick=()=>{ const e=evs.find(x=>String(x.id)===String(r.dataset.id)); if(e) openEventView(e); });
 }
-function gymLbScore(s){ s=s||{}; const active=Math.max(0,(s.members||0)-(s.churn||0)); const rateBonus=(s.ratingCount>=5)?Math.round(((s.ratingAvg||0)-3)*8):0; return Math.max(0, Math.round(active*8 + (s.drops||0)*1.5 + (s.coaches||0)*5 + rateBonus + Math.min(Math.round((s.eventScore||0)*1.2),80))); }
+function gymLbScore(s){ s=s||{};
+  const members=Math.max(0,s.members||0);
+  const active=Math.max(0,members-(s.churn||0));
+  const ret=members>0?active/members:0;                 // retention quality 0..1 (biggest lever)
+  const sizeF=Math.log2(active+1);                       // size LOG-scaled (helps, never dominates)
+  const ratingF=(s.ratingCount>=5)?Math.max(0,((s.ratingAvg||0)-3))/2:0; // 0..1 (3star baseline)
+  const dropF=Math.min((s.drops||0),40)/40;              // recent activity 0..1
+  const coachF=Math.min((s.coaches||0),8)/8;             // team 0..1
+  const eventF=Math.min((s.eventScore||0),60)/60;        // events 0..1
+  const score = sizeF*10 + ret*45 + ratingF*25 + dropF*10 + coachF*8 + eventF*12;
+  return Math.max(0, Math.round(score)); }
 async function renderGymLeaderboard(){
   const list=$('gymLbList'); if(!list) return;
   list.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;font-size:14px;">${L('Načítám...')}</p>`;
@@ -8140,23 +8150,27 @@ async function renderGymLeaderboard(){
   const EN=LANG==='en';
   const infoBox=document.createElement('div');
   infoBox.style.cssText='margin-bottom:12px;';
-  infoBox.innerHTML=`<button id="glInfoBtn" style="background:none;border:none;color:var(--blue);font-size:12.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';padding:4px 0;">ⓘ ${EN?'How is the score calculated?':'Jak se počítá skóre?'}</button>
-    <div id="glInfoBox" style="display:none;background:var(--surf);border-radius:12px;padding:12px 14px;font-size:12.5px;color:var(--mid);line-height:1.65;margin-top:4px;">
-      ${EN
-        ? 'Your score grows with the <b>size and recent activity</b> of your gym:<br>🎟️ <b>Members</b> — your current paying members<br>🥊 <b>Drop-ins</b> — single classes in the <b>last 30 days</b><br>👥 <b>Coaches</b> — your active team<br>⭐ <b>Rating</b> — from people who trained here (small bonus once you have 5+ ratings)<br>🎪 <b>Events</b> — successfully held events also count: more attendance, better ratings and more recent = more points, up to a cap (event ratings also lift your gym\'s stars)<br><br>It rewards a strong, active gym — and because drop-ins only count the last 30 days, every month is a fresh race.'
-        : 'Skóre roste s <b>velikostí a nedávnou aktivitou</b> gymu:<br>🎟️ <b>Členové</b> — aktuální platící členové<br>🥊 <b>Jednorázové vstupy</b> — jednorázové lekce za <b>posledních 30 dní</b><br>👥 <b>Kouči</b> — aktivní tým<br>⭐ <b>Hodnocení</b> — od lidí, co tu trénovali (malý bonus od 5+ hodnocení)<br>🎪 <b>Akce</b> — započítávají se i úspěšně proběhlé akce: vyšší účast, lepší hodnocení a novější = víc bodů, do stropu (hodnocení akcí navíc zvedají i hvězdičky gymu)<br><br>Odměňuje silný a aktivní gym — a protože se drop-iny počítají jen za 30 dní, je každý měsíc tak trochu nový závod.'}
-    </div>`;
+  infoBox.innerHTML=`<button id="glInfoBtn" style="background:none;border:none;color:var(--blue);font-size:12.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';padding:4px 0;">\u2139\ufe0f ${EN?'How is the score calculated?':'Jak se po\u010d\u00edt\u00e1 sk\u00f3re?'}</button><div id="glInfoBox" style="display:none;background:var(--surf);border-radius:12px;padding:12px 14px;font-size:12.5px;color:var(--mid);line-height:1.65;margin-top:4px;">${EN?'The score rewards a <b>well-run</b> gym, not just a big one:<br>\ud83d\udc9a <b>Retention</b> \u2014 how many members stay (the biggest factor; a small gym with loyal members can outrank a big one with churn)<br>\u2b50 <b>Rating</b> \u2014 from people who trained here (bonus from 5+ ratings)<br>\ud83d\udccf <b>Size</b> \u2014 counts, but on a <b>log scale</b>, so it helps without crushing smaller gyms<br>\ud83c\udf9f\ufe0f <b>Recent activity</b> \u2014 drop-ins in the last 30 days<br>\ud83e\uddd1\u200d\ud83c\udfeb <b>Team</b> & \ud83c\udfa4 <b>events held</b> add a little more.<br><br>Filter by your <b>city and discipline</b> to see the race that actually matters to you.':'Sk\u00f3re odm\u011b\u0148uje <b>dob\u0159e veden\u00fd</b> gym, ne jen velk\u00fd:<br>\ud83d\udc9a <b>Retence</b> \u2014 kolik \u010dlen\u016f z\u016fst\u00e1v\u00e1 (nejv\u011bt\u0161\u00ed faktor; mal\u00fd gym s v\u011brn\u00fdmi \u010dleny p\u0159ebije velk\u00fd s odlivem)<br>\u2b50 <b>Hodnocen\u00ed</b> \u2014 od lid\u00ed, co tu tr\u00e9novali (bonus od 5+)<br>\ud83d\udccf <b>Velikost</b> \u2014 po\u010d\u00edt\u00e1 se, ale <b>logaritmicky</b>, takže pom\u00e1h\u00e1, ale nep\u0159ev\u00e1lcuje men\u0161\u00ed gymy<br>\ud83c\udf9f\ufe0f <b>Ned\u00e1vn\u00e1 aktivita</b> \u2014 vstupy za posledn\u00edch 30 dn\u00ed<br>\ud83e\uddd1\u200d\ud83c\udfeb <b>T\u00fdm</b> a \ud83c\udfa4 <b>prob\u011bhl\u00e9 akce</b> p\u0159idaj\u00ed o n\u011bco v\u00edc.<br><br>Filtruj podle <b>m\u011bsta a discipl\u00edny</b> \u2014 uvid\u00ed\u0161 z\u00e1vod, kter\u00fd se t\u011b re\u00e1ln\u011b t\u00fdk\u00e1.'}</div>`;
   list.appendChild(infoBox);
   infoBox.querySelector('#glInfoBtn').onclick=()=>{ const b=infoBox.querySelector('#glInfoBox'); b.style.display = b.style.display==='none'?'block':'none'; };
+  if(listG.length>0 && listG.length<3 && (_glScope==='city' || _glDisc)){
+    const _top=listG[0]; const _dl=_glDisc?((typeof disciplineLabel==='function'?disciplineLabel(_glDisc):_glDisc)):''; const _cl=(_top.city||'').trim();
+    const fb=document.createElement('div');
+    fb.style.cssText='background:linear-gradient(135deg,#FFF4D6,#FFE9A8);border:1.5px solid #E8C24A;border-radius:14px;padding:13px 15px;margin-bottom:12px;';
+    fb.innerHTML=`<div style="font-weight:800;font-size:13px;color:#8a6a12;margin-bottom:3px;">\ud83c\udfdb\ufe0f ${EN?'Founding scene':'Zakl\u00e1daj\u00edc\u00ed sc\u00e9na'}${_dl?(' \u00b7 '+escapeHtml(_dl)):''}${_cl?(' \u00b7 '+escapeHtml(_cl)):''}</div><div style="font-size:12px;color:#7a5a1a;line-height:1.5;">${EN?`<b>${escapeHtml(_top.name||'')}</b> is building the scene here as #1. Being early is the prize \u2014 found the scene, own it.`:`<b>${escapeHtml(_top.name||'')}</b> tu zakl\u00e1d\u00e1 sc\u00e9nu jako #1. B\u00fdt u toho prvn\u00ed je ta v\u00fdhra \u2014 zakl\u00e1d\u00e1\u0161 to tady, vl\u00e1dne\u0161 tomu.`}</div>`;
+    list.appendChild(fb);
+  }
   const scoreBreak=(st)=>{ st=st||{};
+    const _m=st.members||0; const _act=Math.max(0,_m-(st.churn||0)); const _ret=_m>0?Math.round(_act/_m*100):0;
     const row=(label,val)=>`<div style="display:flex;justify-content:space-between;"><span>${label}</span><b style="color:var(--dark);">${val}</b></div>`;
     return `<div style="background:var(--bg);border-radius:10px;padding:10px 12px;margin:0 0 8px;font-size:12.5px;color:var(--mid);line-height:1.8;">
-      ${row('🎟️ '+(EN?'Members':'Členové'), st.members||0)}
-      ${row('🥊 '+(EN?'Drop-ins (30 days)':'Jednorázové vstupy (30 dní)'), st.drops||0)}
-      ${row('👥 '+(EN?'Coaches':'Kouči'), st.coaches||0)}
-      ${st.ratingCount?row('⭐ '+(EN?'Rating':'Hodnocení')+` (${st.ratingCount})`, (st.ratingAvg||0).toFixed(1)+'★'+(st.ratingCount>=5?'':(EN?' · bonus from 5':' · bonus od 5'))):''}
-      ${st.events?row('🎪 '+(EN?'Events held':'Proběhlé akce')+` (${st.events})`, '+'+Math.min(Math.round((st.eventScore||0)*1.2),80)):''}
-      <div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);margin-top:5px;padding-top:5px;font-weight:800;color:var(--dark);"><span>= ${EN?'Score':'Skóre'}</span><b style="color:#B8860B;">${gymLbScore(st)}</b></div>
+      ${row('\ud83d\udc65 '+(EN?'Members':'\u010clenov\u00e9'), _m)}
+      ${row('\ud83d\udc9a '+(EN?'Retention':'Retence'), _ret+'%')}
+      ${st.ratingCount?row('\u2b50 '+(EN?'Rating':'Hodnocen\u00ed')+` (${st.ratingCount})`, (st.ratingAvg||0).toFixed(1)+'\u2605'+(st.ratingCount>=5?'':(EN?' \u00b7 bonus from 5':' \u00b7 bonus od 5'))):''}
+      ${row('\ud83c\udf9f\ufe0f '+(EN?'Drop-ins (30d)':'Vstupy (30 d)'), st.drops||0)}
+      ${row('\ud83e\uddd1\u200d\ud83c\udfeb '+(EN?'Coaches':'Kou\u010di'), st.coaches||0)}
+      ${st.events?row('\ud83c\udfa4 '+(EN?'Events held':'Akce')+` (${st.events})`, st.events):''}
+      <div style="display:flex;justify-content:space-between;border-top:1px solid var(--border);margin-top:5px;padding-top:5px;font-weight:800;color:var(--dark);"><span>= ${EN?'Score':'Sk\u00f3re'}</span><b style="color:#B8860B;">${gymLbScore(st)}</b></div>
     </div>`; };
   if(mine && _myGymData){ const idx=listG.findIndex(g=>g.id===_myGymData.id); if(idx>=0 && $('gymLbMine')){ $('gymLbMine').innerHTML += scoreBreak(listG[idx]._st); } }
   listG.forEach((g,i)=>{
