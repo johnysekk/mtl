@@ -38,7 +38,7 @@ async function sbPatch(table, filter, patch) {
 // Gym jede direct charge na účtu gymu; application_fee MTL končí na platform balance,
 // odkud pošleme 0,5 % základu ambassadorovi dané disciplíny (transfer mezi účty = bez Stripe fee).
 // Vyžaduje: webhook nasazený + naslouchání Connect eventům (event.account je u gym plateb).
-async function payGymAmbassador(discCsv, base, currency, idemKey) {
+async function payGymAmbassador(discCsv, base, currency, idemKey, pi) {
   try {
     if (!base || base <= 0) return;
     const discs = (discCsv || '').split(',').filter(Boolean);
@@ -50,7 +50,7 @@ async function payGymAmbassador(discCsv, base, currency, idemKey) {
     if (!amb) return;
     const cut = Math.round(base * 0.005 * 100); // 0,5 % základu v minor units
     if (cut > 0) await stripe.transfers.create(
-      { amount: cut, currency: (currency || 'czk').toLowerCase(), destination: amb.stripe_account, description: 'MTL Ambassador 0.5% (gym)' },
+      { amount: cut, currency: (currency || 'czk').toLowerCase(), destination: amb.stripe_account, description: 'MTL Ambassador 0.5% (gym)', ...(pi ? { transfer_group: pi } : {}), metadata: { mtl_kind: 'ambassador', ...(pi ? { mtl_pi: pi } : {}) } },
       idemKey ? { idempotencyKey: 'gymamb_' + idemKey } : undefined
     );
   } catch (e) { console.error('payGymAmbassador', e); }
@@ -74,8 +74,27 @@ async function payAmbassador(coachId, amount, currency, disc, idemKey) {
     })());
     if (!amb) return;
     const cut = Math.round(amount * 0.005 * 100); // 0,5 % základu v minor units
-    if (cut > 0) await stripe.transfers.create({ amount: cut, currency: (currency || 'CZK').toLowerCase(), destination: amb.stripe_account, description: 'MTL Ambassador 0.5%' }, idemKey ? { idempotencyKey: 'amb_' + idemKey } : undefined);
+    if (cut > 0) await stripe.transfers.create({ amount: cut, currency: (currency || 'CZK').toLowerCase(), destination: amb.stripe_account, description: 'MTL Ambassador 0.5%', ...(idemKey ? { transfer_group: idemKey } : {}), metadata: { mtl_kind: 'ambassador', ...(idemKey ? { mtl_pi: idemKey } : {}) } }, idemKey ? { idempotencyKey: 'amb_' + idemKey } : undefined);
   } catch (e) { console.error('payAmbassador', e); }
+}
+
+// CLAWBACK: when MTL refunds its own commission, reverse the ambassador's 0.5% proportionally.
+// Finds the ambassador transfer by transfer_group = payment_intent (set at payout) and reverses
+// (transfer.amount * fraction) minus whatever was already reversed (idempotent for partial->full).
+async function clawbackAmbassador(pi, fraction) {
+  try {
+    if (!pi || !(fraction > 0)) return;
+    let list;
+    try { list = await stripe.transfers.list({ transfer_group: pi, limit: 20 }); } catch (e) { console.error('amb list', e.message); return; }
+    for (const tr of (list && list.data) || []) {
+      if (!(tr.metadata && tr.metadata.mtl_kind === 'ambassador')) continue;
+      const target = Math.round((tr.amount || 0) * Math.min(1, fraction));
+      const toReverse = target - (tr.amount_reversed || 0);
+      if (toReverse > 0) {
+        try { await stripe.transfers.createReversal(tr.id, { amount: toReverse, description: 'MTL Ambassador clawback (refund)', metadata: { mtl_clawback: '1', mtl_pi: pi } }); } catch (e) { console.error('amb reversal', e.message); }
+      }
+    }
+  } catch (e) { console.error('clawbackAmbassador', e); }
 }
 
 // Přepíše application_fee_percent na VŠECH aktivních membership subscriptions
@@ -241,7 +260,7 @@ export default async function handler(req, res) {
         }
       } else if (m.mtl_payment_type === 'drop_in' || m.mtl_payment_type === 'membership') {
         // GYM skupinová lekce (direct charge na účtu gymu) → 0,5 % ambassadorovi disciplíny
-        await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id);
+        await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id, s.payment_intent);
         if (m.mtl_payment_type === 'drop_in') { const dpi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id); if (dpi) await recordTransaction(event.account, dpi, { type: 'drop_in', member_id: m.student_id || m.member_id, gym_id: m.gym_id, coach_id: m.coach_profile_id || m.coach_id, plan: m.mtl_plan || 'Drop-in', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side' }); }
         else {
           // MEMBERSHIP (subscription): link the subscription to the row + record the FIRST payment NOW,
@@ -272,7 +291,7 @@ export default async function handler(req, res) {
           const pi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id);
           await sbPatch('event_tickets', `id=eq.${encodeURIComponent(m.ticket_id)}`, { status: 'paid', stripe_ref: pi });
           await recordTransaction(event.account, pi, { type: 'event_ticket', member_id: m.student_id || m.buyer_id, gym_id: m.gym_id, coach_id: m.payout_coach_id, plan: m.mtl_event || 'Event', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side' });
-          await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id);
+          await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id, s.payment_intent);
           try { await sendTicketEmail(s, m); } catch (e) { console.error('ticket email', e.message); }
         }
       }
@@ -283,9 +302,10 @@ export default async function handler(req, res) {
         const full = ch.amount_refunded >= ch.amount_captured;
         const pct = ch.amount_captured ? Math.round((ch.amount_refunded / ch.amount_captured) * 100) : 100;
         await sbPatch('bookings', `payment_intent=eq.${encodeURIComponent(pi)}`, full ? { status: 'cancelled', refund_pct: pct } : { refund_pct: pct });
-        let mtlFeeRefunded = 0;
-        try { if (ch.application_fee) { const afId = typeof ch.application_fee === 'string' ? ch.application_fee : ch.application_fee.id; const af = await stripe.applicationFees.retrieve(afId); mtlFeeRefunded = af.amount_refunded || 0; } } catch (e) { console.error('appfee refund', e.message); }
+        let mtlFeeRefunded = 0, _afFrac = 0;
+        try { if (ch.application_fee) { const afId = typeof ch.application_fee === 'string' ? ch.application_fee : ch.application_fee.id; const af = await stripe.applicationFees.retrieve(afId); mtlFeeRefunded = af.amount_refunded || 0; if (af.amount) _afFrac = (af.amount_refunded || 0) / af.amount; } } catch (e) { console.error('appfee refund', e.message); }
         try { await sbPatch('transactions', `payment_intent=eq.${encodeURIComponent(pi)}`, { status: full ? 'refunded' : 'partial_refund', refund_amount: ch.amount_refunded, mtl_fee_refunded: mtlFeeRefunded }); } catch (e) {}
+        if (_afFrac > 0) await clawbackAmbassador(pi, _afFrac);
       }
     } else if (event.type === 'customer.subscription.deleted') {
       // Exclusive MTL Partner zrušen / neuhrazen → vypni partner sazby
