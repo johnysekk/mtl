@@ -28,7 +28,7 @@ export default async function handler(req, res) {
     // 1) Gather all partner subscription IDs from Supabase.
     const { data: profs, error: dbErr } = await supa
       .from('profiles')
-      .select('id, name, partner_sub')
+      .select('id, name, email, partner_sub, legal_name, tax_id, vat_id, billing_address, invoice_email')
       .not('partner_sub', 'is', null);
     if (dbErr) return res.status(200).json({ ok: false, error: dbErr.message });
 
@@ -45,6 +45,7 @@ export default async function handler(req, res) {
     }
 
     const byCurrency = {}; // CUR -> { gross, fee, net, count }
+    let _curP = null; const partnersRows = [];
     const add = (cur, g, f, n) => {
       const c = (cur || 'usd').toUpperCase();
       if (!byCurrency[c]) byCurrency[c] = { gross: 0, fee: 0, net: 0, count: 0 };
@@ -52,12 +53,14 @@ export default async function handler(req, res) {
       byCurrency[c].fee += f;
       byCurrency[c].net += n;
       byCurrency[c].count += 1;
+      if (_curP) { if (!_curP[c]) _curP[c] = { gross: 0, fee: 0, net: 0, count: 0 }; _curP[c].gross += g; _curP[c].fee += f; _curP[c].net += n; _curP[c].count += 1; }
     };
 
     let payments = 0;
 
     // 2) For each subscription, walk its PAID invoices and read the real balance transaction.
     for (const p of subs) {
+      _curP = {};
       let starting_after;
       for (let page = 0; page < 20; page++) {
         let inv;
@@ -98,6 +101,7 @@ export default async function handler(req, res) {
         if (!inv.has_more) break;
         starting_after = inv.data[inv.data.length - 1].id;
       }
+      if (_curP) { Object.keys(_curP).forEach(c => { _curP[c].gross = Math.round(_curP[c].gross*100)/100; _curP[c].fee = Math.round(_curP[c].fee*100)/100; _curP[c].net = Math.round(_curP[c].net*100)/100; }); partnersRows.push({ id: p.id, name: p.name || '', legal_name: p.legal_name || '', tax_id: p.tax_id || '', vat_id: p.vat_id || '', billing_address: p.billing_address || '', invoice_email: p.invoice_email || p.email || '', partner_sub: p.partner_sub, byCur: _curP }); _curP = null; }
     }
 
     // round to 2 decimals
@@ -113,6 +117,7 @@ export default async function handler(req, res) {
       partners: subs.length,
       payments,
       byCurrency,
+      partnersRows,
     });
   } catch (e) {
     return res.status(200).json({ ok: false, error: e.message || 'error' });
