@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QIS kick-out portability (Byvaly gym / odpojeno). The coach team dashboard now ALSO surfaces gyms where he has coach-owned business (gym_memberships/gym_merch with his coach_id) but NO active gym_coaches link - i.e. gyms he was kicked from or left. (1) former-gym discovery added after the active teamGyms build (excludes active gyms, his own gyms, and hidden ones); (2) the gym selector marks them - odpojeno; (3) an amber banner Byvaly gym - odpojeno explains data+metrics STAY and offers two actions; (4) Prenest muj byznys -> _portCoachBusiness re-tags gym_id on his gym_memberships+gym_merch to a target gym (active full_autonomy gym or his own) - Stripe keeps charging on his account, only the venue label changes, history/transactions are NOT moved (metrics stay); (5) Skryt -> _hideFormerGym adds the gym to profiles.hidden_gyms (additive jsonb) - only hides, never deletes. merch_orders already follow the coach (filtered by coach_id, not gym_id). Needs kick-out-portability.sql (profiles.hidden_gyms). -->
+<!-- MTL build: QIT owner cancel a member membership with 3 clean options. ownerRemoveMember rewritten: instead of nested confirm() it now shows _pickCancelMode - a clean 3-button modal: (1) At period end (cancel_at_period_end, member keeps access, no refund - same as the member self-service); (2) Immediately - no refund (immediate cancel, paid period forfeited); (3) Immediately - full 100% refund (immediate cancel + refunds the last payment incl. MTL application_fee via cancel-membership.js refund=1 -> stripe.refunds.create refund_application_fee:true on the connected account; Stripe processing fee is NOT returned). Per-mode member notification. NO 50% / prorated option (dropped on purpose: arbitrary, dispute-prone; period-end already covers fair mid-period exits). cancel-membership.js extended with immediate=1&refund=1 (retrieves latest_invoice.payment_intent, refunds it fully + the app fee, then cancels). NOTE: this is the OWNER path (gym memberships on the gym Stripe). Coach-side cancel for coach-owned memberships (paid on the coach Stripe) is a separate pass. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -14340,19 +14340,45 @@ function openPartnerInfo(){
   if($('piCalc')) $('piCalc').textContent=(EN?'📊 Calculate margin difference':'📊 Spočítat rozdíl v marži');
   $('partnerInfoOv').classList.add('open');
 }
+function _pickCancelMode(mname){
+  return new Promise(res=>{
+    const EN=LANG==='en';
+    const ov=document.createElement('div');
+    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;';
+    const opt=(id,bg,col,bd,title,desc)=>`<button data-r="${id}" style="width:100%;text-align:left;padding:13px 15px;border-radius:12px;border:${bd};background:${bg};color:${col};font-family:'DM Sans';cursor:pointer;margin-bottom:9px;"><div style="font-weight:800;font-size:14px;">${title}</div><div style="font-size:11.5px;opacity:.82;margin-top:2px;line-height:1.4;">${desc}</div></button>`;
+    ov.innerHTML=`<div style="background:#fff;border-radius:18px;padding:18px;max-width:380px;width:100%;box-shadow:0 12px 40px rgba(0,0,0,.25);"><div style="font-weight:800;font-size:16px;margin-bottom:3px;">${EN?'End membership':'Ukon\u010dit \u010dlenstv\u00ed'}</div><div style="font-size:12.5px;color:var(--mid);margin-bottom:14px;">${escapeHtml(mname||(EN?'this member':'tento \u010dlen'))}</div>`
+      +opt('period','var(--surf)','var(--dark)','1px solid var(--border)',EN?'At period end':'Na konci obdob\u00ed',EN?'Keeps access until the paid period ends. No refund, no further billing. (Same as the member can do.)':'Nech\u00e1 p\u0159\u00edstup do konce zaplacen\u00e9ho obdob\u00ed. Bez refundu, bez dal\u0161\u00ed platby. (Stejn\u00e9, co m\u016f\u017ee \u010dlen s\u00e1m.)')
+      +opt('now','#FEECEC','var(--red)','1px solid #F5C6C6',EN?'Immediately \u00b7 no refund':'Hned \u00b7 bez refundu',EN?'Access ends now. The paid period is not refunded.':'P\u0159\u00edstup kon\u010d\u00ed hned. Zaplacen\u00e9 obdob\u00ed se nevrac\u00ed.')
+      +opt('refund','#F0FBF0','#067647','1px solid #CDEBD6',EN?'Immediately \u00b7 full 100% refund':'Hned \u00b7 pln\u00fd refund 100 %',EN?'Access ends now and the last payment is fully refunded to the member. MTL commission is returned too; the Stripe fee is not.':'P\u0159\u00edstup kon\u010d\u00ed hned a posledn\u00ed platba se \u010dlenovi cel\u00e1 vr\u00e1t\u00ed. Vrac\u00ed se i provize MTL; Stripe poplatek ne.')
+      +`<button data-r="" style="width:100%;padding:11px;border-radius:10px;border:none;background:transparent;color:var(--mid);font-family:'DM Sans';font-size:13px;cursor:pointer;margin-top:2px;">${EN?'Cancel':'Zp\u011bt'}</button></div>`;
+    document.body.appendChild(ov);
+    ov.querySelectorAll('button').forEach(b=>b.onclick=()=>{ const r=b.dataset.r; try{document.body.removeChild(ov);}catch(_){} res(r||null); });
+    ov.onclick=(e)=>{ if(e.target===ov){ try{document.body.removeChild(ov);}catch(_){} res(null); } };
+  });
+}
 async function ownerRemoveMember(mid, subId, mname){
   if(!mid||!_myGymData) return; const EN=LANG==='en';
-  if(!confirm(EN?`End ${mname||'this member'}'s membership? The subscription (if any) will be cancelled.`:`Ukončit členství ${mname||'tohoto člena'}? Jeho předplatné (pokud má) se zruší.`)) return;
+  const mode=await _pickCancelMode(mname); if(!mode) return;
+  const acct=_myGymData.stripe_account||'';
   try{
-    let periodEndIso=null;
-    if(subId){ try{ const r=await fetch(`/api/cancel-membership?subscriptionId=${encodeURIComponent(subId)}&gymAccount=${encodeURIComponent(_myGymData.stripe_account||'')}`); const j=await r.json(); if(j&&j.ok&&j.current_period_end) periodEndIso=new Date(j.current_period_end*1000).toISOString(); }catch(e){} }
-    let immediate=true;
-    if(periodEndIso){ immediate=confirm(EN?'Remove access immediately?\n\nOK = now · Cancel = keep until the paid period ends.':'Odebrat přístup HNED?\n\nOK = hned · Zrušit = nechat do konce zaplaceného období.'); }
-    if(periodEndIso && !immediate){ await supaClient.from('gym_memberships').update({ status:'cancelling', cancelled_at:new Date().toISOString(), period_end:periodEndIso }).eq('id', mid); toast(EN?'✅ Will end at the paid period end.':'✅ Skončí na konci zaplaceného období.'); }
-    else { await supaClient.from('gym_memberships').update({ status:'ended', cancelled_at:new Date().toISOString(), period_end:new Date().toISOString() }).eq('id', mid); toast(EN?'✅ Membership ended.':'✅ Členství ukončeno.'); }
-    try{ const { data: mb }=await supaClient.from('gym_memberships').select('student_id,plan_name').eq('id',mid).single(); if(mb&&mb.student_id){ await supaClient.from('notifications').insert({ user_id:mb.student_id, type:'system', read:false, message:(EN?`Your membership${mb.plan_name?' ('+mb.plan_name+')':''} at ${_myGymData.name||'the gym'} was ended by the gym.`:`Tvé členství${mb.plan_name?' ('+mb.plan_name+')':''} v ${_myGymData.name||'gymu'} bylo ukončeno gymem.`) }); } }catch(e){}
+    if(mode==='period'){
+      let periodEndIso=null;
+      if(subId){ try{ const r=await fetch(`/api/cancel-membership?subscriptionId=${encodeURIComponent(subId)}&gymAccount=${encodeURIComponent(acct)}`); const j=await r.json(); if(j&&j.ok&&j.current_period_end) periodEndIso=new Date(j.current_period_end*1000).toISOString(); }catch(e){} }
+      await supaClient.from('gym_memberships').update({ status:'cancelling', cancelled_at:new Date().toISOString(), period_end:periodEndIso||new Date().toISOString() }).eq('id', mid);
+      toast(EN?'\u2713 Will end at period end':'\u2713 Skon\u010d\u00ed na konci obdob\u00ed');
+    } else if(mode==='now'){
+      if(subId){ try{ await fetch(`/api/cancel-membership?immediate=1&subscriptionId=${encodeURIComponent(subId)}&gymAccount=${encodeURIComponent(acct)}`); }catch(e){} }
+      await supaClient.from('gym_memberships').update({ status:'ended', cancelled_at:new Date().toISOString(), period_end:new Date().toISOString() }).eq('id', mid);
+      toast(EN?'\u2713 Membership ended':'\u2713 \u010clenstv\u00ed ukon\u010deno');
+    } else {
+      let refunded=null;
+      if(subId){ try{ const r=await fetch(`/api/cancel-membership?immediate=1&refund=1&subscriptionId=${encodeURIComponent(subId)}&gymAccount=${encodeURIComponent(acct)}`); const j=await r.json(); if(j&&j.ok) refunded=j.refunded; }catch(e){} }
+      await supaClient.from('gym_memberships').update({ status:'ended', cancelled_at:new Date().toISOString(), period_end:new Date().toISOString() }).eq('id', mid);
+      toast((EN?'\u2713 Ended + refunded':'\u2713 Ukon\u010deno + vr\u00e1ceno')+(refunded?(' '+refunded):''));
+    }
+    try{ const { data: mb }=await supaClient.from('gym_memberships').select('student_id,plan_name').eq('id',mid).single(); if(mb&&mb.student_id){ const pn=mb.plan_name?' ('+mb.plan_name+')':''; const gn=_myGymData.name||(EN?'the gym':'gymu'); const rmsg = mode==='refund' ? (EN?`Your membership${pn} at ${gn} was ended and fully refunded.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} v ${gn} bylo ukon\u010deno a pln\u011b vr\u00e1ceno.`) : (mode==='now' ? (EN?`Your membership${pn} at ${gn} was ended by the gym.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} v ${gn} bylo ukon\u010deno gymem.`) : (EN?`Your membership${pn} at ${gn} will end at the period end.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} v ${gn} skon\u010d\u00ed na konci obdob\u00ed.`)); await supaClient.from('notifications').insert({ user_id:mb.student_id, type:'system', read:false, message:rmsg }); } }catch(e){}
     if(window._mdSid) openGymMemberDetail(window._mdSid, window._mdName); else if(window._mdKid) openGymKidDetail(window._mdKid.parentId, window._mdKid.childName); if(typeof renderGymMembers==='function') renderGymMembers();
-  }catch(e){ toast('⚠️ '+(e.message||'')); }
+  }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
 }
 async function openGymMemberDetail(sid, name){
   window._mdSid=sid; window._mdName=name;
