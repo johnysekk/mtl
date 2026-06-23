@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QIT owner cancel a member membership with 3 clean options. ownerRemoveMember rewritten: instead of nested confirm() it now shows _pickCancelMode - a clean 3-button modal: (1) At period end (cancel_at_period_end, member keeps access, no refund - same as the member self-service); (2) Immediately - no refund (immediate cancel, paid period forfeited); (3) Immediately - full 100% refund (immediate cancel + refunds the last payment incl. MTL application_fee via cancel-membership.js refund=1 -> stripe.refunds.create refund_application_fee:true on the connected account; Stripe processing fee is NOT returned). Per-mode member notification. NO 50% / prorated option (dropped on purpose: arbitrary, dispute-prone; period-end already covers fair mid-period exits). cancel-membership.js extended with immediate=1&refund=1 (retrieves latest_invoice.payment_intent, refunds it fully + the app fee, then cancels). NOTE: this is the OWNER path (gym memberships on the gym Stripe). Coach-side cancel for coach-owned memberships (paid on the coach Stripe) is a separate pass. -->
+<!-- MTL build: QIU coach can cancel his OWN members membership with refund on his OWN Stripe - exactly like the gym owner. Coaches had no per-member UI (only aggregate), so added openCoachMembers (bottom-sheet listing his coach-owned active/cancelling gym_memberships where coach_id=me AND paid_to=coach, across gyms) + coachRemoveMember = clone of ownerRemoveMember reusing the same _pickCancelMode 3-option chooser (period end / immediate no-refund / immediate full 100% refund) but resolving the connected account to the COACH (gym_payout_account||stripe_account) so refund + MTL application_fee reversal hit the coach Stripe via cancel-membership.js immediate=1&refund=1. A My-members button shows in the team dashboard, gated on the coach having a payout account (_paysCoach). cancel-membership.js needed no change (it takes any connected account via gymAccount). -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -7416,6 +7416,44 @@ async function _gtdEnsureGym(){
   }catch(e){}
   return false;
 }
+async function coachRemoveMember(mid, subId, mname){
+  if(!mid) return; const EN=LANG==='en';
+  const mode=await _pickCancelMode(mname); if(!mode) return;
+  const acct=(currentUser&&(currentUser.gym_payout_account||currentUser.stripe_account))||'';
+  try{
+    if(mode==='period'){
+      let periodEndIso=null;
+      if(subId){ try{ const r=await fetch(`/api/cancel-membership?subscriptionId=${encodeURIComponent(subId)}&gymAccount=${encodeURIComponent(acct)}`); const j=await r.json(); if(j&&j.ok&&j.current_period_end) periodEndIso=new Date(j.current_period_end*1000).toISOString(); }catch(e){} }
+      await supaClient.from('gym_memberships').update({ status:'cancelling', cancelled_at:new Date().toISOString(), period_end:periodEndIso||new Date().toISOString() }).eq('id', mid);
+      toast(EN?'\u2713 Will end at period end':'\u2713 Skon\u010d\u00ed na konci obdob\u00ed');
+    } else if(mode==='now'){
+      if(subId){ try{ await fetch(`/api/cancel-membership?immediate=1&subscriptionId=${encodeURIComponent(subId)}&gymAccount=${encodeURIComponent(acct)}`); }catch(e){} }
+      await supaClient.from('gym_memberships').update({ status:'ended', cancelled_at:new Date().toISOString(), period_end:new Date().toISOString() }).eq('id', mid);
+      toast(EN?'\u2713 Membership ended':'\u2713 \u010clenstv\u00ed ukon\u010deno');
+    } else {
+      let refunded=null;
+      if(subId){ try{ const r=await fetch(`/api/cancel-membership?immediate=1&refund=1&subscriptionId=${encodeURIComponent(subId)}&gymAccount=${encodeURIComponent(acct)}`); const j=await r.json(); if(j&&j.ok) refunded=j.refunded; }catch(e){} }
+      await supaClient.from('gym_memberships').update({ status:'ended', cancelled_at:new Date().toISOString(), period_end:new Date().toISOString() }).eq('id', mid);
+      toast((EN?'\u2713 Ended + refunded':'\u2713 Ukon\u010deno + vr\u00e1ceno')+(refunded?(' '+refunded):''));
+    }
+    try{ const { data: mb }=await supaClient.from('gym_memberships').select('student_id,plan_name').eq('id',mid).single(); if(mb&&mb.student_id){ const pn=mb.plan_name?' ('+mb.plan_name+')':''; const cn=(currentUser&&currentUser.name)||(EN?'your coach':'tv\u016fj kou\u010d'); const rmsg = mode==='refund' ? (EN?`Your membership${pn} with ${cn} was ended and fully refunded.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} u ${cn} bylo ukon\u010deno a pln\u011b vr\u00e1ceno.`) : (mode==='now' ? (EN?`Your membership${pn} with ${cn} was ended.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} u ${cn} bylo ukon\u010deno.`) : (EN?`Your membership${pn} with ${cn} will end at the period end.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} u ${cn} skon\u010d\u00ed na konci obdob\u00ed.`)); await supaClient.from('notifications').insert({ user_id:mb.student_id, type:'system', read:false, message:rmsg }); } }catch(e){}
+    if(typeof renderGymTeamDash==='function') renderGymTeamDash();
+  }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
+}
+async function openCoachMembers(){
+  const EN=LANG==='en'; const me=currentUser.id;
+  let mems=[]; try{ const { data }=await supaClient.from('gym_memberships').select('*').eq('coach_id',me).eq('paid_to','coach').in('status',['active','cancelling']).order('created_at',{ascending:false}); mems=data||[]; }catch(e){}
+  const symOf=m=>{ const c=m.currency; return c==='EUR'?'\u20ac':c==='USD'?'$':'K\u010d'; };
+  const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9998;display:flex;align-items:flex-end;justify-content:center;';
+  const rows = mems.length ? mems.map(m=>{ const st=m.status; const stTxt=st==='cancelling'?(EN?'cancelling':'ru\u0161\u00ed se'):(EN?'active':'aktivn\u00ed'); const stCol=st==='cancelling'?'var(--red)':'#006040';
+    return `<div style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:9px;"><div style="font-weight:700;font-size:14px;">${escapeHtml(m.student_name||(EN?'Member':'\u010clen'))}</div><div style="font-size:12px;color:var(--mid);margin-top:2px;">${escapeHtml(m.plan_name||(EN?'Membership':'\u010clenstv\u00ed'))} \u00b7 ${fmtPrice(m.amount||0,m.currency)} ${symOf(m)} \u00b7 <span style="color:${stCol};font-weight:700;">${stTxt}</span></div><button class="cmEnd" data-mid="${m.id}" data-sub="${m.stripe_subscription||''}" data-mname="${escapeHtml(m.student_name||'')}" style="width:100%;margin-top:9px;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'End / refund membership':'Ukon\u010dit / refund \u010dlenstv\u00ed'}</button></div>`;
+  }).join('') : `<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;">${EN?'No active members on your own Stripe.':'\u017d\u00e1dn\u00ed aktivn\u00ed \u010dlenov\u00e9 na tv\u00e9m Stripe.'}</p>`;
+  ov.innerHTML=`<div style="background:#fff;border-radius:18px 18px 0 0;padding:18px;max-width:480px;width:100%;max-height:80vh;overflow-y:auto;box-shadow:0 -8px 30px rgba(0,0,0,.2);"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;"><div style="font-weight:800;font-size:16px;">${EN?'My members':'Moji \u010dlenov\u00e9'}</div><button data-close="1" style="background:none;border:none;font-size:24px;line-height:1;color:var(--mid);cursor:pointer;">\u00d7</button></div>${rows}</div>`;
+  document.body.appendChild(ov);
+  const close=()=>{ try{document.body.removeChild(ov);}catch(_){} };
+  ov.onclick=(e)=>{ if(e.target===ov||(e.target.dataset&&e.target.dataset.close)) close(); };
+  ov.querySelectorAll('.cmEnd').forEach(b=>b.onclick=async()=>{ close(); await coachRemoveMember(b.dataset.mid,b.dataset.sub,b.dataset.mname); });
+}
 async function _hideFormerGym(gymId, gymName){
   const EN=LANG==='en';
   if(!confirm(EN?('Hide "'+(gymName||'this gym')+'" from your panel? Your data stays \u2014 this only hides it.'):('Skr\u00fdt \u201e'+(gymName||'tento gym')+'" z panelu? Tvoje data z\u016fstanou \u2014 jen se to schov\u00e1.'))) return;
@@ -7684,7 +7722,7 @@ async function renderGymTeamDash(){
   // --- action buttons (pulled from the Team section) ---
   const _bs="width:100%;padding:13px;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:10px;";
   const link=gymObj.link||{};
-  const btnsHtml = `<div style="margin-top:18px;">`
+  const btnsHtml = `<div style="margin-top:18px;">${_paysCoach?`<button id="gtdMembersBtn" style="${_bs}background:var(--surf);color:var(--dark);border:1px solid var(--border);">\ud83d\udc65 ${EN?'My members':'Moji \u010dlenov\u00e9'}</button>`:''}`
     + (link.can_manage_schedule?`<button id="gtdSchedBtn" style="${_bs}background:var(--dark);color:#fff;border:none;">📅 ${EN?'My classes':'Moje lekce'}</button>`:'')
     + `<button id="gtdAttBtn" style="${_bs}background:var(--surf);color:var(--dark);border:1px solid var(--border);">📋 ${EN?'Mark attendance':'Doplnit docházku'}</button>`
     + `<button id="gtdTeamBtn" style="${_bs}background:var(--surf);color:var(--dark);border:1px solid var(--border);">👥 ${EN?'Gym team':'Gym tým'}</button>`
@@ -7704,6 +7742,7 @@ async function renderGymTeamDash(){
     + `<div id="gtdStats">` + _ownerPanels + `<div id="gtdTrend"></div></div>` + btnsHtml;
 
   // selectors
+  if($('gtdMembersBtn')) $('gtdMembersBtn').onclick=()=>openCoachMembers();
   const gs=$('gtdGymSel'); if(gs) gs.onchange=()=>{ _gtdGym=gs.value; renderGymTeamDash(); };
   const ms=$('gtdMonthSel'); if(ms) ms.onchange=()=>{ _gtdMonth=ms.value; renderGymTeamDash(); };
   if($('gtdModeNet')) $('gtdModeNet').onclick=()=>{ _gtdMode='net'; renderGymTeamDash(); };
