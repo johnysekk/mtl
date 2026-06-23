@@ -82,23 +82,28 @@ async function recordTransaction(acct, pi, fields) {
       if (!existing && mtlFee > 0) {
         let prov = null;
         if (fields.coach_id) {
-          const cp = await sbGet(`profiles?id=eq.${fields.coach_id}&select=id,referred_by,welcome_free_until,stripe_account,gym_payout_account`);
+          const cp = await sbGet(`profiles?id=eq.${fields.coach_id}&select=id,welcome_free_until,created_at,stripe_account,gym_payout_account`);
           const c = cp && cp[0];
           if (c && (c.stripe_account === acct || c.gym_payout_account === acct)) prov = c;
         }
         if (!prov && fields.gym_id) {
           const gy = await sbGet(`gyms?id=eq.${fields.gym_id}&select=owner_id`);
           const oid = gy && gy[0] && gy[0].owner_id;
-          if (oid) { const op = await sbGet(`profiles?id=eq.${oid}&select=id,referred_by,welcome_free_until`); prov = op && op[0]; }
+          if (oid) { const op = await sbGet(`profiles?id=eq.${oid}&select=id,welcome_free_until,created_at`); prov = op && op[0]; }
         }
-        if (prov) {  // ALL new providers get the welcome (fair to non-referred); referral pull lives on the referrer's Liga ladder
+        if (prov) {  // welcome = first month 0% for genuinely NEW providers (fair to all new, not just referred)
           const nowMs = Date.now();
           let until = prov.welcome_free_until ? new Date(prov.welcome_free_until).getTime() : null;
-          if (until == null) { // first sale -> open the 30-day welcome window once
-            until = nowMs + 30 * 86400000;
-            await sbPatch(`profiles?id=eq.${prov.id}`, { welcome_free_until: new Date(until).toISOString() });
+          if (until == null) {
+            // open the 30-day window ONLY if the account is genuinely new (< 45 days) AND at their FIRST sale,
+            // so deploying this never retroactively hands every existing provider a free month.
+            const createdMs = prov.created_at ? new Date(prov.created_at).getTime() : 0;
+            if (createdMs && (nowMs - createdMs) < 45 * 86400000) {
+              until = nowMs + 30 * 86400000;
+              await sbPatch(`profiles?id=eq.${prov.id}`, { welcome_free_until: new Date(until).toISOString() });
+            }
           }
-          if (nowMs < until) {
+          if (until != null && nowMs < until) {
             const fees = await stripe.applicationFees.list({ charge: chargeId, limit: 1 });
             const feeId = fees && fees.data && fees.data[0] && fees.data[0].id;
             if (feeId) { await stripe.applicationFees.createRefund(feeId); welcomeFreed = true; }
