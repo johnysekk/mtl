@@ -57,8 +57,10 @@ export default async function handler(req, res) {
     const sBk = await sb('bookings?student_id=eq.' + id +
       '&status=eq.active&type=neq.online&student_confirmed=eq.true&coach_confirmed=eq.true&select=id,discipline');
     const s1 = sBk.length;
-    const sGa = await sb('gym_attendance?student_id=eq.' + id + '&select=id');
+    const sGa = await sb('gym_attendance?student_id=eq.' + id + '&select=id,discipline');
     const sg = sGa.length;
+    const sOnline = await sb('bookings?student_id=eq.' + id + '&status=eq.active&type=eq.online&fulfilled=eq.true&select=id');
+    const onlineN = (sOnline||[]).length;
     let refN = 0; try { const rf = await sb('profiles?referred_by=eq.' + id + '&referral_rewarded=eq.true&select=id'); refN = (rf||[]).length; } catch(e){}
     const studentXp = s1*10 + sg*2 + refN*5;
 
@@ -105,7 +107,19 @@ export default async function handler(req, res) {
     // newest/biggest tier only per cumulative track
     const topAdd = (cat, ...tiers) => { let last=null; for(const t of tiers){ if(t[0]) last=t; } if(last) M.push({ cat, emoji:last[1], en:last[2], cs:last[3] }); };
     topAdd('student',[totalTrain>=1,'🥊','First training','První trénink'],[totalTrain>=25,'🔥','25 trainings','25 tréninků'],[totalTrain>=100,'🏆','100 trainings','100 tréninků'],[totalTrain>=500,'💎','500 trainings','500 tréninků']);
+    topAdd('student',[onlineN>=1,'🌐','First online lesson','První online lekce'],[onlineN>=5,'🔥','5 online lessons','5 online lekcí'],[onlineN>=25,'🏆','25 online lessons','25 online lekcí'],[onlineN>=100,'💎','100 online lessons','100 online lekcí']);
     add('student',sportSet.size>=3,'🌍','Tried 3 sports','Vyzkoušel 3 sporty');
+    // per-discipline training milestones — one chip per discipline (>=5), highest tier only, max 6
+    const discCount = {};
+    sBk.forEach(b => { if(b.discipline) discCount[b.discipline] = (discCount[b.discipline]||0)+1; });
+    sGa.forEach(a => { if(a && a.discipline) discCount[a.discipline] = (discCount[a.discipline]||0)+1; });
+    const DLBL = { bjj:'BJJ', mma:'MMA', muay_thai:'Muay Thai', boxing:'Box', kickboxing:'Kickbox', wrestling:'Wrestling', judo:'Judo', karate:'Karate', taekwondo:'Taekwondo', krav_maga:'Krav Maga', sambo:'Sambo', luta_livre:'Luta Livre', sanda:'Sanda', capoeira:'Capoeira', aikido:'Aikido', kung_fu:'Kung Fu' };
+    const dlabel = d => DLBL[d] || String(d||'').replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase());
+    const DTIERS = [[5,'🔥'],[25,'🔥'],[100,'🏆'],[500,'💎']];
+    Object.keys(discCount).sort((x,y)=>discCount[y]-discCount[x]).slice(0,6).forEach(d => {
+      const n = discCount[d]; let best = null; for(const t of DTIERS){ if(n>=t[0]) best=t; }
+      if(best){ const lbl = dlabel(d); M.push({ cat:'discipline', emoji:best[1], en: best[0]+' · '+lbl, cs: best[0]+' tréninků '+lbl }); }
+    });
     topAdd('coach',[c1>=10,'💯','10 lessons taught','10 odučených'],[c1>=250,'🏆','250 lessons taught','250 odučených']);
     topAdd('gym',[members>=1,'🏠','First member','První člen'],[members>=10,'📈','10 members','10 členů'],[members>=50,'📈','50 members','50 členů'],[members>=100,'📈','100 members','100 členů'],[members>=200,'🏆','200 members','200 členů']);
     add('platform',isFounder,'👑','MTL Founder','MTL Founder');
