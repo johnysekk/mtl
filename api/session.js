@@ -94,6 +94,10 @@ async function recordTransaction(acct, pi, fields) {
           if (oid) { const op = await sbGet(`profiles?id=eq.${oid}&select=id,welcome_free_until,created_at`); prov = op && op[0]; }
         }
         if (prov) {  // welcome = first month 0% for genuinely NEW providers (fair to all new, not just referred)
+          // GLOBAL KILL-SWITCH: founder toggle (profiles.welcome_zero_off on the founder row) disables the whole
+          // 30-day welcome - lets the founder test that real mtl_fee is charged on a fresh test account.
+          const _wk = await sbGet(`profiles?id=eq.7e08d4bb-0efa-47ae-bd6a-85e9bd04400c&select=welcome_zero_off`);
+          if (!(_wk && _wk[0] && _wk[0].welcome_zero_off)) {
           const nowMs = Date.now();
           let until = prov.welcome_free_until ? new Date(prov.welcome_free_until).getTime() : null;
           if (until == null) {
@@ -110,6 +114,7 @@ async function recordTransaction(acct, pi, fields) {
             const feeId = fees && fees.data && fees.data[0] && fees.data[0].id;
             if (feeId) { await stripe.applicationFees.createRefund(feeId); welcomeFreed = true; }
           }
+          } // end welcome kill-switch
         }
       }
     } catch (e) { console.error('welcome 0% refund', e.message); }
