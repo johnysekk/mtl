@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QJK two refinements. (A) Founder welcome line simplified: it now shows ONLY the would-be gross commission X ("bez uvitacich 0 % by MTL vydelalo na provizich X"), dropping the redundant "returned Y" - because when the whole period is welcome transactions (all-new test accounts) mtl_fee_refunded equals mtl_fee so X and Y are identical; the real net (X minus Y) is already the NET HERO above. (C) Obnovit (doAppRefresh) now refreshes only the OPEN window instead of the whole app: the heavy deck reload loadCoaches()+updateCoachSummary() runs only when NO sheet is open (i.e. the user is actually looking at the deck), and renderFdReal is gated on the founder dash being open. The cheap always-on work (session refresh, notif badge, profile, cache-clear) and the other already-conditional sheet re-renders (coach dash, money dash, gym stats, ambassador, notifications) are unchanged, so whichever window is open still refreshes - just without needlessly re-pulling the location deck behind it. -->
+<!-- MTL build: QJM gym-deck radius truth + invite endpoint. (1) GYM_LOCAL_KM 25->20: the deck "local gyms" cutoff is now 20 km (matches the demand-signal logic which already used 20). (2,3) the end-of-deck title + subtitle now interpolate GYM_LOCAL_KM ("Vsechny gymy do 20 km" / "...do 20 km od tebe") instead of a hardcoded 25, so the label can never drift from the real radius again. (4) the "Objevovat dal" button dropped the "(N dalsich)" count and is rendered only when _farN>0 (there are actually farther gyms to reveal); since the end card already only shows when local<total this is belt-and-suspenders but guarantees no empty "discover" button. (5) roster invites now POST to /api/invite-members (Resend branded email, no Supabase rate limit) and fall back to client-side signInWithOtp only if that endpoint is unavailable (so testing works before Resend is wired). -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -954,7 +954,7 @@ body.no-emoji [data-keep-emoji] .prow-icon,body.no-emoji [data-keep-emoji] .sico
 <div class="sheet" id="shGymTeamView" style="z-index:89;"><div class="shdr"><div class="shdr-title" id="gtvTitle" data-noi18n>Gym tým</div><button class="btn-close" id="btnCloseGtv">×</button></div><div id="gtvContent" style="padding:16px 20px;"></div></div>
 <div class="sheet" id="shGymManage" style="z-index:87;">
   <div class="shdr"><div class="shdr-title">🏛️ Spravovat gym</div><button class="btn-close" id="btnCloseGymManage">✕</button></div>
-  <div style="padding:14px 20px 0;"><button id="btnImportMembers" data-noi18n style="width:100%;padding:11px;background:#171717;color:#F4D87A;border:1.5px solid #E8C24A;border-radius:11px;font-weight:700;font-size:13px;cursor:pointer;">📥 Importovat členy z jiného softwaru</button></div>
+  <div style="padding:14px 20px 0;display:flex;flex-direction:column;gap:8px;"><button id="btnImportMembers" data-noi18n style="width:100%;padding:11px;background:#171717;color:#F4D87A;border:1.5px solid #E8C24A;border-radius:11px;font-weight:700;font-size:13px;cursor:pointer;">📥 Importovat členy z jiného softwaru</button><button id="btnImportedRoster" data-noi18n style="width:100%;padding:11px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:11px;font-weight:700;font-size:13px;cursor:pointer;">👥 Importovaní členové & pozvánky</button></div>
   <div id="gymManageContent" style="padding:16px 20px;"></div>
 </div>
 
@@ -1693,6 +1693,20 @@ body.no-emoji [data-keep-emoji] .prow-icon,body.no-emoji [data-keep-emoji] .sico
 </div>
 
 <!-- IMPORT MEMBERS (step 1: data in) -->
+<div class="sheet" id="shImportedRoster" style="z-index:91;">
+  <div class="shdr"><div class="shdr-title" data-noi18n>👥 Importovaní členové</div><button class="btn-close" id="btnCloseRoster"></button></div>
+  <div style="padding:18px 20px;">
+    <div id="irSummary" style="font-size:12.5px;color:var(--mid);margin-bottom:12px;line-height:1.5;"></div>
+    <div style="display:flex;gap:8px;margin-bottom:10px;">
+      <button id="irInviteSel" data-noi18n style="flex:1;padding:12px;background:var(--red);color:#fff;border:none;border-radius:11px;font-weight:800;font-size:13px;cursor:pointer;">Pozvat vybrané</button>
+      <button id="irInviteAll" data-noi18n style="flex:1;padding:12px;background:#171717;color:#F4D87A;border:1.5px solid #E8C24A;border-radius:11px;font-weight:700;font-size:13px;cursor:pointer;">Pozvat všechny čekající</button>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--mid);margin-bottom:6px;cursor:pointer;"><input type="checkbox" id="irSelAll"> <span data-noi18n>Vybrat vše na stránce</span></label>
+    <div id="irList"></div>
+    <div id="irPager" style="display:flex;align-items:center;justify-content:space-between;margin-top:14px;"></div>
+  </div>
+</div>
+
 <div class="sheet" id="shImportMembers" style="z-index:91;">
   <div class="shdr"><div class="shdr-title" data-noi18n>📥 Import členů</div><button class="btn-close" id="btnCloseImport"></button></div>
   <div style="padding:20px;">
@@ -4376,11 +4390,11 @@ function renderCards(){
       front.style.display='none'; back.style.display='none'; empty.classList.add('show');
       const h3=empty.querySelector('h3'), p=empty.querySelector('p');
       const EN=LANG==='en'; const _farN=filtered.length-_gymLocalCount;
-      h3.textContent = EN ? 'All gyms within 25 km' : 'Všechny gymy do 25 km';
+      h3.textContent = EN ? ('All gyms within '+GYM_LOCAL_KM+' km') : ('Všechny gymy do '+GYM_LOCAL_KM+' km');
       const _hasOnline = (typeof coaches!=='undefined' && coaches && coaches.some(function(c){ return (c.tags||[]).some(function(t){ return (''+t).indexOf('Online')>=0; }); }));
-      p.innerHTML = (EN ? 'You have seen every certified gym within 25 km of you.' : 'Viděl jsi všechny certifikované gymy do 25 km od tebe.')
+      p.innerHTML = (EN ? ('You have seen every certified gym within '+GYM_LOCAL_KM+' km of you.') : ('Viděl jsi všechny certifikované gymy do '+GYM_LOCAL_KM+' km od tebe.'))
         + _demandBtnHtml()
-        + '<div style="margin-top:10px;"><button id="deckMoreBtn" style="padding:10px 16px;background:transparent;color:var(--dark);border:1px solid var(--border);border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?('🔍 Discover further ('+_farN+' more)'):('🔍 Objevovat dál ('+_farN+' dalších)'))+'</button></div>'
+        + (_farN>0 ? ('<div style="margin-top:10px;"><button id="deckMoreBtn" style="padding:10px 16px;background:transparent;color:var(--dark);border:1px solid var(--border);border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'🔍 Discover further':'🔍 Objevovat dál')+'</button></div>') : '')
         + (_hasOnline ? ('<div style="margin-top:8px;"><button id="deckOnlineBtn" style="padding:10px 16px;background:transparent;color:var(--dark);border:1px solid var(--border);border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">🌐 '+(EN?'Try online coaching':'Zkus online koučink')+'</button></div>') : '')
         + '<div style="margin-top:8px;"><button id="deckRestartBtn" style="background:none;border:none;color:var(--mid);font-size:12px;cursor:pointer;text-decoration:underline;font-family:inherit;">↺ '+(EN?'Start over':'Od začátku')+'</button></div>';
       var _mb=$('deckMoreBtn'); if(_mb) _mb.onclick=function(){ _deckExtended=true; renderCards(); };
@@ -4520,7 +4534,7 @@ function init(){
 // GYM TINDER (deck mode = gyms)
 // ════════════════════════════════════════
 let _deckMode='coaches';
-const GYM_LOCAL_KM=25; let _deckExtended=false; let _gymLocalCount=0;
+const GYM_LOCAL_KM=20; let _deckExtended=false; let _gymLocalCount=0;
 let _gymCancelling=[];
 var _gymCoachSel='';
 let _gymTagFilter=null;
@@ -8377,6 +8391,71 @@ if($('impDetect')) $('impDetect').onclick=_impDetect;
 if($('impSave')) $('impSave').onclick=_impSave;
 if($('impFile')) $('impFile').onchange=function(e){ var f=e.target.files&&e.target.files[0]; if(!f) return; var rd=new FileReader(); rd.onload=function(){ if($('impCsv')) $('impCsv').value=rd.result||''; _impDetect(); }; rd.readAsText(f); };
 // ===== end member import =====
+
+
+// ===== MEMBER IMPORT (step 2: roster + magic-link invites) =====
+window._irPage=0; window._irTotal=0; window._irRows=[]; window._irSel={};
+var IR_PAGE=20;
+function openImportedRoster(){ openSheet('shImportedRoster'); window._irPage=0; window._irSel={}; _irLoad(); }
+function _irBadge(st){ var m={pending:['#FFF1D6','#9A6B00','čeká'],invited:['#E6F0FF','#1452B0','pozván'],claimed:['#E8F8EE','#0A7A3D','registrován'],skipped:['#EEEEEE','#777777','přeskočen']}; var x=m[st]||m.pending; return '<span style="background:'+x[0]+';color:'+x[1]+';font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:20px;white-space:nowrap;">'+x[2]+'</span>'; }
+async function _irLoad(){
+  try{ await checkGymOwnership(); }catch(e){}
+  var g=window._myGymData; if(!g){ toast('Nemáš schválený gym'); return; }
+  var from=window._irPage*IR_PAGE, to=from+IR_PAGE-1;
+  var list=$('irList'); if(list) list.innerHTML='<div style="text-align:center;color:var(--light);padding:20px;font-size:13px;">Načítám…</div>';
+  try{
+    var resp=await supaClient.from('imported_members').select('id,name,email,phone,plan,status,invited_at',{count:'exact'}).eq('gym_id',g.id).order('status',{ascending:true}).order('created_at',{ascending:true}).range(from,to);
+    window._irRows=resp.data||[]; window._irTotal=resp.count||0; _irRender();
+  }catch(e){ if(list) list.innerHTML='<div style="color:var(--red);font-size:12px;padding:10px;">Chyba: '+((e&&e.message)||e)+'</div>'; }
+}
+function _irRender(){
+  var rows=window._irRows||[]; var list=$('irList'); if(!list) return;
+  if(!rows.length){ list.innerHTML='<div style="text-align:center;color:var(--light);padding:24px;font-size:13px;">Žádní importovaní členové. Nejdřív naimportuj CSV přes „Importovat členy".</div>'; }
+  else {
+    var h=''; rows.forEach(function(r){ var claimed=r.status==='claimed';
+      h+='<div style="display:flex;align-items:center;gap:10px;padding:10px 2px;border-bottom:1px solid var(--border);">'
+        +'<input type="checkbox" class="irChk" data-id="'+r.id+'"'+(window._irSel[r.id]?' checked':'')+(claimed?' disabled':'')+' style="width:17px;height:17px;flex-shrink:0;">'
+        +'<div style="flex:1;min-width:0;"><div style="font-size:13.5px;font-weight:600;color:var(--dark);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+escapeHtml(r.name||r.email)+'</div>'
+        +'<div style="font-size:11.5px;color:var(--mid);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+escapeHtml(r.email)+(r.plan?(' · '+escapeHtml(r.plan)):'')+'</div></div>'
+        +_irBadge(r.status)+'</div>'; });
+    list.innerHTML=h;
+    list.querySelectorAll('.irChk').forEach(function(c){ c.onchange=function(){ var id=c.getAttribute('data-id'); if(c.checked) window._irSel[id]=1; else delete window._irSel[id]; _irUpdSel(); }; });
+  }
+  var pages=Math.max(1,Math.ceil(window._irTotal/IR_PAGE)); var pg=$('irPager');
+  if(pg) pg.innerHTML='<button id="irPrev"'+(window._irPage<=0?' disabled':'')+' style="padding:8px 14px;border-radius:9px;border:1px solid var(--border);background:var(--surf);cursor:pointer;font-size:14px;">‹</button><span style="font-size:12px;color:var(--mid);">Strana '+(window._irPage+1)+' / '+pages+' · '+window._irTotal+' celkem</span><button id="irNext"'+(window._irPage>=pages-1?' disabled':'')+' style="padding:8px 14px;border-radius:9px;border:1px solid var(--border);background:var(--surf);cursor:pointer;font-size:14px;">›</button>';
+  if($('irPrev')) $('irPrev').onclick=function(){ if(window._irPage>0){ window._irPage--; _irLoad(); } };
+  if($('irNext')) $('irNext').onclick=function(){ if(window._irPage<pages-1){ window._irPage++; _irLoad(); } };
+  var sa=$('irSelAll'); if(sa) sa.checked=false;
+  var sm=$('irSummary'); if(sm) sm.innerHTML='Pozvánka pošle členovi přihlašovací odkaz — po kliknutí si v appce vytvoří účet (odsouhlasí podmínky, nastaví heslo). Hromadné rozesílání doladíme přes Resend.';
+  _irUpdSel();
+}
+function _irUpdSel(){ var n=Object.keys(window._irSel||{}).length; var b=$('irInviteSel'); if(b) b.textContent='Pozvat vybrané'+(n?(' ('+n+')'):''); }
+async function _irInvite(allPending){
+  try{ await checkGymOwnership(); }catch(e){}
+  var g=window._myGymData; if(!g){ toast('Nemáš gym'); return; }
+  var targets=[];
+  if(allPending){ try{ var resp=await supaClient.from('imported_members').select('id,email,name,status').eq('gym_id',g.id).neq('status','claimed'); targets=resp.data||[]; }catch(e){ toast('Chyba načtení'); return; } }
+  else { var ids=Object.keys(window._irSel||{}); if(!ids.length){ toast('Vyber aspoň jednoho člena'); return; } targets=(window._irRows||[]).filter(function(r){ return window._irSel[r.id] && r.status!=='claimed'; }); }
+  if(!targets.length){ toast('Nikdo k pozvání'); return; }
+  if(!confirm('Poslat pozvánku k registraci '+targets.length+' lidem?')) return;
+  var bA=$('irInviteAll'), bS=$('irInviteSel'); if(bA) bA.disabled=true; if(bS){ bS.disabled=true; bS.textContent='Posílám…'; }
+  var ids=targets.map(function(t){ return t.id; });
+  var sent=0, fail=0, viaEndpoint=false;
+  try{ var _tok=await _freshTok(); var r=await fetch('/api/invite-members',{ method:'POST', headers:{'Content-Type':'application/json','x-access-token':_tok}, body: JSON.stringify({ gymId:g.id, ids:ids }) }); var j=await r.json().catch(function(){ return {}; }); if(j && j.ok){ sent=j.sent||0; fail=j.failed||0; viaEndpoint=true; } }catch(e){}
+  if(!viaEndpoint){ for(var i=0;i<targets.length;i++){ var t=targets[i];
+    try{ await supaClient.auth.signInWithOtp({ email:t.email, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } });
+      await supaClient.from('imported_members').update({ status:'invited', invited_at:new Date().toISOString() }).eq('id', t.id); sent++;
+    }catch(e){ fail++; } } }
+  toast('Pozváno '+sent+(fail?(' · '+fail+' selhalo (limit rozesílání?)'):'')); window._irSel={};
+  if(bA) bA.disabled=false; if(bS) bS.disabled=false; _irLoad();
+}
+async function _claimImported(){ try{ if(!currentUser||!currentUser.email) return; await supaClient.from('imported_members').update({ status:'claimed', claimed_user_id:currentUser.id, claimed_at:new Date().toISOString() }).eq('email', (currentUser.email||'').toLowerCase()).neq('status','claimed'); }catch(e){} }
+if($('btnImportedRoster')) $('btnImportedRoster').onclick=openImportedRoster;
+if($('btnCloseRoster')) $('btnCloseRoster').onclick=function(){ closeSheet('shImportedRoster'); };
+if($('irInviteSel')) $('irInviteSel').onclick=function(){ _irInvite(false); };
+if($('irInviteAll')) $('irInviteAll').onclick=function(){ _irInvite(true); };
+if($('irSelAll')) $('irSelAll').onchange=function(e){ var on=e.target.checked; (window._irRows||[]).forEach(function(r){ if(r.status!=='claimed'){ if(on) window._irSel[r.id]=1; else delete window._irSel[r.id]; } }); document.querySelectorAll('.irChk').forEach(function(c){ if(!c.disabled) c.checked=on; }); _irUpdSel(); };
+// ===== end member import step 2 =====
 
 async function renderGymManage(){
   const box=$('gymManageContent'); if(!box) return;
@@ -16521,6 +16600,7 @@ function enterApp(){
   try{ if(typeof processPendingJoin==='function') processPendingJoin(); }catch(e){}
   try{ if(typeof _emojiAccountSync==='function') _emojiAccountSync(); }catch(e){}
   try{ if(typeof _maybeTermsGate==='function') _maybeTermsGate(); }catch(e){}
+  try{ if(typeof _claimImported==='function') _claimImported(); }catch(e){}
   try{ if(typeof _checkWelcomeEnding==='function') _checkWelcomeEnding(); }catch(e){}
   $('authScreen').style.display='none';
   try{ _maybeAppLock(); }catch(e){}
