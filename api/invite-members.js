@@ -6,7 +6,7 @@
 // ENV required on Vercel:
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY  (already set for other endpoints)
 //   RESEND_API_KEY                            (from resend.com)
-//   INVITE_FROM   (optional, default "MTL Coaches <ahoj@martialtraininglab.com>")
+//   INVITE_FROM   (optional, default "MTL Coaches <no-reply@martialtraininglab.com>")
 //
 // Resend domain martialtraininglab.com must be verified (DNS) so the From address is allowed.
 
@@ -18,7 +18,7 @@ module.exports = async (req, res) => {
     const SB = process.env.SUPABASE_URL;
     const SR = process.env.SUPABASE_SERVICE_ROLE_KEY;
     const RESEND = process.env.RESEND_API_KEY;
-    const FROM = process.env.INVITE_FROM || 'MTL Coaches <ahoj@martialtraininglab.com>';
+    const FROM = process.env.INVITE_FROM || 'MTL Coaches <no-reply@martialtraininglab.com>';
     if (!SB || !SR) return res.status(500).json({ error: 'config (supabase)' });
     if (!RESEND) return res.status(500).json({ error: 'config (resend) — set RESEND_API_KEY' });
 
