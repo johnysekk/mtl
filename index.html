@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QJD CONSENT GATE for passwordless / magic-link logins (LEADER GRADE, GDPR). The registration form already records consent (consents table: doc=terms/privacy, version=LEGAL_VERSION, agreed_at - audit-grade) BUT guests created via signInWithOtp magic link (and future imported members) get a profile at ~17095 WITHOUT going through that form => they never accept the Terms/Privacy. FIX: _maybeTermsGate() runs in enterApp; it queries the consents table for the current LEGAL_VERSION and, if the user is missing terms+privacy consent, shows a BLOCKING overlay (cannot be dismissed) with the same checkbox + Podminky/GDPR links (openTerms/openPrivacy) used at registration. On accept it inserts the same two consents rows, then (for passwordless accounts) chains into openSetPassword. Clicking a magic link is only AUTHENTICATION; consent is this separate explicit affirmative act. Reuses existing consents+LEGAL_VERSION (no new column/SQL); a LEGAL_VERSION bump auto-re-prompts everyone. Emoji in the overlay are strippable by the Vypnout-emoji toggle (non-protected). -->
+<!-- MTL build: QJE three fixes. (1) coach 1:1 In-person card tag is now language-aware: CS shows "Soukromky", EN keeps "In-person" (was hardcoded In-person in both). (2) UNSAVED-CHANGES reminder ("Nezapomen ulozit zmeny") fired on almost any input because blockOf walked up to <body>, and body contains save buttons anywhere in the DOM (plus btnSave = the deck FAVORITE button and a /save/i text regex widened it further). Now scoped to the nearest .sheet that contains one of the three REAL form-save buttons (btnSaveRates/coachSchedSave/mgSave) - search bars, chat, OTP, filters no longer trigger it. (3) WALK-IN drop-in post-pay rewritten to a CODE flow: paints "Payment received" INSTANTLY (no more login-screen flash), sends signInWithOtp, then shows a 6-digit CODE INPUT and verifyOtp({type:email}) instead of telling the user to "click the link" - matching the code email template + PWA-friendly (links open in Safari not the PWA). On success it loads into the app where guest data auto-links by email. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -3792,7 +3792,7 @@ function _mapCoachRow(c){
     // Sestav tagy podle toho co nabízí
     const tags = [];
     const cls = [];
-    if(c.rate_inperson){ tags.push('📍 In-person'); cls.push('tag-inperson'); }
+    if(c.rate_inperson){ tags.push(LANG==='en'?'📍 In-person':'📍 Soukromky'); cls.push('tag-inperson'); }
     if(c.rate_online){ tags.push('🌐 Online'); cls.push('tag-online'); }
     parseSpecs(c.specializations).forEach(k=>{ if(SPEC_LABELS[k]){ tags.push(SPEC_LABELS[k]); cls.push(SPEC_CLS[k]||'tag-style'); } });
 
@@ -11221,12 +11221,12 @@ $('btnUndo').onclick=()=>{ if(_deckMode==='events'){ evPrevCard(); return; } doU
 $('btnGo').onclick=()=>{ if(_deckMode==='events'){ const e=evCurrent(); if(e) openEventView(e); return; } doGo(); };
 $('btnSave').onclick=()=>{ if(_deckMode==='events'){ evSaveFav(); return; } doSave(); };
 (function(){
-  const SAVE_RE=/save|uložit|ulož/i; const SAVE_IDS=['btnSave','btnSaveRates','coachSchedSave','mgSave']; const dirty=new Set();
-  function blockOf(el){ let n=el.parentElement; while(n){ try{ const bs=n.querySelectorAll('button'); for(const x of bs){ if(SAVE_IDS.includes(x.id)||SAVE_RE.test(x.textContent||'')) return n; } }catch(e){} n=n.parentElement; } return null; }
+  const SAVE_IDS=['btnSaveRates','coachSchedSave','mgSave']; const dirty=new Set();
+  function blockOf(el){ const sh=(el.closest&&el.closest('.sheet'))||null; if(!sh) return null; try{ const bs=sh.querySelectorAll('button'); for(const x of bs){ if(SAVE_IDS.includes(x.id)) return sh; } }catch(e){} return null; }
   function onEdit(e){ const t=e.target; if(!t||!t.matches) return; if(!t.matches('input:not([type=file]),textarea,select')) return; const blk=blockOf(t); if(!blk) return; const k=blk.id||((blk.className||'')+''); if(!k||dirty.has(k)) return; dirty.add(k); try{ toast(LANG==='en'?"💾 Don't forget to save your changes":'💾 Nezapomeň uložit změny tlačítkem'); }catch(e){} }
   document.addEventListener('input',onEdit,true);
   document.addEventListener('change',onEdit,true);
-  document.addEventListener('click',function(e){ const x=e.target&&e.target.closest&&e.target.closest('button'); if(x&&(SAVE_IDS.includes(x.id)||SAVE_RE.test(x.textContent||''))) dirty.clear(); },true);
+  document.addEventListener('click',function(e){ const x=e.target&&e.target.closest&&e.target.closest('button'); if(x&&SAVE_IDS.includes(x.id)) dirty.clear(); },true);
 })();
 $('btnInfo').onclick=()=>{ if(_deckMode==='events'){ const e=evCurrent(); if(e) openEventView(e); return; } doInfo(); };
 
@@ -18209,17 +18209,30 @@ async function showPaidPopup(){
   }
   if(params.get('guest_drop')==='ok'){
     document.body.style.background='#fff'; document.body.style.color='#111';
+    const EN=LANG==='en';
+    document.body.innerHTML='<div id="gdWrap" style="padding:44px 24px;text-align:center;font-family:sans-serif;color:#111;max-width:420px;margin:0 auto;"><h2 style="font-size:20px;margin:0 0 8px;">'+(EN?'Payment received!':'Platba proběhla!')+'</h2><p style="font-size:14px;color:#555;">'+(EN?'Finishing your check-in…':'Dokončuji tvé odbavení…')+'</p></div>';
     const bookingId=params.get('booking'), sessionId=params.get('session'), gAcct=params.get('acct');
     let email=null, name=null, pi=null;
     if(sessionId){ try{ const r=await fetch('/api/session?sessionId='+sessionId+(gAcct?'&gymAccount='+encodeURIComponent(gAcct):'')); const j=await r.json(); email=j.customerEmail||null; name=j.customerName||null; pi=j.paymentIntent||null; }catch(e){} }
     if(bookingId){ try{ await supaClient.from('gym_bookings').update({ status:'active', payment_intent:pi, guest_email:email, guest_name:name, student_name:name }).eq('id', bookingId); }catch(e){} }
-    let sent=false; if(email){ try{ await supaClient.auth.signInWithOtp({ email, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } }); sent=true; }catch(e){} }
-    document.body.innerHTML='<div style="padding:48px 24px;text-align:center;font-family:sans-serif;color:#111;max-width:420px;margin:0 auto;">'
-      +'<div style="font-size:40px;margin-bottom:10px;">✅</div>'
-      +'<h2 style="font-size:20px;margin:0 0 10px;">'+(LANG==='en'?'Payment received!':'Platba proběhla!')+'</h2>'
-      +'<p style="font-size:14px;line-height:1.6;color:#444;">'+(sent?(LANG==='en'?('Please open your email ('+(email||'your inbox')+') right now and click the link — this finishes your registration and confirms today\'s attendance. The email is from "Supabase Auth" (subject "MTL — Log in your attendance"). Check spam too.'):('Jdi prosím ihned do svého e-mailu ('+(email||'tvá schránka')+') a klikni na odkaz — dokončíš tím registraci a potvrdíš dnešní docházku. E-mail přijde od odesílatele "Supabase Auth" (předmět "MTL — Log in your attendance"). Mrkni i do spamu.')):(LANG==='en'?'Your payment is done. Ask reception to help you finish signing up.':'Platba je hotová. Recepce ti pomůže dokončit registraci.'))+'</p>'
-      +'<p style="font-size:12px;color:#888;margin-top:18px;">Martial Training Lab</p></div>';
+    let sent=false; if(email){ try{ await supaClient.auth.signInWithOtp({ email, options:{ shouldCreateUser:true } }); sent=true; }catch(e){} }
     window.history.replaceState({}, '', location.pathname);
+    const wrap=document.getElementById('gdWrap'); if(!wrap){ return; }
+    if(!sent || !email){ wrap.innerHTML='<h2 style="font-size:20px;margin:0 0 8px;">'+(EN?'Payment received!':'Platba proběhla!')+'</h2><p style="font-size:14px;color:#555;">'+(EN?'Your payment is done. Ask reception to help you finish signing up.':'Platba je hotová. Recepce ti pomůže dokončit registraci.')+'</p>'; return; }
+    wrap.innerHTML='<h2 style="font-size:21px;margin:0 0 8px;">'+(EN?'Almost done!':'Skoro hotovo!')+'</h2><p style="font-size:14px;line-height:1.6;color:#444;margin-bottom:16px;">'+(EN?('We e-mailed a 6-digit code to <b>'+email+'</b>. Enter it below to finish your check-in and confirm your attendance. Check spam too.'):('Poslali jsme 6místný kód na <b>'+email+'</b>. Zadej ho níže a dokonči odbavení a dnešní docházku. Mrkni i do spamu.'))+'</p><input id="gdCode" inputmode="numeric" autocomplete="one-time-code" maxlength="8" placeholder="000000" style="width:100%;box-sizing:border-box;padding:14px;font-size:22px;text-align:center;letter-spacing:6px;border:1.5px solid #ddd;border-radius:12px;margin-bottom:10px;"><div id="gdMsg" style="display:none;color:#c00;font-size:13px;margin-bottom:8px;"></div><button id="gdVerify" style="width:100%;padding:14px;background:#E11;color:#fff;border:none;border-radius:12px;font-size:16px;font-weight:800;cursor:pointer;font-family:sans-serif;">'+(EN?'Confirm':'Potvrdit')+'</button><p style="font-size:12px;color:#888;margin-top:16px;">Martial Training Lab</p>';
+    const inp=document.getElementById('gdCode'), btn=document.getElementById('gdVerify'), gm=document.getElementById('gdMsg');
+    const showErr=(t)=>{ if(gm){ gm.style.display='block'; gm.textContent=t; } };
+    btn.onclick=async()=>{
+      const tok=(inp.value||'').trim();
+      if(tok.length<6){ showErr(EN?'Enter the 6-digit code.':'Zadej 6místný kód.'); return; }
+      btn.disabled=true; btn.textContent=EN?'Verifying…':'Ověřuji…';
+      try{
+        const { data, error } = await supaClient.auth.verifyOtp({ email, token:tok, type:'email' });
+        if(error){ showErr(error.message); btn.disabled=false; btn.textContent=EN?'Confirm':'Potvrdit'; return; }
+        location.href = location.origin + '/';
+      }catch(e){ showErr((e&&e.message)||'error'); btn.disabled=false; btn.textContent=EN?'Confirm':'Potvrdit'; }
+    };
+    inp.addEventListener('keydown',function(e){ if(e.key==='Enter') btn.click(); });
     return;
   }
   if(params.get('merch_pay')==='ok'){
