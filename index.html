@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QJH ROOT FIX for "Sezeni vyprselo" + blank coach/gym/founder HERO net. Real cause = the access TOKEN, not three bugs: founder revenue (/api/mtl-revenue), coach + gym-owner HERO net (/api/my-transactions) and recording reads all take their token from _freshTok(). On dashboard load several token-gated fetches fire at once; each called refreshSession() concurrently and Supabase ROTATES the refresh token, so the first wins and the rest fail "refresh token already used" -> session breaks -> every token-gated read shows "Sezeni vyprselo" / blank, while the gym management view (reads gym tables directly, no token) still shows numbers. FIX 1: _freshTok now does a SINGLE-FLIGHT refresh - concurrent callers share ONE refreshSession promise (window._tokRefreshP) so the refresh token is never rotated twice in parallel; it also refreshes when getSession has no in-memory session (restores from stored refresh token) and uses a 60s expiry buffer. FIX 2: the Obnovit button (doAppRefresh) calls refreshSession() BEFORE re-fetching, so it actually re-establishes a valid token instead of re-hitting the API with the broken one. With the token reliable, founder/coach/gym-owner NET + walk-in/merch (recorded fine via /api/session, no user token) surface via the PRIMARY path; the QJG direct read stays only as a harmless safety net, not relied upon. -->
+<!-- MTL build: QJJ member-import STEP 1 (data in). New imported_members staging table (imported_members.sql). New sheet shImportMembers: paste or upload a CSV exported from a competitor (ZenPlanner/Mindbody/MAAT/Excel), it auto-detects the delimiter (comma/semicolon/tab), parses with basic quote handling, auto-guesses the name/email/phone/plan columns, lets the owner remap them, previews how many rows have a valid e-mail, and upserts them into imported_members (dedup on gym_id+email, status=pending). Entry button "Importovat cleny z jineho softwaru" sits at the top of the Spravovat gym sheet (static, above gymManageContent so renderGymManage never wipes it). STEP 2 (next): a paginated section UNDER the app-paid members listing the pending imports, with select-individuals + "send registration e-mail to all", sending a magic link via the Resend flow (to be polished together). -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -954,6 +954,7 @@ body.no-emoji [data-keep-emoji] .prow-icon,body.no-emoji [data-keep-emoji] .sico
 <div class="sheet" id="shGymTeamView" style="z-index:89;"><div class="shdr"><div class="shdr-title" id="gtvTitle" data-noi18n>Gym tým</div><button class="btn-close" id="btnCloseGtv">×</button></div><div id="gtvContent" style="padding:16px 20px;"></div></div>
 <div class="sheet" id="shGymManage" style="z-index:87;">
   <div class="shdr"><div class="shdr-title">🏛️ Spravovat gym</div><button class="btn-close" id="btnCloseGymManage">✕</button></div>
+  <div style="padding:14px 20px 0;"><button id="btnImportMembers" data-noi18n style="width:100%;padding:11px;background:#171717;color:#F4D87A;border:1.5px solid #E8C24A;border-radius:11px;font-weight:700;font-size:13px;cursor:pointer;">📥 Importovat členy z jiného softwaru</button></div>
   <div id="gymManageContent" style="padding:16px 20px;"></div>
 </div>
 
@@ -1689,6 +1690,20 @@ body.no-emoji [data-keep-emoji] .prow-icon,body.no-emoji [data-keep-emoji] .sico
     <button class="btn-close" id="btnCloseGymStats" style="background:#333;color:#fff;">✕</button>
   </div>
   <div style="padding:20px;" id="gymStatsBody"></div>
+</div>
+
+<!-- IMPORT MEMBERS (step 1: data in) -->
+<div class="sheet" id="shImportMembers" style="z-index:91;">
+  <div class="shdr"><div class="shdr-title" data-noi18n>📥 Import členů</div><button class="btn-close" id="btnCloseImport"></button></div>
+  <div style="padding:20px;">
+    <p style="font-size:13px;color:var(--mid);line-height:1.55;margin-bottom:12px;" data-noi18n>Přenes členy z jiného softwaru (ZenPlanner, Mindbody, MAAT, Excel…). Vlož CSV nebo nahraj soubor — první řádek musí být názvy sloupců. Pozvánky k registraci jim pošleš v dalším kroku.</p>
+    <input type="file" id="impFile" accept=".csv,.txt" style="margin-bottom:10px;font-size:13px;width:100%;">
+    <textarea id="impCsv" placeholder="jméno;email;telefon" style="width:100%;box-sizing:border-box;height:120px;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:monospace;font-size:12px;margin-bottom:10px;"></textarea>
+    <button id="impDetect" data-noi18n style="width:100%;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;margin-bottom:14px;">Načíst sloupce</button>
+    <div id="impMap"></div>
+    <div id="impPreview" style="font-size:12px;color:var(--mid);margin:10px 0;line-height:1.5;"></div>
+    <button id="impSave" data-noi18n style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-weight:800;cursor:pointer;display:none;"></button>
+  </div>
 </div>
 
 <!-- FOUNDER DASHBOARD (souhrn v Já) -->
@@ -3476,7 +3491,10 @@ const NOTIF_T = {
     : `🎁 Díky za pozvánku — ${d.student||'někdo'} se přes tvůj odkaz přidal do ${d.gym_name||'gymu'}!${d.pct?` Pokud tam máš členství, máš příští měsíc taky ${d.pct}% levnější.`:''}`,
   gym_member_joined: (d)=> LANG==='en'
     ? `🎟️ Congrats! ${d.student||'A student'} just bought a membership for ${d.amt} ${d.sym}/mo.`
-    : `🎟️ Gratulujeme! Student ${d.student||''} si právě zakoupil členství za ${d.amt} ${d.sym}/měs.`
+    : `🎟️ Gratulujeme! Student ${d.student||''} si právě zakoupil členství za ${d.amt} ${d.sym}/měs.`,
+  walkin_drop: (d)=> LANG==='en'
+    ? `🚶 Walk-in: ${d.student||'a guest'} paid for a drop-in${d.amt?(' ('+d.amt+' '+(d.sym||'')+')'):''} — tap for today's attendance.`
+    : `🚶 Walk-in: ${d.student||'host'} zaplatil jednorázový vstup${d.amt?(' ('+d.amt+' '+(d.sym||'')+')'):''} — klepni pro dnešní docházku.`,
 };
 function notifText(n){
   try{
@@ -8294,6 +8312,72 @@ async function renderGymLeaderboard(){
     wrap.appendChild(row); wrap.appendChild(brk); list.appendChild(wrap);
   });
 }
+
+// ===== MEMBER IMPORT (step 1: CSV -> imported_members staging) =====
+window._impRows=null; window._impHead=null;
+function openImportMembers(){ openSheet('shImportMembers'); }
+function _impParseCSV(txt){
+  var firstLine=(txt.split(/\r?\n/)[0]||'');
+  var delim = (firstLine.split(';').length > firstLine.split(',').length) ? ';' : (firstLine.split('\t').length>firstLine.split(',').length?'\t':',');
+  var lines=txt.split(/\r?\n/).filter(function(l){ return l.trim().length; });
+  function parseLine(line){ var out=[],cur='',q=false;
+    for(var i=0;i<line.length;i++){ var c=line[i];
+      if(q){ if(c=='"'){ if(line[i+1]=='"'){ cur+='"'; i++; } else q=false; } else cur+=c; }
+      else { if(c=='"') q=true; else if(c===delim){ out.push(cur); cur=''; } else cur+=c; } }
+    out.push(cur); return out.map(function(x){ return x.trim(); }); }
+  var rows=lines.map(parseLine);
+  return { head: rows[0]||[], body: rows.slice(1) };
+}
+function _impField(label,id,opts){ return '<div style="margin-bottom:10px;"><div style="font-size:12px;font-weight:700;color:var(--dark);margin-bottom:4px;">'+label+'</div><select id="'+id+'" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:13px;">'+opts+'</select></div>'; }
+function _impDetect(){
+  var txt=(($('impCsv')&&$('impCsv').value)||'').trim();
+  if(!txt){ toast('Vlož nebo nahraj CSV'); return; }
+  var pr=_impParseCSV(txt);
+  if(!pr.head.length || !pr.body.length){ toast('Nenašel jsem žádné řádky'); return; }
+  window._impHead=pr.head; window._impRows=pr.body;
+  function guess(keys){ for(var i=0;i<pr.head.length;i++){ var h=(pr.head[i]||'').toLowerCase(); for(var k=0;k<keys.length;k++){ if(h.indexOf(keys[k])>=0) return i; } } return -1; }
+  var gName=guess(['jméno','jmeno','name','člen','clen','klient','client','celé jméno']);
+  var gEmail=guess(['mail']);
+  var gPhone=guess(['tel','phone','mobil','číslo','cislo']);
+  var gPlan=guess(['plán','plan','members','člens','clens','tarif','poznám','note']);
+  function opts(sel){ var o='<option value="-1">— žádný —</option>'; for(var i=0;i<pr.head.length;i++){ o+='<option value="'+i+'"'+(i===sel?' selected':'')+'>'+escapeHtml(pr.head[i]||('Sloupec '+(i+1)))+'</option>'; } return o; }
+  $('impMap').innerHTML=_impField('Jméno','impColName',opts(gName))+_impField('E-mail *','impColEmail',opts(gEmail))+_impField('Telefon','impColPhone',opts(gPhone))+_impField('Plán / poznámka','impColPlan',opts(gPlan));
+  ['impColName','impColEmail','impColPhone','impColPlan'].forEach(function(id){ var el=$(id); if(el) el.onchange=_impRefreshPreview; });
+  _impRefreshPreview();
+}
+function _impRefreshPreview(){
+  var rows=window._impRows||[]; function ci(id){ var el=$(id); return el?parseInt(el.value):-1; }
+  var ei=ci('impColEmail'); var valid=0;
+  rows.forEach(function(r){ var em=ei>=0?((r[ei]||'').trim()):''; if(em && em.indexOf('@')>0) valid++; });
+  var pv=$('impPreview'); if(pv) pv.innerHTML='Nalezeno <b>'+rows.length+'</b> řádků, z toho <b>'+valid+'</b> s platným e-mailem (ty půjde pozvat).';
+  var sb=$('impSave'); if(sb){ sb.style.display=valid>0?'block':'none'; sb.textContent='Uložit '+valid+' členů do importu'; }
+}
+async function _impSave(){
+  var rows=window._impRows||[]; function ci(id){ var el=$(id); return el?parseInt(el.value):-1; }
+  var ni=ci('impColName'), ei=ci('impColEmail'), pi=ci('impColPhone'), li=ci('impColPlan');
+  if(ei<0){ toast('Vyber sloupec s e-mailem'); return; }
+  try{ await checkGymOwnership(); }catch(e){}
+  var g=window._myGymData; if(!g){ toast('Nemáš schválený gym'); return; }
+  var seen={}, recs=[];
+  rows.forEach(function(r){ var em=((r[ei]||'').trim()).toLowerCase(); if(!em||em.indexOf('@')<1||seen[em]) return; seen[em]=1;
+    recs.push({ gym_id:g.id, name:ni>=0?((r[ni]||'').trim()||null):null, email:em, phone:pi>=0?((r[pi]||'').trim()||null):null, plan:li>=0?((r[li]||'').trim()||null):null, source:'csv', status:'pending' }); });
+  if(!recs.length){ toast('Žádné platné řádky s e-mailem'); return; }
+  var sb=$('impSave'); if(sb){ sb.disabled=true; sb.textContent='Ukládám…'; }
+  try{
+    var resp=await supaClient.from('imported_members').upsert(recs, { onConflict:'gym_id,email', ignoreDuplicates:true });
+    if(resp.error) throw resp.error;
+    toast('Importováno '+recs.length+' členů. Pozvánky pošleš v dalším kroku.');
+    closeSheet('shImportMembers');
+    if($('impCsv')) $('impCsv').value=''; if($('impMap')) $('impMap').innerHTML=''; if($('impPreview')) $('impPreview').innerHTML='';
+  }catch(e){ toast('Chyba: '+((e&&e.message)||e)); if(sb){ sb.disabled=false; _impRefreshPreview(); } }
+}
+if($('btnImportMembers')) $('btnImportMembers').onclick=openImportMembers;
+if($('btnCloseImport')) $('btnCloseImport').onclick=function(){ closeSheet('shImportMembers'); };
+if($('impDetect')) $('impDetect').onclick=_impDetect;
+if($('impSave')) $('impSave').onclick=_impSave;
+if($('impFile')) $('impFile').onchange=function(e){ var f=e.target.files&&e.target.files[0]; if(!f) return; var rd=new FileReader(); rd.onload=function(){ if($('impCsv')) $('impCsv').value=rd.result||''; _impDetect(); }; rd.readAsText(f); };
+// ===== end member import =====
+
 async function renderGymManage(){
   const box=$('gymManageContent'); if(!box) return;
   await checkGymOwnership();
@@ -11709,6 +11793,13 @@ async function loadNotifications(append){
       list.appendChild(el);
       return;
     }
+    if(k==='walkin_drop'){
+      const dd=(()=>{ try{ return JSON.parse(n.data||'{}'); }catch(e){ return {}; } })();
+      el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;cursor:pointer;`;
+      el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${notifText(n)}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}</div>`;
+      el.onclick=()=>{ if(dd.gym && typeof openGymStats==='function') openGymStats(dd.gym, dd.gym_name||''); };
+      list.appendChild(el); return;
+    }
     const isBookingConfirm = k ? k==='booking_confirm' : (n.type==='booking' && n.message.includes('Rezervace potvrzena'));
     const isCoachInperson = k ? k==='coach_new_inperson' : (n.type==='booking' && n.message.includes('Nová rezervace'));
     const isCoachLessonRem = k==='coach_lesson_reminder';
@@ -11882,6 +11973,7 @@ async function updateNotifBadge(){
   try{ if(typeof _csFillNetHero==='function' && currentUser) await _csFillNetHero(currentUser.profileId||currentUser.id); }catch(e){}
   try{ if($('shMoneyDash') && $('shMoneyDash').classList.contains('open') && typeof openFullDash==='function') await openFullDash(); }catch(e){}
   try{ if(currentUser && (currentUser.role==='founder'||currentUser.id===FOUNDER_UUID) && typeof renderFdReal==='function') await renderFdReal(); }catch(e){}
+  try{ if($('shCoachDash') && $('shCoachDash').classList.contains('open') && typeof renderCoachDash==='function') await renderCoachDash(); }catch(e){}
   try{ var _ao=document.querySelector('[id^="shAmb"].open'); if(_ao && typeof openAmbassadorDashboard==='function') await openAmbassadorDashboard(); }catch(e){}
   if($('shNotif').classList.contains('open')) loadNotifications();
   if(document.body.classList.contains('dashmode') && typeof buildDashSide==='function') buildDashSide();
@@ -12692,7 +12784,9 @@ async function renderFdReal(){
       if(oN>0){ typeAcc+=HDR('🧾',(EN?'Other':'Ostatní')+' <span style="color:var(--light);font-weight:600;font-size:12px;">· '+oN+'×</span>',f(oNet))+wrap(row('💎','#F0FBF0','MTL net','<span style="color:#006040;font-weight:800;">'+f(oNet)+'</span>')); }
     }
     const curNote = otherCur.length? '<div style="font-size:11px;color:var(--light);line-height:1.5;padding:4px 4px 0;">'+(EN?'Summed nominally across currencies':'Sečteno nominálně napříč měnami')+' · '+otherCur.map(c=>c+': '+(c==='EUR'?'€':c==='USD'?'$':'')+Math.round(byCur[c]/100)).join(' · ')+' '+(EN?'(exact split in CSV)':'(přesný rozpad v CSV)')+'</div>' : '';
-    box.innerHTML = hero + cards + (typeAcc? ('<div class="sec-lbl">'+(EN?'By revenue type':'Podle typu příjmu')+'</div>'+typeAcc):'') + curNote;
+    const _grossFee = rows.reduce((a,r)=>a+Number(r.mtl_fee||0),0); const _welcCost = rows.reduce((a,r)=>a+Number(r.mtl_fee_refunded||0),0);
+    const welcLine = (_welcCost>0) ? ('<div style="background:#FFF8EF;border:1px solid #FFE0B2;border-radius:12px;padding:10px 13px;margin-bottom:10px;font-size:12px;color:#7A4F00;line-height:1.55;">'+(EN?('Without the welcome 0%, MTL would have earned <b>'+f(_grossFee)+'</b> this period — the welcome month returned <b>'+f(_welcCost)+'</b> to new providers.'):('Bez uvítacích 0 % by MTL za toto období vydělalo <b>'+f(_grossFee)+'</b> — uvítací měsíc vrátil <b>'+f(_welcCost)+'</b> novým providerům.'))+'</div>') : '';
+    box.innerHTML = hero + cards + welcLine + (typeAcc? ('<div class="sec-lbl">'+(EN?'By revenue type':'Podle typu příjmu')+'</div>'+typeAcc):'') + curNote;
     box.insertAdjacentHTML('beforeend','<div id="fdEpWrap" style="margin-top:14px;"></div><div id="fdCostsWrap" style="margin-top:14px;"></div>'); _loadFdEp(sel); _loadFdCosts(sel);
     box.querySelectorAll('.dashSecHdr').forEach(function(h){ var g=h.nextElementSibling; var ar=h.querySelector('.dashAccArr'); if(g){ g.style.display='none'; if(ar) ar.style.transform='rotate(-90deg)'; } h.onclick=function(){ if(!g) return; var closed=g.style.display==='none'; g.style.display=closed?'':'none'; if(ar) ar.style.transform=closed?'':'rotate(-90deg)'; }; });
   }catch(e){ box.innerHTML='<p style="color:var(--red);font-size:12px;">⚠️ '+e.message+'</p>'; }
@@ -18234,7 +18328,7 @@ async function showPaidPopup(){
     if(sessionId){ try{ const r=await fetch('/api/session?sessionId='+sessionId+(gAcct?'&gymAccount='+encodeURIComponent(gAcct):'')); const j=await r.json(); email=j.customerEmail||null; name=j.customerName||null; pi=j.paymentIntent||null; }catch(e){} }
     let gymId=null;
     if(bookingId){ try{ const { data:_bk } = await supaClient.from('gym_bookings').update({ status:'active', payment_intent:pi, guest_email:email, guest_name:name, student_name:name }).eq('id', bookingId).select('gym_id').single(); gymId=_bk&&_bk.gym_id; }catch(e){} }
-    if(gymId){ try{ const { data:_g } = await supaClient.from('gyms').select('owner_id,name').eq('id',gymId).single(); if(_g&&_g.owner_id){ await supaClient.from('notifications').insert({ user_id:_g.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'walkin_drop' }), message:(EN?('Walk-in: '+(name||'a guest')+' paid for a drop-in.'):('Walk-in: '+(name||'host')+' zaplatil jednorázový vstup.')) }); } }catch(e){} }
+    if(gymId){ try{ const { data:_g } = await supaClient.from('gyms').select('owner_id,name').eq('id',gymId).single(); if(_g&&_g.owner_id){ await supaClient.from('notifications').insert({ user_id:_g.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'walkin_drop', student:(name||''), gym:gymId, gym_name:(_g.name||'') }), message:(EN?('Walk-in: '+(name||'a guest')+' paid for a drop-in.'):('Walk-in: '+(name||'host')+' zaplatil jednorázový vstup.')) }); } }catch(e){} }
     let sent=false; if(email){ try{ await supaClient.auth.signInWithOtp({ email, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } }); sent=true; }catch(e){} }
     window.history.replaceState({}, '', location.pathname);
     const wrap=document.getElementById('gdWrap'); if(!wrap){ return; }
