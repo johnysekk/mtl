@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QJG fix the blank coach + gym-owner HERO net / breakdown. ROOT CAUSE: renderCoachDash, the gym-team dash and the gym-owner money HERO all read transactions through ONE endpoint, /api/my-transactions (service role). When that endpoint is down, not deployed, or rejects the access token (401), BOTH the coach HERO net and the gym-owner HERO net go blank - while the "gym prehled" management view still shows numbers because it reads gym_bookings/gym_memberships directly. Recording itself is fine: pay.js passes acct+session for BOTH online and in-person 1:1, and session.js records coach 1:1 with coach_id set and gym_id null (so it passes the dashboard !gym_id filter). FIX: _fetchMyTx now FALLS BACK to reading the transactions table directly from the browser (coach_id = me for coachTx; gym_id in my owned gyms for gymTx) whenever the endpoint does not return {ok:true}. This works while RLS is still deferred, so the HERO net + breakdown can never go blank just because the endpoint hiccups. Still deploy my-transactions.js so the primary (RLS-ready) path works too. -->
+<!-- MTL build: QJH ROOT FIX for "Sezeni vyprselo" + blank coach/gym/founder HERO net. Real cause = the access TOKEN, not three bugs: founder revenue (/api/mtl-revenue), coach + gym-owner HERO net (/api/my-transactions) and recording reads all take their token from _freshTok(). On dashboard load several token-gated fetches fire at once; each called refreshSession() concurrently and Supabase ROTATES the refresh token, so the first wins and the rest fail "refresh token already used" -> session breaks -> every token-gated read shows "Sezeni vyprselo" / blank, while the gym management view (reads gym tables directly, no token) still shows numbers. FIX 1: _freshTok now does a SINGLE-FLIGHT refresh - concurrent callers share ONE refreshSession promise (window._tokRefreshP) so the refresh token is never rotated twice in parallel; it also refreshes when getSession has no in-memory session (restores from stored refresh token) and uses a 60s expiry buffer. FIX 2: the Obnovit button (doAppRefresh) calls refreshSession() BEFORE re-fetching, so it actually re-establishes a valid token instead of re-hitting the API with the broken one. With the token reliable, founder/coach/gym-owner NET + walk-in/merch (recorded fine via /api/session, no user token) surface via the PRIMARY path; the QJG direct read stays only as a harmless safety net, not relied upon. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4292,7 +4292,7 @@ async function openHotspotDetail(h){
     }
   }catch(e){ var box2=document.getElementById('hsDetPeople'); if(box2) box2.innerHTML=''; }
 }
-async function _freshTok(){ try{ var _s=await supaClient.auth.getSession(); var ss=_s&&_s.data&&_s.data.session; if(ss){ var exp=ss.expires_at?ss.expires_at*1000:0; if(exp && exp < Date.now()+30000){ try{ var _r=await supaClient.auth.refreshSession(); ss=(_r&&_r.data&&_r.data.session)||ss; }catch(e){} } return (ss&&ss.access_token)||''; } }catch(e){} return ''; }
+async function _freshTok(){ try{ var _s=await supaClient.auth.getSession(); var ss=_s&&_s.data&&_s.data.session; var exp=(ss&&ss.expires_at)?ss.expires_at*1000:0; if(!ss || (exp && exp < Date.now()+60000)){ var p=window._tokRefreshP; if(!p){ p=supaClient.auth.refreshSession(); window._tokRefreshP=p; Promise.resolve(p).catch(function(){}).then(function(){ if(window._tokRefreshP===p) window._tokRefreshP=null; }); } var _r=null; try{ _r=await p; }catch(e){} if(_r&&_r.data&&_r.data.session) ss=_r.data.session; } return (ss&&ss.access_token)||''; }catch(e){} return ''; }
 async function _loadGymGeo(){
   if(window._gymGeo) return window._gymGeo;
   try{ var r=await supaClient.from('gyms').select('city_lat,city_lng,disciplines').eq('status','approved'); window._gymGeo=(r.data||[]).map(function(g){ return { lat:(g.city_lat!=null?+g.city_lat:null), lng:(g.city_lng!=null?+g.city_lng:null), discs:(typeof parseDisc==='function'?parseDisc(g.disciplines):[]) }; }).filter(function(g){ return g.lat!=null&&g.lng!=null; }); }catch(e){ window._gymGeo=[]; }
@@ -11867,6 +11867,7 @@ async function updateNotifBadge(){
 
   async function doAppRefresh(){
   toast(L('⟳ Obnovuji...'));
+  try{ await supaClient.auth.refreshSession(); }catch(e){}
   await loadCoaches();
   if(typeof updateCoachSummary==='function') await updateCoachSummary();
   await updateNotifBadge();
