@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QJN import privacy + roster naming. (1) PHONE dropped from the import UI: placeholder is now "jmeno;email", the Telefon mapping field + its onchange are removed, so phone is no longer collected by default (the imported_members.phone column stays in the DB, just unused) - data minimization, no extra consent, no perf cost. Phone collection should return only WITH a real purpose + a member-controlled "show my phone to coach/gym at bookings" toggle (post-launch). (2) Roster badges renamed for clarity: pending "ceka" -> "ceka na pozvanku", claimed "registrovan" -> "pripojen". (3) The bulk button "Pozvat vsechny cekajici" -> "Pozvat vsechny nepozvane" and now targets ONLY status=pending (never re-spams someone already invited; re-inviting/reminding is the per-row checkbox path), shows the pending count, and hides when 0. (4) Clearer summary explaining select-vs-bulk + the claim flow. -->
+<!-- MTL build: QJO walk-in typo guard. The walk-in success screen no longer auto-fires the magic link to whatever e-mail Stripe captured (a typo there = guest never gets the link = cannot get into the app to fix it). Instead it shows that e-mail in an EDITABLE field with a Send-login-link button, so the guest (still present, just paid) can correct a typo BEFORE the link is sent; on send we update gym_bookings.guest_email to the corrected address and signInWithOtp to it. Also from-address noreply@ -> ahoj@ in invite-members.js (monitored, reply-friendly, marginally better deliverability/brand; the big levers stay SPF/DKIM/DMARC + reputation). -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -18410,12 +18410,28 @@ async function showPaidPopup(){
     let gymId=null;
     if(bookingId){ try{ const { data:_bk } = await supaClient.from('gym_bookings').update({ status:'active', payment_intent:pi, guest_email:email, guest_name:name, student_name:name }).eq('id', bookingId).select('gym_id').single(); gymId=_bk&&_bk.gym_id; }catch(e){} }
     if(gymId){ try{ const { data:_g } = await supaClient.from('gyms').select('owner_id,name').eq('id',gymId).single(); if(_g&&_g.owner_id){ await supaClient.from('notifications').insert({ user_id:_g.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'walkin_drop', student:(name||''), gym:gymId, gym_name:(_g.name||'') }), message:(EN?('Walk-in: '+(name||'a guest')+' paid for a drop-in.'):('Walk-in: '+(name||'host')+' zaplatil jednorázový vstup.')) }); } }catch(e){} }
-    let sent=false; if(email){ try{ await supaClient.auth.signInWithOtp({ email, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } }); sent=true; }catch(e){} }
     window.history.replaceState({}, '', location.pathname);
     const wrap=document.getElementById('gdWrap'); if(!wrap){ return; }
-    wrap.innerHTML = sent
-      ? ('<h2 style="font-size:21px;margin:0 0 8px;">'+(EN?'Almost done!':'Skoro hotovo!')+'</h2><p style="font-size:14px;line-height:1.6;color:#444;">'+(EN?('We sent a login link to <b>'+(email||'your inbox')+'</b>. Open your e-mail and tap the link — it opens your account in the app, where you accept the terms and set a password. Check spam too.'):('Poslali jsme přihlašovací odkaz na <b>'+(email||'tvou schránku')+'</b>. Otevři e-mail a klikni na odkaz — otevře tvůj účet v appce, kde odsouhlasíš podmínky a nastavíš si heslo. Mrkni i do spamu.'))+'</p><p style="font-size:12px;color:#888;margin-top:16px;">Martial Training Lab</p>')
-      : ('<h2 style="font-size:20px;margin:0 0 8px;">'+(EN?'Payment received!':'Platba proběhla!')+'</h2><p style="font-size:14px;color:#555;">'+(EN?'Your payment is done. Ask reception to help you finish signing up.':'Platba je hotová. Recepce ti pomůže dokončit registraci.')+'</p>');
+    if(email){
+      wrap.innerHTML = '<h2 style="font-size:21px;margin:0 0 8px;">'+(EN?'Payment received!':'Platba probehla!')+'</h2>'
+        +'<p style="font-size:14px;line-height:1.6;color:#444;margin:0 0 14px;">'+(EN?'We will send a login link so you can log your session and see your profile. Check the e-mail below and fix any typo:':'Posleme prihlasovaci odkaz, kterym si zapises trenink a uvidis svuj profil. Zkontroluj e-mail nize a oprav pripadny preklep:')+'</p>'
+        +'<input id="gdEmail" type="email" autocomplete="email" value="'+escapeHtml(email)+'" style="width:100%;box-sizing:border-box;padding:13px 14px;font-size:16px;border:1px solid #ccc;border-radius:10px;text-align:center;margin:0 0 10px;"/>'
+        +'<button id="gdSend" style="width:100%;padding:14px;font-size:15px;font-weight:700;color:#fff;background:#111;border:none;border-radius:10px;cursor:pointer;">'+(EN?'Send login link':'Poslat prihlasovaci odkaz')+'</button>'
+        +'<div id="gdMsg" style="font-size:13px;margin-top:10px;min-height:18px;"></div>';
+      const _b=document.getElementById('gdSend'), _i=document.getElementById('gdEmail'), _m=document.getElementById('gdMsg');
+      _b.onclick=async()=>{
+        const to=(_i.value||'').trim();
+        if(!to||!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)){ _m.style.color='#c00'; _m.textContent=(EN?'Enter a valid e-mail.':'Zadej platny e-mail.'); return; }
+        _b.disabled=true; _b.style.opacity='.6'; _b.textContent=(EN?'Sending...':'Posilam...');
+        if(to!==email && bookingId){ try{ await supaClient.from('gym_bookings').update({ guest_email:to }).eq('id',bookingId); }catch(e){} }
+        try{
+          await supaClient.auth.signInWithOtp({ email:to, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } });
+          wrap.innerHTML='<h2 style="font-size:21px;margin:0 0 8px;">'+(EN?'Link sent!':'Odkaz odeslan!')+'</h2><p style="font-size:14px;line-height:1.6;color:#444;">'+(EN?('We sent a login link to <b>'+escapeHtml(to)+'</b>. Open your e-mail and tap the link to finish (check spam too).'):('Poslali jsme prihlasovaci odkaz na <b>'+escapeHtml(to)+'</b>. Otevri si e-mail a klikni na odkaz (mrkni i do spamu).'))+'</p>';
+        }catch(e){ _b.disabled=false; _b.style.opacity='1'; _b.textContent=(EN?'Send login link':'Poslat prihlasovaci odkaz'); _m.style.color='#c00'; _m.textContent=(EN?'Could not send, try again.':'Nepovedlo se odeslat, zkus to znovu.'); }
+      };
+    } else {
+      wrap.innerHTML = '<h2 style="font-size:20px;margin:0 0 8px;">'+(EN?'Payment received!':'Platba probehla!')+'</h2><p style="font-size:14px;color:#555;">'+(EN?'Your payment is done. Ask reception to help find your profile.':'Platba probehla. Pozadej recepci o pomoc s dohledanim profilu.')+'</p>';
+    }
     return;
   }
   if(params.get('merch_pay')==='ok'){
