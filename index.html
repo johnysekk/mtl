@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QJC FOUNDER welcome-0% kill-switch (test tool). Problem: making the welcome 0% apply to ALL new provider accounts broke Petr testing real mtl_fee (his fresh test accounts get 0%). FIX: a toggle button above the Nuke/reset in the Founder TEST section. _toggleWelcomeZero() flips profiles.welcome_zero_off on the founder row (7e08...); _renderWelcomeToggle() reflects state (ZAPNUTO green / VYPNUTO red). session.js reads that founder flag as a GLOBAL kill-switch wrapping the whole welcome block - when off, no window opens + no fee refund => fresh accounts charge the normal 3.5% so mtl_fee is testable. Needs SQL: profiles.welcome_zero_off boolean default false. Instant manual alternative: set a test profiles welcome_free_until to a PAST date in Supabase => that account charges 3.5%. -->
+<!-- MTL build: QJD CONSENT GATE for passwordless / magic-link logins (LEADER GRADE, GDPR). The registration form already records consent (consents table: doc=terms/privacy, version=LEGAL_VERSION, agreed_at - audit-grade) BUT guests created via signInWithOtp magic link (and future imported members) get a profile at ~17095 WITHOUT going through that form => they never accept the Terms/Privacy. FIX: _maybeTermsGate() runs in enterApp; it queries the consents table for the current LEGAL_VERSION and, if the user is missing terms+privacy consent, shows a BLOCKING overlay (cannot be dismissed) with the same checkbox + Podminky/GDPR links (openTerms/openPrivacy) used at registration. On accept it inserts the same two consents rows, then (for passwordless accounts) chains into openSetPassword. Clicking a magic link is only AUTHENTICATION; consent is this separate explicit affirmative act. Reuses existing consents+LEGAL_VERSION (no new column/SQL); a LEGAL_VERSION bump auto-re-prompts everyone. Emoji in the overlay are strippable by the Vypnout-emoji toggle (non-protected). -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -4545,6 +4545,52 @@ function renderGymTagFilters(){
   const tags=[{v:null,lbl:(LANG==='en'?'All':'Vše'),e:''}].concat(CLASS_LEVELS.filter(l=>l.v!=='all').map(l=>({v:l.v,lbl:(LANG==='en'?l.en:l.cs),e:_emo[l.v]||''})));
   box.innerHTML=tags.map(t=>`<div class="pill${((_gymTagFilter||null)===t.v)?' active':''}" data-gt="${t.v==null?'':t.v}">${t.e?t.e+' ':''}${t.lbl}</div>`).join('');
   box.querySelectorAll('.pill').forEach(el=>el.onclick=()=>{ _gymTagFilter=el.dataset.gt||null; renderGymTagFilters(); init(); });
+}
+async function _maybeTermsGate(){
+  try{
+    if(!currentUser || !currentUser.id) return;
+    if(document.getElementById('termsGateOv')) return;
+    let need=false;
+    try{
+      const { data, error } = await supaClient.from('consents').select('doc').eq('user_id', currentUser.id).eq('version', LEGAL_VERSION);
+      if(!error){ const docs=(data||[]).map(r=>r.doc); need = !(docs.includes('terms') && docs.includes('privacy')); }
+    }catch(e){ need=false; }
+    if(!need) return;
+    const EN=LANG==='en';
+    const ov=document.createElement('div'); ov.id='termsGateOv';
+    ov.style.cssText='position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;';
+    ov.innerHTML=`<div style="background:#fff;border-radius:18px;max-width:420px;width:100%;padding:24px;box-shadow:0 12px 44px rgba(0,0,0,.32);">
+      <div style="font-size:18px;font-weight:800;color:var(--dark);margin-bottom:8px;">${EN?'One quick step':'Než budeš pokračovat'}</div>
+      <div style="font-size:13.5px;color:var(--mid);line-height:1.55;margin-bottom:16px;">${EN?'To use Martial Training Lab, please review and accept our documents.':'Abys mohl/a používat Martial Training Lab, přečti a odsouhlas prosím naše dokumenty.'}</div>
+      <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13.5px;color:var(--mid);line-height:1.5;margin-bottom:8px;">
+        <input type="checkbox" id="termsGateChk" style="width:18px;height:18px;flex-shrink:0;margin-top:1px;">
+        <span>${EN?'I agree to these documents:':'Souhlasím s těmito dokumenty:'}</span>
+      </label>
+      <div style="margin:0 0 18px 26px;font-size:13px;line-height:1.9;">
+        <span id="termsGateT" style="color:var(--red);font-weight:600;text-decoration:underline;cursor:pointer;">📄 ${EN?'Terms & Disclaimer':'Podmínky & zřeknutí se odpovědnosti'}</span><br>
+        <span id="termsGateP" style="color:var(--red);font-weight:600;text-decoration:underline;cursor:pointer;">🔒 ${EN?'Privacy Policy (GDPR)':'Zásady ochrany osobních údajů (GDPR)'}</span>
+      </div>
+      <button id="termsGateBtn" disabled style="width:100%;padding:14px;background:#ccc;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:not-allowed;font-family:'DM Sans';">${EN?'Accept & continue':'Souhlasím a pokračovat'}</button>
+    </div>`;
+    document.body.appendChild(ov);
+    const chk=ov.querySelector('#termsGateChk'), btn=ov.querySelector('#termsGateBtn');
+    chk.onchange=()=>{ const on=chk.checked; btn.disabled=!on; btn.style.background=on?'var(--red)':'#ccc'; btn.style.cursor=on?'pointer':'not-allowed'; };
+    ov.querySelector('#termsGateT').onclick=()=>{ try{ openTerms(); }catch(e){} };
+    ov.querySelector('#termsGateP').onclick=()=>{ try{ openPrivacy(); }catch(e){} };
+    btn.onclick=async()=>{
+      if(!chk.checked) return;
+      btn.disabled=true; btn.textContent=EN?'Saving…':'Ukládám…';
+      const nowIso=new Date().toISOString();
+      try{
+        await supaClient.from('consents').insert([
+          { user_id: currentUser.id, doc:'terms', version: LEGAL_VERSION, agreed_at: nowIso },
+          { user_id: currentUser.id, doc:'privacy', version: LEGAL_VERSION, agreed_at: nowIso }
+        ]);
+      }catch(e){}
+      try{ ov.remove(); }catch(e){}
+      try{ if(currentUser && currentUser.password_set===false && typeof openSetPassword==='function') setTimeout(openSetPassword, 400); }catch(e){}
+    };
+  }catch(e){}
 }
 function _welcomeBanner(){
   try{
@@ -11898,7 +11944,7 @@ async function _renderWelcomeToggle(){
   try{ const btn=$('btnWelcomeToggle'); if(!btn) return;
     const { data } = await supaClient.from('profiles').select('welcome_zero_off').eq('id','7e08d4bb-0efa-47ae-bd6a-85e9bd04400c').single();
     const off = !!(data && data.welcome_zero_off);
-    btn.textContent = off ? '\U0001F381 Welcome 0 %: VYPNUTO (test \u2014 nov\u00ed plat\u00ed 3,5 %)' : '\U0001F381 Welcome 0 %: ZAPNUTO (klikni = vypnout)';
+    btn.textContent = off ? '🎁 Welcome 0 %: VYPNUTO (test \u2014 nov\u00ed plat\u00ed 3,5 %)' : '🎁 Welcome 0 %: ZAPNUTO (klikni = vypnout)';
     btn.style.background = off ? '#FEECEC' : '#FFF8E6'; btn.style.color = off ? 'var(--red)' : '#8a6a12'; btn.style.borderColor = off ? '#F3C9C0' : '#E8C24A';
   }catch(e){}
 }
@@ -16379,6 +16425,7 @@ function renderSettingsDisc(){
 function enterApp(){
   try{ if(typeof processPendingJoin==='function') processPendingJoin(); }catch(e){}
   try{ if(typeof _emojiAccountSync==='function') _emojiAccountSync(); }catch(e){}
+  try{ if(typeof _maybeTermsGate==='function') _maybeTermsGate(); }catch(e){}
   try{ if(typeof _checkWelcomeEnding==='function') _checkWelcomeEnding(); }catch(e){}
   $('authScreen').style.display='none';
   try{ _maybeAppLock(); }catch(e){}
