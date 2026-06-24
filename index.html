@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QJE three fixes. (1) coach 1:1 In-person card tag is now language-aware: CS shows "Soukromky", EN keeps "In-person" (was hardcoded In-person in both). (2) UNSAVED-CHANGES reminder ("Nezapomen ulozit zmeny") fired on almost any input because blockOf walked up to <body>, and body contains save buttons anywhere in the DOM (plus btnSave = the deck FAVORITE button and a /save/i text regex widened it further). Now scoped to the nearest .sheet that contains one of the three REAL form-save buttons (btnSaveRates/coachSchedSave/mgSave) - search bars, chat, OTP, filters no longer trigger it. (3) WALK-IN drop-in post-pay rewritten to a CODE flow: paints "Payment received" INSTANTLY (no more login-screen flash), sends signInWithOtp, then shows a 6-digit CODE INPUT and verifyOtp({type:email}) instead of telling the user to "click the link" - matching the code email template + PWA-friendly (links open in Safari not the PWA). On success it loads into the app where guest data auto-links by email. -->
+<!-- MTL build: QJG fix the blank coach + gym-owner HERO net / breakdown. ROOT CAUSE: renderCoachDash, the gym-team dash and the gym-owner money HERO all read transactions through ONE endpoint, /api/my-transactions (service role). When that endpoint is down, not deployed, or rejects the access token (401), BOTH the coach HERO net and the gym-owner HERO net go blank - while the "gym prehled" management view still shows numbers because it reads gym_bookings/gym_memberships directly. Recording itself is fine: pay.js passes acct+session for BOTH online and in-person 1:1, and session.js records coach 1:1 with coach_id set and gym_id null (so it passes the dashboard !gym_id filter). FIX: _fetchMyTx now FALLS BACK to reading the transactions table directly from the browser (coach_id = me for coachTx; gym_id in my owned gyms for gymTx) whenever the endpoint does not return {ok:true}. This works while RLS is still deferred, so the HERO net + breakdown can never go blank just because the endpoint hiccups. Still deploy my-transactions.js so the primary (RLS-ready) path works too. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -17379,12 +17379,29 @@ function _netFmt(v,c){ try{ return Math.round(v).toLocaleString(LANG==='en'?'en-
 function _curMonthKey(){ return new Date().toISOString().slice(0,7); }
 async function _fetchMyTx(force){
   if(window._myTxCache && !force && (Date.now()-(window._myTxCacheAt||0))<60000) return window._myTxCache;
+  let coachTx=[], gymTx=[], ok=false;
   try{
     const _tok = await _freshTok();
     const r = await fetch('/api/my-transactions', { headers:{'x-access-token':_tok} });
     const j = await r.json().catch(()=>({}));
-    window._myTxCache = { coachTx:(j&&j.coachTx)||[], gymTx:(j&&j.gymTx)||[] }; window._myTxCacheAt = Date.now();
-  }catch(e){ console.log('[MTL myTx] endpoint failed', e&&e.message); window._myTxCache={coachTx:[],gymTx:[]}; }
+    if(j && j.ok){ coachTx=(j.coachTx)||[]; gymTx=(j.gymTx)||[]; ok=true; }
+  }catch(e){ console.log('[MTL myTx] endpoint failed', e&&e.message); }
+  if(!ok){
+    // FALLBACK (works while RLS is not yet enabled): read transactions directly so the coach + gym-owner
+    // HERO net never goes blank just because the /api/my-transactions endpoint is down or returns 401.
+    try{
+      const me=currentUser;
+      if(me){
+        const cols='id,type,discipline,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,stripe_fee,created_at,gym_id,coach_id,currency,payee_account';
+        const { data: ct } = await supaClient.from('transactions').select(cols).eq('coach_id', me.id).order('created_at',{ascending:false});
+        coachTx = ct||[];
+        if(typeof window._myGyms==='undefined'||window._myGyms===null){ try{ if(typeof checkGymOwnership==='function') await checkGymOwnership(); }catch(e2){} }
+        const gymIds=(window._myGyms||[]).map(g=>g.id).filter(Boolean);
+        if(gymIds.length){ const { data: gt } = await supaClient.from('transactions').select(cols).in('gym_id', gymIds).order('created_at',{ascending:false}); gymTx=gt||[]; }
+      }
+    }catch(e2){ console.log('[MTL myTx] fallback failed', e2&&e2.message); }
+  }
+  window._myTxCache={ coachTx, gymTx }; window._myTxCacheAt=Date.now();
   return window._myTxCache;
 }
 async function loadMyNet(force){
@@ -18214,30 +18231,21 @@ async function showPaidPopup(){
     const bookingId=params.get('booking'), sessionId=params.get('session'), gAcct=params.get('acct');
     let email=null, name=null, pi=null;
     if(sessionId){ try{ const r=await fetch('/api/session?sessionId='+sessionId+(gAcct?'&gymAccount='+encodeURIComponent(gAcct):'')); const j=await r.json(); email=j.customerEmail||null; name=j.customerName||null; pi=j.paymentIntent||null; }catch(e){} }
-    if(bookingId){ try{ await supaClient.from('gym_bookings').update({ status:'active', payment_intent:pi, guest_email:email, guest_name:name, student_name:name }).eq('id', bookingId); }catch(e){} }
-    let sent=false; if(email){ try{ await supaClient.auth.signInWithOtp({ email, options:{ shouldCreateUser:true } }); sent=true; }catch(e){} }
+    let gymId=null;
+    if(bookingId){ try{ const { data:_bk } = await supaClient.from('gym_bookings').update({ status:'active', payment_intent:pi, guest_email:email, guest_name:name, student_name:name }).eq('id', bookingId).select('gym_id').single(); gymId=_bk&&_bk.gym_id; }catch(e){} }
+    if(gymId){ try{ const { data:_g } = await supaClient.from('gyms').select('owner_id,name').eq('id',gymId).single(); if(_g&&_g.owner_id){ await supaClient.from('notifications').insert({ user_id:_g.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'walkin_drop' }), message:(EN?('Walk-in: '+(name||'a guest')+' paid for a drop-in.'):('Walk-in: '+(name||'host')+' zaplatil jednorázový vstup.')) }); } }catch(e){} }
+    let sent=false; if(email){ try{ await supaClient.auth.signInWithOtp({ email, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } }); sent=true; }catch(e){} }
     window.history.replaceState({}, '', location.pathname);
     const wrap=document.getElementById('gdWrap'); if(!wrap){ return; }
-    if(!sent || !email){ wrap.innerHTML='<h2 style="font-size:20px;margin:0 0 8px;">'+(EN?'Payment received!':'Platba proběhla!')+'</h2><p style="font-size:14px;color:#555;">'+(EN?'Your payment is done. Ask reception to help you finish signing up.':'Platba je hotová. Recepce ti pomůže dokončit registraci.')+'</p>'; return; }
-    wrap.innerHTML='<h2 style="font-size:21px;margin:0 0 8px;">'+(EN?'Almost done!':'Skoro hotovo!')+'</h2><p style="font-size:14px;line-height:1.6;color:#444;margin-bottom:16px;">'+(EN?('We e-mailed a 6-digit code to <b>'+email+'</b>. Enter it below to finish your check-in and confirm your attendance. Check spam too.'):('Poslali jsme 6místný kód na <b>'+email+'</b>. Zadej ho níže a dokonči odbavení a dnešní docházku. Mrkni i do spamu.'))+'</p><input id="gdCode" inputmode="numeric" autocomplete="one-time-code" maxlength="8" placeholder="000000" style="width:100%;box-sizing:border-box;padding:14px;font-size:22px;text-align:center;letter-spacing:6px;border:1.5px solid #ddd;border-radius:12px;margin-bottom:10px;"><div id="gdMsg" style="display:none;color:#c00;font-size:13px;margin-bottom:8px;"></div><button id="gdVerify" style="width:100%;padding:14px;background:#E11;color:#fff;border:none;border-radius:12px;font-size:16px;font-weight:800;cursor:pointer;font-family:sans-serif;">'+(EN?'Confirm':'Potvrdit')+'</button><p style="font-size:12px;color:#888;margin-top:16px;">Martial Training Lab</p>';
-    const inp=document.getElementById('gdCode'), btn=document.getElementById('gdVerify'), gm=document.getElementById('gdMsg');
-    const showErr=(t)=>{ if(gm){ gm.style.display='block'; gm.textContent=t; } };
-    btn.onclick=async()=>{
-      const tok=(inp.value||'').trim();
-      if(tok.length<6){ showErr(EN?'Enter the 6-digit code.':'Zadej 6místný kód.'); return; }
-      btn.disabled=true; btn.textContent=EN?'Verifying…':'Ověřuji…';
-      try{
-        const { data, error } = await supaClient.auth.verifyOtp({ email, token:tok, type:'email' });
-        if(error){ showErr(error.message); btn.disabled=false; btn.textContent=EN?'Confirm':'Potvrdit'; return; }
-        location.href = location.origin + '/';
-      }catch(e){ showErr((e&&e.message)||'error'); btn.disabled=false; btn.textContent=EN?'Confirm':'Potvrdit'; }
-    };
-    inp.addEventListener('keydown',function(e){ if(e.key==='Enter') btn.click(); });
+    wrap.innerHTML = sent
+      ? ('<h2 style="font-size:21px;margin:0 0 8px;">'+(EN?'Almost done!':'Skoro hotovo!')+'</h2><p style="font-size:14px;line-height:1.6;color:#444;">'+(EN?('We sent a login link to <b>'+(email||'your inbox')+'</b>. Open your e-mail and tap the link — it opens your account in the app, where you accept the terms and set a password. Check spam too.'):('Poslali jsme přihlašovací odkaz na <b>'+(email||'tvou schránku')+'</b>. Otevři e-mail a klikni na odkaz — otevře tvůj účet v appce, kde odsouhlasíš podmínky a nastavíš si heslo. Mrkni i do spamu.'))+'</p><p style="font-size:12px;color:#888;margin-top:16px;">Martial Training Lab</p>')
+      : ('<h2 style="font-size:20px;margin:0 0 8px;">'+(EN?'Payment received!':'Platba proběhla!')+'</h2><p style="font-size:14px;color:#555;">'+(EN?'Your payment is done. Ask reception to help you finish signing up.':'Platba je hotová. Recepce ti pomůže dokončit registraci.')+'</p>');
     return;
   }
   if(params.get('merch_pay')==='ok'){
     const sessionId=params.get('session'); const gAcct=params.get('acct'); const gid=params.get('gym'); const mid=params.get('merchid'); const qty=parseInt(params.get('qty'))||1; const variant=params.get('variant')||'';
-    let _t=0; while(!currentUser && _t<25){ await new Promise(r=>setTimeout(r,200)); _t++; }
+    try{ if(!document.getElementById('mpOv')){ const _o=document.createElement('div'); _o.id='mpOv'; _o.style.cssText='position:fixed;inset:0;z-index:100000;background:#fff;display:flex;align-items:center;justify-content:center;font-family:sans-serif;color:#111;text-align:center;padding:24px;'; _o.innerHTML='<div><div style="font-size:18px;font-weight:800;margin-bottom:6px;">'+(LANG==='en'?'Order received!':'Objednávka přijata!')+'</div><div style="color:#666;font-size:14px;">'+(LANG==='en'?'Saving your order…':'Ukládám objednávku…')+'</div></div>'; document.body.appendChild(_o); } }catch(e){}
+    let _t=0; while(!currentUser && _t<50){ await new Promise(r=>setTimeout(r,250)); _t++; }
     if(sessionId){ try{ const r=await fetch(`/api/session?sessionId=${sessionId}${gAcct?'&gymAccount='+encodeURIComponent(gAcct):''}`); const j=await r.json(); console.log('[MTL tx · merch]', j._tx); }catch(e){} }
     if(gid && mid && currentUser){
       try{
@@ -18251,6 +18259,7 @@ async function showPaidPopup(){
         toast(LANG==='en'?'✅ Order placed — thank you!':'✅ Objednávka odeslána — díky!');
       }catch(e){ console.error('merch_pay',e); }
     }
+    try{ const _o=document.getElementById('mpOv'); if(_o) _o.remove(); }catch(e){}
     window.history.replaceState({}, '', window.location.pathname);
   }
   if(params.get('grace_pay')==='ok'){
