@@ -132,6 +132,7 @@ async function coachCheckout(req, res) {
     payment_intent_data: {
       application_fee_amount: (await isWelcomeZero(coachId)) ? 0 : applicationFee,
       metadata: {
+        mtl_welcome: (await isWelcomeZero(coachId)) ? '1' : '0',
         credit_type: credit || 'none',
         coach_pct: (STUDENT_MARKUP - COMMISSION).toFixed(2),
         commission_pct: COMMISSION.toFixed(2),
@@ -194,6 +195,7 @@ async function gymCheckout(req, res) {
         description: `${className || 'Drop-in'}${level ? ' [' + level + ']' : ''} — ${gymName || 'MTL Gym'} (drop-in)`,
         metadata: {
           mtl_payment_type: (String(merch)==='1'?'merch':'drop_in'),
+          mtl_welcome: (await isWelcomeZero(gymAccount)) ? '1' : '0',
           merch_name: merchName || '',
           mtl_plan: className || 'Drop-in',
           mtl_level: level || '',
@@ -255,6 +257,7 @@ async function eventCheckout(req, res) {
         description: `${eventTitle || 'Event'}${tierName ? ' [' + tierName + ']' : ''} (MTL event ticket)`,
         metadata: {
           mtl_payment_type: 'event_ticket',
+          mtl_welcome: (await isWelcomeZero(gymAccount)) ? '1' : '0',
           mtl_event: eventTitle || '',
           mtl_tier: tierName || '',
           mtl_base: String(P),
@@ -350,6 +353,7 @@ async function membershipCheckout(req, res) {
       subscription_data: {
         application_fee_percent: (await isWelcomeZero(gymAccount)) ? 0 : FEE_NOW,
         metadata: {
+          mtl_welcome: (await isWelcomeZero(gymAccount)) ? '1' : '0',
           mtl_acq: _isAcq ? '1' : '',
           mtl_acq_base: String(FEE_PCT),
           mtl_payment_type: 'membership',
