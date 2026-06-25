@@ -13,6 +13,44 @@ const GYM_STUDENT_MARKUP = 1.00;  // no markup
 const GYM_MTL_TAKE       = 0.035;  // drop-in: MTL provize 3,5 %
 const MEMB_MTL_PERCENT   = 3.5;     // membership: 3,5 % z invoicu
 
+// --- Genuine welcome 0%: no fee charged up front (replaces charge-then-instant-refund) ---
+const _SUPA_URL = process.env.SUPABASE_URL, _SUPA_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const _WELCOME_FOUNDER = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+async function _wsbGet(path){
+  if(!_SUPA_URL || !_SUPA_KEY) return [];
+  try{ const r = await fetch(_SUPA_URL.replace(/\/+$/,'') + '/rest/v1/' + path, { headers:{ apikey:_SUPA_KEY, Authorization:'Bearer '+_SUPA_KEY } }); return r.ok ? await r.json() : []; }catch(e){ return []; }
+}
+// True if the provider holding this connected account is still inside their welcome window
+// (welcome_free_until in the future), unless the founder kill-switch (welcome_zero_off) is on.
+// When true we set the application fee to 0 at checkout = clean books, no refund, no doklad.
+async function _wsbPatch(path, body){
+  if(!_SUPA_URL || !_SUPA_KEY) return;
+  try{ await fetch(_SUPA_URL.replace(/\/+$/,'') + '/rest/v1/' + path, { method:'PATCH', headers:{ apikey:_SUPA_KEY, Authorization:'Bearer '+_SUPA_KEY, 'Content-Type':'application/json', Prefer:'return=minimal' }, body: JSON.stringify(body) }); }catch(e){ console.error('wsbPatch', e.message); }
+}
+async function isWelcomeZero(acct){
+  if(!acct) return false;
+  try{
+    const ks = await _wsbGet(`profiles?id=eq.${_WELCOME_FOUNDER}&select=welcome_zero_off`);
+    if(ks && ks[0] && ks[0].welcome_zero_off) return false;
+    const a = encodeURIComponent(String(acct).trim());
+    let prov = (await _wsbGet(`profiles?or=(stripe_account.eq.${a},gym_payout_account.eq.${a})&select=id,welcome_free_until,created_at&limit=1`))[0];
+    if(!prov){
+      const g = (await _wsbGet(`gyms?or=(stripe_account.eq.${a},gym_payout_account.eq.${a})&select=owner_id&limit=1`))[0];
+      if(g && g.owner_id) prov = (await _wsbGet(`profiles?id=eq.${g.owner_id}&select=id,welcome_free_until,created_at`))[0];
+    }
+    if(!prov || !prov.id) return false;
+    const now = Date.now();
+    if(prov.welcome_free_until) return now < new Date(prov.welcome_free_until).getTime();
+    // First sale on a genuinely new account (<45 days): open the 30-day window now and make THIS sale 0%.
+    const created = prov.created_at ? new Date(prov.created_at).getTime() : 0;
+    if(created && (now - created) < 45*86400000){
+      await _wsbPatch(`profiles?id=eq.${prov.id}`, { welcome_free_until: new Date(now + 30*86400000).toISOString() });
+      return true;
+    }
+    return false;
+  }catch(e){ console.error('isWelcomeZero', e.message); return false; }
+}
+
 export default async function handler(req, res) {
   const type = String(req.query.type || 'coach');
   try {
@@ -92,7 +130,7 @@ async function coachCheckout(req, res) {
       { price_data: { currency: cur, product_data: { name: productName }, unit_amount: unitAmount }, quantity: 1 },
     ],
     payment_intent_data: {
-      application_fee_amount: applicationFee,
+      application_fee_amount: (await isWelcomeZero(coachId)) ? 0 : applicationFee,
       metadata: {
         credit_type: credit || 'none',
         coach_pct: (STUDENT_MARKUP - COMMISSION).toFixed(2),
@@ -152,7 +190,7 @@ async function gymCheckout(req, res) {
         { price_data: { currency: cur, product_data: { name: `${className || 'Drop-in lekce'} — ${gymName || 'MTL Gym'}` }, unit_amount: unitAmount }, quantity: 1 },
       ],
       payment_intent_data: {
-        application_fee_amount: applicationFee,
+        application_fee_amount: (await isWelcomeZero(gymAccount)) ? 0 : applicationFee,
         description: `${className || 'Drop-in'}${level ? ' [' + level + ']' : ''} — ${gymName || 'MTL Gym'} (drop-in)`,
         metadata: {
           mtl_payment_type: (String(merch)==='1'?'merch':'drop_in'),
@@ -213,7 +251,7 @@ async function eventCheckout(req, res) {
         { price_data: { currency: cur, product_data: { name: `${eventTitle || 'Event'}${tierName ? ' — ' + tierName : ''}` }, unit_amount: unit }, quantity: Q },
       ],
       payment_intent_data: {
-        application_fee_amount: fee * Q,
+        application_fee_amount: (await isWelcomeZero(gymAccount)) ? 0 : (fee * Q),
         description: `${eventTitle || 'Event'}${tierName ? ' [' + tierName + ']' : ''} (MTL event ticket)`,
         metadata: {
           mtl_payment_type: 'event_ticket',
@@ -310,7 +348,7 @@ async function membershipCheckout(req, res) {
         { price_data: { currency: cur, product_data: { name: `${planName || 'Membership'}${access ? ' [' + access + ']' : ''} — ${gymName || 'MTL Gym'}` }, unit_amount: Math.round(P * 100), recurring: { interval: ivl } }, quantity: 1 },
       ],
       subscription_data: {
-        application_fee_percent: FEE_NOW,
+        application_fee_percent: (await isWelcomeZero(gymAccount)) ? 0 : FEE_NOW,
         metadata: {
           mtl_acq: _isAcq ? '1' : '',
           mtl_acq_base: String(FEE_PCT),

@@ -77,52 +77,12 @@ async function recordTransaction(acct, pi, fields) {
     // WELCOME 0%: a REFERRED provider's first 30 days = MTL takes 0% (we refund our application fee
     // back to them). The window opens at their FIRST sale (set once here) and is checked PER CHARGE, so a
     // membership renewal that bills after 30 days pays the normal rate — it can NEVER become "0% forever".
-    let welcomeFreed = false;
-    try {
-      if (!existing && mtlFee > 0) {
-        let prov = null;
-        // Resolve the provider by the ACCOUNT that actually received the money — covers EVERY type
-        // (gym membership/drop-in/event paid to the gym owner, AND coach 1:1 / coach-owned membership /
-        // coach merch / coach group classes paid to a coach with their own Stripe).
-        if (acct) {
-          const pr2 = await sbGet(`profiles?or=(stripe_account.eq.${acct},gym_payout_account.eq.${acct})&select=id,welcome_free_until,created_at&limit=1`);
-          if (pr2 && pr2[0]) prov = pr2[0];
-        }
-        if (!prov && fields.gym_id) {
-          const gy = await sbGet(`gyms?id=eq.${fields.gym_id}&select=owner_id`);
-          const oid = gy && gy[0] && gy[0].owner_id;
-          if (oid) { const op = await sbGet(`profiles?id=eq.${oid}&select=id,welcome_free_until,created_at`); prov = op && op[0]; }
-        }
-        if (prov) {  // welcome = first month 0% for genuinely NEW providers (fair to all new, not just referred)
-          // GLOBAL KILL-SWITCH: founder toggle (profiles.welcome_zero_off on the founder row) disables the whole
-          // 30-day welcome - lets the founder test that real mtl_fee is charged on a fresh test account.
-          const _wk = await sbGet(`profiles?id=eq.7e08d4bb-0efa-47ae-bd6a-85e9bd04400c&select=welcome_zero_off`);
-          if (!(_wk && _wk[0] && _wk[0].welcome_zero_off)) {
-          const nowMs = Date.now();
-          let until = prov.welcome_free_until ? new Date(prov.welcome_free_until).getTime() : null;
-          if (until == null) {
-            // open the 30-day window ONLY if the account is genuinely new (< 45 days) AND at their FIRST sale,
-            // so deploying this never retroactively hands every existing provider a free month.
-            const createdMs = prov.created_at ? new Date(prov.created_at).getTime() : 0;
-            if (createdMs && (nowMs - createdMs) < 45 * 86400000) {
-              until = nowMs + 30 * 86400000;
-              await sbPatch(`profiles?id=eq.${prov.id}`, { welcome_free_until: new Date(until).toISOString() });
-            }
-          }
-          if (until != null && nowMs < until) {
-            const fees = await stripe.applicationFees.list({ charge: chargeId, limit: 1 });
-            const feeId = fees && fees.data && fees.data[0] && fees.data[0].id;
-            if (feeId) { await stripe.applicationFees.createRefund(feeId); welcomeFreed = true; }
-          }
-          } // end welcome kill-switch
-        }
-      }
-    } catch (e) { console.error('welcome 0% refund', e.message); }
+    // Welcome 0% is now applied UP FRONT in pay.js (application_fee 0 during the window) -> no charge, no refund here.
 
     const row = {
       charge_id: chargeId, payee_account: acct || null, type: fields.type,
       member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null, discipline: fields.discipline || null,
-      gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, mtl_fee_refunded: (welcomeFreed ? mtlFee : 0), net_amount: net, currency, status: 'paid',
+      gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, mtl_fee_refunded: 0, net_amount: net, currency, status: 'paid',
       income_class: fields.income_class || null,
     };
     if (existing) {

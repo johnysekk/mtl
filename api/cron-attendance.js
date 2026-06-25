@@ -177,7 +177,37 @@ export default async function handler(req, res) {
       }
     } catch (e) { console.error('cron purge', e.message); }
 
-    res.status(200).json({ ok: true, gyms: gyms.length, created, purged, purgedG, autoRefunded });
+    // --- Welcome 0% -> base rate: once a provider's welcome window ends, bump their still-0% subscriptions to base ---
+    let welcomeRerated = 0;
+    try {
+      const nowIso = new Date().toISOString();
+      const ended = await sbGet(`profiles?welcome_free_until=lt.${encodeURIComponent(nowIso)}&welcome_rerated=is.false&select=id`);
+      for (const p of (Array.isArray(ended) ? ended : [])) {
+        try {
+          const pGyms = await sbGet(`gyms?owner_id=eq.${p.id}&select=id,stripe_account,gym_payout_account`);
+          for (const g of (Array.isArray(pGyms) ? pGyms : [])) {
+            const acct = g.gym_payout_account || g.stripe_account;
+            if (!acct) continue;
+            const subs = await sbGet(`gym_memberships?gym_id=eq.${g.id}&status=eq.active&select=stripe_subscription`);
+            for (const m of (Array.isArray(subs) ? subs : [])) {
+              if (!m.stripe_subscription) continue;
+              try {
+                const sub = await stripe.subscriptions.retrieve(m.stripe_subscription, { stripeAccount: acct });
+                const cur = (sub.application_fee_percent != null) ? Number(sub.application_fee_percent) : null;
+                if (cur === 0) {
+                  const base = parseFloat((sub.metadata && sub.metadata.mtl_acq_base) || '3.5') || 3.5;
+                  await stripe.subscriptions.update(m.stripe_subscription, { application_fee_percent: base }, { stripeAccount: acct });
+                  welcomeRerated++;
+                }
+              } catch (e) { console.error('welcome rerate sub', m.stripe_subscription, e.message); }
+            }
+          }
+          await sbPatch('profiles', `id=eq.${p.id}`, { welcome_rerated: true });
+        } catch (e) { console.error('welcome rerate provider', p.id, e.message); }
+      }
+    } catch (e) { console.error('cron welcome rerate', e.message); }
+
+    res.status(200).json({ ok: true, gyms: gyms.length, created, purged, purgedG, autoRefunded, welcomeRerated });
   } catch (err) {
     console.error('cron-attendance error:', err.message);
     res.status(200).json({ ok: false, error: err.message });
