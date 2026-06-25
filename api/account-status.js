@@ -17,6 +17,7 @@ export default async function handler(req, res) {
       charges_enabled: !!a.charges_enabled,
       details_submitted: !!a.details_submitted,
       payouts_enabled: !!a.payouts_enabled,
+      country: a.country || null,
     });
   } catch (err) {
     console.error('account-status error:', err);

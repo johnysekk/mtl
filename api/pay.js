@@ -386,13 +386,39 @@ async function membershipCheckout(req, res) {
   res.redirect(303, session.url);
 }
 
-// ───────────────────────── Exclusive MTL Partner ($499/mo, platform account) ─────────────────────────
+// ───────────────────────── Exclusive MTL Partner (localized price by region, platform account) ─────────────────────────
+// Localized EP price by the provider's region. Mirrors _epRegion() in index.html.
+// SK is a cheaper EUR tier than the EU default; both are EUR, so we MUST key on COUNTRY, not currency.
+function epTierForCountry(cc){
+  cc = String(cc||'').toUpperCase();
+  const EU=['AT','BE','BG','HR','CY','EE','FI','FR','DE','GR','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SI','ES','SE','DK'];
+  if(cc==='CZ') return { currency:'czk', amount:1400 };
+  if(cc==='SK') return { currency:'eur', amount:59 };
+  if(EU.indexOf(cc)>=0) return { currency:'eur', amount:89 };
+  return { currency:'usd', amount:99 };
+}
+
 async function partnerCheckout(req, res) {
   const { userId, email } = req.query;
   if (!userId) return res.status(400).json({ error: 'Chybí userId' });
 
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
+
+  // Region = country of the provider's connected Stripe account (authoritative for what we charge).
+  // Fall back to cached stripe_country / profile country if no account is retrievable yet.
+  let cc = '';
+  try {
+    const prof = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(userId)}&select=stripe_account,gym_payout_account,country`))[0] || {};
+    let acct = prof.stripe_account || prof.gym_payout_account || '';
+    if(!acct){ const g=(await _wsbGet(`gyms?owner_id=eq.${encodeURIComponent(userId)}&select=stripe_account,gym_payout_account&limit=1`))[0]; if(g) acct=g.stripe_account||g.gym_payout_account||''; }
+    if(acct){
+      try{ const a=await stripe.accounts.retrieve(String(acct)); cc=String(a.country||'').toUpperCase(); }catch(e){}
+      if(cc){ _wsbPatch(`profiles?id=eq.${encodeURIComponent(userId)}`, { stripe_country: cc }); } // cache for client display; no-op until ep-pricing.sql adds the column
+    }
+    if(!cc) cc = String(prof.country || '').toUpperCase();
+  } catch(e){}
+  const tier = epTierForCountry(cc);
 
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
@@ -401,10 +427,10 @@ async function partnerCheckout(req, res) {
     tax_id_collection: { enabled: true, required: 'if_supported' },
     client_reference_id: userId,
     line_items: [
-      { price_data: { currency: 'usd', product_data: { name: 'Exclusive MTL Partner — coach & gym rates' }, unit_amount: 9900, recurring: { interval: 'month' } }, quantity: 1 },
+      { price_data: { currency: tier.currency, product_data: { name: 'Exclusive MTL Partner — coach & gym rates' }, unit_amount: Math.round(tier.amount*100), recurring: { interval: 'month' } }, quantity: 1 },
     ],
-    subscription_data: { metadata: { mtl_payment_type: 'partner_sub', user_id: userId } },
-    metadata: { mtl_payment_type: 'partner_sub', user_id: userId },
+    subscription_data: { metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'', ep_currency: tier.currency, ep_amount: String(tier.amount) } },
+    metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'' },
     success_url: `${proto}://${host}/?partner_sub=ok&session={CHECKOUT_SESSION_ID}`,
     cancel_url: `${proto}://${host}/`,
   }, { apiVersion: '2024-09-30.acacia' });
