@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QJT membership 'mine' notification: when the coach did NOT set a custom plan name (plan_name empty), the plan field now falls back to the class category via accessLabel(plan_access) e.g. 'Deti', 'Zacatecnici', or 'Vsechny lekce' instead of showing nothing. plan_access is a JSON string of level codes; parsed inline + accessLabel maps to localized labels. Builds on QJS. -->
+<!-- MTL build: QJW Coach QR Check-in: coach shows one QR per lesson (openCoachCheckin -> _issueCoachCheckinToken inserts into new coach_checkin_tokens table, multi-redeem, 45min), students scan ?coachcheckin=1&coach&tok. Redeem handler: paying student's active booking -> fulfilled+student_confirmed (settles, skips dispute, routes to Rate); non-paying group attendees -> gym_attendance row (coach_id set, gym_id null) so they get credited in 'Moji studenti'/lessons without touching financials (dedup per day). QR Check-in button added to coach dashboard above myStatsBox. Named 'QR Check-in' for coaches (gym keeps 'Recepce'). Needs coach-checkin.sql deployed. Builds on QJV. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -3509,6 +3509,12 @@ const NOTIF_T = {
   walkin_drop: (d)=> LANG==='en'
     ? `🚶 Walk-in: ${d.student||'a guest'} paid for a drop-in${d.amt?(' ('+d.amt+' '+(d.sym||'')+')'):''} — tap for today's attendance.`
     : `🚶 Walk-in: ${d.student||'host'} zaplatil jednorázový vstup${d.amt?(' ('+d.amt+' '+(d.sym||'')+')'):''} — klepni pro dnešní docházku.`,
+  fav_added_gym: (d)=> LANG==='en'
+    ? `⭐ ${d.gym_name||'A gym'} is now in your Favorites — tap to open the profile.`
+    : `⭐ ${d.gym_name||'Gym'} máš teď v Oblíbených — klepni pro profil.`,
+  fav_added_coach: (d)=> LANG==='en'
+    ? `⭐ ${d.coach_name||'Your coach'} is now in your Favorites — tap to open the profile.`
+    : `⭐ ${d.coach_name||'Tvůj kouč'} máš teď v Oblíbených — klepni pro profil.`,
 };
 function notifText(n){
   try{
@@ -9508,6 +9514,32 @@ function showMemberCheckinQR(gymId, gname, occ){
   const cb=document.getElementById('memberQrClose'); if(cb) cb.onclick=()=>{ ov.style.display='none'; if(window._memberQrTimer){ clearInterval(window._memberQrTimer); window._memberQrTimer=null; } };
   ov.onclick=(e)=>{ if(e.target===ov){ ov.style.display='none'; if(window._memberQrTimer){ clearInterval(window._memberQrTimer); window._memberQrTimer=null; } } };
 }
+function _mkCoachCheckinTok(){ return 'cc_'+Date.now().toString(36)+Math.random().toString(36).slice(2,12); }
+async function _issueCoachCheckinToken(occ, box){
+  if(!currentUser || !box) return;
+  const tok=_mkCoachCheckinTok();
+  const exp=new Date(Date.now()+45*60000).toISOString();
+  try{ await supaClient.from('coach_checkin_tokens').insert({ token:tok, coach_id:currentUser.id, occ: occ?JSON.stringify(occ):null, expires_at:exp }); }catch(e){ console.error('coach token', e); }
+  const url=location.origin+'/?coachcheckin=1&coach='+encodeURIComponent(currentUser.id)+'&tok='+encodeURIComponent(tok);
+  box.innerHTML=''; try{ if(window.QRCode){ new QRCode(box,{text:url,width:220,height:220,correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined)}); } }catch(e){}
+}
+function openCoachCheckin(occ){
+  if(!currentUser) return;
+  let ov=document.getElementById('coachCkOv');
+  if(!ov){ ov=document.createElement('div'); ov.id='coachCkOv'; ov.style.cssText='position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;'; document.body.appendChild(ov); }
+  ov.innerHTML='<div style="background:#fff;border-radius:20px;padding:24px;max-width:340px;width:100%;text-align:center;">'
+    +'<div style="font-weight:800;font-size:17px;color:#111;margin-bottom:4px;">QR Check-in</div>'
+    +'<div style="font-size:13px;color:#666;margin-bottom:14px;">'+(LANG==='en'?'Show this before the lesson — everyone scans to check in.':'Ukaž před lekcí — každý se naskenováním odbaví.')+'</div>'
+    +'<div id="coachCkBox" style="display:inline-flex;justify-content:center;align-items:center;padding:14px;background:#fff;border:1px solid #eee;border-radius:14px;"></div>'
+    +'<p style="font-size:12px;color:#888;line-height:1.5;margin:14px 0 16px;">'+(LANG==='en'?'Each student scans to log attendance. Paying students settle their lesson; group guests get credited too. Valid 45 min.':'Každý student naskenuje a zaloguje docházku. Platícím se vyrovná lekce, skupinoví hosté se taky připočítají. Platí 45 min.')+'</p>'
+    +'<button id="coachCkClose" style="width:100%;padding:12px;background:#111;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;">'+(LANG==='en'?'Done':'Hotovo')+'</button>'
+    +'</div>';
+  ov.style.display='flex';
+  const box=document.getElementById('coachCkBox');
+  if(box){ _issueCoachCheckinToken(occ||null, box); }
+  const cb=document.getElementById('coachCkClose'); if(cb) cb.onclick=()=>{ ov.style.display='none'; };
+  ov.onclick=(e)=>{ if(e.target===ov){ ov.style.display='none'; } };
+}
 function showTicketQR(ticketId){
   if(!ticketId) return;
   const info=(window._goingTkMap||{})[ticketId]||{};
@@ -11987,9 +12019,10 @@ async function loadNotifications(append){
         else if((function(){ try{ return (JSON.parse(n.data||'{}').kind)==='coach_hq'; }catch(e){ return false; } })()){ if(typeof openOpportunities==='function') openOpportunities(); }
         else if(k==='cert_recommend'||k==='new_listing'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.target_type==='gym' && dd.target_id){ const { data: g }=await supaClient.from('gyms').select('*').eq('id',dd.target_id).single(); if(g) openGymProfile(g); else toast(L('⚠️ Gym nenalezen')); } else if(dd.target_id){ if(typeof openCoachStats==='function') openCoachStats(dd.target_id, dd.target_name||''); else if(typeof openProfileById==='function') openProfileById(dd.target_id); } }catch(e){} }
         else if(k==='gym_dropin_booked'||k==='gym_member_joined'){ try{ openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); }catch(e){} }
-        else if(k==='gym_dropin_mine'||k==='gym_membership_mine'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data:g }=await supaClient.from('gyms').select('*').eq('id',dd.gym_id).single(); if(g) openGymProfile(g); } }catch(e){} }
+        else if(k==='gym_dropin_mine'||k==='gym_membership_mine'||k==='fav_added_gym'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data:g }=await supaClient.from('gyms').select('*').eq('id',dd.gym_id).single(); if(g) openGymProfile(g); } }catch(e){} }
         else if(k==='event_ticket_sold'||k==='event_ticket_mine'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.event_id){ const { data:ev }=await supaClient.from('events').select('*').eq('id',dd.event_id).single(); if(ev) openEventView(ev); } }catch(e){} }
         else if(k==='gym_in_city'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data:g }=await supaClient.from('gyms').select('*').eq('id',dd.gym_id).single(); if(g) openGymProfile(g); } }catch(e){} }
+        else if(k==='fav_added_coach'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.coach_id && typeof openProfileById==='function'){ openProfileById(dd.coach_id); } }catch(e){} }
         else if(k==='demand_hotspot'){ try{ if(typeof openFounderMap==='function') openFounderMap(); }catch(e){} }
         else if(k==='demand_priority'){ try{ if(typeof closeAllSheets==='function') closeAllSheets(); }catch(e){} }
         else if(k==='gym_team_approved'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data:g }=await supaClient.from('gyms').select('*').eq('id',dd.gym_id).single(); if(g){ openGymProfile(g); } else { if(typeof setNav==='function') setNav('ni-me'); openSheet('shMe'); } } else { if(typeof setNav==='function') setNav('ni-me'); openSheet('shMe'); setTimeout(()=>{ const mm=$('meMyTeam'); if(mm){ try{ mm.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} } },300); } }catch(e){ openSheet('shMe'); } }
@@ -16421,7 +16454,7 @@ if($('supSend')) $('supSend').onclick=()=>submitSupport();
   document.addEventListener('DOMContentLoaded',()=>document.body.appendChild(bar));
   if(document.body) document.body.appendChild(bar);
 })();
-(function(){ async function _run(){ try{ var ref=new URLSearchParams(location.search).get('ref'); if(ref){ var _s=await supaClient.auth.getSession(); var _li=!!(_s&&_s.data&&_s.data.session); if(!_li){ try{ localStorage.setItem('mtl_ref_pending', ref); }catch(e){} } } }catch(e){} if(typeof maybeSharedProfileRoute==='function') maybeSharedProfileRoute(); } if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded',_run); } else { _run(); } })();
+(function(){ async function _run(){ try{ var ref=new URLSearchParams(location.search).get('ref'); if(ref){ var _s=await supaClient.auth.getSession(); var _li=!!(_s&&_s.data&&_s.data.session); if(!_li){ try{ localStorage.setItem('mtl_ref_pending', ref); }catch(e){} } } }catch(e){} try{ var _gp=new URLSearchParams(location.search).get('gym'); var _gr=new URLSearchParams(location.search).get('gymref'); if(_gp && _gr){ var _s2=await supaClient.auth.getSession(); var _li2=!!(_s2&&_s2.data&&_s2.data.session); if(!_li2){ try{ localStorage.setItem('mtl_gym_pending', _gp); }catch(e){} } } }catch(e){} if(typeof maybeSharedProfileRoute==='function') maybeSharedProfileRoute(); } if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded',_run); } else { _run(); } })();
 
 // Submit
 if($('authMagic')) $('authMagic').onclick=async()=>{
@@ -16493,9 +16526,36 @@ async function ensureReferral(){
       if(rp && rp.id && rp.id!==currentUser.id){
         await supaClient.from('profiles').update({ referred_by: rp.id }).eq('id', currentUser.id);
         currentUser.referred_by = rp.id;
+        // Auto-favorite the referring provider (coach/gym) + notify the new user (soft routing back to source)
+        try{
+          const { data: _rpf } = await supaClient.from('profiles').select('id, role, name').eq('id', rp.id).single();
+          let _g=null; try{ const { data:_gg } = await supaClient.from('gyms').select('id,name').eq('owner_id', rp.id).limit(1); _g=_gg&&_gg[0]; }catch(e){}
+          if(_g && _g.id){
+            try{ await supaClient.from('gym_favorites').insert({ student_id: currentUser.id, gym_id: _g.id }); }catch(e){}
+            try{ await supaClient.from('notifications').insert({ user_id: currentUser.id, type:'system', read:false, data: JSON.stringify({ kind:'fav_added_gym', gym_id:_g.id, gym_name:(_g.name||'') }) }); }catch(e){}
+          } else if(_rpf && _rpf.role==='coach'){
+            try{ await supaClient.from('favorites').insert({ student_id: currentUser.id, coach_id: rp.id }); }catch(e){}
+            try{ await supaClient.from('notifications').insert({ user_id: currentUser.id, type:'system', read:false, data: JSON.stringify({ kind:'fav_added_coach', coach_id:rp.id, coach_name:(_rpf.name||'') }) }); }catch(e){}
+          }
+        }catch(e){ console.error('auto-fav', e); }
       }
     }
     try{ localStorage.removeItem('mtl_ref_pending'); }catch(e){}  // consumed once -> attribution locked thereafter
+    // Gym invite link (?gym=<id>&gymref=<owner>) -> auto-favorite that gym + notify (soft routing back to source)
+    try{
+      const _gp = (function(){ try{ return localStorage.getItem('mtl_gym_pending')||''; }catch(e){ return ''; } })();
+      if(_gp){
+        const { data:_gx } = await supaClient.from('gyms').select('id,name').eq('id', _gp).single();
+        if(_gx && _gx.id){
+          let _have=false; try{ const { data:_ef } = await supaClient.from('gym_favorites').select('gym_id').eq('student_id', currentUser.id).eq('gym_id', _gx.id).limit(1); _have=!!(_ef&&_ef.length); }catch(e){}
+          if(!_have){
+            try{ await supaClient.from('gym_favorites').insert({ student_id: currentUser.id, gym_id: _gx.id }); }catch(e){}
+            try{ await supaClient.from('notifications').insert({ user_id: currentUser.id, type:'system', read:false, data: JSON.stringify({ kind:'fav_added_gym', gym_id:_gx.id, gym_name:(_gx.name||'') }) }); }catch(e){}
+          }
+        }
+        try{ localStorage.removeItem('mtl_gym_pending'); }catch(e){}
+      }
+    }catch(e){ console.error('auto-fav gym link', e); }
   }catch(e){ console.error('ensureReferral', e); }
 }
 function fillReferral(){
@@ -17747,12 +17807,14 @@ async function renderEarnings(){
     ${partnerBlock}
     <button id="csvExportBtn" style="width:100%;padding:12px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-top:16px;">${LANG==='en'?'⬇ Export for accountant (CSV)':'⬇ Export pro účetní (CSV)'}</button>
     <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:8px;">${LANG==='en'?'Summary of your MTL activity (estimate). Your Stripe Dashboard is the authoritative source for tax.':'Souhrn tvé MTL aktivity (odhad). Závazný zdroj pro daňe je tvůj Stripe Dashboard.'}</p>
+    <button id="coachCheckinBtn" style="width:100%;padding:13px;background:linear-gradient(135deg,#7A3FBF,#9D5FE0);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;margin-top:8px;">⚡ QR Check-in</button>
     <div id="myStatsBox" style="margin-top:20px;"></div>
   `;
   // doplň statistiky (rezervace, storna, hodnocení)
   tab.querySelectorAll('.partnerLearnBtn').forEach(b=>b.onclick=openPartnerInfo);
   { const _csv=tab.querySelector('#csvExportBtn'); if(_csv) _csv.onclick=()=>exportCoachCsv(past, curr); }
   renderCoachAnalyticsCompact(currentUser.id, 'myStatsBox');
+  if($('coachCheckinBtn')) $('coachCheckinBtn').onclick=()=>openCoachCheckin();
 }
 
 let _csStudDisc=null;
@@ -18352,6 +18414,35 @@ async function showPaidPopup(){
   try{ const _own=params.get('own'), _og=params.get('gym'); if(_own==='1'&&_og){ try{ localStorage.setItem('mtl_owngym_'+_og,'1'); }catch(e){} } }catch(e){}
   try{ const _ownc=params.get('own'), _oc=params.get('coach'); if(_ownc==='1'&&_oc){ try{ localStorage.setItem('mtl_owncoach_'+_oc,'1'); }catch(e){} } }catch(e){}
   try{ const _jt=params.get('join'); if(_jt){ try{ localStorage.setItem('mtl_join', _jt); }catch(e){} } }catch(e){}
+  if(params.get('coachcheckin')==='1'){
+    const _ccoachId=params.get('coach'), _cctok=params.get('tok');
+    let _cct=0; while(!currentUser && _cct<25){ await new Promise(r=>setTimeout(r,200)); _cct++; }
+    window.history.replaceState({}, '', location.pathname);
+    if(currentUser && _ccoachId && _cctok){
+      try{
+        const { data: tk } = await supaClient.from('coach_checkin_tokens').select('*').eq('token',_cctok).maybeSingle();
+        if(tk && String(tk.coach_id)===String(_ccoachId) && new Date(tk.expires_at).getTime()>Date.now()){
+          if(String(currentUser.id)===String(_ccoachId)){ toast(LANG==='en'?'That is your own check-in QR.':'To je tvůj vlastní check-in QR.'); }
+          else {
+            let _occ=null; try{ _occ=tk.occ?(typeof tk.occ==='string'?JSON.parse(tk.occ):tk.occ):null; }catch(e){}
+            const _today=new Date().toISOString().slice(0,10);
+            let _settled=false;
+            try{
+              const { data: bks } = await supaClient.from('bookings').select('id,fulfilled,student_confirmed,status,training_date').eq('coach_id',_ccoachId).eq('student_id',currentUser.id).eq('status','active').order('training_date',{ascending:false}).limit(5);
+              const _bk=(bks||[]).find(b=> b.fulfilled!==true || b.student_confirmed!==true);
+              if(_bk){ await supaClient.from('bookings').update({ fulfilled:true, student_confirmed:true }).eq('id',_bk.id); _settled=true; }
+            }catch(e){}
+            if(!_settled){
+              let _dup=false;
+              try{ const { data: ex } = await supaClient.from('gym_attendance').select('id').eq('coach_id',_ccoachId).eq('student_id',currentUser.id).eq('class_date',_today).limit(1); _dup=!!(ex&&ex.length); }catch(e){}
+              if(!_dup){ try{ await supaClient.from('gym_attendance').insert({ gym_id:null, student_id:currentUser.id, student_name:currentUser.name||null, class_name:(_occ&&_occ.name)||null, class_date:_today, class_time:(_occ&&_occ.time)||null, coach_id:_ccoachId, discipline:(_occ&&_occ.disc)||null, marked_by:_ccoachId }); }catch(e){} }
+            }
+            toast(LANG==='en'?'\u2705 Checked in — enjoy the lesson!':'\u2705 Odbaveno — užij si lekci!');
+          }
+        } else { toast(LANG==='en'?'This check-in QR has expired.':'Tento check-in QR vypršel.'); }
+      }catch(e){ console.error('coach checkin', e); }
+    }
+  }
   if(params.get('checkin')==='1'){
     const _cgym=params.get('gym'), _csid=params.get('sid'), _ctok=params.get('tok');
     const _ccls=params.get('cls'), _cdate=params.get('date'), _ctime=params.get('time'), _ccoach=params.get('coach')||null, _clevel=params.get('level')||'all', _cdisc=params.get('disc')||null;
