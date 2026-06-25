@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QKD added a lightweight branded BOOT SPLASH (logo MTL + 'Be More.') shown on cold start / refresh. Pure CSS fade-out (keyframe bootFade, visibility:hidden+pointer-events:none after ~1.25s) so it can NEVER block the app - no JS dependency, no boot hook. z-index above the auth screen, background var(--bg) for a seamless fade into login/app. Note: the app has no skeleton-loading; per-sheet 'Nacitam...' placeholders are the only inline loaders. Builds on QKC. -->
+<!-- MTL build: QKE Exclusive Partner fixes. BUG: EP checkout used location.href which navigates the PWA away to Stripe (iOS breaks standalone->Safari) and the app returned logged-out. Now opens via window.open(_blank) keeping the PWA alive (falls back to location.href if popup blocked) + a visibilitychange/focus re-check that activates EP the moment the webhook-set partner flag appears, no reload. Also the partner_sub=ok boot handler now shows a clear 'payment received, log in to activate' message when session didn't restore (instead of a misleading welcome). MARGIN CALC honesty: monthlyCost corrected 49->99 USD (CZK 1150->2300, EUR 45->92) to match the real $99/mo charge; gainPct 0.98->0.99 (EP truly keeps 99%); the 'pays off' highlight now shows NET = commission saved MINUS the $99 fee (so a $99.01 gross saving reads as +$0.01 net, not +$99.01); added a 'before VAT / reverse charge may add ~21%' caveat. Builds on QKD. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -9590,6 +9590,32 @@ function openCoachCheckin(occ){
   }
   if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded', _plInit); } else { _plInit(); }
 })();
+(function(){
+  var _busy=false;
+  async function _epRecheck(){
+    try{
+      if(_busy) return;
+      if(document.visibilityState && document.visibilityState!=='visible') return;
+      if(!window._epPending || (Date.now()-window._epPending>600000)) return;
+      if(!currentUser){ return; }
+      if(currentUser.partner){ window._epPending=0; return; }
+      _busy=true;
+      for(var i=0;i<4;i++){
+        try{ var r=await supaClient.from('profiles').select('partner').eq('id',currentUser.id).single(); if(r&&r.data&&r.data.partner){
+          window._epPending=0; currentUser.partner=true;
+          try{ if(typeof applyCertUI==='function') applyCertUI(); }catch(e){}
+          try{ if($('partnerBadge')&&typeof epRatesCardHTML==='function'){ $('partnerBadge').style.display='block'; $('partnerBadge').innerHTML=epRatesCardHTML(true,true); } if($('btnCancelPartner')) $('btnCancelPartner').style.display='block'; }catch(e){}
+          try{ toast(LANG==='en'?'\u2b50 Welcome, Exclusive MTL Partner!':'\u2b50 V\u00edtej, Exclusive MTL Partnere!'); }catch(e){}
+          break;
+        } }catch(e){}
+        await new Promise(function(rs){ setTimeout(rs,1500); });
+      }
+      _busy=false;
+    }catch(e){ _busy=false; }
+  }
+  document.addEventListener('visibilitychange', _epRecheck);
+  window.addEventListener('focus', _epRecheck);
+})();
 function showTicketQR(ticketId){
   if(!ticketId) return;
   const info=(window._goingTkMap||{})[ticketId]||{};
@@ -14778,7 +14804,7 @@ function openPartnerInfo(){
     +row(EN?'You keep — drop-ins':'Z drop-inů ti zbyde','96,5 %','99 %')
     +`<p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:12px 0 2px;">${EN?'Partner cuts MTL commission from 3.5% to 1% on every payment — you keep 99% instead of 96.5%. Students always pay the listed price. Cancel anytime.':'Partner snižuje provizi MTL ze 3,5 % na 1 % u každé platby — necháš si 99 % místo 96,5 %. Studenti vždy platí uvedenou cenu. Zrušíš kdykoliv.'}</p>`;
   if($('piBody')){ $('piBody').innerHTML += `<p style="font-size:11px;color:var(--light);line-height:1.55;margin-top:10px;border-top:1px solid var(--border);padding-top:10px;">${EN?'The $99/mo is a B2B service. If you buy as a VAT-registered business in another EU country it falls under reverse charge — MTL invoices without VAT and you self-assess VAT at your local rate. Check with your accountant.':'$99/měs je B2B služba. Pokud ji kupuješ jako podnikatel (plátce/identifikovaná osoba) z jiné země EU, vztahuje se na ni reverse charge — MTL fakturuje bez DPH a daň si odvedeš sám ve své zemi dle své sazby. Ověř s účetní.'}</p>`; }
-  const cta=$('piCta'); if(cta){ cta.textContent=(EN?'⭐ Become Partner — $99/mo':'⭐ Stát se Partnerem — $99/mo'); cta.onclick=()=>{ if(currentUser){ location.href=`/api/pay?type=partner&userId=${currentUser.id}&email=${encodeURIComponent(currentUser.email||'')}`; } }; }
+  const cta=$('piCta'); if(cta){ cta.textContent=(EN?'⭐ Become Partner — $99/mo':'⭐ Stát se Partnerem — $99/mo'); cta.onclick=()=>{ if(currentUser){ { try{ window._epPending=Date.now(); }catch(e){} var _u=`/api/pay?type=partner&userId=${currentUser.id}&email=${encodeURIComponent(currentUser.email||'')}`; var _w=window.open(_u,'_blank'); if(!_w) location.href=_u; } } }; }
   if($('piCalc')) $('piCalc').textContent=(EN?'📊 Calculate margin difference':'📊 Spočítat rozdíl v marži');
   $('partnerInfoOv').classList.add('open');
 }
@@ -17869,14 +17895,15 @@ async function renderEarnings(){
   const curr=(past[0]&&past[0].currency)||currentUser.currency||'CZK';
   const _now30=Date.now()-30*86400000;
   const base30=past.filter(b=>{ const d=new Date(`${b.training_date||(b.created_at||'').slice(0,10)}T00:00:00`).getTime(); return d>=_now30; }).reduce((s,b)=>s+(b.amount||0),0);
-  const monthlyCost = curr==='CZK'?1150:(curr==='EUR'?45:49);
-  const gainPct = Math.max(0, 0.98 - myPct);
+  const monthlyCost = curr==='CZK'?2300:(curr==='EUR'?92:99);
+  const gainPct = Math.max(0, 0.99 - myPct);
   const saving30 = gainPct*base30;
   const ctaUrl=`/api/pay?type=partner&userId=${currentUser.id}&email=${encodeURIComponent(currentUser.email||'')}`;
   let partnerBlock='';
   if(!isPartnerC){
     const paysOff = (gainPct>0 && saving30>=monthlyCost);
-    const highlight = paysOff ? `<div style="font-size:12px;color:#B26A00;font-weight:700;margin-bottom:8px;line-height:1.5;">💡 ${LANG==='en'?`At your volume it pays off now — you'd keep ~${Math.round(saving30)} ${curr}/mo more`:`Při tvém objemu se ti to teď vyplatí — nechal by sis ~${Math.round(saving30)} ${curr}/měs víc`}</div>` : '';
+    const _net = Math.round(saving30 - monthlyCost);
+    const highlight = paysOff ? `<div style="font-size:12px;color:#B26A00;font-weight:700;margin-bottom:8px;line-height:1.5;">💡 ${LANG==='en'?`At your volume it pays off: ~${Math.round(saving30)} ${curr} saved on commission - ${monthlyCost} ${curr} fee = <b>+${_net} ${curr}/mo net</b>`:`Při tvém objemu se vyplatí: ~${Math.round(saving30)} ${curr} úspora na provizi - ${monthlyCost} ${curr} poplatek = <b>+${_net} ${curr}/měs čistého</b>`}<div style="font-weight:500;color:var(--light);font-size:10.5px;margin-top:5px;">${LANG==='en'?'Estimate, before VAT. In another EU country and not VAT-registered? Reverse charge may add up to ~21% - check with your accountant.':'Orientačně, před DPH. Jsi v jiné zemi EU a neplátce DPH? Reverse charge může přidat až ~21 % - ověř s účetní.'}</div></div>` : '';
     partnerBlock=`<div style="background:${paysOff?'linear-gradient(135deg,#FFFaf0,#FFF3D8)':'var(--surf)'};border:1.5px solid ${paysOff?'#E8C24A':'var(--border)'};border-radius:14px;padding:14px 16px;margin:16px 0;text-align:center;">
       ${highlight}
       <div style="font-family:'Bebas Neue';font-size:19px;letter-spacing:.03em;color:var(--dark);">⭐ ${LANG==='en'?'Become Exclusive MTL Partner':'Staň se Exclusive MTL Partnerem'}</div>
@@ -18713,6 +18740,7 @@ async function showPaidPopup(){
     const sid=params.get('session');
     history.replaceState({},'',location.pathname);
     let _t=0; while(!currentUser && _t<25){ await new Promise(r=>setTimeout(r,200)); _t++; }
+    if(!currentUser){ toast(LANG==='en'?'✅ Payment received — log in to activate Exclusive Partner':'✅ Platba proběhla — přihlas se a Exclusive Partner se aktivuje'); try{ if($('authScreen')) $('authScreen').style.display='flex'; }catch(e){} return; }
     toast(LANG==='en'?'⭐ Welcome, Exclusive MTL Partner!':'⭐ Vítej, Exclusive MTL Partnere!');
     if(currentUser){
       const applyEP=()=>{ currentUser.partner=true; try{ if(typeof applyCertUI==='function') applyCertUI(); }catch(e){} try{ if(typeof fillRateEditor==='function') fillRateEditor(); }catch(e){} try{ if($('partnerBadge')){ $('partnerBadge').style.display='block'; $('partnerBadge').innerHTML=epRatesCardHTML(true,true); } if($('btnCancelPartner')) $('btnCancelPartner').style.display='block'; if($('foundingCoachBadge')) $('foundingCoachBadge').style.display='none'; }catch(e){} };
