@@ -82,7 +82,7 @@ async function recordTransaction(acct, pi, fields) {
     const row = {
       charge_id: chargeId, payee_account: acct || null, type: fields.type,
       member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null, discipline: fields.discipline || null,
-      gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, mtl_fee_refunded: 0, net_amount: net, currency, status: 'paid',
+      gross_amount: gross, stripe_fee: stripeFee, mtl_fee: (((fields.welcome_waived||0)>0 && (mtlFee===0||mtlFee==null)) ? (fields.welcome_waived||0) : mtlFee), mtl_fee_refunded: ((fields.welcome_waived||0)>0 ? (fields.welcome_waived||0) : 0), net_amount: net, currency, status: 'paid',
       income_class: fields.income_class || null,
     };
     if (existing) {
@@ -124,7 +124,7 @@ export default async function handler(req, res) {
         if (!invId && session.subscription) { try { const sub = await stripe.subscriptions.retrieve(typeof session.subscription === 'string' ? session.subscription : session.subscription.id, opts); invId = sub.latest_invoice && (typeof sub.latest_invoice === 'string' ? sub.latest_invoice : sub.latest_invoice.id); } catch (e) {} }
         if (invId) { try { const inv = await stripe.invoices.retrieve(invId, opts); payId = (inv.payment_intent && (typeof inv.payment_intent === 'string' ? inv.payment_intent : inv.payment_intent.id)) || (inv.charge && (typeof inv.charge === 'string' ? inv.charge : inv.charge.id)); } catch (e) {} }
       }
-      let txType = null; const f = { currency: m.mtl_currency || session.currency, income_class: m.mtl_income || null };
+      let txType = null; const f = { currency: m.mtl_currency || session.currency, income_class: m.mtl_income || null, welcome_waived: parseInt(m.mtl_welcome_waived||'0',10)||0 };
       if (m.mtl_payment_type === 'membership') { txType = 'membership'; f.member_id = m.student_id; f.gym_id = m.gym_id; f.plan = m.mtl_plan || 'Membership'; }
       else if (m.mtl_payment_type === 'drop_in') { txType = 'drop_in'; f.member_id = m.student_id || m.member_id; f.gym_id = m.gym_id; f.coach_id = m.coach_id || m.coach_profile_id || null; f.plan = m.mtl_plan || 'Drop-in'; f.discipline = m.discipline || m.disc || null; }
       else if (m.mtl_payment_type === 'merch') { txType = 'merch'; f.member_id = m.student_id; f.gym_id = m.gym_id; f.plan = m.merch_name || m.mtl_plan || 'Merch'; }
