@@ -33,9 +33,11 @@ async function isWelcomeZero(acct){
     const ks = await _wsbGet(`profiles?id=eq.${_WELCOME_FOUNDER}&select=welcome_zero_off`);
     if(ks && ks[0] && ks[0].welcome_zero_off) return false;
     const a = encodeURIComponent(String(acct).trim());
-    let prov = (await _wsbGet(`profiles?or=(stripe_account.eq.${a},gym_payout_account.eq.${a})&select=id,welcome_free_until,created_at&limit=1`))[0];
+    let prov = (await _wsbGet(`profiles?stripe_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0]
+            || (await _wsbGet(`profiles?gym_payout_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0];
     if(!prov){
-      const g = (await _wsbGet(`gyms?or=(stripe_account.eq.${a},gym_payout_account.eq.${a})&select=owner_id&limit=1`))[0];
+      let g = (await _wsbGet(`gyms?stripe_account=eq.${a}&select=owner_id&limit=1`))[0]
+           || (await _wsbGet(`gyms?gym_payout_account=eq.${a}&select=owner_id&limit=1`))[0];
       if(g && g.owner_id) prov = (await _wsbGet(`profiles?id=eq.${g.owner_id}&select=id,welcome_free_until,created_at`))[0];
     }
     if(!prov || !prov.id) return false;
@@ -55,15 +57,24 @@ async function isWelcomeZero(acct){
 async function welcomeReason(acct){
   if(!acct) return 'noacct';
   try{
+    const ks = await _wsbGet(`profiles?id=eq.${_WELCOME_FOUNDER}&select=welcome_zero_off`);
+    if(ks && ks[0] && ks[0].welcome_zero_off) return 'off';
     const a = encodeURIComponent(String(acct).trim());
-    const ks = await _wsbGet(`profiles?id=eq.${_WELCOME_FOUNDER}&select=id`);
-    const gS = await _wsbGet(`gyms?stripe_account=eq.${a}&select=id`);
-    const gP = await _wsbGet(`gyms?gym_payout_account=eq.${a}&select=id`);
-    const pS = await _wsbGet(`profiles?stripe_account=eq.${a}&select=id`);
-    const pP = await _wsbGet(`profiles?gym_payout_account=eq.${a}&select=id`);
-    const n = x => Array.isArray(x) ? x.length : -1;
-    return `dbg-ks${n(ks)}-gS${n(gS)}-gP${n(gP)}-pS${n(pS)}-pP${n(pP)}-${String(acct).trim().slice(0,14)}`;
-  }catch(e){ return 'err-'+((e&&e.message)?e.message.slice(0,24):'x'); }
+    let via='prof';
+    let prov = (await _wsbGet(`profiles?stripe_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0]
+            || (await _wsbGet(`profiles?gym_payout_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0];
+    if(!prov){
+      let g = (await _wsbGet(`gyms?stripe_account=eq.${a}&select=owner_id&limit=1`))[0]
+           || (await _wsbGet(`gyms?gym_payout_account=eq.${a}&select=owner_id&limit=1`))[0];
+      if(g && g.owner_id){ prov = (await _wsbGet(`profiles?id=eq.${g.owner_id}&select=id,welcome_free_until,created_at`))[0]; via='gym'; }
+    }
+    if(!prov || !prov.id) return 'noprov';
+    const now=Date.now();
+    if(prov.welcome_free_until) return (now < new Date(prov.welcome_free_until).getTime()) ? ('ok-'+via) : ('expired-'+via);
+    const created = prov.created_at ? new Date(prov.created_at).getTime() : 0;
+    if(created && (now-created) < 45*86400000) return 'anchor-'+via;
+    return 'old-'+via;
+  }catch(e){ return 'err'; }
 }
 
 export default async function handler(req, res) {
