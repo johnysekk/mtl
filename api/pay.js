@@ -54,28 +54,6 @@ async function isWelcomeZero(acct){
 }
 // DIAGNOSTIC: same lookup as isWelcomeZero but returns WHY (shown in Stripe metadata as mtl_welcome).
 // off=kill-switch | noprov=provider not found by account | ok-*=welcome active | expired-* | old-*(>45d no window) | anchor-*(would open) | err
-async function welcomeReason(acct){
-  if(!acct) return 'noacct';
-  try{
-    const ks = await _wsbGet(`profiles?id=eq.${_WELCOME_FOUNDER}&select=welcome_zero_off`);
-    if(ks && ks[0] && ks[0].welcome_zero_off) return 'off';
-    const a = encodeURIComponent(String(acct).trim());
-    let via='prof';
-    let prov = (await _wsbGet(`profiles?stripe_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0]
-            || (await _wsbGet(`profiles?gym_payout_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0];
-    if(!prov){
-      let g = (await _wsbGet(`gyms?stripe_account=eq.${a}&select=owner_id&limit=1`))[0]
-           || (await _wsbGet(`gyms?gym_payout_account=eq.${a}&select=owner_id&limit=1`))[0];
-      if(g && g.owner_id){ prov = (await _wsbGet(`profiles?id=eq.${g.owner_id}&select=id,welcome_free_until,created_at`))[0]; via='gym'; }
-    }
-    if(!prov || !prov.id) return 'noprov';
-    const now=Date.now();
-    if(prov.welcome_free_until) return (now < new Date(prov.welcome_free_until).getTime()) ? ('ok-'+via) : ('expired-'+via);
-    const created = prov.created_at ? new Date(prov.created_at).getTime() : 0;
-    if(created && (now-created) < 45*86400000) return 'anchor-'+via;
-    return 'old-'+via;
-  }catch(e){ return 'err'; }
-}
 
 export default async function handler(req, res) {
   const type = String(req.query.type || 'coach');
@@ -159,7 +137,6 @@ async function coachCheckout(req, res) {
     payment_intent_data: {
       application_fee_amount: (await isWelcomeZero(coachId)) ? 0 : applicationFee,
       metadata: {
-        mtl_welcome: await welcomeReason(coachId),
         credit_type: credit || 'none',
         coach_pct: (STUDENT_MARKUP - COMMISSION).toFixed(2),
         commission_pct: COMMISSION.toFixed(2),
@@ -222,7 +199,6 @@ async function gymCheckout(req, res) {
         description: `${className || 'Drop-in'}${level ? ' [' + level + ']' : ''} — ${gymName || 'MTL Gym'} (drop-in)`,
         metadata: {
           mtl_payment_type: (String(merch)==='1'?'merch':'drop_in'),
-          mtl_welcome: await welcomeReason(gymAccount),
           merch_name: merchName || '',
           mtl_plan: className || 'Drop-in',
           mtl_level: level || '',
@@ -284,7 +260,6 @@ async function eventCheckout(req, res) {
         description: `${eventTitle || 'Event'}${tierName ? ' [' + tierName + ']' : ''} (MTL event ticket)`,
         metadata: {
           mtl_payment_type: 'event_ticket',
-          mtl_welcome: await welcomeReason(gymAccount),
           mtl_event: eventTitle || '',
           mtl_tier: tierName || '',
           mtl_base: String(P),
@@ -381,9 +356,9 @@ async function membershipCheckout(req, res) {
       subscription_data: {
         application_fee_percent: (await isWelcomeZero(gymAccount)) ? 0 : FEE_NOW,
         metadata: {
-          mtl_welcome: await welcomeReason(gymAccount),
           mtl_acq: _isAcq ? '1' : '',
           mtl_acq_base: String(FEE_PCT),
+          mtl_income: income || 'side',
           mtl_payment_type: 'membership',
           gym_id: gymId || '',
           student_id: studentId || '',
