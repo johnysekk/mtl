@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QJW Coach QR Check-in: coach shows one QR per lesson (openCoachCheckin -> _issueCoachCheckinToken inserts into new coach_checkin_tokens table, multi-redeem, 45min), students scan ?coachcheckin=1&coach&tok. Redeem handler: paying student's active booking -> fulfilled+student_confirmed (settles, skips dispute, routes to Rate); non-paying group attendees -> gym_attendance row (coach_id set, gym_id null) so they get credited in 'Moji studenti'/lessons without touching financials (dedup per day). QR Check-in button added to coach dashboard above myStatsBox. Named 'QR Check-in' for coaches (gym keeps 'Recepce'). Needs coach-checkin.sql deployed. Builds on QJV. -->
+<!-- MTL build: QJX coach QR check-in refinements + own-link auto-favorite: (1) redeem now stamps bookings.checked_in_at at scan; (2) the 1:1 'Rate' button is gated to appear only >=3h after check-in (lesson plausibly over), not at scan time which is the lesson START; (3) the ?own=1 own-student link (coach &/or gym) now also captures fav-pending (mtl_gym_pending / mtl_coach_pending); (4) ensureReferral gains a coach fav consumer (mirrors the QJV gym one) -> auto-favorite + fav_added_coach notif. Needs coach-checkin.sql (incl. bookings.checked_in_at). Builds on QJW. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -16556,6 +16556,21 @@ async function ensureReferral(){
         try{ localStorage.removeItem('mtl_gym_pending'); }catch(e){}
       }
     }catch(e){ console.error('auto-fav gym link', e); }
+    // Coach own-student link (?own=1&coach=<id>) -> auto-favorite that coach + notify
+    try{
+      const _cp = (function(){ try{ return localStorage.getItem('mtl_coach_pending')||''; }catch(e){ return ''; } })();
+      if(_cp && _cp!==currentUser.id){
+        const { data:_cx } = await supaClient.from('profiles').select('id,name,role').eq('id', _cp).single();
+        if(_cx && _cx.id){
+          let _have=false; try{ const { data:_ef } = await supaClient.from('favorites').select('coach_id').eq('student_id', currentUser.id).eq('coach_id', _cx.id).limit(1); _have=!!(_ef&&_ef.length); }catch(e){}
+          if(!_have){
+            try{ await supaClient.from('favorites').insert({ student_id: currentUser.id, coach_id: _cx.id }); }catch(e){}
+            try{ await supaClient.from('notifications').insert({ user_id: currentUser.id, type:'system', read:false, data: JSON.stringify({ kind:'fav_added_coach', coach_id:_cx.id, coach_name:(_cx.name||'') }) }); }catch(e){}
+          }
+        }
+        try{ localStorage.removeItem('mtl_coach_pending'); }catch(e){}
+      }
+    }catch(e){ console.error('auto-fav coach link', e); }
   }catch(e){ console.error('ensureReferral', e); }
 }
 function fillReferral(){
@@ -18150,7 +18165,7 @@ async function renderOnlineList(role){
       } else {
         actions = `<div style="display:flex;gap:8px;margin-top:12px;">
           <button class="onChatCoach" data-coach="${b.coach_id}" style="flex:1;padding:10px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${L('💬 Chat s koučem')}</button>`
-          + (!b.rated ? `<button class="onRate" data-id="${b.id}" data-coach="${b.coach_name}" style="flex:1;padding:10px;background:#FFB800;color:#1a1a1a;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${L('⭐ Ohodnotit')}</button>` : '')
+          + ((!b.rated && (!b.checked_in_at || (Date.now()-new Date(b.checked_in_at).getTime()>=10800000))) ? `<button class="onRate" data-id="${b.id}" data-coach="${b.coach_name}" style="flex:1;padding:10px;background:#FFB800;color:#1a1a1a;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${L('⭐ Ohodnotit')}</button>` : '')
           + `</div>`
           + `<button class="onDispute" data-id="${b.id}" data-coach="${b.coach_id}" style="width:100%;margin-top:8px;padding:9px;background:var(--bg);color:var(--mid);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${L('⚠️ Nedostal jsem feedback — řešit rozpor')}</button>`
           + (b.rated ? `<div style="font-size:12px;color:var(--light);margin-top:8px;">${L('Hodnoceno ✓')}</div>` : '');
@@ -18411,8 +18426,8 @@ async function recalcCoachRating(coachId){
 async function showPaidPopup(){
   const params = new URLSearchParams(window.location.search);
   try{ const _gru=params.get('gymref'), _grg=params.get('gym'); if(_gru&&_grg){ window._gymRef={gym:_grg, ref:_gru}; } }catch(e){}
-  try{ const _own=params.get('own'), _og=params.get('gym'); if(_own==='1'&&_og){ try{ localStorage.setItem('mtl_owngym_'+_og,'1'); }catch(e){} } }catch(e){}
-  try{ const _ownc=params.get('own'), _oc=params.get('coach'); if(_ownc==='1'&&_oc){ try{ localStorage.setItem('mtl_owncoach_'+_oc,'1'); }catch(e){} } }catch(e){}
+  try{ const _own=params.get('own'), _og=params.get('gym'); if(_own==='1'&&_og){ try{ localStorage.setItem('mtl_owngym_'+_og,'1'); }catch(e){} try{ localStorage.setItem('mtl_gym_pending', _og); }catch(e){} } }catch(e){}
+  try{ const _ownc=params.get('own'), _oc=params.get('coach'); if(_ownc==='1'&&_oc){ try{ localStorage.setItem('mtl_owncoach_'+_oc,'1'); }catch(e){} try{ localStorage.setItem('mtl_coach_pending', _oc); }catch(e){} } }catch(e){}
   try{ const _jt=params.get('join'); if(_jt){ try{ localStorage.setItem('mtl_join', _jt); }catch(e){} } }catch(e){}
   if(params.get('coachcheckin')==='1'){
     const _ccoachId=params.get('coach'), _cctok=params.get('tok');
@@ -18430,7 +18445,7 @@ async function showPaidPopup(){
             try{
               const { data: bks } = await supaClient.from('bookings').select('id,fulfilled,student_confirmed,status,training_date').eq('coach_id',_ccoachId).eq('student_id',currentUser.id).eq('status','active').order('training_date',{ascending:false}).limit(5);
               const _bk=(bks||[]).find(b=> b.fulfilled!==true || b.student_confirmed!==true);
-              if(_bk){ await supaClient.from('bookings').update({ fulfilled:true, student_confirmed:true }).eq('id',_bk.id); _settled=true; }
+              if(_bk){ await supaClient.from('bookings').update({ fulfilled:true, student_confirmed:true, checked_in_at:new Date().toISOString() }).eq('id',_bk.id); _settled=true; }
             }catch(e){}
             if(!_settled){
               let _dup=false;
