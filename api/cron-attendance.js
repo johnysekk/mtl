@@ -181,14 +181,14 @@ export default async function handler(req, res) {
     let welcomeRerated = 0;
     try {
       const nowIso = new Date().toISOString();
-      const ended = await sbGet(`profiles?welcome_free_until=lt.${encodeURIComponent(nowIso)}&welcome_rerated=is.false&select=id`);
+      const ended = await sbGet(`profiles?welcome_free_until=lt.${encodeURIComponent(nowIso)}&welcome_rerated=is.false&select=id,stripe_account`);
       for (const p of (Array.isArray(ended) ? ended : [])) {
         try {
           const pGyms = await sbGet(`gyms?owner_id=eq.${p.id}&select=id,stripe_account,gym_payout_account`);
           for (const g of (Array.isArray(pGyms) ? pGyms : [])) {
             const acct = g.gym_payout_account || g.stripe_account;
             if (!acct) continue;
-            const subs = await sbGet(`gym_memberships?gym_id=eq.${g.id}&status=eq.active&select=stripe_subscription`);
+            const subs = await sbGet(`gym_memberships?gym_id=eq.${g.id}&status=eq.active&or=(paid_to.is.null,paid_to.eq.gym)&select=stripe_subscription`);
             for (const m of (Array.isArray(subs) ? subs : [])) {
               if (!m.stripe_subscription) continue;
               try {
@@ -200,6 +200,22 @@ export default async function handler(req, res) {
                   welcomeRerated++;
                 }
               } catch (e) { console.error('welcome rerate sub', m.stripe_subscription, e.message); }
+            }
+          }
+          // coach-owned subscriptions: paid directly to the coach (paid_to='coach') on the coach's own Stripe account
+          if (p.stripe_account) {
+            const cSubs = await sbGet(`gym_memberships?coach_id=eq.${p.id}&status=eq.active&paid_to=eq.coach&select=stripe_subscription`);
+            for (const m of (Array.isArray(cSubs) ? cSubs : [])) {
+              if (!m.stripe_subscription) continue;
+              try {
+                const sub = await stripe.subscriptions.retrieve(m.stripe_subscription, { stripeAccount: p.stripe_account });
+                const cur = (sub.application_fee_percent != null) ? Number(sub.application_fee_percent) : null;
+                if (cur === 0) {
+                  const base = parseFloat((sub.metadata && sub.metadata.mtl_acq_base) || '3.5') || 3.5;
+                  await stripe.subscriptions.update(m.stripe_subscription, { application_fee_percent: base }, { stripeAccount: p.stripe_account });
+                  welcomeRerated++;
+                }
+              } catch (e) { console.error('welcome rerate coach sub', m.stripe_subscription, e.message); }
             }
           }
           await sbPatch('profiles', `id=eq.${p.id}`, { welcome_rerated: true });
