@@ -9,6 +9,7 @@
 // DŮLEŽITÉ: webhook musí číst RAW body (proto bodyParser:false), jinak selže ověření podpisu.
 
 import Stripe from 'stripe';
+import crypto from 'crypto';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 export const config = { api: { bodyParser: false } };
@@ -223,6 +224,30 @@ async function recordTransaction(acct, pi, fields) {
   } catch (e) { console.error('recordTransaction', e.message); }
 }
 
+
+// Server-side Meta Purchase (CAPI) for a cohort deposit. Shares event_id cp_<member_id> with
+// the browser Purchase pixel so Meta de-duplicates. Uses the cohort's OWN pixel + secret token.
+async function cohortCapiPurchase(coh, cmId, email, amount, cur, fbp, fbc) {
+  try {
+    if (!coh || !coh.gym_meta_pixel || !coh.capi_token) return;
+    const sha = (v) => crypto.createHash('sha256').update(String(v).trim().toLowerCase()).digest('hex');
+    const user_data = {};
+    if (email) user_data.em = [sha(email)];
+    if (fbp) user_data.fbp = fbp;
+    if (fbc) user_data.fbc = fbc;
+    const evt = {
+      event_name: 'Purchase',
+      event_time: Math.floor(Date.now() / 1000),
+      action_source: 'website',
+      event_id: 'cp_' + cmId,
+      user_data,
+      custom_data: { value: Number(amount || 0), currency: cur || 'CZK' }
+    };
+    const url = 'https://graph.facebook.com/v21.0/' + encodeURIComponent(coh.gym_meta_pixel) + '/events?access_token=' + encodeURIComponent(coh.capi_token);
+    await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: [evt] }) });
+  } catch (e) { console.error('cohortCapiPurchase', e.message); }
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
   let event;
@@ -313,13 +338,13 @@ export default async function handler(req, res) {
         if (cmId && (!already || already.length === 0)) {
           const amount = (s.amount_total || 0) / 100;
           const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
-          const fee = (m.mtl_welcome === '1') ? 0 : Math.round(amount * 0.035 * 100) / 100;
+          const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : ((m.mtl_welcome === '1') ? 0 : Math.round(amount * 0.035 * 100) / 100);
           await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'deposit', amount, currency: cur, mtl_fee: fee, stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
           await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'deposit_paid' });
           // NOTE follow-up: ambassador 0.5% on cohort deposits not wired yet (needs mtl_disc/mtl_base in metadata).
           try {
-            const coh = cohId ? ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=owner_id,name,gym_id,deposit_amount,price_student,price_regular,currency,start_date`)) || [])[0] : null;
-            const mem = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=name,email,tier`)) || [])[0];
+            const coh = cohId ? ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=owner_id,name,gym_id,deposit_amount,price_student,price_regular,currency,start_date,gym_meta_pixel,capi_token`)) || [])[0] : null;
+            const mem = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=name,email,tier,fbp,fbc`)) || [])[0];
             if (coh && coh.owner_id) await sbPost('notifications', { user_id: coh.owner_id, type: 'system', read: false, message: '\uD83D\uDCDA Nov\u00FD zaplacen\u00FD z\u00E1pis do kurzu' + (coh.name ? (' "' + coh.name + '"') : '') + '.' });
             if (mem && mem.email && coh) {
               let gymName = '';
@@ -333,6 +358,7 @@ export default async function handler(req, res) {
               const fromName = (gymName || 'Martial Training Lab').replace(/["<>]/g, '');
               await sendResend(mem.email, (coh.name || 'Kurz') + ' \u2014 z\u00E1loha p\u0159ijata', cohortDepositHtml(mem.name, coh.name || 'Kurz', gymName, money(amount), remainder > 0 ? money(remainder) : '', coh.start_date || ''), { from: '"' + fromName + '" <' + MAIL_ADDR + '>', replyTo: ownerEmail || undefined });
             }
+            try { await cohortCapiPurchase(coh, cmId, (mem && mem.email) || '', amount, cur, (mem && mem.fbp) || '', (mem && mem.fbc) || ''); } catch (e) {}
           } catch (e) { console.error('cohort confirm', e.message); }
         }
       } else if (m.mtl_payment_type === 'cohort_first_month') {
@@ -343,7 +369,7 @@ export default async function handler(req, res) {
         if (cmId && (!already || already.length === 0)) {
           const amount = (s.amount_total || 0) / 100;
           const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
-          const fee = (m.mtl_welcome === '1') ? 0 : Math.round(amount * 0.035 * 100) / 100;
+          const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : ((m.mtl_welcome === '1') ? 0 : Math.round(amount * 0.035 * 100) / 100);
           await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'first_month', amount, currency: cur, mtl_fee: fee, stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
           await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'enrolled' });
         }
