@@ -31,7 +31,7 @@ export default async function handler(req, res) {
 
     const id = (req.query && req.query.cohort) || '';
     if (!id) return res.status(400).json({ ok: false, error: 'missing cohort' });
-    const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(id)}&select=id,gym_id,stripe_account,name,discipline,start_date,months,capacity,deposit_amount,price_student,price_regular,currency,description,gym_meta_pixel,status`);
+    const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(id)}&select=id,gym_id,stripe_account,name,discipline,start_date,months,capacity,deposit_amount,price_student,price_regular,currency,description,gym_meta_pixel,marketing_note,status`);
     const c = rows && rows[0];
     if (!c) return res.status(404).json({ ok: false, error: 'not found' });
     if (c.status === 'draft' || c.status === 'archived') return res.status(403).json({ ok: false, error: 'closed' });
@@ -60,7 +60,7 @@ export default async function handler(req, res) {
         id: c.id, name: c.name, discipline: c.discipline, start_date: c.start_date, months: c.months,
         capacity: c.capacity, taken, deposit_amount: c.deposit_amount, price_student: c.price_student,
         price_regular: c.price_regular, currency: c.currency, description: c.description,
-        gym_name: gymName, provider_name: providerName, meta_pixel: c.gym_meta_pixel || ''
+        gym_name: gymName, provider_name: providerName, meta_pixel: c.gym_meta_pixel || '', marketing_note: c.marketing_note || ''
       }
     });
   } catch (e) {
