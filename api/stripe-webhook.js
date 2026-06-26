@@ -32,6 +32,35 @@ async function sbPatch(table, filter, patch) {
   return { ok: true, status: r.status };
 }
 
+// Resend confirmation email (best-effort; never blocks the webhook). Mirrors invite-members.js.
+const RESEND = process.env.RESEND_API_KEY;
+const MAIL_FROM = process.env.INVITE_FROM || 'Martial Training Lab <no-reply@martialtraininglab.com>';
+const MAIL_ADDR = (MAIL_FROM.match(/<([^>]+)>/) || [])[1] || 'no-reply@martialtraininglab.com';
+function _esc(x) { return String(x == null ? '' : x).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+async function sendResend(to, subject, html, opts) {
+  if (!RESEND || !to) return;
+  try {
+    const body = { from: (opts && opts.from) || MAIL_FROM, to: [to], subject, html };
+    if (opts && opts.replyTo) body.reply_to = opts.replyTo;
+    const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: 'Bearer ' + RESEND, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) console.error('resend', r.status, await r.text().catch(() => ''));
+  } catch (e) { console.error('resend', e.message); }
+}
+function cohortDepositHtml(name, courseName, gymName, depositTxt, remainderTxt, startTxt) {
+  const hi = name ? ('Ahoj ' + _esc(name) + ',') : 'Ahoj,';
+  return `<!doctype html><html><body style="margin:0;background:#f4f1ec;font-family:Arial,Helvetica,sans-serif;color:#171717;">
+  <div style="max-width:480px;margin:0 auto;padding:28px 22px;">
+    <div style="font-size:22px;font-weight:800;letter-spacing:.04em;color:#E11;margin-bottom:4px;">MARTIAL TRAINING LAB</div>
+    <div style="font-size:12px;color:#888;margin-bottom:22px;">Be More.</div>
+    <p style="font-size:15px;line-height:1.6;">${hi}</p>
+    <p style="font-size:15px;line-height:1.6;">Tvoje místo v kurzu <b>${_esc(courseName)}</b>${gymName ? (' u <b>' + _esc(gymName) + '</b>') : ''} je rezervované — zálohu <b>${_esc(depositTxt)}</b> máme. 🥊</p>
+    ${startTxt ? `<p style="font-size:14px;line-height:1.6;">Start: <b>${_esc(startTxt)}</b></p>` : ''}
+    ${remainderTxt ? `<p style="font-size:14px;line-height:1.6;color:#555;">Zbytek 1. měsíce (<b>${_esc(remainderTxt)}</b>) doplatíš na místě přes QR — kartou, žádná hotovost.</p>` : ''}
+    <p style="font-size:13px;line-height:1.6;color:#555;margin-top:18px;">Těšíme se na tebe na tréninku. Kdyby cokoliv, odpověz na tenhle e-mail.</p>
+    <p style="font-size:12px;color:#aaa;line-height:1.6;margin-top:24px;">Tenhle e-mail ti přišel, protože ses přihlásil/a do kurzu${gymName ? (' u ' + _esc(gymName)) : ''}.</p>
+  </div></body></html>`;
+}
+
 // MTL Ambassador 0,5% — pošle 0,5 % základu ambassadorovi dané disciplíny (z provize MTL).
 // Aktivuje se, jakmile existuje ambassador (profil s verify_disciplines + stripe_account).
 // MTL Ambassador 0,5 % z GYM skupinových lekcí (z čisté provize MTL — gym nese Stripe fee).
@@ -289,12 +318,22 @@ export default async function handler(req, res) {
           await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'deposit_paid' });
           // NOTE follow-up: ambassador 0.5% on cohort deposits not wired yet (needs mtl_disc/mtl_base in metadata).
           try {
-            if (cohId) {
-              const coh = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=owner_id,name`);
-              const ownerId = coh && coh[0] && coh[0].owner_id;
-              if (ownerId) await sbPost('notifications', { user_id: ownerId, type: 'system', read: false, message: '\uD83D\uDCDA Nov\u00FD zaplacen\u00FD z\u00E1pis do kurzu' + (coh[0].name ? (' "' + coh[0].name + '"') : '') + '.' });
+            const coh = cohId ? ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=owner_id,name,gym_id,deposit_amount,price_student,price_regular,currency,start_date`)) || [])[0] : null;
+            const mem = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=name,email,tier`)) || [])[0];
+            if (coh && coh.owner_id) await sbPost('notifications', { user_id: coh.owner_id, type: 'system', read: false, message: '\uD83D\uDCDA Nov\u00FD zaplacen\u00FD z\u00E1pis do kurzu' + (coh.name ? (' "' + coh.name + '"') : '') + '.' });
+            if (mem && mem.email && coh) {
+              let gymName = '';
+              try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(coh.gym_id)}&select=name`); gymName = (g && g[0] && g[0].name) || ''; } catch (e) {}
+              let ownerEmail = '';
+              try { if (coh.owner_id) { const op = await sbGet(`profiles?id=eq.${encodeURIComponent(coh.owner_id)}&select=email`); ownerEmail = (op && op[0] && op[0].email) || ''; } } catch (e) {}
+              const cur2 = (coh.currency || cur || 'CZK');
+              const tierPrice = Number((mem.tier === 'student') ? coh.price_student : coh.price_regular) || 0;
+              const remainder = Math.max(0, tierPrice - Number(coh.deposit_amount || 0));
+              const money = (x) => Math.round(x) + ' ' + cur2;
+              const fromName = (gymName || 'Martial Training Lab').replace(/["<>]/g, '');
+              await sendResend(mem.email, (coh.name || 'Kurz') + ' \u2014 z\u00E1loha p\u0159ijata', cohortDepositHtml(mem.name, coh.name || 'Kurz', gymName, money(amount), remainder > 0 ? money(remainder) : '', coh.start_date || ''), { from: '"' + fromName + '" <' + MAIL_ADDR + '>', replyTo: ownerEmail || undefined });
             }
-          } catch (e) { console.error('cohort notify', e.message); }
+          } catch (e) { console.error('cohort confirm', e.message); }
         }
       } else if (m.mtl_payment_type === 'cohort_first_month') {
         // On-site first-month remainder paid via QR. Records the payment and enrolls the member.
