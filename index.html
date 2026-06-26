@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: QKG localized EP pricing. Shared region->price map _epRegion() (CZ 1400 Kc / SK EUR59 / EU EUR89 / US+rest USD99), keyed by connected-account country (currentUser.stripe_country||country||currency-guess). Margin calc now uses real EP cost in region currency (no more _epMonthlyCost $99-equiv map); piSub + CTA + _inCZ all read the same map. Cancel copy de-hardcoded off $99. pay.js partnerCheckout charges by Stripe-account country (authoritative) + caches stripe_country. SK distinguished from EU by COUNTRY not currency (both EUR). Builds on QKF. -->
+<!-- MTL build: QKJ rate-calc + partner-info localization. renderRateCalc no longer shows the manual CZK/USD/EUR currency picker - it locks to the provider's region currency/symbol/EP cost via _epRegion() (so a CZ coach sees the whole calc in Kc with the 1400 Kc break-even, a UK coach in GBP, etc.). Footnote and the openPartnerInfo B2B/reverse-charge paragraph now print the region EP price (e.g. 1400 Kc) instead of a hardcoded $99. Builds on QKI. -->
 <html lang="cs">
 <head>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/cropperjs/1.6.1/cropper.min.css">
@@ -14757,12 +14757,41 @@ function _epMonthlyCost(curr){
 // Localized EP price by the provider's region (country of their connected Stripe account, cached as stripe_country; falls back to profile country, then a currency guess). Single source of truth shared with pay.js partnerCheckout. SK is cheaper than the EU default; CZ is its own CZK tier.
 function _epRegion(){
   var cc = String((currentUser&&(currentUser.stripe_country||currentUser.country))||'').toUpperCase();
-  if(!cc){ var cu=String((currentUser&&currentUser.currency)||'').toUpperCase(); if(cu==='CZK')cc='CZ'; else if(cu==='USD')cc='US'; else if(cu==='EUR')cc='EU_'; }
-  var EU=['AT','BE','BG','HR','CY','EE','FI','FR','DE','GR','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SI','ES','SE','DK','EU_'];
-  if(cc==='CZ') return { country:'CZ', currency:'CZK', amount:1400, label:'1400 Kč', sym:'Kč' };
-  if(cc==='SK') return { country:'SK', currency:'EUR', amount:59,  label:'€59',     sym:'€'  };
-  if(EU.indexOf(cc)>=0) return { country:cc, currency:'EUR', amount:89, label:'€89', sym:'€' };
-  return { country:cc||'', currency:'USD', amount:99, label:'$99', sym:'$' };
+  if(!cc){ var cu=String((currentUser&&currentUser.currency)||'').toUpperCase(); var M={CZK:'CZ',USD:'US',EUR:'EU_',GBP:'GB',CHF:'CH',PLN:'PL',SEK:'SE',DKK:'DK',NOK:'NO',HUF:'HU',RON:'RO',CAD:'CA',AUD:'AU',NZD:'NZ'}; if(M[cu]) cc=M[cu]; }
+  var EUR89=['AT','BE','HR','CY','EE','FI','FR','DE','GR','IE','IT','LV','LT','LU','MT','NL','PT','SI','ES','BG','EU_']; // SK & CZ are their own tiers; BG joined the euro 1.1.2026
+  function T(co,cu,a,l,sy){ return {country:co,currency:cu,amount:a,label:l,sym:sy}; }
+  if(cc==='CZ') return T('CZ','CZK',1400,'1400 Kč','Kč');
+  if(cc==='SK') return T('SK','EUR',59,'€59','€');
+  if(cc==='GB') return T('GB','GBP',75,'£75','£');
+  if(cc==='CH'||cc==='LI') return T(cc,'CHF',89,'CHF 89','CHF');
+  if(cc==='SE') return T('SE','SEK',990,'990 kr','kr');
+  if(cc==='DK') return T('DK','DKK',649,'649 kr','kr');
+  if(cc==='NO') return T('NO','NOK',990,'990 kr','kr');
+  if(cc==='PL') return T('PL','PLN',249,'249 zł','zł');
+  if(cc==='HU') return T('HU','HUF',19900,'19 900 Ft','Ft');
+  if(cc==='RO') return T('RO','RON',229,'229 lei','lei');
+  if(cc==='CA') return T('CA','CAD',139,'CAD 139','CAD');
+  if(cc==='AU') return T('AU','AUD',149,'AUD 149','AUD');
+  if(cc==='NZ') return T('NZ','NZD',169,'NZD 169','NZD');
+  if(EUR89.indexOf(cc)>=0) return T(cc,'EUR',89,'€89','€');
+  return T(cc||'','USD',99,'$99','$');
+}
+// Make sure currentUser.stripe_country is known so _epRegion() shows the right localized EP price
+// (esp. SK vs the EU default - both EUR, only the COUNTRY tells them apart). Reads the connected
+// account's country once via /api/account-status and caches it (in-memory + profile if column exists).
+async function _ensureStripeCountry(){
+  try{
+    if(!currentUser) return null;
+    if(currentUser.stripe_country) return currentUser.stripe_country;
+    let acct = currentUser.stripe_account || currentUser.gym_payout_account || '';
+    if(!acct && Array.isArray(window._myGyms)){ const g=window._myGyms.find(x=>x&&x.stripe_account); if(g) acct=g.stripe_account; }
+    if(!acct) return (currentUser.country||null);
+    const r=await fetch('/api/account-status?acct='+encodeURIComponent(acct));
+    const j=await r.json();
+    const cc=(j&&j.country)?String(j.country).toUpperCase():'';
+    if(cc){ currentUser.stripe_country=cc; try{ await supaClient.from('profiles').update({stripe_country:cc}).eq('id',currentUser.id); }catch(e){} return cc; }
+  }catch(e){}
+  return (currentUser&&currentUser.country)||null;
 }
 function epRatesCardHTML(showCoach, showGym){
   const EN=LANG==='en';
@@ -14789,25 +14818,23 @@ function openRateCalc(){
 function renderRateCalc(){
   const EN=LANG==='en';
   const rt={std:0.035, ep:0.01};
+  const reg=_epRegion(); _rcCur=reg.currency;
   const typeRow=$('rcCurRow'); if(typeRow){ typeRow.innerHTML=''; typeRow.style.display='none'; }
-  const sym=_rcCur==='CZK'?'Kč':_rcCur==='USD'?'$':'€';
+  const sym=reg.sym;
   const base=parseFloat(($('rcPrice')&&$('rcPrice').value)||'0')||0;
-  const r=v=>fmtPrice(Math.round(v*100)/100, _rcCur);
+  const r=v=>(Math.round(v)).toLocaleString(EN?'en-US':'cs-CZ');
   const body=$('rcBody'); if(!body) return;
-  const curHtml=`<div style="display:flex;gap:6px;margin-bottom:12px;">`+['CZK','USD','EUR'].map(c=>{ const on=c===_rcCur; return `<button class="rcCurBtn" data-c="${c}" style="flex:1;padding:8px;border-radius:9px;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'#fff'};color:${on?'#fff':'var(--dark)'};font-weight:700;font-family:'DM Sans';font-size:12px;cursor:pointer;">${c}</button>`; }).join('')+`</div>`;
-  const wireCur=()=>body.querySelectorAll('.rcCurBtn').forEach(b=>b.onclick=()=>{ _rcCur=b.dataset.c; renderRateCalc(); });
-  if(base<=0){ body.innerHTML=curHtml+`<p style="text-align:center;color:var(--light);font-size:13px;padding:8px 0;">${EN?'Enter your expected monthly turnover above.':'Zadej očekávaný měsíční obrat výše.'}</p>`; wireCur(); return; }
+  if(base<=0){ body.innerHTML=`<p style="text-align:center;color:var(--light);font-size:13px;padding:8px 0;">${EN?'Enter your expected monthly turnover above.':'Zadej očekávaný měsíční obrat výše.'}</p>`; return; }
   const blk=(label,accent,pct)=>{ const mtl=base*pct, net=base-mtl; return `<div style="padding:11px 0;border-top:1px solid var(--border);"><div style="font-size:12px;font-weight:800;letter-spacing:.02em;color:${accent};margin-bottom:7px;">${label}</div><div style="display:flex;justify-content:space-between;font-size:12px;color:var(--mid);margin-bottom:6px;"><span>− ${EN?'MTL commission':'Provize MTL'} (${EN ? +(pct*100).toFixed(2) : String(+(pct*100).toFixed(2)).replace('.',',')} %)</span><span>−${r(mtl)} ${sym}</span></div><div style="display:flex;justify-content:space-between;font-size:14.5px;font-weight:800;color:${accent};"><span>${EN?'Your share':'Tvůj podíl'}</span><span>${r(net)} ${sym}</span></div></div>`; };
   const diff=base*(rt.std-rt.ep);
-  const epCost=_rcCur==='CZK'?2300:_rcCur==='EUR'?92:99;
+  const epCost=reg.amount;
   const worth=diff>epCost;
-  body.innerHTML=curHtml
-    +blk(EN?'Standard rate':'Standardní sazba','var(--dark)',rt.std)
+  body.innerHTML=
+    blk(EN?'Standard rate':'Standardní sazba','var(--dark)',rt.std)
     +blk('EXCLUSIVE PARTNER','#8a6a12',rt.ep)
     +`<div style="text-align:center;font-size:13px;font-weight:800;color:#8a6a12;padding:13px 0 2px;border-top:1px solid var(--border);">${EN?'As a Partner you keep':'Jako Partner ti zbyde'} +${r(diff)} ${sym} ${EN?'more / month':'navíc / měsíc'}</div>`
     +`<div style="text-align:center;margin-top:10px;padding:11px 12px;border-radius:11px;background:${worth?'#F0FBF0':'#FDECEC'};border:1px solid ${worth?'#CDEBD6':'#F5C6C6'};"><div style="font-size:12px;color:var(--mid);margin-bottom:4px;">${EN?'Is subscribing to Exclusive Partner worth it?':'Vyplatí se předplatit si Exclusive Partner výhody?'}</div><div style="font-size:16.5px;font-weight:800;color:${worth?'#067647':'#C0392B'};">${worth?(EN?'Yes ✅':'Ano ✅'):(EN?'Not yet ❌':'Zatím ne ❌')}</div></div>`
-    +`<p style="font-size:10.5px;color:var(--light);line-height:1.55;margin-top:9px;">${EN?`MTL commission 3.5%→1% (Standard→Partner) on every payment — lessons, memberships, drop-ins. Exclusive Partner costs $99/mo; "worth it" weighs your monthly fee saving against that cost. Estimates — Stripe Dashboard is authoritative.`:`Provize MTL 3,5 %→1 % (Standard→Partner) u každé platby — lekce, členství, drop-iny. Exclusive Partner stojí $99/měs; „vyplatí se" porovnává tvou měsíční úsporu na provizi proti tomu. Odhady — závazný je Stripe Dashboard.`}</p>`;
-  wireCur();
+    +`<p style="font-size:10.5px;color:var(--light);line-height:1.55;margin-top:9px;">${EN?`MTL commission 3.5%→1% (Standard→Partner) on every payment — lessons, memberships, drop-ins. Exclusive Partner costs ${reg.label}/mo; "worth it" weighs your monthly fee saving against that cost. Estimates — Stripe Dashboard is authoritative.`:`Provize MTL 3,5 %→1 % (Standard→Partner) u každé platby — lekce, členství, drop-iny. Exclusive Partner stojí ${reg.label}/měs; „vyplatí se" porovnává tvou měsíční úsporu na provizi proti tomu. Odhady — závazný je Stripe Dashboard.`}</p>`;
 }
 function openPartnerInfo(){
   const EN=LANG==='en';
@@ -14818,7 +14845,7 @@ function openPartnerInfo(){
     +row(EN?'You keep — memberships':'Z členství ti zbyde','96,5 %','99 %')
     +row(EN?'You keep — drop-ins':'Z drop-inů ti zbyde','96,5 %','99 %')
     +`<p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:12px 0 2px;">${EN?'Partner cuts MTL commission from 3.5% to 1% on every payment — you keep 99% instead of 96.5%. Students always pay the listed price. Cancel anytime.':'Partner snižuje provizi MTL ze 3,5 % na 1 % u každé platby — necháš si 99 % místo 96,5 %. Studenti vždy platí uvedenou cenu. Zrušíš kdykoliv.'}</p>`;
-  if($('piBody')){ $('piBody').innerHTML += `<p style="font-size:11px;color:var(--light);line-height:1.55;margin-top:10px;border-top:1px solid var(--border);padding-top:10px;">${EN?'The $99/mo is a B2B service. If you buy as a VAT-registered business in another EU country it falls under reverse charge — MTL invoices without VAT and you self-assess VAT at your local rate. Check with your accountant.':'$99/měs je B2B služba. Pokud ji kupuješ jako podnikatel (plátce/identifikovaná osoba) z jiné země EU, vztahuje se na ni reverse charge — MTL fakturuje bez DPH a daň si odvedeš sám ve své zemi dle své sazby. Ověř s účetní.'}</p>`; }
+  if($('piBody')){ $('piBody').innerHTML += `<p style="font-size:11px;color:var(--light);line-height:1.55;margin-top:10px;border-top:1px solid var(--border);padding-top:10px;">${EN?'The ${_epRegion().label}/mo is a B2B service. If you buy as a VAT-registered business in another EU country it falls under reverse charge — MTL invoices without VAT and you self-assess VAT at your local rate. Check with your accountant.':'${_epRegion().label}/měs je B2B služba. Pokud ji kupuješ jako podnikatel (plátce/identifikovaná osoba) z jiné země EU, vztahuje se na ni reverse charge — MTL fakturuje bez DPH a daň si odvedeš sám ve své zemi dle své sazby. Ověř s účetní.'}</p>`; }
   const cta=$('piCta'); if(cta){ { var _epL2=_epRegion().label; cta.textContent=(EN?('⭐ Become Partner — '+_epL2+'/mo'):('⭐ Stát se Partnerem — '+_epL2+'/mo')); } cta.onclick=()=>{ if(currentUser){ { try{ window._epPending=Date.now(); }catch(e){} var _u=`/api/pay?type=partner&userId=${currentUser.id}&email=${encodeURIComponent(currentUser.email||'')}`; var _w=window.open(_u,'_blank'); if(!_w) location.href=_u; } } }; }
   if($('piCalc')) $('piCalc').textContent=(EN?'📊 Calculate margin difference':'📊 Spočítat rozdíl v marži');
   $('partnerInfoOv').classList.add('open');
@@ -17032,6 +17059,7 @@ function updateMeNavAvatar(){
 }
 function fillUserProfile(){
   if(!currentUser) return;
+  _ensureStripeCountry();
   try{ if(typeof renderMeNetHero==='function') renderMeNetHero(); }catch(e){}
   if(!currentUser.pref_category){ try{ var _ap=localStorage.getItem('mtl_authpath'); if(_ap){ currentUser.pref_category=_ap; supaClient.from('profiles').update({pref_category:_ap}).eq('id',currentUser.id); } }catch(e){} }
   updateMeNavAvatar();
@@ -17910,6 +17938,7 @@ async function renderEarnings(){
   const curr=(past[0]&&past[0].currency)||currentUser.currency||'CZK';
   const _now30=Date.now()-30*86400000;
   const base30=past.filter(b=>{ const d=new Date(`${b.training_date||(b.created_at||'').slice(0,10)}T00:00:00`).getTime(); return d>=_now30; }).reduce((s,b)=>s+(b.amount||0),0);
+  await _ensureStripeCountry();
   const _epReg=_epRegion(); const monthlyCost=_epReg.amount; const _ecur=_epReg.currency;
   const gainPct = Math.max(0, 0.99 - myPct);
   const saving30 = gainPct*base30;
