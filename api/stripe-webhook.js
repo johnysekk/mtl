@@ -313,7 +313,7 @@ export default async function handler(req, res) {
         if (cmId && (!already || already.length === 0)) {
           const amount = (s.amount_total || 0) / 100;
           const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
-          const fee = Math.round(amount * 0.035 * 100) / 100;
+          const fee = (m.mtl_welcome === '1') ? 0 : Math.round(amount * 0.035 * 100) / 100;
           await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'deposit', amount, currency: cur, mtl_fee: fee, stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
           await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'deposit_paid' });
           // NOTE follow-up: ambassador 0.5% on cohort deposits not wired yet (needs mtl_disc/mtl_base in metadata).
@@ -343,7 +343,7 @@ export default async function handler(req, res) {
         if (cmId && (!already || already.length === 0)) {
           const amount = (s.amount_total || 0) / 100;
           const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
-          const fee = Math.round(amount * 0.035 * 100) / 100;
+          const fee = (m.mtl_welcome === '1') ? 0 : Math.round(amount * 0.035 * 100) / 100;
           await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'first_month', amount, currency: cur, mtl_fee: fee, stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
           await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'enrolled' });
         }

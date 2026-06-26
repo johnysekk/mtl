@@ -26,6 +26,33 @@ async function sbInsert(table, body) {
   return Array.isArray(j) ? j[0] : j;
 }
 
+// Genuine welcome 0% — same logic as pay.js: provider inside their welcome window pays no MTL fee.
+const _WELCOME_FOUNDER = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+async function isWelcomeZero(acct) {
+  if (!acct) return false;
+  try {
+    const ks = await sbGet(`profiles?id=eq.${_WELCOME_FOUNDER}&select=welcome_zero_off`);
+    if (ks && ks[0] && ks[0].welcome_zero_off) return false;
+    const a = encodeURIComponent(String(acct).trim());
+    let prov = (await sbGet(`profiles?stripe_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0]
+            || (await sbGet(`profiles?gym_payout_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0];
+    if (!prov) {
+      let g = (await sbGet(`gyms?stripe_account=eq.${a}&select=owner_id&limit=1`))[0]
+           || (await sbGet(`gyms?gym_payout_account=eq.${a}&select=owner_id&limit=1`))[0];
+      if (g && g.owner_id) prov = (await sbGet(`profiles?id=eq.${g.owner_id}&select=id,welcome_free_until,created_at`))[0];
+    }
+    if (!prov || !prov.id) return false;
+    const now = Date.now();
+    if (prov.welcome_free_until) return now < new Date(prov.welcome_free_until).getTime();
+    const created = prov.created_at ? new Date(prov.created_at).getTime() : 0;
+    if (created && (now - created) < 45 * 86400000) {
+      await sbPatch('profiles', `id=eq.${prov.id}`, { welcome_free_until: new Date(now + 30 * 86400000).toISOString() });
+      return true;
+    }
+    return false;
+  } catch (e) { console.error('isWelcomeZero', e.message); return false; }
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -54,16 +81,17 @@ export default async function handler(req, res) {
       const cur = String(coh.currency || 'CZK').toUpperCase();
       const isCZK = cur === 'CZK';
       const unit = isCZK ? Math.floor(remainder) * 100 : Math.round(remainder * 100);
-      const fee = Math.round(remainder * COMMISSION * 100);
+      const wz = await isWelcomeZero(coh.stripe_account);
+      const fee = wz ? 0 : Math.round(remainder * COMMISSION * 100);
       const host = req.headers.host; const proto = host && host.includes('localhost') ? 'http' : 'https';
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
         success_url: `${proto}://${host}/?cohort=${encodeURIComponent(mem.cohort_id)}&firstmonth=ok&cm=${encodeURIComponent(cmId)}&session={CHECKOUT_SESSION_ID}`,
         cancel_url: `${proto}://${host}/?cohortpay=${encodeURIComponent(cmId)}`,
         customer_email: mem.email || undefined,
-        metadata: { mtl_payment_type: 'cohort_first_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_currency: cur },
+        metadata: { mtl_payment_type: 'cohort_first_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_currency: cur, mtl_welcome: wz ? '1' : '0' },
         line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: `${coh.name || 'Course'} - 1. mesic (doplatek)` }, unit_amount: unit }, quantity: 1 }],
-        payment_intent_data: { application_fee_amount: fee, metadata: { mtl_payment_type: 'cohort_first_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), commission_pct: COMMISSION.toFixed(3) } }
+        payment_intent_data: { application_fee_amount: fee, metadata: { mtl_payment_type: 'cohort_first_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), commission_pct: COMMISSION.toFixed(3), mtl_welcome: wz ? '1' : '0' } }
       }, { stripeAccount: coh.stripe_account });
       return res.status(200).json({ ok: true, url: session.url, remainder });
     }
@@ -93,7 +121,8 @@ export default async function handler(req, res) {
     const cur = String(c.currency || 'CZK').toUpperCase();
     const isCZK = cur === 'CZK';
     const unitAmount = isCZK ? Math.floor(deposit) * 100 : Math.round(deposit * 100);
-    const applicationFee = Math.round(deposit * COMMISSION * 100);
+    const wz = await isWelcomeZero(c.stripe_account);
+    const applicationFee = wz ? 0 : Math.round(deposit * COMMISSION * 100);
 
     const host = req.headers.host;
     const proto = host && host.includes('localhost') ? 'http' : 'https';
@@ -104,11 +133,11 @@ export default async function handler(req, res) {
       mode: 'payment',
       success_url, cancel_url,
       customer_email: email,
-      metadata: { mtl_payment_type: 'cohort_deposit', cohort_id: String(cohortId), cohort_member_id: String(memberId || ''), mtl_currency: cur, tier },
+      metadata: { mtl_payment_type: 'cohort_deposit', cohort_id: String(cohortId), cohort_member_id: String(memberId || ''), mtl_currency: cur, tier, mtl_welcome: wz ? '1' : '0' },
       line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: `${c.name || 'Course'} — ${b.gym_name || ''} (deposit)`.trim() }, unit_amount: unitAmount }, quantity: 1 }],
       payment_intent_data: {
         application_fee_amount: applicationFee,
-        metadata: { mtl_payment_type: 'cohort_deposit', cohort_id: String(cohortId), cohort_member_id: String(memberId || ''), commission_pct: COMMISSION.toFixed(3) }
+        metadata: { mtl_payment_type: 'cohort_deposit', cohort_id: String(cohortId), cohort_member_id: String(memberId || ''), commission_pct: COMMISSION.toFixed(3), mtl_welcome: wz ? '1' : '0' }
       }
     }, { stripeAccount: c.stripe_account });
 

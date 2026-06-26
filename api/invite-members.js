@@ -6,7 +6,7 @@
 // ENV required on Vercel:
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY  (already set for other endpoints)
 //   RESEND_API_KEY                            (from resend.com)
-//   INVITE_FROM   (optional, default "MTL Coaches <no-reply@martialtraininglab.com>")
+//   INVITE_FROM   (optional, default "Martial Training Lab <no-reply@martialtraininglab.com>")
 //
 // Resend domain martialtraininglab.com must be verified (DNS) so the From address is allowed.
 
@@ -18,7 +18,8 @@ module.exports = async (req, res) => {
     const SB = process.env.SUPABASE_URL;
     const SR = process.env.SUPABASE_SERVICE_ROLE_KEY;
     const RESEND = process.env.RESEND_API_KEY;
-    const FROM = process.env.INVITE_FROM || 'MTL Coaches <no-reply@martialtraininglab.com>';
+    const FROM = process.env.INVITE_FROM || 'Martial Training Lab <no-reply@martialtraininglab.com>';
+    const MAIL_ADDR = (FROM.match(/<([^>]+)>/) || [])[1] || 'no-reply@martialtraininglab.com';
     if (!SB || !SR) return res.status(500).json({ error: 'config (supabase)' });
     if (!RESEND) return res.status(500).json({ error: 'config (resend) — set RESEND_API_KEY' });
 
@@ -49,6 +50,8 @@ module.exports = async (req, res) => {
 
     const origin = req.headers.origin || ('https://' + (req.headers.host || 'app.martialtraininglab.com'));
     const gymName = (gym.name || 'tvůj gym');
+    const ownerEmail = (ures && ures.user && ures.user.email) || '';
+    const fromGym = '"' + String(gymName).replace(/["<>]/g, '') + '" <' + MAIL_ADDR + '>';
 
     let sent = 0, failed = 0;
     for (const m of (rows || [])) {
@@ -65,9 +68,10 @@ module.exports = async (req, res) => {
           method: 'POST',
           headers: { 'Authorization': 'Bearer ' + RESEND, 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            from: FROM,
+            from: fromGym,
             to: [m.email],
-            subject: gymName + ' tě zve do MTL Coaches',
+            reply_to: ownerEmail || undefined,
+            subject: gymName + ' tě zve na MTL',
             html
           })
         });
@@ -94,7 +98,7 @@ function inviteHtml(gymName, firstName, link) {
     <div style="font-size:22px;font-weight:800;letter-spacing:.04em;color:#E11;margin-bottom:4px;">MARTIAL TRAINING LAB</div>
     <div style="font-size:12px;color:#888;margin-bottom:22px;">Be More.</div>
     <p style="font-size:15px;line-height:1.6;">${hi}</p>
-    <p style="font-size:15px;line-height:1.6;"><b>${esc(gymName)}</b> teď jede na MTL Coaches — appce, kde máš rozvrh, členství, platby a svůj postup (levely, odznaky) na jednom místě. Připoj se jedním klikem, není potřeba nic vyplňovat.</p>
+    <p style="font-size:15px;line-height:1.6;"><b>${esc(gymName)}</b> teď jede na MTL — appce, kde máš rozvrh, členství, platby a svůj postup (levely, odznaky) na jednom místě. Připoj se jedním klikem, není potřeba nic vyplňovat.</p>
     <p style="text-align:center;margin:26px 0;">
       <a href="${link}" style="display:inline-block;background:#E11;color:#fff;text-decoration:none;font-weight:800;font-size:16px;padding:14px 30px;border-radius:12px;">Připojit se k ${esc(gymName)}</a>
     </p>
