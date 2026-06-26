@@ -13,6 +13,22 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(200).end();
   try {
+    // Member lookup (?cm=<id>) for the on-site first-month remainder page
+    const cm = (req.query && req.query.cm) || '';
+    if (cm) {
+      const mr = await sbGet(`cohort_members?id=eq.${encodeURIComponent(cm)}&select=id,cohort_id,name,tier,status`);
+      const mem = mr && mr[0];
+      if (!mem) return res.status(404).json({ ok: false, error: 'member not found' });
+      const cr = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(mem.cohort_id)}&select=id,gym_id,name,currency,deposit_amount,price_student,price_regular`);
+      const co = cr && cr[0];
+      if (!co) return res.status(404).json({ ok: false, error: 'cohort not found' });
+      let gymName = '';
+      try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(co.gym_id)}&select=name`); gymName = (g && g[0] && g[0].name) || ''; } catch (e) {}
+      const tierPrice = Number((mem.tier === 'student') ? co.price_student : co.price_regular) || 0;
+      const remainder = Math.max(0, tierPrice - Number(co.deposit_amount || 0));
+      return res.status(200).json({ ok: true, member: { id: mem.id, name: mem.name, tier: mem.tier, status: mem.status }, cohort: { id: co.id, name: co.name, gym_name: gymName, currency: co.currency || 'CZK', tier_price: tierPrice }, remainder });
+    }
+
     const id = (req.query && req.query.cohort) || '';
     if (!id) return res.status(400).json({ ok: false, error: 'missing cohort' });
     const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(id)}&select=id,gym_id,stripe_account,name,discipline,start_date,months,capacity,deposit_amount,price_student,price_regular,currency,description,gym_meta_pixel,status`);
