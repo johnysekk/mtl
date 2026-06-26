@@ -275,6 +275,27 @@ export default async function handler(req, res) {
             if (payId) await recordTransaction(event.account, payId, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id, plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side' });
           } catch (e) { console.error('record membership at checkout', e.message); }
         }
+      } else if (m.mtl_payment_type === 'cohort_deposit') {
+        // Cohort signup deposit (accountless, direct charge on the provider's connected account
+        // with MTL's application_fee). Idempotent on the payment_intent.
+        const pi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id);
+        const cmId = m.cohort_member_id, cohId = m.cohort_id;
+        const already = pi ? await sbGet(`cohort_payments?stripe_pi=eq.${encodeURIComponent(pi)}&select=id`) : [];
+        if (cmId && (!already || already.length === 0)) {
+          const amount = (s.amount_total || 0) / 100;
+          const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
+          const fee = Math.round(amount * 0.035 * 100) / 100;
+          await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'deposit', amount, currency: cur, mtl_fee: fee, stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
+          await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'deposit_paid' });
+          // NOTE follow-up: ambassador 0.5% on cohort deposits not wired yet (needs mtl_disc/mtl_base in metadata).
+          try {
+            if (cohId) {
+              const coh = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=owner_id,name`);
+              const ownerId = coh && coh[0] && coh[0].owner_id;
+              if (ownerId) await sbPost('notifications', { user_id: ownerId, type: 'system', read: false, message: '\uD83D\uDCDA Nov\u00FD zaplacen\u00FD z\u00E1pis do kurzu' + (coh[0].name ? (' "' + coh[0].name + '"') : '') + '.' });
+            }
+          } catch (e) { console.error('cohort notify', e.message); }
+        }
       } else if (m.mtl_payment_type === 'partner_sub') {
         // Exclusive MTL Partner subscription zaplacena → zapni partner sazby
         const uid = m.user_id || s.client_reference_id;
