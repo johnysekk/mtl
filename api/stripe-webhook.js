@@ -221,6 +221,7 @@ async function recordTransaction(acct, pi, fields) {
       income_class: fields.income_class || null,
       status: 'paid', created_at: new Date().toISOString(),
     });
+    try { if (fields.member_id && gross != null) await ecoPurchase(fields.member_id, gross / 100, currency, pi); } catch (e) {}
   } catch (e) { console.error('recordTransaction', e.message); }
 }
 
@@ -246,6 +247,45 @@ async function cohortCapiPurchase(coh, cmId, email, amount, cur, fbp, fbc) {
     const url = 'https://graph.facebook.com/v21.0/' + encodeURIComponent(coh.gym_meta_pixel) + '/events?access_token=' + encodeURIComponent(coh.capi_token);
     await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: [evt] }) });
   } catch (e) { console.error('cohortCapiPurchase', e.message); }
+}
+
+// MTL Ecosystem Pixel — server-side Purchase for any customer transaction. Reads the founder's
+// ecosystem pixel + token once, and the buyer's marketing consent + fbp/fbc from their profile.
+// Consent-gated and no-ops cleanly until the pixel/token are configured in Admin -> MTL Ads.
+let _ECO_CFG = null;
+async function _ecoCfg() {
+  if (_ECO_CFG) return _ECO_CFG;
+  try {
+    const rows = await sbGet('profiles?id=eq.7e08d4bb-0efa-47ae-bd6a-85e9bd04400c&select=mtl_eco_pixel,mtl_eco_capi_token');
+    const f = rows && rows[0];
+    _ECO_CFG = (f && f.mtl_eco_pixel && f.mtl_eco_capi_token) ? { pixel: f.mtl_eco_pixel, token: f.mtl_eco_capi_token } : { pixel: '', token: '' };
+  } catch (e) { _ECO_CFG = { pixel: '', token: '' }; }
+  return _ECO_CFG;
+}
+async function ecoPurchase(buyerId, amount, cur, pi) {
+  try {
+    if (!buyerId || !amount) return;
+    const cfg = await _ecoCfg();
+    if (!cfg.pixel || !cfg.token) return;
+    const rows = await sbGet('profiles?id=eq.' + encodeURIComponent(buyerId) + '&select=marketing_consent,email,fbp,fbc');
+    const b = rows && rows[0];
+    if (!b || !b.marketing_consent) return;
+    const sha = (v) => crypto.createHash('sha256').update(String(v).trim().toLowerCase()).digest('hex');
+    const user_data = {};
+    if (b.email) user_data.em = [sha(b.email)];
+    if (b.fbp) user_data.fbp = b.fbp;
+    if (b.fbc) user_data.fbc = b.fbc;
+    const evt = {
+      event_name: 'Purchase',
+      event_time: Math.floor(Date.now() / 1000),
+      action_source: 'website',
+      event_id: 'mtlpur_' + (pi || (buyerId + '_' + Date.now())),
+      user_data,
+      custom_data: { value: Number(amount || 0), currency: (cur || 'CZK'), content_type: 'customer' }
+    };
+    const url = 'https://graph.facebook.com/v21.0/' + encodeURIComponent(cfg.pixel) + '/events?access_token=' + encodeURIComponent(cfg.token);
+    await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: [evt] }) });
+  } catch (e) { console.error('ecoPurchase', e.message); }
 }
 
 export default async function handler(req, res) {
