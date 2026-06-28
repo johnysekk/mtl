@@ -148,15 +148,27 @@ export default async function handler(req, res) {
     // ── Dispute auto-refund: online disputes routed to the coach, past the 3-day deadline, still open => refund student 100% and close ──
     try {
       const nowISO = new Date().toISOString();
-      const od = await sbGet(`bookings?dispute_handler=eq.coach&dispute_status=eq.open&dispute_deadline=lt.${encodeURIComponent(nowISO)}&select=id,coach_id,student_id,payment_intent,gym_id`);
+      const od = await sbGet(`bookings?dispute_handler=eq.coach&dispute_status=eq.open&dispute_deadline=lt.${encodeURIComponent(nowISO)}&select=id,coach_id,student_id,payment_intent,gym_id,amount`);
       for (const b of (od || [])) {
         let acct = null;
         if (b.gym_id) { const g = await sbGet(`gyms?id=eq.${b.gym_id}&select=stripe_account`); acct = g[0] && g[0].stripe_account; }
         if (!acct && b.coach_id) { const c = await sbGet(`profiles?id=eq.${b.coach_id}&select=stripe_account`); acct = c[0] && c[0].stripe_account; }
-        if (acct && b.payment_intent) { try { await stripe.refunds.create({ payment_intent: b.payment_intent, refund_application_fee: true }, { stripeAccount: acct }); } catch (e) { console.error('dispute refund', b.id, e.message); } }
-        await sbPatch('bookings', `id=eq.${b.id}`, { dispute_status: 'refunded', status: 'refunded', refund_requested: false });
-        if (b.student_id) await sbPost('notifications', { user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'dispute_auto_refunded', id: b.id }), message: `\u21a9\ufe0f Spor #${b.id}: kouč nereagoval ve lhůtě, vrátili jsme ti 100 %.` });
-        if (b.coach_id) await sbPost('notifications', { user_id: b.coach_id, type: 'system', read: false, data: JSON.stringify({ kind: 'dispute_auto_refunded_coach', id: b.id }), message: `\u21a9\ufe0f Spor #${b.id}: lhůta vypršela bez reakce, studentovi se automaticky vrátilo 100 %.` });
+        if (acct && b.payment_intent) { try { const _amt = Math.round((parseFloat(b.amount) || 0) * 0.95 * 100); await stripe.refunds.create(_amt > 0 ? { payment_intent: b.payment_intent, amount: _amt } : { payment_intent: b.payment_intent }, { stripeAccount: acct }); } catch (e) { console.error('dispute refund', b.id, e.message); } }
+        await sbPatch('bookings', `id=eq.${b.id}`, { dispute_status: 'refunded', status: 'refunded', refund_requested: false, dispute_auto: true });
+        // auto-flag a student who has accumulated >=3 dispute auto-refunds (possible abuse) -> founder review
+        if (b.student_id) { try {
+          const prior = await sbGet(`bookings?student_id=eq.${b.student_id}&dispute_auto=is.true&select=id`);
+          const cnt = (prior || []).length;
+          if (cnt >= 3) {
+            const sp = await sbGet(`profiles?id=eq.${b.student_id}&select=risk_flag,name`);
+            if (sp[0] && !sp[0].risk_flag) {
+              await sbPatch('profiles', `id=eq.${b.student_id}`, { risk_flag: true, risk_note: `auto: ${cnt} dispute auto-refunds` });
+              await sbPost('notifications', { user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'dispute', read: false, data: JSON.stringify({ kind: 'student_autoflag', student_id: b.student_id, count: cnt }), message: `\ud83d\udea9 Student ${sp[0].name || b.student_id} dosahl ${cnt} auto-refundu sporu - oznacen k posouzeni (mozne zneuziti). Otevri Spory.` });
+            }
+          }
+        } catch (e) { console.error('autoflag', b.id, e.message); } }
+        if (b.student_id) await sbPost('notifications', { user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'dispute_auto_refunded', id: b.id }), message: `\u21a9\ufe0f Spor #${b.id}: kouč nereagoval ve lhůtě, vrátili jsme ti 95 %.` });
+        if (b.coach_id) await sbPost('notifications', { user_id: b.coach_id, type: 'system', read: false, data: JSON.stringify({ kind: 'dispute_auto_refunded_coach', id: b.id }), message: `\u21a9\ufe0f Spor #${b.id}: lhůta vypršela bez reakce, studentovi se automaticky vrátilo 95 %.` });
         autoRefunded++;
       }
     } catch (e) { console.error('cron dispute auto-refund', e.message); }
