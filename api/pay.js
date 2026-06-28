@@ -390,12 +390,10 @@ async function membershipCheckout(req, res) {
 // Localized EP price by the provider's region. Mirrors _epRegion() in index.html.
 // SK is a cheaper EUR tier than the EU default; both are EUR, so we MUST key on COUNTRY, not currency.
 function epTierForCountry(cc){
-  cc = String(cc||'').toUpperCase();
-  const EU=['AT','BE','BG','HR','CY','EE','FI','FR','DE','GR','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SI','ES','SE','DK'];
-  if(cc==='CZ') return { currency:'czk', amount:1400 };
-  if(cc==='SK') return { currency:'eur', amount:59 };
-  if(EU.indexOf(cc)>=0) return { currency:'eur', amount:89 };
-  return { currency:'usd', amount:99 };
+  // FLAT EP pricing: 1000 CZK/mo for everyone (founding price, first 100 PAID partners).
+  // Single currency = zero FX on MTL books. Client shows an indicative ECB conversion only.
+  // When the 100 founding spots fill, raise this to 2000 (and _epPrice() in index.html).
+  return { currency:'czk', amount:1000 };
 }
 
 async function partnerCheckout(req, res) {
