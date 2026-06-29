@@ -50,10 +50,12 @@ export default async function handler(req, res) {
     if (gym.owner_id !== uid) return res.status(403).json({ error: 'not your gym' });
     if (gym.account_suspended) return res.status(403).json({ error: 'account suspended' });
 
-    // authoritative commission rate (EP partner 1% else 3.5%) — never trusts client mtl_fee
-    const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=partner`);
+    // authoritative commission rate — EP 1%, else MTL League ladder (Bankai 2% at
+    // coach_ref_score>=10, Shikai 3% at >=3, base 3.5%). Never trusts client mtl_fee.
+    const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=partner,coach_ref_score`);
     const owner = (owners && owners[0]) || {};
-    const rate = owner.partner ? 0.01 : 0.035;
+    const score = owner.coach_ref_score || 0;
+    const rate = owner.partner ? 0.01 : (score >= 10 ? 0.02 : (score >= 3 ? 0.03 : 0.035));
     const mtl_fee = Math.round(gross * rate);
     const month = new Date().toISOString().slice(0, 7);
     const cur = currency || gym.currency || 'czk';
