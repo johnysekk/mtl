@@ -4,14 +4,14 @@
 // provider's card-on-file (commission_card_*) once we are on/after the 6th.
 //
 //  BILLING (only when day-of-month >= 6):
-//    sum pending+failed cash/qr commission per gym & currency for any closed month
+//    sum pending+failed cash/qr commission per gym AND per coach (paid_to='coach') & currency, any closed month
 //    (commission_month < current YYYY-MM) -> Stripe PaymentIntent off_session on
 //    the card -> success: rows 'collected' + clear the failure clock + notify (doklad);
 //    failure: rows 'failed', start/keep commission_failed_at, notify "fix card in 2 weeks".
 //
 //  SUSPENSION (every run):
 //    commission_failed_at older than GRACE_DAYS (14) and still unpaid ->
-//      qr_bank gym         -> account_suspended = true  (whole gym frozen)
+//      qr_bank gym/coach   -> account_suspended = true  (whole gym/coach frozen)
 //      stripe + takes_cash -> cash_blocked = true        (only cash recording frozen)
 //
 //  LIFT (every run): a gym with a failure clock but NO remaining unpaid commission
@@ -140,6 +140,93 @@ export default async function handler(req, res) {
       if (unpaidSet.has(g.id)) continue; // still owes
       await sb(`gyms?id=eq.${g.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_failed_at: null, account_suspended: false, cash_blocked: false }) });
       if (g.account_suspended || g.cash_blocked) await notify(g.owner_id, 'commission_cleared', `✅ Provize uhrazena — účet je opět plně aktivní.`);
+      lifted++;
+    }
+
+    // ===== COACH PROVIDERS: coach-own cash/QR (paid_to='coach'), billed on profiles =====
+    const ctx = await sb(`transactions?select=coach_id,currency,mtl_fee,commission_status,commission_month&payment_method=in.(cash,qr)&commission_status=in.(pending,failed)&paid_to=eq.coach&coach_id=not.is.null&commission_month=lt.${curMonth}&limit=20000`);
+    const byCoach = {};
+    for (const t of (ctx || [])) {
+      if (!t.coach_id) continue;
+      const cur = (t.currency || 'czk').toLowerCase();
+      (byCoach[t.coach_id] = byCoach[t.coach_id] || {});
+      byCoach[t.coach_id][cur] = (byCoach[t.coach_id][cur] || 0) + (t.mtl_fee || 0);
+    }
+    const coachIds = Object.keys(byCoach);
+    const unpaidCoach = new Set(coachIds);
+    let coachMap = {};
+    if (coachIds.length) {
+      const profs = await sb(`profiles?id=in.(${coachIds.join(',')})&select=id,name,payment_mode,takes_cash,commission_card_customer,commission_card_pm,commission_failed_at,commission_next_retry,account_suspended,cash_blocked`);
+      (profs || []).forEach(p => { coachMap[p.id] = p; });
+    }
+    for (const cid of coachIds) {
+      const c = coachMap[cid]; if (!c) continue;
+
+      // ---- BILLING (on/after the 6th, needs a card, 3-day retry spacing) ----
+      const retryReady = !c.commission_next_retry || new Date(c.commission_next_retry).getTime() <= Date.now();
+      if (billDay && retryReady && c.commission_card_customer && c.commission_card_pm) {
+        let anyFail = false, anyCharge = false;
+        for (const cur of Object.keys(byCoach[cid])) {
+          const amount = Math.round(byCoach[cid][cur]);
+          if (!amount || amount <= 0) continue;
+          anyCharge = true;
+          let pi = null;
+          try {
+            pi = await stripe.paymentIntents.create({
+              amount, currency: cur,
+              customer: c.commission_card_customer,
+              payment_method: c.commission_card_pm,
+              off_session: true, confirm: true,
+              description: `MTL provize (hotovost/QR) ${c.name || 'kouc'}`,
+              metadata: { coach_id: cid, kind: 'mtl_commission', month: curMonth },
+            }, { idempotencyKey: `comm_coach_${cid}_${curMonth}_${cur}` });
+          } catch (e) { pi = null; }
+
+          if (pi && pi.status === 'succeeded') {
+            await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
+            try { await sb('commission_doklady', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ coach_id: cid, owner_id: cid, period_month: prevMonth(curMonth), amount, currency: cur, pi_id: pi.id, status: 'issued' }) }); } catch (e) {}
+            await notify(cid, 'commission_collected', `Provize MTL za hotovost/QR (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) byla strzena z karty. Doklad je v aplikaci.`);
+            collected++;
+          } else {
+            anyFail = true;
+            await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr)&commission_status=eq.pending&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
+            failed++;
+          }
+        }
+        if (anyCharge && anyFail) {
+          const patch = { commission_next_retry: new Date(Date.now() + 3 * 86400000).toISOString() };
+          if (!c.commission_failed_at) { patch.commission_failed_at = new Date().toISOString(); c.commission_failed_at = patch.commission_failed_at; }
+          await sb(`profiles?id=eq.${cid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) });
+          await notify(cid, 'commission_failed', `Strzeni provize MTL z karty selhalo. Aktualizuj kartu - dalsi pokus za 3 dny. Pokud neuhradis do 2 tydnu, zaznamenavani hotovosti se pozastavi.`);
+        } else if (anyCharge && !anyFail) {
+          unpaidCoach.delete(cid);
+          await sb(`profiles?id=eq.${cid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_next_retry: null, commission_last_billed: prevMonth(curMonth) }) });
+        }
+      }
+
+      // ---- SUSPENSION (2-week clock) ----
+      if (c.commission_failed_at && unpaidCoach.has(cid)) {
+        const overdue = Date.now() > new Date(c.commission_failed_at).getTime() + GRACE_DAYS * 86400000;
+        if (overdue) {
+          if (c.payment_mode === 'qr_bank' && !c.account_suspended) {
+            await sb(`profiles?id=eq.${cid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ account_suspended: true }) });
+            await notify(cid, 'account_suspended', `Ucet byl pozastaven kvuli neuhrazene provizi MTL. Tvuj profil je skryty. Aktualizuj kartu a uhrad provizi.`);
+            suspended++;
+          } else if (c.payment_mode !== 'qr_bank' && c.takes_cash && !c.cash_blocked) {
+            await sb(`profiles?id=eq.${cid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ cash_blocked: true }) });
+            await notify(cid, 'cash_blocked', `Zaznamenavani hotovosti bylo pozastaveno kvuli neuhrazene provizi. Stripe platby bezi dal.`);
+            suspended++;
+          }
+        }
+      }
+    }
+
+    // ---- LIFT: coaches with a failure clock but nothing unpaid anymore ----
+    const susCoaches = await sb(`profiles?commission_failed_at=not.is.null&select=id,account_suspended,cash_blocked`);
+    for (const c of (susCoaches || [])) {
+      if (unpaidCoach.has(c.id)) continue;
+      await sb(`profiles?id=eq.${c.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_failed_at: null, account_suspended: false, cash_blocked: false, commission_next_retry: null }) });
+      if (c.account_suspended || c.cash_blocked) await notify(c.id, 'commission_cleared', `Provize uhrazena - ucet je opet plne aktivni.`);
       lifted++;
     }
 

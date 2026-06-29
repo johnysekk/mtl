@@ -5,6 +5,9 @@
 //      in the GYM's local timezone -> status='released' + free the gym_class_reservations
 //      slot-hold + notify the student. Bookings in status 'paid_claimed' are NEVER touched
 //      (the student claims they paid -> the owner must confirm/deny in Reception).
+//  (3) 1:1 EXPIRY: bookings (coach 1:1) payment_method='qr' status='reserved' older than 30 min
+//      -> status='expired' + free the held slot + notify. 'paid_claimed' is never touched.
+//  (4) EVENT EXPIRY: event_tickets payment_method='qr' status='reserved' older than 30 min -> 'expired'.
 //  (2) CLEANUP: gym_memberships with status='pending_offline' older than STALE_HOURS (48)
 //      -> status='ended'. These are abandoned online membership intents where the student
 //      opened the QR but never paid and nobody confirmed; expiring them clears the owner's
@@ -43,7 +46,7 @@ export default async function handler(req, res) {
     if (!(auth === `Bearer ${process.env.CRON_SECRET}` || req.headers['x-vercel-cron'])) return res.status(401).json({ error: 'unauthorized' });
   }
 
-  let released = 0, expired = 0;
+  let released = 0, expired = 0, expired1h = 0;
   try {
     // ---- Pass 1: auto-release unpaid QR drop-in reservations near class start --------------
     const yest = new Date(Date.now() - 36 * 3600 * 1000).toISOString().slice(0, 10);
@@ -85,8 +88,35 @@ export default async function handler(req, res) {
       expired++;
     }
 
-    return res.status(200).json({ ok: true, released, expired });
+    // ---- Pass 3: expire unpaid QR coach 1:1 reservations 1 hour after booking --------------
+    try {
+      const cutoff1h = new Date(Date.now() - 30 * 60 * 1000).toISOString(); // 30 min unpaid window
+      const b1 = await sb(`bookings?payment_method=eq.qr&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoff1h)}&select=id,slot_id,student_id,coach_name&limit=3000`);
+      for (const b of (b1 || [])) {
+        await sb(`bookings?id=eq.${b.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'expired' }) });
+        if (b.slot_id) { try { await sb(`slots?id=eq.${encodeURIComponent(b.slot_id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ booked: false }) }); } catch (e) {} }
+        try {
+          if (b.student_id) {
+            const msg = `Tvá nezaplacená rezervace (${b.coach_name || 'lekce'}) vypršela po 30 minutách a termín se uvolnil pro dalšího zájemce. / Your unpaid reservation expired after 30 minutes and the slot was freed.`;
+            await sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'qr_reservation_expired' }), message: msg }) });
+          }
+        } catch (e) {}
+        expired1h++;
+      }
+    } catch (e) { /* bookings pass non-fatal */ }
+
+    // ---- Pass 4: expire unpaid QR event-ticket reservations 1 hour after booking ----------
+    try {
+      const cutoff1hE = new Date(Date.now() - 30 * 60 * 1000).toISOString(); // 30 min unpaid window
+      const e1 = await sb(`event_tickets?payment_method=eq.qr&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoff1hE)}&select=id&limit=3000`);
+      for (const t of (e1 || [])) {
+        await sb(`event_tickets?id=eq.${t.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'expired' }) });
+        expired1h++;
+      }
+    } catch (e) { /* events pass non-fatal */ }
+
+    return res.status(200).json({ ok: true, released, expired, expired1h });
   } catch (e) {
-    return res.status(500).json({ error: e.message, released, expired });
+    return res.status(500).json({ error: e.message, released, expired, expired1h });
   }
 }

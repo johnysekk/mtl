@@ -121,6 +121,19 @@ export default async function handler(req, res) {
     const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohortId)}&select=*`);
     const c = rows && rows[0];
     if (!c) return res.status(404).json({ ok: false, error: 'cohort not found' });
+    // QR/bank deposit (qr_bank gyms): no Stripe; create a claimed member, gym confirms on arrival.
+    if (b.method === 'qr') {
+      if (c.status === 'draft' || c.status === 'archived') return res.status(403).json({ ok: false, error: 'cohort closed' });
+      const depQ = Number(c.deposit_amount || 0);
+      if (!(depQ > 0)) return res.status(400).json({ ok: false, error: 'no deposit set' });
+      const memberQ = await sbInsert('cohort_members', {
+        cohort_id: cohortId, gym_id: c.gym_id, name, email, phone: (b.phone || '').trim() || null,
+        tier, status: 'deposit_claimed', attribution: (b.attribution || 'direct'),
+        consent_at: new Date().toISOString(), consent_version: (b.consent_version || null),
+        fbp: (b.fbp || null), fbc: (b.fbc || null)
+      });
+      return res.status(200).json({ ok: true, qr: true, cohort_member_id: memberQ && memberQ.id });
+    }
     if (!c.stripe_account) return res.status(400).json({ ok: false, error: 'cohort has no payout account' });
     if (c.status === 'draft' || c.status === 'archived') return res.status(403).json({ ok: false, error: 'cohort closed' });
     const deposit = Number(c.deposit_amount || 0);

@@ -31,13 +31,13 @@ export default async function handler(req, res) {
 
     const id = (req.query && req.query.cohort) || '';
     if (!id) return res.status(400).json({ ok: false, error: 'missing cohort' });
-    const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(id)}&select=id,gym_id,stripe_account,name,discipline,start_date,months,capacity,deposit_amount,price_student,price_regular,currency,description,gym_meta_pixel,marketing_note,status`);
+    const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(id)}&select=id,gym_id,stripe_account,name,discipline,start_date,end_date,months,capacity,deposit_amount,price_student,price_regular,currency,description,gym_meta_pixel,marketing_note,status`);
     const c = rows && rows[0];
     if (!c) return res.status(404).json({ ok: false, error: 'not found' });
     if (c.status === 'draft' || c.status === 'archived') return res.status(403).json({ ok: false, error: 'closed' });
 
-    let gymName = '';
-    try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(c.gym_id)}&select=name`); gymName = (g && g[0] && g[0].name) || ''; } catch (e) {}
+    let gymName = '', gymPay = {};
+    try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(c.gym_id)}&select=name,payment_mode,receiver_id_type,receiver_id_value,receiver_name`); const gg = g && g[0]; if (gg) { gymName = gg.name || ''; gymPay = { payment_mode: gg.payment_mode || null, receiver_id_type: gg.receiver_id_type || null, receiver_id_value: gg.receiver_id_value || null, receiver_name: gg.receiver_name || null }; } } catch (e) {}
 
     // provider legal name from the connected Stripe account (controller for the lead's data)
     let providerName = '';
@@ -57,10 +57,11 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       cohort: {
-        id: c.id, name: c.name, discipline: c.discipline, start_date: c.start_date, months: c.months,
+        id: c.id, name: c.name, discipline: c.discipline, start_date: c.start_date, end_date: c.end_date, months: c.months,
         capacity: c.capacity, taken, deposit_amount: c.deposit_amount, price_student: c.price_student,
         price_regular: c.price_regular, currency: c.currency, description: c.description,
-        gym_name: gymName, provider_name: providerName, meta_pixel: c.gym_meta_pixel || '', marketing_note: c.marketing_note || ''
+        gym_name: gymName, provider_name: providerName, meta_pixel: c.gym_meta_pixel || '', marketing_note: c.marketing_note || '',
+        payment_mode: gymPay.payment_mode || null, receiver_id_type: gymPay.receiver_id_type || null, receiver_id_value: gymPay.receiver_id_value || null, receiver_name: gymPay.receiver_name || null
       }
     });
   } catch (e) {

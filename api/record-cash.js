@@ -82,11 +82,12 @@ export default async function handler(req, res) {
       };
     } else {
       // coach pays out -> the coach authorizes their own cash/QR, rate from coach profile.
-      // NOTE: profiles has no account_suspended yet; coach suspension is a future cron concern.
-      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,coach_ref_score`);
+      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,coach_ref_score,account_suspended,cash_blocked`);
       const coach = cs && cs[0];
       if (!coach) return res.status(404).json({ error: 'coach not found' });
       if (coach.id !== uid) return res.status(403).json({ error: 'not your account' });
+      if (coach.account_suspended) return res.status(403).json({ error: 'account suspended' });
+      if (coach.cash_blocked) return res.status(403).json({ error: 'cash blocked' });
       rate = ladderRate(coach);
       cur = currency || 'czk';
       const mtl_fee = Math.round(gross * rate);
