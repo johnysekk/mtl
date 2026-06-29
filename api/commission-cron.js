@@ -39,6 +39,7 @@ async function sb(path, opts = {}) {
 }
 const notify = (user_id, kind, message, extra = {}) =>
   sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id, type: 'system', read: false, data: JSON.stringify({ kind, ...extra }), message }) });
+function prevMonth(ym) { const [y, m] = ym.split('-').map(Number); return new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 7); }
 
 export default async function handler(req, res) {
   if (!SB || !KEY) return res.status(500).json({ error: 'env not set' });
@@ -67,21 +68,24 @@ export default async function handler(req, res) {
 
     let gymMap = {};
     if (gymIds.length) {
-      const gyms = await sb(`gyms?id=in.(${gymIds.join(',')})&select=id,name,owner_id,payment_mode,takes_cash,commission_card_customer,commission_card_pm,commission_failed_at,account_suspended,cash_blocked`);
+      const gyms = await sb(`gyms?id=in.(${gymIds.join(',')})&select=id,name,owner_id,payment_mode,takes_cash,commission_card_customer,commission_card_pm,commission_failed_at,commission_next_retry,account_suspended,cash_blocked`);
       (gyms || []).forEach(g => { gymMap[g.id] = g; });
     }
 
     for (const gid of gymIds) {
       const g = gymMap[gid]; if (!g) continue;
 
-      // ---- BILLING (on/after the 6th, needs a card) ----
-      if (billDay && g.commission_card_customer && g.commission_card_pm) {
+      // ---- BILLING (on/after the 6th, needs a card, 3-day retry spacing) ----
+      const retryReady = !g.commission_next_retry || new Date(g.commission_next_retry).getTime() <= Date.now();
+      if (billDay && retryReady && g.commission_card_customer && g.commission_card_pm) {
+        let anyFail = false, anyCharge = false;
         for (const cur of Object.keys(byGym[gid])) {
           const amount = Math.round(byGym[gid][cur]);
           if (!amount || amount <= 0) continue;
-          let ok = false;
+          anyCharge = true;
+          let pi = null;
           try {
-            const pi = await stripe.paymentIntents.create({
+            pi = await stripe.paymentIntents.create({
               amount, currency: cur,
               customer: g.commission_card_customer,
               payment_method: g.commission_card_pm,
@@ -89,24 +93,27 @@ export default async function handler(req, res) {
               description: `MTL provize (hotovost/QR) ${g.name || ''}`,
               metadata: { gym_id: gid, kind: 'mtl_commission', month: curMonth },
             }, { idempotencyKey: `comm_${gid}_${curMonth}_${cur}` });
-            ok = !!(pi && pi.status === 'succeeded');
-          } catch (e) { ok = false; }
+          } catch (e) { pi = null; }
 
-          if (ok) {
+          if (pi && pi.status === 'succeeded') {
             await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
+            try { await sb('commission_doklady', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ gym_id: gid, owner_id: g.owner_id, period_month: prevMonth(curMonth), amount, currency: cur, pi_id: pi.id, status: 'issued' }) }); } catch (e) {}
             await notify(g.owner_id, 'commission_collected', `Provize MTL za hotovost/QR (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) byla stržena z karty. Doklad najdeš v účetnictví.`, { amount, currency: cur });
             collected++;
-            unpaidSet.delete(gid); // collected this run
           } else {
+            anyFail = true;
             await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr)&commission_status=eq.pending&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
-            if (!g.commission_failed_at) {
-              const ts = new Date().toISOString();
-              await sb(`gyms?id=eq.${gid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_failed_at: ts }) });
-              g.commission_failed_at = ts;
-            }
-            await notify(g.owner_id, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}). Aktualizuj platební kartu do 2 týdnů — jinak bude účet pozastaven a nepoužitelný pro tebe i studenty.`, { amount, currency: cur });
             failed++;
           }
+        }
+        if (anyCharge && anyFail) {
+          const patch = { commission_next_retry: new Date(Date.now() + 3 * 86400000).toISOString() };
+          if (!g.commission_failed_at) { patch.commission_failed_at = new Date().toISOString(); g.commission_failed_at = patch.commission_failed_at; }
+          await sb(`gyms?id=eq.${gid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) });
+          await notify(g.owner_id, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, účet bude pozastaven.`);
+        } else if (anyCharge && !anyFail) {
+          unpaidSet.delete(gid);
+          await sb(`gyms?id=eq.${gid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_next_retry: null, commission_last_billed: prevMonth(curMonth) }) });
         }
       }
 
