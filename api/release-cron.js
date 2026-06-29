@@ -115,6 +115,9 @@ export default async function handler(req, res) {
       }
     } catch (e) { /* events pass non-fatal */ }
 
+    // housekeeping: drop stale rate-limit windows (>2h old)
+    try { const _rlOld = new Date(Date.now() - 2*3600*1000).toISOString(); await sb('rate_limits?updated_at=lt.' + encodeURIComponent(_rlOld), { method: 'DELETE', prefer: 'return=minimal' }); } catch (e) {}
+
     return res.status(200).json({ ok: true, released, expired, expired1h });
   } catch (e) {
     return res.status(500).json({ error: e.message, released, expired, expired1h });

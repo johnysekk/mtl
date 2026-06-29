@@ -25,6 +25,13 @@ async function sbInsert(table, body) {
   const j = await r.json();
   return Array.isArray(j) ? j[0] : j;
 }
+async function sbRpc(fn, args) {
+  try {
+    const r = await fetch(_SUPA + '/rest/v1/rpc/' + fn, { method: 'POST', headers: { apikey: _KEY, Authorization: 'Bearer ' + _KEY, 'Content-Type': 'application/json' }, body: JSON.stringify(args) });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) { return null; }
+}
 
 // Genuine welcome 0% — same logic as pay.js: provider inside their welcome window pays no MTL fee.
 const _WELCOME_FOUNDER = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
@@ -74,8 +81,16 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'POST only' });
   try {
+    // --- per-IP rate limit (fail-open if the limiter itself errors) ---
+    const _ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || 'unknown';
+    const _win = Math.floor(Date.now() / (10 * 60 * 1000)); // 10-minute window
+    const _rlOk = await sbRpc('rl_hit', { p_key: _ip + ':cohort-pay:' + _win, p_ip: _ip, p_endpoint: 'cohort-pay', p_window: _win, p_limit: 10 });
+    if (_rlOk === false) return res.status(429).json({ ok: false, error: 'Too many requests — please wait a minute and try again.' });
+
     let b = req.body || {};
     if (typeof b === 'string') { try { b = JSON.parse(b); } catch (e) { b = {}; } }
+    // --- honeypot: hidden field only bots fill -> silent no-op (no lead, no Stripe, no pixel) ---
+    if (b && (b.hp || b.website)) return res.status(200).json({ ok: true, url: null });
     const kind = b.kind || 'deposit';
 
     // First-month remainder paid on-site via QR (member already exists; charge tier price minus deposit)
