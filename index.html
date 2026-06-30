@@ -7992,7 +7992,7 @@ async function _guestTermsGate(g, guestName, guestToken, onAgree){
   };
   ov.onclick=(e)=>{ if(e.target===ov) ov.remove(); };
 }
-async function openGymTermsPage(gymId, token){
+async function openGymTermsPage(gymId, token, onConfirmed){
   const EN=LANG==='en';
   let g=null; try{ const { data }=await supaClient.from('gyms').select('id,name,terms_text,terms_title,waiver_version').eq('id',gymId).single(); g=data; }catch(e){}
   const ov=document.createElement('div'); ov.id='gymTermsOv';
@@ -8014,10 +8014,13 @@ async function openGymTermsPage(gymId, token){
     <button id="gtpGo" style="width:100%;padding:15px;background:var(--dark);color:#fff;border:none;border-radius:14px;font-size:16px;font-weight:800;cursor:pointer;font-family:'DM Sans';opacity:.5;" disabled>${EN?'Agree & confirm':'Souhlasím a potvrzuji'}</button>
     <div id="gtpDone" style="display:none;text-align:center;margin-top:20px;"><div style="font-size:42px;">✅</div><div style="font-size:16px;font-weight:800;color:#067647;margin-top:6px;">${EN?'Confirmed — you can pay at reception now.':'Potvrzeno — teď můžeš zaplatit na recepci.'}</div></div>
   </div>`;
-  const cb=ov.querySelector('#gtpAgree'), go=ov.querySelector('#gtpGo');
-  cb.onchange=()=>{ go.disabled=!cb.checked; go.style.opacity=cb.checked?'1':'.5'; };
+  const cb=ov.querySelector('#gtpAgree'), go=ov.querySelector('#gtpGo'), emi=ov.querySelector('#gtpEmail');
+  const _loggedIn=(typeof currentUser!=='undefined'&&currentUser&&currentUser.id);
+  const _emOk=()=>{ const v=(emi&&emi.value.trim())||''; return _loggedIn || /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v); };
+  const _upd=()=>{ const okk=cb.checked&&_emOk(); go.disabled=!okk; go.style.opacity=okk?'1':'.5'; };
+  cb.onchange=_upd; if(emi) emi.oninput=_upd;
   go.onclick=async function(){
-    if(!cb.checked) return;
+    if(!cb.checked || !_emOk()) return;
     const nm=(ov.querySelector('#gtpName')&&ov.querySelector('#gtpName').value.trim())||null;
     const em=(ov.querySelector('#gtpEmail')&&ov.querySelector('#gtpEmail').value.trim())||null;
     go.disabled=true; go.textContent=(EN?'Saving…':'Ukládám…');
@@ -8030,7 +8033,7 @@ async function openGymTermsPage(gymId, token){
         const j=await r.json().catch(()=>({})); ok=!!(j&&j.ok);
       }
     }catch(e){}
-    if(ok){ go.style.display='none'; const d=ov.querySelector('#gtpDone'); if(d) d.style.display='block'; }
+    if(ok){ if(typeof onConfirmed==='function'){ ov.remove(); onConfirmed(em||null); return; } go.style.display='none'; const d=ov.querySelector('#gtpDone'); if(d) d.style.display='block'; }
     else { go.disabled=false; go.textContent=(EN?'Agree & confirm':'Souhlasím a potvrzuji'); toast(EN?'⚠️ Could not save — try again':'⚠️ Nepodařilo se uložit — zkus znovu'); }
   };
 }
@@ -22693,16 +22696,22 @@ async function showPaidPopup(){
       const gymId=params.get('gym'), cls=params.get('cls')||'Drop-in', date=params.get('date'), time=params.get('time'), coach=params.get('coach')||null, level=params.get('level')||'all', disc=params.get('disc')||null, amt=parseInt(params.get('amt')||'0',10)||0, cur=params.get('cur')||'CZK', tok=params.get('tok')||('g'+Date.now());
       const { data: g } = await supaClient.from('gyms').select('*').eq('id', gymId).single();
       if(!g){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">Gym not found.</p>'; return; }
-      const payee = await resolveGymPayee(g, {coach});
-      if(!payee.account){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">Payments not set up for this class yet.</p>'; return; }
-      const rec={ gym_id:gymId, paid_to:payee.coachId?'coach':'gym', amount:amt, currency:cur, status:'pending', reception_checkin:true, guest_token:tok, date:date, time:time, class_name:cls, class_date:date, class_time:time, level:level, coach_id:payee.coachId||coach||null, discipline:disc, gym_name:g.name||'Gym' };
-      const { data: bk, error } = await supaClient.from('gym_bookings').insert(rec).select().single();
-      if(error){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">'+error.message+'</p>'; return; }
-      let _gp=false, _ownerFounding=false, _gtake=0.035; try{ const _ppid=(payee&&payee.coachId)||g.owner_id; if(_ppid){ const { data: ow }=await supaClient.from('profiles').select('partner, founding, coach_ref_score').eq('id',_ppid).single(); _gp=!!(ow&&ow.partner); _ownerFounding=!!(ow&&ow.founding); var _gsc=(ow&&ow.coach_ref_score)||0; _gtake=(_gsc>=10?0.02:(_gsc>=3?0.03:0.035)); } }catch(e){}
-      try{ if(bk&&bk.id) await supaClient.from('gym_bookings').update({gym_keep_pct:((typeof _gymOwnerPartner!=='undefined'&&_gymOwnerPartner)||(typeof _gp!=='undefined'&&_gp))?0.99:((typeof _ownerScore!=='undefined'&&_ownerScore>=10)?0.98:((typeof _ownerScore!=='undefined'&&_ownerScore>=3)?0.97:0.965))}).eq('id',bk.id); }catch(e){}
-      const url='/api/pay?type=gym&guest=1&take='+_gtake+'&founding='+(_ownerFounding?1:0)+'&token='+encodeURIComponent(tok)+'&gymAccount='+encodeURIComponent(payee.account)+'&gymName='+encodeURIComponent(g.name||'')+'&className='+encodeURIComponent(cls)+'&amount='+amt+'&currency='+cur+'&bookingId='+encodeURIComponent(bk.id)+'&income='+encodeURIComponent(g.dropin_income||'side')+'&payee='+encodeURIComponent(payee.name||'')+'&level='+encodeURIComponent(level)+'&disc='+encodeURIComponent(disc||'')+'&partner='+(_gp?1:0)+'&gymId='+encodeURIComponent(g.id)+'&coachId='+encodeURIComponent(coach||'');
-      document.body.innerHTML='<div style="padding:50px 24px;text-align:center;font-family:sans-serif;color:#111;"><div style="font-size:30px;margin-bottom:10px;">💳</div><p>'+(LANG==='en'?'Redirecting to secure payment…':'Přesměrovávám na zabezpečenou platbu…')+'</p></div>';
-      window.location.href=url; return;
+      const _proceedPay = async function(_termsEmail){
+       try{
+        const payee = await resolveGymPayee(g, {coach});
+        if(!payee.account){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">Payments not set up for this class yet.</p>'; return; }
+        const rec={ gym_id:gymId, paid_to:payee.coachId?'coach':'gym', amount:amt, currency:cur, status:'pending', reception_checkin:true, guest_token:tok, guest_email:_termsEmail||null, date:date, time:time, class_name:cls, class_date:date, class_time:time, level:level, coach_id:payee.coachId||coach||null, discipline:disc, gym_name:g.name||'Gym' };
+        const { data: bk, error } = await supaClient.from('gym_bookings').insert(rec).select().single();
+        if(error){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">'+error.message+'</p>'; return; }
+        let _gp=false, _ownerFounding=false, _gtake=0.035; try{ const _ppid=(payee&&payee.coachId)||g.owner_id; if(_ppid){ const { data: ow }=await supaClient.from('profiles').select('partner, founding, coach_ref_score').eq('id',_ppid).single(); _gp=!!(ow&&ow.partner); _ownerFounding=!!(ow&&ow.founding); var _gsc=(ow&&ow.coach_ref_score)||0; _gtake=(_gsc>=10?0.02:(_gsc>=3?0.03:0.035)); } }catch(e){}
+        try{ if(bk&&bk.id) await supaClient.from('gym_bookings').update({gym_keep_pct:((typeof _gymOwnerPartner!=='undefined'&&_gymOwnerPartner)||(typeof _gp!=='undefined'&&_gp))?0.99:((typeof _ownerScore!=='undefined'&&_ownerScore>=10)?0.98:((typeof _ownerScore!=='undefined'&&_ownerScore>=3)?0.97:0.965))}).eq('id',bk.id); }catch(e){}
+        const url='/api/pay?type=gym&guest=1&take='+_gtake+'&founding='+(_ownerFounding?1:0)+'&token='+encodeURIComponent(tok)+'&gymAccount='+encodeURIComponent(payee.account)+'&gymName='+encodeURIComponent(g.name||'')+'&className='+encodeURIComponent(cls)+'&amount='+amt+'&currency='+cur+'&bookingId='+encodeURIComponent(bk.id)+'&income='+encodeURIComponent(g.dropin_income||'side')+'&payee='+encodeURIComponent(payee.name||'')+'&level='+encodeURIComponent(level)+'&disc='+encodeURIComponent(disc||'')+'&partner='+(_gp?1:0)+'&gymId='+encodeURIComponent(g.id)+'&coachId='+encodeURIComponent(coach||'');
+        document.body.innerHTML='<div style="padding:50px 24px;text-align:center;font-family:sans-serif;color:#111;"><div style="font-size:30px;margin-bottom:10px;">💳</div><p>'+(LANG==='en'?'Redirecting to secure payment…':'Přesměrovávám na zabezpečenou platbu…')+'</p></div>';
+        window.location.href=url;
+       }catch(e){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">'+(e.message||'error')+'</p>'; }
+      };
+      if(g.terms_text && g.terms_text.trim()){ openGymTermsPage(gymId, tok, function(em){ _proceedPay(em); }); return; }
+      await _proceedPay(null); return;
     }catch(e){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">'+(e.message||'error')+'</p>'; return; }
   }
   if(params.get('guest_drop')==='ok'){
