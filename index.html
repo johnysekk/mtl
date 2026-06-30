@@ -11736,6 +11736,7 @@ async function renderGymMembers(){
 }
 async function loadGymRoster(){
   const box=$('mgRoster'); if(!box||!_myGymData) return;
+  try{ _crTabBar(_myGymData, _myGymData.id, _myGymData.name||'', 'doch', 'mgRoster', function(){ loadGymRoster(); }, true); }catch(e){}
   window._cancelledOcc = new Set(); try{ const { data:_cd } = await supaClient.from('gym_class_log').select('class_date,class_time,class_name').eq('gym_id', _myGymData.id).eq('status','cancelled'); (_cd||[]).forEach(c=>window._cancelledOcc.add(`${c.class_date}|${c.class_time||''}|${c.class_name||''}`)); }catch(e){}
   window._occOverride = {}; try{ const { data:_ov } = await supaClient.from('gym_class_overrides').select('*').eq('gym_id', _myGymData.id); (_ov||[]).forEach(o=>{ window._occOverride[o.class_date+'|'+(o.class_time||'')+'|'+(o.class_name||'')] = { coach:o.payee_coach_id||null, coachName:o.payee_coach_name||null, leader:o.lead_coach_id||o.payee_coach_id||null, leaderName:o.lead_coach_name||o.payee_coach_name||null }; }); }catch(e){}
   const today=new Date().toISOString().slice(0,10);
@@ -11917,7 +11918,7 @@ async function loadCoachRoster(gymId, gymName){
   if($('coachRosterTitle')) $('coachRosterTitle').textContent=(LANG==='en'?'Attendance — ':'Docházka — ')+(gymName||'Gym');
   const box=$('coachRosterBox'); if(!box) return;
   box.innerHTML=`<p style="text-align:center;color:var(--light);padding:24px;">${L('Načítám...')}</p>`;
-  let g=null; try{ const { data } = await supaClient.from('gyms').select('id,name,capacity,schedule').eq('id',gymId).single(); g=data; }catch(e){}
+  let g=null; try{ const { data } = await supaClient.from('gyms').select('id,name,capacity,schedule,owner_id,currency').eq('id',gymId).single(); g=data; }catch(e){}
   if(!g){ box.innerHTML=`<p style="color:var(--red);padding:16px;font-size:13px;">⚠️ ${L('Chyba')}</p>`; return; }
   let sch=[]; try{ sch = g.schedule ? (typeof g.schedule==='string'?JSON.parse(g.schedule):g.schedule) : []; }catch(e){}
   const occs=upcomingClasses(sch,7).filter(o=>(o.coach||null)===currentUser.id);   // jen lekce TOHOTO kouče
@@ -11965,6 +11966,27 @@ async function loadCoachRoster(gymId, gymName){
   }).join('');
   box.querySelectorAll('.crosterHead').forEach(h=>h.onclick=()=>{ const l=box.querySelector(`.crosterList[data-i="${h.dataset.i}"]`); if(l) l.style.display=l.style.display==='none'?'block':'none'; });
   box.querySelectorAll('.attChk').forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); toggleAttendance(b.dataset); });
+  _crTabBar(g, gymId, gymName, 'doch', 'coachRosterBox', function(){ loadCoachRoster(gymId, gymName); }, !!(g && g.owner_id && currentUser && g.owner_id===currentUser.id));
+}
+function _crTabBar(g, gymId, gymName, active, boxId, dochFn, show){
+  var box=$(boxId); if(!box||!box.parentNode) return;
+  var tbId='crTabBar_'+boxId; var tb=document.getElementById(tbId);
+  if(!show){ if(tb) tb.style.display='none'; return; }
+  if(!tb){ tb=document.createElement('div'); tb.id=tbId; tb.style.cssText='display:flex;gap:6px;padding:14px 20px 0;'; box.parentNode.insertBefore(tb, box); }
+  tb.style.display='flex';
+  var EN=LANG==='en';
+  var bs="flex:1;padding:10px;border-radius:10px;font-size:13px;font-weight:800;cursor:pointer;font-family:'DM Sans';border:1px solid var(--border);";
+  var on='background:var(--dark);color:#fff;border-color:var(--dark);'; var off='background:var(--surf);color:var(--mid);';
+  tb.innerHTML='<button class="crTabD" style="'+bs+(active==='doch'?on:off)+'">\ud83d\udccb '+(EN?'Attendance':'Doch\u00e1zka')+'</button><button class="crTabP" style="'+bs+(active==='pay'?on:off)+'">\ud83d\udcf2 '+(EN?'Confirm payments':'Potvrzen\u00ed \u00fahrad')+'</button>';
+  tb.querySelector('.crTabD').onclick=function(){ dochFn(); };
+  tb.querySelector('.crTabP').onclick=function(){ _renderRosterPayConfirm(g, gymId, gymName, boxId, dochFn); };
+}
+async function _renderRosterPayConfirm(g, gymId, gymName, boxId, dochFn){
+  _crTabBar(g, gymId, gymName, 'pay', boxId, dochFn, true);
+  _recGym=g; _recGymOwnerPartner=false; _recGymOwnerScore=0;
+  var oid=(g&&g.owner_id)||(currentUser&&currentUser.id);
+  try{ if(oid){ const { data:_ro }=await supaClient.from('profiles').select('partner,coach_ref_score').eq('id',oid).single(); _recGymOwnerPartner=!!(_ro&&_ro.partner); _recGymOwnerScore=(_ro&&_ro.coach_ref_score)||0; } }catch(e){}
+  _recpQrConfirm({ gym:g, container:$(boxId), back:function(){ dochFn(); } });
 }
 function updateMgMembBreak(){
   if(!_myGymData) return;
@@ -12279,7 +12301,7 @@ async function openReception(gymId, gymName){
   const h=$('recHint'); if(h) h.textContent=(LANG==='en'?'Type a name to find anyone, or pick a current member below':'Napi\u0161 jm\u00e9no pro vyhled\u00e1n\u00ed kohokoli, nebo vyber \u010dlena n\u00ed\u017ee');
   (function(){ var isOwn=_recGym&&currentUser&&_recGym.owner_id===currentUser.id; var _lv=$('recLeaveBtn'); if(isOwn){ if(_lv) _lv.style.display='none'; return; } if(!_lv){ _lv=document.createElement('button'); _lv.id='recLeaveBtn'; _lv.type='button'; var _h=$('recHint'); if(_h&&_h.parentNode){ _h.parentNode.insertBefore(_lv, _h.nextSibling); } } if(_lv){ _lv.textContent=(LANG==='en'?'Leave reception':'Odejít z recepce'); _lv.style.cssText="display:block;margin:8px 0 10px;padding:9px 12px;background:transparent;color:var(--mid);border:1px solid var(--border);border-radius:9px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';"; _lv.onclick=_recLeaveAction; } })();
   const gb=$('recGuestBtnFixed'); if(gb){ gb.textContent='👤 '+(LANG==='en'?'Drop-in for a non-user (no app)':'Jednorázový vstup pro neuživatele (bez appky)'); gb.style.display='block'; gb.onclick=openGuestDropin; }
-  (function(){ var _g=_recGym; var _tc=_g&&(_g.takes_cash||(typeof _mtlPayMode==='function'&&_mtlPayMode(_g)==='qr_bank')); var cbn=$('recCashBtn'); if(!_tc){ if(cbn) cbn.style.display='none'; return; } if(!cbn){ cbn=document.createElement('button'); cbn.id='recCashBtn'; cbn.type='button'; var _gb=$('recGuestBtnFixed'); if(_gb&&_gb.parentNode){ _gb.parentNode.insertBefore(cbn, _gb.nextSibling); } } if(cbn){ cbn.textContent='\uD83D\uDCB5 '+(LANG==='en'?'Cash payment':'Platba v hotovosti'); cbn.style.cssText="display:block;width:100%;margin:0 0 10px;padding:12px;background:#0a8f5b;color:#fff;border:none;border-radius:11px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';"; cbn.onclick=openCashRecord; } })(); (function(){ var _g=_recGym; var _qr=_g&&(typeof _mtlPayMode==='function'&&_mtlPayMode(_g)==='qr_bank') && _g.owner_id===(currentUser&&currentUser.id); var qbn=$('recQrConfBtn'); if(!_qr){ if(qbn) qbn.style.display='none'; return; } if(!qbn){ qbn=document.createElement('button'); qbn.id='recQrConfBtn'; qbn.type='button'; var _cb=$('recCashBtn')||$('recGuestBtnFixed'); if(_cb&&_cb.parentNode){ _cb.parentNode.insertBefore(qbn, _cb.nextSibling); } } if(qbn){ var _lbl='📲 '+(LANG==='en'?'QR payments to confirm':'QR platby k potvrzení'); qbn.textContent=_lbl; qbn.style.cssText="display:block;width:100%;margin:0 0 10px;padding:12px;background:#5b34d6;color:#fff;border:none;border-radius:11px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';"; qbn.onclick=_recpQrConfirm; (async function(){ try{ var n=await _recpQrPending(_g.id); if(n>0&&$('recQrConfBtn')) $('recQrConfBtn').textContent=_lbl+' ('+n+')'; }catch(e){} })(); } })();
+  (function(){ var _g=_recGym; var _tc=_g&&(_g.takes_cash||(typeof _mtlPayMode==='function'&&_mtlPayMode(_g)==='qr_bank')); var cbn=$('recCashBtn'); if(!_tc){ if(cbn) cbn.style.display='none'; return; } if(!cbn){ cbn=document.createElement('button'); cbn.id='recCashBtn'; cbn.type='button'; var _gb=$('recGuestBtnFixed'); if(_gb&&_gb.parentNode){ _gb.parentNode.insertBefore(cbn, _gb.nextSibling); } } if(cbn){ cbn.textContent='\uD83D\uDCB5 '+(LANG==='en'?'Cash payment':'Platba v hotovosti'); cbn.style.cssText="display:block;width:100%;margin:0 0 10px;padding:12px;background:#0a8f5b;color:#fff;border:none;border-radius:11px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';"; cbn.onclick=openCashRecord; } })(); (function(){ var _g=_recGym; var _qr=false; var qbn=$('recQrConfBtn'); if(!_qr){ if(qbn) qbn.style.display='none'; return; } if(!qbn){ qbn=document.createElement('button'); qbn.id='recQrConfBtn'; qbn.type='button'; var _cb=$('recCashBtn')||$('recGuestBtnFixed'); if(_cb&&_cb.parentNode){ _cb.parentNode.insertBefore(qbn, _cb.nextSibling); } } if(qbn){ var _lbl='📲 '+(LANG==='en'?'QR payments to confirm':'QR platby k potvrzení'); qbn.textContent=_lbl; qbn.style.cssText="display:block;width:100%;margin:0 0 10px;padding:12px;background:#5b34d6;color:#fff;border:none;border-radius:11px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';"; qbn.onclick=_recpQrConfirm; (async function(){ try{ var n=await _recpQrPending(_g.id); if(n>0&&$('recQrConfBtn')) $('recQrConfBtn').textContent=_lbl+' ('+n+')'; }catch(e){} })(); } })();
   (function(){
     const box=$('recOffers'); if(!box) return;
     if(!_recGym){ box.innerHTML=''; return; }
@@ -12849,20 +12871,20 @@ async function _recpQrPending(gymId){
   try{ const { data:mb } = await supaClient.from('gym_memberships').select('id').eq('gym_id',gymId).eq('status','pending_offline'); n+=(mb||[]).length; }catch(e){}
   return n;
 }
-async function _recpQrConfirm(){
-  const g=_recGym; const list=$('recList'); if(!g||!list) return;
+async function _recpQrConfirm(opts){
+  window._qrcOpts=opts||null; const g=(opts&&opts.gym)||_recGym; const list=(opts&&opts.container)||$('recList'); if(!g||!list) return;
   const EN=LANG==='en'; const cur=g.currency||'CZK'; const sym=_curSym(cur);
   const rate=_recRate();
   list.innerHTML='<p style="color:var(--light);padding:14px;text-align:center;">\u2026</p>';
   let drops=[], membs=[];
   try{ const { data } = await supaClient.from('gym_bookings').select('*').eq('gym_id',g.id).eq('payment_method','qr').in('status',['reserved','paid_claimed']).order('created_at',{ascending:true}); drops=data||[]; }catch(e){}
-  try{ const _exC=new Date(Date.now()-48*3600*1000).toISOString(); const { data:_ex } = await supaClient.from('gym_bookings').select('*').eq('gym_id',g.id).eq('payment_method','qr').in('status',['released','expired','unpaid_void']).gte('created_at',_exC).order('created_at',{ascending:true}); (_ex||[]).forEach(function(x){ drops.push(x); }); }catch(e){}
+  try{ const _exC=new Date(Date.now()-24*3600*1000).toISOString(); const { data:_ex } = await supaClient.from('gym_bookings').select('*').eq('gym_id',g.id).eq('payment_method','qr').in('status',['released','expired','unpaid_void']).gte('created_at',_exC).order('created_at',{ascending:true}); (_ex||[]).forEach(function(x){ drops.push(x); }); }catch(e){}
   try{ const { data } = await supaClient.from('gym_memberships').select('*').eq('gym_id',g.id).eq('status','pending_offline').order('created_at',{ascending:true}); membs=data||[]; }catch(e){}
   let h='';
   h+='<button id="recBackBtn" style="background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:8px 12px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-bottom:12px;">\u2039 '+(EN?'Back':'Zp\u011bt')+'</button>';
   h+='<div style="font-weight:800;font-size:16px;color:var(--dark);margin-bottom:2px;">\ud83d\udcf2 '+(EN?'QR payments to confirm':'QR platby k potvrzen\u00ed')+'</div>';
   h+='<p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:12px;">'+(EN?'Confirm only when the bank payment has arrived AND the student attended. \u201cNot paid\u201d voids it \u2014 no lesson, no commission.':'Potvrď a\u017e kdy\u017e platba dorazila na \u00fa\u010det A student p\u0159i\u0161el. \u201ePlatba nep\u0159i\u0161la\u201c zru\u0161\u00ed \u2014 \u017e\u00e1dn\u00e1 lekce, \u017e\u00e1dn\u00e1 provize.')+'</p>';
-  if(!drops.length && !membs.length){ h+='<p style="font-size:13px;color:var(--light);text-align:center;padding:18px;">'+(EN?'Nothing pending.':'Nic ne\u010dek\u00e1.')+'</p>'; list.innerHTML=h; if($('recBackBtn')) $('recBackBtn').onclick=function(){ renderReceptionList(($('recSearch')&&$('recSearch').value)||''); }; return; }
+  if(!drops.length && !membs.length){ h+='<p style="font-size:13px;color:var(--light);text-align:center;padding:18px;">'+(EN?'Nothing pending.':'Nic ne\u010dek\u00e1.')+'</p>'; list.innerHTML=h; if($('recBackBtn')) $('recBackBtn').onclick=function(){ if(window._qrcOpts&&window._qrcOpts.back) window._qrcOpts.back(); else renderReceptionList(($('recSearch')&&$('recSearch').value)||''); }; return; }
   function row(kindLabel, who, what, amt, claimed, id, kind, recover){
     return '<div style="border:1px solid var(--border);border-radius:12px;padding:11px 12px;margin-bottom:10px;background:#fff;">'
       +'<div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;"><div style="font-weight:700;font-size:14px;min-width:0;">'+escapeHtml(who||'\u2014')+'</div><div style="font-size:13px;font-weight:800;color:#006040;white-space:nowrap;">'+fmtPrice(amt||0,cur)+' '+sym+'</div></div>'
@@ -12875,7 +12897,7 @@ async function _recpQrConfirm(){
   drops.forEach(function(b){ var _rec=(b.status==='released'||b.status==='expired'||b.status==='unpaid_void'); var _ct=b.claimed_at?(' \u00b7 '+(EN?'claimed ':'nahl\u00e1\u0161eno ')+new Date(b.claimed_at).toLocaleString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',hour:'2-digit',minute:'2-digit'})):''; h+=row((EN?'Drop-in':'Drop-in'), b.student_name, (b.class_name||'')+(b.class_time?(' \u00b7 '+b.class_time):'')+_ct, b.amount, b.status==='paid_claimed', b.id, 'dropin', _rec); });
   membs.forEach(function(m){ h+=row((EN?'Membership':'\u010clenstv\u00ed'), m.student_name, m.plan_name||'', m.amount, true, m.id, 'memb'); });
   list.innerHTML=h;
-  if($('recBackBtn')) $('recBackBtn').onclick=function(){ renderReceptionList(($('recSearch')&&$('recSearch').value)||''); };
+  if($('recBackBtn')) $('recBackBtn').onclick=function(){ if(window._qrcOpts&&window._qrcOpts.back) window._qrcOpts.back(); else renderReceptionList(($('recSearch')&&$('recSearch').value)||''); };
   list.querySelectorAll('.qrcOk').forEach(function(btn){ btn.onclick=function(){ _qrcConfirm(btn.dataset.id, btn.dataset.kind, true, drops, membs); }; });
   list.querySelectorAll('.qrcNo').forEach(function(btn){ btn.onclick=function(){ _qrcConfirm(btn.dataset.id, btn.dataset.kind, false, drops, membs); }; });
 }
@@ -12895,7 +12917,7 @@ async function _qrcConfirm(id, kind, ok, drops, membs){
   try{
     if(kind==='dropin'){
       const b=(drops||[]).find(function(x){ return String(x.id)===String(id); }); if(!b) return;
-      if(!ok){ await supaClient.from('gym_bookings').update({ status:'unpaid_void' }).eq('id',id); try{ await supaClient.from('gym_class_reservations').delete().eq('gym_id',g.id).eq('student_id',b.student_id).eq('class_date',b.class_date).eq('class_time',b.class_time).eq('class_name',b.class_name); }catch(e){} toast(EN?'Voided \u00b7 slot freed':'Zru\u0161eno \u00b7 m\u00edsto uvoln\u011bno'); return _recpQrConfirm(); }
+      if(!ok){ await supaClient.from('gym_bookings').update({ status:'unpaid_void' }).eq('id',id); try{ await supaClient.from('gym_class_reservations').delete().eq('gym_id',g.id).eq('student_id',b.student_id).eq('class_date',b.class_date).eq('class_time',b.class_time).eq('class_name',b.class_name); }catch(e){} toast(EN?'Voided \u00b7 slot freed':'Zru\u0161eno \u00b7 m\u00edsto uvoln\u011bno'); return _recpQrConfirm(window._qrcOpts); }
       const amount_minor=Math.round((b.amount||0)*100); const fee_minor=Math.round(amount_minor*rate);
       await _recordCashTx({ gym_id:g.id, member_id:b.student_id||null, coach_id:b.coach_id||null, paid_to:'gym', gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:b.currency||cur, type:'drop_in', status:'completed', payment_method:'qr', commission_status:'pending', commission_month:month, cash_payer_name:b.student_name||null, acq_source:b.acq_source||'direct' });
       try{ if(b.student_id){ const { data:ex }=await supaClient.from('gym_attendance').select('id').eq('gym_id',g.id).eq('student_id',b.student_id).eq('class_date',b.class_date).eq('class_time',b.class_time); if(!(ex&&ex.length)){ await supaClient.from('gym_attendance').insert({ gym_id:g.id, student_id:b.student_id, student_name:b.student_name||null, class_name:b.class_name||null, class_date:b.class_date||null, class_time:b.class_time||null, coach_id:b.coach_id||null, discipline:b.discipline||null, marked_by:currentUser?currentUser.id:null }); } } }catch(e){}
@@ -12903,14 +12925,14 @@ async function _qrcConfirm(id, kind, ok, drops, membs){
       toast((EN?'\u2705 Confirmed \u00b7 commission ':'\u2705 Potvrzeno \u00b7 provize ')+fmtPrice(fee_minor/100,cur)+' '+sym, 1);
     } else {
       const m=(membs||[]).find(function(x){ return String(x.id)===String(id); }); if(!m) return;
-      if(!ok){ await supaClient.from('gym_memberships').update({ status:'ended', cancelled_at:new Date().toISOString(), period_end:new Date().toISOString() }).eq('id',id); toast(EN?'Voided':'Zru\u0161eno'); return _recpQrConfirm(); }
+      if(!ok){ await supaClient.from('gym_memberships').update({ status:'ended', cancelled_at:new Date().toISOString(), period_end:new Date().toISOString() }).eq('id',id); toast(EN?'Voided':'Zru\u0161eno'); return _recpQrConfirm(window._qrcOpts); }
       const amount_minor=Math.round((m.amount||0)*100); const fee_minor=Math.round(amount_minor*rate);
       await _recordCashTx({ gym_id:g.id, member_id:m.student_id||null, coach_id:m.coach_id||null, paid_to:'gym', gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:m.currency||cur, type:'membership', status:'completed', payment_method:'qr', commission_status:'pending', commission_month:month, cash_payer_name:m.student_name||null, acq_source:m.acq_source||'direct' });
       var nd=new Date(); nd.setMonth(nd.getMonth()+1);
       await supaClient.from('gym_memberships').update({ status:'active', period_end:nd.toISOString() }).eq('id',id);
       toast((EN?'\u2705 Membership active \u00b7 commission ':'\u2705 \u010clenstv\u00ed aktivn\u00ed \u00b7 provize ')+fmtPrice(fee_minor/100,cur)+' '+sym, 1);
     }
-    _recpQrConfirm();
+    _recpQrConfirm(window._qrcOpts);
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
 }
 const MTL_ENTITY = { name: 'Martial Training Lab s.r.o.', ico: '', sidlo: '', dic: '', vat_id: '', vat_payer: false, vat_rate: 21 };
