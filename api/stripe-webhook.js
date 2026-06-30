@@ -387,7 +387,6 @@ export default async function handler(req, res) {
             const coh = cohId ? ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=owner_id,name,gym_id,deposit_amount,price_student,price_regular,currency,start_date,gym_meta_pixel,capi_token`)) || [])[0] : null;
             const mem = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=name,email,tier,fbp,fbc`)) || [])[0];
             if (coh && coh.owner_id) await sbPost('notifications', { user_id: coh.owner_id, type: 'system', read: false, message: '\uD83D\uDCDA Nov\u00FD zaplacen\u00FD z\u00E1pis do kurzu' + (coh.name ? (' "' + coh.name + '"') : '') + '.' });
-            if (coh && coh.gym_id) { try { const _recs = await sbGet(`gym_coaches?gym_id=eq.${encodeURIComponent(coh.gym_id)}&status=eq.active&is_reception=eq.true&select=coach_id`); for (const _rc of (_recs || [])) { if (_rc.coach_id) await sbPost('notifications', { user_id: _rc.coach_id, type: 'system', read: false, message: '\uD83D\uDCDA Nov\u00FD zaplacen\u00FD z\u00E1pis do kurzu' + (coh.name ? (' "' + coh.name + '"') : '') + '.' }); } } catch (e) {} }
             if (mem && mem.email && coh) {
               let gymName = '';
               try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(coh.gym_id)}&select=name`); gymName = (g && g[0] && g[0].name) || ''; } catch (e) {}
