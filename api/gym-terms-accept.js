@@ -36,6 +36,7 @@ module.exports = async (req, res) => {
     const gymId = (body.gymId || '').toString();
     const token = (body.token || '').toString();
     const name = ((body.name || '').toString().slice(0, 120)) || null;
+    const email = ((body.email || '').toString().slice(0, 160)) || null;
     const hash = (body.hash || '').toString() || null;
     const version = parseInt(body.version, 10) || 0;
     if (!gymId || !token) return res.status(400).json({ error: 'missing gymId/token' });
@@ -56,6 +57,7 @@ module.exports = async (req, res) => {
       guest_token: token,
       student_id: null,
       student_name: name,
+      guest_email: email,
       body_hash: hash,
       body_text: (g.terms_text || '').trim() || null,
       body_title: g.terms_title || null,
