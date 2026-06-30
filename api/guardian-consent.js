@@ -114,6 +114,8 @@ module.exports = async (req, res) => {
         student_id: rq.minor_id,
         student_name: rq.minor_name || null,
         body_hash: rq.body_hash,
+        body_text: rq.body || null,
+        body_title: rq.title || null,
         accepted_at: new Date().toISOString(),
         guardian_id: null,
         guardian_name: gname
