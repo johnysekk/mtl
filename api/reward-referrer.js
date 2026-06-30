@@ -35,7 +35,7 @@ export default async function handler(req, res) {
     if (refUser === uid) return res.status(400).json({ error: 'self' });
 
     // GATE: the referrer must CURRENTLY be an active member of this gym, otherwise no reward at all.
-    const mem = await sbGet(`gym_memberships?select=stripe_subscription&student_id=eq.${encodeURIComponent(refUser)}&gym_id=eq.${encodeURIComponent(gymId)}&status=in.(active,cancelling)`);
+    const mem = await sbGet(`gym_memberships?select=stripe_subscription&student_id=eq.${encodeURIComponent(refUser)}&gym_id=eq.${encodeURIComponent(gymId)}&status=eq.active`);
     if (!mem || !mem.length) return res.status(200).json({ ok: true, skipped: 'referrer not an active member' });
 
     const gymAccount = gy.stripe_account || null;

@@ -329,7 +329,7 @@ async function membershipCheckout(req, res) {
   if (refPctN > 0 && refUser && gymId) {
     let _refActive = false;
     try {
-      const _rm = await _wsbGet(`gym_memberships?student_id=eq.${encodeURIComponent(refUser)}&gym_id=eq.${encodeURIComponent(gymId)}&status=in.(active,cancelling)&select=id&limit=1`);
+      const _rm = await _wsbGet(`gym_memberships?student_id=eq.${encodeURIComponent(refUser)}&gym_id=eq.${encodeURIComponent(gymId)}&status=eq.active&select=id&limit=1`);
       _refActive = !!(_rm && _rm[0]);
     } catch (e) {}
     if (!_refActive) { refPctN = 0; _refUserOk = ''; }   // referrer not an active member -> kill the referral
