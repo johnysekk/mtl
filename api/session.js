@@ -104,7 +104,7 @@ async function rewardReferrer({ refUser, refPct, gymId, gymAccount }) {
     const pct = parseInt(refPct, 10) || 0;
     if (!refUser || !gymId || pct <= 0) return;
     // GATE: the referrer must CURRENTLY be an active member of this gym, otherwise no reward at all.
-    const mem = await sbGet(`gym_memberships?select=stripe_subscription&student_id=eq.${encodeURIComponent(refUser)}&gym_id=eq.${encodeURIComponent(gymId)}&status=eq.active`);
+    const mem = await sbGet(`gym_memberships?select=stripe_subscription&student_id=eq.${encodeURIComponent(refUser)}&gym_id=eq.${encodeURIComponent(gymId)}&status=in.(active,cancelling)`);
     if (!mem || !mem.length) return;
     // Prefer discounting the referrer's NEXT Stripe invoice directly when they hold an active
     // subscription here (one-time coupon on the connected account); otherwise leave a pending credit
