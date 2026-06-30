@@ -103,14 +103,17 @@ async function rewardReferrer({ refUser, refPct, gymId, gymAccount }) {
   try {
     const pct = parseInt(refPct, 10) || 0;
     if (!refUser || !gymId || pct <= 0) return;
+    // GATE: the referrer must CURRENTLY be an active member of this gym, otherwise no reward at all.
+    const mem = await sbGet(`gym_memberships?select=stripe_subscription&student_id=eq.${encodeURIComponent(refUser)}&gym_id=eq.${encodeURIComponent(gymId)}&status=in.(active,cancelling)`);
+    if (!mem || !mem.length) return;
     // Prefer discounting the referrer's NEXT Stripe invoice directly when they hold an active
-    // membership subscription at this gym (one-time coupon on the connected account). Otherwise
-    // leave a pending credit they redeem on their next QR/cash membership at reception. Never both.
+    // subscription here (one-time coupon on the connected account); otherwise leave a pending credit
+    // they redeem on their next QR/cash membership at reception. Never both.
     let stripeApplied = false;
     if (gymAccount) {
       try {
-        const ms = await sbGet(`gym_memberships?select=stripe_subscription&student_id=eq.${encodeURIComponent(refUser)}&gym_id=eq.${encodeURIComponent(gymId)}&status=in.(active,cancelling)&stripe_subscription=not.is.null&limit=1`);
-        const sub = ms && ms[0] && ms[0].stripe_subscription;
+        const subRow = mem.find(m => m.stripe_subscription);
+        const sub = subRow && subRow.stripe_subscription;
         if (sub) {
           const coupon = await stripe.coupons.create({ percent_off: pct, duration: 'once', name: `MTL referral -${pct}%` }, { stripeAccount: gymAccount });
           await stripe.subscriptions.update(sub, { discounts: [{ coupon: coupon.id }] }, { stripeAccount: gymAccount });

@@ -34,13 +34,17 @@ export default async function handler(req, res) {
     if (pct > maxPct) pct = maxPct;                                                 // clamp to the gym's setting
     if (refUser === uid) return res.status(400).json({ error: 'self' });
 
+    // GATE: the referrer must CURRENTLY be an active member of this gym, otherwise no reward at all.
+    const mem = await sbGet(`gym_memberships?select=stripe_subscription&student_id=eq.${encodeURIComponent(refUser)}&gym_id=eq.${encodeURIComponent(gymId)}&status=in.(active,cancelling)`);
+    if (!mem || !mem.length) return res.status(200).json({ ok: true, skipped: 'referrer not an active member' });
+
     const gymAccount = gy.stripe_account || null;
     let stripeApplied = false;
     // Prefer discounting the referrer's NEXT Stripe invoice when they hold an active subscription here.
     if (gymAccount) {
       try {
-        const ms = await sbGet(`gym_memberships?select=stripe_subscription&student_id=eq.${encodeURIComponent(refUser)}&gym_id=eq.${encodeURIComponent(gymId)}&status=in.(active,cancelling)&stripe_subscription=not.is.null&limit=1`);
-        const sub = ms && ms[0] && ms[0].stripe_subscription;
+        const subRow = mem.find(m => m.stripe_subscription);
+        const sub = subRow && subRow.stripe_subscription;
         if (sub) {
           const coupon = await stripe.coupons.create({ percent_off: pct, duration: 'once', name: `MTL referral -${pct}%` }, { stripeAccount: gymAccount });
           await stripe.subscriptions.update(sub, { discounts: [{ coupon: coupon.id }] }, { stripeAccount: gymAccount });

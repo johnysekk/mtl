@@ -313,15 +313,27 @@ async function membershipCheckout(req, res) {
   // it to the normal rate (a finder's fee for the acquisition). Monthly subs only.
   const MTL_ACQ_PERCENT = 10;
   const _isAcq = (String(acq) === 'mtl_discovery' && ivl === 'month' && String(partner) !== '1');
-  const FEE_NOW = _isAcq ? MTL_ACQ_PERCENT : FEE_PCT;
+  // EP perk: HALF the acquisition fee (5%) vs 10% for standard providers; after the window the webhook drops to mtl_acq_base (EP=1%).
+  const FEE_NOW = _isAcq ? (String(partner)==='1' ? (MTL_ACQ_PERCENT/2) : MTL_ACQ_PERCENT) : FEE_PCT;
 
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
 
   // Gym member referral: new member gets a one-time first-month discount.
   // Coupon is created on the CONNECTED account (charges are direct on the gym).
+  // GATE: the referrer must CURRENTLY be an active member of this gym; otherwise no referral at all
+  // (no discount for the new member, and no reward for the referrer -> we also drop refUser below).
   let discounts;
-  const refPctN = parseInt(refPct, 10) || 0;
+  let refPctN = parseInt(refPct, 10) || 0;
+  let _refUserOk = refUser || '';
+  if (refPctN > 0 && refUser && gymId) {
+    let _refActive = false;
+    try {
+      const _rm = await _wsbGet(`gym_memberships?student_id=eq.${encodeURIComponent(refUser)}&gym_id=eq.${encodeURIComponent(gymId)}&status=in.(active,cancelling)&select=id&limit=1`);
+      _refActive = !!(_rm && _rm[0]);
+    } catch (e) {}
+    if (!_refActive) { refPctN = 0; _refUserOk = ''; }   // referrer not an active member -> kill the referral
+  }
   if (refPctN > 0 && refPctN <= 100) {
     try {
       const coupon = await stripe.coupons.create(
@@ -347,7 +359,7 @@ async function membershipCheckout(req, res) {
         mtl_disc: disc || '',
         mtl_base: String(P),
         mtl_currency: cur,
-        mtl_ref_user: refUser || '',
+        mtl_ref_user: _refUserOk,
         mtl_ref_pct: String(refPctN || 0),
       },
       line_items: [
@@ -372,7 +384,7 @@ async function membershipCheckout(req, res) {
           mtl_base: String(P),
           mtl_currency: cur,
           member_name: memberName || '',
-          mtl_ref_user: refUser || '',
+          mtl_ref_user: _refUserOk,
           mtl_ref_pct: String(refPctN || 0),
         },
       },
