@@ -30,11 +30,27 @@ function hav(la1, lo1, la2, lo2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
+const _RL_SUPA = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
+const _RL_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+function _rlIp(req) { const xr = req.headers['x-real-ip']; if (xr) return String(xr).trim(); const p = (req.headers['x-forwarded-for'] || '').split(',').map(s => s.trim()).filter(Boolean); return p.length ? p[p.length - 1] : ((req.socket && req.socket.remoteAddress) || 'unknown'); }
+async function _rlAllow(endpoint, ip, limit) {
+  try {
+    const win = Math.floor(Date.now() / 600000);
+    const r = await fetch(_RL_SUPA + '/rest/v1/rpc/rl_hit', { method: 'POST', headers: { apikey: _RL_KEY, Authorization: 'Bearer ' + _RL_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ p_key: ip + ':' + endpoint + ':' + win, p_ip: ip, p_endpoint: endpoint, p_window: win, p_limit: limit }) });
+    if (!r.ok) return true;
+    let _j = await r.json();
+    if (Array.isArray(_j)) _j = _j[0];
+    else if (_j && typeof _j === 'object') _j = Object.values(_j)[0];
+    return _j !== false && _j !== 'false';
+  } catch (e) { return true; }
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type, x-access-token');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(200).end();
+  if (!(await _rlAllow('gym-cohort', _rlIp(req), 60))) return res.status(429).json({ ok: false, error: 'Too many requests' });
 
   try {
     let b = {};

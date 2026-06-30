@@ -82,15 +82,17 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'POST only' });
   try {
     // --- per-IP rate limit (fail-open if the limiter itself errors) ---
-    const _ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || (req.socket && req.socket.remoteAddress) || 'unknown';
+    const _ip = (function(){ const xr=req.headers['x-real-ip']; if(xr) return String(xr).trim(); const p=(req.headers['x-forwarded-for']||'').split(',').map(x=>x.trim()).filter(Boolean); return p.length?p[p.length-1]:((req.socket&&req.socket.remoteAddress)||'unknown'); })();
     const _win = Math.floor(Date.now() / (10 * 60 * 1000)); // 10-minute window
-    const _rlOk = await sbRpc('rl_hit', { p_key: _ip + ':cohort-pay:' + _win, p_ip: _ip, p_endpoint: 'cohort-pay', p_window: _win, p_limit: 10 });
-    if (_rlOk === false) return res.status(429).json({ ok: false, error: 'Too many requests — please wait a minute and try again.' });
+    let _rlOk = await sbRpc('rl_hit', { p_key: _ip + ':cohort-pay:' + _win, p_ip: _ip, p_endpoint: 'cohort-pay', p_window: _win, p_limit: 30 });
+    if (Array.isArray(_rlOk)) _rlOk = _rlOk[0];
+    else if (_rlOk && typeof _rlOk === 'object') _rlOk = Object.values(_rlOk)[0];
+    if (_rlOk === false || _rlOk === 'false') return res.status(429).json({ ok: false, error: 'Too many requests — please wait a minute and try again.' });
 
     let b = req.body || {};
     if (typeof b === 'string') { try { b = JSON.parse(b); } catch (e) { b = {}; } }
     // --- honeypot: hidden field only bots fill -> silent no-op (no lead, no Stripe, no pixel) ---
-    if (b && (b.hp || b.website)) return res.status(200).json({ ok: true, url: null });
+    if (b && (b.hp || b.website)) return res.status(200).json({ ok: false, error: 'rejected' }); // honeypot -> soft fail (no lead/Stripe/pixel/QR); client toasts + re-enables
     const kind = b.kind || 'deposit';
 
     // First-month remainder paid on-site via QR (member already exists; charge tier price minus deposit)

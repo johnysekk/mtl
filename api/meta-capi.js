@@ -22,6 +22,21 @@ const ALLOWED_ORIGIN = '*';                  // or set to e.g. 'https://yourpage
 // Meta wants PII normalized (trim + lowercase) then SHA-256 hashed.
 const sha256 = (v) => crypto.createHash('sha256').update(String(v).trim().toLowerCase()).digest('hex');
 
+const _RL_SUPA = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
+const _RL_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+function _rlIp(req) { const xr = req.headers['x-real-ip']; if (xr) return String(xr).trim(); const p = (req.headers['x-forwarded-for'] || '').split(',').map(s => s.trim()).filter(Boolean); return p.length ? p[p.length - 1] : ((req.socket && req.socket.remoteAddress) || 'unknown'); }
+async function _rlAllow(endpoint, ip, limit) {
+  try {
+    const win = Math.floor(Date.now() / 600000);
+    const r = await fetch(_RL_SUPA + '/rest/v1/rpc/rl_hit', { method: 'POST', headers: { apikey: _RL_KEY, Authorization: 'Bearer ' + _RL_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ p_key: ip + ':' + endpoint + ':' + win, p_ip: ip, p_endpoint: endpoint, p_window: win, p_limit: limit }) });
+    if (!r.ok) return true;
+    let _j = await r.json();
+    if (Array.isArray(_j)) _j = _j[0];
+    else if (_j && typeof _j === 'object') _j = Object.values(_j)[0];
+    return _j !== false && _j !== 'false';
+  } catch (e) { return true; }
+}
+
 export default async function handler(req, res) {
   // CORS — the Carrd page is on a different domain
   res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
@@ -29,6 +44,7 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST')    return res.status(405).json({ error: 'Method not allowed' });
+  if (!(await _rlAllow('meta-capi', _rlIp(req), 20))) return res.status(429).json({ error: 'Too many requests' });
 
   const token = process.env.META_CAPI_TOKEN;
   if (!token) return res.status(500).json({ error: 'META_CAPI_TOKEN env var is not set' });
