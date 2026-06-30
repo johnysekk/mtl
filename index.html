@@ -7985,8 +7985,9 @@ async function _guestTermsGate(g, guestName, guestToken, onAgree){
   ov.querySelector('#gtgVerify').onclick=async function(){
     const b=this; const _orig=b.textContent; b.disabled=true; b.textContent=(EN?'Checking…':'Ověřuji…');
     let ok=false;
-    try{ const { data }=await supaClient.from('waiver_acceptances').select('id').eq('gym_id',g.id).eq('guest_token',guestToken).limit(1); ok=!!(data&&data.length); }catch(e){}
-    if(ok){ ov.remove(); onAgree(); }
+    let _row=null;
+    try{ const { data }=await supaClient.from('waiver_acceptances').select('id,student_name,guest_email').eq('gym_id',g.id).eq('guest_token',guestToken).limit(1); _row=(data&&data[0])||null; ok=!!_row; }catch(e){}
+    if(ok){ ov.remove(); onAgree(_row&&_row.student_name, _row&&_row.guest_email); }
     else { b.disabled=false; b.textContent=_orig; toast(EN?'⚠️ Not confirmed yet — have them scan & agree first':'⚠️ Zatím nepotvrzeno — nech hosta naskenovat a souhlasit'); }
   };
   ov.onclick=(e)=>{ if(e.target===ov) ov.remove(); };
@@ -8008,6 +8009,7 @@ async function openGymTermsPage(gymId, token){
     <div style="font-size:16px;font-weight:800;color:var(--dark);margin-bottom:8px;">${title.replace(/</g,'&lt;')}</div>
     <div style="font-size:13px;color:var(--dark);line-height:1.6;white-space:pre-wrap;border:1px solid var(--border);border-radius:12px;padding:13px;margin-bottom:12px;background:#fff;max-height:46vh;overflow-y:auto;">${base.replace(/</g,'&lt;')}</div>
     <input id="gtpName" placeholder="${EN?'Your full name':'Tvé jméno a příjmení'}" value="${escapeHtml((typeof currentUser!=='undefined'&&currentUser&&currentUser.name)||'')}" style="width:100%;box-sizing:border-box;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';margin-bottom:10px;">
+    <input id="gtpEmail" type="email" inputmode="email" placeholder="${EN?'Your e-mail — links your account, XP & rewards':'Tvůj e-mail — propojí účet, XP a odměny'}" value="${escapeHtml((typeof currentUser!=='undefined'&&currentUser&&currentUser.email)||'')}" style="width:100%;box-sizing:border-box;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';margin-bottom:10px;">
     <label style="display:flex;align-items:flex-start;gap:9px;font-size:13.5px;margin-bottom:14px;cursor:pointer;color:var(--dark);line-height:1.4;"><input type="checkbox" id="gtpAgree" style="width:19px;height:19px;flex-shrink:0;margin-top:1px;"> ${EN?'I have read and agree to these terms':'Přečetl/a jsem si podmínky a souhlasím s nimi'}</label>
     <button id="gtpGo" style="width:100%;padding:15px;background:var(--dark);color:#fff;border:none;border-radius:14px;font-size:16px;font-weight:800;cursor:pointer;font-family:'DM Sans';opacity:.5;" disabled>${EN?'Agree & confirm':'Souhlasím a potvrzuji'}</button>
     <div id="gtpDone" style="display:none;text-align:center;margin-top:20px;"><div style="font-size:42px;">✅</div><div style="font-size:16px;font-weight:800;color:#067647;margin-top:6px;">${EN?'Confirmed — you can pay at reception now.':'Potvrzeno — teď můžeš zaplatit na recepci.'}</div></div>
@@ -8017,13 +8019,14 @@ async function openGymTermsPage(gymId, token){
   go.onclick=async function(){
     if(!cb.checked) return;
     const nm=(ov.querySelector('#gtpName')&&ov.querySelector('#gtpName').value.trim())||null;
+    const em=(ov.querySelector('#gtpEmail')&&ov.querySelector('#gtpEmail').value.trim())||null;
     go.disabled=true; go.textContent=(EN?'Saving…':'Ukládám…');
     let ok=false;
     try{
       if(typeof currentUser!=='undefined'&&currentUser&&currentUser.id){
-        const { error }=await supaClient.from('waiver_acceptances').insert({ gym_id:g.id, student_id:currentUser.id, guest_token:token||null, student_name:nm||currentUser.name||null, body_hash:hash, version:wv, body_text:base, body_title:title, accepted_at:new Date().toISOString() }); ok=!error;
+        const { error }=await supaClient.from('waiver_acceptances').insert({ gym_id:g.id, student_id:currentUser.id, guest_token:token||null, student_name:nm||currentUser.name||null, guest_email:em||currentUser.email||null, body_hash:hash, version:wv, body_text:base, body_title:title, accepted_at:new Date().toISOString() }); ok=!error;
       } else {
-        const r=await fetch('/api/gym-terms-accept',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ gymId:g.id, token:token||'', name:nm, hash:hash, version:wv }) });
+        const r=await fetch('/api/gym-terms-accept',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ gymId:g.id, token:token||'', name:nm, email:em, hash:hash, version:wv }) });
         const j=await r.json().catch(()=>({})); ok=!!(j&&j.ok);
       }
     }catch(e){}
@@ -12401,12 +12404,14 @@ async function openRecCheckin(r, targetOcc){
 }
 async function finalizeGuestBookings(){
   if(!currentUser||!currentUser.email) return;
+  try{ await supaClient.from('waiver_acceptances').update({ student_id: currentUser.id }).eq('guest_email', currentUser.email).is('student_id', null); }catch(e){}
   try{
     const { data: bks } = await supaClient.from('gym_bookings').select('*').eq('guest_email', currentUser.email).is('student_id', null).eq('status','active');
     if(!bks||!bks.length) return;
     for(const b of bks){
       try{
         await supaClient.from('gym_bookings').update({ student_id: currentUser.id, student_name: currentUser.name||b.guest_name||null }).eq('id', b.id);
+        try{ if(b.guest_token){ await supaClient.from('waiver_acceptances').update({ student_id: currentUser.id }).eq('guest_token', b.guest_token).is('student_id', null); } }catch(e){}
         const { data: ex } = await supaClient.from('gym_attendance').select('id').eq('gym_id',b.gym_id).eq('student_id',currentUser.id).eq('class_date',b.class_date).eq('class_time',b.class_time).limit(1);
         if(!(ex&&ex.length)){ await supaClient.from('gym_attendance').insert({ gym_id:b.gym_id, student_id:currentUser.id, student_name:currentUser.name||b.guest_name||null, class_name:b.class_name||null, class_date:b.class_date||null, class_time:b.class_time||null, coach_id:b.coach_id||null, discipline:b.discipline||null, marked_by:currentUser.id }); }
       }catch(e){}
@@ -12666,12 +12671,12 @@ function _guestCash(occ, method){
   if($('recBackBtn')) $('recBackBtn').onclick=function(){ _guestPayPick(occ); };
   if($('gcSave')) $('gcSave').onclick=async function(){
     let name=($('gcName')&&$('gcName').value.trim())||null;
-    const email=($('gcEmail')&&$('gcEmail').value.trim())||null;
+    let email=($('gcEmail')&&$('gcEmail').value.trim())||null;
     const amount_minor=Math.round((pr.dp||0)*100);
     const fee_minor=Math.round(amount_minor*rate);
     const month=new Date().toISOString().slice(0,7);
     const tok='g'+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
-    const _proceed=async function(_nm){ if(_nm) name=_nm;
+    const _proceed=async function(_nm,_em){ if(_nm) name=_nm; if(_em && !email) email=_em;
     const btn=$('gcSave'); btn.disabled=true; btn.textContent=EN?'Saving\u2026':'Ukl\u00e1d\u00e1m\u2026';
     try{
       const txr={ gym_id:g.id, member_id:null, coach_id:occ.coach||null, paid_to:'gym', gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:cur, type:'drop_in', status:'completed', payment_method:method, commission_status:'pending', commission_month:month, cash_payer_name:name, acq_source:'direct' };
