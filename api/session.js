@@ -103,9 +103,27 @@ async function rewardReferrer({ refUser, refPct, gymId, gymAccount }) {
   try {
     const pct = parseInt(refPct, 10) || 0;
     if (!refUser || !gymId || pct <= 0) return;
-    // Persist a pending credit the referrer redeems on their NEXT QR/cash membership at this gym.
-    await sbPost('gym_member_ref_credits', { gym_id: gymId, referrer_id: refUser, pct, status: 'pending', source: 'stripe', created_at: new Date().toISOString() });
-    await sbPost('notifications', { user_id: refUser, type: 'system', read: false, data: JSON.stringify({ kind: 'gym_member_ref_reward', gym_id: gymId, pct }), message: '🎁 Tvé doporučení se přidalo! -' + pct + ' % se ti automaticky uplatní na další období členství.' });
+    // Prefer discounting the referrer's NEXT Stripe invoice directly when they hold an active
+    // membership subscription at this gym (one-time coupon on the connected account). Otherwise
+    // leave a pending credit they redeem on their next QR/cash membership at reception. Never both.
+    let stripeApplied = false;
+    if (gymAccount) {
+      try {
+        const ms = await sbGet(`gym_memberships?select=stripe_subscription&student_id=eq.${encodeURIComponent(refUser)}&gym_id=eq.${encodeURIComponent(gymId)}&status=in.(active,cancelling)&stripe_subscription=not.is.null&limit=1`);
+        const sub = ms && ms[0] && ms[0].stripe_subscription;
+        if (sub) {
+          const coupon = await stripe.coupons.create({ percent_off: pct, duration: 'once', name: `MTL referral -${pct}%` }, { stripeAccount: gymAccount });
+          await stripe.subscriptions.update(sub, { discounts: [{ coupon: coupon.id }] }, { stripeAccount: gymAccount });
+          stripeApplied = true;
+        }
+      } catch (e) { console.error('referrer stripe coupon', e.message); }
+    }
+    if (stripeApplied) {
+      await sbPost('notifications', { user_id: refUser, type: 'system', read: false, data: JSON.stringify({ kind: 'gym_member_ref_reward', gym_id: gymId, pct }), message: '🎁 Tvé doporučení se přidalo! -' + pct + ' % se ti automaticky strhne z příští faktury členství.' });
+    } else {
+      await sbPost('gym_member_ref_credits', { gym_id: gymId, referrer_id: refUser, pct, status: 'pending', source: 'stripe', created_at: new Date().toISOString() });
+      await sbPost('notifications', { user_id: refUser, type: 'system', read: false, data: JSON.stringify({ kind: 'gym_member_ref_reward', gym_id: gymId, pct }), message: '🎁 Tvé doporučení se přidalo! -' + pct + ' % se ti automaticky uplatní na další období členství (QR/hotovost).' });
+    }
   } catch (e) { console.error('rewardReferrer', e.message); }
 }
 

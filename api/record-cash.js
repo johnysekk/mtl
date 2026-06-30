@@ -37,12 +37,82 @@ function ladderRate(profile) {
   return s >= 10 ? 0.02 : (s >= 3 ? 0.03 : 0.035);
 }
 
+const _WELCOME_FOUNDER = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+let _welcomeOff = null;
+async function welcomeKillSwitch() {
+  if (_welcomeOff !== null) return _welcomeOff;
+  try { const ks = await sb(`profiles?id=eq.${_WELCOME_FOUNDER}&select=welcome_zero_off`); _welcomeOff = !!(ks && ks[0] && ks[0].welcome_zero_off); }
+  catch (e) { _welcomeOff = false; }
+  return _welcomeOff;
+}
+// Mirrors isWelcomeZero() in pay.js, but on the payee profile we already loaded.
+// In window -> this cash/QR sale is 0% MTL fee (clean books, no doklad), exactly like Stripe.
+// First sale on a genuinely new account (<45 days) opens the 30-day window now (same anchor as Stripe).
+async function isWelcomeZeroProfile(prof) {
+  if (!prof || !prof.id) return false;
+  if (await welcomeKillSwitch()) return false;
+  const now = Date.now();
+  if (prof.welcome_free_until) return now < new Date(prof.welcome_free_until).getTime();
+  const created = prof.created_at ? new Date(prof.created_at).getTime() : 0;
+  if (created && (now - created) < 45 * 86400000) {
+    try { await sb(`profiles?id=eq.${prof.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ welcome_free_until: new Date(now + 30 * 86400000).toISOString() }) }); } catch (e) {}
+    return true;
+  }
+  return false;
+}
+
+const ACQ_RATE = 0.10;     // standard providers
+const ACQ_RATE_EP = 0.05;  // EP perk: HALF the acquisition fee (EP buys a cheap ongoing rate; acquisition is halved, not waived)
+// MTL acquisition finder's fee: when the app demonstrably brought the member (acq_source='mtl_discovery'),
+// MTL takes the acquisition rate for the window — membership = first 2 months; 1:1 = the first paid lesson.
+// Mirrors pay.js _isAcq (membership) + the client first-lesson 10% (coach/drop-in). Never for EP or welcome.
+// "Window" is bounded by counting prior COMPLETED tx of this type for this member at this provider
+// (counts Stripe + cash together, so a member already past the window isn't re-charged 10% on cash).
+async function acquisitionRate(acq, type, payee, memberId, scopeCol, scopeId) {
+  if (acq !== 'mtl_discovery') return null;
+  if (payee && payee.partner) return null;            // EP is always 1%, never the acquisition fee
+  if (!memberId) return null;                          // can't bound the window without a member id
+  let max;
+  if (type === 'membership') max = 2;                  // first 2 months
+  else if (type === 'drop_in' || type === 'coach_1to1') max = 1; // the first paid one
+  else return null;                                    // custom / event / course: no acquisition fee
+  try {
+    const prior = await sb(`transactions?select=id&member_id=eq.${memberId}&type=eq.${encodeURIComponent(type)}&${scopeCol}=eq.${scopeId}&status=eq.completed&limit=${max}`);
+    if (!prior || prior.length < max) return (payee && payee.partner) ? ACQ_RATE_EP : ACQ_RATE; // inside window: EP pays half
+  } catch (e) {}
+  return null;
+}
+
+// Referral-credit redemption (parity with the Stripe client flow): MTL waives its WHOLE fee when a
+// member redeems a referral credit. Server-side anti-tamper — we never trust the client that a credit
+// exists; we verify the member's student_credits counter AND a live referral_credits row before zeroing.
+async function findStudentCredit(memberId) {
+  if (!memberId) return null;
+  try {
+    const prof = await sb(`profiles?id=eq.${memberId}&select=student_credits`);
+    const scN = prof && prof[0] ? Number(prof[0].student_credits || 0) : 0;
+    if (!(scN > 0)) return null;
+    const nowIso = new Date().toISOString();
+    const rows = await sb(`referral_credits?user_id=eq.${memberId}&consumed=eq.false&expires_at=gt.${encodeURIComponent(nowIso)}&select=id&order=earned_at.asc&limit=1`);
+    return (rows && rows[0] && rows[0].id) ? { id: rows[0].id, sc: scN } : null;
+  } catch (e) { return null; }
+}
+// Mirror of the client consumption (index.html ~20611): decrement the counter + mark the oldest
+// (earned_at asc) live credit row consumed. Runs AFTER the tx insert; a rare post-insert failure
+// leaves the tx correct (fee already waived) and the credit re-verifies false next time, so no double-burn.
+async function consumeStudentCredit(memberId, creditRowId, sc) {
+  try {
+    await sb(`profiles?id=eq.${memberId}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ student_credits: Math.max(0, (Number(sc) || 1) - 1) }) });
+    await sb(`referral_credits?id=eq.${creditRowId}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ consumed: true }) });
+  } catch (e) { console.error('consumeStudentCredit', e.message); }
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
   if (!SB || !KEY) return res.status(500).json({ error: 'env not set' });
   try {
     const b = (typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body) || {};
-    const { token, gym_id, coach_id, member_id, gross_amount, currency, type, payment_method, cash_payer_name, acq_source } = b;
+    const { token, gym_id, coach_id, member_id, gross_amount, currency, type, payment_method, cash_payer_name, acq_source, credit } = b;
     const provider = b.provider === 'coach' ? 'coach' : 'gym';
 
     if (!token || !type || !payment_method) return res.status(400).json({ error: 'missing fields' });
@@ -60,6 +130,8 @@ export default async function handler(req, res) {
     if (!uid) return res.status(401).json({ error: 'no user' });
 
     let rate, row, cur;
+    let _creditRow = null;   // {memberId,id,sc} to consume after a successful insert (referral-credit redemption)
+    const _wantCredit = (credit === 'student' && member_id && ['coach_1to1', 'drop_in'].includes(type));
     const month = new Date().toISOString().slice(0, 7);
 
     if (provider === 'gym') {
@@ -69,20 +141,26 @@ export default async function handler(req, res) {
       if (!gym) return res.status(404).json({ error: 'gym not found' });
       if (gym.owner_id !== uid) return res.status(403).json({ error: 'not your gym' });
       if (gym.account_suspended) return res.status(403).json({ error: 'account suspended' });
-      const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=partner,coach_ref_score`);
-      rate = ladderRate((owners && owners[0]) || {});
+      const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,coach_ref_score,welcome_free_until,created_at,referral_optin`);
+      const ownerProf = (owners && owners[0]) || {};
+      if (!ownerProf.id) ownerProf.id = gym.owner_id;
+      rate = ladderRate(ownerProf);
       cur = currency || gym.currency || 'czk';
-      const mtl_fee = Math.round(gross * rate);
+      const _wz = await isWelcomeZeroProfile(ownerProf);
+      const _cc = (_wantCredit && ownerProf.referral_optin !== false) ? await findStudentCredit(member_id) : null;
+      if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
+      const _acq = _wz ? null : await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id);
+      const mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
       row = {
         gym_id, coach_id: coach_id || null, member_id: member_id || null, paid_to: 'gym',
         gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0,
         currency: cur, type, status: 'completed', payment_method,
-        commission_status: 'pending', commission_month: month,
+        commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct',
       };
     } else {
       // coach pays out -> the coach authorizes their own cash/QR, rate from coach profile.
-      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,coach_ref_score,account_suspended,cash_blocked`);
+      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,coach_ref_score,account_suspended,cash_blocked,welcome_free_until,created_at,referral_optin`);
       const coach = cs && cs[0];
       if (!coach) return res.status(404).json({ error: 'coach not found' });
       if (coach.id !== uid) return res.status(403).json({ error: 'not your account' });
@@ -90,18 +168,23 @@ export default async function handler(req, res) {
       if (coach.cash_blocked) return res.status(403).json({ error: 'cash blocked' });
       rate = ladderRate(coach);
       cur = currency || 'czk';
-      const mtl_fee = Math.round(gross * rate);
+      const _wz = await isWelcomeZeroProfile(coach);
+      const _cc = (_wantCredit && coach.referral_optin !== false) ? await findStudentCredit(member_id) : null;
+      if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
+      const _acq = _wz ? null : await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id);
+      const mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
       row = {
         gym_id: null, coach_id, member_id: member_id || null, paid_to: 'coach',
         gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0,
         currency: cur, type, status: 'completed', payment_method,
-        commission_status: 'pending', commission_month: month,
+        commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct',
       };
     }
 
     const ins = await sb('transactions', { method: 'POST', prefer: 'return=representation', body: JSON.stringify(row) });
-    return res.status(200).json({ ok: true, mtl_fee: row.mtl_fee, id: (ins && ins[0] && ins[0].id) || null });
+    if (_creditRow) await consumeStudentCredit(_creditRow.memberId, _creditRow.id, _creditRow.sc);
+    return res.status(200).json({ ok: true, mtl_fee: row.mtl_fee, welcome: row.commission_status === 'collected' && row.mtl_fee === 0, credit_redeemed: !!_creditRow, id: (ins && ins[0] && ins[0].id) || null });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
