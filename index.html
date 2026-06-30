@@ -11541,26 +11541,40 @@ async function maybeNotifyCold(count, gymName){
 async function renderGymMembers(){
   const box=$('mgMembers'); if(!box||!_myGymData) return;
   const EN=LANG==='en';
-  let mems=[];
-  try{ const { data } = await supaClient.from('gym_memberships').select('*').eq('gym_id',_myGymData.id).in('status',['active','cancelling']).order('created_at',{ascending:true}); mems=(data||[]).filter(m=>m.paid_to!=='coach'); }catch(e){}
+  const gid=_myGymData.id;
+  const _gmSize=(window._gmSize===50?50:20); window._gmSize=_gmSize;
+  let _gmPage=Math.max(0, window._gmPage||0);
+  const _gmSearch=(window._gmSearch||'').trim();
+  const _sQ=_gmSearch.replace(/[%,()*]/g,' ').replace(/ +/g,' ').trim();
+  const _kid=window._gmMembKid||null;
+  const _lvl=_gmMembLvl||null;
+  let actCount=0, canCount=0;
+  try{ const r=await supaClient.from('gym_memberships').select('id',{count:'exact',head:true}).eq('gym_id',gid).eq('status','active').or('paid_to.neq.coach,paid_to.is.null'); actCount=r.count||0; }catch(e){}
+  try{ const r=await supaClient.from('gym_memberships').select('id',{count:'exact',head:true}).eq('gym_id',gid).eq('status','cancelling').or('paid_to.neq.coach,paid_to.is.null'); canCount=r.count||0; }catch(e){}
+  let mems=[], total=0;
+  try{
+    let q=supaClient.from('gym_memberships').select('*',{count:'exact'}).eq('gym_id',gid).in('status',['active','cancelling']).or('paid_to.neq.coach,paid_to.is.null');
+    if(_sQ) q=q.or('student_name.ilike.*'+_sQ+'*,child_name.ilike.*'+_sQ+'*');
+    if(_kid==='kids') q=q.not('child_name','is',null); else if(_kid==='adults') q=q.is('child_name',null);
+    if(_lvl) q=q.or('plan_access.ilike.*all*,plan_access.ilike.*'+_lvl+'*');
+    q=q.order('status',{ascending:true}).order('created_at',{ascending:true}).range(_gmPage*_gmSize, _gmPage*_gmSize+_gmSize-1);
+    const rr=await q; mems=rr.data||[]; total=rr.count||0;
+  }catch(e){ mems=[]; total=0; }
+  const _totalPages=Math.max(1, Math.ceil((total||0)/_gmSize));
+  if(_gmPage>_totalPages-1){ _gmPage=_totalPages-1; if(_gmPage<0)_gmPage=0; window._gmPage=_gmPage; }
+  const _isDefault=(_gmPage===0 && !_sQ && !_kid && !_lvl);
   // attendance frequency (group-class "seriousness" signal) per member
   const _freqMap={}; try{ const { data:_fa } = await supaClient.rpc('gym_member_frequency',{ p_gym:_myGymData.id }); (_fa||[]).forEach(f=>{ _freqMap[f.student_id]={v30:+f.v30||0, v90:+f.v90||0}; }); }catch(e){}
   const _attInfo=(m)=>{ const f=_freqMap[m.student_id]; const v30=f?f.v30:0, v90=f?f.v90:0; const perWeek=v30/4.345; const prev=(v90-v30)/8.69; const trend=(!f)?'':(perWeek>prev+0.25?' ↑':(perWeek<prev-0.25?' ↓':'')); let color='var(--light)'; if(f&&(v30>0||v90>0)){ color = perWeek>=3?'#006040':(perWeek>=1?'var(--mid)':'var(--red)'); } const num=(EN?perWeek.toFixed(1):perWeek.toFixed(1).replace('.',',')); const txt=(!f||(v30===0&&v90===0))?'—':(num+'×/'+(EN?'wk':'týd')+trend); return { perWeek, color, txt }; };
   const _memSids=new Set(mems.map(function(m){ return m.student_id; }).filter(Boolean));
   let _extras=[];
-  try{
+  if(_isDefault) try{
     const _ex={};
     try{ const { data:_ga } = await supaClient.from('gym_attendance').select('student_id,student_name').eq('gym_id',_myGymData.id); (_ga||[]).forEach(function(a){ const sid=a.student_id; if(!sid||_memSids.has(sid)) return; if(!_ex[sid]) _ex[sid]={student_id:sid, student_name:a.student_name||'', n:0}; _ex[sid].n++; if(!_ex[sid].student_name&&a.student_name) _ex[sid].student_name=a.student_name; }); }catch(e){}
     try{ const { data:_gb } = await supaClient.from('gym_bookings').select('student_id,student_name,status').eq('gym_id',_myGymData.id).eq('status','active'); (_gb||[]).forEach(function(b){ const sid=b.student_id; if(!sid||_memSids.has(sid)) return; if(!_ex[sid]) _ex[sid]={student_id:sid, student_name:b.student_name||'', n:0}; _ex[sid].n++; if(!_ex[sid].student_name&&b.student_name) _ex[sid].student_name=b.student_name; }); }catch(e){}
     _extras=Object.keys(_ex).map(function(k){ return _ex[k]; });
   }catch(e){}
-  if(!mems.length && !_extras.length){ box.innerHTML=`<p style="color:var(--light);font-size:13px;">${EN?'No members yet.':'Zatím žádní členové.'}</p>`; return; }
-  const active=mems.filter(m=>m.status==='active'), cancelling=mems.filter(m=>m.status==='cancelling');
   const accOf=(m)=>{ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
-  const lvlSet=[...new Set(mems.flatMap(m=>accOf(m)).filter(x=>x&&x!=='all'))];
-  const matchLvl=(m)=>{ if(!_gmMembLvl) return true; const a=accOf(m); return a.includes('all')||a.includes(_gmMembLvl); };
-  const matchKid=(m)=>{ if(!window._gmMembKid) return true; const k=!!m.child_name; return window._gmMembKid==='kids'?k:!k; };
-  const fActive=active.filter(m=>matchLvl(m)&&matchKid(m)), fCancel=cancelling.filter(m=>matchLvl(m)&&matchKid(m));
   const compactCard=(m)=>{ const acc=accessLabel(accOf(m)); const cancel=m.status==='cancelling'; const ai=_attInfo(m);
     return `<div class="mbCard" data-sid="${m.student_id}" data-child="${(m.child_name||'').replace(/"/g,'&quot;')}" data-name="${(m.student_name||'').replace(/"/g,'&quot;')}" style="border:1px solid ${cancel?'#F3C9C0':'var(--border)'};border-radius:12px;padding:10px 11px;background:${cancel?'#FEF6F4':'#fff'};cursor:pointer;min-width:0;">
       <div style="font-weight:700;font-size:13.5px;line-height:1.2;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${m.child_name?(kidEmoji(m.child_age)+' '+escapeHtml(m.child_name)+(m.child_age!=null?(' ('+m.child_age+')'):'')):escapeHtml(m.student_name||(EN?'Member':'Člen'))}</div>${m.child_name?`<div style="font-size:10.5px;color:var(--light);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${EN?'parent':'rodič'}: ${escapeHtml(m.student_name||'')}</div>`:''}
@@ -11583,35 +11597,47 @@ async function renderGymMembers(){
     }).join('');
     return `<table class="mtTable"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
   };
+  let _planLevels=[]; try{ const _pls=(typeof gymMembPlans==='function'?gymMembPlans(_myGymData):[])||[]; const _lset=new Set(); _pls.forEach(function(p){ var a=p.access; var arr; if(Array.isArray(a))arr=a; else if(typeof a==='string'){ try{ var j=JSON.parse(a); arr=Array.isArray(j)?j:[a]; }catch(e){ arr=[a]; } } else arr=[]; arr.forEach(function(x){ if(x&&x!=='all') _lset.add(x); }); }); _planLevels=[..._lset]; }catch(e){}
   let html=`<div style="display:flex;gap:8px;margin-bottom:12px;">
-    <div style="flex:1;background:#F0FBF0;border:1px solid #CDEBD6;border-radius:12px;padding:11px;text-align:center;"><div style="font-family:'Bebas Neue';font-size:26px;color:#006040;">${active.length}</div><div style="font-size:11px;color:var(--mid);">${EN?'Active':'Aktivní'}</div></div>
-    <div style="flex:1;background:#FEF0EE;border:1px solid #F3C9C0;border-radius:12px;padding:11px;text-align:center;"><div style="font-family:'Bebas Neue';font-size:26px;color:var(--red);">${cancelling.length}</div><div style="font-size:11px;color:var(--mid);">${EN?'Cancelling':'Ruší se'}</div></div>
+    <div style="flex:1;background:#F0FBF0;border:1px solid #CDEBD6;border-radius:12px;padding:11px;text-align:center;"><div style="font-family:'Bebas Neue';font-size:26px;color:#006040;">${actCount}</div><div style="font-size:11px;color:var(--mid);">${EN?'Active':'Aktivní'}</div></div>
+    <div style="flex:1;background:#FEF0EE;border:1px solid #F3C9C0;border-radius:12px;padding:11px;text-align:center;"><div style="font-family:'Bebas Neue';font-size:26px;color:var(--red);">${canCount}</div><div style="font-size:11px;color:var(--mid);">${EN?'Cancelling':'Ruší se'}</div></div>
   </div>`;
-  const hasKids=mems.some(m=>m.child_name);
-  if(hasKids){ const kc=[{v:null,l:(EN?'All':'Vše')},{v:'adults',l:(EN?'Adults':'Dospělí')},{v:'kids',l:(EN?'Kids':'Děti')}]; html+=`<div style="display:flex;gap:6px;margin-bottom:8px;">${kc.map(c=>{ const on=(window._gmMembKid||null)===c.v; return `<div class="gmKidChip" data-v="${c.v||''}" style="flex:1;text-align:center;padding:8px 4px;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'var(--surf)'};color:${on?'#fff':'var(--dark)'};">${c.l}</div>`; }).join('')}</div>`; }
-  if(lvlSet.length){
-    const chips=[{v:null,l:(EN?'All':'Vše')}].concat(lvlSet.map(v=>({v,l:levelLabel(v)})));
+  html+=`<div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;">
+    <input id="gmSearchInp" value="${escapeHtml(_gmSearch)}" placeholder="${EN?'Search a member by name…':'Hledat člena podle jména…'}" style="flex:1;min-width:0;box-sizing:border-box;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:'DM Sans';">
+    <select id="gmSizeSel" style="flex:0 0 auto;padding:10px 8px;border:1.5px solid var(--border);border-radius:10px;font-size:13px;font-family:'DM Sans';background:var(--surf);color:var(--dark);">${[20,50].map(n=>`<option value="${n}"${_gmSize===n?' selected':''}>${n}/${EN?'pg':'str'}</option>`).join('')}</select>
+  </div>`;
+  { const kc=[{v:null,l:(EN?'All':'Vše')},{v:'adults',l:(EN?'Adults':'Dospělí')},{v:'kids',l:(EN?'Kids':'Děti')}]; html+=`<div style="display:flex;gap:6px;margin-bottom:8px;">${kc.map(c=>{ const on=(window._gmMembKid||null)===c.v; return `<div class="gmKidChip" data-v="${c.v||''}" style="flex:1;text-align:center;padding:8px 4px;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'var(--surf)'};color:${on?'#fff':'var(--dark)'};">${c.l}</div>`; }).join('')}</div>`; }
+  if(_planLevels.length){
+    const chips=[{v:null,l:(EN?'All':'Vše')}].concat(_planLevels.map(v=>({v,l:levelLabel(v)})));
     html+=`<div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:8px;margin-bottom:4px;scrollbar-width:none;">${chips.map(c=>{ const on=(_gmMembLvl||null)===c.v; return `<div class="gmLvlChip" data-v="${c.v==null?'':c.v}" style="flex:0 0 auto;font-size:12px;font-weight:700;cursor:pointer;padding:6px 12px;border-radius:14px;white-space:nowrap;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'transparent'};color:${on?'#fff':'var(--mid)'};">${c.l}</div>`; }).join('')}</div>`;
   }
-  if(_isDeskDash){ const _all=fActive.concat(fCancel); if(_all.length){ html+=_memTable(_all); } else { html+=`<p style="color:var(--light);font-size:13px;margin-top:8px;">${EN?'No members in this filter.':'Žádní členové v tomto filtru.'}</p>`; } }
-  else {
-  if(fActive.length){ html+=`<div style="font-size:12px;font-weight:700;color:var(--mid);margin:6px 0;">✅ ${EN?'Active members':'Aktivní členové'} (${fActive.length})</div>`+grid(fActive); }
-  if(fCancel.length){ html+=`<div style="font-size:12px;font-weight:700;color:var(--mid);margin:12px 0 6px;">📉 ${EN?'Cancelling':'Rušící členové'} (${fCancel.length})</div>`+grid(fCancel); }
-  if(!fActive.length && !fCancel.length){ html+=`<p style="color:var(--light);font-size:13px;margin-top:8px;">${EN?'No members in this filter.':'Žádní členové v tomto filtru.'}</p>`; }
+  if(!mems.length){ html+=`<p style="color:var(--light);font-size:13px;margin-top:8px;">${(_sQ||_kid||_lvl)?(EN?'Nobody matches this filter.':'Nikdo neodpovídá filtru.'):(EN?'No members yet.':'Zatím žádní členové.')}</p>`; }
+  else if(_isDeskDash){ html+=_memTable(mems); }
+  else { html+=grid(mems); }
+  if(total>_gmSize || _gmPage>0){
+    const _from=total?(_gmPage*_gmSize+1):0, _to=Math.min(total,(_gmPage+1)*_gmSize);
+    html+=`<div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-top:14px;">
+      <button id="gmPrev"${_gmPage<=0?' disabled':''} style="padding:8px 14px;border-radius:10px;border:1.5px solid var(--border);background:${_gmPage<=0?'var(--surf)':'#fff'};color:${_gmPage<=0?'var(--light)':'var(--dark)'};font-weight:800;font-size:15px;cursor:${_gmPage<=0?'default':'pointer'};font-family:'DM Sans';">‹</button>
+      <span style="font-size:12px;color:var(--mid);font-weight:700;">${_from}–${_to} ${EN?'of':'z'} ${total}</span>
+      <button id="gmNext"${_gmPage>=_totalPages-1?' disabled':''} style="padding:8px 14px;border-radius:10px;border:1.5px solid var(--border);background:${_gmPage>=_totalPages-1?'var(--surf)':'#fff'};color:${_gmPage>=_totalPages-1?'var(--light)':'var(--dark)'};font-weight:800;font-size:15px;cursor:${_gmPage>=_totalPages-1?'default':'pointer'};font-family:'DM Sans';">›</button>
+    </div>`;
   }
-  if(_extras.length){
+  if(_isDefault && _extras.length){
     html+=`<details style="margin-top:14px;"><summary style="cursor:pointer;font-size:12px;font-weight:700;color:var(--mid);list-style:none;">🥊 ${EN?'Drop-in / attendance (non-members)':'Drop-in / docházka (ne členové)'} (${_extras.length})</summary><div style="font-size:11px;color:var(--light);line-height:1.5;margin:8px 0;">${EN?'They train here without a membership — open one to award a belt.':'Trénují tu bez členství — otevři je pro udělení pásku.'}</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">`+_extras.map(function(e){ return `<div class="mbCard" data-sid="${e.student_id}" data-child="" data-name="${(e.student_name||'').replace(/"/g,'&quot;')}" style="border:1px solid var(--border);border-radius:12px;padding:10px 11px;background:#fff;cursor:pointer;min-width:0;"><div style="font-weight:700;font-size:13.5px;line-height:1.2;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(e.student_name||(EN?'Student':'Student'))}</div><div style="font-size:11px;color:var(--light);">drop-in · ${e.n}× ${EN?'here':'tady'}</div></div>`; }).join('')+`</div></details>`;
   }
   box.innerHTML=html;
-  box.querySelectorAll('.gmLvlChip').forEach(c=>c.onclick=()=>{ _gmMembLvl=c.dataset.v||null; renderGymMembers(); });
-  box.querySelectorAll('.gmKidChip').forEach(c=>c.onclick=()=>{ window._gmMembKid=c.dataset.v||null; renderGymMembers(); });
+  box.querySelectorAll('.gmLvlChip').forEach(c=>c.onclick=()=>{ _gmMembLvl=c.dataset.v||null; window._gmPage=0; renderGymMembers(); });
+  box.querySelectorAll('.gmKidChip').forEach(c=>c.onclick=()=>{ window._gmMembKid=c.dataset.v||null; window._gmPage=0; renderGymMembers(); });
+  { const si=box.querySelector('#gmSearchInp'); if(si){ si.oninput=function(){ const v=this.value; clearTimeout(window._gmSearchT); window._gmSearchT=setTimeout(function(){ window._gmSearch=v; window._gmPage=0; renderGymMembers(); }, 320); }; } const ss=box.querySelector('#gmSizeSel'); if(ss){ ss.onchange=function(){ window._gmSize=(this.value==='50'?50:20); window._gmPage=0; renderGymMembers(); }; } const pv=box.querySelector('#gmPrev'); if(pv){ pv.onclick=function(){ if((window._gmPage||0)>0){ window._gmPage=(window._gmPage||0)-1; renderGymMembers(); } }; } const nx=box.querySelector('#gmNext'); if(nx){ nx.onclick=function(){ window._gmPage=(window._gmPage||0)+1; renderGymMembers(); }; } }
+  if((window._gmSearch||'').length){ const _si=box.querySelector('#gmSearchInp'); if(_si){ try{ _si.focus(); const _l=_si.value.length; _si.setSelectionRange(_l,_l); }catch(e){} } }
   box.querySelectorAll('.mbCard').forEach(c=>c.onclick=()=>{ if(c.dataset.child){ openGymKidDetail(c.dataset.sid, c.dataset.child); } else { openGymMemberDetail(c.dataset.sid, c.dataset.name); } });
   box.querySelectorAll('.mtTable th').forEach(th=>th.onclick=()=>{ const k=th.dataset.k; const tb=th.closest('table').querySelector('tbody'); const rows=Array.prototype.slice.call(tb.querySelectorAll('tr')); const asc=th.dataset.dir!=='asc'; th.closest('thead').querySelectorAll('th').forEach(x=>{x.classList.remove('mtActive');x.removeAttribute('data-dir');}); th.dataset.dir=asc?'asc':'desc'; th.classList.add('mtActive'); const num=(k==='mrr'||k==='joined'||k==='status'||k==='att'); rows.sort((a,b)=>{ let av,bv; if(k==='name'){av=a.dataset.vname;bv=b.dataset.vname;} else if(k==='plan'){av=a.dataset.plan;bv=b.dataset.plan;} else {av=parseFloat(a.dataset[k])||0;bv=parseFloat(b.dataset[k])||0;} if(num) return asc?av-bv:bv-av; return asc?(av<bv?-1:av>bv?1:0):(av>bv?-1:av<bv?1:0); }); rows.forEach(r=>tb.appendChild(r)); });
   // ── Win-back: členové, kteří dlouho nedorazili ──
-  try{
-    const { data: aa } = await supaClient.rpc('gym_member_last_visit',{ p_gym_id:_myGymData.id });
+  if(_isDefault) try{
+    const { data: _actMems } = await supaClient.from('gym_memberships').select('student_id,student_name,created_at').eq('gym_id',gid).eq('status','active').or('paid_to.neq.coach,paid_to.is.null');
+    const { data: aa } = await supaClient.rpc('gym_member_last_visit',{ p_gym_id:gid });
     const last={}; (aa||[]).forEach(a=>{ last[a.student_id]=a.last_visit; });
-    const inactive=computeCold(active, last);
+    const inactive=computeCold(_actMems||[], last);
     if(inactive.length){
       const wb=document.createElement('div');
       wb.innerHTML=`<div style="font-size:12px;font-weight:700;color:#B26A00;margin:16px 0 4px;">👋 ${EN?'Reach out — drifting members':'Ozvi se — možná odcházejí'} (${inactive.length})</div>
@@ -12099,15 +12125,15 @@ function openCashRecord(){
   html+='<p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:12px;">'+(EN?'Logs the payment so the member gets stats/XP and the MTL commission is billed on the 6th from your card.':'Zaznamen\u00e1 platbu \u2014 \u010dlen t\u00edm z\u00edsk\u00e1 staty/XP a provize MTL se strhne 6. z tv\u00e9 karty.')+'</p>';
   html+='<p style="font-size:11px;color:var(--light);margin:0 0 4px;">'+(EN?'Who paid':'Kdo zaplatil')+'</p>';
   html+='<select id="crMember" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:\'DM Sans\';margin-bottom:8px;background:var(--surf);color:var(--dark);">';
-  html+='<option value="">'+(EN?'\u2014 Walk-in / type a name \u2014':'\u2014 Walk-in / napi\u0161 jm\u00e9no \u2014')+'</option>';
+  html+='<option value="">'+(EN?'\u2014 Select a member \u2014':'\u2014 Vyber \u010dlena \u2014')+'</option>';
   (_recMembers||[]).forEach(function(m){ html+='<option value="'+m.student_id+'">'+escapeHtml(m.student_name||'\u2014')+'</option>'; });
   html+='</select>';
-  html+='<input id="crName" placeholder="'+(EN?'Name (for the log)':'Jm\u00e9no (na log)')+'" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:\'DM Sans\';margin-bottom:10px;">';
+  html+='<button id="crWalkBtn" type="button" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px dashed var(--border);background:var(--surf);border-radius:10px;font-size:13px;font-weight:700;color:var(--mid);cursor:pointer;font-family:\'DM Sans\';margin-bottom:10px;">'+(EN?'🚶 Not a member? \u2192 Walk-in check-in':'🚶 Nen\u00ed \u010dlen? \u2192 Jednor\u00e1zov\u00fd vstup')+'</button>';
   html+='<p style="font-size:11px;color:var(--light);margin:0 0 4px;">'+(EN?'For what':'Za co')+'</p>';
   html+='<select id="crType" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:\'DM Sans\';margin-bottom:8px;background:var(--surf);color:var(--dark);">';
   html+='<option value="dropin">'+(EN?'Drop-in (single class)':'Jednor\u00e1zov\u00e1 lekce (drop-in)')+'</option>';
   if(plans.length) html+='<option value="memb">'+(EN?'Membership':'Permanentka')+'</option>';
-  html+='<option value="custom">'+(EN?'Custom amount':'Vlastn\u00ed \u010d\u00e1stka')+'</option>';
+  
   html+='</select>';
   html+='<select id="crClass" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:\'DM Sans\';margin-bottom:8px;background:var(--surf);color:var(--dark);'+(classes.length?'':'display:none;')+'">';
   classes.forEach(function(o,i){ const pr=_recPrice(o); html+='<option value="'+i+'" data-price="'+(pr.dp||0)+'">'+escapeHtml(o.name||'Lekce')+' \u00b7 '+o.time+' ('+fmtPrice(pr.dp||0,pr.dcur||cur)+' '+sym+')</option>'; });
@@ -12115,8 +12141,8 @@ function openCashRecord(){
   html+='<select id="crPlan" style="display:none;width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:\'DM Sans\';margin-bottom:8px;background:var(--surf);color:var(--dark);">';
   plans.forEach(function(p,i){ html+='<option value="'+i+'" data-price="'+(p.price||0)+'">'+escapeHtml(p.name||'Permanentka')+' \u00b7 '+fmtPrice(p.price||0,cur)+' '+sym+'</option>'; });
   html+='</select>';
-  html+='<p style="font-size:11px;color:var(--light);margin:6px 0 4px;">'+(EN?'Amount received':'P\u0159ijat\u00e1 \u010d\u00e1stka')+' ('+sym+')</p>';
-  html+='<input id="crAmt" type="number" inputmode="decimal" min="0" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:16px;font-weight:700;font-family:\'DM Sans\';margin-bottom:8px;">';
+  html+='<p style="font-size:11px;color:var(--light);margin:6px 0 4px;">'+(EN?'Price (from listing)':'Cena (dle cen\u00edku)')+' ('+sym+')</p>';
+  html+='<input id="crAmt" type="number" inputmode="decimal" min="0" readonly style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:16px;font-weight:700;font-family:\'DM Sans\';margin-bottom:8px;background:var(--surf);color:var(--mid);">';
   html+='<div id="crComm" style="font-size:12px;color:var(--mid);margin-bottom:12px;"></div>';
   html+='<button id="crSave" style="width:100%;padding:14px;background:#0a8f5b;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'\u2713 Received in cash':'\u2713 P\u0159ijato v hotovosti')+'</button>';
   list.innerHTML=html;
@@ -12129,14 +12155,15 @@ function openCashRecord(){
   if($$('crClass')) $$('crClass').onchange=function(){ const o=$$('crClass').selectedOptions[0]; setAmt(o?+o.dataset.price:0); };
   if($$('crPlan')) $$('crPlan').onchange=function(){ const o=$$('crPlan').selectedOptions[0]; setAmt(o?+o.dataset.price:0); };
   if($$('crAmt')) $$('crAmt').oninput=refreshComm;
-  if($$('crMember')) $$('crMember').onchange=function(){ const o=this.selectedOptions[0]; if(this.value && $$('crName')){ $$('crName').value=(o?o.textContent:''); } };
+  if($$('crWalkBtn')) $$('crWalkBtn').onclick=function(){ openGuestDropin(); };
   if($$('recBackBtn')) $$('recBackBtn').onclick=function(){ renderReceptionList(($('recSearch')&&$('recSearch').value)||''); };
   syncType();
+  (function(){ var t=$$('crType')&&$$('crType').value; if(t==='memb'&&$$('crPlan')){ var o=$$('crPlan').selectedOptions[0]; setAmt(o?+o.dataset.price:0); } else if($$('crClass')&&classes.length){ var o=$$('crClass').selectedOptions[0]; setAmt(o?+o.dataset.price:0); } })();
   if($$('crSave')) $$('crSave').onclick=async function(){
     const a=curAmt(); if(a<=0){ toast(EN?'Enter the amount':'Zadej \u010d\u00e1stku'); return; }
     const t=$$('crType').value;
     const sid=($$('crMember')&&$$('crMember').value)||null;
-    const nm=($$('crName')&&$$('crName').value.trim())||null;
+    const nm=($$('crMember')&&$$('crMember').value&&$$('crMember').selectedOptions[0])?($$('crMember').selectedOptions[0].textContent||'').trim():null;
     const amount_minor=Math.round(a*100);
     const fee_minor=Math.round(amount_minor*rate);
     const month=new Date().toISOString().slice(0,7);
