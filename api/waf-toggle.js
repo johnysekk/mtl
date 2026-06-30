@@ -27,26 +27,52 @@ export default async function handler(req, res) {
     let b = req.body || {}; if (typeof b === 'string') { try { b = JSON.parse(b); } catch (e) { b = {}; } }
     const qs = V_TEAM ? ('?teamId=' + encodeURIComponent(V_TEAM)) : '';
 
+    // Persist the Vercel-confirmed state on the founder profile (Vercel has no GET-state endpoint,
+    // so the source of truth is the echo in the POST response, which we store + show with a timestamp).
+    async function _storeWaf(enabled, at, until) {
+      try {
+        await fetch(`${SB}/rest/v1/profiles?id=eq.${FOUNDER_UUID}`, {
+          method: 'PATCH',
+          headers: { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+          body: JSON.stringify({ waf_enabled: enabled, waf_set_at: at, waf_until: (until || null) }),
+        });
+      } catch (e) {}
+    }
+
     if (b.action === 'set') {
-      const enabled = !!b.enabled;
+      const want = !!b.enabled;
+      // Vercel REQUIRES attackModeActiveUntil (epoch ms) when ENABLING — it auto-disables at that time.
+      // 24h protection window; re-tap Enable to extend, or Off disables immediately (no until needed).
+      const untilMs = want ? (Date.now() + 24 * 60 * 60 * 1000) : null;
+      const payload = { projectId: V_PROJECT, attackModeEnabled: want };
+      if (want) payload.attackModeActiveUntil = untilMs;
       const r = await fetch('https://api.vercel.com/v1/security/attack-mode' + qs, {
         method: 'POST',
         headers: { Authorization: 'Bearer ' + V_TOKEN, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId: V_PROJECT, attackModeEnabled: enabled }),
+        body: JSON.stringify(payload),
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok) return res.status(502).json({ ok: false, error: (j && j.error && j.error.message) || ('vercel ' + r.status) });
-      return res.status(200).json({ ok: true, configured: true, enabled });
+      // Vercel echoes the resulting state (string "true"/"false" or bool) -> authoritative confirmation.
+      const raw = j && j.attackModeEnabled;
+      const hasEcho = (raw === true || raw === false || raw === 'true' || raw === 'false');
+      const confirmed = hasEcho ? (raw === true || raw === 'true') : want;
+      const at = new Date().toISOString();
+      const untilIso = (confirmed && untilMs) ? new Date(untilMs).toISOString() : null;
+      await _storeWaf(confirmed, at, untilIso);
+      return res.status(200).json({ ok: true, configured: true, enabled: confirmed, confirmed: hasEcho, at, until: untilIso });
     }
 
-    // get current state (best-effort; UI tolerates unknown)
-    const r = await fetch('https://api.vercel.com/v1/security/attack-mode' + qs + (qs ? '&' : '?') + 'projectId=' + encodeURIComponent(V_PROJECT),
-      { headers: { Authorization: 'Bearer ' + V_TOKEN } });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) return res.status(200).json({ ok: true, configured: true, enabled: null });
-    const until = j && (j.attackModeEnabledUntil || j.attack_mode_enabled_until);
-    const enabled = !!(j && (j.attackModeEnabled === true || (until && until > Date.now())));
-    return res.status(200).json({ ok: true, configured: true, enabled });
+    // get: there is NO Vercel GET-state endpoint, so return the last Vercel-confirmed state we stored.
+    const pr = await fetch(`${SB}/rest/v1/profiles?id=eq.${FOUNDER_UUID}&select=waf_enabled,waf_set_at,waf_until`,
+      { headers: { apikey: SKEY, Authorization: `Bearer ${SKEY}` } });
+    const pj = pr.ok ? await pr.json().catch(() => []) : [];
+    const row = (pj && pj[0]) || {};
+    let enabled = (typeof row.waf_enabled === 'boolean') ? row.waf_enabled : null;
+    // Vercel auto-disables Attack Mode at attackModeActiveUntil, so never claim "on" past that time.
+    const expired = !!(enabled && row.waf_until && Date.now() > new Date(row.waf_until).getTime());
+    if (expired) enabled = false;
+    return res.status(200).json({ ok: true, configured: true, enabled, at: row.waf_set_at || null, until: row.waf_until || null, expired, stored: true });
   } catch (e) {
     return res.status(500).json({ error: String((e && e.message) || e) });
   }
