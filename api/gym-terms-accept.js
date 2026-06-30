@@ -41,7 +41,7 @@ module.exports = async (req, res) => {
     if (!gymId || !token) return res.status(400).json({ error: 'missing gymId/token' });
 
     // gym must exist and actually have terms (don't record empty acceptances)
-    const { data: g } = await admin.from('gyms').select('id,terms_text').eq('id', gymId).single();
+    const { data: g } = await admin.from('gyms').select('id,terms_text,terms_title').eq('id', gymId).single();
     if (!g) return res.status(404).json({ error: 'gym not found' });
     if (!(g.terms_text && g.terms_text.trim())) return res.json({ ok: true, skipped: true });
 
@@ -57,6 +57,8 @@ module.exports = async (req, res) => {
       student_id: null,
       student_name: name,
       body_hash: hash,
+      body_text: (g.terms_text || '').trim() || null,
+      body_title: g.terms_title || null,
       version: version,
       accepted_at: new Date().toISOString()
     });
