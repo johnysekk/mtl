@@ -54,28 +54,6 @@ async function isWelcomeZero(acct){
 }
 // DIAGNOSTIC: same lookup as isWelcomeZero but returns WHY (shown in Stripe metadata as mtl_welcome).
 // off=kill-switch | noprov=provider not found by account | ok-*=welcome active | expired-* | old-*(>45d no window) | anchor-*(would open) | err
-async function welcomeReason(acct){
-  if(!acct) return 'noacct';
-  try{
-    const ks = await _wsbGet(`profiles?id=eq.${_WELCOME_FOUNDER}&select=welcome_zero_off`);
-    if(ks && ks[0] && ks[0].welcome_zero_off) return 'off';
-    const a = encodeURIComponent(String(acct).trim());
-    let via='prof';
-    let prov = (await _wsbGet(`profiles?stripe_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0]
-            || (await _wsbGet(`profiles?gym_payout_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0];
-    if(!prov){
-      let g = (await _wsbGet(`gyms?stripe_account=eq.${a}&select=owner_id&limit=1`))[0]
-           || (await _wsbGet(`gyms?gym_payout_account=eq.${a}&select=owner_id&limit=1`))[0];
-      if(g && g.owner_id){ prov = (await _wsbGet(`profiles?id=eq.${g.owner_id}&select=id,welcome_free_until,created_at`))[0]; via='gym'; }
-    }
-    if(!prov || !prov.id) return 'noprov';
-    const now=Date.now();
-    if(prov.welcome_free_until) return (now < new Date(prov.welcome_free_until).getTime()) ? ('ok-'+via) : ('expired-'+via);
-    const created = prov.created_at ? new Date(prov.created_at).getTime() : 0;
-    if(created && (now-created) < 45*86400000) return 'anchor-'+via;
-    return 'old-'+via;
-  }catch(e){ return 'err'; }
-}
 
 export default async function handler(req, res) {
   const type = String(req.query.type || 'coach');
@@ -143,6 +121,7 @@ async function coachCheckout(req, res) {
     tax_id_collection: { enabled: true },
     metadata: {
       booking_type: isOnline ? 'online' : 'inperson',
+      mtl_welcome_waived: (await isWelcomeZero(coachId)) ? String(applicationFee) : '0',
       student_id: studentId || '',
       slot_id: slotId || '',
       coach_profile_id: coachProfileId || '',
@@ -158,7 +137,6 @@ async function coachCheckout(req, res) {
     payment_intent_data: {
       application_fee_amount: (await isWelcomeZero(coachId)) ? 0 : applicationFee,
       metadata: {
-        mtl_welcome: await welcomeReason(coachId),
         credit_type: credit || 'none',
         coach_pct: (STUDENT_MARKUP - COMMISSION).toFixed(2),
         commission_pct: COMMISSION.toFixed(2),
@@ -212,7 +190,7 @@ async function gymCheckout(req, res) {
       payment_method_types: ['card'],
       billing_address_collection: 'required',
       tax_id_collection: { enabled: true },
-      metadata: { mtl_payment_type: (String(merch)==='1'?'merch':'drop_in'), gym_id: gymId || '', student_id: studentId || '', coach_id: coachId || '', mtl_plan: className || 'Drop-in', merch_name: merchName || '', mtl_currency: cur },
+      metadata: { mtl_payment_type: (String(merch)==='1'?'merch':'drop_in'), mtl_welcome_waived: (await isWelcomeZero(gymAccount)) ? String(applicationFee) : '0', gym_id: gymId || '', student_id: studentId || '', coach_id: coachId || '', mtl_plan: className || 'Drop-in', merch_name: merchName || '', mtl_currency: cur },
       line_items: [
         { price_data: { currency: cur, product_data: { name: `${className || 'Drop-in lekce'} — ${gymName || 'MTL Gym'}` }, unit_amount: unitAmount }, quantity: 1 },
       ],
@@ -221,7 +199,6 @@ async function gymCheckout(req, res) {
         description: `${className || 'Drop-in'}${level ? ' [' + level + ']' : ''} — ${gymName || 'MTL Gym'} (drop-in)`,
         metadata: {
           mtl_payment_type: (String(merch)==='1'?'merch':'drop_in'),
-          mtl_welcome: await welcomeReason(gymAccount),
           merch_name: merchName || '',
           mtl_plan: className || 'Drop-in',
           mtl_level: level || '',
@@ -283,7 +260,6 @@ async function eventCheckout(req, res) {
         description: `${eventTitle || 'Event'}${tierName ? ' [' + tierName + ']' : ''} (MTL event ticket)`,
         metadata: {
           mtl_payment_type: 'event_ticket',
-          mtl_welcome: await welcomeReason(gymAccount),
           mtl_event: eventTitle || '',
           mtl_tier: tierName || '',
           mtl_base: String(P),
@@ -296,6 +272,7 @@ async function eventCheckout(req, res) {
       },
       metadata: {
         mtl_payment_type: 'event_ticket',
+        mtl_welcome_waived: (await isWelcomeZero(gymAccount)) ? String(fee * Q) : '0',
         ticket_id: ticketId || '',
         qr_token: qrToken || '',
         mtl_event_id: eventId || '',
@@ -336,7 +313,8 @@ async function membershipCheckout(req, res) {
   // it to the normal rate (a finder's fee for the acquisition). Monthly subs only.
   const MTL_ACQ_PERCENT = 10;
   const _isAcq = (String(acq) === 'mtl_discovery' && ivl === 'month' && String(partner) !== '1');
-  const FEE_NOW = _isAcq ? MTL_ACQ_PERCENT : FEE_PCT;
+  // EP perk: HALF the acquisition fee (5%) vs 10% for standard providers; after the window the webhook drops to mtl_acq_base (EP=1%).
+  const FEE_NOW = _isAcq ? (String(partner)==='1' ? (MTL_ACQ_PERCENT/2) : MTL_ACQ_PERCENT) : FEE_PCT;
 
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
@@ -379,9 +357,9 @@ async function membershipCheckout(req, res) {
       subscription_data: {
         application_fee_percent: (await isWelcomeZero(gymAccount)) ? 0 : FEE_NOW,
         metadata: {
-          mtl_welcome: await welcomeReason(gymAccount),
           mtl_acq: _isAcq ? '1' : '',
           mtl_acq_base: String(FEE_PCT),
+          mtl_income: income || 'side',
           mtl_payment_type: 'membership',
           gym_id: gymId || '',
           student_id: studentId || '',
@@ -409,13 +387,37 @@ async function membershipCheckout(req, res) {
   res.redirect(303, session.url);
 }
 
-// ───────────────────────── Exclusive MTL Partner ($499/mo, platform account) ─────────────────────────
+// ───────────────────────── Exclusive MTL Partner (localized price by region, platform account) ─────────────────────────
+// Localized EP price by the provider's region. Mirrors _epRegion() in index.html.
+// SK is a cheaper EUR tier than the EU default; both are EUR, so we MUST key on COUNTRY, not currency.
+function epTierForCountry(cc){
+  // FLAT EP pricing: 1000 CZK/mo for everyone (founding price, first 100 PAID partners).
+  // Single currency = zero FX on MTL books. Client shows an indicative ECB conversion only.
+  // When the 100 founding spots fill, raise this to 2000 (and _epPrice() in index.html).
+  return { currency:'czk', amount:1000 };
+}
+
 async function partnerCheckout(req, res) {
   const { userId, email } = req.query;
   if (!userId) return res.status(400).json({ error: 'Chybí userId' });
 
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
+
+  // Region = country of the provider's connected Stripe account (authoritative for what we charge).
+  // Fall back to cached stripe_country / profile country if no account is retrievable yet.
+  let cc = '';
+  try {
+    const prof = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(userId)}&select=stripe_account,gym_payout_account,country`))[0] || {};
+    let acct = prof.stripe_account || prof.gym_payout_account || '';
+    if(!acct){ const g=(await _wsbGet(`gyms?owner_id=eq.${encodeURIComponent(userId)}&select=stripe_account,gym_payout_account&limit=1`))[0]; if(g) acct=g.stripe_account||g.gym_payout_account||''; }
+    if(acct){
+      try{ const a=await stripe.accounts.retrieve(String(acct)); cc=String(a.country||'').toUpperCase(); }catch(e){}
+      if(cc){ _wsbPatch(`profiles?id=eq.${encodeURIComponent(userId)}`, { stripe_country: cc }); } // cache for client display; no-op until ep-pricing.sql adds the column
+    }
+    if(!cc) cc = String(prof.country || '').toUpperCase();
+  } catch(e){}
+  const tier = epTierForCountry(cc);
 
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
@@ -424,10 +426,10 @@ async function partnerCheckout(req, res) {
     tax_id_collection: { enabled: true, required: 'if_supported' },
     client_reference_id: userId,
     line_items: [
-      { price_data: { currency: 'usd', product_data: { name: 'Exclusive MTL Partner — coach & gym rates' }, unit_amount: 9900, recurring: { interval: 'month' } }, quantity: 1 },
+      { price_data: { currency: tier.currency, product_data: { name: 'Exclusive MTL Partner — coach & gym rates' }, unit_amount: Math.round(tier.amount*100), recurring: { interval: 'month' } }, quantity: 1 },
     ],
-    subscription_data: { metadata: { mtl_payment_type: 'partner_sub', user_id: userId } },
-    metadata: { mtl_payment_type: 'partner_sub', user_id: userId },
+    subscription_data: { metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'', ep_currency: tier.currency, ep_amount: String(tier.amount) } },
+    metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'' },
     success_url: `${proto}://${host}/?partner_sub=ok&session={CHECKOUT_SESSION_ID}`,
     cancel_url: `${proto}://${host}/`,
   }, { apiVersion: '2024-09-30.acacia' });

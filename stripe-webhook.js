@@ -9,6 +9,7 @@
 // DŮLEŽITÉ: webhook musí číst RAW body (proto bodyParser:false), jinak selže ověření podpisu.
 
 import Stripe from 'stripe';
+import crypto from 'crypto';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 export const config = { api: { bodyParser: false } };
@@ -220,7 +221,71 @@ async function recordTransaction(acct, pi, fields) {
       income_class: fields.income_class || null,
       status: 'paid', created_at: new Date().toISOString(),
     });
+    try { if (fields.member_id && gross != null) await ecoPurchase(fields.member_id, gross / 100, currency, pi); } catch (e) {}
   } catch (e) { console.error('recordTransaction', e.message); }
+}
+
+
+// Server-side Meta Purchase (CAPI) for a cohort deposit. Shares event_id cp_<member_id> with
+// the browser Purchase pixel so Meta de-duplicates. Uses the cohort's OWN pixel + secret token.
+async function cohortCapiPurchase(coh, cmId, email, amount, cur, fbp, fbc) {
+  try {
+    if (!coh || !coh.gym_meta_pixel || !coh.capi_token) return;
+    const sha = (v) => crypto.createHash('sha256').update(String(v).trim().toLowerCase()).digest('hex');
+    const user_data = {};
+    if (email) user_data.em = [sha(email)];
+    if (fbp) user_data.fbp = fbp;
+    if (fbc) user_data.fbc = fbc;
+    const evt = {
+      event_name: 'Purchase',
+      event_time: Math.floor(Date.now() / 1000),
+      action_source: 'website',
+      event_id: 'cp_' + cmId,
+      user_data,
+      custom_data: { value: Number(amount || 0), currency: cur || 'CZK' }
+    };
+    const url = 'https://graph.facebook.com/v21.0/' + encodeURIComponent(coh.gym_meta_pixel) + '/events?access_token=' + encodeURIComponent(coh.capi_token);
+    await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: [evt] }) });
+  } catch (e) { console.error('cohortCapiPurchase', e.message); }
+}
+
+// MTL Ecosystem Pixel — server-side Purchase for any customer transaction. Reads the founder's
+// ecosystem pixel + token once, and the buyer's marketing consent + fbp/fbc from their profile.
+// Consent-gated and no-ops cleanly until the pixel/token are configured in Admin -> MTL Ads.
+let _ECO_CFG = null;
+async function _ecoCfg() {
+  if (_ECO_CFG) return _ECO_CFG;
+  try {
+    const rows = await sbGet('profiles?id=eq.7e08d4bb-0efa-47ae-bd6a-85e9bd04400c&select=mtl_eco_pixel,mtl_eco_capi_token');
+    const f = rows && rows[0];
+    _ECO_CFG = (f && f.mtl_eco_pixel && f.mtl_eco_capi_token) ? { pixel: f.mtl_eco_pixel, token: f.mtl_eco_capi_token } : { pixel: '', token: '' };
+  } catch (e) { _ECO_CFG = { pixel: '', token: '' }; }
+  return _ECO_CFG;
+}
+async function ecoPurchase(buyerId, amount, cur, pi) {
+  try {
+    if (!buyerId || !amount) return;
+    const cfg = await _ecoCfg();
+    if (!cfg.pixel || !cfg.token) return;
+    const rows = await sbGet('profiles?id=eq.' + encodeURIComponent(buyerId) + '&select=marketing_consent,email,fbp,fbc');
+    const b = rows && rows[0];
+    if (!b || !b.marketing_consent) return;
+    const sha = (v) => crypto.createHash('sha256').update(String(v).trim().toLowerCase()).digest('hex');
+    const user_data = {};
+    if (b.email) user_data.em = [sha(b.email)];
+    if (b.fbp) user_data.fbp = b.fbp;
+    if (b.fbc) user_data.fbc = b.fbc;
+    const evt = {
+      event_name: 'Purchase',
+      event_time: Math.floor(Date.now() / 1000),
+      action_source: 'website',
+      event_id: 'mtlpur_' + (pi || (buyerId + '_' + Date.now())),
+      user_data,
+      custom_data: { value: Number(amount || 0), currency: (cur || 'CZK'), content_type: 'customer' }
+    };
+    const url = 'https://graph.facebook.com/v21.0/' + encodeURIComponent(cfg.pixel) + '/events?access_token=' + encodeURIComponent(cfg.token);
+    await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: [evt] }) });
+  } catch (e) { console.error('ecoPurchase', e.message); }
 }
 
 export default async function handler(req, res) {
@@ -313,13 +378,14 @@ export default async function handler(req, res) {
         if (cmId && (!already || already.length === 0)) {
           const amount = (s.amount_total || 0) / 100;
           const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
-          const fee = Math.round(amount * 0.035 * 100) / 100;
+          const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : ((m.mtl_welcome === '1') ? 0 : Math.round(amount * 0.035 * 100) / 100);
           await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'deposit', amount, currency: cur, mtl_fee: fee, stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
           await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'deposit_paid' });
+          try { const _cd = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=discipline`)) || [])[0]; if (_cd && _cd.discipline) await payGymAmbassador(_cd.discipline, amount, cur, s.id, pi); } catch (e) { console.error('cohort amb deposit', e.message); }
           // NOTE follow-up: ambassador 0.5% on cohort deposits not wired yet (needs mtl_disc/mtl_base in metadata).
           try {
-            const coh = cohId ? ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=owner_id,name,gym_id,deposit_amount,price_student,price_regular,currency,start_date`)) || [])[0] : null;
-            const mem = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=name,email,tier`)) || [])[0];
+            const coh = cohId ? ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=owner_id,name,gym_id,deposit_amount,price_student,price_regular,currency,start_date,gym_meta_pixel,capi_token`)) || [])[0] : null;
+            const mem = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=name,email,tier,fbp,fbc`)) || [])[0];
             if (coh && coh.owner_id) await sbPost('notifications', { user_id: coh.owner_id, type: 'system', read: false, message: '\uD83D\uDCDA Nov\u00FD zaplacen\u00FD z\u00E1pis do kurzu' + (coh.name ? (' "' + coh.name + '"') : '') + '.' });
             if (mem && mem.email && coh) {
               let gymName = '';
@@ -333,6 +399,7 @@ export default async function handler(req, res) {
               const fromName = (gymName || 'Martial Training Lab').replace(/["<>]/g, '');
               await sendResend(mem.email, (coh.name || 'Kurz') + ' \u2014 z\u00E1loha p\u0159ijata', cohortDepositHtml(mem.name, coh.name || 'Kurz', gymName, money(amount), remainder > 0 ? money(remainder) : '', coh.start_date || ''), { from: '"' + fromName + '" <' + MAIL_ADDR + '>', replyTo: ownerEmail || undefined });
             }
+            try { await cohortCapiPurchase(coh, cmId, (mem && mem.email) || '', amount, cur, (mem && mem.fbp) || '', (mem && mem.fbc) || ''); } catch (e) {}
           } catch (e) { console.error('cohort confirm', e.message); }
         }
       } else if (m.mtl_payment_type === 'cohort_first_month') {
@@ -343,9 +410,10 @@ export default async function handler(req, res) {
         if (cmId && (!already || already.length === 0)) {
           const amount = (s.amount_total || 0) / 100;
           const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
-          const fee = Math.round(amount * 0.035 * 100) / 100;
+          const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : ((m.mtl_welcome === '1') ? 0 : Math.round(amount * 0.035 * 100) / 100);
           await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'first_month', amount, currency: cur, mtl_fee: fee, stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
           await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'enrolled' });
+          try { const _cd2 = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=discipline`)) || [])[0]; if (_cd2 && _cd2.discipline) await payGymAmbassador(_cd2.discipline, amount, cur, s.id, pi); } catch (e) { console.error('cohort amb firstmonth', e.message); }
         }
       } else if (m.mtl_payment_type === 'partner_sub') {
         // Exclusive MTL Partner subscription zaplacena → zapni partner sazby
@@ -355,7 +423,7 @@ export default async function handler(req, res) {
         if (uid) {
           await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: true, partner_sub: sub || null, stripe_customer: cust || null });
           await rerateGymMemberships(uid, 3); // existující členství → 3 % od příští faktury (Exclusive Partner)
-          await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Teď jsi Exclusive MTL Partner! Z lekcí si necháváš 99 %, student platí jen +3 %, a u gymu si necháváš 99 % z jednorázovek a 97 % z členství. 🥊' });
+          await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Teď jsi Exclusive MTL Partner! Ze všeho (lekce, členství, eventy, kurzy) si necháváš 99 % — provize MTL jen 1 %. A když ti MTL přivede nového člena přes objevení v appce, máš akvizici za půlku: 5 % místo 10 % (první 2 měsíce členství / první 1:1 lekce), pak zpět na 1 %. 🥊' });
           await sbPost('notifications', { user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'system', read: false, message: `⭐ Nový Exclusive MTL Partner (user ${uid}).` });
         }
       } else if (m.mtl_payment_type === 'event_ticket') {
@@ -388,7 +456,7 @@ export default async function handler(req, res) {
       if (uid) {
         await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: false, partner_sub: null });
         await rerateGymMemberships(uid, 5); // zpět na 5 % od příští faktury
-        await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_ended' }), message: '⭐ Teď už nejsi Exclusive MTL Partner. Děkujeme za tvoji přízeň! Sazby se vrátily na standard (kouč 95 % / student +5 %, gym jednorázovky 97 %, členství 95 %).' });
+        await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_ended' }), message: '⭐ Teď už nejsi Exclusive MTL Partner. Děkujeme za tvoji přízeň! Provize se vrátila na standard 3,5 % (dle MTL Ligy případně 3 % nebo 2 %).' });
       }
     } else if (event.type === 'charge.dispute.created') {
       const d = event.data.object;
