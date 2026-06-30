@@ -7965,6 +7965,34 @@ async function gymTermsGate(g, onAgree, isMembership){
   go.onclick=async()=>{ if(!cb.checked) return; try{ if(currentUser&&currentUser.id) await supaClient.from('waiver_acceptances').insert({ gym_id:g.id, version:_wv, student_id:currentUser.id, student_name:currentUser.name||null, body_hash:_hash, accepted_at:new Date().toISOString() }); }catch(e){} ov.remove(); onAgree(); };
   ov.onclick=(e)=>{ if(e.target===ov) ov.remove(); };
 }
+async function _guestTermsGate(g, guestName, guestToken, onAgree){
+  const _base=(g && g.terms_text && g.terms_text.trim())?g.terms_text.trim():'';
+  if(!_base){ onAgree(guestName); return; }
+  const EN=LANG==='en';
+  const _title=(g.terms_title||(EN?'Terms & club rules':'Podmínky a pravidla klubu'));
+  const _fullText=_base;
+  const _hash=_waiverHash(_title+'|'+_fullText);
+  let _wv=g.waiver_version; if(_wv==null){ try{ const { data:gg }=await supaClient.from('gyms').select('waiver_version').eq('id',g.id).single(); _wv=(gg&&gg.waiver_version)||0; }catch(e){ _wv=0; } }
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99999;display:flex;align-items:flex-end;justify-content:center;';
+  ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px 18px 0 0;padding:20px;max-height:82vh;display:flex;flex-direction:column;">
+    <div style="font-size:12.5px;color:#9a5a00;font-weight:800;background:#FFF7ED;border:1px solid #FCD9A8;border-radius:10px;padding:8px 11px;margin-bottom:10px;">${EN?'⚠️ First visit — the visitor must confirm the gym terms before paying.':'⚠️ První návštěva — host musí před platbou potvrdit podmínky gymu.'}</div>
+    <div style="font-size:17px;font-weight:800;margin-bottom:8px;color:var(--dark);">${_title.replace(/</g,'&lt;')}</div>
+    <div style="overflow-y:auto;font-size:13px;color:var(--dark);line-height:1.6;white-space:pre-wrap;border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:12px;flex:1;">${_fullText.replace(/</g,'&lt;')}</div>
+    <input id="gtgName" value="${escapeHtml(guestName||'')}" placeholder="${EN?'Visitor full name':'Jméno a příjmení hosta'}" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:'DM Sans';margin-bottom:8px;">
+    <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;margin-bottom:12px;cursor:pointer;color:var(--dark);line-height:1.4;"><input type="checkbox" id="gtgAgree" style="width:18px;height:18px;flex-shrink:0;margin-top:1px;"> ${EN?'The visitor has read and agrees to these terms':'Host si přečetl podmínky a souhlasí s nimi'}</label>
+    <div style="display:flex;gap:8px;">
+      <button id="gtgCancel" style="flex:1;padding:13px;background:var(--surf);border:1px solid var(--border);border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';color:var(--dark);">${EN?'Cancel':'Zrušit'}</button>
+      <button id="gtgGo" style="flex:1;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';opacity:.5;" disabled>${EN?'Agree & continue':'Souhlasím a pokračuji'}</button>
+    </div>
+  </div>`;
+  document.body.appendChild(ov);
+  const cb=ov.querySelector('#gtgAgree'), go=ov.querySelector('#gtgGo');
+  cb.onchange=()=>{ go.disabled=!cb.checked; go.style.opacity=cb.checked?'1':'.5'; };
+  ov.querySelector('#gtgCancel').onclick=()=>ov.remove();
+  go.onclick=async()=>{ if(!cb.checked) return; const nm=(ov.querySelector('#gtgName')&&ov.querySelector('#gtgName').value.trim())||guestName||null; try{ await supaClient.from('waiver_acceptances').insert({ gym_id:g.id, version:_wv, student_id:null, student_name:nm, body_hash:_hash, accepted_at:new Date().toISOString(), guest_token:guestToken||null }); }catch(e){} ov.remove(); onAgree(nm); };
+  ov.onclick=(e)=>{ if(e.target===ov) ov.remove(); };
+}
 async function openGymProfile(g){
   if(g && g.id){ try{ const { data: full } = await supaClient.from('gyms').select('*').eq('id', g.id).single(); if(full) g=full; }catch(e){} }
   window._currentGym = g;
@@ -12599,12 +12627,13 @@ function _guestCash(occ, method){
   if(isQr){ try{ var payload=(typeof _bankQrPayload==='function')?_bankQrPayload(g, pr.dp||0, (occ.name||'Drop-in')+((occ.level&&occ.level!=='all')?(' '+occ.level):'')):null; var qb=$('gcQrBox'); if(qb){ if(payload && window.QRCode){ new QRCode(qb,{ text:payload, width:200, height:200, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { qb.innerHTML='<div style="font-size:12px;color:var(--mid);text-align:center;line-height:1.6;">'+(EN?'QR not available for this receiver \u2014 pay to:':'QR pro tento typ p\u0159\u00edjemce nen\u00ed \u2014 zapla\u0165 na:')+'<br><b>'+escapeHtml(g.receiver_id_value||'')+'</b><br>'+fmtPrice(pr.dp||0,cur)+' '+sym+'</div>'; } } }catch(e){} }
   if($('recBackBtn')) $('recBackBtn').onclick=function(){ _guestPayPick(occ); };
   if($('gcSave')) $('gcSave').onclick=async function(){
-    const name=($('gcName')&&$('gcName').value.trim())||null;
+    let name=($('gcName')&&$('gcName').value.trim())||null;
     const email=($('gcEmail')&&$('gcEmail').value.trim())||null;
     const amount_minor=Math.round((pr.dp||0)*100);
     const fee_minor=Math.round(amount_minor*rate);
     const month=new Date().toISOString().slice(0,7);
     const tok='g'+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+    const _proceed=async function(_nm){ if(_nm) name=_nm;
     const btn=$('gcSave'); btn.disabled=true; btn.textContent=EN?'Saving\u2026':'Ukl\u00e1d\u00e1m\u2026';
     try{
       const txr={ gym_id:g.id, member_id:null, coach_id:occ.coach||null, paid_to:'gym', gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:cur, type:'drop_in', status:'completed', payment_method:method, commission_status:'pending', commission_month:month, cash_payer_name:name, acq_source:'direct' };
@@ -12616,6 +12645,8 @@ function _guestCash(occ, method){
       toast((EN?'\u2705 Recorded':'\u2705 Zaznamen\u00e1no')+(email?(EN?' \u00b7 link sent':' \u00b7 odkaz odesl\u00e1n'):'')+' \u00b7 '+(EN?'commission ':'provize ')+fmtPrice(fee_minor/100,cur)+' '+sym, 1);
       renderReceptionList(($('recSearch')&&$('recSearch').value)||'');
     }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); btn.disabled=false; btn.textContent=isQr?(EN?'\u2713 Paid via QR':'\u2713 Zaplaceno p\u0159es QR'):(EN?'\u2713 Received in cash':'\u2713 P\u0159ijato v hotovosti'); }
+    };
+    _guestTermsGate(g, name, tok, _proceed);
   };
 }
 function _recpMembPay(pi){
