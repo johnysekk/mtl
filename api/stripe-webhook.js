@@ -387,6 +387,7 @@ export default async function handler(req, res) {
             const coh = cohId ? ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=owner_id,name,gym_id,deposit_amount,price_student,price_regular,currency,start_date,gym_meta_pixel,capi_token`)) || [])[0] : null;
             const mem = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=name,email,tier,fbp,fbc`)) || [])[0];
             if (coh && coh.owner_id) await sbPost('notifications', { user_id: coh.owner_id, type: 'system', read: false, message: '\uD83D\uDCDA Nov\u00FD zaplacen\u00FD z\u00E1pis do kurzu' + (coh.name ? (' "' + coh.name + '"') : '') + '.' });
+            if (coh && coh.gym_id) { try { const _recs = await sbGet(`gym_coaches?gym_id=eq.${encodeURIComponent(coh.gym_id)}&status=eq.active&is_reception=eq.true&select=coach_id`); for (const _rc of (_recs || [])) { if (_rc.coach_id) await sbPost('notifications', { user_id: _rc.coach_id, type: 'system', read: false, message: '\uD83D\uDCDA Nov\u00FD zaplacen\u00FD z\u00E1pis do kurzu' + (coh.name ? (' "' + coh.name + '"') : '') + '.' }); } } catch (e) {} }
             if (mem && mem.email && coh) {
               let gymName = '';
               try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(coh.gym_id)}&select=name`); gymName = (g && g[0] && g[0].name) || ''; } catch (e) {}
@@ -423,7 +424,7 @@ export default async function handler(req, res) {
         if (uid) {
           await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: true, partner_sub: sub || null, stripe_customer: cust || null });
           await rerateGymMemberships(uid, 3); // existující členství → 3 % od příští faktury (Exclusive Partner)
-          await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Teď jsi Exclusive MTL Partner! Z lekcí si necháváš 99 %, student platí jen +3 %, a u gymu si necháváš 99 % z jednorázovek a 97 % z členství. 🥊' });
+          await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Teď jsi Exclusive MTL Partner! Ze všeho (lekce, členství, eventy, kurzy) si necháváš 99 % — provize MTL jen 1 %. A když ti MTL přivede nového člena přes objevení v appce, máš akvizici za půlku: 5 % místo 10 % (první 2 měsíce členství / první 1:1 lekce), pak zpět na 1 %. 🥊' });
           await sbPost('notifications', { user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'system', read: false, message: `⭐ Nový Exclusive MTL Partner (user ${uid}).` });
         }
       } else if (m.mtl_payment_type === 'event_ticket') {
@@ -456,7 +457,7 @@ export default async function handler(req, res) {
       if (uid) {
         await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: false, partner_sub: null });
         await rerateGymMemberships(uid, 5); // zpět na 5 % od příští faktury
-        await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_ended' }), message: '⭐ Teď už nejsi Exclusive MTL Partner. Děkujeme za tvoji přízeň! Sazby se vrátily na standard (kouč 95 % / student +5 %, gym jednorázovky 97 %, členství 95 %).' });
+        await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_ended' }), message: '⭐ Teď už nejsi Exclusive MTL Partner. Děkujeme za tvoji přízeň! Provize se vrátila na standard 3,5 % (dle MTL Ligy případně 3 % nebo 2 %).' });
       }
     } else if (event.type === 'charge.dispute.created') {
       const d = event.data.object;
