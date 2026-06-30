@@ -33,10 +33,10 @@ function hav(la1, lo1, la2, lo2) {
 const _RL_SUPA = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const _RL_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 function _rlIp(req) { const xr = req.headers['x-real-ip']; if (xr) return String(xr).trim(); const p = (req.headers['x-forwarded-for'] || '').split(',').map(s => s.trim()).filter(Boolean); return p.length ? p[p.length - 1] : ((req.socket && req.socket.remoteAddress) || 'unknown'); }
-async function _rlAllow(endpoint, ip, limit) {
+async function _rlAllow(endpoint, ip, limit, banMult) {
   try {
     const win = Math.floor(Date.now() / 600000);
-    const r = await fetch(_RL_SUPA + '/rest/v1/rpc/rl_hit', { method: 'POST', headers: { apikey: _RL_KEY, Authorization: 'Bearer ' + _RL_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ p_key: ip + ':' + endpoint + ':' + win, p_ip: ip, p_endpoint: endpoint, p_window: win, p_limit: limit }) });
+    const r = await fetch(_RL_SUPA + '/rest/v1/rpc/rl_hit', { method: 'POST', headers: { apikey: _RL_KEY, Authorization: 'Bearer ' + _RL_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ p_key: ip + ':' + endpoint + ':' + win, p_ip: ip, p_endpoint: endpoint, p_window: win, p_limit: limit, p_ban_mult: banMult || 0 }) });
     if (!r.ok) return true;
     let _j = await r.json();
     if (Array.isArray(_j)) _j = _j[0];
@@ -50,7 +50,6 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type, x-access-token');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (!(await _rlAllow('gym-cohort', _rlIp(req), 60))) return res.status(429).json({ ok: false, error: 'Too many requests' });
 
   try {
     let b = {};
@@ -68,6 +67,7 @@ export default async function handler(req, res) {
     const user = await ures.json();
     const uid = user && user.id;
     if (!uid) return res.status(401).json({ error: 'no user' });
+    if (!(await _rlAllow('gym-cohort', 'u:' + uid, 60))) return res.status(429).json({ ok: false, error: 'Too many requests' });
 
     // load gym + ownership (founder may also act)
     const gres = await fetch(`${SB}/rest/v1/gyms?id=eq.${encodeURIComponent(gymId)}&select=owner_id,city_lat,city_lng,disciplines,name,city,country`, { headers: svc });
