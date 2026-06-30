@@ -12602,6 +12602,14 @@ function _recpMembPay(pi){
   h+='<option value="">'+(EN?'\u2014 Select member \u2014':'\u2014 Vyber \u010dlena \u2014')+'</option>';
   (_recMembers||[]).forEach(function(m){ h+='<option value="'+m.student_id+'" data-name="'+escapeHtml(m.student_name||'')+'">'+escapeHtml(m.student_name||'\u2014')+'</option>'; });
   h+='</select>';
+  if((g.member_ref_pct||0)>0){
+    h+='<p style="font-size:11px;color:var(--light);margin:10px 0 4px;">'+(EN?'Referred by a member? (optional discount)':'Doporučil někdo ze členů? (nepovinná sleva)')+'</p>';
+    h+='<select id="rmRefBy" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;background:#fff;margin-bottom:4px;">';
+    h+='<option value="">'+(EN?'— no referral —':'— bez doporučení —')+'</option>';
+    (_recMembers||[]).forEach(function(m){ h+='<option value="'+m.student_id+'" data-name="'+escapeHtml(m.student_name||'')+'">'+escapeHtml(m.student_name||'—')+'</option>'; });
+    h+='</select>';
+    h+='<p id="rmRefNote" style="font-size:11px;color:#B26A00;font-weight:700;line-height:1.4;margin:0 0 12px;display:none;"></p>';
+  }
   if(qrMode){
     h+='<div id="rmQrBox" style="display:flex;justify-content:center;align-items:center;padding:14px;background:#fff;border:1px solid var(--border);border-radius:16px;margin-bottom:6px;min-height:120px;"></div>';
     h+='<p style="font-size:12px;color:var(--light);text-align:center;line-height:1.5;margin-bottom:10px;">'+(EN?'Let the member scan with their banking app, then confirm once it arrives.':'Nech \u010dlena naskenovat bankovn\u00ed aplikac\u00ed, pak po p\u0159ijet\u00ed potvr\u010f.')+'</p>';
@@ -12612,16 +12620,20 @@ function _recpMembPay(pi){
   list.innerHTML=h;
   if(qrMode){ try{ var payload=(typeof _bankQrPayload==='function')?_bankQrPayload(g, price, ((($('rmMember')&&$('rmMember').selectedOptions[0]&&$('rmMember').selectedOptions[0].getAttribute('data-name'))||'')?((($('rmMember').selectedOptions[0].getAttribute('data-name'))||'')+' - '):'')+(plan.name||'Membership')):null; var qb=$('rmQrBox'); if(qb){ if(payload && window.QRCode){ new QRCode(qb,{ text:payload, width:200, height:200, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { qb.innerHTML='<div style="font-size:12px;color:var(--mid);text-align:center;line-height:1.6;">'+(EN?'QR not available \u2014 pay to:':'QR nen\u00ed \u2014 zaplať na:')+'<br><b>'+escapeHtml(g.receiver_id_value||'')+'</b><br>'+fmtPrice(price,cur)+' '+sym+'</div>'; } } }catch(e){} }
   if($('recBackBtn')) $('recBackBtn').onclick=function(){ openReception(g.id, g.name); };
+  function _rmRefSel(){ var rb=$('rmRefBy'); if(!rb||!rb.value) return null; var sel=$('rmMember'); if(sel&&sel.value&&sel.value===rb.value) return null; return { id:rb.value, name:(rb.selectedOptions[0]&&rb.selectedOptions[0].getAttribute('data-name'))||'', pct:(g.member_ref_pct||0) }; }
+  function _rmEffPrice(){ var r=_rmRefSel(); return r?Math.round(price*(1-r.pct/100)*100)/100:price; }
   async function _doMembPay(method){
     const sel=$('rmMember'); const sid=(sel&&sel.value)||''; if(!sid){ toast(EN?'\u26a0\ufe0f Select a member':'\u26a0\ufe0f Vyber \u010dlena'); return; }
     const nm=(sel.selectedOptions[0]&&sel.selectedOptions[0].getAttribute('data-name'))||null;
-    const amount_minor=Math.round(price*100); const fee_minor=Math.round(amount_minor*rate);
+    var _refSel=(typeof _rmRefSel==='function')?_rmRefSel():null; var _eff=(typeof _rmEffPrice==='function')?_rmEffPrice():price;
+    const amount_minor=Math.round(_eff*100); const fee_minor=Math.round(amount_minor*rate);
     const month=new Date().toISOString().slice(0,7);
     const btns=[$('rmQrSave'),$('rmCashSave')]; btns.forEach(function(b){ if(b){ b.disabled=true; } });
     try{
       const txr={ gym_id:g.id, member_id:sid, coach_id:plan.coach||null, paid_to:'gym', gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:cur, type:'membership', status:'completed', payment_method:method, commission_status:'pending', commission_month:month, cash_payer_name:nm, acq_source:'direct' };
       const r1=await _recordCashTx(txr);
       if(r1&&r1.error){ toast('\u26a0\ufe0f '+r1.error.message); btns.forEach(function(b){ if(b) b.disabled=false; }); return; }
+      if(_refSel && _refSel.id && _refSel.id!==sid){ try{ await supaClient.from('notifications').insert({ user_id:_refSel.id, type:'system', read:false, data: JSON.stringify({ kind:'gym_member_ref_reward', gym_id:g.id, pct:_refSel.pct }), message:(EN?('🎁 Your referral joined '+(g.name||'the gym')+'! You earned -'+_refSel.pct+'% on your next membership period. Show this at reception.'):('🎁 Tvé doporučení se přidalo do '+(g.name||'gymu')+'! Máš -'+_refSel.pct+' % na další období členství. Ukaž na recepci.')) }); }catch(e){} }
       var base=Date.now(); var existed=false;
       try{ const { data:ex } = await supaClient.from('gym_memberships').select('id,period_end,status').eq('gym_id',g.id).eq('student_id',sid).eq('plan_name',plan.name||null).in('status',['active','cancelling']).order('period_end',{ascending:false}).limit(1); if(ex&&ex.length){ existed=true; var pe=ex[0].period_end?new Date(ex[0].period_end).getTime():base; if(pe<base) pe=base; var nd=new Date(pe); nd.setMonth(nd.getMonth()+1); await supaClient.from('gym_memberships').update({ status:'active', period_end:nd.toISOString(), cancelled_at:null }).eq('id',ex[0].id); } }catch(e){}
       if(!existed){ try{ var nd2=new Date(base); nd2.setMonth(nd2.getMonth()+1); await supaClient.from('gym_memberships').insert({ gym_id:g.id, gym_name:g.name||'Gym', student_id:sid, student_name:nm||'Student', paid_to:'gym', coach_id:plan.coach||null, amount:price, currency:cur, status:'active', period_end:nd2.toISOString(), plan_name:plan.name||null, plan_access:JSON.stringify((plan.access&&plan.access.length)?plan.access:['all']), discipline:plan.disc||null, acq_source:'direct' }); }catch(e){} }
@@ -12629,9 +12641,10 @@ function _recpMembPay(pi){
       openReception(g.id, g.name);
     }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); btns.forEach(function(b){ if(b) b.disabled=false; }); }
   }
-  if($('rmMember')&&qrMode){ $('rmMember').addEventListener('change', function(){ try{ var qb=$('rmQrBox'); if(!qb) return; var mn=(this.selectedOptions[0]&&this.selectedOptions[0].getAttribute('data-name'))||''; var pl=(mn?mn+' - ':'')+(plan.name||'Membership'); var payload=(typeof _bankQrPayload==='function')?_bankQrPayload(g, price, pl):null; qb.innerHTML=''; if(payload && window.QRCode){ new QRCode(qb,{ text:payload, width:200, height:200, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } }catch(e){} }); }
+  if($('rmMember')&&qrMode){ $('rmMember').addEventListener('change', function(){ try{ var qb=$('rmQrBox'); if(!qb) return; var mn=(this.selectedOptions[0]&&this.selectedOptions[0].getAttribute('data-name'))||''; var pl=(mn?mn+' - ':'')+(plan.name||'Membership'); var payload=(typeof _bankQrPayload==='function')?_bankQrPayload(g, _rmEffPrice(), pl):null; qb.innerHTML=''; if(payload && window.QRCode){ new QRCode(qb,{ text:payload, width:200, height:200, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } }catch(e){} }); }
   if($('rmQrSave')) $('rmQrSave').onclick=function(){ _doMembPay('qr'); };
   if($('rmCashSave')) $('rmCashSave').onclick=function(){ _doMembPay('cash'); };
+  if($('rmRefBy')){ $('rmRefBy').addEventListener('change', function(){ var r=_rmRefSel(); var note=$('rmRefNote'); if(note){ if(r){ var ep=_rmEffPrice(); note.style.display='block'; note.textContent=(EN?('Referral -'+r.pct+'%: member pays '+fmtPrice(ep,cur)+' '+sym+' this month; '+r.name+' gets -'+r.pct+'% next period.'):('Doporučení -'+r.pct+' %: člen platí '+fmtPrice(ep,cur)+' '+sym+' tento měsíc; '+r.name+' dostane -'+r.pct+' % na další období.')); } else { note.style.display='none'; } } if(qrMode){ try{ var qb=$('rmQrBox'); if(qb){ var mn=(($('rmMember')&&$('rmMember').selectedOptions[0]&&$('rmMember').selectedOptions[0].getAttribute('data-name'))||''); var pl=(mn?mn+' - ':'')+(plan.name||'Membership'); var payload=(typeof _bankQrPayload==='function')?_bankQrPayload(g, _rmEffPrice(), pl):null; qb.innerHTML=''; if(payload && window.QRCode){ new QRCode(qb,{ text:payload, width:200, height:200, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } } }catch(e){} } }); }
 }
 async function _onlineQrPay(g, occ, _child, kind, plan){
   const EN=LANG==='en';
