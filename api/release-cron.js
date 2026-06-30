@@ -115,6 +115,26 @@ export default async function handler(req, res) {
       }
     } catch (e) { /* events pass non-fatal */ }
 
+    // security: alert founder on auto-bans / loud offenders in the last window
+    try {
+      if (process.env.SECURITY_ALERT_EMAIL && process.env.RESEND_API_KEY) {
+        const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+        const bans = await sb('blocked_ips?blocked_at=gt.' + encodeURIComponent(since) + '&select=ip,reason,hits,expires_at&order=blocked_at.desc').catch(() => []);
+        const loud = await sb('rate_limits?hits=gte.50&updated_at=gt.' + encodeURIComponent(since) + '&select=ip,endpoint,hits&order=hits.desc&limit=20').catch(() => []);
+        if ((bans && bans.length) || (loud && loud.length)) {
+          let html = '<h3>MTL security alert</h3>';
+          if (bans && bans.length) html += '<p><b>Auto-banned (24h):</b></p><ul>' + bans.map(b => '<li>' + b.ip + ' &mdash; ' + (b.reason || '') + ' (' + b.hits + ' hits)</li>').join('') + '</ul>';
+          if (loud && loud.length) html += '<p><b>Loud (throttled, not banned):</b></p><ul>' + loud.map(l => '<li>' + l.ip + ' &mdash; ' + l.endpoint + ' x' + l.hits + '</li>').join('') + '</ul>';
+          html += '<p style="color:#888;font-size:12px">Unban: delete from blocked_ips where ip = \'...\';</p>';
+          await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: { Authorization: 'Bearer ' + process.env.RESEND_API_KEY, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ from: process.env.MAIL_FROM || 'MTL Coaches <noreply@mtlcoaches.co>', to: [process.env.SECURITY_ALERT_EMAIL], subject: 'MTL security: ' + ((bans && bans.length) || 0) + ' bans, ' + ((loud && loud.length) || 0) + ' loud', html })
+          }).catch(() => {});
+        }
+      }
+    } catch (e) {}
+
     // housekeeping: drop stale rate-limit windows (>2h old)
     try { const _rlOld = new Date(Date.now() - 2*3600*1000).toISOString(); await sb('rate_limits?updated_at=lt.' + encodeURIComponent(_rlOld), { method: 'DELETE', prefer: 'return=minimal' }); } catch (e) {}
 

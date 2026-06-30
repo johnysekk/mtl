@@ -16,10 +16,10 @@ const { createClient } = require('@supabase/supabase-js');
 const _RL_SUPA = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const _RL_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 function _rlIp(req) { const xr = req.headers['x-real-ip']; if (xr) return String(xr).trim(); const p = (req.headers['x-forwarded-for'] || '').split(',').map(s => s.trim()).filter(Boolean); return p.length ? p[p.length - 1] : ((req.socket && req.socket.remoteAddress) || 'unknown'); }
-async function _rlAllow(endpoint, ip, limit) {
+async function _rlAllow(endpoint, ip, limit, banMult) {
   try {
     const win = Math.floor(Date.now() / 600000);
-    const r = await fetch(_RL_SUPA + '/rest/v1/rpc/rl_hit', { method: 'POST', headers: { apikey: _RL_KEY, Authorization: 'Bearer ' + _RL_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ p_key: ip + ':' + endpoint + ':' + win, p_ip: ip, p_endpoint: endpoint, p_window: win, p_limit: limit }) });
+    const r = await fetch(_RL_SUPA + '/rest/v1/rpc/rl_hit', { method: 'POST', headers: { apikey: _RL_KEY, Authorization: 'Bearer ' + _RL_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ p_key: ip + ':' + endpoint + ':' + win, p_ip: ip, p_endpoint: endpoint, p_window: win, p_limit: limit, p_ban_mult: banMult || 0 }) });
     if (!r.ok) return true;
     let _j = await r.json();
     if (Array.isArray(_j)) _j = _j[0];
@@ -30,7 +30,7 @@ async function _rlAllow(endpoint, ip, limit) {
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ error: 'method' });
-  if (!(await _rlAllow('guardian-consent', _rlIp(req), 8))) return res.status(429).json({ error: 'Too many requests' });
+  if (!(await _rlAllow('guardian-consent', _rlIp(req), 8, 10))) return res.status(429).json({ error: 'Too many requests' });
   try {
     const SB = process.env.SUPABASE_URL;
     const SR = process.env.SUPABASE_SERVICE_ROLE_KEY;
