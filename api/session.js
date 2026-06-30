@@ -99,6 +99,16 @@ async function recordTransaction(acct, pi, fields) {
 // Vrátí detaily checkout session.
 // Pro gym flows (direct charge / subscription) je session vytvořená NA connected accountu,
 // takže se musí retrievnout s { stripeAccount: gymAccount }.
+async function rewardReferrer({ refUser, refPct, gymId, gymAccount }) {
+  try {
+    const pct = parseInt(refPct, 10) || 0;
+    if (!refUser || !gymId || pct <= 0) return;
+    // Persist a pending credit the referrer redeems on their NEXT QR/cash membership at this gym.
+    await sbPost('gym_member_ref_credits', { gym_id: gymId, referrer_id: refUser, pct, status: 'pending', source: 'stripe', created_at: new Date().toISOString() });
+    await sbPost('notifications', { user_id: refUser, type: 'system', read: false, data: JSON.stringify({ kind: 'gym_member_ref_reward', gym_id: gymId, pct }), message: '🎁 Tvé doporučení se přidalo! -' + pct + ' % se ti automaticky uplatní na další období členství.' });
+  } catch (e) { console.error('rewardReferrer', e.message); }
+}
+
 export default async function handler(req, res) {
   try {
     const { sessionId, gymAccount, refUser, refPct, gymId } = req.query;
