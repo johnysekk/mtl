@@ -220,7 +220,6 @@ async function gymCheckout(req, res) {
         ? `${proto}://${host}/?guest_drop=ok&booking=${encodeURIComponent(bookingId || '')}&acct=${encodeURIComponent(gymAccount)}&token=${encodeURIComponent(token || '')}&session={CHECKOUT_SESSION_ID}`
         : `${proto}://${host}/?gym_pay=ok&booking=${encodeURIComponent(bookingId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
       cancel_url: `${proto}://${host}/`,
-      ...(String(guest)==='1' ? { customer_creation: 'always' } : {}),
     },
     { stripeAccount: gymAccount }
   );
