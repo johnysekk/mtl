@@ -136,7 +136,7 @@ export default async function handler(req, res) {
 
     if (provider === 'gym') {
       // gym pays out -> gym owner authorizes, rate from owner profile
-      const gyms = await sb(`gyms?id=eq.${gym_id}&select=id,owner_id,currency,account_suspended`);
+      const gyms = await sb(`gyms?id=eq.${gym_id}&select=id,owner_id,currency,account_suspended,stripe_account`);
       const gym = gyms && gyms[0];
       if (!gym) return res.status(404).json({ error: 'gym not found' });
       if (gym.owner_id !== uid) return res.status(403).json({ error: 'not your gym' });
@@ -151,8 +151,10 @@ export default async function handler(req, res) {
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
       const _acq = _wz ? null : await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id);
       const mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
+      let _gymPayee = gym.stripe_account || null;
+      if (coach_id) { try { const _cp = await sb(`profiles?id=eq.${coach_id}&select=gym_payout_account`); const _cpa = _cp && _cp[0] && _cp[0].gym_payout_account; if (_cpa) _gymPayee = _cpa; } catch(e){} }
       row = {
-        gym_id, coach_id: coach_id || null, member_id: member_id || null, paid_to: 'gym',
+        gym_id, coach_id: coach_id || null, member_id: member_id || null, paid_to: 'gym', payee_account: _gymPayee,
         gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0,
         currency: cur, type, status: 'completed', payment_method,
         commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,
@@ -160,7 +162,7 @@ export default async function handler(req, res) {
       };
     } else {
       // coach pays out -> the coach authorizes their own cash/QR, rate from coach profile.
-      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,coach_ref_score,account_suspended,cash_blocked,welcome_free_until,created_at,referral_optin`);
+      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,coach_ref_score,account_suspended,cash_blocked,welcome_free_until,created_at,referral_optin,gym_payout_account,stripe_account`);
       const coach = cs && cs[0];
       if (!coach) return res.status(404).json({ error: 'coach not found' });
       if (coach.id !== uid) return res.status(403).json({ error: 'not your account' });
@@ -174,7 +176,7 @@ export default async function handler(req, res) {
       const _acq = _wz ? null : await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id);
       const mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
       row = {
-        gym_id: null, coach_id, member_id: member_id || null, paid_to: 'coach',
+        gym_id: null, coach_id, member_id: member_id || null, paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null),
         gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0,
         currency: cur, type, status: 'completed', payment_method,
         commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,
