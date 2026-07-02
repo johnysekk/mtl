@@ -55,6 +55,24 @@ async function isWelcomeZero(acct){
 // DIAGNOSTIC: same lookup as isWelcomeZero but returns WHY (shown in Stripe metadata as mtl_welcome).
 // off=kill-switch | noprov=provider not found by account | ok-*=welcome active | expired-* | old-*(>45d no window) | anchor-*(would open) | err
 
+// Guard: a connected account must be able to accept payments (charges_enabled)
+// before we create a Checkout on it. Otherwise Stripe throws a raw error
+// (e.g. "you must set a business name") and the buyer sees garbage. This also
+// protects real providers who haven't finished Stripe onboarding.
+async function _assertAcctReady(acct, res) {
+  try {
+    const a = await stripe.accounts.retrieve(String(acct));
+    if (!a.charges_enabled) {
+      res.status(400).json({ error: 'Na strane kouce/gymu je chyba v konfiguraci plateb. Pokud jsi s nimi v kontaktu, dej jim o tom vedet.' });
+      return false;
+    }
+    return true;
+  } catch (e) {
+    res.status(400).json({ error: 'Na strane kouce/gymu je chyba v konfiguraci plateb. Pokud jsi s nimi v kontaktu, dej jim o tom vedet.' });
+    return false;
+  }
+}
+
 export default async function handler(req, res) {
   const type = String(req.query.type || 'coach');
   try {
@@ -78,6 +96,7 @@ async function coachCheckout(req, res) {
   } = req.query;
 
   if (!coachId || !amount) return res.status(400).json({ error: 'Chybí coachId nebo amount' });
+  if (!(await _assertAcctReady(coachId, res))) return;
 
   const rate = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
@@ -220,7 +239,6 @@ async function gymCheckout(req, res) {
         ? `${proto}://${host}/?guest_drop=ok&booking=${encodeURIComponent(bookingId || '')}&acct=${encodeURIComponent(gymAccount)}&token=${encodeURIComponent(token || '')}&session={CHECKOUT_SESSION_ID}`
         : `${proto}://${host}/?gym_pay=ok&booking=${encodeURIComponent(bookingId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
       cancel_url: `${proto}://${host}/`,
-      ...(String(guest)==='1' ? { customer_creation: 'always' } : {}),
     },
     { stripeAccount: gymAccount }
   );
@@ -304,6 +322,7 @@ async function membershipCheckout(req, res) {
   const P = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
   const ivl = interval === 'year' ? 'year' : 'month';
+  if (!(await _assertAcctReady(gymAccount, res))) return;
   // owner's MTL League tier rate (Shikai 3% / Bankai 2%), passed from the client and range-validated.
   let _fp = fee ? parseFloat(fee) : MEMB_MTL_PERCENT;
   if (!(_fp >= 1 && _fp <= 5)) _fp = MEMB_MTL_PERCENT;
@@ -321,8 +340,19 @@ async function membershipCheckout(req, res) {
 
   // Gym member referral: new member gets a one-time first-month discount.
   // Coupon is created on the CONNECTED account (charges are direct on the gym).
+  // GATE: the referrer must CURRENTLY be an active member of this gym; otherwise no referral at all
+  // (no discount for the new member, and no reward for the referrer -> we also drop refUser below).
   let discounts;
-  const refPctN = parseInt(refPct, 10) || 0;
+  let refPctN = parseInt(refPct, 10) || 0;
+  let _refUserOk = refUser || '';
+  if (refPctN > 0 && refUser && gymId) {
+    let _refActive = false;
+    try {
+      const _rm = await _wsbGet(`gym_memberships?student_id=eq.${encodeURIComponent(refUser)}&gym_id=eq.${encodeURIComponent(gymId)}&status=in.(active,cancelling)&select=id&limit=1`);
+      _refActive = !!(_rm && _rm[0]);
+    } catch (e) {}
+    if (!_refActive) { refPctN = 0; _refUserOk = ''; }   // referrer not an active member -> kill the referral
+  }
   if (refPctN > 0 && refPctN <= 100) {
     try {
       const coupon = await stripe.coupons.create(
@@ -348,7 +378,7 @@ async function membershipCheckout(req, res) {
         mtl_disc: disc || '',
         mtl_base: String(P),
         mtl_currency: cur,
-        mtl_ref_user: refUser || '',
+        mtl_ref_user: _refUserOk,
         mtl_ref_pct: String(refPctN || 0),
       },
       line_items: [
@@ -373,7 +403,7 @@ async function membershipCheckout(req, res) {
           mtl_base: String(P),
           mtl_currency: cur,
           member_name: memberName || '',
-          mtl_ref_user: refUser || '',
+          mtl_ref_user: _refUserOk,
           mtl_ref_pct: String(refPctN || 0),
         },
       },
