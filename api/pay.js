@@ -55,6 +55,24 @@ async function isWelcomeZero(acct){
 // DIAGNOSTIC: same lookup as isWelcomeZero but returns WHY (shown in Stripe metadata as mtl_welcome).
 // off=kill-switch | noprov=provider not found by account | ok-*=welcome active | expired-* | old-*(>45d no window) | anchor-*(would open) | err
 
+// Guard: a connected account must be able to accept payments (charges_enabled)
+// before we create a Checkout on it. Otherwise Stripe throws a raw error
+// (e.g. "you must set a business name") and the buyer sees garbage. This also
+// protects real providers who haven't finished Stripe onboarding.
+async function _assertAcctReady(acct, res) {
+  try {
+    const a = await stripe.accounts.retrieve(String(acct));
+    if (!a.charges_enabled) {
+      res.status(400).json({ error: 'Na strane kouce/gymu je chyba v konfiguraci plateb. Pokud jsi s nimi v kontaktu, dej jim o tom vedet.' });
+      return false;
+    }
+    return true;
+  } catch (e) {
+    res.status(400).json({ error: 'Na strane kouce/gymu je chyba v konfiguraci plateb. Pokud jsi s nimi v kontaktu, dej jim o tom vedet.' });
+    return false;
+  }
+}
+
 export default async function handler(req, res) {
   const type = String(req.query.type || 'coach');
   try {
@@ -78,6 +96,7 @@ async function coachCheckout(req, res) {
   } = req.query;
 
   if (!coachId || !amount) return res.status(400).json({ error: 'Chybí coachId nebo amount' });
+  if (!(await _assertAcctReady(coachId, res))) return;
 
   const rate = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
@@ -303,6 +322,7 @@ async function membershipCheckout(req, res) {
   const P = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
   const ivl = interval === 'year' ? 'year' : 'month';
+  if (!(await _assertAcctReady(gymAccount, res))) return;
   // owner's MTL League tier rate (Shikai 3% / Bankai 2%), passed from the client and range-validated.
   let _fp = fee ? parseFloat(fee) : MEMB_MTL_PERCENT;
   if (!(_fp >= 1 && _fp <= 5)) _fp = MEMB_MTL_PERCENT;

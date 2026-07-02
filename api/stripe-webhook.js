@@ -481,6 +481,11 @@ export default async function handler(req, res) {
         await sbPatch('gym_memberships', `stripe_subscription=eq.${encodeURIComponent(sub)}`, { payment_status: 'past_due', payment_failed_at: new Date().toISOString(), last_invoice_url: inv.hosted_invoice_url || null });
         try { const mem = (await sbGet(`gym_memberships?stripe_subscription=eq.${encodeURIComponent(sub)}&select=*`))[0]; if (mem && (mem.student_id || mem.member_id)) await sbPost('notifications', { user_id: mem.student_id || mem.member_id, type: 'system', read: false, data: JSON.stringify({ kind: 'membership_payment_failed', url: inv.hosted_invoice_url || '', gym_id: mem.gym_id }), message: '⚠️ Platba členství ' + (mem.plan_name || '') + ' se nezdařila. Aktualizuj kartu / zaplať odkaz v appce.' }); } catch (e) { console.error('notify failed pay', e.message); }
       }
+    } else if (event.type === 'account.updated') {
+      const acct = event.data.object;
+      const ready = !!(acct && acct.charges_enabled);
+      try { await sbPatch('profiles', `stripe_account=eq.${encodeURIComponent(acct.id)}`, { charges_enabled: ready }); } catch (e) {}
+      try { await sbPatch('gyms', `stripe_account=eq.${encodeURIComponent(acct.id)}`, { charges_enabled: ready }); } catch (e) {}
     }
     res.status(200).json({ received: true });
   } catch (err) {
