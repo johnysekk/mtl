@@ -178,6 +178,7 @@ async function gymCheckout(req, res) {
   } = req.query;
 
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
+  if (!(await _assertAcctReady(gymAccount, res))) return;
 
   const P = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
@@ -251,6 +252,7 @@ async function gymCheckout(req, res) {
 async function eventCheckout(req, res) {
   const { gymAccount, eventTitle, tierName, amount, currency = 'CZK', ticketId, buyerName, qty, qrToken, eventId, founding, partner, disc, gymId, payoutCoachId, take } = req.query;
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
+  if (!(await _assertAcctReady(gymAccount, res))) return;
   const P = parseInt(amount, 10);
   const Q = Math.max(1, parseInt(qty, 10) || 1);
   const cur = String(currency).toLowerCase();

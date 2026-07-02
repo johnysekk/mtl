@@ -105,6 +105,7 @@ export default async function handler(req, res) {
       const crows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(mem.cohort_id)}&select=*`);
       const coh = crows && crows[0];
       if (!coh || !coh.stripe_account) return res.status(400).json({ ok: false, error: 'cohort/account missing' });
+      try { const _a = await stripe.accounts.retrieve(String(coh.stripe_account)); if (!_a.charges_enabled) return res.status(400).json({ ok: false, error: 'Na strane kouce/gymu je chyba v konfiguraci plateb. Pokud jsi s nimi v kontaktu, dej jim o tom vedet.' }); } catch (e) { return res.status(400).json({ ok: false, error: 'Na strane kouce/gymu je chyba v konfiguraci plateb. Pokud jsi s nimi v kontaktu, dej jim o tom vedet.' }); }
       const tierPrice = Number((mem.tier === 'student') ? coh.price_student : coh.price_regular) || 0;
       const dep = Number(coh.deposit_amount || 0);
       const remainder = Math.max(0, tierPrice - dep);
