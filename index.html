@@ -8199,15 +8199,18 @@ async function openGymProfile(g){
   const dn=dayNames();
   let sch=[]; try{ sch=JSON.parse(g.schedule||'[]'); }catch(e){}
   const occs=upcomingClasses(sch,7);
-  // Hide class occurrences led by a coach whose Stripe can't accept payments (charges_enabled=false).
-  // Gym-led classes (no o.coach) are untouched. Failure-safe: on error, nothing is hidden.
+  // Hide ONLY the coach's OWN class occurrences (payee = his own account) when that account
+  // can't accept payments. Gym-led classes he leads (payee = gym) stay visible.
+  // Build _leadingCoaches = coaches who lead a VISIBLE class. Failure-safe: on error, nothing hidden.
+  let _leadingCoaches = new Set();
   try {
     const _scIds=[...new Set((occs||[]).map(o=>o.coach).filter(Boolean))];
     if(_scIds.length){
-      const { data:_nrc } = await supaClient.from('profiles').select('id,charges_enabled').in('id', _scIds);
-      const _badCoach=new Set((_nrc||[]).filter(p=>p.charges_enabled===false).map(p=>p.id));
-      if(_badCoach.size){ for(let _z=occs.length-1;_z>=0;_z--){ if(occs[_z].coach && _badCoach.has(occs[_z].coach)) occs.splice(_z,1); } }
+      const { data:_nrc } = await supaClient.from('profiles').select('id,charges_enabled,gym_payout_account').in('id', _scIds);
+      const _badPayee=new Set((_nrc||[]).filter(p=>p.charges_enabled===false && p.gym_payout_account).map(p=>p.id));
+      if(_badPayee.size){ for(let _z=occs.length-1;_z>=0;_z--){ if(occs[_z].coach && _badPayee.has(occs[_z].coach)) occs.splice(_z,1); } }
     }
+    _leadingCoaches = new Set((occs||[]).map(o=>o.coach).filter(Boolean));
   } catch(e){}
   const occBtn=(o)=>{
     const k=`${o.date}|${o.time}|${o.name}`;
@@ -8259,11 +8262,11 @@ async function openGymProfile(g){
     if(_cids.length){
       const { data:_tp } = await supaClient.from('profiles').select('id,name,photo_url,main_discipline,disciplines,charges_enabled').in('id', _cids);
       const _pm={}; (_tp||[]).forEach(pr=>{ _pm[pr.id]=pr; });
-      const _cc=_cids.map(function(cid){ const pr=_pm[cid]; if(!pr) return ''; const _isO=cid===_own; if(!_isO && pr.charges_enabled===false) return '';
+      const _cc=_cids.map(function(cid){ const pr=_pm[cid]; if(!pr) return ''; const _isO=cid===_own; if(!_isO && pr.charges_enabled===false && !_leadingCoaches.has(cid)) return '';
         const _av=pr.photo_url?('<img src="'+escapeHtml(pr.photo_url)+'" style="width:54px;height:54px;border-radius:50%;object-fit:cover;flex-shrink:0;background:#1a1a1a;">'):('<div style="width:54px;height:54px;border-radius:50%;background:var(--surf);display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;">🥊</div>');
         const _draw=pr.disciplines||pr.main_discipline||''; let _darr=[]; try{ _darr=Array.isArray(_draw)?_draw:(typeof _draw==='string'&&_draw.trim().charAt(0)==='['?JSON.parse(_draw):String(_draw).split(',')); }catch(e){ _darr=String(_draw).split(','); } const _dl=(_darr||[]).map(x=>String(x).trim()).filter(Boolean).slice(0,2).map(d=>(typeof disciplineLabel==='function'?disciplineLabel(d):d)).join(' · ');
         const _rt=_isO?('<div style="font-size:10px;font-weight:800;color:var(--red);">'+(LANG==='en'?'Head coach':'Hlavní kouč')+'</div>'):'';
-        return '<div class="gymCoachCard" data-cid="'+cid+'" style="display:flex;flex-direction:column;align-items:center;gap:5px;width:88px;flex:0 0 auto;cursor:pointer;text-align:center;">'+_av+'<div style="font-size:12.5px;font-weight:700;color:var(--dark);line-height:1.2;max-width:88px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escapeHtml(pr.name||'Coach')+'</div>'+_rt+(_dl?('<div style="font-size:10.5px;color:var(--mid);line-height:1.2;">'+_dl+'</div>'):'')+'</div>';
+        return '<div class="gymCoachCard" data-cid="'+cid+'" data-noclick="'+((pr.charges_enabled===false)?'1':'0')+'" style="display:flex;flex-direction:column;align-items:center;gap:5px;width:88px;flex:0 0 auto;cursor:pointer;text-align:center;">'+_av+'<div style="font-size:12.5px;font-weight:700;color:var(--dark);line-height:1.2;max-width:88px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escapeHtml(pr.name||'Coach')+'</div>'+_rt+(_dl?('<div style="font-size:10.5px;color:var(--mid);line-height:1.2;">'+_dl+'</div>'):'')+'</div>';
       }).filter(Boolean).join('');
       if(_cc){ _coachesBlock='<div class="sec-lbl">👥 '+roleTerm(_gymDisc,true)+'</div><div style="display:flex;gap:14px;overflow-x:auto;padding:2px 4px 14px;margin-bottom:4px;">'+_cc+'</div>'; }
     }
@@ -8295,7 +8298,7 @@ async function openGymProfile(g){
   `;
   {
     const bb=$('btnBookGym'); if(bb) bb.onclick=()=>gymTermsGate(g, ()=>bookGymDropin(g));
-    $('gymProfContent').querySelectorAll('.gymCoachCard').forEach(function(_k){ _k.onclick=function(){ var _id=_k.dataset.cid; if(!_id) return; if(typeof openProfileById==='function'){ openProfileById(_id); } else if(typeof COACHES!=='undefined' && COACHES){ var _r=COACHES.find(function(x){return x.id===_id||x.profileId===_id;}); if(_r && typeof openProfile==='function') openProfile(_r); } }; });
+    $('gymProfContent').querySelectorAll('.gymCoachCard').forEach(function(_k){ _k.onclick=function(){ if(_k.dataset.noclick==='1') return; var _id=_k.dataset.cid; if(!_id) return; if(typeof openProfileById==='function'){ openProfileById(_id); } else if(typeof COACHES!=='undefined' && COACHES){ var _r=COACHES.find(function(x){return x.id===_id||x.profileId===_id;}); if(_r && typeof openProfile==='function') openProfile(_r); } }; });
     $('gymProfContent').querySelectorAll('.lvlHead').forEach(h=>h.onclick=()=>{ const v=h.dataset.v; const body=$('gymProfContent').querySelector('.lvlBody[data-v="'+v+'"]'); const arr=$('gymProfContent').querySelector('.lvlArr[data-v="'+v+'"]'); if(!body) return; const open=body.style.display==='none'; body.style.display=open?'block':'none'; if(arr) arr.style.transform=open?'rotate(180deg)':'none'; });
     $('gymProfContent').querySelectorAll('.subPlanBtn').forEach(b=>{ b.onclick=()=>{ const sel=plansAll[+b.dataset.pi]; if(myMemb && sel && sel.coach && myMemb.coach_id && sel.coach===myMemb.coach_id){ if(!confirm(LANG==='en'?'If you want a different class level with the same coach, talk to them first. Continue anyway?':'Pokud chceš navštěvovat jinou úroveň lekcí u stejného kouče, zkus se s ním nejdřív domluvit. Přesto pokračovat?')) return; } gymTermsGate(g, ()=>subscribeGymMembership(g, sel), true); }; });
     const _grBtn=$('gymProfContent').querySelector('.gymRefShareBtn'); if(_grBtn) _grBtn.onclick=async()=>{ if(!currentUser) return; try{ const { data:_mm } = await supaClient.from('gym_memberships').select('id').eq('student_id',currentUser.id).eq('gym_id',g.id).in('status',['active','cancelling']).limit(1); if(!_mm||!_mm.length){ toast(LANG==='en'?'Only active members can invite friends to this gym.':'Pozvat kamaráda můžou jen aktivní členové tohoto gymu.'); return; } }catch(e){} const link=location.origin+'/?gym='+g.id+'&gymref='+currentUser.id; const msg=(LANG==='en'?`Join ${g.name} on MTL — you get ${g.member_ref_pct}% off your first month! 🥊 `:`Přidej se do ${g.name} na MTL — máš ${g.member_ref_pct}% slevu na první měsíc! 🥊 `); if(navigator.share){ try{ await navigator.share({ title:g.name||'MTL', text:msg, url:link }); }catch(e){} } else { try{ navigator.clipboard.writeText(link); }catch(e){} toast(L('✅ Odkaz zkopírován')); } };
