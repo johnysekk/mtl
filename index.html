@@ -991,10 +991,9 @@ body.no-emoji [data-keep-emoji] .prow-icon,body.no-emoji [data-keep-emoji] .sico
   <div id="gymVouchBox" style="padding:0 20px;"></div>
   <div id="gymManageContent" style="padding:16px 20px;"></div>
 </div>
-<div id="shOwnMembers" style="position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:400;display:none;align-items:center;justify-content:center;padding:20px;box-sizing:border-box;">
-  <div style="background:var(--surf);border-radius:20px;max-width:460px;width:100%;max-height:85vh;overflow-y:auto;padding:22px 20px;position:relative;box-shadow:0 20px 60px rgba(0,0,0,.4);">
-    <button class="btn-close" id="btnCloseOwnMembers" style="position:absolute;top:12px;right:14px;background:#333;color:#fff;z-index:2;"></button>
-    <div style="font-size:17px;font-weight:800;color:var(--dark);margin-bottom:16px;" data-noi18n>🔗 Vlastní členové a migrace</div>
+<div class="sheet" id="shOwnMembers" style="z-index:91;">
+  <div class="shdr"><div class="shdr-title" data-noi18n>🔗 Vlastní členové a migrace</div><button class="btn-close" id="btnCloseOwnMembers"></button></div>
+  <div style="padding:16px 20px;">
     
     <div class="sec-lbl" data-noi18n>Odkaz pro stávající členy</div>
     <p data-noi18n style="font-size:12px;color:var(--mid);line-height:1.5;margin:0 0 10px;">Přecházejí tví stávající členové na placení přes MTL? Sdílej jim TENHLE odkaz. Označí je jako TVÉ členy — ne jako nově přivedené přes MTL — takže si z jejich členství MTL bere jen běžnou provizi, ne vyšší akviziční poplatek.</p>
@@ -4610,18 +4609,19 @@ async function loadCoaches() {
     data = r.data; error = r.error;
     if(error){ // PostGIS not deployed yet -> graceful fallback to the old bounding box
       const _BOX = 6; _coachCenter = null;
-      const fb = await supaClient.from('profiles').select('*').eq('coach_status','approved').is('deleted_at', null).eq('charges_enabled', true).or('and(city_lat.gte.'+(ulat-_BOX)+',city_lat.lte.'+(ulat+_BOX)+',city_lng.gte.'+(ulng-_BOX)+',city_lng.lte.'+(ulng+_BOX)+'),city_lat.is.null').limit(2000);
+      const fb = await supaClient.from('profiles').select('*').eq('coach_status','approved').is('deleted_at', null).or('and(city_lat.gte.'+(ulat-_BOX)+',city_lat.lte.'+(ulat+_BOX)+',city_lng.gte.'+(ulng-_BOX)+',city_lng.lte.'+(ulng+_BOX)+'),city_lat.is.null').limit(2000);
       data = fb.data; error = fb.error;
     }
   } else if(ucountry){
-    const r = await supaClient.from('profiles').select('*').eq('coach_status','approved').is('deleted_at', null).eq('charges_enabled', true).eq('country', ucountry).limit(2000); data=r.data; error=r.error;
+    const r = await supaClient.from('profiles').select('*').eq('coach_status','approved').is('deleted_at', null).eq('country', ucountry).limit(2000); data=r.data; error=r.error;
   } else {
-    const r = await supaClient.from('profiles').select('*').eq('coach_status','approved').is('deleted_at', null).eq('charges_enabled', true).limit(1000); data=r.data; error=r.error;
+    const r = await supaClient.from('profiles').select('*').eq('coach_status','approved').is('deleted_at', null).limit(1000); data=r.data; error=r.error;
   }
 
   if (error) { console.error('Supabase error:', error); toast(L('⚠️ Chyba načítání')); return; }
 
-  data = (data||[]).filter(function(r){ return r.charges_enabled !== false; });
+  (function(){ if(typeof window._coachNotReady!=='function'){ window._coachNotReady=function(r){ var m=r&&r.payment_mode; if(m==='stripe') return r.charges_enabled===false; if(m){ if('commission_card_status' in r) return r.commission_card_status!=='active'; } return false; }; } })();
+  data = (data||[]).filter(function(r){ return !window._coachNotReady(r); });
   COACHES = (data||[]).map(_mapCoachRow);
   try{ await appendDojoSenseis(); }catch(e){ console.error('appendDojoSenseis',e); }
   init();
@@ -4690,7 +4690,7 @@ function _mapCoachRow(c){
       emoji: c.emoji || '🥋',
       photo: c.photo_url || null,
       stripeAccount: c.stripe_account ? c.stripe_account.trim() : null,
-      payment_mode: c.payment_mode || null,
+      payment_mode: c.payment_mode || null, commission_card_status: c.commission_card_status||null, charges_enabled: c.charges_enabled, receiver_id_value: c.receiver_id_value||null, confirm_mode: c.confirm_mode||null,
       bg: '#0d1a2e',
       loc: c.city || '',
       country: c.country || null,
@@ -5730,7 +5730,7 @@ async function loadFavorites(){
   if(!currentUser){ favorites=[]; return; }
   const { data } = await supaClient.from('favorites').select('coach_id').eq('student_id', currentUser.id);
   const ids = new Set((data||[]).map(r=>r.coach_id));
-  favorites = COACHES.filter(c=> ids.has(c.profileId||c.id) && !c.account_suspended);
+  favorites = COACHES.filter(c=> ids.has(c.profileId||c.id) && !c.account_suspended && !(typeof window._coachNotReady==='function' && window._coachNotReady(c)));
   renderFavs();
 }
 
@@ -10783,7 +10783,7 @@ async function renderGymTeamDash(){
   const _bothModes = !!(currentUser&&currentUser.gym_payout_account) && !!window._gtHasGymRevenue;
   const modeToggleHtml = _bothModes ? `<div style="display:flex;gap:6px;margin-bottom:10px;"><button id="gtdModeNet" style="flex:1;padding:9px;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';border:1px solid var(--border);background:${_gtdMode==='gross'?'var(--surf)':'var(--dark)'};color:${_gtdMode==='gross'?'var(--dark)':'#fff'};">${EN?'My net':'Můj net'}</button><button id="gtdModeGross" style="flex:1;padding:9px;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';border:1px solid var(--border);background:${_gtdMode==='gross'?'var(--dark)':'var(--surf)'};color:${_gtdMode==='gross'?'#fff':'var(--dark)'};">${EN?'For the gym':'Pro gym'}</button></div>` : '';
   const _formerBanner = gymObj._former ? `<div style="background:#FFF4E5;border:1px solid #F0C674;border-radius:12px;padding:13px 15px;margin-bottom:12px;"><div style="font-weight:800;font-size:13px;color:#8a5a00;margin-bottom:4px;">\ud83d\udd0c ${EN?'Former gym \u00b7 disconnected':'B\u00fdval\u00fd gym \u00b7 odpojeno'}</div><div style="font-size:12px;color:#7a5a1a;line-height:1.5;margin-bottom:10px;">${EN?'You are no longer on this gym team, but all your data and metrics stay here. Your members keep being charged to your Stripe. You can move your active business (members & merch) to another gym, or hide this from your panel.':'U\u017e nejsi v t\u00fdmu tohoto gymu, ale v\u0161echna tvoje data a metriky tu z\u016fst\u00e1vaj\u00ed. Tv\u00fdm \u010dlen\u016fm se d\u00e1l strh\u00e1v\u00e1 na tv\u016fj Stripe. M\u016f\u017ee\u0161 p\u0159en\u00e9st sv\u016fj aktivn\u00ed byznys (\u010dleny & merch) do jin\u00e9ho gymu, nebo to schovat z panelu.'}</div><div style="display:flex;gap:8px;flex-wrap:wrap;"><button id="gtdPortBtn" style="flex:1;min-width:150px;padding:11px;border-radius:10px;border:none;background:#0A7A4F;color:#fff;font-weight:700;font-size:13px;cursor:pointer;font-family:'DM Sans';">${EN?'Move my business \u2192':'P\u0159en\u00e9st m\u016fj byznys \u2192'}</button><button id="gtdHideBtn" style="flex:0 0 auto;padding:11px 14px;border-radius:10px;border:1px solid #E0C080;background:transparent;color:#8a5a00;font-weight:700;font-size:13px;cursor:pointer;font-family:'DM Sans';">${EN?'Hide':'Skr\u00fdt'}</button></div></div>` : '';
-  box.innerHTML = (typeof _welcomeBanner==='function'?_welcomeBanner():'') + modeToggleHtml + gymSelHtml + (gymObj._former?_formerBanner:'') + monthSelHtml + heroHtml + cardsHtml + note
+  box.innerHTML = (typeof _welcomeBanner==='function'?_welcomeBanner():'') + (typeof _payMethodBanner==='function'?_payMethodBanner(currentUser):'') + modeToggleHtml + gymSelHtml + (gymObj._former?_formerBanner:'') + monthSelHtml + heroHtml + cardsHtml + note
     + `<div id="gtdStats">` + _ownerPanels + `<div id="gtdTrend"></div></div>` + btnsHtml;
 
   // selectors
@@ -11243,7 +11243,7 @@ async function renderGymLeaderboard(){
 // ===== MEMBER IMPORT (step 1: CSV -> imported_members staging) =====
 window._impRows=null; window._impHead=null;
 function openImportMembers(){ openSheet('shImportMembers'); }
-function openOwnMembers(){ var _m=$('shOwnMembers'); if(_m) _m.style.display='flex'; }
+function openOwnMembers(){ openSheet('shOwnMembers'); }
 function _impParseCSV(txt){
   var firstLine=(txt.split(/\r?\n/)[0]||'');
   var delim = (firstLine.split(';').length > firstLine.split(',').length) ? ';' : (firstLine.split('\t').length>firstLine.split(',').length?'\t':',');
@@ -11300,8 +11300,7 @@ async function _impSave(){
   }catch(e){ toast('Chyba: '+((e&&e.message)||e)); if(sb){ sb.disabled=false; _impRefreshPreview(); } }
 }
 if($('btnImportMembers')) $('btnImportMembers').onclick=openImportMembers;
-if($('btnCloseOwnMembers')) $('btnCloseOwnMembers').onclick=function(){ $('shOwnMembers').style.display='none'; };
-if($('shOwnMembers')) $('shOwnMembers').onclick=function(e){ if(e.target===$('shOwnMembers')) $('shOwnMembers').style.display='none'; };
+if($('btnCloseOwnMembers')) $('btnCloseOwnMembers').onclick=function(){ closeSheet('shOwnMembers'); };
 if($('btnCloseImport')) $('btnCloseImport').onclick=function(){ closeSheet('shImportMembers'); };
 if($('impDetect')) $('impDetect').onclick=_impDetect;
 if($('impSave')) $('impSave').onclick=_impSave;
@@ -11403,7 +11402,7 @@ async function renderGymManage(){
     ${(window._myGyms&&window._myGyms.length>1)?`<div style="display:flex;gap:8px;margin-bottom:12px;"><button onclick="openGymPicker()" style="width:100%;padding:10px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">🔁 ${LANG==='en'?'Switch gym':'Přepnout gym'}</button></div>`:''}
     ${partnerBadge}
     <div id="gmLevelBar">${_gymBar}</div>
-${(typeof _commissionBanner==='function')?_commissionBanner():''}
+${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(typeof _commissionBanner==='function')?_commissionBanner():''}
       ${(typeof _mtlPayReady==='function' && _myGymData && !_mtlPayReady(_myGymData).ready) ? `<div style="background:#FFF7ED;border:1px solid #FCD9A8;border-radius:12px;padding:12px 14px;margin-bottom:14px;"><div style="font-size:13px;font-weight:800;color:#9a5a00;margin-bottom:4px;">⚠️ ${LANG==='en'?'Your gym is not public yet':'Tvůj gym zatím není veřejný'}</div><div style="font-size:12px;color:#9a5a00;line-height:1.5;margin-bottom:8px;">${LANG==='en'?'To appear in the deck & take bookings, finish: ':'Aby se zobrazil v nabídce a bral rezervace, doplň: '}${_mtlPayReady(_myGymData).why.join(', ')}.</div><button onclick="openCommissionCard()" style="padding:9px 14px;background:#9a5a00;color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Fix now →':'Doplnit →'}</button></div>` : ''}
     <div id="gmTabBar" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:16px;">
       <button id="gmTabSchedBtn" style="padding:11px 4px;border:none;border-radius:10px;background:var(--dark);color:#fff;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;">📅 ${LANG==='en'?'Schedule':'Rozvrh'}</button>
@@ -23550,6 +23549,51 @@ function _mtlPayMode(row){
   return null;
 }
 // _mtlPayReady: is this gym/profile ready to take payments + be public? Returns {ready, why:[...]}.
+function _receiverError(type, value){
+  var EN=LANG==='en'; type=(type||'').toLowerCase(); var raw=(value||'').trim();
+  if(!raw) return EN?'Enter your receiver (IBAN/PIX/UPI).':'Zadej příjemce (IBAN/PIX/UPI).';
+  if(type==='iban'){
+    var v=raw.replace(/\s+/g,'').toUpperCase();
+    if(!/^[A-Z]{2}/.test(v)) return EN?'IBAN must start with a 2-letter country code (e.g. CZ, SK, DE).':'IBAN musí začínat kódem země (např. CZ, SK, DE).';
+    if(!/^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$/.test(v)) return EN?'Invalid IBAN structure (2 letters + 2 digits + account).':'Neplatná struktura IBAN (2 písmena + 2 číslice + číslo účtu).';
+    var _IL={AD:24,AT:20,BE:16,BG:22,CH:21,CY:28,CZ:24,DE:22,DK:18,EE:20,ES:24,FI:18,FR:27,GB:22,GR:27,HR:21,HU:28,IE:22,IS:26,IT:27,LI:21,LT:20,LU:20,LV:21,MC:27,MT:31,NL:18,NO:15,PL:28,PT:25,RO:24,SE:24,SI:19,SK:24,SM:27};
+    var cc=v.slice(0,2);
+    if(_IL[cc]!==undefined && v.length!==_IL[cc]) return EN?('IBAN for '+cc+' must be '+_IL[cc]+' characters — you have '+v.length+'. Check for missing/extra digits.'):('IBAN pro '+cc+' musí mít '+_IL[cc]+' znaků — máš '+v.length+'. Zkontroluj chybějící/přebývající číslice.');
+    if(typeof _validReceiver==='function' && !_validReceiver('iban', v)) return EN?'IBAN checksum failed — likely a typo. Re-check the number.':'Kontrolní součet IBAN nesedí — nejspíš překlep. Zkontroluj číslo.';
+    return null;
+  }
+  if(type==='upi'){ if(!/^[a-zA-Z0-9._-]{2,}@[a-zA-Z]{2,}$/.test(raw)) return EN?'UPI must look like name@bank.':'UPI musí vypadat jako jmeno@banka.'; return null; }
+  if(type==='pix'){ if(typeof _validReceiver==='function' && !_validReceiver('pix', raw)) return EN?'Invalid PIX key (CPF/CNPJ/email/phone/random key).':'Neplatný PIX klíč (CPF/CNPJ/e-mail/telefon/náhodný klíč).'; return null; }
+  return null;
+}
+function _validReceiver(type, value){
+  try{
+    type=(type||'').toLowerCase(); var raw=(value||'').trim();
+    if(type==='iban'){
+      var v=raw.replace(/\s+/g,'').toUpperCase();
+      if(!/^[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30}$/.test(v)) return false; var _IL={AD:24,AT:20,BE:16,BG:22,CH:21,CY:28,CZ:24,DE:22,DK:18,EE:20,ES:24,FI:18,FR:27,GB:22,GR:27,HR:21,HU:28,IE:22,IS:26,IT:27,LI:21,LT:20,LU:20,LV:21,MC:27,MT:31,NL:18,NO:15,PL:28,PT:25,RO:24,SE:24,SI:19,SK:24,SM:27}; var _cc=v.slice(0,2); if(_IL[_cc]!==undefined && v.length!==_IL[_cc]) return false;
+      var re=v.slice(4)+v.slice(0,4), num='';
+      for(var i=0;i<re.length;i++){ var ch=re.charCodeAt(i); num += (ch>=65&&ch<=90)?(ch-55):re[i]; }
+      var rem=0; for(var j=0;j<num.length;j++){ rem=(rem*10+(num.charCodeAt(j)-48))%97; }
+      return rem===1; // IBAN mod-97 checksum
+    }
+    if(type==='upi'){ return /^[a-zA-Z0-9._-]{2,}@[a-zA-Z]{2,}$/.test(raw); }
+    if(type==='pix'){
+      return /^[0-9]{11}$/.test(raw) || /^[0-9]{14}$/.test(raw) || /^\S+@\S+\.\S+$/.test(raw)
+        || /^\+?[0-9]{10,14}$/.test(raw.replace(/[\s()-]/g,'')) || /^[0-9a-fA-F-]{32,36}$/.test(raw);
+    }
+    return raw.length>=4;
+  }catch(e){ return true; }
+}
+function _payMethodBanner(row){
+  try{
+    if(!row) return '';
+    var notReady = (typeof _mtlPayReady==='function' && !_mtlPayReady(row).ready) || (typeof window._coachNotReady==='function' && window._coachNotReady(row));
+    if(!notReady) return '';
+    var EN=LANG==='en';
+    return '<div style="background:#FEF2F2;border:1px solid #FCA5A5;border-radius:12px;padding:13px 15px;margin-bottom:14px;font-size:13px;font-weight:700;color:#B91C1C;line-height:1.5;">\u26A0\uFE0F '+(EN?'You are currently not visible to students in the app \u2014 connect a payment method so they can train with you again.':'Te\u010f se nezobrazuje\u0161 student\u016fm v appce \u2014 p\u0159ipoj platebn\u00ed metodu, aby u tebe op\u011bt mohli tr\u00e9novat.')+'</div>';
+  }catch(e){ return ''; }
+}
 function _mtlPayReady(row){
   var EN=LANG==='en'; var why=[]; var mode=_mtlPayMode(row);
   if(!mode){ why.push(EN?'choose a payment mode (QR or Stripe)':'zvol zpusob plateb (QR nebo Stripe)'); }
@@ -23673,8 +23717,10 @@ function openCommissionCard(kind){
       var cf=ov.querySelector('input[name="pmConf"]:checked');
       var decl=ov.querySelector('#pmDecl').checked;
       if(!rv){ toast(EN?'Add your receiver (IBAN/PIX/UPI)':'Doplň příjemce (IBAN/PIX/UPI)'); return; }
+      var _rvErr=(typeof _receiverError==='function')?_receiverError(rt, rv):null; if(_rvErr){ toast(_rvErr); return; }
       if(!cf){ toast(EN?'Choose confirmation mode (A/B)':'Zvol způsob potvrzování (A/B)'); return; }
       if(!decl){ toast(EN?'You must confirm the account declaration':'Musíš potvrdit prohlášení o účtu'); return; }
+      if(!(g.commission_card_status==='active')){ toast(EN?'Save a commission card first (required for QR/cash)':'Nejdřív ulož kartu na provizi (nutné pro QR/hotovost)'); return; }
       var _qc=ov.querySelector('#pmQrCash')&&ov.querySelector('#pmQrCash').checked; upd.takes_cash=!!_qc; upd.receiver_id_type=rt; upd.receiver_id_value=rv; upd.receiver_name=rn; upd.confirm_mode=cf.value;
       if(!g.receiver_declared_at) upd.receiver_declared_at=new Date().toISOString();
     }
