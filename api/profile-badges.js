@@ -134,7 +134,7 @@ export default async function handler(req, res) {
       let gt = null; for(const t of GR){ if(grN >= t[0]) gt = t; }
       if(gt) M.push({ cat:'gym', emoji:gt[1], en:gt[2], cs:gt[3], den:gt[4], dcs:gt[5] });
     } catch(e){}
-    add('platform',isFounder,'👑','MTL Founder','MTL Founder','MTL Founder - 🏆 From a bullied kid to 70+ fights in the ring. 🚀 Mission: Spread martial arts.','MTL Founder - 🏆 Ze šikanovaného kluka k 70+ zápasům v ringu. 🚀 Mise: Šířit bojová umění.');
+    add('platform',isFounder,'👑','MTL Founder','MTL Founder','MTL Founder\nFrom a bullied kid to 70+ fights in the ring.\nHis mission: Spread martial arts and its benefits.','MTL Founder\nFrom a bullied kid to 70+ fights in the ring.\nHis mission: Spread martial arts and its benefits.');
     add('platform',isAmbassador,'⭐','MTL Ambassador','MTL Ambassador','MTL Ambassador for their discipline','MTL Ambasador své disciplíny');
     add('platform',me.cert_level==='certified','🏅','MTL Certified','MTL Certified','Verified & certified coach on MTL','Ověřený a certifikovaný kouč na MTL');
     add('coach',cev+gev>=1,'🎪','Hosted an event','Uspořádal akci','Hosted an event on MTL','Uspořádal akci na MTL');
