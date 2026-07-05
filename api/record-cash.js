@@ -149,13 +149,15 @@ export default async function handler(req, res) {
       const _wz = await isWelcomeZeroProfile(ownerProf);
       const _cc = (_wantCredit && ownerProf.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
-      const _acq = _wz ? null : await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id);
-      const mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
+      const _acq = await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id);
+      const _wouldFee = Math.round(gross * (_acq != null ? _acq : rate));
+      const mtl_fee = _cc ? 0 : _wouldFee;                    // credit redemption = real 0
+      const mtl_fee_refunded = (_wz && !_cc) ? _wouldFee : 0; // welcome: waive it back (net 0), matches Stripe so founder "would-earn" shows it
       let _gymPayee = gym.stripe_account || null;
       if (coach_id) { try { const _cp = await sb(`profiles?id=eq.${coach_id}&select=gym_payout_account`); const _cpa = _cp && _cp[0] && _cp[0].gym_payout_account; if (_cpa) _gymPayee = _cpa; } catch(e){} }
       row = {
         gym_id, coach_id: coach_id || null, member_id: member_id || null, paid_to: 'gym', payee_account: _gymPayee,
-        gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0,
+        gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded,
         currency: cur, type, status: 'completed', payment_method,
         commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct',
@@ -173,11 +175,13 @@ export default async function handler(req, res) {
       const _wz = await isWelcomeZeroProfile(coach);
       const _cc = (_wantCredit && coach.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
-      const _acq = _wz ? null : await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id);
-      const mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
+      const _acq = await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id);
+      const _wouldFee = Math.round(gross * (_acq != null ? _acq : rate));
+      const mtl_fee = _cc ? 0 : _wouldFee;
+      const mtl_fee_refunded = (_wz && !_cc) ? _wouldFee : 0;
       row = {
         gym_id: null, coach_id, member_id: member_id || null, paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null),
-        gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0,
+        gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded,
         currency: cur, type, status: 'completed', payment_method,
         commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct',
@@ -186,7 +190,7 @@ export default async function handler(req, res) {
 
     const ins = await sb('transactions', { method: 'POST', prefer: 'return=representation', body: JSON.stringify(row) });
     if (_creditRow) await consumeStudentCredit(_creditRow.memberId, _creditRow.id, _creditRow.sc);
-    return res.status(200).json({ ok: true, mtl_fee: row.mtl_fee, welcome: row.commission_status === 'collected' && row.mtl_fee === 0, credit_redeemed: !!_creditRow, id: (ins && ins[0] && ins[0].id) || null });
+    return res.status(200).json({ ok: true, mtl_fee: row.mtl_fee, welcome: (row.mtl_fee_refunded || 0) > 0, credit_redeemed: !!_creditRow, id: (ins && ins[0] && ins[0].id) || null });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
