@@ -48,11 +48,24 @@ async function welcomeKillSwitch() {
 // Mirrors isWelcomeZero() in pay.js, but on the payee profile we already loaded.
 // In window -> this cash/QR sale is 0% MTL fee (clean books, no doklad), exactly like Stripe.
 // First sale on a genuinely new account (<45 days) opens the 30-day window now (same anchor as Stripe).
-async function isWelcomeZeroProfile(prof) {
+const WELCOME_CAP_MINOR = 100000 * 100; // welcome also ends at 100,000 CZK cumulative turnover in the window (gross_amount is stored x100)
+async function isWelcomeZeroProfile(prof, scopeCol, scopeId) {
   if (!prof || !prof.id) return false;
   if (await welcomeKillSwitch()) return false;
   const now = Date.now();
-  if (prof.welcome_free_until) return now < new Date(prof.welcome_free_until).getTime();
+  if (prof.welcome_free_until) {
+    if (now >= new Date(prof.welcome_free_until).getTime()) return false; // 30-day window elapsed
+    // volume trigger: welcome also ends once turnover in the window reaches the cap (protects against a viral high-volume onboarding)
+    if (scopeCol && scopeId) {
+      try {
+        const winStart = new Date(new Date(prof.welcome_free_until).getTime() - 30 * 86400000).toISOString();
+        const rows = await sb(`transactions?select=gross_amount&${scopeCol}=eq.${scopeId}&status=eq.completed&created_at=gte.${encodeURIComponent(winStart)}`);
+        const sum = (rows || []).reduce((a, r) => a + (Number(r.gross_amount) || 0), 0);
+        if (sum >= WELCOME_CAP_MINOR) return false; // over the cap -> charge normally from now on
+      } catch (e) { /* on any error keep welcome (never over-charge) */ }
+    }
+    return true;
+  }
   const created = prof.created_at ? new Date(prof.created_at).getTime() : 0;
   if (created && (now - created) < 45 * 86400000) {
     try { await sb(`profiles?id=eq.${prof.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ welcome_free_until: new Date(now + 30 * 86400000).toISOString() }) }); } catch (e) {}
@@ -112,7 +125,7 @@ export default async function handler(req, res) {
   if (!SB || !KEY) return res.status(500).json({ error: 'env not set' });
   try {
     const b = (typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body) || {};
-    const { token, gym_id, coach_id, member_id, gross_amount, currency, type, payment_method, cash_payer_name, acq_source, credit } = b;
+    const { token, gym_id, coach_id, member_id, gross_amount, currency, type, payment_method, cash_payer_name, acq_source, credit, source_booking_id } = b;
     const provider = b.provider === 'coach' ? 'coach' : 'gym';
 
     if (!token || !type || !payment_method) return res.status(400).json({ error: 'missing fields' });
@@ -146,21 +159,19 @@ export default async function handler(req, res) {
       if (!ownerProf.id) ownerProf.id = gym.owner_id;
       rate = ladderRate(ownerProf);
       cur = currency || gym.currency || 'czk';
-      const _wz = await isWelcomeZeroProfile(ownerProf);
+      const _wz = await isWelcomeZeroProfile(ownerProf, 'gym_id', gym_id);
       const _cc = (_wantCredit && ownerProf.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
-      const _acq = await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id);
-      const _wouldFee = Math.round(gross * (_acq != null ? _acq : rate));
-      const mtl_fee = _cc ? 0 : _wouldFee;                    // credit redemption = real 0
-      const mtl_fee_refunded = (_wz && !_cc) ? _wouldFee : 0; // welcome: waive it back (net 0), matches Stripe so founder "would-earn" shows it
+      const _acq = _wz ? null : await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id);
+      const mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
       let _gymPayee = gym.stripe_account || null;
       if (coach_id) { try { const _cp = await sb(`profiles?id=eq.${coach_id}&select=gym_payout_account`); const _cpa = _cp && _cp[0] && _cp[0].gym_payout_account; if (_cpa) _gymPayee = _cpa; } catch(e){} }
       row = {
         gym_id, coach_id: coach_id || null, member_id: member_id || null, paid_to: 'gym', payee_account: _gymPayee,
-        gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded,
+        gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0,
         currency: cur, type, status: 'completed', payment_method,
         commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,
-        cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct',
+        cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct', source_booking_id: source_booking_id || null,
       };
     } else {
       // coach pays out -> the coach authorizes their own cash/QR, rate from coach profile.
@@ -172,25 +183,23 @@ export default async function handler(req, res) {
       if (coach.cash_blocked) return res.status(403).json({ error: 'cash blocked' });
       rate = ladderRate(coach);
       cur = currency || 'czk';
-      const _wz = await isWelcomeZeroProfile(coach);
+      const _wz = await isWelcomeZeroProfile(coach, 'coach_id', coach_id);
       const _cc = (_wantCredit && coach.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
-      const _acq = await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id);
-      const _wouldFee = Math.round(gross * (_acq != null ? _acq : rate));
-      const mtl_fee = _cc ? 0 : _wouldFee;
-      const mtl_fee_refunded = (_wz && !_cc) ? _wouldFee : 0;
+      const _acq = _wz ? null : await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id);
+      const mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
       row = {
         gym_id: null, coach_id, member_id: member_id || null, paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null),
-        gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded,
+        gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0,
         currency: cur, type, status: 'completed', payment_method,
         commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,
-        cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct',
+        cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct', source_booking_id: source_booking_id || null,
       };
     }
 
     const ins = await sb('transactions', { method: 'POST', prefer: 'return=representation', body: JSON.stringify(row) });
     if (_creditRow) await consumeStudentCredit(_creditRow.memberId, _creditRow.id, _creditRow.sc);
-    return res.status(200).json({ ok: true, mtl_fee: row.mtl_fee, welcome: (row.mtl_fee_refunded || 0) > 0, credit_redeemed: !!_creditRow, id: (ins && ins[0] && ins[0].id) || null });
+    return res.status(200).json({ ok: true, mtl_fee: row.mtl_fee, welcome: row.commission_status === 'collected' && row.mtl_fee === 0, credit_redeemed: !!_creditRow, id: (ins && ins[0] && ins[0].id) || null });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }

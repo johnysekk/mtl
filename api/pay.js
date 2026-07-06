@@ -42,7 +42,17 @@ async function isWelcomeZero(acct){
     }
     if(!prov || !prov.id) return false;
     const now = Date.now();
-    if(prov.welcome_free_until) return now < new Date(prov.welcome_free_until).getTime();
+    if(prov.welcome_free_until){
+      if(now >= new Date(prov.welcome_free_until).getTime()) return false; // 30-day window elapsed
+      // volume trigger: welcome also ends at 100,000 CZK cumulative turnover in the window (parity with record-cash.js)
+      try{
+        const winStart = new Date(new Date(prov.welcome_free_until).getTime() - 30*86400000).toISOString();
+        const rows = await _wsbGet(`transactions?select=gross_amount&payee_account=eq.${a}&status=eq.completed&created_at=gte.${encodeURIComponent(winStart)}`);
+        const sum = (rows||[]).reduce((x,r)=>x+(Number(r.gross_amount)||0), 0);
+        if(sum >= 100000*100) return false; // over the cap -> charge normally from now on
+      }catch(e){ /* on any error keep welcome (never over-charge) */ }
+      return true;
+    }
     // First sale on a genuinely new account (<45 days): open the 30-day window now and make THIS sale 0%.
     const created = prov.created_at ? new Date(prov.created_at).getTime() : 0;
     if(created && (now - created) < 45*86400000){
