@@ -1,8 +1,7 @@
 // /api/release-cron.js
 // Runs every ~10 min. Two passes:
 //  (1) AUTO-RELEASE: gym_bookings with payment_method='qr' AND status='reserved'
-//      (student has NOT tapped "I've paid") whose class starts within RELEASE_LEAD (45) min
-//      in the GYM's local timezone -> status='released' + free the gym_class_reservations
+//      (student has NOT tapped "I've paid") older than 30 min (created_at+30) -> status='released' + free the gym_class_reservations
 //      slot-hold + notify the student. Bookings in status 'paid_claimed' are NEVER touched
 //      (the student claims they paid -> the owner must confirm/deny in Reception).
 //  (3) 1:1 EXPIRY: bookings (coach 1:1) payment_method='qr' status='reserved' older than 30 min
@@ -48,32 +47,19 @@ export default async function handler(req, res) {
 
   let released = 0, expired = 0, expired1h = 0;
   try {
-    // ---- Pass 1: auto-release unpaid QR drop-in reservations near class start --------------
-    const yest = new Date(Date.now() - 36 * 3600 * 1000).toISOString().slice(0, 10);
-    const rows = await sb(`gym_bookings?payment_method=eq.qr&status=eq.reserved&class_date=gte.${yest}&select=id,gym_id,student_id,student_name,class_name,class_date,class_time,class_level&limit=3000`);
-
-    const gymIds = [...new Set((rows || []).map(r => r.gym_id).filter(Boolean))];
-    const tzMap = {};
-    if (gymIds.length) {
-      const gs = await sb(`gyms?id=in.(${gymIds.join(',')})&select=id,timezone,owner_id,name`);
-      (gs || []).forEach(g => { tzMap[g.id] = { tz: g.timezone || DEFAULT_TZ, owner: g.owner_id, name: g.name }; });
-    }
+    // ---- Pass 1: auto-release unpaid QR drop-in reservations 30 min after booking --------
+    // (student has NOT tapped "I've paid"; created_at + 30 min, same rule as coach 1:1)
+    const cutoff30 = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const rows = await sb(`gym_bookings?payment_method=eq.qr&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoff30)}&select=id,gym_id,student_id,student_name,class_name,class_date,class_time&limit=3000`);
 
     for (const b of (rows || [])) {
-      const gm = tzMap[b.gym_id] || { tz: DEFAULT_TZ };
-      const start = classStartNaive(b.class_date, b.class_time);
-      if (!start) continue;
-      const now = nowInTz(gm.tz);
-      const releaseAt = new Date(start.getTime() - RELEASE_LEAD * 60000);
-      if (now < releaseAt) continue;
-
       await sb(`gym_bookings?id=eq.${b.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'released' }) });
       try {
         await sb(`gym_class_reservations?gym_id=eq.${encodeURIComponent(b.gym_id)}&student_id=eq.${encodeURIComponent(b.student_id)}&class_date=eq.${encodeURIComponent(b.class_date)}&class_time=eq.${encodeURIComponent(b.class_time || '')}&class_name=eq.${encodeURIComponent(b.class_name || '')}`, { method: 'DELETE', prefer: 'return=minimal' });
       } catch (e) {}
       try {
         if (b.student_id) {
-          const msg = `Tvá nezaplacená rezervace (${b.class_name || 'lekce'}) byla uvolněna 45 min před začátkem. Pokud jsi zaplatil/a, klepni příště na „Zaplaceno“ hned po platbě, ať ti místo zůstane. / Your unpaid reservation was released 45 min before start — tap “I’ve paid” right after paying next time.`;
+          const msg = `Tvá nezaplacená rezervace (${b.class_name || 'lekce'}) vypršela po 30 minutách a místo se uvolnilo pro další studenty. Příště klepni na „Zaplaceno“ hned po platbě, ať ti místo zůstane. / Your unpaid reservation expired after 30 minutes and the spot was released to other students.`;
           await sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'qr_released', gym: b.gym_id, class: b.class_name || null }), message: msg }) });
         }
       } catch (e) {}
