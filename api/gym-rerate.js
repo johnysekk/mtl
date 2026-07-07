@@ -13,7 +13,7 @@ async function sbGet(path) {
 // Re-rate a gym owner's existing active member subscriptions to the owner's CURRENT
 // MTL League tier rate (Shikai 3% at >=3 active, Bankai 2% at >=10, else 3.5%, EP 1%).
 // Triggered client-side when the owner crosses a tier. The rate is recomputed server-side
-// from the owner's real coach_ref_score, so the caller cannot spoof a lower rate — calling
+// from the owner's real coach_ref_score,bankai_eligible, so the caller cannot spoof a lower rate — calling
 // this can only set the rate to what the owner has legitimately earned. Applies to FUTURE
 // invoices only; it never changes what the member pays, only the MTL<->gym split.
 export default async function handler(req, res) {
@@ -25,7 +25,7 @@ export default async function handler(req, res) {
     if (!prof) return res.status(404).json({ error: 'owner not found' });
 
     const score = prof.coach_ref_score || 0;
-    const pct = prof.partner ? 1 : (score >= 10 ? 2 : (score >= 3 ? 3 : 3.5));
+    const pct = prof.partner ? 1 : ((score >= 5 && prof.bankai_eligible) ? 2.5 : (score >= 2 ? 3 : 3.5));
 
     let rerated = 0;
     const gyms = await sbGet(`gyms?owner_id=eq.${encodeURIComponent(owner)}&select=id,stripe_account`);

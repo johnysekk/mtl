@@ -34,7 +34,7 @@ function ladderRate(profile) {
   if (!profile) return 0.035;
   if (profile.partner) return 0.01;
   const s = profile.coach_ref_score || 0;
-  return s >= 10 ? 0.02 : (s >= 3 ? 0.03 : 0.035);
+  return (s >= 5 && profile.bankai_eligible) ? 0.025 : (s >= 2 ? 0.03 : 0.035);
 }
 
 const _WELCOME_FOUNDER = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
@@ -154,7 +154,7 @@ export default async function handler(req, res) {
       if (!gym) return res.status(404).json({ error: 'gym not found' });
       if (gym.owner_id !== uid) return res.status(403).json({ error: 'not your gym' });
       if (gym.account_suspended) return res.status(403).json({ error: 'account suspended' });
-      const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,coach_ref_score,welcome_free_until,created_at,referral_optin`);
+      const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,coach_ref_score,bankai_eligible,welcome_free_until,created_at,referral_optin`);
       const ownerProf = (owners && owners[0]) || {};
       if (!ownerProf.id) ownerProf.id = gym.owner_id;
       rate = ladderRate(ownerProf);
@@ -175,7 +175,7 @@ export default async function handler(req, res) {
       };
     } else {
       // coach pays out -> the coach authorizes their own cash/QR, rate from coach profile.
-      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,coach_ref_score,account_suspended,cash_blocked,welcome_free_until,created_at,referral_optin,gym_payout_account,stripe_account`);
+      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,coach_ref_score,bankai_eligible,account_suspended,cash_blocked,welcome_free_until,created_at,referral_optin,gym_payout_account,stripe_account`);
       const coach = cs && cs[0];
       if (!coach) return res.status(404).json({ error: 'coach not found' });
       if (coach.id !== uid) return res.status(403).json({ error: 'not your account' });
