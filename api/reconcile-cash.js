@@ -75,12 +75,30 @@ async function acquisitionRate(acq, type, payee, memberId, scopeCol, scopeId) {
   return null;
 }
 
+async function findStudentCredit(memberId) {
+  try {
+    const prof = await sb(`profiles?id=eq.${memberId}&select=student_credits`);
+    const scN = prof && prof[0] ? Number(prof[0].student_credits || 0) : 0;
+    if (scN <= 0) return null;
+    const nowIso = new Date().toISOString();
+    const rows = await sb(`referral_credits?user_id=eq.${memberId}&consumed=eq.false&expires_at=gt.${encodeURIComponent(nowIso)}&select=id&order=earned_at.asc&limit=1`);
+    if (!rows || !rows.length) return null;
+    return { id: rows[0].id, sc: scN };
+  } catch (e) { return null; }
+}
+async function consumeStudentCredit(memberId, creditRowId, sc) {
+  try {
+    await sb(`profiles?id=eq.${memberId}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ student_credits: Math.max(0, (Number(sc) || 1) - 1) }) });
+    await sb(`referral_credits?id=eq.${creditRowId}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ consumed: true }) });
+  } catch (e) {}
+}
+
 export default async function handler(req, res) {
   if (!SB || !KEY) return res.status(500).json({ error: 'env not set' });
   const out = { scanned: 0, backfilled: 0, already: 0, skipped: 0, errors: [] };
   try {
     const since = new Date(Date.now() - 14 * 86400000).toISOString(); // bound the scan to recent confirmations
-    const bookings = await sb(`gym_bookings?select=id,gym_id,coach_id,student_id,student_name,amount,currency,paid_to,acq_source,created_at&payment_method=eq.qr&status=eq.active&created_at=gte.${encodeURIComponent(since)}&order=created_at.desc&limit=500`);
+    const bookings = await sb(`gym_bookings?select=id,gym_id,coach_id,student_id,student_name,amount,currency,paid_to,acq_source,created_at,credit_used&payment_method=eq.qr&status=eq.active&created_at=gte.${encodeURIComponent(since)}&order=created_at.desc&limit=500`);
     for (const b of (bookings || [])) {
       out.scanned++;
       try {
@@ -88,26 +106,31 @@ export default async function handler(req, res) {
         if (existing && existing.length) { out.already++; continue; }
         const gross = Math.round(Number(b.amount || 0) * 100);
         if (!(gross > 0)) { out.skipped++; continue; }
+        let _creditRow = null;
         const month = (b.created_at ? new Date(b.created_at) : new Date()).toISOString().slice(0, 7);
         const type = 'drop_in';
         let row;
         if (b.paid_to === 'coach' && b.coach_id) {
-          const cs = await sb(`profiles?id=eq.${b.coach_id}&select=id,partner,coach_ref_score,welcome_free_until,created_at,gym_payout_account,stripe_account`);
+          const cs = await sb(`profiles?id=eq.${b.coach_id}&select=id,partner,coach_ref_score,welcome_free_until,created_at,gym_payout_account,stripe_account,referral_optin`);
           const coach = cs && cs[0]; if (!coach) { out.skipped++; continue; }
           const rate = ladderRate(coach);
           const _wz = await isWelcomeZeroReadOnly(coach, 'coach_id', b.coach_id);
-          const _acq = _wz ? null : await acquisitionRate(b.acq_source, type, coach, b.student_id, 'coach_id', b.coach_id);
-          const mtl_fee = _wz ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
+          const _cc = (b.credit_used === 'student' && b.student_id && coach.referral_optin !== false) ? await findStudentCredit(b.student_id) : null;
+          if (_cc) _creditRow = { memberId: b.student_id, id: _cc.id, sc: _cc.sc };
+          const _acq = (_wz || _cc) ? null : await acquisitionRate(b.acq_source, type, coach, b.student_id, 'coach_id', b.coach_id);
+          const mtl_fee = (_wz || _cc) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
           row = { gym_id: b.gym_id || null, coach_id: b.coach_id, member_id: b.student_id || null, paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null), gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0, currency: (b.currency || 'czk'), type, status: 'completed', payment_method: 'qr', commission_status: _wz ? 'collected' : 'pending', commission_month: month, cash_payer_name: b.student_name || null, acq_source: b.acq_source || 'direct', source_booking_id: b.id };
         } else {
           const gyms = await sb(`gyms?id=eq.${b.gym_id}&select=id,owner_id,currency,stripe_account,account_suspended`);
           const gym = gyms && gyms[0]; if (!gym) { out.skipped++; continue; }
-          const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,coach_ref_score,welcome_free_until,created_at`);
+          const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,coach_ref_score,welcome_free_until,created_at,referral_optin`);
           const ownerProf = (owners && owners[0]) || { id: gym.owner_id };
           const rate = ladderRate(ownerProf);
           const _wz = await isWelcomeZeroReadOnly(ownerProf, 'gym_id', b.gym_id);
-          const _acq = _wz ? null : await acquisitionRate(b.acq_source, type, ownerProf, b.student_id, 'gym_id', b.gym_id);
-          const mtl_fee = _wz ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
+          const _cc = (b.credit_used === 'student' && b.student_id && ownerProf.referral_optin !== false) ? await findStudentCredit(b.student_id) : null;
+          if (_cc) _creditRow = { memberId: b.student_id, id: _cc.id, sc: _cc.sc };
+          const _acq = (_wz || _cc) ? null : await acquisitionRate(b.acq_source, type, ownerProf, b.student_id, 'gym_id', b.gym_id);
+          const mtl_fee = (_wz || _cc) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
           let _gymPayee = gym.stripe_account || null;
           if (b.coach_id) { try { const _cp = await sb(`profiles?id=eq.${b.coach_id}&select=gym_payout_account`); const _cpa = _cp && _cp[0] && _cp[0].gym_payout_account; if (_cpa) _gymPayee = _cpa; } catch (e) {} }
           row = { gym_id: b.gym_id, coach_id: b.coach_id || null, member_id: b.student_id || null, paid_to: 'gym', payee_account: _gymPayee, gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0, currency: (b.currency || gym.currency || 'czk'), type, status: 'completed', payment_method: 'qr', commission_status: _wz ? 'collected' : 'pending', commission_month: month, cash_payer_name: b.student_name || null, acq_source: b.acq_source || 'direct', source_booking_id: b.id };
@@ -117,6 +140,7 @@ export default async function handler(req, res) {
         if (recheck && recheck.length) { out.already++; continue; }
         try {
           await sb('transactions', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify(row) });
+          if (_creditRow) await consumeStudentCredit(_creditRow.memberId, _creditRow.id, _creditRow.sc);
           out.backfilled++;
         } catch (e) {
           // a 409 from the unique index means a concurrent write won the race -> already recorded, fine
