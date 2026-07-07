@@ -64,12 +64,12 @@ async function isWelcomeZero(acct) {
 async function providerCommission(ownerId) {
   if (!ownerId) return COMMISSION;
   try {
-    const p = (await sbGet(`profiles?id=eq.${encodeURIComponent(ownerId)}&select=partner,coach_ref_score`))[0];
+    const p = (await sbGet(`profiles?id=eq.${encodeURIComponent(ownerId)}&select=partner,coach_ref_score,bankai_eligible`))[0];
     if (!p) return COMMISSION;
     if (p.partner) return 0.01;            // Exclusive Partner
     const sc = p.coach_ref_score || 0;
-    if (sc >= 10) return 0.02;             // Bankai
-    if (sc >= 3) return 0.03;              // Shikai
+    if (sc >= 5 && p.bankai_eligible) return 0.025;  // Bankai (5 refs + perf gate)
+    if (sc >= 2) return 0.03;              // Shikai
     return 0.035;                          // base
   } catch (e) { return COMMISSION; }
 }
