@@ -8,6 +8,8 @@
 //  (3) 1:1 EXPIRY: bookings (coach 1:1) payment_method='qr' status='reserved' older than 30 min
 //      -> status='expired' + free the held slot + notify. 'paid_claimed' is never touched.
 //  (4) EVENT EXPIRY: event_tickets payment_method='qr' status='reserved' older than 30 min -> 'expired'.
+//  (5) COVER EXPIRY: cover_requests status='open' whose class has already started -> 'expired'
+//      (a substitute-cover request nobody accepted before the class start is dead).
 //  (2) CLEANUP: gym_memberships with status='pending_offline' older than STALE_HOURS (48)
 //      -> status='ended'. These are abandoned online membership intents where the student
 //      opened the QR but never paid and nobody confirmed; expiring them clears the owner's
@@ -46,7 +48,7 @@ export default async function handler(req, res) {
     if (!(auth === `Bearer ${process.env.CRON_SECRET}` || req.headers['x-vercel-cron'])) return res.status(401).json({ error: 'unauthorized' });
   }
 
-  let released = 0, expired = 0, expired1h = 0;
+  let released = 0, expired = 0, expired1h = 0, coverExpired = 0;
   try {
     // ---- Pass 1: auto-release unpaid QR drop-in reservations near class start --------------
     const yest = new Date(Date.now() - 36 * 3600 * 1000).toISOString().slice(0, 10);
@@ -73,7 +75,7 @@ export default async function handler(req, res) {
       } catch (e) {}
       try {
         if (b.student_id) {
-          const msg = `Rezervace (${b.class_name || 'lekce'}) se uvolnila — platba nedorazila včas. / Your reservation (${b.class_name || 'a class'}) was released — payment did not arrive in time.`;
+          const msg = `Tvá nezaplacená rezervace (${b.class_name || 'lekce'}) byla uvolněna 45 min před začátkem. Pokud jsi zaplatil/a, klepni příště na „Zaplaceno“ hned po platbě, ať ti místo zůstane. / Your unpaid reservation was released 45 min before start — tap “I’ve paid” right after paying next time.`;
           await sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'qr_released', gym: b.gym_id, class: b.class_name || null }), message: msg }) });
         }
       } catch (e) {}
@@ -91,14 +93,14 @@ export default async function handler(req, res) {
     // ---- Pass 3: expire unpaid QR coach 1:1 reservations 1 hour after booking --------------
     try {
       const cutoff1h = new Date(Date.now() - 30 * 60 * 1000).toISOString(); // 30 min unpaid window
-      const b1 = await sb(`bookings?payment_method=eq.qr&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoff1h)}&select=id,slot_id,student_id,coach_name,coach_id&limit=3000`);
+      const b1 = await sb(`bookings?payment_method=eq.qr&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoff1h)}&select=id,slot_id,student_id,coach_name&limit=3000`);
       for (const b of (b1 || [])) {
         await sb(`bookings?id=eq.${b.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'expired' }) });
         if (b.slot_id) { try { await sb(`slots?id=eq.${encodeURIComponent(b.slot_id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ booked: false }) }); } catch (e) {} }
         try {
           if (b.student_id) {
-            const msg = `Nezaplacená rezervace (${b.coach_name || 'lekce'}) vypršela a termín se uvolnil. / Your unpaid reservation (${b.coach_name || 'a lesson'}) expired and the slot was freed.`;
-            await sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'qr_reservation_expired', class: b.coach_name || null, coach: b.coach_id || null }), message: msg }) });
+            const msg = `Tvá nezaplacená rezervace (${b.coach_name || 'lekce'}) vypršela po 30 minutách a termín se uvolnil pro dalšího zájemce. / Your unpaid reservation expired after 30 minutes and the slot was freed.`;
+            await sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'qr_reservation_expired' }), message: msg }) });
           }
         } catch (e) {}
         expired1h++;
@@ -114,6 +116,25 @@ export default async function handler(req, res) {
         expired1h++;
       }
     } catch (e) { /* events pass non-fatal */ }
+
+    // ---- Pass 5: expire open cover (substitute) requests once the class has started ------
+    // A 'Potrebuju zaskok' request that nobody accepted before the class start is dead;
+    // mark it expired so it stops showing as an open request and can't be accepted late.
+    try {
+      const yc = new Date(Date.now() - 36 * 3600 * 1000).toISOString().slice(0, 10);
+      const crs = await sb(`cover_requests?status=eq.open&class_date=gte.${yc}&select=id,gym_id,class_date,class_time&limit=3000`);
+      const cGymIds = [...new Set((crs || []).map(r => r.gym_id).filter(Boolean))];
+      const cTz = {};
+      if (cGymIds.length) { const cg = await sb(`gyms?id=in.(${cGymIds.join(',')})&select=id,timezone`); (cg || []).forEach(g => { cTz[g.id] = g.timezone || DEFAULT_TZ; }); }
+      for (const r of (crs || [])) {
+        const start = classStartNaive(r.class_date, r.class_time);
+        if (!start) continue;
+        const now = nowInTz(cTz[r.gym_id] || DEFAULT_TZ);
+        if (now < start) continue; // class hasn't started yet
+        await sb(`cover_requests?id=eq.${r.id}&status=eq.open`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'expired' }) });
+        coverExpired++;
+      }
+    } catch (e) { /* cover pass non-fatal */ }
 
     // security: alert founder on auto-bans / loud offenders in the last window
     try {
@@ -138,8 +159,8 @@ export default async function handler(req, res) {
     // housekeeping: drop stale rate-limit windows (>2h old)
     try { const _rlOld = new Date(Date.now() - 2*3600*1000).toISOString(); await sb('rate_limits?updated_at=lt.' + encodeURIComponent(_rlOld), { method: 'DELETE', prefer: 'return=minimal' }); } catch (e) {}
 
-    return res.status(200).json({ ok: true, released, expired, expired1h });
+    return res.status(200).json({ ok: true, released, expired, expired1h, coverExpired });
   } catch (e) {
-    return res.status(500).json({ error: e.message, released, expired, expired1h });
+    return res.status(500).json({ error: e.message, released, expired, expired1h, coverExpired });
   }
 }
