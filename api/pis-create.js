@@ -5,7 +5,7 @@
 //   ENABLE_APP_ID        = b060fa99-b053-4279-8231-b27292e3e814   (your Application ID)
 //   ENABLE_PRIVATE_KEY   = contents of the downloaded <appid>.pem (the -----BEGIN PRIVATE KEY----- block)
 //   PIS_RETURN_URL       = https://app.martialtraininglab.com/api/pis-return  (whitelisted in the Enable console)
-//   SUPABASE_URL, SUPABASE_SERVICE_KEY
+//   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 //
 // NOTE: the private key is a MULTILINE value. In Vercel paste it as-is; in code we normalise "\n".
 
@@ -16,7 +16,7 @@ const APP_ID   = process.env.ENABLE_APP_ID;
 const PRIV_KEY = (process.env.ENABLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
 const EB_BASE  = 'https://api.enablebanking.com';
 const RETURN_URL = process.env.PIS_RETURN_URL || 'https://app.martialtraininglab.com/api/pis-return';
-const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 const b64url = (o) => Buffer.from(typeof o === 'string' ? o : JSON.stringify(o)).toString('base64url');
 
