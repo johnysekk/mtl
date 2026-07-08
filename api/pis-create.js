@@ -37,7 +37,8 @@ export default async function handler(req, res) {
       bookingId,            // our booking id — carried in `state`, used to reconcile on webhook/return
       gymName, gymIban,     // beneficiary = the gym (creditor)
       amount, currency = 'CZK',
-      vs,                   // variabilní symbol -> reference_number
+      vs,                   // numeric variabilní symbol -> reference_number (only if 1-10 digits)
+      message,              // free-text message -> remittance_information (always set)
       aspspName,            // the student's chosen bank, e.g. "Ceska sporitelna" (from GET /aspsps?country=CZ)
       aspspCountry = 'CZ',
       psuType = 'personal'
@@ -59,7 +60,10 @@ export default async function handler(req, res) {
             creditor: { name: (gymName || 'Gym').slice(0, 70) }
           },
           instructed_amount: { amount: String(amount), currency },
-          ...(vs ? { reference_number: String(vs) } : {})   // maps to VS on the CZ domestic rail
+          // Enable requires reference_number OR remittance_information. We always set remittance_information;
+          // reference_number only when a valid numeric CZ VS (1-10 digits) is provided.
+          ...((vs && /^[0-9]{1,10}$/.test(String(vs))) ? { reference_number: String(vs) } : {}),
+          remittance_information: [ String(message || vs || ('MTL ' + bookingId)).slice(0, 140) ]
         }]
       },
       aspsp: { name: aspspName, country: aspspCountry },
