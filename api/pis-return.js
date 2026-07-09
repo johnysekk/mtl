@@ -9,7 +9,7 @@ const PRIV_KEY = (process.env.ENABLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
 const EB_BASE  = 'https://api.enablebanking.com';
 const APP_URL  = process.env.APP_URL || 'https://app.martialtraininglab.com';
 const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-const PAID_STATUSES = new Set(['ACCC','ACSC','ACSP','ACWC','SETLD','SETTLED']);
+const PAID_STATUSES = new Set(['ACCP','ACTC','ACSP','ACSC','ACCC','ACWC','ACFC','SETLD','SETTLED']);
 const b64url = (o) => Buffer.from(typeof o==='string'?o:JSON.stringify(o)).toString('base64url');
 function ebJwt(){ const now=Math.floor(Date.now()/1000);
   const si=b64url({typ:'JWT',alg:'RS256',kid:APP_ID})+'.'+b64url({iss:'enablebanking.com',aud:'api.enablebanking.com',iat:now,exp:now+3600});

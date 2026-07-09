@@ -17,7 +17,7 @@ const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_R
 export const config = { api: { bodyParser: false } };
 
 // statuses Enable/ASPSP report as FINAL SUCCESS — CONFIRM the exact set for CZ banks in sandbox.
-const PAID_STATUSES = new Set(['ACCC', 'ACSC', 'ACSP', 'ACWC', 'SETLD', 'SETTLED']);
+const PAID_STATUSES = new Set(['ACCP', 'ACTC', 'ACSP', 'ACSC', 'ACCC', 'ACWC', 'ACFC', 'SETLD', 'SETTLED']);
 
 const certCache = {}; // x5u -> pem (public certs rotate rarely; cache to avoid a fetch per webhook)
 
