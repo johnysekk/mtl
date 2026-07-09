@@ -24,8 +24,15 @@ function ebJwt(){ const now=Math.floor(Date.now()/1000);
 export default async function handler(req, res){
   let _dbg='st=NO_PAYMENT_ID';
   try{
-    const paymentId = req.query.payment_id || req.query.paymentId;
     const bookingId = req.query.state;
+    // Enable redirects back with `state` (= our bookingId), NOT payment_id.
+    // Derive the payment id from the stored booking/membership.
+    let paymentId = req.query.payment_id || req.query.paymentId || req.query.id;
+    if(!paymentId && bookingId){
+      let r0=(await sb.from('gym_bookings').select('pis_payment_id').eq('id',bookingId).maybeSingle()).data;
+      if(!r0){ const m0=await sb.from('gym_memberships').select('pis_payment_id').eq('id',bookingId).maybeSingle(); if(m0.data) r0=m0.data; }
+      if(r0 && r0.pis_payment_id) paymentId=r0.pis_payment_id; else _dbg='st=NO_STORED_PID';
+    }
     if(paymentId){
       const jwt=ebJwt();
       const r=await fetch(EB_BASE+'/payments/'+encodeURIComponent(paymentId),{ headers:{ Authorization:'Bearer '+jwt } });
