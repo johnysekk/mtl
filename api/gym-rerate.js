@@ -21,11 +21,11 @@ export default async function handler(req, res) {
     const owner = req.query.owner;
     if (!owner) return res.status(400).json({ error: 'missing owner' });
 
-    const prof = (await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=coach_ref_score,partner`))[0];
+    const prof = (await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=coach_ref_score,partner,bankai_eligible`))[0];
     if (!prof) return res.status(404).json({ error: 'owner not found' });
 
     const score = prof.coach_ref_score || 0;
-    const pct = prof.partner ? 1 : ((score >= 5 && prof.bankai_eligible) ? 2.5 : (score >= 2 ? 3 : 3.5));
+    const pct = prof.partner ? 1 : ((score >= 5 && prof.bankai_eligible) ? 2 : (score >= 2 ? 2.5 : 3)); // Stripe track (this cron only re-rates Stripe subscriptions)
 
     let rerated = 0;
     const gyms = await sbGet(`gyms?owner_id=eq.${encodeURIComponent(owner)}&select=id,stripe_account`);

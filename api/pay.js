@@ -10,7 +10,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 // ════════════════════════════════════════════════════════════════════════
 
 const GYM_STUDENT_MARKUP = 1.00;  // no markup
-const GYM_MTL_TAKE       = 0.035;  // drop-in: MTL provize 3,5 %
+const GYM_MTL_TAKE       = 0.03;   // drop-in: Stripe track base 3%
 const MEMB_MTL_PERCENT   = 3.5;     // membership: 3,5 % z invoicu
 
 // --- Genuine welcome 0%: no fee charged up front (replaces charge-then-instant-refund) ---
@@ -110,7 +110,7 @@ async function coachCheckout(req, res) {
 
   const rate = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
-  let COMMISSION = commission ? parseFloat(commission) : 0.035;
+  let COMMISSION = commission ? parseFloat(commission) : 0.03;
   if (!(COMMISSION >= 0.02 && COMMISSION <= 0.25)) COMMISSION = 0.10;
   let MK = 1.00; // no markup — student pays exactly the listed price
   let STUDENT_MARKUP = MK;
@@ -268,8 +268,8 @@ async function eventCheckout(req, res) {
   const cur = String(currency).toLowerCase();
   // owner's MTL League tier rate (Shikai 3% / Bankai 2%), passed from the client and range-validated.
   const MK = 1.00;
-  let _etk = take ? parseFloat(take) : 0.035;
-  if (!(_etk >= 0.01 && _etk <= 0.05)) _etk = 0.035;
+  let _etk = take ? parseFloat(take) : 0.03;
+  if (!(_etk >= 0.01 && _etk <= 0.05)) _etk = 0.03;
   const TAKE = (String(partner)==='1') ? 0.01 : _etk; // EP 1%, else owner's tier rate (3.5/3/2%)
   const isCZK = cur === 'czk';
   const unit = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);

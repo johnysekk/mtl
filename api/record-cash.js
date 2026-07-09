@@ -31,10 +31,13 @@ async function sb(path, opts = {}) {
 
 const ALLOWED_TYPES = ['drop_in', 'membership', 'custom', 'event_ticket', 'coach_1to1', 'course'];
 function ladderRate(profile) {
+  // record-cash handles cash/qr/pis = the BANK-TRANSFER track (uniform per-person model):
+  //   base 3.5%, Shikai 3% at ref_score>=2, NO Bankai (floor 3%). EP (partner) = 1%.
+  // Stripe payments go through pay.js with the Stripe track (3% / 2.5% / Bankai 2%).
   if (!profile) return 0.035;
   if (profile.partner) return 0.01;
   const s = profile.coach_ref_score || 0;
-  return (s >= 5 && profile.bankai_eligible) ? 0.025 : (s >= 2 ? 0.03 : 0.035);
+  return (s >= 2) ? 0.03 : 0.035;
 }
 
 const _WELCOME_FOUNDER = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
