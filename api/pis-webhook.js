@@ -29,7 +29,9 @@ async function pisSideEffects(rec, tbl) {
     const ownerId = g.data && g.data.owner_id;
     if (ownerId) {
       const what = (tbl === 'gym_memberships') ? (rec.plan_name || 'permanentka') : (rec.class_name || 'drop-in');
-      await sb.from('notifications').insert({ user_id: ownerId, type: 'booking', read: false, message: '\ud83d\udcb8 Platba p\u0159ijata (p\u0159evodem): ' + what, data: JSON.stringify({ kind: 'pis_payment_in', gym_id: rec.gym_id, what }) });
+      const who = rec.student_name || 'Student';
+      const msg = (tbl === 'gym_memberships') ? ('\ud83c\udf9f\ufe0f Nov\u00fd \u010dlen (p\u0159evodem): ' + who + ' \u00b7 ' + what) : ('\ud83d\udcc5 Nov\u00e1 rezervace (p\u0159evodem): ' + who + ' \u00b7 ' + what);
+      await sb.from('notifications').insert({ user_id: ownerId, type: 'booking', read: false, message: msg, data: JSON.stringify({ kind: 'pis_payment_in', gym_id: rec.gym_id, what, student: who }) });
     }
   } catch (e) { /* non-fatal */ }
 }
@@ -86,8 +88,8 @@ export default async function handler(req, res) {
 
     // reconcile against gym_bookings OR gym_memberships (PIS can pay either)
     let tbl = 'gym_bookings';
-    let rec = (await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name,amount,coach_id,acq_source').eq('pis_payment_id', paymentId).maybeSingle()).data;
-    if (!rec) { const m = await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name,amount,coach_id,acq_source').eq('pis_payment_id', paymentId).maybeSingle(); if (m.data) { rec = m.data; tbl = 'gym_memberships'; } }
+    let rec = (await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name,amount,coach_id,acq_source,student_name').eq('pis_payment_id', paymentId).maybeSingle()).data;
+    if (!rec) { const m = await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name,amount,coach_id,acq_source,student_name').eq('pis_payment_id', paymentId).maybeSingle(); if (m.data) { rec = m.data; tbl = 'gym_memberships'; } }
     if (!rec) return res.status(200).json({ ok: true, note: 'no matching record' });
 
     if (PAID_STATUSES.has(String(status)) && rec.status !== 'active') {
