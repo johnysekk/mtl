@@ -64,22 +64,23 @@ export default async function handler(req, res) {
     const status    = evt.status     || (evt.data && evt.data.status);
     if (!paymentId) return res.status(200).json({ ok: true, note: 'no payment_id' });
 
-    const { data: bk } = await sb.from('gym_bookings')
-      .select('id,status,student_id,gym_id,class_name')
-      .eq('pis_payment_id', paymentId).maybeSingle();
-    if (!bk) return res.status(200).json({ ok: true, note: 'no matching booking' });
+    // reconcile against gym_bookings OR gym_memberships (PIS can pay either)
+    let tbl = 'gym_bookings';
+    let rec = (await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name').eq('pis_payment_id', paymentId).maybeSingle()).data;
+    if (!rec) { const m = await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name').eq('pis_payment_id', paymentId).maybeSingle(); if (m.data) { rec = m.data; tbl = 'gym_memberships'; } }
+    if (!rec) return res.status(200).json({ ok: true, note: 'no matching record' });
 
-    if (PAID_STATUSES.has(String(status)) && bk.status !== 'active') {
-      // idempotent: mark paid + fire the SAME notification QR_bank fires when the owner confirms
-      await sb.from('gym_bookings').update({ status: 'active', pis_status: status }).eq('id', bk.id);
+    if (PAID_STATUSES.has(String(status)) && rec.status !== 'active') {
+      // idempotent: mark paid + fire the SAME payment_confirmed notification QR_bank fires on owner confirm
+      await sb.from(tbl).update({ status: 'active', pis_status: status }).eq('id', rec.id);
       try {
-        await sb.from('notifications').insert({
-          user_id: bk.student_id, type: 'booking', read: false,
-          data: JSON.stringify({ kind: 'payment_confirmed', gym_id: bk.gym_id, class_name: bk.class_name })
-        });
+        const notifData = (tbl === 'gym_memberships')
+          ? { kind: 'payment_confirmed', gym_id: rec.gym_id }
+          : { kind: 'payment_confirmed', goto: 'dropin', gym_id: rec.gym_id, class_name: rec.class_name };
+        await sb.from('notifications').insert({ user_id: rec.student_id, type: 'booking', read: false, data: JSON.stringify(notifData) });
       } catch (e) { /* non-fatal */ }
     } else {
-      await sb.from('gym_bookings').update({ pis_status: status }).eq('id', bk.id);
+      await sb.from(tbl).update({ pis_status: status }).eq('id', rec.id);
     }
     return res.status(200).json({ ok: true });
   } catch (e) {

@@ -25,10 +25,12 @@ export default async function handler(req, res){
       const p=await r.json();
       const status=p.status||(p.payment_details&&p.payment_details.status);
       if(r.ok && PAID_STATUSES.has(String(status))){
-        const { data: bk } = await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name').eq('pis_payment_id',paymentId).maybeSingle();
-        if(bk && bk.status!=='active'){
-          await sb.from('gym_bookings').update({ status:'active', pis_status:status }).eq('id',bk.id);
-          try{ await sb.from('notifications').insert({ user_id:bk.student_id, type:'booking', read:false, data:JSON.stringify({ kind:'payment_confirmed', gym_id:bk.gym_id, class_name:bk.class_name }) }); }catch(e){}
+        let tbl='gym_bookings';
+        let rec=(await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name').eq('pis_payment_id',paymentId).maybeSingle()).data;
+        if(!rec){ const m=await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name').eq('pis_payment_id',paymentId).maybeSingle(); if(m.data){ rec=m.data; tbl='gym_memberships'; } }
+        if(rec && rec.status!=='active'){
+          await sb.from(tbl).update({ status:'active', pis_status:status }).eq('id',rec.id);
+          try{ const nd=(tbl==='gym_memberships')?{ kind:'payment_confirmed', gym_id:rec.gym_id }:{ kind:'payment_confirmed', goto:'dropin', gym_id:rec.gym_id, class_name:rec.class_name }; await sb.from('notifications').insert({ user_id:rec.student_id, type:'booking', read:false, data:JSON.stringify(nd) }); }catch(e){}
         }
         return res.redirect(302, APP_URL+'/?pis=ok&b='+encodeURIComponent(bookingId||''));
       }
