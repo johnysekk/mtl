@@ -13,6 +13,26 @@ import { createClient } from '@supabase/supabase-js';
 
 const APP_ID = process.env.ENABLE_APP_ID;
 const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+const APP_URL = process.env.APP_URL || 'https://app.martialtraininglab.com';
+
+// Mirror Stripe on PIS confirm: record the transaction (dashboard + commission) via the shared
+// record-cash logic (single source of truth), idempotently, then notify the gym owner.
+async function pisSideEffects(rec, tbl) {
+  try {
+    const ex = await sb.from('transactions').select('id').eq('source_booking_id', rec.id).limit(1);
+    if (!(ex.data && ex.data.length)) {
+      await fetch(APP_URL + '/api/record-cash', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: 'gym', gym_id: rec.gym_id, coach_id: rec.coach_id || null, member_id: rec.student_id || null, gross_amount: Math.round((rec.amount || 0) * 100), type: (tbl === 'gym_memberships' ? 'membership' : 'drop_in'), payment_method: 'pis', acq_source: rec.acq_source || 'direct', source_booking_id: rec.id }) });
+    }
+  } catch (e) { /* non-fatal */ }
+  try {
+    const g = await sb.from('gyms').select('owner_id').eq('id', rec.gym_id).maybeSingle();
+    const ownerId = g.data && g.data.owner_id;
+    if (ownerId) {
+      const what = (tbl === 'gym_memberships') ? (rec.plan_name || 'permanentka') : (rec.class_name || 'drop-in');
+      await sb.from('notifications').insert({ user_id: ownerId, type: 'booking', read: false, message: '\ud83d\udcb8 Platba p\u0159ijata (p\u0159evodem): ' + what, data: JSON.stringify({ kind: 'pis_payment_in', gym_id: rec.gym_id, what }) });
+    }
+  } catch (e) { /* non-fatal */ }
+}
 
 export const config = { api: { bodyParser: false } };
 
@@ -66,8 +86,8 @@ export default async function handler(req, res) {
 
     // reconcile against gym_bookings OR gym_memberships (PIS can pay either)
     let tbl = 'gym_bookings';
-    let rec = (await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name').eq('pis_payment_id', paymentId).maybeSingle()).data;
-    if (!rec) { const m = await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name').eq('pis_payment_id', paymentId).maybeSingle(); if (m.data) { rec = m.data; tbl = 'gym_memberships'; } }
+    let rec = (await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name,amount,coach_id,acq_source').eq('pis_payment_id', paymentId).maybeSingle()).data;
+    if (!rec) { const m = await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name,amount,coach_id,acq_source').eq('pis_payment_id', paymentId).maybeSingle(); if (m.data) { rec = m.data; tbl = 'gym_memberships'; } }
     if (!rec) return res.status(200).json({ ok: true, note: 'no matching record' });
 
     if (PAID_STATUSES.has(String(status)) && rec.status !== 'active') {
@@ -79,6 +99,7 @@ export default async function handler(req, res) {
           : { kind: 'payment_confirmed', goto: 'dropin', gym_id: rec.gym_id, class_name: rec.class_name };
         await sb.from('notifications').insert({ user_id: rec.student_id, type: 'booking', read: false, data: JSON.stringify(notifData) });
       } catch (e) { /* non-fatal */ }
+      await pisSideEffects(rec, tbl);
     } else {
       await sb.from(tbl).update({ pis_status: status }).eq('id', rec.id);
     }

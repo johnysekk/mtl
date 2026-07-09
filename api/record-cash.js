@@ -126,21 +126,26 @@ export default async function handler(req, res) {
   try {
     const b = (typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body) || {};
     const { token, gym_id, coach_id, member_id, gross_amount, currency, type, payment_method, cash_payer_name, acq_source, credit, source_booking_id } = b;
+    // trusted internal call (PIS server-side confirm) — reuses ALL the commission logic, no user token
+    const _trusted = !!(b.internal && b.intSecret && process.env.PIS_INTERNAL_SECRET && b.intSecret === process.env.PIS_INTERNAL_SECRET);
     const provider = b.provider === 'coach' ? 'coach' : 'gym';
 
-    if (!token || !type || !payment_method) return res.status(400).json({ error: 'missing fields' });
-    if (!['cash', 'qr'].includes(payment_method)) return res.status(400).json({ error: 'bad method' });
+    if ((!token && !_trusted) || !type || !payment_method) return res.status(400).json({ error: 'missing fields' });
+    if (!['cash', 'qr', 'pis'].includes(payment_method)) return res.status(400).json({ error: 'bad method' });
     if (!ALLOWED_TYPES.includes(type)) return res.status(400).json({ error: 'bad type' });
     const gross = Math.round(Number(gross_amount));
     if (!(gross > 0)) return res.status(400).json({ error: 'bad amount' });
     if (provider === 'gym' && !gym_id) return res.status(400).json({ error: 'missing gym_id' });
     if (provider === 'coach' && !coach_id) return res.status(400).json({ error: 'missing coach_id' });
 
-    // verify caller identity
-    const ur = await fetch(`${SB}/auth/v1/user`, { headers: { apikey: KEY, Authorization: `Bearer ${token}` } });
-    if (!ur.ok) return res.status(401).json({ error: 'bad token' });
-    const u = await ur.json(); const uid = u && u.id;
-    if (!uid) return res.status(401).json({ error: 'no user' });
+    // verify caller identity (skipped for trusted internal PIS confirm)
+    let uid = null;
+    if (!_trusted) {
+      const ur = await fetch(`${SB}/auth/v1/user`, { headers: { apikey: KEY, Authorization: `Bearer ${token}` } });
+      if (!ur.ok) return res.status(401).json({ error: 'bad token' });
+      const u = await ur.json(); uid = u && u.id;
+      if (!uid) return res.status(401).json({ error: 'no user' });
+    }
 
     let rate, row, cur;
     let _creditRow = null;   // {memberId,id,sc} to consume after a successful insert (referral-credit redemption)
@@ -152,8 +157,8 @@ export default async function handler(req, res) {
       const gyms = await sb(`gyms?id=eq.${gym_id}&select=id,owner_id,currency,account_suspended,stripe_account`);
       const gym = gyms && gyms[0];
       if (!gym) return res.status(404).json({ error: 'gym not found' });
-      if (gym.owner_id !== uid) return res.status(403).json({ error: 'not your gym' });
-      if (gym.account_suspended) return res.status(403).json({ error: 'account suspended' });
+      if (!_trusted && gym.owner_id !== uid) return res.status(403).json({ error: 'not your gym' });
+      if (!_trusted && gym.account_suspended) return res.status(403).json({ error: 'account suspended' });
       const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,coach_ref_score,bankai_eligible,welcome_free_until,created_at,referral_optin`);
       const ownerProf = (owners && owners[0]) || {};
       if (!ownerProf.id) ownerProf.id = gym.owner_id;
@@ -178,9 +183,9 @@ export default async function handler(req, res) {
       const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,coach_ref_score,bankai_eligible,account_suspended,cash_blocked,welcome_free_until,created_at,referral_optin,gym_payout_account,stripe_account`);
       const coach = cs && cs[0];
       if (!coach) return res.status(404).json({ error: 'coach not found' });
-      if (coach.id !== uid) return res.status(403).json({ error: 'not your account' });
-      if (coach.account_suspended) return res.status(403).json({ error: 'account suspended' });
-      if (coach.cash_blocked) return res.status(403).json({ error: 'cash blocked' });
+      if (!_trusted && coach.id !== uid) return res.status(403).json({ error: 'not your account' });
+      if (!_trusted && coach.account_suspended) return res.status(403).json({ error: 'account suspended' });
+      if (!_trusted && coach.cash_blocked) return res.status(403).json({ error: 'cash blocked' });
       rate = ladderRate(coach);
       cur = currency || 'czk';
       const _wz = await isWelcomeZeroProfile(coach, 'coach_id', coach_id);
