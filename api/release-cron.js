@@ -48,11 +48,11 @@ export default async function handler(req, res) {
     if (!(auth === `Bearer ${process.env.CRON_SECRET}` || req.headers['x-vercel-cron'])) return res.status(401).json({ error: 'unauthorized' });
   }
 
-  let released = 0, expired = 0, expired1h = 0, coverExpired = 0;
+  let released = 0, expired = 0, expired1h = 0, coverExpired = 0, pisExpired = 0;
   try {
     // ---- Pass 1: auto-release unpaid QR drop-in reservations near class start --------------
     const yest = new Date(Date.now() - 36 * 3600 * 1000).toISOString().slice(0, 10);
-    const rows = await sb(`gym_bookings?payment_method=eq.qr&status=eq.reserved&class_date=gte.${yest}&select=id,gym_id,student_id,student_name,class_name,class_date,class_time,class_level&limit=3000`);
+    const rows = await sb(`gym_bookings?payment_method=eq.qr&status=eq.reserved&pis_payment_id=is.null&class_date=gte.${yest}&select=id,gym_id,student_id,student_name,class_name,class_date,class_time,class_level&limit=3000`);
 
     const gymIds = [...new Set((rows || []).map(r => r.gym_id).filter(Boolean))];
     const tzMap = {};
@@ -136,6 +136,19 @@ export default async function handler(req, res) {
       }
     } catch (e) { /* cover pass non-fatal */ }
 
+  // ---- Pass 6: expire abandoned/failed PIS gym-booking reservations after 2h -------------
+  // PIS-in-progress is protected (Pass 1 skips pis_payment_id!=null). After 2h with no
+  // confirmation we free the spot; pis-webhook STILL recovers it to 'active' if the payment
+  // arrives late (Model A: money lands on the gym IBAN directly, so a late confirm = real money).
+  try {
+    const cutoffPis = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const pb = await sb(`gym_bookings?pis_payment_id=not.is.null&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoffPis)}&select=id&limit=2000`);
+    for (const b of (pb || [])) {
+      await sb(`gym_bookings?id=eq.${b.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'expired' }) });
+      pisExpired++;
+    }
+  } catch (e) { /* pis expiry pass non-fatal */ }
+
     // security: alert founder on auto-bans / loud offenders in the last window
     try {
       if (process.env.SECURITY_ALERT_EMAIL && process.env.RESEND_API_KEY) {
@@ -159,8 +172,8 @@ export default async function handler(req, res) {
     // housekeeping: drop stale rate-limit windows (>2h old)
     try { const _rlOld = new Date(Date.now() - 2*3600*1000).toISOString(); await sb('rate_limits?updated_at=lt.' + encodeURIComponent(_rlOld), { method: 'DELETE', prefer: 'return=minimal' }); } catch (e) {}
 
-    return res.status(200).json({ ok: true, released, expired, expired1h, coverExpired });
+    return res.status(200).json({ ok: true, released, expired, expired1h, coverExpired, pisExpired });
   } catch (e) {
-    return res.status(500).json({ error: e.message, released, expired, expired1h, coverExpired });
+    return res.status(500).json({ error: e.message, released, expired, expired1h, coverExpired, pisExpired });
   }
 }
