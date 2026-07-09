@@ -45,7 +45,7 @@ export default async function handler(req, res){
         if(!rec){ const m=await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name,amount,coach_id,acq_source').eq('pis_payment_id',paymentId).maybeSingle(); if(m.data){ rec=m.data; tbl='gym_memberships'; } }
         if(rec && rec.status!=='active'){
           await sb.from(tbl).update({ status:'active', pis_status:status }).eq('id',rec.id);
-          try{ const nd=(tbl==='gym_memberships')?{ kind:'payment_confirmed', gym_id:rec.gym_id }:{ kind:'payment_confirmed', goto:'dropin', gym_id:rec.gym_id, class_name:rec.class_name }; await sb.from('notifications').insert({ user_id:rec.student_id, type:'booking', read:false, data:JSON.stringify(nd) }); }catch(e){}
+          try{ const nd=(tbl==='gym_memberships')?{ kind:'payment_confirmed', auto:true, gym_id:rec.gym_id }:{ kind:'payment_confirmed', auto:true, goto:'dropin', gym_id:rec.gym_id, class_name:rec.class_name }; await sb.from('notifications').insert({ user_id:rec.student_id, type:'booking', read:false, data:JSON.stringify(nd) }); }catch(e){}
           await pisSideEffects(rec, tbl);
         }
         return res.redirect(302, APP_URL+'/?pis=ok&b='+encodeURIComponent(bookingId||''));

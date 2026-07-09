@@ -95,8 +95,8 @@ export default async function handler(req, res) {
       await sb.from(tbl).update({ status: 'active', pis_status: status }).eq('id', rec.id);
       try {
         const notifData = (tbl === 'gym_memberships')
-          ? { kind: 'payment_confirmed', gym_id: rec.gym_id }
-          : { kind: 'payment_confirmed', goto: 'dropin', gym_id: rec.gym_id, class_name: rec.class_name };
+          ? { kind: 'payment_confirmed', auto: true, gym_id: rec.gym_id }
+          : { kind: 'payment_confirmed', auto: true, goto: 'dropin', gym_id: rec.gym_id, class_name: rec.class_name };
         await sb.from('notifications').insert({ user_id: rec.student_id, type: 'booking', read: false, data: JSON.stringify(notifData) });
       } catch (e) { /* non-fatal */ }
       await pisSideEffects(rec, tbl);
