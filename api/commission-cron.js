@@ -55,15 +55,15 @@ export default async function handler(req, res) {
 
   try {
     // ---- gather unpaid closed-month cash/qr commission, grouped by gym + currency ----
-    const tx = await sb(`transactions?select=gym_id,currency,mtl_fee,mtl_rate,gross_amount,commission_status,commission_month&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&commission_month=lt.${curMonth}&limit=20000`);
+    const tx = await sb(`transactions?select=gym_id,currency,mtl_fee,mtl_rate,gross_amount,mtl_fee_refunded,commission_status,commission_month&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&commission_month=lt.${curMonth}&limit=20000`);
     const byGym = {}; const byGymRates = {};
     for (const t of (tx || [])) {
       if (!t.gym_id) continue;
       const cur = (t.currency || 'czk').toLowerCase();
       (byGym[t.gym_id] = byGym[t.gym_id] || {});
-      byGym[t.gym_id][cur] = (byGym[t.gym_id][cur] || 0) + (t.mtl_fee || 0);
+      byGym[t.gym_id][cur] = (byGym[t.gym_id][cur] || 0) + ((t.mtl_fee || 0) - (t.mtl_fee_refunded || 0));
       byGymRates[t.gym_id] = byGymRates[t.gym_id] || {}; byGymRates[t.gym_id][cur] = byGymRates[t.gym_id][cur] || {};
-      { const _rk = (t.mtl_rate != null ? String(t.mtl_rate) : 'na'); const _e = (byGymRates[t.gym_id][cur][_rk] = byGymRates[t.gym_id][cur][_rk] || { rate: (t.mtl_rate != null ? Number(t.mtl_rate) : null), fee: 0, count: 0, gross: 0 }); _e.fee += (t.mtl_fee || 0); _e.count += 1; _e.gross += (t.gross_amount || 0); }
+      { const _rk = (t.mtl_rate != null ? String(t.mtl_rate) : 'na'); const _e = (byGymRates[t.gym_id][cur][_rk] = byGymRates[t.gym_id][cur][_rk] || { rate: (t.mtl_rate != null ? Number(t.mtl_rate) : null), fee: 0, count: 0, gross: 0 }); _e.fee += ((t.mtl_fee || 0) - (t.mtl_fee_refunded || 0)); _e.count += 1; _e.gross += (t.gross_amount || 0); }
     }
     const gymIds = Object.keys(byGym);
     const unpaidSet = new Set(gymIds);
@@ -146,15 +146,15 @@ export default async function handler(req, res) {
     }
 
     // ===== COACH PROVIDERS: coach-own cash/QR (paid_to='coach'), billed on profiles =====
-    const ctx = await sb(`transactions?select=coach_id,currency,mtl_fee,mtl_rate,gross_amount,commission_status,commission_month&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&paid_to=eq.coach&coach_id=not.is.null&commission_month=lt.${curMonth}&limit=20000`);
+    const ctx = await sb(`transactions?select=coach_id,currency,mtl_fee,mtl_rate,gross_amount,mtl_fee_refunded,commission_status,commission_month&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&paid_to=eq.coach&coach_id=not.is.null&commission_month=lt.${curMonth}&limit=20000`);
     const byCoach = {}; const byCoachRates = {};
     for (const t of (ctx || [])) {
       if (!t.coach_id) continue;
       const cur = (t.currency || 'czk').toLowerCase();
       (byCoach[t.coach_id] = byCoach[t.coach_id] || {});
-      byCoach[t.coach_id][cur] = (byCoach[t.coach_id][cur] || 0) + (t.mtl_fee || 0);
+      byCoach[t.coach_id][cur] = (byCoach[t.coach_id][cur] || 0) + ((t.mtl_fee || 0) - (t.mtl_fee_refunded || 0));
       byCoachRates[t.coach_id] = byCoachRates[t.coach_id] || {}; byCoachRates[t.coach_id][cur] = byCoachRates[t.coach_id][cur] || {};
-      { const _rk = (t.mtl_rate != null ? String(t.mtl_rate) : 'na'); const _e = (byCoachRates[t.coach_id][cur][_rk] = byCoachRates[t.coach_id][cur][_rk] || { rate: (t.mtl_rate != null ? Number(t.mtl_rate) : null), fee: 0, count: 0, gross: 0 }); _e.fee += (t.mtl_fee || 0); _e.count += 1; _e.gross += (t.gross_amount || 0); }
+      { const _rk = (t.mtl_rate != null ? String(t.mtl_rate) : 'na'); const _e = (byCoachRates[t.coach_id][cur][_rk] = byCoachRates[t.coach_id][cur][_rk] || { rate: (t.mtl_rate != null ? Number(t.mtl_rate) : null), fee: 0, count: 0, gross: 0 }); _e.fee += ((t.mtl_fee || 0) - (t.mtl_fee_refunded || 0)); _e.count += 1; _e.gross += (t.gross_amount || 0); }
     }
     const coachIds = Object.keys(byCoach);
     const unpaidCoach = new Set(coachIds);
