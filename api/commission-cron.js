@@ -55,7 +55,7 @@ export default async function handler(req, res) {
 
   try {
     // ---- gather unpaid closed-month cash/qr commission, grouped by gym + currency ----
-    const tx = await sb(`transactions?select=gym_id,currency,mtl_fee,mtl_rate,gross_amount,mtl_fee_refunded,commission_status,commission_month&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&commission_month=lt.${curMonth}&limit=20000`);
+    const tx = await sb(`transactions?select=gym_id,currency,mtl_fee,mtl_rate,gross_amount,mtl_fee_refunded,payment_method,commission_status,commission_month&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&commission_month=lt.${curMonth}&limit=20000`);
     const byGym = {}; const byGymRates = {};
     for (const t of (tx || [])) {
       if (!t.gym_id) continue;
@@ -63,7 +63,7 @@ export default async function handler(req, res) {
       (byGym[t.gym_id] = byGym[t.gym_id] || {});
       byGym[t.gym_id][cur] = (byGym[t.gym_id][cur] || 0) + ((t.mtl_fee || 0) - (t.mtl_fee_refunded || 0));
       byGymRates[t.gym_id] = byGymRates[t.gym_id] || {}; byGymRates[t.gym_id][cur] = byGymRates[t.gym_id][cur] || {};
-      { const _rk = (t.mtl_rate != null ? String(t.mtl_rate) : 'na'); const _e = (byGymRates[t.gym_id][cur][_rk] = byGymRates[t.gym_id][cur][_rk] || { rate: (t.mtl_rate != null ? Number(t.mtl_rate) : null), fee: 0, count: 0, gross: 0 }); _e.fee += ((t.mtl_fee || 0) - (t.mtl_fee_refunded || 0)); _e.count += 1; _e.gross += (t.gross_amount || 0); }
+      { const _rk = (t.payment_method || '?') + '|' + (t.mtl_rate != null ? String(t.mtl_rate) : 'na'); const _e = (byGymRates[t.gym_id][cur][_rk] = byGymRates[t.gym_id][cur][_rk] || { method: (t.payment_method || null), rate: (t.mtl_rate != null ? Number(t.mtl_rate) : null), fee: 0, count: 0, gross: 0 }); _e.fee += ((t.mtl_fee || 0) - (t.mtl_fee_refunded || 0)); _e.count += 1; _e.gross += (t.gross_amount || 0); }
     }
     const gymIds = Object.keys(byGym);
     const unpaidSet = new Set(gymIds);
@@ -99,7 +99,7 @@ export default async function handler(req, res) {
 
           if (pi && pi.status === 'succeeded') {
             await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
-            try { await sb('commission_doklady', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ gym_id: gid, owner_id: g.owner_id, period_month: prevMonth(curMonth), amount, currency: cur, pi_id: pi.id, status: 'issued', line_items: ((byGymRates[gid] && byGymRates[gid][cur]) ? Object.values(byGymRates[gid][cur]) : null) }) }); } catch (e) {}
+            /* doklad issued by unified-doklad-cron.js (bank + Stripe combined, one per month) */
             await notify(g.owner_id, 'commission_collected', `Provize MTL za hotovost/QR (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) byla stržena z karty. Doklad najdeš v účetnictví.`, { amount, currency: cur });
             collected++;
           } else {
@@ -146,7 +146,7 @@ export default async function handler(req, res) {
     }
 
     // ===== COACH PROVIDERS: coach-own cash/QR (paid_to='coach'), billed on profiles =====
-    const ctx = await sb(`transactions?select=coach_id,currency,mtl_fee,mtl_rate,gross_amount,mtl_fee_refunded,commission_status,commission_month&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&paid_to=eq.coach&coach_id=not.is.null&commission_month=lt.${curMonth}&limit=20000`);
+    const ctx = await sb(`transactions?select=coach_id,currency,mtl_fee,mtl_rate,gross_amount,mtl_fee_refunded,payment_method,commission_status,commission_month&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&paid_to=eq.coach&coach_id=not.is.null&commission_month=lt.${curMonth}&limit=20000`);
     const byCoach = {}; const byCoachRates = {};
     for (const t of (ctx || [])) {
       if (!t.coach_id) continue;
@@ -154,7 +154,7 @@ export default async function handler(req, res) {
       (byCoach[t.coach_id] = byCoach[t.coach_id] || {});
       byCoach[t.coach_id][cur] = (byCoach[t.coach_id][cur] || 0) + ((t.mtl_fee || 0) - (t.mtl_fee_refunded || 0));
       byCoachRates[t.coach_id] = byCoachRates[t.coach_id] || {}; byCoachRates[t.coach_id][cur] = byCoachRates[t.coach_id][cur] || {};
-      { const _rk = (t.mtl_rate != null ? String(t.mtl_rate) : 'na'); const _e = (byCoachRates[t.coach_id][cur][_rk] = byCoachRates[t.coach_id][cur][_rk] || { rate: (t.mtl_rate != null ? Number(t.mtl_rate) : null), fee: 0, count: 0, gross: 0 }); _e.fee += ((t.mtl_fee || 0) - (t.mtl_fee_refunded || 0)); _e.count += 1; _e.gross += (t.gross_amount || 0); }
+      { const _rk = (t.payment_method || '?') + '|' + (t.mtl_rate != null ? String(t.mtl_rate) : 'na'); const _e = (byCoachRates[t.coach_id][cur][_rk] = byCoachRates[t.coach_id][cur][_rk] || { method: (t.payment_method || null), rate: (t.mtl_rate != null ? Number(t.mtl_rate) : null), fee: 0, count: 0, gross: 0 }); _e.fee += ((t.mtl_fee || 0) - (t.mtl_fee_refunded || 0)); _e.count += 1; _e.gross += (t.gross_amount || 0); }
     }
     const coachIds = Object.keys(byCoach);
     const unpaidCoach = new Set(coachIds);
@@ -188,7 +188,7 @@ export default async function handler(req, res) {
 
           if (pi && pi.status === 'succeeded') {
             await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
-            try { await sb('commission_doklady', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ coach_id: cid, owner_id: cid, period_month: prevMonth(curMonth), amount, currency: cur, pi_id: pi.id, status: 'issued', line_items: ((byCoachRates[cid] && byCoachRates[cid][cur]) ? Object.values(byCoachRates[cid][cur]) : null) }) }); } catch (e) {}
+            /* doklad issued by unified-doklad-cron.js (bank + Stripe combined, one per month) */
             await notify(cid, 'commission_collected', `Provize MTL za hotovost/QR (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) byla strzena z karty. Doklad je v aplikaci.`);
             collected++;
           } else {

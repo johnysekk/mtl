@@ -219,6 +219,7 @@ async function recordTransaction(acct, pi, fields) {
       member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null,
       gross_amount: gross, stripe_fee: stripeFee, mtl_fee: (((fields.welcome_waived||0)>0 && (mtlFee===0||mtlFee==null)) ? (fields.welcome_waived||0) : mtlFee), mtl_rate: ((gross>0 && ((((fields.welcome_waived||0)>0 && (mtlFee===0||mtlFee==null)) ? (fields.welcome_waived||0) : mtlFee))>0) ? Math.round(((((((fields.welcome_waived||0)>0 && (mtlFee===0||mtlFee==null)) ? (fields.welcome_waived||0) : mtlFee))/gross))*10000)/10000 : 0), mtl_fee_refunded: ((fields.welcome_waived||0)>0 ? (fields.welcome_waived||0) : 0), net_amount: net, currency,
       income_class: fields.income_class || null,
+      payment_method: 'stripe', commission_status: 'collected', commission_month: new Date().toISOString().slice(0,7),
       status: 'paid', created_at: new Date().toISOString(),
     });
     try { if (fields.member_id && gross != null) await ecoPurchase(fields.member_id, gross / 100, currency, pi); } catch (e) {}
