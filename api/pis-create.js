@@ -42,7 +42,7 @@ export default async function handler(req, res) {
       aspspName,            // the student's chosen bank, e.g. "Ceska sporitelna" (from GET /aspsps?country=CZ)
       aspspCountry = 'CZ',
       psuType = 'personal',
-      kind                  // 'memb' -> gym_memberships, otherwise gym_bookings
+      kind                  // 'memb'->gym_memberships, 'coach1'->bookings, 'event'->event_tickets, 'cohort'->cohort_members, else gym_bookings
     } = req.body || {};
 
     if (!bookingId || !gymIban || !amount || !aspspName) {
@@ -83,7 +83,7 @@ export default async function handler(req, res) {
 
     // stash the Enable payment_id on the booking so the webhook/return can find it
     try {
-      const _pisTbl = (kind === 'memb') ? 'gym_memberships' : 'gym_bookings';
+      const _pisTbl = (kind === 'memb') ? 'gym_memberships' : (kind === 'coach1') ? 'bookings' : (kind === 'event') ? 'event_tickets' : (kind === 'cohort') ? 'cohort_members' : 'gym_bookings';
       await sb.from(_pisTbl)
         .update({ pis_payment_id: data.payment_id, pis_status: data.status || 'RCVD' })
         .eq('id', bookingId);
