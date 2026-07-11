@@ -121,12 +121,12 @@ export default async function handler(req, res) {
           const mtl_fee = (_wz || _cc) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
           row = { gym_id: b.gym_id || null, coach_id: b.coach_id, member_id: b.student_id || null, paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null), gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0, currency: (b.currency || 'czk'), type, status: 'completed', payment_method: 'qr', commission_status: _wz ? 'collected' : 'pending', commission_month: month, cash_payer_name: b.student_name || null, acq_source: b.acq_source || 'direct', source_booking_id: b.id };
         } else {
-          const gyms = await sb(`gyms?id=eq.${b.gym_id}&select=id,owner_id,currency,stripe_account,account_suspended`);
+          const gyms = await sb(`gyms?id=eq.${b.gym_id}&select=id,owner_id,currency,stripe_account,account_suspended,welcome_free_until,created_at`);
           const gym = gyms && gyms[0]; if (!gym) { out.skipped++; continue; }
           const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,coach_ref_score,bankai_eligible,welcome_free_until,created_at,referral_optin`);
           const ownerProf = (owners && owners[0]) || { id: gym.owner_id };
           const rate = ladderRate(ownerProf);
-          const _wz = await isWelcomeZeroReadOnly(ownerProf, 'gym_id', b.gym_id);
+          const _wz = await isWelcomeZeroReadOnly(gym, 'gym_id', b.gym_id);
           const _cc = (b.credit_used === 'student' && b.student_id && ownerProf.referral_optin !== false) ? await findStudentCredit(b.student_id) : null;
           if (_cc) _creditRow = { memberId: b.student_id, id: _cc.id, sc: _cc.sc };
           const _acq = (_wz || _cc) ? null : await acquisitionRate(b.acq_source, type, ownerProf, b.student_id, 'gym_id', b.gym_id);

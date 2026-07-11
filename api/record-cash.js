@@ -52,7 +52,8 @@ async function welcomeKillSwitch() {
 // In window -> this cash/QR sale is 0% MTL fee (clean books, no doklad), exactly like Stripe.
 // First sale on a genuinely new account (<45 days) opens the 30-day window now (same anchor as Stripe).
 const WELCOME_CAP_MINOR = 100000 * 100; // welcome also ends at 100,000 CZK cumulative turnover in the window (gross_amount is stored x100)
-async function isWelcomeZeroProfile(prof, scopeCol, scopeId) {
+async function isWelcomeZeroProfile(prof, scopeCol, scopeId, table) {
+  table = table || 'profiles';
   if (!prof || !prof.id) return false;
   if (await welcomeKillSwitch()) return false;
   const now = Date.now();
@@ -71,7 +72,7 @@ async function isWelcomeZeroProfile(prof, scopeCol, scopeId) {
   }
   const created = prof.created_at ? new Date(prof.created_at).getTime() : 0;
   if (created && (now - created) < 45 * 86400000) {
-    try { await sb(`profiles?id=eq.${prof.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ welcome_free_until: new Date(now + 30 * 86400000).toISOString() }) }); } catch (e) {}
+    try { await sb(`${table}?id=eq.${prof.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ welcome_free_until: new Date(now + 30 * 86400000).toISOString() }) }); } catch (e) {}
     return true;
   }
   return false;
@@ -157,7 +158,7 @@ export default async function handler(req, res) {
 
     if (provider === 'gym') {
       // gym pays out -> gym owner authorizes, rate from owner profile
-      const gyms = await sb(`gyms?id=eq.${gym_id}&select=id,owner_id,currency,account_suspended,stripe_account`);
+      const gyms = await sb(`gyms?id=eq.${gym_id}&select=id,owner_id,currency,account_suspended,stripe_account,welcome_free_until,created_at`);
       const gym = gyms && gyms[0];
       if (!gym) return res.status(404).json({ error: 'gym not found' });
       if (!_trusted && gym.owner_id !== uid) return res.status(403).json({ error: 'not your gym' });
@@ -167,7 +168,7 @@ export default async function handler(req, res) {
       if (!ownerProf.id) ownerProf.id = gym.owner_id;
       rate = ladderRate(ownerProf);
       cur = currency || gym.currency || 'czk';
-      const _wz = await isWelcomeZeroProfile(ownerProf, 'gym_id', gym_id);
+      const _wz = await isWelcomeZeroProfile(gym, 'gym_id', gym_id, 'gyms');
       const _cc = (_wantCredit && ownerProf.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
       const _acq = _wz ? null : await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id);
@@ -192,7 +193,7 @@ export default async function handler(req, res) {
       if (!_trusted && coach.cash_blocked) return res.status(403).json({ error: 'cash blocked' });
       rate = ladderRate(coach);
       cur = currency || 'czk';
-      const _wz = await isWelcomeZeroProfile(coach, 'coach_id', coach_id);
+      const _wz = await isWelcomeZeroProfile(coach, 'coach_id', coach_id, 'profiles');
       const _cc = (_wantCredit && coach.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
       const _acq = _wz ? null : await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id);

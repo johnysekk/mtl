@@ -33,12 +33,13 @@ async function isWelcomeZero(acct){
     const ks = await _wsbGet(`profiles?id=eq.${_WELCOME_FOUNDER}&select=welcome_zero_off`);
     if(ks && ks[0] && ks[0].welcome_zero_off) return false;
     const a = encodeURIComponent(String(acct).trim());
+    let _wtbl = 'profiles';
     let prov = (await _wsbGet(`profiles?stripe_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0]
             || (await _wsbGet(`profiles?gym_payout_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0];
     if(!prov){
-      let g = (await _wsbGet(`gyms?stripe_account=eq.${a}&select=owner_id&limit=1`))[0]
-           || (await _wsbGet(`gyms?gym_payout_account=eq.${a}&select=owner_id&limit=1`))[0];
-      if(g && g.owner_id) prov = (await _wsbGet(`profiles?id=eq.${g.owner_id}&select=id,welcome_free_until,created_at`))[0];
+      let g = (await _wsbGet(`gyms?stripe_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0]
+           || (await _wsbGet(`gyms?gym_payout_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0];
+      if(g && g.id){ prov = g; _wtbl = 'gyms'; }
     }
     if(!prov || !prov.id) return false;
     const now = Date.now();
@@ -56,7 +57,7 @@ async function isWelcomeZero(acct){
     // First sale on a genuinely new account (<45 days): open the 30-day window now and make THIS sale 0%.
     const created = prov.created_at ? new Date(prov.created_at).getTime() : 0;
     if(created && (now - created) < 45*86400000){
-      await _wsbPatch(`profiles?id=eq.${prov.id}`, { welcome_free_until: new Date(now + 30*86400000).toISOString() });
+      await _wsbPatch(`${_wtbl}?id=eq.${prov.id}`, { welcome_free_until: new Date(now + 30*86400000).toISOString() });
       return true;
     }
     return false;
