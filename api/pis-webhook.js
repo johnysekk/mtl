@@ -32,6 +32,7 @@ async function pisSideEffects(rec, tbl) {
     try { const co = await sb.from('gym_cohorts').select('gym_id,deposit_amount,currency').eq('id', rec.cohort_id).maybeSingle();
       if (co.data) { _cohGym = co.data.gym_id; _cohDep = co.data.deposit_amount || 0; _cohCur = co.data.currency || 'CZK'; } } catch (e) {}
   }
+  const _merch = (tbl === 'merch_orders');
   try {
     const ex = await sb.from('transactions').select('id').eq('source_booking_id', rec.id).limit(1);
     if (!(ex.data && ex.data.length)) {
@@ -39,6 +40,8 @@ async function pisSideEffects(rec, tbl) {
         ? { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: _evProvider, gym_id: _evGym, coach_id: _evCoach, member_id: rec.buyer_id || null, gross_amount: Math.round((rec.amount || 0) * 100), currency: rec.currency || 'CZK', type: 'event_ticket', payment_method: 'pis', acq_source: 'direct', source_booking_id: rec.id }
         : _coach1
         ? { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: 'coach', coach_id: rec.coach_id, member_id: rec.student_id || null, gross_amount: Math.round((rec.amount || 0) * 100), currency: rec.currency || 'CZK', type: 'coach_1to1', payment_method: 'pis', acq_source: rec.acq_source || 'direct', source_booking_id: rec.id }
+        : _merch
+        ? { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: (rec.coach_id ? 'coach' : 'gym'), gym_id: (rec.coach_id ? null : rec.gym_id), coach_id: rec.coach_id || null, member_id: rec.student_id || null, gross_amount: Math.round((rec.amount || 0) * 100), currency: rec.currency || 'CZK', type: 'merch', payment_method: 'pis', acq_source: 'direct', source_booking_id: rec.id }
         : _cohort
         ? { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: 'gym', gym_id: _cohGym, member_id: rec.student_id || null, gross_amount: Math.round(_cohDep * 100), currency: _cohCur, type: 'course', payment_method: 'pis', cash_payer_name: rec.name || null, acq_source: rec.attribution || 'direct', source_booking_id: rec.id }
         : { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: 'gym', gym_id: rec.gym_id, coach_id: rec.coach_id || null, member_id: rec.student_id || null, gross_amount: Math.round((rec.amount || 0) * 100), type: (tbl === 'gym_memberships' ? 'membership' : 'drop_in'), payment_method: 'pis', acq_source: rec.acq_source || 'direct', source_booking_id: rec.id };
@@ -55,6 +58,10 @@ async function pisSideEffects(rec, tbl) {
       if (target) await sb.from('notifications').insert({ user_id: target, type: 'booking', read: false, message: '\ud83c\udf9f\ufe0f Nov\u00fd prodej vstupenky (p\u0159evodem): ' + (rec.buyer_name || 'Z\u00e1kazn\u00edk'), data: JSON.stringify({ kind: 'pis_payment_in', event_id: rec.event_id }) });
     } else if (_coach1) {
       await sb.from('notifications').insert({ user_id: rec.coach_id, type: 'booking', read: false, message: '\ud83d\udcb3 Nov\u00e1 1:1 platba (p\u0159evodem)', data: JSON.stringify({ kind: 'pis_payment_in', coach_id: rec.coach_id, booking_id: rec.id }) });
+    } else if (_merch) {
+      let mt = rec.coach_id || null;
+      if (!mt && rec.gym_id) { const g = await sb.from('gyms').select('owner_id').eq('id', rec.gym_id).maybeSingle(); mt = g.data && g.data.owner_id; }
+      if (mt) await sb.from('notifications').insert({ user_id: mt, type: 'booking', read: false, message: '\ud83d\udecd\ufe0f Nov\u00fd prodej merche (p\u0159evodem): ' + (rec.item_name || 'polo\u017eka') + (rec.buyer_name ? (' \u00b7 ' + rec.buyer_name) : ''), data: JSON.stringify({ kind: 'merch_order', merch_id: rec.merch_id }) });
     } else if (_cohort) {
       if (_cohGym) { const g = await sb.from('gyms').select('owner_id').eq('id', _cohGym).maybeSingle(); const ownerId = g.data && g.data.owner_id; if (ownerId) await sb.from('notifications').insert({ user_id: ownerId, type: 'booking', read: false, message: '\ud83c\udf93 Nov\u00e1 z\u00e1loha kurzu (p\u0159evodem): ' + (rec.name || 'Z\u00e1jemce'), data: JSON.stringify({ kind: 'pis_payment_in', cohort_id: rec.cohort_id }) }); }
     } else {
@@ -127,9 +134,10 @@ export default async function handler(req, res) {
     if (!rec) { const c = await sb.from('bookings').select('id,status,student_id,coach_id,amount,currency,coach_name,slot_id,acq_source').eq('pis_payment_id', paymentId).maybeSingle(); if (c.data) { rec = c.data; tbl = 'bookings'; } }
     if (!rec) { const e = await sb.from('event_tickets').select('id,status,buyer_id,event_id,amount,currency,buyer_name').eq('pis_payment_id', paymentId).maybeSingle(); if (e.data) { rec = e.data; tbl = 'event_tickets'; } }
     if (!rec) { const co = await sb.from('cohort_members').select('id,status,student_id,cohort_id,name,attribution').eq('pis_payment_id', paymentId).maybeSingle(); if (co.data) { rec = co.data; tbl = 'cohort_members'; } }
+    if (!rec) { const mo = await sb.from('merch_orders').select('id,status,student_id,gym_id,coach_id,merch_id,item_name,amount,currency,buyer_name').eq('pis_payment_id', paymentId).maybeSingle(); if (mo.data) { rec = mo.data; tbl = 'merch_orders'; } }
     if (!rec) return res.status(200).json({ ok: true, note: 'no matching record' });
 
-    const _paidStatus = (tbl === 'event_tickets') ? 'paid' : (tbl === 'cohort_members') ? 'deposit_paid' : 'active';
+    const _paidStatus = (tbl === 'event_tickets' || tbl === 'merch_orders') ? 'paid' : (tbl === 'cohort_members') ? 'deposit_paid' : 'active';
     if (PAID_STATUSES.has(String(status)) && rec.status !== _paidStatus) {
       // idempotent: mark paid + fire the SAME payment_confirmed notification QR_bank fires on owner confirm
       await sb.from(tbl).update({ status: _paidStatus, pis_status: status }).eq('id', rec.id);
@@ -142,6 +150,8 @@ export default async function handler(req, res) {
           ? { kind: 'payment_confirmed', auto: true, goto: 'bookings' }
           : (tbl === 'event_tickets')
           ? { kind: 'payment_confirmed', auto: true, goto: 'tickets', event_id: rec.event_id }
+          : (tbl === 'merch_orders')
+          ? { kind: 'payment_confirmed', auto: true, goto: 'merch', merch_id: rec.merch_id }
           : (tbl === 'cohort_members')
           ? { kind: 'payment_confirmed', auto: true, goto: 'courses', cohort_id: rec.cohort_id }
           : { kind: 'payment_confirmed', auto: true, goto: 'dropin', gym_id: rec.gym_id, class_name: rec.class_name };
