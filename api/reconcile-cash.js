@@ -25,10 +25,14 @@ async function sb(path, opts = {}) {
 
 // --- fee logic: mirrors record-cash.js exactly ---
 function ladderRate(profile) {
+  // reconcile-cash backfills cash/qr/pis = the BANK-TRANSFER track, and MUST agree with
+  // record-cash.js exactly: base 3.5%, Shikai 3% at ref_score>=2, NO Bankai. EP = 1%.
+  // It used to grant a 2.5% "Bankai" that does not exist on the bank track, so the SAME
+  // sale was charged 3% if recorded normally and 2.5% if it happened to be backfilled.
   if (!profile) return 0.035;
   if (profile.partner) return 0.01;
   const s = profile.coach_ref_score || 0;
-  return (s >= 5 && profile.bankai_eligible) ? 0.025 : (s >= 2 ? 0.03 : 0.035);
+  return (s >= 2) ? 0.03 : 0.035;
 }
 
 const _WELCOME_FOUNDER = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
