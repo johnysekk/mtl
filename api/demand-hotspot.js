@@ -114,7 +114,7 @@ export default async function handler(req, res) {
         lat: +c.lat.toFixed(3), lng: +c.lng.toFixed(3),
         cluster_key: Math.round(c.lat / 0.25) + '_' + Math.round(c.lng / 0.25),
         gyms_near: sup.near, gyms_near_disc: sup.nearDisc,
-        underserved: sup.nearDisc === 0,   // nobody within 30km teaches what they most want
+        underserved: sup.nearDisc === 0,   // nobody within SUPPLY_KM (20km) teaches what they most want
       };
     });
     const fromNoCoord = Object.values(noCoord).map(m => { const pp = peopleScore(m.users, m.strongU); return {
