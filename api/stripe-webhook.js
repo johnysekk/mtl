@@ -27,9 +27,13 @@ async function sbPost(table, row) {
   if (!r.ok) { const t = await r.text().catch(() => ''); console.error('sbPost', table, r.status, t); return { ok: false, status: r.status, error: t }; }
   return { ok: true, status: r.status };
 }
-async function sbPatch(table, filter, patch) {
-  const r = await fetch(`${SB}/rest/v1/${table}?${filter}`, { method: 'PATCH', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(patch) });
+async function sbPatch(table, filter, patch, prefer) {
+  // `prefer` is optional and defaults to the original behaviour, so every existing caller is
+  // unchanged. Pass 'return=representation' to get the affected rows back - needed to know
+  // whether THIS call was the one that flipped a row (idempotent credit consumption).
+  const r = await fetch(`${SB}/rest/v1/${table}?${filter}`, { method: 'PATCH', headers: { ...sbHeaders, Prefer: prefer || 'return=minimal' }, body: JSON.stringify(patch) });
   if (!r.ok) { const t = await r.text().catch(() => ''); console.error('sbPatch', table, r.status, t); return { ok: false, status: r.status, error: t }; }
+  if (prefer === 'return=representation') { try { return await r.json(); } catch (e) { return []; } }
   return { ok: true, status: r.status };
 }
 
@@ -175,6 +179,75 @@ async function sendTicketEmail(s, m) {
 }
 
 // Records ONE row per Stripe payment into the transactions ledger, with EXACT fees from the charge's balance_transaction.
+// Resolve a connected Stripe account to the ENTITY that owns the money (and therefore owns
+// welcome_free_until). Without this, transactions written by Stripe carry no payee_id and the
+// welcome cap - which is scoped by payee_id in pay.js / record-cash.js - simply cannot see them.
+const _payeeCache = {};
+async function resolvePayee(acct) {
+  if (!acct) return { id: null, kind: null };
+  if (_payeeCache[acct] !== undefined) return _payeeCache[acct];
+  let out = { id: null, kind: null };
+  try {
+    const a = encodeURIComponent(String(acct).trim());
+    const p = (await sbGet(`profiles?or=(stripe_account.eq.${a},gym_payout_account.eq.${a})&select=id&limit=1`))[0];
+    if (p && p.id) out = { id: p.id, kind: 'profile' };
+    else {
+      const g = (await sbGet(`gyms?or=(stripe_account.eq.${a},gym_payout_account.eq.${a})&select=id&limit=1`))[0];
+      if (g && g.id) out = { id: g.id, kind: 'gym' };
+    }
+  } catch (e) { console.error('resolvePayee', e.message); }
+  _payeeCache[acct] = out;
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// THE ONE RULE for what application_fee_percent a membership subscription carries.
+//
+// This field was being set from THREE places that knew nothing about each other:
+//   * pay.js at creation        -> welcome 0% / acquisition 10% (5% EP) / ladder
+//   * cron-attendance when the welcome window ended -> ALWAYS base, which silently threw
+//     away an acquisition window that was still running
+//   * gym-rerate when the owner crossed a tier -> ALWAYS the ladder rate, which blew away
+//     BOTH a running welcome window (breaking a 0% promise made to the provider) and an
+//     open acquisition window (MTL losing its own finder's fee)
+// and nothing at all ever ended an acquisition window, so an MTL-sourced membership was
+// billed 10% forever. mtl_acq had one writer and zero readers.
+//
+// PRECEDENCE: welcome (0) beats acquisition (10 / 5) beats the provider's ladder rate.
+// Welcome wins because it is a promise made to the provider; when it ends, the sub lands
+// on whatever is correct AT THAT MOMENT (still inside the 2 months -> acquisition; else ladder).
+//
+// Returns null when it cannot decide (Stripe call failed) -> the caller must CHANGE NOTHING.
+// Never guess with someone's money.
+async function subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive) {
+  if (welcomeActive) return 0;
+  const md = (sub && sub.metadata) || {};
+  if (md.mtl_acq === '1') {
+    const pct = parseFloat(md.mtl_acq_pct || '0') || 0;
+    if (pct > 0) {
+      let paid;
+      try {
+        const invs = await stripe.invoices.list({ subscription: subId, status: 'paid', limit: 3 }, { stripeAccount: acct });
+        paid = ((invs && invs.data) || []).length;
+      } catch (e) { return null; }            // cannot count -> do not touch the rate
+      if (paid < 2) return pct;               // first two months -> the acquisition rate
+    }
+  }
+  return ladderPct;
+}
+
+// Apply it. Returns true if the rate actually changed.
+async function applySubRate(stripe, acct, subId, sub, ladderPct, welcomeActive) {
+  const want = await subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive);
+  if (want === null) return false;                                  // undecidable -> leave alone
+  const cur = (sub.application_fee_percent != null) ? Number(sub.application_fee_percent) : null;
+  if (cur === want) return false;
+  const md = Object.assign({}, (sub && sub.metadata) || {});
+  if (md.mtl_acq === '1' && want !== 0 && want === ladderPct) md.mtl_acq = 'done';   // window closed
+  await stripe.subscriptions.update(subId, { application_fee_percent: want, metadata: md }, { stripeAccount: acct });
+  return true;
+}
+
 async function recordTransaction(acct, pi, fields) {
   if (!pi) return;
   try {
@@ -214,8 +287,10 @@ async function recordTransaction(acct, pi, fields) {
         }
       } catch (e) { console.error('recordTransaction fee', e.message); }
     }
+    const _payee = await resolvePayee(acct);
     await sbPost('transactions', {
       payment_intent: pi, charge_id: chargeId, payee_account: acct || null, type: fields.type,
+      payee_id: _payee.id, payee_kind: _payee.kind,
       member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null,
       gross_amount: gross, stripe_fee: stripeFee, mtl_fee: (((fields.welcome_waived||0)>0 && (mtlFee===0||mtlFee==null)) ? (fields.welcome_waived||0) : mtlFee), mtl_rate: ((gross>0 && ((((fields.welcome_waived||0)>0 && (mtlFee===0||mtlFee==null)) ? (fields.welcome_waived||0) : mtlFee))>0) ? Math.round(((((((fields.welcome_waived||0)>0 && (mtlFee===0||mtlFee==null)) ? (fields.welcome_waived||0) : mtlFee))/gross))*10000)/10000 : 0), mtl_fee_refunded: ((fields.welcome_waived||0)>0 ? (fields.welcome_waived||0) : 0), net_amount: net, currency,
       income_class: fields.income_class || null,
@@ -313,6 +388,22 @@ export default async function handler(req, res) {
       const s = event.data.object;
       const m = s.metadata || {};
       const _ww = parseInt(m.mtl_welcome_waived||'0',10)||0;
+
+      // ---- Consume a referral credit, server-side, ONLY once the payment really succeeded ----
+      // This used to happen in the browser after returning from Stripe: close the tab and the
+      // credit was never consumed, so it could be redeemed again and again. pay.js verifies the
+      // credit and passes the row id; here we burn it. Idempotent: the UPDATE is filtered on
+      // consumed=false, so a webhook retry can never double-decrement.
+      if (m.mtl_credit_row && m.mtl_credit_user) {
+        try {
+          const _upd = await sbPatch('referral_credits', `id=eq.${encodeURIComponent(m.mtl_credit_row)}&consumed=eq.false`, { consumed: true }, 'return=representation');
+          if (Array.isArray(_upd) && _upd.length) {   // we were the one who flipped it -> decrement once
+            const _p = await sbGet(`profiles?id=eq.${encodeURIComponent(m.mtl_credit_user)}&select=student_credits`);
+            const _sc = (_p && _p[0]) ? Number(_p[0].student_credits || 0) : 0;
+            await sbPatch('profiles', `id=eq.${encodeURIComponent(m.mtl_credit_user)}`, { student_credits: Math.max(0, _sc - 1) });
+          }
+        } catch (e) { console.error('consume credit', e.message); }
+      }
       // jen lekce koučů (gym jede direct-charge na účet gymu, ne přes platformu)
       if (m.booking_type === 'inperson' || m.booking_type === 'online') {
         const pi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id);
@@ -473,7 +564,24 @@ export default async function handler(req, res) {
         const patch = { status: 'active', payment_status: 'ok', payment_failed_at: null, last_invoice_url: null };
         if (periodEnd) patch.period_end = periodEnd;
         await sbPatch('gym_memberships', `stripe_subscription=eq.${encodeURIComponent(sub)}`, patch);
-        try { const ipi = (typeof inv.payment_intent === 'string' ? inv.payment_intent : (inv.payment_intent && inv.payment_intent.id)) || (typeof inv.charge === 'string' ? inv.charge : (inv.charge && inv.charge.id)); const mem = (await sbGet(`gym_memberships?stripe_subscription=eq.${encodeURIComponent(sub)}&select=*`))[0]; let _wwMemb=0, _incClass='side'; try{ const _so=await stripe.subscriptions.retrieve(sub,{stripeAccount:event.account}); if(_so&&_so.metadata){ _incClass=_so.metadata.mtl_income||'side'; if((inv.application_fee_amount||0)===0){ const _br=parseFloat(_so.metadata.mtl_acq_base||'0')||0; if(_br>0) _wwMemb=Math.round((inv.amount_paid||inv.total||0)*_br/100); } } }catch(e){ console.error('memb meta',e.message); } if (ipi && mem) await recordTransaction(event.account, ipi, { type: 'membership', welcome_waived: _wwMemb, income_class: _incClass, member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency }); } catch (e) { console.error('record membership', e.message); }
+        try { const ipi = (typeof inv.payment_intent === 'string' ? inv.payment_intent : (inv.payment_intent && inv.payment_intent.id)) || (typeof inv.charge === 'string' ? inv.charge : (inv.charge && inv.charge.id)); const mem = (await sbGet(`gym_memberships?stripe_subscription=eq.${encodeURIComponent(sub)}&select=*`))[0]; let _wwMemb=0, _incClass='side'; try{ const _so=await stripe.subscriptions.retrieve(sub,{stripeAccount:event.account}); if(_so&&_so.metadata){ _incClass=_so.metadata.mtl_income||'side'; if((inv.application_fee_amount||0)===0){ const _br=parseFloat(_so.metadata.mtl_acq_base||'0')||0; if(_br>0) _wwMemb=Math.round((inv.amount_paid||inv.total||0)*_br/100); } } }catch(e){ console.error('memb meta',e.message); }
+        // THE ACQUISITION DROP that pay.js's own comment promised and nobody ever wrote.
+        // Two invoices paid = the 2-month window is done -> the sub falls to the provider's
+        // CURRENT ladder rate (recomputed live, not the stale mtl_acq_base in metadata).
+        try{
+          const _so2 = await stripe.subscriptions.retrieve(sub, { stripeAccount: event.account });
+          const _mem2 = (await sbGet(`gym_memberships?stripe_subscription=eq.${encodeURIComponent(sub)}&select=gym_id,coach_id,paid_to`))[0];
+          let _ownerId = null;
+          if (_mem2 && _mem2.paid_to === 'coach' && _mem2.coach_id) _ownerId = _mem2.coach_id;
+          else if (_mem2 && _mem2.gym_id) { const _g=(await sbGet(`gyms?id=eq.${_mem2.gym_id}&select=owner_id,welcome_free_until`))[0]; _ownerId = _g && _g.owner_id; }
+          if (_ownerId) {
+            const _op = (await sbGet(`profiles?id=eq.${_ownerId}&select=partner,coach_ref_score,bankai_eligible,welcome_free_until`))[0] || {};
+            const _sc = _op.coach_ref_score || 0;
+            const _ladder = _op.partner ? 1 : ((_sc >= 5 && _op.bankai_eligible) ? 2 : (_sc >= 2 ? 2.5 : 3));
+            const _wActive = !!(_op.welcome_free_until && new Date(_op.welcome_free_until).getTime() > Date.now());
+            await applySubRate(stripe, event.account, sub, _so2, _ladder, _wActive);
+          }
+        }catch(e){ console.error('acq drop', e.message); } if (ipi && mem) await recordTransaction(event.account, ipi, { type: 'membership', welcome_waived: _wwMemb, income_class: _incClass, member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency }); } catch (e) { console.error('record membership', e.message); }
       }
     } else if (event.type === 'invoice.payment_failed') {
       const inv = event.data.object;

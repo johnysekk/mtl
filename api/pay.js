@@ -27,6 +27,59 @@ async function _wsbPatch(path, body){
   if(!_SUPA_URL || !_SUPA_KEY) return;
   try{ await fetch(_SUPA_URL.replace(/\/+$/,'') + '/rest/v1/' + path, { method:'PATCH', headers:{ apikey:_SUPA_KEY, Authorization:'Bearer '+_SUPA_KEY, 'Content-Type':'application/json', Prefer:'return=minimal' }, body: JSON.stringify(body) }); }catch(e){ console.error('wsbPatch', e.message); }
 }
+// SERVER-SIDE CREDIT VERIFICATION.
+// The `credit` query param used to be TRUSTED: `if (String(credit)==='student') COMMISSION = 0`
+// straight from req.query, with no check at all. Anyone could append &credit=student&refDisc=0.5
+// to a checkout URL and pay up to 50% less while MTL collected NOTHING - the provider ate the
+// discount. record-cash.js (the bank track) already refuses to trust the client here; the Stripe
+// track did not. Returns the referral_credits row id when the credit is real, else null.
+async function verifyStudentCredit(studentId){
+  if(!studentId) return null;
+  try{
+    const prof = await _wsbGet(`profiles?id=eq.${encodeURIComponent(studentId)}&select=student_credits`);
+    const sc = (prof && prof[0]) ? Number(prof[0].student_credits || 0) : 0;
+    if(!(sc > 0)) return null;
+    const nowIso = new Date().toISOString();
+    const rows = await _wsbGet(`referral_credits?user_id=eq.${encodeURIComponent(studentId)}&consumed=eq.false&expires_at=gt.${encodeURIComponent(nowIso)}&select=id&order=earned_at.asc&limit=1`);
+    return (rows && rows[0] && rows[0].id) ? String(rows[0].id) : null;
+  }catch(e){ console.error('verifyStudentCredit', e.message); return null; }
+}
+
+// ---------------------------------------------------------------------------
+// WELCOME CAP — 100,000 CZK of turnover inside the window, in REAL money.
+// The cap used to add gross_amount across currencies with no conversion, so a EUR gym
+// got an effective 100,000 EUR cap (~25x too generous). fx-sync.js already caches the
+// ECB reference rates daily in fx_rates (base EUR), so use them.
+// Fail-safe in BOTH directions: if the rates are missing we count only the rows already
+// in CZK, which UNDER-counts and therefore leaves the window open a little longer.
+// Under-counting is the safe error - it never over-charges a provider.
+const WELCOME_CAP_CZK_MINOR = 100000 * 100;   // gross_amount is stored in minor units
+let _fxCache = null;
+async function _fxRates(){
+  if (_fxCache !== null) return _fxCache;
+  try{
+    const r = await _wsbGet(`fx_rates?id=eq.ecb-latest&select=data&limit=1`);
+    const d = r && r[0] && r[0].data;
+    _fxCache = (d && d.rates && d.rates.CZK) ? d.rates : false;
+  }catch(e){ _fxCache = false; }
+  return _fxCache;
+}
+// ECB feed is EUR-based: 1 EUR = rates[CUR] of CUR. EUR itself is not in the feed.
+function _toCzkMinor(amountMinor, cur, rates){
+  const c = String(cur || 'CZK').toUpperCase();
+  if (c === 'CZK') return Number(amountMinor) || 0;
+  if (!rates) return 0;                                  // no rates -> don't count it (under-count = safe)
+  const per = (c === 'EUR') ? 1 : rates[c];
+  if (!per) return 0;
+  return (Number(amountMinor) || 0) / per * rates.CZK;
+}
+async function welcomeCapReached(rows){
+  const rates = await _fxRates();
+  let sum = 0;
+  for (const r of (rows || [])) sum += _toCzkMinor(r.gross_amount, r.currency, rates);
+  return sum >= WELCOME_CAP_CZK_MINOR;
+}
+
 async function isWelcomeZero(acct){
   if(!acct) return false;
   try{
@@ -45,12 +98,15 @@ async function isWelcomeZero(acct){
     const now = Date.now();
     if(prov.welcome_free_until){
       if(now >= new Date(prov.welcome_free_until).getTime()) return false; // 30-day window elapsed
-      // volume trigger: welcome also ends at 100,000 CZK cumulative turnover in the window (parity with record-cash.js)
+      // Volume trigger: the welcome window also ends at 100,000 CZK of turnover.
+      // Scoped by payee_id (the entity that owns welcome_free_until) and converted to CZK -
+      // this used to scope by payee_account, which is NULL for a bank/QR provider and which
+      // diverged from record-cash's gym_id/coach_id scope; and it used to SUM CURRENCIES,
+      // so a EUR gym effectively had a 100,000 EUR cap.
       try{
         const winStart = new Date(new Date(prov.welcome_free_until).getTime() - 30*86400000).toISOString();
-        const rows = await _wsbGet(`transactions?select=gross_amount&payee_account=eq.${a}&status=eq.completed&created_at=gte.${encodeURIComponent(winStart)}`);
-        const sum = (rows||[]).reduce((x,r)=>x+(Number(r.gross_amount)||0), 0);
-        if(sum >= 100000*100) return false; // over the cap -> charge normally from now on
+        const rows = await _wsbGet(`transactions?select=gross_amount,currency&payee_id=eq.${encodeURIComponent(prov.id)}&status=eq.completed&created_at=gte.${encodeURIComponent(winStart)}`);
+        if (await welcomeCapReached(rows)) return false;   // over the cap -> charge normally from now on
       }catch(e){ /* on any error keep welcome (never over-charge) */ }
       return true;
     }
@@ -122,8 +178,10 @@ async function coachCheckout(req, res) {
   if (!(COMMISSION >= 0.01 && COMMISSION <= 0.10)) COMMISSION = 0.03;
   let MK = 1.00; // no markup — student pays exactly the listed price
   let STUDENT_MARKUP = MK;
-  if (String(credit) === 'student') {
+  const _credRow = (String(credit) === 'student') ? await verifyStudentCredit(studentId) : null;
+  if (_credRow) {
     // Referral reward: MTL waives its whole fee; the provider funds the rest of the discount.
+    // Only ever reached when the credit was VERIFIED against the DB above.
     let d = refDisc ? parseFloat(refDisc) : COMMISSION;
     if (!(d >= 0 && d <= 0.5)) d = COMMISSION;
     STUDENT_MARKUP = Math.max(0, MK - d);
@@ -175,6 +233,8 @@ async function coachCheckout(req, res) {
       application_fee_amount: (await isWelcomeZero(coachId)) ? 0 : applicationFee,
       metadata: {
         credit_type: credit || 'none',
+        mtl_credit_row: _credRow || '',      // set ONLY when server-verified; the webhook consumes it
+        mtl_credit_user: _credRow ? String(studentId||'') : '',
         coach_pct: (STUDENT_MARKUP - COMMISSION).toFixed(2),
         commission_pct: COMMISSION.toFixed(2),
         coach_name: coachName || '',
@@ -207,8 +267,10 @@ async function gymCheckout(req, res) {
   let _tk = take ? parseFloat(take) : GYM_MTL_TAKE;
   if (!(_tk >= 0.01 && _tk <= 0.05)) _tk = GYM_MTL_TAKE;
   let TAKE = (String(partner)==='1') ? 0.01 : _tk; // EP 1%, else owner's tier rate (3.5/3/2%)
-  if (String(credit) === 'student') {
-    // Referral reward on a drop-in: MTL waives its whole fee; the gym/coach funds the rest of the discount.
+  const _credRow = (String(credit) === 'student') ? await verifyStudentCredit(studentId) : null;
+  if (_credRow) {
+    // Referral reward on a drop-in: MTL waives its whole fee; the gym/coach funds the rest.
+    // Only ever reached when the credit was VERIFIED against the DB above.
     let d = refDisc ? parseFloat(refDisc) : TAKE;
     if (!(d >= 0 && d <= 0.5)) d = TAKE;
     STUDENT_MK = Math.max(0, MK - d);
@@ -248,6 +310,8 @@ async function gymCheckout(req, res) {
           mtl_currency: cur,
           member_name: memberName || '',
           mtl_credit: credit || 'none',
+          mtl_credit_row: _credRow || '',    // set ONLY when server-verified; the webhook consumes it
+          mtl_credit_user: _credRow ? String(studentId||'') : '',
         },
       },
       success_url: (String(merch)==='1')
@@ -410,7 +474,13 @@ async function membershipCheckout(req, res) {
       subscription_data: {
         application_fee_percent: (await isWelcomeZero(gymAccount)) ? 0 : FEE_NOW,
         metadata: {
+          // mtl_acq   = this membership is inside the MTL acquisition window
+          // mtl_acq_pct  = the acquisition rate for THIS provider (10, or 5 for an EP)
+          // mtl_acq_base = the rate to fall back to once the window is over
+          // Storing the rate itself means the webhook and the cron never have to re-derive
+          // it (and never have to know whether the provider is an EP).
           mtl_acq: _isAcq ? '1' : '',
+          mtl_acq_pct: _isAcq ? String(FEE_NOW) : '',
           mtl_acq_base: String(FEE_PCT),
           mtl_income: income || 'side',
           mtl_payment_type: 'membership',

@@ -50,23 +50,53 @@ async function welcomeKillSwitch() {
 // Mirrors isWelcomeZero() in pay.js, but on the payee profile we already loaded.
 // In window -> this cash/QR sale is 0% MTL fee (clean books, no doklad), exactly like Stripe.
 // First sale on a genuinely new account (<45 days) opens the 30-day window now (same anchor as Stripe).
-const WELCOME_CAP_MINOR = 100000 * 100; // welcome also ends at 100,000 CZK cumulative turnover in the window (gross_amount is stored x100)
-async function isWelcomeZeroProfile(prof, scopeCol, scopeId, table) {
+// WELCOME CAP - identical to pay.js, deliberately. It used to scope by gym_id/coach_id
+// while pay.js scoped by payee_account: the same thing until a coach with their own Stripe
+// sits inside a gym, at which point a gym class they merely TAUGHT (paid to the gym) carried
+// their coach_id and burned THEIR welcome window. Both now scope by payee_id - the entity
+// that actually owns welcome_free_until. And the cap is now real money: it used to add
+// gross_amount across currencies, giving a EUR gym an effective 100,000 EUR cap.
+const WELCOME_CAP_CZK_MINOR = 100000 * 100; // gross_amount is stored in minor units
+let _fxCache = null;
+async function _fxRates() {
+  if (_fxCache !== null) return _fxCache;
+  try {
+    const r = await sb(`fx_rates?id=eq.ecb-latest&select=data&limit=1`);
+    const d = r && r[0] && r[0].data;
+    _fxCache = (d && d.rates && d.rates.CZK) ? d.rates : false;
+  } catch (e) { _fxCache = false; }
+  return _fxCache;
+}
+// ECB feed is EUR-based: 1 EUR = rates[CUR]. EUR itself is not listed.
+// No rates -> count only CZK rows: an UNDER-count, which leaves the window open longer.
+// Under-counting is the safe error - it never over-charges.
+function _toCzkMinor(amountMinor, cur, rates) {
+  const c = String(cur || 'CZK').toUpperCase();
+  if (c === 'CZK') return Number(amountMinor) || 0;
+  if (!rates) return 0;
+  const per = (c === 'EUR') ? 1 : rates[c];
+  if (!per) return 0;
+  return (Number(amountMinor) || 0) / per * rates.CZK;
+}
+async function welcomeCapReached(rows) {
+  const rates = await _fxRates();
+  let sum = 0;
+  for (const r of (rows || [])) sum += _toCzkMinor(r.gross_amount, r.currency, rates);
+  return sum >= WELCOME_CAP_CZK_MINOR;
+}
+async function isWelcomeZeroProfile(prof, table) {   // scope is now payee_id = prof.id; the old scopeCol/scopeId args are gone
   table = table || 'profiles';
   if (!prof || !prof.id) return false;
   if (await welcomeKillSwitch()) return false;
   const now = Date.now();
   if (prof.welcome_free_until) {
     if (now >= new Date(prof.welcome_free_until).getTime()) return false; // 30-day window elapsed
-    // volume trigger: welcome also ends once turnover in the window reaches the cap (protects against a viral high-volume onboarding)
-    if (scopeCol && scopeId) {
-      try {
-        const winStart = new Date(new Date(prof.welcome_free_until).getTime() - 30 * 86400000).toISOString();
-        const rows = await sb(`transactions?select=gross_amount&${scopeCol}=eq.${scopeId}&status=eq.completed&created_at=gte.${encodeURIComponent(winStart)}`);
-        const sum = (rows || []).reduce((a, r) => a + (Number(r.gross_amount) || 0), 0);
-        if (sum >= WELCOME_CAP_MINOR) return false; // over the cap -> charge normally from now on
-      } catch (e) { /* on any error keep welcome (never over-charge) */ }
-    }
+    // volume trigger: welcome also ends once turnover in the window reaches the cap
+    try {
+      const winStart = new Date(new Date(prof.welcome_free_until).getTime() - 30 * 86400000).toISOString();
+      const rows = await sb(`transactions?select=gross_amount,currency&payee_id=eq.${encodeURIComponent(prof.id)}&status=eq.completed&created_at=gte.${encodeURIComponent(winStart)}`);
+      if (await welcomeCapReached(rows)) return false; // over the cap -> charge normally from now on
+    } catch (e) { /* on any error keep welcome (never over-charge) */ }
     return true;
   }
   const created = prof.created_at ? new Date(prof.created_at).getTime() : 0;
@@ -169,7 +199,7 @@ export default async function handler(req, res) {
       if (!ownerProf.id) ownerProf.id = gym.owner_id;
       rate = ladderRate(ownerProf);
       cur = currency || gym.currency || 'czk';
-      const _wz = await isWelcomeZeroProfile(gym, 'gym_id', gym_id, 'gyms');
+      const _wz = await isWelcomeZeroProfile(gym, 'gyms');
       const _cc = (_wantCredit && ownerProf.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
       const _acq = _wz ? null : await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id);
@@ -179,6 +209,7 @@ export default async function handler(req, res) {
       if (coach_id) { try { const _cp = await sb(`profiles?id=eq.${coach_id}&select=gym_payout_account`); const _cpa = _cp && _cp[0] && _cp[0].gym_payout_account; if (_cpa) _gymPayee = _cpa; } catch(e){} }
       row = {
         gym_id, coach_id: coach_id || null, member_id: member_id || null, paid_to: 'gym', payee_account: _gymPayee,
+        payee_id: gym.id, payee_kind: 'gym',   // the entity that owns welcome_free_until
         gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, refund_amount: 0, mtl_fee_refunded: 0,
         currency: cur, type, status: 'completed', payment_method,
         commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,
@@ -194,7 +225,7 @@ export default async function handler(req, res) {
       if (!_trusted && coach.cash_blocked) return res.status(403).json({ error: 'cash blocked' });
       rate = ladderRate(coach);
       cur = currency || 'czk';
-      const _wz = await isWelcomeZeroProfile(coach, 'coach_id', coach_id, 'profiles');
+      const _wz = await isWelcomeZeroProfile(coach, 'profiles');
       const _cc = (_wantCredit && coach.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
       const _acq = _wz ? null : await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id);
@@ -202,6 +233,7 @@ export default async function handler(req, res) {
       const _effRate = (_cc || _wz) ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
       row = {
         gym_id: null, coach_id, member_id: member_id || null, paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null),
+        payee_id: coach.id, payee_kind: 'profile',   // the entity that owns welcome_free_until
         gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, refund_amount: 0, mtl_fee_refunded: 0,
         currency: cur, type, status: 'completed', payment_method,
         commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,

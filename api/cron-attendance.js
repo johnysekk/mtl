@@ -41,7 +41,56 @@ function gymNow(tz) {
   };
 }
 
-export default async function handler(req, res) {
+export default 
+// ---------------------------------------------------------------------------
+// THE ONE RULE for what application_fee_percent a membership subscription carries.
+//
+// This field was being set from THREE places that knew nothing about each other:
+//   * pay.js at creation        -> welcome 0% / acquisition 10% (5% EP) / ladder
+//   * cron-attendance when the welcome window ended -> ALWAYS base, which silently threw
+//     away an acquisition window that was still running
+//   * gym-rerate when the owner crossed a tier -> ALWAYS the ladder rate, which blew away
+//     BOTH a running welcome window (breaking a 0% promise made to the provider) and an
+//     open acquisition window (MTL losing its own finder's fee)
+// and nothing at all ever ended an acquisition window, so an MTL-sourced membership was
+// billed 10% forever. mtl_acq had one writer and zero readers.
+//
+// PRECEDENCE: welcome (0) beats acquisition (10 / 5) beats the provider's ladder rate.
+// Welcome wins because it is a promise made to the provider; when it ends, the sub lands
+// on whatever is correct AT THAT MOMENT (still inside the 2 months -> acquisition; else ladder).
+//
+// Returns null when it cannot decide (Stripe call failed) -> the caller must CHANGE NOTHING.
+// Never guess with someone's money.
+async function subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive) {
+  if (welcomeActive) return 0;
+  const md = (sub && sub.metadata) || {};
+  if (md.mtl_acq === '1') {
+    const pct = parseFloat(md.mtl_acq_pct || '0') || 0;
+    if (pct > 0) {
+      let paid;
+      try {
+        const invs = await stripe.invoices.list({ subscription: subId, status: 'paid', limit: 3 }, { stripeAccount: acct });
+        paid = ((invs && invs.data) || []).length;
+      } catch (e) { return null; }            // cannot count -> do not touch the rate
+      if (paid < 2) return pct;               // first two months -> the acquisition rate
+    }
+  }
+  return ladderPct;
+}
+
+// Apply it. Returns true if the rate actually changed.
+async function applySubRate(stripe, acct, subId, sub, ladderPct, welcomeActive) {
+  const want = await subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive);
+  if (want === null) return false;                                  // undecidable -> leave alone
+  const cur = (sub.application_fee_percent != null) ? Number(sub.application_fee_percent) : null;
+  if (cur === want) return false;
+  const md = Object.assign({}, (sub && sub.metadata) || {});
+  if (md.mtl_acq === '1' && want !== 0 && want === ladderPct) md.mtl_acq = 'done';   // window closed
+  await stripe.subscriptions.update(subId, { application_fee_percent: want, metadata: md }, { stripeAccount: acct });
+  return true;
+}
+
+async function handler(req, res) {
   // Ověření, že volá Vercel cron (nebo externí scheduler se správným tajemstvím)
   const auth = req.headers.authorization || '';
   if (process.env.CRON_SECRET && auth !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -193,9 +242,14 @@ export default async function handler(req, res) {
     let welcomeRerated = 0;
     try {
       const nowIso = new Date().toISOString();
-      const ended = await sbGet(`profiles?welcome_free_until=lt.${encodeURIComponent(nowIso)}&welcome_rerated=is.false&select=id,stripe_account`);
+      const ended = await sbGet(`profiles?welcome_free_until=lt.${encodeURIComponent(nowIso)}&welcome_rerated=is.false&select=id,stripe_account,partner,coach_ref_score,bankai_eligible`);
       for (const p of (Array.isArray(ended) ? ended : [])) {
         try {
+          // The owner's CURRENT ladder rate, computed live - not mtl_acq_base from metadata,
+          // which was stamped when the subscription was created and is stale the moment the
+          // owner crosses a tier. Stripe track (this only ever touches Stripe subscriptions).
+          const _sc = p.coach_ref_score || 0;
+          const ladderPct = p.partner ? 1 : ((_sc >= 5 && p.bankai_eligible) ? 2 : (_sc >= 2 ? 2.5 : 3));
           const pGyms = await sbGet(`gyms?owner_id=eq.${p.id}&select=id,stripe_account,gym_payout_account`);
           for (const g of (Array.isArray(pGyms) ? pGyms : [])) {
             const acct = g.gym_payout_account || g.stripe_account;
@@ -205,12 +259,13 @@ export default async function handler(req, res) {
               if (!m.stripe_subscription) continue;
               try {
                 const sub = await stripe.subscriptions.retrieve(m.stripe_subscription, { stripeAccount: acct });
-                const cur = (sub.application_fee_percent != null) ? Number(sub.application_fee_percent) : null;
-                if (cur === 0) {
-                  const base = parseFloat((sub.metadata && sub.metadata.mtl_acq_base) || '3') || 3;  /* Stripe base 3% (was 3.5 = old ladder) */
-                  await stripe.subscriptions.update(m.stripe_subscription, { application_fee_percent: base }, { stripeAccount: acct });
-                  welcomeRerated++;
-                }
+                // Was: only ever fired at 0% and always restored the BASE rate - which threw the
+                // acquisition fee away for any gym that happened to be in its welcome window, and
+                // never dropped a 10% acquisition sub back at all. Now it simply puts every sub on
+                // whatever rate is correct right now (acquisition inside the 2-month window, base after).
+                // welcome has ENDED for this provider, so welcomeActive=false: the sub lands on
+                // the acquisition rate if the member is still inside their first 2 months, else the ladder.
+                if (await applySubRate(stripe, acct, m.stripe_subscription, sub, ladderPct, false)) welcomeRerated++;
               } catch (e) { console.error('welcome rerate sub', m.stripe_subscription, e.message); }
             }
           }
@@ -221,12 +276,7 @@ export default async function handler(req, res) {
               if (!m.stripe_subscription) continue;
               try {
                 const sub = await stripe.subscriptions.retrieve(m.stripe_subscription, { stripeAccount: p.stripe_account });
-                const cur = (sub.application_fee_percent != null) ? Number(sub.application_fee_percent) : null;
-                if (cur === 0) {
-                  const base = parseFloat((sub.metadata && sub.metadata.mtl_acq_base) || '3') || 3;  /* Stripe base 3% (was 3.5 = old ladder) */
-                  await stripe.subscriptions.update(m.stripe_subscription, { application_fee_percent: base }, { stripeAccount: p.stripe_account });
-                  welcomeRerated++;
-                }
+                if (await applySubRate(stripe, p.stripe_account, m.stripe_subscription, sub, ladderPct, false)) welcomeRerated++;
               } catch (e) { console.error('welcome rerate coach sub', m.stripe_subscription, e.message); }
             }
           }
