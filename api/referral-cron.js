@@ -150,8 +150,12 @@ export default async function handler(req, res) {
         await sb(`profiles?id=eq.${c.referred_by}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ coach_ref_score: newScore }) });
         try { await sb(`coach_ref_log`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ referrer_id: c.referred_by, referred_id: c.id, weight: 2 }]) }); } catch (e) {}
         let msg = `\uD83C\uDF89 Tv\u016Fj pozvan\u00FD gym ${c.name || ''} je te\u010F aktivn\u00ED! +1 bod do MTL Ligy \uD83C\uDFC6 \u2014 m\u00E1\u0161 ${newScore} aktivn\u00EDch p\u0159iveden\u00FDch. \uD83E\uDD4A`;
-        if (newScore === 3) msg = `\uD83D\uDDE1\uFE0F 3 aktivn\u00ED p\u0159iveden\u00ED! Odemkl jsi SHIKAI rate \u2014 nech\u00E1v\u00E1\u0161 si 97 % (provize jen 3 %). \uD83E\uDD4A`;
-        else if (newScore === 10) msg = `\uD83D\uDD25 10 aktivn\u00EDch p\u0159iveden\u00FDch! Odemkl jsi BANKAI rate \u2014 nech\u00E1v\u00E1\u0161 si 98 % (provize jen 2 %). \uD83C\uDFC6`;
+        // Milestones must match the REAL ladder in _ladderRate: Shikai at 2, Bankai at 5
+        // (+ the performance gate, Stripe only). They used to fire at 3 and 10 - the old
+        // ladder - so a referrer was congratulated a referral late. Fee-only wording: we
+        // never show a "you keep X%" figure.
+        if (newScore === 2) msg = `\uD83D\uDDE1\uFE0F 2 aktivn\u00ED p\u0159iveden\u00ED! Odemkl jsi SHIKAI \u2014 provize MTL ti klesla. \uD83E\uDD4A`;
+        else if (newScore === 5) msg = `\uD83D\uDD25 5 aktivn\u00EDch p\u0159iveden\u00FDch! M\u00E1\u0161 na BANKAI (provize 2 %) \u2014 ve Stripe re\u017Eimu a po spln\u011Bn\u00ED v\u00FDkonu (10 soukromek nebo 25 \u010Dlenstv\u00ED). \uD83C\uDFC6`;
         await sb(`notifications`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: c.referred_by, type: 'referral', read: false, data: JSON.stringify({ kind: 'coach_ref_qualified', who: c.name || '', score: newScore }), message: msg }]) });
         gymActivated++;
       }
