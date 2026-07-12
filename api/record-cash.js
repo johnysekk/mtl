@@ -52,6 +52,15 @@ async function welcomeKillSwitch() {
 // In window -> this cash/QR sale is 0% MTL fee (clean books, no doklad), exactly like Stripe.
 // First sale on a genuinely new account (<45 days) opens the 30-day window now (same anchor as Stripe).
 const WELCOME_CAP_MINOR = 100000 * 100; // welcome also ends at 100,000 CZK cumulative turnover in the window (gross_amount is stored x100)
+// MTL CIRCLE v2: a referrer earns a MONTH AT 0% COMMISSION for each gym they referred
+// that reached the gate. Deliberately the same shape as the welcome window - a date on
+// the entity - so there is no second fee pathway to get wrong. Works on every rail: a
+// waived commission is waived whether it was going to be a Stripe application_fee or
+// this month's card charge. Unlike a cash bounty this can NEVER put MTL underwater.
+function isCircleFree(prof) {
+  return !!(prof && prof.circle_free_until && Date.now() < new Date(prof.circle_free_until).getTime());
+}
+
 async function isWelcomeZeroProfile(prof, scopeCol, scopeId, table) {
   table = table || 'profiles';
   if (!prof || !prof.id) return false;
@@ -158,12 +167,12 @@ export default async function handler(req, res) {
 
     if (provider === 'gym') {
       // gym pays out -> gym owner authorizes, rate from owner profile
-      const gyms = await sb(`gyms?id=eq.${gym_id}&select=id,owner_id,currency,account_suspended,stripe_account,welcome_free_until,created_at`);
+      const gyms = await sb(`gyms?id=eq.${gym_id}&select=id,owner_id,currency,account_suspended,stripe_account,welcome_free_until,circle_free_until,created_at`);
       const gym = gyms && gyms[0];
       if (!gym) return res.status(404).json({ error: 'gym not found' });
       if (!_trusted && gym.owner_id !== uid) return res.status(403).json({ error: 'not your gym' });
       if (!_trusted && gym.account_suspended) return res.status(403).json({ error: 'account suspended' });
-      const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,coach_ref_score,bankai_eligible,welcome_free_until,created_at,referral_optin`);
+      const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,coach_ref_score,bankai_eligible,welcome_free_until,circle_free_until,created_at,referral_optin`);
       const ownerProf = (owners && owners[0]) || {};
       if (!ownerProf.id) ownerProf.id = gym.owner_id;
       rate = ladderRate(ownerProf);
@@ -171,21 +180,23 @@ export default async function handler(req, res) {
       const _wz = await isWelcomeZeroProfile(gym, 'gym_id', gym_id, 'gyms');
       const _cc = (_wantCredit && ownerProf.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
-      const _acq = _wz ? null : await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id);
-      const mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
-      const _effRate = (_cc || _wz) ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
+      // Circle free month is stamped on the gym AND on its owner - either satisfies it.
+      const _cf = isCircleFree(gym) || isCircleFree(ownerProf);
+      const _acq = (_wz || _cf) ? null : await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id);
+      const mtl_fee = (_cc || _wz || _cf) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
+      const _effRate = (_cc || _wz || _cf) ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
       let _gymPayee = gym.stripe_account || null;
       if (coach_id) { try { const _cp = await sb(`profiles?id=eq.${coach_id}&select=gym_payout_account`); const _cpa = _cp && _cp[0] && _cp[0].gym_payout_account; if (_cpa) _gymPayee = _cpa; } catch(e){} }
       row = {
         gym_id, coach_id: coach_id || null, member_id: member_id || null, paid_to: 'gym', payee_account: _gymPayee,
         gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, refund_amount: 0, mtl_fee_refunded: 0,
         currency: cur, type, status: 'completed', payment_method,
-        commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,
+        commission_status: (_cc || _wz || _cf) ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct', source_booking_id: source_booking_id || null,
       };
     } else {
       // coach pays out -> the coach authorizes their own cash/QR, rate from coach profile.
-      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,coach_ref_score,bankai_eligible,account_suspended,cash_blocked,welcome_free_until,created_at,referral_optin,gym_payout_account,stripe_account`);
+      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,coach_ref_score,bankai_eligible,account_suspended,cash_blocked,welcome_free_until,circle_free_until,created_at,referral_optin,gym_payout_account,stripe_account`);
       const coach = cs && cs[0];
       if (!coach) return res.status(404).json({ error: 'coach not found' });
       if (!_trusted && coach.id !== uid) return res.status(403).json({ error: 'not your account' });
@@ -196,14 +207,15 @@ export default async function handler(req, res) {
       const _wz = await isWelcomeZeroProfile(coach, 'coach_id', coach_id, 'profiles');
       const _cc = (_wantCredit && coach.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
-      const _acq = _wz ? null : await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id);
-      const mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
-      const _effRate = (_cc || _wz) ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
+      const _cf = isCircleFree(coach);
+      const _acq = (_wz || _cf) ? null : await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id);
+      const mtl_fee = (_cc || _wz || _cf) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
+      const _effRate = (_cc || _wz || _cf) ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
       row = {
         gym_id: null, coach_id, member_id: member_id || null, paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null),
         gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, refund_amount: 0, mtl_fee_refunded: 0,
         currency: cur, type, status: 'completed', payment_method,
-        commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,
+        commission_status: (_cc || _wz || _cf) ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct', source_booking_id: source_booking_id || null,
       };
     }

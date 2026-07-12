@@ -27,6 +27,13 @@ async function _wsbPatch(path, body){
   if(!_SUPA_URL || !_SUPA_KEY) return;
   try{ await fetch(_SUPA_URL.replace(/\/+$/,'') + '/rest/v1/' + path, { method:'PATCH', headers:{ apikey:_SUPA_KEY, Authorization:'Bearer '+_SUPA_KEY, 'Content-Type':'application/json', Prefer:'return=minimal' }, body: JSON.stringify(body) }); }catch(e){ console.error('wsbPatch', e.message); }
 }
+// Returns TRUE when this provider's MTL commission is ZERO right now.
+// Two independent reasons, both stamped as a date on the entity:
+//   welcome_free_until — the 30-day new-account welcome window
+//   circle_free_until  — an MTL CIRCLE free month (earned by referring a gym that
+//                        reached the gate). Circle v2 pays no cash: it simply waives
+//                        the referrer's own commission for a month, so it works on
+//                        every rail and can never put MTL underwater.
 async function isWelcomeZero(acct){
   if(!acct) return false;
   try{
@@ -34,15 +41,17 @@ async function isWelcomeZero(acct){
     if(ks && ks[0] && ks[0].welcome_zero_off) return false;
     const a = encodeURIComponent(String(acct).trim());
     let _wtbl = 'profiles';
-    let prov = (await _wsbGet(`profiles?stripe_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0]
-            || (await _wsbGet(`profiles?gym_payout_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0];
+    let prov = (await _wsbGet(`profiles?stripe_account=eq.${a}&select=id,welcome_free_until,circle_free_until,created_at&limit=1`))[0]
+            || (await _wsbGet(`profiles?gym_payout_account=eq.${a}&select=id,welcome_free_until,circle_free_until,created_at&limit=1`))[0];
     if(!prov){
-      let g = (await _wsbGet(`gyms?stripe_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0]
-           || (await _wsbGet(`gyms?gym_payout_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0];
+      let g = (await _wsbGet(`gyms?stripe_account=eq.${a}&select=id,welcome_free_until,circle_free_until,created_at&limit=1`))[0]
+           || (await _wsbGet(`gyms?gym_payout_account=eq.${a}&select=id,welcome_free_until,circle_free_until,created_at&limit=1`))[0];
       if(g && g.id){ prov = g; _wtbl = 'gyms'; }
     }
     if(!prov || !prov.id) return false;
     const now = Date.now();
+    // MTL CIRCLE free month: a flat 0% month, no volume cap, no window arithmetic.
+    if(prov.circle_free_until && now < new Date(prov.circle_free_until).getTime()) return true;
     if(prov.welcome_free_until){
       if(now >= new Date(prov.welcome_free_until).getTime()) return false; // 30-day window elapsed
       // volume trigger: welcome also ends at 100,000 CZK cumulative turnover in the window (parity with record-cash.js)
