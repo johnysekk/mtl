@@ -11,8 +11,7 @@
 // Auth:
 //   provider='gym'   -> token must be the gym OWNER's access token (gyms.owner_id).
 //   provider='coach' -> token must be the COACH's own access token (profiles.id===coach_id).
-// Rate: EP 1%, else MTL League ladder (Bankai 2% @ coach_ref_score>=10,
-//       Shikai 3% @ >=3, base 3.5%) read from the PAYEE's profile.
+// Rate: BANK track - EP 1%, else base 3.5% / Shikai 3% at coach_ref_score>=2. No Bankai.
 // Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
 
 const SB = process.env.SUPABASE_URL;
@@ -87,7 +86,9 @@ const ACQ_RATE_EP = 0.05;  // EP perk: HALF the acquisition fee (EP buys a cheap
 // (counts Stripe + cash together, so a member already past the window isn't re-charged 10% on cash).
 async function acquisitionRate(acq, type, payee, memberId, scopeCol, scopeId) {
   if (acq !== 'mtl_discovery') return null;
-  if (payee && payee.partner) return null;            // EP is always 1%, never the acquisition fee
+  // NOTE: this used to early-return null for a partner, which made the ACQ_RATE_EP branch
+  // below DEAD CODE - an EP acquisition was billed at their normal 1% instead of 5%.
+  // EP pays HALF the acquisition fee, not none (same bug existed in pay.js _isAcq).
   if (!memberId) return null;                          // can't bound the window without a member id
   let max;
   if (type === 'membership') max = 2;                  // first 2 months

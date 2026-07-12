@@ -207,7 +207,7 @@ export default async function handler(req, res) {
                 const sub = await stripe.subscriptions.retrieve(m.stripe_subscription, { stripeAccount: acct });
                 const cur = (sub.application_fee_percent != null) ? Number(sub.application_fee_percent) : null;
                 if (cur === 0) {
-                  const base = parseFloat((sub.metadata && sub.metadata.mtl_acq_base) || '3.5') || 3.5;
+                  const base = parseFloat((sub.metadata && sub.metadata.mtl_acq_base) || '3') || 3;  /* Stripe base 3% (was 3.5 = old ladder) */
                   await stripe.subscriptions.update(m.stripe_subscription, { application_fee_percent: base }, { stripeAccount: acct });
                   welcomeRerated++;
                 }
@@ -223,7 +223,7 @@ export default async function handler(req, res) {
                 const sub = await stripe.subscriptions.retrieve(m.stripe_subscription, { stripeAccount: p.stripe_account });
                 const cur = (sub.application_fee_percent != null) ? Number(sub.application_fee_percent) : null;
                 if (cur === 0) {
-                  const base = parseFloat((sub.metadata && sub.metadata.mtl_acq_base) || '3.5') || 3.5;
+                  const base = parseFloat((sub.metadata && sub.metadata.mtl_acq_base) || '3') || 3;  /* Stripe base 3% (was 3.5 = old ladder) */
                   await stripe.subscriptions.update(m.stripe_subscription, { application_fee_percent: base }, { stripeAccount: p.stripe_account });
                   welcomeRerated++;
                 }

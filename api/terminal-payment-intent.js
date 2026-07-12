@@ -43,11 +43,18 @@ async function sb(path, opts = {}) {
   return j;
 }
 
-// same base ladder as record-cash.js (base 3.5%, partner/EP 1%)
+// Tap-to-Pay / terminal is a card_present PaymentIntent = a STRIPE direct charge, so it belongs
+// on the STRIPE track, not the bank one. It used to return a FLAT 3.5% (the old bank base) for
+// everybody except EP - it never even selected coach_ref_score or bankai_eligible - so Shikai
+// and Bankai were silently ignored and a Bankai provider (2%) was charged 3.5% on every
+// in-person card payment. Must match _ladderRate('stripe', ...).
 function ladderRate(profile) {
-  if (!profile) return 0.035;
-  if (profile.partner) return 0.01;
-  return 0.035;
+  if (!profile) return 0.03;                                   // Stripe base 3%
+  if (profile.partner) return 0.01;                            // EP
+  const s = profile.coach_ref_score || 0;
+  if (s >= 5 && profile.bankai_eligible) return 0.02;          // Bankai
+  if (s >= 2) return 0.025;                                    // Shikai
+  return 0.03;                                                 // base
 }
 
 module.exports = async (req, res) => {
@@ -72,7 +79,7 @@ module.exports = async (req, res) => {
     if (gym.account_suspended) return res.status(403).json({ error: 'account suspended' });
     if (!gym.stripe_account) return res.status(400).json({ error: 'gym has no Stripe connected account' });
 
-    const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner`);
+    const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,coach_ref_score,bankai_eligible`);
     const rate = ladderRate((owners && owners[0]) || null);
     const applicationFee = Math.round(amount * rate); // amount is already minor units
 

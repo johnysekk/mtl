@@ -11,7 +11,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const GYM_STUDENT_MARKUP = 1.00;  // no markup
 const GYM_MTL_TAKE       = 0.03;   // drop-in: Stripe track base 3%
-const MEMB_MTL_PERCENT   = 3.5;     // membership: 3,5 % z invoicu
+const MEMB_MTL_PERCENT   = 3;       // membership: Stripe track base 3% (was 3.5 = the old ladder)
 
 // --- Genuine welcome 0%: no fee charged up front (replaces charge-then-instant-refund) ---
 const _SUPA_URL = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, ''), _SUPA_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -111,8 +111,15 @@ async function coachCheckout(req, res) {
 
   const rate = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
+  // The client only ever sends _ladderRate(), whose whole range is 0.01 (EP) .. 0.035 (bank
+  // base). The old guard was `>= 0.02 && <= 0.25 else 0.10`, which is broken twice over:
+  //   * an EXCLUSIVE PARTNER sends 0.01 -> FAILS the >= 0.02 test -> was charged 0.10.
+  //     An EP pays 1000 CZK/month FOR a 1% rate and was being billed 10% on every 1:1.
+  //   * the fallback itself was 10%, not the base rate.
+  // Legitimate range: 0.01 (EP) .. 0.10 (the coach-1:1 ACQUISITION fee, which the client
+  // DOES send here as Math.max(comm, partner?0.05:0.10)). Fallback = Stripe base 3%.
   let COMMISSION = commission ? parseFloat(commission) : 0.03;
-  if (!(COMMISSION >= 0.02 && COMMISSION <= 0.25)) COMMISSION = 0.10;
+  if (!(COMMISSION >= 0.01 && COMMISSION <= 0.10)) COMMISSION = 0.03;
   let MK = 1.00; // no markup — student pays exactly the listed price
   let STUDENT_MARKUP = MK;
   if (String(credit) === 'student') {
@@ -344,7 +351,10 @@ async function membershipCheckout(req, res) {
   // discovery, acq=mtl_discovery), MTL takes 10% for the first 2 months, then a webhook drops
   // it to the normal rate (a finder's fee for the acquisition). Monthly subs only.
   const MTL_ACQ_PERCENT = 10;
-  const _isAcq = (String(acq) === 'mtl_discovery' && ivl === 'month' && String(partner) !== '1');
+  // NOTE: this used to also require String(partner) !== '1', which excluded an EP from the
+  // acquisition fee entirely - making the "EP pays half" branch below DEAD CODE and billing
+  // an EP acquisition at their normal 1%. EP pays HALF the acquisition fee, not none.
+  const _isAcq = (String(acq) === 'mtl_discovery' && ivl === 'month');
   // EP perk: HALF the acquisition fee (5%) vs 10% for standard providers; after the window the webhook drops to mtl_acq_base (EP=1%).
   const FEE_NOW = _isAcq ? (String(partner)==='1' ? (MTL_ACQ_PERCENT/2) : MTL_ACQ_PERCENT) : FEE_PCT;
 

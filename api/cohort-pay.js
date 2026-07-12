@@ -7,7 +7,7 @@ import Stripe from 'stripe';
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const _SUPA = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const _KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const COMMISSION = 0.035; // MTL take on cohort payments (welcome-0% window is a noted follow-up)
+const COMMISSION = 0.03;  // Stripe-track base (cohorts charge via Stripe). Was 0.035 = old ladder.
 
 async function sbGet(path) {
   try { const r = await fetch(_SUPA + '/rest/v1/' + path, { headers: { apikey: _KEY, Authorization: 'Bearer ' + _KEY } }); return r.ok ? await r.json() : []; } catch (e) { return []; }
@@ -64,13 +64,17 @@ async function isWelcomeZero(acct) {
 async function providerCommission(ownerId) {
   if (!ownerId) return COMMISSION;
   try {
+    // Cohorts charge through Stripe, so this is the STRIPE track and must match _ladderRate:
+    //   EP 1% | Bankai 2% (score>=5 AND bankai_eligible) | Shikai 2.5% (score>=2) | base 3%.
+    // It was on the OLD ladder entirely - thresholds 10/3 instead of 5/2, base 3.5% instead
+    // of 3% - and never even read bankai_eligible, so Bankai was unreachable here.
     const p = (await sbGet(`profiles?id=eq.${encodeURIComponent(ownerId)}&select=partner,coach_ref_score,bankai_eligible`))[0];
     if (!p) return COMMISSION;
-    if (p.partner) return 0.01;            // Exclusive Partner
+    if (p.partner) return 0.01;                              // Exclusive Partner
     const sc = p.coach_ref_score || 0;
-    if (sc >= 5 && p.bankai_eligible) return 0.025;  // Bankai (5 refs + perf gate)
-    if (sc >= 2) return 0.03;              // Shikai
-    return 0.035;                          // base
+    if (sc >= 5 && p.bankai_eligible) return 0.02;           // Bankai
+    if (sc >= 2) return 0.025;                               // Shikai
+    return 0.03;                                             // Stripe base
   } catch (e) { return COMMISSION; }
 }
 
