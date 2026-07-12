@@ -128,21 +128,36 @@ export default async function handler(req, res) {
     }
 
 
-    // ── GYM-OWNER recruit activation ──
-    // A referred gym owner becomes "active" after 2 distinct months of real gym revenue.
-    // (Coaches activate in-app after 5 paid lessons/classes; this pass covers gym owners.)
-    // ref_coach_qualified is the single idempotency flag → counts once per user even if
-    // they are both a coach and a gym owner (whichever path qualifies first wins).
+    // ── RECRUIT ACTIVATION (universal) ──
+    // ONE rule for EVERYBODY, coach or club: a referred provider counts as ACTIVE once they
+    // have >= 10 taught 1:1 privates OR >= 25 active memberships. This is Petr's rule and it
+    // replaces the two stale, inconsistent tests that used to live here:
+    //   - coach: 5 lessons logged as held (a client-side counter, ref_coach_lessons)
+    //   - gym:   revenue in 2 distinct calendar months
+    // Those were far too weak - a club could "activate" off two tiny months and never become
+    // a real business. The bar is now the same real-traction bar that gates Bankai
+    // (bankai-cron.js), so "active" means the same thing everywhere in the product.
+    // ref_coach_qualified stays the single idempotency flag → each referred person counts once.
+    const ACT_PRIVATES = 10;   // taught 1:1 privates
+    const ACT_MEMBERS  = 25;   // active memberships across the clubs they own
+
+    async function isActiveProvider(uid) {
+      // >= 10 taught 1:1 privates?
+      const priv = await sb(`transactions?coach_id=eq.${uid}&type=eq.coach_1to1&select=id&limit=${ACT_PRIVATES}`);
+      if ((priv || []).length >= ACT_PRIVATES) return true;
+      // …or >= 25 active memberships across the clubs they own?
+      const gy = await sb(`gyms?owner_id=eq.${uid}&status=eq.approved&select=id&limit=20`);
+      const ids = (gy || []).map((g) => g.id);
+      if (!ids.length) return false;
+      const mems = await sb(`gym_memberships?gym_id=in.(${ids.join(',')})&status=in.(active,cancelling)&select=id&limit=${ACT_MEMBERS}`);
+      return (mems || []).length >= ACT_MEMBERS;
+    }
+
     let gymActivated = 0;
     try {
       const cand = await sb(`profiles?referred_by=not.is.null&ref_coach_qualified=not.is.true&select=id,referred_by,name&limit=500`);
       for (const c of (cand || [])) {
-        const gy = await sb(`gyms?owner_id=eq.${c.id}&status=eq.approved&select=id&limit=1`);
-        const gymId = gy && gy[0] && gy[0].id;
-        if (!gymId) continue; // no gym → coach path handles activation in-app
-        const tx = await sb(`transactions?gym_id=eq.${gymId}&select=created_at&limit=1000`);
-        const months = new Set((tx || []).map(t => (t.created_at || '').slice(0, 7)).filter(Boolean));
-        if (months.size < 2) continue; // needs 2 distinct months of real revenue
+        if (!(await isActiveProvider(c.id))) continue;   // not yet a real business
         // qualify (set flag FIRST for idempotency), then bump referrer
         await sb(`profiles?id=eq.${c.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ ref_coach_qualified: true }) });
         const ref = await sb(`profiles?id=eq.${c.referred_by}&select=coach_ref_score,name&limit=1`);
