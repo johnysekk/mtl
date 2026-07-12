@@ -43,30 +43,60 @@ async function welcomeKillSwitch() {
   catch (e) { _welcomeOff = false; }
   return _welcomeOff;
 }
-const WELCOME_CAP_MINOR = 100000 * 100; // welcome also ends at 100,000 CZK turnover in the window
+// WELCOME CAP — identical to pay.js / record-cash.js / terminal-payment-intent.js. It used to be
+// written four slightly different ways, and the differences WERE the bug: scoping by gym_id/coach_id
+// burned a coach's window on gym classes they merely taught, and summing gross_amount across
+// currencies gave a EUR gym an effective 100,000 EUR cap. Scope = payee_id (the entity that owns
+// welcome_free_until); money = CZK via the ECB rates fx-sync.js caches. No rates -> count CZK rows
+// only: an UNDER-count that leaves the window open longer, which is the safe direction.
+const WELCOME_CAP_CZK_MINOR = 100000 * 100;
+let _fxCache = null;
+async function _fxRates() {
+  if (_fxCache !== null) return _fxCache;
+  try {
+    const r = await sb(`fx_rates?id=eq.ecb-latest&select=data&limit=1`);
+    const d = r && r[0] && r[0].data;
+    _fxCache = (d && d.rates && d.rates.CZK) ? d.rates : false;
+  } catch (e) { _fxCache = false; }
+  return _fxCache;
+}
+function _toCzkMinor(amountMinor, cur, rates) {
+  const c = String(cur || 'CZK').toUpperCase();
+  if (c === 'CZK') return Number(amountMinor) || 0;
+  if (!rates) return 0;
+  const per = (c === 'EUR') ? 1 : rates[c];    // ECB feed is EUR-based; EUR itself is not listed
+  if (!per) return 0;
+  return (Number(amountMinor) || 0) / per * rates.CZK;
+}
+async function welcomeCapReached(payeeId, winStart) {
+  if (!payeeId) return false;
+  try {
+    const rows = await sb(`transactions?select=gross_amount,currency&payee_id=eq.${encodeURIComponent(payeeId)}&status=eq.completed&created_at=gte.${encodeURIComponent(winStart)}`);
+    const rates = await _fxRates();
+    let sum = 0;
+    for (const r of (rows || [])) sum += _toCzkMinor(r.gross_amount, r.currency, rates);
+    return sum >= WELCOME_CAP_CZK_MINOR;
+  } catch (e) { return false; }   // on any error keep welcome (never over-charge)
+}
 // Reconciliation must NOT open a new welcome window (only record-cash does, on a live sale). So we
 // only READ welcome_free_until here; if it isn't set we treat the sale as non-welcome (normal fee).
-async function isWelcomeZeroReadOnly(prof, scopeCol, scopeId) {
+async function isWelcomeZeroReadOnly(prof) {
   if (!prof || !prof.id) return false;
   if (await welcomeKillSwitch()) return false;
   if (!prof.welcome_free_until) return false;
   const now = Date.now();
   if (now >= new Date(prof.welcome_free_until).getTime()) return false;
-  if (scopeCol && scopeId) {
-    try {
-      const winStart = new Date(new Date(prof.welcome_free_until).getTime() - 30 * 86400000).toISOString();
-      const rows = await sb(`transactions?select=gross_amount&${scopeCol}=eq.${scopeId}&status=eq.completed&created_at=gte.${encodeURIComponent(winStart)}`);
-      const sum = (rows || []).reduce((a, r) => a + (Number(r.gross_amount) || 0), 0);
-      if (sum >= WELCOME_CAP_MINOR) return false;
-    } catch (e) { /* keep welcome on error */ }
-  }
+  const winStart = new Date(new Date(prof.welcome_free_until).getTime() - 30 * 86400000).toISOString();
+  if (await welcomeCapReached(prof.id, winStart)) return false;
   return true;
 }
 
 const ACQ_RATE = 0.10, ACQ_RATE_EP = 0.05;
 async function acquisitionRate(acq, type, payee, memberId, scopeCol, scopeId) {
   if (acq !== 'mtl_discovery') return null;
-  if (payee && payee.partner) return null;
+  // NOTE: an early `if (payee.partner) return null` used to sit here, which made the
+  // ACQ_RATE_EP branch below DEAD CODE - an EP acquisition was billed at 1% instead of 5%.
+  // EP pays HALF the acquisition fee, not none (same bug existed in pay.js and record-cash.js).
   if (!memberId) return null;
   let max;
   if (type === 'membership') max = 2;
@@ -118,26 +148,26 @@ export default async function handler(req, res) {
           const cs = await sb(`profiles?id=eq.${b.coach_id}&select=id,partner,coach_ref_score,bankai_eligible,welcome_free_until,created_at,gym_payout_account,stripe_account,referral_optin`);
           const coach = cs && cs[0]; if (!coach) { out.skipped++; continue; }
           const rate = ladderRate(coach);
-          const _wz = await isWelcomeZeroReadOnly(coach, 'coach_id', b.coach_id);
+          const _wz = await isWelcomeZeroReadOnly(coach);
           const _cc = (b.credit_used === 'student' && b.student_id && coach.referral_optin !== false) ? await findStudentCredit(b.student_id) : null;
           if (_cc) _creditRow = { memberId: b.student_id, id: _cc.id, sc: _cc.sc };
           const _acq = (_wz || _cc) ? null : await acquisitionRate(b.acq_source, type, coach, b.student_id, 'coach_id', b.coach_id);
           const mtl_fee = (_wz || _cc) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
-          row = { gym_id: b.gym_id || null, coach_id: b.coach_id, member_id: b.student_id || null, paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null), gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0, currency: (b.currency || 'czk'), type, status: 'completed', payment_method: 'qr', commission_status: _wz ? 'collected' : 'pending', commission_month: month, cash_payer_name: b.student_name || null, acq_source: b.acq_source || 'direct', source_booking_id: b.id };
+          row = { gym_id: b.gym_id || null, coach_id: b.coach_id, member_id: b.student_id || null, paid_to: 'coach', payee_id: (cs && cs[0] && cs[0].id) || b.coach_id, payee_kind: 'profile', payee_account: (coach.gym_payout_account || coach.stripe_account || null), gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0, currency: (b.currency || 'czk'), type, status: 'completed', payment_method: 'qr', commission_status: _wz ? 'collected' : 'pending', commission_month: month, cash_payer_name: b.student_name || null, acq_source: b.acq_source || 'direct', source_booking_id: b.id };
         } else {
           const gyms = await sb(`gyms?id=eq.${b.gym_id}&select=id,owner_id,currency,stripe_account,account_suspended,welcome_free_until,created_at`);
           const gym = gyms && gyms[0]; if (!gym) { out.skipped++; continue; }
           const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,coach_ref_score,bankai_eligible,welcome_free_until,created_at,referral_optin`);
           const ownerProf = (owners && owners[0]) || { id: gym.owner_id };
           const rate = ladderRate(ownerProf);
-          const _wz = await isWelcomeZeroReadOnly(gym, 'gym_id', b.gym_id);
+          const _wz = await isWelcomeZeroReadOnly(gym);
           const _cc = (b.credit_used === 'student' && b.student_id && ownerProf.referral_optin !== false) ? await findStudentCredit(b.student_id) : null;
           if (_cc) _creditRow = { memberId: b.student_id, id: _cc.id, sc: _cc.sc };
           const _acq = (_wz || _cc) ? null : await acquisitionRate(b.acq_source, type, ownerProf, b.student_id, 'gym_id', b.gym_id);
           const mtl_fee = (_wz || _cc) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
           let _gymPayee = gym.stripe_account || null;
           if (b.coach_id) { try { const _cp = await sb(`profiles?id=eq.${b.coach_id}&select=gym_payout_account`); const _cpa = _cp && _cp[0] && _cp[0].gym_payout_account; if (_cpa) _gymPayee = _cpa; } catch (e) {} }
-          row = { gym_id: b.gym_id, coach_id: b.coach_id || null, member_id: b.student_id || null, paid_to: 'gym', payee_account: _gymPayee, gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0, currency: (b.currency || gym.currency || 'czk'), type, status: 'completed', payment_method: 'qr', commission_status: _wz ? 'collected' : 'pending', commission_month: month, cash_payer_name: b.student_name || null, acq_source: b.acq_source || 'direct', source_booking_id: b.id };
+          row = { gym_id: b.gym_id, coach_id: b.coach_id || null, member_id: b.student_id || null, paid_to: 'gym', payee_id: gym.id, payee_kind: 'gym', payee_account: _gymPayee, gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0, currency: (b.currency || gym.currency || 'czk'), type, status: 'completed', payment_method: 'qr', commission_status: _wz ? 'collected' : 'pending', commission_month: month, cash_payer_name: b.student_name || null, acq_source: b.acq_source || 'direct', source_booking_id: b.id };
         }
         // re-check right before insert (reduce race with a concurrent record-cash); the UNIQUE index is the hard guard
         const recheck = await sb(`transactions?select=id&source_booking_id=eq.${encodeURIComponent(b.id)}&limit=1`);

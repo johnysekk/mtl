@@ -99,10 +99,26 @@ async function recordTransaction(acct, pi, fields) {
 // Vrátí detaily checkout session.
 // Pro gym flows (direct charge / subscription) je session vytvořená NA connected accountu,
 // takže se musí retrievnout s { stripeAccount: gymAccount }.
-async function rewardReferrer({ refUser, refPct, gymId, gymAccount }) {
+async function rewardReferrer({ refUser, refPct, gymId, gymAccount, subId }) {
   try {
-    const pct = parseInt(refPct, 10) || 0;
+    let pct = parseInt(refPct, 10) || 0;
     if (!refUser || !gymId || pct <= 0) return;
+    // Defense in depth: clamp to the gym's configured member_ref_pct even though pay.js
+    // already did - this function must stay safe even if a caller changes.
+    try {
+      const _g = (await sbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=member_ref_pct`))[0];
+      const _mx = (_g && parseInt(_g.member_ref_pct, 10)) || 0;
+      pct = Math.min(pct, _mx);
+      if (pct <= 0) return;                                  // referral off at the gym
+    } catch (e) { return; }                                  // cannot verify -> no reward
+    // DEDUP: one reward per checkout subscription. Without this, refreshing the success page
+    // re-ran the whole thing (another coupon / another pending credit row) every time.
+    if (subId) {
+      try {
+        const _sub = await stripe.subscriptions.retrieve(subId, gymAccount ? { stripeAccount: gymAccount } : undefined);
+        if (_sub && _sub.metadata && _sub.metadata.mtl_ref_rewarded === '1') return;   // already done
+      } catch (e) {}
+    }
     // GATE: the referrer must CURRENTLY be an active member of this gym, otherwise no reward at all.
     const mem = await sbGet(`gym_memberships?select=stripe_subscription&student_id=eq.${encodeURIComponent(refUser)}&gym_id=eq.${encodeURIComponent(gymId)}&status=in.(active,cancelling)`);
     if (!mem || !mem.length) return;
@@ -127,6 +143,10 @@ async function rewardReferrer({ refUser, refPct, gymId, gymAccount }) {
       await sbPost('gym_member_ref_credits', { gym_id: gymId, referrer_id: refUser, pct, status: 'pending', source: 'stripe', created_at: new Date().toISOString() });
       await sbPost('notifications', { user_id: refUser, type: 'system', read: false, data: JSON.stringify({ kind: 'gym_member_ref_reward', gym_id: gymId, pct }), message: '🎁 Tvé doporučení se přidalo! -' + pct + ' % se ti automaticky uplatní na další období členství (QR/hotovost).' });
     }
+    // Mark this subscription as rewarded so a success-page refresh can never double-reward.
+    if (subId) {
+      try { await stripe.subscriptions.update(subId, { metadata: { mtl_ref_rewarded: '1' } }, gymAccount ? { stripeAccount: gymAccount } : undefined); } catch (e) {}
+    }
   } catch (e) { console.error('rewardReferrer', e.message); }
 }
 
@@ -138,10 +158,21 @@ export default async function handler(req, res) {
     const opts = gymAccount ? { stripeAccount: gymAccount } : undefined;
     const session = await stripe.checkout.sessions.retrieve(sessionId, opts);
 
-    // Reward the person who referred this new member (best-effort, non-blocking for the response).
-    if (refUser && refPct && gymId && gymAccount) {
-      await rewardReferrer({ refUser, refPct, gymId, gymAccount });
-    }
+    // Reward the person who referred this new member (best-effort, non-blocking).
+    // SECURITY: refUser/refPct used to be taken straight from req.query - this endpoint has no
+    // auth, the pct had no clamp and there was no dedup, so any active member could call it
+    // with refUser=<themselves>&refPct=<anything> and grant themselves a coupon, repeatedly.
+    // The ONLY trusted source is the session's own metadata, which pay.js stamps SERVER-SIDE
+    // (mtl_ref_user / mtl_ref_pct, already clamped to the gym's member_ref_pct). Query params
+    // are ignored entirely.
+    try {
+      const _md = (session && session.metadata) || {};
+      const _mdSub = typeof session.subscription === 'string' ? session.subscription : (session.subscription && session.subscription.id);
+      const _ru = _md.mtl_ref_user, _rp = parseInt(_md.mtl_ref_pct, 10) || 0, _rg = _md.gym_id || gymId;
+      if (_ru && _rp > 0 && _rg && gymAccount) {
+        await rewardReferrer({ refUser: _ru, refPct: _rp, gymId: _rg, gymAccount, subId: _mdSub });
+      }
+    } catch (e) { console.error('ref reward gate', e.message); }
 
     // Record the transaction from the session metadata (idempotent). This guarantees the
     // ledger + accounting export are correct even when the Stripe webhook isn't delivering

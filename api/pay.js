@@ -90,8 +90,9 @@ async function isWelcomeZero(acct){
     let prov = (await _wsbGet(`profiles?stripe_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0]
             || (await _wsbGet(`profiles?gym_payout_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0];
     if(!prov){
-      let g = (await _wsbGet(`gyms?stripe_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0]
-           || (await _wsbGet(`gyms?gym_payout_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0];
+      // gyms has ONLY stripe_account; gym_payout_account is a profiles column. The second
+      // query here always 400'd and returned nothing - a fallback that never fell back.
+      let g = (await _wsbGet(`gyms?stripe_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0];
       if(g && g.id){ prov = g; _wtbl = 'gyms'; }
     }
     if(!prov || !prov.id) return false;
@@ -430,8 +431,19 @@ async function membershipCheckout(req, res) {
   // GATE: the referrer must CURRENTLY be an active member of this gym; otherwise no referral at all
   // (no discount for the new member, and no reward for the referrer -> we also drop refUser below).
   let discounts;
+  // refPct arrives from the CLIENT URL. It used to be clamped only to <=100, which meant a
+  // student could append refPct=100&refUser=<any active member> and buy the membership free,
+  // with the gym eating the whole discount. The only legitimate value is the gym's own
+  // configured member_ref_pct - so clamp to it server-side, and zero when referral is off.
   let refPctN = parseInt(refPct, 10) || 0;
   let _refUserOk = refUser || '';
+  if (refPctN > 0 && gymId) {
+    try {
+      const _gRow = (await _wsbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=member_ref_pct`))[0];
+      const _maxP = (_gRow && parseInt(_gRow.member_ref_pct, 10)) || 0;
+      refPctN = Math.min(refPctN, _maxP);          // referral off (0) kills it entirely
+    } catch (e) { refPctN = 0; }                   // cannot verify -> no discount (never guess with money)
+  }
   if (refPctN > 0 && refUser && gymId) {
     let _refActive = false;
     try {
@@ -533,7 +545,7 @@ async function partnerCheckout(req, res) {
   try {
     const prof = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(userId)}&select=stripe_account,gym_payout_account,country`))[0] || {};
     let acct = prof.stripe_account || prof.gym_payout_account || '';
-    if(!acct){ const g=(await _wsbGet(`gyms?owner_id=eq.${encodeURIComponent(userId)}&select=stripe_account,gym_payout_account&limit=1`))[0]; if(g) acct=g.stripe_account||g.gym_payout_account||''; }
+    if(!acct){ const g=(await _wsbGet(`gyms?owner_id=eq.${encodeURIComponent(userId)}&select=stripe_account&limit=1`))[0]; if(g) acct=g.stripe_account||g.gym_payout_account||''; }
     if(acct){
       try{ const a=await stripe.accounts.retrieve(String(acct)); cc=String(a.country||'').toUpperCase(); }catch(e){}
       if(cc){ _wsbPatch(`profiles?id=eq.${encodeURIComponent(userId)}`, { stripe_country: cc }); } // cache for client display; no-op until ep-pricing.sql adds the column

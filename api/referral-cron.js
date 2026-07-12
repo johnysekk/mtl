@@ -202,18 +202,9 @@ export default async function handler(req, res) {
             await sb(`notifications`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: top[i].id, type: 'referral', read: false, data: JSON.stringify({ kind: 'league_champion', season: prevSeason, rank: i + 1 }), message: `${medal} MTL Liga ${prevSeason}: skon\u010Dil jsi #${i + 1}! Z\u00EDskal jsi \u0161ampionsk\u00FD odznak. \uD83C\uDFC6` }]) });
             champions++;
           }
-          // STREAKS — once per rollover: +1 for everyone active in prev season, reset the rest.
-          try {
-            for (const sid of Object.keys(cc)) {
-              const spr = await sb(`profiles?id=eq.${sid}&select=league_streak,league_streak_best&limit=1`);
-              const cur = (spr && spr[0] && spr[0].league_streak) || 0;
-              const best = (spr && spr[0] && spr[0].league_streak_best) || 0;
-              const ns = cur + 1;
-              await sb(`profiles?id=eq.${sid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ league_streak: ns, league_streak_best: Math.max(best, ns) }) });
-            }
-            const hadStreak = await sb(`profiles?league_streak=gt.0&select=id&limit=2000`);
-            for (const pf of (hadStreak || [])) { if (!cc[pf.id]) { await sb(`profiles?id=eq.${pf.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ league_streak: 0 }) }); } }
-          } catch (e) {}
+          // STREAKS removed: MTL Liga is retired and profiles.league_streak / league_streak_best
+          // never existed in the DB - every query here 400'd inside its own try/catch, so the
+          // block was dead weight that could never have worked.
         }
       }
 
