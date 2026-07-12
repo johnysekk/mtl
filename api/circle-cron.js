@@ -1,12 +1,12 @@
 // /api/circle-cron.js
-// MTL CIRCLE — detect when a market (city x discipline) can finally carry student ads,
+// MTL CIRCLE — detect when a CITY can finally carry student ads,
 // stamp it, and tell the CO-CREATORS who built it.
 //
 // THE RULE: advertising into thin supply burns money. A student who searches "Muay Thai
 // Brno" and finds one gym leaves; one who finds six picks one. So ads unlock on a
 // BUSINESS CONDITION, never as a prize:
 //
-//   DENSITY  — DENSITY_GATE live gyms in that city x discipline
+//   DENSITY  — DENSITY_GATE live clubs in that CITY (any discipline)
 //   LIVE     — each gym approved, not suspended, able to take payments, AND actually
 //              trading (>= MIN_TX completed transactions in the last 30 days).
 //              A dead listing converts nobody, so it must not count toward the bar.
@@ -75,45 +75,53 @@ export default async function handler(req, res) {
     const canPay = (g) => (g.payment_mode === 'qr_bank' ? !!g.receiver_id_value : !!g.stripe_account);
     const isLive = (g) => !g.account_suspended && canPay(g) && (txBy[g.id] || 0) >= MIN_TX;
 
-    // Build the markets: city x discipline -> live gyms + the people who brought gyms in.
+    // A market is a CITY, not a city x discipline. Counting per discipline sounds more
+    // precise but would have killed the mechanic: Zlín has ~6 combat clubs in TOTAL and
+    // 1-2 per discipline, so a 6-club gate per discipline only ever opens in Praha. It
+    // also isn't what we advertise - a campaign lands on "find your club in <city>" and
+    // the student filters the discipline themselves. Six clubs of ANY disciplines is a
+    // real choice; one club in the whole city loses them whatever it teaches. Discipline
+    // is still collected, but only as a signal for the ad copy.
     const mk = {};
     for (const g of gyms || []) {
       if (!isLive(g)) continue;
       const city = String(g.city || '').trim();
       if (!city) continue;
-      for (const d of discs(g.disciplines)) {
-        const k = norm(city) + '|' + d;
-        if (!mk[k]) mk[k] = { city, discipline: d, country: g.country || null, live: 0, creators: new Set() };
-        mk[k].live++;
-        // A co-creator is someone who brought a gym into this market and is NOT that gym's
-        // own owner (a self-referral would be attribution, not contribution).
-        if (g.referred_by && String(g.referred_by) !== String(g.owner_id)) mk[k].creators.add(g.referred_by);
-      }
+      const k = norm(city) + '|' + norm(g.country);
+      if (!mk[k]) mk[k] = { city, country: g.country || null, live: 0, creators: new Set(), disc: new Set() };
+      mk[k].live++;
+      discs(g.disciplines).forEach((d) => mk[k].disc.add(d));
+      // A co-creator brought a club into this city and is NOT that club's own owner
+      // (a self-referral would be attribution, not contribution).
+      if (g.referred_by && String(g.referred_by) !== String(g.owner_id)) mk[k].creators.add(g.referred_by);
     }
 
     const ready = Object.values(mk).filter((m) => m.live >= DENSITY_GATE);
     if (!ready.length) return res.status(200).json({ ok: true, ...out });
 
-    const known = await sb('circle_markets?select=city,discipline');
-    const seen = new Set((known || []).map((m) => norm(m.city) + '|' + m.discipline));
+    const known = await sb('circle_markets?select=city,country');
+    const seen = new Set((known || []).map((m) => norm(m.city) + '|' + norm(m.country)));
 
     for (const m of ready) {
       try {
-        if (seen.has(norm(m.city) + '|' + m.discipline)) continue;   // already unlocked
+        if (seen.has(norm(m.city) + '|' + norm(m.country))) continue;   // already unlocked
 
         await sb('circle_markets', {
           method: 'POST', prefer: 'return=minimal',
-          body: JSON.stringify({ city: m.city, discipline: m.discipline, country: m.country, live_gyms: m.live }),
+          body: JSON.stringify({
+            city: m.city, country: m.country, live_gyms: m.live,
+            disciplines: [...m.disc].join(','),   // what the scene teaches -> ad-copy signal
+          }),
         });
         out.unlocked++;
-        out.markets.push(`${m.city} · ${m.discipline} (${m.live})`);
+        out.markets.push(`${m.city} (${m.live})`);
 
         // Tell the co-creators, together. The message names the market, never who brought whom.
         const creators = [...m.creators];
         for (const uid of creators) {
           await notify(uid, 'circle_market',
-            `\u{1F535} MTL Circle: ${m.city} \u2014 ${m.discipline} je ODEMČENO. ${m.live} živých gymů, dost na to, aby si student vybral. Jsi jeden ze spolutvůrců téhle scény.`,
-            { city: m.city, discipline: m.discipline });
+            `\u{1F534} MTL Circle: ${m.city} je ODEMČENO. ${m.live} živých klubů — dost na to, aby si student vybral. Jsi jeden ze spolutvůrců téhle scény.`,
+            { city: m.city });
           out.notified++;
         }
 
@@ -122,16 +130,15 @@ export default async function handler(req, res) {
         for (const g of gyms || []) {
           if (!isLive(g)) continue;
           if (norm(g.city) !== norm(m.city)) continue;
-          if (!discs(g.disciplines).includes(m.discipline)) continue;
           if (g.owner_id && !creators.includes(g.owner_id)) owners.add(g.owner_id);
         }
         for (const uid of owners) {
           await notify(uid, 'circle_market',
-            `\u{1F535} MTL Circle: ${m.city} \u2014 ${m.discipline} je ODEMČENO. Scéna je dost silná na to, aby MTL přivádělo studenty.`,
-            { city: m.city, discipline: m.discipline });
+            `\u{1F534} MTL Circle: ${m.city} je ODEMČENO. Scéna je dost silná na to, aby sem MTL přivádělo studenty.`,
+            { city: m.city });
           out.notified++;
         }
-      } catch (e) { out.errors.push(`${m.city}/${m.discipline}: ${e.message}`); }
+      } catch (e) { out.errors.push(`${m.city}: ${e.message}`); }
     }
 
     return res.status(200).json({ ok: true, ...out });
