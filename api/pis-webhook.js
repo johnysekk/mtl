@@ -39,12 +39,12 @@ async function pisSideEffects(rec, tbl) {
       const _body = _event
         ? { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: _evProvider, gym_id: _evGym, coach_id: _evCoach, member_id: rec.buyer_id || null, gross_amount: Math.round((rec.amount || 0) * 100), currency: rec.currency || 'CZK', type: 'event_ticket', payment_method: 'pis', acq_source: 'direct', source_booking_id: rec.id }
         : _coach1
-        ? { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: 'coach', coach_id: rec.coach_id, member_id: rec.student_id || null, gross_amount: Math.round((rec.amount || 0) * 100), currency: rec.currency || 'CZK', type: 'coach_1to1', payment_method: 'pis', acq_source: rec.acq_source || 'direct', source_booking_id: rec.id }
+        ? { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: 'coach', coach_id: rec.coach_id, member_id: rec.student_id || null, gross_amount: Math.round((rec.amount || 0) * 100), currency: rec.currency || 'CZK', type: 'coach_1to1', payment_method: 'pis', acq_source: rec.acq_source || 'direct', credit: (rec.credit_used === 'student' ? 'student' : undefined), source_booking_id: rec.id }
         : _merch
         ? { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: (rec.coach_id ? 'coach' : 'gym'), gym_id: (rec.coach_id ? null : rec.gym_id), coach_id: rec.coach_id || null, member_id: rec.student_id || null, gross_amount: Math.round((rec.amount || 0) * 100), currency: rec.currency || 'CZK', type: 'merch', payment_method: 'pis', acq_source: 'direct', source_booking_id: rec.id }
         : _cohort
         ? { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: 'gym', gym_id: _cohGym, member_id: rec.student_id || null, gross_amount: Math.round(_cohDep * 100), currency: _cohCur, type: 'course', payment_method: 'pis', cash_payer_name: rec.name || null, acq_source: rec.attribution || 'direct', source_booking_id: rec.id }
-        : { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: 'gym', gym_id: rec.gym_id, coach_id: rec.coach_id || null, member_id: rec.student_id || null, gross_amount: Math.round((rec.amount || 0) * 100), type: (tbl === 'gym_memberships' ? 'membership' : 'drop_in'), payment_method: 'pis', acq_source: rec.acq_source || 'direct', source_booking_id: rec.id };
+        : { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: 'gym', gym_id: rec.gym_id, coach_id: rec.coach_id || null, member_id: rec.student_id || null, gross_amount: Math.round((rec.amount || 0) * 100), type: (tbl === 'gym_memberships' ? 'membership' : 'drop_in'), payment_method: 'pis', acq_source: rec.acq_source || 'direct', credit: ((tbl !== 'gym_memberships' && rec.credit_used === 'student') ? 'student' : undefined), source_booking_id: rec.id };
       await fetch(APP_URL + '/api/record-cash', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(_body) });
     }
   } catch (e) { /* non-fatal */ }
@@ -129,9 +129,9 @@ export default async function handler(req, res) {
 
     // reconcile against gym_bookings OR gym_memberships (PIS can pay either)
     let tbl = 'gym_bookings';
-    let rec = (await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name,amount,coach_id,acq_source,student_name').eq('pis_payment_id', paymentId).maybeSingle()).data;
+    let rec = (await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name,amount,coach_id,acq_source,student_name,credit_used').eq('pis_payment_id', paymentId).maybeSingle()).data;
     if (!rec) { const m = await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name,amount,coach_id,acq_source,student_name').eq('pis_payment_id', paymentId).maybeSingle(); if (m.data) { rec = m.data; tbl = 'gym_memberships'; } }
-    if (!rec) { const c = await sb.from('bookings').select('id,status,student_id,coach_id,amount,currency,coach_name,slot_id,acq_source').eq('pis_payment_id', paymentId).maybeSingle(); if (c.data) { rec = c.data; tbl = 'bookings'; } }
+    if (!rec) { const c = await sb.from('bookings').select('id,status,student_id,coach_id,amount,currency,coach_name,slot_id,acq_source,credit_used').eq('pis_payment_id', paymentId).maybeSingle(); if (c.data) { rec = c.data; tbl = 'bookings'; } }
     if (!rec) { const e = await sb.from('event_tickets').select('id,status,buyer_id,event_id,amount,currency,buyer_name').eq('pis_payment_id', paymentId).maybeSingle(); if (e.data) { rec = e.data; tbl = 'event_tickets'; } }
     if (!rec) { const co = await sb.from('cohort_members').select('id,status,student_id,cohort_id,name,attribution').eq('pis_payment_id', paymentId).maybeSingle(); if (co.data) { rec = co.data; tbl = 'cohort_members'; } }
     if (!rec) { const mo = await sb.from('merch_orders').select('id,status,student_id,gym_id,coach_id,merch_id,item_name,amount,currency,buyer_name').eq('pis_payment_id', paymentId).maybeSingle(); if (mo.data) { rec = mo.data; tbl = 'merch_orders'; } }

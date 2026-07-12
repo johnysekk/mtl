@@ -101,6 +101,15 @@ async function isWelcomeZeroProfile(prof, table) {   // scope is now payee_id = 
   }
   const created = prof.created_at ? new Date(prof.created_at).getTime() : 0;
   if (created && (now - created) < 45 * 86400000) {
+    // Welcome is a NEW-PROVIDER incentive: a gym owner gets it for their FIRST gym only. A 2nd+
+    // gym is an existing owner expanding, not a new acquisition. "First" = no earlier-created gym
+    // of this owner exists (deleted gyms count, so deleting gym #1 can't reset gym #2). Mirrors pay.js.
+    if (table === 'gyms' && prof.owner_id) {
+      try {
+        const earlier = await sb(`gyms?owner_id=eq.${encodeURIComponent(prof.owner_id)}&created_at=lt.${encodeURIComponent(new Date(created).toISOString())}&select=id&limit=1`);
+        if (earlier && earlier.length) return false;   // not the owner's first gym -> no welcome
+      } catch (e) { /* on error grant (never over-charge on our own bug) */ }
+    }
     try { await sb(`${table}?id=eq.${prof.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ welcome_free_until: new Date(now + 30 * 86400000).toISOString() }) }); } catch (e) {}
     return true;
   }
