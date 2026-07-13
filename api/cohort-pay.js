@@ -44,8 +44,7 @@ async function isWelcomeZero(acct) {
     let prov = (await sbGet(`profiles?stripe_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0]
             || (await sbGet(`profiles?gym_payout_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0];
     if (!prov) {
-      let g = (await sbGet(`gyms?stripe_account=eq.${a}&select=owner_id&limit=1`))[0]
-           || (await sbGet(`gyms?gym_payout_account=eq.${a}&select=owner_id&limit=1`))[0];
+      let g = (await sbGet(`gyms?stripe_account=eq.${a}&select=owner_id&limit=1`))[0];   // gyms has no gym_payout_account
       if (g && g.owner_id) prov = (await sbGet(`profiles?id=eq.${g.owner_id}&select=id,welcome_free_until,created_at`))[0];
     }
     if (!prov || !prov.id) return false;
@@ -76,6 +75,19 @@ async function providerCommission(ownerId) {
     if (sc >= 2) return 0.025;                               // Shikai
     return 0.03;                                             // Stripe base
   } catch (e) { return COMMISSION; }
+}
+
+// Resolve what a member actually owes. With named offers, cohort_members.tier holds the offer
+// NAME and the price comes from gym_cohorts.price_tiers. Cohorts created before price_tiers
+// existed still use the legacy price_regular / price_student pair. Server-side only: the client
+// never sends a price, just which offer was picked.
+function tierPriceOf(coh, tierName) {
+  const tiers = Array.isArray(coh.price_tiers) ? coh.price_tiers : null;
+  if (tiers && tiers.length) {
+    const hit = tiers.find(t => t && String(t.name) === String(tierName));
+    return Number(hit ? hit.price : tiers[0].price) || 0;
+  }
+  return Number((tierName === 'student') ? coh.price_student : coh.price_regular) || 0;
 }
 
 export default async function handler(req, res) {
@@ -110,7 +122,7 @@ export default async function handler(req, res) {
       const coh = crows && crows[0];
       if (!coh || !coh.stripe_account) return res.status(400).json({ ok: false, error: 'cohort/account missing' });
       try { const _a = await stripe.accounts.retrieve(String(coh.stripe_account)); if (!_a.charges_enabled) return res.status(400).json({ ok: false, error: 'Na strane kouce/gymu je chyba v konfiguraci plateb. Pokud jsi s nimi v kontaktu, dej jim o tom vedet.' }); } catch (e) { return res.status(400).json({ ok: false, error: 'Na strane kouce/gymu je chyba v konfiguraci plateb. Pokud jsi s nimi v kontaktu, dej jim o tom vedet.' }); }
-      const tierPrice = Number((mem.tier === 'student') ? coh.price_student : coh.price_regular) || 0;
+      const tierPrice = tierPriceOf(coh, mem.tier);
       const dep = Number(coh.deposit_amount || 0);
       const remainder = Math.max(0, tierPrice - dep);
       if (!(remainder > 0)) { await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'enrolled' }); return res.status(200).json({ ok: true, enrolled: true, url: null, remainder: 0 }); }
@@ -138,11 +150,26 @@ export default async function handler(req, res) {
     const email = (b.email || '').trim();
     const name = (b.name || '').trim();
     if (!name || !email) return res.status(400).json({ ok: false, error: 'name + email required' });
-    const tier = (b.tier === 'student') ? 'student' : 'regular';
-
+    // Keep the chosen OFFER NAME (validated against the cohort's price_tiers below); the old code
+    // collapsed everything to 'regular'/'student', which would have thrown named offers away.
     const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohortId)}&select=*`);
     const c = rows && rows[0];
     if (!c) return res.status(404).json({ ok: false, error: 'cohort not found' });
+
+    // The client picks an OFFER by name; normalise it against what the cohort actually offers so a
+    // tampered request can't invent a cheaper one. Unknown name -> the first (standard) offer.
+    // Legacy cohorts (no price_tiers) keep the old regular/student pair.
+    let tier;
+    {
+      const _raw = String(b.tier || '').slice(0, 80);
+      const _tiers = Array.isArray(c.price_tiers) ? c.price_tiers : null;
+      if (_tiers && _tiers.length) {
+        const _hit = _tiers.find(t => t && String(t.name) === _raw);
+        tier = _hit ? String(_hit.name) : String(_tiers[0].name);
+      } else {
+        tier = (_raw === 'student') ? 'student' : 'regular';
+      }
+    }
     // QR/bank deposit (qr_bank gyms): no Stripe; create a claimed member, gym confirms on arrival.
     if (b.method === 'qr') {
       if (c.status === 'draft' || c.status === 'archived') return res.status(403).json({ ok: false, error: 'cohort closed' });

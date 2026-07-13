@@ -19,19 +19,28 @@ export default async function handler(req, res) {
       const mr = await sbGet(`cohort_members?id=eq.${encodeURIComponent(cm)}&select=id,cohort_id,name,tier,status`);
       const mem = mr && mr[0];
       if (!mem) return res.status(404).json({ ok: false, error: 'member not found' });
-      const cr = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(mem.cohort_id)}&select=id,gym_id,name,currency,deposit_amount,price_student,price_regular`);
+      const cr = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(mem.cohort_id)}&select=id,gym_id,name,currency,deposit_amount,price_student,price_regular,price_tiers`);
       const co = cr && cr[0];
       if (!co) return res.status(404).json({ ok: false, error: 'cohort not found' });
       let gymName = '';
       try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(co.gym_id)}&select=name`); gymName = (g && g[0] && g[0].name) || ''; } catch (e) {}
-      const tierPrice = Number((mem.tier === 'student') ? co.price_student : co.price_regular) || 0;
+      // Named offers: mem.tier holds the offer name. Look it up in price_tiers; fall back to the
+      // legacy student/regular columns for cohorts created before price_tiers existed.
+      let tierPrice = 0;
+      const _tiers = Array.isArray(co.price_tiers) ? co.price_tiers : null;
+      if (_tiers && _tiers.length) {
+        const hit = _tiers.find(t => t && String(t.name) === String(mem.tier));
+        tierPrice = Number(hit ? hit.price : _tiers[0].price) || 0;
+      } else {
+        tierPrice = Number((mem.tier === 'student') ? co.price_student : co.price_regular) || 0;
+      }
       const remainder = Math.max(0, tierPrice - Number(co.deposit_amount || 0));
       return res.status(200).json({ ok: true, member: { id: mem.id, name: mem.name, tier: mem.tier, status: mem.status }, cohort: { id: co.id, name: co.name, gym_name: gymName, currency: co.currency || 'CZK', tier_price: tierPrice }, remainder });
     }
 
     const id = (req.query && req.query.cohort) || '';
     if (!id) return res.status(400).json({ ok: false, error: 'missing cohort' });
-    const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(id)}&select=id,gym_id,stripe_account,name,discipline,start_date,end_date,months,capacity,deposit_amount,price_student,price_regular,currency,description,gym_meta_pixel,marketing_note,status`);
+    const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(id)}&select=id,gym_id,stripe_account,name,discipline,start_date,end_date,months,capacity,deposit_amount,price_student,price_regular,price_tiers,currency,description,gym_meta_pixel,marketing_note,status`);
     const c = rows && rows[0];
     if (!c) return res.status(404).json({ ok: false, error: 'not found' });
     if (c.status === 'draft' || c.status === 'archived') return res.status(403).json({ ok: false, error: 'closed' });
@@ -59,7 +68,7 @@ export default async function handler(req, res) {
       cohort: {
         id: c.id, name: c.name, discipline: c.discipline, start_date: c.start_date, end_date: c.end_date, months: c.months,
         capacity: c.capacity, taken, deposit_amount: c.deposit_amount, price_student: c.price_student,
-        price_regular: c.price_regular, currency: c.currency, description: c.description,
+        price_regular: c.price_regular, price_tiers: (Array.isArray(c.price_tiers) ? c.price_tiers : null), currency: c.currency, description: c.description,
         gym_name: gymName, provider_name: providerName, meta_pixel: c.gym_meta_pixel || '', marketing_note: c.marketing_note || '',
         payment_mode: gymPay.payment_mode || null, receiver_id_type: gymPay.receiver_id_type || null, receiver_id_value: gymPay.receiver_id_value || null, receiver_name: gymPay.receiver_name || null
       }
