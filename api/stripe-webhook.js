@@ -271,7 +271,6 @@ async function recordTransaction(acct, pi, fields) {
           if (bt && typeof bt === 'object') {
             // Direct charges: bt.fee is COMBINED (Stripe + application fee); bt.net already nets both.
             // Split via fee_details; net = bt.net (no extra subtraction of the app fee).
-            gross = bt.amount; net = bt.net; currency = bt.currency || currency;
             let sFee = 0, aFee = 0;
             if (Array.isArray(bt.fee_details)) {
               for (const fd of bt.fee_details) {
@@ -280,6 +279,28 @@ async function recordTransaction(acct, pi, fields) {
               }
             }
             if (sFee === 0 && aFee === 0) { aFee = ch.application_fee_amount || 0; sFee = (bt.fee || 0) - aFee; }
+
+            // A balance transaction is in the account's SETTLEMENT currency, not the currency the
+            // student actually paid in. A EUR charge on a CZK-settled Stripe account comes back as
+            // bt.currency='czk' with bt.amount already converted — so blindly taking bt.currency
+            // recorded a EUR club's income as Kc, and the dashboards then showed "41 827 Kc" for
+            // money that was charged in EUR. Keep the PRESENTMENT figures (what the club priced and
+            // the student paid); convert the fees back with bt.exchange_rate when Stripe converted.
+            const _settled = String(bt.currency || '').toLowerCase();
+            const _charged = String(ch.currency || '').toLowerCase();
+            if (_settled && _charged && _settled !== _charged) {
+              const rate = Number(bt.exchange_rate) || 0;                 // presentment -> settlement
+              const back = (v) => (rate > 0 ? Math.round((Number(v) || 0) / rate) : 0);
+              currency = ch.currency;
+              gross = ch.amount;
+              aFee = ch.application_fee_amount != null ? ch.application_fee_amount : back(aFee);
+              sFee = back(sFee);
+              net = gross - aFee - sFee;
+            } else {
+              currency = bt.currency || currency;
+              gross = bt.amount;
+              net = bt.net;
+            }
             stripeFee = sFee; mtlFee = aFee;
           } else {
             gross = ch.amount; mtlFee = ch.application_fee_amount || 0; net = gross - mtlFee;

@@ -55,8 +55,7 @@ async function recordTransaction(acct, pi, fields) {
           if (bt && typeof bt === 'object') {
             // Direct charges: connected-account balance_transaction.fee is the COMBINED fee
             // (Stripe processing + our application fee); .net already nets BOTH out.
-            // Split them via fee_details so we can report each separately. net = bt.net (no extra subtraction).
-            gross = bt.amount; net = bt.net; currency = bt.currency || currency;
+            // Split them via fee_details so we can report each separately.
             let sFee = 0, aFee = 0;
             if (Array.isArray(bt.fee_details)) {
               for (const fd of bt.fee_details) {
@@ -65,6 +64,26 @@ async function recordTransaction(acct, pi, fields) {
               }
             }
             if (sFee === 0 && aFee === 0) { aFee = ch.application_fee_amount || 0; sFee = (bt.fee || 0) - aFee; }
+
+            // Same trap as stripe-webhook: the balance transaction is in the account's SETTLEMENT
+            // currency. A EUR charge on a CZK-settled account returns bt.currency='czk' with an
+            // already-converted amount, which would record a EUR club's income in Kc. Keep what the
+            // student was actually charged and convert the fees back with bt.exchange_rate.
+            const _settled = String(bt.currency || '').toLowerCase();
+            const _charged = String(ch.currency || '').toLowerCase();
+            if (_settled && _charged && _settled !== _charged) {
+              const rate = Number(bt.exchange_rate) || 0;
+              const back = (v) => (rate > 0 ? Math.round((Number(v) || 0) / rate) : 0);
+              currency = ch.currency;
+              gross = ch.amount;
+              aFee = ch.application_fee_amount != null ? ch.application_fee_amount : back(aFee);
+              sFee = back(sFee);
+              net = gross - aFee - sFee;
+            } else {
+              currency = bt.currency || currency;
+              gross = bt.amount;
+              net = bt.net;
+            }
             stripeFee = sFee; mtlFee = aFee;
           } else {
             gross = ch.amount; mtlFee = ch.application_fee_amount || 0; net = gross - mtlFee;
