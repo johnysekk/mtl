@@ -192,7 +192,7 @@ async function resolvePayee(acct) {
     const p = (await sbGet(`profiles?or=(stripe_account.eq.${a},gym_payout_account.eq.${a})&select=id&limit=1`))[0];
     if (p && p.id) out = { id: p.id, kind: 'profile' };
     else {
-      const g = (await sbGet(`gyms?or=(stripe_account.eq.${a},gym_payout_account.eq.${a})&select=id&limit=1`))[0];
+      const g = (await sbGet(`gyms?stripe_account=eq.${a}&select=id&limit=1`))[0];   // gyms has no gym_payout_account
       if (g && g.id) out = { id: g.id, kind: 'gym' };
     }
   } catch (e) { console.error('resolvePayee', e.message); }
@@ -449,6 +449,24 @@ export default async function handler(req, res) {
         // GYM skupinová lekce (direct charge na účtu gymu) → 0,5 % ambassadorovi disciplíny
         await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id, s.payment_intent);
         if (m.mtl_payment_type === 'drop_in') { const dpi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id); if (dpi) await recordTransaction(event.account, dpi, { type: 'drop_in', welcome_waived: _ww, member_id: m.student_id || m.member_id, gym_id: m.gym_id, coach_id: m.coach_profile_id || m.coach_id, plan: m.mtl_plan || 'Drop-in', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side' }); }
+        else if (m.mtl_membership_kind === 'one_time') {
+          // MULTI-MONTH MEMBERSHIP (3/6/12 months) — a ONE-TIME payment, no subscription. Activate
+          // the row and stamp period_end = now + N months; nothing renews, it simply expires then.
+          // (The monthly plan below is untouched and still a real Stripe subscription.)
+          const _mo = Math.max(1, parseInt(m.mtl_months || '1', 10) || 1);
+          const _end = new Date(); _end.setMonth(_end.getMonth() + _mo);
+          const _pi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id);
+          if (m.membership_id) {
+            try {
+              await sbPatch('gym_memberships', `id=eq.${encodeURIComponent(m.membership_id)}`, {
+                status: 'active', payment_status: 'paid', period_end: _end.toISOString(), cancelled_at: null
+              });
+            } catch (e) { console.error('one-time membership activate', e.message); }
+          }
+          try {
+            if (_pi) await recordTransaction(event.account, _pi, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id, plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side' });
+          } catch (e) { console.error('record one-time membership', e.message); }
+        }
         else {
           // MEMBERSHIP (subscription): link the subscription to the row + record the FIRST payment NOW,
           // independent of client timing / the gym_memberships lookup (which used to fail on the first invoice).

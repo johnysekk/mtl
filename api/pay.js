@@ -92,7 +92,7 @@ async function isWelcomeZero(acct){
     if(!prov){
       // gyms has ONLY stripe_account; gym_payout_account is a profiles column. The second
       // query here always 400'd and returned nothing - a fallback that never fell back.
-      let g = (await _wsbGet(`gyms?stripe_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0];
+      let g = (await _wsbGet(`gyms?stripe_account=eq.${a}&select=id,owner_id,welcome_free_until,created_at&limit=1`))[0];
       if(g && g.id){ prov = g; _wtbl = 'gyms'; }
     }
     if(!prov || !prov.id) return false;
@@ -114,6 +114,17 @@ async function isWelcomeZero(acct){
     // First sale on a genuinely new account (<45 days): open the 30-day window now and make THIS sale 0%.
     const created = prov.created_at ? new Date(prov.created_at).getTime() : 0;
     if(created && (now - created) < 45*86400000){
+      // Welcome is a NEW-PROVIDER incentive. A gym owner gets it for their FIRST gym only;
+      // any 2nd+ gym is an existing provider expanding, not a new acquisition, so no welcome.
+      // "First" = no other gym of this owner was created before this one (deleted gyms count,
+      // so deleting gym #1 can't reset gym #2 into a fresh welcome). Solo coaches (profiles)
+      // are unaffected - this gate only applies when the paying entity is a gym.
+      if(_wtbl === 'gyms' && prov.owner_id){
+        try{
+          const earlier = await _wsbGet(`gyms?owner_id=eq.${encodeURIComponent(prov.owner_id)}&created_at=lt.${encodeURIComponent(new Date(created).toISOString())}&select=id&limit=1`);
+          if(earlier && earlier.length) return false;   // not the owner's first gym -> no welcome
+        }catch(e){ /* on error, fall through and grant (never over-charge on our own bug) */ }
+      }
       await _wsbPatch(`${_wtbl}?id=eq.${prov.id}`, { welcome_free_until: new Date(now + 30*86400000).toISOString() });
       return true;
     }
@@ -397,7 +408,7 @@ async function eventCheckout(req, res) {
 
 async function membershipCheckout(req, res) {
   const {
-    gymAccount, gymName, planName, amount, currency = 'CZK', interval = 'month',
+    gymAccount, gymName, planName, amount, currency = 'CZK', interval = 'month', months,
     membershipId, income, memberName, payee, disc, access, partner, refPct, refUser, founding, acq, fee,
     gymId, studentId,
   } = req.query;
@@ -460,6 +471,59 @@ async function membershipCheckout(req, res) {
       );
       discounts = [{ coupon: coupon.id }];
     } catch (e) { console.error('referral coupon failed', e && e.message); }
+  }
+
+  // ── MULTI-MONTH MEMBERSHIP = ONE-TIME PAYMENT ────────────────────────────────────────────
+  // Monthly plans (months = 1, the default) stay exactly as they were: a Stripe subscription
+  // that renews. A 3/6/12-month plan is NOT a subscription — a club sells a term ("pololetni
+  // kurzovne"), the member pays once, and the membership simply expires at the end. Renewing a
+  // 6-month term automatically would be wrong (and a refund/dispute magnet).
+  // Commission: charged ONCE on the whole amount (Petr's call), via application_fee_amount.
+  const _months = Math.max(1, parseInt(months, 10) || 1);
+  if (_months > 1) {
+    const _amtMinor = Math.round(P * 100);
+    const _feePct = (await isWelcomeZero(gymAccount)) ? 0 : FEE_NOW;
+    const _feeMinor = Math.round(_amtMinor * (_feePct / 100));
+    const _meta = {
+      mtl_payment_type: 'membership',
+      mtl_membership_kind: 'one_time',
+      mtl_months: String(_months),
+      gym_id: gymId || '',
+      student_id: studentId || '',
+      membership_id: membershipId || '',
+      mtl_plan: planName || 'Membership',
+      mtl_access: access || '',
+      mtl_income: income || 'side',
+      gym_name: gymName || '',
+      mtl_payee: payee || gymName || '',
+      mtl_disc: disc || '',
+      mtl_base: String(P),
+      mtl_currency: cur,
+      member_name: memberName || '',
+      mtl_ref_user: _refUserOk,
+      mtl_ref_pct: String(refPctN || 0),
+    };
+    const _s1 = await stripe.checkout.sessions.create(
+      {
+        mode: 'payment',
+        payment_method_types: ['card'],
+        billing_address_collection: 'required',
+        tax_id_collection: { enabled: true },
+        metadata: _meta,
+        line_items: [
+          { price_data: { currency: cur, product_data: { name: `${planName || 'Membership'}${access ? ' [' + access + ']' : ''} — ${gymName || ''} (${_months} m)` }, unit_amount: _amtMinor }, quantity: 1 }
+        ],
+        payment_intent_data: {
+          ...(_feeMinor > 0 ? { application_fee_amount: _feeMinor } : {}),
+          metadata: _meta,
+        },
+        ...(discounts ? { discounts } : {}),
+        success_url: `${proto}://${host}/?gym_sub=ok&membership=${encodeURIComponent(membershipId || '')}&acct=${encodeURIComponent(gymAccount)}`,
+        cancel_url: `${proto}://${host}/`,
+      },
+      { stripeAccount: gymAccount }
+    );
+    return res.redirect(303, _s1.url);
   }
 
   const session = await stripe.checkout.sessions.create(
