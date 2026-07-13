@@ -130,7 +130,7 @@ export default async function handler(req, res) {
     // reconcile against gym_bookings OR gym_memberships (PIS can pay either)
     let tbl = 'gym_bookings';
     let rec = (await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name,amount,coach_id,acq_source,student_name,credit_used').eq('pis_payment_id', paymentId).maybeSingle()).data;
-    if (!rec) { const m = await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name,amount,coach_id,acq_source,student_name').eq('pis_payment_id', paymentId).maybeSingle(); if (m.data) { rec = m.data; tbl = 'gym_memberships'; } }
+    if (!rec) { const m = await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name,amount,coach_id,acq_source,student_name,months').eq('pis_payment_id', paymentId).maybeSingle(); if (m.data) { rec = m.data; tbl = 'gym_memberships'; } }
     if (!rec) { const c = await sb.from('bookings').select('id,status,student_id,coach_id,amount,currency,coach_name,slot_id,acq_source,credit_used').eq('pis_payment_id', paymentId).maybeSingle(); if (c.data) { rec = c.data; tbl = 'bookings'; } }
     if (!rec) { const e = await sb.from('event_tickets').select('id,status,buyer_id,event_id,amount,currency,buyer_name').eq('pis_payment_id', paymentId).maybeSingle(); if (e.data) { rec = e.data; tbl = 'event_tickets'; } }
     if (!rec) { const co = await sb.from('cohort_members').select('id,status,student_id,cohort_id,name,attribution').eq('pis_payment_id', paymentId).maybeSingle(); if (co.data) { rec = co.data; tbl = 'cohort_members'; } }
@@ -140,7 +140,28 @@ export default async function handler(req, res) {
     const _paidStatus = (tbl === 'event_tickets' || tbl === 'merch_orders') ? 'paid' : (tbl === 'cohort_members') ? 'deposit_paid' : 'active';
     if (PAID_STATUSES.has(String(status)) && rec.status !== _paidStatus) {
       // idempotent: mark paid + fire the SAME payment_confirmed notification QR_bank fires on owner confirm
-      await sb.from(tbl).update({ status: _paidStatus, pis_status: status }).eq('id', rec.id);
+      // A membership paid by bank transfer needs an expiry date, exactly like the QR/cash flow
+      // stamps one. PIS never set period_end, so these memberships never ran out — and with the
+      // 3/6/12-month terms the length has to come from the plan the member picked.
+      const _patch = { status: _paidStatus, pis_status: status };
+      if (tbl === 'gym_memberships') {
+        let _mo = Math.max(1, parseInt(rec.months, 10) || 0);
+        if (!(_mo > 1)) {
+          try {
+            const g = await sb.from('gyms').select('membership_plans').eq('id', rec.gym_id).maybeSingle();
+            let plans = g && g.data && g.data.membership_plans;
+            if (typeof plans === 'string') plans = JSON.parse(plans);
+            const hit = Array.isArray(plans) ? plans.find(p => p && String(p.name) === String(rec.plan_name)) : null;
+            if (hit) _mo = Math.max(1, parseInt(hit.months, 10) || 1);
+          } catch (e) { /* fall back to 1 month */ }
+        }
+        if (!(_mo >= 1)) _mo = 1;
+        const _end = new Date(); _end.setMonth(_end.getMonth() + _mo);
+        _patch.months = _mo;
+        _patch.period_end = _end.toISOString();
+        _patch.payment_status = 'paid';
+      }
+      await sb.from(tbl).update(_patch).eq('id', rec.id);
       if (tbl === 'bookings' && rec.slot_id) { try { await sb.from('slots').update({ booked: true }).eq('id', rec.slot_id); } catch (e) {} }
       try {
         const _buyerId = (tbl === 'event_tickets') ? rec.buyer_id : rec.student_id;
