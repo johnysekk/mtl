@@ -33,6 +33,18 @@ async function pisSideEffects(rec, tbl) {
       if (co.data) { _cohGym = co.data.gym_id; _cohDep = co.data.deposit_amount || 0; _cohCur = co.data.currency || 'CZK'; } } catch (e) {}
   }
   const _merch = (tbl === 'merch_orders');
+
+  // Cohort deposit paid by bank transfer: mark it paid and CREDIT IT. Without this the member
+  // looks unpaid and `tierPrice - paid_amount` would charge them the whole course a second time.
+  if (_cohort) {
+    try {
+      const _prev = Number(rec.paid_amount || 0);
+      await sb.from('cohort_members')
+        .update({ status: 'deposit_paid', paid_amount: Math.round((_prev + Number(_cohDep || 0)) * 100) / 100 })
+        .eq('id', rec.id);
+    } catch (e) { /* non-fatal */ }
+  }
+
   try {
     const ex = await sb.from('transactions').select('id').eq('source_booking_id', rec.id).limit(1);
     if (!(ex.data && ex.data.length)) {
