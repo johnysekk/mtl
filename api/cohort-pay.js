@@ -123,8 +123,8 @@ export default async function handler(req, res) {
       if (!coh || !coh.stripe_account) return res.status(400).json({ ok: false, error: 'cohort/account missing' });
       try { const _a = await stripe.accounts.retrieve(String(coh.stripe_account)); if (!_a.charges_enabled) return res.status(400).json({ ok: false, error: 'Na strane kouce/gymu je chyba v konfiguraci plateb. Pokud jsi s nimi v kontaktu, dej jim o tom vedet.' }); } catch (e) { return res.status(400).json({ ok: false, error: 'Na strane kouce/gymu je chyba v konfiguraci plateb. Pokud jsi s nimi v kontaktu, dej jim o tom vedet.' }); }
       const tierPrice = tierPriceOf(coh, mem.tier);
-      const dep = Number(coh.deposit_amount || 0);
-      const remainder = Math.max(0, tierPrice - dep);
+      const alreadyPaid = Number(mem.paid_amount || 0);
+      const remainder = Math.max(0, tierPrice - alreadyPaid);
       if (!(remainder > 0)) { await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'enrolled' }); return res.status(200).json({ ok: true, enrolled: true, url: null, remainder: 0 }); }
       const cur = String(coh.currency || 'CZK').toUpperCase();
       const isCZK = cur === 'CZK';
@@ -170,6 +170,20 @@ export default async function handler(req, res) {
         tier = (_raw === 'student') ? 'student' : 'regular';
       }
     }
+    // CAPACITY. cohort-public counts signups for DISPLAY only and nothing enforced it, so a course
+    // for 12 would happily sell a deposit to the 30th person — and the deposit is non-refundable,
+    // which turns an overbooked course into a refund argument. Count the people who actually hold a
+    // place (a bare 'lead' has not paid, so it does not occupy one) and refuse once it is full.
+    if (Number(c.capacity) > 0) {
+      const held = await sbGet(
+        `cohort_members?cohort_id=eq.${encodeURIComponent(cohortId)}` +
+        `&status=in.(deposit_claimed,deposit_paid,enrolled,completed,converted)&select=id`
+      );
+      if ((held || []).length >= Number(c.capacity)) {
+        return res.status(409).json({ ok: false, error: 'Kurz je plný.', full: true });
+      }
+    }
+
     // QR/bank deposit (qr_bank gyms): no Stripe; create a claimed member, gym confirms on arrival.
     if (b.method === 'qr') {
       if (c.status === 'draft' || c.status === 'archived') return res.status(403).json({ ok: false, error: 'cohort closed' });
@@ -177,7 +191,7 @@ export default async function handler(req, res) {
       if (!(depQ > 0)) return res.status(400).json({ ok: false, error: 'no deposit set' });
       const memberQ = await sbInsert('cohort_members', {
         cohort_id: cohortId, gym_id: c.gym_id, name, email, phone: (b.phone || '').trim() || null,
-        tier, status: 'deposit_claimed', attribution: (b.attribution || 'direct'),
+        tier, status: 'deposit_claimed', attribution: (b.attribution || 'direct'), source: 'online',
         consent_at: new Date().toISOString(), consent_version: (b.consent_version || null),
         fbp: (b.fbp || null), fbc: (b.fbc || null)
       });

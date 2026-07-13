@@ -511,7 +511,10 @@ export default async function handler(req, res) {
           const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
           const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : ((m.mtl_welcome === '1') ? 0 : Math.round(amount * 0.03 * 100) / 100)  /* Stripe base 3% (was 0.035 = old ladder) */;
           await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'deposit', amount, currency: cur, mtl_fee: fee, stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
-          await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'deposit_paid' });
+          {
+            const _prev = Number((((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=paid_amount`)) || [])[0] || {}).paid_amount || 0);
+            await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'deposit_paid', paid_amount: Math.round((_prev + amount) * 100) / 100 });
+          }
           try { const _cd = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=discipline`)) || [])[0]; if (_cd && _cd.discipline) await payGymAmbassador(_cd.discipline, amount, cur, s.id, pi); } catch (e) { console.error('cohort amb deposit', e.message); }
           // NOTE follow-up: ambassador 0.5% on cohort deposits not wired yet (needs mtl_disc/mtl_base in metadata).
           try {
@@ -543,7 +546,10 @@ export default async function handler(req, res) {
           const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
           const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : ((m.mtl_welcome === '1') ? 0 : Math.round(amount * 0.03 * 100) / 100)  /* Stripe base 3% (was 0.035 = old ladder) */;
           await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'first_month', amount, currency: cur, mtl_fee: fee, stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
-          await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'enrolled' });
+          {
+            const _prev2 = Number((((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=paid_amount`)) || [])[0] || {}).paid_amount || 0);
+            await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'enrolled', paid_amount: Math.round((_prev2 + amount) * 100) / 100 });
+          }
           try { const _cd2 = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=discipline`)) || [])[0]; if (_cd2 && _cd2.discipline) await payGymAmbassador(_cd2.discipline, amount, cur, s.id, pi); } catch (e) { console.error('cohort amb firstmonth', e.message); }
         }
       } else if (m.mtl_payment_type === 'partner_sub') {
