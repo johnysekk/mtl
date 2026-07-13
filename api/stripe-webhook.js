@@ -459,7 +459,7 @@ export default async function handler(req, res) {
           if (m.membership_id) {
             try {
               await sbPatch('gym_memberships', `id=eq.${encodeURIComponent(m.membership_id)}`, {
-                status: 'active', payment_status: 'paid', period_end: _end.toISOString(), cancelled_at: null
+                status: 'active', payment_status: 'paid', months: _mo, period_end: _end.toISOString(), cancelled_at: null
               });
             } catch (e) { console.error('one-time membership activate', e.message); }
           }
