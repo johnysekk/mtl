@@ -81,6 +81,21 @@ async function providerCommission(ownerId) {
 // NAME and the price comes from gym_cohorts.price_tiers. Cohorts created before price_tiers
 // existed still use the legacy price_regular / price_student pair. Server-side only: the client
 // never sends a price, just which offer was picked.
+// Is this cohort still taking signups?
+// WHITELIST, not blacklist: the old check rejected only draft/archived, which meant a cohort the
+// cron had already closed still sold deposits. Anything that isn't explicitly open is shut.
+// SIGNUPS_GRACE_DAYS: a course that has already started should not be selling deposits to
+// strangers. Two days of slack covers the genuine late joiner; after that the only way in is as a
+// walk-in the club adds by hand — a coach who has actually seen the person deciding to take them.
+const SIGNUPS_GRACE_DAYS = 2;
+function cohortSignupGate(c) {
+  if (!c || c.status !== 'open') return { ok: false, error: 'Zápis do kurzu je uzavřený.' };
+  if (c.start_date) {
+    const shut = new Date(c.start_date).getTime() + SIGNUPS_GRACE_DAYS * 86400000;
+    if (Date.now() > shut) return { ok: false, error: 'Kurz už začal, zápis je uzavřený.' };
+  }
+  return { ok: true };
+}
 function tierPriceOf(coh, tierName) {
   const tiers = Array.isArray(coh.price_tiers) ? coh.price_tiers : null;
   if (tiers && tiers.length) {
@@ -186,7 +201,7 @@ export default async function handler(req, res) {
 
     // QR/bank deposit (qr_bank gyms): no Stripe; create a claimed member, gym confirms on arrival.
     if (b.method === 'qr') {
-      if (c.status === 'draft' || c.status === 'archived') return res.status(403).json({ ok: false, error: 'cohort closed' });
+      { const _g = cohortSignupGate(c); if (!_g.ok) return res.status(403).json({ ok: false, error: _g.error, closed: true }); }
       const depQ = Number(c.deposit_amount || 0);
       if (!(depQ > 0)) return res.status(400).json({ ok: false, error: 'no deposit set' });
       const memberQ = await sbInsert('cohort_members', {
@@ -198,7 +213,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, qr: true, cohort_member_id: memberQ && memberQ.id });
     }
     if (!c.stripe_account) return res.status(400).json({ ok: false, error: 'cohort has no payout account' });
-    if (c.status === 'draft' || c.status === 'archived') return res.status(403).json({ ok: false, error: 'cohort closed' });
+    { const _g = cohortSignupGate(c); if (!_g.ok) return res.status(403).json({ ok: false, error: _g.error, closed: true }); }
     const deposit = Number(c.deposit_amount || 0);
     if (!(deposit > 0)) return res.status(400).json({ ok: false, error: 'no deposit set' });
 

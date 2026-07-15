@@ -43,7 +43,13 @@ export default async function handler(req, res) {
     const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(id)}&select=id,gym_id,stripe_account,name,discipline,start_date,end_date,months,capacity,deposit_amount,price_student,price_regular,price_tiers,currency,description,gym_meta_pixel,marketing_note,status`);
     const c = rows && rows[0];
     if (!c) return res.status(404).json({ ok: false, error: 'not found' });
-    if (c.status === 'draft' || c.status === 'archived') return res.status(403).json({ ok: false, error: 'closed' });
+    // Same gate as cohort-pay: whitelist on `open`, and signups shut SIGNUPS_GRACE_DAYS after the
+    // course has started. Better to say so on arrival than after they have filled in the form.
+    const SIGNUPS_GRACE_DAYS = 2;
+    const _started = c.start_date && (Date.now() > new Date(c.start_date).getTime() + SIGNUPS_GRACE_DAYS * 86400000);
+    if (c.status !== 'open' || _started) {
+      return res.status(403).json({ ok: false, error: 'closed', closed: true, reason: _started ? 'started' : 'closed' });
+    }
 
     let gymName = '', gymPay = {};
     try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(c.gym_id)}&select=name,payment_mode,receiver_id_type,receiver_id_value,receiver_name`); const gg = g && g[0]; if (gg) { gymName = gg.name || ''; gymPay = { payment_mode: gg.payment_mode || null, receiver_id_type: gg.receiver_id_type || null, receiver_id_value: gg.receiver_id_value || null, receiver_name: gg.receiver_name || null }; } } catch (e) {}

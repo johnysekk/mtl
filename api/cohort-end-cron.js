@@ -72,7 +72,7 @@ export default async function handler(req, res) {
     try {
       const due = await sb(
         `gym_cohorts?select=id,gym_id,owner_id,name,end_date,end_warned` +
-          `&status=eq.open&end_date=eq.${day(days)}&limit=200`
+          `&status=in.(open,running)&end_date=eq.${day(days)}&limit=200`
       );
       for (const c of due || []) {
         if (Number(c.end_warned || 0) > 0 && Number(c.end_warned) <= days) continue;
@@ -102,11 +102,37 @@ export default async function handler(req, res) {
     } catch (e) { console.error('pre-end', days, e.message); }
   }
 
-  // ---- 2. CLOSE FINISHED COHORTS --------------------------------------------------------------
+  // ---- 2. SIGNUPS CLOSE ~2 DAYS AFTER THE COURSE STARTS -----------------------------------
+  // Nobody should be paying a deposit into a course that is already running. Two days of slack
+  // covers the genuine late joiner; after that the only way in is as a WALK-IN the club adds by
+  // hand. `running` and `done` already existed in the UI's status map (Běží / Dokončený) — nothing
+  // ever set them. cohort-pay and cohort-public whitelist `open`, so the gate holds even before
+  // this cron runs; flipping the status just makes it visible to the owner and stops the public
+  // page pretending the course is still taking signups.
+  const SIGNUPS_GRACE_DAYS = 2;
+  let running = 0;
+  try {
+    const started = await sb(
+      `gym_cohorts?select=id,name,start_date` +
+        `&status=eq.open&start_date=not.is.null&start_date=lt.${day(-SIGNUPS_GRACE_DAYS)}&limit=200`
+    );
+    for (const c of started || []) {
+      try {
+        await sb(`gym_cohorts?id=eq.${encodeURIComponent(c.id)}`, {
+          method: 'PATCH', body: JSON.stringify({ status: 'running' }),
+        });
+        running++;
+      } catch (e) { console.error('running', c.id, e.message); }
+    }
+  } catch (e) { console.error('start cutoff', e.message); }
+
+  // ---- 3. FINISH COHORTS PAST THEIR END DATE ------------------------------------------------
+  // Must accept BOTH open and running: a cohort whose signups already closed is `running`, and
+  // filtering on `open` alone would leave it hanging forever with nobody ever marked completed.
   try {
     const done = await sb(
       `gym_cohorts?select=id,gym_id,owner_id,name,end_date` +
-        `&status=eq.open&end_date=not.is.null&end_date=lt.${todayStr}&limit=200`
+        `&status=in.(open,running)&end_date=not.is.null&end_date=lt.${todayStr}&limit=200`
     );
     for (const c of done || []) {
       try {
@@ -118,12 +144,12 @@ export default async function handler(req, res) {
           completed += fin.length;
         }
         await sb(`gym_cohorts?id=eq.${encodeURIComponent(c.id)}`, {
-          method: 'PATCH', body: JSON.stringify({ status: 'closed' }),
+          method: 'PATCH', body: JSON.stringify({ status: 'done' }),
         });
         closed++;
-      } catch (e) { console.error('close', c.id, e.message); }
+      } catch (e) { console.error('finish', c.id, e.message); }
     }
-  } catch (e) { console.error('closing', e.message); }
+  } catch (e) { console.error('finishing', e.message); }
 
-  return res.status(200).json({ ok: true, warned, closed, completed });
+  return res.status(200).json({ ok: true, warned, running, finished: closed, completed });
 }
