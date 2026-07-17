@@ -112,8 +112,9 @@ export default async function handler(req, res) {
     // so the flow completes end-to-end (Neonomics is a fallback provider — this path is purely mechanical).
     // PRODUCTION Model A: the debtor is the student's own account, selected at their bank during SCA.
     if (ENVN === 'sandbox') {
-      payBody.creditorAccount = { bban: '12073650567' };            // DNB sandbox account acting as the gym
-      payBody.debtorAccount   = { bban: '12032202452' };            // DNB sandbox account acting as the payer
+      payBody.creditorAccount = { bban: '12073650567' };            // DNB sandbox account acting as the gym (creditor = payee)
+      payBody.debtorAccount   = { bban: '12032202452' };            // DNB sandbox account acting as the payer (debtor = payer)
+      payBody.debtorName      = 'MTL Test Payer';                   // debtor name (account holder) is required
       commonHeaders['x-psu-id'] = Buffer.from('31125453913').toString('base64');  // DNB sandbox SSN (personalIdentificationRequired)
     }
 
