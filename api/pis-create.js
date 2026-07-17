@@ -115,7 +115,7 @@ export default async function handler(req, res) {
       payBody.creditorAccount = { bban: '12073650567' };            // DNB sandbox account acting as the gym (creditor = payee)
       payBody.debtorAccount   = { bban: '12032202452' };            // DNB sandbox account acting as the payer (debtor = payer)
       payBody.debtorName      = 'MTL Test Payer';                   // debtor name (account holder) is required
-      commonHeaders['x-psu-id'] = Buffer.from('31125453913').toString('base64');  // DNB sandbox SSN (personalIdentificationRequired)
+      commonHeaders['x-psu-id'] = '31125453913';  // DNB sandbox SSN, raw (base64 gave "Invalid PSU Id")
     }
 
     const initR = await fetch(ICS_BASE + '/payments/domestic-transfer', {
