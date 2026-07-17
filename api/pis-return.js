@@ -94,7 +94,16 @@ export default async function handler(req, res){
         if(rec && rec.status!==_paidStatus){
           await sb.from(tbl).update({ status:_paidStatus, pis_status:status }).eq('id',rec.id);
           if(tbl==='bookings' && rec.slot_id){ try{ await sb.from('slots').update({ booked:true }).eq('id',rec.slot_id); }catch(e){} }
-          try{ const _buyerId=(tbl==='event_tickets')?rec.buyer_id:rec.student_id; const nd=(tbl==='gym_memberships')?{ kind:'payment_confirmed', auto:true, gym_id:rec.gym_id }:(tbl==='bookings')?{ kind:'payment_confirmed', auto:true, goto:'bookings' }:(tbl==='event_tickets')?{ kind:'payment_confirmed', auto:true, goto:'tickets', event_id:rec.event_id }:(tbl==='merch_orders')?{ kind:'payment_confirmed', auto:true, goto:'merch', merch_id:rec.merch_id }:(tbl==='cohort_members')?{ kind:'payment_confirmed', auto:true, goto:'courses', cohort_id:rec.cohort_id }:{ kind:'payment_confirmed', auto:true, goto:'dropin', gym_id:rec.gym_id, class_name:rec.class_name }; await sb.from('notifications').insert({ user_id:_buyerId, type:'booking', read:false, data:JSON.stringify(nd) }); }catch(e){}
+          try{ const _buyerId=(tbl==='event_tickets')?rec.buyer_id:rec.student_id;
+            const _amt = (rec.amount!=null) ? (rec.amount+' '+(rec.currency||'CZK')) : '';
+            let nd, _msg;
+            if(tbl==='gym_memberships'){ nd={ kind:'payment_confirmed', auto:true, goto:'memberships', gym_id:rec.gym_id, amount:_amt, item:(rec.plan_name||'') }; _msg='✅ Členství aktivní (převodem)! '+(rec.plan_name||'permanentka')+'. 🥊'; }
+            else if(tbl==='bookings'){ nd={ kind:'payment_confirmed', auto:true, goto:'bookings', amount:_amt }; _msg='✅ Rezervace potvrzena (převodem)! Soukromka s '+(rec.coach_name||'koučem')+'. Platba proběhla. 🥊'; }
+            else if(tbl==='event_tickets'){ nd={ kind:'payment_confirmed', auto:true, goto:'tickets', event_id:rec.event_id, amount:_amt }; _msg='✅ Vstupenka zaplacena (převodem)! Platba proběhla. 🥊'; }
+            else if(tbl==='merch_orders'){ nd={ kind:'payment_confirmed', auto:true, goto:'merch', merch_id:rec.merch_id, amount:_amt, item:(rec.item_name||'') }; _msg='✅ Objednávka zaplacena (převodem)! '+(rec.item_name||'')+' 🥊'; }
+            else if(tbl==='cohort_members'){ nd={ kind:'payment_confirmed', auto:true, goto:'courses', cohort_id:rec.cohort_id, amount:_amt }; _msg='✅ Záloha kurzu zaplacena (převodem)! Platba proběhla. 🥊'; }
+            else { nd={ kind:'payment_confirmed', auto:true, goto:'dropin', gym_id:rec.gym_id, class_name:rec.class_name, amount:_amt, item:(rec.class_name||'') }; _msg='✅ Zaplaceno převodem! '+(rec.class_name||'Drop-in')+((rec.class_date)?(' '+rec.class_date+(rec.class_time?(' '+rec.class_time):'')):'')+' · rezervace aktivní. 🥊'; }
+            await sb.from('notifications').insert({ user_id:_buyerId, type:'booking', read:false, message:_msg, data:JSON.stringify(nd) }); }catch(e){}
           await pisSideEffects(rec, tbl);
         }
         return res.redirect(302, APP_URL+'/?pis=ok');
