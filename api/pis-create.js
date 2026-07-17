@@ -108,6 +108,15 @@ export default async function handler(req, res) {
     };
     if (xff) commonHeaders['x-psu-ip-address'] = xff;
 
+    // SANDBOX ONLY: Neonomics test banks require a debtor account; DNB also needs x-psu-id. Force DNB test data
+    // so the flow completes end-to-end (Neonomics is a fallback provider — this path is purely mechanical).
+    // PRODUCTION Model A: the debtor is the student's own account, selected at their bank during SCA.
+    if (ENVN === 'sandbox') {
+      payBody.creditorAccount = { bban: '12073650567' };            // DNB sandbox account acting as the gym
+      payBody.debtorAccount   = { bban: '12032202452' };            // DNB sandbox account acting as the payer
+      commonHeaders['x-psu-id'] = Buffer.from('31125453913').toString('base64');  // DNB sandbox SSN (personalIdentificationRequired)
+    }
+
     const initR = await fetch(ICS_BASE + '/payments/domestic-transfer', {
       method: 'POST', headers: commonHeaders, body: JSON.stringify(payBody)
     });
