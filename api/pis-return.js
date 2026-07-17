@@ -1,15 +1,33 @@
-// /api/pis-return.js — redirect_url the student lands on AFTER approving in their bank.
-// Synchronous confirmation (webhook is the reliable async one). GET payment status; if final-success,
-// mark the booking paid (idempotent with the webhook), then bounce the student back into the app.
-import crypto from 'crypto';
+// /api/pis-return.js — NEONOMICS. redirect the student lands on AFTER approving in their bank.
+// Synchronous confirmation (webhook is the reliable async backstop). GET payment status; if final-success,
+// mark the booking paid (idempotent), then bounce the student back into the app.
+//
+// ENV: NEONOMICS_CLIENT_ID, NEONOMICS_SECRET_ID, NEONOMICS_ENV, APP_URL,
+//      SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, PIS_INTERNAL_SECRET
+//
+// pisSideEffects + the whole reconcile (table lookup by pis_payment_id, status update, buyer notif, record-cash,
+// ticket-email, owner notif) are recycled VERBATIM from the Enable version — provider-agnostic. Only the auth,
+// the status fetch (Neonomics GET Payment by ID, which needs the stored session_id+device_id) and the paid-status
+// set are Neonomics-specific.
 import { createClient } from '@supabase/supabase-js';
 
-const APP_ID   = process.env.ENABLE_APP_ID;
-const PRIV_KEY = (process.env.ENABLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
-const EB_BASE  = 'https://api.enablebanking.com';
+const ENVN = (process.env.NEONOMICS_ENV || 'sandbox').toLowerCase();
+const AUTH_BASE = 'https://' + ENVN + '.neonomics.io/auth/realms/' + ENVN + '/protocol/openid-connect/token';
+const ICS_BASE  = 'https://' + ENVN + '.neonomics.io/ics/v3';
 const APP_URL  = process.env.APP_URL || 'https://app.martialtraininglab.com';
 const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-const PAID_STATUSES = new Set(['ACCP','ACTC','ACSP','ACSC','ACCC','ACWC','ACFC','SETLD','SETTLED']);
+// ISO 20022: ACSC = settled (final success). Accepted-and-beyond are treated as paid (bank transfer rarely
+// reverses post-acceptance); webhook/reconcile is the backstop. Production may tighten to ACSC-only.
+const PAID_STATUSES = new Set(['ACSC','ACCC','ACWC','ACSP','ACTC','ACCP','ACPT','SETLD','SETTLED']);
+
+async function neoToken() {
+  const body = new URLSearchParams({ grant_type: 'client_credentials', client_id: process.env.NEONOMICS_CLIENT_ID || '', client_secret: process.env.NEONOMICS_SECRET_ID || '' });
+  const r = await fetch(AUTH_BASE, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() });
+  const d = await r.json();
+  if (!r.ok || !d.access_token) throw new Error('neo_token_failed');
+  return d.access_token;
+}
+
 async function pisSideEffects(rec, tbl){
   const _coach1=(tbl==='bookings'); const _event=(tbl==='event_tickets');
   let _evP='gym', _evG=null, _evC=null;
@@ -36,18 +54,14 @@ async function pisSideEffects(rec, tbl){
     else { const g=await sb.from('gyms').select('owner_id').eq('id',rec.gym_id).maybeSingle(); const ownerId=g.data&&g.data.owner_id;
       if(ownerId){ const what=(tbl==='gym_memberships')?(rec.plan_name||'permanentka'):(rec.class_name||'drop-in'); const who=rec.student_name||'Student'; const msg=(tbl==='gym_memberships')?('\ud83c\udf9f\ufe0f Nov\u00fd \u010dlen (p\u0159evodem): '+who+' \u00b7 '+what):('\ud83d\udcc5 Nov\u00e1 rezervace (p\u0159evodem): '+who+' \u00b7 '+what); await sb.from('notifications').insert({ user_id:ownerId, type:'booking', read:false, message:msg, data:JSON.stringify({ kind:'pis_payment_in', gym_id:rec.gym_id, what, student:who }) }); } } }catch(e){}
 }
-const b64url = (o) => Buffer.from(typeof o==='string'?o:JSON.stringify(o)).toString('base64url');
-function ebJwt(){ const now=Math.floor(Date.now()/1000);
-  const si=b64url({typ:'JWT',alg:'RS256',kid:APP_ID})+'.'+b64url({iss:'enablebanking.com',aud:'api.enablebanking.com',iat:now,exp:now+3600});
-  return si+'.'+crypto.sign('RSA-SHA256',Buffer.from(si),PRIV_KEY).toString('base64url'); }
 
 export default async function handler(req, res){
   let _dbg='st=NO_PAYMENT_ID';
   try{
     const bookingId = req.query.state;
-    // Enable redirects back with `state` (= our bookingId), NOT payment_id.
-    // Derive the payment id from the stored booking/membership.
-    let paymentId = req.query.payment_id || req.query.paymentId || req.query.id;
+    // Neonomics redirects back to our x-redirect-url (which carries ?state=<bookingId>). Derive the paymentId
+    // from the stored booking/membership, then look up the stored session_id+device_id to query the status.
+    let paymentId = req.query.paymentId || req.query.payment_id || req.query.id;
     if(!paymentId && bookingId){
       let r0=(await sb.from('gym_bookings').select('pis_payment_id').eq('id',bookingId).maybeSingle()).data;
       if(!r0){ const m0=await sb.from('gym_memberships').select('pis_payment_id').eq('id',bookingId).maybeSingle(); if(m0.data) r0=m0.data; }
@@ -58,10 +72,15 @@ export default async function handler(req, res){
       if(r0 && r0.pis_payment_id) paymentId=r0.pis_payment_id; else _dbg='st=NO_STORED_PID';
     }
     if(paymentId){
-      const jwt=ebJwt();
-      const r=await fetch(EB_BASE+'/payments/'+encodeURIComponent(paymentId),{ headers:{ Authorization:'Bearer '+jwt } });
-      const p=await r.json();
-      const status=p.status||(p.payment_details&&p.payment_details.status);
+      // recover the session context stored by pis-create
+      let sessionId=null, deviceId=null;
+      try{ const ps=await sb.from('pis_session').select('session_id,device_id').eq('payment_id',paymentId).maybeSingle(); if(ps.data){ sessionId=ps.data.session_id; deviceId=ps.data.device_id; } }catch(e){}
+      const token=await neoToken();
+      const r=await fetch(ICS_BASE+'/payments/domestic-transfer/'+encodeURIComponent(paymentId),{
+        headers:{ Authorization:'Bearer '+token, Accept:'application/json', ...(deviceId?{'x-device-id':deviceId}:{}), ...(sessionId?{'x-session-id':sessionId}:{}) }
+      });
+      const p=await r.json().catch(()=>({}));
+      const status=p.status||(p.payment&&p.payment.status);
       _dbg = 'st='+encodeURIComponent(String(status||'?'))+'&http='+r.status;
       if(r.ok && PAID_STATUSES.has(String(status))){
         let tbl='gym_bookings';
