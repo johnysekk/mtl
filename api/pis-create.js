@@ -97,6 +97,7 @@ export default async function handler(req, res) {
       paymentMetadata: {}
     };
 
+    const xff = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
     const commonHeaders = {
       Authorization: 'Bearer ' + token,
       'x-device-id': deviceId,
@@ -105,42 +106,44 @@ export default async function handler(req, res) {
       'Content-Type': 'application/json',
       Accept: 'application/json'
     };
+    if (xff) commonHeaders['x-psu-ip-address'] = xff;
 
     const initR = await fetch(ICS_BASE + '/payments/domestic-transfer', {
       method: 'POST', headers: commonHeaders, body: JSON.stringify(payBody)
     });
     const init = await initR.json().catch(() => ({}));
 
-    let paymentId = init.paymentId || (init.meta && init.meta.id) || null;
+    // link/id extractors that work regardless of the exact status/errorCode Neonomics returns
+    const idFrom = (o) => (o && (o.paymentId || (o.meta && o.meta.id) || (Array.isArray(o.links) && o.links[0] && o.links[0].meta && o.links[0].meta.id))) || null;
+    const firstHref = (o) => (o && Array.isArray(o.links) && o.links.length) ? (o.links[0].href || null) : null;
+
+    let paymentId = idFrom(init);
     let bankUrl = null;
     let status = init.status || 'RCVD';
 
-    if (initR.status === 201) {
-      // SCA-exempt: payment already created. Send the student back into the app; pis-return polls the final status.
-      bankUrl = redirect;
-    } else if (initR.status === 510 && String(init.errorCode) === '1428') {
-      // authorization required: the error links[] carry the authorize endpoint; GET it to obtain the bank URL.
-      paymentId = paymentId || (init.links && init.links[0] && init.links[0].meta && init.links[0].meta.id) || null;
-      const authHref = (init.links && init.links[0] && init.links[0].href) || null;
-      if (!authHref) return res.status(502).json({ error: 'no_authorize_href', detail: init });
-      const authR = await fetch(authHref, {
-        headers: { Authorization: 'Bearer ' + token, Accept: 'application/json', 'x-device-id': deviceId, 'x-session-id': sessionId, 'x-redirect-url': redirect }
-      });
-      const auth = await authR.json().catch(() => ({}));
-      paymentId = paymentId || auth.paymentId || null;
-      bankUrl = pickBankUrl(auth.links);
-      if (!bankUrl) return res.status(502).json({ error: 'no_bank_url', detail: auth });
-    } else if (initR.status === 510 && String(init.errorCode) === '1426') {
-      // consent required: follow the consent href to the bank auth page (post-consent re-initiation may need iteration).
-      const consentHref = (init.links && init.links[0] && init.links[0].href) || null;
-      if (consentHref) {
-        const cR = await fetch(consentHref, { headers: { Authorization: 'Bearer ' + token, Accept: 'application/json', 'x-device-id': deviceId, 'x-session-id': sessionId, 'x-redirect-url': redirect } });
-        const c = await cR.json().catch(() => ({}));
-        bankUrl = pickBankUrl(c.links);
+    if (initR.status === 200 || initR.status === 201) {
+      // created (SCA-exempt) OR an authorization link is already present -> prefer the bank URL, else bounce home
+      bankUrl = pickBankUrl(init.links) || redirect;
+    } else if (firstHref(init)) {
+      // auth/consent required (1428/1426/any variant): follow the link the response carries
+      const href = firstHref(init);
+      if (/^https?:\/\//i.test(href) && !/neonomics\.io\/ics\//i.test(href)) {
+        bankUrl = href;                         // already an external bank/consent URL
+      } else {
+        const authR = await fetch(href, {
+          headers: { Authorization: 'Bearer ' + token, Accept: 'application/json', 'x-device-id': deviceId, 'x-session-id': sessionId, 'x-redirect-url': redirect }
+        });
+        const auth = await authR.json().catch(() => ({}));
+        paymentId = paymentId || idFrom(auth);
+        bankUrl = pickBankUrl(auth.links) || firstHref(auth);
+        if (!bankUrl) return res.status(200).json({ error: 'neo_authorize_no_url http=' + authR.status + ' ' + JSON.stringify(auth).slice(0, 240), detail: auth });
       }
-      if (!bankUrl) return res.status(502).json({ error: 'consent_required', detail: init });
     } else {
-      return res.status(initR.status || 502).json({ error: 'neo_init_error', detail: init });
+      // genuine failure -> surface the REAL Neonomics status + code + message in the toast
+      const msg = 'neo_init http=' + initR.status
+        + (init.errorCode ? (' code=' + init.errorCode) : '')
+        + ' ' + (init.message ? String(init.message).slice(0, 150) : JSON.stringify(init).slice(0, 200));
+      return res.status(200).json({ error: msg, detail: init });
     }
 
     // stash the payment id on the target row (reconcile lookup, same as before)
