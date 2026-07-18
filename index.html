@@ -5067,6 +5067,7 @@ function _mapCoachRow(c){
       country: c.country || null,
       countryCode: c.country_code || null,
       avail: c.avail_status || 'available',
+      privOffers: (function(){ try{ return (typeof c.private_offers==='string')?JSON.parse(c.private_offers):(c.private_offers||null); }catch(e){ return null; } })(),
       gym: c.gym || '',
       gymOfficial: c.gym_official || '',
       langs: parseLangs(c.languages),
@@ -6235,6 +6236,7 @@ async function notifySlotWatchers(){
   }catch(e){ console.warn('notifySlotWatchers', e); }
 }
 async function openSlots(c){
+  try{ if(_privOffersOf(c).length) await _privIsMember(c.profileId||c.id); }catch(e){}
   closeAllSheets(); // ať za oknem výběru neprosvítá chat ani jiný sheet
   window._bookingCoach = c;
   $('slotsTitle').textContent = `${L('Vyber čas')} — ${c.name}`;
@@ -6281,9 +6283,12 @@ const { data, error } = await supaClient
     const _scap=Number(slot.capacity)||1;
     const _sCur=c.currencyInperson||'CZK'; const _sSym=_curSym(_sCur);
     const _sBd=(_bookDisc && (c.disciplines||[]).includes(_bookDisc)) ? _bookDisc : ((c.disciplines&&c.disciplines[0])||null);
-    const _sAmt=(_scap>1 && slot.price) ? Number(slot.price) : (discRate(c,_sBd)||c.rateInperson||c.rateNum||0);
+    const _sBase=(_scap>1 && slot.price) ? Number(slot.price) : (discRate(c,_sBd)||c.rateInperson||c.rateNum||0);
+    const _sHit=(_scap>1)?null:_privPick(c, slot, !!(window._privMemb&&window._privMemb[c.profileId||c.id]), _sBase);
+    const _sAmt=_sHit?_sHit.price:_sBase;
     const _sPx=_sAmt>0?(fmtPrice(_sAmt,_sCur)+' '+_sSym):'';
-    const _sk=_scap>1?`<div style="font-size:11px;font-weight:700;color:var(--red);margin-top:3px;">👥 ${LANG==='en'?'Private':'Soukromka'} 1:${_scap}${_sPx?(' · '+_sPx):''}</div>`:(_sPx?`<div style="font-size:11px;font-weight:600;color:var(--mid);margin-top:3px;">${_sPx}</div>`:'');
+    const _sWhy=_sHit?`<div style="font-size:10.5px;font-weight:700;color:#0A7A4F;margin-top:2px;line-height:1.35;">${escapeHtml(_privWhy(_sHit,_sBase,_sCur))}</div>`:'';
+    const _sk=(_scap>1?`<div style="font-size:11px;font-weight:700;color:var(--red);margin-top:3px;">👥 ${LANG==='en'?'Private':'Soukromka'} 1:${_scap}${_sPx?(' · '+_sPx):''}</div>`:(_sPx?`<div style="font-size:11px;font-weight:600;color:var(--mid);margin-top:3px;">${_sPx}</div>`:''))+_sWhy;
     el.innerHTML = `<div><div class="slot-date">${dateStr}</div><div class="slot-time">${slot.time}</div>${_sk}</div><div class="slot-arrow">→</div>`;
     el.onclick = ()=>selectSlot(slot, c);
     list.appendChild(el);
@@ -6348,7 +6353,10 @@ async function selectSlot(slot, c, _party){
   window._bookingSlot = slot;
   toast(L('💳 Přesměrovávám na platbu...'));
   const bookDisc = (_bookDisc && (c.disciplines||[]).includes(_bookDisc)) ? _bookDisc : ((c.disciplines&&c.disciplines[0])||null);
-  const _scap=Number(slot.capacity)||1; const amount = (_scap>1 && slot.price) ? Number(slot.price) : (discRate(c, bookDisc) || c.rateInperson || c.rateNum || 1200);
+  const _scap=Number(slot.capacity)||1; const _amtBase = (_scap>1 && slot.price) ? Number(slot.price) : (discRate(c, bookDisc) || c.rateInperson || c.rateNum || 1200);
+  let _amtHit=null; try{ if(_scap<=1 && _privOffersOf(c).length){ const _im=await _privIsMember(c.profileId||c.id); _amtHit=_privPick(c, slot, _im, _amtBase); } }catch(e){}
+  const amount = _amtHit ? _amtHit.price : _amtBase;
+  try{ if(_amtHit) toast(_privWhy(_amtHit,_amtBase,(c.currencyInperson||'CZK'))); }catch(e){}
   const curr = c.currencyInperson || 'CZK';
   let comm = _ladderRate(_cIsQr ? 'qr_bank' : 'stripe', {partner:c.partner, score:c.coachRefScore||0, bankai:c.coachBankai}), nomarkup=1, creditUsed='';
   if(currentUser && (currentUser.student_credits||0)>0 && (c.referral_optin!==false)){ creditUsed='student'; /* referral redemption: MTL waives its WHOLE fee (3.5%/2%/1%); provider funds the rest (20% new / 10% existing). Applies to founding/partner too (their acquisition cost). */ }
@@ -13232,6 +13240,117 @@ const DISCIPLINES = [
 function activeDisciplines(){ const base=(ACTIVE_DISC&&ACTIVE_DISC.length)?ACTIVE_DISC:DISCIPLINES.filter(d=>d.active).map(d=>d.v); return DISCIPLINES.filter(d=>base.includes(d.v)); }
 function isMultiDiscipline(){ return activeDisciplines().length>1; }
 let _bookDisc = null;
+// --- coach-side editor for conditional 1:1 prices ---
+window._poList = window._poList || null;
+function _poHost(){
+  var rd=$('rateDisplay'); if(!rd) return null;
+  var h=$('poHost'); if(h) return h;
+  h=document.createElement('div'); h.id='poHost'; h.style.cssText='margin-top:14px;padding-top:14px;border-top:1px solid var(--border);';
+  rd.parentNode.insertBefore(h, rd.nextSibling); return h;
+}
+function _poRender(){
+  var h=_poHost(); if(!h) return; var EN=LANG==='en';
+  if(_poList===null){ try{ var o=currentUser&&currentUser.private_offers; if(typeof o==='string') o=JSON.parse(o); _poList=Array.isArray(o)?o:[]; }catch(e){ _poList=[]; } }
+  var cur=(currentUser&&currentUser.currency_inperson)||'CZK', sym=_curSym(cur);
+  var rows=_poList.map(function(o,i){
+    var dsel=Array.isArray(o.days)?o.days:[];
+    var dayBtns=[1,2,3,4,5,6,0].map(function(d){ var lbl=dowShort()[d]; var on=dsel.indexOf(d)>=0;
+      return '<button type="button" onclick="_poDay('+i+','+d+')" style="padding:5px 7px;border:1px solid '+(on?'var(--red)':'var(--border)')+';background:'+(on?'var(--red)':'transparent')+';color:'+(on?'#fff':'var(--mid)')+';border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+lbl+'</button>'; }).join('');
+    return '<div style="border:1px solid var(--border);border-radius:10px;padding:11px;margin-bottom:8px;background:#fff;">'
+      +'<div style="display:flex;gap:6px;margin-bottom:7px;">'
+      +'<input value="'+escapeHtml(o.name||'')+'" oninput="_poSet('+i+',\'name\',this.value)" placeholder="'+(EN?'Offer name':'N\u00e1zev ceny')+'" style="flex:1;min-width:0;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-size:13px;font-family:\'DM Sans\';box-sizing:border-box;">'
+      +'<input type="number" value="'+(o.price||'')+'" oninput="_poSet('+i+',\'price\',this.value)" placeholder="'+sym+'" style="width:92px;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-size:13px;font-family:\'DM Sans\';box-sizing:border-box;">'
+      +'<button type="button" onclick="_poDel('+i+')" style="padding:9px 11px;background:#FEECEC;color:var(--red);border:1px solid #F3C9C0;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;">\u2715</button></div>'
+      +'<label style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--dark);margin-bottom:5px;cursor:pointer;"><input type="checkbox" '+(o.member_only?'checked':'')+' onchange="_poSet('+i+',\'member_only\',this.checked)"> '+(EN?'Only for members of my club':'Plat\u00ed jen pro \u010dleny m\u00e9ho klubu')+'</label>'
+      +'<label style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--dark);cursor:pointer;"><input type="checkbox" '+(o.offpeak?'checked':'')+' onchange="_poSet('+i+',\'offpeak\',this.checked)"> '+(EN?'Only outside peak hours':'Plat\u00ed jen mimo \u0161pi\u010dku')+'</label>'
+      +(o.offpeak?('<div style="margin-top:7px;padding-left:22px;">'
+         +'<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;"><span style="font-size:12px;color:var(--mid);">'+(EN?'from':'od')+'</span><input type="time" value="'+(o.from||'')+'" oninput="_poSet('+i+',\'from\',this.value)" style="padding:7px;border:1.5px solid var(--border);border-radius:8px;font-size:12.5px;font-family:\'DM Sans\';"><span style="font-size:12px;color:var(--mid);">'+(EN?'to':'do')+'</span><input type="time" value="'+(o.to||'')+'" oninput="_poSet('+i+',\'to\',this.value)" style="padding:7px;border:1.5px solid var(--border);border-radius:8px;font-size:12.5px;font-family:\'DM Sans\';"></div>'
+         +'<div style="font-size:11px;color:var(--mid);margin-bottom:4px;">'+(EN?'Days (none = any day)':'Dny (nic = kdykoliv)')+'</div><div style="display:flex;gap:4px;flex-wrap:wrap;">'+dayBtns+'</div></div>'):'')
+      +'</div>';
+  }).join('');
+  h.innerHTML='<div style="font-size:13px;font-weight:800;color:var(--dark);margin-bottom:4px;">'+(EN?'Conditional prices (1:1)':'Zv\u00fdhodn\u011bn\u00e9 ceny (1:1)')+'</div>'
+   +'<p style="font-size:11.5px;color:var(--mid);line-height:1.5;margin:0 0 9px;">'+(EN?'The student always sees ONE price \u2014 the lowest one they qualify for. Your normal rate applies when none match.':'Student v\u017edy vid\u00ed JEDNU cenu \u2014 nejni\u017e\u0161\u00ed, na kterou m\u00e1 n\u00e1rok. Kdy\u017e nespl\u0148uje \u017e\u00e1dnou, plat\u00ed tvoje b\u011b\u017en\u00e1 sazba.')+'</p>'
+   +rows
+   +'<button type="button" onclick="_poAdd()" style="width:100%;padding:10px;background:var(--surf);color:var(--dark);border:1px dashed var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-bottom:7px;">+ '+(EN?'Add a price':'P\u0159idat cenu')+'</button>'
+   +'<button type="button" onclick="_poSave()" style="width:100%;padding:12px;background:var(--red);color:#fff;border:none;border-radius:10px;font-size:13.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Save prices':'Ulo\u017eit ceny')+'</button>';
+}
+function _poSet(i,k,v){ if(!_poList[i]) return; _poList[i][k]=(k==='price')?(parseFloat(v)||0):v; if(k==='offpeak') _poRender(); }
+function _poDay(i,d){ if(!_poList[i]) return; var a=Array.isArray(_poList[i].days)?_poList[i].days:[]; var x=a.indexOf(d); if(x>=0) a.splice(x,1); else a.push(d); _poList[i].days=a; _poRender(); }
+function _poAdd(){ if(_poList===null) _poList=[]; _poList.push({ name:'', price:0, member_only:false, offpeak:false, from:'', to:'', days:[] }); _poRender(); }
+function _poDel(i){ _poList.splice(i,1); _poRender(); }
+async function _poSave(){
+  var clean=(_poList||[]).filter(function(o){ return Number(o.price)>0; }).map(function(o){
+    return { name:String(o.name||'').slice(0,40), price:Number(o.price)||0, member_only:!!o.member_only, offpeak:!!o.offpeak, from:o.offpeak?(o.from||''):'', to:o.offpeak?(o.to||''):'', days:o.offpeak&&Array.isArray(o.days)?o.days:[] };
+  });
+  try{
+    await supaClient.from('profiles').update({ private_offers: clean }).eq('id', currentUser.id);
+    currentUser.private_offers = clean; _poList = clean;
+    toast(LANG==='en'?'Prices saved':'Ceny ulo\u017eeny'); _poRender();
+  }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
+}
+// ===== COACH 1:1 CONDITIONAL PRICING (private_offers) =====
+// One price is shown to the student: the LOWEST offer whose conditions they meet.
+function _privOffersOf(c){
+  try{ var o=(c&&(c.privOffers||c.private_offers)); if(typeof o==='string') o=JSON.parse(o); return Array.isArray(o)?o.filter(function(x){ return x && Number(x.price)>0; }):[]; }catch(e){ return []; }
+}
+// Is the viewer an active member of a club this coach owns / is on the team of?
+window._privMemb = window._privMemb || {};
+async function _privIsMember(coachId){
+  if(!currentUser || !coachId) return false;
+  if(window._privMemb[coachId]!==undefined) return window._privMemb[coachId];
+  var ok=false;
+  try{
+    var gids=[];
+    var t=await supaClient.from('gym_coaches').select('gym_id').eq('coach_id',coachId).eq('status','active');
+    (t.data||[]).forEach(function(r){ if(r.gym_id) gids.push(r.gym_id); });
+    var own=await supaClient.from('gyms').select('id').eq('owner_id',coachId);
+    (own.data||[]).forEach(function(r){ if(r.id) gids.push(r.id); });
+    gids=[...new Set(gids)];
+    if(gids.length){
+      var m=await supaClient.from('gym_memberships').select('id').eq('student_id',currentUser.id).in('gym_id',gids).in('status',['active','cancelling']).limit(1);
+      ok=!!(m.data && m.data.length);
+    }
+  }catch(e){ ok=false; }
+  window._privMemb[coachId]=ok; return ok;
+}
+// Does an offpeak offer match this slot's day + time?
+function _privOffpeakOk(o, slot){
+  try{
+    if(!o.offpeak) return true;
+    var t=String((slot&&slot.time)||'').slice(0,5); if(!t) return false;
+    var f=String(o.from||'').slice(0,5), to=String(o.to||'').slice(0,5);
+    if(f && t < f) return false;
+    if(to && t > to) return false;
+    var d=Array.isArray(o.days)?o.days:[];
+    if(d.length){ var wd=new Date((slot.date||'')+'T00:00:00').getDay(); if(d.indexOf(wd)<0) return false; }
+    return true;
+  }catch(e){ return false; }
+}
+// Pick the cheapest qualifying offer. Returns {price, offer} or null when the normal rate applies.
+function _privPick(c, slot, isMember, base){
+  var offers=_privOffersOf(c); if(!offers.length) return null;
+  var best=null;
+  offers.forEach(function(o){
+    if(o.member_only && !isMember) return;
+    if(!_privOffpeakOk(o, slot)) return;
+    var p=Number(o.price)||0; if(!(p>0)) return;
+    if(base>0 && p>=base) return;                 // an offer must actually be cheaper than the normal rate
+    if(!best || p<best.price) best={ price:p, offer:o };
+  });
+  return best;
+}
+// Plain-language reason shown at booking time.
+function _privWhy(hit, base, cur){
+  if(!hit) return '';
+  var EN=LANG==='en', o=hit.offer, sym=_curSym(cur);
+  var now=fmtPrice(hit.price,cur)+' '+sym, was=base>0?(fmtPrice(base,cur)+' '+sym):'';
+  var lead='';
+  if(o.member_only && o.offpeak) lead = EN?'You are a member of this coach\u2019s club and you are booking a quieter time':'Jsi \u010dlenem kou\u010dova klubu a rezervuje\u0161 v \u010das ni\u017e\u0161\u00ed vyt\u00ed\u017eenosti';
+  else if(o.member_only) lead = EN?'You are a member of this coach\u2019s club':'Jsi \u010dlenem kou\u010dova klubu';
+  else if(o.offpeak) lead = EN?'You are booking a quieter time':'Rezervuje\u0161 v \u010das ni\u017e\u0161\u00ed vyt\u00ed\u017eenosti kou\u010de';
+  else lead = (o.name||(EN?'Special price':'Zv\u00fdhodn\u011bn\u00e1 cena'));
+  return lead + ' \u2014 ' + (EN?'you pay ':'plat\u00ed\u0161 ') + now + (was?((EN?' instead of ':' m\u00edsto ')+was):'') + '.';
+}
 function discRate(c, disc){ if(c && c.disciplineRates && disc && c.disciplineRates[disc]) return c.disciplineRates[disc]; return (c && c.rateInperson) || null; }
 function defaultDiscipline(){ const a=activeDisciplines(); return a.length?a[0].v:'muay_thai'; }
 function disciplineLabel(v){ const o=DISCIPLINES.find(x=>x.v===v); return o?(LANG==='en'?o.en:o.cs):v; }
@@ -24111,6 +24230,7 @@ async function fillRateEditor(){
   if(currentUser.rate_online) txt += `<div>🌐 Online: <strong>${currentUser.rate_online} ${symOn}</strong> <span style="color:var(--light);">(${LANG==='en'?'you get':'dostaneš'} ${fmtPay(currentUser.rate_online*pctPay, currentUser.currency_online||curr)} ${symOn})</span></div>`;
   if(!txt) txt = `<div style="color:var(--light);">${LANG==='en'?"You haven't set any prices yet.":'Zatím nemáš nastavené ceny.'}</div>`;
   if($('rateDisplayText')) $('rateDisplayText').innerHTML = txt;
+  try{ _poRender(); }catch(e){}
   // Editor pre-fill
   if($('editCurrency')) $('editCurrency').value = curr;
   if($('editCurrency')) $('editCurrency').value = currentUser.currency_inperson || curr;
