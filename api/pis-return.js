@@ -96,14 +96,17 @@ export default async function handler(req, res){
           if(tbl==='bookings' && rec.slot_id){ try{ await sb.from('slots').update({ booked:true }).eq('id',rec.slot_id); }catch(e){} }
           try{ const _buyerId=(tbl==='event_tickets')?rec.buyer_id:rec.student_id;
             const _cur=(rec.currency||'CZK'); const _amt=(rec.amount!=null)?(rec.amount+' '+_cur):'';
-            const _dt=(rec.class_date||rec.training_date)?((rec.class_date||rec.training_date)+((rec.class_time||rec.training_time)?(' v '+(rec.class_time||rec.training_time)):'')):'';
-            let nd, _msg;
-            if(tbl==='gym_memberships'){ nd={ kind:'payment_confirmed', auto:true, goto:'memberships', gym_id:rec.gym_id, amount:_amt, item:(rec.plan_name||'') }; _msg='✅ Členství aktivní! '+(rec.plan_name||'permanentka')+(_amt?(' · '+_amt):'')+'. Platba proběhla (převodem). 🥊'; }
-            else if(tbl==='bookings'){ nd={ kind:'payment_confirmed', auto:true, goto:'bookings', amount:_amt }; _msg='✅ Rezervace potvrzena! Soukromka s '+(rec.coach_name||'koučem')+(_dt?(' '+_dt):'')+(_amt?(' · '+_amt):'')+'. Platba proběhla (převodem). 🥊'; }
-            else if(tbl==='event_tickets'){ nd={ kind:'payment_confirmed', auto:true, goto:'tickets', event_id:rec.event_id, amount:_amt }; _msg='✅ Vstupenka zaplacena'+(_amt?(' · '+_amt):'')+'! Platba proběhla (převodem). 🥊'; }
-            else if(tbl==='merch_orders'){ nd={ kind:'payment_confirmed', auto:true, goto:'merch', merch_id:rec.merch_id, gym_id:rec.gym_id, amount:_amt, item:(rec.item_name||'') }; _msg='✅ Objednávka zaplacena! '+(rec.item_name||'')+(_amt?(' · '+_amt):'')+'. Platba proběhla (převodem). 🥊'; }
-            else if(tbl==='cohort_members'){ nd={ kind:'payment_confirmed', auto:true, goto:'courses', cohort_id:rec.cohort_id, member_id:rec.id, amount:_amt }; _msg='✅ Záloha kurzu zaplacena'+(_amt?(' · '+_amt):'')+'! Platba proběhla (převodem). 🥊'; }
-            else { nd={ kind:'payment_confirmed', auto:true, goto:'dropin', gym_id:rec.gym_id, class_name:rec.class_name, amount:_amt, item:(rec.class_name||'') }; _msg='✅ Rezervace potvrzena! '+(rec.class_name||'Drop-in')+(_dt?(' · '+_dt):'')+(_amt?(' · '+_amt):'')+'. Platba proběhla (převodem). 🥊'; }
+            const _dte=(rec.class_date||rec.training_date)||''; const _tme=(rec.class_time||rec.training_time)||'';
+            let _gname=''; try{ const _gid=rec.gym_id||_cohGym||_evG||null; if(_gid){ const _gn=await sb.from('gyms').select('name').eq('id',_gid).maybeSingle(); _gname=(_gn.data&&_gn.data.name)||''; } }catch(e){}
+            // auto:true => the bank confirmed it (PIS), not the club. The client renderer builds the visible text from these fields.
+            let nd;
+            if(tbl==='gym_memberships'){ nd={ kind:'payment_confirmed', auto:true, goto:'memberships', gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.plan_name||'') }; }
+            else if(tbl==='bookings'){ nd={ kind:'payment_confirmed', auto:true, goto:'bookings', amount:_amt, date:_dte, time:_tme, coach:(rec.coach_name||'') }; }
+            else if(tbl==='event_tickets'){ nd={ kind:'payment_confirmed', auto:true, goto:'tickets', event_id:rec.event_id, gym_name:_gname, amount:_amt }; }
+            else if(tbl==='merch_orders'){ nd={ kind:'payment_confirmed', auto:true, goto:'merch', merch_id:rec.merch_id, gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.item_name||'') }; }
+            else if(tbl==='cohort_members'){ nd={ kind:'payment_confirmed', auto:true, goto:'courses', cohort_id:rec.cohort_id, member_id:rec.id, gym_name:_gname, amount:_amt }; }
+            else { nd={ kind:'payment_confirmed', auto:true, goto:'dropin', gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.class_name||''), date:_dte, time:_tme, class_name:rec.class_name }; }
+            const _msg='\u2705 '+(nd.item||'')+(_amt?(' \u00b7 '+_amt):'');
             await sb.from('notifications').insert({ user_id:_buyerId, type:'booking', read:false, message:_msg, data:JSON.stringify(nd) }); }catch(e){}
           await pisSideEffects(rec, tbl);
         }
