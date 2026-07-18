@@ -13240,8 +13240,42 @@ const DISCIPLINES = [
 function activeDisciplines(){ const base=(ACTIVE_DISC&&ACTIVE_DISC.length)?ACTIVE_DISC:DISCIPLINES.filter(d=>d.active).map(d=>d.v); return DISCIPLINES.filter(d=>base.includes(d.v)); }
 function isMultiDiscipline(){ return activeDisciplines().length>1; }
 let _bookDisc = null;
-// --- coach-side editor for conditional 1:1 prices ---
+// --- coach-side editor for conditional 1:1 prices (two independent offers) ---
 window._poList = window._poList || null;
+function _poBase(){ try{ return Number((currentUser&&(currentUser.rate_inperson||currentUser.rateInperson))||0)||0; }catch(e){ return 0; } }
+function _poInit(){ if(_poList===null){ try{ var o=currentUser&&currentUser.private_offers; if(typeof o==='string') o=JSON.parse(o); _poList=Array.isArray(o)?o:[]; }catch(e){ _poList=[]; } } }
+function _poGet(t){ _poInit(); return _poList.find(function(o){ return (t==='member')?o.member_only:o.offpeak; })||null; }
+function _poToggle(t,on){
+  _poInit();
+  if(on){ if(!_poGet(t)) _poList.push(t==='member'?{ name:'', price:0, member_only:true, offpeak:false, from:'', to:'', days:[] }:{ name:'', price:0, member_only:false, offpeak:true, from:'', to:'', days:[] }); }
+  else { _poList=_poList.filter(function(o){ return (t==='member')?!o.member_only:!o.offpeak; }); }
+  _poRender();
+}
+function _poSetT(t,k,v){ var o=_poGet(t); if(!o) return; o[k]=(k==='price')?(parseFloat(v)||0):v; if(k==='price') _poWarn(t); }
+function _poDayT(t,d){ var o=_poGet(t); if(!o) return; var a=Array.isArray(o.days)?o.days:[]; var x=a.indexOf(d); if(x>=0) a.splice(x,1); else a.push(d); o.days=a; _poRender(); }
+function _poWarn(t){
+  var o=_poGet(t), base=_poBase(), el=$('poWarn_'+t); if(!el) return; var EN=LANG==='en';
+  var bad = o && base>0 && Number(o.price)>0 && Number(o.price)>=base;
+  el.innerHTML = bad ? ('\u26a0\ufe0f '+(EN?('Must be lower than your normal rate ('+fmtPrice(base,(currentUser.currency_inperson||'CZK'))+' '+_curSym(currentUser.currency_inperson||'CZK')+').'):('Mus\u00ed b\u00fdt ni\u017e\u0161\u00ed ne\u017e tvoje b\u011b\u017en\u00e1 sazba ('+fmtPrice(base,(currentUser.currency_inperson||'CZK'))+' '+_curSym(currentUser.currency_inperson||'CZK')+').'))) : '';
+  el.style.display = bad?'block':'none';
+}
+function _poBlock(t){
+  var o=_poGet(t); if(!o) return '';
+  var EN=LANG==='en', cur=(currentUser&&currentUser.currency_inperson)||'CZK', sym=_curSym(cur);
+  var h='<div style="margin:8px 0 4px;padding:11px;border:1px solid var(--border);border-radius:10px;background:#fff;">'
+   +'<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px;">'
+   +'<span style="font-size:12.5px;color:var(--mid);flex:1;">'+(EN?'Price per lesson':'Cena za lekci')+'</span>'
+   +'<input type="number" value="'+(o.price||'')+'" oninput="_poSetT(\''+t+'\',\'price\',this.value)" placeholder="'+sym+'" style="width:110px;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-size:13px;font-family:\'DM Sans\';box-sizing:border-box;"></div>'
+   +'<div id="poWarn_'+t+'" style="display:none;font-size:11px;font-weight:700;color:var(--red);line-height:1.4;margin-bottom:4px;"></div>';
+  if(t==='offpeak'){
+    var dsel=Array.isArray(o.days)?o.days:[];
+    var dayBtns=[1,2,3,4,5,6,0].map(function(d){ var on=dsel.indexOf(d)>=0;
+      return '<button type="button" onclick="_poDayT(\'offpeak\','+d+')" style="padding:5px 7px;border:1px solid '+(on?'var(--red)':'var(--border)')+';background:'+(on?'var(--red)':'transparent')+';color:'+(on?'#fff':'var(--mid)')+';border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+dowShort()[d]+'</button>'; }).join('');
+    h+='<div style="display:flex;gap:6px;align-items:center;margin:7px 0 6px;"><span style="font-size:12px;color:var(--mid);">'+(EN?'from':'od')+'</span><input type="time" value="'+(o.from||'')+'" oninput="_poSetT(\'offpeak\',\'from\',this.value)" style="padding:7px;border:1.5px solid var(--border);border-radius:8px;font-size:12.5px;font-family:\'DM Sans\';"><span style="font-size:12px;color:var(--mid);">'+(EN?'to':'do')+'</span><input type="time" value="'+(o.to||'')+'" oninput="_poSetT(\'offpeak\',\'to\',this.value)" style="padding:7px;border:1.5px solid var(--border);border-radius:8px;font-size:12.5px;font-family:\'DM Sans\';"></div>'
+     +'<div style="font-size:11px;color:var(--mid);margin-bottom:4px;">'+(EN?'Days (none = any day)':'Dny (nic = kdykoliv)')+'</div><div style="display:flex;gap:4px;flex-wrap:wrap;">'+dayBtns+'</div>';
+  }
+  return h+'</div>';
+}
 function _poHost(){
   var rd=$('rateDisplay'); if(!rd) return null;
   var h=$('poHost'); if(h) return h;
@@ -13249,43 +13283,28 @@ function _poHost(){
   rd.parentNode.insertBefore(h, rd.nextSibling); return h;
 }
 function _poRender(){
-  var h=_poHost(); if(!h) return; var EN=LANG==='en';
-  if(_poList===null){ try{ var o=currentUser&&currentUser.private_offers; if(typeof o==='string') o=JSON.parse(o); _poList=Array.isArray(o)?o:[]; }catch(e){ _poList=[]; } }
-  var cur=(currentUser&&currentUser.currency_inperson)||'CZK', sym=_curSym(cur);
-  var rows=_poList.map(function(o,i){
-    var dsel=Array.isArray(o.days)?o.days:[];
-    var dayBtns=[1,2,3,4,5,6,0].map(function(d){ var lbl=dowShort()[d]; var on=dsel.indexOf(d)>=0;
-      return '<button type="button" onclick="_poDay('+i+','+d+')" style="padding:5px 7px;border:1px solid '+(on?'var(--red)':'var(--border)')+';background:'+(on?'var(--red)':'transparent')+';color:'+(on?'#fff':'var(--mid)')+';border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+lbl+'</button>'; }).join('');
-    return '<div style="border:1px solid var(--border);border-radius:10px;padding:11px;margin-bottom:8px;background:#fff;">'
-      +'<div style="display:flex;gap:6px;margin-bottom:7px;">'
-      +'<input value="'+escapeHtml(o.name||'')+'" oninput="_poSet('+i+',\'name\',this.value)" placeholder="'+(EN?'Offer name':'N\u00e1zev ceny')+'" style="flex:1;min-width:0;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-size:13px;font-family:\'DM Sans\';box-sizing:border-box;">'
-      +'<input type="number" value="'+(o.price||'')+'" oninput="_poSet('+i+',\'price\',this.value)" placeholder="'+sym+'" style="width:92px;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-size:13px;font-family:\'DM Sans\';box-sizing:border-box;">'
-      +'<button type="button" onclick="_poDel('+i+')" style="padding:9px 11px;background:#FEECEC;color:var(--red);border:1px solid #F3C9C0;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;">\u2715</button></div>'
-      +'<label style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--dark);margin-bottom:5px;cursor:pointer;"><input type="checkbox" '+(o.member_only?'checked':'')+' onchange="_poSet('+i+',\'member_only\',this.checked)"> '+(EN?'Only for members of my club':'Plat\u00ed jen pro \u010dleny m\u00e9ho klubu')+'</label>'
-      +'<label style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--dark);cursor:pointer;"><input type="checkbox" '+(o.offpeak?'checked':'')+' onchange="_poSet('+i+',\'offpeak\',this.checked)"> '+(EN?'Only outside peak hours':'Plat\u00ed jen mimo \u0161pi\u010dku')+'</label>'
-      +(o.offpeak?('<div style="margin-top:7px;padding-left:22px;">'
-         +'<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;"><span style="font-size:12px;color:var(--mid);">'+(EN?'from':'od')+'</span><input type="time" value="'+(o.from||'')+'" oninput="_poSet('+i+',\'from\',this.value)" style="padding:7px;border:1.5px solid var(--border);border-radius:8px;font-size:12.5px;font-family:\'DM Sans\';"><span style="font-size:12px;color:var(--mid);">'+(EN?'to':'do')+'</span><input type="time" value="'+(o.to||'')+'" oninput="_poSet('+i+',\'to\',this.value)" style="padding:7px;border:1.5px solid var(--border);border-radius:8px;font-size:12.5px;font-family:\'DM Sans\';"></div>'
-         +'<div style="font-size:11px;color:var(--mid);margin-bottom:4px;">'+(EN?'Days (none = any day)':'Dny (nic = kdykoliv)')+'</div><div style="display:flex;gap:4px;flex-wrap:wrap;">'+dayBtns+'</div></div>'):'')
-      +'</div>';
-  }).join('');
-  h.innerHTML='<div style="font-size:13px;font-weight:800;color:var(--dark);margin-bottom:4px;">'+(EN?'Conditional prices (1:1)':'Zv\u00fdhodn\u011bn\u00e9 ceny (1:1)')+'</div>'
-   +'<p style="font-size:11.5px;color:var(--mid);line-height:1.5;margin:0 0 9px;">'+(EN?'The student always sees ONE price \u2014 the lowest one they qualify for. Your normal rate applies when none match.':'Student v\u017edy vid\u00ed JEDNU cenu \u2014 nejni\u017e\u0161\u00ed, na kterou m\u00e1 n\u00e1rok. Kdy\u017e nespl\u0148uje \u017e\u00e1dnou, plat\u00ed tvoje b\u011b\u017en\u00e1 sazba.')+'</p>'
-   +rows
-   +'<button type="button" onclick="_poAdd()" style="width:100%;padding:10px;background:var(--surf);color:var(--dark);border:1px dashed var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-bottom:7px;">+ '+(EN?'Add a price':'P\u0159idat cenu')+'</button>'
-   +'<button type="button" onclick="_poSave()" style="width:100%;padding:12px;background:var(--red);color:#fff;border:none;border-radius:10px;font-size:13.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Save prices':'Ulo\u017eit ceny')+'</button>';
+  var h=_poHost(); if(!h) return; var EN=LANG==='en'; _poInit();
+  var cbM=!!_poGet('member'), cbO=!!_poGet('offpeak');
+  h.innerHTML='<div style="font-size:13px;font-weight:800;color:var(--dark);margin-bottom:4px;">'+(EN?'Better prices (1:1)':'Zv\u00fdhodn\u011bn\u00e9 ceny (1:1)')+'</div>'
+   +'<p style="font-size:11.5px;color:var(--mid);line-height:1.5;margin:0 0 10px;">'+(EN?'The student always sees ONE price \u2014 the lowest one they qualify for. Your normal rate applies when none match.':'Student v\u017edy vid\u00ed JEDNU cenu \u2014 nejni\u017e\u0161\u00ed, na kterou m\u00e1 n\u00e1rok. Kdy\u017e nespl\u0148uje \u017e\u00e1dnou, plat\u00ed tvoje b\u011b\u017en\u00e1 sazba.')+'</p>'
+   +'<label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;color:var(--dark);cursor:pointer;line-height:1.4;"><input type="checkbox" '+(cbM?'checked':'')+' onchange="_poToggle(\'member\',this.checked)" style="margin-top:2px;"> '+(EN?'I want a better price for members of my club':'Chci zadat v\u00fdhodn\u011bj\u0161\u00ed cenu pro \u010dleny m\u00e9ho klubu')+'</label>'
+   +_poBlock('member')
+   +'<label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;color:var(--dark);cursor:pointer;line-height:1.4;margin-top:10px;"><input type="checkbox" '+(cbO?'checked':'')+' onchange="_poToggle(\'offpeak\',this.checked)" style="margin-top:2px;"> '+(EN?'I want a better price for times when I am less busy':'Chci zadat v\u00fdhodn\u011bj\u0161\u00ed cenu pro \u010dasy, kdy jsem m\u00e9n\u011b vyt\u00ed\u017een\u00fd')+'</label>'
+   +_poBlock('offpeak')
+   +'<button type="button" onclick="_poSave()" style="width:100%;padding:12px;background:var(--red);color:#fff;border:none;border-radius:10px;font-size:13.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';margin-top:12px;">'+(EN?'Save prices':'Ulo\u017eit ceny')+'</button>';
+  _poWarn('member'); _poWarn('offpeak');
 }
-function _poSet(i,k,v){ if(!_poList[i]) return; _poList[i][k]=(k==='price')?(parseFloat(v)||0):v; if(k==='offpeak') _poRender(); }
-function _poDay(i,d){ if(!_poList[i]) return; var a=Array.isArray(_poList[i].days)?_poList[i].days:[]; var x=a.indexOf(d); if(x>=0) a.splice(x,1); else a.push(d); _poList[i].days=a; _poRender(); }
-function _poAdd(){ if(_poList===null) _poList=[]; _poList.push({ name:'', price:0, member_only:false, offpeak:false, from:'', to:'', days:[] }); _poRender(); }
-function _poDel(i){ _poList.splice(i,1); _poRender(); }
 async function _poSave(){
-  var clean=(_poList||[]).filter(function(o){ return Number(o.price)>0; }).map(function(o){
-    return { name:String(o.name||'').slice(0,40), price:Number(o.price)||0, member_only:!!o.member_only, offpeak:!!o.offpeak, from:o.offpeak?(o.from||''):'', to:o.offpeak?(o.to||''):'', days:o.offpeak&&Array.isArray(o.days)?o.days:[] };
-  });
+  var EN=LANG==='en', base=_poBase();
+  var clean=(_poList||[]).filter(function(o){ return Number(o.price)>0; });
+  // LOCK: a better price must always be LOWER than the normal rate
+  var bad=clean.find(function(o){ return base>0 && Number(o.price)>=base; });
+  if(bad){ toast('\u26a0\ufe0f '+(EN?'A better price must be lower than your normal rate.':'Zv\u00fdhodn\u011bn\u00e1 cena mus\u00ed b\u00fdt ni\u017e\u0161\u00ed ne\u017e tvoje b\u011b\u017en\u00e1 sazba.')); return; }
+  clean=clean.map(function(o){ return { name:String(o.name||'').slice(0,40), price:Number(o.price)||0, member_only:!!o.member_only, offpeak:!!o.offpeak, from:o.offpeak?(o.from||''):'', to:o.offpeak?(o.to||''):'', days:(o.offpeak&&Array.isArray(o.days))?o.days:[] }; });
   try{
     await supaClient.from('profiles').update({ private_offers: clean }).eq('id', currentUser.id);
     currentUser.private_offers = clean; _poList = clean;
-    toast(LANG==='en'?'Prices saved':'Ceny ulo\u017eeny'); _poRender();
+    toast(EN?'Prices saved':'Ceny ulo\u017eeny'); _poRender();
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
 }
 // ===== COACH 1:1 CONDITIONAL PRICING (private_offers) =====
@@ -13345,8 +13364,7 @@ function _privWhy(hit, base, cur){
   var EN=LANG==='en', o=hit.offer, sym=_curSym(cur);
   var now=fmtPrice(hit.price,cur)+' '+sym, was=base>0?(fmtPrice(base,cur)+' '+sym):'';
   var lead='';
-  if(o.member_only && o.offpeak) lead = EN?'You are a member of this coach\u2019s club and you are booking a quieter time':'Jsi \u010dlenem kou\u010dova klubu a rezervuje\u0161 v \u010das ni\u017e\u0161\u00ed vyt\u00ed\u017eenosti';
-  else if(o.member_only) lead = EN?'You are a member of this coach\u2019s club':'Jsi \u010dlenem kou\u010dova klubu';
+  if(o.member_only) lead = EN?'You are a member of this coach\u2019s club':'Jsi \u010dlenem kou\u010dova klubu';
   else if(o.offpeak) lead = EN?'You are booking a quieter time':'Rezervuje\u0161 v \u010das ni\u017e\u0161\u00ed vyt\u00ed\u017eenosti kou\u010de';
   else lead = (o.name||(EN?'Special price':'Zv\u00fdhodn\u011bn\u00e1 cena'));
   return lead + ' \u2014 ' + (EN?'you pay ':'plat\u00ed\u0161 ') + now + (was?((EN?' instead of ':' m\u00edsto ')+was):'') + '.';
