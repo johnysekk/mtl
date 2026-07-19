@@ -68,7 +68,7 @@ export default async function handler(req, res) {
   const preview = (q.preview === '1' || q.preview === 'true');
   const period = (q.month && /^\d{4}-\d{2}$/.test(q.month)) ? q.month : prevMonth(new Date().toISOString().slice(0, 7));
   let ME = {}; try { const _ps = await sb('platform_settings?id=eq.1&select=*'); ME = (_ps && _ps[0]) || {}; } catch (e) {}
-  let issued = 0, skipped = 0;
+  let issued = 0, skipped = 0, deferred = 0;
   try {
     // every collected commission row for the closed month (bank charged + Stripe live)
     const tx = await sb(`transactions?select=gym_id,coach_id,paid_to,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method&commission_status=in.(collected${preview?',pending,failed':''})&commission_month=eq.${period}&mtl_fee=gt.0&limit=50000`);
@@ -103,6 +103,35 @@ export default async function handler(req, res) {
       // idempotent: one unified doklad per entity+period+currency
       const ex = await sb(`commission_doklady?select=id&${col}=eq.${entityId}&period_month=eq.${period}&currency=eq.${encodeURIComponent(cur)}&kind=eq.unified&limit=1`);
       if (ex && ex.length) { skipped++; return; }
+
+      // ---- FOREIGN-VAT GATE (toggle: platform_settings.require_vat_foreign) --------------------
+      // A cross-border EU B2B service must be reported in the souhrnne hlaseni, and that report
+      // needs the CUSTOMER'S VAT ID. Without it we cannot file, so (when the toggle is on) we do
+      // NOT issue the doklad: the commission simply stays pending and is invoiced retroactively
+      // once the provider supplies their VAT ID. Nothing is lost, nobody is blocked from trading.
+      // Safety: unknown country is treated as domestic -> we never block on uncertainty.
+      let buyer = null;
+      try {
+        const _b = await sb((kind === 'gym' ? `gyms?id=eq.${entityId}` : `profiles?id=eq.${entityId}`) + `&select=name,legal_name,billing_address,tax_id,vat_id,country&limit=1`);
+        buyer = _b && _b[0];
+      } catch (e) {}
+      if (ME && ME.require_vat_foreign) {
+        const home = String(ME.home_country || 'CZ').toUpperCase();
+        const bc = String((buyer && buyer.country) || '').trim().toUpperCase();
+        const foreign = !!bc && bc !== home && !/^(CESK|CZECH)/i.test(bc);
+        const hasVat = !!(buyer && String(buyer.vat_id || '').trim());
+        if (foreign && !hasVat) {
+          deferred++;
+          if (ownerId) {
+            try {
+              await notify(ownerId, 'doklad_vat_needed',
+                `\u26a0\ufe0f Doklad za ${period} zat\u00edm nevystaven \u2014 dopl\u0148 DI\u010c (VAT ID), a\u0165 ti ho m\u016f\u017eeme vystavit podle EU pravidel. Provize z\u016fst\u00e1v\u00e1 evidovan\u00e1 a douc\u0165ujeme ji zp\u011btn\u011b.`,
+                { period, currency: cur, needs: 'vat_id' });
+            } catch (e) {}
+          }
+          return;
+        }
+      }
       const items = Object.values(data.rates);
       const bank = items.filter(i => i.method !== 'stripe').reduce((a, i) => a + i.fee, 0);
       const strp = items.filter(i => i.method === 'stripe').reduce((a, i) => a + i.fee, 0);
@@ -112,7 +141,6 @@ export default async function handler(req, res) {
       issued++;
       if (ownerId) { try { await notify(ownerId, 'doklad_unified', `Doklad MTL provize za ${period} (${(data.total / 100).toFixed(2)} ${cur.toUpperCase()}) je připraven.`, { period, currency: cur }); } catch (e) {} }
       try { const pr = await sb(`profiles?id=eq.${ownerId}&select=email&limit=1`); const em = pr && pr[0] && pr[0].email;
-        let buyer = null; try { const _b = await sb((kind==='gym'?`gyms?id=eq.${entityId}`:`profiles?id=eq.${entityId}`)+`&select=name,legal_name,billing_address,tax_id,vat_id&limit=1`); buyer = _b && _b[0]; } catch (e) {}
         if (em) await sendEmail(em, `Doklad MTL provize — ${period}`, dokladHtml(ME, buyer, kind, period, cur, data)); } catch (e) {}
     }
 
@@ -126,7 +154,7 @@ export default async function handler(req, res) {
     for (const gid of gymIds) { const g = gymMap[gid]; if (!g) continue; for (const cur of Object.keys(gymB[gid])) await issue('gym', gid, g.owner_id, cur, gymB[gid][cur]); }
     for (const cid of Object.keys(coachB)) { for (const cur of Object.keys(coachB[cid])) await issue('coach', cid, cid, cur, coachB[cid][cur]); }
 
-    return res.status(200).json({ ok: true, period, issued, skipped });
+    return res.status(200).json({ ok: true, period, issued, skipped, deferred });
   } catch (e) {
     console.error('unified-doklad-cron', e.message);
     return res.status(500).json({ error: e.message });
