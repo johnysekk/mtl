@@ -30,6 +30,22 @@ async function sb(path, opts = {}) {
 const notify = (user_id, kind, message, extra = {}) =>
   sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id, type: 'system', read: false, data: JSON.stringify({ kind, ...extra }), message }) });
 
+// EU/EEA member states that use the reverse-charge / souhrnne hlaseni regime. A buyer OUTSIDE
+// this set (US, TH, UK, CH, ...) is an export of services - no souhrnne hlaseni, no VAT ID needed -
+// so the foreign-VAT gate must NOT defer those. Only intra-EU B2B without a VAT ID is blocked.
+const EU_VAT = new Set(['AT','BE','BG','CY','CZ','DE','DK','EE','ES','FI','FR','GR','HR','HU','IE','IT','LT','LU','LV','MT','NL','PL','PT','RO','SE','SI','SK']);
+// gyms store the country as billing_country; profiles use country. Accept either, plus a couple of
+// long-form spellings, and normalise to an ISO-2 code. Unknown -> null -> treated as domestic.
+const CTRY_ALIAS = { 'CESKO':'CZ','CESKA REPUBLIKA':'CZ','CZECH REPUBLIC':'CZ','CZECHIA':'CZ','SLOVENSKO':'SK','SLOVAKIA':'SK','POLSKO':'PL','POLAND':'PL','NEMECKO':'DE','GERMANY':'DE','RAKOUSKO':'AT','AUSTRIA':'AT','UNITED KINGDOM':'GB','UNITED STATES':'US','THAILAND':'TH' };
+function ctryCode(row) {
+  const raw = String((row && (row.billing_country || row.country)) || '').trim();
+  if (!raw) return null;
+  const up = raw.toUpperCase().replace(/[^A-Z ]/g, '').trim();
+  if (CTRY_ALIAS[up]) return CTRY_ALIAS[up];
+  if (/^[A-Z]{2}$/.test(up)) return up;
+  return null;
+}
+
 function prevMonth(ym) { const [y, m] = ym.split('-').map(Number); const d = new Date(Date.UTC(y, m - 1, 1)); d.setUTCMonth(d.getUTCMonth() - 1); return d.toISOString().slice(0, 7); }
 
 function _methodLabel(m){ return m==='stripe'?'Stripe (karta)':(m==='pis'?'Platba z banky':(m==='qr'?'QR platba':(m==='cash'?'Hotovost':(m||'\u2014')))); }
@@ -112,15 +128,20 @@ export default async function handler(req, res) {
       // Safety: unknown country is treated as domestic -> we never block on uncertainty.
       let buyer = null;
       try {
-        const _b = await sb((kind === 'gym' ? `gyms?id=eq.${entityId}` : `profiles?id=eq.${entityId}`) + `&select=name,legal_name,billing_address,tax_id,vat_id,country&limit=1`);
+        const _sel = (kind === 'gym')
+          ? `gyms?id=eq.${entityId}&select=name,legal_name,billing_address,tax_id,vat_id,billing_country,country&limit=1`
+          : `profiles?id=eq.${entityId}&select=name,legal_name,billing_address,tax_id,vat_id,country,billing_country&limit=1`;
+        const _b = await sb(_sel);
         buyer = _b && _b[0];
       } catch (e) {}
       if (ME && ME.require_vat_foreign) {
-        const home = String(ME.home_country || 'CZ').toUpperCase();
-        const bc = String((buyer && buyer.country) || '').trim().toUpperCase();
-        const foreign = !!bc && bc !== home && !/^(CESK|CZECH)/i.test(bc);
+        const home = ctryCode({ country: ME.home_country }) || 'CZ';
+        const bc = ctryCode(buyer);
+        // defer ONLY for intra-EU cross-border B2B with no VAT ID. Unknown country, domestic, or a
+        // non-EU buyer (US/TH/GB/CH) all issue normally - we never block on uncertainty or on exports.
+        const euForeign = !!bc && bc !== home && EU_VAT.has(bc) && EU_VAT.has(home);
         const hasVat = !!(buyer && String(buyer.vat_id || '').trim());
-        if (foreign && !hasVat) {
+        if (euForeign && !hasVat) {
           deferred++;
           if (ownerId) {
             try {
@@ -146,8 +167,8 @@ export default async function handler(req, res) {
 
     if (preview) {
       let firstHtml = '';
-      for (const gid of gymIds) { const g = gymMap[gid]; if (!g) continue; for (const cur of Object.keys(gymB[gid])) { const _b = (await sb(`gyms?id=eq.${gid}&select=name,legal_name,billing_address,tax_id,vat_id&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'gym', period, cur, gymB[gid][cur]); break; } if (firstHtml) break; }
-      if (!firstHtml) { for (const cid of Object.keys(coachB)) { for (const cur of Object.keys(coachB[cid])) { const _b = (await sb(`profiles?id=eq.${cid}&select=name,legal_name,billing_address,tax_id,vat_id&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'coach', period, cur, coachB[cid][cur]); break; } if (firstHtml) break; } }
+      for (const gid of gymIds) { const g = gymMap[gid]; if (!g) continue; for (const cur of Object.keys(gymB[gid])) { const _b = (await sb(`gyms?id=eq.${gid}&select=name,legal_name,billing_address,tax_id,vat_id,billing_country,country&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'gym', period, cur, gymB[gid][cur]); break; } if (firstHtml) break; }
+      if (!firstHtml) { for (const cid of Object.keys(coachB)) { for (const cur of Object.keys(coachB[cid])) { const _b = (await sb(`profiles?id=eq.${cid}&select=name,legal_name,billing_address,tax_id,vat_id,country,billing_country&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'coach', period, cur, coachB[cid][cur]); break; } if (firstHtml) break; } }
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       return res.status(200).send(firstHtml || ('<p style="font-family:sans-serif;padding:24px;">\u017d\u00e1dn\u00e1 provize za ' + period + ' (zkus jin\u00fd ?month=RRRR-MM).</p>'));
     }
