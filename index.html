@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SCE Per Petr (referral money-trail fixes, now with pay.js + session.js in hand). ROOT CAUSE behind BOTH wrong-amount reports: gym_bookings/bookings store the LIST price and the referral discount is applied server-side at checkout, so anything reading b.amount reports the pre-discount number. The dashboard and Stripe were right because they read the transaction. (1) STUDENT RECEIPT (showReceipt) now looks the transaction up by payment_intent and uses gross_amount when found, falling back to b.amount when there is no transaction yet (unconfirmed QR). When a discount is detected it prints two extra rows: 'Cena pred slevou' and 'Referral sleva -N %', which is what Petr asked for. NOTE for the RLS pass: this is a THIRD client-side read of transactions by the student - the same member_id=auth.uid() policy already needed for the first-lesson acquisition-fee check covers it. (2) DROP-IN NOTIFICATION to the owner used gb.amount; /api/session already returns the real charged gross on _tx, so the success handler stashes it and the notification prints the charged amount. (3) STRIPE REFERRAL CREDITS WERE NEVER SPENT - real bug, not test data. pay.js verifies the credit and stamps mtl_credit_row, commented 'the webhook consumes it', but it only ever went into payment_intent_data.metadata (the PaymentIntent), while /api/session reads session.metadata. session.js exists precisely because the connected-account webhook is not always delivering, and it recorded the transaction but never touched the credit. So on Stripe the money was right and the point was never spent; the QR track consumes it correctly because that path is client-driven. FIX: pay.js now also puts mtl_credit_row/mtl_credit_user at SESSION level (coach 1:1 + gym drop-in), and session.js consumes it via a new sbPatchRet helper - the PATCH is filtered on consumed=eq.false and student_credits is only decremented when a row actually changed, so webhook and session can both run and the point is spent exactly ONCE. Old sessions have no session-level metadata; make a NEW payment to test. (4) STRIPE METADATA now carries mtl_ref_pct and mtl_list_amount on both the Session and the PaymentIntent, so the discount is visible straight in the Stripe dashboard. (5) referral-cron.js: a MEMBERSHIP now qualifies the invitee. Previously only a past 1:1 or a past drop-in counted, so the most valuable conversion of all - invitee joins, buys a membership, never books a single lesson - rewarded nobody. Not gated on a past date (membership money has already moved); pending_offline excluded (unconfirmed bank/QR is not paid). UNCHANGED AND ALREADY CORRECT: the PIS-vs-Stripe split. Both renderers in this file handle payment_method 'pis'; if the club dashboard still shows PIS as Stripe, the deployed build predates SCB. Deploy index.html + pay.js + session.js + referral-cron.js. Builds on SCD. -->
+<!-- MTL build: SCF Per Petr (Petr was right: my acq_source 'fix' was a band-aid that guaranteed we would find the next missing column one at a time, in production. Replaced with a general fix, and the audit turned up a WORSE bug.) WHAT THE DIFF PROVES: bookings is written from 3 places. The two Stripe ones (in-person 1:1 at ~26085, online at ~26154) write slot_id, student_id, coach_id, coach_name, payment_intent, amount, training_date, training_time, status, type, currency, actual_stripe_fee, coach_keep_pct, acq_source, online_format - and NO student_name. The QR path (_coach1to1QrPay) additionally writes student_name, payment_method, credit_used, discipline. So student_name was copied onto bookings from the gym_bookings shape; it is not part of the proven-working column set. Petr's instinct is right: student_id is the key that matters here. WORSE BUG FOUND: BOTH Stripe bookings inserts also write acq_source, which the DB says does not exist on bookings - and NEITHER reads the returned error. supabase-js does not throw, it returns {data,error}, so an unchecked insert loses the row in total silence. The online one did not even capture the result. That means Stripe-paid coach 1:1 and online bookings have most likely NOT been landing in the bookings table at all. Money is unaffected (transactions are written by session.js on a separate path), but the lesson record is missing. CHECK: open the coach diary and look for a Stripe-paid 1:1 lesson. FIX: new _sbInsertTolerant(table,row,sel) always surfaces the error, and when PostgREST names an unknown column it drops THAT column and retries (max 8, every drop console.warn'd loudly so it gets fixed properly rather than tolerated forever). Applied to all three bookings inserts, so schema drift now costs an optional field, never the booking. Tested against a simulated table missing both student_name and acq_source: the row still inserts with student_id intact. SCE carried: receipt + drop-in notification read the transaction instead of the pre-discount booking row, referral discount shown as a line on the doklad, Stripe referral credits now consumed by session.js (they never were), mtl_ref_pct/mtl_list_amount in Stripe metadata, memberships qualify for the referral reward. STILL NEEDED: the real schema. schema-dump.sql produces it. Builds on SCE. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -7550,8 +7550,7 @@ async function _coach1to1QrPay(c, payee, opts){
   let bookingId=null;
   try{
     const row={ slot_id:(isOnline?null:((opts.slot&&opts.slot.id)||null)), student_id:currentUser.id, student_name:sName, coach_id:coachId, coach_name:c.name||'Kou\u010d', amount:price, training_date:(isOnline?today:((opts.slot&&opts.slot.date)||today)), training_time:(isOnline?null:((opts.slot&&opts.slot.time)||null)), status:'reserved', type:(isOnline?'online':'inperson'), currency:cur, payment_method:'qr', credit_used:(_qrCredOk?'student':null), discipline:opts.disc||null, online_format:(isOnline?(opts.fmt||null):null), acq_source:(function(){ try{ return localStorage.getItem('mtl_owncoach_'+coachId)?'direct':'mtl_discovery'; }catch(e){ return 'mtl_discovery'; } })() };
-    let { data:bk, error:e1 } = await supaClient.from('bookings').insert(row).select('id').single();
-    if(e1 && /acq_source/.test(String(e1.message||''))){ const _r2=Object.assign({}, row); delete _r2.acq_source; const _rt=await supaClient.from('bookings').insert(_r2).select('id').single(); bk=_rt.data; e1=_rt.error; }
+    const _bi=await _sbInsertTolerant('bookings', row, 'id'); const bk=_bi&&_bi.data, e1=_bi&&_bi.error;
     if(e1){ toast('\u26a0\ufe0f '+e1.message); return; } bookingId=bk&&bk.id;
     if(!isOnline && opts.slot && opts.slot.id){ try{ await supaClient.from('slots').update({ booked:true }).eq('id', opts.slot.id); }catch(e){} }
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
@@ -7956,6 +7955,26 @@ async function _cashCard(scope, providerId, ym, cardObj){
   }catch(e){ return ''; }
 }
 
+// supabase-js does NOT throw on error - it returns {data,error}. An insert whose error is never
+// read loses the row SILENTLY, which is exactly how bookings inserts writing a non-existent column
+// went unnoticed. This helper does two things: it always surfaces the error, and when PostgREST
+// reports an unknown column it drops THAT column and retries. So schema drift costs an optional
+// field (attribution, a denormalised name), never the whole booking. Every drop is logged loudly
+// so the missing column gets fixed properly instead of silently tolerated forever.
+async function _sbInsertTolerant(table, row, sel){
+  let r=Object.assign({}, row);
+  for(let i=0;i<8;i++){
+    let q=supaClient.from(table).insert(r);
+    if(sel) q=q.select(sel==='*'?undefined:sel).single();
+    const res=await q;
+    if(!res || !res.error) return res;
+    const m=String(res.error.message||'').match(/'([a-zA-Z0-9_]+)' column/);
+    if(!m || !Object.prototype.hasOwnProperty.call(r, m[1])){ console.error('[MTL insert '+table+']', res.error.message); return res; }
+    console.warn('[MTL insert '+table+'] unknown column dropped: '+m[1]+' - add it to the table or stop writing it');
+    delete r[m[1]];
+  }
+  return { data:null, error:{ message:'too many unknown columns on '+table } };
+}
 function _isQrProv(obj){ try{ if(!obj) return false; if(obj.payment_mode==='qr_bank') return true; if(typeof _mtlPayMode==='function' && _mtlPayMode(obj)==='qr_bank') return true; return false; }catch(e){ return false; } }
 
 async function openSecurity(){
@@ -26082,7 +26101,7 @@ async function showPaidPopup(){
           const bkCurr = coachProf?.currency_inperson || coachProf?.currency || 'CZK';
           // Vytvoř booking (idempotentně — webhook ho mohl vytvořit dřív)
           const _dupIn = paymentIntent ? (((await supaClient.from('bookings').select('id').eq('payment_intent', paymentIntent).limit(1)).data)||[]).length>0 : false;
-          if(!_dupIn){ const _bkRow = await supaClient.from('bookings').insert({
+          if(!_dupIn){ const _bkRow = await _sbInsertTolerant('bookings', {
             slot_id: slotData.id,
             student_id: currentUser.id,
             coach_id: slotData.coach_profile_id,
@@ -26097,7 +26116,8 @@ async function showPaidPopup(){
             actual_stripe_fee: _txStripeFee,
             coach_keep_pct: (coachProf&&coachProf.partner)?0.99:((coachProf&&coachProf.founding)?0.965:0.965),
             acq_source: (function(){ try{ return localStorage.getItem('mtl_owncoach_'+slotData.coach_profile_id)?'direct':'mtl_discovery'; }catch(e){ return 'mtl_discovery'; } })()
-          }).select().single();
+          }, '*');
+          if(_bkRow && _bkRow.error) console.error('[MTL booking inperson]', _bkRow.error.message);
           if(_bookDiscLS && _bkRow && _bkRow.data){ try{ await supaClient.from('bookings').update({ discipline: _bookDiscLS }).eq('id', _bkRow.data.id); }catch(e){} }
           if(_bkRow && _bkRow.data && (Number(slotData.capacity)||1)>1){ try{ await supaClient.from('bookings').update({ capacity: Number(slotData.capacity)||1 }).eq('id', _bkRow.data.id); }catch(e){} }
           try{ var _pj=localStorage.getItem('mtl_book_party')||''; if(_pj && _bkRow && _bkRow.data){ var _pa=JSON.parse(_pj); if(_pa && _pa.length){ await supaClient.from('bookings').update({ party:_pa, minor_present:_pa.some(function(x){return x.isMinor;}) }).eq('id', _bkRow.data.id); } } }catch(e){} try{ localStorage.removeItem('mtl_book_party'); }catch(e){}
@@ -26151,7 +26171,7 @@ async function showPaidPopup(){
         const isFirstOrder = !priorOnline || priorOnline.length===0;
         const today = new Date().toISOString().slice(0,10);
         const _dupOn = paymentIntent ? (((await supaClient.from('bookings').select('id').eq('payment_intent', paymentIntent).limit(1)).data)||[]).length>0 : false;
-        if(!_dupOn) await supaClient.from('bookings').insert({
+        if(!_dupOn){ const _bkOn = await _sbInsertTolerant('bookings', {
           slot_id: null, student_id: currentUser.id, coach_id: coachId,
           coach_name: coachProf?.name || 'Kouč', payment_intent: paymentIntent,
           amount: amount, training_date: today, training_time: null,
@@ -26159,7 +26179,7 @@ async function showPaidPopup(){
           online_format: orderFmt,
           coach_keep_pct: (coachProf&&coachProf.partner)?0.99:((coachProf&&coachProf.founding)?0.965:0.965),
           acq_source: (function(){ try{ return localStorage.getItem('mtl_owncoach_'+coachId)?'direct':'mtl_discovery'; }catch(e){ return 'mtl_discovery'; } })()
-        });
+        }); if(_bkOn && _bkOn.error) console.error('[MTL booking online]', _bkOn.error.message); }
         const sym = _curSym(currency);
         const _amtStr = (_txNet!=null) ? fmtPrice(_txNet/100, currency) : fmtPrice(amount*coachPctV, currency);
         await supaClient.from('notifications').insert({ user_id: coachId, type:'booking', read:false, data: JSON.stringify({ kind:'coach_new_online', student: currentUser.name||'Student', fmt: orderFmt||'', amt: _amtStr, sym, bonus: _coachBonus }), message:`🌐 Nová online objednávka! ${currentUser.name||'Student'} si koupil online coaching${orderFmt?' ('+orderFmt+')':''}.${_coachBonus?' 🎁 100% referral bonus!':''} Ozvi se mu v chatu.` });
