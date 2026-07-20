@@ -229,6 +229,10 @@ async function coachCheckout(req, res) {
     metadata: {
       booking_type: isOnline ? 'online' : 'inperson',
       mtl_welcome_waived: (await isWelcomeZero(coachId)) ? String(applicationFee) : '0',
+      mtl_credit_row: _credRow || '',
+      mtl_credit_user: _credRow ? String(studentId || '') : '',
+      mtl_ref_pct: _credRow ? String(Math.round((MK - STUDENT_MARKUP) * 100)) : '0',
+      mtl_list_amount: String(Math.round(rate * 100)),
       student_id: studentId || '',
       slot_id: slotId || '',
       coach_profile_id: coachProfileId || '',
@@ -247,6 +251,8 @@ async function coachCheckout(req, res) {
         credit_type: credit || 'none',
         mtl_credit_row: _credRow || '',      // set ONLY when server-verified; the webhook consumes it
         mtl_credit_user: _credRow ? String(studentId||'') : '',
+        mtl_ref_pct: _credRow ? String(Math.round((MK - STUDENT_MARKUP) * 100)) : '0',
+        mtl_list_amount: String(Math.round(rate * 100)),
         coach_pct: (STUDENT_MARKUP - COMMISSION).toFixed(2),
         commission_pct: COMMISSION.toFixed(2),
         coach_name: coachName || '',
@@ -302,7 +308,7 @@ async function gymCheckout(req, res) {
       payment_method_types: ['card'],
       billing_address_collection: 'required',
       tax_id_collection: { enabled: true },
-      metadata: { mtl_payment_type: (String(merch)==='1'?'merch':'drop_in'), commission_pct: TAKE.toFixed(2), mtl_welcome_waived: (await isWelcomeZero(gymAccount)) ? String(applicationFee) : '0', gym_id: gymId || '', student_id: studentId || '', coach_id: coachId || '', mtl_plan: className || 'Drop-in', merch_name: merchName || '', mtl_currency: cur },
+      metadata: { mtl_payment_type: (String(merch)==='1'?'merch':'drop_in'), commission_pct: TAKE.toFixed(2), mtl_credit_row: _credRow || '', mtl_credit_user: _credRow ? String(studentId || '') : '', mtl_ref_pct: _credRow ? String(Math.round((MK - STUDENT_MK) * 100)) : '0', mtl_list_amount: String(Math.round(P * 100)), mtl_welcome_waived: (await isWelcomeZero(gymAccount)) ? String(applicationFee) : '0', gym_id: gymId || '', student_id: studentId || '', coach_id: coachId || '', mtl_plan: className || 'Drop-in', merch_name: merchName || '', mtl_currency: cur },
       line_items: [
         { price_data: { currency: cur, product_data: { name: `${className || 'Drop-in lekce'} — ${gymName || 'MTL Gym'}` }, unit_amount: unitAmount }, quantity: 1 },
       ],
@@ -324,6 +330,8 @@ async function gymCheckout(req, res) {
           mtl_credit: credit || 'none',
           mtl_credit_row: _credRow || '',    // set ONLY when server-verified; the webhook consumes it
           mtl_credit_user: _credRow ? String(studentId||'') : '',
+          mtl_ref_pct: _credRow ? String(Math.round((MK - STUDENT_MK) * 100)) : '0',
+          mtl_list_amount: String(Math.round(P * 100)),
         },
       },
       success_url: (String(merch)==='1')

@@ -80,6 +80,22 @@ export default async function handler(req, res) {
         );
         qualifies = b2 && b2.length;
       }
+
+      // ...or did they simply BUY A MEMBERSHIP?  (Petr, 2026-07-20)
+      // This used to be a real hole: the most valuable conversion of all - the invitee walks in,
+      // signs up for a membership and never books a single drop-in or private - awarded nobody
+      // anything, because both tests above only look at per-lesson rows. A membership that is
+      // active (or cancelling, i.e. paid to the end of the period) is at least as strong a proof
+      // of "this person actually started training" as one attended lesson.
+      // Deliberately NOT gated on a past date: a membership is paid up front and the money has
+      // already moved, unlike a booking that can still be a no-show. pending_offline is excluded
+      // on purpose - an unconfirmed QR/bank membership is not paid yet.
+      if (!qualifies) {
+        const b3 = await sb(
+          `gym_memberships?student_id=eq.${inv.id}&status=in.(active,cancelling)&select=id&limit=1`
+        );
+        qualifies = b3 && b3.length;
+      }
       if (!qualifies) continue;
 
       // set rewarded FIRST (idempotency) + grant invitee +2 in one PATCH

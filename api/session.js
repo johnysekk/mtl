@@ -17,6 +17,16 @@ async function sbPost(path, body) {
     return { ok: true, status: r.status };
   } catch (e) { console.error('sbPost', e.message); return { ok: false, status: 0, error: e.message, url }; }
 }
+// PATCH that RETURNS the affected rows, so a conditional update can be tested for "did I actually
+// change anything". sbPatch uses return=minimal and cannot answer that.
+async function sbPatchRet(path, body) {
+  try {
+    const r = await fetch(`${SB}/rest/v1/${path}`, { method: 'PATCH', headers: { ...sbHeaders, Prefer: 'return=representation' }, body: JSON.stringify(body) });
+    if (!r.ok) { const t = await r.text().catch(() => ''); console.error('sbPatchRet', r.status, t); return []; }
+    const j = await r.json().catch(() => []);
+    return Array.isArray(j) ? j : [];
+  } catch (e) { console.error('sbPatchRet', e.message); return []; }
+}
 async function sbPatch(path, body) {
   try {
     const r = await fetch(`${SB}/rest/v1/${path}`, { method: 'PATCH', headers: { ...sbHeaders, Prefer: 'return=minimal' }, body: JSON.stringify(body) });
@@ -217,7 +227,30 @@ export default async function handler(req, res) {
       else { const r = await recordTransaction(gymAccount, payId, { type: txType, ...f }); _tx = { recorded: ['recorded','updated','exists'].includes(r.status), ...r, txType, payId, gymAccount, gymId: f.gym_id, memberId: f.member_id }; }
     } catch (e) { _tx = { recorded: false, reason: 'exception: ' + e.message }; }
 
+    // ---- referral credit consumption (idempotent backstop for a non-delivering webhook) ----
+    let _cred = { consumed: false };
+    try {
+      const m2 = session.metadata || {};
+      const credRow = m2.mtl_credit_row || '';
+      const credUser = m2.mtl_credit_user || '';
+      if (credRow && credUser) {
+        // only flips a row that is still unconsumed -> whoever gets here first wins
+        const upd = await sbPatchRet(`referral_credits?id=eq.${encodeURIComponent(credRow)}&consumed=eq.false`, { consumed: true });
+        if (upd.length > 0) {
+          const pr = await sbGet(`profiles?id=eq.${encodeURIComponent(credUser)}&select=student_credits`);
+          const cur = (pr && pr[0] && pr[0].student_credits) || 0;
+          await sbPatch(`profiles?id=eq.${encodeURIComponent(credUser)}`, { student_credits: Math.max(0, cur - 1) });
+          _cred = { consumed: true, row: credRow };
+        } else {
+          _cred = { consumed: false, reason: 'already consumed (webhook got there first)' };
+        }
+      } else {
+        _cred = { consumed: false, reason: 'no mtl_credit_row in session metadata' };
+      }
+    } catch (e) { _cred = { consumed: false, reason: 'exception: ' + e.message }; }
+
     res.status(200).json({
+      _cred,
       paymentIntent: session.payment_intent || null,
       subscription: session.subscription || null,
       customer: session.customer || null,
