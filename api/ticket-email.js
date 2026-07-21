@@ -32,8 +32,8 @@ export default async function handler(req, res) {
     const RESEND_KEY = process.env.RESEND_API_KEY || process.env.RESEND_KEY;
     if (!SERVICE_KEY || !RESEND_KEY) { res.status(500).json({ error: 'server not configured' }); return; }
 
-    const APP_URL = process.env.APP_URL || 'https://app.mtlcoaches.co';
-    const MAIL_FROM = process.env.MAIL_FROM || 'MTL Coaches <noreply@mtlcoaches.co>';
+    const APP_URL = process.env.APP_URL || 'https://app.martialtraininglab.com';
+    const MAIL_FROM = process.env.MAIL_FROM || process.env.INVITE_FROM || 'Martial Training Lab <no-reply@martialtraininglab.com>';
     const sb = (path) => fetch(SUPABASE_URL + '/rest/v1/' + path, {
       headers: { apikey: SERVICE_KEY, Authorization: 'Bearer ' + SERVICE_KEY }
     }).then(r => r.json()).catch(() => null);

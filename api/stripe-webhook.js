@@ -164,7 +164,7 @@ async function sendTicketEmail(s, m) {
   const key = process.env.RESEND_API_KEY; if (!key) return;
   const email = (s.customer_details && s.customer_details.email) || s.customer_email; if (!email) return;
   const qtok = m.qr_token || ''; const evId = m.mtl_event_id || ''; if (!qtok || !evId) return;
-  const origin = process.env.PUBLIC_URL || 'https://app.muaythailab.co';
+  const origin = process.env.PUBLIC_URL || 'https://app.martialtraininglab.com';
   const checkinUrl = `${origin}/?evcheckin=1&ev=${encodeURIComponent(evId)}&tok=${encodeURIComponent(qtok)}`;
   const qrImg = `https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=8&data=${encodeURIComponent(checkinUrl)}`;
   const title = m.mtl_event || 'your event';
@@ -174,7 +174,7 @@ async function sendTicketEmail(s, m) {
     + `<p style="text-align:center;margin:18px 0;"><img src="${qrImg}" width="240" height="240" alt="Ticket QR" style="border:1px solid #eee;border-radius:12px;"></p>`
     + `<p style="text-align:center;color:#888;font-size:13px;">You can also open your ticket anytime in the MTL Coaches app under My events.</p>`
     + `<p style="text-align:center;"><a href="${origin}" style="color:#E8001D;font-weight:bold;text-decoration:none;">Open MTL Coaches \u2192</a></p></div>`;
-  const from = process.env.TICKET_EMAIL_FROM || 'MTL Coaches <tickets@muaythailab.co>';
+  const from = process.env.TICKET_EMAIL_FROM || process.env.INVITE_FROM || 'Martial Training Lab <no-reply@martialtraininglab.com>';
   await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from, to: email, subject: `\uD83C\uDF9F\uFE0F Your ticket \u2014 ${title}`, html }) });
 }
 
@@ -531,7 +531,7 @@ export default async function handler(req, res) {
               const remainder = Math.max(0, tierPrice - Number(coh.deposit_amount || 0));
               const money = (x) => Math.round(x) + ' ' + cur2;
               const fromName = (gymName || 'Martial Training Lab').replace(/["<>]/g, '');
-              await sendResend(mem.email, (coh.name || 'Kurz') + ' \u2014 z\u00E1loha p\u0159ijata', cohortDepositHtml(mem.name, coh.name || 'Kurz', gymName, money(amount), remainder > 0 ? money(remainder) : '', coh.start_date || ''), { from: '"' + fromName + '" <' + MAIL_ADDR + '>', replyTo: ownerEmail || undefined });
+              await sendResend(mem.email, (coh.name || 'Kurz') + ' \u2014 z\u00E1loha p\u0159ijata', cohortDepositHtml(mem.name, coh.name || 'Kurz', gymName, money(amount), remainder > 0 ? money(remainder) : '', coh.start_date || '', ((process.env.APP_URL || process.env.PUBLIC_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '') + '/?myclass=' + encodeURIComponent(cmId))), { from: '"' + fromName + '" <' + MAIL_ADDR + '>', replyTo: ownerEmail || undefined });
             }
             try { await cohortCapiPurchase(coh, cmId, (mem && mem.email) || '', amount, cur, (mem && mem.fbp) || '', (mem && mem.fbc) || ''); } catch (e) {}
           } catch (e) { console.error('cohort confirm', e.message); }
