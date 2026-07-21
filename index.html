@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SCL Per Petr (step 4: courses in the Events discovery surface + distance, recycling the gym-deck geo engine). (1) NEW 'Kurzy' CHIP in the Events chip bar (only shown when there are open courses, with a count). Selecting it swaps the event swipe-deck for a DISTANCE-SORTED course list. (2) GEO ENGINE REUSED verbatim from the gym deck: haversine + userLoc (falls back to currentUser.city_lat/lng), unknown distance sinks to the bottom, maxDistKm honoured. Courses pull coords from their host gym's city_lat/city_lng. Nearest first, because a beginner course two cities away is noise. Unit-tested (Praha user: Praha 2km -> Plzeň 85 -> Brno 185 -> unknown last; 100km filter keeps near + unknown). (3) Course cards mirror the profile Courses section (emoji, weekly pattern via cohortOccurrences, km badge, deposit, from-date); tap -> openCohortSignup with src=mtl_deck, so the roster's attribution split (added in SCC) separates deck-sourced signups from Meta and the alert channel. (4) EVENTS THEMSELVES now carry distance: every event gets _distKm from city_lat/city_lng (both already in the schema), the existing card distTxt lights up (ev._dist wired), and the Max-distance setting now filters events too. Event PRIMARY sort stays by date on purpose - a fight night worth travelling for should not be buried the way a local-only beginner course should; distance is shown + filterable, not the sort key, for events. Courses ARE distance-sorted because locality is the whole point there. No DB change (events.city_lat/lng and gym_cohorts.schedule already exist). Deploy: index.html (SCL). Builds on SCK. -->
+<!-- MTL build: SCM Per Petr (corrected step 4: courses are DECK CARDS like events, not a list; + poster + sort chips). CORRECTION of SCL: I wrongly built courses as a separate distance-sorted LIST. Petr: a course must be a normal swipeable card in the SAME deck as events (Fight Night etc), SAME card style, SAME poster. Reverted the list (_renderCohDeck removed). (1) _cohAsEvent() maps a cohort into the event card shape (title, type, starts_at=start_date, poster, deposit as price, city_lat/lng from the host gym, _isCohort flag). Courses now ride the exact same swipeCardHtml + evRenderSwipe as events; the card shows a '🥊 Kurz/Course' type badge. Tapping / swiping-right / the GO+INFO buttons open openCohortSignup (src=mtl_deck) for cohort cards and openEventView for events. (2) The 'Kurzy' chip fills the deck with cohort-cards (filtered by discipline + search + max-distance) instead of events. (3) POSTER: gym_cohorts had no poster; cohort-poster.sql adds it. The cohort form now has the SAME poster upload as the event form (4/3 crop, klub-photos bucket), saved to gym_cohorts.poster and shown on the deck card exactly like an event poster. (4) SORT CHIPS (second chip row, events only): 'Dle data' (default - soonest start first, so you see what you'll soon be too late to buy), 'Nejbližší', 'Novinky' (newest listed). Unit-tested all three orderings. COURSES are locked to nearest-first (Petr's call - locality is the whole point for a beginner course), so the sort row is hidden on the Kurzy chip. (5) EVENTS also honour Max-distance filtering now; primary sort follows the chosen chip (default date). Deploy: index.html (SCM) + run cohort-poster.sql. Supersedes SCL. Builds on SCK. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -6870,14 +6870,14 @@ async function renderEventsAsync(box){
     // because a beginner course two cities away is noise (unlike a fight night you'd travel for).
     try{
       const _tdISO=new Date().toISOString().slice(0,10);
-      const { data:_chs } = await supaClient.from('gym_cohorts').select('id,gym_id,name,discipline,start_date,end_date,months,capacity,status,description,schedule,schedule_note,currency,deposit_amount,price_regular,price_student,price_tiers').eq('status','open').limit(80);
+      const { data:_chs } = await supaClient.from('gym_cohorts').select('id,gym_id,name,discipline,start_date,end_date,months,capacity,status,description,schedule,schedule_note,currency,deposit_amount,price_regular,price_student,price_tiers,poster').eq('status','open').limit(80);
       let _chList=(_chs||[]).filter(c=>c && (!c.start_date || c.start_date>=_tdISO));
       if(_chList.length){
         const _cgids=[...new Set(_chList.map(c=>c.gym_id).filter(Boolean))];
         const _cg={};
         try{ const { data:_gr }=await supaClient.from('gyms').select('id,name,city,city_lat,city_lng').in('id',_cgids); (_gr||[]).forEach(g=>{ _cg[g.id]=g; }); }catch(e){}
         _chList.forEach(c=>{ const g=_cg[c.gym_id]||{}; c._gymName=g.name||null; c._city=g.city||null; c._lat=(g.city_lat!=null?+g.city_lat:null); c._lng=(g.city_lng!=null?+g.city_lng:null); });
-        window._cohDeckList=_chList;
+        window._cohDeckList=_chList.map(_cohAsEvent);
       } else { window._cohDeckList=[]; }
     }catch(e){ window._cohDeckList=[]; }
     try{ var _gids=[...new Set((window._evList||[]).map(e=>e.gym_id).filter(Boolean))]; var _uids=[...new Set((window._evList||[]).map(e=>e.created_by).filter(Boolean))]; var _gm={}, _um={}; if(_gids.length){ var _gr=await supaClient.from('gyms').select('id,name').in('id',_gids); (_gr&&_gr.data||[]).forEach(g=>_gm[g.id]=g.name); } if(_uids.length){ var _ur=await supaClient.from('profiles').select('id,name').in('id',_uids); (_ur&&_ur.data||[]).forEach(u=>_um[u.id]=u.name); } window._evList.forEach(e=>{ e._gymName=_gm[e.gym_id]||null; e._creatorName=_um[e.created_by]||null; }); }catch(e){}
@@ -6893,13 +6893,27 @@ async function renderEventsAsync(box){
       let _chipHtml=_tch.map(c=>{ const on=(ft===c.v && ft!=='courses'); return `<div class="evTypeChip pill${on?' active':''}" data-v="${c.v}">${c.emoji?c.emoji+' ':''}${c.lbl}</div>`; }).join('');
       if(_nCoh) _chipHtml+=`<div class="evTypeChip pill${ft==='courses'?' active':''}" data-v="courses">\ud83e\udd4b ${LANG==='en'?'Courses':'Kurzy'} <span style="opacity:.6;font-weight:600;">${_nCoh}</span></div>`;
       html += `<div style="display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;margin-bottom:10px;">`+_chipHtml+`</div>`;
-      const _sq=((typeof searchQuery!=='undefined'?searchQuery:'')||'').toLowerCase(); window._evList.forEach(ev=>{ ev._distKm=(userLoc && ev.city_lat!=null && ev.city_lng!=null)?haversine(userLoc.lat,userLoc.lng,+ev.city_lat,+ev.city_lng):null; ev._dist=ev._distKm; }); const list=window._evList.filter(ev=>{ if(fd!=='all'){ let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){} if(!ds.includes(fd)) return false; } else { let _eds=[]; try{ _eds=JSON.parse(ev.disciplines||'[]'); }catch(e){} const _epc=prefCategory(); if(_eds.length && !_eds.some(d=>discCat(d)===_epc)) return false; } if(ft!=='all' && ev.type!==ft) return false; if(maxDistKm!=null && userLoc && ev._distKm!=null && ev._distKm>maxDistKm) return false; if(_sq){ const hay=((ev.title||'')+' '+(ev.venue||'')+' '+(ev.city||'')+' '+(ev.country||'')).toLowerCase(); if(!hay.includes(_sq)) return false; } return true; });
-      window._evFiltered = list; if(window._evIdx==null) window._evIdx=0;
-      if(ft==='courses'){
-        html += `<div id="cohDeckList"></div>`;
-      } else {
-        html += list.length ? `<div id="evDeck" style="position:relative;flex:1;min-height:280px;margin-top:0;"></div>` : `<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;">${LANG==='en'?'No events in this discipline.':'Žádné události v této disciplíně.'}</p>`;
+      if(ft!=='courses'){
+        const _sm=window._deckSortMode||'date';
+        const _sorts=[{v:'date',lbl:(LANG==='en'?'Soonest':'Dle data'),emoji:'\ud83d\udcc5'},{v:'near',lbl:(LANG==='en'?'Nearest':'Nejbližší'),emoji:'\ud83d\udccd'},{v:'new',lbl:(LANG==='en'?'Newest':'Novinky'),emoji:'\u2728'}];
+        html += `<div style="display:flex;gap:7px;overflow-x:auto;scrollbar-width:none;margin-bottom:12px;">`+_sorts.map(sm=>{ const on=(_sm===sm.v); return `<div class="evSortChip" data-v="${sm.v}" style="flex:0 0 auto;font-size:12px;font-weight:700;padding:6px 12px;border-radius:99px;cursor:pointer;border:1px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'transparent'};color:${on?'#fff':'var(--mid)'};">${sm.emoji} ${sm.lbl}</div>`; }).join('')+`</div>`;
       }
+      const _sq=((typeof searchQuery!=='undefined'?searchQuery:'')||'').toLowerCase(); window._evList.forEach(ev=>{ ev._distKm=(userLoc && ev.city_lat!=null && ev.city_lng!=null)?haversine(userLoc.lat,userLoc.lng,+ev.city_lat,+ev.city_lng):null; ev._dist=ev._distKm; }); const list=window._evList.filter(ev=>{ if(fd!=='all'){ let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){} if(!ds.includes(fd)) return false; } else { let _eds=[]; try{ _eds=JSON.parse(ev.disciplines||'[]'); }catch(e){} const _epc=prefCategory(); if(_eds.length && !_eds.some(d=>discCat(d)===_epc)) return false; } if(ft!=='all' && ev.type!==ft) return false; if(maxDistKm!=null && userLoc && ev._distKm!=null && ev._distKm>maxDistKm) return false; if(_sq){ const hay=((ev.title||'')+' '+(ev.venue||'')+' '+(ev.city||'')+' '+(ev.country||'')).toLowerCase(); if(!hay.includes(_sq)) return false; } return true; });
+      // 'Kurzy' chip: the deck shows cohorts (already mapped to event shape) instead of events,
+      // same card, same swipe, filtered by discipline + search + max-distance. Tap opens the signup.
+      if(ft==='courses'){
+        let clist=(window._cohDeckList||[]).slice();
+        if(fd!=='all'){ clist=clist.filter(ev=>{ let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){} return ds.includes(fd); }); }
+        else { clist=clist.filter(ev=>{ let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){} const _pc=prefCategory(); return !ds.length || ds.some(d=>discCat(d)===_pc); }); }
+        if(_sq) clist=clist.filter(ev=>(((ev.title||'')+' '+(ev._gymName||'')+' '+(ev.city||'')).toLowerCase()).includes(_sq));
+        clist.forEach(ev=>{ ev._distKm=(userLoc && ev.city_lat!=null && ev.city_lng!=null)?haversine(userLoc.lat,userLoc.lng,+ev.city_lat,+ev.city_lng):null; ev._dist=ev._distKm; });
+        if(maxDistKm!=null && userLoc) clist=clist.filter(ev=>ev._distKm==null || ev._distKm<=maxDistKm);
+        clist.sort((a,b)=>((a._distKm==null?9e9:a._distKm)-(b._distKm==null?9e9:b._distKm)));
+        list=clist;
+      }
+      if(ft!=='courses'){ _applyDeckSort(list); }
+      window._evFiltered = list; if(window._evIdx==null) window._evIdx=0;
+      html += list.length ? `<div id="evDeck" style="position:relative;flex:1;min-height:280px;margin-top:0;"></div>` : `<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;">${(ft==='courses')?(LANG==='en'?'No open courses near you.':'Zatím tu nejsou otevřené kurzy poblíž.'):(LANG==='en'?'No events in this discipline.':'Žádné události v této disciplíně.')}</p>`;
     } else {
       html += `<div style="text-align:center;padding:40px 16px;color:var(--light);"><div style="font-size:40px;margin-bottom:10px;">🥊</div><div style="font-weight:700;color:var(--dark);margin-bottom:6px;">${LANG==='en'?'No events near you yet':'Zatím tu nejsou žádné události'}</div><div style="font-size:13px;line-height:1.5;">${LANG==='en'?'Fight nights, seminars and camps will show up here.':'Fight nights, semináře a kempy se objeví tady.'}</div></div>`;
     }
@@ -6907,40 +6921,8 @@ async function renderEventsAsync(box){
   box.innerHTML=html;
   const _esb=$('evSportBtn'); if(_esb) _esb.onclick=openDiscPicker;
   box.querySelectorAll('.evTypeChip').forEach(c=>c.onclick=()=>{ window._evFilterType=c.dataset.v; window._evIdx=0; renderEventsAsync(box); });
-  if((window._evFilterType||'all')==='courses'){ try{ _renderCohDeck($('cohDeckList')); }catch(e){} }
-  else if($('evDeck')) evRenderSwipe();
-}
-// Distance-sorted course list for the Events 'Kurzy' chip. Same geo engine as the gym deck
-// (haversine + userLoc, unknown distance sinks to the bottom), same tap target as the profile
-// course cards (openCohortSignup with src=mtl_deck so the roster can separate deck-sourced signups).
-function _renderCohDeck(box){
-  if(!box) return; const EN=LANG==='en';
-  let list=(window._cohDeckList||[]).slice();
-  // discipline filter mirrors the events one
-  const fd=(typeof _deckDisc!=='undefined'&&_deckDisc)?_deckDisc:null;
-  if(fd){ list=list.filter(c=>c.discipline===fd); }
-  else { try{ const _pc=prefCategory(); list=list.filter(c=>!c.discipline || discCat(c.discipline)===_pc); }catch(e){} }
-  const _sq=((typeof searchQuery!=='undefined'?searchQuery:'')||'').toLowerCase();
-  if(_sq) list=list.filter(c=>(((c.name||'')+' '+(c._gymName||'')+' '+(c._city||'')).toLowerCase()).includes(_sq));
-  list.forEach(c=>{ c._distKm=(userLoc && c._lat!=null && c._lng!=null)?haversine(userLoc.lat,userLoc.lng,c._lat,c._lng):null; });
-  if(userLoc) list.sort((a,b)=>((a._distKm==null?9e9:a._distKm)-(b._distKm==null?9e9:b._distKm)));
-  if(maxDistKm!=null && userLoc) list=list.filter(c=>c._distKm==null || c._distKm<=maxDistKm);
-  if(!list.length){ box.innerHTML='<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;line-height:1.5;">'+(EN?'No open courses near you right now.':'Zatím tu nejsou otevřené kurzy poblíž.')+'</p>'; return; }
-  const dn=dowShort();
-  box.innerHTML=list.map(function(c){
-    const em=(typeof disciplineEmoji==='function'?disciplineEmoji(c.discipline||''):'')||'\ud83e\udd4b';
-    let _pat=''; try{ const _occ=cohortOccurrences(c,{horizonDays:90}); const _seen={},_p=[]; _occ.forEach(function(o){ const d=new Date(o.date+'T00:00:00').getDay(); const k=d+'|'+(o.time||''); if(_seen[k])return; _seen[k]=1; _p.push({d:d,t:o.time}); }); _p.sort((a,b)=>a.d-b.d); _pat=_p.map(x=>dn[x.d]+' '+(x.t||'')).join(' \u00b7 '); }catch(e){}
-    const dist=(c._distKm!=null)?('<span style="font-size:11px;font-weight:700;color:var(--red);">'+Math.round(c._distKm)+' km</span>'):'';
-    const dep=(c.deposit_amount?((EN?'deposit ':'záloha ')+Math.round(c.deposit_amount)+' '+(_curSym?_curSym(c.currency):'')):'');
-    return '<div class="cohDeckCard" data-id="'+c.id+'" style="border:1px solid var(--border);border-radius:14px;padding:13px;margin-bottom:10px;cursor:pointer;background:var(--surf);">'
-      +'<div style="display:flex;gap:11px;align-items:center;"><div style="font-size:24px;">'+em+'</div>'
-      +'<div style="flex:1;min-width:0;"><div style="font-weight:800;font-size:14px;color:var(--dark);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escapeHtml(c.name||'')+'</div>'
-      +'<div style="font-size:12px;color:var(--mid);margin-top:1px;">'+escapeHtml(c._gymName||'')+(c._city?(' \u00b7 '+escapeHtml(c._city)):'')+'</div></div>'+dist+'</div>'
-      +(_pat?('<div style="font-size:12px;color:var(--dark);margin-top:8px;">\u23f0 '+escapeHtml(_pat)+'</div>'):'')
-      +'<div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;"><div style="font-size:11.5px;color:var(--light);">'+(c.start_date?((EN?'from ':'od ')+c.start_date):'')+(c.months?(' \u00b7 '+c.months+' '+(EN?'mo':'měs')):'')+'</div><div style="font-size:12.5px;font-weight:800;color:var(--blue);">'+(EN?'sign up \u203a':'přihlásit \u203a')+'</div></div>'
-      +(dep?('<div style="font-size:10.5px;color:var(--light);margin-top:3px;">'+dep+'</div>'):'')+'</div>';
-  }).join('');
-  box.querySelectorAll('.cohDeckCard').forEach(function(cd){ cd.onclick=function(){ try{ localStorage.setItem('mtl_coh_src','mtl_deck'); }catch(e){} if(typeof openCohortSignup==='function') openCohortSignup(cd.dataset.id); }; });
+  box.querySelectorAll('.evSortChip').forEach(c=>c.onclick=()=>{ window._deckSortMode=c.dataset.v; window._evIdx=0; renderEventsAsync(box); });
+  if($('evDeck')) evRenderSwipe();
 }
 async function eventEligibleGyms(){
   if(!currentUser) return [];
@@ -7328,7 +7310,7 @@ async function openEventAttendance(evId, title){
 function swipeCardHtml(ev){
   const cur=ev.currency||'CZK'; const sym=_curSym(cur);
   let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){}
-  const t=EVENT_TYPES.find(x=>x.v===ev.type)||{emoji:'📌',cs:'Akce',en:'Event'};
+  const t=ev._isCohort?{emoji:'\ud83e\udd4b',cs:'Kurz',en:'Course'}:(EVENT_TYPES.find(x=>x.v===ev.type)||{emoji:'📌',cs:'Akce',en:'Event'});
   const dt = ev.starts_at ? new Date(ev.starts_at).toLocaleString(LANG==='en'?'en-US':'cs-CZ',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}) : '';
   const tiers=evTiersOf(ev); const minP=Math.min.apply(null,tiers.map(x=>x.price||0)); const multi=tiers.length>1;
   const price = minP>0 ? `${multi?(LANG==='en'?'from ':'od '):''}${fmtPrice(minP*1,cur)} ${sym}` : (LANG==='en'?'Free':'Zdarma');
@@ -7362,8 +7344,9 @@ function evRenderSwipe(){
   const card=$('evSwipeCard'); let sx=0,dx=0,drag=false,moved=false;
   const apply=x=>{ card.style.transform=`translateX(${x}px) rotate(${x*.06}deg)`; const sk=$('evLblSkip'),vw=$('evLblView'); const o=Math.min(1,Math.abs(x)/90); if(sk)sk.style.opacity=x<-15?o:0; if(vw)vw.style.opacity=x>15?o:0; };
   const finish=()=>{ const sk=$('evLblSkip'),vw=$('evLblView'); if(sk)sk.style.opacity=0; if(vw)vw.style.opacity=0;
-    if(!moved){ openEventView(cur); dx=0; return; }
-    if(dx>90){ card.style.transition='transform .25s ease-out'; card.style.transform='translateX(440px) rotate(22deg)'; setTimeout(()=>{ window._evIdx=idx+1; openEventView(cur); evRenderSwipe(); },180); }
+    const _openCard=(x)=>{ if(x&&x._isCohort){ try{ localStorage.setItem('mtl_coh_src','mtl_deck'); }catch(e){} if(typeof openCohortSignup==='function') openCohortSignup(x.cohort_id||x.id); } else { openEventView(x); } };
+    if(!moved){ _openCard(cur); dx=0; return; }
+    if(dx>90){ card.style.transition='transform .25s ease-out'; card.style.transform='translateX(440px) rotate(22deg)'; setTimeout(()=>{ window._evIdx=idx+1; _openCard(cur); evRenderSwipe(); },180); }
     else if(dx<-90){ card.style.transition='transform .25s ease-out'; card.style.transform='translateX(-440px) rotate(-22deg)'; setTimeout(()=>{ window._evIdx=idx+1; evRenderSwipe(); },180); }
     else { card.style.transition='transform .3s cubic-bezier(.34,1.56,.64,1)'; card.style.transform=''; setTimeout(()=>{ if(card) card.style.transition=''; },300); }
     dx=0;
@@ -11428,12 +11411,12 @@ function _cohBreak(inputId, boxId){
   box.style.display='block';
   box.innerHTML=shareBreakdownHtml(price, _cohCtx.currency, _cohKeepRate());
 }
-function _cohSnapshot(){ var k={}; k._sched=(window._cohSched||[]).slice(); ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)) k[id]=$(id).value; }); k._disc=(typeof _cohDisc!=='undefined'?(_cohDisc||[]).slice():[]); k._tiers=!!($('cohMoreTiers')&&$('cohMoreTiers').checked); return k; }
+function _cohSnapshot(){ var k={}; k._sched=(window._cohSched||[]).slice(); k._poster=window._cohPoster||null; ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)) k[id]=$(id).value; }); k._disc=(typeof _cohDisc!=='undefined'?(_cohDisc||[]).slice():[]); k._tiers=!!($('cohMoreTiers')&&$('cohMoreTiers').checked); return k; }
 function _cohRelang(){ var sh=$('shCohorts'); if(!sh||!sh.classList.contains('open')) return; if(window._cohView==='create'){ _cohShowCreate(_cohSnapshot()); } else if(typeof _cohRender==='function'){ _cohRender(); } }
 function _cohShowCreate(keep){
   if(!_cohCtx) return;
   const box=$('cohBody'); if(!box) return; const EN=LANG==='en'; const cur=_cohCtx.currency; const sym=_curSym(cur);
-  if(!keep) window._cohSched=[];
+  if(!keep){ window._cohSched=[]; window._cohPoster=null; }
   _cohDisc=[];
   const inp='width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;margin-bottom:10px;';
   const lbl='font-size:12px;font-weight:700;color:var(--mid);display:block;margin-bottom:4px;';
@@ -11441,6 +11424,7 @@ function _cohShowCreate(keep){
   const mtlP=Math.round((1-_cohKeepRate())*1000)/10;
   box.innerHTML='<div style="border:1px solid var(--border);border-radius:12px;padding:14px;">'
     +'<div style="background:#F0FBF0;border-radius:10px;padding:9px 12px;margin-bottom:14px;font-size:12px;color:var(--mid);line-height:1.5;"><b style="color:var(--dark);">'+(EN?'Your MTL rate: ':'Tvoje MTL sazba: ')+mtlP+' %</b> \u00b7 '+_cohRateLabel()+'<br>'+(EN?'Same rate as your other prices. Your share is shown under each price.':'Stejn\u00e1 sazba jako u tv\u00fdch ostatn\u00edch cen. Tv\u016fj pod\u00edl vid\u00ed\u0161 pod ka\u017edou cenou.')+'</div>'
+    +'<label style="'+lbl+'">'+(EN?'Poster (optional)':'Poster (nepovinn\u00e9)')+'</label>'+'<div id="cohPosterPv" style="display:none;width:100%;aspect-ratio:4/3;border-radius:12px;background-size:cover;background-position:center;margin-bottom:8px;"></div>'+'<button type="button" id="cohPosterBtn" style="width:100%;padding:11px;border:1.5px dashed var(--border);background:transparent;border-radius:11px;font-size:13px;font-weight:700;color:var(--mid);cursor:pointer;font-family:\'DM Sans\';margin-bottom:12px;">\ud83d\uddbc\ufe0f '+(EN?'Add poster':'P\u0159idat poster')+'</button>'+'<input type="file" id="cohPosterInput" accept="image/*" style="display:none;">'
     +'<label style="'+lbl+'">'+(EN?'Cohort name':'N\u00e1zev kurzu')+'</label><input id="cohName" type="text" style="'+inp+'">'
     +'<label style="'+lbl+'">'+(EN?'Discipline':'Disciplína')+'</label><div id="cohDiscChips" style="margin-bottom:12px;"></div>'
     +'<label style="'+lbl+'">'+(EN?'Start date':'Za\u010d\u00e1tek')+'</label><input id="cohStart" type="date" style="'+inp+'">'
@@ -11483,12 +11467,14 @@ function _cohShowCreate(keep){
     box.querySelectorAll('.cohSchDur').forEach(function(el){ el.onchange=function(){ _cohSched[+el.dataset.i].dur=Number(el.value)||60; }; });
     box.querySelectorAll('.cohSchDel').forEach(function(el){ el.onclick=function(){ _cohSched.splice(+el.dataset.i,1); _cohSchedRender(); }; });
   }
+  if($('cohPosterBtn')) $('cohPosterBtn').onclick=function(){ $('cohPosterInput').click(); };
+  if($('cohPosterInput')) $('cohPosterInput').onchange=async function(e){ const file=e.target.files&&e.target.files[0]; if(!file) return; const blob=await cropImage(file, 4/3); e.target.value=''; if(!blob) return; toast(L('\u2b06\ufe0f Nahr\u00e1v\u00e1m...')); try{ const fileName=currentUser.id+'-cohort-'+Date.now()+'.jpg'; const { error }=await supaClient.storage.from('klub-photos').upload(fileName, blob, { contentType:'image/jpeg', upsert:false }); if(error){ toast('\u26a0\ufe0f '+error.message); return; } const { data }=supaClient.storage.from('klub-photos').getPublicUrl(fileName); window._cohPoster=data.publicUrl; const pv=$('cohPosterPv'); if(pv){ pv.style.backgroundImage='url(\''+data.publicUrl+'\')'; pv.style.display='block'; } toast(LANG==='en'?'\u2705 Poster added':'\u2705 Poster nahr\u00e1n'); }catch(err){ toast('\u26a0\ufe0f'); } };
   if($('cohSchedAdd')) $('cohSchedAdd').onclick=function(){ _cohSched.push({ day:1, time:'18:00', dur:60 }); _cohSchedRender(); };
   window._cohSchedRender=_cohSchedRender;
   _cohSchedRender();
   $('cohSave').onclick=function(){ _cohSave(); };
   window._cohView='create';
-  if(keep){ try{ ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)&&keep[id]!=null) $(id).value=keep[id]; }); if(keep._disc){ _cohDisc=keep._disc.slice(); _cohDiscChips(); } if(keep._sched){ window._cohSched=keep._sched.slice(); if(typeof _cohSchedRender==='function') _cohSchedRender(); } if(keep._tiers && $('cohMoreTiers')){ $('cohMoreTiers').checked=true; var w=$('cohTierWrap'); if(w) w.style.display='block'; } _cohBreak('cohDep','cohDepBreak'); _cohBreak('cohPR','cohPRBreak'); _cohBreak('cohPS','cohPSBreak'); }catch(e){} }
+  if(keep){ try{ ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)&&keep[id]!=null) $(id).value=keep[id]; }); if(keep._disc){ _cohDisc=keep._disc.slice(); _cohDiscChips(); } if(keep._sched){ window._cohSched=keep._sched.slice(); if(typeof _cohSchedRender==='function') _cohSchedRender(); } if(keep._poster!==undefined){ window._cohPoster=keep._poster; const _pv=$('cohPosterPv'); if(_pv&&keep._poster){ _pv.style.backgroundImage='url(\''+keep._poster+'\')'; _pv.style.display='block'; } } if(keep._tiers && $('cohMoreTiers')){ $('cohMoreTiers').checked=true; var w=$('cohTierWrap'); if(w) w.style.display='block'; } _cohBreak('cohDep','cohDepBreak'); _cohBreak('cohPR','cohPRBreak'); _cohBreak('cohPS','cohPSBreak'); }catch(e){} }
 }
 // One extra pricing offer: a free-text name + a price, with a remove button. Rows are plain DOM
 // so the owner can add as many as they want; _cohTiers() reads them back on save.
@@ -11557,7 +11543,7 @@ async function _cohSave(){
       toast(EN?('A '+months+'-month course can end on '+_xm+' at the latest (max +1 month)'):(months+'měsíční kurz může končit nejpozději '+_xm+' (max +1 měsíc)')); return;
     }
   }
-  const rec={ gym_id:_cohCtx.gymId, owner_id:_cohCtx.ownerId, stripe_account:_cohCtx.stripeAccount||null, name:name, discipline:(_cohDisc[0]||null), start_date:g('cohStart')||null, end_date:g('cohEnd')||null, months:months, capacity:parseInt(g('cohCap'),10)||null, deposit_amount:parseFloat(g('cohDep'))||0, price_tiers:_cohTiers(), price_student:((_cohTiers()[1]&&_cohTiers()[1].price)||parseFloat(g('cohPR'))||0), price_regular:(parseFloat(g('cohPR'))||0), currency:_cohCtx.currency, gym_meta_pixel:g('cohPixel')||null, capi_token:g('cohCapiToken')||null, description:g('cohDesc')||null, schedule:(window._cohSched||[]), schedule_note:(cohScheduleSummary(window._cohSched||[])||g('cohSchedNote')||null), status:'open' };
+  const rec={ gym_id:_cohCtx.gymId, owner_id:_cohCtx.ownerId, stripe_account:_cohCtx.stripeAccount||null, name:name, discipline:(_cohDisc[0]||null), start_date:g('cohStart')||null, end_date:g('cohEnd')||null, months:months, capacity:parseInt(g('cohCap'),10)||null, deposit_amount:parseFloat(g('cohDep'))||0, price_tiers:_cohTiers(), price_student:((_cohTiers()[1]&&_cohTiers()[1].price)||parseFloat(g('cohPR'))||0), price_regular:(parseFloat(g('cohPR'))||0), currency:_cohCtx.currency, gym_meta_pixel:g('cohPixel')||null, capi_token:g('cohCapiToken')||null, description:g('cohDesc')||null, schedule:(window._cohSched||[]), schedule_note:(cohScheduleSummary(window._cohSched||[])||g('cohSchedNote')||null), poster:(window._cohPoster||null), status:'open' };
   const btn=$('cohSave'); if(btn){ btn.disabled=true; btn.textContent=(EN?'Saving...':'Ukládám...'); }
   try{
     const { data:_newCoh, error }=await supaClient.from('gym_cohorts').insert(rec).select('id').single();
@@ -17148,7 +17134,7 @@ $('btnProfile').onclick=e=>{ e.stopPropagation(); const c=filtered[idx]; if(c &&
 // Action buttons
 $('btnPass').onclick=()=>{ if(_deckMode==='events'){ evNextCard(); return; } doPass(); };
 $('btnUndo').onclick=()=>{ if(_deckMode==='events'){ evPrevCard(); return; } doUndo(); };
-$('btnGo').onclick=()=>{ if(_deckMode==='events'){ const e=evCurrent(); if(e) openEventView(e); return; } doGo(); };
+$('btnGo').onclick=()=>{ if(_deckMode==='events'){ const e=evCurrent(); if(e){ if(e._isCohort){ try{ localStorage.setItem('mtl_coh_src','mtl_deck'); }catch(e2){} if(typeof openCohortSignup==='function') openCohortSignup(e.cohort_id||e.id); } else openEventView(e); } return; } doGo(); };
 $('btnSave').onclick=()=>{ if(_deckMode==='events'){ evSaveFav(); return; } doSave(); };
 (function(){
   const SAVE_IDS=['btnSaveRates','coachSchedSave','mgSave']; const dirty=new Set();
@@ -17158,7 +17144,7 @@ $('btnSave').onclick=()=>{ if(_deckMode==='events'){ evSaveFav(); return; } doSa
   document.addEventListener('change',onEdit,true);
   document.addEventListener('click',function(e){ const x=e.target&&e.target.closest&&e.target.closest('button'); if(x&&SAVE_IDS.includes(x.id)) dirty.clear(); },true);
 })();
-$('btnInfo').onclick=()=>{ if(_deckMode==='events'){ const e=evCurrent(); if(e) openEventView(e); return; } doInfo(); };
+$('btnInfo').onclick=()=>{ if(_deckMode==='events'){ const e=evCurrent(); if(e){ if(e._isCohort){ try{ localStorage.setItem('mtl_coh_src','mtl_deck'); }catch(e2){} if(typeof openCohortSignup==='function') openCohortSignup(e.cohort_id||e.id); } else openEventView(e); } return; } doInfo(); };
 
 // Bottom nav
 $('ni-find').onclick=()=>{ setNav('ni-find'); closeAllSheets(); exitEventsMode(); setDeckMode('coaches'); };
