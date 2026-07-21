@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SCG Per Petr (RETRACTION + the one real schema mismatch, both settled against the actual information_schema dump). RETRACTED: SCF claimed the two Stripe bookings inserts were silently failing because bookings had no acq_source column. THAT WAS WRONG. bookings HAS acq_source (text). The error Petr saw said 'in the schema cache' and that is exactly what it was - a stale PostgREST schema cache, not a missing column. Running bookings-acq-source.sql was a no-op for the column but the CREATE INDEX was DDL, which made PostgREST reload its cache; that is why the acq_source error vanished and the next one surfaced. Stripe bookings were never broken. bookings-acq-source.sql was therefore unnecessary - harmless, it just added an index. THE ONE REAL MISMATCH: bookings genuinely has NO student_name (46 columns, verified). gym_bookings does have it, and the QR coach path had copied that shape across. Fixed Petr's way - student_id is the key: student_name removed from the insert and from all four bookings selects (coach QR confirm list x2, coach lesson reminder, coach stats), and the display name is now resolved from profiles by student_id, so it can never go stale either. The three reads had been failing silently inside try/catch this whole time, which is why the coach's QR confirm list and lesson reminder were coming back empty. _sbInsertTolerant is kept as a safety net even though it now has nothing to drop on this path. MECHANICAL AUDIT of every client .select() against the real schema found 10 further column references that do not exist: events.discipline, events.price, gym_memberships.price, gyms.bio, gyms.founded, profiles.klub, profiles.league_streak, profiles.suspended, slots.end_time, and the student_reports table itself. NOT touched - reported for Petr to triage one at a time. Builds on SCF. -->
+<!-- MTL build: SCH Per Petr (two live-tested bugs from the PIS + reminder reports). (1) PIS REFERRAL CREDIT NOT CONSUMED - root-caused from the real files, fixed in pis-return.js (SEPARATE file, deploy it). A student who redeemed a referral credit and paid by PIS came back through pis-return.js (the synchronous post-bank redirect), and that file - unlike pis-webhook.js - neither SELECTED credit_used nor passed credit:'student' into /api/record-cash. record-cash consumes the credit only when it receives credit:'student', so the point was never burned. pis-return now selects credit_used on gym_bookings + bookings and passes credit through for the two redeemable types (drop_in, coach_1to1), exactly mirroring pis-webhook. The MTL fee was already correctly waived server-side; only the counter decrement was missing. (2) DUPLICATE / late class reminders. There were TWO independent generators writing class reminders off the same reminder_sent flag: the client checkUpcomingReminders() (fired on app open, 8h window) and cron-attendance (6-10h window). Per Petr: keep ONE reliable path. checkUpcomingReminders now returns immediately (client generation disabled; the muting UI + mute flags stay, the cron honours them). cron-attendance's two windows (group 6-10h, 1:1 3-5h) are unified to ~8h (450-510 min, 60-min wide so the 30-min cron never skips it), which also clears the 6h Stripe cancellation deadline. AND a reservation booked LESS than 8h before start is now born reminder_sent=true (new _remSentAtBooking helper on the QR + Stripe drop-in recs), so a last-minute booking gets NO reminder at all - you booked it, you won't forget. Deploy: index.html (SCH) + pis-return.js + cron-attendance.js. Builds on SCG. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -9041,6 +9041,7 @@ async function bookGymDropin(g, occ, _child){
       date: (occ&&occ.date)||_today, time: (occ&&occ.time)||'18:00'
     };
     if(occ){ rec.class_name = occ.name||null; rec.class_date = occ.date||null; rec.class_time = occ.time||null; }
+    rec.reminder_sent = _remSentAtBooking(rec.class_date||rec.date, rec.class_time||rec.time);
     const { data: bk, error } = await supaClient.from('gym_bookings').insert(rec).select().single();
     if(error){ toast('⚠️ '+error.message); return; }
     try{ await supaClient.from('gym_bookings').update({ student_name: currentUser.name||'Student', gym_name: g.name||'Klub' }).eq('id', bk.id); }catch(e){}
@@ -12737,6 +12738,10 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
 let _gmMembLvl=null;
 let _lastRemCheck=0, _tzSet=false;
 function classReminderMuted(){ return !!(currentUser && currentUser.mute_class_reminder); }
+// A reservation created less than 8h before the class starts gets NO reminder (you booked it, you
+// will not forget). It is born reminder_sent=true so the cron skips it. 8h = the cron reminder
+// window start, and safely past the 6h Stripe cancellation deadline.
+function _remSentAtBooking(dateStr, timeStr){ try{ if(!dateStr) return false; const st=new Date(`${dateStr}T${(timeStr||'09:00')}:00`).getTime(); return (st - Date.now()) < 8*3600000; }catch(e){ return false; } }
 function coachLessonReminderMuted(){ return !!(currentUser && currentUser.mute_coach_lesson_reminder); }
 function leagueNotifMuted(){ return !!(currentUser && currentUser.league_notif_optin===false); }
 async function setLeagueNotifMute(muted){ if(!currentUser) return; currentUser.league_notif_optin = !muted; const v=$('vLeagueNotif'); if(v) v.textContent = muted ? L('Vypnuto') : L('Zapnuto'); try{ await supaClient.from('profiles').update({ league_notif_optin: !muted }).eq('id', currentUser.id); }catch(e){ console.warn('league_notif_optin col?',e); } }
@@ -12756,6 +12761,12 @@ async function checkUpcomingReminders(){
   if(!currentUser) return;
   if(!_tzSet){ _tzSet=true; try{ const tz=Intl.DateTimeFormat().resolvedOptions().timeZone; if(tz && currentUser.timezone!==tz){ currentUser.timezone=tz; supaClient.from('profiles').update({timezone:tz}).eq('id',currentUser.id); } }catch(e){} }
   try{
+    // Client-side reminder generation is DISABLED. Class/lesson reminders are sent by ONE reliable
+    // server path only (cron-attendance), which avoids the duplicate-notification storm two
+    // independent generators sharing reminder_sent produced. The muting UI + flags stay; the cron
+    // honours them. Kept as a no-op so every existing caller is safe.
+    return;
+    // eslint-disable-next-line no-unreachable
     const now=Date.now(), H=3600000, winMax=8*H;
     const mk=(dateStr,timeStr)=>new Date(`${dateStr}T${(timeStr||'09:00')}:00`).getTime();
     let touched=0;
@@ -14557,7 +14568,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan){
       if(e1){ toast('\u26a0\ufe0f '+e1.message); return; } intentId=mb&&mb.id;
     } else {
       const _today=new Date().toISOString().slice(0,10);
-      const rec={ gym_id:g.id, student_id:currentUser.id, student_name:sName, gym_name:g.name||'Klub', paid_to:_qrPaidTo, amount:price, currency:cur, status:'reserved', payment_method:'qr', credit_used:(_qrCredit==='student'?'student':null), date:(occ&&occ.date)||_today, time:(occ&&occ.time)||'18:00', class_name:(occ&&occ.name)||null, class_date:(occ&&occ.date)||null, class_time:(occ&&occ.time)||null, level:(occ&&occ.level)||'all', coach_id:_qrPayeeCoach||(occ&&occ.coach)||null, discipline:disc, acq_source:_acqSrc(g) };
+      const rec={ gym_id:g.id, student_id:currentUser.id, student_name:sName, gym_name:g.name||'Klub', paid_to:_qrPaidTo, amount:price, currency:cur, status:'reserved', payment_method:'qr', credit_used:(_qrCredit==='student'?'student':null), date:(occ&&occ.date)||_today, time:(occ&&occ.time)||'18:00', class_name:(occ&&occ.name)||null, class_date:(occ&&occ.date)||null, class_time:(occ&&occ.time)||null, level:(occ&&occ.level)||'all', coach_id:_qrPayeeCoach||(occ&&occ.coach)||null, discipline:disc, acq_source:_acqSrc(g) , reminder_sent:_remSentAtBooking((occ&&occ.date)||_today,(occ&&occ.time)||'18:00') };
       if(_child){ rec.child_name=_child.name; rec.child_age=_kidAge(_child); }
       const { data:bk, error:e2 } = await supaClient.from('gym_bookings').insert(rec).select('id').single();
       if(e2){ toast('\u26a0\ufe0f '+e2.message); return; } intentId=bk&&bk.id;
