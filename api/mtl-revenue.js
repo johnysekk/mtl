@@ -35,7 +35,7 @@ export default async function handler(req, res) {
     if (!uid) return res.status(401).json({ error: 'no user' });
     if (uid !== FOUNDER_UUID) return res.status(403).json({ error: 'forbidden' });
 
-    const sel = 'created_at,currency,type,gym_id,coach_id,plan,payment_intent,gross_amount,stripe_fee,mtl_fee,mtl_fee_refunded,net_amount,refund_amount,status';
+    const sel = 'created_at,currency,type,payment_method,gym_id,coach_id,plan,payment_intent,gross_amount,stripe_fee,mtl_fee,mtl_fee_refunded,net_amount,refund_amount,status';
     let rows = [], from = 0; const page = 1000;
     for (let i = 0; i < 100; i++) {
       const r = await fetch(`${SB}/rest/v1/transactions?select=${sel}&order=created_at.desc`,
@@ -54,10 +54,17 @@ export default async function handler(req, res) {
       if (!ym) return;
       const cur = t.currency || 'CZK';
       const m = months[ym] = months[ym] || {};
-      const c = m[cur] = m[cur] || { mtl: 0, refunded: 0, count: 0 };
+      const c = m[cur] = m[cur] || { mtl: 0, refunded: 0, count: 0, byMethod: {} };
+      const net = Number(t.mtl_fee || 0) - Number(t.mtl_fee_refunded || 0);
       c.mtl += Number(t.mtl_fee || 0);
       c.refunded += Number(t.mtl_fee_refunded || 0);
       c.count += 1;
+      // by payment method (stripe / qr / pis / cash), same buckets the coach & gym dashboards use
+      const pm = t.payment_method || 'other';
+      const bm = c.byMethod[pm] = c.byMethod[pm] || { net: 0, gross: 0, count: 0 };
+      bm.net += net;
+      bm.gross += Number(t.gross_amount || 0);
+      bm.count += 1;
     });
     const monthArr = Object.keys(months).sort().reverse().map(ym => ({ ym, byCur: months[ym] }));
 
