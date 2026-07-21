@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SCX Per Petr (corrects my SCW over-fix of the schedule). Petr's actual spec: you MUST be able to navigate to PAST weeks (to see history), but a newly created recurring class must NOT propagate backwards into the past. SCW wrongly blocked past-week navigation entirely - reverted. Real fix: each schedule class now carries a `since` (YYYY-MM-DD) stamped when it's created (both the recurring multi-day panel and the single Add-class button). A class with a `since` never materialises on any date before it: upcomingClasses filters `!c.since || _ld>=c.since` (covers the public schedule, cohortOccurrences and .ics in one place), and the editor's week grid dot-count + selected-day list apply the same filter against each cell's date. Classes created before this have no `since` and behave exactly as before, so nothing changes retroactively. Past-week navigation is fully restored - you just won't see a class in weeks earlier than the day it was added. Unit-tested (class created today: hidden last week, shown today + forward; legacy no-since class still shows in the past). Deploy: index.html (SCX). Builds on SCW. -->
+<!-- MTL build: SCY Per Petr (three fixes + a mandatory-schedule call). (1) STRIPE-FEE NOTE ON QR/PIS: the 'Your share (96.5%)' breakdown always appended the Stripe reverse-charge note, even for QR/bank clubs where no Stripe fee applies. shareBreakdownHtml() now takes an optional payMode; qr_bank shows a truthful note ('money lands directly in your account; MTL takes its commission monthly from your card-on-file, no Stripe fee'). The cohort form passes 'qr_bank' when the club has no Stripe account, else 'stripe'. Other call sites unchanged (default = Stripe note as before). (2) 'REVENUE' BUTTON DID NOTHING: openCohortDash was CALLED by the button but never DEFINED (another SCU function that carried a correct marker but was never actually written to the file). Built it now. (3) PER-COHORT METRICS: per Petr, each course now has its OWN dashboard instead of one universal panel. openCohortDash shows THIS cohort's revenue (from cohort_payments, split Stripe/QR platba/Bankovni prevod, all with currency), its own funnel (signups->paid->enrolled->member) and its own attribution sources, plus the ROAS block with a manual per-cohort Meta ad-spend. The aggregate 'Retence napric kurzy' summary panel was removed from the top of the cohort list. Dash math unit-tested. (4) SCHEDULE NOW MANDATORY: creating/saving a cohort requires at least one class day - a course with no sessions can't generate occurrences, .ics, the 'N lekci' count, or a truthful signup page, so an empty schedule was never a real course. (My recommendation to Petr, who asked; he can veto.) Deploy: index.html (SCY). Builds on SCX. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -11217,6 +11217,81 @@ async function _cohThankYou(cohortId, cm){
   document.body.appendChild(ov);
 }
 
+// Per-cohort dashboard: THIS course's revenue (from cohort_payments, split by method), its own
+// retention funnel + attribution (from its cohort_members), and a ROAS block with a manual Meta
+// ad-spend the owner copies from Ads Manager. Each cohort has its own numbers — nothing aggregated.
+async function openCohortDash(cohortId, cohortName){
+  const EN=LANG==='en';
+  let ov=document.getElementById('cohDashOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='cohDashOv'; ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:100000;display:flex;align-items:flex-end;justify-content:center;';
+  ov.innerHTML='<div style="background:#fff;border-radius:18px 18px 0 0;padding:20px;max-width:520px;width:100%;max-height:90vh;overflow-y:auto;"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;"><div style="font-family:\'Bebas Neue\';font-size:24px;color:var(--dark);">\ud83d\udcb0 '+(EN?'Course revenue':'Tržby kurzu')+'</div><button id="cdClose" style="width:32px;height:32px;border:none;background:var(--surf);border-radius:50%;font-size:16px;cursor:pointer;">\u2715</button></div><div style="font-size:13px;color:var(--mid);margin-bottom:16px;">'+escapeHtml(cohortName||'')+'</div><div id="cdBody"><p style="color:var(--light);padding:30px;text-align:center;">'+L('Načítám...')+'</p></div></div>';
+  document.body.appendChild(ov);
+  ov.onclick=function(e){ if(e.target===ov && !_ovHasForm(ov)) ov.remove(); };
+  ov.querySelector('#cdClose').onclick=function(){ ov.remove(); };
+
+  let coh=null, pays=[], members=[];
+  try{ const { data }=await supaClient.from('gym_cohorts').select('id,name,currency,ad_spend,months').eq('id',cohortId).single(); coh=data; }catch(e){}
+  try{ const { data }=await supaClient.from('cohort_payments').select('amount,mtl_fee,currency,payment_method,kind,status').eq('cohort_id',cohortId); pays=(data||[]).filter(function(p){ return p.status!=='refunded'; }); }catch(e){}
+  try{ const { data }=await supaClient.from('cohort_members').select('status,attribution').eq('cohort_id',cohortId); members=data||[]; }catch(e){}
+  const cur=(coh&&coh.currency)||'CZK';
+  const box=document.getElementById('cdBody'); if(!box) return;
+
+  const gross=pays.reduce(function(a,p){ return a+Number(p.amount||0); },0);
+  const mtl=pays.reduce(function(a,p){ return a+Number(p.mtl_fee||0); },0);
+  const net=gross-mtl;
+  const byM={ stripe:{n:0,sum:0}, qr:{n:0,sum:0}, pis:{n:0,sum:0} };
+  pays.forEach(function(p){ const m=(p.payment_method==='qr'||p.payment_method==='pis')?p.payment_method:'stripe'; byM[m].n++; byM[m].sum+=Number(p.amount||0); });
+  const mLabel={ stripe:'\ud83d\udcb3 Stripe', qr:(EN?'\ud83d\udcf2 QR payment':'\ud83d\udcf2 QR platba'), pis:(EN?'\ud83c\udfe6 Bank transfer':'\ud83c\udfe6 Bankovní převod') };
+
+  // per-cohort funnel + attribution
+  const fn={ signups:0, paid:0, enrolled:0, converted:0 };
+  const at={ meta_ads:0, mtl_deck:0, mtl_discovery:0, mtl_alert:0, walk_in:0, direct:0 };
+  members.forEach(function(m){ if(m.status==='cancelled') return; fn.signups++; const _paid=(m.status!=='lead'); if(_paid) fn.paid++; if(m.status==='enrolled'||m.status==='converted'||m.status==='completed') fn.enrolled++; if(m.status==='converted') fn.converted++; const _a=(m.attribution&&at[m.attribution]!==undefined)?m.attribution:'direct'; at[_a]++; });
+
+  const row=function(l,v,strong){ return '<div style="display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--border);font-size:13.5px;"><span style="color:var(--mid);">'+l+'</span><span style="font-weight:'+(strong?'800':'600')+';color:var(--dark);">'+v+'</span></div>'; };
+
+  let h='';
+  h+='<div style="display:flex;gap:8px;margin-bottom:16px;">';
+  h+='<div style="flex:1;background:var(--surf);border-radius:12px;padding:12px;text-align:center;"><div style="font-size:10px;color:var(--mid);text-transform:uppercase;font-weight:700;">'+(EN?'Gross':'Hrubé')+'</div><div style="font-size:19px;font-weight:800;color:var(--dark);">'+fmtPrice(gross,cur)+' '+_curSym(cur)+'</div></div>';
+  h+='<div style="flex:1;background:#F0FBF0;border-radius:12px;padding:12px;text-align:center;"><div style="font-size:10px;color:#006040;text-transform:uppercase;font-weight:700;">'+(EN?'Club net':'Klub čistého')+'</div><div style="font-size:19px;font-weight:800;color:#006040;">'+fmtPrice(net,cur)+' '+_curSym(cur)+'</div></div>';
+  h+='</div>';
+  h+='<div style="font-size:11px;color:var(--light);margin:-8px 0 16px;">'+(EN?'Net = gross − MTL commission (':'Čistého = hrubé − provize MTL (')+fmtPrice(mtl,cur)+' '+_curSym(cur)+').</div>';
+
+  h+='<div style="font-size:11px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;">'+(EN?'By payment method':'Podle způsobu platby')+'</div>';
+  ['stripe','qr','pis'].forEach(function(k){ if(byM[k].n>0) h+=row(mLabel[k]+' <span style="color:var(--light);font-size:11px;">· '+byM[k].n+'×</span>', fmtPrice(byM[k].sum,cur)+' '+_curSym(cur)); });
+  if(!pays.length) h+='<div style="font-size:12px;color:var(--light);padding:10px 0;">'+(EN?'No payments yet.':'Zatím žádné platby.')+'</div>';
+
+  // this course's funnel
+  h+='<div style="font-size:11px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.04em;margin:16px 0 6px;">'+(EN?'This course — funnel':'Tento kurz — funnel')+'</div>';
+  const _fc=function(n,l){ return '<div style="flex:1;background:var(--surf);border-radius:9px;padding:8px 4px;text-align:center;"><div style="font-size:16px;font-weight:800;color:var(--dark);">'+n+'</div><div style="font-size:9.5px;color:var(--mid);">'+l+'</div></div>'; };
+  h+='<div style="display:flex;gap:4px;align-items:center;">'+_fc(fn.signups,(EN?'signups':'signupy'))+'<span style="color:var(--light);">\u203a</span>'+_fc(fn.paid,(EN?'paid':'zaplac.'))+'<span style="color:var(--light);">\u203a</span>'+_fc(fn.enrolled,(EN?'enrolled':'zapsáni'))+'<span style="color:var(--light);">\u203a</span>'+_fc(fn.converted,(EN?'member':'členství'))+'</div>';
+
+  // this course's sources
+  const _srcBits=[]; _srcBits.push('\ud83d\udce3 '+at.meta_ads); if(at.mtl_deck) _srcBits.push('\ud83d\udd0e '+at.mtl_deck); _srcBits.push('\ud83e\udded '+at.mtl_discovery); if(at.mtl_alert) _srcBits.push('\ud83d\udd14 '+at.mtl_alert); if(at.walk_in) _srcBits.push('\ud83d\udeb6 '+at.walk_in); _srcBits.push('\ud83d\udd17 '+at.direct);
+  h+='<div style="font-size:11.5px;color:var(--mid);margin-top:10px;">'+(EN?'Source:':'Zdroj:')+' '+_srcBits.join(' · ')+'</div>';
+  h+='<div style="font-size:9px;color:var(--light);margin-top:4px;line-height:1.4;">'+(EN?'\ud83d\udce3 paid ads · \ud83d\udd0e deck · \ud83e\udded MTL discovery · \ud83d\udd14 alert · \ud83d\udeb6 walk-in · \ud83d\udd17 direct':'\ud83d\udce3 reklama · \ud83d\udd0e deck · \ud83e\udded MTL discovery · \ud83d\udd14 upozornění · \ud83d\udeb6 na místě · \ud83d\udd17 přímý')+'</div>';
+
+  // ROAS
+  const spend=(coh&&coh.ad_spend!=null)?Number(coh.ad_spend):null;
+  const roas=(spend&&spend>0)?(gross/spend):null;
+  h+='<div style="margin-top:18px;background:#171717;border-radius:14px;padding:15px;color:#fff;">';
+  h+='<div style="font-size:11px;font-weight:800;color:#F4D87A;text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">\ud83d\udce3 '+(EN?'Meta ads ROAS':'ROAS z Meta reklamy')+'</div>';
+  h+='<div style="font-size:11.5px;color:#bbb;line-height:1.5;margin-bottom:10px;">'+(EN?'Copy the amount you spent on THIS course\u2019s ads from Meta Ads Manager.':'Zkopíruj částku, kterou jsi na reklamu TOHOTO kurzu utratil v Meta Ads Manageru.')+'</div>';
+  h+='<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;"><input id="cdSpend" type="number" min="0" inputmode="decimal" value="'+(spend!=null?spend:'')+'" placeholder="0" style="flex:1;padding:11px;border:none;border-radius:10px;font-family:\'DM Sans\';font-size:15px;font-weight:700;"><span style="font-weight:700;">'+_curSym(cur)+'</span><button id="cdSpendSave" style="padding:11px 16px;background:#F4D87A;color:#3a2a00;border:none;border-radius:10px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Save':'Uložit')+'</button></div>';
+  if(roas!=null){
+    const good=roas>=1;
+    h+='<div style="display:flex;gap:8px;">';
+    h+='<div style="flex:1;background:rgba(255,255,255,.08);border-radius:10px;padding:10px;text-align:center;"><div style="font-size:10px;color:#bbb;text-transform:uppercase;">ROAS</div><div style="font-size:22px;font-weight:800;color:'+(good?'#7EE0A8':'#FF8A8A')+';">'+roas.toFixed(2)+'\u00d7</div></div>';
+    h+='<div style="flex:1;background:rgba(255,255,255,.08);border-radius:10px;padding:10px;text-align:center;"><div style="font-size:10px;color:#bbb;text-transform:uppercase;">'+(EN?'Gross − spend':'Hrubé − výdaj')+'</div><div style="font-size:16px;font-weight:800;color:'+(gross-spend>=0?'#7EE0A8':'#FF8A8A')+';margin-top:3px;">'+fmtPrice(gross-spend,cur)+' '+_curSym(cur)+'</div></div>';
+    h+='</div>';
+    h+='<div style="font-size:11px;color:#999;margin-top:8px;line-height:1.5;">'+(EN?(good?('Every 1 spent brought back '+roas.toFixed(2)+'. Above 1\u00d7 = the ads paid for themselves (gross).'):'Below 1\u00d7 — the course grossed less than the ad spend.'):(good?('Každá 1 utracená vrátila '+roas.toFixed(2)+'. Nad 1\u00d7 = reklama se zaplatila (hrubě).'):'Pod 1\u00d7 — kurz vydělal hrubě míň, než stála reklama.'))+'</div>';
+  }
+  h+='</div>';
+
+  box.innerHTML=h;
+  const _sv=document.getElementById('cdSpendSave');
+  if(_sv) _sv.onclick=async function(){ const v=parseFloat((document.getElementById('cdSpend')||{}).value); const val=(isFinite(v)&&v>=0)?v:null; _sv.disabled=true; _sv.textContent=(EN?'Saving...':'Ukládám...'); try{ await supaClient.from('gym_cohorts').update({ ad_spend:val }).eq('id',cohortId); toast(EN?'\u2705 Saved':'\u2705 Uloženo'); openCohortDash(cohortId, cohortName); }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); _sv.disabled=false; _sv.textContent=(EN?'Save':'Uložit'); } };
+}
 async function openCohortRoster(cohortId, cohortName){
   const EN=LANG==='en';
   let ov=document.getElementById('cohRosterOv'); if(ov) ov.remove();
@@ -11453,7 +11528,7 @@ async function _cohRender(){
   const summaryHtml='<div style="background:var(--surf);border:1px solid var(--border);border-radius:13px;padding:13px;margin-bottom:14px;"><div style="font-size:12px;font-weight:800;color:var(--dark);margin-bottom:9px;">'+(EN?'Retention across all cohorts':'Retence nap\u0159\u00ed\u010d kurzy')+'</div><div style="display:flex;gap:3px;align-items:center;">'+_fc(agg.signups,(EN?'signups':'signupy'))+_arr+_fc(agg.paid,(EN?'paid':'zaplac.'))+_arr+_fc(agg.enrolled,(EN?'enrolled':'zaps\u00e1ni'))+_arr+_fc(agg.converted,(EN?'member':'\u010dlenstv\u00ed'))+'</div><div style="display:flex;gap:8px;margin-top:10px;font-size:11px;color:var(--mid);"><div style="flex:1;background:#fff;border-radius:8px;padding:7px 9px;"><b style="color:var(--dark);">'+_enrRate+'%</b> '+(EN?'signup\u2192enrolled':'signup\u2192zaps\u00e1n')+'</div><div style="flex:1;background:#fff;border-radius:8px;padding:7px 9px;"><b style="color:var(--dark);">'+_convRate+'%</b> '+(EN?'enrolled\u2192member':'zaps\u00e1n\u2192\u010dlenstv\u00ed')+'</div></div><div style="font-size:11px;color:var(--mid);margin-top:9px;">'+(EN?'Source:':'Zdroj:')+' \uD83D\uDCE3 '+agg.attr.meta_ads+(agg.attr.mtl_deck?(' \u00b7 \uD83D\uDD0E '+agg.attr.mtl_deck):'')+' \u00b7 \uD83E\uDDED '+agg.attr.mtl_discovery+(agg.attr.mtl_alert?(' \u00b7 \uD83D\uDD14 '+agg.attr.mtl_alert):'')+(agg.attr.walk_in?(' \u00b7 \uD83D\uDEB6 '+agg.attr.walk_in):'')+' \u00b7 \uD83D\uDD17 '+agg.attr.direct+'</div><div style="font-size:9px;color:var(--light);margin-top:6px;line-height:1.4;">'+(EN?'\uD83D\uDCE3 = paid ads (Meta) \u00b7 \uD83D\uDD0E deck \u00b7 \uD83E\uDDED MTL discovery (platform-brought) \u00b7 \uD83D\uDD14 alert \u00b7 \uD83D\uDEB6 walk-in \u00b7 \uD83D\uDD17 direct link':'\uD83D\uDCE3 = placen\u00e1 reklama (Meta) \u00b7 \uD83D\uDD0E deck \u00b7 \uD83E\uDDED MTL discovery (p\u0159ivedla platforma) \u00b7 \uD83D\uDD14 upozorn\u011bn\u00ed \u00b7 \uD83D\uDEB6 na m\u00edst\u011b \u00b7 \uD83D\uDD17 p\u0159\u00edm\u00fd odkaz')+'</div></div>';
   const stC={draft:'#999',open:'#0A7A3D',running:'#1452B0',done:'#5B3FB0',archived:'#999'};
   const stL={draft:(EN?'Draft':'Koncept'),open:(EN?'Open':'Otevřený'),running:(EN?'Running':'Běží'),done:(EN?'Done':'Dokončený'),archived:(EN?'Archived':'Archiv')};
-  box.innerHTML=summaryHtml+rows.map(function(c){
+  box.innerHTML=rows.map(function(c){
     const cur=c.currency||'CZK'; const cnt=counts[c.id]||{total:0,paid:0};
     return '<div style="border:1px solid var(--border);border-radius:12px;padding:13px;margin-bottom:10px;"><div style="display:flex;justify-content:space-between;align-items:flex-start;"><div style="font-size:15px;font-weight:800;">'+((c.name||'')+'').replace(/</g,'&lt;')+'</div><span style="font-size:10px;font-weight:700;color:'+(stC[c.status]||'#999')+';text-transform:uppercase;">'+(stL[c.status]||c.status)+'</span></div><div style="font-size:12px;color:var(--mid);margin-top:4px;">'+(c.discipline?(disciplineLabel(c.discipline)+' · '):'')+(c.start_date?(c.start_date+' · '):'')+(c.months||2)+' '+(EN?'mo':'měs')+(c.capacity?(' · '+(EN?'cap ':'kap ')+c.capacity):'')+'</div><div style="font-size:12px;color:var(--mid);margin-top:3px;">'+(EN?'Deposit':'Záloha')+' '+fmtPrice(c.deposit_amount||0,cur)+' '+_curSym(cur)+' · '+(EN?'price ':'cena ')+(function(){ var _t=(Array.isArray(c.price_tiers)&&c.price_tiers.length)?c.price_tiers:null; var _p=_t?Number(_t[0].price):Number(c.price_regular); return fmtPrice(_p||0,cur)+' '+_curSym(cur); })()+'</div><div style="font-size:12px;color:var(--dark);font-weight:600;margin-top:6px;">'+cnt.total+' '+(EN?'signups':'přihlášených')+' · '+cnt.paid+' '+(EN?'paid':'zaplaceno')+'</div><div style="display:flex;gap:6px;margin-top:9px;flex-wrap:wrap;"><button class="cohLinkBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Link + QR':'Odkaz + QR')+'</button><button class="cohRosterBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Roster':'Roster')+'</button><button class="cohDashBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:#171717;color:#F4D87A;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">\ud83d\udcb0 '+(EN?'Revenue':'Tržby')+'</button></div><div style="display:flex;gap:6px;margin-top:6px;"><button class="cohEditBtn" data-id="'+c.id+'" style="flex:1;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">\u270e '+(EN?'Edit':'Upravit')+'</button><button class="cohDelBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;padding:8px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">\ud83d\uddd1 '+(EN?'Delete':'Smazat')+'</button></div></div>';
   }).join('');
@@ -11538,7 +11613,7 @@ function _cohBreak(inputId, boxId){
   const price=parseFloat(inEl&&inEl.value)||0;
   if(price<=0){ box.style.display='none'; box.innerHTML=''; return; }
   box.style.display='block';
-  box.innerHTML=shareBreakdownHtml(price, _cohCtx.currency, _cohKeepRate());
+  box.innerHTML=shareBreakdownHtml(price, _cohCtx.currency, _cohKeepRate(), (_cohCtx&&_cohCtx.stripeAccount)?'stripe':'qr_bank');
 }
 function _cohSnapshot(){ var k={}; k._sched=(window._cohSched||[]).slice(); k._poster=window._cohPoster||null; ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)) k[id]=$(id).value; }); k._disc=(typeof _cohDisc!=='undefined'?(_cohDisc||[]).slice():[]); k._tiers=!!($('cohMoreTiers')&&$('cohMoreTiers').checked); return k; }
 function _cohRelang(){ var sh=$('shCohorts'); if(!sh||!sh.classList.contains('open')) return; if(window._cohView==='create'){ _cohShowCreate(_cohSnapshot()); } else if(typeof _cohRender==='function'){ _cohRender(); } }
@@ -11677,6 +11752,7 @@ async function _cohSave(){
   if(!_cohCtx) return; const EN=LANG==='en';
   const g=function(id){ const e=$(id); return (e&&(''+e.value).trim())||''; };
   const name=g('cohName'); if(!name){ toast(EN?'Name is required':'Název je povinný'); return; }
+  if(!(window._cohSched && window._cohSched.length)){ toast(EN?'\u26a0\ufe0f Add at least one class day to the schedule':'\u26a0\ufe0f P\u0159idej do rozvrhu aspo\u0148 jeden den lekce'); return; }
   // When multiple price variants are on, each price must be named (so students can tell them apart).
   if($('cohMoreTiers') && $('cohMoreTiers').checked){
     if(!g('cohPRName')){ toast(EN?'Name the first price':'Pojmenuj první cenu'); return; }
@@ -17103,7 +17179,7 @@ if($('shGymApp')){
   ['input','change'].forEach(ev=>$('shGymApp').addEventListener(ev, ()=>{ if(typeof saveGymDraft==='function') setTimeout(saveGymDraft,30); }));
   $('shGymApp').addEventListener('click', (e)=>{ if(e.target.closest('#gymDisc')) setTimeout(()=>{ if(typeof saveGymDraft==='function') saveGymDraft(); },60); });
 }
-function shareBreakdownHtml(price, cur, keepPct){ var en=LANG==='en'; var c=(cur==='Kč')?'CZK':(cur==='€')?'EUR':(cur==='$')?'USD':cur; var sym=_curSym(c); var p=parseFloat(price)||0; var _pct=function(v){ var x=Math.round(v*10)/10; return (x%1===0)?String(x):x.toFixed(1); }; var mtlPct=_pct((1-keepPct)*100), keepP=_pct(keepPct*100); var f=function(v){ return c==='CZK'?String(Math.round(v)):(Math.round(v*100)/100).toFixed(2); }; var mtl=p*(1-keepPct), gross=p*keepPct; return '<div style="background:#F0FBF0;border-radius:12px;padding:11px 14px;font-size:13px;line-height:1.6;color:var(--mid);">'+'<div style="display:flex;justify-content:space-between;"><span style="font-weight:700;color:var(--dark);">'+(en?('Your share ('+keepP+'%)'):('Tvůj podíl ('+keepP+' %)'))+'</span><strong style="color:var(--dark);">'+(p?(f(gross)+' '+sym):'—')+'</strong></div>'+'<div style="font-size:11px;color:var(--light);margin-top:6px;line-height:1.4;">'+(en?'Does not include the fees Stripe charges for securely processing payments. These may be subject to the reverse-charge VAT mechanism.':'Nezahrnuje poplatky, které si Stripe účtuje za bezpečné zprocesování plateb. Můžou být předmětem přenesené daňové povinnosti.')+'</div>'+'</div>'; }
+function shareBreakdownHtml(price, cur, keepPct, payMode){ var en=LANG==='en'; var c=(cur==='Kč')?'CZK':(cur==='€')?'EUR':(cur==='$')?'USD':cur; var sym=_curSym(c); var p=parseFloat(price)||0; var _pct=function(v){ var x=Math.round(v*10)/10; return (x%1===0)?String(x):x.toFixed(1); }; var mtlPct=_pct((1-keepPct)*100), keepP=_pct(keepPct*100); var f=function(v){ return c==='CZK'?String(Math.round(v)):(Math.round(v*100)/100).toFixed(2); }; var mtl=p*(1-keepPct), gross=p*keepPct; var _isQr=(payMode==='qr_bank'); var _note=_isQr?(en?'Money lands directly in your account; MTL charges its commission monthly from your card-on-file (no Stripe fee).':'Peníze chodí přímo na tvůj účet; MTL si provizi strhává měsíčně z uložené karty (bez poplatku Stripe).'):(en?'Does not include the fees Stripe charges for securely processing payments. These may be subject to the reverse-charge VAT mechanism.':'Nezahrnuje poplatky, které si Stripe účtuje za bezpečné zprocesování plateb. Můžou být předmětem přenesené daňové povinnosti.'); return '<div style="background:#F0FBF0;border-radius:12px;padding:11px 14px;font-size:13px;line-height:1.6;color:var(--mid);">'+'<div style="display:flex;justify-content:space-between;"><span style="font-weight:700;color:var(--dark);">'+(en?('Your share ('+keepP+'%)'):('Tvůj podíl ('+keepP+' %)'))+'</span><strong style="color:var(--dark);">'+(p?(f(gross)+' '+sym):'—')+'</strong></div>'+'<div style="font-size:11px;color:var(--light);margin-top:6px;line-height:1.4;">'+_note+'</div>'+'</div>'; }
 function updateGymMembBreakdown(){
   const p = parseFloat($('gymMembPrice') && $('gymMembPrice').value) || 0;
   const cur = ($('gymCurrency') && $('gymCurrency').value) || 'CZK';
