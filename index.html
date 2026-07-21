@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SCI Per Petr. (1) 'QR banka' renamed to 'QR platba' in BOTH the trainer and gym payment-method breakdowns; 'Bankovni prevod' kept as the PIS label (they are genuinely different services - QR = club manually confirms in Reception, PIS = the bank confirms via API - and the code already separates them by payment_method 'qr' vs 'pis', so they stay two rows). (2) FOUNDER DASHBOARD now has a 'Podle zpusobu platby' breakdown (Stripe / QR platba / Bankovni prevod / Hotovost + Other), matching the coach and gym dashboards, which it lacked. Built on a new byMethod aggregation that works from BOTH the raw-rows path and the pre-aggregated months path (parity-tested: both produce identical buckets). (3) /api/mtl-revenue.js: payment_method added to the transactions select, and a byMethod {net,gross,count} sub-aggregation added to each month bucket, so the pre-aggregated path carries the split too (not just the raw-rows fallback). Deploy mtl-revenue.js alongside index.html. (4) ACCOUNTING EXPORTS now all carry payment_method: the gym/coach accountant export (_acExportCsv) already had it; added it to the founder ledger export (fdRealExportCsv, new 'payment_method' column, Czech labels) and to the money-dashboard export (_mdCsv). So every CSV a club, coach, or founder hands their ucetni now shows how each amount was collected. Deploy: index.html (SCI) + mtl-revenue.js. Builds on SCH. -->
+<!-- MTL build: SCK Per Petr (channels 3+4 for the accountless course student + mail domain unification). CONTEXT that reshaped this: students enrol into courses straight from Meta ads with NO MTL profile (cohort-pay leaves student_id null; the row carries only name/email/fbp/fbc). So 'upcoming classes for the enrolled student' could not hang off a profile. (1) TOKEN COURSE PAGE ?myclass=<cohort_member_id> - accountless, the unguessable member UUID IS the key (same model as the shared kid profile + walk-in guest). Reuses the existing /api/cohort-public ?cm= branch (extended to return schedule+dates - NO new endpoint). Shows the FULL value they paid for: next session, full dated schedule, deposit status. (2) HARD-BUT-SMART NUDGE: the schedule is never gated (never tax what they already bought). Gated behind creating a profile: calendar sync (.ics), pre-class reminders, progress, and the post-course membership. Logged-in users get the .ics button directly; guests get an amber 'create your profile' card that carries their email into the OTP claim. (3) .ics for the WHOLE course - one VEVENT per session with a -2h alarm, reusing calIcs grammar. Unit-tested (2 sessions, correct DTSTART/DTEND incl. 90-min duration, valid VCALENDAR wrap). (4) CLAIM-ON-LOGIN: new _claimCohortMembers() links accountless cohort_members rows to the account by matching email where student_id is null (mirrors the walk-in / imported-members claim). So when the ad-sourced student finally makes a profile with the same email, their course becomes theirs and reminders/membership-nudge light up. (5) DEPOSIT EMAIL (stripe-webhook cohortDepositHtml) now includes a 'Zobrazit rozvrh kurzu' button linking to ?myclass= + the profile nudge. Sent once from the webhook (idempotent), on the already-unified domain. (6) MAIL DOMAIN UNIFIED: ticket-email.js, release-cron.js and stripe-webhook.js had dead-domain fallbacks (mtlcoaches.co, muaythailab.co). All from-addresses + APP_URL/PUBLIC_URL fallbacks now default to martialtraininglab.com (still env-overridable). NOTE: mail only sends if that domain is verified in Resend - if test mails were not arriving, verifying the domain in Resend is the fix. Deploy: index.html (SCK) + cohort-public.js + stripe-webhook.js + ticket-email.js + release-cron.js. Builds on SCJ. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -9488,6 +9488,43 @@ function classLeadSelectHtml(cls, idx, curLead){
   return `<div style="font-size:11px;color:var(--light);margin:8px 0 2px;font-weight:600;">${LANG==='en'?'Who leads the class:':'Kdo vede lekci:'}</div><select class="${cls}" data-i="${idx}" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${opts}</select>`;
 }
 function _classCap(gym, time, name){ try{ var sch=gym&&gym.schedule; if(typeof sch==='string') sch=JSON.parse(sch||'[]'); sch=sch||[]; var m=sch.find(function(c){return String(c.time)===String(time)&&((c.name||'')===(name||''));})||sch.find(function(c){return String(c.time)===String(time);}); if(m&&Number(m.cap)>0) return Number(m.cap); }catch(e){} return Number(gym&&gym.capacity)||0; }
+// cohortOccurrences(coh, opts) — concrete dated classes for a course, reusing the gym's own
+// upcomingClasses() generator (identical row shape) so there is ONE schedule engine, not two.
+// Windowed to [start_date, end_date]. `horizonDays` caps how far ahead we materialise for display
+// (default 60). Falls back to [] when the cohort has no structured schedule yet (old cohorts keep
+// showing their schedule_note text instead).
+function cohortOccurrences(coh, opts){
+  opts=opts||{};
+  let sch=[]; try{ sch = coh && coh.schedule ? (typeof coh.schedule==='string'?JSON.parse(coh.schedule||'[]'):(coh.schedule||[])) : []; }catch(e){ sch=[]; }
+  if(!sch.length) return [];
+  const start = coh.start_date ? new Date(coh.start_date+'T00:00:00') : null;
+  const end   = coh.end_date   ? new Date(coh.end_date+'T23:59:59')   : null;
+  const today = new Date(); today.setHours(0,0,0,0);
+  // materialise from the later of (today, start) to the earlier of (end, today+horizon)
+  const from = start && start>today ? start : today;
+  const horizon = new Date(from); horizon.setDate(horizon.getDate() + (opts.horizonDays||60));
+  const stop = end && end<horizon ? end : horizon;
+  const days = Math.max(1, Math.ceil((stop - from)/86400000) + 1);
+  // upcomingClasses counts days forward from *now*; offset so day 0 aligns with `from`
+  const backDays = Math.max(0, Math.ceil((today - from)/86400000));
+  const raw = upcomingClasses(sch, days + backDays, 0);
+  return raw.filter(o=>{
+    if(coh.start_date && o.date < coh.start_date) return false;
+    if(coh.end_date && o.date > coh.end_date) return false;
+    return true;
+  });
+}
+// Human one-line summary of a structured schedule, e.g. "Po 18:00 · Čt 19:00". Used to keep
+// schedule_note (and anywhere still text-based) in sync, and as the profile fallback.
+function cohScheduleSummary(sch){
+  try{
+    const rows = typeof sch==='string'?JSON.parse(sch||'[]'):(sch||[]);
+    if(!rows.length) return '';
+    const dn=dowShort();
+    return rows.filter(r=>!r.once).map(r=>dn[Number(r.day)]+' '+(r.time||'')).join(' \u00b7 ')
+      + rows.filter(r=>r.once).map(r=>' \u00b7 '+(r.date||'')+' '+(r.time||'')).join('');
+  }catch(e){ return ''; }
+}
 function upcomingClasses(schedule, days, backDays){
   days = days||7; backDays = backDays||0; const out=[]; const now=new Date();
   for(let d=-backDays; d<days; d++){
@@ -11049,6 +11086,7 @@ async function openCohortSignup(cohortId){
   box.innerHTML='<div style="font-family:\'Bebas Neue\';font-size:30px;letter-spacing:.02em;color:var(--dark);line-height:1.05;">'+((d.name||'')+'').replace(/</g,'&lt;')+'</div>'
     +'<div style="font-size:13px;color:var(--mid);margin:2px 0 14px;">'+(d.gym_name||'')+(d.discipline?(' · '+d.discipline):'')+(d.start_date?(' · '+(EN?'starts ':'start ')+d.start_date):'')+(d.end_date?(' – '+d.end_date):'')+'</div>'
     +(d.description?('<p style="font-size:13px;color:var(--dark);line-height:1.55;margin:0 0 14px;">'+(''+d.description).replace(/</g,'&lt;')+'</p>'):'')
+    +(function(){ try{ var _occ=cohortOccurrences(d,{horizonDays:120}); if(!_occ.length){ return d.schedule_note?('<div style="background:var(--surf);border-radius:11px;padding:11px 13px;margin:0 0 14px;font-size:12.5px;color:var(--dark);">\u23f0 '+(''+d.schedule_note).replace(/</g,'&lt;')+'</div>'):''; } var _dn=dowShort(); var _seen={}; var _pat=[]; _occ.forEach(function(o){ var dow=new Date(o.date+'T00:00:00').getDay(); var k=dow+'|'+(o.time||''); if(_seen[k]) return; _seen[k]=1; _pat.push({dow:dow,time:o.time}); }); _pat.sort(function(a,b){return a.dow-b.dow;}); var _line=_pat.map(function(x){return _dn[x.dow]+' '+(x.time||'');}).join(' \u00b7 '); var _first=_occ[0], _last=_occ[_occ.length-1]; return '<div style="background:var(--surf);border-radius:11px;padding:12px 13px;margin:0 0 14px;"><div style="font-size:12.5px;font-weight:700;color:var(--dark);margin-bottom:3px;">\u23f0 '+_line+'</div><div style="font-size:11px;color:var(--light);">'+_occ.length+' '+(EN?'sessions':'lekc\u00ed')+(_first?(' \u00b7 '+(EN?'first ':'prvn\u00ed ')+_first.date):'')+'</div></div>'; }catch(e){ return ''; } })()
     +'<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:13px;margin-bottom:14px;"><div style="font-size:13px;font-weight:700;">'+(EN?'Deposit now (non-refundable): ':'Záloha teď (nevratná): ')+fmtPrice(d.deposit_amount||0,cur)+'</div><div style="font-size:12px;color:var(--mid);margin-top:5px;">'+(EN?'Then monthly: ':'Pak měsíčně: ')+'student '+fmtPrice(d.price_student||0,cur)+' · '+(EN?'regular ':'ostatní ')+fmtPrice(d.price_regular||0,cur)+'</div>'+(d.capacity?('<div style="font-size:11px;color:var(--light);margin-top:5px;">'+d.taken+' / '+d.capacity+' '+(EN?'spots taken':'míst obsazeno')+'</div>'):'')+'</div>'
     +(full?('<div style="text-align:center;color:var(--red);font-weight:700;padding:18px;">'+(EN?'This cohort is full.':'Tento kurz je plný.')+'</div>'):(
       _cohTierPicker(d, EN, cur)
@@ -11335,11 +11373,12 @@ function _cohBreak(inputId, boxId){
   box.style.display='block';
   box.innerHTML=shareBreakdownHtml(price, _cohCtx.currency, _cohKeepRate());
 }
-function _cohSnapshot(){ var k={}; ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)) k[id]=$(id).value; }); k._disc=(typeof _cohDisc!=='undefined'?(_cohDisc||[]).slice():[]); k._tiers=!!($('cohMoreTiers')&&$('cohMoreTiers').checked); return k; }
+function _cohSnapshot(){ var k={}; k._sched=(window._cohSched||[]).slice(); ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)) k[id]=$(id).value; }); k._disc=(typeof _cohDisc!=='undefined'?(_cohDisc||[]).slice():[]); k._tiers=!!($('cohMoreTiers')&&$('cohMoreTiers').checked); return k; }
 function _cohRelang(){ var sh=$('shCohorts'); if(!sh||!sh.classList.contains('open')) return; if(window._cohView==='create'){ _cohShowCreate(_cohSnapshot()); } else if(typeof _cohRender==='function'){ _cohRender(); } }
 function _cohShowCreate(keep){
   if(!_cohCtx) return;
   const box=$('cohBody'); if(!box) return; const EN=LANG==='en'; const cur=_cohCtx.currency; const sym=_curSym(cur);
+  if(!keep) window._cohSched=[];
   _cohDisc=[];
   const inp='width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;margin-bottom:10px;';
   const lbl='font-size:12px;font-weight:700;color:var(--mid);display:block;margin-bottom:4px;';
@@ -11360,7 +11399,7 @@ function _cohShowCreate(keep){
     +'<div id="cohTierWrap" style="display:none;"><div id="cohTierRows"></div><button type="button" id="cohTierAdd" style="width:100%;padding:10px;background:var(--surf);border:1.5px dashed var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';color:var(--mid);margin-bottom:10px;">+ '+(EN?'Add another offer':'P\u0159idat dal\u0161\u00ed nab\u00eddku')+'</button></div>'
     +'<label style="'+lbl+'">'+(EN?'Meta Pixel ID (optional)':'Meta Pixel ID (nepovinn\u00e9)')+'</label><input id="cohPixel" type="text" style="'+inp+'">'
     +'<label style="'+lbl+'">'+(EN?'Meta CAPI token (optional)':'Meta CAPI token (nepovinn\u00e9)')+'</label><input id="cohCapiToken" type="text" style="'+inp+'"><div style="font-size:10px;color:var(--light);margin:-6px 0 10px;line-height:1.4;">'+(EN?'Server-side conversions for ad accuracy (iOS/adblock-proof). Generate it in Events Manager > your dataset > Settings.':'Server-side konverze pro p\u0159esnost reklam (odoln\u00e9 v\u016f\u010di iOS/adblock). Vygeneruj v Events Manageru > tv\u016fj dataset > Nastaven\u00ed.')+'</div>'
-    +'<label style="'+lbl+'">'+(EN?'Class times (shown on the club profile)':'\u010casy lekc\u00ed (zobraz\u00ed se na profilu klubu)')+'</label><input id="cohSchedNote" type="text" placeholder="'+(EN?'e.g. Mon 18:00 \u00b7 Thu 19:00':'nap\u0159. Po 18:00 \u00b7 \u010ct 19:00')+'" style="'+inp+'">'
+    +'<label style="'+lbl+'">'+(EN?'Class schedule (weekly)':'Rozvrh lekc\u00ed (t\u00fddenn\u011b)')+'</label><div id="cohSchedRows" style="margin-bottom:6px;"></div><button type="button" id="cohSchedAdd" style="width:100%;padding:9px;border:1.5px dashed var(--border);background:transparent;border-radius:10px;font-size:12.5px;font-weight:700;color:var(--mid);cursor:pointer;font-family:\'DM Sans\';margin-bottom:6px;">+ '+(EN?'Add a class day':'P\u0159idat den lekce')+'</button><div style="font-size:10.5px;color:var(--light);margin-bottom:12px;line-height:1.5;">'+(EN?'These times show on the club profile and the signup page, and become the enrolled student\u2019s upcoming classes.':'\u010casy se zobraz\u00ed na profilu klubu a na p\u0159ihla\u0161ovac\u00ed str\u00e1nce a stanou se nadch\u00e1zej\u00edc\u00edmi lekcemi zapsan\u00e9ho studenta.')+'</div><input id="cohSchedNote" type="hidden">'
     +'<label style="'+lbl+'">'+(EN?'Description':'Popis')+'</label><textarea id="cohDesc" rows="3" style="'+inp+'"></textarea>'
     +'<div style="display:flex;gap:8px;"><button id="cohCancel" style="flex:1;padding:12px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;">'+(EN?'Cancel':'Zru\u0161it')+'</button><button id="cohSave" style="flex:1.5;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-weight:800;cursor:pointer;">'+(EN?'Create cohort':'Vytvo\u0159it kurz')+'</button></div></div>';
   _cohDiscChips();
@@ -11371,9 +11410,30 @@ function _cohShowCreate(keep){
   if($('cohTierAdd')) $('cohTierAdd').onclick=function(){ _cohTierAdd(); };
   if($('cohMoreTiers')) $('cohMoreTiers').onchange=function(){ var w=$('cohTierWrap'); if(w) w.style.display=this.checked?'block':'none'; if(this.checked && !(($('cohTierRows')||{}).children||[]).length) _cohTierAdd(); if(!this.checked && $('cohTierRows')) $('cohTierRows').innerHTML=''; };
   $('cohCancel').onclick=function(){ _cohRender(); };
+  // ── structured schedule editor ──
+  window._cohSched = window._cohSched || [];
+  function _cohSchedRender(){
+    const box=$('cohSchedRows'); if(!box) return; const EN=LANG==='en'; const dn=dowShort();
+    if(!_cohSched.length){ box.innerHTML='<div style="font-size:12px;color:var(--light);padding:4px 0 8px;">'+(EN?'No class days yet \u2014 add at least one.':'Zat\u00edm \u017e\u00e1dn\u00fd den \u2014 p\u0159idej aspo\u0148 jeden.')+'</div>'; return; }
+    box.innerHTML=_cohSched.map(function(r,i){
+      const opts=dn.map(function(nm,di){ return '<option value="'+di+'"'+(Number(r.day)===di?' selected':'')+'>'+nm+'</option>'; }).join('');
+      return '<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">'
+        +'<select class="cohSchDay" data-i="'+i+'" style="flex:0 0 78px;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:\'DM Sans\';font-size:13px;">'+opts+'</select>'
+        +'<input class="cohSchTime" data-i="'+i+'" type="time" value="'+(r.time||'18:00')+'" style="flex:1;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:\'DM Sans\';font-size:13px;">'
+        +'<input class="cohSchDur" data-i="'+i+'" type="number" min="15" step="15" value="'+(Number(r.dur)||60)+'" title="'+(EN?'minutes':'minut')+'" style="flex:0 0 62px;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:\'DM Sans\';font-size:13px;">'
+        +'<button type="button" class="cohSchDel" data-i="'+i+'" style="flex:0 0 34px;padding:9px 0;border:none;background:#FEECEC;color:var(--red);border-radius:9px;font-size:15px;cursor:pointer;">\u00d7</button></div>';
+    }).join('');
+    box.querySelectorAll('.cohSchDay').forEach(function(el){ el.onchange=function(){ _cohSched[+el.dataset.i].day=Number(el.value); }; });
+    box.querySelectorAll('.cohSchTime').forEach(function(el){ el.onchange=function(){ _cohSched[+el.dataset.i].time=el.value; }; });
+    box.querySelectorAll('.cohSchDur').forEach(function(el){ el.onchange=function(){ _cohSched[+el.dataset.i].dur=Number(el.value)||60; }; });
+    box.querySelectorAll('.cohSchDel').forEach(function(el){ el.onclick=function(){ _cohSched.splice(+el.dataset.i,1); _cohSchedRender(); }; });
+  }
+  if($('cohSchedAdd')) $('cohSchedAdd').onclick=function(){ _cohSched.push({ day:1, time:'18:00', dur:60 }); _cohSchedRender(); };
+  window._cohSchedRender=_cohSchedRender;
+  _cohSchedRender();
   $('cohSave').onclick=function(){ _cohSave(); };
   window._cohView='create';
-  if(keep){ try{ ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)&&keep[id]!=null) $(id).value=keep[id]; }); if(keep._disc){ _cohDisc=keep._disc.slice(); _cohDiscChips(); } if(keep._tiers && $('cohMoreTiers')){ $('cohMoreTiers').checked=true; var w=$('cohTierWrap'); if(w) w.style.display='block'; } _cohBreak('cohDep','cohDepBreak'); _cohBreak('cohPR','cohPRBreak'); _cohBreak('cohPS','cohPSBreak'); }catch(e){} }
+  if(keep){ try{ ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)&&keep[id]!=null) $(id).value=keep[id]; }); if(keep._disc){ _cohDisc=keep._disc.slice(); _cohDiscChips(); } if(keep._sched){ window._cohSched=keep._sched.slice(); if(typeof _cohSchedRender==='function') _cohSchedRender(); } if(keep._tiers && $('cohMoreTiers')){ $('cohMoreTiers').checked=true; var w=$('cohTierWrap'); if(w) w.style.display='block'; } _cohBreak('cohDep','cohDepBreak'); _cohBreak('cohPR','cohPRBreak'); _cohBreak('cohPS','cohPSBreak'); }catch(e){} }
 }
 // One extra pricing offer: a free-text name + a price, with a remove button. Rows are plain DOM
 // so the owner can add as many as they want; _cohTiers() reads them back on save.
@@ -11442,7 +11502,7 @@ async function _cohSave(){
       toast(EN?('A '+months+'-month course can end on '+_xm+' at the latest (max +1 month)'):(months+'měsíční kurz může končit nejpozději '+_xm+' (max +1 měsíc)')); return;
     }
   }
-  const rec={ gym_id:_cohCtx.gymId, owner_id:_cohCtx.ownerId, stripe_account:_cohCtx.stripeAccount||null, name:name, discipline:(_cohDisc[0]||null), start_date:g('cohStart')||null, end_date:g('cohEnd')||null, months:months, capacity:parseInt(g('cohCap'),10)||null, deposit_amount:parseFloat(g('cohDep'))||0, price_tiers:_cohTiers(), price_student:((_cohTiers()[1]&&_cohTiers()[1].price)||parseFloat(g('cohPR'))||0), price_regular:(parseFloat(g('cohPR'))||0), currency:_cohCtx.currency, gym_meta_pixel:g('cohPixel')||null, capi_token:g('cohCapiToken')||null, description:g('cohDesc')||null, schedule_note:g('cohSchedNote')||null, status:'open' };
+  const rec={ gym_id:_cohCtx.gymId, owner_id:_cohCtx.ownerId, stripe_account:_cohCtx.stripeAccount||null, name:name, discipline:(_cohDisc[0]||null), start_date:g('cohStart')||null, end_date:g('cohEnd')||null, months:months, capacity:parseInt(g('cohCap'),10)||null, deposit_amount:parseFloat(g('cohDep'))||0, price_tiers:_cohTiers(), price_student:((_cohTiers()[1]&&_cohTiers()[1].price)||parseFloat(g('cohPR'))||0), price_regular:(parseFloat(g('cohPR'))||0), currency:_cohCtx.currency, gym_meta_pixel:g('cohPixel')||null, capi_token:g('cohCapiToken')||null, description:g('cohDesc')||null, schedule:(window._cohSched||[]), schedule_note:(cohScheduleSummary(window._cohSched||[])||g('cohSchedNote')||null), status:'open' };
   const btn=$('cohSave'); if(btn){ btn.disabled=true; btn.textContent=(EN?'Saving...':'Ukládám...'); }
   try{
     const { data:_newCoh, error }=await supaClient.from('gym_cohorts').insert(rec).select('id').single();
@@ -12453,6 +12513,14 @@ function _showImportClaim(imp, _em, _gids, gymName){
     }catch(e){ toast('\u26A0\uFE0F '+(e.message||'error')); btn.disabled=false; btn.textContent=EN?'Save & continue':'Ulozit a pokracovat'; }
   };
 }
+async function _claimCohortMembers(){ try{
+  if(!currentUser||!currentUser.email) return;
+  var _em=(currentUser.email||'').toLowerCase();
+  var _sel; try{ _sel=await supaClient.from('cohort_members').select('id').eq('email',_em).is('student_id',null).neq('status','cancelled'); }catch(e){ return; }
+  var rows=(_sel&&_sel.data)||[]; if(!rows.length) return;
+  for(var i=0;i<rows.length;i++){ try{ await supaClient.from('cohort_members').update({ student_id: currentUser.id }).eq('id', rows[i].id).is('student_id', null); }catch(e){} }
+  try{ localStorage.removeItem('mtl_claim_course'); }catch(e){}
+}catch(e){} }
 async function _claimImported(){ try{
   if(!currentUser||!currentUser.email) return;
   var _em=(currentUser.email||'').toLowerCase();
@@ -15398,7 +15466,7 @@ async function loadGymCoursesForProfile(gymId, g){
   const el=$('gpCoursesSection'); if(!el) return; el.innerHTML='';
   const EN=LANG==='en';
   let rows=[];
-  try{ const { data }=await supaClient.from('gym_cohorts').select('id,name,discipline,start_date,end_date,months,capacity,status,description,schedule_note,currency').eq('gym_id',gymId).order('start_date',{ascending:false}).limit(40); rows=data||[]; }catch(e){}
+  try{ const { data }=await supaClient.from('gym_cohorts').select('id,name,discipline,start_date,end_date,months,capacity,status,description,schedule,schedule_note,currency').eq('gym_id',gymId).order('start_date',{ascending:false}).limit(40); rows=data||[]; }catch(e){}
   rows=(rows||[]).filter(function(c){ return c && c.status!=='cancelled'; });
   const today=new Date().toISOString().slice(0,10);
   const isOpen=function(c){ return c.status==='open' && (!c.start_date || c.start_date>today); };
@@ -15420,7 +15488,15 @@ async function loadGymCoursesForProfile(gymId, g){
       ? '<span style="font-size:10px;font-weight:800;color:#9a6b00;background:#FFF4E6;border-radius:6px;padding:2px 7px;white-space:nowrap;">'+(EN?'running':'b\u011b\u017e\u00ed')+'</span>'
       : '<span style="font-size:10px;font-weight:800;color:#006040;background:#F0FBF0;border-radius:6px;padding:2px 7px;white-space:nowrap;">'+(EN?'signups open':'p\u0159ihl\u00e1\u0161ky')+'</span>';
     let body='';
-    if(c.schedule_note) body+='<div style="font-size:12.5px;color:var(--dark);margin-bottom:5px;">'+'⏰'+' '+escapeHtml(c.schedule_note)+'</div>';
+    { let _occ=[]; try{ _occ=cohortOccurrences(c,{horizonDays:90}); }catch(e){}
+      if(_occ.length){
+        const _dn=dowShort(); const _byDay={};
+        _occ.forEach(function(o){ const dow=new Date(o.date+'T00:00:00').getDay(); const k=dow+'|'+(o.time||''); if(!_byDay[k]) _byDay[k]={dow:dow,time:o.time,n:0}; _byDay[k].n++; });
+        const _pat=Object.keys(_byDay).map(function(k){ return _byDay[k]; }).sort(function(a,b){ return a.dow-b.dow; }).map(function(x){ return _dn[x.dow]+' '+(x.time||''); }).join(' \u00b7 ');
+        body+='<div style="font-size:12.5px;color:var(--dark);margin-bottom:5px;">\u23f0 '+escapeHtml(_pat)+'</div>';
+        body+='<div style="font-size:11px;color:var(--light);margin-bottom:6px;">'+_occ.length+' '+(LANG==='en'?'sessions':'lekc\u00ed')+'</div>';
+      } else if(c.schedule_note){ body+='<div style="font-size:12.5px;color:var(--dark);margin-bottom:5px;">\u23f0 '+escapeHtml(c.schedule_note)+'</div>'; }
+    }
     if(c.description) body+='<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:6px;">'+escapeHtml(c.description)+'</div>';
     if(c.months) body+='<div style="font-size:11.5px;color:var(--light);">'+c.months+' '+(EN?'months':'m\u011bs\u00edc\u016f')+(cap?(' \u00b7 '+cap+' '+(EN?'signed up':'p\u0159ihl\u00e1\u0161eno')):'')+'</div>';
     body+= live
@@ -15455,6 +15531,83 @@ async function loadGymCoursesForProfile(gymId, g){
     }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
     bell.disabled=false;
   };
+}
+// ── Accountless course page (?myclass=<cohort_member_id>) ──
+// Reached by anyone with the link (the member id is an unguessable UUID). No login: the link IS
+// the key, exactly like the shared kid profile and the walk-in guest flow. A person who paid a
+// deposit via a Meta ad has NO MTL profile, so the full VALUE they bought — the schedule — is shown
+// freely. What is gated behind creating a profile is everything that only makes sense WITH an
+// account: calendar sync, pre-class reminders, progress, and the post-course membership. That is
+// the hard-but-smart nudge: never tax the thing they already paid for, gate everything that comes
+// after.
+async function openMyCourse(memberId){
+  let ov=$('myCourseOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='myCourseOv';
+  ov.style.cssText='position:fixed;inset:0;z-index:120;background:var(--bg);overflow-y:auto;';
+  document.body.appendChild(ov);
+  const EN=LANG==='en';
+  ov.innerHTML='<div style="max-width:560px;margin:0 auto;padding:22px 18px 60px;"><div id="myCourseBody"><p style="text-align:center;color:var(--light);padding:60px 10px;">'+L('Načítám...')+'</p></div></div>';
+  let d=null,mem=null;
+  try{ const r=await fetch('/api/cohort-public?cm='+encodeURIComponent(memberId)); const j=await r.json(); if(j&&j.ok){ d=j.cohort; mem=j.member; } }catch(e){}
+  const box=$('myCourseBody'); if(!box) return;
+  if(!d){ box.innerHTML='<div style="text-align:center;padding:50px 10px;"><div style="font-size:16px;font-weight:700;margin-bottom:10px;">'+(EN?'Course not found':'Kurz nenalezen')+'</div><button onclick="document.getElementById(\'myCourseOv\').remove();location.href=\'/\';" style="padding:11px 20px;background:var(--dark);color:#fff;border:none;border-radius:11px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Go to MTL':'Na MTL')+'</button></div>'; return; }
+  window._myCourseData=d; window._myCourseMember=mem;
+  const _occ=(function(){ try{ return cohortOccurrences(d,{horizonDays:220}); }catch(e){ return []; } })();
+  const _isLogged=!!currentUser;
+  const dn=dowShort();
+  const _next=_occ.find(o=>{ const st=new Date(o.date+'T'+(o.time||'00:00')+':00'); return st>=new Date(); }) || _occ[0];
+  const money=(typeof _curSym==='function')?_curSym(d.currency):'';
+  let h='';
+  h+='<div style="font-family:\'Bebas Neue\';font-size:15px;letter-spacing:.08em;color:var(--red);">'+(EN?'YOUR COURSE':'TVŮJ KURZ')+'</div>';
+  h+='<div style="font-family:\'Bebas Neue\';font-size:32px;letter-spacing:.02em;color:var(--dark);line-height:1.05;margin-bottom:2px;">'+escapeHtml(d.name||'')+'</div>';
+  h+='<div style="font-size:13px;color:var(--mid);margin-bottom:4px;">'+escapeHtml(d.gym_name||'')+(d.start_date?(' · '+(EN?'from ':'od ')+d.start_date):'')+(d.end_date?(' – '+d.end_date):'')+'</div>';
+  if(mem&&(mem.status==='deposit_claimed'||mem.status==='lead'||mem.status==='enrolled')){
+    const _lbl=(mem.status==='enrolled')?(EN?'Enrolled ✓':'Zapsán ✓'):(EN?'Deposit paid ✓':'Záloha zaplacena ✓');
+    h+='<div style="display:inline-block;font-size:11.5px;font-weight:800;color:#006040;background:#F0FBF0;border:1px solid #CDEBD6;border-radius:7px;padding:3px 9px;margin-bottom:14px;">'+_lbl+'</div>';
+  }
+  if(_next){ const _nd=new Date(_next.date+'T00:00:00'); h+='<div style="background:linear-gradient(135deg,#171717,#2a2a2a);color:#fff;border-radius:14px;padding:15px 16px;margin:8px 0 16px;"><div style="font-size:11px;letter-spacing:.08em;opacity:.7;font-weight:700;">'+(EN?'NEXT SESSION':'DALŠÍ LEKCE')+'</div><div style="font-size:19px;font-weight:800;margin-top:3px;">'+dn[_nd.getDay()]+' '+_next.date+' · '+(_next.time||'')+'</div></div>'; }
+  if(_occ.length){
+    const _seen={}, _pat=[]; _occ.forEach(function(o){ const dow=new Date(o.date+'T00:00:00').getDay(); const k=dow+'|'+(o.time||''); if(_seen[k])return; _seen[k]=1; _pat.push({dow:dow,time:o.time}); }); _pat.sort((a,b)=>a.dow-b.dow);
+    h+='<div style="font-size:11px;letter-spacing:.06em;color:var(--light);font-weight:800;margin:4px 0 8px;">'+(EN?'SCHEDULE':'ROZVRH')+' <span style="color:var(--mid);font-weight:600;">· '+_pat.map(x=>dn[x.dow]+' '+(x.time||'')).join(' · ')+'</span></div>';
+    h+='<div style="border:1px solid var(--border);border-radius:13px;overflow:hidden;margin-bottom:16px;">';
+    _occ.slice(0,60).forEach(function(o,i){ const od=new Date(o.date+'T00:00:00'); const past=new Date(o.date+'T'+(o.time||'23:59')+':00')<new Date(); h+='<div style="display:flex;align-items:center;gap:11px;padding:10px 13px;'+(i>0?'border-top:1px solid var(--border);':'')+(past?'opacity:.4;':'')+'"><div style="flex:0 0 42px;text-align:center;"><div style="font-size:10px;color:var(--light);font-weight:700;text-transform:uppercase;">'+dn[od.getDay()]+'</div><div style="font-size:17px;font-weight:800;color:var(--dark);line-height:1;">'+od.getDate()+'</div></div><div style="flex:1;"><div style="font-size:13px;font-weight:700;color:var(--dark);">'+(o.name||d.name||'')+'</div><div style="font-size:11.5px;color:var(--light);">'+o.date+' · '+(o.time||'')+(o.dur?(' · '+o.dur+' min'):'')+'</div></div>'+(past?'<span style="font-size:15px;">✓</span>':'')+'</div>'; });
+    h+='</div>';
+  } else if(d.schedule_note){ h+='<div style="background:var(--surf);border-radius:12px;padding:13px;margin-bottom:16px;font-size:13px;color:var(--dark);">⏰ '+escapeHtml(d.schedule_note)+'</div>'; }
+
+  // ── the gated block: value that only exists WITH an account ──
+  if(_isLogged){
+    h+='<button id="mcIcs" style="width:100%;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';margin-bottom:10px;">📅 '+(EN?'Add all sessions to calendar':'Přidat všechny lekce do kalendáře')+'</button>';
+    h+='<div style="text-align:center;font-size:12px;color:var(--light);margin-bottom:8px;">'+(EN?'You\u2019ll get a reminder before each class.':'Před každou lekcí ti přijde připomínka.')+'</div>';
+  } else {
+    h+='<div style="background:linear-gradient(135deg,#FFF4E6,#FFE9CC);border:1px solid #FAD9A8;border-radius:15px;padding:17px 16px;margin-bottom:14px;">';
+    h+='<div style="font-size:15px;font-weight:800;color:#7A4F00;margin-bottom:5px;">🥊 '+(EN?'Get the most out of your course':'Vytěž z kurzu maximum')+'</div>';
+    h+='<div style="font-size:12.5px;color:#8a6410;line-height:1.6;margin-bottom:12px;">'+(EN?'Create a free MTL profile with the email you paid with and unlock:':'Založ si zdarma MTL profil s e-mailem, kterým jsi platil, a odemkni:')+'<br>📅 '+(EN?'add every session to your calendar':'přidání všech lekcí do kalendáře')+'<br>🔔 '+(EN?'a reminder before each class':'připomínku před každou lekcí')+'<br>📈 '+(EN?'your attendance & progress':'docházku a pokrok')+'<br>🎟️ '+(EN?'continue on a membership when the course ends':'pokračování na členství, až kurz skončí')+'</div>';
+    const _em=(mem&&mem.email)?('otp='+encodeURIComponent(mem.email)):'signup=1';
+    h+='<button onclick="try{localStorage.setItem(\'mtl_claim_course\',\''+memberId+'\');}catch(e){} location.href=\'/?'+_em+'\';" style="width:100%;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Create my profile — free':'Založit profil — zdarma')+'</button>';
+    h+='</div>';
+  }
+  h+='<button onclick="document.getElementById(\'myCourseOv\').remove();location.href=\'/\';" style="width:100%;padding:11px;background:transparent;color:var(--mid);border:1px solid var(--border);border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Open MTL':'Otevřít MTL')+'</button>';
+  box.innerHTML=h;
+
+  const _ics=$('mcIcs');
+  if(_ics) _ics.onclick=function(){ try{ _cohIcsDownload(d, _occ); }catch(e){ toast('⚠️ '+((e&&e.message)||'')); } };
+}
+// Multi-session .ics for a whole course, reusing the calIcs event grammar (one VEVENT per session).
+function _cohIcsDownload(coh, occ){
+  if(!occ||!occ.length) return;
+  const pad=n=>String(n).padStart(2,'0');
+  const fmt=d=>`${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}00`;
+  const fmtUTC=d=>`${d.getUTCFullYear()}${pad(d.getUTCMonth()+1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
+  const lines=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Martial Training Lab//CS','CALSCALE:GREGORIAN','METHOD:PUBLISH'];
+  occ.forEach(function(o,i){
+    const [h,mi]=String(o.time||'18:00').split(':').map(Number);
+    const st=new Date(o.date+'T00:00:00'); st.setHours(h||0,mi||0,0,0);
+    const en=new Date(st.getTime()+((Number(o.dur)||60)*60000));
+    lines.push('BEGIN:VEVENT',`UID:mtl-coh-${coh.id}-${i}@martialtraininglab.com`,`DTSTAMP:${fmtUTC(new Date())}`,`DTSTART:${fmt(st)}`,`DTEND:${fmt(en)}`,`SUMMARY:${(coh.name||'Kurz')} — ${coh.gym_name||''}`,'DESCRIPTION:Martial Training Lab. Be More.','BEGIN:VALARM','TRIGGER:-PT2H','ACTION:DISPLAY','DESCRIPTION:Lekce za 2 hodiny','END:VALARM','END:VEVENT');
+  });
+  lines.push('END:VCALENDAR');
+  const blob=new Blob([lines.join('\r\n')],{type:'text/calendar;charset=utf-8'});
+  const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='mtl-kurz.ics'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),1500);
 }
 async function _merchQrPay(orderId, payee, m, price, cur, msg){
   const EN=LANG==='en'; const sym=_curSym(cur);
@@ -23803,6 +23956,7 @@ function enterApp(){
   try{ if(typeof _emojiAccountSync==='function') _emojiAccountSync(); }catch(e){}
   try{ if(typeof _maybeTermsGate==='function') _maybeTermsGate(); }catch(e){}
   try{ if(typeof _claimImported==='function') _claimImported(); }catch(e){}
+  try{ if(typeof _claimCohortMembers==='function') _claimCohortMembers(); }catch(e){}
   try{ if(typeof _checkWelcomeEnding==='function') _checkWelcomeEnding(); }catch(e){}
   $('authScreen').style.display='none';
   try{ _maybeAppLock(); }catch(e){}
@@ -25738,6 +25892,7 @@ async function showPaidPopup(){
     const _gc=params.get('guardianconsent'); if(_gc){ try{ openGuardianConsent(_gc); }catch(e){} return; }
     const _gymt=params.get('gymterms'); if(_gymt){ try{ openGymTermsPage(_gymt, params.get('gt')||''); }catch(e){} return; }
     const _cpay=params.get('cohortpay'); if(_cpay){ try{ openCohortRemainder(_cpay); }catch(e){} return; }
+    const _mycl=params.get('myclass'); if(_mycl){ try{ openMyCourse(_mycl); }catch(e){} return; }
     const _ap=params.get('apply'); if(_ap==='coach'||_ap==='gym'){ try{ if(params.get('src')) localStorage.setItem('mtl_prov_src', params.get('src')); }catch(e){} try{ openProviderApply(_ap); }catch(e){} return; }
     const _coh=params.get('cohort');
     if(_coh){
