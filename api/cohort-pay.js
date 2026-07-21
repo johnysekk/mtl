@@ -125,6 +125,14 @@ export default async function handler(req, res) {
     // --- honeypot: hidden field only bots fill -> silent no-op (no lead, no Stripe, no pixel) ---
     if (b && (b.hp || b.website)) return res.status(200).json({ ok: false, error: 'rejected' }); // honeypot -> soft fail (no lead/Stripe/pixel/QR); client toasts + re-enables
     const kind = b.kind || 'deposit';
+    // Server-authoritative attribution. fbc present => meta_ads, overriding whatever the client sent.
+    const _resolveAttribution = (body) => {
+      if (body && body.fbc && String(body.fbc).trim()) return 'meta_ads';
+      const org = (body && body.attribution) ? String(body.attribution) : 'direct';
+      const allowed = ['mtl_deck','mtl_discovery','mtl_alert','walk_in','direct'];
+      return allowed.includes(org) ? org : 'direct';
+    };
+    const _attr = _resolveAttribution(b);
 
     // First-month remainder paid on-site via QR (member already exists; charge tier price minus deposit)
     if (kind === 'first_month') {
@@ -158,6 +166,45 @@ export default async function handler(req, res) {
         payment_intent_data: { application_fee_amount: fee, metadata: { mtl_payment_type: 'cohort_first_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_rate: String(rate), mtl_welcome: wz ? '1' : '0' } }
       }, { stripeAccount: coh.stripe_account });
       return res.status(200).json({ ok: true, url: session.url, remainder });
+    }
+
+    // Month 2+ of a multi-month course: a FULL monthly (tier) payment, like an on-site payer buying
+    // one more month. No deposit maths — just the tier price. months_paid is bumped by the webhook
+    // once Stripe confirms (so a bailed checkout never advances the counter). QR/bank cohorts settle
+    // this the same way the deposit does: via record-cash on confirmation, not here.
+    if (kind === 'month') {
+      const cmId = b.cohort_member_id;
+      if (!cmId) return res.status(400).json({ ok: false, error: 'missing cohort_member_id' });
+      const mrows = await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=*`);
+      const mem = mrows && mrows[0];
+      if (!mem) return res.status(404).json({ ok: false, error: 'member not found' });
+      const crows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(mem.cohort_id)}&select=*`);
+      const coh = crows && crows[0];
+      if (!coh || !coh.stripe_account) return res.status(400).json({ ok: false, error: 'cohort/account missing' });
+      const totalMonths = Number(coh.months || 1);
+      const paidMonths = Number(mem.months_paid || 0);
+      if (paidMonths >= totalMonths) return res.status(200).json({ ok: true, done: true, url: null, message: 'all months paid' });
+      try { const _a = await stripe.accounts.retrieve(String(coh.stripe_account)); if (!_a.charges_enabled) return res.status(400).json({ ok: false, error: 'Na strane kouce/gymu je chyba v konfiguraci plateb. Pokud jsi s nimi v kontaktu, dej jim o tom vedet.' }); } catch (e) { return res.status(400).json({ ok: false, error: 'Na strane kouce/gymu je chyba v konfiguraci plateb. Pokud jsi s nimi v kontaktu, dej jim o tom vedet.' }); }
+      const tierPrice = tierPriceOf(coh, mem.tier);
+      if (!(tierPrice > 0)) return res.status(400).json({ ok: false, error: 'no price set' });
+      const nextMonth = paidMonths + 1;
+      const cur = String(coh.currency || 'CZK').toUpperCase();
+      const isCZK = cur === 'CZK';
+      const unit = isCZK ? Math.floor(tierPrice) * 100 : Math.round(tierPrice * 100);
+      const wz = await isWelcomeZero(coh.stripe_account);
+      const rate = wz ? 0 : await providerCommission(coh.owner_id);
+      const fee = Math.round(tierPrice * rate * 100);
+      const host = req.headers.host; const proto = host && host.includes('localhost') ? 'http' : 'https';
+      const session = await stripe.checkout.sessions.create({
+        mode: 'payment',
+        success_url: `${proto}://${host}/?cohort=${encodeURIComponent(mem.cohort_id)}&monthpaid=ok&cm=${encodeURIComponent(cmId)}&session={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${proto}://${host}/?cohortpay=${encodeURIComponent(cmId)}`,
+        customer_email: mem.email || undefined,
+        metadata: { mtl_payment_type: 'cohort_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_currency: cur, mtl_welcome: wz ? '1' : '0', mtl_rate: String(rate), mtl_month: String(nextMonth) },
+        line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: `${coh.name || 'Course'} - ${nextMonth}. mesic z ${totalMonths}` }, unit_amount: unit }, quantity: 1 }],
+        payment_intent_data: { application_fee_amount: fee, metadata: { mtl_payment_type: 'cohort_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_rate: String(rate), mtl_welcome: wz ? '1' : '0', mtl_month: String(nextMonth) } }
+      }, { stripeAccount: coh.stripe_account });
+      return res.status(200).json({ ok: true, url: session.url, amount: tierPrice, month: nextMonth, totalMonths });
     }
 
     const cohortId = b.cohort_id;
@@ -206,7 +253,7 @@ export default async function handler(req, res) {
       if (!(depQ > 0)) return res.status(400).json({ ok: false, error: 'no deposit set' });
       const memberQ = await sbInsert('cohort_members', {
         cohort_id: cohortId, gym_id: c.gym_id, name, email, phone: (b.phone || '').trim() || null,
-        tier, status: 'deposit_claimed', attribution: (b.attribution || 'direct'), source: 'online',
+        tier, status: 'deposit_claimed', attribution: _attr, source: 'online',
         consent_at: new Date().toISOString(), consent_version: (b.consent_version || null),
         fbp: (b.fbp || null), fbc: (b.fbc || null)
       });
@@ -219,7 +266,7 @@ export default async function handler(req, res) {
 
     const member = await sbInsert('cohort_members', {
       cohort_id: cohortId, gym_id: c.gym_id, name, email, phone: (b.phone || '').trim() || null,
-      tier, status: 'lead', attribution: (b.attribution || 'direct'),
+      tier, status: 'lead', attribution: _attr,
       consent_at: new Date().toISOString(), consent_version: (b.consent_version || null),
       fbp: (b.fbp || null), fbc: (b.fbc || null)
     });
