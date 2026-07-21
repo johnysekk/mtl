@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SCZ Per Petr (the REAL day-shift bug — a live timezone bug, not stale data as I wrongly guessed before). Petr's editor correctly showed Po/St/Pa (Mon/Wed/Fri) but the profile/deck display showed Ne/Ut/Ct (Sun/Tue/Thu) — a consistent 1-day-back shift on a fresh course made with the new build. ROOT CAUSE: upcomingClasses() built each occurrence's `date` field (and its override/cancel keys) with date.toISOString().slice(0,10) — which is UTC. In a positive-offset timezone (Czech = UTC+1/+2) local midnight rolls back to the previous calendar day, so a Monday occurrence was stamped as Sunday; the display then read getDay() off that shifted date and rendered the whole schedule one day early. Matching used the LOCAL date string (_ld) so occurrences landed on the right days, but the REPORTED date was wrong. FIX: use _ld (local Y-M-D, already computed for matching) for the occurrence date field and for the override + cancelled keys, instead of toISOString(). Verified in TZ=Europe/Prague: a local Monday 2026-07-27 was stamped 2026-07-26 (Sun, getDay 0) before, now 2026-07-27 (Mon, getDay 1). cohScheduleSummary was already safe (reads raw day). This was systemic — it affected every schedule occurrence date (gym classes too) for anyone east of UTC, not just cohorts. Deploy: index.html (SCZ). Builds on SCY. -->
+<!-- MTL build: SDA Per Petr (courses-in-deck fix, private courses, timezone audit). (1) COURSES STILL NOT IN DECK - real cause found: the entire events+courses render block was gated on `if(window._evList.length)`, so a club with a course but NO events never reached it and the 'Kurzy' chip never appeared. Now renders when there are events OR courses; and when there are ONLY courses, the filter defaults to the 'courses' chip so the deck isn't empty-looking. (2) PRIVATE COURSE (Petr's design, my one-checkbox recommendation): new gym_cohorts.private (cohort-private.sql). A private course is hidden from the Events deck (deck query now .eq('private',false)) and from the club profile's course list for non-owners (owner still sees it, to manage), but stays reachable by its DIRECT LINK (?cohort= via /api/cohort-public, which never filtered private) and by manual/walk-in add. Checkbox in the create form ('Hidden from Events + profile; reachable only by link or added manually/on-site'), wired through save/edit/snapshot/relang. Real use: fill from your own people (IG/WhatsApp) before going public; closed corporate/team camps; invite-only prep courses. (3) TIMEZONE AUDIT across the app: found + fixed a second instance of the same UTC bug in the coach BULK slot generator (a Monday slot was saved as Sunday in +TZ via d.toISOString()); now uses a local Y-M-D helper, and the from/to default fill too. Audited the rest: cron-attendance.js already computes date + weekday correctly in the gym's own timezone (Intl.DateTimeFormat with gyms.timezone, which is set from the browser on gym save), so server-side occurrence dates are sound. Remaining toISOString().slice(0,10) uses are all 'today' keys for view-logs where a shift is harmless. So the only real occurrence-date TZ bugs were upcomingClasses (SCZ) and bulk slots (this build). Deploy: index.html (SDA) + run cohort-private.sql. Builds on SCZ. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -6899,7 +6899,7 @@ async function renderEventsAsync(box){
     // because a beginner course two cities away is noise (unlike a fight night you'd travel for).
     try{
       const _tdISO=new Date().toISOString().slice(0,10);
-      const { data:_chs } = await supaClient.from('gym_cohorts').select('id,gym_id,name,discipline,start_date,end_date,months,capacity,status,description,schedule,schedule_note,currency,deposit_amount,price_regular,price_student,price_tiers,poster').eq('status','open').limit(80);
+      const { data:_chs } = await supaClient.from('gym_cohorts').select('id,gym_id,name,discipline,start_date,end_date,months,capacity,status,description,schedule,schedule_note,currency,deposit_amount,price_regular,price_student,price_tiers,poster,private').eq('status','open').eq('private',false).limit(80);
       let _chList=(_chs||[]).filter(c=>c && (!c.start_date || c.start_date>=_tdISO));
       if(_chList.length){
         const _cgids=[...new Set(_chList.map(c=>c.gym_id).filter(Boolean))];
@@ -6911,12 +6911,12 @@ async function renderEventsAsync(box){
     }catch(e){ window._cohDeckList=[]; }
     try{ var _gids=[...new Set((window._evList||[]).map(e=>e.gym_id).filter(Boolean))]; var _uids=[...new Set((window._evList||[]).map(e=>e.created_by).filter(Boolean))]; var _gm={}, _um={}; if(_gids.length){ var _gr=await supaClient.from('gyms').select('id,name').in('id',_gids); (_gr&&_gr.data||[]).forEach(g=>_gm[g.id]=g.name); } if(_uids.length){ var _ur=await supaClient.from('profiles').select('id,name').in('id',_uids); (_ur&&_ur.data||[]).forEach(u=>_um[u.id]=u.name); } window._evList.forEach(e=>{ e._gymName=_gm[e.gym_id]||null; e._creatorName=_um[e.created_by]||null; }); }catch(e){}
     const fd = _deckDisc||'all';
-    if(window._evList.length){
+    if(window._evList.length || (window._cohDeckList||[]).length){
       const _evc=prefCategory(), _evEN=LANG==='en';
       const _spLbl = _deckDisc ? (disciplineEmoji(_deckDisc)+' '+disciplineLabel(_deckDisc)) : catAllLabel(_evc,_evEN);
       const _evchg = _deckDisc ? (_evEN ? ('Change '+catSportWord(_evc,true)) : (_evc==='traditional'?'Změnit umění':'Změnit sport')) : (_evEN ? 'Choose specific' : 'Vybrat konkrétní');
       html += `<div style="margin-bottom:10px;"><div class="pill" id="evSportBtn" style="cursor:pointer;font-weight:700;display:inline-block;">${_spLbl} · ${_evchg} ▾</div></div>`;
-      const ft = window._evFilterType||'all';
+      const ft = window._evFilterType || ((!window._evList.length && (window._cohDeckList||[]).length)?'courses':'all');
       const _tch=[{v:'all',lbl:(LANG==='en'?'All':'Vše'),emoji:''}].concat(EVENT_TYPES.map(tt=>({v:tt.v,lbl:(LANG==='en'?tt.en:tt.cs),emoji:tt.emoji})));
       const _nCoh=(window._cohDeckList||[]).length;
       let _chipHtml=_tch.map(c=>{ const on=(ft===c.v && ft!=='courses'); return `<div class="evTypeChip pill${on?' active':''}" data-v="${c.v}">${c.emoji?c.emoji+' ':''}${c.lbl}</div>`; }).join('');
@@ -11615,7 +11615,7 @@ function _cohBreak(inputId, boxId){
   box.style.display='block';
   box.innerHTML=shareBreakdownHtml(price, _cohCtx.currency, _cohKeepRate(), (_cohCtx&&_cohCtx.stripeAccount)?'stripe':'qr_bank');
 }
-function _cohSnapshot(){ var k={}; k._sched=(window._cohSched||[]).slice(); k._poster=window._cohPoster||null; ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)) k[id]=$(id).value; }); k._disc=(typeof _cohDisc!=='undefined'?(_cohDisc||[]).slice():[]); k._tiers=!!($('cohMoreTiers')&&$('cohMoreTiers').checked); return k; }
+function _cohSnapshot(){ var k={}; k._sched=(window._cohSched||[]).slice(); k._poster=window._cohPoster||null; ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)) k[id]=$(id).value; }); k._disc=(typeof _cohDisc!=='undefined'?(_cohDisc||[]).slice():[]); k._tiers=!!($('cohMoreTiers')&&$('cohMoreTiers').checked); k._private=!!($('cohPrivate')&&$('cohPrivate').checked); return k; }
 function _cohRelang(){ var sh=$('shCohorts'); if(!sh||!sh.classList.contains('open')) return; if(window._cohView==='create'){ _cohShowCreate(_cohSnapshot()); } else if(typeof _cohRender==='function'){ _cohRender(); } }
 function _cohShowCreate(keep){
   if(!_cohCtx) return;
@@ -11644,6 +11644,7 @@ function _cohShowCreate(keep){
     +'<label style="'+lbl+'">'+(EN?'Meta CAPI token (optional)':'Meta CAPI token (nepovinn\u00e9)')+'</label><input id="cohCapiToken" type="text" style="'+inp+'"><div style="font-size:10px;color:var(--light);margin:-6px 0 10px;line-height:1.4;">'+(EN?'Server-side conversions for ad accuracy (iOS/adblock-proof). Generate it in Events Manager > your dataset > Settings.':'Server-side konverze pro p\u0159esnost reklam (odoln\u00e9 v\u016f\u010di iOS/adblock). Vygeneruj v Events Manageru > tv\u016fj dataset > Nastaven\u00ed.')+'</div>'
     +'<label style="'+lbl+'">'+(EN?'Class schedule (weekly)':'Rozvrh lekc\u00ed (t\u00fddenn\u011b)')+'</label><div id="cohSchedRows" style="margin-bottom:6px;"></div><button type="button" id="cohSchedAdd" style="width:100%;padding:9px;border:1.5px dashed var(--border);background:transparent;border-radius:10px;font-size:12.5px;font-weight:700;color:var(--mid);cursor:pointer;font-family:\'DM Sans\';margin-bottom:6px;">+ '+(EN?'Add a class day':'P\u0159idat den lekce')+'</button><div style="font-size:10.5px;color:var(--light);margin-bottom:12px;line-height:1.5;">'+(EN?'These times show on the club profile and the signup page, and become the enrolled student\u2019s upcoming classes.':'\u010casy se zobraz\u00ed na profilu klubu a na p\u0159ihla\u0161ovac\u00ed str\u00e1nce a stanou se nadch\u00e1zej\u00edc\u00edmi lekcemi zapsan\u00e9ho studenta.')+'</div><input id="cohSchedNote" type="hidden">'
     +'<label style="'+lbl+'">'+(EN?'Description':'Popis')+'</label><textarea id="cohDesc" rows="3" style="'+inp+'"></textarea>'
+    +'<label style="display:flex;align-items:flex-start;gap:9px;font-size:13px;color:var(--dark);line-height:1.4;margin:4px 0 6px;cursor:pointer;"><input id="cohPrivate" type="checkbox" style="width:17px;height:17px;flex-shrink:0;margin-top:1px;"><span><b>\ud83d\udd12 '+(EN?'Private course':'Soukrom\u00fd kurz')+'</b><br><span style="font-size:11.5px;color:var(--mid);">'+(EN?'Hidden from the Events deck and your club profile. Reachable only by its direct link, or add people manually / on-site.':'Skryt\u00fd v Ud\u00e1lostech i na profilu klubu. Dostupn\u00fd jen p\u0159es odkaz, nebo lidi p\u0159id\u00e1\u0161 ru\u010dn\u011b / na m\u00edst\u011b.')+'</span></span></label>'
     +'<div style="display:flex;gap:8px;"><button id="cohCancel" style="flex:1;padding:12px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;">'+(EN?'Cancel':'Zru\u0161it')+'</button><button id="cohSave" style="flex:1.5;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-weight:800;cursor:pointer;">'+(EN?'Create cohort':'Vytvo\u0159it kurz')+'</button></div></div>';
   _cohDiscChips();
   $('cohDep').oninput=function(){ _cohBreak('cohDep','cohDepBreak'); };
@@ -11714,7 +11715,7 @@ function _cohShowCreate(keep){
   _cohSchedRender();
   $('cohSave').onclick=function(){ _cohSave(); };
   window._cohView='create';
-  if(keep){ try{ ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)&&keep[id]!=null) $(id).value=keep[id]; }); if(keep._disc){ _cohDisc=keep._disc.slice(); _cohDiscChips(); } if(keep._sched){ window._cohSched=keep._sched.slice(); if(typeof _cohSchedRender==='function') _cohSchedRender(); } if(keep._poster!==undefined){ window._cohPoster=keep._poster; const _pv=$('cohPosterPv'); if(_pv&&keep._poster){ _pv.style.backgroundImage='url(\''+keep._poster+'\')'; _pv.style.display='block'; } } if(keep._tiers && $('cohMoreTiers')){ $('cohMoreTiers').checked=true; var w=$('cohTierWrap'); if(w) w.style.display='block'; var nw=$('cohPRNameWrap'); if(nw) nw.style.display='block'; } _cohBreak('cohDep','cohDepBreak'); _cohBreak('cohPR','cohPRBreak'); _cohBreak('cohPS','cohPSBreak'); if(typeof _cohUpdEndHint==='function') _cohUpdEndHint(); }catch(e){} }
+  if(keep){ try{ ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)&&keep[id]!=null) $(id).value=keep[id]; }); if(keep._disc){ _cohDisc=keep._disc.slice(); _cohDiscChips(); } if(keep._sched){ window._cohSched=keep._sched.slice(); if(typeof _cohSchedRender==='function') _cohSchedRender(); } if(keep._poster!==undefined){ window._cohPoster=keep._poster; const _pv=$('cohPosterPv'); if(_pv&&keep._poster){ _pv.style.backgroundImage='url(\''+keep._poster+'\')'; _pv.style.display='block'; } } if(keep._tiers && $('cohMoreTiers')){ $('cohMoreTiers').checked=true; var w=$('cohTierWrap'); if(w) w.style.display='block'; var nw=$('cohPRNameWrap'); if(nw) nw.style.display='block'; } if(keep._private && $('cohPrivate')) $('cohPrivate').checked=true; _cohBreak('cohDep','cohDepBreak'); _cohBreak('cohPR','cohPRBreak'); _cohBreak('cohPS','cohPSBreak'); if(typeof _cohUpdEndHint==='function') _cohUpdEndHint(); }catch(e){} }
 }
 // One extra pricing offer: a free-text name + a price, with a remove button. Rows are plain DOM
 // so the owner can add as many as they want; _cohTiers() reads them back on save.
@@ -11794,13 +11795,13 @@ async function _cohSave(){
       toast(EN?('A '+months+'-month course can end on '+_xm+' at the latest (max +1 month)'):(months+'měsíční kurz může končit nejpozději '+_xm+' (max +1 měsíc)')); return;
     }
   }
-  const rec={ gym_id:_cohCtx.gymId, owner_id:_cohCtx.ownerId, stripe_account:_cohCtx.stripeAccount||null, name:name, discipline:(_cohDisc[0]||null), start_date:g('cohStart')||null, end_date:g('cohEnd')||null, months:months, capacity:parseInt(g('cohCap'),10)||null, deposit_amount:parseFloat(g('cohDep'))||0, price_tiers:_cohTiers(), price_student:(function(){ var st=_cohTiers().find(function(t){ return /student/i.test(t.name||''); }); return st?st.price:0; })(), price_regular:(parseFloat(g('cohPR'))||0), currency:_cohCtx.currency, gym_meta_pixel:g('cohPixel')||null, capi_token:g('cohCapiToken')||null, description:g('cohDesc')||null, schedule:(window._cohSched||[]), schedule_note:(cohScheduleSummary(window._cohSched||[])||g('cohSchedNote')||null), poster:(window._cohPoster||null), status:'open' };
+  const rec={ gym_id:_cohCtx.gymId, owner_id:_cohCtx.ownerId, stripe_account:_cohCtx.stripeAccount||null, name:name, discipline:(_cohDisc[0]||null), start_date:g('cohStart')||null, end_date:g('cohEnd')||null, months:months, capacity:parseInt(g('cohCap'),10)||null, deposit_amount:parseFloat(g('cohDep'))||0, price_tiers:_cohTiers(), price_student:(function(){ var st=_cohTiers().find(function(t){ return /student/i.test(t.name||''); }); return st?st.price:0; })(), price_regular:(parseFloat(g('cohPR'))||0), currency:_cohCtx.currency, gym_meta_pixel:g('cohPixel')||null, capi_token:g('cohCapiToken')||null, description:g('cohDesc')||null, schedule:(window._cohSched||[]), schedule_note:(cohScheduleSummary(window._cohSched||[])||g('cohSchedNote')||null), poster:(window._cohPoster||null), private:!!($('cohPrivate')&&$('cohPrivate').checked), status:'open' };
   const btn=$('cohSave'); if(btn){ btn.disabled=true; btn.textContent=(EN?'Saving...':'Ukládám...'); }
   const _editId=window._cohEditId||null;
   try{
     if(_editId){
       // editing: don't touch gym_id/owner_id/stripe_account/status — only the editable fields
-      const upd={ name:rec.name, discipline:rec.discipline, start_date:rec.start_date, end_date:rec.end_date, months:rec.months, capacity:rec.capacity, deposit_amount:rec.deposit_amount, price_tiers:rec.price_tiers, price_student:rec.price_student, price_regular:rec.price_regular, gym_meta_pixel:rec.gym_meta_pixel, capi_token:rec.capi_token, description:rec.description, schedule:rec.schedule, schedule_note:rec.schedule_note, poster:rec.poster };
+      const upd={ name:rec.name, discipline:rec.discipline, start_date:rec.start_date, end_date:rec.end_date, months:rec.months, capacity:rec.capacity, deposit_amount:rec.deposit_amount, price_tiers:rec.price_tiers, price_student:rec.price_student, price_regular:rec.price_regular, gym_meta_pixel:rec.gym_meta_pixel, capi_token:rec.capi_token, description:rec.description, schedule:rec.schedule, schedule_note:rec.schedule_note, poster:rec.poster, private:rec.private };
       const { error }=await supaClient.from('gym_cohorts').update(upd).eq('id',_editId);
       if(error){ toast('⚠️ '+error.message); if(btn){ btn.disabled=false; btn.textContent=(EN?'Save changes':'Uložit změny'); } return; }
       window._cohEditId=null;
@@ -11834,7 +11835,7 @@ async function _cohEdit(cohortId){
     cohCap:(c.capacity!=null?c.capacity:''), cohDep:(c.deposit_amount!=null?c.deposit_amount:''),
     cohPRName:_hasVariants?((_tiers[0]&&_tiers[0].name)||''):'', cohPR:(_tiers[0]?_tiers[0].price:(c.price_regular||'')),
     cohPixel:c.gym_meta_pixel||'', cohCapiToken:c.capi_token||'', cohDesc:c.description||'',
-    _disc:c.discipline?[c.discipline]:[], _sched:_sched, _poster:c.poster||null, _tiers:_hasVariants
+    _disc:c.discipline?[c.discipline]:[], _sched:_sched, _poster:c.poster||null, _tiers:_hasVariants, _private:!!c.private
   };
   _cohShowCreate(keep);
   // populate the extra tier rows (beyond the base price) + set the create button to 'Save changes'
@@ -15821,7 +15822,7 @@ async function loadGymCoursesForProfile(gymId, g){
   const el=$('gpCoursesSection'); if(!el) return; el.innerHTML='';
   const EN=LANG==='en';
   let rows=[];
-  try{ const { data }=await supaClient.from('gym_cohorts').select('id,name,discipline,start_date,end_date,months,capacity,status,description,schedule,schedule_note,currency').eq('gym_id',gymId).order('start_date',{ascending:false}).limit(40); rows=data||[]; }catch(e){}
+  try{ const { data }=await supaClient.from('gym_cohorts').select('id,name,discipline,start_date,end_date,months,capacity,status,description,schedule,schedule_note,currency,private').eq('gym_id',gymId).order('start_date',{ascending:false}).limit(40); rows=data||[]; }catch(e){}
   rows=(rows||[]).filter(function(c){ return c && c.status!=='cancelled'; });
   const today=new Date().toISOString().slice(0,10);
   const isOpen=function(c){ return c.status==='open' && (!c.start_date || c.start_date>today); };
@@ -15830,6 +15831,7 @@ async function loadGymCoursesForProfile(gymId, g){
   let taken={};
   try{ const ids=rows.map(function(c){return c.id;}); if(ids.length){ const { data:cm }=await supaClient.from('cohort_members').select('cohort_id,status').in('cohort_id',ids); (cm||[]).forEach(function(m){ if(m.status!=='cancelled') taken[m.cohort_id]=(taken[m.cohort_id]||0)+1; }); } }catch(e){}
   const isOwner=!!(currentUser && g && g.owner_id===currentUser.id);
+  if(!isOwner){ rows=(rows||[]).filter(function(c){ return !c.private; }); }
   let subbed=false;
   if(currentUser && !isOwner){ try{ const { data:sa }=await supaClient.from('course_alerts').select('id').eq('gym_id',gymId).eq('user_id',currentUser.id).limit(1); subbed=!!(sa&&sa.length); }catch(e){} }
   if(!open.length && !running.length && (isOwner || !currentUser)) return;
@@ -21438,7 +21440,7 @@ function openBulkSlots(){
   document.querySelectorAll('#bulkDays .bday').forEach(b=>b.classList.remove('on'));
   const today = new Date();
   const to = new Date(today.getTime() + 28*24*60*60*1000);
-  const iso = d => d.toISOString().slice(0,10);
+  const iso = d => d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
   $('bulkFrom').value = iso(today);
   $('bulkTo').value = iso(to);
   $('bulkPreview').textContent = '';
@@ -21473,9 +21475,10 @@ async function bulkCreateSlots(){
   const existing = new Set((diarySlots||[]).map(s=>`${s.date}T${s.time}`));
   const rows=[];
   const start=new Date(from+'T00:00:00'), end=new Date(to+'T00:00:00');
+  const _ymd=x=>x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0');
   for(let d=new Date(start); d<=end; d.setDate(d.getDate()+1)){
     if(!days.includes(d.getDay())) continue;
-    const ds = d.toISOString().slice(0,10);
+    const ds = _ymd(d);
     times.forEach(t=>{ if(!existing.has(`${ds}T${t}`)) rows.push({ coach_profile_id: currentUser.id, date: ds, time: t, booked:false, discipline: (window._diarySlotDisc||(currentUser&&currentUser.main_discipline)||((currentUser&&currentUser.disciplines&&currentUser.disciplines[0]))||null) }); });
   }
   if(!rows.length){ toast(L('Žádné nové termíny (možná už existují)')); btn.textContent=L('Vytvořit termíny'); btn.disabled=false; return; }
