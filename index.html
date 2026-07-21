@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SCU Per Petr (tier rework + cohort revenue dashboard with ROAS, built on a fixed payment-method data base). (1) TIER PRICING REWORK: the cohort form now shows a SINGLE unnamed price by default. Ticking 'Add more pricing variants' reveals a required Name field for that base price AND required names on every extra row (save validates both). _cohTiers() returns a nameless single price (name empty) when there are no variants, named tiers when variants are on. The signup picker _cohTierPicker() was reworked to match: a single nameless price shows NO radios, just a 'monthly price' line; multiple/named variants show the radio list with names. The legacy hard-coded regular/student pair was REMOVED (folded into a fallback that maps an old price_regular to a nameless tier + price_student to a 'Student' tier, so old cohorts still render). (2) COHORT_PAYMENTS PAYMENT-METHOD DATA BASE: found that cohort_payments did NOT store payment_method AND that QR/PIS cohort payments were not written to cohort_payments at all (only to transactions) - so a revenue dashboard could not split by method. Fixed: cohort-payment-method.sql adds cohort_payments.payment_method. Stripe webhook tags all three cohort_payments inserts (deposit/first_month/month) with 'stripe'. The QR deposit + month confirms (_cohDepositConfirm, _cohMonthConfirm) now also insert a cohort_payments row (method 'qr'). pis-webhook logs the cohort deposit to cohort_payments (method 'pis') + sets months_paid=1. (3) COHORT REVENUE DASHBOARD + ROAS: a Trzby/Revenue button on each cohort card opens openCohortDash - a minimalist overlay reading cohort_payments for that cohort: gross, MTL commission, club net, a By-payment-method split (Stripe / QR platba / Bankovni prevod), and a ROAS block with an editable manual Meta ad-spend field (saved to gym_cohorts.ad_spend) that computes ROAS = gross / spend and gross - spend, coloured good/bad at the 1x line. Dashboard math unit-tested (gross 540, method split 180/180/180, ROAS 2.70x). cohort-months.sql appended with the ad_spend column. Deploy: index.html (SCU) + stripe-webhook.js + pis-webhook.js + run cohort-payment-method.sql + run the ad_spend line in cohort-months.sql. Builds on SCT. -->
+<!-- MTL build: SCW Per Petr (big late-night batch: signup clarity, schedule sanity, desktop cohort management). Several of these re-fix things that SCO/SCP marked done but never actually saved. SIGNUP FORM: (a) deposit summary rewritten to be unambiguous - 'Zaplatis ted - zaloha X', 'Pak doplatis 1. mesic Y' (only if remainder>0), 'Kazdy dalsi mesic Z' (if multi-month), all WITH the currency symbol (was missing entirely). Monthly price now derives from the chosen tier, not a phantom student/regular pair. (b) the 'Secure payment via Stripe' line is now conditional - QR/bank cohorts show 'Platba bankovnim prevodem / QR' instead (it was false for non-Stripe clubs). (c) currency symbol added to the pay button. COHORT SCHEDULE EDITOR: (d) Monday-first day order (was Sunday-first, which is why a Mon/Wed/Fri course picked by position saved as Sun/Tue/Thu) - the option VALUE stays the getDay() index so stored days never shift; Sunday moves to the end. (e) END-TIME picker (start - end) instead of a raw duration-in-minutes box (_cohEndFrom/_cohDurFrom, unit-tested incl. midnight wrap + roundtrip); dur is still stored so occurrences/.ics are unchanged. DESKTOP COHORT MANAGEMENT: (f) cohort cards now have EDIT (prefills the form, updates instead of inserts) and DELETE (guarded: refuses if paid members exist) buttons - neither existed. (g) discipline shown via disciplineLabel (was raw 'muay_thai'). (h) currency symbol added to the deposit/price line. CLUB WEEKLY SCHEDULE: (i) navigating to PAST weeks is now blocked (clamp at week 0) - the schedule is a forward-only weekly pattern, so past weeks only ever showed locked classes the owner couldn't delete; this removes the whole 'creates locked classes in the past' confusion. (j) deleting a recurring class now asks Google-Calendar-style whether to remove it and ALL upcoming occurrences (one-time classes skip the prompt). END-DATE GATE: (k) the 'a N-month course must end on X or later' warning now shows LIVE in red under the End-date field the moment start/end/months change (cohEndHint + _cohMinEnd, unit-tested), instead of only as a toast on save. STILL PENDING (told Petr): the ONE existing course with shifted days (0/2/4) has stale data from the old editor - offered to fix that single row by hand or he recreates it. And making 'Add recurring' a checkbox inside Add-class (vs the separate panel) - deferred. Deploy: index.html (SCW). Builds on SCV. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -6871,6 +6871,29 @@ async function renderEventsAsync(box){
     const today=new Date(); today.setHours(0,0,0,0);
     const { data:evs } = await supaClient.from('events').select('*').eq('status','approved').gte('starts_at', today.toISOString()).order('starts_at',{ascending:true}).limit(100);
     window._evList = evs||[];
+    // Map a cohort row to the event-card shape so the deck renders it via swipeCardHtml. Deposit is
+    // the entry price shown; price_tiers become ticket_tiers; host-gym coords drive distance.
+    function _cohAsEvent(c){
+      let _tiers=[]; try{ _tiers=Array.isArray(c.price_tiers)?c.price_tiers:(JSON.parse(c.price_tiers||'[]')); }catch(e){ _tiers=[]; }
+      const _tkTiers=(_tiers&&_tiers.length)?_tiers.map(function(t){ return { name:t.name||'', price:Number(t.price)||0 }; }):[{ name:'', price:Number(c.deposit_amount)||0 }];
+      return {
+        id:c.id, cohort_id:c.id, _isCohort:true,
+        title:c.name||'', type:'course',
+        starts_at:(c.start_date? (c.start_date+'T00:00:00') : null),
+        description:c.description||c.schedule_note||'',
+        poster:c.poster||null,
+        disciplines:JSON.stringify(c.discipline?[c.discipline]:[]),
+        discipline:c.discipline||null,
+        venue:null, city:c._city||null, country:null,
+        city_lat:(c._lat!=null?c._lat:null), city_lng:(c._lng!=null?c._lng:null),
+        _gymName:c._gymName||null,
+        currency:c.currency||'CZK',
+        ticket_price:Number(c.deposit_amount)||0,
+        ticket_tiers:JSON.stringify(_tkTiers),
+        deposit_amount:Number(c.deposit_amount)||0,
+        seeking_fighters:false
+      };
+    }
     // Courses shown in the same discovery surface (chip 'Kurzy'). Open + not-yet-started only, so a
     // person can actually still enrol. Coords come from the host gym; distance decides the order,
     // because a beginner course two cities away is noise (unlike a fight night you'd travel for).
@@ -11131,7 +11154,25 @@ async function openCohortSignup(cohortId){
     +'<div style="font-size:13px;color:var(--mid);margin:2px 0 14px;">'+(d.gym_name||'')+(d.discipline?(' · '+d.discipline):'')+(d.start_date?(' · '+(EN?'starts ':'start ')+d.start_date):'')+(d.end_date?(' – '+d.end_date):'')+'</div>'
     +(d.description?('<p style="font-size:13px;color:var(--dark);line-height:1.55;margin:0 0 14px;">'+(''+d.description).replace(/</g,'&lt;')+'</p>'):'')
     +(function(){ try{ var _occ=cohortOccurrences(d,{horizonDays:120}); if(!_occ.length){ return d.schedule_note?('<div style="background:var(--surf);border-radius:11px;padding:11px 13px;margin:0 0 14px;font-size:12.5px;color:var(--dark);">\u23f0 '+(''+d.schedule_note).replace(/</g,'&lt;')+'</div>'):''; } var _dn=dowShort(); var _seen={}; var _pat=[]; _occ.forEach(function(o){ var dow=new Date(o.date+'T00:00:00').getDay(); var k=dow+'|'+(o.time||''); if(_seen[k]) return; _seen[k]=1; _pat.push({dow:dow,time:o.time}); }); _pat.sort(function(a,b){return a.dow-b.dow;}); var _line=_pat.map(function(x){return _dn[x.dow]+' '+(x.time||'');}).join(' \u00b7 '); var _first=_occ[0], _last=_occ[_occ.length-1]; return '<div style="background:var(--surf);border-radius:11px;padding:12px 13px;margin:0 0 14px;"><div style="font-size:12.5px;font-weight:700;color:var(--dark);margin-bottom:3px;">\u23f0 '+_line+'</div><div style="font-size:11px;color:var(--light);">'+_occ.length+' '+(EN?'sessions':'lekc\u00ed')+(_first?(' \u00b7 '+(EN?'first ':'prvn\u00ed ')+_first.date):'')+'</div></div>'; }catch(e){ return ''; } })()
-    +'<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:13px;margin-bottom:14px;"><div style="font-size:13px;font-weight:700;">'+(EN?'Deposit now (non-refundable): ':'Záloha teď (nevratná): ')+fmtPrice(d.deposit_amount||0,cur)+'</div><div style="font-size:12px;color:var(--mid);margin-top:5px;">'+(EN?'Then monthly: ':'Pak měsíčně: ')+((Number(d.price_student)||0)>0?('student '+fmtPrice(d.price_student||0,cur)+' · '):'')+fmtPrice(d.price_regular||0,cur)+'</div>'+(d.capacity?('<div style="font-size:11px;color:var(--light);margin-top:5px;">'+d.taken+' / '+d.capacity+' '+(EN?'spots taken':'míst obsazeno')+'</div>'):'')+'</div>'
+    +(function(){
+      var _sym=_curSym(cur);
+      var _tiers=(Array.isArray(d.price_tiers)&&d.price_tiers.length)?d.price_tiers:null;
+      var _monthly = _tiers ? (Number(_tiers[0].price)||0) : (Number(d.price_regular)||0);
+      var _dep=Number(d.deposit_amount)||0;
+      var _rem=Math.max(0, _monthly-_dep);
+      var _months=Number(d.months)||1;
+      var h='<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:14px;">';
+      // line 1: what you pay right now
+      h+='<div style="display:flex;justify-content:space-between;align-items:baseline;"><span style="font-size:13px;font-weight:800;color:var(--dark);">'+(EN?'Pay now — deposit':'Zaplatíš teď — záloha')+'</span><span style="font-size:16px;font-weight:800;color:var(--dark);">'+fmtPrice(_dep,cur)+' '+_sym+'</span></div>';
+      h+='<div style="font-size:11px;color:var(--light);margin-top:2px;">'+(EN?'Non-refundable, holds your spot.':'Nevratná, drží ti místo.')+'</div>';
+      // line 2: the rest of month 1 (only if there is a remainder)
+      if(_rem>0){ h+='<div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:9px;padding-top:9px;border-top:1px dashed var(--border);"><span style="font-size:12.5px;color:var(--mid);">'+(EN?'Then top up 1st month':'Pak doplatíš 1. měsíc')+'</span><span style="font-size:13px;font-weight:700;color:var(--dark);">'+fmtPrice(_rem,cur)+' '+_sym+'</span></div>'; }
+      // line 3: each further month, if multi-month
+      if(_months>1){ h+='<div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:7px;"><span style="font-size:12.5px;color:var(--mid);">'+(EN?('Each further month ('+(_months-1)+'\u00d7)'):('Každý další měsíc ('+(_months-1)+'\u00d7)'))+'</span><span style="font-size:13px;font-weight:700;color:var(--dark);">'+fmtPrice(_monthly,cur)+' '+_sym+'</span></div>'; }
+      if(d.capacity){ h+='<div style="font-size:11px;color:var(--light);margin-top:9px;padding-top:8px;border-top:1px dashed var(--border);">'+(d.taken||0)+' / '+d.capacity+' '+(EN?'spots taken':'míst obsazeno')+'</div>'; }
+      h+='</div>';
+      return h;
+    })()
     +(full?('<div style="text-align:center;color:var(--red);font-weight:700;padding:18px;">'+(EN?'This cohort is full.':'Tento kurz je plný.')+'</div>'):(
       _cohTierPicker(d, EN, cur)
       +'<input id="cohSName" type="text" placeholder="'+(EN?'Full name':'Jméno a příjmení')+'" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;margin-bottom:9px;">'
@@ -11139,8 +11180,8 @@ async function openCohortSignup(cohortId){
       +'<input id="cohSPhone" type="tel" placeholder="'+(EN?'Phone':'Telefon')+'" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;margin-bottom:12px;">'+'<input id="cohHp" name="cohort_note2" type="text" tabindex="-1" autocomplete="off" aria-hidden="true" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;">'
       +'<details style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:12px;"><summary style="font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Terms & data protection':'Podmínky & ochrana údajů')+'</summary>'+layers+'</details>'
       +'<label style="display:flex;gap:9px;align-items:flex-start;font-size:12px;color:var(--dark);line-height:1.45;margin-bottom:14px;cursor:pointer;"><input id="cohConsent" type="checkbox" style="margin-top:2px;flex-shrink:0;"><span>'+(EN?'I agree to the cohort terms, the data processing, and the provider marketing/tracking described above.':'Souhlasím s podmínkami kurzu, zpracováním údajů a marketingem/trackingem poskytovatele výše.')+'</span></label>'
-      +'<button id="cohPayBtn" style="width:100%;padding:15px;background:var(--red);color:#fff;border:none;border-radius:13px;font-size:15px;font-weight:800;cursor:pointer;">'+(EN?'Pay deposit ':'Zaplatit zálohu ')+fmtPrice(d.deposit_amount||0,cur)+'</button>'
-      +'<p style="font-size:10px;color:var(--light);text-align:center;margin-top:10px;line-height:1.5;">'+(EN?'Secure payment via Stripe. No app account needed now.':'Bezpečná platba přes Stripe. Účet v appce teď nepotřebuješ.')+'</p>'));
+      +'<button id="cohPayBtn" style="width:100%;padding:15px;background:var(--red);color:#fff;border:none;border-radius:13px;font-size:15px;font-weight:800;cursor:pointer;">'+(EN?'Pay deposit ':'Zaplatit zálohu ')+fmtPrice(d.deposit_amount||0,cur)+' '+_curSym(cur)+'</button>'
+      +'<p style="font-size:10px;color:var(--light);text-align:center;margin-top:10px;line-height:1.5;">'+((d&&d.payment_mode==='qr_bank')?(EN?'Payment by bank transfer / QR. No app account needed now.':'Platba bankovním převodem / QR. Účet v appce teď nepotřebuješ.'):(EN?'Secure payment via Stripe. No app account needed now.':'Bezpečná platba přes Stripe. Účet v appce teď nepotřebuješ.'))+'</p>'));
   if(full) return;
   const cc=ov.querySelector('#cohConsent');
   if(cc) cc.onchange=function(){ if(cc.checked && d.meta_pixel) _cohInjectPixel(d.meta_pixel); };
@@ -11393,7 +11434,7 @@ async function openCohorts(gymId, gymName, ownerId, stripeAccount, currency, dis
   openSheet('shCohorts');
   const t=$('cohSheetTitle'); if(t) t.textContent=(EN?'Cohorts':'Kurzy')+(gymName?(' · '+gymName):'');
   const intro=$('cohIntro'); if(intro) intro.textContent=(EN?'Time-boxed beginner cohorts with ad signups, a non-refundable deposit, and retention tracking.':'Časově ohraničené kurzy pro začátečníky se signupem z reklamy, nevratnou zálohou a sledováním retence.');
-  const nb=$('cohNewBtn'); if(nb){ nb.textContent='+ '+(EN?'New cohort':'Nový kurz'); nb.onclick=function(){ _cohShowCreate(); }; }
+  const nb=$('cohNewBtn'); if(nb){ nb.textContent='+ '+(EN?'New cohort':'Nový kurz'); nb.onclick=function(){ window._cohEditId=null; _cohShowCreate(); }; }
   const cb=$('btnCloseCohorts'); if(cb) cb.onclick=function(){ closeSheet('shCohorts'); };
   _cohRender();
 }
@@ -11414,11 +11455,13 @@ async function _cohRender(){
   const stL={draft:(EN?'Draft':'Koncept'),open:(EN?'Open':'Otevřený'),running:(EN?'Running':'Běží'),done:(EN?'Done':'Dokončený'),archived:(EN?'Archived':'Archiv')};
   box.innerHTML=summaryHtml+rows.map(function(c){
     const cur=c.currency||'CZK'; const cnt=counts[c.id]||{total:0,paid:0};
-    return '<div style="border:1px solid var(--border);border-radius:12px;padding:13px;margin-bottom:10px;"><div style="display:flex;justify-content:space-between;align-items:flex-start;"><div style="font-size:15px;font-weight:800;">'+((c.name||'')+'').replace(/</g,'&lt;')+'</div><span style="font-size:10px;font-weight:700;color:'+(stC[c.status]||'#999')+';text-transform:uppercase;">'+(stL[c.status]||c.status)+'</span></div><div style="font-size:12px;color:var(--mid);margin-top:4px;">'+(c.discipline?(c.discipline+' · '):'')+(c.start_date?(c.start_date+' · '):'')+(c.months||2)+' '+(EN?'mo':'měs')+(c.capacity?(' · '+(EN?'cap ':'kap ')+c.capacity):'')+'</div><div style="font-size:12px;color:var(--mid);margin-top:3px;">'+(EN?'Deposit':'Záloha')+' '+fmtPrice(c.deposit_amount||0,cur)+((Number(c.price_student)||0)>0?(' · student '+fmtPrice(c.price_student||0,cur)):'')+' · '+(EN?'price ':'cena ')+fmtPrice(c.price_regular||0,cur)+'</div><div style="font-size:12px;color:var(--dark);font-weight:600;margin-top:6px;">'+cnt.total+' '+(EN?'signups':'přihlášených')+' · '+cnt.paid+' '+(EN?'paid':'zaplaceno')+'</div><div style="display:flex;gap:6px;margin-top:9px;flex-wrap:wrap;"><button class="cohLinkBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Link + QR':'Odkaz + QR')+'</button><button class="cohRosterBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Roster':'Roster')+'</button><button class="cohDashBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:#171717;color:#F4D87A;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">\ud83d\udcb0 '+(EN?'Revenue':'Tržby')+'</button></div></div>';
+    return '<div style="border:1px solid var(--border);border-radius:12px;padding:13px;margin-bottom:10px;"><div style="display:flex;justify-content:space-between;align-items:flex-start;"><div style="font-size:15px;font-weight:800;">'+((c.name||'')+'').replace(/</g,'&lt;')+'</div><span style="font-size:10px;font-weight:700;color:'+(stC[c.status]||'#999')+';text-transform:uppercase;">'+(stL[c.status]||c.status)+'</span></div><div style="font-size:12px;color:var(--mid);margin-top:4px;">'+(c.discipline?(disciplineLabel(c.discipline)+' · '):'')+(c.start_date?(c.start_date+' · '):'')+(c.months||2)+' '+(EN?'mo':'měs')+(c.capacity?(' · '+(EN?'cap ':'kap ')+c.capacity):'')+'</div><div style="font-size:12px;color:var(--mid);margin-top:3px;">'+(EN?'Deposit':'Záloha')+' '+fmtPrice(c.deposit_amount||0,cur)+' '+_curSym(cur)+' · '+(EN?'price ':'cena ')+(function(){ var _t=(Array.isArray(c.price_tiers)&&c.price_tiers.length)?c.price_tiers:null; var _p=_t?Number(_t[0].price):Number(c.price_regular); return fmtPrice(_p||0,cur)+' '+_curSym(cur); })()+'</div><div style="font-size:12px;color:var(--dark);font-weight:600;margin-top:6px;">'+cnt.total+' '+(EN?'signups':'přihlášených')+' · '+cnt.paid+' '+(EN?'paid':'zaplaceno')+'</div><div style="display:flex;gap:6px;margin-top:9px;flex-wrap:wrap;"><button class="cohLinkBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Link + QR':'Odkaz + QR')+'</button><button class="cohRosterBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Roster':'Roster')+'</button><button class="cohDashBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:#171717;color:#F4D87A;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">\ud83d\udcb0 '+(EN?'Revenue':'Tržby')+'</button></div><div style="display:flex;gap:6px;margin-top:6px;"><button class="cohEditBtn" data-id="'+c.id+'" style="flex:1;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">\u270e '+(EN?'Edit':'Upravit')+'</button><button class="cohDelBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;padding:8px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">\ud83d\uddd1 '+(EN?'Delete':'Smazat')+'</button></div></div>';
   }).join('');
   box.querySelectorAll('.cohLinkBtn').forEach(function(b){ b.onclick=function(){ _cohShowLink(b.dataset.id, b.dataset.name); }; });
   box.querySelectorAll('.cohRosterBtn').forEach(function(b){ b.onclick=function(){ openCohortRoster(b.dataset.id, b.dataset.name); }; });
   box.querySelectorAll('.cohDashBtn').forEach(function(b){ b.onclick=function(){ openCohortDash(b.dataset.id, b.dataset.name); }; });
+  box.querySelectorAll('.cohDelBtn').forEach(function(b){ b.onclick=function(){ _cohDelete(b.dataset.id, b.dataset.name); }; });
+  box.querySelectorAll('.cohEditBtn').forEach(function(b){ b.onclick=function(){ _cohEdit(b.dataset.id); }; });
 }
 let _cohDisc=[];
 // Keep-rate for a CLUB's own pricing (memberships, drop-in). Same rule as _cohKeepRate but the
@@ -11514,7 +11557,7 @@ function _cohShowCreate(keep){
     +'<label style="'+lbl+'">'+(EN?'Cohort name':'N\u00e1zev kurzu')+'</label><input id="cohName" type="text" style="'+inp+'">'
     +'<label style="'+lbl+'">'+(EN?'Discipline':'Disciplína')+'</label><div id="cohDiscChips" style="margin-bottom:12px;"></div>'
     +'<label style="'+lbl+'">'+(EN?'Start date':'Za\u010d\u00e1tek')+'</label><input id="cohStart" type="date" style="'+inp+'">'
-    +'<label style="'+lbl+'">'+(EN?'End date (optional)':'Konec (nepovinn\u00e9)')+'</label><input id="cohEnd" type="date" style="'+inp+'">'
+    +'<label style="'+lbl+'">'+(EN?'End date (optional)':'Konec (nepovinn\u00e9)')+'</label><input id="cohEnd" type="date" style="'+inp+'">'+'<div id="cohEndHint" style="display:none;font-size:11.5px;color:var(--red);font-weight:700;margin:-6px 0 10px;line-height:1.4;"></div>'
     +'<label style="'+lbl+'">'+(EN?'Length (months, min 2)':'D\u00e9lka (m\u011bs\u00edce, min 2)')+'</label><input id="cohMonths" type="number" min="2" value="2" style="'+inp+'"><div style="font-size:10px;color:var(--light);margin:-6px 0 10px;">'+(EN?'2 recommended (most proven)':'2 doporu\u010deno (nejosv\u011bd\u010den\u011bj\u0161\u00ed)')+'</div>'
     +'<label style="'+lbl+'">'+(EN?'Capacity':'Kapacita')+'</label><input id="cohCap" type="number" min="1" style="'+inp+'">'
     +'<label style="'+lbl+'">'+(EN?'Deposit (non-refundable)':'Z\u00e1loha (nevratn\u00e1)')+' \u00b7 '+sym+'</label><input id="cohDep" type="number" min="0" inputmode="numeric" style="'+inp+'"><div id="cohDepBreak" style="'+brk+'"></div>'
@@ -11529,6 +11572,32 @@ function _cohShowCreate(keep){
     +'<div style="display:flex;gap:8px;"><button id="cohCancel" style="flex:1;padding:12px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;">'+(EN?'Cancel':'Zru\u0161it')+'</button><button id="cohSave" style="flex:1.5;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-weight:800;cursor:pointer;">'+(EN?'Create cohort':'Vytvo\u0159it kurz')+'</button></div></div>';
   _cohDiscChips();
   $('cohDep').oninput=function(){ _cohBreak('cohDep','cohDepBreak'); };
+  // Live end-date check: the moment start/end/months change, show a red hint if the end date is
+  // sooner than the course length needs (same calendar-month math as the save-time guard), instead
+  // of only surfacing it as a toast on save.
+  function _cohMinEnd(startStr, months){
+    if(!startStr) return null;
+    var sd=new Date(startStr+'T00:00:00'); if(isNaN(sd.getTime())) return null;
+    var me=new Date(sd.getTime()); var dom=me.getDate();
+    me.setMonth(me.getMonth()+months); if(me.getDate()!==dom) me.setDate(0);
+    me.setDate(me.getDate()-1); return me;
+  }
+  function _cohUpdEndHint(){
+    var EN=LANG==='en'; var h=$('cohEndHint'); if(!h) return;
+    var cs=($('cohStart')&&$('cohStart').value)||''; var ce=($('cohEnd')&&$('cohEnd').value)||'';
+    var months=Math.max(2, parseInt(($('cohMonths')&&$('cohMonths').value),10)||2);
+    if(!cs || !ce){ h.style.display='none'; return; }
+    var ed=new Date(ce+'T00:00:00'); var me=_cohMinEnd(cs, months);
+    if(ed && me && ed.getTime() < me.getTime()){
+      var mm=me.toLocaleDateString(EN?'en-GB':'cs-CZ');
+      h.textContent=(EN?('\u26a0\ufe0f A '+months+'-month course must end on '+mm+' or later.'):('\u26a0\ufe0f '+months+'m\u011bs\u00ed\u010dn\u00ed kurz mus\u00ed kon\u010dit '+mm+' nebo pozd\u011bji.'));
+      h.style.display='block';
+    } else { h.style.display='none'; }
+  }
+  window._cohUpdEndHint=_cohUpdEndHint;
+  if($('cohStart')) $('cohStart').onchange=_cohUpdEndHint;
+  if($('cohEnd')) $('cohEnd').onchange=_cohUpdEndHint;
+  if($('cohMonths')) $('cohMonths').oninput=_cohUpdEndHint;
   $('cohPR').oninput=function(){ _cohBreak('cohPR','cohPRBreak'); };
   // Extra pricing offers: the owner names each one ("Studenti", "Ranni blok", "Dvojice") and can
   // add as many rows as they like. The standard price above is offer #1 and is named too.
@@ -11537,20 +11606,30 @@ function _cohShowCreate(keep){
   $('cohCancel').onclick=function(){ _cohRender(); };
   // ── structured schedule editor ──
   window._cohSched = window._cohSched || [];
+  // Compute end time from a start time + duration (minutes), and duration back from start+end.
+  // Stored value stays `dur` (minutes) so cohortOccurrences/.ics are unchanged; the owner just
+  // picks an end time instead of typing minutes.
+  function _cohEndFrom(time, dur){ var p=String(time||'18:00').split(':'); var h=+p[0]||0, m=+p[1]||0; var t=h*60+m+(Number(dur)||60); t=((t%1440)+1440)%1440; return String(Math.floor(t/60)).padStart(2,'0')+':'+String(t%60).padStart(2,'0'); }
+  function _cohDurFrom(start, end){ var a=String(start||'18:00').split(':'), b=String(end||'19:00').split(':'); var t1=(+a[0]||0)*60+(+a[1]||0), t2=(+b[0]||0)*60+(+b[1]||0); var d=t2-t1; if(d<=0) d+=1440; return d; }
   function _cohSchedRender(){
     const box=$('cohSchedRows'); if(!box) return; const EN=LANG==='en'; const dn=dowShort();
+    // Monday-first display order; the option VALUE stays the getDay() index (Mon=1) so stored days
+    // are unchanged and never shift. Sunday moves to the end.
+    const _order=[1,2,3,4,5,6,0];
     if(!_cohSched.length){ box.innerHTML='<div style="font-size:12px;color:var(--light);padding:4px 0 8px;">'+(EN?'No class days yet \u2014 add at least one.':'Zat\u00edm \u017e\u00e1dn\u00fd den \u2014 p\u0159idej aspo\u0148 jeden.')+'</div>'; return; }
     box.innerHTML=_cohSched.map(function(r,i){
-      const opts=dn.map(function(nm,di){ return '<option value="'+di+'"'+(Number(r.day)===di?' selected':'')+'>'+nm+'</option>'; }).join('');
+      const opts=_order.map(function(di){ return '<option value="'+di+'"'+(Number(r.day)===di?' selected':'')+'>'+dn[di]+'</option>'; }).join('');
+      const _end=_cohEndFrom(r.time||'18:00', r.dur||60);
       return '<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">'
-        +'<select class="cohSchDay" data-i="'+i+'" style="flex:0 0 78px;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:\'DM Sans\';font-size:13px;">'+opts+'</select>'
-        +'<input class="cohSchTime" data-i="'+i+'" type="time" value="'+(r.time||'18:00')+'" style="flex:1;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:\'DM Sans\';font-size:13px;">'
-        +'<input class="cohSchDur" data-i="'+i+'" type="number" min="15" step="15" value="'+(Number(r.dur)||60)+'" title="'+(EN?'minutes':'minut')+'" style="flex:0 0 62px;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:\'DM Sans\';font-size:13px;">'
+        +'<select class="cohSchDay" data-i="'+i+'" style="flex:0 0 72px;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:\'DM Sans\';font-size:13px;">'+opts+'</select>'
+        +'<input class="cohSchTime" data-i="'+i+'" type="time" value="'+(r.time||'18:00')+'" style="flex:1;min-width:0;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:\'DM Sans\';font-size:13px;">'
+        +'<span style="color:var(--light);font-size:12px;">\u2013</span>'
+        +'<input class="cohSchEnd" data-i="'+i+'" type="time" value="'+_end+'" style="flex:1;min-width:0;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:\'DM Sans\';font-size:13px;">'
         +'<button type="button" class="cohSchDel" data-i="'+i+'" style="flex:0 0 34px;padding:9px 0;border:none;background:#FEECEC;color:var(--red);border-radius:9px;font-size:15px;cursor:pointer;">\u00d7</button></div>';
     }).join('');
     box.querySelectorAll('.cohSchDay').forEach(function(el){ el.onchange=function(){ _cohSched[+el.dataset.i].day=Number(el.value); }; });
-    box.querySelectorAll('.cohSchTime').forEach(function(el){ el.onchange=function(){ _cohSched[+el.dataset.i].time=el.value; }; });
-    box.querySelectorAll('.cohSchDur').forEach(function(el){ el.onchange=function(){ _cohSched[+el.dataset.i].dur=Number(el.value)||60; }; });
+    box.querySelectorAll('.cohSchTime').forEach(function(el){ el.onchange=function(){ const it=_cohSched[+el.dataset.i]; const _en=box.querySelector('.cohSchEnd[data-i="'+el.dataset.i+'"]'); it.time=el.value; if(_en) it.dur=_cohDurFrom(el.value, _en.value); }; });
+    box.querySelectorAll('.cohSchEnd').forEach(function(el){ el.onchange=function(){ const it=_cohSched[+el.dataset.i]; const _st=box.querySelector('.cohSchTime[data-i="'+el.dataset.i+'"]'); it.dur=_cohDurFrom(_st?_st.value:it.time, el.value); }; });
     box.querySelectorAll('.cohSchDel').forEach(function(el){ el.onclick=function(){ _cohSched.splice(+el.dataset.i,1); _cohSchedRender(); }; });
   }
   if($('cohPosterBtn')) $('cohPosterBtn').onclick=function(){ $('cohPosterInput').click(); };
@@ -11560,7 +11639,7 @@ function _cohShowCreate(keep){
   _cohSchedRender();
   $('cohSave').onclick=function(){ _cohSave(); };
   window._cohView='create';
-  if(keep){ try{ ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)&&keep[id]!=null) $(id).value=keep[id]; }); if(keep._disc){ _cohDisc=keep._disc.slice(); _cohDiscChips(); } if(keep._sched){ window._cohSched=keep._sched.slice(); if(typeof _cohSchedRender==='function') _cohSchedRender(); } if(keep._poster!==undefined){ window._cohPoster=keep._poster; const _pv=$('cohPosterPv'); if(_pv&&keep._poster){ _pv.style.backgroundImage='url(\''+keep._poster+'\')'; _pv.style.display='block'; } } if(keep._tiers && $('cohMoreTiers')){ $('cohMoreTiers').checked=true; var w=$('cohTierWrap'); if(w) w.style.display='block'; var nw=$('cohPRNameWrap'); if(nw) nw.style.display='block'; } _cohBreak('cohDep','cohDepBreak'); _cohBreak('cohPR','cohPRBreak'); _cohBreak('cohPS','cohPSBreak'); }catch(e){} }
+  if(keep){ try{ ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)&&keep[id]!=null) $(id).value=keep[id]; }); if(keep._disc){ _cohDisc=keep._disc.slice(); _cohDiscChips(); } if(keep._sched){ window._cohSched=keep._sched.slice(); if(typeof _cohSchedRender==='function') _cohSchedRender(); } if(keep._poster!==undefined){ window._cohPoster=keep._poster; const _pv=$('cohPosterPv'); if(_pv&&keep._poster){ _pv.style.backgroundImage='url(\''+keep._poster+'\')'; _pv.style.display='block'; } } if(keep._tiers && $('cohMoreTiers')){ $('cohMoreTiers').checked=true; var w=$('cohTierWrap'); if(w) w.style.display='block'; var nw=$('cohPRNameWrap'); if(nw) nw.style.display='block'; } _cohBreak('cohDep','cohDepBreak'); _cohBreak('cohPR','cohPRBreak'); _cohBreak('cohPS','cohPSBreak'); if(typeof _cohUpdEndHint==='function') _cohUpdEndHint(); }catch(e){} }
 }
 // One extra pricing offer: a free-text name + a price, with a remove button. Rows are plain DOM
 // so the owner can add as many as they want; _cohTiers() reads them back on save.
@@ -11641,12 +11720,52 @@ async function _cohSave(){
   }
   const rec={ gym_id:_cohCtx.gymId, owner_id:_cohCtx.ownerId, stripe_account:_cohCtx.stripeAccount||null, name:name, discipline:(_cohDisc[0]||null), start_date:g('cohStart')||null, end_date:g('cohEnd')||null, months:months, capacity:parseInt(g('cohCap'),10)||null, deposit_amount:parseFloat(g('cohDep'))||0, price_tiers:_cohTiers(), price_student:(function(){ var st=_cohTiers().find(function(t){ return /student/i.test(t.name||''); }); return st?st.price:0; })(), price_regular:(parseFloat(g('cohPR'))||0), currency:_cohCtx.currency, gym_meta_pixel:g('cohPixel')||null, capi_token:g('cohCapiToken')||null, description:g('cohDesc')||null, schedule:(window._cohSched||[]), schedule_note:(cohScheduleSummary(window._cohSched||[])||g('cohSchedNote')||null), poster:(window._cohPoster||null), status:'open' };
   const btn=$('cohSave'); if(btn){ btn.disabled=true; btn.textContent=(EN?'Saving...':'Ukládám...'); }
+  const _editId=window._cohEditId||null;
   try{
+    if(_editId){
+      // editing: don't touch gym_id/owner_id/stripe_account/status — only the editable fields
+      const upd={ name:rec.name, discipline:rec.discipline, start_date:rec.start_date, end_date:rec.end_date, months:rec.months, capacity:rec.capacity, deposit_amount:rec.deposit_amount, price_tiers:rec.price_tiers, price_student:rec.price_student, price_regular:rec.price_regular, gym_meta_pixel:rec.gym_meta_pixel, capi_token:rec.capi_token, description:rec.description, schedule:rec.schedule, schedule_note:rec.schedule_note, poster:rec.poster };
+      const { error }=await supaClient.from('gym_cohorts').update(upd).eq('id',_editId);
+      if(error){ toast('⚠️ '+error.message); if(btn){ btn.disabled=false; btn.textContent=(EN?'Save changes':'Uložit změny'); } return; }
+      window._cohEditId=null;
+      toast(EN?'✅ Cohort updated':'✅ Kurz upraven'); _cohRender();
+      return;
+    }
     const { data:_newCoh, error }=await supaClient.from('gym_cohorts').insert(rec).select('id').single();
     if(error){ toast('⚠️ '+error.message); if(btn){ btn.disabled=false; btn.textContent=(EN?'Create cohort':'Vytvořit kurz'); } return; }
     toast(EN?'✅ Cohort created':'✅ Kurz vytvořen'); _cohRender();
     if(_newCoh && _newCoh.id){ try{ const _t=await _freshTok(); fetch('/api/course-alert',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ cohort_id:_newCoh.id, token:_t }) }).then(function(r){ return r.json(); }).then(function(j){ if(j&&j.ok&&j.notified>0) toast('🔔 '+(EN?('Notified '+j.notified+' people following this club'):('Upozorněno '+j.notified+' zájemců o kurzy klubu')), 1); }).catch(function(){}); }catch(e){} }
   }catch(e){ toast('⚠️ '+e.message); if(btn){ btn.disabled=false; btn.textContent=(EN?'Create cohort':'Vytvořit kurz'); } }
+}
+async function _cohDelete(cohortId, name){
+  const EN=LANG==='en';
+  // Guard: don't allow deleting a course that already has paying members (money + records attached).
+  let paid=0; try{ const { data }=await supaClient.from('cohort_members').select('id,status').eq('cohort_id',cohortId); paid=(data||[]).filter(function(m){ return m.status && m.status!=='lead' && m.status!=='cancelled'; }).length; }catch(e){}
+  if(paid>0){ toast(EN?('\u26a0\ufe0f '+paid+' paid member(s) — cannot delete. Close it instead.'):('\u26a0\ufe0f '+paid+' platících — nelze smazat. Radši ho ukonči.')); return; }
+  if(!confirm(EN?('Delete the course "'+(name||'')+'"? This cannot be undone.'):('Smazat kurz \u201e'+(name||'')+'"? Tuto akci nelze vrátit.'))) return;
+  try{ const { error }=await supaClient.from('gym_cohorts').delete().eq('id',cohortId); if(error){ toast('\u26a0\ufe0f '+error.message); return; } toast(EN?'\ud83d\uddd1 Deleted':'\ud83d\uddd1 Smazáno'); _cohRender(); }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
+}
+async function _cohEdit(cohortId){
+  const EN=LANG==='en';
+  let c=null; try{ const { data }=await supaClient.from('gym_cohorts').select('*').eq('id',cohortId).single(); c=data; }catch(e){}
+  if(!c){ toast('\u26a0\ufe0f'); return; }
+  window._cohEditId=cohortId;
+  let _tiers=[]; try{ _tiers=Array.isArray(c.price_tiers)?c.price_tiers:(JSON.parse(c.price_tiers||'[]')); }catch(e){ _tiers=[]; }
+  let _sched=[]; try{ _sched=Array.isArray(c.schedule)?c.schedule:(JSON.parse(c.schedule||'[]')); }catch(e){ _sched=[]; }
+  const _hasVariants=_tiers.length>1 || (_tiers.length===1 && (_tiers[0].name||'').trim());
+  const keep={
+    cohName:c.name||'', cohStart:c.start_date||'', cohEnd:c.end_date||'', cohMonths:c.months||2,
+    cohCap:(c.capacity!=null?c.capacity:''), cohDep:(c.deposit_amount!=null?c.deposit_amount:''),
+    cohPRName:_hasVariants?((_tiers[0]&&_tiers[0].name)||''):'', cohPR:(_tiers[0]?_tiers[0].price:(c.price_regular||'')),
+    cohPixel:c.gym_meta_pixel||'', cohCapiToken:c.capi_token||'', cohDesc:c.description||'',
+    _disc:c.discipline?[c.discipline]:[], _sched:_sched, _poster:c.poster||null, _tiers:_hasVariants
+  };
+  _cohShowCreate(keep);
+  // populate the extra tier rows (beyond the base price) + set the create button to 'Save changes'
+  try{
+    if(_hasVariants){ for(var k=1;k<_tiers.length;k++){ if(typeof _cohTierAdd==='function') _cohTierAdd(_tiers[k].name||'', _tiers[k].price); } }
+    var _cb=$('cohSave'); if(_cb) _cb.textContent=(EN?'Save changes':'Uložit změny');
+  }catch(e){}
 }
 function _cohShowLink(cohortId, name){
   const EN=LANG==='en';
@@ -15392,7 +15511,7 @@ function renderScheduleEditor(){
     });
   }
   box.innerHTML=html;
-  if($('schPrev')) $('schPrev').onclick=()=>{ _schedWeek--; renderScheduleEditor(); };
+  if($('schPrev')) $('schPrev').onclick=()=>{ if(_schedWeek<=0){ toast(LANG==='en'?'This is the current week \u2014 the schedule only goes forward.':'Tohle je aktu\u00e1ln\u00ed t\u00fdden \u2014 rozvrh jde jen dop\u0159edu.'); return; } _schedWeek--; renderScheduleEditor(); };
   if($('schNext')) $('schNext').onclick=()=>{ _schedWeek++; renderScheduleEditor(); };
   box.querySelectorAll('.schDayCell').forEach(el=>el.onclick=()=>{ _schedSelDow=+el.dataset.dow; _schedEdit=-1; renderScheduleEditor(); });
   if($('schAddSel')) $('schAddSel').onclick=()=>{ _gymSchedule.push({day:_schedSelDow, time:'18:00', name:'', level:'all', dur:60, disc:(isMultiDiscipline()?defaultDiscipline():null)}); _schedEdit=_gymSchedule.length-1; renderScheduleEditor(); };
@@ -15411,9 +15530,24 @@ function renderScheduleEditor(){
   box.querySelectorAll('.schDisc').forEach(el=>{ const it=_gymSchedule[+el.dataset.i]; if(!it.disc) it.disc=el.value||defaultDiscipline(); el.onchange=()=>{ _gymSchedule[+el.dataset.i].disc=el.value; }; });
   box.querySelectorAll('.schCoach').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; it.coach=el.value||null; const c=_gymTeamCoaches.find(x=>x.id===el.value); it.coachName=c?c.name:null; });
   box.querySelectorAll('.schLead').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; const oid=(_myGymData&&_myGymData.owner_id)||(currentUser&&currentUser.id); it.leader=el.value||oid; if(it.leader===oid){ it.leaderName=(currentUser&&currentUser.name)||(LANG==='en'?'Owner':'Majitel'); } else { const cc=_gymTeamCoaches.find(x=>x.id===it.leader); it.leaderName=cc?cc.name:null; } renderScheduleEditor(); });
-  box.querySelectorAll('.schDel').forEach(el=>el.onclick=()=>{ _gymSchedule.splice(+el.dataset.i,1); _schedEdit=-1; renderScheduleEditor(); });
+  box.querySelectorAll('.schDel').forEach(el=>el.onclick=()=>{
+    const i=+el.dataset.i; const c=_gymSchedule[i]; if(!c) return; const EN=LANG==='en';
+    // one-time classes have no future series — just remove them
+    if(c.once){ _gymSchedule.splice(i,1); _schedEdit=-1; renderScheduleEditor(); return; }
+    const _nm=(c.name||levelLabel(c.level||'all'))+' · '+(c.time||'');
+    const _msg=EN
+      ? ('Delete the recurring class "'+_nm+'"?\n\nOK = remove it and ALL upcoming occurrences.\nCancel = keep it (you can cancel a single date from Attendance).')
+      : ('Smazat opakovanou lekci \u201e'+_nm+'"?\n\nOK = smazat ji i V\u0160ECHNY nadch\u00e1zej\u00edc\u00ed term\u00edny.\nZru\u0161it = ponechat (jednotliv\u00fd term\u00edn zru\u0161\u00ed\u0161 v Doch\u00e1zce).');
+    if(!confirm(_msg)) return;
+    _gymSchedule.splice(i,1); _schedEdit=-1; renderScheduleEditor();
+    toast(EN?'Removed — save to apply':'Odebr\u00e1no \u2014 ulo\u017e pro potvrzen\u00ed');
+  });
   box.querySelectorAll('.schSaveCls').forEach(el=>el.onclick=()=>{
-    const i=+el.dataset.i; const c=_gymSchedule[i];
+    const i=+el.dataset.i;
+    // Sync this class's capacity from the DOM first: a pre-filled value the owner never TOUCHED
+    // never fired oninput, so _gymSchedule[i].cap stayed null and this button falsely errored.
+    try{ const _ci=box.querySelector('.schCap[data-i="'+i+'"]'); if(_ci && _gymSchedule[i]){ const _cv=parseInt(_ci.value,10); _gymSchedule[i].cap=(_cv>0?_cv:null); } }catch(e){}
+    const c=_gymSchedule[i];
     if(!c || !(Number(c.cap)>0)){
       const er=box.querySelector('.schCapErr[data-i="'+i+'"]'); if(er) er.style.display='block';
       const inp=box.querySelector('.schCap[data-i="'+i+'"]'); if(inp){ inp.style.borderColor='var(--red)'; try{ inp.focus(); inp.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} }
