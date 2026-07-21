@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SCM Per Petr (corrected step 4: courses are DECK CARDS like events, not a list; + poster + sort chips). CORRECTION of SCL: I wrongly built courses as a separate distance-sorted LIST. Petr: a course must be a normal swipeable card in the SAME deck as events (Fight Night etc), SAME card style, SAME poster. Reverted the list (_renderCohDeck removed). (1) _cohAsEvent() maps a cohort into the event card shape (title, type, starts_at=start_date, poster, deposit as price, city_lat/lng from the host gym, _isCohort flag). Courses now ride the exact same swipeCardHtml + evRenderSwipe as events; the card shows a '🥊 Kurz/Course' type badge. Tapping / swiping-right / the GO+INFO buttons open openCohortSignup (src=mtl_deck) for cohort cards and openEventView for events. (2) The 'Kurzy' chip fills the deck with cohort-cards (filtered by discipline + search + max-distance) instead of events. (3) POSTER: gym_cohorts had no poster; cohort-poster.sql adds it. The cohort form now has the SAME poster upload as the event form (4/3 crop, klub-photos bucket), saved to gym_cohorts.poster and shown on the deck card exactly like an event poster. (4) SORT CHIPS (second chip row, events only): 'Dle data' (default - soonest start first, so you see what you'll soon be too late to buy), 'Nejbližší', 'Novinky' (newest listed). Unit-tested all three orderings. COURSES are locked to nearest-first (Petr's call - locality is the whole point for a beginner course), so the sort row is hidden on the Kurzy chip. (5) EVENTS also honour Max-distance filtering now; primary sort follows the chosen chip (default date). Deploy: index.html (SCM) + run cohort-poster.sql. Supersedes SCL. Builds on SCK. -->
+<!-- MTL build: SCU Per Petr (tier rework + cohort revenue dashboard with ROAS, built on a fixed payment-method data base). (1) TIER PRICING REWORK: the cohort form now shows a SINGLE unnamed price by default. Ticking 'Add more pricing variants' reveals a required Name field for that base price AND required names on every extra row (save validates both). _cohTiers() returns a nameless single price (name empty) when there are no variants, named tiers when variants are on. The signup picker _cohTierPicker() was reworked to match: a single nameless price shows NO radios, just a 'monthly price' line; multiple/named variants show the radio list with names. The legacy hard-coded regular/student pair was REMOVED (folded into a fallback that maps an old price_regular to a nameless tier + price_student to a 'Student' tier, so old cohorts still render). (2) COHORT_PAYMENTS PAYMENT-METHOD DATA BASE: found that cohort_payments did NOT store payment_method AND that QR/PIS cohort payments were not written to cohort_payments at all (only to transactions) - so a revenue dashboard could not split by method. Fixed: cohort-payment-method.sql adds cohort_payments.payment_method. Stripe webhook tags all three cohort_payments inserts (deposit/first_month/month) with 'stripe'. The QR deposit + month confirms (_cohDepositConfirm, _cohMonthConfirm) now also insert a cohort_payments row (method 'qr'). pis-webhook logs the cohort deposit to cohort_payments (method 'pis') + sets months_paid=1. (3) COHORT REVENUE DASHBOARD + ROAS: a Trzby/Revenue button on each cohort card opens openCohortDash - a minimalist overlay reading cohort_payments for that cohort: gross, MTL commission, club net, a By-payment-method split (Stripe / QR platba / Bankovni prevod), and a ROAS block with an editable manual Meta ad-spend field (saved to gym_cohorts.ad_spend) that computes ROAS = gross / spend and gross - spend, coloured good/bad at the 1x line. Dashboard math unit-tested (gross 540, method split 180/180/180, ROAS 2.70x). cohort-months.sql appended with the ad_spend column. Deploy: index.html (SCU) + stripe-webhook.js + pis-webhook.js + run cohort-payment-method.sql + run the ad_spend line in cohort-months.sql. Builds on SCT. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -4608,6 +4608,12 @@ const NOTIF_T = {
   gym_membership_cancelled: (d)=> LANG==='en'
     ? `📉 ${d.member||'A student'} cancelled membership${d.plan?' ('+d.plan+')':''}${d.period_end?' — ends '+new Date(d.period_end).toLocaleDateString('en-GB'):''}.`
     : `📉 ${d.member||'Student'} zrušil členství${d.plan?' ('+d.plan+')':''}${d.period_end?' — končí '+new Date(d.period_end).toLocaleDateString('cs-CZ'):''}.`,
+  cohort_month_due: (d)=> LANG==='en'
+    ? `\ud83e\udd4a Course reminder — time to pay month ${d.month} of ${d.total}.`
+    : `\ud83e\udd4a Kurz — je \u010das doplatit ${d.month}. m\u011bs\u00edc z ${d.total}.`,
+  cohort_month_collect: (d)=> LANG==='en'
+    ? `\ud83d\udcb8 Collect month ${d.month} from ${d.member_name||'a participant'} (${d.month}/${d.total}).`
+    : `\ud83d\udcb8 Vyber ${d.month}. m\u011bs\u00edc od ${d.member_name||'\u00fa\u010dastn\u00edka'} (${d.month}/${d.total}).`,
   cohort_ending: (d)=>{ const w = LANG==='en' ? (d.days===14?'in 2 weeks':'in a week') : (d.days===14?'za 2 týdny':'za týden');
     return LANG==='en'
       ? `🎓 The course "${d.cohort_name||''}" ends ${w}. ${d.count} participant${d.count===1?'':'s'} still without a membership — start preparing them for what comes next.`
@@ -6979,11 +6985,11 @@ async function openEventCreate(klub, ev){
     <input id="evVenue" type="text" style="${inp}" placeholder="${(g.name||'').replace(/"/g,'&quot;')}">
     <div style="${lbl}">${LANG==='en'?'Address':'Adresa'}</div>
     <input id="evAddr" type="text" style="${inp}" placeholder="${LANG==='en'?'Street, number, city':'Ulice, číslo, město'}">
-    <div style="display:flex;gap:10px;"><div style="flex:1;min-width:0;"><div style="${lbl}">${LANG==='en'?'Starts':'Začátek'}</div><input id="evStart" type="datetime-local" style="${inp}"></div><div style="flex:1;min-width:0;"><div style="${lbl}">${LANG==='en'?'Ends':'Konec'}</div><input id="evEnd" type="datetime-local" style="${inp}"></div></div>
+    <div style="display:flex;gap:10px;"><div style="flex:1 1 0;min-width:0;"><div style="${lbl}">${LANG==='en'?'Starts':'Začátek'}</div><input id="evStart" type="datetime-local" style="${inp}min-width:0;max-width:100%;"></div><div style="flex:1 1 0;min-width:0;"><div style="${lbl}">${LANG==='en'?'Ends':'Konec'}</div><input id="evEnd" type="datetime-local" style="${inp}min-width:0;max-width:100%;"></div></div>
     <div style="${lbl}">${LANG==='en'?'Capacity (optional)':'Kapacita (nepovinné)'}</div>
     <input id="evCap" type="number" min="0" style="${inp}" placeholder="${LANG==='en'?'e.g. 60':'např. 60'}">
-    <div style="${lbl}">${LANG==='en'?'Money goes to (Stripe account)':'Peníze přijdou na (Stripe účet)'}</div>
-    <select id="evPayee" style="${inp}">${payees.map(pp=>`<option value="${pp.id}">${escapeHtml(pp.name)}${pp.account?'':(LANG==='en'?' — not connected':' — nepřipojeno')}</option>`).join('')}</select>
+    <div style="${lbl}">${LANG==='en'?'Money goes to':'Peníze přijdou na'}</div>
+    <select id="evPayee" style="${inp}">${payees.map(pp=>`<option value="${pp.id}">${escapeHtml(pp.name)}${pp.account?'':(LANG==='en'?' — QR / bank':' — QR / banka')}</option>`).join('')}</select>
     ${g.org_form==='nonprofit'?`<div style="${lbl}">${LANG==='en'?'Income type (non-profit)':'Druh příjmu (nezisk)'}</div><div id="evIncomeRow" style="display:flex;gap:8px;margin-bottom:14px;"><button type="button" class="evIncomeBtn" data-v="main" style="flex:1;padding:10px 6px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';border:1.5px solid var(--border);background:transparent;color:var(--mid);">${LANG==='en'?'Main (contribution)':'Hlavní (příspěvek)'}</button><button type="button" class="evIncomeBtn" data-v="side" style="flex:1;padding:10px 6px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';border:1.5px solid var(--border);background:transparent;color:var(--mid);">${LANG==='en'?'Side (service)':'Vedlejší (služba)'}</button></div>`:''}
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;"><div style="${lbl}margin-bottom:0;">${LANG==='en'?'Ticket variants':'Varianty lístků'}</div><select id="evCur" disabled title="${LANG==='en'?'Events use your payment currency (single currency).':'Akce používají tvoji měnu plateb (jedna měna).'}" style="padding:8px 10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';font-size:13px;background:#F1F5F9;opacity:.65;cursor:not-allowed;">${['CZK','EUR','USD','GBP','CHF','PLN','SEK','DKK','NOK','HUF','RON','CAD','AUD','NZD'].map(cc=>`<option value="${cc}" ${cc===cur?'selected':''}>${cc}</option>`).join('')}</select></div>
     <div id="evTiers"></div>
@@ -7344,7 +7350,7 @@ function evRenderSwipe(){
   const card=$('evSwipeCard'); let sx=0,dx=0,drag=false,moved=false;
   const apply=x=>{ card.style.transform=`translateX(${x}px) rotate(${x*.06}deg)`; const sk=$('evLblSkip'),vw=$('evLblView'); const o=Math.min(1,Math.abs(x)/90); if(sk)sk.style.opacity=x<-15?o:0; if(vw)vw.style.opacity=x>15?o:0; };
   const finish=()=>{ const sk=$('evLblSkip'),vw=$('evLblView'); if(sk)sk.style.opacity=0; if(vw)vw.style.opacity=0;
-    const _openCard=(x)=>{ if(x&&x._isCohort){ try{ localStorage.setItem('mtl_coh_src','mtl_deck'); }catch(e){} if(typeof openCohortSignup==='function') openCohortSignup(x.cohort_id||x.id); } else { openEventView(x); } };
+    const _openCard=(x)=>{ if(x&&x._isCohort){ try{ _setCohSrc('mtl_deck'); }catch(e){} if(typeof openCohortSignup==='function') openCohortSignup(x.cohort_id||x.id); } else { openEventView(x); } };
     if(!moved){ _openCard(cur); dx=0; return; }
     if(dx>90){ card.style.transition='transform .25s ease-out'; card.style.transform='translateX(440px) rotate(22deg)'; setTimeout(()=>{ window._evIdx=idx+1; _openCard(cur); evRenderSwipe(); },180); }
     else if(dx<-90){ card.style.transition='transform .25s ease-out'; card.style.transform='translateX(-440px) rotate(-22deg)'; setTimeout(()=>{ window._evIdx=idx+1; evRenderSwipe(); },180); }
@@ -7730,7 +7736,7 @@ async function _cohDepositQr(cohortId, d, info, fb, pb){
   if(!(d&&d.receiver_id_value)){ toast(EN?'\u26a0\ufe0f Club has no QR receiver set':'\u26a0\ufe0f Klub nem\u00e1 nastaven\u00e9ho p\u0159\u00edjemce QR'); if(pb){ pb.disabled=false; } return; }
   let memberId=null;
   try{
-    const r=await fetch('/api/cohort-pay',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ method:'qr', cohort_id:cohortId, name:info.name, email:info.email, phone:info.phone, tier:info.tier, attribution:(localStorage.getItem('mtl_coh_src')||'direct'), consent_version:'2026-06-26', fbp:(fb&&fb.fbp), fbc:(fb&&fb.fbc), hp:((document.getElementById('cohHp')||{}).value)||'' }) });
+    const r=await fetch('/api/cohort-pay',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ method:'qr', cohort_id:cohortId, name:info.name, email:info.email, phone:info.phone, tier:info.tier, attribution:_consumeCohSrc(), consent_version:'2026-06-26', fbp:(fb&&fb.fbp), fbc:(fb&&fb.fbc), hp:((document.getElementById('cohHp')||{}).value)||'' }) });
     const j=await r.json();
     if(!j||!j.ok){ toast('\u26a0\ufe0f '+((j&&j.error)||'error')); if(pb){ pb.disabled=false; pb.textContent=(EN?'Pay deposit ':'Zaplatit z\u00e1lohu ')+fmtPrice(dep,cur); } return; }
     memberId=j.cohort_member_id;
@@ -7772,6 +7778,7 @@ async function _cohDepositConfirm(memberId){
   try{ const _pv=Number(m.paid_amount||0); await supaClient.from('cohort_members').update({ status:'deposit_paid', paid_amount: Math.round((_pv+dep)*100)/100 }).eq('id',memberId); }catch(e){}
   try{ fetch('/api/cohort-capi',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ cohort_id:window._crCohortId, event:'Purchase', event_id:'cp_'+memberId, value:dep, currency:cur, email:m.email||undefined, phone:m.phone||undefined, fbp:m.fbp||undefined, fbc:m.fbc||undefined }) }); }catch(e){}
   const fee=(res.mtl_fee||0)/100;
+  try{ await supaClient.from('cohort_payments').insert({ cohort_member_id:memberId, cohort_id:window._crCohortId, kind:'deposit', amount:dep, currency:cur, mtl_fee:fee, payment_method:'qr', status:'paid' }); }catch(e){}
   toast((EN?'\u2705 Deposit confirmed \u00b7 commission ':'\u2705 Z\u00e1loha potvrzena \u00b7 provize ')+fmtPrice(fee,cur),1);
   _cohRosterRender();
 }
@@ -11088,21 +11095,20 @@ function _provApplyThanks(kind){
 // value, which is what gets stored on cohort_members.tier and resolved back to a price server-side.
 // Cohorts created before price_tiers fall back to the legacy Regular/Student pair.
 function _cohTierPicker(d, EN, cur){
-  const tiers = (Array.isArray(d.price_tiers) && d.price_tiers.length) ? d.price_tiers : null;
-  const lbl = '<label style="font-size:12px;font-weight:700;color:var(--mid);display:block;margin-bottom:6px;">'+(EN?'Choose your offer':'Vyber si nabídku')+'</label>';
+  let tiers = (Array.isArray(d.price_tiers) && d.price_tiers.length) ? d.price_tiers : null;
+  if(!tiers){ const _t=[]; if(Number(d.price_regular)>0) _t.push({name:'',price:Number(d.price_regular)}); if(Number(d.price_student)>0) _t.push({name:'Student',price:Number(d.price_student)}); tiers=_t.length?_t:[{name:'',price:0}]; }
   const box = 'display:flex;flex-direction:column;gap:8px;margin-bottom:12px;';
   const opt = 'display:flex;justify-content:space-between;align-items:center;border:1.5px solid var(--border);border-radius:10px;padding:11px 12px;cursor:pointer;font-size:13.5px;';
-  if(tiers){
-    return lbl+'<div style="'+box+'">'+tiers.map(function(t,i){
-      return '<label style="'+opt+'"><span><input type="radio" name="cohTier" value="'+String(t.name).replace(/"/g,'&quot;')+'"'+(i===0?' checked':'')+' style="margin-right:7px;">'+escapeHtml(String(t.name))+'</span>'
-        +'<b style="white-space:nowrap;">'+(Number(t.price)||0)+' '+_curSym(cur)+'</b></label>';
-    }).join('')+'</div>';
+  // A single nameless price is not a choice — just show it, no radios.
+  if(tiers.length===1 && !(String(tiers[0].name||'')).trim()){
+    const t=tiers[0];
+    return '<input type="hidden" name="cohTier" value=""><div style="'+opt+'margin-bottom:12px;cursor:default;"><span style="font-weight:700;color:var(--dark);">'+(EN?'Monthly price':'Cena za měsíc')+'</span><b style="white-space:nowrap;">'+(Number(t.price)||0)+' '+_curSym(cur)+'</b></div>';
   }
-  // legacy two-price cohorts
-  return lbl+'<div style="'+box+'">'
-    +'<label style="'+opt+'"><span><input type="radio" name="cohTier" value="regular" checked style="margin-right:7px;">'+(EN?'Regular':'Ostatní')+'</span><b>'+(Number(d.price_regular)||0)+' '+_curSym(cur)+'</b></label>'
-    +'<label style="'+opt+'"><span><input type="radio" name="cohTier" value="student" style="margin-right:7px;">Student</span><b>'+(Number(d.price_student)||0)+' '+_curSym(cur)+'</b></label>'
-    +'</div>';
+  const lbl = '<label style="font-size:12px;font-weight:700;color:var(--mid);display:block;margin-bottom:6px;">'+(EN?'Choose your option':'Vyber si variantu')+'</label>';
+  return lbl+'<div style="'+box+'">'+tiers.map(function(t,i){
+    return '<label style="'+opt+'"><span><input type="radio" name="cohTier" value="'+String(t.name||'').replace(/"/g,'&quot;')+'"'+(i===0?' checked':'')+' style="margin-right:7px;">'+escapeHtml(String(t.name||(EN?'Option':'Varianta')))+'</span>'
+      +'<b style="white-space:nowrap;">'+(Number(t.price)||0)+' '+_curSym(cur)+'</b></label>';
+  }).join('')+'</div>';
 }
 async function openCohortSignup(cohortId){
   const EN=LANG==='en';
@@ -11125,7 +11131,7 @@ async function openCohortSignup(cohortId){
     +'<div style="font-size:13px;color:var(--mid);margin:2px 0 14px;">'+(d.gym_name||'')+(d.discipline?(' · '+d.discipline):'')+(d.start_date?(' · '+(EN?'starts ':'start ')+d.start_date):'')+(d.end_date?(' – '+d.end_date):'')+'</div>'
     +(d.description?('<p style="font-size:13px;color:var(--dark);line-height:1.55;margin:0 0 14px;">'+(''+d.description).replace(/</g,'&lt;')+'</p>'):'')
     +(function(){ try{ var _occ=cohortOccurrences(d,{horizonDays:120}); if(!_occ.length){ return d.schedule_note?('<div style="background:var(--surf);border-radius:11px;padding:11px 13px;margin:0 0 14px;font-size:12.5px;color:var(--dark);">\u23f0 '+(''+d.schedule_note).replace(/</g,'&lt;')+'</div>'):''; } var _dn=dowShort(); var _seen={}; var _pat=[]; _occ.forEach(function(o){ var dow=new Date(o.date+'T00:00:00').getDay(); var k=dow+'|'+(o.time||''); if(_seen[k]) return; _seen[k]=1; _pat.push({dow:dow,time:o.time}); }); _pat.sort(function(a,b){return a.dow-b.dow;}); var _line=_pat.map(function(x){return _dn[x.dow]+' '+(x.time||'');}).join(' \u00b7 '); var _first=_occ[0], _last=_occ[_occ.length-1]; return '<div style="background:var(--surf);border-radius:11px;padding:12px 13px;margin:0 0 14px;"><div style="font-size:12.5px;font-weight:700;color:var(--dark);margin-bottom:3px;">\u23f0 '+_line+'</div><div style="font-size:11px;color:var(--light);">'+_occ.length+' '+(EN?'sessions':'lekc\u00ed')+(_first?(' \u00b7 '+(EN?'first ':'prvn\u00ed ')+_first.date):'')+'</div></div>'; }catch(e){ return ''; } })()
-    +'<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:13px;margin-bottom:14px;"><div style="font-size:13px;font-weight:700;">'+(EN?'Deposit now (non-refundable): ':'Záloha teď (nevratná): ')+fmtPrice(d.deposit_amount||0,cur)+'</div><div style="font-size:12px;color:var(--mid);margin-top:5px;">'+(EN?'Then monthly: ':'Pak měsíčně: ')+'student '+fmtPrice(d.price_student||0,cur)+' · '+(EN?'regular ':'ostatní ')+fmtPrice(d.price_regular||0,cur)+'</div>'+(d.capacity?('<div style="font-size:11px;color:var(--light);margin-top:5px;">'+d.taken+' / '+d.capacity+' '+(EN?'spots taken':'míst obsazeno')+'</div>'):'')+'</div>'
+    +'<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:13px;margin-bottom:14px;"><div style="font-size:13px;font-weight:700;">'+(EN?'Deposit now (non-refundable): ':'Záloha teď (nevratná): ')+fmtPrice(d.deposit_amount||0,cur)+'</div><div style="font-size:12px;color:var(--mid);margin-top:5px;">'+(EN?'Then monthly: ':'Pak měsíčně: ')+((Number(d.price_student)||0)>0?('student '+fmtPrice(d.price_student||0,cur)+' · '):'')+fmtPrice(d.price_regular||0,cur)+'</div>'+(d.capacity?('<div style="font-size:11px;color:var(--light);margin-top:5px;">'+d.taken+' / '+d.capacity+' '+(EN?'spots taken':'míst obsazeno')+'</div>'):'')+'</div>'
     +(full?('<div style="text-align:center;color:var(--red);font-weight:700;padding:18px;">'+(EN?'This cohort is full.':'Tento kurz je plný.')+'</div>'):(
       _cohTierPicker(d, EN, cur)
       +'<input id="cohSName" type="text" placeholder="'+(EN?'Full name':'Jméno a příjmení')+'" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;margin-bottom:9px;">'
@@ -11153,7 +11159,7 @@ async function openCohortSignup(cohortId){
     try{ fetch('/api/cohort-capi',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ cohort_id:cohortId, event:'Lead', event_id:_lev, email:em, phone:ph, fbp:_fb.fbp, fbc:_fb.fbc, event_source_url:location.href }) }); }catch(e){}
     try{
       if(d && d.payment_mode==='qr_bank'){ return _cohDepositQr(cohortId, d, { name:nm, email:em, phone:ph, tier:tier }, _fb, pb); }
-      const r=await fetch('/api/cohort-pay',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ cohort_id:cohortId, name:nm, email:em, phone:ph, tier:tier, attribution:(localStorage.getItem('mtl_coh_src')||'direct'), consent_version:'2026-06-26', gym_name:d.gym_name, fbp:_fb.fbp, fbc:_fb.fbc, hp:((document.getElementById('cohHp')||{}).value)||'' }) });
+      const r=await fetch('/api/cohort-pay',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ cohort_id:cohortId, name:nm, email:em, phone:ph, tier:tier, attribution:_consumeCohSrc(), consent_version:'2026-06-26', gym_name:d.gym_name, fbp:_fb.fbp, fbc:_fb.fbc, hp:((document.getElementById('cohHp')||{}).value)||'' }) });
       const j=await r.json();
       if(j&&j.ok&&j.url){ window.location.href=j.url; }
       else { toast('⚠️ '+((j&&j.error)||'error')); pb.disabled=false; pb.textContent=(EN?'Pay deposit ':'Zaplatit zálohu ')+fmtPrice(d.deposit_amount||0,cur); }
@@ -11218,6 +11224,9 @@ async function _cohRosterRender(){
   const ov=document.getElementById('cohRosterOv'); if(!ov) return;
   const box=ov.querySelector('#crBody'); if(!box) return; const EN=LANG==='en';
   const cohortId=window._crCohortId;
+  let _cohMonths=1, _cohGymId=null; try{ const { data:_cd }=await supaClient.from('gym_cohorts').select('months,gym_id').eq('id',cohortId).single(); _cohMonths=Number(_cd&&_cd.months)||1; _cohGymId=_cd&&_cd.gym_id; }catch(e){}
+  let _cohPayMode='stripe', _cohGym=null; if(_cohGymId){ try{ const { data:_g }=await supaClient.from('gyms').select('id,payment_mode,receiver_id_type,receiver_id_value,receiver_name,currency,commission_card_status').eq('id',_cohGymId).single(); _cohGym=_g; _cohPayMode=(_g&&_g.payment_mode==='qr_bank')?'qr_bank':'stripe'; }catch(e){} }
+  window._crGym=_cohGym; window._crPayMode=_cohPayMode;
   let members=[]; try{ const { data }=await supaClient.from('cohort_members').select('*').eq('cohort_id',cohortId).order('created_at',{ascending:true}); members=data||[]; }catch(e){}
   window._crMembers=members;
   const f={lead:0,deposit_claimed:0,deposit_paid:0,enrolled:0,completed:0,converted:0,cancelled:0};
@@ -11243,16 +11252,92 @@ async function _cohRosterRender(){
     } else if(m.status==='deposit_claimed'){
       actions='<div style="margin-top:8px;"><button class="crDepBtn" data-id="'+m.id+'" style="width:100%;padding:8px;background:#0a8f5b;color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'\u2713 Confirm QR deposit':'\u2713 Potvrdit QR z\u00e1lohu')+'</button></div>';
     } else if(m.status==='enrolled'){
-      actions='<div style="margin-top:8px;"><button class="crConvertBtn" data-id="'+m.id+'" style="width:100%;padding:8px;background:#EDE7FF;color:#5B3FB0;border:1px solid #CFC0FF;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Convert to membership':'P\u0159ev\u00e9st na \u010dlenstv\u00ed')+'</button></div>';
+      const _mp=Number(m.months_paid||0);
+      let _mo='';
+      if(_cohMonths>1){ _mo='<div style="font-size:11px;color:var(--mid);margin-top:8px;">'+(EN?'Months paid: ':'Zaplaceno m\u011bs\u00edc\u016f: ')+'<b style="color:var(--dark);">'+_mp+'/'+_cohMonths+'</b></div>'; }
+      let _collectBtn='';
+      if(_cohMonths>1 && _mp<_cohMonths){ _collectBtn='<button class="crMonthBtn" data-id="'+m.id+'" data-name="'+((m.name||'')+'').replace(/"/g,'&quot;')+'" style="width:100%;padding:8px;margin-top:6px;background:var(--dark);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?('Collect month '+(_mp+1)):('Vybrat '+(_mp+1)+'. m\u011bs\u00edc'))+'</button>'; }
+      actions='<div style="margin-top:8px;">'+_mo+_collectBtn+'<button class="crConvertBtn" data-id="'+m.id+'" style="width:100%;padding:8px;margin-top:6px;background:#EDE7FF;color:#5B3FB0;border:1px solid #CFC0FF;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Convert to membership':'P\u0159ev\u00e9st na \u010dlenstv\u00ed')+'</button></div>';
     }
     return '<div style="border:1px solid var(--border);border-radius:11px;padding:11px;margin-bottom:8px;"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div style="min-width:0;"><div style="font-size:14px;font-weight:700;">'+((m.name||'?')+'').replace(/</g,'&lt;')+' <span style="font-size:10px;color:var(--light);font-weight:500;">'+(m.tier==='student'?'student':(EN?'regular':'ostatn\u00ed'))+'</span></div><div style="font-size:11px;color:var(--mid);word-break:break-all;">'+((m.email||'')+'').replace(/</g,'&lt;')+(m.phone?(' \u00b7 '+m.phone):'')+'</div></div><span style="font-size:10px;font-weight:700;color:'+(stC[m.status]||'#999')+';text-transform:uppercase;white-space:nowrap;">'+att+' '+(stL[m.status]||m.status)+'</span></div>'+actions+'</div>';
   }).join('');
   box.innerHTML=html;
+  box.querySelectorAll('.crMonthBtn').forEach(function(b){ b.onclick=function(){ _cohCollectMonth(b.dataset.id, b.dataset.name); }; });
   box.querySelectorAll('.crQrBtn').forEach(function(b){ b.onclick=function(){ _cohRemainderQR(b.dataset.id, b.dataset.name); }; });
   box.querySelectorAll('.crCashBtn').forEach(function(b){ b.onclick=function(){ _cohRemainderCash(b.dataset.id); }; });
   { const _wb=document.getElementById('crAddWalkIn'); if(_wb) _wb.onclick=function(){ _cohAddWalkIn(); }; }
   box.querySelectorAll('.crDepBtn').forEach(function(b){ b.onclick=function(){ _cohDepositConfirm(b.dataset.id); }; });
   box.querySelectorAll('.crConvertBtn').forEach(function(b){ b.onclick=async function(){ b.disabled=true; try{ await supaClient.from('cohort_members').update({status:'converted'}).eq('id',b.dataset.id); toast(EN?'Converted to member \u2705':'P\u0159evedeno na \u010dlenstv\u00ed \u2705'); _cohRosterRender(); }catch(e){ toast('\u26a0\ufe0f '+e.message); b.disabled=false; } }; });
+}
+// Collect the next month of a multi-month course: a full monthly payment via Stripe checkout,
+// same server path as the on-site remainder but kind:'month'. The webhook bumps months_paid on
+// confirmation. For QR/bank cohorts the owner uses the existing QR remainder flow instead.
+async function _cohCollectMonth(memberId, memberName){
+  const EN=LANG==='en';
+  // QR/bank clubs collect month N as a bank QR the member pays, confirmed by the club (like the
+  // deposit); Stripe clubs get a one-off Stripe checkout. Same server month index either way.
+  if(window._crPayMode==='qr_bank'){ return _cohMonthQr(memberId, memberName); }
+  if(!confirm(EN?('Collect the next month from '+(memberName||'this member')+'?'):('Vybrat dal\u0161\u00ed m\u011bs\u00edc od '+(memberName||'tohoto \u010dlena')+'?'))) return;
+  try{
+    const r=await fetch('/api/cohort-pay',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ kind:'month', cohort_member_id:memberId }) });
+    const j=await r.json();
+    if(j&&j.ok&&j.url){ window.location.href=j.url; }
+    else if(j&&j.ok&&j.done){ toast(EN?'All months already paid':'V\u0161echny m\u011bs\u00edce ji\u017e zaplaceny'); }
+    else { toast('\u26a0\ufe0f '+((j&&j.error)||'error')); }
+  }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
+}
+// QR/PIS month collection: show a bank QR (+ PIS button) for the full monthly (tier) price, then the
+// club confirms receipt, which records the cash/PIS transaction and bumps months_paid. Mirrors the
+// deposit-QR + deposit-confirm pair, so QR clubs collect every month exactly like the first one.
+async function _cohMonthQr(memberId, memberName){
+  const EN=LANG==='en';
+  const m=(window._crMembers||[]).find(function(x){ return String(x.id)===String(memberId); }); if(!m){ toast('\u26a0\ufe0f'); return; }
+  const g=window._crGym; if(!g||!g.receiver_id_value){ toast(EN?'\u26a0\ufe0f Club has no QR receiver set':'\u26a0\ufe0f Klub nem\u00e1 nastaven\u00e9ho p\u0159\u00edjemce QR'); return; }
+  let coh=null; try{ const { data } = await supaClient.from('gym_cohorts').select('id,name,months,currency,price_regular,price_student,price_tiers').eq('id', window._crCohortId).single(); coh=data; }catch(e){}
+  if(!coh){ toast('\u26a0\ufe0f'); return; }
+  const totalMonths=Number(coh.months||1); const paid=Number(m.months_paid||0);
+  if(paid>=totalMonths){ toast(EN?'All months already paid':'V\u0161echny m\u011bs\u00edce ji\u017e zaplaceny'); return; }
+  const nextMonth=paid+1;
+  // full monthly price = the member's tier price
+  let monthly=0; const _tiers=Array.isArray(coh.price_tiers)?coh.price_tiers:null;
+  if(_tiers&&_tiers.length){ const hit=_tiers.find(function(t){ return String(t.name)===String(m.tier); }); monthly=Number(hit?hit.price:_tiers[0].price)||0; }
+  else { monthly=Number((m.tier==='student')?coh.price_student:coh.price_regular)||0; }
+  if(!(monthly>0)){ toast(EN?'No price set':'Cena nen\u00ed nastavena'); return; }
+  const cur=coh.currency||'CZK';
+  const payee={ receiver_id_type:g.receiver_id_type, receiver_id_value:g.receiver_id_value, receiver_name:g.receiver_name };
+  const msg=(m.name||'')+' - '+((coh.name)||'kurz')+' '+nextMonth+'/'+totalMonths;
+  const payload=(typeof _bankQrPayload==='function')?_bankQrPayload(payee, monthly, msg):null;
+  const _pisOn=(window._PIS_ENABLED||(currentUser&&(currentUser.role==='founder'||currentUser.id===FOUNDER_UUID))||(location.search||'').indexOf('pistest')>=0) && !!(payee&&payee.receiver_id_value);
+  let ov=document.getElementById('crQrOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='crQrOv'; ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100002;display:flex;align-items:center;justify-content:center;padding:20px;';
+  ov.innerHTML='<div style="background:#fff;border-radius:16px;padding:22px;max-width:340px;width:100%;text-align:center;font-family:\'DM Sans\';">'
+    +'<div style="font-size:16px;font-weight:800;margin-bottom:2px;">\ud83d\udcf2 '+(EN?('Month '+nextMonth+' of '+totalMonths):(nextMonth+'. m\u011bs\u00edc z '+totalMonths))+'</div>'
+    +'<div style="font-size:15px;color:#006040;font-weight:800;margin-bottom:12px;">'+fmtPrice(monthly,cur)+'</div>'
+    +(_pisOn?'<button id="cmqPis" style="width:100%;padding:12px;background:#635BFF;color:#fff;border:none;border-radius:11px;font-size:14px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';margin-bottom:10px;">'+(EN?'Pay from bank (PIS)':'Zaplatit z banky (PIS)')+'</button>':'')
+    +'<div id="cmqBox" style="display:flex;justify-content:center;align-items:center;margin-bottom:12px;min-height:140px;"></div>'
+    +'<p style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:12px;">'+(EN?'Member scans & pays. Then confirm below once it lands in the account.':'\u010clen naskenuje a zaplat\u00ed. Pak n\u00ed\u017ee potvr\u010f, a\u017e platba p\u0159ijde na \u00fa\u010det.')+'</p>'
+    +'<button id="cmqConfirm" style="width:100%;padding:13px;background:#0a8f5b;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';margin-bottom:8px;">'+(EN?'Confirm payment received':'Potvrdit p\u0159ijetí platby')+'</button>'
+    +'<button id="cmqClose" style="width:100%;padding:11px;background:var(--surf);color:var(--mid);border:1px solid var(--border);border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zav\u0159\u00edt')+'</button>'
+    +'</div>';
+  document.body.appendChild(ov);
+  const box=ov.querySelector('#cmqBox');
+  if(box){ if(payload && window.QRCode){ new QRCode(box,{ text:payload, width:200, height:200, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { box.innerHTML='<div style="font-size:12px;color:var(--light);">'+(EN?'QR unavailable':'QR nedostupn\u00e9')+'</div>'; } }
+  ov.querySelector('#cmqClose').onclick=function(){ ov.remove(); };
+  const _pb=ov.querySelector('#cmqPis'); if(_pb) _pb.onclick=function(){ _pisPayFlow(memberId, payee, null, monthly, cur, msg, function(){ try{ ov.remove(); }catch(e){} _cohMonthConfirm(memberId, nextMonth, monthly, cur); }); };
+  ov.querySelector('#cmqConfirm').onclick=function(){ if(!confirm(EN?('Confirm '+fmtPrice(monthly,cur)+' received for month '+nextMonth+'?'):('Potvrdit p\u0159ijetí '+fmtPrice(monthly,cur)+' za '+nextMonth+'. m\u011bs\u00edc?'))) return; try{ ov.remove(); }catch(e){} _cohMonthConfirm(memberId, nextMonth, monthly, cur); };
+}
+async function _cohMonthConfirm(memberId, monthNo, amount, cur){
+  const EN=LANG==='en';
+  const m=(window._crMembers||[]).find(function(x){ return String(x.id)===String(memberId); }); if(!m) return;
+  const g=window._crGym; if(!g||!g.id){ toast('\u26a0\ufe0f'); return; }
+  if(!(g.commission_card_status==='active')){ toast(EN?'\u26a0\ufe0f Set up a commission card first (Club \u2192 Payments)':'\u26a0\ufe0f Nejd\u0159\u00edv nastav kartu na provizi (Klub \u2192 Platby)'); return; }
+  const res=await _recordCashTx({ provider:'gym', gym_id:g.id, member_id:m.student_id||null, gross_amount:Math.round(amount*100), currency:cur, type:'course', payment_method:'qr' });
+  if(res.error){ toast('\u26a0\ufe0f '+res.error.message); return; }
+  try{ const _pv=Number(m.paid_amount||0); await supaClient.from('cohort_members').update({ paid_amount: Math.round((_pv+amount)*100)/100, months_paid: monthNo }).eq('id',memberId); }catch(e){}
+  const fee=(res.mtl_fee||0)/100;
+  try{ await supaClient.from('cohort_payments').insert({ cohort_member_id:memberId, cohort_id:window._crCohortId, kind:'month', amount:amount, currency:cur, mtl_fee:fee, payment_method:'qr', status:'paid' }); }catch(e){}
+  toast((EN?('\u2705 Month '+monthNo+' confirmed \u00b7 commission '):('\u2705 '+monthNo+'. m\u011bs\u00edc potvrzen \u00b7 provize '))+fmtPrice(fee,cur),1);
+  _cohRosterRender();
 }
 function _cohRemainderQR(memberId, memberName){
   const EN=LANG==='en';
@@ -11318,21 +11403,22 @@ async function _cohRender(){
   box.innerHTML='<p style="font-size:12px;color:var(--light);">'+(EN?'Loading...':'Načítám...')+'</p>';
   let rows=[]; try{ const { data }=await supaClient.from('gym_cohorts').select('*').eq('gym_id',_cohCtx.gymId).eq('owner_id',_cohCtx.ownerId).order('created_at',{ascending:false}); rows=data||[]; }catch(e){}
   if(!rows.length){ box.innerHTML='<p style="font-size:13px;color:var(--light);text-align:center;padding:18px;">'+(EN?'No cohorts yet. Create your first one above.':'Zatím žádné kurzy. Vytvoř první nahoře.')+'</p>'; return; }
-  let counts={}; let agg={signups:0,paid:0,enrolled:0,converted:0,attr:{gym_ad:0,mtl_discovery:0,mtl_alert:0,mtl_deck:0,direct:0}};
+  let counts={}; let agg={signups:0,paid:0,enrolled:0,converted:0,attr:{meta_ads:0,mtl_deck:0,mtl_discovery:0,mtl_alert:0,walk_in:0,direct:0}};
   try{ const ids=rows.map(function(r){return r.id;}); const { data:cm }=await supaClient.from('cohort_members').select('cohort_id,status,attribution').in('cohort_id',ids); (cm||[]).forEach(function(m){ counts[m.cohort_id]=counts[m.cohort_id]||{total:0,paid:0}; counts[m.cohort_id].total++; const _paid=(m.status!=='lead'&&m.status!=='cancelled'); if(_paid) counts[m.cohort_id].paid++; if(m.status!=='cancelled'){ agg.signups++; if(_paid) agg.paid++; if(m.status==='enrolled'||m.status==='converted'||m.status==='completed') agg.enrolled++; if(m.status==='converted') agg.converted++; const _a=(m.attribution&&agg.attr[m.attribution]!==undefined)?m.attribution:'direct'; agg.attr[_a]++; } }); }catch(e){}
   const _convRate=agg.enrolled>0?Math.round(agg.converted/agg.enrolled*100):0;
   const _enrRate=agg.signups>0?Math.round(agg.enrolled/agg.signups*100):0;
   function _fc(n,l){ return '<div style="flex:1;min-width:54px;text-align:center;"><div style="font-size:19px;font-weight:800;">'+n+'</div><div style="font-size:9px;color:var(--mid);text-transform:uppercase;letter-spacing:.3px;">'+l+'</div></div>'; }
   const _arr='<span style="color:var(--light);font-size:13px;">\u2192</span>';
-  const summaryHtml='<div style="background:var(--surf);border:1px solid var(--border);border-radius:13px;padding:13px;margin-bottom:14px;"><div style="font-size:12px;font-weight:800;color:var(--dark);margin-bottom:9px;">'+(EN?'Retention across all cohorts':'Retence nap\u0159\u00ed\u010d kurzy')+'</div><div style="display:flex;gap:3px;align-items:center;">'+_fc(agg.signups,(EN?'signups':'signupy'))+_arr+_fc(agg.paid,(EN?'paid':'zaplac.'))+_arr+_fc(agg.enrolled,(EN?'enrolled':'zaps\u00e1ni'))+_arr+_fc(agg.converted,(EN?'member':'\u010dlenstv\u00ed'))+'</div><div style="display:flex;gap:8px;margin-top:10px;font-size:11px;color:var(--mid);"><div style="flex:1;background:#fff;border-radius:8px;padding:7px 9px;"><b style="color:var(--dark);">'+_enrRate+'%</b> '+(EN?'signup\u2192enrolled':'signup\u2192zaps\u00e1n')+'</div><div style="flex:1;background:#fff;border-radius:8px;padding:7px 9px;"><b style="color:var(--dark);">'+_convRate+'%</b> '+(EN?'enrolled\u2192member':'zaps\u00e1n\u2192\u010dlenstv\u00ed')+'</div></div><div style="font-size:11px;color:var(--mid);margin-top:9px;">'+(EN?'Source:':'Zdroj:')+' \uD83D\uDCE3 '+agg.attr.gym_ad+' \u00b7 \uD83E\uDDED '+agg.attr.mtl_discovery+(agg.attr.mtl_alert?(' \u00b7 \uD83D\uDD14 '+agg.attr.mtl_alert):'')+(agg.attr.mtl_deck?(' \u00b7 \uD83D\uDD0E '+agg.attr.mtl_deck):'')+' \u00b7 \uD83D\uDD17 '+agg.attr.direct+'</div><div style="font-size:9px;color:var(--light);margin-top:6px;line-height:1.4;">'+(EN?'\uD83E\uDDED MTL discovery = members the platform brought you. Ad-driven signups are your traffic, not MTL discovery.':'\uD83E\uDDED MTL discovery = \u010dlenov\u00e9, kter\u00e9 ti p\u0159ivedla platforma. Signupy z reklamy jsou tv\u016fj traffic, ne z\u00e1sluha MTL.')+'</div></div>';
+  const summaryHtml='<div style="background:var(--surf);border:1px solid var(--border);border-radius:13px;padding:13px;margin-bottom:14px;"><div style="font-size:12px;font-weight:800;color:var(--dark);margin-bottom:9px;">'+(EN?'Retention across all cohorts':'Retence nap\u0159\u00ed\u010d kurzy')+'</div><div style="display:flex;gap:3px;align-items:center;">'+_fc(agg.signups,(EN?'signups':'signupy'))+_arr+_fc(agg.paid,(EN?'paid':'zaplac.'))+_arr+_fc(agg.enrolled,(EN?'enrolled':'zaps\u00e1ni'))+_arr+_fc(agg.converted,(EN?'member':'\u010dlenstv\u00ed'))+'</div><div style="display:flex;gap:8px;margin-top:10px;font-size:11px;color:var(--mid);"><div style="flex:1;background:#fff;border-radius:8px;padding:7px 9px;"><b style="color:var(--dark);">'+_enrRate+'%</b> '+(EN?'signup\u2192enrolled':'signup\u2192zaps\u00e1n')+'</div><div style="flex:1;background:#fff;border-radius:8px;padding:7px 9px;"><b style="color:var(--dark);">'+_convRate+'%</b> '+(EN?'enrolled\u2192member':'zaps\u00e1n\u2192\u010dlenstv\u00ed')+'</div></div><div style="font-size:11px;color:var(--mid);margin-top:9px;">'+(EN?'Source:':'Zdroj:')+' \uD83D\uDCE3 '+agg.attr.meta_ads+(agg.attr.mtl_deck?(' \u00b7 \uD83D\uDD0E '+agg.attr.mtl_deck):'')+' \u00b7 \uD83E\uDDED '+agg.attr.mtl_discovery+(agg.attr.mtl_alert?(' \u00b7 \uD83D\uDD14 '+agg.attr.mtl_alert):'')+(agg.attr.walk_in?(' \u00b7 \uD83D\uDEB6 '+agg.attr.walk_in):'')+' \u00b7 \uD83D\uDD17 '+agg.attr.direct+'</div><div style="font-size:9px;color:var(--light);margin-top:6px;line-height:1.4;">'+(EN?'\uD83D\uDCE3 = paid ads (Meta) \u00b7 \uD83D\uDD0E deck \u00b7 \uD83E\uDDED MTL discovery (platform-brought) \u00b7 \uD83D\uDD14 alert \u00b7 \uD83D\uDEB6 walk-in \u00b7 \uD83D\uDD17 direct link':'\uD83D\uDCE3 = placen\u00e1 reklama (Meta) \u00b7 \uD83D\uDD0E deck \u00b7 \uD83E\uDDED MTL discovery (p\u0159ivedla platforma) \u00b7 \uD83D\uDD14 upozorn\u011bn\u00ed \u00b7 \uD83D\uDEB6 na m\u00edst\u011b \u00b7 \uD83D\uDD17 p\u0159\u00edm\u00fd odkaz')+'</div></div>';
   const stC={draft:'#999',open:'#0A7A3D',running:'#1452B0',done:'#5B3FB0',archived:'#999'};
   const stL={draft:(EN?'Draft':'Koncept'),open:(EN?'Open':'Otevřený'),running:(EN?'Running':'Běží'),done:(EN?'Done':'Dokončený'),archived:(EN?'Archived':'Archiv')};
   box.innerHTML=summaryHtml+rows.map(function(c){
     const cur=c.currency||'CZK'; const cnt=counts[c.id]||{total:0,paid:0};
-    return '<div style="border:1px solid var(--border);border-radius:12px;padding:13px;margin-bottom:10px;"><div style="display:flex;justify-content:space-between;align-items:flex-start;"><div style="font-size:15px;font-weight:800;">'+((c.name||'')+'').replace(/</g,'&lt;')+'</div><span style="font-size:10px;font-weight:700;color:'+(stC[c.status]||'#999')+';text-transform:uppercase;">'+(stL[c.status]||c.status)+'</span></div><div style="font-size:12px;color:var(--mid);margin-top:4px;">'+(c.discipline?(c.discipline+' · '):'')+(c.start_date?(c.start_date+' · '):'')+(c.months||2)+' '+(EN?'mo':'měs')+(c.capacity?(' · '+(EN?'cap ':'kap ')+c.capacity):'')+'</div><div style="font-size:12px;color:var(--mid);margin-top:3px;">'+(EN?'Deposit':'Záloha')+' '+fmtPrice(c.deposit_amount||0,cur)+' · student '+fmtPrice(c.price_student||0,cur)+' · '+(EN?'regular':'ostatní')+' '+fmtPrice(c.price_regular||0,cur)+'</div><div style="font-size:12px;color:var(--dark);font-weight:600;margin-top:6px;">'+cnt.total+' '+(EN?'signups':'přihlášených')+' · '+cnt.paid+' '+(EN?'paid':'zaplaceno')+'</div><div style="display:flex;gap:6px;margin-top:9px;flex-wrap:wrap;"><button class="cohLinkBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Link + QR':'Odkaz + QR')+'</button><button class="cohRosterBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Roster':'Roster')+'</button></div></div>';
+    return '<div style="border:1px solid var(--border);border-radius:12px;padding:13px;margin-bottom:10px;"><div style="display:flex;justify-content:space-between;align-items:flex-start;"><div style="font-size:15px;font-weight:800;">'+((c.name||'')+'').replace(/</g,'&lt;')+'</div><span style="font-size:10px;font-weight:700;color:'+(stC[c.status]||'#999')+';text-transform:uppercase;">'+(stL[c.status]||c.status)+'</span></div><div style="font-size:12px;color:var(--mid);margin-top:4px;">'+(c.discipline?(c.discipline+' · '):'')+(c.start_date?(c.start_date+' · '):'')+(c.months||2)+' '+(EN?'mo':'měs')+(c.capacity?(' · '+(EN?'cap ':'kap ')+c.capacity):'')+'</div><div style="font-size:12px;color:var(--mid);margin-top:3px;">'+(EN?'Deposit':'Záloha')+' '+fmtPrice(c.deposit_amount||0,cur)+((Number(c.price_student)||0)>0?(' · student '+fmtPrice(c.price_student||0,cur)):'')+' · '+(EN?'price ':'cena ')+fmtPrice(c.price_regular||0,cur)+'</div><div style="font-size:12px;color:var(--dark);font-weight:600;margin-top:6px;">'+cnt.total+' '+(EN?'signups':'přihlášených')+' · '+cnt.paid+' '+(EN?'paid':'zaplaceno')+'</div><div style="display:flex;gap:6px;margin-top:9px;flex-wrap:wrap;"><button class="cohLinkBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Link + QR':'Odkaz + QR')+'</button><button class="cohRosterBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Roster':'Roster')+'</button><button class="cohDashBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:#171717;color:#F4D87A;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">\ud83d\udcb0 '+(EN?'Revenue':'Tržby')+'</button></div></div>';
   }).join('');
   box.querySelectorAll('.cohLinkBtn').forEach(function(b){ b.onclick=function(){ _cohShowLink(b.dataset.id, b.dataset.name); }; });
   box.querySelectorAll('.cohRosterBtn').forEach(function(b){ b.onclick=function(){ openCohortRoster(b.dataset.id, b.dataset.name); }; });
+  box.querySelectorAll('.cohDashBtn').forEach(function(b){ b.onclick=function(){ openCohortDash(b.dataset.id, b.dataset.name); }; });
 }
 let _cohDisc=[];
 // Keep-rate for a CLUB's own pricing (memberships, drop-in). Same rule as _cohKeepRate but the
@@ -11418,7 +11504,7 @@ function _cohShowCreate(keep){
   const box=$('cohBody'); if(!box) return; const EN=LANG==='en'; const cur=_cohCtx.currency; const sym=_curSym(cur);
   if(!keep){ window._cohSched=[]; window._cohPoster=null; }
   _cohDisc=[];
-  const inp='width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;margin-bottom:10px;';
+  const inp='width:100%;box-sizing:border-box;min-width:0;max-width:100%;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;margin-bottom:10px;';
   const lbl='font-size:12px;font-weight:700;color:var(--mid);display:block;margin-bottom:4px;';
   const brk='display:none;margin:-4px 0 12px;';
   const mtlP=Math.round((1-_cohKeepRate())*1000)/10;
@@ -11432,9 +11518,9 @@ function _cohShowCreate(keep){
     +'<label style="'+lbl+'">'+(EN?'Length (months, min 2)':'D\u00e9lka (m\u011bs\u00edce, min 2)')+'</label><input id="cohMonths" type="number" min="2" value="2" style="'+inp+'"><div style="font-size:10px;color:var(--light);margin:-6px 0 10px;">'+(EN?'2 recommended (most proven)':'2 doporu\u010deno (nejosv\u011bd\u010den\u011bj\u0161\u00ed)')+'</div>'
     +'<label style="'+lbl+'">'+(EN?'Capacity':'Kapacita')+'</label><input id="cohCap" type="number" min="1" style="'+inp+'">'
     +'<label style="'+lbl+'">'+(EN?'Deposit (non-refundable)':'Z\u00e1loha (nevratn\u00e1)')+' \u00b7 '+sym+'</label><input id="cohDep" type="number" min="0" inputmode="numeric" style="'+inp+'"><div id="cohDepBreak" style="'+brk+'"></div>'
-    +'<label style="'+lbl+'">'+(EN?'Offer name':'N\u00e1zev nab\u00eddky')+'</label><input id="cohPRName" type="text" style="'+inp+'">'
+    +'<div id="cohPRNameWrap" style="display:none;"><label style="'+lbl+'">'+(EN?'Name of this price':'N\u00e1zev t\u00e9to ceny')+'</label><input id="cohPRName" type="text" placeholder="'+(EN?'e.g. Adults':'nap\u0159. Dosp\u011bl\u00ed')+'" style="'+inp+'"></div>'
     +'<label style="'+lbl+'">'+(EN?'Monthly price':'Cena/m\u011bs')+' \u00b7 '+sym+'</label><input id="cohPR" type="number" min="0" inputmode="numeric" style="'+inp+'"><div id="cohPRBreak" style="'+brk+'"></div>'
-    +'<label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--mid);margin:-2px 0 12px;cursor:pointer;"><input id="cohMoreTiers" type="checkbox" style="width:16px;height:16px;flex-shrink:0;">'+(EN?'Add more pricing options':'P\u0159idat dal\u0161\u00ed cenov\u00e9 mo\u017enosti')+'</label>'
+    +'<label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--mid);margin:-2px 0 12px;cursor:pointer;"><input id="cohMoreTiers" type="checkbox" style="width:16px;height:16px;flex-shrink:0;">'+(EN?'Add more pricing options (e.g. student, adult)':'P\u0159idat dal\u0161\u00ed cenov\u00e9 varianty (nap\u0159. student, dosp\u011bl\u00fd)')+'</label>'
     +'<div id="cohTierWrap" style="display:none;"><div id="cohTierRows"></div><button type="button" id="cohTierAdd" style="width:100%;padding:10px;background:var(--surf);border:1.5px dashed var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';color:var(--mid);margin-bottom:10px;">+ '+(EN?'Add another offer':'P\u0159idat dal\u0161\u00ed nab\u00eddku')+'</button></div>'
     +'<label style="'+lbl+'">'+(EN?'Meta Pixel ID (optional)':'Meta Pixel ID (nepovinn\u00e9)')+'</label><input id="cohPixel" type="text" style="'+inp+'">'
     +'<label style="'+lbl+'">'+(EN?'Meta CAPI token (optional)':'Meta CAPI token (nepovinn\u00e9)')+'</label><input id="cohCapiToken" type="text" style="'+inp+'"><div style="font-size:10px;color:var(--light);margin:-6px 0 10px;line-height:1.4;">'+(EN?'Server-side conversions for ad accuracy (iOS/adblock-proof). Generate it in Events Manager > your dataset > Settings.':'Server-side konverze pro p\u0159esnost reklam (odoln\u00e9 v\u016f\u010di iOS/adblock). Vygeneruj v Events Manageru > tv\u016fj dataset > Nastaven\u00ed.')+'</div>'
@@ -11447,7 +11533,7 @@ function _cohShowCreate(keep){
   // Extra pricing offers: the owner names each one ("Studenti", "Ranni blok", "Dvojice") and can
   // add as many rows as they like. The standard price above is offer #1 and is named too.
   if($('cohTierAdd')) $('cohTierAdd').onclick=function(){ _cohTierAdd(); };
-  if($('cohMoreTiers')) $('cohMoreTiers').onchange=function(){ var w=$('cohTierWrap'); if(w) w.style.display=this.checked?'block':'none'; if(this.checked && !(($('cohTierRows')||{}).children||[]).length) _cohTierAdd(); if(!this.checked && $('cohTierRows')) $('cohTierRows').innerHTML=''; };
+  if($('cohMoreTiers')) $('cohMoreTiers').onchange=function(){ var w=$('cohTierWrap'); if(w) w.style.display=this.checked?'block':'none'; var nw=$('cohPRNameWrap'); if(nw) nw.style.display=this.checked?'block':'none'; if(!this.checked && $('cohPRName')) $('cohPRName').value=''; if(this.checked && !(($('cohTierRows')||{}).children||[]).length) _cohTierAdd(); if(!this.checked && $('cohTierRows')) $('cohTierRows').innerHTML=''; };
   $('cohCancel').onclick=function(){ _cohRender(); };
   // ── structured schedule editor ──
   window._cohSched = window._cohSched || [];
@@ -11474,7 +11560,7 @@ function _cohShowCreate(keep){
   _cohSchedRender();
   $('cohSave').onclick=function(){ _cohSave(); };
   window._cohView='create';
-  if(keep){ try{ ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)&&keep[id]!=null) $(id).value=keep[id]; }); if(keep._disc){ _cohDisc=keep._disc.slice(); _cohDiscChips(); } if(keep._sched){ window._cohSched=keep._sched.slice(); if(typeof _cohSchedRender==='function') _cohSchedRender(); } if(keep._poster!==undefined){ window._cohPoster=keep._poster; const _pv=$('cohPosterPv'); if(_pv&&keep._poster){ _pv.style.backgroundImage='url(\''+keep._poster+'\')'; _pv.style.display='block'; } } if(keep._tiers && $('cohMoreTiers')){ $('cohMoreTiers').checked=true; var w=$('cohTierWrap'); if(w) w.style.display='block'; } _cohBreak('cohDep','cohDepBreak'); _cohBreak('cohPR','cohPRBreak'); _cohBreak('cohPS','cohPSBreak'); }catch(e){} }
+  if(keep){ try{ ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)&&keep[id]!=null) $(id).value=keep[id]; }); if(keep._disc){ _cohDisc=keep._disc.slice(); _cohDiscChips(); } if(keep._sched){ window._cohSched=keep._sched.slice(); if(typeof _cohSchedRender==='function') _cohSchedRender(); } if(keep._poster!==undefined){ window._cohPoster=keep._poster; const _pv=$('cohPosterPv'); if(_pv&&keep._poster){ _pv.style.backgroundImage='url(\''+keep._poster+'\')'; _pv.style.display='block'; } } if(keep._tiers && $('cohMoreTiers')){ $('cohMoreTiers').checked=true; var w=$('cohTierWrap'); if(w) w.style.display='block'; var nw=$('cohPRNameWrap'); if(nw) nw.style.display='block'; } _cohBreak('cohDep','cohDepBreak'); _cohBreak('cohPR','cohPRBreak'); _cohBreak('cohPS','cohPSBreak'); }catch(e){} }
 }
 // One extra pricing offer: a free-text name + a price, with a remove button. Rows are plain DOM
 // so the owner can add as many as they want; _cohTiers() reads them back on save.
@@ -11494,21 +11580,31 @@ function _cohTierAdd(name, price){
 // zero-priced rows are dropped. The first entry is the default offer students get.
 function _cohTiers(){
   const out=[];
-  const EN=LANG==='en';
-  const baseName=(($('cohPRName')&&$('cohPRName').value.trim())||(EN?'Standard':'Základní'));
+  const more=!!($('cohMoreTiers')&&$('cohMoreTiers').checked);
   const basePrice=parseFloat($('cohPR')&&$('cohPR').value)||0;
+  // With no extra variants there is ONE nameless price. With variants on, the base price is named too.
+  const baseName=more ? (($('cohPRName')&&$('cohPRName').value.trim())||'') : '';
   if(basePrice>0) out.push({ name:baseName, price:basePrice });
-  document.querySelectorAll('#cohTierRows .cohTierRow').forEach(function(r){
-    const nm=(r.querySelector('.ctName')&&r.querySelector('.ctName').value.trim())||'';
-    const pr=parseFloat(r.querySelector('.ctPrice')&&r.querySelector('.ctPrice').value)||0;
-    if(nm && pr>0) out.push({ name:nm, price:pr });
-  });
+  if(more){
+    document.querySelectorAll('#cohTierRows .cohTierRow').forEach(function(r){
+      const nm=(r.querySelector('.ctName')&&r.querySelector('.ctName').value.trim())||'';
+      const pr=parseFloat(r.querySelector('.ctPrice')&&r.querySelector('.ctPrice').value)||0;
+      if(nm && pr>0) out.push({ name:nm, price:pr });
+    });
+  }
   return out;
 }
 async function _cohSave(){
   if(!_cohCtx) return; const EN=LANG==='en';
   const g=function(id){ const e=$(id); return (e&&(''+e.value).trim())||''; };
   const name=g('cohName'); if(!name){ toast(EN?'Name is required':'Název je povinný'); return; }
+  // When multiple price variants are on, each price must be named (so students can tell them apart).
+  if($('cohMoreTiers') && $('cohMoreTiers').checked){
+    if(!g('cohPRName')){ toast(EN?'Name the first price':'Pojmenuj první cenu'); return; }
+    let _badRow=false;
+    document.querySelectorAll('#cohTierRows .cohTierRow').forEach(function(r){ const nm=(r.querySelector('.ctName')&&r.querySelector('.ctName').value.trim())||''; const pr=parseFloat(r.querySelector('.ctPrice')&&r.querySelector('.ctPrice').value)||0; if(pr>0 && !nm) _badRow=true; });
+    if(_badRow){ toast(EN?'Name every price variant':'Pojmenuj každou cenovou variantu'); return; }
+  }
   const months=Math.max(2, parseInt(g('cohMonths'),10)||2);
   // If an end date is given, the start->end span must cover the course length. We count in
   // CALENDAR months, not days, so month-length differences never cause a false reject: a
@@ -11543,7 +11639,7 @@ async function _cohSave(){
       toast(EN?('A '+months+'-month course can end on '+_xm+' at the latest (max +1 month)'):(months+'měsíční kurz může končit nejpozději '+_xm+' (max +1 měsíc)')); return;
     }
   }
-  const rec={ gym_id:_cohCtx.gymId, owner_id:_cohCtx.ownerId, stripe_account:_cohCtx.stripeAccount||null, name:name, discipline:(_cohDisc[0]||null), start_date:g('cohStart')||null, end_date:g('cohEnd')||null, months:months, capacity:parseInt(g('cohCap'),10)||null, deposit_amount:parseFloat(g('cohDep'))||0, price_tiers:_cohTiers(), price_student:((_cohTiers()[1]&&_cohTiers()[1].price)||parseFloat(g('cohPR'))||0), price_regular:(parseFloat(g('cohPR'))||0), currency:_cohCtx.currency, gym_meta_pixel:g('cohPixel')||null, capi_token:g('cohCapiToken')||null, description:g('cohDesc')||null, schedule:(window._cohSched||[]), schedule_note:(cohScheduleSummary(window._cohSched||[])||g('cohSchedNote')||null), poster:(window._cohPoster||null), status:'open' };
+  const rec={ gym_id:_cohCtx.gymId, owner_id:_cohCtx.ownerId, stripe_account:_cohCtx.stripeAccount||null, name:name, discipline:(_cohDisc[0]||null), start_date:g('cohStart')||null, end_date:g('cohEnd')||null, months:months, capacity:parseInt(g('cohCap'),10)||null, deposit_amount:parseFloat(g('cohDep'))||0, price_tiers:_cohTiers(), price_student:(function(){ var st=_cohTiers().find(function(t){ return /student/i.test(t.name||''); }); return st?st.price:0; })(), price_regular:(parseFloat(g('cohPR'))||0), currency:_cohCtx.currency, gym_meta_pixel:g('cohPixel')||null, capi_token:g('cohCapiToken')||null, description:g('cohDesc')||null, schedule:(window._cohSched||[]), schedule_note:(cohScheduleSummary(window._cohSched||[])||g('cohSchedNote')||null), poster:(window._cohPoster||null), status:'open' };
   const btn=$('cohSave'); if(btn){ btn.disabled=true; btn.textContent=(EN?'Saving...':'Ukládám...'); }
   try{
     const { data:_newCoh, error }=await supaClient.from('gym_cohorts').insert(rec).select('id').single();
@@ -12615,11 +12711,10 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
       <button id="gmTabSetBtn" style="padding:11px 4px;border:1px solid var(--border);border-radius:10px;background:var(--surf);color:var(--dark);font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;">⚙️ ${LANG==='en'?'Settings':'Nastavení'}</button>
     </div>
     <div id="gmMembTab" style="display:none;">
-      <button id="mgCohortsBtn" style="width:100%;padding:12px;margin-bottom:14px;background:var(--dark);color:#fff;border:none;border-radius:11px;font-size:14px;font-weight:700;cursor:pointer;">📚 ${LANG==='en'?'Cohorts':'Kurzy'}</button>
       <div class="sec-lbl">👥 ${LANG==='en'?'Members':'Stálí členové'}</div>
       <div id="mgMembers"><p style="color:var(--light);font-size:13px;">${L('Načítám...')}</p></div>
     </div>
-    <div id="gmSchedTab">    <div class="sec-lbl">${LANG==='en'?'Weekly class schedule':'Týdenní rozvrh tříd'}</div>
+    <div id="gmSchedTab">    <button id="mgCohortsBtn" style="width:100%;padding:12px;margin-bottom:16px;background:var(--dark);color:#fff;border:none;border-radius:11px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">📚 ${LANG==='en'?'Cohorts':'Kurzy'}</button>    <div class="sec-lbl">${LANG==='en'?'Weekly class schedule':'Týdenní rozvrh tříd'}</div>
     <div id="mgSchedule"></div>
     <button id="mgAddRepeat" style="width:100%;padding:11px;background:var(--bg);border:1px dashed var(--border);border-radius:10px;font-weight:600;color:var(--dark);cursor:pointer;font-family:'DM Sans';margin-bottom:10px;">📅 ${LANG==='en'?'Add recurring (multiple days)':'Přidat opakovaně (více dní)'}</button>
     <div id="mgRepeatPanel" style="display:none;border:1.5px solid var(--border);border-radius:12px;padding:12px;margin-bottom:16px;background:var(--surf);">
@@ -12850,6 +12945,12 @@ function classReminderMuted(){ return !!(currentUser && currentUser.mute_class_r
 // A reservation created less than 8h before the class starts gets NO reminder (you booked it, you
 // will not forget). It is born reminder_sent=true so the cron skips it. 8h = the cron reminder
 // window start, and safely past the 6h Stripe cancellation deadline.
+// Course attribution, consumed once with a freshness window. mtl_coh_src is written on every
+// deck/discovery/alert/URL entry; without consume+freshness a stored source leaks onto a later,
+// differently-sourced signup. _consumeCohSrc reads AND clears, and ignores a source older than
+// 6h (a signup is a same-session intent, not a week-old deck open).
+function _setCohSrc(v){ try{ localStorage.setItem('mtl_coh_src', v); localStorage.setItem('mtl_coh_src_t', String(Date.now())); }catch(e){} }
+function _consumeCohSrc(){ var v='direct'; try{ var raw=localStorage.getItem('mtl_coh_src'); var t=parseInt(localStorage.getItem('mtl_coh_src_t')||'0',10); localStorage.removeItem('mtl_coh_src'); localStorage.removeItem('mtl_coh_src_t'); if(raw && (Date.now()-t) < 6*3600000){ v=raw; } }catch(e){} return v; }
 function _remSentAtBooking(dateStr, timeStr){ try{ if(!dateStr) return false; const st=new Date(`${dateStr}T${(timeStr||'09:00')}:00`).getTime(); return (st - Date.now()) < 8*3600000; }catch(e){ return false; } }
 function coachLessonReminderMuted(){ return !!(currentUser && currentUser.mute_coach_lesson_reminder); }
 function leagueNotifMuted(){ return !!(currentUser && currentUser.league_notif_optin===false); }
@@ -15182,6 +15283,9 @@ async function saveScheduleOnly(){
   // Capacity is now REQUIRED per class. It used to be optional with gyms.capacity as a fallback —
   // and if BOTH were empty the class was effectively unlimited, so 40 people could book a mat that
   // fits 15. The club-wide fallback is gone, so the per-class number has to be there.
+  // Sync every capacity field from the DOM first: a pre-filled value the owner never TOUCHED never
+  // fired oninput, so _gymSchedule[i].cap stayed null and save falsely reported 'fill in capacity'.
+  try{ document.querySelectorAll('.schCap').forEach(function(el){ const i=+el.dataset.i; if(_gymSchedule[i]){ const v=parseInt(el.value,10); _gymSchedule[i].cap=(v>0?v:null); } }); }catch(e){}
   { const _noCap=_gymSchedule.findIndex(c=>!(Number(c.cap)>0));
     if(_noCap>=0){
       const _c=_gymSchedule[_noCap];
@@ -15559,7 +15663,7 @@ async function loadGymCoursesForProfile(gymId, g){
   const count=open.length+running.length;
   el.innerHTML='<details style="margin-top:14px;border:1px solid var(--border);border-radius:14px;overflow:hidden;"><summary style="cursor:pointer;padding:13px 15px;font-weight:800;font-size:14px;">'+'🥋'+' '+(EN?'Courses':'Kurzy')+(count?(' <span style="color:var(--light);font-weight:600;font-size:12px;">\u00b7 '+count+'</span>'):'')+'</summary><div style="padding:10px 14px 12px;">'+h+'</div></details>';
   el.querySelectorAll('.gpCohHead').forEach(function(hd){ hd.onclick=function(ev){ if(ev&&ev.target&&ev.target.classList&&ev.target.classList.contains('gpCohGo')) return; const id=hd.dataset.id; const bd=el.querySelector('.gpCohBody[data-id="'+id+'"]'); const ar=el.querySelector('.gpCohArr[data-id="'+id+'"]'); if(!bd) return; const op=bd.style.display==='none'; bd.style.display=op?'block':'none'; if(ar) ar.style.transform=op?'rotate(180deg)':'none'; }; });
-  el.querySelectorAll('.gpCohGo').forEach(function(b){ b.onclick=function(ev){ ev.stopPropagation(); try{ localStorage.setItem('mtl_coh_src','mtl_discovery'); }catch(e){} if(typeof openCohortSignup==='function') openCohortSignup(b.dataset.id); }; });
+  el.querySelectorAll('.gpCohGo').forEach(function(b){ b.onclick=function(ev){ ev.stopPropagation(); try{ _setCohSrc('mtl_discovery'); }catch(e){} if(typeof openCohortSignup==='function') openCohortSignup(b.dataset.id); }; });
   const bell=$('gpCohBell');
   if(bell) bell.onclick=async function(){
     if(!currentUser) return;
@@ -17134,7 +17238,7 @@ $('btnProfile').onclick=e=>{ e.stopPropagation(); const c=filtered[idx]; if(c &&
 // Action buttons
 $('btnPass').onclick=()=>{ if(_deckMode==='events'){ evNextCard(); return; } doPass(); };
 $('btnUndo').onclick=()=>{ if(_deckMode==='events'){ evPrevCard(); return; } doUndo(); };
-$('btnGo').onclick=()=>{ if(_deckMode==='events'){ const e=evCurrent(); if(e){ if(e._isCohort){ try{ localStorage.setItem('mtl_coh_src','mtl_deck'); }catch(e2){} if(typeof openCohortSignup==='function') openCohortSignup(e.cohort_id||e.id); } else openEventView(e); } return; } doGo(); };
+$('btnGo').onclick=()=>{ if(_deckMode==='events'){ const e=evCurrent(); if(e){ if(e._isCohort){ try{ _setCohSrc('mtl_deck'); }catch(e){} if(typeof openCohortSignup==='function') openCohortSignup(e.cohort_id||e.id); } else openEventView(e); } return; } doGo(); };
 $('btnSave').onclick=()=>{ if(_deckMode==='events'){ evSaveFav(); return; } doSave(); };
 (function(){
   const SAVE_IDS=['btnSaveRates','coachSchedSave','mgSave']; const dirty=new Set();
@@ -17144,7 +17248,7 @@ $('btnSave').onclick=()=>{ if(_deckMode==='events'){ evSaveFav(); return; } doSa
   document.addEventListener('change',onEdit,true);
   document.addEventListener('click',function(e){ const x=e.target&&e.target.closest&&e.target.closest('button'); if(x&&SAVE_IDS.includes(x.id)) dirty.clear(); },true);
 })();
-$('btnInfo').onclick=()=>{ if(_deckMode==='events'){ const e=evCurrent(); if(e){ if(e._isCohort){ try{ localStorage.setItem('mtl_coh_src','mtl_deck'); }catch(e2){} if(typeof openCohortSignup==='function') openCohortSignup(e.cohort_id||e.id); } else openEventView(e); } return; } doInfo(); };
+$('btnInfo').onclick=()=>{ if(_deckMode==='events'){ const e=evCurrent(); if(e){ if(e._isCohort){ try{ _setCohSrc('mtl_deck'); }catch(e){} if(typeof openCohortSignup==='function') openCohortSignup(e.cohort_id||e.id); } else openEventView(e); } return; } doInfo(); };
 
 // Bottom nav
 $('ni-find').onclick=()=>{ setNav('ni-find'); closeAllSheets(); exitEventsMode(); setDeckMode('coaches'); };
@@ -17782,9 +17886,9 @@ async function loadNotifications(append){
     const isAmbApp = k==='ambassador_app';
     const isAmbGranted = k==='ambassador_granted';
     const isCoachRefAdmin = false; /* referral EP grants removed — rewards are Shikai/Bankai */
-    const clickable = isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand';
+    const clickable = isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect';
     let linkLabel = L('otevřít ›');
-    if(k==='payment_confirmed'){ var _pcd={}; try{ _pcd=JSON.parse(n.data||'{}'); }catch(e){} var _gg=_pcd.goto; linkLabel = (_gg==='dropin'||_gg==='bookings') ? (LANG==='en'?'booking details ›':'detail rezervace ›') : (_gg==='tickets') ? (LANG==='en'?'my ticket ›':'moje vstupenka ›') : (_gg==='courses') ? (LANG==='en'?'my course ›':'můj kurz ›') : (_gg==='merch') ? (LANG==='en'?'view ›':'zobrazit ›') : (LANG==='en'?'membership details ›':'detail členství ›'); } else if(k==='qr_intent') linkLabel = LANG==='en'?'to confirm ›':'k potvrzení ›'; else if(k==='qr_released'||k==='qr_reservation_expired') linkLabel = LANG==='en'?'book again ›':'rezervovat znovu ›'; else if(k==='cover_needed') linkLabel = LANG==='en'?'take the cover ›':'vzít záskok ›'; else if(k==='cover_filled'||k==='cover_filled_owner') linkLabel = LANG==='en'?'view ›':'zobrazit ›'; else if(k==='doklad_vat_needed') linkLabel = LANG==='en'?'add VAT ID \u203a':'doplnit DI\u010c \u203a'; else if(k==='course_new') linkLabel = LANG==='en'?'course details \u203a':'detail kurzu \u203a'; else if(k==='slot_demand') linkLabel = LANG==='en'?'open my diary \u203a':'otev\u0159\u00edt di\u00e1\u0159 \u203a';
+    if(k==='payment_confirmed'){ var _pcd={}; try{ _pcd=JSON.parse(n.data||'{}'); }catch(e){} var _gg=_pcd.goto; linkLabel = (_gg==='dropin'||_gg==='bookings') ? (LANG==='en'?'booking details ›':'detail rezervace ›') : (_gg==='tickets') ? (LANG==='en'?'my ticket ›':'moje vstupenka ›') : (_gg==='courses') ? (LANG==='en'?'my course ›':'můj kurz ›') : (_gg==='merch') ? (LANG==='en'?'view ›':'zobrazit ›') : (LANG==='en'?'membership details ›':'detail členství ›'); } else if(k==='qr_intent') linkLabel = LANG==='en'?'to confirm ›':'k potvrzení ›'; else if(k==='qr_released'||k==='qr_reservation_expired') linkLabel = LANG==='en'?'book again ›':'rezervovat znovu ›'; else if(k==='cover_needed') linkLabel = LANG==='en'?'take the cover ›':'vzít záskok ›'; else if(k==='cover_filled'||k==='cover_filled_owner') linkLabel = LANG==='en'?'view ›':'zobrazit ›'; else if(k==='doklad_vat_needed') linkLabel = LANG==='en'?'add VAT ID \u203a':'doplnit DI\u010c \u203a'; else if(k==='course_new') linkLabel = LANG==='en'?'course details \u203a':'detail kurzu \u203a'; else if(k==='slot_demand') linkLabel = LANG==='en'?'open my diary \u203a':'otev\u0159\u00edt di\u00e1\u0159 \u203a'; else if(k==='cohort_month_due') linkLabel = LANG==='en'?'pay now \u203a':'doplatit \u203a'; else if(k==='cohort_month_collect') linkLabel = LANG==='en'?'open roster \u203a':'otev\u0159\u00edt roster \u203a';
       else if(k==='doklad_unified') linkLabel = LANG==='en'?'billing details \u203a':'fakturační údaje \u203a';
       else if(k==='pis_payment_in'){ var _pld={}; try{ _pld=JSON.parse(n.data||'{}'); }catch(e){} linkLabel = (_pld.occ && _pld.occ.date) ? (LANG==='en'?'view class ›':'zobrazit lekci ›') : (LANG==='en'?'view dashboard ›':'otevřít přehled ›'); }
     if(isMembCancel) linkLabel = LANG==='en'?'view members ›':'zobrazit členy ›';
@@ -17863,7 +17967,9 @@ async function loadNotifications(append){
         else if(k==='qr_intent'){ try{ var _qd=JSON.parse(n.data||'{}'); if(!_myGymData && _qd.gym){ try{ var r=await supaClient.from('gyms').select('*').eq('id',_qd.gym).single(); if(r&&r.data) _myGymData=r.data; }catch(e){} } if(_qd.occ && _qd.occ.date && _myGymData){ window._caWantTab='pay'; openClassAttendance(_qd.occ); } else if(_qd.gym && typeof openReception==='function'){ await openReception(_qd.gym, _qd.gym_name||''); try{ _recpQrConfirm({ gym:_recGym, container:$('recList'), back:function(){ if(typeof _recSetMode==='function') _recSetMode('checkin'); } }); }catch(e){} } }catch(e){} }
         else if(k==='cover_needed'){ try{ var _cvd=JSON.parse(n.data||'{}'); if(_cvd.req_id){ if(confirm(LANG==='en'?'Take this cover? You will teach this class.':'Vzít tento záskok? Odučíš tuto lekci.')) _acceptCover(_cvd.req_id); } }catch(e){} }
         else if(k==='slot_demand'){ if(typeof openDiary==='function') openDiary(); }
-        else if(k==='course_new'){ try{ var _cnd=JSON.parse(n.data||'{}'); if(_cnd.cohort_id){ try{ localStorage.setItem('mtl_coh_src','mtl_alert'); }catch(e){} if(typeof openCohortSignup==='function') openCohortSignup(_cnd.cohort_id); } }catch(e){} }
+        else if(k==='course_new'){ try{ var _cnd=JSON.parse(n.data||'{}'); if(_cnd.cohort_id){ try{ _setCohSrc('mtl_alert'); }catch(e){} if(typeof openCohortSignup==='function') openCohortSignup(_cnd.cohort_id); } }catch(e){} }
+        else if(k==='cohort_month_due'){ try{ var _md=JSON.parse(n.data||'{}'); if(_md.cohort_member_id){ location.href='/?cohortpay='+encodeURIComponent(_md.cohort_member_id); } }catch(e){} }
+        else if(k==='cohort_month_collect'){ try{ var _mc=JSON.parse(n.data||'{}'); if(_mc.cohort_id && typeof openCohorts==='function'){ closeSheet('shNotif'); if(_myGymData && _myGymData.id===_mc.gym_id){ openCohorts(_myGymData.id, _myGymData.name, currentUser.id, _myGymData.stripe_account, _myGymData.currency, parseDisc(_myGymData.disciplines)); } else { toast(LANG==='en'?'Open this course in your gym management.':'Otev\u0159i tento kurz ve spr\u00e1v\u011b klubu.'); } } }catch(e){} }
         else if(k==='cover_filled'||k==='cover_filled_owner'){ /* informational — no navigation */ }
         else if(k==='doklad_vat_needed' || k==='doklad_unified'){ if($('meGymManage')){ openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); setTimeout(function(){ try{ var _t=$('mgVatId')||$('mgTaxId'); if(_t){ _t.scrollIntoView({behavior:'smooth',block:'center'}); if(k==='doklad_vat_needed') _t.focus(); } }catch(e){} }, 450); } else if(typeof openSheet==='function'){ openSheet('shAccounting'); } }
       else if(k==='pis_payment_in'){ var _pd={}; try{ _pd=JSON.parse(n.data||'{}'); }catch(e){} if(_pd.event_id){ try{ var _pev=await supaClient.from('events').select('*').eq('id',_pd.event_id).single(); if(_pev&&_pev.data && typeof openEventView==='function') openEventView(_pev.data); }catch(e){} } else if(_pd.booking_id){ if(typeof renderCoachDash==='function'){ openSheet('shCoachDash'); renderCoachDash(); } else { openSheet('shBookings'); if(typeof _upTab==='function') _upTab('souk'); } } else if(_pd.cohort_id){ if($('meGymManage')){ openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); } } else if(_pd.occ && _pd.occ.date && _pd.gym_id){ if(!_myGymData){ try{ var _gr=await supaClient.from('gyms').select('*').eq('id',_pd.gym_id).single(); if(_gr&&_gr.data) _myGymData=_gr.data; }catch(e){} } if(typeof openClassAttendance==='function' && _myGymData){ window._caWantTab=null; openClassAttendance(_pd.occ); } else if($('meGymManage')){ openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); } } else if($('meGymManage')){ openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); } else if(typeof openGymTeamDash==='function'){ openGymTeamDash(); } }
@@ -25937,9 +26043,10 @@ async function showPaidPopup(){
     const _ap=params.get('apply'); if(_ap==='coach'||_ap==='gym'){ try{ if(params.get('src')) localStorage.setItem('mtl_prov_src', params.get('src')); }catch(e){} try{ openProviderApply(_ap); }catch(e){} return; }
     const _coh=params.get('cohort');
     if(_coh){
-      try{ const _src=params.get('src'); if(_src) localStorage.setItem('mtl_coh_src', _src); }catch(e){}
+      try{ const _src=params.get('src'); if(_src) _setCohSrc(_src); }catch(e){}
       if(params.get('deposit')==='ok'){ try{ _cohThankYou(_coh, params.get('cm')||''); }catch(e){} try{ window.history.replaceState({}, '', location.pathname); }catch(e){} return; }
       if(params.get('firstmonth')==='ok'){ try{ _cohEnrolledThanks(); }catch(e){} try{ window.history.replaceState({}, '', location.pathname); }catch(e){} return; }
+      if(params.get('monthpaid')==='ok'){ try{ toast(LANG==='en'?'\u2705 Month paid \u2014 thank you!':'\u2705 M\u011bs\u00edc zaplacen \u2014 d\u00edky!'); }catch(e){} try{ window.history.replaceState({}, '', location.pathname); }catch(e){} return; }
       try{ openCohortSignup(_coh); }catch(e){}
       return;
     }
