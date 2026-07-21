@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SDA Per Petr (courses-in-deck fix, private courses, timezone audit). (1) COURSES STILL NOT IN DECK - real cause found: the entire events+courses render block was gated on `if(window._evList.length)`, so a club with a course but NO events never reached it and the 'Kurzy' chip never appeared. Now renders when there are events OR courses; and when there are ONLY courses, the filter defaults to the 'courses' chip so the deck isn't empty-looking. (2) PRIVATE COURSE (Petr's design, my one-checkbox recommendation): new gym_cohorts.private (cohort-private.sql). A private course is hidden from the Events deck (deck query now .eq('private',false)) and from the club profile's course list for non-owners (owner still sees it, to manage), but stays reachable by its DIRECT LINK (?cohort= via /api/cohort-public, which never filtered private) and by manual/walk-in add. Checkbox in the create form ('Hidden from Events + profile; reachable only by link or added manually/on-site'), wired through save/edit/snapshot/relang. Real use: fill from your own people (IG/WhatsApp) before going public; closed corporate/team camps; invite-only prep courses. (3) TIMEZONE AUDIT across the app: found + fixed a second instance of the same UTC bug in the coach BULK slot generator (a Monday slot was saved as Sunday in +TZ via d.toISOString()); now uses a local Y-M-D helper, and the from/to default fill too. Audited the rest: cron-attendance.js already computes date + weekday correctly in the gym's own timezone (Intl.DateTimeFormat with gyms.timezone, which is set from the browser on gym save), so server-side occurrence dates are sound. Remaining toISOString().slice(0,10) uses are all 'today' keys for view-logs where a shift is harmless. So the only real occurrence-date TZ bugs were upcomingClasses (SCZ) and bulk slots (this build). Deploy: index.html (SDA) + run cohort-private.sql. Builds on SCZ. -->
+<!-- MTL build: SDB Per Petr (TZ audit follow-up, internal schedule shows courses, autonomous-coach parity, deck diagnostics). (1) TZ AUDIT - Petr was right to push back: new Date().toISOString().slice(0,10) is UTC 'today', which after local midnight in a +TZ zone (Czech 00:00-02:00) still reads YESTERDAY. 18 of these were used for real date comparisons (is-this-class-upcoming, reservation filters, the cohort deck's start_date>=today) and could be a day off just after midnight. Added _todayLocal() (local Y-M-D) and swapped all 18. The remaining ~22 are view-log keys / fought_at defaults / risk-note text timestamps where a shift is harmless (verified each). (2) INTERNAL SCHEDULE SHOWS COURSES: Petr clarified he meant the club's INTERNAL schedule - so coaches/owners see a course actually occupies the mat at those times (avoid double-booking). loadGymSchedSlots now also materialises this gym's cohort occurrences into _gymCohortOcc[YMD]; the schedule editor renders a read-only 'PROBIHA KURZ' block (purple) for the selected day alongside the teacher slots. (Student-facing profile courses-as-reservable was noted as a softer 'could be' - not built yet.) (3) AUTONOMOUS COACH = OWNER 1:1 for courses: confirmed the autonomous coach's Cohorts button opens the SAME openCohorts flow (create/edit/delete/roster/revenue/month-2+/private), just paying to the coach's own account. Fixed one gap: the button was gated on gym_payout_account (Stripe) only, so a QR/bank autonomous coach couldn't see Cohorts - now gated on having ANY payout route (Stripe or QR receiver). (4) DECK STILL MISSING COURSES: added a real cause + a diagnostic. Likely cause found: in the 'all' view, courses were hidden when their discipline category didn't match the viewer's prefCategory (a combat course vanished for a 'traditional'-pref viewer) - removed that filter for courses (they're few, acquisition products; explicit discipline chip still filters). Also added console.log diagnostics ('[MTL deck] ...') showing cohorts fetched / mapped / chip count / filterType, so if it's STILL hidden Petr can paste the console output and we pinpoint it. Deploy: index.html (SDB). Builds on SDA. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -6907,6 +6907,7 @@ async function renderEventsAsync(box){
         try{ const { data:_gr }=await supaClient.from('gyms').select('id,name,city,city_lat,city_lng').in('id',_cgids); (_gr||[]).forEach(g=>{ _cg[g.id]=g; }); }catch(e){}
         _chList.forEach(c=>{ const g=_cg[c.gym_id]||{}; c._gymName=g.name||null; c._city=g.city||null; c._lat=(g.city_lat!=null?+g.city_lat:null); c._lng=(g.city_lng!=null?+g.city_lng:null); });
         window._cohDeckList=_chList.map(_cohAsEvent);
+        try{ console.log('[MTL deck] cohorts fetched:', (_chs||[]).length, '| open+future:', _chList.length, '| mapped:', window._cohDeckList.length, window._cohDeckList.map(function(x){return x.title+' ('+(x.disciplines)+')';})); }catch(e){}
       } else { window._cohDeckList=[]; }
     }catch(e){ window._cohDeckList=[]; }
     try{ var _gids=[...new Set((window._evList||[]).map(e=>e.gym_id).filter(Boolean))]; var _uids=[...new Set((window._evList||[]).map(e=>e.created_by).filter(Boolean))]; var _gm={}, _um={}; if(_gids.length){ var _gr=await supaClient.from('gyms').select('id,name').in('id',_gids); (_gr&&_gr.data||[]).forEach(g=>_gm[g.id]=g.name); } if(_uids.length){ var _ur=await supaClient.from('profiles').select('id,name').in('id',_uids); (_ur&&_ur.data||[]).forEach(u=>_um[u.id]=u.name); } window._evList.forEach(e=>{ e._gymName=_gm[e.gym_id]||null; e._creatorName=_um[e.created_by]||null; }); }catch(e){}
@@ -6919,6 +6920,7 @@ async function renderEventsAsync(box){
       const ft = window._evFilterType || ((!window._evList.length && (window._cohDeckList||[]).length)?'courses':'all');
       const _tch=[{v:'all',lbl:(LANG==='en'?'All':'Vše'),emoji:''}].concat(EVENT_TYPES.map(tt=>({v:tt.v,lbl:(LANG==='en'?tt.en:tt.cs),emoji:tt.emoji})));
       const _nCoh=(window._cohDeckList||[]).length;
+      try{ console.log('[MTL deck] events:', window._evList.length, '| courses for chip:', _nCoh, '| filterType:', (window._evFilterType||'(default)')); }catch(e){}
       let _chipHtml=_tch.map(c=>{ const on=(ft===c.v && ft!=='courses'); return `<div class="evTypeChip pill${on?' active':''}" data-v="${c.v}">${c.emoji?c.emoji+' ':''}${c.lbl}</div>`; }).join('');
       if(_nCoh) _chipHtml+=`<div class="evTypeChip pill${ft==='courses'?' active':''}" data-v="courses">\ud83e\udd4b ${LANG==='en'?'Courses':'Kurzy'} <span style="opacity:.6;font-weight:600;">${_nCoh}</span></div>`;
       html += `<div style="display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;margin-bottom:10px;">`+_chipHtml+`</div>`;
@@ -6933,7 +6935,7 @@ async function renderEventsAsync(box){
       if(ft==='courses'){
         let clist=(window._cohDeckList||[]).slice();
         if(fd!=='all'){ clist=clist.filter(ev=>{ let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){} return ds.includes(fd); }); }
-        else { clist=clist.filter(ev=>{ let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){} const _pc=prefCategory(); return !ds.length || ds.some(d=>discCat(d)===_pc); }); }
+        /* 'all' view: show every course regardless of the viewer's preferred category */
         if(_sq) clist=clist.filter(ev=>(((ev.title||'')+' '+(ev._gymName||'')+' '+(ev.city||'')).toLowerCase()).includes(_sq));
         clist.forEach(ev=>{ ev._distKm=(userLoc && ev.city_lat!=null && ev.city_lng!=null)?haversine(userLoc.lat,userLoc.lng,+ev.city_lat,+ev.city_lng):null; ev._dist=ev._distKm; });
         if(maxDistKm!=null && userLoc) clist=clist.filter(ev=>ev._distKm==null || ev._distKm<=maxDistKm);
@@ -12200,7 +12202,7 @@ async function renderGymTeamDash(){
         : `<button id="gtdConnectPayout" style="${_bs}background:#635BFF;color:#fff;border:none;">💳 ${EN?'Connect a payout account (get paid for group classes)':'Připojit výplatní účet (platby za skupinovky)'}</button>`))
     + ((drops.length||mems.length)?`<button id="gtdExportBtn" style="${_bs}background:var(--surf);color:var(--dark);border:1px solid var(--border);">⬇ ${EN?'Export classes (CSV)':'Exportovat lekce (CSV)'}</button>`:'')
     + (link.full_autonomy?`<button id="gtdSubTeamBtn" style="${_bs}background:var(--dark);color:#fff;border:none;"> ${EN?'My team':'Můj tým'}</button>`:'')
-    + (link.full_autonomy && currentUser.gym_payout_account?`<button id="gtdCohortsBtn" style="${_bs}background:var(--surf);color:var(--dark);border:1px solid var(--border);">📚 ${EN?'Cohorts':'Kurzy'}</button>`:'')
+    + (link.full_autonomy && (currentUser.gym_payout_account||currentUser.receiver_id_value)?`<button id="gtdCohortsBtn" style="${_bs}background:var(--surf);color:var(--dark);border:1px solid var(--border);">📚 ${EN?'Cohorts':'Kurzy'}</button>`:'')
     + (link.full_autonomy?`<button id="gtdMerchBtn" style="${_bs}background:var(--surf);color:var(--dark);border:1px solid var(--border);">🛍️ ${EN?'My merch':'Můj merch'}</button>`:'')
     + `</div>`;
 
@@ -12214,7 +12216,7 @@ async function renderGymTeamDash(){
   if($('gtdMembersBtn')) $('gtdMembersBtn').onclick=()=>openCoachMembers();
   if($('gtdMyMembersBtn')) $('gtdMyMembersBtn').onclick=()=>openCoachMembersAtGym(_gtdGym, _gtdGymName);
   if($('gtdSubTeamBtn')) $('gtdSubTeamBtn').onclick=()=>openCoachSubTeam(_gtdGym, _gtdGymName);
-  if($('gtdCohortsBtn')) $('gtdCohortsBtn').onclick=()=>openCohorts(_gtdGym, _gtdGymName, currentUser.id, currentUser.gym_payout_account, (gymObj&&gymObj.currency)||'CZK', (currentUser.disciplines?parseDisc(currentUser.disciplines):[]));
+  if($('gtdCohortsBtn')) $('gtdCohortsBtn').onclick=()=>openCohorts(_gtdGym, _gtdGymName, currentUser.id, currentUser.gym_payout_account||null, (gymObj&&gymObj.currency)||'CZK', (currentUser.disciplines?parseDisc(currentUser.disciplines):[]));
   const gs=$('gtdGymSel'); if(gs) gs.onchange=()=>{ _gtdGym=gs.value; renderGymTeamDash(); };
   const ms=$('gtdMonthSel'); if(ms) ms.onchange=()=>{ _gtdMonth=ms.value; renderGymTeamDash(); };
   if($('gtdModeNet')) $('gtdModeNet').onclick=()=>{ _gtdMode='net'; renderGymTeamDash(); };
@@ -15512,7 +15514,16 @@ async function loadGymSchedSlots(weekDates){
     const { data:sl } = await supaClient.from('slots').select('coach_profile_id,date,time,end_time,discipline,booked,capacity').in('coach_profile_id',ids).gte('date',d0).lte('date',d1).order('time',{ascending:true});
     const map={}; (sl||[]).forEach(x=>{ if(!x.date) return; (map[x.date]=map[x.date]||[]).push({ coachName:nm[x.coach_profile_id]||'', time:x.time||'', end:x.end_time||'', disc:x.discipline||'', booked:!!x.booked, cap:Number(x.capacity)||1 }); });
     Object.keys(map).forEach(d=>map[d].sort((a,b)=>String(a.time||'').localeCompare(String(b.time||''))));
-    window._gymSchedSlots=map; renderScheduleEditor();
+    window._gymSchedSlots=map;
+    // course occurrences for this gym, so the internal schedule shows a running course at its times
+    try{
+      const cocc={};
+      const { data:cohs } = await supaClient.from('gym_cohorts').select('id,name,discipline,start_date,end_date,months,schedule,status').eq('gym_id',_myGymData.id).in('status',['open','running']);
+      (cohs||[]).forEach(function(c){ let _o=[]; try{ _o=cohortOccurrences(c,{horizonDays:60}); }catch(e){} _o.forEach(function(o){ (cocc[o.date]=cocc[o.date]||[]).push({ name:c.name||'', time:o.time||'', end:(o.time&&o.dur)?_classEnd(o.time,o.dur):null, disc:c.discipline||null, cohortId:c.id }); }); });
+      Object.keys(cocc).forEach(function(d){ cocc[d].sort(function(a,b){ return String(a.time||'').localeCompare(String(b.time||'')); }); });
+      window._gymCohortOcc=cocc;
+    }catch(e){ window._gymCohortOcc={}; }
+    renderScheduleEditor();
   }catch(e){ window._gymSchedSlots={}; }
 }
 function renderScheduleEditor(){
@@ -15580,6 +15591,13 @@ function renderScheduleEditor(){
       ${(open&&!_cPast)?editFields(c,i):''}
     </div>`; });
   const _selYMD=`${_selDate.getFullYear()}-${String(_selDate.getMonth()+1).padStart(2,'0')}-${String(_selDate.getDate()).padStart(2,'0')}`;
+  const _cohOcc=(window._gymCohortOcc&&window._gymCohortOcc[_selYMD])||[];
+  if(_cohOcc.length){
+    html+=`<div style="margin-top:14px;font-size:11px;color:var(--light);font-weight:800;letter-spacing:.04em;margin-bottom:6px;">\ud83e\udd4b ${LANG==='en'?'COURSE RUNNING':'PROBÍHÁ KURZ'}</div>`;
+    _cohOcc.forEach(function(o){ const _de=o.disc?(disciplineEmoji(o.disc)+' '):''; const _rng=`${o.time||'--:--'}${o.end?('\u2013'+o.end):''}`;
+      html+=`<div style="border:1px solid #E4D9FF;border-radius:12px;padding:9px 11px;margin-bottom:6px;background:#F6F1FF;"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="font-size:13px;min-width:0;"><strong>${_rng}</strong> \u00b7 ${_de}${escapeHtml(o.name||(LANG==='en'?'Course':'Kurz'))}</div><span style="flex-shrink:0;font-size:10px;font-weight:800;color:#5B3FB0;background:#EDE7FF;border-radius:6px;padding:2px 7px;">${LANG==='en'?'course':'kurz'}</span></div></div>`;
+    });
+  }
   const _avSlots=(window._gymSchedSlots&&window._gymSchedSlots[_selYMD])||[];
   if(_avSlots.length){
     html+=`<div style="margin-top:12px;font-size:11px;color:var(--light);font-weight:800;letter-spacing:.04em;margin-bottom:6px;">\ud83d\udcc6 ${LANG==='en'?'TEAM 1:1 AVAILABILITY':'1:1 DOSTUPNOST T\u00ddMU'}</div>`;
