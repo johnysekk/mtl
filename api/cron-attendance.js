@@ -136,9 +136,9 @@ async function handler(req, res) {
         created++;
       }
 
-      // ── Class reminders (~4 h before start): gym classes & drop-ins, gym-local time ──
+      // ── Class reminders (~8 h before start): gym classes & drop-ins, gym-local time ──
       try {
-        const win = (cm) => { const d = cm - mins; return d >= 360 && d <= 600; }; // 6–10 h ahead (before the 6h cancel deadline)
+        const win = (cm) => { const d = cm - mins; return d >= 450 && d <= 510; }; // ~8h ahead (7.5–8.5h): matches the 8h client no-remind threshold and clears the 6h Stripe cancel deadline; 60-min wide so the 30-min cron never skips it
         const resv = await sbGet(`gym_class_reservations?gym_id=eq.${gym.id}&class_date=eq.${date}&reminder_sent=eq.false&select=id,student_id,class_name,class_time,status`);
         for (const r of (resv || [])) {
           if (!r.student_id || mutedRem.has(r.student_id) || r.status === 'released' || r.status === 'cancelled') continue;
@@ -165,7 +165,7 @@ async function handler(req, res) {
         }
       } catch (e) { console.error('cron reminder', e.message); }
     }
-    // ── 1:1 lesson reminders (~4 h before): student + coach, in the coach's timezone ──
+    // ── 1:1 lesson reminders (~8 h before): student + coach, in the coach's timezone ──
     try {
       const dISO = (d) => d.toISOString().slice(0, 10);
       const nowD = new Date();
@@ -181,7 +181,7 @@ async function handler(req, res) {
           const { date, mins } = gymNow(tzMap[b.coach_id] || 'UTC');
           if (b.training_date !== date) continue;
           const t = String(b.training_time || '').split(':'); const cm = Number(t[0]) * 60 + Number(t[1] || 0);
-          if (isNaN(cm)) continue; const diff = cm - mins; if (diff < 180 || diff > 300) continue;
+          if (isNaN(cm)) continue; const diff = cm - mins; if (diff < 450 || diff > 510) continue; // ~8h ahead, aligned with the group-class window
           if (b.reminder_sent === false && b.student_id && !mutedRem.has(b.student_id)) {
             const pk = await sbPatch('bookings', `id=eq.${b.id}&reminder_sent=eq.false`, { reminder_sent: true });
             if (pk.ok) { await sbPost('notifications', { user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'class_reminder', label: (b.coach_name ? ('Lekce s ' + b.coach_name) : 'Tvoje lekce'), time: b.training_time || '' }), message: `⏰ Připomínka: lekce${b.coach_name ? (' s ' + b.coach_name) : ''} brzy začíná (${b.training_time || ''}). Máš zdravotní omezení? Řekni ho v profilu, uvidí jen tvůj kouč.` }); created++; }
