@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SCK Per Petr (channels 3+4 for the accountless course student + mail domain unification). CONTEXT that reshaped this: students enrol into courses straight from Meta ads with NO MTL profile (cohort-pay leaves student_id null; the row carries only name/email/fbp/fbc). So 'upcoming classes for the enrolled student' could not hang off a profile. (1) TOKEN COURSE PAGE ?myclass=<cohort_member_id> - accountless, the unguessable member UUID IS the key (same model as the shared kid profile + walk-in guest). Reuses the existing /api/cohort-public ?cm= branch (extended to return schedule+dates - NO new endpoint). Shows the FULL value they paid for: next session, full dated schedule, deposit status. (2) HARD-BUT-SMART NUDGE: the schedule is never gated (never tax what they already bought). Gated behind creating a profile: calendar sync (.ics), pre-class reminders, progress, and the post-course membership. Logged-in users get the .ics button directly; guests get an amber 'create your profile' card that carries their email into the OTP claim. (3) .ics for the WHOLE course - one VEVENT per session with a -2h alarm, reusing calIcs grammar. Unit-tested (2 sessions, correct DTSTART/DTEND incl. 90-min duration, valid VCALENDAR wrap). (4) CLAIM-ON-LOGIN: new _claimCohortMembers() links accountless cohort_members rows to the account by matching email where student_id is null (mirrors the walk-in / imported-members claim). So when the ad-sourced student finally makes a profile with the same email, their course becomes theirs and reminders/membership-nudge light up. (5) DEPOSIT EMAIL (stripe-webhook cohortDepositHtml) now includes a 'Zobrazit rozvrh kurzu' button linking to ?myclass= + the profile nudge. Sent once from the webhook (idempotent), on the already-unified domain. (6) MAIL DOMAIN UNIFIED: ticket-email.js, release-cron.js and stripe-webhook.js had dead-domain fallbacks (mtlcoaches.co, muaythailab.co). All from-addresses + APP_URL/PUBLIC_URL fallbacks now default to martialtraininglab.com (still env-overridable). NOTE: mail only sends if that domain is verified in Resend - if test mails were not arriving, verifying the domain in Resend is the fix. Deploy: index.html (SCK) + cohort-public.js + stripe-webhook.js + ticket-email.js + release-cron.js. Builds on SCJ. -->
+<!-- MTL build: SCL Per Petr (step 4: courses in the Events discovery surface + distance, recycling the gym-deck geo engine). (1) NEW 'Kurzy' CHIP in the Events chip bar (only shown when there are open courses, with a count). Selecting it swaps the event swipe-deck for a DISTANCE-SORTED course list. (2) GEO ENGINE REUSED verbatim from the gym deck: haversine + userLoc (falls back to currentUser.city_lat/lng), unknown distance sinks to the bottom, maxDistKm honoured. Courses pull coords from their host gym's city_lat/city_lng. Nearest first, because a beginner course two cities away is noise. Unit-tested (Praha user: Praha 2km -> Plzeň 85 -> Brno 185 -> unknown last; 100km filter keeps near + unknown). (3) Course cards mirror the profile Courses section (emoji, weekly pattern via cohortOccurrences, km badge, deposit, from-date); tap -> openCohortSignup with src=mtl_deck, so the roster's attribution split (added in SCC) separates deck-sourced signups from Meta and the alert channel. (4) EVENTS THEMSELVES now carry distance: every event gets _distKm from city_lat/city_lng (both already in the schema), the existing card distTxt lights up (ev._dist wired), and the Max-distance setting now filters events too. Event PRIMARY sort stays by date on purpose - a fight night worth travelling for should not be buried the way a local-only beginner course should; distance is shown + filterable, not the sort key, for events. Courses ARE distance-sorted because locality is the whole point there. No DB change (events.city_lat/lng and gym_cohorts.schedule already exist). Deploy: index.html (SCL). Builds on SCK. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -6865,6 +6865,21 @@ async function renderEventsAsync(box){
     const today=new Date(); today.setHours(0,0,0,0);
     const { data:evs } = await supaClient.from('events').select('*').eq('status','approved').gte('starts_at', today.toISOString()).order('starts_at',{ascending:true}).limit(100);
     window._evList = evs||[];
+    // Courses shown in the same discovery surface (chip 'Kurzy'). Open + not-yet-started only, so a
+    // person can actually still enrol. Coords come from the host gym; distance decides the order,
+    // because a beginner course two cities away is noise (unlike a fight night you'd travel for).
+    try{
+      const _tdISO=new Date().toISOString().slice(0,10);
+      const { data:_chs } = await supaClient.from('gym_cohorts').select('id,gym_id,name,discipline,start_date,end_date,months,capacity,status,description,schedule,schedule_note,currency,deposit_amount,price_regular,price_student,price_tiers').eq('status','open').limit(80);
+      let _chList=(_chs||[]).filter(c=>c && (!c.start_date || c.start_date>=_tdISO));
+      if(_chList.length){
+        const _cgids=[...new Set(_chList.map(c=>c.gym_id).filter(Boolean))];
+        const _cg={};
+        try{ const { data:_gr }=await supaClient.from('gyms').select('id,name,city,city_lat,city_lng').in('id',_cgids); (_gr||[]).forEach(g=>{ _cg[g.id]=g; }); }catch(e){}
+        _chList.forEach(c=>{ const g=_cg[c.gym_id]||{}; c._gymName=g.name||null; c._city=g.city||null; c._lat=(g.city_lat!=null?+g.city_lat:null); c._lng=(g.city_lng!=null?+g.city_lng:null); });
+        window._cohDeckList=_chList;
+      } else { window._cohDeckList=[]; }
+    }catch(e){ window._cohDeckList=[]; }
     try{ var _gids=[...new Set((window._evList||[]).map(e=>e.gym_id).filter(Boolean))]; var _uids=[...new Set((window._evList||[]).map(e=>e.created_by).filter(Boolean))]; var _gm={}, _um={}; if(_gids.length){ var _gr=await supaClient.from('gyms').select('id,name').in('id',_gids); (_gr&&_gr.data||[]).forEach(g=>_gm[g.id]=g.name); } if(_uids.length){ var _ur=await supaClient.from('profiles').select('id,name').in('id',_uids); (_ur&&_ur.data||[]).forEach(u=>_um[u.id]=u.name); } window._evList.forEach(e=>{ e._gymName=_gm[e.gym_id]||null; e._creatorName=_um[e.created_by]||null; }); }catch(e){}
     const fd = _deckDisc||'all';
     if(window._evList.length){
@@ -6874,10 +6889,17 @@ async function renderEventsAsync(box){
       html += `<div style="margin-bottom:10px;"><div class="pill" id="evSportBtn" style="cursor:pointer;font-weight:700;display:inline-block;">${_spLbl} · ${_evchg} ▾</div></div>`;
       const ft = window._evFilterType||'all';
       const _tch=[{v:'all',lbl:(LANG==='en'?'All':'Vše'),emoji:''}].concat(EVENT_TYPES.map(tt=>({v:tt.v,lbl:(LANG==='en'?tt.en:tt.cs),emoji:tt.emoji})));
-      html += `<div style="display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;margin-bottom:10px;">`+_tch.map(c=>{ const on=(ft===c.v); return `<div class="evTypeChip pill${on?' active':''}" data-v="${c.v}">${c.emoji?c.emoji+' ':''}${c.lbl}</div>`; }).join('')+`</div>`;
-      const _sq=((typeof searchQuery!=='undefined'?searchQuery:'')||'').toLowerCase(); const list=window._evList.filter(ev=>{ if(fd!=='all'){ let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){} if(!ds.includes(fd)) return false; } else { let _eds=[]; try{ _eds=JSON.parse(ev.disciplines||'[]'); }catch(e){} const _epc=prefCategory(); if(_eds.length && !_eds.some(d=>discCat(d)===_epc)) return false; } if(ft!=='all' && ev.type!==ft) return false; if(_sq){ const hay=((ev.title||'')+' '+(ev.venue||'')+' '+(ev.city||'')+' '+(ev.country||'')).toLowerCase(); if(!hay.includes(_sq)) return false; } return true; });
+      const _nCoh=(window._cohDeckList||[]).length;
+      let _chipHtml=_tch.map(c=>{ const on=(ft===c.v && ft!=='courses'); return `<div class="evTypeChip pill${on?' active':''}" data-v="${c.v}">${c.emoji?c.emoji+' ':''}${c.lbl}</div>`; }).join('');
+      if(_nCoh) _chipHtml+=`<div class="evTypeChip pill${ft==='courses'?' active':''}" data-v="courses">\ud83e\udd4b ${LANG==='en'?'Courses':'Kurzy'} <span style="opacity:.6;font-weight:600;">${_nCoh}</span></div>`;
+      html += `<div style="display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;margin-bottom:10px;">`+_chipHtml+`</div>`;
+      const _sq=((typeof searchQuery!=='undefined'?searchQuery:'')||'').toLowerCase(); window._evList.forEach(ev=>{ ev._distKm=(userLoc && ev.city_lat!=null && ev.city_lng!=null)?haversine(userLoc.lat,userLoc.lng,+ev.city_lat,+ev.city_lng):null; ev._dist=ev._distKm; }); const list=window._evList.filter(ev=>{ if(fd!=='all'){ let ds=[]; try{ ds=JSON.parse(ev.disciplines||'[]'); }catch(e){} if(!ds.includes(fd)) return false; } else { let _eds=[]; try{ _eds=JSON.parse(ev.disciplines||'[]'); }catch(e){} const _epc=prefCategory(); if(_eds.length && !_eds.some(d=>discCat(d)===_epc)) return false; } if(ft!=='all' && ev.type!==ft) return false; if(maxDistKm!=null && userLoc && ev._distKm!=null && ev._distKm>maxDistKm) return false; if(_sq){ const hay=((ev.title||'')+' '+(ev.venue||'')+' '+(ev.city||'')+' '+(ev.country||'')).toLowerCase(); if(!hay.includes(_sq)) return false; } return true; });
       window._evFiltered = list; if(window._evIdx==null) window._evIdx=0;
-      html += list.length ? `<div id="evDeck" style="position:relative;flex:1;min-height:280px;margin-top:0;"></div>` : `<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;">${LANG==='en'?'No events in this discipline.':'Žádné události v této disciplíně.'}</p>`;
+      if(ft==='courses'){
+        html += `<div id="cohDeckList"></div>`;
+      } else {
+        html += list.length ? `<div id="evDeck" style="position:relative;flex:1;min-height:280px;margin-top:0;"></div>` : `<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;">${LANG==='en'?'No events in this discipline.':'Žádné události v této disciplíně.'}</p>`;
+      }
     } else {
       html += `<div style="text-align:center;padding:40px 16px;color:var(--light);"><div style="font-size:40px;margin-bottom:10px;">🥊</div><div style="font-weight:700;color:var(--dark);margin-bottom:6px;">${LANG==='en'?'No events near you yet':'Zatím tu nejsou žádné události'}</div><div style="font-size:13px;line-height:1.5;">${LANG==='en'?'Fight nights, seminars and camps will show up here.':'Fight nights, semináře a kempy se objeví tady.'}</div></div>`;
     }
@@ -6885,7 +6907,40 @@ async function renderEventsAsync(box){
   box.innerHTML=html;
   const _esb=$('evSportBtn'); if(_esb) _esb.onclick=openDiscPicker;
   box.querySelectorAll('.evTypeChip').forEach(c=>c.onclick=()=>{ window._evFilterType=c.dataset.v; window._evIdx=0; renderEventsAsync(box); });
-  if($('evDeck')) evRenderSwipe();
+  if((window._evFilterType||'all')==='courses'){ try{ _renderCohDeck($('cohDeckList')); }catch(e){} }
+  else if($('evDeck')) evRenderSwipe();
+}
+// Distance-sorted course list for the Events 'Kurzy' chip. Same geo engine as the gym deck
+// (haversine + userLoc, unknown distance sinks to the bottom), same tap target as the profile
+// course cards (openCohortSignup with src=mtl_deck so the roster can separate deck-sourced signups).
+function _renderCohDeck(box){
+  if(!box) return; const EN=LANG==='en';
+  let list=(window._cohDeckList||[]).slice();
+  // discipline filter mirrors the events one
+  const fd=(typeof _deckDisc!=='undefined'&&_deckDisc)?_deckDisc:null;
+  if(fd){ list=list.filter(c=>c.discipline===fd); }
+  else { try{ const _pc=prefCategory(); list=list.filter(c=>!c.discipline || discCat(c.discipline)===_pc); }catch(e){} }
+  const _sq=((typeof searchQuery!=='undefined'?searchQuery:'')||'').toLowerCase();
+  if(_sq) list=list.filter(c=>(((c.name||'')+' '+(c._gymName||'')+' '+(c._city||'')).toLowerCase()).includes(_sq));
+  list.forEach(c=>{ c._distKm=(userLoc && c._lat!=null && c._lng!=null)?haversine(userLoc.lat,userLoc.lng,c._lat,c._lng):null; });
+  if(userLoc) list.sort((a,b)=>((a._distKm==null?9e9:a._distKm)-(b._distKm==null?9e9:b._distKm)));
+  if(maxDistKm!=null && userLoc) list=list.filter(c=>c._distKm==null || c._distKm<=maxDistKm);
+  if(!list.length){ box.innerHTML='<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;line-height:1.5;">'+(EN?'No open courses near you right now.':'Zatím tu nejsou otevřené kurzy poblíž.')+'</p>'; return; }
+  const dn=dowShort();
+  box.innerHTML=list.map(function(c){
+    const em=(typeof disciplineEmoji==='function'?disciplineEmoji(c.discipline||''):'')||'\ud83e\udd4b';
+    let _pat=''; try{ const _occ=cohortOccurrences(c,{horizonDays:90}); const _seen={},_p=[]; _occ.forEach(function(o){ const d=new Date(o.date+'T00:00:00').getDay(); const k=d+'|'+(o.time||''); if(_seen[k])return; _seen[k]=1; _p.push({d:d,t:o.time}); }); _p.sort((a,b)=>a.d-b.d); _pat=_p.map(x=>dn[x.d]+' '+(x.t||'')).join(' \u00b7 '); }catch(e){}
+    const dist=(c._distKm!=null)?('<span style="font-size:11px;font-weight:700;color:var(--red);">'+Math.round(c._distKm)+' km</span>'):'';
+    const dep=(c.deposit_amount?((EN?'deposit ':'záloha ')+Math.round(c.deposit_amount)+' '+(_curSym?_curSym(c.currency):'')):'');
+    return '<div class="cohDeckCard" data-id="'+c.id+'" style="border:1px solid var(--border);border-radius:14px;padding:13px;margin-bottom:10px;cursor:pointer;background:var(--surf);">'
+      +'<div style="display:flex;gap:11px;align-items:center;"><div style="font-size:24px;">'+em+'</div>'
+      +'<div style="flex:1;min-width:0;"><div style="font-weight:800;font-size:14px;color:var(--dark);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escapeHtml(c.name||'')+'</div>'
+      +'<div style="font-size:12px;color:var(--mid);margin-top:1px;">'+escapeHtml(c._gymName||'')+(c._city?(' \u00b7 '+escapeHtml(c._city)):'')+'</div></div>'+dist+'</div>'
+      +(_pat?('<div style="font-size:12px;color:var(--dark);margin-top:8px;">\u23f0 '+escapeHtml(_pat)+'</div>'):'')
+      +'<div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;"><div style="font-size:11.5px;color:var(--light);">'+(c.start_date?((EN?'from ':'od ')+c.start_date):'')+(c.months?(' \u00b7 '+c.months+' '+(EN?'mo':'měs')):'')+'</div><div style="font-size:12.5px;font-weight:800;color:var(--blue);">'+(EN?'sign up \u203a':'přihlásit \u203a')+'</div></div>'
+      +(dep?('<div style="font-size:10.5px;color:var(--light);margin-top:3px;">'+dep+'</div>'):'')+'</div>';
+  }).join('');
+  box.querySelectorAll('.cohDeckCard').forEach(function(cd){ cd.onclick=function(){ try{ localStorage.setItem('mtl_coh_src','mtl_deck'); }catch(e){} if(typeof openCohortSignup==='function') openCohortSignup(cd.dataset.id); }; });
 }
 async function eventEligibleGyms(){
   if(!currentUser) return [];
