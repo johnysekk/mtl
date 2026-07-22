@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SDX cohort dupe-signup guard + funnel labels + detailed revenue w/ Stripe fee. (1) DUPLICATE SIGNUP GUARD (api/cohort-pay.js): the same person could sign up + pay for the same cohort again from the same profile. Added a server check before creating the member (covers both Stripe and QR paths): if a cohort_members row already exists for this cohort_id + e-mail with status in (deposit_claimed,deposit_paid,enrolled,completed,converted), return 409 'Na tento kurz uz jsi prihlaseny/a.'. A bare 'lead' (abandoned checkout) or 'cancelled' does NOT block a retry. Client already toasts the error. (2) FUNNEL LABELS (both the per-cohort funnel and the retention-across-cohorts summary): header 'Tento kurz — funnel' -> 'Tento kurz — trychtyr'; stage labels signupy->Prihlaseno, zaplac.->Uhrazeno, zapsani->Doplaceno, clenstvi->Konvertovano (CS only; EN kept). (3) DETAILED REVENUE (cohort dashboard, #cdBody): replaced the single 'Cisteho = hrube - provize MTL' note with a full breakdown panel: Hrube / - Provize MTL (with %) / - Poplatky Stripe (odhad, jen karta) / = Klub cisteho. Stripe fee is ESTIMATED (cohort_payments has no stripe_fee column) as a range: sum*1.4% .. sum*2.9% + fixed (6 CZK / 0.3 other) x count, applied only to card (Stripe) payments. The 'Klub cisteho' hero card now shows the net range (~lo-hi) when Stripe payments exist, else the definite gross-MTL. A note explains the estimate + that QR/cash/bank carry no Stripe fee (confirm with accountant). Deploy: index.html + api/cohort-pay.js. -->
+<!-- MTL build: SDY REAL Stripe fee from transactions (NO estimates, ever). Petr was right: the exact fee is on the connected account's balance_transaction. SERVER (stripe-webhook.js): new cohortStripeFee(pi, acct) retrieves the charge with balance_transaction expanded on the connected account, reads bt.fee_details type 'stripe_fee' (splits off application_fee for direct charges), returns major units. Written as stripe_fee on all 3 cohort_payments inserts (deposit, first_month, month); QR/cash/bank stay 0. SQL: cohort-stripe-fee.sql adds cohort_payments.stripe_fee numeric default 0. CLIENT (cohort dashboard): query now pulls stripe_fee; removed the entire 1.4-2.9%% estimate + range + 'odhad' wording. stripeFee = sum(stripe_fee); net = gross - MTL - stripeFee (exact). Breakdown: Hrube / - Provize MTL (%) / - Poplatky Stripe (karta) [exact, only if >0] / = Klub cisteho (single exact number, no range). NOTE: cohort_payments rows written BEFORE this deploy have stripe_fee=0 (no retroactive fetch), so their net shows gross-MTL until new payments land; new Stripe payments carry the exact fee. Deploy: index.html + api/stripe-webhook.js + run cohort-stripe-fee.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -11253,21 +11253,16 @@ async function openCohortDash(cohortId, cohortName){
 
   let coh=null, pays=[], members=[];
   try{ const { data }=await supaClient.from('gym_cohorts').select('id,name,currency,ad_spend,months').eq('id',cohortId).single(); coh=data; }catch(e){}
-  try{ const { data }=await supaClient.from('cohort_payments').select('amount,mtl_fee,currency,payment_method,kind,status').eq('cohort_id',cohortId); pays=(data||[]).filter(function(p){ return p.status!=='refunded'; }); }catch(e){}
+  try{ const { data }=await supaClient.from('cohort_payments').select('amount,mtl_fee,stripe_fee,currency,payment_method,kind,status').eq('cohort_id',cohortId); pays=(data||[]).filter(function(p){ return p.status!=='refunded'; }); }catch(e){}
   try{ const { data }=await supaClient.from('cohort_members').select('status,attribution').eq('cohort_id',cohortId); members=data||[]; }catch(e){}
   const cur=(coh&&coh.currency)||'CZK';
   const box=document.getElementById('cdBody'); if(!box) return;
 
   const gross=pays.reduce(function(a,p){ return a+Number(p.amount||0); },0);
   const mtl=pays.reduce(function(a,p){ return a+Number(p.mtl_fee||0); },0);
-  const net=gross-mtl;
-  const _sFix=(cur==='CZK'?6:0.3);
-  const _byMs=(function(){ var st={n:0,sum:0}; pays.forEach(function(p){ if(!(p.payment_method==='qr'||p.payment_method==='pis')){ st.n++; st.sum+=Number(p.amount||0); } }); return st; })();
-  const _stripeLo=_byMs.n?(_byMs.sum*0.014+_sFix*_byMs.n):0;
-  const _stripeHi=_byMs.n?(_byMs.sum*0.029+_sFix*_byMs.n):0;
-  const _hasStripe=_byMs.n>0;
-  const _netHi=gross-mtl-_stripeLo;
-  const _netLo=gross-mtl-_stripeHi;
+  const stripeFee=pays.reduce(function(a,p){ return a+Number(p.stripe_fee||0); },0);
+  const net=gross-mtl-stripeFee;
+  const _hasStripe=stripeFee>0;
   const _mtlPct=(gross>0)?(Math.round(mtl/gross*1000)/10):0;
   const byM={ stripe:{n:0,sum:0}, qr:{n:0,sum:0}, pis:{n:0,sum:0} };
   pays.forEach(function(p){ const m=(p.payment_method==='qr'||p.payment_method==='pis')?p.payment_method:'stripe'; byM[m].n++; byM[m].sum+=Number(p.amount||0); });
@@ -11285,18 +11280,17 @@ async function openCohortDash(cohortId, cohortName){
   let h='';
   h+='<div style="display:flex;gap:8px;margin-bottom:16px;">';
   h+='<div style="flex:1;background:var(--surf);border-radius:12px;padding:12px;text-align:center;"><div style="font-size:10px;color:var(--mid);text-transform:uppercase;font-weight:700;">'+(EN?'Gross':'Hrubé')+'</div><div style="font-size:19px;font-weight:800;color:var(--dark);">'+fmtPrice(gross,cur)+' '+_curSym(cur)+'</div></div>';
-  h+='<div style="flex:1;background:#F0FBF0;border-radius:12px;padding:12px;text-align:center;"><div style="font-size:10px;color:#006040;text-transform:uppercase;font-weight:700;">'+(EN?'Club net':'Klub čistého')+(_hasStripe?(EN?' (est.)':' (odhad)'):'')+'</div><div style="font-size:'+(_hasStripe?'15':'19')+'px;font-weight:800;color:#006040;">'+(_hasStripe?('~'+fmtPrice(_netLo,cur)+'\u2013'+fmtPrice(_netHi,cur)+' '+_curSym(cur)):(fmtPrice(net,cur)+' '+_curSym(cur)))+'</div></div>';
+  h+='<div style="flex:1;background:#F0FBF0;border-radius:12px;padding:12px;text-align:center;"><div style="font-size:10px;color:#006040;text-transform:uppercase;font-weight:700;">'+(EN?'Club net':'Klub čistého')+'</div><div style="font-size:19px;font-weight:800;color:#006040;">'+fmtPrice(net,cur)+' '+_curSym(cur)+'</div></div>';
   h+='</div>';
   { var _sym=_curSym(cur);
     var _brk=function(l,v,strong){ return '<div style="display:flex;justify-content:space-between;padding:4px 0;"><span style="color:'+(strong?'var(--dark)':'var(--mid)')+';font-weight:'+(strong?'800':'500')+';">'+l+'</span><span style="color:'+(strong?'#006040':'var(--dark)')+';font-weight:'+(strong?'800':'600')+';">'+v+'</span></div>'; };
-    h+='<div style="background:var(--surf);border-radius:12px;padding:10px 13px;margin:-6px 0 '+(_hasStripe?'6px':'16px')+';font-size:12.5px;">';
+    h+='<div style="background:var(--surf);border-radius:12px;padding:10px 13px;margin:-6px 0 16px;font-size:12.5px;">';
     h+=_brk((EN?'Gross':'Hrubé'), fmtPrice(gross,cur)+' '+_sym, false);
     h+=_brk((EN?'− MTL commission':'− Provize MTL')+(_mtlPct?(' ('+String(_mtlPct).replace('.',',')+' %)'):''), '−'+fmtPrice(mtl,cur)+' '+_sym, false);
-    if(_hasStripe) h+=_brk((EN?'− Stripe fees (est., card only)':'− Poplatky Stripe (odhad, jen karta)'), '−'+fmtPrice(_stripeLo,cur)+'\u2013'+fmtPrice(_stripeHi,cur)+' '+_sym, false);
+    if(_hasStripe) h+=_brk((EN?'− Stripe fees (card)':'− Poplatky Stripe (karta)'), '−'+fmtPrice(stripeFee,cur)+' '+_sym, false);
     h+='<div style="border-top:1px solid var(--border);margin:4px 0 2px;"></div>';
-    h+=_brk((EN?'= Club net':'= Klub čistého')+(_hasStripe?(EN?' (est.)':' (odhad)'):''), (_hasStripe?('~'+fmtPrice(_netLo,cur)+'\u2013'+fmtPrice(_netHi,cur)):fmtPrice(net,cur))+' '+_sym, true);
+    h+=_brk((EN?'= Club net':'= Klub čistého'), fmtPrice(net,cur)+' '+_sym, true);
     h+='</div>';
-    if(_hasStripe) h+='<div style="font-size:10.5px;color:var(--light);line-height:1.45;margin:0 0 16px;">'+(EN?'Stripe fees are an estimate (~1.4% European / ~2.9% international cards + a fixed part). The club bears them; QR/cash/bank have none. Confirm with your accountant.':'Poplatky Stripe jsou odhad (~1,4 % evropské / ~2,9 % zahraniční karty + fixní část). Nese je klub; QR/hotovost/převod žádné nemají. Ověř s účetní.')+'</div>';
   }
 
   h+='<div style="font-size:11px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;">'+(EN?'Deposits & monthly':'Z\u00e1lohy a m\u011bs\u00ed\u010dn\u00ed platby')+'</div>';
