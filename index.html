@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SDU cohort Stripe checkout parity + Kurzy chip in Muj trenink. (1) Stripe checkout for cohort payments was missing fields other payments have. Read api/pay.js: memberships/drop-ins use payment_method_types:['card'], billing_address_collection:'required', tax_id_collection:{enabled:true} (the last is the 'buying as a business' toggle). cohort-pay.js had none of these on its 3 checkout sessions (deposit, first_month, month) -> added all three fields to all three, so course payments now collect address + billing + business tax ID exactly like the rest. (2) 'Muj trenink' upcoming now has a third chip 'Kurzy' in the MIDDLE (between Skupinovky and Soukromky). New #kurzyList container + a 'kurzy' branch in _upTab (rewritten for 3 tabs) + _loadCohortTrainings(): finds the student's cohorts (cohort_members by student_id OR email, status deposit_paid/enrolled/completed/converted), materialises each cohort's schedule via cohortOccurrences(horizonDays:60), lists upcoming sessions (course name, gym, day + D.M.YYYY + time, discipline tag, 'Kurz' badge). Read-only (fixed schedule, no reschedule). Empty state when none. PDF doklad: NOT built this turn -- no package.json locally and api/ imports only stripe/crypto/@supabase; a Czech PDF needs a PDF lib (pdfkit) + an embedded diacritics-capable font (Helvetica's WinAnsi can't render c/r/z/e-hacek), which is the real cost. Flagged to Petr to greenlight the dep+font; HTML attachment stays meanwhile. Deploy: index.html + api/cohort-pay.js. -->
+<!-- MTL build: SDV cohort Stripe collection shows a QR to the MEMBER (not owner redirect) + course History. BUG FIX: when an owner/coach collected a Stripe cohort payment (deposit remainder or a further month), the app did window.location.href=checkoutUrl -> it redirected the OWNER's own device to Stripe. Wrong: the member must scan a QR and pay on THEIR phone. New _cohStripeQr(memberId,memberName,kind) fetches the checkout URL from /api/cohort-pay and renders it as a QR in a modal (member scans & pays; Stripe confirms via webhook, roster updates automatically -- no manual confirm). _cohRemainderStripe now delegates to _cohStripeQr(...,'first_month'); _cohCollectMonth's Stripe branch delegates to _cohStripeQr(...,'month'). qr_bank branch (bank QR) unchanged. Owner device is never redirected. HISTORY: refactored _loadCohortTrainings into shared _cohMySessions(mode 'upcoming'|'past') + _cohSessionCard + _cohPastOcc (past materialiser: cohortOccurrences only goes forward, so past uses upcomingClasses with a back-window). The Kurzy chip uses upcoming; loadBookings('past') now appends the student's past course sessions under a 'Kurzove treninky' subheader (handles both the empty-lessons case and the after-lessons case), capped at the 40 most recent. Deploy: index.html only. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -11367,17 +11367,40 @@ async function _cohAddWalkIn(){
     _cohRosterRender();
   }catch(e){ toast('⚠️ '+e.message); }
 }
-async function _cohRemainderStripe(memberId, memberName){
+// Owner/coach collects a Stripe cohort payment by showing the MEMBER a QR of the Stripe checkout
+// URL — the member scans & pays on THEIR phone. We must NOT redirect the owner's device. Stripe
+// confirms via webhook, so no manual "confirm" step (unlike the bank-QR flow). kind: first_month|month.
+async function _cohStripeQr(memberId, memberName, kind){
   const EN=LANG==='en';
-  if(!confirm(EN?('Collect the first-month remainder from '+(memberName||'this member')+' via Stripe? A Stripe checkout opens for them to pay.'):('Vybrat doplatek 1. m\u011bs\u00edce od '+(memberName||'tohoto \u010dlena')+' p\u0159es Stripe? Otev\u0159e se Stripe checkout k zaplacen\u00ed.'))) return;
+  toast(EN?'Preparing QR…':'Připravuji QR…');
+  let url=null, err=null, doneAlready=false;
   try{
-    const r=await fetch('/api/cohort-pay',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ kind:'first_month', cohort_member_id:memberId }) });
+    const r=await fetch('/api/cohort-pay',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ kind:kind, cohort_member_id:memberId }) });
     const j=await r.json();
-    if(j&&j.ok&&j.url){ window.location.href=j.url; }
-    else if(j&&j.ok&&j.enrolled){ toast(EN?'Already fully paid \u2014 enrolled':'Ji\u017e pln\u011b zaplaceno \u2014 zaps\u00e1n',1); _cohRosterRender(); }
-    else { toast('\u26a0\ufe0f '+((j&&j.error)||'error')); }
-  }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
+    if(j&&j.ok&&j.url){ url=j.url; }
+    else if(j&&j.ok&&(j.enrolled||j.done)){ doneAlready=true; }
+    else { err=(j&&j.error)||'error'; }
+  }catch(e){ err=(e&&e.message)||'error'; }
+  if(doneAlready){ toast(EN?'Already fully paid':'Již plně zaplaceno',1); _cohRosterRender(); return; }
+  if(!url){ toast('⚠️ '+(err||'error')); return; }
+  const title=(kind==='first_month')?(EN?'First-month remainder':'Doplatek 1. měsíce'):(EN?'Monthly payment':'Měsíční platba');
+  let ov=document.getElementById('crQrOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='crQrOv'; ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100002;display:flex;align-items:center;justify-content:center;padding:20px;';
+  ov.innerHTML='<div style="background:#fff;border-radius:16px;padding:22px;max-width:340px;width:100%;text-align:center;font-family:\'DM Sans\';">'
+    +'<div style="font-size:16px;font-weight:800;margin-bottom:2px;">💳 '+(memberName?escapeHtml(memberName)+' · ':'')+title+'</div>'
+    +'<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:12px;">'+(EN?'Show this to the member — they scan & pay on their own phone.':'Ukaž to členovi — naskenuje a zaplatí na svém telefonu.')+'</div>'
+    +'<div id="csqBox" style="display:flex;justify-content:center;align-items:center;margin-bottom:12px;min-height:220px;"></div>'
+    +'<p style="font-size:11.5px;color:var(--light);line-height:1.5;margin-bottom:12px;">'+(EN?'Paid via Stripe — the roster updates automatically once it goes through.':'Platí přes Stripe — po zaplacení se roster aktualizuje automaticky.')+'</p>'
+    +'<button id="csqClose" style="width:100%;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Done':'Hotovo')+'</button>'
+    +'</div>';
+  document.body.appendChild(ov);
+  ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
+  ov.querySelector('#csqClose').onclick=function(){ ov.remove(); _cohRosterRender(); };
+  const box=ov.querySelector('#csqBox');
+  try{ if(window.QRCode){ new QRCode(box,{text:url,width:220,height:220,correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined)}); } else { box.innerHTML='<p style="font-size:10px;word-break:break-all;max-width:240px;">'+url+'</p>'; } }catch(e){ box.innerHTML='<p style="font-size:10px;word-break:break-all;max-width:240px;">'+url+'</p>'; }
 }
+// Deposit remainder (enrol the member): show the member a Stripe QR, don't redirect the owner.
+async function _cohRemainderStripe(memberId, memberName){ return _cohStripeQr(memberId, memberName, 'first_month'); }
 // Read-only per-member payment breakdown: exactly what this member paid and how much,
 // labelled Zaloha / 1. mesic / Mesic N, from cohort_payments (deposit|first_month|month).
 async function _cohMemberPayments(memberId, wrap){
@@ -11457,18 +11480,11 @@ async function _cohRosterRender(){
 // same server path as the on-site remainder but kind:'month'. The webhook bumps months_paid on
 // confirmation. For QR/bank cohorts the owner uses the existing QR remainder flow instead.
 async function _cohCollectMonth(memberId, memberName){
-  const EN=LANG==='en';
-  // QR/bank clubs collect month N as a bank QR the member pays, confirmed by the club (like the
-  // deposit); Stripe clubs get a one-off Stripe checkout. Same server month index either way.
+  // QR/bank clubs show a bank QR the member pays (owner confirms receipt). Stripe clubs show the
+  // member a Stripe-checkout QR to scan & pay on their phone — the webhook bumps months_paid. Either
+  // way the OWNER's device is never redirected.
   if(window._crPayMode==='qr_bank'){ return _cohMonthQr(memberId, memberName); }
-  if(!confirm(EN?('Collect the next month from '+(memberName||'this member')+'?'):('Vybrat dal\u0161\u00ed m\u011bs\u00edc od '+(memberName||'tohoto \u010dlena')+'?'))) return;
-  try{
-    const r=await fetch('/api/cohort-pay',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ kind:'month', cohort_member_id:memberId }) });
-    const j=await r.json();
-    if(j&&j.ok&&j.url){ window.location.href=j.url; }
-    else if(j&&j.ok&&j.done){ toast(EN?'All months already paid':'V\u0161echny m\u011bs\u00edce ji\u017e zaplaceny'); }
-    else { toast('\u26a0\ufe0f '+((j&&j.error)||'error')); }
-  }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
+  return _cohStripeQr(memberId, memberName, 'month');
 }
 // QR/PIS month collection: show a bank QR (+ PIS button) for the full monthly (tier) price, then the
 // club confirms receipt, which records the cash/PIS transaction and bumps months_paid. Mirrors the
@@ -23013,36 +23029,67 @@ function subscribeRealtime(){
   // Finds the cohorts the student is in (by student_id or e-mail), materialises their schedule
   // via cohortOccurrences, and lists upcoming sessions. cohorts are a fixed schedule, so this is
   // read-only (no reschedule) unlike group/private bookings.
-  async function _loadCohortTrainings(){
-    const box=$('kurzyList'); if(!box||!currentUser) return; const EN=LANG==='en';
-    box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${L('Načítám...')}</p>`;
+  // Past occurrences of a cohort's schedule (start_date .. today), for the History view.
+  // cohortOccurrences only materialises forward from today, so past needs its own back-window pass.
+  function _cohPastOcc(c){
+    let sch=[]; try{ sch=c&&c.schedule?(typeof c.schedule==='string'?JSON.parse(c.schedule||'[]'):(c.schedule||[])):[]; }catch(e){ sch=[]; }
+    if(!sch.length) return [];
+    const start=c.start_date?new Date(c.start_date+'T00:00:00'):null; if(!start) return [];
+    const today=new Date(); today.setHours(0,0,0,0);
+    const backDays=Math.ceil((today-start)/86400000)+1; if(backDays<=0) return [];
+    let raw=[]; try{ raw=upcomingClasses(sch, 1, backDays)||[]; }catch(e){ raw=[]; }
+    const now=new Date();
+    return raw.filter(function(o){ if(c.start_date && o.date<c.start_date) return false; if(c.end_date && o.date>c.end_date) return false; const dt=new Date(`${o.date}T${(o.time||'00:00')}:00`); return dt<now; });
+  }
+  // Student's COURSE (cohort) training sessions, mode 'upcoming' | 'past'. Shared by the Kurzy chip
+  // (upcoming) and the History view (past). Matches the student by student_id OR e-mail.
+  async function _cohMySessions(mode){
+    if(!currentUser) return [];
     let mems=[];
     try{
       const _or=[]; if(currentUser.id)_or.push('student_id.eq.'+currentUser.id); if(currentUser.email)_or.push('email.eq.'+currentUser.email);
       if(_or.length){ const { data }=await supaClient.from('cohort_members').select('cohort_id,status').in('status',['deposit_paid','enrolled','completed','converted']).or(_or.join(',')); mems=data||[]; }
     }catch(e){}
     const cohIds=[...new Set((mems||[]).map(m=>m.cohort_id).filter(Boolean))];
-    const _empty=`<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">${EN?'No upcoming course sessions.':'Žádné nadcházející tréninky v kurzu.'}</p>`;
-    if(!cohIds.length){ box.innerHTML=_empty; return; }
+    if(!cohIds.length) return [];
     let cohs=[];
     try{ const { data }=await supaClient.from('gym_cohorts').select('id,name,gym_id,discipline,schedule,start_date,end_date').in('id',cohIds); cohs=data||[]; }catch(e){}
     const gymIds=[...new Set(cohs.map(c=>c.gym_id).filter(Boolean))]; let gymMap={};
     try{ if(gymIds.length){ const { data }=await supaClient.from('gyms').select('id,name').in('id',gymIds); (data||[]).forEach(g=>{ gymMap[g.id]=g.name; }); } }catch(e){}
     const sessions=[];
-    cohs.forEach(function(c){ let occ=[]; try{ occ=cohortOccurrences(c,{horizonDays:60})||[]; }catch(e){} occ.forEach(function(o){ sessions.push({ date:o.date, time:o.time||'', name:c.name||'Kurz', gym:gymMap[c.gym_id]||'', disc:c.discipline||'' }); }); });
-    const now=new Date();
-    const up=sessions.filter(function(s){ const dt=new Date(`${s.date}T${(s.time||'00:00')}:00`); return dt>=now; }).sort(function(a,b){ return (a.date+(a.time||'')).localeCompare(b.date+(b.time||'')); });
-    if(!up.length){ box.innerHTML=_empty; return; }
+    cohs.forEach(function(c){
+      let occ=[]; try{ occ=(mode==='past')?_cohPastOcc(c):(cohortOccurrences(c,{horizonDays:60})||[]); }catch(e){}
+      occ.forEach(function(o){ sessions.push({ date:o.date, time:o.time||'', name:c.name||'Kurz', gym:gymMap[c.gym_id]||'', disc:c.discipline||'' }); });
+    });
+    sessions.sort(function(a,b){ return (a.date+(a.time||'')).localeCompare(b.date+(b.time||'')); });
+    if(mode==='past'){ sessions.reverse(); return sessions.slice(0,40); }
+    return sessions;
+  }
+  function _cohSessionCard(s){
+    const EN=LANG==='en';
     const dn=(typeof dowShort==='function')?dowShort():['Ne','Po','Út','St','Čt','Pá','So'];
-    box.innerHTML=up.map(function(s){
-      const discTag=(s.disc && typeof isMultiDiscipline==='function' && isMultiDiscipline())?` · ${disciplineEmoji(s.disc)} ${disciplineLabel(s.disc)}`:'';
-      const _dow=dn[new Date(`${s.date}T00:00:00`).getDay()]||'';
-      return `<div style="background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px;">
-        <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.03em;color:var(--dark);">${escapeHtml(s.name)}</div>
-        <div style="font-size:14px;color:var(--mid);margin:3px 0 0;">🥋 ${s.gym?escapeHtml(s.gym)+' · ':''}${_dow} ${_cohD(s.date)}${s.time?(' · '+s.time):''}${discTag}</div>
-        <div style="display:inline-block;font-size:11px;font-weight:800;color:#5B3FB0;background:#EDE7FF;border-radius:8px;padding:2px 9px;margin-top:8px;">${EN?'Course':'Kurz'}</div>
-      </div>`;
-    }).join('');
+    const discTag=(s.disc && typeof isMultiDiscipline==='function' && isMultiDiscipline())?` · ${disciplineEmoji(s.disc)} ${disciplineLabel(s.disc)}`:'';
+    const _dow=dn[new Date(`${s.date}T00:00:00`).getDay()]||'';
+    return `<div style="background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px;">
+      <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.03em;color:var(--dark);">${escapeHtml(s.name)}</div>
+      <div style="font-size:14px;color:var(--mid);margin:3px 0 0;">🥋 ${s.gym?escapeHtml(s.gym)+' · ':''}${_dow} ${_cohD(s.date)}${s.time?(' · '+s.time):''}${discTag}</div>
+      <div style="display:inline-block;font-size:11px;font-weight:800;color:#5B3FB0;background:#EDE7FF;border-radius:8px;padding:2px 9px;margin-top:8px;">${EN?'Course':'Kurz'}</div>
+    </div>`;
+  }
+  async function _loadCohortTrainings(){
+    const box=$('kurzyList'); if(!box||!currentUser) return; const EN=LANG==='en';
+    box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${L('Načítám...')}</p>`;
+    const up=await _cohMySessions('upcoming');
+    if(!up.length){ box.innerHTML=`<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">${EN?'No upcoming course sessions.':'Žádné nadcházející tréninky v kurzu.'}</p>`; return; }
+    box.innerHTML=up.map(_cohSessionCard).join('');
+  }
+  // Append the student's past COURSE sessions to a History list (below the private-lesson history).
+  async function _appendCohortHistory(listEl){
+    if(!listEl) return 0; var EN=LANG==='en'; var past=[];
+    try{ past=await _cohMySessions('past'); }catch(e){}
+    if(!past.length) return 0;
+    listEl.insertAdjacentHTML('beforeend', '<div style="font-size:11px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.04em;margin:8px 0 10px;">'+(EN?'Course sessions':'Kurzov\u00e9 tr\u00e9ninky')+'</div>'+past.map(_cohSessionCard).join(''));
+    return past.length;
   }
   window._upTab=function(w){
     var skB=$('upTabSkup'), kuB=$('upTabKurzy'), soB=$('upTabSouk'), skL=$('skupinovkyList'), kuL=$('kurzyList'), boL=$('bookingsList'), bar=$('upTabBar');
@@ -23084,7 +23131,8 @@ function subscribeRealtime(){
   if(titleEl) titleEl.textContent = mode==='upcoming' ? (LANG==='en'?'Upcoming lessons':'Nadcházející lekce') : (LANG==='en'?'Lesson history':'Historie lekcí');
 
   if(!filtered.length){
-    list.innerHTML=`<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">${mode==='upcoming'?(LANG==='en'?'No upcoming lessons.':'Žádné nadcházející lekce.'):(LANG==='en'?'No past lessons.':'Žádné proběhlé lekce.')}</p>`;
+    if(mode==='past'){ list.innerHTML=''; const _ch=await _appendCohortHistory(list); if(!_ch){ list.innerHTML=`<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">${LANG==='en'?'No history yet.':'Zat\u00edm \u017e\u00e1dn\u00e1 historie.'}</p>`; } return; }
+    list.innerHTML=`<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">${mode==='upcoming'?(LANG==='en'?'No upcoming lessons.':'\u017d\u00e1dn\u00e9 nadch\u00e1zej\u00edc\u00ed lekce.'):(LANG==='en'?'No past lessons.':'\u017d\u00e1dn\u00e9 prob\u011bhl\u00e9 lekce.')}</p>`;
     return;
   }
 
@@ -23156,6 +23204,7 @@ function subscribeRealtime(){
   list.querySelectorAll('.noShowBtn').forEach(btn=>{
     btn.onclick=()=>reportNoShowPrompt(btn.dataset.id, btn.dataset.coach, btn.dataset.name);
   });
+  if(mode==='past'){ try{ await _appendCohortHistory(list); }catch(e){} }
 }
 
 function reportNoShowPrompt(bookingId, coachId, coachName){
