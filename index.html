@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SDJ THE DECK BUG FOUND + remove-poster. (1) ROOT CAUSE of courses never showing in the events deck: `_applyDeckSort(list)` is CALLED at the end of renderEventsAsync but the function was NEVER DEFINED anywhere (grep count = 0). So every render with ft!=='courses' (i.e. the default 'Vse' view and any event-type chip) threw ReferenceError right after merging courses into the list; the outer try/catch swallowed it, so [MTL deck2] never logged and window._evFiltered was never updated -> blank/stale deck. This is also why courses only ever appeared under the explicit 'Kurzy' chip (ft==='courses' skips _applyDeckSort). Console proof this session: deck0 + deck1 fired, deck2 did NOT. FIX: defined _applyDeckSort(list) - sorts in place by window._deckSortMode: 'date' (soonest by starts_at), 'near' (nearest by _distKm), 'new' (newest by created_at); fully try-wrapped, courses and events both carry those fields so they interleave correctly. (2) Cohort creation form: added a 'Odebrat plakát' / 'Remove poster' button (hidden until a poster exists; shown after upload and when editing a cohort that already has one; clears window._cohPoster + preview, flips the add button label to Change/Add). Diagnostics [MTL deck0/1/2] left IN this build so Petr can confirm deck2 now fires and COURSES-in-list >=1; they'll be removed next build. Deploy: index.html (SDJ). cohort-public.js already queued from SDH/SDI (signup poster). -->
+<!-- MTL build: SDL cohort poster fits the deck card + diagnostics removed. (1) The deck swipe card image slot (.cimg) is aspect-ratio 2/1 (a wide banner), but cohort posters are cropped 4/3 at creation, so background-size:cover in the 2/1 slot trimmed the poster's top & bottom (Petr's screenshot: the top line of the poster was cut off). FIX: in swipeCardHtml, cohort cards now get an inline aspect-ratio:4/3 override on .cimg so the 4/3 poster fills the slot with zero crop; non-cohort events keep the 2/1 banner. Creation preview, signup page and deck card are now all 4/3 = the same crop everywhere. (2) Confirmed working via console (deck2 fired, COURSES in list: 1, card visible in 'Vse'), so the [MTL deck0/1/2] diagnostics were removed. Deploy: index.html. cohort-public.js still queued (signup poster). -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -6877,7 +6877,6 @@ function _applyDeckSort(list){
   return list;
 }
 async function renderEventsAsync(box){
-  try{ console.log('[MTL deck0] build=SDI renderEventsAsync CALLED, box=', box&&box.id); }catch(e){}
   let html='';
   try{ const {data:cr}=await supaClient.from('gym_coaches').select('gym_id').eq('coach_id',currentUser.id).eq('status','active').eq('can_request_fighters',true); window._canReqF=!!(cr&&cr.length); window._reqFGym=(cr&&cr[0]&&cr[0].gym_id)||null; }catch(e){ window._canReqF=false; }
   try{
@@ -6920,7 +6919,6 @@ async function renderEventsAsync(box){
         try{ const { data:_gr }=await supaClient.from('gyms').select('id,name,city,city_lat,city_lng').in('id',_cgids); (_gr||[]).forEach(g=>{ _cg[g.id]=g; }); }catch(e){}
         _chList.forEach(c=>{ const g=_cg[c.gym_id]||{}; c._gymName=g.name||null; c._city=g.city||null; c._lat=(g.city_lat!=null?+g.city_lat:null); c._lng=(g.city_lng!=null?+g.city_lng:null); });
         window._cohDeckList=_chList.map(_cohAsEvent);
-        try{ console.log('[MTL deck1] cohorts mapped:', window._cohDeckList.length); }catch(e){}
       } else { window._cohDeckList=[]; }
     }catch(e){ window._cohDeckList=[]; }
     try{ var _gids=[...new Set((window._evList||[]).map(e=>e.gym_id).filter(Boolean))]; var _uids=[...new Set((window._evList||[]).map(e=>e.created_by).filter(Boolean))]; var _gm={}, _um={}; if(_gids.length){ var _gr=await supaClient.from('gyms').select('id,name').in('id',_gids); (_gr&&_gr.data||[]).forEach(g=>_gm[g.id]=g.name); } if(_uids.length){ var _ur=await supaClient.from('profiles').select('id,name').in('id',_uids); (_ur&&_ur.data||[]).forEach(u=>_um[u.id]=u.name); } window._evList.forEach(e=>{ e._gymName=_gm[e.gym_id]||null; e._creatorName=_um[e.created_by]||null; }); }catch(e){}
@@ -6931,10 +6929,11 @@ async function renderEventsAsync(box){
       const _evchg = _deckDisc ? (_evEN ? ('Change '+catSportWord(_evc,true)) : (_evc==='traditional'?'Změnit umění':'Změnit sport')) : (_evEN ? 'Choose specific' : 'Vybrat konkrétní');
       html += `<div style="margin-bottom:10px;"><div class="pill" id="evSportBtn" style="cursor:pointer;font-weight:700;display:inline-block;">${_spLbl} · ${_evchg} ▾</div></div>`;
       const ft = window._evFilterType || 'all';
-      const _tch=[{v:'all',lbl:(LANG==='en'?'All':'Vše'),emoji:''}].concat(EVENT_TYPES.map(tt=>({v:tt.v,lbl:(LANG==='en'?tt.en:tt.cs),emoji:tt.emoji})));
       const _nCoh=(window._cohDeckList||[]).length;
-      let _chipHtml=_tch.map(c=>{ const on=(ft===c.v && ft!=='courses'); return `<div class="evTypeChip pill${on?' active':''}" data-v="${c.v}">${c.emoji?c.emoji+' ':''}${c.lbl}</div>`; }).join('');
-      if(_nCoh) _chipHtml+=`<div class="evTypeChip pill${ft==='courses'?' active':''}" data-v="courses">\ud83e\udd4b ${LANG==='en'?'Courses':'Kurzy'} <span style="opacity:.6;font-weight:600;">${_nCoh}</span></div>`;
+      const _courseChip = _nCoh ? `<div class="evTypeChip pill${ft==='courses'?' active':''}" data-v="courses">\ud83e\udd4b ${LANG==='en'?'Course':'Kurz'}</div>` : '';
+      let _chipHtml=`<div class="evTypeChip pill${ft==='all'?' active':''}" data-v="all">${LANG==='en'?'All':'V\u0161e'}</div>`;
+      // Kurz chip sits directly before the Seminar chip; no count (no other chip shows one).
+      EVENT_TYPES.forEach(function(tt){ if(tt.v==='seminar') _chipHtml+=_courseChip; const on=(ft===tt.v && ft!=='courses'); _chipHtml+=`<div class="evTypeChip pill${on?' active':''}" data-v="${tt.v}">${tt.emoji?tt.emoji+' ':''}${LANG==='en'?tt.en:tt.cs}</div>`; });
       html += `<div style="display:flex;gap:8px;overflow-x:auto;scrollbar-width:none;margin-bottom:10px;">`+_chipHtml+`</div>`;
       if(ft!=='courses'){
         const _sm=window._deckSortMode||'date';
@@ -6966,7 +6965,6 @@ async function renderEventsAsync(box){
       }
       if(ft!=='courses'){ _applyDeckSort(list); }
       window._evFiltered = list; if(window._evIdx==null) window._evIdx=0;
-      try{ console.log('[MTL deck2] ft=',ft,'fd=',fd,'| events in list:',list.filter(function(x){return !x._isCohort;}).length,'| COURSES in list:',list.filter(function(x){return x._isCohort;}).length,'| total:',list.length,'| maxDistKm=',maxDistKm,'userLoc=',!!userLoc,'| cohDeckList=',(window._cohDeckList||[]).length); }catch(e){}
       html += list.length ? `<div id="evDeck" style="position:relative;flex:1;min-height:280px;margin-top:0;"></div>` : `<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;">${(ft==='courses')?(LANG==='en'?'No open courses near you.':'Zatím tu nejsou otevřené kurzy poblíž.'):(LANG==='en'?'No events in this discipline.':'Žádné události v této disciplíně.')}</p>`;
     } else {
       html += `<div style="text-align:center;padding:40px 16px;color:var(--light);"><div style="font-size:40px;margin-bottom:10px;">🥊</div><div style="font-weight:700;color:var(--dark);margin-bottom:6px;">${LANG==='en'?'No events near you yet':'Zatím tu nejsou žádné události'}</div><div style="font-size:13px;line-height:1.5;">${LANG==='en'?'Fight nights, seminars and camps will show up here.':'Fight nights, semináře a kempy se objeví tady.'}</div></div>`;
@@ -7373,7 +7371,7 @@ function swipeCardHtml(ev){
   const bg = ev.poster ? `background-image:url('${ev.poster}');background-size:cover;background-position:center;` : 'background:linear-gradient(135deg,#E8001D,#7A0010);';
   const discTags = ds.map(v=>`<span style="font-size:11px;font-weight:600;background:var(--surf);border:1px solid var(--border);padding:3px 9px;border-radius:99px;">${disciplineEmoji(v)} ${disciplineLabel(v)}</span>`).join('');
   return `<div style="height:100%;display:flex;flex-direction:column;background:var(--surf);border-radius:24px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.12);">
-    <div class="cimg" style="${bg}">
+    <div class="cimg" style="${ev._isCohort?'aspect-ratio:4/3;':''}${bg}">
       <div class="cgrad"></div>
       <div class="ctop"><div class="bdg-cert" style="background:rgba(0,0,0,.6);letter-spacing:.04em;">${t.emoji} ${LANG==='en'?t.en:t.cs}</div>${ev.seeking_fighters?`<div class="bdg-fights" style="background:var(--red);">🥊 ${LANG==='en'?'Fighters':'Fighteři'}</div>`:''}</div>
       <div class="cbot"><div class="cname">${escapeHtml(ev.title||'')}</div><div class="cloc">📅 ${dt}${loc?` · 📍 ${escapeHtml(loc)}`:''}${distTxt}</div>${(ev._gymName||ev._creatorName)?`<div class="cloc" style="margin-top:2px;">🏟️ ${escapeHtml(ev._gymName||'')}${ev._creatorName?` · 👤 ${escapeHtml(ev._creatorName)}`:''}</div>`:''}</div>
@@ -24890,7 +24888,7 @@ function collectSpecs(containerId){ const c=$(containerId); if(!c) return []; re
 
   // Předvyplň ceny při vstupu do coach mode
 const MIN_RATE = { CZK:450, EUR:20, USD:25, GBP:18, CHF:20, PLN:80, SEK:200, DKK:140, NOK:200, HUF:7000, RON:90, CAD:33, AUD:35, NZD:38 }; const MIN_RATE_ONLINE = { CZK:250, EUR:10, USD:10, GBP:8, CHF:9, PLN:35, SEK:90, DKK:60, NOK:90, HUF:3000, RON:40, CAD:13, AUD:15, NZD:16 }; const MIN_EVENT = { CZK:450, EUR:20, USD:22, GBP:17, CHF:19, PLN:80, SEK:190, DKK:130, NOK:190, HUF:6500, RON:85, CAD:30, AUD:32, NZD:35 };
-const EVENT_TYPES=[{v:'fight_night',cs:'Fight night',en:'Fight night',emoji:'🥊'},{v:'seminar',cs:'Seminář',en:'Seminar',emoji:'🎓'},{v:'camp',cs:'Kemp',en:'Camp',emoji:'🏕️'},{v:'open_mat',cs:'Open mat',en:'Open mat',emoji:'🤼'},{v:'grading',cs:'Zkoušky',en:'Grading',emoji:'🎗️'},{v:'competition',cs:'Soutěž',en:'Competition',emoji:'🏆'},{v:'other',cs:'Jiné',en:'Other',emoji:'📌'}];
+const EVENT_TYPES=[{v:'fight_night',cs:'Fight night',en:'Fight night',emoji:'🥊'},{v:'competition',cs:'Soutěž',en:'Competition',emoji:'🏆'},{v:'seminar',cs:'Seminář',en:'Seminar',emoji:'🎓'},{v:'camp',cs:'Kemp',en:'Camp',emoji:'🏕️'},{v:'open_mat',cs:'Open mat',en:'Open mat',emoji:'🤼'},{v:'grading',cs:'Zkoušky',en:'Grading',emoji:'🎗️'},{v:'other',cs:'Jiné',en:'Other',emoji:'📌'}];
 const MIN_GYM = { CZK: 200, EUR: 10, USD: 12, GBP: 9, CHF: 10, PLN: 40, SEK: 100, DKK: 70, NOK: 100, HUF: 3500, RON: 45, CAD: 17, AUD: 18, NZD: 19 }; const MIN_MEMB = { CZK: 1400, EUR: 80, USD: 100, GBP: 70, CHF: 80, PLN: 320, SEK: 800, DKK: 560, NOK: 800, HUF: 28000, RON: 360, CAD: 130, AUD: 140, NZD: 150 };
 
 async function fillRateEditor(){
