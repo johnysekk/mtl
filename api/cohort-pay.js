@@ -158,6 +158,9 @@ export default async function handler(req, res) {
       const host = req.headers.host; const proto = host && host.includes('localhost') ? 'http' : 'https';
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
+        payment_method_types: ['card'],
+        billing_address_collection: 'required',
+        tax_id_collection: { enabled: true },
         success_url: `${proto}://${host}/?cohort=${encodeURIComponent(mem.cohort_id)}&firstmonth=ok&cm=${encodeURIComponent(cmId)}&session={CHECKOUT_SESSION_ID}`,
         cancel_url: `${proto}://${host}/?cohortpay=${encodeURIComponent(cmId)}`,
         customer_email: mem.email || undefined,
@@ -197,6 +200,9 @@ export default async function handler(req, res) {
       const host = req.headers.host; const proto = host && host.includes('localhost') ? 'http' : 'https';
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
+        payment_method_types: ['card'],
+        billing_address_collection: 'required',
+        tax_id_collection: { enabled: true },
         success_url: `${proto}://${host}/?cohort=${encodeURIComponent(mem.cohort_id)}&monthpaid=ok&cm=${encodeURIComponent(cmId)}&session={CHECKOUT_SESSION_ID}`,
         cancel_url: `${proto}://${host}/?cohortpay=${encodeURIComponent(cmId)}`,
         customer_email: mem.email || undefined,
@@ -286,6 +292,9 @@ export default async function handler(req, res) {
 
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
+      payment_method_types: ['card'],
+      billing_address_collection: 'required',
+      tax_id_collection: { enabled: true },
       success_url, cancel_url,
       customer_email: email,
       metadata: { mtl_payment_type: 'cohort_deposit', cohort_id: String(cohortId), cohort_member_id: String(memberId || ''), mtl_currency: cur, tier, mtl_welcome: wz ? '1' : '0', mtl_rate: String(rate) },
