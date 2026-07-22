@@ -241,6 +241,17 @@ export default async function handler(req, res) {
     // CAPACITY. cohort-public counts signups for DISPLAY only and nothing enforced it, so a course
     // for 12 would happily sell a deposit to the 30th person — and the deposit is non-refundable,
     // which turns an overbooked course into a refund argument. Count the people who actually hold a
+    // DUPLICATE GUARD: the same person (by e-mail) must not sign up for the same cohort twice.
+    // A bare 'lead' (abandoned checkout) or a 'cancelled' row does NOT block a retry; anything
+    // where they already hold a place / have paid does.
+    {
+      const _dupe = await sbGet(
+        `cohort_members?cohort_id=eq.${encodeURIComponent(cohortId)}` +
+        `&email=eq.${encodeURIComponent(email)}` +
+        `&status=in.(deposit_claimed,deposit_paid,enrolled,completed,converted)&select=id&limit=1`
+      );
+      if (_dupe && _dupe.length) return res.status(409).json({ ok: false, error: 'Na tento kurz už jsi přihlášený/á.', duplicate: true });
+    }
     // place (a bare 'lead' has not paid, so it does not occupy one) and refuse once it is full.
     if (Number(c.capacity) > 0) {
       const held = await sbGet(
