@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SDS cohort roster payments detail + Stripe remainder + deposit notifications (verified from real serverless). Read api/cohort-pay.js + api/stripe-webhook.js. The Stripe deposit webhook (mtl_payment_type cohort_deposit) DOES write cohort_payments(kind:deposit, cohort_id, payment_method:stripe, mtl_fee) and sets member deposit_paid -- QR and Stripe deposits both reach cohort_payments; the SDR 'Zalohy' row surfaces them. Correct kind for the deposit REMAINDER in Stripe mode is 'first_month' (tierPrice - paid_amount), NOT 'month' (would double-charge). CLIENT (index.html): (1) roster deposit_paid actions branch on window._crPayMode: stripe -> Stripe doplatek (calls /api/cohort-pay kind:first_month via new _cohRemainderStripe) + Hotovost; qr_bank -> QR doplatek + Hotovost. (2) each paid member gets a 'Co zaplatil' toggle that lazy-loads cohort_payments and lists Zaloha / 1. mesic (first_month) / Mesic N (month rows numbered from 2) + method + date + Total (new _cohMemberPayments). (3) notif routing: cohort_deposit_paid (owner) -> openCohortRoster; cohort_deposit_mine (student) -> openMyCourse. SERVER (api/stripe-webhook.js -- MUST DEPLOY): owner cohort-deposit notification now carries data{kind:cohort_deposit_paid,...} for click-through; ADDED an in-app student notification (was email-only) by matching the accountless member email to a profile id, data{kind:cohort_deposit_mine,...}; both try/catch, syntax-checked. Deploy: index.html + api/stripe-webhook.js. cohort-public.js still queued (signup poster). -->
+<!-- MTL build: SDU cohort Stripe checkout parity + Kurzy chip in Muj trenink. (1) Stripe checkout for cohort payments was missing fields other payments have. Read api/pay.js: memberships/drop-ins use payment_method_types:['card'], billing_address_collection:'required', tax_id_collection:{enabled:true} (the last is the 'buying as a business' toggle). cohort-pay.js had none of these on its 3 checkout sessions (deposit, first_month, month) -> added all three fields to all three, so course payments now collect address + billing + business tax ID exactly like the rest. (2) 'Muj trenink' upcoming now has a third chip 'Kurzy' in the MIDDLE (between Skupinovky and Soukromky). New #kurzyList container + a 'kurzy' branch in _upTab (rewritten for 3 tabs) + _loadCohortTrainings(): finds the student's cohorts (cohort_members by student_id OR email, status deposit_paid/enrolled/completed/converted), materialises each cohort's schedule via cohortOccurrences(horizonDays:60), lists upcoming sessions (course name, gym, day + D.M.YYYY + time, discipline tag, 'Kurz' badge). Read-only (fixed schedule, no reschedule). Empty state when none. PDF doklad: NOT built this turn -- no package.json locally and api/ imports only stripe/crypto/@supabase; a Czech PDF needs a PDF lib (pdfkit) + an embedded diacritics-capable font (Helvetica's WinAnsi can't render c/r/z/e-hacek), which is the real cost. Flagged to Petr to greenlight the dep+font; HTML attachment stays meanwhile. Deploy: index.html + api/cohort-pay.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -1954,10 +1954,12 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
   </div>
   <div id="upTabBar" style="display:flex;gap:6px;padding:12px 20px 4px;">
     <button id="upTabSkup" onclick="_upTab('skup')" style="flex:1;padding:9px;border:none;border-radius:10px;font-size:13px;font-weight:800;cursor:pointer;font-family:'DM Sans';background:var(--dark);color:#fff;">🏛️ Skupinovky</button>
+    <button id="upTabKurzy" onclick="_upTab('kurzy')" style="flex:1;padding:9px;border:none;border-radius:10px;font-size:13px;font-weight:800;cursor:pointer;font-family:'DM Sans';background:var(--surf);color:var(--mid);">🥋 Kurzy</button>
     <button id="upTabSouk" onclick="_upTab('souk')" style="flex:1;padding:9px;border:none;border-radius:10px;font-size:13px;font-weight:800;cursor:pointer;font-family:'DM Sans';background:var(--surf);color:var(--mid);">🥊 Soukromky</button>
   </div>
   <div id="pendQrHost" style="padding:0 20px;"></div>
   <div id="skupinovkyList" style="padding:16px 20px;"></div>
+  <div id="kurzyList" style="padding:16px 20px;display:none;"></div>
   <div style="padding:16px 20px;display:none;" id="bookingsList"></div>
 </div>
   
@@ -4688,8 +4690,8 @@ const NOTIF_T = {
     ? `🚶 Walk-in: ${d.student||'a guest'} paid for a drop-in${d.amt?(' ('+d.amt+' '+(d.sym||'')+')'):''} — tap for today's attendance.`
     : `🚶 Walk-in: ${d.student||'host'} zaplatil jednorázový vstup${d.amt?(' ('+d.amt+' '+(d.sym||'')+')'):''} — klepni pro dnešní docházku.`,
   course_new: (d)=> LANG==='en'
-    ? `🥋 ${d.gym_name||'A club'} just opened a new course: ${d.name||''}${d.start_date?(' · starts '+d.start_date):''}. Signups are open.`
-    : `🥋 ${d.gym_name||'Klub'} vypsal nový kurz: ${d.name||''}${d.start_date?(' · začátek '+d.start_date):''}. Přihlášky jsou otevřené.`,
+    ? `🥋 ${d.gym_name||'A club'} just opened a new course: ${d.name||''}${d.start_date?(' · starts '+_cohD(d.start_date)):''}. Signups are open.`
+    : `🥋 ${d.gym_name||'Klub'} vypsal nový kurz: ${d.name||''}${d.start_date?(' · začátek '+_cohD(d.start_date)):''}. Přihlášky jsou otevřené.`,
   fav_added_gym: (d)=> LANG==='en'
     ? `⭐ ${d.gym_name||'A gym'} is now in your Favorites — tap to open the profile.`
     : `⭐ ${d.gym_name||'Klub'} máš teď v Oblíbených — klepni pro profil.`,
@@ -11150,6 +11152,7 @@ function _cohTierPicker(d, EN, cur){
       +'<b style="white-space:nowrap;">'+(Number(t.price)||0)+' '+_curSym(cur)+'</b></label>';
   }).join('')+'</div>';
 }
+function _cohD(iso){ try{ var m=String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})/); if(!m) return String(iso||''); return parseInt(m[3],10)+'. '+parseInt(m[2],10)+'. '+m[1]; }catch(e){ return String(iso||''); } }
 async function openCohortSignup(cohortId, fromColdLink){
   const EN=LANG==='en';
   let ov=document.getElementById('cohSignupOv'); if(ov) ov.remove();
@@ -11169,7 +11172,7 @@ async function openCohortSignup(cohortId, fromColdLink){
     +(d.marketing_note?('<p style="font-size:11px;color:var(--mid);line-height:1.5;margin:0 0 8px;"><b>'+(EN?'Provider also notes: ':'Poskytovatel dále uvádí: ')+'</b>'+(''+d.marketing_note).replace(/</g,'&lt;')+'</p>'):'')
     +'<div style="font-size:10.5px;color:var(--light);line-height:1.5;margin-top:10px;padding-top:8px;border-top:1px dashed var(--border);">'+(EN?'This template is provided by MTL as a tool. The provider is responsible for the completeness and correctness of the terms towards its customers.':'Tuto šablonu poskytuje MTL jako nástroj. Za úplnost a správnost podmínek vůči svým zákazníkům odpovídá poskytovatel.')+'</div>';
   box.innerHTML='<div style="font-family:\'Bebas Neue\';font-size:30px;letter-spacing:.02em;color:var(--dark);line-height:1.05;">'+((d.name||'')+'').replace(/</g,'&lt;')+'</div>'
-    +'<div style="font-size:13px;color:var(--mid);margin:2px 0 14px;">'+(d.gym_name||'')+(d.discipline?(' · '+(typeof disciplineLabel==='function'?disciplineLabel(d.discipline):d.discipline)):'')+(d.start_date?(' · '+(EN?'starts ':'start ')+d.start_date):'')+(d.end_date?(' – '+d.end_date):'')+'</div>'
+    +'<div style="font-size:13px;color:var(--mid);margin:2px 0 14px;">'+(d.gym_name||'')+(d.discipline?(' · '+(typeof disciplineLabel==='function'?disciplineLabel(d.discipline):d.discipline)):'')+(d.start_date?(' · '+(EN?'starts ':'začátek ')+_cohD(d.start_date)):'')+(d.end_date?(' – '+_cohD(d.end_date)):'')+'</div>'
     +(d.poster?('<div style="width:100%;max-width:420px;aspect-ratio:2/1;border-radius:14px;background-image:url(\''+String(d.poster).replace(/\x27/g,"%27")+'\');background-size:cover;background-position:center;margin:0 auto 14px;"></div>'):'')
     +(d.description?('<p style="font-size:13px;color:var(--dark);line-height:1.55;margin:0 0 14px;">'+(''+d.description).replace(/</g,'&lt;')+'</p>'):'')
     +(function(){ try{ var _occ=cohortOccurrences(d,{horizonDays:120}); if(!_occ.length){ return d.schedule_note?('<div style="background:var(--surf);border-radius:11px;padding:11px 13px;margin:0 0 14px;font-size:12.5px;color:var(--dark);">\u23f0 '+(''+d.schedule_note).replace(/</g,'&lt;')+'</div>'):''; } var _dn=dowShort(); var _seen={}; var _pat=[]; _occ.forEach(function(o){ var dow=new Date(o.date+'T00:00:00').getDay(); var k=dow+'|'+(o.time||''); if(_seen[k]) return; _seen[k]=1; _pat.push({dow:dow,time:o.time}); }); _pat.sort(function(a,b){return a.dow-b.dow;}); var _line=_pat.map(function(x){return _dn[x.dow]+' '+(x.time||'');}).join(' \u00b7 '); var _first=_occ[0], _last=_occ[_occ.length-1]; return '<div style="background:var(--surf);border-radius:11px;padding:12px 13px;margin:0 0 14px;"><div style="font-size:12.5px;font-weight:700;color:var(--dark);margin-bottom:3px;">\u23f0 '+_line+'</div><div style="font-size:11px;color:var(--light);">'+_occ.length+' '+(EN?'sessions':'lekc\u00ed')+(_first?(' \u00b7 '+(EN?'first ':'prvn\u00ed ')+_first.date):'')+'</div></div>'; }catch(e){ return ''; } })()
@@ -11596,7 +11599,7 @@ async function _cohRender(){
   const stL={draft:(EN?'Draft':'Koncept'),open:(EN?'Open':'Otevřený'),running:(EN?'Running':'Běží'),done:(EN?'Done':'Dokončený'),archived:(EN?'Archived':'Archiv')};
   box.innerHTML=rows.map(function(c){
     const cur=c.currency||'CZK'; const cnt=counts[c.id]||{total:0,paid:0};
-    return '<div style="border:1px solid var(--border);border-radius:12px;padding:13px;margin-bottom:10px;"><div style="display:flex;justify-content:space-between;align-items:flex-start;"><div style="font-size:15px;font-weight:800;">'+((c.name||'')+'').replace(/</g,'&lt;')+'</div><span style="font-size:10px;font-weight:700;color:'+(stC[c.status]||'#999')+';text-transform:uppercase;">'+(stL[c.status]||c.status)+'</span></div><div style="font-size:12px;color:var(--mid);margin-top:4px;">'+(c.discipline?(disciplineLabel(c.discipline)+' · '):'')+(c.start_date?(c.start_date+' · '):'')+(c.months||2)+' '+(EN?'mo':'měs')+(c.capacity?(' · '+(EN?'cap ':'kap ')+c.capacity):'')+'</div><div style="font-size:12px;color:var(--mid);margin-top:3px;">'+(EN?'Deposit':'Záloha')+' '+fmtPrice(c.deposit_amount||0,cur)+' '+_curSym(cur)+' · '+(EN?'price ':'cena ')+(function(){ var _t=(Array.isArray(c.price_tiers)&&c.price_tiers.length)?c.price_tiers:null; var _p=_t?Number(_t[0].price):Number(c.price_regular); return fmtPrice(_p||0,cur)+' '+_curSym(cur); })()+'</div><div style="font-size:12px;color:var(--dark);font-weight:600;margin-top:6px;">'+cnt.total+' '+(EN?'signups':'přihlášených')+' · '+cnt.paid+' '+(EN?'paid':'zaplaceno')+'</div><div style="display:flex;gap:6px;margin-top:9px;flex-wrap:wrap;"><button class="cohLinkBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Link + QR':'Odkaz + QR')+'</button><button class="cohRosterBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Roster':'Roster')+'</button><button class="cohDashBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:#171717;color:#F4D87A;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">\ud83d\udcb0 '+(EN?'Revenue':'Tržby')+'</button></div><div style="display:flex;gap:6px;margin-top:6px;"><button class="cohEditBtn" data-id="'+c.id+'" style="flex:1;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">\u270e '+(EN?'Edit':'Upravit')+'</button><button class="cohDelBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;padding:8px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">\ud83d\uddd1 '+(EN?'Delete':'Smazat')+'</button></div></div>';
+    return '<div style="border:1px solid var(--border);border-radius:12px;padding:13px;margin-bottom:10px;"><div style="display:flex;justify-content:space-between;align-items:flex-start;"><div style="font-size:15px;font-weight:800;">'+((c.name||'')+'').replace(/</g,'&lt;')+'</div><span style="font-size:10px;font-weight:700;color:'+(stC[c.status]||'#999')+';text-transform:uppercase;">'+(stL[c.status]||c.status)+'</span></div><div style="font-size:12px;color:var(--mid);margin-top:4px;">'+(c.discipline?(disciplineLabel(c.discipline)+' · '):'')+(c.start_date?(_cohD(c.start_date)+' · '):'')+(c.months||2)+' '+(EN?'mo':'měs')+(c.capacity?(' · '+(EN?'cap ':'kap ')+c.capacity):'')+'</div><div style="font-size:12px;color:var(--mid);margin-top:3px;">'+(EN?'Deposit':'Záloha')+' '+fmtPrice(c.deposit_amount||0,cur)+' '+_curSym(cur)+' · '+(EN?'price ':'cena ')+(function(){ var _t=(Array.isArray(c.price_tiers)&&c.price_tiers.length)?c.price_tiers:null; var _p=_t?Number(_t[0].price):Number(c.price_regular); return fmtPrice(_p||0,cur)+' '+_curSym(cur); })()+'</div><div style="font-size:12px;color:var(--dark);font-weight:600;margin-top:6px;">'+cnt.total+' '+(EN?'signups':'přihlášených')+' · '+cnt.paid+' '+(EN?'paid':'zaplaceno')+'</div><div style="display:flex;gap:6px;margin-top:9px;flex-wrap:wrap;"><button class="cohLinkBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Link + QR':'Odkaz + QR')+'</button><button class="cohRosterBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Roster':'Roster')+'</button><button class="cohDashBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;min-width:0;padding:8px;background:#171717;color:#F4D87A;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">\ud83d\udcb0 '+(EN?'Revenue':'Tržby')+'</button></div><div style="display:flex;gap:6px;margin-top:6px;"><button class="cohEditBtn" data-id="'+c.id+'" style="flex:1;padding:8px;background:var(--surf);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">\u270e '+(EN?'Edit':'Upravit')+'</button><button class="cohDelBtn" data-id="'+c.id+'" data-name="'+((c.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;padding:8px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">\ud83d\uddd1 '+(EN?'Delete':'Smazat')+'</button></div></div>';
   }).join('');
   box.querySelectorAll('.cohLinkBtn').forEach(function(b){ b.onclick=function(){ _cohShowLink(b.dataset.id, b.dataset.name); }; });
   box.querySelectorAll('.cohRosterBtn').forEach(function(b){ b.onclick=function(){ openCohortRoster(b.dataset.id, b.dataset.name); }; });
@@ -23006,16 +23009,53 @@ function subscribeRealtime(){
     box.querySelectorAll('.gymDropCalBtn').forEach(function(btn){ btn.onclick=function(){ const b=(window._skupRows||[]).find(x=>String(x.id)===String(btn.dataset.id)); if(!b) return; addToCalendar({ training_date:b.class_date, training_time:b.class_time, id:b.id, title:`🥊 ${b.class_name||(LANG==='en'?'Class':'Lekce')} — ${b.gym_name||'Klub'}` }); }; });
     box.querySelectorAll('.gymDropCancelBtn').forEach(function(b){ b.onclick=function(){ cancelGymDropin((window._skupRows||[]).find(x=>String(x.id)===String(b.dataset.id))); }; });
   };
+  // Student's upcoming COURSE (cohort) trainings for the "Kurzy" chip in Muj trenink.
+  // Finds the cohorts the student is in (by student_id or e-mail), materialises their schedule
+  // via cohortOccurrences, and lists upcoming sessions. cohorts are a fixed schedule, so this is
+  // read-only (no reschedule) unlike group/private bookings.
+  async function _loadCohortTrainings(){
+    const box=$('kurzyList'); if(!box||!currentUser) return; const EN=LANG==='en';
+    box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${L('Načítám...')}</p>`;
+    let mems=[];
+    try{
+      const _or=[]; if(currentUser.id)_or.push('student_id.eq.'+currentUser.id); if(currentUser.email)_or.push('email.eq.'+currentUser.email);
+      if(_or.length){ const { data }=await supaClient.from('cohort_members').select('cohort_id,status').in('status',['deposit_paid','enrolled','completed','converted']).or(_or.join(',')); mems=data||[]; }
+    }catch(e){}
+    const cohIds=[...new Set((mems||[]).map(m=>m.cohort_id).filter(Boolean))];
+    const _empty=`<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">${EN?'No upcoming course sessions.':'Žádné nadcházející tréninky v kurzu.'}</p>`;
+    if(!cohIds.length){ box.innerHTML=_empty; return; }
+    let cohs=[];
+    try{ const { data }=await supaClient.from('gym_cohorts').select('id,name,gym_id,discipline,schedule,start_date,end_date').in('id',cohIds); cohs=data||[]; }catch(e){}
+    const gymIds=[...new Set(cohs.map(c=>c.gym_id).filter(Boolean))]; let gymMap={};
+    try{ if(gymIds.length){ const { data }=await supaClient.from('gyms').select('id,name').in('id',gymIds); (data||[]).forEach(g=>{ gymMap[g.id]=g.name; }); } }catch(e){}
+    const sessions=[];
+    cohs.forEach(function(c){ let occ=[]; try{ occ=cohortOccurrences(c,{horizonDays:60})||[]; }catch(e){} occ.forEach(function(o){ sessions.push({ date:o.date, time:o.time||'', name:c.name||'Kurz', gym:gymMap[c.gym_id]||'', disc:c.discipline||'' }); }); });
+    const now=new Date();
+    const up=sessions.filter(function(s){ const dt=new Date(`${s.date}T${(s.time||'00:00')}:00`); return dt>=now; }).sort(function(a,b){ return (a.date+(a.time||'')).localeCompare(b.date+(b.time||'')); });
+    if(!up.length){ box.innerHTML=_empty; return; }
+    const dn=(typeof dowShort==='function')?dowShort():['Ne','Po','Út','St','Čt','Pá','So'];
+    box.innerHTML=up.map(function(s){
+      const discTag=(s.disc && typeof isMultiDiscipline==='function' && isMultiDiscipline())?` · ${disciplineEmoji(s.disc)} ${disciplineLabel(s.disc)}`:'';
+      const _dow=dn[new Date(`${s.date}T00:00:00`).getDay()]||'';
+      return `<div style="background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px;">
+        <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.03em;color:var(--dark);">${escapeHtml(s.name)}</div>
+        <div style="font-size:14px;color:var(--mid);margin:3px 0 0;">🥋 ${s.gym?escapeHtml(s.gym)+' · ':''}${_dow} ${_cohD(s.date)}${s.time?(' · '+s.time):''}${discTag}</div>
+        <div style="display:inline-block;font-size:11px;font-weight:800;color:#5B3FB0;background:#EDE7FF;border-radius:8px;padding:2px 9px;margin-top:8px;">${EN?'Course':'Kurz'}</div>
+      </div>`;
+    }).join('');
+  }
   window._upTab=function(w){
-    var skB=$('upTabSkup'), soB=$('upTabSouk'), skL=$('skupinovkyList'), boL=$('bookingsList'), bar=$('upTabBar');
+    var skB=$('upTabSkup'), kuB=$('upTabKurzy'), soB=$('upTabSouk'), skL=$('skupinovkyList'), kuL=$('kurzyList'), boL=$('bookingsList'), bar=$('upTabBar');
     if(bar) bar.style.display='flex';
-    var souk=(w==='souk');
-    if(skB){ skB.style.background=souk?'var(--surf)':'var(--dark)'; skB.style.color=souk?'var(--mid)':'#fff'; }
-    if(soB){ soB.style.background=souk?'var(--dark)':'var(--surf)'; soB.style.color=souk?'#fff':'var(--mid)'; }
-    if(skL) skL.style.display=souk?'none':'block';
-    if(boL) boL.style.display=souk?'block':'none';
+    var active=(w==='souk'||w==='kurzy')?w:'skup';
+    function _setBtn(b,on){ if(!b) return; b.style.background=on?'var(--dark)':'var(--surf)'; b.style.color=on?'#fff':'var(--mid)'; }
+    _setBtn(skB, active==='skup'); _setBtn(kuB, active==='kurzy'); _setBtn(soB, active==='souk');
+    if(skL) skL.style.display=active==='skup'?'block':'none';
+    if(kuL) kuL.style.display=active==='kurzy'?'block':'none';
+    if(boL) boL.style.display=active==='souk'?'block':'none';
     try{ if(typeof _renderPendingQr==='function') _renderPendingQr(); }catch(e){}
-    if(souk){ if(typeof loadBookings==='function') loadBookings('upcoming'); }
+    if(active==='souk'){ if(typeof loadBookings==='function') loadBookings('upcoming'); }
+    else if(active==='kurzy'){ if(typeof _loadCohortTrainings==='function') _loadCohortTrainings(); }
     else { if(typeof window._loadSkupinovky==='function') window._loadSkupinovky(); }
   };
   async function loadBookings(mode){
