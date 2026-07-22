@@ -520,7 +520,15 @@ export default async function handler(req, res) {
           try {
             const coh = cohId ? ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=owner_id,name,gym_id,deposit_amount,price_student,price_regular,currency,start_date,gym_meta_pixel,capi_token`)) || [])[0] : null;
             const mem = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=name,email,tier,fbp,fbc`)) || [])[0];
-            if (coh && coh.owner_id) await sbPost('notifications', { user_id: coh.owner_id, type: 'system', read: false, message: '\uD83D\uDCDA Nov\u00FD zaplacen\u00FD z\u00E1pis do kurzu' + (coh.name ? (' "' + coh.name + '"') : '') + '.' });
+            if (coh && coh.owner_id) await sbPost('notifications', { user_id: coh.owner_id, type: 'system', read: false, data: JSON.stringify({ kind: 'cohort_deposit_paid', cohort_id: cohId || null, cohort_member_id: cmId || null, cohort_name: coh.name || '' }), message: '\uD83D\uDCDA Nov\u00FD zaplacen\u00FD z\u00E1pis do kurzu' + (coh.name ? (' "' + coh.name + '"') : '') + '.' });
+            // In-app notification to the student too (match the accountless member by e-mail to a profile).
+            try {
+              if (mem && mem.email) {
+                const _sp = await sbGet(`profiles?email=eq.${encodeURIComponent(mem.email)}&select=id&limit=1`);
+                const _sid = _sp && _sp[0] && _sp[0].id;
+                if (_sid) await sbPost('notifications', { user_id: _sid, type: 'system', read: false, data: JSON.stringify({ kind: 'cohort_deposit_mine', cohort_id: cohId || null, cohort_member_id: cmId || null, cohort_name: coh.name || '' }), message: '\u2705 Z\u00E1loha za kurz' + (coh.name ? (' "' + coh.name + '"') : '') + ' p\u0159ijata. M\u00EDsto m\u00E1\u0161 rezervovan\u00E9.' });
+              }
+            } catch (e) { console.error('cohort student notif', e.message); }
             if (mem && mem.email && coh) {
               let gymName = '';
               try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(coh.gym_id)}&select=name`); gymName = (g && g[0] && g[0].name) || ''; } catch (e) {}
