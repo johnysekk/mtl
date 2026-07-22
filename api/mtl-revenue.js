@@ -48,6 +48,32 @@ export default async function handler(req, res) {
       from += page;
     }
 
+    // Cohorts (Kurzy) live in cohort_payments, not transactions. Pull them in as synthetic rows
+    // (type='cohort') so the founder ledger shows a Kurzy line instead of hiding them in "Other".
+    // cohort_payments amounts are MAJOR units -> x100 to match the transactions minor-unit convention.
+    try {
+      let cp = [], cfrom = 0;
+      for (let i = 0; i < 50; i++) {
+        const cr = await fetch(`${SB}/rest/v1/cohort_payments?select=created_at,currency,payment_method,amount,mtl_fee,stripe_fee,status&order=created_at.desc`,
+          { headers: { ...svc, 'Range-Unit': 'items', Range: `${cfrom}-${cfrom + page - 1}` } });
+        if (!cr.ok) break;
+        const cb = await cr.json();
+        if (!Array.isArray(cb) || !cb.length) break;
+        cp = cp.concat(cb);
+        if (cb.length < page) break;
+        cfrom += page;
+      }
+      cp.filter(p => p.status !== 'refunded').forEach(p => {
+        const g = Math.round(Number(p.amount || 0) * 100);
+        const mf = Math.round(Number(p.mtl_fee || 0) * 100);
+        const sf = Math.round(Number(p.stripe_fee || 0) * 100);
+        rows.push({ created_at: p.created_at, currency: p.currency || 'CZK', type: 'cohort', payment_method: p.payment_method || 'stripe', gym_id: null, coach_id: null, plan: 'Kurz', payment_intent: null, gross_amount: g, stripe_fee: sf, mtl_fee: mf, mtl_fee_refunded: 0, net_amount: g - mf - sf, refund_amount: 0, status: p.status || 'paid' });
+      });
+    } catch (e) { /* cohorts optional */ }
+
+    // Cohorts are counted via cohort_payments (added below); drop the record-cash 'course'
+    // transactions so a PIS cohort deposit isn't counted twice.
+    rows = rows.filter(t => t.type !== 'course');
     const months = {};
     rows.forEach(t => {
       const ym = (t.created_at || '').slice(0, 7);

@@ -44,7 +44,8 @@ async function pisSideEffects(rec, tbl) {
         .eq('id', rec.id);
       try {
         const _feeRate = 0.03;
-        await sb.from('cohort_payments').insert({ cohort_member_id: rec.id, cohort_id: rec.cohort_id || _cohGym && null, kind: 'deposit', amount: Number(_cohDep || 0), currency: _cohCur || 'CZK', mtl_fee: Math.round(Number(_cohDep || 0) * _feeRate * 100) / 100, payment_method: 'pis', status: 'paid' });
+        const _exCP = await sb.from('cohort_payments').select('id').eq('cohort_member_id', rec.id).eq('kind', 'deposit').limit(1);
+        if (!(_exCP.data && _exCP.data.length)) await sb.from('cohort_payments').insert({ cohort_member_id: rec.id, cohort_id: rec.cohort_id || _cohGym && null, kind: 'deposit', amount: Number(_cohDep || 0), currency: _cohCur || 'CZK', mtl_fee: Math.round(Number(_cohDep || 0) * _feeRate * 100) / 100, payment_method: 'pis', status: 'paid' });
       } catch (e2) { /* non-fatal */ }
     } catch (e) { /* non-fatal */ }
   }
