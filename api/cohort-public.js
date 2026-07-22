@@ -40,7 +40,7 @@ export default async function handler(req, res) {
 
     const id = (req.query && req.query.cohort) || '';
     if (!id) return res.status(400).json({ ok: false, error: 'missing cohort' });
-    const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(id)}&select=id,gym_id,stripe_account,name,discipline,start_date,end_date,months,capacity,deposit_amount,price_student,price_regular,price_tiers,currency,description,schedule,schedule_note,gym_meta_pixel,marketing_note,status`);
+    const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(id)}&select=id,gym_id,stripe_account,name,discipline,start_date,end_date,months,capacity,deposit_amount,price_student,price_regular,price_tiers,currency,description,schedule,schedule_note,gym_meta_pixel,marketing_note,poster,status`);
     const c = rows && rows[0];
     if (!c) return res.status(404).json({ ok: false, error: 'not found' });
     // Same gate as cohort-pay: whitelist on `open`, and signups shut SIGNUPS_GRACE_DAYS after the
@@ -74,7 +74,7 @@ export default async function handler(req, res) {
       cohort: {
         id: c.id, name: c.name, discipline: c.discipline, start_date: c.start_date, end_date: c.end_date, months: c.months, schedule: (Array.isArray(c.schedule) ? c.schedule : []), schedule_note: c.schedule_note || null,
         capacity: c.capacity, taken, deposit_amount: c.deposit_amount, price_student: c.price_student,
-        price_regular: c.price_regular, price_tiers: (Array.isArray(c.price_tiers) ? c.price_tiers : null), currency: c.currency, description: c.description,
+        price_regular: c.price_regular, price_tiers: (Array.isArray(c.price_tiers) ? c.price_tiers : null), currency: c.currency, description: c.description, poster: c.poster || null,
         gym_name: gymName, provider_name: providerName, meta_pixel: c.gym_meta_pixel || '', marketing_note: c.marketing_note || '',
         payment_mode: gymPay.payment_mode || null, receiver_id_type: gymPay.receiver_id_type || null, receiver_id_value: gymPay.receiver_id_value || null, receiver_name: gymPay.receiver_name || null
       }
