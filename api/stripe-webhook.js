@@ -10,6 +10,8 @@
 
 import Stripe from 'stripe';
 import crypto from 'crypto';
+import PDFDocument from 'pdfkit';
+import { DEJAVU_CZ } from './_dejavu-cz.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 export const config = { api: { bodyParser: false } };
@@ -47,21 +49,97 @@ async function sendResend(to, subject, html, opts) {
   try {
     const body = { from: (opts && opts.from) || MAIL_FROM, to: [to], subject, html };
     if (opts && opts.replyTo) body.reply_to = opts.replyTo;
+    if (opts && opts.attachments && opts.attachments.length) body.attachments = opts.attachments;
     const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: 'Bearer ' + RESEND, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     if (!r.ok) console.error('resend', r.status, await r.text().catch(() => ''));
   } catch (e) { console.error('resend', e.message); }
 }
+function _czDate(iso){ try{ const m=String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})/); if(!m) return String(iso||''); return parseInt(m[3],10)+'. '+parseInt(m[2],10)+'. '+m[1]; }catch(e){ return String(iso||''); } }
+function cohortDokladHtml(o){
+  o = o || {}; const rec = o.gym || {};
+  const seller = _esc(rec.legal_name || rec.name || o.gymName || 'Poskytovatel');
+  const c = String(o.cur || 'CZK').toUpperCase();
+  const sym = c === 'CZK' ? 'Kč' : (c === 'EUR' ? '€' : (c === 'USD' ? '$' : c));
+  const isPayer = !!rec.vat_payer;
+  const rate = isPayer ? (rec.vat_rate != null ? Number(rec.vat_rate) : 21) : 0;
+  const amt = Math.round((Number(o.amount) || 0) * 100) / 100;
+  const base = isPayer ? Math.round((amt / (1 + rate / 100)) * 100) / 100 : amt;
+  const vat = isPayer ? Math.round((amt - base) * 100) / 100 : 0;
+  const fmt = (n) => { const v = Math.round((Number(n) || 0) * 100) / 100; try { return v.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); } catch (e) { return v.toFixed(2); } };
+  const row = (l, v, strong) => `<tr><td style="padding:6px 0;color:#555;font-size:13px;">${l}</td><td style="padding:6px 0;text-align:right;font-size:13px;${strong ? 'font-weight:700;color:#1a1a1a;' : ''}">${v}</td></tr>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Potvrzení o platbě</title></head>`
+    + `<body style="font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;max-width:600px;margin:24px auto;padding:0 20px;line-height:1.5;">`
+    + `<div style="font-size:22px;font-weight:800;letter-spacing:.04em;color:#E11;">MTL</div>`
+    + `<div style="color:#777;font-size:13px;margin-bottom:18px;">Potvrzení o platbě</div>`
+    + `<table style="width:100%;border-collapse:collapse;">`
+    + row('Poskytovatel (prodejce)', seller, true)
+    + (rec.tax_id ? row('IČO', _esc(rec.tax_id), true) : '')
+    + (rec.vat_id ? row('DIČ', _esc(rec.vat_id), true) : '')
+    + (rec.billing_address ? row('Sídlo', _esc(rec.billing_address), true) : '')
+    + row('Zákazník', _esc(o.buyer || ''), true)
+    + row('Položka', _esc(o.item || ''), true)
+    + row('Datum', _esc(o.date || ''), true)
+    + (o.ref ? row('Reference platby (Stripe)', _esc(o.ref), true) : '')
+    + (isPayer
+        ? (row('Základ daně', fmt(base) + ' ' + sym) + row('DPH ' + rate + '%', fmt(vat) + ' ' + sym) + row('Celkem', fmt(amt) + ' ' + sym, true))
+        : row('Celkem', fmt(amt) + ' ' + sym, true))
+    + `</table>`
+    + (isPayer ? '' : `<div style="font-size:12px;color:#777;margin-top:10px;">Dodavatel není plátcem DPH.</div>`)
+    + `<div style="font-size:11px;color:#999;line-height:1.6;margin-top:18px;border-top:1px solid #eee;padding-top:12px;">Platný doklad o platbě pro tvou evidenci. Prodejcem služby je výše uvedený poskytovatel — MTL je platforma, která platbu zprostředkovala. Potřebuješ formální fakturu? Vyžádej si ji u poskytovatele.</div>`
+    + `</body></html>`;
+}
+// Same payment confirmation as cohortDokladHtml, but rendered to a real PDF (attached to the mail).
+// Uses an embedded DejaVu subset so Czech diacritics render (standard PDF fonts can't). Returns a Buffer.
+function cohortDokladPdf(o){
+  return new Promise((resolve, reject) => {
+    try{
+      const rec = o.gym || {};
+      const seller = rec.legal_name || rec.name || o.gymName || 'Poskytovatel';
+      const c = String(o.cur || 'CZK').toUpperCase();
+      const sym = c === 'CZK' ? 'Kč' : (c === 'EUR' ? '€' : (c === 'USD' ? '$' : c));
+      const isPayer = !!rec.vat_payer;
+      const rate = isPayer ? (rec.vat_rate != null ? Number(rec.vat_rate) : 21) : 0;
+      const amt = Math.round((Number(o.amount) || 0) * 100) / 100;
+      const base = isPayer ? Math.round((amt / (1 + rate / 100)) * 100) / 100 : amt;
+      const vat = isPayer ? Math.round((amt - base) * 100) / 100 : 0;
+      const fmt = (n) => { const v = Math.round((Number(n) || 0) * 100) / 100; try { return v.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); } catch (e) { return v.toFixed(2); } };
+      const doc = new PDFDocument({ size: 'A4', margin: 50 });
+      const chunks = []; doc.on('data', d => chunks.push(d)); doc.on('end', () => resolve(Buffer.concat(chunks))); doc.on('error', reject);
+      doc.registerFont('cz', DEJAVU_CZ); doc.font('cz');
+      doc.fontSize(22).fillColor('#E11111').text('MTL');
+      doc.moveDown(0.15).fontSize(11).fillColor('#777777').text('Potvrzení o platbě');
+      doc.moveDown(1);
+      const row = (l, v) => { const y = doc.y; doc.fontSize(11).fillColor('#555555').text(l, 50, y, { width: 230 }); const after = doc.y; doc.fillColor('#111111').text(String(v == null ? '' : v), 315, y, { width: 230, align: 'right' }); doc.y = Math.max(after, doc.y) + 4; };
+      row('Poskytovatel (prodejce)', seller);
+      if (rec.tax_id) row('IČO', rec.tax_id);
+      if (rec.vat_id) row('DIČ', rec.vat_id);
+      if (rec.billing_address) row('Sídlo', rec.billing_address);
+      row('Zákazník', o.buyer || '');
+      row('Položka', o.item || '');
+      row('Datum', o.date || '');
+      if (o.ref) row('Reference platby (Stripe)', o.ref);
+      doc.moveDown(0.3);
+      if (isPayer) { row('Základ daně', fmt(base) + ' ' + sym); row('DPH ' + rate + '%', fmt(vat) + ' ' + sym); }
+      const yT = doc.y; doc.fontSize(13).fillColor('#111111').text('Celkem', 50, yT, { width: 230 }); doc.text(fmt(amt) + ' ' + sym, 315, yT, { width: 230, align: 'right' }); doc.y += 8;
+      if (!isPayer) { doc.moveDown(0.3).fontSize(10).fillColor('#777777').text('Dodavatel není plátcem DPH.', 50); }
+      doc.moveDown(1.2).fontSize(9).fillColor('#999999').text('Platný doklad o platbě pro tvou evidenci. Prodejcem služby je výše uvedený poskytovatel — MTL je platforma, která platbu zprostředkovala. Potřebuješ formální fakturu? Vyžádej si ji u poskytovatele.', 50, doc.y, { width: 495 });
+      doc.end();
+    }catch(e){ reject(e); }
+  });
+}
 function cohortDepositHtml(name, courseName, gymName, depositTxt, remainderTxt, startTxt) {
-  const hi = name ? ('Ahoj ' + _esc(name) + ',') : 'Ahoj,';
+  // Czech has vocative declension ('Petr' -> 'Petře'); getting it wrong reads worse than omitting,
+  // so we greet without the name. (name kept in the signature for callers / future localisation.)
+  const hi = 'Ahoj,';
   return `<!doctype html><html><body style="margin:0;background:#f4f1ec;font-family:Arial,Helvetica,sans-serif;color:#171717;">
   <div style="max-width:480px;margin:0 auto;padding:28px 22px;">
     <div style="font-size:22px;font-weight:800;letter-spacing:.04em;color:#E11;margin-bottom:4px;">MARTIAL TRAINING LAB</div>
     <div style="font-size:12px;color:#888;margin-bottom:22px;">Be More.</div>
     <p style="font-size:15px;line-height:1.6;">${hi}</p>
     <p style="font-size:15px;line-height:1.6;">Tvoje místo v kurzu <b>${_esc(courseName)}</b>${gymName ? (' u <b>' + _esc(gymName) + '</b>') : ''} je rezervované — zálohu <b>${_esc(depositTxt)}</b> máme. 🥊</p>
-    ${startTxt ? `<p style="font-size:14px;line-height:1.6;">Start: <b>${_esc(startTxt)}</b></p>` : ''}
-    ${remainderTxt ? `<p style="font-size:14px;line-height:1.6;color:#555;">Zbytek 1. měsíce (<b>${_esc(remainderTxt)}</b>) doplatíš na místě přes QR — kartou, žádná hotovost.</p>` : ''}
-    <p style="font-size:13px;line-height:1.6;color:#555;margin-top:18px;">Těšíme se na tebe na tréninku. Kdyby cokoliv, odpověz na tenhle e-mail.</p>
+    ${startTxt ? `<p style="font-size:14px;line-height:1.6;">Začátek: <b>${_esc(_czDate(startTxt))}</b></p>` : ''}
+    ${remainderTxt ? `<p style="font-size:14px;line-height:1.6;color:#555;">Zbytek 1. měsíce (<b>${_esc(remainderTxt)}</b>) doplatíš na místě přímo v klubu (kartou, QR nebo hotově — dle klubu).</p>` : ''}
+    <p style="font-size:13px;line-height:1.6;color:#555;margin-top:18px;">Těšíme se na tebe na tréninku! S dotazy ke kurzu se obrať přímo na svůj klub.</p>
     <p style="font-size:12px;color:#aaa;line-height:1.6;margin-top:24px;">Tenhle e-mail ti přišel, protože ses přihlásil/a do kurzu${gymName ? (' u ' + _esc(gymName)) : ''}.</p>
   </div></body></html>`;
 }
@@ -530,8 +608,8 @@ export default async function handler(req, res) {
               }
             } catch (e) { console.error('cohort student notif', e.message); }
             if (mem && mem.email && coh) {
-              let gymName = '';
-              try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(coh.gym_id)}&select=name`); gymName = (g && g[0] && g[0].name) || ''; } catch (e) {}
+              let gymName = ''; let gymRec = null;
+              try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(coh.gym_id)}&select=name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_address`); gymRec = (g && g[0]) || null; gymName = (gymRec && gymRec.name) || ''; } catch (e) {}
               let ownerEmail = '';
               try { if (coh.owner_id) { const op = await sbGet(`profiles?id=eq.${encodeURIComponent(coh.owner_id)}&select=email`); ownerEmail = (op && op[0] && op[0].email) || ''; } } catch (e) {}
               const cur2 = (coh.currency || cur || 'CZK');
@@ -539,7 +617,12 @@ export default async function handler(req, res) {
               const remainder = Math.max(0, tierPrice - Number(coh.deposit_amount || 0));
               const money = (x) => Math.round(x) + ' ' + cur2;
               const fromName = (gymName || 'Martial Training Lab').replace(/["<>]/g, '');
-              await sendResend(mem.email, (coh.name || 'Kurz') + ' \u2014 z\u00E1loha p\u0159ijata', cohortDepositHtml(mem.name, coh.name || 'Kurz', gymName, money(amount), remainder > 0 ? money(remainder) : '', coh.start_date || '', ((process.env.APP_URL || process.env.PUBLIC_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '') + '/?myclass=' + encodeURIComponent(cmId))), { from: '"' + fromName + '" <' + MAIL_ADDR + '>', replyTo: ownerEmail || undefined });
+              let _dokAtt = undefined;
+              try {
+                const _dokBuf = await cohortDokladPdf({ gym: gymRec, gymName: gymName, buyer: (mem.name || mem.email || ''), item: ((coh.name || 'Kurz') + ' — záloha'), amount: amount, cur: cur2, ref: pi || '', date: _czDate(new Date().toISOString().slice(0,10)) });
+                _dokAtt = [{ filename: 'MTL-potvrzeni-o-platbe.pdf', content: _dokBuf.toString('base64') }];
+              } catch (e) { console.error('cohort doklad pdf', e.message); }
+              await sendResend(mem.email, (coh.name || 'Kurz') + ' \u2014 z\u00E1loha p\u0159ijata', cohortDepositHtml(mem.name, coh.name || 'Kurz', gymName, money(amount), remainder > 0 ? money(remainder) : '', coh.start_date || '', ((process.env.APP_URL || process.env.PUBLIC_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '') + '/?myclass=' + encodeURIComponent(cmId))), { from: '"' + fromName + '" <' + MAIL_ADDR + '>', replyTo: ownerEmail || undefined, attachments: _dokAtt });
             }
             try { await cohortCapiPurchase(coh, cmId, (mem && mem.email) || '', amount, cur, (mem && mem.fbp) || '', (mem && mem.fbc) || ''); } catch (e) {}
           } catch (e) { console.error('cohort confirm', e.message); }
