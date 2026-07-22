@@ -90,6 +90,25 @@ function cohortDokladHtml(o){
 }
 // Same payment confirmation as cohortDokladHtml, but rendered to a real PDF (attached to the mail).
 // Uses an embedded DejaVu subset so Czech diacritics render (standard PDF fonts can't). Returns a Buffer.
+// Exact Stripe fee for a direct charge, straight from the connected account's balance_transaction
+// (bt.fee_details -> type 'stripe_fee'). Direct charges: bt.fee is combined, so we split off the
+// application fee. Returns MAJOR units in the charge currency. No estimates.
+async function cohortStripeFee(pi, acct){
+  if (!pi || !acct) return 0;
+  try{
+    let ch = null;
+    if (String(pi).startsWith('ch_')) { ch = await stripe.charges.retrieve(pi, { expand: ['balance_transaction'] }, { stripeAccount: acct }); }
+    else { const intent = await stripe.paymentIntents.retrieve(pi, { expand: ['latest_charge.balance_transaction'] }, { stripeAccount: acct }); ch = intent && intent.latest_charge; if (typeof ch === 'string') ch = await stripe.charges.retrieve(ch, { expand: ['balance_transaction'] }, { stripeAccount: acct }); }
+    if (!ch || typeof ch !== 'object') return 0;
+    let bt = ch.balance_transaction;
+    if (typeof bt === 'string') { try { bt = await stripe.balanceTransactions.retrieve(bt, { stripeAccount: acct }); } catch (e) {} }
+    if (!bt || typeof bt !== 'object') return 0;
+    let sFee = 0, aFee = 0;
+    if (Array.isArray(bt.fee_details)) { for (const fd of bt.fee_details) { if (fd.type === 'stripe_fee') sFee += fd.amount; else if (fd.type === 'application_fee') aFee += fd.amount; } }
+    if (sFee === 0 && aFee === 0) { aFee = ch.application_fee_amount || 0; sFee = (bt.fee || 0) - aFee; }
+    return Math.round(sFee) / 100;
+  }catch(e){ console.error('cohortStripeFee', e.message); return 0; }
+}
 function cohortDokladPdf(o){
   return new Promise((resolve, reject) => {
     try{
@@ -588,7 +607,8 @@ export default async function handler(req, res) {
           const amount = (s.amount_total || 0) / 100;
           const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
           const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : ((m.mtl_welcome === '1') ? 0 : Math.round(amount * 0.03 * 100) / 100)  /* Stripe base 3% (was 0.035 = old ladder) */;
-          await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'deposit', amount, currency: cur, mtl_fee: fee, payment_method: 'stripe', stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
+          const _sFee = await cohortStripeFee(pi, event.account);
+          await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'deposit', amount, currency: cur, mtl_fee: fee, stripe_fee: _sFee, payment_method: 'stripe', stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
           {
             const _prev = Number((((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=paid_amount`)) || [])[0] || {}).paid_amount || 0);
             await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'deposit_paid', paid_amount: Math.round((_prev + amount) * 100) / 100 });
@@ -636,7 +656,8 @@ export default async function handler(req, res) {
           const amount = (s.amount_total || 0) / 100;
           const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
           const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : ((m.mtl_welcome === '1') ? 0 : Math.round(amount * 0.03 * 100) / 100)  /* Stripe base 3% (was 0.035 = old ladder) */;
-          await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'first_month', amount, currency: cur, mtl_fee: fee, payment_method: 'stripe', stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
+          const _sFee = await cohortStripeFee(pi, event.account);
+          await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'first_month', amount, currency: cur, mtl_fee: fee, stripe_fee: _sFee, payment_method: 'stripe', stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
           {
             const _prev2 = Number((((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=paid_amount`)) || [])[0] || {}).paid_amount || 0);
             await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'enrolled', paid_amount: Math.round((_prev2 + amount) * 100) / 100, months_paid: 1 });
@@ -653,7 +674,8 @@ export default async function handler(req, res) {
           const amount = (s.amount_total || 0) / 100;
           const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
           const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : ((m.mtl_welcome === '1') ? 0 : Math.round(amount * 0.03 * 100) / 100);
-          await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'month', amount, currency: cur, mtl_fee: fee, payment_method: 'stripe', stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
+          const _sFee = await cohortStripeFee(pi, event.account);
+          await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'month', amount, currency: cur, mtl_fee: fee, stripe_fee: _sFee, payment_method: 'stripe', stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
           {
             const _mr = (((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=paid_amount,months_paid`)) || [])[0]) || {};
             const _prevPaid = Number(_mr.paid_amount || 0);
