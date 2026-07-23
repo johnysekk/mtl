@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SEI kids pre-reservation/attendance parity + migrated child leaves Rodina. ROOT CAUSE (verified, not guessed): a parent and ALL their children share ONE student_id -- children are child_name rows on the parent's account. Every roster keyed released/auto/explicit by student_id ALONE, so the whole family collapsed into a single person: (a) explicit=rs.filter(... && !autoIds.has(r.student_id)) dropped EVERY reservation belonging to that account as soon as any one membership under it auto-covered the class, so a child with a kids pass never appeared as pre-reserved; (b) releasedIds.has(m.student_id) meant excusing ONE family member removed the parent AND all siblings from auto-fill. Fixed in all THREE roster renderers (loadGymRoster, openClassAttendance, loadCoachRoster) by keying on a composite person key _pk = student_id + '|' + (child_name||''). Attendance rows already carried data-child and presentSet already included child_name, so ticking/saving was fine once the right people are listed. KIDS-CLASS COVERAGE: planCovers(['all'],'kids') is true, so a generic adult all-access pass auto-filled KIDS classes (flooding the roster and the capacity count) -- a kids class is now only auto-covered by a membership that belongs to a child (child_name) or whose access explicitly includes 'kids'. Applied to the three rosters and to membCovers on the student side (gym profile class list), where isReleased/autoIds/explicitCount were given the same composite keying so capacity counts stop double-counting families. MIGRATED CHILD: when a 15+ child claims their own account via the transfer link, the parent's JSON entry was flagged _archived+_migrated. _archived already hid it from the main Rodina list, BUT it still sat in the 'Archivovane deti' section with a RESTORE button -- so the parent could resurrect a child who now owns that identity (duplicate person, parent booking/paying for them again). The archive list now excludes _migrated entries, so the child disappears from Rodina entirely, and restoreChild() refuses migrated entries defensively. The _migrated/_migratedTo record stays in the JSON as the audit trail and keeps the re-migration guard working. Deploy: index.html only. -->
+<!-- MTL build: SEJ schedule-save deadlock, all class levels on the club profile, cancel reason everywhere, 15+ handover visibility. (1) CAPACITY DEADLOCK: 'Ulozit lekci' validates its own row, then saveScheduleOnly() re-validates EVERY class in _gymSchedule. The editor renders only the SELECTED day and expands only ONE class, so a legacy class with no capacity on another day is invisible -- it blocked every save with a toast the owner could not act on. The error now names the DAY too and JUMPS to the offending class: sets _schedSelDow + _schedEdit, re-renders, shows the inline error and focuses/scrolls its capacity field; if that weekday already passed this week (past days are read-only) it steps to next week and retries. (2) CLUB PROFILE SCHEDULE: levelsPresent mapped ONLY CLASS_LEVELS, so classes using a club's CUSTOM level (gymCustomLevels) were silently dropped from the public schedule. Now the standard levels render first (stable order) and any other level actually present in occs is appended, so no class type can ever be hidden. ('kids' and 'sparring' are standard and were already included -- the kids class most likely never saved because of bug 1.) (3) CANCELLATION REASON: only the membership 'excuse' flow ever asked for a reason; unreserveClass and cancelGymDropin (drop-in AND QR/PIS) cancelled silently. Added a shared _askCancelReason() modal (EXCUSE_REASONS chips + optional note, both optional) wired into both, plus _notifyCancelReason() which tells the class coach (or club owner) via the existing gym_member_excused notification. NOTE: cohorts have NO student-side cancellation at all, so there is nothing there to attach a reason to yet. (4) 15+ HANDOVER: the 'move to own account' button already exists in Rodina and is highlighted once the child reaches the consent age, but the threshold came from _consentAge(profile country) which DEFAULTS TO 16 when no country is set -- so a 15-year-old CZ child showed no button at all. New _consentAgeForMe() resolves the country from profile -> club -> UI language -> browser locale before falling back. VERIFIED (unchanged, reported to Petr): the migration transfers BELTS (merged) and re-points GYM_ATTENDANCE (so XP/history follow), but does NOT re-point gym_memberships, gym_class_reservations, cohort_members or gym_bookings -- the child's active pass stays on the parent's account as a child_name row, because moving it would move the payment relationship (Stripe subscription is on the parent). Petr's call. Deploy: index.html only. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3417,6 +3417,19 @@ function t(cs){ const d=I18N[LANG]; return (d && d[cs]!=null) ? d[cs] : cs; }
 function L(cs){ const d=I18N[LANG]; return (d && d[cs]!=null) ? d[cs] : cs; } // alias pro inline překlad (kde 't' koliduje)
 function _myChildren(){ try{ const c=currentUser&&currentUser.children; if(!c) return []; const a=typeof c==='string'?JSON.parse(c):c; return Array.isArray(a)?a:[]; }catch(e){ return []; } }
 function _kidAge(k){ try{ if(k && k.dob){ const d=new Date(k.dob); if(!isNaN(d.getTime())){ const t=new Date(); let a=t.getFullYear()-d.getFullYear(); const m=t.getMonth()-d.getMonth(); if(m<0||(m===0&&t.getDate()<d.getDate())) a--; return a; } } if(k && k.age!=null && k.age!==''){ let created=null; try{ const ts=parseInt(String(k.id||'').replace(/^k/,''),36); if(ts>1e12) created=new Date(ts); }catch(e){} if(created){ const yrs=(Date.now()-created.getTime())/(365.25*864e5); return Math.floor((+k.age)+yrs); } return (+k.age); } }catch(e){} return null; }
+// The parent's profile often has no country set, and _consentAge() then defaulted to 16 -- so a
+// 15-year-old in CZ never got the 'move to own account' button and the handover looked missing.
+// Resolve the country from every hint we have before falling back.
+function _consentAgeForMe(){
+  try{
+    var cc=(currentUser&&(currentUser.billing_country||currentUser.country))||'';
+    if(!cc){ try{ cc=(typeof _myGymData!=='undefined'&&_myGymData&&_myGymData.country)||''; }catch(e){} }
+    if(!cc && typeof LANG!=='undefined' && LANG==='cs') cc='CZ';
+    if(!cc){ var loc=String((typeof navigator!=='undefined'&&navigator.language)||'').toUpperCase(); var m=loc.match(/[-_]([A-Z]{2})$/); if(m) cc=m[1]; else if(/^CS/.test(loc)) cc='CZ'; }
+    if(cc) return _consentAge(cc);
+  }catch(e){}
+  return _consentAge('');
+}
 function _consentAge(cc){ try{ cc=String(cc||'').toUpperCase(); const m={CZ:15,FR:15,GR:15,SI:15,AT:14,BG:14,CY:14,IT:14,LT:14,ES:14,BE:13,DK:13,EE:13,FI:13,LV:13,MT:13,PT:13,SE:13,GB:13,UK:13,US:13,NO:13,DE:16,HR:16,HU:16,IE:16,LU:16,NL:16,PL:16,RO:16,SK:16}; if(m[cc]!=null) return m[cc]; }catch(e){} return 16; }
 async function _gateBelts(){
   const btn=$('meMyBeltsBtn'); if(!btn || !currentUser) return;
@@ -4177,7 +4190,7 @@ async function _saveKidTrophy(i, url){
   try{ renderMyKids(); }catch(e){}
 }
 function renderMyKids(){
-  const box=$('myKidsBody'); if(!box) return; const EN=LANG==='en'; const kids=_myChildren(); const _ca=_consentAge(currentUser&&(currentUser.billing_country||currentUser.country));
+  const box=$('myKidsBody'); if(!box) return; const EN=LANG==='en'; const kids=_myChildren(); const _ca=_consentAgeForMe();
   const _arch = kids.map((k,i)=>({k:k,i:i})).filter(x=>x.k._archived && !x.k._migrated);
   const archList = _arch.length ? `<details style="margin-top:14px;"><summary style="cursor:pointer;font-size:12px;font-weight:700;color:var(--mid);list-style:none;">🗄️ ${EN?'Archived children':'Archivované děti'} (${_arch.length})</summary><div style="margin-top:8px;">${_arch.map(x=>`<div style="display:flex;justify-content:space-between;align-items:center;background:#fafafa;border:1px dashed var(--border);border-radius:10px;padding:10px 12px;margin-bottom:7px;"><div style="font-size:13px;color:var(--mid);">${kidEmoji(x.k.age)} ${escapeHtml(x.k.name||'')}</div><button class="kidRestore" data-i="${x.i}" style="padding:6px 11px;background:#E8F5EE;color:#006040;border:none;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">↩︎ ${EN?'Restore':'Obnovit'}</button></div>`).join('')}<div style="font-size:11px;color:var(--light);line-height:1.45;margin-top:4px;">${EN?'Archived children keep all progress, belts and trophy-case. Nothing is deleted.':'Archivované děti si nechávají veškerý progres, pásky i vitrínu. Nic se nemaže.'}</div></div></details>` : '';
   const list = kids.some(function(_k){return !_k._archived;}) ? kids.map((k,i)=> k._archived ? '' : `<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:8px;"><div style="display:flex;justify-content:space-between;align-items:center;"><div><div style="font-weight:700;font-size:14px;">${kidEmoji(_kidAge(k))} ${escapeHtml(k.name||'')}</div>${(_kidAge(k)!=null)?`<div style="font-size:12px;color:var(--mid);">${_kidAge(k)} ${EN?'years':'let'}</div>`:''}</div><button class="kidDel" data-i="${i}" style="padding:7px 11px;background:#FEECEC;color:var(--red);border:none;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">${EN?'Remove':'Odebrat'}</button></div><div id="myKidLvl${i}" style="margin-top:10px;"></div>${k.trophy_img?`<div style="margin-top:10px;text-align:center;"><img src="${escapeHtml(k.trophy_img)}" alt="" style="max-width:100%;max-height:170px;border-radius:12px;border:1px solid var(--border);"></div>`:''}<button class="kidTrophy" data-i="${i}" style="width:100%;margin-top:7px;padding:9px;background:#fff;color:#141414;border:1.5px solid var(--border);border-radius:10px;font-weight:700;font-size:12px;cursor:pointer;">🖼️ ${k.trophy_img?(EN?'Change image':'Změnit obrázek'):(EN?'Add a picture to brag':'Přidej obrázek na chlubení')}</button><button class="kidShare" data-i="${i}" style="width:100%;margin-top:10px;padding:9px;background:#141414;color:#F4D87A;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;">🏆 ${EN?'Share trophy-case':'Pochlubit se'}</button><button class="kidBelts" data-i="${i}" style="width:100%;margin-top:7px;padding:9px;background:#fff;color:#141414;border:1.5px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;">🥋 ${EN?'Belts':'Pásky'}${_kidBeltCount(k)?(' · '+_kidBeltCount(k)):''}</button><button class="kidXfer" data-i="${i}" style="width:100%;margin-top:7px;padding:9px;background:#fff;color:#141414;border:1.5px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;">🤝 ${EN?'Transfer to another guardian':'Předat jinému guardianovi'}</button>${(_kidAge(k)==null||_kidAge(k)>=_ca)?`<button class="kidMigrate" data-i="${i}" style="width:100%;margin-top:7px;padding:${_kidAge(k)>=_ca?'11px':'9px'};background:${_kidAge(k)>=_ca?'#F4D87A':'#fff'};color:#141414;border:1.5px solid ${_kidAge(k)>=_ca?'#E0B84A':'var(--border)'};border-radius:10px;font-weight:${_kidAge(k)>=_ca?'800':'700'};cursor:pointer;font-family:'DM Sans';font-size:12.5px;">${_kidAge(k)>=_ca?('🎂 '+(EN?(escapeHtml(k.firstName||k.name||'')+' is 15 — move to own account'):(escapeHtml(k.firstName||k.name||'')+' je 15 — přejít na vlastní účet'))):('🎓 '+(EN?'Move to own account (15+)':'Přejít na vlastní účet (15+)'))}</button>`:''}</div>`).join('') : `<p style="color:var(--light);font-size:13px;padding:6px 0;">${EN?'No children added yet.':'Zatím žádné děti.'}</p>`;
@@ -8859,7 +8872,14 @@ async function openGymProfile(g){
     return { cap:capTxt, btn:`<button class="bookClassBtn" ${da} data-coachname="${(o.coachName||'').replace(/"/g,'&quot;')}" data-disc="${o.disc||''}" style="background:var(--red);color:#fff;border:none;border-radius:8px;padding:7px 12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${LANG==='en'?'Book':'Rezervovat'} · ${(()=>{ const cp=(window._gymCoachPricing||{})[o.coach]; const dp=(cp&&cp.dropin_price)?cp.dropin_price:(g.dropin_price||0); const dc=(cp&&cp.dropin_price)?(cp.currency||g.currency):g.currency; const _mul=(cp&&cp.dropin_price)?gdMul(!!cp.partner):gdMul(_gymOwnerPartner); return fmtPrice(dp*_mul, dc)+' '+(typeof symOf==='function'?symOf(dc):(_curSym(dc))); })()}</button>` };
   };
   const occRow=(o)=>{ const dd=new Date(o.date); const b=occBtn(o); const lvl=(o.level&&o.level!=='all')?` · <span style="color:var(--mid);">${levelLabel(o.level)}</span>`:''; const _lead=(g&&g.hide_leaders)?null:(o.leaderName||o.coachName||_gymOwnerName); const led=_lead?` · <span style="color:var(--blue);font-weight:600;">${LANG==='en'?'with ':'vede '}${escapeHtml(_lead)}</span>`:''; const _altSq=(o.altPlace||o.altAddr)?'<span title="'+(LANG==='en'?'Different location':'Jiné místo')+'" style="display:inline-block;width:8px;height:8px;border-radius:2px;background:#E67E22;margin-right:5px;vertical-align:middle;"></span>':''; const _altLine=(o.altPlace||o.altAddr)?('<div style="color:#E67E22;font-size:11.5px;font-weight:600;margin-top:2px;">📍 '+escapeHtml(o.altPlace||'')+((o.altPlace&&o.altAddr)?' · ':'')+(o.altAddr?('<a href="https://maps.google.com/?q='+encodeURIComponent(o.altAddr)+'" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="color:#E67E22;text-decoration:underline;">'+escapeHtml(o.altAddr)+'</a>'):'')+'</div>'):''; return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:#fff;border:1px solid var(--border);border-radius:10px;padding:9px 12px;margin-bottom:6px;"><div style="font-size:13px;min-width:0;">${_altSq}<strong style="${o.cancelled?'text-decoration:line-through;opacity:.6;':''}">${o.name}</strong>${lvl}${o.cancelled?' <span style="font-size:10px;font-weight:700;color:#C0392B;background:#C0392B1a;border-radius:6px;padding:1px 6px;">'+(LANG==='en'?'not held':'neproběhlo')+'</span>':''}<div style="color:var(--mid);font-size:12px;">${dn[dd.getDay()]} ${o.time} · ${dd.getDate()}.${dd.getMonth()+1}.${b.cap}${led}</div>${_altLine}</div>${b.btn}</div>`; };
-  const levelsPresent = CLASS_LEVELS.map(l=>l.v).filter(v=> occs.some(o=>(o.level||'all')===v));
+  // Group by the standard levels first (stable order), then append ANY other level actually used
+  // by this club. Clubs can define custom levels (gymCustomLevels), and those classes used to be
+  // silently dropped from the public schedule because only CLASS_LEVELS was ever mapped.
+  const levelsPresent = (function(){
+    const std=CLASS_LEVELS.map(l=>l.v).filter(v=> occs.some(o=>(o.level||'all')===v));
+    const extra=[]; (occs||[]).forEach(function(o){ const lv=o.level||'all'; if(std.indexOf(lv)<0 && extra.indexOf(lv)<0) extra.push(lv); });
+    return std.concat(extra.sort());
+  })();
   const schedBlock = (!occs.length) ? '' : `<div style="margin-top:12px;">` + levelsPresent.map(v=>{
     const items=occs.filter(o=>(o.level||'all')===v).slice(0,14);
     const covered = !!((window._myMembs||[]).some(mm=>_memLive(mm)) && items.some(o=> planCovers({access:myAccess}, o.level||'all')));
@@ -9054,11 +9074,73 @@ async function reserveClass(g, occ, myMemb, _cleared){
     openGymProfile(g);
   }catch(e){ console.error('reserveClass',e); toast('⚠️ '+e.message); }
 }
+// Optional cancellation reason for EVERY student-side cancellation (reservation, drop-in, QR/PIS
+// booking) — until now only the membership "excuse" flow ever asked, so cancellations paid by
+// QR/PIS or as drop-ins told the club nothing. Resolves {key,text}, or null if they back out.
+function _askCancelReason(opts){
+  opts=opts||{}; const EN=LANG==='en';
+  return new Promise(function(resolve){
+    let ov=document.getElementById('cxReasonOv'); if(ov) ov.remove();
+    ov=document.createElement('div'); ov.id='cxReasonOv';
+    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100005;display:flex;align-items:center;justify-content:center;padding:20px;';
+    let sel=null;
+    ov.innerHTML='<div style="background:#fff;border-radius:16px;padding:20px;max-width:340px;width:100%;font-family:\'DM Sans\';">'
+      +'<div style="font-size:16px;font-weight:800;margin-bottom:4px;">'+escapeHtml(opts.title||(EN?'Cancel this class?':'Zrušit tuto lekci?'))+'</div>'
+      +(opts.note?('<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:6px;">'+escapeHtml(opts.note)+'</div>'):'')
+      +'<div style="font-size:11px;color:var(--light);font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin:10px 0 6px;">'+(EN?'Reason (optional)':'Důvod (nepovinné)')+'</div>'
+      +'<div id="cxChips" style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:10px;"></div>'
+      +'<textarea id="cxNote" rows="2" maxlength="200" placeholder="'+(EN?'Short note (optional)':'Krátká poznámka (nepovinné)')+'" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:13px;font-family:\'DM Sans\';resize:none;"></textarea>'
+      +'<button id="cxGo" style="width:100%;margin-top:12px;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+escapeHtml(opts.confirmLabel||(EN?'Cancel':'Zrušit'))+'</button>'
+      +'<button id="cxBack" style="width:100%;margin-top:8px;padding:11px;background:none;color:var(--mid);border:none;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Keep it':'Nechat být')+'</button>'
+      +'</div>';
+    document.body.appendChild(ov);
+    const chips=ov.querySelector('#cxChips');
+    const _off='background:var(--surf);border:1px solid var(--border);color:var(--dark);';
+    const _on='background:var(--dark);border:1px solid var(--dark);color:#fff;';
+    try{
+      (EXCUSE_REASONS||[]).forEach(function(r){
+        const el=document.createElement('div');
+        el.style.cssText='padding:6px 11px;border-radius:999px;font-size:12.5px;font-weight:700;cursor:pointer;'+_off;
+        el.textContent=(EN?r.en:r.cs);
+        el.onclick=function(){
+          const was=(sel===r.k);
+          chips.querySelectorAll('div').forEach(function(x){ x.style.cssText='padding:6px 11px;border-radius:999px;font-size:12.5px;font-weight:700;cursor:pointer;'+_off; });
+          if(was){ sel=null; return; }
+          sel=r.k; el.style.cssText='padding:6px 11px;border-radius:999px;font-size:12.5px;font-weight:700;cursor:pointer;'+_on;
+        };
+        chips.appendChild(el);
+      });
+    }catch(e){}
+    const done=function(v){ try{ ov.remove(); }catch(e){} resolve(v); };
+    ov.querySelector('#cxBack').onclick=function(){ done(null); };
+    ov.onclick=function(e){ if(e.target===ov) done(null); };
+    ov.querySelector('#cxGo').onclick=function(){
+      const t=(((ov.querySelector('#cxNote')||{}).value)||'').trim();
+      let lbl=''; try{ const ro=(EXCUSE_REASONS||[]).find(function(r){ return r.k===sel; }); if(ro) lbl=(EN?ro.en:ro.cs); }catch(e){}
+      done({ key:(sel||''), text:(t||lbl||'') });
+    };
+  });
+}
+// Tell the class coach (or the club owner) that a student cancelled, with their optional reason.
+async function _notifyCancelReason(gymId, coachId, ownerId, occ, cx){
+  try{
+    if(!cx || !cx.text) return;
+    const notifyId = coachId || ownerId; if(!notifyId || notifyId===currentUser.id) return;
+    const dd=occ && occ.date ? new Date(occ.date) : null;
+    const dstr = dd ? (dd.getDate()+'.'+(dd.getMonth()+1)+'.') : '';
+    await supaClient.from('notifications').insert({ user_id:notifyId, type:'system', read:false,
+      data: JSON.stringify({ kind:'gym_member_excused', member:(currentUser.name||'Člen'), student_id:currentUser.id, reasonKey:(cx.key||''), className:((occ&&occ.name)||''), date:((occ&&occ.date)||''), time:((occ&&occ.time)||''), reason:cx.text, gym_id:gymId||null }),
+      message:'🔕 '+(currentUser.name||'Člen')+' zrušil/a lekci '+((occ&&occ.name)||'')+' ('+dstr+' '+((occ&&occ.time)||'')+') — '+cx.text+'.' });
+  }catch(e){}
+}
 async function unreserveClass(g, occ){
   if(!currentUser) return;
+  const _cx=await _askCancelReason({ title:(LANG==='en'?'Cancel this reservation?':'Zrušit tuto rezervaci?'), note:(LANG==='en'?'The spot is freed for others.':'Místo se uvolní pro ostatní.'), confirmLabel:(LANG==='en'?'Cancel reservation':'Zrušit rezervaci') });
+  if(!_cx) return;
   try{
     await supaClient.from('gym_class_reservations').delete().eq('gym_id', g.id).eq('student_id', currentUser.id).eq('class_date', occ.date).eq('class_time', occ.time).eq('class_name', occ.name);
     try{ await supaClient.from('gym_bookings').update({ status:'cancelled' }).eq('gym_id', g.id).eq('student_id', currentUser.id).eq('class_date', occ.date).eq('class_time', occ.time).eq('class_name', occ.name).in('status',['reserved','paid_claimed']); }catch(e){}
+    try{ await _notifyCancelReason(g&&g.id, (occ&&(occ.leader||occ.coach)), g&&g.owner_id, occ, _cx); }catch(e){}
     toast(LANG==='en'?'Reservation cancelled':'Rezervace zrušena');
     openGymProfile(g);
   }catch(e){ console.error('unreserveClass',e); toast('⚠️ '+e.message); }
@@ -9429,7 +9511,14 @@ async function cancelGymDropin(b){
   const now=new Date();
   const dt=new Date(`${b.class_date}T${(b.class_time||'00:00')}:00`);
   if((dt-now)/(1000*60*60) < 6){ toast(LANG==='en'?'⚠️ Less than 6 h before — no refund. You can still just not show up.':'⚠️ Méně než 6 h před lekcí — bez vrácení.'); return; }
-  if(!confirm((b.payment_method==='qr')?(LANG==='en'?'Cancel this reservation? The spot is freed for others.':'Zrušit tuto rezervaci? Místo se uvolní pro další.'):(LANG==='en'?'Cancel this drop-in? You get 95% back; the club keeps the rest.':'Zrušit tuto jednorázovou lekci? Vrátí se ti 95 %, zbytek si nechá gym.'))) return;
+  const _cx=await _askCancelReason({
+    title:(LANG==='en'?'Cancel this class?':'Zrušit tuto lekci?'),
+    note:((b.payment_method==='qr'||b.payment_method==='pis')
+      ?(LANG==='en'?'The spot is freed for others.':'Místo se uvolní pro další.')
+      :(LANG==='en'?'You get 95% back; the club keeps the rest.':'Vrátí se ti 95 %, zbytek si nechá klub.')),
+    confirmLabel:(LANG==='en'?'Cancel the class':'Zrušit lekci') });
+  if(!_cx) return;
+  try{ await _notifyCancelReason(b.gym_id, null, (await (async function(){ try{ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',b.gym_id).single(); return _g&&_g.owner_id; }catch(e){ return null; } })()), { name:b.class_name, date:b.class_date, time:b.class_time }, _cx); }catch(e){}
   try{
     if(!b.payment_intent){ await supaClient.from('gym_bookings').update({ status:'cancelled' }).eq('id', b.id); toast(LANG==='en'?'✅ Cancelled.':'✅ Zrušeno.'); loadMyMemberships(); return; }
     const { data:g } = await supaClient.from('gyms').select('stripe_account').eq('id', b.gym_id).single();
@@ -15660,9 +15749,28 @@ async function saveScheduleOnly(){
   { const _noCap=_gymSchedule.findIndex(c=>!(Number(c.cap)>0));
     if(_noCap>=0){
       const _c=_gymSchedule[_noCap];
+      // The editor only renders ONE day and expands ONE class, so the offending class is usually
+      // invisible (different day / collapsed) and the owner had no way to know what to fix -- every
+      // save was blocked by a legacy class with no capacity. Name the day AND jump straight to it.
+      const _dnm=(function(){ try{ return dayNames()[Number(_c.day)]||''; }catch(e){ return ''; } })();
       toast(LANG==='en'
-        ? `⚠️ Set a max capacity for "${(_c.name||levelLabel(_c.level||'all'))}" (${_c.time||''})`
-        : `⚠️ Vyplň max. kapacitu u lekce „${(_c.name||levelLabel(_c.level||'all'))}" (${_c.time||''})`);
+        ? `⚠️ Set a max capacity for "${(_c.name||levelLabel(_c.level||'all'))}" (${_dnm} ${_c.time||''})`
+        : `⚠️ Vyplň max. kapacitu u lekce „${(_c.name||levelLabel(_c.level||'all'))}" (${_dnm} ${_c.time||''})`);
+      try{
+        _schedSelDow=Number(_c.day); _schedEdit=_noCap; renderScheduleEditor();
+        const _focus=function(){
+          const inp=document.querySelector('.schCap[data-i="'+_noCap+'"]');
+          const er=document.querySelector('.schCapErr[data-i="'+_noCap+'"]');
+          if(er) er.style.display='block';
+          if(inp){ inp.style.borderColor='var(--red)'; try{ inp.focus(); inp.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} return true; }
+          return false;
+        };
+        setTimeout(function(){
+          // Not rendered => that weekday already passed this week (past days are read-only), so
+          // step to next week where the same class is editable again.
+          if(!_focus()){ try{ _schedWeek=(Number(_schedWeek)||0)+1; renderScheduleEditor(); setTimeout(_focus,60); }catch(e){} }
+        },60);
+      }catch(e){}
       return;
     } }
   const sched = JSON.stringify(_gymSchedule.map(c=>({ ...c, name: (c.name&&String(c.name).trim()) ? c.name.trim() : levelLabel(c.level||'all') })));
