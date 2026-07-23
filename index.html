@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SEJ schedule-save deadlock, all class levels on the club profile, cancel reason everywhere, 15+ handover visibility. (1) CAPACITY DEADLOCK: 'Ulozit lekci' validates its own row, then saveScheduleOnly() re-validates EVERY class in _gymSchedule. The editor renders only the SELECTED day and expands only ONE class, so a legacy class with no capacity on another day is invisible -- it blocked every save with a toast the owner could not act on. The error now names the DAY too and JUMPS to the offending class: sets _schedSelDow + _schedEdit, re-renders, shows the inline error and focuses/scrolls its capacity field; if that weekday already passed this week (past days are read-only) it steps to next week and retries. (2) CLUB PROFILE SCHEDULE: levelsPresent mapped ONLY CLASS_LEVELS, so classes using a club's CUSTOM level (gymCustomLevels) were silently dropped from the public schedule. Now the standard levels render first (stable order) and any other level actually present in occs is appended, so no class type can ever be hidden. ('kids' and 'sparring' are standard and were already included -- the kids class most likely never saved because of bug 1.) (3) CANCELLATION REASON: only the membership 'excuse' flow ever asked for a reason; unreserveClass and cancelGymDropin (drop-in AND QR/PIS) cancelled silently. Added a shared _askCancelReason() modal (EXCUSE_REASONS chips + optional note, both optional) wired into both, plus _notifyCancelReason() which tells the class coach (or club owner) via the existing gym_member_excused notification. NOTE: cohorts have NO student-side cancellation at all, so there is nothing there to attach a reason to yet. (4) 15+ HANDOVER: the 'move to own account' button already exists in Rodina and is highlighted once the child reaches the consent age, but the threshold came from _consentAge(profile country) which DEFAULTS TO 16 when no country is set -- so a 15-year-old CZ child showed no button at all. New _consentAgeForMe() resolves the country from profile -> club -> UI language -> browser locale before falling back. VERIFIED (unchanged, reported to Petr): the migration transfers BELTS (merged) and re-points GYM_ATTENDANCE (so XP/history follow), but does NOT re-point gym_memberships, gym_class_reservations, cohort_members or gym_bookings -- the child's active pass stays on the parent's account as a child_name row, because moving it would move the payment relationship (Stripe subscription is on the parent). Petr's call. Deploy: index.html only. -->
+<!-- MTL build: SEK corrects SEJ -- per-class validation done right + the reason modal is now the EXISTING one. (1) SEJ's 'jump to the offending class' is REVERTED. Petr is right: saving ONE class must validate only THAT class. saveScheduleOnly() now takes an optional _onlyIdx and the per-class 'Ulozit lekci' button passes its own index, so a different (often invisible) legacy class with no capacity can no longer block any save. Called with no argument it still validates the whole schedule. This also removes SEJ's _schedWeek++ retry, which was the REGRESSION Petr saw: it left the editor parked on a future week, where nothing is in the past, so already-finished classes looked unlocked and editable. The past-lock logic itself (_selPast/_cPast -> editFields suppressed) was never touched and is intact. (2) SEJ built a SECOND reason modal (#cxReasonOv) when one already existed. Removed. _askCancelReason() now DRIVES the existing #excuseOv picker (chips + optional note): shared _excuseChips() + _excuseSetText() helpers, and each opener sets its own title/subtitle/confirm handler -- openExcuse() -> doRelease for the membership excuse, _askCancelReason() -> resolve for the drop-in/QR/PIS and reservation cancels. Backing out (Zpet or backdrop) resolves null via closeExcuse(), and if the modal markup is somehow missing it resolves an empty reason rather than blocking the cancellation. One modal, one set of reasons. Deploy: index.html only. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -8976,15 +8976,19 @@ async function openGymProfile(g){
   loadGymCoursesForProfile(g.id, g);
 }
 const EXCUSE_REASONS=[{k:'nemoc',cs:'🤒 Nemoc',en:'🤒 Sick'},{k:'prace',cs:'💼 Práce',en:'💼 Work'},{k:'zraneni',cs:'🤕 Zranění',en:'🤕 Injury'},{k:'dovolena',cs:'🏖️ Dovolená',en:'🏖️ Holiday'},{k:'jine',cs:'✏️ Jiné',en:'✏️ Other'}];
-let _excuseCtx=null, _excuseSel=null;
+let _excuseCtx=null, _excuseSel=null, _cxResolve=null;
 function openExcuse(g, occ){
   if(!currentUser) return;
-  _excuseCtx={g,occ}; _excuseSel=null;
-  const chips=$('excuseChips'); if(chips){ chips.innerHTML=''; EXCUSE_REASONS.forEach(r=>{ const el=document.createElement('div'); el.className='spec-chip'; el.dataset.k=r.k; el.textContent=LANG==='en'?r.en:r.cs; el.onclick=()=>{ _excuseSel=(_excuseSel===r.k)?null:r.k; chips.querySelectorAll('.spec-chip').forEach(c=>c.classList.toggle('on', c.dataset.k===_excuseSel)); }; chips.appendChild(el); }); }
+  _cxResolve=null; _excuseCtx={g,occ};
+  _excuseSetText(LANG==='en'?'Excuse from class':'Omluva z lekce',
+    LANG==='en'?'Frees your spot. Optionally let the coach know why \u2014 it keeps the relationship good.':'Uvolňuješ místo. Dej koučovi volitelně vědět proč — udrží to dobrý vztah.',
+    LANG==='en'?'Release the spot':'Uvolnit místo');
+  _excuseChips();
   const note=$('excuseNote'); if(note) note.value='';
+  const b=$('excuseConfirm'); if(b) b.onclick=doRelease;
   $('excuseOv').classList.add('open');
 }
-function closeExcuse(){ const o=$('excuseOv'); if(o) o.classList.remove('open'); _excuseCtx=null; }
+function closeExcuse(){ const o=$('excuseOv'); if(o) o.classList.remove('open'); _excuseCtx=null; if(_cxResolve){ const r=_cxResolve; _cxResolve=null; r(null); } }
 async function releaseClass(g, occ){
   if(!currentUser) return;
   // anti-spam: pokud už student jednou uvedl důvod pro TUHLE konkrétní lekci, podruhé už ne → tiché uvolnění
@@ -9074,51 +9078,45 @@ async function reserveClass(g, occ, myMemb, _cleared){
     openGymProfile(g);
   }catch(e){ console.error('reserveClass',e); toast('⚠️ '+e.message); }
 }
-// Optional cancellation reason for EVERY student-side cancellation (reservation, drop-in, QR/PIS
-// booking) — until now only the membership "excuse" flow ever asked, so cancellations paid by
-// QR/PIS or as drop-ins told the club nothing. Resolves {key,text}, or null if they back out.
+// One shared reason picker: this DRIVES THE EXISTING #excuseOv modal (chips + optional note)
+// rather than building a second one. openExcuse() uses it for the membership excuse, and
+// _askCancelReason() for every other student-side cancellation -- each sets its own title,
+// subtitle and confirm handler. Resolves {key,text}, or null if the student backs out.
+function _excuseChips(){
+  const chips=$('excuseChips'); if(!chips) return;
+  chips.innerHTML=''; _excuseSel=null;
+  EXCUSE_REASONS.forEach(function(r){
+    const el=document.createElement('div'); el.className='spec-chip'; el.dataset.k=r.k;
+    el.textContent=(LANG==='en'?r.en:r.cs);
+    el.onclick=function(){ _excuseSel=(_excuseSel===r.k)?null:r.k; chips.querySelectorAll('.spec-chip').forEach(function(c){ c.classList.toggle('on', c.dataset.k===_excuseSel); }); };
+    chips.appendChild(el);
+  });
+}
+function _excuseSetText(title, sub, btnLabel){
+  const ov=$('excuseOv'); if(!ov) return;
+  const t=ov.querySelector('.picker-title'); if(t) t.textContent=title;
+  const p=ov.querySelector('p'); if(p) p.textContent=sub;
+  const b=$('excuseConfirm'); if(b) b.textContent=btnLabel;
+}
 function _askCancelReason(opts){
   opts=opts||{}; const EN=LANG==='en';
   return new Promise(function(resolve){
-    let ov=document.getElementById('cxReasonOv'); if(ov) ov.remove();
-    ov=document.createElement('div'); ov.id='cxReasonOv';
-    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100005;display:flex;align-items:center;justify-content:center;padding:20px;';
-    let sel=null;
-    ov.innerHTML='<div style="background:#fff;border-radius:16px;padding:20px;max-width:340px;width:100%;font-family:\'DM Sans\';">'
-      +'<div style="font-size:16px;font-weight:800;margin-bottom:4px;">'+escapeHtml(opts.title||(EN?'Cancel this class?':'Zrušit tuto lekci?'))+'</div>'
-      +(opts.note?('<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:6px;">'+escapeHtml(opts.note)+'</div>'):'')
-      +'<div style="font-size:11px;color:var(--light);font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin:10px 0 6px;">'+(EN?'Reason (optional)':'Důvod (nepovinné)')+'</div>'
-      +'<div id="cxChips" style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:10px;"></div>'
-      +'<textarea id="cxNote" rows="2" maxlength="200" placeholder="'+(EN?'Short note (optional)':'Krátká poznámka (nepovinné)')+'" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:13px;font-family:\'DM Sans\';resize:none;"></textarea>'
-      +'<button id="cxGo" style="width:100%;margin-top:12px;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+escapeHtml(opts.confirmLabel||(EN?'Cancel':'Zrušit'))+'</button>'
-      +'<button id="cxBack" style="width:100%;margin-top:8px;padding:11px;background:none;color:var(--mid);border:none;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Keep it':'Nechat být')+'</button>'
-      +'</div>';
-    document.body.appendChild(ov);
-    const chips=ov.querySelector('#cxChips');
-    const _off='background:var(--surf);border:1px solid var(--border);color:var(--dark);';
-    const _on='background:var(--dark);border:1px solid var(--dark);color:#fff;';
-    try{
-      (EXCUSE_REASONS||[]).forEach(function(r){
-        const el=document.createElement('div');
-        el.style.cssText='padding:6px 11px;border-radius:999px;font-size:12.5px;font-weight:700;cursor:pointer;'+_off;
-        el.textContent=(EN?r.en:r.cs);
-        el.onclick=function(){
-          const was=(sel===r.k);
-          chips.querySelectorAll('div').forEach(function(x){ x.style.cssText='padding:6px 11px;border-radius:999px;font-size:12.5px;font-weight:700;cursor:pointer;'+_off; });
-          if(was){ sel=null; return; }
-          sel=r.k; el.style.cssText='padding:6px 11px;border-radius:999px;font-size:12.5px;font-weight:700;cursor:pointer;'+_on;
-        };
-        chips.appendChild(el);
-      });
-    }catch(e){}
-    const done=function(v){ try{ ov.remove(); }catch(e){} resolve(v); };
-    ov.querySelector('#cxBack').onclick=function(){ done(null); };
-    ov.onclick=function(e){ if(e.target===ov) done(null); };
-    ov.querySelector('#cxGo').onclick=function(){
-      const t=(((ov.querySelector('#cxNote')||{}).value)||'').trim();
-      let lbl=''; try{ const ro=(EXCUSE_REASONS||[]).find(function(r){ return r.k===sel; }); if(ro) lbl=(EN?ro.en:ro.cs); }catch(e){}
-      done({ key:(sel||''), text:(t||lbl||'') });
+    const ov=$('excuseOv');
+    if(!ov){ resolve({ key:'', text:'' }); return; }   // never block the cancellation itself
+    _excuseCtx=null; _cxResolve=resolve;
+    _excuseSetText(opts.title||(EN?'Cancel the class':'Zrušit lekci'), opts.note||'', opts.confirmLabel||(EN?'Cancel':'Zrušit'));
+    _excuseChips();
+    const note=$('excuseNote'); if(note) note.value='';
+    const b=$('excuseConfirm');
+    if(b) b.onclick=function(){
+      const t=(($('excuseNote')&&$('excuseNote').value)||'').trim();
+      let lbl=''; try{ const ro=EXCUSE_REASONS.find(function(r){ return r.k===_excuseSel; }); if(ro) lbl=(EN?ro.en:ro.cs); }catch(e){}
+      const out={ key:(_excuseSel||''), text:(t||lbl||'') };
+      const r=_cxResolve; _cxResolve=null;
+      ov.classList.remove('open');
+      if(r) r(out);
     };
+    ov.classList.add('open');
   });
 }
 // Tell the class coach (or the club owner) that a student cancelled, with their optional reason.
@@ -15738,7 +15736,7 @@ function renderPlansEditor(){
   box.querySelectorAll('.planAgeMax').forEach(el=>el.oninput=()=>{ _gymPlans[+el.dataset.i].ageMax=el.value===''?null:(parseInt(el.value)||0); });
   box.querySelectorAll('.planParentReq').forEach(el=>el.onchange=()=>{ _gymPlans[+el.dataset.i].parentReq=el.checked; });
 }
-async function saveScheduleOnly(){
+async function saveScheduleOnly(_onlyIdx){
   if(!_myGymData) return;
   // Capacity is now REQUIRED per class. It used to be optional with gyms.capacity as a fallback —
   // and if BOTH were empty the class was effectively unlimited, so 40 people could book a mat that
@@ -15746,31 +15744,14 @@ async function saveScheduleOnly(){
   // Sync every capacity field from the DOM first: a pre-filled value the owner never TOUCHED never
   // fired oninput, so _gymSchedule[i].cap stayed null and save falsely reported 'fill in capacity'.
   try{ document.querySelectorAll('.schCap').forEach(function(el){ const i=+el.dataset.i; if(_gymSchedule[i]){ const v=parseInt(el.value,10); _gymSchedule[i].cap=(v>0?v:null); } }); }catch(e){}
-  { const _noCap=_gymSchedule.findIndex(c=>!(Number(c.cap)>0));
+  { const _noCap=(_onlyIdx!=null)
+      ? ((!(Number((_gymSchedule[_onlyIdx]||{}).cap)>0)) ? _onlyIdx : -1)
+      : _gymSchedule.findIndex(c=>!(Number(c.cap)>0));
     if(_noCap>=0){
-      const _c=_gymSchedule[_noCap];
-      // The editor only renders ONE day and expands ONE class, so the offending class is usually
-      // invisible (different day / collapsed) and the owner had no way to know what to fix -- every
-      // save was blocked by a legacy class with no capacity. Name the day AND jump straight to it.
-      const _dnm=(function(){ try{ return dayNames()[Number(_c.day)]||''; }catch(e){ return ''; } })();
+      const _c=_gymSchedule[_noCap]||{};
       toast(LANG==='en'
-        ? `⚠️ Set a max capacity for "${(_c.name||levelLabel(_c.level||'all'))}" (${_dnm} ${_c.time||''})`
-        : `⚠️ Vyplň max. kapacitu u lekce „${(_c.name||levelLabel(_c.level||'all'))}" (${_dnm} ${_c.time||''})`);
-      try{
-        _schedSelDow=Number(_c.day); _schedEdit=_noCap; renderScheduleEditor();
-        const _focus=function(){
-          const inp=document.querySelector('.schCap[data-i="'+_noCap+'"]');
-          const er=document.querySelector('.schCapErr[data-i="'+_noCap+'"]');
-          if(er) er.style.display='block';
-          if(inp){ inp.style.borderColor='var(--red)'; try{ inp.focus(); inp.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} return true; }
-          return false;
-        };
-        setTimeout(function(){
-          // Not rendered => that weekday already passed this week (past days are read-only), so
-          // step to next week where the same class is editable again.
-          if(!_focus()){ try{ _schedWeek=(Number(_schedWeek)||0)+1; renderScheduleEditor(); setTimeout(_focus,60); }catch(e){} }
-        },60);
-      }catch(e){}
+        ? `⚠️ Set a max capacity for "${(_c.name||levelLabel(_c.level||'all'))}" (${_c.time||''})`
+        : `⚠️ Vyplň max. kapacitu u lekce „${(_c.name||levelLabel(_c.level||'all'))}" (${_c.time||''})`);
       return;
     } }
   const sched = JSON.stringify(_gymSchedule.map(c=>({ ...c, name: (c.name&&String(c.name).trim()) ? c.name.trim() : levelLabel(c.level||'all') })));
@@ -15929,7 +15910,7 @@ function renderScheduleEditor(){
       const inp=box.querySelector('.schCap[data-i="'+i+'"]'); if(inp){ inp.style.borderColor='var(--red)'; try{ inp.focus(); inp.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} }
       return;
     }
-    saveScheduleOnly();
+    saveScheduleOnly(i);
   });
   box.querySelectorAll('.schKids').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].kids=el.checked; renderScheduleEditor(); });
   box.querySelectorAll('.schAgeMin').forEach(el=>el.oninput=()=>{ _gymSchedule[+el.dataset.i].ageMin=el.value===''?null:(parseInt(el.value)||0); });
