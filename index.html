@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SEK corrects SEJ -- per-class validation done right + the reason modal is now the EXISTING one. (1) SEJ's 'jump to the offending class' is REVERTED. Petr is right: saving ONE class must validate only THAT class. saveScheduleOnly() now takes an optional _onlyIdx and the per-class 'Ulozit lekci' button passes its own index, so a different (often invisible) legacy class with no capacity can no longer block any save. Called with no argument it still validates the whole schedule. This also removes SEJ's _schedWeek++ retry, which was the REGRESSION Petr saw: it left the editor parked on a future week, where nothing is in the past, so already-finished classes looked unlocked and editable. The past-lock logic itself (_selPast/_cPast -> editFields suppressed) was never touched and is intact. (2) SEJ built a SECOND reason modal (#cxReasonOv) when one already existed. Removed. _askCancelReason() now DRIVES the existing #excuseOv picker (chips + optional note): shared _excuseChips() + _excuseSetText() helpers, and each opener sets its own title/subtitle/confirm handler -- openExcuse() -> doRelease for the membership excuse, _askCancelReason() -> resolve for the drop-in/QR/PIS and reservation cancels. Backing out (Zpet or backdrop) resolves null via closeExcuse(), and if the modal markup is somehow missing it resolves an empty reason rather than blocking the cancellation. One modal, one set of reasons. Deploy: index.html only. -->
+<!-- MTL build: SEO course ATTENDANCE on the existing system + cohort schedule versioning. CORRECTION: cohort attendance had NOT been built (no cohort_attendance table anywhere, no gym_attendance write carried a cohort, the roster had none, and the course card in the club day view was read-only). Built now, deliberately on the SAME system as normal classes rather than beside it. (1) ATTENDANCE: the course card in the schedule day view gets the same Attendance button as a class; it opens the existing openClassAttendance() sheet with a cohort occurrence (cocc rows now carry date + dur alongside cohortId). When occ.cohortId is set the expected-attendee list comes from cohort_members (deposit_paid/enrolled/completed/converted) instead of gym_memberships -- the exact role a membership plays for a normal class. Same gym_attendance table, same toggleAttendance, so XP, streaks, milestones and stats all work with zero extra code. (2) ACCOUNT-LESS ATTENDEES: course participants can sign up by e-mail without an account (student_id null), and the sheet previously refused to tick anyone without a sid. Attendance is now keyed by student_id OR, when there is none, by name: presentSet/attRow use _whoKey(sid,name), toggleAttendance inserts student_id null + student_name and deletes with .is('student_id',null).eq('student_name',...). Also fixes data-sid rendering as the STRING 'null' (truthy) for such rows. This benefits paid drop-in guests too, who had the same limitation. Milestone/rating notifications stay guarded on a real sid. (3) COHORT SCHEDULE VERSIONING -- now mandatory, because sessions carry attendance keyed date|time|name. Editing an already-started cohort's schedule closes every current row with `until` and starts the new ones with `since` (_cohVersionedSchedule), with the same precise boundary as the gym: if a session already ran today the old version keeps today and the new starts tomorrow, otherwise the new applies from today. A cohort that has not started, or an unchanged schedule, is left exactly as it was. The edit form snapshots the full original (window._cohSchedOrig) but only ever LISTS rows that still run, and creating a new cohort clears the snapshot. cohortOccurrences() needed no change -- it delegates to upcomingClasses(), which already honours since/until from SEM. Verified with 5 scenarios: retimed running course keeps its past and moves its future; not-yet-started overwrites plainly; an unchanged schedule is untouched; a day added after today's session already ran takes effect tomorrow; a second edit preserves the first version. Deploy: index.html only. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -9721,7 +9721,7 @@ function upcomingClasses(schedule, days, backDays){
     const date=new Date(now); date.setDate(now.getDate()+d);
     const dow=date.getDay();
     const _ld=date.getFullYear()+'-'+String(date.getMonth()+1).padStart(2,'0')+'-'+String(date.getDate()).padStart(2,'0');
-    (schedule||[]).filter(c=> c.once ? (c.date===_ld) : (Number(c.day)===dow && (!c.since || _ld>=c.since))).forEach(c=>{
+    (schedule||[]).filter(c=> c.once ? (c.date===_ld) : (Number(c.day)===dow && (!c.since || _ld>=c.since) && (!c.until || _ld<=c.until))).forEach(c=>{
       if(d===0 && !backDays){ const [h,mi]=String(c.time||'00:00').split(':').map(Number); const ct=new Date(date); ct.setHours(h||0,mi||0,0,0); if(ct<now) return; }
       const _ovK=_ld+'|'+(c.time||'')+'|'+(c.name||''); const _ovR=(typeof window!=='undefined'&&window._occOverride&&window._occOverride[_ovK])||null;
       out.push({ name:c.name, cap:(c.cap!=null?Number(c.cap):null), cancelled:!!(typeof window!=='undefined'&&window._cancelledOcc&&window._cancelledOcc.has(_ld+'|'+(c.time||'')+'|'+(c.name||''))), date:_ld, time:c.time, dur:Number(c.dur)||60, level:c.level||'all', coach:(_ovR?_ovR.coach:(c.coach||null)), coachName:(_ovR?_ovR.coachName:(c.coachName||null)), leader:(_ovR?_ovR.leader:((c.leader||c.coach)||null)), leaderName:(_ovR?_ovR.leaderName:((c.leaderName||c.coachName)||null)), disc:c.disc||null, kids:((!!c.kids)||(c.level==='kids')), ageMin:(c.ageMin!=null?c.ageMin:null), ageMax:(c.ageMax!=null?c.ageMax:null), parentReq:!!c.parentReq, altPlace:(c.altPlace||null), altAddr:(c.altAddr||null), cancelled: !!(window._cancelledOcc && window._cancelledOcc.has(_ld+'|'+(c.time||'')+'|'+(c.name||''))) });
@@ -11853,7 +11853,7 @@ function _cohShowCreate(keep){
   if(!_cohCtx) return;
   const box=$('cohBody'); if(!box) return; const EN=LANG==='en'; const cur=_cohCtx.currency; const sym=_curSym(cur);
   if($('cohNewBtn')) $('cohNewBtn').style.display='none'; if($('cohIntro')) $('cohIntro').style.display='none';
-  if(!keep){ window._cohSched=[]; window._cohPoster=null; }
+  if(!keep){ window._cohSched=[]; window._cohPoster=null; window._cohSchedOrig=null; window._cohEditStart=null; }
   _cohDisc=[];
   const inp='width:100%;box-sizing:border-box;min-width:0;max-width:100%;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;margin-bottom:10px;';
   const lbl='font-size:12px;font-weight:700;color:var(--mid);display:block;margin-bottom:4px;';
@@ -12029,7 +12029,7 @@ async function _cohSave(){
       toast(EN?('A '+months+'-month course can end on '+_xm+' at the latest (max +1 month)'):(months+'měsíční kurz může končit nejpozději '+_xm+' (max +1 měsíc)')); return;
     }
   }
-  const rec={ gym_id:_cohCtx.gymId, owner_id:_cohCtx.ownerId, stripe_account:_cohCtx.stripeAccount||null, name:name, discipline:(_cohDisc[0]||null), start_date:g('cohStart')||null, end_date:g('cohEnd')||null, months:months, capacity:parseInt(g('cohCap'),10)||null, deposit_amount:parseFloat(g('cohDep'))||0, price_tiers:_cohTiers(), price_student:(function(){ var st=_cohTiers().find(function(t){ return /student/i.test(t.name||''); }); return st?st.price:0; })(), price_regular:(parseFloat(g('cohPR'))||0), currency:_cohCtx.currency, gym_meta_pixel:g('cohPixel')||null, capi_token:g('cohCapiToken')||null, description:g('cohDesc')||null, schedule:(window._cohSched||[]), schedule_note:(cohScheduleSummary(window._cohSched||[])||g('cohSchedNote')||null), poster:(window._cohPoster||null), private:!!($('cohPrivate')&&$('cohPrivate').checked), status:'open' };
+  const rec={ gym_id:_cohCtx.gymId, owner_id:_cohCtx.ownerId, stripe_account:_cohCtx.stripeAccount||null, name:name, discipline:(_cohDisc[0]||null), start_date:g('cohStart')||null, end_date:g('cohEnd')||null, months:months, capacity:parseInt(g('cohCap'),10)||null, deposit_amount:parseFloat(g('cohDep'))||0, price_tiers:_cohTiers(), price_student:(function(){ var st=_cohTiers().find(function(t){ return /student/i.test(t.name||''); }); return st?st.price:0; })(), price_regular:(parseFloat(g('cohPR'))||0), currency:_cohCtx.currency, gym_meta_pixel:g('cohPixel')||null, capi_token:g('cohCapiToken')||null, description:g('cohDesc')||null, schedule:_cohVersionedSchedule(), schedule_note:(cohScheduleSummary(window._cohSched||[])||g('cohSchedNote')||null), poster:(window._cohPoster||null), private:!!($('cohPrivate')&&$('cohPrivate').checked), status:'open' };
   const btn=$('cohSave'); if(btn){ btn.disabled=true; btn.textContent=(EN?'Saving...':'Ukládám...'); }
   const _editId=window._cohEditId||null;
   try{
@@ -12063,6 +12063,10 @@ async function _cohEdit(cohortId){
   window._cohEditId=cohortId;
   let _tiers=[]; try{ _tiers=Array.isArray(c.price_tiers)?c.price_tiers:(JSON.parse(c.price_tiers||'[]')); }catch(e){ _tiers=[]; }
   let _sched=[]; try{ _sched=Array.isArray(c.schedule)?c.schedule:(JSON.parse(c.schedule||'[]')); }catch(e){ _sched=[]; }
+  // keep the FULL history for versioning, but only ever show the rows that still run
+  try{ window._cohSchedOrig=JSON.parse(JSON.stringify(_sched)); }catch(e){ window._cohSchedOrig=_sched.slice(); }
+  window._cohEditStart=c.start_date||null;
+  { const _t=_rcToday(); _sched=_sched.filter(function(r){ return !(r && r.until && r.until<_t); }); }
   const _hasVariants=_tiers.length>1 || (_tiers.length===1 && (_tiers[0].name||'').trim());
   const keep={
     cohName:c.name||'', cohStart:c.start_date||'', cohEnd:c.end_date||'', cohMonths:c.months||2,
@@ -13671,7 +13675,7 @@ async function loadGymRoster(){
     const dd=new Date(o.date);
     const lvl=(o.level&&o.level!=='all')?` · ${levelLabel(o.level)}`:'';
     const attRow=(a)=>{ const present=a.sid?presentSet.has(`${o.date}|${o.time}|${o.name||''}|${a.sid}|${a.child||''}`):false;
-      const chk = a.sid ? `<button class="attChk" data-sid="${a.sid}" data-name="${esc(a.name)}" data-date="${o.date}" data-time="${o.time}" data-cn="${esc(o.name||'')}" data-coach="${o.coach||''}" data-disc="${esc(o.disc||'')}" data-child="${esc(a.child||'')}" data-present="${present?1:0}" style="margin-left:auto;flex-shrink:0;width:26px;height:26px;border-radius:50%;border:1.5px solid ${present?'#006040':'var(--border)'};background:${present?'#006040':'transparent'};color:#fff;font-size:13px;font-weight:700;cursor:pointer;">${present?'✓':''}</button>` : '';
+      const chk = a.sid ? `<button class="attChk" data-sid="${a.sid||''}" data-name="${esc(a.name)}" data-date="${o.date}" data-time="${o.time}" data-cn="${esc(o.name||'')}" data-coach="${o.coach||''}" data-disc="${esc(o.disc||'')}" data-child="${esc(a.child||'')}" data-present="${present?1:0}" style="margin-left:auto;flex-shrink:0;width:26px;height:26px;border-radius:50%;border:1.5px solid ${present?'#006040':'var(--border)'};background:${present?'#006040':'transparent'};color:#fff;font-size:13px;font-weight:700;cursor:pointer;">${present?'✓':''}</button>` : '';
       return `<div style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--dark);padding:4px 0;">• ${a.name}${a.pill}${chk}</div>`; };
     const excusedHtml = excused.length ? `<div style="margin-top:8px;border-top:1px dashed var(--border);padding-top:8px;"><div style="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:4px;">📋 ${LANG==='en'?'Excused':'Omluveni'} (${excused.length})</div>${excused.map(r=>`<div style="font-size:13px;color:var(--dark);padding:3px 0;">• ${escapeHtml(r.student_name||(LANG==='en'?'Member':'Člen'))}${r.reason?` <span style="color:var(--mid);">— ${escapeHtml(r.reason)}</span>`:''}</div>`).join('')}</div>` : '';
     return `<div style="border:1px solid var(--border);border-radius:12px;padding:11px;margin-bottom:8px;">
@@ -13692,10 +13696,12 @@ async function toggleAttendance(d){
   const present = d.present==='1';
   try{
     if(present){
-      let _dq=supaClient.from('gym_attendance').delete().eq('gym_id', gid).eq('student_id', d.sid).eq('class_date', d.date).eq('class_time', d.time).eq('class_name', d.cn||null); _dq=d.child?_dq.eq('child_name', d.child):_dq.is('child_name', null); await _dq;
+      let _dq=supaClient.from('gym_attendance').delete().eq('gym_id', gid).eq('class_date', d.date).eq('class_time', d.time).eq('class_name', d.cn||null);
+      _dq = d.sid ? _dq.eq('student_id', d.sid) : _dq.is('student_id', null).eq('student_name', d.name||'');
+      _dq=d.child?_dq.eq('child_name', d.child):_dq.is('child_name', null); await _dq;
       toast(LANG==='en'?'Unmarked':'Odznačeno');
     } else {
-      await supaClient.from('gym_attendance').insert({ gym_id:gid, student_id:d.sid, student_name:(d.child||d.name||null), child_name:d.child||null, class_name:d.cn||null, class_date:d.date||null, class_time:d.time||null, coach_id:d.coach||null, discipline:d.disc||null, marked_by:currentUser?currentUser.id:null });
+      await supaClient.from('gym_attendance').insert({ gym_id:gid, student_id:d.sid||null, student_name:(d.child||d.name||null), child_name:d.child||null, class_name:d.cn||null, class_date:d.date||null, class_time:d.time||null, coach_id:d.coach||null, discipline:d.disc||null, marked_by:currentUser?currentUser.id:null });
       toast(LANG==='en'?'✓ Checked in':'✓ Označeno jako přítomen');
       try{
         let _cq=supaClient.from('gym_attendance').select('id',{count:'exact',head:true}).eq('gym_id', gid).eq('student_id', d.sid); _cq=d.child?_cq.eq('child_name', d.child):_cq.is('child_name', null); const { count } = await _cq;
@@ -13771,10 +13777,18 @@ async function openClassAttendance(occ){
   try{ const { data } = await supaClient.from('gym_class_reservations').select('*').eq('gym_id',gid).eq('class_date',occ.date); rs=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_bookings').select('student_id,student_name,class_date,class_time,class_name,status,child_name,child_age').eq('gym_id',gid).eq('status','active').eq('class_date',occ.date); drops=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_memberships').select('student_id,student_name,plan_access,coach_id,status,child_name,child_age,discipline').eq('gym_id',gid).in('status',['active','cancelling']); mems=data||[]; }catch(e){}
-  try{ const { data } = await supaClient.from('gym_attendance').select('student_id,class_date,class_time,class_name,child_name').eq('gym_id',gid).eq('class_date',occ.date); att=data||[]; }catch(e){}
+  try{ const { data } = await supaClient.from('gym_attendance').select('student_id,student_name,class_date,class_time,class_name,child_name').eq('gym_id',gid).eq('class_date',occ.date); att=data||[]; }catch(e){}
+  // A COURSE session: the people who belong there are the paid-up cohort members, exactly the way
+  // a membership auto-fills a normal class. Same gym_attendance table, same toggle, same XP.
+  let cohMems=null;
+  if(occ.cohortId){
+    cohMems=[];
+    try{ const { data } = await supaClient.from('cohort_members').select('student_id,name,email,status').eq('cohort_id',occ.cohortId).in('status',['deposit_paid','enrolled','completed','converted']); cohMems=data||[]; }catch(e){}
+  }
   const accOf=(m)=>{ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
   const rk=(r)=>`${r.class_date}|${r.class_time}|${r.class_name}`;
-  const presentSet=new Set(att.map(a=>`${a.class_date}|${a.class_time}|${a.class_name||''}|${a.student_id}|${a.child_name||''}`));
+  const _whoKey=(sid,nm)=> sid?String(sid):('n:'+String(nm||''));
+  const presentSet=new Set(att.map(a=>`${a.class_date}|${a.class_time}|${a.class_name||''}|`+_whoKey(a.student_id,a.student_name)+'|'+(a.child_name||'')));
   const tagPill=(t,c)=>`<span style="font-size:10px;font-weight:700;color:${c};background:${c}1a;border-radius:6px;padding:1px 6px;margin-left:6px;">${t}</span>`;
   const esc=v=>String(v||'').replace(/"/g,'&quot;');
   const _pk=(x)=>String(x.student_id)+'|'+(x.child_name||'');
@@ -13785,7 +13799,8 @@ async function openClassAttendance(occ){
   const explicit=rs.filter(r=> r.status!=='released' && rk(r)===k && !autoIds.has(_pk(r)));
   const excused=rs.filter(r=> r.status==='released' && rk(r)===k);
   const _kpill=tagPill(EN?'kid':'dítě','#9A5B00');
-  const attendees=[
+  const _cpill=tagPill(EN?'course':'kurz','#5B3FB0');
+  const attendees=cohMems ? cohMems.map(function(m){ return { sid:m.student_id||null, name:(m.name||m.email||(EN?'Participant':'Účastník')), pill:_cpill }; }) : [
     ...auto.map(m=>(m.child_name?{sid:m.student_id, child:m.child_name, name:kidEmoji(m.child_age)+' '+m.child_name, pill:_kpill}:{sid:m.student_id, name:m.student_name||(EN?'Member':'Člen'), pill:tagPill(EN?'member':'členství','#006040')})),
     ...explicit.map(r=>(r.child_name?{sid:r.student_id, child:r.child_name, name:kidEmoji(r.child_age)+' '+r.child_name, pill:_kpill}:{sid:r.student_id, name:r.student_name||(EN?'Member':'Člen'), pill:tagPill(EN?'reserved':'rezervace','#1E6FD9')})),
     ...dropList.map(d=>(d.child_name?{sid:d.student_id, child:d.child_name, name:kidEmoji(d.child_age)+' '+d.child_name, pill:_kpill}:{sid:d.student_id, name:d.student_name||'Student', pill:tagPill(EN?'drop-in':'jednoráz','#C0392B')}))
@@ -13803,8 +13818,8 @@ async function openClassAttendance(occ){
   if(_logStatus==='cancelled'){ html+=`<div style="background:#FEECEC;border:1px solid #F3C9C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-weight:700;font-size:14px;color:var(--red);">${EN?'✕ Marked: class did not take place':'✕ Označeno: lekce neproběhla'}</div>`; }
   else if(_logStatus==='held'){ html+=`<div style="background:#F0FBF0;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-weight:700;font-size:14px;color:#006040;">${EN?'✅ Marked: class took place':'✅ Označeno: lekce proběhla'}</div>`; }
   else if(!_roLock && isPast && !hasAtt){ html+=`<div id="caHappenedBanner" style="background:#FFFBEF;border:1px solid #F5C842;border-radius:12px;padding:13px 14px;margin-bottom:12px;"><div style="font-weight:800;font-size:14px;color:#9a7400;margin-bottom:8px;">${EN?'Did this class take place?':'Proběhla tato lekce?'}</div><div style="display:flex;gap:8px;"><button id="caHappenedYes" style="flex:1;padding:11px;background:var(--green);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;">${EN?'✅ Yes':'✅ Ano'}</button><button id="caHappenedNo" style="flex:1;padding:11px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;">${EN?'❌ No':'❌ Neproběhla'}</button></div><div style="font-size:11.5px;color:var(--mid);margin-top:8px;line-height:1.5;">${EN?'Yes — check in who attended below. No — logged as not held.':'Ano — odbav níže, kdo dorazil. Ne — zaloguje se jako neproběhlá.'}</div></div>`; }
-  const attRow=(a)=>{ const present=a.sid?presentSet.has(`${occ.date}|${occ.time}|${occ.name||''}|${a.sid}|${a.child||''}`):false;
-    const chk=(!_roLock && a.sid&&started)?`<button class="caChk" data-sid="${a.sid}" data-name="${esc(a.name)}" data-date="${occ.date}" data-time="${occ.time}" data-cn="${esc(occ.name||'')}" data-coach="${occ.coach||''}" data-disc="${esc(occ.disc||'')}" data-child="${esc(a.child||'')}" data-present="${present?1:0}" style="margin-left:auto;flex-shrink:0;width:28px;height:28px;border-radius:50%;border:1.5px solid ${present?'#006040':'var(--border)'};background:${present?'#006040':'transparent'};color:#fff;font-size:14px;font-weight:700;cursor:pointer;">${present?'✓':''}</button>`:'';
+  const attRow=(a)=>{ const present=presentSet.has(`${occ.date}|${occ.time}|${occ.name||''}|`+_whoKey(a.sid,a.name)+'|'+(a.child||''));
+    const chk=(!_roLock && started)?`<button class="caChk" data-sid="${a.sid||''}" data-name="${esc(a.name)}" data-date="${occ.date}" data-time="${occ.time}" data-cn="${esc(occ.name||'')}" data-coach="${occ.coach||''}" data-disc="${esc(occ.disc||'')}" data-child="${esc(a.child||'')}" data-present="${present?1:0}" style="margin-left:auto;flex-shrink:0;width:28px;height:28px;border-radius:50%;border:1.5px solid ${present?'#006040':'var(--border)'};background:${present?'#006040':'transparent'};color:#fff;font-size:14px;font-weight:700;cursor:pointer;">${present?'✓':''}</button>`:'';
     return `<div style="display:flex;align-items:center;gap:6px;font-size:14px;color:var(--dark);padding:7px 2px;border-bottom:1px solid var(--border);">• ${escapeHtml(a.name)}${a.pill}${chk}${(!a.sid)?('<span style="margin-left:auto;font-size:11px;color:#0A7A4F;background:#EAF7F0;border-radius:8px;padding:3px 8px;font-weight:700;white-space:nowrap;">'+((LANG==='en')?'paid · guest':'zaplaceno · host')+'</span>'):''}</div>`; };
   const _ocOwner = _myGymData && currentUser && _myGymData.owner_id===currentUser.id;
   let _ocOvHtml='';
@@ -13893,7 +13908,7 @@ async function loadCoachRoster(gymId, gymName){
     const n=attendees.length; const dd=new Date(o.date);
     const lvl=(o.level&&o.level!=='all')?` · ${levelLabel(o.level)}`:'';
     const attRow=(a)=>{ const present=a.sid?presentSet.has(`${o.date}|${o.time}|${o.name||''}|${a.sid}|${a.child||''}`):false;
-      const chk = a.sid ? `<button class="attChk" data-sid="${a.sid}" data-name="${esc(a.name)}" data-date="${o.date}" data-time="${o.time}" data-cn="${esc(o.name||'')}" data-coach="${o.coach||''}" data-disc="${esc(o.disc||'')}" data-child="${esc(a.child||'')}" data-present="${present?1:0}" data-gymid="${gymId}" data-gname="${gn}" style="margin-left:auto;flex-shrink:0;width:26px;height:26px;border-radius:50%;border:1.5px solid ${present?'#006040':'var(--border)'};background:${present?'#006040':'transparent'};color:#fff;font-size:13px;font-weight:700;cursor:pointer;">${present?'✓':''}</button>` : '';
+      const chk = a.sid ? `<button class="attChk" data-sid="${a.sid||''}" data-name="${esc(a.name)}" data-date="${o.date}" data-time="${o.time}" data-cn="${esc(o.name||'')}" data-coach="${o.coach||''}" data-disc="${esc(o.disc||'')}" data-child="${esc(a.child||'')}" data-present="${present?1:0}" data-gymid="${gymId}" data-gname="${gn}" style="margin-left:auto;flex-shrink:0;width:26px;height:26px;border-radius:50%;border:1.5px solid ${present?'#006040':'var(--border)'};background:${present?'#006040':'transparent'};color:#fff;font-size:13px;font-weight:700;cursor:pointer;">${present?'✓':''}</button>` : '';
       return `<div style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--dark);padding:4px 0;">• ${a.name}${a.pill}${chk}</div>`; };
     const excusedHtml = excused.length ? `<div style="margin-top:8px;border-top:1px dashed var(--border);padding-top:8px;"><div style="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:4px;">📋 ${LANG==='en'?'Excused':'Omluveni'} (${excused.length})</div>${excused.map(r=>`<div style="font-size:13px;color:var(--dark);padding:3px 0;">• ${escapeHtml(r.student_name||(LANG==='en'?'Member':'Člen'))}${r.reason?` <span style="color:var(--mid);">— ${escapeHtml(r.reason)}</span>`:''}</div>`).join('')}</div>` : '';
     return `<div style="border:1px solid var(--border);border-radius:12px;padding:11px;margin-bottom:8px;">
@@ -15746,7 +15761,7 @@ async function saveScheduleOnly(_onlyIdx){
   try{ document.querySelectorAll('.schCap').forEach(function(el){ const i=+el.dataset.i; if(_gymSchedule[i]){ const v=parseInt(el.value,10); _gymSchedule[i].cap=(v>0?v:null); } }); }catch(e){}
   { const _noCap=(_onlyIdx!=null)
       ? ((!(Number((_gymSchedule[_onlyIdx]||{}).cap)>0)) ? _onlyIdx : -1)
-      : _gymSchedule.findIndex(c=>!(Number(c.cap)>0));
+      : (function(){ const _t=_rcToday(); return _gymSchedule.findIndex(c=> c && !(c.until && c.until<_t) && !(Number(c.cap)>0)); })();
     if(_noCap>=0){
       const _c=_gymSchedule[_noCap]||{};
       toast(LANG==='en'
@@ -15781,12 +15796,186 @@ async function loadGymSchedSlots(weekDates){
     try{
       const cocc={};
       const { data:cohs } = await supaClient.from('gym_cohorts').select('id,name,discipline,start_date,end_date,months,schedule,status').eq('gym_id',_myGymData.id).in('status',['open','running']);
-      (cohs||[]).forEach(function(c){ let _o=[]; try{ _o=cohortOccurrences(c,{horizonDays:60}); }catch(e){} _o.forEach(function(o){ (cocc[o.date]=cocc[o.date]||[]).push({ name:c.name||'', time:o.time||'', end:(o.time&&o.dur)?_classEnd(o.time,o.dur):null, disc:c.discipline||null, cohortId:c.id }); }); });
+      (cohs||[]).forEach(function(c){ let _o=[]; try{ _o=cohortOccurrences(c,{horizonDays:60}); }catch(e){} _o.forEach(function(o){ (cocc[o.date]=cocc[o.date]||[]).push({ name:c.name||'', date:o.date, time:o.time||'', dur:o.dur||null, end:(o.time&&o.dur)?_classEnd(o.time,o.dur):null, disc:c.discipline||null, cohortId:c.id }); }); });
       Object.keys(cocc).forEach(function(d){ cocc[d].sort(function(a,b){ return String(a.time||'').localeCompare(String(b.time||'')); }); });
       window._gymCohortOcc=cocc;
     }catch(e){ window._gymCohortOcc={}; }
     renderScheduleEditor();
   }catch(e){ window._gymSchedSlots={}; }
+}
+// ── "Opakované lekce": the weekly TEMPLATE, editable in one place ────────────────────────────
+// The schedule below is a per-DATE view derived from this template, which is why editing a class
+// down there fights the past-lock and hides classes sitting on other days. Here the whole week is
+// visible and editable at once. STEP 1 deliberately exposes only the fields that carry no per-date
+// key -- capacity, duration, level, discipline, who leads. Time and name still change in the day
+// view, because per-date cancellations/overrides key on date|time|name and moving them needs the
+// `until` versioning that comes in step 2. One-off classes (c.once) are not part of the template.
+// Deleting a class is the same decision wherever it is triggered from, so both the day view and
+// the recurring list call this. One-off classes just vanish; a recurring one takes all its future
+// occurrences with it (a SINGLE date is cancelled from Attendance instead).
+// The day view is a per-DATE surface: attendance, a stand-in coach, cancelling one occurrence.
+// A recurring class's settings belong to the template, so instead of the full edit form it now gets
+// this panel pointing at 'Opakovane lekce'. One-off classes keep the full form -- for them the
+// single date IS the class.
+function _occPanel(c,i){
+  const EN=LANG==='en';
+  return '<div style="margin-top:9px;padding-top:9px;border-top:1px dashed var(--border);font-size:12.5px;color:var(--mid);line-height:1.55;">'
+    +(EN?'This class repeats weekly. Name, time, capacity and the rest live in <strong>Recurring classes</strong> \u2014 here you handle just this date: attendance, a stand-in coach or cancelling this one occurrence, all under <strong>Attendance</strong> above.'
+        :'Tato lekce se opakuje t\u00fddn\u011b. N\u00e1zev, \u010das, kapacitu a zbytek nastav\u00ed\u0161 v <strong>Opakovan\u00fdch lekc\u00edch</strong> \u2014 tady \u0159e\u0161\u00ed\u0161 jen tenhle term\u00edn: doch\u00e1zku, n\u00e1hradn\u00edho kou\u010de nebo zru\u0161en\u00ed jednoho term\u00ednu, v\u0161e pod <strong>Doch\u00e1zkou</strong> v\u00fd\u0161e.')
+    +'<button class="schToRecur" data-i="'+i+'" style="width:100%;margin-top:10px;padding:10px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">\ud83d\udd01 '
+    +(EN?'Edit in Recurring classes':'Upravit v Opakovan\u00fdch lekc\u00edch')+'</button></div>';
+}
+function _schDeleteClass(i){
+  const c=_gymSchedule[i]; if(!c) return; const EN=LANG==='en';
+  if(c.once){ _gymSchedule.splice(i,1); _schedEdit=-1; renderScheduleEditor(); return; }
+  const _nm=(c.name||levelLabel(c.level||'all'))+' \u00b7 '+(c.time||'');
+  const _msg=EN
+    ? ('Delete the recurring class "'+_nm+'"?\n\nOK = remove it and ALL upcoming occurrences.\nCancel = keep it (you can cancel a single date from Attendance).')
+    : ('Smazat opakovanou lekci \u201e'+_nm+'"?\n\nOK = smazat ji i V\u0160ECHNY nadch\u00e1zej\u00edc\u00ed term\u00edny.\nZru\u0161it = ponechat (jednotliv\u00fd term\u00edn zru\u0161\u00ed\u0161 v Doch\u00e1zce).');
+  if(!confirm(_msg)) return;
+  _gymSchedule.splice(i,1); _schedEdit=-1; renderScheduleEditor();
+  toast(EN?'Removed — save to apply':'Odebr\u00e1no \u2014 ulo\u017e pro potvrzen\u00ed');
+}
+// A running course whose sessions already happened must not have its past re-drawn. Now that
+// course sessions carry ATTENDANCE (keyed date|time|name, same as normal classes), changing the
+// schedule of an already-started cohort closes every current row with `until` and starts the new
+// ones with `since` -- exactly like the gym's recurring classes. cohortOccurrences() delegates to
+// upcomingClasses(), which already honours both, so nothing else has to change.
+function _cohVersionedSchedule(){
+  const next=(window._cohSched||[]).map(function(r){ return Object.assign({}, r); });
+  const orig=window._cohSchedOrig;
+  if(!window._cohEditId || !Array.isArray(orig) || !orig.length) return next;
+  const start=window._cohEditStart||null; const today=_rcToday();
+  if(!start || start>=today) return next;              // not started yet -> no history to keep
+  const isLive=function(r){ return !(r.until && r.until<today); };
+  const live=orig.filter(isLive);
+  const norm=function(a){ return (a||[]).map(function(r){ return String(r.day)+'|'+String(r.time||'')+'|'+String(r.dur||''); }).sort().join(','); };
+  if(norm(live)===norm(next)) return orig.slice();      // unchanged -> keep every version as-is
+  const now=new Date();
+  const hh=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+  const ranToday=live.some(function(r){ return Number(r.day)===now.getDay() && String(r.time||'')<=hh; });
+  const endD=new Date(now); endD.setDate(endD.getDate()-(ranToday?0:1));
+  const startD=new Date(now); startD.setDate(startD.getDate()+(ranToday?1:0));
+  const cutEnd=_rcYmd(endD), newSince=_rcYmd(startD);
+  const out=orig.map(function(r){ const c=Object.assign({}, r); if(isLive(c)) c.until=cutEnd; return c; });
+  next.forEach(function(r){ const c=Object.assign({}, r); c.since=newSince; delete c.until; out.push(c); });
+  return out;
+}
+function _rcYmd(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function _rcToday(){ return _rcYmd(new Date()); }
+// Time/name edits are buffered per row until save, so typing a name never spawns a row per keystroke.
+function _pv(i, field, fallback){ try{ const p=(window._rcPending||{})[i]; if(p && p[field]!=null) return p[field]; }catch(e){} return fallback; }
+// Applying a time/name change VERSIONS the class instead of rewriting it: the old row is closed on
+// its last real day (`until`) and a NEW row starts from the first occurrence that has not run yet
+// (`since`). Past occurrences therefore keep rendering exactly as they ran, and their per-date
+// cancellations / coach overrides -- keyed on date|time|name -- stay valid. A class that has never
+// occurred yet is simply edited in place; there is no history worth preserving.
+function _rcApplyPending(){
+  const pend=window._rcPending||{}; const keys=Object.keys(pend);
+  window._rcPending={};
+  if(!keys.length) return 0;
+  const now=new Date(); const today=_rcYmd(now);
+  const hh=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+  let changed=0;
+  keys.forEach(function(k){
+    const i=+k; const c=_gymSchedule[i]; if(!c) return;
+    const p=pend[k]||{};
+    const nt=(p.time!=null && p.time!=='')?p.time:(c.time||'');
+    const nn=(p.name!=null)?p.name:(c.name||'');
+    if(nt===(c.time||'') && nn===(c.name||'')) return;
+    changed++;
+    if(!c.since || c.since>=today){ c.time=nt; c.name=nn; return; }
+    const ranToday=(Number(c.day)===now.getDay()) && String(c.time||'')<=hh;
+    const endD=new Date(now); endD.setDate(endD.getDate()-(ranToday?0:1));
+    const startD=new Date(now); startD.setDate(startD.getDate()+(ranToday?1:0));
+    let copy; try{ copy=JSON.parse(JSON.stringify(c)); }catch(e){ copy=Object.assign({},c); }
+    copy.time=nt; copy.name=nn; copy.since=_rcYmd(startD); delete copy.until;
+    c.until=_rcYmd(endD);
+    _gymSchedule.push(copy);
+  });
+  return changed;
+}
+function _recurBlockHtml(days){
+  const EN=LANG==='en';
+  const _t=_rcToday();
+  const rows=_gymSchedule.map((c,i)=>({c:c,i:i})).filter(x=>x.c && !x.c.once && !(x.c.until && x.c.until < _t));
+  rows.sort(function(a,b){ return (Number(a.c.day)-Number(b.c.day)) || String(a.c.time||'').localeCompare(String(b.c.time||'')); });
+  const open=!!window._rcOpen;
+  let head='<div id="rcHead" style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:var(--surf);">'
+    +'<div style="font-size:13.5px;font-weight:800;">🔁 '+(EN?'Recurring classes':'Opakované lekce')+' <span style="color:var(--light);font-weight:600;">('+rows.length+')</span></div>'
+    +'<div style="color:var(--mid);font-size:13px;font-weight:800;">'+(open?'▾':'▸')+'</div></div>';
+  if(!open) return '<div style="margin-bottom:12px;">'+head+'</div>';
+
+  let body='<div style="border:1px solid var(--border);border-top:none;border-radius:0 0 12px 12px;padding:12px 14px 14px;">'
+    +'<div style="font-size:11.5px;color:var(--light);line-height:1.5;margin-bottom:4px;">'
+    +(EN?'Your weekly plan. Changes apply to upcoming classes only — finished ones keep the name, time and attendance they ran with.'
+        :'Tvůj týdenní plán. Změny platí jen pro nadcházející lekce — už proběhlé si nechají název, čas i docházku, se kterými proběhly.')
+    +'</div>';
+
+  if(!rows.length){
+    body+='<div style="font-size:12.5px;color:var(--light);padding:12px 2px;">'+(EN?'No recurring classes yet.':'Zatím žádné opakované lekce.')+'</div></div>';
+    return '<div style="margin-bottom:12px;">'+head+body+'</div>';
+  }
+
+  const _lab='font-size:10px;color:var(--mid);margin-bottom:3px;font-weight:600;';
+  const _inp="width:100%;box-sizing:border-box;padding:9px 10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';font-size:13px;";
+  let lastDay=null;
+  rows.forEach(function(x){
+    const c=x.c, i=x.i;
+    if(Number(c.day)!==lastDay){
+      lastDay=Number(c.day);
+      body+='<div style="font-size:11px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.04em;margin:14px 0 7px;">'+escapeHtml(days[lastDay]||'')+'</div>';
+    }
+    const title=(c.name&&String(c.name).trim())?c.name:levelLabel(c.level||'all');
+    body+='<div style="border:1px solid var(--border);border-radius:12px;padding:10px 12px;margin-bottom:8px;">'
+      +'<div style="display:flex;gap:8px;margin-bottom:8px;">'
+        +'<div style="width:104px;"><div style="'+_lab+'">'+(EN?'Time':'Čas')+'</div>'
+          +'<input class="rcTime" data-i="'+i+'" type="time" value="'+escapeHtml(String(_pv(i,'time',c.time||'')))+'" style="'+_inp+'"></div>'
+        +'<div style="flex:1;"><div style="'+_lab+'">'+(EN?'Name':'Název')+'</div>'
+          +'<input class="rcName" data-i="'+i+'" type="text" value="'+escapeHtml(String(_pv(i,'name',c.name||'')))+'" placeholder="'+escapeHtml(String(title))+'" style="'+_inp+'"></div>'
+      +'</div>'
+      +'<div style="display:flex;gap:8px;">'
+        +'<div style="flex:1;"><div style="'+_lab+'">'+(EN?'Capacity *':'Kapacita *')+'</div>'
+          +'<input class="rcCap" data-i="'+i+'" type="number" min="1" max="200" inputmode="numeric" value="'+(c.cap!=null?c.cap:'')+'" style="'+_inp+'"></div>'
+        +'<div style="flex:1;"><div style="'+_lab+'">'+(EN?'Length (min)':'Délka (min)')+'</div>'
+          +'<input class="rcDur" data-i="'+i+'" type="number" min="10" max="300" step="5" inputmode="numeric" value="'+(Number(c.dur)||60)+'" style="'+_inp+'"></div>'
+      +'</div>'
+      +'<div style="margin-top:6px;"><div style="'+_lab+'">'+(EN?'Level':'Úroveň')+'</div>'
+        +'<select class="rcLevel" data-i="'+i+'" style="'+_inp+'background:#fff;">'
+        +CLASS_LEVELS.concat(gymCustomTags().map(function(t){ return {v:t,cs:t,en:t}; })).map(function(o){ return '<option value="'+o.v+'" '+(o.v===(c.level||'all')?'selected':'')+'>'+(EN?o.en:o.cs)+'</option>'; }).join('')
+        +'</select></div>';
+    if(isMultiDiscipline()){
+      const _gd=(_gymMgDisc&&_gymMgDisc.length);
+      const _sel=(c.disc && (!_gd||_gymMgDisc.includes(c.disc))) ? c.disc : ((_gd&&_gymMgDisc[0])||defaultDiscipline());
+      body+='<div style="margin-top:6px;"><div style="'+_lab+'">'+(EN?'Discipline':'Disciplína')+'</div>'
+        +'<select class="rcDisc" data-i="'+i+'" style="'+_inp+'background:#fff;">'
+        +discOptsHtml(activeDisciplines().filter(function(o){ return !_gd||_gymMgDisc.includes(o.v); }), _sel)
+        +'</select></div>';
+    }
+    if(!c.coachOwned) body+=classLeadSelectHtml('rcLead', i, c.leader||c.coach)+payeeSelectHtml('rcCoach', i, c.coach);
+    body+='<div style="margin-top:6px;"><div style="'+_lab+'">'+(EN?'Day':'Den')+'</div><select class="rcDay" data-i="'+i+'" style="'+_inp+'background:#fff;">'
+      +[1,2,3,4,5,6,0].map(function(d){ return '<option value="'+d+'" '+(Number(c.day)===d?'selected':'')+'>'+escapeHtml(String(days[d]||''))+'</option>'; }).join('')
+      +'</select></div>';
+    if((c.level||'')==='kids'){
+      body+='<div style="display:flex;gap:8px;margin-top:6px;">'
+        +'<div style="flex:1;"><div style="'+_lab+'">'+(EN?'Age from':'Věk od')+'</div><input class="rcAgeMin" data-i="'+i+'" type="number" min="0" max="18" inputmode="numeric" value="'+(c.ageMin!=null?c.ageMin:'')+'" style="'+_inp+'"></div>'
+        +'<div style="flex:1;"><div style="'+_lab+'">'+(EN?'Age to':'Věk do')+'</div><input class="rcAgeMax" data-i="'+i+'" type="number" min="0" max="18" inputmode="numeric" value="'+(c.ageMax!=null?c.ageMax:'')+'" style="'+_inp+'"></div>'
+      +'</div>'
+      +'<label style="display:flex;align-items:center;gap:7px;margin-top:8px;font-size:12.5px;cursor:pointer;"><input class="rcParentReq" data-i="'+i+'" type="checkbox" '+(c.parentReq?'checked':'')+'> '+(EN?'Requires a parent present':'Vyžaduje přítomnost rodiče')+'</label>';
+    }
+    body+='<label style="display:flex;align-items:center;gap:7px;margin-top:8px;font-size:12.5px;cursor:pointer;"><input class="rcAltTog" data-i="'+i+'" type="checkbox" '+((c.altPlace||c.altAddr)?'checked':'')+'> '+(EN?'Takes place elsewhere':'Koná se na jiné adrese')+'</label>'
+      +'<div class="rcAltBox" data-i="'+i+'" style="display:'+((c.altPlace||c.altAddr)?'block':'none')+';margin-top:6px;">'
+        +'<input class="rcAltPlace" data-i="'+i+'" type="text" value="'+escapeHtml(String(c.altPlace||''))+'" placeholder="'+(EN?'Place name':'Název místa')+'" style="'+_inp+'margin-bottom:6px;">'
+        +'<input class="rcAltAddr" data-i="'+i+'" type="text" value="'+escapeHtml(String(c.altAddr||''))+'" placeholder="'+(EN?'Address':'Adresa')+'" style="'+_inp+'">'
+      +'</div>';
+    body+='<label style="display:flex;align-items:center;gap:7px;margin-top:8px;font-size:12.5px;cursor:pointer;"><input class="rcOnce" data-i="'+i+'" type="checkbox"> '+(EN?'One-off (does not repeat)':'Jednor\u00e1zov\u011b (neopakuje se)')+'</label>';
+    body+='<button class="rcDel" data-i="'+i+'" style="width:100%;margin-top:9px;padding:9px;background:none;color:var(--red);border:1px solid var(--border);border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Delete class':'Smazat lekci')+'</button>';
+    body+='</div>';
+  });
+
+  body+='<button id="rcSave" style="width:100%;margin-top:6px;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">💾 '
+    +(EN?'Save recurring classes':'Uložit opakované lekce')+'</button></div>';
+  return '<div style="margin-bottom:12px;">'+head+body+'</div>';
 }
 function renderScheduleEditor(){
   const box=$('mgSchedule'); if(!box) return;
@@ -15829,7 +16018,7 @@ function renderScheduleEditor(){
       <button id="schNext" style="width:38px;height:38px;border-radius:50%;border:1px solid var(--border);background:var(--surf);font-size:18px;cursor:pointer;">›</button>
     </div>
     <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-bottom:14px;">`;
-  weekDates.forEach(d=>{ const jd=d.getDay(); const _dymd=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); const cnt=_gymSchedule.filter(c=>Number(c.day)===jd && (!c.since || _dymd>=c.since)).length; const sel=jd===_schedSelDow;
+  weekDates.forEach(d=>{ const jd=d.getDay(); const _dymd=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); const cnt=_gymSchedule.filter(c=>Number(c.day)===jd && (!c.since || _dymd>=c.since) && (!c.until || _dymd<=c.until)).length; const sel=jd===_schedSelDow;
     html+=`<button class="schDayCell" data-dow="${jd}" style="display:flex;flex-direction:column;align-items:center;gap:2px;padding:7px 0;border:1px solid ${sel?'var(--dark)':'var(--border)'};border-radius:10px;background:${sel?'var(--dark)':'#fff'};color:${sel?'#fff':'var(--dark)'};cursor:pointer;font-family:'DM Sans';">
       <span style="font-size:10px;font-weight:700;${sel?'':'color:var(--light);'}">${days[jd]}</span>
       <span style="font-size:15px;font-weight:800;">${d.getDate()}</span>
@@ -15837,7 +16026,7 @@ function renderScheduleEditor(){
     </button>`; });
   html+=`</div>`;
   const _today0=new Date(); _today0.setHours(0,0,0,0); const _selDate=(weekDates.find(d=>d.getDay()===_schedSelDow)||weekDates[0]||new Date()); const _selPast=_selDate < _today0; const _selYmd=_selDate.getFullYear()+'-'+String(_selDate.getMonth()+1).padStart(2,'0')+'-'+String(_selDate.getDate()).padStart(2,'0');
-  const idxs=_gymSchedule.map((c,i)=>({c,i})).filter(x=>Number(x.c.day)===_schedSelDow && (!x.c.since || _selYmd>=x.c.since)).sort((a,b)=>String(a.c.time||'').localeCompare(String(b.c.time||'')));
+  const idxs=_gymSchedule.map((c,i)=>({c,i})).filter(x=>Number(x.c.day)===_schedSelDow && (!x.c.since || _selYmd>=x.c.since) && (!x.c.until || _selYmd<=x.c.until)).sort((a,b)=>String(a.c.time||'').localeCompare(String(b.c.time||'')));
   html+=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
       <div style="font-weight:800;font-size:14px;letter-spacing:.02em;">${days[_schedSelDow]} <span style="color:var(--light);font-weight:600;">(${idxs.length})</span></div>
       ${_selPast?`<span style="font-size:12px;color:var(--light);font-weight:600;">🔒 ${LANG==='en'?'Past — read only':'Proběhlé — jen čtení'}</span>`:`<button id="schAddSel" style="font-size:13px;font-weight:700;color:#fff;background:var(--blue);border:none;border-radius:9px;padding:7px 13px;cursor:pointer;">+ ${LANG==='en'?'Add a class':'Přidat lekci'}</button>`}
@@ -15850,14 +16039,14 @@ function renderScheduleEditor(){
         <button class="schAtt" data-i="${i}" style="flex-shrink:0;padding:5px 9px;background:#EEF2F6;color:#1E6FD9;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">📋 ${(typeof _mtlPayMode==='function'&&_mtlPayMode(_myGymData)==='qr_bank')?(LANG==='en'?'Attendance & Payments':'Docházka & Úhrady'):(LANG==='en'?'Attendance':'Docházka')}</button>
         <span style="color:var(--light);font-size:14px;flex-shrink:0;">${_cPast?'🔒':(open?'▴':'✎')}</span>
       </div>
-      ${(open&&!_cPast)?editFields(c,i):''}
+      ${open ? (c.once ? (_cPast?'':editFields(c,i)) : _occPanel(c,i)) : ''}
     </div>`; });
   const _selYMD=`${_selDate.getFullYear()}-${String(_selDate.getMonth()+1).padStart(2,'0')}-${String(_selDate.getDate()).padStart(2,'0')}`;
   const _cohOcc=(window._gymCohortOcc&&window._gymCohortOcc[_selYMD])||[];
   if(_cohOcc.length){
     html+=`<div style="margin-top:14px;font-size:11px;color:var(--light);font-weight:800;letter-spacing:.04em;margin-bottom:6px;">\ud83c\udf93 ${LANG==='en'?'COURSE RUNNING':'PROBÍHÁ KURZ'}</div>`;
     _cohOcc.forEach(function(o){ const _de=o.disc?(disciplineEmoji(o.disc)+' '):''; const _rng=`${o.time||'--:--'}${o.end?('\u2013'+o.end):''}`;
-      html+=`<div style="border:1px solid #E4D9FF;border-radius:12px;padding:9px 11px;margin-bottom:6px;background:#F6F1FF;"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="font-size:13px;min-width:0;"><strong>${_rng}</strong> \u00b7 ${_de}${escapeHtml(o.name||(LANG==='en'?'Course':'Kurz'))}</div><span style="flex-shrink:0;font-size:10px;font-weight:800;color:#5B3FB0;background:#EDE7FF;border-radius:6px;padding:2px 7px;">${LANG==='en'?'course':'kurz'}</span></div></div>`;
+      html+=`<div style="border:1px solid #E4D9FF;border-radius:12px;padding:9px 11px;margin-bottom:6px;background:#F6F1FF;"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="font-size:13px;min-width:0;"><strong>${_rng}</strong> \u00b7 ${_de}${escapeHtml(o.name||(LANG==='en'?'Course':'Kurz'))}</div><button class="cohAtt" data-date="${escapeHtml(String(o.date||_selYMD))}" data-time="${escapeHtml(String(o.time||''))}" data-name="${escapeHtml(String(o.name||''))}" data-disc="${escapeHtml(String(o.disc||''))}" data-coh="${escapeHtml(String(o.cohortId||''))}" data-dur="${o.dur||''}" style="flex-shrink:0;padding:5px 9px;background:#EDE7FF;color:#5B3FB0;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">\ud83d\udccb ${LANG==='en'?'Attendance':'Doch\u00e1zka'}</button></div></div>`;
     });
   }
   const _avSlots=(window._gymSchedSlots&&window._gymSchedSlots[_selYMD])||[];
@@ -15867,11 +16056,49 @@ function renderScheduleEditor(){
       html+=`<div style="border:1px solid var(--border);border-radius:12px;padding:9px 11px;margin-bottom:6px;background:#FBFAF4;"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="font-size:13px;min-width:0;"><strong>${_rng}</strong> \u00b7 <span style="color:#8a6a12;font-weight:700;">${_typ}</span> <span style="color:var(--mid);font-size:12px;">\u00b7 ${_de}\ud83d\udc64 ${escapeHtml(s2.coachName||'')}</span></div><span style="flex-shrink:0;display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;color:${s2.booked?'var(--red)':'#006040'};"><span style="width:9px;height:9px;border-radius:50%;background:${s2.booked?'var(--red)':'#19b36b'};display:inline-block;"></span>${s2.booked?(LANG==='en'?'Booked':'Rezervov\u00e1no'):(LANG==='en'?'Free':'Volno')}</span></div></div>`;
     });
   }
-  box.innerHTML=html;
+  box.innerHTML=_recurBlockHtml(days)+html;
+  if($('rcHead')) $('rcHead').onclick=()=>{ window._rcOpen=!window._rcOpen; renderScheduleEditor(); };
+  box.querySelectorAll('.rcCap').forEach(el=>el.oninput=()=>{ const v=parseInt(el.value,10); _gymSchedule[+el.dataset.i].cap=(v>0?v:null); el.style.borderColor='var(--border)'; });
+  box.querySelectorAll('.rcDur').forEach(el=>el.oninput=()=>{ const v=parseInt(el.value,10); if(v>0) _gymSchedule[+el.dataset.i].dur=v; });
+  box.querySelectorAll('.rcLevel').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; it.level=el.value; it.kids=(el.value==='kids'); renderScheduleEditor(); });
+  box.querySelectorAll('.rcDisc').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].disc=el.value||null; });
+  box.querySelectorAll('.rcLead').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; const oid=(_myGymData&&_myGymData.owner_id)||(currentUser&&currentUser.id); it.leader=el.value||oid;
+    if(it.leader===oid){ it.leaderName=(currentUser&&currentUser.name)||(LANG==='en'?'Owner':'Majitel'); } else { const cc=_gymTeamCoaches.find(x=>x.id===it.leader); it.leaderName=cc?cc.name:null; } renderScheduleEditor(); });
+  box.querySelectorAll('.rcCoach').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; it.coach=el.value||null; const cc=_gymTeamCoaches.find(x=>x.id===el.value); it.coachName=cc?cc.name:null; });
+  box.querySelectorAll('.rcDay').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].day=+el.value; renderScheduleEditor(); });
+  box.querySelectorAll('.rcAgeMin').forEach(el=>el.oninput=()=>{ _gymSchedule[+el.dataset.i].ageMin=el.value===''?null:(parseInt(el.value)||0); });
+  box.querySelectorAll('.rcAgeMax').forEach(el=>el.oninput=()=>{ _gymSchedule[+el.dataset.i].ageMax=el.value===''?null:(parseInt(el.value)||0); });
+  box.querySelectorAll('.rcParentReq').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].parentReq=el.checked; });
+  box.querySelectorAll('.rcAltTog').forEach(el=>el.onchange=()=>{ const i=+el.dataset.i; const bx=box.querySelector('.rcAltBox[data-i="'+i+'"]'); if(bx) bx.style.display=el.checked?'block':'none';
+    if(!el.checked){ _gymSchedule[i].altPlace=null; _gymSchedule[i].altAddr=null; const pe=box.querySelector('.rcAltPlace[data-i="'+i+'"]'); const ae=box.querySelector('.rcAltAddr[data-i="'+i+'"]'); if(pe)pe.value=''; if(ae)ae.value=''; } });
+  box.querySelectorAll('.rcAltPlace').forEach(el=>el.oninput=()=>{ _gymSchedule[+el.dataset.i].altPlace=el.value.trim()||null; });
+  box.querySelectorAll('.rcAltAddr').forEach(el=>el.oninput=()=>{ _gymSchedule[+el.dataset.i].altAddr=el.value.trim()||null; });
+  box.querySelectorAll('.rcOnce').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; it.once=el.checked;
+    if(el.checked){ const _wd=weekDates.find(d=>d.getDay()===Number(it.day)); it.date=_wd?_rcYmd(_wd):''; } else { delete it.date; } renderScheduleEditor(); });
+  box.querySelectorAll('.cohAtt').forEach(el=>el.onclick=()=>{ openClassAttendance({ date:el.dataset.date, time:el.dataset.time, name:el.dataset.name, disc:el.dataset.disc||null, cohortId:el.dataset.coh||null, dur:(parseInt(el.dataset.dur,10)||null), level:'all', coach:null, coachName:null }); });
+  box.querySelectorAll('.schToRecur').forEach(el=>el.onclick=()=>{ const i=+el.dataset.i; _schedEdit=-1; window._rcOpen=true; renderScheduleEditor();
+    setTimeout(function(){ const t=document.querySelector('.rcName[data-i="'+i+'"]'); if(t){ try{ t.focus(); t.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} } },60); });
+  box.querySelectorAll('.rcTime').forEach(el=>el.onchange=()=>{ const i=+el.dataset.i; window._rcPending=window._rcPending||{}; (window._rcPending[i]=window._rcPending[i]||{}).time=el.value; });
+  box.querySelectorAll('.rcName').forEach(el=>el.oninput=()=>{ const i=+el.dataset.i; window._rcPending=window._rcPending||{}; (window._rcPending[i]=window._rcPending[i]||{}).name=el.value; });
+  if($('rcSave')) $('rcSave').onclick=()=>{
+    const split=_rcApplyPending();
+    const _t=_rcToday();
+    const bad=_gymSchedule.findIndex(c=>c && !c.once && !(c.until && c.until<_t) && !(Number(c.cap)>0));
+    if(bad>=0){
+      if(split) renderScheduleEditor();
+      setTimeout(function(){ const el=document.querySelector('.rcCap[data-i="'+bad+'"]'); if(el){ el.style.borderColor='var(--red)'; try{ el.focus(); el.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} } },40);
+    } else if(split) renderScheduleEditor();
+    saveScheduleOnly();
+  };
   if($('schPrev')) $('schPrev').onclick=()=>{ _schedWeek--; renderScheduleEditor(); };
   if($('schNext')) $('schNext').onclick=()=>{ _schedWeek++; renderScheduleEditor(); };
   box.querySelectorAll('.schDayCell').forEach(el=>el.onclick=()=>{ _schedSelDow=+el.dataset.dow; _schedEdit=-1; renderScheduleEditor(); });
-  if($('schAddSel')) $('schAddSel').onclick=()=>{ _gymSchedule.push({day:_schedSelDow, time:'18:00', name:'', level:'all', dur:60, disc:(isMultiDiscipline()?defaultDiscipline():null), since:(new Date().toISOString().slice(0,10))}); _schedEdit=_gymSchedule.length-1; renderScheduleEditor(); };
+  if($('schAddSel')) $('schAddSel').onclick=()=>{ _gymSchedule.push({day:_schedSelDow, time:'18:00', name:'', level:'all', dur:60, disc:(isMultiDiscipline()?defaultDiscipline():null), since:_rcToday()});
+    // creating a weekly class is a TEMPLATE action -> take the owner straight to it, where there is
+    // no past-lock and every field lives
+    const _ni=_gymSchedule.length-1; _schedEdit=-1; window._rcOpen=true; renderScheduleEditor();
+    setTimeout(function(){ const el=document.querySelector('.rcName[data-i="'+_ni+'"]'); if(el){ try{ el.focus(); el.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} } },60);
+  };
   box.querySelectorAll('.schCardOpen').forEach(el=>el.onclick=()=>{ if(_selPast || el.dataset.cpast==='1') return; const i=+el.dataset.i; _schedEdit=(_schedEdit===i?-1:i); renderScheduleEditor(); });
   box.querySelectorAll('.schAtt').forEach(el=>el.onclick=(e)=>{ e.stopPropagation(); const i=+el.dataset.i; const c=_gymSchedule[i]; if(!c) return; const sd=weekDates.find(d=>d.getDay()===_schedSelDow)||weekDates[0]; const ds=`${sd.getFullYear()}-${String(sd.getMonth()+1).padStart(2,'0')}-${String(sd.getDate()).padStart(2,'0')}`; openClassAttendance({ date:ds, time:c.time, name:c.name||'', level:c.level||'all', coach:(c.leader||c.coach)||null, coachName:(c.leaderName||c.coachName)||'', disc:c.disc||null }); });
   box.querySelectorAll('.schDay').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].day=+el.value; _schedSelDow=+el.value; renderScheduleEditor(); });
@@ -15887,18 +16114,8 @@ function renderScheduleEditor(){
   box.querySelectorAll('.schDisc').forEach(el=>{ const it=_gymSchedule[+el.dataset.i]; if(!it.disc) it.disc=el.value||defaultDiscipline(); el.onchange=()=>{ _gymSchedule[+el.dataset.i].disc=el.value; }; });
   box.querySelectorAll('.schCoach').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; it.coach=el.value||null; const c=_gymTeamCoaches.find(x=>x.id===el.value); it.coachName=c?c.name:null; });
   box.querySelectorAll('.schLead').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; const oid=(_myGymData&&_myGymData.owner_id)||(currentUser&&currentUser.id); it.leader=el.value||oid; if(it.leader===oid){ it.leaderName=(currentUser&&currentUser.name)||(LANG==='en'?'Owner':'Majitel'); } else { const cc=_gymTeamCoaches.find(x=>x.id===it.leader); it.leaderName=cc?cc.name:null; } renderScheduleEditor(); });
-  box.querySelectorAll('.schDel').forEach(el=>el.onclick=()=>{
-    const i=+el.dataset.i; const c=_gymSchedule[i]; if(!c) return; const EN=LANG==='en';
-    // one-time classes have no future series — just remove them
-    if(c.once){ _gymSchedule.splice(i,1); _schedEdit=-1; renderScheduleEditor(); return; }
-    const _nm=(c.name||levelLabel(c.level||'all'))+' · '+(c.time||'');
-    const _msg=EN
-      ? ('Delete the recurring class "'+_nm+'"?\n\nOK = remove it and ALL upcoming occurrences.\nCancel = keep it (you can cancel a single date from Attendance).')
-      : ('Smazat opakovanou lekci \u201e'+_nm+'"?\n\nOK = smazat ji i V\u0160ECHNY nadch\u00e1zej\u00edc\u00ed term\u00edny.\nZru\u0161it = ponechat (jednotliv\u00fd term\u00edn zru\u0161\u00ed\u0161 v Doch\u00e1zce).');
-    if(!confirm(_msg)) return;
-    _gymSchedule.splice(i,1); _schedEdit=-1; renderScheduleEditor();
-    toast(EN?'Removed — save to apply':'Odebr\u00e1no \u2014 ulo\u017e pro potvrzen\u00ed');
-  });
+  box.querySelectorAll('.schDel').forEach(el=>el.onclick=()=>_schDeleteClass(+el.dataset.i));
+  box.querySelectorAll('.rcDel').forEach(el=>el.onclick=()=>_schDeleteClass(+el.dataset.i));
   box.querySelectorAll('.schSaveCls').forEach(el=>el.onclick=()=>{
     const i=+el.dataset.i;
     // Sync this class's capacity from the DOM first: a pre-filled value the owner never TOUCHED
