@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SEQ Studies label + cohort leader made PER-SESSION (matching gym classes exactly). (1) The excuse reason en label 'Study' -> 'Studies'. (2) Petr's correction: a gym class stores 'who leads' (leader/leaderName) AND 'payee' (coach/coachName, only when that coach has their own Stripe) PER SCHEDULE ROW, not per gym. SEP put the cohort leader on the whole course, which was wrong. Reworked to per-session: each row in the cohort schedule editor now has the same classLeadSelectHtml('cohSchLead') + payeeSelectHtml('cohSchPay') block as a gym class, wired identically (leader defaults to owner, sets leaderName; payee sets coach/coachName; team coaches loaded before render). The whole-cohort 'Kdo vede kurz' field, its helpers and the leader_id/leader_name columns were all removed. FLOW: leader/coach now live inside gym_cohorts.schedule (JSON), so cohortOccurrences() -> upcomingClasses() already carries leader/leaderName/coach/coachName per occurrence for free. The club schedule card sources them from the OCCURRENCE (o.leader/o.leaderName), shows the leader, and passes both leader and payee into the Attendance sheet -> gym_attendance.coach_id is filled per session with the actual person who taught THAT session. Different coaches on different course days now credit correctly. cohort-public.js derives the public course page's leader from the first scheduled session that has a leaderName (schedule.find(r=>r.leaderName)). NO SQL NEEDED anymore: leader lives in the existing schedule JSON, so the SEP cohort-leader.sql migration is obsolete (discarded). Versioning is unaffected -- it keys on day|time|dur, so changing only the leader does not spawn a new schedule version. Deploy: index.html + api/cohort-public.js. (cohort-leader.sql no longer needed.) -->
+<!-- MTL build: SES a 15-17 minor with their OWN account can now join a kids class they qualify for. PROBLEM (Petr): a kids class (level='kids', optional ageMin/ageMax) forces openChildPicker, which only ever listed JSON children under a parent + an 'add child' button. A 15-17 minor on their own account has no children, so they hit an empty picker and were locked out of a kids class even when their age fits (e.g. a class open to under-16s). FIX -- treat a kids class as AGE-GATED, not JSON-kids-only. openChildPicker now computes the account holder's OWN age and, when it fits the class range, offers a '\ud83e\uddd1 J\u00e1 \u2014 je mi X' option at the top. Picking it books/subscribes them AS THEMSELVES: the callback passes {self:true, name:null, age}, so downstream child_name stays null (they attend as the account holder) and child_age is their real age -- no new plumbing, the existing _child path handles it. Eligibility: age within [ageMin,ageMax]; for an unbounded kids class, capped at under-18 / is_minor so an ADULT never sees 'J\u00e1' for a kids class (they still only see their children). SUPPORT: the holder's birthdate isn't carried on currentUser, so added _ensureMyBirthdate() to fetch+cache it once (warmed at login); if the picker opens before it loads, it fetches and re-renders itself once. And a minor who is OUT of range with no children now sees a clear 'age-restricted, your age is outside the range' note instead of an empty picker. COVERAGE stays consistent: a self-held kids MEMBERSHIP (child_name null) is auto-covered because a kids plan's access includes 'kids' (the rule added earlier is child_name OR access includes 'kids'). Deploy: index.html only. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -4249,6 +4249,17 @@ async function restoreChild(i){
 
 // ===== RODINA / FAMILY (account <-> account links) =====
 let _famMineCache=null;
+// The account holder's own birthdate isn't loaded onto currentUser, so fetch it once and cache it.
+// Needed so a 15-17 minor with their OWN account can be offered a kids class they qualify for.
+async function _ensureMyBirthdate(){
+  if(!currentUser) return null;
+  if(currentUser.birthdate!==undefined) return currentUser.birthdate?_famAge(currentUser.birthdate):null;
+  try{ const { data }=await supaClient.from('profiles').select('birthdate,is_minor').eq('id',currentUser.id).single();
+    currentUser.birthdate=(data&&data.birthdate)||null;
+    if(data&&data.is_minor!=null && currentUser.is_minor==null) currentUser.is_minor=data.is_minor;
+  }catch(e){ currentUser.birthdate=null; }
+  return currentUser.birthdate?_famAge(currentUser.birthdate):null;
+}
 function _famAge(s){ try{ const d=new Date(s); if(isNaN(d.getTime())) return null; const t=new Date(); let a=t.getFullYear()-d.getFullYear(); const m=t.getMonth()-d.getMonth(); if(m<0||(m===0&&t.getDate()<d.getDate())) a--; return a; }catch(e){ return null; } }
 async function _famMineInfo(){
   if(_famMineCache) return _famMineCache;
@@ -9160,7 +9171,25 @@ function openChildPicker(info, cb){
   const body=document.getElementById('childPickBody');
   const ageNote=(info&&(info.ageMin!=null||info.ageMax!=null))?`<div style="font-size:11.5px;color:var(--mid);margin-bottom:8px;">${EN?'Age':'Věk'}: ${info.ageMin!=null?info.ageMin:''}–${info.ageMax!=null?info.ageMax:''}</div>`:'';
   const parentNote=(info&&info.parentReq)?`<div style="background:#FFF7E0;border:1px solid #E8C24A;border-radius:10px;padding:9px 12px;font-size:12px;color:#8a6a12;font-weight:600;margin-bottom:10px;">⚠️ ${EN?'A parent must be present at the lesson.':'Na lekci musí být přítomen rodič.'}</div>`:'';
-  body.innerHTML=parentNote+ageNote+kids.map((k,i)=> k._archived ? '' : `<button class="childPick" data-i="${i}" style="width:100%;text-align:left;padding:13px;margin-bottom:8px;border:1px solid var(--border);border-radius:12px;background:#fff;cursor:pointer;font-family:'DM Sans';"><div style="font-weight:700;">${kidEmoji(_kidAge(k))} ${escapeHtml(k.name||'')}</div>${(_kidAge(k)!=null)?`<div style="font-size:12px;color:var(--mid);">${_kidAge(k)} ${EN?'years':'let'}</div>`:''}</button>`).join('')+`<button id="childPickAdd" style="width:100%;padding:11px;background:var(--surf);border:1px dashed var(--border);border-radius:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';color:var(--mid);">+ ${EN?'Add a child':'Přidat dítě'}</button>`;
+  // Who is the account holder themselves eligible for? A kids class is age-gated, not JSON-kids-only:
+  // if the holder's own age fits [ageMin, ageMax] (and for an unbounded 'kids' class, they're under 18
+  // or a minor account) they can book AS THEMSELVES. Returns the age, false (doesn't fit), or null (age
+  // not loaded yet -> fetch and re-render this picker once).
+  const _selfAge=(function(){
+    if(!currentUser || currentUser.birthdate===undefined) return null;
+    const a=currentUser.birthdate?_famAge(currentUser.birthdate):null; if(a==null) return false;
+    const okMin=(!info||info.ageMin==null||a>=info.ageMin);
+    const okMax=(info&&info.ageMax!=null)?(a<=info.ageMax):(a<18||!!(currentUser&&currentUser.is_minor));
+    return (okMin&&okMax)?a:false;
+  })();
+  if(_selfAge===null){ try{ _ensureMyBirthdate().then(function(){ if(ov.style.display!=='none' && _childPickCb) openChildPicker(info, _childPickCb); }); }catch(e){} }
+  const _selfBtn=(_selfAge && _selfAge!==null)?('<button class="childPickSelf" style="width:100%;text-align:left;padding:13px;margin-bottom:8px;border:1.5px solid var(--dark);border-radius:12px;background:#fff;font-family:\'DM Sans\';font-size:14px;font-weight:700;cursor:pointer;">\ud83e\uddd1 '+(LANG==='en'?('Me \u2014 I\u2019m '+_selfAge):('J\u00e1 \u2014 je mi '+_selfAge))+'</button>'):'';
+  const _noKids=!kids.some(function(_k){ return !_k._archived; });
+  const _deadEnd=(_selfAge===false && _noKids && currentUser && currentUser.is_minor)
+    ? '<div style="background:#FFF3F3;border:1px solid #F3C0C0;border-radius:10px;padding:10px 12px;font-size:12px;color:#8a2a2a;line-height:1.45;margin-bottom:10px;">'+(LANG==='en'?'This class is age-restricted and your age is outside its range.':'Tato lekce je v\u011bkov\u011b omezen\u00e1 a tv\u016fj v\u011bk je mimo jej\u00ed rozmez\u00ed.')+'</div>'
+    : '';
+  body.innerHTML=parentNote+ageNote+_deadEnd+_selfBtn+kids.map((k,i)=> k._archived ? '' : `<button class="childPick" data-i="${i}" style="width:100%;text-align:left;padding:13px;margin-bottom:8px;border:1px solid var(--border);border-radius:12px;background:#fff;cursor:pointer;font-family:'DM Sans';"><div style="font-weight:700;">${kidEmoji(_kidAge(k))} ${escapeHtml(k.name||'')}</div>${(_kidAge(k)!=null)?`<div style="font-size:12px;color:var(--mid);">${_kidAge(k)} ${EN?'years':'let'}</div>`:''}</button>`).join('')+`<button id="childPickAdd" style="width:100%;padding:11px;background:var(--surf);border:1px dashed var(--border);border-radius:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';color:var(--mid);">+ ${EN?'Add a child':'Přidat dítě'}</button>`;
+  body.querySelectorAll('.childPickSelf').forEach(b=>b.onclick=()=>{ ov.style.display='none'; const cb=_childPickCb; _childPickCb=null; if(cb) cb({ self:true, id:null, name:null, dob:(currentUser&&currentUser.birthdate)||null, age:_selfAge }); });
   body.querySelectorAll('.childPick').forEach(b=>b.onclick=()=>{ const k=kids[+b.dataset.i]; ov.style.display='none'; const cb=_childPickCb; _childPickCb=null; if(cb) cb({ id:k.id, name:k.name, age:_kidAge(k) }); });
   const add=document.getElementById('childPickAdd'); if(add) add.onclick=()=>{ ov.style.display='none'; _childPickCb=null; openMyKids(); };
   ov.style.display='flex';
@@ -11533,6 +11562,32 @@ async function _cohMemberPayments(memberId, wrap){
   _html+='<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0 2px;font-size:12.5px;"><span style="font-weight:800;color:var(--dark);">'+(EN?'Total paid':'Celkem zaplaceno')+'</span><span style="font-weight:800;color:#0A7A3D;">'+fmtPrice(_tot,_cur)+' '+_sym+'</span></div>';
   wrap.innerHTML='<div style="background:var(--surf);border-radius:9px;padding:8px 11px;margin-top:7px;">'+_html+'</div>';
 }
+// Owner removes a participant from a course: no-shows and non-payers otherwise sit on the roster
+// forever, holding a spot and being nagged for monthly payments. Removing sets status='cancelled'
+// -- capacity counts (here, the public page and the signup gate) and the month-payment cron all
+// already exclude 'cancelled', so this frees the spot and stops the prompts in one move. Paid money
+// is NOT auto-refunded (deposits are non-refundable and the course was partly delivered); the owner
+// settles any refund out-of-band, exactly like a membership cancellation.
+async function _cohRemoveMember(id){
+  const m=((window._crMembers||[]).find(function(x){ return x.id===id; }))||{};
+  const EN=LANG==='en'; const paid=(['deposit_paid','enrolled','completed','converted'].indexOf(m.status)>=0)||Number(m.paid_amount||0)>0;
+  const msg=paid
+    ? (EN?('Remove '+(m.name||'this participant')+' from the course?\n\nThe spot is freed and monthly prompts stop. Payments already made are NOT refunded automatically.')
+         :('Odebrat '+(m.name||'tohoto \u00fa\u010dastn\u00edka')+' z kurzu?\n\nM\u00edsto se uvoln\u00ed a p\u0159estanou chodit v\u00fdzvy k platb\u011b. Ji\u017e zaplacen\u00e9 platby se automaticky NEVRAC\u00ed.'))
+    : (EN?('Remove '+(m.name||'this participant')+' from the course? The spot is freed.')
+         :('Odebrat '+(m.name||'tohoto \u00fa\u010dastn\u00edka')+' z kurzu? M\u00edsto se uvoln\u00ed.'));
+  if(!confirm(msg)) return;
+  try{ await supaClient.from('cohort_members').update({ status:'cancelled' }).eq('id',id); toast(EN?'Removed':'Odebr\u00e1no'); if(typeof _cohRosterRender==='function') _cohRosterRender(); }
+  catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
+}
+// Restore a removed participant. We do not store the pre-removal status, so infer it from what they
+// had already paid: a paid month -> enrolled, a paid deposit -> deposit_paid, otherwise a lead.
+async function _cohRestoreMember(id){
+  const m=((window._crMembers||[]).find(function(x){ return x.id===id; }))||{};
+  const st=(Number(m.months_paid||0)>0)?'enrolled':(Number(m.paid_amount||0)>0?'deposit_paid':'lead');
+  try{ await supaClient.from('cohort_members').update({ status:st }).eq('id',id); toast(LANG==='en'?'Restored':'Vr\u00e1ceno'); if(typeof _cohRosterRender==='function') _cohRosterRender(); }
+  catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
+}
 async function _cohRosterRender(){
   const box=document.getElementById('crBody'); if(!box) return; const EN=LANG==='en';
   const cohortId=window._crCohortId;
@@ -11555,7 +11610,8 @@ async function _cohRosterRender(){
     +'</div>';
   if(!members.length){ html+='<p style="font-size:13px;color:var(--light);text-align:center;padding:18px;">'+(EN?'No signups yet. Share the link/QR to fill the cohort.':'Zat\u00edm \u017e\u00e1dn\u00e9 signupy. Sd\u00edlej odkaz/QR a napl\u0148 kurz.')+'</p>'; box.innerHTML=html; return; }
   if(members.length>4){ html+='<input id="crSearchInp" type="text" value="'+((window._crSearch||'').replace(/"/g,'&quot;'))+'" placeholder="'+(EN?'Search a participant by name or e-mail\u2026':'Hledat \u00fa\u010dastn\u00edka podle jm\u00e9na nebo e-mailu\u2026')+'" style="width:100%;box-sizing:border-box;padding:11px 12px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:\'DM Sans\';margin-bottom:12px;">'; }
-  html+=members.map(function(m){
+  const _rmLink=function(m){ return '<div style="text-align:right;margin-top:4px;"><button class="crRemove" data-id="'+m.id+'" style="background:none;border:none;color:var(--light);font-size:11px;font-weight:700;cursor:pointer;padding:2px 0;font-family:inherit;">'+(EN?'\u2715 Remove':'\u2715 Odebrat')+'</button></div>'; };
+  html+=members.filter(function(m){ return m.status!=='cancelled'; }).map(function(m){
     const att={gym_ad:'\uD83D\uDCE3',mtl_discovery:'\uD83E\uDDED',mtl_alert:'\uD83D\uDD14',mtl_deck:'\uD83D\uDD0E',direct:'\uD83D\uDD17'}[m.attribution]||'';
     let actions='';
     if(m.status==='deposit_paid'){
@@ -11576,8 +11632,13 @@ async function _cohRosterRender(){
       if(_cohMonths>1 && _mp<_cohMonths){ _collectBtn='<button class="crMonthBtn" data-id="'+m.id+'" data-name="'+((m.name||'')+'').replace(/"/g,'&quot;')+'" style="width:100%;padding:8px;margin-top:6px;background:var(--dark);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?('Collect month '+(_mp+1)):('Vybrat '+(_mp+1)+'. m\u011bs\u00edc'))+'</button>'; }
       actions='<div style="margin-top:8px;">'+_mo+_collectBtn+'<button class="crConvertBtn" data-id="'+m.id+'" style="width:100%;padding:8px;margin-top:6px;background:#EDE7FF;color:#5B3FB0;border:1px solid #CFC0FF;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Convert to membership':'P\u0159ev\u00e9st na \u010dlenstv\u00ed')+'</button></div>';
     }
-    return '<div class="crMemberCard" data-search="'+(((m.name||'')+' '+(m.email||'')).toLowerCase().replace(/"/g,'&quot;'))+'" style="border:1px solid var(--border);border-radius:11px;padding:9px 11px;margin-bottom:6px;"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div style="min-width:0;"><div style="font-size:14px;font-weight:700;">'+((m.name||'?')+'').replace(/</g,'&lt;')+' <span style="font-size:10px;color:var(--light);font-weight:500;">'+(m.tier==='student'?'student':(EN?'regular':'ostatn\u00ed'))+'</span></div><div style="font-size:11px;color:var(--mid);word-break:break-all;">'+((m.email||'')+'').replace(/</g,'&lt;')+(m.phone?(' \u00b7 '+m.phone):'')+'</div></div><span style="font-size:10px;font-weight:700;color:'+(stC[m.status]||'#999')+';text-transform:uppercase;white-space:nowrap;">'+att+' '+(stL[m.status]||m.status)+'</span></div>'+actions+(( ['deposit_paid','enrolled','completed','converted'].indexOf(m.status)>=0 || Number(m.paid_amount||0)>0 )?('<button class="crPayToggle" data-id="'+m.id+'" style="background:none;border:none;color:#635BFF;font-size:11.5px;font-weight:700;cursor:pointer;padding:6px 0 0;font-family:inherit;">'+(EN?'What they paid \u203a':'Co zaplatil \u203a')+'</button><div class="crPayWrap" data-id="'+m.id+'" style="display:none;"></div>'):'')+'</div>';
+    return '<div class="crMemberCard" data-search="'+(((m.name||'')+' '+(m.email||'')).toLowerCase().replace(/"/g,'&quot;'))+'" style="border:1px solid var(--border);border-radius:11px;padding:9px 11px;margin-bottom:6px;"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div style="min-width:0;"><div style="font-size:14px;font-weight:700;">'+((m.name||'?')+'').replace(/</g,'&lt;')+' <span style="font-size:10px;color:var(--light);font-weight:500;">'+(m.tier==='student'?'student':(EN?'regular':'ostatn\u00ed'))+'</span></div><div style="font-size:11px;color:var(--mid);word-break:break-all;">'+((m.email||'')+'').replace(/</g,'&lt;')+(m.phone?(' \u00b7 '+m.phone):'')+'</div></div><span style="font-size:10px;font-weight:700;color:'+(stC[m.status]||'#999')+';text-transform:uppercase;white-space:nowrap;">'+att+' '+(stL[m.status]||m.status)+'</span></div>'+actions+(( ['deposit_paid','enrolled','completed','converted'].indexOf(m.status)>=0 || Number(m.paid_amount||0)>0 )?('<button class="crPayToggle" data-id="'+m.id+'" style="background:none;border:none;color:#635BFF;font-size:11.5px;font-weight:700;cursor:pointer;padding:6px 0 0;font-family:inherit;">'+(EN?'What they paid \u203a':'Co zaplatil \u203a')+'</button><div class="crPayWrap" data-id="'+m.id+'" style="display:none;"></div>'):'')+_rmLink(m)+'</div>';
   }).join('');
+  { const _canc=members.filter(function(m){ return m.status==='cancelled'; });
+    if(_canc.length){ html+='<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:12px;font-weight:700;color:var(--light);list-style:none;">'+(EN?'Removed':'Odebran\u00ed')+' ('+_canc.length+')</summary><div style="margin-top:8px;">'
+      +_canc.map(function(m){ return '<div style="display:flex;justify-content:space-between;align-items:center;background:#fafafa;border:1px dashed var(--border);border-radius:10px;padding:9px 11px;margin-bottom:6px;"><div style="font-size:12.5px;color:var(--mid);min-width:0;word-break:break-all;">'+((m.name||'?')+'').replace(/</g,'&lt;')+'</div><button class="crRestore" data-id="'+m.id+'" style="flex-shrink:0;background:none;border:1px solid var(--border);border-radius:8px;color:var(--dark);font-size:11px;font-weight:700;cursor:pointer;padding:5px 10px;font-family:inherit;">'+(EN?'Restore':'Vr\u00e1tit')+'</button></div>'; }).join('')
+      +'</div></details>'; }
+  }
   box.innerHTML=html;
   { var _si=document.getElementById('crSearchInp'); if(_si){ var _apply=function(){ var q=(_si.value||'').toLowerCase().trim(); window._crSearch=_si.value||''; box.querySelectorAll('.crMemberCard').forEach(function(c){ var t=(c.getAttribute('data-search')||''); c.style.display=(!q||t.indexOf(q)>=0)?'':'none'; }); }; _si.oninput=_apply; if(window._crSearch) _apply(); } }
   box.querySelectorAll('.crMonthBtn').forEach(function(b){ b.onclick=function(){ _cohCollectMonth(b.dataset.id, b.dataset.name); }; });
@@ -11586,6 +11647,8 @@ async function _cohRosterRender(){
   box.querySelectorAll('.crStripeBtn').forEach(function(b){ b.onclick=function(){ _cohRemainderStripe(b.dataset.id, b.dataset.name); }; });
   box.querySelectorAll('.crPayToggle').forEach(function(b){ b.onclick=function(){ var w=box.querySelector('.crPayWrap[data-id="'+b.dataset.id+'"]'); if(!w) return; if(w.style.display==='none'){ w.style.display='block'; b.textContent=(LANG==='en'?'What they paid \u25be':'Co zaplatil \u25be'); if(!w._loaded){ w._loaded=true; _cohMemberPayments(b.dataset.id, w); } } else { w.style.display='none'; b.textContent=(LANG==='en'?'What they paid \u203a':'Co zaplatil \u203a'); } }; });
   { const _wb=document.getElementById('crAddWalkIn'); if(_wb) _wb.onclick=function(){ _cohAddWalkIn(); }; }
+  box.querySelectorAll('.crRemove').forEach(function(b){ b.onclick=function(){ _cohRemoveMember(b.dataset.id); }; });
+  box.querySelectorAll('.crRestore').forEach(function(b){ b.onclick=function(){ _cohRestoreMember(b.dataset.id); }; });
   box.querySelectorAll('.crDepBtn').forEach(function(b){ b.onclick=function(){ _cohDepositConfirm(b.dataset.id); }; });
   box.querySelectorAll('.crConvertBtn').forEach(function(b){ b.onclick=async function(){ b.disabled=true; try{ await supaClient.from('cohort_members').update({status:'converted'}).eq('id',b.dataset.id); toast(EN?'Converted to member \u2705':'P\u0159evedeno na \u010dlenstv\u00ed \u2705'); _cohRosterRender(); }catch(e){ toast('\u26a0\ufe0f '+e.message); b.disabled=false; } }; });
 }
@@ -23480,12 +23543,42 @@ function subscribeRealtime(){
       <div style="display:inline-block;font-size:11px;font-weight:800;color:#5B3FB0;background:#EDE7FF;border-radius:8px;padding:2px 9px;margin-top:8px;">${EN?'Course':'Kurz'}</div>
     </div>`;
   }
+  async function _cohMyList(){
+    if(!currentUser) return [];
+    let mems=[];
+    try{ const _or=[]; if(currentUser.id)_or.push('student_id.eq.'+currentUser.id); if(currentUser.email)_or.push('email.eq.'+currentUser.email);
+      if(_or.length){ const { data }=await supaClient.from('cohort_members').select('id,cohort_id,status,paid_amount').in('status',['deposit_paid','enrolled']).or(_or.join(',')); mems=data||[]; }
+    }catch(e){}
+    const byCoh={}; (mems||[]).forEach(function(m){ if(m.cohort_id && !byCoh[m.cohort_id]) byCoh[m.cohort_id]=m; });
+    const ids=Object.keys(byCoh); if(!ids.length) return [];
+    let cohs=[]; try{ const { data }=await supaClient.from('gym_cohorts').select('id,name').in('id',ids); cohs=data||[]; }catch(e){}
+    return cohs.map(function(c){ return { id:c.id, name:c.name||'Kurz', memberId:byCoh[c.id].id, paid:Number(byCoh[c.id].paid_amount||0)>0 }; });
+  }
+  // The student cancels their OWN participation. Deposits are non-refundable, so leaving forfeits what
+  // was paid; we say so plainly. Sets their row to 'cancelled', which frees the spot for others.
+  async function _cohLeave(cohortId, memberId, paid){
+    const EN=LANG==='en';
+    const msg=paid
+      ? (EN?'Leave this course? Your deposit and any payments are non-refundable, and your spot is freed for someone else.':'Opustit tento kurz? Z\u00e1loha a p\u0159\u00edpadn\u00e9 platby jsou nevratn\u00e9 a tv\u00e9 m\u00edsto se uvoln\u00ed pro dal\u0161\u00edho.')
+      : (EN?'Leave this course? Your spot is freed for someone else.':'Opustit tento kurz? Tv\u00e9 m\u00edsto se uvoln\u00ed pro dal\u0161\u00edho.');
+    if(!confirm(msg)) return;
+    try{
+      if(memberId){ await supaClient.from('cohort_members').update({ status:'cancelled' }).eq('id',memberId); }
+      else { let q=supaClient.from('cohort_members').update({ status:'cancelled' }).eq('cohort_id',cohortId).in('status',['deposit_paid','enrolled']);
+        q = currentUser.id ? q.eq('student_id',currentUser.id) : q.eq('email',currentUser.email); await q; }
+      toast(EN?'You left the course':'Opustil/a jsi kurz');
+      if(typeof _loadCohortTrainings==='function') _loadCohortTrainings();
+    }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
+  }
   async function _loadCohortTrainings(){
     const box=$('kurzyList'); if(!box||!currentUser) return; const EN=LANG==='en';
-    box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${L('Načítám...')}</p>`;
+    box.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;">'+L('Na\u010d\u00edt\u00e1m...')+'</p>';
+    const list=await _cohMyList();
     const up=await _cohMySessions('upcoming');
-    if(!up.length){ box.innerHTML=`<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">${EN?'No upcoming course sessions.':'Žádné nadcházející tréninky v kurzu.'}</p>`; return; }
-    box.innerHTML=up.map(_cohSessionCard).join('');
+    const head=list.map(function(c){ return '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;border:1px solid var(--border);border-radius:11px;padding:9px 12px;margin-bottom:8px;"><div style="font-size:13px;font-weight:700;min-width:0;word-break:break-word;">\ud83c\udf93 '+((c.name||'')+'').replace(/</g,'&lt;')+'</div><button class="cohLeaveBtn" data-coh="'+c.id+'" data-mem="'+c.memberId+'" data-paid="'+(c.paid?'1':'')+'" style="flex-shrink:0;background:none;border:1px solid var(--border);border-radius:8px;color:var(--mid);font-size:11px;font-weight:700;cursor:pointer;padding:5px 10px;font-family:inherit;">'+(EN?'Leave':'Opustit')+'</button></div>'; }).join('');
+    const empty='<p style="text-align:center;color:var(--light);padding:30px 40px;font-size:14px;">'+(EN?'No upcoming course sessions.':'\u017d\u00e1dn\u00e9 nadch\u00e1zej\u00edc\u00ed tr\u00e9ninky v kurzu.')+'</p>';
+    box.innerHTML=head+(up.length?up.map(_cohSessionCard).join(''):empty);
+    box.querySelectorAll('.cohLeaveBtn').forEach(function(b){ b.onclick=function(){ _cohLeave(b.dataset.coh, b.dataset.mem, b.dataset.paid==='1'); }; });
   }
   // Append the student's past COURSE sessions to a History list (below the private-lesson history).
   async function _appendCohortHistory(listEl){
@@ -24900,6 +24993,7 @@ function enterApp(){
   try{ if(typeof _maybeTermsGate==='function') _maybeTermsGate(); }catch(e){}
   try{ if(typeof _claimImported==='function') _claimImported(); }catch(e){}
   try{ if(typeof _claimCohortMembers==='function') _claimCohortMembers(); }catch(e){}
+  try{ if(typeof _ensureMyBirthdate==='function') _ensureMyBirthdate(); }catch(e){}
   try{ if(typeof _checkWelcomeEnding==='function') _checkWelcomeEnding(); }catch(e){}
   $('authScreen').style.display='none';
   try{ _maybeAppLock(); }catch(e){}
