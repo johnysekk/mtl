@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SEX cohort WAITLIST when full (cohort gap 3) -- capture demand instead of turning people away. Before, a full course just showed 'Tento kurz je plny' and refused. Now the full state shows a waitlist form (name + email + optional phone + 'Zapsat na cekacku'). MODEL: a waitlist entry is a cohort_members row with status='waitlist'. Crucially it must NOT hold a spot, so the capacity count now excludes it everywhere: cohort-public.js signup gate (status=not.in.(cancelled,waitlist)) and the client roster taken count. The month-payment and end crons already only target enrolled/deposit_paid/converted, so waitlisters get no prompts. STUDENT: _cohJoinWaitlist() validates name+email, dupe-guards (already on the waitlist vs already signed up), inserts the row, confirms. OWNER (roster): a '\u23f3 Cekacka (N)' section lists waitlisters with their email/phone and two actions -- 'Pozvat' (_cohWaitInvite copies the email + opens mailto so the club can reach out when a spot opens; it deliberately does NOT change status, because an unpaid invitee must not hold a spot -- if they take it they go through normal signup, and _claimCohortMembers links them by email once they have an account) and 'Odebrat' (reuses _cohRemoveMember). Waitlisters are kept out of the active roster list and the funnel counts. Deploy: index.html + api/cohort-public.js. -->
+<!-- MTL build: SEY the migrate country prompt used the Stripe payout picker (wrong copy). On the Family migrate button, when the guardian had no country stored, SEU reused pickCountry() -- but that dialog is the STRIPE PAYOUT country picker ('Vyber zemi, kde mas bankovni ucet. Stripe ji k uctu zamkne... Pokracovat na Stripe'), which makes no sense for a consent-age question. pickCountry(hintCC, opts) now takes optional copy: opts.subtitle + opts.confirmLabel, defaulting to the Stripe text so all 7 existing payout callers are untouched. The migrate prompt passes neutral copy: 'Vyber zemi, kde bydlis -- urcuje, od kolika let si dite muze zalozit vlastni ucet.' + 'Potvrdit'. ANSWER to Petr's question (does this window appear elsewhere): yes, in 7 other places -- but there it's CORRECT, it's the payout-account country picker for connecting Stripe (coach/gym payout onboarding, payout swap). Only the migrate reuse was wrong; now it's neutral. And as Petr noted, this prompt only ever fires for accounts with no billing_country (pre-registration-country-step, i.e. his old test account); normal users carry it from signup and never see it. Deploy: index.html only. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3797,7 +3797,7 @@ async function _kidMigrateLink(i){
   // this is legally correct (e.g. Germany = 16) instead of guessed.
   let _cc=_myConsentCC();
   if(!_cc){
-    const picked=await pickCountry((typeof _guessCC==='function'?_guessCC():''));
+    const picked=await pickCountry((typeof _guessCC==='function'?_guessCC():''), { subtitle:(EN?'Pick the country you live in — it sets the age from which a child may open their own account.':'Vyber zemi, kde bydlíš — určuje, od kolika let si dítě může založit vlastní účet.'), confirmLabel:(EN?'Confirm':'Potvrdit') });
     if(!picked) return;
     _cc=String(picked).toUpperCase();
     try{ await supaClient.from('profiles').update({ billing_country:_cc }).eq('id',currentUser.id); currentUser.billing_country=_cc; }catch(e){}
@@ -20523,7 +20523,8 @@ window._curForCountry=function(cc){ cc=String(cc||'').toUpperCase();
   var EUR=['AT','BE','CY','EE','FI','FR','DE','GR','IE','IT','LV','LT','LU','MT','NL','PT','SK','SI','ES','HR'];
   if(cc==='CZ') return 'CZK'; if(cc==='GB'||cc==='UK') return 'GBP'; if(cc==='US') return 'USD'; if(cc==='PL') return 'PLN'; if(cc==='HU') return 'HUF'; if(cc==='CH') return 'CHF'; if(cc==='SE') return 'SEK'; if(cc==='DK') return 'DKK'; if(cc==='NO') return 'NOK'; if(cc==='RO') return 'RON'; if(EUR.indexOf(cc)>=0) return 'EUR'; return ''; };
 window._applyCurDefault=function(selId, cc){ try{ var el=document.getElementById(selId); if(!el) return; var want=window._curForCountry(cc); if(want){ for(var i=0;i<el.options.length;i++){ if(el.options[i].value===want){ el.value=want; break; } } } }catch(e){} };
-function pickCountry(hintCC){
+function pickCountry(hintCC, opts){
+  opts=opts||{};
   return new Promise(resolve=>{
     const EN=LANG==='en'; const hint=hintCC||'';
     const sorted=MTL_STRIPE_COUNTRIES.slice().sort((a,b)=>(EN?a[2]:a[1]).localeCompare(EN?b[2]:b[1],EN?'en':'cs'));
@@ -20533,11 +20534,11 @@ function pickCountry(hintCC){
     ov.style.cssText='position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:20px;';
     ov.innerHTML=`<div style="background:#fff;border-radius:16px;padding:22px;max-width:380px;width:100%;font-family:'DM Sans';box-shadow:0 10px 40px rgba(0,0,0,.25);">
       <div style="font-size:17px;font-weight:800;margin-bottom:6px;color:var(--dark);">🌍 ${EN?'Your country':'Tvoje země'} <span style="color:var(--red);">*</span></div>
-      <div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:14px;">${EN?'Pick the country where your bank account is. Stripe locks this to the account permanently — it cannot be changed later, so choose carefully.':'Vyber zemi, kde máš bankovní účet. Stripe ji k účtu zamkne natrvalo — později už ji nezměníš, tak vybírej pečlivě.'}</div>
+      <div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:14px;">${opts.subtitle || (EN?'Pick the country where your bank account is. Stripe locks this to the account permanently — it cannot be changed later, so choose carefully.':'Vyber zemi, kde máš bankovní účet. Stripe ji k účtu zamkne natrvalo — později už ji nezměníš, tak vybírej pečlivě.')}</div>
       <select id="_pcSel" style="width:100%;padding:12px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:16px;">${opts}</select>
       <div style="display:flex;gap:10px;">
         <button id="_pcCancel" style="flex:1;padding:12px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'Cancel':'Zrušit'}</button>
-        <button id="_pcOk" disabled style="flex:2;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:not-allowed;opacity:.45;font-family:'DM Sans';transition:opacity .15s;">${EN?'Continue to Stripe →':'Pokračovat na Stripe →'}</button>
+        <button id="_pcOk" disabled style="flex:2;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:not-allowed;opacity:.45;font-family:'DM Sans';transition:opacity .15s;">${opts.confirmLabel || (EN?'Continue to Stripe →':'Pokračovat na Stripe →')}</button>
       </div>
     </div>`;
     document.body.appendChild(ov);
