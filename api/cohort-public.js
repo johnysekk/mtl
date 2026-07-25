@@ -68,7 +68,7 @@ export default async function handler(req, res) {
 
     // current signup count (for capacity display only; no PII)
     let taken = 0;
-    try { const cm = await sbGet(`cohort_members?cohort_id=eq.${encodeURIComponent(id)}&status=neq.cancelled&select=id`); taken = Array.isArray(cm) ? cm.length : 0; } catch (e) {}
+    try { const cm = await sbGet(`cohort_members?cohort_id=eq.${encodeURIComponent(id)}&status=not.in.(cancelled,waitlist)&select=id`); taken = Array.isArray(cm) ? cm.length : 0; } catch (e) {}
 
     return res.status(200).json({
       ok: true,
