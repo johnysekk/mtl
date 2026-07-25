@@ -23,7 +23,8 @@ export default async function handler(req, res) {
       const co = cr && cr[0];
       if (!co) return res.status(404).json({ ok: false, error: 'cohort not found' });
       let gymName = '';
-      try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(co.gym_id)}&select=name`); gymName = (g && g[0] && g[0].name) || ''; } catch (e) {}
+      let _cmPay = { payment_mode:null, receiver_id_type:null, receiver_id_value:null, receiver_name:null };
+      try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(co.gym_id)}&select=name,payment_mode,receiver_id_type,receiver_id_value,receiver_name`); const gg = g && g[0]; if (gg) { gymName = gg.name || ''; _cmPay = { payment_mode: gg.payment_mode || null, receiver_id_type: gg.receiver_id_type || null, receiver_id_value: gg.receiver_id_value || null, receiver_name: gg.receiver_name || null }; } } catch (e) {}
       // Named offers: mem.tier holds the offer name. Look it up in price_tiers; fall back to the
       // legacy student/regular columns for cohorts created before price_tiers existed.
       let tierPrice = 0;
@@ -35,7 +36,7 @@ export default async function handler(req, res) {
         tierPrice = Number((mem.tier === 'student') ? co.price_student : co.price_regular) || 0;
       }
       const remainder = Math.max(0, tierPrice - Number(co.deposit_amount || 0));
-      return res.status(200).json({ ok: true, member: { id: mem.id, name: mem.name, tier: mem.tier, status: mem.status }, cohort: { id: co.id, name: co.name, discipline: co.discipline || null, gym_name: gymName, currency: co.currency || 'CZK', tier_price: tierPrice, start_date: co.start_date || null, end_date: co.end_date || null, months: co.months || null, schedule: (Array.isArray(co.schedule) ? co.schedule : []), schedule_note: co.schedule_note || null }, remainder });
+      return res.status(200).json({ ok: true, member: { id: mem.id, name: mem.name, tier: mem.tier, status: mem.status }, cohort: { id: co.id, name: co.name, leader_name: (Array.isArray(co.schedule)?((co.schedule.find(r=>r&&r.leaderName)||{}).leaderName||null):null), discipline: co.discipline || null, gym_name: gymName, currency: co.currency || 'CZK', tier_price: tierPrice, start_date: co.start_date || null, end_date: co.end_date || null, months: co.months || null, schedule: (Array.isArray(co.schedule) ? co.schedule : []), schedule_note: co.schedule_note || null, stripe_account: co.stripe_account || null, payment_mode: _cmPay.payment_mode, receiver_id_type: _cmPay.receiver_id_type, receiver_id_value: _cmPay.receiver_id_value, receiver_name: _cmPay.receiver_name }, remainder });
     }
 
     const id = (req.query && req.query.cohort) || '';
@@ -72,7 +73,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       cohort: {
-        id: c.id, name: c.name, discipline: c.discipline, start_date: c.start_date, end_date: c.end_date, months: c.months, schedule: (Array.isArray(c.schedule) ? c.schedule : []), schedule_note: c.schedule_note || null,
+        id: c.id, name: c.name, leader_name: (Array.isArray(c.schedule)?((c.schedule.find(r=>r&&r.leaderName)||{}).leaderName||null):null), discipline: c.discipline, start_date: c.start_date, end_date: c.end_date, months: c.months, schedule: (Array.isArray(c.schedule) ? c.schedule : []), schedule_note: c.schedule_note || null,
         capacity: c.capacity, taken, deposit_amount: c.deposit_amount, price_student: c.price_student,
         price_regular: c.price_regular, price_tiers: (Array.isArray(c.price_tiers) ? c.price_tiers : null), currency: c.currency, description: c.description, poster: c.poster || null,
         gym_name: gymName, provider_name: providerName, meta_pixel: c.gym_meta_pixel || '', marketing_note: c.marketing_note || '',
