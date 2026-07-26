@@ -11,6 +11,8 @@
 import Stripe from 'stripe';
 import crypto from 'crypto';
 import PDFDocument from 'pdfkit';
+import { isTestMode } from './_config.js';
+const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 import { DEJAVU_CZ } from './_dejavu-cz.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -638,6 +640,8 @@ export default async function handler(req, res) {
               const money = (x) => Math.round(x) + ' ' + cur2;
               const fromName = (gymName || 'Martial Training Lab').replace(/["<>]/g, '');
               let _dokAtt = undefined;
+              let _testDok = false; try { _testDok = await isTestMode(); } catch (e) {}
+              if (!(_testDok && coh && coh.owner_id !== FOUNDER_UUID)) // test mode: doklad only for the founder's own club
               try {
                 const _dokBuf = await cohortDokladPdf({ gym: gymRec, gymName: gymName, buyer: (mem.name || mem.email || ''), item: ((coh.name || 'Kurz') + ' — záloha'), amount: amount, cur: cur2, ref: pi || '', date: _czDate(new Date().toISOString().slice(0,10)) });
                 _dokAtt = [{ filename: 'MTL-potvrzeni-o-platbe.pdf', content: _dokBuf.toString('base64') }];

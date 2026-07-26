@@ -12,6 +12,8 @@
 // the receipt itemises by FORM + RATE (transparency). amount = total; bank_amount /
 // stripe_amount split the two rails. Idempotent per (entity, period, currency, kind).
 
+import { isTestMode } from './_config.js';
+const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 const SB  = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const RESEND = process.env.RESEND_API_KEY;
@@ -51,16 +53,17 @@ function prevMonth(ym) { const [y, m] = ym.split('-').map(Number); const d = new
 function _methodLabel(m){ return m==='stripe'?'Stripe (karta)':(m==='pis'?'Platba z banky':(m==='qr'?'QR platba':(m==='cash'?'Hotovost':(m||'\u2014')))); }
 function _pct(r){ return r!=null ? (Math.round(r*1000)/10).toString().replace('.',',')+' %' : '\u2014'; }
 function _money(minor, cur){ return (minor/100).toFixed(2).replace('.',',')+' '+String(cur).toUpperCase(); }
-function dokladHtml(ME, buyer, kind, period, cur, data){
+function dokladHtml(ME, buyer, kind, period, cur, data, test){
+  const _ph = test ? 'Nevypln\u011bno' : '';
   ME = ME || {}; const esc=function(x){ return String(x==null?'':x).replace(/[<>&]/g,function(c){return c==='<'?'&lt;':c==='>'?'&gt;':'&amp;';}); };
   const items = Object.values(data.rates);
   const rows = items.map(function(i){ return '<tr><td style="padding:6px 10px;border-bottom:1px solid #eee;">'+_methodLabel(i.method)+'</td><td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:center;">'+_pct(i.rate)+'</td><td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:center;">'+i.count+'</td><td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:right;">'+_money(i.gross,cur)+'</td><td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:right;">'+_money(i.fee,cur)+'</td></tr>'; }).join('');
   const bank = items.filter(function(i){return i.method!=='stripe';}).reduce(function(a,i){return a+i.fee;},0);
   const strp = items.filter(function(i){return i.method==='stripe';}).reduce(function(a,i){return a+i.fee;},0);
   const total = data.total;
-  const supLines = ['<b>'+esc(ME.name||'Martial Training Lab s.r.o.')+'</b>', ME.ico?('I\u010cO: '+esc(ME.ico)):'', ME.sidlo?esc(ME.sidlo):'', ME.dic?('DI\u010c: '+esc(ME.dic)):'', ME.vat_id?('VAT ID: '+esc(ME.vat_id)):''].filter(Boolean).join('<br>');
+  const supLines = ['<b>'+esc(ME.name||'Martial Training Lab s.r.o.')+'</b>', ME.ico?('I\u010cO: '+esc(ME.ico)):(_ph?('I\u010cO: '+_ph):''), ME.sidlo?esc(ME.sidlo):'', ME.dic?('DI\u010c: '+esc(ME.dic)):(_ph?('DI\u010c: '+_ph):''), ME.vat_id?('VAT ID: '+esc(ME.vat_id)):''].filter(Boolean).join('<br>');
   const bName = (buyer && (buyer.legal_name || buyer.name)) || '\u2014';
-  const buyLines = ['<b>'+esc(bName)+'</b>', (buyer&&buyer.tax_id)?('I\u010cO: '+esc(buyer.tax_id)):'', (buyer&&buyer.billing_address)?esc(buyer.billing_address):'', (buyer&&buyer.vat_id)?('DI\u010c: '+esc(buyer.vat_id)):''].filter(Boolean).join('<br>');
+  const buyLines = ['<b>'+esc(bName)+'</b>', (buyer&&buyer.tax_id)?('I\u010cO: '+esc(buyer.tax_id)):(_ph?('I\u010cO: '+_ph):''), (buyer&&buyer.billing_address)?esc(buyer.billing_address):'', (buyer&&buyer.vat_id)?('DI\u010c: '+esc(buyer.vat_id)):(_ph?('DI\u010c: '+_ph):'')].filter(Boolean).join('<br>');
   let vatBlock;
   if(ME.vat_payer){ const rate=ME.vat_rate||21; const base=total/(1+rate/100); const vat=total-base; vatBlock='<tr><td>Z\u00e1klad dan\u011b</td><td style="text-align:right;">'+_money(base,cur)+'</td></tr><tr><td>DPH '+rate+'%</td><td style="text-align:right;">'+_money(vat,cur)+'</td></tr>'; }
   else { vatBlock='<tr><td colspan="2" style="font-size:11px;color:#666;padding-top:6px;">Dodavatel nen\u00ed pl\u00e1tcem DPH.</td></tr>'; }
@@ -82,12 +85,22 @@ export default async function handler(req, res) {
   if (!SB || !KEY) return res.status(500).json({ error: 'env' });
   const q = (req && req.query) || {};
   const preview = (q.preview === '1' || q.preview === 'true');
-  const period = (q.month && /^\d{4}-\d{2}$/.test(q.month)) ? q.month : prevMonth(new Date().toISOString().slice(0, 7));
+  // TEST MODE: daily doklad for the founder only, so Petr sees the commission receipt in real time.
+  // LIVE stays exactly as before: one monthly doklad per provider, with the IChO/DIChC + VAT flow intact.
+  let TEST = false; try { TEST = await isTestMode(); } catch (e) {}
+  let period, dayStart = null, dayEnd = null;
+  if (TEST) {
+    const d = (q.date && /^\d{4}-\d{2}-\d{2}$/.test(q.date)) ? q.date : new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    period = d; dayStart = d + 'T00:00:00';
+    dayEnd = new Date(new Date(d + 'T00:00:00Z').getTime() + 86400000).toISOString().slice(0, 10) + 'T00:00:00';
+  } else {
+    period = (q.month && /^\d{4}-\d{2}$/.test(q.month)) ? q.month : prevMonth(new Date().toISOString().slice(0, 7));
+  }
   let ME = {}; try { const _ps = await sb('platform_settings?id=eq.1&select=*'); ME = (_ps && _ps[0]) || {}; } catch (e) {}
   let issued = 0, skipped = 0, deferred = 0;
   try {
     // every collected commission row for the closed month (bank charged + Stripe live)
-    const tx = await sb(`transactions?select=gym_id,coach_id,paid_to,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method&commission_status=in.(collected${preview?',pending,failed':''})&commission_month=eq.${period}&mtl_fee=gt.0&limit=50000`);
+    const tx = await sb(`transactions?select=gym_id,coach_id,paid_to,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method&commission_status=in.(collected${preview?',pending,failed':''})&${TEST?`created_at=gte.${dayStart}&created_at=lt.${dayEnd}`:`commission_month=eq.${period}`}&mtl_fee=gt.0&limit=50000`);
 
     // bucket per provider + currency, with a per-(form,rate) breakdown
     const gymB = {}, coachB = {};
@@ -116,6 +129,7 @@ export default async function handler(req, res) {
 
     async function issue(kind, entityId, ownerId, cur, data) {
       const col = kind === 'gym' ? 'gym_id' : 'coach_id';
+      if (TEST && String(ownerId) !== FOUNDER_UUID) { skipped++; return; } // test mode: founder club only
       // idempotent: one unified doklad per entity+period+currency
       const ex = await sb(`commission_doklady?select=id&${col}=eq.${entityId}&period_month=eq.${period}&currency=eq.${encodeURIComponent(cur)}&kind=eq.unified&limit=1`);
       if (ex && ex.length) { skipped++; return; }
@@ -134,7 +148,7 @@ export default async function handler(req, res) {
         const _b = await sb(_sel);
         buyer = _b && _b[0];
       } catch (e) {}
-      if (ME && ME.require_vat_foreign) {
+      if (!TEST && ME && ME.require_vat_foreign) {
         const home = ctryCode({ country: ME.home_country }) || 'CZ';
         const bc = ctryCode(buyer);
         // defer ONLY for intra-EU cross-border B2B with no VAT ID. Unknown country, domestic, or a
@@ -162,13 +176,13 @@ export default async function handler(req, res) {
       issued++;
       if (ownerId) { try { await notify(ownerId, 'doklad_unified', `Doklad MTL provize za ${period} (${(data.total / 100).toFixed(2)} ${cur.toUpperCase()}) je připraven.`, { period, currency: cur }); } catch (e) {} }
       try { const pr = await sb(`profiles?id=eq.${ownerId}&select=email&limit=1`); const em = pr && pr[0] && pr[0].email;
-        if (em) await sendEmail(em, `Doklad MTL provize — ${period}`, dokladHtml(ME, buyer, kind, period, cur, data)); } catch (e) {}
+        if (em) await sendEmail(em, `Doklad MTL provize — ${period}`, dokladHtml(ME, buyer, kind, period, cur, data, TEST)); } catch (e) {}
     }
 
     if (preview) {
       let firstHtml = '';
-      for (const gid of gymIds) { const g = gymMap[gid]; if (!g) continue; for (const cur of Object.keys(gymB[gid])) { const _b = (await sb(`gyms?id=eq.${gid}&select=name,legal_name,billing_address,tax_id,vat_id,billing_country,country&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'gym', period, cur, gymB[gid][cur]); break; } if (firstHtml) break; }
-      if (!firstHtml) { for (const cid of Object.keys(coachB)) { for (const cur of Object.keys(coachB[cid])) { const _b = (await sb(`profiles?id=eq.${cid}&select=name,legal_name,billing_address,tax_id,vat_id,country,billing_country&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'coach', period, cur, coachB[cid][cur]); break; } if (firstHtml) break; } }
+      for (const gid of gymIds) { const g = gymMap[gid]; if (!g) continue; for (const cur of Object.keys(gymB[gid])) { const _b = (await sb(`gyms?id=eq.${gid}&select=name,legal_name,billing_address,tax_id,vat_id,billing_country,country&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'gym', period, cur, gymB[gid][cur], TEST); break; } if (firstHtml) break; }
+      if (!firstHtml) { for (const cid of Object.keys(coachB)) { for (const cur of Object.keys(coachB[cid])) { const _b = (await sb(`profiles?id=eq.${cid}&select=name,legal_name,billing_address,tax_id,vat_id,country,billing_country&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'coach', period, cur, coachB[cid][cur], TEST); break; } if (firstHtml) break; } }
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       return res.status(200).send(firstHtml || ('<p style="font-family:sans-serif;padding:24px;">\u017d\u00e1dn\u00e1 provize za ' + period + ' (zkus jin\u00fd ?month=RRRR-MM).</p>'));
     }
