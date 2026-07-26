@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SFJ in-app doklad step 1a -- test-mode note + universal showReceipt. COST verified: the in-app doklad is pure client-side HTML (showReceipt opens a window and writes the receipt), on-demand (only when the user taps), ~2 light Supabase reads per view (seller record + real paid amount from transactions), NO pdfkit, NO serverless, NO Resend; the 'download PDF' is the browser's native Print -> Save as PDF (onclick=window.print()), so it's free and channel-agnostic (renders from the transaction, works for Stripe/QR/PIS/cash alike). CHANGES: (1) test-mode note -- when window._TEST_MODE, the receipt shows a red '\ud83e\uddea TESTOVACI REZIM -- nejde o danovy doklad' banner so an in-app receipt is never mistaken for an official document in test mode (the pushed/emailed + commission dokladu stay founder-only in test as before). (2) showReceipt now accepts b.item_label as an override for the item name, making it universal so tickets / merch / cohorts can reuse it by passing their own label. COVERAGE now: memberships (membReceiptBtn), gym drop-ins (gymReceiptBtn), coach bookings (bkDokladBtn) already had the button. STILL TO WIRE (next, mechanical, per-type data assembly): event tickets, merch orders, cohort courses -- each needs its row to pass {gym_id, amount, currency, item_label, created_at} into showReceipt. Deploy: index.html only. -->
+<!-- MTL build: SFM reusable MTL dialogs + migrate popup converted; MTL_BUILD resynced. NOTE: MTL_BUILD had drifted (stuck at SFI while markers said SFJ/SFK/SFL) because the const-bump replace referenced the wrong previous letter; resynced to SFM here. Added _mtlDialog(opts) + _confirm(msg,opts) / _alert(msg,opts) / _prompt(msg,def,opts) -- pretty MTL-styled replacements for the native browser dialogs, all Promise-returning so `if(confirm(x))` becomes `if(await _confirm(x))`. Styled card (title/message/optional input), scale+fade in, ESC/backdrop/Cancel resolve false|null, Enter confirms, danger option for a red OK, autofocus. Converted the child->own-account migrate confirm (the one screenshotted) to `await _confirm(..., {title})`. The other native confirm()/prompt()/alert() calls across the app (~96/30/2) are NOT yet migrated -- that's the tracked future rollout. Deploy: index.html only. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3795,7 +3795,46 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SFI';
+const MTL_BUILD='SFM';
+// ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
+function _mtlDialog(opts){
+  return new Promise(function(resolve){
+    var EN=(typeof LANG!=='undefined'&&LANG==='en'); var o=opts||{};
+    var kind=o.kind||'confirm';
+    var ov=document.createElement('div');
+    ov.style.cssText='position:fixed;inset:0;z-index:2147483000;background:rgba(15,12,20,.55);display:flex;align-items:center;justify-content:center;padding:22px;';
+    var card=document.createElement('div');
+    card.style.cssText='background:#fff;border-radius:18px;padding:24px 22px 20px;max-width:380px;width:100%;box-shadow:0 18px 60px rgba(0,0,0,.32);font-family:\'DM Sans\',-apple-system,sans-serif;transform:scale(.96);opacity:0;transition:transform .16s cubic-bezier(.2,.8,.3,1),opacity .16s;';
+    var titleHtml=o.title?('<div style="font-size:17px;font-weight:800;color:var(--dark,#171717);margin-bottom:7px;line-height:1.25;">'+o.title+'</div>'):'';
+    var msgHtml=o.message?('<div style="font-size:13.5px;color:var(--mid,#555);line-height:1.55;">'+o.message+'</div>'):'';
+    var inputHtml=(kind==='prompt')?('<input id="_mdInput" type="text" value="'+String(o.value||'').replace(/"/g,'&quot;')+'" placeholder="'+String(o.placeholder||'').replace(/"/g,'&quot;')+'" style="width:100%;box-sizing:border-box;margin-top:14px;padding:12px;border:1.5px solid var(--border,#e5e0d8);border-radius:11px;font-size:15px;font-family:inherit;">'):'';
+    var okLabel=o.okLabel||'OK';
+    var cancelLabel=o.cancelLabel||(EN?'Cancel':'Zru\u0161it');
+    var danger=!!o.danger;
+    var cancelBtn=(kind==='alert')?'':('<button id="_mdCancel" style="flex:1;padding:12px;background:var(--surf,#f4f1ec);color:var(--dark,#171717);border:1px solid var(--border,#e5e0d8);border-radius:12px;font-weight:700;font-size:14px;cursor:pointer;font-family:inherit;">'+cancelLabel+'</button>');
+    var okBg=danger?'#b0201a':'var(--dark,#171717)';
+    card.innerHTML=titleHtml+msgHtml+inputHtml
+      +'<div style="display:flex;gap:10px;margin-top:20px;">'+cancelBtn
+      +'<button id="_mdOk" style="flex:'+((kind==='alert')?'1':'1.4')+';padding:12px;background:'+okBg+';color:#fff;border:none;border-radius:12px;font-weight:800;font-size:14px;cursor:pointer;font-family:inherit;">'+okLabel+'</button></div>';
+    ov.appendChild(card); document.body.appendChild(ov);
+    requestAnimationFrame(function(){ card.style.transform='scale(1)'; card.style.opacity='1'; });
+    var done=false;
+    function close(val){ if(done) return; done=true; card.style.transform='scale(.96)'; card.style.opacity='0'; ov.style.opacity='0'; ov.style.transition='opacity .15s'; setTimeout(function(){ try{ document.body.removeChild(ov); }catch(e){} }, 150); document.removeEventListener('keydown', onKey); resolve(val); }
+    var inp=card.querySelector('#_mdInput');
+    function onOk(){ close(kind==='prompt'?(inp?inp.value:''):(kind==='alert'?undefined:true)); }
+    function onCancel(){ close(kind==='prompt'?null:(kind==='alert'?undefined:false)); }
+    var okB=card.querySelector('#_mdOk'); if(okB) okB.onclick=onOk;
+    var caB=card.querySelector('#_mdCancel'); if(caB) caB.onclick=onCancel;
+    ov.addEventListener('click', function(e){ if(e.target===ov) onCancel(); });
+    function onKey(e){ if(e.key==='Escape') onCancel(); else if(e.key==='Enter' && kind!=='alert'){ e.preventDefault(); onOk(); } }
+    document.addEventListener('keydown', onKey);
+    if(inp){ setTimeout(function(){ try{ inp.focus(); inp.select(); }catch(e){} }, 60); } else if(okB){ setTimeout(function(){ try{ okB.focus(); }catch(e){} }, 60); }
+  });
+}
+function _confirm(message, opts){ var o=opts||{}; o.message=message; o.kind='confirm'; return _mtlDialog(o); }
+function _alert(message, opts){ var o=opts||{}; o.message=message; o.kind='alert'; return _mtlDialog(o); }
+function _prompt(message, def, opts){ var o=opts||{}; o.message=message; o.value=(def!=null?def:''); o.kind='prompt'; return _mtlDialog(o); }
+
 // Immediate, login-independent build badge: open any URL with ?build to see the LIVE build number
 // bottom-left. If it doesn't appear, the running file is stale (deploy/CDN cache), not the code.
 (function(){ try{ if(!new URLSearchParams(location.search).has('build')) return;
@@ -3845,7 +3884,7 @@ async function _kidMigrateLink(i){
             :('Ve tv\u00e9 zemi si d\u00edt\u011b m\u016f\u017ee zalo\u017eit vlastn\u00ed \u00fa\u010det a\u017e od '+_ca+' let. '+(k.name||'Toto d\u00edt\u011b')+' m\u00e1 '+_age+'.'));
     return;
   }
-  if(!confirm(EN?`Create a transfer link for ${k.name||'this child'}? Send it to them so they can open their OWN account (15+) and keep all their belts and training history. Use this only once they are 15 or older.`:`Vytvořit přenosový odkaz pro ${k.name||'toto dítě'}? Pošli mu ho — otevře si VLASTNÍ účet (15+) a přenese si všechny pásky i historii tréninků. Použij až když mu je 15 nebo víc.`)) return;
+  if(!(await _confirm(EN?`Create a transfer link for ${k.name||'this child'}? Send it to them so they can create their OWN account (15+) and carry over all their training history and stats. Use this only once they are 15 or older.`:`Vytvořit přenosový odkaz pro ${k.name||'toto dítě'}? Pošli mu ho — založí si VLASTNÍ účet (15+) a přenese si veškerou historii tréninků a statistiky. Použij až když mu je 15 nebo víc.`, {title:(EN?'Move to their own account':'P\u0159ej\u00edt na vlastn\u00ed \u00fa\u010det')}))) return;
   const tok='m'+Math.random().toString(36).slice(2,10)+Date.now().toString(36).slice(-4);
   try{
     const { error } = await supaClient.from('migration_tokens').insert({ token:tok, parent_id:currentUser.id, kid_id:(k.id||('idx'+i)), kid_name:(k.name||null) });
@@ -7243,12 +7282,12 @@ async function renderMyEvGoing(){
     const { data:tk } = await supaClient.from('event_tickets').select('*').eq('buyer_id',currentUser.id).neq('status','cancelled').neq('status','refunded').order('created_at',{ascending:false});
     const eids=[...new Set((tk||[]).map(t=>t.event_id).filter(Boolean))]; const em={};
     if(eids.length){ const { data:evs } = await supaClient.from('events').select('*').in('id',eids); (evs||[]).forEach(e=>{ em[e.id]=e; window._myEvMap[e.id]=e; }); }
-    const rows=(tk||[]).map(t=>({t,e:em[t.event_id]})).filter(x=>x.e);
+    const rows=(tk||[]).map(t=>({t,e:em[t.event_id]})).filter(x=>x.e); window._myTixR=rows;
     const up=rows.filter(x=>x.e.starts_at && new Date(x.e.starts_at)>=now);
     const past=rows.filter(x=>!(x.e.starts_at && new Date(x.e.starts_at)>=now));
     const show = tab==='history'?past:up;
     if(show.length){
-      html += show.map(({t,e})=>{ const cur=t.currency||e.currency||'CZK'; const sym=_curSym(cur); const dt=e.starts_at?new Date(e.starts_at).toLocaleString(LANG==='en'?'en-US':'cs-CZ',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):''; const loc=e.venue||[e.city,e.country].filter(Boolean).join(', '); const bg=e.poster?`background-image:url('${e.poster}')`:'background:linear-gradient(135deg,#E8001D,#7A0010)'; const status=t.amount>0?`✅ ${LANG==='en'?'You have a ticket':'Máš lístek'} · ${t.amount} ${sym}${t.status==='pending'?' · '+(LANG==='en'?'unpaid':'nezaplaceno'):''}`:`✅ ${LANG==='en'?'You are on the list':'Jsi na seznamu'}`; return `<div class="myEvCard" data-id="${e.id}" style="display:flex;gap:12px;border:1px solid var(--border);border-radius:14px;padding:10px;margin-bottom:10px;cursor:pointer;align-items:center;${tab==='history'?'opacity:.7;':''}"><div style="width:62px;height:62px;border-radius:10px;background-size:cover;background-position:center;${bg};flex-shrink:0;"></div><div style="flex:1;min-width:0;"><div style="font-weight:700;">${escapeHtml(e.title||'')}</div><div style="font-size:12px;color:var(--mid);">📅 ${dt}${loc?` · 📍 ${escapeHtml(loc)}`:''}</div><div style="font-size:12px;font-weight:700;color:#006040;margin-top:3px;">${status}</div></div><span class="prow-arr">›</span></div>`; }).join('');
+      html += show.map(({t,e})=>{ const cur=t.currency||e.currency||'CZK'; const sym=_curSym(cur); const dt=e.starts_at?new Date(e.starts_at).toLocaleString(LANG==='en'?'en-US':'cs-CZ',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):''; const loc=e.venue||[e.city,e.country].filter(Boolean).join(', '); const bg=e.poster?`background-image:url('${e.poster}')`:'background:linear-gradient(135deg,#E8001D,#7A0010)'; const status=t.amount>0?`✅ ${LANG==='en'?'You have a ticket':'Máš lístek'} · ${t.amount} ${sym}${t.status==='pending'?' · '+(LANG==='en'?'unpaid':'nezaplaceno'):''}`:`✅ ${LANG==='en'?'You are on the list':'Jsi na seznamu'}`; return `<div class="myEvCard" data-id="${e.id}" style="display:flex;gap:12px;border:1px solid var(--border);border-radius:14px;padding:10px;margin-bottom:10px;cursor:pointer;align-items:center;${tab==='history'?'opacity:.7;':''}"><div style="width:62px;height:62px;border-radius:10px;background-size:cover;background-position:center;${bg};flex-shrink:0;"></div><div style="flex:1;min-width:0;"><div style="font-weight:700;">${escapeHtml(e.title||'')}</div><div style="font-size:12px;color:var(--mid);">📅 ${dt}${loc?` · 📍 ${escapeHtml(loc)}`:''}</div><div style="font-size:12px;font-weight:700;color:#006040;margin-top:3px;">${status}</div></div>${Number(t.amount)>0?`<button class="tixDokBtn" data-id="${t.id}" onclick="event.stopPropagation()" style="align-self:center;flex-shrink:0;background:none;border:1px solid var(--border);border-radius:8px;color:var(--mid);font-size:10.5px;font-weight:700;cursor:pointer;padding:5px 9px;margin-right:6px;" data-noi18n>Doklad</button>`:''}<span class="prow-arr">›</span></div>`; }).join('');
     } else {
       html += `<p style="text-align:center;color:var(--light);padding:36px 16px;font-size:13px;">${tab==='history'?(LANG==='en'?'No past events.':'Žádné proběhlé akce.'):(LANG==='en'?'You are not going to any events yet. Browse them in the Events tab.':'Zatím nikam nejdeš. Akce najdeš v záložce Události.')}</p>`;
     }
@@ -7261,6 +7300,7 @@ async function renderMyEvGoing(){
     }
   }catch(e){ html='<p style="text-align:center;color:var(--light);padding:30px;">⚠️</p>'; }
   box.innerHTML=html;
+  box.querySelectorAll('.tixDokBtn').forEach(function(b){ b.onclick=function(ev){ if(ev&&ev.stopPropagation)ev.stopPropagation(); const r=(window._myTixR||[]).find(x=>String(x.t.id)===String(b.dataset.id)); if(!r) return; const t=r.t, e=r.e; showReceipt({ gym_id:e.gym_id, coach_id:e.coach_id||null, amount:t.amount, currency:t.currency||e.currency, created_at:t.created_at, gym_name:e.gym_name, item_label:((e.name||e.title||'Akce')+' \u2014 '+(LANG==='en'?'ticket':'vstupenka')), payment_intent:t.payment_intent||null }); }; });
   box.querySelectorAll('.myEvCard').forEach(c=>c.onclick=()=>{ const e=window._myEvMap[c.dataset.id]; if(e) openEventView(e); });
 }
 function openMyEvManage(){
@@ -16730,12 +16770,14 @@ async function renderMyMerch(){
   try{ const { data }=await supaClient.from('merch_orders').select('id,item_name,variant,qty,amount,currency,status,gym_id,created_at').eq('student_id',currentUser.id).order('created_at',{ascending:false}); orders=data||[]; }catch(e){}
   if(!orders.length){ wrap.style.display='none'; return; }
   let gmap={}; try{ const gids=[...new Set(orders.map(o=>o.gym_id).filter(Boolean))]; if(gids.length){ const { data:gs }=await supaClient.from('gyms').select('id,name').in('id',gids); (gs||[]).forEach(g=>{ gmap[g.id]=g.name; }); } }catch(e){}
+  window._myMerchR=orders; window._myMerchG=gmap||{};
   list.innerHTML=orders.map(o=>{
     const cur=o.currency||'CZK', sym=_curSym(cur); const done=o.status==='fulfilled';
     const stLbl=done?(EN?'✅ Ready':'✅ Připraveno'):(EN?'⏳ Processing':'⏳ Zpracovává se'); const stCol=done?'var(--green)':'var(--mid)';
-    return `<div class="prow" style="cursor:default;"><div class="prow-l"><div class="prow-icon" style="background:#EEF0FF;">🛍️</div><div class="prow-lbl"><div style="font-weight:700;">${escapeHtml(o.item_name||'—')}${o.variant?` (${escapeHtml(o.variant)})`:''}${o.qty>1?` ×${o.qty}`:''}</div><div style="font-size:11.5px;color:var(--light);">${escapeHtml(gmap[o.gym_id]||'')} · ${fmtPrice(o.amount,cur)} ${sym} · ${new Date(o.created_at).toLocaleDateString()}</div></div></div><span class="prow-val" style="color:${stCol};font-size:11.5px;font-weight:700;white-space:nowrap;">${stLbl}</span></div>`;
+    return `<div class="prow" style="cursor:default;"><div class="prow-l"><div class="prow-icon" style="background:#EEF0FF;">🛍️</div><div class="prow-lbl"><div style="font-weight:700;">${escapeHtml(o.item_name||'—')}${o.variant?` (${escapeHtml(o.variant)})`:''}${o.qty>1?` ×${o.qty}`:''}</div><div style="font-size:11.5px;color:var(--light);">${escapeHtml(gmap[o.gym_id]||'')} · ${fmtPrice(o.amount,cur)} ${sym} · ${new Date(o.created_at).toLocaleDateString()}</div></div></div><span class="prow-val" style="color:${stCol};font-size:11.5px;font-weight:700;white-space:nowrap;">${stLbl}</span><button class="merchDokBtn" data-id="${o.id}" style="margin-left:8px;background:none;border:1px solid var(--border);border-radius:7px;color:var(--mid);font-size:10.5px;font-weight:700;cursor:pointer;padding:4px 8px;flex-shrink:0;" data-noi18n>Doklad</button></div>`;
   }).join('');
   wrap.style.display='block';
+  list.querySelectorAll('.merchDokBtn').forEach(function(b){ b.onclick=function(){ const o=(window._myMerchR||[]).find(x=>String(x.id)===String(b.dataset.id)); if(!o) return; showReceipt({ gym_id:o.gym_id, coach_id:o.coach_id||null, amount:o.amount, currency:o.currency, created_at:o.created_at, gym_name:(window._myMerchG||{})[o.gym_id], item_label:(o.item_name||'Merch')+(o.variant?(' ('+o.variant+')'):'')+(o.qty>1?(' \u00d7'+o.qty):''), payment_intent:o.payment_intent||null }); }; });
 }
 function openGymMerchOrders(){
   try{
@@ -23740,8 +23782,8 @@ function subscribeRealtime(){
     }catch(e){}
     const byCoh={}; (mems||[]).forEach(function(m){ if(m.cohort_id && !byCoh[m.cohort_id]) byCoh[m.cohort_id]=m; });
     const ids=Object.keys(byCoh); if(!ids.length) return [];
-    let cohs=[]; try{ const { data }=await supaClient.from('gym_cohorts').select('id,name').in('id',ids); cohs=data||[]; }catch(e){}
-    return cohs.map(function(c){ return { id:c.id, name:c.name||'Kurz', memberId:byCoh[c.id].id, paid:Number(byCoh[c.id].paid_amount||0)>0 }; });
+    let cohs=[]; try{ const { data }=await supaClient.from('gym_cohorts').select('id,name,gym_id,currency').in('id',ids); cohs=data||[]; }catch(e){}
+    return cohs.map(function(c){ var _pa=Number(byCoh[c.id].paid_amount||0); return { id:c.id, name:c.name||'Kurz', memberId:byCoh[c.id].id, paid:_pa>0, gym_id:c.gym_id||null, currency:c.currency||'CZK', amount:_pa }; });
   }
   // The student cancels their OWN participation. Deposits are non-refundable, so leaving forfeits what
   // was paid; we say so plainly. Sets their row to 'cancelled', which frees the spot for others.
@@ -23764,10 +23806,12 @@ function subscribeRealtime(){
     box.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;">'+L('Na\u010d\u00edt\u00e1m...')+'</p>';
     const list=await _cohMyList();
     const up=await _cohMySessions('upcoming');
-    const head=list.map(function(c){ return '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;border:1px solid var(--border);border-radius:11px;padding:9px 12px;margin-bottom:8px;"><div style="font-size:13px;font-weight:700;min-width:0;word-break:break-word;">\ud83c\udf93 '+((c.name||'')+'').replace(/</g,'&lt;')+'</div><button class="cohLeaveBtn" data-coh="'+c.id+'" data-mem="'+c.memberId+'" data-paid="'+(c.paid?'1':'')+'" style="flex-shrink:0;background:none;border:1px solid var(--border);border-radius:8px;color:var(--mid);font-size:11px;font-weight:700;cursor:pointer;padding:5px 10px;font-family:inherit;">'+(EN?'Leave':'Opustit')+'</button></div>'; }).join('');
+    window._cohRcpt=list;
+    const head=list.map(function(c){ return '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;border:1px solid var(--border);border-radius:11px;padding:9px 12px;margin-bottom:8px;"><div style="font-size:13px;font-weight:700;min-width:0;word-break:break-word;">\ud83c\udf93 '+((c.name||'')+'').replace(/</g,'&lt;')+'</div><div style="display:flex;gap:6px;flex-shrink:0;">'+(c.paid?('<button class="cohDokBtn" data-coh="'+c.id+'" style="background:none;border:1px solid var(--border);border-radius:8px;color:var(--mid);font-size:10.5px;font-weight:700;cursor:pointer;padding:5px 9px;">Doklad</button>'):'')+'<button class="cohLeaveBtn" data-coh="'+c.id+'" data-mem="'+c.memberId+'" data-paid="'+(c.paid?'1':'')+'" style="flex-shrink:0;background:none;border:1px solid var(--border);border-radius:8px;color:var(--mid);font-size:11px;font-weight:700;cursor:pointer;padding:5px 10px;font-family:inherit;">'+(EN?'Leave':'Opustit')+'</button></div></div>'; }).join('');
     const empty='<p style="text-align:center;color:var(--light);padding:30px 40px;font-size:14px;">'+(EN?'No upcoming course sessions.':'\u017d\u00e1dn\u00e9 nadch\u00e1zej\u00edc\u00ed tr\u00e9ninky v kurzu.')+'</p>';
     box.innerHTML=head+(up.length?up.map(_cohSessionCard).join(''):empty);
     box.querySelectorAll('.cohLeaveBtn').forEach(function(b){ b.onclick=function(){ _cohLeave(b.dataset.coh, b.dataset.mem, b.dataset.paid==='1'); }; });
+    box.querySelectorAll('.cohDokBtn').forEach(function(b){ b.onclick=function(){ const c=(window._cohRcpt||[]).find(x=>String(x.id)===String(b.dataset.coh)); if(!c) return; showReceipt({ gym_id:c.gym_id, amount:c.amount, currency:c.currency, created_at:'', item_label:(c.name||'Kurz'), type:'course' }); }; });
   }
   // Append the student's past COURSE sessions to a History list (below the private-lesson history).
   async function _appendCohortHistory(listEl){
