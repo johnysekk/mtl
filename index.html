@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SFV recurring editor re-laid-out per Petr's mockup. Main class block: row1 = Name (wide) | Capacity (120px), row2 = Start time | End time (was Time|Name then Capacity|End); Discipline|Level and Kdo-vede|Platba unchanged; Day stays full width. EXTRA sessions (extraSlots) now mirror the main day: Day is a FULL-WIDTH select (+ delete), and below it Start time | End time -- so each extra session has its OWN end, not just a start. Per-slot duration plumbed through everything: extraSlots entries are now {day,time,dur}; _classSlots(c) returns each slot WITH its dur (primary=c.dur, extra=s.dur ?? c.dur); upcomingClasses _emit(TIME,DUR), the diary, coach schedule (_csSched/_csFullSched) and _todayGymClasses all use the SLOT's dur. Editor: rcXEnd stores dur via _endToDur(slotStart,end); changing an extra slot's start shifts its End field to keep its duration; new slots inherit the main duration until edited. saveScheduleOnly's {...c} spread persists extraSlots incl. dur. Deploy: index.html only. -->
+<!-- MTL build: SFW recurring editor FULL REDESIGN (variant A, compact + day chips). Removed the top Start|End row, the 'Day' dropdown, and the tall 'More sessions' (extraSlots) blocks. Replaced with: (a) weekday CHIPS Po-Ne (rcChip) -- tap to add/remove a day; active = solid dark, inactive = outline; (b) a compact per-day time LIST, one row per day sorted Mon-Sun: 'DD  [start]-[end]  main|x'. Data model UNCHANGED (primary c.day/c.time/c.dur + extraSlots[{day,time,dur}]); the editor manages the unified view via _classSlots. The PRIMARY row reuses rcTime/rcEnd (so time versioning via _rcPending/_rcApplyPending still works) and shows 'hlavni' with no x; extra rows reuse rcXTime/rcXEnd with data-j = the extraSlots index. _rcChip(i,d): toggling a day on pushes an extra slot (inherits primary time/dur); toggling off removes it, and if it's the primary day it PROMOTES the first extra to primary; never removes the last day. Row x = _rcChip(i,day). Old handlers rcDay/rcXDay/rcXDel/rcAddDay + the 'Add another session' button removed. Everything downstream reads _classSlots so occurrence gen/diary/coach-sched are untouched. Trial on the recurring editor; may propagate the compact style elsewhere later. Deploy: index.html only. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3795,7 +3795,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SFV';
+const MTL_BUILD='SFW';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -16047,15 +16047,24 @@ function _occPanel(c,i){
 }
 // Add another weekly session to the SAME recurring class: clone every template field onto a fresh
 // row (a new day/time the owner then sets), so a 1x/week class becomes 2x/week without re-typing.
-function _rcAddDay(i){
-  const c=_gymSchedule[i]; if(!c) return; const EN=LANG==='en';
-  // ECONOMICAL multi-slot: add ANOTHER weekly session to the SAME class (no duplicate row).
-  if(!Array.isArray(c.extraSlots)) c.extraSlots=[];
-  c.extraSlots.push({ day:(Number(c.day||0)+1)%7, time:c.time||'18:00' });   // default next weekday, same time
+function _rcChip(i, d){
+  const c=_gymSchedule[i]; if(!c) return; d=Number(d);
+  const act=_classSlots(c).map(function(s){ return Number(s.day); });
+  if(act.indexOf(d)>=0){
+    if(act.length<=1) return;                 // keep at least one day
+    if(Number(c.day)===d){                    // removing the PRIMARY day -> promote first extra
+      const ex=(c.extraSlots||[])[0]; if(!ex) return;
+      c.day=ex.day; c.time=ex.time; if(ex.dur!=null) c.dur=ex.dur; c.extraSlots.shift();
+    } else {
+      c.extraSlots=(c.extraSlots||[]).filter(function(s){ return Number(s.day)!==d; });
+    }
+    if(Array.isArray(c.extraSlots) && !c.extraSlots.length) delete c.extraSlots;
+  } else {
+    if(!Array.isArray(c.extraSlots)) c.extraSlots=[];
+    c.extraSlots.push({ day:d, time:(c.time||'18:00'), dur:(Number(c.dur)||60) });   // inherit primary time/dur
+  }
   window._rcOpen=true;
   if(typeof renderScheduleEditor==='function') renderScheduleEditor();
-  setTimeout(function(){ var xs=document.querySelectorAll('.rcXDay[data-i="'+i+'"]'); var el=xs.length?xs[xs.length-1]:null; if(el){ try{ el.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} } }, 70);
-  toast(EN?'Session added \u2014 set its day & time':'Term\u00edn p\u0159id\u00e1n \u2014 nastav den a \u010das', 1);
 }
 function _schDeleteClass(i){
   const c=_gymSchedule[i]; if(!c) return; const EN=LANG==='en';
@@ -16166,12 +16175,6 @@ function _recurBlockHtml(days){
         +'<div style="width:120px;"><div style="'+_lab+'">'+(EN?'Capacity *':'Kapacita *')+'</div>'
           +'<input class="rcCap" data-i="'+i+'" type="number" min="1" max="200" inputmode="numeric" value="'+(c.cap!=null?c.cap:'')+'" style="'+_inp+'"></div>'
       +'</div>'
-      +'<div style="display:flex;gap:8px;">'
-        +'<div style="flex:1;"><div style="'+_lab+'">'+(EN?'Start time':'Čas začátku')+'</div>'
-          +'<input class="rcTime" data-i="'+i+'" type="time" value="'+escapeHtml(String(_pv(i,'time',c.time||'')))+'" style="'+_inp+'"></div>'
-        +'<div style="flex:1;"><div style="'+_lab+'">'+(EN?'End time':'Čas konce')+'</div>'
-          +'<input class="rcEnd" data-i="'+i+'" type="time" value="'+_classEnd(c.time, Number(c.dur)||60)+'" style="'+_inp+'"></div>'
-      +'</div>'
       +'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;"><div style="flex:1 1 45%;min-width:150px;order:2;"><div style="'+_lab+'">'+(EN?'Level':'Úroveň')+'</div>'
         +'<select class="rcLevel" data-i="'+i+'" style="'+_inp+'background:#fff;">'
         +CLASS_LEVELS.concat(gymCustomTags().map(function(t){ return {v:t,cs:t,en:t}; })).map(function(o){ return '<option value="'+o.v+'" '+(o.v===(c.level||'all')?'selected':'')+'>'+(EN?o.en:o.cs)+'</option>'; }).join('')
@@ -16187,31 +16190,32 @@ function _recurBlockHtml(days){
     body+='</div>';   // close the Level+Discipline row
     if(!c.coachOwned){ var _lead=classLeadSelectHtml('rcLead', i, c.leader||c.coach); var _pay=payeeSelectHtml('rcCoach', i, c.coach);
       body+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;"><div style="flex:1 1 45%;min-width:150px;">'+_lead+'</div>'+(_pay?('<div style="flex:1 1 45%;min-width:150px;">'+_pay+'</div>'):'')+'</div>'; }
-    body+='<div style="margin-top:6px;"><div style="'+_lab+'">'+(EN?'Day':'Den')+'</div><select class="rcDay" data-i="'+i+'" style="'+_inp+'background:#fff;">'
-      +[1,2,3,4,5,6,0].map(function(d){ return '<option value="'+d+'" '+(Number(c.day)===d?'selected':'')+'>'+escapeHtml(String(days[d]||''))+'</option>'; }).join('')
-      +'</select></div>';
-    // Extra weekly sessions (economical: one class definition, no duplicate rows). Primary day/time
-    // stays c.day/c.time; each extra session lives in c.extraSlots [{day,time}]. _classSlots merges them.
-    if(Array.isArray(c.extraSlots) && c.extraSlots.length){
-      body+='<div style="margin-top:8px;"><div style="'+_lab+'">'+(EN?'More sessions':'Dal\u0161\u00ed term\u00edny')+'</div>';
-      c.extraSlots.forEach(function(xs,xj){
-        body+='<div style="border:1px dashed var(--border);border-radius:10px;padding:8px 9px;margin-top:6px;">'
-          +'<div style="display:flex;gap:6px;align-items:center;">'
-            +'<select class="rcXDay" data-i="'+i+'" data-j="'+xj+'" style="flex:1;'+_inp+'background:#fff;">'
-            +[1,2,3,4,5,6,0].map(function(d){ return '<option value="'+d+'" '+(Number(xs.day)===d?'selected':'')+'>'+escapeHtml(String(days[d]||''))+'</option>'; }).join('')
-            +'</select>'
-            +'<button class="rcXDel" data-i="'+i+'" data-j="'+xj+'" style="flex-shrink:0;background:none;border:1px solid var(--border);border-radius:9px;color:var(--red);font-size:15px;cursor:pointer;padding:6px 11px;line-height:1;">\u2715</button>'
-          +'</div>'
-          +'<div style="display:flex;gap:8px;margin-top:6px;">'
-            +'<div style="flex:1;"><div style="'+_lab+'">'+(EN?'Start time':'\u010cas za\u010d\u00e1tku')+'</div>'
-              +'<input class="rcXTime" data-i="'+i+'" data-j="'+xj+'" type="time" value="'+escapeHtml(String(xs.time||''))+'" style="'+_inp+'"></div>'
-            +'<div style="flex:1;"><div style="'+_lab+'">'+(EN?'End time':'\u010cas konce')+'</div>'
-              +'<input class="rcXEnd" data-i="'+i+'" data-j="'+xj+'" type="time" value="'+_classEnd(xs.time, (xs.dur!=null?xs.dur:(Number(c.dur)||60)))+'" style="'+_inp+'"></div>'
-          +'</div>'
+        // Days as toggle chips (replace the old Day dropdown + 'More sessions' list) + a compact
+    // per-day time list. Reuses rcTime/rcEnd for the PRIMARY slot (keeps time versioning) and
+    // rcXTime/rcXEnd for the extra slots; _rcChip adds/removes a day.
+    var _slots=_classSlots(c).map(function(s,k){ return { day:Number(s.day), time:s.time, dur:(s.dur!=null?Number(s.dur):(Number(c.dur)||60)), primary:(k===0), xj:(k-1) }; });
+    var _actD=_slots.map(function(s){ return s.day; });
+    body+='<div style="margin-top:8px;"><div style="'+_lab+'">'+(EN?'Days':'Dny v t\u00fddnu')+'</div>';
+    body+='<div style="display:flex;gap:6px;flex-wrap:wrap;">';
+    [1,2,3,4,5,6,0].forEach(function(d){ var on=_actD.indexOf(d)>=0;
+      body+='<button type="button" class="rcChip" data-i="'+i+'" data-d="'+d+'" style="font-size:13px;padding:6px 13px;border-radius:20px;cursor:pointer;font-family:inherit;'+(on?'background:var(--dark);color:#fff;border:1px solid var(--dark);':'background:none;color:var(--mid);border:1px solid var(--border);')+'">'+escapeHtml(String(days[d]||''))+'</button>';
+    });
+    body+='</div></div>';
+    var _ord={1:0,2:1,3:2,4:3,5:4,6:5,0:6};
+    _slots.sort(function(a2,b2){ return (_ord[a2.day]||0)-(_ord[b2.day]||0); });
+    body+='<div style="margin-top:8px;border:1px solid var(--border);border-radius:10px;overflow:hidden;">';
+    _slots.forEach(function(sl,idx){ var _endV=_classEnd(sl.time, sl.dur);
+      var _sc=sl.primary?'rcTime':'rcXTime', _ec=sl.primary?'rcEnd':'rcXEnd', _dj=sl.primary?'':(' data-j="'+sl.xj+'"');
+      var _stV=sl.primary?escapeHtml(String(_pv(i,'time',c.time||''))):escapeHtml(String(sl.time||''));
+      body+='<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;'+(idx<_slots.length-1?'border-bottom:1px solid var(--border);':'')+'">'
+        +'<span style="font-size:13px;font-weight:700;width:26px;flex-shrink:0;">'+escapeHtml(String(days[sl.day]||''))+'</span>'
+        +'<input class="'+_sc+'" data-i="'+i+'"'+_dj+' type="time" value="'+_stV+'" style="height:32px;width:82px;text-align:center;padding:4px;border:1px solid var(--border);border-radius:8px;font-family:inherit;">'
+        +'<span style="color:var(--light);">\u2013</span>'
+        +'<input class="'+_ec+'" data-i="'+i+'"'+_dj+' type="time" value="'+_endV+'" style="height:32px;width:82px;text-align:center;padding:4px;border:1px solid var(--border);border-radius:8px;font-family:inherit;">'
+        +(sl.primary?('<span style="font-size:10.5px;color:var(--light);margin-left:auto;">'+(EN?'main':'hlavn\u00ed')+'</span>'):('<button type="button" class="rcRowDel" data-i="'+i+'" data-d="'+sl.day+'" style="margin-left:auto;background:none;border:none;color:var(--red);font-size:16px;cursor:pointer;padding:4px 8px;line-height:1;">\u2715</button>'))
         +'</div>';
-      });
-      body+='</div>';
-    }
+    });
+    body+='</div>';
     if((c.level||'')==='kids'){
       body+='<div style="display:flex;gap:8px;margin-top:6px;">'
         +'<div style="flex:1;"><div style="'+_lab+'">'+(EN?'Age from':'Věk od')+'</div><input class="rcAgeMin" data-i="'+i+'" type="number" min="0" max="18" inputmode="numeric" value="'+(c.ageMin!=null?c.ageMin:'')+'" style="'+_inp+'"></div>'
@@ -16225,7 +16229,6 @@ function _recurBlockHtml(days){
         +'<input class="rcAltAddr" data-i="'+i+'" type="text" value="'+escapeHtml(String(c.altAddr||''))+'" placeholder="'+(EN?'Address':'Adresa')+'" style="'+_inp+'">'
       +'</div>';
     body+='<label style="display:flex;align-items:center;gap:7px;margin-top:8px;font-size:12.5px;cursor:pointer;"><input class="rcOnce" data-i="'+i+'" type="checkbox"> '+(EN?'One-off (does not repeat)':'Jednor\u00e1zov\u011b (neopakuje se)')+'</label>';
-    body+='<button class="rcAddDay" data-i="'+i+'" style="width:100%;margin-top:9px;padding:9px;background:#F0FBF0;color:#0e6b3d;border:1px solid #A8E6C0;border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;">\u2795 '+(EN?'Add another session (day/time)':'P\u0159idat dal\u0161\u00ed term\u00edn (den/\u010das)')+'</button>';
     body+='<button class="rcDel" data-i="'+i+'" style="width:100%;margin-top:9px;padding:9px;background:none;color:var(--red);border:1px solid var(--border);border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Delete class':'Smazat lekci')+'</button>';
     body+='</div>';
   });
@@ -16322,11 +16325,10 @@ function renderScheduleEditor(){
   box.querySelectorAll('.rcLead').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; const oid=(_myGymData&&_myGymData.owner_id)||(currentUser&&currentUser.id); it.leader=el.value||oid;
     if(it.leader===oid){ it.leaderName=(currentUser&&currentUser.name)||(LANG==='en'?'Owner':'Majitel'); } else { const cc=_gymTeamCoaches.find(x=>x.id===it.leader); it.leaderName=cc?cc.name:null; } renderScheduleEditor(); });
   box.querySelectorAll('.rcCoach').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; it.coach=el.value||null; const cc=_gymTeamCoaches.find(x=>x.id===el.value); it.coachName=cc?cc.name:null; });
-  box.querySelectorAll('.rcDay').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].day=+el.value; renderScheduleEditor(); });
-  box.querySelectorAll('.rcXDay').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; if(it&&it.extraSlots&&it.extraSlots[+el.dataset.j]) it.extraSlots[+el.dataset.j].day=+el.value; });
+  box.querySelectorAll('.rcChip').forEach(el=>el.onclick=()=>_rcChip(+el.dataset.i, +el.dataset.d));
+  box.querySelectorAll('.rcRowDel').forEach(el=>el.onclick=()=>_rcChip(+el.dataset.i, +el.dataset.d));
   box.querySelectorAll('.rcXTime').forEach(el=>el.onchange=()=>{ const i=+el.dataset.i, j=+el.dataset.j; const it=_gymSchedule[i]; if(it&&it.extraSlots&&it.extraSlots[j]){ it.extraSlots[j].time=el.value; const _e=document.querySelector('.rcXEnd[data-i="'+i+'"][data-j="'+j+'"]'); if(_e){ const _d=(it.extraSlots[j].dur!=null?it.extraSlots[j].dur:(Number(it.dur)||60)); _e.value=_classEnd(el.value, _d); } } });
   box.querySelectorAll('.rcXEnd').forEach(el=>el.onchange=()=>{ const i=+el.dataset.i, j=+el.dataset.j; const it=_gymSchedule[i]; if(it&&it.extraSlots&&it.extraSlots[j]){ const _st=((document.querySelector('.rcXTime[data-i="'+i+'"][data-j="'+j+'"]')||{}).value)||it.extraSlots[j].time||'18:00'; const _d=_endToDur(_st, el.value); if(_d>0) it.extraSlots[j].dur=_d; } });
-  box.querySelectorAll('.rcXDel').forEach(el=>el.onclick=()=>{ const it=_gymSchedule[+el.dataset.i]; if(it&&it.extraSlots){ it.extraSlots.splice(+el.dataset.j,1); if(!it.extraSlots.length) delete it.extraSlots; renderScheduleEditor(); } });
   box.querySelectorAll('.rcAgeMin').forEach(el=>el.oninput=()=>{ _gymSchedule[+el.dataset.i].ageMin=el.value===''?null:(parseInt(el.value)||0); });
   box.querySelectorAll('.rcAgeMax').forEach(el=>el.oninput=()=>{ _gymSchedule[+el.dataset.i].ageMax=el.value===''?null:(parseInt(el.value)||0); });
   box.querySelectorAll('.rcParentReq').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].parentReq=el.checked; });
@@ -16377,7 +16379,6 @@ function renderScheduleEditor(){
   box.querySelectorAll('.schLead').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; const oid=(_myGymData&&_myGymData.owner_id)||(currentUser&&currentUser.id); it.leader=el.value||oid; if(it.leader===oid){ it.leaderName=(currentUser&&currentUser.name)||(LANG==='en'?'Owner':'Majitel'); } else { const cc=_gymTeamCoaches.find(x=>x.id===it.leader); it.leaderName=cc?cc.name:null; } renderScheduleEditor(); });
   box.querySelectorAll('.schDel').forEach(el=>el.onclick=()=>_schDeleteClass(+el.dataset.i));
   box.querySelectorAll('.rcDel').forEach(el=>el.onclick=()=>_schDeleteClass(+el.dataset.i));
-  box.querySelectorAll('.rcAddDay').forEach(el=>el.onclick=()=>_rcAddDay(+el.dataset.i));
   box.querySelectorAll('.schSaveCls').forEach(el=>el.onclick=()=>{
     const i=+el.dataset.i;
     // Sync this class's capacity from the DOM first: a pre-filled value the owner never TOUCHED
