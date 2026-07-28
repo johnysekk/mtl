@@ -63,7 +63,35 @@ export default async function handler(req, res) {
       `&select=cohort_member_id,kind,amount,currency,payment_method,mtl_fee,stripe_fee,status,created_at&order=created_at.asc`,
       { headers: svc }
     );
-    const payments = pres.ok ? await pres.json() : [];
+    let payments = pres.ok ? await pres.json() : [];
+
+    // Fallback for cohort mode: if cohort_payments has no rows yet, derive the cohort's revenue from the
+    // REAL transactions rows (recordTransaction stored the true gross/mtl/stripe fee). Link via the
+    // members' student_ids. Amounts in transactions are in minor units (x100), so normalise to match.
+    if (cohortQ && (!payments || !payments.length)) {
+      try {
+        const memres = await fetch(`${SB}/rest/v1/cohort_members?cohort_id=eq.${encodeURIComponent(cohortId)}&select=id,student_id,paid_amount,status`, { headers: svc });
+        const mem = memres.ok ? await memres.json() : [];
+        const sids = [...new Set(mem.map(m => m.student_id).filter(Boolean))];
+        let txRows = [];
+        if (sids.length) {
+          const inList = sids.map(encodeURIComponent).join(',');
+          const txres = await fetch(`${SB}/rest/v1/transactions?type=eq.course&member_id=in.(${inList})&select=member_id,gross_amount,mtl_fee,stripe_fee,net_amount,currency,income_class,created_at&order=created_at.asc`, { headers: svc });
+          txRows = txres.ok ? await txres.json() : [];
+        }
+        payments = txRows.map(t => ({
+          cohort_member_id: null,
+          kind: (t.income_class === 'cohort_first_month' ? 'first_month' : (t.income_class === 'cohort_month' ? 'month' : 'deposit')),
+          amount: (Number(t.gross_amount || 0) / 100),
+          currency: t.currency,
+          payment_method: 'stripe',
+          mtl_fee: (Number(t.mtl_fee || 0) / 100),
+          stripe_fee: (Number(t.stripe_fee || 0) / 100),
+          status: 'paid',
+          created_at: t.created_at,
+        }));
+      } catch (e) { /* leave payments empty */ }
+    }
 
     return res.status(200).json({ ok: true, payments: Array.isArray(payments) ? payments : [], paid_amount: member ? (member.paid_amount || 0) : 0, status: member ? member.status : null, currency: (crows && crows[0] && crows[0].currency) || null });
   } catch (e) {
