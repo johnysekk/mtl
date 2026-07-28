@@ -187,7 +187,7 @@ async function coachCheckout(req, res) {
   // Legitimate range: 0.01 (EP) .. 0.10 (the coach-1:1 ACQUISITION fee, which the client
   // DOES send here as Math.max(comm, partner?0.05:0.10)). Fallback = Stripe base 3%.
   let COMMISSION = commission ? parseFloat(commission) : 0.03;
-  if (!(COMMISSION >= 0.01 && COMMISSION <= 0.10)) COMMISSION = 0.03;
+  if (!(COMMISSION >= 0.005 && COMMISSION <= 0.10)) COMMISSION = 0.03;   // 0.005 = EP (0.5%) floor
   let MK = 1.00; // no markup — student pays exactly the listed price
   let STUDENT_MARKUP = MK;
   const _credRow = (String(credit) === 'student') ? await verifyStudentCredit(studentId) : null;
