@@ -1,6 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SGZ HOTFIX for a crash-on-load regression introduced in SGW. When SGW made shareBreakdownHtml a no-op, it located the function body with s.index('
-}') which greedily spanned PAST shareBreakdownHtml's real end into the very next function -- updateGymMembBreakdown -- so BOTH were replaced by the single shareBreakdownHtml no-op, DELETING updateGymMembBreakdown's definition. updateGymMembBreakdown is referenced UNGUARDED as an event-listener arg (addEventListener('input', updateGymMembBreakdown) at ~18091 and ('change',...) at ~18098), so its absence threw 'updateGymMembBreakdown is not defined' during init and dropped the whole app to the login screen. Fix: re-defined updateGymMembBreakdown as a no-op that hides #gymMembBreakdown (matches the intended 'breakdowns removed everywhere' behaviour). Verified all four breakdown fns are defined and the region is coherent. Deploy: index.html only (URGENT). -->
+<!-- MTL build: SHA new commission rates -- EP 0.5% + Founding Partner ladder. EP economics verified (Stripe fees paid by the club on direct charges, infra is mostly amortised fixed cost -> 0.5%+1000/mo is ~90-98% margin even for a 1M/mo club). RATES: EP (profiles.partner) = 0.5% flat (was 1%). FOUNDING PARTNER = the EXISTING profiles.founding flag (it already gave founding members a rate edge, e.g. 2% on events), now a full ladder via _ladderRate: base 2%, Shikai (ref>=2) 1.5% (all modes incl QR/PIS/cash), Bankai (ref>=5 + bankai_eligible) 1% (stripe+cash only, no Bankai on QR/PIS). Rates are USER-level (profiles), so a coach with 5 gyms gets the same rate everywhere. CHANGED: _ladderRate rewritten (EP 0.005 + founding branch); founding threaded into all 8 _ladderRate callers (currentUser x2, coach-obj x2, u-obj x4); server api/cohort-pay.js providerCommission now returns EP 0.005 + the FP ladder + selects founding; api/pay.js commission guard widened to >=0.005 (was >=0.01) so EP 0.5% is no longer rejected to the 3% fallback; dashboard income estimates (evTake, epMul) updated for EP 0.5% / founding keep 98%. STILL TODO (next): Founding Partner BADGE placement, manual grant UI, Nuke handling of founding, and turning Ambassadors off. Deploy: index.html + api/cohort-pay.js + api/pay.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3800,7 +3799,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SGZ';
+const MTL_BUILD='SHA';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -6050,7 +6049,7 @@ function _welcomeBanner(scope){
       }catch(e){}
     }
     const wf = (_wfProfile!==null || _wfGym!==null) ? Math.max(_wfProfile||0, _wfGym||0) : null;
-    const _arN = Math.round(_ladderRate(currentUser.payment_mode, {partner:currentUser.partner, score:currentUser.coach_ref_score, bankai:currentUser.bankai_eligible}) * 1000) / 10; const afterR = EN ? (_arN+'%') : (String(_arN).replace('.',',')+' %');
+    const _arN = Math.round(_ladderRate(currentUser.payment_mode, {partner:currentUser.partner, score:currentUser.coach_ref_score, bankai:currentUser.bankai_eligible, founding:currentUser.founding}) * 1000) / 10; const afterR = EN ? (_arN+'%') : (String(_arN).replace('.',',')+' %');
     const _wrap=(t,b,urgent)=>`<div style="background:${urgent?'linear-gradient(135deg,#B45309,#7C2D12)':'linear-gradient(135deg,#0A7A4F,#005A3C)'};color:#fff;border-radius:14px;padding:13px 16px;margin-bottom:12px;box-shadow:0 2px 10px rgba(0,96,64,.18);"><div style="font-weight:800;font-size:14px;margin-bottom:3px;">${t}</div><div style="font-size:12.5px;opacity:.93;line-height:1.5;">${b}</div></div>`;
     if(wf && now < wf){
       const d=new Date(wf).toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'long',year:'numeric'});
@@ -6110,7 +6109,7 @@ async function _checkWelcomeEnding(){
     try{ if(localStorage.getItem(key)===String(wf)) return; localStorage.setItem(key,String(wf)); }catch(e){}
     const EN=LANG==='en';
     const d=new Date(wf).toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'long'});
-    const _arN = Math.round(_ladderRate(currentUser.payment_mode, {partner:currentUser.partner, score:currentUser.coach_ref_score, bankai:currentUser.bankai_eligible}) * 1000) / 10; const afterR = EN ? (_arN+'%') : (String(_arN).replace('.',',')+' %');
+    const _arN = Math.round(_ladderRate(currentUser.payment_mode, {partner:currentUser.partner, score:currentUser.coach_ref_score, bankai:currentUser.bankai_eligible, founding:currentUser.founding}) * 1000) / 10; const afterR = EN ? (_arN+'%') : (String(_arN).replace('.',',')+' %');
     await supaClient.from('notifications').insert({ user_id: currentUser.id, type:'system', read:false,
       data: JSON.stringify({ kind:'welcome_ending' }),
       message: EN?`Your welcome month ends ${d} — standard ${afterR} commission applies after that.`
@@ -6492,7 +6491,7 @@ async function selectSlot(slot, c, _party){
   let _amtHit=null; try{ if(_scap<=1 && _privOffersOf(c).length){ const _im=await _privIsMember(c.profileId||c.id); _amtHit=_privPick(c, slot, _im, _amtBase); } }catch(e){}
   const amount = _amtHit ? _amtHit.price : _amtBase;
   const curr = c.currencyInperson || 'CZK';
-  let comm = _ladderRate(_cIsQr ? 'qr_bank' : 'stripe', {partner:c.partner, score:c.coachRefScore||0, bankai:c.coachBankai}), nomarkup=1, creditUsed='';
+  let comm = _ladderRate(_cIsQr ? 'qr_bank' : 'stripe', {partner:c.partner, score:c.coachRefScore||0, bankai:c.coachBankai, founding:c.founding}), nomarkup=1, creditUsed='';
   if(currentUser && (currentUser.student_credits||0)>0 && (c.referral_optin!==false)){ creditUsed='student'; /* referral redemption: MTL waives its WHOLE fee (3.5%/2%/1%); provider funds the rest (20% new / 10% existing). Applies to founding/partner too (their acquisition cost). */ }
   else if((c.coachCredits||0)>0){ comm=0.035; creditUsed='coach'; }
   try{ localStorage.setItem('mtl_credit_used', creditUsed); }catch(e){}
@@ -6926,7 +6925,7 @@ async function startOnlineBooking(c, tier, disc){
     ? 'Refund policy: cancel and get 95% back. If the coach doesn\'t deliver, you get 100%.\n\nContinue to payment?'
     : 'Refund: při zrušení dostaneš 95 % zpět. Pokud kouč nedodá, dostaneš 100 %.\n\nPokračovat na platbu?')) return;
   toast(L('💳 Přesměrovávám na platbu...'));
-  let comm = _ladderRate('stripe', {partner:c.partner, score:c.coachRefScore||0, bankai:c.coachBankai}), nomarkup=1, creditUsed='';
+  let comm = _ladderRate('stripe', {partner:c.partner, score:c.coachRefScore||0, bankai:c.coachBankai, founding:c.founding}), nomarkup=1, creditUsed='';
   if(currentUser && (currentUser.student_credits||0)>0 && (c.referral_optin!==false)){ creditUsed='student'; /* referral redemption: MTL waives its WHOLE fee (3.5%/2%/1%); provider funds the rest (20% new / 10% existing). Applies to founding/partner too (their acquisition cost). */ }
   else if((c.coachCredits||0)>0){ comm=0.035; creditUsed='coach'; }
   try{ localStorage.setItem('mtl_credit_used', creditUsed); }catch(e){}
@@ -12100,7 +12099,7 @@ function _gaKeepRate(){
   if(wf && Date.now()<wf) return 1;
   const ck=document.querySelector('input[name="gaPayMode"]:checked');
   const mode=(ck && ck.value==='qr_bank')?'qr_bank':'stripe';
-  const fee=_ladderRate(mode, { partner:u.partner, score:u.coach_ref_score||0, bankai:u.bankai_eligible });
+  const fee=_ladderRate(mode, { partner:u.partner, score:u.coach_ref_score||0, bankai:u.bankai_eligible, founding:u.founding });
   return Math.round((1-fee)*1000)/1000;
 }
 function _gymKeepRate(g){
@@ -12114,7 +12113,7 @@ function _gymKeepRate(g){
   if(wf && Date.now()<wf) return 1;   // welcome window: 0% fee
   const pm=gg.payment_mode||u.payment_mode;
   const mode=(pm==='qr_bank'||pm==='cash'||pm==='pis')?'qr_bank':'stripe';
-  const fee=_ladderRate(mode, { partner:u.partner, score:u.coach_ref_score||0, bankai:u.bankai_eligible });
+  const fee=_ladderRate(mode, { partner:u.partner, score:u.coach_ref_score||0, bankai:u.bankai_eligible, founding:u.founding });
   return Math.round((1-fee)*1000)/1000;
 }
 function _cohKeepRate(){
@@ -12126,7 +12125,7 @@ function _cohKeepRate(){
   // one source of truth; keep = 1 - fee. This used to hard-code the Stripe ladder (and showed
   // 3.5% for everyone regardless of mode).
   const mode = (u.payment_mode==='qr_bank' || u.payment_mode==='cash' || u.payment_mode==='pis') ? 'qr_bank' : 'stripe';
-  const fee = _ladderRate(mode, { partner:u.partner, score:u.coach_ref_score||0, bankai:u.bankai_eligible });
+  const fee = _ladderRate(mode, { partner:u.partner, score:u.coach_ref_score||0, bankai:u.bankai_eligible, founding:u.founding });
   return Math.round((1-fee)*1000)/1000;
 }
 function _cohRateLabel(){
@@ -15306,8 +15305,12 @@ function _emv(id,val){ var l=('00'+String(val.length)).slice(-2); return id+l+va
 // EP (partner) = 1% in both modes.
 function _ladderRate(mode, o){
   o = o || {};
-  if(o.partner) return 0.01;
+  if(o.partner) return 0.005;                       // Exclusive Partner: flat 1000/mo + 0.5%
   var s = o.score || 0;
+  if(o.founding){                                    // Founding Partner ladder
+    if(mode === 'stripe'){ return (s >= 5 && o.bankai) ? 0.01 : (s >= 2 ? 0.015 : 0.02); }  // base 2 / Shikai 1.5 / Bankai 1 (stripe+cash)
+    return (s >= 2) ? 0.015 : 0.02;                  // QR/PIS: base 2 / Shikai 1.5 (no Bankai)
+  }
   if(mode === 'stripe'){ return (s >= 5 && o.bankai) ? 0.02 : (s >= 2 ? 0.025 : 0.03); }
   return (s >= 2) ? 0.03 : 0.035;
 }
@@ -17064,7 +17067,7 @@ async function loadGymManageBookings(){
     const monthLabel = _gymMonth==='all' ? (LANG==='en'?'all time':'celkem') : (()=>{ const mm=fdMonthList().find(x=>x.ym===_gymMonth); return mm?mm.lbl:_gymMonth; })();
     const _evCur=_myGymData.currency||'CZK';
     const evTixM=_gymEvTix.filter(t=>(!t.currency||t.currency===_evCur) && (_gymMonth==='all'?true:((t.created_at||'').slice(0,7)===_gymMonth)));
-    const _evTake=(currentUser&&currentUser.partner)?0.01:((currentUser&&currentUser.founding)?0.02:0.035);
+    const _evTake=(currentUser&&currentUser.partner)?0.005:((currentUser&&currentUser.founding)?0.02:0.035);
     const evGross=evTixM.reduce((s,t)=>s+(t.amount||0),0);
     const evMtl=evGross*_evTake;
     const evFeeEst=evTixM.reduce((s,t)=>s+((t.amount||0)*0.014+6),0);
@@ -17081,7 +17084,7 @@ async function loadGymManageBookings(){
     const activeNow = mems.filter(m=>m.status==='active');
     const cancellingNow = mems.filter(m=>m.status==='cancelling');
     _gymCancelling = cancellingNow.slice();
-    const epMul = isEP?0.99:((currentUser&&currentUser.founding)?0.965:0.965);
+    const epMul = isEP?0.995:((currentUser&&currentUser.founding)?0.98:0.965);
     const memsM = _gymMonth==='all' ? mems.filter(m=>(m.status==='active'||m.status==='cancelling') && (m.payment_status==='past_due' || !m.period_end || new Date(m.period_end).getTime() >= Date.now()-86400000)) : mems.filter(m => (inGM(m)||beforeGM(m)) && !(m.cancelled_at && String(m.cancelled_at).slice(0,7) < _gymMonth));
     const memMRR=memsM.reduce((s,m)=>s+_memMonthlyValue(m),0), memGym=memsM.reduce((s,m)=>s+(m.amount||0)*(m.gym_keep_pct!=null?m.gym_keep_pct:epMul),0);
     const memFeeMo=memsM.reduce((s,m)=>s+((m.amount||0)*0.014+6),0);
@@ -23699,7 +23702,7 @@ function myKeepPct(){
   if(wf && Date.now()<wf) return 1;
   const pm=u.payment_mode;
   const mode=(pm==='qr_bank'||pm==='cash'||pm==='pis')?'qr_bank':'stripe';
-  const fee=_ladderRate(mode, { partner:u.partner, score:u.coach_ref_score||0, bankai:u.bankai_eligible });
+  const fee=_ladderRate(mode, { partner:u.partner, score:u.coach_ref_score||0, bankai:u.bankai_eligible, founding:u.founding });
   return Math.round((1-fee)*1000)/1000;
 }
 
