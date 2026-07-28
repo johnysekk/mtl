@@ -1,5 +1,5 @@
 import Stripe from 'stripe';
-import { resolveRate } from './_rate.js';
+import { resolveRate, effectiveRate } from './_rate.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -172,7 +172,7 @@ export default async function handler(req, res) {
 async function coachCheckout(req, res) {
   const {
     coachId, coachName, amount, currency = 'CZK', slotId, online,
-    coachProfileId, fmt, commission, nomarkup, credit, studentId, disc, markup, refDisc,
+    coachProfileId, fmt, commission, nomarkup, credit, studentId, disc, markup, refDisc, acq,
   } = req.query;
 
   if (!coachId || !amount) return res.status(400).json({ error: 'Chybí coachId nebo amount' });
@@ -187,11 +187,13 @@ async function coachCheckout(req, res) {
   //   * the fallback itself was 10%, not the base rate.
   // Legitimate range: 0.01 (EP) .. 0.10 (the coach-1:1 ACQUISITION fee, which the client
   // DOES send here as Math.max(comm, partner?0.05:0.10)). Fallback = Stripe base 3%.
-  let COMMISSION = commission ? parseFloat(commission) : NaN;
-  if (!(COMMISSION >= 0.005 && COMMISSION <= 0.10)) {
-    // No silent 3% fallback: resolve the coach's real Stripe-track rate from _rate.js.
-    try { COMMISSION = await resolveRate(_wsbGet, { ownerId: coachProfileId, mode: 'stripe' }); }
-    catch (e) { console.error('pay.coach rate resolve failed:', e.message); COMMISSION = 0.03; }
+  // Server-side single source: ladder + acquisition via _rate.js (client 'commission' only a fallback).
+  let COMMISSION;
+  try {
+    COMMISSION = await effectiveRate(_wsbGet, { ownerId: coachProfileId, mode: 'stripe', type: 'coach_1to1', acqSource: acq, memberId: studentId, scopeCol: 'coach_id', scopeId: coachProfileId });
+  } catch (e) {
+    console.error('pay.coach effectiveRate failed:', e.message);
+    COMMISSION = (commission && parseFloat(commission) >= 0.005 && parseFloat(commission) <= 0.10) ? parseFloat(commission) : 0.03;
   }
   let MK = 1.00; // no markup — student pays exactly the listed price
   let STUDENT_MARKUP = MK;
@@ -275,7 +277,7 @@ async function gymCheckout(req, res) {
   const {
     gymAccount, gymName, className, amount, currency = 'CZK', bookingId,
     income, memberName, payee, disc, level, partner, guest, token, founding, credit, refDisc, take,
-    gymId, studentId, coachId, grace, merch, merchId, qty, variant, merchName,
+    gymId, studentId, coachId, grace, merch, merchId, qty, variant, merchName, acq,
   } = req.query;
 
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
@@ -286,13 +288,15 @@ async function gymCheckout(req, res) {
   const isPartner = (String(partner) === '1');
   const MK   = 1.00;
   let STUDENT_MK = MK;
-  // Rate: the client sends its _ladderRate (EP 0.5% / FP / Shikai/Bankai) already max'd with any
-  // acquisition fee. We accept the full legit range; if it's missing/invalid we resolve the owner's
-  // real rate server-side (no silent 3% guess). No partner override -> EP 0.5% is honoured.
-  let TAKE = take ? parseFloat(take) : NaN;
-  if (!(TAKE >= 0.005 && TAKE <= 0.10)) {
-    try { TAKE = await resolveRate(_wsbGet, { gymAccount, mode: 'stripe' }); }
-    catch (e) { console.error('pay.gym rate resolve failed:', e.message); TAKE = GYM_MTL_TAKE; }
+  // Server-side single source: ladder + acquisition via _rate.js. Merch/grace/guest are not drop-ins
+  // so they never get the acquisition fee. Client 'take' is only a fallback if resolve fails.
+  let TAKE;
+  try {
+    const _txType = (String(merch) === '1') ? 'merch' : 'drop_in';
+    TAKE = await effectiveRate(_wsbGet, { gymAccount, mode: 'stripe', type: _txType, acqSource: acq, memberId: studentId, scopeCol: 'gym_id', scopeId: gymId });
+  } catch (e) {
+    console.error('pay.gym effectiveRate failed:', e.message);
+    TAKE = (take && parseFloat(take) >= 0.005 && parseFloat(take) <= 0.10) ? parseFloat(take) : GYM_MTL_TAKE;
   }
   const _credRow = (String(credit) === 'student') ? await verifyStudentCredit(studentId) : null;
   if (_credRow) {
