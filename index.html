@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SHC ROOT CAUSE of the empty 'Co zaplatil' found + FP manual grant. ROOT: cohort_payments is RLS-blocked on the browser client (that's why we READ it via the service-role endpoint). The QR/cash deposit confirm WRITES cohort_payments via the browser client (index ~7951) -> that INSERT is RLS-blocked too and fails silently in its try/catch -> no row -> empty log (Stripe deposits log fine via the service-role webhook). FIX (shows the real deposit regardless): api/cohort-payments.js now also returns the member's authoritative paid_amount/status/currency, and _cohMemberPayments shows 'Zaloha: {paid_amount}' when there are no detailed rows. (Follow-up: route the QR/cash cohort_payments write through record-cash.js/service-role for the full deposit/month breakdown.) Also: (2) FP RATE INDICATOR moved ABOVE the amount in the net hero (was below). (3) MANUAL FP GRANT to the USER: new toggleFP(userId) (sets profiles.founding, confirm notes it applies to ALL their gyms/coaching) + a founder-only 'Grant Founding Partner' button on the coach profile next to the EP button + _setFp state. (4) EP grant copy updated 1% -> 0.5% everywhere. Deploy: index.html + api/cohort-payments.js. -->
+<!-- MTL build: SHD REAL root cause of the 'Co zaplatil' 404. My SHC change added currency to the cohort_members select (select=cohort_id,status,paid_amount,currency). cohort_members has NO currency column, so PostgREST returned 400 -> mres.ok=false -> member=null -> the endpoint returned its OWN 404 'member not found'. The client's SGX handler mapped ANY 404 to 'endpoint not deployed', which is why it wrongly said 'nasad /api/cohort-payments' even though it WAS deployed. FIX: cohort-payments.js no longer selects currency from cohort_members (gets currency from gym_cohorts instead). The client now shows the endpoint's ACTUAL j.error text ('member not found' / 'not owner' / etc.) instead of assuming 404==undeployed -- so if it still fails we'll see the true reason. NOTE: this is why 'Co zaplatil' broke AFTER SHC specifically. Whether cohort_payments has rows for a Stripe deposit is the separate open question; with the endpoint fixed we will finally see real payments OR the paid_amount OR the true error. STILL OPEN: (a) confirm Stripe deposits actually write cohort_payments; (b) 'Platby a provize' global %% must reflect the FP/EP badge rate. Deploy: index.html + api/cohort-payments.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3800,7 +3800,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SHC';
+const MTL_BUILD='SHD';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -11764,10 +11764,10 @@ async function _cohMemberPayments(memberId, wrap){
   let rows=[]; let _err='';
   try{ var _s=await supaClient.auth.getSession(); var _tok=(_s&&_s.data&&_s.data.session&&_s.data.session.access_token)||'';
     const r=await fetch('/api/cohort-payments?member='+encodeURIComponent(memberId), { headers:{ 'x-access-token':_tok } });
-    if(!r.ok){ _err=(r.status===404?'endpoint':(r.status===403?'owner':String(r.status))); }
+    if(!r.ok){ try{ var _ej=await r.json(); _err=(_ej&&_ej.error)||('HTTP '+r.status); }catch(e){ _err='HTTP '+r.status; } }
     else { const j=await r.json(); rows=((j&&j.payments)||[]).filter(function(p){ return p.status!=='refunded'; }); window._cohLastPA=Number((j&&j.paid_amount)||0); window._cohLastCur=(j&&j.currency)||'CZK'; }
   }catch(e){ _err='net'; }
-  if(_err){ wrap.innerHTML='<div style="font-size:11px;color:var(--red);padding:6px 0;">'+(EN?('Could not load payments ('+_err+')'):('Nelze na\u010d\u00edst platby ('+_err+')'))+(_err==='endpoint'?(EN?' \u2014 deploy /api/cohort-payments':' \u2014 nasa\u010f /api/cohort-payments'):'')+'</div>'; return; }
+  if(_err){ wrap.innerHTML='<div style="font-size:11px;color:var(--red);padding:6px 0;">'+(EN?('Could not load payments: '+_err):('Nelze na\u010d\u00edst platby: '+_err))+'</div>'; return; }
   if(!rows.length){
     var _pa=Number(window._cohLastPA||0), _c=window._cohLastCur||'CZK';
     if(_pa>0){ var _sy=(typeof _curSym==='function')?_curSym(_c):'';
