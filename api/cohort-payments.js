@@ -39,9 +39,17 @@ export default async function handler(req, res) {
     const cohortId = mrows.length ? mrows[0].cohort_id : null;
     if (!cohortId) return res.status(404).json({ error: 'member not found' });
 
-    const cres = await fetch(`${SB}/rest/v1/gym_cohorts?id=eq.${encodeURIComponent(cohortId)}&select=owner_id`, { headers: svc });
+    const cres = await fetch(`${SB}/rest/v1/gym_cohorts?id=eq.${encodeURIComponent(cohortId)}&select=owner_id,gym_id`, { headers: svc });
     const crows = cres.ok ? await cres.json() : [];
-    if (!crows.length || crows[0].owner_id !== uid) return res.status(403).json({ error: 'not owner' });
+    if (!crows.length) return res.status(404).json({ error: 'cohort not found' });
+    let owns = crows[0].owner_id === uid;
+    if (!owns && crows[0].gym_id) {
+      // fall back to gym ownership (cohort.owner_id may be unset on older rows)
+      const gres = await fetch(`${SB}/rest/v1/gyms?id=eq.${encodeURIComponent(crows[0].gym_id)}&select=owner_id`, { headers: svc });
+      const grows = gres.ok ? await gres.json() : [];
+      owns = grows.length && grows[0].owner_id === uid;
+    }
+    if (!owns) return res.status(403).json({ error: 'not owner' });
 
     // 3) read the member's payments via the service role (bypasses RLS)
     const pres = await fetch(
