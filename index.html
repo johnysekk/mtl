@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SHH admin coach detail fixes + course-detail Trzby fallback. ADMIN COACH DETAIL (renderCoachAnalytics, founder view): (1) csSuspend button now display:block only when coach_status is 'approved' (shows Suspend) or 'suspended' (shows Restore); hidden for pending/other -> no more misleading 'Obnovit kouce' on a coach that isn't suspended. (2) The founder rate banner text fixed: EP '99%' -> '99.5% (0.5% fee)', and the hardcoded 'bezna 96,5%' replaced with FP-aware copy (Founding Partner 2/1.5/1% when prof.founding, else 'ladder Shikai/Bankai applies') -- no more 'Exclusive MTL Partner + normal 96.5%' contradiction. (3) Added EP + FP toggle buttons INTO that banner (csEpToggle/csFpToggle) wired to toggleEP/toggleFP with a re-render, so the founder can grant both from this admin detail. TRZBY (openCohortDash): now reads cohort_payments via the ?cohort= service-role endpoint (SHG), and when there are no detailed rows yet it falls back to the members' authoritative paid_amount (gross = sum(paid_amount), mtl/net estimated via _cohKeepRate) so course revenue shows even before the SQL migrations populate cohort_payments. Deploy: index.html. -->
+<!-- MTL build: SHI removed the hardcoded stripeFee=0 fallback (my bad) and made course revenue read REAL data. openCohortDash no longer fabricates a 0 fee; the ?cohort= endpoint now, when cohort_payments has no rows (or its select 400s because payment_method/stripe_fee columns are absent -> pres.ok false -> empty), derives the cohort's revenue from the REAL transactions rows: it reads the members' student_ids, pulls transactions where type='course' AND member_id in (student_ids), and returns gross_amount/mtl_fee/stripe_fee/net_amount (normalised /100) with the true Stripe fee that recordTransaction captured from the balance_transaction. So Trzby shows the same real fee the dashboard uses, no hardcode. NOTE on the numbers: a 0 Stripe fee is EXPECTED for Stripe TEST-mode charges (test charges carry no real fee); in live mode the real fee flows through. If the roster shows 2 paid but only ~1 deposit of revenue appears, that cohort has only 1 course transaction -> one member reached deposit_paid without a recorded Stripe transaction (its recordTransaction likely errored, or it wasn't a real charge). Deploy: index.html + api/cohort-payments.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3800,7 +3800,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SHH';
+const MTL_BUILD='SHI';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -11610,12 +11610,7 @@ async function openCohortDash(cohortId, cohortName){
   let mtl=pays.reduce(function(a,p){ return a+Number(p.mtl_fee||0); },0);
   let stripeFee=pays.reduce(function(a,p){ return a+Number(p.stripe_fee||0); },0);
   let net=gross-mtl-stripeFee;
-  if(!pays.length){
-    // No detailed cohort_payments rows (e.g. migrations not run) -> use the members' authoritative paid_amount.
-    gross = members.reduce(function(a,m){ return a + Number(m.paid_amount||0); }, 0);
-    var _kr = (typeof _cohKeepRate==='function') ? _cohKeepRate() : 0.965;
-    mtl = Math.round(gross*(1-_kr)*100)/100; stripeFee = 0; net = gross - mtl;
-  }
+
   const _isStripeMode=!!(coh && coh.stripe_account);
   const _hasStripe=stripeFee>0;
   const _mtlPct=(gross>0)?(Math.round(mtl/gross*1000)/10):0;
