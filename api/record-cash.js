@@ -14,7 +14,7 @@
 // Rate: BANK track - EP 1%, else base 3.5% / Shikai 3% at coach_ref_score>=2. No Bankai.
 // Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
 
-import { ladderRate as _mtlRate } from './_rate.js';
+import { ladderRate as _mtlRate, acquisitionRate as _mtlAcq } from './_rate.js';
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -122,20 +122,8 @@ const ACQ_RATE_EP = 0.05;  // EP perk: HALF the acquisition fee (EP buys a cheap
 // "Window" is bounded by counting prior COMPLETED tx of this type for this member at this provider
 // (counts Stripe + cash together, so a member already past the window isn't re-charged 10% on cash).
 async function acquisitionRate(acq, type, payee, memberId, scopeCol, scopeId) {
-  if (acq !== 'mtl_discovery') return null;
-  // NOTE: this used to early-return null for a partner, which made the ACQ_RATE_EP branch
-  // below DEAD CODE - an EP acquisition was billed at their normal 1% instead of 5%.
-  // EP pays HALF the acquisition fee, not none (same bug existed in pay.js _isAcq).
-  if (!memberId) return null;                          // can't bound the window without a member id
-  let max;
-  if (type === 'membership') max = 2;                  // first 2 months
-  else if (type === 'drop_in' || type === 'coach_1to1') max = 1; // the first paid one
-  else return null;                                    // custom / event / course: no acquisition fee
-  try {
-    const prior = await sb(`transactions?select=id&member_id=eq.${memberId}&type=eq.${encodeURIComponent(type)}&${scopeCol}=eq.${scopeId}&status=eq.completed&limit=${max}`);
-    if (!prior || prior.length < max) return (payee && payee.partner) ? ACQ_RATE_EP : ACQ_RATE; // inside window: EP pays half
-  } catch (e) {}
-  return null;
+  // Delegates to the single source of truth in _rate.js.
+  return _mtlAcq(sb, { acqSource: acq, type, ownerPartner: payee && payee.partner, memberId, scopeCol, scopeId });
 }
 
 // Referral-credit redemption (parity with the Stripe client flow): MTL waives its WHOLE fee when a

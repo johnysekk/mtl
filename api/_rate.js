@@ -1,8 +1,14 @@
-// The ONE source of truth for MTL's commission rate. Mirrors the client _ladderRate exactly.
-// Every charge path (cohort-pay, pay, ...) must resolve the rate through here so a coach/club
-// is charged the SAME rate for a lesson, membership, event or course. No silent 3% fallback:
-// resolveRate throws if it cannot resolve the owner, so an overcharge surfaces as an error
-// instead of quietly billing the base rate.
+// THE single source of truth for MTL's per-transaction rate. Every charge path (pay, cohort-pay,
+// record-cash, ...) resolves the rate through here so a coach/club is billed the SAME way for a
+// lesson, membership, event or course. Two layers:
+//   - ladderRate(): the EP/FP/Shikai/Bankai ladder (what the owner pays ongoing).
+//   - acquisitionRate(): the finder's fee MTL takes when the APP demonstrably brought the member
+//     (first paid lesson / first 2 membership months). EP pays HALF (5% vs 10%).
+//   - effectiveRate(): the actual per-tx rate = max(ladder, acquisition).
+// No silent 3% fallback: resolvers throw if the owner can't be found, so an overcharge surfaces.
+
+const ACQ_RATE = 0.10;     // finder's fee, standard providers
+const ACQ_RATE_EP = 0.05;  // EP perk: half the acquisition fee
 
 // mode: 'stripe' (Stripe track) | anything else (QR/bank/cash/pis track)
 // o: { partner, founding, score, bankai }
@@ -18,11 +24,8 @@ export function ladderRate(mode, o) {
   return (s >= 2) ? 0.03 : 0.035;
 }
 
-// Resolve the effective rate for whoever owns the money.
-//   sbGet: a function (path) => Promise<rows[]> against the REST API (service role)
-//   { ownerId, gymId, mode }: pass ownerId when you have it; gymId is a fallback (owner_id may be
-//   null on a row); mode selects the Stripe vs bank ladder.
-export async function resolveRate(sbGet, { ownerId, gymId, gymAccount, mode }) {
+// Resolve the profile of whoever owns the money (ownerId, or via gymId / gym stripe_account).
+export async function resolveOwner(sbGet, { ownerId, gymId, gymAccount }) {
   let oid = ownerId;
   if (!oid && gymId) {
     const g = (await sbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=owner_id`))[0];
@@ -32,8 +35,40 @@ export async function resolveRate(sbGet, { ownerId, gymId, gymAccount, mode }) {
     const g = (await sbGet(`gyms?stripe_account=eq.${encodeURIComponent(gymAccount)}&select=owner_id&limit=1`))[0];
     oid = g && g.owner_id;
   }
-  if (!oid) throw new Error('resolveRate: no owner (ownerId/gymId both unresolved)');
-  const p = (await sbGet(`profiles?id=eq.${encodeURIComponent(oid)}&select=partner,founding,coach_ref_score,bankai_eligible`))[0];
-  if (!p) throw new Error('resolveRate: owner profile not found');
+  if (!oid) throw new Error('resolveOwner: no owner (ownerId/gymId/gymAccount all unresolved)');
+  const p = (await sbGet(`profiles?id=eq.${encodeURIComponent(oid)}&select=id,partner,founding,coach_ref_score,bankai_eligible`))[0];
+  if (!p) throw new Error('resolveOwner: owner profile not found');
+  return p;
+}
+
+// The owner's ongoing ladder rate (no acquisition). Cohorts (courses) use this directly.
+export async function resolveRate(sbGet, { ownerId, gymId, gymAccount, mode }) {
+  const p = await resolveOwner(sbGet, { ownerId, gymId, gymAccount });
   return ladderRate(mode, { partner: p.partner, founding: p.founding, score: p.coach_ref_score, bankai: p.bankai_eligible });
+}
+
+// Acquisition finder's fee, or null if it doesn't apply. Only when acqSource === 'mtl_discovery'
+// AND the member is still inside the window: membership = first 2 months, drop_in/coach_1to1 =
+// first paid one. Window is bounded by counting prior COMPLETED tx of this type for this member at
+// this provider (Stripe + cash together). ownerPartner => EP pays half.
+export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, memberId, scopeCol, scopeId }) {
+  if (acqSource !== 'mtl_discovery' || !memberId) return null;
+  let max;
+  if (type === 'membership') max = 2;
+  else if (type === 'drop_in' || type === 'coach_1to1') max = 1;
+  else return null;                                     // custom / event / course: no acquisition fee
+  if (!scopeCol || !scopeId) return null;
+  try {
+    const prior = await sbGet(`transactions?select=id&member_id=eq.${encodeURIComponent(memberId)}&type=eq.${encodeURIComponent(type)}&${scopeCol}=eq.${encodeURIComponent(scopeId)}&status=eq.completed`);
+    if (!prior || prior.length < max) return ownerPartner ? ACQ_RATE_EP : ACQ_RATE;
+  } catch (e) {}
+  return null;
+}
+
+// The actual per-transaction rate = the higher of the owner's ladder rate and any acquisition fee.
+export async function effectiveRate(sbGet, { ownerId, gymId, gymAccount, mode, type, acqSource, memberId, scopeCol, scopeId }) {
+  const p = await resolveOwner(sbGet, { ownerId, gymId, gymAccount });
+  const ladder = ladderRate(mode, { partner: p.partner, founding: p.founding, score: p.coach_ref_score, bankai: p.bankai_eligible });
+  const acq = await acquisitionRate(sbGet, { acqSource, type, ownerPartner: p.partner, memberId, scopeCol, scopeId: (scopeId || p.id) });
+  return acq != null ? Math.max(ladder, acq) : ladder;
 }

@@ -439,9 +439,13 @@ async function membershipCheckout(req, res) {
   const ivl = interval === 'year' ? 'year' : 'month';
   if (!(await _assertAcctReady(gymAccount, res))) return;
   // owner's MTL League tier rate (Shikai 3% / Bankai 2%), passed from the client and range-validated.
-  let _fp = fee ? parseFloat(fee) : MEMB_MTL_PERCENT;
-  if (!(_fp >= 1 && _fp <= 5)) _fp = MEMB_MTL_PERCENT;
-  const FEE_PCT = (String(partner)==='1') ? 1 : _fp; // EP 1%, else owner's tier rate (3.5/3/2%)
+  // Rate in PERCENT. Client sends its _ladderRate (EP 0.5% / FP / ladder); resolve server-side if
+  // invalid. No partner override -> EP 0.5% honoured. Acquisition (below) still stacks on top.
+  let FEE_PCT = fee ? parseFloat(fee) : NaN;
+  if (!(FEE_PCT >= 0.5 && FEE_PCT <= 10)) {
+    try { FEE_PCT = (await resolveRate(_wsbGet, { gymAccount, mode: 'stripe' })) * 100; }
+    catch (e) { console.error('pay.membership rate resolve failed:', e.message); FEE_PCT = MEMB_MTL_PERCENT; }
+  }
   // MTL acquisition fee: when the app DEMONSTRABLY brought this member (organic deck/search
   // discovery, acq=mtl_discovery), MTL takes 10% for the first 2 months, then a webhook drops
   // it to the normal rate (a finder's fee for the acquisition). Monthly subs only.
