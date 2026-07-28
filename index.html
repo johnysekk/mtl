@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SGR fixed 'Co zaplatil' PROPERLY (root cause, no workaround). cohort_payments is RLS-subject on the browser client -- exactly like transactions, which the dashboard already reads via /api/gym-transactions (service role) for the same reason. The roster's 'Co zaplatil' was reading cohort_payments with the browser client, so it saw 0 rows even though the webhook (service role, stripe-webhook.js ~613) and the owner QR-confirm had written them. NEW endpoint /api/cohort-payments.js reads a member's cohort_payments via the SERVICE ROLE after verifying the caller's token AND that they own the cohort (gym_cohorts.owner_id); _cohMemberPayments now fetches from it with x-access-token. Removed the SGQ paid_amount fallback -- it now shows the real logged rows (deposit / first_month / month) or an honest empty state. MIGRATION phone normalization: member import (_impSave) now runs each imported phone through _normPhone(raw, clubCC) -- keeps a leading +, converts 00-international to +, and prepends the club's country prefix (derived from the owner's stripe/billing country, else +420) to bare local numbers (dropping a single national-trunk 0). So most imported numbers get a correct prefix and prefix-less ones are normalized to the club's country. Deploy: index.html + api/cohort-payments.js (NEW -- required for 'Co zaplatil'). -->
+<!-- MTL build: SGS founderResetStats (Admin Nuke) now also resets the founder's currency to the country-derived default via _userCur() (Brno -> CZ -> CZK, from stripe_country||billing_country||country_code||country + the country->currency map). Sets profiles.currency/currency_inperson/currency_online for the founder and gyms.currency for the founder's gyms, and mirrors it onto currentUser/_myGyms in memory. Since the nuke deletes all transactions, the per-transaction currency lock is released, so after a wipe the currency starts on a clean geo default. Edge case only (won't normally happen) but keeps a nuked slate tidy. Deploy: index.html only. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3799,7 +3799,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SGR';
+const MTL_BUILD='SGS';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -23577,6 +23577,15 @@ async function founderResetStats(){
   catch(e){ fail.push('profiles.welcome: '+(e&&e.message||e)); }
   try{ await supaClient.from('gyms').update({ welcome_free_until:null }).not('id','is',null); ok.push('gyms.welcome'); }
   catch(e){ fail.push('gyms.welcome: '+(e&&e.message||e)); }
+  // Reset the founder's currency to the country-derived default (Brno -> CZ -> CZK) so a wiped
+  // slate starts clean. Activity is gone, so the per-transaction currency lock is released too.
+  try{ var _dc=(typeof _userCur==='function' && _userCur())||'CZK';
+    await supaClient.from('profiles').update({ currency:_dc, currency_inperson:_dc, currency_online:_dc }).eq('id',currentUser.id);
+    currentUser.currency=_dc; currentUser.currency_inperson=_dc; currentUser.currency_online=_dc;
+    var _gids=(window._myGyms||[]).map(function(g){return g.id;}).filter(Boolean);
+    if(_gids.length){ await supaClient.from('gyms').update({ currency:_dc }).in('id',_gids); (window._myGyms||[]).forEach(function(g){ g.currency=_dc; }); }
+    ok.push('currency->'+_dc);
+  }catch(e){ fail.push('currency: '+(e&&e.message||e)); }
   console.log('[founderReset] ok:',ok,'| fail:',fail);
   toast(fail.length? ('⚠️ Hotovo s chybami: '+ok.length+' OK, '+fail.length+' chyb (konzole)') : ('✅ Vynulováno: '+ok.length+' tabulek'));
 }
