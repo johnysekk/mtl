@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SGO cohort roster/signup fixes. (1) The GYM-PROFILE course card enrolled count ('2/14 prihlaseno') had the SAME lead-inflation bug as cohort-public: in loadGymCoursesForProfile the per-cohort taken counted cohort_members with status != cancelled/waitlist (INCLUDING unpaid 'lead'). Now counts only committed (deposit_claimed/deposit_paid/enrolled/completed/converted). NOTE: cohort-public.js (the signup-page count) was fixed in SGM -- must be DEPLOYED for that page's count. (2) Cohort signup now REQUIRES phone too (was name+email only): if(!nm||!em||!ph). (3) Redesigned the roster member footer: 'Co zaplatil v' (left) and 'x Odebrat' (right) now sit on ONE flex row, with the payment-log wrap rendered BELOW it; Odebrat restyled to a subtle bordered chip (no longer floating oddly bottom-right). 'Co zaplatil' reads cohort_payments by cohort_member_id -- if empty despite deposit_paid, the Stripe deposit wasn't logged (stripe-webhook.js writes it ~line 613; verify it's deployed) or the member reached deposit_paid without a completed payment (test). STILL TODO (bigger, next): phone country-code prefix on ALL forms app-wide (unify via _phoneCCOptions) + in-app dedup (recognise a logged-in user and stop them re-registering when paying the deposit). Deploy: index.html only (cohort-public.js already staged from SGM). -->
+<!-- MTL build: SGP three things. (1) IN-APP DEDUP for cohort signup: openCohortSignup now, for a logged-in user, queries cohort_members for this cohort by student_id OR email and -- if they already hold a committed place (deposit_claimed/deposit_paid/enrolled/completed/converted) -- shows a 'Na tento kurz uz jsi prihlasen' confirmation panel INSTEAD of the form. The server already blocks duplicate committed signups (cohort-pay.js ~249 -> 409 duplicate), and the pay handler toasts j.error, so this is the proactive front-stop. (2) PHONE COUNTRY-CODE prefix UNIFIED across forms: new reusable _phoneFieldHtml(id,curVal) (renders the +CC <select id=idCC> + number input, splitting a leading +prefix out of any prefilled value) and _phoneVal(scope,id) (recombines on read). Applied to the cohort waitlist (cohWPhone), the walk-in/invite member field (_icPhone) and the profile-edit phone (_pePhone); the cohort signup (cohSPhone) already had the prefix from SGN. (3) IN-APP prefill (already built in SGN) confirmed: logged-in users get name/email/phone prefilled (editable) with the 'Prihlasen -- kurz se prida pod tvuj ucet' footer. Deploy: index.html only. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3799,7 +3799,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SGO';
+const MTL_BUILD='SGP';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -11397,7 +11397,7 @@ async function _cohJoinWaitlist(d, ov, btn){
   const EN=LANG==='en';
   const nm=((ov.querySelector('#cohWName')&&ov.querySelector('#cohWName').value)||'').trim();
   const em=((ov.querySelector('#cohWEmail')&&ov.querySelector('#cohWEmail').value)||'').trim();
-  const ph=((ov.querySelector('#cohWPhone')&&ov.querySelector('#cohWPhone').value)||'').trim();
+  const ph=_phoneVal(ov,'cohWPhone');
   if(!nm){ toast(EN?'Enter your name':'Zadej jméno'); return; }
   if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)){ toast(EN?'Enter a valid email':'Zadej platný email'); return; }
   const cid=(d&&d.id)||(d&&d.cohort&&d.cohort.id); if(!cid){ return; }
@@ -11418,6 +11418,19 @@ async function _cohJoinWaitlist(d, ov, btn){
     toast(EN?'\u2705 You\u2019re on the waitlist \u2014 the club will reach out if a spot opens.':'\u2705 Jsi na čekačce \u2014 klub se ozve, jakmile se místo uvolní.',1);
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); if(btn){ btn.disabled=false; btn.textContent='\u23f3 '+(EN?'Join the waitlist':'Zapsat na čekačku'); } }
 }
+function _phoneFieldHtml(id, curVal){
+  curVal=String(curVal||'').trim(); var pref='', num=curVal;
+  var mm=curVal.match(/^(\+\d{1,4})[\s-]*(.*)$/); if(mm){ pref=mm[1]; num=mm[2]; }
+  return '<div style="display:flex;gap:8px;">'
+    +'<select id="'+id+'CC" style="flex:0 0 auto;box-sizing:border-box;padding:12px 6px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;background:#fff;color:var(--dark);">'+_phoneCCOptions(pref||null)+'</select>'
+    +'<input id="'+id+'" type="tel" value="'+String(num).replace(/"/g,'&quot;')+'" placeholder="'+(LANG==='en'?'Phone':'Telefon')+'" style="flex:1;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;">'
+  +'</div>';
+}
+function _phoneVal(scope, id){
+  scope=scope||document; var q=function(sel){ return scope.querySelector?scope.querySelector(sel):document.querySelector(sel); };
+  var inp=q('#'+id), selEl=q('#'+id+'CC'); var num=(inp&&inp.value.trim())||''; if(!num) return '';
+  var cc=(selEl&&selEl.value)||''; return (cc && num.charAt(0)!=='+') ? (cc+' '+num) : num;
+}
 function _phoneCCOptions(sel){
   var ccs=['+420','+421','+48','+49','+43','+36','+44','+1','+33','+39','+34','+31','+41','+46','+47','+45','+380','+40','+353','+32','+30','+90'];
   if(!sel){ try{ var cc=String((typeof currentUser!=='undefined'&&currentUser&&(currentUser.stripe_country||currentUser.billing_country||currentUser.country_code))||'').toUpperCase();
@@ -11436,6 +11449,18 @@ async function openCohortSignup(cohortId, fromColdLink){
   const box=ov.querySelector('div');
   if(!d){ box.innerHTML='<div style="text-align:center;padding:50px 10px;"><div style="font-size:16px;font-weight:700;margin-bottom:8px;">'+(EN?'Cohort not available':'Kurz není dostupný')+'</div><button onclick="document.getElementById(\'cohSignupOv\').remove();location.href=\'/\';" style="padding:11px 18px;background:var(--dark);color:#fff;border:none;border-radius:11px;font-weight:700;cursor:pointer;">'+(EN?'Close':'Zavřít')+'</button></div>'; return; }
   const cur=d.currency||'CZK'; const prov=d.provider_name||d.gym_name||(EN?'the provider':'poskytovatel');
+  // IN-APP DEDUP: a logged-in user who already holds a place here sees a confirmation, not the form again.
+  if(typeof currentUser!=='undefined' && currentUser){
+    try{ const _or=['student_id.eq.'+currentUser.id]; if(currentUser.email) _or.push('email.eq.'+String(currentUser.email));
+      const { data:_mine }=await supaClient.from('cohort_members').select('status').eq('cohort_id',d.id).or(_or.join(','));
+      if((_mine||[]).some(function(x){ return ['deposit_claimed','deposit_paid','enrolled','completed','converted'].indexOf(x.status)>=0; })){
+        box.innerHTML='<div style="text-align:center;padding:44px 18px;"><div style="font-size:46px;margin-bottom:10px;">\u2705</div>'
+          +'<div style="font-size:18px;font-weight:800;color:var(--dark);margin-bottom:6px;">'+(EN?'You are already signed up':'Na tento kurz u\u017e jsi p\u0159ihl\u00e1\u0161en/\u00e1')+'</div>'
+          +'<div style="font-size:13px;color:var(--mid);line-height:1.5;">'+(EN?'Your enrollment is under My training in the app.':'Detail zpisu najde\u0161 v Muj trenink v appce.')+'</div></div>';
+        return;
+      }
+    }catch(e){}
+  }
   const full=(d.capacity && d.taken>=d.capacity);
   const layers=
     '<div style="font-weight:700;font-size:12px;margin:10px 0 4px;">'+(EN?'1) What you are buying':'1) Co kupuješ')+'</div><p style="font-size:11.5px;color:var(--mid);line-height:1.5;margin:0 0 8px;">'+(EN?('A '+(d.months||2)+'-month course at '+(d.gym_name||'')+'. You pay a NON-REFUNDABLE deposit now; the rest of month 1 is paid at the gym. Provider (seller): '+prov+'.'):('Kurz na '+(d.months||2)+' měsíce u '+(d.gym_name||'')+'. Teď platíš NEVRATNOU zálohu; zbytek 1. měsíce doplatíš na místě. Poskytovatel (prodávající): '+prov+'.'))+'</p>'
@@ -11467,7 +11492,7 @@ async function openCohortSignup(cohortId, fromColdLink){
       h+='</div>';
       return h;
     })()
-    +(full?('<div style="text-align:center;padding:6px 0 12px;"><div style="color:var(--red);font-weight:800;font-size:15px;margin-bottom:2px;">'+(EN?'This course is full':'Tento kurz je plný')+'</div>'+'<div style="font-size:12.5px;color:var(--mid);line-height:1.5;">'+(EN?'Join the waitlist \u2014 we\u2019ll let the club know you\u2019re interested and they can reach out if a spot opens.':'Zapiš se na čekačku \u2014 dáme klubu vědět, že máš zájem, a ozve se ti, jakmile se místo uvolní.')+'</div></div>'+'<input id="cohWName" type="text" placeholder="'+(EN?'Full name':'Jméno a příjmení')+'" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;margin-bottom:9px;">'+'<input id="cohWEmail" type="email" placeholder="Email" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;margin-bottom:9px;">'+'<input id="cohWPhone" type="tel" placeholder="'+(EN?'Phone (optional)':'Telefon (nepovinné)')+'" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;margin-bottom:12px;">'+'<button id="cohWaitBtn" style="width:100%;padding:14px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">\u23f3 '+(EN?'Join the waitlist':'Zapsat na čekačku')+'</button>'):(
+    +(full?('<div style="text-align:center;padding:6px 0 12px;"><div style="color:var(--red);font-weight:800;font-size:15px;margin-bottom:2px;">'+(EN?'This course is full':'Tento kurz je plný')+'</div>'+'<div style="font-size:12.5px;color:var(--mid);line-height:1.5;">'+(EN?'Join the waitlist \u2014 we\u2019ll let the club know you\u2019re interested and they can reach out if a spot opens.':'Zapiš se na čekačku \u2014 dáme klubu vědět, že máš zájem, a ozve se ti, jakmile se místo uvolní.')+'</div></div>'+'<input id="cohWName" type="text" placeholder="'+(EN?'Full name':'Jméno a příjmení')+'" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;margin-bottom:9px;">'+'<input id="cohWEmail" type="email" placeholder="Email" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;margin-bottom:9px;">'+'<div style="margin-bottom:12px;">'+_phoneFieldHtml('cohWPhone','')+'</div>'+'<button id="cohWaitBtn" style="width:100%;padding:14px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">\u23f3 '+(EN?'Join the waitlist':'Zapsat na čekačku')+'</button>'):(
       _cohTierPicker(d, EN, cur)
       +'<input id="cohSName" type="text" placeholder="'+(EN?'Full name':'Jméno a příjmení')+'" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;margin-bottom:9px;">'
       +'<input id="cohSEmail" type="email" placeholder="Email" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;margin-bottom:9px;">'
@@ -13328,7 +13353,7 @@ function _showImportClaim(imp, _em, _gids, gymName){
    +'<label style="font-size:12px;font-weight:700;color:var(--mid);">Email</label>'
    +'<input id="_icEmail" type="email" value="'+(_em||'')+'" readonly style="'+'+IN+'+'background:var(--bg);color:var(--mid);">'
    +'<label style="font-size:12px;font-weight:700;color:var(--mid);">'+(EN?'Phone (optional)':'Telefon (nepovinne)')+'</label>'
-   +'<input id="_icPhone" type="tel" value="'+ph+'" placeholder="'+(EN?'e.g. +420...':'napr. +420...')+'" style="'+'+IN+'+'">'
+   +_phoneFieldHtml('_icPhone', ph)
    +'<label style="display:flex;align-items:flex-start;gap:9px;cursor:pointer;font-size:12.5px;color:var(--dark);margin:2px 0 14px;line-height:1.45;"><input id="_icPhoneShow" type="checkbox" style="width:17px;height:17px;flex-shrink:0;margin-top:1px;"><span>'+(EN?'Show my number to the club and coaches I train with':'Zobrazovat me cislo klubu a trenerum, se kterymi trenuji')+'</span></label>'
    +'<label style="font-size:12px;font-weight:700;color:var(--mid);">'+(EN?'Country':'Zeme')+'</label>'
    +'<select id="_icCountry" style="'+IN+'">'+((typeof _countryOptsHtml==='function')?_countryOptsHtml(''):'<option value="">--</option>')+'</select>'
@@ -13342,7 +13367,7 @@ function _showImportClaim(imp, _em, _gids, gymName){
   document.body.appendChild(ov);
   var $$=function(id){ return ov.querySelector('#'+id); };
   $$('_icSave').onclick=async function(){
-    var nm2=(($$('_icName').value)||'').trim(); var ph2=(($$('_icPhone').value)||'').trim(); var show=$$('_icPhoneShow').checked;
+    var nm2=(($$('_icName').value)||'').trim(); var ph2=_phoneVal(document,'_icPhone'); var show=$$('_icPhoneShow').checked;
     var pw=$$('_icPw').value||''; var pw2=$$('_icPw2').value||'';
     if(pw.length<6){ toast(EN?'Password too short (min 6)':'Heslo je kratke (min. 6)'); return; }
     if(pw!==pw2){ toast(EN?'Passwords do not match':'Hesla se neshoduji'); return; }
@@ -18642,14 +18667,14 @@ function _openPhoneEdit(){
   var ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99999;display:flex;align-items:center;justify-content:center;padding:20px;';
   ov.innerHTML='<div style="background:var(--surf);max-width:380px;width:100%;border-radius:18px;padding:22px;box-shadow:0 12px 40px rgba(0,0,0,.25);">'
    +'<div style="font-family:\'Bebas Neue\';font-size:20px;letter-spacing:.03em;color:var(--dark);margin-bottom:12px;">'+(EN?'Phone number':'Telefonni cislo')+'</div>'
-   +'<input id="_pePhone" type="tel" value="'+ph+'" placeholder="'+(EN?'e.g. +420...':'napr. +420...')+'" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:10px;font-size:15px;margin-bottom:12px;">'
+   +'<div style="margin-bottom:12px;">'+_phoneFieldHtml('_pePhone', ph)+'</div>'
    +'<label style="display:flex;align-items:flex-start;gap:9px;cursor:pointer;font-size:12.5px;color:var(--dark);margin-bottom:16px;line-height:1.45;"><input id="_peShow" type="checkbox" '+(show?'checked':'')+' style="width:17px;height:17px;flex-shrink:0;margin-top:1px;"><span>'+(EN?'Show my number to the club and coaches I train with':'Zobrazovat me cislo klubu a trenerum, se kterymi trenuji')+'</span></label>'
    +'<div style="display:flex;gap:8px;"><button id="_peCancel" style="flex:1;padding:12px;background:var(--bg);color:var(--dark);border:none;border-radius:10px;font-weight:600;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Cancel':'Zrusit')+'</button><button id="_peSave" style="flex:1;padding:12px;background:var(--red);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Save':'Ulozit')+'</button></div>'
    +'</div>';
   document.body.appendChild(ov);
   var q=function(id){ return ov.querySelector('#'+id); };
   q('_peCancel').onclick=function(){ ov.remove(); };
-  q('_peSave').onclick=async function(){ var ph2=(q('_pePhone').value||'').trim(); var show2=q('_peShow').checked;
+  q('_peSave').onclick=async function(){ var ph2=_phoneVal(document,'_pePhone'); var show2=q('_peShow').checked;
     try{ await supaClient.from('profiles').update({ phone:(ph2||null), phone_show:!!show2 }).eq('id', currentUser.id); if(currentUser){ currentUser.phone=ph2||null; currentUser.phone_show=!!show2; } _renderMePhone(); toast(EN?'✅ Saved':'✅ Ulozeno'); ov.remove(); }catch(e){ toast('⚠️ '+(e.message||'error')); } };
 }
 if($('meEditPhone')) $('meEditPhone').onclick=_openPhoneEdit;
