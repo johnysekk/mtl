@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SGT (serverless fix -- stripe-webhook.js) cohort Stripe payments now land in the club DASHBOARD. Root cause: recordTransaction() (which writes the  ledger the dashboards read) was called for coach_inperson/coach_online/membership/event_ticket/drop_in but NOT for the cohort branches -- cohort_deposit/first_month/month only wrote cohort_payments, so deposits (and remainders) never appeared in the club's revenue. Added recordTransaction(event.account, pi, { type:'course', member_id, gym_id, income_class:'cohort_deposit'/'cohort_first_month'/'cohort_month' }) right after each cohort_payments write + member patch (idempotent on payment_intent; gym_id fetched from gym_cohorts, member_id from cohort_members.student_id). Matches the client QR/cash cohort paths which already record type:'course' via _recordCashTx (deposit ~7946, remainder ~7892), so those were already in the dashboard. Deploy: api/stripe-webhook.js (index.html unchanged this build -- marker only). -->
+<!-- MTL build: SGU cohort duplicate-lead fix + cohort price-breakdown removed. (1) DUPLICATE LEADS (Foto 3): cohort-pay.js used to sbInsert a fresh 'lead' on every deposit attempt, so an abandoned Stripe checkout + a retry stacked identical rows. Now it looks up an existing status='lead' by cohort_id+email and REUSES it (patches its fields) instead of inserting -- no more duplicates. (2) INCOMPLETE-PAYMENT GATE (Foto 3): openCohortSignup, for a logged-in user, now also detects an existing unpaid 'lead' (in addition to the committed-member 'already signed up' check) and shows a 'Nedokoncena platba ke kurzu' panel with a 'Dokoncit platbu' button that re-calls /api/cohort-pay (reusing the lead) and redirects to Stripe -- so they finish the existing deposit instead of re-filling the form. (Leads are Stripe-only; QR/PIS create deposit_claimed directly, caught by the committed check.) (3) COHORT PRICE BREAKDElection removed (Foto 1): the per-price 'Tvuj podil (X%)' green boxes under the cohort deposit/monthly inputs are gone (cohDepBreak/cohPRBreak divs removed, _cohBreak no-op) -- the commission % lives only in Settings > Platby a provize. Deploy: index.html + api/cohort-pay.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3799,7 +3799,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SGT';
+const MTL_BUILD='SGU';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -11452,11 +11452,28 @@ async function openCohortSignup(cohortId, fromColdLink){
   // IN-APP DEDUP: a logged-in user who already holds a place here sees a confirmation, not the form again.
   if(typeof currentUser!=='undefined' && currentUser){
     try{ const _or=['student_id.eq.'+currentUser.id]; if(currentUser.email) _or.push('email.eq.'+String(currentUser.email));
-      const { data:_mine }=await supaClient.from('cohort_members').select('status').eq('cohort_id',d.id).or(_or.join(','));
+      const { data:_mine }=await supaClient.from('cohort_members').select('id,status,tier').eq('cohort_id',d.id).or(_or.join(','));
       if((_mine||[]).some(function(x){ return ['deposit_claimed','deposit_paid','enrolled','completed','converted'].indexOf(x.status)>=0; })){
         box.innerHTML='<div style="text-align:center;padding:44px 18px;"><div style="font-size:46px;margin-bottom:10px;">\u2705</div>'
           +'<div style="font-size:18px;font-weight:800;color:var(--dark);margin-bottom:6px;">'+(EN?'You are already signed up':'Na tento kurz u\u017e jsi p\u0159ihl\u00e1\u0161en/\u00e1')+'</div>'
           +'<div style="font-size:13px;color:var(--mid);line-height:1.5;">'+(EN?'Your enrollment is under My training in the app.':'Detail zpisu najde\u0161 v Muj trenink v appce.')+'</div></div>';
+        return;
+      }
+      var _leadRow=(_mine||[]).find(function(x){ return x.status==='lead'; });
+      if(_leadRow){
+        box.innerHTML='<div style="text-align:center;padding:40px 18px;"><div style="font-size:46px;margin-bottom:10px;">\u23f3</div>'
+          +'<div style="font-size:18px;font-weight:800;color:var(--dark);margin-bottom:6px;">'+(EN?'Payment not finished':'Nedokon\u010den\u00e1 platba ke kurzu')+'</div>'
+          +'<div style="font-size:13px;color:var(--mid);line-height:1.5;margin-bottom:16px;">'+(EN?'You already submitted your application \u2014 finish the deposit to hold your place.':'P\u0159ihl\u00e1\u0161ku u\u017e jsi odeslal/a \u2014 dokon\u010di z\u00e1lohu, a\u0165 ti dr\u017e\u00ed m\u00edsto.')+'</div>'
+          +'<button id="cohResume" style="width:100%;max-width:280px;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit;">'+(EN?'Finish payment':'Dokon\u010dit platbu')+'</button></div>';
+        var _rb=box.querySelector('#cohResume');
+        if(_rb) _rb.onclick=async function(){ _rb.disabled=true; _rb.textContent='\u2026';
+          try{ var _fb=(typeof _cohFb==='function')?_cohFb():{ fbp:null, fbc:null };
+            var r=await fetch('/api/cohort-pay',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ cohort_id:d.id, name:(currentUser.name||''), email:(currentUser.email||''), phone:(currentUser.phone||''), tier:(_leadRow.tier||'regular'), consent_version:'2026-06-26', gym_name:d.gym_name, fbp:_fb.fbp, fbc:_fb.fbc }) });
+            var j=await r.json();
+            if(j&&j.ok&&j.url){ window.location.href=j.url; }
+            else { toast('\u26a0\ufe0f '+((j&&j.error)||'error')); _rb.disabled=false; _rb.textContent=(EN?'Finish payment':'Dokon\u010dit platbu'); }
+          }catch(e){ toast('\u26a0\ufe0f '+e.message); _rb.disabled=false; _rb.textContent=(EN?'Finish payment':'Dokon\u010dit platbu'); }
+        };
         return;
       }
     }catch(e){}
@@ -12111,13 +12128,7 @@ function _cohDiscChips(){
   box.innerHTML=list.map(function(d){ var on=_cohDisc[0]===d.v; return '<span class="cohDchip" data-v="'+d.v+'" style="display:inline-block;padding:7px 12px;margin:3px;border-radius:16px;font-size:13px;font-weight:600;cursor:pointer;border:1.5px solid '+(on?'var(--dark)':'var(--border)')+';background:'+(on?'var(--dark)':'transparent')+';color:'+(on?'#fff':'var(--mid)')+';">'+d.emoji+' '+(LANG==='en'?d.en:d.cs)+'</span>'; }).join('');
   box.querySelectorAll('.cohDchip').forEach(function(el){ el.onclick=function(){ _cohDisc=[el.dataset.v]; _cohDiscChips(); }; });
 }
-function _cohBreak(inputId, boxId){
-  const inEl=$(inputId), box=$(boxId); if(!box) return;
-  const price=parseFloat(inEl&&inEl.value)||0;
-  if(price<=0){ box.style.display='none'; box.innerHTML=''; return; }
-  box.style.display='block';
-  box.innerHTML=shareBreakdownHtml(price, _cohCtx.currency, _cohKeepRate(), (_cohCtx&&_cohCtx.stripeAccount)?'stripe':'qr_bank');
-}
+function _cohBreak(inputId, boxId){ /* per-price share breakdown removed; the global commission %% lives in Settings > Platby a provize */ }
 function _cohSnapshot(){ var k={}; k._sched=(window._cohSched||[]).slice(); k._poster=window._cohPoster||null; ['cohName','cohStart','cohEnd','cohMonths','cohCap','cohDep','cohPRName','cohPR','cohPixel','cohCapiToken','cohDesc'].forEach(function(id){ if($(id)) k[id]=$(id).value; }); k._disc=(typeof _cohDisc!=='undefined'?(_cohDisc||[]).slice():[]); k._tiers=!!($('cohMoreTiers')&&$('cohMoreTiers').checked); k._private=!!($('cohPrivate')&&$('cohPrivate').checked); return k; }
 function _cohRelang(){ var sh=$('shCohorts'); if(!sh||!sh.classList.contains('open')) return; if(window._cohView==='create'){ _cohShowCreate(_cohSnapshot()); } else if(typeof _cohRender==='function'){ _cohRender(); } }
 function _cohShowCreate(keep){
@@ -12138,9 +12149,9 @@ function _cohShowCreate(keep){
     +'<label style="'+lbl+'">'+(EN?'End date (optional)':'Konec (nepovinn\u00e9)')+'</label><input id="cohEnd" type="date" style="'+inp+'">'+'<div id="cohEndHint" style="display:none;font-size:11.5px;color:var(--red);font-weight:700;margin:-6px 0 10px;line-height:1.4;"></div>'
     +'<label style="'+lbl+'">'+(EN?'Length (months, min 2)':'D\u00e9lka (m\u011bs\u00edce, min 2)')+'</label><input id="cohMonths" type="number" min="2" value="2" style="'+inp+'"><div style="font-size:10px;color:var(--light);margin:-6px 0 10px;">'+(EN?'2 recommended (most proven)':'2 doporu\u010deno (nejosv\u011bd\u010den\u011bj\u0161\u00ed)')+'</div>'
     +'<label style="'+lbl+'">'+(EN?'Capacity':'Kapacita')+'</label><input id="cohCap" type="number" min="1" style="'+inp+'">'
-    +'<label style="'+lbl+'">'+(EN?'Deposit (non-refundable)':'Z\u00e1loha (nevratn\u00e1)')+' \u00b7 '+sym+'</label><input id="cohDep" type="number" min="0" inputmode="numeric" style="'+inp+'"><div id="cohDepBreak" style="'+brk+'"></div>'
+    +'<label style="'+lbl+'">'+(EN?'Deposit (non-refundable)':'Z\u00e1loha (nevratn\u00e1)')+' \u00b7 '+sym+'</label><input id="cohDep" type="number" min="0" inputmode="numeric" style="'+inp+'">'
     +'<div id="cohPRNameWrap" style="display:none;"><label style="'+lbl+'">'+(EN?'Name of this price':'N\u00e1zev t\u00e9to ceny')+'</label><input id="cohPRName" type="text" placeholder="'+(EN?'e.g. Adults':'nap\u0159. Dosp\u011bl\u00ed')+'" style="'+inp+'"></div>'
-    +'<label style="'+lbl+'">'+(EN?'Monthly price':'Cena/m\u011bs')+' \u00b7 '+sym+'</label><input id="cohPR" type="number" min="0" inputmode="numeric" style="'+inp+'"><div id="cohPRBreak" style="'+brk+'"></div>'
+    +'<label style="'+lbl+'">'+(EN?'Monthly price':'Cena/m\u011bs')+' \u00b7 '+sym+'</label><input id="cohPR" type="number" min="0" inputmode="numeric" style="'+inp+'">'
     +'<label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--mid);margin:-2px 0 12px;cursor:pointer;"><input id="cohMoreTiers" type="checkbox" style="width:16px;height:16px;flex-shrink:0;">'+(EN?'Add more pricing options (e.g. student, adult)':'P\u0159idat dal\u0161\u00ed cenov\u00e9 varianty (nap\u0159. student, dosp\u011bl\u00fd)')+'</label>'
     +'<div id="cohTierWrap" style="display:none;"><div id="cohTierRows"></div><button type="button" id="cohTierAdd" style="width:100%;padding:10px;background:var(--surf);border:1.5px dashed var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';color:var(--mid);margin-bottom:10px;">+ '+(EN?'Add another offer':'P\u0159idat dal\u0161\u00ed nab\u00eddku')+'</button></div>'
     +'<label style="'+lbl+'">'+(EN?'Meta Pixel ID (optional)':'Meta Pixel ID (nepovinn\u00e9)')+'</label><input id="cohPixel" type="text" style="'+inp+'">'
