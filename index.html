@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SGP three things. (1) IN-APP DEDUP for cohort signup: openCohortSignup now, for a logged-in user, queries cohort_members for this cohort by student_id OR email and -- if they already hold a committed place (deposit_claimed/deposit_paid/enrolled/completed/converted) -- shows a 'Na tento kurz uz jsi prihlasen' confirmation panel INSTEAD of the form. The server already blocks duplicate committed signups (cohort-pay.js ~249 -> 409 duplicate), and the pay handler toasts j.error, so this is the proactive front-stop. (2) PHONE COUNTRY-CODE prefix UNIFIED across forms: new reusable _phoneFieldHtml(id,curVal) (renders the +CC <select id=idCC> + number input, splitting a leading +prefix out of any prefilled value) and _phoneVal(scope,id) (recombines on read). Applied to the cohort waitlist (cohWPhone), the walk-in/invite member field (_icPhone) and the profile-edit phone (_pePhone); the cohort signup (cohSPhone) already had the prefix from SGN. (3) IN-APP prefill (already built in SGN) confirmed: logged-in users get name/email/phone prefilled (editable) with the 'Prihlasen -- kurz se prida pod tvuj ucet' footer. Deploy: index.html only. -->
+<!-- MTL build: SGQ cohort roster polish. (1) 'Co zaplatil' now FALLS BACK to the member's paid_amount when the cohort_payments log is empty: if _cohMemberPayments finds no rows, it looks the member up in window._crMembers and, if paid_amount>0, shows a 'Zaloha: {amount}' line + 'Z evidence clena (bez detailniho logu)'. This makes it show the real deposit even when the detailed payment log is missing (e.g. stripe-webhook.js not deployed, or a deposit reached without a logged payment). (2) LEADS separated: the main committed list now excludes status==='lead'; a new 'Odeslali prihlasku . cekaji na zalohu (N)' section (dashed cards, name + contact + red Remove) renders below the committed members, above the waitlist/cancelled sections. (3) Odebrat/Remove restyled BACK to red (border+color var(--red)) as before -- SGO had muted it to grey. NOTE on migration (Petr asked): member import (imported_members) stores the CSV phone AS-IS with no prefix normalization; downstream the unified prefix field handles prefix-less numbers on edit/claim. Could optionally prepend the club's country prefix to prefix-less imported numbers -- offered, not forced (source formats are unknown). Deploy: index.html only. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3799,7 +3799,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SGP';
+const MTL_BUILD='SGQ';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -11727,7 +11727,15 @@ async function _cohMemberPayments(memberId, wrap){
   wrap.innerHTML='<div style="font-size:11px;color:var(--light);padding:6px 0;">'+(EN?'Loading...':'Na\u010d\u00edt\u00e1m...')+'</div>';
   let rows=[];
   try{ const { data }=await supaClient.from('cohort_payments').select('kind,amount,currency,payment_method,status,created_at').eq('cohort_member_id',memberId).order('created_at',{ascending:true}); rows=(data||[]).filter(function(p){ return p.status!=='refunded'; }); }catch(e){}
-  if(!rows.length){ wrap.innerHTML='<div style="font-size:11px;color:var(--light);padding:6px 0;">'+(EN?'No payments recorded yet.':'Zat\u00edm \u017e\u00e1dn\u00e9 zaznamenan\u00e9 platby.')+'</div>'; return; }
+  if(!rows.length){
+    var _mm=(window._crMembers||[]).find(function(x){ return String(x.id)===String(memberId); })||{};
+    var _pa=Number(_mm.paid_amount||0);
+    if(_pa>0){ var _c=_mm.currency||'CZK'; var _s=(typeof _curSym==='function')?_curSym(_c):'';
+      wrap.innerHTML='<div style="display:flex;justify-content:space-between;font-size:12.5px;color:var(--dark);padding:6px 0;"><span>'+(EN?'Deposit':'Z\u00e1loha')+'</span><span style="font-weight:700;">'+fmtPrice(_pa,_c)+' '+_s+'</span></div>'
+        +'<div style="font-size:10px;color:var(--light);line-height:1.4;">'+(EN?'From the member record (no detailed payment log).':'Z evidence \u010dlena (bez detailn\u00edho logu plateb).')+'</div>';
+    } else { wrap.innerHTML='<div style="font-size:11px;color:var(--light);padding:6px 0;">'+(EN?'No payments recorded yet.':'Zat\u00edm \u017e\u00e1dn\u00e9 zaznamenan\u00e9 platby.')+'</div>'; }
+    return;
+  }
   var _pmE={ stripe:'\ud83d\udcb3', qr:'\ud83d\udcf2', pis:'\ud83c\udfe6', cash:'\ud83d\udcb5' };
   var _cur=(rows[0]&&rows[0].currency)||'CZK'; var _sym=(typeof _curSym==='function'?_curSym(_cur):_cur); var _tot=0; var _mn=1;
   var _html=rows.map(function(p){
@@ -11798,8 +11806,8 @@ async function _cohRosterRender(){
     +'</div>';
   if(!members.length){ html+='<p style="font-size:13px;color:var(--light);text-align:center;padding:18px;">'+(EN?'No signups yet. Share the link/QR to fill the cohort.':'Zat\u00edm \u017e\u00e1dn\u00e9 signupy. Sd\u00edlej odkaz/QR a napl\u0148 kurz.')+'</p>'; box.innerHTML=html; return; }
   if(members.length>4){ html+='<input id="crSearchInp" type="text" value="'+((window._crSearch||'').replace(/"/g,'&quot;'))+'" placeholder="'+(EN?'Search a participant by name or e-mail\u2026':'Hledat \u00fa\u010dastn\u00edka podle jm\u00e9na nebo e-mailu\u2026')+'" style="width:100%;box-sizing:border-box;padding:11px 12px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:\'DM Sans\';margin-bottom:12px;">'; }
-  const _rmLink=function(m){ return '<button class="crRemove" data-id="'+m.id+'" style="background:none;border:1px solid var(--border);color:var(--light);font-size:11px;font-weight:700;cursor:pointer;padding:5px 11px;border-radius:8px;font-family:inherit;">'+(EN?'\u2715 Remove':'\u2715 Odebrat')+'</button>'; };
-  html+=members.filter(function(m){ return m.status!=='cancelled' && m.status!=='waitlist'; }).map(function(m){
+  const _rmLink=function(m){ return '<button class="crRemove" data-id="'+m.id+'" style="background:none;border:1px solid var(--red);color:var(--red);font-size:11px;font-weight:800;cursor:pointer;padding:5px 11px;border-radius:8px;font-family:inherit;">'+(EN?'\u2715 Remove':'\u2715 Odebrat')+'</button>'; };
+  html+=members.filter(function(m){ return m.status!=='cancelled' && m.status!=='waitlist' && m.status!=='lead'; }).map(function(m){
     const att={gym_ad:'\uD83D\uDCE3',mtl_discovery:'\uD83E\uDDED',mtl_alert:'\uD83D\uDD14',mtl_deck:'\uD83D\uDD0E',direct:'\uD83D\uDD17'}[m.attribution]||'';
     let actions='';
     if(m.status==='deposit_paid'){
@@ -11822,6 +11830,15 @@ async function _cohRosterRender(){
     }
     return '<div class="crMemberCard" data-search="'+(((m.name||'')+' '+(m.email||'')).toLowerCase().replace(/"/g,'&quot;'))+'" style="border:1px solid var(--border);border-radius:11px;padding:9px 11px;margin-bottom:6px;"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div style="min-width:0;"><div style="font-size:14px;font-weight:700;">'+((m.name||'?')+'').replace(/</g,'&lt;')+' <span style="font-size:10px;color:var(--light);font-weight:500;">'+(m.tier==='student'?'student':(EN?'regular':'ostatn\u00ed'))+'</span></div><div style="font-size:11px;color:var(--mid);word-break:break-all;">'+((m.email||'')+'').replace(/</g,'&lt;')+(m.phone?(' \u00b7 '+m.phone):'')+'</div></div><span style="font-size:10px;font-weight:700;color:'+(stC[m.status]||'#999')+';text-transform:uppercase;white-space:nowrap;">'+att+' '+(stL[m.status]||m.status)+'</span></div>'+actions+'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:10px;">'+(( ['deposit_paid','enrolled','completed','converted'].indexOf(m.status)>=0 || Number(m.paid_amount||0)>0 )?('<button class="crPayToggle" data-id="'+m.id+'" style="background:none;border:none;color:#635BFF;font-size:11.5px;font-weight:700;cursor:pointer;padding:0;font-family:inherit;display:inline-flex;align-items:center;gap:3px;">'+(EN?'What they paid':'Co zaplatil')+' \u25be</button>'):'<span></span>')+_rmLink(m)+'</div>'+(( ['deposit_paid','enrolled','completed','converted'].indexOf(m.status)>=0 || Number(m.paid_amount||0)>0 )?('<div class="crPayWrap" data-id="'+m.id+'" style="display:none;margin-top:8px;"></div>'):'')+'</div>';
   }).join('');
+  { const _leads=members.filter(function(m){ return m.status==='lead'; });
+    if(_leads.length){ html+='<div style="margin-top:14px;"><div style="font-size:11px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.04em;margin-bottom:7px;">'+(EN?'Applied \u00b7 awaiting deposit':'Odeslali p\u0159ihl\u00e1\u0161ku \u00b7 \u010dekaj\u00ed na z\u00e1lohu')+' ('+_leads.length+')</div>'
+      +_leads.map(function(m){ var _c=[(m.email||''),(m.phone||'')].filter(Boolean).join(' \u00b7 ');
+        return '<div style="border:1px dashed var(--border);background:#FBFAF7;border-radius:11px;padding:10px 12px;margin-bottom:7px;display:flex;justify-content:space-between;align-items:center;gap:8px;">'
+          +'<div style="min-width:0;"><div style="font-size:13px;font-weight:700;color:var(--dark);">'+escapeHtml(m.name||'')+'</div>'+(_c?('<div style="font-size:11px;color:var(--light);">'+escapeHtml(_c)+'</div>'):'')+'</div>'
+          +_rmLink(m)
+        +'</div>'; }).join('')
+      +'</div>'; }
+  }
   { const _wait=members.filter(function(m){ return m.status==='waitlist'; });
     if(_wait.length){ html+='<div style="margin-top:14px;"><div style="font-size:11px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.04em;margin-bottom:7px;">\u23f3 '+(EN?'Waitlist':'\u010cek\u00e1\u010dka')+' ('+_wait.length+')</div>'
       +_wait.map(function(m){ const _c=[(m.email||''),(m.phone||'')].filter(Boolean).join(' \u00b7 ');
