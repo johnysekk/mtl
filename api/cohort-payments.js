@@ -34,9 +34,10 @@ export default async function handler(req, res) {
     if (!uid) return res.status(401).json({ error: 'no user' });
 
     // 2) resolve the member -> cohort, and confirm this user OWNS the cohort
-    const mres = await fetch(`${SB}/rest/v1/cohort_members?id=eq.${encodeURIComponent(memberId)}&select=cohort_id`, { headers: svc });
+    const mres = await fetch(`${SB}/rest/v1/cohort_members?id=eq.${encodeURIComponent(memberId)}&select=cohort_id,status,paid_amount,currency`, { headers: svc });
     const mrows = mres.ok ? await mres.json() : [];
-    const cohortId = mrows.length ? mrows[0].cohort_id : null;
+    const member = mrows.length ? mrows[0] : null;
+    const cohortId = member ? member.cohort_id : null;
     if (!cohortId) return res.status(404).json({ error: 'member not found' });
 
     const cres = await fetch(`${SB}/rest/v1/gym_cohorts?id=eq.${encodeURIComponent(cohortId)}&select=owner_id,gym_id`, { headers: svc });
@@ -59,7 +60,7 @@ export default async function handler(req, res) {
     );
     const payments = pres.ok ? await pres.json() : [];
 
-    return res.status(200).json({ ok: true, payments: Array.isArray(payments) ? payments : [] });
+    return res.status(200).json({ ok: true, payments: Array.isArray(payments) ? payments : [], paid_amount: member ? (member.paid_amount || 0) : 0, status: member ? member.status : null, currency: member ? (member.currency || null) : null });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
