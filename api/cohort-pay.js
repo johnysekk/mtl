@@ -4,6 +4,7 @@
 //     cohort owner's connected account with MTL's application_fee (3.5%). No MTL login needed.
 //  -> { ok, url, cohort_member_id }
 import Stripe from 'stripe';
+import { resolveRate } from './_rate.js';
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const _SUPA = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const _KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -60,26 +61,16 @@ async function isWelcomeZero(acct) {
 }
 
 // Provider's effective MTL rate from the cohort owner's profile (same ladder as the rest of the app).
-async function providerCommission(ownerId) {
-  if (!ownerId) return COMMISSION;
+async function providerCommission(ownerId, gymId) {
+  // Cohorts charge via Stripe -> Stripe-track ladder. Single source of truth in _rate.js so a
+  // course is billed the SAME rate as a lesson/membership/event. resolveRate falls back to the
+  // gym owner when owner_id is null; it only throws if there is genuinely no owner (logged, not silent).
   try {
-    // Cohorts charge through Stripe, so this is the STRIPE track and must match _ladderRate:
-    //   EP 1% | Bankai 2% (score>=5 AND bankai_eligible) | Shikai 2.5% (score>=2) | base 3%.
-    // It was on the OLD ladder entirely - thresholds 10/3 instead of 5/2, base 3.5% instead
-    // of 3% - and never even read bankai_eligible, so Bankai was unreachable here.
-    const p = (await sbGet(`profiles?id=eq.${encodeURIComponent(ownerId)}&select=partner,founding,coach_ref_score,bankai_eligible`))[0];
-    if (!p) return COMMISSION;
-    if (p.partner) return 0.005;                             // Exclusive Partner (0.5%)
-    const sc = p.coach_ref_score || 0;
-    if (p.founding) {                                        // Founding Partner (Stripe track: 2 / 1.5 / 1)
-      if (sc >= 5 && p.bankai_eligible) return 0.01;
-      if (sc >= 2) return 0.015;
-      return 0.02;
-    }
-    if (sc >= 5 && p.bankai_eligible) return 0.02;           // Bankai
-    if (sc >= 2) return 0.025;                               // Shikai
-    return 0.03;                                             // Stripe base
-  } catch (e) { return COMMISSION; }
+    return await resolveRate(sbGet, { ownerId, gymId, mode: 'stripe' });
+  } catch (e) {
+    console.error('providerCommission: could not resolve rate ->', e.message);
+    return COMMISSION;
+  }
 }
 
 // Resolve what a member actually owes. With named offers, cohort_members.tier holds the offer
@@ -158,7 +149,7 @@ export default async function handler(req, res) {
       const isCZK = cur === 'CZK';
       const unit = isCZK ? Math.floor(remainder) * 100 : Math.round(remainder * 100);
       const wz = await isWelcomeZero(coh.stripe_account);
-      const rate = wz ? 0 : await providerCommission(coh.owner_id);
+      const rate = wz ? 0 : await providerCommission(coh.owner_id, coh.gym_id);
       const fee = Math.round(remainder * rate * 100);
       const host = req.headers.host; const proto = host && host.includes('localhost') ? 'http' : 'https';
       const session = await stripe.checkout.sessions.create({
@@ -200,7 +191,7 @@ export default async function handler(req, res) {
       const isCZK = cur === 'CZK';
       const unit = isCZK ? Math.floor(tierPrice) * 100 : Math.round(tierPrice * 100);
       const wz = await isWelcomeZero(coh.stripe_account);
-      const rate = wz ? 0 : await providerCommission(coh.owner_id);
+      const rate = wz ? 0 : await providerCommission(coh.owner_id, coh.gym_id);
       const fee = Math.round(tierPrice * rate * 100);
       const host = req.headers.host; const proto = host && host.includes('localhost') ? 'http' : 'https';
       const session = await stripe.checkout.sessions.create({
@@ -305,7 +296,7 @@ export default async function handler(req, res) {
     const isCZK = cur === 'CZK';
     const unitAmount = isCZK ? Math.floor(deposit) * 100 : Math.round(deposit * 100);
     const wz = await isWelcomeZero(c.stripe_account);
-    const rate = wz ? 0 : await providerCommission(c.owner_id);
+    const rate = wz ? 0 : await providerCommission(c.owner_id, c.gym_id);
     const applicationFee = Math.round(deposit * rate * 100);
 
     const host = req.headers.host;

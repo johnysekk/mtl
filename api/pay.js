@@ -1,4 +1,5 @@
 import Stripe from 'stripe';
+import { resolveRate } from './_rate.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -186,8 +187,12 @@ async function coachCheckout(req, res) {
   //   * the fallback itself was 10%, not the base rate.
   // Legitimate range: 0.01 (EP) .. 0.10 (the coach-1:1 ACQUISITION fee, which the client
   // DOES send here as Math.max(comm, partner?0.05:0.10)). Fallback = Stripe base 3%.
-  let COMMISSION = commission ? parseFloat(commission) : 0.03;
-  if (!(COMMISSION >= 0.005 && COMMISSION <= 0.10)) COMMISSION = 0.03;   // 0.005 = EP (0.5%) floor
+  let COMMISSION = commission ? parseFloat(commission) : NaN;
+  if (!(COMMISSION >= 0.005 && COMMISSION <= 0.10)) {
+    // No silent 3% fallback: resolve the coach's real Stripe-track rate from _rate.js.
+    try { COMMISSION = await resolveRate(_wsbGet, { ownerId: coachProfileId, mode: 'stripe' }); }
+    catch (e) { console.error('pay.coach rate resolve failed:', e.message); COMMISSION = 0.03; }
+  }
   let MK = 1.00; // no markup — student pays exactly the listed price
   let STUDENT_MARKUP = MK;
   const _credRow = (String(credit) === 'student') ? await verifyStudentCredit(studentId) : null;
@@ -281,10 +286,14 @@ async function gymCheckout(req, res) {
   const isPartner = (String(partner) === '1');
   const MK   = 1.00;
   let STUDENT_MK = MK;
-  // owner's MTL League tier rate (Shikai 3% / Bankai 2%), passed from the client and range-validated.
-  let _tk = take ? parseFloat(take) : GYM_MTL_TAKE;
-  if (!(_tk >= 0.01 && _tk <= 0.05)) _tk = GYM_MTL_TAKE;
-  let TAKE = (String(partner)==='1') ? 0.01 : _tk; // EP 1%, else owner's tier rate (3.5/3/2%)
+  // Rate: the client sends its _ladderRate (EP 0.5% / FP / Shikai/Bankai) already max'd with any
+  // acquisition fee. We accept the full legit range; if it's missing/invalid we resolve the owner's
+  // real rate server-side (no silent 3% guess). No partner override -> EP 0.5% is honoured.
+  let TAKE = take ? parseFloat(take) : NaN;
+  if (!(TAKE >= 0.005 && TAKE <= 0.10)) {
+    try { TAKE = await resolveRate(_wsbGet, { gymAccount, mode: 'stripe' }); }
+    catch (e) { console.error('pay.gym rate resolve failed:', e.message); TAKE = GYM_MTL_TAKE; }
+  }
   const _credRow = (String(credit) === 'student') ? await verifyStudentCredit(studentId) : null;
   if (_credRow) {
     // Referral reward on a drop-in: MTL waives its whole fee; the gym/coach funds the rest.
@@ -358,11 +367,13 @@ async function eventCheckout(req, res) {
   const P = parseInt(amount, 10);
   const Q = Math.max(1, parseInt(qty, 10) || 1);
   const cur = String(currency).toLowerCase();
-  // owner's MTL League tier rate (Shikai 3% / Bankai 2%), passed from the client and range-validated.
   const MK = 1.00;
-  let _etk = take ? parseFloat(take) : 0.03;
-  if (!(_etk >= 0.01 && _etk <= 0.05)) _etk = 0.03;
-  const TAKE = (String(partner)==='1') ? 0.01 : _etk; // EP 1%, else owner's tier rate (3.5/3/2%)
+  // Rate: client _ladderRate (EP 0.5% / FP / ladder), server resolve as backstop. No partner override.
+  let TAKE = take ? parseFloat(take) : NaN;
+  if (!(TAKE >= 0.005 && TAKE <= 0.10)) {
+    try { TAKE = await resolveRate(_wsbGet, { gymAccount, mode: 'stripe' }); }
+    catch (e) { console.error('pay.event rate resolve failed:', e.message); TAKE = 0.03; }
+  }
   const isCZK = cur === 'czk';
   const unit = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);
   const fee  = Math.round(P * TAKE * 100); // exact pct (was floored to whole CZK)

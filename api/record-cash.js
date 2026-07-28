@@ -14,6 +14,7 @@
 // Rate: BANK track - EP 1%, else base 3.5% / Shikai 3% at coach_ref_score>=2. No Bankai.
 // Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
 
+import { ladderRate as _mtlRate } from './_rate.js';
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -30,13 +31,10 @@ async function sb(path, opts = {}) {
 
 const ALLOWED_TYPES = ['drop_in', 'membership', 'custom', 'event_ticket', 'coach_1to1', 'course'];
 function ladderRate(profile) {
-  // record-cash handles cash/qr/pis = the BANK-TRANSFER track (uniform per-person model):
-  //   base 3.5%, Shikai 3% at ref_score>=2, NO Bankai (floor 3%). EP (partner) = 1%.
-  // Stripe payments go through pay.js with the Stripe track (3% / 2.5% / Bankai 2%).
+  // cash/qr/pis = BANK-TRANSFER track. Single source of truth in _rate.js: same EP/FP/ladder as
+  // Stripe (Bankai is Stripe-only, so the bank track floors at Shikai).
   if (!profile) return 0.035;
-  if (profile.partner) return 0.01;
-  const s = profile.coach_ref_score || 0;
-  return (s >= 2) ? 0.03 : 0.035;
+  return _mtlRate('qr_bank', { partner: profile.partner, founding: profile.founding, score: profile.coach_ref_score, bankai: profile.bankai_eligible });
 }
 
 const _WELCOME_FOUNDER = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
@@ -203,7 +201,7 @@ export default async function handler(req, res) {
       if (!gym) return res.status(404).json({ error: 'gym not found' });
       if (!_trusted && gym.owner_id !== uid) return res.status(403).json({ error: 'not your gym' });
       if (!_trusted && gym.account_suspended) return res.status(403).json({ error: 'account suspended' });
-      const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,coach_ref_score,bankai_eligible,welcome_free_until,created_at,referral_optin`);
+      const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,welcome_free_until,created_at,referral_optin`);
       const ownerProf = (owners && owners[0]) || {};
       if (!ownerProf.id) ownerProf.id = gym.owner_id;
       rate = ladderRate(ownerProf);
@@ -226,7 +224,7 @@ export default async function handler(req, res) {
       };
     } else {
       // coach pays out -> the coach authorizes their own cash/QR, rate from coach profile.
-      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,coach_ref_score,bankai_eligible,account_suspended,cash_blocked,welcome_free_until,created_at,referral_optin,gym_payout_account,stripe_account`);
+      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,account_suspended,cash_blocked,welcome_free_until,created_at,referral_optin,gym_payout_account,stripe_account`);
       const coach = cs && cs[0];
       if (!coach) return res.status(404).json({ error: 'coach not found' });
       if (!_trusted && coach.id !== uid) return res.status(403).json({ error: 'not your account' });
