@@ -610,7 +610,14 @@ export default async function handler(req, res) {
           const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
           const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : ((m.mtl_welcome === '1') ? 0 : Math.round(amount * 0.03 * 100) / 100)  /* Stripe base 3% (was 0.035 = old ladder) */;
           const _sFee = await cohortStripeFee(pi, event.account);
-          await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'deposit', amount, currency: cur, mtl_fee: fee, stripe_fee: _sFee, payment_method: 'stripe', stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
+          const _cpRes = await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'deposit', amount, currency: cur, mtl_fee: fee, stripe_fee: _sFee, payment_method: 'stripe', stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
+          if (_cpRes && _cpRes.ok === false) {
+            // A migration-added column (payment_method / stripe_fee) may be missing in cohort_payments;
+            // retry with the core columns so the payment is still logged (run cohort-payment-method.sql
+            // + cohort-stripe-fee.sql to restore the full breakdown).
+            console.error('cohort_payments full insert failed, retrying core columns:', _cpRes.error);
+            await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'deposit', amount, currency: cur, mtl_fee: fee, status: 'paid', created_at: new Date().toISOString() });
+          }
           {
             const _prev = Number((((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=paid_amount`)) || [])[0] || {}).paid_amount || 0);
             await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'deposit_paid', paid_amount: Math.round((_prev + amount) * 100) / 100 });
