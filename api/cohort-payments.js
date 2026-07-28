@@ -19,10 +19,11 @@ export default async function handler(req, res) {
     const q = req.query || {};
     const b = (typeof req.body === 'object' && req.body) || {};
     const memberId = q.member || b.member;
+    const cohortQ = q.cohort || b.cohort;
     const token = req.headers['x-access-token'] || b.token ||
                   ((req.headers.authorization || '').replace(/^Bearer\s+/i, ''));
 
-    if (!memberId) return res.status(400).json({ error: 'no member' });
+    if (!memberId && !cohortQ) return res.status(400).json({ error: 'no member or cohort' });
     if (!token) return res.status(401).json({ error: 'no token' });
     if (!SB || !SKEY) return res.status(500).json({ error: 'server not configured' });
 
@@ -33,12 +34,15 @@ export default async function handler(req, res) {
     const uid = user && user.id;
     if (!uid) return res.status(401).json({ error: 'no user' });
 
-    // 2) resolve the member -> cohort, and confirm this user OWNS the cohort
-    const mres = await fetch(`${SB}/rest/v1/cohort_members?id=eq.${encodeURIComponent(memberId)}&select=cohort_id,status,paid_amount`, { headers: svc });
-    const mrows = mres.ok ? await mres.json() : [];
-    const member = mrows.length ? mrows[0] : null;
-    const cohortId = member ? member.cohort_id : null;
-    if (!cohortId) return res.status(404).json({ error: 'member not found' });
+    // 2) resolve the cohort (from ?cohort= directly, or via the member), then confirm ownership
+    let member = null, cohortId = cohortQ || null;
+    if (!cohortId) {
+      const mres = await fetch(`${SB}/rest/v1/cohort_members?id=eq.${encodeURIComponent(memberId)}&select=cohort_id,status,paid_amount`, { headers: svc });
+      const mrows = mres.ok ? await mres.json() : [];
+      member = mrows.length ? mrows[0] : null;
+      cohortId = member ? member.cohort_id : null;
+      if (!cohortId) return res.status(404).json({ error: 'member not found' });
+    }
 
     const cres = await fetch(`${SB}/rest/v1/gym_cohorts?id=eq.${encodeURIComponent(cohortId)}&select=owner_id,gym_id,currency`, { headers: svc });
     const crows = cres.ok ? await cres.json() : [];
@@ -52,10 +56,11 @@ export default async function handler(req, res) {
     }
     if (!owns) return res.status(403).json({ error: 'not owner' });
 
-    // 3) read the member's payments via the service role (bypasses RLS)
+    // 3) read payments via the service role (bypasses RLS): whole cohort in cohort mode, else one member
+    const _filter = cohortQ ? `cohort_id=eq.${encodeURIComponent(cohortId)}` : `cohort_member_id=eq.${encodeURIComponent(memberId)}`;
     const pres = await fetch(
-      `${SB}/rest/v1/cohort_payments?cohort_member_id=eq.${encodeURIComponent(memberId)}` +
-      `&select=kind,amount,currency,payment_method,status,created_at&order=created_at.asc`,
+      `${SB}/rest/v1/cohort_payments?${_filter}` +
+      `&select=cohort_member_id,kind,amount,currency,payment_method,mtl_fee,stripe_fee,status,created_at&order=created_at.asc`,
       { headers: svc }
     );
     const payments = pres.ok ? await pres.json() : [];
