@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SGD gym currency-vs-Stripe mismatch now surfaces a warning + an ALIGN button (only when the app currency differs from the Stripe payout currency). The block checks whether the club is locked (has a transaction): if NOT locked, it shows a 'Zarovnat na menu Stripe (X)' button that sets the selector to the Stripe currency on click (user saves to confirm -- not silent/automatic); if LOCKED, it keeps the FX warning + 'Napsat na podporu' button (copies support@martialtraininglab.com), since a locked currency can't change and Stripe just auto-converts. Nothing shows when app currency == Stripe currency. The 'no currency yet -> adopt Stripe currency' default from SGC stays. Deploy: index.html only. -->
+<!-- MTL build: SGH fmtPrice drops the decimals for whole-number prices. Was always .toFixed(2) ('200.00 Kc'); now returns String(Math.round(n)) when the value is a whole number (abs(n%1)<0.005 tolerance for float noise) and n.toFixed(2) otherwise ('200.50 Kc'). Since the profile prices in the screenshot all route through fmtPrice -- the reserve button (bookClassBtn ~8968), the drop-in 'OD/from X' header (~8517/8831) and the membership 'OD X' header (~8917) plus course prices -- this single change fixes them all: '200.00 Kc' -> '200 Kc', '1400.00 Kc' -> '1400 Kc'. A few direct .toFixed(2) spots remain in provider-only views (openCoachPricingRequests ~10223/10224) and ROAS multipliers (~11592/11595, which SHOULD keep decimals) -- left as-is. Deploy: index.html only. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3795,7 +3795,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SGD';
+const MTL_BUILD='SGH';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -20752,7 +20752,7 @@ function _guessCC(){
 window._checkCurLock=async function(){
   try{ var gymIds=(window._myGyms||[]).map(function(g){return g.id;}).filter(Boolean);
     var q=supaClient.from('transactions').select('id',{count:'exact',head:true});
-    if(gymIds.length){ q=q.or('coach_id.eq.'+currentUser.id+',gym_id.in.('+gymIds.join(',')+')'); } else { q=q.eq('coach_id',currentUser.id); }
+    q=q.eq('coach_id',currentUser.id);   // per entity: coach currency locks on the coach's OWN transactions only
     var r=await q; window._curLocked=((r&&r.count)||0)>0; return window._curLocked;
   }catch(e){ return window._curLocked; }
 };
@@ -23819,7 +23819,11 @@ function subscribeRealtime(){
     window._skupRows=rows;
     if(!rows.length){ box.innerHTML=`<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">${LANG==='en'?'No group sessions. Reservations awaiting payment show above.':'Žádné skupinové lekce. Rezervace čekající na platbu jsou nahoře.'}</p>`; return; }
     const EN=LANG==='en';
-    box.innerHTML=rows.map(function(b){
+    const _hasKid = rows.some(function(b){ return b.child_name; });
+    const _kv = window._skupKidView||'me';
+    const shown = _hasKid ? rows.filter(function(b){ return _kv==='kids' ? !!b.child_name : !b.child_name; }) : rows;
+    const _kidToggle = _hasKid ? ('<div style="display:flex;gap:6px;margin-bottom:14px;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:4px;">'+'<button class="skupKidTab" data-kv="me" style="flex:1;padding:9px;border:none;border-radius:9px;font-size:13px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';background:'+(_kv==='me'?'var(--dark)':'transparent')+';color:'+(_kv==='me'?'#fff':'var(--mid)')+';">'+(EN?'Me':'J\u00e1')+'</button>'+'<button class="skupKidTab" data-kv="kids" style="flex:1;padding:9px;border:none;border-radius:9px;font-size:13px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';background:'+(_kv==='kids'?'var(--dark)':'transparent')+';color:'+(_kv==='kids'?'#fff':'var(--mid)')+';">\ud83d\udc76 '+(EN?'Children':'D\u011bti')+'</button>'+'</div>') : '';
+    const _rowsHtml=shown.map(function(b){
       const dt=new Date(`${b.class_date}T${(b.class_time||'00:00')}:00`);
       const hrs=(dt-now)/(1000*60*60);
       const claimed=b.status==='paid_claimed';
@@ -23837,6 +23841,8 @@ function subscribeRealtime(){
         ${canChange?`${canResched?`<button class="gymReschedBtn" data-id="${b.id}" style="width:100%;padding:11px;background:#E8F0FF;color:var(--blue);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">${EN?'🔄 Reschedule to another class':'🔄 Přesunout na jinou lekci'}</button>`:`<div style="font-size:12px;color:var(--light);text-align:center;margin-bottom:8px;">${EN?'Max reschedules used (2/2)':'Limit přesunů využit (2/2)'}</div>`}<button class="gymDropCancelBtn" data-id="${b.id}" style="width:100%;padding:11px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${(b.payment_method==='qr')?(EN?'Cancel reservation':'Zrušit rezervaci'):(EN?'Cancel (95% back)':'Zrušit (95 % zpět)')}</button>`:''}
       </div>`;
     }).join('');
+    box.innerHTML = _kidToggle + (_rowsHtml || ('<p style="text-align:center;color:var(--light);padding:30px;font-size:13px;">'+(EN?(_kv==='kids'?'No upcoming sessions for your children.':'Nothing upcoming for you.'):(_kv==='kids'?'\u017d\u00e1dn\u00e9 nadch\u00e1zej\u00edc\u00ed lekce d\u011bt\u00ed.':'Tady pro tebe nic nadch\u00e1zej\u00edc\u00edho nen\u00ed.'))+'</p>'));
+    box.querySelectorAll('.skupKidTab').forEach(function(b){ b.onclick=function(){ window._skupKidView=b.dataset.kv; window._loadSkupinovky(); }; });
     box.querySelectorAll('.gymReschedBtn').forEach(function(b){ b.onclick=function(){ openGymReschedule((window._skupRows||[]).find(x=>String(x.id)===String(b.dataset.id))); }; });
     box.querySelectorAll('.gymReceiptBtn').forEach(function(btn){ btn.onclick=function(){ const b=(window._skupRows||[]).find(x=>String(x.id)===String(btn.dataset.id)); if(b) showReceipt(b); }; });
     box.querySelectorAll('.gymDropCalBtn').forEach(function(btn){ btn.onclick=function(){ const b=(window._skupRows||[]).find(x=>String(x.id)===String(btn.dataset.id)); if(!b) return; addToCalendar({ training_date:b.class_date, training_time:b.class_time, id:b.id, title:`🥊 ${b.class_name||(LANG==='en'?'Class':'Lekce')} — ${b.gym_name||'Klub'}` }); }; });
@@ -25765,7 +25771,7 @@ function isRealized(b){
 $('tabCal').onclick=()=>{ resetDiaryTabs(); $('diaryCalTab').style.display='block'; $('tabCal').style.background='var(--dark)'; $('tabCal').style.color='#fff'; };
 $('tabMtl').onclick=()=>{ resetDiaryTabs(); $('diaryMtlTab').style.display='block'; $('tabMtl').style.background='var(--dark)'; $('tabMtl').style.color='#fff'; renderMtl(); };
 
-function fmtPrice(v, curr){ return (Number(v)||0).toFixed(2); }
+function fmtPrice(v, curr){ var n=Number(v)||0; return (Math.abs(n%1)<0.005) ? String(Math.round(n)) : n.toFixed(2); }
 
 function showPriceBreakdown(inputId, breakId){
   const box = $(breakId);
@@ -25914,6 +25920,14 @@ const MIN_RATE = { CZK:450, EUR:20, USD:25, GBP:18, CHF:20, PLN:80, SEK:200, DKK
 const EVENT_TYPES=[{v:'fight_night',cs:'Fight night',en:'Fight night',emoji:'🥊'},{v:'competition',cs:'Soutěž',en:'Competition',emoji:'🏆'},{v:'seminar',cs:'Seminář',en:'Seminar',emoji:'🎓'},{v:'camp',cs:'Kemp',en:'Camp',emoji:'🏕️'},{v:'open_mat',cs:'Open mat',en:'Open mat',emoji:'🤼'},{v:'grading',cs:'Zkoušky',en:'Grading',emoji:'🎗️'},{v:'other',cs:'Jiné',en:'Other',emoji:'📌'}];
 const MIN_GYM = { CZK: 200, EUR: 10, USD: 12, GBP: 9, CHF: 10, PLN: 40, SEK: 100, DKK: 70, NOK: 100, HUF: 3500, RON: 45, CAD: 17, AUD: 18, NZD: 19 }; const MIN_MEMB = { CZK: 1400, EUR: 80, USD: 100, GBP: 70, CHF: 80, PLN: 320, SEK: 800, DKK: 560, NOK: 800, HUF: 28000, RON: 360, CAD: 130, AUD: 140, NZD: 150 };
 
+async function _coachStripeCurrency(){
+  try{ const acct = currentUser && (currentUser.gym_payout_account || currentUser.stripe_account); if(!acct) return null;
+    if(currentUser._stripeCur !== undefined) return currentUser._stripeCur;
+    const r = await fetch('/api/account-status?acct='+encodeURIComponent(acct)); const j = await r.json();
+    const cur = (j && j.default_currency) ? String(j.default_currency).toUpperCase() : null;
+    currentUser._stripeCur = cur; return cur;
+  }catch(e){ return null; }
+}
 async function fillRateEditor(){
   if(!currentUser) return;
   // načti čerstvý profil ať jsou ceny aktuální
@@ -25959,6 +25973,22 @@ async function fillRateEditor(){
   if($('editCurrency')) $('editCurrency').value = curr;
   if($('editCurrency')) $('editCurrency').value = currentUser.currency_inperson || curr;
   if($('editCurrencyOnline')) $('editCurrencyOnline').value = currentUser.currency_online || curr;
+  (async()=>{ try{ const _sc = await _coachStripeCurrency(); if(!_sc) return; const EN=(typeof LANG!=='undefined'&&LANG==='en');
+    const _c=document.getElementById('editCurrency'); if(!_c) return; const _old=document.getElementById('editCurFxWarn'); if(_old) _old.remove();
+    if(!(currentUser.currency_inperson || currentUser.currency)){ _c.value=_sc; return; }
+    const _cur=(_c.value||currentUser.currency_inperson||'').toUpperCase();
+    if(_cur && _cur !== _sc){ const _p=_c.parentElement; if(!_p) return;
+      let _locked=false; try{ _locked=(typeof window._checkCurLock==='function')?(await window._checkCurLock()):!!window._curLocked; }catch(e){}
+      const _w=document.createElement('div'); _w.id='editCurFxWarn'; _w.style.cssText='margin-top:8px;padding:10px 12px;background:#FFF7E6;border:1px solid #F0D48A;border-radius:10px;font-size:11.5px;color:#7a5a00;line-height:1.5;';
+      _w.innerHTML='\u26a0\ufe0f '+(EN?('Mismatch: your Stripe pays out in <b>'+_sc+'</b>, but your coaching is set to <b>'+_cur+'</b>. '+(_locked?('Stripe auto-converts each card payment to '+_sc+' (~2% FX); QR/cash stay in '+_cur+'.'):('Align it to '+_sc+' to avoid conversion.'))):('Nesoulad: tv\u016fj Stripe vypl\u00e1c\u00ed v <b>'+_sc+'</b>, ale kou\u010dov\u00e1n\u00ed m\u00e1\u0161 v <b>'+_cur+'</b>. '+(_locked?('Stripe ka\u017edou kartovou platbu p\u0159evede na '+_sc+' (~2 % FX); QR/hotovost jedou d\u00e1l v '+_cur+'.'):('Zarovnej ji na '+_sc+', a\u0165 se nekonvertuje.'))));
+      if(!_locked){ const _al=document.createElement('button'); _al.type='button'; _al.textContent=(EN?('Align to '+_sc):('Zarovnat na m\u011bnu Stripe ('+_sc+')')); _al.style.cssText='margin-top:8px;background:var(--dark);color:#fff;border:none;border-radius:8px;font-size:11.5px;font-weight:800;cursor:pointer;padding:6px 12px;font-family:inherit;';
+        _al.onclick=function(){ _c.value=_sc; var _oc=document.getElementById('editCurrencyOnline'); if(_oc && (!currentUser.currency_online || (currentUser.currency_online===currentUser.currency_inperson))) _oc.value=_sc; var ww=document.getElementById('editCurFxWarn'); if(ww) ww.remove(); toast(EN?('Set to '+_sc+' \u2014 save to confirm'):('Nastaveno na '+_sc+' \u2014 ulo\u017e pro potvrzen\u00ed'),1); };
+        _w.appendChild(document.createElement('br')); _w.appendChild(_al);
+      } else { const _btn=document.createElement('button'); _btn.type='button'; _btn.textContent=(EN?'Contact support':'Napsat na podporu'); _btn.style.cssText='margin-top:8px;background:none;border:1px solid #E0C060;border-radius:8px;color:#7a5a00;font-size:11px;font-weight:700;cursor:pointer;padding:5px 10px;font-family:inherit;';
+        _btn.onclick=function(){ try{ navigator.clipboard.writeText('support@martialtraininglab.com'); }catch(e){} toast(EN?'Copied: support@martialtraininglab.com':'Zkop\u00edrov\u00e1no: support@martialtraininglab.com',1); };
+        _w.appendChild(document.createElement('br')); _w.appendChild(_btn);
+      }
+      _p.appendChild(_w); } }catch(e){} })();
   if($('editRateInperson')) $('editRateInperson').value = currentUser.rate_inperson || '';
   if($('editRateOnline')) $('editRateOnline').value = currentUser.rate_online || '';
   if($('editOnlineFormat')) $('editOnlineFormat').value = currentUser.online_format || '';
@@ -28023,7 +28053,7 @@ function renderPaymentsPage(){
   if(currentUser.target_payment_mode && currentUser.target_payment_mode!==_emode){ _modeLbl=_modeLbl+' \u2192 '+(currentUser.target_payment_mode==='stripe'?'Stripe':(EN?'Bank':'Banka'))+' \u23f3'; }
   var h=_pendWarn+_mmWarn+_rateCard+'<button id="payRowMode" style="'+bs+'"><span>\ud83d\udd01 '+(EN?'Payment mode':'Re\u017eim plateb')+'</span><span style="display:flex;align-items:center;gap:8px;"><span style="color:var(--mid);font-weight:700;font-size:13px;white-space:nowrap;">'+_modeLbl+'</span>'+arr+'</span></button>';
   var _curL=(currentUser.currency||(window._myGyms&&window._myGyms[0]&&window._myGyms[0].currency)||'CZK');
-  h+='<button id="payRowCur" style="'+bs+'"><span>💱 '+(EN?'Payment currency':'Měna plateb')+'</span><span style="display:flex;align-items:center;gap:8px;"><span style="color:var(--mid);font-weight:700;font-size:13px;white-space:nowrap;">'+_curL+'</span>'+arr+'</span></button>';
+  // Payment-currency picker removed: currency is PER ENTITY now (set in coach settings / gym settings).
   body.innerHTML=h;
   var rm=document.getElementById('payRowMode'); if(rm) rm.onclick=function(){ openSheet('shPayMode'); if(typeof renderPayModeSheet==='function') renderPayModeSheet(); };
   var rcu=document.getElementById('payRowCur'); if(rcu) rcu.onclick=function(){ if(typeof openCurrencyPicker==='function') openCurrencyPicker(); };
