@@ -281,12 +281,19 @@ export default async function handler(req, res) {
     const deposit = Number(c.deposit_amount || 0);
     if (!(deposit > 0)) return res.status(400).json({ ok: false, error: 'no deposit set' });
 
-    const member = await sbInsert('cohort_members', {
-      cohort_id: cohortId, gym_id: c.gym_id, name, email, phone: (b.phone || '').trim() || null,
-      tier, status: 'lead', attribution: _attr,
-      consent_at: new Date().toISOString(), consent_version: (b.consent_version || null),
-      fbp: (b.fbp || null), fbc: (b.fbc || null)
-    });
+    // Reuse an existing UNPAID lead for this cohort+email instead of creating a duplicate
+    // (abandoned Stripe checkout leaves a 'lead'; retrying must not stack more rows).
+    let member;
+    {
+      const _lead = await sbGet(`cohort_members?cohort_id=eq.${encodeURIComponent(cohortId)}&email=eq.${encodeURIComponent(email)}&status=eq.lead&select=id&limit=1`);
+      const _leadFields = { name, phone: (b.phone || '').trim() || null, tier, attribution: _attr, consent_at: new Date().toISOString(), consent_version: (b.consent_version || null), fbp: (b.fbp || null), fbc: (b.fbc || null) };
+      if (_lead && _lead.length) {
+        await sbPatch('cohort_members', `id=eq.${encodeURIComponent(_lead[0].id)}`, _leadFields);
+        member = { id: _lead[0].id };
+      } else {
+        member = await sbInsert('cohort_members', Object.assign({ cohort_id: cohortId, gym_id: c.gym_id, email, status: 'lead' }, _leadFields));
+      }
+    }
     const memberId = member && member.id;
 
     const cur = String(c.currency || 'CZK').toUpperCase();
