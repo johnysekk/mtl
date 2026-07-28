@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SFW recurring editor FULL REDESIGN (variant A, compact + day chips). Removed the top Start|End row, the 'Day' dropdown, and the tall 'More sessions' (extraSlots) blocks. Replaced with: (a) weekday CHIPS Po-Ne (rcChip) -- tap to add/remove a day; active = solid dark, inactive = outline; (b) a compact per-day time LIST, one row per day sorted Mon-Sun: 'DD  [start]-[end]  main|x'. Data model UNCHANGED (primary c.day/c.time/c.dur + extraSlots[{day,time,dur}]); the editor manages the unified view via _classSlots. The PRIMARY row reuses rcTime/rcEnd (so time versioning via _rcPending/_rcApplyPending still works) and shows 'hlavni' with no x; extra rows reuse rcXTime/rcXEnd with data-j = the extraSlots index. _rcChip(i,d): toggling a day on pushes an extra slot (inherits primary time/dur); toggling off removes it, and if it's the primary day it PROMOTES the first extra to primary; never removes the last day. Row x = _rcChip(i,day). Old handlers rcDay/rcXDay/rcXDel/rcAddDay + the 'Add another session' button removed. Everything downstream reads _classSlots so occurrence gen/diary/coach-sched are untouched. Trial on the recurring editor; may propagate the compact style elsewhere later. Deploy: index.html only. -->
+<!-- MTL build: SFY XP/STATS CHILD-NAME LEAK FIXED. A kid's class attendance is stored as gym_attendance under the PARENT's student_id with child_name set; several of the parent's OWN stat/XP queries filtered only by student_id, so kid activity inflated the parent's numbers. Added .is('child_name',null) to: (a) the group-class-attendance count that feeds the student's XP (sg, ~line 22824), (b) the student's gym-trainings breakdown (gymTrain, ~22998), (c) disciplines-trained volume + belt-eligibility check (both .select('discipline').eq(student_id) at ~3448 and ~3789), (d) gyms-attended map (~9381). Now the parent's XP/disciplines/gyms/belts reflect ONLY their own attendance; kid XP stays isolated via computeKidXP(parentId, childName). CAVEAT (server-side, NOT fixable here): the MTL Liga ranking uses the Supabase RPC 'league_top' -- if that SQL aggregates gym_attendance by student_id it ALSO counts kid rows, so the RPC needs 'AND child_name IS NULL' on the attendance aggregation. STILL TODO: the me/kid toggle on the Upcoming (shBookings) view. Deploy: index.html only. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3445,7 +3445,7 @@ async function _gateBelts(){
       const b=beltsOf(pr.belts); if(b && Object.keys(b).some(function(k){ return b[k]&&b[k].belt; })) ok=true;
       if(!ok){ try{ if(parseDisc(pr.disciplines||pr.main_discipline).some(function(d){ return discHasBelts(d); })) ok=true; }catch(e){} }
     }
-    if(!ok){ try{ const { data:ga } = await supaClient.from('gym_attendance').select('discipline').eq('student_id',currentUser.id); if((ga||[]).some(function(a){ return discHasBelts(a.discipline); })) ok=true; }catch(e){} }
+    if(!ok){ try{ const { data:ga } = await supaClient.from('gym_attendance').select('discipline').eq('student_id',currentUser.id).is('child_name',null); if((ga||[]).some(function(a){ return discHasBelts(a.discipline); })) ok=true; }catch(e){} }
     if(!ok){ try{ const { data:gy } = await supaClient.from('gyms').select('disciplines').eq('owner_id',currentUser.id); if((gy||[]).some(function(g){ return parseDisc(g.disciplines).some(function(d){ return discHasBelts(d); }); })) ok=true; }catch(e){} }
   }catch(e){ ok=true; }
   btn.style.display = ok ? '' : 'none';
@@ -3786,7 +3786,7 @@ async function openMyDisciplines(){
   const box=document.getElementById('myDiscBody2'); if(!box) return; const EN=LANG==='en';
   box.innerHTML='<p style="text-align:center;color:var(--light);padding:24px;">'+L('Načítám...')+'</p>';
   const dc={};
-  try{ const { data:ga }=await supaClient.from('gym_attendance').select('discipline').eq('student_id',currentUser.id); (ga||[]).forEach(function(a){ if(a.discipline) dc[a.discipline]=(dc[a.discipline]||0)+1; }); }catch(e){}
+  try{ const { data:ga }=await supaClient.from('gym_attendance').select('discipline').eq('student_id',currentUser.id).is('child_name',null); (ga||[]).forEach(function(a){ if(a.discipline) dc[a.discipline]=(dc[a.discipline]||0)+1; }); }catch(e){}
   try{ const { data:bk }=await supaClient.from('bookings').select('discipline,status,type,fulfilled,student_confirmed,coach_confirmed').eq('student_id',currentUser.id); (bk||[]).forEach(function(b){ if(!b.discipline) return; const done=(b.type==='online')?(!!b.fulfilled):(b.student_confirmed===true&&b.coach_confirmed===true); if(b.status==='active'&&done) dc[b.discipline]=(dc[b.discipline]||0)+1; }); }catch(e){}
   const ks=Object.keys(dc).sort(function(a,b){ return dc[b]-dc[a]; });
   if(!ks.length){ box.innerHTML='<p style="font-size:13px;color:var(--mid);line-height:1.55;padding:8px 0;">'+(EN?'No trainings logged yet — disciplines you train show up here.':'Zatím žádné odtrénované disciplíny — co trénuješ, se objeví tady.')+'</p>'; return; }
@@ -3795,7 +3795,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SFW';
+const MTL_BUILD='SFY';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -9378,7 +9378,7 @@ async function loadMyMemberships(){
   window._membReleased = new Set();
   try{ const _td=new Date().toISOString().slice(0,10); const { data: _rv } = await supaClient.from('gym_class_reservations').select('gym_id,class_date,class_time,class_name,status').eq('student_id', currentUser.id).eq('status','released').gte('class_date', _td); (_rv||[]).forEach(r=>{ window._membReleased.add(`${r.gym_id}|${r.class_date}|${r.class_time||''}|${r.class_name||''}`); }); }catch(e){}
   let attMap={};
-  try{ const { data: aa } = await supaClient.from('gym_attendance').select('gym_id').eq('student_id', currentUser.id); (aa||[]).forEach(a=>{ attMap[a.gym_id]=(attMap[a.gym_id]||0)+1; }); }catch(e){}
+  try{ const { data: aa } = await supaClient.from('gym_attendance').select('gym_id').eq('student_id', currentUser.id).is('child_name',null); (aa||[]).forEach(a=>{ attMap[a.gym_id]=(attMap[a.gym_id]||0)+1; }); }catch(e){}
   // ── drop-iny + Já/Děti pohled (kid obsah žije v memberships + gym_bookings) ──
   const today = new Date().toISOString().slice(0,10);
   let drops=[];
@@ -12135,24 +12135,40 @@ function _cohShowCreate(keep){
   // picks an end time instead of typing minutes.
   function _cohEndFrom(time, dur){ var p=String(time||'18:00').split(':'); var h=+p[0]||0, m=+p[1]||0; var t=h*60+m+(Number(dur)||60); t=((t%1440)+1440)%1440; return String(Math.floor(t/60)).padStart(2,'0')+':'+String(t%60).padStart(2,'0'); }
   function _cohDurFrom(start, end){ var a=String(start||'18:00').split(':'), b=String(end||'19:00').split(':'); var t1=(+a[0]||0)*60+(+a[1]||0), t2=(+b[0]||0)*60+(+b[1]||0); var d=t2-t1; if(d<=0) d+=1440; return d; }
+  function _cohChip(d){ d=Number(d);
+    var idx=_cohSched.findIndex(function(r){ return Number(r.day)===d; });
+    if(idx>=0){ _cohSched.splice(idx,1); } else { _cohSched.push({ day:d, time:'18:00', dur:60 }); }
+    _cohSchedRender();
+  }
   function _cohSchedRender(){
     const box=$('cohSchedRows'); if(!box) return; const EN=LANG==='en'; const dn=dowShort();
     // Monday-first display order; the option VALUE stays the getDay() index (Mon=1) so stored days
     // are unchanged and never shift. Sunday moves to the end.
     const _order=[1,2,3,4,5,6,0];
-    if(!_cohSched.length){ box.innerHTML='<div style="font-size:12px;color:var(--light);padding:4px 0 8px;">'+(EN?'No class days yet \u2014 add at least one.':'Zat\u00edm \u017e\u00e1dn\u00fd den \u2014 p\u0159idej aspo\u0148 jeden.')+'</div>'; return; }
-    box.innerHTML=_cohSched.map(function(r,i){
-      const opts=_order.map(function(di){ return '<option value="'+di+'"'+(Number(r.day)===di?' selected':'')+'>'+dn[di]+'</option>'; }).join('');
-      const _end=_cohEndFrom(r.time||'18:00', r.dur||60);
-      return '<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;">'
-        +'<select class="cohSchDay" data-i="'+i+'" style="flex:0 0 72px;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:\'DM Sans\';font-size:13px;">'+opts+'</select>'
-        +'<input class="cohSchTime" data-i="'+i+'" type="time" value="'+(r.time||'18:00')+'" style="flex:1;min-width:0;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:\'DM Sans\';font-size:13px;">'
-        +'<span style="color:var(--light);font-size:12px;">\u2013</span>'
-        +'<input class="cohSchEnd" data-i="'+i+'" type="time" value="'+_end+'" style="flex:1;min-width:0;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:\'DM Sans\';font-size:13px;">'
-        +'<button type="button" class="cohSchDel" data-i="'+i+'" style="flex:0 0 34px;padding:9px 0;border:none;background:#FEECEC;color:var(--red);border-radius:9px;font-size:15px;cursor:pointer;">\u00d7</button></div>'
-        +'<div style="margin:-2px 0 12px;padding:0 2px 10px;border-bottom:1px dashed var(--border);">'+classLeadSelectHtml('cohSchLead', i, r.leader||r.coach)+payeeSelectHtml('cohSchPay', i, r.coach)+'</div>';
-    }).join('');
-    box.querySelectorAll('.cohSchDay').forEach(function(el){ el.onchange=function(){ _cohSched[+el.dataset.i].day=Number(el.value); }; });
+    var _actD=_cohSched.map(function(r){ return Number(r.day); });
+    var _hasTeam=(_gymTeamCoaches&&_gymTeamCoaches.length);
+    var _h='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">';
+    _order.forEach(function(d){ var on=_actD.indexOf(d)>=0;
+      _h+='<button type="button" class="cohChip" data-d="'+d+'" style="font-size:13px;padding:6px 13px;border-radius:20px;cursor:pointer;font-family:inherit;'+(on?'background:var(--dark);color:#fff;border:1px solid var(--dark);':'background:none;color:var(--mid);border:1px solid var(--border);')+'">'+dn[d]+'</button>';
+    });
+    _h+='</div>';
+    if(!_cohSched.length){ _h+='<div style="font-size:12px;color:var(--light);padding:2px 0 6px;">'+(EN?'Tap a day to add a class session.':'\u0164ukni na den pro p\u0159id\u00e1n\u00ed lekce.')+'</div>'; }
+    var _rows=_cohSched.map(function(r,idx){ return {r:r, idx:idx}; });
+    _rows.sort(function(x,y){ return _order.indexOf(Number(x.r.day))-_order.indexOf(Number(y.r.day)); });
+    _rows.forEach(function(o){ var r=o.r, i=o.idx; var _end=_cohEndFrom(r.time||'18:00', r.dur||60);
+      _h+='<div style="border:1px solid var(--border);border-radius:10px;padding:8px 10px;margin-bottom:8px;">'
+        +'<div style="display:flex;align-items:center;gap:8px;">'
+          +'<span style="font-size:13px;font-weight:700;width:26px;flex-shrink:0;">'+dn[Number(r.day)]+'</span>'
+          +'<input class="cohSchTime" data-i="'+i+'" type="time" value="'+(r.time||'18:00')+'" style="height:32px;width:82px;text-align:center;padding:4px;border:1px solid var(--border);border-radius:8px;font-family:inherit;">'
+          +'<span style="color:var(--light);">\u2013</span>'
+          +'<input class="cohSchEnd" data-i="'+i+'" type="time" value="'+_end+'" style="height:32px;width:82px;text-align:center;padding:4px;border:1px solid var(--border);border-radius:8px;font-family:inherit;">'
+          +'<button type="button" class="cohSchDel" data-i="'+i+'" style="margin-left:auto;background:none;border:none;color:var(--red);font-size:16px;cursor:pointer;padding:4px 8px;line-height:1;">\u2715</button>'
+        +'</div>'
+        +(_hasTeam?('<div style="margin-top:8px;">'+classLeadSelectHtml('cohSchLead', i, r.leader||r.coach)+payeeSelectHtml('cohSchPay', i, r.coach)+'</div>'):'')
+      +'</div>';
+    });
+    box.innerHTML=_h;
+    box.querySelectorAll('.cohChip').forEach(function(el){ el.onclick=function(){ _cohChip(Number(el.dataset.d)); }; });
     box.querySelectorAll('.cohSchTime').forEach(function(el){ el.onchange=function(){ const it=_cohSched[+el.dataset.i]; const _en=box.querySelector('.cohSchEnd[data-i="'+el.dataset.i+'"]'); it.time=el.value; if(_en) it.dur=_cohDurFrom(el.value, _en.value); }; });
     box.querySelectorAll('.cohSchEnd').forEach(function(el){ el.onchange=function(){ const it=_cohSched[+el.dataset.i]; const _st=box.querySelector('.cohSchTime[data-i="'+el.dataset.i+'"]'); it.dur=_cohDurFrom(_st?_st.value:it.time, el.value); }; });
     box.querySelectorAll('.cohSchLead').forEach(function(el){ el.onchange=function(){ const it=_cohSched[+el.dataset.i]; const oid=(_cohCtx&&_cohCtx.ownerId)||(_myGymData&&_myGymData.owner_id)||(currentUser&&currentUser.id); it.leader=el.value||oid;
@@ -12163,7 +12179,7 @@ function _cohShowCreate(keep){
   if($('cohPosterBtn')) $('cohPosterBtn').onclick=function(){ $('cohPosterInput').click(); };
   if($('cohPosterRemove')) $('cohPosterRemove').onclick=function(){ window._cohPoster=null; var pv=$('cohPosterPv'); if(pv){ pv.style.backgroundImage=''; pv.style.display='none'; } this.style.display='none'; var _ab=$('cohPosterBtn'); if(_ab) _ab.textContent=(LANG==='en'?'\ud83d\uddbc\ufe0f Add poster':'\ud83d\uddbc\ufe0f P\u0159idat poster'); toast(LANG==='en'?'Poster removed':'Plak\u00e1t odebr\u00e1n'); };
   if($('cohPosterInput')) $('cohPosterInput').onchange=async function(e){ const file=e.target.files&&e.target.files[0]; if(!file) return; const blob=await cropImage(file, 2/1); e.target.value=''; if(!blob) return; toast(L('\u2b06\ufe0f Nahr\u00e1v\u00e1m...')); try{ const fileName=currentUser.id+'-cohort-'+Date.now()+'.jpg'; const { error }=await supaClient.storage.from('gym-photos').upload(fileName, blob, { contentType:'image/jpeg', upsert:false }); if(error){ toast('\u26a0\ufe0f '+error.message); return; } const { data }=supaClient.storage.from('gym-photos').getPublicUrl(fileName); window._cohPoster=data.publicUrl; const pv=$('cohPosterPv'); if(pv){ pv.style.backgroundImage='url(\''+data.publicUrl+'\')'; pv.style.display='block'; } toast(LANG==='en'?'\u2705 Poster added':'\u2705 Poster nahr\u00e1n'); var _rb=$('cohPosterRemove'); if(_rb) _rb.style.display='block'; var _ab=$('cohPosterBtn'); if(_ab) _ab.textContent=(LANG==='en'?'\ud83d\uddbc\ufe0f Change poster':'\ud83d\uddbc\ufe0f Zm\u011bnit poster'); }catch(err){ toast('\u26a0\ufe0f'); } };
-  if($('cohSchedAdd')) $('cohSchedAdd').onclick=function(){ _cohSched.push({ day:1, time:'18:00', dur:60 }); _cohSchedRender(); };
+  if($('cohSchedAdd')) $('cohSchedAdd').style.display='none';
   window._cohSchedRender=_cohSchedRender;
   if(!(_gymTeamCoaches||[]).length){ try{ loadGymTeamCoaches().then(function(){ _cohSchedRender(); }).catch(function(){}); }catch(e){} }
   _cohSchedRender();
@@ -16212,7 +16228,7 @@ function _recurBlockHtml(days){
         +'<input class="'+_sc+'" data-i="'+i+'"'+_dj+' type="time" value="'+_stV+'" style="height:32px;width:82px;text-align:center;padding:4px;border:1px solid var(--border);border-radius:8px;font-family:inherit;">'
         +'<span style="color:var(--light);">\u2013</span>'
         +'<input class="'+_ec+'" data-i="'+i+'"'+_dj+' type="time" value="'+_endV+'" style="height:32px;width:82px;text-align:center;padding:4px;border:1px solid var(--border);border-radius:8px;font-family:inherit;">'
-        +(sl.primary?('<span style="font-size:10.5px;color:var(--light);margin-left:auto;">'+(EN?'main':'hlavn\u00ed')+'</span>'):('<button type="button" class="rcRowDel" data-i="'+i+'" data-d="'+sl.day+'" style="margin-left:auto;background:none;border:none;color:var(--red);font-size:16px;cursor:pointer;padding:4px 8px;line-height:1;">\u2715</button>'))
+        +((_slots.length>1)?('<button type="button" class="rcRowDel" data-i="'+i+'" data-d="'+sl.day+'" style="margin-left:auto;background:none;border:none;color:var(--red);font-size:16px;cursor:pointer;padding:4px 8px;line-height:1;">\u2715</button>'):'')
         +'</div>';
     });
     body+='</div>';
@@ -22805,7 +22821,7 @@ async function computeMyXP(){
   var me=currentUser; var out={student:0,coach:0,gym:0,d:{}};
   if(!me) return out;
   var isPhys=function(b){ return b.type!=='online' && b.status==='active' && b.student_confirmed===true && b.coach_confirmed===true; };
-  try{ var r=await supaClient.from('bookings').select('type,status,student_confirmed,coach_confirmed').eq('student_id',me.id); var bk=(r&&r.data)||[]; var s1=bk.filter(isPhys).length; var sg=0; try{ var g=await supaClient.from('gym_attendance').select('id').eq('student_id',me.id); sg=((g&&g.data)||[]).length; }catch(e){} out.student=s1*10+sg*2; out.d.s1=s1; out.d.sg=sg; }catch(e){}
+  try{ var r=await supaClient.from('bookings').select('type,status,student_confirmed,coach_confirmed').eq('student_id',me.id); var bk=(r&&r.data)||[]; var s1=bk.filter(isPhys).length; var sg=0; try{ var g=await supaClient.from('gym_attendance').select('id').eq('student_id',me.id).is('child_name',null); sg=((g&&g.data)||[]).length; }catch(e){} out.student=s1*10+sg*2; out.d.s1=s1; out.d.sg=sg; }catch(e){}
   try{ var rf=await supaClient.from('profiles').select('id',{count:'exact',head:true}).eq('referred_by',me.id).eq('referral_rewarded',true); var rfn=rf.count||0; out.student+=rfn*5; out.d.ref=rfn; }catch(e){} try{ var _grC=await supaClient.from('gyms').select('id',{count:'exact',head:true}).eq('referred_by',me.id); var _grCreated=_grC.count||0; var _grR=await supaClient.from('gyms').select('id',{count:'exact',head:true}).eq('referred_by',me.id).eq('referral_rewarded',true); var _grRew=_grR.count||0; out.student+=_grCreated*25 + _grRew*125; out.d.gymref=_grCreated; out.d.gymrefRew=_grRew; }catch(e){}
   if(me.coach_status==='approved'){ try{ var r2=await supaClient.from('bookings').select('type,status,student_confirmed,coach_confirmed').eq('coach_id',me.id); var cb=(r2&&r2.data)||[]; var c1=cb.filter(isPhys).length; var cev=0; try{ var ce=await supaClient.from('events').select('id',{count:'exact',head:true}).eq('created_by',me.id).eq('status','approved').lt('starts_at', new Date().toISOString()); cev=ce.count||0; }catch(e){} var ccls=0; try{ var cga=await supaClient.from('gym_attendance').select('class_date,class_time,gym_id').eq('coach_id',me.id); var cset=new Set(((cga&&cga.data)||[]).map(function(a){return (a.gym_id||'')+'|'+(a.class_date||'')+'|'+(a.class_time||'');})); cset.delete('||'); ccls=cset.size; }catch(e){} out.coach=c1*2+cev*40+ccls; out.d.c1=c1; out.d.cev=cev; out.d.ccls=ccls; }catch(e){} }
   try{ var mg=await supaClient.from('gyms').select('id').eq('owner_id',me.id).eq('status','approved'); var gg=(mg&&mg.data)||[]; if(gg.length){ var gid=gg[0].id; var cls=0; try{ var ga=await supaClient.from('gym_attendance').select('class_date,class_time').eq('gym_id',gid); var set=new Set(((ga&&ga.data)||[]).map(function(a){return (a.class_date||'')+'|'+(a.class_time||'');})); set.delete('|'); cls=set.size; }catch(e){} var gev=0; try{ var ge=await supaClient.from('events').select('id',{count:'exact',head:true}).eq('gym_id',gid).eq('status','approved').lt('starts_at', new Date().toISOString()); gev=ge.count||0; }catch(e){} out.gym=cls+gev*40; out.d.cls=cls; out.d.gev=gev; out.d.gid=gid; } }catch(e){}
@@ -22979,7 +22995,7 @@ async function openMilestones(){
   try{
     const { data: bk } = await supaClient.from('bookings').select('id,type,status,fulfilled,training_date,training_time,coach_id,discipline,student_confirmed,coach_confirmed').eq('student_id',me.id);
     const hp=(bk||[]).filter(b=>b.status==='active'&&isP(b)); const online=hp.filter(b=>b.type==='online').length; const coaches=new Set(hp.map(b=>b.coach_id).filter(Boolean)).size;
-    let gymTrain=0; const discSet=new Set(); const _noDiscGyms=new Set(); try{ const { data: ga } = await supaClient.from('gym_attendance').select('id,discipline,gym_id').eq('student_id',me.id); gymTrain=(ga||[]).length; (ga||[]).forEach(a=>{ if(a.discipline){ discSet.add(a.discipline); _discCount[a.discipline]=(_discCount[a.discipline]||0)+1; } else if(a.gym_id) _noDiscGyms.add(a.gym_id); }); }catch(e){}
+    let gymTrain=0; const discSet=new Set(); const _noDiscGyms=new Set(); try{ const { data: ga } = await supaClient.from('gym_attendance').select('id,discipline,gym_id').eq('student_id',me.id).is('child_name',null); gymTrain=(ga||[]).length; (ga||[]).forEach(a=>{ if(a.discipline){ discSet.add(a.discipline); _discCount[a.discipline]=(_discCount[a.discipline]||0)+1; } else if(a.gym_id) _noDiscGyms.add(a.gym_id); }); }catch(e){}
     if(_noDiscGyms.size){ try{ const { data: _gg } = await supaClient.from('gyms').select('id,disciplines').in('id',[..._noDiscGyms]); (_gg||[]).forEach(g2=>{ let dl=[]; try{ dl=g2.disciplines?(typeof g2.disciplines==='string'?JSON.parse(g2.disciplines):g2.disciplines):[]; }catch(e){} if(Array.isArray(dl)&&dl.length) discSet.add(dl[0]); }); }catch(e){} }
     hp.forEach(b=>{ if(b.discipline){ discSet.add(b.discipline); _discCount[b.discipline]=(_discCount[b.discipline]||0)+1; } }); const sports=discSet.size;
     const total=hp.filter(b=>b.type!=='online').length+gymTrain;
