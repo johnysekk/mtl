@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SGA CURRENCY LOCK once a club has taken a payment (Petr's bug: the mgCurrency selector in 'Ceny & clenstvi' let him change currency after a transaction had already happened -- which would break reconciliation, doklady and history). ROOT CAUSE: an earlier over-aggressive lock (locked across ALL of an owner's clubs, blocking a cross-border 2nd club) was removed entirely, leaving NO lock. FIX (per-club, defense-in-depth): (1) saveGymManage -- when the selected currency differs from the stored one, it now checks transactions for THIS gym_id; if any exist it reverts _curSel to _myGymData.currency, resets the select, and toasts 'Menu nelze zmenit -- klub uz ma platby' (the query runs ONLY when a change is attempted, so no latency on normal saves). (2) renderGymManage -- after render, an async check disables the mgCurrency <select> (greyed, not-allowed cursor, title) and appends a 'Menu jiz nelze zmenit' note when the club has >=1 transaction. New clubs / clubs with no payments yet are unaffected and still pick freely; a cross-border 2nd club is fine because the check is per gym_id. Deploy: index.html only. -->
+<!-- MTL build: SGD gym currency-vs-Stripe mismatch now surfaces a warning + an ALIGN button (only when the app currency differs from the Stripe payout currency). The block checks whether the club is locked (has a transaction): if NOT locked, it shows a 'Zarovnat na menu Stripe (X)' button that sets the selector to the Stripe currency on click (user saves to confirm -- not silent/automatic); if LOCKED, it keeps the FX warning + 'Napsat na podporu' button (copies support@martialtraininglab.com), since a locked currency can't change and Stripe just auto-converts. Nothing shows when app currency == Stripe currency. The 'no currency yet -> adopt Stripe currency' default from SGC stays. Deploy: index.html only. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3795,7 +3795,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SGA';
+const MTL_BUILD='SGD';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -13606,6 +13606,28 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
     if(_hx && _hx.length){ const _c=document.getElementById('mgCurrency'); _c.disabled=true; _c.style.opacity='.6'; _c.style.cursor='not-allowed';
       _c.title=(LANG==='en'?'Locked \u2014 this club already has payments':'Zam\u010deno \u2014 klub u\u017e m\u00e1 platby');
       const _p=_c.parentElement; if(_p && !_p.querySelector('.curLockNote')){ const _n=document.createElement('div'); _n.className='curLockNote'; _n.style.cssText='font-size:11px;color:var(--light);margin-top:5px;line-height:1.4;'; _n.textContent=(LANG==='en'?'Currency is locked once the club has taken a payment.':'M\u011bnu ji\u017e nelze zm\u011bnit \u2014 klub u\u017e p\u0159ijal platbu.'); _p.appendChild(_n); } } }catch(e){} })();
+  (async()=>{ try{ if(!_myGymData || !document.getElementById('mgCurrency')) return;
+    const _sc = await _gymStripeCurrency(_myGymData); if(!_sc) return;
+    const _c = document.getElementById('mgCurrency');
+    // DEFAULT FROM STRIPE: if this club has no currency set yet, adopt the Stripe payout currency.
+    if(!_myGymData.currency){ _c.value=_sc; return; }
+    const _cur = (_c.value||_myGymData.currency||'').toUpperCase();
+    const _old=document.getElementById('mgCurFxWarn'); if(_old) _old.remove();
+    if(_cur && _cur !== _sc){ const _p=_c.parentElement; if(!_p) return;
+      // Is the club locked (already took a payment)?
+      let _locked=false; try{ const { data:_hx } = await supaClient.from('transactions').select('id').eq('gym_id', _myGymData.id).limit(1); _locked=!!(_hx && _hx.length); }catch(e){}
+      const _w=document.createElement('div'); _w.id='mgCurFxWarn'; _w.style.cssText='margin-top:8px;padding:10px 12px;background:#FFF7E6;border:1px solid #F0D48A;border-radius:10px;font-size:11.5px;color:#7a5a00;line-height:1.5;';
+      _w.innerHTML='\u26a0\ufe0f '+(LANG==='en'?('Mismatch: your Stripe account pays out in <b>'+_sc+'</b>, but this club is set to <b>'+_cur+'</b>. '+(_locked?('Stripe auto-converts each card payment to '+_sc+' (~2% FX fee); QR/cash stay in '+_cur+'.'):('Align it to '+_sc+' to avoid conversion.'))):('Nesoulad: tv\u016fj Stripe \u00fa\u010det vypl\u00e1c\u00ed v <b>'+_sc+'</b>, ale klub je nastaven\u00fd na <b>'+_cur+'</b>. '+(_locked?('Stripe ka\u017edou kartovou platbu p\u0159evede na '+_sc+' (~2 % FX); QR/hotovost jedou d\u00e1l v '+_cur+'.'):('Zarovnej ji na '+_sc+', a\u0165 se nekonvertuje.'))));
+      if(!_locked){
+        const _al=document.createElement('button'); _al.type='button'; _al.textContent=(LANG==='en'?('Align to '+_sc):('Zarovnat na m\u011bnu Stripe ('+_sc+')')); _al.style.cssText='margin-top:8px;background:var(--dark);color:#fff;border:none;border-radius:8px;font-size:11.5px;font-weight:800;cursor:pointer;padding:6px 12px;font-family:inherit;';
+        _al.onclick=function(){ _c.value=_sc; var ww=document.getElementById('mgCurFxWarn'); if(ww) ww.remove(); toast(LANG==='en'?('Set to '+_sc+' \u2014 save to confirm'):('Nastaveno na '+_sc+' \u2014 ulo\u017e pro potvrzen\u00ed'),1); };
+        _w.appendChild(document.createElement('br')); _w.appendChild(_al);
+      } else {
+        const _btn=document.createElement('button'); _btn.type='button'; _btn.textContent=(LANG==='en'?'Contact support':'Napsat na podporu'); _btn.style.cssText='margin-top:8px;background:none;border:1px solid #E0C060;border-radius:8px;color:#7a5a00;font-size:11px;font-weight:700;cursor:pointer;padding:5px 10px;font-family:inherit;';
+        _btn.onclick=function(){ try{ navigator.clipboard.writeText('support@martialtraininglab.com'); }catch(e){} toast(LANG==='en'?'Copied: support@martialtraininglab.com':'Zkop\u00edrov\u00e1no: support@martialtraininglab.com',1); };
+        _w.appendChild(document.createElement('br')); _w.appendChild(_btn);
+      }
+      _p.appendChild(_w); } }catch(e){} })();
   if($('btnImportMembers')) $('btnImportMembers').onclick=openImportMembers;
   if($('btnImportedRoster')) $('btnImportedRoster').onclick=openImportedRoster;
   if($('mgVatPayer')) $('mgVatPayer').onchange=function(){ var r=$('mgVatRateRow'); if(r) r.style.display=this.checked?'':'none'; };
@@ -16448,6 +16470,14 @@ function updateMgDropinBreak(){
   b.dataset.belowMin=''; b.style.background='transparent'; b.style.color=''; b.style.fontWeight=''; b.style.padding='0';
   b.innerHTML=shareBreakdownHtml(p, cur, gymR);
 }
+async function _gymStripeCurrency(gym){
+  try{ const acct = gym && gym.stripe_account; if(!acct) return null;
+    if(gym._stripeCur !== undefined) return gym._stripeCur;
+    const r = await fetch('/api/account-status?acct='+encodeURIComponent(acct)); const j = await r.json();
+    const cur = (j && j.default_currency) ? String(j.default_currency).toUpperCase() : null;
+    gym._stripeCur = cur; return cur;
+  }catch(e){ return null; }
+}
 async function saveGymManage(){
   if(!_myGymData) return;
   const dropin = parseInt($('mgDropin').value)||_myGymData.dropin_price;
@@ -16636,9 +16666,14 @@ async function loadGymCoursesForProfile(gymId, g){
     { let _occ=[]; try{ _occ=cohortOccurrences(c,{horizonDays:90}); }catch(e){}
       if(_occ.length){
         const _dn=dowShort(); const _byDay={};
-        _occ.forEach(function(o){ const dow=new Date(o.date+'T00:00:00').getDay(); const k=dow+'|'+(o.time||''); if(!_byDay[k]) _byDay[k]={dow:dow,time:o.time,n:0}; _byDay[k].n++; });
-        const _pat=Object.keys(_byDay).map(function(k){ return _byDay[k]; }).sort(function(a,b){ return a.dow-b.dow; }).map(function(x){ return _dn[x.dow]+' '+(x.time||''); }).join(' \u00b7 ');
-        body+='<div style="font-size:12.5px;color:var(--dark);margin-bottom:5px;">\u23f0 '+escapeHtml(_pat)+'</div>';
+        _occ.forEach(function(o){ const dow=new Date(o.date+'T00:00:00').getDay(); const k=dow+'|'+(o.time||''); if(!_byDay[k]) _byDay[k]={dow:dow,time:o.time,leader:(o.leaderName||o.coachName||''),n:0}; _byDay[k].n++; });
+        var _hideLead=!!(g&&g.hide_leaders);
+        var _rows=Object.keys(_byDay).map(function(k){ return _byDay[k]; }).sort(function(a,b){ return a.dow-b.dow; });
+        var _uniqL=[]; if(!_hideLead){ _rows.forEach(function(x){ if(x.leader && _uniqL.indexOf(x.leader)<0) _uniqL.push(x.leader); }); }
+        var _multiL=_uniqL.length>1;
+        var _pat=_rows.map(function(x){ return escapeHtml(_dn[x.dow]+' '+(x.time||''))+((_multiL && x.leader)?(' \u00b7 '+escapeHtml(x.leader)):''); }).join(_multiL?'<br>':' \u00b7 ');
+        body+='<div style="font-size:12.5px;color:var(--dark);margin-bottom:5px;">\u23f0 '+_pat+'</div>';
+        if(!_hideLead && _uniqL.length===1){ body+='<div style="font-size:11.5px;color:var(--mid);margin-bottom:5px;">'+(EN?'Led by ':'Vede: ')+escapeHtml(_uniqL[0])+'</div>'; }
         body+='<div style="font-size:11px;color:var(--light);margin-bottom:6px;">'+_occ.length+' '+(LANG==='en'?'sessions':'lekc\u00ed')+'</div>';
       } else if(c.schedule_note){ body+='<div style="font-size:12.5px;color:var(--dark);margin-bottom:5px;">\u23f0 '+escapeHtml(c.schedule_note)+'</div>'; }
     }
@@ -17939,7 +17974,9 @@ async function openGymApp(){
       // and cash/QR/PIS via record-cash), so there is nothing to inherit. Empty by default and
       // validated on submit: you cannot create a club without choosing.
       _gc.disabled=false; _gc.style.opacity=''; _gc.title='';
-      _gc.value=''; }catch(e){} },0);
+      // Default a NEW club to the owner's in-person currency (coach/existing club), whether or not
+      // that currency is already locked -- it's just a pre-fill the owner can still change here.
+      _gc.value=(currentUser && (currentUser.currency_inperson || currentUser.currency)) || ''; }catch(e){} },0);
   }catch(e){ try{ gaGoStep(1); }catch(_){} }
 }
 
@@ -20755,10 +20792,9 @@ async function openCurrencyPicker(){
       var _odc=ov.querySelector('#curPickOnDiff');
       var _onv=(_odc && _odc.checked && ov.querySelector('#curPickOnSel')) ? ov.querySelector('#curPickOnSel').value : nv;
       await supaClient.from('profiles').update({ currency:nv, currency_inperson:nv, currency_online:_onv }).eq('id',currentUser.id);
-      var gymIds=(window._myGyms||[]).map(function(g){return g.id;}).filter(Boolean);
-      if(gymIds.length) await supaClient.from('gyms').update({ currency:nv }).in('id',gymIds);
+      // Currency is PER ENTITY: this coach picker sets ONLY the coach's own currency. Each gym keeps
+      // its own currency (set in gym settings), so a cross-border 2nd club can differ.
       currentUser.currency=nv; currentUser.currency_inperson=nv; currentUser.currency_online=_onv;
-      (window._myGyms||[]).forEach(function(g){ g.currency=nv; });
       toast(EN?'✅ Currency saved':'✅ Měna uložena',1); close();
       if(typeof renderPaymentsPage==='function') renderPaymentsPage();
     }catch(e){ toast('⚠️ '+(e.message||'')); sv.disabled=false; sv.textContent=EN?'Save':'Uložit'; }
