@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SFZ courses now show who LEADS, hide_leaders-aware (parity with recurring classes). Cohort sessions already stored per-session leaders (cohSchLead) and cohortOccurrences carries leaderName via upcomingClasses, but no public view rendered it. In openCohortSignup's schedule box: _pat entries now carry the session leader; compact display -- if hide_leaders (gym flag) the leaders are omitted (schedule shows day+time only, as before); if exactly ONE distinct leader across sessions, a 'Vede: {name}' line shows under the schedule; if MULTIPLE distinct leaders, each pattern row shows 'Day TIME . {leader}' on its own line. hide_leaders is now returned by /api/cohort-public (added to the gyms select + response as d.hide_leaders) so it works for anonymous cold-link viewers too via the service-role fetch. Deploy: index.html + api/cohort-public.js. -->
+<!-- MTL build: SGA CURRENCY LOCK once a club has taken a payment (Petr's bug: the mgCurrency selector in 'Ceny & clenstvi' let him change currency after a transaction had already happened -- which would break reconciliation, doklady and history). ROOT CAUSE: an earlier over-aggressive lock (locked across ALL of an owner's clubs, blocking a cross-border 2nd club) was removed entirely, leaving NO lock. FIX (per-club, defense-in-depth): (1) saveGymManage -- when the selected currency differs from the stored one, it now checks transactions for THIS gym_id; if any exist it reverts _curSel to _myGymData.currency, resets the select, and toasts 'Menu nelze zmenit -- klub uz ma platby' (the query runs ONLY when a change is attempted, so no latency on normal saves). (2) renderGymManage -- after render, an async check disables the mgCurrency <select> (greyed, not-allowed cursor, title) and appends a 'Menu jiz nelze zmenit' note when the club has >=1 transaction. New clubs / clubs with no payments yet are unaffected and still pick freely; a cross-border 2nd club is fine because the check is per gym_id. Deploy: index.html only. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3795,7 +3795,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SFZ';
+const MTL_BUILD='SGA';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -13601,6 +13601,11 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
     toast(LANG==='en'?`✅ ${days.length} classes added`:`✅ Přidáno ${days.length} lekcí`);
   };
   document.querySelectorAll('.mgSaveSec').forEach(b=>b.onclick=saveGymManage);
+  (async()=>{ try{ if(!_myGymData || !document.getElementById('mgCurrency')) return;
+    const { data:_hx } = await supaClient.from('transactions').select('id').eq('gym_id', _myGymData.id).limit(1);
+    if(_hx && _hx.length){ const _c=document.getElementById('mgCurrency'); _c.disabled=true; _c.style.opacity='.6'; _c.style.cursor='not-allowed';
+      _c.title=(LANG==='en'?'Locked \u2014 this club already has payments':'Zam\u010deno \u2014 klub u\u017e m\u00e1 platby');
+      const _p=_c.parentElement; if(_p && !_p.querySelector('.curLockNote')){ const _n=document.createElement('div'); _n.className='curLockNote'; _n.style.cssText='font-size:11px;color:var(--light);margin-top:5px;line-height:1.4;'; _n.textContent=(LANG==='en'?'Currency is locked once the club has taken a payment.':'M\u011bnu ji\u017e nelze zm\u011bnit \u2014 klub u\u017e p\u0159ijal platbu.'); _p.appendChild(_n); } } }catch(e){} })();
   if($('btnImportMembers')) $('btnImportMembers').onclick=openImportMembers;
   if($('btnImportedRoster')) $('btnImportedRoster').onclick=openImportedRoster;
   if($('mgVatPayer')) $('mgVatPayer').onchange=function(){ var r=$('mgVatRateRow'); if(r) r.style.display=this.checked?'':'none'; };
@@ -16459,7 +16464,14 @@ async function saveGymManage(){
   const termsTitle = ($('mgTermsTitle')&&$('mgTermsTitle').value.trim())||null;
   const termsText = ($('mgTermsText')&&$('mgTermsText').value.trim())||null;
   const sched = JSON.stringify(_gymSchedule.map(c=>({ ...c, name: (c.name&&String(c.name).trim()) ? c.name.trim() : levelLabel(c.level||'all') })));
-  const _curSel = ($('mgCurrency')&&$('mgCurrency').value) || _myGymData.currency || 'CZK';
+  let _curSel = ($('mgCurrency')&&$('mgCurrency').value) || _myGymData.currency || 'CZK';
+  // CURRENCY LOCK: once a club has taken ANY payment, its currency is fixed -- changing it would break
+  // reconciliation, doklady and history. Only checked when a change is actually attempted (no latency otherwise).
+  if(_curSel !== (_myGymData.currency||_curSel)){
+    try{ const { data:_hx } = await supaClient.from('transactions').select('id').eq('gym_id', _myGymData.id).limit(1);
+      if(_hx && _hx.length){ _curSel = _myGymData.currency; try{ if($('mgCurrency')) $('mgCurrency').value=_myGymData.currency; }catch(e){}
+        toast(LANG==='en'?'Currency is locked \u2014 this club already has payments.':'M\u011bnu nelze zm\u011bnit \u2014 klub u\u017e m\u00e1 platby.'); } }catch(e){}
+  }
   const patch = { currency:_curSel, dropin_price:dropin, membership_plans:JSON.stringify(plans), membership_name:first?first.name:null, membership_price:first?first.price:null, schedule:sched, terms_title:termsTitle, terms_text:termsText, org_form:_gymOrgForm, dropin_income:_gymDropinIncome };
   const _gdesc = ($('mgDescription')&&$('mgDescription').value.trim())||null; patch.description=_gdesc;
   if(_myGymData && _myGymData.discipline_meta!==undefined){ patch.discipline_meta = _myGymData.discipline_meta?JSON.stringify(_myGymData.discipline_meta):null; } _myGymData.description=_gdesc;
