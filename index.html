@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SHA new commission rates -- EP 0.5% + Founding Partner ladder. EP economics verified (Stripe fees paid by the club on direct charges, infra is mostly amortised fixed cost -> 0.5%+1000/mo is ~90-98% margin even for a 1M/mo club). RATES: EP (profiles.partner) = 0.5% flat (was 1%). FOUNDING PARTNER = the EXISTING profiles.founding flag (it already gave founding members a rate edge, e.g. 2% on events), now a full ladder via _ladderRate: base 2%, Shikai (ref>=2) 1.5% (all modes incl QR/PIS/cash), Bankai (ref>=5 + bankai_eligible) 1% (stripe+cash only, no Bankai on QR/PIS). Rates are USER-level (profiles), so a coach with 5 gyms gets the same rate everywhere. CHANGED: _ladderRate rewritten (EP 0.005 + founding branch); founding threaded into all 8 _ladderRate callers (currentUser x2, coach-obj x2, u-obj x4); server api/cohort-pay.js providerCommission now returns EP 0.005 + the FP ladder + selects founding; api/pay.js commission guard widened to >=0.005 (was >=0.01) so EP 0.5% is no longer rejected to the 3% fallback; dashboard income estimates (evTake, epMul) updated for EP 0.5% / founding keep 98%. STILL TODO (next): Founding Partner BADGE placement, manual grant UI, Nuke handling of founding, and turning Ambassadors off. Deploy: index.html + api/cohort-pay.js + api/pay.js. -->
+<!-- MTL build: SHB roster + signup UX + FP indicator. (1) Roster default tab is now 'Odeslali prihlasku' (leads), was 'paid' (_crTab default 'leads'). (2) Signup DUPLICATE silent-fail fixed: the pay-button failure only toasted, and the toast is hidden BEHIND the full-screen signup overlay -- so a duplicate email looked like it 'just failed'. Added an inline #cohSErr red box under the pay button; on failure it shows the message IN the overlay, and for j.duplicate a clear 'Ucastnik s timto e-mailem uz je do kurzu prihlaseny.' (plus the toast). (3) FP RATE INDICATOR added to the profile net hero (#meNetHeroCard): a small line computing _ladderRate for the user + labelling 'Exclusive Partner' / 'Founding Partner' when applicable -- non-intrusive, in the hero, as Petr asked. (4) Nuke now also resets profiles.founding (re-grant after). VERIFIED serverless in outputs is correct: stripe-webhook.js writes type:'course' for cohort deposit/first_month/month (x3), cohort-payments.js reads the payment log -- so the persistent 'Kurzy dashboard' + 'Co zaplatil' blanks are a DEPLOY gap (old webhook lacks SGT; cohort-payments.js is a new file), NOT a code bug; old transactions won't retro-categorise. Deploy: index.html + (for the persistent issues) api/stripe-webhook.js + api/cohort-payments.js + api/cohort-pay.js + api/pay.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3799,7 +3799,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SHA';
+const MTL_BUILD='SHB';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -11520,6 +11520,7 @@ async function openCohortSignup(cohortId, fromColdLink){
       +'<details style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:12px;"><summary style="font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Terms & data protection':'Podmínky & ochrana údajů')+'</summary>'+layers+'</details>'
       +'<label style="display:flex;gap:9px;align-items:flex-start;font-size:12px;color:var(--dark);line-height:1.45;margin-bottom:14px;cursor:pointer;"><input id="cohConsent" type="checkbox" style="margin-top:2px;flex-shrink:0;"><span>'+(EN?'I agree to the cohort terms, the data processing, and the provider marketing/tracking described above.':'Souhlasím s podmínkami kurzu, zpracováním údajů a marketingem/trackingem poskytovatele výše.')+'</span></label>'+'<div id="cohConsentErr" style="display:none;color:var(--red);font-size:12px;font-weight:700;margin:-8px 0 12px;text-align:left;">'+(EN?'You must agree to the terms to continue.':'Pro pokračování musíš souhlasit s podmínkami.')+'</div>'
       +'<button id="cohPayBtn" style="width:100%;padding:15px;background:var(--red);color:#fff;border:none;border-radius:13px;font-size:15px;font-weight:800;cursor:pointer;">'+(EN?'Pay deposit ':'Zaplatit zálohu ')+fmtPrice(d.deposit_amount||0,cur)+' '+_curSym(cur)+'</button>'
+      +'<div id="cohSErr" style="display:none;margin-top:10px;padding:10px 12px;background:#FEECEC;border:1px solid #F3C9C0;border-radius:10px;color:var(--red);font-size:13px;font-weight:700;text-align:center;"></div>'
       +'<p style="font-size:10px;color:var(--light);text-align:center;margin-top:10px;line-height:1.5;">'+((typeof currentUser!=='undefined'&&currentUser)?(EN?'Signed in \u2014 the course will be added to your account.':'P\u0159ihl\u00e1\u0161en \u2014 kurz se p\u0159id\u00e1 pod tv\u016fj \u00fa\u010det.'):((d&&d.payment_mode==='qr_bank')?(EN?'Payment by bank transfer / QR. No app account needed now.':'Platba bankovním převodem / QR. Účet v appce teď nepotřebuješ.'):(EN?'Secure payment via Stripe. No app account needed now.':'Bezpečná platba přes Stripe. Účet v appce teď nepotřebuješ.')))+'</p>'));
   if(full){
     const wb=ov.querySelector('#cohWaitBtn');
@@ -11552,7 +11553,9 @@ async function openCohortSignup(cohortId, fromColdLink){
       const r=await fetch('/api/cohort-pay',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ cohort_id:cohortId, name:nm, email:em, phone:ph, tier:tier, attribution:_consumeCohSrc(), consent_version:'2026-06-26', gym_name:d.gym_name, fbp:_fb.fbp, fbc:_fb.fbc, hp:((document.getElementById('cohHp')||{}).value)||'' }) });
       const j=await r.json();
       if(j&&j.ok&&j.url){ window.location.href=j.url; }
-      else { toast('⚠️ '+((j&&j.error)||'error')); pb.disabled=false; pb.textContent=(EN?'Pay deposit ':'Zaplatit zálohu ')+fmtPrice(d.deposit_amount||0,cur)+' '+_curSym(cur); }
+      else { var _msg=(j&&j.duplicate)?(EN?'Someone with this e-mail is already signed up for this course.':'Účastník s tímto e-mailem už je do kurzu přihlášený.'):((j&&j.error)||(EN?'Something went wrong.':'Něco se pokazilo.'));
+      var _ce2=ov.querySelector('#cohSErr'); if(_ce2){ _ce2.textContent=_msg; _ce2.style.display='block'; } toast('⚠️ '+_msg);
+      pb.disabled=false; pb.textContent=(EN?'Pay deposit ':'Zaplatit zálohu ')+fmtPrice(d.deposit_amount||0,cur)+' '+_curSym(cur); }
     }catch(e){ toast('⚠️ '+e.message); pb.disabled=false; pb.textContent=(EN?'Pay deposit ':'Zaplatit zálohu ')+fmtPrice(d.deposit_amount||0,cur)+' '+_curSym(cur); }
   };
 }
@@ -11830,7 +11833,7 @@ async function _cohRosterRender(){
   const _rmLink=function(m){ return '<button class="crRemove" data-id="'+m.id+'" style="background:none;border:1px solid var(--red);color:var(--red);font-size:11px;font-weight:800;cursor:pointer;padding:5px 11px;border-radius:8px;font-family:inherit;">'+(EN?'\u2715 Remove':'\u2715 Odebrat')+'</button>'; };
   var _paidN=members.filter(function(m){ return ['deposit_claimed','deposit_paid','enrolled','completed','converted'].indexOf(m.status)>=0; }).length;
   var _leadN=members.filter(function(m){ return m.status==='lead'; }).length;
-  var _tab=window._crTab||'paid';
+  var _tab=window._crTab||'leads';
   var _tbtn=function(id,lbl,n){ var on=_tab===id; return '<button class="crTabBtn" data-tab="'+id+'" style="flex:1;padding:9px 6px;border:none;border-radius:9px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:inherit;background:'+(on?'var(--dark)':'#EEF2F6')+';color:'+(on?'#fff':'var(--mid)')+';">'+lbl+' ('+n+')</button>'; };
   html+='<div style="display:flex;gap:6px;margin:14px 0 12px;">'+_tbtn('leads',(EN?'Applied':'Odeslali p\u0159ihl\u00e1\u0161ku'),_leadN)+_tbtn('paid',(EN?'Paid deposit':'Zaplatili z\u00e1lohu'),_paidN)+'</div>';
   html+='<div id="crPanePaid" class="crPane"'+(_tab==='paid'?'':' style="display:none;"')+'>';
@@ -23553,7 +23556,7 @@ async function founderResetStats(){
   catch(e){ fail.push('profiles.ratings: '+(e&&e.message||e)); }
   try{ await supaClient.from('profiles').update({ welcome_free_until:null, welcome_zero_off:false, target_payment_mode:null }).not('id','is',null); ok.push('profiles.welcome'); }
   catch(e){ fail.push('profiles.welcome: '+(e&&e.message||e)); }
-  try{ await supaClient.from('profiles').update({ partner:false, partner_sub:null, partner_cancelling:false, partner_period_end:null, partner_until:null }).not('id','is',null); ok.push('profiles.ep'); }
+  try{ await supaClient.from('profiles').update({ partner:false, partner_sub:null, partner_cancelling:false, partner_period_end:null, partner_until:null, founding:false }).not('id','is',null); ok.push('profiles.ep+founding'); }
   catch(e){ fail.push('profiles.ep: '+(e&&e.message||e)); }
   try{ await supaClient.from('gyms').update({ welcome_free_until:null }).not('id','is',null); ok.push('gyms.welcome'); }
   catch(e){ fail.push('gyms.welcome: '+(e&&e.message||e)); }
@@ -26622,7 +26625,7 @@ async function renderMeNetHero(){
   const isCoach=currentUser.coach_status==='approved'; const isGym=!!(window._myGyms&&window._myGyms.length);
   if(!isCoach&&!isGym){ box.style.display='none'; box.innerHTML=''; return; }
   box.style.display='block';
-  box.innerHTML='<div id="meNetHeroCard" style="background:linear-gradient(135deg,#0A7A4F,#005A3C);border-radius:16px;padding:15px 18px;margin-bottom:16px;cursor:pointer;color:#fff;box-shadow:0 2px 10px rgba(0,96,64,.18);"><div style="font-size:11.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">💰 '+(LANG==='en'?'Net collected':'Čistě vybráno')+' · '+(LANG==='en'?'this month':'tento měsíc')+'</div><div id="meNetHeroVal" style="font-size:30px;font-weight:800;line-height:1.05;margin:5px 0 3px;">…</div><div style="font-size:11px;opacity:.78;">'+(function(){var _ns=((typeof _mtlPayMode==='function'?_mtlPayMode(currentUser):currentUser.payment_mode)!=='stripe');return LANG==='en'?('real '+(_ns?'':'Stripe ')+'net · tap for dashboard ›'):('reálný '+(_ns?'':'Stripe ')+'net · klikni pro dashboard ›');})()+'</div></div>';
+  box.innerHTML='<div id="meNetHeroCard" style="background:linear-gradient(135deg,#0A7A4F,#005A3C);border-radius:16px;padding:15px 18px;margin-bottom:16px;cursor:pointer;color:#fff;box-shadow:0 2px 10px rgba(0,96,64,.18);"><div style="font-size:11.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">💰 '+(LANG==='en'?'Net collected':'Čistě vybráno')+' · '+(LANG==='en'?'this month':'tento měsíc')+'</div><div id="meNetHeroVal" style="font-size:30px;font-weight:800;line-height:1.05;margin:5px 0 3px;">…</div><div style="font-size:11px;opacity:.78;">'+(function(){var _ns=((typeof _mtlPayMode==='function'?_mtlPayMode(currentUser):currentUser.payment_mode)!=='stripe');return LANG==='en'?('real '+(_ns?'':'Stripe ')+'net · tap for dashboard ›'):('reálný '+(_ns?'':'Stripe ')+'net · klikni pro dashboard ›');})()+(function(){ var _md=(typeof _mtlPayMode==='function'?_mtlPayMode(currentUser):currentUser.payment_mode)||'stripe'; var _rr=_ladderRate(_md,{partner:currentUser.partner,score:currentUser.coach_ref_score,bankai:currentUser.bankai_eligible,founding:currentUser.founding}); var _pp=Math.round(_rr*1000)/10; var _ll=currentUser.partner?'⭐ Exclusive Partner':(currentUser.founding?'⭐ Founding Partner':''); return '<div style="margin-top:9px;padding-top:8px;border-top:1px solid rgba(255,255,255,.18);font-size:11px;font-weight:700;opacity:.95;">'+(_ll?(_ll+' · '):'')+(LANG==='en'?'MTL fee ':'Provize MTL ')+_pp+'%</div>'; })()+'</div></div>';
   const card=$('meNetHeroCard'); if(card) card.onclick=()=>openFullDash();
   try{
     const nn=await loadMyNet();
