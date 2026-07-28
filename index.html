@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SGQ cohort roster polish. (1) 'Co zaplatil' now FALLS BACK to the member's paid_amount when the cohort_payments log is empty: if _cohMemberPayments finds no rows, it looks the member up in window._crMembers and, if paid_amount>0, shows a 'Zaloha: {amount}' line + 'Z evidence clena (bez detailniho logu)'. This makes it show the real deposit even when the detailed payment log is missing (e.g. stripe-webhook.js not deployed, or a deposit reached without a logged payment). (2) LEADS separated: the main committed list now excludes status==='lead'; a new 'Odeslali prihlasku . cekaji na zalohu (N)' section (dashed cards, name + contact + red Remove) renders below the committed members, above the waitlist/cancelled sections. (3) Odebrat/Remove restyled BACK to red (border+color var(--red)) as before -- SGO had muted it to grey. NOTE on migration (Petr asked): member import (imported_members) stores the CSV phone AS-IS with no prefix normalization; downstream the unified prefix field handles prefix-less numbers on edit/claim. Could optionally prepend the club's country prefix to prefix-less imported numbers -- offered, not forced (source formats are unknown). Deploy: index.html only. -->
+<!-- MTL build: SGR fixed 'Co zaplatil' PROPERLY (root cause, no workaround). cohort_payments is RLS-subject on the browser client -- exactly like transactions, which the dashboard already reads via /api/gym-transactions (service role) for the same reason. The roster's 'Co zaplatil' was reading cohort_payments with the browser client, so it saw 0 rows even though the webhook (service role, stripe-webhook.js ~613) and the owner QR-confirm had written them. NEW endpoint /api/cohort-payments.js reads a member's cohort_payments via the SERVICE ROLE after verifying the caller's token AND that they own the cohort (gym_cohorts.owner_id); _cohMemberPayments now fetches from it with x-access-token. Removed the SGQ paid_amount fallback -- it now shows the real logged rows (deposit / first_month / month) or an honest empty state. MIGRATION phone normalization: member import (_impSave) now runs each imported phone through _normPhone(raw, clubCC) -- keeps a leading +, converts 00-international to +, and prepends the club's country prefix (derived from the owner's stripe/billing country, else +420) to bare local numbers (dropping a single national-trunk 0). So most imported numbers get a correct prefix and prefix-less ones are normalized to the club's country. Deploy: index.html + api/cohort-payments.js (NEW -- required for 'Co zaplatil'). -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3799,7 +3799,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SGQ';
+const MTL_BUILD='SGR';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -11726,16 +11726,10 @@ async function _cohMemberPayments(memberId, wrap){
   if(!wrap) return; const EN=LANG==='en';
   wrap.innerHTML='<div style="font-size:11px;color:var(--light);padding:6px 0;">'+(EN?'Loading...':'Na\u010d\u00edt\u00e1m...')+'</div>';
   let rows=[];
-  try{ const { data }=await supaClient.from('cohort_payments').select('kind,amount,currency,payment_method,status,created_at').eq('cohort_member_id',memberId).order('created_at',{ascending:true}); rows=(data||[]).filter(function(p){ return p.status!=='refunded'; }); }catch(e){}
-  if(!rows.length){
-    var _mm=(window._crMembers||[]).find(function(x){ return String(x.id)===String(memberId); })||{};
-    var _pa=Number(_mm.paid_amount||0);
-    if(_pa>0){ var _c=_mm.currency||'CZK'; var _s=(typeof _curSym==='function')?_curSym(_c):'';
-      wrap.innerHTML='<div style="display:flex;justify-content:space-between;font-size:12.5px;color:var(--dark);padding:6px 0;"><span>'+(EN?'Deposit':'Z\u00e1loha')+'</span><span style="font-weight:700;">'+fmtPrice(_pa,_c)+' '+_s+'</span></div>'
-        +'<div style="font-size:10px;color:var(--light);line-height:1.4;">'+(EN?'From the member record (no detailed payment log).':'Z evidence \u010dlena (bez detailn\u00edho logu plateb).')+'</div>';
-    } else { wrap.innerHTML='<div style="font-size:11px;color:var(--light);padding:6px 0;">'+(EN?'No payments recorded yet.':'Zat\u00edm \u017e\u00e1dn\u00e9 zaznamenan\u00e9 platby.')+'</div>'; }
-    return;
-  }
+  try{ var _s=await supaClient.auth.getSession(); var _tok=(_s&&_s.data&&_s.data.session&&_s.data.session.access_token)||'';
+    const r=await fetch('/api/cohort-payments?member='+encodeURIComponent(memberId), { headers:{ 'x-access-token':_tok } });
+    const j=await r.json(); rows=((j&&j.payments)||[]).filter(function(p){ return p.status!=='refunded'; }); }catch(e){}
+  if(!rows.length){ wrap.innerHTML='<div style="font-size:11px;color:var(--light);padding:6px 0;">'+(EN?'No payments recorded yet.':'Zat\u00edm \u017e\u00e1dn\u00e9 zaznamenan\u00e9 platby.')+'</div>'; return; }
   var _pmE={ stripe:'\ud83d\udcb3', qr:'\ud83d\udcf2', pis:'\ud83c\udfe6', cash:'\ud83d\udcb5' };
   var _cur=(rows[0]&&rows[0].currency)||'CZK'; var _sym=(typeof _curSym==='function'?_curSym(_cur):_cur); var _tot=0; var _mn=1;
   var _html=rows.map(function(p){
@@ -13267,15 +13261,27 @@ function _impRefreshPreview(){
   var pv=$('impPreview'); if(pv) pv.innerHTML='Nalezeno <b>'+rows.length+'</b> řádků, z toho <b>'+valid+'</b> s platným e-mailem (ty půjde pozvat).';
   var sb=$('impSave'); if(sb){ sb.style.display=valid>0?'block':'none'; sb.textContent='Uložit '+valid+' členů do importu'; }
 }
+function _normPhone(raw, defCC){
+  var v=String(raw==null?'':raw).trim(); if(!v) return null;
+  var d=v.replace(/[^\d+]/g,''); if(!d || d==='+') return null;
+  if(d.charAt(0)==='+') return d;
+  if(d.slice(0,2)==='00') return '+'+d.slice(2);
+  var cc=defCC||'+420';
+  if(d.charAt(0)==='0') d=d.slice(1);
+  return cc+' '+d;
+}
 async function _impSave(){
   var rows=window._impRows||[]; function ci(id){ var el=$(id); return el?parseInt(el.value):-1; }
   var ni=ci('impColName'), ei=ci('impColEmail'), pi=ci('impColPhone'), li=ci('impColPlan');
   if(ei<0){ toast('Vyber sloupec s e-mailem'); return; }
   try{ await checkGymOwnership(); }catch(e){}
   var g=window._myGymData; if(!g){ toast('Nemáš schválený gym'); return; }
+  var _cc=String((currentUser&&(currentUser.stripe_country||currentUser.billing_country||currentUser.country_code))||(g&&(g.billing_country||g.country_code))||'').toUpperCase();
+  var _ccMap={CZ:'+420',SK:'+421',PL:'+48',DE:'+49',AT:'+43',HU:'+36',GB:'+44',UK:'+44',US:'+1',FR:'+33',IT:'+39',ES:'+34',NL:'+31',CH:'+41',SE:'+46',NO:'+47',DK:'+45',UA:'+380',RO:'+40',IE:'+353',BE:'+32',GR:'+30',TR:'+90'};
+  var _clubCC=_ccMap[_cc]||'+420';
   var seen={}, recs=[];
   rows.forEach(function(r){ var em=((r[ei]||'').trim()).toLowerCase(); if(!em||em.indexOf('@')<1||seen[em]) return; seen[em]=1;
-    recs.push({ gym_id:g.id, name:ni>=0?((r[ni]||'').trim()||null):null, email:em, phone:pi>=0?((r[pi]||'').trim()||null):null, plan:li>=0?((r[li]||'').trim()||null):null, source:'csv', status:'pending' }); });
+    recs.push({ gym_id:g.id, name:ni>=0?((r[ni]||'').trim()||null):null, email:em, phone:pi>=0?_normPhone(r[pi], _clubCC):null, plan:li>=0?((r[li]||'').trim()||null):null, source:'csv', status:'pending' }); });
   if(!recs.length){ toast('Žádné platné řádky s e-mailem'); return; }
   var sb=$('impSave'); if(sb){ sb.disabled=true; sb.textContent='Ukládám…'; }
   try{
