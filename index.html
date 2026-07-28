@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SHF gym dashboard now counts COURSES + real root cause of the empty cohort_payments. ROOT CAUSE (not a Vercel deploy -- a DB migration): the webhook writes cohort_payments with payment_method + stripe_fee columns, which are added by cohort-payment-method.sql + cohort-stripe-fee.sql. If those migrations were never run in Supabase, the INSERT 400s on the missing column; sbPost does NOT throw (it console.errors and returns {ok:false}), the webhook ignored the result, and the very next line set deposit_paid -- so the member shows deposit_paid while cohort_payments stays empty (endpoint then falls back to paid_amount). Fixes: (1) stripe-webhook.js now checks the cohort_payments insert result and retries with core columns if the full write fails, so the payment logs even without the migrations. (2) GYM DASHBOARD included COURSES everywhere it was excluded: _heroNet now adds cohNetL (Cistě vybráno was dropNetL+memNetL+evNetL+merchNetL only -> course revenue invisible); both per-month net filters now include type==='course'; and a new 'Kurzy' category card (Gross/MTL fee/Stripe fee/Net) renders when cohGrossL>0, mirroring the Events card. STILL OPEN: openCohortDash 'Trzby' reads cohort_payments via the browser client (RLS-blocked) -> route it through the service-role endpoint next. ACTION FOR PETR: run cohort-payment-method.sql + cohort-stripe-fee.sql in Supabase. Deploy: index.html + api/stripe-webhook.js. -->
+<!-- MTL build: SHG course-detail 'Trzby' now reads via the service-role endpoint (RLS-safe). api/cohort-payments.js gained a ?cohort=<id> mode: it verifies the caller owns the cohort (owner_id or gym owner) and returns ALL that cohort's cohort_payments rows (cohort_member_id,kind,amount,currency,payment_method,mtl_fee,stripe_fee,status,created_at). openCohortDash used to read cohort_payments through the browser client (RLS-blocked -> pays=[] -> Trzby 0); it now fetches /api/cohort-payments?cohort=<id> with x-access-token. After the two SQL migrations land (so the webhook actually writes cohort_payments), the course-detail Trzby + the roster 'Co zaplatil' detailed rows will populate. Deploy: index.html + api/cohort-payments.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3800,7 +3800,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SHF';
+const MTL_BUILD='SHG';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -11598,7 +11598,10 @@ async function openCohortDash(cohortId, cohortName){
 
   let coh=null, pays=[], members=[];
   try{ const { data }=await supaClient.from('gym_cohorts').select('id,name,currency,ad_spend,months,stripe_account').eq('id',cohortId).single(); coh=data; }catch(e){}
-  try{ const { data }=await supaClient.from('cohort_payments').select('amount,mtl_fee,stripe_fee,currency,payment_method,kind,status').eq('cohort_id',cohortId); pays=(data||[]).filter(function(p){ return p.status!=='refunded'; }); }catch(e){}
+  try{ var _ps=await supaClient.auth.getSession(); var _pt=(_ps&&_ps.data&&_ps.data.session&&_ps.data.session.access_token)||'';
+    const _pr=await fetch('/api/cohort-payments?cohort='+encodeURIComponent(cohortId), { headers:{ 'x-access-token':_pt } });
+    if(_pr.ok){ const _pj=await _pr.json(); pays=((_pj&&_pj.payments)||[]).filter(function(p){ return p.status!=='refunded'; }); }
+  }catch(e){}
   try{ const { data }=await supaClient.from('cohort_members').select('status,attribution').eq('cohort_id',cohortId); members=data||[]; }catch(e){}
   const cur=(coh&&coh.currency)||'CZK';
   const box=document.getElementById('cdBody'); if(!box) return;
