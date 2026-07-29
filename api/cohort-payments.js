@@ -58,11 +58,13 @@ export default async function handler(req, res) {
 
     // 3) read payments via the service role (bypasses RLS): whole cohort in cohort mode, else one member
     const _filter = cohortQ ? `cohort_id=eq.${encodeURIComponent(cohortId)}` : `cohort_member_id=eq.${encodeURIComponent(memberId)}`;
-    const pres = await fetch(
-      `${SB}/rest/v1/cohort_payments?${_filter}` +
-      `&select=cohort_member_id,kind,amount,currency,payment_method,mtl_fee,stripe_fee,status,created_at&order=created_at.asc`,
-      { headers: svc }
-    );
+    // Select the CORE columns first (always present). stripe_fee + payment_method are migration-added
+    // and may be absent; asking for them makes the whole select 400 -> empty Trzby. So try them, and
+    // if that 400s, retry with just the core columns. cohort_payments is keyed by cohort_id, so this
+    // is the source of truth for BOTH app and accountless members (name/email live on the member row).
+    const _coreSel = 'cohort_member_id,kind,amount,currency,mtl_fee,status,created_at';
+    let pres = await fetch(`${SB}/rest/v1/cohort_payments?${_filter}&select=${_coreSel},payment_method,stripe_fee&order=created_at.asc`, { headers: svc });
+    if (!pres.ok) pres = await fetch(`${SB}/rest/v1/cohort_payments?${_filter}&select=${_coreSel}&order=created_at.asc`, { headers: svc });
     let payments = pres.ok ? await pres.json() : [];
 
     // Fallback for cohort mode: if cohort_payments has no rows yet, derive the cohort's revenue from the
