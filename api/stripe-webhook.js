@@ -634,7 +634,7 @@ export default async function handler(req, res) {
           // NOTE follow-up: ambassador 0.5% on cohort deposits not wired yet (needs mtl_disc/mtl_base in metadata).
           try {
             const coh = cohId ? ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=owner_id,name,gym_id,deposit_amount,price_student,price_regular,currency,start_date,gym_meta_pixel,capi_token`)) || [])[0] : null;
-            const mem = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=name,email,tier,fbp,fbc`)) || [])[0];
+            const mem = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=name,email,tier,fbp,fbc,student_id`)) || [])[0];
             if (coh && coh.owner_id) await sbPost('notifications', { user_id: coh.owner_id, type: 'system', read: false, data: JSON.stringify({ kind: 'cohort_deposit_paid', cohort_id: cohId || null, cohort_member_id: cmId || null, cohort_name: coh.name || '' }), message: '\uD83D\uDCDA Nov\u00FD zaplacen\u00FD z\u00E1pis do kurzu' + (coh.name ? (' "' + coh.name + '"') : '') + '.' });
             // In-app notification to the student too (match the accountless member by e-mail to a profile).
             try {
@@ -644,7 +644,7 @@ export default async function handler(req, res) {
                 if (_sid) await sbPost('notifications', { user_id: _sid, type: 'system', read: false, data: JSON.stringify({ kind: 'cohort_deposit_mine', cohort_id: cohId || null, cohort_member_id: cmId || null, cohort_name: coh.name || '' }), message: '\u2705 Z\u00E1loha za kurz' + (coh.name ? (' "' + coh.name + '"') : '') + ' p\u0159ijata. M\u00EDsto m\u00E1\u0161 rezervovan\u00E9.' });
               }
             } catch (e) { console.error('cohort student notif', e.message); }
-            if (mem && mem.email && coh) {
+            if (mem && mem.email && coh && !mem.student_id) {  // app users get the doklad in-app, no e-mail
               let gymName = ''; let gymRec = null;
               try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(coh.gym_id)}&select=name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_address`); gymRec = (g && g[0]) || null; gymName = (gymRec && gymRec.name) || ''; } catch (e) {}
               let ownerEmail = '';
