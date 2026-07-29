@@ -175,7 +175,13 @@ export default async function handler(req, res) {
       await sb('commission_doklady', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify(body) });
       issued++;
       if (ownerId) { try { await notify(ownerId, 'doklad_unified', `Doklad MTL provize za ${period} (${(data.total / 100).toFixed(2)} ${cur.toUpperCase()}) je připraven.`, { period, currency: cur }); } catch (e) {} }
-      try { const pr = await sb(`profiles?id=eq.${ownerId}&select=email&limit=1`); const em = pr && pr[0] && pr[0].email;
+      try {
+        // Route the commission invoice to the RIGHT billing e-mail: a gym's on gyms.invoice_email,
+        // a coach's on profiles.invoice_email (they can differ). Fall back to the owner's account e-mail.
+        let em = null;
+        if (kind === 'gym') { const gr = await sb(`gyms?id=eq.${entityId}&select=invoice_email&limit=1`); em = (gr && gr[0] && gr[0].invoice_email) || null; }
+        else { const pr = await sb(`profiles?id=eq.${ownerId}&select=invoice_email&limit=1`); em = (pr && pr[0] && pr[0].invoice_email) || null; }
+        if (!em && ownerId) { const pr2 = await sb(`profiles?id=eq.${ownerId}&select=email&limit=1`); em = pr2 && pr2[0] && pr2[0].email; }
         if (em) await sendEmail(em, `Doklad MTL provize — ${period}`, dokladHtml(ME, buyer, kind, period, cur, data, TEST)); } catch (e) {}
     }
 
