@@ -155,7 +155,7 @@ export default async function handler(req, res) {
   if (!SB || !KEY) return res.status(500).json({ error: 'env not set' });
   try {
     const b = (typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body) || {};
-    const { token, gym_id, coach_id, member_id, gross_amount, currency, type, payment_method, cash_payer_name, acq_source, credit, source_booking_id } = b;
+    const { token, gym_id, coach_id, member_id, gross_amount, currency, type, payment_method, cash_payer_name, acq_source, credit, source_booking_id, cohort_id, income_class } = b;
     // trusted internal call (PIS server-side confirm) — reuses ALL the commission logic, no user token
     const _trusted = !!(b.internal && b.intSecret && process.env.PIS_INTERNAL_SECRET && b.intSecret === process.env.PIS_INTERNAL_SECRET);
     const provider = b.provider === 'coach' ? 'coach' : 'gym';
@@ -206,7 +206,7 @@ export default async function handler(req, res) {
         gym_id, coach_id: coach_id || null, member_id: member_id || null, paid_to: 'gym', payee_account: _gymPayee,
         payee_id: gym.id, payee_kind: 'gym',   // the entity that owns welcome_free_until
         gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, refund_amount: 0, mtl_fee_refunded: 0,
-        currency: cur, type, status: 'completed', payment_method,
+        currency: cur, type, status: 'completed', payment_method, cohort_id: cohort_id || null, income_class: income_class || null,
         commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct', source_booking_id: source_booking_id || null,
       };
@@ -230,7 +230,7 @@ export default async function handler(req, res) {
         gym_id: null, coach_id, member_id: member_id || null, paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null),
         payee_id: coach.id, payee_kind: 'profile',   // the entity that owns welcome_free_until
         gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, refund_amount: 0, mtl_fee_refunded: 0,
-        currency: cur, type, status: 'completed', payment_method,
+        currency: cur, type, status: 'completed', payment_method, cohort_id: cohort_id || null, income_class: income_class || null,
         commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct', source_booking_id: source_booking_id || null,
       };

@@ -684,7 +684,7 @@ export default async function handler(req, res) {
           try {
             const _cg = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=gym_id`)) || [])[0];
             const _cm = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=student_id`)) || [])[0];
-            await recordTransaction(event.account, pi, { type: 'course', member_id: (_cm && _cm.student_id) || null, gym_id: (_cg && _cg.gym_id) || null, income_class: 'cohort_first_month' });
+            await recordTransaction(event.account, pi, { type: 'course', member_id: (_cm && _cm.student_id) || null, gym_id: (_cg && _cg.gym_id) || null, income_class: 'cohort_first_month', cohort_id: (m.cohort_id || null) });
           } catch (e) { console.error('cohort first_month tx', e.message); }
           try { const _cd2 = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=discipline`)) || [])[0]; if (_cd2 && _cd2.discipline) await payGymAmbassador(_cd2.discipline, amount, cur, s.id, pi); } catch (e) { console.error('cohort amb firstmonth', e.message); }
         }
@@ -710,7 +710,7 @@ export default async function handler(req, res) {
           try {
             const _cg = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=gym_id`)) || [])[0];
             const _cm = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=student_id`)) || [])[0];
-            await recordTransaction(event.account, pi, { type: 'course', member_id: (_cm && _cm.student_id) || null, gym_id: (_cg && _cg.gym_id) || null, income_class: 'cohort_month' });
+            await recordTransaction(event.account, pi, { type: 'course', member_id: (_cm && _cm.student_id) || null, gym_id: (_cg && _cg.gym_id) || null, income_class: 'cohort_month', cohort_id: (m.cohort_id || null) });
           } catch (e) { console.error('cohort month tx', e.message); }
           try { const _cd3 = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=discipline`)) || [])[0]; if (_cd3 && _cd3.discipline) await payGymAmbassador(_cd3.discipline, amount, cur, s.id, pi); } catch (e) { console.error('cohort amb month', e.message); }
         }

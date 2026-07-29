@@ -58,37 +58,30 @@ export default async function handler(req, res) {
 
     // 3) read payments via the service role (bypasses RLS): whole cohort in cohort mode, else one member
     const _filter = cohortQ ? `cohort_id=eq.${encodeURIComponent(cohortId)}` : `cohort_member_id=eq.${encodeURIComponent(memberId)}`;
-    // Select the CORE columns first (always present). stripe_fee + payment_method are migration-added
-    // and may be absent; asking for them makes the whole select 400 -> empty Trzby. So try them, and
-    // if that 400s, retry with just the core columns. cohort_payments is keyed by cohort_id, so this
-    // is the source of truth for BOTH app and accountless members (name/email live on the member row).
-    const _coreSel = 'cohort_member_id,kind,amount,currency,mtl_fee,status,created_at';
-    let pres = await fetch(`${SB}/rest/v1/cohort_payments?${_filter}&select=${_coreSel},payment_method,stripe_fee&order=created_at.asc`, { headers: svc });
-    if (!pres.ok) pres = await fetch(`${SB}/rest/v1/cohort_payments?${_filter}&select=${_coreSel}&order=created_at.asc`, { headers: svc });
-    let payments = pres.ok ? await pres.json() : [];
-
-    // Fallback for cohort mode: if cohort_payments has no rows yet, derive the cohort's revenue from the
-    // REAL transactions rows (recordTransaction stored the true gross/mtl/stripe fee). Link via the
-    // members' student_ids. Amounts in transactions are in minor units (x100), so normalise to match.
-    if (cohortQ && (!payments || !payments.length)) {
-      try {
-        // Link via transactions.cohort_id (written by recordTransaction). Same reliable source the club
-        // dashboard reads, and works for BOTH app and accountless members (a non-app deposit has
-        // member_id NULL but still carries cohort_id).
-        const txres = await fetch(`${SB}/rest/v1/transactions?type=eq.course&cohort_id=eq.${encodeURIComponent(cohortId)}&select=member_id,gross_amount,mtl_fee,stripe_fee,net_amount,currency,income_class,created_at&order=created_at.asc`, { headers: svc });
-        let txRows = txres.ok ? await txres.json() : [];
-        payments = txRows.map(t => ({
-          cohort_member_id: null,
-          kind: (t.income_class === 'cohort_first_month' ? 'first_month' : (t.income_class === 'cohort_month' ? 'month' : 'deposit')),
-          amount: (Number(t.gross_amount || 0) / 100),
-          currency: t.currency,
-          payment_method: 'stripe',
-          mtl_fee: (Number(t.mtl_fee || 0) / 100),
-          stripe_fee: (Number(t.stripe_fee || 0) / 100),
-          status: 'paid',
-          created_at: t.created_at,
-        }));
-      } catch (e) { /* leave payments empty */ }
+    let payments = [];
+    if (cohortQ) {
+      // COHORT mode (dashboard Trzby): transactions are the reliable per-cohort source -- they always
+      // carry the REAL payment_method, income_class and fees (unlike cohort_payments, whose extra
+      // columns may be absent). recordTransaction (Stripe) and record-cash (cash) both stamp cohort_id.
+      const txres = await fetch(`${SB}/rest/v1/transactions?type=eq.course&cohort_id=eq.${encodeURIComponent(cohortId)}&select=member_id,gross_amount,mtl_fee,stripe_fee,net_amount,currency,income_class,payment_method,created_at&order=created_at.asc`, { headers: svc });
+      const txRows = txres.ok ? await txres.json() : [];
+      payments = txRows.map(t => ({
+        cohort_member_id: null,
+        kind: (t.income_class === 'cohort_first_month' ? 'first_month' : (t.income_class === 'cohort_month' ? 'month' : 'deposit')),
+        amount: (Number(t.gross_amount || 0) / 100),
+        currency: t.currency,
+        payment_method: t.payment_method || 'stripe',
+        mtl_fee: (Number(t.mtl_fee || 0) / 100),
+        stripe_fee: (Number(t.stripe_fee || 0) / 100),
+        status: 'paid',
+        created_at: t.created_at,
+      }));
+    } else {
+      // MEMBER mode ("Co zaplatil"): per-member breakdown from cohort_payments (keyed by cohort_member_id).
+      const _coreSel = 'cohort_member_id,kind,amount,currency,mtl_fee,status,created_at';
+      let pres = await fetch(`${SB}/rest/v1/cohort_payments?${_filter}&select=${_coreSel},payment_method,stripe_fee&order=created_at.asc`, { headers: svc });
+      if (!pres.ok) pres = await fetch(`${SB}/rest/v1/cohort_payments?${_filter}&select=${_coreSel}&order=created_at.asc`, { headers: svc });
+      payments = pres.ok ? await pres.json() : [];
     }
 
     return res.status(200).json({ ok: true, payments: Array.isArray(payments) ? payments : [], paid_amount: member ? (member.paid_amount || 0) : 0, status: member ? member.status : null, currency: (crows && crows[0] && crows[0].currency) || null });
