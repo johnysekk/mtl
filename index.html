@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SHU roster month-collection buttons now sit side-by-side (flex row, flex:1 each) matching the deposit stage: Vybrat N. mesic + Hotovost in one row instead of stacked full-width. Deploy: index.html. -->
+<!-- MTL build: SHV month-button labels + Co zaplatil deposit reconstruction. (1) Month buttons now read 'Vybrat N. mesic kartou' (Stripe) / 'QR platbou' (qr_bank) and 'Vybrat N. mesic v hotovosti', smaller font + line-wrap so both fit side-by-side. (2) 'Co zaplatil' (_cohMemberPayments) showed only the cash first-month row because the deposit's cohort_payments row was missing (deposit paid before the table had columns). It now reconstructs a synthetic 'Zaloha' line = paid_amount - sum(logged rows) when no deposit row exists, so both the deposit and the month remainder show. Also _cohRemainderCash now backfills a real deposit row (from the member's pre-remainder paid_amount) before writing the first-month row, so future breakdowns are correct at the source. Deploy: index.html (+ cohort-payments-columns.sql in Supabase). -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3803,7 +3803,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SHU';
+const MTL_BUILD='SHV';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -7923,6 +7923,12 @@ async function _cohRemainderCash(memberId){
   if(_multi) _upd.months_paid = Math.max(1, Number(m.months_paid||0));   // the remainder completes the FIRST month
   try{ await supaClient.from('cohort_members').update(_upd).eq('id',memberId); }catch(e){}
   // Breakdown row so "Co zaplatil" shows deposit + first-month remainder separately (best-effort; RLS/columns permitting).
+  // If no deposit row exists yet (e.g. the deposit was paid before cohort_payments had these columns),
+  // backfill it from what the member had already paid = the deposit, so "Co zaplatil" shows both lines.
+  try{ var _depQ=await supaClient.from('cohort_payments').select('id').eq('cohort_member_id',memberId).eq('kind','deposit');
+    if((!_depQ.data||!_depQ.data.length) && Number(m.paid_amount||0)>0){
+      await supaClient.from('cohort_payments').insert({ cohort_member_id:memberId, cohort_id:coh.id, kind:'deposit', amount:Number(m.paid_amount||0), currency:cur, status:'paid' });
+    } }catch(e){}
   try{ await supaClient.from('cohort_payments').insert({ cohort_member_id:memberId, cohort_id:coh.id, kind:(_multi?'first_month':'deposit'), amount:remainder, currency:cur, payment_method:'cash', status:'paid' }); }catch(e){}
   toast((EN?'\u2705 Enrolled \u00b7 cash remainder recorded':'\u2705 Zaps\u00e1n \u00b7 doplatek hotov\u011b zaznamen\u00e1n'),1);
   _cohRosterRender();
@@ -11847,6 +11853,13 @@ async function _cohMemberPayments(memberId, wrap){
     return;
   }
   var _pmE={ stripe:'\ud83d\udcb3', qr:'\ud83d\udcf2', pis:'\ud83c\udfe6', cash:'\ud83d\udcb5' };
+  // Reconstruct a missing deposit line: if there are month rows but no 'deposit' row and the member
+  // has paid more than those rows sum to, the difference is the (unlogged) deposit -> show it.
+  try{ var _hasDep=rows.some(function(p){ return p.kind==='deposit'; });
+    var _sumR=rows.reduce(function(a,p){ return a+Number(p.amount||0); },0);
+    var _paX=Number(window._cohLastPA||0);
+    if(!_hasDep && (_paX-_sumR)>0.5){ rows=[{ kind:'deposit', amount:Math.round((_paX-_sumR)*100)/100, currency:(rows[0]&&rows[0].currency)||window._cohLastCur||'CZK', payment_method:null, status:'paid' }].concat(rows); }
+  }catch(e){}
   var _cur=(rows[0]&&rows[0].currency)||'CZK'; var _sym=(typeof _curSym==='function'?_curSym(_cur):_cur); var _tot=0; var _mn=1;
   var _html=rows.map(function(p){
     var lbl; if(p.kind==='deposit'){ lbl=(EN?'Deposit':'Z\u00e1loha'); } else if(p.kind==='first_month'){ lbl=(EN?'Month 1 (remainder)':'1. m\u011bs\u00edc (doplatek)'); } else if(p.kind==='month'){ _mn++; lbl=(EN?('Month '+_mn):(_mn+'. m\u011bs\u00edc')); } else { lbl=(p.kind||''); }
@@ -11941,7 +11954,7 @@ async function _cohRosterRender(){
       let _mo='';
       if(_cohMonths>1){ _mo='<div style="font-size:11px;color:var(--mid);margin-top:8px;">'+(EN?'Months paid: ':'Zaplaceno m\u011bs\u00edc\u016f: ')+'<b style="color:var(--dark);">'+_mp+'/'+_cohMonths+'</b></div>'; }
       let _collectBtn='';
-      if(_cohMonths>1 && _mp<_cohMonths){ _collectBtn='<div style="display:flex;gap:6px;margin-top:6px;">'+'<button class="crMonthBtn" data-id="'+m.id+'" data-name="'+((m.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;padding:9px 6px;background:var(--dark);color:#fff;border:none;border-radius:9px;font-size:12px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?('Collect month '+(_mp+1)):('Vybrat '+(_mp+1)+'. m\u011bs\u00edc'))+'</button>'+((window._crPayMode!=='qr_bank')?'<button class="crMonthCashBtn" data-id="'+m.id+'" data-name="'+((m.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;padding:9px 6px;background:#0A7A3D;color:#fff;border:none;border-radius:9px;font-size:12px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">\ud83d\udcb5 '+(EN?'Cash':'Hotovost')+'</button>':'')+'</div>'; }
+      if(_cohMonths>1 && _mp<_cohMonths){ _collectBtn='<div style="display:flex;gap:6px;margin-top:6px;">'+'<button class="crMonthBtn" data-id="'+m.id+'" data-name="'+((m.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;padding:9px 6px;background:var(--dark);color:#fff;border:none;border-radius:9px;font-size:11.5px;line-height:1.25;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?('Month '+(_mp+1)+(window._crPayMode==='qr_bank'?' by QR':' by card')):('Vybrat '+(_mp+1)+'. m\u011bs\u00edc '+(window._crPayMode==='qr_bank'?'QR platbou':'kartou')))+'</button>'+((window._crPayMode!=='qr_bank')?'<button class="crMonthCashBtn" data-id="'+m.id+'" data-name="'+((m.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;padding:9px 6px;background:#0A7A3D;color:#fff;border:none;border-radius:9px;font-size:11.5px;line-height:1.25;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?('Month '+(_mp+1)+' cash'):('Vybrat '+(_mp+1)+'. m\u011bs\u00edc v hotovosti'))+'</button>':'')+'</div>'; }
       actions='<div style="margin-top:8px;">'+_mo+_collectBtn+'</div>';
     }
     return '<div class="crMemberCard" data-search="'+(((m.name||'')+' '+(m.email||'')).toLowerCase().replace(/"/g,'&quot;'))+'" style="border:1px solid var(--border);border-radius:11px;padding:9px 11px;margin-bottom:6px;"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div style="min-width:0;"><div style="font-size:14px;font-weight:700;">'+((m.name||'?')+'').replace(/</g,'&lt;')+' <span style="font-size:10px;color:var(--light);font-weight:500;">'+(m.tier==='student'?'student':(EN?'regular':'ostatn\u00ed'))+'</span></div><div style="font-size:11px;color:var(--mid);word-break:break-all;">'+((m.email||'')+'').replace(/</g,'&lt;')+(m.phone?(' \u00b7 '+m.phone):'')+'</div></div><span style="font-size:10px;font-weight:700;color:'+(stC[m.status]||'#999')+';text-transform:uppercase;white-space:nowrap;">'+(stL[m.status]||m.status)+'</span></div>'+'<details class="crMore" style="margin-top:6px;"><summary style="cursor:pointer;list-style:none;font-size:12px;font-weight:700;color:var(--mid);padding:5px 0;">'+(EN?'Options':'Mo\u017enosti')+' \u25be</summary>'+actions+'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:10px;">'+(( ['deposit_paid','enrolled','completed','converted'].indexOf(m.status)>=0 || Number(m.paid_amount||0)>0 )?('<button class="crPayToggle" data-id="'+m.id+'" style="background:none;border:none;color:#635BFF;font-size:11.5px;font-weight:700;cursor:pointer;padding:0;font-family:inherit;display:inline-flex;align-items:center;gap:3px;">'+(EN?'What they paid':'Co zaplatil')+' \u25be</button>'):'<span></span>')+_rmLink(m)+'</div>'+(( ['deposit_paid','enrolled','completed','converted'].indexOf(m.status)>=0 || Number(m.paid_amount||0)>0 )?('<div class="crPayWrap" data-id="'+m.id+'" style="display:none;margin-top:8px;"></div>'):'')+'</details></div>';
