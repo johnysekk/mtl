@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SHX course-signup sheet close X + post-payment returns to the app. (1) The in-app course-signup sheet's .btn-close was empty (just the grey circle) -- the app's close buttons carry a literal U+2715; added it so the X shows. (2) After an app user pays the deposit, _cohThankYou's logged-in branch used to call openMyCourse(cm), which renders the PUBLIC cohort-public HTML schedule -- the 'html rozvrh' the user kept landing on. It now returns to the app on Upcoming > Courses (openSheet('shBookings') + _upTab('kurzy')); the webhook's cohort_deposit_mine notification deep-links there too, where the just-booked course is listed. Deploy: index.html. -->
+<!-- MTL build: SHZ course Trzby now read from TRANSACTIONS (reliable) instead of cohort_payments. Root of 'Ostatni' + 'Stripe 6x even for cash': the dash read cohort_payments, whose payment_method column may be absent (all -> stripe) and whose kind can be null (-> Ostatni); and record-cash never stamped cohort_id/income_class on the cash tx, so cash was invisible to a cohort_id read. Fixes: record-cash now stores cohort_id + income_class; _recordCashTx + _cohRemainderCash + _cohMonthCash pass them; the webhook's cohort_first_month/cohort_month recordTransaction calls now also set cohort_id (deposit already did). The ?cohort= endpoint now reads transactions by cohort_id as the PRIMARY source with the REAL payment_method (not hardcoded stripe) and income_class->kind; ?member= keeps cohort_payments. Roster cards tightened once more. CAVEAT: existing cash surcharges written before this have no cohort_id/income_class, so a clean test needs fresh payments. Deploy: index.html + api/cohort-payments.js + api/record-cash.js + api/stripe-webhook.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3803,7 +3803,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SHX';
+const MTL_BUILD='SHZ';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -7915,7 +7915,7 @@ async function _cohRemainderCash(memberId){
   if(!cardOk){ toast(EN?'\u26a0\ufe0f Set up a commission card first (Club \u2192 Payments \u2192 "I also take cash")':'\u26a0\ufe0f Nejd\u0159\u00edv nastav kartu na provizi (Klub \u2192 Platby \u2192 \u201ebr\u00e1t i hotovost\u201c)'); return; }
   const _ok = await _cohCashModal(remainder, cur);
   if(!_ok) return;
-  const res=await _recordCashTx({ provider:'gym', gym_id:coh.gym_id, member_id:m.student_id||null, gross_amount:Math.round(remainder*100), currency:cur, type:'course', payment_method:'cash', cohort_member_id:memberId });
+  const res=await _recordCashTx({ provider:'gym', gym_id:coh.gym_id, member_id:m.student_id||null, gross_amount:Math.round(remainder*100), currency:cur, type:'course', payment_method:'cash', cohort_member_id:memberId, cohort_id:coh.id, income_class:(_multi?'cohort_first_month':'cohort_deposit') });
   if(res.error){ toast('\u26a0\ufe0f '+res.error.message); return; }
   const _multi = Number(coh.months||1) > 1;
   const _newPaid = Math.round(((Number(m.paid_amount||0))+remainder)*100)/100;
@@ -7929,7 +7929,7 @@ async function _cohRemainderCash(memberId){
     if((!_depQ.data||!_depQ.data.length) && Number(m.paid_amount||0)>0){
       await supaClient.from('cohort_payments').insert({ cohort_member_id:memberId, cohort_id:coh.id, kind:'deposit', amount:Number(m.paid_amount||0), currency:cur, status:'paid' });
     } }catch(e){}
-  try{ await supaClient.from('cohort_payments').insert({ cohort_member_id:memberId, cohort_id:coh.id, kind:(_multi?'first_month':'deposit'), amount:remainder, currency:cur, payment_method:'cash', status:'paid' }); }catch(e){}
+  try{ await supaClient.from('cohort_payments').insert({ cohort_member_id:memberId, cohort_id:coh.id, kind:(_multi?'first_month':'deposit'), amount:remainder, currency:cur, payment_method:'cash', mtl_fee:(res.mtl_fee||0)/100, status:'paid' }); }catch(e){}
   toast((EN?'\u2705 Enrolled \u00b7 cash remainder recorded':'\u2705 Zaps\u00e1n \u00b7 doplatek hotov\u011b zaznamen\u00e1n'),1);
   _cohRosterRender();
 }
@@ -7950,12 +7950,12 @@ async function _cohMonthCash(memberId, memberName){
   if(!cardOk){ toast(EN?'\u26a0\ufe0f Set up a commission card first (Club \u2192 Payments)':'\u26a0\ufe0f Nejd\u0159\u00edv nastav kartu na provizi (Klub \u2192 Platby)'); return; }
   const _ok = await _cohCashModal(amount, cur);
   if(!_ok) return;
-  const res=await _recordCashTx({ provider:'gym', gym_id:coh.gym_id, member_id:m.student_id||null, gross_amount:Math.round(amount*100), currency:cur, type:'course', payment_method:'cash', cohort_member_id:memberId });
+  const res=await _recordCashTx({ provider:'gym', gym_id:coh.gym_id, member_id:m.student_id||null, gross_amount:Math.round(amount*100), currency:cur, type:'course', payment_method:'cash', cohort_member_id:memberId, cohort_id:coh.id, income_class:'cohort_month' });
   if(res.error){ toast('\u26a0\ufe0f '+res.error.message); return; }
   const _newMonths=Math.min(_total, _done+1);
   const _newPaid=Math.round(((Number(m.paid_amount||0))+amount)*100)/100;
   try{ await supaClient.from('cohort_members').update({ status:(_newMonths>=_total?'completed':'enrolled'), months_paid:_newMonths, paid_amount:_newPaid }).eq('id',memberId); }catch(e){}
-  try{ await supaClient.from('cohort_payments').insert({ cohort_member_id:memberId, cohort_id:coh.id, kind:'month', amount:amount, currency:cur, payment_method:'cash', status:'paid' }); }catch(e){}
+  try{ await supaClient.from('cohort_payments').insert({ cohort_member_id:memberId, cohort_id:coh.id, kind:'month', amount:amount, currency:cur, payment_method:'cash', mtl_fee:(res.mtl_fee||0)/100, status:'paid' }); }catch(e){}
   toast((EN?('\u2705 Month '+_newMonths+'/'+_total+' recorded'):('\u2705 M\u011bs\u00edc '+_newMonths+'/'+_total+' zaznamen\u00e1n')),1);
   _cohRosterRender();
 }
@@ -11689,11 +11689,11 @@ async function openCohortDash(cohortId, cohortName){
   const _isStripeMode=!!(coh && coh.stripe_account);
   const _hasStripe=stripeFee>0;
   const _mtlPct=(gross>0)?(Math.round(mtl/gross*1000)/10):0;
-  const byM={ stripe:{n:0,sum:0}, qr:{n:0,sum:0}, pis:{n:0,sum:0} };
-  pays.forEach(function(p){ const m=(p.payment_method==='qr'||p.payment_method==='pis')?p.payment_method:'stripe'; byM[m].n++; byM[m].sum+=Number(p.amount||0); });
+  const byM={ stripe:{n:0,sum:0}, qr:{n:0,sum:0}, pis:{n:0,sum:0}, cash:{n:0,sum:0} };
+  pays.forEach(function(p){ const m=(p.payment_method==='qr'||p.payment_method==='pis'||p.payment_method==='cash')?p.payment_method:'stripe'; byM[m].n++; byM[m].sum+=Number(p.amount||0); });
   const byK={ deposit:{n:0,sum:0,mtl:0}, month:{n:0,sum:0,mtl:0}, other:{n:0,sum:0,mtl:0} };
-  pays.forEach(function(p){ const k=(p.kind==='deposit'||p.kind==='month')?p.kind:'other'; byK[k].n++; byK[k].sum+=Number(p.amount||0); byK[k].mtl+=Number(p.mtl_fee||0); });
-  const mLabel={ stripe:'\ud83d\udcb3 Stripe', qr:(EN?'\ud83d\udcf2 QR payment':'\ud83d\udcf2 QR platba'), pis:(EN?'\ud83c\udfe6 Bank transfer':'\ud83c\udfe6 Bankovní převod') };
+  pays.forEach(function(p){ const k=(p.kind==='deposit')?'deposit':((p.kind==='month'||p.kind==='first_month')?'month':'other'); byK[k].n++; byK[k].sum+=Number(p.amount||0); byK[k].mtl+=Number(p.mtl_fee||0); });
+  const mLabel={ stripe:'\ud83d\udcb3 Stripe', qr:(EN?'\ud83d\udcf2 QR payment':'\ud83d\udcf2 QR platba'), cash:(EN?'\ud83d\udcb5 Cash':'\ud83d\udcb5 Hotovost'), pis:(EN?'\ud83c\udfe6 Bank transfer':'\ud83c\udfe6 Bankovní převod') };
 
   // per-cohort funnel + attribution
   const fn={ signups:0, paid:0, enrolled:0, converted:0 };
@@ -11725,7 +11725,7 @@ async function openCohortDash(cohortId, cohortName){
     if(byK.other.n) h+=row('\ud83e\uddfe '+(EN?'Other':'Ostatn\u00ed')+' <span style="color:var(--light);font-size:11px;">\u00b7 '+byK.other.n+'</span>', fmtPrice(byK.other.sum,cur)+' '+_curSym(cur));
   } else { h+='<div style="font-size:12px;color:var(--light);padding:8px 0 14px;">'+(EN?'No payments yet.':'Zat\u00edm \u017e\u00e1dn\u00e9 platby.')+'</div>'; }
   h+='<div style="font-size:11px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;">'+(EN?'By payment method':'Podle způsobu platby')+'</div>';
-  ['stripe','qr','pis'].forEach(function(k){ if(byM[k].n>0) h+=row(mLabel[k]+' <span style="color:var(--light);font-size:11px;">· '+byM[k].n+'×</span>', fmtPrice(byM[k].sum,cur)+' '+_curSym(cur)); });
+  ['stripe','qr','cash','pis'].forEach(function(k){ if(byM[k].n>0) h+=row(mLabel[k]+' <span style="color:var(--light);font-size:11px;">· '+byM[k].n+'×</span>', fmtPrice(byM[k].sum,cur)+' '+_curSym(cur)); });
   if(!pays.length) h+='<div style="font-size:12px;color:var(--light);padding:10px 0;">'+(EN?'No payments yet.':'Zatím žádné platby.')+'</div>';
 
   // this course's funnel
@@ -11959,7 +11959,7 @@ async function _cohRosterRender(){
       if(_cohMonths>1 && _mp<_cohMonths){ _collectBtn='<div style="display:flex;gap:6px;margin-top:6px;">'+'<button class="crMonthBtn" data-id="'+m.id+'" data-name="'+((m.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;padding:9px 6px;background:var(--dark);color:#fff;border:none;border-radius:9px;font-size:11.5px;line-height:1.25;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?('Month '+(_mp+1)+(window._crPayMode==='qr_bank'?' by QR':' by card')):('Vybrat '+(_mp+1)+'. m\u011bs\u00edc '+(window._crPayMode==='qr_bank'?'QR platbou':'kartou')))+'</button>'+((window._crPayMode!=='qr_bank')?'<button class="crMonthCashBtn" data-id="'+m.id+'" data-name="'+((m.name||'')+'').replace(/"/g,'&quot;')+'" style="flex:1;padding:9px 6px;background:#0A7A3D;color:#fff;border:none;border-radius:9px;font-size:11.5px;line-height:1.25;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?('Month '+(_mp+1)+' cash'):('Vybrat '+(_mp+1)+'. m\u011bs\u00edc v hotovosti'))+'</button>':'')+'</div>'; }
       actions='<div style="margin-top:8px;">'+_mo+_collectBtn+'</div>';
     }
-    return '<div class="crMemberCard" data-search="'+(((m.name||'')+' '+(m.email||'')).toLowerCase().replace(/"/g,'&quot;'))+'" style="border:1px solid var(--border);border-radius:10px;padding:6px 10px;margin-bottom:4px;"><div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div style="min-width:0;"><div style="font-size:13px;font-weight:700;line-height:1.2;">'+((m.name||'?')+'').replace(/</g,'&lt;')+' <span style="font-size:10px;color:var(--light);font-weight:500;">'+(m.tier==='student'?'student':(EN?'regular':'ostatn\u00ed'))+'</span></div><div style="font-size:11px;color:var(--mid);word-break:break-all;">'+((m.email||'')+'').replace(/</g,'&lt;')+(m.phone?(' \u00b7 '+m.phone):'')+'</div></div><span style="font-size:10px;font-weight:700;color:'+(stC[m.status]||'#999')+';text-transform:uppercase;white-space:nowrap;">'+(stL[m.status]||m.status)+'</span></div>'+'<details class="crMore" style="margin-top:6px;"><summary style="cursor:pointer;list-style:none;font-size:12px;font-weight:700;color:var(--mid);padding:3px 0;">'+(EN?'Options':'Mo\u017enosti')+' \u25be</summary>'+actions+'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:10px;">'+(( ['deposit_paid','enrolled','completed','converted'].indexOf(m.status)>=0 || Number(m.paid_amount||0)>0 )?('<button class="crPayToggle" data-id="'+m.id+'" style="background:none;border:none;color:#635BFF;font-size:11.5px;font-weight:700;cursor:pointer;padding:0;font-family:inherit;display:inline-flex;align-items:center;gap:3px;">'+(EN?'What they paid':'Co zaplatil')+' \u25be</button>'):'<span></span>')+_rmLink(m)+'</div>'+(( ['deposit_paid','enrolled','completed','converted'].indexOf(m.status)>=0 || Number(m.paid_amount||0)>0 )?('<div class="crPayWrap" data-id="'+m.id+'" style="display:none;margin-top:8px;"></div>'):'')+'</details></div>';
+    return '<div class="crMemberCard" data-search="'+(((m.name||'')+' '+(m.email||'')).toLowerCase().replace(/"/g,'&quot;'))+'" style="border:1px solid var(--border);border-radius:8px;padding:3px 8px;margin-bottom:2px;"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="min-width:0;"><div style="font-size:12px;font-weight:700;line-height:1.1;">'+((m.name||'?')+'').replace(/</g,'&lt;')+' <span style="font-size:10px;color:var(--light);font-weight:500;">'+(m.tier==='student'?'student':(EN?'regular':'ostatn\u00ed'))+'</span></div><div style="font-size:10px;color:var(--mid);word-break:break-all;line-height:1.15;">'+((m.email||'')+'').replace(/</g,'&lt;')+(m.phone?(' \u00b7 '+m.phone):'')+'</div></div><span style="font-size:10px;font-weight:700;color:'+(stC[m.status]||'#999')+';text-transform:uppercase;white-space:nowrap;">'+(stL[m.status]||m.status)+'</span></div>'+'<details class="crMore" style="margin-top:6px;"><summary style="cursor:pointer;list-style:none;font-size:12px;font-weight:700;color:var(--mid);padding:3px 0;">'+(EN?'Options':'Mo\u017enosti')+' \u25be</summary>'+actions+'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:10px;">'+(( ['deposit_paid','enrolled','completed','converted'].indexOf(m.status)>=0 || Number(m.paid_amount||0)>0 )?('<button class="crPayToggle" data-id="'+m.id+'" style="background:none;border:none;color:#635BFF;font-size:11.5px;font-weight:700;cursor:pointer;padding:0;font-family:inherit;display:inline-flex;align-items:center;gap:3px;">'+(EN?'What they paid':'Co zaplatil')+' \u25be</button>'):'<span></span>')+_rmLink(m)+'</div>'+(( ['deposit_paid','enrolled','completed','converted'].indexOf(m.status)>=0 || Number(m.paid_amount||0)>0 )?('<div class="crPayWrap" data-id="'+m.id+'" style="display:none;margin-top:8px;"></div>'):'')+'</details></div>';
   }).join('');
   if(!_paidN) html+='<p style="font-size:13px;color:var(--light);text-align:center;padding:20px;">'+(EN?'No paid deposits yet.':'Zat\u00edm \u017e\u00e1dn\u00e9 zaplacen\u00e9 z\u00e1lohy.')+'</p>';
   html+='</div><div id="crPaneLeads" class="crPane"'+(_tab==='leads'?'':' style="display:none;"')+'>';
@@ -15784,7 +15784,7 @@ async function _recordCashTx(row){
     const tok=await _freshTok(force);
     if(!tok) return { data:null, error:{ message:(LANG==='en'?'Not signed in':'Nejsi přihlášen'), _retriable:true } };
     let r;
-    try{ r=await fetch('/api/record-cash',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ token:tok, provider:row.provider||'gym', gym_id:row.gym_id, member_id:row.member_id, coach_id:row.coach_id, gross_amount:row.gross_amount, currency:row.currency, type:row.type, payment_method:row.payment_method, cash_payer_name:row.cash_payer_name, acq_source:row.acq_source, source_booking_id:row.source_booking_id, credit:row.credit }) }); }
+    try{ r=await fetch('/api/record-cash',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ token:tok, provider:row.provider||'gym', gym_id:row.gym_id, member_id:row.member_id, coach_id:row.coach_id, gross_amount:row.gross_amount, currency:row.currency, type:row.type, payment_method:row.payment_method, cash_payer_name:row.cash_payer_name, acq_source:row.acq_source, source_booking_id:row.source_booking_id, credit:row.credit, cohort_id:row.cohort_id, income_class:row.income_class }) }); }
     catch(e){ return { data:null, error:{ message:(e&&e.message)||'network', _retriable:true } }; }
     const j=await r.json().catch(function(){ return {}; });
     if(!r.ok) return { data:null, error:{ message:(j&&j.error)||('HTTP '+r.status), _retriable:(r.status===401||r.status===403||r.status===408||r.status>=500) } };
