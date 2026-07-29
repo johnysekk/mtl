@@ -282,7 +282,7 @@ export default async function handler(req, res) {
     let member;
     {
       const _lead = await sbGet(`cohort_members?cohort_id=eq.${encodeURIComponent(cohortId)}&email=eq.${encodeURIComponent(email)}&status=eq.lead&select=id&limit=1`);
-      const _leadFields = { name, phone: (b.phone || '').trim() || null, tier, attribution: _attr, consent_at: new Date().toISOString(), consent_version: (b.consent_version || null), fbp: (b.fbp || null), fbc: (b.fbc || null) };
+      const _leadFields = { name, phone: (b.phone || '').trim() || null, tier, attribution: _attr, student_id: b.student_id || null, consent_at: new Date().toISOString(), consent_version: (b.consent_version || null), fbp: (b.fbp || null), fbc: (b.fbc || null) };
       if (_lead && _lead.length) {
         await sbPatch('cohort_members', `id=eq.${encodeURIComponent(_lead[0].id)}`, _leadFields);
         member = { id: _lead[0].id };
