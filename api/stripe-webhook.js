@@ -627,7 +627,7 @@ export default async function handler(req, res) {
           try {
             const _cg = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=gym_id`)) || [])[0];
             const _cm = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=student_id`)) || [])[0];
-            await recordTransaction(event.account, pi, { type: 'course', member_id: (_cm && _cm.student_id) || null, gym_id: (_cg && _cg.gym_id) || null, income_class: 'cohort_deposit' });
+            await recordTransaction(event.account, pi, { type: 'course', member_id: (_cm && _cm.student_id) || null, gym_id: (_cg && _cg.gym_id) || null, income_class: 'cohort_deposit', plan: cohId || null });
           } catch (e) { console.error('cohort deposit tx', e.message); }
           try { const _cd = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=discipline`)) || [])[0]; if (_cd && _cd.discipline) await payGymAmbassador(_cd.discipline, amount, cur, s.id, pi); } catch (e) { console.error('cohort amb deposit', e.message); }
           // NOTE follow-up: ambassador 0.5% on cohort deposits not wired yet (needs mtl_disc/mtl_base in metadata).

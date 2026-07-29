@@ -72,15 +72,11 @@ export default async function handler(req, res) {
     // members' student_ids. Amounts in transactions are in minor units (x100), so normalise to match.
     if (cohortQ && (!payments || !payments.length)) {
       try {
-        const memres = await fetch(`${SB}/rest/v1/cohort_members?cohort_id=eq.${encodeURIComponent(cohortId)}&select=id,student_id,paid_amount,status`, { headers: svc });
-        const mem = memres.ok ? await memres.json() : [];
-        const sids = [...new Set(mem.map(m => m.student_id).filter(Boolean))];
-        let txRows = [];
-        if (sids.length) {
-          const inList = sids.map(encodeURIComponent).join(',');
-          const txres = await fetch(`${SB}/rest/v1/transactions?type=eq.course&member_id=in.(${inList})&select=member_id,gross_amount,mtl_fee,stripe_fee,net_amount,currency,income_class,created_at&order=created_at.asc`, { headers: svc });
-          txRows = txres.ok ? await txres.json() : [];
-        }
+        // Link via cohort_id stored in transactions.plan (recordTransaction). This is the SAME reliable
+        // source the club dashboard reads, and works for BOTH app and accountless members (a non-app
+        // deposit has member_id NULL but still carries the cohort_id in plan).
+        const txres = await fetch(`${SB}/rest/v1/transactions?type=eq.course&plan=eq.${encodeURIComponent(cohortId)}&select=member_id,gross_amount,mtl_fee,stripe_fee,net_amount,currency,income_class,created_at&order=created_at.asc`, { headers: svc });
+        let txRows = txres.ok ? await txres.json() : [];
         payments = txRows.map(t => ({
           cohort_member_id: null,
           kind: (t.income_class === 'cohort_first_month' ? 'first_month' : (t.income_class === 'cohort_month' ? 'month' : 'deposit')),
