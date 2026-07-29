@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SHP transactions.cohort_id (proper column, not the plan hack) + in-app course registration pre-fill. (1) recordTransaction now writes a real cohort_id column and the cohort deposit passes cohort_id; /api/cohort-payments ?cohort= reads transactions by cohort_id -- the same reliable source the club dashboard uses, so course Trzby works for app AND accountless members. REQUIRES the one-time SQL (add-cohort-id-to-transactions.sql) run in Supabase BEFORE deploying the webhook, else the tx insert 400s on the missing column. (2) In-app course signup (openCohortSignup) now pre-fills name/email/phone from the logged-in account with a 'check your details' header, so an app user gets the SAME registration form but pre-filled for review/edit, then the normal Stripe/QR/PIS redirect. After payment the club/student notifications fire; the student's cohort_deposit_mine notification already deep-links to Upcoming > Courses (SHO). Deploy: index.html + (SQL first) stripe-webhook.js + cohort-payments.js. -->
+<!-- MTL build: SHQ cash course-remainder flow fixes + app-user doklad e-mail suppression. (1) The cash 'Hotovost' remainder (_cohRemainderCash) now opens a modal: enter the amount RECEIVED from the student and it shows the CHANGE to return, instead of a bare confirm. (2) The success toast no longer prints the MTL commission -- just 'Zapsan / doplatek hotove zaznamenan'. (3) MONTH TRACKING: for a multi-month course the cash remainder now sets months_paid to at least 1 (it completes the FIRST month), so the roster shows the next month ('Vybrat 2. mesic') instead of staying on 'Vybrat 1. mesic', and status enrolled. It also inserts a cohort_payments row (kind first_month / deposit, payment_method cash) best-effort so 'Co zaplatil' can break down deposit + first-month remainder separately (RLS/columns permitting). Added  to the cohort select it reads. (4) The accountless doklad e-mail (webhook) is now SKIPPED when the cohort member has a student_id -- app users get the receipt in-app like any other purchase; accountless buyers still receive the PDF by e-mail. Deploy: index.html + stripe-webhook.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3800,7 +3800,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SHP';
+const MTL_BUILD='SHQ';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -7874,7 +7874,7 @@ async function _cohRemainderCash(memberId){
   const EN=LANG==='en';
   const m=(window._crMembers||[]).find(function(x){ return String(x.id)===String(memberId); }); if(!m) return;
   let coh=null;
-  try{ const { data } = await supaClient.from('gym_cohorts').select('id,gym_id,owner_id,deposit_amount,price_student,price_regular,price_tiers,currency').eq('id', window._crCohortId).single(); coh=data; }catch(e){}
+  try{ const { data } = await supaClient.from('gym_cohorts').select('id,gym_id,owner_id,deposit_amount,price_student,price_regular,price_tiers,currency,months').eq('id', window._crCohortId).single(); coh=data; }catch(e){}
   if(!coh || !coh.gym_id){ toast('\u26a0\ufe0f '+(EN?'Cohort not found':'Kurz nenalezen')); return; }
   const cur=coh.currency||'CZK';
   // The member's tier is the OFFER NAME. Resolve it from price_tiers (same rule as cohort-pay's
@@ -7889,12 +7889,35 @@ async function _cohRemainderCash(memberId){
   let cardOk=false;
   try{ const { data:g } = await supaClient.from('gyms').select('commission_card_status').eq('id',coh.gym_id).single(); cardOk=!!(g&&g.commission_card_status==='active'); }catch(e){}
   if(!cardOk){ toast(EN?'\u26a0\ufe0f Set up a commission card first (Club \u2192 Payments \u2192 "I also take cash")':'\u26a0\ufe0f Nejd\u0159\u00edv nastav kartu na provizi (Klub \u2192 Platby \u2192 \u201ebr\u00e1t i hotovost\u201c)'); return; }
-  if(!confirm((EN?'Record CASH remainder of ':'Zaznamenat HOTOVOSTN\u00cd doplatek ')+fmtPrice(remainder,cur)+(EN?(' and enroll '+(m.name||'this member')+'?'):(' a zapsat '+(m.name||'\u010dlena')+'?')))) return;
-  const res=await _recordCashTx({ provider:'gym', gym_id:coh.gym_id, member_id:m.student_id||null, gross_amount:Math.round(remainder*100), currency:cur, type:'course', payment_method:'cash', cash_payer_name:m.name||null, acq_source:m.attribution||'direct' });
+  // Cash modal: enter the amount RECEIVED and see the change to return.
+  const _ok = await new Promise(function(resolve){
+    var mv=document.createElement('div'); mv.style.cssText='position:fixed;inset:0;z-index:100002;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:20px;';
+    mv.innerHTML='<div style="background:#fff;border-radius:16px;padding:22px;max-width:360px;width:100%;box-sizing:border-box;">'
+      +'<div style="font-size:17px;font-weight:800;color:var(--dark);margin-bottom:4px;">'+(EN?'Cash remainder':'Hotovostn\u00ed doplatek')+'</div>'
+      +'<div style="font-size:13px;color:var(--mid);margin-bottom:16px;">'+(EN?'Due: ':'K doplacen\u00ed: ')+'<b>'+fmtPrice(remainder,cur)+'</b></div>'
+      +'<label style="font-size:12px;color:var(--mid);font-weight:600;">'+(EN?'Received from student':'Obdr\u017eeno od studenta')+'</label>'
+      +'<input id="_cashRcv" type="number" inputmode="decimal" value="'+Math.round(remainder)+'" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:10px;font-size:16px;margin:6px 0 10px;">'
+      +'<div id="_cashChange" style="font-size:15px;font-weight:800;color:var(--dark);margin-bottom:18px;"></div>'
+      +'<div style="display:flex;gap:8px;"><button id="_cashCancel" style="flex:1;padding:12px;background:#eee;border:none;border-radius:11px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Cancel':'Zru\u0161it')+'</button>'
+      +'<button id="_cashOk" style="flex:1;padding:12px;background:var(--red);color:#fff;border:none;border-radius:11px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Record':'Zaznamenat')+'</button></div></div>';
+    document.body.appendChild(mv);
+    var inp=mv.querySelector('#_cashRcv'), chg=mv.querySelector('#_cashChange');
+    function upd(){ var r=parseFloat(inp.value)||0; var d=Math.max(0, r-remainder); chg.textContent=(EN?'Change to return: ':'Vr\u00e1tit: ')+fmtPrice(d,cur); }
+    inp.oninput=upd; upd(); setTimeout(function(){ try{ inp.focus(); inp.select(); }catch(e){} },50);
+    mv.querySelector('#_cashCancel').onclick=function(){ mv.remove(); resolve(false); };
+    mv.querySelector('#_cashOk').onclick=function(){ mv.remove(); resolve(true); };
+  });
+  if(!_ok) return;
+  const res=await _recordCashTx({ provider:'gym', gym_id:coh.gym_id, member_id:m.student_id||null, gross_amount:Math.round(remainder*100), currency:cur, type:'course', payment_method:'cash', cohort_member_id:memberId });
   if(res.error){ toast('\u26a0\ufe0f '+res.error.message); return; }
-  try{ await supaClient.from('cohort_members').update({ status:'enrolled', paid_amount: Math.round(((Number(m.paid_amount||0))+remainder)*100)/100 }).eq('id',memberId); }catch(e){}
-  const fee=(res.mtl_fee||0)/100;
-  toast((EN?'\u2705 Enrolled \u00b7 cash remainder \u00b7 commission ':'\u2705 Zaps\u00e1n \u00b7 doplatek hotov\u011b \u00b7 provize ')+fmtPrice(fee,cur),1);
+  const _multi = Number(coh.months||1) > 1;
+  const _newPaid = Math.round(((Number(m.paid_amount||0))+remainder)*100)/100;
+  const _upd = { status:'enrolled', paid_amount:_newPaid };
+  if(_multi) _upd.months_paid = Math.max(1, Number(m.months_paid||0));   // the remainder completes the FIRST month
+  try{ await supaClient.from('cohort_members').update(_upd).eq('id',memberId); }catch(e){}
+  // Breakdown row so "Co zaplatil" shows deposit + first-month remainder separately (best-effort; RLS/columns permitting).
+  try{ await supaClient.from('cohort_payments').insert({ cohort_member_id:memberId, cohort_id:coh.id, kind:(_multi?'first_month':'deposit'), amount:remainder, currency:cur, payment_method:'cash', status:'paid' }); }catch(e){}
+  toast((EN?'\u2705 Enrolled \u00b7 cash remainder recorded':'\u2705 Zaps\u00e1n \u00b7 doplatek hotov\u011b zaznamen\u00e1n'),1);
   _cohRosterRender();
 }
 
