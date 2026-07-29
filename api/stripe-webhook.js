@@ -414,6 +414,7 @@ async function recordTransaction(acct, pi, fields) {
       member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null,
       gross_amount: gross, stripe_fee: stripeFee, mtl_fee: (((fields.welcome_waived||0)>0 && (mtlFee===0||mtlFee==null)) ? (fields.welcome_waived||0) : mtlFee), mtl_rate: ((gross>0 && ((((fields.welcome_waived||0)>0 && (mtlFee===0||mtlFee==null)) ? (fields.welcome_waived||0) : mtlFee))>0) ? Math.round(((((((fields.welcome_waived||0)>0 && (mtlFee===0||mtlFee==null)) ? (fields.welcome_waived||0) : mtlFee))/gross))*10000)/10000 : 0), mtl_fee_refunded: ((fields.welcome_waived||0)>0 ? (fields.welcome_waived||0) : 0), net_amount: net, currency,
       income_class: fields.income_class || null,
+      cohort_id: fields.cohort_id || null,
       payment_method: 'stripe', commission_status: 'collected', commission_month: new Date().toISOString().slice(0,7),
       status: 'paid', created_at: new Date().toISOString(),
     });
@@ -627,7 +628,7 @@ export default async function handler(req, res) {
           try {
             const _cg = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=gym_id`)) || [])[0];
             const _cm = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=student_id`)) || [])[0];
-            await recordTransaction(event.account, pi, { type: 'course', member_id: (_cm && _cm.student_id) || null, gym_id: (_cg && _cg.gym_id) || null, income_class: 'cohort_deposit', plan: cohId || null });
+            await recordTransaction(event.account, pi, { type: 'course', member_id: (_cm && _cm.student_id) || null, gym_id: (_cg && _cg.gym_id) || null, income_class: 'cohort_deposit', cohort_id: cohId || null });
           } catch (e) { console.error('cohort deposit tx', e.message); }
           try { const _cd = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=discipline`)) || [])[0]; if (_cd && _cd.discipline) await payGymAmbassador(_cd.discipline, amount, cur, s.id, pi); } catch (e) { console.error('cohort amb deposit', e.message); }
           // NOTE follow-up: ambassador 0.5% on cohort deposits not wired yet (needs mtl_disc/mtl_base in metadata).

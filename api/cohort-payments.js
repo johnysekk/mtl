@@ -72,10 +72,10 @@ export default async function handler(req, res) {
     // members' student_ids. Amounts in transactions are in minor units (x100), so normalise to match.
     if (cohortQ && (!payments || !payments.length)) {
       try {
-        // Link via cohort_id stored in transactions.plan (recordTransaction). This is the SAME reliable
-        // source the club dashboard reads, and works for BOTH app and accountless members (a non-app
-        // deposit has member_id NULL but still carries the cohort_id in plan).
-        const txres = await fetch(`${SB}/rest/v1/transactions?type=eq.course&plan=eq.${encodeURIComponent(cohortId)}&select=member_id,gross_amount,mtl_fee,stripe_fee,net_amount,currency,income_class,created_at&order=created_at.asc`, { headers: svc });
+        // Link via transactions.cohort_id (written by recordTransaction). Same reliable source the club
+        // dashboard reads, and works for BOTH app and accountless members (a non-app deposit has
+        // member_id NULL but still carries cohort_id).
+        const txres = await fetch(`${SB}/rest/v1/transactions?type=eq.course&cohort_id=eq.${encodeURIComponent(cohortId)}&select=member_id,gross_amount,mtl_fee,stripe_fee,net_amount,currency,income_class,created_at&order=created_at.asc`, { headers: svc });
         let txRows = txres.ok ? await txres.json() : [];
         payments = txRows.map(t => ({
           cohort_member_id: null,
