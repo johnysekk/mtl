@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SHM FP grant via server + cohort member now linked to the account. (1) profiles.founding is RLS-protected (service-role only), which is why the client toggle + the Nuke sweep couldn't change it. New /api/set-founding (founder-verified, service role) sets founding; toggleFP and the Nuke self-reset now call it. FP button label now distinguishes grant vs remove ('+ Udelit FP' vs 'FP checkmark odebrat'), and since renderCoachAnalytics refetches prof, the banner rate now updates after the grant. (2) ROOT of the empty course Trzby + accountless treatment: cohort_members were NEVER linked to the app account -- cohort-pay._leadFields had no student_id, so the webhook wrote the course transaction with member_id=null and the Trzby fallback (transactions by student_id) matched nothing. Now the client passes student_id (currentUser.id when logged in) on the signup POSTs and cohort-pay stores it on the member; the webhook already selects _cm.student_id, so new deposits get member_id set and Trzby links. Deploy: index.html + api/set-founding.js + api/cohort-pay.js. -->
+<!-- MTL build: SHN reverted the unnecessary set-founding endpoint + fixed the banner re-render + made course Trzby read cohort_payments robustly. (1) profiles.founding IS client-writable via a self .eq() update (the FP grant did work -- Platby a provize reflected it); only the .not('id','is',null) sweep was RLS-filtered. So toggleFP + the Nuke self-reset are back to the plain client update and /api/set-founding is deleted. (2) The admin rate banner didn't refresh after the grant because the re-render refetched prof before the write propagated (read-after-write); csFpToggle now waits 400ms before renderCoachAnalytics, and the button already distinguishes grant vs remove. (3) ROOT of empty course Trzby: the /api/cohort-payments ?cohort= select asked for stripe_fee + payment_method, which are migration-added columns; when absent the whole select 400s -> empty -> fell through. It now selects the CORE columns (always present) and only tries stripe_fee/payment_method as an optional second attempt. cohort_payments is keyed by cohort_id, so this is the source of truth for BOTH app and accountless members (member row carries name/email/phone + student_id, null until they make an account). Deploy: index.html + api/cohort-payments.js (cohort-pay.js with student_id shipped in SHM). -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3800,7 +3800,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SHM';
+const MTL_BUILD='SHN';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -19945,11 +19945,8 @@ async function toggleFP(userId){
     const { data:pr } = await supaClient.from('profiles').select('founding,name').eq('id',userId).single();
     const cur=!!(pr&&pr.founding); const next=!cur; const nm=(pr&&pr.name)||'';
     if(!confirm((next?(EN?'Grant FOUNDING PARTNER (2 / 1.5 / 1%) to the USER ':'Ud\u011blit FOUNDING PARTNER (2 / 1,5 / 1%) U\u017dIVATELI '):(EN?'Remove Founding Partner from ':'Odebrat Founding Partner '))+nm+(next?(EN?' -- applies to ALL their gyms/coaching.':' -- plat\u00ed pro V\u0160ECHNY jeho gymy/kou\u010dov\u00e1n\u00ed.'):'')+'?')) return;
-    // profiles.founding is RLS-protected (service-role only) -> set it through the server.
-    try{ var _sf=await supaClient.auth.getSession(); var _tf=(_sf&&_sf.data&&_sf.data.session&&_sf.data.session.access_token)||'';
-      var _rf=await fetch('/api/set-founding', { method:'POST', headers:{'Content-Type':'application/json','x-access-token':_tf}, body: JSON.stringify({ userId:userId, value: next }) });
-      if(!_rf.ok){ var _jf=await _rf.json().catch(function(){return {};}); toast('\u26a0\ufe0f '+((_jf&&_jf.error)||'error')); return; }
-    }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'error')); return; }
+    const { error } = await supaClient.from('profiles').update({ founding: next }).eq('id',userId);
+    if(error){ toast('\u26a0\ufe0f '+error.message); return; }
     if(currentUser && currentUser.id===userId){ currentUser.founding=next; }
     toast(next?(EN?'\u2b50 Founding Partner granted (2 / 1.5 / 1%)':'\u2b50 Founding Partner ud\u011bleno (2 / 1,5 / 1%)'):(EN?'Founding Partner removed':'Founding Partner odebr\u00e1no'));
   }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'error')); }
@@ -22041,7 +22038,7 @@ async function renderCoachAnalytics(coachId, containerId){
   if(typeof renderCoachGymSection==='function') renderCoachGymSection(coachId);
   const ms=$('csMessage'); if(ms) ms.onclick=()=>messageCoachAsFounder(coachId);
   const sus=$('csSuspend'); if(sus) sus.onclick=()=>toggleCoachSuspend(coachId, prof?.coach_status, prof?.name);
-  const _ft=$('csFpToggle'); if(_ft) _ft.onclick=async()=>{ await toggleFP(coachId); if(typeof renderCoachAnalytics==='function') renderCoachAnalytics(coachId,'coachStatsBody'); };
+  const _ft=$('csFpToggle'); if(_ft) _ft.onclick=async()=>{ await toggleFP(coachId); await new Promise(function(r){ setTimeout(r,400); }); if(typeof renderCoachAnalytics==='function') renderCoachAnalytics(coachId, 'coachStatsBody'); };
   const tIp=$('csTabIp'), tOn=$('csTabOn'), pIp=$('csPanelIp'), pOn=$('csPanelOn');
   function csShowTab(ip){ if(!pIp||!pOn) return; pIp.style.display=ip?'block':'none'; pOn.style.display=ip?'none':'block';
     if(tIp){ tIp.style.background=ip?'var(--dark)':'var(--surf)'; tIp.style.color=ip?'#fff':'var(--dark)'; tIp.style.border=ip?'none':'1px solid var(--border)'; }
@@ -23605,13 +23602,9 @@ async function founderResetStats(){
   catch(e){ fail.push('profiles.ep: '+(e&&e.message||e)); }
   // The .not('id','is',null) update is RLS-filtered on the client, so ALSO reset the founder's OWN
   // row explicitly (self-update is always allowed) and sync currentUser so the UI reflects it now.
-  try{ await supaClient.from('profiles').update({ partner:false }).eq('id', currentUser.id); currentUser.partner=false; ok.push('self.ep'); }
-  catch(e){ fail.push('self.ep: '+(e&&e.message||e)); }
-  // founding is service-role only -> clear via the server endpoint
-  try{ var _sn=await supaClient.auth.getSession(); var _tn=(_sn&&_sn.data&&_sn.data.session&&_sn.data.session.access_token)||'';
-    var _rn=await fetch('/api/set-founding', { method:'POST', headers:{'Content-Type':'application/json','x-access-token':_tn}, body: JSON.stringify({ userId: currentUser.id, value: false }) });
-    if(_rn.ok){ currentUser.founding=false; ok.push('self.founding'); } else { fail.push('self.founding: '+_rn.status); } }
-  catch(e){ fail.push('self.founding: '+(e&&e.message||e)); }
+  try{ await supaClient.from('profiles').update({ partner:false, founding:false }).eq('id', currentUser.id);
+    currentUser.partner=false; currentUser.founding=false; ok.push('self.ep+founding'); }
+  catch(e){ fail.push('self.ep+founding: '+(e&&e.message||e)); }
   try{ await supaClient.from('gyms').update({ welcome_free_until:null }).not('id','is',null); ok.push('gyms.welcome'); }
   catch(e){ fail.push('gyms.welcome: '+(e&&e.message||e)); }
   // Reset the founder's currency to the country-derived default (Brno -> CZ -> CZK) so a wiped
