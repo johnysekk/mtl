@@ -275,6 +275,25 @@ export default async function handler(req, res) {
         consent_at: new Date().toISOString(), consent_version: (b.consent_version || null),
         fbp: (b.fbp || null), fbc: (b.fbc || null)
       });
+      // Tell the OWNER. Nothing here ever notified anyone, so a QR course signup landed silently in
+      // the roster and the club only found it if they went looking. The accountless student can't
+      // confirm anything -- only the club can see the bank account -- so the club is the single
+      // actor and must be told the moment the QR is put in front of the person.
+      try {
+        const ownerId = c.owner_id || (c.gym_id ? ((await sbGet(`gyms?id=eq.${encodeURIComponent(c.gym_id)}&select=owner_id`))[0] || {}).owner_id : null);
+        if (ownerId) {
+          const _cur = c.currency || 'CZK';
+          await fetch(`${_SUPA}/rest/v1/notifications`, {
+            method: 'POST',
+            headers: { apikey: _KEY, Authorization: `Bearer ${_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+            body: JSON.stringify({
+              user_id: ownerId, type: 'system', read: false,
+              data: JSON.stringify({ kind: 'cohort_qr_claim', cohort_id: cohortId, cohort_member_id: memberQ && memberQ.id, cohort_name: c.name || '' }),
+              message: `\u{1F4CB} ${name || 'Z\u00e1jemce'} si zobrazil/a QR k \u00fahrad\u011b z\u00e1lohy ${depQ} ${_cur}${c.name ? (' \u2014 kurz \u201e' + c.name + '\u201c') : ''}. A\u017e platba dorazi na \u00fa\u010det, potvrd ji v \u00fa\u010dastnic\u00edch.`
+            })
+          });
+        }
+      } catch (e) { console.error('cohort qr owner notif', e.message); }
       return res.status(200).json({ ok: true, qr: true, cohort_member_id: memberQ && memberQ.id });
     }
     if (!c.stripe_account) return res.status(400).json({ ok: false, error: 'cohort has no payout account' });
