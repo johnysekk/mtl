@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SIZ adds the owner notification for an ACCOUNTLESS course signup paying by QR. cohort-pay.js never wrote a notification at all, so a QR signup landed silently in the roster and the club only found it by going looking. The accountless student cannot confirm anything -- only the club sees the bank account -- so the club is the single actor and gets told the moment the QR is shown. New kind cohort_qr_claim, clickable, deep-links to the roster like cohort_deposit_paid. Deploy: index.html + api/cohort-pay.js. -->
+<!-- MTL build: SJC corrects two descriptions of the passive demand signal that did not match the code. (1) The comment said 'within 25km'; the constant is GYM_LOCAL_KM = 20. (2) The founder hotspot panel described a passive signal as someone who 'hit the end of the deck without tapping that a club is missing' -- there is no end-of-deck condition. The signal fires when the deck is BUILT and _gymLocalCount === 0, i.e. there was no club of that discipline within 20 km at all. They did not scroll past anything; there was nothing to scroll. Wording only, no behaviour change. Deploy: index.html. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3842,7 +3842,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SIZ';
+const MTL_BUILD='SJC';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -5738,7 +5738,7 @@ async function openHotspotDetail(h){
     html+='<div style="font-size:12px;color:var(--light);margin-bottom:12px;">'+(EN?'Demand signals collected in this area':'Signály poptávky nasbírané v této oblasti')+'</div>';
     html+='<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:11px 13px;margin-bottom:12px;font-size:13px;line-height:1.65;">';
     html+='<div style="font-weight:700;margin-bottom:5px;">'+(EN?'How they signalled:':'Jak zájem projevili:')+'</div>';
-    html+='<div>👀 <b>'+_pas+'</b> '+(EN?'passive interest':'pasivní zájem')+' — '+(EN?'viewed this sport and hit the end of the deck without ever tapping that a club is missing (3+ times = real interest, not just curiosity)':'3× a víckrát si zobrazili tenhle sport a dojeli na konec decku, ale aktivně neklikli, že klub hledají/chtějí (3+ = reálný zájem, ne jen zvědavost)')+'</div>';
+    html+='<div>👀 <b>'+_pas+'</b> '+(EN?'passive interest':'pasivní zájem')+' — '+(EN?'opened this sport and found no club at all within 20 km, without ever tapping that a club is missing (3+ times = real interest, not just curiosity)':'3× a víckrát si otevřeli tenhle sport a v okolí 20 km nenašli ani jeden klub, ale aktivně neklikli, že klub hledají (3+ = reálný zájem, ne jen zvědavost)')+'</div>';
     html+='<div>🙋 <b>'+_exp+'</b> '+(EN?'actively asked':'aktivně požádali')+' — '+(EN?'tapped \u201ca club is missing here\u201d and explicitly want one':'klikli na \u201etady chybí klub\u201c a přímo řekli, že ho chtějí')+'</div>';
     if(_com) html+='<div>🤝 <b>'+_com+'</b> '+(EN?'committed / waiting':'vážní / čekající')+' — '+(EN?'strongest signal, ready to join':'nejsilnější signál, připravení nastoupit')+'</div>';
     html+='</div>';
@@ -6185,7 +6185,8 @@ function buildGymFiltered(){
   if(userLoc) list.sort((a,b)=>((a.distKm==null?9e9:a.distKm)-(b.distKm==null?9e9:b.distKm)));  // PURE distance - honest, no thumb on the scale (klub deck has no quality axis to legitimately boost within)
   _gymLocalCount = userLoc ? list.filter(g=>g.distKm!=null && g.distKm<=GYM_LOCAL_KM).length : list.length;
   _deckExtended = false;
-  // passive demand: if there are 0 gyms of the active discipline within 25km, log that gap silently
+  // passive demand: if there are 0 gyms of the active discipline within GYM_LOCAL_KM (20km),
+  // log that gap silently
   // (real intent: they opened the deck for this discipline). Fire once per discipline per session.
   try{
     if(currentUser && currentUser.role==='student' && userLoc && userLoc.lat!=null && _gymLocalCount===0){
@@ -8056,6 +8057,13 @@ async function _cohDepositConfirm(memberId){
   const res=await _recordCashTx({ provider:'gym', gym_id:coh.gym_id, member_id:m.student_id||null, gross_amount:Math.round(dep*100), currency:cur, type:'course', payment_method:'qr', cash_payer_name:m.name||null, acq_source:m.attribution||'direct' });
   if(res.error){ toast('\u26a0\ufe0f '+res.error.message); return; }
   try{ const _pv=Number(m.paid_amount||0); await supaClient.from('cohort_members').update({ status:'deposit_paid', paid_amount: Math.round((_pv+dep)*100)/100 }).eq('id',memberId); }catch(e){}
+  // Same deposit e-mail + doklad the Stripe rail sends from its webhook. A browser can't send mail
+  // or build a PDF, so this went out on Stripe and never on QR. Fire-and-forget: the confirmation
+  // itself has already been recorded, and a mail failure must not undo it.
+  try{
+    const _mt=(await supaClient.auth.getSession()).data.session.access_token;
+    fetch('/api/cohort-deposit-mail',{ method:'POST', headers:{'Content-Type':'application/json','x-access-token':_mt}, body:JSON.stringify({ cohort_member_id:memberId }) });
+  }catch(e){}
   try{ fetch('/api/cohort-capi',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ cohort_id:window._crCohortId, event:'Purchase', event_id:'cp_'+memberId, value:dep, currency:cur, email:m.email||undefined, phone:m.phone||undefined, fbp:m.fbp||undefined, fbc:m.fbc||undefined }) }); }catch(e){}
   // Tell the STUDENT their deposit landed. The Stripe path already does this from the webhook
   // (kind 'cohort_deposit_mine'); on the QR path nobody told them anything -- they paid, the club
@@ -8082,13 +8090,13 @@ async function _cohDepositConfirm(memberId){
 // exactly the state it was in before the student tapped "Zaplaceno" -- still held -- so they can
 // simply pay again from the same QR.
 //
-// The window is 24h here, not the usual 30 minutes, and that is deliberate. A normal reservation
-// starts its countdown at a moment the STUDENT chose. This one starts when the OWNER happened to
-// click, which can be the middle of the night. Losing the spot because you were not holding your
-// phone at that moment would be punishing the wrong person. requeued_at carries that longer window
-// to both release-cron and the student's own countdown; created_at is deliberately left alone so
-// the row keeps its real history.
-const REQUEUE_HOURS = 24;
+// No clock runs on it. A normal reservation counts down from a moment the STUDENT chose; this one
+// would count down from whenever the OWNER happened to click. And in practice the payment has
+// usually already been sent -- CZ QR transfers are mostly instant, so "I can't see it" is normally
+// a lag. Taking the spot from someone whose money is already gone is the expensive mistake.
+// It stays held until the student pays or cancels it (both buttons reappear in their pending list
+// the moment the status goes back to 'reserved'), or the owner confirms. requeued_at is what tells
+// release-cron to leave it alone; created_at is untouched so the row keeps its real history.
 async function _qrRequeue(tbl, id, studentId, what){
   try{
     const { error } = await supaClient.from(tbl).update({ status:'reserved', claimed_at: null, requeued_at: new Date().toISOString() }).eq('id', id);
@@ -8138,7 +8146,7 @@ async function _renderPendingQr(){
   h+=rows.map(function(r){
     const claimed=r.status==='paid_claimed';
     const pisProc = !!r.pis && !claimed;
-    const exp=r.requeued_at ? (new Date(r.requeued_at).getTime()+REQUEUE_HOURS*3600*1000) : (new Date(r.created_at||Date.now()).getTime()+30*60*1000);
+    const exp=new Date(r.created_at||Date.now()).getTime()+30*60*1000;
     const cd = pisProc
       ? '<span style="font-size:12px;font-weight:800;color:#635BFF;">\u23f3 '+(EN?'Payment processing\u2026':'Platba se zpracov\u00e1v\u00e1\u2026')+'</span>'
       : claimed
