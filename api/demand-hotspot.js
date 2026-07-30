@@ -5,6 +5,7 @@
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const svc = { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json' };
+import { LOCAL_KM } from './_geo.js';
 
 async function pagedGet(path) {
   let out = [], PAGE = 1000;
@@ -51,8 +52,8 @@ export default async function handler(req, res) {
 
     // Cluster by PROXIMITY (~30 km), not exact city string, so 'Brno' + 'Brno-stred'
     // + nearby villages collapse into one real hotspot. Greedy nearest-centroid pass.
-    const CLUSTER_KM = 20;   // how demand signals group into one hotspot
-    const SUPPLY_KM = 20;    // gym-coverage radius (matches the app's hotspot coverage display)
+    const CLUSTER_KM = LOCAL_KM;   // how demand signals group into one hotspot
+    const SUPPLY_KM = LOCAL_KM;    // gym-coverage radius (matches what the deck showed the student)
     // recency decay: a person's signal loses half its weight every 90 days and is ignored past 180.
     const NOW = Date.now(), HALFLIFE = 60, MAXAGE = 120;
     const recW = ms => { const a = (NOW - ms) / 86400000; return a > MAXAGE ? 0 : Math.pow(0.5, a / HALFLIFE); };

@@ -10,8 +10,9 @@ const svc = { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'ap
 async function sbGet(path) { try { const r = await fetch(`${SB}/rest/v1/${path}`, { headers: svc }); return r.ok ? r.json() : []; } catch (e) { return []; } }
 async function sbPost(path, body) { try { const r = await fetch(`${SB}/rest/v1/${path}`, { method: 'POST', headers: { ...svc, Prefer: 'return=minimal' }, body: JSON.stringify(body) }); return r.ok; } catch (e) { return false; } }
 
-const THRESHOLD = 15;      // unique people wanting the SAME discipline within the radius
-const RADIUS_KM = 25;
+import { LOCAL_KM, DEMAND_THRESHOLD } from './_geo.js';
+const THRESHOLD = DEMAND_THRESHOLD;   // unique people wanting the SAME discipline within the radius
+const RADIUS_KM = LOCAL_KM;           // was 25 -- the deck only ever showed the student 20
 const COOLDOWN_DAYS = 45;
 
 function hav(la1, lo1, la2, lo2) {

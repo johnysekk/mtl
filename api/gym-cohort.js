@@ -7,9 +7,10 @@
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const svc = { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json' };
-const RADIUS_KM = 25;
-const FRESH_DAYS = 120;
-const THRESHOLD = 15; // the cohort surfaces to the gym only at 15+ unique people (meaningful + small-number privacy) // ignore demand older than this
+import { LOCAL_KM, DEMAND_THRESHOLD, DEMAND_FRESH_DAYS } from './_geo.js';
+const RADIUS_KM = LOCAL_KM;   // was 25 -- a club must not be handed people the app never showed it
+const FRESH_DAYS = DEMAND_FRESH_DAYS;
+const THRESHOLD = DEMAND_THRESHOLD; // the cohort surfaces to the gym only at 15+ unique people (small-number privacy)
 
 async function pagedGet(path) {
   let out = [], PAGE = 1000;
