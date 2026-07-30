@@ -13,13 +13,19 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(200).end();
   try {
+    // Declared HERE, above every use. It used to be declared *after* both assignment
+    // sites, so each assignment threw a TDZ ReferenceError that the surrounding catch{}
+    // swallowed -- taking gymName / gymPay / _cmPay down with it. The public signup page
+    // then returned an empty club name and NO bank details, so a QR_bank club had nowhere
+    // for the student to send the money.
+    let _hideLeaders = false;
     // Member lookup (?cm=<id>) for the on-site first-month remainder page
     const cm = (req.query && req.query.cm) || '';
     if (cm) {
       const mr = await sbGet(`cohort_members?id=eq.${encodeURIComponent(cm)}&select=id,cohort_id,name,tier,status`);
       const mem = mr && mr[0];
       if (!mem) return res.status(404).json({ ok: false, error: 'member not found' });
-      const cr = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(mem.cohort_id)}&select=id,gym_id,name,discipline,currency,deposit_amount,price_student,price_regular,price_tiers,start_date,end_date,months,schedule,schedule_note`);
+      const cr = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(mem.cohort_id)}&select=id,gym_id,stripe_account,name,discipline,currency,deposit_amount,price_student,price_regular,price_tiers,start_date,end_date,months,schedule,schedule_note`);
       const co = cr && cr[0];
       if (!co) return res.status(404).json({ ok: false, error: 'cohort not found' });
       let gymName = '';
@@ -56,7 +62,7 @@ export default async function handler(req, res) {
     try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(c.gym_id)}&select=name,payment_mode,receiver_id_type,receiver_id_value,receiver_name,hide_leaders`); const gg = g && g[0]; if (gg) { _hideLeaders = !!gg.hide_leaders; gymName = gg.name || ''; gymPay = { payment_mode: gg.payment_mode || null, receiver_id_type: gg.receiver_id_type || null, receiver_id_value: gg.receiver_id_value || null, receiver_name: gg.receiver_name || null }; } } catch (e) {}
 
     // provider legal name from the connected Stripe account (controller for the lead's data)
-    let providerName = ''; let _hideLeaders = false;
+    let providerName = '';
     if (c.stripe_account) {
       try {
         const acct = await stripe.accounts.retrieve(c.stripe_account);

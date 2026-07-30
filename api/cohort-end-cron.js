@@ -36,9 +36,14 @@ async function sb(path, opts) {
 }
 
 export default async function handler(req, res) {
-  const secret = req.headers['x-cron-secret'] || (req.query && req.query.secret);
-  if (!process.env.CRON_SECRET || secret !== process.env.CRON_SECRET) {
-    return res.status(401).json({ ok: false, error: 'unauthorized' });
+  // Vercel Cron sends `Authorization: Bearer <CRON_SECRET>` plus an `x-vercel-cron` header.
+  // It does NOT send `x-cron-secret`, and vercel.json carries no `?secret=`, so the previous
+  // gate rejected every scheduled run with 401. Same shape as commission-cron.js.
+  if (process.env.CRON_SECRET) {
+    const _auth = req.headers.authorization || '';
+    if (!(_auth === `Bearer ${process.env.CRON_SECRET}` || req.headers['x-vercel-cron'])) {
+      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
   }
 
   const now = new Date();

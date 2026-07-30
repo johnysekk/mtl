@@ -11,7 +11,9 @@ async function sbGet(path) {
 }
 
 // Re-rate a gym owner's existing active member subscriptions to the owner's CURRENT
-// MTL League tier rate (Shikai 3% at >=3 active, Bankai 2% at >=10, else 3.5%, EP 1%).
+// MTL League tier rate. REAL thresholds (see _rate.js / referral-cron.js / bankai-cron.js):
+// Shikai 2.5% at coach_ref_score>=2, Bankai 2% at >=5 AND bankai_eligible, else base 3%.
+// (The old comment said >=3 / >=10 / 3.5% base -- all three were the retired ladder.)
 // Triggered client-side when the owner crosses a tier. The rate is recomputed server-side
 // from the owner's real coach_ref_score,bankai_eligible, so the caller cannot spoof a lower rate — calling
 // this can only set the rate to what the owner has legitimately earned. Applies to FUTURE

@@ -63,6 +63,9 @@ export default async function handler(req, res) {
           type: 'system',
           read: false,
           data: JSON.stringify({ kind: 'gym_invite_reward', gym_name: g.name || 'Gym' }),
+          // `message` was missing entirely, so the card rendered blank. Wording stays VAGUE
+          // on purpose: it must never reveal the member count or the threshold.
+          message: '\u{1F3C6} Gym, kter\u00FD jsi p\u0159ivedl (' + (g.name || 'Gym') + '), se rozjel na MTL \u2014 odm\u011Bna je tvoje. \u{1F94A}',
         }]),
       });
       rewarded++;
