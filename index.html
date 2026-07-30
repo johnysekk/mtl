@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SIX replaces the owner's DENY on a claimed QR payment. It used to void the booking and delete the held reservation, so the student had to start over and was never told. It now REQUEUES: status back to 'reserved', created_at reset (which is what both the student countdown and release-cron key off, so the 30-minute window restarts), claimed_at cleared, the slot/reservation left held, and a new qr_requeued notification whose blue link ('zaplatit znovu') drops the student back on the same QR. Applied to all four owner-facing deny paths: event ticket, gym drop-in from the coach view, coach 1:1, and reception. Shared helper _qrRequeue so the four stay identical. Deploy: index.html + api/release-cron.js + claim-ageing.sql (RUN THE SQL FIRST). -->
+<!-- MTL build: SIY reworks the requeue window. It used to reset created_at and give the student the usual 30 minutes, which is harsh: a normal reservation starts counting at a moment the STUDENT picked, a requeue starts when the OWNER happened to click, possibly at night. Losing the spot for not holding your phone punishes the wrong person. _qrRequeue now stamps requeued_at (created_at untouched, so the row keeps its real history) and both release-cron and the student countdown give requeued rows 24h instead of 30 minutes. The notification wording also drops the deadline-as-ultimatum and leads with the reassurance that the spot is held. Deploy: index.html + api/release-cron.js + claim-ageing.sql (RUN THE SQL FIRST -- adds requeued_at and claim_reminded to gym_bookings, bookings and event_tickets). -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3842,7 +3842,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SIX';
+const MTL_BUILD='SIY';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -4888,8 +4888,8 @@ const NOTIF_T = {
   // put back exactly where it was before the student tapped "Zaplaceno" -- still held, fresh
   // 30-minute window -- so the tap-through lands on the same QR rather than making them start over.
   qr_requeued: (d)=> LANG==='en'
-    ? `⏳ The club can't see your payment${d&&d.what?(' ('+d.what+')'):''} on the account yet. Your spot is still held — check the payment and pay again if needed. You have 30 minutes.`
-    : `⏳ Klub zatím tvoji platbu${d&&d.what?(' ('+d.what+')'):''} na účtu nevidí. Místo ti držíme — zkontroluj platbu a případně zaplat znovu. Máš na to 30 minut.`,
+    ? `⏳ The club can't see your payment${d&&d.what?(' ('+d.what+')'):''} on the account yet — bank transfers can take a while. We're holding your spot for you; if the payment didn't go through, you can pay again from the same QR.`
+    : `⏳ Klub zatím tvoji platbu${d&&d.what?(' ('+d.what+')'):''} na účtu nevidí — převod může chvíli trvat. Místo ti držíme; jestli platba neodešla, můžeš zaplatit znovu ze stejného QR.`,
 };
 function notifText(n){
   try{
@@ -8079,15 +8079,19 @@ async function _cohDepositConfirm(memberId){
 }
 
 // The owner says the money has not arrived. That is NOT a rejection: the reservation goes back to
-// exactly the state it was in before the student tapped "Zaplaceno" -- still held, status 'reserved',
-// a fresh 30-minute window -- so the student can simply pay again from the same QR. If they don't,
-// release-cron frees it after 30 minutes like any other unpaid reservation, so nothing leaks.
-// created_at is what BOTH the student's countdown and release-cron key off, so resetting it is what
-// restarts the window; claimed_at is cleared because the claim is being withdrawn.
+// exactly the state it was in before the student tapped "Zaplaceno" -- still held -- so they can
+// simply pay again from the same QR.
+//
+// The window is 24h here, not the usual 30 minutes, and that is deliberate. A normal reservation
+// starts its countdown at a moment the STUDENT chose. This one starts when the OWNER happened to
+// click, which can be the middle of the night. Losing the spot because you were not holding your
+// phone at that moment would be punishing the wrong person. requeued_at carries that longer window
+// to both release-cron and the student's own countdown; created_at is deliberately left alone so
+// the row keeps its real history.
+const REQUEUE_HOURS = 24;
 async function _qrRequeue(tbl, id, studentId, what){
-  const nowIso = new Date().toISOString();
   try{
-    const { error } = await supaClient.from(tbl).update({ status:'reserved', created_at: nowIso, claimed_at: null }).eq('id', id);
+    const { error } = await supaClient.from(tbl).update({ status:'reserved', claimed_at: null, requeued_at: new Date().toISOString() }).eq('id', id);
     if(error) throw error;
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return false; }
   try{
@@ -8119,9 +8123,9 @@ async function _renderPendingQr(){
   let rows=[]; window._pendQrRows={};
   try{
     const [b,gb,et]=await Promise.all([
-      supaClient.from('bookings').select('id,coach_id,slot_id,coach_name,training_date,training_time,type,online_format,amount,currency,status,created_at').eq('student_id',currentUser.id).eq('payment_method','qr').in('status',['reserved','paid_claimed']),
-      supaClient.from('gym_bookings').select('id,gym_id,gym_name,class_name,class_date,class_time,amount,currency,status,created_at,pis_payment_id').eq('student_id',currentUser.id).eq('payment_method','qr').in('status',['reserved','paid_claimed']),
-      supaClient.from('event_tickets').select('id,event_id,amount,currency,status,created_at').eq('buyer_id',currentUser.id).eq('payment_method','qr').in('status',['reserved','paid_claimed'])
+      supaClient.from('bookings').select('id,coach_id,slot_id,coach_name,training_date,training_time,type,online_format,amount,currency,status,created_at,requeued_at').eq('student_id',currentUser.id).eq('payment_method','qr').in('status',['reserved','paid_claimed']),
+      supaClient.from('gym_bookings').select('id,gym_id,gym_name,class_name,class_date,class_time,amount,currency,status,created_at,pis_payment_id,requeued_at').eq('student_id',currentUser.id).eq('payment_method','qr').in('status',['reserved','paid_claimed']),
+      supaClient.from('event_tickets').select('id,event_id,amount,currency,status,created_at,requeued_at').eq('buyer_id',currentUser.id).eq('payment_method','qr').in('status',['reserved','paid_claimed'])
     ]);
     (b.data||[]).forEach(function(x){ rows.push({ tbl:'bookings', id:x.id, coach_id:x.coach_id, slot_id:x.slot_id, k:'1:1', title:x.coach_name||'Soukromka', sub:(x.type==='online'?('Online'+(x.online_format?(' \u00b7 '+x.online_format):'')):((x.training_date||'')+(x.training_time?(' '+x.training_time):''))), amount:x.amount, currency:x.currency, status:x.status, created_at:x.created_at }); });
     (gb.data||[]).forEach(function(x){ rows.push({ tbl:'gym_bookings', id:x.id, gym_id:x.gym_id, class_date:x.class_date, class_name:x.class_name, pis:x.pis_payment_id, k:'Drop-in', title:x.class_name||x.gym_name||'Drop-in', sub:((x.class_date||'')+(x.class_time?(' '+x.class_time):'')), amount:x.amount, currency:x.currency, status:x.status, created_at:x.created_at }); });
@@ -8134,7 +8138,7 @@ async function _renderPendingQr(){
   h+=rows.map(function(r){
     const claimed=r.status==='paid_claimed';
     const pisProc = !!r.pis && !claimed;
-    const exp=new Date(r.created_at||Date.now()).getTime()+30*60*1000;
+    const exp=r.requeued_at ? (new Date(r.requeued_at).getTime()+REQUEUE_HOURS*3600*1000) : (new Date(r.created_at||Date.now()).getTime()+30*60*1000);
     const cd = pisProc
       ? '<span style="font-size:12px;font-weight:800;color:#635BFF;">\u23f3 '+(EN?'Payment processing\u2026':'Platba se zpracov\u00e1v\u00e1\u2026')+'</span>'
       : claimed
