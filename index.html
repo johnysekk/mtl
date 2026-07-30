@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SIV reworks the tax-ID wording and the VIES lookup. (1) The club billing hint said 'ID number of your company / association', which excludes a coach invoicing under their own IC - now neutral. (2) mtlTaxVerify takes an optional country-select id and appends &cc= when a VAT number is typed WITHOUT its 2-letter prefix; tax-verify.js already accepted cc, and VIES was otherwise reading the first two digits as the country and answering 'not found'. Wired on all 4 VAT fields. (3) The 'For a CZ ICO enter 8 digits' line read as an instruction to foreign providers whose registration number is not 8 digits; it now explains that only Czech numbers are auto-verified and names their country. Foreign numbers remain unverified and unblocked, which is unchanged and intended. Deploy: index.html. -->
+<!-- MTL build: SIX replaces the owner's DENY on a claimed QR payment. It used to void the booking and delete the held reservation, so the student had to start over and was never told. It now REQUEUES: status back to 'reserved', created_at reset (which is what both the student countdown and release-cron key off, so the 30-minute window restarts), claimed_at cleared, the slot/reservation left held, and a new qr_requeued notification whose blue link ('zaplatit znovu') drops the student back on the same QR. Applied to all four owner-facing deny paths: event ticket, gym drop-in from the coach view, coach 1:1, and reception. Shared helper _qrRequeue so the four stay identical. Deploy: index.html + api/release-cron.js + claim-ageing.sql (RUN THE SQL FIRST). -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3842,7 +3842,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SIV';
+const MTL_BUILD='SIX';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -4883,6 +4883,13 @@ const NOTIF_T = {
   qr_reservation_expired: (d)=> LANG==='en'
     ? `⏳ Your reservation${d&&d.class?(' ('+d.class+')'):''} was released because the payment wasn't confirmed.`
     : `⏳ Rezervace${d&&d.class?(' ('+d.class+')'):''} se uvolnila z důvodu nepotvrzení platby.`,
+
+  // Not a rejection: the club simply cannot see the money on the account yet. The reservation is
+  // put back exactly where it was before the student tapped "Zaplaceno" -- still held, fresh
+  // 30-minute window -- so the tap-through lands on the same QR rather than making them start over.
+  qr_requeued: (d)=> LANG==='en'
+    ? `⏳ The club can't see your payment${d&&d.what?(' ('+d.what+')'):''} on the account yet. Your spot is still held — check the payment and pay again if needed. You have 30 minutes.`
+    : `⏳ Klub zatím tvoji platbu${d&&d.what?(' ('+d.what+')'):''} na účtu nevidí. Místo ti držíme — zkontroluj platbu a případně zaplat znovu. Máš na to 30 minut.`,
 };
 function notifText(n){
   try{
@@ -7773,7 +7780,7 @@ async function _evtQrConfirm(ticketId, ok){
   const t=(window._evQrPend||[]).find(function(x){ return String(x.id)===String(ticketId); }); if(!t) return;
   const ev=(window._mineHosted||[]).find(function(x){ return String(x.id)===String(t.event_id); }); if(!ev) return;
   try{
-    if(!ok){ await supaClient.from('event_tickets').update({ status:'void' }).eq('id',ticketId); toast(EN?'Voided':'Zru\u0161eno',1); renderMyEvManage(); return; }
+    if(!ok){ await _qrRequeue('event_tickets', ticketId, (t&&t.buyer_id)||null, (ev&&ev.title)||null); toast(EN?'Sent back to the student \u00b7 spot still held':'Vr\u00e1ceno studentovi \u00b7 m\u00edsto dr\u017e\u00edme',1); renderMyEvManage(); return; }
     let provider='gym', gym_id=ev.gym_id||null, coach_id=null;
     if(ev.payout_coach_id){ provider='coach'; coach_id=ev.payout_coach_id; gym_id=null; }
     if(provider==='coach' && currentUser && String(currentUser.id)!==String(coach_id)){ toast(EN?'Only the paid coach can confirm this':'Tuto platbu potvrd\u00ed kou\u010d, kter\u00e9mu jde v\u00fdplata'); return; }
@@ -7872,7 +7879,7 @@ async function _coach1to1QrRender(){
 async function _coach1QrConfirmGym(b, ok){
   const EN=LANG==='en';
   try{
-    if(!ok){ await supaClient.from('gym_bookings').update({ status:'unpaid_void' }).eq('id',b.id); try{ await supaClient.from('gym_class_reservations').delete().eq('gym_id',b.gym_id).eq('student_id',b.student_id).eq('class_date',b.class_date).eq('class_time',b.class_time); }catch(e){} toast(EN?'Voided':'Zru\u0161eno',1); _coach1to1QrRender(); return; }
+    if(!ok){ await _qrRequeue('gym_bookings', b.id, b.student_id||null, b.class_name||null); toast(EN?'Sent back to the student \u00b7 spot still held':'Vr\u00e1ceno studentovi \u00b7 m\u00edsto dr\u017e\u00edme',1); _coach1to1QrRender(); return; }
     const amount_minor=Math.round((b.amount||0)*100);
     const res=await _recordCashTx({ provider:'coach', coach_id:currentUser.id, gym_id:b.gym_id, member_id:b.student_id||null, gross_amount:amount_minor, currency:b.currency||'CZK', type:'drop_in', payment_method:'qr', acq_source:'direct', source_booking_id:b.id, credit:(b.credit_used==='student'?'student':undefined) });
     if(res.error){ toast('\u26a0\ufe0f '+res.error.message); return; }
@@ -7889,9 +7896,8 @@ async function _coach1to1QrConfirm(bookingId, ok){
   if(b._src==='gym'){ return _coach1QrConfirmGym(b, ok); }
   try{
     if(!ok){
-      await supaClient.from('bookings').update({ status:'cancelled' }).eq('id',bookingId);
-      if(b.slot_id){ try{ await supaClient.from('slots').update({ booked:false }).eq('id',b.slot_id); }catch(e){} }
-      toast(EN?'Voided':'Zru\u0161eno',1); _coach1to1QrRender(); return;
+      await _qrRequeue('bookings', bookingId, b.student_id||null, b.coach_name||null);
+      toast(EN?'Sent back to the student \u00b7 spot still held':'Vr\u00e1ceno studentovi \u00b7 m\u00edsto dr\u017e\u00edme',1); _coach1to1QrRender(); return;
     }
     const amount_minor=Math.round((b.amount||0)*100);
     const res=await _recordCashTx({ provider:'coach', coach_id:currentUser.id, member_id:b.student_id||null, gross_amount:amount_minor, currency:b.currency||'CZK', type:'coach_1to1', payment_method:'qr', acq_source:'direct', credit:(b.credit_used==='student'?'student':undefined) });
@@ -8072,6 +8078,28 @@ async function _cohDepositConfirm(memberId){
   _cohRosterRender();
 }
 
+// The owner says the money has not arrived. That is NOT a rejection: the reservation goes back to
+// exactly the state it was in before the student tapped "Zaplaceno" -- still held, status 'reserved',
+// a fresh 30-minute window -- so the student can simply pay again from the same QR. If they don't,
+// release-cron frees it after 30 minutes like any other unpaid reservation, so nothing leaks.
+// created_at is what BOTH the student's countdown and release-cron key off, so resetting it is what
+// restarts the window; claimed_at is cleared because the claim is being withdrawn.
+async function _qrRequeue(tbl, id, studentId, what){
+  const nowIso = new Date().toISOString();
+  try{
+    const { error } = await supaClient.from(tbl).update({ status:'reserved', created_at: nowIso, claimed_at: null }).eq('id', id);
+    if(error) throw error;
+  }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return false; }
+  try{
+    if(studentId){
+      await supaClient.from('notifications').insert({
+        user_id: studentId, type:'system', read:false,
+        data: JSON.stringify({ kind:'qr_requeued', what: what||null, tbl: tbl, id: id })
+      });
+    }
+  }catch(e){}
+  return true;
+}
 async function _hasOpenQrReservation(uid){
   if(!uid) return false;
   try{
@@ -15871,7 +15899,7 @@ async function _qrcConfirm(id, kind, ok, drops, membs){
   try{
     if(kind==='dropin'){
       let b=(drops||[]).find(function(x){ return String(x.id)===String(id); }); if(!b){ try{ const r=await supaClient.from('gym_bookings').select('*').eq('id',id).single(); b=(r&&r.data)||null; }catch(e){} } if(!b){ toast(EN?'\u26a0\ufe0f Reservation not found':'\u26a0\ufe0f Rezervace nenalezena'); return _rer(); } if(ok && (b.status==='active'||b.status==='completed'||b.status==='unpaid_void')){ toast(EN?'Already handled':'Ji\u017e vy\u0159\u00edzeno', 1); return _rer(); }
-      if(!ok){ await supaClient.from('gym_bookings').update({ status:'unpaid_void' }).eq('id',id); try{ await supaClient.from('gym_class_reservations').delete().eq('gym_id',g.id).eq('student_id',b.student_id).eq('class_date',b.class_date).eq('class_time',b.class_time).eq('class_name',b.class_name); }catch(e){} toast(EN?'Voided \u00b7 slot freed':'Zru\u0161eno \u00b7 m\u00edsto uvoln\u011bno'); return _rer(); }
+      if(!ok){ await _qrRequeue('gym_bookings', id, b.student_id||null, b.class_name||null); toast(EN?'Sent back to the student \u00b7 spot still held':'Vr\u00e1ceno studentovi \u00b7 m\u00edsto dr\u017e\u00edme',1); return _rer(); }
       const amount_minor=Math.round((b.amount||0)*100); const fee_minor=Math.round(amount_minor*rate);
       const _upB=await supaClient.from('gym_bookings').update({ status:'active' }).eq('id',id); if(_upB&&_upB.error){ toast('\u26a0\ufe0f '+(_upB.error.message||'')); return _rer(); }
       const _txB=await _recordCashTx({ gym_id:g.id, member_id:b.student_id||null, coach_id:b.coach_id||null, paid_to:'gym', gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:b.currency||cur, type:'drop_in', status:'completed', payment_method:'qr', commission_status:'pending', commission_month:month, cash_payer_name:b.student_name||null, acq_source:b.acq_source||'direct', source_booking_id:b.id, credit:(b.credit_used==='student'?'student':undefined) }); if(_txB&&_txB.error){ toast('\u26a0\ufe0f '+(EN?'Confirmed, but the bookkeeping write failed \u2014 ':'Potvrzeno, ale zápis do účetnictví selhal \u2014 ')+(_txB.error.message||'')); } try{ if(b&&b.student_id){ await supaClient.from('notifications').insert({ user_id:b.student_id, type:'booking', read:false, message:(LANG==='en'?'\u2705 Payment confirmed':'\u2705 Platba potvrzena'), data:JSON.stringify({ kind:'payment_confirmed', gym:g.id, gym_name:(g.name||''), amount:(fmtPrice(b.amount||0, b.currency||cur)+' '+_curSym(b.currency||cur)), item:(b.class_name||''), goto:'dropin' }) }); } }catch(e){}
@@ -19184,9 +19212,9 @@ async function loadNotifications(append){
     const isAmbApp = k==='ambassador_app';
     const isAmbGranted = k==='ambassador_granted';
     const isCoachRefAdmin = false; /* referral EP grants removed — rewards are Shikai/Bankai */
-    const clickable = isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine';
+    const clickable = isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine';
     let linkLabel = L('otevřít ›');
-    if(k==='payment_confirmed'){ var _pcd={}; try{ _pcd=JSON.parse(n.data||'{}'); }catch(e){} var _gg=_pcd.goto; linkLabel = (_gg==='dropin'||_gg==='bookings') ? (LANG==='en'?'booking details ›':'detail rezervace ›') : (_gg==='tickets') ? (LANG==='en'?'my ticket ›':'moje vstupenka ›') : (_gg==='courses') ? (LANG==='en'?'my course ›':'můj kurz ›') : (_gg==='merch') ? (LANG==='en'?'view ›':'zobrazit ›') : (LANG==='en'?'membership details ›':'detail členství ›'); } else if(k==='qr_intent') linkLabel = LANG==='en'?'to confirm ›':'k potvrzení ›'; else if(k==='qr_released'||k==='qr_reservation_expired') linkLabel = LANG==='en'?'book again ›':'rezervovat znovu ›'; else if(k==='cover_needed') linkLabel = LANG==='en'?'take the cover ›':'vzít záskok ›'; else if(k==='cover_filled'||k==='cover_filled_owner') linkLabel = LANG==='en'?'view ›':'zobrazit ›'; else if(k==='doklad_vat_needed') linkLabel = LANG==='en'?'add VAT ID \u203a':'doplnit DI\u010c \u203a'; else if(k==='course_new') linkLabel = LANG==='en'?'course details \u203a':'detail kurzu \u203a'; else if(k==='slot_demand') linkLabel = LANG==='en'?'open my diary \u203a':'otev\u0159\u00edt di\u00e1\u0159 \u203a'; else if(k==='cohort_month_due') linkLabel = LANG==='en'?'pay now \u203a':'doplatit \u203a'; else if(k==='cohort_month_collect') linkLabel = LANG==='en'?'open roster \u203a':'otev\u0159\u00edt roster \u203a'; else if(k==='cohort_deposit_paid') linkLabel = LANG==='en'?'view roster \u203a':'otev\u0159\u00edt \u00fa\u010dastn\u00edky \u203a'; else if(k==='cohort_deposit_mine') linkLabel = LANG==='en'?'my course \u203a':'m\u016fj kurz \u203a';
+    if(k==='payment_confirmed'){ var _pcd={}; try{ _pcd=JSON.parse(n.data||'{}'); }catch(e){} var _gg=_pcd.goto; linkLabel = (_gg==='dropin'||_gg==='bookings') ? (LANG==='en'?'booking details ›':'detail rezervace ›') : (_gg==='tickets') ? (LANG==='en'?'my ticket ›':'moje vstupenka ›') : (_gg==='courses') ? (LANG==='en'?'my course ›':'můj kurz ›') : (_gg==='merch') ? (LANG==='en'?'view ›':'zobrazit ›') : (LANG==='en'?'membership details ›':'detail členství ›'); } else if(k==='qr_intent') linkLabel = LANG==='en'?'to confirm ›':'k potvrzení ›'; else if(k==='qr_released'||k==='qr_reservation_expired') linkLabel = LANG==='en'?'book again ›':'rezervovat znovu ›'; else if(k==='qr_requeued') linkLabel = LANG==='en'?'pay again ›':'zaplatit znovu ›'; else if(k==='cover_needed') linkLabel = LANG==='en'?'take the cover ›':'vzít záskok ›'; else if(k==='cover_filled'||k==='cover_filled_owner') linkLabel = LANG==='en'?'view ›':'zobrazit ›'; else if(k==='doklad_vat_needed') linkLabel = LANG==='en'?'add VAT ID \u203a':'doplnit DI\u010c \u203a'; else if(k==='course_new') linkLabel = LANG==='en'?'course details \u203a':'detail kurzu \u203a'; else if(k==='slot_demand') linkLabel = LANG==='en'?'open my diary \u203a':'otev\u0159\u00edt di\u00e1\u0159 \u203a'; else if(k==='cohort_month_due') linkLabel = LANG==='en'?'pay now \u203a':'doplatit \u203a'; else if(k==='cohort_month_collect') linkLabel = LANG==='en'?'open roster \u203a':'otev\u0159\u00edt roster \u203a'; else if(k==='cohort_deposit_paid') linkLabel = LANG==='en'?'view roster \u203a':'otev\u0159\u00edt \u00fa\u010dastn\u00edky \u203a'; else if(k==='cohort_deposit_mine') linkLabel = LANG==='en'?'my course \u203a':'m\u016fj kurz \u203a';
       else if(k==='doklad_unified') linkLabel = LANG==='en'?'billing details \u203a':'fakturační údaje \u203a';
       else if(k==='pis_payment_in'){ var _pld={}; try{ _pld=JSON.parse(n.data||'{}'); }catch(e){} linkLabel = (_pld.occ && _pld.occ.date) ? (LANG==='en'?'view class ›':'zobrazit lekci ›') : (LANG==='en'?'view dashboard ›':'otevřít přehled ›'); }
     if(isMembCancel) linkLabel = LANG==='en'?'view members ›':'zobrazit členy ›';
@@ -19305,6 +19333,7 @@ async function loadNotifications(append){
         else if(k==='own_student_link'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.target==='gym'){ openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); setTimeout(function(){ if(typeof openOwnMembers==='function') openOwnMembers(); }, 360); } else { if(typeof openCoachSettings==='function') openCoachSettings(); setTimeout(function(){ var d=$('csOwnStudentAcc'); if(d){ try{ d.open=true; }catch(e){} try{ d.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} } }, 360); } }catch(e){} }
         else if(k==='merch_fulfilled'){ try{ if(typeof setNav==='function') setNav('ni-me'); openSheet('shMe'); setTimeout(function(){ if(typeof renderMyMerch==='function') renderMyMerch(); var w=$('myMerchWrap'); if(w&&w.scrollIntoView){ try{ w.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} } }, 320); }catch(e){} }
         else if(k==='gym_member_joined_coach'){ try{ const dd=JSON.parse(n.data||'{}'); if(typeof openGymTeamDash==='function') openGymTeamDash(dd.gym_id||null,'','net'); }catch(e){} }
+        else if(k==='qr_requeued'){ closeSheet('shNotif'); if(typeof openSheet==='function') openSheet('shBookings'); try{ if(typeof _upTab==='function') _upTab('skup'); }catch(e){} try{ if(typeof _renderPendingQr==='function') _renderPendingQr(); }catch(e){} }
         else if(k==='qr_released'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym){ const { data:g }=await supaClient.from('gyms').select('*').eq('id',dd.gym).single(); if(g) openGymProfile(g); else toast(L('⚠️ Klub nenalezen')); } }catch(e){} }
         else if(k==='qr_reservation_expired'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.coach && typeof openProfileById==='function') openProfileById(dd.coach); else toast(L('⚠️ Profil nenalezen')); }catch(e){ toast(L('⚠️ Profil nenalezen')); } }
         else openOnline('coach');
@@ -26573,17 +26602,19 @@ async function renderCoachBilling(){
   if(me.coach_status!=='approved'){ box.style.display='none'; box.innerHTML=''; return; }
   box.style.display=''; const EN=LANG==='en';
   let pr={};
-  try{ const { data }=await supaClient.from('profiles').select('legal_name,tax_id,vat_id,billing_address,vat_payer,vat_rate,invoice_email').eq('id',me.id).maybeSingle(); pr=data||{}; }catch(e){}
+  try{ const { data }=await supaClient.from('profiles').select('legal_name,tax_id,vat_id,billing_address,billing_country,vat_payer,vat_rate,invoice_email').eq('id',me.id).maybeSingle(); pr=data||{}; }catch(e){}
   const ev=(x)=>String(x==null?'':x).replace(/"/g,'&quot;');
   { const _lb=$('csLblBilling'); if(_lb) _lb.textContent='🧾 '+(EN?'Billing details':'Fakturační údaje'); }
   box.innerHTML=`
     <p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:0 0 10px;">${EN?'Shown on the receipts your students get for 1:1 / online lessons. As a VAT payer, receipts break the price into net + VAT.':'Zobrazí se na dokladech, které studenti dostanou za 1:1 / online lekce. Jako plátce DPH se cena na dokladu rozepíše na základ daně + DPH.'}</p>
+    ${_countrySel('acmCountry', pr.billing_country)}
     <input id="acmLegalName" value="${ev(pr.legal_name)}" placeholder="${EN?'Legal name (you / your business)':'Jméno / název (ty / tvá firma)'}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:8px;">
     <input id="acmBillingAddr" value="${ev(pr.billing_address)}" placeholder="${EN?'Registered / billing address':'Sídlo / fakturační adresa'}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:8px;">
-    <input id="acmTaxId" value="${ev(pr.tax_id)}" placeholder="I\u010cO" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:8px;">
+    <input id="acmTaxId" value="${ev(pr.tax_id)}" placeholder="I\u010cO" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:4px;">
+    <p style="font-size:11px;color:var(--light);line-height:1.4;margin:0 0 4px;">${EN?'Business ID you invoice under — your own, or your company\'s / association\'s.':'IČO, pod kterým fakturuješ — tvoje vlastní, nebo firmy či spolku.'}</p>
     <p id="acmTaxStatus" data-noi18n style="font-size:11.5px;font-weight:600;margin:-4px 0 8px;"></p>
-    ${_countrySel('acmCountry', pr.billing_country)}
-    <input id="acmVatId" value="${ev(pr.vat_id)}" placeholder="DI\u010c / VAT ID" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:8px;">
+    <input id="acmVatId" value="${ev(pr.vat_id)}" placeholder="DI\u010c / VAT ID" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:4px;">
+    <p style="font-size:11px;color:var(--light);line-height:1.45;margin:0 0 4px;">${EN?'Tax (VAT) number — used when providing/receiving services within the EU and once you become a VAT payer.':'Daňové (VAT) číslo — užívá se při poskytování/odběru služeb v rámci EU a jakmile jsi plátce DPH.'}</p>
     <p id="acmVatStatus" data-noi18n style="font-size:11.5px;font-weight:600;margin:-4px 0 8px;"></p>
     <label style="display:flex;align-items:center;gap:9px;cursor:pointer;font-size:14px;font-weight:600;color:var(--dark);margin:4px 0 6px;"><input type="checkbox" id="acmVatPayer" ${pr.vat_payer?'checked':''} style="width:18px;height:18px;"> ${EN?'I am a VAT payer':'Jsem plátce DPH'}</label>
     <div id="acmVatRateRow" style="${pr.vat_payer?'':'display:none;'}margin-bottom:8px;"><input id="acmVatRate" type="number" min="0" max="100" step="0.5" value="${pr.vat_rate!=null?pr.vat_rate:21}" placeholder="${EN?'VAT rate (%)':'Sazba DPH (%)'}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:8px;"></div>
