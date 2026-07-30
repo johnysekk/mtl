@@ -5,15 +5,14 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const sbHeaders = { apikey: SKEY, Authorization: `Bearer ${SKEY}` };
+import { ladderRate as _mtlLadder } from './_rate.js';
 async function sbGet(path) {
   try { const r = await fetch(`${SB}/rest/v1/${path}`, { headers: sbHeaders }); return r.ok ? r.json() : []; }
   catch (e) { return []; }
 }
 
 // Re-rate a gym owner's existing active member subscriptions to the owner's CURRENT
-// MTL League tier rate. REAL thresholds (see _rate.js / referral-cron.js / bankai-cron.js):
-// Shikai 2.5% at coach_ref_score>=2, Bankai 2% at >=5 AND bankai_eligible, else base 3%.
-// (The old comment said >=3 / >=10 / 3.5% base -- all three were the retired ladder.)
+// MTL League tier rate (Shikai 3% at >=3 active, Bankai 2% at >=10, else 3.5%, EP 1%).
 // Triggered client-side when the owner crosses a tier. The rate is recomputed server-side
 // from the owner's real coach_ref_score,bankai_eligible, so the caller cannot spoof a lower rate — calling
 // this can only set the rate to what the owner has legitimately earned. Applies to FUTURE
@@ -71,11 +70,11 @@ export default async function handler(req, res) {
     const owner = req.query.owner;
     if (!owner) return res.status(400).json({ error: 'missing owner' });
 
-    const prof = (await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=coach_ref_score,partner,bankai_eligible`))[0];
+    const prof = (await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=coach_ref_score,partner,founding,bankai_eligible`))[0];
     if (!prof) return res.status(404).json({ error: 'owner not found' });
 
     const score = prof.coach_ref_score || 0;
-    const pct = prof.partner ? 1 : ((score >= 5 && prof.bankai_eligible) ? 2 : (score >= 2 ? 2.5 : 3)); // Stripe track (this cron only re-rates Stripe subscriptions)
+    const pct = _mtlLadder('stripe', { partner: prof.partner, founding: prof.founding, score: score, bankai: prof.bankai_eligible }) * 100; // Stripe track (this cron only re-rates Stripe subscriptions)
 
     let rerated = 0;
     const gyms = await sbGet(`gyms?owner_id=eq.${encodeURIComponent(owner)}&select=id,stripe_account,welcome_free_until`);

@@ -31,6 +31,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const { ladderRate: _mtlLadder } = require('./_rate.js');
 
 async function sb(path, opts = {}) {
   const r = await fetch(`${SB}/rest/v1/${path}`, {
@@ -50,11 +51,7 @@ async function sb(path, opts = {}) {
 // in-person card payment. Must match _ladderRate('stripe', ...).
 function ladderRate(profile) {
   if (!profile) return 0.03;                                   // Stripe base 3%
-  if (profile.partner) return 0.01;                            // EP
-  const s = profile.coach_ref_score || 0;
-  if (s >= 5 && profile.bankai_eligible) return 0.02;          // Bankai
-  if (s >= 2) return 0.025;                                    // Shikai
-  return 0.03;                                                 // base
+  return _mtlLadder('stripe', { partner: profile.partner, founding: profile.founding, score: profile.coach_ref_score, bankai: profile.bankai_eligible });
 }
 
 module.exports = async (req, res) => {
@@ -79,7 +76,7 @@ module.exports = async (req, res) => {
     if (gym.account_suspended) return res.status(403).json({ error: 'account suspended' });
     if (!gym.stripe_account) return res.status(400).json({ error: 'gym has no Stripe connected account' });
 
-    const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,coach_ref_score,bankai_eligible`);
+    const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,founding,coach_ref_score,bankai_eligible`);
     const rate = ladderRate((owners && owners[0]) || null);
     const applicationFee = Math.round(amount * rate); // amount is already minor units
 

@@ -30,12 +30,11 @@ function ladderRate(profile) {
   // It used to grant a 2.5% "Bankai" that does not exist on the bank track, so the SAME
   // sale was charged 3% if recorded normally and 2.5% if it happened to be backfilled.
   if (!profile) return 0.035;
-  if (profile.partner) return 0.01;
-  const s = profile.coach_ref_score || 0;
-  return (s >= 2) ? 0.03 : 0.035;
+  return _mtlLadder('qr_bank', { partner: profile.partner, founding: profile.founding, score: profile.coach_ref_score, bankai: profile.bankai_eligible });
 }
 
 const _WELCOME_FOUNDER = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+import { ladderRate as _mtlLadder } from './_rate.js';
 let _welcomeOff = null;
 async function welcomeKillSwitch() {
   if (_welcomeOff !== null) return _welcomeOff;
@@ -145,7 +144,7 @@ export default async function handler(req, res) {
         const type = 'drop_in';
         let row;
         if (b.paid_to === 'coach' && b.coach_id) {
-          const cs = await sb(`profiles?id=eq.${b.coach_id}&select=id,partner,coach_ref_score,bankai_eligible,welcome_free_until,created_at,gym_payout_account,stripe_account,referral_optin`);
+          const cs = await sb(`profiles?id=eq.${b.coach_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,welcome_free_until,created_at,gym_payout_account,stripe_account,referral_optin`);
           const coach = cs && cs[0]; if (!coach) { out.skipped++; continue; }
           const rate = ladderRate(coach);
           const _wz = await isWelcomeZeroReadOnly(coach);
@@ -157,7 +156,7 @@ export default async function handler(req, res) {
         } else {
           const gyms = await sb(`gyms?id=eq.${b.gym_id}&select=id,owner_id,currency,stripe_account,account_suspended,welcome_free_until,created_at`);
           const gym = gyms && gyms[0]; if (!gym) { out.skipped++; continue; }
-          const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,coach_ref_score,bankai_eligible,welcome_free_until,created_at,referral_optin`);
+          const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,welcome_free_until,created_at,referral_optin`);
           const ownerProf = (owners && owners[0]) || { id: gym.owner_id };
           const rate = ladderRate(ownerProf);
           const _wz = await isWelcomeZeroReadOnly(gym);

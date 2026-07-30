@@ -25,6 +25,7 @@ async function sbPatch(table, query, row) {
 }
 
 const DOW = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+import { ladderRate as _mtlLadder } from './_rate.js';
 
 // Aktuální čas v timezone gymu → {date 'YYYY-MM-DD', dow 0-6, mins od půlnoci}
 function gymNow(tz) {
@@ -242,14 +243,14 @@ async function handler(req, res) {
     let welcomeRerated = 0;
     try {
       const nowIso = new Date().toISOString();
-      const ended = await sbGet(`profiles?welcome_free_until=lt.${encodeURIComponent(nowIso)}&welcome_rerated=is.false&select=id,stripe_account,partner,coach_ref_score,bankai_eligible`);
+      const ended = await sbGet(`profiles?welcome_free_until=lt.${encodeURIComponent(nowIso)}&welcome_rerated=is.false&select=id,stripe_account,partner,founding,coach_ref_score,bankai_eligible`);
       for (const p of (Array.isArray(ended) ? ended : [])) {
         try {
           // The owner's CURRENT ladder rate, computed live - not mtl_acq_base from metadata,
           // which was stamped when the subscription was created and is stale the moment the
           // owner crosses a tier. Stripe track (this only ever touches Stripe subscriptions).
           const _sc = p.coach_ref_score || 0;
-          const ladderPct = p.partner ? 1 : ((_sc >= 5 && p.bankai_eligible) ? 2 : (_sc >= 2 ? 2.5 : 3));
+          const ladderPct = _mtlLadder('stripe', { partner: p.partner, founding: p.founding, score: _sc, bankai: p.bankai_eligible }) * 100;
           const pGyms = await sbGet(`gyms?owner_id=eq.${p.id}&select=id,stripe_account,gym_payout_account`);
           for (const g of (Array.isArray(pGyms) ? pGyms : [])) {
             const acct = g.gym_payout_account || g.stripe_account;
