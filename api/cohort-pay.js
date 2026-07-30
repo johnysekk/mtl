@@ -264,9 +264,14 @@ export default async function handler(req, res) {
       { const _g = cohortSignupGate(c); if (!_g.ok) return res.status(403).json({ ok: false, error: _g.error, closed: true }); }
       const depQ = Number(c.deposit_amount || 0);
       if (!(depQ > 0)) return res.status(400).json({ ok: false, error: 'no deposit set' });
+      // student_id was silently dropped here while the Stripe branch below stores it. The signup
+      // page sends it, so a LOGGED-IN student paying by QR still ended up as an accountless row:
+      // the course did not show under their account until claim-cohorts.js matched them by e-mail
+      // on a later login, and nothing in-app could be sent to them (no user_id to address).
       const memberQ = await sbInsert('cohort_members', {
         cohort_id: cohortId, gym_id: c.gym_id, name, email, phone: (b.phone || '').trim() || null,
         tier, status: 'deposit_claimed', attribution: _attr, source: 'online',
+        student_id: b.student_id || null,
         consent_at: new Date().toISOString(), consent_version: (b.consent_version || null),
         fbp: (b.fbp || null), fbc: (b.fbc || null)
       });
