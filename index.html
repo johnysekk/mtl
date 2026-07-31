@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SJC corrects two descriptions of the passive demand signal that did not match the code. (1) The comment said 'within 25km'; the constant is GYM_LOCAL_KM = 20. (2) The founder hotspot panel described a passive signal as someone who 'hit the end of the deck without tapping that a club is missing' -- there is no end-of-deck condition. The signal fires when the deck is BUILT and _gymLocalCount === 0, i.e. there was no club of that discipline within 20 km at all. They did not scroll past anything; there was nothing to scroll. Wording only, no behaviour change. Deploy: index.html. -->
+<!-- MTL build: SJE surfaces the distance bands the gym-cohort endpoint now returns, and leads the club panel with the NEAREST band instead of the total: a single number hides the distribution, and a club that opens a class expecting 14 and gets 4 never trusts the data again. Adds the honesty line (these are people looking, not orders; other clubs see the same) because telling an owner the limits of the data makes them trust it more. Also calls resolve_demand() on app load -- a reconciliation rather than an event hook, because a QR payment is confirmed by the owner when the student is not in the app, so no single moment could be trusted to fire; the SQL matches active membership or recorded attendance itself. Deploy: index.html + demand-signals-fix.sql (RUN THE SQL FIRST) + api/_geo.js, gym-cohort.js, demand-threshold.js, demand-hotspot.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3842,7 +3842,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SJC';
+const MTL_BUILD='SJE';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -5581,6 +5581,56 @@ async function _copyReferralLink(){
     toast(LANG==='en'?'Invite link copied!':'Zvací odkaz zkopírován!');
   }catch(e){ toast(LANG==='en'?'Copy failed':'Kopírování selhalo'); }
 }
+// Time windows and gap reasons. The `.v` STRINGS ARE A CONTRACT with api/_geo.js (TIME_WINDOWS,
+// GAP_REASONS) -- the server matches a club's schedule against them via windowOf(). Labels live
+// here because they are UI and get translated; boundaries live on the server because they are
+// logic. If a boundary changes, it has to change in BOTH places, hence the times are spelled out
+// in the subtitle so the mismatch is visible rather than silent.
+//
+// THE RULE, printed for the user: every window goes by the START of the class, except Morning
+// which goes by the END -- "I have to be finished before work" is a different constraint from
+// "I can't start before I leave work".
+//
+// Naming: the label is a plain time-of-day word true for everyone, the work/school context is
+// only a subtitle. Calling the 16:00-19:30 window "After work" would quietly exclude shift
+// workers, students, parents on leave and pensioners -- precisely the people who can fill the
+// dead midday hours, i.e. the most commercially useful answers in the whole form.
+var MTL_TIME_WINDOWS = [
+  { v:'morning',   cs:'R\u00e1no',     en:'Morning',       tCs:'konec do 8:30',  tEn:'ends by 8:30',  sCs:'stihnu p\u0159ed prac\u00ed / \u0161kolou', sEn:'done before work / school' },
+  { v:'forenoon',  cs:'Dopoledne',      en:'Late morning',  tCs:'8:30\u201312:00', tEn:'8:30\u201312:00', sCs:'', sEn:'' },
+  { v:'afternoon', cs:'Odpoledne',      en:'Afternoon',     tCs:'12:00\u201316:00', tEn:'12:00\u201316:00', sCs:'', sEn:'' },
+  { v:'earlyeve',  cs:'Podve\u010der', en:'Early evening', tCs:'16:00\u201319:30', tEn:'16:00\u201319:30', sCs:'po \u0161kole, po pr\u00e1ci', sEn:'after school, after work' },
+  { v:'evening',   cs:'Ve\u010der',    en:'Evening',       tCs:'od 19:30',       tEn:'from 19:30',    sCs:'', sEn:'' },
+  { v:'weekend',   cs:'V\u00edkend',   en:'Weekend',       tCs:'So / Ne',        tEn:'Sat / Sun',     sCs:'', sEn:'' }
+];
+// FOUNDER-ONLY. Never shown to a club: a club does not need to know why someone is NOT coming,
+// it needs to know that someone WILL -- and that positive answer is already in the time windows
+// above. Feeding clubs the negative version would be a mechanic that helps nobody and can only
+// give offence. For MTL these are the most valuable rows in the dataset: they say why a market
+// is not working.
+var MTL_GAP_REASONS = [
+  { v:'time', cs:'\u010cas', en:'Time' },
+  { v:'distance', cs:'Doj\u00ed\u017ed\u011bn\u00ed', en:'Distance' },
+  { v:'price', cs:'Cena', en:'Price' },
+  { v:'level', cs:'\u00darove\u0148', en:'Level' },
+  { v:'atmosphere', cs:'Atmosf\u00e9ra', en:'Atmosphere' },
+  { v:'browsing', cs:'Nev\u00edm, jen hled\u00e1m', en:'Just looking' }
+];
+function _chipHtml(cls, v, label, sub){
+  return '<span class="'+cls+'" data-v="'+v+'" style="display:inline-block;padding:7px 12px;margin:3px;border:1.5px solid var(--border);border-radius:999px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;background:#fff;color:var(--dark);line-height:1.25;">'
+    + label + (sub?('<span style="display:block;font-size:10.5px;font-weight:600;opacity:.65;">'+sub+'</span>'):'') + '</span>';
+}
+function _wireChips(root, cls){
+  Array.prototype.forEach.call(root.querySelectorAll('.'+cls), function(c){
+    c.onclick=function(){ var on=c.dataset.on==='1'; c.dataset.on=on?'':'1';
+      c.style.background=on?'#fff':'var(--dark)'; c.style.color=on?'var(--dark)':'#fff';
+      c.style.borderColor=on?'var(--border)':'var(--dark)'; };
+  });
+}
+function _pickedChips(root, cls){
+  var out=[]; Array.prototype.forEach.call(root.querySelectorAll('.'+cls), function(c){ if(c.dataset.on==='1') out.push(c.dataset.v); });
+  return out;
+}
 function _demandBtnHtml(){ return '<div id="demandWrap" style="margin-top:10px;"><button id="deckDemandBtn" style="padding:12px 18px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:11px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">📍 '+(LANG==='en'?'Missing clubs near you? Tell us':'Chybí ti tu kluby? Dej nám vědět')+'</button></div>'; }
 function _openDemandChips(){
   var wrap=document.getElementById('demandWrap'); if(!wrap) return;
@@ -5589,7 +5639,35 @@ function _openDemandChips(){
   var chips=ds.map(function(d){ return '<span class="demandChip" data-v="'+d.v+'" style="display:inline-block;padding:7px 12px;margin:3px;border:1.5px solid var(--border);border-radius:999px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;background:#fff;color:var(--dark);">'+d.emoji+' '+(LANG==='en'?d.en:d.cs)+'</span>'; }).join('');
   wrap.innerHTML='<div style="font-size:13px;font-weight:700;color:var(--dark);margin-bottom:6px;">'+(LANG==='en'?'What club would you want — what should it teach?':'Jaký klub bys chtěl — co má učit?')+'</div><div id="demandChips" style="margin-bottom:8px;">'+chips+'</div><label style="display:flex;align-items:flex-start;gap:8px;margin-bottom:10px;font-size:12.5px;line-height:1.4;cursor:pointer;color:var(--dark);"><input type="checkbox" id="demandCommit" style="width:16px;height:16px;margin-top:1px;flex-shrink:0;"> '+(LANG==='en'?'I am seriously interested in training (you will be notified when a club for the selected sport joins MTL near you)':'Mám vážný zájem trénovat (Dostaneš upozornění, jakmile se ve tvém okolí přidá nový klub s vybraným sportem)')+'</label><button id="demandSend" style="padding:10px 18px;background:var(--red);color:#fff;border:none;border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">'+(LANG==='en'?'Send':'Odeslat')+'</button>';
   Array.prototype.forEach.call(wrap.querySelectorAll('.demandChip'),function(c){ c.onclick=function(){ var on=c.dataset.on==='1'; c.dataset.on=on?'':'1'; c.style.background=on?'#fff':'var(--dark)'; c.style.color=on?'var(--dark)':'#fff'; c.style.borderColor=on?'var(--border)':'var(--dark)'; }; });
-  var sb=document.getElementById('demandSend'); if(sb) sb.onclick=function(){ var sel=[]; Array.prototype.forEach.call(wrap.querySelectorAll('.demandChip'),function(c){ if(c.dataset.on==='1') sel.push(c.dataset.v); }); var _cm=!!((document.getElementById('demandCommit')||{}).checked); _reportGymDemand(sel.join(','), false, _cm); };
+  // Steps 1-3. Each one is independently useful, so abandoning half way is not a failure --
+  // that is why nothing is required and the whole block can be sent with one chip ticked.
+  // Step 3 only appears when clubs actually exist nearby: with zero clubs within GYM_LOCAL_KM
+  // there is nothing to have rejected, and asking would be nonsense.
+  var _EN=LANG==='en';
+  var _hasLocal = (typeof _gymLocalCount!=='undefined' && _gymLocalCount>0);
+  var _lv=(typeof LEVELS!=='undefined'?LEVELS:[]).filter(function(l){ return l.v!=='all'; });
+  var _extra='<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border);">'
+    + '<div style="font-size:13px;font-weight:700;color:var(--dark);margin-bottom:2px;">'+(_EN?'When could you train?':'Kdy bys mohl/a tr\u00e9novat?')+'</div>'
+    + '<div style="font-size:11px;color:var(--light);margin-bottom:6px;">'+(_EN?'By class START time \u2014 except Morning, which is by when it ENDS.':'Podle ZA\u010c\u00c1TKU lekce \u2014 krom\u011b R\u00e1na, kter\u00e9 se \u0159\u00edd\u00ed KONCEM.')+'</div>'
+    + '<div id="demandWin" style="margin-bottom:10px;">'
+    + MTL_TIME_WINDOWS.map(function(w){ var sub=(_EN?w.tEn:w.tCs)+((_EN?w.sEn:w.sCs)?(' \u00b7 '+(_EN?w.sEn:w.sCs)):''); return _chipHtml('winChip', w.v, (_EN?w.en:w.cs), sub); }).join('')
+    + '</div>'
+    + (_lv.length ? ('<div style="font-size:13px;font-weight:700;color:var(--dark);margin-bottom:6px;">'+(_EN?'For whom?':'Pro koho?')+'</div><div id="demandLvl" style="margin-bottom:10px;">'
+        + _lv.map(function(l){ return _chipHtml('lvlChip', l.v, (_EN?l.en:l.cs), ''); }).join('') + '</div>') : '')
+    + (_hasLocal ? ('<div style="font-size:13px;font-weight:700;color:var(--dark);margin-bottom:6px;">'+(_EN?'There are clubs nearby. What does not fit?':'V okol\u00ed n\u011bco je. Co ti u nich nesed\u00ed?')+'</div><div id="demandWhy" style="margin-bottom:8px;">'
+        + MTL_GAP_REASONS.map(function(r){ return _chipHtml('whyChip', r.v, (_EN?r.en:r.cs), ''); }).join('') + '</div>'
+        + '<textarea id="demandNote" rows="2" placeholder="'+(_EN?'Anything else? (optional)':'N\u011bco dal\u0161\u00edho? (nepovinn\u00e9)')+'" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:10px;font-size:12.5px;font-family:inherit;resize:vertical;margin-bottom:4px;"></textarea>') : '')
+    + '</div>';
+  try{ var _cmLbl=wrap.querySelector('label'); if(_cmLbl) _cmLbl.insertAdjacentHTML('beforebegin', _extra); }catch(e){}
+  _wireChips(wrap,'winChip'); _wireChips(wrap,'lvlChip'); _wireChips(wrap,'whyChip');
+
+  var sb=document.getElementById('demandSend'); if(sb) sb.onclick=function(){
+    var sel=_pickedChips(wrap,'demandChip');
+    var _cm=!!((document.getElementById('demandCommit')||{}).checked);
+    var _form={ windows:_pickedChips(wrap,'winChip').join(','), levels:_pickedChips(wrap,'lvlChip').join(','),
+                reasons:_pickedChips(wrap,'whyChip').join(','), note:((document.getElementById('demandNote')||{}).value||'').trim() };
+    _reportGymDemand(sel.join(','), false, _cm, _form);
+  };
 }
 async function _browseOnline(){
   try{
@@ -5598,7 +5676,7 @@ async function _browseOnline(){
     if(typeof init==='function') init(); else { filtered=buildFiltered(); idx=0; renderCards(); }
   }catch(e){}
 }
-async function _reportGymDemand(discCsv, silent, commit){
+async function _reportGymDemand(discCsv, silent, commit, form){
   try{
     if(!currentUser||!currentUser.id){ if(!silent) toast(L('⚠️ Nejdřív se přihlas')); return; }
     var _ul=(typeof userLoc!=='undefined')?userLoc:null;
@@ -5608,7 +5686,18 @@ async function _reportGymDemand(discCsv, silent, commit){
     var lng=(_ul&&_ul.lng!=null)?_ul.lng:((currentUser.city_lng!=null)?+currentUser.city_lng:null);
     if(!country && lat!=null && lng!=null){ try{ var _rr=await fetch('https://nominatim.openstreetmap.org/reverse?format=json&addressdetails=1&zoom=5&lat='+lat+'&lon='+lng); var _rj=await _rr.json(); country=((_rj&&_rj.address&&_rj.address.country)||'').trim(); if(!city&&_rj&&_rj.address){ city=(_rj.address.city||_rj.address.town||_rj.address.village||'').trim(); } }catch(e){} }
     if(!country) country=(currentUser.country||'').trim();
-    (discCsv||'').split(',').map(function(x){return x.trim();}).filter(Boolean).forEach(function(_d){ try{ supaClient.rpc('bump_demand', { p_user:currentUser.id, p_disc:_d, p_city:city||null, p_country:country||null, p_lat:lat, p_lng:lng, p_source:(silent?'passive':'explicit'), p_commit:!!commit }).then(function(){},function(){}); }catch(e){} });
+    var _discs=(discCsv||'').split(',').map(function(x){return x.trim();}).filter(Boolean);
+    var _hasForm = !!(form && (form.windows || form.levels || form.reasons || form.note));
+    if(_hasForm && _discs.length){
+      // One write for the whole form, mirrored onto every discipline the person is looking for.
+      try{ supaClient.rpc('submit_demand_form', { p_discs:_discs, p_windows:form.windows||null, p_levels:form.levels||null,
+        p_reasons:form.reasons||null, p_note:form.note||null, p_city:city||null, p_country:country||null,
+        p_lat:lat, p_lng:lng, p_commit:!!commit }).then(function(){},function(){}); }catch(e){}
+    } else {
+      // p_user is ignored server-side now (auth.uid() is used instead) but stays in the call so an
+      // older deployed client keeps working against the new function.
+      _discs.forEach(function(_d){ try{ supaClient.rpc('bump_demand', { p_user:currentUser.id, p_disc:_d, p_city:city||null, p_country:country||null, p_lat:lat, p_lng:lng, p_source:(silent?'passive':'explicit'), p_commit:(commit?true:null) }).then(function(){},function(){}); }catch(e){} });
+    }
     if(lat!=null && lng!=null){ try{ fetch('/api/demand-threshold?lat='+lat+'&lng='+lng+'&user='+encodeURIComponent(currentUser.id)).catch(function(){}); }catch(e){} }
     var w=document.getElementById('demandWrap'); if(w) w.innerHTML='<div style="font-size:13px;font-weight:700;color:#006040;padding:6px 0;">'+(LANG==='en'?'✓ Thanks! We\'ll focus on adding more gyms in your area. You\'ll get a notification when a new klub teaching your sport is added.':'✓ Díky! Zaměříme se na přidání dalších klubů ve tvém okolí. Až přibude nový klub s tvým sportem, dáme ti vědět.')+'</div>';
   }catch(e){}
@@ -17216,6 +17305,25 @@ async function _loadGymCohort(gymId, box){
     var cnt=j.count||0, com=j.committed||0;
     if(cnt<1){ box.innerHTML='<div style="font-size:12px;color:var(--mid);padding:10px 4px;line-height:1.5;">'+(EN?'No one nearby has asked for your sport yet. When they do, you can welcome them here.':'Zat\u00edm nikdo v okol\u00ed nepoptal tv\u016fj sport. A\u017e ano, m\u016f\u017ee\u0161 je tu p\u0159iv\u00edtat.')+'</div>'; return; }
     var html='';
+    // Lead with the NEAREST band, not the total. A single number hides the distribution and the
+    // distribution is the whole story: 3 people 2 km away will almost certainly come, 6 people
+    // 19 km away almost certainly will not -- they will go somewhere nearer. A club that opens a
+    // class expecting 14 and gets 4 never trusts this data again, so the number it reads first
+    // has to be one that will actually turn up.
+    var _bands=(j.bands||[]).filter(function(b){ return b && b.count>0; });
+    if(_bands.length){
+      html+='<div style="font-size:13px;line-height:1.6;padding:4px 4px 2px;">'
+        + '<b style="font-size:15px;">'+_bands[0].count+'</b> '+(EN?('within '+_bands[0].km+' km'):('do '+_bands[0].km+' km'))
+        + _bands.slice(1).map(function(b){ return ' \u00b7 <span style="color:var(--mid);">'+b.count+' '+(EN?('to '+b.km+' km'):('do '+b.km+' km'))+'</span>'; }).join('')
+        + '</div>';
+      if(com) html+='<div style="font-size:12px;color:#067647;font-weight:700;padding:0 4px 2px;">'+(EN?('Of those, '+com+' asked to be told when such a class appears.'):('Z toho '+com+' si \u0159eklo, \u017ee chce v\u011bd\u011bt, a\u017e se takov\u00e1 lekce objev\u00ed.'))+'</div>';
+      // Telling an owner the limits of the data makes them trust it MORE. Overstating is what
+      // kills credibility, and credibility is the only thing this feature has.
+      html+='<div style="font-size:11px;color:var(--light);line-height:1.45;padding:2px 4px 8px;">'
+        + (EN?'These are not orders \u2014 they are people looking, who said this about themselves. Other clubs teaching this sport see the same.'
+             :'Nejsou to objedn\u00e1vky \u2014 jsou to lid\u00e9, kte\u0159\u00ed hledaj\u00ed a tohle uvedli o sob\u011b. Ostatn\u00ed kluby s t\u00edmto sportem vid\u00ed tot\u00e9\u017e.')
+        + '</div>';
+    }
     html+='<div style="font-size:13px;line-height:1.55;padding:4px 4px 8px;">'+(EN?('<b>'+cnt+'</b> people nearby wanted your sport'):('<b>'+cnt+'</b> lid\u00ed v okol\u00ed cht\u011blo tv\u016fj sport'))+(com?(' \u00b7 <b style="color:#067647;">'+com+'</b> '+(EN?'serious':'v\u00e1\u017en\u00fdch')):'')+'.</div>';
     html+='<div style="font-size:12px;color:var(--mid);line-height:1.5;padding:0 4px 8px;">'+(EN?'Send them a welcome message. A discount is optional \u2014 it lifts conversion, but it is your call.':'Po\u0161li jim uv\u00edtac\u00ed zpr\u00e1vu. Sleva je voliteln\u00e1 \u2014 zvedne konverzi, ale je na tob\u011b.')+'</div>';
     html+='<div style="display:flex;gap:10px;align-items:center;padding:2px 4px 10px;flex-wrap:wrap;">'
@@ -25745,6 +25853,14 @@ async function _betaRecheck(){
   _hideBetaWaiting(); try{ enterApp(); }catch(e){ location.reload(); }
 }
 function enterApp(){
+  // Take anyone who has since found a club out of the demand queue. Deliberately a RECONCILIATION
+  // on load, not an event hook on purchase: a QR payment is confirmed by the owner later, when the
+  // student is not in the app, so no single moment could be trusted to fire. The SQL does the
+  // matching itself (active membership at a club teaching it, or attendance already recorded), so
+  // this is one cheap call that self-heals even after a failure. A queue full of people who are
+  // already training somewhere is worthless -- and it quietly inflates the number shown to clubs.
+  try{ if(currentUser && currentUser.id) supaClient.rpc('resolve_demand').then(function(){},function(){}); }catch(e){}
+
   if(_betaGateActive()){ try{ _showBetaWaiting(); }catch(e){} return; }
   try{ _hideBetaWaiting(); }catch(e){}
   try{ if(typeof processPendingJoin==='function') processPendingJoin(); }catch(e){}
