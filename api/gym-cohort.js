@@ -95,7 +95,7 @@ export default async function handler(req, res) {
     // and must never move, last_seen_at is "are they still looking". And anyone who has since
     // found a club (source='resolved') is out of the queue -- a queue full of people already
     // training somewhere is worthless and quietly inflates the number we show clubs.
-    const rows = await pagedGet(`demand_signals?select=user_id,disciplines,lat,lng,committed,source,opens&source=neq.resolved&last_seen_at=gte.${fresh}&lat=gte.${glat - dLat}&lat=lte.${glat + dLat}&lng=gte.${glng - dLng}&lng=lte.${glng + dLng}`);
+    const rows = await pagedGet(`demand_signals?select=user_id,disciplines,lat,lng,committed,source,opens,form_at,windows,levels&source=neq.resolved&last_seen_at=gte.${fresh}&lat=gte.${glat - dLat}&lat=lte.${glat + dLat}&lng=gte.${glng - dLng}&lng=lte.${glng + dLng}`);
 
     // A single total hides the distribution, and the distribution is the whole story: 3 people
     // 2 km away will almost certainly come, 6 people 19 km away almost certainly will not -- they
@@ -104,6 +104,10 @@ export default async function handler(req, res) {
     // The distance was already being computed here and thrown away as a filter; now it is kept.
     const matchUsers = new Set(), committedUsers = new Set(), discCount = {};
     const bandUsers = DEMAND_BANDS_KM.map(() => new Set());
+    // The threshold is measured on people who FILLED THE FORM, not on every signal: a passive one is
+    // somebody who opened an empty deck and said nothing, and gating on those is weak.
+    const formUsers = new Set();
+    const winCount = {}, lvlCount = {};
     for (const r of rows) {
       if (r.lat == null || r.lng == null) continue;
       const dKm = hav(glat, glng, +r.lat, +r.lng);
@@ -120,19 +124,75 @@ export default async function handler(req, res) {
         for (let bi = 0; bi < DEMAND_BANDS_KM.length; bi++) {
           if (dKm <= DEMAND_BANDS_KM[bi]) bandUsers[bi].add(r.user_id);
         }
+        if (r.form_at) {
+          formUsers.add(r.user_id);
+          (r.windows || '').split(',').map(x => x.trim()).filter(Boolean).forEach(w => { winCount[w] = (winCount[w] || 0) + 1; });
+          (r.levels || '').split(',').map(x => x.trim()).filter(Boolean).forEach(l => { lvlCount[l] = (lvlCount[l] || 0) + 1; });
+        }
       }
       ds.forEach(d => { if (!gymDisc.size || gymDisc.has(d)) discCount[d] = (discCount[d] || 0) + 1; });
     }
     const disciplines = Object.entries(discCount).sort((a, b) => b[1] - a[1]).map(([v, n]) => ({ v, n }));
 
     if (req.method !== 'POST') {
-      const enough = matchUsers.size >= THRESHOLD;
+      const enough = formUsers.size >= THRESHOLD;
       return res.status(200).json(enough
-        ? { ok: true, enough: true, threshold: THRESHOLD, count: matchUsers.size, committed: committedUsers.size, disciplines,
-            bands: DEMAND_BANDS_KM.map((km, i) => ({ km, count: bandUsers[i].size })) }
-        : { ok: true, enough: false, threshold: THRESHOLD });   // below threshold: hide the small number entirely
+        ? { ok: true, enough: true, threshold: THRESHOLD, count: matchUsers.size, forms: formUsers.size,
+            committed: committedUsers.size, disciplines,
+            bands: DEMAND_BANDS_KM.map((km, i) => ({ km, count: bandUsers[i].size })),
+            windows: Object.entries(winCount).sort((a, b) => b[1] - a[1]).map(([v, n]) => ({ v, n })),
+            levels: Object.entries(lvlCount).sort((a, b) => b[1] - a[1]).map(([v, n]) => ({ v, n })) }
+        : { ok: true, enough: false, threshold: THRESHOLD, forms: formUsers.size });   // below threshold: hide the numbers, show only progress
     }
-    if (matchUsers.size < THRESHOLD) return res.status(400).json({ error: 'not enough demand', threshold: THRESHOLD });
+    if (formUsers.size < THRESHOLD) return res.status(400).json({ error: 'not enough demand', threshold: THRESHOLD });
+
+    // POST action=sounding: ask the waiting cohort whether they would come, WITHOUT opening
+    // anything. A club that lists a class and then finds nobody comes never trusts this data
+    // again, and once the room and the coach are booked the days are expensive to move. Asking
+    // is free, so even a cautious owner will try it -- and a concrete answer beats an estimate.
+    //
+    // It lives here rather than in the client because the recipient ids must never leave the
+    // server: the club is told HOW MANY, never WHO.
+    if (b.action === 'sounding') {
+      const ids = Array.from(matchUsers);
+      if (!ids.length) return res.status(400).json({ ok: false, error: 'nobody to ask' });
+
+      const disc = String(b.discipline || (disciplines.length ? disciplines[0].v : '') || '').trim();
+      const dys = String(b.days || '').split(',').map(x => x.trim()).filter(Boolean).join(',');
+      if (!disc || !dys) return res.status(400).json({ ok: false, error: 'discipline + days required' });
+
+      // send_sounding enforces ownership and the one-per-30-days cap, so a failure here is a
+      // real refusal and must surface rather than be swallowed.
+      const sr = await fetch(`${SB}/rest/v1/rpc/send_sounding`, {
+        method: 'POST', headers: { ...svc },
+        body: JSON.stringify({ p_gym_id: gymId, p_disc: disc, p_window: b.window || null,
+          p_level: b.level || null, p_days: dys, p_time: b.time || null, p_user_ids: ids }),
+      });
+      if (!sr.ok) {
+        const t = await sr.text().catch(() => '');
+        return res.status(400).json({ ok: false, error: 'sounding refused', detail: t.slice(0, 200) });
+      }
+      const soundingId = await sr.json().catch(() => null);
+
+      const nm2 = gym.name || 'Klub';
+      const dayCs = { po: 'Po', ut: '\u00dat', st: 'St', ct: '\u010ct', pa: 'P\u00e1', so: 'So', ne: 'Ne' };
+      const dTxt = dys.split(',').map(d => dayCs[d] || d).join(' a ');
+      const tTxt = b.time ? (' v ' + b.time) : '';
+      const payload2 = ids.map(u => ({
+        user_id: u, type: 'system', read: false,
+        data: JSON.stringify({ kind: 'sounding_ask', sounding_id: soundingId, gym_id: gymId, gym_name: nm2, days: dys, time: b.time || null, disc }),
+        // Deliberately conditional wording. If people answer and nothing ever happens, we have
+        // burned their willingness to answer the next one.
+        message: '\uD83E\uDD14 ' + nm2 + ' zva\u017euje otev\u0159\u00edt lekci ' + dTxt + tTxt + '. P\u0159i\u0161el bys? Nen\u00ed to z\u00e1vazn\u00e9 \u2014 pom\u016f\u017ee to klubu rozhodnout.',
+      }));
+      let sent = 0;
+      for (let i = 0; i < payload2.length; i += 500) {
+        const chunk = payload2.slice(i, i + 500);
+        const rr = await fetch(`${SB}/rest/v1/notifications`, { method: 'POST', headers: { ...svc, Prefer: 'return=minimal' }, body: JSON.stringify(chunk) });
+        if (rr.ok) sent += chunk.length;
+      }
+      return res.status(200).json({ ok: true, sounding_id: soundingId, asked: sent });
+    }
 
     // POST: send the waiting cohort a welcome-offer notification (discount optional)
     const pct = Math.max(0, Math.min(100, parseInt(b.discount_pct, 10) || 0));

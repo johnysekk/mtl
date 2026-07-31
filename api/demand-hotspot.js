@@ -42,7 +42,14 @@ export default async function handler(req, res) {
     const prows = pr.ok ? await pr.json() : [];
     if (!prows.length || prows[0].role !== 'founder') return res.status(403).json({ error: 'founder only' });
 
-    const rows = await pagedGet(`demand_signals?select=user_id,city,country,disciplines,created_at,last_seen_at,lat,lng,source,opens,committed&source=neq.resolved`);
+    const rows = await pagedGet(`demand_signals?select=user_id,city,country,disciplines,created_at,last_seen_at,lat,lng,source,opens,committed,form_at,windows,levels,reasons&source=neq.resolved`);
+
+    // Resolved rows are the CONVERSION numerator: people who asked and have since started training
+    // somewhere. resolve_demand() flips them rather than deleting, so the evidence stays. Note this
+    // reads created_at, not last_seen_at -- somebody who found a club three months ago and stopped
+    // opening the app is still a conversion, and filtering them on last-seen would lose exactly the
+    // successes we are trying to count.
+    const resolvedRows = await pagedGet(`demand_signals?select=user_id,disciplines,lat,lng,created_at&source=eq.resolved`);
 
     // SUPPLY side: approved gyms with coords + the disciplines they teach.
     const gymRows = await pagedGet(`gyms?status=eq.approved&select=id,disciplines,city_lat,city_lng`);
@@ -77,7 +84,7 @@ export default async function handler(req, res) {
         for (const c of clusters) { const d = hav(lat, lng, c.lat, c.lng); if (d < bestD) { bestD = d; best = c; } }
         let c;
         if (best && bestD <= CLUSTER_KM) { c = best; }
-        else { c = { lat, lng, n: 0, users: new Map(), exU: new Set(), pasU: new Set(), strongU: new Set(), comU: new Set(), disc: {}, cities: {}, country, last: '' }; clusters.push(c); }
+        else { c = { lat, lng, n: 0, users: new Map(), exU: new Set(), pasU: new Set(), strongU: new Set(), comU: new Set(), formU: new Set(), win: {}, lvl: {}, why: {}, resolvedU: new Set(), disc: {}, cities: {}, country, last: '' }; clusters.push(c); }
         c.lat = (c.lat * c.n + lat) / (c.n + 1);
         c.lng = (c.lng * c.n + lng) / (c.n + 1);
         c.n++;
@@ -86,15 +93,29 @@ export default async function handler(req, res) {
         if (city) c.cities[city] = (c.cities[city] || 0) + 1;
         if (r.created_at > c.last) c.last = r.created_at;
         addDisc(c.disc, r.disciplines);
+        if (r.form_at && r.user_id) {
+          c.formU.add(r.user_id);
+          addDisc(c.win, r.windows);
+          addDisc(c.lvl, r.levels);
+          addDisc(c.why, r.reasons);
+        }
       } else {
         const key = country + '|' + (city || '(unknown)');
-        if (!noCoord[key]) noCoord[key] = { city: city || '(unknown)', country, users: new Map(), exU: new Set(), pasU: new Set(), strongU: new Set(), comU: new Set(), disc: {}, last: '' };
+        if (!noCoord[key]) noCoord[key] = { city: city || '(unknown)', country, users: new Map(), exU: new Set(), pasU: new Set(), strongU: new Set(), comU: new Set(), formU: new Set(), disc: {}, last: '' };
         const m = noCoord[key];
         if (r.user_id) { const _ts = new Date(r.last_seen_at || r.created_at || 0).getTime(); if (_ts > (m.users.get(r.user_id) || 0)) m.users.set(r.user_id, _ts); (r.source==='passive'?m.pasU:m.exU).add(r.user_id); if((r.source!=='passive')||((r.opens||1)>=3)) m.strongU.add(r.user_id); if(r.committed) m.comU.add(r.user_id); }
         if (r.created_at > m.last) m.last = r.created_at;
         addDisc(m.disc, r.disciplines);
       }
     });
+
+    // Attach each resolved person to the nearest cluster, same CLUSTER_KM rule that built them.
+    for (const r of resolvedRows || []) {
+      if (r.lat == null || r.lng == null || !r.user_id) continue;
+      let best = null, bestD = Infinity;
+      for (const c of clusters) { const d = hav(+r.lat, +r.lng, c.lat, c.lng); if (d < bestD) { bestD = d; best = c; } }
+      if (best && bestD <= CLUSTER_KM) best.resolvedU.add(r.user_id);
+    }
 
     const discList = obj => Object.entries(obj).sort((a, b) => b[1] - a[1]).map(([v, n]) => ({ v, n }));
     const supplyNear = (lat, lng, topDisc) => {
@@ -104,12 +125,30 @@ export default async function handler(req, res) {
       }
       return { near, nearDisc };
     };
+    // Three queues, split by the ACTION they need rather than by the shape of the data. "No club"
+    // and "club that repels people" both end in "go recruit a club", but they are different sales
+    // conversations -- greenfield versus going in against an incumbent -- so they stay apart.
+    //
+    // CONV_WEAK is a judgement call on thin data: at ten people the difference between 10% and 30%
+    // is one person, so this is a hint for sorting, never a verdict. The founder can and should
+    // override it from what they saw on the ground.
+    const CONV_WEAK = 0.15;
+    const CONV_MIN_SAMPLE = 8;
     const fromClusters = clusters.map(c => {
       const dl = discList(c.disc);
       const topDisc = dl.length ? dl[0].v : null;
       const sup = supplyNear(c.lat, c.lng, topDisc);
       const pp = peopleScore(c.users, c.strongU);
+      const resolved = c.resolvedU.size;
+      const base = pp.people + resolved;
+      const conversion = base >= CONV_MIN_SAMPLE ? +(resolved / base).toFixed(3) : null;
+      const queue = (sup.nearDisc === 0)
+        ? 'none'
+        : ((conversion != null && conversion < CONV_WEAK) ? 'conv' : 'add');
       return {
+        queue, resolved, conversion,
+        forms: c.formU.size,
+        windows: discList(c.win), levels: discList(c.lvl), reasons: discList(c.why),
         city: (Object.entries(c.cities).sort((a, b) => b[1] - a[1])[0] || ['(area)'])[0],
         country: c.country, people: pp.people, score: pp.score, explicit: c.exU.size, passive: c.pasU.size, committed: c.comU.size, disciplines: dl, last: c.last,
         lat: +c.lat.toFixed(3), lng: +c.lng.toFixed(3),
@@ -121,6 +160,8 @@ export default async function handler(req, res) {
     const fromNoCoord = Object.values(noCoord).map(m => { const pp = peopleScore(m.users, m.strongU); return {
       city: m.city, country: m.country, people: pp.people, score: pp.score, explicit: m.exU.size, passive: m.pasU.size, committed: m.comU.size, disciplines: discList(m.disc), last: m.last,
       gyms_near: null, gyms_near_disc: null, underserved: false,
+      queue: 'none', resolved: 0, conversion: null, forms: m.formU ? m.formU.size : 0,
+      windows: [], levels: [], reasons: [],
       cluster_key: 'city:' + (m.city || '').toLowerCase(),
     }; });
     const hotspots = fromClusters.concat(fromNoCoord).filter(h => h.people > 0).sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, 100);

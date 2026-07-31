@@ -15,7 +15,18 @@
 // class, plenty will for an 18:00 one. One number cannot carry that; bands can.
 
 export const LOCAL_KM = 20;           // "near me" everywhere: deck, hotspot clustering, gym coverage, demand
-export const DEMAND_THRESHOLD = 15;   // unique people before a number is shown to a club (small-number privacy)
+// Measured on people who FILLED THE FORM, not on total signals. The total includes passive ones --
+// someone who opened an empty deck and said nothing -- and a threshold built on those is weak.
+export const DEMAND_THRESHOLD = 14;   // filled forms before a number is shown to a club
+
+// When to tell a club the class is worth opening. Measured on people who confirmed a SPECIFIC day
+// in a sounding, which is the closest thing we have to bums on mats.
+//
+// THIS NUMBER IS A GUESS AND IS MEANT TO BE REPLACED BY DATA. At roughly 65% turnout it yields 8
+// people, the minimum for a viable class. Nobody knows the real confirm-to-attend ratio yet; the
+// app can measure it by comparing sounding confirmations against gym_attendance once a handful of
+// classes have actually run. Rewrite this from that measurement, do not defend it as designed.
+export const OPEN_RECOMMEND_CONFIRMED = 12;
 export const DEMAND_FRESH_DAYS = 120; // older signals are ignored entirely
 
 // Bands the club-facing panel leads with, nearest first. Lead with the SMALLEST number, never the
