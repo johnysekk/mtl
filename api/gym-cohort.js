@@ -91,7 +91,11 @@ export default async function handler(req, res) {
     // pull recent demand in a bounding box, exact-filter by haversine + discipline intersection + strong signal
     const dLat = 0.32, dLng = 0.32 / Math.max(0.2, Math.cos(glat * Math.PI / 180));
     const fresh = new Date(Date.now() - FRESH_DAYS * 86400000).toISOString();
-    const rows = await pagedGet(`demand_signals?select=user_id,disciplines,lat,lng,committed,source,opens&created_at=gte.${fresh}&lat=gte.${glat - dLat}&lat=lte.${glat + dLat}&lng=gte.${glng - dLng}&lng=lte.${glng + dLng}`);
+    // freshness now runs on last_seen_at, not created_at: created_at is when they FIRST said it
+    // and must never move, last_seen_at is "are they still looking". And anyone who has since
+    // found a club (source='resolved') is out of the queue -- a queue full of people already
+    // training somewhere is worthless and quietly inflates the number we show clubs.
+    const rows = await pagedGet(`demand_signals?select=user_id,disciplines,lat,lng,committed,source,opens&source=neq.resolved&last_seen_at=gte.${fresh}&lat=gte.${glat - dLat}&lat=lte.${glat + dLat}&lng=gte.${glng - dLng}&lng=lte.${glng + dLng}`);
 
     // A single total hides the distribution, and the distribution is the whole story: 3 people
     // 2 km away will almost certainly come, 6 people 19 km away almost certainly will not -- they
