@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SKI is SKF with its own two changes reverted -- the map focus parameter and the 'show on the map' button in the hotspot detail. This is functionally the SKE client, which is the last build known to work in production, rebuilt so it can be committed rather than only promoted. Neither reverted change could be shown to cause the freeze: both run on click, the file parses and executes cleanly, the markup is balanced and the encoding is intact. They are gone because they were the only client difference from a working build and neither is worth carrying an unexplained failure for -- a map button is not worth a broken dashboard. The real bugs found while investigating were both server-side and are fixed separately: sbGet did not exist in gym-cohort.js, and resolve_demand compared a JSONB column as text. Deploy: this index.html + api/gym-cohort.js, api/demand-hotspot.js + demand-signals-fix.sql (RE-RUN -- a Vercel rollback does not undo SQL). -->
+<!-- MTL build: SKJ fixes the duplicated opportunity strip and brings back the map link. The duplicate was an async race and quite possibly the cause of the freeze: _renderSchedOpportunityStrip checked for an existing strip and THEN awaited a token and a fetch, so a re-render during that gap passed the same check -- nothing had been inserted yet -- and started another request. Four concurrent calls produced four strips, and four requests at an endpoint that was itself failing. The slot is now claimed synchronously, before the first await, and released on every exit path including the catch, so a failed fetch cannot leave a permanent placeholder that blocks the strip for good. Also restores 'show on the map' in the hotspot detail, centred on the cluster's centre of mass, and a way back from the map to the list -- shown only when the map was opened from there. Deploy: index.html + api/gym-cohort.js, api/demand-hotspot.js + demand-signals-fix.sql (RE-RUN). -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -1744,7 +1744,12 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
 <div class="sheet" id="shFounderMap" style="z-index:88;display:flex;flex-direction:column;">
   <div class="shdr" style="background:var(--dark);border-color:#333;">
     <div class="shdr-title" style="color:#fff;">🗺️ Mapa uživatelů</div>
-    <button class="btn-close" id="btnCloseFounderMap" style="background:#333;color:#fff;">✕</button>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <!-- Comparing a cluster against the clubs around it is a back-and-forth job; closing the map
+           only to reopen the hub and the list each time turns a glance into four taps. -->
+      <button id="btnMapToHotspots" style="display:none;background:#333;color:#fff;border:none;border-radius:9px;padding:7px 12px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;">‹ Poptávka</button>
+      <button class="btn-close" id="btnCloseFounderMap" style="background:#333;color:#fff;">✕</button>
+    </div>
   </div>
   <div style="display:flex;gap:16px;padding:10px 20px;font-size:13px;font-weight:600;flex-shrink:0;align-items:center;background:var(--surf);border-bottom:1px solid var(--border);">
     <span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:12px;border-radius:50%;background:var(--red);display:inline-block;"></span> Kouči <span id="mapCoachCount" style="color:var(--mid);">0</span></span>
@@ -3856,7 +3861,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SKI';
+const MTL_BUILD='SKJ';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -6335,7 +6340,13 @@ async function openHotspotDetail(h){
     html+='<div id="hsDetDisc"></div>';
     var _tot=(typeof _gymsNearTotal==='function')?_gymsNearTotal(h.lat,h.lng):null;
     if(_tot!=null) html+='<div style="font-size:12.5px;color:var(--mid);margin-bottom:8px;">🏛️ '+(EN?(_tot+' MTL klub'+(_tot!==1?'s':'')+' within 20 km total'):(_tot+' MTL '+(_tot===1?'klub':'klubů')+' do 20 km celkem'))+'</div>';
+    if(h.lat!=null && h.lng!=null){
+      html+='<button id="hsToMap" style="width:100%;margin-top:4px;padding:11px;background:none;color:var(--dark);border:1.5px solid var(--border);border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">'
+        + (EN?'\ud83d\uddfa\ufe0f Show on the map':'\ud83d\uddfa\ufe0f Uk\u00e1zat na map\u011b')+'</button>';
+    }
     sum.innerHTML=html;
+    try{ var _m2=document.getElementById('hsToMap');
+      if(_m2) _m2.onclick=function(){ closeSheet('shHotspotDetail'); openFounderMap({ lat:h.lat, lng:h.lng, zoom:11, fromHotspots:true }); }; }catch(e){}
     _renderHsDisc(null);
   }
   var ab=document.getElementById('hsAssignBox'); if(ab) ab.innerHTML='';
@@ -14537,6 +14548,7 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
   if($('btnCloseGymCohort')) $('btnCloseGymCohort').onclick=()=>closeSheet('shGymCohort');
   if($('btnCloseFounderSond')) $('btnCloseFounderSond').onclick=()=>closeSheet('shFounderSoundings');
   if($('btnCloseFirstClub')) $('btnCloseFirstClub').onclick=()=>closeSheet('shFirstClub');
+  if($('btnMapToHotspots')) $('btnMapToHotspots').onclick=()=>{ closeSheet('shFounderMap'); openSheet('shDemandHotspots'); };
   if($('btnCloseFinance')) $('btnCloseFinance').onclick=()=>closeSheet('shFinance');
   if($('mgCohortsBtn')) $('mgCohortsBtn').onclick=()=>openCohorts(_myGymData.id, _myGymData.name, currentUser.id, _myGymData.stripe_account, _myGymData.currency, parseDisc(_myGymData.disciplines));
   if($('recpSearchBtn')) $('recpSearchBtn').onclick=recpSearchUsers;
@@ -17205,10 +17217,18 @@ async function _renderSchedOpportunityStrip(){
   try{
     const host=$('mgSchedule'); if(!host || !_myGymData || !_myGymData.id) return;
     if(document.getElementById('schedOppStrip')) return;
+    // Claim the slot SYNCHRONOUSLY, before the first await. The guard above used to be the only
+    // protection, and it is useless in an async function: the check passes, the fetch begins, the
+    // schedule re-renders while it is in flight, the check passes again because nothing has been
+    // inserted yet -- and two strips appear. With more re-renders it is more strips, each firing
+    // its own request at the endpoint.
+    host.insertAdjacentHTML('beforebegin', '<div id="schedOppStrip" style="display:none;"></div>');
+    const slot=document.getElementById('schedOppStrip');
+    const _giveUp=function(){ try{ if(slot && slot.parentNode) slot.parentNode.removeChild(slot); }catch(e){} };
     const _t=await _freshTok();
     const r=await fetch('/api/gym-cohort?gymId='+encodeURIComponent(_myGymData.id), { headers:{ 'x-access-token':_t } });
     const j=await r.json().catch(function(){ return {}; });
-    if(!j || !j.ok || !j.enough) return;                       // below threshold: silence
+    if(!j || !j.ok || !j.enough){ _giveUp(); return; }         // below threshold: silence
 
     const EN=LANG==='en';
     const opps=(j.opportunities||[]);
@@ -17233,15 +17253,15 @@ async function _renderSchedOpportunityStrip(){
 
     const n=opps.length+(live?1:0);
     const col=live?'#E7F6EE':'#EEF4FF', fg=live?'#067647':'#1E40AF';
-    host.insertAdjacentHTML('beforebegin',
-      '<div id="schedOppStrip" style="background:'+col+';border-radius:11px;padding:11px 13px;margin-bottom:12px;cursor:pointer;">'
-      + '<div style="display:flex;align-items:center;gap:11px;">'
+    slot.style.cssText='background:'+col+';border-radius:11px;padding:11px 13px;margin-bottom:12px;cursor:pointer;';
+    slot.innerHTML=(
+      '<div style="display:flex;align-items:center;gap:11px;">'
       + '<span style="font-size:18px;flex-shrink:0;">'+(live?'\ud83d\udcac':'\ud83d\udca1')+'</span>'
       + '<div style="flex:1;min-width:0;">'
       + '<div style="font-size:13.5px;font-weight:800;color:'+fg+';">'+(EN?'Ways to get new members':'P\u0159\u00edle\u017eitosti z\u00edskat nov\u00e9 \u010dleny')+(n?(' <span style="opacity:.7;font-weight:600;">'+n+'</span>'):'')+'</div>'
       + (sub?('<div style="font-size:12px;color:'+fg+';opacity:.85;margin-top:1px;">'+sub+'</div>'):'')
-      + '</div><span style="font-size:16px;color:'+fg+';flex-shrink:0;">\u203a</span></div></div>');
-    const el=document.getElementById('schedOppStrip');
+      + '</div><span style="font-size:16px;color:'+fg+';flex-shrink:0;">\u203a</span></div>');
+    const el=slot;
     if(el) el.onclick=function(){ try{ openSheet('shGymCohort'); _loadGymCohort(_myGymData.id, $('gymCohortBody')); }catch(e){} };
 
     // A separate strip for a separate situation: the club is the FIRST one here for this sport, so
@@ -17266,7 +17286,7 @@ async function _renderSchedOpportunityStrip(){
         if(_fe) _fe.onclick=function(){ try{ openSheet('shFirstClub'); _loadFirstClubOffer(_myGymData.id, $('firstClubBody')); }catch(e){} };
       }
     }
-  }catch(e){}
+  }catch(e){ try{ _giveUp(); }catch(e2){} }
 }
 function renderScheduleEditor(){
   const box=$('mgSchedule'); if(!box) return;
@@ -20474,9 +20494,18 @@ if($('btnCloseFounderMap')) $('btnCloseFounderMap').onclick=()=>{ closeSheet('sh
 if($('btnCloseGymStats')) $('btnCloseGymStats').onclick=()=>closeSheet('shGymStats');
 
 let _founderMap=null, _mapLayer=null;
-function openFounderMap(){
+function openFounderMap(focus){
   openSheet('shFounderMap');
-  setTimeout(initFounderMap, 250); // počkej na layout sheetu
+  setTimeout(function(){
+    initFounderMap();
+    // Optional focus, so a hotspot card can hand the map its own centre of mass -- the point the
+    // 20 km supply radius is actually measured from. It is neither the city centre nor the city
+    // boundary, so from a card there is no way to picture where it sits against the nearest clubs,
+    // and that comparison is the only reason to open a map at all.
+    try{ if(focus && focus.lat!=null && focus.lng!=null && _founderMap) _founderMap.setView([focus.lat, focus.lng], focus.zoom||11); }catch(e){}
+    // Offer the way back only when there is somewhere to go back TO.
+    try{ var _bk=$('btnMapToHotspots'); if(_bk) _bk.style.display=(focus&&focus.fromHotspots)?'':'none'; }catch(e){}
+  }, 250); // počkej na layout sheetu
 }
 async function _mapOpenGym(id){ try{ const { data:g }=await supaClient.from('gyms').select('*').eq('id',id).single(); if(g) openGymProfile(g); }catch(e){} }
 function _gymsInCity(city){ try{ window._admGymCity=city||''; if(typeof closeSheet==='function') closeSheet('shFounderMap'); openSheet('shAllGyms'); if(typeof loadAdminGymList==='function') loadAdminGymList(); if(city) toast((LANG==='en'?'Clubs in ':'Kluby v ')+city); }catch(e){} }
