@@ -5,7 +5,7 @@
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const svc = { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json' };
-import { LOCAL_KM, commitLive, discList as _discList } from './_geo.js';
+import { LOCAL_KM, DEMAND_FRESH_DAYS, commitLive, discList as _discList } from './_geo.js';
 
 async function pagedGet(path) {
   let out = [], PAGE = 1000;
@@ -42,7 +42,14 @@ export default async function handler(req, res) {
     const prows = pr.ok ? await pr.json() : [];
     if (!prows.length || prows[0].role !== 'founder') return res.status(403).json({ error: 'founder only' });
 
-    const rows = await pagedGet(`demand_signals?select=user_id,city,country,disciplines,created_at,last_seen_at,lat,lng,source,opens,committed,committed_at,form_at,windows,levels,reasons,wanted_gyms&source=neq.resolved&order=created_at.asc`);
+    // Freshness is filtered HERE, not only weighted later. peopleScore already dropped stale rows
+    // from the headline count (recW returns 0 past MAXAGE), but every breakdown underneath it --
+    // explicit, passive, committed, filled forms, named clubs, windows, levels, reasons -- was
+    // built from Sets that took everyone ever recorded. The funnel could therefore claim eighteen
+    // people looking and twenty-five forms filled, which cannot happen. Same window the club panel
+    // uses, so both sides now describe the same population.
+    const fresh = new Date(Date.now() - DEMAND_FRESH_DAYS * 86400000).toISOString();
+    const rows = await pagedGet(`demand_signals?select=user_id,city,country,disciplines,created_at,last_seen_at,lat,lng,source,opens,committed,committed_at,form_at,windows,levels,reasons,wanted_gyms&source=neq.resolved&last_seen_at=gte.${fresh}&order=created_at.asc`);
 
     // Resolved rows are the CONVERSION numerator: people who asked and have since started training
     // somewhere. resolve_demand() flips them rather than deleting, so the evidence stays. Note this
@@ -82,7 +89,7 @@ export default async function handler(req, res) {
       lat, lng, alat: lat, alng: lng, n: 0, members: [],
       users: new Map(), exU: new Set(), pasU: new Set(), strongU: new Set(), comU: new Set(),
       formU: new Set(), wantG: {}, namedU: new Set(), unnamedU: new Set(),
-      win: {}, lvl: {}, why: {}, resolvedU: new Set(), disc: {}, cities: {}, country: country || '', last: '',
+      win: {}, lvl: {}, why: {}, resolvedU: new Set(), disc: {}, cities: {}, country: country || '', last: '', first: '',
     });
     const addToCluster = (c, r, lat, lng) => {
       c.lat = (c.lat * c.n + lat) / (c.n + 1);
@@ -99,6 +106,12 @@ export default async function handler(req, res) {
       if (country && !c.country) c.country = country;
       if (city) c.cities[city] = (c.cities[city] || 0) + 1;
       if (r.created_at > c.last) c.last = r.created_at;
+      // How long this demand has been building, not just when it was last touched. A cluster that
+      // has been accumulating for three months is a different proposition from one that appeared
+      // last week at the same headcount: the first is a steady trickle worth acting on, the second
+      // could be a single class emptying out or one shared link. Only the newest signal was kept,
+      // so that difference was invisible.
+      if (!c.first || r.created_at < c.first) c.first = r.created_at;
       addDisc(c.disc, r.disciplines);
       if (r.form_at && r.user_id) {
         c.formU.add(r.user_id);
@@ -254,7 +267,7 @@ export default async function handler(req, res) {
         windows: discList(c.win), levels: discList(c.lvl), reasons: discList(c.why),
         wanted: Object.entries(c.wantG).map(([g, set]) => ({ gym: g, name: gymName[g] || '', n: set.size })).sort((a, b) => b.n - a.n).slice(0, 8),
         city: (Object.entries(c.cities).sort((a, b) => b[1] - a[1])[0] || ['(area)'])[0],
-        country: c.country, people: pp.people, score: pp.score, explicit: c.exU.size, passive: c.pasU.size, committed: c.comU.size, disciplines: dl, last: c.last,
+        country: c.country, people: pp.people, score: pp.score, explicit: c.exU.size, passive: c.pasU.size, committed: c.comU.size, disciplines: dl, last: c.last, first: c.first,
         lat: +c.lat.toFixed(3), lng: +c.lng.toFixed(3),
         cluster_key: Math.round(c.lat / 0.25) + '_' + Math.round(c.lng / 0.25),
         gyms_near: sup.near, gyms_near_disc: sup.nearDisc,
