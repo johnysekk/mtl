@@ -33,6 +33,35 @@ export const DEMAND_FRESH_DAYS = 120; // older signals are ignored entirely
 // total -- a club that opens a class expecting 14 and gets 4 never trusts the data again.
 export const DEMAND_BANDS_KM = [5, 10, 20];
 
+// gyms.disciplines and profiles.disciplines are JSONB (default '["muay_thai"]'), but several
+// consumers were splitting them on commas as if they were CSV. PostgREST hands the raw JSON text
+// back, so `["muay_thai"]`.split(',') yields the single string `["muay_thai"]` -- which never
+// matches a discipline key. The visible symptom: a gym that plainly teaches the sport was reported
+// as "nobody teaches this within 20 km", which put real markets in the wrong founder queue.
+// Handles all three shapes: a parsed array, a JSON string, and legacy comma-separated text.
+export function discList(v) {
+  if (Array.isArray(v)) return v.map(x => String(x).trim()).filter(Boolean);
+  const t = String(v == null ? '' : v).trim();
+  if (!t) return [];
+  if (t.charAt(0) === '[') {
+    try { const a = JSON.parse(t); if (Array.isArray(a)) return a.map(x => String(x).trim()).filter(Boolean); } catch (e) {}
+  }
+  return t.split(',').map(x => x.trim()).filter(Boolean);
+}
+
+// How long a "serious interest" tick stays true. It is a statement, not an act -- one tap, costing
+// nothing -- so it has to age out, or the queue we show clubs slowly fills with people who ticked
+// it two years ago. The column committed_at was added for exactly this and was, until now, written
+// and never read.
+export const COMMIT_VALID_DAYS = 90;
+export function commitLive(committed, committedAt) {
+  if (!committed) return false;
+  // Legacy rows from before committed_at existed: trust the flag rather than silently dropping
+  // real commitments on the day this ships.
+  if (!committedAt) return true;
+  return (Date.now() - new Date(committedAt).getTime()) <= COMMIT_VALID_DAYS * 86400000;
+}
+
 // -- Training-time windows -------------------------------------------------------------------
 // The SAME six windows are used by the student ("when could you train?"), by the club panel
 // ("mornings are missing here") and by the matching between them. Defined twice they would drift,

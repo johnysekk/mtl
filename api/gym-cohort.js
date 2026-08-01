@@ -7,7 +7,7 @@
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const svc = { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json' };
-import { LOCAL_KM, DEMAND_THRESHOLD, DEMAND_FRESH_DAYS, DEMAND_BANDS_KM } from './_geo.js';
+import { LOCAL_KM, DEMAND_THRESHOLD, DEMAND_FRESH_DAYS, DEMAND_BANDS_KM, commitLive, discList as _discList } from './_geo.js';
 const RADIUS_KM = LOCAL_KM;   // was 25 -- a club must not be handed people the app never showed it
 const FRESH_DAYS = DEMAND_FRESH_DAYS;
 const THRESHOLD = DEMAND_THRESHOLD; // the cohort surfaces to the gym only at 15+ unique people (small-number privacy)
@@ -86,7 +86,7 @@ export default async function handler(req, res) {
     const glat = gym.city_lat != null ? +gym.city_lat : null;
     const glng = gym.city_lng != null ? +gym.city_lng : null;
     if (glat == null || glng == null || !isFinite(glat) || !isFinite(glng)) return res.status(200).json({ ok: true, count: 0, committed: 0, disciplines: [], note: 'gym has no coords' });
-    const gymDisc = new Set((gym.disciplines || '').split(',').map(x => x.trim()).filter(Boolean));
+    const gymDisc = new Set(_discList(gym.disciplines));
 
     // pull recent demand in a bounding box, exact-filter by haversine + discipline intersection + strong signal
     const dLat = 0.32, dLng = 0.32 / Math.max(0.2, Math.cos(glat * Math.PI / 180));
@@ -95,7 +95,7 @@ export default async function handler(req, res) {
     // and must never move, last_seen_at is "are they still looking". And anyone who has since
     // found a club (source='resolved') is out of the queue -- a queue full of people already
     // training somewhere is worthless and quietly inflates the number we show clubs.
-    const rows = await pagedGet(`demand_signals?select=user_id,disciplines,lat,lng,committed,source,opens,form_at,windows,levels&source=neq.resolved&last_seen_at=gte.${fresh}&lat=gte.${glat - dLat}&lat=lte.${glat + dLat}&lng=gte.${glng - dLng}&lng=lte.${glng + dLng}`);
+    const rows = await pagedGet(`demand_signals?select=user_id,disciplines,lat,lng,committed,committed_at,source,opens,form_at,windows,levels&source=neq.resolved&last_seen_at=gte.${fresh}&lat=gte.${glat - dLat}&lat=lte.${glat + dLat}&lng=gte.${glng - dLng}&lng=lte.${glng + dLng}`);
 
     // A single total hides the distribution, and the distribution is the whole story: 3 people
     // 2 km away will almost certainly come, 6 people 19 km away almost certainly will not -- they
@@ -119,7 +119,7 @@ export default async function handler(req, res) {
       if (!strong) continue;
       if (r.user_id) {
         matchUsers.add(r.user_id);
-        if (r.committed) committedUsers.add(r.user_id);
+        if (commitLive(r.committed, r.committed_at)) committedUsers.add(r.user_id);
         // cumulative: someone 3 km away counts in the 5, 10 and 20 km bands
         for (let bi = 0; bi < DEMAND_BANDS_KM.length; bi++) {
           if (dKm <= DEMAND_BANDS_KM[bi]) bandUsers[bi].add(r.user_id);

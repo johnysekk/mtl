@@ -5,7 +5,7 @@
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const svc = { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json' };
-import { LOCAL_KM } from './_geo.js';
+import { LOCAL_KM, commitLive, discList as _discList } from './_geo.js';
 
 async function pagedGet(path) {
   let out = [], PAGE = 1000;
@@ -42,7 +42,7 @@ export default async function handler(req, res) {
     const prows = pr.ok ? await pr.json() : [];
     if (!prows.length || prows[0].role !== 'founder') return res.status(403).json({ error: 'founder only' });
 
-    const rows = await pagedGet(`demand_signals?select=user_id,city,country,disciplines,created_at,last_seen_at,lat,lng,source,opens,committed,form_at,windows,levels,reasons&source=neq.resolved`);
+    const rows = await pagedGet(`demand_signals?select=user_id,city,country,disciplines,created_at,last_seen_at,lat,lng,source,opens,committed,committed_at,form_at,windows,levels,reasons&source=neq.resolved`);
 
     // Resolved rows are the CONVERSION numerator: people who asked and have since started training
     // somewhere. resolve_demand() flips them rather than deleting, so the evidence stays. Note this
@@ -55,7 +55,7 @@ export default async function handler(req, res) {
     const gymRows = await pagedGet(`gyms?status=eq.approved&select=id,disciplines,city_lat,city_lng`);
     const gymPts = gymRows
       .filter(g => g.city_lat != null && g.city_lng != null && isFinite(+g.city_lat) && isFinite(+g.city_lng))
-      .map(g => ({ lat: +g.city_lat, lng: +g.city_lng, disc: new Set((g.disciplines || '').split(',').map(x => x.trim()).filter(Boolean)) }));
+      .map(g => ({ lat: +g.city_lat, lng: +g.city_lng, disc: new Set(_discList(g.disciplines)) }));
 
     // Cluster by PROXIMITY (~30 km), not exact city string, so 'Brno' + 'Brno-stred'
     // + nearby villages collapse into one real hotspot. Greedy nearest-centroid pass.
@@ -88,7 +88,7 @@ export default async function handler(req, res) {
         c.lat = (c.lat * c.n + lat) / (c.n + 1);
         c.lng = (c.lng * c.n + lng) / (c.n + 1);
         c.n++;
-        if (r.user_id) { const _ts = new Date(r.last_seen_at || r.created_at || 0).getTime(); if (_ts > (c.users.get(r.user_id) || 0)) c.users.set(r.user_id, _ts); (r.source==='passive'?c.pasU:c.exU).add(r.user_id); if((r.source!=='passive')||((r.opens||1)>=3)) c.strongU.add(r.user_id); if(r.committed) c.comU.add(r.user_id); }
+        if (r.user_id) { const _ts = new Date(r.last_seen_at || r.created_at || 0).getTime(); if (_ts > (c.users.get(r.user_id) || 0)) c.users.set(r.user_id, _ts); (r.source==='passive'?c.pasU:c.exU).add(r.user_id); if((r.source!=='passive')||((r.opens||1)>=3)) c.strongU.add(r.user_id); if(commitLive(r.committed, r.committed_at)) c.comU.add(r.user_id); }
         if (country && !c.country) c.country = country;
         if (city) c.cities[city] = (c.cities[city] || 0) + 1;
         if (r.created_at > c.last) c.last = r.created_at;
@@ -103,7 +103,7 @@ export default async function handler(req, res) {
         const key = country + '|' + (city || '(unknown)');
         if (!noCoord[key]) noCoord[key] = { city: city || '(unknown)', country, users: new Map(), exU: new Set(), pasU: new Set(), strongU: new Set(), comU: new Set(), formU: new Set(), disc: {}, last: '' };
         const m = noCoord[key];
-        if (r.user_id) { const _ts = new Date(r.last_seen_at || r.created_at || 0).getTime(); if (_ts > (m.users.get(r.user_id) || 0)) m.users.set(r.user_id, _ts); (r.source==='passive'?m.pasU:m.exU).add(r.user_id); if((r.source!=='passive')||((r.opens||1)>=3)) m.strongU.add(r.user_id); if(r.committed) m.comU.add(r.user_id); }
+        if (r.user_id) { const _ts = new Date(r.last_seen_at || r.created_at || 0).getTime(); if (_ts > (m.users.get(r.user_id) || 0)) m.users.set(r.user_id, _ts); (r.source==='passive'?m.pasU:m.exU).add(r.user_id); if((r.source!=='passive')||((r.opens||1)>=3)) m.strongU.add(r.user_id); if(commitLive(r.committed, r.committed_at)) m.comU.add(r.user_id); }
         if (r.created_at > m.last) m.last = r.created_at;
         addDisc(m.disc, r.disciplines);
       }
