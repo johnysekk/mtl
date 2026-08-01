@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SKW fixes the club analytics panel, which failed on 'klub is not defined'. The variable in scope is gym; klub was left behind by a rename at nine call sites. Not a syntax error, so every check passed it, and before SKT added a catch it simply hung the panel on 'Nacitam' with the reason only in the console. Also applies the admin-view rule to clubs, matching SKV for coaches: opened from an admin list, your own club's money is hidden, because that screen exists for looking at other people's. And one English string still said 'Open klub Stripe'; the rest of the dictionary was clean. Deploy: index.html. -->
+<!-- MTL build: SKX makes the club analytics use the real commission instead of a hardcoded 3.5%. The split was written as *0.965 and *0.035 with matching fixed labels, so a club on Stripe (3%), a Founding Partner (2%) or an Exclusive Partner (0.5%) was shown numbers that do not match what it is charged -- and the labels announced the wrong figure even after the arithmetic was corrected. The rate now comes from the ladder, read off the OWNER's profile (partner, founding, coach_ref_score, bankai_eligible), which is exactly the field list the server's resolveOwner uses, so both sides answer from the same five columns. Verified against _rate.js: the client and server ladders are line-for-line identical. Deploy: index.html. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3860,7 +3860,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SKW';
+const MTL_BUILD='SKX';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -21046,11 +21046,34 @@ async function _renderGymAnalyticsInner(gymId, box){
   const cur = (gym&&gym.currency)||'CZK';
   const sym = _curSym(cur);
   const dropBase = Number(_st.drops_sum)||0;
-  const dropTurnover = dropBase*1, dropGym = dropBase*0.965, dropMtl = dropBase*0.035;
+  // The commission was hardcoded at 3.5% here and never asked the ladder, so a club on Stripe (3%),
+  // a Founding Partner (2%) or an Exclusive Partner (0.5%) was shown a split that does not match
+  // what it is actually charged. The ladder lives on the OWNER's profile -- partner, founding,
+  // coach_ref_score, bankai_eligible -- which is exactly what the server's resolveOwner reads, so
+  // both sides now answer from the same five fields.
+  let _rateOwner = null;
+  try{
+    if(gym && gym.owner_id){
+      const { data: _ro } = await supaClient.from('profiles')
+        .select('id, partner, founding, coach_ref_score, bankai_eligible')
+        .eq('id', gym.owner_id).maybeSingle();
+      _rateOwner = _ro || null;
+    }
+  }catch(e){}
+  const _gMode = (typeof _mtlPayMode==='function' ? _mtlPayMode(gym) : null) || 'stripe';
+  const _mtlRate = (typeof _ladderRate==='function')
+    ? _ladderRate(_gMode, { partner:_rateOwner?.partner, founding:_rateOwner?.founding, score:_rateOwner?.coach_ref_score, bankai:_rateOwner?.bankai_eligible })
+    : 0.035;
+  const _keepRate = 1 - _mtlRate;
+  // Labels said 96.5% / 3.5% in fixed text, so even with the maths corrected they would have kept
+  // announcing the wrong figure.
+  const _pctMtl = (Math.round(_mtlRate*1000)/10).toString().replace('.', LANG==='en'?'.':',');
+  const _pctKeep = (Math.round(_keepRate*1000)/10).toString().replace('.', LANG==='en'?'.':',');
+  const dropTurnover = dropBase*1, dropGym = dropBase*_keepRate, dropMtl = dropBase*_mtlRate;
   const activeMemCount = Number(_st.active_members)||0;
   const cancellingMems = Number(_st.cancelling)||0;
   const memMonthly = Number(_st.mem_monthly)||0;
-  const memGymMo = memMonthly*0.965, memMtlMo = memMonthly*0.035;
+  const memGymMo = memMonthly*_keepRate, memMtlMo = memMonthly*_mtlRate;
   const _isFounder = !!(currentUser && (currentUser.role==='founder'||currentUser.id===FOUNDER_UUID));
   let _upDrops=0, _mtlNet=0, _lastAct='', _new30=0;
   if(_isFounder){
@@ -21079,7 +21102,7 @@ async function _renderGymAnalyticsInner(gymId, box){
     <div class="prow-group" style="margin-bottom:16px;">
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🥊</div><div class="prow-lbl">${LANG==='en'?'Drop-ins sold':'Prodaných jednorázových vstupů'}</div></div><span class="prow-val">${dropsCount}</span></div>
       ${_self?`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">💳</div><div class="prow-lbl">${LANG==='en'?'Drop-in turnover':'Obrat jednorázových vstupů'}</div></div><span class="prow-val">${fmt(dropTurnover)}</span></div>`:''}
-      ${_self?`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏛️</div><div class="prow-lbl">${LANG==='en'?'Club share (96.5%)':'Klubu (96,5 %)'}</div></div><span class="prow-val">${fmt(dropGym)}</span></div>`:''}
+      ${_self?`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏛️</div><div class="prow-lbl">${LANG==='en'?('Club share ('+_pctKeep+'%)'):('Klubu ('+_pctKeep+' %)')}</div></div><span class="prow-val">${fmt(dropGym)}</span></div>`:''}
       ${_self?`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">👑</div><div class="prow-lbl">${LANG==='en'?'MTL fee (6%)':'MTL provize (6 %)'}</div></div><span class="prow-val" style="color:var(--red);">${fmt(dropMtl)}</span></div>`:''}
     </div>
     <div class="sec-lbl">${LANG==='en'?'Membership':'Členství'}</div>
@@ -21087,8 +21110,8 @@ async function _renderGymAnalyticsInner(gymId, box){
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#E8F0FF;">🎟️</div><div class="prow-lbl">${LANG==='en'?'Active members':'Aktivní členové'}</div></div><span class="prow-val">${activeMemCount}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">📉</div><div class="prow-lbl">${LANG==='en'?'Cancelling (churn)':'Ruší se (churn)'}</div></div><span class="prow-val" style="${cancellingMems>0?'color:var(--red);':''}">${cancellingMems}</span></div>
       ${_self?`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🔁</div><div class="prow-lbl">${LANG==='en'?'Monthly recurring (MRR)':'Měsíčně (MRR)'}</div></div><span class="prow-val">${fmt(memMonthly)}</span></div>`:''}
-      ${_self?`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏛️</div><div class="prow-lbl">${LANG==='en'?'Club / mo (96.5%)':'Klubu / měs (96,5 %)'}</div></div><span class="prow-val">${fmt(memGymMo)}</span></div>`:''}
-      ${_self?`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">👑</div><div class="prow-lbl">${LANG==='en'?'MTL / mo (3.5%)':'MTL / měs (3,5 %)'}</div></div><span class="prow-val" style="color:var(--red);">${fmt(memMtlMo)}</span></div>`:''}
+      ${_self?`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🏛️</div><div class="prow-lbl">${LANG==='en'?('Club / mo ('+_pctKeep+'%)'):('Klubu / měs ('+_pctKeep+' %)')}</div></div><span class="prow-val">${fmt(memGymMo)}</span></div>`:''}
+      ${_self?`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">👑</div><div class="prow-lbl">${LANG==='en'?('MTL / mo ('+_pctMtl+'%)'):('MTL / měs ('+_pctMtl+' %)')}</div></div><span class="prow-val" style="color:var(--red);">${fmt(memMtlMo)}</span></div>`:''}
     </div>
     ` : ''}
     ${(currentUser && (currentUser.role==='founder'||currentUser.id===FOUNDER_UUID)) ? `
