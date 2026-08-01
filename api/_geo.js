@@ -33,6 +33,17 @@ export const DEMAND_FRESH_DAYS = 120; // older signals are ignored entirely
 // total -- a club that opens a class expecting 14 and gets 4 never trusts the data again.
 export const DEMAND_BANDS_KM = [5, 10, 20];
 
+// Opportunities are window x level PAIRS, not two separate rankings. Two rankings ("9 want early
+// evening, 10 want beginners") cannot tell you whether that is the same nine people or two
+// different groups, and a club opening a class needs to know which -- a beginner evening class and
+// a kids afternoon class are not interchangeable.
+//
+// The cost of crossing them is fragmentation, so two guardrails: a pair needs at least
+// OPPORTUNITY_MIN_PEOPLE to be worth showing at all, and at most OPPORTUNITY_MAX are listed. The
+// remainder is summarised in one line rather than dropped, so nothing disappears silently.
+export const OPPORTUNITY_MIN_PEOPLE = 3;
+export const OPPORTUNITY_MAX = 5;
+
 // gyms.disciplines and profiles.disciplines are JSONB (default '["muay_thai"]'), but several
 // consumers were splitting them on commas as if they were CSV. PostgREST hands the raw JSON text
 // back, so `["muay_thai"]`.split(',') yields the single string `["muay_thai"]` -- which never

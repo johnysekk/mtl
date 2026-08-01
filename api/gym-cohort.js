@@ -7,7 +7,7 @@
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const svc = { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json' };
-import { LOCAL_KM, DEMAND_THRESHOLD, DEMAND_FRESH_DAYS, DEMAND_BANDS_KM, commitLive, discList as _discList } from './_geo.js';
+import { LOCAL_KM, DEMAND_THRESHOLD, DEMAND_FRESH_DAYS, DEMAND_BANDS_KM, commitLive, discList as _discList, OPPORTUNITY_MIN_PEOPLE, OPPORTUNITY_MAX } from './_geo.js';
 const RADIUS_KM = LOCAL_KM;   // was 25 -- a club must not be handed people the app never showed it
 const FRESH_DAYS = DEMAND_FRESH_DAYS;
 const THRESHOLD = DEMAND_THRESHOLD; // the cohort surfaces to the gym only at 15+ unique people (small-number privacy)
@@ -108,6 +108,9 @@ export default async function handler(req, res) {
     // somebody who opened an empty deck and said nothing, and gating on those is weak.
     const formUsers = new Set();
     const winCount = {}, lvlCount = {};
+    // window|level -> Set of people, plus their distances, so each opportunity can carry its own
+    // bands rather than inheriting the totals.
+    const pairUsers = {}, pairDist = {};
     for (const r of rows) {
       if (r.lat == null || r.lng == null) continue;
       const dKm = hav(glat, glng, +r.lat, +r.lng);
@@ -126,13 +129,43 @@ export default async function handler(req, res) {
         }
         if (r.form_at) {
           formUsers.add(r.user_id);
-          (r.windows || '').split(',').map(x => x.trim()).filter(Boolean).forEach(w => { winCount[w] = (winCount[w] || 0) + 1; });
-          (r.levels || '').split(',').map(x => x.trim()).filter(Boolean).forEach(l => { lvlCount[l] = (lvlCount[l] || 0) + 1; });
+          const _ws = (r.windows || '').split(',').map(x => x.trim()).filter(Boolean);
+          const _ls = (r.levels || '').split(',').map(x => x.trim()).filter(Boolean);
+          _ws.forEach(w => { winCount[w] = (winCount[w] || 0) + 1; });
+          _ls.forEach(l => { lvlCount[l] = (lvlCount[l] || 0) + 1; });
+          // Somebody who ticked no level still wants that time slot, so pair the window with a
+          // null level rather than dropping them out of the opportunity list entirely.
+          (_ls.length ? _ls : [null]).forEach(l => {
+            _ws.forEach(w => {
+              const k = w + '|' + (l || '');
+              (pairUsers[k] = pairUsers[k] || new Set()).add(r.user_id);
+              (pairDist[k] = pairDist[k] || []).push(dKm);
+            });
+          });
         }
       }
       ds.forEach(d => { if (!gymDisc.size || gymDisc.has(d)) discCount[d] = (discCount[d] || 0) + 1; });
     }
     const disciplines = Object.entries(discCount).sort((a, b) => b[1] - a[1]).map(([v, n]) => ({ v, n }));
+
+    // Build the opportunity list: window x level pairs, each with its own distance bands. A club
+    // decides on a concrete class, not on two abstract rankings.
+    const _pairs = Object.keys(pairUsers).map(k => {
+      const [w, l] = k.split('|');
+      const ds = pairDist[k] || [];
+      return {
+        window: w, level: l || null, count: pairUsers[k].size,
+        bands: DEMAND_BANDS_KM.map(km => ({ km, count: ds.filter(d => d <= km).length })),
+      };
+    }).sort((a, b) => b.count - a.count);
+    const _strong = _pairs.filter(p => p.count >= OPPORTUNITY_MIN_PEOPLE);
+    const _opps = _strong.slice(0, OPPORTUNITY_MAX);
+    // Everything below the bar is summarised, never silently dropped -- a club that sees "3 further
+    // smaller requests" knows something is forming; one that sees nothing assumes there is nothing.
+    const _weak = _pairs.filter(p => _opps.indexOf(p) < 0);
+    const _restU = new Set();
+    _weak.forEach(p => { const k = p.window + '|' + (p.level || ''); (pairUsers[k] || new Set()).forEach(u => _restU.add(u)); });
+    const _oppRest = { groups: _weak.length, people: _restU.size };
 
     if (req.method !== 'POST') {
       const enough = formUsers.size >= THRESHOLD;
@@ -141,7 +174,8 @@ export default async function handler(req, res) {
             committed: committedUsers.size, disciplines,
             bands: DEMAND_BANDS_KM.map((km, i) => ({ km, count: bandUsers[i].size })),
             windows: Object.entries(winCount).sort((a, b) => b[1] - a[1]).map(([v, n]) => ({ v, n })),
-            levels: Object.entries(lvlCount).sort((a, b) => b[1] - a[1]).map(([v, n]) => ({ v, n })) }
+            levels: Object.entries(lvlCount).sort((a, b) => b[1] - a[1]).map(([v, n]) => ({ v, n })),
+            opportunities: _opps, opportunities_rest: _oppRest }
         : { ok: true, enough: false, threshold: THRESHOLD, forms: formUsers.size });   // below threshold: hide the numbers, show only progress
     }
     if (formUsers.size < THRESHOLD) return res.status(400).json({ error: 'not enough demand', threshold: THRESHOLD });
