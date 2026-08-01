@@ -133,8 +133,10 @@ export default async function handler(req, res) {
           const _ls = (r.levels || '').split(',').map(x => x.trim()).filter(Boolean);
           _ws.forEach(w => { winCount[w] = (winCount[w] || 0) + 1; });
           _ls.forEach(l => { lvlCount[l] = (lvlCount[l] || 0) + 1; });
-          // Somebody who ticked no level still wants that time slot, so pair the window with a
-          // null level rather than dropping them out of the opportunity list entirely.
+          // Both are required by the form now (and by submit_demand_form), so a pair is always
+          // complete. The fallback for a missing level is kept only for rows written before that
+          // rule existed -- without it they would vanish from the opportunity list instead of
+          // showing up as a time slot with no stated audience.
           (_ls.length ? _ls : [null]).forEach(l => {
             _ws.forEach(w => {
               const k = w + '|' + (l || '');
