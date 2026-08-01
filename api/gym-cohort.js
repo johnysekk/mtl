@@ -144,16 +144,16 @@ export default async function handler(req, res) {
           const _ls = (r.levels || '').split(',').map(x => x.trim()).filter(Boolean);
           _ws.forEach(w => { winCount[w] = (winCount[w] || 0) + 1; });
           _ls.forEach(l => { lvlCount[l] = (lvlCount[l] || 0) + 1; });
-          // Both are required by the form now (and by submit_demand_form), so a pair is always
-          // complete. The fallback for a missing level is kept only for rows written before that
-          // rule existed -- without it they would vanish from the opportunity list instead of
-          // showing up as a time slot with no stated audience.
-          (_ls.length ? _ls : [null]).forEach(l => {
-            _ws.forEach(w => {
-              const k = w + '|' + (l || '');
-              (pairUsers[k] = pairUsers[k] || new Set()).add(r.user_id);
-              (pairDist[k] = pairDist[k] || []).push(dKm);
-            });
+          // The audience is the WHOLE combination, not each label separately. Crossing them one by
+          // one turned "advanced + women" and "beginner + women" into a single "women: 4", and the
+          // club could not tell whether to open a beginners' or an advanced women's class -- the
+          // one thing it needed to know. Sorted so the same combination always keys the same way
+          // regardless of the order somebody tapped the chips.
+          const _key = _ls.slice().sort().join('+');
+          _ws.forEach(w => {
+            const k = w + '|' + _key;
+            (pairUsers[k] = pairUsers[k] || new Set()).add(r.user_id);
+            (pairDist[k] = pairDist[k] || []).push(dKm);
           });
         }
       }
@@ -167,7 +167,7 @@ export default async function handler(req, res) {
       const [w, l] = k.split('|');
       const ds = pairDist[k] || [];
       return {
-        window: w, level: l || null, count: pairUsers[k].size,
+        window: w, levels: (l ? l.split('+') : []), count: pairUsers[k].size,
         bands: DEMAND_BANDS_KM.map(km => ({ km, count: ds.filter(d => d <= km).length })),
       };
     }).sort((a, b) => b.count - a.count);
@@ -177,7 +177,7 @@ export default async function handler(req, res) {
     // smaller requests" knows something is forming; one that sees nothing assumes there is nothing.
     const _weak = _pairs.filter(p => _opps.indexOf(p) < 0);
     const _restU = new Set();
-    _weak.forEach(p => { const k = p.window + '|' + (p.level || ''); (pairUsers[k] || new Set()).forEach(u => _restU.add(u)); });
+    _weak.forEach(p => { const k = p.window + '|' + (p.levels || []).join('+'); (pairUsers[k] || new Set()).forEach(u => _restU.add(u)); });
     const _oppRest = { groups: _weak.length, people: _restU.size };
 
     if (req.method !== 'POST') {
