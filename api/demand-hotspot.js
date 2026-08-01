@@ -139,9 +139,6 @@ export default async function handler(req, res) {
     // and "club that repels people" both end in "go recruit a club", but they are different sales
     // conversations -- greenfield versus going in against an incumbent -- so they stay apart.
     //
-    // CONV_WEAK is a judgement call on thin data: at ten people the difference between 10% and 30%
-    // is one person, so this is a hint for sorting, never a verdict. The founder can and should
-    // override it from what they saw on the ground.
     // "Weak conversion" used to be inferred from resolved/(live+resolved), which measured the wrong
     // thing: fresh demand has had no time to convert, so every new market came out weak and landed
     // in the acquisition queue even when people had plainly chosen a local club.
@@ -159,6 +156,7 @@ export default async function handler(req, res) {
       const pp = peopleScore(c.users, c.strongU);
       const resolved = c.resolvedU.size;
       const base = pp.people + resolved;
+      const CONV_MIN_SAMPLE = 8;   // below this the ratio is noise, so show nothing
       const conversion = base >= CONV_MIN_SAMPLE ? +(resolved / base).toFixed(3) : null;
       const _named = c.namedU.size, _unnamed = c.unnamedU.size, _both = _named + _unnamed;
       const rejected = _both >= REJECT_MIN ? +(_unnamed / _both).toFixed(3) : null;
