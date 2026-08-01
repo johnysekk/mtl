@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SJQ adds the club-exclusion step and splits the gap reasons. The student can cross out clubs they would not train at whatever happened, and those clubs then do not count them -- which fixes an unfairness the earlier design had: inferring the exclusion from an 'atmosphere' tick would have hidden that person from EVERY club nearby, including ones they had never set foot in, punishing them for a rival's failure while the club actually at fault learned nothing. Paginated ten per page rather than hidden above ten clubs, which would have switched the step off in Prague, exactly where it matters most. Nothing is pre-ticked; the default is everyone, so this narrows an existing scope rather than collecting consent here (that belongs in the terms at registration). Reasons are now grouped into operational (a club could change it) and subjective (nobody can act on it, and it is about one gym rather than the market) -- both founder-only. NOTE: this build also restores _reportGymDemand, which the SJP step-form rewrite destroyed by cutting from _openDemandChips to the next function keyword. Deploy: index.html + demand-signals-fix.sql (RE-RUN) + api/gym-cohort.js. -->
+<!-- MTL build: SJS makes the category single-select and rewrites step 3 as a conditional. Somebody is a beginner or a fighter, not both, and multi-select there produced a wish list rather than a class a club could open; the times stay multi-select, since one person genuinely can make several. Step 3 now asks which club they would go to IF it opened classes at that level and those times -- without that clause people answer about the club as it stands today and reject one precisely because it lacks the class they have just asked for, which would have made the whole question self-defeating. Deploy: index.html. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3848,7 +3848,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SJQ';
+const MTL_BUILD='SJS';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -5813,13 +5813,13 @@ async function _reportGymDemand(discCsv, silent, commit, form){
     }
 
     var _discs=(discCsv||'').split(',').map(function(x){return x.trim();}).filter(Boolean);
-    var _hasForm = !!(form && (form.windows || form.levels || form.reasons || form.note || form.nogo));
+    var _hasForm = !!(form && (form.windows || form.levels || form.reasons || form.note || form.want));
     if(_hasForm && _discs.length){
       // One write for the whole form, mirrored onto every discipline the person is looking for.
       try{ supaClient.rpc('submit_demand_form', { p_discs:_discs, p_windows:form.windows||null,
         p_levels:form.levels||null, p_reasons:form.reasons||null, p_note:form.note||null,
         p_city:city||null, p_country:country||null, p_lat:lat, p_lng:lng,
-        p_commit:!!commit, p_nogo:form.nogo||null }).then(function(){},function(){}); }catch(e){}
+        p_commit:!!commit, p_want:form.want||null }).then(function(){},function(){}); }catch(e){}
     } else {
       _discs.forEach(function(_d){
         try{ supaClient.rpc('bump_demand', { p_user:currentUser.id, p_disc:_d, p_city:city||null,
@@ -5853,7 +5853,7 @@ function _openDemandChips(){
   // The "what does not fit" step only exists where clubs already do: with none within
   // GYM_LOCAL_KM there is nothing to have rejected, and asking would be nonsense.
   var hasLocal=(typeof _gymLocalCount!=='undefined' && _gymLocalCount>0);
-  var st={ disc:[], win:[], lvl:[], why:[], nogo:[], note:'', commit:false };
+  var st={ disc:[], win:[], lvl:[], want:[], why:[], note:'', commit:false };
   var step=0;
 
   var chip=function(cls,v,label,sub){
@@ -5861,24 +5861,75 @@ function _openDemandChips(){
       + label + (sub?('<span style="display:block;font-size:10.5px;font-weight:600;opacity:.65;">'+sub+'</span>'):'') + '</span>';
   };
 
+  // FOUR STEPS. The long version asked six questions to fill in a number that, once the opening
+  // recommendation moved to the sounding, no longer decided anything -- so most of it was work
+  // spent propping up a figure nobody acts on.
+  //
+  // The important change is step 3. Attribution used to be computed from distance: the app worked
+  // out who was "near" a club and counted them for it. That never worked in a city -- Zbraslav to
+  // Pocernice is 21 km and 70 minutes, Zbraslav to Radotin is 3 km and 8 minutes, and no radius
+  // tells those apart. And it could not be fixed by better location data, because even exact GPS
+  // gives you where somebody stood when they opened the app, not where they would commute from.
+  //
+  // So the app stops guessing. The person names the clubs -- they have just swiped past them, and
+  // they know their own city better than any calculation. Attribution becomes exact and geography
+  // drops out of it entirely. It also treats a brand-new club fairly: it appears in that list like
+  // everyone else, which a view- or distance-based measure would never manage.
   var STEPS=[
     { key:'disc', cls:'dqDisc', req:true,
       t:(EN?'What are you looking for?':'Co hled\u00e1\u0161?'),
       h:(EN?'Pick every sport you would train.':'Vyber v\u0161echny sporty, kter\u00e9 bys tr\u00e9noval/a.'),
       html:function(){ return ds.map(function(d){ return chip('dqDisc', d.v, d.emoji+' '+(EN?d.en:d.cs), ''); }).join(''); } },
-    { key:'win', cls:'dqWin', req:true,
-      t:(EN?'When could you train?':'Kdy bys mohl/a tr\u00e9novat?'),
-      h:(EN?'By class START time \u2014 except Morning, which goes by when it ENDS.':'Podle ZA\u010c\u00c1TKU lekce \u2014 krom\u011b R\u00e1na, kter\u00e9 se \u0159\u00edd\u00ed KONCEM.'),
-      html:function(){ return MTL_TIME_WINDOWS.map(function(w){
-        var sub=(EN?w.tEn:w.tCs)+((EN?w.sEn:w.sCs)?(' \u00b7 '+(EN?w.sEn:w.sCs)):'');
-        return chip('dqWin', w.v, (EN?w.en:w.cs), sub); }).join(''); } },
-    { key:'lvl', cls:'dqLvl', req:true,
-      t:(EN?'Who is it for?':'Pro koho to m\u00e1 b\u00fdt?'),
-      h:(EN?'A club cannot guess \u2014 beginners at 6:30 and kids at 6:30 are not the same class.':'Klub to neuh\u00e1dne \u2014 za\u010d\u00e1te\u010dn\u00edci v 6:30 a d\u011bti v 6:30 nen\u00ed t\u00e1\u017e lekce.'),
-      html:function(){ return lv.map(function(l){ return chip('dqLvl', l.v, (EN?l.en:l.cs), ''); }).join(''); } }
+
+    // Category and times in ONE step: they answer the same question from two sides, and a club
+    // reads them together anyway -- "beginners at 6:30" is a class, "beginners" alone is not.
+    { key:'lvl', cls:'dqLvl', req:true, single:true, also:'dqWin', alsoKey:'win',
+      t:(EN?'For whom, and when?':'Pro koho a kdy?'),
+      h:(EN?'Times go by class START \u2014 except Morning, which goes by when it ENDS.':'\u010casy podle ZA\u010c\u00c1TKU lekce \u2014 krom\u011b R\u00e1na, kter\u00e9 se \u0159\u00edd\u00ed KONCEM.'),
+      html:function(){
+        return '<div style="font-size:12px;color:var(--mid);font-weight:700;margin-bottom:2px;">'+(EN?'Category':'Kategorie')+'</div>'
+          + lv.map(function(l){ return chip('dqLvl', l.v, (EN?l.en:l.cs), ''); }).join('')
+          + '<div style="font-size:12px;color:var(--mid);font-weight:700;margin:14px 0 2px;">'+(EN?'When':'Kdy')+'</div>'
+          + MTL_TIME_WINDOWS.map(function(w){
+              var sub=(EN?w.tEn:w.tCs)+((EN?w.sEn:w.sCs)?(' \u00b7 '+(EN?w.sEn:w.sCs)):'');
+              return chip('dqWin', w.v, (EN?w.en:w.cs), sub); }).join('');
+      } }
   ];
+
+  // Step 3 exists only where clubs exist. With an empty deck there is nobody to name, and the
+  // demand is founder-facing by definition -- which is exactly the "no club here" queue.
+  var nearGyms=[];
+  try{
+    nearGyms=(typeof GYMS!=='undefined'?GYMS:[]).filter(function(g){
+      if(g.distKm==null || g.distKm>GYM_LOCAL_KM) return false;
+      if(!st.disc.length) return true;
+      return (g.disciplines||[]).some(function(d){ return st.disc.indexOf(d)>=0; });
+    });
+  }catch(e){ nearGyms=[]; }
+  var gPage=0, G_PER=10;
+
+  if(nearGyms.length) STEPS.push({ key:'want', cls:'dqWant', req:false,
+      t:(EN?'Which of the clubs you just saw would you go to, if it opened classes at that level and those times?':'Do kter\u00e9ho z klub\u016f, kter\u00e9 jsi pr\u00e1v\u011b vid\u011bl/a, bys chodil/a, kdyby lekce na danou \u00farove\u0148 v dan\u00e9 \u010dasy otev\u0159el?'),
+      h:(EN?'Only the ones you pick will see your anonymous demand. Nobody else does.':'Jen ty, kter\u00e9 vybere\u0161, uvid\u00ed tvoji anonymn\u00ed popt\u00e1vku. Nikdo jin\u00fd.'),
+      html:function(){
+        var pages=Math.ceil(nearGyms.length/G_PER);
+        if(gPage>=pages) gPage=0;
+        return nearGyms.slice(gPage*G_PER, gPage*G_PER+G_PER).map(function(g){
+            return chip('dqWant', g.id, (g.name||'Klub'), (g.distKm!=null?(Math.round(g.distKm)+' km'):''));
+          }).join('')
+          + (pages>1 ? ('<div style="display:flex;align-items:center;gap:10px;margin-top:12px;">'
+              + '<button id="dqGPrev" style="padding:7px 12px;border:1.5px solid var(--border);border-radius:9px;background:none;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--dark);">\u2039</button>'
+              + '<span style="font-size:12px;color:var(--mid);">'+(gPage+1)+'/'+pages+'</span>'
+              + '<button id="dqGNext" style="padding:7px 12px;border:1.5px solid var(--border);border-radius:9px;background:none;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--dark);">'+(EN?'Next \u203a':'Dal\u0161\u00ed \u203a')+'</button></div>') : '')
+          + '<div style="font-size:11.5px;color:var(--light);margin-top:10px;">'+(EN?'None of them? That is an answer too \u2014 just skip.':'\u017d\u00e1dn\u00fd z nich? To je taky odpov\u011b\u010f \u2014 jen p\u0159esko\u010d.')+'</div>';
+      } });
+
+  // Optional, last, and founder-only. Grouped by what can be DONE about it: operational things a
+  // club could change, versus subjective ones nobody can act on -- which is the difference between
+  // "this town is underserved" and "this town is served badly", and therefore between adding a
+  // class and bringing in a rival.
   if(hasLocal) STEPS.push({ key:'why', cls:'dqWhy', req:false,
-      t:(EN?'Clubs already exist nearby. What does not fit? (Anonymous)':'V okol\u00ed u\u017e kluby jsou. Co ti na nich nesed\u00ed? (Anonymn\u00ed)'),
+      t:(EN?'What does not fit about the clubs nearby? (Anonymous)':'Co ti na klubech v okol\u00ed nesed\u00ed? (Anonymn\u00ed)'),
       h:(EN?'Only we see this \u2014 clubs never do. Skip it if none apply.':'Vid\u00edme to jen my \u2014 klub\u016fm se to nikdy nezobraz\u00ed. Kdy\u017e nic nesed\u00ed, p\u0159esko\u010d.'),
       html:function(){
         var grp=function(g,label){
@@ -5889,42 +5940,12 @@ function _openDemandChips(){
         };
         return grp('ops', (EN?'What could be changed':'Co by \u0161lo zm\u011bnit'))
              + grp('subj', (EN?'What just did not fit':'Co prost\u011b nesedlo'))
-        + '<textarea id="dqNote" rows="2" placeholder="'+(EN?'Anything else? (optional)':'N\u011bco dal\u0161\u00edho? (nepovinn\u00e9)')+'" style="width:100%;box-sizing:border-box;margin-top:10px;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:13px;font-family:inherit;resize:vertical;">'+(st.note||'')+'</textarea>'; } });
-  // Excluding clubs, paginated rather than capped. An earlier draft hid this step entirely above
-  // ten clubs -- which would have switched it off in Prague, exactly where it matters most. Ten
-  // per page instead: everybody gets to decide about every club that concerns them.
-  //
-  // Nothing is pre-ticked, and the default is "all of them", so this is a subtraction from an
-  // existing scope rather than a consent being collected here. The consent for passing demand to
-  // nearby clubs belongs in the terms accepted at registration.
-  var nearGyms=[];
-  try{
-    nearGyms=(typeof GYMS!=='undefined'?GYMS:[]).filter(function(g){
-      if(g.distKm==null || g.distKm>GYM_LOCAL_KM) return false;
-      if(!st.disc.length) return true;
-      return (g.disciplines||[]).some(function(d){ return st.disc.indexOf(d)>=0; });
-    });
-  }catch(e){ nearGyms=[]; }
-  var gPage=0, G_PER=10;
-  if(nearGyms.length) STEPS.push({ key:'nogo', cls:'dqNogo', req:false,
-      t:(EN?'Any club you would not train at, no matter what?':'Do jak\u00e9ho klubu bys ne\u0161el tr\u00e9novat, ani kdyby padaly traka\u0159e?'),
-      h:(EN?'Clubs you cross out will not see your anonymous demand data.':'Kluby, kter\u00e9 od\u0161krtne\u0161, pak neuvid\u00ed data tvoj\u00ed anonymn\u00ed popt\u00e1vky.'),
-      html:function(){
-        var pages=Math.ceil(nearGyms.length/G_PER);
-        if(gPage>=pages) gPage=0;
-        var slice=nearGyms.slice(gPage*G_PER, gPage*G_PER+G_PER);
-        return slice.map(function(g){
-            return '<span class="dqNogo" data-v="'+g.id+'" style="display:inline-block;padding:9px 13px;margin:4px;border:1.5px solid var(--border);border-radius:999px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;background:#fff;color:var(--dark);">'
-              + (g.name||'Klub') + ' <span style="opacity:.5;font-weight:600;">\u2715</span></span>';
-          }).join('')
-          + (pages>1 ? ('<div style="display:flex;align-items:center;gap:10px;margin-top:12px;">'
-              + '<button id="dqGPrev" style="padding:7px 12px;border:1.5px solid var(--border);border-radius:9px;background:none;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--dark);">\u2039</button>'
-              + '<span style="font-size:12px;color:var(--mid);">'+(gPage+1)+'/'+pages+'</span>'
-              + '<button id="dqGNext" style="padding:7px 12px;border:1.5px solid var(--border);border-radius:9px;background:none;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--dark);">'+(EN?'Next \u203a':'Dal\u0161\u00ed \u203a')+'</button></div>') : '')
-          + '<div style="font-size:11.5px;color:var(--light);margin-top:10px;">'+(EN?'None like that? Just skip.':'Nem\u00e1\u0161 takov\u00fd? Klidn\u011b p\u0159esko\u010d.')+'</div>';
+             + '<textarea id="dqNote" rows="2" placeholder="'+(EN?'Anything else? (optional)':'N\u011bco dal\u0161\u00edho? (nepovinn\u00e9)')+'" style="width:100%;box-sizing:border-box;margin-top:10px;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:13px;font-family:inherit;resize:vertical;">'+(st.note||'')+'</textarea>';
       } });
 
-  STEPS.push({ key:'done', cls:null, req:false,
+  // The "tell me when something appears" tick only makes sense when there was nothing to name.
+  // Where clubs exist, picking them already said it, and asking again would be noise.
+  if(!nearGyms.length) STEPS.push({ key:'done', cls:null, req:false,
       t:(EN?'One last thing':'Je\u0161t\u011b jedna v\u011bc'),
       h:(EN?'We will let you know the moment a club matching this appears near you.':'D\u00e1me ti v\u011bd\u011bt, jakmile se v tv\u00e9m okol\u00ed objev\u00ed klub, kter\u00fd tomu odpov\u00edd\u00e1.'),
       html:function(){
@@ -5955,7 +5976,9 @@ function _openDemandChips(){
 
   var syncNext=function(){
     var sp=STEPS[step];
-    var ok=(!sp.req) || (st[sp.key]&&st[sp.key].length>0);
+    // A merged step is only answered when BOTH of its sets are: a category with no time, or a time
+    // with no category, is not a class a club could open.
+    var ok=(!sp.req) || ((st[sp.key]&&st[sp.key].length>0) && (!sp.alsoKey || (st[sp.alsoKey]&&st[sp.alsoKey].length>0)));
     var b=ov.querySelector('#dqNext');
     b.disabled=!ok; b.style.opacity=ok?'1':'.4'; b.style.cursor=ok?'pointer':'default';
     b.textContent=(step===STEPS.length-1)?(EN?'Send':'Odeslat'):(sp.req?(EN?'Continue':'Pokra\u010dovat'):(st[sp.key]&&st[sp.key].length?(EN?'Continue':'Pokra\u010dovat'):(EN?'Skip':'P\u0159esko\u010dit')));
@@ -5988,19 +6011,33 @@ function _openDemandChips(){
       + '<div style="font-size:12px;color:var(--mid);line-height:1.45;margin-bottom:12px;">'+sp.h+'</div>'
       + '<div>'+sp.html()+'</div>';
     ov.querySelector('#dqBack').style.visibility=step?'visible':'hidden';
-    if(sp.cls){
-      Array.prototype.forEach.call(ov.querySelectorAll('.'+sp.cls), function(c){
-        if((st[sp.key]||[]).indexOf(c.dataset.v)>=0){ c.dataset.on='1'; c.style.background='var(--dark)'; c.style.color='#fff'; c.style.borderColor='var(--dark)'; }
+    // The merged step renders two chip sets; wire both, keyed separately, so category and time
+    // stay distinct fields even though they share one screen.
+    // `single` for the category: somebody is a beginner or a fighter, not both, and letting them
+    // tick everything would produce a wish list rather than a class a club could open.
+    var _wire=function(cls, key, single){
+      if(!cls) return;
+      Array.prototype.forEach.call(ov.querySelectorAll('.'+cls), function(c){
+        if((st[key]||[]).indexOf(c.dataset.v)>=0){ c.dataset.on='1'; c.style.background='var(--dark)'; c.style.color='#fff'; c.style.borderColor='var(--dark)'; }
         c.onclick=function(){
           var on=c.dataset.on==='1'; c.dataset.on=on?'':'1';
           c.style.background=on?'#fff':'var(--dark)'; c.style.color=on?'var(--dark)':'#fff'; c.style.borderColor=on?'var(--border)':'var(--dark)';
-          st[sp.key]=(st[sp.key]||[]).filter(function(x){ return x!==c.dataset.v; });
-          if(!on) st[sp.key].push(c.dataset.v);
+          if(single && !on){
+            Array.prototype.forEach.call(ov.querySelectorAll('.'+cls), function(o){
+              if(o!==c){ o.dataset.on=''; o.style.background='#fff'; o.style.color='var(--dark)'; o.style.borderColor='var(--border)'; }
+            });
+            st[key]=[c.dataset.v];
+          } else {
+            st[key]=(st[key]||[]).filter(function(x){ return x!==c.dataset.v; });
+            if(!on) st[key].push(c.dataset.v);
+          }
           syncNext();
         };
       });
-    }
-    if(sp.key==='nogo'){
+    };
+    _wire(sp.cls, sp.key, !!sp.single);
+    _wire(sp.also, sp.alsoKey, false);
+    if(sp.key==='want'){
       var pv=ov.querySelector('#dqGPrev'), nx=ov.querySelector('#dqGNext');
       if(pv) pv.onclick=function(){ gPage=Math.max(0,gPage-1); draw(); };
       if(nx) nx.onclick=function(){ gPage++; draw(); };
@@ -6016,10 +6053,11 @@ function _openDemandChips(){
     if(sp.key==='why'){ var n=ov.querySelector('#dqNote'); if(n) st.note=n.value.trim(); }
     if(sp.key==='done'){ var c=ov.querySelector('#dqCommit'); st.commit=!!(c&&c.checked); }
     if(sp.req && !(st[sp.key]&&st[sp.key].length)) return;
+    if(sp.req && sp.alsoKey && !(st[sp.alsoKey]&&st[sp.alsoKey].length)) return;
     if(step<STEPS.length-1){ step++; draw(); return; }
     ov.remove();
     _reportGymDemand(st.disc.join(','), false, st.commit,
-      { windows:st.win.join(','), levels:st.lvl.join(','), reasons:st.why.join(','), note:st.note, nogo:st.nogo.join(',') });
+      { windows:st.win.join(','), levels:st.lvl.join(','), reasons:st.why.join(','), note:st.note, want:st.want.join(',') });
   };
   draw();
 }
