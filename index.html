@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SKP stops the map dots jumping on every pan. Overlapping people were spread apart with Math.random(), rolled afresh on each redraw -- and the map redraws on moveend, so every scroll threw every dot up to several hundred metres. The spread is still needed, since people share a city centroid and would otherwise stack, but it now comes from a hash of the point's own key: same person, same offset, every render. Also moves the back-to-demand button from the dark header down beside the legend, where it reads as navigation rather than as a window control. Deploy: index.html. -->
+<!-- MTL build: SKQ takes people's names off the founder map and admits when the map is showing only part of what is there. The popup gave a full name for every dot; the map exists to answer where demand is, a name adds nothing to that, and there is not even a student profile to open from here -- so it was personal data on a screen with no use for it. Role and place now, and deliberately NOT membership or sounding replies: dropping the name does not anonymise anything, and 'Student, Brno, member of X, answered the sounding' identifies one person in a small club just as well, so adding those would have moved in the opposite direction to the fix. Clubs keep their names -- a club is a business, listed publicly in the app, and the popup opens it. Separately, map_points caps the viewport query and drops the remainder in silence, so a dense city could show 1500 of 5000 with no way to tell; the legend now says when the cap has bitten. Deploy: index.html. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -1750,6 +1750,7 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
     <!-- Sits with the legend rather than in the dark header: it is navigation about the CONTENT of
          the map, not a window control like the close cross, and on the dark bar it read as one. -->
     <button id="btnMapToHotspots" style="display:none;background:none;color:var(--dark);border:1.5px solid var(--border);border-radius:9px;padding:6px 11px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;flex-shrink:0;">‹ Poptávka</button>
+    <span id="mapCapNote" style="display:none;margin-left:auto;font-size:12px;font-weight:700;color:#8A5A00;background:#FFF4E5;border-radius:8px;padding:4px 10px;"></span>
     <span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:12px;border-radius:50%;background:var(--red);display:inline-block;"></span> Kouči <span id="mapCoachCount" style="color:var(--mid);">0</span></span>
     <span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:12px;border-radius:50%;background:#2F6FED;display:inline-block;"></span> Studenti <span id="mapStudentCount" style="color:var(--mid);">0</span></span>
     <span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:12px;border-radius:50%;background:#0A7A4F;display:inline-block;"></span> Kluby <span id="mapGymCount" style="color:var(--mid);">0</span></span>
@@ -3859,7 +3860,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SKP';
+const MTL_BUILD='SKQ';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -20555,7 +20556,7 @@ async function _mapRefresh(fit){
   if(_mapLayer) _founderMap.removeLayer(_mapLayer);
   _mapLayer = Leaflet.layerGroup().addTo(_founderMap);
   const z=_founderMap.getZoom(); const b=_founderMap.getBounds();
-  let coaches=0, students=0, gyms=0; const bounds=[];
+  let coaches=0, students=0, gyms=0; const bounds=[]; let _mapCapped=0;
   try{
     if(z < 8){
       // ZOOMED OUT: aggregated cells computed in the DB (GROUP BY). Returns <=800 rows
@@ -20574,7 +20575,12 @@ async function _mapRefresh(fit){
       });
     } else {
       // ZOOMED IN: only the raw points inside the current viewport, capped server-side.
-      const { data } = await supaClient.rpc('map_points', { minlat:b.getSouth(), minlng:b.getWest(), maxlat:b.getNorth(), maxlng:b.getEast(), lim:1500 });
+      const _LIM=1500;
+      const { data } = await supaClient.rpc('map_points', { minlat:b.getSouth(), minlng:b.getWest(), maxlat:b.getNorth(), maxlng:b.getEast(), lim:_LIM });
+      // Say so when the cap bites. The query stops at _LIM and the rest is simply dropped, so in a
+      // dense city you would be looking at 1500 of 5000 with no way to tell -- a map that quietly
+      // omits most of its subject is worse than one that admits it.
+      _mapCapped = (data && data.length >= _LIM) ? _LIM : 0;
       var _mpSeen={};
       (data||[]).forEach(function(pt){
         const la=parseFloat(pt.lat), ln=parseFloat(pt.lng); if(isNaN(la)||isNaN(ln)) return;
@@ -20587,7 +20593,13 @@ async function _mapRefresh(fit){
         const pla=la+(_hash(_mk+'a')-0.5)*0.012, pln=ln+(_hash(_mk+'b')-0.5)*0.012; bounds.push([pla,pln]);
         const kind=pt.kind; if(kind==='gym') gyms++; else if(kind==='coach') coaches++; else students++;
         const color = kind==='gym' ? '#0A7A4F' : (kind==='coach' ? '#E11' : '#2F6FED');
-        const head = (kind==='gym'?'\ud83c\udfdb\ufe0f ':(kind==='coach'?'\ud83e\udd4a ':'\ud83d\ude4b '))+(pt.name||'\u2014');
+        // Role and place, not the person. This map answers "where is the demand", and a name adds
+        // nothing to that question while being personal data on a screen that has no use for it --
+        // there is not even a student profile to open from here, so it led nowhere either.
+        // A CLUB keeps its name: it is a business, publicly listed in the app, and the popup opens it.
+        const head = kind==='gym'
+          ? ('\ud83c\udfdb\ufe0f '+(pt.name||'\u2014'))
+          : (kind==='coach' ? ('\ud83e\udd4a '+(LANG==='en'?'Coach':'Kou\u010d')) : ('\ud83d\ude4b '+(LANG==='en'?'Student':'Student')));
         let pop='<b>'+head+'</b>'+(pt.city?'<br>\ud83d\udccd '+pt.city:'')+(pt.country?', '+pt.country:'');
         if(kind==='gym') pop+='<br><button onclick="_mapOpenGym(\''+pt.id+'\')" style="margin-top:6px;padding:5px 10px;background:var(--dark);color:#fff;border:none;border-radius:7px;font-weight:700;cursor:pointer;font-size:12px;">'+(LANG==='en'?'Open club':'Otevřít klub')+'</button>';
         Leaflet.circleMarker([pla,pln], { radius:7, color:'#fff', weight:1.5, fillColor:color, fillOpacity:0.92 })
@@ -20620,6 +20632,15 @@ async function _mapRefresh(fit){
   if($('mapCoachCount')) $('mapCoachCount').textContent=coaches;
   if($('mapStudentCount')) $('mapStudentCount').textContent=students;
   if($('mapGymCount')) $('mapGymCount').textContent=gyms;
+  // The viewport query stops at its limit and silently drops the rest, so a dense city would show
+  // a fraction of itself with nothing to say so. Say so.
+  try{
+    var _cn=$('mapCapNote');
+    if(_cn){
+      _cn.style.display=_mapCapped?'':'none';
+      _cn.textContent=_mapCapped?((LANG==='en'?'Showing first ':'Zobrazeno prvn\u00edch ')+_mapCapped+(LANG==='en'?' \u2014 zoom in for the rest':' \u2014 pro zbytek si p\u0159ibli\u017e')):'';
+    }
+  }catch(e){}
   if(fit && z>=8 && bounds.length) _founderMap.fitBounds(bounds, { padding:[40,40], maxZoom:11 });
 }
 
