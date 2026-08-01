@@ -42,7 +42,7 @@ export default async function handler(req, res) {
     const prows = pr.ok ? await pr.json() : [];
     if (!prows.length || prows[0].role !== 'founder') return res.status(403).json({ error: 'founder only' });
 
-    const rows = await pagedGet(`demand_signals?select=user_id,city,country,disciplines,created_at,last_seen_at,lat,lng,source,opens,committed,committed_at,form_at,windows,levels,reasons&source=neq.resolved`);
+    const rows = await pagedGet(`demand_signals?select=user_id,city,country,disciplines,created_at,last_seen_at,lat,lng,source,opens,committed,committed_at,form_at,windows,levels,reasons,wanted_gyms&source=neq.resolved`);
 
     // Resolved rows are the CONVERSION numerator: people who asked and have since started training
     // somewhere. resolve_demand() flips them rather than deleting, so the evidence stays. Note this
@@ -52,10 +52,13 @@ export default async function handler(req, res) {
     const resolvedRows = await pagedGet(`demand_signals?select=user_id,disciplines,lat,lng,created_at&source=eq.resolved`);
 
     // SUPPLY side: approved gyms with coords + the disciplines they teach.
-    const gymRows = await pagedGet(`gyms?status=eq.approved&select=id,disciplines,city_lat,city_lng`);
+    const gymRows = await pagedGet(`gyms?status=eq.approved&select=id,name,disciplines,city_lat,city_lng`);
     const gymPts = gymRows
       .filter(g => g.city_lat != null && g.city_lng != null && isFinite(+g.city_lat) && isFinite(+g.city_lng))
       .map(g => ({ lat: +g.city_lat, lng: +g.city_lng, disc: new Set(_discList(g.disciplines)) }));
+    // id -> name, so the founder reads club names rather than UUIDs in the 'people picked these'
+    // list. Cheap: the gyms are already loaded for the supply calculation.
+    const gymName = {}; (gymRows || []).forEach(g => { gymName[g.id] = g.name || ''; });
 
     // Cluster by PROXIMITY (~30 km), not exact city string, so 'Brno' + 'Brno-stred'
     // + nearby villages collapse into one real hotspot. Greedy nearest-centroid pass.
@@ -84,7 +87,7 @@ export default async function handler(req, res) {
         for (const c of clusters) { const d = hav(lat, lng, c.lat, c.lng); if (d < bestD) { bestD = d; best = c; } }
         let c;
         if (best && bestD <= CLUSTER_KM) { c = best; }
-        else { c = { lat, lng, n: 0, users: new Map(), exU: new Set(), pasU: new Set(), strongU: new Set(), comU: new Set(), formU: new Set(), win: {}, lvl: {}, why: {}, resolvedU: new Set(), disc: {}, cities: {}, country, last: '' }; clusters.push(c); }
+        else { c = { lat, lng, n: 0, users: new Map(), exU: new Set(), pasU: new Set(), strongU: new Set(), comU: new Set(), formU: new Set(), wantG: {}, win: {}, lvl: {}, why: {}, resolvedU: new Set(), disc: {}, cities: {}, country, last: '' }; clusters.push(c); }
         c.lat = (c.lat * c.n + lat) / (c.n + 1);
         c.lng = (c.lng * c.n + lng) / (c.n + 1);
         c.n++;
@@ -95,6 +98,12 @@ export default async function handler(req, res) {
         addDisc(c.disc, r.disciplines);
         if (r.form_at && r.user_id) {
           c.formU.add(r.user_id);
+          // Which clubs people said they would go to. The founder needs this even below the club
+          // threshold: it is the earliest sign that demand is forming around a specific gym, and
+          // it says whether the market has a candidate or is genuinely unserved.
+          (r.wanted_gyms || '').split(',').map(x => x.trim()).filter(Boolean).forEach(g => {
+            (c.wantG[g] = c.wantG[g] || new Set()).add(r.user_id);
+          });
           addDisc(c.win, r.windows);
           addDisc(c.lvl, r.levels);
           addDisc(c.why, r.reasons);
@@ -149,6 +158,7 @@ export default async function handler(req, res) {
         queue, resolved, conversion,
         forms: c.formU.size,
         windows: discList(c.win), levels: discList(c.lvl), reasons: discList(c.why),
+        wanted: Object.entries(c.wantG).map(([g, set]) => ({ gym: g, name: gymName[g] || '', n: set.size })).sort((a, b) => b.n - a.n).slice(0, 8),
         city: (Object.entries(c.cities).sort((a, b) => b[1] - a[1])[0] || ['(area)'])[0],
         country: c.country, people: pp.people, score: pp.score, explicit: c.exU.size, passive: c.pasU.size, committed: c.comU.size, disciplines: dl, last: c.last,
         lat: +c.lat.toFixed(3), lng: +c.lng.toFixed(3),

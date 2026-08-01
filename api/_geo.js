@@ -15,34 +15,43 @@
 // class, plenty will for an 18:00 one. One number cannot carry that; bands can.
 
 export const LOCAL_KM = 20;           // "near me" everywhere: deck, hotspot clustering, gym coverage, demand
-// Measured on people who FILLED THE FORM, not on total signals. The total includes passive ones --
-// someone who opened an empty deck and said nothing -- and a threshold built on those is weak.
-export const DEMAND_THRESHOLD = 14;   // filled forms before a number is shown to a club
+// Measured on ONE CONCRETE CLASS -- a single time window plus a single audience -- not on total
+// demand for the club. Scattered demand cannot be acted on: fourteen people spread over six
+// windows and several audiences leave the biggest group at three, and a club that opens a class
+// for three and gets nobody stops believing this data for good. So the panel stays silent until
+// twenty people want the SAME class; below that there is nothing to decide and nothing is shown.
+//
+// The two failures are not equally expensive, which is what sets this number. A panel that never
+// appears costs nothing. A panel that appears and disappoints costs the club's trust permanently,
+// and it tells other clubs. Hence deliberately conservative.
+//
+// Costs roughly 55 filled forms per club to reach. That is the price of only ever showing
+// something worth acting on.
+export const DEMAND_THRESHOLD = 20;   // people wanting ONE window + audience, before a club sees it
 
 // When to tell a club the class is worth opening. Measured on people who confirmed a SPECIFIC day
 // in a sounding, which is the closest thing we have to bums on mats.
 //
-// THIS NUMBER IS A GUESS AND IS MEANT TO BE REPLACED BY DATA. At roughly 65% turnout it yields 8
-// people, the minimum for a viable class. Nobody knows the real confirm-to-attend ratio yet; the
-// app can measure it by comparing sounding confirmations against gym_attendance once a handful of
-// classes have actually run. Rewrite this from that measurement, do not defend it as designed.
-export const OPEN_RECOMMEND_CONFIRMED = 12;
+// The sounding only ever asks the people in that combination, so this can never exceed
+// DEMAND_THRESHOLD -- and the two have to sit sensibly on each other. Asking 20 and demanding 12
+// would have been fine; demanding 14 assumes a 70% answer-and-agree rate, which is demanding but
+// reachable from a group that all asked for exactly this class.
+//
+// STILL A GUESS, MEANT TO BE REPLACED BY DATA. The confirm-to-attend ratio is unknown; the app can
+// measure it by comparing sounding confirmations against gym_attendance once a handful of classes
+// have run. Rewrite it from that measurement rather than defending it as designed.
+export const OPEN_RECOMMEND_CONFIRMED = 14;
 export const DEMAND_FRESH_DAYS = 120; // older signals are ignored entirely
 
-// Bands the club-facing panel leads with, nearest first. Lead with the SMALLEST number, never the
-// total -- a club that opens a class expecting 14 and gets 4 never trusts the data again.
-export const DEMAND_BANDS_KM = [5, 10, 20];
-
-// Opportunities are window x level PAIRS, not two separate rankings. Two rankings ("9 want early
-// evening, 10 want beginners") cannot tell you whether that is the same nine people or two
-// different groups, and a club opening a class needs to know which -- a beginner evening class and
-// a kids afternoon class are not interchangeable.
+// Distance bands were dropped from the club panel. They only ever meant "how far from THIS club",
+// and once the threshold moved onto a single class that people named the club for themselves,
+// they added nothing: everyone counted had already said they would come. Keeping them would have
+// promised geographic precision in a feature where geography decides nothing.
 //
-// The cost of crossing them is fragmentation, so two guardrails: a pair needs at least
-// OPPORTUNITY_MIN_PEOPLE to be worth showing at all, and at most OPPORTUNITY_MAX are listed. The
-// remainder is summarised in one line rather than dropped, so nothing disappears silently.
-export const OPPORTUNITY_MIN_PEOPLE = 3;
-export const OPPORTUNITY_MAX = 5;
+// They are not "kept for the founder" either -- there is no club to measure from in a city
+// cluster. The founder's equivalent is the map and the cluster itself.
+
+
 
 // gyms.disciplines and profiles.disciplines are JSONB (default '["muay_thai"]'), but several
 // consumers were splitting them on commas as if they were CSV. PostgREST hands the raw JSON text

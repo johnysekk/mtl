@@ -7,7 +7,7 @@
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const svc = { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json' };
-import { LOCAL_KM, DEMAND_THRESHOLD, DEMAND_FRESH_DAYS, DEMAND_BANDS_KM, commitLive, discList as _discList, OPPORTUNITY_MIN_PEOPLE, OPPORTUNITY_MAX } from './_geo.js';
+import { LOCAL_KM, DEMAND_THRESHOLD, DEMAND_FRESH_DAYS, commitLive, discList as _discList } from './_geo.js';
 const RADIUS_KM = LOCAL_KM;   // was 25 -- a club must not be handed people the app never showed it
 const FRESH_DAYS = DEMAND_FRESH_DAYS;
 const THRESHOLD = DEMAND_THRESHOLD; // the cohort surfaces to the gym only at 15+ unique people (small-number privacy)
@@ -97,20 +97,13 @@ export default async function handler(req, res) {
     // training somewhere is worthless and quietly inflates the number we show clubs.
     const rows = await pagedGet(`demand_signals?select=user_id,disciplines,lat,lng,committed,committed_at,source,opens,form_at,windows,levels,wanted_gyms&source=neq.resolved&last_seen_at=gte.${fresh}&lat=gte.${glat - dLat}&lat=lte.${glat + dLat}&lng=gte.${glng - dLng}&lng=lte.${glng + dLng}`);
 
-    // A single total hides the distribution, and the distribution is the whole story: 3 people
-    // 2 km away will almost certainly come, 6 people 19 km away almost certainly will not -- they
-    // will go somewhere nearer. A club that opens a 06:30 class expecting 14 and gets 4 never
-    // trusts this data again, so the panel must lead with the NEAREST band, not the total.
-    // The distance was already being computed here and thrown away as a filter; now it is kept.
     const matchUsers = new Set(), committedUsers = new Set(), discCount = {};
-    const bandUsers = DEMAND_BANDS_KM.map(() => new Set());
     // The threshold is measured on people who FILLED THE FORM, not on every signal: a passive one is
     // somebody who opened an empty deck and said nothing, and gating on those is weak.
     const formUsers = new Set();
     const winCount = {}, lvlCount = {};
-    // window|level -> Set of people, plus their distances, so each opportunity can carry its own
-    // bands rather than inheriting the totals.
-    const pairUsers = {}, pairDist = {};
+    // window|level -> Set of people who asked for exactly that class.
+    const pairUsers = {};
     for (const r of rows) {
       if (r.lat == null || r.lng == null) continue;
       const dKm = hav(glat, glng, +r.lat, +r.lng);
@@ -134,10 +127,6 @@ export default async function handler(req, res) {
       if (r.user_id) {
         matchUsers.add(r.user_id);
         if (commitLive(r.committed, r.committed_at)) committedUsers.add(r.user_id);
-        // cumulative: someone 3 km away counts in the 5, 10 and 20 km bands
-        for (let bi = 0; bi < DEMAND_BANDS_KM.length; bi++) {
-          if (dKm <= DEMAND_BANDS_KM[bi]) bandUsers[bi].add(r.user_id);
-        }
         if (r.form_at) {
           formUsers.add(r.user_id);
           const _ws = (r.windows || '').split(',').map(x => x.trim()).filter(Boolean);
@@ -153,7 +142,6 @@ export default async function handler(req, res) {
           _ws.forEach(w => {
             const k = w + '|' + _key;
             (pairUsers[k] = pairUsers[k] || new Set()).add(r.user_id);
-            (pairDist[k] = pairDist[k] || []).push(dKm);
           });
         }
       }
@@ -165,33 +153,22 @@ export default async function handler(req, res) {
     // decides on a concrete class, not on two abstract rankings.
     const _pairs = Object.keys(pairUsers).map(k => {
       const [w, l] = k.split('|');
-      const ds = pairDist[k] || [];
-      return {
-        window: w, levels: (l ? l.split('+') : []), count: pairUsers[k].size,
-        bands: DEMAND_BANDS_KM.map(km => ({ km, count: ds.filter(d => d <= km).length })),
-      };
+      return { window: w, levels: (l ? l.split('+') : []), count: pairUsers[k].size };
     }).sort((a, b) => b.count - a.count);
-    const _strong = _pairs.filter(p => p.count >= OPPORTUNITY_MIN_PEOPLE);
-    const _opps = _strong.slice(0, OPPORTUNITY_MAX);
-    // Everything below the bar is summarised, never silently dropped -- a club that sees "3 further
-    // smaller requests" knows something is forming; one that sees nothing assumes there is nothing.
-    const _weak = _pairs.filter(p => _opps.indexOf(p) < 0);
-    const _restU = new Set();
-    _weak.forEach(p => { const k = p.window + '|' + (p.levels || []).join('+'); (pairUsers[k] || new Set()).forEach(u => _restU.add(u)); });
-    const _oppRest = { groups: _weak.length, people: _restU.size };
+    // Only combinations that reach the threshold on their own are shown. There is no "top five"
+    // list any more: a club is not choosing from a menu of weak options, it is being told about
+    // one concrete class that enough people asked for -- or about nothing at all.
+    const _opps = _pairs.filter(p => p.count >= THRESHOLD);
 
     if (req.method !== 'POST') {
-      const enough = formUsers.size >= THRESHOLD;
+      // The gate is now the strongest single combination, not the club's total demand.
+      const enough = _opps.length > 0;
       return res.status(200).json(enough
         ? { ok: true, enough: true, threshold: THRESHOLD, count: matchUsers.size, forms: formUsers.size,
-            committed: committedUsers.size, disciplines,
-            bands: DEMAND_BANDS_KM.map((km, i) => ({ km, count: bandUsers[i].size })),
-            windows: Object.entries(winCount).sort((a, b) => b[1] - a[1]).map(([v, n]) => ({ v, n })),
-            levels: Object.entries(lvlCount).sort((a, b) => b[1] - a[1]).map(([v, n]) => ({ v, n })),
-            opportunities: _opps, opportunities_rest: _oppRest }
+            committed: committedUsers.size, disciplines, opportunities: _opps }
         : { ok: true, enough: false, threshold: THRESHOLD, forms: formUsers.size });   // below threshold: hide the numbers, show only progress
     }
-    if (formUsers.size < THRESHOLD) return res.status(400).json({ error: 'not enough demand', threshold: THRESHOLD });
+    if (!_opps.length) return res.status(400).json({ error: 'not enough demand', threshold: THRESHOLD });
 
     // POST action=sounding: ask the waiting cohort whether they would come, WITHOUT opening
     // anything. A club that lists a class and then finds nobody comes never trusts this data
@@ -201,7 +178,11 @@ export default async function handler(req, res) {
     // It lives here rather than in the client because the recipient ids must never leave the
     // server: the club is told HOW MANY, never WHO.
     if (b.action === 'sounding') {
-      const ids = Array.from(matchUsers);
+      // Ask only the people in this combination. They all asked for the same class, so their
+      // answers are about one thing -- which is the whole reason the threshold is measured per
+      // combination rather than on the club's scattered total.
+      const _k = String(b.window || '') + '|' + String(b.level || '');
+      const ids = Array.from(pairUsers[_k] || matchUsers);
       if (!ids.length) return res.status(400).json({ ok: false, error: 'nobody to ask' });
 
       const disc = String(b.discipline || (disciplines.length ? disciplines[0].v : '') || '').trim();
