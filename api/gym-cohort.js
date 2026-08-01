@@ -95,7 +95,7 @@ export default async function handler(req, res) {
     // and must never move, last_seen_at is "are they still looking". And anyone who has since
     // found a club (source='resolved') is out of the queue -- a queue full of people already
     // training somewhere is worthless and quietly inflates the number we show clubs.
-    const rows = await pagedGet(`demand_signals?select=user_id,disciplines,lat,lng,committed,committed_at,source,opens,form_at,windows,levels&source=neq.resolved&last_seen_at=gte.${fresh}&lat=gte.${glat - dLat}&lat=lte.${glat + dLat}&lng=gte.${glng - dLng}&lng=lte.${glng + dLng}`);
+    const rows = await pagedGet(`demand_signals?select=user_id,disciplines,lat,lng,committed,committed_at,source,opens,form_at,windows,levels,wanted_gyms&source=neq.resolved&last_seen_at=gte.${fresh}&lat=gte.${glat - dLat}&lat=lte.${glat + dLat}&lng=gte.${glng - dLng}&lng=lte.${glng + dLng}`);
 
     // A single total hides the distribution, and the distribution is the whole story: 3 people
     // 2 km away will almost certainly come, 6 people 19 km away almost certainly will not -- they
@@ -115,6 +115,17 @@ export default async function handler(req, res) {
       if (r.lat == null || r.lng == null) continue;
       const dKm = hav(glat, glng, +r.lat, +r.lng);
       if (dKm > RADIUS_KM) continue;
+      // ATTRIBUTION IS NAMED, NOT COMPUTED. The person picked which clubs they would go to, having
+      // just swiped past them; distance decides nothing here. A radius could never tell apart
+      // 21 km / 70 minutes from 3 km / 8 minutes inside one city, and no amount of location
+      // precision fixes that -- even exact GPS says where somebody stood, not where they would
+      // travel from.
+      //
+      // Rows written before the form existed carry no list, so they fall back to the radius they
+      // were collected under. Dropping them would erase real demand to enforce a rule that did not
+      // exist when they were made.
+      const _want = String(r.wanted_gyms || '').split(',').map(x => x.trim()).filter(Boolean);
+      if (r.form_at && _want.indexOf(String(gymId)) < 0) continue;
       const ds = (r.disciplines || '').split(',').map(x => x.trim()).filter(Boolean);
       const hit = gymDisc.size ? ds.some(d => gymDisc.has(d)) : ds.length > 0;
       if (!hit) continue;
