@@ -87,7 +87,7 @@ export default async function handler(req, res) {
         for (const c of clusters) { const d = hav(lat, lng, c.lat, c.lng); if (d < bestD) { bestD = d; best = c; } }
         let c;
         if (best && bestD <= CLUSTER_KM) { c = best; }
-        else { c = { lat, lng, n: 0, users: new Map(), exU: new Set(), pasU: new Set(), strongU: new Set(), comU: new Set(), formU: new Set(), wantG: {}, win: {}, lvl: {}, why: {}, resolvedU: new Set(), disc: {}, cities: {}, country, last: '' }; clusters.push(c); }
+        else { c = { lat, lng, n: 0, users: new Map(), exU: new Set(), pasU: new Set(), strongU: new Set(), comU: new Set(), formU: new Set(), wantG: {}, namedU: new Set(), unnamedU: new Set(), win: {}, lvl: {}, why: {}, resolvedU: new Set(), disc: {}, cities: {}, country, last: '' }; clusters.push(c); }
         c.lat = (c.lat * c.n + lat) / (c.n + 1);
         c.lng = (c.lng * c.n + lng) / (c.n + 1);
         c.n++;
@@ -101,9 +101,10 @@ export default async function handler(req, res) {
           // Which clubs people said they would go to. The founder needs this even below the club
           // threshold: it is the earliest sign that demand is forming around a specific gym, and
           // it says whether the market has a candidate or is genuinely unserved.
-          (r.wanted_gyms || '').split(',').map(x => x.trim()).filter(Boolean).forEach(g => {
-            (c.wantG[g] = c.wantG[g] || new Set()).add(r.user_id);
-          });
+          const _wl = (r.wanted_gyms || '').split(',').map(x => x.trim()).filter(Boolean);
+          _wl.forEach(g => { (c.wantG[g] = c.wantG[g] || new Set()).add(r.user_id); });
+          // Named somebody vs named nobody. The second group is the honest "none of these will do".
+          (_wl.length ? c.namedU : c.unnamedU).add(r.user_id);
           addDisc(c.win, r.windows);
           addDisc(c.lvl, r.levels);
           addDisc(c.why, r.reasons);
@@ -141,8 +142,16 @@ export default async function handler(req, res) {
     // CONV_WEAK is a judgement call on thin data: at ten people the difference between 10% and 30%
     // is one person, so this is a hint for sorting, never a verdict. The founder can and should
     // override it from what they saw on the ground.
-    const CONV_WEAK = 0.15;
-    const CONV_MIN_SAMPLE = 8;
+    // "Weak conversion" used to be inferred from resolved/(live+resolved), which measured the wrong
+    // thing: fresh demand has had no time to convert, so every new market came out weak and landed
+    // in the acquisition queue even when people had plainly chosen a local club.
+    //
+    // The direct evidence was there all along: whether form-fillers NAMED a club. Somebody who
+    // filled the form and picked nobody has looked at what exists and rejected all of it. That is
+    // what "the supply repels people" actually looks like -- an answer, not an inference from a
+    // ratio that is low simply because nothing has happened yet.
+    const REJECT_SHARE = 0.6;   // most form-fillers named nobody -> supply is the problem
+    const REJECT_MIN = 5;       // below this the share is noise
     const fromClusters = clusters.map(c => {
       const dl = discList(c.disc);
       const topDisc = dl.length ? dl[0].v : null;
@@ -151,11 +160,13 @@ export default async function handler(req, res) {
       const resolved = c.resolvedU.size;
       const base = pp.people + resolved;
       const conversion = base >= CONV_MIN_SAMPLE ? +(resolved / base).toFixed(3) : null;
+      const _named = c.namedU.size, _unnamed = c.unnamedU.size, _both = _named + _unnamed;
+      const rejected = _both >= REJECT_MIN ? +(_unnamed / _both).toFixed(3) : null;
       const queue = (sup.nearDisc === 0)
         ? 'none'
-        : ((conversion != null && conversion < CONV_WEAK) ? 'conv' : 'add');
+        : ((rejected != null && rejected >= REJECT_SHARE) ? 'conv' : 'add');
       return {
-        queue, resolved, conversion,
+        queue, resolved, conversion, rejected, named: _named, unnamed: _unnamed,
         forms: c.formU.size,
         windows: discList(c.win), levels: discList(c.lvl), reasons: discList(c.why),
         wanted: Object.entries(c.wantG).map(([g, set]) => ({ gym: g, name: gymName[g] || '', n: set.size })).sort((a, b) => b.n - a.n).slice(0, 8),
@@ -170,7 +181,7 @@ export default async function handler(req, res) {
     const fromNoCoord = Object.values(noCoord).map(m => { const pp = peopleScore(m.users, m.strongU); return {
       city: m.city, country: m.country, people: pp.people, score: pp.score, explicit: m.exU.size, passive: m.pasU.size, committed: m.comU.size, disciplines: discList(m.disc), last: m.last,
       gyms_near: null, gyms_near_disc: null, underserved: false,
-      queue: 'none', resolved: 0, conversion: null, forms: m.formU ? m.formU.size : 0,
+      queue: 'none', resolved: 0, conversion: null, rejected: null, named: 0, unnamed: 0, forms: m.formU ? m.formU.size : 0,
       windows: [], levels: [], reasons: [],
       cluster_key: 'city:' + (m.city || '').toLowerCase(),
     }; });
