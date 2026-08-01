@@ -76,6 +76,44 @@ export default async function handler(req, res) {
     };
     const addDisc = (obj, csv) => (csv || '').split(',').map(x => x.trim()).filter(Boolean).forEach(d => { obj[d] = (obj[d] || 0) + 1; });
 
+    // Accumulation lives in a function because the second pass has to redo it from scratch once the
+    // clusters have settled -- the totals are sets and counters, so they cannot simply be moved.
+    const newCluster = (lat, lng, country) => ({
+      lat, lng, alat: lat, alng: lng, n: 0, members: [],
+      users: new Map(), exU: new Set(), pasU: new Set(), strongU: new Set(), comU: new Set(),
+      formU: new Set(), wantG: {}, namedU: new Set(), unnamedU: new Set(),
+      win: {}, lvl: {}, why: {}, resolvedU: new Set(), disc: {}, cities: {}, country: country || '', last: '',
+    });
+    const addToCluster = (c, r, lat, lng) => {
+      c.lat = (c.lat * c.n + lat) / (c.n + 1);
+      c.lng = (c.lng * c.n + lng) / (c.n + 1);
+      c.n++;
+      const city = (r.city || '').trim(), country = (r.country || '').trim();
+      if (r.user_id) {
+        const _ts = new Date(r.last_seen_at || r.created_at || 0).getTime();
+        if (_ts > (c.users.get(r.user_id) || 0)) c.users.set(r.user_id, _ts);
+        (r.source === 'passive' ? c.pasU : c.exU).add(r.user_id);
+        if ((r.source !== 'passive') || ((r.opens || 1) >= 3)) c.strongU.add(r.user_id);
+        if (commitLive(r.committed, r.committed_at)) c.comU.add(r.user_id);
+      }
+      if (country && !c.country) c.country = country;
+      if (city) c.cities[city] = (c.cities[city] || 0) + 1;
+      if (r.created_at > c.last) c.last = r.created_at;
+      addDisc(c.disc, r.disciplines);
+      if (r.form_at && r.user_id) {
+        c.formU.add(r.user_id);
+        // Which clubs people said they would go to. The founder needs this even below the club
+        // threshold: it is the earliest sign that demand is forming around a specific gym.
+        const _wl = (r.wanted_gyms || '').split(',').map(x => x.trim()).filter(Boolean);
+        _wl.forEach(g => { (c.wantG[g] = c.wantG[g] || new Set()).add(r.user_id); });
+        // Named somebody vs named nobody. The second group is the honest "none of these will do".
+        (_wl.length ? c.namedU : c.unnamedU).add(r.user_id);
+        addDisc(c.win, r.windows);
+        addDisc(c.lvl, r.levels);
+        addDisc(c.why, r.reasons);
+      }
+    };
+
     const clusters = [];
     const noCoord = {}; // signals without coords -> exact city|country buckets
     rows.forEach(r => {
@@ -94,28 +132,9 @@ export default async function handler(req, res) {
         for (const c of clusters) { const d = hav(lat, lng, c.alat, c.alng); if (d < bestD) { bestD = d; best = c; } }
         let c;
         if (best && bestD <= CLUSTER_KM) { c = best; }
-        else { c = { lat, lng, alat: lat, alng: lng, n: 0, users: new Map(), exU: new Set(), pasU: new Set(), strongU: new Set(), comU: new Set(), formU: new Set(), wantG: {}, namedU: new Set(), unnamedU: new Set(), win: {}, lvl: {}, why: {}, resolvedU: new Set(), disc: {}, cities: {}, country, last: '' }; clusters.push(c); }
-        c.lat = (c.lat * c.n + lat) / (c.n + 1);
-        c.lng = (c.lng * c.n + lng) / (c.n + 1);
-        c.n++;
-        if (r.user_id) { const _ts = new Date(r.last_seen_at || r.created_at || 0).getTime(); if (_ts > (c.users.get(r.user_id) || 0)) c.users.set(r.user_id, _ts); (r.source==='passive'?c.pasU:c.exU).add(r.user_id); if((r.source!=='passive')||((r.opens||1)>=3)) c.strongU.add(r.user_id); if(commitLive(r.committed, r.committed_at)) c.comU.add(r.user_id); }
-        if (country && !c.country) c.country = country;
-        if (city) c.cities[city] = (c.cities[city] || 0) + 1;
-        if (r.created_at > c.last) c.last = r.created_at;
-        addDisc(c.disc, r.disciplines);
-        if (r.form_at && r.user_id) {
-          c.formU.add(r.user_id);
-          // Which clubs people said they would go to. The founder needs this even below the club
-          // threshold: it is the earliest sign that demand is forming around a specific gym, and
-          // it says whether the market has a candidate or is genuinely unserved.
-          const _wl = (r.wanted_gyms || '').split(',').map(x => x.trim()).filter(Boolean);
-          _wl.forEach(g => { (c.wantG[g] = c.wantG[g] || new Set()).add(r.user_id); });
-          // Named somebody vs named nobody. The second group is the honest "none of these will do".
-          (_wl.length ? c.namedU : c.unnamedU).add(r.user_id);
-          addDisc(c.win, r.windows);
-          addDisc(c.lvl, r.levels);
-          addDisc(c.why, r.reasons);
-        }
+        else { c = newCluster(lat, lng, country); clusters.push(c); }
+        c.members.push(r);
+        addToCluster(c, r, lat, lng);
       } else {
         const key = country + '|' + (city || '(unknown)');
         if (!noCoord[key]) noCoord[key] = { city: city || '(unknown)', country, users: new Map(), exU: new Set(), pasU: new Set(), strongU: new Set(), comU: new Set(), formU: new Set(), disc: {}, last: '' };
@@ -125,6 +144,65 @@ export default async function handler(req, res) {
         addDisc(m.disc, r.disciplines);
       }
     });
+
+    // SECOND PASS: settle the clusters onto their centres of mass.
+    //
+    // Greedy clustering is order-dependent, and no anchoring rule fixes that -- it only decides
+    // WHICH wrong answer you get. On the test data the same 29 people came out as one cluster in
+    // one order and as 11 + 14 + 4 in another, purely because of which signal happened to arrive
+    // first. And a cluster founded by somebody on the edge of a city only ever reaches halfway
+    // across it, so the rest of the city splits off into clusters of its own.
+    //
+    // So: recompute each centre from its members, reassign everybody to the nearest centre, merge
+    // centres that end up within CLUSTER_KM of each other, and repeat until nothing moves. The
+    // centres drift to the middle of the mass -- which for a city is roughly its centre -- and the
+    // result stops depending on arrival order. A handful of iterations is plenty; the cap is there
+    // so a pathological layout cannot spin.
+    for (let iter = 0; iter < 6; iter++) {
+      if (clusters.length < 2) break;
+      const centres = clusters.map(c => ({ lat: c.lat, lng: c.lng }));
+      const buckets = centres.map(() => []);
+      for (const c of clusters) {
+        for (const m of c.members) {
+          const mlat = +m.lat, mlng = +m.lng;
+          let bi = 0, bd = Infinity;
+          centres.forEach((q, i) => { const d = hav(mlat, mlng, q.lat, q.lng); if (d < bd) { bd = d; bi = i; } });
+          buckets[bi].push(m);
+        }
+      }
+      let moved = false;
+      const next = [];
+      buckets.forEach((mem, i) => {
+        if (!mem.length) { moved = true; return; }
+        const lat = mem.reduce((a, m) => a + (+m.lat), 0) / mem.length;
+        const lng = mem.reduce((a, m) => a + (+m.lng), 0) / mem.length;
+        if (hav(lat, lng, centres[i].lat, centres[i].lng) > 0.2) moved = true;
+        next.push({ lat, lng, members: mem });
+      });
+      // Merge centres that have converged onto the same place.
+      const merged = [];
+      for (const c of next) {
+        const m = merged.find(x => hav(x.lat, x.lng, c.lat, c.lng) <= CLUSTER_KM);
+        if (m) {
+          const tot = m.members.length + c.members.length;
+          m.lat = (m.lat * m.members.length + c.lat * c.members.length) / tot;
+          m.lng = (m.lng * m.members.length + c.lng * c.members.length) / tot;
+          m.members = m.members.concat(c.members);
+          moved = true;
+        } else merged.push({ lat: c.lat, lng: c.lng, members: c.members.slice() });
+      }
+      // Rebuild the aggregates from the settled membership.
+      clusters.length = 0;
+      for (const m of merged) {
+        const c = newCluster(m.lat, m.lng, '');
+        for (const r of m.members) { c.members.push(r); addToCluster(c, r, +r.lat, +r.lng); }
+        // Keep the settled centre: addToCluster recomputes a running mean from the member order,
+        // which lands in the same place but should not be allowed to drift the anchor.
+        c.lat = m.lat; c.lng = m.lng; c.alat = m.lat; c.alng = m.lng;
+        clusters.push(c);
+      }
+      if (!moved) break;
+    }
 
     // Attach each resolved person to the nearest cluster, same CLUSTER_KM rule that built them.
     for (const r of resolvedRows || []) {
