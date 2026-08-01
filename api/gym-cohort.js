@@ -165,7 +165,7 @@ export default async function handler(req, res) {
     // prompt: these people have nobody else to go to and may simply not know it exists.
     let _rivals = null;
     try {
-      const _all = await sbGet(`gyms?status=eq.approved&select=id,disciplines,city_lat,city_lng`);
+      const _all = await pagedGet(`gyms?status=eq.approved&select=id,disciplines,city_lat,city_lng`);
       _rivals = (_all || []).filter(g => {
         if (g.city_lat == null || g.city_lng == null) return false;
         if (hav(glat, glng, +g.city_lat, +g.city_lng) > RADIUS_KM) return false;
