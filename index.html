@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SKM fixes two things visible on the founder map. The back-to-demand button did nothing because I had wired it inside renderGymManage -- that is the CLUB management screen, while the map is a founder screen reached from Admin, so for a founder who never opens gym management the handler was never attached. It is now wired where the map opens, which cannot be missed, and it reloads the hotspot list rather than just revealing an empty sheet. Second, the orange demand blob is a circleMarker whose radius is in PIXELS and scales with headcount, so it says nothing about area and made it look as though the people sat outside their own cluster. A real 20 km catchment ring is now drawn underneath it with L.circle, which takes metres and scales with zoom: the blob says how many, the ring says how far. Deploy: index.html. -->
+<!-- MTL build: SKO moves the back-to-demand button out of the dark sheet header and down beside the map legend. It is navigation about the CONTENT of the map, not a window control like the close cross, and sitting on the dark bar it read as one. Deploy: index.html. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -1744,10 +1744,12 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
 <div class="sheet" id="shFounderMap" style="z-index:88;display:flex;flex-direction:column;">
   <div class="shdr" style="background:var(--dark);border-color:#333;">
     <div class="shdr-title" style="color:#fff;">🗺️ Mapa uživatelů</div>
-    <button id="btnMapToHotspots" style="display:none;background:#333;color:#fff;border:none;border-radius:9px;padding:7px 12px;margin-right:8px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;">‹ Poptávka</button>
     <button class="btn-close" id="btnCloseFounderMap" style="background:#333;color:#fff;">✕</button>
   </div>
   <div style="display:flex;gap:16px;padding:10px 20px;font-size:13px;font-weight:600;flex-shrink:0;align-items:center;background:var(--surf);border-bottom:1px solid var(--border);">
+    <!-- Sits with the legend rather than in the dark header: it is navigation about the CONTENT of
+         the map, not a window control like the close cross, and on the dark bar it read as one. -->
+    <button id="btnMapToHotspots" style="display:none;background:none;color:var(--dark);border:1.5px solid var(--border);border-radius:9px;padding:6px 11px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;flex-shrink:0;">‹ Poptávka</button>
     <span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:12px;border-radius:50%;background:var(--red);display:inline-block;"></span> Kouči <span id="mapCoachCount" style="color:var(--mid);">0</span></span>
     <span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:12px;border-radius:50%;background:#2F6FED;display:inline-block;"></span> Studenti <span id="mapStudentCount" style="color:var(--mid);">0</span></span>
     <span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:12px;border-radius:50%;background:#0A7A4F;display:inline-block;"></span> Kluby <span id="mapGymCount" style="color:var(--mid);">0</span></span>
@@ -3857,7 +3859,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SKM';
+const MTL_BUILD='SKO';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -20467,7 +20469,7 @@ if($('btnWelcomeToggle')){ $('btnWelcomeToggle').onclick=_toggleWelcomeZero; try
 if($('btnFounderReset')) $('btnFounderReset').onclick=founderResetStats;
 if($('btnAllCoaches')) $('btnAllCoaches').onclick=()=>{ openSheet('shAllCoaches'); loadAdminCoachList(); };
 if($('btnCloseAllCoaches')) $('btnCloseAllCoaches').onclick=()=>closeSheet('shAllCoaches');
-if($('btnAllGyms')) $('btnAllGyms').onclick=()=>{ window._admGymCity=''; openSheet('shAllGyms'); loadAdminGymList(); };
+if($('btnAllGyms')) $('btnAllGyms').onclick=()=>{ window._admGymCity=''; window._admGymNear=null; openSheet('shAllGyms'); loadAdminGymList(); };
 if($('btnCloseAllGyms')) $('btnCloseAllGyms').onclick=()=>closeSheet('shAllGyms');
 if($('btnCloseHsDet')) $('btnCloseHsDet').onclick=()=>closeSheet('shHotspotDetail');
 if($('hsAddContact')) $('hsAddContact').onclick=()=>_assignHotspotContact();
@@ -20518,7 +20520,22 @@ function openFounderMap(focus){
   }, 250); // počkej na layout sheetu
 }
 async function _mapOpenGym(id){ try{ const { data:g }=await supaClient.from('gyms').select('*').eq('id',id).single(); if(g) openGymProfile(g); }catch(e){} }
-function _gymsInCity(city){ try{ window._admGymCity=city||''; if(typeof closeSheet==='function') closeSheet('shFounderMap'); openSheet('shAllGyms'); if(typeof loadAdminGymList==='function') loadAdminGymList(); if(city) toast((LANG==='en'?'Clubs in ':'Kluby v ')+city); }catch(e){} }
+function _gymsInCity(city){ try{ window._admGymCity=city||''; window._admGymNear=null; if(typeof closeSheet==='function') closeSheet('shFounderMap'); openSheet('shAllGyms'); if(typeof loadAdminGymList==='function') loadAdminGymList(); if(city) toast((LANG==='en'?'Clubs in ':'Kluby v ')+city); }catch(e){} }
+// Clubs near a POINT, not clubs whose city string happens to contain the cluster's label. The old
+// version matched gyms.city against the cluster name and found nothing -- and it would have failed
+// in production too, because the cluster label comes from what users said their city was
+// ("Brno-stred") while the club has its own ("Brno"). The cluster has coordinates; use them.
+function _gymsNearPoint(lat, lng, label){
+  try{
+    window._admGymCity='';
+    window._admGymNear=(lat!=null && lng!=null) ? { lat:+lat, lng:+lng, km:(typeof GYM_LOCAL_KM!=='undefined'?GYM_LOCAL_KM:20) } : null;
+    if(!window._admGymNear) return _gymsInCity(label||'');
+    if(typeof closeSheet==='function') closeSheet('shFounderMap');
+    openSheet('shAllGyms');
+    if(typeof loadAdminGymList==='function') loadAdminGymList();
+    toast((LANG==='en'?'Clubs within ':'Kluby do ')+window._admGymNear.km+(LANG==='en'?' km of ':' km od ')+(label||''));
+  }catch(e){}
+}
 async function initFounderMap(){
   if(typeof Leaflet==='undefined'){ toast(L('\u26a0\ufe0f Mapa se nenačetla (Leaflet)')); return; }
   if(!_founderMap){
@@ -20590,7 +20607,7 @@ async function _mapRefresh(fit){
         try{ Leaflet.circle([h.lat,h.lng], { radius: 20000, color:'#B85C00', weight:1, opacity:0.35,
           fillColor:'#F39C12', fillOpacity:0.06, interactive:false }).addTo(_mapLayer); }catch(e){}
         Leaflet.circleMarker([h.lat,h.lng],{ radius:_r, color:'#B85C00', weight:1, fillColor:'#F39C12', fillOpacity:0.5 })
-          .bindPopup('<b>\ud83d\udccd '+(h.city||'')+(h.country?(', '+h.country):'')+'</b><br>'+(LANG==='en'?'Demand: ':'Poptávka: ')+(h.people||0)+(LANG==='en'?' people want a club':' lidí chce gym')+(_dl?'<br>'+_dl:'')+(h.gyms_near!=null?('<br>'+(h.underserved?('🎯 '+(LANG==='en'?'0 clubs teach this <20km':'do 20 km to nikdo neučí')):('🏛️ '+h.gyms_near_disc+(LANG==='en'?' clubs teach this <20km':' klubů to učí do 20 km')))):'')+'<br><button onclick="_gymsInCity(\''+(h.city||'').replace(/\'/g,'')+'\')" style="margin-top:6px;padding:5px 10px;background:#0A7A4F;color:#fff;border:none;border-radius:7px;font-weight:700;cursor:pointer;font-size:12px;">'+(LANG==='en'?'\ud83d\udd0d Clubs here':'\ud83d\udd0d Kluby tady')+'</button>')
+          .bindPopup('<b>\ud83d\udccd '+(h.city||'')+(h.country?(', '+h.country):'')+'</b><br>'+(LANG==='en'?'Demand: ':'Poptávka: ')+(h.people||0)+(LANG==='en'?' people want a club':' lidí chce gym')+(_dl?'<br>'+_dl:'')+(h.gyms_near!=null?('<br>'+(h.underserved?('🎯 '+(LANG==='en'?'0 clubs teach this <20km':'do 20 km to nikdo neučí')):('🏛️ '+h.gyms_near_disc+(LANG==='en'?' clubs teach this <20km':' klubů to učí do 20 km')))):'')+'<br><button onclick="_gymsNearPoint('+(h.lat!=null?h.lat:'null')+','+(h.lng!=null?h.lng:'null')+',\''+(h.city||'').replace(/\'/g,'')+'\')" style="margin-top:6px;padding:5px 10px;background:#0A7A4F;color:#fff;border:none;border-radius:7px;font-weight:700;cursor:pointer;font-size:12px;">'+(LANG==='en'?'\ud83d\udd0d Clubs here':'\ud83d\udd0d Kluby tady')+'</button>')
           .addTo(_mapLayer);
       });
     }
@@ -21158,8 +21175,11 @@ async function loadAdminGymList(){
   const list=$('adminGymDashList');
   if(!list) return;
   list.innerHTML=`<p style="color:var(--light);font-size:13px;">${L('Načítám...')}</p>`;
-  const { data } = await supaClient.from('gyms').select('id, name, city, country, photos, status, dropin_price, membership_price, currency, cert_level, payment_mode, created_at').eq('status','approved').order('created_at',{ascending:false});
-  let gyms=data||[]; if(window._admGymCity){ const _cf=String(window._admGymCity).toLowerCase(); gyms=gyms.filter(function(g){ return (g.city||'').toLowerCase().indexOf(_cf)>=0; }); }
+  const { data } = await supaClient.from('gyms').select('id, name, city, country, photos, status, dropin_price, membership_price, currency, cert_level, payment_mode, created_at, city_lat, city_lng').eq('status','approved').order('created_at',{ascending:false});
+  let gyms=data||[]; if(window._admGymNear && typeof haversine==='function'){
+    const _n=window._admGymNear;
+    gyms=gyms.filter(function(g){ return g.city_lat!=null && g.city_lng!=null && haversine(_n.lat,_n.lng,+g.city_lat,+g.city_lng)<=_n.km; });
+  } else if(window._admGymCity){ const _cf=String(window._admGymCity).toLowerCase(); gyms=gyms.filter(function(g){ return (g.city||'').toLowerCase().indexOf(_cf)>=0; }); }
   let _gvat={}; try{ const { data:_gv } = await supaClient.from('gyms').select('id,vat_id').eq('status','approved'); (_gv||[]).forEach(x=>{ _gvat[x.id]=x.vat_id||null; }); }catch(e){}
   let _riskG={}, _lastG={}; try{ const { data:_gbk } = await supaClient.from('gym_bookings').select('gym_id,status,created_at'); (_gbk||[]).forEach(b=>{ if(!b.gym_id) return; const r=_riskG[b.gym_id]||(_riskG[b.gym_id]={tot:0,bad:0}); r.tot++; if(b.status==='refunded') r.bad++; if(b.created_at && (!_lastG[b.gym_id]||b.created_at>_lastG[b.gym_id])) _lastG[b.gym_id]=b.created_at; }); }catch(e){}
   const _riskFlagG=(id)=>{ const r=_riskG[id]; if(!r) return false; return r.tot>=5 && r.bad/r.tot>=0.25; };
