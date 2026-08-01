@@ -160,13 +160,27 @@ export default async function handler(req, res) {
     // one concrete class that enough people asked for -- or about nothing at all.
     const _opps = _pairs.filter(p => p.count >= THRESHOLD);
 
+    // How many clubs within LOCAL_KM teach this sport at all, this one included. One means the club
+    // is alone here -- which is a different situation from a missing class, and gets its own
+    // prompt: these people have nobody else to go to and may simply not know it exists.
+    let _rivals = null;
+    try {
+      const _all = await sbGet(`gyms?status=eq.approved&select=id,disciplines,city_lat,city_lng`);
+      _rivals = (_all || []).filter(g => {
+        if (g.city_lat == null || g.city_lng == null) return false;
+        if (hav(glat, glng, +g.city_lat, +g.city_lng) > RADIUS_KM) return false;
+        const gd = _discList(g.disciplines);
+        return disciplines.some(d => gd.indexOf(d.v) >= 0);
+      }).length;
+    } catch (e) {}
+
     if (req.method !== 'POST') {
       // The gate is now the strongest single combination, not the club's total demand.
       const enough = _opps.length > 0;
       return res.status(200).json(enough
         ? { ok: true, enough: true, threshold: THRESHOLD, count: matchUsers.size, forms: formUsers.size,
-            committed: committedUsers.size, disciplines, opportunities: _opps }
-        : { ok: true, enough: false, threshold: THRESHOLD, forms: formUsers.size });   // below threshold: hide the numbers, show only progress
+            committed: committedUsers.size, disciplines, opportunities: _opps, gyms_near_disc: _rivals }
+        : { ok: true, enough: false, threshold: THRESHOLD, forms: formUsers.size, count: matchUsers.size, gyms_near_disc: _rivals });   // below threshold: hide the numbers, show only progress
     }
     if (!_opps.length) return res.status(400).json({ error: 'not enough demand', threshold: THRESHOLD });
 
