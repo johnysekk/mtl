@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SKF adds a 'show on the map' button to the founder hotspot detail, centred on that cluster's CENTRE OF MASS -- which is the point the 20 km supply radius is genuinely measured from. Not the city centre, not the city boundary: c.lat/c.lng is a running average of where those people actually are, so it moves as signals arrive and can sit outside the city whose name the card carries, since that name is just the most common city string in the cluster. From a card alone there is no way to picture where that point sits against the nearest clubs, and that comparison is the entire reason to open a map. openFounderMap now takes an optional focus; the two existing callers pass nothing and are unaffected. Deploy: index.html. -->
+<!-- MTL build: SKG stops founder clusters from drifting. Membership was tested against the cluster's MOVING centroid, so a chain of signals spaced under CLUSTER_KM apart dragged the cluster along behind it -- on a 12 km chain the outermost members ended up 24.7 km apart despite a 20 km rule, and along a road out of a city it could reach the next town. Membership now runs against a fixed ANCHOR (the point that created the cluster), which caps the spread; the centroid is still computed for display and for the map. The signals query also gained order=created_at.asc, without which identical data could produce different clusters between runs. NOTE: club-facing numbers were never affected -- gym-cohort.js does not use clusters at all, it measures from the club's own position and filters on named attribution. Also adds a way back from the map to the hotspot list, shown only when the map was opened from there. Deploy: index.html + api/demand-hotspot.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -1744,7 +1744,13 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
 <div class="sheet" id="shFounderMap" style="z-index:88;display:flex;flex-direction:column;">
   <div class="shdr" style="background:var(--dark);border-color:#333;">
     <div class="shdr-title" style="color:#fff;">🗺️ Mapa uživatelů</div>
-    <button class="btn-close" id="btnCloseFounderMap" style="background:#333;color:#fff;">✕</button>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <!-- Straight back to the list. Comparing a cluster against the clubs around it is a
+           back-and-forth job, and closing the map only to reopen the hub and the hotspots each
+           time turns a glance into four taps. -->
+      <button id="btnMapToHotspots" style="display:none;background:#333;color:#fff;border:none;border-radius:9px;padding:7px 12px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;">‹ Poptávka</button>
+      <button class="btn-close" id="btnCloseFounderMap" style="background:#333;color:#fff;">✕</button>
+    </div>
   </div>
   <div style="display:flex;gap:16px;padding:10px 20px;font-size:13px;font-weight:600;flex-shrink:0;align-items:center;background:var(--surf);border-bottom:1px solid var(--border);">
     <span style="display:flex;align-items:center;gap:6px;"><span style="width:12px;height:12px;border-radius:50%;background:var(--red);display:inline-block;"></span> Kouči <span id="mapCoachCount" style="color:var(--mid);">0</span></span>
@@ -3856,7 +3862,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SKF';
+const MTL_BUILD='SKG';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -6345,7 +6351,7 @@ async function openHotspotDetail(h){
     }
     sum.innerHTML=html;
     try{ var _m2=document.getElementById('hsToMap');
-      if(_m2) _m2.onclick=function(){ closeSheet('shHotspotDetail'); openFounderMap({ lat:h.lat, lng:h.lng, zoom:11 }); }; }catch(e){}
+      if(_m2) _m2.onclick=function(){ closeSheet('shHotspotDetail'); openFounderMap({ lat:h.lat, lng:h.lng, zoom:11, fromHotspots:true }); }; }catch(e){}
     _renderHsDisc(null);
   }
   var ab=document.getElementById('hsAssignBox'); if(ab) ab.innerHTML='';
@@ -14547,6 +14553,7 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
   if($('btnCloseGymCohort')) $('btnCloseGymCohort').onclick=()=>closeSheet('shGymCohort');
   if($('btnCloseFounderSond')) $('btnCloseFounderSond').onclick=()=>closeSheet('shFounderSoundings');
   if($('btnCloseFirstClub')) $('btnCloseFirstClub').onclick=()=>closeSheet('shFirstClub');
+  if($('btnMapToHotspots')) $('btnMapToHotspots').onclick=()=>{ closeSheet('shFounderMap'); openSheet('shDemandHotspots'); };
   if($('btnCloseFinance')) $('btnCloseFinance').onclick=()=>closeSheet('shFinance');
   if($('mgCohortsBtn')) $('mgCohortsBtn').onclick=()=>openCohorts(_myGymData.id, _myGymData.name, currentUser.id, _myGymData.stripe_account, _myGymData.currency, parseDisc(_myGymData.disciplines));
   if($('recpSearchBtn')) $('recpSearchBtn').onclick=recpSearchUsers;
@@ -20494,6 +20501,9 @@ function openFounderMap(focus){
     // picture from a card. Seeing where it actually sits against the nearest clubs is the whole
     // reason to look at a map at all.
     try{ if(focus && focus.lat!=null && focus.lng!=null && _founderMap) _founderMap.setView([focus.lat, focus.lng], focus.zoom||11); }catch(e){}
+    // Only offer the way back when there is somewhere to go back TO -- opening the map from the
+    // hub should not suggest a list the founder never opened.
+    try{ var _bk=$('btnMapToHotspots'); if(_bk) _bk.style.display=(focus&&focus.fromHotspots)?'':'none'; }catch(e){}
   }, 250); // počkej na layout sheetu
 }
 async function _mapOpenGym(id){ try{ const { data:g }=await supaClient.from('gyms').select('*').eq('id',id).single(); if(g) openGymProfile(g); }catch(e){} }
