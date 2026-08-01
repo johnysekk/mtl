@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SJP rebuilds the demand form as a stepped bottom sheet. It used to grow inside the deck card, which has no height of its own and does not scroll, so once the form reached three sections the last one sat below the fold with no way to reach it -- people could not answer even if they wanted to. Now: one question per step, a fixed footer so Continue is always reachable, a progress bar, and Back. Continue is disabled until a required step is answered, which shows the requirement BEFORE you press rather than as a toast afterwards; the reasons step reads Skip instead, since it is optional. Also renames that step to 'V okoli uz kluby jsou. Co ti na nich nesedi? (Anonymni)' and states in the hint that only we see it. The no-GPS city prompt moved into the first step. Deploy: index.html. -->
+<!-- MTL build: SJQ adds the club-exclusion step and splits the gap reasons. The student can cross out clubs they would not train at whatever happened, and those clubs then do not count them -- which fixes an unfairness the earlier design had: inferring the exclusion from an 'atmosphere' tick would have hidden that person from EVERY club nearby, including ones they had never set foot in, punishing them for a rival's failure while the club actually at fault learned nothing. Paginated ten per page rather than hidden above ten clubs, which would have switched the step off in Prague, exactly where it matters most. Nothing is pre-ticked; the default is everyone, so this narrows an existing scope rather than collecting consent here (that belongs in the terms at registration). Reasons are now grouped into operational (a club could change it) and subjective (nobody can act on it, and it is about one gym rather than the market) -- both founder-only. NOTE: this build also restores _reportGymDemand, which the SJP step-form rewrite destroyed by cutting from _openDemandChips to the next function keyword. Deploy: index.html + demand-signals-fix.sql (RE-RUN) + api/gym-cohort.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3848,7 +3848,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SJP';
+const MTL_BUILD='SJQ';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -5622,12 +5622,21 @@ var MTL_TIME_WINDOWS = [
 // give offence. For MTL these are the most valuable rows in the dataset: they say why a market
 // is not working.
 var MTL_GAP_REASONS = [
-  { v:'time', cs:'\u010cas', en:'Time' },
-  { v:'distance', cs:'Doj\u00ed\u017ed\u011bn\u00ed', en:'Distance' },
-  { v:'price', cs:'Cena', en:'Price' },
-  { v:'level', cs:'\u00darove\u0148', en:'Level' },
-  { v:'atmosphere', cs:'Atmosf\u00e9ra', en:'Atmosphere' },
-  { v:'browsing', cs:'Nev\u00edm, jen hled\u00e1m', en:'Just looking' }
+  // Split by what can be DONE about it, which is what makes them readable at all.
+  // Operational: a club could change this, and it leads somewhere -- "the times don't work" pairs
+  // with the window they already picked, so it becomes a brief rather than a complaint.
+  // Subjective: nobody can act on it, and it is not about the market but about one gym. For MTL it
+  // is the most valuable row in the dataset -- it separates "this town is underserved" from "this
+  // town is served badly", which is the difference between adding a class and bringing in a rival.
+  // Neither group is ever shown to a club.
+  { v:'time', g:'ops', cs:'\u010casy lekc\u00ed', en:'Class times' },
+  { v:'type', g:'ops', cs:'Chyb\u00ed typ lekce', en:'Missing class type' },
+  { v:'distance', g:'ops', cs:'Doj\u00ed\u017ed\u011bn\u00ed', en:'Distance' },
+  { v:'price', g:'ops', cs:'Cena', en:'Price' },
+  { v:'atmosphere', g:'subj', cs:'Atmosf\u00e9ra', en:'Atmosphere' },
+  { v:'level', g:'subj', cs:'\u00darove\u0148', en:'Level' },
+  { v:'coaches', g:'subj', cs:'Tren\u00e9\u0159i', en:'Coaches' },
+  { v:'browsing', g:'subj', cs:'Nev\u00edm, jen hled\u00e1m', en:'Just looking' }
 ];
 function _chipHtml(cls, v, label, sub){
   return '<span class="'+cls+'" data-v="'+v+'" style="display:inline-block;padding:7px 12px;margin:3px;border:1.5px solid var(--border);border-radius:999px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;background:#fff;color:var(--dark);line-height:1.25;">'
@@ -5780,6 +5789,56 @@ async function _openSoundingReply(d){
   // "never replied", which is what tells the club whether to move the slot or drop the idea.
   ov.querySelector('#srNone').onclick=function(){ send(''); };
 }
+// Writes a demand signal. Two paths on purpose:
+//   - the FORM goes through submit_demand_form, which additionally stamps form_at -- the only
+//     timestamp on the row produced by an actual act rather than by the deck rendering, and the
+//     one the club-facing threshold counts.
+//   - the PASSIVE signal (empty deck, nobody tapped anything) goes through bump_demand.
+// p_user is ignored server-side now (auth.uid() is used instead) but stays in the call so an
+// older deployed client keeps working against the new function.
+async function _reportGymDemand(discCsv, silent, commit, form){
+  try{
+    if(!currentUser||!currentUser.id){ if(!silent) toast(L('\u26a0\ufe0f Nejd\u0159\u00edv se p\u0159ihlas')); return; }
+    var _ul=(typeof userLoc!=='undefined')?userLoc:null;
+    var city=((_ul&&_ul.city)||currentUser.city||'').trim();
+    var country=((_ul&&_ul.country)||'').trim();
+    var lat=(_ul&&_ul.lat!=null)?_ul.lat:((currentUser.city_lat!=null)?+currentUser.city_lat:null);
+    var lng=(_ul&&_ul.lng!=null)?_ul.lng:((currentUser.city_lng!=null)?+currentUser.city_lng:null);
+    if(!country && lat!=null && lng!=null){
+      try{
+        var _rr=await fetch('https://nominatim.openstreetmap.org/reverse?format=json&addressdetails=1&zoom=5&lat='+lat+'&lon='+lng);
+        var _rj=await _rr.json();
+        country=((_rj&&_rj.address&&_rj.address.country)||'').trim();
+      }catch(e){}
+    }
+
+    var _discs=(discCsv||'').split(',').map(function(x){return x.trim();}).filter(Boolean);
+    var _hasForm = !!(form && (form.windows || form.levels || form.reasons || form.note || form.nogo));
+    if(_hasForm && _discs.length){
+      // One write for the whole form, mirrored onto every discipline the person is looking for.
+      try{ supaClient.rpc('submit_demand_form', { p_discs:_discs, p_windows:form.windows||null,
+        p_levels:form.levels||null, p_reasons:form.reasons||null, p_note:form.note||null,
+        p_city:city||null, p_country:country||null, p_lat:lat, p_lng:lng,
+        p_commit:!!commit, p_nogo:form.nogo||null }).then(function(){},function(){}); }catch(e){}
+    } else {
+      _discs.forEach(function(_d){
+        try{ supaClient.rpc('bump_demand', { p_user:currentUser.id, p_disc:_d, p_city:city||null,
+          p_country:country||null, p_lat:lat, p_lng:lng,
+          p_source:(silent?'passive':'explicit'), p_commit:(commit?true:null) }).then(function(){},function(){}); }catch(e){}
+      });
+    }
+
+    if(!silent){
+      toast(LANG==='en'
+        ? '\u2713 Thanks! We will focus on adding more gyms in your area \u2014 you will get a notification when a club teaching your sport joins.'
+        : '\u2713 D\u00edky! Zam\u011b\u0159\u00edme se na p\u0159id\u00e1n\u00ed dal\u0161\u00edch klub\u016f ve tv\u00e9m okol\u00ed \u2014 a\u017e p\u0159ibude nov\u00fd klub s tv\u00fdm sportem, d\u00e1me ti v\u011bd\u011bt.', 1);
+      // Fire-and-forget: crossing a threshold notifies the founder and the people waiting, and
+      // must never block or fail the person's own submission.
+      try{ if(lat!=null && lng!=null) fetch('/api/demand-threshold?lat='+lat+'&lng='+lng); }catch(e){}
+    }
+  }catch(e){}
+}
+
 function _openDemandChips(){
   // A SHEET WITH STEPS, not one long block inside the deck card. The card has no height of its
   // own and does not scroll, so once the form grew past three sections the last one sat below the
@@ -5794,7 +5853,7 @@ function _openDemandChips(){
   // The "what does not fit" step only exists where clubs already do: with none within
   // GYM_LOCAL_KM there is nothing to have rejected, and asking would be nonsense.
   var hasLocal=(typeof _gymLocalCount!=='undefined' && _gymLocalCount>0);
-  var st={ disc:[], win:[], lvl:[], why:[], note:'', commit:false };
+  var st={ disc:[], win:[], lvl:[], why:[], nogo:[], note:'', commit:false };
   var step=0;
 
   var chip=function(cls,v,label,sub){
@@ -5821,8 +5880,50 @@ function _openDemandChips(){
   if(hasLocal) STEPS.push({ key:'why', cls:'dqWhy', req:false,
       t:(EN?'Clubs already exist nearby. What does not fit? (Anonymous)':'V okol\u00ed u\u017e kluby jsou. Co ti na nich nesed\u00ed? (Anonymn\u00ed)'),
       h:(EN?'Only we see this \u2014 clubs never do. Skip it if none apply.':'Vid\u00edme to jen my \u2014 klub\u016fm se to nikdy nezobraz\u00ed. Kdy\u017e nic nesed\u00ed, p\u0159esko\u010d.'),
-      html:function(){ return MTL_GAP_REASONS.map(function(r){ return chip('dqWhy', r.v, (EN?r.en:r.cs), ''); }).join('')
+      html:function(){
+        var grp=function(g,label){
+          var items=MTL_GAP_REASONS.filter(function(r){ return r.g===g; });
+          if(!items.length) return '';
+          return '<div style="font-size:12px;color:var(--mid);font-weight:700;margin:8px 0 2px;">'+label+'</div>'
+            + items.map(function(r){ return chip('dqWhy', r.v, (EN?r.en:r.cs), ''); }).join('');
+        };
+        return grp('ops', (EN?'What could be changed':'Co by \u0161lo zm\u011bnit'))
+             + grp('subj', (EN?'What just did not fit':'Co prost\u011b nesedlo'))
         + '<textarea id="dqNote" rows="2" placeholder="'+(EN?'Anything else? (optional)':'N\u011bco dal\u0161\u00edho? (nepovinn\u00e9)')+'" style="width:100%;box-sizing:border-box;margin-top:10px;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:13px;font-family:inherit;resize:vertical;">'+(st.note||'')+'</textarea>'; } });
+  // Excluding clubs, paginated rather than capped. An earlier draft hid this step entirely above
+  // ten clubs -- which would have switched it off in Prague, exactly where it matters most. Ten
+  // per page instead: everybody gets to decide about every club that concerns them.
+  //
+  // Nothing is pre-ticked, and the default is "all of them", so this is a subtraction from an
+  // existing scope rather than a consent being collected here. The consent for passing demand to
+  // nearby clubs belongs in the terms accepted at registration.
+  var nearGyms=[];
+  try{
+    nearGyms=(typeof GYMS!=='undefined'?GYMS:[]).filter(function(g){
+      if(g.distKm==null || g.distKm>GYM_LOCAL_KM) return false;
+      if(!st.disc.length) return true;
+      return (g.disciplines||[]).some(function(d){ return st.disc.indexOf(d)>=0; });
+    });
+  }catch(e){ nearGyms=[]; }
+  var gPage=0, G_PER=10;
+  if(nearGyms.length) STEPS.push({ key:'nogo', cls:'dqNogo', req:false,
+      t:(EN?'Any club you would not train at, no matter what?':'Do jak\u00e9ho klubu bys ne\u0161el tr\u00e9novat, ani kdyby padaly traka\u0159e?'),
+      h:(EN?'Clubs you cross out will not see your anonymous demand data.':'Kluby, kter\u00e9 od\u0161krtne\u0161, pak neuvid\u00ed data tvoj\u00ed anonymn\u00ed popt\u00e1vky.'),
+      html:function(){
+        var pages=Math.ceil(nearGyms.length/G_PER);
+        if(gPage>=pages) gPage=0;
+        var slice=nearGyms.slice(gPage*G_PER, gPage*G_PER+G_PER);
+        return slice.map(function(g){
+            return '<span class="dqNogo" data-v="'+g.id+'" style="display:inline-block;padding:9px 13px;margin:4px;border:1.5px solid var(--border);border-radius:999px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;background:#fff;color:var(--dark);">'
+              + (g.name||'Klub') + ' <span style="opacity:.5;font-weight:600;">\u2715</span></span>';
+          }).join('')
+          + (pages>1 ? ('<div style="display:flex;align-items:center;gap:10px;margin-top:12px;">'
+              + '<button id="dqGPrev" style="padding:7px 12px;border:1.5px solid var(--border);border-radius:9px;background:none;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--dark);">\u2039</button>'
+              + '<span style="font-size:12px;color:var(--mid);">'+(gPage+1)+'/'+pages+'</span>'
+              + '<button id="dqGNext" style="padding:7px 12px;border:1.5px solid var(--border);border-radius:9px;background:none;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--dark);">'+(EN?'Next \u203a':'Dal\u0161\u00ed \u203a')+'</button></div>') : '')
+          + '<div style="font-size:11.5px;color:var(--light);margin-top:10px;">'+(EN?'None like that? Just skip.':'Nem\u00e1\u0161 takov\u00fd? Klidn\u011b p\u0159esko\u010d.')+'</div>';
+      } });
+
   STEPS.push({ key:'done', cls:null, req:false,
       t:(EN?'One last thing':'Je\u0161t\u011b jedna v\u011bc'),
       h:(EN?'We will let you know the moment a club matching this appears near you.':'D\u00e1me ti v\u011bd\u011bt, jakmile se v tv\u00e9m okol\u00ed objev\u00ed klub, kter\u00fd tomu odpov\u00edd\u00e1.'),
@@ -5899,6 +6000,11 @@ function _openDemandChips(){
         };
       });
     }
+    if(sp.key==='nogo'){
+      var pv=ov.querySelector('#dqGPrev'), nx=ov.querySelector('#dqGNext');
+      if(pv) pv.onclick=function(){ gPage=Math.max(0,gPage-1); draw(); };
+      if(nx) nx.onclick=function(){ gPage++; draw(); };
+    }
     syncNext();
     if(step===0){ try{ _dqCityHint(); }catch(e){} }
   };
@@ -5913,7 +6019,7 @@ function _openDemandChips(){
     if(step<STEPS.length-1){ step++; draw(); return; }
     ov.remove();
     _reportGymDemand(st.disc.join(','), false, st.commit,
-      { windows:st.win.join(','), levels:st.lvl.join(','), reasons:st.why.join(','), note:st.note });
+      { windows:st.win.join(','), levels:st.lvl.join(','), reasons:st.why.join(','), note:st.note, nogo:st.nogo.join(',') });
   };
   draw();
 }
