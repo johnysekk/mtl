@@ -42,7 +42,7 @@ export default async function handler(req, res) {
     const prows = pr.ok ? await pr.json() : [];
     if (!prows.length || prows[0].role !== 'founder') return res.status(403).json({ error: 'founder only' });
 
-    const rows = await pagedGet(`demand_signals?select=user_id,city,country,disciplines,created_at,last_seen_at,lat,lng,source,opens,committed,committed_at,form_at,windows,levels,reasons,wanted_gyms&source=neq.resolved`);
+    const rows = await pagedGet(`demand_signals?select=user_id,city,country,disciplines,created_at,last_seen_at,lat,lng,source,opens,committed,committed_at,form_at,windows,levels,reasons,wanted_gyms&source=neq.resolved&order=created_at.asc`);
 
     // Resolved rows are the CONVERSION numerator: people who asked and have since started training
     // somewhere. resolve_demand() flips them rather than deleting, so the evidence stays. Note this
@@ -84,10 +84,17 @@ export default async function handler(req, res) {
       const country = (r.country || '').trim();
       if (lat != null && lng != null && isFinite(lat) && isFinite(lng)) {
         let best = null, bestD = Infinity;
-        for (const c of clusters) { const d = hav(lat, lng, c.lat, c.lng); if (d < bestD) { bestD = d; best = c; } }
+        // Membership is measured against the cluster's ANCHOR -- the point that created it -- not
+        // against its moving centroid. With the centroid, a chain of signals spaced under
+        // CLUSTER_KM apart drags the cluster along behind it: on a 12 km chain the outermost
+        // members ended up 24.7 km apart despite a 20 km rule, and along a road out of a city it
+        // could reach the next town entirely. The anchor caps that: everybody in a cluster is
+        // within CLUSTER_KM of one fixed point. The centroid is still computed, but only for
+        // display and for the map.
+        for (const c of clusters) { const d = hav(lat, lng, c.alat, c.alng); if (d < bestD) { bestD = d; best = c; } }
         let c;
         if (best && bestD <= CLUSTER_KM) { c = best; }
-        else { c = { lat, lng, n: 0, users: new Map(), exU: new Set(), pasU: new Set(), strongU: new Set(), comU: new Set(), formU: new Set(), wantG: {}, namedU: new Set(), unnamedU: new Set(), win: {}, lvl: {}, why: {}, resolvedU: new Set(), disc: {}, cities: {}, country, last: '' }; clusters.push(c); }
+        else { c = { lat, lng, alat: lat, alng: lng, n: 0, users: new Map(), exU: new Set(), pasU: new Set(), strongU: new Set(), comU: new Set(), formU: new Set(), wantG: {}, namedU: new Set(), unnamedU: new Set(), win: {}, lvl: {}, why: {}, resolvedU: new Set(), disc: {}, cities: {}, country, last: '' }; clusters.push(c); }
         c.lat = (c.lat * c.n + lat) / (c.n + 1);
         c.lng = (c.lng * c.n + lng) / (c.n + 1);
         c.n++;
