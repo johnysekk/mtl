@@ -1,3 +1,7 @@
+// The ladder lives in ONE place. This file used to carry its own copy, which had drifted:
+// it billed an Exclusive Partner 1% instead of 0.5% and did not know about Founding Partner
+// at all, so an FP subscription was re-rated up to the ordinary rate.
+import { ladderRate } from './_rate.js';
 import Stripe from 'stripe';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -5,7 +9,6 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const sbHeaders = { apikey: SKEY, Authorization: `Bearer ${SKEY}` };
-import { ladderRate as _mtlLadder } from './_rate.js';
 async function sbGet(path) {
   try { const r = await fetch(`${SB}/rest/v1/${path}`, { headers: sbHeaders }); return r.ok ? r.json() : []; }
   catch (e) { return []; }
@@ -70,11 +73,11 @@ export default async function handler(req, res) {
     const owner = req.query.owner;
     if (!owner) return res.status(400).json({ error: 'missing owner' });
 
-    const prof = (await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=coach_ref_score,partner,founding,bankai_eligible`))[0];
+    const prof = (await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=coach_ref_score,partner,bankai_eligible`))[0];
     if (!prof) return res.status(404).json({ error: 'owner not found' });
 
     const score = prof.coach_ref_score || 0;
-    const pct = _mtlLadder('stripe', { partner: prof.partner, founding: prof.founding, score: score, bankai: prof.bankai_eligible }) * 100; // Stripe track (this cron only re-rates Stripe subscriptions)
+    const pct = ladderRate('stripe', { partner: prof.partner, founding: prof.founding, score: score, bankai: prof.bankai_eligible }) * 100; // Stripe track (this cron only re-rates Stripe subscriptions)
 
     let rerated = 0;
     const gyms = await sbGet(`gyms?owner_id=eq.${encodeURIComponent(owner)}&select=id,stripe_account,welcome_free_until`);

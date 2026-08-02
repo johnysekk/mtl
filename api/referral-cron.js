@@ -180,6 +180,14 @@ export default async function handler(req, res) {
         const newScore = ((ref && ref[0] && ref[0].coach_ref_score) || 0) + 1;
         await sb(`profiles?id=eq.${c.referred_by}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ coach_ref_score: newScore }) });
         try { await sb(`coach_ref_log`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ referrer_id: c.referred_by, referred_id: c.id, weight: 2 }]) }); } catch (e) {}
+        // A tier change only reaches NEW members by itself: a Stripe subscription locks its
+        // application_fee_percent when it is created, so without this the referrer keeps paying
+        // the old rate on every member they already had -- the reward arrives for nobody who is
+        // already there. Fire-and-forget; sub-rate-cron sweeps anything this misses.
+        try {
+          const _base = (process.env.APP_URL || process.env.PUBLIC_URL || '').replace(/\/+$/, '');
+          if (_base) await fetch(`${_base}/api/gym-rerate?owner=${encodeURIComponent(c.referred_by)}`);
+        } catch (e) {}
         let msg = `\uD83C\uDF89 Tv\u016Fj pozvan\u00FD gym ${c.name || ''} je te\u010F aktivn\u00ED! +1 bod do MTL Ligy \uD83C\uDFC6 \u2014 m\u00E1\u0161 ${newScore} aktivn\u00EDch p\u0159iveden\u00FDch. \uD83E\uDD4A`;
         // Milestones must match the REAL ladder in _ladderRate: Shikai at 2, Bankai at 5
         // (+ the performance gate, Stripe only). They used to fire at 3 and 10 - the old

@@ -8,13 +8,16 @@
 //
 // DŮLEŽITÉ: webhook musí číst RAW body (proto bodyParser:false), jinak selže ověření podpisu.
 
+// The ladder lives in ONE place. This file used to carry its own copy, which had drifted:
+// it billed an Exclusive Partner 1% instead of 0.5% and did not know about Founding Partner
+// at all, so an FP subscription was re-rated up to the ordinary rate.
+import { ladderRate } from './_rate.js';
 import Stripe from 'stripe';
 import crypto from 'crypto';
 import PDFDocument from 'pdfkit';
 import { isTestMode } from './_config.js';
 const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 import { DEJAVU_CZ } from './_dejavu-cz.js';
-import { ladderRate as _mtlLadder } from './_rate.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 export const config = { api: { bodyParser: false } };
@@ -47,7 +50,7 @@ const RESEND = process.env.RESEND_API_KEY;
 const MAIL_FROM = process.env.INVITE_FROM || 'Martial Training Lab <no-reply@martialtraininglab.com>';
 const MAIL_ADDR = (MAIL_FROM.match(/<([^>]+)>/) || [])[1] || 'no-reply@martialtraininglab.com';
 function _esc(x) { return String(x == null ? '' : x).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-export async function sendResend(to, subject, html, opts) {
+async function sendResend(to, subject, html, opts) {
   if (!RESEND || !to) return;
   try {
     const body = { from: (opts && opts.from) || MAIL_FROM, to: [to], subject, html };
@@ -58,7 +61,7 @@ export async function sendResend(to, subject, html, opts) {
   } catch (e) { console.error('resend', e.message); }
 }
 function _czDate(iso){ try{ const m=String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})/); if(!m) return String(iso||''); return parseInt(m[3],10)+'. '+parseInt(m[2],10)+'. '+m[1]; }catch(e){ return String(iso||''); } }
-export function cohortDokladHtml(o){
+function cohortDokladHtml(o){
   o = o || {}; const rec = o.gym || {};
   const seller = _esc(rec.legal_name || rec.name || o.gymName || 'Poskytovatel');
   const c = String(o.cur || 'CZK').toUpperCase();
@@ -112,7 +115,7 @@ async function cohortStripeFee(pi, acct){
     return Math.round(sFee) / 100;
   }catch(e){ console.error('cohortStripeFee', e.message); return 0; }
 }
-export function cohortDokladPdf(o){
+function cohortDokladPdf(o){
   return new Promise((resolve, reject) => {
     try{
       const rec = o.gym || {};
@@ -149,7 +152,7 @@ export function cohortDokladPdf(o){
     }catch(e){ reject(e); }
   });
 }
-export function cohortDepositHtml(name, courseName, gymName, depositTxt, remainderTxt, startTxt, courseUrl) {
+function cohortDepositHtml(name, courseName, gymName, depositTxt, remainderTxt, startTxt) {
   // Czech has vocative declension ('Petr' -> 'Petře'); getting it wrong reads worse than omitting,
   // so we greet without the name. (name kept in the signature for callers / future localisation.)
   const hi = 'Ahoj,';
@@ -161,8 +164,6 @@ export function cohortDepositHtml(name, courseName, gymName, depositTxt, remaind
     <p style="font-size:15px;line-height:1.6;">Tvoje místo v kurzu <b>${_esc(courseName)}</b>${gymName ? (' u <b>' + _esc(gymName) + '</b>') : ''} je rezervované — zálohu <b>${_esc(depositTxt)}</b> máme. 🥊</p>
     ${startTxt ? `<p style="font-size:14px;line-height:1.6;">Začátek: <b>${_esc(_czDate(startTxt))}</b></p>` : ''}
     ${remainderTxt ? `<p style="font-size:14px;line-height:1.6;color:#555;">Zbytek 1. měsíce (<b>${_esc(remainderTxt)}</b>) doplatíš na místě přímo v klubu (kartou, QR nebo hotově — dle klubu).</p>` : ''}
-    ${courseUrl ? `<p style="text-align:center;margin:24px 0 8px;"><a href="${courseUrl}" style="display:inline-block;background:#E11;color:#fff;text-decoration:none;font-weight:800;font-size:15px;padding:13px 26px;border-radius:12px;">Otevřít můj kurz</a></p>
-    <p style="font-size:12px;line-height:1.6;color:#888;text-align:center;margin:0 0 6px;">Najdeš tam rozvrh kurzu. Účet nepotřebuješ — odkaz stačí.</p>` : ''}
     <p style="font-size:13px;line-height:1.6;color:#555;margin-top:18px;">Těšíme se na tebe na tréninku! S dotazy ke kurzu se obrať přímo na svůj klub.</p>
     <p style="font-size:12px;color:#aaa;line-height:1.6;margin-top:24px;">Tenhle e-mail ti přišel, protože ses přihlásil/a do kurzu${gymName ? (' u ' + _esc(gymName)) : ''}.</p>
   </div></body></html>`;
@@ -785,9 +786,9 @@ export default async function handler(req, res) {
           if (_mem2 && _mem2.paid_to === 'coach' && _mem2.coach_id) _ownerId = _mem2.coach_id;
           else if (_mem2 && _mem2.gym_id) { const _g=(await sbGet(`gyms?id=eq.${_mem2.gym_id}&select=owner_id,welcome_free_until`))[0]; _ownerId = _g && _g.owner_id; }
           if (_ownerId) {
-            const _op = (await sbGet(`profiles?id=eq.${_ownerId}&select=partner,founding,coach_ref_score,bankai_eligible,welcome_free_until`))[0] || {};
+            const _op = (await sbGet(`profiles?id=eq.${_ownerId}&select=partner,coach_ref_score,bankai_eligible,welcome_free_until`))[0] || {};
             const _sc = _op.coach_ref_score || 0;
-            const _ladder = _mtlLadder('stripe', { partner: _op.partner, founding: _op.founding, score: _sc, bankai: _op.bankai_eligible }) * 100;
+            const _ladder = ladderRate('stripe', { partner: _op.partner, founding: _op.founding, score: _sc, bankai: _op.bankai_eligible }) * 100;
             const _wActive = !!(_op.welcome_free_until && new Date(_op.welcome_free_until).getTime() > Date.now());
             await applySubRate(stripe, event.account, sub, _so2, _ladder, _wActive);
           }

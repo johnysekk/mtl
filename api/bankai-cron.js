@@ -28,7 +28,16 @@ export default async function handler(req, res) {
           elig = (mems || []).length >= 25;
         }
       }
-      if (!!p.bankai_eligible !== elig) { await sbPatch(`profiles?id=eq.${encodeURIComponent(p.id)}`, { bankai_eligible: elig }); changed++; }
+      if (!!p.bankai_eligible !== elig) {
+        await sbPatch(`profiles?id=eq.${encodeURIComponent(p.id)}`, { bankai_eligible: elig });
+        changed++;
+        // Same reason as in referral-cron: existing subscriptions keep the fee they were created
+        // with, so crossing into (or out of) Bankai has to be pushed to them explicitly.
+        try {
+          const _base = (process.env.APP_URL || process.env.PUBLIC_URL || '').replace(/\/+$/, '');
+          if (_base) await fetch(`${_base}/api/gym-rerate?owner=${encodeURIComponent(p.id)}`);
+        } catch (e) {}
+      }
     }
     res.status(200).json({ ok: true, checked: (cands || []).length, changed });
   } catch (err) {

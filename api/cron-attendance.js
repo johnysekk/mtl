@@ -7,6 +7,10 @@
 // + Druhý pass: připomínka studentovi ~4 h před začátkem GYM lekce / drop-inu (TZ gymu). Dedup přes reminder_sent na řádku.
 //   1:1 lekce (coach + student) řeší tenhle cron přes profiles.timezone (TZ kouče) + client-side fallback. Respektuje mute_class_reminder / mute_coach_lesson_reminder.
 
+// The ladder lives in ONE place. This file used to carry its own copy, which had drifted:
+// it billed an Exclusive Partner 1% instead of 0.5% and did not know about Founding Partner
+// at all, so an FP subscription was re-rated up to the ordinary rate.
+import { ladderRate } from './_rate.js';
 import Stripe from 'stripe';
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = process.env.SUPABASE_URL;
@@ -25,7 +29,6 @@ async function sbPatch(table, query, row) {
 }
 
 const DOW = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-import { ladderRate as _mtlLadder } from './_rate.js';
 
 // Aktuální čas v timezone gymu → {date 'YYYY-MM-DD', dow 0-6, mins od půlnoci}
 function gymNow(tz) {
@@ -243,14 +246,14 @@ async function handler(req, res) {
     let welcomeRerated = 0;
     try {
       const nowIso = new Date().toISOString();
-      const ended = await sbGet(`profiles?welcome_free_until=lt.${encodeURIComponent(nowIso)}&welcome_rerated=is.false&select=id,stripe_account,partner,founding,coach_ref_score,bankai_eligible`);
+      const ended = await sbGet(`profiles?welcome_free_until=lt.${encodeURIComponent(nowIso)}&welcome_rerated=is.false&select=id,stripe_account,partner,coach_ref_score,bankai_eligible`);
       for (const p of (Array.isArray(ended) ? ended : [])) {
         try {
           // The owner's CURRENT ladder rate, computed live - not mtl_acq_base from metadata,
           // which was stamped when the subscription was created and is stale the moment the
           // owner crosses a tier. Stripe track (this only ever touches Stripe subscriptions).
           const _sc = p.coach_ref_score || 0;
-          const ladderPct = _mtlLadder('stripe', { partner: p.partner, founding: p.founding, score: _sc, bankai: p.bankai_eligible }) * 100;
+          const ladderPct = ladderRate('stripe', { partner: p.partner, founding: p.founding, score: _sc, bankai: p.bankai_eligible }) * 100;
           const pGyms = await sbGet(`gyms?owner_id=eq.${p.id}&select=id,stripe_account,gym_payout_account`);
           for (const g of (Array.isArray(pGyms) ? pGyms : [])) {
             const acct = g.gym_payout_account || g.stripe_account;
