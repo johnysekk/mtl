@@ -7,10 +7,6 @@
 // + Druhý pass: připomínka studentovi ~4 h před začátkem GYM lekce / drop-inu (TZ gymu). Dedup přes reminder_sent na řádku.
 //   1:1 lekce (coach + student) řeší tenhle cron přes profiles.timezone (TZ kouče) + client-side fallback. Respektuje mute_class_reminder / mute_coach_lesson_reminder.
 
-// The ladder lives in ONE place. This file used to carry its own copy, which had drifted:
-// it billed an Exclusive Partner 1% instead of 0.5% and did not know about Founding Partner
-// at all, so an FP subscription was re-rated up to the ordinary rate.
-import { ladderRate } from './_rate.js';
 import Stripe from 'stripe';
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = process.env.SUPABASE_URL;
@@ -174,7 +170,7 @@ async function handler(req, res) {
       const dISO = (d) => d.toISOString().slice(0, 10);
       const nowD = new Date();
       const lo = dISO(new Date(nowD.getTime() - 86400000)), hi = dISO(new Date(nowD.getTime() + 2 * 86400000));
-      const bks = await sbGet(`bookings?type=neq.online&status=eq.active&training_date=gte.${lo}&training_date=lte.${hi}&or=(reminder_sent.eq.false,coach_reminder_sent.eq.false)&select=id,coach_id,student_id,student_name,coach_name,training_date,training_time,reminder_sent,coach_reminder_sent`);
+      const bks = await sbGet(`bookings?type=neq.online&status=eq.active&training_date=gte.${lo}&training_date=lte.${hi}&or=(reminder_sent.eq.false,coach_reminder_sent.eq.false)&select=id,coach_id,student_id,coach_name,training_date,training_time,reminder_sent,coach_reminder_sent`);
       if (bks && bks.length) {
         const coachIds = [...new Set(bks.map(b => b.coach_id).filter(Boolean))];
         const tzMap = {};
@@ -253,8 +249,10 @@ async function handler(req, res) {
           // which was stamped when the subscription was created and is stale the moment the
           // owner crosses a tier. Stripe track (this only ever touches Stripe subscriptions).
           const _sc = p.coach_ref_score || 0;
-          const ladderPct = ladderRate('stripe', { partner: p.partner, founding: p.founding, score: _sc, bankai: p.bankai_eligible }) * 100;
-          const pGyms = await sbGet(`gyms?owner_id=eq.${p.id}&select=id,stripe_account,gym_payout_account`);
+          const ladderPct = p.partner ? 1 : ((_sc >= 5 && p.bankai_eligible) ? 2 : (_sc >= 2 ? 2.5 : 3));
+          // gyms has no gym_payout_account column -- that lives on profiles. Naming it here made
+          // PostgREST reject the whole query, so this block silently did nothing.
+          const pGyms = await sbGet(`gyms?owner_id=eq.${p.id}&select=id,stripe_account`);
           for (const g of (Array.isArray(pGyms) ? pGyms : [])) {
             const acct = g.gym_payout_account || g.stripe_account;
             if (!acct) continue;

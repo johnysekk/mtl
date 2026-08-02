@@ -27,7 +27,6 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const H = { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' };
-import { ladderRate as _mtlLadder } from './_rate.js';
 
 async function sbGet(path) {
   try { const r = await fetch(`${SB}/rest/v1/${path}`, { headers: H }); return r.ok ? r.json() : []; }
@@ -72,7 +71,11 @@ async function applySubRate(stripe, acct, subId, sub, ladderPct, welcomeActive) 
 // Stripe track (subscriptions are always Stripe): EP 1% | Bankai 2% | Shikai 2.5% | base 3%.
 function ladderOf(p) {
   if (!p) return 3;
-  return _mtlLadder('stripe', { partner: p.partner, founding: p.founding, score: p.coach_ref_score, bankai: p.bankai_eligible }) * 100;
+  if (p.partner) return 1;
+  const s = p.coach_ref_score || 0;
+  if (s >= 5 && p.bankai_eligible) return 2;
+  if (s >= 2) return 2.5;
+  return 3;
 }
 
 export default async function handler(req, res) {
@@ -99,7 +102,9 @@ export default async function handler(req, res) {
           ownerId = m.coach_id;
         } else if (m.gym_id) {
           if (gymCache[m.gym_id] === undefined) {
-            gymCache[m.gym_id] = (await sbGet(`gyms?id=eq.${m.gym_id}&select=owner_id,stripe_account,gym_payout_account,welcome_free_until`))[0] || null;
+            // gym_payout_account is a profiles column, not a gyms one; asking for it here rejected the
+            // whole query and left gymCache null, so nothing was ever re-rated.
+            gymCache[m.gym_id] = (await sbGet(`gyms?id=eq.${m.gym_id}&select=owner_id,stripe_account,welcome_free_until`))[0] || null;
           }
           const g = gymCache[m.gym_id];
           if (!g) { out.skipped++; continue; }
@@ -110,7 +115,7 @@ export default async function handler(req, res) {
         if (!ownerId) { out.skipped++; continue; }
 
         if (profCache[ownerId] === undefined) {
-          profCache[ownerId] = (await sbGet(`profiles?id=eq.${ownerId}&select=partner,founding,coach_ref_score,bankai_eligible,stripe_account,gym_payout_account,welcome_free_until`))[0] || null;
+          profCache[ownerId] = (await sbGet(`profiles?id=eq.${ownerId}&select=partner,coach_ref_score,bankai_eligible,stripe_account,gym_payout_account,welcome_free_until`))[0] || null;
         }
         const p = profCache[ownerId];
         if (!p) { out.skipped++; continue; }

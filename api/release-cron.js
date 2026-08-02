@@ -39,16 +39,6 @@ async function sb(path, opts = {}) {
 // current wall-clock time in a given IANA tz, returned as a naive Date whose fields equal the tz-local time
 function nowInTz(tz) { try { return new Date(new Date().toLocaleString('en-US', { timeZone: tz || DEFAULT_TZ })); } catch (e) { return new Date(); } }
 // scheduled class start as a naive Date (same "wall-clock as local" basis as nowInTz, so the two compare correctly)
-// Has this reservation's unpaid window run out? Normally 30 minutes from created_at. If the owner
-// requeued it (told the student "the payment isn't on the account"), the student did not pick that
-// moment, so it gets REQUEUE_HOURS instead -- long enough to survive being away from your phone.
-const REQUEUE_HOURS = 24;
-function _windowPassed(r) {
-  const base = r.requeued_at || r.created_at;
-  if (!base) return false;
-  const ms = r.requeued_at ? REQUEUE_HOURS * 3600 * 1000 : 30 * 60 * 1000;
-  return new Date(base).getTime() <= Date.now() - ms;
-}
 function classStartNaive(date, time) { try { return new Date(`${date}T${(time || '00:00')}:00`); } catch (e) { return null; } }
 
 export default async function handler(req, res) {
@@ -62,7 +52,7 @@ export default async function handler(req, res) {
   try {
     // ---- Pass 1: auto-release unpaid QR drop-in reservations 30 min after reservation --------------
     const yest = new Date(Date.now() - 36 * 3600 * 1000).toISOString().slice(0, 10);
-    const rows = await sb(`gym_bookings?payment_method=eq.qr&status=eq.reserved&pis_payment_id=is.null&class_date=gte.${yest}&select=id,gym_id,student_id,student_name,class_name,class_date,class_time,class_level,created_at,requeued_at&limit=3000`);
+    const rows = await sb(`gym_bookings?payment_method=eq.qr&status=eq.reserved&pis_payment_id=is.null&class_date=gte.${yest}&select=id,gym_id,student_id,student_name,class_name,class_date,class_time,created_at&limit=3000`);
 
     const gymIds = [...new Set((rows || []).map(r => r.gym_id).filter(Boolean))];
     const tzMap = {};
@@ -75,9 +65,7 @@ export default async function handler(req, res) {
       const gm = tzMap[b.gym_id] || { tz: DEFAULT_TZ };
       // release 30 min after reservation (matches the in-app 30-min countdown + coach 1:1 Pass 3);
       // the old 45-min-before-class rule did not match what the student was shown.
-      // A requeued reservation (owner said "I can't see the payment") runs on REQUEUE_HOURS, not
-      // 30 minutes: the student did not choose that moment, the owner did.
-      if (!_windowPassed(b)) continue;
+      if (!b.created_at || new Date(b.created_at).getTime() > Date.now() - 30 * 60 * 1000) continue;
 
       await sb(`gym_bookings?id=eq.${b.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'released' }) });
       try {
@@ -103,9 +91,8 @@ export default async function handler(req, res) {
     // ---- Pass 3: expire unpaid QR coach 1:1 reservations 1 hour after booking --------------
     try {
       const cutoff1h = new Date(Date.now() - 30 * 60 * 1000).toISOString(); // 30 min unpaid window
-      const b1 = await sb(`bookings?payment_method=eq.qr&status=eq.reserved&select=id,slot_id,student_id,coach_name,created_at,requeued_at&limit=3000`);
+      const b1 = await sb(`bookings?payment_method=eq.qr&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoff1h)}&select=id,slot_id,student_id,coach_name&limit=3000`);
       for (const b of (b1 || [])) {
-        if (!_windowPassed(b)) continue;
         await sb(`bookings?id=eq.${b.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'expired' }) });
         if (b.slot_id) { try { await sb(`slots?id=eq.${encodeURIComponent(b.slot_id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ booked: false }) }); } catch (e) {} }
         try {
@@ -121,9 +108,8 @@ export default async function handler(req, res) {
     // ---- Pass 4: expire unpaid QR event-ticket reservations 1 hour after booking ----------
     try {
       const cutoff1hE = new Date(Date.now() - 30 * 60 * 1000).toISOString(); // 30 min unpaid window
-      const e1 = await sb(`event_tickets?payment_method=eq.qr&status=eq.reserved&select=id,created_at,requeued_at&limit=3000`);
+      const e1 = await sb(`event_tickets?payment_method=eq.qr&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoff1hE)}&select=id&limit=3000`);
       for (const t of (e1 || [])) {
-        if (!_windowPassed(t)) continue;
         await sb(`event_tickets?id=eq.${t.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'expired' }) });
         expired1h++;
       }
@@ -161,106 +147,6 @@ export default async function handler(req, res) {
     }
   } catch (e) { /* pis expiry pass non-fatal */ }
 
-    // ---- Pass 7: the OWNER's side of a claimed QR payment ------------------------------------
-    // 'paid_claimed' means the student says they paid and the owner has not decided yet. Nothing
-    // ever touched that state, so an owner who simply forgot held the spot for good: the student
-    // could not rebook, the class looked full, and nobody was told. Two stages, both idempotent
-    // via a stamp on the row:
-    //   48h  -> remind the owner it is waiting on them (once)
-    //   7d   -> release it. The student is told and can book again; the club can still record the
-    //           payment by hand if it turns up later.
-    const CLAIM_REMIND_H = 48;
-    const CLAIM_RELEASE_D = 7;
-    let claimReminded = 0, claimReleased = 0;
-    try {
-      const remindBefore = new Date(Date.now() - CLAIM_REMIND_H * 3600 * 1000).toISOString();
-      const releaseBefore = new Date(Date.now() - CLAIM_RELEASE_D * 86400000).toISOString();
-
-      // --- 7a) release first, so a row never gets a reminder on the same run it is released
-      const oldClaims = await sb(`gym_bookings?status=eq.paid_claimed&claimed_at=lt.${encodeURIComponent(releaseBefore)}&select=id,gym_id,student_id,class_name,class_date,class_time&limit=1000`);
-      for (const b of (oldClaims || [])) {
-        try {
-          await sb(`gym_bookings?id=eq.${b.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'released' }) });
-          try {
-            await sb(`gym_class_reservations?gym_id=eq.${encodeURIComponent(b.gym_id)}&student_id=eq.${encodeURIComponent(b.student_id)}&class_date=eq.${encodeURIComponent(b.class_date)}&class_time=eq.${encodeURIComponent(b.class_time || '')}&class_name=eq.${encodeURIComponent(b.class_name || '')}`, { method: 'DELETE', prefer: 'return=minimal' });
-          } catch (e) {}
-          if (b.student_id) {
-            await sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({
-              user_id: b.student_id, type: 'system', read: false,
-              data: JSON.stringify({ kind: 'qr_released', gym: b.gym_id, class: b.class_name || null }),
-              message: `\u23f3 Klub tvoji platbu (${b.class_name || 'lekce'}) nepotvrdil do ${CLAIM_RELEASE_D} dn\u00ed, tak\u017ee se m\u00edsto uvolnilo. Pokud jsi zaplatil/a, ozvi se klubu \u2014 m\u016f\u017ee platbu zaznamenat ru\u010dn\u011b. / Your payment was not confirmed within ${CLAIM_RELEASE_D} days, so the spot was released.`
-            }) });
-          }
-          claimReleased++;
-        } catch (e) { console.error('claim release', b.id, e.message); }
-      }
-
-      // --- 7c) same two stages for coach 1:1 and event tickets ---------------------------------
-      // merch_orders is deliberately NOT here: a pending merch order blocks nobody, so ageing it
-      // would only generate noise.
-      for (const cfg of [
-        { tbl: 'bookings',      who: 'student_id', owner: 'coach_id', extra: 'slot_id' },
-        { tbl: 'event_tickets', who: 'buyer_id',   owner: null,       extra: null },
-      ]) {
-        try {
-          const sel = ['id', cfg.who, 'claimed_at'].concat(cfg.owner ? [cfg.owner] : []).concat(cfg.extra ? [cfg.extra] : []).join(',');
-          const old2 = await sb(`${cfg.tbl}?status=eq.paid_claimed&claimed_at=lt.${encodeURIComponent(releaseBefore)}&select=${sel}&limit=1000`);
-          for (const r of (old2 || [])) {
-            try {
-              await sb(`${cfg.tbl}?id=eq.${r.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'expired' }) });
-              if (cfg.tbl === 'bookings' && r.slot_id) { try { await sb(`slots?id=eq.${encodeURIComponent(r.slot_id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ booked: false }) }); } catch (e) {} }
-              if (r[cfg.who]) {
-                await sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({
-                  user_id: r[cfg.who], type: 'system', read: false,
-                  data: JSON.stringify({ kind: 'qr_reservation_expired' }),
-                  message: `\u23f3 Tvoje platba nebyla potvrzena do ${CLAIM_RELEASE_D} dn\u00ed, tak\u017ee rezervace propadla. Pokud jsi zaplatil/a, ozvi se klubu \u2014 platbu lze zaznamenat ru\u010dn\u011b.`
-                }) });
-              }
-              claimReleased++;
-            } catch (e) { console.error('claim release', cfg.tbl, r.id, e.message); }
-          }
-
-          const wait2 = await sb(`${cfg.tbl}?status=eq.paid_claimed&claimed_at=lt.${encodeURIComponent(remindBefore)}&claim_reminded=is.null&select=${sel}&limit=1000`);
-          for (const r of (wait2 || [])) {
-            try {
-              const ownerId = cfg.owner ? r[cfg.owner] : null;
-              if (ownerId) {
-                await sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({
-                  user_id: ownerId, type: 'system', read: false,
-                  data: JSON.stringify({ kind: 'qr_intent' }),
-                  message: `\u23f0 N\u011bkdo hl\u00e1s\u00ed platbu u\u017e ${CLAIM_REMIND_H} hodin a \u010dek\u00e1 na tvoje potvrzen\u00ed. Za ${CLAIM_RELEASE_D} dn\u00ed se rezervace uvoln\u00ed sama.`
-                }) });
-              }
-              await sb(`${cfg.tbl}?id=eq.${r.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ claim_reminded: new Date().toISOString() }) });
-              claimReminded++;
-            } catch (e) { console.error('claim remind', cfg.tbl, r.id, e.message); }
-          }
-        } catch (e) { console.error('claim ageing', cfg.tbl, e.message); }
-      }
-
-      // --- 7b) remind the owner about anything still sitting there past 48h
-      const waiting = await sb(`gym_bookings?status=eq.paid_claimed&claimed_at=lt.${encodeURIComponent(remindBefore)}&claim_reminded=is.null&select=id,gym_id,student_name,class_name,amount,currency&limit=1000`);
-      const gymOwner = {};
-      for (const b of (waiting || [])) {
-        try {
-          if (gymOwner[b.gym_id] === undefined) {
-            const g = await sb(`gyms?id=eq.${encodeURIComponent(b.gym_id)}&select=owner_id,name`);
-            gymOwner[b.gym_id] = (g && g[0]) || null;
-          }
-          const gy = gymOwner[b.gym_id];
-          if (gy && gy.owner_id) {
-            await sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({
-              user_id: gy.owner_id, type: 'system', read: false,
-              data: JSON.stringify({ kind: 'qr_intent', gym_id: b.gym_id }),
-              message: `\u23f0 ${b.student_name || 'Student'} hl\u00e1s\u00ed platbu (${b.class_name || 'lekce'}) u\u017e ${CLAIM_REMIND_H} hodin a \u010dek\u00e1 na tvoje potvrzen\u00ed. Dokud nerozhodne\u0161, dr\u017e\u00ed to m\u00edsto \u2014 za ${CLAIM_RELEASE_D} dn\u00ed se uvoln\u00ed samo.`
-            }) });
-          }
-          await sb(`gym_bookings?id=eq.${b.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ claim_reminded: new Date().toISOString() }) });
-          claimReminded++;
-        } catch (e) { console.error('claim remind', b.id, e.message); }
-      }
-    } catch (e) { console.error('claim ageing', e.message); }
-
     // security: alert founder on auto-bans / loud offenders in the last window
     try {
       if (process.env.SECURITY_ALERT_EMAIL && process.env.RESEND_API_KEY) {
@@ -284,7 +170,7 @@ export default async function handler(req, res) {
     // housekeeping: drop stale rate-limit windows (>2h old)
     try { const _rlOld = new Date(Date.now() - 2*3600*1000).toISOString(); await sb('rate_limits?updated_at=lt.' + encodeURIComponent(_rlOld), { method: 'DELETE', prefer: 'return=minimal' }); } catch (e) {}
 
-    return res.status(200).json({ ok: true, released, expired, expired1h, coverExpired, pisExpired, claimReminded, claimReleased });
+    return res.status(200).json({ ok: true, released, expired, expired1h, coverExpired, pisExpired });
   } catch (e) {
     return res.status(500).json({ error: e.message, released, expired, expired1h, coverExpired, pisExpired });
   }

@@ -65,7 +65,8 @@ export default async function handler(req, res){
     if(!paymentId && bookingId){
       let r0=(await sb.from('gym_bookings').select('pis_payment_id').eq('id',bookingId).maybeSingle()).data;
       if(!r0){ const m0=await sb.from('gym_memberships').select('pis_payment_id').eq('id',bookingId).maybeSingle(); if(m0.data) r0=m0.data; }
-      if(!r0){ const c0=await sb.from('bookings').select('pis_payment_id').eq('id',bookingId).maybeSingle(); if(c0.data) r0=c0.data; }
+      // 'bookings' has no pis_payment_id column, so this third lookup could never succeed -- it
+      // only ever returned an error. Coach 1:1 bookings are not a PIS payment target.
       if(!r0){ const e0=await sb.from('event_tickets').select('pis_payment_id').eq('id',bookingId).maybeSingle(); if(e0.data) r0=e0.data; }
       if(!r0){ const co0=await sb.from('cohort_members').select('pis_payment_id').eq('id',bookingId).maybeSingle(); if(co0.data) r0=co0.data; }
       if(!r0){ const mo0=await sb.from('merch_orders').select('pis_payment_id').eq('id',bookingId).maybeSingle(); if(mo0.data) r0=mo0.data; }
