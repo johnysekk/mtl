@@ -1,3 +1,4 @@
+import { rerateOwner } from './gym-rerate.js';
 // /api/bankai-cron.js — maintains profiles.bankai_eligible for the Bankai perf-gate.
 // Given coach_ref_score>=5 (the referral threshold, checked at rate-compute time), a provider
 // is Bankai-eligible if EITHER: >=10 taught privates (transactions type=coach_1to1 for this
@@ -31,12 +32,11 @@ export default async function handler(req, res) {
       if (!!p.bankai_eligible !== elig) {
         await sbPatch(`profiles?id=eq.${encodeURIComponent(p.id)}`, { bankai_eligible: elig });
         changed++;
-        // Same reason as in referral-cron: existing subscriptions keep the fee they were created
-        // with, so crossing into (or out of) Bankai has to be pushed to them explicitly.
-        try {
-          const _base = (process.env.APP_URL || process.env.PUBLIC_URL || '').replace(/\/+$/, '');
-          if (_base) await fetch(`${_base}/api/gym-rerate?owner=${encodeURIComponent(p.id)}`);
-        } catch (e) {}
+        // Called directly rather than over HTTP: a self-fetch needs a base URL from the
+        // environment, and if that variable is missing the call fails silently -- the worst way
+        // for a money fix to not work. A Stripe subscription locks its application_fee_percent at
+        // creation, so without this the reward reaches nobody who is already a member.
+        try { await rerateOwner(p.id); } catch (e) { console.error('rerate', e && e.message); }
       }
     }
     res.status(200).json({ ok: true, checked: (cands || []).length, changed });
