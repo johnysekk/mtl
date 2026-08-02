@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SLG states the tier requirements as referral-cron.js actually implements them, correcting my own SLE guess. The score rises by ONE per activated referral, a club included: referral-cron does newScore = old + 1 and the weight:2 it writes into coach_ref_log is never read back into the score, so my 'a club counts 2' was invented. What the cards were missing all along is the word ACTIVATED -- a referral only counts once that person themselves reaches 10 taught privates or 25 active memberships, the same bar bankai-cron uses, so 'bring 2 coaches' understated the work considerably. Deploy: index.html. -->
+<!-- MTL build: SLH fixes five queries in the app that named columns the database does not have. PostgREST rejects the WHOLE select when one name is wrong, so each of these returned null and its section rendered nothing, silently: slots.end_time twice (the column is just time), events.price and events.discipline (ticket_price and disciplines), gyms.bio and gyms.founded (description and founded_year), gym_memberships.price (amount). Readers were corrected alongside, and the merch price fields were left alone -- that is a different table where price does exist. Found by auditing all 558 selects against a fresh schema export; the previous run had used a dump predating claim-ageing.sql and drowned the real findings in false positives about requeued_at. Deploy: index.html + api/cron-attendance.js, sub-rate-cron.js, pis-return.js, release-cron.js + gym-views-engaged.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3860,7 +3860,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SLG';
+const MTL_BUILD='SLH';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -11165,7 +11165,7 @@ async function loadCsTeamSlots(gymId){
     const nm={}; (profs||[]).forEach(pp=>nm[pp.id]=pp.name||'');
     const t0=new Date(); const ymdToday=`${t0.getFullYear()}-${String(t0.getMonth()+1).padStart(2,'0')}-${String(t0.getDate()).padStart(2,'0')}`;
     const t1=new Date(t0.getTime()+8*86400000); const ymdEnd=`${t1.getFullYear()}-${String(t1.getMonth()+1).padStart(2,'0')}-${String(t1.getDate()).padStart(2,'0')}`;
-    const { data:sl } = await supaClient.from('slots').select('coach_profile_id,date,time,end_time,discipline,booked').in('coach_profile_id',ids).gte('date',ymdToday).lte('date',ymdEnd).eq('booked',false);
+    const { data:sl } = await supaClient.from('slots').select('coach_profile_id,date,time,discipline,booked').in('coach_profile_id',ids).gte('date',ymdToday).lte('date',ymdEnd).eq('booked',false);
     (sl||[]).forEach(s2=>{ const d=s2.date; if(!d) return; (_csTeamSlots[d]=_csTeamSlots[d]||[]).push({ coachId:s2.coach_profile_id, coachName:nm[s2.coach_profile_id]||'', time:s2.time||'', end:s2.end_time||'', disc:s2.discipline||'' }); });
     Object.keys(_csTeamSlots).forEach(d=>_csTeamSlots[d].sort((a,b)=>String(a.time).localeCompare(String(b.time))));
     if(_csView==='full') renderCoachSchedEditor();
@@ -16970,7 +16970,7 @@ async function loadGymSchedSlots(weekDates){
     const nm={}; (profs||[]).forEach(pp=>nm[pp.id]=pp.name||'');
     const ymd=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
     const d0=ymd(weekDates[0]); const d1=ymd(weekDates[6]);
-    const { data:sl } = await supaClient.from('slots').select('coach_profile_id,date,time,end_time,discipline,booked,capacity').in('coach_profile_id',ids).gte('date',d0).lte('date',d1).order('time',{ascending:true});
+    const { data:sl } = await supaClient.from('slots').select('coach_profile_id,date,time,discipline,booked,capacity').in('coach_profile_id',ids).gte('date',d0).lte('date',d1).order('time',{ascending:true});
     const map={}; (sl||[]).forEach(x=>{ if(!x.date) return; (map[x.date]=map[x.date]||[]).push({ coachName:nm[x.coach_profile_id]||'', time:x.time||'', end:x.end_time||'', disc:x.discipline||'', booked:!!x.booked, cap:Number(x.capacity)||1 }); });
     Object.keys(map).forEach(d=>map[d].sort((a,b)=>String(a.time||'').localeCompare(String(b.time||''))));
     window._gymSchedSlots=map;
@@ -17630,7 +17630,7 @@ async function loadGymMerchForProfile(gymId, g){
 }
 async function loadGymEventsForProfile(gymId, g){
   const el=$('gpEventsSection'); if(!el) return; el.innerHTML='';
-  let evs=[]; try{ const { data }=await supaClient.from('events').select('id,title,starts_at,city,venue,price,discipline,status,gym_id').eq('gym_id',gymId).eq('status','approved').order('starts_at',{ascending:false}).limit(60); evs=data||[]; }catch(e){}
+  let evs=[]; try{ const { data }=await supaClient.from('events').select('id,title,starts_at,city,venue,ticket_price,disciplines,status,gym_id').eq('gym_id',gymId).eq('status','approved').order('starts_at',{ascending:false}).limit(60); evs=data||[]; }catch(e){}
   if(!evs.length) return;
   const EN=LANG==='en'; const sym=_curSym(g&&g.currency); const now=Date.now();
   window._gpEvents=evs;
@@ -17638,7 +17638,7 @@ async function loadGymEventsForProfile(gymId, g){
   const monthLabel=ym=>{ const a=ym.split('-'); return MN[parseInt(a[1],10)-1]+' '+a[0]; };
   const months=[...new Set(evs.map(e=>(e.starts_at||'').slice(0,7)).filter(Boolean))];
   const card=(e,past)=>{ const d=new Date(e.starts_at); const ds=isNaN(d)?'':d.toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'short',year:'numeric'}); const ts=isNaN(d)?'':d.toLocaleTimeString(EN?'en-GB':'cs-CZ',{hour:'2-digit',minute:'2-digit'}); const em=disciplineEmoji(e.discipline||'')||'📅';
-    return '<div class="gpEvCard" data-id="'+e.id+'" style="display:flex;gap:11px;align-items:center;border:1px solid var(--border);border-radius:12px;padding:11px;margin-bottom:8px;cursor:pointer;opacity:'+(past?0.65:1)+';"><div style="font-size:22px;">'+em+'</div><div style="flex:1;min-width:0;"><div style="font-weight:800;font-size:13px;color:var(--dark);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escapeHtml(e.title||'')+'</div><div style="font-size:11.5px;color:var(--light);margin-top:2px;">'+ds+(ts?' · '+ts:'')+(e.city?' · '+escapeHtml(e.city):'')+'</div></div>'+(e.price?'<span style="font-size:12px;font-weight:800;color:var(--dark);white-space:nowrap;">'+e.price+' '+sym+'</span>':'')+'</div>'; };
+    return '<div class="gpEvCard" data-id="'+e.id+'" style="display:flex;gap:11px;align-items:center;border:1px solid var(--border);border-radius:12px;padding:11px;margin-bottom:8px;cursor:pointer;opacity:'+(past?0.65:1)+';"><div style="font-size:22px;">'+em+'</div><div style="flex:1;min-width:0;"><div style="font-weight:800;font-size:13px;color:var(--dark);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escapeHtml(e.title||'')+'</div><div style="font-size:11.5px;color:var(--light);margin-top:2px;">'+ds+(ts?' · '+ts:'')+(e.city?' · '+escapeHtml(e.city):'')+'</div></div>'+(e.ticket_price?'<span style="font-size:12px;font-weight:800;color:var(--dark);white-space:nowrap;">'+e.ticket_price+' '+sym+'</span>':'')+'</div>'; };
   const renderList=(sel)=>{ const list=evs.filter(e=> sel==='all'?true:(e.starts_at||'').slice(0,7)===sel);
     const up=list.filter(e=>{ const t=new Date(e.starts_at).getTime(); return !isNaN(t)&&t>=now; }).sort((a,b)=>new Date(a.starts_at)-new Date(b.starts_at));
     const pa=list.filter(e=>{ const t=new Date(e.starts_at).getTime(); return isNaN(t)||t<now; }).sort((a,b)=>new Date(b.starts_at)-new Date(a.starts_at));
@@ -21984,7 +21984,7 @@ async function renderAmbRoster(mine){
   try{
     const { data: coaches } = await supaClient.from('profiles').select('id, name, city, disciplines, photo_url, bio, active_students, years, fights, gym').eq('coach_status','approved');
     const myC=(coaches||[]).filter(c=>c.id!==currentUser.id && parseDisc(c.disciplines).some(x=>mine.includes(x)));
-    const { data: gyms } = await supaClient.from('gyms').select('id, name, city, disciplines, suspended, description, bio, capacity, founded').eq('status','approved');
+    const { data: gyms } = await supaClient.from('gyms').select('id, name, city, disciplines, suspended, description, capacity, founded_year').eq('status','approved');
     const myG=(gyms||[]).filter(g=>parseDisc(g.disciplines).some(x=>mine.includes(x)));
     let html='<div class="sec-lbl">'+(EN?'My coaches & clubs':'Moji kouči & kluby')+'</div>'
       + '<p style="font-size:11px;color:var(--light);line-height:1.5;margin:-4px 0 10px;">'+(EN?'Active in your discipline. You can flag one for the founder to review (revoke certification or suspend).':'Aktivní ve tvojí disciplíně. Můžeš nahlásit founderovi k posouzení (odebrání certifikace nebo suspendace).')+'</p>';
@@ -24734,8 +24734,8 @@ async function openGymKidDetail(parentId, childName){
   try{ const { data:_pr } = await supaClient.from('profiles').select('children').eq('id',parentId).single(); kids=_pr&&_pr.children?(typeof _pr.children==='string'?JSON.parse(_pr.children):_pr.children):[]; child=(kids||[]).find(c=>c&&c.name===childName)||null; }catch(e){}
   const _belts=_kidBeltsOf(child);
   let n=0; try{ const { data:att } = await supaClient.from('gym_attendance').select('id').eq('gym_id',_myGymData.id).eq('student_id',parentId).eq('child_name',childName); n=(att||[]).length; }catch(e){}
-  let kmems=[]; try{ const { data:km } = await supaClient.from('gym_memberships').select('id,plan_name,price,currency,status,stripe_subscription').eq('gym_id',_myGymData.id).eq('student_id',parentId).eq('child_name',childName).in('status',['active','cancelling']); kmems=km||[]; }catch(e){}
-  const _kmHtml = kmems.length ? (`<div class="sec-lbl" style="margin:14px 0 6px;">${EN?'Membership':'Členství'}</div>`+kmems.map(m=>`<div style="border:1px solid var(--border);border-radius:11px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="min-width:0;"><div style="font-size:13.5px;font-weight:700;">${escapeHtml(m.plan_name||(EN?'Membership':'Členství'))}</div><div style="font-size:11.5px;color:var(--mid);">${m.status==='cancelling'?(EN?'Cancelling at period end':'Ukončuje se na konci období'):(EN?'Active':'Aktivní')}${m.price?(' · '+m.price+' '+(m.currency||'CZK')+'/'+(EN?'mo':'měs')):''}</div></div><button class="kidRemoveMember" data-mid="${m.id}" data-sub="${m.stripe_subscription||''}" style="flex-shrink:0;padding:8px 12px;background:#fff;border:1.5px solid var(--red);color:var(--red);border-radius:9px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'End':'Ukončit'}</button></div>`).join('')) : '';
+  let kmems=[]; try{ const { data:km } = await supaClient.from('gym_memberships').select('id,plan_name,amount,currency,status,stripe_subscription').eq('gym_id',_myGymData.id).eq('student_id',parentId).eq('child_name',childName).in('status',['active','cancelling']); kmems=km||[]; }catch(e){}
+  const _kmHtml = kmems.length ? (`<div class="sec-lbl" style="margin:14px 0 6px;">${EN?'Membership':'Členství'}</div>`+kmems.map(m=>`<div style="border:1px solid var(--border);border-radius:11px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="min-width:0;"><div style="font-size:13.5px;font-weight:700;">${escapeHtml(m.plan_name||(EN?'Membership':'Členství'))}</div><div style="font-size:11.5px;color:var(--mid);">${m.status==='cancelling'?(EN?'Cancelling at period end':'Ukončuje se na konci období'):(EN?'Active':'Aktivní')}${m.amount?(' · '+m.amount+' '+(m.currency||'CZK')+'/'+(EN?'mo':'měs')):''}</div></div><button class="kidRemoveMember" data-mid="${m.id}" data-sub="${m.stripe_subscription||''}" style="flex-shrink:0;padding:8px 12px;background:#fff;border:1.5px solid var(--red);color:var(--red);border-radius:9px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'End':'Ukončit'}</button></div>`).join('')) : '';
   const li=levelInfo(n*2);
   let html=`<div class="prow-group">`
     +`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">🥋</div><div class="prow-lbl">${EN?'Trainings attended':'Odtr\u00e9nov\u00e1no'}</div></div><span class="prow-val">${n}</span></div>`
