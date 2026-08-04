@@ -8,10 +8,6 @@
 //
 // DŮLEŽITÉ: webhook musí číst RAW body (proto bodyParser:false), jinak selže ověření podpisu.
 
-// The ladder lives in ONE place. This file used to carry its own copy, which had drifted:
-// it billed an Exclusive Partner 1% instead of 0.5% and did not know about Founding Partner
-// at all, so an FP subscription was re-rated up to the ordinary rate.
-import { ladderRate } from './_rate.js';
 import Stripe from 'stripe';
 import crypto from 'crypto';
 import PDFDocument from 'pdfkit';
@@ -175,64 +171,20 @@ function cohortDepositHtml(name, courseName, gymName, depositTxt, remainderTxt, 
 // Gym jede direct charge na účtu gymu; application_fee MTL končí na platform balance,
 // odkud pošleme 0,5 % základu ambassadorovi dané disciplíny (transfer mezi účty = bez Stripe fee).
 // Vyžaduje: webhook nasazený + naslouchání Connect eventům (event.account je u gym plateb).
-async function payGymAmbassador(discCsv, base, currency, idemKey, pi) {
-  try {
-    if (!base || base <= 0) return;
-    const discs = (discCsv || '').split(',').filter(Boolean);
-    if (!discs.length) return;
-    const ambs = await sbGet(`profiles?select=id,stripe_account,verify_disciplines`);
-    const amb = (ambs || []).find(a => a.stripe_account && (() => {
-      try { const v = a.verify_disciplines ? (typeof a.verify_disciplines === 'string' ? JSON.parse(a.verify_disciplines) : a.verify_disciplines) : []; return Array.isArray(v) && v.some(x => discs.includes(x)); } catch (e) { return false; }
-    })());
-    if (!amb) return;
-    const cut = Math.round(base * 0.005 * 100); // 0,5 % základu v minor units
-    if (cut > 0) await stripe.transfers.create(
-      { amount: cut, currency: (currency || 'czk').toLowerCase(), destination: amb.stripe_account, description: 'MTL Ambassador 0.5% (gym)', ...(pi ? { transfer_group: pi } : {}), metadata: { mtl_kind: 'ambassador', ...(pi ? { mtl_pi: pi } : {}) } },
-      idemKey ? { idempotencyKey: 'gymamb_' + idemKey } : undefined
-    );
-  } catch (e) { console.error('payGymAmbassador', e); }
-}
-async function payAmbassador(coachId, amount, currency, disc, idemKey) {
-  try {
-    if (!coachId || !amount || amount <= 0) return;
-    let discs = [];
-    if (disc) { discs = [disc]; }
-    else {
-      const cps = await sbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=disciplines`);
-      try { const cp = cps[0]; discs = cp && cp.disciplines ? (typeof cp.disciplines === 'string' ? JSON.parse(cp.disciplines) : cp.disciplines) : []; } catch (e) {}
-      // jen pokud má kouč JEDINOU disciplínu (jinak neznáme atribuci)
-      if (Array.isArray(discs) && discs.length > 1) return;
-    }
-    if (!Array.isArray(discs) || !discs.length) return;
-    // NOTE: při škále filtrovat na straně DB; zatím prosté načtení profilů.
-    const ambs = await sbGet(`profiles?select=id,stripe_account,verify_disciplines`);
-    const amb = (ambs || []).find(a => a.id !== coachId && a.stripe_account && (() => {
-      try { const v = a.verify_disciplines ? (typeof a.verify_disciplines === 'string' ? JSON.parse(a.verify_disciplines) : a.verify_disciplines) : []; return Array.isArray(v) && v.some(x => discs.includes(x)); } catch (e) { return false; }
-    })());
-    if (!amb) return;
-    const cut = Math.round(amount * 0.005 * 100); // 0,5 % základu v minor units
-    if (cut > 0) await stripe.transfers.create({ amount: cut, currency: (currency || 'CZK').toLowerCase(), destination: amb.stripe_account, description: 'MTL Ambassador 0.5%', ...(idemKey ? { transfer_group: idemKey } : {}), metadata: { mtl_kind: 'ambassador', ...(idemKey ? { mtl_pi: idemKey } : {}) } }, idemKey ? { idempotencyKey: 'amb_' + idemKey } : undefined);
-  } catch (e) { console.error('payAmbassador', e); }
-}
+// The ambassador role is retired, so this pays nobody. NEUTERED rather than deleted, and the
+// call sites left in place, deliberately: this file is the webhook that records every payment MTL
+// takes. A call to a function that no longer exists would throw inside the handler, and a throwing
+// webhook means transactions stop being written -- the money still moves at Stripe while the ledger
+// silently falls behind. One missed call site is all it would take.
+async function payGymAmbassador(discCsv, base, currency, idemKey, pi) { return; }
+// Same as payGymAmbassador, for coach 1:1.
+async function payAmbassador(coachId, amount, currency, disc, idemKey) { return; }
 
 // CLAWBACK: when MTL refunds its own commission, reverse the ambassador's 0.5% proportionally.
 // Finds the ambassador transfer by transfer_group = payment_intent (set at payout) and reverses
 // (transfer.amount * fraction) minus whatever was already reversed (idempotent for partial->full).
-async function clawbackAmbassador(pi, fraction) {
-  try {
-    if (!pi || !(fraction > 0)) return;
-    let list;
-    try { list = await stripe.transfers.list({ transfer_group: pi, limit: 20 }); } catch (e) { console.error('amb list', e.message); return; }
-    for (const tr of (list && list.data) || []) {
-      if (!(tr.metadata && tr.metadata.mtl_kind === 'ambassador')) continue;
-      const target = Math.round((tr.amount || 0) * Math.min(1, fraction));
-      const toReverse = target - (tr.amount_reversed || 0);
-      if (toReverse > 0) {
-        try { await stripe.transfers.createReversal(tr.id, { amount: toReverse, description: 'MTL Ambassador clawback (refund)', metadata: { mtl_clawback: '1', mtl_pi: pi } }); } catch (e) { console.error('amb reversal', e.message); }
-      }
-    }
-  } catch (e) { console.error('clawbackAmbassador', e); }
-}
+// Nothing was paid out, so nothing can be clawed back.
+async function clawbackAmbassador(pi, fraction) { return; }
 
 // Přepíše application_fee_percent na VŠECH aktivních membership subscriptions
 // gymů vlastněných daným uživatelem (Partner: 4 %, jinak 5 %). Aplikuje se na
@@ -788,7 +740,7 @@ export default async function handler(req, res) {
           if (_ownerId) {
             const _op = (await sbGet(`profiles?id=eq.${_ownerId}&select=partner,coach_ref_score,bankai_eligible,welcome_free_until`))[0] || {};
             const _sc = _op.coach_ref_score || 0;
-            const _ladder = ladderRate('stripe', { partner: _op.partner, founding: _op.founding, score: _sc, bankai: _op.bankai_eligible }) * 100;
+            const _ladder = _op.partner ? 1 : ((_sc >= 5 && _op.bankai_eligible) ? 2 : (_sc >= 2 ? 2.5 : 3));
             const _wActive = !!(_op.welcome_free_until && new Date(_op.welcome_free_until).getTime() > Date.now());
             await applySubRate(stripe, event.account, sub, _so2, _ladder, _wActive);
           }
