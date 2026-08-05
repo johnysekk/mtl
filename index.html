@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SMH stops a coach publishing a slot nobody could take. Students book up to 3 hours before a slot starts, so anything published closer than that is dead on arrival; SLOT_LEAD_H is 4, which leaves an hour in which somebody who asked for a session tonight can still take it. Both creation paths are covered and they behave differently on purpose: the single-slot form refuses and says why, while bulk creation SKIPS the slots that are too close and creates the rest, because stopping the whole range over today's evening would be obstructive -- and if everything in the range was too close, the message says that rather than the misleading 'they probably already exist'. Deploy: index.html. -->
+<!-- MTL build: SMI makes the slot end time actually work. Moving the start now carries the end an hour after it, but only as a suggestion: once the coach edits the end themselves it is left alone, unless the start would overtake it. Wraps past midnight correctly. The booking picker shows the range as 16:00-17:00 where an end exists. CRITICAL: slots.end_time DOES NOT EXIST -- the insert tries it and falls back silently on schema error, so every end time a coach has ever typed was thrown away and the student only ever saw a start. slots-end-time.sql adds the column; until it is run the range cannot appear. On past slots: SMH's four-hour rule already blocks them, since anything earlier is by definition under now+4h -- verified against yesterday, this morning and tonight. The bulk date pickers did allow choosing a past range, which then produced an empty result; they now carry a minimum of today. Deploy: index.html + slots-end-time.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -1694,11 +1694,11 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
     <div style="display:flex;gap:10px;margin-bottom:8px;">
       <div style="flex:1;">
         <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Od</div>
-        <input id="bulkFrom" type="date" style="width:100%;padding:12px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;">
+        <input id="bulkFrom" type="date" min="" data-mintoday="1" style="width:100%;padding:12px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;">
       </div>
       <div style="flex:1;">
         <div style="font-size:13px;font-weight:700;margin-bottom:8px;">Do</div>
-        <input id="bulkTo" type="date" style="width:100%;padding:12px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;">
+        <input id="bulkTo" type="date" min="" data-mintoday="1" style="width:100%;padding:12px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;">
       </div>
     </div>
     <div id="bulkPreview" style="font-size:13px;color:var(--mid);margin:6px 0 18px;"></div>
@@ -3885,7 +3885,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SMH';
+const MTL_BUILD='SMI';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -7122,7 +7122,7 @@ const { data, error } = await supaClient
     const _sPx=_sAmt>0?(fmtPrice(_sAmt,_sCur)+' '+_sSym):'';
     const _sWhy=_sHit?`<div style="font-size:10.5px;font-weight:700;color:#0A7A4F;margin-top:2px;line-height:1.35;">${escapeHtml(_privWhy(_sHit,_sBase,_sCur))}</div>`:'';
     const _sk=(_scap>1?`<div style="font-size:11px;font-weight:700;color:var(--red);margin-top:3px;">👥 ${LANG==='en'?'Private':'Soukromka'} 1:${_scap}${_sPx?(' · '+_sPx):''}</div>`:(_sPx?`<div style="font-size:11px;font-weight:600;color:var(--mid);margin-top:3px;">${_sPx}</div>`:''))+_sWhy;
-    el.innerHTML = `<div><div class="slot-date">${dateStr}</div><div class="slot-time">${slot.time}</div>${_sk}${_soon?`<div style="font-size:11px;color:#B26A00;font-weight:600;margin-top:3px;">⚠️ ${LANG==='en'?'Under 16 h ahead — cancelling returns 50%':'Méně než 16 h předem — při zrušení 50 %'}</div>`:''}</div><div class="slot-arrow">→</div>`;
+    el.innerHTML = `<div><div class="slot-date">${dateStr}</div><div class="slot-time">${slot.time}${slot.end_time?('\u2013'+slot.end_time):''}</div>${_sk}${_soon?`<div style="font-size:11px;color:#B26A00;font-weight:600;margin-top:3px;">⚠️ ${LANG==='en'?'Under 16 h ahead — cancelling returns 50%':'Méně než 16 h předem — při zrušení 50 %'}</div>`:''}</div><div class="slot-arrow">→</div>`;
     el.onclick = ()=>selectSlot(slot, c);
     list.appendChild(el);
   });
@@ -23451,6 +23451,19 @@ detail.querySelectorAll('.diaryCancelBtn').forEach(btn=>{
     };
   });
   detail.querySelectorAll('.diaryCapBtn').forEach(function(btn){ btn.onclick=function(){ window._diarySlotCap=Number(btn.dataset.cap)||1; detail.querySelectorAll('.diaryCapBtn').forEach(function(b){ var on=Number(b.dataset.cap)===window._diarySlotCap; b.style.background=on?'var(--dark)':'#fff'; b.style.color=on?'#fff':'var(--dark)'; }); var pw=$('diaryPriceWrap'); if(pw) pw.style.display=(window._diarySlotCap>1)?'block':'none'; }; });
+  // Start moves, end follows an hour later -- but only ever as a suggestion. Whoever teaches
+  // ninety minutes just corrects it, and their correction is not overwritten on the next change
+  // unless the end would land before the start.
+  const _dss=$('diarySlotStart'), _dse=$('diarySlotEnd');
+  if(_dss && _dse) _dss.oninput = function(){
+    const m=/^(\d{2}):(\d{2})$/.exec(_dss.value||''); if(!m) return;
+    const cur=/^(\d{2}):(\d{2})$/.exec(_dse.value||'');
+    const sMin=Number(m[1])*60+Number(m[2]);
+    if(cur){ const eMin=Number(cur[1])*60+Number(cur[2]); if(eMin>sMin && _dse.dataset.touched==='1') return; }
+    const t=(sMin+60)%1440;
+    _dse.value=String(Math.floor(t/60)).padStart(2,'0')+':'+String(t%60).padStart(2,'0');
+  };
+  if(_dse) _dse.oninput = function(){ _dse.dataset.touched='1'; };
   $('diaryAddSlot').onclick = async ()=>{
     const start=($('diarySlotStart')&&$('diarySlotStart').value)||'';
     const end=($('diarySlotEnd')&&$('diarySlotEnd').value)||'';
@@ -23505,6 +23518,12 @@ function bulkUpdatePreview(){
   let count=0; const start=new Date(from+'T00:00:00'), end=new Date(to+'T00:00:00');
   for(let d=new Date(start); d<=end; d.setDate(d.getDate()+1)){ if(days.includes(d.getDay())) count+=times.length; }
   $('bulkPreview').textContent = count>0 ? (LANG==='en'?`${count} slots will be created.`:`Vytvoří se ${count} termínů.`) : (LANG==='en'?'No days in the range match.':'Žádné dny v rozsahu neodpovídají.');
+}
+function _bulkMinToday(){
+  try{
+    const t=new Date(); const ymd=t.getFullYear()+'-'+String(t.getMonth()+1).padStart(2,'0')+'-'+String(t.getDate()).padStart(2,'0');
+    document.querySelectorAll('[data-mintoday="1"]').forEach(function(el){ el.min=ymd; });
+  }catch(e){}
 }
 async function bulkCreateSlots(){
   const times = bulkParseTimes();
@@ -25355,7 +25374,7 @@ async function openReschedule(d){
     const dateStr = `${dayName} ${dd.getDate()}.${dd.getMonth()+1}.`;
     const el = document.createElement('div');
     el.className = 'slot-item';
-    el.innerHTML = `<div><div class="slot-date">${dateStr}</div><div class="slot-time">${slot.time}</div></div><div class="slot-arrow">→</div>`;
+    el.innerHTML = `<div><div class="slot-date">${dateStr}</div><div class="slot-time">${slot.time}${slot.end_time?('\u2013'+slot.end_time):''}</div></div><div class="slot-arrow">→</div>`;
     el.onclick = ()=>doReschedule(slot);
     list.appendChild(el);
   });
@@ -25854,7 +25873,7 @@ if($('btnCloseSecurity')) $('btnCloseSecurity').onclick = ()=>closeSheet('shSecu
   if($('meRefToggle')) $('meRefToggle').querySelectorAll('button').forEach(b=>{ b.onclick=async()=>{ if(!currentUser) return; const _ro=b.dataset.ro==='1'; currentUser.referral_optin=_ro; if(typeof paintRefSwitch==='function') paintRefSwitch(); try{ await supaClient.from('profiles').update({ referral_optin:_ro }).eq('id', currentUser.id); try{ const mc=COACHES.find(x=>x.id===currentUser.id||x.profileId===currentUser.id); if(mc) mc.referral_optin=_ro; }catch(_e){} }catch(e){ console.warn('referral_optin col?', e); toast(LANG==='en'?'⚠️ Could not save':'⚠️ Nepodařilo se uložit'); } }; });
   if($('meRefInfoBtn')) $('meRefInfoBtn').onclick=()=>{ const _p=$('meRefInfo'); if(_p) _p.style.display=(_p.style.display==='none'?'block':'none'); };
 $('btnCloseDiary').onclick = ()=>closeSheet('shDiary');
-$('btnBulkSlots').onclick = openBulkSlots;
+$('btnBulkSlots').onclick = ()=>{ openBulkSlots(); _bulkMinToday(); };
 $('btnBulkCancel').onclick = ()=>{ $('bulkOv').style.display='none'; };
 $('btnBulkCreate').onclick = bulkCreateSlots;
 $('calGoogleBtn').onclick = calGoogle;
