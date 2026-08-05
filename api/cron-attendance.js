@@ -8,6 +8,8 @@
 //   1:1 lekce (coach + student) řeší tenhle cron přes profiles.timezone (TZ kouče) + client-side fallback. Respektuje mute_class_reminder / mute_coach_lesson_reminder.
 
 import Stripe from 'stripe';
+
+const FOUNDER_ID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = process.env.SUPABASE_URL;
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -197,6 +199,9 @@ async function handler(req, res) {
     // ── Dispute auto-refund: online disputes routed to the coach, past the 3-day deadline, still open => refund student 100% and close ──
     try {
       const nowISO = new Date().toISOString();
+      // The refund now happens the moment a dispute is filed, so this sweep is only a safety net
+      // for reports whose refund call failed at the time -- dispute_status still 'open' past the
+      // deadline. Without the guard it would refund a second time.
       const od = await sbGet(`bookings?dispute_handler=eq.coach&dispute_status=eq.open&dispute_deadline=lt.${encodeURIComponent(nowISO)}&select=id,coach_id,student_id,payment_intent,gym_id,amount`);
       for (const b of (od || [])) {
         let acct = null;
@@ -204,22 +209,29 @@ async function handler(req, res) {
         if (!acct && b.coach_id) { const c = await sbGet(`profiles?id=eq.${b.coach_id}&select=stripe_account`); acct = c[0] && c[0].stripe_account; }
         if (acct && b.payment_intent) { try { await stripe.refunds.create({ payment_intent: b.payment_intent }, { stripeAccount: acct }); } catch (e) { console.error('dispute refund', b.id, e.message); } }
         await sbPatch('bookings', `id=eq.${b.id}`, { dispute_status: 'refunded', status: 'refunded', refund_requested: false, dispute_auto: true });
-        // auto-flag a student who has accumulated >=3 dispute auto-refunds (possible abuse) -> founder review
-        if (b.student_id) { try {
-          const prior = await sbGet(`bookings?student_id=eq.${b.student_id}&dispute_auto=is.true&select=id`);
-          const cnt = (prior || []).length;
-          if (cnt >= 3) {
-            const sp = await sbGet(`profiles?id=eq.${b.student_id}&select=risk_flag,name`);
-            if (sp[0] && !sp[0].risk_flag) {
-              await sbPatch('profiles', `id=eq.${b.student_id}`, { risk_flag: true, risk_note: `auto: ${cnt} dispute auto-refunds` });
-              await sbPost('notifications', { user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'dispute', read: false, data: JSON.stringify({ kind: 'student_autoflag', student_id: b.student_id, count: cnt }), message: `\ud83d\udea9 Student ${sp[0].name || b.student_id} dosahl ${cnt} auto-refundu sporu - oznacen k posouzeni (mozne zneuziti). Otevri Spory.` });
-            }
-          }
-        } catch (e) { console.error('autoflag', b.id, e.message); } }
-        if (b.student_id) await sbPost('notifications', { user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'dispute_auto_refunded', id: b.id }), message: `\u21a9\ufe0f Spor #${b.id}: kouč nereagoval ve lhůtě, vrátili jsme ti plných 100 %.` });
-        if (b.coach_id) await sbPost('notifications', { user_id: b.coach_id, type: 'system', read: false, data: JSON.stringify({ kind: 'dispute_auto_refunded_coach', id: b.id }), message: `\u21a9\ufe0f Spor #${b.id}: lhůta vypršela bez reakce, studentovi se automaticky vrátilo 100 %.` });
+        if (b.student_id) await sbPost('notifications', { user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'dispute_auto_refunded', id: b.id }), message: `\u21a9\ufe0f Spor #${b.id}: pen\u00edze se ti vr\u00e1tily v pln\u00e9 v\u00fd\u0161i.` });
         autoRefunded++;
       }
+
+      // Flagging runs on REPORTS, not on refunds, and it runs on BOTH sides. Counting auto-refunds
+      // stopped working once the money moves immediately, and only the student was ever watched --
+      // so the side that is usually in the right was the only one being policed.
+      try {
+        const recent = await sbGet(`bookings?dispute_status=in.(open,refunded)&select=id,student_id,coach_id,refund_reason`);
+        const byStudent = {}, byCoach = {};
+        for (const b of (recent || [])) {
+          if (b.student_id) byStudent[b.student_id] = (byStudent[b.student_id] || 0) + 1;
+          if (b.coach_id) byCoach[b.coach_id] = (byCoach[b.coach_id] || 0) + 1;
+        }
+        const flag = async (id, cnt, what) => {
+          const pr = await sbGet(`profiles?id=eq.${encodeURIComponent(id)}&select=risk_flag,name`);
+          if (!pr[0] || pr[0].risk_flag) return;
+          await sbPatch('profiles', `id=eq.${encodeURIComponent(id)}`, { risk_flag: true, risk_note: `auto: ${cnt} ${what}` });
+          await sbPost('notifications', { user_id: FOUNDER_ID, type: 'dispute', read: false, data: JSON.stringify({ kind: 'risk_autoflag', who: id, count: cnt, what }), message: `\ud83d\udea9 ${pr[0].name || id}: ${cnt}\u00d7 ${what} \u2014 oznaceno k posouzeni.` });
+        };
+        for (const id in byStudent) if (byStudent[id] >= 3) await flag(id, byStudent[id], 'nahlasenych sporu');
+        for (const id in byCoach) if (byCoach[id] >= 3) await flag(id, byCoach[id], 'sporu proti nemu');
+      } catch (e) { console.error('risk flagging', e.message); }
     } catch (e) { console.error('cron dispute auto-refund', e.message); }
 
     // ── Purge accounts/gyms past the 30-day deletion grace (anonymize PII, keep rows for booking/accounting FK integrity) ──
