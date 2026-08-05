@@ -500,10 +500,6 @@ export default async function handler(req, res) {
                 training_date: slot.date, training_time: slot.time,
                 status: 'active', type: 'inperson', currency, discipline: m.discipline || null,
               });
-              if (slot.coach_profile_id) await sbPost('notifications', {
-                user_id: slot.coach_profile_id, type: 'booking', read: false,
-                message: `📅 Nová rezervace (potvrzeno platbou) na ${slot.date} ${slot.time}.`,
-              });
               await payAmbassador(slot.coach_profile_id, amount, currency, m.discipline, pi);
               await recordTransaction(event.account, pi, { type: 'coach_inperson', welcome_waived: _ww, member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', gross: amount, currency });
             }
