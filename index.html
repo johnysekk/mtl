@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SMF refunds a no-show dispute the moment it is filed. The three-day wait decided nothing: refund, contest or ignore, the money went back either way, and the one path that let a provider keep it was gated on Certified, which no longer exists -- so the delay held up a student whose outcome was already settled and protected nobody. The coach's window survives as the time to put their side on record, which works just as well after the money has moved. FIXED EN ROUTE: submitDispute still referenced _cert after SMD removed its declaration, which was a ReferenceError on every report -- the whole block was rewritten. cron-attendance keeps the sweep as a safety net for reports whose refund call failed, guarded so it cannot refund twice, and risk flagging now counts REPORTS rather than auto-refunds and runs on BOTH sides: counting auto-refunds stopped working once the money moves immediately, and only the student was ever watched, which meant the side usually in the right was the only one being policed. Texts no longer promise that MTL will sort it out. Deploy: index.html + api/cron-attendance.js. -->
+<!-- MTL build: SMG lets a 1:1 slot be booked up to 3 hours ahead instead of 16. Sixteen hours meant a coach with a free evening lost anyone who thought of it that morning, which works against the person with time to fill. The figure was hardcoded in three places and is now BOOK_LEAD_H, alongside RESCHEDULE_LEAD_H, deliberately left at 16: booking is a new commitment, moving one costs the coach a slot they had already given up. Slots inside the 16-hour window now carry a warning on the picker that cancelling returns 50% rather than 95% -- that threshold did not move, so without saying so the student would only discover it when cancelling, and it would come back as a complaint. The coach side needed no change; nothing ever stopped them publishing a slot close to now. NOTE the lead time is enforced only in the browser -- for QR bookings the row is inserted client-side with the times it is handed, so RLS remains the actual guard. Deploy: index.html. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3885,7 +3885,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SMF';
+const MTL_BUILD='SMG';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -6920,7 +6920,7 @@ function scrollToOffers(){
 async function loadIpSlotPreview(coachId, disc){
   try {
     const { data } = await supaClient.from('slots').select('date, time, discipline').eq('coach_profile_id', coachId).eq('booked', false);
-    const minTime = new Date(Date.now() + 16*60*60*1000);
+    const minTime = new Date(Date.now() + BOOK_LEAD_H*60*60*1000);
     let valid = (data||[]).filter(s=>new Date(`${s.date}T${s.time}:00`) >= minTime);
     if(disc) valid = valid.filter(s=>!s.discipline || s.discipline===disc);
     const el = $('ipSlotPreview');
@@ -7085,7 +7085,7 @@ const { data, error } = await supaClient
 
   // Filtruj sloty které jsou aspoň 16h v budoucnu
   const now = new Date();
-  const minTime = new Date(now.getTime() + 16*60*60*1000); // teď + 16 hodin
+  const minTime = new Date(now.getTime() + BOOK_LEAD_H*60*60*1000);
   const _bd = _bookDisc || null;
   const validSlots = (data||[]).filter(slot=>{
     const slotDateTime = new Date(`${slot.date}T${slot.time}:00`);
@@ -7105,10 +7105,12 @@ const { data, error } = await supaClient
   }
 
   list.innerHTML = '';
+  const _lowRefundFrom = new Date(Date.now() + REFUND_FULL_LEAD_H*60*60*1000);
   validSlots.forEach(slot=>{
     const d = new Date(slot.date);
     const dayName = dowShort()[d.getDay()];
     const dateStr = `${dayName} ${d.getDate()}.${d.getMonth()+1}.`;
+    const _soon = new Date(`${slot.date}T${slot.time}:00`) < _lowRefundFrom;
     const el = document.createElement('div');
     el.className = 'slot-item';
     const _scap=Number(slot.capacity)||1;
@@ -7120,7 +7122,7 @@ const { data, error } = await supaClient
     const _sPx=_sAmt>0?(fmtPrice(_sAmt,_sCur)+' '+_sSym):'';
     const _sWhy=_sHit?`<div style="font-size:10.5px;font-weight:700;color:#0A7A4F;margin-top:2px;line-height:1.35;">${escapeHtml(_privWhy(_sHit,_sBase,_sCur))}</div>`:'';
     const _sk=(_scap>1?`<div style="font-size:11px;font-weight:700;color:var(--red);margin-top:3px;">👥 ${LANG==='en'?'Private':'Soukromka'} 1:${_scap}${_sPx?(' · '+_sPx):''}</div>`:(_sPx?`<div style="font-size:11px;font-weight:600;color:var(--mid);margin-top:3px;">${_sPx}</div>`:''))+_sWhy;
-    el.innerHTML = `<div><div class="slot-date">${dateStr}</div><div class="slot-time">${slot.time}</div>${_sk}</div><div class="slot-arrow">→</div>`;
+    el.innerHTML = `<div><div class="slot-date">${dateStr}</div><div class="slot-time">${slot.time}</div>${_sk}${_soon?`<div style="font-size:11px;color:#B26A00;font-weight:600;margin-top:3px;">⚠️ ${LANG==='en'?'Under 16 h ahead — cancelling returns 50%':'Méně než 16 h předem — při zrušení 50 %'}</div>`:''}</div><div class="slot-arrow">→</div>`;
     el.onclick = ()=>selectSlot(slot, c);
     list.appendChild(el);
   });
@@ -15442,6 +15444,14 @@ function beltBadgeHtml(belt, stripes, fringe){
   const suffix = isCustom ? '' : (LANG==='en'?' belt':' pásek');
   return '<span style="display:inline-flex;align-items:center;gap:4px;background:'+m.c+';color:'+m.t+';border:1px solid rgba(0,0,0,.18);border-radius:8px;padding:3px 9px;font-size:11.5px;font-weight:800;">🥋 '+label+suffix+stripesHtml+'</span>';
 }
+// How late a 1:1 slot can still be booked. Was 16 hours hardcoded in three places, which meant
+// a coach with a free evening lost anyone who thought of it that morning. Three hours keeps the
+// coach's day plannable while letting a genuinely free slot fill. Rescheduling deliberately stays
+// at 16h: booking is a new commitment, moving one costs the coach a slot they had already given up.
+const BOOK_LEAD_H = 3;
+const RESCHEDULE_LEAD_H = 16;
+// Below this the cancellation refund drops from 95% to 50% -- the student has to be told.
+const REFUND_FULL_LEAD_H = 16;
 const CLASS_LEVELS = [
   {v:'beginner', cs:'Začátečníci', en:'Beginners'},
   {v:'advanced', cs:'Pokročilí', en:'Advanced'},
@@ -25310,7 +25320,7 @@ async function openReschedule(d){
     .order('time', { ascending: true });
 
   const now = new Date();
-  const minTime = new Date(now.getTime() + 16*60*60*1000); // aspoň 16h dopředu
+  const minTime = new Date(now.getTime() + RESCHEDULE_LEAD_H*60*60*1000);
   let _oldCap=1; try{ const {data:_os}=await supaClient.from('slots').select('capacity').eq('id', d.slot).single(); _oldCap=Number(_os&&_os.capacity)||1; }catch(e){}
   const validSlots = (data||[]).filter(slot=>{
     const sdt = new Date(`${slot.date}T${slot.time}:00`);
