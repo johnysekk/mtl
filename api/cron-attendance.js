@@ -202,7 +202,7 @@ async function handler(req, res) {
         let acct = null;
         if (b.gym_id) { const g = await sbGet(`gyms?id=eq.${b.gym_id}&select=stripe_account`); acct = g[0] && g[0].stripe_account; }
         if (!acct && b.coach_id) { const c = await sbGet(`profiles?id=eq.${b.coach_id}&select=stripe_account`); acct = c[0] && c[0].stripe_account; }
-        if (acct && b.payment_intent) { try { const _amt = Math.round((parseFloat(b.amount) || 0) * 0.95 * 100); await stripe.refunds.create(_amt > 0 ? { payment_intent: b.payment_intent, amount: _amt } : { payment_intent: b.payment_intent }, { stripeAccount: acct }); } catch (e) { console.error('dispute refund', b.id, e.message); } }
+        if (acct && b.payment_intent) { try { await stripe.refunds.create({ payment_intent: b.payment_intent }, { stripeAccount: acct }); } catch (e) { console.error('dispute refund', b.id, e.message); } }
         await sbPatch('bookings', `id=eq.${b.id}`, { dispute_status: 'refunded', status: 'refunded', refund_requested: false, dispute_auto: true });
         // auto-flag a student who has accumulated >=3 dispute auto-refunds (possible abuse) -> founder review
         if (b.student_id) { try {
@@ -216,8 +216,8 @@ async function handler(req, res) {
             }
           }
         } catch (e) { console.error('autoflag', b.id, e.message); } }
-        if (b.student_id) await sbPost('notifications', { user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'dispute_auto_refunded', id: b.id }), message: `\u21a9\ufe0f Spor #${b.id}: kouč nereagoval ve lhůtě, vrátili jsme ti 95 %.` });
-        if (b.coach_id) await sbPost('notifications', { user_id: b.coach_id, type: 'system', read: false, data: JSON.stringify({ kind: 'dispute_auto_refunded_coach', id: b.id }), message: `\u21a9\ufe0f Spor #${b.id}: lhůta vypršela bez reakce, studentovi se automaticky vrátilo 95 %.` });
+        if (b.student_id) await sbPost('notifications', { user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'dispute_auto_refunded', id: b.id }), message: `\u21a9\ufe0f Spor #${b.id}: kouč nereagoval ve lhůtě, vrátili jsme ti plných 100 %.` });
+        if (b.coach_id) await sbPost('notifications', { user_id: b.coach_id, type: 'system', read: false, data: JSON.stringify({ kind: 'dispute_auto_refunded_coach', id: b.id }), message: `\u21a9\ufe0f Spor #${b.id}: lhůta vypršela bez reakce, studentovi se automaticky vrátilo 100 %.` });
         autoRefunded++;
       }
     } catch (e) { console.error('cron dispute auto-refund', e.message); }
