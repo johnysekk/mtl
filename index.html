@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SMG lets a 1:1 slot be booked up to 3 hours ahead instead of 16. Sixteen hours meant a coach with a free evening lost anyone who thought of it that morning, which works against the person with time to fill. The figure was hardcoded in three places and is now BOOK_LEAD_H, alongside RESCHEDULE_LEAD_H, deliberately left at 16: booking is a new commitment, moving one costs the coach a slot they had already given up. Slots inside the 16-hour window now carry a warning on the picker that cancelling returns 50% rather than 95% -- that threshold did not move, so without saying so the student would only discover it when cancelling, and it would come back as a complaint. The coach side needed no change; nothing ever stopped them publishing a slot close to now. NOTE the lead time is enforced only in the browser -- for QR bookings the row is inserted client-side with the times it is handed, so RLS remains the actual guard. Deploy: index.html. -->
+<!-- MTL build: SMH stops a coach publishing a slot nobody could take. Students book up to 3 hours before a slot starts, so anything published closer than that is dead on arrival; SLOT_LEAD_H is 4, which leaves an hour in which somebody who asked for a session tonight can still take it. Both creation paths are covered and they behave differently on purpose: the single-slot form refuses and says why, while bulk creation SKIPS the slots that are too close and creates the rest, because stopping the whole range over today's evening would be obstructive -- and if everything in the range was too close, the message says that rather than the misleading 'they probably already exist'. Deploy: index.html. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3885,7 +3885,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SMG';
+const MTL_BUILD='SMH';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -15449,6 +15449,9 @@ function beltBadgeHtml(belt, stripes, fringe){
 // coach's day plannable while letting a genuinely free slot fill. Rescheduling deliberately stays
 // at 16h: booking is a new commitment, moving one costs the coach a slot they had already given up.
 const BOOK_LEAD_H = 3;
+// A coach must publish a slot at least an hour before the student's own cut-off, otherwise they
+// create a slot nobody can take. Somebody asking for a session tonight then still has time to book.
+const SLOT_LEAD_H = 4;
 const RESCHEDULE_LEAD_H = 16;
 // Below this the cancellation refund drops from 95% to 50% -- the student has to be told.
 const REFUND_FULL_LEAD_H = 16;
@@ -23452,6 +23455,10 @@ detail.querySelectorAll('.diaryCancelBtn').forEach(btn=>{
     const start=($('diarySlotStart')&&$('diarySlotStart').value)||'';
     const end=($('diarySlotEnd')&&$('diarySlotEnd').value)||'';
     if(!/^\d{2}:\d{2}$/.test(start)){ toast(L('⚠️ Špatný formát času')); return; }
+    if(new Date(`${dateStr}T${start}:00`) < new Date(Date.now() + SLOT_LEAD_H*60*60*1000)){
+      toast('\u26a0\ufe0f '+(LANG==='en'?('Publish a slot at least '+SLOT_LEAD_H+' h ahead \u2014 students book up to '+BOOK_LEAD_H+' h before'):('Term\u00edn vypisuj aspo\u0148 '+SLOT_LEAD_H+' h dop\u0159edu \u2014 studenti rezervuj\u00ed do '+BOOK_LEAD_H+' h p\u0159ed za\u010d\u00e1tkem')));
+      return;
+    }
     const disc=($('diarySlotDisc')&&$('diarySlotDisc').value)||window._diarySlotDisc||(currentUser&&currentUser.main_discipline)||((currentUser&&currentUser.disciplines&&currentUser.disciplines[0]))||null;
     if(disc) window._diarySlotDisc=disc;
     const base={ coach_profile_id: currentUser.id, date: dateStr, time: start, booked:false, discipline: disc };
@@ -23510,14 +23517,21 @@ async function bulkCreateSlots(){
   // existující termíny ať se nezdvojí
   const existing = new Set((diarySlots||[]).map(s=>`${s.date}T${s.time}`));
   const rows=[];
+  const _minSlot = new Date(Date.now() + SLOT_LEAD_H*60*60*1000);
+  let _skipped = 0;
   const start=new Date(from+'T00:00:00'), end=new Date(to+'T00:00:00');
   const _ymd=x=>x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0');
   for(let d=new Date(start); d<=end; d.setDate(d.getDate()+1)){
     if(!days.includes(d.getDay())) continue;
     const ds = _ymd(d);
-    times.forEach(t=>{ if(!existing.has(`${ds}T${t}`)) rows.push({ coach_profile_id: currentUser.id, date: ds, time: t, booked:false, discipline: (window._diarySlotDisc||(currentUser&&currentUser.main_discipline)||((currentUser&&currentUser.disciplines&&currentUser.disciplines[0]))||null) }); });
+    times.forEach(t=>{ if(new Date(`${ds}T${t}:00`) < _minSlot){ _skipped++; return; } if(!existing.has(`${ds}T${t}`)) rows.push({ coach_profile_id: currentUser.id, date: ds, time: t, booked:false, discipline: (window._diarySlotDisc||(currentUser&&currentUser.main_discipline)||((currentUser&&currentUser.disciplines&&currentUser.disciplines[0]))||null) }); });
   }
-  if(!rows.length){ toast(L('Žádné nové termíny (možná už existují)')); btn.textContent=L('Vytvořit termíny'); btn.disabled=false; return; }
+  if(!rows.length){
+    toast(_skipped
+      ? ('\u26a0\ufe0f '+(LANG==='en'?('All of those are under '+SLOT_LEAD_H+' h away'):('V\u0161echny ty term\u00edny jsou m\u00e9n\u011b ne\u017e '+SLOT_LEAD_H+' h od te\u010f')))
+      : L('\u017d\u00e1dn\u00e9 nov\u00e9 term\u00edny (mo\u017en\u00e1 u\u017e existuj\u00ed)'));
+    btn.textContent=L('Vytvo\u0159it term\u00edny'); btn.disabled=false; return;
+  }
   const { error } = await supaClient.from('slots').insert(rows);
   btn.textContent=L('Vytvořit termíny'); btn.disabled=false;
   if(error){ toast('⚠️ '+error.message); return; }
