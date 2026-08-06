@@ -39,6 +39,10 @@ async function sb(path, opts = {}) {
 }
 const notify = (user_id, kind, message, extra = {}) =>
   sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id, type: 'system', read: false, data: JSON.stringify({ kind, ...extra }), message }) });
+const CZ_MONTHS = ['ledna','\u00fanora','b\u0159ezna','dubna','kv\u011btna','\u010dervna','\u010dervence','srpna','z\u00e1\u0159\u00ed','\u0159\u00edjna','listopadu','prosince'];
+// The notification said only how much was taken, not what for. Naming the month makes the charge
+// checkable against the statement instead of being one number among many.
+function czMonthName(ym) { try { const m = Number(String(ym).split('-')[1]); return CZ_MONTHS[m-1] || ym; } catch (e) { return ym; } }
 function prevMonth(ym) { const [y, m] = ym.split('-').map(Number); return new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 7); }
 
 export default async function handler(req, res) {
@@ -100,7 +104,7 @@ export default async function handler(req, res) {
           if (pi && pi.status === 'succeeded') {
             await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
             /* doklad issued by unified-doklad-cron.js (bank + Stripe combined, one per month) */
-            await notify(g.owner_id, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) byla stržena z karty. Doklad najdeš v účetnictví.`, { amount, currency: cur });
+            await notify(g.owner_id, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) za měsíc ${czMonthName(prevMonth(curMonth))} byla stržena z karty. Doklad najdeš v účetnictví.`, { amount, currency: cur });
             collected++;
           } else {
             anyFail = true;
@@ -189,7 +193,7 @@ export default async function handler(req, res) {
           if (pi && pi.status === 'succeeded') {
             await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
             /* doklad issued by unified-doklad-cron.js (bank + Stripe combined, one per month) */
-            await notify(cid, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) byla stržena z karty. Doklad najdeš v účetnictví.`);
+            await notify(cid, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) za měsíc ${czMonthName(prevMonth(curMonth))} byla stržena z karty. Doklad najdeš v účetnictví.`);
             collected++;
           } else {
             anyFail = true;
