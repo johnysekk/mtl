@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SOE lets a membership be tied to NAMED classes rather than only to levels, and warns when a plan covers nothing. Levels are too coarse for a club running the same level several times a week: 'Zacatecnici' covers Monday, Wednesday and Saturday alike, so a two-a-week pass could not be expressed at all. planCovers gained a class-name argument and the named list wins outright when present -- if the club picked exact classes, the level is not a second chance -- while a plan with no list behaves exactly as before, which is every plan sold so far. All seven call sites pass the name. The list is copied onto the membership row as plan_classes at purchase, so an already-sold membership keeps what it was bought with even if the club edits the plan afterwards. The warning fires when a plan's level matches no class in the schedule, which is how a member ends up paying for access to nowhere; it does not block, because clubs routinely build the price list before the timetable and blocking would stop them onboarding. The class picker and the warning show for monthly plans as well -- only the fixed end date and pro-rata stay limited to terms, where they are the only thing that makes sense. Deploy: index.html. -->
+<!-- MTL build: SOG fixes the class picker so it can actually do the thing it was built for, and corrects the acquisition fee. The picker deduplicated by NAME, so a club running 'Kickboxing Pokrocili' on Tue+Thu and again on Mon+Wed saw ONE chip covering both -- which is precisely the case the feature exists to separate. Schedule classes carry no id, so the key is the name plus its slots, and the chip shows the days and times, computed from the class duration, so an owner can tell the two groups apart at a glance. planCovers takes the class object now and derives the same key; a bare name still matches by prefix, so nothing that passes a name breaks. THE ACQUISITION FEE was counting the first two transaction ROWS as 'the first 2 months', so a 12-month term took the acquisition rate on the whole year, and a term followed by a monthly counted as two purchases and BOTH got it -- which is what Petr saw in the export. transactions has no months column, so memberships are counted in gym_memberships instead, summing months and ignoring pending rows, which are the purchase being priced right now. Drop-ins and 1:1 still count rows, one each, as before. Deploy: index.html + api/_rate.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3877,7 +3877,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SOE';
+const MTL_BUILD='SOG';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -9954,7 +9954,7 @@ async function openGymProfile(g){
   }
   // membership pokrývá danou lekci? (štítek + případně kouč)
   const membAccessOf=(m)=>{ try{ const pa = m.plan_access ? (typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access) : null; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
-  const membCovers=(m,o)=> planCovers({access:membAccessOf(m), classes:_memClasses(m)}, o.level||'all', o.name||null) && (!m.discipline || (o.disc||null)===m.discipline)
+  const membCovers=(m,o)=> planCovers({access:membAccessOf(m), classes:_memClasses(m)}, o.level||'all', o) && (!m.discipline || (o.disc||null)===m.discipline)
     && ((o.level!=='kids') || !!m.child_name || ((membAccessOf(m)||[]).indexOf('kids')>=0));
   try{
     const resvAll = (_pResv && _pResv.data) || [];
@@ -10041,7 +10041,7 @@ async function openGymProfile(g){
   })();
   const schedBlock = (!occs.length) ? '' : `<div style="margin-top:12px;">` + levelsPresent.map(v=>{
     const items=occs.filter(o=>(o.level||'all')===v).slice(0,14);
-    const covered = !!((window._myMembs||[]).some(mm=>_memLive(mm)) && items.some(o=> planCovers({access:myAccess, classes:_myMembClasses()}, o.level||'all', o.name||null)));
+    const covered = !!((window._myMembs||[]).some(mm=>_memLive(mm)) && items.some(o=> planCovers({access:myAccess, classes:_myMembClasses()}, o.level||'all', o)));
     const tag = covered ? `<span style="color:#006040;font-weight:700;font-size:11px;"> · ${LANG==='en'?'in your plan ✓':'v permici ✓'}</span>` : '';
     return `<div style="border:1px solid var(--border);border-radius:12px;margin-bottom:8px;overflow:hidden;">
       <button class="lvlHead" data-v="${v}" style="width:100%;display:flex;justify-content:space-between;align-items:center;padding:12px 14px;background:var(--surf);border:none;cursor:pointer;font-family:'DM Sans';font-weight:700;font-size:14px;color:var(--dark);text-align:left;">
@@ -10207,7 +10207,7 @@ async function rejoinClass(g, occ){
       const released=new Set((rv.data||[]).filter(r=>r.status==='released').map(r=>r.student_id));
       const { data: gm } = await supaClient.from('gym_memberships').select('student_id,plan_access,coach_id,discipline').eq('gym_id',g.id).in('status',['active','cancelling']);
       const accOf=(m)=>{ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
-      const autoCnt=(gm||[]).filter(m=> planCovers({access:accOf(m), classes:_memClasses(m)}, occ.level||'all', occ.name||null) && (!m.discipline || (occ.disc||null)===m.discipline) && !released.has(m.student_id) && m.student_id!==currentUser.id).length;
+      const autoCnt=(gm||[]).filter(m=> planCovers({access:accOf(m), classes:_memClasses(m)}, occ.level||'all', occ) && (!m.discipline || (occ.disc||null)===m.discipline) && !released.has(m.student_id) && m.student_id!==currentUser.id).length;
       const cnt = autoCnt + 1 + (db.data||[]).length; // +1 = já zpět
       if(cnt > _cap){ toast(LANG==='en'?'⚠️ This class is full now.':'⚠️ Tahle lekce je teď plná.'); return; }
     }
@@ -10524,7 +10524,7 @@ async function loadMyMemberships(){
             ? `${m.period_end?`<div style="font-size:12px;color:var(--mid);text-align:center;padding:9px;background:var(--surf);border-radius:10px;font-weight:600;margin-bottom:8px;">🔄 ${LANG==='en'?'Renews':'Obnovuje se'} ${new Date(m.period_end).toLocaleDateString(LANG==='en'?'en-GB':'cs-CZ')} · ${fmtPrice(m.amount||0, m.currency)} ${sym}</div>`:''}<button class="cancelMembBtn" data-id="${m.id}" data-gym="${m.gym_id}" data-sub="${m.stripe_subscription||''}" style="width:100%;padding:11px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Cancel membership':'Zrušit členství'}</button>`
             : `<div style="font-size:12px;color:${_memExpiryCol(_memDaysLeft(m))||'var(--mid)'};text-align:center;padding:10px;background:var(--surf);border-radius:10px;font-weight:${_memExpiryCol(_memDaysLeft(m))?'800':'600'};">${m.period_end?((_memDaysLeft(m)!==null&&_memDaysLeft(m)<=7?((LANG==='en'?`⌛ Ends in ${_memDaysLeft(m)} d · `:`⌛ Končí za ${_memDaysLeft(m)} d · `)):'')+(LANG==='en'?'until ':'do ')+new Date(m.period_end).toLocaleDateString(LANG==='en'?'en-GB':'cs-CZ')+(LANG==='en'?' · does not renew':' · neobnovuje se')):(LANG==='en'?'One-time membership':'Jednorázové členství')}</div>`)}
         <button class="membQrBtn" data-gym="${m.gym_id}" data-gname="${escapeHtml(m.gym_name||(g&&g.name)||'Klub')}" style="width:100%;margin-top:8px;padding:11px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;">📲 ${LANG==='en'?'Show check-in QR':'Ukázat check-in QR'}</button><button class="membReceiptBtn" data-id="${m.id}" style="width:100%;margin-top:8px;padding:11px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;">🧾 ${LANG==='en'?'Receipt':'Doklad'}</button>
-        ${false?(`<div style="font-size:11px;color:var(--light);margin:10px 0 4px;">${LANG==='en'?'Per-class check-in QR:':'QR na konkrétní lekci:'}</div>`+window._membUpc[m.gym_id].map((o,i)=>{ const _k=`${m.gym_id}|${o.date}|${o.time||''}|${o.name||''}`; let _acc=['all']; try{ const pa=m.plan_access?(typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access):null; if(pa&&pa.length)_acc=pa; }catch(e){} const _cov=planCovers({access:_acc, classes:_memClasses(m)}, o.level||'all', o.name||null) && (!m.discipline || (o.disc||null)===m.discipline); const _rel=!!(window._membReleased&&window._membReleased.has(_k)); const _rb=_cov?`<button class="membRelBtn" data-gym="${m.gym_id}" data-i="${i}" data-rel="${_rel?1:0}" style="display:block;width:100%;border:none;border-radius:10px;padding:7px;margin:-2px 0 6px;cursor:pointer;font-size:12px;font-weight:700;${_rel?'background:#FFF4E5;color:#9A5B00;':'background:#E8F5EE;color:#006040;'}">${_rel?(LANG==='en'?'Released · I am going':'Uvolněno · jdu zpět'):(LANG==='en'?'✓ Going · release spot':'✓ Jdu · uvolnit místo')}</button>`:''; return `<button class="membQrClsBtn" data-gym="${m.gym_id}" data-gname="${escapeHtml(m.gym_name||(g&&g.name)||'Klub')}" data-i="${i}" style="display:block;width:100%;text-align:left;border:1px solid var(--border);border-radius:10px;padding:8px 11px;margin-bottom:6px;background:#fff;cursor:pointer;font-size:12.5px;color:var(--dark);">📲 ${dowShort()[new Date(o.date).getDay()]} ${new Date(o.date).getDate()}.${new Date(o.date).getMonth()+1}. · ${o.time||''} · ${escapeHtml(o.name||'')}</button>${_rb}`; }).join('')):''}
+        ${false?(`<div style="font-size:11px;color:var(--light);margin:10px 0 4px;">${LANG==='en'?'Per-class check-in QR:':'QR na konkrétní lekci:'}</div>`+window._membUpc[m.gym_id].map((o,i)=>{ const _k=`${m.gym_id}|${o.date}|${o.time||''}|${o.name||''}`; let _acc=['all']; try{ const pa=m.plan_access?(typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access):null; if(pa&&pa.length)_acc=pa; }catch(e){} const _cov=planCovers({access:_acc, classes:_memClasses(m)}, o.level||'all', o) && (!m.discipline || (o.disc||null)===m.discipline); const _rel=!!(window._membReleased&&window._membReleased.has(_k)); const _rb=_cov?`<button class="membRelBtn" data-gym="${m.gym_id}" data-i="${i}" data-rel="${_rel?1:0}" style="display:block;width:100%;border:none;border-radius:10px;padding:7px;margin:-2px 0 6px;cursor:pointer;font-size:12px;font-weight:700;${_rel?'background:#FFF4E5;color:#9A5B00;':'background:#E8F5EE;color:#006040;'}">${_rel?(LANG==='en'?'Released · I am going':'Uvolněno · jdu zpět'):(LANG==='en'?'✓ Going · release spot':'✓ Jdu · uvolnit místo')}</button>`:''; return `<button class="membQrClsBtn" data-gym="${m.gym_id}" data-gname="${escapeHtml(m.gym_name||(g&&g.name)||'Klub')}" data-i="${i}" style="display:block;width:100%;text-align:left;border:1px solid var(--border);border-radius:10px;padding:8px 11px;margin-bottom:6px;background:#fff;cursor:pointer;font-size:12.5px;color:var(--dark);">📲 ${dowShort()[new Date(o.date).getDay()]} ${new Date(o.date).getDate()}.${new Date(o.date).getMonth()+1}. · ${o.time||''} · ${escapeHtml(o.name||'')}</button>${_rb}`; }).join('')):''}
       </div>`;
     }).join('');
   }
@@ -15110,7 +15110,7 @@ async function loadGymRoster(){
     const k=`${o.date}|${o.time}|${o.name}`;
     const _pk=(x)=>String(x.student_id)+'|'+(x.child_name||'');
     const releasedIds=new Set(rs.filter(r=>r.status==='released'&&rk(r)===k).map(_pk));
-    const auto=mems.filter(m=> planCovers({access:accOf(m), classes:_memClasses(m)}, o.level||'all', o.name||null) && ((o.level!=='kids') || !!m.child_name || ((accOf(m)||[]).indexOf('kids')>=0)) && (!m.discipline || (o.disc||null)===m.discipline) && !releasedIds.has(_pk(m)));
+    const auto=mems.filter(m=> planCovers({access:accOf(m), classes:_memClasses(m)}, o.level||'all', o) && ((o.level!=='kids') || !!m.child_name || ((accOf(m)||[]).indexOf('kids')>=0)) && (!m.discipline || (o.disc||null)===m.discipline) && !releasedIds.has(_pk(m)));
     const autoIds=new Set(auto.map(_pk));
     const dropList=drops.filter(d=>`${d.class_date}|${d.class_time}|${d.class_name}`===k);
     const explicit=rs.filter(r=> r.status!=='released' && rk(r)===k && !autoIds.has(_pk(r)));
@@ -15243,7 +15243,7 @@ async function openClassAttendance(occ){
   const esc=v=>String(v||'').replace(/"/g,'&quot;');
   const _pk=(x)=>String(x.student_id)+'|'+(x.child_name||'');
   const releasedIds=new Set(rs.filter(r=>r.status==='released'&&rk(r)===k).map(_pk));
-  const auto=mems.filter(m=> planCovers({access:accOf(m), classes:_memClasses(m)}, occ.level||'all', occ.name||null) && ((occ.level!=='kids') || !!m.child_name || ((accOf(m)||[]).indexOf('kids')>=0)) && (!m.discipline || (occ.disc||null)===m.discipline) && !releasedIds.has(_pk(m)));
+  const auto=mems.filter(m=> planCovers({access:accOf(m), classes:_memClasses(m)}, occ.level||'all', occ) && ((occ.level!=='kids') || !!m.child_name || ((accOf(m)||[]).indexOf('kids')>=0)) && (!m.discipline || (occ.disc||null)===m.discipline) && !releasedIds.has(_pk(m)));
   const autoIds=new Set(auto.map(_pk));
   const dropList=drops.filter(d=>`${d.class_date}|${d.class_time}|${d.class_name}`===k);
   const explicit=rs.filter(r=> r.status!=='released' && rk(r)===k && !autoIds.has(_pk(r)));
@@ -15345,7 +15345,7 @@ async function loadCoachRoster(gymId, gymName){
     const k=`${o.date}|${o.time}|${o.name}`;
     const _pk=(x)=>String(x.student_id)+'|'+(x.child_name||'');
     const releasedIds=new Set(rs.filter(r=>r.status==='released'&&rk(r)===k).map(_pk));
-    const auto=mems.filter(m=> planCovers({access:accOf(m), classes:_memClasses(m)}, o.level||'all', o.name||null) && ((o.level!=='kids') || !!m.child_name || ((accOf(m)||[]).indexOf('kids')>=0)) && (!m.discipline || (o.disc||null)===m.discipline) && !releasedIds.has(_pk(m)));
+    const auto=mems.filter(m=> planCovers({access:accOf(m), classes:_memClasses(m)}, o.level||'all', o) && ((o.level!=='kids') || !!m.child_name || ((accOf(m)||[]).indexOf('kids')>=0)) && (!m.discipline || (o.disc||null)===m.discipline) && !releasedIds.has(_pk(m)));
     const autoIds=new Set(auto.map(_pk));
     const dropList=drops.filter(d=>`${d.class_date}|${d.class_time}|${d.class_name}`===k);
     const explicit=rs.filter(r=> r.status!=='released' && rk(r)===k && !autoIds.has(_pk(r)));
@@ -17120,12 +17120,42 @@ function _gymScheduleLevels(){
     return out;
   }catch(e){ return []; }
 }
-function _gymClassNames(){
+const _DAY_SH = ['Ne','Po','\u00dat','St','\u010ct','P\u00e1','So'];
+function _clsKey(c){
+  try{
+    const slots = (typeof _classSlots==='function' ? _classSlots(c) : [{day:c.day,time:c.time}]) || [];
+    const sig = slots.map(function(s){ return String(s.day)+'@'+String(s.time||''); }).join(',');
+    return ((c && c.name || '').trim()) + '|' + sig;
+  }catch(e){ return ((c && c.name || '').trim()) + '|'; }
+}
+function _clsLabel(c){
+  try{
+    const slots = (typeof _classSlots==='function' ? _classSlots(c) : [{day:c.day,time:c.time}]) || [];
+    const when = slots.map(function(s){
+      const d = _DAY_SH[Number(s.day) % 7] || '';
+      const t = s.time || '';
+      const dur = Number(s.dur) || Number(c.dur) || 60;
+      let end = '';
+      try{
+        const [hh,mm] = String(t).split(':').map(Number);
+        const tot = hh*60 + mm + dur;
+        end = String(Math.floor(tot/60)%24).padStart(2,'0') + ':' + String(tot%60).padStart(2,'0');
+      }catch(e){}
+      return d + ' ' + t + (end ? ('\u2013'+end) : '');
+    }).join(' \u00b7 ');
+    return ((c && c.name || '').trim()) + (when ? (' \u2014 ' + when) : '');
+  }catch(e){ return (c && c.name || '').trim(); }
+}
+function _gymClassList(){
   try{
     const raw = (_myGymData && _myGymData.schedule) || '[]';
     const arr = typeof raw==='string' ? JSON.parse(raw||'[]') : (raw||[]);
-    const out=[];
-    (Array.isArray(arr)?arr:[]).forEach(function(c){ const n=(c&&c.name||'').trim(); if(n && out.indexOf(n)<0) out.push(n); });
+    const out=[], seen={};
+    (Array.isArray(arr)?arr:[]).forEach(function(c){
+      const n=(c&&c.name||'').trim(); if(!n) return;
+      const k=_clsKey(c); if(seen[k]) return; seen[k]=1;
+      out.push({ key:k, label:_clsLabel(c) });
+    });
     return out;
   }catch(e){ return []; }
 }
@@ -17144,10 +17174,17 @@ function _myMembClasses(){
     return out.length ? out : null;
   }catch(e){ return null; }
 }
-function planCovers(plan, level, className){
+function planCovers(plan, level, cls_or_name){
   // Named classes take precedence: if the club listed them, only those count.
   const cls = (plan && plan.classes && plan.classes.length) ? plan.classes : null;
-  if(cls) return className ? cls.indexOf(className) >= 0 : false;
+  if(cls){
+    if(!cls_or_name) return false;
+    // Callers pass either the class object or just its name; the stored key needs the slots, so
+    // a bare name can only be matched by prefix.
+    if(typeof cls_or_name === 'object'){ return cls.indexOf(_clsKey(cls_or_name)) >= 0; }
+    const nm = String(cls_or_name);
+    return cls.some(function(k){ return k === nm || k.indexOf(nm + '|') === 0; });
+  }
   const a = (plan && plan.access && plan.access.length) ? plan.access : ['all'];
   return a.includes('all') || a.includes(level||'all');
 }
@@ -17247,16 +17284,16 @@ function renderPlansEditor(){
             : ('\u017d\u00e1dn\u00e1 lekce v rozvrhu nem\u00e1 \u00farove\u0148 '+_orphan.join(', ')+' \u2014 \u010dlena s t\u00edmto \u010dlenstv\u00edm nepust\u00ed\u0161 nikam.')}</div>`:''}
           <div style="font-size:11px;color:var(--light);margin-bottom:3px;">${LANG==='en'?'Only these classes (optional)':'Jen tyto lekce (nepovinn\u00e9)'}</div>
           <div style="margin-bottom:4px;">${(function(){
-            const names=_gymClassNames();
-            if(!names.length) return '<div style="font-size:10.5px;color:var(--light);">'+(LANG==='en'?'No classes in the schedule yet.':'V rozvrhu zat\u00edm nejsou \u017e\u00e1dn\u00e9 lekce.')+'</div>';
+            const list=_gymClassList();
+            if(!list.length) return '<div style="font-size:10.5px;color:var(--light);">'+(LANG==='en'?'No classes in the schedule yet.':'V rozvrhu zat\u00edm nejsou \u017e\u00e1dn\u00e9 lekce.')+'</div>';
             const picked=(p.classes&&p.classes.length)?p.classes:[];
-            return names.map(function(nm){ const on=picked.indexOf(nm)>=0;
-              return '<span class="planClsChip" data-i="'+i+'" data-n="'+escapeHtml(nm)+'" style="display:inline-block;padding:6px 10px;margin:3px;border-radius:14px;font-size:12px;font-weight:600;cursor:pointer;border:1.5px solid '+(on?'var(--dark)':'var(--border)')+';background:'+(on?'var(--dark)':'transparent')+';color:'+(on?'#fff':'var(--mid)')+';">'+escapeHtml(nm)+'</span>';
+            return list.map(function(o){ const on=picked.indexOf(o.key)>=0;
+              return '<span class="planClsChip" data-i="'+i+'" data-n="'+escapeHtml(o.key)+'" style="display:block;padding:8px 11px;margin:4px 0;border-radius:11px;font-size:12px;font-weight:600;cursor:pointer;border:1.5px solid '+(on?'var(--dark)':'var(--border)')+';background:'+(on?'var(--dark)':'transparent')+';color:'+(on?'#fff':'var(--mid)')+';">'+escapeHtml(o.label)+'</span>';
             }).join('');
           })()}</div>
           <div style="font-size:10.5px;color:var(--light);line-height:1.45;margin-bottom:10px;">${LANG==='en'
-            ? 'Pick none and the levels above decide. Pick some and the membership covers only those, whatever level they are.'
-            : 'Nevyber nic a rozhoduj\u00ed \u00farovn\u011b v\u00fd\u0161e. Vyber n\u011bkter\u00e9 a \u010dlenstv\u00ed plat\u00ed jen na n\u011b, a\u0165 maj\u00ed jakoukoli \u00farove\u0148.'}</div>
+            ? 'Names of recurring classes, with their days and times. Leave unticked and the member can attend every class of that level and discipline.'
+            : 'N\u00e1zev opakovan\u00fdch lekc\u00ed \u2014 zobrazuje dny a \u010dasy tr\u00e9nink\u016f. P\u0159i neza\u0161krtnut\u00ed m\u016f\u017ee \u010dlen chodit na v\u0161echny lekce dan\u00e9 \u00farovn\u011b a discipl\u00edny.'}</div>
           ${(Number(p.months)||1)>1?`
           <div style="font-size:11px;color:var(--light);margin-bottom:3px;">${LANG==='en'?'Fixed end date (optional)':'Pevn\u00e9 datum konce (nepovinn\u00e9)'}</div>
           <input class="planEndsOn" data-i="${i}" type="date" value="${p.ends_on||''}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';margin-bottom:4px;color:var(--dark);">
