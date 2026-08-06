@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SNZ finally makes the feature flags take effect on the dashboard sidebar and the MTL Ekosystem rows. The guard was correct and the timing was not: buildDashSide runs inside enterApp BEFORE the async _loadFeatureFlags resolves, so the sidebar was assembled from an empty flag object, which reads as everything-on. Applying flags afterwards could not help, because those rows are built as a string rather than toggled by id -- so once the flags land, the sidebar is rebuilt and applyCertUI re-run. Note the founder deliberately still sees everything; _featOff returns false for role==='founder' so the screens can be checked before launch. Separately the shared trophy-case link still awarded MTL Ambassador and MTL Certified badges: profile-badges.js was building both, and openSharedProfile was rendering them, so a retired tier lived on in every link already sent. Both removed. ON DEFERRING THE CLUB PROFILE FURTHER: of the nine queries after the parallel block, the schedule and team ones (five) genuinely could wait until somebody scrolls -- but they feed the HTML as it is assembled, so deferring them means restructuring how the profile is built, which is a bigger job than it looks and not one to start at the end of a long session. Deploy: index.html + api/profile-badges.js. -->
+<!-- MTL build: SOA adds the second parallel wave to the club profile, so opening one now costs two round trips instead of the nineteen it started at. The five queries left after SNY -- class reservations, drop-in bookings, club memberships and the coach roster -- are independent of each other too; they were only sequential because they were written one after another. The two that follow them genuinely need ids these return and stay put. FOUND SEPARATELY, and it is worse than a missing notification: a MULTI-MONTH membership (3/6/12) comes back from Stripe on gym_sub=ok WITHOUT the checkout session id, unlike the monthly one, so the client skipped /api/session entirely -- no transaction written to the ledger, no doklad, and no notification to the club owner. That is why a yearly purchase looked silent. pay.js now passes the session id on that path as well. On the profile: 'Eventy klubu' becomes 'Udalosti klubu', and merch moves below the events -- events are why somebody comes back to a club page, merch is an extra. Reordering the calls was not enough, since each section writes into its own container, so the containers themselves were reordered. Deploy: index.html + api/pay.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3877,7 +3877,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SNZ';
+const MTL_BUILD='SOA';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -9867,6 +9867,16 @@ async function openGymProfile(g){
     ]);
     if(_pFull && _pFull.data) g = _pFull.data;
   }
+  let _pResv=null, _pDrop=null, _pGymMemb=null, _pTeam=null;
+  if(_gid){
+    const _today2 = new Date().toISOString().slice(0,10);
+    [_pResv, _pDrop, _pGymMemb, _pTeam] = await Promise.all([
+      supaClient.from('gym_class_reservations').select('*').eq('gym_id', _gid).gte('class_date', _today2).then(r=>r,()=>({})),
+      supaClient.from('gym_bookings').select('class_date,class_time,class_name,status,student_id').eq('gym_id', _gid).eq('status','active').gte('class_date', _today2).then(r=>r,()=>({})),
+      supaClient.from('gym_memberships').select('student_id,plan_access,coach_id,status,discipline,period_end,stripe_subscription,cancelled_at').eq('gym_id', _gid).in('status',['active','cancelling']).then(r=>r,()=>({})),
+      supaClient.from('gym_coaches').select('coach_id, is_reception, hidden_from_profile').eq('gym_id', _gid).eq('status','active').then(r=>r,()=>({}))
+    ]);
+  }
   window._currentGym = g;
   const _gymDisc=(parseDisc(g.disciplines)||[])[0]||defaultDiscipline();
   try{ if(g&&g.id&&currentUser&&currentUser.id){ var _vsrc=window._gymViewSrc||'app'; window._gymViewSrc=null; window._curGymOpenSrc={gym:g.id,src:_vsrc}; supaClient.from('gym_views').upsert({ gym_id:g.id, viewer_id:currentUser.id, view_date:new Date().toISOString().slice(0,10), source:_vsrc }, { onConflict:'gym_id,viewer_id,view_date' }).then(function(){},function(){}); } }catch(e){}
@@ -9947,15 +9957,15 @@ async function openGymProfile(g){
   const membCovers=(m,o)=> planCovers({access:membAccessOf(m)}, o.level||'all') && (!m.discipline || (o.disc||null)===m.discipline)
     && ((o.level!=='kids') || !!m.child_name || ((membAccessOf(m)||[]).indexOf('kids')>=0));
   try{
-    const { data: resvAll } = await supaClient.from('gym_class_reservations').select('*').eq('gym_id', g.id).gte('class_date', today);
+    const resvAll = (_pResv && _pResv.data) || [];
     _resvAll=resvAll||[];
   }catch(e){}
   try{
-    const { data: dr } = await supaClient.from('gym_bookings').select('class_date,class_time,class_name,status,student_id').eq('gym_id', g.id).eq('status','active').gte('class_date', today);
+    const dr = (_pDrop && _pDrop.data) || [];
     _dropAll=dr||[];
   }catch(e){}
   try{
-    const { data: gm } = await supaClient.from('gym_memberships').select('student_id,plan_access,coach_id,status,discipline,period_end,stripe_subscription,cancelled_at').eq('gym_id', g.id).in('status',['active','cancelling']);
+    const gm = (_pGymMemb && _pGymMemb.data) || [];
     _gymMembers=gm||[];
   }catch(e){}
   const relKey=(r)=>`${r.class_date}|${r.class_time}|${r.class_name}`;
@@ -10043,7 +10053,7 @@ async function openGymProfile(g){
   const _gymHero=`<div style="position:relative;border-radius:18px;overflow:hidden;margin-bottom:18px;box-shadow:0 4px 16px rgba(0,0,0,.12);"><div style="height:150px;background:${_bcover?`#111 url('${_bcover}') center/cover`:`linear-gradient(135deg, ${_bc}, #18181b)`};"></div><div style="position:absolute;inset:0;background:linear-gradient(to top, rgba(0,0,0,.78), rgba(0,0,0,.1) 60%, transparent);"></div><div style="position:absolute;left:14px;right:14px;bottom:13px;display:flex;align-items:flex-end;gap:12px;"><div style="flex:1;min-width:0;"><div style="font-family:'Bebas Neue';font-size:32px;line-height:.95;color:#fff;letter-spacing:.5px;text-shadow:0 2px 10px rgba(0,0,0,.6);">${escapeHtml(g.name||'Klub')}</div>${[g.city,g.country].filter(Boolean).length?`<div style="font-size:12.5px;color:rgba(255,255,255,.92);margin-top:4px;text-shadow:0 1px 6px rgba(0,0,0,.6);">📍 ${escapeHtml([g.city,g.country].filter(Boolean).join(', '))}</div>`:''}${isMine?`<div style="display:inline-block;margin-top:6px;font-size:9.5px;font-weight:800;letter-spacing:.6px;color:#FFD98A;background:rgba(0,0,0,.45);padding:3px 9px;border-radius:999px;text-shadow:none;">🏆 ${LANG==='en'?'YOUR GYM':'TVŮJ GYM'}</div>`:''}</div></div></div>`;
   let _coachesBlock='';
   try{ if(g&&g.id){
-    const { data:_tl } = await supaClient.from('gym_coaches').select('coach_id, is_reception, hidden_from_profile').eq('gym_id', g.id).eq('status','active');
+    const _tl = (_pTeam && _pTeam.data) || [];
     let _cids=[...new Set((_tl||[]).filter(l=>!l.is_reception && !l.hidden_from_profile).map(l=>l.coach_id))];
     const _ownerHidden=!!g.owner_hidden_from_profile;
     const _ownerId=g.owner_id||null;
@@ -10070,9 +10080,9 @@ async function openGymProfile(g){
     ${g.description?`<p style="font-size:14px;color:var(--dark);line-height:1.6;margin:10px 0 16px;">${escapeHtml(g.description)}</p>`:''}
     ${capBlock}
     ${amenBlock}
-    <div id="gpMerchSection" style="margin:4px 0 14px;"></div>
     ${_coachesBlock}
     <div id="gpEventsSection"></div>
+    <div id="gpMerchSection" style="margin:4px 0 14px;"></div>
     <div class="sec-lbl" style="margin-top:18px;">${LANG==='en'?'Why book through MTL':'Proč rezervovat přes MTL'}</div>
     ${(_isQrProv(g) ? '' : `<div class="info-box" style="background:#EEF2F6;"><span style="font-size:20px;flex-shrink:0;">☑️</span><p style="color:#475569;"><strong>MTL Verified:</strong> ${LANG==='en'?'Payments via Stripe — guaranteed prepaid reservations, automatic refunds and verified space photos. A trustworthy choice.':'Platby přes Stripe — garantované předplacené rezervace, automatické vrácení a ověřené fotky prostor. Důvěryhodná volba.'}</p></div>`)}
     <div class="info-box" style="background:#E8F0FF;"><span style="font-size:20px;flex-shrink:0;">🛡️</span><p style="color:var(--blue);"><strong>${LANG==='en'?'Booking protection:':'Ochrana rezervace:'}</strong> ${(typeof _mtlPayMode==='function'&&_mtlPayMode(g)==='qr_bank')?(LANG==='en'?'Cancel 6+ h ahead → 95% back; if the club cancels the class, you are entitled to 100%.':'Zrušíš 6+ h předem → 95 % zpět; když lekci zruší klub, máš nárok na 100 %.'):(LANG==='en'?'You pay securely via Stripe. Cancel 6+ h ahead → 95% back; if the club cancels the class, you are entitled to 100%.':'Platíš bezpečně přes Stripe. Zrušíš 6+ h předem → 95 % zpět; když lekci zruší klub, máš nárok na 100 %.')}</p></div>
@@ -10120,8 +10130,8 @@ async function openGymProfile(g){
     }
   }
   openSheet('shGymProfile');
-  loadGymMerchForProfile(g.id, g);
   loadGymEventsForProfile(g.id, g);
+  loadGymMerchForProfile(g.id, g);
   loadGymCoursesForProfile(g.id, g);
 }
 const EXCUSE_REASONS=[{k:'nemoc',cs:'🤒 Nemoc',en:'🤒 Sick'},{k:'prace',cs:'💼 Práce',en:'💼 Work'},{k:'zraneni',cs:'🤕 Zranění',en:'🤕 Injury'},{k:'dovolena',cs:'🏖️ Dovolená',en:'🏖️ Holiday'},{k:'studium',cs:'📚 Studium',en:'📚 Studies'},{k:'jine',cs:'✏️ Jiné',en:'✏️ Other'}];
@@ -17938,7 +17948,7 @@ async function loadGymEventsForProfile(gymId, g){
     return h; };
   const chip=(val,lbl,sel)=>'<button class="gpEvM" data-m="'+val+'" style="flex:0 0 auto;padding:6px 12px;border-radius:20px;border:1px solid '+(sel?'var(--dark)':'var(--border)')+';background:'+(sel?'var(--dark)':'transparent')+';color:'+(sel?'#fff':'var(--mid)')+';font-size:12px;font-weight:700;cursor:pointer;font-family:&quot;DM Sans&quot;;white-space:nowrap;">'+lbl+'</button>';
   const monthChips=chip('all',EN?'All':'Vše',true)+months.map(m=>chip(m,monthLabel(m),false)).join('');
-  el.innerHTML='<details style="margin-top:14px;border:1px solid var(--border);border-radius:14px;overflow:hidden;"><summary style="cursor:pointer;padding:13px 15px;font-weight:800;font-size:14px;">📅 '+(EN?'Club events':'Eventy klubu')+' <span style="color:var(--light);font-weight:600;font-size:12px;">· '+evs.length+'</span></summary><div style="padding:10px 14px 6px;"><div style="display:flex;gap:7px;overflow-x:auto;padding-bottom:9px;margin-bottom:4px;">'+monthChips+'</div><div id="gpEvList">'+renderList('all')+'</div></div></details>';
+  el.innerHTML='<details style="margin-top:14px;border:1px solid var(--border);border-radius:14px;overflow:hidden;"><summary style="cursor:pointer;padding:13px 15px;font-weight:800;font-size:14px;">📅 '+(EN?'Club events':'Události klubu')+' <span style="color:var(--light);font-weight:600;font-size:12px;">· '+evs.length+'</span></summary><div style="padding:10px 14px 6px;"><div style="display:flex;gap:7px;overflow-x:auto;padding-bottom:9px;margin-bottom:4px;">'+monthChips+'</div><div id="gpEvList">'+renderList('all')+'</div></div></details>';
   const bindCards=()=>{ el.querySelectorAll('.gpEvCard').forEach(c=>{ c.onclick=()=>{ const ev=evs.find(x=>String(x.id)===String(c.dataset.id)); if(ev && typeof openEventView==='function') openEventView(ev); }; }); };
   el.querySelectorAll('.gpEvM').forEach(b=>{ b.onclick=()=>{ const m=b.dataset.m; el.querySelectorAll('.gpEvM').forEach(x=>{ const sl=x.dataset.m===m; x.style.background=sl?'var(--dark)':'transparent'; x.style.color=sl?'#fff':'var(--mid)'; x.style.borderColor=sl?'var(--dark)':'var(--border)'; }); const lst=$('gpEvList'); if(lst){ lst.innerHTML=renderList(m); bindCards(); } }; });
   bindCards();
