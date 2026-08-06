@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SNL makes deactivation mean the right thing per role, and actually enforces it. The banner said 'you are out of search and listings' to everybody, but a student is never IN search or listings -- only coaches and clubs are, and deleted_at is filtered in exactly seven places, all of them provider listings. What a plain student genuinely exposes is a referral code, and the children's trophy-case links are built from that same code. So a student now reads that their invite and trophy-case links stop working while memberships carry on; a provider reads that they leave the listings while existing students and bookings are untouched. Saying the links stop is not the same as stopping them: profile-badges and kid-badges resolved the share token without ever looking at account state, so a deleted account's trophy case stayed open to anyone holding an old link. Both endpoints now return 410 when the owner is deleted or deactivated. The check is server-side on purpose -- a client-side version was written first and deleted, because a link that only the app respects is not closed. Deploy: index.html + api/profile-badges.js + api/kid-badges.js. -->
+<!-- MTL build: SNM fixes the feature toggles reverting on reload. Two causes, both mine: _loadFeatureFlags swallowed its error, so a MISSING platform_config.features_off column looked exactly like 'everything is on' and a ticked box quietly had nothing to write to; and the panel rendered from window._featuresOff rather than re-reading, so it never showed what the database actually held. It now reloads on open and, if the column is absent, says so and names the SQL to run instead of pretending. VERIFIED for the second question -- deactivating somebody's referral link breaks nothing for anyone else: referral_credits are looked up by the HOLDER's user_id, never by whoever introduced them, so a discount already earned keeps working; referred_by is only ever read to count how many people YOU invited, for your own XP and milestones; and the single place a foreign code is resolved (club signup attribution) already falls through to no attribution when the lookup finds nothing. An earned coach_ref_score and the rate it bought are untouched. Deploy: index.html. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3866,7 +3866,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SNL';
+const MTL_BUILD='SNM';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -27476,10 +27476,17 @@ async function _acctSetState(deleted, deactivated){
 // Founder switch. Circle and the leaderboards are built but not finished -- Circle in particular
 // reads circle_markets, which the cron fills only for city ad-density, so the screen has nothing
 // to show. Rather than delete working code, they are switched off until they are worth opening.
-function renderFeatureToggles(){
+async function renderFeatureToggles(){
   const box=$('featToggles'); if(!box) return;
   if(!currentUser || currentUser.role!=='founder'){ box.style.display='none'; return; }
   box.style.display='block';
+  await _loadFeatureFlags();
+  if(window._featFlagsErr){
+    box.innerHTML='<div class="sec-lbl" style="margin-bottom:8px;">\u23f3 '+(LANG==='en'?'Not launched yet':'Zat\u00edm nespu\u0161t\u011bno')+'</div>'
+      +'<p style="font-size:12px;color:var(--red);line-height:1.5;">'+(LANG==='en'?'Cannot read the flags: ':'Nelze na\u010d\u00edst p\u0159\u00edznaky: ')+escapeHtml(window._featFlagsErr)
+      +'<br><span style="color:var(--mid);">'+(LANG==='en'?'Run account-deactivate.sql \u2014 platform_config.features_off is missing.':'Pus\u0165 account-deactivate.sql \u2014 chyb\u00ed sloupec platform_config.features_off.')+'</span></p>';
+    return;
+  }
   const EN=LANG==='en';
   const off=window._featuresOff||{};
   const items=[['coaches',EN?'Coach leaderboard':'\u017deb\u0159\u00ed\u010dek kou\u010d\u016f'],
@@ -27510,11 +27517,19 @@ function _featOffToast(){
 }
 async function _loadFeatureFlags(){
   try{
-    const { data } = await supaClient.from('platform_config').select('features_off').eq('id',1).single();
+    const { data, error } = await supaClient.from('platform_config').select('features_off').eq('id',1).single();
+    if(error) throw error;
     let v = data && data.features_off;
     if(typeof v === 'string') v = JSON.parse(v);
     window._featuresOff = v || {};
-  }catch(e){ window._featuresOff = window._featuresOff || {}; }
+    window._featFlagsOk = true;
+  }catch(e){
+    // Swallowing this made a missing column look like 'everything is on', so a founder ticked a
+    // box, saw it revert on reload and had no idea why.
+    console.error('feature flags', e);
+    window._featuresOff = window._featuresOff || {};
+    window._featFlagsErr = (e && e.message) || String(e);
+  }
 }
 async function _featToggle(key, on){
   const off = Object.assign({}, window._featuresOff || {});
@@ -27524,6 +27539,7 @@ async function _featToggle(key, on){
     if(error) throw error;
     window._featuresOff = off;
     toast('\u2705');
+    try{ renderFeatureToggles(); }catch(e){}
   }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
 }
 function openDeleteFlow(kind, gymId, gymName){
