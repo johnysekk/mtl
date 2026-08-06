@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SNQ fixes three things about the account controls. THE BANNER WAS EATING THE APP: it sat inside .app, which is a flex column of height 100dvh with overflow:hidden, so a new child took its height out of the rest and pushed the content and the bottom navigation off screen -- it is now position:fixed, outside the flow entirely. 'Radeji deaktivovat' did nothing because I had put its onclick INSIDE the Delete button's handler, so it only became live after clicking Delete; it is attached when the dialog is built. And the danger zone moves into its own sheet behind 'Sprava uctu a soukromi': deleting an account had been sitting at the bottom of the same scroll as language and notification preferences, close enough to mis-tap on a phone. The block was cut with a div-balance assert after an earlier attempt left the markup one tag short and check_html caught it. Deploy: index.html + account-deactivate.sql. -->
+<!-- MTL build: SNR puts a My club shortcut in the header, between the bell and the heart, shown only to somebody who actually has a membership. One club opens straight away; several ask which, the same way a club owner picks which club to manage. This is deliberately NOT the 'make my club the home screen' toggle that was discussed: a member who trains at one club opens the app to book or check the schedule rather than to browse coaches, and making them scroll past a deck they will never book from is a tax on every single open -- but replacing the deck would remove the discovery that the whole product rests on, for exactly the majority of users. A shortcut costs one tap and takes nothing away. Membership columns were checked against the schema before use, and the enterApp anchor was read end-to-end before hooking to it, after two builds today were hung on anchors that never ran. Deploy: index.html. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -614,6 +614,7 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
   <div class="logo" style="color:var(--red);">MTL <span style="font-family:'DM Sans';font-size:11px;font-weight:700;letter-spacing:.06em;color:var(--dark);vertical-align:middle;">· Be More.</span></div>
 <div class="hdr-r">
     <div class="icon-btn" id="btnNotif" title="Notifikace" style="position:relative;">🔔<span id="notifBadge" style="display:none;position:absolute;top:-2px;right:-2px;background:var(--red);color:#fff;font-size:10px;font-weight:700;min-width:18px;height:18px;border-radius:99px;align-items:center;justify-content:center;padding:0 4px;border:2px solid var(--bg);">0</span></div>
+    <div class="icon-btn" id="btnMyClub" title="Můj klub" style="display:none;">🏛️</div>
     <div class="icon-btn" id="btnFavs" title="Oblíbené">❤️</div>
     <div class="icon-btn" id="btnLeaderboard" title="Žebříček koučů" style="display:none;">🏆</div>
     <div class="icon-btn" id="btnRefresh" title="Obnovit">🔄</div>
@@ -3875,7 +3876,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SNQ';
+const MTL_BUILD='SNR';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -19604,6 +19605,7 @@ $('ni-events').onclick=()=>{ setNav('ni-events'); closeAllSheets(); enterEventsM
 $('btnCloseEvents').onclick=()=>{ closeSheet('shEvents'); setNav('ni-find'); };
 $('btnCloseEventCreate').onclick=()=>{ closeSheet('shEventCreate'); };
 $('btnCloseEventView').onclick=()=>{ closeSheet('shEventView'); };
+  if($('btnMyClub')) $('btnMyClub').onclick=_openMyClub;
 $('btnFavs').onclick=()=>{ renderFavs(); openSheet('shFavs'); ensureGymsLoaded().then(()=>{ if($('shFavs').classList.contains('open')) renderFavs(); }); };
 $('ni-msgs').onclick=()=>{ setNav('ni-msgs'); openSheet('shMsgs'); loadConversations(); };
 $('ni-me').onclick=()=>{ setNav('ni-me'); openSheet('shMe'); };
@@ -26485,6 +26487,7 @@ function enterApp(){
   // so the flags were fetched for practically nobody and nothing was ever hidden.
   try{ _loadFeatureFlags(); }catch(e){}
   try{ renderAcctStateBar(); }catch(e){}
+  try{ _loadMyClubs(); }catch(e){}
   // Take anyone who has since found a club out of the demand queue. Deliberately a RECONCILIATION
   // on load, not an event hook on purchase: a QR payment is confirmed by the owner later, when the
   // student is not in the app, so no single moment could be trusted to fire. The SQL does the
@@ -27468,6 +27471,52 @@ function _paintDeactBtn(){
   const _l=$('setDeactLbl'), _sub=$('setDeactSub');
   if(_l) _l.textContent = _dOn ? (LANG==='en'?'Reactivate account':'Znovu aktivovat \u00fa\u010det') : (LANG==='en'?'Deactivate account':'Deaktivovat \u00fa\u010det');
   if(_sub) _sub.textContent = _dOn ? (LANG==='en'?'You are hidden right now. This puts you back.':'Te\u010f jsi skryt\u00fd. T\u00edmto se vr\u00e1t\u00ed\u0161.') : (LANG==='en'?'You disappear everywhere. Nothing is deleted. Back anytime.':'Zmiz\u00ed\u0161 odev\u0161ad. Nic se nema\u017ee. Kdykoli zp\u011bt.');
+}
+async function _loadMyClubs(){
+  try{
+    if(!currentUser) { window._myClubMemb = []; return; }
+    const { data } = await supaClient.from('gym_memberships')
+      .select('gym_id,gym_name,status')
+      .eq('student_id', currentUser.id)
+      .in('status', ['active','cancelling']);
+    const seen = {}; const out = [];
+    (data||[]).forEach(function(m){ if(m.gym_id && !seen[m.gym_id]){ seen[m.gym_id]=1; out.push(m); } });
+    window._myClubMemb = out;
+  }catch(e){ window._myClubMemb = window._myClubMemb || []; }
+  try{ _paintMyClubBtn(); }catch(e){}
+}
+function _paintMyClubBtn(){
+  const b = document.getElementById('btnMyClub'); if(!b) return;
+  const list = window._myClubMemb || [];
+  b.style.display = list.length ? '' : 'none';
+  b.title = (LANG==='en'?'My club':'M\u016fj klub');
+}
+async function _openMyClub(){
+  const list = window._myClubMemb || [];
+  if(!list.length) return;
+  // One club goes straight there; more than one has to ask, the same way a club owner picks
+  // which club to manage.
+  if(list.length === 1){ return _openClubById(list[0].gym_id); }
+  const EN = LANG === 'en';
+  const ov = document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;display:flex;align-items:'+(window.innerHeight>780?'center':'flex-end')+';justify-content:center;overflow:auto;padding:16px;box-sizing:border-box;';
+  ov.innerHTML = `<div style="background:#fff;width:100%;max-width:420px;border-radius:18px;padding:20px;">
+    <div style="font-size:17px;font-weight:800;margin-bottom:12px;color:var(--dark);">${EN?'Which club?':'Kter\u00fd klub?'}</div>
+    ${list.map(function(m,i){ return '<button class="myClubPick" data-i="'+i+'" style="width:100%;margin-bottom:8px;padding:13px 15px;background:var(--surf);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;color:var(--dark);cursor:pointer;font-family:\'DM Sans\';text-align:left;">\ud83c\udfdb\ufe0f '+escapeHtml(m.gym_name||'')+'</button>'; }).join('')}
+    <button id="myClubCancel" style="width:100%;margin-top:4px;padding:10px;background:transparent;color:var(--mid);border:1.5px solid var(--border);border-radius:12px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'Cancel':'Zru\u0161it'}</button>
+  </div>`;
+  document.body.appendChild(ov);
+  ov.querySelector('#myClubCancel').onclick=()=>ov.remove();
+  ov.querySelectorAll('.myClubPick').forEach(function(btn){
+    btn.onclick=function(){ const m=list[Number(btn.dataset.i)]; ov.remove(); _openClubById(m.gym_id); };
+  });
+}
+async function _openClubById(gymId){
+  try{
+    const { data: g } = await supaClient.from('gyms').select('*').eq('id', gymId).single();
+    if(g && typeof openGymProfile==='function') openGymProfile(g);
+    else toast('\u26a0\ufe0f '+(LANG==='en'?'Club not found':'Klub nenalezen'));
+  }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
 }
 function renderAcctStateBar(){
   try{ _paintDeactBtn(); }catch(e){}
