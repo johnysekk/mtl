@@ -545,7 +545,7 @@ async function membershipCheckout(req, res) {
           metadata: _meta,
         },
         ...(discounts ? { discounts } : {}),
-        success_url: `${proto}://${host}/?gym_sub=ok&membership=${encodeURIComponent(membershipId || '')}&acct=${encodeURIComponent(gymAccount)}`,
+        success_url: `${proto}://${host}/?gym_sub=ok&membership=${encodeURIComponent(membershipId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
         cancel_url: `${proto}://${host}/`,
       },
       { stripeAccount: gymAccount }
