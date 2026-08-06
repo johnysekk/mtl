@@ -39,7 +39,7 @@ async function sb(path, opts = {}) {
 }
 const notify = (user_id, kind, message, extra = {}) =>
   sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id, type: 'system', read: false, data: JSON.stringify({ kind, ...extra }), message }) });
-const CZ_MONTHS = ['ledna','\u00fanora','b\u0159ezna','dubna','kv\u011btna','\u010dervna','\u010dervence','srpna','z\u00e1\u0159\u00ed','\u0159\u00edjna','listopadu','prosince'];
+const CZ_MONTHS = ['leden','\u00fanor','b\u0159ezen','duben','kv\u011bten','\u010derven','\u010dervenec','srpen','z\u00e1\u0159\u00ed','\u0159\u00edjen','listopad','prosinec'];
 // The notification said only how much was taken, not what for. Naming the month makes the charge
 // checkable against the statement instead of being one number among many.
 function czMonthName(ym) { try { const m = Number(String(ym).split('-')[1]); return CZ_MONTHS[m-1] || ym; } catch (e) { return ym; } }
@@ -59,10 +59,16 @@ export default async function handler(req, res) {
 
   try {
     // ---- gather unpaid closed-month cash/qr commission, grouped by gym + currency ----
-    const tx = await sb(`transactions?select=gym_id,currency,mtl_fee,mtl_rate,gross_amount,mtl_fee_refunded,payment_method,commission_status,commission_month&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&commission_month=lt.${curMonth}&limit=20000`);
+    // Who is on daily collection. Normally a commission waits for its month to close, which means
+    // any change to how it is billed cannot be checked until the 1st -- so a founder can put a
+    // single club or coach on daily and see the whole charge run the next morning.
+    const dailyGyms = new Set(((await sb(`gyms?commission_daily=is.true&select=id`)) || []).map(g => g.id));
+    // Fetch the current month too, then drop it again for everyone not on daily.
+    const tx = await sb(`transactions?select=gym_id,currency,mtl_fee,mtl_rate,gross_amount,mtl_fee_refunded,payment_method,commission_status,commission_month&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&commission_month=lte.${curMonth}&limit=20000`);
     const byGym = {}; const byGymRates = {};
     for (const t of (tx || [])) {
       if (!t.gym_id) continue;
+      if (t.commission_month === curMonth && !dailyGyms.has(t.gym_id)) continue;
       const cur = (t.currency || 'czk').toLowerCase();
       (byGym[t.gym_id] = byGym[t.gym_id] || {});
       byGym[t.gym_id][cur] = (byGym[t.gym_id][cur] || 0) + ((t.mtl_fee || 0) - (t.mtl_fee_refunded || 0));
@@ -102,13 +108,13 @@ export default async function handler(req, res) {
           } catch (e) { pi = null; }
 
           if (pi && pi.status === 'succeeded') {
-            await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
+            await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=${dailyGyms.has(gid) ? 'lte' : 'lt'}.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
             /* doklad issued by unified-doklad-cron.js (bank + Stripe combined, one per month) */
-            await notify(g.owner_id, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) za měsíc ${czMonthName(prevMonth(curMonth))} byla stržena z karty. Doklad najdeš v účetnictví.`, { amount, currency: cur });
+            await notify(g.owner_id, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) za ${czMonthName(prevMonth(curMonth))} byla stržena z karty. Doklad najdeš v účetnictví.`, { amount, currency: cur });
             collected++;
           } else {
             anyFail = true;
-            await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=eq.pending&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
+            await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=eq.pending&currency=eq.${encodeURIComponent(cur)}&commission_month=${dailyGyms.has(gid) ? 'lte' : 'lt'}.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
             failed++;
           }
         }
@@ -150,10 +156,12 @@ export default async function handler(req, res) {
     }
 
     // ===== COACH PROVIDERS: coach-own cash/QR (paid_to='coach'), billed on profiles =====
-    const ctx = await sb(`transactions?select=coach_id,currency,mtl_fee,mtl_rate,gross_amount,mtl_fee_refunded,payment_method,commission_status,commission_month&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&paid_to=eq.coach&coach_id=not.is.null&commission_month=lt.${curMonth}&limit=20000`);
+    const dailyCoaches = new Set(((await sb(`profiles?commission_daily=is.true&select=id`)) || []).map(p => p.id));
+    const ctx = await sb(`transactions?select=coach_id,currency,mtl_fee,mtl_rate,gross_amount,mtl_fee_refunded,payment_method,commission_status,commission_month&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&paid_to=eq.coach&coach_id=not.is.null&commission_month=lte.${curMonth}&limit=20000`);
     const byCoach = {}; const byCoachRates = {};
     for (const t of (ctx || [])) {
       if (!t.coach_id) continue;
+      if (t.commission_month === curMonth && !dailyCoaches.has(t.coach_id)) continue;
       const cur = (t.currency || 'czk').toLowerCase();
       (byCoach[t.coach_id] = byCoach[t.coach_id] || {});
       byCoach[t.coach_id][cur] = (byCoach[t.coach_id][cur] || 0) + ((t.mtl_fee || 0) - (t.mtl_fee_refunded || 0));
@@ -191,13 +199,13 @@ export default async function handler(req, res) {
           } catch (e) { pi = null; }
 
           if (pi && pi.status === 'succeeded') {
-            await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
+            await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=${dailyCoaches.has(cid) ? 'lte' : 'lt'}.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
             /* doklad issued by unified-doklad-cron.js (bank + Stripe combined, one per month) */
-            await notify(cid, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) za měsíc ${czMonthName(prevMonth(curMonth))} byla stržena z karty. Doklad najdeš v účetnictví.`);
+            await notify(cid, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) za ${czMonthName(prevMonth(curMonth))} byla stržena z karty. Doklad najdeš v účetnictví.`);
             collected++;
           } else {
             anyFail = true;
-            await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=eq.pending&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
+            await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=eq.pending&currency=eq.${encodeURIComponent(cur)}&commission_month=${dailyCoaches.has(cid) ? 'lte' : 'lt'}.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
             failed++;
           }
         }
