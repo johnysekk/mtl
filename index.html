@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SNR puts a My club shortcut in the header, between the bell and the heart, shown only to somebody who actually has a membership. One club opens straight away; several ask which, the same way a club owner picks which club to manage. This is deliberately NOT the 'make my club the home screen' toggle that was discussed: a member who trains at one club opens the app to book or check the schedule rather than to browse coaches, and making them scroll past a deck they will never book from is a tax on every single open -- but replacing the deck would remove the discovery that the whole product rests on, for exactly the majority of users. A shortcut costs one tap and takes nothing away. Membership columns were checked against the schema before use, and the enterApp anchor was read end-to-end before hooking to it, after two builds today were hung on anchors that never ran. Deploy: index.html. -->
+<!-- MTL build: SNT stores the renewal date on a Stripe membership. The card already knew how to say 'Obnovuje se {date}' and only showed it when period_end existed -- and after a Stripe checkout nothing ever wrote one. The return handler saved status and stripe_subscription and stopped there, so the row could say it renews but never when, which is why a member who had just paid saw no date at all. session.js now retrieves the subscription's current_period_end and returns it, and the client writes it alongside the subscription id. Bank/QR memberships were unaffected: their period_end is stamped at purchase. Deploy: index.html + api/session.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3876,7 +3876,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SNR';
+const MTL_BUILD='SNT';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -26555,8 +26555,8 @@ function buildDashSide(){
           +'<div class="dsItem" data-act="level">🎮 <span>'+(LANG==='en'?'Levels':'Levely')+'</span></div>'
           +'<div class="dsItem" data-act="miles">🏆 <span>'+(LANG==='en'?'Milestones':'Milníky')+'</span></div>'
           +'<div class="dsItem" data-act="rewards">🎁 <span>'+(LANG==='en'?'Rewards':'Odměny')+'</span></div>'
-          +'<div class="dsItem" data-act="leaderboards">🥇 <span>'+(LANG==='en'?'Leaderboards':'Žebříčky')+'</span></div>'
-          +'<div class="dsItem" data-act="circle">🔴 <span>MTL Circle</span></div>'
+          +((typeof _featOff==='function' && _featOff('coaches'))?'':'<div class="dsItem" data-act="leaderboards">🥇 <span>'+(LANG==='en'?'Leaderboards':'Žebříčky')+'</span></div>')
+          +((typeof _featOff==='function' && _featOff('circle'))?'':'<div class="dsItem" data-act="circle">🔴 <span>MTL Circle</span></div>')
                   +'</div>'
         +'<div class="dsGroup" data-grp="coach">🥊 <span>'+(LANG==='en'?'Coach':'Kouč')+'</span><span class="dsArr" style="transform:rotate(-90deg);">▾</span></div>'
         +'<div class="dsSub" id="dsSubCoach" style="display:none;">'
@@ -26716,8 +26716,8 @@ function updateAvailNotifUI(){
 }
 function applyCertUI(){
   const approved = currentUser && currentUser.coach_status==='approved';
-  try{ if($('meMtlLeague')){ const _c=approved, _g=!!(window._myGyms&&window._myGyms.length), _f=currentUser&&(currentUser.role==='founder'||currentUser.id===FOUNDER_UUID); $('meMtlLeague').style.display=(_c||_g||_f)?'flex':'none'; const _l=$('meMtlLeague').querySelector('.prow-lbl'); if(_l) _l.textContent=(LANG==='en'?'MTL League':'MTL Liga'); } }catch(e){}
-  try{ if($('meMtlCircle')){ const _p=(typeof _payProv==='function') ? _payProv() : (approved || !!(window._myGyms&&window._myGyms.length)); $('meMtlCircle').style.display = _p ? 'flex' : 'none'; } }catch(e){}
+  try{ if($('meMtlLeague')){ const _c=approved, _g=!!(window._myGyms&&window._myGyms.length), _f=currentUser&&(currentUser.role==='founder'||currentUser.id===FOUNDER_UUID); $('meMtlLeague').style.display=((_c||_g||_f) && !(typeof _featOff==='function' && _featOff('league')))?'flex':'none'; const _l=$('meMtlLeague').querySelector('.prow-lbl'); if(_l) _l.textContent=(LANG==='en'?'MTL League':'MTL Liga'); } }catch(e){}
+  try{ if($('meMtlCircle')){ const _p=(typeof _payProv==='function') ? _payProv() : (approved || !!(window._myGyms&&window._myGyms.length)); $('meMtlCircle').style.display = (_p && !(typeof _featOff==='function' && _featOff('circle'))) ? 'flex' : 'none'; } }catch(e){}
   const _bbl=$('meBeltBadge'); if(_bbl){ (async()=>{ try{ let _b=beltsOf(currentUser&&currentUser.belts); if(currentUser&&currentUser.belts===undefined){ const {data:_p}=await supaClient.from('profiles').select('belts').eq('id',currentUser.id).single(); if(_p){ currentUser.belts=_p.belts; _b=beltsOf(_p.belts); } } if(_b&&_b.bjj&&_b.bjj.belt){ _bbl.innerHTML=beltBadgeHtml(_b.bjj); _bbl.style.display='block'; } else { _bbl.style.display='none'; } }catch(e){} })(); }
   const _hn=$('meHeroName'); if(_hn) _hn.textContent=(currentUser&&currentUser.name)||(LANG==='en'?'My profile':'Můj profil');
   const _al=$('meAvatarLabel'); if(_al) _al.textContent=(LANG==='en'?'📷 Upload':'📷 Nahrát');
@@ -29151,10 +29151,10 @@ async function showPaidPopup(){
     const gAcct = params.get('acct');
     let _t=0; while(!currentUser && _t<25){ await new Promise(r=>setTimeout(r,200)); _t++; }
     if(membershipId){
-      let subId=null;
-      if(sessionId){ try{ const r=await fetch(`/api/session?sessionId=${sessionId}${gAcct?'&gymAccount='+encodeURIComponent(gAcct):''}`); const j=await r.json(); subId=j.subscription||null; console.log('[MTL tx · membership]', j._tx); }catch(e){} }
+      let subId=null, _pEnd=null;
+      if(sessionId){ try{ const r=await fetch(`/api/session?sessionId=${sessionId}${gAcct?'&gymAccount='+encodeURIComponent(gAcct):''}`); const j=await r.json(); subId=j.subscription||null; _pEnd=j.periodEnd||null; console.log('[MTL tx · membership]', j._tx); }catch(e){} }
       try {
-        const { data: mb } = await supaClient.from('gym_memberships').update({ status:'active', stripe_subscription: subId }).eq('id', membershipId).select().single();
+        const { data: mb } = await supaClient.from('gym_memberships').update(Object.assign({ status:'active', stripe_subscription: subId }, _pEnd?{ period_end:_pEnd }:{})).eq('id', membershipId).select().single();
         if(mb){
           const { data: gym } = await supaClient.from('gyms').select('owner_id, name, membership_price, currency').eq('id', mb.gym_id).single();
           const _membCoach=(mb.paid_to==='coach' && mb.coach_id)?mb.coach_id:null;
