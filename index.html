@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SNM fixes the feature toggles reverting on reload. Two causes, both mine: _loadFeatureFlags swallowed its error, so a MISSING platform_config.features_off column looked exactly like 'everything is on' and a ticked box quietly had nothing to write to; and the panel rendered from window._featuresOff rather than re-reading, so it never showed what the database actually held. It now reloads on open and, if the column is absent, says so and names the SQL to run instead of pretending. VERIFIED for the second question -- deactivating somebody's referral link breaks nothing for anyone else: referral_credits are looked up by the HOLDER's user_id, never by whoever introduced them, so a discount already earned keeps working; referred_by is only ever read to count how many people YOU invited, for your own XP and milestones; and the single place a foreign code is resolved (club signup attribution) already falls through to no attribution when the lookup finds nothing. An earned coach_ref_score and the rate it bought are untouched. Deploy: index.html. -->
+<!-- MTL build: SNN actually hides the switched-off sections instead of only blocking them. Guarding the five open* functions stopped the screens but left every entry sitting there to be tapped for a toast -- and they are scattered: the deck header trophy, the coach tab button, My profile, club management, the founder panel, and the three cross-links the boards use to jump between each other, since coaches, clubs and events share one sheet. applyFeatureFlags now hides all sixteen, runs on load and after every toggle so switching back on needs no reload, and is re-run when the club and founder panels render, because mgGymLb and fdGymLb do not exist in the HTML at all -- they are built at render time, so they were absent when the flags first applied. Checkboxes became proper toggles. VERIFIED, on the rate question: Shikai and Bankai cannot be lost through somebody else deactivating. coach_ref_score only ever increments and the cron never re-checks whether a referred person is still around, and bankai_eligible counts YOUR taught privates and YOUR gym's memberships. A rate somebody earned stays earned. Deploy: index.html + account-deactivate.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3866,7 +3866,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SNM';
+const MTL_BUILD='SNN';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -14665,6 +14665,7 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
   if($('gtLinkBox')) renderInviteLink('team');
   if($('gtPending')) loadPending('team');
   if($('mgGymLb')) $('mgGymLb').onclick=()=>openGymLeaderboard('city');
+  try{ applyFeatureFlags(); }catch(e){}
   if($('gmRefToggle')){ const _paintGmRef=()=>{ const on=!(_myGymData&&_myGymData.referral_optin===false); $('gmRefToggle').querySelectorAll('button').forEach(b=>{ const sel=(b.dataset.ro==='1')===on; b.style.background=sel?'var(--dark)':'transparent'; b.style.color=sel?'#fff':'var(--mid)'; }); }; $('gmRefToggle').querySelectorAll('button').forEach(b=>{ b.onclick=async()=>{ if(!_myGymData) return; const _ro=b.dataset.ro==='1'; _myGymData.referral_optin=_ro; _paintGmRef(); try{ await supaClient.from('gyms').update({ referral_optin:_ro }).eq('id', _myGymData.id); }catch(e){ console.warn('referral_optin col?', e); toast(LANG==='en'?'⚠️ Could not save':'⚠️ Nepodařilo se uložit'); } }; }); }
   if($('gmRefInfoBtn')) $('gmRefInfoBtn').onclick=()=>{ const _p=$('gmRefInfo'); if(_p) _p.style.display=(_p.style.display==='none'?'block':'none'); };
   if($('mgStripeBtn')) $('mgStripeBtn').onclick=()=>openMyStripe(g.id);
@@ -21593,6 +21594,7 @@ async function renderFounderDash(){
   const dsel=$('fdDiscSel'); if(dsel) dsel.onchange=()=>{ _fdDisc=dsel.value; renderFounderDash(); };
   const tc=$('fdToggleCoaches'); if(tc) tc.onclick=()=>{ const el=$('fdCoaches'); const open=el.style.display!=='none'; el.style.display=open?'none':'block'; const ar=$('fdArrowC'); if(ar) ar.textContent=open?'›':'⌄'; };
   const tg=$('fdToggleGyms'); if(tg) tg.onclick=()=>{ const el=$('fdGyms'); const open=el.style.display!=='none'; el.style.display=open?'none':'block'; const ar=$('fdArrowG'); if(ar) ar.textContent=open?'›':'⌄'; };
+  try{ applyFeatureFlags(); }catch(e){}
   const glb=$('fdGymLb'); if(glb) glb.onclick=()=>openGymLeaderboard('world');
   box.querySelectorAll('.fdCoachRow').forEach(r=>r.onclick=()=>openCoachStats(r.dataset.id, r.dataset.name));
   box.querySelectorAll('.fdGymRow').forEach(r=>r.onclick=()=>openGymStats(r.dataset.id, r.dataset.name));
@@ -27476,6 +27478,29 @@ async function _acctSetState(deleted, deactivated){
 // Founder switch. Circle and the leaderboards are built but not finished -- Circle in particular
 // reads circle_markets, which the cron fills only for city ad-density, so the screen has nothing
 // to show. Rather than delete working code, they are switched off until they are worth opening.
+// Applies the flags to the UI. Called on load and after every toggle, so turning something back
+// on does not need a reload.
+function applyFeatureFlags(){
+  try{
+    const map = [
+      ['coaches', ['btnLeaderboard','btnLeaderboardCoach','lbTypeCoach','glTypeCoach','elTypeCoach']],
+      ['gyms',    ['mgGymLb','fdGymLb','lbTypeGym','glTypeGym','elTypeGym']],
+      ['events',  ['lbTypeEvents','glTypeEvents','elTypeEvents']],
+      ['league',  ['meMtlLeague']],
+      ['circle',  ['meMtlCircle','btnCircleHub']]
+    ];
+    map.forEach(function(pair){
+      const off = _featOff(pair[0]);
+      pair[1].forEach(function(id){
+        const el = document.getElementById(id);
+        if(el) el.style.display = off ? 'none' : '';
+      });
+    });
+    // Deck header trophy: one icon that opens the coach board.
+    const t = document.getElementById('btnLeaderboard');
+    if(t) t.style.display = _featOff('coaches') ? 'none' : '';
+  }catch(e){}
+}
 async function renderFeatureToggles(){
   const box=$('featToggles'); if(!box) return;
   if(!currentUser || currentUser.role!=='founder'){ box.style.display='none'; return; }
@@ -27501,9 +27526,21 @@ async function renderFeatureToggles(){
     +'<div class="prow-group">'+items.map(function(it){
       const on=!off[it[0]];
       return '<label class="prow" style="cursor:pointer;"><div class="prow-l"><div class="prow-lbl">'+it[1]+'</div></div>'
-        +'<input type="checkbox" class="featChk" data-k="'+it[0]+'" '+(on?'checked':'')+' style="width:18px;height:18px;cursor:pointer;"></label>';
+        +'<span style="position:relative;display:inline-block;width:44px;height:25px;flex-shrink:0;">'
+        +'<input type="checkbox" class="featChk" data-k="'+it[0]+'" '+(on?'checked':'')+' style="opacity:0;width:0;height:0;position:absolute;">'
+        +'<span class="featSlide" style="position:absolute;inset:0;border-radius:25px;transition:background .18s;background:'+(on?'#006040':'var(--border)')+';"></span>'
+        +'<span class="featKnob" style="position:absolute;top:3px;left:3px;width:19px;height:19px;border-radius:50%;background:#fff;transition:transform .18s;box-shadow:0 1px 3px rgba(0,0,0,.25);transform:translateX('+(on?'19px':'0')+');"></span>'
+        +'</span></label>';
     }).join('')+'</div>';
-  box.querySelectorAll('.featChk').forEach(function(c){ c.onchange=function(){ _featToggle(c.dataset.k, c.checked); }; });
+  box.querySelectorAll('.featChk').forEach(function(c){
+    c.onchange=function(){
+      const wrap=c.parentNode;
+      const sl=wrap.querySelector('.featSlide'), kn=wrap.querySelector('.featKnob');
+      if(sl) sl.style.background = c.checked ? '#006040' : 'var(--border)';
+      if(kn) kn.style.transform = 'translateX('+(c.checked?'19px':'0')+')';
+      _featToggle(c.dataset.k, c.checked);
+    };
+  });
 }
 function _featOff(key){
   try{
@@ -27523,6 +27560,7 @@ async function _loadFeatureFlags(){
     if(typeof v === 'string') v = JSON.parse(v);
     window._featuresOff = v || {};
     window._featFlagsOk = true;
+    try{ applyFeatureFlags(); }catch(e){}
   }catch(e){
     // Swallowing this made a missing column look like 'everything is on', so a founder ticked a
     // box, saw it revert on reload and had no idea why.
@@ -27539,6 +27577,7 @@ async function _featToggle(key, on){
     if(error) throw error;
     window._featuresOff = off;
     toast('\u2705');
+    try{ applyFeatureFlags(); }catch(e){}
     try{ renderFeatureToggles(); }catch(e){}
   }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
 }
