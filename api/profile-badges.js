@@ -45,9 +45,10 @@ export default async function handler(req, res) {
 
     // 1) resolve profile by referral_code
     const prof = await sb('profiles?referral_code=eq.' + encodeURIComponent(token) +
-      '&select=id,name,photo_url,belts,coach_status,cert_level,verify_disciplines&limit=1');
+      '&select=id,name,photo_url,belts,coach_status,cert_level,verify_disciplines,deleted_at,deactivated_at&limit=1');
     if(!prof || !prof.length){ res.status(404).json({ error: 'not found' }); return; }
     const me = prof[0];
+    if(me.deleted_at || me.deactivated_at){ res.status(410).json({ error: 'gone' }); return; }
     const id = me.id;
     const isCoach = me.coach_status === 'approved';
     const isFounder = (id === '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c');

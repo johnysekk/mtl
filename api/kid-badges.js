@@ -26,10 +26,13 @@ export default async function handler(req, res){
     // Parent located by the referral code carried in the link (no scan).
     const { data: prof } = await sb
       .from('profiles')
-      .select('id,name,children')
+      .select('id,name,children,deleted_at,deactivated_at')
       .eq('referral_code', ref)
       .maybeSingle();
     if(!prof) return res.status(404).json({ error:'not found' });
+    // A child's trophy case is reachable only through the guardian's code, so it must go dark
+    // with the guardian's account -- otherwise an old link outlives the account it belonged to.
+    if(prof.deleted_at || prof.deactivated_at) return res.status(410).json({ error:'gone' });
 
     let kids = [];
     try{ kids = typeof prof.children === 'string' ? JSON.parse(prof.children) : (prof.children || []); }
