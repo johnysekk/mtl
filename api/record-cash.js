@@ -123,7 +123,11 @@ const ACQ_RATE_EP = 0.05;  // EP perk: HALF the acquisition fee (EP buys a cheap
 // (counts Stripe + cash together, so a member already past the window isn't re-charged 10% on cash).
 async function acquisitionRate(acq, type, payee, memberId, scopeCol, scopeId) {
   // Delegates to the single source of truth in _rate.js.
-  return _mtlAcq(sb, { acqSource: acq, type, ownerPartner: payee && payee.partner, memberId, scopeCol, scopeId });
+  const r = await _mtlAcq(sb, { acqSource: acq, type, ownerPartner: payee && payee.partner, memberId, scopeCol, scopeId });
+  // _rate.js returns { rate, months } for memberships so a multi-month payment can be blended.
+  // Cash and QR are billed one period at a time, so the rate alone is what matters here.
+  if (r && typeof r === 'object') return (typeof r.rate === 'number') ? r.rate : null;
+  return r;
 }
 
 // Referral-credit redemption (parity with the Stripe client flow): MTL waives its WHOLE fee when a

@@ -62,7 +62,8 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
     if (type === 'membership' && scopeCol === 'gym_id') {
       const prior = await sbGet(`gym_memberships?select=months&student_id=eq.${encodeURIComponent(memberId)}&gym_id=eq.${encodeURIComponent(scopeId)}&status=in.(active,cancelling,ended,expired)`);
       const used = (prior || []).reduce((n, r) => n + Math.max(1, parseInt(r && r.months, 10) || 1), 0);
-      if (used < max) return ownerPartner ? ACQ_RATE_EP : ACQ_RATE;
+      const leftQualifying = max - used;
+      if (leftQualifying > 0) return { rate: (ownerPartner ? ACQ_RATE_EP : ACQ_RATE), months: leftQualifying };
       return null;
     }
     const prior = await sbGet(`transactions?select=id&member_id=eq.${encodeURIComponent(memberId)}&type=eq.${encodeURIComponent(type)}&${scopeCol}=eq.${encodeURIComponent(scopeId)}&status=eq.completed`);
@@ -72,9 +73,23 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
 }
 
 // The actual per-transaction rate = the higher of the owner's ladder rate and any acquisition fee.
-export async function effectiveRate(sbGet, { ownerId, gymId, gymAccount, mode, type, acqSource, memberId, scopeCol, scopeId }) {
+export async function effectiveRate(sbGet, { ownerId, gymId, gymAccount, mode, type, acqSource, memberId, scopeCol, scopeId, months }) {
   const p = await resolveOwner(sbGet, { ownerId, gymId, gymAccount });
   const ladder = ladderRate(mode, { partner: p.partner, founding: p.founding, score: p.coach_ref_score, bankai: p.bankai_eligible });
   const acq = await acquisitionRate(sbGet, { acqSource, type, ownerPartner: p.partner, memberId, scopeCol, scopeId: (scopeId || p.id) });
-  return acq != null ? Math.max(ladder, acq) : ladder;
+  if (acq == null) return ladder;
+
+  // Older shape: a bare number, no month information -> behave as before.
+  if (typeof acq === 'number') return Math.max(ladder, acq);
+
+  const bought = Math.max(1, parseInt(months, 10) || 1);
+  const covered = Math.max(0, Math.min(bought, acq.months));
+  if (covered <= 0) return ladder;
+  if (covered >= bought) return Math.max(ladder, acq.rate);
+
+  // A single payment covering more months than qualify: blend, so the acquisition fee lands on
+  // the months it is owed for and the rest is charged at the ordinary rate. Buying a year up
+  // front then costs the club the same as twelve monthly payments would have.
+  const hi = Math.max(ladder, acq.rate);
+  return (hi * covered + ladder * (bought - covered)) / bought;
 }

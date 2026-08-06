@@ -293,7 +293,7 @@ async function gymCheckout(req, res) {
   let TAKE;
   try {
     const _txType = (String(merch) === '1') ? 'merch' : 'drop_in';
-    TAKE = await effectiveRate(_wsbGet, { gymAccount, mode: 'stripe', type: _txType, acqSource: acq, memberId: studentId, scopeCol: 'gym_id', scopeId: gymId });
+    TAKE = await effectiveRate(_wsbGet, { gymAccount, mode: 'stripe', type: _txType, acqSource: acq, memberId: studentId, scopeCol: 'gym_id', scopeId: gymId, months: (Math.max(1, parseInt(months, 10) || 1)) });
   } catch (e) {
     console.error('pay.gym effectiveRate failed:', e.message);
     TAKE = (take && parseFloat(take) >= 0.005 && parseFloat(take) <= 0.10) ? parseFloat(take) : GYM_MTL_TAKE;
