@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SMV restores the per-club daily commission switch I removed in SMS, and aligns the receipt with the charge. Removing it was wrong: platform_config.test_mode is the switch for the beta with real coaches and turns the WHOLE platform into a test, which is no use while the only real data is your own -- so a per-entity flag has to exist alongside it. Both crons now treat 'daily' as global test mode OR the flag on that specific club or coach, which also means the receipt is no longer restricted to the founder's own club when a flag is set. The daily receipt covers TODAY rather than yesterday: commission-cron charges half an hour earlier, so a receipt for the previous day documents money taken on a different day and the two never reconcile. Idempotency and row-marking are decided per entity as well, so a club on daily is charged again tomorrow while everybody else keeps the monthly rule. Requires commission-daily.sql. Deploy: index.html + api/commission-cron.js + api/unified-doklad-cron.js + commission-daily.sql. -->
+<!-- MTL build: SMX makes the two partner banners one builder and moves the Exclusive Partner offer to Payments & commission. The Founding card was written separately and looked different for no reason, which is two things to keep in step; partnerCardHTML now renders both, with only the colour, the icon and the tier name differing, so Founding gets the same collapse, the same struck-through comparison and the same club rows. The purchase button lived in My profile, where dashmode hides it by CSS and where nobody is thinking about what commission costs them; it now sits directly under the rate it would change. The old #btnBecomePartner is left in place and still works where it shows. The Founding grant notification added in SMW is correct -- it writes inside toggleFP before the toast -- so it only exists from that build onward, which is why a grant made earlier produced nothing. Deploy: index.html. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -1105,6 +1105,7 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
     <div class="coach-only">
       <div id="meCoachLevelBar" style="display:none;margin-bottom:14px;"></div>
       
+      <div id="foundingCoachBadge" style="display:none;margin-bottom:18px;"></div>
       <div id="partnerBadge" style="display:none;margin-bottom:18px;"></div>
       <button id="btnCancelPartner" style="display:none;width:100%;padding:10px;background:transparent;color:var(--light);border:none;font-size:12.5px;font-weight:600;cursor:pointer;font-family:'DM Sans';margin:-10px 0 16px;text-decoration:underline;">Zrušit výhody Exclusive Partnera</button>
       <button id="btnCoachDash" style="width:100%;padding:16px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">📊 Přehled</button>
@@ -3863,7 +3864,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SMV';
+const MTL_BUILD='SMX';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -20056,7 +20057,7 @@ async function loadNotifications(append){
     const isDropMine = k==='gym_dropin_mine';
     const isTicketMine = k==='event_ticket_mine';
     const isExcused = k==='gym_member_excused';
-    const isPartnerGranted = k==='partner_granted';
+    const isPartnerGranted = k==='partner_granted' || k==='partner_granted_fp';
     const isPartnerCancelSched = k==='partner_cancel_scheduled';
     const isGymClassAdded = k==='gym_class_added';
     const isGymClassAttendee = k==='gym_class_attendee';
@@ -20993,6 +20994,11 @@ async function toggleFP(userId){
     const { error } = await supaClient.from('profiles').update({ founding: next }).eq('id',userId);
     if(error){ toast('\u26a0\ufe0f '+error.message); return; }
     if(currentUser && currentUser.id===userId){ currentUser.founding=next; }
+    try{ await supaClient.from('notifications').insert({ user_id:userId, type:'system', read:false,
+      data: JSON.stringify({ kind: next?'partner_granted_fp':'partner_removed_fp' }),
+      message: next
+        ? (EN?'🌱 You are now a Founding Partner \u2014 a permanently lower MTL rate on everything you bill.':'🌱 Jsi Founding Partner \u2014 trvale ni\u017e\u0161\u00ed sazba MTL na v\u0161echno, co \u00fa\u010dtuje\u0161.')
+        : (EN?'Your Founding Partner status has ended.':'Tv\u016fj status Founding Partner skon\u010dil.') }); }catch(e){}
     toast(next?(EN?'\u2b50 Founding Partner granted (2 / 1.5 / 1%)':'\u2b50 Founding Partner ud\u011bleno (2 / 1,5 / 1%)'):(EN?'Founding Partner removed':'Founding Partner odebr\u00e1no'));
   }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'error')); }
 }
@@ -21006,6 +21012,11 @@ async function toggleEP(userId){
     const { error } = await supaClient.from('profiles').update({ partner: next }).eq('id',userId);
     if(error){ toast('⚠️ '+error.message); return; }
     if(currentUser && currentUser.id===userId){ currentUser.partner=next; }
+    try{ await supaClient.from('notifications').insert({ user_id:userId, type:'system', read:false,
+      data: JSON.stringify({ kind: next?'partner_granted':'partner_removed' }),
+      message: next
+        ? (EN?'⭐ You are now an Exclusive MTL Partner — 0.5% on everything you bill.':'⭐ Jsi Exclusive MTL Partner — 0,5 % ze všeho, co účtuješ.')
+        : (EN?'Your Exclusive Partner status has ended.':'Tvůj status Exclusive Partner skončil.') }); }catch(e){}
     toast(next?(EN?'⭐ Exclusive Partner granted — 0.5% on everything they bill':'⭐ Exclusive Partner udělen — 0,5 % ze všeho, co účtuje'):(EN?'Exclusive Partner removed':'Exclusive Partner odebrán'));
   }catch(e){ toast('⚠️ '+((e&&e.message)||'error')); }
 }
@@ -23340,15 +23351,57 @@ function _curSym(c){ c=String(c||'').toUpperCase(); var M={CZK:'Kč',EUR:'€',U
 function _curOptsHTML(sel){ sel=String(sel||'').toUpperCase(); var L=[['CZK','CZK Kč'],['EUR','EUR €'],['USD','USD $'],['GBP','GBP £'],['CHF','CHF Fr.'],['PLN','PLN zł'],['SEK','SEK kr'],['DKK','DKK kr'],['NOK','NOK kr'],['HUF','HUF Ft'],['RON','RON lei'],['CAD','CAD $'],['AUD','AUD $'],['NZD','NZD $']]; return L.map(function(c){ return '<option value="'+c[0]+'"'+(c[0]===sel?' selected':'')+'>'+c[1]+'</option>'; }).join(''); }
 // One delegated listener instead of wiring the toggle at each of the five places that render this
 // card -- five chances to forget one, and it would have to survive every re-render besides.
-if(!window._epFoldWired){
-  window._epFoldWired = true;
+function fpRatesCardHTML(){
+  return partnerCardHTML({
+    key: 'fp',
+    title: 'FOUNDING PARTNER',
+    icon: '🌱',
+    accent: '#7ddaa0',
+    tint: 'rgba(125,218,160,.10)',
+    border: 'rgba(125,218,160,.4)',
+    rate: (typeof _ladderRate === 'function')
+      ? _ladderRate(_pcMode(), { partner: false, founding: true, score: currentUser && currentUser.coach_ref_score, bankai: currentUser && currentUser.bankai_eligible })
+      : 0.02,
+    granted: true,
+    acq: null
+  });
+}
+function _pcMode(){
+  return (currentUser && currentUser.payment_mode) || (currentUser && currentUser.stripe_account ? 'stripe' : 'qr_bank');
+}
+// One builder for both tiers. They used to be separate cards that happened to look alike, which is
+// two things to keep in step for no benefit -- only the colour and the name actually differ.
+function partnerCardHTML(o){
+  const EN = LANG === 'en';
+  const pct = (r) => ((Math.round(r * 1000) / 10) + '').replace('.', EN ? '.' : ',') + ' %';
+  const base = (typeof _ladderRate === 'function')
+    ? _ladderRate(_pcMode(), { partner: false, founding: (o.key === 'fp' ? false : (currentUser && currentUser.founding)), score: currentUser && currentUser.coach_ref_score, bankai: currentUser && currentUser.bankai_eligible })
+    : 0.035;
+  const cell = (lbl) => `<div style="flex:1;background:${o.tint};border:1px solid ${o.border};border-radius:8px;padding:5px 8px;min-width:0;"><div style="font-size:9.5px;color:${o.accent};font-weight:700;">${lbl}</div><div style="font-size:9.5px;color:rgba(255,255,255,.4);text-decoration:line-through;line-height:1.2;">${pct(base)}</div><div style="font-size:15px;color:#fff;font-weight:800;line-height:1.05;">${pct(o.rate)}</div></div>`;
+  const showGym = !!(window._myGyms && window._myGyms.length) || !!(currentUser && currentUser.gym_official);
+  let body = `<div style="display:flex;gap:7px;margin-bottom:${showGym ? '6px' : '0'};">${cell(EN ? 'Per lesson' : 'Z lekce')}</div>`;
+  if (showGym) body += `<div style="display:flex;gap:7px;">${cell(EN ? 'Memberships' : '\u010clenstv\u00ed')}${cell(EN ? 'Drop-ins' : 'Jednor\u00e1zov\u00e9 vstupy')}</div>`;
+  if (o.acq) body += `<div style="margin-top:8px;font-size:10.5px;color:rgba(255,255,255,.75);line-height:1.5;">${o.acq}</div>`;
+  return `<div style="background:#1a1a1a;border:1px solid ${o.accent};border-radius:12px;padding:9px 12px;">
+    <div id="${o.key}CardHead" style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;cursor:pointer;user-select:none;">
+      <span style="font-size:15px;">${o.icon}</span>
+      <div style="font-family:'Bebas Neue';font-size:16px;letter-spacing:.05em;color:${o.accent};">${o.title}</div>
+      ${o.granted ? `<span style="font-size:10px;font-weight:800;color:#0f2233;background:${o.accent};border-radius:6px;padding:2px 7px;">${EN ? 'GRANTED BY MTL' : 'UD\u011aLENO MTL'}</span>` : ''}
+      <span id="${o.key}CardArrow" style="margin-left:auto;color:${o.accent};font-size:12px;transition:transform .15s;">\u25be</span>
+    </div>
+    <div id="${o.key}CardBody" style="display:none;margin-top:7px;">${body}</div>
+  </div>`;
+}
+if(!window._pcFoldWired){
+  window._pcFoldWired = true;
   document.addEventListener('click', function(e){
     try{
-      const h = e.target && e.target.closest && e.target.closest('#epCardHead');
+      const h = e.target && e.target.closest && e.target.closest('[id$="CardHead"]');
       if(!h) return;
-      const card = h.parentNode;
-      const body = card && card.querySelector('#epCardBody');
-      const arr = h.querySelector('#epCardArrow');
+      const key = h.id.replace('CardHead','');
+      if(key !== 'fp' && key !== 'ep') return;
+      const body = h.parentNode && h.parentNode.querySelector('#' + key + 'CardBody');
+      const arr = h.querySelector('#' + key + 'CardArrow');
       if(!body) return;
       const open = body.style.display !== 'none';
       body.style.display = open ? 'none' : '';
@@ -23357,28 +23410,23 @@ if(!window._epFoldWired){
   });
 }
 function epRatesCardHTML(showCoach, showGym){
-  const EN=LANG==='en';
-  const _pct=(r)=>((Math.round(r*1000)/10)+'').replace('.', EN?'.':',')+' %';
-  const _mode=(currentUser&&currentUser.payment_mode)||(currentUser&&currentUser.stripe_account?'stripe':'qr_bank');
-  const _base=(typeof _ladderRate==='function')
-    ? _ladderRate(_mode,{ partner:false, founding:currentUser&&currentUser.founding,
-                          score:currentUser&&currentUser.coach_ref_score, bankai:currentUser&&currentUser.bankai_eligible })
-    : 0.035;
-  const _epRate=0.005;
-  const cell=(lbl,fee,normalFee)=>`<div style="flex:1;background:rgba(244,216,122,.08);border:1px solid rgba(232,194,74,.35);border-radius:8px;padding:5px 8px;min-width:0;"><div style="font-size:9.5px;color:#E8C24A;font-weight:700;">${lbl}</div><div style="font-size:9.5px;color:rgba(255,255,255,.4);text-decoration:line-through;line-height:1.2;">${normalFee}</div><div style="font-size:15px;color:#fff;font-weight:800;line-height:1.05;">${fee}</div></div>`;
-  const sub=(t)=>`<div style="font-size:10px;color:rgba(255,255,255,.55);font-weight:700;letter-spacing:.05em;margin-bottom:5px;">${t}</div>`;
-  const _epCanc=!!(currentUser&&currentUser.partner_cancelling&&currentUser.partner_period_end);
-  const _epEnd=_epCanc?new Date(currentUser.partner_period_end).toLocaleString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric',hour:'2-digit',minute:'2-digit'}):'';
-  const _epBanner=_epCanc?`<div style="background:rgba(229,0,29,.14);border:1px solid rgba(229,0,29,.5);border-radius:9px;padding:7px 10px;margin-bottom:10px;"><div style="font-size:10px;color:#ff9a9a;font-weight:800;letter-spacing:.05em;margin-bottom:2px;">${EN?'CANCELLING':'RUŠÍ SE'}</div><div style="font-size:12px;color:#ffd6d6;font-weight:700;">${EN?'Active until':'Aktivní do'}: ${_epEnd}</div></div>`:'';
-  var _epGift = !!(currentUser && currentUser.partner && !currentUser.partner_sub);
-    let head=`<div id="epCardHead" style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;cursor:pointer;user-select:none;"><span style="font-size:15px;">⭐</span><div style="font-family:'Bebas Neue';font-size:16px;letter-spacing:.05em;color:#F4D87A;">EXCLUSIVE MTL PARTNER</div>${_epGift?`<span style="font-size:10px;font-weight:800;color:#0f2233;background:#F4D87A;border-radius:6px;padding:2px 7px;">${EN?'GRANTED BY MTL':'UDĚLENO MTL'}</span>`:''}<span id="epCardArrow" style="margin-left:auto;color:#F4D87A;font-size:12px;transition:transform .15s;">▾</span></div>`;
-  let inner='';
-  if(showCoach){ inner+=sub(EN?'COACH RATES':'SAZBY KOUČE')+`<div style="display:flex;gap:7px;margin-bottom:${showGym?'6px':'0'};">`+cell(EN?'Per lesson':'Z lekce',_pct(_epRate),_pct(_base))+`</div>`; }
-  if(showGym){ inner+=sub(EN?'CLUB RATES':'SAZBY KLUBU')+`<div style="display:flex;gap:7px;">`+cell(EN?'Memberships':'Členství',_pct(_epRate),_pct(_base))+cell(EN?'Drop-ins':'Jednorázové vstupy',_pct(_epRate),_pct(_base))+`</div>`; }
-  inner+=`<div style="margin-top:8px;font-size:10.5px;color:#F4D87A;font-weight:700;line-height:1.5;background:rgba(244,216,122,.10);border:1px solid rgba(232,194,74,.4);border-radius:9px;padding:7px 10px;">${EN?'⚡ Half-price acquisition — 5% instead of 10% when MTL brings a new member: their first 2 membership months, first drop-in, first 1:1. Then your usual 0.5%.':'⚡ Poloviční akvizice — 5 % místo 10 %, když ti MTL přivede nového člena: první 2 měsíce členství, první jednorázový vstup, první 1:1. Pak už tvoje 0,5 %.'}</div>`;
-  return `<div style="background:#1a1a1a;border:1px solid #E8C24A;border-radius:12px;padding:9px 12px;">${_epBanner}${head}<div id="epCardBody" style="display:none;margin-top:7px;">${inner}</div></div>`;
+  const EN = LANG === 'en';
+  const _epGift = !!(currentUser && currentUser.partner && !currentUser.partner_sub);
+  const _acqPct = (currentUser && currentUser.partner) ? 5 : 10;
+  return partnerCardHTML({
+    key: 'ep',
+    title: 'EXCLUSIVE MTL PARTNER',
+    icon: '⭐',
+    accent: '#F4D87A',
+    tint: 'rgba(244,216,122,.08)',
+    border: 'rgba(232,194,74,.35)',
+    rate: 0.005,
+    granted: _epGift,
+    acq: (EN
+      ? ('\u26a1 Half-price acquisition \u2014 ' + _acqPct + '% instead of 10% when MTL brings a new member: their first 2 membership months, first drop-in, first 1:1. Then your usual 0.5%.')
+      : ('\u26a1 Polovi\u010dn\u00ed akvizice \u2014 ' + _acqPct + ' % m\u00edsto 10 %, kdy\u017e ti MTL p\u0159ivede nov\u00e9ho \u010dlena: prvn\u00ed 2 m\u011bs\u00edce \u010dlenstv\u00ed, prvn\u00ed jednor\u00e1zov\u00fd vstup, prvn\u00ed 1:1. Pak u\u017e tvoje 0,5 %.'))
+  });
 }
-let _rcCur='CZK', _rcType='1:1';
 function closeRateCalc(){ const o=$('rateCalcOv'); if(o) o.classList.remove('open'); }
 async function openRateCalc(){
   const EN=LANG==='en';
@@ -26461,7 +26509,7 @@ function applyCertUI(){
   if($('mePartnerStrip')){ const _ps=$('mePartnerStrip'); const _canP=!!(currentUser && !currentUser.partner && (currentUser.coach_status==='approved'||currentUser.gym_official||(window._myGyms&&window._myGyms.length))); if(_canP){ _ps.style.display='block'; _ps.innerHTML = (LANG==='en'?'⭐ Become Exclusive MTL Partner → keep 99%':'⭐ Staň se Exclusive MTL Partnerem → nech si 99 %'); } else { _ps.style.display='none'; } }
   if($('btnBecomePartner')) $('btnBecomePartner').style.display = (currentUser && !currentUser.partner && (currentUser.coach_status==='approved'||currentUser.gym_official||(window._myGyms&&window._myGyms.length))) ? 'block' : 'none'; try{ _refreshEpCta(); }catch(e){}
   if($('btnCancelPartner')){ $('btnCancelPartner').style.display = (currentUser&&currentUser.partner&&currentUser.partner_sub) ? 'block' : 'none'; if(typeof paintPartnerCancelBtn==='function') paintPartnerCancelBtn(); }
-  if($('foundingCoachBadge')) $('foundingCoachBadge').style.display = (currentUser&&currentUser.founding&&!currentUser.partner) ? 'block' : 'none';
+  if($('foundingCoachBadge')){ const _fpOn=!!(currentUser&&currentUser.founding&&!currentUser.partner); $('foundingCoachBadge').style.display=_fpOn?'block':'none'; if(_fpOn && typeof fpRatesCardHTML==='function') $('foundingCoachBadge').innerHTML=fpRatesCardHTML(); }
   if($('partnerBadge')){ $('partnerBadge').style.display=(currentUser&&currentUser.partner)?'block':'none'; if(currentUser&&currentUser.partner&&typeof epRatesCardHTML==='function') $('partnerBadge').innerHTML=epRatesCardHTML(true,true); }
   setAvailUI();
 }
@@ -26797,7 +26845,7 @@ async function fillRateEditor(){
   if(profErr){ console.error('fillRateEditor select error:', profErr); }
   if(prof){
     currentUser.founding = !!prof.founding; currentUser.partner = !!prof.partner;
-    if($('foundingCoachBadge')) $('foundingCoachBadge').style.display = (prof.founding && !prof.partner) ? 'block' : 'none';
+    if($('foundingCoachBadge')){ const _fpOn=!!(prof.founding && !prof.partner); $('foundingCoachBadge').style.display=_fpOn?'block':'none'; if(_fpOn && typeof fpRatesCardHTML==='function') $('foundingCoachBadge').innerHTML=fpRatesCardHTML(); }
     if($('partnerBadge')){ $('partnerBadge').style.display = prof.partner ? 'block' : 'none'; if(prof.partner) $('partnerBadge').innerHTML = epRatesCardHTML(true, true); }
     if($('mePartnerStrip')){ const _ps=$('mePartnerStrip'); const _canP=!!(!prof.partner && (prof.coach_status==='approved'||prof.gym_official||(window._myGyms&&window._myGyms.length))); if(_canP){ _ps.style.display='block'; _ps.innerHTML = (LANG==='en'?'⭐ Become Exclusive MTL Partner → keep 99%':'⭐ Staň se Exclusive MTL Partnerem → nech si 99 %'); } else { _ps.style.display='none'; } }
     if($('btnCancelPartner')){ $('btnCancelPartner').style.display = (prof.partner && prof.partner_sub) ? 'block' : 'none'; if(typeof paintPartnerCancelBtn==='function') paintPartnerCancelBtn(); }
@@ -29120,7 +29168,13 @@ async function renderPaymentsPage(){
   var h=_pendWarn+_mmWarn+_rateCard+'<button id="payRowMode" style="'+bs+'"><span>\ud83d\udd01 '+(EN?'Payment mode':'Re\u017eim plateb')+'</span><span style="display:flex;align-items:center;gap:8px;"><span style="color:var(--mid);font-weight:700;font-size:13px;white-space:nowrap;">'+_modeLbl+'</span>'+arr+'</span></button>';
   var _curL=(currentUser.currency||(window._myGyms&&window._myGyms[0]&&window._myGyms[0].currency)||'CZK');
   // Payment-currency picker removed: currency is PER ENTITY now (set in coach settings / gym settings).
+  {
+    var _canEP = !!(currentUser && !currentUser.partner && (currentUser.coach_status==='approved' || currentUser.gym_official || (window._myGyms && window._myGyms.length)));
+    if(_canEP) h += '<button id="payBecomePartner" style="width:100%;margin-top:12px;padding:13px;background:linear-gradient(135deg,#FFEFB0 0%,#F5B922 48%,#D98A0E 100%);color:#3a2400;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">\u2b50 '
+      + (EN ? 'Become an Exclusive MTL Partner \u2014 0.5%' : 'Sta\u0148 se Exclusive MTL Partnerem \u2014 0,5 %') + '</button>';
+  }
   body.innerHTML=h;
+  try{ var _bp=document.getElementById('payBecomePartner'); if(_bp) _bp.onclick=function(){ if(typeof openPartnerInfo==='function') openPartnerInfo(); }; }catch(e){}
   try{ var _ai=document.getElementById('acqInfoBtn'), _ab=document.getElementById('acqInfoBox');
     if(_ai&&_ab) _ai.onclick=function(){ _ab.style.display=(_ab.style.display==='none'?'':'none'); }; }catch(e){}
   (async function(){ try{ var _s=await supaClient.auth.getSession(); var _t=(_s&&_s.data&&_s.data.session&&_s.data.session.access_token)||''; if(!_t) return;
