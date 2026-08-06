@@ -176,9 +176,20 @@ export default async function handler(req, res) {
   // TEST MODE: daily doklad for the founder only, so Petr sees the commission receipt in real time.
   // LIVE stays exactly as before: one monthly doklad per provider, with the IChO/DIChC + VAT flow intact.
   let TEST = false; try { TEST = await isTestMode(); } catch (e) {}
+  // A club or coach can be on daily without the whole platform being in test mode.
+  let dailyAny = false;
+  try {
+    const _dg = await sb('gyms?commission_daily=is.true&select=id&limit=1');
+    const _dc = await sb('profiles?commission_daily=is.true&select=id&limit=1');
+    dailyAny = !!((_dg && _dg.length) || (_dc && _dc.length));
+  } catch (e) {}
+  const DAILY = TEST || dailyAny;
   let period, dayStart = null, dayEnd = null;
-  if (TEST) {
-    const d = (q.date && /^\d{4}-\d{2}-\d{2}$/.test(q.date)) ? q.date : new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  if (DAILY) {
+    // Today, not yesterday. commission-cron charges half an hour earlier, so the receipt should
+    // describe that charge -- a receipt for the previous day documents money taken on a different
+    // day and the two never reconcile.
+    const d = (q.date && /^\d{4}-\d{2}-\d{2}$/.test(q.date)) ? q.date : new Date().toISOString().slice(0, 10);
     period = d; dayStart = d + 'T00:00:00';
     dayEnd = new Date(new Date(d + 'T00:00:00Z').getTime() + 86400000).toISOString().slice(0, 10) + 'T00:00:00';
   } else {
@@ -188,7 +199,7 @@ export default async function handler(req, res) {
   let issued = 0, skipped = 0, deferred = 0;
   try {
     // every collected commission row for the closed month (bank charged + Stripe live)
-    const tx = await sb(`transactions?select=gym_id,coach_id,paid_to,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method&commission_status=in.(collected${(TEST||preview)?',pending,failed':''})&${TEST?`created_at=gte.${dayStart}&created_at=lt.${dayEnd}`:`commission_month=eq.${period}`}&mtl_fee=gt.0&limit=50000`);
+    const tx = await sb(`transactions?select=gym_id,coach_id,paid_to,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method&commission_status=in.(collected${(DAILY||preview)?',pending,failed':''})&${DAILY?`created_at=gte.${dayStart}&created_at=lt.${dayEnd}`:`commission_month=eq.${period}`}&mtl_fee=gt.0&limit=50000`);
 
     // bucket per provider + currency, with a per-(form,rate) breakdown
     const gymB = {}, coachB = {};
@@ -217,7 +228,7 @@ export default async function handler(req, res) {
 
     async function issue(kind, entityId, ownerId, cur, data) {
       const col = kind === 'gym' ? 'gym_id' : 'coach_id';
-      if (TEST && String(ownerId) !== FOUNDER_UUID) { skipped++; return; } // test mode: founder club only
+      if (TEST && !dailyAny && String(ownerId) !== FOUNDER_UUID) { skipped++; return; }
       // idempotent: one unified doklad per entity+period+currency
       const ex = await sb(`commission_doklady?select=id&${col}=eq.${entityId}&period_month=eq.${period}&currency=eq.${encodeURIComponent(cur)}&kind=eq.unified&limit=1`);
       if (ex && ex.length) { skipped++; return; }
@@ -236,7 +247,7 @@ export default async function handler(req, res) {
         const _b = await sb(_sel);
         buyer = _b && _b[0];
       } catch (e) {}
-      if (!TEST && ME && ME.require_vat_foreign) {
+      if (!DAILY && ME && ME.require_vat_foreign) {
         const home = ctryCode({ country: ME.home_country }) || 'CZ';
         const bc = ctryCode(buyer);
         // defer ONLY for intra-EU cross-border B2B with no VAT ID. Unknown country, domestic, or a
@@ -273,10 +284,10 @@ export default async function handler(req, res) {
         if (em) {
           let _att = [];
           try {
-            const _buf = await dokladPdf(ME, buyer, kind, period, cur, data, TEST);
+            const _buf = await dokladPdf(ME, buyer, kind, period, cur, data, DAILY);
             _att = [{ filename: `MTL-provize-${String(period).replace(/-/g,'')}.pdf`, content: _buf.toString('base64') }];
           } catch (e) { console.error('doklad pdf', e.message); }
-          await sendEmail(em, `Doklad o provizi MTL — ${periodShort(period)}`, dokladHtml(ME, buyer, kind, period, cur, data, TEST), _att);
+          await sendEmail(em, `Doklad o provizi MTL — ${periodShort(period)}`, dokladHtml(ME, buyer, kind, period, cur, data, DAILY), _att);
         } } catch (e) {}
     }
 

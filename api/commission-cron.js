@@ -56,15 +56,19 @@ export default async function handler(req, res) {
   const curMonth = now.toISOString().slice(0, 7);
   let collected = 0, failed = 0, suspended = 0, lifted = 0;
 
-  // Test mode charges what has accrued TODAY and deliberately leaves the rows alone, so the same
-  // run can be watched again tomorrow instead of waiting for the 1st. Live keeps the closed-month
-  // rule and marks rows collected, which is what stops them being charged twice.
+  // Two independent ways to end up on daily: the global beta switch, or a per-entity flag the
+  // founder sets on one club or coach. The second exists because the first turns the whole
+  // platform into a test, which is no use while the only real data is your own.
   let TEST = false; try { TEST = await isTestMode(); } catch (e) {}
-  const monthOp = TEST ? 'lte' : 'lt';
-  // Idempotency must follow the period being charged. In test that is the DAY -- keeping the month
-  // key would make Stripe replay yesterday's charge from cache and the run would look successful
-  // while nothing moved.
-  const idemPeriod = TEST ? new Date().toISOString().slice(0, 10) : curMonth;
+  let dailyGyms = new Set(), dailyCoaches = new Set();
+  try { dailyGyms = new Set(((await sb('gyms?commission_daily=is.true&select=id')) || []).map(g => g.id)); } catch (e) {}
+  try { dailyCoaches = new Set(((await sb('profiles?commission_daily=is.true&select=id')) || []).map(x => x.id)); } catch (e) {}
+  const gymDaily = (id) => TEST || dailyGyms.has(id);
+  const coachDaily = (id) => TEST || dailyCoaches.has(id);
+  const today = new Date().toISOString().slice(0, 10);
+  // The wide fetch takes the running month too; rows belonging to anybody NOT on daily are
+  // dropped again during grouping, so nothing changes for them.
+  const monthOp = (TEST || dailyGyms.size || dailyCoaches.size) ? 'lte' : 'lt';
 
   try {
     // ---- gather unpaid cash/qr commission, grouped by gym + currency ----
@@ -72,6 +76,7 @@ export default async function handler(req, res) {
     const byGym = {}; const byGymRates = {};
     for (const t of (tx || [])) {
       if (!t.gym_id) continue;
+      if (t.commission_month === curMonth && !gymDaily(t.gym_id)) continue;
       const cur = (t.currency || 'czk').toLowerCase();
       (byGym[t.gym_id] = byGym[t.gym_id] || {});
       byGym[t.gym_id][cur] = (byGym[t.gym_id][cur] || 0) + ((t.mtl_fee || 0) - (t.mtl_fee_refunded || 0));
@@ -107,17 +112,17 @@ export default async function handler(req, res) {
               off_session: true, confirm: true,
               description: `MTL provize (hotovost/QR) ${g.name || ''}`,
               metadata: { gym_id: gid, kind: 'mtl_commission', month: curMonth },
-            }, { idempotencyKey: `comm_${gid}_${idemPeriod}_${cur}` });
+            }, { idempotencyKey: `comm_${gid}_${gymDaily(gid) ? today : curMonth}_${cur}` });
           } catch (e) { pi = null; }
 
           if (pi && pi.status === 'succeeded') {
-            if (!TEST) await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=${monthOp}.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
+            if (!gymDaily(gid)) await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
             /* doklad issued by unified-doklad-cron.js (bank + Stripe combined, one per month) */
-            await notify(g.owner_id, 'commission_collected', `Provize MTL za hotovost/QR (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) byla stržena z karty. Doklad najdeš v účetnictví.`, { amount, currency: cur });
+            await notify(g.owner_id, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) za ${czMonthName(prevMonth(curMonth))} byla stržena z karty. Doklad najdeš v účetnictví.`, { amount, currency: cur });
             collected++;
           } else {
             anyFail = true;
-            if (!TEST) await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=eq.pending&currency=eq.${encodeURIComponent(cur)}&commission_month=${monthOp}.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
+            if (!gymDaily(gid)) await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=eq.pending&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
             failed++;
           }
         }
@@ -163,6 +168,7 @@ export default async function handler(req, res) {
     const byCoach = {}; const byCoachRates = {};
     for (const t of (ctx || [])) {
       if (!t.coach_id) continue;
+      if (t.commission_month === curMonth && !coachDaily(t.coach_id)) continue;
       const cur = (t.currency || 'czk').toLowerCase();
       (byCoach[t.coach_id] = byCoach[t.coach_id] || {});
       byCoach[t.coach_id][cur] = (byCoach[t.coach_id][cur] || 0) + ((t.mtl_fee || 0) - (t.mtl_fee_refunded || 0));
@@ -196,17 +202,17 @@ export default async function handler(req, res) {
               off_session: true, confirm: true,
               description: `MTL provize (hotovost/QR) ${c.name || 'kouc'}`,
               metadata: { coach_id: cid, kind: 'mtl_commission', month: curMonth },
-            }, { idempotencyKey: `comm_coach_${cid}_${idemPeriod}_${cur}` });
+            }, { idempotencyKey: `comm_coach_${cid}_${coachDaily(cid) ? today : curMonth}_${cur}` });
           } catch (e) { pi = null; }
 
           if (pi && pi.status === 'succeeded') {
-            if (!TEST) await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=${monthOp}.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
+            if (!coachDaily(cid)) await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
             /* doklad issued by unified-doklad-cron.js (bank + Stripe combined, one per month) */
-            await notify(cid, 'commission_collected', `Provize MTL za hotovost/QR (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) byla strzena z karty. Doklad je v aplikaci.`);
+            await notify(cid, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) za ${czMonthName(prevMonth(curMonth))} byla stržena z karty. Doklad najdeš v účetnictví.`);
             collected++;
           } else {
             anyFail = true;
-            if (!TEST) await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=eq.pending&currency=eq.${encodeURIComponent(cur)}&commission_month=${monthOp}.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
+            if (!coachDaily(cid)) await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=eq.pending&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
             failed++;
           }
         }
