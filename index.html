@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SMP fixes a Report button that looked broken and was not. Submitting the no-show form without a reason DID toast 'Popis prosim co se stalo', but the toast sits at z-index 999 while the rate overlay is at 99999, so the message rendered underneath it and the button appeared dead. The toast is now above everything, which fixes the same silent failure in every other modal too. The Close button underneath was light grey on a light card; it now has a border and readable text, since it is the way out for somebody who agreed with their coach and does not want to report anything. commission-cron names the month it is charging for, so the amount can be checked against a statement instead of being one number among many -- verified across the year boundary. vercel.json gains /api/unified-doklad-cron at 08:30, half an hour after commission-cron: WARNING, deploy that entry ONLY if api/unified-doklad-cron.js exists in the repo, because it is not among the files here and a scheduled call to a missing endpoint will 404 every morning. Deploy: index.html + api/commission-cron.js + vercel.json (conditionally). -->
+<!-- MTL build: SMQ adds a founder-only daily commission switch and fixes the Czech in the charge notification. 'za mesic cervence' was genitive, which belongs to a date -- it now reads 'za cervenec'. On the switch: a commission normally waits for its month to close, so any change to how it is billed cannot be checked until the 1st; a checkbox in the club detail puts that one club on daily and the whole run can be watched the next morning. commission-cron widens its query to include the running month and drops those rows again for everybody not flagged, so nothing changes for anyone else, and the two status PATCHes pick their month bound per club and per coach. Requires commission-daily.sql. ON THE RECEIPT QUESTION: the charge is already conditional -- commission_status only becomes 'collected' inside the succeeded branch and 'failed' otherwise, so a receipt keyed off 'collected' can only exist for a successful charge. Whether unified-doklad-cron actually keys off it I cannot verify, because that file is not among the ones I have. Deploy: index.html + api/commission-cron.js + commission-daily.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3863,7 +3863,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SMP';
+const MTL_BUILD='SMQ';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -20882,6 +20882,10 @@ async function _renderGymAnalyticsInner(gymId, box){
         ${LANG==='en'?'MTL fee ':'Provize MTL '}${_pctMtl}% \u00b7 ${_rateTier} \u00b7 ${_gMode==='stripe'?'Stripe':(LANG==='en'?'bank transfer':'bankovn\u00ed p\u0159evod')}<br>
         <span style="opacity:.8;">${LANG==='en'?'Acquisition ':'Akvizice '}${_acqPct}\u00a0%</span>
       </div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:9px;padding-top:8px;border-top:1px solid rgba(255,255,255,.14);cursor:pointer;">
+        <input type="checkbox" id="fdGymDaily" ${gym?.commission_daily?'checked':''} style="width:16px;height:16px;cursor:pointer;">
+        <span style="font-size:11.5px;color:#cbd5e1;">${LANG==='en'?'Charge daily instead of monthly (testing)':'Strh\u00e1vat denn\u011b m\u00edsto m\u011bs\u00ed\u010dn\u011b (testov\u00e1n\u00ed)'}</span>
+      </label>
     </div>` : ''}
     ${_isFounder ? `
     <div class="sec-lbl">${LANG==='en'?'Founder overview':'Founder přehled'}</div>
@@ -20917,6 +20921,21 @@ async function _renderGymAnalyticsInner(gymId, box){
       <div style="font-size:10.5px;color:var(--light);margin:5px 0 0;line-height:1.45;">${LANG==='en'?'Grant 0.5% per profile — applies to that person across coach 1:1 + club + everything they bill.':'Uděl 0,5% na profil — platí pak na kouč 1:1 + klub + vše co účtuje.'}</div>
     </div>` : ''}
   `;
+
+  // Founder-only switch, wired after the panel renders. Writes straight to the column the
+  // commission cron reads, so the effect is visible on the next run rather than next month.
+  try{
+    var _gd=document.getElementById('fdGymDaily');
+    if(_gd) _gd.onchange=async function(){
+      var on=!!_gd.checked;
+      try{
+        const { error } = await supaClient.from('gyms').update({ commission_daily:on }).eq('id', gymId);
+        if(error) throw error;
+        if(gym) gym.commission_daily=on;
+        toast(on?(LANG==='en'?'\u2705 Daily collection on':'\u2705 Denn\u00ed str\u017een\u00ed zapnuto'):(LANG==='en'?'Back to monthly':'Zp\u011bt na m\u011bs\u00ed\u010dn\u00ed'));
+      }catch(e){ _gd.checked=!on; toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
+    };
+  }catch(e){}
 }
 async function openGymEpManage(gymId, monthKey){
   if(!currentUser || currentUser.role!=='founder'){ toast('⚠️'); return; }
