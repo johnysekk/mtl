@@ -93,7 +93,7 @@ function dokladHtml(ME, buyer, kind, period, cur, data, test){
   else { vatBlock='<tr><td colspan="2" style="font-size:11px;color:#666;padding-top:6px;">Dodavatel nen\u00ed pl\u00e1tcem DPH.</td></tr>'; }
   return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;color:#1a1a1a;">'
     +'<h2 style="margin:0 0 2px;">Doklad o provizi MTL</h2>'
-    +'<div style="font-size:13px;color:#666;margin-bottom:14px;">Obdob\u00ed '+period+'</div>'
+    +'<div style="font-size:13px;color:#666;margin-bottom:14px;">Obdob\u00ed '+periodLabel(period)+'  \u00b7  '+(kind==='gym'?'klub':'kou\u010d')+'</div>'
     +'<div style="display:flex;gap:24px;margin-bottom:8px;"><div style="flex:1;font-size:13px;"><div style="font-size:11px;text-transform:uppercase;color:#888;margin-bottom:4px;">Dodavatel</div>'+supLines+'</div><div style="flex:1;font-size:13px;"><div style="font-size:11px;text-transform:uppercase;color:#888;margin-bottom:4px;">Odb\u011bratel</div>'+buyLines+'</div></div>'
     +'<table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:12px;"><thead><tr style="background:#f5f2ee;"><th style="padding:8px 10px;text-align:left;">Forma</th><th style="padding:8px 10px;">Sazba</th><th style="padding:8px 10px;">Transakc\u00ed</th><th style="padding:8px 10px;text-align:right;">Z\u00e1klad</th><th style="padding:8px 10px;text-align:right;">Provize</th></tr></thead><tbody>'+rows+'</tbody></table>'
     +'<table style="width:100%;border-collapse:collapse;font-size:14px;margin-top:2px;">'+vatBlock+'<tr style="font-weight:800;"><td style="border-top:2px solid #333;padding-top:8px;">Celkem</td><td style="text-align:right;border-top:2px solid #333;padding-top:8px;">'+_money(total,cur)+'</td></tr></table>'
@@ -113,7 +113,7 @@ function dokladPdf(ME, buyer, kind, period, cur, data, test){
       const B = buyer || {};
       doc.fontSize(22).fillColor('#E11111').text('MTL');
       doc.moveDown(0.15).fontSize(15).fillColor('#111111').text('Doklad o provizi MTL');
-      doc.moveDown(0.1).fontSize(10).fillColor('#777777').text('Obdob\u00ed ' + periodLabel(period));
+      doc.moveDown(0.1).fontSize(10).fillColor('#777777').text('Obdob\u00ed ' + periodLabel(period) + '  \u00b7  ' + (kind === 'gym' ? 'klub' : 'kou\u010d'));
       doc.moveDown(1);
 
       const yTop = doc.y;
