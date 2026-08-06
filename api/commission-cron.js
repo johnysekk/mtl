@@ -100,7 +100,7 @@ export default async function handler(req, res) {
           if (pi && pi.status === 'succeeded') {
             await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
             /* doklad issued by unified-doklad-cron.js (bank + Stripe combined, one per month) */
-            await notify(g.owner_id, 'commission_collected', `Provize MTL za hotovost/QR (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) byla stržena z karty. Doklad najdeš v účetnictví.`, { amount, currency: cur });
+            await notify(g.owner_id, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) byla stržena z karty. Doklad najdeš v účetnictví.`, { amount, currency: cur });
             collected++;
           } else {
             anyFail = true;
@@ -189,7 +189,7 @@ export default async function handler(req, res) {
           if (pi && pi.status === 'succeeded') {
             await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
             /* doklad issued by unified-doklad-cron.js (bank + Stripe combined, one per month) */
-            await notify(cid, 'commission_collected', `Provize MTL za hotovost/QR (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) byla strzena z karty. Doklad je v aplikaci.`);
+            await notify(cid, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) byla stržena z karty. Doklad najdeš v účetnictví.`);
             collected++;
           } else {
             anyFail = true;
