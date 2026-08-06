@@ -1,5 +1,5 @@
 import Stripe from 'stripe';
-import { resolveRate, effectiveRate } from './_rate.js';
+import { resolveRate, effectiveRate, effectiveRateBreakdown } from './_rate.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -291,9 +291,11 @@ async function gymCheckout(req, res) {
   // Server-side single source: ladder + acquisition via _rate.js. Merch/grace/guest are not drop-ins
   // so they never get the acquisition fee. Client 'take' is only a fallback if resolve fails.
   let TAKE;
+  let _acqMonths = 0, _baseRate = null;
   try {
     const _txType = (String(merch) === '1') ? 'merch' : 'drop_in';
-    TAKE = await effectiveRate(_wsbGet, { gymAccount, mode: 'stripe', type: _txType, acqSource: acq, memberId: studentId, scopeCol: 'gym_id', scopeId: gymId, months: (Math.max(1, parseInt(months, 10) || 1)) });
+    const _brk = await effectiveRateBreakdown(_wsbGet, { gymAccount, mode: 'stripe', type: _txType, acqSource: acq, memberId: studentId, scopeCol: 'gym_id', scopeId: gymId, months: (Math.max(1, parseInt(months, 10) || 1)) });
+    TAKE = _brk.rate; _acqMonths = _brk.acqMonths; _baseRate = _brk.baseRate;
   } catch (e) {
     console.error('pay.gym effectiveRate failed:', e.message);
     TAKE = (take && parseFloat(take) >= 0.005 && parseFloat(take) <= 0.10) ? parseFloat(take) : GYM_MTL_TAKE;
@@ -459,7 +461,23 @@ async function membershipCheckout(req, res) {
   // an EP acquisition at their normal 1%. EP pays HALF the acquisition fee, not none.
   const _isAcq = (String(acq) === 'mtl_discovery' && ivl === 'month');
   // EP perk: HALF the acquisition fee (5%) vs 10% for standard providers; after the window the webhook drops to mtl_acq_base (EP=1%).
-  const FEE_NOW = _isAcq ? (String(partner)==='1' ? (MTL_ACQ_PERCENT/2) : MTL_ACQ_PERCENT) : FEE_PCT;
+  let FEE_NOW = _isAcq ? (String(partner)==='1' ? (MTL_ACQ_PERCENT/2) : MTL_ACQ_PERCENT) : FEE_PCT;
+  // A term plan is one payment covering N months, but only the first two ever carry the
+  // acquisition fee -- so the rate has to be blended over the months it is actually owed for.
+  // A monthly plan has months=1 and comes out of this unchanged.
+  let _acqMonthsM = 0, _baseRateM = null;
+  try {
+    const _moM = Math.max(1, parseInt(months, 10) || 1);
+    const _brkM = await effectiveRateBreakdown(_wsbGet, {
+      gymAccount, mode: 'stripe', type: 'membership', acqSource: acq,
+      memberId: studentId, scopeCol: 'gym_id', scopeId: gymId, months: _moM
+    });
+    if (_brkM && typeof _brkM.rate === 'number') {
+      FEE_NOW = _brkM.rate * 100;
+      _acqMonthsM = _brkM.acqMonths || 0;
+      _baseRateM = _brkM.baseRate;
+    }
+  } catch (e) { console.error('pay.membership blended rate failed:', e.message); }
 
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
@@ -585,6 +603,8 @@ async function membershipCheckout(req, res) {
           // it (and never have to know whether the provider is an EP).
           mtl_acq: _isAcq ? '1' : '',
           mtl_acq_pct: _isAcq ? String(FEE_NOW) : '',
+          ...(_acqMonthsM ? { mtl_acq_months: String(_acqMonthsM) } : {}),
+          ...(_baseRateM != null ? { mtl_base_rate: String(_baseRateM) } : {}),
           mtl_acq_base: String(FEE_PCT),
           mtl_income: income || 'side',
           mtl_payment_type: 'membership',

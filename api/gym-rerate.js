@@ -1,8 +1,5 @@
-// The ladder lives in ONE place. This file used to carry its own copy, which had drifted:
-// it billed an Exclusive Partner 1% instead of 0.5% and did not know about Founding Partner
-// at all, so an FP subscription was re-rated up to the ordinary rate.
-import { ladderRate } from './_rate.js';
 import Stripe from 'stripe';
+import { ladderRate } from './_rate.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -68,48 +65,39 @@ async function applySubRate(stripe, acct, subId, sub, ladderPct, welcomeActive) 
   return true;
 }
 
-// Callable directly, so the crons that CHANGE a tier can re-rate without an HTTP hop back into
-// this same deployment. A self-fetch needs a base URL, and if that env var is missing the call
-// fails silently -- which is the worst way for a money fix to not work.
-export async function rerateOwner(owner) {
-  return await _rerate(owner);
-}
-
 export default async function handler(req, res) {
   try {
     const owner = req.query.owner;
-    if (!owner) return res.status(400).json({ error: 'owner required' });
-    const out = await _rerate(owner);
-    return res.status(200).json(out);
-  } catch (e) {
-    return res.status(500).json({ error: String((e && e.message) || e) });
-  }
-}
+    if (!owner) return res.status(400).json({ error: 'missing owner' });
 
-async function _rerate(owner) {
-  if (!owner) throw new Error('missing owner');
+    const prof = (await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=coach_ref_score,partner,founding,bankai_eligible`))[0];
+    if (!prof) return res.status(404).json({ error: 'owner not found' });
 
-  const prof = (await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=coach_ref_score,partner,founding,bankai_eligible`))[0];
-  if (!prof) throw new Error('owner not found');
+    const score = prof.coach_ref_score || 0;
+    // Single source of truth -- a local copy of the ladder had drifted: EP was billed 1% instead
+    // of 0.5% and founding was not handled at all, so every run raised a Founding Partner's rate.
+    const pct = ladderRate('stripe', { partner: prof.partner, founding: prof.founding, score, bankai: prof.bankai_eligible }) * 100;
 
-  const score = prof.coach_ref_score || 0;
-  const pct = ladderRate('stripe', { partner: prof.partner, founding: prof.founding, score: score, bankai: prof.bankai_eligible }) * 100;
-
-  let rerated = 0;
-  const gyms = await sbGet(`gyms?owner_id=eq.${encodeURIComponent(owner)}&select=id,stripe_account,welcome_free_until`);
-  for (const g of gyms || []) {
-    if (!g.stripe_account) continue;
-    // Every sub goes through the one shared rule, so a running welcome window (0%) or an open
-    // acquisition window (10%/5%) is not wiped out by a tier change.
-    const gWelcome = !!(g.welcome_free_until && new Date(g.welcome_free_until).getTime() > Date.now());
-    const mems = await sbGet(`gym_memberships?gym_id=eq.${encodeURIComponent(g.id)}&status=in.(active,cancelling)&select=stripe_subscription`);
-    for (const m of mems || []) {
-      if (!m.stripe_subscription) continue;
-      try {
-        const sub = await stripe.subscriptions.retrieve(m.stripe_subscription, { stripeAccount: g.stripe_account });
-        if (await applySubRate(stripe, g.stripe_account, m.stripe_subscription, sub, pct, gWelcome)) rerated++;
-      } catch (e) { console.error('rerate sub', m.stripe_subscription, e.message); }
+    let rerated = 0;
+    const gyms = await sbGet(`gyms?owner_id=eq.${encodeURIComponent(owner)}&select=id,stripe_account,welcome_free_until`);
+    for (const g of gyms || []) {
+      if (!g.stripe_account) continue;
+      // Was: blindly set application_fee_percent = pct on EVERY active subscription, which
+      // wiped out a running welcome window (0%) and an open acquisition window (10%/5%).
+      // Now every sub goes through the one shared rule.
+      const gWelcome = !!(g.welcome_free_until && new Date(g.welcome_free_until).getTime() > Date.now());
+      const mems = await sbGet(`gym_memberships?gym_id=eq.${encodeURIComponent(g.id)}&status=in.(active,cancelling)&select=stripe_subscription`);
+      for (const m of mems || []) {
+        if (!m.stripe_subscription) continue;
+        try {
+          const sub = await stripe.subscriptions.retrieve(m.stripe_subscription, { stripeAccount: g.stripe_account });
+          if (await applySubRate(stripe, g.stripe_account, m.stripe_subscription, sub, pct, gWelcome)) rerated++;
+        } catch (e) { console.error('rerate sub', m.stripe_subscription, e.message); }
+      }
     }
+    res.status(200).json({ ok: true, pct, rerated });
+  } catch (err) {
+    console.error('gym-rerate', err);
+    res.status(500).json({ error: err.message });
   }
-  return { ok: true, pct, rerated };
 }
