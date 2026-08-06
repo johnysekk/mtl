@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SMY stops the partner-grant notification failing in silence and adds its templates. The insert was wrapped in a bare catch, so if it failed nobody found out -- not the founder, who saw the success toast regardless, and not the recipient, who saw nothing at all. The catch now logs and tells the granter the notification did not go out, which turns 'it does not arrive' into something with a reason attached. NOTIF_T also gains partner_granted, partner_removed and their Founding equivalents, so the message renders in the RECIPIENT's language rather than whichever one the founder happened to have set; until now it fell back to the stored string, which is written at grant time. The toast stays: that is feedback for the person doing the granting, and it is a different thing from the notification. Deploy: index.html. -->
+<!-- MTL build: SNA makes the partner cards list what that person actually bills, and corrects three notification texts that all quoted the wrong rate. The card had a fixed set of rows, so a coach who only teaches 1:1 was shown club rates for things they cannot sell, while somebody running events saw no line for them at all. Rows are now chosen from what the account can charge: lessons for an approved coach, memberships and drop-ins for a club owner or a coach paid directly, events on top of that. Events matter separately because they carry NO acquisition fee -- _rate.js returns null for anything that is not a membership, drop-in or 1:1 -- so the card says so rather than leaving 'acquisition 5%' hanging beside a row where it never applies. On the texts: the EP grant notification existed in three places (two in index.html, one in stripe-webhook) and every one of them said the provider keeps 99%, which is a 1% fee when the tier is 0.5%. All three now state the fee and the acquisition rate instead of the kept share, which is the number being decided about. Deploy: index.html + api/stripe-webhook.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3864,7 +3864,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SMY';
+const MTL_BUILD='SNA';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -4581,8 +4581,8 @@ const NOTIF_T = {
     ? `Your Exclusive Partner status has ended.`
     : `Tv\u016fj status Exclusive Partner skon\u010dil.`,
   partner_granted_fp: (d)=> LANG==='en'
-    ? `\ud83c\udf31 You are now a Founding Partner \u2014 a permanently lower MTL rate on everything you bill.`
-    : `\ud83c\udf31 Jsi Founding Partner \u2014 trvale ni\u017e\u0161\u00ed sazba MTL na v\u0161echno, co \u00fa\u010dtuje\u0161.`,
+    ? `\ud83d\udee1\ufe0f You are now a Founding Partner \u2014 a permanently lower MTL rate on everything you bill.`
+    : `\ud83d\udee1\ufe0f Jsi Founding Partner \u2014 trvale ni\u017e\u0161\u00ed sazba MTL na v\u0161echno, co \u00fa\u010dtuje\u0161.`,
   partner_removed_fp: (d)=> LANG==='en'
     ? `Your Founding Partner status has ended.`
     : `Tv\u016fj status Founding Partner skon\u010dil.`,
@@ -4628,8 +4628,8 @@ const NOTIF_T = {
     + '',
   founder_approved_coach: (d)=> LANG==='en' ? `✅ You approved coach: ${d.name}` : `✅ Schválil jsi kouče: ${d.name}`,
   partner_granted: (d)=> LANG==='en'
-    ? `⭐ You've been granted the Exclusive MTL Partner rate — you now keep 99% of your price! 🥊`
-    : `⭐ Byla ti udělena sazba Exclusive MTL Partner — od teď si necháváš 99 % své ceny! 🥊`,
+    ? `⭐ You are now an Exclusive MTL Partner — the MTL fee is 0.5% and acquisition only 5%. 🥊`
+    : `⭐ Byla ti udělena sazba Exclusive MTL Partner — od teď je provize MTL 0,5 % a akviziční pouze 5 %. 🥊`,
   gym_class_added: (d)=>{ const dn=(typeof dayNames==='function'?dayNames():[])[Number(d.day)]||''; return LANG==='en'
     ? `📅 ${d.coach||'A coach'} added a class “${d.className||''}” (${dn} ${d.time||''}) to your klub schedule.`
     : `📅 ${d.coach||'Kouč'} přidal lekci „${d.className||''}" (${dn} ${d.time||''}) do rozvrhu tvého klubu.`; },
@@ -13337,8 +13337,17 @@ async function openGymTeamDash(gymId, gymName, mode){
 function _txEff(r){ const eG=(r.gross_amount||0)-(r.refund_amount||0); const eM=(r.mtl_fee||0)-(r.mtl_fee_refunded||0); const st=r.stripe_fee||0; return {eG,st,eM,eN:Math.max(0,eG-st-eM)}; }
 async function renderGymTeamDash(){
   const box=$('gtdBody'); if(!box||!currentUser) return;
-  const EN=LANG==='en';
   box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${L('Načítám...')}</p>`;
+  try{ return await _renderGymTeamDashInner(box); }
+  catch(e){
+    console.error('renderGymTeamDash', e);
+    box.innerHTML='<p style="color:var(--red);padding:20px;font-size:13px;line-height:1.6;">'
+      + (LANG==='en'?'Could not load the overview.':'Přehled se nepodařilo načíst.')
+      + '<br><span style="color:var(--mid);font-size:12px;">'+((e&&e.message)||e||'')+'</span></p>';
+  }
+}
+async function _renderGymTeamDashInner(box){
+  const EN=LANG==='en';
   // --- coach's team gyms (for selector) ---
   let teamGyms=[];
   try{
@@ -21009,7 +21018,7 @@ async function toggleFP(userId){
     try{ await supaClient.from('notifications').insert({ user_id:userId, type:'system', read:false,
       data: JSON.stringify({ kind: next?'partner_granted_fp':'partner_removed_fp' }),
       message: next
-        ? (EN?'🌱 You are now a Founding Partner \u2014 a permanently lower MTL rate on everything you bill.':'🌱 Jsi Founding Partner \u2014 trvale ni\u017e\u0161\u00ed sazba MTL na v\u0161echno, co \u00fa\u010dtuje\u0161.')
+        ? (EN?'🛡️ You are now a Founding Partner \u2014 a permanently lower MTL rate on everything you bill.':'🛡️ Jsi Founding Partner \u2014 trvale ni\u017e\u0161\u00ed sazba MTL na v\u0161echno, co \u00fa\u010dtuje\u0161.')
         : (EN?'Your Founding Partner status has ended.':'Tv\u016fj status Founding Partner skon\u010dil.') }); }catch(e){ console.error('partner notify', e); toast('\u26a0\ufe0f '+(LANG==='en'?'Notification failed: ':'Notifikace neode\u0161la: ')+((e&&e.message)||'')); }
     toast(next?(EN?'\u2b50 Founding Partner granted (2 / 1.5 / 1%)':'\u2b50 Founding Partner ud\u011bleno (2 / 1,5 / 1%)'):(EN?'Founding Partner removed':'Founding Partner odebr\u00e1no'));
   }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'error')); }
@@ -23367,7 +23376,7 @@ function fpRatesCardHTML(){
   return partnerCardHTML({
     key: 'fp',
     title: 'FOUNDING PARTNER',
-    icon: '🌱',
+    icon: '🛡️',
     accent: '#7ddaa0',
     tint: 'rgba(125,218,160,.10)',
     border: 'rgba(125,218,160,.4)',
@@ -23375,7 +23384,9 @@ function fpRatesCardHTML(){
       ? _ladderRate(_pcMode(), { partner: false, founding: true, score: currentUser && currentUser.coach_ref_score, bankai: currentUser && currentUser.bankai_eligible })
       : 0.02,
     granted: true,
-    acq: null
+    acq: (LANG==='en'
+      ? '🛡️ A permanently lower rate for being here early. It applies to everything you bill and drops further as you bring people in.'
+      : '🛡️ Trvale nižší sazba za to, že jsi tu byl brzy. Platí na všechno, co účtuješ, a ještě klesá, jak přivádíš další.')
   });
 }
 function _pcMode(){
@@ -23390,10 +23401,21 @@ function partnerCardHTML(o){
     ? _ladderRate(_pcMode(), { partner: false, founding: (o.key === 'fp' ? false : (currentUser && currentUser.founding)), score: currentUser && currentUser.coach_ref_score, bankai: currentUser && currentUser.bankai_eligible })
     : 0.035;
   const cell = (lbl) => `<div style="flex:1;background:${o.tint};border:1px solid ${o.border};border-radius:8px;padding:5px 8px;min-width:0;"><div style="font-size:9.5px;color:${o.accent};font-weight:700;">${lbl}</div><div style="font-size:9.5px;color:rgba(255,255,255,.4);text-decoration:line-through;line-height:1.2;">${pct(base)}</div><div style="font-size:15px;color:#fff;font-weight:800;line-height:1.05;">${pct(o.rate)}</div></div>`;
-  const showGym = !!(window._myGyms && window._myGyms.length) || !!(currentUser && currentUser.gym_official);
-  let body = `<div style="display:flex;gap:7px;margin-bottom:${showGym ? '6px' : '0'};">${cell(EN ? 'Per lesson' : 'Z lekce')}</div>`;
-  if (showGym) body += `<div style="display:flex;gap:7px;">${cell(EN ? 'Memberships' : '\u010clenstv\u00ed')}${cell(EN ? 'Drop-ins' : 'Jednor\u00e1zov\u00e9 vstupy')}</div>`;
+  const _billsClub = !!(window._myGyms && window._myGyms.length) || !!(currentUser && currentUser.gym_official) || !!(currentUser && currentUser.gym_payout_account);
+  const _billsEvents = _billsClub || !!(currentUser && currentUser.can_create_events);
+  const rows = [];
+  if (currentUser && currentUser.coach_status === 'approved') rows.push(cell(EN ? 'Lessons' : 'Lekce'));
+  if (_billsClub) { rows.push(cell(EN ? 'Memberships' : '\u010clenstv\u00ed')); rows.push(cell(EN ? 'Drop-ins' : 'Jednor\u00e1zov\u00e9 vstupy')); }
+  if (_billsEvents) rows.push(cell(EN ? 'Events' : 'Ud\u00e1losti'));
+  if (!rows.length) rows.push(cell(EN ? 'Everything you bill' : 'V\u0161e, co \u00fa\u010dtuje\u0161'));
+  let body = '';
+  for (let k = 0; k < rows.length; k += 2) {
+    body += `<div style="display:flex;gap:7px;${k + 2 < rows.length ? 'margin-bottom:6px;' : ''}">${rows[k]}${rows[k + 1] || ''}</div>`;
+  }
   if (o.acq) body += `<div style="margin-top:8px;font-size:10.5px;color:rgba(255,255,255,.75);line-height:1.5;">${o.acq}</div>`;
+  if (_billsEvents) body += `<div style="margin-top:6px;font-size:10px;color:rgba(255,255,255,.5);line-height:1.5;">${EN
+    ? 'Events and courses carry no acquisition fee \u2014 only the rate above.'
+    : 'U ud\u00e1lost\u00ed a kurz\u016f se akvizice ne\u00fa\u010dtuje \u2014 plat\u00ed jen sazba v\u00fd\u0161e.'}</div>`;
   return `<div style="background:#1a1a1a;border:1px solid ${o.accent};border-radius:12px;padding:9px 12px;">
     <div id="${o.key}CardHead" style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;cursor:pointer;user-select:none;">
       <span style="font-size:15px;">${o.icon}</span>
@@ -23435,8 +23457,8 @@ function epRatesCardHTML(showCoach, showGym){
     rate: 0.005,
     granted: _epGift,
     acq: (EN
-      ? ('\u26a1 Half-price acquisition \u2014 ' + _acqPct + '% instead of 10% when MTL brings a new member: their first 2 membership months, first drop-in, first 1:1. Then your usual 0.5%.')
-      : ('\u26a1 Polovi\u010dn\u00ed akvizice \u2014 ' + _acqPct + ' % m\u00edsto 10 %, kdy\u017e ti MTL p\u0159ivede nov\u00e9ho \u010dlena: prvn\u00ed 2 m\u011bs\u00edce \u010dlenstv\u00ed, prvn\u00ed jednor\u00e1zov\u00fd vstup, prvn\u00ed 1:1. Pak u\u017e tvoje 0,5 %.'))
+      ? ('\u26a1 Half-price acquisition \u2014 ' + _acqPct + '% instead of 10% on the first payment of a member MTL brought you: their first lesson or drop-in, first 2 months of a membership.')
+      : ('\u26a1 Polovi\u010dn\u00ed akvizice \u2014 ' + _acqPct + ' % m\u00edsto 10 % u prvn\u00ed platby \u010dlena, kter\u00e9ho ti p\u0159ivedlo MTL: prvn\u00ed lekce nebo jednor\u00e1zov\u00fd vstup, u \u010dlenstv\u00ed prvn\u00ed 2 m\u011bs\u00edce.'))
   });
 }
 function closeRateCalc(){ const o=$('rateCalcOv'); if(o) o.classList.remove('open'); }
@@ -28714,7 +28736,7 @@ async function showPaidPopup(){
           const r=await fetch(`/api/session?sessionId=${encodeURIComponent(sid)}`); const j=await r.json();
           if(j && (j.subscription || j.customer)){
             await supaClient.from('profiles').update({ partner:true, partner_sub:j.subscription||null, stripe_customer:j.customer||null }).eq('id', currentUser.id);
-            await supaClient.from('notifications').insert({ user_id: currentUser.id, type:'system', read:false, data: JSON.stringify({ kind:'partner_granted' }), message:'⭐ Teď jsi Exclusive MTL Partner! Z lekcí si necháváš 99 %, student platí uvedenou cenu, a u klubu platíš jen 1 %. 🥊' });
+            await supaClient.from('notifications').insert({ user_id: currentUser.id, type:'system', read:false, data: JSON.stringify({ kind:'partner_granted' }), message:'⭐ Byla ti udělena sazba Exclusive MTL Partner — od teď je provize MTL 0,5 % a akviziční pouze 5 %. 🥊' });
             try{ await supaClient.from('notifications').insert({ user_id:'7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type:'system', read:false, message:`⭐ Nový Exclusive MTL Partner: ${currentUser.name||'kouč'} (${currentUser.id}).` }); }catch(e){}
             isPartner=true;
           }
