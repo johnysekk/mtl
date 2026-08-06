@@ -431,7 +431,7 @@ async function eventCheckout(req, res) {
 
 async function membershipCheckout(req, res) {
   const {
-    gymAccount, gymName, planName, amount, currency = 'CZK', interval = 'month', months,
+    gymAccount, gymName, planName, amount, currency = 'CZK', interval = 'month', months, endsOn,
     membershipId, income, memberName, payee, disc, access, partner, refPct, refUser, founding, acq, fee,
     gymId, studentId,
   } = req.query;
@@ -515,6 +515,7 @@ async function membershipCheckout(req, res) {
       mtl_payment_type: 'membership',
       mtl_membership_kind: 'one_time',
       mtl_months: String(_months),
+      ...(endsOn ? { mtl_ends_on: String(endsOn) } : {}),
       gym_id: gymId || '',
       student_id: studentId || '',
       membership_id: membershipId || '',

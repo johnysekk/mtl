@@ -575,7 +575,11 @@ export default async function handler(req, res) {
           // the row and stamp period_end = now + N months; nothing renews, it simply expires then.
           // (The monthly plan below is untouched and still a real Stripe subscription.)
           const _mo = Math.max(1, parseInt(m.mtl_months || '1', 10) || 1);
-          const _end = new Date(); _end.setMonth(_end.getMonth() + _mo);
+          let _end = new Date(); _end.setMonth(_end.getMonth() + _mo);
+          if (m.mtl_ends_on) {
+            const _fixed = new Date(String(m.mtl_ends_on) + 'T23:59:59Z');
+            if (!isNaN(_fixed.getTime()) && _fixed > new Date()) _end = _fixed;
+          }
           const _pi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id);
           if (m.membership_id) {
             try {
