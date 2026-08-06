@@ -665,6 +665,11 @@ async function partnerCheckout(req, res) {
     if(!cc) cc = String(prof.country || '').toUpperCase();
   } catch(e){}
   const tier = epTierForCountry(cc);
+  // Test mode bills EP daily instead of monthly, so the whole loop -- charge, Stripe invoice,
+  // e-mail, renewal -- can be seen the next morning rather than in a month.
+  let _epDaily = false;
+  try { const { isTestMode } = await import('./_config.js'); _epDaily = await isTestMode(); } catch (e) {}
+  const _epInterval = _epDaily ? 'day' : 'month';
 
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
@@ -673,7 +678,7 @@ async function partnerCheckout(req, res) {
     tax_id_collection: { enabled: true, required: 'if_supported' },
     client_reference_id: userId,
     line_items: [
-      { price_data: { currency: tier.currency, product_data: { name: 'Exclusive MTL Partner — coach & gym rates' }, unit_amount: Math.round(tier.amount*100), recurring: { interval: 'month' } }, quantity: 1 },
+      { price_data: { currency: tier.currency, product_data: { name: 'Exclusive MTL Partner — coach & gym rates' }, unit_amount: Math.round(tier.amount*100), recurring: { interval: _epInterval } }, quantity: 1 },
     ],
     subscription_data: { metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'', ep_currency: tier.currency, ep_amount: String(tier.amount) } },
     metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'' },
