@@ -60,8 +60,15 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
   if (!scopeCol || !scopeId) return null;
   try {
     if (type === 'membership' && scopeCol === 'gym_id') {
-      const prior = await sbGet(`gym_memberships?select=months&student_id=eq.${encodeURIComponent(memberId)}&gym_id=eq.${encodeURIComponent(scopeId)}&status=in.(active,cancelling,ended,expired)`);
-      const used = (prior || []).reduce((n, r) => n + Math.max(1, parseInt(r && r.months, 10) || 1), 0);
+      let used = 0;
+      try {
+        const tx = await sbGet(`transactions?select=acq_months&member_id=eq.${encodeURIComponent(memberId)}&type=eq.membership&gym_id=eq.${encodeURIComponent(scopeId)}&status=eq.completed&acq_months=gt.0`);
+        used = (tx || []).reduce((n, r) => n + (parseInt(r && r.acq_months, 10) || 0), 0);
+      } catch (e) {}
+      if (!used) {
+        const prior = await sbGet(`gym_memberships?select=months&student_id=eq.${encodeURIComponent(memberId)}&gym_id=eq.${encodeURIComponent(scopeId)}&status=in.(active,cancelling,ended,expired)`);
+        used = (prior || []).reduce((n, r) => n + Math.max(1, parseInt(r && r.months, 10) || 1), 0);
+      }
       const leftQualifying = max - used;
       if (leftQualifying > 0) return { rate: (ownerPartner ? ACQ_RATE_EP : ACQ_RATE), months: leftQualifying };
       return null;
@@ -92,4 +99,20 @@ export async function effectiveRate(sbGet, { ownerId, gymId, gymAccount, mode, t
   // front then costs the club the same as twelve monthly payments would have.
   const hi = Math.max(ladder, acq.rate);
   return (hi * covered + ladder * (bought - covered)) / bought;
+}
+
+// Same computation, but returns the parts as well, so the ledger can record WHY the rate is what
+// it is instead of leaving a club to reverse-engineer a blended number.
+export async function effectiveRateBreakdown(sbGet, args) {
+  const p = await resolveOwner(sbGet, { ownerId: args.ownerId, gymId: args.gymId, gymAccount: args.gymAccount });
+  const ladder = ladderRate(args.mode, { partner: p.partner, founding: p.founding, score: p.coach_ref_score, bankai: p.bankai_eligible });
+  const acq = await acquisitionRate(sbGet, { acqSource: args.acqSource, type: args.type, ownerPartner: p.partner, memberId: args.memberId, scopeCol: args.scopeCol, scopeId: (args.scopeId || p.id) });
+  const bought = Math.max(1, parseInt(args.months, 10) || 1);
+  if (acq == null) return { rate: ladder, baseRate: ladder, acqMonths: 0, months: bought };
+  if (typeof acq === 'number') return { rate: Math.max(ladder, acq), baseRate: ladder, acqMonths: bought, months: bought };
+  const covered = Math.max(0, Math.min(bought, acq.months));
+  if (covered <= 0) return { rate: ladder, baseRate: ladder, acqMonths: 0, months: bought };
+  const hi = Math.max(ladder, acq.rate);
+  const rate = (covered >= bought) ? hi : ((hi * covered + ladder * (bought - covered)) / bought);
+  return { rate, baseRate: ladder, acqMonths: covered, months: bought };
 }

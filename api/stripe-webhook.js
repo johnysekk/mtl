@@ -413,6 +413,8 @@ async function recordTransaction(acct, pi, fields) {
       payee_id: _payee.id, payee_kind: _payee.kind,
       member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null,
       gross_amount: gross, stripe_fee: stripeFee, mtl_fee: (((fields.welcome_waived||0)>0 && (mtlFee===0||mtlFee==null)) ? (fields.welcome_waived||0) : mtlFee), mtl_rate: ((gross>0 && ((((fields.welcome_waived||0)>0 && (mtlFee===0||mtlFee==null)) ? (fields.welcome_waived||0) : mtlFee))>0) ? Math.round(((((((fields.welcome_waived||0)>0 && (mtlFee===0||mtlFee==null)) ? (fields.welcome_waived||0) : mtlFee))/gross))*10000)/10000 : 0), mtl_fee_refunded: ((fields.welcome_waived||0)>0 ? (fields.welcome_waived||0) : 0), net_amount: net, currency,
+      ...(fields.acq_months != null ? { acq_months: fields.acq_months } : {}),
+      ...(fields.base_rate != null ? { base_rate: fields.base_rate } : {}),
       income_class: fields.income_class || null,
       cohort_id: fields.cohort_id || null,
       payment_method: 'stripe', commission_status: 'collected', commission_month: new Date().toISOString().slice(0,7),
@@ -589,7 +591,7 @@ export default async function handler(req, res) {
             } catch (e) { console.error('one-time membership activate', e.message); }
           }
           try {
-            if (_pi) await recordTransaction(event.account, _pi, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id, plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side' });
+            if (_pi) await recordTransaction(event.account, _pi, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id, plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side', acq_months: (m.mtl_acq_months ? parseInt(m.mtl_acq_months,10) : null), base_rate: (m.mtl_base_rate ? parseFloat(m.mtl_base_rate) : null) });
           } catch (e) { console.error('record one-time membership', e.message); }
         }
         else {
@@ -601,7 +603,7 @@ export default async function handler(req, res) {
             const invId = typeof s.invoice === 'string' ? s.invoice : (s.invoice && s.invoice.id);
             let payId = null;
             if (invId) { const invObj = await stripe.invoices.retrieve(invId, { stripeAccount: event.account }); payId = (typeof invObj.payment_intent === 'string' ? invObj.payment_intent : (invObj.payment_intent && invObj.payment_intent.id)) || (typeof invObj.charge === 'string' ? invObj.charge : (invObj.charge && invObj.charge.id)); }
-            if (payId) await recordTransaction(event.account, payId, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id, plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side' });
+            if (payId) await recordTransaction(event.account, payId, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id, plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side', acq_months: (m.mtl_acq_months ? parseInt(m.mtl_acq_months,10) : null), base_rate: (m.mtl_base_rate ? parseFloat(m.mtl_base_rate) : null) });
           } catch (e) { console.error('record membership at checkout', e.message); }
         }
       } else if (m.mtl_payment_type === 'cohort_deposit') {
@@ -781,6 +783,8 @@ export default async function handler(req, res) {
         // CURRENT ladder rate (recomputed live, not the stale mtl_acq_base in metadata).
         try{
           const _so2 = await stripe.subscriptions.retrieve(sub, { stripeAccount: event.account });
+          let _subWasAcq=false, _subLadder=null;
+        try{ const _smd=(_so2&&_so2.metadata)||{}; if(_smd.mtl_acq==='1'){ const _invs=await stripe.invoices.list({ subscription: sub, status:'paid', limit:3 }, { stripeAccount: event.account }); _subWasAcq = (((_invs&&_invs.data)||[]).length <= 2); } }catch(e){}
           const _mem2 = (await sbGet(`gym_memberships?stripe_subscription=eq.${encodeURIComponent(sub)}&select=gym_id,coach_id,paid_to`))[0];
           let _ownerId = null;
           if (_mem2 && _mem2.paid_to === 'coach' && _mem2.coach_id) _ownerId = _mem2.coach_id;
@@ -789,10 +793,11 @@ export default async function handler(req, res) {
             const _op = (await sbGet(`profiles?id=eq.${_ownerId}&select=partner,coach_ref_score,bankai_eligible,welcome_free_until`))[0] || {};
             const _sc = _op.coach_ref_score || 0;
             const _ladder = _op.partner ? 1 : ((_sc >= 5 && _op.bankai_eligible) ? 2 : (_sc >= 2 ? 2.5 : 3));
+            _subLadder = _ladder / 100;
             const _wActive = !!(_op.welcome_free_until && new Date(_op.welcome_free_until).getTime() > Date.now());
             await applySubRate(stripe, event.account, sub, _so2, _ladder, _wActive);
           }
-        }catch(e){ console.error('acq drop', e.message); } if (ipi && mem) await recordTransaction(event.account, ipi, { type: 'membership', welcome_waived: _wwMemb, income_class: _incClass, member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency }); } catch (e) { console.error('record membership', e.message); }
+        }catch(e){ console.error('acq drop', e.message); } if (ipi && mem) await recordTransaction(event.account, ipi, { type: 'membership', welcome_waived: _wwMemb, income_class: _incClass, member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency , acq_months: (_subWasAcq ? 1 : null), base_rate: (_subLadder != null ? _subLadder : null) }); } catch (e) { console.error('record membership', e.message); }
       }
     } else if (event.type === 'invoice.payment_failed') {
       const inv = event.data.object;
