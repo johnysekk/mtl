@@ -188,7 +188,7 @@ export default async function handler(req, res) {
   let issued = 0, skipped = 0, deferred = 0;
   try {
     // every collected commission row for the closed month (bank charged + Stripe live)
-    const tx = await sb(`transactions?select=gym_id,coach_id,paid_to,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method&commission_status=in.(collected${preview?',pending,failed':''})&${TEST?`created_at=gte.${dayStart}&created_at=lt.${dayEnd}`:`commission_month=eq.${period}`}&mtl_fee=gt.0&limit=50000`);
+    const tx = await sb(`transactions?select=gym_id,coach_id,paid_to,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method&commission_status=in.(collected${(TEST||preview)?',pending,failed':''})&${TEST?`created_at=gte.${dayStart}&created_at=lt.${dayEnd}`:`commission_month=eq.${period}`}&mtl_fee=gt.0&limit=50000`);
 
     // bucket per provider + currency, with a per-(form,rate) breakdown
     const gymB = {}, coachB = {};
