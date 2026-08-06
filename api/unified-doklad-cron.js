@@ -12,6 +12,8 @@
 // the receipt itemises by FORM + RATE (transparency). amount = total; bank_amount /
 // stripe_amount split the two rails. Idempotent per (entity, period, currency, kind).
 
+import PDFDocument from 'pdfkit';
+import { DEJAVU_CZ } from './_dejavu-cz.js';
 import { isTestMode } from './_config.js';
 const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 const SB  = process.env.SUPABASE_URL;
@@ -48,6 +50,28 @@ function ctryCode(row) {
   return null;
 }
 
+const CZ_MONTHS = ['leden','\u00fanor','b\u0159ezen','duben','kv\u011bten','\u010derven','\u010dervenec','srpen','z\u00e1\u0159\u00ed','\u0159\u00edjen','listopad','prosinec'];
+// The notification said 'za 2026-07', which is a database value, not something a person reads on
+// a receipt. In TEST mode period is a DATE, so it renders as a date instead.
+// Subject line wants a compact form; 2026-07 reads as a sort key, 07/2026 as a period.
+function periodShort(p) {
+  try {
+    const md = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(p));
+    if (md) return md[3] + '. ' + md[2] + '. ' + md[1];
+    const mm = /^(\d{4})-(\d{2})$/.exec(String(p));
+    if (mm) return mm[2] + '/' + mm[1];
+    return p;
+  } catch (e) { return p; }
+}
+function periodLabel(p) {
+  try {
+    const md = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(p));
+    if (md) return Number(md[3]) + '. ' + Number(md[2]) + '. ' + md[1];
+    const mm = /^(\d{4})-(\d{2})$/.exec(String(p));
+    if (mm) return (CZ_MONTHS[Number(mm[2]) - 1] || p) + ' ' + mm[1];
+    return p;
+  } catch (e) { return p; }
+}
 function prevMonth(ym) { const [y, m] = ym.split('-').map(Number); const d = new Date(Date.UTC(y, m - 1, 1)); d.setUTCMonth(d.getUTCMonth() - 1); return d.toISOString().slice(0, 7); }
 
 function _methodLabel(m){ return m==='stripe'?'Stripe (karta)':(m==='pis'?'Platba z banky':(m==='qr'?'QR platba':(m==='cash'?'Hotovost':(m||'\u2014')))); }
@@ -76,9 +100,73 @@ function dokladHtml(ME, buyer, kind, period, cur, data, test){
     +'<div style="margin-top:10px;font-size:12px;color:#555;">Bankovn\u00ed p\u0159evod (str\u017eeno z karty): <b>'+_money(bank,cur)+'</b> \u00b7 Stripe (\u017eiv\u011b): <b>'+_money(strp,cur)+'</b></div>'
     +'<p style="color:#999;font-size:11px;margin-top:18px;">Doklad o ji\u017e str\u017een\u00e9 / na\u00fa\u010dtovan\u00e9 provizi MTL za uveden\u00e9 obdob\u00ed. Nejde o v\u00fdzvu k platb\u011b.</p></div>';
 }
-async function sendEmail(to, subject, html){
+// The receipt went out as HTML in the body, which cannot be filed or handed to an accountant.
+// Same approach stripe-webhook already uses for its payment receipts: pdfkit with the DejaVu font,
+// because the built-in fonts have no diacritics and Czech names come out mangled.
+function dokladPdf(ME, buyer, kind, period, cur, data, test){
+  return new Promise(function(resolve, reject){
+    try{
+      const doc = new PDFDocument({ size:'A4', margin:50 });
+      const chunks=[]; doc.on('data', function(d){ chunks.push(d); }); doc.on('end', function(){ resolve(Buffer.concat(chunks)); }); doc.on('error', reject);
+      doc.registerFont('cz', DEJAVU_CZ); doc.font('cz');
+      const ph = test ? 'Nevypln\u011bno' : '';
+      const B = buyer || {};
+      doc.fontSize(22).fillColor('#E11111').text('MTL');
+      doc.moveDown(0.15).fontSize(15).fillColor('#111111').text('Doklad o provizi MTL');
+      doc.moveDown(0.1).fontSize(10).fillColor('#777777').text('Obdob\u00ed ' + periodLabel(period));
+      doc.moveDown(1);
+
+      const yTop = doc.y;
+      doc.fontSize(9).fillColor('#888888').text('DODAVATEL', 50, yTop, { width:230 });
+      doc.fontSize(11).fillColor('#111111').text(ME.name || 'Martial Training Lab s.r.o.', 50, doc.y, { width:230 });
+      if (ME.ico) doc.fontSize(10).fillColor('#555555').text('I\u010cO: ' + ME.ico, 50, doc.y, { width:230 });
+      if (ME.dic) doc.fontSize(10).fillColor('#555555').text('DI\u010c: ' + ME.dic, 50, doc.y, { width:230 });
+      if (ME.sidlo) doc.fontSize(10).fillColor('#555555').text(ME.sidlo, 50, doc.y, { width:230 });
+      const yLeft = doc.y;
+
+      doc.fontSize(9).fillColor('#888888').text('ODB\u011aRATEL', 315, yTop, { width:230 });
+      doc.fontSize(11).fillColor('#111111').text(B.legal_name || B.name || ph, 315, doc.y, { width:230 });
+      if (B.tax_id) doc.fontSize(10).fillColor('#555555').text('I\u010cO: ' + B.tax_id, 315, doc.y, { width:230 });
+      if (B.vat_id) doc.fontSize(10).fillColor('#555555').text('DI\u010c: ' + B.vat_id, 315, doc.y, { width:230 });
+      if (B.billing_address) doc.fontSize(10).fillColor('#555555').text(B.billing_address, 315, doc.y, { width:230 });
+      doc.y = Math.max(yLeft, doc.y) + 18;
+
+      const cols = [50, 190, 260, 340, 440];
+      const head = ['Forma','Sazba','Transakc\u00ed','Z\u00e1klad','Provize'];
+      let y = doc.y;
+      doc.fontSize(9).fillColor('#888888');
+      head.forEach(function(h,i){ doc.text(h, cols[i], y, { width: (i>=3?105:(i===0?135:70)), align: (i>=3?'right':(i===0?'left':'center')) }); });
+      y = doc.y + 4;
+      doc.moveTo(50,y).lineTo(545,y).strokeColor('#dddddd').stroke(); y += 6;
+
+      Object.values(data.rates).forEach(function(it){
+        doc.fontSize(10).fillColor('#111111');
+        doc.text(_methodLabel(it.method), cols[0], y, { width:135 });
+        doc.text(_pct(it.rate), cols[1], y, { width:70, align:'center' });
+        doc.text(String(it.count), cols[2], y, { width:70, align:'center' });
+        doc.text(_money(it.gross, cur), cols[3], y, { width:105, align:'right' });
+        doc.text(_money(it.fee, cur), cols[4], y, { width:105, align:'right' });
+        y = doc.y + 5;
+        doc.moveTo(50,y).lineTo(545,y).strokeColor('#eeeeee').stroke(); y += 5;
+      });
+
+      doc.y = y + 4;
+      if (!ME.vat_payer) doc.fontSize(9).fillColor('#777777').text('Dodavatel nen\u00ed pl\u00e1tcem DPH.', 50, doc.y, { width:495 });
+      doc.moveDown(0.5);
+      const yT = doc.y;
+      doc.fontSize(13).fillColor('#111111').text('Celkem', 50, yT, { width:230 });
+      doc.text(_money(data.total, cur), 315, yT, { width:230, align:'right' });
+      doc.y = Math.max(doc.y, yT) + 8;
+      doc.fontSize(9).fillColor('#666666').text('Bankovn\u00ed p\u0159evod (str\u017eeno z karty): ' + _money(data.bank || 0, cur) + '  \u00b7  Stripe (\u017eiv\u011b): ' + _money(data.stripe || 0, cur), 50, doc.y, { width:495 });
+      doc.moveDown(1).fontSize(9).fillColor('#999999').text('Doklad o ji\u017e str\u017een\u00e9 / na\u00fa\u010dtovan\u00e9 provizi MTL za uveden\u00e9 obdob\u00ed. Nejde o v\u00fdzvu k platb\u011b.', 50, doc.y, { width:495 });
+      doc.end();
+    }catch(e){ reject(e); }
+  });
+}
+
+async function sendEmail(to, subject, html, attachments){
   if(!RESEND || !to) return;
-  try{ await fetch('https://api.resend.com/emails', { method:'POST', headers:{ Authorization:'Bearer '+RESEND, 'Content-Type':'application/json' }, body: JSON.stringify({ from: MAIL_FROM, to:[to], subject, html }) }); }catch(e){ console.error('doklad email', e.message); }
+  try{ await fetch('https://api.resend.com/emails', { method:'POST', headers:{ Authorization:'Bearer '+RESEND, 'Content-Type':'application/json' }, body: JSON.stringify(Object.assign({ from: MAIL_FROM, to:[to], subject, html }, (attachments && attachments.length) ? { attachments } : {})) }); }catch(e){ console.error('doklad email', e.message); }
 }
 
 export default async function handler(req, res) {
@@ -174,7 +262,7 @@ export default async function handler(req, res) {
       body[col] = entityId;
       await sb('commission_doklady', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify(body) });
       issued++;
-      if (ownerId) { try { await notify(ownerId, 'doklad_unified', `Doklad MTL provize za ${period} (${(data.total / 100).toFixed(2)} ${cur.toUpperCase()}) je připraven.`, { period, currency: cur }); } catch (e) {} }
+      if (ownerId) { try { await notify(ownerId, 'doklad_unified', `Doklad k provizi MTL za ${periodLabel(period)} (${(data.total / 100).toFixed(2)} ${cur.toUpperCase()}) je připraven. Najdeš ho v účetnictví.`, { period, currency: cur }); } catch (e) {} }
       try {
         // Route the commission invoice to the RIGHT billing e-mail: a gym's on gyms.invoice_email,
         // a coach's on profiles.invoice_email (they can differ). Fall back to the owner's account e-mail.
@@ -182,7 +270,14 @@ export default async function handler(req, res) {
         if (kind === 'gym') { const gr = await sb(`gyms?id=eq.${entityId}&select=invoice_email&limit=1`); em = (gr && gr[0] && gr[0].invoice_email) || null; }
         else { const pr = await sb(`profiles?id=eq.${ownerId}&select=invoice_email&limit=1`); em = (pr && pr[0] && pr[0].invoice_email) || null; }
         if (!em && ownerId) { const pr2 = await sb(`profiles?id=eq.${ownerId}&select=email&limit=1`); em = pr2 && pr2[0] && pr2[0].email; }
-        if (em) await sendEmail(em, `Doklad MTL provize — ${period}`, dokladHtml(ME, buyer, kind, period, cur, data, TEST)); } catch (e) {}
+        if (em) {
+          let _att = [];
+          try {
+            const _buf = await dokladPdf(ME, buyer, kind, period, cur, data, TEST);
+            _att = [{ filename: `MTL-provize-${String(period).replace(/-/g,'')}.pdf`, content: _buf.toString('base64') }];
+          } catch (e) { console.error('doklad pdf', e.message); }
+          await sendEmail(em, `Doklad o provizi MTL — ${periodShort(period)}`, dokladHtml(ME, buyer, kind, period, cur, data, TEST), _att);
+        } } catch (e) {}
     }
 
     if (preview) {
