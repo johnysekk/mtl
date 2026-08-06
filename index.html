@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SOW makes the club profile hide plans from a coach who cannot take payment, using the same test as everywhere else. Two places asked the same question and answered it differently: the coach CARD in the club team hides on charges_enabled===false alone, while the PLAN list required charges_enabled===false AND gym_payout_account -- so an autonomous coach with their own Stripe account and no payout to the club never matched, and their membership kept selling while their card had already vanished. The plan filter now tests charges_enabled on anybody whose mode is Stripe, whatever their payout arrangement, and keeps the existing qr_bank-without-IBAN branch. CORRECTION to SOV: I said the flag was stale from before onboarding, which does not fit Petr's account of Stripe having worked first. I cannot tell from the code alone what set it false -- nothing in the mode switch writes it. What is certain is that profiles.charges_enabled is a cache no scheduled job refreshes, so whatever set it wrong, it stays wrong; that is what SOV's session refresh addresses, and it is right either way. Deploy: index.html. -->
+<!-- MTL build: SOY finds what an abandoned mode switch actually leaves behind, and tells a hidden coach why. Clicking QR and not finishing writes profiles.target_payment_mode and leaves it there. _checkModePromotion exists precisely to clear it -- it clears the field when the target already matches the live mode, or completes the switch once every entity is ready -- but it only ever runs inside renderPaymentsPage, so anybody who abandoned the switch and did not later open Payments & commission stayed stuck half-way. It now runs at enterApp too. Separately a coach who drops out of the deck had no way to learn it: the same sticky bar that reports a deactivated account now says 'Nejsi videt v nabidce' with the reason -- Stripe not able to charge yet, or missing bank details -- and a link straight to the payment settings. And the bar was position:fixed over the top of .app, so it sat on the header instead of above it; .app is padded by the bar's height while it is shown, so nothing is covered on desktop or mobile. Deploy: index.html. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -619,7 +619,7 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
   </div>
 
 <div class="toast" id="toast"></div>
-<div id="acctStateBar" style="display:none;position:fixed;top:0;left:0;right:0;z-index:95;padding:8px 14px;font-size:12.5px;font-weight:700;line-height:1.35;text-align:center;box-shadow:0 1px 6px rgba(0,0,0,.12);"></div>
+<div id="acctStateBar" style="display:none;position:fixed;top:0;left:0;right:0;z-index:95;padding:8px 14px;font-size:12.5px;font-weight:700;line-height:1.35;text-align:center;box-shadow:0 1px 6px rgba(0,0,0,.12);box-sizing:border-box;"></div>
 
 <!-- HEADER -->
 <div class="hdr">
@@ -3943,7 +3943,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SOW';
+const MTL_BUILD='SOY';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -23264,10 +23264,14 @@ async function toggleCoachSuspend(coachId, status, name){
   loadAdminCoachList();
 }
 
-function openProfileById(coachId){
+async function openProfileById(coachId){
   const c = COACHES.find(x=>x.profileId===coachId || x.id===coachId);
-  if(!c){ toast(L('⚠️ Profil kouče se nepodařilo načíst')); return; }
-  openProfile(c);
+  if(c) return openProfile(c);
+  try{
+    const { data } = await supaClient.from('profiles').select('*').eq('id', coachId).single();
+    if(data && typeof _mapCoachRow==='function') return openProfile(_mapCoachRow(data));
+  }catch(e){}
+  toast(L('⚠️ Profil kouče se nepodařilo načíst'));
 }
 
 async function messageCoachAsFounder(coachId){
@@ -26847,6 +26851,7 @@ function enterApp(){
   try{ _loadFeatureFlags(); }catch(e){}
   try{ renderAcctStateBar(); }catch(e){}
   try{ _loadMyClubs(); }catch(e){}
+  try{ if(typeof _checkModePromotion==='function') _checkModePromotion(); }catch(e){}
   // Refresh the Stripe payment flag once per session: it is otherwise only ever set by a one-off
   // backfill, so a provider whose account was finished later stays hidden from the deck for good.
   try{
@@ -27915,6 +27920,13 @@ async function _openClubById(gymId){
     else toast('\u26a0\ufe0f '+(LANG==='en'?'Club not found':'Klub nenalezen'));
   }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
 }
+function _acctBarOffset(on){
+  try{
+    const app=document.querySelector('.app'); if(!app) return;
+    const bar=document.getElementById('acctStateBar');
+    app.style.paddingTop = on ? ((bar && bar.offsetHeight ? bar.offsetHeight : 34) + 'px') : '';
+  }catch(e){}
+}
 function renderAcctStateBar(){
   try{ _paintDeactBtn(); }catch(e){}
   const bar = $('acctStateBar'); if(!bar || !currentUser) return;
@@ -27927,7 +27939,28 @@ function renderAcctStateBar(){
       : (EN?'Deactivated \u2014 your invite and trophy-case links stop working. Your memberships carry on.':'Deaktivov\u00e1no \u2014 tv\u016fj zvac\u00ed odkaz a odkazy na vitr\u00ednu p\u0159estanou fungovat. \u010clenstv\u00ed b\u011b\u017e\u00ed d\u00e1l.')
       + ' <button id="acctReactivate" style="background:none;border:none;color:#0B63CE;font-weight:800;font-size:12.5px;text-decoration:underline;cursor:pointer;font-family:\'DM Sans\';padding:0 0 0 4px;">'
       + (EN?'Reactivate':'Znovu aktivovat') + '</button>';
+    _acctBarOffset(true);
     const b=$('acctReactivate'); if(b) b.onclick=function(){ _acctSetState(null,null); };
+    return;
+  }
+  const _cnr = (function(){
+    try{
+      if(!currentUser || currentUser.coach_status!=='approved') return null;
+      const m = currentUser.payment_mode || 'stripe';
+      if(m==='stripe' && currentUser.charges_enabled===false) return 'stripe';
+      if(m!=='stripe' && !currentUser.receiver_id_value) return 'iban';
+      return null;
+    }catch(e){ return null; }
+  })();
+  if(_cnr){
+    bar.style.display='block'; bar.style.background='#FFF4E0'; bar.style.color='#8A5A00';
+    bar.innerHTML = (EN
+      ? ('You are hidden from the deck \u2014 ' + (_cnr==='stripe' ? 'your Stripe account cannot take payments yet.' : 'your bank details are missing.'))
+      : ('Nejsi vid\u011bt v nab\u00eddce \u2014 ' + (_cnr==='stripe' ? 'tv\u016fj \u00fa\u010det Stripe zat\u00edm nem\u016f\u017ee p\u0159ij\u00edmat platby.' : 'chyb\u00ed bankovn\u00ed \u00fadaje.')))
+      + ' <button id="acctFixPay" style="background:none;border:none;color:#8A5A00;font-weight:800;font-size:12.5px;text-decoration:underline;cursor:pointer;font-family:\'DM Sans\';padding:0 0 0 4px;">'
+      + (EN?'Fix it':'Nastavit') + '</button>';
+    _acctBarOffset(true);
+    const b=$('acctFixPay'); if(b) b.onclick=function(){ try{ openSheet('shPayments'); if(typeof renderPaymentsPage==='function') renderPaymentsPage(); }catch(e){} };
     return;
   }
   if(currentUser.deleted_at){
@@ -27937,10 +27970,12 @@ function renderAcctStateBar(){
                        :('Zadal jsi \u00fa\u010det k vymaz\u00e1n\u00ed \u2014 sma\u017ee se za '+left+' dn\u00ed.'))
       + ' <button id="acctRestore" style="background:none;border:none;color:#8B1E1E;font-weight:800;font-size:12.5px;text-decoration:underline;cursor:pointer;font-family:\'DM Sans\';padding:0 0 0 4px;">'
       + (EN?'Restore account':'Obnovit \u00fa\u010det') + '</button>';
+    _acctBarOffset(true);
     const b=$('acctRestore'); if(b) b.onclick=function(){ _acctSetState(null,null); };
     return;
   }
   bar.style.display='none';
+  _acctBarOffset(false);
 }
 async function _acctSetState(deleted, deactivated){
   const EN = LANG === 'en';
