@@ -249,8 +249,20 @@ export default async function handler(req, res) {
       }
     } catch (e) { _cred = { consumed: false, reason: 'exception: ' + e.message }; }
 
+    // Renewal date, so the membership row can say WHEN it renews rather than only that it does.
+    let _periodEnd = null;
+    try {
+      const _sid = typeof session.subscription === 'string' ? session.subscription : (session.subscription && session.subscription.id);
+      if (_sid) {
+        const _s = await stripe.subscriptions.retrieve(_sid, opts);
+        const _cpe = _s && (_s.current_period_end || (_s.items && _s.items.data && _s.items.data[0] && _s.items.data[0].current_period_end));
+        if (_cpe) _periodEnd = new Date(_cpe * 1000).toISOString();
+      }
+    } catch (e) { console.error('period_end', e.message); }
+
     res.status(200).json({
       _cred,
+      periodEnd: _periodEnd,
       paymentIntent: session.payment_intent || null,
       subscription: session.subscription || null,
       customer: session.customer || null,
