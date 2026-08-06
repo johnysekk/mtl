@@ -293,7 +293,7 @@ async function gymCheckout(req, res) {
   let TAKE;
   let _acqMonths = 0, _baseRate = null;
   try {
-    const _txType = (String(merch) === '1') ? 'merch' : 'drop_in';
+    const _txType = (String(merch) === '1') ? 'merch' : ((String(grace) === '1' || String(guest) === '1') ? 'other' : 'drop_in');
     const _brk = await effectiveRateBreakdown(_wsbGet, { gymAccount, mode: 'stripe', type: _txType, acqSource: acq, memberId: studentId, scopeCol: 'gym_id', scopeId: gymId, months: (Math.max(1, parseInt(months, 10) || 1)) });
     TAKE = _brk.rate; _acqMonths = _brk.acqMonths; _baseRate = _brk.baseRate;
   } catch (e) {
