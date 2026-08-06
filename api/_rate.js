@@ -59,6 +59,12 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
   else return null;                                     // custom / event / course: no acquisition fee
   if (!scopeCol || !scopeId) return null;
   try {
+    if (type === 'membership' && scopeCol === 'gym_id') {
+      const prior = await sbGet(`gym_memberships?select=months&student_id=eq.${encodeURIComponent(memberId)}&gym_id=eq.${encodeURIComponent(scopeId)}&status=in.(active,cancelling,ended,expired)`);
+      const used = (prior || []).reduce((n, r) => n + Math.max(1, parseInt(r && r.months, 10) || 1), 0);
+      if (used < max) return ownerPartner ? ACQ_RATE_EP : ACQ_RATE;
+      return null;
+    }
     const prior = await sbGet(`transactions?select=id&member_id=eq.${encodeURIComponent(memberId)}&type=eq.${encodeURIComponent(type)}&${scopeCol}=eq.${encodeURIComponent(scopeId)}&status=eq.completed`);
     if (!prior || prior.length < max) return ownerPartner ? ACQ_RATE_EP : ACQ_RATE;
   } catch (e) {}
