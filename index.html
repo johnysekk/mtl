@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SNW corrects two things I got wrong out loud. Events ARE a swipe deck -- evDeck, evRenderSwipe and _evIdx -- not a list, so the 'Zobrazit dalsi' button added in SNV was wrong and is replaced by the same eight-cards-from-the-end top-up the coach deck uses. And I started trimming the club deck's select('*') down to named columns to avoid shipping every club's whole schedule for the sake of a level filter -- that would have BROKEN the club profile: _mapGymRow keeps the raw row as .g and openGymProfile is called with c.g, reading capacity, facilities_claimed, facilities_verified and founded_year among others, none of which were in my list. I also invented a schedule_levels column that does not exist, which PostgREST would have rejected outright, emptying the deck. Reverted to select('*') on both the first page and the load-more. Verified afterwards: _mapGymRow returns every field the inline mapping did, and nothing outside ensureGymsLoaded and loadMoreGyms touches the GYMS array, so a partially loaded deck breaks no other feature. Deploy: index.html. -->
+<!-- MTL build: SNY opens a club profile in about one round trip instead of nineteen sequential ones. Seven of the eight opening queries had no dependency on each other -- only the coach-partner lookup needs ids the pricing query returns -- yet each waited for the one before, which is where the second of dead time came from. They now run in a single Promise.all and the rest of the function reads the results, keeping the same variable names so nothing downstream changed. Two of them were also fetching the SAME owner profile twice, once for partner and once for name+partner; that is one read now. Every branch has its own catch so a failing query degrades exactly as before rather than taking the profile down, and _me is checked once instead of assuming a logged-in user. Verified after: no result is read before its declaration, and rr, ac, mbs, _gopProf, _gymOwnerName and _gymCoachCount all keep their names and uses. Nine queries remain further down, deliberately untouched -- they depend on ids the first block returns. WITHDRAWN: the sub-period endpoint added in SNX, together with its client backfill. It existed only to fill in renewal dates on memberships bought before SNT, which is test data; a nuke solves that without a new public endpoint. Deploy: index.html + api/session.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3877,7 +3877,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SNW';
+const MTL_BUILD='SNY';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -9851,17 +9851,32 @@ async function openGymTermsPage(gymId, token, onConfirmed){
   };
 }
 async function openGymProfile(g){
-  if(g && g.id){ try{ const { data: full } = await supaClient.from('gyms').select('*').eq('id', g.id).single(); if(full) g=full; }catch(e){} }
+  const _gid = g && g.id;
+  const _oid = g && g.owner_id;
+  let _pFull=null, _pCps=null, _pOwner=null, _pCoachN=null, _pRatings=null, _pAtt=null, _pMemb=null;
+  if(_gid){
+    const _me = currentUser && currentUser.id;
+    [_pFull, _pCps, _pOwner, _pCoachN, _pRatings, _pAtt, _pMemb] = await Promise.all([
+      supaClient.from('gyms').select('*').eq('id', _gid).single().then(r=>r,()=>({})),
+      supaClient.from('gym_coach_pricing').select('*').eq('gym_id', _gid).eq('status','approved').then(r=>r,()=>({})),
+      _oid ? supaClient.from('profiles').select('name, partner').eq('id', _oid).single().then(r=>r,()=>({})) : Promise.resolve({}),
+      supaClient.from('gym_coaches').select('id',{count:'exact',head:true}).eq('gym_id', _gid).eq('status','active').then(r=>r,()=>({})),
+      supaClient.from('gym_ratings').select('id, student_id, student_name, rating, comment, created_at').eq('gym_id', _gid).order('created_at',{ascending:false}).then(r=>r,()=>({})),
+      _me ? supaClient.from('gym_attendance').select('id',{count:'exact',head:true}).eq('gym_id', _gid).eq('student_id', _me).then(r=>r,()=>({})) : Promise.resolve({}),
+      _me ? supaClient.from('gym_memberships').select('*').eq('student_id', _me).eq('gym_id', _gid).in('status',['active','cancelling']).then(r=>r,()=>({})) : Promise.resolve({})
+    ]);
+    if(_pFull && _pFull.data) g = _pFull.data;
+  }
   window._currentGym = g;
   const _gymDisc=(parseDisc(g.disciplines)||[])[0]||defaultDiscipline();
   try{ if(g&&g.id&&currentUser&&currentUser.id){ var _vsrc=window._gymViewSrc||'app'; window._gymViewSrc=null; window._curGymOpenSrc={gym:g.id,src:_vsrc}; supaClient.from('gym_views').upsert({ gym_id:g.id, viewer_id:currentUser.id, view_date:new Date().toISOString().slice(0,10), source:_vsrc }, { onConflict:'gym_id,viewer_id,view_date' }).then(function(){},function(){}); } }catch(e){}
   window._gymCoachPricing = {};
-  try{ if(g&&g.id){ const { data: _cps } = await supaClient.from('gym_coach_pricing').select('*').eq('gym_id', g.id).eq('status','approved'); (_cps||[]).forEach(cp=>{ window._gymCoachPricing[cp.coach_id]=cp; }); const _cids=Object.keys(window._gymCoachPricing); if(_cids.length){ const { data:_cpr } = await supaClient.from('profiles').select('id,partner').in('id',_cids); (_cpr||[]).forEach(pp=>{ if(window._gymCoachPricing[pp.id]) window._gymCoachPricing[pp.id].partner=!!pp.partner; }); } } }catch(e){}
+  try{ ((_pCps&&_pCps.data)||[]).forEach(cp=>{ window._gymCoachPricing[cp.coach_id]=cp; }); const _cids=Object.keys(window._gymCoachPricing); if(_cids.length){ const { data:_cpr } = await supaClient.from('profiles').select('id,partner').in('id',_cids); (_cpr||[]).forEach(pp=>{ if(window._gymCoachPricing[pp.id]) window._gymCoachPricing[pp.id].partner=!!pp.partner; }); } }catch(e){}
   if($('gymProfTitle')) $('gymProfTitle').textContent = g.name || venueTerm(_gymDisc,false,g);
   const sym = _curSym(g.currency);
   const symOf = x => _curSym(x);
   const base = g.dropin_price||0;
-  let _gopProf=false; try{ if(g.owner_id){ const { data:_op3 }=await supaClient.from('profiles').select('partner').eq('id',g.owner_id).single(); _gopProf=!!(_op3&&_op3.partner); } }catch(e){}
+  let _gopProf=!!(_pOwner && _pOwner.data && _pOwner.data.partner);
   let _opts=[]; if(base>0) _opts.push(base*gdMul(_gopProf));
   try{ Object.values(window._gymCoachPricing||{}).forEach(cp=>{ if(cp&&cp.dropin_price>0) _opts.push(cp.dropin_price*gdMul(!!cp.partner)); }); }catch(e){}
   const _minSp=_opts.length?Math.min(..._opts):(base*gdMul(_gopProf));
@@ -9870,12 +9885,12 @@ async function openGymProfile(g){
   const photos=gymPhotoList(g.photos);
   const gallery = photos.length ? `<div style="display:flex;gap:8px;overflow-x:auto;margin-bottom:14px;">${photos.map(p=>`<div style="flex:0 0 auto;width:220px;height:130px;border-radius:12px;background:#000 url('${p}') center/cover;"></div>`).join('')}</div>` : '';
   const isMine = currentUser && g.owner_id===currentUser.id;
-  let _gymOwnerName='', _gymOwnerPartner=false; try{ if(g.owner_id){ const { data: ow } = await supaClient.from('profiles').select('name, partner').eq('id', g.owner_id).single(); _gymOwnerName=(ow&&ow.name)||''; _gymOwnerPartner=!!(ow&&ow.partner); } }catch(e){}
+  let _gymOwnerName=(_pOwner&&_pOwner.data&&_pOwner.data.name)||'', _gymOwnerPartner=_gopProf;
   const amenObj = (()=>{ try{ return JSON.parse(g.facilities_verified||g.facilities_claimed||'{}'); }catch(e){ return {}; } })();
   const amenIcons = Object.keys(AMEN_VIEW).filter(k=>amenObj[k]).map(k=>{ const a=AMEN_VIEW[k]; return `<span style="display:inline-flex;align-items:center;gap:5px;background:var(--surf);border:1px solid var(--border);border-radius:999px;padding:5px 11px;font-size:13px;color:var(--dark);margin:0 6px 6px 0;">${a[0]} ${LANG==='en'?a[1]:a[2]}</span>`; }).join('');
   const amenBlock = amenIcons ? `<div style="margin-bottom:16px;">${amenIcons}</div>` : '';
   const _cr=(typeof _gymCapRange==='function')?_gymCapRange(g):(g.capacity?{min:g.capacity,max:g.capacity}:null); const capBlock = _cr ? `<div style="font-size:13px;color:var(--mid);margin-bottom:12px;">👥 ${LANG==='en'?(_cr.min===_cr.max?`Up to ${_cr.max} per group class`:`${_cr.min}–${_cr.max} per group class`):(_cr.min===_cr.max?`Až ${_cr.max} ve skupinové lekci`:`${_cr.min}–${_cr.max} ve skupinové lekci`)}</div>` : '';
-  let _gymCoachCount=0; try{ const { count } = await supaClient.from('gym_coaches').select('id',{count:'exact',head:true}).eq('gym_id', g.id).eq('status','active'); _gymCoachCount=count||0; }catch(e){}
+  let _gymCoachCount=(_pCoachN&&_pCoachN.count)||0;
   let _weeklyClasses=0; try{ _weeklyClasses=(JSON.parse(g.schedule||'[]')||[]).length; }catch(e){}
   const _statItems=[];
   if(g.founded_year) _statItems.push(['📅', LANG==='en'?'Founded':'Založeno', g.founded_year]);
@@ -9885,7 +9900,7 @@ async function openGymProfile(g){
   // ── Klub ratings (hodnocení) ──
   let _gymRatings=[], _gymRateAvg=0, _gymRateCount=0, _myRating=null, _canRate=false;
   try{
-    const { data: rr } = await supaClient.from('gym_ratings').select('id, student_id, student_name, rating, comment, created_at').eq('gym_id', g.id).order('created_at',{ascending:false});
+    const rr = (_pRatings && _pRatings.data) || [];
     _gymRatings = rr||[]; _gymRateCount=_gymRatings.length;
     _gymRateAvg = _gymRateCount ? _gymRatings.reduce((s,r)=>s+(r.rating||0),0)/_gymRateCount : 0;
     if(currentUser) _myRating=_gymRatings.find(r=>r.student_id===currentUser.id)||null;
@@ -9893,7 +9908,7 @@ async function openGymProfile(g){
   if(currentUser && !isMine){
     if(_myRating){ _canRate=true; }
     else { try{
-      const { count: ac } = await supaClient.from('gym_attendance').select('id',{count:'exact',head:true}).eq('gym_id', g.id).eq('student_id', currentUser.id);
+      const ac = (_pAtt && _pAtt.count) || 0;
       if((ac||0)>=2) _canRate=true;   // jen po 2+ docházkách ručně označených klubem
     }catch(e){} }
   }
@@ -9919,7 +9934,7 @@ async function openGymProfile(g){
       // A student can hold SEVERAL memberships at one club (e.g. a yearly Sparring pass and a
       // monthly Advanced plan). This used to .limit(1), so only one plan card could ever show
       // "you already have this" — the second purchase looked unbought. Keep them all.
-      const { data: mbs } = await supaClient.from('gym_memberships').select('*').eq('student_id', currentUser.id).eq('gym_id', g.id).in('status',['active','cancelling']);
+      const mbs = (_pMemb && _pMemb.data) || [];
       window._myMembs = mbs || [];
       if(mbs && mbs.length){ myMemb=mbs[0];
         // access = the union across every membership the student holds here
@@ -20358,7 +20373,7 @@ async function loadNotifications(append){
     const isAmbApp = k==='ambassador_app';
     const isAmbGranted = k==='ambassador_granted';
     const isCoachRefAdmin = false; /* referral EP grants removed — rewards are Shikai/Bankai */
-    const clickable = isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim';
+    const clickable = isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim';
     let linkLabel = L('otevřít ›');
     if(k==='payment_confirmed'){ var _pcd={}; try{ _pcd=JSON.parse(n.data||'{}'); }catch(e){} var _gg=_pcd.goto; linkLabel = (_gg==='dropin'||_gg==='bookings') ? (LANG==='en'?'booking details ›':'detail rezervace ›') : (_gg==='tickets') ? (LANG==='en'?'my ticket ›':'moje vstupenka ›') : (_gg==='courses') ? (LANG==='en'?'my course ›':'můj kurz ›') : (_gg==='merch') ? (LANG==='en'?'view ›':'zobrazit ›') : (LANG==='en'?'membership details ›':'detail členství ›'); } else if(k==='qr_intent') linkLabel = LANG==='en'?'to confirm ›':'k potvrzení ›'; else if(k==='qr_released'||k==='qr_reservation_expired') linkLabel = LANG==='en'?'book again ›':'rezervovat znovu ›'; else if(k==='qr_requeued') linkLabel = LANG==='en'?'pay again ›':'zaplatit znovu ›'; else if(k==='sounding_ask') linkLabel = LANG==='en'?'answer ›':'odpovědět ›'; else if(k==='cover_needed') linkLabel = LANG==='en'?'take the cover ›':'vzít záskok ›'; else if(k==='cover_filled'||k==='cover_filled_owner') linkLabel = LANG==='en'?'view ›':'zobrazit ›'; else if(k==='doklad_vat_needed') linkLabel = LANG==='en'?'add VAT ID \u203a':'doplnit DI\u010c \u203a'; else if(k==='course_new') linkLabel = LANG==='en'?'course details \u203a':'detail kurzu \u203a'; else if(k==='slot_demand') linkLabel = LANG==='en'?'open my diary \u203a':'otev\u0159\u00edt di\u00e1\u0159 \u203a'; else if(k==='cohort_month_due') linkLabel = LANG==='en'?'pay now \u203a':'doplatit \u203a'; else if(k==='cohort_month_collect') linkLabel = LANG==='en'?'open roster \u203a':'otev\u0159\u00edt roster \u203a'; else if(k==='cohort_deposit_paid') linkLabel = LANG==='en'?'view roster \u203a':'otev\u0159\u00edt \u00fa\u010dastn\u00edky \u203a'; else if(k==='cohort_qr_claim') linkLabel = LANG==='en'?'view roster ›':'otevřít účastníky ›'; else if(k==='cohort_deposit_mine') linkLabel = LANG==='en'?'my course \u203a':'m\u016fj kurz \u203a';
       else if(k==='doklad_unified') linkLabel = LANG==='en'?'open the receipt \u203a':'otevřít doklad \u203a';
@@ -20404,6 +20419,7 @@ async function loadNotifications(append){
     else if(k==='merch_order') linkLabel = LANG==='en'?'view orders ›':'zobrazit objednávky ›';
     else if(k==='own_student_link') linkLabel = LANG==='en'?'open settings ›':'otevřít nastavení ›';
     else if(k==='merch_fulfilled') linkLabel = LANG==='en'?'view ›':'zobrazit ›';
+    else if(k==='gym_member_joined') linkLabel = LANG==='en'?'open members ›':'otevřít členy ›';
     else if(k==='gym_member_joined_coach') linkLabel = LANG==='en'?'view ›':'zobrazit ›';
     el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;${clickable?'cursor:pointer;':''}`;
     el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${notifText(n)}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}${clickable?` · <span style="color:var(--blue);font-weight:600;">${linkLabel}</span>`:''}</div>`;
