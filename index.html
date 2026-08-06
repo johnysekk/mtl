@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SNT stores the renewal date on a Stripe membership. The card already knew how to say 'Obnovuje se {date}' and only showed it when period_end existed -- and after a Stripe checkout nothing ever wrote one. The return handler saved status and stripe_subscription and stopped there, so the row could say it renews but never when, which is why a member who had just paid saw no date at all. session.js now retrieves the subscription's current_period_end and returns it, and the client writes it alongside the subscription id. Bank/QR memberships were unaffected: their period_end is stamped at purchase. Deploy: index.html + api/session.js. -->
+<!-- MTL build: SNV finishes what SNU only half did for events. SNU gave them a 50-row first page and no way past it, which is the same dead end the old flat limit(100) had, just at a lower number -- events are a LIST, not a swipe deck, so nothing triggers a fetch as you reach the end. They get a 'Zobrazit dalsi' button and a loadMoreEvents that appends. The first page also did not filter by country while the load-more did, so the second press would have NARROWED the list and made events disappear from it; both scope the same way now. events.country was checked against the schema before use. Deploy: index.html. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -654,6 +654,7 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
   <div class="pill" data-f="fighter">🏆 Závodníci</div>
 </div>
 <div class="filters" id="gymTagFilters" style="display:none;"></div>
+<div class="filters" id="countryFilters" style="display:none;"></div>
 
 <!-- CARD STACK -->
 <div class="stack">
@@ -3876,7 +3877,7 @@ async function openMyDisciplines(){
 
 function openMyKids(){ if($('myKidsTitle')) $('myKidsTitle').textContent=LANG==='en'?'Family':'Rodina'; if($('btnCloseMyKids')) $('btnCloseMyKids').onclick=()=>closeSheet('shMyKids'); openSheet('shMyKids'); renderMyKids(); }
 // ── JSON child -> own 15+ account migration (Path A: guardian-cooperative token link) ──
-const MTL_BUILD='SNT';
+const MTL_BUILD='SNV';
 // ── MTL dialogs (pretty replacements for native confirm/alert/prompt) ────────────────────────────
 function _mtlDialog(opts){
   return new Promise(function(resolve){
@@ -5483,7 +5484,13 @@ async function loadMoreCoaches(){
 let idx = 0;
 let filtered = [];
 let _coachCenter = null, _coachOffset = 0, _coachLoadingMore = false;
-const _COACH_PAGE = 150;   // nearest-N per page (PostGIS); load-more appends the next page
+const _COACH_PAGE = 100;
+const _GYM_PAGE = 50;
+const _EVENT_PAGE = 50;
+let _gymOffset = 0, _gymLoadingMore = false, _gymExhausted = false;
+let _evOffset = 0, _evLoadingMore = false, _evExhausted = false;
+let _deckAbroad = false;
+function _deckHomeCountry(){ return (currentUser && currentUser.country) || (window.userLoc && userLoc.country) || null; }   // nearest-N per page (PostGIS); load-more appends the next page
 let favorites = [];
 let _openProfileId = null;
 let lastCoach = null;
@@ -5530,6 +5537,8 @@ function buildFiltered(){
   if(_deckMode==='gyms') return buildGymFiltered();
   if(currentUser && currentUser.is_minor) return [];
   let list = [...COACHES];
+  // Country pick only exists once the deck has been widened past home.
+  if(_deckAbroad && window._deckCountryPick) list = list.filter(c=> c.country === window._deckCountryPick);
   // nezobrazuj sám sebe v nabídce
   if(currentUser) list = list.filter(c=>c.id!==currentUser.id && c.profileId!==currentUser.id);
   list = list.filter(c=> !c.account_suspended);
@@ -6770,20 +6779,99 @@ let GYMS=[];
 let _gymsLoaded=false;
 let gymFavorites=[];
 
+// Asked, never assumed. Somebody browsing their own city must not silently start getting results
+// from another continent -- but somebody who has genuinely seen everything at home should not hit
+// a dead end either.
+// Only appears once the deck has been widened -- before that there is nothing to filter by,
+// since everything on screen is from one country anyway.
+function renderCountryFilter(){
+  const box=document.getElementById('countryFilters'); if(!box) return;
+  if(!_deckAbroad){ box.style.display='none'; box.innerHTML=''; return; }
+  const EN=LANG==='en';
+  const set={};
+  try{ (GYMS||[]).forEach(function(g){ if(g.country) set[g.country]=(set[g.country]||0)+1; }); }catch(e){}
+  try{ (COACHES||[]).forEach(function(c){ if(c.country) set[c.country]=(set[c.country]||0)+1; }); }catch(e){}
+  const keys=Object.keys(set).sort(function(a,b){ return set[b]-set[a]; });
+  if(!keys.length){ box.style.display='none'; return; }
+  box.style.display='flex';
+  box.innerHTML='<div class="pill'+(!window._deckCountryPick?' active':'')+'" data-cf="">'+(EN?'All countries':'V\u0161echny zem\u011b')+'</div>'
+    + keys.map(function(k){ return '<div class="pill'+(window._deckCountryPick===k?' active':'')+'" data-cf="'+escapeHtml(k)+'">'+escapeHtml(k)+' <span style="opacity:.55;">'+set[k]+'</span></div>'; }).join('');
+  box.querySelectorAll('.pill').forEach(function(el){
+    el.onclick=function(){ window._deckCountryPick = el.dataset.cf || null; renderCountryFilter(); try{ if(typeof init==='function') init(); }catch(e){} };
+  });
+}
+function _offerAbroad(kind){
+  if(_deckAbroad) return;
+  if(document.getElementById('abroadPrompt')) return;
+  const EN = LANG === 'en';
+  const host = document.getElementById('cardStack') || document.getElementById('app');
+  if(!host) return;
+  const what = kind==='gyms' ? (EN?'clubs':'kluby') : kind==='events' ? (EN?'events':'ud\u00e1losti') : (EN?'coaches':'kou\u010de');
+  const el = document.createElement('div');
+  el.id='abroadPrompt';
+  el.style.cssText='margin:14px auto;max-width:400px;background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:14px 16px;text-align:center;';
+  el.innerHTML = '<div style="font-size:13.5px;font-weight:700;color:var(--dark);margin-bottom:4px;">'
+    + (EN?('That is every '+what+' here.'):('To jsou v\u0161echny '+what+' u tebe v zemi.')) + '</div>'
+    + '<div style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:10px;">'
+    + (EN?'Want to look beyond your borders?':'Chce\u0161 se pod\u00edvat i za hranice?') + '</div>'
+    + '<button id="abroadGo" style="width:100%;padding:11px;background:var(--dark);color:#fff;border:none;border-radius:11px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';font-size:13.5px;">\ud83c\udf0d '
+    + (EN?'Show other countries':'Zobrazit dal\u0161\u00ed zem\u011b') + '</button>';
+  host.appendChild(el);
+  const b=document.getElementById('abroadGo');
+  if(b) b.onclick=async function(){
+    _deckAbroad = true;
+    el.remove();
+    _gymsLoaded = false; _gymOffset = 0; _gymExhausted = false;
+    _coachOffset = 0;
+    try{ if(typeof renderCountryFilter==='function') renderCountryFilter(); }catch(e){}
+    try{ await ensureGymsLoaded(true); }catch(e){}
+    try{ if(typeof loadCoaches==='function') await loadCoaches(); }catch(e){}
+    try{ if(typeof init==='function') init(); }catch(e){}
+    toast(LANG==='en'?'\ud83c\udf0d Showing other countries too':'\ud83c\udf0d Zobrazuji i dal\u0161\u00ed zem\u011b');
+  };
+}
+function _mapGymRow(g){
+  const coords = (g.city_lat!=null && g.city_lng!=null) ? {lat:+g.city_lat,lng:+g.city_lng} : null;
+  return { isGym:true, g, id:g.id, name:g.name||'Klub', payment_mode:(g.payment_mode||null), certLevel:(g.cert_level||'verified'),
+    photo: gymFirstPhoto(g.photos)||'',
+    city: g.city||'', country: g.country||'', countryCode:(g.country_code||'').toUpperCase(),
+    disciplines: parseDisc(g.disciplines),
+    dropin: g.dropin_price||0, memb: g.membership_price||0, ownerId:g.owner_id||null, ownerPartner:false,
+    currency: g.currency||'CZK', venue_type: g.venue_type||null, levels: _gymLevels(g.schedule), coords };
+}
+async function loadMoreGyms(){
+  if(_gymLoadingMore || _gymExhausted) return false;
+  _gymLoadingMore = true;
+  try{
+    let q = supaClient.from('gyms').select('*').eq('status','approved');
+    const hc = _deckHomeCountry();
+    if(hc && !_deckAbroad) q = q.eq('country', hc);
+    const from = _gymOffset + _GYM_PAGE;
+    const { data } = await q.order('created_at',{ascending:false}).range(from, from + _GYM_PAGE - 1);
+    if(!data || !data.length){ _gymExhausted = true; _gymLoadingMore = false; try{ _offerAbroad('gyms'); }catch(e){} return false; }
+    if(data.length < _GYM_PAGE) _gymExhausted = true;
+    _gymOffset = from;
+    const have = new Set(GYMS.map(x=>x.id));
+    const add = data.filter(g=>!g.suspended && !g.deleted_at && !have.has(g.id));
+    if(add.length){
+      GYMS = GYMS.concat(add.map(_mapGymRow));
+      try{ if(typeof init==='function') init(); }catch(e){}
+    }
+    _gymLoadingMore = false;
+    return add.length > 0;
+  }catch(e){ _gymLoadingMore=false; return false; }
+}
 async function ensureGymsLoaded(force){
   if(_gymsLoaded && !force){ return; }
   try{
-    const { data } = await supaClient.from('gyms').select('*').eq('status','approved');
+    _gymOffset = 0; _gymExhausted = false;
+    let _q = supaClient.from('gyms').select('*').eq('status','approved');
+    const _hc = _deckHomeCountry();
+    if(_hc && !_deckAbroad) _q = _q.eq('country', _hc);
+    const { data } = await _q.order('created_at',{ascending:false}).range(0, _GYM_PAGE - 1);
     const gyms=(data||[]).filter(g=>!g.suspended && !g.deleted_at);
-    GYMS=gyms.map(g=>{
-      const coords = (g.city_lat!=null && g.city_lng!=null) ? {lat:+g.city_lat,lng:+g.city_lng} : null;
-      return { isGym:true, g, id:g.id, name:g.name||'Klub', payment_mode:(g.payment_mode||null), certLevel:(g.cert_level||'verified'),
-        photo: gymFirstPhoto(g.photos)||'',
-        city: g.city||'', country: g.country||'', countryCode:(g.country_code||'').toUpperCase(),
-        disciplines: parseDisc(g.disciplines),
-        dropin: g.dropin_price||0, memb: g.membership_price||0, ownerId:g.owner_id||null, ownerPartner:false,
-        currency: g.currency||'CZK', venue_type: g.venue_type||null, levels: _gymLevels(g.schedule), coords };
-    });
+    if(!data || data.length < _GYM_PAGE) _gymExhausted = true;
+    GYMS=gyms.map(_mapGymRow);
     try{ const _oids=[...new Set(gyms.map(x=>x.owner_id).filter(Boolean))]; if(_oids.length){ const { data:_ow } = await supaClient.from('profiles').select('id,partner').in('id',_oids); const _opm={}; (_ow||[]).forEach(o=>_opm[o.id]=!!o.partner); GYMS.forEach(c=>{ if(c.ownerId) c.ownerPartner=!!_opm[c.ownerId]; }); } }catch(e){}
     try{ const _gids=gyms.map(x=>x.id).filter(Boolean); if(_gids.length){ const { data:_acp } = await supaClient.from('gym_coach_pricing').select('gym_id,coach_id,dropin_price').eq('status','approved').in('gym_id',_gids); const _cpg={}; const _cids2=new Set(); (_acp||[]).forEach(cp=>{ if(cp.dropin_price>0){ (_cpg[cp.gym_id]=_cpg[cp.gym_id]||[]).push(cp); _cids2.add(cp.coach_id); } }); let _cpm={}; if(_cids2.size){ const { data:_cpp } = await supaClient.from('profiles').select('id,partner').in('id',[..._cids2]); (_cpp||[]).forEach(pp=>{_cpm[pp.id]=!!pp.partner;}); } GYMS.forEach(c=>{ const _o=[]; if(c.dropin>0) _o.push(c.dropin*gdMul(c.ownerPartner)); (_cpg[c.id]||[]).forEach(cp=>_o.push(cp.dropin_price*gdMul(_cpm[cp.coach_id]))); if(_o.length){ c.priceFrom=Math.min(..._o); c.priceMulti=(new Set(_o.map(x=>Math.round(x))).size)>1; } }); } }catch(e){}
     _gymsLoaded=true;
@@ -6949,6 +7037,7 @@ const NEW_PROV_DAYS=30, NEW_PROV_COACH_BOOST=15, NEW_PROV_GYM_KM=12;
 function _isNewProvider(createdAt){ if(!createdAt) return false; const t=new Date(createdAt).getTime(); if(isNaN(t)) return false; return (Date.now()-t) < NEW_PROV_DAYS*86400000; }
 function buildGymFiltered(){
   let list=[...GYMS].filter(function(x){ try{ return ((_mtlPayReady(x.g).ready && !x.g.account_suspended) || (currentUser && x.ownerId===currentUser.id)); }catch(e){ return true; } });
+  if(_deckAbroad && window._deckCountryPick) list = list.filter(g=> g.country === window._deckCountryPick);
   if(window._blockedByGyms && window._blockedByGyms.size) list=list.filter(g=> !window._blockedByGyms.has(g.id));
   /* vlastní kluby zůstávají v decku (owner/tým si může rezervovat lekci) */
   list.forEach(g=>{ g.distKm = (userLoc && g.coords) ? haversine(userLoc.lat,userLoc.lng,g.coords.lat,g.coords.lng) : null; });
@@ -7022,7 +7111,7 @@ function doPass(){
   lastCoach=filtered[idx];
   const f=$('cardFront'); f.classList.add('fly-left');
   toast(L('⏭️ Přeskočeno'));
-  setTimeout(()=>{ idx++; renderCards(); if(_coachCenter && idx>=filtered.length-8) loadMoreCoaches(); }, 350);
+  setTimeout(()=>{ idx++; renderCards(); if(idx>=filtered.length-8){ if(_deckMode==='gyms'){ loadMoreGyms(); } else if(_coachCenter){ loadMoreCoaches(); } } }, 350);
 }
 
 function doGo(){
@@ -7815,12 +7904,35 @@ function _applyDeckSort(list){
   }catch(e){}
   return list;
 }
+async function loadMoreEvents(){
+  if(_evLoadingMore || _evExhausted) return false;
+  _evLoadingMore = true;
+  try{
+    const today=new Date(); today.setHours(0,0,0,0);
+    let q = supaClient.from('events').select('*').eq('status','approved').gte('starts_at', today.toISOString());
+    const hc=_deckHomeCountry(); if(hc && !_deckAbroad) q=q.eq('country', hc);
+    const from=_evOffset + _EVENT_PAGE;
+    const { data } = await q.order('starts_at',{ascending:true}).range(from, from + _EVENT_PAGE - 1);
+    if(!data || !data.length){ _evExhausted=true; _evLoadingMore=false; try{ _offerAbroad('events'); }catch(e){} return false; }
+    if(data.length < _EVENT_PAGE) _evExhausted=true;
+    _evOffset = from;
+    const have=new Set((window._evList||[]).map(x=>x.id));
+    const add=data.filter(e=>!have.has(e.id));
+    window._evList=(window._evList||[]).concat(add);
+    _evLoadingMore=false;
+    try{ const b=document.getElementById('eventsBody')||document.getElementById('evBody'); if(b) await renderEventsAsync(b); }catch(e){}
+    return add.length>0;
+  }catch(e){ _evLoadingMore=false; return false; }
+}
 async function renderEventsAsync(box){
   let html='';
   try{ const {data:cr}=await supaClient.from('gym_coaches').select('gym_id').eq('coach_id',currentUser.id).eq('status','active').eq('can_request_fighters',true); window._canReqF=!!(cr&&cr.length); window._reqFGym=(cr&&cr[0]&&cr[0].gym_id)||null; }catch(e){ window._canReqF=false; }
   try{
     const today=new Date(); today.setHours(0,0,0,0);
-    const { data:evs } = await supaClient.from('events').select('*').eq('status','approved').gte('starts_at', today.toISOString()).order('starts_at',{ascending:true}).limit(100);
+    let _eq = supaClient.from('events').select('*').eq('status','approved').gte('starts_at', today.toISOString());
+    { const _ehc=_deckHomeCountry(); if(_ehc && !_deckAbroad) _eq=_eq.eq('country', _ehc); }
+    const { data:evs } = await _eq.order('starts_at',{ascending:true}).range(0, _EVENT_PAGE - 1);
+    _evOffset = 0; _evExhausted = !evs || evs.length < _EVENT_PAGE;
     window._evList = evs||[];
     // Map a cohort row to the event-card shape so the deck renders it via swipeCardHtml. Deposit is
     // the entry price shown; price_tiers become ticket_tiers; host-gym coords drive distance.
@@ -7904,7 +8016,9 @@ async function renderEventsAsync(box){
       html += `<div style="text-align:center;padding:40px 16px;color:var(--light);"><div style="font-size:40px;margin-bottom:10px;">🥊</div><div style="font-weight:700;color:var(--dark);margin-bottom:6px;">${LANG==='en'?'No events near you yet':'Zatím tu nejsou žádné události'}</div><div style="font-size:13px;line-height:1.5;">${LANG==='en'?'Fight nights, seminars and camps will show up here.':'Fight nights, semináře a kempy se objeví tady.'}</div></div>`;
     }
   }catch(e){}
+  if(!_evExhausted) html += '<button id="evMore" style="width:100%;margin-top:12px;padding:12px;background:var(--surf);border:1px solid var(--border);border-radius:12px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';color:var(--dark);">'+(LANG==='en'?'Show more':'Zobrazit dal\u0161\u00ed')+'</button>';
   box.innerHTML=html;
+  { const _em=document.getElementById('evMore'); if(_em) _em.onclick=function(){ _em.disabled=true; _em.textContent=L('Na\u010d\u00edt\u00e1m...'); loadMoreEvents(); }; }
   const _esb=$('evSportBtn'); if(_esb) _esb.onclick=openDiscPicker;
   box.querySelectorAll('.evTypeChip').forEach(c=>c.onclick=()=>{ window._evFilterType=c.dataset.v; window._evIdx=0; renderEventsAsync(box); });
   if($('evDeck')) evRenderSwipe();
