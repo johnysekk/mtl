@@ -171,20 +171,64 @@ function cohortDepositHtml(name, courseName, gymName, depositTxt, remainderTxt, 
 // Gym jede direct charge na účtu gymu; application_fee MTL končí na platform balance,
 // odkud pošleme 0,5 % základu ambassadorovi dané disciplíny (transfer mezi účty = bez Stripe fee).
 // Vyžaduje: webhook nasazený + naslouchání Connect eventům (event.account je u gym plateb).
-// The ambassador role is retired, so this pays nobody. NEUTERED rather than deleted, and the
-// call sites left in place, deliberately: this file is the webhook that records every payment MTL
-// takes. A call to a function that no longer exists would throw inside the handler, and a throwing
-// webhook means transactions stop being written -- the money still moves at Stripe while the ledger
-// silently falls behind. One missed call site is all it would take.
-async function payGymAmbassador(discCsv, base, currency, idemKey, pi) { return; }
-// Same as payGymAmbassador, for coach 1:1.
-async function payAmbassador(coachId, amount, currency, disc, idemKey) { return; }
+async function payGymAmbassador(discCsv, base, currency, idemKey, pi) {
+  try {
+    if (!base || base <= 0) return;
+    const discs = (discCsv || '').split(',').filter(Boolean);
+    if (!discs.length) return;
+    const ambs = await sbGet(`profiles?select=id,stripe_account,verify_disciplines`);
+    const amb = (ambs || []).find(a => a.stripe_account && (() => {
+      try { const v = a.verify_disciplines ? (typeof a.verify_disciplines === 'string' ? JSON.parse(a.verify_disciplines) : a.verify_disciplines) : []; return Array.isArray(v) && v.some(x => discs.includes(x)); } catch (e) { return false; }
+    })());
+    if (!amb) return;
+    const cut = Math.round(base * 0.005 * 100); // 0,5 % základu v minor units
+    if (cut > 0) await stripe.transfers.create(
+      { amount: cut, currency: (currency || 'czk').toLowerCase(), destination: amb.stripe_account, description: 'MTL Ambassador 0.5% (gym)', ...(pi ? { transfer_group: pi } : {}), metadata: { mtl_kind: 'ambassador', ...(pi ? { mtl_pi: pi } : {}) } },
+      idemKey ? { idempotencyKey: 'gymamb_' + idemKey } : undefined
+    );
+  } catch (e) { console.error('payGymAmbassador', e); }
+}
+async function payAmbassador(coachId, amount, currency, disc, idemKey) {
+  try {
+    if (!coachId || !amount || amount <= 0) return;
+    let discs = [];
+    if (disc) { discs = [disc]; }
+    else {
+      const cps = await sbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=disciplines`);
+      try { const cp = cps[0]; discs = cp && cp.disciplines ? (typeof cp.disciplines === 'string' ? JSON.parse(cp.disciplines) : cp.disciplines) : []; } catch (e) {}
+      // jen pokud má kouč JEDINOU disciplínu (jinak neznáme atribuci)
+      if (Array.isArray(discs) && discs.length > 1) return;
+    }
+    if (!Array.isArray(discs) || !discs.length) return;
+    // NOTE: při škále filtrovat na straně DB; zatím prosté načtení profilů.
+    const ambs = await sbGet(`profiles?select=id,stripe_account,verify_disciplines`);
+    const amb = (ambs || []).find(a => a.id !== coachId && a.stripe_account && (() => {
+      try { const v = a.verify_disciplines ? (typeof a.verify_disciplines === 'string' ? JSON.parse(a.verify_disciplines) : a.verify_disciplines) : []; return Array.isArray(v) && v.some(x => discs.includes(x)); } catch (e) { return false; }
+    })());
+    if (!amb) return;
+    const cut = Math.round(amount * 0.005 * 100); // 0,5 % základu v minor units
+    if (cut > 0) await stripe.transfers.create({ amount: cut, currency: (currency || 'CZK').toLowerCase(), destination: amb.stripe_account, description: 'MTL Ambassador 0.5%', ...(idemKey ? { transfer_group: idemKey } : {}), metadata: { mtl_kind: 'ambassador', ...(idemKey ? { mtl_pi: idemKey } : {}) } }, idemKey ? { idempotencyKey: 'amb_' + idemKey } : undefined);
+  } catch (e) { console.error('payAmbassador', e); }
+}
 
 // CLAWBACK: when MTL refunds its own commission, reverse the ambassador's 0.5% proportionally.
 // Finds the ambassador transfer by transfer_group = payment_intent (set at payout) and reverses
 // (transfer.amount * fraction) minus whatever was already reversed (idempotent for partial->full).
-// Nothing was paid out, so nothing can be clawed back.
-async function clawbackAmbassador(pi, fraction) { return; }
+async function clawbackAmbassador(pi, fraction) {
+  try {
+    if (!pi || !(fraction > 0)) return;
+    let list;
+    try { list = await stripe.transfers.list({ transfer_group: pi, limit: 20 }); } catch (e) { console.error('amb list', e.message); return; }
+    for (const tr of (list && list.data) || []) {
+      if (!(tr.metadata && tr.metadata.mtl_kind === 'ambassador')) continue;
+      const target = Math.round((tr.amount || 0) * Math.min(1, fraction));
+      const toReverse = target - (tr.amount_reversed || 0);
+      if (toReverse > 0) {
+        try { await stripe.transfers.createReversal(tr.id, { amount: toReverse, description: 'MTL Ambassador clawback (refund)', metadata: { mtl_clawback: '1', mtl_pi: pi } }); } catch (e) { console.error('amb reversal', e.message); }
+      }
+    }
+  } catch (e) { console.error('clawbackAmbassador', e); }
+}
 
 // Přepíše application_fee_percent na VŠECH aktivních membership subscriptions
 // gymů vlastněných daným uživatelem (Partner: 4 %, jinak 5 %). Aplikuje se na
@@ -500,6 +544,10 @@ export default async function handler(req, res) {
                 training_date: slot.date, training_time: slot.time,
                 status: 'active', type: 'inperson', currency, discipline: m.discipline || null,
               });
+              if (slot.coach_profile_id) await sbPost('notifications', {
+                user_id: slot.coach_profile_id, type: 'booking', read: false,
+                message: `📅 Nová rezervace (potvrzeno platbou) na ${slot.date} ${slot.time}.`,
+              });
               await payAmbassador(slot.coach_profile_id, amount, currency, m.discipline, pi);
               await recordTransaction(event.account, pi, { type: 'coach_inperson', welcome_waived: _ww, member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', gross: amount, currency });
             }
@@ -674,7 +722,7 @@ export default async function handler(req, res) {
         if (uid) {
           await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: true, partner_sub: sub || null, stripe_customer: cust || null });
           await rerateGymMemberships(uid, 3); // existující členství → 3 % od příští faktury (Exclusive Partner)
-          await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Teď jsi Exclusive MTL Partner! Ze všeho (lekce, členství, eventy, kurzy) si necháváš 99 % — provize MTL jen 1 %. A když ti MTL přivede nového člena přes objevení v appce, máš akvizici za půlku: 5 % místo 10 % (první 2 měsíce členství / první 1:1 lekce), pak zpět na 1 %. 🥊' });
+          await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Byla ti udělena sazba Exclusive MTL Partner — od teď je provize MTL 0,5 % a akviziční pouze 5 %. 🥊' });
           await sbPost('notifications', { user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'system', read: false, message: `⭐ Nový Exclusive MTL Partner (user ${uid}).` });
         }
       } else if (m.mtl_payment_type === 'event_ticket') {
