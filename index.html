@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SPN fixes what SPL broke. SPL collapsed seven copies of the PIS condition into one helper with a single blind string replace that assumed the variable was called payee at every site. At one of the seven, _onlineQrPay, there is no payee at all, so the club drop-in QR sheet threw a ReferenceError after the booking row had already been written: nothing rendered and the next attempt reported an unfinished reservation. That site now passes _qrPayeeObj and the gym id, which is what it actually has. All seven call sites were re-checked against the enclosing function scope, and runtime_check.js was written to catch this class of mistake rather than trusting a count of replacements again. -->
+<!-- MTL build: SPO. The per-club toggle could never work, because the PIS button needs BOTH _pisAllowed and _pisAvailable to say yes and _pisAvailable still carried the old rule: not globally enabled and not the founder means false, entity flag never consulted. It now defers to _pisAllowed and, in test mode, returns true without the bank-availability fetch, which was measuring the club country while the test overrides everything to Norway anyway. The drop-in site asks once instead of twice. KNOWN GAP, deliberately not patched blind: the payee objects built for events, coach 1:1, both cohort flows and merch are literals carrying only receiver_id_type, receiver_id_value and receiver_name, so those five have no id to match the toggle against and stay founder-only until the id is threaded into each literal from its own source row. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -16551,11 +16551,10 @@ window._checkModePromotion=async function(){
 window._checkWelcomeBanner=function(){ try{ if(typeof supaClient==='undefined') return; supaClient.from('profiles').select('welcome_zero_off').eq('id','7e08d4bb-0efa-47ae-bd6a-85e9bd04400c').single().then(function(r){ var off=!!(r&&r.data&&r.data.welcome_zero_off); document.querySelectorAll('.welcomeZeroBanner').forEach(function(b){ b.style.display=off?'none':''; }); }).catch(function(e){}); }catch(e){} };
 window._refreshPayEntry=function(){ if(typeof currentUser==='undefined'||!currentUser) return; try{ var _prov=!!(currentUser.coach_status==='approved' || currentUser.role==='founder' || (typeof FOUNDER_UUID!=='undefined'&&currentUser.id===FOUNDER_UUID) || (window._myGyms&&window._myGyms.length) || (typeof _myGymData!=='undefined'&&_myGymData&&_myGymData.id)); document.body.classList.toggle('mtl-provider', !!_prov); }catch(e){} };
 window._pisAvailCache={};
-async function _pisAvailable(country){
+async function _pisAvailable(country, ent, id){
   country=String(country||'CZ').toUpperCase();
-  var _pisFounder=_pisFounderNow();
-  if(!(window._PIS_ENABLED || _pisFounder)) return false;
-  if(!window._PIS_ENABLED && _pisFounder) return true;  // sandbox founder: show the button; _pisPayFlow applies the NO test override + does its own bank fetch
+  if(!_pisAllowed(ent, id)) return false;
+  if(!window._PIS_ENABLED) return true;  // sandbox founder: show the button; _pisPayFlow applies the NO test override + does its own bank fetch
   if(window._pisAvailCache[country]!==undefined) return window._pisAvailCache[country];
   try{ const r=await fetch('/api/pis-aspsps?country='+country); const d=await r.json(); const ok=!!((d.aspsps||[]).some(function(b){ return (b.psu_types||[]).indexOf('personal')>=0; })); window._pisAvailCache[country]=ok; return ok; }
   catch(e){ window._pisAvailCache[country]=false; return false; }
@@ -16576,6 +16575,8 @@ function _pisAllowed(ent, id){
   var m=window._PIS_TEST_IDS; if(!m) return false;
   if(id && m[id]) return true;
   if(ent && ent.id && m[ent.id]) return true;
+  if(ent && ent.gym_id && m[ent.gym_id]) return true;
+  if(ent && ent.coach_id && m[ent.coach_id]) return true;
   return false;
 }
  // NEONOMICS SANDBOX phase: false => testMode on + founder-only button (no real money). Flip to TRUE when Neonomics production + CZ banks are live (NEONOMICS_ENV=production).
@@ -16835,7 +16836,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan){
   const payload=(typeof _bankQrPayload==='function')?_bankQrPayload(_qrPayeeObj, price, msg):null;
   const _pisIban=String((_qrPayeeObj&&_qrPayeeObj.receiver_id_value)||(g&&g.receiver_id_value)||'').replace(/\s+/g,'');
   const _pisCountry=String(_pisIban.slice(0,2)||'CZ').toUpperCase();
-  const _pisOn=_pisAllowed(_qrPayeeObj, (g&&g.id)||null) && (await _pisAvailable(_pisCountry));
+  const _pisOn=await _pisAvailable(_pisCountry, _qrPayeeObj, (g&&g.id)||null);
   if((location.search||'').indexOf('pisdebug')>=0){ try{ toast('PIS dbg on='+_pisOn+' en='+(!!window._PIS_ENABLED)+' role='+((currentUser&&currentUser.role)||'?')+' uuidF='+(!!(currentUser&&currentUser.id===FOUNDER_UUID))+' ctry='+_pisCountry); }catch(e){} }
   const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100000;display:flex;align-items:center;justify-content:center;padding:20px;';
   ov.innerHTML='<div style="background:#fff;border-radius:18px;padding:22px;max-width:340px;width:100%;text-align:center;font-family:\'DM Sans\';">'
