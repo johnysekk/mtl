@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SPD reverts the sensei filter SPC added, which was wrong, and keeps the membership fix, which was not. A dojo sensei sells NOTHING: the card carries no rate, openProfile calls renderDojoSenseiCta instead of renderOffers, and the button sends you to the dojo rather than to a checkout. They appear in the deck so a traditional dojo can be found at all, so filtering them on payment readiness was applying a purchase rule to something nobody can buy. Filter and the payment columns it needed are both removed. What stays from SPC is the real gap: an autonomous coach's MEMBERSHIP PLANS were built from window._gymCoachPricing with no readiness check, so they stayed on sale and the checkout failed server-side. The club profile turns out to be carefully built already -- classes paid to a coach are dropped when they cannot be paid while club-paid classes stay, and a coach's team card is hidden only if they lead no remaining visible class, so somebody who teaches for the club keeps their card. Deploy: plan-classes.sql + index.html. -->
+<!-- MTL build: SPE moves the coach payout account out of Platby & provize and into Payment mode, under Stripe, rendered exactly like the club owner rows (label, checkmark, arrow) and shown on the same condition as before (gym_payout_account or granted autonomy). The connect flow itself is unchanged and now lives in one function, _connectCoachPayout, instead of an inline handler. Not done: the displayed commission tier is still read from profiles.founding via /api/my-rate and was NOT touched, because the card showing Founding Partner while the column reads false is unexplained and guessing at it would hide the cause. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -30050,41 +30050,14 @@ async function renderPaymentsPage(){
   var _curL=(currentUser.currency||(window._myGyms&&window._myGyms[0]&&window._myGyms[0].currency)||'CZK');
   // Payment-currency picker removed: currency is PER ENTITY now (set in coach settings / gym settings).
   {
-    var _isAuto = !!(currentUser && (currentUser.gym_payout_account || window._cpAutonomy || (window._myTeamAutonomy===true)));
-    if(_isAuto){
-      var _pa = currentUser.gym_payout_account || '';
-      h += '<div class="sec-lbl" style="margin-top:18px;">\U0001f4b3 ' + (EN?'Payout account':'V\u00fdplatn\u00ed \u00fa\u010det') + '</div>'
-        + '<div style="font-size:11.5px;color:var(--light);line-height:1.5;margin-bottom:8px;">'
-        + (EN ? 'Where a club sends your share for classes and events you are paid for.'
-              : 'Kam ti klub pos\u00edl\u00e1 tvoji \u010d\u00e1st za lekce a ud\u00e1losti, kde jsi p\u0159\u00edjemce.') + '</div>'
-        + '<button id="payCoachPayout" style="width:100%;padding:12px;background:' + (_pa?'var(--surf)':'#635BFF') + ';color:' + (_pa?'var(--dark)':'#fff') + ';border:' + (_pa?'1px solid var(--border)':'none') + ';border-radius:11px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';text-align:left;">'
-        + (_pa ? ('\u2705 ' + (EN?'Connected':'P\u0159ipojen') + '<br><span style="font-size:11px;font-weight:400;color:var(--mid);">' + escapeHtml(_pa) + ' \u00b7 ' + (EN?'change':'zm\u011bnit') + '</span>')
-               : ('\U0001f517 ' + (EN?'Connect a payout account':'P\u0159ipojit v\u00fdplatn\u00ed \u00fa\u010det')))
-        + '</button>';
-    }
+    /* payout-account block moved to renderPayModeSheet (Stripe section), same shape as the club rows */
     var _canEP = !!(currentUser && !currentUser.partner && (currentUser.coach_status==='approved' || currentUser.gym_official || (window._myGyms && window._myGyms.length)));
     if(_canEP) h += '<button id="payBecomePartner" style="width:100%;margin-top:12px;padding:13px;background:linear-gradient(135deg,#FFEFB0 0%,#F5B922 48%,#D98A0E 100%);color:#3a2400;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">\u2b50 '
       + (EN ? 'Become an Exclusive MTL Partner \u2014 0.5%' : 'Sta\u0148 se Exclusive MTL Partnerem \u2014 0,5 %') + '</button>';
   }
   body.innerHTML=h;
   try{ var _bp=document.getElementById('payBecomePartner'); if(_bp) _bp.onclick=function(){ if(typeof openPartnerInfo==='function') openPartnerInfo(); }; }catch(e){}
-  try{
-    var _cp=document.getElementById('payCoachPayout');
-    if(_cp) _cp.onclick=async function(){
-      const EN2 = LANG==='en';
-      if(currentUser.gym_payout_account && !confirm(EN2?'Connect a different payout account? The current one stays active until the new one is verified.':'P\u0159ipojit jin\u00fd v\u00fdplatn\u00ed \u00fa\u010det? St\u00e1vaj\u00edc\u00ed z\u016fstane akt\u00edvn\u00ed, dokud nen\u00ed nov\u00fd ov\u011b\u0159en\u00fd.')) return;
-      const _cc = await pickCountry(_guessCC()); if(!_cc) return;
-      _cp.disabled=true; _cp.textContent=L('Vytv\u00e1\u0159\u00edm...');
-      try{
-        const r=await fetch('/api/create-gym?for=coach&gymProfileId='+encodeURIComponent(currentUser.id)+'&country='+_cc);
-        const j=await r.json();
-        if(j&&j.url){ window.location.href=j.url; return; }
-        toast('\u26a0\ufe0f '+((j&&j.error)||''));
-      }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
-      _cp.disabled=false;
-    };
-  }catch(e){}
-  try{ var _ai=document.getElementById('acqInfoBtn'), _ab=document.getElementById('acqInfoBox');
+    try{ var _ai=document.getElementById('acqInfoBtn'), _ab=document.getElementById('acqInfoBox');
     if(_ai&&_ab) _ai.onclick=function(){ _ab.style.display=(_ab.style.display==='none'?'':'none'); }; }catch(e){}
   (async function(){ try{ var _s=await supaClient.auth.getSession(); var _t=(_s&&_s.data&&_s.data.session&&_s.data.session.access_token)||''; if(!_t) return;
     var _md=(typeof _mtlPayMode==='function'?_mtlPayMode(currentUser):currentUser.payment_mode)||'stripe';
@@ -30095,6 +30068,21 @@ async function renderPaymentsPage(){
   }catch(e){} })();
   var rm=document.getElementById('payRowMode'); if(rm) rm.onclick=function(){ openSheet('shPayMode'); if(typeof renderPayModeSheet==='function') renderPayModeSheet(); };
   var rcu=document.getElementById('payRowCur'); if(rcu) rcu.onclick=function(){ if(typeof openCurrencyPicker==='function') openCurrencyPicker(); };
+}
+function _connectCoachPayout(btn){
+  var EN2 = LANG==='en';
+  if(currentUser.gym_payout_account && !confirm(EN2?'Connect a different payout account? The current one stays active until the new one is verified.':'P\u0159ipojit jin\u00fd v\u00fdplatn\u00ed \u00fa\u010det? St\u00e1vaj\u00edc\u00ed z\u016fstane akt\u00edvn\u00ed, dokud nen\u00ed nov\u00fd ov\u011b\u0159en\u00fd.')) return;
+  (async function(){
+    var _cc = await pickCountry(_guessCC()); if(!_cc) return;
+    if(btn) btn.disabled=true;
+    try{
+      var r=await fetch('/api/create-gym?for=coach&gymProfileId='+encodeURIComponent(currentUser.id)+'&country='+_cc);
+      var j=await r.json();
+      if(j&&j.url){ window.location.href=j.url; return; }
+      toast('\u26a0\ufe0f '+((j&&j.error)||''));
+    }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
+    if(btn) btn.disabled=false;
+  })();
 }
 function renderPayModeSheet(){
   var EN=LANG==='en'; var body=document.getElementById('payModeBody'); if(!body||!currentUser) return;
@@ -30118,9 +30106,12 @@ function renderPayModeSheet(){
   var _shd='<div style="font-size:11.5px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:var(--light);margin-bottom:10px;">'+(EN?'Set up Stripe account':'Nastav Stripe \u00fa\u010det')+'</div>';
   if(_isC) _shd+='<button class="payMdStripeCoach" style="'+_ibs+'"><span>'+(EN?'Coach':'Kou\u010d')+(currentUser.stripe_account?' \u2705':'')+'</span>'+_iarr+'</button>';
   (window._myGyms||[]).forEach(function(gg){ _shd+='<button class="payMdStripeGym" data-gid="'+gg.id+'" style="'+_ibs+'"><span>'+escapeHtml(gg.name||'Klub')+(gg.stripe_account?' \u2705':'')+'</span>'+_iarr+'</button>'; });
+  var _isAutoPay = !!(currentUser && (currentUser.gym_payout_account || window._cpAutonomy || (window._myTeamAutonomy===true)));
+  if(_isAutoPay){ _shd+='<button class="payMdStripePayout" style="'+_ibs+'"><span>'+(EN?'Payout account':'V\u00fdplatn\u00ed \u00fa\u010det')+(currentUser.gym_payout_account?' \u2705':'')+'</span>'+_iarr+'</button>'+'<div style="font-size:11.5px;color:var(--light);line-height:1.5;margin:-2px 0 8px 2px;">'+(EN?'Where a club sends your share for classes and events you are paid for.':'Kam ti klub pos\u00edl\u00e1 tvoji \u010d\u00e1st za lekce a ud\u00e1losti, kde jsi p\u0159\u00edjemce.')+'</div>'; }
   _isw.innerHTML=_shd; body.appendChild(_isw);
   var _sdc=_isw.querySelector('.payMdStripeCoach'); if(_sdc) _sdc.onclick=function(){ if(typeof openCommissionCard==='function') openCommissionCard('coach',{accountOnly:true, asSheet:true, viewMode:'stripe'}); };
   _isw.querySelectorAll('.payMdStripeGym').forEach(function(b){ b.onclick=function(){ if(typeof openCommissionCard==='function') openCommissionCard('gym',{accountOnly:true, asSheet:true, viewMode:'stripe', gymId:b.getAttribute('data-gid')}); }; });
+  var _spo=_isw.querySelector('.payMdStripePayout'); if(_spo) _spo.onclick=function(){ _connectCoachPayout(_spo); };
   body.querySelectorAll('input[name="payMdMode"]').forEach(function(r){ r.addEventListener('change', function(){ _iw.style.display=(this.value==='qr_bank')?'block':'none'; _isw.style.display=(this.value==='stripe')?'block':'none'; }); });
   var _svWrap=document.createElement('div'); _svWrap.innerHTML='<button id="payMdSave" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-weight:700;font-size:14px;cursor:pointer;font-family:inherit;margin-top:20px;">'+(EN?'Save mode':'Ulo\u017eit re\u017eim')+'</button>'; body.appendChild(_svWrap);
   var sv=document.getElementById('payMdSave'); if(sv) sv.onclick=async function(){ var sel=body.querySelector('input[name="payMdMode"]:checked'); var m=sel?sel.value:''; if(!m){ toast(EN?'Pick a mode':'Zvol re\u017eim'); return; } var _cur=(typeof _mtlPayMode==='function'?_mtlPayMode(currentUser):currentUser.payment_mode)||''; if(m!==_cur){ var _mg=await _modeSwitchGate(m, null); if(!_mg.ready){
