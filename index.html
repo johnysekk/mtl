@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SQB lets a person buy more than one ticket for the same event. Owning one used to make it impossible to buy a second, which was never decided: the ticket query was limit(1) and the render swapped the buy button out for the ticket box, so the two together silently enforced one ticket per person. At a fight night that is the wrong default -- a partner, two kids, a seat and a standing ticket are the normal case. All tickets are loaded now, the box summarises them as paid and not-yet-paid counts with a total, and the buy button stays and reads Buy another ticket. One row per seat on purpose, so each keeps its own QR and its own check-in; a qty column on one row would give three people one scan and a door list that counts rows instead of people. A single payment covering several seats is a separate thing and needs an order above the tickets, which this does not attempt. -->
+<!-- MTL build: SQC writes the ticket clickwrap down. It had zero _recordConsent and zero inserts: the checkbox unlocked the button and nothing else, so the one clause that costs money when disputed -- the ticket is non-refundable -- was agreed to and undocumented, even for logged-in buyers. It now goes through _recordConsent like waivers, terms, marketing and the guardian consents already do. No new table and no volume problem: record-consent.js stores the wording ONCE per kind, scope, version and language in consent_versions and each acceptance is a small row pointing at it, with the hash of what was actually displayed. The displayed clause and the recorded text are now one variable, including the organiser own terms when they set them, so they cannot drift. TICKET_CONSENT_VERSION must be bumped when the wording changes; the endpoint refuses to let text change under a version already in use and flags a hash mismatch instead. Accountless buyers are NOT covered -- record-consent requires a user_id -- and that is part of the public ticket form, not this. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -4555,6 +4555,11 @@ function renderMyKids(){
   box.querySelectorAll('.kidRestore').forEach(b=>b.onclick=()=>restoreChild(+b.dataset.i));
 }
 const KID_CONSENT_VERSION='2026-06-v1';
+// Bump this whenever the ticket clickwrap wording below changes. record-consent.js stores the exact
+// wording ONCE per (kind, scope, version, lang) and refuses to let it change under a version that is
+// already in use -- it flags a hash mismatch instead. So the version is not decoration: it is what
+// keeps an old acceptance meaning what it said at the time.
+const TICKET_CONSENT_VERSION='2026-08-v1';
 const GUARDIAN_CONSENT_CS='Prohlašuji, že jsem zákonný zástupce tohoto nezletilého a souhlasím se správou jeho účtu, tréninkových dat a se zastupováním nezletilého v rámci podmínek MTL.';
 const GUARDIAN_CONSENT_EN='I declare that I am the legal guardian of this minor and consent to managing their account and training data and to acting on the minor\u2019s behalf under the MTL terms.';
 const EVENT_CONSENT_CS='Jako zákonný zástupce schvaluji účast tohoto nezletilého na uvedené akci a nákup vstupenky jeho jménem.';
@@ -8636,11 +8641,15 @@ function _tkUnpaid(t){ var st=String((t&&t.status)||''); return st==='reserved' 
 function _tkClaimed(t){ return String((t&&t.status)||'')==='paid_claimed'; }
 function showTicketClickwrap(ev, tier){
   const cur=ev.currency||'CZK'; const sym=_curSym(cur); const EN=LANG==='en';
+  // The exact wording the person is shown, kept in one variable so what is displayed and what is
+  // recorded cannot drift apart. The organiser's own terms, when they set any, are part of it.
+  const _cwClause=(EN?'I understand this ticket is non-refundable. Any refund is handled by the organizer directly; MTL is not responsible for the state of payments.':'Beru na v\u011bdom\u00ed, \u017ee tento l\u00edstek je nevratn\u00fd. P\u0159\u00edpadn\u00e9 refundace \u0159e\u0161\u00ed po\u0159adatel p\u0159\u00edmo, MTL nezodpov\u00edd\u00e1 za stav plateb.');
+  const _cwText=[(ev.terms_text&&ev.terms_text.trim())?ev.terms_text.trim():'', _cwClause].filter(Boolean).join('\n\n---\n\n');
   const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:250;display:flex;align-items:flex-end;justify-content:center;';
   ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px;padding:20px;">
     <div style="font-size:17px;font-weight:800;margin-bottom:6px;">${EN?'Before you pay':'Než zaplatíš'}</div>
     <div style="font-size:13px;color:var(--mid);line-height:1.55;margin-bottom:14px;">${EN?'Ticket':'Lístek'}: <b>${escapeHtml(tier.name||(EN?'Ticket':'Lístek'))}</b> · ${fmtPrice(tier.price||0,cur)} ${sym}</div>${(ev.terms_text&&ev.terms_text.trim())?`<div style="max-height:180px;overflow-y:auto;font-size:12.5px;color:var(--dark);line-height:1.55;white-space:pre-wrap;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:14px;">${escapeHtml(ev.terms_text.trim())}</div>`:''}
-    <label style="display:flex;align-items:flex-start;gap:10px;font-size:13px;cursor:pointer;color:var(--dark);line-height:1.5;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:14px;"><input type="checkbox" id="cwChk" style="width:20px;height:20px;flex-shrink:0;margin-top:1px;"> <span>${EN?'I understand this ticket is non-refundable. Any refund is handled by the organizer directly; MTL is not responsible for the state of payments.':'Beru na vědomí, že tento lístek je nevratný. Případné refundace řeší pořadatel přímo, MTL nezodpovídá za stav plateb.'}</span></label>
+    <label style="display:flex;align-items:flex-start;gap:10px;font-size:13px;cursor:pointer;color:var(--dark);line-height:1.5;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:14px;"><input type="checkbox" id="cwChk" style="width:20px;height:20px;flex-shrink:0;margin-top:1px;"> <span>${escapeHtml(_cwClause)}</span></label>
     <button id="cwConfirm" disabled style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';opacity:.5;">${EN?'Continue to payment':'Pokračovat na platbu'}</button>
     <button id="cwCancel" style="width:100%;margin-top:6px;padding:11px;background:transparent;border:none;color:var(--light);font-weight:600;cursor:pointer;font-family:'DM Sans';">${EN?'Cancel':'Zrušit'}</button>
   </div>`;
@@ -8650,7 +8659,13 @@ function showTicketClickwrap(ev, tier){
   ov.querySelector('#cwCancel').onclick=close;
   const chk=ov.querySelector('#cwChk'), btn=ov.querySelector('#cwConfirm');
   chk.onchange=()=>{ btn.disabled=!chk.checked; btn.style.opacity=chk.checked?'1':'.5'; };
-  btn.onclick=()=>{ if(!chk.checked) return; close(); doEventCheckout(ev, tier, true); };
+  btn.onclick=()=>{ if(!chk.checked) return;
+    // Until now this checkbox only unlocked the button and was never written down anywhere -- no
+    // _recordConsent, no insert. So the one clause that actually costs money if disputed, that a
+    // ticket is non-refundable, was agreed to and undocumented. Recorded now the same way waivers,
+    // terms and the guardian consents already are.
+    try{ if(typeof _recordConsent==='function') _recordConsent('ticket_terms', TICKET_CONSENT_VERSION, LANG, _cwText, { event_id:(ev&&ev.id)||null, event_title:(ev&&ev.title)||null, tier:(tier&&tier.name)||null, price:(tier&&tier.price)||0, currency:cur }, (ev&&ev.id)||null); }catch(e){}
+    close(); doEventCheckout(ev, tier, true); };
 }
 async function doEventCheckout(ev, tier, _confirmed, _minorOk){
   if(!_minorOk && currentUser && currentUser.is_minor && _tierNeedsConsent(ev, tier)){ _minorEventGate(ev, function(){ doEventCheckout(ev, tier, _confirmed, true); }); return; }
