@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SPS stops the membership sheet writing a row before the person has chosen anything. It used to insert gym_memberships with status pending_offline as the sheet opened, so abandoning the sheet, or a failed PIS init, left a row the member saw as waiting for the club to confirm a payment they had never made, and which sat in the club confirm queue for 48 hours until release-cron killed it. The row is now written by _ensureIntent on the tap that actually commits: Pay from bank, or I have paid. Nothing is created by opening the sheet or by tapping Later. Deliberately NOT changed: there is still no automatic fall-through from PIS to QR. When PIS is offered the QR stays hidden and only the explicit my-bank-is-not-listed button reveals it, and a failed PIS init leaves the person on the bank list with the error rather than silently switching rails. Also unchanged: the drop-in still reserves up front, because that row is the slot hold and it is shown honestly as an unpaid reservation with a 30 minute countdown, not as something the club owes an answer to. -->
+<!-- MTL build: SPT finishes what SPS started. SPS moved the membership row from sheet-open to the tap that commits, which was right, but Pay from bank IS such a tap and pis-create needs an id, so a failed bank init left exactly the orphan SPS was meant to prevent: pending_offline, shown as waiting for the club, and _hasOpenQrReservation then blocked every further booking. _pisPayFlow now reports abandonment -- backdrop, the my-bank-is-not-listed link, anything that is not the redirect actually happening -- and the membership row created for that attempt is deleted, guarded on the status still being pending_offline. Retrying the same bank after an error keeps working, because an error alone does not count as abandonment and the id stays valid. The drop-in row is left alone on purpose: there the row is the slot hold. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -16586,8 +16586,13 @@ function _pisAllowed(ent, id){
 function _pisTestAmount(){
   return (1 + Math.floor(Math.random()*899)/100).toFixed(2);
 }
-async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMode, onQrFallback, kind){
+async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMode, onQrFallback, kind, onAbandon){
   const EN=LANG==='en';
+  // Whether we actually handed the person over to their bank. Everything else -- backdrop, the
+  // my-bank-is-not-listed link, walking away -- means no payment was started, and the caller may
+  // need to undo a row it created just to have an id to send here.
+  let _launched=false;
+  const _abandon=function(){ if(_launched) return; _launched=true; if(typeof onAbandon==='function'){ try{ onAbandon(); }catch(e){} } };
   let iban=String((payee&&payee.receiver_id_value)||(g&&g.receiver_id_value)||'').replace(/\s+/g,'');
   let country=String(iban.slice(0,2)||'CZ').toUpperCase();  // picker country = the klub's IBAN country (students bank locally)
   let payCur=cur;  // klub currency drives it (settable in gym settings)
@@ -16600,16 +16605,16 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMo
   if(testMode){ var _dnb=banks.filter(function(b){ return /dnb/i.test(String(b.name||'')); }); if(_dnb.length) banks=[_dnb[0]]; }
   const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100001;display:flex;align-items:flex-end;justify-content:center;';
   ov.innerHTML='<div style="background:#fff;border-radius:18px;padding:18px;max-width:420px;width:100%;max-height:80vh;overflow-y:auto;font-family:\'DM Sans\';"><div style="font-size:16px;font-weight:800;margin-bottom:10px;">'+(EN?'Your bank':'Tvoje banka')+'</div><div id="pisBanks"></div></div>';
-  document.body.appendChild(ov); ov.onclick=function(e){ if(e.target===ov && !_ovHasForm(ov)) ov.remove(); };
+  document.body.appendChild(ov); ov.onclick=function(e){ if(e.target===ov && !_ovHasForm(ov)){ ov.remove(); _abandon(); } };
   const bx=ov.querySelector('#pisBanks');
   bx.innerHTML=banks.map(function(b,i){ return '<button class="pisBankBtn" data-i="'+i+'" style="width:100%;text-align:left;padding:13px;margin-bottom:8px;border:1px solid var(--border);border-radius:12px;background:var(--surf);font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+escapeHtml(b.name)+(testMode?('<span style="font-weight:600;color:var(--light);"> ('+(EN?'on the next page tap \u201cFortsett\u201d':'na dal\u0161\u00ed str\u00e1nce klikni na \u201eFortsett\u201c')+')</span>'):'')+'</button>'; }).join('');
-  if(onQrFallback){ var _nb=document.createElement('button'); _nb.id='pisNoBank'; _nb.style.cssText='width:100%;padding:11px;background:none;color:var(--mid);border:none;font-size:12.5px;cursor:pointer;font-family:\'DM Sans\';text-decoration:underline;margin-top:4px;'; _nb.textContent=(EN?'My bank is not listed — pay by QR transfer':'Nemám banku v seznamu — zaplatit QR převodem'); _nb.onclick=function(){ ov.remove(); onQrFallback(); }; bx.appendChild(_nb); }
+  if(onQrFallback){ var _nb=document.createElement('button'); _nb.id='pisNoBank'; _nb.style.cssText='width:100%;padding:11px;background:none;color:var(--mid);border:none;font-size:12.5px;cursor:pointer;font-family:\'DM Sans\';text-decoration:underline;margin-top:4px;'; _nb.textContent=(EN?'My bank is not listed — pay by QR transfer':'Nemám banku v seznamu — zaplatit QR převodem'); _nb.onclick=function(){ ov.remove(); _abandon(); onQrFallback(); }; bx.appendChild(_nb); }
   bx.querySelectorAll('.pisBankBtn').forEach(function(btn){ btn.onclick=async function(){
     const b=banks[+btn.dataset.i]; const _t=btn.textContent; btn.textContent='\u2026'; btn.disabled=true;
     try{
       const r=await fetch('/api/pis-create',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ bookingId:bookingId, gymName:gymNm, gymIban:iban, amount:(testMode?_pisTestAmount():price), currency:payCur, message:(msg||'').slice(0,140), bankId:b.bankId, aspspName:b.name, aspspCountry:b.country, psuType:'personal', kind:kind }) });
       const d=await r.json();
-      if(d && d.url){ if(closeQr) closeQr(); window.location.href=d.url; return; }
+      if(d && d.url){ _launched=true; if(closeQr) closeQr(); window.location.href=d.url; return; }
       toast('\u26a0\ufe0f '+((d&&d.error)||'PIS error')); btn.disabled=false; btn.textContent=_t;
     }catch(e){ toast('\u26a0\ufe0f '+e.message); btn.disabled=false; btn.textContent=_t; }
   }; });
@@ -16878,7 +16883,17 @@ async function _onlineQrPay(g, occ, _child, kind, plan){
   ov.onclick=function(e){ if(e.target===ov && !_ovHasForm(ov)) close(); };
   const cb=ov.querySelector('#oqrClose'); if(cb) cb.onclick=function(){ close(); try{ openGymProfile(g); }catch(e){} };
   try{ var _oqCd=ov.querySelector('#oqrCd'); if(_oqCd){ var _oqTick=function(){ var ms=(parseInt(_oqCd.dataset.exp,10)||0)-Date.now(); if(ms<=0){ _oqCd.textContent=(EN?'expired…':'vypršelo…'); _oqCd.style.color='var(--red)'; return; } var m=Math.floor(ms/60000),sec=Math.floor((ms%60000)/1000); _oqCd.textContent=(EN?'releases in ':'uvolní se za ')+m+':'+(sec<10?'0':'')+sec; }; _oqTick(); var _oqT=setInterval(function(){ if(!document.body.contains(ov)){ clearInterval(_oqT); return; } _oqTick(); },1000); } }catch(e){}
-  const pb=ov.querySelector('#oqrPaid'); var _pisB=ov.querySelector('#oqrPisBtn'); if(_pisB) _pisB.onclick=async function(){ _pisB.disabled=true; const _iid=await _ensureIntent(); _pisB.disabled=false; if(kind==='memb' && !_iid) return; _pisPayFlow(_iid||intentId, _qrPayeeObj, g, price, cur, msg, close, !window._PIS_ENABLED, function(){ var _w=ov.querySelector('#oqrQrWrap'); if(_w) _w.style.display='block'; var _pb=ov.querySelector('#oqrPisBtn'); if(_pb) _pb.style.display='none'; try{ var _c=ov.firstElementChild; var _t=_c&&_c.firstElementChild; if(_t) _t.textContent='📲 '+(EN?'Pay by bank QR':'Zaplať bankovním QR'); }catch(e){} }, kind); };
+  // The membership row only exists because pis-create needs an id to hang the payment on. If the
+  // person never reaches their bank -- init failed, they backed out, they switched to QR -- that row
+  // is a claim nobody made, and leaving it behind is what put "waiting for the club to confirm" on
+  // screen and then blocked every further reservation. So it goes. The drop-in row is NOT touched:
+  // there the row is the slot hold, and it is shown honestly as an unpaid reservation.
+  const _rollbackMemb=async function(){
+    if(kind!=='memb' || !intentId) return;
+    const _id=intentId; intentId=null;
+    try{ await supaClient.from('gym_memberships').delete().eq('id', _id).eq('status','pending_offline'); }catch(e){}
+  };
+  const pb=ov.querySelector('#oqrPaid'); var _pisB=ov.querySelector('#oqrPisBtn'); if(_pisB) _pisB.onclick=async function(){ _pisB.disabled=true; const _iid=await _ensureIntent(); _pisB.disabled=false; if(kind==='memb' && !_iid) return; _pisPayFlow(_iid||intentId, _qrPayeeObj, g, price, cur, msg, close, !window._PIS_ENABLED, function(){ var _w=ov.querySelector('#oqrQrWrap'); if(_w) _w.style.display='block'; var _pb=ov.querySelector('#oqrPisBtn'); if(_pb) _pb.style.display='none'; try{ var _c=ov.firstElementChild; var _t=_c&&_c.firstElementChild; if(_t) _t.textContent='📲 '+(EN?'Pay by bank QR':'Zaplať bankovním QR'); }catch(e){} }, kind, _rollbackMemb); };
   var _bx2=ov.querySelector('#oqrBox'); if(_bx2){ _bx2.style.cursor='pointer'; _bx2.ondblclick=function(){ try{ var cv=_bx2.querySelector('canvas'); var im=_bx2.querySelector('img'); var blob=null; if(cv&&cv.toDataURL){ var durl=cv.toDataURL('image/png'); var bs=atob(durl.split(',')[1]); var n=bs.length, u8=new Uint8Array(n); while(n--){ u8[n]=bs.charCodeAt(n); } blob=new Blob([u8],{type:'image/png'}); } if(!blob){ return; } var file=null; try{ file=new File([blob],'MTL-platba-QR.png',{type:'image/png'}); }catch(e){} if(file && navigator.canShare && navigator.canShare({files:[file]})){ navigator.share({files:[file], title:'MTL platba QR'}).catch(function(){}); } else { var url=URL.createObjectURL(blob); var a=document.createElement('a'); a.href=url; a.download='MTL-platba-QR.png'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(function(){ try{ URL.revokeObjectURL(url); }catch(e){} },1500); } }catch(e){} }; } if(pb) pb.onclick=async function(){
     pb.disabled=true; pb.textContent='\u2026';
     { const _iid=await _ensureIntent(); if(kind==='memb' && !_iid){ pb.disabled=false; pb.textContent='\u2713 '+(EN?'I\u2019ve paid':'Zaplaceno'); return; } }
