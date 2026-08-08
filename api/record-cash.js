@@ -114,11 +114,14 @@ async function isWelcomeZeroProfile(prof, table) {   // scope is now payee_id = 
   return false;
 }
 
-const ACQ_RATE = 0.10;     // standard providers
-const ACQ_RATE_EP = 0.05;  // EP perk: HALF the acquisition fee (EP buys a cheap ongoing rate; acquisition is halved, not waived)
+// REMOVED: two local constants (0.10 / 0.05, later 0.20 / 0.10) used to sit here. They were dead
+// -- acquisitionRate() below delegates to _rate.js and never read them -- and a dead copy of a rate
+// is worse than no copy, because the next person to change the fee edits the one they find first.
+// The live values are ACQ_RATE / ACQ_RATE_EP in _rate.js lines 34-35.
 // MTL acquisition finder's fee: when the app demonstrably brought the member (acq_source='mtl_discovery'),
-// MTL takes the acquisition rate for the window — membership = first 2 months; 1:1 = the first paid lesson.
-// Mirrors pay.js _isAcq (membership) + the client first-lesson 10% (coach/drop-in). Never for EP or welcome.
+// MTL takes the acquisition rate ONCE — the first membership, the first drop-in, the first 1:1.
+// (Was: membership spread it over the first 2 months.)
+// Mirrors pay.js _isAcq (membership) + the client first-lesson charge (coach/drop-in). Never for EP or welcome.
 // "Window" is bounded by counting prior COMPLETED tx of this type for this member at this provider
 // (counts Stripe + cash together, so a member already past the window isn't re-charged 10% on cash).
 async function acquisitionRate(acq, type, payee, memberId, scopeCol, scopeId) {

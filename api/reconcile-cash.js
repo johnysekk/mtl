@@ -34,7 +34,7 @@ function ladderRate(profile) {
 }
 
 const _WELCOME_FOUNDER = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
-import { ladderRate as _mtlLadder } from './_rate.js';
+import { ladderRate as _mtlLadder, acquisitionRate as _mtlAcq } from './_rate.js';
 let _welcomeOff = null;
 async function welcomeKillSwitch() {
   if (_welcomeOff !== null) return _welcomeOff;
@@ -90,22 +90,17 @@ async function isWelcomeZeroReadOnly(prof) {
   return true;
 }
 
-const ACQ_RATE = 0.10, ACQ_RATE_EP = 0.05;
+// REWRITTEN. This file used to carry its OWN full copy of the acquisition rule -- its own rates and
+// its own window, with membership set to two months. Backfilling a sale through here therefore
+// charged something different from recording the same sale normally, which is the exact failure this
+// file was written to prevent. It now delegates to _rate.js like record-cash.js does, so there is one
+// rule and one place to change it.
 async function acquisitionRate(acq, type, payee, memberId, scopeCol, scopeId) {
-  if (acq !== 'mtl_discovery') return null;
-  // NOTE: an early `if (payee.partner) return null` used to sit here, which made the
-  // ACQ_RATE_EP branch below DEAD CODE - an EP acquisition was billed at 1% instead of 5%.
-  // EP pays HALF the acquisition fee, not none (same bug existed in pay.js and record-cash.js).
-  if (!memberId) return null;
-  let max;
-  if (type === 'membership') max = 2;
-  else if (type === 'drop_in' || type === 'coach_1to1') max = 1;
-  else return null;
-  try {
-    const prior = await sb(`transactions?select=id&member_id=eq.${memberId}&type=eq.${encodeURIComponent(type)}&${scopeCol}=eq.${scopeId}&status=eq.completed&limit=${max}`);
-    if (!prior || prior.length < max) return (payee && payee.partner) ? ACQ_RATE_EP : ACQ_RATE;
-  } catch (e) {}
-  return null;
+  const r = await _mtlAcq(sb, { acqSource: acq, type, ownerPartner: payee && payee.partner, memberId, scopeCol, scopeId });
+  // _rate.js returns { rate, months } for memberships so a multi-month payment can be blended.
+  // A backfilled bank sale is one period, so the rate alone is what matters here.
+  if (r && typeof r === 'object') return (typeof r.rate === 'number') ? r.rate : null;
+  return r;
 }
 
 async function findStudentCredit(memberId) {

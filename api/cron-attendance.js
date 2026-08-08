@@ -74,7 +74,10 @@ async function subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive) {
         const invs = await stripe.invoices.list({ subscription: subId, status: 'paid', limit: 3 }, { stripeAccount: acct });
         paid = ((invs && invs.data) || []).length;
       } catch (e) { return null; }            // cannot count -> do not touch the rate
-      if (paid < 2) return pct;               // first two months -> the acquisition rate
+      // CHANGED: was `paid < 2` -- the acquisition rate rode the first TWO paid invoices.
+      // Acquisition is now a single 20% (10% EP) charge on the first month only, so it comes
+      // off after one. The rule lives in _rate.js; this is the subscription mirror of it.
+      if (paid < 1) return pct;               // first month only -> the acquisition rate
     }
   }
   return ladderPct;
@@ -278,7 +281,7 @@ async function handler(req, res) {
                 // never dropped a 10% acquisition sub back at all. Now it simply puts every sub on
                 // whatever rate is correct right now (acquisition inside the 2-month window, base after).
                 // welcome has ENDED for this provider, so welcomeActive=false: the sub lands on
-                // the acquisition rate if the member is still inside their first 2 months, else the ladder.
+                // the acquisition rate on their first month only, else the ladder. (Was: first 2 months.)
                 if (await applySubRate(stripe, acct, m.stripe_subscription, sub, ladderPct, false)) welcomeRerated++;
               } catch (e) { console.error('welcome rerate sub', m.stripe_subscription, e.message); }
             }

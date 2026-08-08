@@ -51,7 +51,10 @@ async function subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive) {
         const invs = await stripe.invoices.list({ subscription: subId, status: 'paid', limit: 3 }, { stripeAccount: acct });
         paid = ((invs && invs.data) || []).length;
       } catch (e) { return null; }            // cannot count -> do not touch the rate
-      if (paid < 2) return pct;               // first two months -> the acquisition rate
+      // CHANGED: was `paid < 2` -- the acquisition rate rode the first TWO paid invoices.
+      // Acquisition is now a single 20% (10% EP) charge on the first month only, so it comes
+      // off after one. The rule lives in _rate.js; this is the subscription mirror of it.
+      if (paid < 1) return pct;               // first month only -> the acquisition rate
     }
   }
   return ladderPct;

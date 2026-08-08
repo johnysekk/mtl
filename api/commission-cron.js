@@ -116,7 +116,17 @@ export default async function handler(req, res) {
           } catch (e) { pi = null; }
 
           if (pi && pi.status === 'succeeded') {
-            if (!gymDaily(gid)) await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
+            // CHANGED: the mark-as-collected used to be skipped entirely on a daily entity, so the
+            // rows stayed 'pending' and the SAME money was charged again the next day, and every day
+            // after. Daily now marks too -- it just marks a wider set, because a daily charge also
+            // covers the running month, which the monthly filter (commission_month < current) excludes.
+            // commission_collected_at is what unified-doklad-cron reads to know what to put on the
+            // receipt, instead of guessing from created_at.
+            {
+              const _scope = gymDaily(gid) ? '' : `&commission_month=lt.${curMonth}`;
+              await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}${_scope}`,
+                { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected', commission_collected_at: new Date().toISOString() }) });
+            }
             /* doklad issued by unified-doklad-cron.js (bank + Stripe combined, one per month) */
             await notify(g.owner_id, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) za ${czMonthName(prevMonth(curMonth))} byla stržena z karty. Doklad najdeš v účetnictví.`, { amount, currency: cur, gym_id: gid });
             collected++;
@@ -206,7 +216,12 @@ export default async function handler(req, res) {
           } catch (e) { pi = null; }
 
           if (pi && pi.status === 'succeeded') {
-            if (!coachDaily(cid)) await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected' }) });
+            // CHANGED: same as the gym branch above -- daily used to skip the mark and re-charge daily.
+            {
+              const _scope = coachDaily(cid) ? '' : `&commission_month=lt.${curMonth}`;
+              await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}${_scope}`,
+                { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected', commission_collected_at: new Date().toISOString() }) });
+            }
             /* doklad issued by unified-doklad-cron.js (bank + Stripe combined, one per month) */
             await notify(cid, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) za ${czMonthName(prevMonth(curMonth))} byla stržena z karty. Doklad najdeš v účetnictví.`, { coach_id: cid });
             collected++;

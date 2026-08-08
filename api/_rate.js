@@ -7,8 +7,32 @@
 //   - effectiveRate(): the actual per-tx rate = max(ladder, acquisition).
 // No silent 3% fallback: resolvers throw if the owner can't be found, so an overcharge surfaces.
 
-const ACQ_RATE = 0.10;     // finder's fee, standard providers
-const ACQ_RATE_EP = 0.05;  // EP perk: half the acquisition fee
+// ── CHANGED: acquisition is now ONE payment, not a two-month window ──────────────────────────
+// WAS (until this change):  ACQ_RATE = 0.10, ACQ_RATE_EP = 0.05, and membership carried the fee
+//                           for the FIRST TWO months (max = 2 on line 57 below).
+// NOW:                      20% / 10% EP, charged on the FIRST month only (max = 1).
+//
+// The money is the same for anyone who stays two months: 10% twice equals 20% once. Someone who
+// leaves after one month pays more, and that is deliberate -- they are exactly the member MTL
+// delivered and the club failed to keep.
+//
+// What this buys is that the two-month window STOPS EXISTING, and with it five separate
+// implementations of the same idea that had already drifted apart from each other:
+//   _rate.js            used / leftQualifying month arithmetic       (below, now collapsed)
+//   stripe-webhook.js   line 332, invoices paid < 2                  -> < 1
+//   sub-rate-cron.js    line 54,  invoices paid < 2                  -> < 1
+//   gym-rerate.js       line 50,  invoices paid < 2                  -> < 1
+//   cron-attendance.js  line 77,  invoices paid < 2                  -> < 1
+// plus the blended-rate machinery that only existed to spread two months across one payment.
+//
+// It also makes the club's conversions panel and the fee agree: one member = one acquisition,
+// so "MTL brought you 3 people" and "you paid 3 acquisition fees" are the same sentence.
+//
+// A multi-month payment still blends, and that is what makes a yearly membership fair: the fee
+// lands on one month's worth of it. 16 000 / 12 months -> 20% of 1 333 = 267, not 20% of 16 000.
+// effectiveRate() below does that from { rate, months: 1 }; nothing extra is needed.
+const ACQ_RATE = 0.20;     // finder's fee, standard providers  (was 0.10 across two months)
+const ACQ_RATE_EP = 0.10;  // EP perk: half the acquisition fee (was 0.05 across two months)
 
 // mode: 'stripe' (Stripe track) | anything else (QR/bank/cash/pis track)
 // o: { partner, founding, score, bankai }
@@ -48,30 +72,31 @@ export async function resolveRate(sbGet, { ownerId, gymId, gymAccount, mode }) {
 }
 
 // Acquisition finder's fee, or null if it doesn't apply. Only when acqSource === 'mtl_discovery'
-// AND the member is still inside the window: membership = first 2 months, drop_in/coach_1to1 =
-// first paid one. Window is bounded by counting prior COMPLETED tx of this type for this member at
+// AND it is their FIRST one of that kind here: first membership, first drop-in, first 1:1.
+// (Was: membership = first 2 months. Single charge now -- see the header.) Window is bounded by counting prior COMPLETED tx of this type for this member at
 // this provider (Stripe + cash together). ownerPartner => EP pays half.
 export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, memberId, scopeCol, scopeId }) {
   if (acqSource !== 'mtl_discovery' || !memberId) return null;
   let max;
-  if (type === 'membership') max = 2;
+  if (type === 'membership') max = 1;                   // CHANGED: was 2 (first two months)
   else if (type === 'drop_in' || type === 'coach_1to1') max = 1;
   else return null;                                     // custom / event / course: no acquisition fee
   if (!scopeCol || !scopeId) return null;
   try {
     if (type === 'membership' && scopeCol === 'gym_id') {
-      let used = 0;
-      try {
-        const tx = await sbGet(`transactions?select=acq_months&member_id=eq.${encodeURIComponent(memberId)}&type=eq.membership&gym_id=eq.${encodeURIComponent(scopeId)}&status=eq.completed&acq_months=gt.0`);
-        used = (tx || []).reduce((n, r) => n + (parseInt(r && r.acq_months, 10) || 0), 0);
-      } catch (e) {}
-      if (!used) {
-        const prior = await sbGet(`gym_memberships?select=months&student_id=eq.${encodeURIComponent(memberId)}&gym_id=eq.${encodeURIComponent(scopeId)}&status=in.(active,cancelling,ended,expired)`);
-        used = (prior || []).reduce((n, r) => n + Math.max(1, parseInt(r && r.months, 10) || 1), 0);
-      }
-      const leftQualifying = max - used;
-      if (leftQualifying > 0) return { rate: (ownerPartner ? ACQ_RATE_EP : ACQ_RATE), months: leftQualifying };
-      return null;
+      // CHANGED. This block used to add up how many of the two qualifying months were already
+      // spent, from transactions.acq_months with a gym_memberships fallback. Both halves were
+      // broken: acq_months is never written by anything, and the query filtered status=completed
+      // while the Stripe rail writes status=paid, so the first query ALWAYS came back empty. The
+      // fallback then counted ROWS, not months -- a monthly subscription is one row with months=1
+      // whether it ran for a month or three years -- so a member who had already paid both
+      // qualifying months could be charged a third one on a new membership.
+      // With one qualifying month the whole thing collapses into a single question, and that
+      // question has no status vocabulary to get wrong: has this person ever held a membership
+      // at this club before?
+      const prior = await sbGet(`gym_memberships?select=id&student_id=eq.${encodeURIComponent(memberId)}&gym_id=eq.${encodeURIComponent(scopeId)}&status=in.(active,cancelling,ended,expired)&limit=1`);
+      if (prior && prior.length) return null;           // not their first membership here
+      return { rate: (ownerPartner ? ACQ_RATE_EP : ACQ_RATE), months: 1 };
     }
     const prior = await sbGet(`transactions?select=id&member_id=eq.${encodeURIComponent(memberId)}&type=eq.${encodeURIComponent(type)}&${scopeCol}=eq.${encodeURIComponent(scopeId)}&status=eq.completed`);
     if (!prior || prior.length < max) return ownerPartner ? ACQ_RATE_EP : ACQ_RATE;

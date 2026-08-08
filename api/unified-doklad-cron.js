@@ -199,7 +199,16 @@ export default async function handler(req, res) {
   let issued = 0, skipped = 0, deferred = 0;
   try {
     // every collected commission row for the closed month (bank charged + Stripe live)
-    const tx = await sb(`transactions?select=gym_id,coach_id,paid_to,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method&commission_status=in.(collected${(DAILY||preview)?',pending,failed':''})&${DAILY?`created_at=gte.${dayStart}&created_at=lt.${dayEnd}`:`commission_month=eq.${period}`}&mtl_fee=gt.0&limit=50000`);
+    // CHANGED. The daily branch used to select on created_at, i.e. what was SOLD today, while
+    // commission-cron charges by commission_status, i.e. what was OWED. On a day with no sales the
+    // card was still charged and no receipt existed for it. Daily now reads commission_collected_at,
+    // which commission-cron stamps at the moment the card goes through, so the receipt describes
+    // exactly the charge that just happened. Preview keeps the old shape on purpose: it is a dry run
+    // over what has not been billed yet, so it must still see pending rows.
+    const _dailyFilter = preview
+      ? `created_at=gte.${dayStart}&created_at=lt.${dayEnd}`
+      : `commission_collected_at=gte.${dayStart}&commission_collected_at=lt.${dayEnd}`;
+    const tx = await sb(`transactions?select=gym_id,coach_id,paid_to,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method&commission_status=in.(collected${preview?',pending,failed':''})&${DAILY?_dailyFilter:`commission_month=eq.${period}`}&mtl_fee=gt.0&limit=50000`);
 
     // bucket per provider + currency, with a per-(form,rate) breakdown
     const gymB = {}, coachB = {};
@@ -230,6 +239,8 @@ export default async function handler(req, res) {
       const col = kind === 'gym' ? 'gym_id' : 'coach_id';
       if (TEST && !dailyAny && String(ownerId) !== FOUNDER_UUID) { skipped++; return; }
       // idempotent: one unified doklad per entity+period+currency
+      // period is the DAY in daily mode and the month otherwise, so one receipt per entity per
+      // charge either way -- a second run on the same day cannot issue a duplicate.
       const ex = await sb(`commission_doklady?select=id&${col}=eq.${entityId}&period_month=eq.${period}&currency=eq.${encodeURIComponent(cur)}&kind=eq.unified&limit=1`);
       if (ex && ex.length) { skipped++; return; }
 
