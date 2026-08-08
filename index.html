@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SPP adds the next-step hint beside the bank name in the PIS picker, test mode only, since it describes the DNB sandbox screen and would be wrong beside a real bank in production. Spelled Fortsett, which is the Norwegian word DNB uses; the request said Forsett and that looks like a slip, so it is worth a glance at the actual sandbox screen before this ships. -->
+<!-- MTL build: SPQ extends the PIS test toggle from the club drop-in to every other bank-rail flow: event tickets, coach 1:1, course deposit, course month, course remainder and merch. Memberships already went through _onlineQrPay so they were covered. The reason those six were stuck founder-only is that each builds its payee as a literal carrying receiver_id_type, receiver_id_value and receiver_name and nothing else, so there was no id to match the toggle against. Rather than thread an id into six different literals from six different source rows, some of which do not carry one, the flag map is now keyed by the RECEIVING ACCOUNT as well as by id: _loadPisTestIds reads receiver_id_value alongside id, and _pisAllowed matches on it. Every payee object already has that field, and it identifies exactly the entity the money is going to, which is what the toggle is about. One consequence worth knowing: a coach and a club sharing one IBAN share the flag. Not changed: those six sites still skip _pisAvailable, so in production they would not check real bank coverage for the country the way the drop-in does. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -16561,10 +16561,12 @@ async function _pisAvailable(country, ent, id){
 }
 window._PIS_ENABLED=false;
 window._PIS_TEST_IDS=null;
+function _pisKey(v){ return 'acct:'+String(v==null?'':v).replace(/\s+/g,'').toUpperCase(); }
 async function _loadPisTestIds(){
   var m={};
-  try{ const { data:_gg } = await supaClient.from('gyms').select('id').eq('pis_test',true); (_gg||[]).forEach(function(x){ m[x.id]=1; }); }catch(e){}
-  try{ const { data:_pp } = await supaClient.from('profiles').select('id').eq('pis_test',true); (_pp||[]).forEach(function(x){ m[x.id]=1; }); }catch(e){}
+  var add=function(x){ if(!x) return; if(x.id) m[x.id]=1; if(x.receiver_id_value) m[_pisKey(x.receiver_id_value)]=1; };
+  try{ const { data:_gg } = await supaClient.from('gyms').select('id,receiver_id_value').eq('pis_test',true); (_gg||[]).forEach(add); }catch(e){}
+  try{ const { data:_pp } = await supaClient.from('profiles').select('id,receiver_id_value').eq('pis_test',true); (_pp||[]).forEach(add); }catch(e){}
   window._PIS_TEST_IDS=m; return m;
 }
 function _pisFounderNow(){ return !!(currentUser && (currentUser.role==='founder' || currentUser.id===FOUNDER_UUID)); }
@@ -16577,6 +16579,7 @@ function _pisAllowed(ent, id){
   if(ent && ent.id && m[ent.id]) return true;
   if(ent && ent.gym_id && m[ent.gym_id]) return true;
   if(ent && ent.coach_id && m[ent.coach_id]) return true;
+  if(ent && ent.receiver_id_value && m[_pisKey(ent.receiver_id_value)]) return true;
   return false;
 }
  // NEONOMICS SANDBOX phase: false => testMode on + founder-only button (no real money). Flip to TRUE when Neonomics production + CZ banks are live (NEONOMICS_ENV=production).
