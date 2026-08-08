@@ -26,7 +26,23 @@ const AUTH_BASE = 'https://' + ENVN + '.neonomics.io/auth/realms/' + ENVN + '/pr
 const ICS_BASE  = 'https://' + ENVN + '.neonomics.io/ics/v3';
 const RETURN_URL = process.env.PIS_RETURN_URL || 'https://app.martialtraininglab.com/api/pis-return';
 const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-export const DNB_SANDBOX_SSN = '31125453913';   // one of the three SSNs Neonomics lists for DNB sandbox
+// Neonomics lists three usable DNB sandbox SSNs: 31125461118, 31125453913, 31125461037.
+// If one test customer's sandbox account is in a bad state, the next one is a free thing to try,
+// so it is an env var rather than a literal.
+export const DNB_SANDBOX_SSN = process.env.NEONOMICS_DNB_SSN || '31125453913';
+// Neonomics 1048: "Only A-Å, a-å, 0-9, and space allowed" in name fields. Czech diacritics are NOT
+// in that range -- e, s, c, r, z with hacek all sit outside it -- and a Czech class or plan name
+// goes straight into the remittance line. A Norwegian bank being handed "Petr Haiser - Deti" with a
+// hacek is a plausible way to earn an unexplained internal error, so fold to the allowed set before
+// sending. Nothing is lost that matters: the remittance is how the club recognises the payment, and
+// it recognises it the same without the accents.
+const NORDIC_OK = /[^A-Za-z\u00C0-\u00FF0-9 \-\/\.,:()]/g;
+function nordicSafe(v, max) {
+  let t = String(v == null ? '' : v).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  t = t.replace(NORDIC_OK, ' ').replace(/\s+/g, ' ').trim();
+  return max ? t.slice(0, max) : t;
+}
+   // one of the three SSNs Neonomics lists for DNB sandbox
 
 // DNB (and any bank with personalIdentificationRequired) wants the national ID in x-psu-id
 // ENCRYPTED, not raw. Neonomics decrypts it with the same key before handing it to the bank.
@@ -106,12 +122,12 @@ export default async function handler(req, res) {
 
     const iban = String(gymIban).replace(/\s+/g, '');
     const e2e = (String(vs || bookingId).replace(/[^A-Za-z0-9]/g, '').slice(0, 35)) || ('MTL' + Date.now());
-    const remit = String(message || vs || ('MTL ' + bookingId)).slice(0, 140);
+    const remit = nordicSafe(message || vs || ('MTL ' + bookingId), 140) || ('MTL ' + String(bookingId).slice(0, 8));
     const redirect = RETURN_URL + (RETURN_URL.indexOf('?') >= 0 ? '&' : '?') + 'state=' + encodeURIComponent(bookingId);
 
     const payBody = {
       creditorAccount: { accountScheme: 'IBAN', identifier: iban },
-      creditorName: (gymName || 'Klub').slice(0, 70),
+      creditorName: nordicSafe(gymName || 'Klub', 70) || 'Klub',
       instrumentedAmount: String(amount),
       currency,
       remittanceInformationUnstructured: remit,
@@ -174,8 +190,13 @@ export default async function handler(req, res) {
       }
     } else {
       // genuine failure -> surface the REAL Neonomics status + code + message in the toast
-      const msg = 'neo_init http=' + initR.status
+      // x-request-id is Neonomics' correlation id. For a 4000-5999 bank error it is the ONLY thing
+      // their support can act on, and until now we threw it away and kept a message that says
+      // nothing. Surface it so a failure is reportable instead of just annoying.
+      const _rid = initR.headers && (initR.headers.get('x-request-id') || initR.headers.get('X-Request-Id'));
+      const msg = 'neo_init[SPU] http=' + initR.status
         + (init.errorCode ? (' code=' + init.errorCode) : '')
+        + (_rid ? (' req=' + _rid) : '')
         + ' ' + (init.message ? String(init.message).slice(0, 150) : JSON.stringify(init).slice(0, 200));
       return res.status(200).json({ error: msg, detail: init });
     }
