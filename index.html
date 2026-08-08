@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SPQ extends the PIS test toggle from the club drop-in to every other bank-rail flow: event tickets, coach 1:1, course deposit, course month, course remainder and merch. Memberships already went through _onlineQrPay so they were covered. The reason those six were stuck founder-only is that each builds its payee as a literal carrying receiver_id_type, receiver_id_value and receiver_name and nothing else, so there was no id to match the toggle against. Rather than thread an id into six different literals from six different source rows, some of which do not carry one, the flag map is now keyed by the RECEIVING ACCOUNT as well as by id: _loadPisTestIds reads receiver_id_value alongside id, and _pisAllowed matches on it. Every payee object already has that field, and it identifies exactly the entity the money is going to, which is what the toggle is about. One consequence worth knowing: a coach and a club sharing one IBAN share the flag. Not changed: those six sites still skip _pisAvailable, so in production they would not check real bank coverage for the country the way the drop-in does. -->
+<!-- MTL build: SPR stops the sandbox PIS test sending an identical payment every time. It was hardcoded to 1.00 NOK from the same debtor to the same creditor, so every attempt after the first looked to the bank like a duplicate; Neonomics documents 5000 for exactly that case and tells you to change instrumentedAmount, and DNB sandbox appears to answer with 4930 Internal bank error instead. The test now sends a random 1.00 to 9.99 NOK. Worth being clear about what this does NOT prove: 4930 is in the 4000-5999 band, which the docs define as errors returned by the bank rather than rejections of our payload, and it is typed FATAL, so a DNB sandbox outage would look the same. If it still fails with a fresh amount, the problem is on their side and there is nothing to fix here. Real payments are untouched; the amount only varies in test mode. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -16583,6 +16583,9 @@ function _pisAllowed(ent, id){
   return false;
 }
  // NEONOMICS SANDBOX phase: false => testMode on + founder-only button (no real money). Flip to TRUE when Neonomics production + CZ banks are live (NEONOMICS_ENV=production).
+function _pisTestAmount(){
+  return (1 + Math.floor(Math.random()*899)/100).toFixed(2);
+}
 async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMode, onQrFallback, kind){
   const EN=LANG==='en';
   let iban=String((payee&&payee.receiver_id_value)||(g&&g.receiver_id_value)||'').replace(/\s+/g,'');
@@ -16604,7 +16607,7 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMo
   bx.querySelectorAll('.pisBankBtn').forEach(function(btn){ btn.onclick=async function(){
     const b=banks[+btn.dataset.i]; const _t=btn.textContent; btn.textContent='\u2026'; btn.disabled=true;
     try{
-      const r=await fetch('/api/pis-create',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ bookingId:bookingId, gymName:gymNm, gymIban:iban, amount:(testMode?'1.00':price), currency:payCur, message:(msg||'').slice(0,140), bankId:b.bankId, aspspName:b.name, aspspCountry:b.country, psuType:'personal', kind:kind }) });
+      const r=await fetch('/api/pis-create',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ bookingId:bookingId, gymName:gymNm, gymIban:iban, amount:(testMode?_pisTestAmount():price), currency:payCur, message:(msg||'').slice(0,140), bankId:b.bankId, aspspName:b.name, aspspCountry:b.country, psuType:'personal', kind:kind }) });
       const d=await r.json();
       if(d && d.url){ if(closeQr) closeQr(); window.location.href=d.url; return; }
       toast('\u26a0\ufe0f '+((d&&d.error)||'PIS error')); btn.disabled=false; btn.textContent=_t;
