@@ -9,6 +9,7 @@
 // ticket-email, owner notif) are recycled VERBATIM from the Enable version — provider-agnostic. Only the auth,
 // the status fetch (Neonomics GET Payment by ID, which needs the stored session_id+device_id) and the paid-status
 // set are Neonomics-specific.
+import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 
 const ENVN = (process.env.NEONOMICS_ENV || 'sandbox').toLowerCase();
@@ -26,6 +27,42 @@ async function neoToken() {
   const d = await r.json();
   if (!r.ok || !d.access_token) throw new Error('neo_token_failed');
   return d.access_token;
+}
+
+
+// Same encryption as pis-create: banks with personalIdentificationRequired want x-psu-id encrypted.
+function encPsuId(ssn) {
+  const raw = process.env.NEONOMICS_PSU_KEY || '';
+  if (!raw) return null;
+  try {
+    const key = Buffer.from(raw, 'base64');
+    const alg = key.length === 32 ? 'aes-256-gcm' : 'aes-128-gcm';
+    const iv = crypto.randomBytes(12);
+    const c = crypto.createCipheriv(alg, key, iv, { authTagLength: 16 });
+    const ct = Buffer.concat([c.update(String(ssn), 'utf8'), c.final()]);
+    return Buffer.concat([iv, ct, c.getAuthTag()]).toString('base64');
+  } catch (e) { return null; }
+}
+const DNB_SANDBOX_SSN = '31125453913';
+
+// THE STEP THAT WAS MISSING ENTIRELY.
+// Neonomics: "Although some banks complete the payments after a successful SCA, it is required to
+// ALWAYS call the Complete Payment endpoint to ensure that your process works for all banks."
+// Without it the payment sits authorised-but-not-submitted, so it can never reach ACSC/ACCC and the
+// status read below was waiting on something that was never going to move. It must run without
+// delay because the bank's payment token is short-lived, hence first thing on the redirect.
+// A 1426 back means consent is required; nothing to do about that here, the status read still runs.
+async function completePayment(token, paymentId, sessionId, deviceId) {
+  try {
+    const h = { Authorization: 'Bearer ' + token, Accept: 'application/json', 'Content-Type': 'application/json' };
+    if (deviceId) h['x-device-id'] = deviceId;
+    if (sessionId) h['x-session-id'] = sessionId;
+    const enc = encPsuId(DNB_SANDBOX_SSN);
+    if (enc) h['x-psu-id'] = enc;
+    const r = await fetch(ICS_BASE + '/payments/domestic-transfer/' + encodeURIComponent(paymentId) + '/complete', { method: 'POST', headers: h, body: '{}' });
+    const j = await r.json().catch(() => ({}));
+    return { http: r.status, code: (j && j.errorCode) || '', status: j && (j.status || (j.payment && j.payment.status)) };
+  } catch (e) { return { http: 0, code: 'exception' }; }
 }
 
 async function pisSideEffects(rec, tbl){
@@ -77,12 +114,13 @@ export default async function handler(req, res){
       let sessionId=null, deviceId=null;
       try{ const ps=await sb.from('pis_session').select('session_id,device_id').eq('payment_id',paymentId).maybeSingle(); if(ps.data){ sessionId=ps.data.session_id; deviceId=ps.data.device_id; } }catch(e){}
       const token=await neoToken();
+      const _cp=await completePayment(token, paymentId, sessionId, deviceId);
       const r=await fetch(ICS_BASE+'/payments/domestic-transfer/'+encodeURIComponent(paymentId),{
         headers:{ Authorization:'Bearer '+token, Accept:'application/json', ...(deviceId?{'x-device-id':deviceId}:{}), ...(sessionId?{'x-session-id':sessionId}:{}) }
       });
       const p=await r.json().catch(()=>({}));
       const status=p.status||(p.payment&&p.payment.status);
-      _dbg = 'st='+encodeURIComponent(String(status||'?'))+'&http='+r.status;
+      _dbg = 'st='+encodeURIComponent(String(status||'?'))+'&http='+r.status+'&cp='+((_cp&&_cp.http)||0)+((_cp&&_cp.code)?('_'+_cp.code):'');
       if(r.ok && PAID_STATUSES.has(String(status))){
         let tbl='gym_bookings';
         let rec=(await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name,class_date,class_time,amount,currency,coach_id,acq_source,student_name,credit_used').eq('pis_payment_id',paymentId).maybeSingle()).data;

@@ -26,6 +26,28 @@ const AUTH_BASE = 'https://' + ENVN + '.neonomics.io/auth/realms/' + ENVN + '/pr
 const ICS_BASE  = 'https://' + ENVN + '.neonomics.io/ics/v3';
 const RETURN_URL = process.env.PIS_RETURN_URL || 'https://app.martialtraininglab.com/api/pis-return';
 const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+export const DNB_SANDBOX_SSN = '31125453913';   // one of the three SSNs Neonomics lists for DNB sandbox
+
+// DNB (and any bank with personalIdentificationRequired) wants the national ID in x-psu-id
+// ENCRYPTED, not raw. Neonomics decrypts it with the same key before handing it to the bank.
+// Format, taken from their PHP sample: AES-GCM over the SSN with the key file's rawValue as the
+// key, then base64 of IV || ciphertext || authTag. Key length decides 128 vs 256.
+// NEONOMICS_PSU_KEY = the rawValue field out of the <client_id>.json downloaded from the portal.
+// No key set -> send the raw value exactly as before, so this can be deployed ahead of the key
+// without changing today's behaviour.
+function encPsuId(ssn) {
+  const raw = process.env.NEONOMICS_PSU_KEY || '';
+  if (!raw) return null;
+  try {
+    const key = Buffer.from(raw, 'base64');
+    const alg = key.length === 32 ? 'aes-256-gcm' : 'aes-128-gcm';
+    const iv = crypto.randomBytes(12);
+    const c = crypto.createCipheriv(alg, key, iv, { authTagLength: 16 });
+    const ct = Buffer.concat([c.update(String(ssn), 'utf8'), c.final()]);
+    return Buffer.concat([iv, ct, c.getAuthTag()]).toString('base64');
+  } catch (e) { return null; }
+}
+
 
 async function neoToken() {
   const body = new URLSearchParams({
@@ -115,7 +137,9 @@ export default async function handler(req, res) {
       payBody.creditorAccount = { bban: '12073650567' };            // DNB sandbox account acting as the gym (creditor = payee)
       payBody.debtorAccount   = { bban: '12032202452' };            // DNB sandbox account acting as the payer (debtor = payer)
       payBody.debtorName      = 'MTL Test Payer';                   // debtor name (account holder) is required
-      commonHeaders['x-psu-id'] = '31125453913';  // DNB sandbox SSN, raw (base64 gave "Invalid PSU Id")
+      // Encrypted when NEONOMICS_PSU_KEY is set, raw otherwise. Raw is what we sent until now and it
+      // got past Neonomics' own validation only to fail inside DNB with 4930 Internal bank error.
+      commonHeaders['x-psu-id'] = encPsuId(DNB_SANDBOX_SSN) || DNB_SANDBOX_SSN;
     }
 
     const initR = await fetch(ICS_BASE + '/payments/domestic-transfer', {
