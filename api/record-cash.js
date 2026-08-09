@@ -92,7 +92,7 @@ async function isWelcomeZeroProfile(prof, table) {   // scope is now payee_id = 
     // volume trigger: welcome also ends once turnover in the window reaches the cap
     try {
       const winStart = new Date(new Date(prof.welcome_free_until).getTime() - 30 * 86400000).toISOString();
-      const rows = await sb(`transactions?select=gross_amount,currency&payee_id=eq.${encodeURIComponent(prof.id)}&status=eq.completed&created_at=gte.${encodeURIComponent(winStart)}`);
+      const rows = await sb(`transactions?select=gross_amount,currency&payee_id=eq.${encodeURIComponent(prof.id)}&status=in.(paid,completed)&created_at=gte.${encodeURIComponent(winStart)}`);
       if (await welcomeCapReached(rows)) return false; // over the cap -> charge normally from now on
     } catch (e) { /* on any error keep welcome (never over-charge) */ }
     return true;
@@ -124,13 +124,22 @@ async function isWelcomeZeroProfile(prof, table) {   // scope is now payee_id = 
 // Mirrors pay.js _isAcq (membership) + the client first-lesson charge (coach/drop-in). Never for EP or welcome.
 // "Window" is bounded by counting prior COMPLETED tx of this type for this member at this provider
 // (counts Stripe + cash together, so a member already past the window isn't re-charged 10% on cash).
-async function acquisitionRate(acq, type, payee, memberId, scopeCol, scopeId) {
+async function acquisitionRate(acq, type, payee, memberId, scopeCol, scopeId, ladder, periods) {
   // Delegates to the single source of truth in _rate.js.
   const r = await _mtlAcq(sb, { acqSource: acq, type, ownerPartner: payee && payee.partner, memberId, scopeCol, scopeId });
-  // _rate.js returns { rate, months } for memberships so a multi-month payment can be blended.
-  // Cash and QR are billed one period at a time, so the rate alone is what matters here.
-  if (r && typeof r === 'object') return (typeof r.rate === 'number') ? r.rate : null;
-  return r;
+  if (r == null) return null;
+  if (typeof r === 'number') return r;
+  // FIXED. This used to take r.rate and throw r.months away, on the assumption that cash and QR are
+  // always billed one period at a time. They are not: a club can sell a 12-month membership for one
+  // QR payment, and the whole year was then charged the acquisition rate -- twelve times what is
+  // owed. Blended the same way _rate.js effectiveRate does it, so the fee lands on the ONE month it
+  // is for and the rest of the payment is charged at the club's ordinary rate. A yearly membership
+  // now costs the club the same as twelve monthly ones, on every rail.
+  const bought = Math.max(1, parseInt(periods, 10) || 1);
+  const covered = Math.max(0, Math.min(bought, r.months));
+  if (covered <= 0) return null;
+  const hi = Math.max(Number(ladder) || 0, r.rate);
+  return (covered >= bought) ? hi : ((hi * covered + (Number(ladder) || 0) * (bought - covered)) / bought);
 }
 
 // Referral-credit redemption (parity with the Stripe client flow): MTL waives its WHOLE fee when a
@@ -162,7 +171,7 @@ export default async function handler(req, res) {
   if (!SB || !KEY) return res.status(500).json({ error: 'env not set' });
   try {
     const b = (typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body) || {};
-    const { token, gym_id, coach_id, member_id, gross_amount, currency, type, payment_method, cash_payer_name, acq_source, credit, source_booking_id, cohort_id, income_class } = b;
+    const { token, gym_id, coach_id, member_id, gross_amount, currency, type, payment_method, cash_payer_name, acq_source, credit, source_booking_id, cohort_id, income_class, months } = b;
     // trusted internal call (PIS server-side confirm) — reuses ALL the commission logic, no user token
     const _trusted = !!(b.internal && b.intSecret && process.env.PIS_INTERNAL_SECRET && b.intSecret === process.env.PIS_INTERNAL_SECRET);
     const provider = b.provider === 'coach' ? 'coach' : 'gym';
@@ -204,7 +213,7 @@ export default async function handler(req, res) {
       const _wz = await isWelcomeZeroProfile(gym, 'gyms');
       const _cc = (_wantCredit && ownerProf.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
-      const _acq = _wz ? null : await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id);
+      const _acq = _wz ? null : await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id, rate, months);
       const mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
       const _effRate = (_cc || _wz) ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
       let _gymPayee = gym.stripe_account || null;
@@ -213,7 +222,11 @@ export default async function handler(req, res) {
         gym_id, coach_id: coach_id || null, member_id: member_id || null, paid_to: 'gym', payee_account: _gymPayee,
         payee_id: gym.id, payee_kind: 'gym',   // the entity that owns welcome_free_until
         gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, refund_amount: 0, mtl_fee_refunded: 0,
-        currency: cur, type, status: 'completed', payment_method, cohort_id: cohort_id || null, income_class: income_class || null,
+        // CHANGED: was 'completed'. The column's own DB default is 'paid' and the Stripe rail writes
+        // 'paid', so 'completed' was the odd one out -- and every reader of prior turnover asked for
+        // 'completed' only, which is why none of them could see a Stripe transaction. One vocabulary
+        // now; status-vocabulary.sql normalises the rows written before this.
+        currency: cur, type, status: 'paid', payment_method, cohort_id: cohort_id || null, income_class: income_class || null,
         commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct', source_booking_id: source_booking_id || null,
       };
@@ -230,14 +243,14 @@ export default async function handler(req, res) {
       const _wz = await isWelcomeZeroProfile(coach, 'profiles');
       const _cc = (_wantCredit && coach.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
-      const _acq = _wz ? null : await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id);
+      const _acq = _wz ? null : await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id, rate, months);
       const mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
       const _effRate = (_cc || _wz) ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
       row = {
         gym_id: null, coach_id, member_id: member_id || null, paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null),
         payee_id: coach.id, payee_kind: 'profile',   // the entity that owns welcome_free_until
         gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, refund_amount: 0, mtl_fee_refunded: 0,
-        currency: cur, type, status: 'completed', payment_method, cohort_id: cohort_id || null, income_class: income_class || null,
+        currency: cur, type, status: 'paid', payment_method, cohort_id: cohort_id || null, income_class: income_class || null,
         commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct', source_booking_id: source_booking_id || null,
       };

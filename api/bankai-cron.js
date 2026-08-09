@@ -17,7 +17,7 @@ export default async function handler(req, res) {
     let changed = 0;
     for (const p of cands || []) {
       // >=10 taught privates (paid coach 1:1)?
-      const priv = await sbGet(`transactions?coach_id=eq.${encodeURIComponent(p.id)}&type=eq.coach_1to1&select=id&limit=10`);
+      const priv = await sbGet(`transactions?coach_id=eq.${encodeURIComponent(p.id)}&type=in.(coach_1to1,coach_inperson,coach_online)&select=id&limit=10`);
       let elig = (priv || []).length >= 10;
       if (!elig) {
         // else >=25 active memberships across gyms this profile owns?

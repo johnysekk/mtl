@@ -160,7 +160,7 @@ export default async function handler(req, res) {
 
     async function isActiveProvider(uid) {
       // >= 10 taught 1:1 privates?
-      const priv = await sb(`transactions?coach_id=eq.${uid}&type=eq.coach_1to1&select=id&limit=${ACT_PRIVATES}`);
+      const priv = await sb(`transactions?coach_id=eq.${uid}&type=in.(coach_1to1,coach_inperson,coach_online)&select=id&limit=${ACT_PRIVATES}`);
       if ((priv || []).length >= ACT_PRIVATES) return true;
       // …or >= 25 active memberships across the clubs they own?
       const gy = await sb(`gyms?owner_id=eq.${uid}&status=eq.approved&select=id&limit=20`);

@@ -70,7 +70,7 @@ function _toCzkMinor(amountMinor, cur, rates) {
 async function welcomeCapReached(payeeId, winStart) {
   if (!payeeId) return false;
   try {
-    const rows = await sb(`transactions?select=gross_amount,currency&payee_id=eq.${encodeURIComponent(payeeId)}&status=eq.completed&created_at=gte.${encodeURIComponent(winStart)}`);
+    const rows = await sb(`transactions?select=gross_amount,currency&payee_id=eq.${encodeURIComponent(payeeId)}&status=in.(paid,completed)&created_at=gte.${encodeURIComponent(winStart)}`);
     const rates = await _fxRates();
     let sum = 0;
     for (const r of (rows || [])) sum += _toCzkMinor(r.gross_amount, r.currency, rates);
@@ -147,7 +147,11 @@ export default async function handler(req, res) {
           if (_cc) _creditRow = { memberId: b.student_id, id: _cc.id, sc: _cc.sc };
           const _acq = (_wz || _cc) ? null : await acquisitionRate(b.acq_source, type, coach, b.student_id, 'coach_id', b.coach_id);
           const mtl_fee = (_wz || _cc) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
-          row = { gym_id: b.gym_id || null, coach_id: b.coach_id, member_id: b.student_id || null, paid_to: 'coach', payee_id: (cs && cs[0] && cs[0].id) || b.coach_id, payee_kind: 'profile', payee_account: (coach.gym_payout_account || coach.stripe_account || null), gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0, currency: (b.currency || 'czk'), type, status: 'completed', payment_method: 'qr', commission_status: _wz ? 'collected' : 'pending', commission_month: month, cash_payer_name: b.student_name || null, acq_source: b.acq_source || 'direct', source_booking_id: b.id };
+          // CHANGED: was 'completed'. The column's own DB default is 'paid' and the Stripe rail writes
+          // 'paid', so 'completed' was the odd one out -- and every reader of prior turnover asked for
+          // 'completed' only, which is why none of them could see a Stripe transaction. One vocabulary
+          // now; status-vocabulary.sql normalises the rows written before this.
+          row = { gym_id: b.gym_id || null, coach_id: b.coach_id, member_id: b.student_id || null, paid_to: 'coach', payee_id: (cs && cs[0] && cs[0].id) || b.coach_id, payee_kind: 'profile', payee_account: (coach.gym_payout_account || coach.stripe_account || null), gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0, currency: (b.currency || 'czk'), type, status: 'paid', payment_method: 'qr', commission_status: _wz ? 'collected' : 'pending', commission_month: month, cash_payer_name: b.student_name || null, acq_source: b.acq_source || 'direct', source_booking_id: b.id };
         } else {
           const gyms = await sb(`gyms?id=eq.${b.gym_id}&select=id,owner_id,currency,stripe_account,account_suspended,welcome_free_until,created_at`);
           const gym = gyms && gyms[0]; if (!gym) { out.skipped++; continue; }
@@ -161,7 +165,7 @@ export default async function handler(req, res) {
           const mtl_fee = (_wz || _cc) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
           let _gymPayee = gym.stripe_account || null;
           if (b.coach_id) { try { const _cp = await sb(`profiles?id=eq.${b.coach_id}&select=gym_payout_account`); const _cpa = _cp && _cp[0] && _cp[0].gym_payout_account; if (_cpa) _gymPayee = _cpa; } catch (e) {} }
-          row = { gym_id: b.gym_id, coach_id: b.coach_id || null, member_id: b.student_id || null, paid_to: 'gym', payee_id: gym.id, payee_kind: 'gym', payee_account: _gymPayee, gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0, currency: (b.currency || gym.currency || 'czk'), type, status: 'completed', payment_method: 'qr', commission_status: _wz ? 'collected' : 'pending', commission_month: month, cash_payer_name: b.student_name || null, acq_source: b.acq_source || 'direct', source_booking_id: b.id };
+          row = { gym_id: b.gym_id, coach_id: b.coach_id || null, member_id: b.student_id || null, paid_to: 'gym', payee_id: gym.id, payee_kind: 'gym', payee_account: _gymPayee, gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0, currency: (b.currency || gym.currency || 'czk'), type, status: 'paid', payment_method: 'qr', commission_status: _wz ? 'collected' : 'pending', commission_month: month, cash_payer_name: b.student_name || null, acq_source: b.acq_source || 'direct', source_booking_id: b.id };
         }
         // re-check right before insert (reduce race with a concurrent record-cash); the UNIQUE index is the hard guard
         const recheck = await sb(`transactions?select=id&source_booking_id=eq.${encodeURIComponent(b.id)}&limit=1`);

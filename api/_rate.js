@@ -98,7 +98,13 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
       if (prior && prior.length) return null;           // not their first membership here
       return { rate: (ownerPartner ? ACQ_RATE_EP : ACQ_RATE), months: 1 };
     }
-    const prior = await sbGet(`transactions?select=id&member_id=eq.${encodeURIComponent(memberId)}&type=eq.${encodeURIComponent(type)}&${scopeCol}=eq.${encodeURIComponent(scopeId)}&status=eq.completed`);
+    // A 1:1 lesson is written under THREE names: pay.js asks for coach_1to1, the bank rail writes
+    // coach_1to1, and Stripe writes coach_inperson or coach_online because it keeps the distinction
+    // the bank rail throws away. Asking for one of the three found none of the Stripe ones, so the
+    // acquisition fee re-applied on every Stripe lesson forever. Online counts, per the product.
+    const _1to1 = (type === 'coach_1to1' || type === 'coach_inperson' || type === 'coach_online');
+    const _typeQ = _1to1 ? 'type=in.(coach_1to1,coach_inperson,coach_online)' : `type=eq.${encodeURIComponent(type)}`;
+    const prior = await sbGet(`transactions?select=id&member_id=eq.${encodeURIComponent(memberId)}&${_typeQ}&${scopeCol}=eq.${encodeURIComponent(scopeId)}&status=in.(paid,completed)`);
     if (!prior || prior.length < max) return ownerPartner ? ACQ_RATE_EP : ACQ_RATE;
   } catch (e) {}
   return null;

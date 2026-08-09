@@ -68,7 +68,7 @@ export default async function handler(req, res) {
     // Which gyms are actually trading? A listing with no money moving through it is not
     // supply, and counting it would send us advertising into a market that cannot convert.
     const since = new Date(Date.now() - TX_WINDOW_D * 86400000).toISOString();
-    const tx = await sb(`transactions?status=eq.completed&created_at=gte.${encodeURIComponent(since)}&select=gym_id`);
+    const tx = await sb(`transactions?status=in.(paid,completed)&created_at=gte.${encodeURIComponent(since)}&select=gym_id`);
     const txBy = {};
     for (const t of tx || []) if (t.gym_id) txBy[t.gym_id] = (txBy[t.gym_id] || 0) + 1;
 

@@ -107,7 +107,7 @@ async function isWelcomeZero(acct){
       // so a EUR gym effectively had a 100,000 EUR cap.
       try{
         const winStart = new Date(new Date(prov.welcome_free_until).getTime() - 30*86400000).toISOString();
-        const rows = await _wsbGet(`transactions?select=gross_amount,currency&payee_id=eq.${encodeURIComponent(prov.id)}&status=eq.completed&created_at=gte.${encodeURIComponent(winStart)}`);
+        const rows = await _wsbGet(`transactions?select=gross_amount,currency&payee_id=eq.${encodeURIComponent(prov.id)}&status=in.(paid,completed)&created_at=gte.${encodeURIComponent(winStart)}`);
         if (await welcomeCapReached(rows)) return false;   // over the cap -> charge normally from now on
       }catch(e){ /* on any error keep welcome (never over-charge) */ }
       return true;
