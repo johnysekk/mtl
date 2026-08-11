@@ -38,15 +38,34 @@ const ACQ_RATE_EP = 0.10;  // EP perk: half the acquisition fee (was 0.05 across
 // o: { partner, founding, score, bankai }
 export function ladderRate(mode, o) {
   o = o || {};
-  if (o.partner) return 0.005;                         // Exclusive Partner (flat 1000/mo + 0.5%)
+  // ── SAZEBNÍK ────────────────────────────────────────────────────────────────────────────
+  //                      Stripe    banka        jak se k tomu dostaneš
+  //   base                2,0 %     2,5 %       nijak, výchozí
+  //   Shikai              1,5 %     2,0 %       ref_score >= 2
+  //   Bankai              1,0 %     1,25 %      ref_score >= 5 + výkonnostní brána
+  //   Organizace          1,5 %     1,5 %       schválená organizace, MTL ji potvrzuje ručně
+  //   EP                  0,5 %     0,5 %       platí 1000/měs (nebo uděleno zdarma na začátku)
+  //
+  // Banka je dražší než Stripe schválně: tam si provizi bereš rovnou z platby, tady ji musíš
+  // strhnout klubu z karty -- to může selhat, upomínat, končit pozastavením účtu. Ten rozdíl
+  // je cena za to riziko, ne za nic.
+  //
+  // ZRUŠENO: Founding Partner. Byl to čtvrtý stupeň mezi Shikai a EP a po tomhle snížení sazeb
+  // ztratil smysl -- základ 2 % je dnes nižší, než býval FP. Ranou výhodou je místo něj EP
+  // udělené zdarma, tedy partner=true bez partner_sub. Parametr `founding` se schválně nemaže
+  // ze signatury ani ze selectů: sloupec v DB zůstává a ignorovat ho je bezpečnější než honit
+  // jeho odstranění napříč šesti soubory kvůli něčemu, co se nepoužívá.
+  if (o.partner) return 0.005;                                   // EP
+  if (o.org) return 0.015;                                       // schválená organizace, obě koleje
   const s = o.score || 0;
-  if (o.founding) {                                    // Founding Partner
-    if (mode === 'stripe') return (s >= 5 && o.bankai) ? 0.01 : (s >= 2 ? 0.015 : 0.02);
-    return (s >= 2) ? 0.015 : 0.02;                    // QR/PIS: no Bankai
+  if (mode === 'stripe') {
+    if (s >= 5 && o.bankai) return 0.01;                         // Bankai
+    return (s >= 2) ? 0.015 : 0.02;                              // Shikai / base
   }
-  if (mode === 'stripe') return (s >= 5 && o.bankai) ? 0.02 : (s >= 2 ? 0.025 : 0.03);
-  return (s >= 2) ? 0.03 : 0.035;
+  if (s >= 5 && o.bankai) return 0.0125;                         // Bankai na bance
+  return (s >= 2) ? 0.02 : 0.025;                                // Shikai / base
 }
+
 
 // Resolve the profile of whoever owns the money (ownerId, or via gymId / gym stripe_account).
 export async function resolveOwner(sbGet, { ownerId, gymId, gymAccount }) {

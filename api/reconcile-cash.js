@@ -29,7 +29,7 @@ function ladderRate(profile) {
   // record-cash.js exactly: base 3.5%, Shikai 3% at ref_score>=2, NO Bankai. EP = 1%.
   // It used to grant a 2.5% "Bankai" that does not exist on the bank track, so the SAME
   // sale was charged 3% if recorded normally and 2.5% if it happened to be backfilled.
-  if (!profile) return 0.035;
+  if (!profile) return 0.025;  // base na bankovní koleji (bylo 0.035, pak 0.03)
   return _mtlLadder('qr_bank', { partner: profile.partner, founding: profile.founding, score: profile.coach_ref_score, bankai: profile.bankai_eligible });
 }
 

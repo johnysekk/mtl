@@ -11,7 +11,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 // ════════════════════════════════════════════════════════════════════════
 
 const GYM_STUDENT_MARKUP = 1.00;  // no markup
-const GYM_MTL_TAKE       = 0.03;   // drop-in: Stripe track base 3%
+const GYM_MTL_TAKE       = 0.02;   // drop-in: Stripe track base 2 % (bylo 3 %)
 const MEMB_MTL_PERCENT   = 3;       // membership: Stripe track base 3% (was 3.5 = the old ladder)
 
 // --- Genuine welcome 0%: no fee charged up front (replaces charge-then-instant-refund) ---
@@ -180,7 +180,7 @@ async function coachCheckout(req, res) {
 
   const rate = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
-  // The client only ever sends _ladderRate(), whose whole range is 0.01 (EP) .. 0.035 (bank
+  // The client only ever sends _ladderRate(), whose whole range is 0.005 (EP) .. 0.03 (bank base)
   // base). The old guard was `>= 0.02 && <= 0.25 else 0.10`, which is broken twice over:
   //   * an EXCLUSIVE PARTNER sends 0.01 -> FAILS the >= 0.02 test -> was charged 0.10.
   //     An EP pays 1000 CZK/month FOR a 1% rate and was being billed 10% on every 1:1.
@@ -193,7 +193,7 @@ async function coachCheckout(req, res) {
     COMMISSION = await effectiveRate(_wsbGet, { ownerId: coachProfileId, mode: 'stripe', type: 'coach_1to1', acqSource: acq, memberId: studentId, scopeCol: 'coach_id', scopeId: coachProfileId });
   } catch (e) {
     console.error('pay.coach effectiveRate failed:', e.message);
-    COMMISSION = (commission && parseFloat(commission) >= 0.005 && parseFloat(commission) <= 0.10) ? parseFloat(commission) : 0.03;
+    COMMISSION = (commission && parseFloat(commission) >= 0.005 && parseFloat(commission) <= 0.10) ? parseFloat(commission) : 0.02;   // fallback = base Stripe (bylo 0.03)
   }
   let MK = 1.00; // no markup — student pays exactly the listed price
   let STUDENT_MARKUP = MK;

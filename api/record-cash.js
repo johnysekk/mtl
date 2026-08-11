@@ -33,8 +33,34 @@ const ALLOWED_TYPES = ['drop_in', 'membership', 'custom', 'event_ticket', 'coach
 function ladderRate(profile) {
   // cash/qr/pis = BANK-TRANSFER track. Single source of truth in _rate.js: same EP/FP/ladder as
   // Stripe (Bankai is Stripe-only, so the bank track floors at Shikai).
-  if (!profile) return 0.035;
+  if (!profile) return 0.025;  // base na bankovní koleji (bylo 0.035, pak 0.03)
   return _mtlRate('qr_bank', { partner: profile.partner, founding: profile.founding, score: profile.coach_ref_score, bankai: profile.bankai_eligible });
+}
+
+
+// ── MINIMÁLNÍ PROVIZE U PIS ────────────────────────────────────────────────────────────────
+// PIS je jediná kolej, kde MTL platí za KAŽDOU platbu pevnou částku providerovi. Procento to
+// u drobných nepokryje: 1,25 % ze sedmdesátikorunové jednorázovky je 88 haléřů, a platba stojí
+// korunu. Podlaha, ne přirážka -- u členství za 1 400 Kč se neprojeví vůbec.
+//
+// Neplatí pro Stripe (tam si Stripe svoje bere sám od klubu a MTL žádnou pevnou položku nenese)
+// ani pro QR a hotovost (ty nestojí nic).
+//
+// Nikdy se nestrhne víc, než kolik je celá platba -- kdyby někdo prodal lekci za korunu,
+// nemá smysl mu účtovat dvě.
+const PIS_MIN_FEE_CZK_MINOR = 200;   // 2 Kč
+async function _pisMinFee(cur, grossMinor) {
+  const c = String(cur || 'CZK').toUpperCase();
+  if (c === 'CZK') return Math.min(PIS_MIN_FEE_CZK_MINOR, grossMinor);
+  // Jiná měna: přepočet přes ECB kurzy, které už tady jsou kvůli welcome capu. Když kurzy
+  // nejsou, minimum se NEUPLATNÍ -- radši nevybrat, než vybrat špatně.
+  try {
+    const rates = await _fxRates();
+    if (!rates || !rates.CZK) return 0;
+    const per = (c === 'EUR') ? 1 : rates[c];
+    if (!per) return 0;
+    return Math.min(Math.round(PIS_MIN_FEE_CZK_MINOR / rates.CZK * per), grossMinor);
+  } catch (e) { return 0; }
 }
 
 const _WELCOME_FOUNDER = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
@@ -214,7 +240,9 @@ export default async function handler(req, res) {
       const _cc = (_wantCredit && ownerProf.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
       const _acq = _wz ? null : await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id, rate, months);
-      const mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
+      let mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
+      // Podlaha jen u PIS a jen když se opravdu něco účtuje -- kredit a welcome zůstávají nulové.
+      if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, gross));
       const _effRate = (_cc || _wz) ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
       let _gymPayee = gym.stripe_account || null;
       if (coach_id) { try { const _cp = await sb(`profiles?id=eq.${coach_id}&select=gym_payout_account`); const _cpa = _cp && _cp[0] && _cp[0].gym_payout_account; if (_cpa) _gymPayee = _cpa; } catch(e){} }
@@ -244,7 +272,9 @@ export default async function handler(req, res) {
       const _cc = (_wantCredit && coach.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
       const _acq = _wz ? null : await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id, rate, months);
-      const mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
+      let mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
+      // Podlaha jen u PIS a jen když se opravdu něco účtuje -- kredit a welcome zůstávají nulové.
+      if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, gross));
       const _effRate = (_cc || _wz) ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
       row = {
         gym_id: null, coach_id, member_id: member_id || null, paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null),

@@ -30,10 +30,12 @@ export default async function handler(req, res) {
     const cond = { partner: !!p.partner, founding: !!p.founding, score: p.coach_ref_score || 0, bankai: !!p.bankai_eligible };
     const rate = ladderRate(mode, cond);
 
+    // Founding Partner is gone from the ladder; the early perk is a free EP instead. The column
+    // stays in the DB and is simply not consulted, which is why it is no longer selected here.
     let tier;
     if (cond.partner) tier = 'EP';
-    else if (cond.founding) tier = 'FP';
-    else if (mode === 'stripe' && cond.score >= 5 && cond.bankai) tier = 'Bankai';
+    else if (cond.org) tier = 'Organization';
+    else if (cond.score >= 5 && cond.bankai) tier = 'Bankai';
     else if (cond.score >= 2) tier = 'Shikai';
     else tier = 'base';
 

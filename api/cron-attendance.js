@@ -8,6 +8,7 @@
 //   1:1 lekce (coach + student) řeší tenhle cron přes profiles.timezone (TZ kouče) + client-side fallback. Respektuje mute_class_reminder / mute_coach_lesson_reminder.
 
 import Stripe from 'stripe';
+import { ladderRate as _mtlLadder } from './_rate.js';
 
 const FOUNDER_ID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -264,7 +265,8 @@ async function handler(req, res) {
           // which was stamped when the subscription was created and is stale the moment the
           // owner crosses a tier. Stripe track (this only ever touches Stripe subscriptions).
           const _sc = p.coach_ref_score || 0;
-          const ladderPct = p.partner ? 1 : ((_sc >= 5 && p.bankai_eligible) ? 2 : (_sc >= 2 ? 2.5 : 3));
+          // Delegováno na _rate.js -- viz sub-rate-cron.js, tohle byla třetí kopie téhož.
+          const ladderPct = _mtlLadder('stripe', { partner: p.partner, org: p.org_rate, score: _sc, bankai: p.bankai_eligible }) * 100;
           // gyms has no gym_payout_account column -- that lives on profiles. Naming it here made
           // PostgREST reject the whole query, so this block silently did nothing.
           const pGyms = await sbGet(`gyms?owner_id=eq.${p.id}&select=id,stripe_account`);

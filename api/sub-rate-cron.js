@@ -71,14 +71,13 @@ async function applySubRate(stripe, acct, subId, sub, ladderPct, welcomeActive) 
   return true;
 }
 
-// Stripe track (subscriptions are always Stripe): EP 1% | Bankai 2% | Shikai 2.5% | base 3%.
+// Delegováno na _rate.js. Tady dřív seděla vlastní kopie žebříčku s vlastními čísly a rozešla se:
+// EP mělo 1 % místo 0,5 % a founding se neřešil vůbec, takže každý noční běh zvedl sazbu tomu,
+// komu ji gym-rerate.js přes den snížil. Jedno pravidlo, jedno místo.
+// Předplatné je vždycky Stripe, proto natvrdo 'stripe'. Vrací PROCENTA, protože to Stripe chce tak.
 function ladderOf(p) {
-  if (!p) return 3;
-  if (p.partner) return 1;
-  const s = p.coach_ref_score || 0;
-  if (s >= 5 && p.bankai_eligible) return 2;
-  if (s >= 2) return 2.5;
-  return 3;
+  if (!p) return 2;   // bez profilu se chováme jako base, ne jako starých 3 %
+  return _mtlLadder('stripe', { partner: p.partner, org: p.org_rate, score: p.coach_ref_score, bankai: p.bankai_eligible }) * 100;
 }
 
 export default async function handler(req, res) {

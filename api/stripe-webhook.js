@@ -9,6 +9,7 @@
 // DŮLEŽITÉ: webhook musí číst RAW body (proto bodyParser:false), jinak selže ověření podpisu.
 
 import Stripe from 'stripe';
+import { ladderRate as _mtlLadder } from './_rate.js';
 import crypto from 'crypto';
 import PDFDocument from 'pdfkit';
 import { isTestMode } from './_config.js';
@@ -795,7 +796,10 @@ export default async function handler(req, res) {
           if (_ownerId) {
             const _op = (await sbGet(`profiles?id=eq.${_ownerId}&select=partner,coach_ref_score,bankai_eligible,welcome_free_until`))[0] || {};
             const _sc = _op.coach_ref_score || 0;
-            const _ladder = _op.partner ? 1 : ((_sc >= 5 && _op.bankai_eligible) ? 2 : (_sc >= 2 ? 2.5 : 3));
+            // Delegováno na _rate.js. Tady dřív seděla vlastní kopie žebříčku s vlastními čísly, a přesně
+            // ta se rozešla: EP mělo 1 % místo 0,5 % a founding se neřešil vůbec, takže každý běh zvedal
+            // sazbu tomu, komu ji gym-rerate.js právě snížil. Jedno pravidlo, jedno místo.
+            const _ladder = _mtlLadder('stripe', { partner: _op.partner, org: _op.org_rate, score: _sc, bankai: _op.bankai_eligible }) * 100;
             _subLadder = _ladder / 100;
             const _wActive = !!(_op.welcome_free_until && new Date(_op.welcome_free_until).getTime() > Date.now());
             await applySubRate(stripe, event.account, sub, _so2, _ladder, _wActive);
