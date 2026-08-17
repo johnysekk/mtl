@@ -113,7 +113,14 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
       // With one qualifying month the whole thing collapses into a single question, and that
       // question has no status vocabulary to get wrong: has this person ever held a membership
       // at this club before?
-      const prior = await sbGet(`gym_memberships?select=id&student_id=eq.${encodeURIComponent(memberId)}&gym_id=eq.${encodeURIComponent(scopeId)}&status=in.(active,cancelling,ended,expired)&limit=1`);
+      // POZOR NA PORADI. Ptat se gym_memberships na "uz tu nekdy clenstvi mel?" nefunguje, protoze
+      // radek TOHOTO nakupu uz existuje driv, nez sem dojde rec: klient ho zaklada dopredu kvuli
+      // variabilnimu symbolu a pis-return.js ho prepne na 'active' JESTE PRED volanim record-cash.
+      // Vlastni nakup se tim sam prohlasil za predchozi a akvizice na bankovni koleji nepadla nikdy.
+      // Ptame se proto ucetnictvi, ne clenstvi: transakce vznika az ve chvili, kdy jsou penize
+      // zaplacene, takze zadna transakce tohoto nakupu jeste neexistuje. Beru oba slovniky statusu
+      // ('paid' i historicke 'completed') a oba typy koleji.
+      const prior = await sbGet(`transactions?select=id&member_id=eq.${encodeURIComponent(memberId)}&gym_id=eq.${encodeURIComponent(scopeId)}&type=eq.membership&status=in.(paid,completed)&limit=1`);
       if (prior && prior.length) return null;           // not their first membership here
       return { rate: (ownerPartner ? ACQ_RATE_EP : ACQ_RATE), months: 1 };
     }
