@@ -549,10 +549,11 @@ export default async function handler(req, res) {
                 training_date: slot.date, training_time: slot.time,
                 status: 'active', type: 'inperson', currency, discipline: m.discipline || null,
               });
-              if (slot.coach_profile_id) await sbPost('notifications', {
-                user_id: slot.coach_profile_id, type: 'booking', read: false,
-                message: `📅 Nová rezervace (potvrzeno platbou) na ${slot.date} ${slot.time}.`,
-              });
+              // ODSTRANENO: druha notifikace kouci o te same rezervaci. Klient ji posila taky, na
+              // navratu ze Stripe (kind coach_new_inperson) -- a posila ji bohatsi: format lekce,
+              // castku, kterou kouc dostane, a priznak referral bonusu. Tahle mela jen datum a cas
+              // a nemela ani `data`, takze se nedala prokliknout. Dve notifikace o jedne veci jsou
+              // horsi nez jedna; nechavame tu popisnejsi.
               await payAmbassador(slot.coach_profile_id, amount, currency, m.discipline, pi);
               await recordTransaction(event.account, pi, { type: 'coach_inperson',  member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', gross: amount, currency });
             }
@@ -563,10 +564,8 @@ export default async function handler(req, res) {
               training_date: new Date().toISOString().slice(0, 10), training_time: null,
               status: 'active', type: 'online', currency, online_format: m.online_fmt || null, discipline: m.discipline || null,
             });
-            await sbPost('notifications', {
-              user_id: m.coach_profile_id, type: 'booking', read: false,
-              message: `🌐 Nová online objednávka (potvrzeno platbou).`,
-            });
+            // ODSTRANENO ze stejneho duvodu: klient posila kind coach_new_online s formatem
+            // objednavky, castkou a referral bonusem.
             await payAmbassador(m.coach_profile_id, amount, currency, m.discipline, pi);
             await recordTransaction(event.account, pi, { type: 'coach_online',  member_id: m.student_id, coach_id: m.coach_profile_id, plan: m.online_fmt || 'Online', gross: amount, currency });
           }
