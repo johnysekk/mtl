@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SQO stops the club profile showing a coach who cannot be paid. A coach whose connected account has charges_enabled false was already dropped from that list, but the club owner was exempt, so the head coach card stayed up, its click was swallowed by data-noclick, and anyone who reached a booking another way landed on the payment-configuration error from pay.js _assertAcctReady. The exemption is gone; a coach leading classes is still listed, because there the card describes who teaches rather than offering a booking. Also renames every Czech in-person label to Osobni lekce -- it read as Osobne, Nazivo or Osobni depending on the screen. -->
+<!-- MTL build: SQP fixes the reception QR, which sent the customer to the coach deck instead of the purchase. It encoded ?klub=<id>&buy=<n> while the only reader asks for ?gym= -- the same klub-versus-gym mismatch that made the own-members link a no-op. With no gym in hand the buy branch never ran and the app just booted normally. The QR now writes gym= and the reader accepts either, so codes already printed and stuck on a wall keep working. Also removes the duplicate booking notification the coach got for a Stripe 1:1: the server sent a bare one with only a date and time and no data payload to tap, while the client sends a richer one on the Stripe return with the lesson format, the coach payout and the referral flag. The membership notification said "clenstvi 16000 CZK na lekci Yearly Sparring Pass" because it reused the class-name slot for a plan name; the plan now follows the word membership and the amount comes after it. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -5064,7 +5064,14 @@ const NOTIF_T = {
     if(d.event_id)   return EN2?`🎟️ Congrats! ${d.student||'A customer'} just bought a ticket${_amt}${_by}.`:`🎟️ Gratulujeme! ${d.student||'Zákazník'} si právě koupil vstupenku${_amt}${_by}.`;
     if(d.merch_id)   return EN2?`🛍️ Congrats! ${d.student||'A customer'} just bought ${d.className||'merch'}${_amt}${_by}.`:`🛍️ Gratulujeme! ${d.student||'Zákazník'} si právě koupil ${d.className||'merch'}${_amt}${_by}.`;
     if(d.cohort_id)  return EN2?`🎓 Congrats! ${d.student||'Someone'} just paid a course deposit${_amt}${_by}.`:`🎓 Gratulujeme! ${d.student||'Zájemce'} právě zaplatil zálohu kurzu${_amt}${_by}.`;
-    if(d.membership) return EN2?`🎟️ Congrats! ${d.student||'A student'} just bought a membership${_amt}${_cls}${_by}.`:`🎟️ Gratulujeme! Student ${d.student||''} si právě zakoupil členství${_amt}${_cls}${_by}.`;
+    // U clenstvi je d.className NAZEV TARIFU, ne nazev lekce -- takze _cls davalo "clenstvi
+    // 16000 CZK na lekci Yearly Sparring Pass". Tarif patri hned za slovo clenstvi a castka az
+    // za nej, s predlozkou.
+    if(d.membership){
+      const _plan = d.className ? (' '+d.className) : '';
+      const _for  = d.amt ? ((EN2?' for ':' za ')+d.amt+(d.sym?(' '+d.sym):'')) : '';
+      return EN2?`🎟️ Congrats! ${d.student||'A student'} just bought a membership${_plan}${_for}${_by}.`:`🎟️ Gratulujeme! Student ${d.student||''} si právě zakoupil členství${_plan}${_for}${_by}.`;
+    }
     return EN2?`🏛️ Congrats! ${d.student||'A student'} just bought a drop-in session${_amt}${_cls}${_dt}${_by}.`:`🏛️ Gratulujeme! Student ${d.student||''} si právě zakoupil jednorázovou lekci${_amt}${_cls}${_dt}${_by}.`;
   },
   gym_dropin_booked_coach: (d)=> LANG==='en'
@@ -10127,7 +10134,7 @@ async function openGymProfile(g){
     $('gymProfContent').querySelectorAll('.gymCoachCard').forEach(function(_k){ _k.onclick=function(){ if(_k.dataset.noclick==='1') return; var _id=_k.dataset.cid; if(!_id) return; if(typeof openProfileById==='function'){ openProfileById(_id); } else if(typeof COACHES!=='undefined' && COACHES){ var _r=COACHES.find(function(x){return x.id===_id||x.profileId===_id;}); if(_r && typeof openProfile==='function') openProfile(_r); } }; });
     $('gymProfContent').querySelectorAll('.lvlHead').forEach(h=>h.onclick=()=>{ const v=h.dataset.v; const body=$('gymProfContent').querySelector('.lvlBody[data-v="'+v+'"]'); const arr=$('gymProfContent').querySelector('.lvlArr[data-v="'+v+'"]'); if(!body) return; const open=body.style.display==='none'; body.style.display=open?'block':'none'; if(arr) arr.style.transform=open?'rotate(180deg)':'none'; });
     $('gymProfContent').querySelectorAll('.subPlanBtn').forEach(b=>{ b.onclick=()=>{ const sel=plansAll[+b.dataset.pi]; if(myMemb && sel && sel.coach && myMemb.coach_id && sel.coach===myMemb.coach_id){ if(!confirm(LANG==='en'?'If you want a different class level with the same coach, talk to them first. Continue anyway?':'Pokud chceš navštěvovat jinou úroveň lekcí u stejného kouče, zkus se s ním nejdřív domluvit. Přesto pokračovat?')) return; } gymTermsGate(g, ()=>subscribeGymMembership(g, sel), true); }; });
-    const _grBtn=$('gymProfContent').querySelector('.gymRefShareBtn'); if(_grBtn) _grBtn.onclick=async()=>{ if(!currentUser) return; try{ const { data:_mm } = await supaClient.from('gym_memberships').select('id').eq('student_id',currentUser.id).eq('gym_id',g.id).in('status',['active','cancelling']).limit(1); if(!_mm||!_mm.length){ toast(LANG==='en'?'Only active members can invite friends to this club.':'Pozvat kamaráda můžou jen aktivní členové tohoto klubu.'); return; } }catch(e){} const link=location.origin+'/?klub='+g.id+'&gymref='+currentUser.id; const msg=(LANG==='en'?`Join ${g.name} on MTL — you get ${g.member_ref_pct}% off your first month! 🥊 `:`Přidej se do ${g.name} na MTL — máš ${g.member_ref_pct}% slevu na první měsíc! 🥊 `); if(navigator.share){ try{ await navigator.share({ title:g.name||'MTL', text:msg, url:link }); }catch(e){} } else { try{ navigator.clipboard.writeText(link); }catch(e){} toast(L('✅ Odkaz zkopírován')); } };
+    const _grBtn=$('gymProfContent').querySelector('.gymRefShareBtn'); if(_grBtn) _grBtn.onclick=async()=>{ if(!currentUser) return; try{ const { data:_mm } = await supaClient.from('gym_memberships').select('id').eq('student_id',currentUser.id).eq('gym_id',g.id).in('status',['active','cancelling']).limit(1); if(!_mm||!_mm.length){ toast(LANG==='en'?'Only active members can invite friends to this club.':'Pozvat kamaráda můžou jen aktivní členové tohoto klubu.'); return; } }catch(e){} const link=location.origin+'/?gym='+g.id+'&gymref='+currentUser.id; const msg=(LANG==='en'?`Join ${g.name} on MTL — you get ${g.member_ref_pct}% off your first month! 🥊 `:`Přidej se do ${g.name} na MTL — máš ${g.member_ref_pct}% slevu na první měsíc! 🥊 `); if(navigator.share){ try{ await navigator.share({ title:g.name||'MTL', text:msg, url:link }); }catch(e){} } else { try{ navigator.clipboard.writeText(link); }catch(e){} toast(L('✅ Odkaz zkopírován')); } };
     $('gymProfContent').querySelectorAll('.bookClassBtn').forEach(b=>{ b.onclick=()=>gymTermsGate(g, ()=>bookGymDropin(g, {name:b.dataset.name, date:b.dataset.date, time:b.dataset.time, coach:b.dataset.coach||null, leader:b.dataset.leader||null, coachName:b.dataset.coachname||null, disc:b.dataset.disc||null, kids:b.dataset.kids==='1', ageMin:(b.dataset.agemin?parseInt(b.dataset.agemin):null), ageMax:(b.dataset.agemax?parseInt(b.dataset.agemax):null), parentReq:b.dataset.parentreq==='1'})); });
     $('gymProfContent').querySelectorAll('.dropMineBtn').forEach(b=>{ b.onclick=()=>{ toast(LANG==='en'?'Already booked - manage it in Upcoming':'Už máš rezervováno - spravuj v sekci Nadcházející'); }; });
     $('gymProfContent').querySelectorAll('.resvBtn').forEach(b=>{ b.onclick=()=>reserveClass(g, {name:b.dataset.name, date:b.dataset.date, time:b.dataset.time, level:b.dataset.level, coach:b.dataset.coach||null, leader:b.dataset.leader||null}, myMemb); });
@@ -16045,7 +16052,7 @@ function _recBuildOffers(box){
   if(!box) return;
   if(!_recGym){ box.innerHTML=''; return; }
   const EN=LANG==='en'; const cur=_recGym.currency||'CZK';
-  const base='https://app.martialtraininglab.com/?klub='+encodeURIComponent(_recGym.id);
+  const base='https://app.martialtraininglab.com/?gym='+encodeURIComponent(_recGym.id);
   let h=''; const plans=gymMembPlans(_recGym)||[];
   var _offSM=(typeof _mtlPayMode==='function'&&_mtlPayMode(_recGym)==='qr_bank');
   if(plans.length){
@@ -16089,7 +16096,7 @@ function _recRenderQrMenu(hasQr){
 function openMemberQR(){
   var list=$('recList'); var g=_recGym; if(!list||!g) return;
   var EN=LANG==='en'; var cur=g.currency||'CZK'; var sym=_curSym(cur);
-  var base='https://app.martialtraininglab.com/?klub='+encodeURIComponent(g.id);
+  var base='https://app.martialtraininglab.com/?gym='+encodeURIComponent(g.id);
   var plans=(typeof gymMembPlans==='function'?gymMembPlans(g):[])||[];
   var h='<button id="recBackBtn" style="background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:8px 12px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:12px;">‹ '+(EN?'Back':'Zpět')+'</button>';
   h+='<div style="font-weight:800;font-size:16px;color:var(--dark);margin-bottom:2px;">📲 '+(EN?'Student with app':'Platba studenta s aplikací')+'</div>';
@@ -23281,7 +23288,7 @@ async function renderCoachAnalytics(coachId, containerId){
         // Falling back to a default when the profile is missing masked a failed query as a real
         // 3% and sent me hunting a bug in the ladder that was never there. If we cannot read the
         // row, say we cannot read the row.
-        var _m=(typeof _mtlPayMode==='function'?_mtlPayMode(prof):null)||(prof.stripe_account?'stripe':'qr_bank'); var _r=(typeof _ladderRate==='function')?_ladderRate(_m,{partner:prof?.partner,founding:prof?.founding,score:prof?.coach_ref_score,bankai:prof?.bankai_eligible}):0.03; var _p=Math.round(_r*1000)/10; var _t=prof?.partner?(LANG==='en'?'Exclusive Partner (subscription)':'Exclusive Partner (p\u0159edplatn\u00e9)'):(prof?.founding?'Founding Partner':(_m==='stripe'?((prof?.coach_ref_score>=5&&prof?.bankai_eligible)?'Bankai':(prof?.coach_ref_score>=2?'Shikai':(LANG==='en'?'base':'z\u00e1klad'))):(prof?.coach_ref_score>=2?'Shikai':(LANG==='en'?'base':'z\u00e1klad')))); var _ap=prof?.partner?5:10;
+        var _m=(typeof _mtlPayMode==='function'?_mtlPayMode(prof):null)||(prof.stripe_account?'stripe':'qr_bank'); var _r=(typeof _ladderRate==='function')?_ladderRate(_m,{partner:prof?.partner,founding:prof?.founding,score:prof?.coach_ref_score,bankai:prof?.bankai_eligible}):0.03; var _p=Math.round(_r*1000)/10; var _t=prof?.partner?(LANG==='en'?'Exclusive Partner (subscription)':'Exclusive Partner (p\u0159edplatn\u00e9)'):(prof?.founding?'Founding Partner':(_m==='stripe'?((prof?.coach_ref_score>=5&&prof?.bankai_eligible)?'Bankai':(prof?.coach_ref_score>=2?'Shikai':(LANG==='en'?'base':'z\u00e1klad'))):(prof?.coach_ref_score>=2?'Shikai':(LANG==='en'?'base':'z\u00e1klad')))); var _ap=prof?.partner?10:20;
         var _mLbl=(_m==='stripe')?'Stripe':(LANG==='en'?'bank transfer':'bankovn\u00ed p\u0159evod');
         return (LANG==='en'?'MTL fee ':'Provize MTL ')+_p+'% \u00b7 '+_t+' \u00b7 '+_mLbl
           + '<br><span style="opacity:.8;">'+(LANG==='en'?'Acquisition ':'Akvizice ')+_ap+'\u00a0%</span>'; })()}</div></div>
@@ -29411,7 +29418,10 @@ function _openAccountQR(){
 }
 async function showPaidPopup(){
   const params = new URLSearchParams(window.location.search);
-  try{ const _gru=params.get('gymref'), _grg=params.get('gym'); if(_gru&&_grg){ window._gymRef={gym:_grg, ref:_gru}; } }catch(e){}
+  try{ const _gru=params.get('gymref'), _grg=params.get('gym')||params.get('klub'); if(_gru&&_grg){ window._gymRef={gym:_grg, ref:_gru};
+    // Pozvanka do klubu si taky zaslouzi to, co slibuje: pridat klub do oblibenych. Doted to
+    // delal jen odkaz s own=1, takze pozvany clen dorazil a nic se mu nestalo.
+    try{ localStorage.setItem('mtl_gym_pending', _grg); }catch(e){} } }catch(e){}
   try{ const _own=params.get('own'), _og=params.get('gym')||params.get('klub'); if(_own==='1'&&_og){ try{ localStorage.setItem('mtl_owngym_'+_og,'1'); }catch(e){} try{ localStorage.setItem('mtl_gym_pending', _og); }catch(e){} } }catch(e){}
   try{ const _ownc=params.get('own'), _oc=params.get('coach'); if(_ownc==='1'&&_oc){ try{ localStorage.setItem('mtl_owncoach_'+_oc,'1'); }catch(e){} try{ localStorage.setItem('mtl_coach_pending', _oc); }catch(e){} } }catch(e){}
   try{ const _jt=params.get('join'); if(_jt){ try{ localStorage.setItem('mtl_join', _jt); }catch(e){} } }catch(e){}
@@ -29433,7 +29443,10 @@ async function showPaidPopup(){
     }
   }catch(e){}
   try{
-    const _rbg=params.get('gym'), _rbb=params.get('buy');
+    // Prijimame i `klub=`: recepcni QR ho generoval, cist ho ale nikdo neumel, takze zakaznik
+    // po naskenovani skoncil na decku koucu. QR uz generuje `gym=`, tohle je pro ty, co uz
+    // nekde visi vytistene.
+    const _rbg=params.get('gym')||params.get('klub'), _rbb=params.get('buy');
     if(_rbg && _rbb!==null){
       let _rc=0; while(!currentUser && _rc<25){ await new Promise(r=>setTimeout(r,200)); _rc++; }
       if(currentUser){
@@ -30116,11 +30129,11 @@ async function renderPaymentsPage(){
   var _rmodeLbl=(_rmode==='stripe'?'Stripe':(EN?'Bank transfer':'Bankovn\u00ed p\u0159evod'));
   var _rateCard='<div style="background:linear-gradient(135deg,#0A7A4F,#005A3C);color:#fff;border-radius:14px;padding:13px 16px;margin-bottom:14px;box-shadow:0 2px 10px rgba(0,96,64,.18);"><div style="font-size:11.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:rgba(255,255,255,.75);margin-bottom:5px;">'+(EN?'Your MTL commission':'Tvoje provize MTL')+'</div><div class="mtlRatePct" style="font-size:26px;font-weight:800;line-height:1;">'+_rpct+' %</div><div style="font-size:12px;color:rgba(255,255,255,.85);margin-top:7px;line-height:1.4;">'+_rtier+' \u00b7 '+_rmodeLbl+' \u00b7 '+(EN?'taken from each payment through MTL':'str\u017eeno z ka\u017ed\u00e9 platby p\u0159es MTL')+'</div>'
     +'<div style="display:flex;align-items:center;gap:7px;font-size:12px;color:rgba(255,255,255,.85);margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,.18);">'
-    +'<span>'+(EN?'Acquisition ':'Akvizice ')+'<b>'+(currentUser.partner?5:10)+'\u00a0%</b></span>'
+    +'<span>'+(EN?'Acquisition ':'Akvizice ')+'<b>'+(currentUser.partner?10:20)+'\u00a0%</b></span>'
     +'<span id="acqInfoBtn" style="cursor:pointer;opacity:.85;font-size:14px;">\u24d8</span></div>'
     +'<div id="acqInfoBox" style="display:none;font-size:11.5px;color:rgba(255,255,255,.8);line-height:1.5;margin-top:6px;">'
-    +(EN?'Charged instead of the rate above on the first payment of a member the app brought you \u2014 their first lesson or drop-in, and the first 2 months of a membership. After that the normal rate applies.'
-        :'\u00da\u010dtuje se m\u00edsto sazby v\u00fd\u0161e u prvn\u00ed platby \u010dlena, kter\u00e9ho ti p\u0159ivedla appka \u2014 jeho prvn\u00ed lekce nebo jednor\u00e1zov\u00fd tr\u00e9nink a u \u010dlenstv\u00ed prvn\u00ed 2 m\u011bs\u00edce. Pak u\u017e plat\u00ed b\u011b\u017en\u00e1 sazba.')
+    +(EN?'Charged instead of the rate above on the first payment of a member the app brought you \u2014 their first lesson, first drop-in, or the first month of a membership. Once, not every time.'
+        :'\u00da\u010dtuje se m\u00edsto sazby v\u00fd\u0161e u prvn\u00ed platby \u010dlena, kter\u00e9ho ti p\u0159ivedla appka \u2014 jeho prvn\u00ed lekce, prvn\u00ed jednor\u00e1zov\u00fd vstup nebo prvn\u00ed m\u011bs\u00edc \u010dlenstv\u00ed. Jednou, ne opakovan\u011b.')
     +'</div></div>';
   var _mmWarn='';
   var _pmode=currentUser.payment_mode||(currentUser.stripe_account?'stripe':'');
