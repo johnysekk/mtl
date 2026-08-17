@@ -280,8 +280,7 @@ async function sendTicketEmail(s, m) {
 
 // Records ONE row per Stripe payment into the transactions ledger, with EXACT fees from the charge's balance_transaction.
 // Resolve a connected Stripe account to the ENTITY that owns the money (and therefore owns
-// welcome_free_until). Without this, transactions written by Stripe carry no payee_id and the
-// welcome cap - which is scoped by payee_id in pay.js / record-cash.js - simply cannot see them.
+// Without this, transactions written by Stripe carry no payee_id at all.
 const _payeeCache = {};
 async function resolvePayee(acct) {
   if (!acct) return { id: null, kind: null };
@@ -304,23 +303,24 @@ async function resolvePayee(acct) {
 // THE ONE RULE for what application_fee_percent a membership subscription carries.
 //
 // This field was being set from THREE places that knew nothing about each other:
-//   * pay.js at creation        -> welcome 0% / acquisition 10% (5% EP) / ladder
-//   * cron-attendance when the welcome window ended -> ALWAYS base, which silently threw
+//   * pay.js at creation        -> acquisition 20% (10% EP, first month only) / ladder
+//   * cron-attendance at renewal -> ALWAYS base, which silently threw
 //     away an acquisition window that was still running
 //   * gym-rerate when the owner crossed a tier -> ALWAYS the ladder rate, which blew away
-//     BOTH a running welcome window (breaking a 0% promise made to the provider) and an
 //     open acquisition window (MTL losing its own finder's fee)
 // and nothing at all ever ended an acquisition window, so an MTL-sourced membership was
 // billed 10% forever. mtl_acq had one writer and zero readers.
 //
-// PRECEDENCE: welcome (0) beats acquisition (10 / 5) beats the provider's ladder rate.
+// PRECEDENCE: acquisition (20 / 10 EP, first month only) beats the provider's ladder rate.
 // Welcome wins because it is a promise made to the provider; when it ends, the sub lands
 // on whatever is correct AT THAT MOMENT (still inside the 2 months -> acquisition; else ladder).
 //
 // Returns null when it cannot decide (Stripe call failed) -> the caller must CHANGE NOTHING.
 // Never guess with someone's money.
-async function subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive) {
-  if (welcomeActive) return 0;
+async function subRateFor(stripe, acct, subId, sub, ladderPct) {
+  // ODSTRANENO: `if (welcomeActive) return 0;`. Uvitaci okno bylo zruseno -- pri zakladu 2 %
+  // na Stripe a 2,5 % na bance uz neni co zlevnovat, a to okno stalo za vic kodu na penezni
+  // ceste nez samotny zebricek. Zbyva precedence: akvizice > zebricek.
   const md = (sub && sub.metadata) || {};
   if (md.mtl_acq === '1') {
     const pct = parseFloat(md.mtl_acq_pct || '0') || 0;
@@ -340,8 +340,8 @@ async function subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive) {
 }
 
 // Apply it. Returns true if the rate actually changed.
-async function applySubRate(stripe, acct, subId, sub, ladderPct, welcomeActive) {
-  const want = await subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive);
+async function applySubRate(stripe, acct, subId, sub, ladderPct) {
+  const want = await subRateFor(stripe, acct, subId, sub, ladderPct);
   if (want === null) return false;                                  // undecidable -> leave alone
   const cur = (sub.application_fee_percent != null) ? Number(sub.application_fee_percent) : null;
   if (cur === want) return false;
@@ -416,7 +416,7 @@ async function recordTransaction(acct, pi, fields) {
       payment_intent: pi, charge_id: chargeId, payee_account: acct || null, type: fields.type,
       payee_id: _payee.id, payee_kind: _payee.kind,
       member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null,
-      gross_amount: gross, stripe_fee: stripeFee, mtl_fee: (((fields.welcome_waived||0)>0 && (mtlFee===0||mtlFee==null)) ? (fields.welcome_waived||0) : mtlFee), mtl_rate: ((gross>0 && ((((fields.welcome_waived||0)>0 && (mtlFee===0||mtlFee==null)) ? (fields.welcome_waived||0) : mtlFee))>0) ? Math.round(((((((fields.welcome_waived||0)>0 && (mtlFee===0||mtlFee==null)) ? (fields.welcome_waived||0) : mtlFee))/gross))*10000)/10000 : 0), mtl_fee_refunded: ((fields.welcome_waived||0)>0 ? (fields.welcome_waived||0) : 0), net_amount: net, currency,
+      gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, mtl_rate: ((gross>0 && (mtlFee)>0) ? Math.round((((mtlFee)/gross))*10000)/10000 : 0), mtl_fee_refunded: 0, net_amount: net, currency,
       ...(fields.acq_months != null ? { acq_months: fields.acq_months } : {}),
       ...(fields.base_rate != null ? { base_rate: fields.base_rate } : {}),
       income_class: fields.income_class || null,
@@ -514,7 +514,6 @@ export default async function handler(req, res) {
     if (event.type === 'checkout.session.completed') {
       const s = event.data.object;
       const m = s.metadata || {};
-      const _ww = parseInt(m.mtl_welcome_waived||'0',10)||0;
 
       // ---- Consume a referral credit, server-side, ONLY once the payment really succeeded ----
       // This used to happen in the browser after returning from Stripe: close the tab and the
@@ -555,7 +554,7 @@ export default async function handler(req, res) {
                 message: `📅 Nová rezervace (potvrzeno platbou) na ${slot.date} ${slot.time}.`,
               });
               await payAmbassador(slot.coach_profile_id, amount, currency, m.discipline, pi);
-              await recordTransaction(event.account, pi, { type: 'coach_inperson', welcome_waived: _ww, member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', gross: amount, currency });
+              await recordTransaction(event.account, pi, { type: 'coach_inperson',  member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', gross: amount, currency });
             }
           } else if (m.booking_type === 'online' && m.coach_profile_id) {
             await sbPost('bookings', {
@@ -569,13 +568,13 @@ export default async function handler(req, res) {
               message: `🌐 Nová online objednávka (potvrzeno platbou).`,
             });
             await payAmbassador(m.coach_profile_id, amount, currency, m.discipline, pi);
-            await recordTransaction(event.account, pi, { type: 'coach_online', welcome_waived: _ww, member_id: m.student_id, coach_id: m.coach_profile_id, plan: m.online_fmt || 'Online', gross: amount, currency });
+            await recordTransaction(event.account, pi, { type: 'coach_online',  member_id: m.student_id, coach_id: m.coach_profile_id, plan: m.online_fmt || 'Online', gross: amount, currency });
           }
         }
       } else if (m.mtl_payment_type === 'drop_in' || m.mtl_payment_type === 'membership') {
         // GYM skupinová lekce (direct charge na účtu gymu) → 0,5 % ambassadorovi disciplíny
         await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id, s.payment_intent);
-        if (m.mtl_payment_type === 'drop_in') { const dpi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id); if (dpi) await recordTransaction(event.account, dpi, { type: 'drop_in', welcome_waived: _ww, member_id: m.student_id || m.member_id, gym_id: m.gym_id, coach_id: m.coach_profile_id || m.coach_id, plan: m.mtl_plan || 'Drop-in', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side' }); }
+        if (m.mtl_payment_type === 'drop_in') { const dpi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id); if (dpi) await recordTransaction(event.account, dpi, { type: 'drop_in',  member_id: m.student_id || m.member_id, gym_id: m.gym_id, coach_id: m.coach_profile_id || m.coach_id, plan: m.mtl_plan || 'Drop-in', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side' }); }
         else if (m.mtl_membership_kind === 'one_time') {
           // MULTI-MONTH MEMBERSHIP (3/6/12 months) — a ONE-TIME payment, no subscription. Activate
           // the row and stamp period_end = now + N months; nothing renews, it simply expires then.
@@ -619,7 +618,7 @@ export default async function handler(req, res) {
         if (cmId && (!already || already.length === 0)) {
           const amount = (s.amount_total || 0) / 100;
           const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
-          const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : ((m.mtl_welcome === '1') ? 0 : Math.round(amount * 0.03 * 100) / 100)  /* Stripe base 3% (was 0.035 = old ladder) */;
+          const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : (Math.round(amount * 0.03 * 100) / 100)  /* Stripe base 3% (was 0.035 = old ladder) */;
           const _sFee = await cohortStripeFee(pi, event.account);
           const _cpRes = await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'deposit', amount, currency: cur, mtl_fee: fee, stripe_fee: _sFee, payment_method: 'stripe', stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
           if (_cpRes && _cpRes.ok === false) {
@@ -684,7 +683,7 @@ export default async function handler(req, res) {
         if (cmId && (!already || already.length === 0)) {
           const amount = (s.amount_total || 0) / 100;
           const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
-          const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : ((m.mtl_welcome === '1') ? 0 : Math.round(amount * 0.03 * 100) / 100)  /* Stripe base 3% (was 0.035 = old ladder) */;
+          const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : (Math.round(amount * 0.03 * 100) / 100)  /* Stripe base 3% (was 0.035 = old ladder) */;
           const _sFee = await cohortStripeFee(pi, event.account);
           await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'first_month', amount, currency: cur, mtl_fee: fee, stripe_fee: _sFee, payment_method: 'stripe', stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
           {
@@ -707,7 +706,7 @@ export default async function handler(req, res) {
         if (cmId && (!already || already.length === 0)) {
           const amount = (s.amount_total || 0) / 100;
           const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
-          const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : ((m.mtl_welcome === '1') ? 0 : Math.round(amount * 0.03 * 100) / 100);
+          const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : (Math.round(amount * 0.03 * 100) / 100);
           const _sFee = await cohortStripeFee(pi, event.account);
           await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'month', amount, currency: cur, mtl_fee: fee, stripe_fee: _sFee, payment_method: 'stripe', stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
           {
@@ -740,7 +739,7 @@ export default async function handler(req, res) {
         if (m.ticket_id) {
           const pi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id);
           await sbPatch('event_tickets', `id=eq.${encodeURIComponent(m.ticket_id)}`, { status: 'paid', stripe_ref: pi });
-          await recordTransaction(event.account, pi, { type: 'event_ticket', welcome_waived: _ww, member_id: m.student_id || m.buyer_id, gym_id: m.gym_id, coach_id: m.payout_coach_id, plan: m.mtl_event || 'Event', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side' });
+          await recordTransaction(event.account, pi, { type: 'event_ticket',  member_id: m.student_id || m.buyer_id, gym_id: m.gym_id, coach_id: m.payout_coach_id, plan: m.mtl_event || 'Event', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side' });
           await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id, s.payment_intent);
           try { await sendTicketEmail(s, m); } catch (e) { console.error('ticket email', e.message); }
         }
@@ -792,19 +791,18 @@ export default async function handler(req, res) {
           const _mem2 = (await sbGet(`gym_memberships?stripe_subscription=eq.${encodeURIComponent(sub)}&select=gym_id,coach_id,paid_to`))[0];
           let _ownerId = null;
           if (_mem2 && _mem2.paid_to === 'coach' && _mem2.coach_id) _ownerId = _mem2.coach_id;
-          else if (_mem2 && _mem2.gym_id) { const _g=(await sbGet(`gyms?id=eq.${_mem2.gym_id}&select=owner_id,welcome_free_until`))[0]; _ownerId = _g && _g.owner_id; }
+          else if (_mem2 && _mem2.gym_id) { const _g=(await sbGet(`gyms?id=eq.${_mem2.gym_id}&select=owner_id`))[0]; _ownerId = _g && _g.owner_id; }
           if (_ownerId) {
-            const _op = (await sbGet(`profiles?id=eq.${_ownerId}&select=partner,coach_ref_score,bankai_eligible,welcome_free_until`))[0] || {};
+            const _op = (await sbGet(`profiles?id=eq.${_ownerId}&select=partner,coach_ref_score,bankai_eligible`))[0] || {};
             const _sc = _op.coach_ref_score || 0;
             // Delegováno na _rate.js. Tady dřív seděla vlastní kopie žebříčku s vlastními čísly, a přesně
             // ta se rozešla: EP mělo 1 % místo 0,5 % a founding se neřešil vůbec, takže každý běh zvedal
             // sazbu tomu, komu ji gym-rerate.js právě snížil. Jedno pravidlo, jedno místo.
             const _ladder = _mtlLadder('stripe', { partner: _op.partner, org: _op.org_rate, score: _sc, bankai: _op.bankai_eligible }) * 100;
             _subLadder = _ladder / 100;
-            const _wActive = !!(_op.welcome_free_until && new Date(_op.welcome_free_until).getTime() > Date.now());
-            await applySubRate(stripe, event.account, sub, _so2, _ladder, _wActive);
+            await applySubRate(stripe, event.account, sub, _so2, _ladder);
           }
-        }catch(e){ console.error('acq drop', e.message); } if (ipi && mem) await recordTransaction(event.account, ipi, { type: 'membership', welcome_waived: _wwMemb, income_class: _incClass, member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency , acq_months: (_subWasAcq ? 1 : null), base_rate: (_subLadder != null ? _subLadder : null) }); } catch (e) { console.error('record membership', e.message); }
+        }catch(e){ console.error('acq drop', e.message); } if (ipi && mem) await recordTransaction(event.account, ipi, { type: 'membership',  income_class: _incClass, member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency , acq_months: (_subWasAcq ? 1 : null), base_rate: (_subLadder != null ? _subLadder : null) }); } catch (e) { console.error('record membership', e.message); }
       }
     } else if (event.type === 'invoice.payment_failed') {
       const inv = event.data.object;

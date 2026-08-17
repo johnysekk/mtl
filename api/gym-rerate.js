@@ -21,23 +21,22 @@ async function sbGet(path) {
 // THE ONE RULE for what application_fee_percent a membership subscription carries.
 //
 // This field was being set from THREE places that knew nothing about each other:
-//   * pay.js at creation        -> welcome 0% / acquisition 10% (5% EP) / ladder
-//   * cron-attendance when the welcome window ended -> ALWAYS base, which silently threw
-//     away an acquisition window that was still running
-//   * gym-rerate when the owner crossed a tier -> ALWAYS the ladder rate, which blew away
-//     BOTH a running welcome window (breaking a 0% promise made to the provider) and an
-//     open acquisition window (MTL losing its own finder's fee)
-// and nothing at all ever ended an acquisition window, so an MTL-sourced membership was
-// billed 10% forever. mtl_acq had one writer and zero readers.
-//
-// PRECEDENCE: welcome (0) beats acquisition (10 / 5) beats the provider's ladder rate.
+//   * pay.js at creation        -> acquisition 20% (10% EP, first month) / ladder
+//   * cron-attendance at renewal  -> ALWAYS base, which silently threw the acquisition rate away
+//     one invoice early
+//   * this file                   -> whatever is correct right now
+// PRECEDENCE: acquisition (20 / 10 EP, first month only) beats the provider's ladder rate.
+// (Do konce 2026-08 tu byla jeste tretí, prednejsi uroven -- uvitaci okno 0 % na 30 dnu. Zruseno:
+//  pri zakladu 2 % na Stripe a 2,5 % na bance uz nemelo co zlevnit.)
 // Welcome wins because it is a promise made to the provider; when it ends, the sub lands
 // on whatever is correct AT THAT MOMENT (still inside the 2 months -> acquisition; else ladder).
 //
 // Returns null when it cannot decide (Stripe call failed) -> the caller must CHANGE NOTHING.
 // Never guess with someone's money.
-async function subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive) {
-  if (welcomeActive) return 0;
+async function subRateFor(stripe, acct, subId, sub, ladderPct) {
+  // ODSTRANENO: `if (welcomeActive) return 0;`. Uvitaci okno bylo zruseno -- pri zakladu 2 %
+  // na Stripe a 2,5 % na bance uz neni co zlevnovat, a to okno stalo za vic kodu na penezni
+  // ceste nez samotny zebricek. Zbyva precedence: akvizice > zebricek.
   const md = (sub && sub.metadata) || {};
   if (md.mtl_acq === '1') {
     const pct = parseFloat(md.mtl_acq_pct || '0') || 0;
@@ -57,8 +56,8 @@ async function subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive) {
 }
 
 // Apply it. Returns true if the rate actually changed.
-async function applySubRate(stripe, acct, subId, sub, ladderPct, welcomeActive) {
-  const want = await subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive);
+async function applySubRate(stripe, acct, subId, sub, ladderPct) {
+  const want = await subRateFor(stripe, acct, subId, sub, ladderPct);
   if (want === null) return false;                                  // undecidable -> leave alone
   const cur = (sub.application_fee_percent != null) ? Number(sub.application_fee_percent) : null;
   if (cur === want) return false;
@@ -82,19 +81,18 @@ export default async function handler(req, res) {
     const pct = ladderRate('stripe', { partner: prof.partner, founding: prof.founding, score, bankai: prof.bankai_eligible }) * 100;
 
     let rerated = 0;
-    const gyms = await sbGet(`gyms?owner_id=eq.${encodeURIComponent(owner)}&select=id,stripe_account,welcome_free_until`);
+    const gyms = await sbGet(`gyms?owner_id=eq.${encodeURIComponent(owner)}&select=id,stripe_account`);
     for (const g of gyms || []) {
       if (!g.stripe_account) continue;
       // Was: blindly set application_fee_percent = pct on EVERY active subscription, which
-      // wiped out a running welcome window (0%) and an open acquisition window (10%/5%).
+      // wiped out an open acquisition charge (20%/10% EP).
       // Now every sub goes through the one shared rule.
-      const gWelcome = !!(g.welcome_free_until && new Date(g.welcome_free_until).getTime() > Date.now());
       const mems = await sbGet(`gym_memberships?gym_id=eq.${encodeURIComponent(g.id)}&status=in.(active,cancelling)&select=stripe_subscription`);
       for (const m of mems || []) {
         if (!m.stripe_subscription) continue;
         try {
           const sub = await stripe.subscriptions.retrieve(m.stripe_subscription, { stripeAccount: g.stripe_account });
-          if (await applySubRate(stripe, g.stripe_account, m.stripe_subscription, sub, pct, gWelcome)) rerated++;
+          if (await applySubRate(stripe, g.stripe_account, m.stripe_subscription, sub, pct)) rerated++;
         } catch (e) { console.error('rerate sub', m.stripe_subscription, e.message); }
       }
     }

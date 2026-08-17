@@ -52,7 +52,7 @@ const PIS_MIN_FEE_CZK_MINOR = 200;   // 2 Kč
 async function _pisMinFee(cur, grossMinor) {
   const c = String(cur || 'CZK').toUpperCase();
   if (c === 'CZK') return Math.min(PIS_MIN_FEE_CZK_MINOR, grossMinor);
-  // Jiná měna: přepočet přes ECB kurzy, které už tady jsou kvůli welcome capu. Když kurzy
+  // Jiná měna: přepočet přes ECB kurzy. Když kurzy
   // nejsou, minimum se NEUPLATNÍ -- radši nevybrat, než vybrat špatně.
   try {
     const rates = await _fxRates();
@@ -63,24 +63,8 @@ async function _pisMinFee(cur, grossMinor) {
   } catch (e) { return 0; }
 }
 
-const _WELCOME_FOUNDER = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
-let _welcomeOff = null;
-async function welcomeKillSwitch() {
-  if (_welcomeOff !== null) return _welcomeOff;
-  try { const ks = await sb(`profiles?id=eq.${_WELCOME_FOUNDER}&select=welcome_zero_off`); _welcomeOff = !!(ks && ks[0] && ks[0].welcome_zero_off); }
-  catch (e) { _welcomeOff = false; }
-  return _welcomeOff;
-}
-// Mirrors isWelcomeZero() in pay.js, but on the payee profile we already loaded.
-// In window -> this cash/QR sale is 0% MTL fee (clean books, no doklad), exactly like Stripe.
-// First sale on a genuinely new account (<45 days) opens the 30-day window now (same anchor as Stripe).
-// WELCOME CAP - identical to pay.js, deliberately. It used to scope by gym_id/coach_id
-// while pay.js scoped by payee_account: the same thing until a coach with their own Stripe
-// sits inside a gym, at which point a gym class they merely TAUGHT (paid to the gym) carried
-// their coach_id and burned THEIR welcome window. Both now scope by payee_id - the entity
-// that actually owns welcome_free_until. And the cap is now real money: it used to add
-// gross_amount across currencies, giving a EUR gym an effective 100,000 EUR cap.
-const WELCOME_CAP_CZK_MINOR = 100000 * 100; // gross_amount is stored in minor units
+// VRACENO: _fxRates() a _toCzkMinor(). Rez welcome funkci je odnesl, ale _pisMinFee() nize je
+// pouziva na prepocet minimalni provize u PIS do cizi meny -- bez nich by minimum za behu spadlo.
 let _fxCache = null;
 async function _fxRates() {
   if (_fxCache !== null) return _fxCache;
@@ -102,43 +86,11 @@ function _toCzkMinor(amountMinor, cur, rates) {
   if (!per) return 0;
   return (Number(amountMinor) || 0) / per * rates.CZK;
 }
-async function welcomeCapReached(rows) {
-  const rates = await _fxRates();
-  let sum = 0;
-  for (const r of (rows || [])) sum += _toCzkMinor(r.gross_amount, r.currency, rates);
-  return sum >= WELCOME_CAP_CZK_MINOR;
-}
-async function isWelcomeZeroProfile(prof, table) {   // scope is now payee_id = prof.id; the old scopeCol/scopeId args are gone
-  table = table || 'profiles';
-  if (!prof || !prof.id) return false;
-  if (await welcomeKillSwitch()) return false;
-  const now = Date.now();
-  if (prof.welcome_free_until) {
-    if (now >= new Date(prof.welcome_free_until).getTime()) return false; // 30-day window elapsed
-    // volume trigger: welcome also ends once turnover in the window reaches the cap
-    try {
-      const winStart = new Date(new Date(prof.welcome_free_until).getTime() - 30 * 86400000).toISOString();
-      const rows = await sb(`transactions?select=gross_amount,currency&payee_id=eq.${encodeURIComponent(prof.id)}&status=in.(paid,completed)&created_at=gte.${encodeURIComponent(winStart)}`);
-      if (await welcomeCapReached(rows)) return false; // over the cap -> charge normally from now on
-    } catch (e) { /* on any error keep welcome (never over-charge) */ }
-    return true;
-  }
-  const created = prof.created_at ? new Date(prof.created_at).getTime() : 0;
-  if (created && (now - created) < 45 * 86400000) {
-    // Welcome is a NEW-PROVIDER incentive: a gym owner gets it for their FIRST gym only. A 2nd+
-    // gym is an existing owner expanding, not a new acquisition. "First" = no earlier-created gym
-    // of this owner exists (deleted gyms count, so deleting gym #1 can't reset gym #2). Mirrors pay.js.
-    if (table === 'gyms' && prof.owner_id) {
-      try {
-        const earlier = await sb(`gyms?owner_id=eq.${encodeURIComponent(prof.owner_id)}&created_at=lt.${encodeURIComponent(new Date(created).toISOString())}&select=id&limit=1`);
-        if (earlier && earlier.length) return false;   // not the owner's first gym -> no welcome
-      } catch (e) { /* on error grant (never over-charge on our own bug) */ }
-    }
-    try { await sb(`${table}?id=eq.${prof.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ welcome_free_until: new Date(now + 30 * 86400000).toISOString() }) }); } catch (e) {}
-    return true;
-  }
-  return false;
-}
+
+// ODSTRANENO: welcomeKillSwitch(), welcomeCapReached() a isWelcomeZeroProfile(). Uvitaci okno
+// bylo zruseno -- pri zakladu 2 % na Stripe a 2,5 % na bance uz neni co zlevnovat. _fxRates() a
+// _toCzkMinor() ZUSTAVAJI: vznikly sice kvuli stotisicovemu stropu, ale dnes je pouziva
+// minimalni provize u PIS, viz _pisMinFee nize.
 
 // REMOVED: two local constants (0.10 / 0.05, later 0.20 / 0.10) used to sit here. They were dead
 // -- acquisitionRate() below delegates to _rate.js and never read them -- and a dead copy of a rate
@@ -147,7 +99,7 @@ async function isWelcomeZeroProfile(prof, table) {   // scope is now payee_id = 
 // MTL acquisition finder's fee: when the app demonstrably brought the member (acq_source='mtl_discovery'),
 // MTL takes the acquisition rate ONCE — the first membership, the first drop-in, the first 1:1.
 // (Was: membership spread it over the first 2 months.)
-// Mirrors pay.js _isAcq (membership) + the client first-lesson charge (coach/drop-in). Never for EP or welcome.
+// Mirrors pay.js _isAcq (membership) + the client first-lesson charge (coach/drop-in). Never for EP.
 // "Window" is bounded by counting prior COMPLETED tx of this type for this member at this provider
 // (counts Stripe + cash together, so a member already past the window isn't re-charged 10% on cash).
 async function acquisitionRate(acq, type, payee, memberId, scopeCol, scopeId, ladder, periods) {
@@ -226,41 +178,40 @@ export default async function handler(req, res) {
 
     if (provider === 'gym') {
       // gym pays out -> gym owner authorizes, rate from owner profile
-      const gyms = await sb(`gyms?id=eq.${gym_id}&select=id,owner_id,currency,account_suspended,stripe_account,welcome_free_until,created_at`);
+      const gyms = await sb(`gyms?id=eq.${gym_id}&select=id,owner_id,currency,account_suspended,stripe_account,created_at`);
       const gym = gyms && gyms[0];
       if (!gym) return res.status(404).json({ error: 'gym not found' });
       if (!_trusted && gym.owner_id !== uid) return res.status(403).json({ error: 'not your gym' });
       if (!_trusted && gym.account_suspended) return res.status(403).json({ error: 'account suspended' });
-      const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,welcome_free_until,created_at,referral_optin`);
+      const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,created_at,referral_optin`);
       const ownerProf = (owners && owners[0]) || {};
       if (!ownerProf.id) ownerProf.id = gym.owner_id;
       rate = ladderRate(ownerProf);
       cur = currency || gym.currency || 'czk';
-      const _wz = await isWelcomeZeroProfile(gym, 'gyms');
       const _cc = (_wantCredit && ownerProf.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
-      const _acq = _wz ? null : await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id, rate, months);
-      let mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
-      // Podlaha jen u PIS a jen když se opravdu něco účtuje -- kredit a welcome zůstávají nulové.
+      const _acq = await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id, rate, months);
+      let mtl_fee = _cc ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
+      // Podlaha jen u PIS a jen když se opravdu něco účtuje -- uplatněný kredit zůstává nulový.
       if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, gross));
-      const _effRate = (_cc || _wz) ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
+      const _effRate = _cc ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
       let _gymPayee = gym.stripe_account || null;
       if (coach_id) { try { const _cp = await sb(`profiles?id=eq.${coach_id}&select=gym_payout_account`); const _cpa = _cp && _cp[0] && _cp[0].gym_payout_account; if (_cpa) _gymPayee = _cpa; } catch(e){} }
       row = {
         gym_id, coach_id: coach_id || null, member_id: member_id || null, paid_to: 'gym', payee_account: _gymPayee,
-        payee_id: gym.id, payee_kind: 'gym',   // the entity that owns welcome_free_until
+        payee_id: gym.id, payee_kind: 'gym',
         gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, refund_amount: 0, mtl_fee_refunded: 0,
         // CHANGED: was 'completed'. The column's own DB default is 'paid' and the Stripe rail writes
         // 'paid', so 'completed' was the odd one out -- and every reader of prior turnover asked for
         // 'completed' only, which is why none of them could see a Stripe transaction. One vocabulary
         // now; status-vocabulary.sql normalises the rows written before this.
         currency: cur, type, status: 'paid', payment_method, cohort_id: cohort_id || null, income_class: income_class || null,
-        commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,
+        commission_status: _cc ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct', source_booking_id: source_booking_id || null,
       };
     } else {
       // coach pays out -> the coach authorizes their own cash/QR, rate from coach profile.
-      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,account_suspended,cash_blocked,welcome_free_until,created_at,referral_optin,gym_payout_account,stripe_account`);
+      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,account_suspended,cash_blocked,created_at,referral_optin,gym_payout_account,stripe_account`);
       const coach = cs && cs[0];
       if (!coach) return res.status(404).json({ error: 'coach not found' });
       if (!_trusted && coach.id !== uid) return res.status(403).json({ error: 'not your account' });
@@ -268,27 +219,26 @@ export default async function handler(req, res) {
       if (!_trusted && coach.cash_blocked) return res.status(403).json({ error: 'cash blocked' });
       rate = ladderRate(coach);
       cur = currency || 'czk';
-      const _wz = await isWelcomeZeroProfile(coach, 'profiles');
       const _cc = (_wantCredit && coach.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
-      const _acq = _wz ? null : await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id, rate, months);
-      let mtl_fee = (_cc || _wz) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
-      // Podlaha jen u PIS a jen když se opravdu něco účtuje -- kredit a welcome zůstávají nulové.
+      const _acq = await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id, rate, months);
+      let mtl_fee = _cc ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
+      // Podlaha jen u PIS a jen když se opravdu něco účtuje -- uplatněný kredit zůstává nulový.
       if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, gross));
-      const _effRate = (_cc || _wz) ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
+      const _effRate = _cc ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
       row = {
         gym_id: null, coach_id, member_id: member_id || null, paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null),
-        payee_id: coach.id, payee_kind: 'profile',   // the entity that owns welcome_free_until
+        payee_id: coach.id, payee_kind: 'profile',
         gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, refund_amount: 0, mtl_fee_refunded: 0,
         currency: cur, type, status: 'paid', payment_method, cohort_id: cohort_id || null, income_class: income_class || null,
-        commission_status: (_cc || _wz) ? 'collected' : 'pending', commission_month: month,
+        commission_status: _cc ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct', source_booking_id: source_booking_id || null,
       };
     }
 
     const ins = await sb('transactions', { method: 'POST', prefer: 'return=representation', body: JSON.stringify(row) });
     if (_creditRow) await consumeStudentCredit(_creditRow.memberId, _creditRow.id, _creditRow.sc);
-    return res.status(200).json({ ok: true, mtl_fee: row.mtl_fee, welcome: row.commission_status === 'collected' && row.mtl_fee === 0, credit_redeemed: !!_creditRow, id: (ins && ins[0] && ins[0].id) || null });
+    return res.status(200).json({ ok: true, mtl_fee: row.mtl_fee, credit_redeemed: !!_creditRow, id: (ins && ins[0] && ins[0].id) || null });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }

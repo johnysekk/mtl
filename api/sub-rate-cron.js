@@ -18,10 +18,11 @@
 //
 // The rate rule itself lives in ONE place, duplicated verbatim into every file that sets
 // application_fee_percent (pay.js at creation, stripe-webhook.js on invoice.paid,
-// cron-attendance.js when a welcome window ends, gym-rerate.js when an owner crosses a tier,
-// and here). They were four different rules once. That was the bug.
+// cron-attendance.js at renewal, gym-rerate.js when an owner crosses a tier, and here).
+// They were four different rules once. That was the bug.
 // =============================================================================
 import Stripe from 'stripe';
+import { ladderRate as _mtlLadder } from './_rate.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
@@ -35,13 +36,15 @@ async function sbGet(path) {
 
 // ---------------------------------------------------------------------------
 // THE ONE RULE for what application_fee_percent a membership subscription carries.
-// PRECEDENCE: welcome (0) beats acquisition (10 / 5, first two paid invoices) beats the
+// PRECEDENCE: acquisition (20 / 10 EP, the first paid invoice) beats the provider's ladder rate.
 // provider's current ladder rate. Welcome wins because it is a promise made to the provider;
 // when it ends, the sub lands on whatever is correct AT THAT MOMENT.
 // Returns null when it cannot decide (a Stripe call failed) -> the caller CHANGES NOTHING.
 // Never guess with someone's money.
-async function subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive) {
-  if (welcomeActive) return 0;
+async function subRateFor(stripe, acct, subId, sub, ladderPct) {
+  // ODSTRANENO: `if (welcomeActive) return 0;`. Uvitaci okno bylo zruseno -- pri zakladu 2 %
+  // na Stripe a 2,5 % na bance uz neni co zlevnovat, a to okno stalo za vic kodu na penezni
+  // ceste nez samotny zebricek. Zbyva precedence: akvizice > zebricek.
   const md = (sub && sub.metadata) || {};
   if (md.mtl_acq === '1') {
     const pct = parseFloat(md.mtl_acq_pct || '0') || 0;
@@ -60,8 +63,8 @@ async function subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive) {
   return ladderPct;
 }
 
-async function applySubRate(stripe, acct, subId, sub, ladderPct, welcomeActive) {
-  const want = await subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive);
+async function applySubRate(stripe, acct, subId, sub, ladderPct) {
+  const want = await subRateFor(stripe, acct, subId, sub, ladderPct);
   if (want === null) return false;
   const cur = (sub.application_fee_percent != null) ? Number(sub.application_fee_percent) : null;
   if (cur === want) return false;
@@ -99,37 +102,32 @@ export default async function handler(req, res) {
       out.checked++;
       try {
         // Who owns this money, and therefore whose rate applies?
-        let ownerId = null, acct = null, entWelcome = null;
+        let ownerId = null, acct = null;
         if (m.paid_to === 'coach' && m.coach_id) {
           ownerId = m.coach_id;
         } else if (m.gym_id) {
           if (gymCache[m.gym_id] === undefined) {
             // gym_payout_account is a profiles column, not a gyms one; asking for it here rejected the
             // whole query and left gymCache null, so nothing was ever re-rated.
-            gymCache[m.gym_id] = (await sbGet(`gyms?id=eq.${m.gym_id}&select=owner_id,stripe_account,welcome_free_until`))[0] || null;
+            gymCache[m.gym_id] = (await sbGet(`gyms?id=eq.${m.gym_id}&select=owner_id,stripe_account`))[0] || null;
           }
           const g = gymCache[m.gym_id];
           if (!g) { out.skipped++; continue; }
           ownerId = g.owner_id;
           acct = g.gym_payout_account || g.stripe_account;
-          entWelcome = g.welcome_free_until;
         }
         if (!ownerId) { out.skipped++; continue; }
 
         if (profCache[ownerId] === undefined) {
-          profCache[ownerId] = (await sbGet(`profiles?id=eq.${ownerId}&select=partner,coach_ref_score,bankai_eligible,stripe_account,gym_payout_account,welcome_free_until`))[0] || null;
+          profCache[ownerId] = (await sbGet(`profiles?id=eq.${ownerId}&select=partner,coach_ref_score,bankai_eligible,stripe_account,gym_payout_account`))[0] || null;
         }
         const p = profCache[ownerId];
         if (!p) { out.skipped++; continue; }
         if (!acct) acct = p.gym_payout_account || p.stripe_account;
         if (!acct) { out.skipped++; continue; }
 
-        // The welcome window can sit on the gym row or the owner's profile - whichever is set.
-        const wUntil = entWelcome || p.welcome_free_until;
-        const wActive = !!(wUntil && new Date(wUntil).getTime() > Date.now());
-
         const sub = await stripe.subscriptions.retrieve(m.stripe_subscription, { stripeAccount: acct });
-        if (await applySubRate(stripe, acct, m.stripe_subscription, sub, ladderOf(p), wActive)) out.fixed++;
+        if (await applySubRate(stripe, acct, m.stripe_subscription, sub, ladderOf(p))) out.fixed++;
       } catch (e) {
         out.errors.push(`${m.stripe_subscription}: ${e.message}`);
       }

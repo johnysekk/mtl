@@ -50,7 +50,7 @@ export default
 //
 // This field was being set from THREE places that knew nothing about each other:
 //   * pay.js at creation        -> welcome 0% / acquisition 10% (5% EP) / ladder
-//   * cron-attendance when the welcome window ended -> ALWAYS base, which silently threw
+//   * cron-attendance at renewal -> ALWAYS base, which silently threw
 //     away an acquisition window that was still running
 //   * gym-rerate when the owner crossed a tier -> ALWAYS the ladder rate, which blew away
 //     BOTH a running welcome window (breaking a 0% promise made to the provider) and an
@@ -64,8 +64,10 @@ export default
 //
 // Returns null when it cannot decide (Stripe call failed) -> the caller must CHANGE NOTHING.
 // Never guess with someone's money.
-async function subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive) {
-  if (welcomeActive) return 0;
+async function subRateFor(stripe, acct, subId, sub, ladderPct) {
+  // ODSTRANENO: `if (welcomeActive) return 0;`. Uvitaci okno bylo zruseno -- pri zakladu 2 %
+  // na Stripe a 2,5 % na bance uz neni co zlevnovat, a to okno stalo za vic kodu na penezni
+  // ceste nez samotny zebricek. Zbyva precedence: akvizice > zebricek.
   const md = (sub && sub.metadata) || {};
   if (md.mtl_acq === '1') {
     const pct = parseFloat(md.mtl_acq_pct || '0') || 0;
@@ -85,8 +87,8 @@ async function subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive) {
 }
 
 // Apply it. Returns true if the rate actually changed.
-async function applySubRate(stripe, acct, subId, sub, ladderPct, welcomeActive) {
-  const want = await subRateFor(stripe, acct, subId, sub, ladderPct, welcomeActive);
+async function applySubRate(stripe, acct, subId, sub, ladderPct) {
+  const want = await subRateFor(stripe, acct, subId, sub, ladderPct);
   if (want === null) return false;                                  // undecidable -> leave alone
   const cur = (sub.application_fee_percent != null) ? Number(sub.application_fee_percent) : null;
   if (cur === want) return false;
@@ -254,57 +256,13 @@ async function handler(req, res) {
       }
     } catch (e) { console.error('cron purge', e.message); }
 
-    // --- Welcome 0% -> base rate: once a provider's welcome window ends, bump their still-0% subscriptions to base ---
-    let welcomeRerated = 0;
-    try {
-      const nowIso = new Date().toISOString();
-      const ended = await sbGet(`profiles?welcome_free_until=lt.${encodeURIComponent(nowIso)}&welcome_rerated=is.false&select=id,stripe_account,partner,coach_ref_score,bankai_eligible`);
-      for (const p of (Array.isArray(ended) ? ended : [])) {
-        try {
-          // The owner's CURRENT ladder rate, computed live - not mtl_acq_base from metadata,
-          // which was stamped when the subscription was created and is stale the moment the
-          // owner crosses a tier. Stripe track (this only ever touches Stripe subscriptions).
-          const _sc = p.coach_ref_score || 0;
-          // Delegováno na _rate.js -- viz sub-rate-cron.js, tohle byla třetí kopie téhož.
-          const ladderPct = _mtlLadder('stripe', { partner: p.partner, org: p.org_rate, score: _sc, bankai: p.bankai_eligible }) * 100;
-          // gyms has no gym_payout_account column -- that lives on profiles. Naming it here made
-          // PostgREST reject the whole query, so this block silently did nothing.
-          const pGyms = await sbGet(`gyms?owner_id=eq.${p.id}&select=id,stripe_account`);
-          for (const g of (Array.isArray(pGyms) ? pGyms : [])) {
-            const acct = g.gym_payout_account || g.stripe_account;
-            if (!acct) continue;
-            const subs = await sbGet(`gym_memberships?gym_id=eq.${g.id}&status=eq.active&or=(paid_to.is.null,paid_to.eq.gym)&select=stripe_subscription`);
-            for (const m of (Array.isArray(subs) ? subs : [])) {
-              if (!m.stripe_subscription) continue;
-              try {
-                const sub = await stripe.subscriptions.retrieve(m.stripe_subscription, { stripeAccount: acct });
-                // Was: only ever fired at 0% and always restored the BASE rate - which threw the
-                // acquisition fee away for any gym that happened to be in its welcome window, and
-                // never dropped a 10% acquisition sub back at all. Now it simply puts every sub on
-                // whatever rate is correct right now (acquisition inside the 2-month window, base after).
-                // welcome has ENDED for this provider, so welcomeActive=false: the sub lands on
-                // the acquisition rate on their first month only, else the ladder. (Was: first 2 months.)
-                if (await applySubRate(stripe, acct, m.stripe_subscription, sub, ladderPct, false)) welcomeRerated++;
-              } catch (e) { console.error('welcome rerate sub', m.stripe_subscription, e.message); }
-            }
-          }
-          // coach-owned subscriptions: paid directly to the coach (paid_to='coach') on the coach's own Stripe account
-          if (p.stripe_account) {
-            const cSubs = await sbGet(`gym_memberships?coach_id=eq.${p.id}&status=eq.active&paid_to=eq.coach&select=stripe_subscription`);
-            for (const m of (Array.isArray(cSubs) ? cSubs : [])) {
-              if (!m.stripe_subscription) continue;
-              try {
-                const sub = await stripe.subscriptions.retrieve(m.stripe_subscription, { stripeAccount: p.stripe_account });
-                if (await applySubRate(stripe, p.stripe_account, m.stripe_subscription, sub, ladderPct, false)) welcomeRerated++;
-              } catch (e) { console.error('welcome rerate coach sub', m.stripe_subscription, e.message); }
-            }
-          }
-          await sbPatch('profiles', `id=eq.${p.id}`, { welcome_rerated: true });
-        } catch (e) { console.error('welcome rerate provider', p.id, e.message); }
-      }
-    } catch (e) { console.error('cron welcome rerate', e.message); }
+    // ODSTRANENO: blok "welcome 0 % skoncilo -> preved predplatna na zakladni sazbu".
+    // Uvitaci okno bylo zruseno, takze neexistuje stav, ze by predplatne viselo na 0 % a cekalo,
+    // az ho nekdo vrati zpet. Sazbu resi sub-rate-cron.js kazdou noc a stripe-webhook.js pri
+    // kazde zaplacene fakture; tenhle blok byl treti cesta ke stejnemu cili a existoval jen kvuli
+    // welcome.
 
-    res.status(200).json({ ok: true, gyms: gyms.length, created, purged, purgedG, autoRefunded, welcomeRerated });
+    res.status(200).json({ ok: true, gyms: gyms.length, created, purged, purgedG, autoRefunded });
   } catch (err) {
     console.error('cron-attendance error:', err.message);
     res.status(200).json({ ok: false, error: err.message });

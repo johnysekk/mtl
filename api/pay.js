@@ -14,16 +14,11 @@ const GYM_STUDENT_MARKUP = 1.00;  // no markup
 const GYM_MTL_TAKE       = 0.02;   // drop-in: Stripe track base 2 % (bylo 3 %)
 const MEMB_MTL_PERCENT   = 3;       // membership: Stripe track base 3% (was 3.5 = the old ladder)
 
-// --- Genuine welcome 0%: no fee charged up front (replaces charge-then-instant-refund) ---
 const _SUPA_URL = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, ''), _SUPA_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const _WELCOME_FOUNDER = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 async function _wsbGet(path){
   if(!_SUPA_URL || !_SUPA_KEY) return [];
   try{ const r = await fetch(_SUPA_URL.replace(/\/+$/,'') + '/rest/v1/' + path, { headers:{ apikey:_SUPA_KEY, Authorization:'Bearer '+_SUPA_KEY } }); return r.ok ? await r.json() : []; }catch(e){ return []; }
 }
-// True if the provider holding this connected account is still inside their welcome window
-// (welcome_free_until in the future), unless the founder kill-switch (welcome_zero_off) is on.
-// When true we set the application fee to 0 at checkout = clean books, no refund, no doklad.
 async function _wsbPatch(path, body){
   if(!_SUPA_URL || !_SUPA_KEY) return;
   try{ await fetch(_SUPA_URL.replace(/\/+$/,'') + '/rest/v1/' + path, { method:'PATCH', headers:{ apikey:_SUPA_KEY, Authorization:'Bearer '+_SUPA_KEY, 'Content-Type':'application/json', Prefer:'return=minimal' }, body: JSON.stringify(body) }); }catch(e){ console.error('wsbPatch', e.message); }
@@ -45,96 +40,13 @@ async function verifyStudentCredit(studentId){
     return (rows && rows[0] && rows[0].id) ? String(rows[0].id) : null;
   }catch(e){ console.error('verifyStudentCredit', e.message); return null; }
 }
-
-// ---------------------------------------------------------------------------
-// WELCOME CAP — 100,000 CZK of turnover inside the window, in REAL money.
-// The cap used to add gross_amount across currencies with no conversion, so a EUR gym
-// got an effective 100,000 EUR cap (~25x too generous). fx-sync.js already caches the
-// ECB reference rates daily in fx_rates (base EUR), so use them.
-// Fail-safe in BOTH directions: if the rates are missing we count only the rows already
-// in CZK, which UNDER-counts and therefore leaves the window open a little longer.
-// Under-counting is the safe error - it never over-charges a provider.
-const WELCOME_CAP_CZK_MINOR = 100000 * 100;   // gross_amount is stored in minor units
-let _fxCache = null;
-async function _fxRates(){
-  if (_fxCache !== null) return _fxCache;
-  try{
-    const r = await _wsbGet(`fx_rates?id=eq.ecb-latest&select=data&limit=1`);
-    const d = r && r[0] && r[0].data;
-    _fxCache = (d && d.rates && d.rates.CZK) ? d.rates : false;
-  }catch(e){ _fxCache = false; }
-  return _fxCache;
-}
-// ECB feed is EUR-based: 1 EUR = rates[CUR] of CUR. EUR itself is not in the feed.
-function _toCzkMinor(amountMinor, cur, rates){
-  const c = String(cur || 'CZK').toUpperCase();
-  if (c === 'CZK') return Number(amountMinor) || 0;
-  if (!rates) return 0;                                  // no rates -> don't count it (under-count = safe)
-  const per = (c === 'EUR') ? 1 : rates[c];
-  if (!per) return 0;
-  return (Number(amountMinor) || 0) / per * rates.CZK;
-}
-async function welcomeCapReached(rows){
-  const rates = await _fxRates();
-  let sum = 0;
-  for (const r of (rows || [])) sum += _toCzkMinor(r.gross_amount, r.currency, rates);
-  return sum >= WELCOME_CAP_CZK_MINOR;
-}
-
-async function isWelcomeZero(acct){
-  if(!acct) return false;
-  try{
-    const ks = await _wsbGet(`profiles?id=eq.${_WELCOME_FOUNDER}&select=welcome_zero_off`);
-    if(ks && ks[0] && ks[0].welcome_zero_off) return false;
-    const a = encodeURIComponent(String(acct).trim());
-    let _wtbl = 'profiles';
-    let prov = (await _wsbGet(`profiles?stripe_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0]
-            || (await _wsbGet(`profiles?gym_payout_account=eq.${a}&select=id,welcome_free_until,created_at&limit=1`))[0];
-    if(!prov){
-      // gyms has ONLY stripe_account; gym_payout_account is a profiles column. The second
-      // query here always 400'd and returned nothing - a fallback that never fell back.
-      let g = (await _wsbGet(`gyms?stripe_account=eq.${a}&select=id,owner_id,welcome_free_until,created_at&limit=1`))[0];
-      if(g && g.id){ prov = g; _wtbl = 'gyms'; }
-    }
-    if(!prov || !prov.id) return false;
-    const now = Date.now();
-    if(prov.welcome_free_until){
-      if(now >= new Date(prov.welcome_free_until).getTime()) return false; // 30-day window elapsed
-      // Volume trigger: the welcome window also ends at 100,000 CZK of turnover.
-      // Scoped by payee_id (the entity that owns welcome_free_until) and converted to CZK -
-      // this used to scope by payee_account, which is NULL for a bank/QR provider and which
-      // diverged from record-cash's gym_id/coach_id scope; and it used to SUM CURRENCIES,
-      // so a EUR gym effectively had a 100,000 EUR cap.
-      try{
-        const winStart = new Date(new Date(prov.welcome_free_until).getTime() - 30*86400000).toISOString();
-        const rows = await _wsbGet(`transactions?select=gross_amount,currency&payee_id=eq.${encodeURIComponent(prov.id)}&status=in.(paid,completed)&created_at=gte.${encodeURIComponent(winStart)}`);
-        if (await welcomeCapReached(rows)) return false;   // over the cap -> charge normally from now on
-      }catch(e){ /* on any error keep welcome (never over-charge) */ }
-      return true;
-    }
-    // First sale on a genuinely new account (<45 days): open the 30-day window now and make THIS sale 0%.
-    const created = prov.created_at ? new Date(prov.created_at).getTime() : 0;
-    if(created && (now - created) < 45*86400000){
-      // Welcome is a NEW-PROVIDER incentive. A gym owner gets it for their FIRST gym only;
-      // any 2nd+ gym is an existing provider expanding, not a new acquisition, so no welcome.
-      // "First" = no other gym of this owner was created before this one (deleted gyms count,
-      // so deleting gym #1 can't reset gym #2 into a fresh welcome). Solo coaches (profiles)
-      // are unaffected - this gate only applies when the paying entity is a gym.
-      if(_wtbl === 'gyms' && prov.owner_id){
-        try{
-          const earlier = await _wsbGet(`gyms?owner_id=eq.${encodeURIComponent(prov.owner_id)}&created_at=lt.${encodeURIComponent(new Date(created).toISOString())}&select=id&limit=1`);
-          if(earlier && earlier.length) return false;   // not the owner's first gym -> no welcome
-        }catch(e){ /* on error, fall through and grant (never over-charge on our own bug) */ }
-      }
-      await _wsbPatch(`${_wtbl}?id=eq.${prov.id}`, { welcome_free_until: new Date(now + 30*86400000).toISOString() });
-      return true;
-    }
-    return false;
-  }catch(e){ console.error('isWelcomeZero', e.message); return false; }
-}
-// DIAGNOSTIC: same lookup as isWelcomeZero but returns WHY (shown in Stripe metadata as mtl_welcome).
-// off=kill-switch | noprov=provider not found by account | ok-*=welcome active | expired-* | old-*(>45d no window) | anchor-*(would open) | err
-
+// ODSTRANENO s uvitacim oknem: _fxRates() a _toCzkMinor(). Existovaly VYHRADNE proto, aby se dal
+// stotisicovy strop porovnat napric menami. record-cash.js si svoji kopii nechava -- tam je
+// potrebuje minimalni provize u PIS.
+// ODSTRANENO: welcomeCapReached() + isWelcomeZero(). Uvitaci okno bylo zruseno -- pri zakladu
+// 2 % na Stripe a 2,5 % na bance uz neni co zlevnovat, a stalo za vic kodu na penezni ceste nez
+// samotny zebricek: okno na dvou entitach, strop v CZK vyzadujici prepocet men, kill-switch,
+// razitko welcome_waived na transakci a pravidlo "welcome prebiji akvizici" na peti mistech.
 // Guard: a connected account must be able to accept payments (charges_enabled)
 // before we create a Checkout on it. Otherwise Stripe throws a raw error
 // (e.g. "you must set a business name") and the buyer sees garbage. This also
@@ -235,7 +147,6 @@ async function coachCheckout(req, res) {
     tax_id_collection: { enabled: true },
     metadata: {
       booking_type: isOnline ? 'online' : 'inperson',
-      mtl_welcome_waived: (await isWelcomeZero(coachId)) ? String(applicationFee) : '0',
       mtl_credit_row: _credRow || '',
       mtl_credit_user: _credRow ? String(studentId || '') : '',
       mtl_ref_pct: _credRow ? String(Math.round((MK - STUDENT_MARKUP) * 100)) : '0',
@@ -253,7 +164,7 @@ async function coachCheckout(req, res) {
       { price_data: { currency: cur, product_data: { name: productName }, unit_amount: unitAmount }, quantity: 1 },
     ],
     payment_intent_data: {
-      application_fee_amount: (await isWelcomeZero(coachId)) ? 0 : applicationFee,
+      application_fee_amount: applicationFee,
       metadata: {
         credit_type: credit || 'none',
         mtl_credit_row: _credRow || '',      // set ONLY when server-verified; the webhook consumes it
@@ -323,12 +234,12 @@ async function gymCheckout(req, res) {
       payment_method_types: ['card'],
       billing_address_collection: 'required',
       tax_id_collection: { enabled: true },
-      metadata: { mtl_payment_type: (String(merch)==='1'?'merch':'drop_in'), commission_pct: TAKE.toFixed(2), mtl_credit_row: _credRow || '', mtl_credit_user: _credRow ? String(studentId || '') : '', mtl_ref_pct: _credRow ? String(Math.round((MK - STUDENT_MK) * 100)) : '0', mtl_list_amount: String(Math.round(P * 100)), mtl_welcome_waived: (await isWelcomeZero(gymAccount)) ? String(applicationFee) : '0', gym_id: gymId || '', student_id: studentId || '', coach_id: coachId || '', mtl_plan: className || 'Drop-in', merch_name: merchName || '', mtl_currency: cur },
+      metadata: { mtl_payment_type: (String(merch)==='1'?'merch':'drop_in'), commission_pct: TAKE.toFixed(2), mtl_credit_row: _credRow || '', mtl_credit_user: _credRow ? String(studentId || '') : '', mtl_ref_pct: _credRow ? String(Math.round((MK - STUDENT_MK) * 100)) : '0', mtl_list_amount: String(Math.round(P * 100)), gym_id: gymId || '', student_id: studentId || '', coach_id: coachId || '', mtl_plan: className || 'Drop-in', merch_name: merchName || '', mtl_currency: cur },
       line_items: [
         { price_data: { currency: cur, product_data: { name: `${className || 'Drop-in lekce'} — ${gymName || 'MTL Gym'}` }, unit_amount: unitAmount }, quantity: 1 },
       ],
       payment_intent_data: {
-        application_fee_amount: (await isWelcomeZero(gymAccount)) ? 0 : applicationFee,
+        application_fee_amount: applicationFee,
         description: `${className || 'Drop-in'}${level ? ' [' + level + ']' : ''} — ${gymName || 'MTL Gym'} (drop-in)`,
         metadata: {
           mtl_payment_type: (String(merch)==='1'?'merch':'drop_in'),
@@ -395,7 +306,7 @@ async function eventCheckout(req, res) {
         { price_data: { currency: cur, product_data: { name: `${eventTitle || 'Event'}${tierName ? ' — ' + tierName : ''}` }, unit_amount: unit }, quantity: Q },
       ],
       payment_intent_data: {
-        application_fee_amount: (await isWelcomeZero(gymAccount)) ? 0 : (fee * Q),
+        application_fee_amount: (fee * Q),
         description: `${eventTitle || 'Event'}${tierName ? ' [' + tierName + ']' : ''} (MTL event ticket)`,
         metadata: {
           mtl_payment_type: 'event_ticket',
@@ -411,7 +322,6 @@ async function eventCheckout(req, res) {
       },
       metadata: {
         mtl_payment_type: 'event_ticket',
-        mtl_welcome_waived: (await isWelcomeZero(gymAccount)) ? String(fee * Q) : '0',
         ticket_id: ticketId || '',
         qr_token: qrToken || '',
         mtl_event_id: eventId || '',
@@ -527,7 +437,7 @@ async function membershipCheckout(req, res) {
   const _months = Math.max(1, parseInt(months, 10) || 1);
   if (_months > 1) {
     const _amtMinor = Math.round(P * 100);
-    const _feePct = (await isWelcomeZero(gymAccount)) ? 0 : FEE_NOW;
+    const _feePct = FEE_NOW;
     const _feeMinor = Math.round(_amtMinor * (_feePct / 100));
     const _meta = {
       mtl_payment_type: 'membership',
@@ -594,7 +504,7 @@ async function membershipCheckout(req, res) {
         { price_data: { currency: cur, product_data: { name: `${planName || 'Membership'}${access ? ' [' + access + ']' : ''} — ${gymName || 'MTL Gym'}` }, unit_amount: Math.round(P * 100), recurring: { interval: ivl } }, quantity: 1 },
       ],
       subscription_data: {
-        application_fee_percent: (await isWelcomeZero(gymAccount)) ? 0 : FEE_NOW,
+        application_fee_percent: FEE_NOW,
         metadata: {
           // mtl_acq   = this membership is inside the MTL acquisition window
           // mtl_acq_pct  = the acquisition rate for THIS provider (10, or 5 for an EP)
