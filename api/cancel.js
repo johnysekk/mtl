@@ -10,7 +10,7 @@ async function sbGet(path) {
   catch (e) { return []; }
 }
 
-// ── MTL Coaches — storno / refund (DIRECT charge na účtu kouče) ──
+// ── Martial Training Lab — storno / refund (DIRECT charge na účtu kouče) ──
 // Lekce 1:1 je teď direct charge: platba i poplatek MTL žijí na connected
 // účtu kouče. Refund se proto vystaví NA účtu kouče a refund_application_fee
 // vrací poměrnou část MTL provize → student dostane svoje %, gym/kouč si nechá zbytek (pokryje Stripe), MTL i kouč nesou

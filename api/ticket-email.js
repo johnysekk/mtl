@@ -70,7 +70,7 @@ export default async function handler(req, res) {
     const html =
       '<div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto;background:#0c0c0c;border-radius:18px;overflow:hidden;color:#fff;">' +
       '<div style="padding:26px 24px 8px;text-align:center;">' +
-      '<div style="font-size:13px;letter-spacing:.16em;color:#F4D87A;font-weight:700;">MTL COACHES</div>' +
+      '<div style="font-size:13px;letter-spacing:.16em;color:#F4D87A;font-weight:700;">MARTIAL TRAINING LAB</div>' +
       '<div style="font-size:22px;font-weight:800;margin:10px 0 2px;">🎟️ ' + title + '</div>' +
       (dt ? '<div style="font-size:14px;color:#c9c9c9;margin-top:6px;">' + esc(dt) + '</div>' : '') +
       (venue ? '<div style="font-size:13px;color:#9a9a9a;margin-top:2px;">' + esc(venue) + '</div>' : '') +
