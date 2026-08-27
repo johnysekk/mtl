@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SRV lets one payment buy several tickets, in the app and outside it. Until now a person wanting three went through checkout three times and got three separate e-mails, which on a fight night -- a man buying for himself and his partner, a parent for two kids -- is the ordinary case rather than the edge one. The grouping is a shared order_id on event_tickets rather than a separate event_orders table: an order would have carried only what the ticket already holds, so a second table would mean the same facts in two places and a way for them to disagree. One row still means one seat, each with its own qr_token and its own checked_in_at, because a single QR shared by three people cannot be scanned three times at a door and a guest list counting rows is not counting people. The public form gains a stepper capped by remaining capacity, the payment is for the total, and both callbacks flip the whole order -- otherwise the siblings would sit as reservations and release-cron would free seats that were paid for. The ticket e-mail loads the order and renders one QR per ticket in a single message. Needs event-orders.sql. -->
+<!-- MTL build: SRW brings the quantity stepper into the app. Having an account does not mean buying only for yourself -- a parent buys for children who have no account of their own -- so the in-app flow had the same one-at-a-time limit as the public page did. The clickwrap now carries the same stepper, capped by remaining capacity, and the checkout writes one row per seat sharing an order_id on all three rails, with the payment for the total. The callbacks already flip a whole order, so nothing on the server needed changing. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -9081,6 +9081,7 @@ function showTicketClickwrap(ev, tier){
     <div style="font-size:17px;font-weight:800;margin-bottom:6px;">${EN?'Before you pay':'Než zaplatíš'}</div>
     <div style="font-size:13px;color:var(--mid);line-height:1.55;margin-bottom:14px;">${EN?'Ticket':'Lístek'}: <b>${escapeHtml(tier.name||(EN?'Ticket':'Lístek'))}</b> · ${fmtPrice(tier.price||0,cur)} ${sym}</div>${(ev.terms_text&&ev.terms_text.trim())?`<div style="max-height:180px;overflow-y:auto;font-size:12.5px;color:var(--dark);line-height:1.55;white-space:pre-wrap;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:14px;">${escapeHtml(ev.terms_text.trim())}</div>`:''}
     <label style="display:flex;align-items:flex-start;gap:10px;font-size:13px;cursor:pointer;color:var(--dark);line-height:1.5;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:14px;"><input type="checkbox" id="cwChk" style="width:20px;height:20px;flex-shrink:0;margin-top:1px;"> <span>${escapeHtml(_cwClause)}</span></label>
+    ${(tier.price>0)?`<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:9px 12px;margin-bottom:6px;"><span style="font-size:13.5px;font-weight:600;">${EN?'Tickets':'Počet lístků'}</span><span style="display:flex;align-items:center;gap:12px;"><button type="button" id="cwQtyM" style="width:32px;height:32px;border:1px solid var(--border);background:#fff;border-radius:8px;font-size:18px;font-weight:800;cursor:pointer;line-height:1;">−</button><b id="cwQty" style="font-size:16px;min-width:20px;text-align:center;">1</b><button type="button" id="cwQtyP" style="width:32px;height:32px;border:1px solid var(--border);background:#fff;border-radius:8px;font-size:18px;font-weight:800;cursor:pointer;line-height:1;">+</button></span></div><div id="cwTotal" style="font-size:12.5px;color:var(--mid);text-align:right;margin-bottom:10px;"></div>`:''}
     <button id="cwConfirm" disabled style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';opacity:.5;">${EN?'Continue to payment':'Pokračovat na platbu'}</button>
     <button id="cwCancel" style="width:100%;margin-top:6px;padding:11px;background:transparent;border:none;color:var(--light);font-weight:600;cursor:pointer;font-family:'DM Sans';">${EN?'Cancel':'Zrušit'}</button>
   </div>`;
@@ -9090,15 +9091,29 @@ function showTicketClickwrap(ev, tier){
   ov.querySelector('#cwCancel').onclick=close;
   const chk=ov.querySelector('#cwChk'), btn=ov.querySelector('#cwConfirm');
   chk.onchange=()=>{ btn.disabled=!chk.checked; btn.style.opacity=chk.checked?'1':'.5'; };
+  // Počet kusů i pro přihlášené. Že člověk má účet neznamená, že kupuje jen sobě -- rodič bere
+  // lístky dětem a ty účet nemají. Strop je zbývající kapacita.
+  window._cwQty=1;
+  const _cwMax=Math.max(1, Math.min(10, (ev.capacity? Math.max(1, Number(ev.capacity)-(Number(window._evTaken)||0)) : 10)));
+  const _cwPaint=()=>{ const q=window._cwQty;
+    const qe=ov.querySelector('#cwQty'); if(qe) qe.textContent=q;
+    const te=ov.querySelector('#cwTotal'); if(te) te.textContent=(q>1)?((EN?'Total: ':'Celkem: ')+fmtPrice((tier.price||0)*q,cur)+' '+sym):'';
+    const mb=ov.querySelector('#cwQtyM'), pb=ov.querySelector('#cwQtyP');
+    if(mb) mb.style.opacity=(q<=1)?'.35':'1';
+    if(pb) pb.style.opacity=(q>=_cwMax)?'.35':'1';
+  };
+  if(ov.querySelector('#cwQtyM')) ov.querySelector('#cwQtyM').onclick=()=>{ if(window._cwQty>1){ window._cwQty--; _cwPaint(); } };
+  if(ov.querySelector('#cwQtyP')) ov.querySelector('#cwQtyP').onclick=()=>{ if(window._cwQty<_cwMax){ window._cwQty++; _cwPaint(); } };
+  _cwPaint();
   btn.onclick=()=>{ if(!chk.checked) return;
     // Until now this checkbox only unlocked the button and was never written down anywhere -- no
     // _recordConsent, no insert. So the one clause that actually costs money if disputed, that a
     // ticket is non-refundable, was agreed to and undocumented. Recorded now the same way waivers,
     // terms and the guardian consents already are.
     try{ if(typeof _recordConsent==='function') _recordConsent('ticket_terms', TICKET_CONSENT_VERSION, LANG, _cwText, { event_id:(ev&&ev.id)||null, event_title:(ev&&ev.title)||null, tier:(tier&&tier.name)||null, price:(tier&&tier.price)||0, currency:cur }, (ev&&ev.id)||null); }catch(e){}
-    close(); doEventCheckout(ev, tier, true); };
+    close(); doEventCheckout(ev, tier, true, Math.max(1, parseInt(window._cwQty,10)||1)); };
 }
-async function doEventCheckout(ev, tier, _confirmed, _minorOk){
+async function doEventCheckout(ev, tier, _confirmed, _minorOk, _qty){
   if(!_minorOk && currentUser && currentUser.is_minor && _tierNeedsConsent(ev, tier)){ _minorEventGate(ev, function(){ doEventCheckout(ev, tier, _confirmed, true); }); return; }
   const cur=ev.currency||'CZK';
   const base=(tier&&tier.price)||0;
@@ -9112,17 +9127,23 @@ async function doEventCheckout(ev, tier, _confirmed, _minorOk){
     try{ const { data:_frt } = await supaClient.from('event_tickets').insert({ attr_src:_attrGet(), event_id:ev.id, buyer_id:currentUser.id, buyer_name:currentUser.name||'', qty:1, amount:0, currency:cur, status:'paid' }).select('id').single(); if(_frt&&_frt.id){ try{ fetch('/api/ticket-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticketId:_frt.id})}); }catch(e){} } if(ev.created_by){ await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'event_rsvp', event_id:ev.id, title:ev.title}), message:'🎟️ '+(currentUser.name||'Někdo')+(LANG==='en'?` is coming to "${ev.title}"`:` přijde na „${ev.title}"`) }); } }catch(e){}
     toast(LANG==='en'?'🎟️ You are on the list!':'🎟️ Jsi na seznamu!'); closeSheet('shEventView'); return;
   }
-  if(_evPayee && typeof _mtlPayMode==='function' && _mtlPayMode(_evPayee)==='qr_bank'){ return _eventQrPay(ev, tier, _evPayee, _evPayeeKind); }
+  if(_evPayee && typeof _mtlPayMode==='function' && _mtlPayMode(_evPayee)==='qr_bank'){ return _eventQrPay(ev, tier, _evPayee, _evPayeeKind, Math.max(1, Math.min(10, parseInt(_qty,10)||1))); }
   if(!acct){ toast(LANG==='en'?'⚠️ This event cannot take payments yet':'⚠️ Tato událost zatím nepřijímá platby'); return; }
+  const _q=Math.max(1, Math.min(10, parseInt(_qty,10)||1));
   const buyerPays=Math.round(base*1*100)/100;
   let ticketId=null;
-  try{ const { data:t } = await supaClient.from('event_tickets').insert({ attr_src:_attrGet(), event_id:ev.id, buyer_id:currentUser.id, buyer_name:currentUser.name||'', qty:1, amount:buyerPays, currency:cur, status:'pending' }).select().single(); ticketId=t&&t.id; }catch(e){ toast('⚠️ '+(e.message||'')); return; }
+  // Jeden řádek = jedno místo, všechny se stejným order_id. Platba visí na prvním; callback
+  // překlopí celou objednávku, takže sourozenci nezůstanou viset jako rezervace.
+  const _oid=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():('o'+Date.now()+Math.random().toString(36).slice(2,10));
+  try{ const _rows=[]; for(let i=0;i<_q;i++) _rows.push({ attr_src:_attrGet(), event_id:ev.id, buyer_id:currentUser.id, buyer_name:currentUser.name||'', order_id:_oid, qty:1, amount:buyerPays, currency:cur, status:'pending' });
+    const { data:t } = await supaClient.from('event_tickets').insert(_rows).select('id'); ticketId=t&&t[0]&&t[0].id; }catch(e){ toast('⚠️ '+(e.message||'')); return; }
   let _evF=false, _evP=false, _evtake=0.035; try{ if(ev.created_by){ const {data:_ow}=await supaClient.from('profiles').select('founding,partner,coach_ref_score,bankai_eligible').eq('id',ev.created_by).single(); var _evsc=(_ow&&_ow.coach_ref_score)||0; _evtake=_ladderRate('stripe', {score:_evsc, bankai:(_ow&&_ow.bankai_eligible)}); _evF=!!(_ow&&_ow.founding); _evP=!!(_ow&&_ow.partner); } }catch(e){}
-  const url=`/api/pay?type=event&founding=${_evF?1:0}&partner=${_evP?1:0}&take=${_evtake}&gymAccount=${encodeURIComponent(acct)}&eventTitle=${encodeURIComponent(ev.title||'Event')}&tierName=${encodeURIComponent((tier&&tier.name)||'')}&amount=${base}&currency=${cur}&ticketId=${encodeURIComponent(ticketId||'')}&buyerName=${encodeURIComponent(currentUser.name||'')}&disc=${encodeURIComponent((()=>{ try{ const ds=JSON.parse(ev.disciplines||'[]'); return Array.isArray(ds)?ds.join(','):''; }catch(e){ return ''; } })())}&gymId=${encodeURIComponent(ev.gym_id||'')}&payoutCoachId=${encodeURIComponent(ev.payout_coach_id||'')}&income=${encodeURIComponent(ev.income||'side')}`;
+  const url=`/api/pay?type=event&founding=${_evF?1:0}&partner=${_evP?1:0}&take=${_evtake}&gymAccount=${encodeURIComponent(acct)}&eventTitle=${encodeURIComponent(ev.title||'Event')}&tierName=${encodeURIComponent(((tier&&tier.name)||'')+(_q>1?(' \u00d7'+_q):''))}&amount=${base*_q}&currency=${cur}&ticketId=${encodeURIComponent(ticketId||'')}&buyerName=${encodeURIComponent(currentUser.name||'')}&disc=${encodeURIComponent((()=>{ try{ const ds=JSON.parse(ev.disciplines||'[]'); return Array.isArray(ds)?ds.join(','):''; }catch(e){ return ''; } })())}&gymId=${encodeURIComponent(ev.gym_id||'')}&payoutCoachId=${encodeURIComponent(ev.payout_coach_id||'')}&income=${encodeURIComponent(ev.income||'side')}`;
   window.location.href=url;
 }
-async function _eventQrPay(ev, tier, payee, payeeKind){
+async function _eventQrPay(ev, tier, payee, payeeKind, _qty){
   const EN=LANG==='en';
+  const _q=Math.max(1, Math.min(10, parseInt(_qty,10)||1));
   if(currentUser && await _hasOpenQrReservation(currentUser.id)){ toast(EN?'\u26a0\ufe0f You already have an unpaid QR reservation \u2014 settle it first before booking another.':'M\u00e1\u0161 nepotvrzenou QR rezervaci \u2014 nejd\u0159\u00edv ji vy\u0159e\u0161, ne\u017e si rezervuje\u0161 dal\u0161\u00ed.'); return; }
   const cur=ev.currency||(payee&&payee.currency)||'CZK'; const sym=_curSym(cur);
   const price=(tier&&tier.price)||0;
@@ -9132,8 +9153,10 @@ async function _eventQrPay(ev, tier, payee, payeeKind){
   const sName=currentUser.name||'Student';
   let ticketId=null;
   try{
-    const { data:t, error:e1 } = await supaClient.from('event_tickets').insert({ attr_src:_attrGet(), event_id:ev.id, buyer_id:currentUser.id, buyer_name:sName, qty:1, amount:price, currency:cur, status:'reserved', payment_method:'qr' }).select('id').single();
-    if(e1){ toast('\u26a0\ufe0f '+e1.message); return; } ticketId=t&&t.id;
+    const _oid=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():('o'+Date.now()+Math.random().toString(36).slice(2,10));
+    const _rows=[]; for(let i=0;i<_q;i++) _rows.push({ attr_src:_attrGet(), event_id:ev.id, buyer_id:currentUser.id, buyer_name:sName, order_id:_oid, qty:1, amount:price, currency:cur, status:'reserved', payment_method:'qr' });
+    const { data:t, error:e1 } = await supaClient.from('event_tickets').insert(_rows).select('id');
+    if(e1){ toast('\u26a0\ufe0f '+e1.message); return; } ticketId=t&&t[0]&&t[0].id;
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
   const msg=sName+' - '+(ev.title||'Event');
   const _pisOn=_pisAllowed(payee, (payee&&payee.gym_id)||null) && !!(payee&&payee.receiver_id_value);
