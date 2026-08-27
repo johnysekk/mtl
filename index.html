@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SRB lets the public ticket page run in PIS test mode. The flag comes from the public endpoint as pis_test rather than from _PIS_TEST_IDS, which is loaded in enterApp and therefore never exists for an anonymous visitor -- so the one page that most needs trying out was the one page that could not be. The endpoint reads that column in its own isolated query on purpose: pis_test ships in a separate migration, and putting it in the main select would let PostgREST reject the whole request and kill the page, which is exactly how the club deck died once already. Ordering note for the record: pay-by-bank is the primary rail here, not a fallback behind Stripe. Which rail runs is the club payment_mode, so a club on transfers goes to PIS and only a club that chose Stripe goes to Stripe; QR remains purely for a buyer whose bank is not on the list. -->
+<!-- MTL build: SRE makes the ad option usable by someone who has never seen Ads Manager, and shows the organiser what the tracking actually found. Picking Instagram or Facebook ad no longer copies a link -- Meta will not accept a tagged URL, it appends its own parameters from a separate field, so a link alone would silently lose the paid/organic split. It now opens a two-step panel: copy the clean link, copy the parameter string, and the exact path to the field, named as Meta names it, with the note that Boost post has no such field so the plain link is the right choice there. It also says outright that skipping step two breaks nothing -- the sale still counts, just as Instagram rather than Instagram ad -- because a provider who thinks they can get it wrong will not do it at all. The event view gains a source breakdown above the share button, organiser only and only once something has sold, with paid rows marked and a split of how many sales the app itself made against links sent out. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -8487,11 +8487,17 @@ async function openEventView(ev){
       <div style="margin-bottom:14px;">${tiersHtml}</div>
       ${ev.description?`<p style="font-size:14px;line-height:1.6;color:var(--mid);white-space:pre-wrap;margin-bottom:16px;">${escapeHtml(ev.description)}</p>`:''}
       ${ myTk ? `<div style="background:#F0FBF0;border:1px solid #A8E6C0;border-radius:12px;padding:14px;text-align:center;margin-bottom:10px;"><div style="font-weight:800;color:${_tkPaidN?'#006040':'#9a5a00'};font-size:15px;">${myTk.amount>0?((_tkPaidN?('✅ '+_tkPaidN+' '+(LANG==='en'?(_tkPaidN===1?'ticket':'tickets'):czPlural(_tkPaidN,'lístek','lístky','lístků'))):'')+(_tkPaidN&&_tkWaitN?' · ':'')+(_tkWaitN?('⏳ '+_tkWaitN+' '+(LANG==='en'?'not paid yet':'zatím nezaplaceno')):'')):('✅ '+(LANG==='en'?'You are on the list':'Jsi na seznamu'))}</div>${myTk.amount>0?`<div style="font-size:12px;color:var(--mid);margin-top:3px;">${myTks.reduce((a,t)=>a+(Number(t.amount)||0),0)} ${sym}${myTks.length>1?` · ${myTks.length}×`:''}</div>`:''}</div>` : ''}
+      ${ (currentUser && (ev.created_by===currentUser.id || (_myGymData && _myGymData.id===ev.gym_id && _myGymData.owner_id===currentUser.id))) ? `<button id="evShareBtn" style="width:100%;padding:11px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:10px;">🔗 ${LANG==='en'?'Share ticket link':'Sdílet odkaz na lístky'}</button>` : '' }
       ${ (isPast && myTk) ? '' : (isPast ? `<div style="text-align:center;color:var(--light);font-size:13px;padding:10px;">${LANG==='en'?'This event has ended':'Akce už proběhla'}</div>` : `<button id="evBuyBtn" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:${ev.seeking_fighters?'8px':'0'};">🎟️ ${(tiers.some(x=>x.price>0))?(myTk?(LANG==='en'?'Buy another ticket':'Koupit další lístek'):(LANG==='en'?'Get ticket':'Koupit lístek')):(LANG==='en'?'RSVP':'Přihlásit se')}</button>`) }
       ${(tiers.some(x=>x.price>0) && !isPast)?`<p style="font-size:11px;color:var(--light);line-height:1.45;text-align:center;margin:8px 0 0;">${LANG==='en'?'Tickets are non-refundable. Any refund is handled by the organizer directly; MTL is not responsible for the state of payments.':'Lístky jsou nevratné. Případné refundace řeší pořadatel přímo, MTL nezodpovídá za stav plateb.'}</p>`:''}
       ${(ev.seeking_fighters && window._canReqF)?`<button id="evFighterBtn" style="width:100%;padding:13px;background:var(--surf);border:1.5px solid var(--red);color:var(--red);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">🥊 ${LANG==='en'?'Suggest a fighter':'Navrhnout fightera'}</button>${ev.fighter_info?`<p style="font-size:12px;color:var(--mid);line-height:1.5;margin-top:8px;">${escapeHtml(ev.fighter_info)}</p>`:''}`:''}
     </div>`;
   if($('evBuyBtn')) $('evBuyBtn').onclick=()=>buyEventTicket(ev);
+  if($('evShareBtn')){
+    $('evShareBtn').onclick=function(){ _evShareSheet(ev); };
+    // Dotahne se az po vykresleni, aby otevreni akce necekalo na dalsi dotaz do databaze.
+    (async function(){ try{ const h=await _attrPanel('event_tickets','event_id',ev.id,ev.currency); if(h){ const b=$('evShareBtn'); if(b) b.insertAdjacentHTML('beforebegin', h); } }catch(e){} })();
+  }
   if($('evFighterBtn')) $('evFighterBtn').onclick=()=>suggestFighter(ev);
   openSheet('shEventView');
 }
@@ -8566,6 +8572,238 @@ function _tkClaimed(t){ return String((t&&t.status)||'')==='paid_claimed'; }
 // Vstupní bod je ?event=<id>. Data tahá /api/event-public, které je veřejné a bez auth.
 // ZÁMĚRNĚ NESAHÁ na doEventCheckout ani _eventQrPay -- ty jsou pro přihlášené a fungují.
 function _evPubEsc(v){ try{ return escapeHtml(String(v==null?'':v)); }catch(e){ return ''; } }
+
+// ── SDÍLENÝ ODKAZ NA AKCI ────────────────────────────────────────────────────────────────────
+// Pořadatel rozešle jedinou adresu a ta si sama poradí s obojím publikem. Dvě adresy by znamenaly,
+// že se pořadatel musí rozhodovat, komu kterou pošle — a to na Instagramu nejde.
+
+// ── MARKETINGOVÁ ATRIBUCE (last non-direct click) ────────────────────────────────────────────
+// Odpovídá na "odkud ten člověk přišel", ne na "kdo mu klub doporučil" -- to druhé je acq_source
+// a rozhoduje o akviziční provizi. Tyhle dvě věci se nesmí smíchat.
+//
+// Tři signály, první vyhrává:
+//   1. UTM parametry -- nejpřesnější, ale jen když někdo odkaz označil
+//   2. click ID (fbclid / gclid / ttclid / msclkid) -- Meta, Google a TikTok je lepí na KAŽDÝ
+//      odchozí klik, i na neoznačený odkaz v popisku. Odtud poznáme platformu automaticky.
+//   3. document.referrer -- na webu funguje, ve vestavěném prohlížeči na iOS bývá prázdný
+//
+// Co tímhle NEJDE poznat: fbclid je stejný u reklamy i u běžného příspěvku. Rozdíl paid/organic
+// vidíme JEN z UTM, které si člověk vloží do reklamy. Proto je generátor označených odkazů
+// součást řešení, ne ozdoba.
+const ATTR_TTL_MS = 30*24*3600000;
+const ATTR_KEY='mtl_attr', ATTR_KEY_T='mtl_attr_t';
+function _attrClean(v){ return String(v==null?'':v).toLowerCase().replace(/[^a-z0-9_\-]/g,'').slice(0,40) || '-'; }
+// Doména odkazující stránky -> náš název zdroje. Meta a Google mají několik hostitelů pro to samé.
+function _attrFromRef(){
+  var r=''; try{ r=document.referrer||''; }catch(e){}
+  if(!r) return null;
+  var h=''; try{ h=new URL(r).hostname.toLowerCase(); }catch(e){ return null; }
+  try{ if(h===location.hostname) return null; }catch(e){}
+  if(/(^|\.)instagram\.com$/.test(h)||/^l\.instagram/.test(h)) return 'instagram';
+  if(/(^|\.)facebook\.com$/.test(h)||/^(l|lm|m)\.facebook/.test(h)||/(^|\.)fb\.(me|com)$/.test(h)) return 'facebook';
+  if(/(^|\.)google\./.test(h)) return 'google';
+  if(/(^|\.)tiktok\.com$/.test(h)) return 'tiktok';
+  if(/(^|\.)youtube\.com$/.test(h)||/(^|\.)youtu\.be$/.test(h)) return 'youtube';
+  if(/(^|\.)(whatsapp|wa\.me)/.test(h)) return 'whatsapp';
+  if(/(^|\.)t\.co$/.test(h)||/(^|\.)(x|twitter)\.com$/.test(h)) return 'x';
+  if(/(^|\.)linkedin\.com$/.test(h)||/^lnkd\.in$/.test(h)) return 'linkedin';
+  if(/(^|\.)(seznam|bing|duckduckgo|ecosia)\./.test(h)) return 'search';
+  return _attrClean(h.replace(/^www\./,'').split('.')[0]);
+}
+// Běží při KAŽDÉM načtení. Když najde rozpoznatelný zdroj, přepíše ten uložený -- to je last touch.
+// Když nenajde nic, nechá starý být; jinak by každé otevření appky přepsalo zdroj na "direct".
+function _attrCapture(){
+  try{
+    var q=new URLSearchParams(location.search);
+    var src=null, med='organic', camp='-';
+    var us=q.get('utm_source'), um=q.get('utm_medium'), uc=q.get('utm_campaign'), mysrc=q.get('src');
+    if(us){ src=_attrClean(us); if(um) med=_attrClean(um); if(uc) camp=_attrClean(uc); }
+    else if(mysrc){ var mm=_attrClean(mysrc).split('_'); src=mm[0]; if(mm[1]==='ad'){ med='paid'; } }
+    else if(q.get('fbclid')){ src=_attrFromRef()||'facebook'; }
+    else if(q.get('gclid')||q.get('gbraid')||q.get('wbraid')){ src='google'; med='paid'; }
+    else if(q.get('ttclid')){ src='tiktok'; }
+    else if(q.get('msclkid')){ src='bing'; med='paid'; }
+    else { src=_attrFromRef(); }
+    if(um==='cpc'||um==='ppc'||um==='ad'||um==='ads'||um==='paid') med='paid';
+    if(!src) return;                       // nic nového -> starou hodnotu neruším
+    localStorage.setItem(ATTR_KEY, src+':'+med+':'+camp);
+    localStorage.setItem(ATTR_KEY_T, String(Date.now()));
+  }catch(e){}
+}
+// Vrátí atribuci pro zápis na řádek nákupu. NESPOTŘEBUJE ji -- last touch znamená, že platí dál,
+// dokud ji nepřepíše nový zdroj. Kdo koupí lístek a za týden členství, má u obou to samé.
+function _attrGet(){
+  var where=(typeof currentUser!=='undefined' && currentUser)?'app':'web';
+  try{
+    var raw=localStorage.getItem(ATTR_KEY);
+    var t=parseInt(localStorage.getItem(ATTR_KEY_T)||'0',10);
+    if(raw && (Date.now()-t) < ATTR_TTL_MS) return where+':'+raw;
+  }catch(e){}
+  return where+':direct:direct:-';
+}
+try{ _attrCapture(); }catch(e){}
+
+function _evSetSrc(v){ try{ if(v){ localStorage.setItem('mtl_ev_src', String(v).slice(0,40)); localStorage.setItem('mtl_ev_src_t', String(Date.now())); } }catch(e){} }
+// Zdroj se spotřebuje při nákupu a pak se zahodí, ať se nepřilepí k další akci. Šest hodin je
+// stejné okno, jaké používají kurzy.
+function _evConsumeSrc(where){
+  var v='direct';
+  try{
+    var raw=localStorage.getItem('mtl_ev_src');
+    var t=parseInt(localStorage.getItem('mtl_ev_src_t')||'0',10);
+    localStorage.removeItem('mtl_ev_src'); localStorage.removeItem('mtl_ev_src_t');
+    if(raw && (Date.now()-t) < 6*3600000) v=raw;
+  }catch(e){}
+  return (where||'web')+':'+v;
+}
+// Rozcestník. Přihlášený jde do appky, ostatní na veřejnou stránku. Na currentUser se chvíli
+// počká, protože po návratu do PWA se přihlášení obnovuje asynchronně a bez toho by i vlastní
+// člen spadl na veřejnou verzi.
+async function _evOpenShared(eventId){
+  var _t=0; while(typeof currentUser==='undefined' || !currentUser){ if(_t>=12) break; await new Promise(function(r){ setTimeout(r,200); }); _t++; }
+  if(typeof currentUser!=='undefined' && currentUser){
+    try{
+      const { data:ev } = await supaClient.from('events').select('*').eq('id', eventId).single();
+      if(ev){ try{ window.history.replaceState({}, '', location.pathname); }catch(e){} openEventView(ev); return; }
+    }catch(e){}
+  }
+  try{ openEventSignup(eventId); }catch(e){}
+}
+
+
+// Nabídka kanálů. Pořadatel si vybere, kam odkaz dává, a MTL pak ví, co mu funguje — bez toho by
+// všechny prodeje splynuly do jednoho čísla. `Jiný` je pro cokoli, co v seznamu není.
+
+// Návod na reklamu. Meta nedovolí prostě vzít odkaz s parametry -- ta si je doplňuje sama z
+// vlastního políčka "Parametry URL" a odkaz musí zůstat čistý. Tohle je jediné místo v appce,
+// kde pořadatel musí něco přepsat do cizího systému, takže se to musí dát zvládnout bez přemýšlení:
+// dvě tlačítka, dvě kopírování, a přesný název políčka, které má hledat.
+function _evAdHowTo(ev, base, chan){
+  const EN=LANG==='en';
+  const net=(chan==='instagram_ad')?'Instagram':'Facebook';
+  const netKey=(chan==='instagram_ad')?'instagram':'facebook';
+  const camp=(ev.title||'akce').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,30)||'akce';
+  const params='utm_source='+netKey+'&utm_medium=paid&utm_campaign='+camp;
+  let ov=document.getElementById('evAdOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='evAdOv';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:100002;display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:18px 12px;';
+  const _fld='background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-size:12px;font-family:ui-monospace,Menlo,monospace;word-break:break-all;line-height:1.5;margin-bottom:7px;';
+  const _cpy='width:100%;padding:11px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-bottom:16px;';
+  const _num='display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:var(--red);color:#fff;font-size:12px;font-weight:800;margin-right:8px;flex:none;';
+  let h='<div style="background:var(--bg);border-radius:18px;max-width:460px;width:100%;padding:20px;">';
+  h+='<div style="font-size:17px;font-weight:800;margin-bottom:4px;">'+net+' '+(EN?'ad':'reklama')+'</div>';
+  h+='<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:16px;">'+(EN?'Two things to copy. Do them in this order and the app will show you exactly how many tickets the ad sold.':'Dvě věci ke zkopírování. Udělej je v tomhle pořadí a appka ti pak ukáže, kolik lístků reklama prodala.')+'</div>';
+
+  h+='<div style="display:flex;align-items:flex-start;margin-bottom:6px;"><span style="'+_num+'">1</span><div style="font-size:13.5px;font-weight:700;line-height:1.35;">'+(EN?'Paste this as the ad\'s website URL':'Tohle vlož do reklamy jako odkaz na web')+'</div></div>';
+  h+='<div style="'+_fld+'">'+_evPubEsc(base)+'</div>';
+  h+='<button id="evAdC1" style="'+_cpy+'">'+(EN?'Copy the link':'Zkopírovat odkaz')+'</button>';
+
+  h+='<div style="display:flex;align-items:flex-start;margin-bottom:6px;"><span style="'+_num+'">2</span><div style="font-size:13.5px;font-weight:700;line-height:1.35;">'+(EN?'Paste this into the field called “URL parameters”':'Tohle vlož do políčka „Parametry URL“')+'</div></div>';
+  h+='<div style="'+_fld+'">'+_evPubEsc(params)+'</div>';
+  h+='<button id="evAdC2" style="'+_cpy+'">'+(EN?'Copy the parameters':'Zkopírovat parametry')+'</button>';
+
+  h+='<div style="background:var(--surf);border-radius:12px;padding:13px;font-size:12.5px;line-height:1.65;color:var(--mid);margin-bottom:14px;">';
+  h+='<div style="font-weight:800;color:var(--dark);margin-bottom:6px;">'+(EN?'Where that field is':'Kde to políčko najdeš')+'</div>';
+  h+=(EN
+    ? 'Ads Manager → open the ad (the bottom level, not the campaign) → scroll to <b>Tracking</b> at the very bottom → <b>URL parameters</b>.<br><br>On a phone it is in the Meta Ads app under the ad, same section. If you use <b>Boost post</b>, that field does not exist — use the plain link instead and pick Instagram or Facebook in the previous menu.'
+    : 'Správce reklam → otevři <b>reklamu</b> (úplně spodní úroveň, ne kampaň) → sjeď dolů na <b>Sledování</b> → <b>Parametry URL</b>.<br><br>V mobilu je to v appce Meta Ads pod reklamou, stejná sekce. Když použiješ <b>Propagovat příspěvek</b>, tohle políčko tam není — pak vezmi obyčejný odkaz a v předchozí nabídce vyber Instagram nebo Facebook.');
+  h+='</div>';
+  h+='<div style="font-size:11.5px;color:var(--light);line-height:1.5;margin-bottom:12px;">'+(EN?'Skipping step 2 is fine — the sale still gets counted, just as Instagram rather than Instagram ad.':'Když krok 2 vynecháš, nic se nerozbije — prodej se pořád započítá, jen jako Instagram místo Instagram reklama.')+'</div>';
+  h+='<button id="evAdX" style="width:100%;padding:11px;background:none;border:1px solid var(--border);border-radius:10px;color:var(--mid);font-size:13px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Done':'Hotovo')+'</button></div>';
+  ov.innerHTML=h; document.body.appendChild(ov);
+  ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
+  ov.querySelector('#evAdX').onclick=function(){ ov.remove(); };
+  function _cp(txt, btn, lbl){ try{ navigator.clipboard.writeText(txt); }catch(e){} btn.textContent='✅ '+(EN?'Copied':'Zkopírováno'); setTimeout(function(){ btn.textContent=lbl; }, 1600); }
+  ov.querySelector('#evAdC1').onclick=function(){ _cp(base, this, (EN?'Copy the link':'Zkopírovat odkaz')); };
+  ov.querySelector('#evAdC2').onclick=function(){ _cp(params, this, (EN?'Copy the parameters':'Zkopírovat parametry')); };
+}
+
+
+// Odkud přišly prodeje. Ukazuje se jen pořadateli a jen když už něco prodal -- prázdný graf
+// nikomu nic neřekne a jen zabírá místo nad tlačítkem, kterým se prodává.
+// `where` je 'app' nebo 'web' a odpovídá na otázku, kterou dosud nešlo zodpovědět vůbec:
+// kolik prodala samotná appka proti odkazům rozeslaným ven.
+function _attrLabel(src){
+  const EN=LANG==='en';
+  const m={ instagram:'📷 Instagram', facebook:'📘 Facebook', google:'🔍 Google', tiktok:'🎵 TikTok',
+            youtube:'▶️ YouTube', whatsapp:'💬 WhatsApp', x:'✖️ X', linkedin:'💼 LinkedIn',
+            search:(EN?'🔍 Search':'🔍 Vyhledávání'), poster:(EN?'🖼️ Poster':'🖼️ Plakát'),
+            mail:'✉️ E-mail', other:(EN?'🔗 Other':'🔗 Jiný'), direct:(EN?'↗️ Direct':'↗️ Přímo') };
+  return m[src]||('🔗 '+src);
+}
+async function _attrPanel(table, col, id, cur){
+  const EN=LANG==='en';
+  let rows=[];
+  try{
+    const { data } = await supaClient.from(table).select('attr_src,amount').eq(col, id).not('attr_src','is',null);
+    rows=data||[];
+  }catch(e){ return ''; }
+  if(!rows.length) return '';
+  const agg={}; let appN=0, webN=0, tot=0;
+  rows.forEach(function(r){
+    const p=String(r.attr_src||'').split(':');
+    const where=p[0]||'web', src=p[1]||'direct', med=p[2]||'organic';
+    const key=src+(med==='paid'?'|paid':'');
+    agg[key]=agg[key]||{ n:0, sum:0, src:src, paid:(med==='paid') };
+    agg[key].n++; agg[key].sum+=(Number(r.amount)||0);
+    if(where==='app') appN++; else webN++; tot++;
+  });
+  const list=Object.values(agg).sort(function(a,b){ return b.n-a.n; });
+  const max=list[0]?list[0].n:1;
+  const sym=(typeof _curSym==='function')?_curSym(cur||'CZK'):(cur||'');
+  let h='<div style="background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:14px;margin-bottom:12px;">';
+  h+='<div style="font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.04em;color:var(--mid);margin-bottom:10px;">'+(EN?'Where buyers came from':'Odkud přišli kupující')+'</div>';
+  list.forEach(function(x){
+    const pct=Math.round(x.n*100/tot);
+    h+='<div style="margin-bottom:9px;">';
+    h+='<div style="display:flex;justify-content:space-between;font-size:13px;font-weight:600;margin-bottom:3px;"><span>'+_attrLabel(x.src)+(x.paid?(' <span style="font-size:10.5px;font-weight:800;color:#fff;background:var(--red);border-radius:5px;padding:1px 5px;vertical-align:middle;">'+(EN?'AD':'REKLAMA')+'</span>'):'')+'</span><span style="color:var(--mid);">'+x.n+' · '+Math.round(x.sum)+' '+sym+'</span></div>';
+    h+='<div style="height:6px;background:var(--border);border-radius:4px;overflow:hidden;"><div style="height:100%;width:'+Math.max(4,Math.round(x.n*100/max))+'%;background:'+(x.paid?'var(--red)':'#0A7A4F')+';"></div></div>';
+    h+='</div>';
+  });
+  h+='<div style="display:flex;gap:8px;margin-top:12px;padding-top:10px;border-top:1px solid var(--border);font-size:12px;color:var(--mid);">';
+  h+='<div style="flex:1;"><b style="color:var(--dark);font-size:15px;">'+appN+'</b><br>'+(EN?'in the app':'v appce')+'</div>';
+  h+='<div style="flex:1;"><b style="color:var(--dark);font-size:15px;">'+webN+'</b><br>'+(EN?'via a link':'z odkazu')+'</div></div>';
+  h+='</div>';
+  return h;
+}
+
+function _evShareSheet(ev){
+  const EN=LANG==='en';
+  const base=location.origin+'/?event='+encodeURIComponent(ev.id);
+  // Organické kanály zvládne detekce sama; ty jsou tu proto, aby šly rozlišit dvě místa na téže
+  // síti (bio versus story). Placené varianty detekce NEPOZNÁ -- fbclid je u reklamy i u příspěvku
+  // stejný -- takže označený odkaz je jediná cesta, jak reklamu oddělit. Proto ty _ad položky.
+  const chans=[['instagram','📷 Instagram'],['instagram_ad','📷 '+(EN?'Instagram ad':'Instagram reklama')],
+               ['facebook','📘 Facebook'],['facebook_ad','📘 '+(EN?'Facebook ad':'Facebook reklama')],
+               ['whatsapp','💬 WhatsApp'],['poster','🖼️ '+(EN?'Poster / QR':'Plakát / QR')],
+               ['mail','✉️ E-mail'],['other','🔗 '+(EN?'Other':'Jiný')]];
+  let ov=document.getElementById('evShareOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='evShareOv';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100001;display:flex;align-items:flex-end;justify-content:center;';
+  let h='<div style="background:var(--bg);border-radius:18px 18px 0 0;max-width:460px;width:100%;padding:20px;">';
+  h+='<div style="font-size:16px;font-weight:800;margin-bottom:3px;">'+(EN?'Share ticket link':'Sdílet odkaz na lístky')+'</div>';
+  h+='<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:14px;">'+(EN?'One link for everyone. People with the app land on the event; people without it get the ticket page.':'Jeden odkaz pro všechny. Kdo má appku, skončí na akci; kdo ji nemá, na stránce s lístky.')+'</div>';
+  chans.forEach(function(c){ h+='<button class="evShareCh" data-c="'+c[0]+'" style="width:100%;text-align:left;padding:12px 14px;margin-bottom:7px;background:var(--surf);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:600;cursor:pointer;font-family:\'DM Sans\';">'+c[1]+'</button>'; });
+  h+='<button id="evShareX" style="width:100%;margin-top:6px;padding:11px;background:none;border:none;color:var(--mid);font-size:13px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button></div>';
+  ov.innerHTML=h; document.body.appendChild(ov);
+  ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
+  ov.querySelector('#evShareX').onclick=function(){ ov.remove(); };
+  ov.querySelectorAll('.evShareCh').forEach(function(b){
+    b.onclick=async function(){
+      const c=b.dataset.c;
+      // Reklama se nedá "jen zkopírovat" -- Meta si parametry doplňuje sama z vlastního políčka,
+      // takže tady musí přijít návod, ne odkaz. Bez něj by to nikdo nenastavil.
+      if(c==='instagram_ad'||c==='facebook_ad'){ _evAdHowTo(ev, base, c); return; }
+      const link=base+'&src='+encodeURIComponent(c);
+      const msg=(EN?('🥊 '+(ev.title||'Event')+' — tickets: '):('🥊 '+(ev.title||'Akce')+' — lístky: '));
+      ov.remove();
+      if(navigator.share){ try{ await navigator.share({ title:ev.title||'MTL', text:msg, url:link }); return; }catch(e){} }
+      try{ await navigator.clipboard.writeText(link); }catch(e){}
+      toast(EN?'✅ Link copied':'✅ Odkaz zkopírován');
+    };
+  });
+}
+
 async function openEventSignup(eventId){
   const EN=LANG==='en';
   let ov=document.getElementById('evPubOv'); if(ov) ov.remove();
@@ -8652,9 +8890,9 @@ async function _evPubBuy(d, tiers, ov){
   btn.disabled=true; btn.textContent='…';
   let tk=null;
   try{
-    const { data, error } = await supaClient.from('event_tickets').insert({
+    const { data, error } = await supaClient.from('event_tickets').insert({ attr_src:_attrGet(),
       event_id:d.id, buyer_id:null, buyer_name:name, buyer_email:mail, buyer_phone:tel||null,
-      qty:1, amount:price, currency:cur, status:'reserved',
+      qty:1, amount:price, currency:cur, status:'reserved', share_src:_evConsumeSrc('web'),
       consent_at:new Date().toISOString(), consent_version:(typeof TICKET_CONSENT_VERSION!=='undefined'?TICKET_CONSENT_VERSION:'')
     }).select('id').single();
     if(error) throw error;
@@ -8773,14 +9011,14 @@ async function doEventCheckout(ev, tier, _confirmed, _minorOk){
     if(!_evPayee){ const { data:g } = await supaClient.from('gyms').select('id,stripe_account,payment_mode,receiver_id_type,receiver_id_value,receiver_name,confirm_mode,name,owner_id,currency').eq('id', ev.gym_id).single(); if(g){ _evPayee=g; _evPayeeKind='gym'; if(!acct) acct=g.stripe_account||null; } }
   }catch(e){}
   if(base<=0){
-    try{ const { data:_frt } = await supaClient.from('event_tickets').insert({ event_id:ev.id, buyer_id:currentUser.id, buyer_name:currentUser.name||'', qty:1, amount:0, currency:cur, status:'paid' }).select('id').single(); if(_frt&&_frt.id){ try{ fetch('/api/ticket-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticketId:_frt.id})}); }catch(e){} } if(ev.created_by){ await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'event_rsvp', event_id:ev.id, title:ev.title}), message:'🎟️ '+(currentUser.name||'Někdo')+(LANG==='en'?` is coming to "${ev.title}"`:` přijde na „${ev.title}"`) }); } }catch(e){}
+    try{ const { data:_frt } = await supaClient.from('event_tickets').insert({ attr_src:_attrGet(), event_id:ev.id, buyer_id:currentUser.id, buyer_name:currentUser.name||'', qty:1, amount:0, currency:cur, status:'paid', share_src:_evConsumeSrc('app') }).select('id').single(); if(_frt&&_frt.id){ try{ fetch('/api/ticket-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticketId:_frt.id})}); }catch(e){} } if(ev.created_by){ await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'event_rsvp', event_id:ev.id, title:ev.title}), message:'🎟️ '+(currentUser.name||'Někdo')+(LANG==='en'?` is coming to "${ev.title}"`:` přijde na „${ev.title}"`) }); } }catch(e){}
     toast(LANG==='en'?'🎟️ You are on the list!':'🎟️ Jsi na seznamu!'); closeSheet('shEventView'); return;
   }
   if(_evPayee && typeof _mtlPayMode==='function' && _mtlPayMode(_evPayee)==='qr_bank'){ return _eventQrPay(ev, tier, _evPayee, _evPayeeKind); }
   if(!acct){ toast(LANG==='en'?'⚠️ This event cannot take payments yet':'⚠️ Tato událost zatím nepřijímá platby'); return; }
   const buyerPays=Math.round(base*1*100)/100;
   let ticketId=null;
-  try{ const { data:t } = await supaClient.from('event_tickets').insert({ event_id:ev.id, buyer_id:currentUser.id, buyer_name:currentUser.name||'', qty:1, amount:buyerPays, currency:cur, status:'pending' }).select().single(); ticketId=t&&t.id; }catch(e){ toast('⚠️ '+(e.message||'')); return; }
+  try{ const { data:t } = await supaClient.from('event_tickets').insert({ attr_src:_attrGet(), event_id:ev.id, buyer_id:currentUser.id, buyer_name:currentUser.name||'', qty:1, amount:buyerPays, currency:cur, status:'pending', share_src:_evConsumeSrc('app') }).select().single(); ticketId=t&&t.id; }catch(e){ toast('⚠️ '+(e.message||'')); return; }
   let _evF=false, _evP=false, _evtake=0.035; try{ if(ev.created_by){ const {data:_ow}=await supaClient.from('profiles').select('founding,partner,coach_ref_score,bankai_eligible').eq('id',ev.created_by).single(); var _evsc=(_ow&&_ow.coach_ref_score)||0; _evtake=_ladderRate('stripe', {score:_evsc, bankai:(_ow&&_ow.bankai_eligible)}); _evF=!!(_ow&&_ow.founding); _evP=!!(_ow&&_ow.partner); } }catch(e){}
   const url=`/api/pay?type=event&founding=${_evF?1:0}&partner=${_evP?1:0}&take=${_evtake}&gymAccount=${encodeURIComponent(acct)}&eventTitle=${encodeURIComponent(ev.title||'Event')}&tierName=${encodeURIComponent((tier&&tier.name)||'')}&amount=${base}&currency=${cur}&ticketId=${encodeURIComponent(ticketId||'')}&buyerName=${encodeURIComponent(currentUser.name||'')}&disc=${encodeURIComponent((()=>{ try{ const ds=JSON.parse(ev.disciplines||'[]'); return Array.isArray(ds)?ds.join(','):''; }catch(e){ return ''; } })())}&gymId=${encodeURIComponent(ev.gym_id||'')}&payoutCoachId=${encodeURIComponent(ev.payout_coach_id||'')}&income=${encodeURIComponent(ev.income||'side')}`;
   window.location.href=url;
@@ -8796,7 +9034,7 @@ async function _eventQrPay(ev, tier, payee, payeeKind){
   const sName=currentUser.name||'Student';
   let ticketId=null;
   try{
-    const { data:t, error:e1 } = await supaClient.from('event_tickets').insert({ event_id:ev.id, buyer_id:currentUser.id, buyer_name:sName, qty:1, amount:price, currency:cur, status:'reserved', payment_method:'qr' }).select('id').single();
+    const { data:t, error:e1 } = await supaClient.from('event_tickets').insert({ attr_src:_attrGet(), event_id:ev.id, buyer_id:currentUser.id, buyer_name:sName, qty:1, amount:price, currency:cur, status:'reserved', payment_method:'qr', share_src:_evConsumeSrc('app') }).select('id').single();
     if(e1){ toast('\u26a0\ufe0f '+e1.message); return; } ticketId=t&&t.id;
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
   const msg=sName+' - '+(ev.title||'Event');
@@ -10672,7 +10910,7 @@ async function subscribeGymMembership(g, plan, _child, _cleared){
     : `Stát se členem ${g.name} (${plan.name})${_forTxt}? ${_memChargeSentence(plan, _memPriceTxt)}`)+_prTxt)) return;
   toast(L('💳 Přesměrovávám na platbu...'));
   try {
-    const { data: mb, error } = await supaClient.from('gym_memberships').insert({ months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0,
+    const { data: mb, error } = await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0,
       gym_id: g.id, gym_name: g.name||'Gym', student_id: currentUser.id, student_name: currentUser.name||'Student', paid_to: payee.coachId?'coach':'gym',
       amount: _term.price||0, currency: (plan._cur||g.currency||'CZK'), status:'pending', acq_source: _acqSrc(g),
       plan_name: plan.name||null, plan_access: JSON.stringify((plan.access&&plan.access.length)?plan.access:['all']), plan_classes: ((plan.classes&&plan.classes.length)?JSON.stringify(plan.classes):null)
@@ -10709,7 +10947,7 @@ async function bookGymDropin(g, occ, _child){
     };
     if(occ){ rec.class_name = occ.name||null; rec.class_date = occ.date||null; rec.class_time = occ.time||null; }
     rec.reminder_sent = _remSentAtBooking(rec.class_date||rec.date, rec.class_time||rec.time);
-    const { data: bk, error } = await supaClient.from('gym_bookings').insert(rec).select().single();
+    const { data: bk, error } = await supaClient.from('gym_bookings').insert(Object.assign({ attr_src:_attrGet() }, rec)).select().single();
     if(error){ toast('⚠️ '+error.message); return; }
     try{ await supaClient.from('gym_bookings').update({ student_name: currentUser.name||'Student', gym_name: g.name||'Klub' }).eq('id', bk.id); }catch(e){}
     if(_child){ try{ await supaClient.from('gym_bookings').update({ child_name:_child.name, child_age:_kidAge(_child) }).eq('id', bk.id); }catch(e){} }
@@ -12810,7 +13048,7 @@ async function _cohJoinWaitlist(d, ov, btn){
     }
     const ins={ cohort_id:cid, name:nm, email:em, phone:(ph||null), status:'waitlist' };
     try{ if(currentUser&&currentUser.id) ins.attribution=_acqSrc&&typeof _acqSrc==='function'?null:null; }catch(e){}
-    const { error } = await supaClient.from('cohort_members').insert(ins);
+    const { error } = await supaClient.from('cohort_members').insert(Object.assign({ attr_src:_attrGet() }, ins));
     if(error){ toast('\u26a0\ufe0f '+error.message); if(btn){ btn.disabled=false; btn.textContent='\u23f3 '+(EN?'Join the waitlist':'Zapsat na čekačku'); } return; }
     if(ov) ov.remove();
     toast(EN?'\u2705 You\u2019re on the waitlist \u2014 the club will reach out if a spot opens.':'\u2705 Jsi na čekačce \u2014 klub se ozve, jakmile se místo uvolní.',1);
@@ -13123,7 +13361,7 @@ async function _cohAddWalkIn(){
     const _i=parseInt(pick,10); if(_i>0 && tiers[_i-1]) tier=tiers[_i-1].name;
   }
   try{
-    await supaClient.from('cohort_members').insert({
+    await supaClient.from('cohort_members').insert({ attr_src:_attrGet(),
       cohort_id: cohortId, gym_id: coh.gym_id, name: nm.trim(),
       email: (em||null), tier: tier, status: 'deposit_claimed',
       source: 'walk_in', paid_amount: 0, attribution: 'walk_in'
@@ -13318,6 +13556,8 @@ async function _cohRosterRender(){
       +'</div></details>'; }
   }
   box.innerHTML=html;
+  // Panel se zdroji nad seznamem prihlasenych -- stejna vec jako u akce, jen pro kurz.
+  (async function(){ try{ const _h=await _attrPanel('cohort_members','cohort_id',cohortId,(_cohGym&&_cohGym.currency)||'CZK'); if(_h) box.insertAdjacentHTML('afterbegin', _h); }catch(e){} })();
   { var _si=document.getElementById('crSearchInp'); if(_si){ var _apply=function(){ var q=(_si.value||'').toLowerCase().trim(); window._crSearch=_si.value||''; box.querySelectorAll('.crMemberCard').forEach(function(c){ var t=(c.getAttribute('data-search')||''); c.style.display=(!q||t.indexOf(q)>=0)?'':'none'; }); }; _si.oninput=_apply; if(window._crSearch) _apply(); } }
   box.querySelectorAll('.crMonthBtn').forEach(function(b){ b.onclick=function(){ _cohCollectMonth(b.dataset.id, b.dataset.name); }; });
   box.querySelectorAll('.crMonthCashBtn').forEach(function(b){ b.onclick=function(){ _cohMonthCash(b.dataset.id, b.dataset.name); }; });
@@ -16705,7 +16945,7 @@ function _guestMemb(plan){
         var r1=await _recordCashTx(txr);
         if(r1&&r1.error){ toast('\u26a0\ufe0f '+r1.error.message); btns.forEach(function(b){ if(b) b.disabled=false; }); return; }
         var nd=new Date(); nd.setMonth(nd.getMonth()+(parseInt(plan.months,10)||1));   /* 1 = monthly (unchanged); 3/6/12 = one-time term */
-        await supaClient.from('gym_memberships').insert({ months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:null, student_name:nnm, guest_email:v.email, guest_name:nnm, guest_token:tok, paid_to:'gym', coach_id:plan.coach||null, amount:price, currency:cur, status:'active', period_end:nd.toISOString(), plan_name:plan.name||null, plan_access:JSON.stringify((plan.access&&plan.access.length)?plan.access:['all']), discipline:plan.disc||null, acq_source:'direct' });
+        await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:null, student_name:nnm, guest_email:v.email, guest_name:nnm, guest_token:tok, paid_to:'gym', coach_id:plan.coach||null, amount:price, currency:cur, status:'active', period_end:nd.toISOString(), plan_name:plan.name||null, plan_access:JSON.stringify((plan.access&&plan.access.length)?plan.access:['all']), discipline:plan.disc||null, acq_source:'direct' });
         try{ await supaClient.auth.signInWithOtp({ email:v.email, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } }); }catch(e){}
         try{ if(g.id) await _notifyGymDesk(g.id, g.owner_id, (EN?('Walk-in membership: '+nnm+' ('+(plan.name||'')+')'):('Walk-in permanentka: '+nnm+' ('+(plan.name||'')+')'))); }catch(e){}
         toast((EN?'\u2705 Membership active \u00b7 link sent':'\u2705 \u010clenstv\u00ed aktivn\u00ed \u00b7 odkaz odesl\u00e1n'),1);
@@ -16958,7 +17198,7 @@ function _guestCash(occ, method){
     try{
       if(isQr){
         // QR: reception does NOT confirm the money. Create a pending intent; the owner confirms when it arrives in the bank.
-        try{ await supaClient.from('gym_bookings').insert({ gym_id:g.id, paid_to:'gym', amount:(pr.dp||0), currency:cur, status:'paid_claimed', claimed_at:new Date().toISOString(), payment_method:'qr', reception_checkin:true, guest_token:tok, guest_name:name, guest_email:email, student_name:name, date:occ.date, time:occ.time, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, level:occ.level||'all', coach_id:occ.coach||null, discipline:occ.disc||null, gym_name:g.name||'Klub' }); }catch(e){}
+        try{ await supaClient.from('gym_bookings').insert({ attr_src:_attrGet(), gym_id:g.id, paid_to:'gym', amount:(pr.dp||0), currency:cur, status:'paid_claimed', claimed_at:new Date().toISOString(), payment_method:'qr', reception_checkin:true, guest_token:tok, guest_name:name, guest_email:email, student_name:name, date:occ.date, time:occ.time, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, level:occ.level||'all', coach_id:occ.coach||null, discipline:occ.disc||null, gym_name:g.name||'Klub' }); }catch(e){}
         if(email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){ try{ await supaClient.auth.signInWithOtp({ email:email, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } }); }catch(e){} }
         try{ if(g.id){ await _notifyGymDesk(g.id, g.owner_id, (EN?('Walk-in (QR): '+(name||'a guest')+' says they paid for a drop-in \u2014 confirm in Reception when it arrives in the bank.'):('Walk-in (QR): '+(name||'host')+' tvrd\u00ed, \u017ee zaplatil drop-in \u2014 potvr\u010f v Recepci, a\u017e platba p\u0159ijde na \u00fa\u010det.')), { kind:'walkin_drop', student:(name||''), gym:g.id, gym_name:(g.name||''), occ:((typeof occ!=='undefined'&&occ&&occ.date)?{date:occ.date,time:occ.time,name:occ.name||'',level:occ.level||'all',disc:occ.disc||null}:null) }); } }catch(e){}
         toast(EN?'\u2705 Reserved \u00b7 owner confirms the QR payment when it arrives':'\u2705 Rezervov\u00e1no \u00b7 klub potvrd\u00ed QR platbu, a\u017e p\u0159ijde', 1);
@@ -16967,7 +17207,7 @@ function _guestCash(occ, method){
       const txr={ gym_id:g.id, member_id:null, coach_id:occ.coach||null, paid_to:'gym', gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:cur, type:'drop_in', status:'completed', payment_method:method, commission_status:'pending', commission_month:month, cash_payer_name:name, acq_source:'direct' };
       const r1=await _recordCashTx(txr);
       if(r1&&r1.error){ toast('\u26a0\ufe0f '+r1.error.message); btn.disabled=false; btn.textContent=(EN?'\u2713 Received in cash':'\u2713 P\u0159ijato v hotovosti'); return; }
-      try{ await supaClient.from('gym_bookings').insert({ gym_id:g.id, paid_to:'gym', amount:(pr.dp||0), currency:cur, status:'active', reception_checkin:true, guest_token:tok, guest_name:name, guest_email:email, student_name:name, date:occ.date, time:occ.time, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, level:occ.level||'all', coach_id:occ.coach||null, discipline:occ.disc||null, gym_name:g.name||'Klub' }); }catch(e){}
+      try{ await supaClient.from('gym_bookings').insert({ attr_src:_attrGet(), gym_id:g.id, paid_to:'gym', amount:(pr.dp||0), currency:cur, status:'active', reception_checkin:true, guest_token:tok, guest_name:name, guest_email:email, student_name:name, date:occ.date, time:occ.time, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, level:occ.level||'all', coach_id:occ.coach||null, discipline:occ.disc||null, gym_name:g.name||'Klub' }); }catch(e){}
       if(email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){ try{ await supaClient.auth.signInWithOtp({ email:email, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } }); }catch(e){} }
       try{ if(g.id){ await _notifyGymDesk(g.id, g.owner_id, (EN?('Walk-in: '+(name||'a guest')+' paid a drop-in (cash).'):('Walk-in: '+(name||'host')+' zaplatil jednor\u00e1zov\u00fd vstup (hotov\u011b).')), { kind:'walkin_drop', student:(name||''), gym:g.id, gym_name:(g.name||''), occ:((typeof occ!=='undefined'&&occ&&occ.date)?{date:occ.date,time:occ.time,name:occ.name||'',level:occ.level||'all',disc:occ.disc||null}:null) }); } }catch(e){}
       toast((EN?'\u2705 Recorded':'\u2705 Zaznamen\u00e1no')+(email?(EN?' \u00b7 link sent':' \u00b7 odkaz odesl\u00e1n'):''), 1);
@@ -17039,7 +17279,7 @@ function _recpMembPay(pi){
       else if(_d2 && _d2.kind==='refer' && _refSel && _refSel.id && _refSel.id!==sid){ try{ var _rtk=(typeof _freshTok==='function')?await _freshTok():null; await fetch('/api/reward-referrer',{ method:'POST', headers:{ 'Content-Type':'application/json', 'x-access-token':_rtk||'' }, body: JSON.stringify({ refUser:_refSel.id, refPct:_refSel.pct, gymId:g.id }) }); }catch(e){} }
       var base=Date.now(); var existed=false;
       try{ const { data:ex } = await supaClient.from('gym_memberships').select('id,period_end,status').eq('gym_id',g.id).eq('student_id',sid).eq('plan_name',plan.name||null).in('status',['active','cancelling']).order('period_end',{ascending:false}).limit(1); if(ex&&ex.length){ existed=true; var pe=ex[0].period_end?new Date(ex[0].period_end).getTime():base; if(pe<base) pe=base; var nd=new Date(pe); nd.setMonth(nd.getMonth()+1); await supaClient.from('gym_memberships').update({ status:'active', period_end:nd.toISOString(), cancelled_at:null }).eq('id',ex[0].id); } }catch(e){}
-      if(!existed){ try{ var nd2=new Date(base); nd2.setMonth(nd2.getMonth()+1); await supaClient.from('gym_memberships').insert({ months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:sid, student_name:nm||'Student', paid_to:'gym', coach_id:plan.coach||null, amount:price, currency:cur, status:'active', period_end:nd2.toISOString(), plan_name:plan.name||null, plan_access:JSON.stringify((plan.access&&plan.access.length)?plan.access:['all']), discipline:plan.disc||null, acq_source:'direct' }); }catch(e){} }
+      if(!existed){ try{ var nd2=new Date(base); nd2.setMonth(nd2.getMonth()+1); await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:sid, student_name:nm||'Student', paid_to:'gym', coach_id:plan.coach||null, amount:price, currency:cur, status:'active', period_end:nd2.toISOString(), plan_name:plan.name||null, plan_access:JSON.stringify((plan.access&&plan.access.length)?plan.access:['all']), discipline:plan.disc||null, acq_source:'direct' }); }catch(e){} }
       toast((EN?'\u2705 Confirmed':'\u2705 Potvrzeno'), 1);
       openReception(g.id, g.name);
     }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); btns.forEach(function(b){ if(b) b.disabled=false; }); }
@@ -17080,7 +17320,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan){
       const _today=new Date().toISOString().slice(0,10);
       const rec={ gym_id:g.id, student_id:currentUser.id, student_name:sName, gym_name:g.name||'Klub', paid_to:_qrPaidTo, amount:price, currency:cur, status:'reserved', payment_method:'qr', credit_used:(_qrCredit==='student'?'student':null), date:(occ&&occ.date)||_today, time:(occ&&occ.time)||'18:00', class_name:(occ&&occ.name)||null, class_date:(occ&&occ.date)||null, class_time:(occ&&occ.time)||null, level:(occ&&occ.level)||'all', coach_id:_qrPayeeCoach||(occ&&occ.coach)||null, discipline:disc, acq_source:_acqSrc(g) , reminder_sent:_remSentAtBooking((occ&&occ.date)||_today,(occ&&occ.time)||'18:00') };
       if(_child){ rec.child_name=_child.name; rec.child_age=_kidAge(_child); }
-      const { data:bk, error:e2 } = await supaClient.from('gym_bookings').insert(rec).select('id').single();
+      const { data:bk, error:e2 } = await supaClient.from('gym_bookings').insert(Object.assign({ attr_src:_attrGet() }, rec)).select('id').single();
       if(e2){ toast('\u26a0\ufe0f '+e2.message); return; } intentId=bk&&bk.id;
       try{ await supaClient.from('gym_class_reservations').insert({ gym_id:g.id, gym_name:g.name||'Gym', student_id:currentUser.id, student_name:sName, class_name:(occ&&occ.name)||null, class_date:(occ&&occ.date)||null, class_time:(occ&&occ.time)||null, class_level:(occ&&occ.level)||'all' }); }catch(e){}
     }
@@ -17091,7 +17331,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan){
     if(intentId) return intentId;
     if(kind!=='memb') return intentId;
     try{
-      const { data:mb, error:e1 } = await supaClient.from('gym_memberships').insert({ months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:currentUser.id, student_name:sName, paid_to:'gym', amount:price, currency:cur, status:'pending_offline', ref_by:_mbRefBy, ref_pct:(_mbRefPct||null), ref_credit_id:_mbRefCreditId, plan_name:label, plan_access:JSON.stringify((plan&&plan.access&&plan.access.length)?plan.access:['all']), discipline:disc, acq_source:_acqSrc(g) }).select('id').single();
+      const { data:mb, error:e1 } = await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:currentUser.id, student_name:sName, paid_to:'gym', amount:price, currency:cur, status:'pending_offline', ref_by:_mbRefBy, ref_pct:(_mbRefPct||null), ref_credit_id:_mbRefCreditId, plan_name:label, plan_access:JSON.stringify((plan&&plan.access&&plan.access.length)?plan.access:['all']), discipline:disc, acq_source:_acqSrc(g) }).select('id').single();
       if(e1){ toast('\u26a0\ufe0f '+e1.message); return null; }
       intentId=mb&&mb.id; return intentId;
     }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return null; }
@@ -17385,7 +17625,7 @@ async function recDoCheckinCard(occ){
     const _today=new Date().toISOString().slice(0,10);
     const disc=occ.disc||((typeof parseDisc==='function'?parseDisc(g.disciplines):[])[0]||null);
     const rec={ gym_id:g.id, student_id:r.student_id, student_name:r.student_name||'Student', gym_name:g.name||'Klub', paid_to:payee.coachId?'coach':'gym', amount:_dp, currency:_dcur, status:'pending', reception_checkin:true, credit_used:(_rcCred==='student'?'student':null), date:occ.date||_today, time:occ.time||'18:00', class_name:occ.name||null, class_date:occ.date||null, class_time:occ.time||null, level:occ.level||'all', coach_id:payee.coachId||(occ.coach||null), discipline:disc };
-    const { data: bk, error } = await supaClient.from('gym_bookings').insert(rec).select().single();
+    const { data: bk, error } = await supaClient.from('gym_bookings').insert(Object.assign({ attr_src:_attrGet() }, rec)).select().single();
     if(error){ toast('⚠️ '+error.message); return; }
     let _gymOwnerPartner=false, _ownerFounding=false, _ownerScore=0, _ownerBankai=false; try{ const _ppid=(payee&&payee.coachId)||g.owner_id; if(_ppid){ const { data: ow }=await supaClient.from('profiles').select('partner, founding, coach_ref_score,bankai_eligible').eq('id',_ppid).single(); _gymOwnerPartner=!!(ow&&ow.partner); _ownerFounding=!!(ow&&ow.founding); _ownerScore=(ow&&ow.coach_ref_score)||0; _ownerBankai=!!(ow&&ow.bankai_eligible); } }catch(e){}
     try{ if(bk&&bk.id) await supaClient.from('gym_bookings').update({gym_keep_pct:((typeof _gymOwnerPartner!=='undefined'&&_gymOwnerPartner)||(typeof _gp!=='undefined'&&_gp))?0.99:((typeof _ownerScore!=='undefined'&&_ownerScore>=10)?0.98:((typeof _ownerScore!=='undefined'&&_ownerScore>=3)?0.97:0.965))}).eq('id',bk.id); }catch(e){}
@@ -17401,7 +17641,7 @@ async function recDoCheckin(occ, charge, grace){
   try{ const { data: ex } = await supaClient.from('gym_attendance').select('id').eq('gym_id',g.id).eq('student_id',r.student_id).eq('class_date',occ.date).eq('class_time',occ.time).limit(1); if(ex&&ex.length){ if(!confirm(LANG==='en'?'Already checked in for this class. Add again?':'Na tuto lekci u\u017e je odbaven/a. P\u0159idat znovu?')) return; } }catch(e){}
   if(charge){
     if(!confirm((LANG==='en'?'Charge ':'Na\u00fa\u010dtovat ')+(r.student_name||'')+' \u00b7 '+(occ.name||'')+' \u00b7 '+fmtPrice(pr.dp,pr.dcur)+' '+symf(pr.dcur)+(LANG==='en'?' \u2014 paid in person (cash/terminal)?':' \u2014 zaplaceno na m\u00edst\u011b (hotov\u011b/termin\u00e1l)?'))) return;
-    try{ const { data:_bk, error:_be } = await supaClient.from('gym_bookings').insert({ gym_id:g.id, student_id:r.student_id, student_name:r.student_name||null, gym_name:g.name||null, amount:pr.dp, currency:pr.dcur, status:'active', paid_in_person:true, paid_to:'in_person', payment_method:'cash', date:occ.date, time:occ.time, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, level:occ.level||'all', coach_id:occ.coach||null, discipline:disc }).select('id').single(); if(_be) throw _be;
+    try{ const { data:_bk, error:_be } = await supaClient.from('gym_bookings').insert({ attr_src:_attrGet(), gym_id:g.id, student_id:r.student_id, student_name:r.student_name||null, gym_name:g.name||null, amount:pr.dp, currency:pr.dcur, status:'active', paid_in_person:true, paid_to:'in_person', payment_method:'cash', date:occ.date, time:occ.time, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, level:occ.level||'all', coach_id:occ.coach||null, discipline:disc }).select('id').single(); if(_be) throw _be;
       // record the cash transaction so MTL earns its commission (was only paid_in_person -> never commissioned)
       try{ const _res=await _recordCashTx({ provider:'gym', gym_id:g.id, coach_id:occ.coach||null, member_id:r.student_id||null, gross_amount:Math.round((pr.dp||0)*100), currency:pr.dcur||'CZK', type:'drop_in', payment_method:'cash', acq_source:'direct', source_booking_id:(_bk&&_bk.id)||null, cash_payer_name:r.student_name||null }); if(_res&&_res.error){ console.error('checkin cash tx', _res.error); } }catch(e){ console.error('checkin cash tx', e); }
     }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
@@ -18678,7 +18918,7 @@ async function buyMerch(merchId){
   var _mrBank=_mrEnt?(_mrEnt.payment_mode? _mrEnt.payment_mode!=='stripe' : !_mrEnt.stripe_account):false;
   if(_mrBank && _mrEnt.receiver_id_value){
     var _mrPayee={ receiver_id_type:_mrEnt.receiver_id_type, receiver_id_value:_mrEnt.receiver_id_value, receiver_name:_mrEnt.receiver_name, currency:cur };
-    try{ const { data:mo, error:eM } = await supaClient.from('merch_orders').insert({ gym_id:g.id, coach_id:m.coach_id||null, merch_id:merchId, student_id:currentUser.id, item_name:m.name, qty:qty, variant:variant||null, amount:amt, currency:cur, status:'reserved', buyer_name:currentUser.name||null, category:m.category||null }).select('id').single();
+    try{ const { data:mo, error:eM } = await supaClient.from('merch_orders').insert({ attr_src:_attrGet(), gym_id:g.id, coach_id:m.coach_id||null, merch_id:merchId, student_id:currentUser.id, item_name:m.name, qty:qty, variant:variant||null, amount:amt, currency:cur, status:'reserved', buyer_name:currentUser.name||null, category:m.category||null }).select('id').single();
       if(eM){ toast('⚠️ '+eM.message); return; }
       _merchQrPay(mo.id, _mrPayee, m, amt, cur, (currentUser.name||'')+' - '+m.name); }catch(e){ toast('⚠️ '+(e.message||'')); }
     return;
@@ -29643,10 +29883,11 @@ async function showPaidPopup(){
     const _cpay=params.get('cohortpay'); if(_cpay){ try{ openCohortRemainder(_cpay); }catch(e){} return; }
     const _mycl=params.get('myclass'); if(_mycl){ try{ openMyCourse(_mycl); }catch(e){} return; }
     const _ap=params.get('apply'); if(_ap==='coach'||_ap==='gym'){ try{ if(params.get('src')) localStorage.setItem('mtl_prov_src', params.get('src')); }catch(e){} try{ openProviderApply(_ap); }catch(e){} return; }
-    // ?event=<id> -- verejna stranka listku pro nekoho bez uctu. Musi bezet PRED jakoukoli
-    // kontrolou prihlaseni; presne to je smysl te cesty.
+    // ?event=<id>[&src=<kanal>] -- JEDEN odkaz pro obe publika. Kdo ma ucet, skonci v appce na
+    // profilu akce; kdo ho nema, na verejne strance. Rozcestnik je _evOpenShared, ne tahle vetev,
+    // protoze v tuhle chvili jeste nemusi byt jasne, jestli je clovek prihlaseny.
     const _evp=params.get('event');
-    if(_evp){ try{ openEventSignup(_evp); }catch(e){} return; }
+    if(_evp){ try{ _evSetSrc(params.get('src')); _evOpenShared(_evp); }catch(e){} return; }
     const _coh=params.get('cohort');
     if(_coh){
       try{ const _src=params.get('src'); if(_src) _setCohSrc(_src); }catch(e){}
@@ -29744,7 +29985,7 @@ async function showPaidPopup(){
         const payee = await resolveGymPayee(g, {coach});
         if(!payee.account){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">Payments not set up for this class yet.</p>'; return; }
         const rec={ gym_id:gymId, paid_to:payee.coachId?'coach':'gym', amount:amt, currency:cur, status:'pending', reception_checkin:true, guest_token:tok, guest_email:_termsEmail||null, date:date, time:time, class_name:cls, class_date:date, class_time:time, level:level, coach_id:payee.coachId||coach||null, discipline:disc, gym_name:g.name||'Klub' };
-        const { data: bk, error } = await supaClient.from('gym_bookings').insert(rec).select().single();
+        const { data: bk, error } = await supaClient.from('gym_bookings').insert(Object.assign({ attr_src:_attrGet() }, rec)).select().single();
         if(error){ document.body.innerHTML='<p style="padding:40px;text-align:center;font-family:sans-serif;">'+error.message+'</p>'; return; }
         let _gp=false, _ownerFounding=false, _gtake=0.035; try{ const _ppid=(payee&&payee.coachId)||g.owner_id; if(_ppid){ const { data: ow }=await supaClient.from('profiles').select('partner, founding, coach_ref_score,bankai_eligible').eq('id',_ppid).single(); _gp=!!(ow&&ow.partner); _ownerFounding=!!(ow&&ow.founding); var _gsc=(ow&&ow.coach_ref_score)||0; _gtake=_ladderRate('stripe', {partner:!!(ow&&ow.partner), score:_gsc, bankai:!!(ow&&ow.bankai_eligible)}); } }catch(e){}
         try{ if(bk&&bk.id) await supaClient.from('gym_bookings').update({gym_keep_pct:((typeof _gymOwnerPartner!=='undefined'&&_gymOwnerPartner)||(typeof _gp!=='undefined'&&_gp))?0.99:((typeof _ownerScore!=='undefined'&&_ownerScore>=10)?0.98:((typeof _ownerScore!=='undefined'&&_ownerScore>=3)?0.97:0.965))}).eq('id',bk.id); }catch(e){}
@@ -29804,7 +30045,7 @@ async function showPaidPopup(){
       try{
         const { data: prod } = await supaClient.from('gym_merch').select('*').eq('id',mid).single();
         if(prod){
-          await supaClient.from('merch_orders').insert({ gym_id:gid, coach_id:prod.coach_id||null, merch_id:mid, student_id:currentUser.id, item_name:prod.name, qty, variant:variant||null, amount:(prod.price||0)*qty, currency:prod.currency||'CZK', status:'paid', buyer_name:currentUser.name||null, category:prod.category||null });
+          await supaClient.from('merch_orders').insert({ attr_src:_attrGet(), gym_id:gid, coach_id:prod.coach_id||null, merch_id:mid, student_id:currentUser.id, item_name:prod.name, qty, variant:variant||null, amount:(prod.price||0)*qty, currency:prod.currency||'CZK', status:'paid', buyer_name:currentUser.name||null, category:prod.category||null });
           if(prod.stock!=null){ const ns=Math.max(0,(prod.stock||0)-qty); await supaClient.from('gym_merch').update({ stock:ns }).eq('id',mid); }
           const { data: _gym } = await supaClient.from('gyms').select('owner_id,name').eq('id',gid).single();
           const _notifyTo=prod.coach_id||(_gym&&_gym.owner_id); if(_notifyTo){ await supaClient.from('notifications').insert({ user_id:_notifyTo, type:'booking', read:false, data: JSON.stringify({ kind:'merch_order', item:prod.name }), message:`🛍️ ${LANG==='en'?((currentUser?.name||'A member')+' bought '+prod.name+(variant?(' ('+variant+')'):'')):((currentUser?.name||'Člen')+' koupil '+prod.name+(variant?(' ('+variant+')'):''))}` }); if(typeof updateNotifBadge==='function') updateNotifBadge(); }
