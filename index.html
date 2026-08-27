@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SQZ adds the public ticket purchase, which courses have had from the start and events have not. That gap costs a fight night most of its audience: friends, family and people off Instagram do not install a training app to buy a 600 CZK ticket. ?event=<id> now opens openEventSignup before any login check, reads the event through the public endpoint, and takes a name, an e-mail and the non-refundable consent, which is stamped on the ticket row with its version. The ticket is written with buyer_id null and buyer_email set, so claim-tickets can attach it later; _claimTickets runs at login next to _claimCohorts. Stripe organisers go to checkout with customer_email prefilled so the receipt reaches the only address we have for that buyer; bank organisers get a QR plus the account details typed out, and an I-have-paid button that sets paid_claimed for the organiser to confirm. doEventCheckout and _eventQrPay are untouched -- those are the logged-in paths and they work. Needs event-public.sql for buyer_email, buyer_phone, consent_at, consent_version and claimed_by. -->
+<!-- MTL build: SRA puts pay-by-bank ahead of the QR fallback on the public ticket page. A QR payment has to be confirmed by hand by the organiser, which is fine for a drop-in and impossible for a fight night with five hundred tickets; a PIS payment confirms itself, because the bank reports the result and pis-return writes the transaction and flips the ticket. The server side of that already existed -- pis-return has handled event_tickets all along -- so this only wires the client. QR stays as the fallback for anyone whose bank is not on the list. Test mode can never apply here: _PIS_TEST_IDS loads in enterApp, which an anonymous visitor never reaches, so the public page is live or nothing. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -8681,7 +8681,17 @@ async function _evPubBuy(d, tiers, ov){
       +'&payoutCoachId='+encodeURIComponent((d.host&&d.host.kind==='coach'&&d.host.id)||'');
     window.location.href=q; return;
   }
-  _evPubQr(d, tier, tk, name, ov);
+  // Prevodem. PIS ma prednost pred QR, protoze se potvrzuje SAM -- u akce s peti sty listky nikdo
+  // rucne odklikavat nebude. QR zustava jako zaloha pro toho, kdo svou banku v seznamu nenajde.
+  const _payee={ receiver_id_type:d.receiver_id_type, receiver_id_value:d.receiver_id_value, receiver_name:d.receiver_name||(d.host&&d.host.name), currency:cur, name:(d.host&&d.host.name)||'', id:(d.host&&d.host.id)||null };
+  const _msg=(name+' - '+(d.title||'')).slice(0,60);
+  const _qrFallback=function(){ _evPubQr(d, tier, tk, name, ov); };
+  if(window._PIS_ENABLED && d.receiver_id_value && typeof _pisPayFlow==='function'){
+    // Anonymni navstevnik nema nactene _PIS_TEST_IDS (bezi az v enterApp), takze testovaci rezim
+    // tady nikdy neplati -- verejna stranka jede vzdy naostro nebo vubec.
+    try{ _pisPayFlow(tk, _payee, null, price, cur, _msg, null, false, _qrFallback, 'event', null); return; }catch(e){}
+  }
+  _qrFallback();
 }
 
 // Převodem: ukáže QR i údaje k ručnímu opsání a nechá kupujícího potvrdit, že zaplatil.
