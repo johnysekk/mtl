@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SRN makes every Share button copy the link and nothing else. All three link-sharing spots -- the event, the club invite and the referral link -- opened the OS share sheet when one was available and only fell back to the clipboard otherwise. That takes the decision of where the link goes away from the person holding the phone, adds a step to what should be one tap, and on desktop frequently does nothing at all. They now copy and say so. The QR image share is left alone: that one hands over a file, which the clipboard cannot do. The free-event tick reads Akce je zdarma rather than posing a question. -->
+<!-- MTL build: SRO fixes a ticket insert that could not succeed and a login screen that should never have been seen. Every ticket write still carried share_src alongside attr_src: SRD added the new column by regex without removing the old one, and share_src was never created because attribution.sql replaced it, so PostgREST rejected the whole insert and nobody could buy anything, in the app or out of it. All four writes and the dead _evSetSrc/_evConsumeSrc layer are gone; attribution has one owner again. And an event link no longer flashes the sign-in screen: deciding where that person belongs waits on the session being restored, and until then they were looking at a login, which on a link off Instagram is the moment they close the tab. A tiny inline script hides the auth screen and shows a spinner the instant it sees ?event= in the URL, before anything renders; whichever branch wins clears it once it has something to show. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -534,6 +534,21 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
     </div>
   </div>
   <!-- AUTH OBRAZOVKA -->
+<div id="evBootLoad" style="display:none;position:fixed;inset:0;z-index:10001;background:var(--bg);align-items:center;justify-content:center;flex-direction:column;gap:14px;"><div style="width:34px;height:34px;border:3px solid var(--border);border-top-color:var(--red);border-radius:50%;animation:evspin .8s linear infinite;"></div><div style="font-size:13px;color:var(--mid);font-weight:600;">Načítám…</div></div>
+<style>@keyframes evspin{to{transform:rotate(360deg)}}</style>
+<script>
+/* Odkaz na akci nesmí problesknout přihlašovací obrazovkou. Rozhodnutí, kam ten člověk patří,
+   trvá chvíli (čeká se na obnovení session), a do té doby se mu ukázal login — u odkazu poslaného
+   na Instagram je to přesně ten okamžik, kdy zavře kartu. Běží HNED, ještě před vykreslením. */
+(function(){ try{
+  if(new URLSearchParams(location.search).get('event')){
+    document.documentElement.setAttribute('data-evboot','1');
+    var st=document.createElement('style');
+    st.textContent='#authScreen{display:none!important}#evBootLoad{display:flex!important}';
+    st.id='evBootStyle'; document.head.appendChild(st);
+  }
+}catch(e){} })();
+</script>
 <div id="authScreen" style="position:fixed;inset:0;z-index:9999;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px;max-width:430px;margin:0 auto;">
   <div style="font-family:'Bebas Neue';font-size:clamp(31px,8.5vw,38px);letter-spacing:.05em;color:var(--red);margin-bottom:6px;line-height:1.05;text-align:center;">MARTIAL TRAINING LAB</div>
   <p id="authSub" data-noi18n style="font-size:14px;color:var(--mid);margin-bottom:32px;text-align:center;">Najdi svého Muay Thai kouče</p>
@@ -8600,114 +8615,22 @@ function _tkClaimed(t){ return String((t&&t.status)||'')==='paid_claimed'; }
 function _evPubEsc(v){ try{ return escapeHtml(String(v==null?'':v)); }catch(e){ return ''; } }
 
 // ── SDÍLENÝ ODKAZ NA AKCI ────────────────────────────────────────────────────────────────────
-// Pořadatel rozešle jedinou adresu a ta si sama poradí s obojím publikem. Dvě adresy by znamenaly,
-// že se pořadatel musí rozhodovat, komu kterou pošle — a to na Instagramu nejde.
-
-// ── MARKETINGOVÁ ATRIBUCE (last non-direct click) ────────────────────────────────────────────
-// Odpovídá na "odkud ten člověk přišel", ne na "kdo mu klub doporučil" -- to druhé je acq_source
-// a rozhoduje o akviziční provizi. Tyhle dvě věci se nesmí smíchat.
-//
-// Tři signály, první vyhrává:
-//   1. UTM parametry -- nejpřesnější, ale jen když někdo odkaz označil
-//   2. click ID (fbclid / gclid / ttclid / msclkid) -- Meta, Google a TikTok je lepí na KAŽDÝ
-//      odchozí klik, i na neoznačený odkaz v popisku. Odtud poznáme platformu automaticky.
-//   3. document.referrer -- na webu funguje, ve vestavěném prohlížeči na iOS bývá prázdný
-//
-// Co tímhle NEJDE poznat: fbclid je stejný u reklamy i u běžného příspěvku. Rozdíl paid/organic
-// vidíme JEN z UTM, které si člověk vloží do reklamy. Proto je generátor označených odkazů
-// součást řešení, ne ozdoba.
-const ATTR_TTL_MS = 30*24*3600000;
-const ATTR_KEY='mtl_attr', ATTR_KEY_T='mtl_attr_t';
-// Pět kategorií a dost. Dřív jich tu byla dvacítka plus placement z Meta maker, jenže to
-// znamenalo, že pořadatel musel vybrat kanál PŘED tím, než odkaz někam dá, a mít pro každé místo
-// jiný odkaz. Jeden odkaz, který si appka přebere sama, je použitelnější než přesnější statistika,
-// kterou nikdo nenastaví správně.
-//
-//   instagram / facebook  z click ID nebo z odkazující stránky
-//   app                   člověk už byl přihlášený v MTL
-//   other                 jiná rozpoznaná stránka (Google, TikTok, něčí web…)
-//   direct                nic se nezjistilo -- napsaná adresa, QR z plakátu, odkaz z chatu
-//
-// "direct" je sběrný koš, ne kanál. WhatsApp, Messenger ani SMS k odkazu nepřipojují nic a
-// neposílají odkazující stránku, takže se poznat nedají -- to neumí nikdo, ani Google Analytics.
-function _attrFrom(){
-  var q=null; try{ q=new URLSearchParams(location.search); }catch(e){ return null; }
-  var us=q.get('utm_source');
-  if(us){
-    var u=String(us).toLowerCase();
-    if(u==='ig'||u.indexOf('insta')>=0) return 'instagram';
-    if(u==='fb'||u.indexOf('face')>=0) return 'facebook';
-    if(u.indexOf('youtu')>=0) return 'youtube';
-    if(u.indexOf('tiktok')>=0) return 'tiktok';
-    if(u.indexOf('google')>=0||u.indexOf('seznam')>=0||u==='bing') return 'google';
-    return 'other';
-  }
-  var r=''; try{ r=document.referrer||''; }catch(e){}
-  var h=''; if(r){ try{ h=new URL(r).hostname.toLowerCase(); }catch(e){} }
-  try{ if(h && h===location.hostname) h=''; }catch(e){}
-  if(/(^|\.)instagram\.com$/.test(h)||/^l\.instagram/.test(h)) return 'instagram';
-  if(/(^|\.)facebook\.com$/.test(h)||/^(l|lm|m)\.facebook/.test(h)||/(^|\.)fb\.(me|com)$/.test(h)) return 'facebook';
-  if(/(^|\.)youtube\.com$/.test(h)||/(^|\.)youtu\.be$/.test(h)) return 'youtube';
-  if(/(^|\.)tiktok\.com$/.test(h)) return 'tiktok';
-  // Google a ostatní vyhledávače do jednoho -- klub zajímá "našli mě hledáním", ne který stroj.
-  if(/(^|\.)google\./.test(h)||/(^|\.)(seznam|bing|duckduckgo|ecosia)\./.test(h)) return 'google';
-  // Click ID z reklam. Referrer u nich často chybí, tohle je jediné, co zbyde.
-  if(q.get('gclid')||q.get('gbraid')||q.get('wbraid')) return 'google';
-  if(q.get('ttclid')) return 'tiktok';
-  // fbclid lepí Meta na každý odchozí klik. Bez odkazující stránky nepoznáme, jestli to byl
-  // Instagram nebo Facebook, ale že to bylo od Mety, víme jistě.
-  if(q.get('fbclid')) return 'facebook';
-  // Doménu si necháme. "Z webu" pořadateli nic neřekne -- chce vědět, ZE KTERÉHO webu, a tu
-  // informaci máme, jen se dosud zahazovala. Ukládá se za svislítkem, ať to jde snadno rozpojit.
-  if(h) return 'web|'+h.replace(/^www\./,'').slice(0,40);
-  return null;
-}
-// Běží při každém načtení. Když nic nenajde, starou hodnotu nechá být -- jinak by každé otevření
-// appky přepsalo zdroj na "direct" (last non-direct click).
-function _attrCapture(){
-  try{
-    var v=_attrFrom(); if(!v) return;
-    localStorage.setItem(ATTR_KEY, v);
-    localStorage.setItem(ATTR_KEY_T, String(Date.now()));
-  }catch(e){}
-}
-// Vrátí zdroj pro zápis na řádek nákupu. NESPOTŘEBUJE ho -- platí dál, dokud ho nepřepíše nový.
-// Nákup uvnitř appky je vlastní kategorie: tam ten člověk už nepřišel odjinud.
-function _attrGet(){
-  var inApp=(typeof currentUser!=='undefined' && !!currentUser);
-  try{
-    var raw=localStorage.getItem(ATTR_KEY);
-    var t=parseInt(localStorage.getItem(ATTR_KEY_T)||'0',10);
-    if(raw && (Date.now()-t) < ATTR_TTL_MS) return raw;
-  }catch(e){}
-  return inApp ? 'app' : 'direct';
-}
-try{ _attrCapture(); }catch(e){}
-
-function _evSetSrc(v){ try{ if(v){ localStorage.setItem('mtl_ev_src', String(v).slice(0,40)); localStorage.setItem('mtl_ev_src_t', String(Date.now())); } }catch(e){} }
-// Zdroj se spotřebuje při nákupu a pak se zahodí, ať se nepřilepí k další akci. Šest hodin je
-// stejné okno, jaké používají kurzy.
-function _evConsumeSrc(where){
-  var v='direct';
-  try{
-    var raw=localStorage.getItem('mtl_ev_src');
-    var t=parseInt(localStorage.getItem('mtl_ev_src_t')||'0',10);
-    localStorage.removeItem('mtl_ev_src'); localStorage.removeItem('mtl_ev_src_t');
-    if(raw && (Date.now()-t) < 6*3600000) v=raw;
-  }catch(e){}
-  return (where||'web')+':'+v;
-}
+// Pořadatel rozešle jedinou adresu a ta si sama poradí s obojím publikem. Zdroj řeší atribuční
+// vrstva výš (_attrCapture/_attrGet); dřív tu byla druhá, vlastní, která psala do share_src --
+// sloupce, který nikdy nevznikl, protože ho nahradil attr_src. Zápis lístku na tom padal.
 // Rozcestník. Přihlášený jde do appky, ostatní na veřejnou stránku. Na currentUser se chvíli
 // počká, protože po návratu do PWA se přihlášení obnovuje asynchronně a bez toho by i vlastní
 // člen spadl na veřejnou verzi.
+function _evBootDone(){ try{ var st=document.getElementById('evBootStyle'); if(st) st.remove(); var l=document.getElementById('evBootLoad'); if(l) l.style.display='none'; }catch(e){} }
 async function _evOpenShared(eventId){
   var _t=0; while(typeof currentUser==='undefined' || !currentUser){ if(_t>=12) break; await new Promise(function(r){ setTimeout(r,200); }); _t++; }
   if(typeof currentUser!=='undefined' && currentUser){
     try{
       const { data:ev } = await supaClient.from('events').select('*').eq('id', eventId).single();
-      if(ev){ try{ window.history.replaceState({}, '', location.pathname); }catch(e){} openEventView(ev); return; }
+      if(ev){ try{ window.history.replaceState({}, '', location.pathname); }catch(e){} _evBootDone(); openEventView(ev); return; }
     }catch(e){}
   }
+  // Veřejná stránka si loader sundá až sama, jakmile má co vykreslit -- viz openEventSignup.
   try{ openEventSignup(eventId); }catch(e){}
 }
 
@@ -8807,6 +8730,8 @@ async function openEventSignup(eventId){
   ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:100000;display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:18px 12px;';
   ov.innerHTML='<div style="background:var(--bg);border-radius:18px;max-width:460px;width:100%;padding:20px;"><div style="text-align:center;padding:26px;color:var(--mid);font-size:13px;">'+(EN?'Loading…':'Načítám…')+'</div></div>';
   document.body.appendChild(ov);
+  // Až teď je na obrazovce něco k vidění -- předtím by pod formulářem prosvítal login.
+  try{ if(typeof _evBootDone==='function') _evBootDone(); }catch(e){}
   const box=ov.firstElementChild;
 
   let d=null;
@@ -8888,7 +8813,7 @@ async function _evPubBuy(d, tiers, ov){
   try{
     const { data, error } = await supaClient.from('event_tickets').insert({ attr_src:_attrGet(),
       event_id:d.id, buyer_id:null, buyer_name:name, buyer_email:mail, buyer_phone:tel||null,
-      qty:1, amount:price, currency:cur, status:'reserved', share_src:_evConsumeSrc('web'),
+      qty:1, amount:price, currency:cur, status:'reserved',
       consent_at:new Date().toISOString(), consent_version:(typeof TICKET_CONSENT_VERSION!=='undefined'?TICKET_CONSENT_VERSION:'')
     }).select('id').single();
     if(error) throw error;
@@ -9007,14 +8932,14 @@ async function doEventCheckout(ev, tier, _confirmed, _minorOk){
     if(!_evPayee){ const { data:g } = await supaClient.from('gyms').select('id,stripe_account,payment_mode,receiver_id_type,receiver_id_value,receiver_name,confirm_mode,name,owner_id,currency').eq('id', ev.gym_id).single(); if(g){ _evPayee=g; _evPayeeKind='gym'; if(!acct) acct=g.stripe_account||null; } }
   }catch(e){}
   if(base<=0){
-    try{ const { data:_frt } = await supaClient.from('event_tickets').insert({ attr_src:_attrGet(), event_id:ev.id, buyer_id:currentUser.id, buyer_name:currentUser.name||'', qty:1, amount:0, currency:cur, status:'paid', share_src:_evConsumeSrc('app') }).select('id').single(); if(_frt&&_frt.id){ try{ fetch('/api/ticket-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticketId:_frt.id})}); }catch(e){} } if(ev.created_by){ await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'event_rsvp', event_id:ev.id, title:ev.title}), message:'🎟️ '+(currentUser.name||'Někdo')+(LANG==='en'?` is coming to "${ev.title}"`:` přijde na „${ev.title}"`) }); } }catch(e){}
+    try{ const { data:_frt } = await supaClient.from('event_tickets').insert({ attr_src:_attrGet(), event_id:ev.id, buyer_id:currentUser.id, buyer_name:currentUser.name||'', qty:1, amount:0, currency:cur, status:'paid' }).select('id').single(); if(_frt&&_frt.id){ try{ fetch('/api/ticket-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticketId:_frt.id})}); }catch(e){} } if(ev.created_by){ await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'event_rsvp', event_id:ev.id, title:ev.title}), message:'🎟️ '+(currentUser.name||'Někdo')+(LANG==='en'?` is coming to "${ev.title}"`:` přijde na „${ev.title}"`) }); } }catch(e){}
     toast(LANG==='en'?'🎟️ You are on the list!':'🎟️ Jsi na seznamu!'); closeSheet('shEventView'); return;
   }
   if(_evPayee && typeof _mtlPayMode==='function' && _mtlPayMode(_evPayee)==='qr_bank'){ return _eventQrPay(ev, tier, _evPayee, _evPayeeKind); }
   if(!acct){ toast(LANG==='en'?'⚠️ This event cannot take payments yet':'⚠️ Tato událost zatím nepřijímá platby'); return; }
   const buyerPays=Math.round(base*1*100)/100;
   let ticketId=null;
-  try{ const { data:t } = await supaClient.from('event_tickets').insert({ attr_src:_attrGet(), event_id:ev.id, buyer_id:currentUser.id, buyer_name:currentUser.name||'', qty:1, amount:buyerPays, currency:cur, status:'pending', share_src:_evConsumeSrc('app') }).select().single(); ticketId=t&&t.id; }catch(e){ toast('⚠️ '+(e.message||'')); return; }
+  try{ const { data:t } = await supaClient.from('event_tickets').insert({ attr_src:_attrGet(), event_id:ev.id, buyer_id:currentUser.id, buyer_name:currentUser.name||'', qty:1, amount:buyerPays, currency:cur, status:'pending' }).select().single(); ticketId=t&&t.id; }catch(e){ toast('⚠️ '+(e.message||'')); return; }
   let _evF=false, _evP=false, _evtake=0.035; try{ if(ev.created_by){ const {data:_ow}=await supaClient.from('profiles').select('founding,partner,coach_ref_score,bankai_eligible').eq('id',ev.created_by).single(); var _evsc=(_ow&&_ow.coach_ref_score)||0; _evtake=_ladderRate('stripe', {score:_evsc, bankai:(_ow&&_ow.bankai_eligible)}); _evF=!!(_ow&&_ow.founding); _evP=!!(_ow&&_ow.partner); } }catch(e){}
   const url=`/api/pay?type=event&founding=${_evF?1:0}&partner=${_evP?1:0}&take=${_evtake}&gymAccount=${encodeURIComponent(acct)}&eventTitle=${encodeURIComponent(ev.title||'Event')}&tierName=${encodeURIComponent((tier&&tier.name)||'')}&amount=${base}&currency=${cur}&ticketId=${encodeURIComponent(ticketId||'')}&buyerName=${encodeURIComponent(currentUser.name||'')}&disc=${encodeURIComponent((()=>{ try{ const ds=JSON.parse(ev.disciplines||'[]'); return Array.isArray(ds)?ds.join(','):''; }catch(e){ return ''; } })())}&gymId=${encodeURIComponent(ev.gym_id||'')}&payoutCoachId=${encodeURIComponent(ev.payout_coach_id||'')}&income=${encodeURIComponent(ev.income||'side')}`;
   window.location.href=url;
@@ -9030,7 +8955,7 @@ async function _eventQrPay(ev, tier, payee, payeeKind){
   const sName=currentUser.name||'Student';
   let ticketId=null;
   try{
-    const { data:t, error:e1 } = await supaClient.from('event_tickets').insert({ attr_src:_attrGet(), event_id:ev.id, buyer_id:currentUser.id, buyer_name:sName, qty:1, amount:price, currency:cur, status:'reserved', payment_method:'qr', share_src:_evConsumeSrc('app') }).select('id').single();
+    const { data:t, error:e1 } = await supaClient.from('event_tickets').insert({ attr_src:_attrGet(), event_id:ev.id, buyer_id:currentUser.id, buyer_name:sName, qty:1, amount:price, currency:cur, status:'reserved', payment_method:'qr' }).select('id').single();
     if(e1){ toast('\u26a0\ufe0f '+e1.message); return; } ticketId=t&&t.id;
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
   const msg=sName+' - '+(ev.title||'Event');
@@ -29883,7 +29808,7 @@ async function showPaidPopup(){
     // profilu akce; kdo ho nema, na verejne strance. Rozcestnik je _evOpenShared, ne tahle vetev,
     // protoze v tuhle chvili jeste nemusi byt jasne, jestli je clovek prihlaseny.
     const _evp=params.get('event');
-    if(_evp){ try{ _evSetSrc(params.get('src')); _evOpenShared(_evp); }catch(e){} return; }
+    if(_evp){ try{ _evOpenShared(_evp); }catch(e){} return; }
     const _coh=params.get('cohort');
     if(_coh){
       try{ const _src=params.get('src'); if(_src) _setCohSrc(_src); }catch(e){}
