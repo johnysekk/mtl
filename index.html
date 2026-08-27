@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SRA puts pay-by-bank ahead of the QR fallback on the public ticket page. A QR payment has to be confirmed by hand by the organiser, which is fine for a drop-in and impossible for a fight night with five hundred tickets; a PIS payment confirms itself, because the bank reports the result and pis-return writes the transaction and flips the ticket. The server side of that already existed -- pis-return has handled event_tickets all along -- so this only wires the client. QR stays as the fallback for anyone whose bank is not on the list. Test mode can never apply here: _PIS_TEST_IDS loads in enterApp, which an anonymous visitor never reaches, so the public page is live or nothing. -->
+<!-- MTL build: SRB lets the public ticket page run in PIS test mode. The flag comes from the public endpoint as pis_test rather than from _PIS_TEST_IDS, which is loaded in enterApp and therefore never exists for an anonymous visitor -- so the one page that most needs trying out was the one page that could not be. The endpoint reads that column in its own isolated query on purpose: pis_test ships in a separate migration, and putting it in the main select would let PostgREST reject the whole request and kill the page, which is exactly how the club deck died once already. Ordering note for the record: pay-by-bank is the primary rail here, not a fallback behind Stripe. Which rail runs is the club payment_mode, so a club on transfers goes to PIS and only a club that chose Stripe goes to Stripe; QR remains purely for a buyer whose bank is not on the list. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -8686,10 +8686,12 @@ async function _evPubBuy(d, tiers, ov){
   const _payee={ receiver_id_type:d.receiver_id_type, receiver_id_value:d.receiver_id_value, receiver_name:d.receiver_name||(d.host&&d.host.name), currency:cur, name:(d.host&&d.host.name)||'', id:(d.host&&d.host.id)||null };
   const _msg=(name+' - '+(d.title||'')).slice(0,60);
   const _qrFallback=function(){ _evPubQr(d, tier, tk, name, ov); };
-  if(window._PIS_ENABLED && d.receiver_id_value && typeof _pisPayFlow==='function'){
-    // Anonymni navstevnik nema nactene _PIS_TEST_IDS (bezi az v enterApp), takze testovaci rezim
-    // tady nikdy neplati -- verejna stranka jede vzdy naostro nebo vubec.
-    try{ _pisPayFlow(tk, _payee, null, price, cur, _msg, null, false, _qrFallback, 'event', null); return; }catch(e){}
+  // Testovaci rezim si tahame z endpointu (d.pis_test), ne z _PIS_TEST_IDS -- ta mapa se nacita
+  // v enterApp, kam se anonymni navstevnik nedostane. Bez toho by veřejnou stránku nešlo vyzkoušet.
+  // V testu se pousti i kdyz _PIS_ENABLED jeste neni, presne jako uvnitr appky.
+  const _pisTest=!!d.pis_test;
+  if((window._PIS_ENABLED || _pisTest) && d.receiver_id_value && typeof _pisPayFlow==='function'){
+    try{ _pisPayFlow(tk, _payee, null, price, cur, _msg, null, _pisTest, _qrFallback, 'event', null); return; }catch(e){}
   }
   _qrFallback();
 }
