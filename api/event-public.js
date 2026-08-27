@@ -10,8 +10,6 @@
 // ?tk=<ticketId> returns one ticket instead, for the "here is your ticket" page an accountless buyer
 // lands on -- same shape as cohort-public's ?cm= branch.
 
-import Stripe from 'stripe';
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const _SUPA = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const _KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -22,17 +20,19 @@ async function sbGet(path) {
   } catch (e) { return []; }
 }
 
-// ticket_tiers is TEXT holding JSON (same shape gym_cohorts.price_tiers has). Older events have
-// nothing there and carry a single ticket_price instead, so fall back to that rather than showing
-// a page with no way to buy.
+// events.ticket_tiers je TEXT s JSONem: [{name, price}]. Kdyz je prazdny, akce ma jedinou cenu
+// v events.ticket_price -- a presne takhle to cte i klient v index.html:8048, kde prazdne pole
+// nahradi jednim radkem z ticket_price. Bez toho zalozniho kroku by se akce s jedinou cenou
+// zobrazila jako vyprodana/neprodejna, protoze by nemela zadny cenik.
+// Nazev nechavame prazdny stejne jako klient: u jedine ceny neni co odlisovat a "Ticket" by se
+// zbytecne vypisovalo pod tlacitkem.
 function parseTiers(ev) {
   let t = null;
-  try { t = (typeof ev.ticket_tiers === 'string') ? JSON.parse(ev.ticket_tiers) : ev.ticket_tiers; } catch (e) { t = null; }
+  try { t = (typeof ev.ticket_tiers === 'string') ? JSON.parse(ev.ticket_tiers || '[]') : ev.ticket_tiers; } catch (e) { t = null; }
   if (Array.isArray(t) && t.length) {
-    return t.map((x) => ({ name: String((x && x.name) || 'Ticket'), price: Number((x && x.price) || 0) }))
-            .filter((x) => x.name);
+    return t.map((x) => ({ name: String((x && x.name) || ''), price: Number((x && x.price) || 0) }));
   }
-  return [{ name: 'Ticket', price: Number(ev.ticket_price || 0) }];
+  return [{ name: '', price: Number(ev.ticket_price || 0) }];
 }
 
 export default async function handler(req, res) {
@@ -86,39 +86,38 @@ export default async function handler(req, res) {
     // venue rather than a training club. Resolving a host instead of a gym is what makes this page
     // work unchanged the day a promoter is allowed to create an event.
     let payee = { payment_mode: null, receiver_id_type: null, receiver_id_value: null, receiver_name: null };
-    let gymName = '', stripeAccount = null, hostKind = null, hostId = null;
+    let gymName = '', legalName = '', stripeAccount = null, hostKind = null, hostId = null;
     try {
       if (ev.payout_coach_id) {
-        const p = await sbGet(`profiles?id=eq.${encodeURIComponent(ev.payout_coach_id)}&select=name,payment_mode,receiver_id_type,receiver_id_value,receiver_name,stripe_account,gym_payout_account`);
+        const p = await sbGet(`profiles?id=eq.${encodeURIComponent(ev.payout_coach_id)}&select=name,legal_name,payment_mode,receiver_id_type,receiver_id_value,receiver_name,stripe_account,gym_payout_account`);
         const pp = p && p[0];
         if (pp) {
           hostKind = 'coach'; hostId = ev.payout_coach_id;
           gymName = pp.name || '';
+          legalName = pp.legal_name || pp.receiver_name || '';
           stripeAccount = pp.gym_payout_account || pp.stripe_account || null;
           payee = { payment_mode: pp.payment_mode || null, receiver_id_type: pp.receiver_id_type || null, receiver_id_value: pp.receiver_id_value || null, receiver_name: pp.receiver_name || null };
         }
       } else if (ev.gym_id) {
-        const g = await sbGet(`gyms?id=eq.${encodeURIComponent(ev.gym_id)}&select=name,kind,payment_mode,receiver_id_type,receiver_id_value,receiver_name,stripe_account`);
+        const g = await sbGet(`gyms?id=eq.${encodeURIComponent(ev.gym_id)}&select=name,legal_name,payment_mode,receiver_id_type,receiver_id_value,receiver_name,stripe_account`);
         const gg = g && g[0];
         if (gg) {
-          hostKind = gg.kind || 'gym'; hostId = ev.gym_id;
+          hostKind = 'gym'; hostId = ev.gym_id;
           gymName = gg.name || '';
+          legalName = gg.legal_name || gg.receiver_name || '';
           stripeAccount = gg.stripe_account || null;
           payee = { payment_mode: gg.payment_mode || null, receiver_id_type: gg.receiver_id_type || null, receiver_id_value: gg.receiver_id_value || null, receiver_name: gg.receiver_name || null };
         }
       }
     } catch (e) {}
 
-    // The legal name of whoever the buyer is contracting with, straight from Stripe.
-    let providerName = '';
-    if (stripeAccount) {
-      try {
-        const acct = await stripe.accounts.retrieve(stripeAccount);
-        providerName = (acct.company && acct.company.name)
-          || ([acct.individual && acct.individual.first_name, acct.individual && acct.individual.last_name].filter(Boolean).join(' '))
-          || (acct.business_profile && acct.business_profile.name) || '';
-      } catch (e) { /* leave blank */ }
-    }
+    // Pravni nazev porizujeme z MTL, ne ze Stripe. Puvodne se tahal pres stripe.accounts.retrieve,
+    // coz funguje jen u poskytovatele na Stripe -- kdo bere prevodem, zadny Stripe ucet nema a
+    // kupujici by na verejne strance nevidel, s kym vlastne uzavira smlouvu. legal_name je na
+    // gyms i profiles a plni se pri fakturacnim nastaveni; receiver_name je zaloha, protoze u
+    // bankovni koleje je to jmeno majitele uctu, ktere provider deklaroval.
+    // Stejne poradi pouziva unified-doklad-cron pri vystavovani dokladu.
+    const providerName = legalName || gymName;
 
     // Places taken. Counting ROWS is correct here and not an oversight: one row is one seat, which
     // is what lets every ticket carry its own QR and its own check-in. Reserved-but-unpaid counts,

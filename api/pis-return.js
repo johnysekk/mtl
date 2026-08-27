@@ -134,7 +134,17 @@ export default async function handler(req, res){
         if(!rec){ const mo=await sb.from('merch_orders').select('id,status,student_id,gym_id,coach_id,merch_id,item_name,amount,currency,buyer_name').eq('pis_payment_id',paymentId).maybeSingle(); if(mo.data){ rec=mo.data; tbl='merch_orders'; } }
         const _paidStatus=(tbl==='event_tickets'||tbl==='merch_orders')?'paid':(tbl==='cohort_members')?'deposit_paid':'active';
         if(rec && rec.status!==_paidStatus){
-          await sb.from(tbl).update({ status:_paidStatus, pis_status:status }).eq('id',rec.id);
+          // Clenstvi potrebuje i datum konce. Vsech osm ostatnich cest, ktere clenstvi aktivuji,
+          // ho nastavuje; tahle jedina ne, takze PIS clenstvi zustalo aktivni bez konce. Dusledky
+          // dva: clenovi se ukazovalo 'neobnovuje se' bez informace DOKDY, a membership-expiry-cron
+          // nema co porovnat, takze takove clenstvi nikdy samo nevyprsi -- ani rocni za 16 000.
+          const _upd={ status:_paidStatus, pis_status:status };
+          if(tbl==='gym_memberships'){
+            const _mo=Math.max(1, parseInt(rec.months,10)||1);
+            const _pe=new Date(); _pe.setMonth(_pe.getMonth()+_mo);
+            _upd.period_end=_pe.toISOString();
+          }
+          await sb.from(tbl).update(_upd).eq('id',rec.id);
           if(tbl==='cohort_members'){ try{ const _exC=await sb.from('cohort_payments').select('id').eq('cohort_member_id',rec.id).eq('kind','deposit').limit(1); if(!(_exC.data&&_exC.data.length)){ const _prevC=Number(rec.paid_amount||0); await sb.from('cohort_members').update({ paid_amount: Math.round((_prevC+Number(_cohDep||0))*100)/100, months_paid:1 }).eq('id',rec.id); await sb.from('cohort_payments').insert({ cohort_member_id:rec.id, cohort_id:rec.cohort_id||null, kind:'deposit', amount:Number(_cohDep||0), currency:_cohCur||'CZK', mtl_fee: Math.round(Number(_cohDep||0)*0.03*100)/100, payment_method:'pis', status:'paid' }); } }catch(e){} }
           if(tbl==='bookings' && rec.slot_id){ try{ await sb.from('slots').update({ booked:true }).eq('id',rec.slot_id); }catch(e){} }
           try{ const _buyerId=(tbl==='event_tickets')?rec.buyer_id:rec.student_id;
