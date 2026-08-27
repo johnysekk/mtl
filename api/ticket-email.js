@@ -138,7 +138,9 @@ export default async function handler(req, res) {
         const lbl = (t.tier_name || t.plan_name || '') || (tickets.length > 1 ? ('Ticket ' + (ix + 1) + ' of ' + tickets.length) : 'Your ticket');
         return '<div style="background:#fff;margin:18px 22px;border-radius:16px;padding:18px;text-align:center;">' +
           '<img src="' + qrFor(tid) + '" width="220" height="220" alt="Ticket QR" style="display:block;margin:0 auto;border-radius:10px;" />' +
-          '<div style="color:#111;font-size:13px;font-weight:700;margin-top:12px;">' + esc(name || 'Your ticket') + '</div>' +
+          // Jméno ÚČASTNÍKA, ne toho, kdo platil. U rodiče se třemi dětmi by jinak na všech
+          // třech lístcích stálo jméno rodiče a u vchodu by to nikomu nepomohlo.
+          '<div style="color:#111;font-size:13px;font-weight:700;margin-top:12px;">' + esc(t.attendee_name || name || 'Your ticket') + '</div>' +
           (tickets.length > 1 ? '<div style="color:#666;font-size:12px;margin-top:2px;">' + esc(lbl) + '</div>' : '') +
           '<div style="color:#888;font-size:12px;margin-top:4px;">Show this QR at the event entrance to check in.</div>' +
           '<div style="color:#b0b0b0;font-size:10.5px;margin-top:8px;word-break:break-all;">' + esc(tid) + '</div>' +
