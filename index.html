@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SRT corrects what SRS misnamed and closes the gap it left. The amazonaws execute-api host was Neonomics, not Stripe -- a PIS return, not a card one -- and the guard missed it on the parameter side because pis-return comes back as ?pis=ok, which was not in the list; only the domain rule caught it. The parameter is in now, so the return is ignored before the referrer is even read. The domain list is a list of things to IGNORE, not sources: the bank where someone confirmed a transfer is not a marketing channel, and without it a club would see csob.cz sitting next to Instagram as though the bank were sending customers. More Czech banks and Tink are added, plus a catch-all for any host with bank in the name while a payment is still open, since the next provider will bring domains nobody has listed yet. -->
+<!-- MTL build: SRV lets one payment buy several tickets, in the app and outside it. Until now a person wanting three went through checkout three times and got three separate e-mails, which on a fight night -- a man buying for himself and his partner, a parent for two kids -- is the ordinary case rather than the edge one. The grouping is a shared order_id on event_tickets rather than a separate event_orders table: an order would have carried only what the ticket already holds, so a second table would mean the same facts in two places and a way for them to disagree. One row still means one seat, each with its own qr_token and its own checked_in_at, because a single QR shared by three people cannot be scanned three times at a door and a guest list counting rows is not counting people. The public form gains a stepper capped by remaining capacity, the payment is for the total, and both callbacks flip the whole order -- otherwise the siblings would sit as reservations and release-cron would free seats that were paid for. The ticket e-mail loads the order and renders one QR per ticket in a single message. Needs event-orders.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -8688,6 +8688,17 @@ const ATTR_KEY='mtl_attr', ATTR_KEY_T='mtl_attr_t';
 // akci a rozeslal adresu, která má být interní. Zákazník na ni sice dojde, ale posílat lidi na
 // dashboard je špatně a jednou tam být nemusí.
 // Na localhostu a preview deploji zůstává location.origin, jinak by nešlo nic otestovat.
+
+// Kolečko myši mění hodnotu v <input type="number">, když je zaostřený. Kapacita 300 se rolováním
+// stránky tiše změní na 299 -- a u ceny je to horší: klub může nechtěně prodávat za jinou částku,
+// než si myslí. Prohlížeč to nabízí jako funkci, ale nikdo ji nechce.
+document.addEventListener('wheel', function(e){
+  try{
+    var el=document.activeElement;
+    if(el && el.type==='number' && el===e.target) el.blur();
+  }catch(err){}
+}, { passive:true });
+
 function _appOrigin(){
   try{
     var h=location.hostname||'';
@@ -8898,6 +8909,16 @@ async function openEventSignup(eventId){
   h+='<input id="evPubName" placeholder="'+(EN?'Your name':'Tvoje jméno')+'" style="'+_inp+'">';
   h+='<input id="evPubMail" type="email" inputmode="email" placeholder="'+(EN?'E-mail (ticket goes here)':'E-mail (sem přijde lístek)')+'" style="'+_inp+'">';
   h+='<input id="evPubTel" type="tel" inputmode="tel" placeholder="'+(EN?'Phone (optional)':'Telefon (nepovinné)')+'" style="'+_inp+'">';
+  // Počet kusů. Chlap kupuje sobě a přítelkyni, rodič dvěma dětem -- na fight night je to ten
+  // běžný případ. Jedna platba, ale pořád jeden řádek = jedno místo, aby měl každý svůj QR.
+  h+='<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:9px 12px;margin-bottom:9px;">'
+    +'<span style="font-size:13.5px;font-weight:600;">'+(EN?'Tickets':'Počet lístků')+'</span>'
+    +'<span style="display:flex;align-items:center;gap:12px;">'
+    +'<button type="button" id="evPubQtyM" style="width:32px;height:32px;border:1px solid var(--border);background:var(--bg);border-radius:8px;font-size:18px;font-weight:800;cursor:pointer;line-height:1;">−</button>'
+    +'<b id="evPubQty" style="font-size:16px;min-width:20px;text-align:center;">1</b>'
+    +'<button type="button" id="evPubQtyP" style="width:32px;height:32px;border:1px solid var(--border);background:var(--bg);border-radius:8px;font-size:18px;font-weight:800;cursor:pointer;line-height:1;">+</button>'
+    +'</span></div>';
+  h+='<div id="evPubTotal" style="font-size:12.5px;color:var(--mid);text-align:right;margin:-4px 0 10px;"></div>';
 
   const _terms=(d.terms_text&&d.terms_text.trim())?d.terms_text.trim():'';
   const _clause=(EN?'I understand this ticket is non-refundable. Any refund is handled by the organizer directly; MTL is not responsible for the state of payments.':'Beru na vědomí, že tento lístek je nevratný. Případné refundace řeší pořadatel přímo, MTL nezodpovídá za stav plateb.');
@@ -8909,6 +8930,24 @@ async function openEventSignup(eventId){
   box.innerHTML=h;
 
   ov.querySelector('#evPubX').onclick=function(){ ov.remove(); _evBootRelease(); try{ window.history.replaceState({}, '', location.pathname); }catch(e){} };
+  // Strop je zbývající kapacita -- nabízet pět lístků na akci, kde zbývají dva, je slib, který
+  // se rozbije až u platby.
+  var _maxQ=Math.max(1, Math.min(10, (left!==null? left : 10)));
+  window._evPubQty=1;
+  var _paintQ=function(){
+    var q=window._evPubQty, ti=parseInt((ov.querySelector('#evPubTier')||{}).value,10)||0;
+    var t=tiers[ti]||tiers[0]; var pr=(Number(t&&t.price)||0)*q;
+    var el=ov.querySelector('#evPubQty'); if(el) el.textContent=q;
+    var tot=ov.querySelector('#evPubTotal');
+    if(tot) tot.textContent=(q>1&&pr>0)?((EN?'Total: ':'Celkem: ')+pr+' '+sym):'';
+    var mb=ov.querySelector('#evPubQtyM'), pb=ov.querySelector('#evPubQtyP');
+    if(mb) mb.style.opacity=(q<=1)?'.35':'1';
+    if(pb) pb.style.opacity=(q>=_maxQ)?'.35':'1';
+  };
+  if(ov.querySelector('#evPubQtyM')) ov.querySelector('#evPubQtyM').onclick=function(){ if(window._evPubQty>1){ window._evPubQty--; _paintQ(); } };
+  if(ov.querySelector('#evPubQtyP')) ov.querySelector('#evPubQtyP').onclick=function(){ if(window._evPubQty<_maxQ){ window._evPubQty++; _paintQ(); } };
+  if(ov.querySelector('#evPubTier')) ov.querySelector('#evPubTier').onchange=_paintQ;
+  _paintQ();
   ov.querySelector('#evPubGo').onclick=function(){ _evPubBuy(d, tiers, ov); };
 }
 
@@ -8933,15 +8972,22 @@ async function _evPubBuy(d, tiers, ov){
   const cur=d.currency||'CZK';
 
   btn.disabled=true; btn.textContent='…';
+  // Kolik kusů. Jeden řádek = jedno místo, všechny se stejným order_id -- tím drží pohromadě pro
+  // platbu i pro e-mail, ale každý si nese vlastní QR a vlastní odbavení u dveří.
+  const qty=Math.max(1, Math.min(10, parseInt(window._evPubQty,10)||1));
+  const orderId=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():('o'+Date.now()+Math.random().toString(36).slice(2,10));
   let tk=null;
   try{
-    const { data, error } = await supaClient.from('event_tickets').insert({ attr_src:_attrGet(),
+    const _now=new Date().toISOString();
+    const _rows=[];
+    for(let i=0;i<qty;i++) _rows.push({ attr_src:_attrGet(),
       event_id:d.id, buyer_id:null, buyer_name:name, buyer_email:mail, buyer_phone:tel||null,
-      qty:1, amount:price, currency:cur, status:'reserved',
-      consent_at:new Date().toISOString(), consent_version:(typeof TICKET_CONSENT_VERSION!=='undefined'?TICKET_CONSENT_VERSION:'')
-    }).select('id').single();
+      order_id:orderId, qty:1, amount:price, currency:cur, status:'reserved',
+      consent_at:_now, consent_version:(typeof TICKET_CONSENT_VERSION!=='undefined'?TICKET_CONSENT_VERSION:'')
+    });
+    const { data, error } = await supaClient.from('event_tickets').insert(_rows).select('id');
     if(error) throw error;
-    tk=data&&data.id;
+    tk=data&&data[0]&&data[0].id;   // platba visí na prvním; callback překlopí celou objednávku
   }catch(e){
     btn.disabled=false; btn.textContent=(EN?'Continue to payment':'Pokračovat na platbu');
     toast('⚠️ '+((e&&e.message)||'')); return;
@@ -8954,8 +9000,8 @@ async function _evPubBuy(d, tiers, ov){
     const q='/api/pay?type=event'
       +'&gymAccount='+encodeURIComponent(d.stripe_account)
       +'&eventTitle='+encodeURIComponent(d.title||'Event')
-      +'&tierName='+encodeURIComponent(tier.name||'')
-      +'&amount='+price+'&currency='+encodeURIComponent(cur)
+      +'&tierName='+encodeURIComponent((tier.name||'')+(qty>1?(' ×'+qty):''))
+      +'&amount='+(price*qty)+'&currency='+encodeURIComponent(cur)
       +'&ticketId='+encodeURIComponent(tk)
       +'&buyerName='+encodeURIComponent(name)
       +'&buyerEmail='+encodeURIComponent(mail)
@@ -8968,23 +9014,24 @@ async function _evPubBuy(d, tiers, ov){
   // rucne odklikavat nebude. QR zustava jako zaloha pro toho, kdo svou banku v seznamu nenajde.
   const _payee={ receiver_id_type:d.receiver_id_type, receiver_id_value:d.receiver_id_value, receiver_name:d.receiver_name||(d.host&&d.host.name), currency:cur, name:(d.host&&d.host.name)||'', id:(d.host&&d.host.id)||null };
   const _msg=(name+' - '+(d.title||'')).slice(0,60);
-  const _qrFallback=function(){ _evPubQr(d, tier, tk, name, ov); };
+  const _qrFallback=function(){ _evPubQr(d, tier, tk, name, ov, qty); };
   // Testovaci rezim si tahame z endpointu (d.pis_test), ne z _PIS_TEST_IDS -- ta mapa se nacita
   // v enterApp, kam se anonymni navstevnik nedostane. Bez toho by veřejnou stránku nešlo vyzkoušet.
   // V testu se pousti i kdyz _PIS_ENABLED jeste neni, presne jako uvnitr appky.
   const _pisTest=!!d.pis_test;
   if((window._PIS_ENABLED || _pisTest) && d.receiver_id_value && typeof _pisPayFlow==='function'){
-    try{ _pisPayFlow(tk, _payee, null, price, cur, _msg, null, _pisTest, _qrFallback, 'event', null); return; }catch(e){}
+    try{ _pisPayFlow(tk, _payee, null, price*qty, cur, _msg, null, _pisTest, _qrFallback, 'event', null); return; }catch(e){}
   }
   _qrFallback();
 }
 
 // Převodem: ukáže QR i údaje k ručnímu opsání a nechá kupujícího potvrdit, že zaplatil.
 // Pořadatel to pak schvaluje stejně jako u jakékoli jiné QR platby.
-function _evPubQr(d, tier, ticketId, name, ov){
+function _evPubQr(d, tier, ticketId, name, ov, qty){
+  qty=Math.max(1, parseInt(qty,10)||1);
   const EN=LANG==='en';
   const cur=d.currency||'CZK'; const sym=(typeof _curSym==='function')?_curSym(cur):cur;
-  const price=Number(tier.price)||0;
+  const price=(Number(tier.price)||0)*qty;
   const vs=String(ticketId||'').replace(/[^0-9]/g,'').slice(0,10);
   const msg=(name+' - '+(d.title||'')).slice(0,60);
   const payee={ receiver_id_type:d.receiver_id_type, receiver_id_value:d.receiver_id_value, receiver_name:d.receiver_name||(d.host&&d.host.name), currency:cur, name:(d.host&&d.host.name)||'' };
@@ -9011,7 +9058,13 @@ function _evPubQr(d, tier, ticketId, name, ov){
   ov.querySelector('#evPubX2').onclick=function(){ ov.remove(); _evBootRelease(); try{ window.history.replaceState({}, '', location.pathname); }catch(e){} };
   ov.querySelector('#evPubPaid').onclick=async function(){
     const b=this; b.disabled=true; b.textContent='…';
-    try{ await supaClient.from('event_tickets').update({ status:'paid_claimed', claimed_at:new Date().toISOString() }).eq('id', ticketId); }catch(e){}
+    // Celá objednávka, ne jen ten jeden řádek -- zbytek by zůstal jako rezervace a release-cron
+    // by je uvolnil, přestože za ně člověk poslal peníze.
+    try{
+      const { data:_t0 } = await supaClient.from('event_tickets').select('order_id').eq('id', ticketId).single();
+      const _q=supaClient.from('event_tickets').update({ status:'paid_claimed', claimed_at:new Date().toISOString() });
+      if(_t0 && _t0.order_id) await _q.eq('order_id', _t0.order_id); else await _q.eq('id', ticketId);
+    }catch(e){}
     box.innerHTML='<div style="text-align:center;padding:26px;"><div style="font-size:34px;margin-bottom:10px;">⏳</div><div style="font-size:15px;font-weight:800;margin-bottom:6px;">'+(EN?'Thanks — waiting for confirmation':'Díky — čeká na potvrzení')+'</div><div style="font-size:13px;color:var(--mid);line-height:1.5;">'+(EN?'The organizer confirms the payment and the ticket goes to your e-mail.':'Pořadatel platbu potvrdí a lístek ti přijde na e-mail.')+'</div><button id="evPubX3" style="margin-top:16px;padding:10px 18px;border:1px solid var(--border);background:var(--surf);border-radius:10px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button></div>';
     ov.querySelector('#evPubX3').onclick=function(){ ov.remove(); _evBootRelease(); try{ window.history.replaceState({}, '', location.pathname); }catch(e){} };
   };
@@ -22830,7 +22883,9 @@ async function loadAccounting(){
   const _tsf=$('acTypeSel'); if(_tsf) _tsf.onchange=function(){ _acType=_tsf.value; loadAccounting(); };
 }
 function _acDisclaimer(){ const en=LANG==='en'; return `<div style="background:#FFF8E6;border:1px solid #F0DFA8;border-radius:12px;padding:13px 14px;margin-top:16px;font-size:12px;line-height:1.6;color:#7A5B00;">`+(en?`\uD83D\uDCC5 <b>Generate next month's export at the start of the following month</b>, so it contains everything (incl. late refunds).<br><br>\u2696\uFE0F These figures combine Stripe data with the cash/QR payments you confirmed, <b>and we take no responsibility for their accuracy</b> and recommend handing them to your accountant <b>together with your Stripe statement for the month (1:1)</b>. Figures are records, not tax advice; VAT/tax with your accountant.`:`\uD83D\uDCC5 <b>Výpis za daný měsíc generuj až na začátku dalšího měsíce</b>, ať obsahuje všechno (vč. pozdních refundů).<br><br>\u2696\uFE0F Data kombinují Stripe s vámi potvrzenými hotovostními/QR platbami, <b>za jejich správnost neneseme odpovědnost</b> a doporučujeme předat účetní <b>spolu s výpisem ze Stripe za daný měsíc (1:1)</b>. Jde o podklady, ne daňové poradenství; DPH/daně řeš s účetní.`)+`</div>`; }
-function _acExportCsv(rows, cur, mLbl){ const num=v=>_czMoney(v); const esc=v=>{ const x=String(v==null?'':v); return /["\n;]/.test(x)?('"'+x.replace(/"/g,'""')+'"'):x; }; const pmL=function(m){return ({stripe:'Stripe',cash:'Hotovost',qr:'QR',pis:'Platba z banky'})[m]||'Stripe';}; const csL=function(r){ if(r.payment_method!=='cash'&&r.payment_method!=='qr') return 'auto (Stripe)'; return ({pending:'k uhrade 6.',collected:'uhrazeno',failed:'selhalo'})[r.commission_status]||'k uhrade 6.'; }; const acqL=function(r){ const a=r.acq_source||'direct'; return a==='mtl_discovery' ? 'MTL objeveni' : (a==='referral' ? 'Doporuceni' : 'Vlastni'); };
+function _acExportCsv(rows, cur, mLbl){ const num=v=>_czMoney(v); const esc=v=>{ const x=String(v==null?'':v); return /["\n;]/.test(x)?('"'+x.replace(/"/g,'""')+'"'):x; }; const pmL=function(m){return ({stripe:'Stripe',cash:'Hotovost',qr:'QR',pis:'Platba z banky'})[m]||'Stripe';}; // PIS je bankovní kolej stejně jako QR a hotovost -- provizi si MTL strhává z karty, ne z platby.
+  // Dřív spadl do větve 'auto (Stripe)', takže doklad tvrdil, že se strhla automaticky, a to je lež.
+  const csL=function(r){ if(r.payment_method==='stripe') return 'auto (Stripe)'; return ({pending:'k uhrade 6.',collected:'uhrazeno',failed:'selhalo'})[r.commission_status]||'k uhrade 6.'; }; const acqL=function(r){ const a=r.acq_source||'direct'; return a==='mtl_discovery' ? 'MTL objeveni' : (a==='referral' ? 'Doporuceni' : 'Vlastni'); };
   const _sp=function(r){
     const am=parseInt(r.acq_months,10)||0, gross=Number(r._eG)||0, fee=Number(r._eM)||0;
     if(!am || r.base_rate==null) return { am:'', ar:'', aa:'', br:'', ba:'' };
