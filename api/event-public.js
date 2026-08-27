@@ -119,6 +119,20 @@ export default async function handler(req, res) {
     // Stejne poradi pouziva unified-doklad-cron pri vystavovani dokladu.
     const providerName = legalName || gymName;
 
+    // Testovaci PIS rezim pro verejnou stranku. ZAMERNE SAMOSTATNY DOTAZ: sloupec pis_test nemusi
+    // v databazi byt (pis-test.sql se pousti zvlast), a kdyby byl v hlavnim selectu, PostgREST by
+    // odmitl CELY dotaz a verejna stranka by umrela. Takhle to jen tise vrati false.
+    let pisTest = false;
+    try {
+      if (hostKind === 'coach' && hostId) {
+        const r = await sbGet(`profiles?id=eq.${encodeURIComponent(hostId)}&select=pis_test`);
+        pisTest = !!(r && r[0] && r[0].pis_test);
+      } else if (ev.gym_id) {
+        const r = await sbGet(`gyms?id=eq.${encodeURIComponent(ev.gym_id)}&select=pis_test`);
+        pisTest = !!(r && r[0] && r[0].pis_test);
+      }
+    } catch (e) { pisTest = false; }
+
     // Places taken. Counting ROWS is correct here and not an oversight: one row is one seat, which
     // is what lets every ticket carry its own QR and its own check-in. Reserved-but-unpaid counts,
     // because it is a live 30 minute hold; release-cron frees it if the payment never lands.
@@ -145,6 +159,7 @@ export default async function handler(req, res) {
         // host_* is the generic form; gym_name stays so nothing already reading it breaks.
         host: { kind: hostKind, id: hostId, name: gymName, legal_name: providerName },
         stripe_account: stripeAccount,
+        pis_test: pisTest,
         payment_mode: payee.payment_mode, receiver_id_type: payee.receiver_id_type,
         receiver_id_value: payee.receiver_id_value, receiver_name: payee.receiver_name,
       },
