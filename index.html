@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SSA brings the cart into the app and gives an accountless buyer somewhere to land. The in-app variant picker chose one tier and bought one seat; it is now the same cart as the public page, every variant with its own counter from zero, running total, and the whole thing capped by remaining capacity. A single-variant event goes through it too, otherwise there is no way to buy two. The clickwrap shows the order back rather than asking for a quantity again. Variant names are whatever the organiser typed -- they are read off the tier and stored per row. And after paying, someone without an account used to be dropped on the sign-in screen: they had paid, received nothing, and were being asked to register. Both rails now show a thank-you with what was bought and where the tickets are going; pis-return carries the ticket id back so that page has something to read. -->
+<!-- MTL build: SSC bounds the wait on /api/my-transactions to six seconds. The call had no timeout, so a stalled serverless function meant the browser decided when to give up -- around a minute -- and only then did the fallback run, which reads the transactions directly and is quick. That is why the earnings overview sat on Nacitam with a perfectly healthy database. This does not explain WHY the endpoint stalls; it removes the consequence, so a slow endpoint costs six seconds instead of sixty. The cause still needs the Network tab: if my-transactions shows a long time there, that is the thing to fix. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -8626,7 +8626,7 @@ function openTierPick(ev, tiers){
         <button type="button" class="tpM" data-i="${i}" style="width:32px;height:32px;border:1px solid var(--border);background:#fff;border-radius:8px;font-size:18px;font-weight:800;cursor:pointer;line-height:1;">−</button>
         <b class="tpN" data-i="${i}" style="font-size:16px;min-width:20px;text-align:center;">0</b>
         <button type="button" class="tpP" data-i="${i}" style="width:32px;height:32px;border:1px solid var(--border);background:#fff;border-radius:8px;font-size:18px;font-weight:800;cursor:pointer;line-height:1;">+</button>
-      </span></div>`).join('');
+      </span></div>${t.participant?`<div style="font-size:11px;color:var(--light);margin:-4px 0 8px 2px;">${EN?'Active participation — one per person':'Aktivní účast — jeden na osobu'}</div>`:''}`).join('');
   ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px;padding:20px;">
     <div style="font-size:17px;font-weight:800;margin-bottom:12px;">${EN?'Tickets':'Lístky'}</div>${rows}
     <div id="tpTotal" style="font-size:14px;font-weight:800;text-align:right;margin:6px 0 12px;"></div>
@@ -8641,12 +8641,15 @@ function openTierPick(ev, tiers){
     let sum=0; cart.forEach((q,i)=>sum+=q*(Number(tiers[i].price)||0));
     ov.querySelectorAll('.tpN').forEach(el=>el.textContent=cart[+el.dataset.i]);
     ov.querySelectorAll('.tpM').forEach(b=>b.style.opacity=(cart[+b.dataset.i]<=0)?'.35':'1');
-    ov.querySelectorAll('.tpP').forEach(b=>b.style.opacity=(tot()>=maxTot)?'.35':'1');
+    ov.querySelectorAll('.tpP').forEach(b=>{ const i=+b.dataset.i; const lim=tiers[i].participant?1:maxTot;
+      b.style.opacity=(tot()>=maxTot || cart[i]>=lim)?'.35':'1'; });
     const te=ov.querySelector('#tpTotal'); if(te) te.textContent=tot()?((EN?'Total: ':'Celkem: ')+fmtPrice(sum,cur)+' '+sym+'  ·  '+tot()+'\u00d7'):'';
     const go=ov.querySelector('#tpGo'); if(go){ go.disabled=!tot(); go.style.opacity=tot()?'1':'.45'; }
   };
   ov.querySelectorAll('.tpM').forEach(b=>b.onclick=()=>{ const i=+b.dataset.i; if(cart[i]>0){ cart[i]--; paint(); } });
-  ov.querySelectorAll('.tpP').forEach(b=>b.onclick=()=>{ const i=+b.dataset.i; if(tot()<maxTot){ cart[i]++; paint(); } });
+  ov.querySelectorAll('.tpP').forEach(b=>b.onclick=()=>{ const i=+b.dataset.i;
+    const lim=tiers[i].participant?1:maxTot;   // účastnická varianta: strop 1
+    if(tot()<maxTot && cart[i]<lim){ cart[i]++; paint(); } });
   paint();
   ov.querySelector('#tpGo').onclick=()=>{
     const picked=cart.map((q,i)=>({ t:tiers[i], q })).filter(x=>x.q>0);
@@ -9022,6 +9025,10 @@ async function openEventSignup(eventId){
       +'<b class="evQtyN" data-i="'+i+'" style="font-size:16px;min-width:20px;text-align:center;">0</b>'
       +'<button type="button" class="evQtyP" data-i="'+i+'" style="width:32px;height:32px;border:1px solid var(--border);background:var(--bg);border-radius:8px;font-size:18px;font-weight:800;cursor:pointer;line-height:1;">+</button>'
       +'</span></div>';
+    // Varianta s aktivní účastí je na JEDNU osobu. Koupit pět míst na semináři pod jedním jménem
+    // nedává smysl -- pořadatel by měl v seznamu pětkrát toho samého člověka a u nezletilých
+    // by nebylo ke komu přiřadit souhlas zástupce. Divácký lístek se kupuje po kolika chce.
+    if(t.participant) h+='<div style="font-size:11px;color:var(--light);margin:-4px 0 8px 2px;">'+(EN?'Active participation — one per person':'Aktivní účast — jeden na osobu')+'</div>';
   });
 
   const _inp='width:100%;padding:11px;border:1px solid var(--border);border-radius:10px;font-size:14px;font-family:\'DM Sans\';background:var(--surf);margin-bottom:9px;';
@@ -9050,14 +9057,18 @@ async function openEventSignup(eventId){
     window._evPubCart.forEach(function(q,i){ tot+=q; sum+=q*(Number(tiers[i]&&tiers[i].price)||0); });
     ov.querySelectorAll('.evQtyN').forEach(function(el){ el.textContent=window._evPubCart[+el.dataset.i]||0; });
     ov.querySelectorAll('.evQtyM').forEach(function(b){ b.style.opacity=(window._evPubCart[+b.dataset.i]<=0)?'.35':'1'; });
-    ov.querySelectorAll('.evQtyP').forEach(function(b){ b.style.opacity=(tot>=_maxTot)?'.35':'1'; });
+    ov.querySelectorAll('.evQtyP').forEach(function(b){ var i=+b.dataset.i;
+      var _lim=(tiers[i]&&tiers[i].participant)?1:_maxTot;
+      b.style.opacity=(tot>=_maxTot || window._evPubCart[i]>=_lim)?'.35':'1'; });
     var te=ov.querySelector('#evPubTotal');
     if(te) te.textContent = tot ? ((EN?'Total: ':'Celkem: ')+sum+' '+sym+'  ·  '+tot+'\u00d7') : '';
     var go=ov.querySelector('#evPubGo');
     if(go){ go.disabled=!tot; go.style.opacity=tot?'1':'.45'; }
   };
   ov.querySelectorAll('.evQtyM').forEach(function(b){ b.onclick=function(){ var i=+b.dataset.i; if(window._evPubCart[i]>0){ window._evPubCart[i]--; _paintQ(); } }; });
-  ov.querySelectorAll('.evQtyP').forEach(function(b){ b.onclick=function(){ var i=+b.dataset.i; if(_cartTot()<_maxTot){ window._evPubCart[i]++; _paintQ(); } }; });
+  ov.querySelectorAll('.evQtyP').forEach(function(b){ b.onclick=function(){ var i=+b.dataset.i;
+    var _lim=(tiers[i]&&tiers[i].participant)?1:_maxTot;   // účastnická varianta: strop 1
+    if(_cartTot()<_maxTot && window._evPubCart[i]<_lim){ window._evPubCart[i]++; _paintQ(); } }; });
   _paintQ();
   ov.querySelector('#evPubGo').onclick=function(){ _evPubBuy(d, tiers, ov); };
 }
@@ -29225,11 +29236,19 @@ async function _fetchMyTx(force){
   if(window._myTxCache && !force && (Date.now()-(window._myTxCacheAt||0))<60000) return window._myTxCache;
   let coachTx=[], gymTx=[], ok=false;
   try{
-    const _tok = await _freshTok();
-    const r = await fetch('/api/my-transactions', { headers:{'x-access-token':_tok} });
-    const j = await r.json().catch(()=>({}));
-    if(j && j.ok){ coachTx=(j.coachTx)||[]; gymTx=(j.gymTx)||[]; ok=true; }
-  }catch(e){ console.log('[MTL myTx] endpoint failed', e&&e.message); }
+    // ČASOVÝ LIMIT. Bez něj se čekalo, až to vzdá prohlížeč -- u zatuhlé serverless funkce klidně
+    // minutu, a teprve pak doběhla záloha. Přehled výdělků tak visel na "Načítám..." při plně
+    // funkční databázi. Záloha čte transakce napřímo a je rychlá, takže není proč na endpoint
+    // čekat déle než pár vteřin. Neřeší to PŘÍČINU pomalosti endpointu, jen její dopad.
+    const _ctl=(typeof AbortController!=='undefined')?new AbortController():null;
+    const _to=setTimeout(function(){ try{ _ctl&&_ctl.abort(); }catch(e){} }, 6000);
+    try{
+      const _tok = await _freshTok();
+      const r = await fetch('/api/my-transactions', { headers:{'x-access-token':_tok}, signal:_ctl?_ctl.signal:undefined });
+      const j = await r.json().catch(()=>({}));
+      if(j && j.ok){ coachTx=(j.coachTx)||[]; gymTx=(j.gymTx)||[]; ok=true; }
+    } finally { clearTimeout(_to); }
+  }catch(e){ console.log('[MTL myTx] endpoint failed/timeout', e&&e.message); }
   if(!ok){
     // FALLBACK (works while RLS is not yet enabled): read transactions directly so the coach + klub-owner
     // HERO net never goes blank just because the /api/my-transactions endpoint is down or returns 401.
