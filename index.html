@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SSD makes the earnings load measure itself instead of asking for a console. Each step is timed separately -- refreshing the token, the endpoint call, and the fallback -- and when the total passes a second the founder sees a line at the top of the overview saying which one it was. Nothing shows on a normal load, and nobody but the founder ever sees it. The point is that the next time this is slow the number names the culprit, rather than the guessing it cost last time: a large token figure means the session refresh is hanging, a large endpoint figure with a six-second ceiling means the serverless function is stalling and the timeout caught it, and a large fallback figure would mean the direct read is the slow part, which would be a different problem entirely. -->
+<!-- MTL build: SSE makes the earnings overview open immediately instead of costing a round trip every time. Three things: the transactions are fetched in the background about a second after sign-in, so the endpoint call happens while the person is looking at the deck rather than at Nacitam; the cache lives five minutes instead of one, because transactions do not change by the second and a one-minute window meant nearly every open paid full price again; and when numbers are already in memory the panel renders from them at once and refreshes behind. Instrumentation from SSD stays, so if the slow case returns the line still names which step it was -- the one measurement taken showed a healthy 200 in about a second, which points at a cold serverless start rather than a bad query, and none of this depends on that being right. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -27666,6 +27666,14 @@ function enterApp(){
   // so the flags were fetched for practically nobody and nothing was ever hidden.
   try{ _loadFeatureFlags(); }catch(e){}
   try{ _loadPisTestIds(); }catch(e){}
+  // Předehřát transakce hned po startu. Ta vteřina na endpointu se odehraje, zatímco se člověk
+  // dívá na deck -- ne až když otevře Přehled výdělků a kouká na "Načítám...". Jen pro toho,
+  // kdo nějaké výdělky vůbec má; student by tím zbytečně budil serverless funkci.
+  try{
+    if(currentUser && (currentUser.coach_status==='approved' || currentUser.stripe_account || currentUser.gym_payout_account)){
+      setTimeout(function(){ try{ _fetchMyTx(); }catch(e){} }, 1200);
+    }
+  }catch(e){}
   try{ _flushOwnOrigins().then(function(){ return _loadMemberOrigin(); }); }catch(e){}
   try{ renderAcctStateBar(); }catch(e){}
   try{ _loadMyClubs(); }catch(e){}
@@ -29233,7 +29241,9 @@ function _netSym(c){ return _curSym(c); }
 function _netFmt(v,c){ const _d=2; try{ return (Number(v)||0).toLocaleString(LANG==='en'?'en-US':'cs-CZ',{minimumFractionDigits:_d,maximumFractionDigits:_d})+' '+_netSym(c); }catch(e){ return ((Number(v)||0).toFixed(_d))+' '+_netSym(c); } }
 function _curMonthKey(){ return new Date().toISOString().slice(0,7); }
 async function _fetchMyTx(force){
-  if(window._myTxCache && !force && (Date.now()-(window._myTxCacheAt||0))<60000) return window._myTxCache;
+  // 5 minut místo 1. Transakce se nemění po vteřinách a přehled se otevírá opakovaně -- minutová
+  // platnost znamenala, že skoro každé otevření platilo plnou cenu dotazu znovu.
+  if(window._myTxCache && !force && (Date.now()-(window._myTxCacheAt||0))<300000) return window._myTxCache;
   let coachTx=[], gymTx=[], ok=false;
   try{
     // ČASOVÝ LIMIT. Bez něj se čekalo, až to vzdá prohlížeč -- u zatuhlé serverless funkce klidně
@@ -29278,7 +29288,7 @@ async function _fetchMyTx(force){
   return window._myTxCache;
 }
 async function loadMyNet(force){
-  if(window._myNetCache && !force && (Date.now()-(window._myNetCacheAt||0))<60000) return window._myNetCache;
+  if(window._myNetCache && !force && (Date.now()-(window._myNetCacheAt||0))<300000) return window._myNetCache;
   const me=currentUser;
   const empty={coachTx:[],gymTx:[],hasCoach:false,hasGym:false,cur:'CZK',sameAcct:false};
   if(!me) return empty;
@@ -29363,8 +29373,12 @@ async function openFullDash(){
   openSheet('shMoneyDash');
   const body=$('moneyDashBody'); if(!body) return;
   const EN=LANG==='en';
-  body.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;">'+L('Načítám...')+'</p>';
-  const n=await loadMyNet();
+  // Když už čísla jednou byla, ukaž je HNED a obnov je na pozadí. Prázdné "Načítám..." nad daty,
+  // která ležela v paměti, je zbytečné čekání -- a je to ta jediná část, kterou člověk vidí.
+  const _cached=(window._myNetCache && (Date.now()-(window._myNetCacheAt||0))<600000) ? window._myNetCache : null;
+  if(!_cached) body.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;">'+L('Načítám...')+'</p>';
+  const n=_cached || await loadMyNet();
+  if(_cached){ setTimeout(function(){ try{ loadMyNet(true).then(function(){ if(document.getElementById('moneyDashBody')) openFullDash(); }); }catch(e){} }, 50); }
   const cur=n.cur, fmt=v=>_netFmt(v,cur);
   const both=n.hasCoach&&n.hasGym;
   const yNow=new Date().getFullYear();
