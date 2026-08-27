@@ -282,7 +282,11 @@ async function eventCheckout(req, res) {
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
   if (!(await _assertAcctReady(gymAccount, res))) return;
   const P = parseInt(amount, 10);
-  const Q = Math.max(1, parseInt(qty, 10) || 1);
+  // POZOR: `amount` je u akce VŽDY celková částka objednávky, ne cena za kus -- klient sčítá košík
+  // sám, protože v jedné objednávce můžou být různé varianty za různé ceny, a jedno `qty` by to
+  // nepopsalo. Q proto musí zůstat 1; kdyby sem někdo qty začal posílat, Stripe by tu částku
+  // vynásobil podruhé a člověk by zaplatil dvakrát.
+  const Q = 1;
   const cur = String(currency).toLowerCase();
   const MK = 1.00;
   // Rate: client _ladderRate (EP 0.5% / FP / ladder), server resolve as backstop. No partner override.
