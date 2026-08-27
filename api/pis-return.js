@@ -152,14 +152,30 @@ export default async function handler(req, res){
           if(tbl==='cohort_members'){ try{ const _exC=await sb.from('cohort_payments').select('id').eq('cohort_member_id',rec.id).eq('kind','deposit').limit(1); if(!(_exC.data&&_exC.data.length)){ const _prevC=Number(rec.paid_amount||0); await sb.from('cohort_members').update({ paid_amount: Math.round((_prevC+Number(_cohDep||0))*100)/100, months_paid:1 }).eq('id',rec.id); await sb.from('cohort_payments').insert({ cohort_member_id:rec.id, cohort_id:rec.cohort_id||null, kind:'deposit', amount:Number(_cohDep||0), currency:_cohCur||'CZK', mtl_fee: Math.round(Number(_cohDep||0)*0.03*100)/100, payment_method:'pis', status:'paid' }); } }catch(e){} }
           if(tbl==='bookings' && rec.slot_id){ try{ await sb.from('slots').update({ booked:true }).eq('id',rec.slot_id); }catch(e){} }
           try{ const _buyerId=(tbl==='event_tickets')?rec.buyer_id:rec.student_id;
-            const _cur=(rec.currency||'CZK'); const _amt=(rec.amount!=null)?(rec.amount+' '+_cur):'';
+            const _cur=(rec.currency||'CZK'); let _amt=(rec.amount!=null)?(rec.amount+' '+_cur):'';
+            // U objednávky s víc lístky je rec.amount cena JEDNOHO. Hlásit 400 Kč u pěti kusů za
+            // dva tisíce vede pořadatele k tomu, že si špatně spočítá tržbu -- sečteme celou
+            // objednávku a přidáme počet i varianty.
+            let _oQty=0, _oTiers='';
+            if(tbl==='event_tickets' && rec.order_id){
+              try{
+                const _sib=await sb.from('event_tickets').select('amount,tier_name').eq('order_id',rec.order_id);
+                const _rows=(_sib&&_sib.data)||[];
+                if(_rows.length){
+                  _oQty=_rows.length;
+                  _amt=_rows.reduce(function(a,r){ return a+(Number(r.amount)||0); },0)+' '+_cur;
+                  const _cnt={}; _rows.forEach(function(r){ const k=r.tier_name||''; if(k) _cnt[k]=(_cnt[k]||0)+1; });
+                  _oTiers=Object.keys(_cnt).map(function(k){ return _cnt[k]>1?(k+' \u00d7'+_cnt[k]):k; }).join(', ');
+                }
+              }catch(e){}
+            }
             const _dte=(rec.class_date||rec.training_date)||''; const _tme=(rec.class_time||rec.training_time)||'';
             let _gname=''; try{ const _gid=rec.gym_id||_cohGym||_evG||null; if(_gid){ const _gn=await sb.from('gyms').select('name').eq('id',_gid).maybeSingle(); _gname=(_gn.data&&_gn.data.name)||''; } }catch(e){}
             // auto:true => the bank confirmed it (PIS), not the club. The client renderer builds the visible text from these fields.
             let nd;
             if(tbl==='gym_memberships'){ nd={ kind:'payment_confirmed', auto:true, goto:'memberships', gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.plan_name||'') }; }
             else if(tbl==='bookings'){ nd={ kind:'payment_confirmed', auto:true, goto:'bookings', amount:_amt, date:_dte, time:_tme, coach:(rec.coach_name||'') }; }
-            else if(tbl==='event_tickets'){ nd={ kind:'payment_confirmed', auto:true, goto:'tickets', event_id:rec.event_id, gym_name:_gname, amount:_amt }; }
+            else if(tbl==='event_tickets'){ nd={ kind:'payment_confirmed', auto:true, goto:'tickets', event_id:rec.event_id, gym_name:_gname, amount:_amt, qty:(_oQty||1), tiers:_oTiers }; }
             else if(tbl==='merch_orders'){ nd={ kind:'payment_confirmed', auto:true, goto:'merch', merch_id:rec.merch_id, gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.item_name||'') }; }
             else if(tbl==='cohort_members'){ nd={ kind:'payment_confirmed', auto:true, goto:'courses', cohort_id:rec.cohort_id, member_id:rec.id, gym_name:_gname, amount:_amt }; }
             else { nd={ kind:'payment_confirmed', auto:true, goto:'dropin', gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.class_name||''), date:_dte, time:_tme, class_name:rec.class_name }; }
@@ -167,7 +183,10 @@ export default async function handler(req, res){
             await sb.from('notifications').insert({ user_id:_buyerId, type:'booking', read:false, message:_msg, data:JSON.stringify(nd) }); }catch(e){}
           await pisSideEffects(rec, tbl);
         }
-        return res.redirect(302, APP_URL+'/?pis=ok');
+        // Číslo lístku s sebou: bez něj by děkovací stránka nevěděla, co kupujícímu ukázat,
+        // a nepřihlášený člověk by po zaplacení skončil na přihlašovací obrazovce.
+        return res.redirect(302, APP_URL+'/?pis=ok'
+          + ((tbl==='event_tickets' && rec && rec.id) ? ('&tk='+encodeURIComponent(rec.id)) : ''));
       }
     }
     return res.redirect(302, APP_URL+'/?pis=pending&'+_dbg);
