@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SRR routes every link that leaves the app through one canonical origin. The app also answers on dashboard.martialtraininglab.com, and links built from location.origin baked that host in -- the event ticket link among them -- so an organiser working on the dashboard copied and posted an internal address. It resolves, which is why nobody noticed, but sending customers to a dashboard host is wrong and that host may not always exist. Six other links had app.martialtraininglab.com typed in by hand and twelve more carried their own replace of dashboard with app, which worked but meant the rule lived in twenty places. All of them now call _appOrigin, which rewrites any non-app martialtraininglab.com host and leaves localhost and preview deploys on their own origin so they stay testable. Auth redirects keep location.origin on purpose: those come back to the tab the person is already in, and forcing them to app would throw someone signing in on the dashboard out of it. -->
+<!-- MTL build: SRS stops a payment return being recorded as the source, and shows the organiser how many tickets are gone. Coming back from Stripe the referrer is Stripe or the infrastructure under it, which surfaces as an amazonaws execute-api host; attribution captured that on the return page and overwrote the real source moments before the purchase row was written, so every paid ticket looked like it arrived from the payment gateway. Capture now bails out entirely when a return parameter is present, and separately ignores Stripe, AWS, Cloudfront, the PIS providers and the Czech bank domains, so a bank redirect cannot claim the sale either. Capacity gains a live count beside it -- sold, remaining, or SOLD OUT -- visible only to the organiser and fetched after render, because a bare capacity number does not answer the only question they have about it. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -8524,7 +8524,7 @@ async function openEventView(ev){
     <div style="padding:16px 20px;">
       <div style="font-weight:800;font-size:20px;margin-bottom:8px;">${escapeHtml(ev.title||'')}</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">${discRow}</div>
-      <div style="font-size:14px;color:var(--dark);line-height:1.7;margin-bottom:10px;">📅 ${dt}${endt}<br>📍 ${escapeHtml(loc||'')}${ev.address?`<br>🗺️ ${escapeHtml(ev.address)}`:''}${ev.capacity?`<br>👥 ${LANG==='en'?'Capacity':'Kapacita'}: ${ev.capacity}`:''}</div>
+      <div style="font-size:14px;color:var(--dark);line-height:1.7;margin-bottom:10px;">📅 ${dt}${endt}<br>📍 ${escapeHtml(loc||'')}${ev.address?`<br>🗺️ ${escapeHtml(ev.address)}`:''}${ev.capacity?`<br>👥 ${LANG==='en'?'Capacity':'Kapacita'}: ${ev.capacity}<span id="evCapLive"></span>`:''}</div>
       <div style="margin-bottom:14px;">${tiersHtml}</div>
       ${ev.description?`<p style="font-size:14px;line-height:1.6;color:var(--mid);white-space:pre-wrap;margin-bottom:16px;">${escapeHtml(ev.description)}</p>`:''}
       ${ myTk ? `<div style="background:#F0FBF0;border:1px solid #A8E6C0;border-radius:12px;padding:14px;text-align:center;margin-bottom:10px;"><div style="font-weight:800;color:${_tkPaidN?'#006040':'#9a5a00'};font-size:15px;">${myTk.amount>0?((_tkPaidN?('✅ '+_tkPaidN+' '+(LANG==='en'?(_tkPaidN===1?'ticket':'tickets'):czPlural(_tkPaidN,'lístek','lístky','lístků'))):'')+(_tkPaidN&&_tkWaitN?' · ':'')+(_tkWaitN?('⏳ '+_tkWaitN+' '+(LANG==='en'?'not paid yet':'zatím nezaplaceno')):'')):('✅ '+(LANG==='en'?'You are on the list':'Jsi na seznamu'))}</div>${myTk.amount>0?`<div style="font-size:12px;color:var(--mid);margin-top:3px;">${myTks.reduce((a,t)=>a+(Number(t.amount)||0),0)} ${sym}${myTks.length>1?` · ${myTks.length}×`:''}</div>`:''}</div>` : ''}
@@ -8534,6 +8534,20 @@ async function openEventView(ev){
       ${(ev.seeking_fighters && window._canReqF)?`<button id="evFighterBtn" style="width:100%;padding:13px;background:var(--surf);border:1.5px solid var(--red);color:var(--red);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">🥊 ${LANG==='en'?'Suggest a fighter':'Navrhnout fightera'}</button>${ev.fighter_info?`<p style="font-size:12px;color:var(--mid);line-height:1.5;margin-top:8px;">${escapeHtml(ev.fighter_info)}</p>`:''}`:''}
     </div>`;
   if($('evBuyBtn')) $('evBuyBtn').onclick=()=>buyEventTicket(ev);
+  // Kolik lístků je pryč. Vidí to jen pořadatel a dotahuje se až po vykreslení -- kapacita bez
+  // prodaných kusů je číslo, které pořadateli neřekne, jestli má vyprodáno.
+  (async function(){
+    if(!ev.capacity) return;
+    if(!(currentUser && (ev.created_by===currentUser.id || (_myGymData && _myGymData.id===ev.gym_id && _myGymData.owner_id===currentUser.id)))) return;
+    try{
+      const { data } = await supaClient.from('event_tickets').select('qty,status').eq('event_id', ev.id).in('status',['reserved','paid_claimed','paid','active']);
+      const sold=(data||[]).reduce((a,r)=>a+(parseInt(r.qty,10)||1),0);
+      const left=Math.max(0, Number(ev.capacity)-sold);
+      const el=$('evCapLive'); if(!el) return;
+      el.innerHTML=' · <b>'+(LANG==='en'?(sold+' sold'):(sold+' prodáno'))+'</b> · '
+        +(left>0?(LANG==='en'?(left+' left'):(left+' zbývá')):'<span style="color:var(--red);font-weight:800;">'+(LANG==='en'?'SOLD OUT':'VYPRODÁNO')+'</span>');
+    }catch(e){}
+  })();
   if($('evShareBtn')){
     $('evShareBtn').onclick=function(){ _evShareSheet(ev); };
     // Dotahne se az po vykresleni, aby otevreni akce necekalo na dalsi dotaz do databaze.
@@ -8696,9 +8710,20 @@ function _attrFrom(){
     if(u.indexOf('google')>=0||u.indexOf('seznam')>=0||u==='bing') return 'google';
     return 'other';
   }
+  // Návrat z platby NENÍ zdroj. Po zaplacení se člověk vrací ze Stripe (nebo z infrastruktury pod
+  // ním, což bývá amazonaws execute-api), a kdyby se to bralo jako odkazující stránku, přepsalo by
+  // to skutečný zdroj těsně před zápisem nákupu -- takže by KAŽDÝ zaplacený lístek vypadal, že
+  // přišel z platební brány. Přesně to se dělo.
+  var q2=null; try{ q2=new URLSearchParams(location.search); }catch(e){}
+  if(q2 && (q2.get('event_pay')||q2.get('session')||q2.get('pay')||q2.get('cohortpay')||q2.get('merchid')||q2.get('paid'))) return null;
   var r=''; try{ r=document.referrer||''; }catch(e){}
   var h=''; if(r){ try{ h=new URL(r).hostname.toLowerCase(); }catch(e){} }
   try{ if(h && h===location.hostname) h=''; }catch(e){}
+  // Platební a infrastrukturní domény zahodit i tehdy, když návratový parametr chybí.
+  if(/(^|\.)stripe\.com$/.test(h)||/(^|\.)stripe\.network$/.test(h)) return null;
+  if(/amazonaws\.com$/.test(h)||/execute-api\./.test(h)||/(^|\.)cloudfront\.net$/.test(h)) return null;
+  if(/(^|\.)(znpay\.tech|mo\.one|neonomics\.io|finbricks\.com)$/.test(h)) return null;
+  if(/(^|\.)(dnb\.no|csob\.cz|kb\.cz|csas\.cz|fio\.cz|airbank\.cz|moneta\.cz|rb\.cz|mbank\.cz|unicreditbank\.cz)$/.test(h)) return null;
   if(/(^|\.)instagram\.com$/.test(h)||/^l\.instagram/.test(h)) return 'instagram';
   if(/(^|\.)facebook\.com$/.test(h)||/^(l|lm|m)\.facebook/.test(h)||/(^|\.)fb\.(me|com)$/.test(h)) return 'facebook';
   if(/(^|\.)youtube\.com$/.test(h)||/(^|\.)youtu\.be$/.test(h)) return 'youtube';
