@@ -1,3 +1,5 @@
+import PDFDocument from 'pdfkit';
+import { DEJAVU_CZ } from './_dejavu-cz.js';
 // MTL — /api/ticket-email  (ESM, same style as pay.js / profile-badges.js)
 // Sends the buyer their event ticket as an email with a scannable QR (encodes /?etk=<ticketId>).
 // Called fire-and-forget from the app right after a ticket becomes paid (free RSVP or card).
@@ -14,6 +16,45 @@ async function _rlAllow(endpoint, ip, limit, banMult) {
     else if (_j && typeof _j === 'object') _j = Object.values(_j)[0];
     return _j !== false && _j !== 'false';
   } catch (e) { return true; }
+}
+
+// PDF lístek. QR se do něj ZAPEČE jako obrázek: v e-mailu je to <img> z cizí služby, takže se
+// u dveří ve sportovní hale bez signálu nenačte. Tady se stáhne jednou při generování a od té
+// chvíle je lístek soběstačný -- dá se uložit, přeposlat kamarádovi a ukázat offline.
+// Jedno PDF na lístek, ne jedno na objednávku: kdo koupí tři, přepošle dvě dál a nemusí u vchodu
+// stát a scrollovat cizím lidem po displeji.
+async function ticketPdf(t, ev, appUrl, venue, dt) {
+  const url = appUrl + '/?etk=' + encodeURIComponent(t.id);
+  let qrBuf = null;
+  try {
+    const r = await fetch('https://api.qrserver.com/v1/create-qr-code/?size=600x600&margin=2&data=' + encodeURIComponent(url));
+    if (r.ok) qrBuf = Buffer.from(await r.arrayBuffer());
+  } catch (e) {}
+  return await new Promise(function (resolve) {
+    try {
+      const doc = new PDFDocument({ size: 'A4', margin: 50 });
+      const chunks = []; doc.on('data', d => chunks.push(d)); doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', () => resolve(null));
+      try { doc.registerFont('cz', DEJAVU_CZ); doc.font('cz'); } catch (e) {}
+
+      doc.fontSize(22).fillColor('#E11111').text('MTL');
+      doc.moveDown(0.1).fontSize(9).fillColor('#888888').text('MARTIAL TRAINING LAB');
+      doc.moveDown(1.2).fontSize(20).fillColor('#111111').text(String(ev.title || 'Event'));
+      if (dt) doc.moveDown(0.3).fontSize(11).fillColor('#555555').text(dt);
+      if (venue) doc.moveDown(0.15).fontSize(11).fillColor('#555555').text(venue);
+
+      doc.moveDown(1.4);
+      if (qrBuf) { try { doc.image(qrBuf, (doc.page.width - 220) / 2, doc.y, { width: 220 }); doc.y += 232; } catch (e) {} }
+      else { doc.fontSize(10).fillColor('#B00').text('QR se nepodařilo vygenerovat — použij odkaz níže.', { align: 'center' }); doc.moveDown(1); }
+
+      doc.fontSize(13).fillColor('#111111').text(String(t.buyer_name || ''), { align: 'center' });
+      if (t.tier_name) doc.moveDown(0.2).fontSize(10).fillColor('#666666').text(String(t.tier_name), { align: 'center' });
+      doc.moveDown(0.5).fontSize(10).fillColor('#666666').text('Ukaž tento QR kód u vstupu.', { align: 'center' });
+      doc.moveDown(1.2).fontSize(8).fillColor('#999999').text(String(t.id), { align: 'center' });
+      doc.moveDown(0.2).fontSize(8).fillColor('#999999').text(url, { align: 'center' });
+      doc.end();
+    } catch (e) { resolve(null); }
+  });
 }
 
 export default async function handler(req, res) {
@@ -107,14 +148,28 @@ export default async function handler(req, res) {
       'If a QR doesn’t load, open: <a href="' + checkinUrl + '" style="color:#F4D87A;">' + esc(checkinUrl) + '</a>' +
       '</div></div>';
 
+    // Jedno PDF na lístek, pojmenované podle akce a pořadí -- kupující je pozná v příloze bez
+    // otevírání a přepošle jen ten, který má poslat dál.
+    const _slug = String(ev.title || 'MTL').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'MTL';
+    let attachments = [];
+    try {
+      const built = await Promise.all(tickets.map(t => ticketPdf(t, ev, APP_URL, venue, dt)));
+      attachments = built.map((buf, ix) => buf ? ({
+        filename: _slug + (tickets.length > 1 ? ('-' + (ix + 1)) : '') + '.pdf',
+        content: buf.toString('base64')
+      }) : null).filter(Boolean);
+    } catch (e) { attachments = []; }
+
     const rRes = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + RESEND_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         from: MAIL_FROM,
         to: [email],
-        subject: '🎟️ Your ticket — ' + (ev.title || 'MTL Event'),
-        html
+        subject: (tickets.length > 1 ? ('🎟️ Your ' + tickets.length + ' tickets — ') : '🎟️ Your ticket — ') + (ev.title || 'MTL Event'),
+        html,
+        ...(attachments.length ? { attachments } : {})
       })
     });
     const rJson = await rRes.json().catch(() => ({}));
