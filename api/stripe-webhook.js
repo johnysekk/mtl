@@ -737,7 +737,18 @@ export default async function handler(req, res) {
         // Event ticket (direct charge on payee account) — backstop confirm if user closed tab before redirect
         if (m.ticket_id) {
           const pi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id);
-          await sbPatch('event_tickets', `id=eq.${encodeURIComponent(m.ticket_id)}`, { status: 'paid', stripe_ref: pi });
+          // Objednávka může nést víc lístků na jednu platbu. Překlápí se všechny naráz -- kdyby
+          // se potvrdil jen ten, jehož id nese metadata, zbytek by zůstal viset jako rezervace
+          // a release-cron by je za půl hodiny uvolnil, přestože jsou zaplacené.
+          {
+            let _tScope = `id=eq.${encodeURIComponent(m.ticket_id)}`;
+            try {
+              const _t0 = await sbGet(`event_tickets?id=eq.${encodeURIComponent(m.ticket_id)}&select=order_id`);
+              const _oid = _t0 && _t0[0] && _t0[0].order_id;
+              if (_oid) _tScope = `order_id=eq.${encodeURIComponent(_oid)}`;
+            } catch (e) {}
+            await sbPatch('event_tickets', _tScope, { status: 'paid', stripe_ref: pi });
+          }
           await recordTransaction(event.account, pi, { type: 'event_ticket',  member_id: m.student_id || m.buyer_id, gym_id: m.gym_id, coach_id: m.payout_coach_id, plan: m.mtl_event || 'Event', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side' });
           await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id, s.payment_intent);
           try { await sendTicketEmail(s, m); } catch (e) { console.error('ticket email', e.message); }

@@ -195,12 +195,17 @@ export default async function handler(req, res) {
       // Podlaha jen u PIS a jen když se opravdu něco účtuje -- uplatněný kredit zůstává nulový.
       if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, gross));
       const _effRate = _cc ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
+      // Rozklad na akvizici a běžnou sazbu. Bez těchhle dvou sloupců nechá export pro účetní pět
+      // sloupců prázdných (akviz. měsíců/sazba/částka, běžná sazba/částka) -- _sp() se z nich počítá
+      // a bez nich vrací prázdno. Píše se jen tam, kde akvizice opravdu padla.
+      const _acqMonths = (_acq != null && !_cc) ? 1 : null;
+      const _baseRate  = (_acq != null && !_cc) ? rate : null;
       let _gymPayee = gym.stripe_account || null;
       if (coach_id) { try { const _cp = await sb(`profiles?id=eq.${coach_id}&select=gym_payout_account`); const _cpa = _cp && _cp[0] && _cp[0].gym_payout_account; if (_cpa) _gymPayee = _cpa; } catch(e){} }
       row = {
         gym_id, coach_id: coach_id || null, member_id: member_id || null, paid_to: 'gym', payee_account: _gymPayee,
         payee_id: gym.id, payee_kind: 'gym',
-        gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, refund_amount: 0, mtl_fee_refunded: 0,
+        gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, acq_months: _acqMonths, base_rate: _baseRate, refund_amount: 0, mtl_fee_refunded: 0,
         // CHANGED: was 'completed'. The column's own DB default is 'paid' and the Stripe rail writes
         // 'paid', so 'completed' was the odd one out -- and every reader of prior turnover asked for
         // 'completed' only, which is why none of them could see a Stripe transaction. One vocabulary
@@ -226,10 +231,15 @@ export default async function handler(req, res) {
       // Podlaha jen u PIS a jen když se opravdu něco účtuje -- uplatněný kredit zůstává nulový.
       if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, gross));
       const _effRate = _cc ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
+      // Rozklad na akvizici a běžnou sazbu. Bez těchhle dvou sloupců nechá export pro účetní pět
+      // sloupců prázdných (akviz. měsíců/sazba/částka, běžná sazba/částka) -- _sp() se z nich počítá
+      // a bez nich vrací prázdno. Píše se jen tam, kde akvizice opravdu padla.
+      const _acqMonths = (_acq != null && !_cc) ? 1 : null;
+      const _baseRate  = (_acq != null && !_cc) ? rate : null;
       row = {
         gym_id: null, coach_id, member_id: member_id || null, paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null),
         payee_id: coach.id, payee_kind: 'profile',
-        gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, refund_amount: 0, mtl_fee_refunded: 0,
+        gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, acq_months: _acqMonths, base_rate: _baseRate, refund_amount: 0, mtl_fee_refunded: 0,
         currency: cur, type, status: 'paid', payment_method, cohort_id: cohort_id || null, income_class: income_class || null,
         commission_status: _cc ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct', source_booking_id: source_booking_id || null,

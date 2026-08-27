@@ -129,7 +129,7 @@ export default async function handler(req, res){
         let rec=(await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name,class_date,class_time,amount,currency,coach_id,acq_source,student_name,credit_used').eq('pis_payment_id',paymentId).maybeSingle()).data;
         if(!rec){ const m=await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name,amount,currency,coach_id,acq_source,student_name,months').eq('pis_payment_id',paymentId).maybeSingle(); if(m.data){ rec=m.data; tbl='gym_memberships'; } }
         if(!rec){ const c=await sb.from('bookings').select('id,status,student_id,coach_id,amount,currency,coach_name,training_date,training_time,slot_id,acq_source,credit_used').eq('pis_payment_id',paymentId).maybeSingle(); if(c.data){ rec=c.data; tbl='bookings'; } }
-        if(!rec){ const e=await sb.from('event_tickets').select('id,status,buyer_id,event_id,amount,currency,buyer_name').eq('pis_payment_id',paymentId).maybeSingle(); if(e.data){ rec=e.data; tbl='event_tickets'; } }
+        if(!rec){ const e=await sb.from('event_tickets').select('id,status,buyer_id,event_id,amount,currency,buyer_name,order_id').eq('pis_payment_id',paymentId).maybeSingle(); if(e.data){ rec=e.data; tbl='event_tickets'; } }
         if(!rec){ const co=await sb.from('cohort_members').select('id,status,student_id,cohort_id,name,attribution').eq('pis_payment_id',paymentId).maybeSingle(); if(co.data){ rec=co.data; tbl='cohort_members'; } }
         if(!rec){ const mo=await sb.from('merch_orders').select('id,status,student_id,gym_id,coach_id,merch_id,item_name,amount,currency,buyer_name').eq('pis_payment_id',paymentId).maybeSingle(); if(mo.data){ rec=mo.data; tbl='merch_orders'; } }
         const _paidStatus=(tbl==='event_tickets'||tbl==='merch_orders')?'paid':(tbl==='cohort_members')?'deposit_paid':'active';
@@ -144,7 +144,11 @@ export default async function handler(req, res){
             const _pe=new Date(); _pe.setMonth(_pe.getMonth()+_mo);
             _upd.period_end=_pe.toISOString();
           }
-          await sb.from(tbl).update(_upd).eq('id',rec.id);
+          // Objednávka může nést víc lístků na jednu platbu -- překlopit je všechny, jinak by
+          // zbytek zůstal viset jako rezervace a release-cron by je uvolnil, přestože jsou
+          // zaplacené. U ostatních tabulek order_id neexistuje a jede se po id jako dosud.
+          if(tbl==='event_tickets' && rec.order_id){ await sb.from(tbl).update(_upd).eq('order_id',rec.order_id); }
+          else { await sb.from(tbl).update(_upd).eq('id',rec.id); }
           if(tbl==='cohort_members'){ try{ const _exC=await sb.from('cohort_payments').select('id').eq('cohort_member_id',rec.id).eq('kind','deposit').limit(1); if(!(_exC.data&&_exC.data.length)){ const _prevC=Number(rec.paid_amount||0); await sb.from('cohort_members').update({ paid_amount: Math.round((_prevC+Number(_cohDep||0))*100)/100, months_paid:1 }).eq('id',rec.id); await sb.from('cohort_payments').insert({ cohort_member_id:rec.id, cohort_id:rec.cohort_id||null, kind:'deposit', amount:Number(_cohDep||0), currency:_cohCur||'CZK', mtl_fee: Math.round(Number(_cohDep||0)*0.03*100)/100, payment_method:'pis', status:'paid' }); } }catch(e){} }
           if(tbl==='bookings' && rec.slot_id){ try{ await sb.from('slots').update({ booked:true }).eq('id',rec.slot_id); }catch(e){} }
           try{ const _buyerId=(tbl==='event_tickets')?rec.buyer_id:rec.student_id;

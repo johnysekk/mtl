@@ -43,6 +43,16 @@ export default async function handler(req, res) {
     const tk = (tkArr && tkArr[0]) || null;
     if (!tk) { res.status(404).json({ error: 'ticket not found' }); return; }
 
+    // Objednávka může nést víc lístků. Posílá se JEDEN e-mail se všemi -- tři samostatné maily za
+    // jednu platbu vypadají jako chyba a člověk u dveří pak hledá, který z nich patří komu.
+    // Voláno kterýmkoli lístkem z objednávky; sourozence si dohledáme sami.
+    let tickets = [tk];
+    if (tk.order_id) {
+      const sib = await sb('event_tickets?order_id=eq.' + encodeURIComponent(tk.order_id)
+        + '&status=in.(paid,active,paid_claimed)&order=created_at.asc&select=*');
+      if (Array.isArray(sib) && sib.length) tickets = sib;
+    }
+
     // event
     const evArr = await sb('events?id=eq.' + encodeURIComponent(tk.event_id) + '&select=title,starts_at,venue,city,country');
     const ev = (evArr && evArr[0]) || {};
@@ -57,9 +67,12 @@ export default async function handler(req, res) {
     }
     if (!email) { res.status(200).json({ ok: false, reason: 'no email' }); return; }
 
-    // QR (image so it renders in email — encodes the check-in URL)
+    // Jeden QR na lístek. Sdílet jeden kód mezi třemi lidmi nejde -- u dveří se skenuje každý
+    // zvlášť a checked_in_at je na řádku, ne na objednávce.
+    const qrFor = (id) => 'https://api.qrserver.com/v1/create-qr-code/?size=260x260&margin=8&data='
+      + encodeURIComponent(APP_URL + '/?etk=' + encodeURIComponent(id));
     const checkinUrl = APP_URL + '/?etk=' + encodeURIComponent(ticketId);
-    const qrImg = 'https://api.qrserver.com/v1/create-qr-code/?size=260x260&margin=8&data=' + encodeURIComponent(checkinUrl);
+    const qrImg = qrFor(ticketId);
 
     let dt = '';
     try { if (ev.starts_at) dt = new Date(ev.starts_at).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch (e) {}
@@ -75,13 +88,23 @@ export default async function handler(req, res) {
       (dt ? '<div style="font-size:14px;color:#c9c9c9;margin-top:6px;">' + esc(dt) + '</div>' : '') +
       (venue ? '<div style="font-size:13px;color:#9a9a9a;margin-top:2px;">' + esc(venue) + '</div>' : '') +
       '</div>' +
-      '<div style="background:#fff;margin:18px 22px;border-radius:16px;padding:18px;text-align:center;">' +
-      '<img src="' + qrImg + '" width="220" height="220" alt="Ticket QR" style="display:block;margin:0 auto;border-radius:10px;" />' +
-      '<div style="color:#111;font-size:13px;font-weight:700;margin-top:12px;">' + (name ? esc(name) : 'Your ticket') + '</div>' +
-      '<div style="color:#888;font-size:12px;margin-top:4px;">Show this QR at the event entrance to check in.</div>' +
-      '</div>' +
+      (tickets.length > 1
+        ? '<div style="text-align:center;color:#c9c9c9;font-size:13px;margin:2px 0 -6px;">' + tickets.length + ' tickets — one QR each</div>'
+        : '') +
+      // Každý lístek svůj blok. Číslování je kvůli dveřím: "ten druhý" se hledá líp než UUID.
+      tickets.map(function(t, ix){
+        const tid = t.id;
+        const lbl = (t.tier_name || t.plan_name || '') || (tickets.length > 1 ? ('Ticket ' + (ix + 1) + ' of ' + tickets.length) : 'Your ticket');
+        return '<div style="background:#fff;margin:18px 22px;border-radius:16px;padding:18px;text-align:center;">' +
+          '<img src="' + qrFor(tid) + '" width="220" height="220" alt="Ticket QR" style="display:block;margin:0 auto;border-radius:10px;" />' +
+          '<div style="color:#111;font-size:13px;font-weight:700;margin-top:12px;">' + esc(name || 'Your ticket') + '</div>' +
+          (tickets.length > 1 ? '<div style="color:#666;font-size:12px;margin-top:2px;">' + esc(lbl) + '</div>' : '') +
+          '<div style="color:#888;font-size:12px;margin-top:4px;">Show this QR at the event entrance to check in.</div>' +
+          '<div style="color:#b0b0b0;font-size:10.5px;margin-top:8px;word-break:break-all;">' + esc(tid) + '</div>' +
+          '</div>';
+      }).join('') +
       '<div style="padding:4px 24px 26px;text-align:center;color:#7a7a7a;font-size:11px;line-height:1.5;">' +
-      'Ticket ID: ' + esc(ticketId) + '<br/>If the QR doesn’t load, open: <a href="' + checkinUrl + '" style="color:#F4D87A;">' + esc(checkinUrl) + '</a>' +
+      'If a QR doesn’t load, open: <a href="' + checkinUrl + '" style="color:#F4D87A;">' + esc(checkinUrl) + '</a>' +
       '</div></div>';
 
     const rRes = await fetch('https://api.resend.com/emails', {
