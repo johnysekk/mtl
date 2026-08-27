@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SSC bounds the wait on /api/my-transactions to six seconds. The call had no timeout, so a stalled serverless function meant the browser decided when to give up -- around a minute -- and only then did the fallback run, which reads the transactions directly and is quick. That is why the earnings overview sat on Nacitam with a perfectly healthy database. This does not explain WHY the endpoint stalls; it removes the consequence, so a slow endpoint costs six seconds instead of sixty. The cause still needs the Network tab: if my-transactions shows a long time there, that is the thing to fix. -->
+<!-- MTL build: SSD makes the earnings load measure itself instead of asking for a console. Each step is timed separately -- refreshing the token, the endpoint call, and the fallback -- and when the total passes a second the founder sees a line at the top of the overview saying which one it was. Nothing shows on a normal load, and nobody but the founder ever sees it. The point is that the next time this is slow the number names the culprit, rather than the guessing it cost last time: a large token figure means the session refresh is hanging, a large endpoint figure with a six-second ceiling means the serverless function is stalling and the timeout caught it, and a large fallback figure would mean the direct read is the slow part, which would be a different problem entirely. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -29240,15 +29240,24 @@ async function _fetchMyTx(force){
     // minutu, a teprve pak doběhla záloha. Přehled výdělků tak visel na "Načítám..." při plně
     // funkční databázi. Záloha čte transakce napřímo a je rychlá, takže není proč na endpoint
     // čekat déle než pár vteřin. Neřeší to PŘÍČINU pomalosti endpointu, jen její dopad.
+    // Změř každý krok zvlášť a nech to v paměti. Bez toho se nepozná, jestli visí obnova
+    // přihlášení, nebo endpoint -- a hádat, co z toho, stálo minule zbytečné kolo.
     const _ctl=(typeof AbortController!=='undefined')?new AbortController():null;
     const _to=setTimeout(function(){ try{ _ctl&&_ctl.abort(); }catch(e){} }, 6000);
+    const _t0=Date.now();
+    window._mtlNetDiag={ tok:0, net:0, status:0, ok:false, fallback:0 };
     try{
       const _tok = await _freshTok();
+      window._mtlNetDiag.tok=Date.now()-_t0;
+      const _t1=Date.now();
       const r = await fetch('/api/my-transactions', { headers:{'x-access-token':_tok}, signal:_ctl?_ctl.signal:undefined });
+      window._mtlNetDiag.net=Date.now()-_t1;
+      window._mtlNetDiag.status=r.status;
       const j = await r.json().catch(()=>({}));
-      if(j && j.ok){ coachTx=(j.coachTx)||[]; gymTx=(j.gymTx)||[]; ok=true; }
+      if(j && j.ok){ coachTx=(j.coachTx)||[]; gymTx=(j.gymTx)||[]; ok=true; window._mtlNetDiag.ok=true; }
     } finally { clearTimeout(_to); }
-  }catch(e){ console.log('[MTL myTx] endpoint failed/timeout', e&&e.message); }
+  }catch(e){ try{ window._mtlNetDiag.err=(e&&e.name)||'err'; }catch(_){} }
+  const _fbStart=Date.now();
   if(!ok){
     // FALLBACK (works while RLS is not yet enabled): read transactions directly so the coach + klub-owner
     // HERO net never goes blank just because the /api/my-transactions endpoint is down or returns 401.
@@ -29264,6 +29273,7 @@ async function _fetchMyTx(force){
       }
     }catch(e2){ console.log('[MTL myTx] fallback failed', e2&&e2.message); }
   }
+  try{ if(window._mtlNetDiag && !window._mtlNetDiag.ok) window._mtlNetDiag.fallback=Date.now()-_fbStart; }catch(e){}
   window._myTxCache={ coachTx, gymTx }; window._myTxCacheAt=Date.now();
   return window._myTxCache;
 }
@@ -29361,7 +29371,19 @@ async function openFullDash(){
   let pOpts='<option value="month">'+(EN?'This month':'Tento měsíc')+'</option><option value="12m">'+(EN?'Last 12 months':'Posledních 12 měsíců')+'</option>';
   for(let y=yNow;y>=yNow-6;y--){ pOpts+='<option value="y'+y+'">'+(EN?'Year ':'Rok ')+y+'</option>'; }
   pOpts+='<option value="all">'+(EN?'All time':'Vše (celá historie)')+'</option>';
-  body.innerHTML='<div id="mdHeader"></div>'
+  // Řádek s naměřenými časy. Vidí ho JEN zakladatel a ukáže se jen tehdy, když něco trvalo dýl
+  // než vteřinu -- jinak zabírá místo a nikomu nic neříká. Smysl: až to zase bude pomalé, číslo
+  // rovnou řekne KDE, místo aby se to hádalo.
+  const _dg=window._mtlNetDiag||{};
+  const _slow=((_dg.tok||0)+(_dg.net||0)+(_dg.fallback||0))>1000;
+  const _isFounder=(currentUser && (currentUser.id===FOUNDER_UUID || currentUser.role==='founder'));
+  const _diagHtml=(_isFounder && _slow) ? ('<div style="background:#FFF8E6;border:1px solid #F0DFA8;border-radius:10px;padding:9px 11px;margin-bottom:10px;font-size:11.5px;color:#7a5a1a;line-height:1.6;font-family:ui-monospace,Menlo,monospace;">'
+    +'⏱ token '+(_dg.tok||0)+' ms · endpoint '+(_dg.net||0)+' ms'+(_dg.status?(' ('+_dg.status+')'):'')
+    +(_dg.fallback?(' · záloha '+_dg.fallback+' ms'):'')
+    +(_dg.err?(' · '+_dg.err):'')
+    +(_dg.ok?'':' · endpoint nepoužit')
+    +'</div>') : '';
+  body.innerHTML=_diagHtml+'<div id="mdHeader"></div>'
     +'<select id="mdPeriodSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-weight:700;font-family:\'DM Sans\';background:#fff;color:var(--dark);margin-bottom:7px;">'+pOpts+'</select>'
     +'<div id="mdPerNote" style="font-size:11px;color:var(--light);line-height:1.5;margin-bottom:12px;display:none;"></div>'
     +(both?'<div id="mdAcctNote" style="font-size:11.5px;color:var(--mid);background:var(--surf);border-radius:9px;padding:8px 11px;margin-bottom:14px;line-height:1.45;"></div>':'')
