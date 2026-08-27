@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SRO fixes a ticket insert that could not succeed and a login screen that should never have been seen. Every ticket write still carried share_src alongside attr_src: SRD added the new column by regex without removing the old one, and share_src was never created because attribution.sql replaced it, so PostgREST rejected the whole insert and nobody could buy anything, in the app or out of it. All four writes and the dead _evSetSrc/_evConsumeSrc layer are gone; attribution has one owner again. And an event link no longer flashes the sign-in screen: deciding where that person belongs waits on the session being restored, and until then they were looking at a login, which on a link off Instagram is the moment they close the tab. A tiny inline script hides the auth screen and shows a spinner the instant it sees ?event= in the URL, before anything renders; whichever branch wins clears it once it has something to show. -->
+<!-- MTL build: SRQ restores the attribution layer, which SRO deleted by accident. Removing the dead _evSetSrc/_evConsumeSrc block cut from a comment header to the next comment header and swallowed _attrFrom, _attrCapture, _attrGet and the ATTR constants sitting between them -- so attr_src was written by nineteen call sites and defined by none, and every purchase threw _attrGet is not defined. Nothing was wrong with the design; the cut was. This is the fourth time a block removed by anchoring on the next declaration has taken a neighbour with it, so undef_check.js now exists: it collects every _function actually called and every one defined, and reports the difference. Run against the broken build it names _attrGet immediately. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -8621,13 +8621,22 @@ function _evPubEsc(v){ try{ return escapeHtml(String(v==null?'':v)); }catch(e){ 
 // Rozcestník. Přihlášený jde do appky, ostatní na veřejnou stránku. Na currentUser se chvíli
 // počká, protože po návratu do PWA se přihlášení obnovuje asynchronně a bez toho by i vlastní
 // člen spadl na veřejnou verzi.
-function _evBootDone(){ try{ var st=document.getElementById('evBootStyle'); if(st) st.remove(); var l=document.getElementById('evBootLoad'); if(l) l.style.display='none'; }catch(e){} }
+// mode='app'    -- člověk je přihlášený, appka se vykreslí normálně, styl pryč
+// mode='public'  -- nepřihlášený zůstává na veřejné stránce; přihlašovací obrazovka MUSÍ zůstat
+//                   schovaná, jinak se odkryje pod formulářem. Odkryje se až při zavření.
+function _evBootDone(mode){
+  try{ var l=document.getElementById('evBootLoad'); if(l) l.style.display='none'; }catch(e){}
+  if(mode==='public') return;
+  try{ var st=document.getElementById('evBootStyle'); if(st) st.remove(); }catch(e){}
+}
+// Zavření veřejné stránky = teprve teď má smysl ukázat login; člověk je v appce, ne u lístku.
+function _evBootRelease(){ try{ var st=document.getElementById('evBootStyle'); if(st) st.remove(); }catch(e){} }
 async function _evOpenShared(eventId){
   var _t=0; while(typeof currentUser==='undefined' || !currentUser){ if(_t>=12) break; await new Promise(function(r){ setTimeout(r,200); }); _t++; }
   if(typeof currentUser!=='undefined' && currentUser){
     try{
       const { data:ev } = await supaClient.from('events').select('*').eq('id', eventId).single();
-      if(ev){ try{ window.history.replaceState({}, '', location.pathname); }catch(e){} _evBootDone(); openEventView(ev); return; }
+      if(ev){ try{ window.history.replaceState({}, '', location.pathname); }catch(e){} _evBootDone('app'); openEventView(ev); return; }
     }catch(e){}
   }
   // Veřejná stránka si loader sundá až sama, jakmile má co vykreslit -- viz openEventSignup.
@@ -8645,6 +8654,71 @@ async function _evOpenShared(eventId){
 
 // Odkud přišly prodeje. Ukazuje se jen pořadateli a jen když už něco prodal -- prázdný graf
 // nikomu nic neřekne a jen zabírá místo nad tlačítkem, kterým se prodává.
+
+// ── MARKETINGOVÁ ATRIBUCE (last non-direct click) ────────────────────────────────────────────
+// Odpovídá na "odkud ten člověk přišel", ne na "kdo mu klub doporučil" -- to druhé je acq_source
+// a rozhoduje o akviziční provizi. Tyhle dvě věci se nesmí smíchat.
+//
+//   instagram / facebook / youtube / tiktok / google   z click ID nebo z odkazující stránky
+//   web|doména   rozpoznaná stránka, kterou nepojmenováváme -- doménu ukazujeme přímo
+//   app          člověk už byl přihlášený v MTL
+//   direct       nic se nezjistilo -- QR z plakátu, odkaz z chatu, adresa otevřená rovnou
+//
+// "direct" je sběrný koš, ne kanál: WhatsApp, Messenger ani SMS k odkazu nic nepřipojují a
+// neposílají odkazující stránku, takže se poznat nedají -- to neumí nikdo.
+const ATTR_TTL_MS = 30*24*3600000;
+const ATTR_KEY='mtl_attr', ATTR_KEY_T='mtl_attr_t';
+function _attrFrom(){
+  var q=null; try{ q=new URLSearchParams(location.search); }catch(e){ return null; }
+  var us=q.get('utm_source');
+  if(us){
+    var u=String(us).toLowerCase();
+    if(u==='ig'||u.indexOf('insta')>=0) return 'instagram';
+    if(u==='fb'||u.indexOf('face')>=0) return 'facebook';
+    if(u.indexOf('youtu')>=0) return 'youtube';
+    if(u.indexOf('tiktok')>=0) return 'tiktok';
+    if(u.indexOf('google')>=0||u.indexOf('seznam')>=0||u==='bing') return 'google';
+    return 'other';
+  }
+  var r=''; try{ r=document.referrer||''; }catch(e){}
+  var h=''; if(r){ try{ h=new URL(r).hostname.toLowerCase(); }catch(e){} }
+  try{ if(h && h===location.hostname) h=''; }catch(e){}
+  if(/(^|\.)instagram\.com$/.test(h)||/^l\.instagram/.test(h)) return 'instagram';
+  if(/(^|\.)facebook\.com$/.test(h)||/^(l|lm|m)\.facebook/.test(h)||/(^|\.)fb\.(me|com)$/.test(h)) return 'facebook';
+  if(/(^|\.)youtube\.com$/.test(h)||/(^|\.)youtu\.be$/.test(h)) return 'youtube';
+  if(/(^|\.)tiktok\.com$/.test(h)) return 'tiktok';
+  if(/(^|\.)google\./.test(h)||/(^|\.)(seznam|bing|duckduckgo|ecosia)\./.test(h)) return 'google';
+  if(q.get('gclid')||q.get('gbraid')||q.get('wbraid')) return 'google';
+  if(q.get('ttclid')) return 'tiktok';
+  // fbclid lepí Meta na každý odchozí klik. Bez odkazující stránky nerozliší Instagram od
+  // Facebooku, ale že to bylo od Mety, víme jistě.
+  if(q.get('fbclid')) return 'facebook';
+  // Doménu si necháme. "Z webu" pořadateli nic neřekne -- chce vědět, ZE KTERÉHO webu.
+  if(h) return 'web|'+h.replace(/^www\./,'').slice(0,40);
+  return null;
+}
+// Běží při každém načtení. Když nic nenajde, starou hodnotu nechá být -- jinak by každé otevření
+// appky přepsalo zdroj na "direct" (last non-direct click).
+function _attrCapture(){
+  try{
+    var v=_attrFrom(); if(!v) return;
+    localStorage.setItem(ATTR_KEY, v);
+    localStorage.setItem(ATTR_KEY_T, String(Date.now()));
+  }catch(e){}
+}
+// Vrátí zdroj pro zápis na řádek nákupu. NESPOTŘEBUJE ho -- platí dál, dokud ho nepřepíše nový.
+// Nákup uvnitř appky je vlastní kategorie: tam ten člověk už nepřišel odjinud.
+function _attrGet(){
+  var inApp=(typeof currentUser!=='undefined' && !!currentUser);
+  try{
+    var raw=localStorage.getItem(ATTR_KEY);
+    var t=parseInt(localStorage.getItem(ATTR_KEY_T)||'0',10);
+    if(raw && (Date.now()-t) < ATTR_TTL_MS) return raw;
+  }catch(e){}
+  return inApp ? 'app' : 'direct';
+}
+try{ _attrCapture(); }catch(e){}
+
 function _attrLabel(src){
   const EN=LANG==='en';
   const m={ instagram:'📷 Instagram', facebook:'📘 Facebook',
@@ -8727,19 +8801,21 @@ async function openEventSignup(eventId){
   const EN=LANG==='en';
   let ov=document.getElementById('evPubOv'); if(ov) ov.remove();
   ov=document.createElement('div'); ov.id='evPubOv';
-  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:100000;display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:18px 12px;';
+  // Neprůsvitné, ne rgba. Pod tím leží přihlašovací obrazovka a průsvitným pozadím prosvítala --
+  // nakupující bez účtu neměl proč koukat na login do appky, kterou nechce.
+  ov.style.cssText='position:fixed;inset:0;background:#0b0b0b;z-index:100000;display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:18px 12px;';
   ov.innerHTML='<div style="background:var(--bg);border-radius:18px;max-width:460px;width:100%;padding:20px;"><div style="text-align:center;padding:26px;color:var(--mid);font-size:13px;">'+(EN?'Loading…':'Načítám…')+'</div></div>';
   document.body.appendChild(ov);
   // Až teď je na obrazovce něco k vidění -- předtím by pod formulářem prosvítal login.
-  try{ if(typeof _evBootDone==='function') _evBootDone(); }catch(e){}
+  try{ if(typeof _evBootDone==='function') _evBootDone('public'); }catch(e){}
   const box=ov.firstElementChild;
 
   let d=null;
   try{ const r=await fetch('/api/event-public?event='+encodeURIComponent(eventId)); const j=await r.json(); if(j&&j.ok) d=j.event; else if(j&&j.closed) d={__closed:j.reason||'closed'}; }catch(e){}
-  if(!d){ box.innerHTML='<div style="text-align:center;padding:26px;"><div style="font-size:14px;font-weight:700;margin-bottom:10px;">'+(EN?'Event not found':'Akce nenalezena')+'</div><button id="evPubX" style="padding:10px 18px;border:1px solid var(--border);background:var(--surf);border-radius:10px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button></div>'; ov.querySelector('#evPubX').onclick=function(){ ov.remove(); }; return; }
+  if(!d){ box.innerHTML='<div style="text-align:center;padding:26px;"><div style="font-size:14px;font-weight:700;margin-bottom:10px;">'+(EN?'Event not found':'Akce nenalezena')+'</div><button id="evPubX" style="padding:10px 18px;border:1px solid var(--border);background:var(--surf);border-radius:10px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button></div>'; ov.querySelector('#evPubX').onclick=function(){ ov.remove(); _evBootRelease(); }; return; }
   if(d.__closed){
     const _why = d.__closed==='started' ? (EN?'This event has already started.':'Tato akce už začala.') : (EN?'Tickets are not on sale.':'Lístky nejsou v prodeji.');
-    box.innerHTML='<div style="text-align:center;padding:26px;"><div style="font-size:14px;font-weight:700;margin-bottom:8px;">'+_why+'</div><button id="evPubX" style="padding:10px 18px;border:1px solid var(--border);background:var(--surf);border-radius:10px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button></div>'; ov.querySelector('#evPubX').onclick=function(){ ov.remove(); }; return;
+    box.innerHTML='<div style="text-align:center;padding:26px;"><div style="font-size:14px;font-weight:700;margin-bottom:8px;">'+_why+'</div><button id="evPubX" style="padding:10px 18px;border:1px solid var(--border);background:var(--surf);border-radius:10px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button></div>'; ov.querySelector('#evPubX').onclick=function(){ ov.remove(); _evBootRelease(); }; return;
   }
 
   const cur=d.currency||'CZK'; const sym=(typeof _curSym==='function')?_curSym(cur):cur;
@@ -8762,7 +8838,7 @@ async function openEventSignup(eventId){
   if(soldOut){
     h+='<div style="background:var(--surf);border-radius:12px;padding:16px;text-align:center;font-weight:700;">'+(EN?'Sold out':'Vyprodáno')+'</div>';
     box.innerHTML=h+'<button id="evPubX" style="width:100%;margin-top:12px;padding:11px;border:1px solid var(--border);background:var(--surf);border-radius:10px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button>';
-    ov.querySelector('#evPubX').onclick=function(){ ov.remove(); }; return;
+    ov.querySelector('#evPubX').onclick=function(){ ov.remove(); _evBootRelease(); }; return;
   }
 
   h+='<div style="font-size:12px;font-weight:700;color:var(--mid);text-transform:uppercase;letter-spacing:.04em;margin:12px 0 6px;">'+(EN?'Ticket':'Lístek')+'</div>';
@@ -8784,7 +8860,7 @@ async function openEventSignup(eventId){
   h+='<button id="evPubX" style="width:100%;margin-top:8px;padding:10px;background:none;border:none;color:var(--mid);font-size:12.5px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Cancel':'Zrušit')+'</button>';
   box.innerHTML=h;
 
-  ov.querySelector('#evPubX').onclick=function(){ ov.remove(); try{ window.history.replaceState({}, '', location.pathname); }catch(e){} };
+  ov.querySelector('#evPubX').onclick=function(){ ov.remove(); _evBootRelease(); try{ window.history.replaceState({}, '', location.pathname); }catch(e){} };
   ov.querySelector('#evPubGo').onclick=function(){ _evPubBuy(d, tiers, ov); };
 }
 
@@ -8884,12 +8960,12 @@ function _evPubQr(d, tier, ticketId, name, ov){
   if(qb){ if(payload && window.QRCode){ new QRCode(qb,{ text:payload, width:190, height:190, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); }
     else { qb.innerHTML='<div style="font-size:12px;color:var(--light);padding:16px;text-align:center;">'+(EN?'QR unavailable — use the details below':'QR nedostupné — použij údaje níž')+'</div>'; } }
 
-  ov.querySelector('#evPubX2').onclick=function(){ ov.remove(); try{ window.history.replaceState({}, '', location.pathname); }catch(e){} };
+  ov.querySelector('#evPubX2').onclick=function(){ ov.remove(); _evBootRelease(); try{ window.history.replaceState({}, '', location.pathname); }catch(e){} };
   ov.querySelector('#evPubPaid').onclick=async function(){
     const b=this; b.disabled=true; b.textContent='…';
     try{ await supaClient.from('event_tickets').update({ status:'paid_claimed', claimed_at:new Date().toISOString() }).eq('id', ticketId); }catch(e){}
     box.innerHTML='<div style="text-align:center;padding:26px;"><div style="font-size:34px;margin-bottom:10px;">⏳</div><div style="font-size:15px;font-weight:800;margin-bottom:6px;">'+(EN?'Thanks — waiting for confirmation':'Díky — čeká na potvrzení')+'</div><div style="font-size:13px;color:var(--mid);line-height:1.5;">'+(EN?'The organizer confirms the payment and the ticket goes to your e-mail.':'Pořadatel platbu potvrdí a lístek ti přijde na e-mail.')+'</div><button id="evPubX3" style="margin-top:16px;padding:10px 18px;border:1px solid var(--border);background:var(--surf);border-radius:10px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button></div>';
-    ov.querySelector('#evPubX3').onclick=function(){ ov.remove(); try{ window.history.replaceState({}, '', location.pathname); }catch(e){} };
+    ov.querySelector('#evPubX3').onclick=function(){ ov.remove(); _evBootRelease(); try{ window.history.replaceState({}, '', location.pathname); }catch(e){} };
   };
 }
 
