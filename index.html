@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SSE makes the earnings overview open immediately instead of costing a round trip every time. Three things: the transactions are fetched in the background about a second after sign-in, so the endpoint call happens while the person is looking at the deck rather than at Nacitam; the cache lives five minutes instead of one, because transactions do not change by the second and a one-minute window meant nearly every open paid full price again; and when numbers are already in memory the panel renders from them at once and refreshes behind. Instrumentation from SSD stays, so if the slow case returns the line still names which step it was -- the one measurement taken showed a healthy 200 in about a second, which points at a cold serverless start rather than a bad query, and none of this depends on that being right. -->
+<!-- MTL build: SSI accepts that the buyer is often not the attendee. The age tick asked the BUYER to confirm their own age, which is nonsense the moment a parent buys a place for a twelve-year-old -- and that is the case the basket was built for. There is now a tick saying the purchase is for a minor as their legal guardian, and it reveals a name and date of birth for each participant place in the basket. That is what makes the consent real: the guardian is present and declaring on the child behalf, rather than the child declaring their own age, which is worth nothing. The age limit is then checked against the date of birth instead of being self-declared. Because the guardian route works, participant places are back on sale publicly at any age rather than only on 18+ events. attendee_name and attendee_dob are stored per ticket, so the door list finally shows who is actually coming rather than the payer three times. Needs event-attendee.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -8105,6 +8105,8 @@ async function openEventCreate(club, ev){
     <select id="evPayee" style="${inp}">${payees.map(pp=>`<option value="${pp.id}">${escapeHtml(pp.name)}${pp.account?'':(LANG==='en'?' — QR / bank':' — QR / banka')}</option>`).join('')}</select>
     ${g.org_form==='nonprofit'?`<div style="${lbl}">${LANG==='en'?'Income type (non-profit)':'Druh příjmu (nezisk)'}</div><div id="evIncomeRow" style="display:flex;gap:8px;margin-bottom:14px;"><button type="button" class="evIncomeBtn" data-v="main" style="flex:1;padding:10px 6px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';border:1.5px solid var(--border);background:transparent;color:var(--mid);">${LANG==='en'?'Main (contribution)':'Hlavní (příspěvek)'}</button><button type="button" class="evIncomeBtn" data-v="side" style="flex:1;padding:10px 6px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';border:1.5px solid var(--border);background:transparent;color:var(--mid);">${LANG==='en'?'Side (service)':'Vedlejší (služba)'}</button></div>`:''}
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;"><div style="${lbl}margin-bottom:0;">${LANG==='en'?'Ticket variants':'Varianty lístků'}</div><select id="evCur" disabled title="${LANG==='en'?'Events use your payment currency (single currency).':'Akce používají tvoji měnu plateb (jedna měna).'}" style="padding:8px 10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';font-size:13px;background:#F1F5F9;opacity:.65;cursor:not-allowed;">${['CZK','EUR','USD','GBP','CHF','PLN','SEK','DKK','NOK','HUF','RON','CAD','AUD','NZD'].map(cc=>`<option value="${cc}" ${cc===cur?'selected':''}>${cc}</option>`).join('')}</select></div>
+    <label style="display:flex;gap:9px;align-items:center;font-size:13.5px;font-weight:600;cursor:pointer;margin-bottom:8px;"><input type="checkbox" id="evAgeOn"><span>${LANG==='en'?'Set a minimum age':'Určit minimální věk'}</span></label>
+    <div id="evAgeWrap" style="display:none;margin-bottom:12px;"><input id="evMinAge" type="number" min="1" max="99" style="${inp}" placeholder="${LANG==='en'?'e.g. 18':'např. 18'}"><div style="font-size:11.5px;color:var(--light);line-height:1.5;margin-top:5px;">${LANG==='en'?'In the app we check it against the date of birth. Outside the app the buyer confirms it themselves.':'V appce ho ověříme podle data narození. Mimo appku ho kupující potvrzuje sám.'}</div></div>
     <label style="display:flex;gap:9px;align-items:center;font-size:13.5px;font-weight:600;cursor:pointer;margin-bottom:12px;"><input type="checkbox" id="evFree"><span>${LANG==='en'?'This event is free':'Akce je zdarma'}</span></label>
     <div id="evTiers"></div>
     <button type="button" id="evAddTier" style="width:100%;padding:10px;background:var(--surf);border:1px dashed var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:14px;font-size:13px;">+ ${LANG==='en'?'Add variant':'Přidat variantu'}</button>
@@ -8132,6 +8134,8 @@ async function openEventCreate(club, ev){
     if(typeof evCheckSave==='function') evCheckSave();
   };
   if($('evFree')) $('evFree').onchange=_evFreeToggle;
+  const _evAgeToggle=function(){ const w=$('evAgeWrap'); if(w) w.style.display=($('evAgeOn')&&$('evAgeOn').checked)?'block':'none'; };
+  if($('evAgeOn')) $('evAgeOn').onchange=_evAgeToggle;
   renderEvTiers();
   $('evAddTier').onclick=()=>{ window._evTiers.push({name:'',price:'',participant:(['seminar','camp','open_mat','grading','competition'].indexOf(($('evType')&&$('evType').value)||'')>=0)}); renderEvTiers(); };
   $('evCur').onchange=()=>{ window._evCur=$('evCur').value; renderEvTiers(); };
@@ -8143,12 +8147,14 @@ async function openEventCreate(club, ev){
     if($('evStart')) $('evStart').value=toLocalInput(ev.starts_at); if($('evEnd')) $('evEnd').value=toLocalInput(ev.ends_at);
     $('evCap').value=ev.capacity||''; if($('evPayee')) $('evPayee').value=ev.payout_coach_id||'gym'; if($('evCur')) $('evCur').value=window._evCur;
     if($('evFree')) $('evFree').checked=!(window._evTiers||[]).some(function(x){ return Number(x.price)>0; });
+    if($('evMinAge')&&ev.min_age){ $('evMinAge').value=ev.min_age; if($('evAgeOn')) $('evAgeOn').checked=true; }
     $('evSeek').checked=!!ev.seeking_fighters; if(ev.seeking_fighters) $('evFighterInfo').style.display='block'; $('evFighterInfo').value=ev.fighter_info||''; if($('evTerms')) $('evTerms').value=ev.terms_text||''; if($('evMinorConsent')) $('evMinorConsent').checked=!!ev.minor_consent;
     if(ev.poster){ const pv=$('evPosterPv'); if(pv){ pv.style.backgroundImage=`url('${ev.poster}')`; pv.style.display='block'; } var _erb2=$('evPosterRemove'); if(_erb2) _erb2.style.display='block'; var _eab2=$('evPosterBtn'); if(_eab2) _eab2.textContent=(LANG==='en'?'\ud83d\uddbc\ufe0f Change poster':'\ud83d\uddbc\ufe0f Zm\u011bnit poster'); }
     document.querySelectorAll('.evDiscChip').forEach(c=>{ if((window._evDisc||[]).includes(c.dataset.v)){ c.style.background='var(--red)'; c.style.borderColor='var(--red)'; c.style.color='#fff'; } });
   }
   if(typeof _evSeekToggle==='function') _evSeekToggle();
   if(typeof _evFreeToggle==='function') _evFreeToggle();
+  if(typeof _evAgeToggle==='function') _evAgeToggle();
   openSheet('shEventCreate');
 }
 function renderEvTiers(){
@@ -8207,10 +8213,10 @@ async function saveEvent(){
   const payeeSel=($('evPayee')&&$('evPayee').value)||'gym';
   const payout_coach_id = payeeSel==='gym' ? null : payeeSel;
   const isOwner = g.owner_id===currentUser.id;
-  const row={ gym_id:g.id, income:(window._evIncome||'side'), created_by:currentUser.id, status: isOwner?'approved':'pending', type:$('evType').value||'other', title, description:($('evDesc').value||'').trim()||null, poster: window._evPoster||null, disciplines: JSON.stringify(window._evDisc||[]), city: g.city||null, country: g.country||null, venue:($('evVenue').value||'').trim()||null, address:($('evAddr')?($('evAddr').value||'').trim():null)||null, city_lat: g.city_lat||null, city_lng: g.city_lng||null, starts_at: new Date($('evStart').value).toISOString(), ends_at: $('evEnd').value ? new Date($('evEnd').value).toISOString() : null, capacity: parseInt($('evCap').value)||null, ticket_price: priceMin, ticket_tiers: JSON.stringify(tiers), payout_coach_id, currency: cur, seeking_fighters: !!$('evSeek').checked, fighter_info: ($('evFighterInfo').value||'').trim()||null, terms_text: ($('evTerms')?($('evTerms').value||'').trim():'')||null, minor_consent: tiers.some(t=>!!t.participant) };
+  const row={ gym_id:g.id, income:(window._evIncome||'side'), created_by:currentUser.id, status: isOwner?'approved':'pending', type:$('evType').value||'other', title, description:($('evDesc').value||'').trim()||null, poster: window._evPoster||null, disciplines: JSON.stringify(window._evDisc||[]), city: g.city||null, country: g.country||null, venue:($('evVenue').value||'').trim()||null, address:($('evAddr')?($('evAddr').value||'').trim():null)||null, city_lat: g.city_lat||null, city_lng: g.city_lng||null, starts_at: new Date($('evStart').value).toISOString(), ends_at: $('evEnd').value ? new Date($('evEnd').value).toISOString() : null, capacity: parseInt($('evCap').value)||null, min_age: (($('evAgeOn')&&$('evAgeOn').checked)?(parseInt($('evMinAge')&&$('evMinAge').value,10)||null):null), ticket_price: priceMin, ticket_tiers: JSON.stringify(tiers), payout_coach_id, currency: cur, seeking_fighters: !!$('evSeek').checked, fighter_info: ($('evFighterInfo').value||'').trim()||null, terms_text: ($('evTerms')?($('evTerms').value||'').trim():'')||null, minor_consent: tiers.some(t=>!!t.participant) };
   const sv=$('evSave'); if(sv){ sv.disabled=true; sv.textContent='…'; }
   if(window._evEditing){
-    const upd={ income:row.income, type:row.type, title:row.title, description:row.description, poster:row.poster, disciplines:row.disciplines, venue:row.venue, address:row.address, starts_at:row.starts_at, ends_at:row.ends_at, capacity:row.capacity, ticket_price:row.ticket_price, ticket_tiers:row.ticket_tiers, payout_coach_id:row.payout_coach_id, currency:row.currency, seeking_fighters:row.seeking_fighters, fighter_info:row.fighter_info, terms_text:row.terms_text, minor_consent:row.minor_consent };
+    const upd={ income:row.income, type:row.type, title:row.title, description:row.description, poster:row.poster, disciplines:row.disciplines, venue:row.venue, address:row.address, starts_at:row.starts_at, ends_at:row.ends_at, capacity:row.capacity, min_age:row.min_age, ticket_price:row.ticket_price, ticket_tiers:row.ticket_tiers, payout_coach_id:row.payout_coach_id, currency:row.currency, seeking_fighters:row.seeking_fighters, fighter_info:row.fighter_info, terms_text:row.terms_text, minor_consent:row.minor_consent };
     const { error:e2 } = await supaClient.from('events').update(upd).eq('id', window._evEditing.id);
     if(e2){ toast('⚠️ '+e2.message); if(sv){ sv.disabled=false; } return; }
     toast(LANG==='en'?'✅ Saved':'✅ Uloženo'); closeSheet('shEventCreate'); renderEvents(); return;
@@ -8601,8 +8607,28 @@ async function _approveMinorEvent(d){
   };
 }
 
+
+// Věk z data narození. Appka ho zná, takže se nikoho neptáme -- ptát se člověka, kterého známe,
+// je jen krok navíc a otevřená pozvánka zalhat.
+function _ageFromBirth(b){
+  if(!b) return null;
+  var d=new Date(b); if(isNaN(d.getTime())) return null;
+  var t=new Date(), a=t.getFullYear()-d.getFullYear();
+  var m=t.getMonth()-d.getMonth();
+  if(m<0 || (m===0 && t.getDate()<d.getDate())) a--;
+  return (a>=0 && a<120) ? a : null;
+}
+
 function buyEventTicket(ev){
   if(!currentUser){ toast(L('⚠️ Nejprve se přihlas')); return; }
+  // Věkový limit akce. V appce se ověří proti datu narození; kdo ho nemá vyplněné, doplní ho
+  // v profilu -- pouštět ho dál "protože to nevíme" by ten limit dělalo bezcenným.
+  const _mn=parseInt(ev.min_age,10)||0;
+  if(_mn){
+    const _a=_ageFromBirth(currentUser.birthdate);
+    if(_a==null){ toast(LANG==='en'?('⚠️ Add your date of birth in your profile — this event is '+_mn+'+'):('⚠️ Doplň si datum narození v profilu — akce je od '+_mn+' let')); return; }
+    if(_a<_mn){ toast(LANG==='en'?('⚠️ This event is '+_mn+'+'):('⚠️ Akce je od '+_mn+' let')); return; }
+  }
   _buyEventTicketProceed(ev);
 }
 function _buyEventTicketProceed(ev){
@@ -8651,9 +8677,22 @@ function openTierPick(ev, tiers){
     const lim=tiers[i].participant?1:maxTot;   // účastnická varianta: strop 1
     if(tot()<maxTot && cart[i]<lim){ cart[i]++; paint(); } });
   paint();
-  ov.querySelector('#tpGo').onclick=()=>{
+  ov.querySelector('#tpGo').onclick=async ()=>{
     const picked=cart.map((q,i)=>({ t:tiers[i], q })).filter(x=>x.q>0);
     if(!picked.length) return;
+    // Strop "jeden na osobu" musí platit i napříč objednávkami, ne jen uvnitř jedné -- jinak ho
+    // obejde každý, kdo nákupem projde dvakrát. Ptáme se na už koupené místo pro TOHOHLE člověka.
+    const _partNames=picked.filter(x=>x.t.participant).map(x=>x.t.name||'');
+    if(_partNames.length && currentUser){
+      try{
+        const { data:_had } = await supaClient.from('event_tickets')
+          .select('tier_name').eq('event_id', ev.id).eq('buyer_id', currentUser.id)
+          .in('status',['reserved','paid_claimed','paid','active']);
+        const _mine=new Set((_had||[]).map(r=>r.tier_name||''));
+        const _dup=_partNames.find(nm=>_mine.has(nm));
+        if(_dup){ toast(EN?('You already have a place: '+_dup):('Místo už máš: '+_dup)); return; }
+      }catch(e){}
+    }
     close();
     // Souhlas se ukazuje jednou za objednávku; košík jde dál celý.
     showTicketClickwrap(ev, picked[0].t, picked);
@@ -8990,7 +9029,19 @@ async function openEventSignup(eventId){
   }
 
   const cur=d.currency||'CZK'; const sym=(typeof _curSym==='function')?_curSym(cur):cur;
-  const tiers=(d.tiers||[]).filter(function(t){ return Number(t.price)>0 || (d.tiers||[]).length===1; });
+  // ÚČASTNICKÉ VARIANTY SE TADY NEPRODÁVAJÍ. Kdo jde trénovat nebo závodit, musí být known
+  // person: appka u něj řeší věk, souhlas zákonného zástupce u nezletilých a waiver klubu --
+  // a veřejný formulář z toho neumí nic. Nechat to projít by znamenalo, že patnáctiletý koupí
+  // místo na semináři bez vědomí rodiče, protože stačí vyplnit jméno a e-mail.
+  // Divácký lístek tenhle problém nemá: nikdo netrénuje, nic se nepodepisuje.
+  const _allT=(d.tiers||[]).filter(function(t){ return Number(t.price)>0 || (d.tiers||[]).length===1; });
+  // Účastnická místa se venku prodávají. Souhlas za nezletilého dává jeho zákonný zástupce,
+  // který nákup provádí -- je u toho, prohlašuje se jménem dítěte a jeho jméno i e-mail máme.
+  // To je ten správný tvar; sebeprohlášení dítěte o vlastním věku by nebylo k ničemu.
+  const _minAge=parseInt(d.min_age,10)||0;
+  const tiers=_allT;
+  const _hiddenPart=0;
+  const _hasPart=_allT.some(function(t){ return !!t.participant; });
   const soldOut=!!d.sold_out;
   const left=(d.capacity? Math.max(0, d.capacity-(d.taken||0)) : null);
   const host=(d.host&&d.host.name)||d.gym_name||'';
@@ -9004,6 +9055,7 @@ async function openEventSignup(eventId){
   if(host) h+='<div style="font-size:13px;color:var(--mid);margin-bottom:2px;">'+_evPubEsc(host)+'</div>';
   if(when) h+='<div style="font-size:13px;color:var(--mid);">📅 '+_evPubEsc(when)+'</div>';
   if(where) h+='<div style="font-size:13px;color:var(--mid);margin-bottom:10px;">📍 '+_evPubEsc(where)+'</div>';
+  if(_minAge) h+='<div style="display:inline-block;font-size:12px;font-weight:800;background:var(--dark);color:#fff;border-radius:6px;padding:2px 8px;margin-bottom:8px;">'+_minAge+'+</div>';
   if(left!==null && left>0 && left<=20) h+='<div style="font-size:12px;font-weight:700;color:var(--red);margin-bottom:8px;">'+(EN?('Only '+left+' left'):('Zbývá už jen '+left))+'</div>';
 
   if(soldOut){
@@ -9015,7 +9067,21 @@ async function openEventSignup(eventId){
   // Košík, ne výběr jedné varianty. Kdo chce dva na sezení a tři na stání, to je jedna
   // objednávka a jedna platba -- nutit ho projít nákupem dvakrát je nesmysl. Výchozí počet 0,
   // takže si člověk vybere sám a nic mu nepředvyplňujeme.
+  if(!tiers.length){
+    // Akce má jen účastnické varianty -- venku není co prodat. Pošli člověka do appky místo
+    // prázdné stránky; tam projde věkem, waiverem a případně souhlasem zástupce.
+    h+='<div style="background:var(--surf);border-radius:12px;padding:16px;text-align:center;font-size:13.5px;line-height:1.6;color:var(--mid);margin-bottom:12px;">'
+      +(EN?'Places on this event are for participants, so they are booked in the MTL app — it needs your age and, for under-18s, a guardian consent.'
+          :'Místa na této akci jsou pro účastníky, proto se rezervují v appce MTL — potřebuje tvůj věk a u nezletilých souhlas zákonného zástupce.')
+      +'</div>';
+    h+='<a href="'+_appOrigin()+'/?event='+encodeURIComponent(d.id)+'" style="display:block;width:100%;box-sizing:border-box;padding:13px;background:var(--red);color:#fff;border-radius:12px;font-size:15px;font-weight:800;text-align:center;text-decoration:none;font-family:\'DM Sans\';">'+(EN?'Open in the MTL app':'Otevřít v appce MTL')+'</a>';
+    h+='<button id="evPubX" style="width:100%;margin-top:8px;padding:10px;background:none;border:none;color:var(--mid);font-size:12.5px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button>';
+    box.innerHTML=h;
+    ov.querySelector('#evPubX').onclick=function(){ ov.remove(); _evBootRelease(); try{ window.history.replaceState({}, '', location.pathname); }catch(e){} };
+    return;
+  }
   h+='<div style="font-size:12px;font-weight:700;color:var(--mid);text-transform:uppercase;letter-spacing:.04em;margin:12px 0 6px;">'+(EN?'Tickets':'Lístky')+'</div>';
+  if(_hiddenPart) h+='<div style="font-size:11.5px;color:var(--light);line-height:1.5;margin-bottom:8px;">'+(EN?'Participant places are booked in the MTL app — they need an age and, for under-18s, a guardian consent.':'Místa pro účastníky se rezervují v appce MTL — potřebují věk a u nezletilých souhlas zástupce.')+'</div>';
   tiers.forEach(function(t,i){
     h+='<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px;">'
       +'<span style="min-width:0;"><b style="font-size:14px;display:block;">'+_evPubEsc(t.name||(EN?'Ticket':'Lístek'))+'</b>'
@@ -9040,6 +9106,18 @@ async function openEventSignup(eventId){
   const _terms=(d.terms_text&&d.terms_text.trim())?d.terms_text.trim():'';
   const _clause=(EN?'I understand this ticket is non-refundable. Any refund is handled by the organizer directly; MTL is not responsible for the state of payments.':'Beru na vědomí, že tento lístek je nevratný. Případné refundace řeší pořadatel přímo, MTL nezodpovídá za stav plateb.');
   if(_terms) h+='<div style="font-size:11.5px;color:var(--mid);background:var(--surf);border-radius:10px;padding:10px;margin-bottom:8px;max-height:110px;overflow-y:auto;white-space:pre-wrap;">'+_evPubEsc(_terms)+'</div>';
+  // Kupující nemusí být účastník. Rodič bere místo dítěti, trenér svěřencům -- a ptát se pak
+  // KUPUJÍCÍHO, jestli mu je dvanáct, je nesmysl. Když jsou v košíku účastnická místa, může
+  // říct, že je bere nezletilému, a doplnit jeho jméno a datum narození. Tím dává souhlas
+  // zástupce on sám, což je jediná forma, která u dítěte platí.
+  if(_hasPart){
+    h+='<label style="display:flex;gap:9px;align-items:flex-start;font-size:12.5px;line-height:1.45;margin-bottom:8px;cursor:pointer;"><input type="checkbox" id="evPubGuard" style="margin-top:2px;"><span>'+(EN?'I am buying for a minor as their legal guardian':'Kupuji pro nezletilého jako jeho zákonný zástupce')+'</span></label>';
+    h+='<div id="evPubGuardBox" style="display:none;background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:11px 12px;margin-bottom:10px;">'
+      +'<div id="evPubMinors"></div>'
+      +'<div style="font-size:11.5px;color:var(--mid);line-height:1.5;">'+(EN?'As the legal guardian I consent to their participation and confirm the details above are correct.':'Jako zákonný zástupce souhlasím s jeho účastí a potvrzuji správnost uvedených údajů.')+'</div></div>';
+  }
+  // Věkový limit u dospělého kupujícího, který jde sám za sebe.
+  if(_minAge) h+='<label id="evPubAgeWrap" style="display:flex;gap:9px;align-items:flex-start;font-size:12.5px;line-height:1.45;margin-bottom:9px;cursor:pointer;"><input type="checkbox" id="evPubAge" style="margin-top:2px;"><span>'+(EN?('I confirm the attendee is '+_minAge+' or older.'):('Potvrzuji, že účastníkovi je '+_minAge+' let nebo víc.'))+'</span></label>';
   h+='<label style="display:flex;gap:9px;align-items:flex-start;font-size:12.5px;line-height:1.45;margin-bottom:12px;cursor:pointer;"><input type="checkbox" id="evPubOk" style="margin-top:2px;"><span>'+_evPubEsc(_clause)+'</span></label>';
   h+='<button id="evPubGo" style="width:100%;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Continue to payment':'Pokračovat na platbu')+'</button>';
   if(legal) h+='<div style="font-size:11px;color:var(--light);text-align:center;margin-top:9px;line-height:1.4;">'+(EN?'Seller: ':'Prodávající: ')+_evPubEsc(legal)+'</div>';
@@ -9065,10 +9143,36 @@ async function openEventSignup(eventId){
     var go=ov.querySelector('#evPubGo');
     if(go){ go.disabled=!tot; go.style.opacity=tot?'1':'.45'; }
   };
-  ov.querySelectorAll('.evQtyM').forEach(function(b){ b.onclick=function(){ var i=+b.dataset.i; if(window._evPubCart[i]>0){ window._evPubCart[i]--; _paintQ(); } }; });
+  // Kolik jmen se má vyplnit, řídí počet účastnických míst v košíku -- jedno pole na jedno
+  // místo. Vyplněná jména se při překreslení nesmí ztratit, proto se čtou zpátky.
+  var _paintMinors=function(){
+    var box=ov.querySelector('#evPubMinors'); if(!box) return;
+    var want=0; window._evPubCart.forEach(function(q,i){ if(tiers[i]&&tiers[i].participant) want+=q; });
+    var keep=[]; box.querySelectorAll('.evMinName').forEach(function(el,ix){ keep[ix]={ n:el.value, d:(box.querySelectorAll('.evMinDob')[ix]||{}).value||'' }; });
+    var _i='width:100%;padding:9px 10px;border:1px solid var(--border);border-radius:8px;font-size:13.5px;font-family:\'DM Sans\';background:var(--bg);margin-bottom:6px;';
+    var out='';
+    for(var k=0;k<want;k++){
+      out+='<div style="margin-bottom:9px;">'
+        +(want>1?('<div style="font-size:11.5px;color:var(--mid);font-weight:700;margin-bottom:4px;">'+(EN?('Attendee '+(k+1)):('Účastník '+(k+1)))+'</div>'):'')
+        +'<input class="evMinName" placeholder="'+(EN?'Full name':'Jméno a příjmení')+'" value="'+_evPubEsc((keep[k]&&keep[k].n)||'')+'" style="'+_i+'">'
+        +'<input class="evMinDob" type="date" value="'+_evPubEsc((keep[k]&&keep[k].d)||'')+'" style="'+_i+'">'
+        +'</div>';
+    }
+    box.innerHTML=out || ('<div style="font-size:12px;color:var(--mid);margin-bottom:6px;">'+(EN?'Add a participant ticket above first.':'Nejdřív přidej výše účastnické místo.')+'</div>');
+  };
+  var _guardToggle=function(){
+    var on=!!(ov.querySelector('#evPubGuard')||{}).checked;
+    var gb=ov.querySelector('#evPubGuardBox'); if(gb) gb.style.display=on?'block':'none';
+    // Zástupce prohlašuje za dítě, takže potvrzení "účastníkovi je X let" už nedává smysl --
+    // věk se ověří z data narození, které vyplnil.
+    var aw=ov.querySelector('#evPubAgeWrap'); if(aw) aw.style.display=on?'none':'flex';
+    if(on) _paintMinors();
+  };
+  if(ov.querySelector('#evPubGuard')) ov.querySelector('#evPubGuard').onchange=_guardToggle;
+  ov.querySelectorAll('.evQtyM').forEach(function(b){ b.onclick=function(){ var i=+b.dataset.i; if(window._evPubCart[i]>0){ window._evPubCart[i]--; _paintQ(); _paintMinors(); } }; });
   ov.querySelectorAll('.evQtyP').forEach(function(b){ b.onclick=function(){ var i=+b.dataset.i;
     var _lim=(tiers[i]&&tiers[i].participant)?1:_maxTot;   // účastnická varianta: strop 1
-    if(_cartTot()<_maxTot && window._evPubCart[i]<_lim){ window._evPubCart[i]++; _paintQ(); } }; });
+    if(_cartTot()<_maxTot && window._evPubCart[i]<_lim){ window._evPubCart[i]++; _paintQ(); _paintMinors(); } }; });
   _paintQ();
   ov.querySelector('#evPubGo').onclick=function(){ _evPubBuy(d, tiers, ov); };
 }
@@ -9087,6 +9191,28 @@ async function _evPubBuy(d, tiers, ov){
   if(!name){ toast(EN?'⚠️ Fill in your name':'⚠️ Vyplň jméno'); return; }
   if(!/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(mail)){ toast(EN?'⚠️ Check your e-mail':'⚠️ Zkontroluj e-mail'); return; }
   if(!ok){ toast(EN?'⚠️ Tick the box first':'⚠️ Nejdřív zaškrtni souhlas'); return; }
+  const _mnA=parseInt(d.min_age,10)||0;
+  const _guard=!!((ov.querySelector('#evPubGuard')||{}).checked);
+  // Jména a data narození účastníků, jeden pár na jedno účastnické místo.
+  let _minors=[];
+  if(_guard){
+    const _nm=[].slice.call(ov.querySelectorAll('.evMinName'));
+    const _db=[].slice.call(ov.querySelectorAll('.evMinDob'));
+    _minors=_nm.map(function(el,ix){ return { name:(el.value||'').trim(), dob:((_db[ix]||{}).value||'').trim() }; });
+    if(_minors.some(function(x){ return !x.name || !x.dob; })){ toast(EN?'⚠️ Fill in every attendee name and date of birth':'⚠️ Vyplň u každého účastníka jméno i datum narození'); return; }
+    if(_mnA){
+      // Věk se ověří z data narození, ne z prohlášení -- když to zástupce vyplnil, není proč
+      // se ptát znovu, a zároveň to nejde odklepnout naslepo.
+      const _tooYoung=_minors.find(function(x){
+        const b=new Date(x.dob); if(isNaN(b.getTime())) return true;
+        const t=new Date(); let a=t.getFullYear()-b.getFullYear(); const m=t.getMonth()-b.getMonth();
+        if(m<0||(m===0&&t.getDate()<b.getDate())) a--;
+        return a<_mnA;
+      });
+      if(_tooYoung){ toast(EN?('⚠️ This event is '+_mnA+'+ — '+(_tooYoung.name||'the attendee')+' is younger'):('⚠️ Akce je od '+_mnA+' let — '+(_tooYoung.name||'účastník')+' je mladší')); return; }
+    }
+  }
+  else if(_mnA && !((ov.querySelector('#evPubAge')||{}).checked)){ toast(EN?('⚠️ Confirm the attendee is '+_mnA+'+'):('⚠️ Potvrď, že účastníkovi je '+_mnA+' let')); return; }
 
   // Košík: seznam {varianta, počet}. Objednávka může mít víc variant naráz.
   const cart=(window._evPubCart||[]).map(function(q,i){ return { t:tiers[i], q:parseInt(q,10)||0 }; }).filter(function(x){ return x.t && x.q>0; });
@@ -9108,12 +9234,18 @@ async function _evPubBuy(d, tiers, ov){
     const _rows=[];
     // Jeden řádek = jedno místo, i napříč variantami. Každý si nese SVOJI cenu a název varianty,
     // takže u dveří i na dokladu je vidět, kdo má sezení a kdo stání.
+    // Účastníci se přiřazují jen k účastnickým místům, v pořadí, jak je zástupce vyplnil.
+    let _mi=0;
     cart.forEach(function(x){
-      for(let i=0;i<x.q;i++) _rows.push({ attr_src:_attrGet(),
-        event_id:d.id, buyer_id:null, buyer_name:name, buyer_email:mail, buyer_phone:tel||null,
-        order_id:orderId, qty:1, amount:(Number(x.t.price)||0), tier_name:(x.t.name||null), currency:cur, status:'reserved',
-        consent_at:_now, consent_version:(typeof TICKET_CONSENT_VERSION!=='undefined'?TICKET_CONSENT_VERSION:'')
-      });
+      for(let i=0;i<x.q;i++){
+        const _who=(_guard && x.t.participant) ? (_minors[_mi++]||null) : null;
+        _rows.push({ attr_src:_attrGet(),
+          event_id:d.id, buyer_id:null, buyer_name:name, buyer_email:mail, buyer_phone:tel||null,
+          attendee_name:(_who?_who.name:null), attendee_dob:(_who?_who.dob:null),
+          order_id:orderId, qty:1, amount:(Number(x.t.price)||0), tier_name:(x.t.name||null), currency:cur, status:'reserved',
+          consent_at:_now, consent_version:((typeof TICKET_CONSENT_VERSION!=='undefined'?TICKET_CONSENT_VERSION:'')+(_mnA?('+age'+_mnA):'')+(_who?'+guardian':''))
+        });
+      }
     });
     const { data, error } = await supaClient.from('event_tickets').insert(_rows).select('id');
     if(error) throw error;
@@ -29378,7 +29510,12 @@ async function openFullDash(){
   const _cached=(window._myNetCache && (Date.now()-(window._myNetCacheAt||0))<600000) ? window._myNetCache : null;
   if(!_cached) body.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;">'+L('Načítám...')+'</p>';
   const n=_cached || await loadMyNet();
-  if(_cached){ setTimeout(function(){ try{ loadMyNet(true).then(function(){ if(document.getElementById('moneyDashBody')) openFullDash(); }); }catch(e){} }, 50); }
+  // Obnovit data na pozadí, ale NIC znovu neotevírat. Původně to volalo openFullDash(), jenže
+  // to samo otevírá panel -- a podmínka na existenci moneyDashBody nic nehlídala, protože ten
+  // prvek je ve stránce pořád, i když je panel zavřený. Výsledek: kdo se mezitím proklikal jinam,
+  // byl vždycky vrácen do Přehledu výdělků. Čerstvá čísla stačí až při dalším otevření; na
+  // okamžitou obnovu je tlačítko Obnovit.
+  if(_cached){ setTimeout(function(){ try{ loadMyNet(true); }catch(e){} }, 50); }
   const cur=n.cur, fmt=v=>_netFmt(v,cur);
   const both=n.hasCoach&&n.hasGym;
   const yNow=new Date().getFullYear();
