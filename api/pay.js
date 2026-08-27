@@ -278,7 +278,7 @@ async function gymCheckout(req, res) {
 // ───────────────────────── GYM membership (direct charge subscription) ─────────────────────────
 // ───────────────────────── EVENT TICKET (flat 6% = 3% markup + 3% cut, no partner discount) ─────────────────────────
 async function eventCheckout(req, res) {
-  const { gymAccount, eventTitle, tierName, amount, currency = 'CZK', ticketId, buyerName, qty, qrToken, eventId, founding, partner, disc, gymId, payoutCoachId, take } = req.query;
+  const { gymAccount, eventTitle, tierName, amount, currency = 'CZK', ticketId, buyerName, buyerEmail, qty, qrToken, eventId, founding, partner, disc, gymId, payoutCoachId, take } = req.query;
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
   if (!(await _assertAcctReady(gymAccount, res))) return;
   const P = parseInt(amount, 10);
@@ -305,6 +305,9 @@ async function eventCheckout(req, res) {
       line_items: [
         { price_data: { currency: cur, product_data: { name: `${eventTitle || 'Event'}${tierName ? ' — ' + tierName : ''}` }, unit_amount: unit }, quantity: Q },
       ],
+      // Predvyplni e-mail na Stripe strance a hlavne posle uctenku tam, kam patri. U kupujiciho
+      // bez uctu v MTL je to jedina adresa, kterou o nem mame.
+      ...(buyerEmail ? { customer_email: String(buyerEmail).trim() } : {}),
       payment_intent_data: {
         application_fee_amount: (fee * Q),
         description: `${eventTitle || 'Event'}${tierName ? ' [' + tierName + ']' : ''} (MTL event ticket)`,
