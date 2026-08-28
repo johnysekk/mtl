@@ -64,6 +64,7 @@ export default async function handler(req, res) {
   const now = new Date();
   const billDay = now.getUTCDate() >= 6;
   const curMonth = now.toISOString().slice(0, 7);
+  let marked = 0, markErr = null;
   let collected = 0, failed = 0, suspended = 0, lifted = 0;
 
   // Two independent ways to end up on daily: the global beta switch, or a per-entity flag the
@@ -134,8 +135,15 @@ export default async function handler(req, res) {
             // receipt, instead of guessing from created_at.
             {
               const _scope = gymDaily(gid) ? '' : `&commission_month=lt.${curMonth}`;
-              await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}${_scope}`,
-                { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected', commission_collected_at: new Date().toISOString() }) });
+              // return=representation, ne minimal: potřebujeme vědět, KOLIK řádků se opravdu
+              // orazítkovalo. Když se karta strhne a označení tiše selže, transakce zůstanou
+              // pending, unified-doklad-cron nemá co vystavit a nikdo se to nedozví -- přesně
+              // ten stav, kdy notifikace chodí a doklad ne.
+              try{
+                const _upd = await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}${_scope}`,
+                  { method: 'PATCH', prefer: 'return=representation', body: JSON.stringify({ commission_status: 'collected', commission_collected_at: new Date().toISOString() }) });
+                marked += (Array.isArray(_upd) ? _upd.length : 0);
+              }catch(e){ markErr = markErr || String(e.message || e).slice(0, 200); }
             }
             /* doklad issued by unified-doklad-cron.js (bank + Stripe combined, one per month) */
             await notify(g.owner_id, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) za ${_periodLabel(gymDaily(gid))} byla stržena z karty. Doklad najdeš v účetnictví.`, { amount, currency: cur, gym_id: gid });
@@ -278,7 +286,9 @@ export default async function handler(req, res) {
       lifted++;
     }
 
-    return res.status(200).json({ ok: true, billDay, collected, failed, suspended, lifted });
+    // marked = kolik transakcí dostalo commission_collected_at. Když je collected > 0 a marked = 0,
+    // strhlo se, ale neoznačilo -- a pak nemá unified-doklad-cron co vystavit.
+    return res.status(200).json({ ok: true, billDay, collected, failed, suspended, lifted, marked, markErr });
   } catch (e) {
     return res.status(500).json({ error: e.message, collected, failed, suspended, lifted });
   }
