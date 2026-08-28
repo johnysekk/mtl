@@ -66,7 +66,7 @@ export default async function handler(req, res) {
     const id = (req.query && req.query.event) || '';
     if (!id) return res.status(400).json({ ok: false, error: 'missing event' });
 
-    const rows = await sbGet(`events?id=eq.${encodeURIComponent(id)}&select=id,gym_id,created_by,status,type,title,description,poster,disciplines,city,country,venue,address,starts_at,ends_at,capacity,capacity_full,ticket_price,ticket_tiers,currency,terms_text,payout_coach_id`);
+    const rows = await sbGet(`events?id=eq.${encodeURIComponent(id)}&select=id,gym_id,created_by,status,type,title,description,poster,disciplines,city,country,venue,address,starts_at,ends_at,capacity,capacity_full,ticket_price,ticket_tiers,currency,terms_text,payout_coach_id,min_age`);
     const ev = rows && rows[0];
     if (!ev) return res.status(404).json({ ok: false, error: 'not found' });
 
@@ -154,6 +154,9 @@ export default async function handler(req, res) {
         currency: ev.currency || 'CZK',
         tiers: parseTiers(ev),
         capacity: cap || null, taken, sold_out: soldOut,
+        // Bez tohohle by věkový limit na veřejné stránce nebyl vidět ani vynucený -- klient
+        // ho čte z d.min_age a rozhoduje podle něj i o tom, jestli smí prodat účastnické místo.
+        min_age: (ev.min_age != null ? Number(ev.min_age) : null),
         terms_text: ev.terms_text || '',
         gym_id: ev.gym_id || null, gym_name: gymName, provider_name: providerName,
         // host_* is the generic form; gym_name stays so nothing already reading it breaks.
