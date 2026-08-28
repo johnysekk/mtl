@@ -113,7 +113,7 @@ function dokladPdf(ME, buyer, kind, period, cur, data, test){
       const B = buyer || {};
       doc.fontSize(22).fillColor('#E11111').text('MTL');
       doc.moveDown(0.15).fontSize(15).fillColor('#111111').text('Doklad o provizi MTL');
-      doc.moveDown(0.1).fontSize(10).fillColor('#777777').text('Obdob\u00ed ' + periodLabel(period) + '  \u00b7  ' + (kind === 'gym' ? 'klub' : 'kou\u010d'));
+      doc.moveDown(0.1).fontSize(10).fillColor('#777777').text('Obdob\u00ed ' + periodLabel(period) + '  \u00b7  ' + (kind === 'gym' ? ('klub' + (B.name ? (' ' + B.name) : '')) : 'kou\u010d'));
       doc.moveDown(1);
 
       const yTop = doc.y;
@@ -126,6 +126,12 @@ function dokladPdf(ME, buyer, kind, period, cur, data, test){
 
       doc.fontSize(9).fillColor('#888888').text('ODB\u011aRATEL', 315, yTop, { width:230 });
       doc.fontSize(11).fillColor('#111111').text(B.legal_name || B.name || ph, 315, doc.y, { width:230 });
+      // Provozní název klubu pod právním. Provize se strhává ZA KAŽDÝ KLUB ZVLÁŠŤ, takže kdo má
+      // dva kluby pod jednou firmou, dostane dva doklady se stejným odběratelem a bez tohohle
+      // řádku by je nerozeznal -- ani on, ani jeho účetní.
+      if (kind === 'gym' && B.name && B.legal_name && B.name !== B.legal_name) {
+        doc.fontSize(10).fillColor('#555555').text('Klub: ' + B.name, 315, doc.y, { width:230 });
+      }
       if (B.tax_id) doc.fontSize(10).fillColor('#555555').text('I\u010cO: ' + B.tax_id, 315, doc.y, { width:230 });
       if (B.vat_id) doc.fontSize(10).fillColor('#555555').text('DI\u010c: ' + B.vat_id, 315, doc.y, { width:230 });
       if (B.billing_address) doc.fontSize(10).fillColor('#555555').text(B.billing_address, 315, doc.y, { width:230 });
@@ -248,7 +254,9 @@ export default async function handler(req, res) {
       // idempotent: one unified doklad per entity+period+currency
       // period is the DAY in daily mode and the month otherwise, so one receipt per entity per
       // charge either way -- a second run on the same day cannot issue a duplicate.
-      const ex = await sb(`commission_doklady?select=id&${col}=eq.${entityId}&period_month=eq.${period}&currency=eq.${encodeURIComponent(cur)}&kind=eq.unified&limit=1`);
+            // ilike i tady. Kontrola duplicity porovnává měnu s dřív vystavenými doklady, a kdyby se
+      // v nich lišila velikost písmen, nenajde je a vystaví doklad DRUHÝ RÁZ na to samé období.
+      const ex = await sb(`commission_doklady?select=id&${col}=eq.${entityId}&period_month=eq.${period}&currency=ilike.${encodeURIComponent(cur)}&kind=eq.unified&limit=1`);
       if (ex && ex.length) { skipped++; return; }
 
       // ---- FOREIGN-VAT GATE (toggle: platform_settings.require_vat_foreign) --------------------
@@ -291,7 +299,7 @@ export default async function handler(req, res) {
       body[col] = entityId;
       await sb('commission_doklady', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify(body) });
       issued++;
-      if (ownerId) { try { await notify(ownerId, 'doklad_unified', `Doklad k provizi MTL za ${periodLabel(period)} (${(data.total / 100).toFixed(2)} ${cur.toUpperCase()}) je připraven. Najdeš ho v účetnictví.`, { period, currency: cur }); } catch (e) {} }
+      if (ownerId) { try { await notify(ownerId, 'doklad_unified', `Doklad k provizi MTL${(kind === 'gym' && buyer && buyer.name) ? (' — ' + buyer.name) : ''} za ${periodLabel(period)} (${(data.total / 100).toFixed(2)} ${cur.toUpperCase()}) je připraven. Najdeš ho v účetnictví.`, { period, currency: cur }); } catch (e) {} }
       try {
         // Route the commission invoice to the RIGHT billing e-mail: a gym's on gyms.invoice_email,
         // a coach's on profiles.invoice_email (they can differ). Fall back to the owner's account e-mail.
@@ -305,7 +313,9 @@ export default async function handler(req, res) {
             const _buf = await dokladPdf(ME, buyer, kind, period, cur, data, DAILY);
             _att = [{ filename: `MTL-provize-${String(period).replace(/-/g,'')}.pdf`, content: _buf.toString('base64') }];
           } catch (e) { console.error('doklad pdf', e.message); }
-          await sendEmail(em, `Doklad o provizi MTL — ${periodShort(period)}`, dokladHtml(ME, buyer, kind, period, cur, data, DAILY), _att);
+          // Předmět nese název klubu. Kdo má dva kluby, dostane dva e-maily naráz a bez toho by musel
+          // otevírat přílohy, aby zjistil, který je který.
+          await sendEmail(em, `Doklad o provizi MTL — ${periodShort(period)}${(kind === 'gym' && buyer && buyer.name) ? (' — ' + buyer.name) : ''}`, dokladHtml(ME, buyer, kind, period, cur, data, DAILY), _att);
         } } catch (e) {}
     }
 

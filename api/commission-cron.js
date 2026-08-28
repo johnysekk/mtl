@@ -150,7 +150,9 @@ export default async function handler(req, res) {
               }catch(e){ markErr = markErr || String(e.message || e).slice(0, 200); }
             }
             /* doklad issued by unified-doklad-cron.js (bank + Stripe combined, one per month) */
-            await notify(g.owner_id, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) za ${_periodLabel(gymDaily(gid))} byla stržena z karty. Doklad najdeš v účetnictví.`, { amount, currency: cur, gym_id: gid });
+            // Název klubu do zprávy: strhává se za každý klub zvlášť, takže majiteli dvou klubů přijdou
+            // dvě notifikace naráz a bez jména by nepoznal, které peníze jsou které.
+            await notify(g.owner_id, 'commission_collected', `Provize MTL${g.name ? (' — ' + g.name) : ''} (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) za ${_periodLabel(gymDaily(gid))} byla stržena z karty. Doklad najdeš v účetnictví.`, { amount, currency: cur, gym_id: gid });
             collected++;
           } else {
             anyFail = true;
