@@ -197,6 +197,7 @@ export default async function handler(req, res) {
   }
   let ME = {}; try { const _ps = await sb('platform_settings?id=eq.1&select=*'); ME = (_ps && _ps[0]) || {}; } catch (e) {}
   let issued = 0, skipped = 0, deferred = 0;
+  let window_diag = null;
   try {
     // every collected commission row for the closed month (bank charged + Stripe live)
     // CHANGED. The daily branch used to select on created_at, i.e. what was SOLD today, while
@@ -210,6 +211,12 @@ export default async function handler(req, res) {
       : `commission_collected_at=gte.${dayStart}&commission_collected_at=lt.${dayEnd}`;
     const tx = await sb(`transactions?select=gym_id,coach_id,paid_to,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method&commission_status=in.(collected${preview?',pending,failed':''})&${DAILY?_dailyFilter:`commission_month=eq.${period}`}&mtl_fee=gt.0&limit=50000`);
 
+    // Posbírat diagnostiku hned tady -- tx a buckety jsou lokální pro tenhle blok a u návratové
+    // hodnoty už neexistují. Bez toho se z odpovědi nedá poznat, jestli filtr nic nenašel, nebo
+    // našel transakce s nulovou provizí.
+    window_diag = { daily: DAILY, test: TEST, dailyAny, dayStart, dayEnd,
+                    txFound: (tx || []).length,
+                    txWithFee: (tx || []).filter(r => (Number(r.mtl_fee) || 0) > 0).length };
     // bucket per provider + currency, with a per-(form,rate) breakdown
     const gymB = {}, coachB = {};
     const bucket = (store, id, cur) => { store[id] = store[id] || {}; store[id][cur] = store[id][cur] || { total: 0, rates: {} }; return store[id][cur]; };
@@ -312,7 +319,11 @@ export default async function handler(req, res) {
     for (const gid of gymIds) { const g = gymMap[gid]; if (!g) continue; for (const cur of Object.keys(gymB[gid])) await issue('gym', gid, g.owner_id, cur, gymB[gid][cur]); }
     for (const cid of Object.keys(coachB)) { for (const cur of Object.keys(coachB[cid])) await issue('coach', cid, cid, cur, coachB[cid][cur]); }
 
-    return res.status(200).json({ ok: true, period, issued, skipped, deferred });
+    // DIAGNOSTIKA. issued/skipped/deferred = 0 znamená, že se nenašlo nic k vystavení -- ale
+    // neřekne PROČ. Tohle ukáže, kolik transakcí filtr vůbec vrátil, kolik z nich mělo provizi
+    // a kolik poskytovatelů z toho vzniklo, takže je hned vidět, kde se to láme.
+    return res.status(200).json({ ok: true, period, issued, skipped, deferred,
+      diag: window_diag });
   } catch (e) {
     console.error('unified-doklad-cron', e.message);
     return res.status(500).json({ error: e.message });
