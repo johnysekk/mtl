@@ -44,6 +44,16 @@ const CZ_MONTHS = ['leden','\u00fanor','b\u0159ezen','duben','kv\u011bten','\u01
 function czMonthName(ym) { try { return CZ_MONTHS[Number(String(ym).split('-')[1]) - 1] || ym; } catch (e) { return ym; } }
 function prevMonth(ym) { const [y, m] = ym.split('-').map(Number); return new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 7); }
 
+// Popisek období v notifikaci. V denním režimu se strhává za DNEŠEK, ne za minulý měsíc --
+// hlásit "za červenec" u částky stržené v srpnu znamená, že se notifikace a doklad popisují
+// každý jinou věc a nejdou spárovat. Doklad se v denním režimu vystavuje na dnešní datum,
+// tak ať to notifikace říká taky.
+function _periodLabel(daily) {
+  const d = new Date();
+  if (daily) return d.toLocaleDateString('cs-CZ', { day: 'numeric', month: 'numeric', year: 'numeric' });
+  return czMonthName(prevMonth(d.toISOString().slice(0, 7)));
+}
+
 export default async function handler(req, res) {
   if (!SB || !KEY) return res.status(500).json({ error: 'env not set' });
   if (process.env.CRON_SECRET) {
@@ -128,7 +138,7 @@ export default async function handler(req, res) {
                 { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected', commission_collected_at: new Date().toISOString() }) });
             }
             /* doklad issued by unified-doklad-cron.js (bank + Stripe combined, one per month) */
-            await notify(g.owner_id, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) za ${czMonthName(prevMonth(curMonth))} byla stržena z karty. Doklad najdeš v účetnictví.`, { amount, currency: cur, gym_id: gid });
+            await notify(g.owner_id, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) za ${_periodLabel(gymDaily(gid))} byla stržena z karty. Doklad najdeš v účetnictví.`, { amount, currency: cur, gym_id: gid });
             collected++;
           } else {
             anyFail = true;
@@ -223,7 +233,7 @@ export default async function handler(req, res) {
                 { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected', commission_collected_at: new Date().toISOString() }) });
             }
             /* doklad issued by unified-doklad-cron.js (bank + Stripe combined, one per month) */
-            await notify(cid, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) za ${czMonthName(prevMonth(curMonth))} byla stržena z karty. Doklad najdeš v účetnictví.`, { coach_id: cid });
+            await notify(cid, 'commission_collected', `Provize MTL (${(amount / 100).toFixed(2)} ${cur.toUpperCase()}) za ${_periodLabel(coachDaily(cid))} byla stržena z karty. Doklad najdeš v účetnictví.`, { coach_id: cid });
             collected++;
           } else {
             anyFail = true;
