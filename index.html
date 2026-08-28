@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SSN makes the receipt notification land somewhere useful. It called openAccounting with no arguments, which opens the generic Podklady pro ucetni with no scope -- and the MTL commission doklady button only renders when _acFilter.gymId is set, so the one thing the person clicked through for was not on the screen. The notification now carries gym_id, coach_id and the club name, the handler opens that club accounting, and for a club it opens the receipts list straight away. Receipts and charges are per club throughout, so the club name is also on the PDF, in the e-mail subject and in the charge notification: an owner of two clubs gets two of each at once and could not tell them apart, since the customer block shows the legal entity, which is the same for both. -->
+<!-- MTL build: SSO removes the accounting view that has no subject. Opened with no filter it looks like the normal Podklady pro ucetni but has no receipts button, so anyone arriving there from a receipt notification found the one thing they came for missing; openAccounting now refuses a call without a club or coach and logs it as a caller bug, and the two places that made such a call are gone. A coach also gets the receipts button: openCommissionDoklady has always looked them up by coach_id when no club is given, but the button itself was conditioned on gymId, so a coach could never reach their own receipts. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -21720,7 +21720,9 @@ async function loadNotifications(append){
           if(typeof openAccounting==='function'){
             if(_dd.gym_id){ openAccounting({ gymId:_dd.gym_id }, (_dd.gym_name||'')||undefined); }
             else if(_dd.coach_id){ openAccounting({ coachId:_dd.coach_id }, (LANG==='en'?'Coach':'Kouč')); }
-            else openAccounting();
+            // Sem se dostane jen notifikace bez identifikátoru, což by nemělo nastat -- a kdyby
+            // ano, nezacílené účetnictví nemá tlačítko na doklady, takže by to nikam nevedlo.
+            else toast(LANG==='en'?'⚠️ Receipt not found':'⚠️ Doklad se nepodařilo najít');
           }
           // A rovnou otevřít seznam dokladů -- kvůli němu ta notifikace přišla.
           if(_dd.gym_id) setTimeout(function(){ try{ var b=document.getElementById('acComDoklady'); if(b) b.click(); }catch(e){} }, 500);
@@ -23227,10 +23229,18 @@ function _openCommissionDoklad(d){
     openAccounting({ gymId:_gid, payeeAccount:(_g&&_g.stripe_account)||undefined }, _t+((_g&&_g.name)||''));
     return;
   }
+  // Bez identifikátoru se účetnictví neotevírá. Nezacílený pohled vypadá jako obyčejné
+  // "Podklady pro účetní", ale chybí v něm tlačítko na doklady -- tedy přesně to, kvůli čemu
+  // sem člověk jde. Radši nic než obrazovka, která tváří se, že je správná.
   if(currentUser && typeof openAccounting==='function'){ openAccounting({ coachId: currentUser.id, paidTo:'coach' }, _t+(currentUser.name||'')); return; }
-  if(typeof openAccounting==='function') openAccounting();
+  toast(LANG==='en'?'⚠️ Pick a club or coach first':'⚠️ Nejdřív vyber klub nebo kouče');
 }
-function openAccounting(filter, title){ _acFilter=filter||{}; _acType='all'; _acMonth=new Date().toISOString().slice(0,7); if($('acTitle')) $('acTitle').textContent=title||(LANG==='en'?'Accounting export':'Podklady pro účetní'); openSheet('shAccounting'); loadAccounting(); }
+function openAccounting(filter, title){
+  // Účetnictví bez filtru nedává smysl: sečetlo by dohromady kouče a všechny jeho kluby a
+  // neukázalo by doklady, které jsou vždycky za jeden subjekt. Volání bez cíle je vždycky chyba
+  // volajícího, ne stav, který má uživatel vidět.
+  if(!filter || (!filter.gymId && !filter.coachId)){ console.warn('[MTL] openAccounting bez cile — ignoruji'); return; }
+  _acFilter=filter||{}; _acType='all'; _acMonth=new Date().toISOString().slice(0,7); if($('acTitle')) $('acTitle').textContent=title||(LANG==='en'?'Accounting export':'Podklady pro účetní'); openSheet('shAccounting'); loadAccounting(); }
 function acShiftMonth(d){ const p=_acMonth.split('-').map(Number); const dt=new Date(Date.UTC(p[0], p[1]-1+d, 1)); _acMonth=dt.toISOString().slice(0,7); loadAccounting(); }
 function _acTypeLabel(t){ const en=LANG==='en'; const map={ coach_1to1:en?'1:1 lesson':'Lekce 1:1', coach_inperson:en?'1:1 lesson':'Lekce 1:1', coach_online:en?'Online 1:1':'Online 1:1', online:en?'Online 1:1':'Online 1:1', inperson:en?'1:1 lesson':'Lekce 1:1', drop_in:(en?'Drop-in':'Jednorázový vstup'), membership:en?'Membership':'Členství', event_ticket:en?'Event':'Událost', course:en?'Course':'Kurz', merch:en?'Merch':'Zboží' }; return map[t]||(en?'Other':'Ostatní'); }
 function _acRowLabel(r){ const c=Number(r&&r._cap)||1; if(r&&r.type==='coach_inperson') return (LANG==='en'?('Lesson 1:'+c):('Lekce 1:'+c)); if(r&&r.type==='coach_online') return ('Online 1:'+c); return _acTypeLabel(r?r.type:''); }
@@ -23265,11 +23275,13 @@ async function loadAccounting(){
     <div style="margin:2px 0 12px;"><select id="acViewSel" style="width:100%;padding:11px 12px;border:1px solid var(--border);border-radius:10px;font-size:14px;font-weight:600;font-family:&quot;DM Sans&quot;;background:var(--surf);cursor:pointer;"><option value="cat">${LANG==='en'?'By category':'Podle kategorie'}</option><option value="tx">${LANG==='en'?'Transactions':'Transakce'} (${rows.length})</option></select></div>
     <div id="acCatView">${cats}</div>
     <button id="acExport" style="width:100%;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:&quot;DM Sans&quot;;margin:14px 0 8px;">\u2B07 ${LANG==='en'?'Export CSV (member IDs, no names)':'Export CSV (jen ID členů, bez jmen)'}</button>
-    ${(_acFilter&&_acFilter.gymId)?`<button id="acComDoklady" style="width:100%;padding:11px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:&quot;DM Sans&quot;;margin:0 0 8px;">📄 ${LANG==='en'?'MTL commission doklady':'Doklady provize MTL'}</button>`:''}
+    ${(_acFilter&&(_acFilter.gymId||_acFilter.coachId))?`<button id="acComDoklady" style="width:100%;padding:11px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:&quot;DM Sans&quot;;margin:0 0 8px;">📄 ${LANG==='en'?'MTL commission doklady':'Doklady provize MTL'}</button>`:''}
     <div id="acTxView" style="display:none;">${lines}</div>
     ${_acDisclaimer()}`;
   const eb=$('acExport'); if(eb) eb.onclick=()=>_acExportCsv(rows, cur, mLbl);
-  const _cd=$('acComDoklady'); if(_cd) _cd.onclick=function(){ openCommissionDoklady(_acFilter.gymId); };
+  // U kouče se předá null a funkce si sama sáhne na jeho doklady podle coach_id -- uměla to
+  // celou dobu, jen se k ní kouč nedostal, protože tlačítko bylo podmíněné gymId.
+  const _cd=$('acComDoklady'); if(_cd) _cd.onclick=function(){ openCommissionDoklady(_acFilter.gymId||null); };
   const _vs=$('acViewSel'); if(_vs) _vs.onchange=function(){ var v=_vs.value; if($('acCatView')) $('acCatView').style.display=(v==='cat')?'':'none'; if($('acTxView')) $('acTxView').style.display=(v==='tx')?'':'none'; };
   const _tsf=$('acTypeSel'); if(_tsf) _tsf.onchange=function(){ _acType=_tsf.value; loadAccounting(); };
 }
