@@ -135,12 +135,16 @@ export default async function handler(req, res) {
             // receipt, instead of guessing from created_at.
             {
               const _scope = gymDaily(gid) ? '' : `&commission_month=lt.${curMonth}`;
+              // ilike, ne eq: nahoře se měna převádí na malá písmena (`t.currency.toLowerCase()`),
+              // ale v databázi je uložená velkými -- takže `currency=eq.czk` nenašlo NIC. Provize
+              // se strhla z karty, PATCH proběhl bez chyby a označil nula řádků. Transakce zůstaly
+              // pending, unified-doklad-cron neměl co vystavit a nikomu nic nedošlo.
               // return=representation, ne minimal: potřebujeme vědět, KOLIK řádků se opravdu
               // orazítkovalo. Když se karta strhne a označení tiše selže, transakce zůstanou
               // pending, unified-doklad-cron nemá co vystavit a nikdo se to nedozví -- přesně
               // ten stav, kdy notifikace chodí a doklad ne.
               try{
-                const _upd = await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}${_scope}`,
+                const _upd = await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=ilike.${encodeURIComponent(cur)}${_scope}`,
                   { method: 'PATCH', prefer: 'return=representation', body: JSON.stringify({ commission_status: 'collected', commission_collected_at: new Date().toISOString() }) });
                 marked += (Array.isArray(_upd) ? _upd.length : 0);
               }catch(e){ markErr = markErr || String(e.message || e).slice(0, 200); }
@@ -150,7 +154,7 @@ export default async function handler(req, res) {
             collected++;
           } else {
             anyFail = true;
-            if (!gymDaily(gid)) await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=eq.pending&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
+            if (!gymDaily(gid)) await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=eq.pending&currency=ilike.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
             failed++;
           }
         }
@@ -237,7 +241,7 @@ export default async function handler(req, res) {
             // CHANGED: same as the gym branch above -- daily used to skip the mark and re-charge daily.
             {
               const _scope = coachDaily(cid) ? '' : `&commission_month=lt.${curMonth}`;
-              await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=eq.${encodeURIComponent(cur)}${_scope}`,
+              await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=ilike.${encodeURIComponent(cur)}${_scope}`,
                 { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'collected', commission_collected_at: new Date().toISOString() }) });
             }
             /* doklad issued by unified-doklad-cron.js (bank + Stripe combined, one per month) */
@@ -245,7 +249,7 @@ export default async function handler(req, res) {
             collected++;
           } else {
             anyFail = true;
-            if (!coachDaily(cid)) await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=eq.pending&currency=eq.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
+            if (!coachDaily(cid)) await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=eq.pending&currency=ilike.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
             failed++;
           }
         }
