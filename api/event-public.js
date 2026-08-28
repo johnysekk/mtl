@@ -30,7 +30,10 @@ function parseTiers(ev) {
   let t = null;
   try { t = (typeof ev.ticket_tiers === 'string') ? JSON.parse(ev.ticket_tiers || '[]') : ev.ticket_tiers; } catch (e) { t = null; }
   if (Array.isArray(t) && t.length) {
-    return t.map((x) => ({ name: String((x && x.name) || ''), price: Number((x && x.price) || 0) }));
+    // participant MUSÍ projít dál. Bez něj veřejná stránka nepozná účastnické místo od
+    // diváckého, takže neukáže blok pro zákonného zástupce a nevyžádá jméno ani datum
+    // narození nezletilého -- přesně to se dělo.
+    return t.map((x) => ({ name: String((x && x.name) || ''), price: Number((x && x.price) || 0), participant: !!(x && x.participant) }));
   }
   return [{ name: '', price: Number(ev.ticket_price || 0) }];
 }
