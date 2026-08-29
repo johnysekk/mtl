@@ -94,7 +94,7 @@ function dokladHtml(ME, buyer, kind, period, cur, data, test, testMode){
   // Doklad vystavený v testovacím režimu musí být jako testovací poznat i v e-mailu -- ten
   // člověku zůstane ve schránce i po smazání testovacích dat z databáze.
   const _tm = testMode
-    ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:12px;">\u{1F9EA} TESTOVAC\u00cd RE\u017dIM \u2014 nejde o da\u0148ov\u00fd doklad</div>'
+    ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:12px;">\u{1F9EA} TESTOVAC\u00cd RE\u017dIM \u2014 nejde o da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 re\u00e1ln\u00e9 transakci nedo\u0161lo</div>'
     : '';
   return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;color:#1a1a1a;">'
     +_tm
@@ -122,7 +122,7 @@ function dokladPdf(ME, buyer, kind, period, cur, data, test, testMode){
       if(testMode){
         doc.rect(50, doc.y, 495, 26).fillAndStroke('#FDECEC', '#F3C0C0');
         doc.fillColor('#8a1c1c').fontSize(10)
-           .text('TESTOVAC\u00cd RE\u017dIM \u2014 nejde o da\u0148ov\u00fd doklad', 58, doc.y - 18, { width: 480 });
+           .text('TESTOVAC\u00cd RE\u017dIM \u2014 nejde o da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 re\u00e1ln\u00e9 transakci nedo\u0161lo', 58, doc.y - 18, { width: 480 });
         doc.moveDown(1.2);
       }
       doc.fontSize(22).fillColor('#E11111').text('MTL');
