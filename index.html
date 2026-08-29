@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SUJ adds an info dot to the test banner explaining what survives the wipe. A tester needs to know before they invest an evening in it, not after: payments are not real, attendance and XP and payments are deleted before launch, and the clubs, schedules and prices they set up stay. Setting up a club is work; ticking off attendance is clicking, and saying so up front makes the deletion a fair deal rather than a surprise. -->
+<!-- MTL build: SUL completes the guardian record for 15-17 year olds. The consent flow already existed and fires at the first booking or membership rather than at signup, which is right -- but it only kept an e-mail address. An e-mail does not say who consented, and a club whose member is hurt or has not turned up needs to ring someone rather than write and wait until morning. The form now asks for the guardian full name and phone as well, stores them on the minor profile, and the club sees them at the top of the member detail with the number as a tap-to-call link. A minor with nothing on file is itself worth seeing, since without consent they cannot have booked. Needs guardian-contact.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -10674,7 +10674,12 @@ function _minorWaiverEmailForm(g, title, body, hash, version){
   ov.innerHTML='<div style="background:#fff;width:100%;max-width:480px;border-radius:18px;padding:20px 20px max(22px,env(safe-area-inset-bottom));font-family:\'DM Sans\';box-sizing:border-box;">'
     +'<div style="font-size:17px;font-weight:800;color:#141414;margin-bottom:4px;">'+(EN?'Guardian consent':'Souhlas zástupce')+'</div>'
     +'<div style="font-size:13px;color:#777;line-height:1.55;margin-bottom:14px;">'+(EN?('To train at '+gn+', your parent/guardian approves once. Enter their e-mail — we send them a link to approve. No account needed for them.'):('Abys mohl/a trénovat v '+gn+', rodič/zástupce to jednou schválí. Zadej jeho e-mail — pošleme mu odkaz ke schválení. Účet potřebovat nebude.'))+'</div>'
-    +'<input id="mwgEmail" type="email" autocomplete="off" placeholder="'+(EN?'Parent / guardian e-mail':'E-mail rodiče / zástupce')+'" style="width:100%;box-sizing:border-box;padding:14px;border:1.5px solid var(--border);border-radius:12px;font-family:\'DM Sans\';font-size:15px;margin-bottom:10px;">'
+    // Jméno a telefon navíc: samotný e-mail neřekne, KDO souhlasil, a když klub potřebuje rodiče
+    // sehnat (úraz, dítě nedorazilo), nemá na koho zavolat. Ukládá se to na profil mladistvého,
+    // takže to klub uvidí v detailu člena.
+    +'<input id="mwgName" type="text" autocomplete="off" placeholder="'+(EN?'Parent / guardian full name':'Jméno a příjmení rodiče / zástupce')+'" style="width:100%;box-sizing:border-box;padding:14px;border:1.5px solid var(--border);border-radius:12px;font-family:\'DM Sans\';font-size:15px;margin-bottom:8px;">'
+    +'<input id="mwgEmail" type="email" autocomplete="off" placeholder="'+(EN?'Parent / guardian e-mail':'E-mail rodiče / zástupce')+'" style="width:100%;box-sizing:border-box;padding:14px;border:1.5px solid var(--border);border-radius:12px;font-family:\'DM Sans\';font-size:15px;margin-bottom:8px;">'
+    +'<input id="mwgPhone" type="tel" autocomplete="off" placeholder="'+(EN?'Parent / guardian phone':'Telefon rodiče / zástupce')+'" style="width:100%;box-sizing:border-box;padding:14px;border:1.5px solid var(--border);border-radius:12px;font-family:\'DM Sans\';font-size:15px;margin-bottom:10px;">'
     +'<div id="mwgMsg" style="display:none;background:#FEECEC;color:var(--red);border-radius:10px;padding:10px;font-size:12.5px;font-weight:600;margin-bottom:10px;"></div>'
     +'<button id="mwgSend" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Send approval link':'Poslat odkaz ke schválení')+'</button>'
     +'<div style="text-align:center;margin-top:12px;"><span id="mwgFam" style="font-size:12.5px;color:var(--mid);cursor:pointer;text-decoration:underline;">'+(EN?'Or link a guardian account in Family':'Nebo si napoj účet zástupce v Rodině')+'</span></div>'
@@ -10688,6 +10693,13 @@ function _minorWaiverEmailForm(g, title, body, hash, version){
   ov.querySelector('#mwgSend').onclick=async()=>{
     const email=(ov.querySelector('#mwgEmail').value||'').trim().toLowerCase();
     if(!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){ showM(EN?'Enter a valid e-mail.':'Zadej platný e-mail.'); return; }
+    const _gName=((ov.querySelector('#mwgName')||{}).value||'').trim();
+    const _gPhone=((ov.querySelector('#mwgPhone')||{}).value||'').trim();
+    if(_gName.length<3){ showM(EN?'Enter the guardian full name.':'Zadej jméno a příjmení zástupce.'); return; }
+    if(_gPhone.replace(/\D/g,'').length<9){ showM(EN?'Enter a valid phone number.':'Zadej platné telefonní číslo.'); return; }
+    // Uložit na profil mladistvého, aby to klub viděl v detailu člena. Při úrazu nebo když dítě
+    // nedorazí, potřebuje klub zavolat -- ne psát e-mail a čekat do rána.
+    try{ await supaClient.from('profiles').update({ guardian_name:_gName, guardian_email:email, guardian_phone:_gPhone }).eq('id', currentUser.id); }catch(e){ console.log('[guardian save]', e&&e.message); }
     const btn=ov.querySelector('#mwgSend'); btn.disabled=true; btn.style.opacity='.6'; btn.textContent=EN?'Sending…':'Odesílám…';
     try{
       const ses=await supaClient.auth.getSession(); const tok=ses&&ses.data&&ses.data.session&&ses.data.session.access_token;
@@ -22306,13 +22318,50 @@ function _syncTestModeBtn(){
   btn.style.color = on ? '#8a1c1c' : '#0e6b3d';
   btn.style.borderColor = on ? '#F3C0C0' : '#A8E6C0';
 }
+
+// ── ÚKLID TESTOVACÍCH DAT PŘI PŘECHODU NA OSTRO ──────────────────────────────────────────────
+// Beta tester si během testu neodtrénoval padesát hodin -- padesátkrát klikl. Kdyby to zůstalo,
+// klub by si první měsíc otevřel přehled a viděl testovací docházku smíchanou se skutečnou,
+// právě když posuzuje, jestli mu appka říká pravdu.
+//
+// Maže se to samé co Nuke, ALE cíleně: kde je sloupec test_mode, jede se podle něj, takže se
+// úklid dá pustit i kdyby už mezitím vzniklo něco ostrého. Zbytek (rezervace lekcí, hodnocení,
+// zprávy) razítko nemá a maže se celý -- v testovacím provozu nic jiného nevzniklo.
+//
+// NEMAŽE profily, kluby, rozvrhy, ceny ani členské plány. To je práce, kterou tester odvedl.
+const _WIPE_STAMPED = ['transactions','commission_doklady','bookings','gym_bookings',
+  'gym_memberships','gym_attendance','event_tickets','cohort_members','merch_orders'];
+const _WIPE_ALL = ['gym_class_reservations','gym_excuses','event_ratings','gym_ratings',
+  'notifications','messages','conversations','referral_credits','demand_signals',
+  'hotspot_contacts','circle_markets','cohort_payments','waiver_acceptances'];
+async function _wipeTestData(){
+  const EN=LANG==='en';
+  const ok=[], fail=[];
+  for(const t of _WIPE_STAMPED){
+    try{ const { error }=await supaClient.from(t).delete().eq('test_mode', true);
+      if(error) fail.push(t+': '+error.message); else ok.push(t);
+    }catch(e){ fail.push(t+': '+((e&&e.message)||e)); }
+  }
+  for(const t of _WIPE_ALL){
+    try{ const { error }=await supaClient.from(t).delete().not('id','is',null);
+      if(error) fail.push(t+': '+error.message); else ok.push(t);
+    }catch(e){ fail.push(t+': '+((e&&e.message)||e)); }
+  }
+  // Hodnocení a kredity jsou stav na profilu, ne řádky -- nulují se zvlášť, jinak by po testu
+  // zůstalo koučovi hodnocení od lidí, kteří u něj nikdy nebyli.
+  try{ await supaClient.from('profiles').update({ rating:'5.0', reviews:0, text_reviews:0, disc_ratings:{}, student_credits:0, coach_credits:0 }).not('id','is',null); ok.push('profiles.ratings'); }
+  catch(e){ fail.push('profiles.ratings: '+((e&&e.message)||e)); }
+  console.log('[wipeTest] ok:',ok,'| fail:',fail);
+  if(fail.length) toast('\u26a0\ufe0f '+(EN?'Cleanup finished with errors — see console':'Úklid dokončen s chybami — viz konzole'));
+}
+
 async function _toggleTestMode(){
   const EN=LANG==='en'; const FOUNDER='7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
   if(!currentUser || currentUser.id!==FOUNDER){ toast(EN?'Founder only':'Jen founder'); return; }
   const on=!!window._TEST_MODE;
   if(on){
     // Going LIVE is the money-critical direction -> require typing OSTRO.
-    const ans=prompt(EN?'Switch to LIVE? Real payments and receipts resume. Type OSTRO to confirm.':'P\u0159epnout na OSTRO? Spust\u00ed se re\u00e1ln\u00e9 platby a doklady. Napi\u0161 OSTRO pro potvrzen\u00ed.');
+    const ans=prompt(EN?'Switch to LIVE? All test data (payments, receipts, attendance, XP) is deleted. Clubs, schedules and prices stay. Type OSTRO to confirm.':'P\u0159epnout na OSTRO? Smažou se VŠECHNA testovací data (platby, doklady, docházka, XP). Kluby, rozvrhy a ceny zůstanou. Napiš OSTRO pro potvrzení.');
     if(!ans || ans.trim().toUpperCase()!=='OSTRO'){ toast(EN?'Cancelled':'Zru\u0161eno'); return; }
   } else {
     if(!confirm(EN?'Switch to TEST mode? No real payments will be processed.':'P\u0159epnout na TESTOVAC\u00cd re\u017eim? \u017d\u00e1dn\u00e9 re\u00e1ln\u00e9 platby se neprovedou.')) return;
@@ -22322,6 +22371,10 @@ async function _toggleTestMode(){
     if(error){ toast('\u26a0\ufe0f '+error.message); return; }
     window._TEST_MODE = !on;
     _renderTestBanner(!on); _syncTestModeBtn();
+    // Přechod na ostro uklidí testovací data. Maže se jen to, co nese razítko test_mode --
+    // tabulky bez razítka (rezervace lekcí, hodnocení, zprávy) se čistí podle toho, že v testu
+    // nic ostrého nevzniklo. Kluby, rozvrhy, ceny a profily zůstávají.
+    if(on){ await _wipeTestData(); }
     toast(!on ? (EN?'\ud83e\uddea TEST mode ON':'\ud83e\uddea TESTOVAC\u00cd re\u017eim ZAPNUT') : (EN?'\ud83d\ude80 LIVE':'\ud83d\ude80 OSTR\u00dd provoz'), 1);
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
 }
@@ -25672,7 +25725,7 @@ async function openGymMemberDetail(sid, name){
   try{ const { data } = await supaClient.from('gym_memberships').select('*').eq('gym_id',_myGymData.id).eq('student_id',sid).order('created_at',{ascending:true}); mems=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_attendance').select('class_date,class_name').eq('gym_id',_myGymData.id).eq('student_id',sid); att=data||[]; }catch(e){}
   let _belts={}; let _mdFighter=false, _mdRec=null;
-  try{ const { data: _pr } = await supaClient.from('profiles').select('belts,is_fighter,fight_record').eq('id',sid).single(); _belts=beltsOf(_pr&&_pr.belts); _mdFighter=!!(_pr&&_pr.is_fighter); try{ _mdRec=_pr&&_pr.fight_record?(typeof _pr.fight_record==='string'?JSON.parse(_pr.fight_record):_pr.fight_record):null; }catch(_){ _mdRec=null; } }catch(e){}
+  try{ const { data: _pr } = await supaClient.from('profiles').select('belts,is_fighter,fight_record,is_minor,guardian_name,guardian_email,guardian_phone').eq('id',sid).single(); _belts=beltsOf(_pr&&_pr.belts); _mdFighter=!!(_pr&&_pr.is_fighter); try{ _mdRec=_pr&&_pr.fight_record?(typeof _pr.fight_record==='string'?JSON.parse(_pr.fight_record):_pr.fight_record):null; }catch(_){ _mdRec=null; } }catch(e){}
   try{ const { data } = await supaClient.from('gym_bookings').select('id,status').eq('gym_id',_myGymData.id).eq('student_id',sid); drops=data||[]; }catch(e){}
   const fmtD=(d)=>d?new Date(d).toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric'}):'—';
   const accOf=(m)=>{ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
@@ -25681,7 +25734,23 @@ async function openGymMemberDetail(sid, name){
   const sinceTs=mems.length?Math.min(...mems.map(m=>new Date(m.created_at||Date.now()).getTime())):null;
   const monthsMember = sinceTs?Math.max(0,Math.round((Date.now()-sinceTs)/(86400000*30.4))):0;
   const stat=(ic,lbl,val,col)=>`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">${ic}</div><div class="prow-lbl">${lbl}</div></div><span class="prow-val"${col?` style="color:${col};"`:''}>${val}</span></div>`;
-  let html=`<div class="prow-group">`
+  // Kontakt na zástupce u mladistvého. Klub ho musí mít po ruce -- při úrazu se nevolá e-mailem.
+  // Zobrazuje se nahoře, ne mezi statistikami; když ho člen nemá vyplněný, je to samo o sobě
+  // informace, protože bez souhlasu si nemohl nic rezervovat.
+  const _isMinorMember=!!(_pr && _pr.is_minor);
+  const _gN=(_pr&&_pr.guardian_name)||'', _gE=(_pr&&_pr.guardian_email)||'', _gP=(_pr&&_pr.guardian_phone)||'';
+  let html='';
+  if(_isMinorMember){
+    html+='<div style="background:#FFF8E6;border:1px solid #F0DFA8;border-radius:12px;padding:12px 14px;margin-bottom:12px;">'
+      +'<div style="font-size:11px;font-weight:800;color:#7a5a1a;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">'+(EN?'Minor · guardian':'Mladistvý · zákonný zástupce')+'</div>'
+      +((_gN||_gE||_gP)
+        ? ('<div style="font-size:14px;font-weight:700;color:var(--dark);">'+escapeHtml(_gN||'—')+'</div>'
+           +(_gP?('<div style="font-size:13px;margin-top:3px;"><a href="tel:'+escapeHtml(_gP.replace(/\s+/g,''))+'" style="color:#635BFF;font-weight:700;text-decoration:none;">'+escapeHtml(_gP)+'</a></div>'):'')
+           +(_gE?('<div style="font-size:12.5px;margin-top:2px;"><a href="mailto:'+escapeHtml(_gE)+'" style="color:var(--mid);text-decoration:none;">'+escapeHtml(_gE)+'</a></div>'):''))
+        : ('<div style="font-size:12.5px;color:#7a5a1a;line-height:1.5;">'+(EN?'No guardian on file yet — they have not booked or joined anything.':'Zástupce zatím nevyplněn — člen si nic nerezervoval ani nekoupil.')+'</div>'))
+      +'</div>';
+  }
+  html+=`<div class="prow-group">`
     +stat('🥋', EN?'Trainings attended (total)':'Odtrénováno (celkem)', totalTrain, '#7A3FBF')
     +stat('🥊', EN?'Single classes bought':'Jednorázových lekcí', drops.length)
     +stat('📅', EN?'Member for':'Členem už', monthsMember+(EN?(monthsMember===1?' month':' months'):' měs.'))
@@ -25965,11 +26034,6 @@ async function openMilestones(){
   const tiers=(prefix,emoji,unit,count,arr)=>arr.map(function(t){ if(count>=t) unlocked[prefix+'_'+t]=1; return badge(prefix+'_'+t,emoji,t.toLocaleString()+' '+unit,count>=t); }).join('');
   const T_STUD=[100,500,1000,5000,25000,100000,500000], T_COACH=[100,200,500,1000,2000,5000,10000,20000,50000,100000], T_GYM=[10,20,50,100,200,500,1000,2000,5000,10000], T_BOOK=[500,1000,5000,25000,100000,500000], T_ONLINE=[250,500,2500,10000,50000];
   const now=new Date(); const isP=(b)=>b.type==='online'?!!b.fulfilled:(b.student_confirmed===true && b.coach_confirmed===true);
-  // FARMENÍ XP V TESTU. V testovacím režimu se neplatí doopravdy, takže by si člověk mohl
-  // odklikat padesát tréninků a po spuštění s tím sedět nahoře v žebříčku. Nic se ale nemaže --
-  // tester má svou historii vidět. Proto: v testu se počítá všechno, po přepnutí na ostro se
-  // testovací záznamy přestanou počítat. Náskok tím zmizí, historie zůstane.
-  const _noFarm=(q)=> window._TEST_MODE ? q : q.or('test_mode.is.null,test_mode.eq.false');
   const isCoach = me.coach_status==='approved'; let _discCount={};
   let vd=[]; try{ vd=me.verify_disciplines?(typeof me.verify_disciplines==='string'?JSON.parse(me.verify_disciplines):me.verify_disciplines):[]; if(!Array.isArray(vd))vd=[]; }catch(e){ vd=[]; }
   const isAmb = vd.length>0;
@@ -25984,9 +26048,9 @@ async function openMilestones(){
 
   let sInner='';
   try{
-    const { data: bk } = await _noFarm(supaClient.from('bookings').select('id,type,status,fulfilled,training_date,training_time,coach_id,discipline,student_confirmed,coach_confirmed').eq('student_id',me.id));
+    const { data: bk } = await supaClient.from('bookings').select('id,type,status,fulfilled,training_date,training_time,coach_id,discipline,student_confirmed,coach_confirmed').eq('student_id',me.id);
     const hp=(bk||[]).filter(b=>b.status==='active'&&isP(b)); const online=hp.filter(b=>b.type==='online').length; const coaches=new Set(hp.map(b=>b.coach_id).filter(Boolean)).size;
-    let gymTrain=0; const discSet=new Set(); const _noDiscGyms=new Set(); try{ const { data: ga } = await _noFarm(supaClient.from('gym_attendance').select('id,discipline,gym_id').eq('student_id',me.id).is('child_name',null)); gymTrain=(ga||[]).length; (ga||[]).forEach(a=>{ if(a.discipline){ discSet.add(a.discipline); _discCount[a.discipline]=(_discCount[a.discipline]||0)+1; } else if(a.gym_id) _noDiscGyms.add(a.gym_id); }); }catch(e){}
+    let gymTrain=0; const discSet=new Set(); const _noDiscGyms=new Set(); try{ const { data: ga } = await supaClient.from('gym_attendance').select('id,discipline,gym_id').eq('student_id',me.id).is('child_name',null); gymTrain=(ga||[]).length; (ga||[]).forEach(a=>{ if(a.discipline){ discSet.add(a.discipline); _discCount[a.discipline]=(_discCount[a.discipline]||0)+1; } else if(a.gym_id) _noDiscGyms.add(a.gym_id); }); }catch(e){}
     if(_noDiscGyms.size){ try{ const { data: _gg } = await supaClient.from('gyms').select('id,disciplines').in('id',[..._noDiscGyms]); (_gg||[]).forEach(g2=>{ let dl=[]; try{ dl=g2.disciplines?(typeof g2.disciplines==='string'?JSON.parse(g2.disciplines):g2.disciplines):[]; }catch(e){} if(Array.isArray(dl)&&dl.length) discSet.add(dl[0]); }); }catch(e){} }
     hp.forEach(b=>{ if(b.discipline){ discSet.add(b.discipline); _discCount[b.discipline]=(_discCount[b.discipline]||0)+1; } }); const sports=discSet.size;
     const total=hp.filter(b=>b.type!=='online').length+gymTrain;
@@ -26019,7 +26083,7 @@ async function openMilestones(){
 
   if(ownsGym && myGym){ let gInner=''; try{
     let members=0,atts=0; try{ const { data: m } = await supaClient.from('gym_memberships').select('student_id,child_name').eq('gym_id',myGym.id).in('status',['active','cancelling']); members=new Set((m||[]).map(function(x){return (x.student_id||'')+'|'+(x.child_name||'');})).size; }catch(e){}
-    try{ const { data: a } = await _noFarm(supaClient.from('gym_attendance').select('id').eq('gym_id',myGym.id)); atts=(a||[]).length; }catch(e){}
+    try{ const { data: a } = await supaClient.from('gym_attendance').select('id').eq('gym_id',myGym.id); atts=(a||[]).length; }catch(e){}
     gInner+=`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">${counter('👥',EN?'members':'členů',members)}${counter('🥋',EN?'attend.':'docházek',atts)}</div>`;
     gInner+=topOf([['g_first','🏠',EN?'First member':'První člen',members>=1],['g_10','📈',EN?'10 members':'10 členů',members>=10],['g_50','📈',EN?'50 members':'50 členů',members>=50],['g_100','📈',EN?'100 members':'100 členů',members>=100],['g_200','🏆',EN?'200 members':'200 členů',members>=200]])+topOf([['g_att','🥋',EN?'1000 attendances':'1000 docházek',atts>=1000],['g_att5','🥋',EN?'5000 attendances':'5000 docházek',atts>=5000]]);
   }catch(e){} html+=wrap('🏛️ '+(EN?'Club milestones':'Klub milníky')+' — '+escapeHtml(myGym.name||''), gInner, false); }
