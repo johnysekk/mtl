@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: STC fixes three things reported from the screen. Message members claimed there was nobody to write to while a member sat right there: the query asked for a column called plan, but on gym_memberships it is plan_name, so PostgREST rejected the whole request, the error fell into a catch and the empty result read as an empty club. The error is now logged rather than swallowed. A membership notification also flashed the members tab and then jumped to the schedule -- the requested tab was cleared after the first render, and in dashmode Spravovat klub renders a second time right after opening, so that pass found nothing and fell back to tab zero; the request now survives for a moment rather than a single render. And the labels read better: MLADISTVY rather than NEZLETILY, and naposledy spelled out instead of the abbreviation. -->
+<!-- MTL build: STD picks the audience by how often someone trains rather than by whether they hold a membership. Member versus drop-in describes how a person pays, not the relationship: a club that offers no memberships at all can still have forty people in three times a week, and they behave exactly like members. The groups carry their own thresholds in the label -- Regulars 4+ visits in 60 days, Occasional 1-3, Not seen lately nothing in 60 days but something within six months -- so there is nothing to guess and nothing that reads as a verdict on the person. Anyone with an active membership counts as a regular regardless of attendance, since they are paying. Guests with no account are left out because they have no inbox, and nobody past six months is offered at all. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -16197,16 +16197,9 @@ async function renderGymMembers(){
       const _k=(window._gmMembKid||null);
       if(_k==='lapsed'){ _gmBulkMessage(window._gmLapsed||[], (LANG==='en'?'Just lapsed':'Nedávno doběhlo')); return; }
       bb.disabled=true; bb.textContent='…';
-      let _all=[];
-      // plan_name, ne plan -- ten sloupec neexistuje a PostgREST kvůli němu odmítne CELÝ dotaz.
-      // Chyba spadla do catch, seznam vyšel prázdný a appka hlásila "Není komu psát", přestože
-      // člen na obrazovce byl.
-      try{ const { data, error }=await supaClient.from('gym_memberships').select('student_id,student_name,child_name,plan_name').eq('gym_id',_myGymData.id).in('status',['active','cancelling']).or('paid_to.neq.coach,paid_to.is.null');
-        if(error) console.log('[gm bulk]', error.message);
-        _all=(data||[]).map(function(x){ return { student_id:x.student_id, student_name:x.student_name, child_name:x.child_name, plan:x.plan_name }; });
-      }catch(e){ console.log('[gm bulk]', e&&e.message); }
+      const _grp=await _gmAudienceGroups(_myGymData.id);
       bb.disabled=false; bb.textContent='\uD83D\uDCAC '+(LANG==='en'?'Message members':'Napsat členům zprávu');
-      _gmBulkMessage(_all, (LANG==='en'?'Active members':'Aktivní členové'));
+      _gmPickAudience(_grp);
     }; }
   { const si=box.querySelector('#gmSearchInp'); if(si){ si.oninput=function(){ const v=this.value; clearTimeout(window._gmSearchT); window._gmSearchT=setTimeout(function(){ window._gmSearch=v; window._gmPage=0; renderGymMembers(); }, 320); }; } const ss=box.querySelector('#gmSizeSel'); if(ss){ ss.onchange=function(){ window._gmSize=(this.value==='50'?50:20); window._gmPage=0; renderGymMembers(); }; } const pv=box.querySelector('#gmPrev'); if(pv){ pv.onclick=function(){ if((window._gmPage||0)>0){ window._gmPage=(window._gmPage||0)-1; renderGymMembers(); } }; } const nx=box.querySelector('#gmNext'); if(nx){ nx.onclick=function(){ window._gmPage=(window._gmPage||0)+1; renderGymMembers(); }; } }
   if((window._gmSearch||'').length){ const _si=box.querySelector('#gmSearchInp'); if(_si){ try{ _si.focus(); const _l=_si.value.length; _si.setSelectionRange(_l,_l); }catch(e){} } }
@@ -26210,6 +26203,83 @@ async function openGymConvos(){
   }; });
 }
 
+
+// ── SKUPINY PODLE CHOVÁNÍ, NE PODLE ČLENSTVÍ ─────────────────────────────────────────────────
+// "Člen vs. drop-inista" je forma platby, ne vztah. Existují kluby, které členství vůbec
+// nenabízejí a přesto tam čtyřicet lidí chodí třikrát týdně -- ti se chovají jako členové.
+// Proto se dělí podle toho, jak často někdo chodí.
+//
+// Prahy jsou přímo v názvu skupiny, aby nešlo hádat, co která znamená.
+// Kdo má aktivní členství, je pravidelný z definice -- i kdyby zrovna měsíc nedorazil.
+async function _gmAudienceGroups(gid){
+  const out={ reg:[], occ:[], gone:[] };
+  if(!gid) return out;
+  const d60=new Date(Date.now()-60*86400000).toISOString().slice(0,10);
+  const d180=new Date(Date.now()-180*86400000).toISOString().slice(0,10);
+  let att=[], memb=new Set(), memNames={};
+  try{
+    const { data }=await supaClient.from('gym_attendance').select('student_id,student_name,class_date').eq('gym_id',gid).gte('class_date',d180);
+    att=data||[];
+  }catch(e){ console.log('[aud att]', e&&e.message); }
+  try{
+    const { data }=await supaClient.from('gym_memberships').select('student_id,student_name').eq('gym_id',gid).in('status',['active','cancelling']);
+    (data||[]).forEach(function(m){ if(m.student_id){ memb.add(String(m.student_id)); memNames[String(m.student_id)]=m.student_name||''; } });
+  }catch(e){ console.log('[aud memb]', e&&e.message); }
+
+  const by={};
+  att.forEach(function(a){
+    const sid=String(a.student_id||''); if(!sid) return;   // host bez účtu nemá schránku
+    if(!by[sid]) by[sid]={ student_id:sid, student_name:a.student_name||'', n60:0, last:'' };
+    if((a.class_date||'')>=d60) by[sid].n60++;
+    if((a.class_date||'')>by[sid].last) by[sid].last=a.class_date||'';
+  });
+  // Aktivní člen patří mezi pravidelné i bez docházky -- platí, tedy vztah trvá.
+  memb.forEach(function(sid){ if(!by[sid]) by[sid]={ student_id:sid, student_name:memNames[sid]||'', n60:99, last:'' }; else by[sid].n60=Math.max(by[sid].n60,4); });
+
+  Object.values(by).forEach(function(x){
+    if(x.n60>=4) out.reg.push(x);
+    else if(x.n60>=1) out.occ.push(x);
+    else out.gone.push(x);   // za 60 dní nic, ale do 180 dní ano
+  });
+  const bylast=(a,b)=>String(b.last||'').localeCompare(String(a.last||''));
+  out.reg.sort(bylast); out.occ.sort(bylast); out.gone.sort(bylast);
+  return out;
+}
+
+
+// Výběr skupiny. Prahy jsou v názvu, takže se nedá splést, co která znamená -- a klub, který
+// členství nenabízí, tu uvidí své lidi stejně jako klub, který je má.
+function _gmPickAudience(grp){
+  const EN=LANG==='en';
+  const opts=[
+    { k:'reg',  n:(grp.reg||[]).length,  l:(EN?'Regulars':'Pravidelní'),      s:(EN?'4+ visits in 60 days':'4+ návštěvy za 60 dní') },
+    { k:'occ',  n:(grp.occ||[]).length,  l:(EN?'Occasional':'Občasní'),        s:(EN?'1–3 visits in 60 days':'1–3 návštěvy za 60 dní') },
+    { k:'gone', n:(grp.gone||[]).length, l:(EN?'Not seen lately':'Dlouho nebyli'), s:(EN?'nothing in 60 days, last within 6 months':'nic za 60 dní, naposledy do půl roku') },
+  ];
+  if(!opts.some(o=>o.n)){ toast(EN?'⚠️ Nobody to write to':'⚠️ Není komu psát'); return; }
+  let ov=document.getElementById('gmAudOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='gmAudOv';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100068;display:flex;align-items:flex-end;justify-content:center;';
+  let h='<div style="background:var(--bg);border-radius:18px 18px 0 0;max-width:520px;width:100%;padding:20px;">';
+  h+='<div style="font-size:17px;font-weight:800;margin-bottom:3px;">'+(EN?'Who to write to':'Komu psát')+'</div>';
+  h+='<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:14px;">'+(EN?'Grouped by how often they train, not by whether they hold a membership — a club with no memberships has regulars too.':'Rozdělené podle toho, jak často chodí, ne podle členství — i klub bez členství má své stálice.')+'</div>';
+  opts.forEach(function(o){
+    const off=!o.n;
+    h+='<button class="gmAud" data-k="'+o.k+'" '+(off?'disabled':'')+' style="width:100%;text-align:left;padding:13px 15px;margin-bottom:9px;border-radius:12px;cursor:'+(off?'default':'pointer')+';font-family:\'DM Sans\';border:1px solid var(--border);background:var(--surf);opacity:'+(off?'.45':'1')+';">'
+      +'<div style="font-size:14px;font-weight:800;">'+o.l+' <span style="color:var(--mid);font-weight:700;">('+o.n+')</span></div>'
+      +'<div style="font-size:11.5px;color:var(--mid);margin-top:2px;">'+o.s+'</div></button>';
+  });
+  h+='<button id="gmAudX" style="width:100%;margin-top:2px;padding:11px;background:none;border:none;color:var(--mid);font-size:13px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Cancel':'Zrušit')+'</button></div>';
+  ov.innerHTML=h; document.body.appendChild(ov);
+  ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
+  ov.querySelector('#gmAudX').onclick=function(){ ov.remove(); };
+  ov.querySelectorAll('.gmAud').forEach(function(b){ b.onclick=function(){
+    const k=b.dataset.k; const o=opts.find(x=>x.k===k);
+    ov.remove();
+    _gmBulkMessage(grp[k]||[], o.l+' · '+o.s);
+  }; });
+}
+
 async function _gmBulkMessage(list, ctxLabel){
   const EN=LANG==='en';
   const _l=(list||[]).filter(function(m){ return m && m.student_id; });
@@ -26226,7 +26296,8 @@ async function _gmBulkMessage(list, ctxLabel){
   const _inp="width:100%;box-sizing:border-box;padding:11px 13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';background:#fff;";
   let h='<div style="background:var(--bg);border-radius:18px 18px 0 0;max-width:520px;width:100%;padding:20px;max-height:88vh;overflow-y:auto;">';
   h+='<div style="font-size:17px;font-weight:800;margin-bottom:3px;">'+(EN?'Announcement':'Oznámení')+'</div>';
-  h+='<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:12px;">'+(EN?'Goes out as a notification. It is one-way — anyone who wants to reply opens a private chat with you themselves.':'Odejde jako notifikace. Je jednosměrné — kdo bude chtít odpovědět, otevře si s tebou soukromý chat sám.')+(ctxLabel?(' · '+escapeHtml(ctxLabel)):'')+'</div>';
+  h+='<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:12px;">'+(EN?'Goes out as a notification. It is one-way — anyone who wants to reply opens a private chat with you themselves.':'Odejde jako notifikace. Je jednosměrné — kdo bude chtít odpovědět, otevře si s tebou soukromý chat sám.')+'</div>';
+  if(ctxLabel) h+='<div style="display:inline-block;font-size:11.5px;font-weight:700;background:var(--surf);border:1px solid var(--border);border-radius:8px;padding:4px 9px;margin-bottom:12px;color:var(--mid);">'+escapeHtml(ctxLabel)+'</div>';
   // Komu se píše, si vybere sám. Odeslat rovnou celému seznamu je pohodlné přesně do chvíle,
   // kdy tam je někdo, komu psát nechtěl -- a to se odvolat nedá.
   h+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">'
@@ -26249,7 +26320,10 @@ async function _gmBulkMessage(list, ctxLabel){
       +'</div>';
   }
   // Dvě nezávislé volby. "Oznámení klubu" mění, KDO to říká; "může odpovědět" mění, KUDY to jde.
-  if(canAsClub) h+='<label style="display:flex;gap:9px;align-items:flex-start;font-size:13px;line-height:1.45;margin-bottom:8px;cursor:pointer;"><input type="checkbox" id="gmAnn" style="margin-top:2px;"><span>'+(EN?'Club announcement':'Oznámení klubu')+'<br><span style="font-size:11.5px;color:var(--mid);">'+(EN?'Shows as the club, not as you.':'Zobrazí se jako klub, ne jako ty.')+'</span></span></label>';
+  // U "Dlouho nebyli" se oznámení klubu nenabízí. "Chybíš nám" má poslat člověk, ne instituce --
+  // od klubu jako subjektu to zní jako hromadný mail, což to sice je, ale nemá tak vypadat.
+  const _isWinback=/Dlouho nebyli|Not seen lately/.test(String(ctxLabel||''));
+  if(canAsClub && !_isWinback) h+='<label style="display:flex;gap:9px;align-items:flex-start;font-size:13px;line-height:1.45;margin-bottom:8px;cursor:pointer;"><input type="checkbox" id="gmAnn" style="margin-top:2px;"><span>'+(EN?'Club announcement':'Oznámení klubu')+'<br><span style="font-size:11.5px;color:var(--mid);">'+(EN?'Shows as the club, not as you.':'Zobrazí se jako klub, ne jako ty.')+'</span></span></label>';
   h+='<label style="display:flex;gap:9px;align-items:flex-start;font-size:13px;line-height:1.45;margin-bottom:12px;cursor:pointer;"><input type="checkbox" id="gmCanReply" checked style="margin-top:2px;"><span>'+(EN?'Members can reply':'Student může odpovědět')+'<br><span style="font-size:11.5px;color:var(--mid);">'+(EN?'Off: goes as a notification only, no chat thread opens.':'Vypnuto: půjde jen jako notifikace, žádné vlákno nevznikne.')+'</span></span></label>';
   h+='<textarea id="gmBulkTxt" rows="5" placeholder="'+(EN?'Write your message…':'Napiš zprávu…')+'" style="'+_inp+'resize:vertical;margin-bottom:6px;"></textarea>';
   h+='<div style="font-size:11.5px;color:var(--light);line-height:1.5;margin-bottom:12px;">'+(EN?'Tip: {name} inserts the person\'s name.':'Tip: {jmeno} doplní jméno toho člověka.')+'</div>';
