@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SUY stops the profile write failing in silence. It sat inside an empty catch, so when the database refused it the registration carried on regardless: no row in profiles, no is_minor, no beta_status, and the person ended up inside the app as an ordinary adult with no profile at all. That is why the waiting room never appeared and why the coach deck stayed visible to a minor -- the flags that drive both were never stored. The error now stops the flow and says what went wrong, which will name the real cause; if it is a policy on profiles, that is where the fix belongs rather than anywhere in this file. -->
+<!-- MTL build: SUZ closes the two ways a new account still walked straight in. Signing in with no profile row fell to a rescue branch that created one without beta_status or is_minor -- the very fields the waiting room and the minor lock read -- so anyone whose registration had failed simply logged in again and was let through as an adult. And test mode is fetched in the background without being awaited, so on a fast login enterApp ran while _TEST_MODE was still false and the gate had nothing to act on; both the gate and the minor lock are now re-evaluated once that fetch lands. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -22480,6 +22480,10 @@ async function _loadTestMode(){
   try{ const { data } = await supaClient.from('platform_config').select('test_mode').eq('id',1).single();
     window._TEST_MODE = !!(data && data.test_mode);
   }catch(e){ window._TEST_MODE = !!window._TEST_MODE; }
+  // Načítá se na pozadí, takže při rychlém přihlášení doběhne AŽ PO enterApp -- v tu chvíli je
+  // _TEST_MODE ještě false a brána nikoho nezastaví. Proto se po načtení přepočítá.
+  try{ if(typeof _betaGateActive==='function' && _betaGateActive() && typeof _showBetaWaiting==='function') _showBetaWaiting(); }catch(e){}
+  try{ if(typeof _applyMinorLock==='function') _applyMinorLock(); }catch(e){}
   try{ _renderTestBanner(!!window._TEST_MODE); }catch(e){}
   try{ _syncTestModeBtn(); }catch(e){}
   return window._TEST_MODE;
@@ -30161,9 +30165,15 @@ async function checkAuth(){
     if(prof && prof.purged_at){ try{ await supaClient.auth.signOut(); }catch(e){} return; }
     if(prof && prof.deleted_at){ openRestorePrompt(prof); return; }
     if(!prof){
+      // Záchranná větev pro účet bez profilu. Zakládala ho BEZ beta_status a BEZ is_minor, takže
+      // kdokoli, komu registrace spadla, se přihlásil znovu a proklouzl dovnitř jako dospělý --
+      // brána i zámek mladistvého se řídí přesně těmi dvěma poli.
       const _em=(data.session.user.email)||null;
-      try{ await supaClient.from('profiles').insert({ id:data.session.user.id, email:_em, role:'student', password_set:false }); }catch(e){}
-      currentUser={ id:data.session.user.id, email:_em, role:'student', password_set:false };
+      const _row={ id:data.session.user.id, email:_em, role:'student', password_set:false,
+                   beta_status:(window._TEST_MODE?'pending':null) };
+      try{ const { error:_ie }=await supaClient.from('profiles').insert(_row);
+        if(_ie) console.log('[autoProfile] nezapsan:', _ie.message); }catch(e){ console.log('[autoProfile]', e&&e.message); }
+      currentUser=_row;
     } else { currentUser=prof; }
     enterApp();
     try{ if(currentUser && currentUser.password_set===false) setTimeout(function(){ if(typeof openSetPassword==='function') openSetPassword(); }, 800); }catch(e){}
