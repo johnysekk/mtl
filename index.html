@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SUE keeps the test-mode notice on receipts issued while testing. Both receipts drew the notice from whether test mode is on right now, so switching to live would silently turn every test receipt into something that looks like a real tax document. They now read a stamp recorded when the row was created -- on the transaction for the student receipt, on commission_doklady for the MTL-to-provider one -- set by a trigger, since the serverless functions that write those rows know nothing about test mode. Rejection also became permanent: the beta gate only asked whether test mode was on, so switching to live let in everyone turned away, quietly undoing the decision. Needs test-mode-stamp.sql. -->
+<!-- MTL build: SUF actually delivers the test-mode stamp to the receipt. SUE added the column and the trigger, but nothing carried the value from the transaction into showReceipt: the row was not selected and not passed, so the notice still followed whichever way the switch happened to be set. Both lists now read test_mode and hand it over, and where a receipt arrives without one -- a transfer has no payment_intent to match on -- the transaction is found by creation time instead. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -30269,7 +30269,7 @@ async function _loadMyPayments(){
   box.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;font-size:13px;">'+(EN?'Loading\u2026':'Na\u010d\u00edt\u00e1m\u2026')+'</p>';
   if(typeof currentUser==='undefined' || !currentUser){ box.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;font-size:13px;">'+(EN?'Not signed in.':'Nejsi p\u0159ihl\u00e1\u0161en.')+'</p>'; return; }
   let rows=[];
-  try{ const { data }=await supaClient.from('transactions').select('id,gross_amount,currency,type,payment_method,created_at,payment_intent,gym_id,coach_id,income_class,status').eq('member_id',currentUser.id).order('created_at',{ascending:false}); rows=(data||[]).filter(function(t){ return t.status!=='refunded' && Number(t.gross_amount||0)>0; }); }catch(e){}
+  try{ const { data }=await supaClient.from('transactions').select('id,gross_amount,currency,type,payment_method,created_at,payment_intent,gym_id,coach_id,income_class,status,test_mode').eq('member_id',currentUser.id).order('created_at',{ascending:false}); rows=(data||[]).filter(function(t){ return t.status!=='refunded' && Number(t.gross_amount||0)>0; }); }catch(e){}
   window._myPayRows=rows;
   // Kde student nakoupil -- gym_name/coach_name na transakci nejsou, dohledají se jedním dotazem
   // na kluby a jedním na kouče.
@@ -30315,7 +30315,10 @@ function _mpRender(){
       +'<button class="mpDokBtn" data-idx="'+idx+'" style="flex:none;background:none;border:none;color:#635BFF;font-size:12.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';white-space:nowrap;">'+(EN?'Receipt \u203a':'Doklad \u203a')+'</button></div>';
   }).join('');
   const _sel=sel;
-  box.querySelectorAll('.mpDokBtn').forEach(function(b){ b.onclick=function(){ const t=_sel[parseInt(b.dataset.idx,10)]; if(!t) return; showReceipt({ amount:(Number(t.gross_amount||0)/100), currency:t.currency, type:t.type, created_at:t.created_at, payment_intent:t.payment_intent, gym_id:t.gym_id, coach_id:t.coach_id, item_label:_mpItemLabel(t) }); }; });
+  box.querySelectorAll('.mpDokBtn').forEach(function(b){ b.onclick=function(){ const t=_sel[parseInt(b.dataset.idx,10)]; if(!t) return; showReceipt({ amount:(Number(t.gross_amount||0)/100), currency:t.currency, type:t.type, created_at:t.created_at, payment_intent:t.payment_intent, gym_id:t.gym_id, coach_id:t.coach_id, item_label:_mpItemLabel(t),
+      // Razítko musí dojít až sem. Bez něj doklad spadl na aktuální režim, takže rámeček mizel
+      // a objevoval se podle přepínače -- přesně to, čemu se mělo předejít.
+      test_mode:t.test_mode }); }; });
 }
 
 
@@ -30382,7 +30385,7 @@ async function _loadClubDoklady(_gidIn){
   // Do nadpisu, ať je vidět, čí doklady to jsou -- dvě entity, dva seznamy.
   try{ const _t=document.getElementById('cdkTitle'); if(_t) _t.textContent=(EN?'History & receipts':'V\u0161echny doklady')+(_who?(' \u00b7 '+_who):''); }catch(e){}
   let rows=[];
-  try{ const { data }=await supaClient.from('transactions').select('id,gross_amount,currency,type,payment_method,created_at,payment_intent,gym_id,coach_id,member_id,income_class,status,plan,cash_payer_name').eq(_filter.col,_filter.val).order('created_at',{ascending:false}); rows=(data||[]).filter(function(t){ return t.status!=='refunded' && Number(t.gross_amount||0)>0; }); }catch(e){}
+  try{ const { data }=await supaClient.from('transactions').select('id,gross_amount,currency,type,payment_method,created_at,payment_intent,gym_id,coach_id,member_id,income_class,status,plan,cash_payer_name,test_mode').eq(_filter.col,_filter.val).order('created_at',{ascending:false}); rows=(data||[]).filter(function(t){ return t.status!=='refunded' && Number(t.gross_amount||0)>0; }); }catch(e){}
   // Jméno kupujícího je v member_id. Ověřeno na datech: chybí JEN u nákupu bez účtu -- lístek
   // koupený z veřejné stránky, kde kupující žádný profil nemá. "Bez účtu" je tam tedy pravda,
   // ne chyba, a pomlčka by tu informaci zbytečně zahodila.
@@ -30482,7 +30485,10 @@ function _cdkRender(){
       +'<button class="cdkDokBtn" data-idx="'+idx+'" style="flex:none;background:none;border:none;color:#635BFF;font-size:12.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';white-space:nowrap;">'+(EN?'Receipt \u203a':'Doklad \u203a')+'</button></div>';
   }).join('');
   var _sel=sel;
-  box.querySelectorAll('.cdkDokBtn').forEach(function(b){ b.onclick=function(){ var t=_sel[parseInt(b.dataset.idx,10)]; if(!t) return; showReceipt({ amount:(Number(t.gross_amount||0)/100), currency:t.currency, type:t.type, created_at:t.created_at, payment_intent:t.payment_intent, gym_id:t.gym_id, coach_id:t.coach_id, item_label:_mpItemLabel(t) }); }; });
+  box.querySelectorAll('.cdkDokBtn').forEach(function(b){ b.onclick=function(){ var t=_sel[parseInt(b.dataset.idx,10)]; if(!t) return; showReceipt({ amount:(Number(t.gross_amount||0)/100), currency:t.currency, type:t.type, created_at:t.created_at, payment_intent:t.payment_intent, gym_id:t.gym_id, coach_id:t.coach_id, item_label:_mpItemLabel(t),
+      // Razítko musí dojít až sem. Bez něj doklad spadl na aktuální režim, takže rámeček mizel
+      // a objevoval se podle přepínače -- přesně to, čemu se mělo předejít.
+      test_mode:t.test_mode }); }; });
 }
 
 async function showReceipt(b){
@@ -30519,6 +30525,14 @@ async function showReceipt(b){
       else if(ref){
         const { data:_tm }=await supaClient.from('transactions').select('test_mode').eq('payment_intent',ref).limit(1);
         if(_tm && _tm.length && _tm[0].test_mode!=null) _wasTest=!!_tm[0].test_mode;
+      }
+      else if(b && b.created_at){
+        // U převodu payment_intent není, tak se transakce dohledá podle času vzniku -- vzniká
+        // spolu se záznamem, takže minutové okno stačí.
+        const _t0=new Date(new Date(b.created_at).getTime()-60000).toISOString();
+        const _t1=new Date(new Date(b.created_at).getTime()+60000).toISOString();
+        const { data:_tm2 }=await supaClient.from('transactions').select('test_mode').gte('created_at',_t0).lte('created_at',_t1).limit(1);
+        if(_tm2 && _tm2.length && _tm2[0].test_mode!=null) _wasTest=!!_tm2[0].test_mode;
       }
     }catch(e){}
     const html=`<!doctype html><html><head><meta charset="utf-8"><title>${EN?'Payment confirmation':'Potvrzení o platbě'}</title>`
