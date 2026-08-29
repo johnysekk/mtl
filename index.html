@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: STO makes the PIS sandbox the default rather than something each club and coach opts into. Before launch nobody has live PIS, so an entity without the flag was attempting a real payment that could only fail -- which is what happened on the 1:1 rail, where the flag cannot even be set from anywhere a coach can reach. It is now on unless the founder switches it off per club or coach in admin, and those fall back to QR transfer. Club-sent personal messages are tagged only in the sender view: a student sees a message from a person they know and the internal provenance tells them nothing, while the coach does need to know which hat they were wearing, especially when they are also that student 1:1 coach. Minors are unaffected -- the oversight note in the thread already covers them. Needs pis-test-default.sql. -->
+<!-- MTL build: STP tells the student where the person writing to them belongs. Under the name in the chat header there is now a line like coach · Muay Thai Lab Brno. The role shown is the teaching one: someone who trains people is a coach even when they also own the club, because owner says something about the company and nothing about the person the student actually deals with -- club management appears only for someone who does not teach. Coaching at several clubs collapses to a count. The PIS sandbox also narrows to the bank rail, since a provider on Stripe never touches PIS, and it is driven entirely by the _PIS_ENABLED switch rather than a database default, so going live is one flag and leaves nothing behind to unwind. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -2003,7 +2003,8 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
 <!-- CHAT -->
 <div class="sheet" id="shChat" style="z-index:87;display:flex;flex-direction:column;">
   <div class="shdr">
-    <div class="shdr-title" id="chatTitle">Chat</div>
+    <div style="min-width:0;"><div class="shdr-title" id="chatTitle">Chat</div>
+    <div id="chatSub" style="font-size:11px;color:var(--mid);font-weight:600;line-height:1.3;margin-top:1px;display:none;"></div></div>
     <button id="chatBlockBtn" style="display:none;background:transparent;border:none;font-size:18px;line-height:1;cursor:pointer;padding:4px 8px;margin-left:auto;margin-right:4px;">⛔</button>
     <button class="btn-close" id="btnCloseChat">✕</button>
   </div>
@@ -17668,12 +17669,15 @@ async function _loadPisTestIds(){
 // nespustilo": člověk skončil v pískovišti bez účtu, nebo mu pro jeho zemi nevyšly banky.
 // _pisAllowed umí rozhodnout podle konkrétního klubu nebo kouče; tohle je jeho testovací dvojče.
 function _pisTestFor(ent, id){
-  // Pískoviště je VÝCHOZÍ, dokud PIS neběží ostře. Před spuštěním nikdo ostrý PIS nemá, takže
-  // vypnuté pískoviště znamená pokus o skutečnou platbu, který spadne -- a přihlašovat se
-  // k jedinému režimu, který může fungovat, je obráceně. Zakladatel to u konkrétního klubu nebo
-  // kouče vypne v adminu (🏦 PIS) a ten pak jede na QR převod.
-  if(window._PIS_ENABLED) return false;          // ostrý provoz: pískoviště nikdy
-  if(ent && ent.pis_test===false) return false;  // vědomě vypnuto v adminu
+  // Pískoviště, dokud PIS neběží ostře. Před spuštěním nikdo ostrý PIS nemá, takže vypnuté
+  // pískoviště znamená pokus o skutečnou platbu, který spadne. Řídí se to jen tímhle jedním
+  // přepínačem -- v databázi se nic nemění, takže až se PIS rozjede naostro, stačí přepnout
+  // _PIS_ENABLED a nezůstane po tom v datech žádná výchozí hodnota, kterou by bylo nutné vracet.
+  //
+  // Týká se to POUZE bankovní koleje. Kdo jede přes Stripe, PIS vůbec nepoužívá.
+  if(window._PIS_ENABLED) return false;
+  if(ent && ent.pis_test===false) return false;   // zakladatel vypnul v adminu (🏦 PIS)
+  try{ if(typeof _mtlPayMode==='function' && ent && _mtlPayMode(ent)!=='qr_bank') return false; }catch(e){}
   return true;
 }
 
@@ -24541,12 +24545,58 @@ function isChatBlockedForMe(conv){
   return conv.coach_id===currentUser.id && conv.student_id !== FOUNDER_UUID; // blokuj jen chaty, kde jsem kouč studenta (ne MTL, ne když jsem klient jiného kouče)
 }
 
+
+// Kde ten člověk v klubu působí, slovy, kterým student rozumí. Vrací třeba
+// "trenér · Muay Thai Lab Brno" nebo "trenér · 2 kluby" u toho, kdo učí na víc místech.
+async function _chatCoachClubs(coachId){
+  const EN=LANG==='en';
+  const out=[];
+  try{
+    // Kluby, které ten člověk vlastní.
+    const { data:_own }=await supaClient.from('gyms').select('id,name').eq('owner_id',coachId).eq('status','approved');
+    (_own||[]).forEach(function(g){ out.push({ id:g.id, name:g.name||'', teaches:false, lead:true }); });
+    // A kde je v týmu.
+    const { data:_tc }=await supaClient.from('gym_coaches').select('gym_id,co_owner,is_reception').eq('coach_id',coachId).eq('status','active');
+    const ids=(_tc||[]).map(function(r){ return r.gym_id; }).filter(Boolean);
+    if(ids.length){
+      const { data:_gs }=await supaClient.from('gyms').select('id,name').in('id',ids).eq('status','approved');
+      const nm={}; (_gs||[]).forEach(function(g){ nm[String(g.id)]=g.name||''; });
+      (_tc||[]).forEach(function(r){
+        const k=String(r.gym_id); if(!nm[k]) return;
+        const ex=out.find(function(x){ return String(x.id)===k; });
+        const teaches=!r.is_reception;   // recepční netrénuje
+        if(ex){ ex.teaches=ex.teaches||teaches; }
+        else out.push({ id:r.gym_id, name:nm[k], teaches:teaches, lead:!!r.co_owner });
+      });
+    }
+  }catch(e){ return ''; }
+  if(!out.length) return '';
+  // Trénuje kdekoli? Pak je pro studenta trenér -- i kdyby ten klub zároveň vlastnil.
+  const anyTeach=out.some(function(x){ return x.teaches; });
+  const role=anyTeach ? (EN?'coach':'trenér')
+           : (out.some(function(x){ return x.lead; }) ? (EN?'club management':'vedení klubu') : (EN?'reception':'recepce'));
+  const where=(out.length===1) ? out[0].name
+            : (EN?(out.length+' clubs'):(out.length+' kluby'));
+  return role+' · '+where;
+}
+
 async function openChat(conv){
   if(currentUser && conv && conv.coach_id && conv.coach_id!==currentUser.id && await _coachChatLocked(conv.coach_id)){ toast(LANG==='en'?'This chat is no longer available.':'Tento chat u\u017e nen\u00ed dostupn\u00fd.'); return; }
   activeConv=conv;
   if(currentUser && currentUser.is_minor){ toast(LANG==='en'?'Chat is not available on a minor account.':'Chat není na účtu nezletilého dostupný.'); return; }
   const amICoach = conv.coach_id===currentUser.id;
   $('chatTitle').textContent = amICoach ? conv.student_name : conv.coach_name;
+  // Studentovi ukázat, ODKUD toho člověka zná. "Owner" mu nic neřekne a spíš mate -- zajímá ho,
+  // kdo ho učí, ne kdo firmu vlastní. Proto se zobrazuje vztah k tréninku: kdo v klubu trénuje,
+  // je trenér, i když je zároveň majitel. Vedení se ukáže jen u toho, kdo netrénuje.
+  { const _sub=$('chatSub');
+    if(_sub){ _sub.style.display='none'; _sub.textContent='';
+      if(!amICoach && conv.coach_id){
+        _chatCoachClubs(conv.coach_id).then(function(txt){
+          if(txt && activeConv && activeConv.id===conv.id){ _sub.textContent=txt; _sub.style.display='block'; }
+        }).catch(function(){});
+      }
+    } }
   // Načti foto druhé strany (pro bubliny)
   const otherId = amICoach ? conv.student_id : conv.coach_id;
   const { data: otherProf } = await supaClient.from('profiles').select('photo_url, avail_status, name').eq('id', otherId).single();
