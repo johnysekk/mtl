@@ -56,10 +56,34 @@ module.exports = async (req, res) => {
       if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || !gymId) {
         return res.status(400).json({ error: 'valid guardian_email + gym_id required' });
       }
+      // ZÁSTUPCE NESMÍ BÝT ON SÁM. Kontrola v prohlížeči se dá obejít vývojářskými nástroji;
+      // tady už ne, protože uid pochází z ověřeného tokenu, ne z toho, co klient poslal.
+      // Bez toho si mladistvý zadal vlastní e-mail a souhlas si udělil sám.
+      {
+        const { data: me } = await admin.from('profiles')
+          .select('email,name,phone').eq('id', uid).maybeSingle();
+        if (me && String(me.email || '').trim().toLowerCase() === email) {
+          return res.status(400).json({ error: 'Zadaný e-mail je tvůj vlastní — zadej e-mail rodiče nebo zástupce.' });
+        }
+        const { data: owner } = await admin.from('profiles')
+          .select('id,is_minor').ilike('email', email).limit(1);
+        if (owner && owner.length) {
+          if (String(owner[0].id) === String(uid)) {
+            return res.status(400).json({ error: 'Zadaný e-mail patří tvému účtu.' });
+          }
+          if (owner[0].is_minor) {
+            return res.status(400).json({ error: 'Ten účet patří mladistvému — zástupce musí být dospělý.' });
+          }
+        }
+      }
       const token = (cryptoUUID());
       const row = {
         token,
         minor_id: uid,
+        // Kdo a odkud o souhlas požádal. Když se později ukáže, že souhlas nebyl pravý, tohle je
+        // to, čím klub i MTL doloží, že jednali v dobré víře podle toho, co jim bylo předloženo.
+        requested_ip: _rlIp(req) || null,
+        requested_ua: String(req.headers['user-agent'] || '').slice(0, 300) || null,
         minor_name: (body.minor_name || '').toString().slice(0, 120) || null,
         gym_id: gymId,
         gym_name: (body.gym_name || 'Gym').toString().slice(0, 160),
@@ -122,8 +146,19 @@ module.exports = async (req, res) => {
       });
       if (we) return res.status(500).json({ error: we.message });
 
+      // Kdo souhlas potvrdil a odkud. Tohle je ta část, která v případném sporu rozhoduje:
+      // když se ukáže, že e-mail nepatřil rodiči, IP a čas ukážou, že klub i MTL jednali podle
+      // toho, co jim bylo předloženo -- a jestli klepnutí přišlo ze stejného zařízení jako
+      // žádost, což je nejsilnější známka, že si souhlas udělil sám mladistvý.
       await admin.from('guardian_consent_requests')
-        .update({ status: 'approved', approved_at: new Date().toISOString(), guardian_name: gname })
+        .update({
+          status: 'approved',
+          approved_at: new Date().toISOString(),
+          guardian_name: gname,
+          approved_ip: _rlIp(req) || null,
+          approved_ua: String(req.headers['user-agent'] || '').slice(0, 300) || null,
+          same_device: !!(rq.requested_ip && _rlIp(req) && rq.requested_ip === _rlIp(req))
+        })
         .eq('token', token);
 
       try {
