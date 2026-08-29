@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SUL completes the guardian record for 15-17 year olds. The consent flow already existed and fires at the first booking or membership rather than at signup, which is right -- but it only kept an e-mail address. An e-mail does not say who consented, and a club whose member is hurt or has not turned up needs to ring someone rather than write and wait until morning. The form now asks for the guardian full name and phone as well, stores them on the minor profile, and the club sees them at the top of the member detail with the number as a tap-to-call link. A minor with nothing on file is itself worth seeing, since without consent they cannot have booked. Needs guardian-contact.sql. -->
+<!-- MTL build: SUM lets a guardian who is already linked in Family approve inside the app instead of by e-mail. Sending a message out through the mail to someone logged in one screen away is a detour, and mail is easy to miss; the minor now sees an Ask in the app button when the link exists, the guardian gets a notification, reads the club terms and ticks one box. The record written is the same shape the e-mail route writes, so the club has one kind of document either way. The e-mail form stays for guardians without an account. The guardian phone number in the member detail also asks before dialling rather than placing the call on a stray tap. Needs guardian-contact.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -10666,6 +10666,32 @@ function _minorInfoPopup(title, body, btnLabel, btnAction){
 // Minor enters guardian e-mail -> /api/guardian-consent request -> guardian gets a public
 // approval link -> approves via clickwrap (no account) -> waiver_acceptances row unlocks
 // THAT klub for the minor (the in-app _minorWaiverGate then clears).
+// Je zástupce už napojený v Rodině? Pak nemá smysl posílat e-mail cizí cestou -- souhlas udělí
+// přímo v appce, kde je přihlášený. E-mailová varianta zůstává pro rodiče bez účtu.
+async function _linkedGuardian(){
+  try{
+    const { data }=await supaClient.from('family_links').select('guardian_id')
+      .eq('member_id', currentUser.id).eq('status','confirmed').limit(1);
+    if(!data || !data.length) return null;
+    const gid=data[0].guardian_id;
+    const { data:p }=await supaClient.from('profiles').select('id,name,email').eq('id',gid).maybeSingle();
+    return p||{ id:gid, name:'' };
+  }catch(e){ return null; }
+}
+async function _minorWaiverInApp(gp, g, title, body, hash, version, onSent){
+  const EN=LANG==='en';
+  try{
+    await supaClient.from('notifications').insert({
+      user_id: gp.id, type:'system', read:false,
+      message:'\ud83d\udd12 '+((currentUser&&currentUser.name)||(EN?'Your child':'Tvoje dítě'))+(EN?' needs your approval to train at ':' potřebuje tvůj souhlas s tréninkem v ')+((g&&g.name)||'klubu'),
+      data: JSON.stringify({ kind:'minor_waiver_req', minor_id:currentUser.id,
+        minor_name:(currentUser&&currentUser.name)||'', gym_id:(g&&g.id)||null,
+        gym_name:(g&&g.name)||'', title:title||'', body:body||'', hash:hash||'', version:version||null })
+    });
+    toast(EN?('\u2705 Sent to '+(gp.name||'your guardian')):('\u2705 Odesláno '+(gp.name||'zástupci')), 1);
+    if(typeof onSent==='function') onSent();
+  }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
+}
 function _minorWaiverEmailForm(g, title, body, hash, version){
   const EN=LANG==='en';
   const gn=escapeHtml(g&&g.name||(EN?'this club':'tomto klubu'));
@@ -10689,6 +10715,23 @@ function _minorWaiverEmailForm(g, title, body, hash, version){
   const close=()=>{ try{ ov.remove(); }catch(e){} };
   ov.querySelector('#mwgCancel').onclick=close;
   ov.querySelector('#mwgFam').onclick=()=>{ close(); try{ openMyKids(); }catch(e){} };
+  // Napojený zástupce dostane požadavek rovnou do appky. Posílat mu e-mail, když je přihlášený
+  // o patro vedle, je zbytečná oklika -- a e-mail se snadno přehlédne.
+  _linkedGuardian().then(function(gp){
+    if(!gp) return;
+    const _w=ov.querySelector('#mwgName'); if(!_w) return;
+    const _b=document.createElement('div');
+    _b.innerHTML='<div style="background:#F0FBF0;border:1px solid #CDEBD6;border-radius:12px;padding:12px 14px;margin-bottom:12px;">'
+      +'<div style="font-size:13px;color:#006040;line-height:1.5;margin-bottom:9px;">'
+      +(EN?('<b>'+escapeHtml(gp.name||'Your guardian')+'</b> is in your Family — ask them right in the app.')
+          :('<b>'+escapeHtml(gp.name||'Tvůj zástupce')+'</b> je v tvojí Rodině — požádej ho rovnou v appce.'))
+      +'</div><button id="mwgAsk" style="width:100%;padding:12px;background:#0a8f5b;color:#fff;border:none;border-radius:11px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'
+      +(EN?'Ask in the app':'Požádat v appce')+'</button></div>';
+    _w.parentNode.insertBefore(_b, _w);
+    _b.querySelector('#mwgAsk').onclick=function(){
+      _minorWaiverInApp(gp, g, title, body, hash, version, close);
+    };
+  }).catch(function(){});
   const showM=(t)=>{ const m=ov.querySelector('#mwgMsg'); if(m){ m.style.display='block'; m.textContent=t; } };
   ov.querySelector('#mwgSend').onclick=async()=>{
     const email=(ov.querySelector('#mwgEmail').value||'').trim().toLowerCase();
@@ -10750,6 +10793,69 @@ async function openGuardianConsent(token){
       if(!r.ok || !j.ok){ showG('⚠️ '+((j&&j.error)||('error '+r.status))); ap.disabled=false; ap.style.opacity='1'; ap.textContent=EN?'Approve':'Schválit'; return; }
       bd.innerHTML='<div style="font-size:20px;font-weight:800;color:var(--green);margin-bottom:8px;">'+(EN?'Approved ✅':'Schváleno ✅')+'</div><div style="font-size:14px;color:var(--mid);line-height:1.6;">'+mn+' '+(EN?'can now train at ':'teď může trénovat v ')+'<b>'+gnm+'</b>. '+(EN?'You can close this page.':'Tuhle stránku můžeš zavřít.')+'</div>';
     }catch(e){ showG('⚠️ '+((e&&e.message)||'error')); ap.disabled=false; ap.style.opacity='1'; ap.textContent=EN?'Approve':'Schválit'; }
+  };
+}
+
+
+// Rodičovská strana souhlasu v appce. Otevře se z notifikace: rodič si přečte podmínky klubu,
+// zaškrtne a hotovo. Zápis jde do waiver_acceptances na jméno mladistvého, stejně jako
+// u e-mailové cesty -- pro klub i pro případný spor je to tentýž doklad.
+async function openMinorWaiverApprove(d){
+  const EN=LANG==='en';
+  if(!d || !d.minor_id){ toast('\u26a0\ufe0f '+(EN?'Invalid request':'Neplatný požadavek')); return; }
+  let ov=document.getElementById('mwaOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='mwaOv';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100066;display:flex;align-items:flex-end;justify-content:center;';
+  ov.innerHTML='<div style="background:var(--bg);border-radius:18px 18px 0 0;max-width:520px;width:100%;padding:20px;max-height:86vh;overflow-y:auto;font-family:\'DM Sans\';">'
+    +'<div style="font-size:17px;font-weight:800;margin-bottom:3px;">'+(EN?'Guardian approval':'Souhlas zástupce')+'</div>'
+    +'<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:14px;">'
+      +escapeHtml(d.minor_name||(EN?'Your child':'Tvoje dítě'))+(EN?' wants to train at ':' chce trénovat v ')+'<b>'+escapeHtml(d.gym_name||'klubu')+'</b>.</div>'
+    +(d.title?('<div style="font-size:14px;font-weight:700;margin-bottom:6px;">'+escapeHtml(d.title)+'</div>'):'')
+    +'<div style="background:#fff;border:1px solid var(--border);border-radius:12px;padding:13px;font-size:13px;color:var(--dark);line-height:1.6;white-space:pre-wrap;max-height:34vh;overflow-y:auto;margin-bottom:14px;">'+escapeHtml(d.body||'')+'</div>'
+    +'<label style="display:flex;gap:10px;align-items:flex-start;font-size:13.5px;line-height:1.5;margin-bottom:14px;cursor:pointer;">'
+      +'<input type="checkbox" id="mwaChk" style="margin-top:2px;width:18px;height:18px;flex:none;">'
+      +'<span>'+(EN?'As the legal guardian I have read the above and I consent to my child taking part.':'Jako zákonný zástupce jsem si výše uvedené přečetl/a a souhlasím s účastí svého dítěte.')+'</span></label>'
+    +'<button id="mwaGo" disabled style="width:100%;padding:13px;background:var(--light);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:default;font-family:\'DM Sans\';">'+(EN?'Approve':'Schválit')+'</button>'
+    +'<button id="mwaX" style="width:100%;margin-top:8px;padding:11px;background:none;border:none;color:var(--mid);font-size:13px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#mwaX').onclick=function(){ ov.remove(); };
+  const chk=ov.querySelector('#mwaChk'), go=ov.querySelector('#mwaGo');
+  chk.onchange=function(){
+    go.disabled=!chk.checked;
+    go.style.background=chk.checked?'var(--red)':'var(--light)';
+    go.style.cursor=chk.checked?'pointer':'default';
+  };
+  go.onclick=async function(){
+    go.disabled=true; go.textContent='…';
+    try{
+      // Sloupce podle skutečné tabulky: body_hash / version / guardian_id / guardian_name.
+      // Stejný tvar, jaký zapisuje e-mailová cesta -- pro klub i pro spor je to tentýž doklad.
+      await supaClient.from('waiver_acceptances').insert({
+        gym_id: d.gym_id||null,
+        version: (d.version!=null?d.version:0),
+        student_id: d.minor_id,
+        student_name: d.minor_name||'',
+        body_hash: d.hash||null,
+        body_title: d.title||'',
+        body_text: d.body||'',
+        guardian_id: currentUser.id,
+        guardian_name: (currentUser&&currentUser.name)||'',
+        accepted_at: new Date().toISOString()
+      });
+      // Kontakt na sebe -- klub ho musí mít, aby měl komu volat.
+      try{ await supaClient.from('profiles').update({
+        guardian_name:(currentUser&&currentUser.name)||null,
+        guardian_email:(currentUser&&currentUser.email)||null
+      }).eq('id', d.minor_id); }catch(e){}
+      try{ await supaClient.from('notifications').insert({ user_id:d.minor_id, type:'system', read:false,
+        message:'\u2705 '+(EN?'Your guardian approved it — you can book now.':'Zástupce to schválil — můžeš si rezervovat.'),
+        data: JSON.stringify({ kind:'minor_waiver_ok' }) }); }catch(e){}
+      toast(EN?'\u2705 Approved':'\u2705 Schváleno', 1);
+      ov.remove();
+    }catch(e){
+      go.disabled=false; go.textContent=(EN?'Approve':'Schválit');
+      toast('\u26a0\ufe0f '+((e&&e.message)||''));
+    }
   };
 }
 
@@ -22033,6 +22139,9 @@ async function loadNotifications(append){
           // Oznámení: klepnutí otevře soukromou konverzaci S TÍM, KDO ho napsal. Vlákno vzniká
           // až tady, tedy z rozhodnutí příjemce -- to je celý rozdíl proti hromadné zprávě.
           // Student tvrdí, že zaplatil převodem -- kouč to potvrzuje v diáři.
+          else if(_pd.kind==='minor_waiver_req'){
+            if(typeof openMinorWaiverApprove==='function') openMinorWaiverApprove(_pd);
+          }
           else if(_pd.kind==='coach_qr_intent' || k==='coach_qr_intent'){
             // Potvrzuje se v Přehledu kouče, kde ten seznam je odjakživa.
             if(typeof openCoachDash==='function') openCoachDash();
@@ -25745,7 +25854,7 @@ async function openGymMemberDetail(sid, name){
       +'<div style="font-size:11px;font-weight:800;color:#7a5a1a;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">'+(EN?'Minor · guardian':'Mladistvý · zákonný zástupce')+'</div>'
       +((_gN||_gE||_gP)
         ? ('<div style="font-size:14px;font-weight:700;color:var(--dark);">'+escapeHtml(_gN||'—')+'</div>'
-           +(_gP?('<div style="font-size:13px;margin-top:3px;"><a href="tel:'+escapeHtml(_gP.replace(/\s+/g,''))+'" style="color:#635BFF;font-weight:700;text-decoration:none;">'+escapeHtml(_gP)+'</a></div>'):'')
+           +(_gP?('<div style="font-size:13px;margin-top:3px;"><span id="mdGuardCall" data-t="'+escapeHtml(_gP.replace(/\s+/g,''))+'" style="color:#635BFF;font-weight:700;cursor:pointer;">'+escapeHtml(_gP)+'</span></div>'):'')
            +(_gE?('<div style="font-size:12.5px;margin-top:2px;"><a href="mailto:'+escapeHtml(_gE)+'" style="color:var(--mid);text-decoration:none;">'+escapeHtml(_gE)+'</a></div>'):''))
         : ('<div style="font-size:12.5px;color:#7a5a1a;line-height:1.5;">'+(EN?'No guardian on file yet — they have not booked or joined anything.':'Zástupce zatím nevyplněn — člen si nic nerezervoval ani nekoupil.')+'</div>'))
       +'</div>';
@@ -25787,6 +25896,12 @@ async function openGymMemberDetail(sid, name){
   html+=`<button id="mdReportBtn" style="width:100%;margin-top:8px;padding:11px;background:#FFF7EE;color:#B8860B;border:1px solid #F0C97A;border-radius:11px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';">⚠️ ${EN?'Report to MTL':'Nahlásit MTL'}</button>`;
 
   if(body) body.innerHTML=html;
+  // Telefon se nevytáčí sám -- na mobilu stačí omylem ťuknout a volá se rodiči.
+  { const _cb=document.getElementById('mdGuardCall');
+    if(_cb) _cb.onclick=function(){
+      const _t=_cb.dataset.t||''; if(!_t) return;
+      if(confirm((LANG==='en'?'Call ':'Zavolat ')+_t+'?')) location.href='tel:'+_t;
+    }; }
   const mb=$('mdMsgBtn'); if(mb) mb.onclick=()=>{ closeMemberDetail(); messageGymMember(sid, name); };
   const _gb=$('mdGraceBill'); if(_gb) _gb.onclick=async()=>{ _gb.disabled=true; try{ await supaClient.from('grace_visits').update({ settlement:'billed' }).eq('gym_id',_myGymData.id).eq('student_id',sid).eq('settled',false).is('settlement',null); toast(EN?'✅ Marked to bill — student will see a drop-in charge':'✅ Označeno k doúčtování — studentovi se objeví doplatek'); openGymMemberDetail(sid,name); }catch(e){ toast('⚠️'); _gb.disabled=false; } };
   const _gw=$('mdGraceWrite'); if(_gw) _gw.onclick=async()=>{ if(!confirm(EN?'Write off all tolerated visits? They will not be charged.':'Odepsat všechny tolerované návštěvy? Nebudou doúčtovány.')) return; _gw.disabled=true; try{ await supaClient.from('grace_visits').update({ settled:true, settlement:'written_off', settled_at:new Date().toISOString() }).eq('gym_id',_myGymData.id).eq('student_id',sid).eq('settled',false); toast(EN?'✅ Written off':'✅ Odepsáno'); openGymMemberDetail(sid,name); }catch(e){ toast('⚠️'); _gw.disabled=false; } };
