@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SVH puts pending registrations above the Founder Dashboard button. Someone waiting to be let in is the one thing in that panel that needs acting on today; the analytics can wait until it has been dealt with. -->
+<!-- MTL build: SVI stops the deck flashing before the waiting screen covers it. The boot splash faded on a fixed 1.25s animation rather than waiting for anything, so an unapproved account saw the app for a moment before being told it could not come in. The splash now holds while the gate is still deciding and lifts once the answer is known, revealing either the app or the waiting screen directly. It only holds when a session already exists, since a signed-out visitor has nothing to wait for, and it drops itself after four seconds regardless -- a stuck app would be worse than the flash it prevents. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -438,6 +438,9 @@ body.no-emoji [data-keep-emoji] .prow-icon,body.no-emoji [data-keep-emoji] .sico
 .picker-sh>.picker-title,.picker-sh>.picker-cancel{flex-shrink:0}
 #memberDetailOv #mdBody{flex:1 1 auto;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch}
 #bootSplash{position:fixed;inset:0;z-index:10001;display:flex;align-items:center;justify-content:center;flex-direction:column;padding-bottom:calc(5vh + env(safe-area-inset-bottom,0px));box-sizing:border-box;background:var(--bg);animation:bootFade .45s ease 1.25s forwards;}
+/* Když se čeká na rozhodnutí brány, clona zůstane. Bez toho zmizí po 1,25 s napevno a na chvíli
+   je vidět deck, který ten člověk vidět nemá -- problikne a teprve pak ho překryje čekárna. */
+body.gate-pending #bootSplash{animation:none !important;opacity:1 !important;}
 @keyframes bootFade{to{opacity:0;visibility:hidden;pointer-events:none;}}
 .picker-opt{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;font-size:16px;color:var(--dark);cursor:pointer;border-bottom:1px solid var(--border);transition:background .1s}
 .picker-opt:last-child{border-bottom:none}
@@ -6898,6 +6901,9 @@ function openDiscPicker(){
   if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded', function(){ setTimeout(_pisReturnToast, 800); }); } else { setTimeout(_pisReturnToast, 800); }
 })();
 function init(){
+  // Když už relace existuje, appka bude pouštět přihlášeného -- do rozhodnutí brány držíme clonu.
+  // U nepřihlášeného není co držet, ten uvidí přihlašovací obrazovku.
+  try{ supaClient.auth.getSession().then(function(r){ if(r&&r.data&&r.data.session) _gateHold(true); }); }catch(e){}
   try{ _loadTestMode(); }catch(e){}
   renderDiscFilters();
   applyTypeFilters();
@@ -22528,6 +22534,17 @@ async function _testModeNow(){
   }catch(e){ console.log('[testModeNow]', e&&e.message); }
   return !!window._TEST_MODE;
 }
+// Dokud nevíme, jestli člověka pustíme dovnitř, drží úvodní clona. Rozhodnutí padne až po
+// načtení profilu a testovacího režimu -- do té doby nemá smysl ukazovat obsah, který může
+// za vteřinu zmizet.
+function _gateHold(on){
+  try{ document.body.classList.toggle('gate-pending', !!on); }catch(e){}
+  // Pojistka: kdyby rozhodnutí z jakéhokoli důvodu nedorazilo, clona po chvíli spadne sama.
+  // Zaseknutá appka je horší než problikávání.
+  if(on){ clearTimeout(window._gateHoldT);
+    window._gateHoldT=setTimeout(function(){ try{ document.body.classList.remove('gate-pending'); }catch(e){} }, 4000); }
+  else { clearTimeout(window._gateHoldT); }
+}
 async function _loadTestMode(){
   try{ const { data } = await supaClient.from('platform_config').select('test_mode').eq('id',1).single();
     window._TEST_MODE = !!(data && data.test_mode);
@@ -29354,8 +29371,14 @@ function enterApp(){
   // already training somewhere is worthless -- and it quietly inflates the number shown to clubs.
   try{ if(currentUser && currentUser.id) supaClient.rpc('resolve_demand').then(function(){},function(){}); }catch(e){}
 
-  if(_betaGateActive()){ try{ _showBetaWaiting(); }catch(e){} return; }
+  if(_betaGateActive()){
+    // Čekárna se vykreslí POD clonou, takže se odkryje rovnou ona a deck neproblikne.
+    try{ _showBetaWaiting(); }catch(e){}
+    _gateHold(false);
+    return;
+  }
   try{ _hideBetaWaiting(); }catch(e){}
+  _gateHold(false);
   try{ if(typeof processPendingJoin==='function') processPendingJoin(); }catch(e){}
   try{ if(typeof _emojiAccountSync==='function') _emojiAccountSync(); }catch(e){}
   try{ if(typeof _maybeTermsGate==='function') _maybeTermsGate(); }catch(e){}
