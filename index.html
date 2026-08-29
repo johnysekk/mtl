@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SSW drops the unpaid-attendee group, which cannot happen: the attendance roster is built from reservations, paid drop-ins and active memberships, so there is nobody unpaid to tick off in the first place. Only a deliberately waived Stripe instalment gets close, and that is the club decision rather than a debt. Just lapsed stays, and on the bank rail it replaces the Cancelling tile, which can only ever be zero there. It also gains Message all, because a list you have to act on one row at a time is a list nobody acts on, and chasing a renewal is exactly the job that gets put off. Each person still receives a private chat -- nobody sees the others -- and {jmeno} inserts their name. An owner or co-owner can choose to send as themselves or as the club; anyone else writes as themselves. A club message keeps the sender coach_id so it stays traceable. Needs conversations-gym.sql. -->
+<!-- MTL build: SSZ gives the club a way to write to its members. The button sits above the tiles and is always available rather than only on the lapsed tab, because a club also needs to reach active members about a closure or a schedule change; it sends to whatever the current filter shows. Two independent ticks: Club announcement changes who is speaking, and Members can reply changes which channel it takes. With replies off no conversation is created at all and it goes purely as a notification -- a locked input inside a chat would confuse and would enforce nothing anyway. With replies on it lands in the normal thread, styled as an announcement, so the answers stay attached to what they answer. conversations.origin_gym_id marks threads that started this way, which is what will later let a club see who spoke to a minor. Needs club-announcements.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -4944,6 +4944,10 @@ const NOTIF_T = {
     : `❌ Přihláška klubu ${d.name} nebyla schválena. Důvod: ${d.reason}`,
   founder_rejected_gym: (d)=> LANG==='en' ? `❌ You rejected gym: ${d.name}. Reason: ${d.reason}` : `❌ Zamítl jsi gym: ${d.name}. Důvod: ${d.reason}`,
   gym_invite_reward: (d)=> LANG==='en' ? `🏆 The klub you invited (${d.gym_name||'a klub'}) is now active on MTL — +125 XP!` : `🏆 Klub, který jsi pozval (${d.gym_name||'gym'}), se rozjel na MTL — +125 XP!`,
+  // Oznámení klubu. Jednosměrné: klub sdělí, student si sám rozhodne, jestli odepíše. Tím vlákno
+  // nevzniká z rozhodnutí dospělého, ale z rozhodnutí příjemce -- a nezletilý může oznámení
+  // dostat, aniž by mu někdo otevřel soukromý kanál.
+  gym_announce: (d)=> '📣 ' + (d.gym_name ? (d.gym_name + ': ') : '') + (d.body || ''),
   coowner_granted: (d)=> LANG==='en' ? `🤝 ${d.gym_name||'A klub'} made you a CO-OWNER — you now share full operational control of the gym.` : `🤝 ${d.gym_name||'Gym'} z tebe udělal SPOLUMAJITELE — sdílíš teď plnou provozní kontrolu nad klubem.`,
   coowner_revoked: (d)=> LANG==='en' ? `${d.gym_name||'A klub'} removed your co-owner status — you're back to a regular coach.` : `${d.gym_name||'Klub'} ti odebral status spolumajitele — jsi zpět běžný kouč.`,
   gym_team_invite: (d)=> LANG==='en' ? `🏛️ ${d.gym_name} invites you to join their team on MTL.` : `🏛️ ${d.gym_name} tě zve do svého týmu na MTL.`,
@@ -16115,7 +16119,10 @@ async function renderGymMembers(){
     return `<table class="mtTable"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
   };
   let _planLevels=[]; try{ const _pls=(typeof gymMembPlans==='function'?gymMembPlans(_myGymData):[])||[]; const _lset=new Set(); _pls.forEach(function(p){ var a=p.access; var arr; if(Array.isArray(a))arr=a; else if(typeof a==='string'){ try{ var j=JSON.parse(a); arr=Array.isArray(j)?j:[a]; }catch(e){ arr=[a]; } } else arr=[]; arr.forEach(function(x){ if(x&&x!=='all') _lset.add(x); }); }); _planLevels=[..._lset]; }catch(e){}
-  let html=`<div style="display:flex;gap:8px;margin-bottom:12px;">
+  // Psát členům jde vždycky, ne jen u doběhlých -- klub potřebuje oslovit i aktivní (změna
+  // rozvrhu, zavřeno). Komu přesně, se vybírá až v tom okně.
+  let html=`${actCount||canCount||_nExp?`<button id="gmBulkBtn" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:13px;font-weight:800;cursor:pointer;font-family:'DM Sans';">\uD83D\uDCAC ${EN?'Message members':'Napsat členům zprávu'}</button>`:''}
+  <div style="display:flex;gap:8px;margin-bottom:12px;">
     <div style="flex:1;background:#F0FBF0;border:1px solid #CDEBD6;border-radius:12px;padding:11px;text-align:center;"><div style="font-family:'Bebas Neue';font-size:26px;color:#006040;">${actCount}</div><div style="font-size:11px;color:var(--mid);">${EN?'Active':'Aktivní'}</div></div>
     ${(function(){
       // "Ruší se" je stav zrušeného předplatného -- ten existuje JEN u Stripe. Na bankovní koleji
@@ -16143,7 +16150,7 @@ async function renderGymMembers(){
     .concat([{v:'history',l:(EN?'History':'Historie')}]);
   // Napsat všem, kdo je zrovna v seznamu. Nejvíc to dává smysl u "Nedávno doběhlo" -- to je přesně
   // seznam lidí, kterým se má připomenout, ať si obnoví, a jednotlivě to nikdo neobejde.
-  if(_nExp && (window._gmMembKid||null)==='lapsed') html+=`<button id="gmBulkBtn" style="width:100%;padding:11px;margin-bottom:10px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:13.5px;font-weight:800;cursor:pointer;font-family:'DM Sans';">\uD83D\uDCAC ${EN?('Message all ('+_nExp+')'):('Napsat všem ('+_nExp+')')}</button>`;
+
   if(actCount||canCount||_nExp||(window._gmMembKid||null)){ html+=`<div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;">${kc.map(c=>{ const on=(window._gmMembKid||null)===c.v; return `<div class="gmKidChip" data-v="${c.v||''}" style="flex:1;text-align:center;padding:8px 4px;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'var(--surf)'};color:${on?'#fff':'var(--dark)'};">${c.l}</div>`; }).join('')}</div>`; } }
   if(_planLevels.length){
     const chips=[{v:null,l:(EN?'All':'Vše')}].concat(_planLevels.map(v=>({v,l:levelLabel(v)})));
@@ -16168,7 +16175,17 @@ async function renderGymMembers(){
   box.querySelectorAll('.gmKidChip').forEach(c=>c.onclick=()=>{ window._gmMembKid=c.dataset.v||null; window._gmPage=0; renderGymMembers(); });
   // Píše se CELÉMU seznamu, ne jen zobrazené stránce -- kdo má patnáct doběhlých a dvacet na
   // stránku, jinak by o pět přišel a nevěděl o tom.
-  { const bb=box.querySelector('#gmBulkBtn'); if(bb) bb.onclick=function(){ _gmBulkMessage(window._gmLapsed||[], (LANG==='en'?'Just lapsed':'Nedávno doběhlo')); }; }
+  // Posílá se tomu, co je zrovna vyfiltrované -- kdo si vybral "Nedávno doběhlo", chce psát jim;
+  // kdo je na "Vše", všem. Celý seznam, ne jen zobrazená stránka.
+  { const bb=box.querySelector('#gmBulkBtn'); if(bb) bb.onclick=async function(){
+      const _k=(window._gmMembKid||null);
+      if(_k==='lapsed'){ _gmBulkMessage(window._gmLapsed||[], (LANG==='en'?'Just lapsed':'Nedávno doběhlo')); return; }
+      bb.disabled=true; bb.textContent='…';
+      let _all=[];
+      try{ const { data }=await supaClient.from('gym_memberships').select('student_id,student_name,child_name,plan').eq('gym_id',_myGymData.id).in('status',['active','cancelling']).or('paid_to.neq.coach,paid_to.is.null'); _all=data||[]; }catch(e){}
+      bb.disabled=false; bb.textContent='\uD83D\uDCAC '+(LANG==='en'?'Message members':'Napsat členům zprávu');
+      _gmBulkMessage(_all, (LANG==='en'?'Active members':'Aktivní členové'));
+    }; }
   { const si=box.querySelector('#gmSearchInp'); if(si){ si.oninput=function(){ const v=this.value; clearTimeout(window._gmSearchT); window._gmSearchT=setTimeout(function(){ window._gmSearch=v; window._gmPage=0; renderGymMembers(); }, 320); }; } const ss=box.querySelector('#gmSizeSel'); if(ss){ ss.onchange=function(){ window._gmSize=(this.value==='50'?50:20); window._gmPage=0; renderGymMembers(); }; } const pv=box.querySelector('#gmPrev'); if(pv){ pv.onclick=function(){ if((window._gmPage||0)>0){ window._gmPage=(window._gmPage||0)-1; renderGymMembers(); } }; } const nx=box.querySelector('#gmNext'); if(nx){ nx.onclick=function(){ window._gmPage=(window._gmPage||0)+1; renderGymMembers(); }; } }
   if((window._gmSearch||'').length){ const _si=box.querySelector('#gmSearchInp'); if(_si){ try{ _si.focus(); const _l=_si.value.length; _si.setSelectionRange(_l,_l); }catch(e){} } }
   box.querySelectorAll('.mbCard').forEach(c=>c.onclick=()=>{ if(c.dataset.child){ openGymKidDetail(c.dataset.sid, c.dataset.child); } else { openGymMemberDetail(c.dataset.sid, c.dataset.name); } });
@@ -21822,6 +21839,11 @@ async function loadNotifications(append){
           // Clenstvi patri do zalozky Clenove (gmMembTab = index 2). Bez teto vetve spadlo az do
           // posledni moznosti, ktera otevre Spravovat klub bez urceni zalozky -- a ta se otevre
           // na nulte, tedy na Rozvrhu.
+          // Oznámení: klepnutí otevře soukromou konverzaci S TÍM, KDO ho napsal. Vlákno vzniká
+          // až tady, tedy z rozhodnutí příjemce -- to je celý rozdíl proti hromadné zprávě.
+          else if(_pd.announce && _pd.from_id){
+            if(typeof openChatWithPerson==='function') openChatWithPerson(_pd.from_id, _pd.from_name||'');
+          }
           else if(_pd.membership){ if($('meGymManage')){ window._gmInitTab=2; openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); setTimeout(function(){ if(window._gmShowTab) window._gmShowTab(2); }, 260); } }
           else if(_pd.occ && _pd.occ.date && _pd.gym_id){ if(!_myGymData){ try{ var _gr=await supaClient.from('gyms').select('*').eq('id',_pd.gym_id).single(); if(_gr&&_gr.data) _myGymData=_gr.data; }catch(e){} } if(typeof openClassAttendance==='function' && _myGymData){ window._caWantTab=null; openClassAttendance(_pd.occ); } else if($('meGymManage')){ openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); } } else if($('meGymManage')){ openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); } else if(typeof openGymTeamDash==='function'){ openGymTeamDash(); } }
         else if(isTicketMine){ openMyEv('upcoming'); }
@@ -24525,6 +24547,20 @@ async function openChat(conv){
 let _chatOldest=null, _chatHasMore=false, _chatLoading=false; const _CHAT_PAGE=30;
 function _chatBubble(m){
   const mine = m.sender_id===currentUser.id;
+  // Oznámení klubu je vizuálně jiná bublina se jménem klubu -- říká to klub, ne ten člověk.
+  // Vlákno zůstává jedno, aby byla vidět souvislost mezi oznámením a odpověďmi na něj.
+  if(m.kind==='announce'){
+    const wrap=document.createElement('div');
+    wrap.style.cssText='align-self:stretch;max-width:100%;background:#FFF8E6;border:1px solid #F0DFA8;border-radius:14px;padding:11px 13px;';
+    const hdr=document.createElement('div');
+    hdr.style.cssText='font-size:11px;font-weight:800;color:#7a5a1a;text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;';
+    hdr.textContent='📣 '+((activeConv&&activeConv.coach_name)||'');
+    const body=document.createElement('div');
+    body.style.cssText='font-size:14px;line-height:1.45;color:var(--dark);';
+    body.textContent=m.text;
+    wrap.appendChild(hdr); wrap.appendChild(body);
+    return wrap;
+  }
   const bubble=document.createElement('div');
   bubble.style.cssText=`max-width:75%;padding:10px 14px;border-radius:16px;font-size:14px;line-height:1.4;${mine?'align-self:flex-end;background:var(--red);color:#fff;border-bottom-right-radius:4px;':'align-self:flex-start;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-bottom-left-radius:4px;'}`;
   bubble.textContent=m.text;
@@ -26062,13 +26098,30 @@ async function _gmBulkMessage(list, ctxLabel){
   const g=window._myGymData||null;
   const canAsClub=!!(g && currentUser && (String(g.owner_id)===String(currentUser.id) || g._isCoOwner));
 
+  // Nezletilí se NEVYNECHÁVAJÍ. Oznámení je jednosměrné -- vlákno vznikne, až když příjemce sám
+  // klepne na odpověď. Vylučovat je by znamenalo, že se mladistvý nedozví, že je zítra zavřeno,
+  // a to je horší než ten problém, kterému jsme se u hromadné zprávy vyhýbali.
   let ov=document.getElementById('gmBulkOv'); if(ov) ov.remove();
   ov=document.createElement('div'); ov.id='gmBulkOv';
   ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100070;display:flex;align-items:flex-end;justify-content:center;';
   const _inp="width:100%;box-sizing:border-box;padding:11px 13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';background:#fff;";
   let h='<div style="background:var(--bg);border-radius:18px 18px 0 0;max-width:520px;width:100%;padding:20px;max-height:88vh;overflow-y:auto;">';
-  h+='<div style="font-size:17px;font-weight:800;margin-bottom:3px;">'+(EN?'Message members':'Napsat členům')+'</div>';
-  h+='<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:14px;">'+(EN?('Goes to '+_l.length+' people, each as a private chat — nobody sees the others.'):('Půjde '+_l.length+' lidem, každému jako soukromý chat — nikdo neuvidí ostatní.'))+(ctxLabel?(' · '+escapeHtml(ctxLabel)):'')+'</div>';
+  h+='<div style="font-size:17px;font-weight:800;margin-bottom:3px;">'+(EN?'Announcement':'Oznámení')+'</div>';
+  h+='<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:12px;">'+(EN?'Goes out as a notification. It is one-way — anyone who wants to reply opens a private chat with you themselves.':'Odejde jako notifikace. Je jednosměrné — kdo bude chtít odpovědět, otevře si s tebou soukromý chat sám.')+(ctxLabel?(' · '+escapeHtml(ctxLabel)):'')+'</div>';
+  // Komu se píše, si vybere sám. Odeslat rovnou celému seznamu je pohodlné přesně do chvíle,
+  // kdy tam je někdo, komu psát nechtěl -- a to se odvolat nedá.
+  h+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">'
+    +'<span style="font-size:12px;font-weight:800;color:var(--mid);text-transform:uppercase;letter-spacing:.04em;">'+(EN?'Recipients':'Komu')+'</span>'
+    +'<button id="gmPickAll" style="background:none;border:none;color:var(--red);font-size:12.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Select all':'Označit všechny')+'</button></div>';
+  h+='<div style="max-height:34vh;overflow-y:auto;border:1px solid var(--border);border-radius:12px;padding:6px 4px;margin-bottom:12px;background:var(--surf);">'
+    +_l.map(function(m,i){
+      var nm=(m.child_name||m.student_name||'');
+      var sub=m.child_name?((EN?'parent: ':'rodič: ')+(m.student_name||'')):(m.plan||'');
+      return '<label style="display:flex;gap:10px;align-items:center;padding:8px 9px;cursor:pointer;">'
+        +'<input type="checkbox" class="gmPick" data-i="'+i+'" checked style="width:17px;height:17px;flex:none;">'
+        +'<span style="min-width:0;"><span style="font-size:13.5px;font-weight:700;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escapeHtml(nm)+'</span>'
+        +(sub?('<span style="font-size:11px;color:var(--mid);">'+escapeHtml(sub)+'</span>'):'')+'</span></label>';
+    }).join('')+'</div>';
   if(canAsClub){
     h+='<div style="font-size:12px;font-weight:800;color:var(--mid);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">'+(EN?'Send as':'Odeslat za')+'</div>';
     h+='<div style="display:flex;gap:8px;margin-bottom:12px;">'
@@ -26076,6 +26129,9 @@ async function _gmBulkMessage(list, ctxLabel){
       +'<button class="gmAsBtn" data-as="club" style="flex:1;padding:11px;border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';border:1px solid var(--border);background:var(--surf);color:var(--dark);">🏛️ '+escapeHtml(g.name||'')+'</button>'
       +'</div>';
   }
+  // Dvě nezávislé volby. "Oznámení klubu" mění, KDO to říká; "může odpovědět" mění, KUDY to jde.
+  if(canAsClub) h+='<label style="display:flex;gap:9px;align-items:flex-start;font-size:13px;line-height:1.45;margin-bottom:8px;cursor:pointer;"><input type="checkbox" id="gmAnn" style="margin-top:2px;"><span>'+(EN?'Club announcement':'Oznámení klubu')+'<br><span style="font-size:11.5px;color:var(--mid);">'+(EN?'Shows as the club, not as you.':'Zobrazí se jako klub, ne jako ty.')+'</span></span></label>';
+  h+='<label style="display:flex;gap:9px;align-items:flex-start;font-size:13px;line-height:1.45;margin-bottom:12px;cursor:pointer;"><input type="checkbox" id="gmCanReply" checked style="margin-top:2px;"><span>'+(EN?'Members can reply':'Student může odpovědět')+'<br><span style="font-size:11.5px;color:var(--mid);">'+(EN?'Off: goes as a notification only, no chat thread opens.':'Vypnuto: půjde jen jako notifikace, žádné vlákno nevznikne.')+'</span></span></label>';
   h+='<textarea id="gmBulkTxt" rows="5" placeholder="'+(EN?'Write your message…':'Napiš zprávu…')+'" style="'+_inp+'resize:vertical;margin-bottom:6px;"></textarea>';
   h+='<div style="font-size:11.5px;color:var(--light);line-height:1.5;margin-bottom:12px;">'+(EN?'Tip: {name} inserts the person\'s name.':'Tip: {jmeno} doplní jméno toho člověka.')+'</div>';
   h+='<button id="gmBulkGo" style="width:100%;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Send':'Odeslat')+'</button>';
@@ -26083,6 +26139,18 @@ async function _gmBulkMessage(list, ctxLabel){
   ov.innerHTML=h; document.body.appendChild(ov);
   ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
   ov.querySelector('#gmBulkX').onclick=function(){ ov.remove(); };
+  const _picked=function(){ return [].slice.call(ov.querySelectorAll('.gmPick')).filter(function(c){ return c.checked; }).map(function(c){ return _l[+c.dataset.i]; }).filter(Boolean); };
+  const _paintGo=function(){ const k=_picked().length; const b=ov.querySelector('#gmBulkGo');
+    if(b){ b.textContent=k?((EN?'Send to ':'Odeslat ')+k):(EN?'Nobody selected':'Nikdo nevybrán'); b.disabled=!k; b.style.opacity=k?'1':'.45'; } };
+  ov.querySelectorAll('.gmPick').forEach(function(c){ c.onchange=_paintGo; });
+  { const pa=ov.querySelector('#gmPickAll'); if(pa) pa.onclick=function(){
+      const all=[].slice.call(ov.querySelectorAll('.gmPick'));
+      const allOn=all.every(function(c){ return c.checked; });
+      all.forEach(function(c){ c.checked=!allOn; });
+      pa.textContent=allOn?(EN?'Select all':'Označit všechny'):(EN?'Deselect all':'Odznačit vše');
+      _paintGo();
+    }; }
+  _paintGo();
   let _as='me';
   ov.querySelectorAll('.gmAsBtn').forEach(function(b){ b.onclick=function(){
     _as=b.dataset.as;
@@ -26093,34 +26161,77 @@ async function _gmBulkMessage(list, ctxLabel){
   ov.querySelector('#gmBulkGo').onclick=async function(){
     const txt=String((ov.querySelector('#gmBulkTxt')||{}).value||'').trim();
     if(!txt){ toast(EN?'⚠️ Write something first':'⚠️ Nejdřív něco napiš'); return; }
+    const _to=_picked();
+    if(!_to.length){ toast(EN?'⚠️ Nobody selected':'⚠️ Nikdo není vybraný'); return; }
     const btn=this; btn.disabled=true; btn.textContent='…';
-    const asClub=(_as==='club' && canAsClub);
+    const asClub=(_as==='club' && canAsClub && !!((ov.querySelector('#gmAnn')||{}).checked));
+    const canReply=!!((ov.querySelector('#gmCanReply')||{}).checked);
     let sent=0, failed=0;
-    for(const m of _l){
+    for(const m of _to){
       try{
         const sid=String(m.student_id);
         const nm=(m.child_name||m.student_name||'');
-        // Konverzaci hledáme podle dvojice student+kouč. U klubové zprávy se navíc označí gym_id,
-        // aby se v chatu ukázal klub místo jména.
+        const body=txt.replace(/\{jmeno\}|\{name\}/g, nm);
+
+        if(!canReply){
+          // Bez možnosti odpovědi žádné vlákno nevzniká -- jde to jen jako notifikace. Zamčené
+          // políčko v chatu by matlo a stejně by nic nevynutilo.
+          await supaClient.from('notifications').insert({ user_id:sid, type:'system', read:false,
+            message:'📣 '+((asClub&&g&&g.name)?(g.name+': '):'')+body,
+            data:JSON.stringify({ kind:'gym_announce', body:body,
+              gym_name:(asClub&&g)?(g.name||''):(currentUser.name||''),
+              gym_id:(g&&g.id)||null, from_id:currentUser.id, from_name:currentUser.name||'' }) });
+          sent++; continue;
+        }
+
         let conv=null;
         const { data }=await supaClient.from('conversations').select('*').eq('student_id',sid).eq('coach_id',currentUser.id);
         if(data && data.length) conv=data[0];
         else {
+          // Kdo co poslal, drží messages.sender_id u KAŽDÉ zprávy -- v jednom vlákně se odesílatelé
+          // střídají, takže jedna hodnota na konverzaci by u zbytku lhala.
           const { data:cr }=await supaClient.from('conversations').insert({ student_id:sid, coach_id:currentUser.id,
-            coach_name:(asClub?((g&&g.name)||''):(currentUser.name||'Kouč')), student_name:(m.student_name||'Student'),
-            ...(asClub?{ gym_id:g.id }:{}) }).select();
+            coach_name:(currentUser.name||'Kouč'), student_name:(m.student_name||'Student'),
+            ...(g?{ origin_gym_id:g.id }:{}) }).select();
           conv=cr && cr[0];
         }
         if(!conv) { failed++; continue; }
-        if(asClub && !conv.gym_id){ try{ await supaClient.from('conversations').update({ gym_id:g.id, coach_name:(g&&g.name)||'' }).eq('id',conv.id); }catch(e){} }
+        if(g && !conv.origin_gym_id){ try{ await supaClient.from('conversations').update({ origin_gym_id:g.id }).eq('id',conv.id); }catch(e){} }
         await supaClient.from('messages').insert({ conversation_id:conv.id, sender_id:currentUser.id,
-          text:txt.replace(/\{jmeno\}|\{name\}/g, nm) });
+          text:body, ...(asClub?{ kind:'announce' }:{}) });
+        // Notifikace i tak -- do chatu se nikdo nedívá sám od sebe.
+        try{ await supaClient.from('notifications').insert({ user_id:sid, type:'system', read:false,
+          message:(asClub&&g&&g.name?('📣 '+g.name+': '):'💬 ')+body.slice(0,120),
+          data:JSON.stringify({ kind:'gym_announce', body:body.slice(0,120),
+            gym_name:(asClub&&g)?(g.name||''):(currentUser.name||''),
+            announce:true, from_id:currentUser.id, from_name:currentUser.name||'' }) }); }catch(e){}
         sent++;
       }catch(e){ failed++; }
     }
     ov.remove();
     toast((EN?('✅ Sent to '+sent):('✅ Odesláno '+sent))+(failed?((EN?', failed ':', neúspěch ')+failed):''));
   };
+}
+
+
+// Otevře soukromou konverzaci s konkrétním člověkem. Používá se z oznámení klubu: příjemce
+// klepne na "odpovědět" a teprve tím vlákno vznikne. Kdo je v konverzaci kouč a kdo student se
+// řídí tím, kdo ji zakládá -- tady ji zakládá příjemce oznámení, tedy student.
+async function openChatWithPerson(personId, personName){
+  if(!personId || !currentUser){ toast(L('⚠️ Chyba')); return; }
+  try{
+    let conv=null;
+    const { data }=await supaClient.from('conversations').select('*')
+      .or('and(student_id.eq.'+currentUser.id+',coach_id.eq.'+personId+'),and(student_id.eq.'+personId+',coach_id.eq.'+currentUser.id+')');
+    if(data && data.length) conv=data[0];
+    else {
+      const { data:cr }=await supaClient.from('conversations').insert({
+        student_id:currentUser.id, coach_id:personId,
+        coach_name:personName||'', student_name:currentUser.name||'' }).select();
+      conv=cr && cr[0];
+    }
+    if(conv){ closeAllSheets(); openChat(conv); } else { toast('⚠️ '+L('Chyba')); }
+  }catch(e){ console.error('openChatWithPerson', e); toast('⚠️ '+L('Chyba')); }
 }
 
 async function messageGymMember(studentId, studentName){
