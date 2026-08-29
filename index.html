@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SST stops the receipts list mixing two sellers and makes it readable. It queried gym_id OR coach_id together, so a coach saw the whole club takings and an owner had their own 1:1s stirred into the club list -- a club and a coach can be separate legal entities with separate tax numbers, and a coach who merely teaches there has no business seeing what the club sold. The caller now states whose receipts it wants and the header names them. The rows also led with the buyer name over a raw database type, so a ticket read event_ticket; they now lead with what was sold and put buyer, date, method and amount underneath. Pagination at fifty per page, because a club with two hundred members produces hundreds of receipts a month and rendering them all at once is slow to open and endless to scroll. -->
+<!-- MTL build: SSU gives the receipts list the same handling the member list has. Rows named only the kind of sale, so a ticket said Listek na akci without saying to which event and a membership did not say which tariff -- transactions.plan holds that name and is now appended, with course deposits and first months marked since plan does not carry those. There is a search across the buyer name and the item, chips for the kinds actually present rather than a fixed list, and a 20 or 50 per page switch; the default drops to twenty to match the members screen. Changing any filter returns to the first page, and an empty result now says whether it is the period or the filter that is empty. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -2292,7 +2292,10 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
     <div style="display:flex;gap:8px;margin-bottom:14px;">
       <select id="cdkYear" style="flex:1;padding:9px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:'DM Sans';background:#fff;"></select>
       <select id="cdkMonth" style="flex:1;padding:9px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:'DM Sans';background:#fff;"></select>
+      <select id="cdkPer" style="flex:none;width:92px;padding:9px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:'DM Sans';background:#fff;"><option value="20">20/str</option><option value="50">50/str</option></select>
     </div>
+    <input id="cdkSearch" type="search" placeholder="Hledat podle jména nebo položky…" style="width:100%;box-sizing:border-box;padding:11px 13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';background:#fff;margin-bottom:10px;">
+    <div id="cdkTypes" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;"></div>
     <div id="cdkBody"><p style="text-align:center;color:var(--light);padding:30px;font-size:13px;">Načítám…</p></div>
   </div>
 </div>
@@ -29462,7 +29465,7 @@ async function _loadClubDoklady(_gidIn){
   // Do nadpisu, ať je vidět, čí doklady to jsou -- dvě entity, dva seznamy.
   try{ const _t=document.getElementById('cdkTitle'); if(_t) _t.textContent=(EN?'All receipts':'V\u0161echny doklady')+(_who?(' \u00b7 '+_who):''); }catch(e){}
   let rows=[];
-  try{ const { data }=await supaClient.from('transactions').select('id,gross_amount,currency,type,payment_method,created_at,payment_intent,gym_id,coach_id,member_id,income_class,status').eq(_filter.col,_filter.val).order('created_at',{ascending:false}); rows=(data||[]).filter(function(t){ return t.status!=='refunded' && Number(t.gross_amount||0)>0; }); }catch(e){}
+  try{ const { data }=await supaClient.from('transactions').select('id,gross_amount,currency,type,payment_method,created_at,payment_intent,gym_id,coach_id,member_id,income_class,status,plan,cash_payer_name').eq(_filter.col,_filter.val).order('created_at',{ascending:false}); rows=(data||[]).filter(function(t){ return t.status!=='refunded' && Number(t.gross_amount||0)>0; }); }catch(e){}
   var ids=Array.from(new Set(rows.map(function(t){ return t.member_id; }).filter(Boolean)));
   window._cdkNames={};
   if(ids.length){ try{ const { data:profs }=await supaClient.from('profiles').select('id,name').in('id',ids); (profs||[]).forEach(function(p){ window._cdkNames[p.id]=p.name; }); }catch(e){} }
@@ -29479,29 +29482,69 @@ async function _loadClubDoklady(_gidIn){
   var last=new Date(rows[0].created_at);
   if(yEl) yEl.value=String(last.getFullYear());
   if(mEl) mEl.value=String(last.getMonth());
+  // Filtr druhů se skládá z toho, co v seznamu opravdu je -- nabízet "Merch" klubu, který ho
+  // neprodává, je jen šum. Stejná logika jako u členů: štítky nad seznamem, ne rozbalovátko.
+  var tEl=document.getElementById('cdkTypes');
+  if(tEl){
+    var seen=[]; rows.forEach(function(t){ var k=t.type||''; if(k && seen.indexOf(k)<0) seen.push(k); });
+    window._cdkType=window._cdkType||'';
+    var _chip='padding:7px 13px;border-radius:999px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';border:1px solid var(--border);';
+    tEl.innerHTML=(seen.length>1?('<button class="cdkTy" data-t="" style="'+_chip+(window._cdkType?'background:var(--surf);color:var(--mid);':'background:var(--dark);color:#fff;border-color:var(--dark);')+'">'+(EN?'All':'Vše')+'</button>'
+      +seen.map(function(k){ return '<button class="cdkTy" data-t="'+escapeHtml(k)+'" style="'+_chip+(window._cdkType===k?'background:var(--dark);color:#fff;border-color:var(--dark);':'background:var(--surf);color:var(--mid);')+'">'+escapeHtml(_cdkTypeLabel({type:k}))+'</button>'; }).join('')):'');
+    tEl.querySelectorAll('.cdkTy').forEach(function(b){ b.onclick=function(){ window._cdkType=b.dataset.t||''; window._cdkPage=0; _cdkRender(); }; });
+  }
+  var sEl=document.getElementById('cdkSearch');
+  if(sEl && !sEl.dataset.wired){ sEl.dataset.wired='1'; sEl.oninput=function(){ window._cdkQ=sEl.value||''; window._cdkPage=0; _cdkRender(); }; }
+  var pEl=document.getElementById('cdkPer');
+  if(pEl && !pEl.dataset.wired){ pEl.dataset.wired='1'; pEl.value=String(window._cdkPer||20); pEl.onchange=function(){ window._cdkPer=parseInt(pEl.value,10)||20; window._cdkPage=0; _cdkRender(); }; }
   _cdkRender();
 }
 // Lidský název místo syrového typu z databáze. _mpItemLabel je pro jiný kontext a u dokladů
 // vracel věci jako "event_ticket".
 function _cdkTypeLabel(t){
   var EN=LANG==='en';
-  var m={ event_ticket:EN?'Event ticket':'Lístek na akci', membership:EN?'Membership':'Členství',
+  var m={ event_ticket:EN?'Event ticket':'Lístek na akci', event:EN?'Event ticket':'Lístek na akci',
+          membership:EN?'Membership':'Členství',
           gym_dropin:EN?'Drop-in':'Jednorázový vstup', dropin:EN?'Drop-in':'Jednorázový vstup',
+          drop_in:EN?'Drop-in':'Jednorázový vstup',
           coach_1to1:EN?'1:1 lesson':'Lekce 1:1', coach_inperson:EN?'1:1 lesson':'Lekce 1:1',
           coach_online:EN?'Online 1:1':'Online 1:1', online:EN?'Online 1:1':'Online 1:1',
-          cohort:EN?'Course':'Kurz', cohort_deposit:EN?'Course deposit':'Záloha na kurz',
+          cohort:EN?'Course':'Kurz', course:EN?'Course':'Kurz',
           merch:EN?'Merch':'Merch' };
-  return m[t.type] || (typeof _acTypeLabel==='function' ? _acTypeLabel(t.type) : (t.type||''));
+  var base=m[t.type] || (typeof _acTypeLabel==='function' ? _acTypeLabel(t.type) : (t.type||''));
+  // Konkrétní název, ne jen druh. "Lístek na akci" neřekne na kterou, "Členství" neřekne jaké --
+  // a účetní ani majitel podle toho nepozná, co se vlastně prodalo. transactions.plan drží název
+  // tarifu nebo akce; když chybí, zůstane aspoň druh.
+  var nm=(t.plan||'').trim();
+  if(nm && nm.toLowerCase()!==String(base).toLowerCase()) base += ' \u00b7 ' + nm;
+  // U kurzu ještě rozlišit zálohu od splátky, to plan nenese.
+  if(t.income_class==='cohort_deposit') base += ' ('+(EN?'deposit':'záloha')+')';
+  else if(t.income_class==='cohort_first_month') base += ' ('+(EN?'month 1':'1. měsíc')+')';
+  return base;
 }
 function _cdkRender(){
   var EN=LANG==='en'; var box=document.getElementById('cdkBody'); var rows=window._cdkRows||[]; if(!box) return;
   var y=parseInt((document.getElementById('cdkYear')||{}).value,10); var m=parseInt((document.getElementById('cdkMonth')||{}).value,10);
-  var sel=rows.filter(function(t){ var d=new Date(t.created_at); if(d.getFullYear()!==y) return false; if(!isNaN(m)&&m>=0&&d.getMonth()!==m) return false; return true; });
-  if(!sel.length){ box.innerHTML='<p style="text-align:center;color:var(--light);padding:26px;font-size:13px;">'+(EN?'No receipts in this period.':'\u017d\u00e1dn\u00e9 doklady v tomto obdob\u00ed.')+'</p>'; return; }
+  var q=String(window._cdkQ||'').trim().toLowerCase();
+  var ty=window._cdkType||'';
+  var sel=rows.filter(function(t){
+    var d=new Date(t.created_at);
+    if(d.getFullYear()!==y) return false;
+    if(!isNaN(m)&&m>=0&&d.getMonth()!==m) return false;
+    if(ty && (t.type||'')!==ty) return false;
+    if(q){
+      // Hledá se přes jméno kupujícího i název položky -- majitel hledá jednou "Novák",
+      // podruhé "Roční", a nutit ho vybírat čím to bude, nemá smysl.
+      var hay=((window._cdkNames&&window._cdkNames[t.member_id])||'')+' '+(t.cash_payer_name||'')+' '+(t.plan||'')+' '+_cdkTypeLabel(t);
+      if(hay.toLowerCase().indexOf(q)<0) return false;
+    }
+    return true;
+  });
+  if(!sel.length){ box.innerHTML='<p style="text-align:center;color:var(--light);padding:26px;font-size:13px;">'+((q||ty)?(EN?'Nothing matches.':'Nic neodpov\u00edd\u00e1 filtru.'):(EN?'No receipts in this period.':'\u017d\u00e1dn\u00e9 doklady v tomto obdob\u00ed.'))+'</p>'; return; }
   // Stránkování. Klub s dvěma sty členy má za měsíc stovky dokladů a vykreslit je najednou
   // znamená dlouhé scrollování a pomalé otevření. Padesát na stránku, zbytek na doklepnutí.
-  var _PP=50;
-  if(window._cdkPageKey!==(y+'-'+m)){ window._cdkPage=0; window._cdkPageKey=(y+'-'+m); }
+  var _PP=window._cdkPer||20;
+  if(window._cdkPageKey!==(y+'-'+m+'-'+ty+'-'+q)){ window._cdkPage=0; window._cdkPageKey=(y+'-'+m+'-'+ty+'-'+q); }
   var _page=window._cdkPage||0;
   var _pages=Math.ceil(sel.length/_PP);
   var _all=sel;
@@ -29512,8 +29555,10 @@ function _cdkRender(){
     var cur=t.currency||'CZK'; var amt=fmtPrice(Number(t.gross_amount||0)/100,cur);
     var who=(window._cdkNames&&window._cdkNames[t.member_id])||(EN?'Walk-in':'Bez \u00fa\u010dtu');
     return '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 2px;border-bottom:1px solid var(--border);">'
-      +'<div style="min-width:0;"><div style="font-size:13.5px;font-weight:700;color:var(--dark);">'+escapeHtml(who)+'</div>'
-      +'<div style="font-size:11.5px;color:var(--mid);margin-top:1px;">'+escapeHtml(_mpItemLabel(t))+' \u00b7 '+ds+' \u00b7 '+(pmE[t.payment_method]||'')+' '+amt+'</div></div>'
+      // Nahoře CO se prodalo i s názvem, dole komu, kdy a jak. Dřív bylo nahoře jméno kupujícího
+      // a pod ním obecný druh, takže na řádku nebylo vidět, na kterou akci nebo jaký tarif to je.
+      +'<div style="min-width:0;"><div style="font-size:13.5px;font-weight:700;color:var(--dark);">'+escapeHtml(_cdkTypeLabel(t))+'</div>'
+      +'<div style="font-size:11.5px;color:var(--mid);margin-top:2px;">'+escapeHtml(who)+' \u00b7 '+ds+' \u00b7 '+(pmE[t.payment_method]||'')+' '+amt+'</div></div>'
       +'<button class="cdkDokBtn" data-idx="'+idx+'" style="flex:none;background:none;border:none;color:#635BFF;font-size:12.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';white-space:nowrap;">'+(EN?'Receipt \u203a':'Doklad \u203a')+'</button></div>';
   }).join('');
   var _sel=sel;
