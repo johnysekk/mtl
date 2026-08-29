@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: STH fixes the message sheet after testing. Club announcement never appeared for the owner because the check read owner_id off _myGymData, which does not always carry it; it now also checks the club list, where checkGymOwnership always sets it. The sheet no longer closes when you click beside it -- losing five typed sentences with no way back is not acceptable -- and what is typed is kept as a draft, so it survives closing anyway. Recipients start unchecked rather than all selected, there is a Clear next to Select all, and membership levels appear as chips: a club thinks in levels rather than in a list of names, so picking Pokrocili selects everyone on it. The heading follows the chosen type instead of always saying Announcement, and the Czech reads properly. The sidebar entry is genuinely gone this time, and the screen waits in a short loop for the club rather than announcing that it did not load. -->
+<!-- MTL build: STI settles the ownership question by asking the database instead of guessing from memory. Twice I inferred it from _myGymData and then from _myGyms, and twice the owner still saw only Personal message: those objects are populated from several places and need not carry owner_id. One query on gyms, and a second on gym_coaches for a co-owner, is reliable and costs nothing -- the same check now guards the threads screen, which is also what was producing the club-did-not-load toast. Drafts get their own list: unsent messages are kept per audience and type, reopened with the audience they were written for, and expire after thirty days so they cannot pile up. The two buttons above the tiles now share one style. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -16140,7 +16140,9 @@ async function renderGymMembers(){
     // Komunikace z oznámení patří k psaní členům -- je to jeho následek, ne provozní položka
     // menu. Vidí ji jen majitel a spolumajitel.
     const _own=!!(_myGymData && currentUser && (String(_myGymData.owner_id)===String(currentUser.id) || _myGymData._isCoOwner));
-    return _own?`<button id="gmConvBtn" style="width:100%;padding:8px;margin:-6px 0 10px;background:none;border:none;color:var(--mid);font-size:12.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';text-decoration:underline;">${EN?'Announcement threads \u203a':'Komunikace z oznámení \u203a'}</button>`:'';
+    const _nd=(typeof _gmDraftsLoad==='function')?_gmDraftsLoad().length:0;
+    const _draftBtn=_nd?`<button id="gmDraftBtn" style="width:100%;padding:10px;margin-bottom:10px;background:#FFF8E6;color:#7a5a1a;border:1px solid #F0DFA8;border-radius:12px;font-size:13px;font-weight:800;cursor:pointer;font-family:'DM Sans';">\uD83D\uDCDD ${EN?('Drafts ('+_nd+')'):('Koncepty ('+_nd+')')}</button>`:'';
+    return _draftBtn+(_own?`<button id="gmConvBtn" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:13px;font-weight:800;cursor:pointer;font-family:'DM Sans';">\uD83D\uDCAC ${EN?'Announcement threads':'Komunikace z oznámení'}</button>`:'');
   })()}`:''}
   <div style="display:flex;gap:8px;margin-bottom:12px;">
     <div style="flex:1;background:#F0FBF0;border:1px solid #CDEBD6;border-radius:12px;padding:11px;text-align:center;"><div style="font-family:'Bebas Neue';font-size:26px;color:#006040;">${actCount}</div><div style="font-size:11px;color:var(--mid);">${EN?'Active':'Aktivní'}</div></div>
@@ -16200,6 +16202,7 @@ async function renderGymMembers(){
   // Posílá se tomu, co je zrovna vyfiltrované -- kdo si vybral "Nedávno doběhlo", chce psát jim;
   // kdo je na "Vše", všem. Celý seznam, ne jen zobrazená stránka.
   { const cb=box.querySelector('#gmConvBtn'); if(cb) cb.onclick=function(){ if(typeof openGymConvos==='function') openGymConvos(); }; }
+  { const db=box.querySelector('#gmDraftBtn'); if(db) db.onclick=function(){ _gmOpenDrafts(); }; }
   { const bb=box.querySelector('#gmBulkBtn'); if(bb) bb.onclick=async function(){
       const _k=(window._gmMembKid||null);
       if(_k==='lapsed'){ _gmBulkMessage(window._gmLapsed||[], (LANG==='en'?'Just lapsed':'Nedávno doběhlo')); return; }
@@ -26164,7 +26167,18 @@ async function openGymConvos(){
   if(!g){ try{ if(typeof checkGymOwnership==='function') await checkGymOwnership(); }catch(e){} }
   for(let _i=0;!(g=window._myGymData||null) && _i<20;_i++){ await new Promise(r=>setTimeout(r,150)); }
   if(!g){ toast(EN?'⚠️ No club loaded':'⚠️ Klub se nenačetl'); return; }
-  const canSee=!!(currentUser && (String(g.owner_id)===String(currentUser.id) || g._isCoOwner));
+  // Stejně jako u psaní členům: zeptat se databáze, ne paměti.
+  let canSee=false;
+  try{
+    const { data:_gr }=await supaClient.from('gyms').select('owner_id').eq('id',g.id).maybeSingle();
+    if(_gr && String(_gr.owner_id)===String(currentUser.id)) canSee=true;
+  }catch(e){}
+  if(!canSee){
+    try{
+      const { data:_co }=await supaClient.from('gym_coaches').select('id').eq('gym_id',g.id).eq('coach_id',currentUser.id).eq('co_owner',true).eq('status','active').limit(1);
+      if(_co && _co.length) canSee=true;
+    }catch(e){}
+  }
   if(!canSee){ toast(EN?'⚠️ Owners only':'⚠️ Jen pro majitele a spolumajitele'); return; }
   openSheet('shGymConvos');
   const box=document.getElementById('gymConvosBody'); if(!box) return;
@@ -26295,19 +26309,103 @@ function _gmPickAudience(grp){
   }; });
 }
 
+
+// ── KONCEPTY ROZEPSANÝCH ZPRÁV ───────────────────────────────────────────────────────────────
+// Rozepsaná zpráva se nesmí ztratit, ale ani se nesmí hromadit donekonečna. Drží se v prohlížeči
+// (nikam se neposílá -- je to nedokončený text, ne data klubu) a po 30 dnech se sama zahodí.
+const _GM_DRAFTS='mtl_bulk_drafts';
+function _gmDraftsLoad(){
+  let a=[];
+  try{ a=JSON.parse(localStorage.getItem(_GM_DRAFTS)||'[]'); if(!Array.isArray(a)) a=[]; }catch(e){ a=[]; }
+  const cut=Date.now()-30*86400000;
+  const keep=a.filter(function(d){ return d && d.at && d.at>cut && String(d.text||'').trim(); });
+  if(keep.length!==a.length){ try{ localStorage.setItem(_GM_DRAFTS, JSON.stringify(keep)); }catch(e){} }
+  return keep;
+}
+function _gmDraftSave(text, ctx, kind){
+  const t=String(text||'').trim(); if(!t) return;
+  const a=_gmDraftsLoad();
+  // Jeden koncept na kombinaci skupiny a druhu -- psát dvě zprávy témuž publiku naráz nikdo
+  // nepotřebuje a deset skoro stejných konceptů je horší než žádný.
+  const key=(ctx||'')+'|'+(kind||'');
+  const ix=a.findIndex(function(d){ return d.key===key; });
+  const rec={ key:key, text:t, ctx:ctx||'', kind:kind||'dm', at:Date.now() };
+  if(ix>=0) a[ix]=rec; else a.unshift(rec);
+  try{ localStorage.setItem(_GM_DRAFTS, JSON.stringify(a.slice(0,20))); }catch(e){}
+}
+function _gmDraftDrop(key){
+  const a=_gmDraftsLoad().filter(function(d){ return d.key!==key; });
+  try{ localStorage.setItem(_GM_DRAFTS, JSON.stringify(a)); }catch(e){}
+}
+function _gmDraftFor(ctx, kind){
+  return _gmDraftsLoad().find(function(d){ return d.key===((ctx||'')+'|'+(kind||'')); })||null;
+}
+
+
+// Seznam rozepsaných zpráv. Otevřením se koncept vrátí do okna i s publikem a druhem, ve kterém
+// vznikl -- jinak by si člověk musel pamatovat, komu to vlastně psal.
+function _gmOpenDrafts(){
+  const EN=LANG==='en';
+  const list=_gmDraftsLoad();
+  if(!list.length){ toast(EN?'No drafts':'Žádné koncepty'); return; }
+  let ov=document.getElementById('gmDraftOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='gmDraftOv';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100069;display:flex;align-items:flex-end;justify-content:center;';
+  let h='<div style="background:var(--bg);border-radius:18px 18px 0 0;max-width:520px;width:100%;padding:20px;max-height:80vh;overflow-y:auto;">';
+  h+='<div style="font-size:17px;font-weight:800;margin-bottom:3px;">'+(EN?'Drafts':'Koncepty')+'</div>';
+  h+='<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:14px;">'+(EN?'Unsent messages. They are kept on this device and disappear after 30 days.':'Neodeslané zprávy. Drží se v tomhle prohlížeči a po 30 dnech samy zmizí.')+'</div>';
+  list.forEach(function(d,ix){
+    const age=Math.max(0, Math.round((Date.now()-d.at)/86400000));
+    h+='<div style="border:1px solid var(--border);background:#fff;border-radius:12px;padding:11px 13px;margin-bottom:9px;">'
+      +'<div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;">'
+      +'<div style="min-width:0;"><div style="font-size:11.5px;font-weight:800;color:var(--mid);">'+(d.kind==='ann'?'\u{1F4E3} ':'\u{1F4AC} ')+escapeHtml(d.ctx||'')+'</div>'
+      +'<div style="font-size:13px;color:var(--dark);margin-top:4px;line-height:1.45;">'+escapeHtml(String(d.text||'').slice(0,140))+(String(d.text||'').length>140?'…':'')+'</div>'
+      +'<div style="font-size:11px;color:var(--light);margin-top:4px;">'+(age===0?(EN?'today':'dnes'):(EN?(age+' d ago'):('před '+age+' dny')))+'</div></div>'
+      +'<button class="gmDrDel" data-i="'+ix+'" title="'+(EN?'Delete':'Smazat')+'" style="flex:none;background:none;border:none;color:var(--light);font-size:18px;cursor:pointer;line-height:1;">\u00d7</button>'
+      +'</div>'
+      +'<button class="gmDrOpen" data-i="'+ix+'" style="width:100%;margin-top:9px;padding:9px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Continue writing':'Pokračovat v psaní')+'</button></div>';
+  });
+  h+='<button id="gmDrX" style="width:100%;margin-top:2px;padding:11px;background:none;border:none;color:var(--mid);font-size:13px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button></div>';
+  ov.innerHTML=h; document.body.appendChild(ov);
+  ov.querySelector('#gmDrX').onclick=function(){ ov.remove(); };
+  ov.querySelectorAll('.gmDrDel').forEach(function(b){ b.onclick=function(){
+    const d=list[+b.dataset.i]; if(!d) return;
+    _gmDraftDrop(d.key); ov.remove(); _gmOpenDrafts();
+    try{ if(typeof renderGymMembers==='function') renderGymMembers(); }catch(e){}
+  }; });
+  ov.querySelectorAll('.gmDrOpen').forEach(function(b){ b.onclick=async function(){
+    const d=list[+b.dataset.i]; if(!d) return;
+    ov.remove();
+    // Vrátit se do stejného publika, ve kterém koncept vznikl.
+    try{
+      const grp=await _gmAudienceGroups((window._myGymData||{}).id);
+      const k=/Pravideln|Regular/.test(d.ctx)?'reg':(/Občas|Occasional/.test(d.ctx)?'occ':'gone');
+      _gmBulkMessage(grp[k]||[], d.ctx);
+    }catch(e){ toast(EN?'⚠️ Could not reopen':'⚠️ Nepodařilo se otevřít'); }
+  }; });
+}
+
 async function _gmBulkMessage(list, ctxLabel){
   const EN=LANG==='en';
   const _l=(list||[]).filter(function(m){ return m && m.student_id; });
   if(!_l.length){ toast(EN?'⚠️ Nobody to write to':'⚠️ Není komu psát'); return; }
-  // _myGymData nemusí mít owner_id (podle toho, čím se naplnila), takže se vlastnictví ověřuje
-  // i proti seznamu klubů, kde ho checkGymOwnership vždycky má. Bez toho se majiteli vůbec
-  // nenabídlo "Oznámení klubu" a zbyla jen osobní zpráva.
+  // VLASTNICTVÍ SE ZJISTÍ Z DATABÁZE, ne z toho, co je zrovna v paměti. Dvakrát jsem to hádal
+  // z _myGymData a z _myGyms a dvakrát to majiteli nefungovalo -- ty objekty se plní z různých
+  // míst a nemusí owner_id nést. Jeden dotaz je spolehlivý a stojí nic.
   const g=window._myGymData||null;
-  const _mine=(window._myGyms||[]).find(function(x){ return g && String(x.id)===String(g.id); })||null;
-  const canAsClub=!!(g && currentUser && (
-        String(g.owner_id||'')===String(currentUser.id)
-     || g._isCoOwner
-     || (_mine && (String(_mine.owner_id||'')===String(currentUser.id) || _mine._isCoOwner))));
+  let canAsClub=false;
+  if(g && currentUser){
+    try{
+      const { data:_gr }=await supaClient.from('gyms').select('owner_id').eq('id',g.id).maybeSingle();
+      if(_gr && String(_gr.owner_id)===String(currentUser.id)) canAsClub=true;
+    }catch(e){ console.log('[gm owner]', e&&e.message); }
+    if(!canAsClub){
+      try{
+        const { data:_co }=await supaClient.from('gym_coaches').select('id').eq('gym_id',g.id).eq('coach_id',currentUser.id).eq('co_owner',true).eq('status','active').limit(1);
+        if(_co && _co.length) canAsClub=true;
+      }catch(e){ console.log('[gm coowner]', e&&e.message); }
+    }
+  }
 
   // Nezletilí se NEVYNECHÁVAJÍ. Oznámení je jednosměrné -- vlákno vznikne, až když příjemce sám
   // klepne na odpověď. Vylučovat je by znamenalo, že se mladistvý nedozví, že je zítra zavřeno,
@@ -26390,8 +26488,10 @@ async function _gmBulkMessage(list, ctxLabel){
   }; });
   // Rozepsaná zpráva přežije zavření okna. Kdo napíše pět vět a omylem klepne vedle, o ně nepřijde.
   { const ta=ov.querySelector('#gmBulkTxt');
-    if(ta){ try{ const _d=localStorage.getItem('mtl_bulk_draft'); if(_d) ta.value=_d; }catch(e){}
-      ta.oninput=function(){ try{ localStorage.setItem('mtl_bulk_draft', ta.value||''); }catch(e){} }; } }
+    if(ta){
+      const _d=_gmDraftFor(ctxLabel, _kind); if(_d) ta.value=_d.text;
+      ta.oninput=function(){ _gmDraftSave(ta.value, ctxLabel, _kind); };
+    } }
   _paintGo();
   let _kind='dm';
   const _paintKind=function(){
@@ -26403,8 +26503,8 @@ async function _gmBulkMessage(list, ctxLabel){
     if(nt) nt.textContent=(_kind==='ann')
       ? (EN?'Speaks for the club. Goes as a notification, one-way — anyone who wants to reply opens a chat with you themselves.'
           :'Mluví klub. Půjde jako notifikace, jednosměrně — kdo bude chtít odpovědět, otevře si s tebou chat sám.')
-      : (EN?'Speaks for you. Lands in the chat and they can reply there.'
-          :'Mluvíš ty. Přistane v chatu a člověk může rovnou odpovědět.');
+      : (EN?'Sent from your profile under your name. It lands in the student\'s chat and they can reply to you.'
+          :'Zpráva přijde z tvého profilu pod tvým jménem. Přistane studentovi v chatu a může ti odpovědět.');
   };
   ov.querySelectorAll('.gmKind').forEach(function(b){ b.onclick=function(){ _kind=b.dataset.k; _paintKind(); }; });
   _paintKind();
@@ -26459,7 +26559,7 @@ async function _gmBulkMessage(list, ctxLabel){
         sent++;
       }catch(e){ failed++; }
     }
-    try{ localStorage.removeItem('mtl_bulk_draft'); }catch(e){}
+    _gmDraftDrop((ctxLabel||'')+'|'+_kind);
     ov.remove();
     toast((EN?('✅ Sent to '+sent):('✅ Odesláno '+sent))+(failed?((EN?', failed ':', neúspěch ')+failed):''));
   };
