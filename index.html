@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SUZ closes the two ways a new account still walked straight in. Signing in with no profile row fell to a rescue branch that created one without beta_status or is_minor -- the very fields the waiting room and the minor lock read -- so anyone whose registration had failed simply logged in again and was let through as an adult. And test mode is fetched in the background without being awaited, so on a fast login enterApp ran while _TEST_MODE was still false and the gate had nothing to act on; both the gate and the minor lock are now re-evaluated once that fetch lands. -->
+<!-- MTL build: SVB gives a minor their messages back. Hiding the chat cut off the club and the coach from the one person who most needs telling that training is cancelled, and it was hidden on the reasoning that a minor account should be limited -- but the limit that matters is what they can buy, not whether anyone can reach them. Private lessons stay 18+ and the coach deck stays hidden; everything else, including Messages, works as it does for anyone else. Threads with a minor remain visible to club management, with both sides told so in the thread. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -70,7 +70,7 @@ textarea:-webkit-autofill {
 body.coach-mode .coach-only{display:block}
 body.coach-mode .student-only{display:none}
 body.coach-mode:not(.dashmode) #meMenuGroup{display:none}
-body.minor-mode #ni-find,body.minor-mode #ni-msgs,body.minor-mode #becomeCoachBox,body.minor-mode #meGymApply,body.minor-mode .opp-card:has(.opp-cta[data-opp="coach"]),body.minor-mode .opp-card:has(.opp-cta[data-opp="ambassador"]),body.minor-mode .opp-card:has(.opp-cta[data-opp="addgym"]),body.minor-mode .opp-card:has(.opp-cta[data-opp="gym"]){display:none !important;}
+body.minor-mode #ni-find,body.minor-mode #becomeCoachBox,body.minor-mode #meGymApply,body.minor-mode .opp-card:has(.opp-cta[data-opp="coach"]),body.minor-mode .opp-card:has(.opp-cta[data-opp="ambassador"]),body.minor-mode .opp-card:has(.opp-cta[data-opp="addgym"]),body.minor-mode .opp-card:has(.opp-cta[data-opp="gym"]){display:none !important;}
 .slot-manage{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:var(--surf);border:1px solid var(--border);border-radius:12px;margin-bottom:10px}
 .slot-del{width:32px;height:32px;border-radius:8px;background:#FEECEC;color:var(--red);border:none;font-size:16px;cursor:pointer;flex-shrink:0}
 .booked-tag{font-size:11px;background:#FEECEC;color:var(--red);padding:3px 8px;border-radius:5px;font-weight:600}
@@ -22476,6 +22476,16 @@ async function _betaSetStatus(id, status){
     toast(status==='approved'?(EN?'\u2705 Approved':'\u2705 Schv\u00e1leno'):(EN?'Rejected':'Zam\u00edtnuto')); _loadBetaPending();
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
 }
+// Testovací režim z DATABÁZE, ne z paměti. window._TEST_MODE se plní na pozadí, takže při
+// registraci bývá ještě false -- a beta_status se pak uložil jako null, čímž brána ztratila
+// jediné, podle čeho pozná čekajícího. Tohle se zeptá napřímo a čeká na odpověď.
+async function _testModeNow(){
+  try{
+    const { data }=await supaClient.from('platform_config').select('test_mode').eq('id',1).maybeSingle();
+    if(data){ window._TEST_MODE=!!data.test_mode; return !!data.test_mode; }
+  }catch(e){ console.log('[testModeNow]', e&&e.message); }
+  return !!window._TEST_MODE;
+}
 async function _loadTestMode(){
   try{ const { data } = await supaClient.from('platform_config').select('test_mode').eq('id',1).single();
     window._TEST_MODE = !!(data && data.test_mode);
@@ -24992,7 +25002,9 @@ async function _chatCoachClubs(coachId){
 async function openChat(conv){
   if(currentUser && conv && conv.coach_id && conv.coach_id!==currentUser.id && await _coachChatLocked(conv.coach_id)){ toast(LANG==='en'?'This chat is no longer available.':'Tento chat u\u017e nen\u00ed dostupn\u00fd.'); return; }
   activeConv=conv;
-  if(currentUser && currentUser.is_minor){ toast(LANG==='en'?'Chat is not available on a minor account.':'Chat není na účtu nezletilého dostupný.'); return; }
+  // Chat mladistvému otevřený JE. Klub i trenér mu musí mít jak napsat -- změna rozvrhu, zavřeno,
+  // domluva okolo tréninku. Omezené je jen to, co si smí koupit: soukromky jsou od 18 let.
+  // Vlákna s mladistvým navíc vidí vedení klubu a obě strany o tom vědí (hlavička ve vlákně).
   const amICoach = conv.coach_id===currentUser.id;
   $('chatTitle').textContent = amICoach ? conv.student_name : conv.coach_name;
   // Studentovi ukázat, ODKUD toho člověka zná. "Owner" mu nic neřekne a spíš mate -- zajímá ho,
@@ -27107,6 +27119,8 @@ async function _gmBulkMessage(list, ctxLabel){
     const btn=this; btn.disabled=true; btn.textContent='…';
     const asClub=(_kind==='ann' && canAsClub);
     const canReply=!asClub;   // oznámení je jednosměrné, osobní zpráva jde rovnou do chatu
+    // Mladistvý má chat zavřený, takže osobní zpráva by mu skončila ve vlákně, které si nikdy
+    // neotevře. Oznámení klubu mu ale dojde -- chodí notifikací a zvonek v liště mu zůstává.
     let sent=0, failed=0;
     for(const m of _to){
       try{
@@ -28605,7 +28619,7 @@ async function _lockDobAndNext(){
       // Jméno a beta stav MUSÍ být i tady. Tenhle upsert běží dřív než _finishReg, takže bez nich
       // vznikl profil s prázdným jménem a bez příznaku čekání -- a člověk prošel branou rovnou
       // do appky, přestože testovací režim běžel.
-      const { error:_de }=await supaClient.from('profiles').upsert({ id:_suUserId, email:_suEmail, name:(_suName||''), birthdate:_signupDob, is_minor:_signupMinor, guardian_email:null, role:'student', beta_status:(window._TEST_MODE?'pending':null) });
+      const { error:_de }=await supaClient.from('profiles').upsert({ id:_suUserId, email:_suEmail, name:(_suName||''), birthdate:_signupDob, is_minor:_signupMinor, guardian_email:null, role:'student', beta_status:(await _testModeNow()?'pending':null) });
       if(_de){ console.log('[dobStep] profil se nezapsal:', _de.message); toast('\u26a0\ufe0f '+_de.message); return; } }
     }catch(e){}
   }
@@ -28624,13 +28638,13 @@ async function _finishReg(){ if(!_suUserId){ toast(LANG==='en'?'⚠️ Session e
   // vesele pokračovala: v databázi žádný řádek, žádný is_minor, žádný beta_status -- a člověk
   // skončil uvnitř appky jako běžný dospělý uživatel úplně bez profilu.
   try{
-    const { error:_pe }=await supaClient.from('profiles').upsert({ id:_suUserId, email:_suEmail, name:nm, role:'student', password_set:true, birthdate:_signupDob||null, is_minor:_signupMinor, guardian_email:_signupGuardian||null, billing_country:_signupCountry||null, beta_status:(window._TEST_MODE?'pending':null) });
+    const { error:_pe }=await supaClient.from('profiles').upsert({ id:_suUserId, email:_suEmail, name:nm, role:'student', password_set:true, birthdate:_signupDob||null, is_minor:_signupMinor, guardian_email:_signupGuardian||null, billing_country:_signupCountry||null, beta_status:(await _testModeNow()?'pending':null) });
     if(_pe) throw _pe;
   }catch(e){
     console.log('[finishReg] profil se nezapsal:', e&&e.message);
     toast('\u26a0\ufe0f '+(LANG==='en'?'Could not save your profile: ':'Profil se nepodařilo uložit: ')+((e&&e.message)||''));
     return;   // účet bez profilu je horší než nedokončená registrace
-  } try{ await supaClient.from('consents').insert([{ user_id:_suUserId, doc:'terms', version:LEGAL_VERSION, agreed_at:new Date().toISOString() },{ user_id:_suUserId, doc:'privacy', version:LEGAL_VERSION, agreed_at:new Date().toISOString() }]); }catch(e){} toast(L('Účet vytvořen!'),1); currentUser={ id:_suUserId, email:_suEmail, name:nm, role:'student', coach_status:null, beta_status:(window._TEST_MODE?'pending':null) }; try{ if(typeof _recordConsent==='function'){ _recordConsent('terms', LEGAL_VERSION, LANG, (typeof legalTerms==='function'?legalTerms():''), {via:'signup'}); _recordConsent('privacy', LEGAL_VERSION, LANG, (typeof legalPrivacy==='function'?legalPrivacy():''), {via:'signup'}); } }catch(e){} try{ localStorage.removeItem('mtl_authpath'); }catch(e){} try{ var _ut=(function(){ try{ return localStorage.getItem('mtl_provapp')?'provider':'customer'; }catch(e){ return 'customer'; } })(); _mtlEcoTrack('CompleteRegistration',{ user_type:_ut }); }catch(e){} enterApp(); }
+  } try{ await supaClient.from('consents').insert([{ user_id:_suUserId, doc:'terms', version:LEGAL_VERSION, agreed_at:new Date().toISOString() },{ user_id:_suUserId, doc:'privacy', version:LEGAL_VERSION, agreed_at:new Date().toISOString() }]); }catch(e){} toast(L('Účet vytvořen!'),1); currentUser={ id:_suUserId, email:_suEmail, name:nm, role:'student', coach_status:null, beta_status:(await _testModeNow()?'pending':null) }; try{ if(typeof _recordConsent==='function'){ _recordConsent('terms', LEGAL_VERSION, LANG, (typeof legalTerms==='function'?legalTerms():''), {via:'signup'}); _recordConsent('privacy', LEGAL_VERSION, LANG, (typeof legalPrivacy==='function'?legalPrivacy():''), {via:'signup'}); } }catch(e){} try{ localStorage.removeItem('mtl_authpath'); }catch(e){} try{ var _ut=(function(){ try{ return localStorage.getItem('mtl_provapp')?'provider':'customer'; }catch(e){ return 'customer'; } })(); _mtlEcoTrack('CompleteRegistration',{ user_type:_ut }); }catch(e){} enterApp(); }
 if($('authVerBtn')) $('authVerBtn').onclick=async()=>{ const tok=($('authVerCode')&&$('authVerCode').value.trim())||''; const msg=$('authVerMsg'); const show=(t)=>{ if(msg){ msg.style.display='block'; msg.textContent=t; } }; if(tok.length<4){ show(LANG==='en'?'Enter the code from the e-mail.':'Zadej kód z e-mailu.'); return; } try{ const { data, error } = await supaClient.auth.verifyOtp({ email:_suEmail, token:tok, type:'signup' }); if(error){ show('⚠️ '+error.message); return; } if(data&&data.user) _suUserId=data.user.id; if(msg) msg.style.display='none'; _regStep='country'; applyDobGate(); }catch(e){ show('⚠️ '+(e.message||'error')); } };
 if($('authVerResend')) $('authVerResend').onclick=async()=>{
     if(_resendLeft>0) return;
@@ -28642,7 +28656,7 @@ if($('authVerResend')) $('authVerResend').onclick=async()=>{
       toast(LANG==='en'?'✉️ Code resent':'✉️ Kód odeslán znovu'); _startResend(); }catch(e){ toast('⚠️ '+(e.message||'error')); } };
 if($('authDobBack')) $('authDobBack').onclick=_authToLogin;
 if($('authVerBack')) $('authVerBack').onclick=_authToLogin;
-if($('authNmBtn')) $('authNmBtn').onclick=async()=>{ const name=($('authNmInput')&&$('authNmInput').value.trim())||''; { const _e=_fullNameErr(name); if(_e){ toast('\u26a0\ufe0f '+_e); return; } } if(!_suUserId){ toast(LANG==='en'?'⚠️ Session error — please log in':'⚠️ Chyba relace — přihlas se prosím'); return; } try{ await supaClient.from('profiles').insert({ id:_suUserId, email:_suEmail, name, role:'student', password_set:true, birthdate:_signupDob||null, is_minor:_signupMinor, guardian_email:_signupGuardian||null, beta_status:(window._TEST_MODE?'pending':null) }); }catch(e){} try{ await supaClient.from('consents').insert([{ user_id:_suUserId, doc:'terms', version:LEGAL_VERSION, agreed_at:new Date().toISOString() },{ user_id:_suUserId, doc:'privacy', version:LEGAL_VERSION, agreed_at:new Date().toISOString() }]); }catch(e){} toast(L('🎉 Účet vytvořen!'),1); currentUser={ id:_suUserId, email:_suEmail, name, role:'student', coach_status:null }; try{ if(typeof _recordConsent==='function'){ _recordConsent('terms', LEGAL_VERSION, LANG, (typeof legalTerms==='function'?legalTerms():''), {via:'signup'}); _recordConsent('privacy', LEGAL_VERSION, LANG, (typeof legalPrivacy==='function'?legalPrivacy():''), {via:'signup'}); } }catch(e){} try{ localStorage.removeItem('mtl_authpath'); }catch(e){} try{ var _ut=(function(){ try{ return localStorage.getItem('mtl_provapp')?'provider':'customer'; }catch(e){ return 'customer'; } })(); _mtlEcoTrack('CompleteRegistration',{ user_type:_ut }); }catch(e){} enterApp(); };
+if($('authNmBtn')) $('authNmBtn').onclick=async()=>{ const name=($('authNmInput')&&$('authNmInput').value.trim())||''; { const _e=_fullNameErr(name); if(_e){ toast('\u26a0\ufe0f '+_e); return; } } if(!_suUserId){ toast(LANG==='en'?'⚠️ Session error — please log in':'⚠️ Chyba relace — přihlas se prosím'); return; } try{ await supaClient.from('profiles').insert({ id:_suUserId, email:_suEmail, name, role:'student', password_set:true, birthdate:_signupDob||null, is_minor:_signupMinor, guardian_email:_signupGuardian||null, beta_status:(await _testModeNow()?'pending':null) }); }catch(e){} try{ await supaClient.from('consents').insert([{ user_id:_suUserId, doc:'terms', version:LEGAL_VERSION, agreed_at:new Date().toISOString() },{ user_id:_suUserId, doc:'privacy', version:LEGAL_VERSION, agreed_at:new Date().toISOString() }]); }catch(e){} toast(L('🎉 Účet vytvořen!'),1); currentUser={ id:_suUserId, email:_suEmail, name, role:'student', coach_status:null }; try{ if(typeof _recordConsent==='function'){ _recordConsent('terms', LEGAL_VERSION, LANG, (typeof legalTerms==='function'?legalTerms():''), {via:'signup'}); _recordConsent('privacy', LEGAL_VERSION, LANG, (typeof legalPrivacy==='function'?legalPrivacy():''), {via:'signup'}); } }catch(e){} try{ localStorage.removeItem('mtl_authpath'); }catch(e){} try{ var _ut=(function(){ try{ return localStorage.getItem('mtl_provapp')?'provider':'customer'; }catch(e){ return 'customer'; } })(); _mtlEcoTrack('CompleteRegistration',{ user_type:_ut }); }catch(e){} enterApp(); };
 $('btnAuthToggle').onclick=()=>{
   // Nápověda k heslu jen v registraci -- při přihlášení nemá co radit.
   setTimeout(function(){ const _h=$('authPassHint'); if(_h) _h.style.display=(authMode==='register')?'block':'none'; },0);
@@ -29155,6 +29169,8 @@ function _applyMinorLock(){
 // is never gated. Approving in Admin flips it to 'approved'.
 function _betaGateActive(){
   try{
+    console.log('[betaGate] beta_status=', currentUser && currentUser.beta_status,
+                '| TEST_MODE=', !!window._TEST_MODE, '| id=', currentUser && currentUser.id);
     if(!currentUser || currentUser.id==='7e08d4bb-0efa-47ae-bd6a-85e9bd04400c') return false;
     // Zamítnutí platí VŽDY, i po přepnutí na ostro. Brána se dřív ptala jen na testovací režim,
     // takže vypnutím testu se zamítnutým i čekajícím otevřely dveře -- rozhodnutí "tenhle člověk
@@ -30170,7 +30186,7 @@ async function checkAuth(){
       // brána i zámek mladistvého se řídí přesně těmi dvěma poli.
       const _em=(data.session.user.email)||null;
       const _row={ id:data.session.user.id, email:_em, role:'student', password_set:false,
-                   beta_status:(window._TEST_MODE?'pending':null) };
+                   beta_status:(await _testModeNow()?'pending':null) };
       try{ const { error:_ie }=await supaClient.from('profiles').insert(_row);
         if(_ie) console.log('[autoProfile] nezapsan:', _ie.message); }catch(e){ console.log('[autoProfile]', e&&e.message); }
       currentUser=_row;
