@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SVB gives a minor their messages back. Hiding the chat cut off the club and the coach from the one person who most needs telling that training is cancelled, and it was hidden on the reasoning that a minor account should be limited -- but the limit that matters is what they can buy, not whether anyone can reach them. Private lessons stay 18+ and the coach deck stays hidden; everything else, including Messages, works as it does for anyone else. Threads with a minor remain visible to club management, with both sides told so in the thread. -->
+<!-- MTL build: SVD shows the oversight notice to the minor as well. It appeared only when the OTHER party was a minor, so the person it concerns never saw it -- and being told is the whole point of the arrangement; the check now asks whether anyone in the thread is a minor. Opening a thread from the oversight list also stops reopening your own chat: it now reads the messages in a separate read-only view, because management is there to see the conversation, not to join it. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -25125,9 +25125,11 @@ async function loadMessages(older){
   if(activeConv.origin_gym_id && window._chatPeerMinorFor!==activeConv.id){
     window._chatPeerMinorFor=activeConv.id; window._chatPeerMinor=false;
     try{
-      const _pid=(String(activeConv.student_id)===String(currentUser.id))?activeConv.coach_id:activeConv.student_id;
-      const { data:_p }=await supaClient.from('profiles').select('is_minor').eq('id',_pid).single();
-      window._chatPeerMinor=!!(_p&&_p.is_minor);
+      // Ptát se na CELÉ vlákno, ne na protistranu. Mladistvý sám sebe za protistranu nemá, takže
+      // tu větu neviděl -- a přitom je to on, koho se týká. Obě strany o tom vědět musí.
+      const _ids=[activeConv.student_id, activeConv.coach_id].filter(Boolean);
+      const { data:_p }=await supaClient.from('profiles').select('id,is_minor').in('id',_ids).eq('is_minor', true);
+      window._chatPeerMinor=!!(_p && _p.length);
     }catch(e){}
   }
   const box=$('chatMessages');
@@ -25937,7 +25939,13 @@ async function openGymMemberDetail(sid, name){
   try{ const { data } = await supaClient.from('gym_memberships').select('*').eq('gym_id',_myGymData.id).eq('student_id',sid).order('created_at',{ascending:true}); mems=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_attendance').select('class_date,class_name').eq('gym_id',_myGymData.id).eq('student_id',sid); att=data||[]; }catch(e){}
   let _belts={}; let _mdFighter=false, _mdRec=null;
-  try{ const { data: _pr } = await supaClient.from('profiles').select('belts,is_fighter,fight_record,is_minor,guardian_name,guardian_email,guardian_phone').eq('id',sid).single(); _belts=beltsOf(_pr&&_pr.belts); _mdFighter=!!(_pr&&_pr.is_fighter); try{ _mdRec=_pr&&_pr.fight_record?(typeof _pr.fight_record==='string'?JSON.parse(_pr.fight_record):_pr.fight_record):null; }catch(_){ _mdRec=null; } }catch(e){}
+  try{ // Kontakt na zástupce se čte ZVLÁŠŤ. Když ty sloupce v databázi nejsou (guardian-contact.sql
+      // ještě neproběhlo), PostgREST odmítne celý dotaz a detail člena zůstane na "Načítám...".
+      // Takhle se nejvýš nezobrazí kontakt, ale zbytek karty se vykreslí.
+      const { data: _pr } = await supaClient.from('profiles').select('belts,is_fighter,fight_record,is_minor').eq('id',sid).single();
+      let _grd=null;
+      try{ const { data:_g2 }=await supaClient.from('profiles').select('guardian_name,guardian_email,guardian_phone').eq('id',sid).maybeSingle(); _grd=_g2||null; }
+      catch(e){ console.log('[memberDetail] kontakt na zastupce:', e&&e.message); } _belts=beltsOf(_pr&&_pr.belts); _mdFighter=!!(_pr&&_pr.is_fighter); try{ _mdRec=_pr&&_pr.fight_record?(typeof _pr.fight_record==='string'?JSON.parse(_pr.fight_record):_pr.fight_record):null; }catch(_){ _mdRec=null; } }catch(e){}
   try{ const { data } = await supaClient.from('gym_bookings').select('id,status').eq('gym_id',_myGymData.id).eq('student_id',sid); drops=data||[]; }catch(e){}
   const fmtD=(d)=>d?new Date(d).toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric'}):'—';
   const accOf=(m)=>{ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
@@ -25950,7 +25958,7 @@ async function openGymMemberDetail(sid, name){
   // Zobrazuje se nahoře, ne mezi statistikami; když ho člen nemá vyplněný, je to samo o sobě
   // informace, protože bez souhlasu si nemohl nic rezervovat.
   const _isMinorMember=!!(_pr && _pr.is_minor);
-  const _gN=(_pr&&_pr.guardian_name)||'', _gE=(_pr&&_pr.guardian_email)||'', _gP=(_pr&&_pr.guardian_phone)||'';
+  const _gN=(_grd&&_grd.guardian_name)||'', _gE=(_grd&&_grd.guardian_email)||'', _gP=(_grd&&_grd.guardian_phone)||'';
   let html='';
   if(_isMinorMember){
     html+='<div style="background:#FFF8E6;border:1px solid #F0DFA8;border-radius:12px;padding:12px 14px;margin-bottom:12px;">'
@@ -26712,6 +26720,43 @@ async function coachSendWish(n, dd, wishKey){
 
 
 
+
+// Vlákno s mladistvým očima vedení klubu. Jen ke čtení -- vedení do konverzace nevstupuje,
+// jen na ni vidí. Psát smí ten, kdo v ní je.
+async function _gcReadThread(c){
+  const EN=LANG==='en';
+  let ov=document.getElementById('gcReadOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='gcReadOv';
+  ov.style.cssText='position:fixed;inset:0;z-index:100067;background:var(--bg);display:flex;flex-direction:column;font-family:\'DM Sans\';';
+  ov.innerHTML='<div style="display:flex;align-items:center;gap:10px;padding:calc(env(safe-area-inset-top,0px) + 12px) 16px 12px;border-bottom:1px solid var(--border);">'
+    +'<button id="gcRdX" style="flex:none;padding:8px 13px;background:var(--surf);border:1px solid var(--border);border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">\u2039 '+(EN?'Back':'Zpět')+'</button>'
+    +'<div style="min-width:0;"><div style="font-size:15px;font-weight:800;">'+escapeHtml(c.student_name||'')+'</div>'
+    +'<div style="font-size:11.5px;color:var(--mid);">'+(EN?'with ':'s ')+escapeHtml(c.coach_name||'')+'</div></div></div>'
+    +'<div style="padding:10px 16px;background:#FFF8E6;border-bottom:1px solid #F0DFA8;font-size:11.5px;color:#7a5a1a;line-height:1.5;">'
+    +(EN?'Read-only. You are seeing this because it involves a minor — both sides are told so in the thread.'
+        :'Jen ke čtení. Vidíš to proto, že jde o mladistvého — obě strany o tom vědí z hlavičky vlákna.')+'</div>'
+    +'<div id="gcRdBody" style="flex:1;overflow-y:auto;padding:14px 16px;display:flex;flex-direction:column;gap:8px;">'
+    +'<p style="text-align:center;color:var(--light);font-size:13px;padding:20px;">'+(EN?'Loading…':'Načítám…')+'</p></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#gcRdX').onclick=function(){ ov.remove(); };
+  const body=ov.querySelector('#gcRdBody');
+  let msgs=[];
+  try{
+    const { data }=await supaClient.from('messages').select('*').eq('conversation_id', c.id).order('created_at',{ascending:true});
+    msgs=data||[];
+  }catch(e){ body.innerHTML='<p style="text-align:center;color:var(--red);font-size:13px;padding:20px;">'+((e&&e.message)||'')+'</p>'; return; }
+  if(!msgs.length){ body.innerHTML='<p style="text-align:center;color:var(--light);font-size:13px;padding:20px;">'+(EN?'No messages yet.':'Zatím žádné zprávy.')+'</p>'; return; }
+  body.innerHTML=msgs.map(function(m){
+    const fromStudent=(String(m.sender_id)===String(c.student_id));
+    const who=fromStudent?(c.student_name||''):(c.coach_name||'');
+    const when=m.created_at?new Date(m.created_at).toLocaleString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',hour:'2-digit',minute:'2-digit'}):'';
+    return '<div style="align-self:'+(fromStudent?'flex-start':'flex-end')+';max-width:78%;">'
+      +'<div style="font-size:10.5px;color:var(--light);margin-bottom:2px;'+(fromStudent?'':'text-align:right;')+'">'+escapeHtml(who)+' \u00b7 '+when+'</div>'
+      +'<div style="padding:9px 13px;border-radius:14px;font-size:14px;line-height:1.45;background:'+(fromStudent?'var(--surf)':'#EAF0FF')+';color:var(--dark);">'+escapeHtml(m.text||'')+'</div></div>';
+  }).join('');
+  body.scrollTop=body.scrollHeight;
+}
+
 async function openGymConvos(){
   const EN=LANG==='en';
   // Počkat, až se klub načte, místo okamžité stížnosti. Menu i obrazovky se staví dřív, než
@@ -26802,8 +26847,9 @@ async function openGymConvos(){
   box.innerHTML=h;
   box.querySelectorAll('.gcOpen').forEach(function(b){ b.onclick=function(){
     const c=(window._gcRows||[])[+b.dataset.i]; if(!c) return;
-    window._gcOversight=true;   // hlavička vlákna to napíše oběma stranám
-    closeAllSheets(); openChat(c);
+    // Čtení jako vedení klubu, ne otevření vlastního chatu. openChat by u vlastního vlákna
+    // otevřel běžnou konverzaci -- a vedení sem chodí číst, ne psát.
+    _gcReadThread(c);
   }; });
 }
 
