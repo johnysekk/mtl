@@ -109,7 +109,7 @@ function dokladHtml(ME, buyer, kind, period, cur, data, test, testMode){
 // The receipt went out as HTML in the body, which cannot be filed or handed to an accountant.
 // Same approach stripe-webhook already uses for its payment receipts: pdfkit with the DejaVu font,
 // because the built-in fonts have no diacritics and Czech names come out mangled.
-function dokladPdf(ME, buyer, kind, period, cur, data, test){
+function dokladPdf(ME, buyer, kind, period, cur, data, test, testMode){
   return new Promise(function(resolve, reject){
     try{
       const doc = new PDFDocument({ size:'A4', margin:50 });
@@ -117,6 +117,14 @@ function dokladPdf(ME, buyer, kind, period, cur, data, test){
       doc.registerFont('cz', DEJAVU_CZ); doc.font('cz');
       const ph = test ? 'Nevypln\u011bno' : '';
       const B = buyer || {};
+      // Razítko testovacího režimu i v PDF. Příloha z mailu člověku zůstane na disku i po
+      // smazání testovacích dat, takže bez něj vypadá jako pravý daňový doklad.
+      if(testMode){
+        doc.rect(50, doc.y, 495, 26).fillAndStroke('#FDECEC', '#F3C0C0');
+        doc.fillColor('#8a1c1c').fontSize(10)
+           .text('TESTOVAC\u00cd RE\u017dIM \u2014 nejde o da\u0148ov\u00fd doklad', 58, doc.y - 18, { width: 480 });
+        doc.moveDown(1.2);
+      }
       doc.fontSize(22).fillColor('#E11111').text('MTL');
       doc.moveDown(0.15).fontSize(15).fillColor('#111111').text('Doklad o provizi MTL');
       doc.moveDown(0.1).fontSize(10).fillColor('#777777').text('Obdob\u00ed ' + periodLabel(period) + '  \u00b7  ' + (kind === 'gym' ? ('klub' + (B.name ? (' ' + B.name) : '')) : 'kou\u010d'));
@@ -329,7 +337,7 @@ export default async function handler(req, res) {
         if (em) {
           let _att = [];
           try {
-            const _buf = await dokladPdf(ME, buyer, kind, period, cur, data, DAILY);
+            const _buf = await dokladPdf(ME, buyer, kind, period, cur, data, DAILY, _TESTMODE);
             _att = [{ filename: `MTL-provize-${String(period).replace(/-/g,'')}.pdf`, content: _buf.toString('base64') }];
           } catch (e) { console.error('doklad pdf', e.message); }
           // Předmět nese název klubu. Kdo má dva kluby, dostane dva e-maily naráz a bez toho by musel
