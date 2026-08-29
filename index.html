@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SSU gives the receipts list the same handling the member list has. Rows named only the kind of sale, so a ticket said Listek na akci without saying to which event and a membership did not say which tariff -- transactions.plan holds that name and is now appended, with course deposits and first months marked since plan does not carry those. There is a search across the buyer name and the item, chips for the kinds actually present rather than a fixed list, and a 20 or 50 per page switch; the default drops to twenty to match the members screen. Changing any filter returns to the first page, and an empty result now says whether it is the period or the filter that is empty. -->
+<!-- MTL build: SSW drops the unpaid-attendee group, which cannot happen: the attendance roster is built from reservations, paid drop-ins and active memberships, so there is nobody unpaid to tick off in the first place. Only a deliberately waived Stripe instalment gets close, and that is the club decision rather than a debt. Just lapsed stays, and on the bank rail it replaces the Cancelling tile, which can only ever be zero there. It also gains Message all, because a list you have to act on one row at a time is a list nobody acts on, and chasing a renewal is exactly the job that gets put off. Each person still receives a private chat -- nobody sees the others -- and {jmeno} inserts their name. An owner or co-owner can choose to send as themselves or as the club; anyone else writes as themselves. A club message keeps the sender coach_id so it stays traceable. Needs conversations-gym.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -15998,7 +15998,47 @@ async function renderGymMembers(){
   let actCount=0, canCount=0;
   try{ const r=await supaClient.from('gym_memberships').select('id',{count:'exact',head:true}).eq('gym_id',gid).eq('status','active').or('paid_to.neq.coach,paid_to.is.null'); actCount=r.count||0; }catch(e){}
   try{ const r=await supaClient.from('gym_memberships').select('id',{count:'exact',head:true}).eq('gym_id',gid).eq('status','cancelling').or('paid_to.neq.coach,paid_to.is.null'); canCount=r.count||0; }catch(e){}
+  // ── DVĚ AUTOMATIKY ────────────────────────────────────────────────────────────────────────
+  // Obojí je práce, kterou dnes klub dělá po paměti, a proto ji nedělá.
+  window._gmNoPay=window._gmNoPay||[]; window._gmLapsed=window._gmLapsed||[];
+  try{
+    const _30=new Date(Date.now()-30*86400000).toISOString().slice(0,10);
+    const _14=new Date(Date.now()-14*86400000).toISOString();
+    const _now=new Date().toISOString();
+    // Kdo má právě platné členství -- proti tomu se obojí porovnává.
+    const { data:_act }=await supaClient.from('gym_memberships').select('student_id').eq('gym_id',gid).in('status',['active','cancelling']);
+    const _paid=new Set((_act||[]).map(function(x){ return String(x.student_id); }).filter(Boolean));
+
+    // 1) Chodí, ale nemá zaplaceno. Docházka za 30 dní minus ti, co členství mají.
+    //    Vylučují se jednorázové vstupy: kdo si zaplatil drop-in, nic nedluží.
+    const { data:_att }=await supaClient.from('gym_attendance').select('student_id,student_name,class_date').eq('gym_id',gid).gte('class_date',_30);
+    const { data:_drop }=await supaClient.from('gym_bookings').select('student_id').eq('gym_id',gid).gte('class_date',_30).in('status',['active','paid']);
+    const _hadDrop=new Set((_drop||[]).map(function(x){ return String(x.student_id); }).filter(Boolean));
+    const _seen={};
+    (_att||[]).forEach(function(a){
+      const sid=String(a.student_id||''); if(!sid || _paid.has(sid) || _hadDrop.has(sid)) return;
+      if(!_seen[sid]) _seen[sid]={ student_id:sid, student_name:a.student_name||'', n:0, last:'' };
+      _seen[sid].n++; if((a.class_date||'')>_seen[sid].last) _seen[sid].last=a.class_date||'';
+    });
+    window._gmNoPay=Object.values(_seen).sort(function(a,b){ return b.n-a.n; });
+
+    // 2) Nedávno doběhlo. Skončilo za posledních 14 dní a nic nového si nekoupil -- kdo si
+    //    obnovil, v _paid je a vypadne.
+    const { data:_end }=await supaClient.from('gym_memberships').select('*').eq('gym_id',gid).in('status',['ended','expired','cancelled']).gte('period_end',_14).lte('period_end',_now);
+    window._gmLapsed=(_end||[]).filter(function(m){ return !_paid.has(String(m.student_id)); });
+  }catch(e){ console.log('[gm auto]', e&&e.message); }
+  window._gmNoPayCount=window._gmNoPay.length;
+  window._gmLapsedCount=window._gmLapsed.length;
+
   let mems=[], total=0;
+  // Obě automatiky se nedotazují znovu -- seznam už je spočítaný výš. Docházka navíc není
+  // členství, takže se ty řádky poskládají do stejného tvaru, aby je uměl vykreslit ten samý kód.
+  if(_kid==='lapsed'){
+    let _l=window._gmLapsed||[];
+    if(_sQ) _l=_l.filter(function(x){ return (String(x.student_name||'')+' '+String(x.child_name||'')).toLowerCase().indexOf(_sQ.toLowerCase())>=0; });
+    total=_l.length;
+    mems=_l.slice(_gmPage*_gmSize,(_gmPage+1)*_gmSize);
+  } else
   try{
     const _histView=(_kid==='history');
     let q=supaClient.from('gym_memberships').select('*',{count:'exact'}).eq('gym_id',gid).in('status', _histView?['ended','expired','cancelled']:['active','cancelling']).or('paid_to.neq.coach,paid_to.is.null');
@@ -16049,7 +16089,10 @@ async function renderGymMembers(){
     return `<div class="mbCard" data-sid="${m.student_id}" data-child="${(m.child_name||'').replace(/"/g,'&quot;')}" data-name="${(m.student_name||'').replace(/"/g,'&quot;')}" style="border:1px solid ${cancel?'#F3C9C0':'var(--border)'};border-radius:12px;padding:10px 11px;background:${cancel?'#FEF6F4':'#fff'};cursor:pointer;min-width:0;">
       <div style="font-weight:700;font-size:13.5px;line-height:1.2;margin-bottom:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${m.child_name?(kidEmoji(m.child_age)+' '+escapeHtml(m.child_name)+(m.child_age!=null?(' ('+m.child_age+')'):'')):escapeHtml(m.student_name||(EN?'Member':'Člen'))}</div>${m.child_name?`<div style="font-size:10.5px;color:var(--light);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${EN?'parent':'rodič'}: ${escapeHtml(m.student_name||'')}</div>`:''}
       <div style="font-size:11px;color:#006040;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${acc}</div>
-      <div style="font-size:11px;color:${cancel?'var(--red)':'var(--light)'};margin-top:3px;">${cancel?(EN?'cancelling':'ruší se'):(EN?'active':'aktivní')} · ${fmtPrice(m.amount||0,m.currency||'CZK')}${_memPerLabel(m)}</div>${_memExpiryChip(m)}
+      ${(_kid==='lapsed'
+          ? `<div style="font-size:11px;color:var(--red);font-weight:700;margin-top:3px;">${EN?'lapsed':'doběhlo'}${m.period_end?(' '+new Date(m.period_end).toLocaleDateString(EN?'en-GB':'cs-CZ')):''}</div>
+             <div style="font-size:11px;color:var(--mid);margin-top:2px;">${escapeHtml(m.plan||'')} · ${fmtPrice(m.amount||0,m.currency||'CZK')}</div>`
+          : `<div style="font-size:11px;color:${cancel?'var(--red)':'var(--light)'};margin-top:3px;">${cancel?(EN?'cancelling':'ruší se'):(EN?'active':'aktivní')} · ${fmtPrice(m.amount||0,m.currency||'CZK')}${_memPerLabel(m)}</div>${_memExpiryChip(m)}`)}
       <div style="font-size:11px;font-weight:800;margin-top:3px;color:${ai.color};">🥊 ${ai.txt}</div>${m.acq_source==='mtl_discovery'?('<div style="font-size:10px;font-weight:800;margin-top:3px;color:#0a7a4f;">🧲 '+(EN?'via MTL':'přes MTL')+'</div>'):(m.acq_source==='referral'?'<div style="font-size:10px;font-weight:800;margin-top:3px;color:var(--mid);">🔗 '+(EN?'Member invite':'Pozvánka')+'</div>':'')}
     </div>`; };
   const grid=(arr)=>`<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">${arr.map(compactCard).join('')}</div>`;
@@ -16074,13 +16117,34 @@ async function renderGymMembers(){
   let _planLevels=[]; try{ const _pls=(typeof gymMembPlans==='function'?gymMembPlans(_myGymData):[])||[]; const _lset=new Set(); _pls.forEach(function(p){ var a=p.access; var arr; if(Array.isArray(a))arr=a; else if(typeof a==='string'){ try{ var j=JSON.parse(a); arr=Array.isArray(j)?j:[a]; }catch(e){ arr=[a]; } } else arr=[]; arr.forEach(function(x){ if(x&&x!=='all') _lset.add(x); }); }); _planLevels=[..._lset]; }catch(e){}
   let html=`<div style="display:flex;gap:8px;margin-bottom:12px;">
     <div style="flex:1;background:#F0FBF0;border:1px solid #CDEBD6;border-radius:12px;padding:11px;text-align:center;"><div style="font-family:'Bebas Neue';font-size:26px;color:#006040;">${actCount}</div><div style="font-size:11px;color:var(--mid);">${EN?'Active':'Aktivní'}</div></div>
-    <div style="flex:1;background:#FEF0EE;border:1px solid #F3C9C0;border-radius:12px;padding:11px;text-align:center;"><div style="font-family:'Bebas Neue';font-size:26px;color:var(--red);">${canCount}</div><div style="font-size:11px;color:var(--mid);">${EN?'Cancelling':'Ruší se'}</div></div>
+    ${(function(){
+      // "Ruší se" je stav zrušeného předplatného -- ten existuje JEN u Stripe. Na bankovní koleji
+      // se nic neobnovuje, takže by ta dlaždice byla navždy nula. Tam má smysl to, co klub
+      // opravdu řeší: kdo chodí, aniž by měl zaplaceno.
+      const _bank=(typeof _mtlPayMode==='function' && _myGymData && _mtlPayMode(_myGymData)==='qr_bank');
+      const _v=_bank?_nExp:canCount;
+      const _l=_bank?(EN?'Just lapsed':'Nedávno doběhlo'):(EN?'Cancelling':'Ruší se');
+      return `<div style="flex:1;background:#FEF0EE;border:1px solid #F3C9C0;border-radius:12px;padding:11px;text-align:center;"><div style="font-family:'Bebas Neue';font-size:26px;color:var(--red);">${_v}</div><div style="font-size:11px;color:var(--mid);">${_l}</div></div>`;
+    })()}
   </div>`;
   html+=`<div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;">
     <input id="gmSearchInp" value="${escapeHtml(_gmSearch)}" placeholder="${EN?'Search a member by name…':'Hledat člena podle jména…'}" style="flex:1;min-width:0;box-sizing:border-box;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:'DM Sans';">
     <select id="gmSizeSel" style="flex:0 0 auto;padding:10px 8px;border:1.5px solid var(--border);border-radius:10px;font-size:13px;font-family:'DM Sans';background:var(--surf);color:var(--dark);">${[20,50].map(n=>`<option value="${n}"${_gmSize===n?' selected':''}>${n}/${EN?'pg':'str'}</option>`).join('')}</select>
   </div>`;
-  { const kc=[{v:null,l:(EN?'All':'Vše')},{v:'adults',l:(EN?'Adults':'Dospělí')},{v:'kids',l:(EN?'Kids':'Děti')},{v:'fighters',l:(EN?'Fighters':'Závodníci')},{v:'history',l:(EN?'History':'Historie')}]; html+=`<div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;">${kc.map(c=>{ const on=(window._gmMembKid||null)===c.v; return `<div class="gmKidChip" data-v="${c.v||''}" style="flex:1;text-align:center;padding:8px 4px;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'var(--surf)'};color:${on?'#fff':'var(--dark)'};">${c.l}</div>`; }).join('')}</div>`; }
+  { // Dvě skupiny navíc, obě odpovídají na otázku "komu mám napsat":
+  //   trénuje bez platného členství -- byl na tréninku, ale žádné aktivní členství nemá; na
+  //     bankovní koleji je to ten nejčastější způsob, jak klub přichází o peníze, a dnes to
+  //     majitel odhalí jen tak, že si někoho náhodou vybaví
+  //   nedávno doběhlo -- členství skončilo v posledních 14 dnech a nic nového si nekoupil
+  // Ukazují se jen když někoho obsahují; prázdná záložka jen zabírá místo a svádí ke klikání.
+  const _nExp=(window._gmLapsedCount||0);
+  const kc=[{v:null,l:(EN?'All':'Vše')},{v:'adults',l:(EN?'Adults':'Dospělí')},{v:'kids',l:(EN?'Kids':'Děti')},{v:'fighters',l:(EN?'Fighters':'Závodníci')}]
+    .concat(_nExp?[{v:'lapsed',l:(EN?'Just lapsed ('+_nExp+')':'Nedávno doběhlo ('+_nExp+')')}]:[])
+    .concat([{v:'history',l:(EN?'History':'Historie')}]);
+  // Napsat všem, kdo je zrovna v seznamu. Nejvíc to dává smysl u "Nedávno doběhlo" -- to je přesně
+  // seznam lidí, kterým se má připomenout, ať si obnoví, a jednotlivě to nikdo neobejde.
+  if(_nExp && (window._gmMembKid||null)==='lapsed') html+=`<button id="gmBulkBtn" style="width:100%;padding:11px;margin-bottom:10px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:13.5px;font-weight:800;cursor:pointer;font-family:'DM Sans';">\uD83D\uDCAC ${EN?('Message all ('+_nExp+')'):('Napsat všem ('+_nExp+')')}</button>`;
+  if(actCount||canCount||_nExp||(window._gmMembKid||null)){ html+=`<div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;">${kc.map(c=>{ const on=(window._gmMembKid||null)===c.v; return `<div class="gmKidChip" data-v="${c.v||''}" style="flex:1;text-align:center;padding:8px 4px;border-radius:10px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'var(--surf)'};color:${on?'#fff':'var(--dark)'};">${c.l}</div>`; }).join('')}</div>`; } }
   if(_planLevels.length){
     const chips=[{v:null,l:(EN?'All':'Vše')}].concat(_planLevels.map(v=>({v,l:levelLabel(v)})));
     html+=`<div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:8px;margin-bottom:4px;scrollbar-width:none;">${chips.map(c=>{ const on=(_gmMembLvl||null)===c.v; return `<div class="gmLvlChip" data-v="${c.v==null?'':c.v}" style="flex:0 0 auto;font-size:12px;font-weight:700;cursor:pointer;padding:6px 12px;border-radius:14px;white-space:nowrap;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'transparent'};color:${on?'#fff':'var(--mid)'};">${c.l}</div>`; }).join('')}</div>`;
@@ -16102,6 +16166,9 @@ async function renderGymMembers(){
   box.innerHTML=html;
   box.querySelectorAll('.gmLvlChip').forEach(c=>c.onclick=()=>{ _gmMembLvl=c.dataset.v||null; window._gmPage=0; renderGymMembers(); });
   box.querySelectorAll('.gmKidChip').forEach(c=>c.onclick=()=>{ window._gmMembKid=c.dataset.v||null; window._gmPage=0; renderGymMembers(); });
+  // Píše se CELÉMU seznamu, ne jen zobrazené stránce -- kdo má patnáct doběhlých a dvacet na
+  // stránku, jinak by o pět přišel a nevěděl o tom.
+  { const bb=box.querySelector('#gmBulkBtn'); if(bb) bb.onclick=function(){ _gmBulkMessage(window._gmLapsed||[], (LANG==='en'?'Just lapsed':'Nedávno doběhlo')); }; }
   { const si=box.querySelector('#gmSearchInp'); if(si){ si.oninput=function(){ const v=this.value; clearTimeout(window._gmSearchT); window._gmSearchT=setTimeout(function(){ window._gmSearch=v; window._gmPage=0; renderGymMembers(); }, 320); }; } const ss=box.querySelector('#gmSizeSel'); if(ss){ ss.onchange=function(){ window._gmSize=(this.value==='50'?50:20); window._gmPage=0; renderGymMembers(); }; } const pv=box.querySelector('#gmPrev'); if(pv){ pv.onclick=function(){ if((window._gmPage||0)>0){ window._gmPage=(window._gmPage||0)-1; renderGymMembers(); } }; } const nx=box.querySelector('#gmNext'); if(nx){ nx.onclick=function(){ window._gmPage=(window._gmPage||0)+1; renderGymMembers(); }; } }
   if((window._gmSearch||'').length){ const _si=box.querySelector('#gmSearchInp'); if(_si){ try{ _si.focus(); const _l=_si.value.length; _si.setSelectionRange(_l,_l); }catch(e){} } }
   box.querySelectorAll('.mbCard').forEach(c=>c.onclick=()=>{ if(c.dataset.child){ openGymKidDetail(c.dataset.sid, c.dataset.child); } else { openGymMemberDetail(c.dataset.sid, c.dataset.name); } });
@@ -25979,6 +26046,83 @@ async function coachSendWish(n, dd, wishKey){
     loadNotifications();
   }catch(e){ console.error('coachSendWish',e); toast('⚠️ '+e.message); }
 }
+
+// ── HROMADNÁ ZPRÁVA ČLENŮM ───────────────────────────────────────────────────────────────────
+// Seznam členů je k něčemu, až se z něj dá jednat. Napsat postupně dvaceti lidem přes chat
+// nikdo nebude, takže se to prostě neudělá -- a připomenutí platby je přesně ta věc, kterou
+// klub odkládá.
+//
+// Za KOHO se píše: kdo klub vlastní nebo spoluvlastní, si může vybrat sebe nebo klub. Ostatní
+// píšou vždy za sebe. Klubová zpráva má u sebe pořád coach_id toho, kdo ji poslal -- u sporu
+// musí jít dohledat, kdo za klub psal.
+async function _gmBulkMessage(list, ctxLabel){
+  const EN=LANG==='en';
+  const _l=(list||[]).filter(function(m){ return m && m.student_id; });
+  if(!_l.length){ toast(EN?'⚠️ Nobody to write to':'⚠️ Není komu psát'); return; }
+  const g=window._myGymData||null;
+  const canAsClub=!!(g && currentUser && (String(g.owner_id)===String(currentUser.id) || g._isCoOwner));
+
+  let ov=document.getElementById('gmBulkOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='gmBulkOv';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100070;display:flex;align-items:flex-end;justify-content:center;';
+  const _inp="width:100%;box-sizing:border-box;padding:11px 13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';background:#fff;";
+  let h='<div style="background:var(--bg);border-radius:18px 18px 0 0;max-width:520px;width:100%;padding:20px;max-height:88vh;overflow-y:auto;">';
+  h+='<div style="font-size:17px;font-weight:800;margin-bottom:3px;">'+(EN?'Message members':'Napsat členům')+'</div>';
+  h+='<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:14px;">'+(EN?('Goes to '+_l.length+' people, each as a private chat — nobody sees the others.'):('Půjde '+_l.length+' lidem, každému jako soukromý chat — nikdo neuvidí ostatní.'))+(ctxLabel?(' · '+escapeHtml(ctxLabel)):'')+'</div>';
+  if(canAsClub){
+    h+='<div style="font-size:12px;font-weight:800;color:var(--mid);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">'+(EN?'Send as':'Odeslat za')+'</div>';
+    h+='<div style="display:flex;gap:8px;margin-bottom:12px;">'
+      +'<button class="gmAsBtn" data-as="me" style="flex:1;padding:11px;border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';border:1px solid var(--dark);background:var(--dark);color:#fff;">'+escapeHtml(currentUser.name||(EN?'Me':'Já'))+'</button>'
+      +'<button class="gmAsBtn" data-as="club" style="flex:1;padding:11px;border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';border:1px solid var(--border);background:var(--surf);color:var(--dark);">🏛️ '+escapeHtml(g.name||'')+'</button>'
+      +'</div>';
+  }
+  h+='<textarea id="gmBulkTxt" rows="5" placeholder="'+(EN?'Write your message…':'Napiš zprávu…')+'" style="'+_inp+'resize:vertical;margin-bottom:6px;"></textarea>';
+  h+='<div style="font-size:11.5px;color:var(--light);line-height:1.5;margin-bottom:12px;">'+(EN?'Tip: {name} inserts the person\'s name.':'Tip: {jmeno} doplní jméno toho člověka.')+'</div>';
+  h+='<button id="gmBulkGo" style="width:100%;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Send':'Odeslat')+'</button>';
+  h+='<button id="gmBulkX" style="width:100%;margin-top:8px;padding:11px;background:none;border:none;color:var(--mid);font-size:13px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Cancel':'Zrušit')+'</button></div>';
+  ov.innerHTML=h; document.body.appendChild(ov);
+  ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
+  ov.querySelector('#gmBulkX').onclick=function(){ ov.remove(); };
+  let _as='me';
+  ov.querySelectorAll('.gmAsBtn').forEach(function(b){ b.onclick=function(){
+    _as=b.dataset.as;
+    ov.querySelectorAll('.gmAsBtn').forEach(function(x){ const on=(x.dataset.as===_as);
+      x.style.background=on?'var(--dark)':'var(--surf)'; x.style.color=on?'#fff':'var(--dark)'; x.style.borderColor=on?'var(--dark)':'var(--border)'; });
+  }; });
+
+  ov.querySelector('#gmBulkGo').onclick=async function(){
+    const txt=String((ov.querySelector('#gmBulkTxt')||{}).value||'').trim();
+    if(!txt){ toast(EN?'⚠️ Write something first':'⚠️ Nejdřív něco napiš'); return; }
+    const btn=this; btn.disabled=true; btn.textContent='…';
+    const asClub=(_as==='club' && canAsClub);
+    let sent=0, failed=0;
+    for(const m of _l){
+      try{
+        const sid=String(m.student_id);
+        const nm=(m.child_name||m.student_name||'');
+        // Konverzaci hledáme podle dvojice student+kouč. U klubové zprávy se navíc označí gym_id,
+        // aby se v chatu ukázal klub místo jména.
+        let conv=null;
+        const { data }=await supaClient.from('conversations').select('*').eq('student_id',sid).eq('coach_id',currentUser.id);
+        if(data && data.length) conv=data[0];
+        else {
+          const { data:cr }=await supaClient.from('conversations').insert({ student_id:sid, coach_id:currentUser.id,
+            coach_name:(asClub?((g&&g.name)||''):(currentUser.name||'Kouč')), student_name:(m.student_name||'Student'),
+            ...(asClub?{ gym_id:g.id }:{}) }).select();
+          conv=cr && cr[0];
+        }
+        if(!conv) { failed++; continue; }
+        if(asClub && !conv.gym_id){ try{ await supaClient.from('conversations').update({ gym_id:g.id, coach_name:(g&&g.name)||'' }).eq('id',conv.id); }catch(e){} }
+        await supaClient.from('messages').insert({ conversation_id:conv.id, sender_id:currentUser.id,
+          text:txt.replace(/\{jmeno\}|\{name\}/g, nm) });
+        sent++;
+      }catch(e){ failed++; }
+    }
+    ov.remove();
+    toast((EN?('✅ Sent to '+sent):('✅ Odesláno '+sent))+(failed?((EN?', failed ':', neúspěch ')+failed):''));
+  };
+}
+
 async function messageGymMember(studentId, studentName){
   if(!studentId||!currentUser){ toast(L('⚠️ Chyba')); return; }
   try{
