@@ -121,8 +121,24 @@ export default async function handler(req, res) {
     const esc = (x) => String(x || '').replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
     const title = esc(ev.title || 'MTL Event');
 
+    // TESTOVACÍ REŽIM. Lístek odeslaný během testu vypadá úplně stejně jako pravý -- a na rozdíl
+    // od dokladu v appce zůstane člověku ve schránce i po smazání testovacích dat. Razítko se
+    // bere z lístku (test_mode, trigger v test-mode-stamp-2.sql); když tam není, doptáme se
+    // platform_config, aby na to nedoplatily řádky, které vznikly před tou migrací.
+    let _isTest = tickets.some(t => t && t.test_mode === true);
+    if (!_isTest && tickets.every(t => !t || t.test_mode == null)) {
+      try {
+        const pc = await sb('platform_config?select=test_mode&id=eq.1');
+        _isTest = !!(pc && pc[0] && pc[0].test_mode);
+      } catch (e) { /* raději bez razítka než spadnout na odeslání */ }
+    }
+    const _testBar = _isTest
+      ? '<div style="background:#8a1c1c;color:#fff;font:800 12px/1.4 Arial,sans-serif;text-align:center;padding:8px 12px;letter-spacing:.02em;">🧪 TESTOVACÍ REŽIM — nejde o platný lístek ani daňový doklad</div>'
+      : '';
+
     const html =
       '<div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto;background:#0c0c0c;border-radius:18px;overflow:hidden;color:#fff;">' +
+      _testBar +
       '<div style="padding:26px 24px 8px;text-align:center;">' +
       '<div style="font-size:13px;letter-spacing:.16em;color:#F4D87A;font-weight:700;">MARTIAL TRAINING LAB</div>' +
       '<div style="font-size:22px;font-weight:800;margin:10px 0 2px;">🎟️ ' + title + '</div>' +
@@ -169,7 +185,7 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         from: MAIL_FROM,
         to: [email],
-        subject: (tickets.length > 1 ? ('🎟️ Your ' + tickets.length + ' tickets — ') : '🎟️ Your ticket — ') + (ev.title || 'MTL Event'),
+        subject: (_isTest ? '[TEST] ' : '') + (tickets.length > 1 ? ('🎟️ Your ' + tickets.length + ' tickets — ') : '🎟️ Your ticket — ') + (ev.title || 'MTL Event'),
         html,
         ...(attachments.length ? { attachments } : {})
       })

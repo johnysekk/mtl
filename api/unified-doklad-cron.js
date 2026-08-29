@@ -77,7 +77,7 @@ function prevMonth(ym) { const [y, m] = ym.split('-').map(Number); const d = new
 function _methodLabel(m){ return m==='stripe'?'Stripe (karta)':(m==='pis'?'Platba z banky':(m==='qr'?'QR platba':(m==='cash'?'Hotovost':(m||'\u2014')))); }
 function _pct(r){ return r!=null ? (Math.round(r*1000)/10).toString().replace('.',',')+' %' : '\u2014'; }
 function _money(minor, cur){ return (minor/100).toFixed(2).replace('.',',')+' '+String(cur).toUpperCase(); }
-function dokladHtml(ME, buyer, kind, period, cur, data, test){
+function dokladHtml(ME, buyer, kind, period, cur, data, test, testMode){
   const _ph = test ? 'Nevypln\u011bno' : '';
   ME = ME || {}; const esc=function(x){ return String(x==null?'':x).replace(/[<>&]/g,function(c){return c==='<'?'&lt;':c==='>'?'&gt;':'&amp;';}); };
   const items = Object.values(data.rates);
@@ -91,7 +91,13 @@ function dokladHtml(ME, buyer, kind, period, cur, data, test){
   let vatBlock;
   if(ME.vat_payer){ const rate=ME.vat_rate||21; const base=total/(1+rate/100); const vat=total-base; vatBlock='<tr><td>Z\u00e1klad dan\u011b</td><td style="text-align:right;">'+_money(base,cur)+'</td></tr><tr><td>DPH '+rate+'%</td><td style="text-align:right;">'+_money(vat,cur)+'</td></tr>'; }
   else { vatBlock='<tr><td colspan="2" style="font-size:11px;color:#666;padding-top:6px;">Dodavatel nen\u00ed pl\u00e1tcem DPH.</td></tr>'; }
+  // Doklad vystavený v testovacím režimu musí být jako testovací poznat i v e-mailu -- ten
+  // člověku zůstane ve schránce i po smazání testovacích dat z databáze.
+  const _tm = testMode
+    ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:12px;">\u{1F9EA} TESTOVAC\u00cd RE\u017dIM \u2014 nejde o da\u0148ov\u00fd doklad</div>'
+    : '';
   return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;color:#1a1a1a;">'
+    +_tm
     +'<h2 style="margin:0 0 2px;">Doklad o provizi MTL</h2>'
     +'<div style="font-size:13px;color:#666;margin-bottom:14px;">Obdob\u00ed '+periodLabel(period)+'  \u00b7  '+(kind==='gym'?'klub':'kou\u010d')+'</div>'
     +'<div style="display:flex;gap:24px;margin-bottom:8px;"><div style="flex:1;font-size:13px;"><div style="font-size:11px;text-transform:uppercase;color:#888;margin-bottom:4px;">Dodavatel</div>'+supLines+'</div><div style="flex:1;font-size:13px;"><div style="font-size:11px;text-transform:uppercase;color:#888;margin-bottom:4px;">Odb\u011bratel</div>'+buyLines+'</div></div>'
@@ -190,6 +196,14 @@ export default async function handler(req, res) {
     dailyAny = !!((_dg && _dg.length) || (_dc && _dc.length));
   } catch (e) {}
   const DAILY = TEST || dailyAny;
+  // Testovací režim platformy. Doklad vystavený v testu musí být jako testovací poznat i v mailu,
+  // který člověku zůstane ve schránce i po smazání testovacích dat.
+  // POZOR: nesouvisí s proměnnou TEST výš -- ta znamená ruční spuštění cronu s ?test=1.
+  let _TESTMODE = false;
+  try {
+    const _pc = await sb('platform_config?select=test_mode&id=eq.1');
+    _TESTMODE = !!(_pc && _pc[0] && _pc[0].test_mode);
+  } catch (e) {}
   let period, dayStart = null, dayEnd = null;
   if (DAILY) {
     // Today, not yesterday. commission-cron charges half an hour earlier, so the receipt should
@@ -299,7 +313,12 @@ export default async function handler(req, res) {
       body[col] = entityId;
       await sb('commission_doklady', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify(body) });
       issued++;
-      if (ownerId) { try { await notify(ownerId, 'doklad_unified', `Doklad k provizi MTL${(kind === 'gym' && buyer && buyer.name) ? (' — ' + buyer.name) : ''} za ${periodLabel(period)} (${(data.total / 100).toFixed(2)} ${cur.toUpperCase()}) je připraven. Najdeš ho v účetnictví.`, { period, currency: cur }); } catch (e) {} }
+      if (ownerId) { try { await notify(ownerId, 'doklad_unified', `Doklad k provizi MTL${(kind === 'gym' && buyer && buyer.name) ? (' — ' + buyer.name) : ''} za ${periodLabel(period)} (${(data.total / 100).toFixed(2)} ${cur.toUpperCase()}) je připraven. Najdeš ho v účetnictví.`, { period, currency: cur,
+        // Kam ta notifikace vede: bez identifikátoru otevře obecné účetnictví, kde tlačítko
+        // na doklady vůbec není -- a přesně kvůli němu na ni člověk klikne.
+        gym_id: (kind === 'gym' ? entityId : null),
+        coach_id: (kind === 'gym' ? null : entityId),
+        gym_name: ((kind === 'gym' && buyer && buyer.name) ? buyer.name : null) }); } catch (e) {} }
       try {
         // Route the commission invoice to the RIGHT billing e-mail: a gym's on gyms.invoice_email,
         // a coach's on profiles.invoice_email (they can differ). Fall back to the owner's account e-mail.
@@ -315,7 +334,7 @@ export default async function handler(req, res) {
           } catch (e) { console.error('doklad pdf', e.message); }
           // Předmět nese název klubu. Kdo má dva kluby, dostane dva e-maily naráz a bez toho by musel
           // otevírat přílohy, aby zjistil, který je který.
-          await sendEmail(em, `Doklad o provizi MTL — ${periodShort(period)}${(kind === 'gym' && buyer && buyer.name) ? (' — ' + buyer.name) : ''}`, dokladHtml(ME, buyer, kind, period, cur, data, DAILY), _att);
+          await sendEmail(em, `${_TESTMODE ? '[TEST] ' : ''}Doklad o provizi MTL — ${periodShort(period)}${(kind === 'gym' && buyer && buyer.name) ? (' — ' + buyer.name) : ''}`, dokladHtml(ME, buyer, kind, period, cur, data, DAILY, _TESTMODE), _att);
         } } catch (e) {}
     }
 
