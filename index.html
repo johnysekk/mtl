@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: STP tells the student where the person writing to them belongs. Under the name in the chat header there is now a line like coach · Muay Thai Lab Brno. The role shown is the teaching one: someone who trains people is a coach even when they also own the club, because owner says something about the company and nothing about the person the student actually deals with -- club management appears only for someone who does not teach. Coaching at several clubs collapses to a count. The PIS sandbox also narrows to the bank rail, since a provider on Stripe never touches PIS, and it is driven entirely by the _PIS_ENABLED switch rather than a database default, so going live is one flag and leaves nothing behind to unwind. -->
+<!-- MTL build: STQ gives a 1:1 coach somewhere to confirm bank transfers. A club has Reception for this; a coach had nothing at all -- the student tapped I have paid, the lesson sat in paid_claimed, and the coach was neither told nor able to acknowledge it, so money arrived in their account while the app showed the lesson as unpaid forever. Payments to confirm lists what is waiting, confirming records the transaction so it reaches earnings and receipts rather than only flipping a status, and the student is notified. Not yet puts it back to reserved rather than deleting it, since the lesson still stands. The entry appears only for a coach on the bank rail, because on Stripe the bank confirms. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -2288,6 +2288,11 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
   </div>
 </div>
 <!-- KOMUNIKACE Z OZNÁMENÍ -->
+<!-- 1:1 — ÚHRADY PŘEVODEM K POTVRZENÍ -->
+<div class="sheet" id="shCoachQr" style="z-index:89;">
+  <div class="shdr"><div class="shdr-title">🏦 Úhrady k potvrzení</div><button class="btn-close" id="btnCloseCoachQr">✕</button></div>
+  <div id="coachQrBody" style="padding:16px 18px 44px;"><p style="text-align:center;color:var(--light);padding:30px;font-size:13px;">Načítám…</p></div>
+</div>
 <div class="sheet" id="shGymConvos" style="z-index:89;">
   <div class="shdr"><div class="shdr-title">💬 Komunikace z oznámení</div><button class="btn-close" id="btnCloseGymConvos">✕</button></div>
   <div id="gymConvosBody" style="padding:16px 18px 44px;"><p style="text-align:center;color:var(--light);padding:30px;font-size:13px;">Načítám…</p></div>
@@ -5280,6 +5285,7 @@ async function _dashGo(t){ try{
   // najde to v obou sekcích a otevře se mu ten samý seznam; komu akce patří, řeší až sama akce.
   if(t==='evmanage'){ openSheet('shMyEvManage'); if(typeof renderMyEvManage==='function') renderMyEvManage(); return; }
   if(t==='gymconvos'){ if(typeof openGymConvos==='function') openGymConvos(); return; }
+  if(t==='coachqr'){ if(typeof openCoachQr==='function') openCoachQr(); return; }
   if(t==='finance'){ _openFinance('club'); return; }
   if(t==='financeCoach'){ _openFinance('coach'); return; }
   if(t==='gtddash'){ if(typeof openGymTeamDash==='function') openGymTeamDash(null,null,'net'); return; }
@@ -26247,6 +26253,75 @@ async function coachSendWish(n, dd, wishKey){
 // Čitelnost se NEUKLÁDÁ, odvozuje se za běhu z profiles.is_minor. Uložený příznak by se rozešel
 // s realitou v den, kdy má student osmnáctiny; takhle zmizí sám.
 // Dítě pod účtem rodiče se toho netýká -- protistranou je tam dospělý a dohled dělá on.
+
+// ── 1:1 ÚHRADY PŘEVODEM ──────────────────────────────────────────────────────────────────────
+// Klub má na potvrzování převodů Recepci. Kouč u 1:1 neměl NIC: student po zaplacení klepl na
+// "Zaplaceno", lekce zůstala v paid_claimed a kouč se to nedozvěděl ani neměl kde odklepnout --
+// takže mu peníze dorazily na účet a v appce lekce navždy visela jako nezaplacená.
+async function openCoachQr(){
+  const EN=LANG==='en';
+  if(!currentUser) return;
+  openSheet('shCoachQr');
+  const box=document.getElementById('coachQrBody'); if(!box) return;
+  box.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;font-size:13px;">'+(EN?'Loading…':'Načítám…')+'</p>';
+  let rows=[];
+  try{
+    const { data }=await supaClient.from('bookings').select('*')
+      .eq('coach_id',currentUser.id).eq('payment_method','qr')
+      .in('status',['reserved','paid_claimed']).order('created_at',{ascending:true});
+    rows=data||[];
+  }catch(e){ console.log('[coachQr]', e&&e.message); }
+  if(!rows.length){
+    box.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;font-size:13px;line-height:1.6;">'+(EN?'Nothing waiting. Transfers your students have marked as paid show up here for you to confirm.':'Nic nečeká. Objeví se tu převody, které student označil jako zaplacené, abys je potvrdil.')+'</p>';
+    return;
+  }
+  const cur0=(rows[0]&&rows[0].currency)||currentUser.currency||'CZK';
+  window._cqRows=rows;
+  let h='<div style="font-size:12.5px;color:var(--mid);line-height:1.6;margin-bottom:14px;">'
+    +(EN?'Confirm once the money is actually in your account. Confirming records the payment and issues the receipt.'
+        :'Potvrď, až peníze doopravdy dorazí na účet. Potvrzením se platba zapíše a vystaví se doklad.')+'</div>';
+  rows.forEach(function(b,ix){
+    const claimed=(b.status==='paid_claimed');
+    const when=b.class_date?(b.class_date+(b.class_time?(' '+b.class_time):'')):((b.created_at||'').slice(0,10));
+    h+='<div style="border:1px solid '+(claimed?'#F0DFA8':'var(--border)')+';background:'+(claimed?'#FFFCF4':'#fff')+';border-radius:12px;padding:11px 13px;margin-bottom:9px;">'
+      +'<div style="font-size:13.5px;font-weight:700;">'+escapeHtml(b.student_name||(EN?'Student':'Student'))+'</div>'
+      +'<div style="font-size:11.5px;color:var(--mid);margin-top:2px;line-height:1.5;">'+escapeHtml(when)+' · '+fmtPrice(Number(b.amount||0),b.currency||cur0)+' '+_curSym(b.currency||cur0)
+      +'<br>'+(claimed?(EN?'⏳ student marked it paid':'⏳ student označil jako zaplacené'):(EN?'reserved — not marked yet':'rezervováno — zatím neoznačeno'))+'</div>'
+      +'<div style="display:flex;gap:8px;margin-top:10px;">'
+      +'<button class="cqYes" data-i="'+ix+'" style="flex:1;padding:10px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Money arrived':'Peníze dorazily')+'</button>'
+      +'<button class="cqNo" data-i="'+ix+'" style="flex:none;padding:10px 13px;background:var(--surf);color:var(--mid);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Not yet':'Zatím ne')+'</button>'
+      +'</div></div>';
+  });
+  box.innerHTML=h;
+  box.querySelectorAll('.cqYes').forEach(function(btn){ btn.onclick=async function(){
+    const b=(window._cqRows||[])[+btn.dataset.i]; if(!b) return;
+    btn.disabled=true; btn.textContent='…';
+    try{
+      await supaClient.from('bookings').update({ status:'active', claimed_at:new Date().toISOString() }).eq('id',b.id);
+      // Transakce, aby se to objevilo ve výdělcích a v dokladech -- bez ní by potvrzení jen
+      // změnilo stav a peníze by v přehledech chyběly.
+      if(typeof _recordCashTx==='function'){
+        try{ await _recordCashTx({ provider:'coach', coach_id:currentUser.id, member_id:b.student_id||null,
+          gross_amount:Math.round(Number(b.amount||0)*100), currency:b.currency||cur0,
+          type:(b.online_format?'coach_online':'coach_1to1'), payment_method:'qr', booking_id:b.id,
+          cash_payer_name:b.student_name||null }); }catch(e){ console.log('[coachQr tx]', e&&e.message); }
+      }
+      try{ await supaClient.from('notifications').insert({ user_id:b.student_id, type:'system', read:false,
+        message:(EN?'✅ Your coach confirmed the payment.':'✅ Kouč potvrdil tvoji platbu.'),
+        data:JSON.stringify({ kind:'payment_confirmed', auto:true }) }); }catch(e){}
+      toast(EN?'✅ Confirmed':'✅ Potvrzeno');
+      openCoachQr();
+    }catch(e){ btn.disabled=false; btn.textContent=(EN?'Money arrived':'Peníze dorazily'); toast('⚠️ '+((e&&e.message)||'')); }
+  }; });
+  box.querySelectorAll('.cqNo').forEach(function(btn){ btn.onclick=async function(){
+    const b=(window._cqRows||[])[+btn.dataset.i]; if(!b) return;
+    // Zpět na rezervováno: student si to označil, ale peníze nedorazily. Nemaže se -- lekce
+    // pořád platí, jen se čeká dál.
+    try{ await supaClient.from('bookings').update({ status:'reserved', claimed_at:null }).eq('id',b.id); }catch(e){}
+    openCoachQr();
+  }; });
+}
+
 async function openGymConvos(){
   const EN=LANG==='en';
   // Počkat, až se klub načte, místo okamžité stížnosti. Menu i obrazovky se staví dřív, než
@@ -28858,6 +28933,7 @@ function buildDashSide(){
           +(_coachHasOnline()?('<div class="dsItem" data-act="feedback">🌐 <span>'+(LANG==='en'?'Online coaching':'Online koučing')+'</span></div>'):'')
           +'<div class="dsItem" data-act="preview">👁️ <span>'+(LANG==='en'?'Preview profile':'Náhled profilu')+'</span></div>'
           +((currentUser&&(currentUser.can_create_events||(window._myGyms&&window._myGyms.length)))?('<div class="dsItem" data-act="evmanage">🎪 <span>'+(LANG==='en'?'Events':'Události')+'</span></div>'):'')
+          +((typeof _mtlPayMode==='function' && currentUser && _mtlPayMode(currentUser)==='qr_bank')?('<div class="dsItem" data-act="coachqr">🏦 <span>'+(LANG==='en'?'Payments to confirm':'Úhrady k potvrzení')+'</span></div>'):'')
           +'<div class="dsItem" data-act="coachset">⚙️ <span>'+(LANG==='en'?'Coach settings':'Nastavení kouče')+'</span></div>'
         +'</div>'
         +(((window._myGyms&&window._myGyms.length)||(currentUser&&currentUser.role==='founder'))?('<div class="dsGroup" data-grp="gym">🏛️ <span id="dsGymName">'+_dsGymLabel()+'</span>'+_dsGymSwitchBtn()+'<span class="dsArr" style="transform:rotate(-90deg);">▾</span></div>'
