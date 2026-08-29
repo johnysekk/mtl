@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: STL makes the message-type switch actually work. _kind was declared below a block that already read it for the draft, and touching a let before its declaration throws -- so everything after that point, including the handler for the two buttons and the code that repaints the heading, never ran. The declaration now comes first and the draft is loaded after it, which also means each type keeps its own draft: switching between announcement and personal message swaps the text rather than carrying one into the other. Back out of Announcement threads returns to Members instead of the schedule, since Spravovat klub redraws on close and without a tab falls to the first one. -->
+<!-- MTL build: STM renames the oversight screen to Komunikace se cleny, because an announcement cannot be replied to and the old name promised threads that announcements do not produce -- the threads listed there come from personal messages. Each row now says in what capacity the club person spoke: owner, co-owner, reception or coach, which is the part that matters if anything is ever disputed. Club announcement is the default type, since closures and schedule changes are the common case and a personal message should be a deliberate choice. The payments row in settings opens Platby directly; the screen it used to pass through held a single row with the same name leading to the same place. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -2104,7 +2104,7 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
 </div>
 
 <div class="sheet" id="shPay" style="z-index:89;">
-  <div class="shdr"><div class="shdr-title" data-noi18n>💰 Platby & provize</div><button class="btn-close" data-setback="1">✕</button></div>
+  <div class="shdr"><div class="shdr-title" data-noi18n>💳 Platby & provize</div><button class="btn-close" data-setback="1">✕</button></div>
   <div style="padding:16px 20px 44px;">
     <div class="sgrp" id="setPaySgrp">
       <div class="srow" id="sPayMode"><div class="srow-l"><div class="sicon" style="background:#EAF0FF;">💳</div><div class="slbl">Platby & provize<div style="font-size:11px;color:var(--mid);font-weight:400;margin-top:2px;line-height:1.3;max-width:250px;">Režim plateb pro celý účet (Stripe / Bankovní převod). Výplatní účet (IBAN / Stripe) nastavíš u kouče nebo klubu.</div></div></div><div class="sval">›</div></div>
@@ -15864,9 +15864,16 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
   if($('mgDokladyBtn')) $('mgDokladyBtn').onclick=()=>{ openSheet('shClubDoklady'); _loadClubDoklady((typeof g!=='undefined'&&g&&g.id)||null); };
   // Zpět má vrátit na Členy, odkud se sem chodí -- ne na Rozvrh. Spravovat klub se po zavření
   // překreslí a bez určení záložky spadne na nultou, což je Rozvrh.
+  // Zpět otevře Členy znovu a explicitně. Spoléhat na to, že se Spravovat klub překreslí do
+  // správné záložky, nefunguje -- bez určení spadne na nultou, což je Rozvrh.
   if($('btnCloseGymConvos')) $('btnCloseGymConvos').onclick=()=>{
     closeSheet('shGymConvos');
-    try{ window._gmInitTab=2; if(window._gmShowTab) window._gmShowTab(2); }catch(e){}
+    try{
+      window._gmInitTab=2;
+      openSheet('shGymManage');
+      if(typeof renderGymManage==='function') renderGymManage();
+      setTimeout(function(){ try{ if(window._gmShowTab) window._gmShowTab(2); }catch(e){} }, 300);
+    }catch(e){}
   };
   if($('btnCloseClubDoklady')) $('btnCloseClubDoklady').onclick=()=>closeSheet('shClubDoklady');
   if($('btnCloseGymCohort')) $('btnCloseGymCohort').onclick=()=>closeSheet('shGymCohort');
@@ -26200,14 +26207,14 @@ async function openGymConvos(){
     convs=data||[];
   }catch(e){}
   if(!convs.length){
-    box.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;font-size:13px;line-height:1.6;">'+(EN?'Nothing yet. Threads started by a club announcement show up here.':'Zatím nic. Objeví se tu vlákna, která vznikla z oznámení klubu.')+'</p>';
+    box.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;font-size:13px;line-height:1.6;">'+(EN?'Nothing yet. Threads started by a message to members show up here.':'Zatím nic. Objeví se tu vlákna, která vznikla ze zprávy členům.')+'</p>';
     return;
   }
   // Kolik zpráv a kdy naposled -- bez obsahu. A kdo je nezletilý.
   const ids=convs.map(c=>c.id);
   const sids=[...new Set(convs.map(c=>String(c.student_id)).filter(Boolean))];
   const cids=[...new Set(convs.map(c=>String(c.coach_id)).filter(Boolean))];
-  let cnt={}, last={}, minor=new Set(), names={};
+  let cnt={}, last={}, minor=new Set(), names={}, roles={};
   try{
     const { data:ms }=await supaClient.from('messages').select('conversation_id,created_at').in('conversation_id', ids);
     (ms||[]).forEach(function(m){ const k=m.conversation_id; cnt[k]=(cnt[k]||0)+1; if(!last[k]||m.created_at>last[k]) last[k]=m.created_at; });
@@ -26215,6 +26222,17 @@ async function openGymConvos(){
   try{
     const { data:ps }=await supaClient.from('profiles').select('id,name,is_minor').in('id', sids.concat(cids));
     (ps||[]).forEach(function(p){ names[String(p.id)]=p.name||''; if(p.is_minor) minor.add(String(p.id)); });
+  }catch(e){}
+  // Kdo je ten člověk z klubu -- majitel, spolumajitel, recepční nebo trenér. "s Petr Haiser"
+  // neřekne, v jaké roli s tím studentem mluvil, a u sporu je to ta podstatná informace.
+  try{
+    if(String(g.owner_id||'')===''){ const { data:_g2 }=await supaClient.from('gyms').select('owner_id').eq('id',g.id).maybeSingle(); if(_g2) g.owner_id=_g2.owner_id; }
+    roles[String(g.owner_id||'')]=(EN?'owner':'majitel');
+    const { data:_tc }=await supaClient.from('gym_coaches').select('coach_id,co_owner,is_reception').eq('gym_id',g.id).eq('status','active');
+    (_tc||[]).forEach(function(r){
+      const k=String(r.coach_id||''); if(!k || roles[k]) return;
+      roles[k]=r.co_owner?(EN?'co-owner':'spolumajitel'):(r.is_reception?(EN?'reception':'recepční'):(EN?'coach':'trenér'));
+    });
   }catch(e){}
 
   window._gcRows=convs;
@@ -26230,7 +26248,9 @@ async function openGymConvos(){
     h+='<div style="border:1px solid '+(isMinor?'#F0DFA8':'var(--border)')+';background:'+(isMinor?'#FFFCF4':'#fff')+';border-radius:12px;padding:11px 13px;margin-bottom:9px;">'
       +'<div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;">'
       +'<div style="min-width:0;"><div style="font-size:13.5px;font-weight:700;">'+escapeHtml(who)+(isMinor?(' <span style="font-size:10.5px;font-weight:800;color:#7a5a1a;background:#F5E6B8;border-radius:5px;padding:1px 6px;">'+(EN?'MINOR':'MLADISTVÝ')+'</span>'):'')+'</div>'
-      +'<div style="font-size:11.5px;color:var(--mid);margin-top:2px;">'+(EN?'with ':'s ')+escapeHtml(from)+' · '+nMsg+'\u00d7 '+(EN?'message':'zpráva')+' · '+(EN?'last on ':'naposledy ')+lastD+'</div></div>'
+      +'<div style="font-size:11.5px;color:var(--mid);margin-top:2px;line-height:1.5;">'
+      +(EN?'with ':'s ')+escapeHtml((roles[String(c.coach_id||'')]||(EN?'coach':'trenérem')))+' '+escapeHtml(from)
+      +'<br>'+nMsg+'\u00d7 '+(EN?(nMsg===1?'message':'messages'):(nMsg===1?'zpráva':(nMsg<5?'zprávy':'zpráv')))+' · '+(EN?'last on ':'naposledy ')+lastD+'</div></div>'
       +(isMinor?('<button class="gcOpen" data-i="'+ix+'" style="flex:none;background:none;border:none;color:#635BFF;font-size:12.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';white-space:nowrap;">'+(EN?'Open ›':'Otevřít ›')+'</button>'):'')
       +'</div></div>';
   });
@@ -26476,8 +26496,8 @@ async function _gmBulkMessage(list, ctxLabel){
   }
   h+='<div style="font-size:12px;font-weight:800;color:var(--mid);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">'+(EN?'Message type':'Druh zprávy')+'</div>';
   h+='<div style="display:flex;gap:8px;margin-bottom:6px;">'
-    +(canAsClub?('<button class="gmKind" data-k="ann" style="flex:1;padding:11px 9px;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';border:1px solid var(--border);background:var(--surf);color:var(--dark);">\uD83D\uDCE3 '+(EN?'Club announcement':'Oznámení klubu')+'</button>'):'')
-    +'<button class="gmKind" data-k="dm" style="flex:1;padding:11px 9px;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';border:1px solid var(--dark);background:var(--dark);color:#fff;">\uD83D\uDCAC '+(EN?'Personal message':'Osobní zpráva')+'</button>'
+    +(canAsClub?('<button class="gmKind" data-k="ann" style="flex:1;padding:11px 9px;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';border:1px solid var(--dark);background:var(--dark);color:#fff;">\uD83D\uDCE3 '+(EN?'Club announcement':'Oznámení klubu')+'</button>'):'')
+    +'<button class="gmKind" data-k="dm" style="flex:1;padding:11px 9px;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';border:1px solid var(--border);background:var(--surf);color:var(--dark);">\uD83D\uDCAC '+(EN?'Personal message':'Osobní zpráva')+'</button>'
     +'</div>';
   h+='<div id="gmKindNote" style="font-size:11.5px;color:var(--mid);line-height:1.5;margin-bottom:12px;"></div>';
   h+='<textarea id="gmBulkTxt" rows="5" placeholder="'+(EN?'Write your message…':'Napiš zprávu…')+'" style="'+_inp+'resize:vertical;margin-bottom:6px;"></textarea>';
@@ -26517,7 +26537,9 @@ async function _gmBulkMessage(list, ctxLabel){
   // POZOR na pořadí: _kind se deklaruje TADY, a cokoli, co ho čte, musí být níž. Blok s konceptem
   // byl výš a sáhl na něj před deklarací -- to vyhodí chybu a všechno za tím se přestane vykonat,
   // takže přepínač druhu zprávy vůbec nedostal obsluhu a nešlo ho přepnout.
-  let _kind='dm';
+  // Výchozí je oznámení klubu, když na něj má člověk právo -- to je ten častější případ
+  // (zavřeno, změna rozvrhu). Osobní zpráva je záměrné rozhodnutí, ne to, do čeho spadneš.
+  let _kind=canAsClub?'ann':'dm';
   const _paintKind=function(){
     ov.querySelectorAll('.gmKind').forEach(function(x){ const on=(x.dataset.k===_kind);
       x.style.background=on?'var(--dark)':'var(--surf)'; x.style.color=on?'#fff':'var(--dark)'; x.style.borderColor=on?'var(--dark)':'var(--border)'; });
@@ -26525,8 +26547,8 @@ async function _gmBulkMessage(list, ctxLabel){
     if(ti) ti.textContent=(_kind==='ann')?(EN?'Club announcement':'Oznámení klubu'):(EN?'Personal message':'Osobní zpráva');
     const nt=ov.querySelector('#gmKindNote');
     if(nt) nt.textContent=(_kind==='ann')
-      ? (EN?'Speaks for the club. Goes as a notification, one-way — anyone who wants to reply opens a chat with you themselves.'
-          :'Mluví klub. Půjde jako notifikace, jednosměrně — kdo bude chtít odpovědět, otevře si s tebou chat sám.')
+      ? (EN?'Goes out as a notification from the club, one-way — it cannot be replied to.'
+          :'Půjde jako notifikace za klub, jednosměrně — nepůjde na ni odpovědět.')
       : (EN?'Sent from your profile under your name. It lands in the student\'s chat and they can reply to you.'
           :'Zpráva přijde z tvého profilu pod tvým jménem. Přistane studentovi v chatu a může ti odpovědět.');
   };
@@ -29618,7 +29640,13 @@ function setupDangerZone(){
     const _isProv = !!(currentUser && (currentUser.coach_status==='approved' || currentUser.gym_official
       || (window._myGyms && window._myGyms.length) || currentUser.role==='founder'));
     const _hide = function(id){ const el=document.getElementById(id); if(el) el.style.display = _isProv ? '' : 'none'; };
-    const _payRow = document.querySelector('[data-setopen="shPay"]');
+    // Mezistránka "Platby & provize" obsahovala jediný řádek se stejným názvem, který vedl na
+    // stejné místo -- klik navíc bez obsahu. Řádek v Nastavení teď otevírá rovnou Platby.
+    { const _pr=document.querySelector('[data-setopen="shPay"]');
+      if(_pr && !_pr.dataset.direct){ _pr.dataset.direct='1'; _pr.removeAttribute('data-setopen');
+        _pr.onclick=function(){ try{ closeSheet('shSettings'); }catch(e){}
+          openSheet('shPayments'); if(typeof renderPaymentsPage==='function') renderPaymentsPage(); }; } }
+    const _payRow = document.querySelector('[data-setopen="shPay"]') || document.querySelector('[data-direct="1"]');
     if(_payRow) _payRow.style.display = _isProv ? '' : 'none';
   }catch(e){}
   try{
