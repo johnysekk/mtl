@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SUG puts the test-mode stamp on the records a receipt is opened from -- lessons, drop-ins, memberships, tickets, course places and merch orders -- so the receipt reads it directly. Until now only the transaction carried it, and a receipt opened from the record itself had to go looking: for a transfer there is no payment_intent to match on, so it fell back to finding a transaction created around the same time, which picks whatever is in that window rather than the right row. That guess is gone. Needs test-mode-stamp-2.sql. -->
+<!-- MTL build: SUH stops test-mode activity from carrying XP into the live league. Payments are not real during testing, so someone could tick off fifty sessions, farm the milestones and sit at the top of the table on launch day. Nothing is deleted -- a tester should still see what they trained -- so instead the milestone counts ignore rows stamped as test once test mode is off, while counting everything while it is on, which is what a tester needs to see the system work at all. The commission PDF also carries the test notice now, matching the email and the in-app receipt. Needs test-mode-stamp-3.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -25933,6 +25933,11 @@ async function openMilestones(){
   const tiers=(prefix,emoji,unit,count,arr)=>arr.map(function(t){ if(count>=t) unlocked[prefix+'_'+t]=1; return badge(prefix+'_'+t,emoji,t.toLocaleString()+' '+unit,count>=t); }).join('');
   const T_STUD=[100,500,1000,5000,25000,100000,500000], T_COACH=[100,200,500,1000,2000,5000,10000,20000,50000,100000], T_GYM=[10,20,50,100,200,500,1000,2000,5000,10000], T_BOOK=[500,1000,5000,25000,100000,500000], T_ONLINE=[250,500,2500,10000,50000];
   const now=new Date(); const isP=(b)=>b.type==='online'?!!b.fulfilled:(b.student_confirmed===true && b.coach_confirmed===true);
+  // FARMENÍ XP V TESTU. V testovacím režimu se neplatí doopravdy, takže by si člověk mohl
+  // odklikat padesát tréninků a po spuštění s tím sedět nahoře v žebříčku. Nic se ale nemaže --
+  // tester má svou historii vidět. Proto: v testu se počítá všechno, po přepnutí na ostro se
+  // testovací záznamy přestanou počítat. Náskok tím zmizí, historie zůstane.
+  const _noFarm=(q)=> window._TEST_MODE ? q : q.or('test_mode.is.null,test_mode.eq.false');
   const isCoach = me.coach_status==='approved'; let _discCount={};
   let vd=[]; try{ vd=me.verify_disciplines?(typeof me.verify_disciplines==='string'?JSON.parse(me.verify_disciplines):me.verify_disciplines):[]; if(!Array.isArray(vd))vd=[]; }catch(e){ vd=[]; }
   const isAmb = vd.length>0;
@@ -25947,9 +25952,9 @@ async function openMilestones(){
 
   let sInner='';
   try{
-    const { data: bk } = await supaClient.from('bookings').select('id,type,status,fulfilled,training_date,training_time,coach_id,discipline,student_confirmed,coach_confirmed').eq('student_id',me.id);
+    const { data: bk } = await _noFarm(supaClient.from('bookings').select('id,type,status,fulfilled,training_date,training_time,coach_id,discipline,student_confirmed,coach_confirmed').eq('student_id',me.id));
     const hp=(bk||[]).filter(b=>b.status==='active'&&isP(b)); const online=hp.filter(b=>b.type==='online').length; const coaches=new Set(hp.map(b=>b.coach_id).filter(Boolean)).size;
-    let gymTrain=0; const discSet=new Set(); const _noDiscGyms=new Set(); try{ const { data: ga } = await supaClient.from('gym_attendance').select('id,discipline,gym_id').eq('student_id',me.id).is('child_name',null); gymTrain=(ga||[]).length; (ga||[]).forEach(a=>{ if(a.discipline){ discSet.add(a.discipline); _discCount[a.discipline]=(_discCount[a.discipline]||0)+1; } else if(a.gym_id) _noDiscGyms.add(a.gym_id); }); }catch(e){}
+    let gymTrain=0; const discSet=new Set(); const _noDiscGyms=new Set(); try{ const { data: ga } = await _noFarm(supaClient.from('gym_attendance').select('id,discipline,gym_id').eq('student_id',me.id).is('child_name',null)); gymTrain=(ga||[]).length; (ga||[]).forEach(a=>{ if(a.discipline){ discSet.add(a.discipline); _discCount[a.discipline]=(_discCount[a.discipline]||0)+1; } else if(a.gym_id) _noDiscGyms.add(a.gym_id); }); }catch(e){}
     if(_noDiscGyms.size){ try{ const { data: _gg } = await supaClient.from('gyms').select('id,disciplines').in('id',[..._noDiscGyms]); (_gg||[]).forEach(g2=>{ let dl=[]; try{ dl=g2.disciplines?(typeof g2.disciplines==='string'?JSON.parse(g2.disciplines):g2.disciplines):[]; }catch(e){} if(Array.isArray(dl)&&dl.length) discSet.add(dl[0]); }); }catch(e){} }
     hp.forEach(b=>{ if(b.discipline){ discSet.add(b.discipline); _discCount[b.discipline]=(_discCount[b.discipline]||0)+1; } }); const sports=discSet.size;
     const total=hp.filter(b=>b.type!=='online').length+gymTrain;
@@ -25982,7 +25987,7 @@ async function openMilestones(){
 
   if(ownsGym && myGym){ let gInner=''; try{
     let members=0,atts=0; try{ const { data: m } = await supaClient.from('gym_memberships').select('student_id,child_name').eq('gym_id',myGym.id).in('status',['active','cancelling']); members=new Set((m||[]).map(function(x){return (x.student_id||'')+'|'+(x.child_name||'');})).size; }catch(e){}
-    try{ const { data: a } = await supaClient.from('gym_attendance').select('id').eq('gym_id',myGym.id); atts=(a||[]).length; }catch(e){}
+    try{ const { data: a } = await _noFarm(supaClient.from('gym_attendance').select('id').eq('gym_id',myGym.id)); atts=(a||[]).length; }catch(e){}
     gInner+=`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">${counter('👥',EN?'members':'členů',members)}${counter('🥋',EN?'attend.':'docházek',atts)}</div>`;
     gInner+=topOf([['g_first','🏠',EN?'First member':'První člen',members>=1],['g_10','📈',EN?'10 members':'10 členů',members>=10],['g_50','📈',EN?'50 members':'50 členů',members>=50],['g_100','📈',EN?'100 members':'100 členů',members>=100],['g_200','🏆',EN?'200 members':'200 členů',members>=200]])+topOf([['g_att','🥋',EN?'1000 attendances':'1000 docházek',atts>=1000],['g_att5','🥋',EN?'5000 attendances':'5000 docházek',atts>=5000]]);
   }catch(e){} html+=wrap('🏛️ '+(EN?'Club milestones':'Klub milníky')+' — '+escapeHtml(myGym.name||''), gInner, false); }
