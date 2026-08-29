@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: STN decides the PIS sandbox per payee instead of globally. Every call passed !window._PIS_ENABLED as the test flag, which is the platform-wide switch: while PIS is not live that made every payment run against the Norwegian sandbox bank, including for a coach who has no test mode enabled. That is the 1:1 failure -- the payer was sent to a sandbox they have no account with, or their country returned no banks, and nothing launched. _pisAllowed already decides this correctly for showing the button; _pisTestFor is its counterpart for the flow, checking the club or coach pis_test flag and the test-account map, with the founder still always in sandbox. -->
+<!-- MTL build: STO makes the PIS sandbox the default rather than something each club and coach opts into. Before launch nobody has live PIS, so an entity without the flag was attempting a real payment that could only fail -- which is what happened on the 1:1 rail, where the flag cannot even be set from anywhere a coach can reach. It is now on unless the founder switches it off per club or coach in admin, and those fall back to QR transfer. Club-sent personal messages are tagged only in the sender view: a student sees a message from a person they know and the internal provenance tells them nothing, while the coach does need to know which hat they were wearing, especially when they are also that student 1:1 coach. Minors are unaffected -- the oversight note in the thread already covers them. Needs pis-test-default.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -17668,15 +17668,13 @@ async function _loadPisTestIds(){
 // nespustilo": člověk skončil v pískovišti bez účtu, nebo mu pro jeho zemi nevyšly banky.
 // _pisAllowed umí rozhodnout podle konkrétního klubu nebo kouče; tohle je jeho testovací dvojče.
 function _pisTestFor(ent, id){
-  if(window._PIS_ENABLED) return false;          // ostrý provoz: žádné pískoviště
-  if(ent && ent.pis_test) return true;
-  var m=window._PIS_TEST_IDS;
-  if(m){
-    if(id && m[id]) return true;
-    if(ent && ent.id && m[ent.id]) return true;
-    if(ent && ent.receiver_id_value && m[_pisKey(ent.receiver_id_value)]) return true;
-  }
-  return _pisFounderNow();                        // zakladatel testuje vždycky
+  // Pískoviště je VÝCHOZÍ, dokud PIS neběží ostře. Před spuštěním nikdo ostrý PIS nemá, takže
+  // vypnuté pískoviště znamená pokus o skutečnou platbu, který spadne -- a přihlašovat se
+  // k jedinému režimu, který může fungovat, je obráceně. Zakladatel to u konkrétního klubu nebo
+  // kouče vypne v adminu (🏦 PIS) a ten pak jede na QR převod.
+  if(window._PIS_ENABLED) return false;          // ostrý provoz: pískoviště nikdy
+  if(ent && ent.pis_test===false) return false;  // vědomě vypnuto v adminu
+  return true;
 }
 
 function _pisFounderNow(){ return !!(currentUser && (currentUser.role==='founder' || currentUser.id===FOUNDER_UUID)); }
@@ -24616,6 +24614,20 @@ function _chatOversightNote(){
 }
 function _chatBubble(m){
   const mine = m.sender_id===currentUser.id;
+  // Zpráva poslaná z klubového tlačítka. Štítek se ukáže jen jejímu odesílateli -- pro studenta
+  // je to prostě zpráva od člověka, kterého zná, a vnitřní původ mu nic neřekne.
+  if(m.kind==='club' && mine){
+    const w=document.createElement('div');
+    w.style.cssText='align-self:flex-end;max-width:75%;display:flex;flex-direction:column;align-items:flex-end;gap:3px;';
+    const tag=document.createElement('div');
+    tag.style.cssText='font-size:10px;font-weight:800;color:var(--mid);text-transform:uppercase;letter-spacing:.04em;';
+    tag.textContent=(LANG==='en'?'sent as the club':'odesláno za klub');
+    const b=document.createElement('div');
+    b.style.cssText='padding:10px 14px;border-radius:16px;font-size:14px;line-height:1.4;background:var(--red);color:#fff;border-bottom-right-radius:4px;';
+    b.textContent=m.text;
+    w.appendChild(tag); w.appendChild(b);
+    return w;
+  }
   // Oznámení klubu je vizuálně jiná bublina se jménem klubu -- říká to klub, ne ten člověk.
   // Vlákno zůstává jedno, aby byla vidět souvislost mezi oznámením a odpověďmi na něj.
   if(m.kind==='announce'){
@@ -26626,8 +26638,11 @@ async function _gmBulkMessage(list, ctxLabel){
         }
         if(!conv) { failed++; continue; }
         if(g && !conv.origin_gym_id){ try{ await supaClient.from('conversations').update({ origin_gym_id:g.id }).eq('id',conv.id); }catch(e){} }
+        // kind='club' = odesláno z klubového tlačítka. Štítek uvidí JEN ten, kdo píše za klub --
+        // student o vnitřní rozdělení nestojí, jemu píše konkrétní člověk. Kouč ale potřebuje
+        // vědět, ve které roli tu zprávu poslal, hlavně když je zároveň něčí 1:1 trenér.
         await supaClient.from('messages').insert({ conversation_id:conv.id, sender_id:currentUser.id,
-          text:body, ...(asClub?{ kind:'announce' }:{}) });
+          text:body, kind:'club' });
         // ŽÁDNÁ NOTIFIKACE NAVÍC. Osobní zpráva je normální zpráva v chatu -- ten už si nepřečtené
         // hlídá odznakem sám. Posílat k tomu ještě notifikaci znamenalo, že jedna zpráva dorazila
         // dvakrát, pokaždé jinam, a nebylo poznat, jestli je to totéž.
