@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: STB shows Just lapsed on both rails, since a Stripe membership ends too and the club should know; Cancelling stays Stripe-only because on transfers nothing renews and that tile could only ever read zero. It also builds the oversight screen we designed: Announcement threads lists every conversation that started from a club announcement, and it deliberately shows two different things. For an adult member only the fact and the volume appear -- who spoke to whom, how many messages, when last -- because reading a member private conversation with their coach would be surveillance of a customer. A thread involving a minor can be opened, which is the standard in youth sport, and crucially it is not hidden: both sides see a line in the thread saying the club management can read it. That visibility is the point -- an adult who knows it is readable behaves differently. Whether it applies is derived from profiles.is_minor at read time rather than stored, so it lapses by itself on the student eighteenth birthday. Needs club-announcements.sql. -->
+<!-- MTL build: STC fixes three things reported from the screen. Message members claimed there was nobody to write to while a member sat right there: the query asked for a column called plan, but on gym_memberships it is plan_name, so PostgREST rejected the whole request, the error fell into a catch and the empty result read as an empty club. The error is now logged rather than swallowed. A membership notification also flashed the members tab and then jumped to the schedule -- the requested tab was cleared after the first render, and in dashmode Spravovat klub renders a second time right after opening, so that pass found nothing and fell back to tab zero; the request now survives for a moment rather than a single render. And the labels read better: MLADISTVY rather than NEZLETILY, and naposledy spelled out instead of the abbreviation. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -15765,7 +15765,12 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
   (function(){ const tabs=[['gmTabSchedBtn','gmSchedTab'],['gmTabSetBtn','gmSetTab'],['gmTabMembBtn','gmMembTab'],['gmTabDashBtn','gmDash']];
     const els=tabs.map(([b,p])=>({b:$(b),p:$(p),pid:p})); if(els.some(x=>!x.b||!x.p)) return;
     const show=k=>{ els.forEach((x,idx)=>{ const on=idx===k; x.p.style.display=on?'block':'none'; x.b.style.background=on?'var(--dark)':'var(--surf)'; x.b.style.color=on?'#fff':'var(--dark)'; x.b.style.border=on?'none':'1px solid var(--border)'; }); if(els[k].pid==='gmMembTab' && typeof renderGymMembers==='function') renderGymMembers(); };
-    els.forEach((x,idx)=>x.b.onclick=()=>show(idx)); var _it=(window._gmInitTab!=null?window._gmInitTab:0); window._gmInitTab=null; show(_it); window._gmShowTab=show; })();
+    els.forEach((x,idx)=>x.b.onclick=()=>show(idx)); // Požadovaná záložka drží krátkou chvíli, ne jen do prvního vykreslení. V dashmodu se
+    // Spravovat klub překreslí ještě jednou hned po otevření a to druhé vykreslení už našlo
+    // prázdno, takže spadlo na nultou -- Rozvrh. Odtud to probliknutí Členů a skok jinam.
+    var _it=(window._gmInitTab!=null?window._gmInitTab:0);
+    if(window._gmInitTab!=null){ window._gmInitTabAt=Date.now(); setTimeout(function(){ if(Date.now()-(window._gmInitTabAt||0)>=1400) window._gmInitTab=null; }, 1500); }
+    show(_it); window._gmShowTab=show; })();
   try{ renderScheduleEditor(); }catch(e){ console.error('renderGymManage renderScheduleEditor', e); }
   try{ renderPlansEditor(); }catch(e){ console.error('renderGymManage renderPlansEditor', e); }
   try{ _mgPhotos = gymPhotoList(_myGymData.photos); renderMgPhotos(); }catch(e){ console.error('renderGymManage renderMgPhotos', e); }
@@ -16193,7 +16198,13 @@ async function renderGymMembers(){
       if(_k==='lapsed'){ _gmBulkMessage(window._gmLapsed||[], (LANG==='en'?'Just lapsed':'Nedávno doběhlo')); return; }
       bb.disabled=true; bb.textContent='…';
       let _all=[];
-      try{ const { data }=await supaClient.from('gym_memberships').select('student_id,student_name,child_name,plan').eq('gym_id',_myGymData.id).in('status',['active','cancelling']).or('paid_to.neq.coach,paid_to.is.null'); _all=data||[]; }catch(e){}
+      // plan_name, ne plan -- ten sloupec neexistuje a PostgREST kvůli němu odmítne CELÝ dotaz.
+      // Chyba spadla do catch, seznam vyšel prázdný a appka hlásila "Není komu psát", přestože
+      // člen na obrazovce byl.
+      try{ const { data, error }=await supaClient.from('gym_memberships').select('student_id,student_name,child_name,plan_name').eq('gym_id',_myGymData.id).in('status',['active','cancelling']).or('paid_to.neq.coach,paid_to.is.null');
+        if(error) console.log('[gm bulk]', error.message);
+        _all=(data||[]).map(function(x){ return { student_id:x.student_id, student_name:x.student_name, child_name:x.child_name, plan:x.plan_name }; });
+      }catch(e){ console.log('[gm bulk]', e&&e.message); }
       bb.disabled=false; bb.textContent='\uD83D\uDCAC '+(LANG==='en'?'Message members':'Napsat členům zprávu');
       _gmBulkMessage(_all, (LANG==='en'?'Active members':'Aktivní členové'));
     }; }
@@ -26186,8 +26197,8 @@ async function openGymConvos(){
     const lastD=last[c.id]?new Date(last[c.id]).toLocaleDateString(EN?'en-GB':'cs-CZ'):'—';
     h+='<div style="border:1px solid '+(isMinor?'#F0DFA8':'var(--border)')+';background:'+(isMinor?'#FFFCF4':'#fff')+';border-radius:12px;padding:11px 13px;margin-bottom:9px;">'
       +'<div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start;">'
-      +'<div style="min-width:0;"><div style="font-size:13.5px;font-weight:700;">'+escapeHtml(who)+(isMinor?(' <span style="font-size:10.5px;font-weight:800;color:#7a5a1a;background:#F5E6B8;border-radius:5px;padding:1px 6px;">'+(EN?'MINOR':'NEZLETILÝ')+'</span>'):'')+'</div>'
-      +'<div style="font-size:11.5px;color:var(--mid);margin-top:2px;">'+(EN?'with ':'s ')+escapeHtml(from)+' · '+nMsg+' '+(EN?'msg':'zpráv')+' · '+(EN?'last ':'posl. ')+lastD+'</div></div>'
+      +'<div style="min-width:0;"><div style="font-size:13.5px;font-weight:700;">'+escapeHtml(who)+(isMinor?(' <span style="font-size:10.5px;font-weight:800;color:#7a5a1a;background:#F5E6B8;border-radius:5px;padding:1px 6px;">'+(EN?'MINOR':'MLADISTVÝ')+'</span>'):'')+'</div>'
+      +'<div style="font-size:11.5px;color:var(--mid);margin-top:2px;">'+(EN?'with ':'s ')+escapeHtml(from)+' · '+nMsg+'\u00d7 '+(EN?'message':'zpráva')+' · '+(EN?'last on ':'naposledy ')+lastD+'</div></div>'
       +(isMinor?('<button class="gcOpen" data-i="'+ix+'" style="flex:none;background:none;border:none;color:#635BFF;font-size:12.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';white-space:nowrap;">'+(EN?'Open ›':'Otevřít ›')+'</button>'):'')
       +'</div></div>';
   });
