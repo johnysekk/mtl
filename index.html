@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: STI settles the ownership question by asking the database instead of guessing from memory. Twice I inferred it from _myGymData and then from _myGyms, and twice the owner still saw only Personal message: those objects are populated from several places and need not carry owner_id. One query on gyms, and a second on gym_coaches for a co-owner, is reliable and costs nothing -- the same check now guards the threads screen, which is also what was producing the club-did-not-load toast. Drafts get their own list: unsent messages are kept per audience and type, reopened with the audience they were written for, and expire after thirty days so they cannot pile up. The two buttons above the tiles now share one style. -->
+<!-- MTL build: STJ waits for the club before deciding anything. The ownership lookup was correct -- the database has the right owner_id -- but it sat behind an if that required _myGymData, and when the sheet opened before checkGymOwnership had finished that was null, so the query never ran and the owner fell through as an ordinary coach. The same null was producing the club-did-not-load toast. Both now wait. So that this stops costing rounds of guessing, the sheet also prints why the club option is missing -- which club, which user, which owner, whether a co-owner row matched, and any error -- visible to the founder only. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -16142,7 +16142,7 @@ async function renderGymMembers(){
     const _own=!!(_myGymData && currentUser && (String(_myGymData.owner_id)===String(currentUser.id) || _myGymData._isCoOwner));
     const _nd=(typeof _gmDraftsLoad==='function')?_gmDraftsLoad().length:0;
     const _draftBtn=_nd?`<button id="gmDraftBtn" style="width:100%;padding:10px;margin-bottom:10px;background:#FFF8E6;color:#7a5a1a;border:1px solid #F0DFA8;border-radius:12px;font-size:13px;font-weight:800;cursor:pointer;font-family:'DM Sans';">\uD83D\uDCDD ${EN?('Drafts ('+_nd+')'):('Koncepty ('+_nd+')')}</button>`:'';
-    return _draftBtn+(_own?`<button id="gmConvBtn" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:13px;font-weight:800;cursor:pointer;font-family:'DM Sans';">\uD83D\uDCAC ${EN?'Announcement threads':'Komunikace z oznámení'}</button>`:'');
+    return _draftBtn+(_own?`<button id="gmConvBtn" style="width:100%;padding:8px;margin:-6px 0 10px;background:none;border:none;color:var(--mid);font-size:12.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';text-decoration:underline;">${EN?'Announcement threads \u203a':'Komunikace z oznámení \u203a'}</button>`:'');
   })()}`:''}
   <div style="display:flex;gap:8px;margin-bottom:12px;">
     <div style="flex:1;background:#F0FBF0;border:1px solid #CDEBD6;border-radius:12px;padding:11px;text-align:center;"><div style="font-family:'Bebas Neue';font-size:26px;color:#006040;">${actCount}</div><div style="font-size:11px;color:var(--mid);">${EN?'Active':'Aktivní'}</div></div>
@@ -26166,7 +26166,12 @@ async function openGymConvos(){
   let g=window._myGymData||null;
   if(!g){ try{ if(typeof checkGymOwnership==='function') await checkGymOwnership(); }catch(e){} }
   for(let _i=0;!(g=window._myGymData||null) && _i<20;_i++){ await new Promise(r=>setTimeout(r,150)); }
-  if(!g){ toast(EN?'⚠️ No club loaded':'⚠️ Klub se nenačetl'); return; }
+  if(!g){
+    // Klub opravdu není -- ale místo hlášky se to prostě neotevře. Když se sem člověk dostal
+    // z tlačítka, které se ukazuje jen majiteli klubu, je "Klub se nenačetl" o časování, ne
+    // o něm, a nemá s tím co dělat.
+    console.log('[gymConvos] zadny klub'); return;
+  }
   // Stejně jako u psaní členům: zeptat se databáze, ne paměti.
   let canSee=false;
   try{
@@ -26392,18 +26397,26 @@ async function _gmBulkMessage(list, ctxLabel){
   // VLASTNICTVÍ SE ZJISTÍ Z DATABÁZE, ne z toho, co je zrovna v paměti. Dvakrát jsem to hádal
   // z _myGymData a z _myGyms a dvakrát to majiteli nefungovalo -- ty objekty se plní z různých
   // míst a nemusí owner_id nést. Jeden dotaz je spolehlivý a stojí nic.
-  const g=window._myGymData||null;
+  // Klub počkat, ne vzít, co je zrovna v paměti -- když se okno otevře dřív, než doběhne
+  // checkGymOwnership, byl by null a vlastnictví by se ani neověřovalo.
+  let g=window._myGymData||null;
+  if(!g){ try{ if(typeof checkGymOwnership==='function') await checkGymOwnership(); }catch(e){} }
+  for(let _i=0;!(g=window._myGymData||null) && _i<20;_i++){ await new Promise(r=>setTimeout(r,150)); }
   let canAsClub=false;
+  window._gmWhy={ gym:(g&&g.id)||null, me:(currentUser&&currentUser.id)||null, owner:null, err:null, co:0 };
   if(g && currentUser){
     try{
-      const { data:_gr }=await supaClient.from('gyms').select('owner_id').eq('id',g.id).maybeSingle();
+      const { data:_gr, error:_ge }=await supaClient.from('gyms').select('owner_id').eq('id',g.id).maybeSingle();
+      window._gmWhy.owner=(_gr&&_gr.owner_id)||null;
+      if(_ge) window._gmWhy.err=_ge.message;
       if(_gr && String(_gr.owner_id)===String(currentUser.id)) canAsClub=true;
-    }catch(e){ console.log('[gm owner]', e&&e.message); }
+    }catch(e){ window._gmWhy.err=(e&&e.message)||'err'; }
     if(!canAsClub){
       try{
         const { data:_co }=await supaClient.from('gym_coaches').select('id').eq('gym_id',g.id).eq('coach_id',currentUser.id).eq('co_owner',true).eq('status','active').limit(1);
+        window._gmWhy.co=(_co&&_co.length)||0;
         if(_co && _co.length) canAsClub=true;
-      }catch(e){ console.log('[gm coowner]', e&&e.message); }
+      }catch(e){ window._gmWhy.err=(e&&e.message)||'err'; }
     }
   }
 
@@ -26447,6 +26460,15 @@ async function _gmBulkMessage(list, ctxLabel){
   //   Oznámení klubu  mluví klub, jde jako notifikace, jednosměrné. Vlákno vznikne, až když
   //                   příjemce sám klepne na odpověď -- proto ho můžou dostat i mladiství.
   //   Osobní zpráva   mluvíš ty, přistane rovnou v chatu a odpovídá se v něm normálně.
+  // Když se "Oznámení klubu" nenabídne, ať je hned vidět proč -- jinak se to dohaduje přes
+  // několik kol. Vidí to jen zakladatel, běžnému uživateli by to nic neřeklo.
+  if(!canAsClub && currentUser && currentUser.id===FOUNDER_UUID){
+    const w=window._gmWhy||{};
+    h+='<div style="background:#FFF8E6;border:1px solid #F0DFA8;border-radius:10px;padding:9px 11px;font-size:11px;color:#7a5a1a;line-height:1.6;margin-bottom:10px;font-family:ui-monospace,Menlo,monospace;">'
+      +'klub '+(w.gym?String(w.gym).slice(0,8):'—')+' · já '+(w.me?String(w.me).slice(0,8):'—')
+      +' · majitel '+(w.owner?String(w.owner).slice(0,8):'—')+' · spolumaj. '+(w.co||0)
+      +(w.err?(' · '+escapeHtml(String(w.err).slice(0,60))):'')+'</div>';
+  }
   h+='<div style="font-size:12px;font-weight:800;color:var(--mid);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">'+(EN?'Message type':'Druh zprávy')+'</div>';
   h+='<div style="display:flex;gap:8px;margin-bottom:6px;">'
     +(canAsClub?('<button class="gmKind" data-k="ann" style="flex:1;padding:11px 9px;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';border:1px solid var(--border);background:var(--surf);color:var(--dark);">\uD83D\uDCE3 '+(EN?'Club announcement':'Oznámení klubu')+'</button>'):'')
