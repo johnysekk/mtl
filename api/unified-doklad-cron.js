@@ -105,7 +105,7 @@ function dokladHtml(ME, buyer, kind, period, cur, data, test, testMode){
   const supLines = ['<b>'+esc(ME.name||'Martial Training Lab s.r.o.')+'</b>', ME.ico?('I\u010cO: '+esc(ME.ico)):(_ph?('I\u010cO: '+_ph):''), ME.sidlo?esc(ME.sidlo):'', ME.dic?('DI\u010c: '+esc(ME.dic)):(_ph?('DI\u010c: '+_ph):''), ME.vat_id?('VAT ID: '+esc(ME.vat_id)):''].filter(Boolean).join('<br>');
   const bName = (buyer && (buyer.legal_name || buyer.name)) || '\u2014';
   const buyLines = ['<b>'+esc(bName)+'</b>',
-    (buyer&&buyer.name&&buyer.name!==bName)?('Klub v MTL: '+esc(buyer.name)):'', (buyer&&buyer.tax_id)?('I\u010cO: '+esc(buyer.tax_id)):(_ph?('I\u010cO: '+_ph):''), (buyer&&buyer.billing_address)?esc(buyer.billing_address):'', (buyer&&buyer.vat_id)?('DI\u010c: '+esc(buyer.vat_id)):(_ph?('DI\u010c: '+_ph):'')].filter(Boolean).join('<br>');
+    (buyer&&buyer.name&&buyer.name!==bName)?(((kind==='coach')?'Kou\u010d v MTL: ':'Klub v MTL: ')+esc(buyer.name)):'', (buyer&&buyer.tax_id)?('I\u010cO: '+esc(buyer.tax_id)):(_ph?('I\u010cO: '+_ph):''), (buyer&&buyer.billing_address)?esc(buyer.billing_address):'', (buyer&&buyer.vat_id)?('DI\u010c: '+esc(buyer.vat_id)):(_ph?('DI\u010c: '+_ph):'')].filter(Boolean).join('<br>');
   let vatBlock;
   if(ME.vat_payer){ const rate=ME.vat_rate||21; const base=total/(1+rate/100); const vat=total-base; vatBlock='<tr><td>Z\u00e1klad dan\u011b</td><td style="text-align:right;">'+_money(base,cur)+'</td></tr><tr><td>DPH '+rate+'%</td><td style="text-align:right;">'+_money(vat,cur)+'</td></tr>'; }
   else { vatBlock='<tr><td colspan="2" style="font-size:11px;color:#666;padding-top:6px;">Dodavatel nen\u00ed pl\u00e1tcem DPH.</td></tr>'; }
