@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SVW finally lands the family invite fix. The change SVU described was never written to the file -- the block still passed the token straight to _consumeFamilyInvite at page load, where currentUser does not exist yet, so it returned on its first line. Worse, the fallback branch read the stored token, deleted it, and handed it to the same function, discarding the invitation before enterApp could ever redeem it; that branch is gone, since _famPendingCheck now does that job with a profile in hand. The token is logged as it is read, so the next failure names its own cause. -->
+<!-- MTL build: SVX moves approval of a family link into the Family screen. Approving a tie to your own child from a strip in the notification list gives you almost nothing to judge it by; the notification is now a way through to Family, where pending requests are listed with the person name and age and whether they would join as a child or a partner, alongside the family you already have. Family did not show these requests at all before. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -4511,6 +4511,45 @@ function _openAddKid(){
   ov.querySelector('#kidAddCancel').onclick=()=>ov.remove();
   const ka=ov.querySelector('#kidAdd'); if(ka) ka.onclick=async()=>{ await addChild(); if(document.body.contains(ov)) ov.remove(); };
 }
+
+// Čekající žádosti o napojení -- vykreslují se přímo v Rodině, ne v notifikacích. Schvalovat
+// vazbu na svoje dítě z útržku v seznamu upozornění je málo kontextu; tady je vidět, koho už
+// v rodině mám a co k tomu přibyde.
+async function _famRenderRequests(){
+  const box=document.getElementById('famReqBox'); if(!box) return;
+  const EN=LANG==='en'; const me=currentUser&&currentUser.id; if(!me){ box.innerHTML=''; return; }
+  let rows=[];
+  try{
+    const { data }=await supaClient.from('family_links').select('*')
+      .eq('guardian_id',me).eq('status','requested').limit(20);
+    rows=data||[];
+  }catch(e){ box.innerHTML=''; return; }
+  if(!rows.length){ box.innerHTML=''; return; }
+  const names={};
+  try{
+    const ids=rows.map(function(r){ return r.member_id; }).filter(Boolean);
+    if(ids.length){ const { data:ps }=await supaClient.from('profiles').select('id,name,birthdate,is_minor').in('id',ids);
+      (ps||[]).forEach(function(p){ names[p.id]=p; }); }
+  }catch(e){}
+  box.innerHTML=rows.map(function(r){
+    const p=names[r.member_id]||{};
+    const _age=(function(){ try{ if(!p.birthdate) return ''; const b=new Date(p.birthdate), n=new Date();
+      let a=n.getFullYear()-b.getFullYear();
+      if(n.getMonth()<b.getMonth()||(n.getMonth()===b.getMonth()&&n.getDate()<b.getDate())) a--;
+      return a+' '+(EN?'y':'let'); }catch(e){ return ''; } })();
+    const _rel=p.is_minor?(EN?'as your child':'jako tvoje dítě'):(EN?'as your partner':'jako partner');
+    return '<div style="background:#FFF8E6;border:1px solid #F0DFA8;border-radius:12px;padding:13px;margin-bottom:8px;">'
+      +'<div style="font-size:14px;font-weight:700;color:var(--dark);">'+escapeHtml(p.name||'—')+(_age?(' <span style="font-weight:600;color:var(--mid);font-size:12px;">· '+_age+'</span>'):'')+'</div>'
+      +'<div style="font-size:12.5px;color:#7a5a1a;margin:3px 0 10px;">'+(EN?'wants to join your family ':'chce se napojit do tvé rodiny ')+_rel+'.</div>'
+      +'<div style="display:flex;gap:8px;">'
+      +'<button class="frAcc" data-id="'+r.id+'" style="flex:1;padding:10px;background:var(--green);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Approve':'Schválit')+'</button>'
+      +'<button class="frDec" data-id="'+r.id+'" style="flex:1;padding:10px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Reject':'Zamítnout')+'</button>'
+      +'</div></div>';
+  }).join('');
+  box.querySelectorAll('.frAcc').forEach(function(b){ b.onclick=async function(){ b.disabled=true; b.style.opacity='.5'; await _famApprove(b.dataset.id); try{ renderMyKids(); }catch(e){} }; });
+  box.querySelectorAll('.frDec').forEach(function(b){ b.onclick=async function(){ b.disabled=true; b.style.opacity='.5'; await _famReject(b.dataset.id); try{ renderMyKids(); }catch(e){} }; });
+}
+
 function renderMyKids(){
   const box=$('myKidsBody'); if(!box) return; const EN=LANG==='en'; const kids=_myChildren(); const _caStrict=_consentAgeForMe(); const _ca=(_caStrict!=null)?_caStrict:15;
   const _kidActiveN = kids.filter(function(x){ return !x._archived; }).length;
@@ -4564,7 +4603,8 @@ function renderMyKids(){
       </details>
     </div>`;
   })()).join('') : `<p style="color:var(--light);font-size:13px;padding:6px 0;">${EN?'No children added yet.':'Zatím žádné děti.'}</p>`;
-  box.innerHTML=`<div id="famAcctBox" style="margin-bottom:6px;"></div><div id="migConfirmBox" style="margin-bottom:6px;"></div><div id="kidXferBox" style="margin-bottom:6px;"></div><div id="kidXferOutBox" style="margin-bottom:6px;"></div><div style="margin:16px 0 0;border-top:1px solid var(--border);padding-top:14px;">
+  try{ setTimeout(_famRenderRequests, 0); }catch(e){}
+  box.innerHTML=`<div id="famReqBox" style="margin-bottom:6px;"></div><div id="famAcctBox" style="margin-bottom:6px;"></div><div id="migConfirmBox" style="margin-bottom:6px;"></div><div id="kidXferBox" style="margin-bottom:6px;"></div><div id="kidXferOutBox" style="margin-bottom:6px;"></div><div style="margin:16px 0 0;border-top:1px solid var(--border);padding-top:14px;">
   <details id="kidsFold" style="border:1px solid var(--border);border-radius:12px;background:var(--surf);overflow:hidden;">
     <summary style="list-style:none;cursor:pointer;padding:13px 15px;display:flex;justify-content:space-between;align-items:center;gap:10px;">
       <span style="font-weight:800;font-size:13.5px;color:#141414;">${EN?'Children (under 15)':'Děti (do 15 let)'} <span id="kidGuardInfo" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:var(--border);color:var(--mid);font-size:10.5px;font-weight:800;cursor:pointer;vertical-align:middle;">i</span>${_kidActiveN?(' <span style="color:var(--mid);font-weight:600;">· '+_kidActiveN+'</span>'):''}</span>
@@ -22068,10 +22108,13 @@ async function loadNotifications(append){
           <button class="faAcc" style="flex:1;padding:10px;background:var(--green);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Approve':'Schválit'}</button>
           <button class="faDec" style="flex:1;padding:10px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Reject':'Zamítnout'}</button>
         </div>`;
+      // Schvalovat vazbu na vlastní dítě z útržku v seznamu upozornění je málo kontextu -- odsud
+      // se jde do Rodiny, kde je vidět, koho už v rodině mám a co k tomu přibyde.
       const fa=el.querySelector('.faAcc'), fd=el.querySelector('.faDec');
-      const flk=()=>{ fa.disabled=fd.disabled=true; fa.style.opacity=fd.style.opacity='.5'; fa.style.pointerEvents=fd.style.pointerEvents='none'; };
-      fa.onclick=()=>{ flk(); _famApprove(dd.linkId); };
-      fd.onclick=()=>{ flk(); _famReject(dd.linkId); };
+      if(fd) fd.remove();
+      if(fa){ fa.textContent=(LANG==='en'?'Open Family ›':'Otevřít Rodinu ›');
+        fa.style.background='var(--dark)';
+        fa.onclick=()=>{ closeSheet('shNotif'); try{ openMyKids(); }catch(e){} }; }
       list.appendChild(el);
       return;
     }
