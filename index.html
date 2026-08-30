@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SWT gates the new Events entries on who may actually host. An event is always run by a club -- a coach cannot host one in their own name -- so the entry appears only for clubs you own or where the owner has granted can_create_events, which is what eventEligibleGyms already decided for the dashboard. The check runs again after the club management screen redraws, since that button is rebuilt each time and would otherwise stay hidden. -->
+<!-- MTL build: SWW fixes the time on emailed tickets, which showed two hours early: the date was formatted without a time zone, so it came out in the server UTC rather than local time -- an event at 18:00 printed as 16:00. It now formats in Europe/Prague and in Czech. A payment request for an event ticket also opens that event instead of falling through to Family, since ticket requests carry an event id rather than a club and a class. The Events button is hidden in dashmode, where the sidebar already has it, and the tracing logs added today are gone -- error reporting stays. Needs the updated ticket-email.js. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -74,6 +74,7 @@ body:not(.role-ready) .student-only,body:not(.role-ready) .coach-only{visibility
 body.coach-mode .coach-only{display:block}
 body.coach-mode .student-only{display:none}
 body.coach-mode:not(.dashmode) #meMenuGroup{display:none}
+body.dashmode #mgEvManageBtn{display:none!important}
 body.minor-mode #kidsSection,body.minor-mode #kidAddOpen,body.minor-mode #ni-find,body.minor-mode #becomeCoachBox,body.minor-mode #meGymApply,body.minor-mode .opp-card:has(.opp-cta[data-opp="coach"]),body.minor-mode .opp-card:has(.opp-cta[data-opp="ambassador"]),body.minor-mode .opp-card:has(.opp-cta[data-opp="addgym"]),body.minor-mode .opp-card:has(.opp-cta[data-opp="gym"]){display:none !important;}
 .slot-manage{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:var(--surf);border:1px solid var(--border);border-radius:12px;margin-bottom:10px}
 .slot-del{width:32px;height:32px;border-radius:8px;background:#FEECEC;color:var(--red);border:none;font-size:16px;cursor:pointer;flex-shrink:0}
@@ -4893,7 +4894,6 @@ async function _famGenLink(){
 async function _famPendingCheck(){
   let tok=null;
   try{ tok=localStorage.getItem('mtl_family_pending'); }catch(e){}
-  console.log('[famPending] token=', tok, '| me=', currentUser && currentUser.id);
   if(!tok || !(currentUser && currentUser.id)) return;
   try{ localStorage.removeItem('mtl_family_pending'); }catch(e){}
   await _consumeFamilyInvite(tok);
@@ -8350,10 +8350,19 @@ async function renderEventsAsync(box){
 // vykreslení správy klubu -- to tlačítko se překresluje, takže by jinak zůstalo skryté.
 async function _syncEvManageBtns(){
   try{
-    const _el=(typeof eventEligibleGyms==='function') ? await eventEligibleGyms() : [];
-    const _show=!!(_el && _el.length);
+    // Odpověď si zapamatovat. Bez toho se při každém vykreslení znovu ptáme databáze a tlačítko
+    // se mezitím objeví a zase zmizí -- to je to probliknutí po zavření správy akcí.
+    let _show;
+    if(window._evEligCache!=null){ _show=window._evEligCache; }
+    else {
+      const _el=(typeof eventEligibleGyms==='function') ? await eventEligibleGyms() : [];
+      _show=!!(_el && _el.length);
+      window._evEligCache=_show;
+    }
     // V klubovém rozhraní vždycky, když je za koho pořádat.
-    const _b=document.getElementById('mgEvManageBtn'); if(_b) _b.style.display=_show?'':'none';
+    // V dashmode se k akcím chodí postranní lištou, tlačítko v Rozvrhu by bylo navíc.
+    const _dash=document.body.classList.contains('dashmode');
+    const _b=document.getElementById('mgEvManageBtn'); if(_b) _b.style.display=(_show && !_dash)?'':'none';
     // U kouče jen tomu, kdo klubovou sekci nemá -- kouč z týmu s can_create_events vidí pouze
     // "Můj tým", takže by se ke správě akcí jinak vůbec nedostal. Majiteli se u kouče neukáže,
     // ten ji má v klubu.
@@ -11766,7 +11775,6 @@ async function _sendPayRequest(what, amount, currency, extra){
     });
     // Chyba zápisu se dřív spolkla a ohlásilo se "odesláno", i když nic nedorazilo.
     if(_ne){ console.log('[payRequest] notifikace se nezapsala:', _ne.message); toast('\u26a0\ufe0f '+_ne.message); return false; }
-    console.log('[payRequest] odesláno zástupci', gp.id, gp.name);
     toast(EN?('\u2705 Sent to '+(gp.name||'your guardian')):('\u2705 Odesláno '+(gp.name||'zástupci')), 1);
     return true;
   }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); return false; }
@@ -15731,6 +15739,9 @@ async function toggleCoachPerm(linkId, col, cur){
   const nv=!cur; const upd={}; upd[col]=nv;
   const { error } = await supaClient.from('gym_coaches').update(upd).eq('id', linkId);
   if(error){ toast('⚠️ '+error.message); return; }
+  // Zapamatovaná odpověď už neplatí -- jinak by se položka Události neobjevila (ani nezmizela),
+  // dokud by se appka nenačetla znovu.
+  try{ window._evEligCache=null; if(typeof _syncEvManageBtns==='function') _syncEvManageBtns(true); }catch(e){}
   const lbl = col==='can_create_events' ? (LANG==='en'?'create events':'vytvářet události') : col==='can_take_payments' ? (LANG==='en'?'take payments at the desk':'brát platby u pultu') : col==='can_scan_tickets' ? (LANG==='en'?'scan event tickets':'skenovat lístky na eventech') : (LANG==='en'?'send fighter requests':'posílat přihlášky fighterů');
   toast(nv ? (LANG==='en'?`✅ Coach can ${lbl}`:`✅ Kouč může ${lbl}`) : (LANG==='en'?'Permission removed':'Oprávnění zrušeno'));
   loadGymTeam();
@@ -16536,9 +16547,7 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
   // Otevírá ten samý seznam jako dashmode. Odkrytí řeší _syncEvManageBtns -- tlačítko se při
   // každém vykreslení správy klubu tvoří znovu, takže by jinak zůstalo skryté.
   if($('mgEvManageBtn')){
-    console.log('[evManage] tlacitko nalezeno, napojuji obsluhu');
     $('mgEvManageBtn').onclick=()=>{
-      console.log('[evManage] klepnuti');
       openSheet('shMyEvManage');
       try{ if(typeof renderMyEvManage==='function') renderMyEvManage(); else console.log('[evManage] renderMyEvManage neexistuje'); }catch(e){ console.log('[evManage]', e&&e.message); }
     };
@@ -22512,33 +22521,33 @@ async function loadNotifications(append){
   // se vůbec nenapojí -- větev, která má otevřít admin, pak nemá kdo spustit.
   const clickable = k==='beta_pending' || k==='minor_waiver_req' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked';
     let linkLabel = L('otevřít ›');
-    if(k==='payment_confirmed'){ var _pcd={}; try{ _pcd=JSON.parse(n.data||'{}'); }catch(e){} var _gg=_pcd.goto; linkLabel = (_gg==='dropin'||_gg==='bookings') ? (LANG==='en'?'booking details ›':'detail rezervace ›') : (_gg==='tickets') ? (LANG==='en'?'my ticket ›':'moje vstupenka ›') : (_gg==='courses') ? (LANG==='en'?'my course ›':'můj kurz ›') : (_gg==='merch') ? (LANG==='en'?'view ›':'zobrazit ›') : (LANG==='en'?'membership details ›':'detail členství ›'); } else if(k==='qr_intent') linkLabel = LANG==='en'?'to confirm ›':'k potvrzení ›'; else if(k==='qr_released'||k==='qr_reservation_expired') linkLabel = LANG==='en'?'book again ›':'rezervovat znovu ›'; else if(k==='qr_requeued') linkLabel = LANG==='en'?'pay again ›':'zaplatit znovu ›'; else if(k==='sounding_ask') linkLabel = LANG==='en'?'answer ›':'odpovědět ›'; else if(k==='cover_needed') linkLabel = LANG==='en'?'take the cover ›':'vzít záskok ›'; else if(k==='cover_filled'||k==='cover_filled_owner') linkLabel = LANG==='en'?'view ›':'zobrazit ›'; else if(k==='doklad_vat_needed') linkLabel = LANG==='en'?'add VAT ID \u203a':'doplnit DI\u010c \u203a'; else if(k==='course_new') linkLabel = LANG==='en'?'course details \u203a':'detail kurzu \u203a'; else if(k==='slot_demand') linkLabel = LANG==='en'?'open my diary \u203a':'otev\u0159\u00edt di\u00e1\u0159 \u203a'; else if(k==='cohort_month_due') linkLabel = LANG==='en'?'pay now \u203a':'doplatit \u203a'; else if(k==='cohort_month_collect') linkLabel = LANG==='en'?'open roster \u203a':'otev\u0159\u00edt roster \u203a'; else if(k==='cohort_deposit_paid') linkLabel = LANG==='en'?'view roster \u203a':'otev\u0159\u00edt \u00fa\u010dastn\u00edky \u203a'; else if(k==='cohort_qr_claim') linkLabel = LANG==='en'?'view roster ›':'otevřít účastníky ›'; else if(k==='cohort_deposit_mine') linkLabel = LANG==='en'?'my course \u203a':'m\u016fj kurz \u203a';
-      else if(k==='doklad_unified') linkLabel = LANG==='en'?'open the receipt \u203a':'otevřít doklad \u203a';
+    if(k==='payment_confirmed'){ var _pcd={}; try{ _pcd=JSON.parse(n.data||'{}'); }catch(e){} var _gg=_pcd.goto; linkLabel = (_gg==='dropin'||_gg==='bookings') ? (LANG==='en'?'booking details ›':'detail rezervace ›') : (_gg==='tickets') ? (LANG==='en'?'my ticket ›':'moje vstupenka ›') : (_gg==='courses') ? (LANG==='en'?'my course ›':'můj kurz ›') : (_gg==='merch') ? (LANG==='en'?'view ›':'zobrazit ›') : (LANG==='en'?'membership details ›':'detail členství ›'); } else if(k==='qr_intent') linkLabel = LANG==='en'?'To confirm ›':'K potvrzení ›'; else if(k==='qr_released'||k==='qr_reservation_expired') linkLabel = LANG==='en'?'Book again ›':'Rezervovat znovu ›'; else if(k==='qr_requeued') linkLabel = LANG==='en'?'Pay again ›':'Zaplatit znovu ›'; else if(k==='sounding_ask') linkLabel = LANG==='en'?'Answer ›':'Odpovědět ›'; else if(k==='cover_needed') linkLabel = LANG==='en'?'Take the cover ›':'Vzít záskok ›'; else if(k==='cover_filled'||k==='cover_filled_owner') linkLabel = LANG==='en'?'View ›':'Zobrazit ›'; else if(k==='doklad_vat_needed') linkLabel = LANG==='en'?'Add VAT ID ›':'Doplnit DIČ ›'; else if(k==='course_new') linkLabel = LANG==='en'?'Course details ›':'Detail kurzu ›'; else if(k==='slot_demand') linkLabel = LANG==='en'?'Open my diary ›':'Otevřít diář ›'; else if(k==='cohort_month_due') linkLabel = LANG==='en'?'Pay now ›':'Doplatit ›'; else if(k==='cohort_month_collect') linkLabel = LANG==='en'?'Open roster ›':'Otevřít roster ›'; else if(k==='cohort_deposit_paid') linkLabel = LANG==='en'?'View roster ›':'Otevřít účastníky ›'; else if(k==='cohort_qr_claim') linkLabel = LANG==='en'?'View roster ›':'Otevřít účastníky ›'; else if(k==='cohort_deposit_mine') linkLabel = LANG==='en'?'My course ›':'Můj kurz ›';
+      else if(k==='doklad_unified') linkLabel = LANG==='en'?'Open the receipt ›':'Otevřít doklad ›';
       else if(k==='pis_payment_in'){ var _pld={}; try{ _pld=JSON.parse(n.data||'{}'); }catch(e){} linkLabel = _pld.membership ? (LANG==='en'?'open members ›':'otevřít členy ›')
       : (_pld.occ && _pld.occ.date) ? (LANG==='en'?'view class ›':'zobrazit lekci ›')
       : (LANG==='en'?'view dashboard ›':'otevřít přehled ›'); }
-    if(isMembCancel) linkLabel = LANG==='en'?'view members ›':'zobrazit členy ›';
-    else if(isMembMine) linkLabel = LANG==='en'?'my memberships ›':'moje členství ›';
-    else if(isMembExpired) linkLabel = LANG==='en'?'renew ›':'obnovit ›';
-    else if(isMembExpiring) linkLabel = LANG==='en'?'renew ›':'obnovit ›';
-    else if(isMembRenewing) linkLabel = LANG==='en'?'manage membership ›':'spravovat členství ›';
-    else if(isCohortEnded) linkLabel = LANG==='en'?'open the roster ›':'otevřít účastníky ›';
-    else if(isDropMine) linkLabel = LANG==='en'?'view ›':'zobrazit ›';
-    else if(isTicketMine) linkLabel = LANG==='en'?'view ticket ›':'zobrazit lístek ›';
-        else if(k==='gym_dropin_booked') linkLabel = LANG==='en'?'view in club ›':'zobrazit v klubu ›';
-    else if(k==='commission_collected'||k==='commission_cleared') linkLabel = LANG==='en'?'open accounting ›':'otevřít účetnictví ›';
-    else if(k==='commission_failed'||k==='account_suspended'||k==='cash_blocked') linkLabel = LANG==='en'?'update the card ›':'aktualizovat kartu ›';
-    else if(isExcused) linkLabel = LANG==='en'?'reply ›':'odpovědět ›';
-    else if(isPartnerGranted) linkLabel = LANG==='en'?'view my benefits ›':'zobrazit výhody ›';
-    else if(isPartnerCancelSched) linkLabel = LANG==='en'?'keep benefits ›':'zachovat výhody ›';
-    else if(isAmbGranted) linkLabel = LANG==='en'?'open Ambassador Dashboard ›':'otevřít Ambassador Dashboard ›';
-    else if(isCoachRefAdmin) linkLabel = LANG==='en'?'open coach ›':'otevřít kouče ›';
-    else if(isGymClassAdded) linkLabel = LANG==='en'?'open schedule ›':'otevřít rozvrh ›';
-    else if(isGymClassAttendee) linkLabel = LANG==='en'?'open dashboard ›':'otevřít přehled ›';
-    else if(isGymRatePrompt) linkLabel = LANG==='en'?'rate ›':'ohodnotit ›';
-    else if(isEpCancelled) linkLabel = LANG==='en'?'view feedback ›':'zobrazit zpětnou vazbu ›';
-    else if(isAttendReminder) linkLabel = LANG==='en'?'mark attendance ›':'doplnit docházku ›';
-    else if(isAmbApp) linkLabel = LANG==='en'?'view applications ›':'zobrazit přihlášky ›';
+    if(isMembCancel) linkLabel = LANG==='en'?'View members ›':'Zobrazit členy ›';
+    else if(isMembMine) linkLabel = LANG==='en'?'My memberships ›':'Moje členství ›';
+    else if(isMembExpired) linkLabel = LANG==='en'?'Renew ›':'Obnovit ›';
+    else if(isMembExpiring) linkLabel = LANG==='en'?'Renew ›':'Obnovit ›';
+    else if(isMembRenewing) linkLabel = LANG==='en'?'Manage membership ›':'Spravovat členství ›';
+    else if(isCohortEnded) linkLabel = LANG==='en'?'Open the roster ›':'Otevřít účastníky ›';
+    else if(isDropMine) linkLabel = LANG==='en'?'View ›':'Zobrazit ›';
+    else if(isTicketMine) linkLabel = LANG==='en'?'View ticket ›':'Zobrazit lístek ›';
+        else if(k==='gym_dropin_booked') linkLabel = LANG==='en'?'View in club ›':'Zobrazit v klubu ›';
+    else if(k==='commission_collected'||k==='commission_cleared') linkLabel = LANG==='en'?'Open accounting ›':'Otevřít účetnictví ›';
+    else if(k==='commission_failed'||k==='account_suspended'||k==='cash_blocked') linkLabel = LANG==='en'?'Update the card ›':'Aktualizovat kartu ›';
+    else if(isExcused) linkLabel = LANG==='en'?'Reply ›':'Odpovědět ›';
+    else if(isPartnerGranted) linkLabel = LANG==='en'?'View my benefits ›':'Zobrazit výhody ›';
+    else if(isPartnerCancelSched) linkLabel = LANG==='en'?'Keep benefits ›':'Zachovat výhody ›';
+    else if(isAmbGranted) linkLabel = LANG==='en'?'Open Ambassador Dashboard ›':'Otevřít Ambassador Dashboard ›';
+    else if(isCoachRefAdmin) linkLabel = LANG==='en'?'Open coach ›':'Otevřít kouče ›';
+    else if(isGymClassAdded) linkLabel = LANG==='en'?'Open schedule ›':'Otevřít rozvrh ›';
+    else if(isGymClassAttendee) linkLabel = LANG==='en'?'Open dashboard ›':'Otevřít přehled ›';
+    else if(isGymRatePrompt) linkLabel = LANG==='en'?'Rate ›':'Ohodnotit ›';
+    else if(isEpCancelled) linkLabel = LANG==='en'?'View feedback ›':'Zobrazit zpětnou vazbu ›';
+    else if(isAttendReminder) linkLabel = LANG==='en'?'Mark attendance ›':'Doplnit docházku ›';
+    else if(isAmbApp) linkLabel = LANG==='en'?'View applications ›':'Zobrazit přihlášky ›';
     if(linkLabel) linkLabel = linkLabel.charAt(0).toUpperCase()+linkLabel.slice(1);
     if(isBookingConfirm) linkLabel = L('přidat do kalendáře ›');
     else if(isSlotOpen) linkLabel = L('rezervovat ›');
@@ -22548,25 +22557,25 @@ async function loadNotifications(append){
     else if(isFavAvail) linkLabel = L('rezervovat ›');
     else if(n.type==='dispute' && currentUser.role!=='founder' && n.message.includes('nedorazil na trénink')) linkLabel = L('reagovat na hlášení ›');
     else if(isMtlContact) linkLabel = L('napsat MTL ›');
-    else if(k==='cert_recommend'||k==='new_listing') linkLabel = LANG==='en'?'open profile ›':'otevřít profil ›';
-    else if(k==='schedule_perm_on') linkLabel = LANG==='en'?'manage classes ›':'spravovat lekce ›';
-    else if(k==='coach_pricing_request') linkLabel = LANG==='en'?'review ›':'zkontrolovat ›';
-    else if(k==='coach_pricing_approved'||k==='coach_pricing_rejected') linkLabel = LANG==='en'?'open ›':'otevřít ›';
-    else if(k==='gym_team_approved') linkLabel = LANG==='en'?'open club ›':'otevřít klub ›';
-    else if(k==='gym_join_request') linkLabel = LANG==='en'?'review request ›':'zkontrolovat žádost ›';
-    else if(k==='gym_recep_left') linkLabel = LANG==='en'?'manage team ›':'spravovat tým ›';
-    else if(k==='gym_recep_removed') linkLabel = LANG==='en'?'open ›':'otevřít ›';
-    else if(k==='merch_order') linkLabel = LANG==='en'?'view orders ›':'zobrazit objednávky ›';
-    else if(k==='own_student_link') linkLabel = LANG==='en'?'open settings ›':'otevřít nastavení ›';
-    else if(k==='merch_fulfilled') linkLabel = LANG==='en'?'view ›':'zobrazit ›';
-    else if(k==='gym_member_joined') linkLabel = LANG==='en'?'open members ›':'otevřít členy ›';
-    else if(k==='gym_member_joined_coach') linkLabel = LANG==='en'?'view ›':'zobrazit ›';
-    else if(k==='family_active') linkLabel = LANG==='en'?'open Family ›':'otevřít Rodinu ›';
-    else if(k==='minor_waiver_done') linkLabel = LANG==='en'?'open club ›':'otevřít klub ›';
-    else if(k==='pay_request'){ linkLabel = LANG==='en'?'pay ›':'zaplatit ›';
+    else if(k==='cert_recommend'||k==='new_listing') linkLabel = LANG==='en'?'Open profile ›':'Otevřít profil ›';
+    else if(k==='schedule_perm_on') linkLabel = LANG==='en'?'Manage classes ›':'Spravovat lekce ›';
+    else if(k==='coach_pricing_request') linkLabel = LANG==='en'?'Review ›':'Zkontrolovat ›';
+    else if(k==='coach_pricing_approved'||k==='coach_pricing_rejected') linkLabel = LANG==='en'?'Open ›':'Otevřít ›';
+    else if(k==='gym_team_approved') linkLabel = LANG==='en'?'Open club ›':'Otevřít klub ›';
+    else if(k==='gym_join_request') linkLabel = LANG==='en'?'Review request ›':'Zkontrolovat žádost ›';
+    else if(k==='gym_recep_left') linkLabel = LANG==='en'?'Manage team ›':'Spravovat tým ›';
+    else if(k==='gym_recep_removed') linkLabel = LANG==='en'?'Open ›':'Otevřít ›';
+    else if(k==='merch_order') linkLabel = LANG==='en'?'View orders ›':'Zobrazit objednávky ›';
+    else if(k==='own_student_link') linkLabel = LANG==='en'?'Open settings ›':'Otevřít nastavení ›';
+    else if(k==='merch_fulfilled') linkLabel = LANG==='en'?'View ›':'Zobrazit ›';
+    else if(k==='gym_member_joined') linkLabel = LANG==='en'?'Open members ›':'Otevřít členy ›';
+    else if(k==='gym_member_joined_coach') linkLabel = LANG==='en'?'View ›':'Zobrazit ›';
+    else if(k==='family_active') linkLabel = LANG==='en'?'Open Family ›':'Otevřít Rodinu ›';
+    else if(k==='minor_waiver_done') linkLabel = LANG==='en'?'Open club ›':'Otevřít klub ›';
+    else if(k==='pay_request'){ linkLabel = LANG==='en'?'Pay ›':'Zaplatit ›';
       try{ console.log('[payReqNotif]', JSON.parse(n.data||'{}')); }catch(e){ console.log('[payReqNotif] data se nedaji precist:', n.data); } }
-    else if(k==='beta_pending') linkLabel = LANG==='en'?'open admin ›':'otevřít admin ›';
-    else if(k==='minor_waiver_req') linkLabel = LANG==='en'?'approve ›':'schválit ›';
+    else if(k==='beta_pending') linkLabel = LANG==='en'?'Open admin ›':'Otevřít admin ›';
+    else if(k==='minor_waiver_req') linkLabel = LANG==='en'?'Approve ›':'Schválit ›';
     el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;${clickable?'cursor:pointer;':''}`;
     el.innerHTML=`<p style="font-size:14px;color:var(--dark);line-height:1.5;">${notifText(n)}</p><div style="font-size:11px;color:var(--light);margin-top:6px;">${d.getDate()}.${d.getMonth()+1}. ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}${clickable?` · <span style="color:var(--blue);font-weight:600;">${linkLabel}</span>`:''}</div>`;
     if(clickable){
@@ -22593,6 +22602,14 @@ async function loadNotifications(append){
                 // Uklidit po chvíli, ať to neovlivní další platbu, kterou rodič udělá sám za sebe.
                 setTimeout(function(){ window._payOnBehalf=null; }, 15*60000);
                 const _ik=_rq.item_kind||_rq.kind;
+                // Lístek na akci: otevřít tu akci, ne Rodinu. Bez toho spadl requesty na akce
+                // až do zachytné větve, protože nemají gym_id ani occ.
+                if(_ik==='event' && _rq.event_id){
+                  try{
+                    const { data:_ev }=await supaClient.from('events').select('*').eq('id',_rq.event_id).single();
+                    if(_ev && typeof openEventView==='function'){ openEventView(_ev); return; }
+                  }catch(e){}
+                }
                 if(_ik==='memb' || _ik==='membership'){
                   const _pl=(typeof gymMembPlans==='function'?gymMembPlans(_g):[]).find(function(x){ return String(x.id)===String(_rq.plan_id); });
                   if(_pl && typeof _onlineQrPay==='function'){ _onlineQrPay(_g, null, null, 'memb', _pl, _forWhom); return; }
@@ -28074,6 +28091,14 @@ async function coachCancelBooking(d){
   }
 }
 
+// Pojistka pro zvoneček. Realtime doručí notifikaci jen tehdy, když je tabulka v publikaci
+// supabase_realtime -- když není, číslo naskočí až po načtení stránky. Přepočítat proto i při
+// návratu do appky (přepnutí záložky, probuzení telefonu), což je chvíle, kdy se člověk dívá.
+try{
+  document.addEventListener('visibilitychange', function(){
+    if(!document.hidden && currentUser){ try{ updateNotifBadge(); }catch(e){} }
+  });
+}catch(e){}
 function subscribeRealtime(){
   if(!currentUser) return;
   if(realtimeChannel) supaClient.removeChannel(realtimeChannel);
@@ -29537,7 +29562,6 @@ if($('supSend')) $('supSend').onclick=()=>submitSupport();
 (function(){ async function _run(){ try{ var ref=new URLSearchParams(location.search).get('ref'); if(ref){ var _s=await supaClient.auth.getSession(); var _li=!!(_s&&_s.data&&_s.data.session); if(!_li){ try{ localStorage.setItem('mtl_ref_pending', ref); }catch(e){} } try{ localStorage.setItem('mtl_gym_ref', JSON.stringify({code:ref,ts:Date.now()})); }catch(e){} if(_li && _s.data.session.user){ try{ supaClient.from('profiles').update({pending_gym_ref:ref, pending_gym_ref_at:new Date().toISOString()}).eq('id',_s.data.session.user.id); }catch(e){} } } }catch(e){} try{ var _gp=new URLSearchParams(location.search).get('gym'); var _gr=new URLSearchParams(location.search).get('gymref'); if(_gp && _gr){ var _s2=await supaClient.auth.getSession(); var _li2=!!(_s2&&_s2.data&&_s2.data.session); if(!_li2){ try{ localStorage.setItem('mtl_gym_pending', _gp); }catch(e){} try{ if(typeof openGymLanding==='function') openGymLanding(_gp, _gr); }catch(e){} } } }catch(e){} try{ var _fam=new URLSearchParams(location.search).get('family'); if(_fam){ var _sf=await supaClient.auth.getSession(); var _lif=!!(_sf&&_sf.data&&_sf.data.session); // Token si schovat VŽDY. Tenhle kód běží při načtení stránky, kdy currentUser ještě není
         // naplněný -- _consumeFamilyInvite hned na prvním řádku vypadne na !me a odkaz neudělá nic.
         // Vyzvedne se v enterApp přes _famPendingCheck, kde už profil existuje.
-        console.log('[famURL] token z adresy =', _fam, '| prihlasen =', _lif);
         try{ localStorage.setItem('mtl_family_pending', _fam); }catch(e){ console.log('[famURL] localStorage:', e&&e.message); } } }catch(e){}  try{ var _mig=new URLSearchParams(location.search).get('migrate'); if(_mig){ var _sm=await supaClient.auth.getSession(); var _lim=!!(_sm&&_sm.data&&_sm.data.session); if(_lim){ if(typeof _consumeMigrate==='function') _consumeMigrate(_mig); } else { try{ localStorage.setItem('mtl_migrate_pending', _mig); }catch(e){} } } else { try{ var _mp=localStorage.getItem('mtl_migrate_pending'); if(_mp){ var _sm2=await supaClient.auth.getSession(); if(_sm2&&_sm2.data&&_sm2.data.session){ localStorage.removeItem('mtl_migrate_pending'); if(typeof _consumeMigrate==='function') _consumeMigrate(_mp); } } }catch(e){} } }catch(e){} try{ var _kx=new URLSearchParams(location.search).get('kidxfer'); if(_kx){ var _sk=await supaClient.auth.getSession(); var _lik=!!(_sk&&_sk.data&&_sk.data.session); if(_lik){ if(typeof _consumeKidXfer==='function') _consumeKidXfer(_kx); } else { try{ localStorage.setItem('mtl_kidxfer_pending', _kx); }catch(e){} } } else { try{ var _kxp=localStorage.getItem('mtl_kidxfer_pending'); if(_kxp){ var _sk2=await supaClient.auth.getSession(); if(_sk2&&_sk2.data&&_sk2.data.session){ localStorage.removeItem('mtl_kidxfer_pending'); if(typeof _consumeKidXfer==='function') _consumeKidXfer(_kxp); } } }catch(e){} } }catch(e){} if(typeof maybeSharedProfileRoute==='function') maybeSharedProfileRoute(); } if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded',_run); } else { _run(); } })();
 
 // Submit
@@ -29794,8 +29818,6 @@ function _applyMinorLock(){
 // is never gated. Approving in Admin flips it to 'approved'.
 function _betaGateActive(){
   try{
-    console.log('[betaGate] beta_status=', currentUser && currentUser.beta_status,
-                '| TEST_MODE=', !!window._TEST_MODE, '| id=', currentUser && currentUser.id);
     if(!currentUser || currentUser.id==='7e08d4bb-0efa-47ae-bd6a-85e9bd04400c') return false;
     // Zamítnutí platí VŽDY, i po přepnutí na ostro. Brána se dřív ptala jen na testovací režim,
     // takže vypnutím testu se zamítnutým i čekajícím otevřely dveře -- rozhodnutí "tenhle člověk
