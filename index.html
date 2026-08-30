@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SWH takes a payment request straight to the payment. The notification named the class and the price but led nowhere, so the guardian had to find that class in the club themselves; tapping it now opens the pay window for exactly that drop-in or membership, falling back to the club profile if the detail is missing. The request button also sits above Later rather than at the top, since it is a way to pay rather than a way out, and a childrens membership says it cannot be bought instead of borrowing the wording for a class. -->
+<!-- MTL build: SWI stops a QR reservation being written before the payment method is chosen. Opening the drop-in window created the booking immediately with payment_method qr, so someone whose bank is listed and who then picked Pay from bank was already recorded as a QR reservation -- and closing the window left it behind. Membership already deferred this to _ensureIntent, called on the tap that commits; drop-in now does the same, and both stop if the row cannot be written, since half a payment is worse than none. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -18573,11 +18573,10 @@ async function _onlineQrPay(g, occ, _child, kind, plan){
       // and never even picked a method for. The club saw it in its confirm queue too. The row is now
       // created by _ensureIntent(), on the tap that commits: Pay from bank, or I have paid.
     } else {
-      const _today=new Date().toISOString().slice(0,10);
-      const rec={ gym_id:g.id, student_id:currentUser.id, student_name:sName, gym_name:g.name||'Klub', paid_to:_qrPaidTo, amount:price, currency:cur, status:'reserved', payment_method:'qr', credit_used:(_qrCredit==='student'?'student':null), date:(occ&&occ.date)||_today, time:(occ&&occ.time)||'18:00', class_name:(occ&&occ.name)||null, class_date:(occ&&occ.date)||null, class_time:(occ&&occ.time)||null, level:(occ&&occ.level)||'all', coach_id:_qrPayeeCoach||(occ&&occ.coach)||null, discipline:disc, acq_source:_acqSrc(g) , reminder_sent:_remSentAtBooking((occ&&occ.date)||_today,(occ&&occ.time)||'18:00') };
-      if(_child){ rec.child_name=_child.name; rec.child_age=_kidAge(_child); }
-      const { data:bk, error:e2 } = await supaClient.from('gym_bookings').insert(Object.assign({ attr_src:_attrGet() }, rec)).select('id').single();
-      if(e2){ toast('\u26a0\ufe0f '+e2.message); return; } intentId=bk&&bk.id;
+      // Rezervace se ZÁMĚRNĚ nevytváří tady. Vznikala dřív, než si člověk vybral způsob platby,
+      // takže i když měl banku v seznamu a chtěl PIS, byl už zapsaný jako QR rezervace. Vytvoří
+      // ji _ensureIntent() při kliknutí, které platbu opravdu spouští.
+      intentId=null;
       try{ await supaClient.from('gym_class_reservations').insert({ gym_id:g.id, gym_name:g.name||'Gym', student_id:currentUser.id, student_name:sName, class_name:(occ&&occ.name)||null, class_date:(occ&&occ.date)||null, class_time:(occ&&occ.time)||null, class_level:(occ&&occ.level)||'all' }); }catch(e){}
     }
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
@@ -18585,7 +18584,27 @@ async function _onlineQrPay(g, occ, _child, kind, plan){
   // written, and the caller must then do nothing -- half a payment is worse than none.
   async function _ensureIntent(){
     if(intentId) return intentId;
-    if(kind!=='memb') return intentId;
+    // Drop-in: rezervaci vytvořit až tady, tedy při kliknutí, které platbu opravdu spouští.
+    // Dřív vznikala hned při otevření okna jako QR -- i pro toho, kdo si vzápětí zvolil PIS.
+    if(kind!=='memb'){
+      try{
+        const _today=new Date().toISOString().slice(0,10);
+        const rec={ gym_id:g.id, student_id:currentUser.id, student_name:sName, gym_name:g.name||'Klub',
+          paid_to:_qrPaidTo, amount:price, currency:cur, status:'reserved', payment_method:'qr',
+          credit_used:(_qrCredit==='student'?'student':null),
+          date:(occ&&occ.date)||_today, time:(occ&&occ.time)||'18:00',
+          class_name:(occ&&occ.name)||null, class_date:(occ&&occ.date)||null, class_time:(occ&&occ.time)||null,
+          level:(occ&&occ.level)||'all', coach_id:_qrPayeeCoach||(occ&&occ.coach)||null,
+          discipline:disc, acq_source:_acqSrc(g),
+          reminder_sent:_remSentAtBooking((occ&&occ.date)||_today,(occ&&occ.time)||'18:00') };
+        if(_child){ rec.child_name=_child.name; rec.child_age=_kidAge(_child); }
+        const { data:bk, error:e2 } = await supaClient.from('gym_bookings').insert(Object.assign({ attr_src:_attrGet() }, rec)).select('id').single();
+        if(e2){ toast('\u26a0\ufe0f '+e2.message); return null; }
+        intentId=bk&&bk.id;
+        try{ await supaClient.from('gym_class_reservations').insert({ gym_id:g.id, gym_name:g.name||'Gym', student_id:currentUser.id, student_name:sName, class_name:(occ&&occ.name)||null, class_date:(occ&&occ.date)||null, class_time:(occ&&occ.time)||null, status:'reserved' }); }catch(e){}
+      }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); return null; }
+      return intentId;
+    }
     try{
       const { data:mb, error:e1 } = await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:currentUser.id, student_name:sName, paid_to:'gym', amount:price, currency:cur, status:'pending_offline', ref_by:_mbRefBy, ref_pct:(_mbRefPct||null), ref_credit_id:_mbRefCreditId, plan_name:label, plan_access:JSON.stringify((plan&&plan.access&&plan.access.length)?plan.access:['all']), discipline:disc, acq_source:_acqSrc(g) }).select('id').single();
       if(e1){ toast('\u26a0\ufe0f '+e1.message); return null; }
@@ -18636,10 +18655,10 @@ async function _onlineQrPay(g, occ, _child, kind, plan){
     const _id=intentId; intentId=null;
     try{ await supaClient.from('gym_memberships').delete().eq('id', _id).eq('status','pending_offline'); }catch(e){}
   };
-  const pb=ov.querySelector('#oqrPaid'); var _pisB=ov.querySelector('#oqrPisBtn'); if(_pisB) _pisB.onclick=async function(){ _pisB.disabled=true; const _iid=await _ensureIntent(); _pisB.disabled=false; if(kind==='memb' && !_iid) return; _pisPayFlow(_iid||intentId, _qrPayeeObj, g, price, cur, msg, close, _pisTestFor(_qrPayeeObj||g), function(){ var _w=ov.querySelector('#oqrQrWrap'); if(_w) _w.style.display='block'; var _pb=ov.querySelector('#oqrPisBtn'); if(_pb) _pb.style.display='none'; try{ var _c=ov.firstElementChild; var _t=_c&&_c.firstElementChild; if(_t) _t.textContent='📲 '+(EN?'Pay by bank QR':'Zaplať bankovním QR'); }catch(e){} }, kind, _rollbackMemb); };
+  const pb=ov.querySelector('#oqrPaid'); var _pisB=ov.querySelector('#oqrPisBtn'); if(_pisB) _pisB.onclick=async function(){ _pisB.disabled=true; const _iid=await _ensureIntent(); _pisB.disabled=false; if(!_iid) return; _pisPayFlow(_iid||intentId, _qrPayeeObj, g, price, cur, msg, close, _pisTestFor(_qrPayeeObj||g), function(){ var _w=ov.querySelector('#oqrQrWrap'); if(_w) _w.style.display='block'; var _pb=ov.querySelector('#oqrPisBtn'); if(_pb) _pb.style.display='none'; try{ var _c=ov.firstElementChild; var _t=_c&&_c.firstElementChild; if(_t) _t.textContent='📲 '+(EN?'Pay by bank QR':'Zaplať bankovním QR'); }catch(e){} }, kind, _rollbackMemb); };
   var _bx2=ov.querySelector('#oqrBox'); if(_bx2){ _bx2.style.cursor='pointer'; _bx2.ondblclick=function(){ try{ var cv=_bx2.querySelector('canvas'); var im=_bx2.querySelector('img'); var blob=null; if(cv&&cv.toDataURL){ var durl=cv.toDataURL('image/png'); var bs=atob(durl.split(',')[1]); var n=bs.length, u8=new Uint8Array(n); while(n--){ u8[n]=bs.charCodeAt(n); } blob=new Blob([u8],{type:'image/png'}); } if(!blob){ return; } var file=null; try{ file=new File([blob],'MTL-platba-QR.png',{type:'image/png'}); }catch(e){} if(file && navigator.canShare && navigator.canShare({files:[file]})){ navigator.share({files:[file], title:'MTL platba QR'}).catch(function(){}); } else { var url=URL.createObjectURL(blob); var a=document.createElement('a'); a.href=url; a.download='MTL-platba-QR.png'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(function(){ try{ URL.revokeObjectURL(url); }catch(e){} },1500); } }catch(e){} }; } if(pb) pb.onclick=async function(){
     pb.disabled=true; pb.textContent='\u2026';
-    { const _iid=await _ensureIntent(); if(kind==='memb' && !_iid){ pb.disabled=false; pb.textContent='\u2713 '+(EN?'I\u2019ve paid':'Zaplaceno'); return; } }
+    { const _iid=await _ensureIntent(); if(!_iid){ pb.disabled=false; pb.textContent='\u2713 '+(EN?'I\u2019ve paid':'Zaplaceno'); return; } }
     try{ if(kind==='dropin' && intentId){ await supaClient.from('gym_bookings').update({ status:'paid_claimed', claimed_at:new Date().toISOString() }).eq('id',intentId); } }catch(e){}
     try{ if(_qrPaidTo==='coach' && _qrPayeeCoach){ await supaClient.from('notifications').insert({ user_id:_qrPayeeCoach, type:'booking', read:false, data:JSON.stringify({ kind:'coach_qr_intent', student:sName }), message:'\ud83d\udcf2 '+sName+(EN?(' claims they paid for '+label+' (QR). Confirm in your diary.'):(' tvrd\u00ed, \u017ee zaplatil za '+label+' (QR). Potvr\u010f v di\u00e1\u0159i.')) }); } else if(g.owner_id){ const realtime=(g.confirm_mode==='realtime'); const m=realtime?(EN?(sName+' claims they paid for '+label+' (QR).'):(sName+' tvrd\u00ed, \u017ee zaplatil za '+label+' (QR).')):(EN?(sName+' reserved '+label+' (QR).'):(sName+' si rezervoval '+label+' (QR).')); await supaClient.from('notifications').insert({ user_id:g.owner_id, type:'booking', read:false, data:JSON.stringify({ kind:'qr_intent', student:sName, gym:g.id, gym_name:g.name||'', what:label, occ:{ date:(occ&&occ.date)||null, time:(occ&&occ.time)||null, name:(occ&&occ.name)||null }, confirm_mode:(g.confirm_mode||'') }), message:m }); } }catch(e){}
     toast((kind==='memb')?(EN?('\u2705 Membership reserved \u00b7 '+(g.name||'the klub')+' will confirm the payment'):('\u2705 \u010clenstv\u00ed rezervov\u00e1no \u00b7 '+(g.name||'gym')+' potvrd\u00ed platbu')):(EN?('\u2705 Spot reserved \u00b7 '+(g.name||'the klub')+' will confirm the payment'):('\u2705 M\u00edsto rezervov\u00e1no \u00b7 '+(g.name||'gym')+' potvrd\u00ed platbu')), 1);
