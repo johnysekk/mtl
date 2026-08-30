@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SWB fixes every notification opening Online feedback. The click handler ended in a bare else that called openOnline, so anything not matching one of the branches above landed there -- harmless-looking for years, but every new kind of notification inherits it and looks broken. It now does nothing when there is nowhere to go. Family notifications are also checked first, since the chain is long and easily beats them to it, and the guardian-approved notice says what it enables and opens the club. -->
+<!-- MTL build: SWC lets a 15-17 year old ask their guardian to pay. The guardian ticks a box on the linked minor in Family, and from then on the minor can send a request for a specific training or membership; it arrives as a notification and is settled in Family alongside the consents. The point is that only the bill moves -- the attendance, the statistics and the XP stay on the minor own profile, unlike a child sub-account where everything belongs to the parent. Without the tick nothing changes and no request can be sent. Needs family-pay-request.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -4561,7 +4561,7 @@ async function _famRenderConsents(){
     const { data }=await supaClient.from('notifications').select('id,data,message,created_at')
       .eq('user_id',me).eq('read',false).order('created_at',{ascending:false}).limit(40);
     rows=(data||[]).filter(function(x){
-      try{ const d=JSON.parse(x.data||'{}'); return d.kind==='minor_waiver' || d.kind==='minor_event_consent'; }
+      try{ const d=JSON.parse(x.data||'{}'); return d.kind==='minor_waiver' || d.kind==='minor_event_consent' || d.kind==='pay_request'; }
       catch(e){ return false; }
     });
   }catch(e){ box.innerHTML=''; return; }
@@ -4570,14 +4570,18 @@ async function _famRenderConsents(){
     +(EN?'Waiting for your consent':'Čeká na tvůj souhlas')+'</div>'
     +rows.map(function(r){
       let d={}; try{ d=JSON.parse(r.data||'{}'); }catch(e){}
-      const _what=(d.kind==='minor_event_consent')
-        ? ((EN?'event ':'akce ')+(d.event_title||d.title||''))
-        : ((EN?'club ':'klub ')+(d.gym_name||''));
+      const _what=(d.kind==='pay_request')
+        ? (String(d.what||'')+(d.amount!=null?(' \u00b7 '+fmtPrice(d.amount, d.currency||'CZK')+' '+_curSym(d.currency||'CZK')):''))
+        : (d.kind==='minor_event_consent')
+          ? ((EN?'event ':'akce ')+(d.event_title||d.title||''))
+          : ((EN?'club ':'klub ')+(d.gym_name||''));
       return '<div style="background:#FFF8E6;border:1px solid #F0DFA8;border-radius:12px;padding:13px;margin-bottom:8px;">'
         +'<div style="font-size:14px;font-weight:700;color:var(--dark);">'+escapeHtml(d.minor_name||'')+'</div>'
         +'<div style="font-size:12.5px;color:#7a5a1a;margin:3px 0 10px;">'+escapeHtml(_what)+'</div>'
         +'<button class="fcOpen" data-i="'+r.id+'" data-k="'+(d.kind||'')+'" style="width:100%;padding:10px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'
-        +(EN?'Review & decide':'Zobrazit a rozhodnout')+'</button></div>';
+        +(d.kind==='pay_request'
+          ? (EN?'Pay':'Zaplatit')
+          : (EN?'Review & decide':'Zobrazit a rozhodnout'))+'</button></div>';
     }).join('');
   box.querySelectorAll('.fcOpen').forEach(function(b){
     b.onclick=function(){
@@ -4588,6 +4592,22 @@ async function _famRenderConsents(){
         try{ await supaClient.from('notifications').update({ read:true }).eq('id', b.dataset.i); }catch(e){}
         try{ renderMyKids(); }catch(e){}
       };
+      if(b.dataset.k==='pay_request'){
+        // Zaplatit za mladistvého: otevře se profil klubu, kde rodič projde běžnou platbou.
+        // Docházka i XP zůstávají mladistvému -- platí se jen účet, účet se nepřepisuje.
+        (async function(){
+          try{
+            if(d.gym_id){
+              const { data:_g }=await supaClient.from('gyms').select('*').eq('id',d.gym_id).single();
+              if(_g && typeof openGymProfile==='function'){ closeSheet('shMyKids'); openGymProfile(_g); }
+            } else {
+              toast(LANG==='en'?'Open the club to pay':'Otevři klub a zaplať');
+            }
+          }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
+          _done();
+        })();
+        return;
+      }
       if(b.dataset.k==='minor_event_consent'){ if(typeof _approveMinorEvent==='function') _approveMinorEvent(d); }
       else { if(typeof _approveMinorWaiver==='function') _approveMinorWaiver(d); }
       setTimeout(_done, 2500);
@@ -4789,6 +4809,20 @@ async function _loadFamilyAccts(){
       return `<div style="display:flex;align-items:center;gap:10px;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:10px 12px;margin-bottom:8px;">${avatar(p)}<div style="flex:1;min-width:0;"><div style="font-weight:700;font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(p.name||(EN?'Member':'Člen'))}</div><div style="margin-top:3px;">${badge(r)}</div>${(function(){ const _kf=_famKidFirstNames(p); return _kf.length?`<div style="margin-top:4px;font-size:11px;color:var(--light);">👶 ${EN?'Kids':'Děti'}: ${_kf.map(escapeHtml).join(' · ')}</div>`:''; })()}</div>${canUnlink?`<button class="famUnlink" data-id="${r.id}" style="padding:6px 10px;background:#FEECEC;color:var(--red);border:none;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:11.5px;flex:none;">${EN?'Unlink':'Odpojit'}</button>`:''}</div>`;
     }).join('');
   }
+
+  // Přepínač uložit hned -- rodič nemá co potvrzovat.
+  setTimeout(function(){
+    wrap.querySelectorAll('.famPayReq').forEach(function(cb){
+      cb.onchange=async function(){
+        const _on=cb.checked;
+        try{
+          const { error }=await supaClient.from('family_links').update({ can_request_pay:_on }).eq('id', cb.dataset.id);
+          if(error){ cb.checked=!_on; toast('\u26a0\ufe0f '+error.message); return; }
+          toast(_on?(EN?'\u2705 Allowed':'\u2705 Povoleno'):(EN?'Turned off':'Vypnuto'), 1);
+        }catch(e){ cb.checked=!_on; toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
+      };
+    });
+  }, 0);
 
   if(incoming.length){
     html+=`<div style="font-size:11px;font-weight:800;color:#9A5B00;margin:12px 0 6px;">${EN?'Waiting for your approval':'Čeká na tvé schválení'}</div>`;
@@ -11609,6 +11643,39 @@ async function rejoinClass(g, occ){
     openGymProfile(g);
   }catch(e){ console.error('rejoinClass',e); toast('⚠️ '+e.message); }
 }
+
+// ── ŽÁDOST O ÚHRADU OD MLADISTVÉHO ───────────────────────────────────────────────────────────
+// Mladistvý má vlastní účet, ale platit nemůže. Když mu to zástupce povolil, pošle mu odsud
+// žádost: rodič zaplatí, ale docházka, statistiky i XP zůstávají mladistvému -- není to podúčet,
+// jen účet za trénink jde jinam.
+async function _payReqGuardian(){
+  try{
+    const { data }=await supaClient.from('family_links')
+      .select('guardian_id,can_request_pay').eq('member_id',currentUser.id)
+      .eq('status','confirmed').eq('relation','guardian').eq('can_request_pay',true).limit(1);
+    if(!data || !data.length) return null;
+    const { data:p }=await supaClient.from('profiles').select('id,name').eq('id',data[0].guardian_id).maybeSingle();
+    return p || { id:data[0].guardian_id, name:'' };
+  }catch(e){ return null; }
+}
+async function _sendPayRequest(what, amount, currency, extra){
+  const EN=LANG==='en';
+  const gp=await _payReqGuardian();
+  if(!gp){ toast(EN?'Your guardian has not enabled payment requests.':'Zástupce zatím žádosti o úhradu nepovolil.'); return false; }
+  const _amt=(amount!=null && amount!=='') ? (fmtPrice(amount, currency||'CZK')+' '+_curSym(currency||'CZK')) : '';
+  try{
+    await supaClient.from('notifications').insert({
+      user_id: gp.id, type:'system', read:false,
+      message:'\u{1F4B3} '+((currentUser&&currentUser.name)||'')+(EN?' asks you to pay for ':' tě žádá o úhradu: ')+String(what||'')+(_amt?(' \u00b7 '+_amt):''),
+      data: JSON.stringify(Object.assign({ kind:'pay_request', minor_id:currentUser.id,
+        minor_name:(currentUser&&currentUser.name)||'', what:String(what||''),
+        amount:amount, currency:currency||'CZK' }, extra||{}))
+    });
+    toast(EN?('\u2705 Sent to '+(gp.name||'your guardian')):('\u2705 Odesláno '+(gp.name||'zástupci')), 1);
+    return true;
+  }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); return false; }
+}
+
 async function reserveClass(g, occ, myMemb, _cleared){
   if(window._blockedByGyms && window._blockedByGyms.has(g.id)){ toast(LANG==='en'?'⚠️ Not available':'⚠️ Nedostupné'); return; }
   if(!currentUser){ toast(L('⚠️ Nejdřív se přihlas')); return; }
@@ -22265,7 +22332,7 @@ async function loadNotifications(append){
     const isCoachRefAdmin = false; /* referral EP grants removed — rewards are Shikai/Bankai */
     // beta_pending sem musí být přidané, jinak se notifikace vykreslí jako neklikatelná a obsluha
   // se vůbec nenapojí -- větev, která má otevřít admin, pak nemá kdo spustit.
-  const clickable = k==='beta_pending' || k==='minor_waiver_req' || k==='family_active' || k==='minor_waiver_done' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked';
+  const clickable = k==='beta_pending' || k==='minor_waiver_req' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked';
     let linkLabel = L('otevřít ›');
     if(k==='payment_confirmed'){ var _pcd={}; try{ _pcd=JSON.parse(n.data||'{}'); }catch(e){} var _gg=_pcd.goto; linkLabel = (_gg==='dropin'||_gg==='bookings') ? (LANG==='en'?'booking details ›':'detail rezervace ›') : (_gg==='tickets') ? (LANG==='en'?'my ticket ›':'moje vstupenka ›') : (_gg==='courses') ? (LANG==='en'?'my course ›':'můj kurz ›') : (_gg==='merch') ? (LANG==='en'?'view ›':'zobrazit ›') : (LANG==='en'?'membership details ›':'detail členství ›'); } else if(k==='qr_intent') linkLabel = LANG==='en'?'to confirm ›':'k potvrzení ›'; else if(k==='qr_released'||k==='qr_reservation_expired') linkLabel = LANG==='en'?'book again ›':'rezervovat znovu ›'; else if(k==='qr_requeued') linkLabel = LANG==='en'?'pay again ›':'zaplatit znovu ›'; else if(k==='sounding_ask') linkLabel = LANG==='en'?'answer ›':'odpovědět ›'; else if(k==='cover_needed') linkLabel = LANG==='en'?'take the cover ›':'vzít záskok ›'; else if(k==='cover_filled'||k==='cover_filled_owner') linkLabel = LANG==='en'?'view ›':'zobrazit ›'; else if(k==='doklad_vat_needed') linkLabel = LANG==='en'?'add VAT ID \u203a':'doplnit DI\u010c \u203a'; else if(k==='course_new') linkLabel = LANG==='en'?'course details \u203a':'detail kurzu \u203a'; else if(k==='slot_demand') linkLabel = LANG==='en'?'open my diary \u203a':'otev\u0159\u00edt di\u00e1\u0159 \u203a'; else if(k==='cohort_month_due') linkLabel = LANG==='en'?'pay now \u203a':'doplatit \u203a'; else if(k==='cohort_month_collect') linkLabel = LANG==='en'?'open roster \u203a':'otev\u0159\u00edt roster \u203a'; else if(k==='cohort_deposit_paid') linkLabel = LANG==='en'?'view roster \u203a':'otev\u0159\u00edt \u00fa\u010dastn\u00edky \u203a'; else if(k==='cohort_qr_claim') linkLabel = LANG==='en'?'view roster ›':'otevřít účastníky ›'; else if(k==='cohort_deposit_mine') linkLabel = LANG==='en'?'my course \u203a':'m\u016fj kurz \u203a';
       else if(k==='doklad_unified') linkLabel = LANG==='en'?'open the receipt \u203a':'otevřít doklad \u203a';
@@ -22318,6 +22385,7 @@ async function loadNotifications(append){
     else if(k==='gym_member_joined_coach') linkLabel = LANG==='en'?'view ›':'zobrazit ›';
     else if(k==='family_active') linkLabel = LANG==='en'?'open Family ›':'otevřít Rodinu ›';
     else if(k==='minor_waiver_done') linkLabel = LANG==='en'?'open club ›':'otevřít klub ›';
+    else if(k==='pay_request') linkLabel = LANG==='en'?'open Family ›':'otevřít Rodinu ›';
     else if(k==='beta_pending') linkLabel = LANG==='en'?'open admin ›':'otevřít admin ›';
     else if(k==='minor_waiver_req') linkLabel = LANG==='en'?'approve ›':'schválit ›';
     el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;${clickable?'cursor:pointer;':''}`;
@@ -22326,7 +22394,7 @@ async function loadNotifications(append){
       el.onclick=async()=>{
         closeSheet('shNotif');
         // Rodinné věci nahoru. Řetězec pod tím je dlouhý a snadno je předběhne něco jiného.
-        if(k==='family_active' || k==='family_request' || k==='minor_waiver' || k==='minor_event_consent'){
+        if(k==='family_active' || k==='family_request' || k==='minor_waiver' || k==='minor_event_consent' || k==='pay_request'){
           try{ openMyKids(); }catch(e){}
           return;
         }
