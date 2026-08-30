@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SWX names the parties on a receipt properly. The counterparty was labelled Zakaznik, a marketing word; on a document it is the Odberatel, which is what the commission receipt already says. It was also taken from whoever had the receipt open, so a club viewing a student receipt saw itself there -- it now comes from who actually paid. Where a guardian settled the bill for a minor, the payer is the customer and the minor is listed as Ucastnik beneath, since the payer needs the document for their own books while the training belongs to the child. An event ticket also stops printing event_ticket as its item: the app writes that type but the label only knew event, and nothing now falls through to a raw database value. -->
+<!-- MTL build: SXB explains why bank payment failed only when the drop-in was paid to a coach rather than the club. The payee object for a coach is assembled by hand from a few selected columns, and it carried neither the coach id nor pis_test -- so the permission check had nothing to recognise and refused the payment even with the sandbox switched on in admin. Paying the club passes the club record itself, which is why that path always worked. Both fields are now fetched and passed on. Also included, from the builds after SWW: the reservation records the method actually chosen instead of always qr, receipts name the payer as Odberatel with the minor as Ucastnik, an event ticket no longer prints event_ticket as its item, the VAT note says Poskytovatel, and the country comes from the IBAN only when the stored value is one. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -18313,6 +18313,13 @@ window._checkModePromotion=async function(){
 };
 window._refreshPayEntry=function(){ if(typeof currentUser==='undefined'||!currentUser) return; try{ var _prov=!!(currentUser.coach_status==='approved' || currentUser.role==='founder' || (typeof FOUNDER_UUID!=='undefined'&&currentUser.id===FOUNDER_UUID) || (window._myGyms&&window._myGyms.length) || (typeof _myGymData!=='undefined'&&_myGymData&&_myGymData.id)); document.body.classList.toggle('mtl-provider', !!_prov); }catch(e){} };
 window._pisAvailCache={};
+// Země z IBANu. Do pole účtu se dá napsat i "Fio 2302345678/2010" nebo číslo účtu s lomítkem --
+// z prvních dvou znaků pak vyšlo "FI" nebo "12" a PIS hledal banky v neexistující zemi.
+// Zemi bereme, jen když hodnota jako IBAN opravdu vypadá: dvě písmena a dvě číslice.
+function _ibanCC(v){
+  const t=String(v||'').replace(/\s+/g,'').toUpperCase();
+  return /^[A-Z]{2}[0-9]{2}/.test(t) ? t.slice(0,2) : 'CZ';
+}
 async function _pisAvailable(country, ent, id){
   country=String(country||'CZ').toUpperCase();
   if(!_pisAllowed(ent, id)) return false;
@@ -18375,14 +18382,20 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMo
   let _launched=false;
   const _abandon=function(){ if(_launched) return; _launched=true; if(typeof onAbandon==='function'){ try{ onAbandon(); }catch(e){} } };
   let iban=String((payee&&payee.receiver_id_value)||(g&&g.receiver_id_value)||'').replace(/\s+/g,'');
-  let country=String(iban.slice(0,2)||'CZ').toUpperCase();  // picker country = the klub's IBAN country (students bank locally)
+  let country=_ibanCC(iban);  // picker country = the klub's IBAN country (students bank locally)
   let payCur=cur;  // klub currency drives it (settable in gym settings)
   const gymNm=(payee&&(payee.receiver_name||payee.name))||(g&&g.name)||'Klub';
   if(testMode){ country='NO'; iban='NO2712073650567'; payCur='NOK'; }  // NEONOMICS SANDBOX: no CZ banks -> exercise the full domestic-transfer flow via a NO test bank/IBAN/NOK (DNB/Sbanken)
   if(!iban){ toast(EN?'No IBAN on file':'Chybí IBAN'); return; }
   let banks=[];
   try{ const r=await fetch('/api/pis-aspsps?country='+country); const d=await r.json(); banks=(d.aspsps||[]).filter(function(b){ return (b.psu_types||[]).indexOf('personal')>=0; }); }catch(e){}
-  if(!banks.length){ toast(EN?('No banks for '+country+' yet (production only)'):('Pro '+country+' zatím nejsou banky (jen produkce)')); return; }
+  if(!banks.length){
+    // Seznam bank je prázdný -- pro tuhle zemi PIS nejede. Místo hlášky o zemi, která uživateli
+    // nic neříká, spadneme na QR: to je přesně stav "banku v seznamu nemám".
+    toast(EN?'Bank transfer is not available here — use the QR code.':'Platba z účtu tu není dostupná — použij QR kód.');
+    if(typeof onQrFallback==='function'){ try{ onQrFallback(); }catch(e){} }
+    return;
+  }
   if(testMode){ var _dnb=banks.filter(function(b){ return /dnb/i.test(String(b.name||'')); }); if(_dnb.length) banks=[_dnb[0]]; }
   const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100001;display:flex;align-items:flex-end;justify-content:center;';
   ov.innerHTML='<div style="background:#fff;border-radius:18px;padding:18px;max-width:420px;width:100%;max-height:80vh;overflow-y:auto;font-family:\'DM Sans\';"><div style="font-size:16px;font-weight:800;margin-bottom:10px;">'+(EN?'Your bank':'Tvoje banka')+'</div><div id="pisBanks"></div></div>';
@@ -18617,7 +18630,12 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom){
     let _dp=g.dropin_price||0;
     if(occ&&occ.coach){ try{ const { data:_cp }=await supaClient.from('gym_coach_pricing').select('dropin_price,currency').eq('gym_id',g.id).eq('coach_id',occ.coach).eq('status','approved').maybeSingle(); if(_cp&&_cp.dropin_price){ _dp=_cp.dropin_price; } }catch(e){} }
     price=_dp; label=(occ&&occ.name)||(EN?'Drop-in':'Drop-in'); try{ if(occ&&occ.date){ var _dt=new Date(occ.date); if(!isNaN(_dt.getTime())){ var _ds=_dt.toLocaleDateString(EN?'en-GB':'cs-CZ',{weekday:'long',day:'numeric',month:'numeric'}); label += (EN?(' on '+_ds+(occ.time?(' '+occ.time):'')):(' konající se v '+_ds+(occ.time?(' '+occ.time):''))); } } }catch(e){} disc=(occ&&occ.disc)||(parseDisc(g.disciplines)[0]||null); lvl=(occ&&occ.level&&occ.level!=='all')?occ.level:null;
-    if(occ&&occ.coach){ try{ const { data:_cpr }=await supaClient.from('profiles').select('name,payment_mode,receiver_id_type,receiver_id_value,receiver_name,referral_optin').eq('id', occ.coach).single(); if(_cpr && (typeof _isQrProv==='function' && _isQrProv(_cpr)) && _cpr.receiver_id_value){ _qrPayeeObj={ receiver_id_type:_cpr.receiver_id_type, receiver_id_value:_cpr.receiver_id_value, receiver_name:_cpr.receiver_name, currency:cur, name:_cpr.name, referral_optin:_cpr.referral_optin }; _qrPaidTo='coach'; _qrPayeeCoach=occ.coach; } }catch(e){} }
+    if(occ&&occ.coach){ try{ const { data:_cpr }=await supaClient.from('profiles').select('id,name,payment_mode,receiver_id_type,receiver_id_value,receiver_name,referral_optin,pis_test').eq('id', occ.coach).single(); if(_cpr && (typeof _isQrProv==='function' && _isQrProv(_cpr)) && _cpr.receiver_id_value){ // id a pis_test MUSÍ projít dál. Bez nich _pisAllowed nepozná, že má kouč pískoviště zapnuté,
+          // a platbu z účtu zamítne -- proto u drop-inu placeného koučovi PIS nešel, i když v adminu
+          // zapnutý byl. U platby klubu se tenhle objekt nestaví, tak se to tam neprojevilo.
+          _qrPayeeObj={ id:_cpr.id, coach_id:_cpr.id, pis_test:_cpr.pis_test,
+            receiver_id_type:_cpr.receiver_id_type, receiver_id_value:_cpr.receiver_id_value,
+            receiver_name:_cpr.receiver_name, currency:cur, name:_cpr.name, referral_optin:_cpr.referral_optin }; _qrPaidTo='coach'; _qrPayeeCoach=occ.coach; } }catch(e){} }
     { var _qrRefOptin=(_qrPaidTo==='coach' && _qrPayeeObj) ? _qrPayeeObj.referral_optin : g.referral_optin; if(currentUser && _qrRefOptin!==false && (await _qrLiveCredit(currentUser.id))){ _qrRefD=0.20; try{ const { data:_pb } = await supaClient.from('gym_bookings').select('status').eq('gym_id', g.id).eq('student_id', currentUser.id).limit(20); if(_pb && _pb.some(b=>b.status!=='refunded'&&b.status!=='cancelled')) _qrRefD=0.10; }catch(e){ _qrRefD=0.10; } const _ccOk=await _askCreditChoice((currentUser.student_credits||1), _qrRefD, price, cur); if(_ccOk){ _qrCredit='student'; price=Math.floor(price*(1-_qrRefD)); } else { _qrRefD=0; } } }
   }
   if(!price){ toast(EN?'\u26a0\ufe0f No price set':'\u26a0\ufe0f Nen\u00ed nastaven\u00e1 cena'); return; }
@@ -18639,7 +18657,9 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom){
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
   // Creates the membership row at the moment of choice, once. Returns null if it could not be
   // written, and the caller must then do nothing -- half a payment is worse than none.
-  async function _ensureIntent(){
+  // _how: 'pis' pri platbe z uctu, 'qr' pri QR. Dosud se zapisovalo vzdycky 'qr', takze i platba
+  // z banky skoncila jako QR rezervace, kterou klub musel rucne potvrzovat nebo rusit.
+  async function _ensureIntent(_how){
     if(intentId) return intentId;
     // Drop-in: rezervaci vytvořit až tady, tedy při kliknutí, které platbu opravdu spouští.
     // Dřív vznikala hned při otevření okna jako QR -- i pro toho, kdo si vzápětí zvolil PIS.
@@ -18650,7 +18670,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom){
           // Kdo doopravdy platil -- doklad musí znít na něj, i když rezervace patří mladistvému.
           paid_by:(_forWhom&&_forWhom.id)?currentUser.id:null,
           paid_by_name:(_forWhom&&_forWhom.id)?((currentUser&&currentUser.name)||''):null,
-          paid_to:_qrPaidTo, amount:price, currency:cur, status:'reserved', payment_method:'qr',
+          paid_to:_qrPaidTo, amount:price, currency:cur, status:'reserved', payment_method:(_how==='pis'?'pis':'qr'),
           credit_used:(_qrCredit==='student'?'student':null),
           date:(occ&&occ.date)||_today, time:(occ&&occ.time)||'18:00',
           class_name:(occ&&occ.name)||null, class_date:(occ&&occ.date)||null, class_time:(occ&&occ.time)||null,
@@ -18674,7 +18694,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom){
   const msg=sName+(disc?(' - '+disc):'')+(lvl?(' - '+lvl):((kind==='memb'&&label)?(' - '+label):''));
   const payload=(typeof _bankQrPayload==='function')?_bankQrPayload(_qrPayeeObj, price, msg):null;
   const _pisIban=String((_qrPayeeObj&&_qrPayeeObj.receiver_id_value)||(g&&g.receiver_id_value)||'').replace(/\s+/g,'');
-  const _pisCountry=String(_pisIban.slice(0,2)||'CZ').toUpperCase();
+  const _pisCountry=_ibanCC(_pisIban);
   const _pisOn=await _pisAvailable(_pisCountry, _qrPayeeObj, (g&&g.id)||null);
   if((location.search||'').indexOf('pisdebug')>=0){ try{ toast('PIS dbg on='+_pisOn+' en='+(!!window._PIS_ENABLED)+' role='+((currentUser&&currentUser.role)||'?')+' uuidF='+(!!(currentUser&&currentUser.id===FOUNDER_UUID))+' ctry='+_pisCountry); }catch(e){} }
   const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100000;display:flex;align-items:center;justify-content:center;padding:20px;';
@@ -18725,7 +18745,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom){
     const _id=intentId; intentId=null;
     try{ await supaClient.from('gym_memberships').delete().eq('id', _id).eq('status','pending_offline'); }catch(e){}
   };
-  const pb=ov.querySelector('#oqrPaid'); var _pisB=ov.querySelector('#oqrPisBtn'); if(_pisB) _pisB.onclick=async function(){ _pisB.disabled=true; const _iid=await _ensureIntent(); _pisB.disabled=false; if(!_iid) return; _pisPayFlow(_iid||intentId, _qrPayeeObj, g, price, cur, msg, close, _pisTestFor(_qrPayeeObj||g), function(){ var _w=ov.querySelector('#oqrQrWrap'); if(_w) _w.style.display='block'; var _pb=ov.querySelector('#oqrPisBtn'); if(_pb) _pb.style.display='none'; try{ var _c=ov.firstElementChild; var _t=_c&&_c.firstElementChild; if(_t) _t.textContent='📲 '+(EN?'Pay by bank QR':'Zaplať bankovním QR'); }catch(e){} }, kind, _rollbackMemb); };
+  const pb=ov.querySelector('#oqrPaid'); var _pisB=ov.querySelector('#oqrPisBtn'); if(_pisB) _pisB.onclick=async function(){ _pisB.disabled=true; const _iid=await _ensureIntent('pis'); _pisB.disabled=false; if(!_iid) return; _pisPayFlow(_iid||intentId, _qrPayeeObj, g, price, cur, msg, close, _pisTestFor(_qrPayeeObj||g), function(){ var _w=ov.querySelector('#oqrQrWrap'); if(_w) _w.style.display='block'; var _pb=ov.querySelector('#oqrPisBtn'); if(_pb) _pb.style.display='none'; try{ var _c=ov.firstElementChild; var _t=_c&&_c.firstElementChild; if(_t) _t.textContent='📲 '+(EN?'Pay by bank QR':'Zaplať bankovním QR'); }catch(e){} }, kind, _rollbackMemb); };
   var _bx2=ov.querySelector('#oqrBox'); if(_bx2){ _bx2.style.cursor='pointer'; _bx2.ondblclick=function(){ try{ var cv=_bx2.querySelector('canvas'); var im=_bx2.querySelector('img'); var blob=null; if(cv&&cv.toDataURL){ var durl=cv.toDataURL('image/png'); var bs=atob(durl.split(',')[1]); var n=bs.length, u8=new Uint8Array(n); while(n--){ u8[n]=bs.charCodeAt(n); } blob=new Blob([u8],{type:'image/png'}); } if(!blob){ return; } var file=null; try{ file=new File([blob],'MTL-platba-QR.png',{type:'image/png'}); }catch(e){} if(file && navigator.canShare && navigator.canShare({files:[file]})){ navigator.share({files:[file], title:'MTL platba QR'}).catch(function(){}); } else { var url=URL.createObjectURL(blob); var a=document.createElement('a'); a.href=url; a.download='MTL-platba-QR.png'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(function(){ try{ URL.revokeObjectURL(url); }catch(e){} },1500); } }catch(e){} }; } if(pb) pb.onclick=async function(){
     pb.disabled=true; pb.textContent='\u2026';
     { const _iid=await _ensureIntent(); if(!_iid){ pb.disabled=false; pb.textContent='\u2713 '+(EN?'I\u2019ve paid':'Zaplaceno'); return; } }
@@ -31581,7 +31601,7 @@ async function showReceipt(b){
       +`<div class="row"><span>${EN?'Item':'Položka'}</span><strong>${esc(item)}${disc?' · '+esc(disc):''}</strong></div>`
       +(date?`<div class="row"><span>${EN?'Date':'Datum'}</span><strong>${esc(date)}${time?' '+esc(time):''}</strong></div>`:'')
       +(ref?`<div class="row"><span>${EN?'Payment ref (Stripe)':'Reference platby (Stripe)'}</span><strong>${esc(ref)}</strong></div>`:'')
-      +(isPayer?`<div class="row"><span>${EN?'Net amount':'Základ daně'}</span><span>${fmt(base)} ${sym}</span></div><div class="row"><span>${EN?'VAT':'DPH'} ${rate}%</span><span>${fmt(vat)} ${sym}</span></div><div class="row tot"><span>${EN?'Total':'Celkem'}</span><span>${fmt(amt)} ${sym}</span></div></div>`:`<div class="row"><span>${EN?'VAT':'DPH'}</span><span>0 ${sym}</span></div><div class="row tot"><span>${EN?'Total':'Celkem'}</span><span>${fmt(amt)} ${sym}</span></div></div><div style="font-size:12px;color:#444;font-weight:600;margin-top:12px;">${EN?'Supplier is not a VAT payer.':'Dodavatel není plátcem DPH.'}</div>`)
+      +(isPayer?`<div class="row"><span>${EN?'Net amount':'Základ daně'}</span><span>${fmt(base)} ${sym}</span></div><div class="row"><span>${EN?'VAT':'DPH'} ${rate}%</span><span>${fmt(vat)} ${sym}</span></div><div class="row tot"><span>${EN?'Total':'Celkem'}</span><span>${fmt(amt)} ${sym}</span></div></div>`:`<div class="row"><span>${EN?'VAT':'DPH'}</span><span>0 ${sym}</span></div><div class="row tot"><span>${EN?'Total':'Celkem'}</span><span>${fmt(amt)} ${sym}</span></div></div><div style="font-size:12px;color:#444;font-weight:600;margin-top:12px;">${EN?'The provider is not a VAT payer.':'Poskytovatel není plátcem DPH.'}</div>`)
       +`<div class="note">${EN?'This is a A valid proof of payment for your records. The seller of the service is the provider named above — MTL is the platform that facilitated the payment. Need a formal tax invoice? Request it from the provider. Generated via MTL.':'Platné potvrzení o zaplacení pro tvé účely. Prodejcem služby je výše uvedený poskytovatel — MTL je platforma, která platbu zprostředkovala. Potřebuješ formální daňový doklad (fakturu)? Vyžádej si ho u poskytovatele. Vygenerováno přes MTL.'}</div>`
       +`<button class="btn" onclick="window.print()">${EN?'Print / Save PDF':'Tisk / Uložit PDF'}</button></body></html>`;
     var ov=document.getElementById('dokladOv'); if(ov) ov.remove();
