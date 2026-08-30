@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SXB explains why bank payment failed only when the drop-in was paid to a coach rather than the club. The payee object for a coach is assembled by hand from a few selected columns, and it carried neither the coach id nor pis_test -- so the permission check had nothing to recognise and refused the payment even with the sandbox switched on in admin. Paying the club passes the club record itself, which is why that path always worked. Both fields are now fetched and passed on. Also included, from the builds after SWW: the reservation records the method actually chosen instead of always qr, receipts name the payer as Odberatel with the minor as Ucastnik, an event ticket no longer prints event_ticket as its item, the VAT note says Poskytovatel, and the country comes from the IBAN only when the stored value is one. -->
+<!-- MTL build: SXC finds why bank payment failed for a drop-in paid to a coach. The payee object built for a coach was missing payment_mode, so the check for which rail they are on returned nothing, the sandbox was treated as off, and the bank list came back empty -- the column was being fetched all along and simply never copied across, as with the id and pis_test in the previous build. A reservation created for a bank payment is also removed again when the flow falls back to QR: it was written before the banks were known, so the class showed as booked although nothing had been paid. The QR path writes its own on confirmation. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -18634,6 +18634,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom){
           // a platbu z účtu zamítne -- proto u drop-inu placeného koučovi PIS nešel, i když v adminu
           // zapnutý byl. U platby klubu se tenhle objekt nestaví, tak se to tam neprojevilo.
           _qrPayeeObj={ id:_cpr.id, coach_id:_cpr.id, pis_test:_cpr.pis_test,
+            payment_mode:_cpr.payment_mode,
             receiver_id_type:_cpr.receiver_id_type, receiver_id_value:_cpr.receiver_id_value,
             receiver_name:_cpr.receiver_name, currency:cur, name:_cpr.name, referral_optin:_cpr.referral_optin }; _qrPaidTo='coach'; _qrPayeeCoach=occ.coach; } }catch(e){} }
     { var _qrRefOptin=(_qrPaidTo==='coach' && _qrPayeeObj) ? _qrPayeeObj.referral_optin : g.referral_optin; if(currentUser && _qrRefOptin!==false && (await _qrLiveCredit(currentUser.id))){ _qrRefD=0.20; try{ const { data:_pb } = await supaClient.from('gym_bookings').select('status').eq('gym_id', g.id).eq('student_id', currentUser.id).limit(20); if(_pb && _pb.some(b=>b.status!=='refunded'&&b.status!=='cancelled')) _qrRefD=0.10; }catch(e){ _qrRefD=0.10; } const _ccOk=await _askCreditChoice((currentUser.student_credits||1), _qrRefD, price, cur); if(_ccOk){ _qrCredit='student'; price=Math.floor(price*(1-_qrRefD)); } else { _qrRefD=0; } } }
@@ -18745,7 +18746,21 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom){
     const _id=intentId; intentId=null;
     try{ await supaClient.from('gym_memberships').delete().eq('id', _id).eq('status','pending_offline'); }catch(e){}
   };
-  const pb=ov.querySelector('#oqrPaid'); var _pisB=ov.querySelector('#oqrPisBtn'); if(_pisB) _pisB.onclick=async function(){ _pisB.disabled=true; const _iid=await _ensureIntent('pis'); _pisB.disabled=false; if(!_iid) return; _pisPayFlow(_iid||intentId, _qrPayeeObj, g, price, cur, msg, close, _pisTestFor(_qrPayeeObj||g), function(){ var _w=ov.querySelector('#oqrQrWrap'); if(_w) _w.style.display='block'; var _pb=ov.querySelector('#oqrPisBtn'); if(_pb) _pb.style.display='none'; try{ var _c=ov.firstElementChild; var _t=_c&&_c.firstElementChild; if(_t) _t.textContent='📲 '+(EN?'Pay by bank QR':'Zaplať bankovním QR'); }catch(e){} }, kind, _rollbackMemb); };
+  const pb=ov.querySelector('#oqrPaid'); var _pisB=ov.querySelector('#oqrPisBtn'); if(_pisB) _pisB.onclick=async function(){ _pisB.disabled=true; const _iid=await _ensureIntent('pis'); _pisB.disabled=false; if(!_iid) return;
+      // Když PIS spadne zpátky na QR (třeba pro tu zemi nejsou banky), rezervace vzniklá o řádek
+      // výš by zůstala viset jako zaplacená -- lekce se označí jako rezervovaná a nikdo nic
+      // nezaplatil. Proto se v takovém případě zase smaže; QR si založí vlastní při potvrzení.
+      const _dropIntent=async function(){
+        try{
+          if(!_iid) return;
+          if(kind==='memb') await supaClient.from('gym_memberships').delete().eq('id',_iid).eq('status','pending_offline');
+          else { await supaClient.from('gym_bookings').delete().eq('id',_iid).eq('status','reserved');
+            try{ await supaClient.from('gym_class_reservations').delete().eq('student_id',_stuId).eq('gym_id',g.id).eq('class_date',(occ&&occ.date)||null).eq('class_time',(occ&&occ.time)||null); }catch(e){} }
+          intentId=null;
+        }catch(e){}
+      };
+      _pisPayFlow(_iid||intentId, _qrPayeeObj, g, price, cur, msg, close, _pisTestFor(_qrPayeeObj||g), function(){
+        _dropIntent(); var _w=ov.querySelector('#oqrQrWrap'); if(_w) _w.style.display='block'; var _pb=ov.querySelector('#oqrPisBtn'); if(_pb) _pb.style.display='none'; try{ var _c=ov.firstElementChild; var _t=_c&&_c.firstElementChild; if(_t) _t.textContent='📲 '+(EN?'Pay by bank QR':'Zaplať bankovním QR'); }catch(e){} }, kind, _rollbackMemb); };
   var _bx2=ov.querySelector('#oqrBox'); if(_bx2){ _bx2.style.cursor='pointer'; _bx2.ondblclick=function(){ try{ var cv=_bx2.querySelector('canvas'); var im=_bx2.querySelector('img'); var blob=null; if(cv&&cv.toDataURL){ var durl=cv.toDataURL('image/png'); var bs=atob(durl.split(',')[1]); var n=bs.length, u8=new Uint8Array(n); while(n--){ u8[n]=bs.charCodeAt(n); } blob=new Blob([u8],{type:'image/png'}); } if(!blob){ return; } var file=null; try{ file=new File([blob],'MTL-platba-QR.png',{type:'image/png'}); }catch(e){} if(file && navigator.canShare && navigator.canShare({files:[file]})){ navigator.share({files:[file], title:'MTL platba QR'}).catch(function(){}); } else { var url=URL.createObjectURL(blob); var a=document.createElement('a'); a.href=url; a.download='MTL-platba-QR.png'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(function(){ try{ URL.revokeObjectURL(url); }catch(e){} },1500); } }catch(e){} }; } if(pb) pb.onclick=async function(){
     pb.disabled=true; pb.textContent='\u2026';
     { const _iid=await _ensureIntent(); if(!_iid){ pb.disabled=false; pb.textContent='\u2713 '+(EN?'I\u2019ve paid':'Zaplaceno'); return; } }
