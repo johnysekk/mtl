@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SWI stops a QR reservation being written before the payment method is chosen. Opening the drop-in window created the booking immediately with payment_method qr, so someone whose bank is listed and who then picked Pay from bank was already recorded as a QR reservation -- and closing the window left it behind. Membership already deferred this to _ensureIntent, called on the tap that commits; drop-in now does the same, and both stop if the row cannot be written, since half a payment is worse than none. -->
+<!-- MTL build: SWJ makes the guardian payment land on the minor. Until now the request only opened the pay window and the booking was written against whoever was paying, so the attendance and the XP would have gone to the parent -- the opposite of the point. The pay window takes an optional on-behalf-of, and when it is set the booking, the reservation and the name recorded all belong to the minor while the parent settles the bill. The window says whose booking it is, so it is clear the payment is not for oneself. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -11671,6 +11671,8 @@ async function _payReqButton(container, what, amount, currency, extra){
   try{
     if(!container) return;
     if(!(currentUser && currentUser.is_minor)) return;
+    // Když v okně už platí zástupce za mladistvého, nemá si o co žádat.
+    if(extra && extra._forWhom) return;
     const gp=await _payReqGuardian(); if(!gp) return;
     const EN=LANG==='en';
     const b=document.createElement('button');
@@ -18545,7 +18547,11 @@ function _recpMembPay(pi){
   if($('rmCashSave')) $('rmCashSave').onclick=function(){ _doMembPay('cash'); };
   if($('rmRefBy')){ $('rmRefBy').addEventListener('change', _rmRefresh); }
 }
-async function _onlineQrPay(g, occ, _child, kind, plan){
+// _forWhom: zástupce platí za mladistvého. Rezervace se pak zapíše NA MLADISTVÉHO -- docházka,
+// statistiky i XP zůstávají jemu, mění se jen to, kdo účet uhradil. Bez toho parametru se nic
+// nemění a člověk platí sám za sebe.
+async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom){
+  const _stuId=(_forWhom&&_forWhom.id)||currentUser.id;
   let _qrPayeeObj=g, _qrPaidTo='gym', _qrPayeeCoach=null, _qrCredit='', _qrRefD=0;
   const EN=LANG==='en';
   if(currentUser && await _hasOpenQrReservation(currentUser.id)){ toast(EN?'\u26a0\ufe0f You already have an unpaid QR reservation \u2014 settle it first before booking another.':'M\u00e1\u0161 nepotvrzenou QR rezervaci \u2014 nejd\u0159\u00edv ji vy\u0159e\u0161, ne\u017e si rezervuje\u0161 dal\u0161\u00ed.'); return; }
@@ -18563,7 +18569,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan){
     { var _qrRefOptin=(_qrPaidTo==='coach' && _qrPayeeObj) ? _qrPayeeObj.referral_optin : g.referral_optin; if(currentUser && _qrRefOptin!==false && (await _qrLiveCredit(currentUser.id))){ _qrRefD=0.20; try{ const { data:_pb } = await supaClient.from('gym_bookings').select('status').eq('gym_id', g.id).eq('student_id', currentUser.id).limit(20); if(_pb && _pb.some(b=>b.status!=='refunded'&&b.status!=='cancelled')) _qrRefD=0.10; }catch(e){ _qrRefD=0.10; } const _ccOk=await _askCreditChoice((currentUser.student_credits||1), _qrRefD, price, cur); if(_ccOk){ _qrCredit='student'; price=Math.floor(price*(1-_qrRefD)); } else { _qrRefD=0; } } }
   }
   if(!price){ toast(EN?'\u26a0\ufe0f No price set':'\u26a0\ufe0f Nen\u00ed nastaven\u00e1 cena'); return; }
-  const sName=currentUser.name||'Student';
+  const sName=(_forWhom&&_forWhom.name)||currentUser.name||'Student';
   let intentId=null;
   try{
     if(kind==='memb'){
@@ -18577,7 +18583,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan){
       // takže i když měl banku v seznamu a chtěl PIS, byl už zapsaný jako QR rezervace. Vytvoří
       // ji _ensureIntent() při kliknutí, které platbu opravdu spouští.
       intentId=null;
-      try{ await supaClient.from('gym_class_reservations').insert({ gym_id:g.id, gym_name:g.name||'Gym', student_id:currentUser.id, student_name:sName, class_name:(occ&&occ.name)||null, class_date:(occ&&occ.date)||null, class_time:(occ&&occ.time)||null, class_level:(occ&&occ.level)||'all' }); }catch(e){}
+      try{ await supaClient.from('gym_class_reservations').insert({ gym_id:g.id, gym_name:g.name||'Gym', student_id:_stuId, student_name:sName, class_name:(occ&&occ.name)||null, class_date:(occ&&occ.date)||null, class_time:(occ&&occ.time)||null, class_level:(occ&&occ.level)||'all' }); }catch(e){}
     }
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
   // Creates the membership row at the moment of choice, once. Returns null if it could not be
@@ -18589,7 +18595,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan){
     if(kind!=='memb'){
       try{
         const _today=new Date().toISOString().slice(0,10);
-        const rec={ gym_id:g.id, student_id:currentUser.id, student_name:sName, gym_name:g.name||'Klub',
+        const rec={ gym_id:g.id, student_id:_stuId, student_name:sName, gym_name:g.name||'Klub',
           paid_to:_qrPaidTo, amount:price, currency:cur, status:'reserved', payment_method:'qr',
           credit_used:(_qrCredit==='student'?'student':null),
           date:(occ&&occ.date)||_today, time:(occ&&occ.time)||'18:00',
@@ -18601,12 +18607,12 @@ async function _onlineQrPay(g, occ, _child, kind, plan){
         const { data:bk, error:e2 } = await supaClient.from('gym_bookings').insert(Object.assign({ attr_src:_attrGet() }, rec)).select('id').single();
         if(e2){ toast('\u26a0\ufe0f '+e2.message); return null; }
         intentId=bk&&bk.id;
-        try{ await supaClient.from('gym_class_reservations').insert({ gym_id:g.id, gym_name:g.name||'Gym', student_id:currentUser.id, student_name:sName, class_name:(occ&&occ.name)||null, class_date:(occ&&occ.date)||null, class_time:(occ&&occ.time)||null, status:'reserved' }); }catch(e){}
+        try{ await supaClient.from('gym_class_reservations').insert({ gym_id:g.id, gym_name:g.name||'Gym', student_id:_stuId, student_name:sName, class_name:(occ&&occ.name)||null, class_date:(occ&&occ.date)||null, class_time:(occ&&occ.time)||null, status:'reserved' }); }catch(e){}
       }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); return null; }
       return intentId;
     }
     try{
-      const { data:mb, error:e1 } = await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:currentUser.id, student_name:sName, paid_to:'gym', amount:price, currency:cur, status:'pending_offline', ref_by:_mbRefBy, ref_pct:(_mbRefPct||null), ref_credit_id:_mbRefCreditId, plan_name:label, plan_access:JSON.stringify((plan&&plan.access&&plan.access.length)?plan.access:['all']), discipline:disc, acq_source:_acqSrc(g) }).select('id').single();
+      const { data:mb, error:e1 } = await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:_stuId, student_name:sName, paid_to:'gym', amount:price, currency:cur, status:'pending_offline', ref_by:_mbRefBy, ref_pct:(_mbRefPct||null), ref_credit_id:_mbRefCreditId, plan_name:label, plan_access:JSON.stringify((plan&&plan.access&&plan.access.length)?plan.access:['all']), discipline:disc, acq_source:_acqSrc(g) }).select('id').single();
       if(e1){ toast('\u26a0\ufe0f '+e1.message); return null; }
       intentId=mb&&mb.id; return intentId;
     }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return null; }
@@ -18632,6 +18638,16 @@ async function _onlineQrPay(g, occ, _child, kind, plan){
   document.body.appendChild(ov);
   // Mladistvý bez vlastní karty může poslat účet zástupci. Platí za drop-in i členství.
   // Nad "Později" -- je to nabídka, jak zaplatit, ne odchod. Patří k platebním tlačítkům.
+  // Když platí zástupce za mladistvého, ať je to v okně vidět -- jinak není poznat, že
+  // rezervace nepůjde na něj.
+  if(_forWhom && _forWhom.id){
+    try{
+      const _hd=document.createElement('div');
+      _hd.style.cssText='background:#FFF8E6;border:1px solid #F0DFA8;border-radius:10px;padding:9px 12px;margin-bottom:10px;font-size:12px;font-weight:700;color:#7a5a1a;';
+      _hd.textContent=(EN?'Paying for ':'Platíš za ')+(_forWhom.name||'')+(EN?' — the booking is theirs':' — rezervace bude jeho');
+      const _b=ov.firstElementChild; if(_b) _b.insertBefore(_hd, _b.firstChild);
+    }catch(e){}
+  }
   try{ _payReqButton(document.getElementById('oqrClose'), label, price, cur, { gym_id:(g&&g.id)||null, gym_name:(g&&g.name)||'', kind:kind||'dropin', occ:occ||null, plan_id:(plan&&plan.id)||null }); }catch(e){}
   try{ if(_pisOn){ var _card=ov.firstElementChild; var _tt=_card&&_card.firstElementChild; if(_tt) _tt.textContent='📲 '+(EN?'Pay from your bank':'Zaplatit z účtu'); } }catch(e){}
   const box=ov.querySelector('#oqrBox');
@@ -22516,11 +22532,13 @@ async function loadNotifications(append){
               const { data:_g }=await supaClient.from('gyms').select('*').eq('id',_rq.gym_id).single();
               if(_g){
                 window._currentGym=_g;
+                // Platí zástupce, ale rezervace patří mladistvému -- proto _forWhom.
+                const _forWhom={ id:_rq.minor_id, name:_rq.minor_name||'' };
                 if(_rq.kind==='memb' || _rq.kind==='membership'){
                   const _pl=(typeof gymMembPlans==='function'?gymMembPlans(_g):[]).find(function(x){ return String(x.id)===String(_rq.plan_id); });
-                  if(_pl && typeof _onlineQrPay==='function'){ _onlineQrPay(_g, null, null, 'memb', _pl); return; }
+                  if(_pl && typeof _onlineQrPay==='function'){ _onlineQrPay(_g, null, null, 'memb', _pl, _forWhom); return; }
                 } else if(_rq.occ && typeof _onlineQrPay==='function'){
-                  _onlineQrPay(_g, _rq.occ, null, 'dropin', null); return;
+                  _onlineQrPay(_g, _rq.occ, null, 'dropin', null, _forWhom); return;
                 }
                 if(typeof openGymProfile==='function'){ openGymProfile(_g); return; }
               }
