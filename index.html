@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SWC lets a 15-17 year old ask their guardian to pay. The guardian ticks a box on the linked minor in Family, and from then on the minor can send a request for a specific training or membership; it arrives as a notification and is settled in Family alongside the consents. The point is that only the bill moves -- the attendance, the statistics and the XP stay on the minor own profile, unlike a child sub-account where everything belongs to the parent. Without the tick nothing changes and no request can be sent. Needs family-pay-request.sql. -->
+<!-- MTL build: SWD extends the payment request to every rail. A minor can still pay for anything themselves -- this is for the ones with no card or bank account of their own. Where a payment window opens (bank transfer, QR, club drop-in and membership, course deposit and balance, 1:1) a button underneath sends the bill to the guardian by name. Stripe shows no window and redirects straight out, so events and merch ask first: pay yourself, or send it to your guardian. Anyone without the permission sees none of this. Needs family-pay-request.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -9734,6 +9734,8 @@ async function doEventCheckout(ev, tier, _confirmed, _minorOk, _qty, _cartIn, _w
   const cur=ev.currency||'CZK';
   const base=(tier&&tier.price)||0;
   if(base>0 && !_confirmed){ return showTicketClickwrap(ev, tier); }
+  // Mladistvý bez karty: poslat účet zástupci místo odchodu na platební bránu.
+  try{ if(base>0 && await _payReqAsk(((ev&&(ev.title||ev.name))||'akce')+((tier&&tier.name)?(' \u00b7 '+tier.name):''), base, cur, { event_id:(ev&&ev.id)||null, kind:'event' })) return; }catch(e){}
   let acct=null, _evPayee=null, _evPayeeKind=null;
   try{
     if(ev.payout_coach_id){ const { data:pr } = await supaClient.from('profiles').select('id,gym_payout_account,payment_mode,stripe_account,receiver_id_type,receiver_id_value,receiver_name,confirm_mode,name,currency').eq('id', ev.payout_coach_id).single(); if(pr){ _evPayee=pr; _evPayeeKind='coach'; acct=pr.gym_payout_account||null; } }
@@ -9811,6 +9813,7 @@ async function _eventQrPay(ev, tier, payee, payeeKind, _qty, _cartIn, _whoIn){
     +'<button id="evqrClose" style="width:100%;padding:10px;background:none;color:var(--mid);border:none;font-size:13px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Later':'Pozd\u011bji')+'</button>'
     +'</div>';
   document.body.appendChild(ov);
+  try{ _payReqButton(ov.firstElementChild, (ev&&(ev.title||ev.name))||'akce', price, cur, { event_id:(ev&&ev.id)||null }); }catch(e){}
   const box=ov.querySelector('#evqrBox');
   if(box){ if(payload && window.QRCode){ new QRCode(box,{ text:payload, width:200, height:200, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { box.innerHTML='<div style="font-size:12px;color:var(--light);padding:20px;">'+(EN?'QR unavailable \u2014 pay manually':'QR nedostupn\u00e9 \u2014 zaplať ru\u010dn\u011b')+'</div>'; } }
   const close=function(){ ov.remove(); };
@@ -9916,6 +9919,7 @@ async function _coach1to1QrPay(c, payee, opts){
     +'<button id="c1qrClose" style="width:100%;padding:10px;background:none;color:var(--mid);border:none;font-size:13px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Later':'Pozd\u011bji')+'</button>'
     +'</div>';
   document.body.appendChild(ov);
+  try{ _payReqButton(ov.firstElementChild, 'soukromá lekce', price, cur, {}); }catch(e){}
   const box=ov.querySelector('#c1qrBox');
   if(box){ if(payload && window.QRCode){ new QRCode(box,{ text:payload, width:200, height:200, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { box.innerHTML='<div style="font-size:12px;color:var(--light);padding:20px;">'+(EN?'QR unavailable \u2014 pay manually':'QR nedostupn\u00e9 \u2014 zaplať ru\u010dn\u011b')+'</div>'; } }
   const close=function(){ ov.remove(); };
@@ -10136,6 +10140,7 @@ async function _cohDepositQr(cohortId, d, info, fb, pb){
     +'<button id="cdqDone" style="width:100%;padding:14px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Done':'Hotovo')+'</button>'
     +'</div>';
   document.body.appendChild(ov);
+  try{ _payReqButton(ov.firstElementChild, 'kurz — záloha', d, cur, { cohort_id:cohortId||null }); }catch(e){}
   const box=ov.querySelector('#cdqBox');
   if(box){ if(payload && window.QRCode){ new QRCode(box,{ text:payload, width:220, height:220, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { box.innerHTML='<div style="font-size:12px;color:var(--light);padding:20px;">'+(EN?'QR unavailable':'QR nedostupn\u00e9')+'</div>'; } }
   const dn=ov.querySelector('#cdqDone'); if(dn) dn.onclick=function(){ try{ ov.remove(); }catch(e){} try{ location.href='/'; }catch(e){} };
@@ -11648,6 +11653,60 @@ async function rejoinClass(g, occ){
 // Mladistvý má vlastní účet, ale platit nemůže. Když mu to zástupce povolil, pošle mu odsud
 // žádost: rodič zaplatí, ale docházka, statistiky i XP zůstávají mladistvému -- není to podúčet,
 // jen účet za trénink jde jinam.
+
+// Tlačítko "Poslat žádost o úhradu" do libovolného platebního okna. Mladistvý si smí platit sám
+// jako kdokoli jiný -- tohle je jen cesta pro ty, kdo vlastní kartu nebo účet nemají. Zobrazí se
+// jen když mu to zástupce povolil, a jméno v popisku říká, komu žádost půjde.
+// Volá se po vykreslení okna; když povolení není, nevykreslí se nic.
+async function _payReqButton(container, what, amount, currency, extra){
+  try{
+    if(!container) return;
+    if(!(currentUser && currentUser.is_minor)) return;
+    const gp=await _payReqGuardian(); if(!gp) return;
+    const EN=LANG==='en';
+    const b=document.createElement('button');
+    b.type='button';
+    b.style.cssText='width:100%;padding:13px;margin:8px 0 0;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';';
+    b.textContent='\u{1F4B3} '+(EN?('Ask '+(gp.name||'my guardian')+' to pay'):('Poslat žádost o úhradu '+(gp.name||'zástupci')));
+    b.onclick=async function(){
+      b.disabled=true; b.style.opacity='.5';
+      const ok=await _sendPayRequest(what, amount, currency, extra);
+      if(ok){ b.textContent=(EN?'\u2705 Request sent':'\u2705 Žádost odeslána'); }
+      else { b.disabled=false; b.style.opacity='1'; }
+    };
+    container.appendChild(b);
+  }catch(e){ console.log('[payReqButton]', e&&e.message); }
+}
+
+
+// U Stripe se neotevírá žádné okno -- přesměruje se rovnou na platební bránu. Mladistvý bez
+// vlastní karty by tam narazil až na cizí stránce, takže se zeptáme předem: zaplatit sám,
+// nebo poslat účet zástupci. Kdo povolení nemá, jde rovnou dál a nic navíc nevidí.
+async function _payReqAsk(what, amount, currency, extra){
+  if(!(currentUser && currentUser.is_minor)) return false;
+  const gp=await _payReqGuardian(); if(!gp) return false;
+  const EN=LANG==='en';
+  return await new Promise(function(resolve){
+    const ov=document.createElement('div');
+    ov.style.cssText='position:fixed;inset:0;z-index:100064;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center;';
+    ov.innerHTML='<div style="background:#fff;width:100%;max-width:440px;border-radius:18px 18px 0 0;padding:22px 20px max(24px,env(safe-area-inset-bottom));font-family:\'DM Sans\';">'
+      +'<div style="font-size:16px;font-weight:800;margin-bottom:4px;">'+(EN?'How do you want to pay?':'Jak chceš zaplatit?')+'</div>'
+      +'<div style="font-size:13px;color:var(--mid);margin-bottom:16px;">'+escapeHtml(String(what||''))
+      +(amount!=null?(' \u00b7 '+fmtPrice(amount,currency||'CZK')+' '+_curSym(currency||'CZK')):'')+'</div>'
+      +'<button id="prSelf" style="width:100%;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';margin-bottom:8px;">'+(EN?'Pay myself':'Zaplatím sám/sama')+'</button>'
+      +'<button id="prAsk" style="width:100%;padding:13px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">\u{1F4B3} '
+      +(EN?('Ask '+(gp.name||'my guardian')+' to pay'):('Poslat žádost o úhradu '+(gp.name||'zástupci')))+'</button>'
+      +'<button id="prX" style="width:100%;margin-top:10px;padding:10px;background:none;border:none;color:var(--mid);font-size:13px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Cancel':'Zrušit')+'</button></div>';
+    document.body.appendChild(ov);
+    ov.querySelector('#prSelf').onclick=function(){ ov.remove(); resolve(false); };
+    ov.querySelector('#prX').onclick=function(){ ov.remove(); resolve(true); };
+    ov.querySelector('#prAsk').onclick=async function(){
+      await _sendPayRequest(what, amount, currency, extra);
+      ov.remove(); resolve(true);
+    };
+  });
+}
+
 async function _payReqGuardian(){
   try{
     const { data }=await supaClient.from('family_links')
@@ -14715,6 +14774,7 @@ async function _cohRemainderSelf(memberId, d, rem, cur, pb){
     +'<button id="crsDone" style="width:100%;padding:14px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Done':'Hotovo')+'</button>'
     +'</div>';
   document.body.appendChild(ov);
+  try{ _payReqButton(ov.firstElementChild, 'kurz — doplatek', rem, cur, { member_id:memberId||null }); }catch(e){}
   const box=ov.querySelector('#crsQrBox');
   if(box){ if(payload && window.QRCode){ new QRCode(box,{ text:payload, width:220, height:220, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { box.innerHTML='<div style="font-size:11px;color:var(--light);padding:20px;">'+(EN?'QR unavailable — use pay-by-bank above.':'QR nedostupné — použij platbu z účtu výše.')+'</div>'; } }
   const dn=ov.querySelector('#crsDone'); if(dn) dn.onclick=function(){ try{ ov.remove(); }catch(e){} };
@@ -18526,6 +18586,8 @@ async function _onlineQrPay(g, occ, _child, kind, plan){
     +'<button id="oqrClose" style="width:100%;padding:10px;background:none;color:var(--mid);border:none;font-size:13px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Later':'Pozd\u011bji')+'</button>'
     +'</div>';
   document.body.appendChild(ov);
+  // Mladistvý bez vlastní karty může poslat účet zástupci. Platí za drop-in i členství.
+  try{ _payReqButton(ov.firstElementChild, label, price, cur, { gym_id:(g&&g.id)||null, gym_name:(g&&g.name)||'', kind:kind||'dropin' }); }catch(e){}
   try{ if(_pisOn){ var _card=ov.firstElementChild; var _tt=_card&&_card.firstElementChild; if(_tt) _tt.textContent='📲 '+(EN?'Pay from your bank':'Zaplatit z účtu'); } }catch(e){}
   const box=ov.querySelector('#oqrBox');
   if(box){ if(payload && window.QRCode){ new QRCode(box,{ text:payload, width:200, height:200, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { box.innerHTML='<div style="font-size:12px;color:var(--mid);line-height:1.6;">'+(EN?'Pay to:':'Zaplať na:')+'<br><b>'+escapeHtml(g.receiver_id_value||'')+'</b><br>'+fmtPrice(price,cur)+' '+sym+'</div>'; } }
@@ -20078,6 +20140,8 @@ async function _merchQrPay(orderId, payee, m, price, cur, msg){
 async function buyMerch(merchId){
   if(!currentUser||!currentUser.id){ toast(LANG==='en'?'Sign in to buy':'Pro nákup se přihlas'); return; }
   const g=window._currentGym; const m=(window._gymMerchItems||[]).find(x=>x.id===merchId); if(!g||!m){ toast('⚠️'); return; }
+  // Mladistvý bez karty: nabídnout poslání účtu zástupci dřív, než ho Stripe odvede pryč.
+  try{ if(await _payReqAsk((m.name||'merch'), m.price, (g&&g.currency)||'CZK', { gym_id:g.id, gym_name:g.name||'', kind:'merch', merch_id:merchId })) return; }catch(e){}
   const EN=LANG==='en'; let variant=''; const vsel=$('mv_'+merchId); if(vsel) variant=vsel.value||'';
   const qty=1; const amt=(m.price||0)*qty; const cur=g.currency||'CZK';
   let _acct=null, _take=0.035, _partner=0; const _coachId=m.coach_id||'';
