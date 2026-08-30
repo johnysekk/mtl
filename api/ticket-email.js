@@ -116,7 +116,14 @@ export default async function handler(req, res) {
     const qrImg = qrFor(ticketId);
 
     let dt = '';
-    try { if (ev.starts_at) dt = new Date(ev.starts_at).toLocaleString('en-GB', { weekday: 'short', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch (e) {}
+    // ČASOVÉ PÁSMO. Bez timeZone se čas formátuje podle serveru, a ten běží v UTC -- akce v 18:00
+    // se na lístku objevila jako 16:00. Datum se navíc píše česky, když je lístek český.
+    try {
+      if (ev.starts_at) dt = new Date(ev.starts_at).toLocaleString('cs-CZ', {
+        weekday: 'short', day: 'numeric', month: 'long', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Prague'
+      });
+    } catch (e) {}
     const venue = [ev.venue, ev.city, ev.country].filter(Boolean).join(', ');
     const esc = (x) => String(x || '').replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
     const title = esc(ev.title || 'MTL Event');
