@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SWW fixes the time on emailed tickets, which showed two hours early: the date was formatted without a time zone, so it came out in the server UTC rather than local time -- an event at 18:00 printed as 16:00. It now formats in Europe/Prague and in Czech. A payment request for an event ticket also opens that event instead of falling through to Family, since ticket requests carry an event id rather than a club and a class. The Events button is hidden in dashmode, where the sidebar already has it, and the tracing logs added today are gone -- error reporting stays. Needs the updated ticket-email.js. -->
+<!-- MTL build: SWX names the parties on a receipt properly. The counterparty was labelled Zakaznik, a marketing word; on a document it is the Odberatel, which is what the commission receipt already says. It was also taken from whoever had the receipt open, so a club viewing a student receipt saw itself there -- it now comes from who actually paid. Where a guardian settled the bill for a minor, the payer is the customer and the minor is listed as Ucastnik beneath, since the payer needs the document for their own books while the training belongs to the child. An event ticket also stops printing event_ticket as its item: the app writes that type but the label only knew event, and nothing now falls through to a raw database value. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -18647,6 +18647,9 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom){
       try{
         const _today=new Date().toISOString().slice(0,10);
         const rec={ gym_id:g.id, student_id:_stuId, student_name:sName, gym_name:g.name||'Klub',
+          // Kdo doopravdy platil -- doklad musí znít na něj, i když rezervace patří mladistvému.
+          paid_by:(_forWhom&&_forWhom.id)?currentUser.id:null,
+          paid_by_name:(_forWhom&&_forWhom.id)?((currentUser&&currentUser.name)||''):null,
           paid_to:_qrPaidTo, amount:price, currency:cur, status:'reserved', payment_method:'qr',
           credit_used:(_qrCredit==='student'?'student':null),
           date:(occ&&occ.date)||_today, time:(occ&&occ.time)||'18:00',
@@ -26121,7 +26124,7 @@ function showEpReceipt(p){
       +(MTL_BILL.ico?`<div class="row"><span>IČO</span><strong>${esc(MTL_BILL.ico)}</strong></div>`:'')
       +(MTL_BILL.dic?`<div class="row"><span>DIČ</span><strong>${esc(MTL_BILL.dic)}</strong></div>`:'')
       +(MTL_BILL.addr?`<div class="row"><span>${EN?'Address':'Sídlo'}</span><strong>${esc(MTL_BILL.addr)}</strong></div>`:'')
-      +`<div class="row"><span>${EN?'Customer':'Zákazník'}</span><strong>${esc(buyer)}</strong></div>`
+      +`<div class="row"><span>${EN?'Customer':'Odběratel'}</span><strong>${esc(buyer)}</strong></div>`
       +(buyerIco?`<div class="row"><span>IČO</span><strong>${esc(buyerIco)}</strong></div>`:'')
       +(buyerDic?`<div class="row"><span>DIČ / VAT ID</span><strong>${esc(buyerDic)}</strong></div>`:'')
       +(buyerAddr?`<div class="row"><span>${EN?'Address':'Adresa'}</span><strong>${esc(buyerAddr)}</strong></div>`:'')
@@ -31281,9 +31284,12 @@ function _mpItemLabel(t){
   if(t.type==='drop_in') return EN?'Drop-in':'Jednor\u00e1zov\u00e1 lekce';
   if(t.type==='coach_1to1'||t.type==='coach_inperson') return EN?'Private lesson 1:1':'Soukrom\u00e1 lekce 1:1';
   if(t.type==='coach_online') return EN?'Online lesson':'Online lekce';
-  if(t.type==='event') return EN?'Event ticket':'Vstupenka';
+  // Appka zapisuje 'event_ticket', ne 'event' -- bez toho se název typu propsal na doklad
+  // syrový, takže tam u vstupenky stálo "event_ticket".
+  if(t.type==='event' || t.type==='event_ticket') return EN?'Event ticket':'Vstupenka';
   if(t.type==='merch') return EN?'Merch':'Zbo\u017e\u00ed';
-  return t.type||'\u2014';
+  // Poslední záchrana: nikdy neukazovat syrový název z databáze.
+  return EN?'Payment':'Platba';
 }
 async function _loadMyPayments(){
   const EN=LANG==='en'; const box=document.getElementById('mpBody'); if(!box) return;
@@ -31524,7 +31530,16 @@ async function showReceipt(b){
     if(!gymRec){ const _cid=b.coach_id||b.coach_profile_id; if(_cid){ try{ const { data:_c }=await supaClient.from('profiles').select('legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address').eq('id',_cid).maybeSingle(); coachRec=_c||null; }catch(e){} } }
     const rec=gymRec||coachRec;
     const seller=(rec&&(rec.legal_name||rec.name))||b.gym_name||b.coach_name||(EN?'Provider':'Poskytovatel');
-    const buyer=(currentUser&&(currentUser.name||currentUser.email))||(EN?'Customer':'Zákazník');
+    // ODBĚRATEL je ten, kdo platil. Když zástupce hradil za mladistvého, rezervace je vedená na
+  // mladistvého, ale doklad musí znít na plátce -- ten ho dává do účetnictví a jemu se vrací
+  // peníze. Komu služba patří, se uvede zvlášť jako účastník.
+  // Pozor: dosud se odběratel bral z currentUser, takže na dokladu stál ten, kdo si ho zrovna
+  // otevřel -- klub prohlížející doklad studenta tam viděl sám sebe.
+  const _payerName=(b.paid_by_name||'').trim();
+  const _partName=(b.student_name||'').trim();
+  const buyer=_payerName || _partName || (currentUser&&(currentUser.name||currentUser.email)) || (EN?'Customer':'Zákazník');
+  // Účastníka uvádět jen tehdy, když se od plátce liší.
+  const _participant=(_payerName && _partName && _payerName!==_partName) ? _partName : '';
     const date=b.class_date||b.training_date||(b.created_at||'').slice(0,10)||'';
     const time=b.class_time||b.training_time||'';
     const item=b.item_label||(b.gym_name?((b.discipline||b.class_date||b.class_time)?(EN?'Single class':'Jednorázová lekce'):((b.plan_discipline?(b.plan_discipline+' \u2013 '):'')+(b.class_name||(EN?'Membership':'Členství')))):(b.type==='online'?(EN?'Online coaching':'Online kočink'):(((Number(b.capacity)||1)>1)?((EN?'Group lesson 1:':'Skupinová lekce 1:')+(Number(b.capacity)||1)):(EN?'1:1 lesson':'Lekce 1:1'))));
@@ -31561,7 +31576,8 @@ async function showReceipt(b){
       +(sellerIco?`<div class="row"><span>IČO</span><strong>${esc(sellerIco)}</strong></div>`:'')
       +(sellerDic?`<div class="row"><span>DIČ</span><strong>${esc(sellerDic)}</strong></div>`:'')
       +((rec&&rec.billing_address)?`<div class="row"><span>${EN?'Address':'Sídlo'}</span><strong>${esc(rec.billing_address)}</strong></div>`:'')
-      +`<div class="row"><span>${EN?'Customer':'Zákazník'}</span><strong>${esc(buyer)}</strong></div>`
+      +`<div class="row"><span>${EN?'Customer':'Odběratel'}</span><strong>${esc(buyer)}</strong></div>`
+      +(_participant?`<div class="row"><span>${EN?'Participant':'Účastník'}</span><strong>${esc(_participant)}</strong></div>`:'')
       +`<div class="row"><span>${EN?'Item':'Položka'}</span><strong>${esc(item)}${disc?' · '+esc(disc):''}</strong></div>`
       +(date?`<div class="row"><span>${EN?'Date':'Datum'}</span><strong>${esc(date)}${time?' '+esc(time):''}</strong></div>`:'')
       +(ref?`<div class="row"><span>${EN?'Payment ref (Stripe)':'Reference platby (Stripe)'}</span><strong>${esc(ref)}</strong></div>`:'')
