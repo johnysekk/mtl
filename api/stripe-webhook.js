@@ -76,18 +76,20 @@ function cohortDokladHtml(o){
     + `<div style="color:#777;font-size:13px;margin-bottom:18px;">Potvrzení o platbě</div>`
     + `<table style="width:100%;border-collapse:collapse;">`
     + row('Poskytovatel (prodejce)', seller, true)
+    + row('Datum vystavení', _esc(_czDate(o.issued || new Date().toISOString().slice(0,10))), true)
     + (rec.tax_id ? row('IČO', _esc(rec.tax_id), true) : '')
     + (rec.vat_id ? row('DIČ', _esc(rec.vat_id), true) : '')
     + (rec.billing_address ? row('Sídlo', _esc(rec.billing_address), true) : '')
-    + row('Zákazník', _esc(o.buyer || ''), true)
+    + row('Odběratel', _esc(o.buyer || ''), true)
+    + (o.participant ? row('Účastník', _esc(o.participant), true) : '')
     + row('Položka', _esc(o.item || ''), true)
-    + row('Datum', _esc(o.date || ''), true)
+    + row('Termín lekce', _esc(_czDate(o.date || '')), true)
     + (o.ref ? row('Reference platby (Stripe)', _esc(o.ref), true) : '')
     + (isPayer
         ? (row('Základ daně', fmt(base) + ' ' + sym) + row('DPH ' + rate + '%', fmt(vat) + ' ' + sym) + row('Celkem', fmt(amt) + ' ' + sym, true))
         : row('Celkem', fmt(amt) + ' ' + sym, true))
     + `</table>`
-    + (isPayer ? '' : `<div style="font-size:12px;color:#777;margin-top:10px;">Dodavatel není plátcem DPH.</div>`)
+    + (isPayer ? '' : `<div style="font-size:12px;color:#777;margin-top:10px;">Poskytovatel není plátcem DPH.</div>`)
     + `<div style="font-size:11px;color:#999;line-height:1.6;margin-top:18px;border-top:1px solid #eee;padding-top:12px;">Platný doklad o platbě pro tvou evidenci. Prodejcem služby je výše uvedený poskytovatel — MTL je platforma, která platbu zprostředkovala. Potřebuješ formální fakturu? Vyžádej si ji u poskytovatele.</div>`
     + `</body></html>`;
 }
@@ -133,17 +135,19 @@ function cohortDokladPdf(o){
       doc.moveDown(1);
       const row = (l, v) => { const y = doc.y; doc.fontSize(11).fillColor('#555555').text(l, 50, y, { width: 230 }); const after = doc.y; doc.fillColor('#111111').text(String(v == null ? '' : v), 315, y, { width: 230, align: 'right' }); doc.y = Math.max(after, doc.y) + 4; };
       row('Poskytovatel (prodejce)', seller);
+      row('Datum vystavení', _czDate(o.issued || new Date().toISOString().slice(0,10)));
       if (rec.tax_id) row('IČO', rec.tax_id);
       if (rec.vat_id) row('DIČ', rec.vat_id);
       if (rec.billing_address) row('Sídlo', rec.billing_address);
-      row('Zákazník', o.buyer || '');
+      row('Odběratel', o.buyer || '');
+      if (o.participant) row('Účastník', o.participant);
       row('Položka', o.item || '');
-      row('Datum', o.date || '');
+      row('Termín lekce', _czDate(o.date || ''));
       if (o.ref) row('Reference platby (Stripe)', o.ref);
       doc.moveDown(0.3);
       if (isPayer) { row('Základ daně', fmt(base) + ' ' + sym); row('DPH ' + rate + '%', fmt(vat) + ' ' + sym); }
       const yT = doc.y; doc.fontSize(13).fillColor('#111111').text('Celkem', 50, yT, { width: 230 }); doc.text(fmt(amt) + ' ' + sym, 315, yT, { width: 230, align: 'right' }); doc.y += 8;
-      if (!isPayer) { doc.moveDown(0.3).fontSize(10).fillColor('#777777').text('Dodavatel není plátcem DPH.', 50); }
+      if (!isPayer) { doc.moveDown(0.3).fontSize(10).fillColor('#777777').text('Poskytovatel není plátcem DPH.', 50); }
       doc.moveDown(1.2).fontSize(9).fillColor('#999999').text('Platný doklad o platbě pro tvou evidenci. Prodejcem služby je výše uvedený poskytovatel — MTL je platforma, která platbu zprostředkovala. Potřebuješ formální fakturu? Vyžádej si ji u poskytovatele.', 50, doc.y, { width: 495 });
       doc.end();
     }catch(e){ reject(e); }

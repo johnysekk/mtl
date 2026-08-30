@@ -149,7 +149,7 @@ export default async function handler(req, res) {
   if (!SB || !KEY) return res.status(500).json({ error: 'env not set' });
   try {
     const b = (typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body) || {};
-    const { token, gym_id, coach_id, member_id, gross_amount, currency, type, payment_method, cash_payer_name, acq_source, credit, source_booking_id, cohort_id, income_class, months } = b;
+    const { token, gym_id, coach_id, member_id, paid_by, paid_by_name, session_at_issue, gross_amount, currency, type, payment_method, cash_payer_name, acq_source, credit, source_booking_id, cohort_id, income_class, months } = b;
     // trusted internal call (PIS server-side confirm) — reuses ALL the commission logic, no user token
     const _trusted = !!(b.internal && b.intSecret && process.env.PIS_INTERNAL_SECRET && b.intSecret === process.env.PIS_INTERNAL_SECRET);
     const provider = b.provider === 'coach' ? 'coach' : 'gym';
@@ -203,7 +203,13 @@ export default async function handler(req, res) {
       let _gymPayee = gym.stripe_account || null;
       if (coach_id) { try { const _cp = await sb(`profiles?id=eq.${coach_id}&select=gym_payout_account`); const _cpa = _cp && _cp[0] && _cp[0].gym_payout_account; if (_cpa) _gymPayee = _cpa; } catch(e){} }
       row = {
-        gym_id, coach_id: coach_id || null, member_id: member_id || null, paid_to: 'gym', payee_account: _gymPayee,
+        // Kdo doopravdy platil, když to není účastník (zástupce za mladistvého). Doklad musí
+        // znít na plátce, ale docházka patří účastníkovi -- proto obojí zvlášť.
+        gym_id, coach_id: coach_id || null, member_id: member_id || null,
+        paid_by: paid_by || null, paid_by_name: paid_by_name || null,
+        // Termín zafixovaný při vystavení -- doklad se z něj kreslí a pozdější přesun ho nemění.
+        session_at_issue: session_at_issue || null,
+        paid_to: 'gym', payee_account: _gymPayee,
         payee_id: gym.id, payee_kind: 'gym',
         gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, acq_months: _acqMonths, base_rate: _baseRate, refund_amount: 0, mtl_fee_refunded: 0,
         // CHANGED: was 'completed'. The column's own DB default is 'paid' and the Stripe rail writes
@@ -237,7 +243,10 @@ export default async function handler(req, res) {
       const _acqMonths = (_acq != null && !_cc) ? 1 : null;
       const _baseRate  = (_acq != null && !_cc) ? rate : null;
       row = {
-        gym_id: null, coach_id, member_id: member_id || null, paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null),
+        gym_id: null, coach_id, member_id: member_id || null,
+        paid_by: paid_by || null, paid_by_name: paid_by_name || null,
+        session_at_issue: session_at_issue || null,
+        paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null),
         payee_id: coach.id, payee_kind: 'profile',
         gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, acq_months: _acqMonths, base_rate: _baseRate, refund_amount: 0, mtl_fee_refunded: 0,
         currency: cur, type, status: 'paid', payment_method, cohort_id: cohort_id || null, income_class: income_class || null,
