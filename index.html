@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SVP stops the Belts row flashing in My profile. It was visible in the markup and _gateBelts hid it only after asking the database whether the user has belts or trains a discipline that uses them, so it appeared and vanished on every open. It now starts hidden and is revealed once the answer is known. The profile also refreshes its data-driven rows on open rather than showing the previous state until the query returns. -->
+<!-- MTL build: SVS is SVM plus three changes, rebuilt from the running file after SVO had to be rolled back. A minor can no longer create a child sub-account and act as its guardian while needing one themselves; the Belts row in My profile starts hidden and appears once _gateBelts has asked whether the user has any, instead of showing and vanishing on every open; and a failed sign-in now states its reason, since one unchanging Invalid credentials box made a spent rate limit look identical to a wrong password. The async change to _consumeFamilyInvite is deliberately left out -- that function was already async, the keyword landed loose in the file and killed the whole script block, and the family link problem it was meant to fix lies elsewhere. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -4610,7 +4610,7 @@ const EVENT_CONSENT_EN='As the legal guardian I approve this minor\u2019s partic
 async function addChild(){
   const EN=LANG==='en';
   // Dítě může vést jen dospělý. Mladistvý sám potřebuje souhlas zástupce -- nemůže být zástupcem
-  // někoho dalšího. Kontrola je stejná, jaká už brání převzetí dítěte v _kidXferDoAccept.
+  // někoho dalšího. Stejná kontrola už brání převzetí dítěte v _kidXferDoAccept.
   try{
     const _mine=await _famMineInfo();
     if(_mine && _mine.minor){
@@ -4745,8 +4745,6 @@ async function _famGenLink(){
   if($('myKidsBody')) renderMyKids();
 }
 
-async // MUSÍ být async -- uvnitř se čeká na databázi. Bez toho je to syntaktická chyba, funkce se
-// vůbec nevytvoří a klepnutí na odkaz do Rodiny neudělá nic.
 async function _consumeFamilyInvite(tok){
   const EN=LANG==='en'; const me=currentUser&&currentUser.id; if(!me||!tok) return;
   let row=null;
@@ -21855,13 +21853,7 @@ $('meOnline').onclick=()=>{ openOnline('student'); };
 $('btnCloseOnline').onclick=()=>closeSheet('shOnline');
 $('meSettings').onclick=()=>{ refreshSettingsToggles(); if(typeof setupDangerZone==='function') setupDangerZone(); openSheet('shSettings'); };
 if($('meMilestones')) $('meMilestones').onclick=()=>openMilestones();
-if($('meMyProfileBtn')) $('meMyProfileBtn').onclick=()=>{
-    openSheet('shMyProfile');
-    // Oba řádky, které se řídí až daty, srovnat HNED při otevření -- jinak je vidět stav
-    // z minula, než dojede dotaz.
-    _gateBelts();
-    try{ if(typeof fillUserProfile==='function') fillUserProfile(); }catch(e){}
-  };
+if($('meMyProfileBtn')) $('meMyProfileBtn').onclick=()=>{ openSheet('shMyProfile'); _gateBelts(); };
 if($('meMyBeltsBtn')) $('meMyBeltsBtn').onclick=()=>openMyBelts();
 if($('btnCloseMyBelts')) $('btnCloseMyBelts').onclick=()=>closeSheet('shMyBelts');
 if($('meMyDiscBtn')) $('meMyDiscBtn').onclick=()=>openMyDisciplines();
@@ -29125,7 +29117,17 @@ $('btnAuthSubmit').onclick=async()=>{
     const _nf=$('authVerCode'); if(_nf) _nf.focus();
   } else {
     const { data, error } = await supaClient.auth.signInWithPassword({ email, password: pass });
-    if(error){ $('authError').style.display='block'; return; }
+    if(error){
+      // Ukázat DŮVOD. Dosud se rozsvítil jen rámeček "Neplatné přihlašovací údaje", takže
+      // vyčerpaný limit přihlášení vypadal stejně jako špatné heslo a nebylo podle čeho jednat.
+      console.log('[login]', error.message);
+      const _ae=$('authError');
+      if(_ae){ _ae.style.display='block';
+        _ae.textContent=/rate|limit|too many|seconds/i.test(error.message||'')
+          ? (LANG==='en'?'Too many attempts — wait a few minutes.':'Příliš mnoho pokusů — počkej pár minut.')
+          : (error.message||(LANG==='en'?'Invalid credentials':'Neplatné přihlašovací údaje')); }
+      return;
+    }
     $('authError').style.display='none';
     
     // Načti profil
