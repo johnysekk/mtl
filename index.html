@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SWG fixes the payment-request permission never appearing. Everything I added checked for a link status of confirmed, but the app writes active -- confirmed is not used anywhere -- so the checkbox was skipped, and _linkedGuardian and _payReqGuardian found nothing either, meaning the in-app consent route and the request buttons were dead too. All three now accept either value. -->
+<!-- MTL build: SWH takes a payment request straight to the payment. The notification named the class and the price but led nowhere, so the guardian had to find that class in the club themselves; tapping it now opens the pay window for exactly that drop-in or membership, falling back to the club profile if the detail is missing. The request button also sits above Later rather than at the top, since it is a way to pay rather than a way out, and a childrens membership says it cannot be bought instead of borrowing the wording for a class. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -11683,7 +11683,9 @@ async function _payReqButton(container, what, amount, currency, extra){
       if(ok){ b.textContent=(EN?'\u2705 Request sent':'\u2705 Žádost odeslána'); }
       else { b.disabled=false; b.style.opacity='1'; }
     };
-    container.appendChild(b);
+    // Když dostaneme konkrétní prvek (třeba tlačítko "Později"), vložíme se NAD něj.
+    if(container.parentNode && container.tagName==='BUTTON') container.parentNode.insertBefore(b, container);
+    else container.appendChild(b);
   }catch(e){ console.log('[payReqButton]', e&&e.message); }
 }
 
@@ -11839,8 +11841,12 @@ function openChildPicker(info, cb){
     const _r=(info && (info.ageMin!=null || info.ageMax!=null))
       ? ((info.ageMin!=null?info.ageMin:'')+(info.ageMax!=null?('\u2013'+info.ageMax):'+')+' '+(EN?'yrs':'let'))
       : '';
-    toast(EN?('This class is for children'+(_r?(' aged '+_r):'')+' \u2014 you cannot book it.')
-           :('Tahle lekce je pro d\u011bti'+(_r?(' ve v\u011bku '+_r):'')+' \u2014 p\u0159ihl\u00e1sit se do n\u00ed nelze.'));
+    const _isMemb=!!(info && info.memb);
+    toast(EN
+      ? (_isMemb ? ('This is a childrens membership'+(_r?(' for ages '+_r):'')+' \u2014 it cannot be bought.')
+                 : ('This class is for children'+(_r?(' aged '+_r):'')+' \u2014 it cannot be booked.'))
+      : (_isMemb ? ('Toto je d\u011btsk\u00e9 \u010dlenstv\u00ed'+(_r?(' pro v\u011bk '+_r):'')+' \u2014 zakoupit ho nelze.')
+                 : ('Tahle lekce je pro d\u011bti'+(_r?(' ve v\u011bku '+_r):'')+' \u2014 p\u0159ihl\u00e1sit se do n\u00ed nelze.')));
     return;
   }
   if(!kids.length){ toast(EN?'Add a child first in "Children".':'Nejdřív přidej dítě v „Děti".'); openMyKids(); return; }
@@ -11986,7 +11992,7 @@ async function subscribeGymMembership(g, plan, _child, _cleared){
   if(!currentUser){ toast(L('⚠️ Nejdřív se přihlas')); return; }
   if(!plan){ const pl=gymMembPlans(g); plan=pl[0]; }
   if(!plan){ toast(L('⚠️ Klub nemá nastavené členství')); return; }
-  if(plan.kids && _child===undefined){ return openChildPicker({parentReq:plan.parentReq, ageMin:plan.ageMin, ageMax:plan.ageMax}, (ch)=>subscribeGymMembership(g, plan, ch, _cleared)); }
+  if(plan.kids && _child===undefined){ return openChildPicker({parentReq:plan.parentReq, ageMin:plan.ageMin, ageMax:plan.ageMax, memb:true}, (ch)=>subscribeGymMembership(g, plan, ch, _cleared)); }
   if(!_cleared && !_child){ return gymTermsGate(g, ()=>subscribeGymMembership(g, plan, _child, true), true); }
   if(typeof _mtlPayMode==='function' && _mtlPayMode(g)==='qr_bank'){ return _onlineQrPay(g, null, _child, 'memb', plan); }
   const payee = await resolveGymPayee(g, plan);
@@ -18606,7 +18612,8 @@ async function _onlineQrPay(g, occ, _child, kind, plan){
     +'</div>';
   document.body.appendChild(ov);
   // Mladistvý bez vlastní karty může poslat účet zástupci. Platí za drop-in i členství.
-  try{ _payReqButton(ov.firstElementChild, label, price, cur, { gym_id:(g&&g.id)||null, gym_name:(g&&g.name)||'', kind:kind||'dropin' }); }catch(e){}
+  // Nad "Později" -- je to nabídka, jak zaplatit, ne odchod. Patří k platebním tlačítkům.
+  try{ _payReqButton(document.getElementById('oqrClose'), label, price, cur, { gym_id:(g&&g.id)||null, gym_name:(g&&g.name)||'', kind:kind||'dropin', occ:occ||null, plan_id:(plan&&plan.id)||null }); }catch(e){}
   try{ if(_pisOn){ var _card=ov.firstElementChild; var _tt=_card&&_card.firstElementChild; if(_tt) _tt.textContent='📲 '+(EN?'Pay from your bank':'Zaplatit z účtu'); } }catch(e){}
   const box=ov.querySelector('#oqrBox');
   if(box){ if(payload && window.QRCode){ new QRCode(box,{ text:payload, width:200, height:200, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { box.innerHTML='<div style="font-size:12px;color:var(--mid);line-height:1.6;">'+(EN?'Pay to:':'Zaplať na:')+'<br><b>'+escapeHtml(g.receiver_id_value||'')+'</b><br>'+fmtPrice(price,cur)+' '+sym+'</div>'; } }
@@ -22468,7 +22475,7 @@ async function loadNotifications(append){
     else if(k==='gym_member_joined_coach') linkLabel = LANG==='en'?'view ›':'zobrazit ›';
     else if(k==='family_active') linkLabel = LANG==='en'?'open Family ›':'otevřít Rodinu ›';
     else if(k==='minor_waiver_done') linkLabel = LANG==='en'?'open club ›':'otevřít klub ›';
-    else if(k==='pay_request') linkLabel = LANG==='en'?'open Family ›':'otevřít Rodinu ›';
+    else if(k==='pay_request') linkLabel = LANG==='en'?'pay ›':'zaplatit ›';
     else if(k==='beta_pending') linkLabel = LANG==='en'?'open admin ›':'otevřít admin ›';
     else if(k==='minor_waiver_req') linkLabel = LANG==='en'?'approve ›':'schválit ›';
     el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;${clickable?'cursor:pointer;':''}`;
@@ -22477,7 +22484,29 @@ async function loadNotifications(append){
       el.onclick=async()=>{
         closeSheet('shNotif');
         // Rodinné věci nahoru. Řetězec pod tím je dlouhý a snadno je předběhne něco jiného.
-        if(k==='family_active' || k==='family_request' || k==='minor_waiver' || k==='minor_event_consent' || k==='pay_request'){
+        if(k==='family_active' || k==='family_request' || k==='minor_waiver' || k==='minor_event_consent'){
+          try{ openMyKids(); }catch(e){}
+          return;
+        }
+        // Žádost o úhradu -- otevřít rovnou platbu té konkrétní věci. Posílat rodiče hledat lekci
+        // v klubu, když v žádosti přesně stojí která, je práce navíc pro nic.
+        if(k==='pay_request'){
+          try{
+            const _rq=JSON.parse(n.data||'{}');
+            if(_rq.gym_id){
+              const { data:_g }=await supaClient.from('gyms').select('*').eq('id',_rq.gym_id).single();
+              if(_g){
+                window._currentGym=_g;
+                if(_rq.kind==='memb' || _rq.kind==='membership'){
+                  const _pl=(typeof gymMembPlans==='function'?gymMembPlans(_g):[]).find(function(x){ return String(x.id)===String(_rq.plan_id); });
+                  if(_pl && typeof _onlineQrPay==='function'){ _onlineQrPay(_g, null, null, 'memb', _pl); return; }
+                } else if(_rq.occ && typeof _onlineQrPay==='function'){
+                  _onlineQrPay(_g, _rq.occ, null, 'dropin', null); return;
+                }
+                if(typeof openGymProfile==='function'){ openGymProfile(_g); return; }
+              }
+            }
+          }catch(e){ console.log('[payReq open]', e&&e.message); }
           try{ openMyKids(); }catch(e){}
           return;
         }
