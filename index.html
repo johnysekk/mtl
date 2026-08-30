@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SWJ makes the guardian payment land on the minor. Until now the request only opened the pay window and the booking was written against whoever was paying, so the attendance and the XP would have gone to the parent -- the opposite of the point. The pay window takes an optional on-behalf-of, and when it is set the booking, the reservation and the name recorded all belong to the minor while the parent settles the bill. The window says whose booking it is, so it is clear the payment is not for oneself. -->
+<!-- MTL build: SWL fixes payment requests never being recognised, and completes the Stripe half. The extra details passed with a request carry their own kind -- dropin, memb, event, merch -- and merging them over the payload overwrote kind:pay_request, so the notification called itself a dropin and matched nothing: no link, no route to the payment. The notification kind is now applied last and the item type travels as item_kind. On the Stripe rail the client was always sending its own id as studentId, so a guardian paying would have had the booking recorded against themselves; it now sends the minor id, which pay.js already accepts as a parameter -- no server change was needed. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -11739,9 +11739,13 @@ async function _sendPayRequest(what, amount, currency, extra){
     const { error:_ne }=await supaClient.from('notifications').insert({
       user_id: gp.id, type:'system', read:false,
       message:'\u{1F4B3} '+((currentUser&&currentUser.name)||'')+(EN?' asks you to pay for ':' tě žádá o úhradu: ')+String(what||'')+(_amt?(' \u00b7 '+_amt):''),
-      data: JSON.stringify(Object.assign({ kind:'pay_request', minor_id:currentUser.id,
+      // POZOR na pořadí: extra nese vlastní kind (dropin/memb/event/merch) a přepsalo by tím
+      // kind:'pay_request', podle kterého se notifikace pozná. Druh položky proto jde zvlášť
+      // jako item_kind a kind se dosazuje AŽ NAKONEC.
+      data: JSON.stringify(Object.assign({ minor_id:currentUser.id,
         minor_name:(currentUser&&currentUser.name)||'', what:String(what||''),
-        amount:amount, currency:currency||'CZK' }, extra||{}))
+        amount:amount, currency:currency||'CZK' }, extra||{},
+        { kind:'pay_request', item_kind:((extra&&extra.kind)||'dropin') }))
     });
     // Chyba zápisu se dřív spolkla a ohlásilo se "odesláno", i když nic nedorazilo.
     if(_ne){ console.log('[payRequest] notifikace se nezapsala:', _ne.message); toast('\u26a0\ufe0f '+_ne.message); return false; }
@@ -11992,6 +11996,9 @@ function _planTerm(plan){
   return out;
 }
 async function subscribeGymMembership(g, plan, _child, _cleared){
+  // Zástupce platí za mladistvého: rezervace i Stripe metadata musí nést JEHO id, ne id toho,
+  // kdo zrovna platí. Bez parametru se nic nemění.
+  const _payFor=(window._payOnBehalf&&window._payOnBehalf.id)||null;
   if(window._blockedByGyms && window._blockedByGyms.has(g.id)){ toast(LANG==='en'?'⚠️ Not available':'⚠️ Nedostupné'); return; }
   if(g && g.account_suspended){ toast(LANG==='en'?'⚠️ This club is temporarily paused':'⚠️ Tento klub je dočasně pozastavený'); return; }
   if(!currentUser){ toast(L('⚠️ Nejdřív se přihlas')); return; }
@@ -12025,11 +12032,14 @@ async function subscribeGymMembership(g, plan, _child, _cleared){
     { const _lid=plan.lead||payee.coachId||null; const _lnm=plan.lead?(plan.leadName||null):(payee.coachId?payee.name:null); if(_lid){ try{ await supaClient.from('gym_memberships').update({ lead_coach_id:_lid, lead_coach_name:_lnm }).eq('id', mb.id); }catch(e){} } }
     let _gymOwnerPartner=false, _ownerFounding=false, _ownerScore=0, _ownerBankai=false; try{ const _ppid=(payee&&payee.coachId)||g.owner_id; if(_ppid){ const { data: ow } = await supaClient.from('profiles').select('partner, founding, coach_ref_score,bankai_eligible').eq('id', _ppid).single(); _gymOwnerPartner=!!(ow&&ow.partner); _ownerFounding=!!(ow&&ow.founding); _ownerScore=(ow&&ow.coach_ref_score)||0; _ownerBankai=!!(ow&&ow.bankai_eligible); } }catch(e){}
     try{ if(mb&&mb.id) await supaClient.from('gym_memberships').update({gym_keep_pct:((typeof _gymOwnerPartner!=='undefined'&&_gymOwnerPartner)||(typeof _gp!=='undefined'&&_gp))?0.99:((typeof _ownerScore!=='undefined'&&_ownerScore>=10)?0.98:((typeof _ownerScore!=='undefined'&&_ownerScore>=3)?0.97:0.965))}).eq('id',mb.id); }catch(e){}
-    const url = `/api/pay?type=membership&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&planName=${encodeURIComponent(plan.name||'Membership')}&amount=${_term.price||0}&currency=${plan._cur||g.currency||'CZK'}&interval=month&months=${parseInt(plan.months,10)||1}${_term.endsOn?('&endsOn='+encodeURIComponent(_term.endsOn)):''}&membershipId=${encodeURIComponent(mb.id)}&gymId=${encodeURIComponent(g.id)}&studentId=${encodeURIComponent(currentUser.id)}&income=${encodeURIComponent(plan.income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&access=${encodeURIComponent(((plan.access&&plan.access.length)?plan.access:['all']).join(','))}&disc=${encodeURIComponent(plan.disc||'')}&partner=${_gymOwnerPartner?1:0}&fee=${(_ladderRate('stripe',{partner:_gymOwnerPartner,score:_ownerScore,bankai:_ownerBankai})*100)}&acq=${encodeURIComponent(_acqSrc(g))}${(window._gymRef && window._gymRef.gym===g.id && (g.member_ref_pct||0)>0) ? ('&refPct='+g.member_ref_pct+'&refUser='+encodeURIComponent(window._gymRef.ref||'')) : ''}`;
+    const url = `/api/pay?type=membership&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&planName=${encodeURIComponent(plan.name||'Membership')}&amount=${_term.price||0}&currency=${plan._cur||g.currency||'CZK'}&interval=month&months=${parseInt(plan.months,10)||1}${_term.endsOn?('&endsOn='+encodeURIComponent(_term.endsOn)):''}&membershipId=${encodeURIComponent(mb.id)}&gymId=${encodeURIComponent(g.id)}&studentId=${encodeURIComponent(_payFor||currentUser.id)}&income=${encodeURIComponent(plan.income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&access=${encodeURIComponent(((plan.access&&plan.access.length)?plan.access:['all']).join(','))}&disc=${encodeURIComponent(plan.disc||'')}&partner=${_gymOwnerPartner?1:0}&fee=${(_ladderRate('stripe',{partner:_gymOwnerPartner,score:_ownerScore,bankai:_ownerBankai})*100)}&acq=${encodeURIComponent(_acqSrc(g))}${(window._gymRef && window._gymRef.gym===g.id && (g.member_ref_pct||0)>0) ? ('&refPct='+g.member_ref_pct+'&refUser='+encodeURIComponent(window._gymRef.ref||'')) : ''}`;
     setTimeout(()=>{ window.location.href = url; }, 500);
   } catch(e){ console.error('subscribeGymMembership', e); toast('⚠️ '+e.message); }
 }
 async function bookGymDropin(g, occ, _child){
+  // Zástupce platí za mladistvého: rezervace i Stripe metadata musí nést JEHO id, ne id toho,
+  // kdo zrovna platí. Bez parametru se nic nemění.
+  const _payFor=(window._payOnBehalf&&window._payOnBehalf.id)||null;
   if(window._blockedByGyms && window._blockedByGyms.has(g.id)){ toast(LANG==='en'?'⚠️ Not available':'⚠️ Nedostupné'); return; }
   if(g && g.account_suspended){ toast(LANG==='en'?'⚠️ This club is temporarily paused':'⚠️ Tento klub je dočasně pozastavený'); return; }
   if(!currentUser){ toast(L('⚠️ Nejdřív se přihlas')); return; }
@@ -12067,7 +12077,7 @@ async function bookGymDropin(g, occ, _child){
     try{ localStorage.setItem('mtl_credit_used', _dropCreditUsed); }catch(e){}
     try{ localStorage.setItem('mtl_ref_disc', String(_dropRefD)); }catch(e){}
     if(_dropCreditUsed==='student'){ const _ccG=await _askCreditChoice((currentUser.student_credits||1), _dropRefD, _dp, _dcur); if(!_ccG){ _dropCreditUsed=''; _dropRefD=0; } }
-    const url = `/api/pay?type=gym&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&className=${encodeURIComponent(occ&&occ.name?occ.name:'Drop-in')}&amount=${_dp}&currency=${_dcur}&bookingId=${encodeURIComponent(bk.id)}&income=${encodeURIComponent(g.dropin_income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&level=${encodeURIComponent((occ&&occ.level)||'')}&disc=${encodeURIComponent((occ&&occ.disc)?occ.disc:parseDisc(g.disciplines).join(','))}&partner=${_gymOwnerPartner?1:0}&take=${(_ownerScore>=5&&_ownerBankai)?0.025:(_ownerScore>=2?0.03:0.035)}&credit=${_dropCreditUsed||'none'}&refDisc=${_dropRefD}&gymId=${encodeURIComponent(g.id)}&studentId=${currentUser?currentUser.id:''}&acq=${encodeURIComponent((typeof _acqSrc==='function'?_acqSrc(g):'')||'')}&coachId=${encodeURIComponent((occ&&occ.coach)||'')}`;
+    const url = `/api/pay?type=gym&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&className=${encodeURIComponent(occ&&occ.name?occ.name:'Drop-in')}&amount=${_dp}&currency=${_dcur}&bookingId=${encodeURIComponent(bk.id)}&income=${encodeURIComponent(g.dropin_income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&level=${encodeURIComponent((occ&&occ.level)||'')}&disc=${encodeURIComponent((occ&&occ.disc)?occ.disc:parseDisc(g.disciplines).join(','))}&partner=${_gymOwnerPartner?1:0}&take=${(_ownerScore>=5&&_ownerBankai)?0.025:(_ownerScore>=2?0.03:0.035)}&credit=${_dropCreditUsed||'none'}&refDisc=${_dropRefD}&gymId=${encodeURIComponent(g.id)}&studentId=${_payFor||(currentUser?currentUser.id:'')}&acq=${encodeURIComponent((typeof _acqSrc==='function'?_acqSrc(g):'')||'')}&coachId=${encodeURIComponent((occ&&occ.coach)||'')}`;
     setTimeout(()=>{ window.location.href = url; }, 500);
   } catch(e){ console.error('bookGymDropin', e); toast('⚠️ '+e.message); }
 }
@@ -22428,7 +22438,6 @@ async function loadNotifications(append){
       }; }
       list.appendChild(el); return;
     }
-    console.log('[notifDbg]', (n.message||'').slice(0,40), '| k=', k, '| type=', n.type);
     if(n.message==null) n.message='';  // system notifs (e.g. cover_needed) carry only data, no message -> guard n.message.includes below
     const isBookingConfirm = k ? k==='booking_confirm' : (n.type==='booking' && n.message.includes('Rezervace potvrzena'));
     const isCoachInperson = k ? k==='coach_new_inperson' : (n.type==='booking' && n.message.includes('Nová rezervace'));
@@ -22536,9 +22545,14 @@ async function loadNotifications(append){
               const { data:_g }=await supaClient.from('gyms').select('*').eq('id',_rq.gym_id).single();
               if(_g){
                 window._currentGym=_g;
-                // Platí zástupce, ale rezervace patří mladistvému -- proto _forWhom.
+                // Platí zástupce, ale rezervace patří mladistvému -- proto _forWhom. Stripe cesta
+                // si id bere z _payOnBehalf, protože jde jinudy (přesměrování na bránu).
                 const _forWhom={ id:_rq.minor_id, name:_rq.minor_name||'' };
-                if(_rq.kind==='memb' || _rq.kind==='membership'){
+                window._payOnBehalf=_forWhom;
+                // Uklidit po chvíli, ať to neovlivní další platbu, kterou rodič udělá sám za sebe.
+                setTimeout(function(){ window._payOnBehalf=null; }, 15*60000);
+                const _ik=_rq.item_kind||_rq.kind;
+                if(_ik==='memb' || _ik==='membership'){
                   const _pl=(typeof gymMembPlans==='function'?gymMembPlans(_g):[]).find(function(x){ return String(x.id)===String(_rq.plan_id); });
                   if(_pl && typeof _onlineQrPay==='function'){ _onlineQrPay(_g, null, null, 'memb', _pl, _forWhom); return; }
                 } else if(_rq.occ && typeof _onlineQrPay==='function'){
