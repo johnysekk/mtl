@@ -77,6 +77,23 @@ function prevMonth(ym) { const [y, m] = ym.split('-').map(Number); const d = new
 function _methodLabel(m){ return m==='stripe'?'Stripe (karta)':(m==='pis'?'Platba z banky':(m==='qr'?'QR platba':(m==='cash'?'Hotovost':(m||'\u2014')))); }
 function _pct(r){ return r!=null ? (Math.round(r*1000)/10).toString().replace('.',',')+' %' : '\u2014'; }
 function _money(minor, cur){ return (minor/100).toFixed(2).replace('.',',')+' '+String(cur).toUpperCase(); }
+
+// Krátký průvodní text k příloze. Celý doklad se dřív vypisoval i do těla e-mailu, takže ho
+// člověk dostal dvakrát -- a v mobilu musel dlouhou tabulkou prorolovat, aby se dostal k příloze,
+// která je to podstatné. Když příloha z nějakého důvodu nevznikne, pošle se doklad v těle dál.
+function dokladMailHtml(ME, buyer, kind, period, cur, data, test, testMode, hasPdf){
+  if(!hasPdf) return dokladHtml(ME, buyer, kind, period, cur, data, test, testMode);
+  const nm = (buyer && buyer.name) ? String(buyer.name) : '';
+  const tot = (data && data.total != null) ? data.total : null;
+  return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.6;">'
+    + (testMode ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:14px;">\u{1F9EA} TESTOVAC\u00cd RE\u017dIM \u2014 nejde o da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 re\u00e1ln\u00e9 transakci nedo\u0161lo</div>' : '')
+    + '<p style="margin:0 0 10px;">Dobr\u00fd den' + (nm ? (', ' + esc(nm)) : '') + ',</p>'
+    + '<p style="margin:0 0 10px;">v p\u0159\u00edloze posíl\u00e1me doklad o provizi MTL za obdob\u00ed <b>' + esc(periodLabel(period)) + '</b>'
+    + (tot != null ? (' \u2014 celkem <b>' + esc(_money(tot, cur)) + '</b>') : '') + '.</p>'
+    + '<p style="margin:0 0 10px;color:#666;font-size:13px;">Provize je ji\u017e str\u017een\u00e1 nebo na\u00fa\u010dtovan\u00e1. Nejde o v\u00fdzvu k platb\u011b.</p>'
+    + '<p style="margin:18px 0 0;color:#888;font-size:12px;">Martial Training Lab</p></div>';
+}
+
 function dokladHtml(ME, buyer, kind, period, cur, data, test, testMode){
   const _ph = test ? 'Nevypln\u011bno' : '';
   ME = ME || {}; const esc=function(x){ return String(x==null?'':x).replace(/[<>&]/g,function(c){return c==='<'?'&lt;':c==='>'?'&gt;':'&amp;';}); };
@@ -87,7 +104,8 @@ function dokladHtml(ME, buyer, kind, period, cur, data, test, testMode){
   const total = data.total;
   const supLines = ['<b>'+esc(ME.name||'Martial Training Lab s.r.o.')+'</b>', ME.ico?('I\u010cO: '+esc(ME.ico)):(_ph?('I\u010cO: '+_ph):''), ME.sidlo?esc(ME.sidlo):'', ME.dic?('DI\u010c: '+esc(ME.dic)):(_ph?('DI\u010c: '+_ph):''), ME.vat_id?('VAT ID: '+esc(ME.vat_id)):''].filter(Boolean).join('<br>');
   const bName = (buyer && (buyer.legal_name || buyer.name)) || '\u2014';
-  const buyLines = ['<b>'+esc(bName)+'</b>', (buyer&&buyer.tax_id)?('I\u010cO: '+esc(buyer.tax_id)):(_ph?('I\u010cO: '+_ph):''), (buyer&&buyer.billing_address)?esc(buyer.billing_address):'', (buyer&&buyer.vat_id)?('DI\u010c: '+esc(buyer.vat_id)):(_ph?('DI\u010c: '+_ph):'')].filter(Boolean).join('<br>');
+  const buyLines = ['<b>'+esc(bName)+'</b>',
+    (buyer&&buyer.name&&buyer.name!==bName)?('Klub v MTL: '+esc(buyer.name)):'', (buyer&&buyer.tax_id)?('I\u010cO: '+esc(buyer.tax_id)):(_ph?('I\u010cO: '+_ph):''), (buyer&&buyer.billing_address)?esc(buyer.billing_address):'', (buyer&&buyer.vat_id)?('DI\u010c: '+esc(buyer.vat_id)):(_ph?('DI\u010c: '+_ph):'')].filter(Boolean).join('<br>');
   let vatBlock;
   if(ME.vat_payer){ const rate=ME.vat_rate||21; const base=total/(1+rate/100); const vat=total-base; vatBlock='<tr><td>Z\u00e1klad dan\u011b</td><td style="text-align:right;">'+_money(base,cur)+'</td></tr><tr><td>DPH '+rate+'%</td><td style="text-align:right;">'+_money(vat,cur)+'</td></tr>'; }
   else { vatBlock='<tr><td colspan="2" style="font-size:11px;color:#666;padding-top:6px;">Dodavatel nen\u00ed pl\u00e1tcem DPH.</td></tr>'; }
@@ -120,10 +138,16 @@ function dokladPdf(ME, buyer, kind, period, cur, data, test, testMode){
       // Razítko testovacího režimu i v PDF. Příloha z mailu člověku zůstane na disku i po
       // smazání testovacích dat, takže bez něj vypadá jako pravý daňový doklad.
       if(testMode){
-        doc.rect(50, doc.y, 495, 26).fillAndStroke('#FDECEC', '#F3C0C0');
-        doc.fillColor('#8a1c1c').fontSize(10)
-           .text('TESTOVAC\u00cd RE\u017dIM \u2014 nejde o da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 re\u00e1ln\u00e9 transakci nedo\u0161lo', 58, doc.y - 18, { width: 480 });
-        doc.moveDown(1.2);
+        // fillAndStroke posune doc.y, takže dopočítávat pozici textu z něj znamenalo psát přes
+        // rámeček -- a logo pod ním se pak kreslilo taky do něj. Souřadnice se proto drží pevně
+        // a kurzor se nastaví AŽ POTOM, pod celý pruh.
+        const _ty = doc.y;
+        doc.rect(50, _ty, 495, 24).fillAndStroke('#FDECEC', '#F3C0C0');
+        doc.fillColor('#8a1c1c').fontSize(9)
+           .text('TESTOVAC\u00cd RE\u017dIM \u2014 nejde o da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 re\u00e1ln\u00e9 transakci nedo\u0161lo',
+                 58, _ty + 8, { width: 479, align: 'center', lineBreak: false });
+        doc.y = _ty + 24 + 14;
+        doc.x = 50;
       }
       doc.fontSize(22).fillColor('#E11111').text('MTL');
       doc.moveDown(0.15).fontSize(15).fillColor('#111111').text('Doklad o provizi MTL');
@@ -342,7 +366,7 @@ export default async function handler(req, res) {
           } catch (e) { console.error('doklad pdf', e.message); }
           // Předmět nese název klubu. Kdo má dva kluby, dostane dva e-maily naráz a bez toho by musel
           // otevírat přílohy, aby zjistil, který je který.
-          await sendEmail(em, `${_TESTMODE ? '[TEST] ' : ''}Doklad o provizi MTL — ${periodShort(period)}${(kind === 'gym' && buyer && buyer.name) ? (' — ' + buyer.name) : ''}`, dokladHtml(ME, buyer, kind, period, cur, data, DAILY, _TESTMODE), _att);
+          await sendEmail(em, `${_TESTMODE ? '[TEST] ' : ''}Doklad o provizi MTL — ${periodShort(period)}${(kind === 'gym' && buyer && buyer.name) ? (' — ' + buyer.name) : ''}`, dokladMailHtml(ME, buyer, kind, period, cur, data, DAILY, _TESTMODE, !!(_att && _att.length)), _att);
         } } catch (e) {}
     }
 
