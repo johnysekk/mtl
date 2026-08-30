@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SXC finds why bank payment failed for a drop-in paid to a coach. The payee object built for a coach was missing payment_mode, so the check for which rail they are on returned nothing, the sandbox was treated as off, and the bank list came back empty -- the column was being fetched all along and simply never copied across, as with the id and pis_test in the previous build. A reservation created for a bank payment is also removed again when the flow falls back to QR: it was written before the banks were known, so the class showed as booked although nothing had been paid. The QR path writes its own on confirmation. -->
+<!-- MTL build: SXK hides the reschedule button once a move is no longer possible, rather than offering it and refusing on the tap. A 1:1 booking showed it regardless; the club listing already checked the six hours and the counter, but carried its own limit of two while the rule said one, so the two now read the same constant. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -1632,7 +1632,7 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
         <p id="gymVatStatus" data-noi18n style="font-size:11.5px;font-weight:600;margin-top:4px;margin-bottom:12px;min-height:14px;"></p>
         <label style="display:flex;align-items:center;gap:9px;cursor:pointer;font-size:13.5px;font-weight:600;color:var(--dark);margin-top:12px;"><input type="checkbox" id="gymVatPayer" style="width:17px;height:17px;"> Jsem plátce DPH</label>
         <div id="gymVatRateRow" style="display:none;margin-top:7px;"><input type="number" id="gymVatRate" min="0" max="100" step="0.5" value="21" placeholder="Sazba DPH (%)" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;"></div>
-        <p style="font-size:11px;color:var(--light);line-height:1.4;margin-top:6px;margin-bottom:0;">Pokud nejsi plátce DPH, doklady studentům ukážou 0 Kč DPH + text „Dodavatel není plátcem DPH." Jako plátce se cena rozepíše na základ daně + DPH.</p>
+        <p style="font-size:11px;color:var(--light);line-height:1.4;margin-top:6px;margin-bottom:0;">Pokud nejsi plátce DPH, doklady studentům ukážou 0 Kč DPH + text „Poskytovatel není plátcem DPH." Jako plátce se cena rozepíše na základ daně + DPH.</p>
         <div id="gymNonprofitWrap" style="border-top:1px solid var(--border);margin-top:14px;padding-top:12px;display:none;">
           <label style="display:flex;align-items:flex-start;gap:9px;cursor:pointer;font-size:13.5px;font-weight:600;color:var(--dark);"><input type="checkbox" id="gymNonprofit" style="width:17px;height:17px;flex-shrink:0;margin-top:1px;"> <span>Jsme nezisková organizace / spolek</span></label>
           <p id="gymNonprofitHint" style="display:none;font-size:11.5px;color:var(--mid);line-height:1.55;margin-top:8px;margin-bottom:0;background:#F0FBF4;border:1px solid #BBE8CF;border-radius:10px;padding:10px 12px;">U každé ceny pak odlišíš hlavní činnost (členské příspěvky) od vedlejší (placené služby a lekce) — appka ti příjmy podle toho rozdělí pro účetnictví a daň z příjmu. Zařazení určuješ ty, MTL ho jen zaznamenává. I spolek může být plátcem DPH — týká se jen vedlejší činnosti nad zákonný limit. Ověř s účetní.</p>
@@ -12293,10 +12293,127 @@ async function openGymReschedule(b){
     });
   }
 }
+
+// ── POTVRZENÍ O ZMĚNĚ TERMÍNU ────────────────────────────────────────────────────────────────
+// Doklad je neměnný: co na něm stálo při vystavení, tam zůstane. Přesun proto nesahá do dokladu,
+// ale vystaví SAMOSTATNÝ dokument -- stejně jako se faktura neopravuje přepsáním, ale opravným
+// dokladem. Odkazuje na původní doklad, takže je jasné, čeho se týká, a dostanou ho obě strany.
+// Přesuny jsou omezené na dva, takže vzniknou nejvýš dvě a druhé odkazuje na první.
+
+// Potvrzení o změně termínu -- otevře se z notifikace nebo z historie. Je to samostatný doklad,
+// tak vypadá jako doklad: obě strany, čeho se týká, co se změnilo, a odkaz na původní doklad.
+async function showRescheduleConfirmation(id){
+  const EN=LANG==='en';
+  let c=null;
+  try{ const { data }=await supaClient.from('reschedule_confirmations').select('*').eq('id',id).single(); c=data; }catch(e){}
+  if(!c){ toast('\u26a0\ufe0f'); return; }
+  const w=window.open('', '_blank');
+  if(!w){ toast(EN?'Allow pop-ups to view it':'Povol vyskakovací okna'); return; }
+  const esc=(typeof escapeHtml==='function')?escapeHtml:(x=>String(x==null?'':x));
+  const issued=new Date(c.created_at).toLocaleDateString(EN?'en-GB':'cs-CZ');
+  const row=(l,v)=>'<div class="row"><span>'+l+'</span><strong>'+esc(v)+'</strong></div>';
+  w.document.write('<html><head><meta charset="utf-8"><title>'+(EN?'Change of session date':'Potvrzení o změně termínu')+'</title>'
+    +'<style>body{font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;max-width:640px;margin:24px auto;padding:0 18px;line-height:1.5;}'
+    +'h1{font-size:19px;margin:0 0 2px;}.row{display:flex;justify-content:space-between;gap:16px;padding:7px 0;border-bottom:1px solid #eee;font-size:13px;}'
+    +'.row span{color:#666;}.note{font-size:11px;color:#999;margin-top:16px;line-height:1.6;}@media print{button{display:none;}}</style></head><body>'
+    +'<h1>'+(EN?'Change of session date':'Potvrzení o změně termínu')+'</h1>'
+    +(c.test_mode?'<div style="margin:10px 0;padding:9px 12px;background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font-size:12px;font-weight:700;">\u{1F9EA} '+(EN?'TEST MODE':'TESTOVACÍ REŽIM')+'</div>':'')
+    +'<div style="font-size:13px;color:#666;margin-bottom:14px;">'+(EN?'Issued: ':'Vystaveno: ')+issued+' \u00b7 '+(EN?'change no. ':'změna č. ')+(c.seq||1)+'/2</div>'
+    +'<div style="margin-top:18px;">'
+    +row(EN?'Provider':'Poskytovatel', c.provider_name||'—')
+    +row(EN?'Customer':'Odběratel', c.student_name||'—')
+    +row(EN?'Original date':'Původní termín', _fmtSess(c.from_at))
+    +row(EN?'New date':'Nový termín', _fmtSess(c.to_at))
+    +row(EN?'Price':'Cena', (EN?'unchanged':'beze změny'))
+    +'</div>'
+    +'<p class="note">'+(EN
+      ? 'This document records a change of the session date only. The original receipt is unchanged and remains valid.'
+      : 'Tento dokument dokládá pouze změnu termínu lekce. Původní doklad se nemění a zůstává v platnosti.')+'</p>'
+    +'<button onclick="window.print()" style="margin-top:16px;padding:10px 16px;background:#141414;color:#fff;border:none;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;">'
+    +(EN?'Print / Save PDF':'Tisk / Uložit PDF')+'</button></body></html>');
+  w.document.close();
+}
+
+async function _issueRescheduleConfirmation(o){
+  try{
+    if(!o || !o.from_at || !o.to_at) return null;
+    const _seq=(Number(o.prev_count)||0)+1;
+    // Předchozí potvrzení -- řetěz musí být dohledatelný.
+    let _prevId=null;
+    try{
+      if(o.booking_id){
+        const { data:_p }=await supaClient.from('reschedule_confirmations')
+          .select('id').eq('booking_id',o.booking_id).order('created_at',{ascending:false}).limit(1);
+        _prevId=(_p&&_p[0]&&_p[0].id)||null;
+      }
+    }catch(e){}
+    const row={
+      booking_id:o.booking_id||null, booking_kind:o.booking_kind||'dropin',
+      transaction_id:o.transaction_id||null, prev_conf_id:_prevId,
+      student_id:(currentUser&&currentUser.id)||null,
+      student_name:(currentUser&&currentUser.name)||'',
+      gym_id:o.gym_id||null, coach_id:o.coach_id||null,
+      provider_name:o.provider_name||'',
+      seq:_seq, from_at:String(o.from_at), to_at:String(o.to_at),
+      amount:(o.amount!=null?o.amount:null), currency:o.currency||'CZK'
+    };
+    const { data:_ins, error }=await supaClient.from('reschedule_confirmations').insert(row).select('id').single();
+    if(error){ console.log('[resched] potvrzeni se nezapsalo:', error.message); return null; }
+    // Druhá strana se to musí dozvědět -- pro klub je to doklad, že o přesunu ví.
+    try{
+      const _to=o.coach_id||null;
+      const _msg='\u{1F504} '+(row.student_name||'Student')+(LANG==='en'?' moved a session: ':' přesunul lekci: ')
+        +_fmtSess(o.from_at)+' \u2192 '+_fmtSess(o.to_at);
+      if(_to) await supaClient.from('notifications').insert({ user_id:_to, type:'system', read:false,
+        message:_msg, data:JSON.stringify({ kind:'resched_conf', conf_id:_ins&&_ins.id }) });
+    }catch(e){}
+    return (_ins&&_ins.id)||null;
+  }catch(e){ console.log('[resched]', e&&e.message); return null; }
+}
+// Termín čitelně: 1. 9. 2026 18:00
+function _fmtSess(v){
+  try{
+    const m=String(v||'').match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}:\d{2}))?/);
+    if(!m) return String(v||'');
+    return parseInt(m[3],10)+'. '+parseInt(m[2],10)+'. '+m[1]+(m[4]?(' '+m[4]):'');
+  }catch(e){ return String(v||''); }
+}
+
+
+// ── PRAVIDLA PŘESUNU ─────────────────────────────────────────────────────────────────────────
+// Jeden přesun a nejpozději 6 hodin před začátkem. Druhý přesun je pro kouče k nerozeznání od
+// storna -- termín mu drží někdo, kdo se ještě dvakrát rozmyslí -- a přesun na poslední chvíli
+// je totéž jako zrušení: čas už nikomu jinému nenabídne.
+const RESCHED_MAX = 1;
+const RESCHED_MIN_HOURS = 6;
+// Vrátí text chyby, nebo null když se přesunout smí.
+function _reschedBlocked(count, dateStr, timeStr){
+  const EN=LANG==='en';
+  if((count||0) >= RESCHED_MAX){
+    return EN ? 'This booking has already been moved once — that is the limit.'
+              : 'Tuhle rezervaci už jsi jednou přesunul/a — víc to nejde.';
+  }
+  try{
+    const _d=String(dateStr||''); const _t=String(timeStr||'00:00');
+    if(_d){
+      const _start=new Date(_d+'T'+(_t.length===5?_t:'00:00')+':00');
+      if(!isNaN(_start.getTime())){
+        const _hrs=(_start.getTime()-Date.now())/3600000;
+        if(_hrs < RESCHED_MIN_HOURS){
+          return EN ? ('Sessions can be moved up to '+RESCHED_MIN_HOURS+' hours before they start.')
+                    : ('Přesunout jde nejpozději '+RESCHED_MIN_HOURS+' hodin před začátkem.');
+        }
+      }
+    }
+  }catch(e){}
+  return null;
+}
+
 async function doGymReschedule(occ){
   const b = window._gymReschedBooking;
   if(!b) return;
-  if((b.reschedule_count||0) >= 2){ toast(LANG==='en'?'⚠️ You have used both reschedules for this drop-in.':'⚠️ Oba přesuny tohoto jednorázové lekce jsou vyčerpané.'); return; }
+  { const _e=_reschedBlocked(b.reschedule_count, b.class_date||b.date, b.class_time||b.time);
+    if(_e){ toast('\u26a0\ufe0f '+_e); return; } }
   const dd=new Date(occ.date);
   const dayName=dowShort()[dd.getDay()];
   const newStr=`${dayName} ${dd.getDate()}.${dd.getMonth()+1}. · ${occ.time}`;
@@ -12321,6 +12438,18 @@ async function doGymReschedule(occ){
     const patch = { class_name: occ.name||null, class_date: occ.date||null, class_time: occ.time||null, reschedule_count: (b.reschedule_count||0)+1 };
     if(occ.disc){ patch.discipline = occ.disc; }
     await supaClient.from('gym_bookings').update(patch).eq('id', b.id);
+    // Doklad se nemění -- vystaví se samostatné potvrzení o změně termínu pro obě strany.
+    try{
+      await _issueRescheduleConfirmation({
+        booking_id:b.id, booking_kind:'dropin',
+        gym_id:b.gym_id||null, coach_id:b.coach_id||null,
+        provider_name:b.gym_name||'',
+        from_at:((b.class_date||b.date||'')+(b.class_time?(' '+b.class_time):'')),
+        to_at:((occ.date||'')+(occ.time?(' '+occ.time):'')),
+        amount:b.amount, currency:b.currency||'CZK',
+        prev_count:(b.reschedule_count||0)
+      });
+    }catch(e){}
     // notifikace klubu (best-effort)
     try{
       const { data:g } = await supaClient.from('gyms').select('owner_id').eq('id', b.gym_id).single();
@@ -16413,7 +16542,7 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
     <p id="orgFormHint" style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:16px;"></p>
     </div>
     ${_countrySel('mgCountry', g.billing_country)}
-    <input id="mgLegalName" value="${(g.legal_name||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Legal name':'Jméno / název'}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:8px;"><input id="mgBillingAddr" value="${(g.billing_address||'').replace(/"/g,'&quot;')}" placeholder="${_le?(LANG==='en'?'Registered office':'Sídlo'):(LANG==='en'?'Address':'Adresa')}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:8px;"><input id="mgTaxId" value="${(g.tax_id||'').replace(/"/g,'&quot;')}" placeholder="IČO" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:4px;"><p style="font-size:11px;color:var(--light);line-height:1.4;margin:0 0 8px;">${LANG==='en'?'Business ID you invoice under — your own, or your company\'s / association\'s.':'IČO, pod kterým fakturuješ — tvoje vlastní, nebo firmy či spolku.'}</p><p id="mgTaxStatus" data-noi18n style="font-size:11.5px;font-weight:600;margin:-4px 0 8px;"></p><input id="mgVatId" value="${(g.vat_id||'').replace(/"/g,'&quot;')}" placeholder="DIČ / VAT ID" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:4px;"><p style="font-size:11px;color:var(--light);line-height:1.4;margin:0 0 6px;">${LANG==='en'?'Tax (VAT) number — used when providing/receiving services within the EU and once you become a VAT payer.':'Daňové (VAT) číslo — užívá se při poskytování/odběru služeb v rámci EU a jakmile jsi plátce DPH.'}</p><p id="mgVatStatus" data-noi18n style="font-size:11.5px;font-weight:600;margin:-4px 0 8px;"></p>${(typeof _mtlPayMode==='function'&&_mtlPayMode(g)==='stripe')?`<p style="font-size:11px;color:#9a6b00;line-height:1.45;background:#FFFBEF;border:1px solid #F0E0A8;border-radius:9px;padding:7px 9px;margin:0 0 14px;">${LANG==='en'?'⚠️ On your first payment Stripe (Ireland) charges a fee = an EU service. That makes you (as a non-VAT-payer) a VAT-identified person — register within 15 days and add your DIČ. Confirm with your accountant.':'⚠️ Při první platbě ti Stripe (Irsko) strhne poplatek = služba z EU. Tím se (jako neplátce DPH) stáváš identifikovanou osobou — do 15 dnů se zaregistruj a doplň DIČ. Ověř s účetní.'}</p>`:`<p style="font-size:11px;color:var(--light);line-height:1.45;margin:0 0 14px;">${LANG==='en'?'Commission on QR/cash is charged monthly from your card-on-file (no Stripe). Confirm tax specifics with your accountant.':'Provize z QR/cash se strhává měsíčně z karty na provizi (bez Stripe). Daňové specifika ověř s účetní.'}</p>`}<div class="sec-lbl" style="margin-top:14px;">${LANG==='en'?'VAT (DPH)':'DPH'}</div><label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px;font-weight:600;color:var(--dark);margin-bottom:6px;"><input type="checkbox" id="mgVatPayer" ${g.vat_payer?'checked':''} style="width:18px;height:18px;"> ${LANG==='en'?'I am a VAT payer':'Jsem plátce DPH'}</label><p style="font-size:11.5px;color:var(--light);line-height:1.45;margin:0 0 8px;">${LANG==='en'?'Off = receipts show 0 VAT + the note "supplier is not a VAT payer". On = receipts break the price into net + VAT at your rate.':'Vypnuto = doklady ukazují 0 Kč DPH + text „Dodavatel není plátcem DPH." Zapnuto = doklady rozepíšou cenu na základ daně + DPH dle tvé sazby.'}</p><div id="mgVatRateRow" style="${g.vat_payer?'':'display:none;'}margin-bottom:18px;"><div class="sec-lbl">${LANG==='en'?'VAT rate (%)':'Sazba DPH (%)'}</div><input id="mgVatRate" type="number" min="0" max="100" step="0.5" value="${g.vat_rate!=null?g.vat_rate:21}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';"></div><div class="sec-lbl" style="margin-top:14px;">${LANG==='en'?'📨 Invoice delivery':'📨 Doručení faktury'}</div><input id="mgInvoiceEmail" type="email" value="${(g.invoice_email||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Billing e-mail (where invoices go)':'Fakturační e-mail (kam chodí faktury)'}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:4px;"><p style="font-size:11px;color:var(--light);line-height:1.4;margin:0 0 14px;">${LANG==='en'?'MTL sends the club\'s monthly commission invoice here.':'Sem MTL pošle měsíční fakturu klubu za provizi.'}</p><button id="mgSave" class="mgSaveSec" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-top:8px;">${LANG==='en'?'Save changes':'Uložit změny'}</button>
+    <input id="mgLegalName" value="${(g.legal_name||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Legal name':'Jméno / název'}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:8px;"><input id="mgBillingAddr" value="${(g.billing_address||'').replace(/"/g,'&quot;')}" placeholder="${_le?(LANG==='en'?'Registered office':'Sídlo'):(LANG==='en'?'Address':'Adresa')}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:8px;"><input id="mgTaxId" value="${(g.tax_id||'').replace(/"/g,'&quot;')}" placeholder="IČO" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:4px;"><p style="font-size:11px;color:var(--light);line-height:1.4;margin:0 0 8px;">${LANG==='en'?'Business ID you invoice under — your own, or your company\'s / association\'s.':'IČO, pod kterým fakturuješ — tvoje vlastní, nebo firmy či spolku.'}</p><p id="mgTaxStatus" data-noi18n style="font-size:11.5px;font-weight:600;margin:-4px 0 8px;"></p><input id="mgVatId" value="${(g.vat_id||'').replace(/"/g,'&quot;')}" placeholder="DIČ / VAT ID" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:4px;"><p style="font-size:11px;color:var(--light);line-height:1.4;margin:0 0 6px;">${LANG==='en'?'Tax (VAT) number — used when providing/receiving services within the EU and once you become a VAT payer.':'Daňové (VAT) číslo — užívá se při poskytování/odběru služeb v rámci EU a jakmile jsi plátce DPH.'}</p><p id="mgVatStatus" data-noi18n style="font-size:11.5px;font-weight:600;margin:-4px 0 8px;"></p>${(typeof _mtlPayMode==='function'&&_mtlPayMode(g)==='stripe')?`<p style="font-size:11px;color:#9a6b00;line-height:1.45;background:#FFFBEF;border:1px solid #F0E0A8;border-radius:9px;padding:7px 9px;margin:0 0 14px;">${LANG==='en'?'⚠️ On your first payment Stripe (Ireland) charges a fee = an EU service. That makes you (as a non-VAT-payer) a VAT-identified person — register within 15 days and add your DIČ. Confirm with your accountant.':'⚠️ Při první platbě ti Stripe (Irsko) strhne poplatek = služba z EU. Tím se (jako neplátce DPH) stáváš identifikovanou osobou — do 15 dnů se zaregistruj a doplň DIČ. Ověř s účetní.'}</p>`:`<p style="font-size:11px;color:var(--light);line-height:1.45;margin:0 0 14px;">${LANG==='en'?'Commission on QR/cash is charged monthly from your card-on-file (no Stripe). Confirm tax specifics with your accountant.':'Provize z QR/cash se strhává měsíčně z karty na provizi (bez Stripe). Daňové specifika ověř s účetní.'}</p>`}<div class="sec-lbl" style="margin-top:14px;">${LANG==='en'?'VAT (DPH)':'DPH'}</div><label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:14px;font-weight:600;color:var(--dark);margin-bottom:6px;"><input type="checkbox" id="mgVatPayer" ${g.vat_payer?'checked':''} style="width:18px;height:18px;"> ${LANG==='en'?'I am a VAT payer':'Jsem plátce DPH'}</label><p style="font-size:11.5px;color:var(--light);line-height:1.45;margin:0 0 8px;">${LANG==='en'?'Off = receipts show 0 VAT + the note "the provider is not a VAT payer". On = receipts break the price into net + VAT at your rate.':'Vypnuto = doklady ukazují 0 Kč DPH + text „Poskytovatel není plátcem DPH." Zapnuto = doklady rozepíšou cenu na základ daně + DPH dle tvé sazby.'}</p><div id="mgVatRateRow" style="${g.vat_payer?'':'display:none;'}margin-bottom:18px;"><div class="sec-lbl">${LANG==='en'?'VAT rate (%)':'Sazba DPH (%)'}</div><input id="mgVatRate" type="number" min="0" max="100" step="0.5" value="${g.vat_rate!=null?g.vat_rate:21}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';"></div><div class="sec-lbl" style="margin-top:14px;">${LANG==='en'?'📨 Invoice delivery':'📨 Doručení faktury'}</div><input id="mgInvoiceEmail" type="email" value="${(g.invoice_email||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Billing e-mail (where invoices go)':'Fakturační e-mail (kam chodí faktury)'}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:4px;"><p style="font-size:11px;color:var(--light);line-height:1.4;margin:0 0 14px;">${LANG==='en'?'MTL sends the club\'s monthly commission invoice here.':'Sem MTL pošle měsíční fakturu klubu za provizi.'}</p><button id="mgSave" class="mgSaveSec" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-top:8px;">${LANG==='en'?'Save changes':'Uložit změny'}</button>
     </div></details><button onclick="_openFinance('club')" style="width:100%;border:1px solid var(--border);border-radius:14px;margin-bottom:12px;background:var(--surf);padding:14px 16px;font-size:14px;font-weight:800;color:var(--dark);display:flex;justify-content:space-between;align-items:center;gap:10px;cursor:pointer;font-family:'DM Sans';text-align:left;"><span>💰 Finance a doklady</span><span style="color:var(--light);font-size:16px;">›</span></button>
 
     </div>
@@ -18824,7 +18953,7 @@ async function _recordCashTx(row){
     const tok=await _freshTok(force);
     if(!tok) return { data:null, error:{ message:(LANG==='en'?'Not signed in':'Nejsi přihlášen'), _retriable:true } };
     let r;
-    try{ r=await fetch('/api/record-cash',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ token:tok, provider:row.provider||'gym', gym_id:row.gym_id, member_id:row.member_id, coach_id:row.coach_id, gross_amount:row.gross_amount, currency:row.currency, type:row.type, payment_method:row.payment_method, cash_payer_name:row.cash_payer_name, acq_source:row.acq_source, source_booking_id:row.source_booking_id, credit:row.credit, cohort_id:row.cohort_id, income_class:row.income_class }) }); }
+    try{ r=await fetch('/api/record-cash',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ token:tok, provider:row.provider||'gym', gym_id:row.gym_id, member_id:row.member_id, coach_id:row.coach_id, paid_by:row.paid_by, paid_by_name:row.paid_by_name, session_at_issue:row.session_at_issue, gross_amount:row.gross_amount, currency:row.currency, type:row.type, payment_method:row.payment_method, cash_payer_name:row.cash_payer_name, acq_source:row.acq_source, source_booking_id:row.source_booking_id, credit:row.credit, cohort_id:row.cohort_id, income_class:row.income_class }) }); }
     catch(e){ return { data:null, error:{ message:(e&&e.message)||'network', _retriable:true } }; }
     const j=await r.json().catch(function(){ return {}; });
     if(!r.ok) return { data:null, error:{ message:(j&&j.error)||('HTTP '+r.status), _retriable:(r.status===401||r.status===403||r.status===408||r.status>=500) } };
@@ -18844,7 +18973,10 @@ async function _qrcConfirm(id, kind, ok, drops, membs){
       if(!ok){ await _qrRequeue('gym_bookings', id, b.student_id||null, b.class_name||null); toast(EN?'Sent back to the student \u00b7 spot still held':'Vr\u00e1ceno studentovi \u00b7 m\u00edsto dr\u017e\u00edme',1); return _rer(); }
       const amount_minor=Math.round((b.amount||0)*100); const fee_minor=Math.round(amount_minor*rate);
       const _upB=await supaClient.from('gym_bookings').update({ status:'active' }).eq('id',id); if(_upB&&_upB.error){ toast('\u26a0\ufe0f '+(_upB.error.message||'')); return _rer(); }
-      const _txB=await _recordCashTx({ gym_id:g.id, member_id:b.student_id||null, coach_id:b.coach_id||null, paid_to:'gym', gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:b.currency||cur, type:'drop_in', status:'completed', payment_method:'qr', commission_status:'pending', commission_month:month, cash_payer_name:b.student_name||null, acq_source:b.acq_source||'direct', source_booking_id:b.id, credit:(b.credit_used==='student'?'student':undefined) }); if(_txB&&_txB.error){ toast('\u26a0\ufe0f '+(EN?'Confirmed, but the bookkeeping write failed \u2014 ':'Potvrzeno, ale zápis do účetnictví selhal \u2014 ')+(_txB.error.message||'')); } try{ if(b&&b.student_id){ await supaClient.from('notifications').insert({ user_id:b.student_id, type:'booking', read:false, message:(LANG==='en'?'\u2705 Payment confirmed':'\u2705 Platba potvrzena'), data:JSON.stringify({ kind:'payment_confirmed', gym:g.id, gym_name:(g.name||''), amount:(fmtPrice(b.amount||0, b.currency||cur)+' '+_curSym(b.currency||cur)), item:(b.class_name||''), goto:'dropin' }) }); } }catch(e){}
+      const _txB=await // paid_to rozhoduje, komu se provize připíše a komu půjde doklad. Bylo tu natvrdo 'gym',
+      // takže drop-in placený koučovi se účtoval klubu a doklad chodil majiteli místo kouči.
+      // Rezervace si nese vlastní paid_to z doby vzniku -- řídíme se jím.
+      _recordCashTx({ gym_id:(b.paid_to==='coach'?null:g.id), member_id:b.student_id||null, coach_id:b.coach_id||null, paid_to:(b.paid_to==='coach'?'coach':'gym'), provider:(b.paid_to==='coach'?'coach':'gym'), gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:b.currency||cur, type:'drop_in', status:'completed', payment_method:'qr', commission_status:'pending', commission_month:month, cash_payer_name:b.student_name||null, acq_source:b.acq_source||'direct', source_booking_id:b.id, credit:(b.credit_used==='student'?'student':undefined) }); if(_txB&&_txB.error){ toast('\u26a0\ufe0f '+(EN?'Confirmed, but the bookkeeping write failed \u2014 ':'Potvrzeno, ale zápis do účetnictví selhal \u2014 ')+(_txB.error.message||'')); } try{ if(b&&b.student_id){ await supaClient.from('notifications').insert({ user_id:b.student_id, type:'booking', read:false, message:(LANG==='en'?'\u2705 Payment confirmed':'\u2705 Platba potvrzena'), data:JSON.stringify({ kind:'payment_confirmed', gym:g.id, gym_name:(g.name||''), amount:(fmtPrice(b.amount||0, b.currency||cur)+' '+_curSym(b.currency||cur)), item:(b.class_name||''), goto:'dropin' }) }); } }catch(e){}
       toast((EN?'\u2705 Confirmed':'\u2705 Potvrzeno'), 1);
     } else {
       let m=(membs||[]).find(function(x){ return String(x.id)===String(id); }); if(!m){ try{ const r=await supaClient.from('gym_memberships').select('*').eq('id',id).single(); m=(r&&r.data)||null; }catch(e){} } if(!m){ toast(EN?'\u26a0\ufe0f Membership not found':'\u26a0\ufe0f \u010clenstv\u00ed nenalezeno'); return _rer(); } if(ok && (m.status==='active'||m.status==='completed')){ toast(EN?'Already handled':'Ji\u017e vy\u0159\u00edzeno', 1); return _rer(); }
@@ -22610,8 +22742,8 @@ async function loadNotifications(append){
     else if(k==='gym_member_joined_coach') linkLabel = LANG==='en'?'View ›':'Zobrazit ›';
     else if(k==='family_active') linkLabel = LANG==='en'?'Open Family ›':'Otevřít Rodinu ›';
     else if(k==='minor_waiver_done') linkLabel = LANG==='en'?'Open club ›':'Otevřít klub ›';
-    else if(k==='pay_request'){ linkLabel = LANG==='en'?'Pay ›':'Zaplatit ›';
-      try{ console.log('[payReqNotif]', JSON.parse(n.data||'{}')); }catch(e){ console.log('[payReqNotif] data se nedaji precist:', n.data); } }
+    else if(k==='pay_request') linkLabel = LANG==='en'?'Pay ›':'Zaplatit ›';
+    else if(k==='resched_conf') linkLabel = LANG==='en'?'Open confirmation ›':'Otevřít potvrzení ›';
     else if(k==='beta_pending') linkLabel = LANG==='en'?'Open admin ›':'Otevřít admin ›';
     else if(k==='minor_waiver_req') linkLabel = LANG==='en'?'Approve ›':'Schválit ›';
     el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;${clickable?'cursor:pointer;':''}`;
@@ -26149,7 +26281,7 @@ function showEpReceipt(p){
       vatBlock=`<div class="row"><span>${EN?'Net amount':'Základ daně'}</span><span>${fmt(base)} ${sym}</span></div><div class="row"><span>${EN?'VAT':'DPH'} ${rate}%</span><span>${fmt(vat)} ${sym}</span></div><div class="row"><span>${EN?'Total':'Celkem'}</span><strong>${fmt(amt)} ${sym}</strong></div>`;
     } else {
       vatBlock=`<div class="row"><span>${EN?'Total':'Celkem'}</span><strong>${fmt(amt)} ${sym}</strong></div>`
-        +`<div class="note">${EN?'The supplier is not a VAT payer.':'Dodavatel není plátcem DPH.'}</div>`;
+        +`<div class="note">${EN?'The provider is not a VAT payer.':'Poskytovatel není plátcem DPH.'}</div>`;
     }
     const html=`<!doctype html><html><head><meta charset="utf-8"><title>${EN?'Payment confirmation':'Potvrzení o platbě'}</title>`
       +`<style>body{font-family:-apple-system,Arial,sans-serif;color:#1a1a1a;max-width:600px;margin:30px auto;padding:0 20px;line-height:1.5}h1{font-size:26px;margin:0}.muted{color:#888}.row{display:flex;justify-content:space-between;gap:14px;padding:8px 0;border-bottom:1px solid #eee}.note{color:#888;font-size:12px;margin-top:14px;line-height:1.5}.btn{margin-top:22px;padding:13px 18px;background:#141414;color:#fff;border:none;border-radius:10px;font-size:15px;cursor:pointer}</style></head><body>`
@@ -28210,7 +28342,7 @@ function subscribeRealtime(){
       const claimed=b.status==='paid_claimed';
       const canChange=!claimed && hrs>=6;
       const discTag=(b.discipline && isMultiDiscipline())?` · ${disciplineEmoji(b.discipline)} ${disciplineLabel(b.discipline)}`:'';
-      const rc=b.reschedule_count||0; const canResched=canChange && rc<2;
+      const rc=b.reschedule_count||0; const canResched=canChange && rc<RESCHED_MAX;
       const windowTxt=canChange?((b.payment_method==='qr')?(EN?'Free reschedule (6+ h before)':'Přesun zdarma (6+ h před lekcí)'):(EN?'Free reschedule / 95% refund (6+ h before)':'Přesun zdarma / 95 % zpět (6+ h před lekcí)')):(claimed?'':((b.payment_method==='qr')?(EN?'Less than 6 h before — no change':'Méně než 6 h před lekcí — bez změny'):(EN?'Less than 6 h before — no change/refund':'Méně než 6 h před lekcí — bez změny/vrácení')));
       return `<div style="background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px;">
         <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.03em;color:var(--dark);">${escapeHtml(b.gym_name||'Klub')}</div>
@@ -28444,7 +28576,7 @@ async function loadBookings(mode){
         <div style="font-size:12px;font-weight:700;color:${(Number(b.capacity)||1)>1?'#6B4FBB':'var(--light)'};margin:2px 0 4px;">${(Number(b.capacity)||1)>1?('👥 '+(LANG==='en'?'Group':'Skupinová')+' 1:'+(Number(b.capacity)||1)):('🥊 1:1')}</div>
         <div style="font-size:13px;color:var(--dark);margin-bottom:12px;">${fmtPrice(b.amount*1, b.currency)} ${sym}${refundInfo?(' · '+(LANG==='en'?'If cancelled now':'Při zrušení teď')+': <strong>'+refundInfo+'</strong>'):''}</div>
         <button class="calBtn" data-id="${b.id}" data-coach="${b.coach_name}" data-date="${b.training_date}" data-time="${b.training_time}" style="width:100%;padding:11px;background:#F0FBF0;color:#006040;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">${L('📅 Přidat do kalendáře')}</button>
-        <button class="rescheduleBtn" data-id="${b.id}" data-slot="${b.slot_id}" data-coachid="${b.coach_id}" data-coachname="${b.coach_name}" data-date="${b.training_date}" data-time="${b.training_time}" style="width:100%;padding:11px;background:#E8F0FF;color:var(--blue);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">${L('🔄 Přesunout termín')}</button>
+        ${_reschedBlocked(b.reschedule_count, b.training_date, b.training_time) ? '' : `<button class="rescheduleBtn" data-id="${b.id}" data-slot="${b.slot_id}" data-coachid="${b.coach_id}" data-coachname="${b.coach_name}" data-date="${b.training_date}" data-time="${b.training_time}" data-rcount="${b.reschedule_count||0}" style="width:100%;padding:11px;background:#E8F0FF;color:var(--blue);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">${L('🔄 Přesunout termín')}</button>`}
         <button class="cancelBtn" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-slot="${b.slot_id}" data-date="${b.training_date}" data-time="${b.training_time}" style="width:100%;padding:11px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${L('Zrušit rezervaci')}</button>
       `;
     } else {
@@ -28588,6 +28720,8 @@ async function openReschedule(d){
 async function doReschedule(newSlot){
   const b = window._reschedBooking;
   if(!b) return;
+  { const _e=_reschedBlocked(b.reschedule_count, b.oldDate, b.oldTime);
+    if(_e){ toast('\u26a0\ufe0f '+_e); return; } }
   const dd = new Date(newSlot.date);
   const dayName = dowShort()[dd.getDay()];
   const newStr = `${dayName} ${dd.getDate()}.${dd.getMonth()+1}. · ${newSlot.time}`;
@@ -28611,6 +28745,18 @@ async function doReschedule(newSlot){
     await supaClient.from('bookings')
       .update({ slot_id:newSlot.id, training_date:newSlot.date, training_time:newSlot.time })
       .eq('id', b.id);
+    // Doklad zůstává, jak byl vystaven -- změnu dokládá samostatné potvrzení pro obě strany.
+    try{
+      await _issueRescheduleConfirmation({
+        booking_id:b.id, booking_kind:'coach_1to1',
+        gym_id:b.gym_id||null, coach_id:b.coachId||b.coach_id||null,
+        provider_name:b.coach_name||b.coachName||'',
+        from_at:((b.training_date||'')+(b.training_time?(' '+b.training_time):'')),
+        to_at:((newSlot.date||'')+(newSlot.time?(' '+newSlot.time):'')),
+        amount:b.amount, currency:b.currency||'CZK',
+        prev_count:(b.reschedule_count||0)
+      });
+    }catch(e){}
     // 4) notifikace koučovi
     await supaClient.from('notifications').insert({
       user_id: b.coachId, type:'rescheduled', read:false,
@@ -31331,7 +31477,7 @@ async function _loadMyPayments(){
   box.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;font-size:13px;">'+(EN?'Loading\u2026':'Na\u010d\u00edt\u00e1m\u2026')+'</p>';
   if(typeof currentUser==='undefined' || !currentUser){ box.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;font-size:13px;">'+(EN?'Not signed in.':'Nejsi p\u0159ihl\u00e1\u0161en.')+'</p>'; return; }
   let rows=[];
-  try{ const { data }=await supaClient.from('transactions').select('id,gross_amount,currency,type,payment_method,created_at,payment_intent,gym_id,coach_id,income_class,status,test_mode').eq('member_id',currentUser.id).order('created_at',{ascending:false}); rows=(data||[]).filter(function(t){ return t.status!=='refunded' && Number(t.gross_amount||0)>0; }); }catch(e){}
+  try{ const { data }=await supaClient.from('transactions').select('id,gross_amount,currency,type,payment_method,created_at,payment_intent,gym_id,coach_id,income_class,status,test_mode,paid_by,paid_by_name,member_id,paid_to,session_at_issue').eq('member_id',currentUser.id).order('created_at',{ascending:false}); rows=(data||[]).filter(function(t){ return t.status!=='refunded' && Number(t.gross_amount||0)>0; }); }catch(e){}
   window._myPayRows=rows;
   // Kde student nakoupil -- gym_name/coach_name na transakci nejsou, dohledají se jedním dotazem
   // na kluby a jedním na kouče.
@@ -31378,6 +31524,9 @@ function _mpRender(){
   }).join('');
   const _sel=sel;
   box.querySelectorAll('.mpDokBtn').forEach(function(b){ b.onclick=function(){ const t=_sel[parseInt(b.dataset.idx,10)]; if(!t) return; showReceipt({ amount:(Number(t.gross_amount||0)/100), currency:t.currency, type:t.type, created_at:t.created_at, payment_intent:t.payment_intent, gym_id:t.gym_id, coach_id:t.coach_id, item_label:_mpItemLabel(t),
+      // Kdo platil a komu služba patří -- bez toho doklad nemá jak účastníka uvést.
+      paid_by:t.paid_by, paid_by_name:t.paid_by_name, paid_to:t.paid_to, session_at_issue:t.session_at_issue,
+      student_name:((currentUser&&currentUser.name)||''),
       // Razítko musí dojít až sem. Bez něj doklad spadl na aktuální režim, takže rámeček mizel
       // a objevoval se podle přepínače -- přesně to, čemu se mělo předejít.
       test_mode:t.test_mode }); }; });
@@ -31548,6 +31697,9 @@ function _cdkRender(){
   }).join('');
   var _sel=sel;
   box.querySelectorAll('.cdkDokBtn').forEach(function(b){ b.onclick=function(){ var t=_sel[parseInt(b.dataset.idx,10)]; if(!t) return; showReceipt({ amount:(Number(t.gross_amount||0)/100), currency:t.currency, type:t.type, created_at:t.created_at, payment_intent:t.payment_intent, gym_id:t.gym_id, coach_id:t.coach_id, item_label:_mpItemLabel(t),
+      // Kdo platil a komu služba patří -- bez toho doklad nemá jak účastníka uvést.
+      paid_by:t.paid_by, paid_by_name:t.paid_by_name, paid_to:t.paid_to, session_at_issue:t.session_at_issue,
+      student_name:((currentUser&&currentUser.name)||''),
       // Razítko musí dojít až sem. Bez něj doklad spadl na aktuální režim, takže rámeček mizel
       // a objevoval se podle přepínače -- přesně to, čemu se mělo předejít.
       test_mode:t.test_mode }); }; });
@@ -31559,8 +31711,12 @@ async function showReceipt(b){
     if(!b){ return; }
     const esc=(typeof escapeHtml==='function')?escapeHtml:(x=>String(x==null?'':x));
     const fmt=n=>{ const v=Math.round((Number(n)||0)*100)/100; try{ return v.toLocaleString(EN?'en-US':'cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2}); }catch(e){ return v.toFixed(2); } };
+    // POSKYTOVATEL = ten, komu peníze šly. Dosud se rozhodovalo podle gym_id, takže drop-in
+    // zaplacený koučovi v klubu měl na dokladu klub -- prodávajícím byl přitom kouč.
+    // Řídíme se paid_to, které nese sama transakce.
+    const _toCoach = (b.paid_to==='coach') || (!b.gym_id && !!(b.coach_id||b.coach_profile_id));
     let gymRec=null;
-    if(b.gym_id){ try{ const { data:_g }=await supaClient.from('gyms').select('legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address').eq('id',b.gym_id).maybeSingle(); gymRec=_g||null; }catch(e){} }
+    if(b.gym_id && !_toCoach){ try{ const { data:_g }=await supaClient.from('gyms').select('legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address').eq('id',b.gym_id).maybeSingle(); gymRec=_g||null; }catch(e){} }
     let coachRec=null;
     if(!gymRec){ const _cid=b.coach_id||b.coach_profile_id; if(_cid){ try{ const { data:_c }=await supaClient.from('profiles').select('legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address').eq('id',_cid).maybeSingle(); coachRec=_c||null; }catch(e){} } }
     const rec=gymRec||coachRec;
@@ -31575,7 +31731,10 @@ async function showReceipt(b){
   const buyer=_payerName || _partName || (currentUser&&(currentUser.name||currentUser.email)) || (EN?'Customer':'Zákazník');
   // Účastníka uvádět jen tehdy, když se od plátce liší.
   const _participant=(_payerName && _partName && _payerName!==_partName) ? _partName : '';
-    const date=b.class_date||b.training_date||(b.created_at||'').slice(0,10)||'';
+    // Termín ZAFIXOVANÝ při vystavení. Doklad se nesmí zpětně měnit -- dosud se kreslil z aktuální
+  // rezervace, takže po přesunu ukázal jiný termín než v okamžiku platby. Změny řeší samostatné
+  // potvrzení o změně termínu, do dokladu se nezasahuje.
+  const date=b.session_at_issue||b.class_date||b.training_date||(b.created_at||'').slice(0,10)||'';
     const time=b.class_time||b.training_time||'';
     const item=b.item_label||(b.gym_name?((b.discipline||b.class_date||b.class_time)?(EN?'Single class':'Jednorázová lekce'):((b.plan_discipline?(b.plan_discipline+' \u2013 '):'')+(b.class_name||(EN?'Membership':'Členství')))):(b.type==='online'?(EN?'Online coaching':'Online kočink'):(((Number(b.capacity)||1)>1)?((EN?'Group lesson 1:':'Skupinová lekce 1:')+(Number(b.capacity)||1)):(EN?'1:1 lesson':'Lekce 1:1'))));
     const disc=b.discipline?((typeof disciplineLabel==='function')?disciplineLabel(b.discipline):b.discipline):''; const cur=b.currency||'CZK';
@@ -31614,7 +31773,14 @@ async function showReceipt(b){
       +`<div class="row"><span>${EN?'Customer':'Odběratel'}</span><strong>${esc(buyer)}</strong></div>`
       +(_participant?`<div class="row"><span>${EN?'Participant':'Účastník'}</span><strong>${esc(_participant)}</strong></div>`:'')
       +`<div class="row"><span>${EN?'Item':'Položka'}</span><strong>${esc(item)}${disc?' · '+esc(disc):''}</strong></div>`
-      +(date?`<div class="row"><span>${EN?'Date':'Datum'}</span><strong>${esc(date)}${time?' '+esc(time):''}</strong></div>`:'')
+      // TERMÍN LEKCE, ne datum plnění. Podle zákona o DPH je datem plnění den uskutečnění NEBO
+      // den přijetí úplaty -- ten, který nastane dřív. U platby předem je to den platby, tedy
+      // shodné s datem vystavení. Termín lekce se navíc přesunem mění, takže jako datum plnění
+      // by z jedné platby vznikla dvě různá.
+      +(date?`<div class="row"><span>${EN?'Session date':'Termín lekce'}</span><strong>${(function(){
+        try{ var _dd=new Date(date+'T00:00:00'); if(!isNaN(_dd.getTime())) return _dd.toLocaleDateString(EN?'en-GB':'cs-CZ'); }catch(e){}
+        return esc(date);
+      })()}${time?' '+esc(time):''}</strong></div>`:'')
       +(ref?`<div class="row"><span>${EN?'Payment ref (Stripe)':'Reference platby (Stripe)'}</span><strong>${esc(ref)}</strong></div>`:'')
       +(isPayer?`<div class="row"><span>${EN?'Net amount':'Základ daně'}</span><span>${fmt(base)} ${sym}</span></div><div class="row"><span>${EN?'VAT':'DPH'} ${rate}%</span><span>${fmt(vat)} ${sym}</span></div><div class="row tot"><span>${EN?'Total':'Celkem'}</span><span>${fmt(amt)} ${sym}</span></div></div>`:`<div class="row"><span>${EN?'VAT':'DPH'}</span><span>0 ${sym}</span></div><div class="row tot"><span>${EN?'Total':'Celkem'}</span><span>${fmt(amt)} ${sym}</span></div></div><div style="font-size:12px;color:#444;font-weight:600;margin-top:12px;">${EN?'The provider is not a VAT payer.':'Poskytovatel není plátcem DPH.'}</div>`)
       +`<div class="note">${EN?'This is a A valid proof of payment for your records. The seller of the service is the provider named above — MTL is the platform that facilitated the payment. Need a formal tax invoice? Request it from the provider. Generated via MTL.':'Platné potvrzení o zaplacení pro tvé účely. Prodejcem služby je výše uvedený poskytovatel — MTL je platforma, která platbu zprostředkovala. Potřebuješ formální daňový doklad (fakturu)? Vyžádej si ho u poskytovatele. Vygenerováno přes MTL.'}</div>`
