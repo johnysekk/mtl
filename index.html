@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SXK hides the reschedule button once a move is no longer possible, rather than offering it and refusing on the tap. A 1:1 booking showed it regardless; the club listing already checked the six hours and the counter, but carried its own limit of two while the rule said one, so the two now read the same constant. -->
+<!-- MTL build: SXM delivers the reschedule confirmation to both sides. It went only to coach_id, so on a club class with no coach it went nowhere, and the student never received it at all -- the point of the document is that both parties hold it. The club owner now gets it when there is no coach, and so does the student. The older plain notification to the owner is dropped when the confirmation goes out, since two messages about one event, one of them without a link to the document, is just noise. Tapping the attendee notification also stops opening the team dashboard, which tells an owner they are not in any club team; it goes to the club schedule instead. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -12238,6 +12238,9 @@ async function openGymReschedule(b){
   if(!b){ return; }
   closeAllSheets();
   window._gymReschedBooking = b;
+  // "Požádat kouče o termín" má smysl jen u soukromky, kde kouč termíny vypisuje. U klubové
+  // lekce určuje rozvrh klub a jednotlivec si termín neobjedná. Okno je pro obojí společné.
+  try{ const _rt=$('btnRequestTime'); if(_rt) _rt.style.display='none'; }catch(e){}
   if($('rescheduleTitle')) $('rescheduleTitle').textContent = (LANG==='en'?'Reschedule drop-in':'Přesunout jednorázovou lekci')+(b.gym_name?' — '+b.gym_name:'');
   const list = $('rescheduleList');
   if(list) list.innerHTML = `<p style="text-align:center;color:var(--light);padding:40px;">${L('Načítám časy...')}</p>`;
@@ -12261,6 +12264,20 @@ async function openGymReschedule(b){
     const dt=new Date(`${o.date}T${(o.time||'00:00')}:00`);
     if(dt < minTime) return false;
     if(_cxSet.has(`${o.date}|${o.time||''}|${o.name||''}`)) return false; // skip classes marked not held
+    // Dětské lekce mladistvému nenabízet. Filtr je hlídal jen podle disciplíny a úrovně, takže
+    // patnáctiletý dostal na výběr lekci pro děti a přesun proběhl -- ohlásilo se "přesunuto"
+    // a skončil zapsaný tam, kam nepatří.
+    if(o.kids && currentUser && currentUser.is_minor) return false;
+    // A když má lekce věkové rozpětí, respektovat ho podle věku toho, kdo rezervaci drží.
+    try{
+      if(o.ageMin!=null || o.ageMax!=null){
+        const _a=(typeof _famAge==='function' && currentUser && currentUser.birthdate) ? _famAge(currentUser.birthdate) : null;
+        if(_a!=null){
+          if(o.ageMin!=null && _a < o.ageMin) return false;
+          if(o.ageMax!=null && _a > o.ageMax) return false;
+        }
+      }
+    }catch(e){}
     // stejná disciplína (když je u rezervace určená)
     if(b.discipline && o.disc && o.disc!==b.discipline) return false;
     // stejný štítek/úroveň (např. Pokročilí → jen Pokročilí), když je známý
@@ -12335,6 +12352,8 @@ async function showRescheduleConfirmation(id){
 }
 
 async function _issueRescheduleConfirmation(o){
+  // Příznak platí jen pro tenhle přesun -- bez vynulování by druhý přesun zprávu neposlal.
+  window._reschedConfSent=false;
   try{
     if(!o || !o.from_at || !o.to_at) return null;
     const _seq=(Number(o.prev_count)||0)+1;
@@ -12358,14 +12377,35 @@ async function _issueRescheduleConfirmation(o){
       amount:(o.amount!=null?o.amount:null), currency:o.currency||'CZK'
     };
     const { data:_ins, error }=await supaClient.from('reschedule_confirmations').insert(row).select('id').single();
-    if(error){ console.log('[resched] potvrzeni se nezapsalo:', error.message); return null; }
+    if(error){
+      // Nezapsané potvrzení je právní mezera, ne kosmetika -- musí se o něm vědět.
+      console.log('[resched] potvrzeni se nezapsalo:', error.message);
+      toast('\u26a0\ufe0f '+(LANG==='en'?'Confirmation was not issued: ':'Potvrzení o přesunu se nevystavilo: ')+error.message);
+      return null;
+    }
     // Druhá strana se to musí dozvědět -- pro klub je to doklad, že o přesunu ví.
     try{
-      const _to=o.coach_id||null;
-      const _msg='\u{1F504} '+(row.student_name||'Student')+(LANG==='en'?' moved a session: ':' přesunul lekci: ')
-        +_fmtSess(o.from_at)+' \u2192 '+_fmtSess(o.to_at);
-      if(_to) await supaClient.from('notifications').insert({ user_id:_to, type:'system', read:false,
-        message:_msg, data:JSON.stringify({ kind:'resched_conf', conf_id:_ins&&_ins.id }) });
+      const _cid=(_ins&&_ins.id)||null;
+      // Potvrzení musí mít OBĚ strany -- je to doklad o změně, ne upozornění pro kouče.
+      // Dosud se posílalo jen coach_id, takže u klubové lekce bez kouče neodešlo nikam
+      // a student ho nedostal nikdy.
+      const _targets=[];
+      if(o.coach_id) _targets.push(o.coach_id);
+      if(!o.coach_id && o.gym_id){
+        try{ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',o.gym_id).single();
+          if(_g && _g.owner_id) _targets.push(_g.owner_id); }catch(e){}
+      }
+      if(currentUser && currentUser.id) _targets.push(currentUser.id);
+      const _me=(currentUser&&currentUser.id)||null;
+      window._reschedConfSent=true;
+      for(const _t of [...new Set(_targets)]){
+        const _mine=(String(_t)===String(_me));
+        const _msg=_mine
+          ? ('\u{1F504} '+(LANG==='en'?'Session moved: ':'Lekce přesunuta: ')+_fmtSess(o.from_at)+' \u2192 '+_fmtSess(o.to_at))
+          : ('\u{1F504} '+(row.student_name||'Student')+(LANG==='en'?' moved a session: ':' přesunul lekci: ')+_fmtSess(o.from_at)+' \u2192 '+_fmtSess(o.to_at));
+        await supaClient.from('notifications').insert({ user_id:_t, type:'system', read:false,
+          message:_msg, data:JSON.stringify({ kind:'resched_conf', conf_id:_cid }) });
+      }
     }catch(e){}
     return (_ins&&_ins.id)||null;
   }catch(e){ console.log('[resched]', e&&e.message); return null; }
@@ -12453,7 +12493,9 @@ async function doGymReschedule(occ){
     // notifikace klubu (best-effort)
     try{
       const { data:g } = await supaClient.from('gyms').select('owner_id').eq('id', b.gym_id).single();
-      if(g && g.owner_id){
+      // Potvrzení o přesunu už majiteli zprávu posílá, a má navíc proklik na doklad. Posílat
+      // sem druhou znamená dvě hlášky o jedné události, kde ta bez prokliku je ta horší.
+      if(!window._reschedConfSent && g && g.owner_id){
         await supaClient.from('notifications').insert({ user_id: g.owner_id, type:'system', read:false,
           data: JSON.stringify({ kind:'gym_dropin_rescheduled', student: currentUser.name||'Student', oldDate:b.class_date, oldTime:b.class_time, newDate:occ.date, newTime:occ.time }),
           message:`🔄 ${currentUser.name||'Student'} přesunul jednorázovou lekci z ${b.class_date} ${b.class_time||''} na ${occ.date} ${occ.time}.` });
@@ -22895,7 +22937,19 @@ async function loadNotifications(append){
         else if(k==='gym_team_joined'){ if($('meGymManage')){ window._gmInitTab=1; openSheet('shGymManage'); renderGymManage(); setTimeout(()=>{ if(window._gmShowTab) window._gmShowTab(1); const d=$('gmTeamSec'); if(d){ d.open=true; try{ d.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} } }, 260); } }
         else if(k==='coach_avail'){ if($('meGymManage')){ window._gmInitTab=1; openSheet('shGymManage'); renderGymManage(); setTimeout(()=>{ if(window._gmShowTab) window._gmShowTab(1); const d=$('gmTeamSec'); if(d){ d.open=true; try{ d.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} } }, 260); } }
         else if(isGymClassAdded){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.day!=null) _schedSelDow=Number(dd.day); if($('meGymManage')){ openSheet('shGymManage'); renderGymManage(); setTimeout(()=>{ if(window._gmShowTab) window._gmShowTab(0); if(dd.day!=null && typeof renderScheduleEditor==='function'){ _schedSelDow=Number(dd.day); renderScheduleEditor(); } }, 220); } }catch(e){} }
-        else if(isGymClassAttendee){ if(typeof openGymTeamDash==='function') openGymTeamDash(); }
+        else if(isGymClassAttendee){
+          // openGymTeamDash je přehled pro kouče v TÝMU klubu -- majiteli tam vyskočí
+          // "Nejsi v žádném klub týmu". Docházka na lekci patří do rozvrhu klubu, kam se
+          // dostane majitel i kouč.
+          try{
+            const dd=JSON.parse(n.data||'{}');
+            if($('meGymManage') && $('meGymManage').style.display!=='none'){
+              window._gmInitTab=0; openSheet('shGymManage');
+              if(typeof renderGymManage==='function') renderGymManage();
+              if(dd.date && typeof _gmGoToDate==='function') setTimeout(function(){ try{ _gmGoToDate(dd.date); }catch(e){} }, 400);
+            } else if(typeof openGymTeamDash==='function'){ openGymTeamDash(); }
+          }catch(e){ if(typeof openGymTeamDash==='function') openGymTeamDash(); }
+        }
         else if(isGymRatePrompt){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data: gg }=await supaClient.from('gyms').select('*').eq('id',dd.gym_id).single(); if(gg){ await openGymProfile(gg); setTimeout(()=>{ const f=$('gymRateForm'); if(f){ f.style.display='block'; f.scrollIntoView({behavior:'smooth',block:'center'}); } }, 300); } else toast(L('⚠️ Klub nenalezen')); } }catch(e){ toast(L('⚠️ Klub nenalezen')); } }
         else if(isEpCancelled){ openEPFeedback(); }
         else if(isAttendReminder){ try{ const dd=JSON.parse(n.data||'{}'); const gid=dd.gym_id; const owns=gid&&((window._myGyms||[]).some(g=>g.id===gid)||(_myGymData&&_myGymData.id===gid)); if(owns){ if(!(_myGymData&&_myGymData.id===gid)){ try{ await renderGymManage(); }catch(e){} } const sc=(_gymSchedule||[]).find(c=>String(c.time)===String(dd.time)&&((c.name||'')===(dd.className||''))); openClassAttendance({ date:dd.date, time:dd.time, name:dd.className||'', level:sc?(sc.level||'all'):'all', coach:sc?(sc.coach||null):null, coachName:sc?(sc.coachName||''):'', disc:sc?(sc.disc||null):null }); _sheetParent['shClassAttend']=null; } else if(gid){ openSheet('shCoachRoster'); loadCoachRoster(gid, dd.gym_name||''); _sheetParent['shCoachRoster']=null; } }catch(e){} }
@@ -28676,6 +28730,8 @@ async function cancelBooking(d){
 // ── PŘESUN TERMÍNU (reschedule) — žádné peníze se nehýbou ──
 async function openReschedule(d){
   closeAllSheets();
+  // U soukromky tlačítko naopak patří -- vrátit ho, okno sdílíme s klubovou lekcí.
+  try{ const _rt=$('btnRequestTime'); if(_rt) _rt.style.display=''; }catch(e){}
   window._reschedBooking = { id:d.id, oldSlot:d.slot, coachId:d.coachid, coachName:d.coachname, oldDate:d.date, oldTime:d.time };
   $('rescheduleTitle').textContent = `${L('Přesunout termín')} — ${d.coachname}`;
   const list = $('rescheduleList');
