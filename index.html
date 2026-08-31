@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SXS sends a plain summary instead of a commission receipt while the introductory zero is running -- the receipt states the commission was charged or deducted, which in that period is untrue. The summary shows how many payments went through MTL and their volume, says no commission was charged and until when, and carries no PDF, since that is the shape of a tax document and this is not one. Once the date passes the ordinary receipt returns and the fee is deducted again: verified on both rails, including that the PIS minimum fee does not lift a zero off the floor, and that the bank path, which computes its own rate rather than going through effectiveRateBreakdown, now checks the same thing. Test-mode notices reworded throughout. Needs the updated _rate.js, record-cash.js and unified-doklad-cron.js. -->
+<!-- MTL build: SXU makes the country switch show what is actually in force. It read the stored flag, so once the date had passed it still said Vypnuta while commission was already being charged again -- the admin screen and the money disagreed. It now derives the state the same way the server does, and switching commission back on clears the date rather than leaving one that would restore the zero if extended. The explanation and the operating instructions fold away behind an info summary, and the list of country codes is generated from the same list the registration form offers, so it cannot drift from what a provider can actually pick. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -2283,7 +2283,9 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
   <div class="shdr" style="background:var(--dark);border-color:#333;"><div class="shdr-title" style="color:#fff;">💶 Provize podle zemí</div><button class="btn-close" id="btnCloseIntroRates" style="background:#333;color:#fff;">✕</button></div>
   <div style="padding:20px;">
 
-    <div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:16px;">
+    <details style="background:var(--surf);border:1px solid var(--border);border-radius:12px;margin-bottom:16px;">
+      <summary style="list-style:none;cursor:pointer;padding:13px 14px;font-size:12px;font-weight:800;color:var(--mid);letter-spacing:.04em;" data-noi18n>ℹ️ JAK TO FUNGUJE A JAK SE TO OBSLUHUJE</summary>
+      <div style="padding:0 14px 14px;">
       <div style="font-size:12px;font-weight:800;color:var(--mid);letter-spacing:.04em;margin-bottom:8px;" data-noi18n>JAK TO FUNGUJE</div>
       <div style="font-size:13px;color:var(--dark);line-height:1.7;" data-noi18n>
         <b>Zapnutá</b> — provize se účtuje podle sazebníku (2 % Stripe, 2,5 % banka, míň podle stupně).<br>
@@ -2291,12 +2293,11 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
         <b>Datum</b> je poslední den nulové provize. Od druhého dne se účtuje normálně.
         Prázdné datum = platí bez omezení, dokud to nevypneš ručně.<br><br>
         Země se bere z <b>daňového domicilu</b> poskytovatele — z toho, co si vybral při registraci.
-        Ne z místa, kde klub stojí.
+        Ne z místa, kde klub stojí.<br><br>
+        Po uplynutí data se provize začne strhávat sama a tlačítko se přepne na <b>Zapnutá</b> —
+        v databázi zůstane zapsané, kdy nula skončila.
       </div>
-    </div>
-
-    <div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:16px;">
-      <div style="font-size:12px;font-weight:800;color:var(--mid);letter-spacing:.04em;margin-bottom:8px;" data-noi18n>OBSLUHA</div>
+      <div style="font-size:12px;font-weight:800;color:var(--mid);letter-spacing:.04em;margin:14px 0 8px;" data-noi18n>OBSLUHA</div>
       <div style="font-size:13px;color:var(--dark);line-height:1.7;" data-noi18n>
         <b>Přidat zemi:</b> napiš do políčka vlevo dvoupísmenný kód (PL, AT, DE) a klepni na <b>+ Přidat zemi</b>.
         Přidá se s vypnutou provizí.<br>
@@ -2304,7 +2305,13 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
         <b>Změnit datum:</b> klepni na datum a vyber jiné. Uloží se hned.<br>
         <b>Odebrat zemi:</b> křížek vpravo. Provize tam pak poběží podle sazebníku.
       </div>
-    </div>
+      <div style="font-size:12px;font-weight:800;color:var(--mid);letter-spacing:.04em;margin:14px 0 8px;" data-noi18n>KÓDY ZEMÍ, KTERÉ APPKA ZNÁ</div>
+      <div style="font-size:12px;color:var(--mid);line-height:1.7;" data-noi18n>
+        Jen tyhle si poskytovatel může vybrat při registraci, takže jiný kód nikdy nikoho nezasáhne.
+      </div>
+      <div id="introCcHelp" style="font-size:12px;color:var(--dark);line-height:1.8;margin-top:6px;"></div>
+      </div>
+    </details>
 
     <div id="introRatesList"></div>
     <div style="display:flex;gap:8px;margin-top:12px;">
@@ -23581,17 +23588,27 @@ async function renderDac7(){
 }
 
 async function renderIntroRates(){
+  // Seznam zemí ze stejného zdroje jako registrace. Vypsat ho ručně by znamenalo, že se dřív
+  // nebo později rozejde s tím, co si poskytovatel může vybrat.
+  try{
+    const _h=document.getElementById('introCcHelp');
+    if(_h && !_h.textContent && typeof COUNTRIES!=='undefined'){
+      _h.innerHTML=COUNTRIES.map(function(c){ return '<b>'+c[0]+'</b>\u00a0'+escapeHtml(c[1]); }).join(' \u00b7 ');
+    }
+  }catch(e){}
   const box=document.getElementById('introRatesList'); if(!box) return;
   const map=await _loadIntroRates();
   const ccs=Object.keys(map).sort();
   if(!ccs.length){ box.innerHTML='<div style="font-size:12px;color:var(--light);padding:4px 0;">Zatím žádná země — provize běží všude podle sazebníku.</div>'; return; }
   box.innerHTML=ccs.map(function(cc){
-    const e=map[cc]||{}; const on=!e.off; const live=_introActive(e);
-    // "Vypnutá" s prošlým datem už reálně neplatí -- ať je to vidět, ne aby se na to spoléhalo.
-    const stav = on ? 'Provize běží'
-      : (live ? ('0 % do '+(e.until||'odvolání')) : ('0 % skončila '+(e.until||'')));
-    const col  = on ? '#0e6b3d' : (live ? '#8a5a00' : 'var(--light)');
-    const bg   = on ? '#EAF7EE' : (live ? '#FFF8E6' : 'var(--bg)');
+    const e=map[cc]||{}; const live=_introActive(e);
+    // Tlačítko ukazuje, co PLATÍ TEĎ, ne co je zapsané v databázi. Po uplynutí data se provize
+    // strhává, takže "Vypnutá" by lhala -- server se řídí stejným výpočtem (introFreeFor).
+    const on=!live;
+    const stav = live ? ('0 % do '+(e.until||'odvolání'))
+      : (e.off && e.until ? ('provize běží od '+e.until+' \u2014 nula skončila') : 'provize běží');
+    const col  = live ? '#8a5a00' : '#0e6b3d';
+    const bg   = live ? '#FFF8E6' : '#EAF7EE';
     return '<div style="display:flex;align-items:center;gap:8px;padding:9px 0;border-bottom:1px solid var(--border);">'
       +'<div style="flex:1;min-width:0;">'
         +'<div style="font-size:13.5px;font-weight:800;color:var(--dark);">'+escapeHtml(_ccName(cc))+' <span style="font-size:11px;color:var(--light);">'+escapeHtml(cc)+'</span></div>'
@@ -23608,7 +23625,9 @@ async function renderIntroRates(){
     b.onclick=async function(){
       const cc=b.dataset.cc; const m=Object.assign({}, window._introRates||{});
       const cur=m[cc]||{};
-      m[cc]= cur.off ? { off:false, until:cur.until||null } : { off:true, until:cur.until||null };
+      // Zapínám provizi: nula končí dneškem, ne zítra. Ponechat staré datum by znamenalo, že
+      // se nula vrátí, jakmile ho někdo prodlouží.
+      m[cc]= _introActive(cur) ? { off:false, until:null } : { off:true, until:cur.until||null };
       if(await _saveIntroRates(m)) renderIntroRates();
     };
   });
