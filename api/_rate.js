@@ -70,17 +70,25 @@ export function ladderRate(mode, o) {
 // Resolve the profile of whoever owns the money (ownerId, or via gymId / gym stripe_account).
 export async function resolveOwner(sbGet, { ownerId, gymId, gymAccount }) {
   let oid = ownerId;
-  if (!oid && gymId) {
-    const g = (await sbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=owner_id`))[0];
-    oid = g && g.owner_id;
+  // Země z PŘIHLÁŠKY POSKYTOVATELE, ne z registrace do appky. Klub má vlastní billing_country --
+  // majitel může bydlet v Česku a fakturovat klub ze Slovenska. Podle toho se řídí provize i DAC7,
+  // a doklad zní na klub, takže rozhoduje jeho země. Profil majitele je až náhradní zdroj.
+  let gymCC = null;
+  if (gymId) {
+    const g = (await sbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=owner_id,billing_country`))[0];
+    if (g) { oid = oid || g.owner_id; gymCC = g.billing_country || null; }
   }
-  if (!oid && gymAccount) {
-    const g = (await sbGet(`gyms?stripe_account=eq.${encodeURIComponent(gymAccount)}&select=owner_id&limit=1`))[0];
-    oid = g && g.owner_id;
+  if (!oid || !gymCC) {
+    if (gymAccount) {
+      const g = (await sbGet(`gyms?stripe_account=eq.${encodeURIComponent(gymAccount)}&select=owner_id,billing_country&limit=1`))[0];
+      if (g) { oid = oid || g.owner_id; gymCC = gymCC || g.billing_country || null; }
+    }
   }
   if (!oid) throw new Error('resolveOwner: no owner (ownerId/gymId/gymAccount all unresolved)');
-  const p = (await sbGet(`profiles?id=eq.${encodeURIComponent(oid)}&select=id,partner,founding,coach_ref_score,bankai_eligible,billing_country`))[0];
+  let p = (await sbGet(`profiles?id=eq.${encodeURIComponent(oid)}&select=id,partner,founding,coach_ref_score,bankai_eligible,billing_country,tax_country`))[0];
   if (!p) throw new Error('resolveOwner: owner profile not found');
+  // Země klubu má přednost před zemí majitele.
+  if (gymCC) p = Object.assign({}, p, { billing_country: gymCC });
   return p;
 }
 
@@ -191,7 +199,12 @@ export async function introFreeFor(sbGet, country) {
 export async function effectiveRateBreakdown(sbGet, args) {
   const p = await resolveOwner(sbGet, { ownerId: args.ownerId, gymId: args.gymId, gymAccount: args.gymAccount });
   // Zaváděcí období má přednost před vším ostatním -- ani akviziční příplatek se neúčtuje.
-  const _free = await introFreeFor(sbGet, p.billing_country);
+  // tax_country je daňový domicil z přihlášky poskytovatele. billing_country plní registrace do
+  // appky ("Odkud jsi?") -- bydliště, které se může lišit; bereme ho jen jako náhradu u účtů,
+  // které přihlášku vyplnily dřív, než ten sloupec vznikl.
+  // billing_country = daňový domicil, u profilu i u klubu stejně. tax_country je přechodná
+  // záloha z doby, než se ta dvě pole rozdělila.
+  const _free = await introFreeFor(sbGet, p.billing_country || p.tax_country);
   if (_free) return { rate: 0, baseRate: 0, acqMonths: 0, months: Math.max(1, parseInt(args.months, 10) || 1), introFree: true, introUntil: _free.until };
   const ladder = ladderRate(args.mode, { partner: p.partner, founding: p.founding, score: p.coach_ref_score, bankai: p.bankai_eligible });
   const acq = await acquisitionRate(sbGet, { acqSource: args.acqSource, type: args.type, ownerPartner: p.partner, memberId: args.memberId, scopeCol: args.scopeCol, scopeId: (args.scopeId || p.id) });
