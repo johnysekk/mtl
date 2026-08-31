@@ -79,7 +79,7 @@ export async function resolveOwner(sbGet, { ownerId, gymId, gymAccount }) {
     oid = g && g.owner_id;
   }
   if (!oid) throw new Error('resolveOwner: no owner (ownerId/gymId/gymAccount all unresolved)');
-  const p = (await sbGet(`profiles?id=eq.${encodeURIComponent(oid)}&select=id,partner,founding,coach_ref_score,bankai_eligible`))[0];
+  const p = (await sbGet(`profiles?id=eq.${encodeURIComponent(oid)}&select=id,partner,founding,coach_ref_score,bankai_eligible,billing_country`))[0];
   if (!p) throw new Error('resolveOwner: owner profile not found');
   return p;
 }
@@ -160,8 +160,39 @@ export async function effectiveRate(sbGet, { ownerId, gymId, gymAccount, mode, t
 
 // Same computation, but returns the parts as well, so the ledger can record WHY the rate is what
 // it is instead of leaving a club to reverse-engineer a blended number.
+
+// ── ZAVÁDĚCÍ NULOVÁ PROVIZE ──────────────────────────────────────────────────────────────────
+// V nově otevřené zemi neúčtujeme provizi, dokud neuplyne nastavené datum. Je to jedno místo:
+// platform_config.intro_rates, klíčované zemí daňového domicilu poskytovatele (billing_country --
+// ne country, což je poloha klubu; klub v Českém Těšíně může fakturovat z Polska).
+//
+// Přidat další zemi znamená přidat klíč v adminu. Tenhle kód se kvůli tomu nemění.
+export async function introFreeFor(sbGet, country) {
+  try {
+    const cc = String(country || '').trim().toUpperCase();
+    if (!cc) return null;
+    const row = (await sbGet('platform_config?id=eq.1&select=intro_rates'))[0];
+    const map = (row && row.intro_rates) || {};
+    const e = map[cc];
+    if (!e || !e.off) return null;
+    // Bez data platí bez omezení -- záměrné: dokud se nerozhodne, kdy skončí.
+    if (!e.until) return { until: null };
+    // Do konce uvedeného dne včetně.
+    const end = new Date(String(e.until) + 'T23:59:59');
+    if (isNaN(end.getTime()) || end.getTime() < Date.now()) return null;
+    return { until: e.until };
+  } catch (e) {
+    // Když se to nepodaří zjistit, účtuje se normálně -- neúčtovat omylem je horší.
+    console.error('introFreeFor:', e.message);
+    return null;
+  }
+}
+
 export async function effectiveRateBreakdown(sbGet, args) {
   const p = await resolveOwner(sbGet, { ownerId: args.ownerId, gymId: args.gymId, gymAccount: args.gymAccount });
+  // Zaváděcí období má přednost před vším ostatním -- ani akviziční příplatek se neúčtuje.
+  const _free = await introFreeFor(sbGet, p.billing_country);
+  if (_free) return { rate: 0, baseRate: 0, acqMonths: 0, months: Math.max(1, parseInt(args.months, 10) || 1), introFree: true, introUntil: _free.until };
   const ladder = ladderRate(args.mode, { partner: p.partner, founding: p.founding, score: p.coach_ref_score, bankai: p.bankai_eligible });
   const acq = await acquisitionRate(sbGet, { acqSource: args.acqSource, type: args.type, ownerPartner: p.partner, memberId: args.memberId, scopeCol: args.scopeCol, scopeId: (args.scopeId || p.id) });
   const bought = Math.max(1, parseInt(args.months, 10) || 1);
