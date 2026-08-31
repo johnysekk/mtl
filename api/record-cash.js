@@ -14,7 +14,7 @@
 // Rate: BANK track - EP 1%, else base 3.5% / Shikai 3% at coach_ref_score>=2. No Bankai.
 // Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
 
-import { ladderRate as _mtlRate, acquisitionRate as _mtlAcq } from './_rate.js';
+import { ladderRate as _mtlRate, acquisitionRate as _mtlAcq, introFreeFor as _introFree } from './_rate.js';
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -183,7 +183,7 @@ export default async function handler(req, res) {
       if (!gym) return res.status(404).json({ error: 'gym not found' });
       if (!_trusted && gym.owner_id !== uid) return res.status(403).json({ error: 'not your gym' });
       if (!_trusted && gym.account_suspended) return res.status(403).json({ error: 'account suspended' });
-      const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,created_at,referral_optin`);
+      const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,created_at,referral_optin,billing_country`);
       const ownerProf = (owners && owners[0]) || {};
       if (!ownerProf.id) ownerProf.id = gym.owner_id;
       rate = ladderRate(ownerProf);
@@ -191,10 +191,13 @@ export default async function handler(req, res) {
       const _cc = (_wantCredit && ownerProf.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
       const _acq = await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id, rate, months);
-      let mtl_fee = _cc ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
+      // Zaváděcí nulová provize. Tahle cesta počítá sazbu sama přes ladderRate, takže by kontrolu
+      // uvnitř effectiveRateBreakdown (kudy jde Stripe) jinak obešla.
+      const _intro = await _introFree(_wsbGet, (ownerProf && ownerProf.billing_country) || (coach && coach.billing_country));
+      let mtl_fee = (_cc || _intro) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
       // Podlaha jen u PIS a jen když se opravdu něco účtuje -- uplatněný kredit zůstává nulový.
       if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, gross));
-      const _effRate = _cc ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
+      const _effRate = (_cc || _intro) ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
       // Rozklad na akvizici a běžnou sazbu. Bez těchhle dvou sloupců nechá export pro účetní pět
       // sloupců prázdných (akviz. měsíců/sazba/částka, běžná sazba/částka) -- _sp() se z nich počítá
       // a bez nich vrací prázdno. Píše se jen tam, kde akvizice opravdu padla.
@@ -222,7 +225,7 @@ export default async function handler(req, res) {
       };
     } else {
       // coach pays out -> the coach authorizes their own cash/QR, rate from coach profile.
-      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,account_suspended,cash_blocked,created_at,referral_optin,gym_payout_account,stripe_account`);
+      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,account_suspended,cash_blocked,created_at,referral_optin,billing_country,gym_payout_account,stripe_account`);
       const coach = cs && cs[0];
       if (!coach) return res.status(404).json({ error: 'coach not found' });
       if (!_trusted && coach.id !== uid) return res.status(403).json({ error: 'not your account' });
@@ -233,10 +236,13 @@ export default async function handler(req, res) {
       const _cc = (_wantCredit && coach.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
       const _acq = await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id, rate, months);
-      let mtl_fee = _cc ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
+      // Zaváděcí nulová provize. Tahle cesta počítá sazbu sama přes ladderRate, takže by kontrolu
+      // uvnitř effectiveRateBreakdown (kudy jde Stripe) jinak obešla.
+      const _intro = await _introFree(_wsbGet, (ownerProf && ownerProf.billing_country) || (coach && coach.billing_country));
+      let mtl_fee = (_cc || _intro) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
       // Podlaha jen u PIS a jen když se opravdu něco účtuje -- uplatněný kredit zůstává nulový.
       if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, gross));
-      const _effRate = _cc ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
+      const _effRate = (_cc || _intro) ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
       // Rozklad na akvizici a běžnou sazbu. Bez těchhle dvou sloupců nechá export pro účetní pět
       // sloupců prázdných (akviz. měsíců/sazba/částka, běžná sazba/částka) -- _sp() se z nich počítá
       // a bez nich vrací prázdno. Píše se jen tam, kde akvizice opravdu padla.

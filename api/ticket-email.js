@@ -140,7 +140,7 @@ export default async function handler(req, res) {
       } catch (e) { /* raději bez razítka než spadnout na odeslání */ }
     }
     const _testBar = _isTest
-      ? '<div style="background:#8a1c1c;color:#fff;font:800 12px/1.4 Arial,sans-serif;text-align:center;padding:8px 12px;letter-spacing:.02em;">🧪 TESTOVACÍ REŽIM — nejde o platný lístek ani daňový doklad</div>'
+      ? '<div style="background:#8a1c1c;color:#fff;font:800 12px/1.4 Arial,sans-serif;text-align:center;padding:8px 12px;letter-spacing:.02em;">🧪 TESTOVACÍ REŽIM — nejde o platný lístek ani formální daňový doklad a k žádné skutečné transakci nedošlo</div>'
       : '';
 
     const html =

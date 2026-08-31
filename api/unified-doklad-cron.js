@@ -15,6 +15,7 @@
 import PDFDocument from 'pdfkit';
 import { DEJAVU_CZ } from './_dejavu-cz.js';
 import { isTestMode } from './_config.js';
+import { introFreeFor } from './_rate.js';
 const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 const SB  = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -86,12 +87,48 @@ function dokladMailHtml(ME, buyer, kind, period, cur, data, test, testMode, hasP
   const nm = (buyer && buyer.name) ? String(buyer.name) : '';
   const tot = (data && data.total != null) ? data.total : null;
   return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.6;">'
-    + (testMode ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:14px;">\u{1F9EA} TESTOVAC\u00cd RE\u017dIM \u2014 nejde o da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 re\u00e1ln\u00e9 transakci nedo\u0161lo</div>' : '')
+    + (testMode ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:14px;">\u{1F9EA} TESTOVAC\u00cd RE\u017dIM \u2014 nejde o form\u00e1ln\u00ed da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo</div>' : '')
     + '<p style="margin:0 0 10px;">Dobr\u00fd den' + (nm ? (', ' + esc(nm)) : '') + ',</p>'
     + '<p style="margin:0 0 10px;">v p\u0159\u00edloze posíl\u00e1me doklad o provizi MTL za obdob\u00ed <b>' + esc(periodLabel(period)) + '</b>'
     + (tot != null ? (' \u2014 celkem <b>' + esc(_money(tot, cur)) + '</b>') : '') + '.</p>'
     + '<p style="margin:0 0 10px;color:#666;font-size:13px;">Provize je ji\u017e str\u017een\u00e1 nebo na\u00fa\u010dtovan\u00e1. Nejde o v\u00fdzvu k platb\u011b.</p>'
     + '<p style="margin:18px 0 0;color:#888;font-size:12px;">Martial Training Lab</p></div>';
+}
+
+
+// ── PŘEHLED PŘI NULOVÉ PROVIZI ───────────────────────────────────────────────────────────────
+// V zaváděcím období se provize neúčtuje, takže "Doklad o provizi MTL" by tvrdil něco, co se
+// nestalo -- stojí v něm, že provize byla stržena nebo naúčtována. Vystavit ho beze změny by
+// bylo horší než nevystavit nic.
+//
+// Klub ale má vidět, že službu odebíral. Posílá se proto PŘEHLED: kolik transakcí přes MTL
+// prošlo a jaký objem, s jasným "za toto období nebyla účtována žádná provize". Až nula skončí,
+// má klub v předchozích přehledech vidět, co ta služba obnáší.
+function introSummaryHtml(ME, buyer, kind, period, cur, data, testMode, until){
+  const bName = (buyer && (buyer.legal_name || buyer.name)) || '\u2014';
+  const _cnt = Object.values(data.rates || {}).reduce((a, i) => a + (i.count || 0), 0);
+  const _vol = Object.values(data.rates || {}).reduce((a, i) => a + (i.gross || 0), 0);
+  const _u = until ? _czDate(until) : null;
+  return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;color:#1a1a1a;">'
+    + (testMode ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:12px;">\u{1F9EA} TESTOVAC\u00cd RE\u017dIM \u2014 nejde o form\u00e1ln\u00ed da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo</div>' : '')
+    + '<h2 style="margin:0 0 2px;">P\u0159ehled zprost\u0159edkovan\u00fdch plateb</h2>'
+    + '<div style="font-size:13px;color:#666;margin-bottom:14px;">Obdob\u00ed ' + esc(periodLabel(period))
+    + '  \u00b7  ' + (kind === 'coach' ? 'kou\u010d' : 'klub') + '</div>'
+    + '<div class="cols" style="display:flex;gap:24px;margin-bottom:16px;">'
+      + '<div style="flex:1;font-size:13px;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:4px;">Poskytovatel slu\u017eby</div><b>' + esc(ME.name) + '</b></div>'
+      + '<div style="flex:1;font-size:13px;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:4px;">Odb\u011bratel</div><b>' + esc(bName) + '</b>'
+      + ((buyer && buyer.name && buyer.name !== bName) ? ('<br>' + (kind === 'coach' ? 'Kou\u010d v MTL: ' : 'Klub v MTL: ') + esc(buyer.name)) : '')
+      + ((buyer && buyer.tax_id) ? ('<br>I\u010cO: ' + esc(buyer.tax_id)) : '') + '</div>'
+    + '</div>'
+    + '<table style="width:100%;border-collapse:collapse;margin-top:8px;">'
+      + '<tr><td style="padding:8px 0;border-bottom:1px solid #eee;">Zprost\u0159edkovan\u00fdch plateb</td><td style="padding:8px 0;border-bottom:1px solid #eee;text-align:right;"><b>' + _cnt + '</b></td></tr>'
+      + '<tr><td style="padding:8px 0;border-bottom:1px solid #eee;">Objem</td><td style="padding:8px 0;border-bottom:1px solid #eee;text-align:right;"><b>' + esc(_money(_vol, cur)) + '</b></td></tr>'
+      + '<tr><td style="padding:10px 0;font-weight:700;">Provize MTL</td><td style="padding:10px 0;text-align:right;font-weight:700;">0,00 ' + String(cur).toUpperCase() + '</td></tr>'
+    + '</table>'
+    + '<p style="font-size:12px;color:#666;line-height:1.6;margin-top:14px;">Za toto obdob\u00ed nebyla \u00fa\u010dtov\u00e1na \u017e\u00e1dn\u00e1 provize'
+    + (_u ? (' \u2014 zav\u00e1d\u011bc\u00ed obdob\u00ed plat\u00ed do ' + esc(_u) + '.') : '.')
+    + ' P\u0159ehled slou\u017e\u00ed jako doklad o odeb\u00edran\u00e9 slu\u017eb\u011b zprost\u0159edkov\u00e1n\u00ed plateb. Nejde o da\u0148ov\u00fd doklad.</p>'
+    + '</div>';
 }
 
 function dokladHtml(ME, buyer, kind, period, cur, data, test, testMode){
@@ -112,7 +149,7 @@ function dokladHtml(ME, buyer, kind, period, cur, data, test, testMode){
   // Doklad vystavený v testovacím režimu musí být jako testovací poznat i v e-mailu -- ten
   // člověku zůstane ve schránce i po smazání testovacích dat z databáze.
   const _tm = testMode
-    ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:12px;">\u{1F9EA} TESTOVAC\u00cd RE\u017dIM \u2014 nejde o da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 re\u00e1ln\u00e9 transakci nedo\u0161lo</div>'
+    ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:12px;">\u{1F9EA} TESTOVAC\u00cd RE\u017dIM \u2014 nejde o form\u00e1ln\u00ed da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo</div>'
     : '';
   return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;color:#1a1a1a;">'
     +_tm
@@ -144,7 +181,7 @@ function dokladPdf(ME, buyer, kind, period, cur, data, test, testMode){
         const _ty = doc.y;
         doc.rect(50, _ty, 495, 24).fillAndStroke('#FDECEC', '#F3C0C0');
         doc.fillColor('#8a1c1c').fontSize(9)
-           .text('TESTOVAC\u00cd RE\u017dIM \u2014 nejde o da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 re\u00e1ln\u00e9 transakci nedo\u0161lo',
+           .text('TESTOVAC\u00cd RE\u017dIM \u2014 nejde o form\u00e1ln\u00ed da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo',
                  58, _ty + 8, { width: 479, align: 'center', lineBreak: false });
         doc.y = _ty + 24 + 14;
         doc.x = 50;
@@ -296,6 +333,13 @@ export default async function handler(req, res) {
 
     async function issue(kind, entityId, ownerId, cur, data) {
       const col = kind === 'gym' ? 'gym_id' : 'coach_id';
+      // Zaváděcí období: provize se neúčtovala, takže "doklad o stržené provizi" by lhal.
+      // Místo něj přehled odebrané služby -- viz introSummaryHtml.
+      let _intro = null;
+      try {
+        const _p = (await sb(`profiles?id=eq.${encodeURIComponent(ownerId)}&select=billing_country`))[0];
+        _intro = await introFreeFor(sb, _p && _p.billing_country);
+      } catch (e) { console.error('issue introFreeFor:', e.message); }
       if (TEST && !dailyAny && String(ownerId) !== FOUNDER_UUID) { skipped++; return; }
       // idempotent: one unified doklad per entity+period+currency
       // period is the DAY in daily mode and the month otherwise, so one receipt per entity per
@@ -359,6 +403,15 @@ export default async function handler(req, res) {
         else { const pr = await sb(`profiles?id=eq.${ownerId}&select=invoice_email&limit=1`); em = (pr && pr[0] && pr[0].invoice_email) || null; }
         if (!em && ownerId) { const pr2 = await sb(`profiles?id=eq.${ownerId}&select=email&limit=1`); em = pr2 && pr2[0] && pr2[0].email; }
         if (em) {
+          // Při nulové provizi jde přehled bez přílohy: PDF je formát daňového dokladu a tohle
+          // žádný není. Text v těle stačí a nesvádí to k tomu brát ho jako doklad.
+          if (_intro) {
+            await sendEmail(em,
+              `${_TESTMODE ? '[TEST] ' : ''}Přehled zprostředkovaných plateb — ${periodShort(period)}${(kind === 'gym' && buyer && buyer.name) ? (' — ' + buyer.name) : ''}`,
+              introSummaryHtml(ME, buyer, kind, period, cur, data, _TESTMODE, _intro.until), []);
+            issued++;
+            return;
+          }
           let _att = [];
           try {
             const _buf = await dokladPdf(ME, buyer, kind, period, cur, data, DAILY, _TESTMODE);
