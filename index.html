@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SYD puts the address suggester on every address field that is read: the club application and club settings, the billing address of a club and of a coach, and the venue of an event. The billing ones never reach a map, but they are the registered office printed on every receipt, so a typo there is worth catching too. The only field left alone is the optional address in the old onboarding screen, which nothing ever reads. -->
+<!-- MTL build: SYG stores the address in parts as well as in the single field people see. DAC7 will probably want them, and splitting one text line apart afterwards across hundreds of clubs is not something anyone is going to do. Both routes now supply them: picking from the suggester, which is where Nominatim already has them separated, and a small form for addresses the map does not know, which asks for street, town and postcode rather than offering a free line -- a free line is what would create the records nobody can read later. The suggester also covers the MTL registered address, which prints on every commission receipt. Needs address-parts.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -16841,7 +16841,8 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
   // rovnou, místo aby se adresa geokódovala znovu a mohla spadnout na střed města.
   // Fakturační adresa klubu. Na mapu nejde, ale je to sídlo na dokladu -- ať tam nesedí překlep,
   // který pak jde na každý vystavený doklad.
-  try{ _attachAddrSuggest('mgBillingAddr', function(){ return (_myGymData&&_myGymData.city)||''; }); }catch(e){}
+  try{ _attachAddrSuggest('mgBillingAddr', function(){ return (_myGymData&&_myGymData.city)||''; },
+    function(p){ window._mgBillParts=p; }); }catch(e){}
   try{ _attachAddrSuggest('gcAddress', function(){ return ($('gcCity')&&$('gcCity').value)||''; },
     function(p){ window._gcPickedGeo={ lat:p.lat, lng:p.lng, addr:($('gcAddress')&&$('gcAddress').value)||'' };
       if(p.city && $('gcCity') && !$('gcCity').value.trim()) $('gcCity').value=p.city; }); }catch(e){}
@@ -19182,6 +19183,9 @@ async function openMtlBilling(){
   await _loadMtlEnt(true); const E = window._mtlEnt || MTL_ENTITY;
   const body=document.getElementById('mtlBillBody'); if(!body) return;
   openSheet('shMtlBilling');
+  // Našeptávač i pro sídlo MTL -- to je dodavatel na každém dokladu o provizi, takže překlep
+  // tam jde na všechny vystavené doklady.
+  try{ _attachAddrSuggest('mbSidlo'); }catch(e){}
   const esc=function(v){ return v?String(v).replace(/"/g,'&quot;'):''; };
   const inp=function(id,val,ph){ return '<input id="'+id+'" value="'+esc(val)+'" placeholder="'+ph+'" style="width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid var(--border);border-radius:10px;font-size:14px;font-family:\'DM Sans\';margin-bottom:10px;">'; };
   const lbl=function(t){ return '<label style="font-size:12px;font-weight:700;color:var(--mid);display:block;margin-bottom:3px;">'+t+'</label>'; };
@@ -20193,6 +20197,16 @@ async function submitGymChangeRequest(){
   if(!next.name){ toast(LANG==='en'?'⚠️ Club name is required':'⚠️ Název klubu je povinný'); return; }
   const _vtSel=($('gcVenueType')?$('gcVenueType').value:'')||null;
   const patch={ name:next.name, address:next.address, city:next.city, venue_type:_vtSel };
+  // Rozpad adresy, jak ho vrátil našeptávač nebo ruční formulář. Bez něj by se z jednoho řádku
+  // musely části tahat zpětně, což u stovek klubů nejde.
+  try{
+    const _bp=window._mgBillParts;
+    if(_bp){ patch.billing_line1=_bp.line1||null; patch.billing_line2=_bp.line2||null;
+      patch.billing_city=_bp.city||null; patch.billing_postal=_bp.postal||null; }
+    const _ap=($('gcAddress')||{})._addrParts;
+    if(_ap){ patch.addr_line1=_ap.line1||null; patch.addr_line2=_ap.line2||null;
+      patch.addr_city=_ap.city||null; patch.addr_postal=_ap.postal||null; }
+  }catch(e){}
   // Změna adresy musí přepočítat souřadnice. Ukládala se jen adresa, takže klub po stěhování
   // zůstal na mapě na starém místě -- a vzdálenost ve vyhledávání se počítala k němu.
   if(next.address!==(_myGymData.address||'') || next.city!==(_myGymData.city||'')){
@@ -29566,10 +29580,70 @@ function renderCaActiveStudents(){
 //
 // Nominatim (OpenStreetMap) už používáme jinde. Jeho podmínky žádají nejvýš jeden dotaz za
 // vteřinu, proto se čeká, než člověk přestane psát.
+// Poštovní tvar: "Jičínská 226/17, Žižkov (Praha 3), 130 00 Praha". Nominatim vrací display_name
+// jako "název podniku, číslo, ulice, ...", což se nedá použít ani do pole, ani k přečtení.
+function _fmtAddr(a){
+  a=a||{};
+  const street=[a.road||a.pedestrian||a.footway, a.house_number].filter(Boolean).join(' ');
+  const _sub=a.suburb||a.quarter||a.neighbourhood||'';
+  const _dist=a.city_district||a.borough||'';
+  const quarter=_sub ? (_sub+(_dist && _dist!==_sub ? (' ('+_dist+')') : '')) : _dist;
+  const town=[a.postcode, a.city||a.town||a.village||a.municipality].filter(Boolean).join(' ');
+  return [street, quarter, town].filter(Boolean).join(', ');
+}
+
+// ── RUČNÍ ZADÁNÍ ADRESY ──────────────────────────────────────────────────────────────────────
+// Našeptávač je běžná cesta a nese s sebou rozpad na části. Kdo svou adresu v mapě nenajde
+// (nová budova, malá obec), musí mít jinou možnost -- ale ne volné pole. Volné pole by časem
+// vytvořilo adresy, které jde jen vytisknout a ne přečíst, a rozdělovat je zpětně u stovek
+// klubů nejde. Ručně se proto zadává rovnou po částech.
+function _addrManualPrompt(inputId, onDone){
+  const el=document.getElementById(inputId); if(!el) return;
+  const EN=LANG==='en';
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;z-index:100070;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;';
+  const _i='width:100%;padding:12px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:\'DM Sans\';box-sizing:border-box;margin-bottom:8px;';
+  ov.innerHTML='<div style="background:#fff;border-radius:18px;max-width:400px;width:100%;padding:22px;font-family:\'DM Sans\';">'
+    +'<div style="font-size:16px;font-weight:800;color:var(--dark);margin-bottom:4px;">'+(EN?'Enter the address':'Zadej adresu')+'</div>'
+    +'<div style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:14px;">'
+    +(EN?'Fill in the parts — we need them for tax reporting, so one long line will not do.'
+        :'Vyplň části zvlášť — potřebujeme je pro daňové hlášení, jeden dlouhý řádek nestačí.')+'</div>'
+    +'<input id="amStreet" placeholder="'+(EN?'Street and number':'Ulice a číslo')+'" style="'+_i+'">'
+    +'<input id="amCity" placeholder="'+(EN?'Town':'Město')+'" style="'+_i+'">'
+    +'<input id="amZip" placeholder="'+(EN?'Postcode':'PSČ')+'" style="'+_i+'">'
+    +'<button id="amOk" style="width:100%;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';margin-top:4px;">'+(EN?'Save':'Uložit')+'</button>'
+    +'<button id="amX" style="width:100%;margin-top:8px;padding:10px;background:none;border:none;color:var(--mid);font-size:13px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Cancel':'Zrušit')+'</button>'
+    +'</div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#amX').onclick=function(){ ov.remove(); };
+  ov.querySelector('#amOk').onclick=function(){
+    const st=(ov.querySelector('#amStreet').value||'').trim();
+    const ct=(ov.querySelector('#amCity').value||'').trim();
+    const zp=(ov.querySelector('#amZip').value||'').trim();
+    if(!st || !ct){ toast(EN?'\u26a0\ufe0f Street and town are required':'\u26a0\ufe0f Ulice a město jsou povinné'); return; }
+    el.value=[st, [zp,ct].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+    ov.remove();
+    if(typeof onDone==='function') onDone({ line1:st, city:ct, postal:zp, manual:true });
+  };
+}
+
 function _attachAddrSuggest(inputId, cityGetter, onPick){
   const el=document.getElementById(inputId); if(!el || el._addrWired) return;
   el._addrWired=true;
   el.setAttribute('autocomplete','off');
+  // Adresa vzniká VÝBĚREM, ne psaním. Volné pole by časem vytvořilo záznamy, které jde jen
+  // vytisknout a ne přečíst -- a rozdělit je zpětně u stovek klubů nejde. Psát se dá kvůli
+  // hledání, ale co se neuloží výběrem nebo ručním formulářem, se před uložením zahodí.
+  try{
+    if(!el._manualLink){
+      el._manualLink=document.createElement('button');
+      el._manualLink.type='button';
+      el._manualLink.textContent=(LANG==='en'?'Address not found? Enter it manually':'Nenašel jsi adresu? Zadej ji ručně');
+      el._manualLink.style.cssText='background:none;border:none;padding:4px 0 0;color:var(--blue);font-size:11.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';text-decoration:underline;';
+      el._manualLink.onclick=function(){ _addrManualPrompt(inputId, function(p){ el._addrParts=p; if(typeof onPick==='function') onPick(p); }); };
+      if(el.parentNode) el.parentNode.insertBefore(el._manualLink, el.nextSibling);
+    }
+  }catch(e){}
   const box=document.createElement('div');
   box.style.cssText='position:absolute;z-index:100060;background:#fff;border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);max-height:220px;overflow:auto;display:none;';
   document.body.appendChild(box);
@@ -29592,23 +29666,38 @@ function _attachAddrSuggest(inputId, cityGetter, onPick){
         +encodeURIComponent(q+(city && q.toLowerCase().indexOf(city.toLowerCase())<0 ? (', '+city) : '')));
       const d=await r.json();
       if(!d || !d.length){ hide(); return; }
+      // Vlastní formát. display_name vrací "Muay Thai Lab, 20, Kounicova, Brno" -- název podniku,
+      // číslo, teprve pak ulice. Skládáme si to sami: ulice s číslem jako hlavní řádek, pod ním
+      // město, a název podniku jen jako doplněk, když nějaký je.
       box.innerHTML=d.map(function(x,i){
-        return '<div class="asItem" data-i="'+i+'" style="padding:10px 12px;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border);line-height:1.4;">'
-          +escapeHtml(x.display_name)+'</div>';
+        const _t=_fmtAddr(x.address) || String(x.display_name||'').split(',').slice(0,3).join(',');
+        return '<div class="asItem" data-i="'+i+'" style="padding:10px 12px;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border);line-height:1.4;color:var(--dark);">'
+          +escapeHtml(_t)+'</div>';
       }).join('');
       place(); box.style.display='block';
       box.querySelectorAll('.asItem').forEach(function(it){
-        it.onmousedown=function(ev){
-          ev.preventDefault();
+        // Na dotyku mousedown nemusí přijít vůbec, takže i touchstart -- jinak se po klepnutí
+        // jen zavře nabídka (blur) a pole zůstane, jak bylo.
+        const _pick=function(ev){
+          if(ev && ev.preventDefault) ev.preventDefault();
           const x=d[Number(it.dataset.i)]; if(!x) return;
           const a=x.address||{};
-          // Do pole jen ulice a číslo -- město má vlastní pole a celý display_name by ho zdvojil.
-          const _street=[a.road, a.house_number].filter(Boolean).join(' ');
-          el.value=_street || String(x.display_name||'').split(',')[0];
+          // Do pole přesně to, co si člověk vybral -- ať se nabídka a výsledek neliší.
+          el.value=_fmtAddr(a) || String(x.display_name||'').split(',').slice(0,3).join(',');
           hide();
-          if(typeof onPick==='function') onPick({ lat:parseFloat(x.lat), lng:parseFloat(x.lon),
-            city:(a.city||a.town||a.village||a.municipality||''), country:(a.country||''), raw:x });
+          // Rozpad na části si odnáší i výběr z nabídky -- DAC7 je bude chtít a zpětně by se
+          // z jednoho řádku u stovek klubů netahaly.
+          el._addrParts={
+            line1:[a.road||a.pedestrian||a.footway, a.house_number].filter(Boolean).join(' '),
+            line2:(a.suburb||a.quarter||a.neighbourhood||''),
+            city:(a.city||a.town||a.village||a.municipality||''),
+            postal:(a.postcode||''), country:(a.country_code||'').toUpperCase()
+          };
+          if(typeof onPick==='function') onPick(Object.assign({ lat:parseFloat(x.lat), lng:parseFloat(x.lon),
+            country:(a.country||''), raw:x }, el._addrParts));
         };
+        it.addEventListener('mousedown', _pick);
+        it.addEventListener('touchstart', _pick, { passive:false });
       });
     }catch(e){ hide(); }
   };
@@ -31630,7 +31719,7 @@ async function renderCoachBilling(){
         else { _st.textContent=''; } } }
   };
   // Fakturační adresa kouče -- sídlo na dokladu, stejný důvod jako u klubu.
-  try{ _attachAddrSuggest('acmBillingAddr'); }catch(e){}
+  try{ _attachAddrSuggest('acmBillingAddr', null, function(p){ window._acmBillParts=p; }); }catch(e){}
   $('acmSaveBilling').onclick=async()=>{ var _ln=(($('acmLegalName')||{}).value||'').trim(), _tx=(($('acmTaxId')||{}).value||'').trim(), _co=(($('acmCountry')||{}).value||''), _ba=(($('acmBillingAddr')||{}).value||'').trim(), _ie=(($('acmInvoiceEmail')||{}).value||'').trim(); if(!_ln||!_tx||!_co||!_ba||!_ie){ toast(LANG==='en'?'Fill in legal name, tax ID (business reg. no.), country, address and billing e-mail':'Vypl\u0148 pr\u00e1vn\u00ed n\u00e1zev, I\u010cO (reg. \u010d\u00edslo), zemi, adresu a fakturac\u00ed e-mail'); return; } if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(_ie)){ toast(LANG==='en'?'Enter a valid billing e-mail':'Zadej platn\u00fd fakturac\u00ed e-mail'); return; } if(typeof _taxGate==='function' && !_taxGate('acmLegalName',['acmTaxId'])) return; const btn=$('acmSaveBilling'); const _o=btn.textContent; btn.disabled=true; btn.textContent=L('Ukládám...');
     const upd={ billing_country:(($('acmCountry')&&$('acmCountry').value)||null), legal_name:($('acmLegalName').value.trim()||null), billing_address:($('acmBillingAddr').value.trim()||null), tax_id:($('acmTaxId').value.trim()||null), vat_id:($('acmVatId').value.trim()||null), invoice_email:(($('acmInvoiceEmail')&&$('acmInvoiceEmail').value.trim())||null), vat_payer:!!$('acmVatPayer').checked };
     { const r=parseFloat($('acmVatRate').value); if(upd.vat_payer && isFinite(r) && r>=0) upd.vat_rate=r; }
