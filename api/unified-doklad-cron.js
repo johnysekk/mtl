@@ -158,7 +158,10 @@ function dokladHtml(ME, buyer, kind, period, cur, data, test, testMode){
     +'<div style="display:flex;gap:24px;margin-bottom:8px;"><div style="flex:1;font-size:13px;"><div style="font-size:11px;text-transform:uppercase;color:#888;margin-bottom:4px;">Dodavatel</div>'+supLines+'</div><div style="flex:1;font-size:13px;"><div style="font-size:11px;text-transform:uppercase;color:#888;margin-bottom:4px;">Odb\u011bratel</div>'+buyLines+'</div></div>'
     +'<table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:12px;"><thead><tr style="background:#f5f2ee;"><th style="padding:8px 10px;text-align:left;">Forma</th><th style="padding:8px 10px;">Sazba</th><th style="padding:8px 10px;">Transakc\u00ed</th><th style="padding:8px 10px;text-align:right;">Z\u00e1klad</th><th style="padding:8px 10px;text-align:right;">Provize</th></tr></thead><tbody>'+rows+'</tbody></table>'
     +'<table style="width:100%;border-collapse:collapse;font-size:14px;margin-top:2px;">'+vatBlock+'<tr style="font-weight:800;"><td style="border-top:2px solid #333;padding-top:8px;">Celkem</td><td style="text-align:right;border-top:2px solid #333;padding-top:8px;">'+_money(total,cur)+'</td></tr></table>'
-    +'<div style="margin-top:10px;font-size:12px;color:#555;">Bankovn\u00ed p\u0159evod (str\u017eeno z karty): <b>'+_money(bank,cur)+'</b> \u00b7 Stripe (\u017eiv\u011b): <b>'+_money(strp,cur)+'</b></div>'
+    +'<div style="margin-top:10px;font-size:12px;color:#555;">Zprost\u0159edkovan\u00fdch plateb: <b>'
+      +Object.values(data.rates||{}).reduce(function(a,i){ return a+(i.count||0); },0)
+      +'</b> \u00b7 objem <b>'+_money(Object.values(data.rates||{}).reduce(function(a,i){ return a+(i.gross||0); },0), cur)+'</b></div>'
+    +'<div style="margin-top:4px;font-size:12px;color:#555;">Bankovn\u00ed p\u0159evod (str\u017eeno z karty): <b>'+_money(bank,cur)+'</b> \u00b7 Stripe (\u017eiv\u011b): <b>'+_money(strp,cur)+'</b></div>'
     +'<p style="color:#999;font-size:11px;margin-top:18px;">Doklad o ji\u017e str\u017een\u00e9 / na\u00fa\u010dtovan\u00e9 provizi MTL za uveden\u00e9 obdob\u00ed. Nejde o v\u00fdzvu k platb\u011b.</p></div>';
 }
 // The receipt went out as HTML in the body, which cannot be filed or handed to an accountant.
