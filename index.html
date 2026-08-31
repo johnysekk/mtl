@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SYA geocodes a club by its street address instead of just the town, so every gym in Brno no longer sits on one point in the middle -- distance in search could be wrong by several kilometres. The address field is where the gym actually is; billing_address is the registered office and has no business on a map. If the address does not resolve it falls back to the town as before. The tax_country column added earlier is dropped: billing_country now means the tax domicile on both profiles and gyms, and residence_country holds where the person lives. Needs country-fields.sql, which replaces tax-country.sql. -->
+<!-- MTL build: SYD puts the address suggester on every address field that is read: the club application and club settings, the billing address of a club and of a coach, and the venue of an event. The billing ones never reach a map, but they are the registered office printed on every receipt, so a typo there is worth catching too. The only field left alone is the optional address in the old onboarding screen, which nothing ever reads. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -8534,6 +8534,8 @@ async function openEventCreate(club, ev){
     <textarea id="evTerms" rows="3" style="${inp}resize:vertical;" placeholder="${LANG==='en'?'Refund/cancellation policy, what to bring, rules…':'Storno podmínky, co si vzít, pravidla…'}"></textarea></div>
     ${isOwner?'':`<p style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:10px;">${LANG==='en'?'Your club owner reviews and approves this before it goes live.':'Majitel klubu to před zveřejněním schválí.'}</p>`}
     <button id="evSave" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${window._evEditing?(LANG==='en'?'Save changes':'Uložit změny'):(isOwner?(LANG==='en'?'Publish event':'Zveřejnit událost'):(LANG==='en'?'Send for approval':'Uložit ceny'))}</button>`;
+  // Adresa místa konání. Používá se pro mapu u akce, tak ať je přesná.
+  try{ _attachAddrSuggest('evAddr', function(){ return (club&&club.city)||''; }); }catch(e){}
   $('evPosterBtn').onclick=()=>$('evPosterInput').click();
   if($('evPosterRemove')) $('evPosterRemove').onclick=function(){ window._evPoster=''; var pv=$('evPosterPv'); if(pv){ pv.style.backgroundImage=''; pv.style.display='none'; } this.style.display='none'; var _eab=$('evPosterBtn'); if(_eab) _eab.textContent=(LANG==='en'?'\ud83d\uddbc\ufe0f Add poster':'\ud83d\uddbc\ufe0f P\u0159idat poster'); toast(LANG==='en'?'Poster removed':'Poster odebr\u00e1n'); };
   $('evPosterInput').onchange=async(e)=>{ const file=e.target.files&&e.target.files[0]; if(!file) return; const blob=await cropImage(file, 2/1); e.target.value=''; if(!blob) return; toast(L('⬆️ Nahrávám...')); try{ const fileName=`${currentUser.id}-event-${Date.now()}.jpg`; const { error }=await supaClient.storage.from('gym-photos').upload(fileName, blob, { contentType:'image/jpeg', upsert:false }); if(error){ toast('⚠️ '+error.message); return; } const { data }=supaClient.storage.from('gym-photos').getPublicUrl(fileName); window._evPoster=data.publicUrl; const pv=$('evPosterPv'); if(pv){ pv.style.backgroundImage=`url('${data.publicUrl}')`; pv.style.display='block'; } toast(LANG==='en'?'✅ Poster added':'✅ Poster nahrán'); var _erb=$('evPosterRemove'); if(_erb) _erb.style.display='block'; var _eab=$('evPosterBtn'); if(_eab) _eab.textContent=(LANG==='en'?'\ud83d\uddbc\ufe0f Change poster':'\ud83d\uddbc\ufe0f Zm\u011bnit poster'); }catch(err){ toast('⚠️'); } };
@@ -16835,6 +16837,14 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
   if($('mgCurrency')) $('mgCurrency').addEventListener('change', ()=>{ _myGymData.currency=$('mgCurrency').value; if(typeof updateMgDropinBreak==='function') updateMgDropinBreak(); if(typeof renderPlansEditor==='function') renderPlansEditor(); });
   if(typeof updateMgDropinBreak==='function') updateMgDropinBreak();
   if($('gcSubmit')) $('gcSubmit').onclick=submitGymChangeRequest;
+  // Našeptávač adres. Souřadnice z vybrané položky si odložíme -- při ukládání se použijí
+  // rovnou, místo aby se adresa geokódovala znovu a mohla spadnout na střed města.
+  // Fakturační adresa klubu. Na mapu nejde, ale je to sídlo na dokladu -- ať tam nesedí překlep,
+  // který pak jde na každý vystavený doklad.
+  try{ _attachAddrSuggest('mgBillingAddr', function(){ return (_myGymData&&_myGymData.city)||''; }); }catch(e){}
+  try{ _attachAddrSuggest('gcAddress', function(){ return ($('gcCity')&&$('gcCity').value)||''; },
+    function(p){ window._gcPickedGeo={ lat:p.lat, lng:p.lng, addr:($('gcAddress')&&$('gcAddress').value)||'' };
+      if(p.city && $('gcCity') && !$('gcCity').value.trim()) $('gcCity').value=p.city; }); }catch(e){}
   if($('gtSearchBtn')) $('gtSearchBtn').onclick=gtSearchCoaches;
   if($('gtLinkBox')) renderInviteLink('team');
   if($('gtPending')) loadPending('team');
@@ -20183,6 +20193,24 @@ async function submitGymChangeRequest(){
   if(!next.name){ toast(LANG==='en'?'⚠️ Club name is required':'⚠️ Název klubu je povinný'); return; }
   const _vtSel=($('gcVenueType')?$('gcVenueType').value:'')||null;
   const patch={ name:next.name, address:next.address, city:next.city, venue_type:_vtSel };
+  // Změna adresy musí přepočítat souřadnice. Ukládala se jen adresa, takže klub po stěhování
+  // zůstal na mapě na starém místě -- a vzdálenost ve vyhledávání se počítala k němu.
+  if(next.address!==(_myGymData.address||'') || next.city!==(_myGymData.city||'')){
+    // Souřadnice z našeptávače, když se adresa od výběru nezměnila -- přesnější než dohledávat
+    // ji znovu a bez dalšího dotazu na mapu.
+    const _pg=window._gcPickedGeo;
+    if(_pg && _pg.addr===next.address && _pg.lat!=null){ patch.city_lat=_pg.lat; patch.city_lng=_pg.lng; }
+    else try{
+      const _q=(next.address? (next.address+', ') : '')+next.city;
+      let _r=await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q='+encodeURIComponent(_q));
+      let _d=await _r.json();
+      if((!_d||!_d.length) && next.city){
+        _r=await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q='+encodeURIComponent(next.city));
+        _d=await _r.json();
+      }
+      if(_d && _d.length){ patch.city_lat=parseFloat(_d[0].lat); patch.city_lng=parseFloat(_d[0].lon); }
+    }catch(e){ console.log('[gymGeo]', e&&e.message); }
+  }
   const btn=$('gcSubmit'); if(btn){ btn.disabled=true; btn.textContent=(LANG==='en'?'Saving...':'Ukládám...'); }
   try{
     const { error } = await supaClient.from('gyms').update(patch).eq('id', _myGymData.id);
@@ -21870,6 +21898,10 @@ async function openGymApp(){
   else { if($('gymDiscBlock')) $('gymDiscBlock').style.display='none'; }
   if(hadDraft){ applyGymDraftPreviews(); toast(LANG==='en'?'↩︎ Draft restored':'↩︎ Rozpracované obnoveno'); }
   openSheet('shGymApp');
+  // Našeptávač adres i v přihlášce -- adresa tu vzniká poprvé a právě z ní se počítá poloha.
+  try{ _attachAddrSuggest('gymAddress', function(){ return ($('gymCity')&&$('gymCity').value)||''; },
+    function(p){ window._gaPickedGeo={ lat:p.lat, lng:p.lng, addr:($('gymAddress')&&$('gymAddress').value)||'' };
+      if(p.city && $('gymCity') && !$('gymCity').value.trim()) $('gymCity').value=p.city; }); }catch(e){}
   try{ if(typeof _gaApplyMode==='function'){ var _ck=document.querySelector('input[name=gaPayMode]:checked'); _gaApplyMode(_ck?_ck.value:null); } }catch(e){}
   try{ if(!_sheetParent['shGymApp']) _sheetParent['shGymApp']=(window._myGyms&&window._myGyms.length)?'shGymManage':'shMe'; }catch(e){}
   try{ let st=1; if(hadDraft){ const raw=localStorage.getItem(GYM_DRAFT_KEY); const d=raw?JSON.parse(raw):null; st=1; } gaGoStep(1);
@@ -22003,6 +22035,9 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
       // na jednom bodě uprostřed -- vzdálenost ve vyhledávání se pletla klidně o pět kilometrů.
       // Adresa je "kde klub je", ne fakturační sídlo; to je billing_address a na mapu nepatří.
       // Když se adresa nenajde (překlep, nová ulice), spadne se na město jako dřív.
+      // Souřadnice z našeptávače, když se adresa od výběru nezměnila -- přesnější a bez dotazu.
+      const _pg=window._gaPickedGeo;
+      if(_pg && _pg.addr===address && _pg.lat!=null){ lat=_pg.lat; lng=_pg.lng; }
       const _q1 = (address && String(address).trim()) ? (String(address).trim()+', '+city) : city;
       let geo=await fetch(`https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q=${encodeURIComponent(_q1)}`);
       let gd=await geo.json();
@@ -29523,6 +29558,66 @@ function renderCaActiveStudents(){
     box.appendChild(b);
   });
 }
+
+// ── NAŠEPTÁVAČ ADRES ─────────────────────────────────────────────────────────────────────────
+// Adresu klubu jsme brali tak, jak ji člověk napsal, a pak ji geokódovali. Překlep nebo tvar,
+// který mapa nezná, tiše spadl na střed města -- klub pak sedí kilometry vedle a nikdo se to
+// nedozví. Když se vybírá z nabídky, souřadnice přijdou rovnou s ní a hádat se nemusí.
+//
+// Nominatim (OpenStreetMap) už používáme jinde. Jeho podmínky žádají nejvýš jeden dotaz za
+// vteřinu, proto se čeká, než člověk přestane psát.
+function _attachAddrSuggest(inputId, cityGetter, onPick){
+  const el=document.getElementById(inputId); if(!el || el._addrWired) return;
+  el._addrWired=true;
+  el.setAttribute('autocomplete','off');
+  const box=document.createElement('div');
+  box.style.cssText='position:absolute;z-index:100060;background:#fff;border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);max-height:220px;overflow:auto;display:none;';
+  document.body.appendChild(box);
+  const place=function(){
+    try{ const r=el.getBoundingClientRect();
+      box.style.left=(r.left+window.scrollX)+'px';
+      box.style.top=(r.bottom+window.scrollY+4)+'px';
+      box.style.width=r.width+'px';
+    }catch(e){}
+  };
+  const hide=function(){ box.style.display='none'; };
+  let _t=null, _last='';
+  const search=async function(){
+    const q=String(el.value||'').trim();
+    if(q.length<3 || q===_last){ if(q.length<3) hide(); return; }
+    _last=q;
+    const city=(typeof cityGetter==='function' ? (cityGetter()||'') : '');
+    try{
+      const r=await fetch('https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=6&q='
+        +encodeURIComponent(q+(city && q.toLowerCase().indexOf(city.toLowerCase())<0 ? (', '+city) : '')));
+      const d=await r.json();
+      if(!d || !d.length){ hide(); return; }
+      box.innerHTML=d.map(function(x,i){
+        return '<div class="asItem" data-i="'+i+'" style="padding:10px 12px;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border);line-height:1.4;">'
+          +escapeHtml(x.display_name)+'</div>';
+      }).join('');
+      place(); box.style.display='block';
+      box.querySelectorAll('.asItem').forEach(function(it){
+        it.onmousedown=function(ev){
+          ev.preventDefault();
+          const x=d[Number(it.dataset.i)]; if(!x) return;
+          const a=x.address||{};
+          // Do pole jen ulice a číslo -- město má vlastní pole a celý display_name by ho zdvojil.
+          const _street=[a.road, a.house_number].filter(Boolean).join(' ');
+          el.value=_street || String(x.display_name||'').split(',')[0];
+          hide();
+          if(typeof onPick==='function') onPick({ lat:parseFloat(x.lat), lng:parseFloat(x.lon),
+            city:(a.city||a.town||a.village||a.municipality||''), country:(a.country||''), raw:x });
+        };
+      });
+    }catch(e){ hide(); }
+  };
+  el.addEventListener('input', function(){ clearTimeout(_t); _t=setTimeout(search, 500); });
+  el.addEventListener('blur', function(){ setTimeout(hide, 150); });
+  window.addEventListener('scroll', place, true);
+  window.addEventListener('resize', place);
+}
+
 async function _caGeoCity(){
   try{
     var el=$('caCity'); if(!el) return; var v=(el.value||'').trim();
@@ -31534,6 +31629,8 @@ async function renderCoachBilling(){
         if(v){ var _cc=(($('acmCountry')&&$('acmCountry').value)||'').toUpperCase(); _st.textContent=(_cc && _cc!=='CZ')  ? (LANG==='en'?('We can only verify Czech numbers automatically \u2014 '+_cc+' is not checked'):('Automaticky ov\u011b\u0159ujeme jen \u010desk\u00e1 \u010d\u00edsla \u2014 '+_cc+' nekontrolujeme'))  : (LANG==='en'?'A CZ I\u010cO has 8 digits (checked against ARES)':'\u010cesk\u00e9 I\u010cO m\u00e1 8 \u010d\u00edslic (ov\u011b\u0159ujeme v ARES)'); _st.style.color='var(--light)'; }
         else { _st.textContent=''; } } }
   };
+  // Fakturační adresa kouče -- sídlo na dokladu, stejný důvod jako u klubu.
+  try{ _attachAddrSuggest('acmBillingAddr'); }catch(e){}
   $('acmSaveBilling').onclick=async()=>{ var _ln=(($('acmLegalName')||{}).value||'').trim(), _tx=(($('acmTaxId')||{}).value||'').trim(), _co=(($('acmCountry')||{}).value||''), _ba=(($('acmBillingAddr')||{}).value||'').trim(), _ie=(($('acmInvoiceEmail')||{}).value||'').trim(); if(!_ln||!_tx||!_co||!_ba||!_ie){ toast(LANG==='en'?'Fill in legal name, tax ID (business reg. no.), country, address and billing e-mail':'Vypl\u0148 pr\u00e1vn\u00ed n\u00e1zev, I\u010cO (reg. \u010d\u00edslo), zemi, adresu a fakturac\u00ed e-mail'); return; } if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(_ie)){ toast(LANG==='en'?'Enter a valid billing e-mail':'Zadej platn\u00fd fakturac\u00ed e-mail'); return; } if(typeof _taxGate==='function' && !_taxGate('acmLegalName',['acmTaxId'])) return; const btn=$('acmSaveBilling'); const _o=btn.textContent; btn.disabled=true; btn.textContent=L('Ukládám...');
     const upd={ billing_country:(($('acmCountry')&&$('acmCountry').value)||null), legal_name:($('acmLegalName').value.trim()||null), billing_address:($('acmBillingAddr').value.trim()||null), tax_id:($('acmTaxId').value.trim()||null), vat_id:($('acmVatId').value.trim()||null), invoice_email:(($('acmInvoiceEmail')&&$('acmInvoiceEmail').value.trim())||null), vat_payer:!!$('acmVatPayer').checked };
     { const r=parseFloat($('acmVatRate').value); if(upd.vat_payer && isFinite(r) && r>=0) upd.vat_rate=r; }
