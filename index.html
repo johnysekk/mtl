@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SXZ makes billing_country mean the same thing everywhere. On a club it was the tax domicile from the application; on a profile it was where you live, written by the app signup, and the two shared a name while driving different decisions. It is the tax domicile in both places now, and residence -- which is what the age of consent, the phone prefix and the currency default hang off -- moved to residence_country. The country column keeps holding the display name used for filters, the map and the leaderboards, untouched. Needs country-fields.sql, which must run after tax-country.sql. -->
+<!-- MTL build: SYA geocodes a club by its street address instead of just the town, so every gym in Brno no longer sits on one point in the middle -- distance in search could be wrong by several kilometres. The address field is where the gym actually is; billing_address is the registered office and has no business on a map. If the address does not resolve it falls back to the town as before. The tax_country column added earlier is dropped: billing_country now means the tax domicile on both profiles and gyms, and residence_country holds where the person lives. Needs country-fields.sql, which replaces tax-country.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -21999,8 +21999,17 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
   try {
     let lat=null,lng=null,countryName=null;
     try {
-      const geo=await fetch(`https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q=${encodeURIComponent(city)}`);
-      const gd=await geo.json();
+      // PŘESNÁ ADRESA, ne jen město. Geokódovalo se pouze město, takže každý klub v Brně seděl
+      // na jednom bodě uprostřed -- vzdálenost ve vyhledávání se pletla klidně o pět kilometrů.
+      // Adresa je "kde klub je", ne fakturační sídlo; to je billing_address a na mapu nepatří.
+      // Když se adresa nenajde (překlep, nová ulice), spadne se na město jako dřív.
+      const _q1 = (address && String(address).trim()) ? (String(address).trim()+', '+city) : city;
+      let geo=await fetch(`https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q=${encodeURIComponent(_q1)}`);
+      let gd=await geo.json();
+      if((!gd || !gd.length) && _q1!==city){
+        geo=await fetch(`https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q=${encodeURIComponent(city)}`);
+        gd=await geo.json();
+      }
       if(gd && gd.length){ lat=parseFloat(gd[0].lat); lng=parseFloat(gd[0].lon); countryName=gd[0].address&&gd[0].address.country||null; }
     } catch(e){}
     const showcasePhotos = GYM_SHOWCASE.filter(sp=>gymShowcaseUrls[sp.k]).map(sp=>({ space:sp.k, url:gymShowcaseUrls[sp.k] }));
@@ -23478,7 +23487,7 @@ async function _introBannerFor(container){
     if(!container || !currentUser) return;
     const cc=String(
       (typeof _myGymData!=='undefined' && _myGymData && _myGymData.billing_country) ||
-      currentUser.billing_country || currentUser.tax_country || '').trim().toUpperCase();
+      currentUser.billing_country || '').trim().toUpperCase();
     if(!cc) return;
     const map=await _loadIntroRates();
     const e=map[cc];
@@ -23546,7 +23555,7 @@ async function renderDac7(){
   try{ if(gids.length){ const { data:gs }=await supaClient.from('gyms').select('id,name,legal_name,tax_id,vat_id,billing_address,billing_country,owner_id').in('id',gids); (gs||[]).forEach(function(x){ gm[x.id]=x; }); } }catch(e){}
   try{
     const _pids=cids.concat(Object.values(gm).map(function(x){ return x.owner_id; }).filter(Boolean));
-    if(_pids.length){ const { data:ps }=await supaClient.from('profiles').select('id,name,legal_name,tax_id,vat_id,billing_address,tax_country,billing_country,birthdate').in('id',_pids); (ps||[]).forEach(function(x){ cm[x.id]=x; }); }
+    if(_pids.length){ const { data:ps }=await supaClient.from('profiles').select('id,name,legal_name,tax_id,vat_id,billing_address,billing_country,birthdate').in('id',_pids); (ps||[]).forEach(function(x){ cm[x.id]=x; }); }
   }catch(e){}
 
   const rows=keys.map(function(k){
@@ -23554,7 +23563,7 @@ async function renderDac7(){
     const g=(b.kind==='gym')?(gm[b.id]||{}):null;
     const prof=(b.kind==='gym')?(cm[(g&&g.owner_id)]||{}):(cm[b.id]||{});
     const name=(g&&(g.legal_name||g.name))||prof.legal_name||prof.name||'—';
-    const cc=String((g&&g.billing_country)||prof.billing_country||prof.tax_country||'').toUpperCase();
+    const cc=String((g&&g.billing_country)||prof.billing_country||'').toUpperCase();
     const txN=b.q.reduce(function(a,x){ return a+x; },0);
     const vol=b.v.reduce(function(a,x){ return a+x; },0);
     // Práh: 30 plnění NEBO 2 000 EUR. U CZK počítáme hrubě 25 Kč/EUR -- na hranici to rozhodne
@@ -31489,12 +31498,12 @@ async function renderCoachBilling(){
   if(me.coach_status!=='approved'){ box.style.display='none'; box.innerHTML=''; return; }
   box.style.display=''; const EN=LANG==='en';
   let pr={};
-  try{ const { data }=await supaClient.from('profiles').select('legal_name,tax_id,vat_id,billing_address,billing_country,tax_country,vat_payer,vat_rate,invoice_email').eq('id',me.id).maybeSingle(); pr=data||{}; }catch(e){}
+  try{ const { data }=await supaClient.from('profiles').select('legal_name,tax_id,vat_id,billing_address,billing_country,vat_payer,vat_rate,invoice_email').eq('id',me.id).maybeSingle(); pr=data||{}; }catch(e){}
   const ev=(x)=>String(x==null?'':x).replace(/"/g,'&quot;');
   { const _lb=$('csLblBilling'); if(_lb) _lb.textContent='🧾 '+(EN?'Billing details':'Fakturační údaje'); }
   box.innerHTML=`
     <p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:0 0 10px;">${EN?'Shown on the receipts your students get for 1:1 / online lessons. As a VAT payer, receipts break the price into net + VAT.':'Zobrazí se na dokladech, které studenti dostanou za 1:1 / online lekce. Jako plátce DPH se cena na dokladu rozepíše na základ daně + DPH.'}</p>
-    ${_countrySel('acmCountry', pr.billing_country || pr.tax_country)}
+    ${_countrySel('acmCountry', pr.billing_country)}
     <input id="acmLegalName" value="${ev(pr.legal_name)}" placeholder="${EN?'Legal name (you / your business)':'Jméno / název (ty / tvá firma)'}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:8px;">
     <input id="acmBillingAddr" value="${ev(pr.billing_address)}" placeholder="${EN?'Registered / billing address':'Sídlo / fakturační adresa'}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:8px;">
     <input id="acmTaxId" value="${ev(pr.tax_id)}" placeholder="I\u010cO" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:4px;">
