@@ -85,7 +85,7 @@ export async function resolveOwner(sbGet, { ownerId, gymId, gymAccount }) {
     }
   }
   if (!oid) throw new Error('resolveOwner: no owner (ownerId/gymId/gymAccount all unresolved)');
-  let p = (await sbGet(`profiles?id=eq.${encodeURIComponent(oid)}&select=id,partner,founding,coach_ref_score,bankai_eligible,billing_country,tax_country`))[0];
+  let p = (await sbGet(`profiles?id=eq.${encodeURIComponent(oid)}&select=id,partner,founding,coach_ref_score,bankai_eligible,billing_country`))[0];
   if (!p) throw new Error('resolveOwner: owner profile not found');
   // Země klubu má přednost před zemí majitele.
   if (gymCC) p = Object.assign({}, p, { billing_country: gymCC });
@@ -199,12 +199,9 @@ export async function introFreeFor(sbGet, country) {
 export async function effectiveRateBreakdown(sbGet, args) {
   const p = await resolveOwner(sbGet, { ownerId: args.ownerId, gymId: args.gymId, gymAccount: args.gymAccount });
   // Zaváděcí období má přednost před vším ostatním -- ani akviziční příplatek se neúčtuje.
-  // tax_country je daňový domicil z přihlášky poskytovatele. billing_country plní registrace do
-  // appky ("Odkud jsi?") -- bydliště, které se může lišit; bereme ho jen jako náhradu u účtů,
-  // které přihlášku vyplnily dřív, než ten sloupec vznikl.
-  // billing_country = daňový domicil, u profilu i u klubu stejně. tax_country je přechodná
-  // záloha z doby, než se ta dvě pole rozdělila.
-  const _free = await introFreeFor(sbGet, p.billing_country || p.tax_country);
+  // billing_country = daňový domicil. U klubu i u profilu stejně; bydliště je v residence_country.
+  // billing_country = daňový domicil, u profilu i u klubu stejně.
+  const _free = await introFreeFor(sbGet, p.billing_country);
   if (_free) return { rate: 0, baseRate: 0, acqMonths: 0, months: Math.max(1, parseInt(args.months, 10) || 1), introFree: true, introUntil: _free.until };
   const ladder = ladderRate(args.mode, { partner: p.partner, founding: p.founding, score: p.coach_ref_score, bankai: p.bankai_eligible });
   const acq = await acquisitionRate(sbGet, { acqSource: args.acqSource, type: args.type, ownerPartner: p.partner, memberId: args.memberId, scopeCol: args.scopeCol, scopeId: (args.scopeId || p.id) });
