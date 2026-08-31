@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SXW separates the provider country from the Stripe country. Registration was offering MTL_STRIPE_COUNTRIES -- the countries where Stripe Connect can deduct a fee for a non-resident platform -- but billing_country is a tax domicile, and both the country commission switch and DAC7 hang off it; neither has anything to do with Stripe, least of all on the bank rail where Stripe is absent. A coach in Thailand can take transfers and QR perfectly well and simply could not register. MTL_COUNTRIES now holds the tax domiciles, including Thailand, Mexico, Malaysia and Brazil, and registration, the country picker and the guess-my-country helper all read it; the Stripe list stays where it belongs, for deciding whether that rail can be used at all. -->
+<!-- MTL build: SXZ makes billing_country mean the same thing everywhere. On a club it was the tax domicile from the application; on a profile it was where you live, written by the app signup, and the two shared a name while driving different decisions. It is the tax domicile in both places now, and residence -- which is what the age of consent, the phone prefix and the currency default hang off -- moved to residence_country. The country column keeps holding the display name used for filters, the map and the leaderboards, untouched. Needs country-fields.sql, which must run after tax-country.sql. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -3709,11 +3709,12 @@ function _kidAge(k){ try{ if(k && k.dob){ const d=new Date(k.dob); if(!isNaN(d.g
 // 15-year-old in CZ never got the 'move to own account' button and the handover looked missing.
 // Resolve the country from every hint we have before falling back.
 function _myConsentCC(){
-  // billing_country holds the country every user picks at registration ('Odkud jsi?' -> _finishReg),
-  // so it's the reliable field despite the billing-ish name; country_code is a fallback (coaches).
-  // NOT 'country' -- that column holds a display name. Only accounts predating the registration country
-  // step have none, which is why the migrate flow asks once and stores it.
-  try{ var src=[currentUser&&currentUser.billing_country, currentUser&&currentUser.country_code];
+  // BYDLIŠTĚ, ne daňový domicil. Věk souhlasu se řídí tím, kde člověk žije -- residence_country
+  // plní registrace do appky ("Odkud jsi?"). billing_country je teď u profilu daňový domicil
+  // z přihlášky poskytovatele, který se může lišit, a jako záloha slouží jen účtům, které
+  // vznikly dřív, než se ty dvě věci rozdělily. 'country' je zobrazovací název, ne kód.
+  try{ var src=[currentUser&&currentUser.residence_country, currentUser&&currentUser.billing_country,
+                currentUser&&currentUser.country_code];
     for(var i=0;i<src.length;i++){ var cc=String(src[i]||'').toUpperCase().trim(); if(/^[A-Z]{2}$/.test(cc)) return cc; } }catch(e){}
   return '';
 }
@@ -14500,7 +14501,7 @@ function _phoneVal(scope, id){
 }
 function _phoneCCOptions(sel){
   var ccs=['+420','+421','+48','+49','+43','+36','+44','+1','+33','+39','+34','+31','+41','+46','+47','+45','+380','+40','+353','+32','+30','+90'];
-  if(!sel){ try{ var cc=String((typeof currentUser!=='undefined'&&currentUser&&(currentUser.stripe_country||currentUser.billing_country||currentUser.country_code))||'').toUpperCase();
+  if(!sel){ try{ var cc=String((typeof currentUser!=='undefined'&&currentUser&&(currentUser.stripe_country||currentUser.residence_country||currentUser.billing_country||currentUser.country_code))||'').toUpperCase();
     var map={CZ:'+420',SK:'+421',PL:'+48',DE:'+49',AT:'+43',HU:'+36',GB:'+44',UK:'+44',US:'+1',FR:'+33',IT:'+39',ES:'+34',NL:'+31',CH:'+41',SE:'+46',NO:'+47',DK:'+45',UA:'+380',RO:'+40',IE:'+353',BE:'+32',GR:'+30',TR:'+90'};
     sel=map[cc]||'+420'; }catch(e){ sel='+420'; } }
   return ccs.map(function(c){ return '<option value="'+c+'"'+(c===sel?' selected':'')+'>'+c+'</option>'; }).join('');
@@ -16344,7 +16345,7 @@ async function _impSave(){
   if(ei<0){ toast('Vyber sloupec s e-mailem'); return; }
   try{ await checkGymOwnership(); }catch(e){}
   var g=_myGymData; if(!g){ toast('Nemáš schválený gym'); return; }
-  var _cc=String((currentUser&&(currentUser.stripe_country||currentUser.billing_country||currentUser.country_code))||(g&&(g.billing_country||g.country_code))||'').toUpperCase();
+  var _cc=String((currentUser&&(currentUser.stripe_country||currentUser.residence_country||currentUser.billing_country||currentUser.country_code))||(g&&(g.billing_country||g.country_code))||'').toUpperCase();
   var _ccMap={CZ:'+420',SK:'+421',PL:'+48',DE:'+49',AT:'+43',HU:'+36',GB:'+44',UK:'+44',US:'+1',FR:'+33',IT:'+39',ES:'+34',NL:'+31',CH:'+41',SE:'+46',NO:'+47',DK:'+45',UA:'+380',RO:'+40',IE:'+353',BE:'+32',GR:'+30',TR:'+90'};
   var _clubCC=_ccMap[_cc]||'+420';
   var seen={}, recs=[];
@@ -23475,7 +23476,9 @@ function _introActive(e){
 async function _introBannerFor(container){
   try{
     if(!container || !currentUser) return;
-    const cc=String(currentUser.billing_country||'').trim().toUpperCase();
+    const cc=String(
+      (typeof _myGymData!=='undefined' && _myGymData && _myGymData.billing_country) ||
+      currentUser.billing_country || currentUser.tax_country || '').trim().toUpperCase();
     if(!cc) return;
     const map=await _loadIntroRates();
     const e=map[cc];
@@ -23540,10 +23543,10 @@ async function renderDac7(){
   const gids=keys.filter(function(k){ return k[0]==='g'; }).map(function(k){ return k.slice(2); });
   const cids=keys.filter(function(k){ return k[0]==='c'; }).map(function(k){ return k.slice(2); });
   const gm={}, cm={};
-  try{ if(gids.length){ const { data:gs }=await supaClient.from('gyms').select('id,name,legal_name,tax_id,vat_id,billing_address,owner_id').in('id',gids); (gs||[]).forEach(function(x){ gm[x.id]=x; }); } }catch(e){}
+  try{ if(gids.length){ const { data:gs }=await supaClient.from('gyms').select('id,name,legal_name,tax_id,vat_id,billing_address,billing_country,owner_id').in('id',gids); (gs||[]).forEach(function(x){ gm[x.id]=x; }); } }catch(e){}
   try{
     const _pids=cids.concat(Object.values(gm).map(function(x){ return x.owner_id; }).filter(Boolean));
-    if(_pids.length){ const { data:ps }=await supaClient.from('profiles').select('id,name,legal_name,tax_id,vat_id,billing_address,billing_country,birthdate').in('id',_pids); (ps||[]).forEach(function(x){ cm[x.id]=x; }); }
+    if(_pids.length){ const { data:ps }=await supaClient.from('profiles').select('id,name,legal_name,tax_id,vat_id,billing_address,tax_country,billing_country,birthdate').in('id',_pids); (ps||[]).forEach(function(x){ cm[x.id]=x; }); }
   }catch(e){}
 
   const rows=keys.map(function(k){
@@ -23551,7 +23554,7 @@ async function renderDac7(){
     const g=(b.kind==='gym')?(gm[b.id]||{}):null;
     const prof=(b.kind==='gym')?(cm[(g&&g.owner_id)]||{}):(cm[b.id]||{});
     const name=(g&&(g.legal_name||g.name))||prof.legal_name||prof.name||'—';
-    const cc=String(prof.billing_country||'').toUpperCase();
+    const cc=String((g&&g.billing_country)||prof.billing_country||prof.tax_country||'').toUpperCase();
     const txN=b.q.reduce(function(a,x){ return a+x; },0);
     const vol=b.v.reduce(function(a,x){ return a+x; },0);
     // Práh: 30 plnění NEBO 2 000 EUR. U CZK počítáme hrubě 25 Kč/EUR -- na hranici to rozhodne
@@ -26744,7 +26747,7 @@ function showEpReceipt(p){
 }
 function _epPrice(){ return {amount:1000, currency:'CZK', label:(LANG==='en'?'1000 CZK':'1000 Kč'), sym:'Kč'}; }
 function _userCur(){
-  var cc=String((currentUser&&(currentUser.stripe_country||currentUser.billing_country||currentUser.country_code||currentUser.country))||'').toUpperCase();
+  var cc=String((currentUser&&(currentUser.stripe_country||currentUser.residence_country||currentUser.billing_country||currentUser.country_code||currentUser.country))||'').toUpperCase();
   if(!cc){ var cu=String((currentUser&&currentUser.currency)||'').toUpperCase(); if(cu) return cu; }
   var EUR=['AT','BE','HR','CY','EE','FI','FR','DE','GR','IE','IT','LV','LT','LU','MT','NL','PT','SI','ES','SK','BG'];
   var M={CZ:'CZK',GB:'GBP',CH:'CHF',LI:'CHF',SE:'SEK',DK:'DKK',NO:'NOK',PL:'PLN',HU:'HUF',RO:'RON',CA:'CAD',AU:'AUD',NZ:'NZD',US:'USD',JP:'JPY',CN:'CNY',HK:'HKD',SG:'SGD',IN:'INR',ZA:'ZAR',MX:'MXN',BR:'BRL',KR:'KRW',TR:'TRY',IL:'ILS',TH:'THB',PH:'PHP',MY:'MYR',ID:'IDR',IS:'ISK'};
@@ -26794,7 +26797,7 @@ async function _epEnrich(){
   }catch(e){}
 }
 function _epRegion(){
-  var cc = String((currentUser&&(currentUser.stripe_country||currentUser.billing_country||currentUser.country_code||currentUser.country))||'').toUpperCase();
+  var cc = String((currentUser&&(currentUser.stripe_country||currentUser.residence_country||currentUser.billing_country||currentUser.country_code||currentUser.country))||'').toUpperCase();
   if(!cc){ var cu=String((currentUser&&currentUser.currency)||'').toUpperCase(); var M={CZK:'CZ',USD:'US',EUR:'EU_',GBP:'GB',CHF:'CH',PLN:'PL',SEK:'SE',DKK:'DK',NOK:'NO',HUF:'HU',RON:'RO',CAD:'CA',AUD:'AU',NZD:'NZ'}; if(M[cu]) cc=M[cu]; }
   var EUR89=['AT','BE','HR','CY','EE','FI','FR','DE','GR','IE','IT','LV','LT','LU','MT','NL','PT','SI','ES','BG','EU_']; // SK & CZ are their own tiers; BG joined the euro 1.1.2026
   function T(co,cu,a,l,sy){ return {country:co,currency:cu,amount:a,label:l,sym:sy}; }
@@ -29771,7 +29774,10 @@ await supaClient.from('profiles').update({
       inperson_desc: $('caInpersonDesc').value.trim() || null,
       specializations: JSON.stringify(collectSpecs('caSpecs')),
       languages: JSON.stringify(collectLangs('caLangs')),
-      profile_video_url:videoUrl, photo_url:photoUrl, billing_country:(($('caCountry')&&$('caCountry').value)||null),
+      profile_video_url:videoUrl, photo_url:photoUrl, // DAŇOVÝ DOMICIL. Stejný význam jako gyms.billing_country, takže provize i DAC7 čtou u klubu
+      // i u kouče stejné pole. Bydliště z registrace je vedle v residence_country a věk souhlasu
+      // se řídí jím -- přihláška ho nepřepisuje.
+      billing_country:(($('caCountry')&&$('caCountry').value)||null),
       tax_id: (($('caTaxId')&&$('caTaxId').value.trim())||null),
       vat_id: (($('caVatId')&&$('caVatId').value.trim())||null),
       legal_name: (($('caLegalName')&&$('caLegalName').value.trim())||null),
@@ -31483,12 +31489,12 @@ async function renderCoachBilling(){
   if(me.coach_status!=='approved'){ box.style.display='none'; box.innerHTML=''; return; }
   box.style.display=''; const EN=LANG==='en';
   let pr={};
-  try{ const { data }=await supaClient.from('profiles').select('legal_name,tax_id,vat_id,billing_address,billing_country,vat_payer,vat_rate,invoice_email').eq('id',me.id).maybeSingle(); pr=data||{}; }catch(e){}
+  try{ const { data }=await supaClient.from('profiles').select('legal_name,tax_id,vat_id,billing_address,billing_country,tax_country,vat_payer,vat_rate,invoice_email').eq('id',me.id).maybeSingle(); pr=data||{}; }catch(e){}
   const ev=(x)=>String(x==null?'':x).replace(/"/g,'&quot;');
   { const _lb=$('csLblBilling'); if(_lb) _lb.textContent='🧾 '+(EN?'Billing details':'Fakturační údaje'); }
   box.innerHTML=`
     <p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:0 0 10px;">${EN?'Shown on the receipts your students get for 1:1 / online lessons. As a VAT payer, receipts break the price into net + VAT.':'Zobrazí se na dokladech, které studenti dostanou za 1:1 / online lekce. Jako plátce DPH se cena na dokladu rozepíše na základ daně + DPH.'}</p>
-    ${_countrySel('acmCountry', pr.billing_country)}
+    ${_countrySel('acmCountry', pr.billing_country || pr.tax_country)}
     <input id="acmLegalName" value="${ev(pr.legal_name)}" placeholder="${EN?'Legal name (you / your business)':'Jméno / název (ty / tvá firma)'}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:8px;">
     <input id="acmBillingAddr" value="${ev(pr.billing_address)}" placeholder="${EN?'Registered / billing address':'Sídlo / fakturační adresa'}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:8px;">
     <input id="acmTaxId" value="${ev(pr.tax_id)}" placeholder="I\u010cO" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:4px;">
