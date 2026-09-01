@@ -77,6 +77,7 @@ function cohortDokladHtml(o){
     + `<table style="width:100%;border-collapse:collapse;">`
     + row('Poskytovatel (prodejce)', seller, true)
     + row('Datum vystavení', _esc(_czDate(o.issued || new Date().toISOString().slice(0,10))), true)
+    + (o.providerContact ? row('Kontakt na poskytovatele', _esc(o.providerContact), true) : '')
     + (rec.tax_id ? row('IČO', _esc(rec.tax_id), true) : '')
     + (rec.vat_id ? row('DIČ', _esc(rec.vat_id), true) : '')
     + (rec.billing_address ? row('Sídlo', _esc(rec.billing_address), true) : '')
@@ -136,6 +137,7 @@ function cohortDokladPdf(o){
       const row = (l, v) => { const y = doc.y; doc.fontSize(11).fillColor('#555555').text(l, 50, y, { width: 230 }); const after = doc.y; doc.fillColor('#111111').text(String(v == null ? '' : v), 315, y, { width: 230, align: 'right' }); doc.y = Math.max(after, doc.y) + 4; };
       row('Poskytovatel (prodejce)', seller);
       row('Datum vystavení', _czDate(o.issued || new Date().toISOString().slice(0,10)));
+      if (o.providerContact) row('Kontakt na poskytovatele', o.providerContact);
       if (rec.tax_id) row('IČO', rec.tax_id);
       if (rec.vat_id) row('DIČ', rec.vat_id);
       if (rec.billing_address) row('Sídlo', rec.billing_address);
