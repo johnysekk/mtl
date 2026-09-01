@@ -139,7 +139,7 @@ function dokladHtml(ME, buyer, kind, period, cur, data, test, testMode){
   const bank = items.filter(function(i){return i.method!=='stripe';}).reduce(function(a,i){return a+i.fee;},0);
   const strp = items.filter(function(i){return i.method==='stripe';}).reduce(function(a,i){return a+i.fee;},0);
   const total = data.total;
-  const supLines = ['<b>'+esc(ME.name||'Martial Training Lab s.r.o.')+'</b>', ME.ico?('I\u010cO: '+esc(ME.ico)):(_ph?('I\u010cO: '+_ph):''), ME.sidlo?esc(ME.sidlo):'', ME.dic?('DI\u010c: '+esc(ME.dic)):(_ph?('DI\u010c: '+_ph):''), ME.vat_id?('VAT ID: '+esc(ME.vat_id)):''].filter(Boolean).join('<br>');
+  const supLines = ['<b>'+esc(ME.name||'Martial Training Lab s.r.o.')+'</b>', ME.ico?('I\u010cO: '+esc(ME.ico)):(_ph?('I\u010cO: '+_ph):''), ME.sidlo?esc(ME.sidlo):'', ME.dic?('DI\u010c: '+esc(ME.dic)):(_ph?('DI\u010c: '+_ph):''), ME.vat_id?('VAT ID: '+esc(ME.vat_id)):'', ME.contact_phone?('Kontaktn\u00ed telefon: '+esc(ME.contact_phone)):'', ME.contact_email?('Kontaktn\u00ed e-mail: '+esc(ME.contact_email)):''].filter(Boolean).join('<br>');
   const bName = (buyer && (buyer.legal_name || buyer.name)) || '\u2014';
   const buyLines = ['<b>'+esc(bName)+'</b>',
     (buyer&&buyer.name&&buyer.name!==bName)?(((kind==='coach')?'Kou\u010d v MTL: ':'Klub v MTL: ')+esc(buyer.name)):'', (buyer&&buyer.tax_id)?('I\u010cO: '+esc(buyer.tax_id)):(_ph?('I\u010cO: '+_ph):''), (buyer&&buyer.billing_address)?esc(buyer.billing_address):'', (buyer&&buyer.vat_id)?('DI\u010c: '+esc(buyer.vat_id)):(_ph?('DI\u010c: '+_ph):'')].filter(Boolean).join('<br>');
