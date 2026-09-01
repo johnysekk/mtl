@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SZA prints the provider contact on a receipt as two labelled lines and only when they have asked for it -- showing a number to paying students and having it on every document are separate decisions, so the switch is separate too. MTL is the supplier on a commission receipt, so its own contact always appears there and the fields for it are in the MTL billing settings. The transfer note now says plainly that payment for services is non-refundable by default and any refund is for the provider to offer. Needs the updated provider-contact.sql. -->
+<!-- MTL build: SZB adds a preview of both receipts to the billing settings of a club and a coach: the one a student gets, and the commission receipt from MTL. It renders from whatever is in the form at that moment, so the effect of a change is visible before saving, and it lists what is still missing rather than refusing to show anything -- someone who sees an empty company-number line understands the problem better than they would from a validation message. It also shows when a contact is filled in but not ticked for receipts, which otherwise looks like the field was ignored. The contact phone stays optional: it is not a required detail on an invoice, and forcing it only produces made-up numbers. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -16901,6 +16901,20 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
   // který pak jde na každý vystavený doklad.
   try{ _attachAddrSuggest('mgBillingAddr', function(){ return (_myGymData&&_myGymData.city)||''; },
     function(p){ window._mgBillParts=p; }); }catch(e){}
+  // Náhledy dokladů -- ukážou, jak to vypadá s tím, co je právě vyplněné, včetně chybějícího.
+  try{
+    const _sv=$('mgSave');
+    if(_sv && _sv.parentNode && !document.getElementById('mgPrevStud')){
+      const w=document.createElement('div');
+      w.innerHTML='<div style="display:flex;gap:8px;margin-top:10px;">'
+        +'<button id="mgPrevStud" style="flex:1;padding:11px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:11px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">\u{1F9FE} Doklad studentovi</button>'
+        +'<button id="mgPrevProv" style="flex:1;padding:11px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:11px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">\u{1F9FE} Doklad o provizi</button>'
+        +'</div>';
+      _sv.parentNode.insertBefore(w, _sv.nextSibling);
+      $('mgPrevStud').onclick=function(){ _dokladPreview('student', { prefix:'mg', nameId:'mgLegalName', phoneId:'gcPhone', emailId:'gcEmail', dokId:'gcDok' }); };
+      $('mgPrevProv').onclick=function(){ _dokladPreview('provize', { prefix:'mg', nameId:'mgLegalName' }); };
+    }
+  }catch(e){}
   try{ _attachAddrSuggest('gcAddress', function(){ return ($('gcCity')&&$('gcCity').value)||''; },
     function(p){ window._gcPickedGeo={ lat:p.lat, lng:p.lng, addr:($('gcAddress')&&$('gcAddress').value)||'' };
       if(p.city && $('gcCity') && !$('gcCity').value.trim()) $('gcCity').value=p.city; }); }catch(e){}
@@ -29721,6 +29735,81 @@ async function _providerContactHtml(kind, id, isBank){
   }catch(e){ return ''; }
 }
 
+
+// ── NÁHLED DOKLADU ───────────────────────────────────────────────────────────────────────────
+// Ukáže, jak doklad vypadá s tím, co je právě vyplněné -- včetně prázdných míst. Kdo nemá IČO,
+// uvidí prázdný řádek a pochopí to líp než z hlášky "vyplň IČO"; kdo nezaškrtl kontakt, uvidí,
+// že tam není. Bere hodnoty rovnou z formuláře, aby seděly i před uložením.
+function _dokladPreview(which, opts){
+  opts=opts||{};
+  const EN=LANG==='en';
+  const v=function(id){ const el=document.getElementById(id); return el?String(el.value||'').trim():''; };
+  const ck=function(id){ const el=document.getElementById(id); return !!(el&&el.checked); };
+  const P=opts.prefix||'acm';
+  const _me=window._mtlEnt || MTL_ENTITY || {};
+  // Poskytovatel: co je právě ve formuláři, ne co je uložené v databázi.
+  const prov={
+    name: v(opts.nameId||(P+'LegalName')) || (currentUser&&currentUser.name) || '—',
+    ico:  v(P+'TaxId'), dic: v(P+'VatId'), addr: v(P+'BillingAddr'),
+    phone: v(opts.phoneId||'csPhone'), email: v(opts.emailId||'csEmail'),
+    onDok: ck(opts.dokId||'csDok')
+  };
+  const _row=function(l,val,strong){
+    return '<div style="display:flex;justify-content:space-between;gap:16px;padding:7px 0;border-bottom:1px solid #eee;font-size:13px;">'
+      +'<span style="color:#666;">'+l+'</span><'+(strong?'strong':'span')+'>'+escapeHtml(val||'—')+'</'+(strong?'strong':'span')+'></div>';
+  };
+  const _miss=[];
+  if(!prov.name || prov.name==='—') _miss.push(EN?'legal name':'právní název');
+  if(!prov.ico) _miss.push('IČO');
+  if(!prov.addr) _miss.push(EN?'address':'adresa');
+
+  let body;
+  if(which==='student'){
+    // Doklad, který dostane student. Poskytovatel je dodavatel.
+    body='<h2 style="margin:0 0 14px;font-size:18px;">'+(EN?'Payment receipt':'Doklad o zaplacení')+'</h2>'
+      +_row(EN?'Provider (seller)':'Poskytovatel (prodejce)', prov.name, true)
+      +(prov.ico?_row('IČO', prov.ico):'')
+      +(prov.addr?_row(EN?'Address':'Adresa', prov.addr):'')
+      +_row(EN?'Issue date':'Datum vystavení', new Date().toLocaleDateString(EN?'en-GB':'cs-CZ'))
+      +(prov.onDok&&prov.phone?_row(EN?'Contact phone':'Kontaktní telefon', prov.phone):'')
+      +(prov.onDok&&prov.email?_row(EN?'Contact e-mail':'Kontaktní e-mail', prov.email):'')
+      +_row(EN?'Customer':'Odběratel', EN?'Student name':'Jméno studenta', true)
+      +_row(EN?'Item':'Položka', EN?'Single class':'Jednorázová lekce')
+      +_row(EN?'Total':'Celkem', '200,00 CZK', true)
+      +(!prov.onDok&&(prov.phone||prov.email)
+        ? '<p style="font-size:11.5px;color:#8a5a00;margin-top:12px;">'+(EN?'Contact is filled in but not ticked for receipts, so it does not appear here.':'Kontakt máš vyplněný, ale nezaškrtnutý pro doklady — proto tu není.')+'</p>' : '');
+  } else {
+    // Doklad o provizi: dodavatel je MTL, odběratel poskytovatel.
+    body='<h2 style="margin:0 0 14px;font-size:18px;">'+(EN?'MTL commission receipt':'Doklad o provizi MTL')+'</h2>'
+      +_row(EN?'Supplier':'Dodavatel', _me.name||'Martial Training Lab s.r.o.', true)
+      +(_me.ico?_row('IČO', _me.ico):'')
+      +(_me.sidlo?_row(EN?'Address':'Sídlo', _me.sidlo):'')
+      +(_me.contact_phone?_row(EN?'Contact phone':'Kontaktní telefon', _me.contact_phone):'')
+      +(_me.contact_email?_row(EN?'Contact e-mail':'Kontaktní e-mail', _me.contact_email):'')
+      +'<div style="height:10px;"></div>'
+      +_row(EN?'Customer':'Odběratel', prov.name, true)
+      +_row('IČO', prov.ico)
+      +_row(EN?'Address':'Adresa', prov.addr)
+      +(prov.dic?_row('DIČ', prov.dic):'')
+      +_row(EN?'Period':'Období', new Date().toISOString().slice(0,7))
+      +_row(EN?'Commission':'Provize', '40,00 CZK', true);
+  }
+
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;z-index:100080;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:18px;overflow:auto;';
+  ov.innerHTML='<div style="background:#fff;border-radius:16px;max-width:460px;width:100%;padding:22px;font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;">'
+    +'<div style="font-size:11px;font-weight:800;color:var(--light);letter-spacing:.05em;margin-bottom:10px;">'
+    +(EN?'PREVIEW — sample amounts':'NÁHLED — částky jsou ukázkové')+'</div>'
+    +body
+    +(_miss.length?('<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:10px;padding:10px 12px;margin-top:14px;font-size:12px;color:#8a1c1c;line-height:1.5;">'
+      +(EN?'Missing on the receipt: ':'Na dokladu chybí: ')+escapeHtml(_miss.join(', '))+'</div>'):'')
+    +'<button id="dpClose" style="width:100%;margin-top:16px;padding:12px;background:#141414;color:#fff;border:none;border-radius:11px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'
+    +(EN?'Close':'Zavřít')+'</button></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#dpClose').onclick=function(){ ov.remove(); };
+  ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
+}
+
 function _fmtAddr(a){
   a=a||{};
   const cc=String(a.country_code||'').toUpperCase();
@@ -31907,6 +31996,20 @@ async function renderCoachBilling(){
   };
   // Fakturační adresa kouče -- sídlo na dokladu, stejný důvod jako u klubu.
   try{ _attachAddrSuggest('acmBillingAddr', null, function(p){ window._acmBillParts=p; }); }catch(e){}
+  // Náhledy dokladů. Ukážou, jak to vypadá s tím, co je právě vyplněné -- včetně toho, co chybí.
+  try{
+    const _sb=$('acmSaveBilling');
+    if(_sb && _sb.parentNode && !document.getElementById('acmPrevStud')){
+      const w=document.createElement('div');
+      w.innerHTML='<div style="display:flex;gap:8px;margin-top:10px;">'
+      +'<button id="acmPrevStud" style="flex:1;padding:11px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:11px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">\u{1F9FE} Doklad studentovi</button>'
+      +'<button id="acmPrevProv" style="flex:1;padding:11px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:11px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">\u{1F9FE} Doklad o provizi</button>'
+      +'</div>';
+      _sb.parentNode.insertBefore(w, _sb.nextSibling);
+      $('acmPrevStud').onclick=function(){ _dokladPreview('student', { prefix:'acm', phoneId:'csPhone', emailId:'csEmail', dokId:'csDok' }); };
+      $('acmPrevProv').onclick=function(){ _dokladPreview('provize', { prefix:'acm' }); };
+    }
+  }catch(e){}
   $('acmSaveBilling').onclick=async()=>{ var _ln=(($('acmLegalName')||{}).value||'').trim(), _tx=(($('acmTaxId')||{}).value||'').trim(), _co=(($('acmCountry')||{}).value||''), _ba=(($('acmBillingAddr')||{}).value||'').trim(), _ie=(($('acmInvoiceEmail')||{}).value||'').trim(); if(!_ln||!_tx||!_co||!_ba||!_ie){ toast(LANG==='en'?'Fill in legal name, tax ID (business reg. no.), country, address and billing e-mail':'Vypl\u0148 pr\u00e1vn\u00ed n\u00e1zev, I\u010cO (reg. \u010d\u00edslo), zemi, adresu a fakturac\u00ed e-mail'); return; } if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(_ie)){ toast(LANG==='en'?'Enter a valid billing e-mail':'Zadej platn\u00fd fakturac\u00ed e-mail'); return; } if(typeof _taxGate==='function' && !_taxGate('acmLegalName',['acmTaxId'])) return; const btn=$('acmSaveBilling'); const _o=btn.textContent; btn.disabled=true; btn.textContent=L('Ukládám...');
     const upd={ billing_country:(($('acmCountry')&&$('acmCountry').value)||null), legal_name:($('acmLegalName').value.trim()||null), billing_address:($('acmBillingAddr').value.trim()||null), tax_id:($('acmTaxId').value.trim()||null), vat_id:($('acmVatId').value.trim()||null), invoice_email:(($('acmInvoiceEmail')&&$('acmInvoiceEmail').value.trim())||null), vat_payer:!!$('acmVatPayer').checked };
     { const r=parseFloat($('acmVatRate').value); if(upd.vat_payer && isFinite(r) && r>=0) upd.vat_rate=r; }
