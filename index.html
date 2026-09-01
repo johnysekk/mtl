@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SYI drops the subtitle under the signup country question; Kde zijes says it on its own. Checked at the same time that nothing in the DAC7 path reads the venue address: the sheet, the missing-detail check and the receipt cron all take billing_address, which is the registered office and the one the directive asks for. -->
+<!-- MTL build: SYL attaches the suggester to the MTL registered address after the panel is drawn rather than before it. The call sat above the innerHTML assignment that creates the field, so it found nothing and bound to nothing -- silently, since it is wrapped in a try. The other five fields were already wired inside the function that renders them. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -19183,9 +19183,6 @@ async function openMtlBilling(){
   await _loadMtlEnt(true); const E = window._mtlEnt || MTL_ENTITY;
   const body=document.getElementById('mtlBillBody'); if(!body) return;
   openSheet('shMtlBilling');
-  // Našeptávač i pro sídlo MTL -- to je dodavatel na každém dokladu o provizi, takže překlep
-  // tam jde na všechny vystavené doklady.
-  try{ _attachAddrSuggest('mbSidlo'); }catch(e){}
   const esc=function(v){ return v?String(v).replace(/"/g,'&quot;'):''; };
   const inp=function(id,val,ph){ return '<input id="'+id+'" value="'+esc(val)+'" placeholder="'+ph+'" style="width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid var(--border);border-radius:10px;font-size:14px;font-family:\'DM Sans\';margin-bottom:10px;">'; };
   const lbl=function(t){ return '<label style="font-size:12px;font-weight:700;color:var(--mid);display:block;margin-bottom:3px;">'+t+'</label>'; };
@@ -19197,6 +19194,9 @@ async function openMtlBilling(){
     +'<label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;margin:6px 0 12px;cursor:pointer;"><input type="checkbox" id="mbVat" '+(E.vat_payer?'checked':'')+' style="width:18px;height:18px;"> '+(EN?'MTL is a VAT payer':'MTL je plátce DPH')+'</label>'+'<div style="border-top:1px solid var(--border);margin:10px 0 12px;padding-top:12px;">'+'<label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;font-weight:700;cursor:pointer;line-height:1.4;"><input type="checkbox" id="mbVatGate" '+(E.require_vat_foreign?'checked':'')+' style="width:18px;height:18px;margin-top:1px;"> '+(EN?'Require a VAT ID from foreign providers before issuing a doklad':'Vyžadovat DIČ od zahraničních providerů před vystavením dokladu')+'</label>'+'<div style="font-size:11.5px;color:var(--mid);line-height:1.45;margin:6px 0 0 26px;">'+(EN?'ON: a foreign provider with no VAT ID gets no doklad — the commission stays pending and is invoiced retroactively once they supply it. Confirm with your accountant first.':'ZAPNUTO: zahraniční provider bez DIČ nedostane doklad — provize zůstane evidovaná a doúčtuje se zpětně, až DIČ doplní (dál normálně funguje). Před zapnutím potvrď s účetní.')+'</div></div>'
     +lbl(EN?'VAT rate %':'Sazba DPH %')+inp('mbRate',E.vat_rate,'21')
     +'<button onclick="_saveMtlBilling()" style="width:100%;padding:14px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-top:6px;">'+(EN?'Save':'Uložit')+'</button>';
+  // Až tady: do vykreslení pole mbSidlo neexistuje. Sídlo MTL je dodavatel na každém dokladu
+  // o provizi, takže překlep v něm jde na všechny vystavené doklady.
+  try{ _attachAddrSuggest('mbSidlo'); }catch(e){}
 }
 async function _saveMtlBilling(){
   const EN=LANG==='en';
@@ -29584,49 +29584,68 @@ function renderCaActiveStudents(){
 // jako "název podniku, číslo, ulice, ...", což se nedá použít ani do pole, ani k přečtení.
 function _fmtAddr(a){
   a=a||{};
+  const cc=String(a.country_code||'').toUpperCase();
   const street=[a.road||a.pedestrian||a.footway, a.house_number].filter(Boolean).join(' ');
-  const _sub=a.suburb||a.quarter||a.neighbourhood||'';
+  const city=a.city||a.town||a.village||a.municipality||'';
+  const zip=a.postcode||'';
+  const state=a.state||a.province||'';
+
+  // Číslo popisné před ulicí. V angličtině a francouzštině se píše "10 Downing Street",
+  // ne "Downing Street 10".
+  const _numFirst=['GB','IE','US','CA','AU','NZ','FR','SG','HK'].indexOf(cc)>=0;
+  const _street=_numFirst && a.house_number && (a.road||a.pedestrian||a.footway)
+    ? (a.house_number+' '+(a.road||a.pedestrian||a.footway))
+    : street;
+
+  // PSČ patří jinam v každé z těch tří skupin.
+  let tail;
+  if(cc==='GB' || cc==='IE'){
+    // Londýn, SW1A 2AA -- PSČ až úplně nakonec, oddělené čárkou.
+    tail=[city, zip].filter(Boolean).join(', ');
+  } else if(['US','CA','AU','NZ'].indexOf(cc)>=0){
+    // New York, NY 10118 -- mezi městem a PSČ stojí stát.
+    tail=[city, [state, zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  } else if(cc==='JP'){
+    // Roppongi 6-10-1, Minato-ku, Tokyo 106-0032. Japonsky se píše od největšího celku, ale
+    // v latince se to obrací a končí prefekturou s PSČ.
+    tail=[city, [state, zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  } else if(cc==='SG'){
+    // Singapore 238859 -- žádný stát ani kraj, jen město a PSČ za ním.
+    tail=[city||'Singapore', zip].filter(Boolean).join(' ');
+  } else if(cc==='HK'){
+    // Hongkong PSČ nemá vůbec; pošta doporučuje pole nechat prázdné. Jen čtvrť a město.
+    tail=[a.suburb||a.quarter||'', city].filter(Boolean).join(', ');
+  } else if(cc==='IT'){
+    // 00184 Roma (RM) -- za městem zkratka provincie. Zkratky jsou dané a nedají se odvodit
+    // z prvních dvou písmen (Roma = RM, Milano = MI), takže je bereme jen tehdy, když už
+    // zkratkou jsou; jinak provincii vypustíme, než abychom vymysleli špatnou.
+    const _p=(state && state.length===2) ? (' ('+state.toUpperCase()+')') : '';
+    tail=[zip, city].filter(Boolean).join(' ')+_p;
+  } else if(cc==='BR'){
+    // Av. Paulista 1578 - Bela Vista, São Paulo - SP, 01310-100. Mezi ulicí a městem stojí čtvrť.
+    const _n=a.suburb||a.neighbourhood||'';
+    tail=[_n, [city, state].filter(Boolean).join(' - '), zip].filter(Boolean).join(', ');
+  } else if(cc==='MX' || cc==='TH' || cc==='MY'){
+    // 06600 Ciudad de México, CDMX -- PSČ před městem a kraj za ním. Když se kraj jmenuje jako
+    // město, vypustí se.
+    tail=[[zip, city].filter(Boolean).join(' '), (state&&state!==city)?state:''].filter(Boolean).join(', ');
+  } else if(cc==='AE'){
+    // Emiráty PSČ nepoužívají; adresa končí emirátem. Město a emirát se často jmenují stejně
+    // (Dubai, Dubai), tak se to neopakuje.
+    tail=(state && state!==city) ? [city, state].filter(Boolean).join(', ') : city;
+  } else {
+    // Zbytek Evropy: 602 00 Brno. PSČ před městem, bez čárky mezi nimi.
+    tail=[zip, city].filter(Boolean).join(' ');
+  }
+
+  // Čtvrť se vypouští. Nominatim ji vrací z jiné vrstvy než mapy, které lidi znají -- na jednu
+  // adresu tak vyjde "Veveří" i "Ponava", obojí správně, a klub svou adresu nepozná. Pro doručení
+  // ani pro DAC7 není potřeba. Výjimka je Praha, kde se "Praha 3" běžně píše.
   const _dist=a.city_district||a.borough||'';
-  const quarter=_sub ? (_sub+(_dist && _dist!==_sub ? (' ('+_dist+')') : '')) : _dist;
-  const town=[a.postcode, a.city||a.town||a.village||a.municipality].filter(Boolean).join(' ');
-  return [street, quarter, town].filter(Boolean).join(', ');
-}
+  const _prahaLike=/^(Praha|Prague|Wien|Bratislava)\s*\d+$/i.test(_dist) ? _dist : '';
 
-// ── RUČNÍ ZADÁNÍ ADRESY ──────────────────────────────────────────────────────────────────────
-// Našeptávač je běžná cesta a nese s sebou rozpad na části. Kdo svou adresu v mapě nenajde
-// (nová budova, malá obec), musí mít jinou možnost -- ale ne volné pole. Volné pole by časem
-// vytvořilo adresy, které jde jen vytisknout a ne přečíst, a rozdělovat je zpětně u stovek
-// klubů nejde. Ručně se proto zadává rovnou po částech.
-function _addrManualPrompt(inputId, onDone){
-  const el=document.getElementById(inputId); if(!el) return;
-  const EN=LANG==='en';
-  const ov=document.createElement('div');
-  ov.style.cssText='position:fixed;inset:0;z-index:100070;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;';
-  const _i='width:100%;padding:12px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:\'DM Sans\';box-sizing:border-box;margin-bottom:8px;';
-  ov.innerHTML='<div style="background:#fff;border-radius:18px;max-width:400px;width:100%;padding:22px;font-family:\'DM Sans\';">'
-    +'<div style="font-size:16px;font-weight:800;color:var(--dark);margin-bottom:4px;">'+(EN?'Enter the address':'Zadej adresu')+'</div>'
-    +'<div style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:14px;">'
-    +(EN?'Fill in the parts — we need them for tax reporting, so one long line will not do.'
-        :'Vyplň části zvlášť — potřebujeme je pro daňové hlášení, jeden dlouhý řádek nestačí.')+'</div>'
-    +'<input id="amStreet" placeholder="'+(EN?'Street and number':'Ulice a číslo')+'" style="'+_i+'">'
-    +'<input id="amCity" placeholder="'+(EN?'Town':'Město')+'" style="'+_i+'">'
-    +'<input id="amZip" placeholder="'+(EN?'Postcode':'PSČ')+'" style="'+_i+'">'
-    +'<button id="amOk" style="width:100%;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';margin-top:4px;">'+(EN?'Save':'Uložit')+'</button>'
-    +'<button id="amX" style="width:100%;margin-top:8px;padding:10px;background:none;border:none;color:var(--mid);font-size:13px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Cancel':'Zrušit')+'</button>'
-    +'</div>';
-  document.body.appendChild(ov);
-  ov.querySelector('#amX').onclick=function(){ ov.remove(); };
-  ov.querySelector('#amOk').onclick=function(){
-    const st=(ov.querySelector('#amStreet').value||'').trim();
-    const ct=(ov.querySelector('#amCity').value||'').trim();
-    const zp=(ov.querySelector('#amZip').value||'').trim();
-    if(!st || !ct){ toast(EN?'\u26a0\ufe0f Street and town are required':'\u26a0\ufe0f Ulice a město jsou povinné'); return; }
-    el.value=[st, [zp,ct].filter(Boolean).join(' ')].filter(Boolean).join(', ');
-    ov.remove();
-    if(typeof onDone==='function') onDone({ line1:st, city:ct, postal:zp, manual:true });
-  };
+  return [_street, _prahaLike, tail].filter(Boolean).join(', ');
 }
-
 function _attachAddrSuggest(inputId, cityGetter, onPick){
   const el=document.getElementById(inputId); if(!el || el._addrWired) return;
   el._addrWired=true;
