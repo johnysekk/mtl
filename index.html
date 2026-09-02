@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SZH checks at reception whether the person already has an account before writing them down as a guest. It never looked, so a student who had installed the app on Monday and paid at the desk on Wednesday got a guest row their own account knew nothing about -- the claim added in the last build existed largely to repair that. When the e-mail matches an account the membership is written straight to it and the desk is told whose account it went to. The claim button stays for rows created before this. -->
+<!-- MTL build: SZK closes the hole in the it-is-someone-else path. Declining the link still saved the guest row under the e-mail that belongs to an account, so its owner would later claim a stranger record as their own -- exactly what the prompt exists to prevent. That button now returns to the form and asks for the right address, and nothing is written until one is given. Also: the MTL phone and e-mail were read from the database but never carried onto the object the preview reads, so the commission receipt showed neither; the contact phone for MTL is now required, since a dispute is not something to settle by e-mail alone; and a number is stored in one shape whichever way it was typed. Needs the corrected provider-contact.sql -- the MTL columns belong on platform_settings, not platform_config. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -9737,6 +9737,22 @@ async function _evPubBuy(d, tiers, ov){
   const tier=cart[0].t;
   const price=Number(tier.price)||0;
 
+  // Patří e-mail kupujícího někomu s účtem? U lístku to řeší, aby si ho člověk našel v appce
+  // místo jen v mailu. Ptáme se ho samotného -- na veřejné stránce nikdo u pultu nestojí.
+  let _acct=null;
+  try{
+    const _em=($('evPubMail')&&$('evPubMail').value.trim())||'';
+    if(_em){
+      _acct=await _findAccount(_em);
+      if(_acct && !(currentUser && currentUser.id===_acct.id)){
+        const _ans=await _askLinkAccount(_acct, _em);
+        if(_ans!=='link'){
+          if(_ans==='other') toast(EN?'\u26a0\ufe0f Use your own e-mail address':'\u26a0\ufe0f Zadej svůj vlastní e-mail', 1);
+          return;
+        }
+      }
+    }
+  }catch(e){}
   btn.disabled=true; btn.textContent='…';
   // Kolik kusů. Jeden řádek = jedno místo, všechny se stejným order_id -- tím drží pohromadě pro
   // platbu i pro e-mail, ale každý si nese vlastní QR a vlastní odbavení u dveří.
@@ -9753,7 +9769,7 @@ async function _evPubBuy(d, tiers, ov){
       for(let i=0;i<x.q;i++){
         const _who=(_guard && x.t.participant) ? (_minors[_mi++]||null) : null;
         _rows.push({ attr_src:_attrGet(),
-          event_id:d.id, buyer_id:null, buyer_name:name, buyer_email:mail, buyer_phone:tel||null,
+          event_id:d.id, buyer_id:(_acct?_acct.id:null), buyer_name:name, buyer_email:mail, buyer_phone:tel||null,
           attendee_name:(_who?_who.name:null), attendee_dob:(_who?_who.dob:null),
           order_id:orderId, qty:1, amount:(Number(x.t.price)||0), tier_name:(x.t.name||null), currency:cur, status:'reserved',
           consent_at:_now, consent_version:((typeof TICKET_CONSENT_VERSION!=='undefined'?TICKET_CONSENT_VERSION:'')+(_mnA?('+age'+_mnA):'')+(_who?'+guardian':''))
@@ -14546,8 +14562,14 @@ function _phoneFieldVal(id){
     const el=document.getElementById(id); if(!el) return null;
     let num=String(el.value||'').trim(); if(!num) return null;
     const cc=(document.getElementById(id+'CC')||{}).value||'';
-    if(cc && num.charAt(0)!=='+') num=cc+' '+num;
-    return num;
+    let pref='';
+    if(num.charAt(0)==='+'){ const mm=num.match(/^(\+\d{1,4})[\s-]*(.*)$/); if(mm){ pref=mm[1]; num=mm[2]; } }
+    else pref=cc;
+    // Sjednotit zápis: jeden napíše 777123456, druhý 777 123 456 -- na dokladu pak vypadají
+    // pokaždé jinak. Devítimístná čísla po trojicích, ostatní beze změny (cizí formáty se liší).
+    const _d=num.replace(/[^\d]/g,'');
+    num=(_d.length===9) ? _d.replace(/(\d{3})(\d{3})(\d{3})/,'$1 $2 $3') : num.trim();
+    return (pref ? (pref+' ') : '')+num;
   }catch(e){ return null; }
 }
 function _phoneFieldHtml(id, curVal){
@@ -18644,7 +18666,16 @@ function _guestMemb(plan){
       // Existující účet má přednost před hostem: zapíšeme rovnou na něj a nic se pak nemusí
       // přebírat. Recepce ho dosud nehledala, takže student s appkou dostal hostovský řádek.
       var _acct=await _findAccount(_em||v.email);
-      if(_acct) toast((EN?'\u2139\ufe0f Linked to existing account: ':'\u2139\ufe0f Připojeno k účtu: ')+(_acct.name||''), 1);
+      if(_acct){
+        // Shoda e-mailu není důkaz totožnosti -- rozhodne obsluha, která na toho člověka kouká.
+        var _ans=await _askLinkAccount(_acct, _em||v.email);
+        if(_ans!=='link'){
+          // Zrušit i "někdo jiný" končí stejně: zpátky k formuláři. Cizí e-mail se neuloží.
+          try{ [$('gmQrSave'),$('gmCashSave')].forEach(function(b){ if(b) b.disabled=false; }); }catch(e){}
+          if(_ans==='other') toast(EN?'\u26a0\ufe0f Enter that person\u2019s own e-mail':'\u26a0\ufe0f Zadej e-mail toho člověka', 1);
+          return;
+        }
+      }
       var amount_minor=Math.round(price*100); var fee_minor=Math.round(amount_minor*rate);
       var btns=[$('gmQrSave'),$('gmCashSave')]; btns.forEach(function(b){ if(b) b.disabled=true; });
       try{
@@ -18933,11 +18964,25 @@ function _guestCash(occ, method){
     const month=new Date().toISOString().slice(0,7);
     const tok='g'+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
     const _proceed=async function(_nm,_em){ if(_nm) name=_nm; if(_em && !email) email=_em;
+    // Patří ten e-mail někomu s účtem? Platí to samé co u členství: shoda e-mailu není důkaz
+    // totožnosti, tak se ptáme obsluhy. Bez toho by studentovi s appkou vznikl hostovský vstup,
+    // který by ve své historii nikdy neuviděl.
+    let _acct=null;
+    if(email){
+      _acct=await _findAccount(email);
+      if(_acct){
+        const _ans=await _askLinkAccount(_acct, email);
+        if(_ans!=='link'){
+          if(_ans==='other') toast(EN?'\u26a0\ufe0f Enter that person\u2019s own e-mail':'\u26a0\ufe0f Zadej e-mail toho člověka', 1);
+          return;
+        }
+      }
+    }
     const btn=$('gcSave'); btn.disabled=true; btn.textContent=EN?'Saving\u2026':'Ukl\u00e1d\u00e1m\u2026';
     try{
       if(isQr){
         // QR: reception does NOT confirm the money. Create a pending intent; the owner confirms when it arrives in the bank.
-        try{ await supaClient.from('gym_bookings').insert({ attr_src:_attrGet(), gym_id:g.id, paid_to:'gym', amount:(pr.dp||0), currency:cur, status:'paid_claimed', claimed_at:new Date().toISOString(), payment_method:'qr', reception_checkin:true, guest_token:tok, guest_name:name, guest_email:email, student_name:name, date:occ.date, time:occ.time, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, level:occ.level||'all', coach_id:occ.coach||null, discipline:occ.disc||null, gym_name:g.name||'Klub' }); }catch(e){}
+        try{ await supaClient.from('gym_bookings').insert({ attr_src:_attrGet(), gym_id:g.id, paid_to:'gym', amount:(pr.dp||0), currency:cur, status:'paid_claimed', claimed_at:new Date().toISOString(), payment_method:'qr', reception_checkin:true, student_id:(_acct?_acct.id:null), guest_token:(_acct?null:tok), guest_name:(_acct?null:name), guest_email:(_acct?null:email), student_name:name, date:occ.date, time:occ.time, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, level:occ.level||'all', coach_id:occ.coach||null, discipline:occ.disc||null, gym_name:g.name||'Klub' }); }catch(e){}
         if(email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){ try{ await supaClient.auth.signInWithOtp({ email:email, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } }); }catch(e){} }
         try{ if(g.id){ await _notifyGymDesk(g.id, g.owner_id, (EN?('Walk-in (QR): '+(name||'a guest')+' says they paid for a drop-in \u2014 confirm in Reception when it arrives in the bank.'):('Walk-in (QR): '+(name||'host')+' tvrd\u00ed, \u017ee zaplatil drop-in \u2014 potvr\u010f v Recepci, a\u017e platba p\u0159ijde na \u00fa\u010det.')), { kind:'walkin_drop', student:(name||''), gym:g.id, gym_name:(g.name||''), occ:((typeof occ!=='undefined'&&occ&&occ.date)?{date:occ.date,time:occ.time,name:occ.name||'',level:occ.level||'all',disc:occ.disc||null}:null) }); } }catch(e){}
         toast(EN?'\u2705 Reserved \u00b7 owner confirms the QR payment when it arrives':'\u2705 Rezervov\u00e1no \u00b7 klub potvrd\u00ed QR platbu, a\u017e p\u0159ijde', 1);
@@ -18946,7 +18991,7 @@ function _guestCash(occ, method){
       const txr={ gym_id:g.id, member_id:null, coach_id:occ.coach||null, paid_to:'gym', gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:cur, type:'drop_in', status:'completed', payment_method:method, commission_status:'pending', commission_month:month, cash_payer_name:name, acq_source:'direct' };
       const r1=await _recordCashTx(txr);
       if(r1&&r1.error){ toast('\u26a0\ufe0f '+r1.error.message); btn.disabled=false; btn.textContent=(EN?'\u2713 Received in cash':'\u2713 P\u0159ijato v hotovosti'); return; }
-      try{ await supaClient.from('gym_bookings').insert({ attr_src:_attrGet(), gym_id:g.id, paid_to:'gym', amount:(pr.dp||0), currency:cur, status:'active', reception_checkin:true, guest_token:tok, guest_name:name, guest_email:email, student_name:name, date:occ.date, time:occ.time, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, level:occ.level||'all', coach_id:occ.coach||null, discipline:occ.disc||null, gym_name:g.name||'Klub' }); }catch(e){}
+      try{ await supaClient.from('gym_bookings').insert({ attr_src:_attrGet(), gym_id:g.id, paid_to:'gym', amount:(pr.dp||0), currency:cur, status:'active', reception_checkin:true, student_id:(_acct?_acct.id:null), guest_token:(_acct?null:tok), guest_name:(_acct?null:name), guest_email:(_acct?null:email), student_name:name, date:occ.date, time:occ.time, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, level:occ.level||'all', coach_id:occ.coach||null, discipline:occ.disc||null, gym_name:g.name||'Klub' }); }catch(e){}
       if(email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){ try{ await supaClient.auth.signInWithOtp({ email:email, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } }); }catch(e){} }
       try{ if(g.id){ await _notifyGymDesk(g.id, g.owner_id, (EN?('Walk-in: '+(name||'a guest')+' paid a drop-in (cash).'):('Walk-in: '+(name||'host')+' zaplatil jednor\u00e1zov\u00fd vstup (hotov\u011b).')), { kind:'walkin_drop', student:(name||''), gym:g.id, gym_name:(g.name||''), occ:((typeof occ!=='undefined'&&occ&&occ.date)?{date:occ.date,time:occ.time,name:occ.name||'',level:occ.level||'all',disc:occ.disc||null}:null) }); } }catch(e){}
       toast((EN?'\u2705 Recorded':'\u2705 Zaznamen\u00e1no')+(email?(EN?' \u00b7 link sent':' \u00b7 odkaz odesl\u00e1n'):''), 1);
@@ -19307,7 +19352,8 @@ function _commissionBanner(row, kind){
 
 async function _loadMtlEnt(force){
   if(window._mtlEnt && !force) return window._mtlEnt;
-  try{ const { data } = await supaClient.from('platform_settings').select('*').eq('id',1).single(); if(data){ window._mtlEnt = Object.assign({}, MTL_ENTITY, { name:data.name||MTL_ENTITY.name, ico:data.ico||'', sidlo:data.sidlo||'', dic:data.dic||'', vat_id:data.vat_id||'', vat_payer:!!data.vat_payer, vat_rate:data.vat_rate||21, require_vat_foreign:!!data.require_vat_foreign }); } }catch(e){}
+  try{ const { data } = await supaClient.from('platform_settings').select('*').eq('id',1).single(); if(data){ window._mtlEnt = Object.assign({}, MTL_ENTITY, { name:data.name||MTL_ENTITY.name, ico:data.ico||'', sidlo:data.sidlo||'', dic:data.dic||'', vat_id:data.vat_id||'', vat_payer:!!data.vat_payer, vat_rate:data.vat_rate||21, require_vat_foreign:!!data.require_vat_foreign,
+        contact_phone:data.contact_phone||'', contact_email:data.contact_email||'' }); } }catch(e){}
   return window._mtlEnt || MTL_ENTITY;
 }
 async function openMtlBilling(){
@@ -20412,6 +20458,13 @@ async function saveGymManage(){
       const _bad = !_ie ? (LANG==='en' ? 'Fill in the club billing e-mail' : 'Vypl\u0148 faktura\u010Dn\u00ED e-mail klubu')
         : (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(_ie) ? (LANG==='en' ? 'Enter a valid billing e-mail' : 'Zadej platn\u00FD faktura\u010Dn\u00ED e-mail') : null);
       if (_bad) { toast('\u26A0\uFE0F ' + _bad); try { const _d=_ieEl.closest('details'); if(_d) _d.open=true; _ieEl.focus(); } catch(e){} return; }
+    } }
+  // Telefon pro MTL je povinný stejně jako u kouče -- bez něj se naléhavá věc řeší jen mailem.
+  { const _bp=$('mgBillingPhone');
+    if(_bp && !_phoneFieldVal('mgBillingPhone')){
+      toast(LANG==='en'?'\u26A0\uFE0F Enter a contact phone for MTL':'\u26A0\uFE0F Zadej kontaktní telefon pro MTL');
+      try{ const _d=_bp.closest('details'); if(_d) _d.open=true; _bp.focus(); }catch(e){}
+      return;
     } }
   // Legal name must still match ARES/VIES, same gate the club onboarding applies (r. ~18350).
   if(typeof _taxGate==='function' && !_taxGate('mgLegalName',['mgTaxId'])) return;
@@ -29809,6 +29862,41 @@ async function _providerContactHtml(kind, id, isBank){
 //
 // Bezpečnost stojí na tom, že se hledá podle e-mailu PŘIHLÁŠENÉHO účtu, ne podle zadaného.
 // Cizí historii si tedy nikdo nevezme tím, že zná cizí adresu; musel by mít i přístup do schránky.
+
+// ── E-MAIL PATŘÍ REGISTROVANÉMU UŽIVATELI ────────────────────────────────────────────────────
+// Recepce umí uživatele vyhledat podle jména, ale obsluha může jít rovnou na "nový host" a
+// zadat e-mail. Když ten e-mail někomu patří, propojit to potichu by bylo špatně: shoda
+// e-mailu není důkaz, že u pultu stojí ten člověk -- může jít o jmenovce, sdílenou rodinnou
+// adresu nebo překlep. Rozhodnutí patří obsluze, která na toho člověka kouká.
+function _askLinkAccount(acct, email){
+  const EN=LANG==='en';
+  return new Promise(function(resolve){
+    const ov=document.createElement('div');
+    ov.style.cssText='position:fixed;inset:0;z-index:100090;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;';
+    ov.innerHTML='<div style="background:#fff;border-radius:18px;max-width:400px;width:100%;padding:22px;font-family:\'DM Sans\';">'
+      +'<div style="font-size:15px;font-weight:800;color:var(--dark);line-height:1.4;margin-bottom:6px;">'
+      +(EN?'This e-mail belongs to a registered user':'Tento e-mail patří registrovanému uživateli')+'</div>'
+      +'<div style="font-size:14px;color:var(--dark);margin-bottom:4px;"><b>'+escapeHtml(acct.name||'—')+'</b></div>'
+      +'<div style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:16px;">'+escapeHtml(email)+'<br><br>'
+      +(EN?'Linking puts the membership on their account, so they see it in the app and keep their history. Only do this if it is the same person standing in front of you.'
+          :'Propojením půjde členství na jeho účet — uvidí ho v appce a naváže na svou historii. Propoj to jen tehdy, když u tebe stojí opravdu on.')+'</div>'
+      +'<button id="alYes" style="width:100%;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'
+      +(EN?'Verify and link to their profile':'Ověřit a propojit s jeho profilem')+'</button>'
+      +'<button id="alNo" style="width:100%;margin-top:8px;padding:12px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'
+      +(EN?'It is someone else \u2014 use a different e-mail':'Jde o někoho jiného \u2014 zadám jiný e-mail')+'</button>'
+      +'<button id="alX" style="width:100%;margin-top:8px;padding:10px;background:none;border:none;color:var(--mid);font-size:13px;cursor:pointer;font-family:\'DM Sans\';">'
+      +(EN?'Cancel':'Zrušit')+'</button></div>';
+    document.body.appendChild(ov);
+    const done=function(v){ ov.remove(); resolve(v); };
+    ov.querySelector('#alYes').onclick=function(){ done('link'); };
+    // "Někdo jiný" NEZALOŽÍ hosta na tuhle adresu. Kdyby ano, majitel účtu by si ten záznam
+    // později převzal jako svůj -- právě to, čemu má dotaz bránit. Vrací se k formuláři, ať
+    // obsluha zadá adresu toho člověka, co u ní opravdu stojí.
+    ov.querySelector('#alNo').onclick=function(){ done('other'); };
+    ov.querySelector('#alX').onclick=function(){ done(null); };
+  });
+}
+
 async function _claimGuestHistory(silent){
   try{
     if(!currentUser || !currentUser.email) return 0;
@@ -32131,7 +32219,11 @@ async function renderCoachBilling(){
       $('acmPrevProv').onclick=function(){ _dokladPreview('provize', { prefix:'acm' }); };
     }
   }catch(e){}
-  $('acmSaveBilling').onclick=async()=>{ var _ln=(($('acmLegalName')||{}).value||'').trim(), _tx=(($('acmTaxId')||{}).value||'').trim(), _co=(($('acmCountry')||{}).value||''), _ba=(($('acmBillingAddr')||{}).value||'').trim(), _ie=(($('acmInvoiceEmail')||{}).value||'').trim(); if(!_ln||!_tx||!_co||!_ba||!_ie){ toast(LANG==='en'?'Fill in legal name, tax ID (business reg. no.), country, address and billing e-mail':'Vypl\u0148 pr\u00e1vn\u00ed n\u00e1zev, I\u010cO (reg. \u010d\u00edslo), zemi, adresu a fakturac\u00ed e-mail'); return; } if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(_ie)){ toast(LANG==='en'?'Enter a valid billing e-mail':'Zadej platn\u00fd fakturac\u00ed e-mail'); return; } if(typeof _taxGate==='function' && !_taxGate('acmLegalName',['acmTaxId'])) return; const btn=$('acmSaveBilling'); const _o=btn.textContent; btn.disabled=true; btn.textContent=L('Ukládám...');
+  $('acmSaveBilling').onclick=async()=>{ var _ln=(($('acmLegalName')||{}).value||'').trim(), _tx=(($('acmTaxId')||{}).value||'').trim(), _co=(($('acmCountry')||{}).value||''), _ba=(($('acmBillingAddr')||{}).value||'').trim(), _ie=(($('acmInvoiceEmail')||{}).value||'').trim(); if(!_ln||!_tx||!_co||!_ba||!_ie){ toast(LANG==='en'?'Fill in legal name, tax ID (business reg. no.), country, address and billing e-mail':'Vypl\u0148 pr\u00e1vn\u00ed n\u00e1zev, I\u010cO (reg. \u010d\u00edslo), zemi, adresu a fakturac\u00ed e-mail'); return; } if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(_ie)){ toast(LANG==='en'?'Enter a valid billing e-mail':'Zadej platn\u00fd fakturac\u00ed e-mail'); return; } if(typeof _taxGate==='function' && !_taxGate('acmLegalName',['acmTaxId'])) return;
+  // Telefon pro MTL je povinný: bez něj nemáme jak dořešit provizi, spor nebo problém s účtem
+  // jinak než e-mailem, což u něčeho naléhavého nestačí.
+  if(!_phoneFieldVal('acmBillingPhone')){ toast(LANG==='en'?'\u26a0\ufe0f Enter a contact phone for MTL':'\u26a0\ufe0f Zadej kontaktní telefon pro MTL'); return; }
+  const btn=$('acmSaveBilling'); const _o=btn.textContent; btn.disabled=true; btn.textContent=L('Ukládám...');
     const upd={ billing_phone:_phoneFieldVal('acmBillingPhone'), billing_country:(($('acmCountry')&&$('acmCountry').value)||null), legal_name:($('acmLegalName').value.trim()||null), billing_address:($('acmBillingAddr').value.trim()||null), tax_id:($('acmTaxId').value.trim()||null), vat_id:($('acmVatId').value.trim()||null), invoice_email:(($('acmInvoiceEmail')&&$('acmInvoiceEmail').value.trim())||null), vat_payer:!!$('acmVatPayer').checked };
     { const r=parseFloat($('acmVatRate').value); if(upd.vat_payer && isFinite(r) && r>=0) upd.vat_rate=r; }
     try{ const { error }=await supaClient.from('profiles').update(upd).eq('id',currentUser.id); if(error) throw error; Object.assign(currentUser,upd); toast(EN?'✓ Saved':'✓ Uloženo'); }catch(e){ toast('⚠️ '+(e.message||'')); }
