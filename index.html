@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: SZL makes the show-my-number switch do something. It promised to show the number to the clubs and coaches a member trains with, and no screen ever read it -- someone turned it on believing they had given the club a contact, and the club still saw nothing. The member detail now shows the phone, and the e-mail beside it, to the club whose member they are; with the switch off only the e-mail appears, since that one the club already has from the sale. -->
+<!-- MTL build: SZM opens a detail for a member without an account. Their card was in the list but tapping it did nothing -- the member detail returns immediately without a student id -- so the club could not read back the e-mail and phone it had typed in at its own reception. The guest view is keyed on that e-mail, since a name would not separate two people with the same one, and shows the contact, the membership, the visits and the drop-ins, plus a line explaining that attendance has to be marked for them because they cannot book. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -17313,7 +17313,13 @@ async function renderGymMembers(){
     }; }
   { const si=box.querySelector('#gmSearchInp'); if(si){ si.oninput=function(){ const v=this.value; clearTimeout(window._gmSearchT); window._gmSearchT=setTimeout(function(){ window._gmSearch=v; window._gmPage=0; renderGymMembers(); }, 320); }; } const ss=box.querySelector('#gmSizeSel'); if(ss){ ss.onchange=function(){ window._gmSize=(this.value==='50'?50:20); window._gmPage=0; renderGymMembers(); }; } const pv=box.querySelector('#gmPrev'); if(pv){ pv.onclick=function(){ if((window._gmPage||0)>0){ window._gmPage=(window._gmPage||0)-1; renderGymMembers(); } }; } const nx=box.querySelector('#gmNext'); if(nx){ nx.onclick=function(){ window._gmPage=(window._gmPage||0)+1; renderGymMembers(); }; } }
   if((window._gmSearch||'').length){ const _si=box.querySelector('#gmSearchInp'); if(_si){ try{ _si.focus(); const _l=_si.value.length; _si.setSelectionRange(_l,_l); }catch(e){} } }
-  box.querySelectorAll('.mbCard').forEach(c=>c.onclick=()=>{ if(c.dataset.child){ openGymKidDetail(c.dataset.sid, c.dataset.child); } else { openGymMemberDetail(c.dataset.sid, c.dataset.name); } });
+  box.querySelectorAll('.mbCard').forEach(c=>c.onclick=()=>{
+    if(c.dataset.child){ openGymKidDetail(c.dataset.sid, c.dataset.child); }
+    // Host nemá student_id, takže detail členů by se ani neotevřel. Má vlastní, postavený na
+    // e-mailu -- klub mu ten kontakt sám zadal na recepci a musí se k němu dostat.
+    else if(!c.dataset.sid || c.dataset.sid==='null'){ openGuestDetail(c.dataset.guestemail, c.dataset.name); }
+    else { openGymMemberDetail(c.dataset.sid, c.dataset.name); }
+  });
   box.querySelectorAll('.mtTable th').forEach(th=>th.onclick=()=>{ const k=th.dataset.k; const tb=th.closest('table').querySelector('tbody'); const rows=Array.prototype.slice.call(tb.querySelectorAll('tr')); const asc=th.dataset.dir!=='asc'; th.closest('thead').querySelectorAll('th').forEach(x=>{x.classList.remove('mtActive');x.removeAttribute('data-dir');}); th.dataset.dir=asc?'asc':'desc'; th.classList.add('mtActive'); const num=(k==='mrr'||k==='joined'||k==='status'||k==='att'||k==='ends'); rows.sort((a,b)=>{ let av,bv; if(k==='name'){av=a.dataset.vname;bv=b.dataset.vname;} else if(k==='plan'){av=a.dataset.plan;bv=b.dataset.plan;} else {av=parseFloat(a.dataset[k])||0;bv=parseFloat(b.dataset[k])||0;} if(num) return asc?av-bv:bv-av; return asc?(av<bv?-1:av>bv?1:0):(av>bv?-1:av<bv?1:0); }); rows.forEach(r=>tb.appendChild(r)); });
   // ── Win-back: členové, kteří dlouho nedorazili ──
   if(_isDefault) try{
@@ -27342,6 +27348,78 @@ async function ownerRemoveMember(mid, subId, mname){
     if(window._mdSid) openGymMemberDetail(window._mdSid, window._mdName); else if(window._mdKid) openGymKidDetail(window._mdKid.parentId, window._mdKid.childName); if(typeof renderGymMembers==='function') renderGymMembers();
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
 }
+
+// ── DETAIL ČLENA BEZ ÚČTU ────────────────────────────────────────────────────────────────────
+// Host nemá student_id, takže openGymMemberDetail se na něm zastaví hned na prvním řádku a
+// karta v seznamu nešla otevřít. Klub přitom jeho e-mail a telefon sám zadal na recepci a pak
+// se k nim nedostal.
+//
+// Všechno se dohledává podle guest_email -- to je u hosta jediný spolehlivý klíč, jméno by
+// dvě stejné lidi nerozlišilo.
+async function openGuestDetail(email, name){
+  const EN=LANG==='en';
+  if(!email || !_myGymData){ toast(EN?'No contact on file':'Není u něj uložený kontakt'); return; }
+  const ov=$('memberDetailOv'), body=$('mdBody');
+  if($('mdTitle')) $('mdTitle').textContent=name||(EN?'Guest':'Host');
+  if(body) body.innerHTML='<p style="text-align:center;color:var(--light);padding:20px;">…</p>';
+  if(ov) ov.style.display='flex';
+
+  let mem=[], bk=[], att=[];
+  const gid=_myGymData.id;
+  try{ const { data }=await supaClient.from('gym_memberships')
+    .select('plan_name,status,period_end,amount,currency,guest_phone,created_at')
+    .eq('gym_id',gid).ilike('guest_email',email).order('created_at',{ascending:false}); mem=data||[]; }catch(e){}
+  try{ const { data }=await supaClient.from('gym_bookings')
+    .select('class_name,class_date,status,amount,currency')
+    .eq('gym_id',gid).ilike('guest_email',email).order('class_date',{ascending:false}).limit(20); bk=data||[]; }catch(e){}
+  try{ const { data }=await supaClient.from('gym_attendance')
+    .select('class_name,class_date').eq('gym_id',gid).ilike('guest_email',email)
+    .order('class_date',{ascending:false}).limit(30); att=data||[]; }catch(e){}
+
+  const _ph=(mem.find(function(m){ return m.guest_phone; })||{}).guest_phone||'';
+  const _act=mem.find(function(m){ return m.status==='active'||m.status==='cancelling'; });
+  const _d=function(v){ return v?new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ'):'—'; };
+
+  let h='';
+  h+='<div style="background:#FFF8E6;border:1px solid #F0DFA8;border-radius:12px;padding:10px 12px;margin-bottom:10px;font-size:12px;color:#7a5a1a;line-height:1.5;">'
+    +(EN?'This member has no app account. Attendance has to be marked by you and they cannot book online.'
+        :'Tenhle člen nemá účet v appce. Docházku mu značíš ty a rezervovat si online nemůže.')+'</div>';
+
+  h+='<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:11px 13px;margin-bottom:10px;">'
+    +'<div style="font-size:11px;font-weight:800;color:var(--mid);letter-spacing:.04em;margin-bottom:5px;">'+(EN?'CONTACT':'KONTAKT')+'</div>'
+    +'<div style="font-size:13px;"><a href="mailto:'+escapeHtml(email)+'" style="color:var(--blue);text-decoration:none;">'+escapeHtml(email)+'</a></div>'
+    +(_ph?('<div style="font-size:13.5px;margin-top:2px;"><a href="tel:'+escapeHtml(_ph.replace(/\s/g,''))+'" style="color:var(--blue);font-weight:700;text-decoration:none;">'+escapeHtml(_ph)+'</a></div>'):'')
+    +'</div>';
+
+  h+='<div style="display:flex;gap:8px;margin-bottom:10px;">'
+    +'<div style="flex:1;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:10px 12px;">'
+      +'<div style="font-size:11px;color:var(--light);">'+(EN?'Membership':'Členství')+'</div>'
+      +'<div style="font-size:13.5px;font-weight:800;color:var(--dark);">'+(_act?escapeHtml(_act.plan_name||(EN?'Active':'Aktivní')):(EN?'None':'Žádné'))+'</div>'
+      +(_act&&_act.period_end?('<div style="font-size:11px;color:var(--light);">'+(EN?'until ':'do ')+_d(_act.period_end)+'</div>'):'')
+    +'</div>'
+    +'<div style="flex:1;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:10px 12px;">'
+      +'<div style="font-size:11px;color:var(--light);">'+(EN?'Attendance':'Docházka')+'</div>'
+      +'<div style="font-size:13.5px;font-weight:800;color:var(--dark);">'+att.length+'\u00d7</div>'
+      +(att.length?('<div style="font-size:11px;color:var(--light);">'+(EN?'last ':'naposled ')+_d(att[0].class_date)+'</div>'):'')
+    +'</div></div>';
+
+  if(bk.length){
+    h+='<div style="font-size:11px;font-weight:800;color:var(--mid);letter-spacing:.04em;margin:12px 0 6px;">'+(EN?'DROP-INS':'JEDNORÁZOVÉ VSTUPY')+'</div>';
+    h+=bk.slice(0,8).map(function(b){
+      return '<div style="display:flex;justify-content:space-between;gap:10px;font-size:12.5px;padding:6px 0;border-bottom:1px solid var(--border);">'
+        +'<span>'+escapeHtml(b.class_name||'—')+'</span><span style="color:var(--light);">'+_d(b.class_date)+'</span></div>';
+    }).join('');
+  }
+  if(att.length){
+    h+='<div style="font-size:11px;font-weight:800;color:var(--mid);letter-spacing:.04em;margin:12px 0 6px;">'+(EN?'RECENT VISITS':'POSLEDNÍ NÁVŠTĚVY')+'</div>';
+    h+=att.slice(0,8).map(function(a){
+      return '<div style="display:flex;justify-content:space-between;gap:10px;font-size:12.5px;padding:6px 0;border-bottom:1px solid var(--border);">'
+        +'<span>'+escapeHtml(a.class_name||'—')+'</span><span style="color:var(--light);">'+_d(a.class_date)+'</span></div>';
+    }).join('');
+  }
+  if(body) body.innerHTML=h;
+}
+
 async function openGymMemberDetail(sid, name){
   window._mdSid=sid; window._mdName=name;
   if(!sid||!_myGymData) return;
