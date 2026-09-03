@@ -146,7 +146,6 @@ export default async function handler(req, res) {
     res.status(200).json({
       name: me.name || 'Athlete',
       photo: me.photo_url || null,
-      certified: me.cert_level === 'certified',
       founder: isFounder,
       ambassador: isAmbassador,
       levels,
