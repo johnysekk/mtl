@@ -523,6 +523,7 @@ async function membershipCheckout(req, res) {
           ...(_acqMonthsM ? { mtl_acq_months: String(_acqMonthsM) } : {}),
           ...(_baseRateM != null ? { mtl_base_rate: String(_baseRateM) } : {}),
           mtl_acq_base: String(FEE_PCT),
+        mtl_acq_src: String(acq || ''),
           mtl_income: income || 'side',
           mtl_payment_type: 'membership',
           gym_id: gymId || '',

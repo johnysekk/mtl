@@ -553,7 +553,7 @@ export default async function handler(req, res) {
                 slot_id: slot.id, student_id: m.student_id || null, coach_id: slot.coach_profile_id,
                 coach_name: m.coach_name || 'Kouč', payment_intent: pi, amount,
                 training_date: slot.date, training_time: slot.time,
-                status: 'active', type: 'inperson', currency, discipline: m.discipline || null,
+                status: 'active', type: 'inperson', currency, discipline: m.discipline || null, acq_source: m.mtl_acq_src || null,
               });
               // ODSTRANENO: druha notifikace kouci o te same rezervaci. Klient ji posila taky, na
               // navratu ze Stripe (kind coach_new_inperson) -- a posila ji bohatsi: format lekce,
@@ -568,7 +568,7 @@ export default async function handler(req, res) {
               slot_id: null, student_id: m.student_id || null, coach_id: m.coach_profile_id,
               coach_name: m.coach_name || 'Kouč', payment_intent: pi, amount,
               training_date: new Date().toISOString().slice(0, 10), training_time: null,
-              status: 'active', type: 'online', currency, online_format: m.online_fmt || null, discipline: m.discipline || null,
+              status: 'active', type: 'online', currency, online_format: m.online_fmt || null, discipline: m.discipline || null, acq_source: m.mtl_acq_src || null,
             });
             // ODSTRANENO ze stejneho duvodu: klient posila kind coach_new_online s formatem
             // objednavky, castkou a referral bonusem.

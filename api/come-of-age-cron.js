@@ -96,7 +96,7 @@ module.exports = async (req, res) => {
 
     await sb('profiles?id=in.' + inList, {
       method: 'PATCH',
-      body: JSON.stringify({ is_minor: false, can_request_pay: false })
+      body: JSON.stringify({ is_minor: false })
     });
 
     // Vazba na zástupce zůstává. Je to rodina, ne administrativní vztah -- rušit ji za člověka
@@ -111,7 +111,7 @@ module.exports = async (req, res) => {
           user_id: r.id,
           type: 'system',
           read: false,
-          message: '\u{1F382} Všechno nejlepší k osmnáctinám! Jsi plnoletý — platíš si sám a o úhradu už zástupce požádat nemůžeš. Rodinná vazba zůstává; zrušit si ji můžeš kdykoli v Rodině.'
+          message: '\u{1F382} Všechno nejlepší k osmnáctinám! Účet máš teď plnohodnotný — nic už nepotřebuje souhlas zástupce. Rodinná vazba zůstává a o úhradu tréninku ho můžeš pořád požádat; zrušit si ji můžeš kdykoli v Rodině.'
         })))
       });
     } catch (e) {
