@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: TCB shows a club owner their own group classes in the diary. It only ever looked at gym_coaches, where an owner does not appear -- they own the club rather than being listed as a coach in it -- so their own schedule was missing entirely; classes with no leader named are treated as the owner\u2019s, since the field is usually left blank. The calendar dots stay as they were: green on a free slot reads correctly to a coach looking for where he still has room. -->
+<!-- MTL build: TCC orders a day in the diary by time rather than by kind, so an eight o\u2019clock private, a five o\u2019clock group class and a seven o\u2019clock private read down the page in that order. A booked private also shows who is coming: the booking row rarely carries the name, so it is looked up, and the phone number appears as a dialable link when the student has chosen to show it. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -27042,6 +27042,20 @@ async function loadDiaryData(){
   const { data: books } = await supaClient.from('bookings').select('*').eq('coach_id', currentUser.id).eq('status','active');
   diarySlots = slots || [];
   diaryBookings = books || [];
+  // Rezervace jméno studenta často nenese a v diáři pak stálo jen "Rezervace".
+  // Telefon jen tehdy, když ho student sám zveřejnil (phone_show).
+  try{
+    const _sids=[...new Set((diaryBookings||[]).map(b=>b.student_id).filter(Boolean))];
+    if(_sids.length){
+      const { data:_ps } = await supaClient.from('profiles').select('id,name,phone,phone_show').in('id', _sids.slice(0,200));
+      const _m={}; (_ps||[]).forEach(p=>{ _m[p.id]=p; });
+      diaryBookings.forEach(b=>{
+        const p=_m[b.student_id]; if(!p) return;
+        if(!b.student_name) b.student_name=p.name||'';
+        if(p.phone_show && p.phone) b._studPhone=p.phone;
+      });
+    }
+  }catch(e){}
   // skupinovky, ktere kouc vede (read-only z klub rozvrhu)
   diaryClasses = [];
   try{
@@ -27181,13 +27195,14 @@ function showDiaryDay(dateStr){
 
   dayClasses.forEach(c=>{
     const _end=c.dur?('–'+_classEnd(c.time,c.dur)):'';
-    html += `<div style="background:#EEF4FF;border:1px solid #C5D9F5;border-radius:12px;padding:12px;margin-bottom:8px;"><div style="font-size:15px;font-weight:700;color:#1E5FB8;">🥊 ${c.time}${_end} · ${c.name?escapeHtml(c.name):(LANG==='en'?'Group class':'Skupinovka')}</div><div style="font-size:12px;color:var(--mid);margin-top:3px;">${escapeHtml(c.gymName||'')}${c.level&&c.level!=='all'?' · '+levelLabel(c.level):''} · ${LANG==='en'?'you teach (manage in the Club section)':'vedeš (lze upravovat v sekci Klubu)'}</div></div>`;
+    html += `<div data-t="${c.time||'99:99'}" style="background:#EEF4FF;border:1px solid #C5D9F5;border-radius:12px;padding:12px;margin-bottom:8px;"><div style="font-size:15px;font-weight:700;color:#1E5FB8;">🥊 ${c.time}${_end} · ${c.name?escapeHtml(c.name):(LANG==='en'?'Group class':'Skupinovka')}</div><div style="font-size:12px;color:var(--mid);margin-top:3px;">${escapeHtml(c.gymName||'')}${c.level&&c.level!=='all'?' · '+levelLabel(c.level):''} · ${LANG==='en'?'you teach (manage in the Club section)':'vedeš (lze upravovat v sekci Klubu)'}</div></div>`;
   });
   dayBookings.forEach(b=>{
     html += `
-      <div style="background:#FFF0F0;border:1px solid #FFD0D0;border-radius:12px;padding:12px;margin-bottom:8px;">
+      <div data-t="${b.training_time||'99:99'}" style="background:#FFF0F0;border:1px solid #FFD0D0;border-radius:12px;padding:12px;margin-bottom:8px;">
         <div style="font-size:15px;font-weight:700;color:var(--dark);">${b.discipline?disciplineEmoji(b.discipline):'🥊'} ${b.training_time} · ${b.discipline&&isMultiDiscipline()?disciplineLabel(b.discipline):L('Rezervace')}</div>
         ${b.student_name?`<div style="font-size:13px;color:var(--dark);font-weight:600;margin-top:3px;">\ud83d\udc64 ${escapeHtml(b.student_name)}</div>`:''}
+        ${b._studPhone?`<div style="font-size:12.5px;margin-top:2px;"><a href="tel:${escapeHtml(String(b._studPhone).replace(/\s/g,''))}" style="color:var(--blue);text-decoration:none;font-weight:600;">\ud83d\udcde ${escapeHtml(b._studPhone)}</a></div>`:''}
         <div style="font-size:13px;color:var(--mid);margin:4px 0 8px;">${fmtPrice(b.amount||0, b.currency||'CZK')} ${_curSym(b.currency)}</div>
         <div style="display:flex;gap:8px;">
           <button class="diaryMsgBtn" data-student="${b.student_id}" style="flex:1;padding:8px;background:var(--dark);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans';">${L('💬 Napsat')}</button>
@@ -27199,7 +27214,7 @@ function showDiaryDay(dateStr){
 
   dayFreeSlots.forEach(s=>{
     html += `
-      <div style="background:#F0FBF0;border:1px solid #C0E8C0;border-radius:12px;padding:12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
+      <div data-t="${s.time||'99:99'}" style="background:#F0FBF0;border:1px solid #C0E8C0;border-radius:12px;padding:12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
         <div style="font-size:15px;font-weight:600;color:var(--dark);">⏰ ${s.time}${s.end_time?'–'+s.end_time:''} · ${(Number(s.capacity)||1)>1?('👥 '+(LANG==='en'?'Private':'Soukromka')+' 1:'+(Number(s.capacity)||1)+(s.price?(' · '+fmtPrice(s.price,(currentUser&&currentUser.currency)||'CZK')):'')):L('Volný termín')}</div>
         <button class="diaryDelSlot" data-id="${s.id}" style="padding:6px 10px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;font-family:'DM Sans';">${L('Smazat')}</button>
       </div>`;
@@ -27219,6 +27234,13 @@ function showDiaryDay(dateStr){
     + `<button id="diaryAddSlot" data-date="${dateStr}" style="width:100%;padding:11px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'+ Add slot':'+ Přidat termín'}</button></div>`;
 
   detail.innerHTML = html;
+  // Den seřazený podle času: soukromka v 8, skupinovka v 17, soukromka v 19 -- ne tři bloky
+  // pod sebou podle druhu. Řadí se hotové bloky, ať nemusí být cykly přestavěné.
+  try{
+    const _sorted=[].slice.call(detail.querySelectorAll('[data-t]'))
+      .sort(function(x,y){ return (x.dataset.t||'').localeCompare(y.dataset.t||''); });
+    _sorted.forEach(function(el){ el.parentNode.appendChild(el); });
+  }catch(e){}
 
   // Napoj tlačítka
   detail.querySelectorAll('.diaryMsgBtn').forEach(btn=>{
