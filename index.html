@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: TAZ gives a coach who takes cash somewhere to record it. The application let them tick cash and charged commission on it, and record-cash.js has handled provider=coach since it was written, but no screen called it for a coach -- so a cash lesson could be declared and never entered. A button above the coach bookings, shown only to coaches who take cash, asks for the student, an e-mail for the receipt, the amount and the date, matches the e-mail to an account when there is one, and sends it down the same path the club reception uses. -->
+<!-- MTL build: TBA gives a coach a reception of their own. The club reception was built around the club record -- members, attendance and the cash screen all keyed on gym_id -- so nothing in it was reachable for a coach, and yesterday I added a cut-down cash dialog beside it instead of noticing. The cash screen now takes a provider: the club as before, or the coach as themselves, with the history drawn from their own bookings and the rate from their own profile. A Recepce button in the diary opens it, with the same search, the same student QR scanner and the same walk-in entry the club has. The cut-down dialog is gone. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -1680,6 +1680,7 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
 <div class="sheet" id="shDiary" style="z-index:86;">
   <div class="shdr">
     <div class="shdr-title">Můj diář</div>
+    <button id="btnCoachReception" data-noi18n title="Recepce" style="margin-right:8px;padding:7px 12px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:10px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:'DM Sans';">🛎️ Recepce</button>
     <button class="btn-close" id="btnCloseDiary">✕</button>
   </div>
   <div style="padding:16px 20px;">
@@ -18272,17 +18273,54 @@ function _recpShowBuyQR(gymId, label, buy, base){
   const box=ov.querySelector('#recpQrBox');
   try{ if(window.QRCode && box){ new QRCode(box, { text:url, width:220, height:220 }); } else if(box){ box.innerHTML='<span style="font-size:11px;word-break:break-all;">'+url+'</span>'; } }catch(e){ if(box) box.textContent=url; }
 }
-function openCashRecord(){
-  if(typeof _recGym!=='undefined' && _recCashBlk(_recGym)){ toast(LANG==='en'?'⚠️ Cash recording paused (unpaid commission)':'⚠️ Zaznamenávání hotovosti pozastaveno (neuhrazená provize)'); return; }
-  const g=_recGym; if(!g) return; openSheet('shCashRecord'); if($('cashRecTitle')) $('cashRecTitle').textContent=(LANG==='en'?'Cash payment':'Platba v hotovosti'); if($('btnCloseCashRec')) $('btnCloseCashRec').onclick=function(){ closeSheet('shCashRecord'); }; const list=$('cashRecBody'); if(!list) return;
+
+// ── RECEPCE KOUČE ────────────────────────────────────────────────────────────────────────────
+// Totéž co recepce klubu, jen pro jiný typ poskytovatele: hledat studenta podle jména z
+// vlastní historie, načíst jeho QR, nebo zapsat hosta -- a zapsat hotovostní platbu.
+// Sdílí obrazovku openCashRecord; liší se zdroj historie a komu se platba připíše.
+async function openCoachReception(){
+  const EN=LANG==='en';
+  if(!currentUser) return;
+  if(!currentUser.takes_cash){
+    toast(EN?'\u26a0\ufe0f Turn on cash in your coach settings first':'\u26a0\ufe0f Nejdřív si v nastavení kouče zapni hotovost');
+    return;
+  }
+  let hist=[];
+  try{
+    const { data }=await supaClient.from('bookings').select('student_id,student_name,training_date')
+      .eq('coach_id', currentUser.id).not('student_id','is',null).order('training_date',{ascending:false}).limit(300);
+    hist=data||[];
+  }catch(e){}
+  try{
+    const ids=[...new Set(hist.filter(h=>!h.student_name).map(h=>h.student_id))];
+    if(ids.length){
+      const { data:ps }=await supaClient.from('profiles').select('id,name').in('id', ids.slice(0,200));
+      const nm={}; (ps||[]).forEach(p=>{ nm[p.id]=p.name; });
+      hist.forEach(h=>{ if(!h.student_name) h.student_name=nm[h.student_id]||''; });
+    }
+  }catch(e){}
+  window._coachHistory=hist;
+  openCashRecord(Object.assign({ coach:true }, currentUser));
+  if($('cashRecTitle')) $('cashRecTitle').textContent=(EN?'\u{1F6CE}\ufe0f Reception':'\u{1F6CE}\ufe0f Recepce');
+}
+
+function openCashRecord(prov){
+  // Stejná obrazovka pro klub i kouče. Klub přijde z recepce (_recGym), kouč jako
+  // {coach:true, ...currentUser}. Liší se jen tím, komu se platba připíše a co je na výběr.
+  const _isCoach=!!(prov&&prov.coach);
+  const g=_isCoach ? prov : (prov||_recGym);
+  if(!g) return;
+  if(!_isCoach && typeof _recGym!=='undefined' && _recCashBlk(g)){ toast(LANG==='en'?'⚠️ Cash recording paused (unpaid commission)':'⚠️ Zaznamenávání hotovosti pozastaveno (neuhrazená provize)'); return; } openSheet('shCashRecord'); if($('cashRecTitle')) $('cashRecTitle').textContent=(LANG==='en'?'Cash payment':'Platba v hotovosti'); if($('btnCloseCashRec')) $('btnCloseCashRec').onclick=function(){ closeSheet('shCashRecord'); }; const list=$('cashRecBody'); if(!list) return;
   const EN=LANG==='en'; const cur=g.currency||'CZK'; const sym=_curSym(cur);
-  const rate = _recRate();
-  const classes=(typeof _todayGymClasses==='function'?_todayGymClasses(g):[])||[];
-  const plans=(typeof gymMembPlans==='function'?gymMembPlans(g):[])||[];
+  const rate = _isCoach
+    ? _ladderRate('qr_bank', {partner:!!g.partner, score:(g.coach_ref_score||0), bankai:!!g.bankai_eligible})
+    : _recRate();
+  const classes=_isCoach?[]:((typeof _todayGymClasses==='function'?_todayGymClasses(g):[])||[]);
+  const plans=_isCoach?[]:((typeof gymMembPlans==='function'?gymMembPlans(g):[])||[]);
   let html='';
   html+='<p style="font-size:11px;color:var(--light);margin:0 0 4px;">'+(EN?'Who paid':'Kdo zaplatil')+'</p>';
   html+='<div style="display:flex;gap:6px;margin-bottom:10px;">';
-  html+='<button id="crTabHist" type="button" style="flex:1;padding:9px;border:1.5px solid var(--border);border-radius:10px;background:var(--dark);color:#fff;font-size:12.5px;font-weight:800;cursor:pointer;font-family:inherit;">'+(EN?'Has history here':'M\u00e1 historii v klubu')+'</button>';
+  html+='<button id="crTabHist" type="button" style="flex:1;padding:9px;border:1.5px solid var(--border);border-radius:10px;background:var(--dark);color:#fff;font-size:12.5px;font-weight:800;cursor:pointer;font-family:inherit;">'+(EN?'Has history here':(_isCoach?'U\u017e u m\u011b byl':'M\u00e1 historii v klubu'))+'</button>';
   html+='<button id="crTabNew" type="button" style="flex:1;padding:9px;border:1.5px solid var(--border);border-radius:10px;background:var(--surf);color:var(--dark);font-size:12.5px;font-weight:800;cursor:pointer;font-family:inherit;">'+(EN?'First time here':'Je\u0161t\u011b u n\u00e1s nebyl')+'</button>';
   html+='</div>';
   html+='<div id="crHistPane">';
@@ -18315,7 +18353,10 @@ function openCashRecord(){
   function _crTab(t){ var hp=$$('crHistPane'), np=$$('crNewPane'), bh=$$('crTabHist'), bn=$$('crTabNew'); var hist=(t==='hist'); if(hp) hp.style.display=hist?'block':'none'; if(np) np.style.display=hist?'none':'block'; if(bh){ bh.style.background=hist?'var(--dark)':'var(--surf)'; bh.style.color=hist?'#fff':'var(--dark)'; } if(bn){ bn.style.background=hist?'var(--surf)':'var(--dark)'; bn.style.color=hist?'var(--dark)':'#fff'; } }
   if($$('crTabHist')) $$('crTabHist').onclick=function(){ _crTab('hist'); };
   if($$('crTabNew')) $$('crTabNew').onclick=function(){ _crTab('new'); };
-  var _crSeen={}, _crUniq=[]; ((_recHistory&&_recHistory.length?_recHistory:_recMembers)||[]).forEach(function(m){ if(m&&m.student_id&&!_crSeen[m.student_id]){ _crSeen[m.student_id]=1; _crUniq.push(m); } });
+  var _crSeen={}, _crUniq=[];
+  // Klub bere historii z recepce; kouč ze svých rezervací (_coachHistory naplní openCoachReception).
+  var _crSrc = _isCoach ? ((window._coachHistory)||[]) : ((_recHistory&&_recHistory.length?_recHistory:_recMembers)||[]);
+  _crSrc.forEach(function(m){ if(m&&m.student_id&&!_crSeen[m.student_id]){ _crSeen[m.student_id]=1; _crUniq.push(m); } });
   function _crRenderSearch(q){ var res=$$('crSearchRes'); if(!res) return; q=(q||'').trim().toLowerCase(); if(!q){ res.innerHTML=''; return; } var ms=_crUniq.filter(function(m){ return (m.student_name||'').toLowerCase().indexOf(q)>=0; }).slice(0,8); if(!ms.length){ res.innerHTML='<p style="font-size:12px;color:var(--light);padding:8px;">'+(EN?'No match':'Nikdo nenalezen')+'</p>'; return; } res.innerHTML=ms.map(function(m){ return '<button type="button" class="crPick" data-id="'+m.student_id+'" data-nm="'+escapeHtml(m.student_name||'').replace(/"/g,'&quot;')+'" style="display:block;width:100%;text-align:left;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:#fff;font-size:13.5px;font-weight:600;color:var(--dark);cursor:pointer;margin-bottom:5px;font-family:inherit;">'+escapeHtml(m.student_name||'\u2014')+'</button>'; }).join(''); res.querySelectorAll('.crPick').forEach(function(b){ b.onclick=function(){ _crSetSel({ id:b.dataset.id, name:b.dataset.nm }); res.innerHTML=''; var si=$$('crSearch'); if(si) si.value=b.dataset.nm; }; }); }
   if($$('crSearch')) $$('crSearch').oninput=function(){ _crRenderSearch(this.value); };
   if($$('crClearSel')) $$('crClearSel').onclick=function(){ _crSetSel(null); var si=$$('crSearch'); if(si) si.value=''; var res=$$('crSearchRes'); if(res) res.innerHTML=''; };
@@ -18342,7 +18383,7 @@ function openCashRecord(){
     const type=(t==='memb')?'membership':'drop_in';
     const btn=$$('crSave'); btn.disabled=true; btn.textContent=EN?'Saving\u2026':'Ukl\u00e1d\u00e1m\u2026';
     try{
-      const row={ gym_id:g.id, member_id:sid||null, coach_id:null, paid_to:'gym', gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:cur, type:type, status:'completed', payment_method:'cash', commission_status:'pending', commission_month:month, cash_payer_name:nm, acq_source:'direct' };
+      const row={ provider:(_isCoach?'coach':'gym'), gym_id:(_isCoach?null:g.id), member_id:sid||null, coach_id:(_isCoach?g.id:null), paid_to:(_isCoach?'coach':'gym'), gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:cur, type:type, status:'completed', payment_method:'cash', commission_status:'pending', commission_month:month, cash_payer_name:nm, acq_source:'direct' };
       const resp=await _recordCashTx(row);
       if(resp&&resp.error){ toast('\u26a0\ufe0f '+resp.error.message); btn.disabled=false; btn.textContent=EN?'\u2713 Received in cash':'\u2713 P\u0159ijato v hotovosti'; return; }
       if(t==='dropin' && classes.length && sid){ try{ const oi=+(($$('crClass')&&$$('crClass').value)||0); const occ=classes[oi]; if(occ){ const ex=await supaClient.from('gym_attendance').select('id').eq('gym_id',g.id).eq('student_id',sid).eq('class_date',occ.date).eq('class_time',occ.time); if(!(ex&&ex.data&&ex.data.length)){ await supaClient.from('gym_attendance').insert({ gym_id:g.id, student_id:sid, student_name:nm||null, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, coach_id:occ.coach||null, discipline:occ.disc||null, marked_by:currentUser?currentUser.id:null }); } } }catch(e){} }
@@ -21950,6 +21991,7 @@ async function _emojiAccountSync(){
 }
 function refreshSettingsToggles(){ const _eo=$('vNoEmoji'); if(_eo) _eo.textContent=_emojiOff()?L('Vypnuto'):L('Zapnuto'); var _ned=$('noEmojiDesc'); if(_ned) _ned.textContent=(LANG==='en'?'Turns emoji off for info & notifications — celebratory & gamification ones always stay':'Vypne emoji u informací a notifikací — oslavné a herní zůstávají vždy'); const _vt=$('vType'); if(_vt) _vt.textContent=typeFiltersEnabled()?L('Zapnuto'):L('Vypnuto'); const c=$('vColdNotif'); if(c) c.textContent=coldNotifMuted()?L('Vypnuto'):L('Zapnuto'); const a=$('vAvailNotif'); if(a) a.textContent=availNotifMuted()?L('Vypnuto'):L('Zapnuto'); const r=$('vClassRem'); if(r) r.textContent=classReminderMuted()?L('Vypnuto'):L('Zapnuto'); const cr=$('vCoachRem'); if(cr) cr.textContent=coachLessonReminderMuted()?L('Vypnuto'):L('Zapnuto'); const _me=currentUser||{}; const _coach=_me.coach_status==='approved'; const _gym=!!(window._myGyms&&window._myGyms.length)||_me.role==='founder'; if($('sCoachRem')) $('sCoachRem').style.display=_coach?'':'none'; if($('sColdNotif')) $('sColdNotif').style.display=_gym?'':'none'; const _nn=$('vNewListingNotif'); if(_nn) _nn.textContent=newListingMuted()?L('Vypnuto'):L('Zapnuto'); const _amb=(_me.role==='founder'||_me.id===FOUNDER_UUID); if($('sNewListingNotif')) $('sNewListingNotif').style.display=_amb?'':'none';  try{ if(typeof renderSettingsDisc==='function') renderSettingsDisc(); }catch(e){} try{ var _al=$('vAppLock'); if(_al) _al.textContent=(localStorage.getItem('mtl_applock')==='1')?L('Zapnuto'):L('Vypnuto'); if(typeof _biometricAvailable==='function') _biometricAvailable().then(function(ok){ if($('sAppLock')) $('sAppLock').style.display=ok?'':'none'; }); }catch(e){} }
 if($('meBecomeProvider')) $('meBecomeProvider').onclick=()=>openBecomeProvider();
+if($('btnCoachReception')) $('btnCoachReception').onclick=()=>openCoachReception();
 if($('btnFaq')) $('btnFaq').onclick=()=>openFaq();
 if($('btnCloseFaq')) $('btnCloseFaq').onclick=()=>closeSheet('shFaq');
 if($('faqToSupport')) $('faqToSupport').onclick=()=>{ closeSheet('shFaq'); openSupport(); };
@@ -26852,46 +26894,9 @@ function _coachCashBtnHtml(){
 }
 function _wireCoachCashBtn(){
   const b=$('coachCashBtn'); if(!b) return;
-  b.onclick=function(){ _coachCashDialog(); };
+  b.onclick=function(){ openCoachReception(); };
 }
-function _coachCashDialog(){
-  const EN=LANG==='en';
-  const cur=(currentUser&&currentUser.currency)||'CZK';
-  const _def=(currentUser&&(currentUser.rate_inperson||currentUser.rateInperson))||'';
-  const ov=document.createElement('div');
-  ov.style.cssText='position:fixed;inset:0;z-index:100060;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;';
-  const _i='width:100%;padding:12px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:\'DM Sans\';box-sizing:border-box;margin-bottom:8px;';
-  ov.innerHTML='<div style="background:#fff;border-radius:18px;max-width:400px;width:100%;padding:22px;font-family:\'DM Sans\';">'
-    +'<div style="font-size:16px;font-weight:800;color:var(--dark);margin-bottom:4px;">\u{1F4B5} '+(EN?'Cash lesson':'Hotovostní soukromka')+'</div>'
-    +'<div style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:14px;">'
-    +(EN?'Enter what the student paid you in cash. MTL charges its commission to your card, and the student gets a receipt.':'Zadej, co ti student zaplatil hotově. MTL si strhne provizi z tvé karty a student dostane doklad.')+'</div>'
-    +'<input id="ccName" placeholder="'+(EN?'Student name':'Jméno studenta')+'" style="'+_i+'">'
-    +'<input id="ccEmail" type="email" placeholder="'+(EN?'Student e-mail (for the receipt)':'E-mail studenta (na doklad)')+'" style="'+_i+'">'
-    +'<input id="ccAmt" type="number" inputmode="decimal" value="'+_def+'" placeholder="'+(EN?'Amount':'Částka')+' ('+cur+')" style="'+_i+'">'
-    +'<input id="ccDate" type="date" value="'+new Date().toISOString().slice(0,10)+'" style="'+_i+'">'
-    +'<button id="ccOk" style="width:100%;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';margin-top:4px;">'+(EN?'Record':'Zapsat')+'</button>'
-    +'<button id="ccX" style="width:100%;margin-top:8px;padding:10px;background:none;border:none;color:var(--mid);font-size:13px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Cancel':'Zrušit')+'</button></div>';
-  document.body.appendChild(ov);
-  ov.querySelector('#ccX').onclick=function(){ ov.remove(); };
-  ov.querySelector('#ccOk').onclick=async function(){
-    const nm=(ov.querySelector('#ccName').value||'').trim();
-    const em=(ov.querySelector('#ccEmail').value||'').trim();
-    const amt=Number(ov.querySelector('#ccAmt').value)||0;
-    const dt=(ov.querySelector('#ccDate').value||'').trim();
-    if(!nm){ toast(EN?'\u26a0\ufe0f Enter the student name':'\u26a0\ufe0f Zadej jméno studenta'); return; }
-    if(!(amt>0)){ toast(EN?'\u26a0\ufe0f Enter the amount':'\u26a0\ufe0f Zadej částku'); return; }
-    // Zaplaceno na misto, tak i studentum s uctem: dohledat podle e-mailu, jinak host.
-    let sid=null;
-    if(em){ try{ const { data }=await supaClient.from('profiles').select('id').ilike('email', em).maybeSingle(); sid=(data&&data.id)||null; }catch(e){} }
-    const ok=ov.querySelector('#ccOk'); ok.disabled=true; ok.textContent=EN?'Recording\u2026':'Zapisuji\u2026';
-    const res=await _recordCashTx({ provider:'coach', coach_id:currentUser.id, member_id:sid,
-      gross_amount:Math.round(amt*100), currency:cur, type:'drop_in', payment_method:'cash',
-      cash_payer_name:nm, session_at_issue:(dt?(dt+'T12:00:00'):null), acq_source:'direct' });
-    if(res.error){ toast('\u26a0\ufe0f '+res.error.message); ok.disabled=false; ok.textContent=EN?'Record':'Zapsat'; return; }
-    toast(EN?'\u2705 Recorded':'\u2705 Zapsáno', 1);
-    ov.remove();
-  };
-}
+
 
 async function loadCoachBookings(){
   if(!currentUser) return;
