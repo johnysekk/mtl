@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: TAY names the new coach setting Umoznit rezervaci mladistvym. Mladistvy is the account type -- fifteen to eighteen with their own login -- while nezletily covers anyone under eighteen, including children under a parent account who never book alone, so the old wording described the wrong group. -->
+<!-- MTL build: TAZ gives a coach who takes cash somewhere to record it. The application let them tick cash and charged commission on it, and record-cash.js has handled provider=coach since it was written, but no screen called it for a coach -- so a cash lesson could be declared and never entered. A button above the coach bookings, shown only to coaches who take cash, asks for the student, an e-mail for the receipt, the amount and the date, matches the e-mail to an account when there is one, and sends it down the same path the club reception uses. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -26839,7 +26839,61 @@ async function loadMessages(older){
 
 let realtimeChannel=null;
 
-  async function loadCoachBookings(){
+  
+// ── HOTOVOSTNÍ SOUKROMKA ─────────────────────────────────────────────────────────────────────
+// Kouč si v přihlášce mohl zaškrtnout, že bere hotovost, a platil z ní provizi -- ale student
+// neměl jak hotovost zvolit a kouč neměl kde ji zapsat. Tohle je totéž co recepce klubu:
+// kouč zadá jméno a částku, server to zúčtuje (record-cash.js kouče umí od začátku).
+function _coachCashBtnHtml(){
+  if(!(currentUser && currentUser.takes_cash)) return '';
+  const EN=LANG==='en';
+  return '<button id="coachCashBtn" style="width:100%;padding:12px;margin-bottom:12px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:13.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'
+    +'\u{1F4B5} '+(EN?'Record a cash lesson':'Zapsat hotovostní soukromku')+'</button>';
+}
+function _wireCoachCashBtn(){
+  const b=$('coachCashBtn'); if(!b) return;
+  b.onclick=function(){ _coachCashDialog(); };
+}
+function _coachCashDialog(){
+  const EN=LANG==='en';
+  const cur=(currentUser&&currentUser.currency)||'CZK';
+  const _def=(currentUser&&(currentUser.rate_inperson||currentUser.rateInperson))||'';
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;z-index:100060;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;';
+  const _i='width:100%;padding:12px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:\'DM Sans\';box-sizing:border-box;margin-bottom:8px;';
+  ov.innerHTML='<div style="background:#fff;border-radius:18px;max-width:400px;width:100%;padding:22px;font-family:\'DM Sans\';">'
+    +'<div style="font-size:16px;font-weight:800;color:var(--dark);margin-bottom:4px;">\u{1F4B5} '+(EN?'Cash lesson':'Hotovostní soukromka')+'</div>'
+    +'<div style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:14px;">'
+    +(EN?'Enter what the student paid you in cash. MTL charges its commission to your card, and the student gets a receipt.':'Zadej, co ti student zaplatil hotově. MTL si strhne provizi z tvé karty a student dostane doklad.')+'</div>'
+    +'<input id="ccName" placeholder="'+(EN?'Student name':'Jméno studenta')+'" style="'+_i+'">'
+    +'<input id="ccEmail" type="email" placeholder="'+(EN?'Student e-mail (for the receipt)':'E-mail studenta (na doklad)')+'" style="'+_i+'">'
+    +'<input id="ccAmt" type="number" inputmode="decimal" value="'+_def+'" placeholder="'+(EN?'Amount':'Částka')+' ('+cur+')" style="'+_i+'">'
+    +'<input id="ccDate" type="date" value="'+new Date().toISOString().slice(0,10)+'" style="'+_i+'">'
+    +'<button id="ccOk" style="width:100%;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';margin-top:4px;">'+(EN?'Record':'Zapsat')+'</button>'
+    +'<button id="ccX" style="width:100%;margin-top:8px;padding:10px;background:none;border:none;color:var(--mid);font-size:13px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Cancel':'Zrušit')+'</button></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#ccX').onclick=function(){ ov.remove(); };
+  ov.querySelector('#ccOk').onclick=async function(){
+    const nm=(ov.querySelector('#ccName').value||'').trim();
+    const em=(ov.querySelector('#ccEmail').value||'').trim();
+    const amt=Number(ov.querySelector('#ccAmt').value)||0;
+    const dt=(ov.querySelector('#ccDate').value||'').trim();
+    if(!nm){ toast(EN?'\u26a0\ufe0f Enter the student name':'\u26a0\ufe0f Zadej jméno studenta'); return; }
+    if(!(amt>0)){ toast(EN?'\u26a0\ufe0f Enter the amount':'\u26a0\ufe0f Zadej částku'); return; }
+    // Zaplaceno na misto, tak i studentum s uctem: dohledat podle e-mailu, jinak host.
+    let sid=null;
+    if(em){ try{ const { data }=await supaClient.from('profiles').select('id').ilike('email', em).maybeSingle(); sid=(data&&data.id)||null; }catch(e){} }
+    const ok=ov.querySelector('#ccOk'); ok.disabled=true; ok.textContent=EN?'Recording\u2026':'Zapisuji\u2026';
+    const res=await _recordCashTx({ provider:'coach', coach_id:currentUser.id, member_id:sid,
+      gross_amount:Math.round(amt*100), currency:cur, type:'drop_in', payment_method:'cash',
+      cash_payer_name:nm, session_at_issue:(dt?(dt+'T12:00:00'):null), acq_source:'direct' });
+    if(res.error){ toast('\u26a0\ufe0f '+res.error.message); ok.disabled=false; ok.textContent=EN?'Record':'Zapsat'; return; }
+    toast(EN?'\u2705 Recorded':'\u2705 Zapsáno', 1);
+    ov.remove();
+  };
+}
+
+async function loadCoachBookings(){
   if(!currentUser) return;
   const list=$('coachBookingsList');
   if(!list) return;
@@ -26851,10 +26905,12 @@ let realtimeChannel=null;
     .order('training_date',{ascending:true});
 
   if(!data || !data.length){
-    list.innerHTML=`<p style="color:var(--light);font-size:13px;padding:10px 0;">${L('Žádné nadcházející rezervace.')}</p>`;
+    list.innerHTML=(typeof _coachCashBtnHtml==='function'?_coachCashBtnHtml():'')+`<p style="color:var(--light);font-size:13px;padding:10px 0;">${L('Žádné nadcházející rezervace.')}</p>`;
+    if(typeof _wireCoachCashBtn==='function') _wireCoachCashBtn();
     return;
   }
-  list.innerHTML='';
+  list.innerHTML=(typeof _coachCashBtnHtml==='function'?_coachCashBtnHtml():'');
+  if(typeof _wireCoachCashBtn==='function') _wireCoachCashBtn();
   data.forEach(b=>{
     const el=document.createElement('div');
     el.style.cssText='background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;';
