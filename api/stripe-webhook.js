@@ -561,7 +561,7 @@ export default async function handler(req, res) {
               // a nemela ani `data`, takze se nedala prokliknout. Dve notifikace o jedne veci jsou
               // horsi nez jedna; nechavame tu popisnejsi.
               await payAmbassador(slot.coach_profile_id, amount, currency, m.discipline, pi);
-              await recordTransaction(event.account, pi, { type: 'coach_inperson',  member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', gross: amount, currency });
+              await recordTransaction(event.account, pi, { type: 'coach_inperson',  member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', discipline: (m.disc || m.discipline || slot.discipline || null), gross: amount, currency });
             }
           } else if (m.booking_type === 'online' && m.coach_profile_id) {
             await sbPost('bookings', {
@@ -573,7 +573,7 @@ export default async function handler(req, res) {
             // ODSTRANENO ze stejneho duvodu: klient posila kind coach_new_online s formatem
             // objednavky, castkou a referral bonusem.
             await payAmbassador(m.coach_profile_id, amount, currency, m.discipline, pi);
-            await recordTransaction(event.account, pi, { type: 'coach_online',  member_id: m.student_id, coach_id: m.coach_profile_id, plan: m.online_fmt || 'Online', gross: amount, currency });
+            await recordTransaction(event.account, pi, { type: 'coach_online',  member_id: m.student_id, coach_id: m.coach_profile_id, plan: m.online_fmt || 'Online', discipline: (m.disc || m.discipline || null), gross: amount, currency });
           }
         }
       } else if (m.mtl_payment_type === 'drop_in' || m.mtl_payment_type === 'membership') {
