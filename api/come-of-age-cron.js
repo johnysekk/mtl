@@ -30,6 +30,41 @@ async function sb(path, opts) {
   return j;
 }
 
+// Narozeniny: jednou za rok popřát. Běží ve stejném cronu, ať nepřibývá další.
+// Dedup drží sloupec last_birthday_year -- bez něj by se při dvou spuštěních poslalo dvakrát.
+async function greetBirthdays() {
+  try {
+    const now = new Date();
+    const md = String(now.getUTCMonth() + 1).padStart(2, '0') + '-' + String(now.getUTCDate()).padStart(2, '0');
+    const year = now.getUTCFullYear();
+    const rows = await sb(
+      'profiles?select=id,name,birthdate,last_birthday_year&birthdate=not.is.null' +
+      '&or=(last_birthday_year.is.null,last_birthday_year.lt.' + year + ')&limit=2000'
+    );
+    const today = (rows || []).filter(r => String(r.birthdate || '').slice(5, 10) === md);
+    if (!today.length) return 0;
+
+    await sb('notifications', {
+      method: 'POST',
+      body: JSON.stringify(today.map(r => ({
+        user_id: r.id,
+        type: 'system',
+        read: false,
+        data: JSON.stringify({ kind: 'birthday' }),
+        message: '\u{1F382} Všechno nejlepší k narozeninám! Ať ti to na tréninku jde.'
+      })))
+    });
+    await sb('profiles?id=in.(' + today.map(r => r.id).join(',') + ')', {
+      method: 'PATCH',
+      body: JSON.stringify({ last_birthday_year: year })
+    });
+    return today.length;
+  } catch (e) {
+    console.log('[birthday]', e && e.message);
+    return 0;
+  }
+}
+
 module.exports = async (req, res) => {
   // Vercel cron posílá Authorization: Bearer <CRON_SECRET>. Bez něj endpoint nikoho nepřeklápí.
   const auth = (req.headers && (req.headers.authorization || req.headers.Authorization)) || '';
@@ -64,18 +99,9 @@ module.exports = async (req, res) => {
       body: JSON.stringify({ is_minor: false, can_request_pay: false })
     });
 
-    // Vazba na zástupce: dospělý zástupce nemá. Ukončit, ne mazat — ať je dohledatelné, že byla.
-    let linksEnded = 0;
-    try {
-      const upd = await sb('family_links?member_id=in.' + inList + '&status=eq.active', {
-        method: 'PATCH',
-        body: JSON.stringify({ status: 'ended' })
-      });
-      linksEnded = (upd && upd.length) || 0;
-    } catch (e) {
-      // Vazba je vedlejší; když se nepovede, příznak už je přepnutý a klient si to srovná.
-      console.log('[come-of-age] family_links:', e && e.message);
-    }
+    // Vazba na zástupce zůstává. Je to rodina, ne administrativní vztah -- rušit ji za člověka
+    // by mu vzalo přehled o dětech nebo o rodičích. Mění se jen to, že si o platbu už neřekne;
+    // zrušit si ji může sám v Rodině.
 
     // Ať to člověk nezjistí až tím, že se mu appka chová jinak.
     try {
@@ -85,18 +111,20 @@ module.exports = async (req, res) => {
           user_id: r.id,
           type: 'system',
           read: false,
-          message: '\u{1F382} Je ti 18 — tvůj účet je teď dospělý. Vazba na zákonného zástupce skončila.'
+          message: '\u{1F382} Všechno nejlepší k osmnáctinám! Jsi plnoletý — platíš si sám a o úhradu už zástupce požádat nemůžeš. Rodinná vazba zůstává; zrušit si ji můžeš kdykoli v Rodině.'
         })))
       });
     } catch (e) {
       console.log('[come-of-age] notifikace:', e && e.message);
     }
 
+    const greeted = await greetBirthdays();
+
     return res.status(200).json({
       ok: true,
       cutoff,
       promoted: ids.length,
-      links_ended: linksEnded,
+      birthdays: greeted,
       names: rows.map(r => r.name).filter(Boolean).slice(0, 20)
     });
   } catch (e) {
