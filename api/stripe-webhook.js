@@ -422,6 +422,8 @@ async function recordTransaction(acct, pi, fields) {
       payment_intent: pi, charge_id: chargeId, payee_account: acct || null, type: fields.type,
       payee_id: _payee.id, payee_kind: _payee.kind,
       member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null,
+      discipline: fields.discipline || null,
+      acq_source: fields.acq_source || null,
       gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, mtl_rate: ((gross>0 && (mtlFee)>0) ? Math.round((((mtlFee)/gross))*10000)/10000 : 0), mtl_fee_refunded: 0, net_amount: net, currency,
       ...(fields.acq_months != null ? { acq_months: fields.acq_months } : {}),
       ...(fields.base_rate != null ? { base_rate: fields.base_rate } : {}),
@@ -561,7 +563,7 @@ export default async function handler(req, res) {
               // a nemela ani `data`, takze se nedala prokliknout. Dve notifikace o jedne veci jsou
               // horsi nez jedna; nechavame tu popisnejsi.
               await payAmbassador(slot.coach_profile_id, amount, currency, m.discipline, pi);
-              await recordTransaction(event.account, pi, { type: 'coach_inperson',  member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', discipline: (m.disc || m.discipline || slot.discipline || null), gross: amount, currency });
+              await recordTransaction(event.account, pi, { type: 'coach_inperson',  member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', discipline: (m.disc || m.discipline || slot.discipline || null), acq_source: (m.mtl_acq_src || null), gross: amount, currency });
             }
           } else if (m.booking_type === 'online' && m.coach_profile_id) {
             await sbPost('bookings', {
@@ -573,7 +575,7 @@ export default async function handler(req, res) {
             // ODSTRANENO ze stejneho duvodu: klient posila kind coach_new_online s formatem
             // objednavky, castkou a referral bonusem.
             await payAmbassador(m.coach_profile_id, amount, currency, m.discipline, pi);
-            await recordTransaction(event.account, pi, { type: 'coach_online',  member_id: m.student_id, coach_id: m.coach_profile_id, plan: m.online_fmt || 'Online', discipline: (m.disc || m.discipline || null), gross: amount, currency });
+            await recordTransaction(event.account, pi, { type: 'coach_online',  member_id: m.student_id, coach_id: m.coach_profile_id, plan: m.online_fmt || 'Online', discipline: (m.disc || m.discipline || null), acq_source: (m.mtl_acq_src || null), gross: amount, currency });
           }
         }
       } else if (m.mtl_payment_type === 'drop_in' || m.mtl_payment_type === 'membership') {
