@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: TCA fixes a type mismatch I introduced when the confirmations table was written. booking_id was declared uuid, but it points at two tables with different keys -- bookings.id is a plain number for private lessons, gym_bookings.id is a uuid -- so every private-lesson reschedule failed on write and on read with invalid input syntax for type uuid. The column becomes text, which holds both, and the app sends and matches the id as a string throughout. Needs reschedule-conf-id-fix.sql. -->
+<!-- MTL build: TCB shows a club owner their own group classes in the diary. It only ever looked at gym_coaches, where an owner does not appear -- they own the club rather than being listed as a coach in it -- so their own schedule was missing entirely; classes with no leader named are treated as the owner\u2019s, since the field is usually left blank. The calendar dots stay as they were: green on a free slot reads correctly to a coach looking for where he still has room. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -27046,10 +27046,19 @@ async function loadDiaryData(){
   diaryClasses = [];
   try{
     const { data:links } = await supaClient.from('gym_coaches').select('gym_id').eq('coach_id', currentUser.id).eq('status','active');
-    const gids=[...new Set((links||[]).map(l=>l.gym_id).filter(Boolean))];
+    // Majitel klubu není mezi gym_coaches -- klub vlastní, není v něm veden jako kouč.
+    // Bez tohohle dotazu neviděl v diáři vlastní skupinovky vůbec.
+    let _ownGids=[];
+    try{
+      const { data:_og } = await supaClient.from('gyms').select('id').eq('owner_id', currentUser.id);
+      _ownGids=(_og||[]).map(x=>x.id).filter(Boolean);
+    }catch(e){}
+    const gids=[...new Set([].concat((links||[]).map(l=>l.gym_id), _ownGids).filter(Boolean))];
     if(gids.length){
       const { data:gs } = await supaClient.from('gyms').select('id,name,schedule').in('id', gids);
-      (gs||[]).forEach(g=>{ let sc=[]; try{ sc=(typeof g.schedule==='string')?JSON.parse(g.schedule||'[]'):(g.schedule||[]); }catch(e){ sc=[]; } (sc||[]).filter(c=>(c.leader||c.coach)===currentUser.id).forEach(c=>{ diaryClasses.push({ gymId:g.id, gymName:g.name||'', day:Number(c.day)||0, time:c.time||'18:00', dur:Number(c.dur)||60, name:c.name||'', level:c.level||'all' }); }); });
+      (gs||[]).forEach(g=>{ let sc=[]; try{ sc=(typeof g.schedule==='string')?JSON.parse(g.schedule||'[]'):(g.schedule||[]); }catch(e){ sc=[]; } // Lekce bez uvedeného vedoucího vede majitel -- v rozvrhu se leader často nevyplňuje.
+        const _mine=(_ownGids.indexOf(g.id)>=0);
+        (sc||[]).filter(c=>{ const _l=(c.leader||c.coach); return _l ? (_l===currentUser.id) : _mine; }).forEach(c=>{ diaryClasses.push({ gymId:g.id, gymName:g.name||'', day:Number(c.day)||0, time:c.time||'18:00', dur:Number(c.dur)||60, name:c.name||'', level:c.level||'all' }); }); });
     }
   }catch(e){ diaryClasses=[]; }
 }
