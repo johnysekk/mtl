@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: TBL leaves the webhook as the only writer of a refund. cancel.js briefly wrote the amounts itself so the overview updated at once, but the webhook already does it correctly with the real figures from Stripe, and two writers for one number is how they drift. cancel.js issues the refund and writes nothing, as before. What stays from the previous build: the transaction cache is dropped when a refund goes through, so the overview no longer shows a stale figure for five minutes, and the webhook records the discipline. -->
+<!-- MTL build: TBM stops the diary guessing at net income. A booked slot showed the price times the rate on the profile minus a Stripe fee, so a 300 lesson read as 294 -- a number that is almost never right, because the real rate is decided at payment time by the server. The diary shows what the student paid; the Prehled has the actual figures from transactions. The coming-of-age greeting arrived twice because enterApp runs more than once in a session and both passes saw a minor; the flag flip is now conditional on still being a minor, and only whoever flips it sends the message. The guardian link is no longer ended for them either -- family is not an administrative relationship, and it is theirs to end; what changes is that payment requests stop. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -26997,7 +26997,6 @@ function goToDiaryDate(dateStr){
 
 function renderDiary(){
   $('diaryMonth').textContent = `${monthName(diaryMonth)} ${diaryYear}`;
-  const myPct = myKeepPct();
   const grid = $('diaryGrid');
   grid.innerHTML = '';
   $('diaryDayDetail').innerHTML = '';
@@ -27021,7 +27020,10 @@ function renderDiary(){
     const d = new Date(s.date);
     return d.getFullYear()===diaryYear && d.getMonth()===diaryMonth && !s.booked && (!window._diaryFilterDisc || s.discipline===window._diaryFilterDisc);
   });
-  const earnings = monthBookings.reduce((sum,b)=>sum+(b.amount||0)*myPct,0);
+  // Cena, kterou studenti zaplatili -- ne odhad čistého. Sazbu určuje server při platbě
+  // (akviziční příplatek, kredity, EP), takže vynásobit sazbou z profilu dá skoro vždy jiné
+  // číslo než skutečnost. Čistý příjem patří do Přehledu, kde jsou reálná data z transakcí.
+  const earnings = monthBookings.reduce((sum,b)=>sum+(b.amount||0),0);
   const summary = document.createElement('div');
   summary.style.cssText='grid-column:1/-1;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;font-size:13px;color:var(--dark);text-align:center;';
   summary.innerHTML = LANG==='en'
@@ -27065,7 +27067,6 @@ function renderDiary(){
 
 function showDiaryDay(dateStr){
   const detail = $('diaryDayDetail');
-  const myPct = myKeepPct();
   const [y,m,d] = dateStr.split('-');
   const dayBookings = diaryBookings.filter(b=>b.training_date===dateStr && b.type!=='online' && (!window._diaryFilterDisc || b.discipline===window._diaryFilterDisc)).sort((a,b)=>(a.training_time||'').localeCompare(b.training_time||''));
   const dayFreeSlots = diarySlots.filter(s=>s.date===dateStr && !s.booked && (!window._diaryFilterDisc || s.discipline===window._diaryFilterDisc)).sort((a,b)=>a.time.localeCompare(b.time));
@@ -27087,7 +27088,7 @@ function showDiaryDay(dateStr){
       <div style="background:#FFF0F0;border:1px solid #FFD0D0;border-radius:12px;padding:12px;margin-bottom:8px;">
         <div style="font-size:15px;font-weight:700;color:var(--dark);">${b.discipline?disciplineEmoji(b.discipline):'🥊'} ${b.training_time} · ${b.discipline&&isMultiDiscipline()?disciplineLabel(b.discipline):L('Rezervace')}</div>
         ${b.student_name?`<div style="font-size:13px;color:var(--dark);font-weight:600;margin-top:3px;">\ud83d\udc64 ${escapeHtml(b.student_name)}</div>`:''}
-        <div style="font-size:13px;color:var(--mid);margin:4px 0 8px;">${fmtPrice(Math.max(0,(b.amount||0)*myPct-((b.actual_stripe_fee||0)/100)), b.currency||'CZK')} ${_curSym(b.currency)}</div>
+        <div style="font-size:13px;color:var(--mid);margin:4px 0 8px;">${fmtPrice(b.amount||0, b.currency||'CZK')} ${_curSym(b.currency)}</div>
         <div style="display:flex;gap:8px;">
           <button class="diaryMsgBtn" data-student="${b.student_id}" style="flex:1;padding:8px;background:var(--dark);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans';">${L('💬 Napsat')}</button>
           <button class="diaryCancelBtn" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-slot="${b.slot_id}" data-student="${b.student_id}" data-date="${b.training_date}" data-time="${b.training_time}" style="flex:1;padding:8px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans';">${L('Zrušit')}</button>
@@ -31784,22 +31785,23 @@ async function _maybeComeOfAge(){
     const age=await _ensureMyBirthdate();
     if(age==null || age<18) return false;
     const EN=LANG==='en';
-    await supaClient.from('profiles').update({ is_minor:false, can_request_pay:false }).eq('id', currentUser.id);
+    // Podmínka is_minor=true v samotném updatu: kdo přepne první, ten notifikuje. enterApp
+    // proběhne za sezení víckrát a bez toho dorazila gratulace dvakrát.
+    const { data:_flip } = await supaClient.from('profiles')
+      .update({ is_minor:false, can_request_pay:false })
+      .eq('id', currentUser.id).eq('is_minor', true).select('id');
     currentUser.is_minor=false; currentUser.can_request_pay=false;
-    // Vazba na zástupce: dospělý už zástupce nemá. Ukončit, ne smazat -- ať je vidět, že byla.
-    try{
-      await supaClient.from('family_links').update({ status:'ended' })
-        .eq('member_id', currentUser.id).eq('status','active');
-    }catch(e){}
     try{ document.body.classList.remove('minor-mode'); }catch(e){}
     try{ if(typeof _applyMinorLock==='function') _applyMinorLock(); }catch(e){}
-    // Notifikace, ne toast: je to změna účtu, ke které se člověk může chtít vrátit.
+    if(!(_flip && _flip.length)) return false;   // přepnul někdo jiný, negratulujeme podruhé
+    // Vazba na zástupce zůstává -- je to rodina, ne administrativní vztah, a rušit ji za člověka
+    // by mu vzalo přehled o dětech nebo o rodičích. Mění se jen to, že si o platbu už neřekne.
     try{
       await supaClient.from('notifications').insert({
         user_id: currentUser.id, type:'system', read:false,
         data: JSON.stringify({ kind:'came_of_age' }),
-        message: (EN?'\u{1F382} Happy 18th \u2014 your account is now an adult account. You pay for yourself and the guardian link has ended.'
-                    :'\u{1F382} Všechno nejlepší k osmnáctinám \u2014 tvůj účet je teď dospělý. Platíš si sám a vazba na zákonného zástupce skončila.')
+        message: (EN?'\u{1F382} Happy 18th! You are an adult now \u2014 you pay for yourself and can no longer send payment requests to your guardian. The family link stays; you can end it in Family whenever you like.'
+                    :'\u{1F382} Všechno nejlepší k osmnáctinám! Jsi plnoletý \u2014 platíš si sám a o úhradu už zástupce požádat nemůžeš. Rodinná vazba zůstává; zrušit si ji můžeš kdykoli v Rodině.')
       });
     }catch(e){}
     try{ if(typeof updateNotifBadge==='function') updateNotifBadge(); }catch(e){}
