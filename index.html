@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: TBV shows the receipt and the change-of-date confirmation on a private lesson before it happens. The receipt was gated on mode being past, though the lesson is paid for at booking and the receipt exists from that moment -- club classes have always shown it on upcoming ones. The confirmation is fetched for the bookings on screen and sits under the receipt, so it can be reached from the lesson rather than only from the notification that announced it. -->
+<!-- MTL build: TBW catches an e-mail that is already registered. signUp was checked for an error, but Supabase deliberately returns a fake success for an existing address so that registration cannot be used to find out who has an account; the giveaway is an empty identities array. Without that check the app sent people off to copy a code from a mail that was never going to arrive. A company ID already used by another provider now raises a warning next to the register lookup -- a warning, not a block, since one sole trader may legitimately run both a club and their own coaching. The name field says Celé jméno. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -580,7 +580,7 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
       <div style="text-align:center;margin-top:14px;"><span id="authDobBack" data-noi18n style="font-size:13px;color:var(--mid);cursor:pointer;"></span></div>
     </div>
     <div id="authFormFields">
-    <input id="authName" type="text" placeholder="Jméno a příjmení" autocomplete="name" style="display:none;width:100%;padding:14px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;margin-bottom:12px;font-family:'DM Sans';">
+    <input id="authName" type="text" placeholder="Celé jméno" autocomplete="name" style="display:none;width:100%;padding:14px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;margin-bottom:12px;font-family:'DM Sans';">
     <input id="authEmail" type="email" placeholder="Email" style="width:100%;padding:14px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;margin-bottom:12px;font-family:'DM Sans';">
     <input id="authPass" type="password" placeholder="Heslo" autocomplete="current-password" style="width:100%;padding:14px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;margin-bottom:6px;font-family:'DM Sans';">
       <!-- Nápověda se ukáže jen při registraci: pravidla mají být vidět PŘED odesláním, ne až
@@ -5551,6 +5551,7 @@ const NOTIF_T = {
   "Země":"Country",
   "Chci se stát koučem / přidat klub":"I want to coach / add a club",
   "Recepce":"Reception",
+  "Celé jméno":"Full name",
 };
 function notifText(n){
   try{
@@ -30229,6 +30230,35 @@ function _taxNorm(s){ try{ return String(s||'').normalize('NFD').replace(/[\u030
 function _taxMatchState(inputId, legalId){ var v=window._taxVer[inputId]; if(!v||!v.valid||!v.name) return null; var le=$(legalId); if(!le||!le.value.trim()) return null; return _taxNorm(le.value)===_taxNorm(v.name)?'match':'mismatch'; }
 function _taxRefreshMatch(inputId, statusId, legalId){ var st=$(statusId), v=window._taxVer[inputId]; if(!st) return; st.onclick=null; st.style.cursor=''; if(!v||!v.valid||!v.name){ return; } var ms=_taxMatchState(inputId,legalId); var _fill=function(){ var le=$(legalId); if(le){ le.value=v.name; _taxRefreshMatch(inputId,statusId,legalId); try{ if(typeof saveGymDraft==='function') saveGymDraft(); }catch(e){} try{ if(typeof saveCoachDraft==='function') saveCoachDraft(); }catch(e){} } }; if(ms==='match'){ st.textContent='✓ '+v.name+(LANG==='en'?' · matches the legal name':' · odpovídá právnímu jménu'); st.style.color='var(--green)'; } else if(ms===null){ st.textContent='✓ '+v.name+(LANG==='en'?' · tap to use as legal name':' · klepni a použij jako právní jméno'); st.style.color='var(--green)'; st.style.cursor='pointer'; st.onclick=_fill; } else { st.textContent='✗ '+v.name+(LANG==='en'?' · does NOT match the name above — tap to use it':' · NESOUHLASÍ se jménem výše — klepni a použij'); st.style.color='var(--red)'; st.style.cursor='pointer'; st.onclick=_fill; } }
 function _taxGate(legalId, ids){ for(var i=0;i<ids.length;i++){ var _tv=window._taxVer[ids[i]]; if(_tv && _tv.valid===false && ids[i].indexOf('Vat')<0){ toast(LANG==='en'?('\u26a0\ufe0f '+'Business reg. no.'+' not found in the register \u2014 check the number'):('\u26a0\ufe0f '+'I\u010cO'+' nebylo v rejst\u0159\u00edku nalezeno \u2014 zkontroluj \u010d\u00edslo')); var _e=$(ids[i]); if(_e){ try{ var _d=_e.closest('details'); if(_d) _d.open=true; _e.focus(); }catch(e){} } return false; } if(_taxMatchState(ids[i], legalId)==='mismatch'){ var v=window._taxVer[ids[i]]; toast(LANG==='en'?('⚠️ Legal name must match ARES/VIES: “'+v.name+'”'):('⚠️ Právní jméno musí odpovídat ARES/VIES: „'+v.name+'"')); return false; } } return true; }
+
+// ── IČO UŽ NĚKDO MÁ ──────────────────────────────────────────────────────────────────────────
+// Číslo se ověřovalo proti rejstříku, ale ne proti vlastní databázi. Dva lidé si tak mohli
+// založit poskytovatele na totéž IČO -- a doklady i provize by se rozešly mezi dva účty.
+// Kontrola je varovná, ne blokující: jeden živnostník může mít klub i vlastní koučování,
+// a rozhodnout, jestli jde o duplicitu, umí líp člověk než tahle funkce.
+async function _taxDupCheck(val, inputId, statusId){
+  const st=$(statusId); if(!st || !val) return;
+  const me=(currentUser&&currentUser.id)||null;
+  let hit=null;
+  try{
+    const { data:_g }=await supaClient.from('gyms').select('id,name,owner_id').eq('tax_id', val).limit(3);
+    (_g||[]).forEach(function(x){ if(!hit && x.owner_id!==me) hit={kind:'gym', name:x.name}; });
+  }catch(e){}
+  if(!hit){
+    try{
+      const { data:_p }=await supaClient.from('profiles').select('id,name').eq('tax_id', val).limit(3);
+      (_p||[]).forEach(function(x){ if(!hit && x.id!==me) hit={kind:'coach', name:x.name}; });
+    }catch(e){}
+  }
+  const inp=$(inputId); if(!inp || ((inp.value||'').trim())!==val) return;
+  if(!hit) return;
+  const EN=LANG==='en';
+  st.innerHTML=(st.textContent||'')+'<br><span style="color:#8a5a00;">\u26a0\ufe0f '
+    +(EN?('This company ID is already used by '+(hit.kind==='gym'?'a club':'a coach')+(hit.name?(' ('+escapeHtml(hit.name)+')'):'')+'. Continue only if that is also you.')
+        :('Toto IČO už používá '+(hit.kind==='gym'?'klub':'kouč')+(hit.name?(' ('+escapeHtml(hit.name)+')'):'')+'. Pokračuj jen tehdy, když jsi to taky ty.'))
+    +'</span>';
+}
+
 function mtlTaxVerify(kind, inputId, statusId, legalId, ccId){
   const inp=$(inputId), st=$(statusId); if(!inp||!st) return;
   const val=(inp.value||'').trim(); if(!val){ st.textContent=''; st.onclick=null; st.style.cursor=''; try{ delete window._taxVer[inputId]; }catch(e){} return; }
@@ -30239,7 +30269,7 @@ function mtlTaxVerify(kind, inputId, statusId, legalId, ccId){
     if(j.valid){
       var _matchable=(kind==='ico');
       window._taxVer[inputId]={raw:val, valid:true, name:(_matchable?(j.name||null):null), source:j.source||kind};
-      if(_matchable && j.name){ _taxRefreshMatch(inputId, statusId, legalId); }
+      if(_matchable && j.name){ _taxRefreshMatch(inputId, statusId, legalId); try{ _taxDupCheck(val, inputId, statusId); }catch(e){} }
       else { st.textContent='✓ '+(j.name?j.name:(LANG==='en'?'Valid':'Platné')); st.style.color='var(--green)'; }
     } else { st.textContent='✗ '+(LANG==='en'?'Not found — double-check the number':'Nenalezeno — zkontroluj číslo'); st.style.color='var(--red)'; window._taxVer[inputId]={raw:val, valid:false}; }
   }).catch(()=>{ st.textContent=''; });
@@ -31615,6 +31645,15 @@ $('btnAuthSubmit').onclick=async()=>{
         { const _e=_fullNameErr(_nm); if(_e){ toast('\u26a0\ufe0f '+_e); return; } } _suName=_nm;
     const { data, error } = await supaClient.auth.signUp({ email, password: pass });
     if(error){ if(/already|registered|exists/i.test(error.message||'')){ toast(LANG==='en'?'⚠️ This e-mail is already registered — log in instead.':'⚠️ Tento e-mail už je registrovaný — přihlas se.'); } else { toast('⚠️ '+error.message); } return; }
+    // Supabase u už registrovaného e-mailu chybu NEVRACÍ -- vrátí falešný úspěch, aby přes
+    // registraci nešlo zjišťovat, kdo účet má. Pozná se to podle prázdného pole identities:
+    // skutečně nový uživatel má aspoň jednu. Bez téhle kontroly appka poslala člověka opisovat
+    // kód z e-mailu, který nikdy nedorazil.
+    if(data && data.user && Array.isArray(data.user.identities) && data.user.identities.length===0){
+      toast(LANG==='en'?'⚠️ This e-mail is already registered — log in instead.':'⚠️ Tento e-mail už je registrovaný — přihlas se.');
+      try{ _authMode='login'; if(typeof renderAuth==='function') renderAuth(); }catch(e){}
+      return;
+    }
     _suEmail=email; _suUserId=(data&&data.user)?data.user.id:null;
     if(data&&data.session){ _regStep='country'; applyDobGate(); return; }
     _regStep='verify'; _startResend(); applyDobGate();
