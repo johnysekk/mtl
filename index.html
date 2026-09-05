@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: TCH stops the change-of-date link depending on one fragile chain. The map from payment to booking was built only from the bookings a confirmation pointed at, and those ids went to gym_bookings too, where the key is a uuid -- so that query failed and took the mapping with it. Each table is now asked for the student\u2019s own rows with its own kind of key, and if the chain still comes up empty the confirmation is matched on the session time it records against the time frozen on the receipt. The console prints what was found. -->
+<!-- MTL build: TCJ adds the change-of-date link to Historie a doklady, which is the screen a coach actually opens from Vsechny doklady -- the previous build put it in the accounting breakdown, a different page. Rows match on the transaction, on the booking behind a cash or QR payment, or on the session time frozen at issue, and the confirmations are fetched for that coach or that club. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -25605,7 +25605,31 @@ async function loadAccounting(){
   let tG=0,tS=0,tM=0,tN=0,tMoff=0; const byType={};
   rows.forEach(r=>{ const ref=r.refund_amount||0, mref=r.mtl_fee_refunded||0; const eG=(r.gross_amount||0)-ref; const eM=(r.mtl_fee||0)-mref; const st=r.stripe_fee||0; const eN=eG-st-eM; r._eG=eG; r._eM=eM; r._st=st; r._eN=eN; r._ref=ref; tG+=eG; tS+=st; tM+=eM; tN+=eN; if(r.payment_method==='cash'||r.payment_method==='qr') tMoff+=eM; const t=_acRowLabel(r); if(!byType[t]) byType[t]={n:0,g:0,nt:0}; byType[t].n++; byType[t].g+=eG; byType[t].nt+=eN; });
   const cats=Object.keys(byType).map(t=>`<div style="display:flex;justify-content:space-between;font-size:13px;padding:7px 0;border-bottom:1px solid var(--border);"><span style="color:var(--mid);">${t} (${byType[t].n})</span><span style="font-weight:700;">${f(byType[t].g)}</span></div>`).join('');
-  const lines=rows.map(r=>{ const d=new Date(r.created_at).toLocaleDateString(LANG==='en'?'en-GB':'cs-CZ',{day:'numeric',month:'numeric'}); const refBadge=r._ref?` <span style="color:var(--red);font-size:11px;">(${LANG==='en'?'refund':'refund'} -${f(r._ref)})</span>`:''; const mid=r.member_id?String(r.member_id).slice(0,8):'—'; return `<div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;padding:8px 0;border-bottom:1px solid var(--border);"><div style="min-width:0;"><div style="font-weight:600;">${_acRowLabel(r)}${refBadge}</div><div style="color:var(--light);font-size:11px;">${d} \u00b7 ${escapeHtml(r.plan||'')} \u00b7 ID ${mid}</div></div><div style="text-align:right;white-space:nowrap;"><div style="font-weight:700;">${f(r._eG)}</div><div style="color:#006040;font-size:11px;">net ${f(r._eN)}</div></div></div>`; }).join('');
+  // Potvrzení o změně termínu k dokladům tohohle subjektu -- stejně jako je vidí student.
+  // Poskytovatel je druhá strana té změny a v podkladech mu chybělo.
+  const _acRsc={}, _acRscSess={};
+  try{
+    let _q=supaClient.from('reschedule_confirmations').select('id,booking_id,transaction_id,from_at').limit(200);
+    if(_acFilter && _acFilter.coachId) _q=_q.eq('coach_id', _acFilter.coachId);
+    else if(_acFilter && _acFilter.gymId) _q=_q.eq('gym_id', _acFilter.gymId);
+    const { data:_rc }=await _q;
+    (_rc||[]).forEach(function(c){
+      if(c.transaction_id) _acRsc['tx:'+c.transaction_id]=c.id;
+      if(c.booking_id) _acRsc['bk:'+String(c.booking_id)]=c.id;
+      if(c.from_at) _acRscSess[String(c.from_at).slice(0,16)]=c.id;
+    });
+  }catch(e){}
+  const _acRscFor=function(r){
+    if(_acRsc['tx:'+r.id]) return _acRsc['tx:'+r.id];
+    if(r.source_booking_id && _acRsc['bk:'+String(r.source_booking_id)]) return _acRsc['bk:'+String(r.source_booking_id)];
+    if(r.session_at_issue){
+      const _k=String(r.session_at_issue).replace('T',' ').slice(0,16);
+      if(_acRscSess[_k]) return _acRscSess[_k];
+      if(_acRscSess[_k.slice(0,10)]) return _acRscSess[_k.slice(0,10)];
+    }
+    return null;
+  };
+  const lines=rows.map(r=>{ const d=new Date(r.created_at).toLocaleDateString(LANG==='en'?'en-GB':'cs-CZ',{day:'numeric',month:'numeric'}); const refBadge=r._ref?` <span style="color:var(--red);font-size:11px;">(${LANG==='en'?'refund':'refund'} -${f(r._ref)})</span>`:''; const mid=r.member_id?String(r.member_id).slice(0,8):'—'; return `<div style="display:flex;justify-content:space-between;gap:8px;font-size:12.5px;padding:8px 0;border-bottom:1px solid var(--border);"><div style="min-width:0;"><div style="font-weight:600;">${_acRowLabel(r)}${refBadge}</div><div style="color:var(--light);font-size:11px;">${d} \u00b7 ${escapeHtml(r.plan||'')} \u00b7 ID ${mid}</div>${_acRscFor(r)?`<button class="acReschedBtn" data-id="${_acRscFor(r)}" style="margin-top:3px;background:none;border:none;padding:0;color:var(--mid);font-size:11.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';">\u{1F504} ${LANG==='en'?'Change of date \u203a':'Změna termínu \u203a'}</button>`:''}</div><div style="text-align:right;white-space:nowrap;"><div style="font-weight:700;">${f(r._eG)}</div><div style="color:#006040;font-size:11px;">net ${f(r._eN)}</div></div></div>`; }).join('');
   body.innerHTML=`
     <div class="prow-group" style="margin-bottom:12px;">
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">\uD83D\uDCB0</div><div class="prow-lbl">${LANG==='en'?'Taken in (after refunds)':'Přijato od klientů'}</div></div><span class="prow-val">${f(tG)}</span></div>
@@ -25622,6 +25646,11 @@ async function loadAccounting(){
     <div id="acTxView" style="display:none;">${lines}</div>
     ${_acDisclaimer()}`;
   const eb=$('acExport'); if(eb) eb.onclick=()=>_acExportCsv(rows, cur, mLbl);
+  try{
+    body.querySelectorAll('.acReschedBtn').forEach(function(el){
+      el.onclick=function(){ if(typeof showRescheduleConfirmation==='function') showRescheduleConfirmation(el.dataset.id); };
+    });
+  }catch(e){}
   // U kouče se předá null a funkce si sama sáhne na jeho doklady podle coach_id -- uměla to
   // celou dobu, jen se k ní kouč nedostal, protože tlačítko bylo podmíněné gymId.
   const _cd=$('acComDoklady'); if(_cd) _cd.onclick=function(){ openCommissionDoklady(_acFilter.gymId||null); };
@@ -33812,6 +33841,19 @@ async function _loadClubDoklady(_gidIn){
   window._cdkNames={};
   if(ids.length){ try{ const { data:profs }=await supaClient.from('profiles').select('id,name').in('id',ids); (profs||[]).forEach(function(p){ window._cdkNames[p.id]=p.name; }); }catch(e){} }
   window._cdkRows=rows;
+  // Potvrzení o změně termínu k těmhle dokladům -- poskytovatel je druhá strana změny.
+  window._cdkRsc={}; window._cdkRscSess={};
+  try{
+    let _q=supaClient.from('reschedule_confirmations').select('id,booking_id,transaction_id,from_at').limit(300);
+    if(_gidIn==='coach' && currentUser) _q=_q.eq('coach_id', currentUser.id);
+    else if(_gidIn) _q=_q.eq('gym_id', _gidIn);
+    const { data:_rc }=await _q;
+    (_rc||[]).forEach(function(c){
+      if(c.transaction_id) window._cdkRsc['tx:'+c.transaction_id]=c.id;
+      if(c.booking_id) window._cdkRsc['bk:'+String(c.booking_id)]=c.id;
+      if(c.from_at) window._cdkRscSess[String(c.from_at).slice(0,16)]=c.id;
+    });
+  }catch(e){}
   var yEl=document.getElementById('cdkYear'), mEl=document.getElementById('cdkMonth');
   var years=Array.from(new Set(rows.map(function(t){ return new Date(t.created_at).getFullYear(); }))).sort(function(a,b){ return b-a; });
   if(!years.length){ box.innerHTML='<p style="text-align:center;color:var(--light);padding:30px;font-size:13px;line-height:1.6;">'+(EN?'No receipts yet.':'Zat\u00edm \u017e\u00e1dn\u00e9 doklady.')
@@ -33864,6 +33906,17 @@ function _cdkTypeLabel(t){
   else if(t.income_class==='cohort_first_month') base += ' ('+(EN?'month 1':'1. měsíc')+')';
   return base;
 }
+function _cdkRscFor(t){
+  var R=window._cdkRsc||{}, S=window._cdkRscSess||{};
+  if(R['tx:'+t.id]) return R['tx:'+t.id];
+  if(t.source_booking_id && R['bk:'+String(t.source_booking_id)]) return R['bk:'+String(t.source_booking_id)];
+  if(t.session_at_issue){
+    var k=String(t.session_at_issue).replace('T',' ').slice(0,16);
+    if(S[k]) return S[k];
+    if(S[k.slice(0,10)]) return S[k.slice(0,10)];
+  }
+  return null;
+}
 function _cdkRender(){
   var EN=LANG==='en'; var box=document.getElementById('cdkBody'); var rows=window._cdkRows||[]; if(!box) return;
   var y=parseInt((document.getElementById('cdkYear')||{}).value,10); var m=parseInt((document.getElementById('cdkMonth')||{}).value,10);
@@ -33901,9 +33954,13 @@ function _cdkRender(){
       // a pod ním obecný druh, takže na řádku nebylo vidět, na kterou akci nebo jaký tarif to je.
       +'<div style="min-width:0;"><div style="font-size:13.5px;font-weight:700;color:var(--dark);">'+escapeHtml(_cdkTypeLabel(t))+'</div>'
       +'<div style="font-size:11.5px;color:var(--mid);margin-top:2px;">'+escapeHtml(who)+' \u00b7 '+ds+' \u00b7 '+(pmE[t.payment_method]||'')+' '+amt+'</div></div>'
-      +'<button class="cdkDokBtn" data-idx="'+idx+'" style="flex:none;background:none;border:none;color:#635BFF;font-size:12.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';white-space:nowrap;">'+(EN?'Receipt \u203a':'Doklad \u203a')+'</button></div>';
+      +'<div style="flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:2px;">'
+      +'<button class="cdkDokBtn" data-idx="'+idx+'" style="background:none;border:none;color:#635BFF;font-size:12.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';white-space:nowrap;">'+(EN?'Receipt \u203a':'Doklad \u203a')+'</button>'
+      +(_cdkRscFor(t)?('<button class="cdkReschedBtn" data-id="'+_cdkRscFor(t)+'" style="background:none;border:none;color:var(--mid);font-size:11.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';white-space:nowrap;">\u{1F504} '+(EN?'Change of date \u203a':'Změna termínu \u203a')+'</button>'):'')
+      +'</div></div>';
   }).join('');
   var _sel=sel;
+  box.querySelectorAll('.cdkReschedBtn').forEach(function(b){ b.onclick=function(){ if(typeof showRescheduleConfirmation==='function') showRescheduleConfirmation(b.dataset.id); }; });
   box.querySelectorAll('.cdkDokBtn').forEach(function(b){ b.onclick=function(){ var t=_sel[parseInt(b.dataset.idx,10)]; if(!t) return; showReceipt({ amount:(Number(t.gross_amount||0)/100), currency:t.currency, type:t.type, created_at:t.created_at, payment_intent:t.payment_intent, gym_id:t.gym_id, coach_id:t.coach_id, item_label:_mpItemLabel(t),
       // Kdo platil a komu služba patří -- bez toho doklad nemá jak účastníka uvést.
       paid_by:t.paid_by, paid_by_name:t.paid_by_name, paid_to:t.paid_to, session_at_issue:t.session_at_issue,
