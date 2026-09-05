@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: TCJ adds the change-of-date link to Historie a doklady, which is the screen a coach actually opens from Vsechny doklady -- the previous build put it in the accounting breakdown, a different page. Rows match on the transaction, on the booking behind a cash or QR payment, or on the session time frozen at issue, and the confirmations are fetched for that coach or that club. -->
+<!-- MTL build: TCK gives the provider\u2019s receipt list the one match that actually works. The student\u2019s version finds the confirmation by following the payment intent to the booking; the coach\u2019s version was built without that step, so it only ever tried the transaction id, the cash booking reference and the frozen session time -- none of which a Stripe private lesson carries. The same step is added to the accounting breakdown, and the console reports what was found. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -25622,6 +25622,8 @@ async function loadAccounting(){
   const _acRscFor=function(r){
     if(_acRsc['tx:'+r.id]) return _acRsc['tx:'+r.id];
     if(r.source_booking_id && _acRsc['bk:'+String(r.source_booking_id)]) return _acRsc['bk:'+String(r.source_booking_id)];
+    var _P=window._cdkPiToBk||{};
+    if(r.payment_intent && _P[r.payment_intent] && _acRsc['bk:'+_P[r.payment_intent]]) return _acRsc['bk:'+_P[r.payment_intent]];
     if(r.session_at_issue){
       const _k=String(r.session_at_issue).replace('T',' ').slice(0,16);
       if(_acRscSess[_k]) return _acRscSess[_k];
@@ -33853,6 +33855,21 @@ async function _loadClubDoklady(_gidIn){
       if(c.booking_id) window._cdkRsc['bk:'+String(c.booking_id)]=c.id;
       if(c.from_at) window._cdkRscSess[String(c.from_at).slice(0,16)]=c.id;
     });
+    // Stripe transakce nemá source_booking_id -- spojkou je payment_intent na rezervaci.
+    // U studenta to je jediná cesta, která zabrala; tady chyběla úplně.
+    window._cdkPiToBk={};
+    const _bids=[...new Set((_rc||[]).map(function(c){ return c.booking_id; }).filter(Boolean))].map(String);
+    if(_bids.length){
+      try{
+        const { data:_b1 }=await supaClient.from('bookings').select('id,payment_intent').in('id', _bids);
+        (_b1||[]).forEach(function(b){ if(b.payment_intent) window._cdkPiToBk[b.payment_intent]=String(b.id); });
+      }catch(e){}
+      try{
+        const { data:_b2 }=await supaClient.from('gym_bookings').select('id,payment_intent').in('id', _bids);
+        (_b2||[]).forEach(function(b){ if(b.payment_intent) window._cdkPiToBk[b.payment_intent]=String(b.id); });
+      }catch(e){}
+    }
+    console.log('[resched/doklady] potvrzeni:', (_rc||[]).length, '| mapa:', Object.keys(window._cdkPiToBk||{}).length);
   }catch(e){}
   var yEl=document.getElementById('cdkYear'), mEl=document.getElementById('cdkMonth');
   var years=Array.from(new Set(rows.map(function(t){ return new Date(t.created_at).getFullYear(); }))).sort(function(a,b){ return b-a; });
@@ -33910,6 +33927,8 @@ function _cdkRscFor(t){
   var R=window._cdkRsc||{}, S=window._cdkRscSess||{};
   if(R['tx:'+t.id]) return R['tx:'+t.id];
   if(t.source_booking_id && R['bk:'+String(t.source_booking_id)]) return R['bk:'+String(t.source_booking_id)];
+  var P=window._cdkPiToBk||{};
+  if(t.payment_intent && P[t.payment_intent] && R['bk:'+P[t.payment_intent]]) return R['bk:'+P[t.payment_intent]];
   if(t.session_at_issue){
     var k=String(t.session_at_issue).replace('T',' ').slice(0,16);
     if(S[k]) return S[k];
