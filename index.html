@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: TCE finds why no confirmation was ever issued for a private lesson. The call read b.training_date and b.training_time, but the object it was handed holds oldDate and oldTime -- so from_at came out empty, the issuer returned on its first line, and it did so without a word. It reads the right fields now, and an empty session time says so instead of failing quietly. The object was also dropping the reschedule count, the amount and the currency, so even a confirmation that had been written would have carried blanks. -->
+<!-- MTL build: TCF collapses the milestone sections for everyone. They were forced open for anyone without a second role -- which is exactly an ordinary student -- so two long lists of badges landed open on arrival. The change-of-date confirmation opens in a new tab, where the browser has nothing to go back to, so it gets a Close button beside Print. And it can be reached from Receipt history again: the link paired on source_booking_id, which a Stripe payment does not carry, so the transaction is matched to its booking through the payment intent. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -12773,7 +12773,9 @@ async function showRescheduleConfirmation(id){
       ? 'This document records a change of the session date only. The original receipt is unchanged and remains valid.'
       : 'Tento dokument dokládá pouze změnu termínu lekce. Původní doklad se nemění a zůstává v platnosti.')+'</p>'
     +'<button onclick="window.print()" style="margin-top:16px;padding:10px 16px;background:#141414;color:#fff;border:none;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;">'
-    +(EN?'Print / Save PDF':'Tisk / Uložit PDF')+'</button></body></html>');
+    +(EN?'Print / Save PDF':'Tisk / Uložit PDF')+'</button>'
+    +'<button onclick="window.close()" style="margin-top:16px;margin-left:8px;padding:10px 16px;background:#fff;color:#141414;border:1px solid #d9d9d9;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;">'
+    +(EN?'Close':'Zavřít')+'</button></body></html>');
   w.document.close();
 }
 
@@ -28257,8 +28259,7 @@ async function openMilestones(){
   // Rozbalovací sekce dostávali jen lidé s víc rolemi; student je měl naplocho a vedle sebe to
   // vypadalo jako dvě různé obrazovky. Stejný tvar pro všechny -- u jedné sekce navíc stačí, že
   // je otevřená, takže se nic neschová.
-  const multi = isCoach||ownsGym||isAmb||isFounder;
-  const wrap=(title,inner,open)=> drop(title, inner, (open || !multi));
+  const wrap=(title,inner,open)=> drop(title, inner, !!open);
 
   let sInner='';
   try{
@@ -33628,6 +33629,18 @@ async function _loadMyPayments(){
       .select('id,created_at,seq,provider_name,transaction_id,booking_id')
       .eq('student_id', currentUser.id).order('created_at',{ascending:false}).limit(50);
     window._mpResched=_rc||[];
+    // Transakce nese payment_intent, potvrzení booking_id. Spojka jsou rezervace: bez ní
+    // se párovalo přes source_booking_id, které u Stripe platby není vyplněné.
+    window._mpPiToBk={};
+    try{
+      const _bids=[...new Set((_rc||[]).map(c=>c.booking_id).filter(Boolean))].map(String);
+      if(_bids.length){
+        const { data:_bk }=await supaClient.from('bookings').select('id,payment_intent').in('id', _bids);
+        (_bk||[]).forEach(function(b){ if(b.payment_intent) window._mpPiToBk[b.payment_intent]=String(b.id); });
+        const { data:_gb }=await supaClient.from('gym_bookings').select('id,payment_intent').in('id', _bids);
+        (_gb||[]).forEach(function(b){ if(b.payment_intent) window._mpPiToBk[b.payment_intent]=String(b.id); });
+      }
+    }catch(e){}
   }catch(e){}
   // Kde student nakoupil -- gym_name/coach_name na transakci nejsou, dohledají se jedním dotazem
   // na kluby a jedním na kouče.
@@ -33669,7 +33682,12 @@ function _mpRender(){
     if(c.transaction_id) _rscByTx['tx:'+c.transaction_id]=c.id;
     if(c.booking_id) _rscByTx['bk:'+c.booking_id]=c.id;
   });
-  const _rscFor=function(t){ return _rscByTx['tx:'+t.id] || (t.source_booking_id?_rscByTx['bk:'+t.source_booking_id]:null) || null; };
+  const _rscFor=function(t){
+    if(_rscByTx['tx:'+t.id]) return _rscByTx['tx:'+t.id];
+    if(t.source_booking_id && _rscByTx['bk:'+String(t.source_booking_id)]) return _rscByTx['bk:'+String(t.source_booking_id)];
+    const _b=t.payment_intent && window._mpPiToBk ? window._mpPiToBk[t.payment_intent] : null;
+    return (_b && _rscByTx['bk:'+_b]) || null;
+  };
 
   box.innerHTML=sel.map(function(t,idx){
     const d=new Date(t.created_at); const ds=d.toLocaleDateString(EN?'en-GB':'cs-CZ');
