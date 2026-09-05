@@ -52,8 +52,11 @@ export default async function handler(req, res) {
     return res.status(400).send('<!doctype html><meta charset="utf-8"><p>Chybí klub.</p>');
   }
 
-  const gr = await sbGet(`gyms?id=eq.${encodeURIComponent(id)}&select=id,name,city,address,photos,disciplines,description,schedule,membership_plans,dropin_price,currency,status,owner_id,rating,reviews&limit=1`);
+  // Vyjmenovat sloupce se nevyplatilo: stačí jeden, který se jinak jmenuje, a PostgREST
+  // odmítne celý dotaz -- stránka pak vyjde prázdná a není vidět proč.
+  const gr = await sbGet(`gyms?id=eq.${encodeURIComponent(id)}&select=*&limit=1`);
   const g = gr && gr[0];
+  if (!g) console.log('[club-public] klub nenalezen nebo dotaz selhal:', id);
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
 
@@ -127,8 +130,15 @@ export default async function handler(req, res) {
       '</div></section>';
   }
 
-  const stars = (g.rating && Number(g.reviews) > 0)
-    ? ('<div class="stars">★ ' + Number(g.rating).toFixed(1) + ' <span>(' + Number(g.reviews) + ' hodnocení)</span></div>')
+  // Počet hodnocení klub v řádku nenese -- spočítá se z gym_ratings.
+  let nRat = 0;
+  try {
+    const rr = await sbGet(`gym_ratings?gym_id=eq.${encodeURIComponent(id)}&select=id&limit=500`);
+    nRat = (rr || []).length;
+  } catch (e) { /* hvězdičky nejsou povinné */ }
+  const _avg = g.rating || g.avg_rating || null;
+  const stars = (_avg && nRat > 0)
+    ? ('<div class="stars">★ ' + Number(_avg).toFixed(1) + ' <span>(' + nRat + ' hodnocení)</span></div>')
     : '';
 
   const html =
@@ -182,6 +192,7 @@ ${hero ? `<img class="hero" src="${esc(hero)}" alt="${esc(g.name || '')}">` : ''
   ${stars}
   ${discs.length ? `<div class="chips">${discs.map(d => `<span class="chip">${esc(discLabel(d))}</span>`).join('')}</div>` : ''}
   ${g.description ? `<section><p class="desc">${esc(g.description)}</p></section>` : ''}
+  ${(!schedHtml && !priceHtml && !coaches.length && !g.description) ? `<section><p style="color:var(--light);">Klub zatím nemá vyplněný rozvrh ani ceník. Otevři si ho v aplikaci.</p></section>` : ''}
   ${schedHtml ? `<section><h2>Rozvrh</h2>${schedHtml}</section>` : ''}
   ${priceHtml}
   ${coaches.length ? `<section><h2>Kdo tu trénuje</h2><div class="people">${coaches.map(c =>
