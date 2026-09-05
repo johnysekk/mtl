@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: TCC orders a day in the diary by time rather than by kind, so an eight o\u2019clock private, a five o\u2019clock group class and a seven o\u2019clock private read down the page in that order. A booked private also shows who is coming: the booking row rarely carries the name, so it is looked up, and the phone number appears as a dialable link when the student has chosen to show it. -->
+<!-- MTL build: TCD makes the sixty days run from the click and restart on every new one. The browser key held a bare 1 and the write ignored duplicates, so the window never reset however often someone used the club\u2019s link; rewriting it on every entry instead would have made it permanent for anyone who keeps a browser. The key now carries the moment of the click, the row is only replaced when a newer click reaches further, and the key itself stops counting once it is past -- otherwise own_link came straight back out of local storage after expiry and the deck source could never return. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -12319,8 +12319,27 @@ async function _loadMemberOrigin(){
 }
 // Značky, které si člen nasbíral do localStorage ještě před přihlášením (nebo před tímto buildem),
 // se při prvním vstupu vyklopí nahoru. Bez toho by kluby přišly o to, co už mají rozeslané.
+
+// Klíč v prohlížeči platí jen po dobu lhůty. Bez toho by po jejím vypršení znovu naskočil
+// own_link přímo z localStorage a zdroj deck by se nikdy nevrátil -- lhůta by byla jen na papíře.
+function _ownClickFresh(key){
+  try{
+    var v=localStorage.getItem(key);
+    if(v===null) return false;
+    var t=Number(v)||0;
+    if(!t) return true;                       // starý klíč bez času, bereme jako platný
+    if(Date.now() - t <= OWN_ORIGIN_DAYS*86400000) return true;
+    try{ localStorage.removeItem(key); }catch(e){}   // prošlé: uklidit, ať se nevrací
+    return false;
+  }catch(e){ return false; }
+}
+
 async function _flushOwnOrigins(){
   if(!(currentUser && currentUser.id)) return;
+  // Lhůta se počítá od KLIKNUTÍ na odkaz, ne od spuštění appky. Klíč v localStorage proto
+  // nese čas kliknutí; každé další kliknutí na ten samý odkaz ji posune o dalších 60 dní.
+  // Dřív se psala jednička a zápis měl ignoreDuplicates, takže se lhůta neresetovala nikdy
+  // -- a kdyby se přepisovala pokaždé, stačilo by appku otevřít a platila by donekonečna.
   var rows=[];
   try{
     for(var i=0;i<localStorage.length;i++){
@@ -12329,13 +12348,31 @@ async function _flushOwnOrigins(){
       if(!kind) continue;
       var id=k.slice(kind==='gym'?11:13);
       if(!/^[0-9a-f-]{36}$/i.test(id)) continue;
+      var _clicked=Number(localStorage.getItem(k))||0;
+      if(!_clicked) _clicked=Date.now();          // starý klíč bez času: bereme jako teď
       rows.push({ user_id:currentUser.id, scope_kind:kind, scope_id:id, source:'own_link',
-                  expires_at:new Date(Date.now()+OWN_ORIGIN_DAYS*86400000).toISOString() });
+                  expires_at:new Date(_clicked + OWN_ORIGIN_DAYS*86400000).toISOString() });
     }
   }catch(e){}
   if(!rows.length) return;
-  try{ await supaClient.from('member_origin').upsert(rows, { onConflict:'user_id,scope_kind,scope_id', ignoreDuplicates:true }); }catch(e){}
+  // Co už je uložené: přepisujeme jen tehdy, když nové kliknutí sahá dál než stará lhůta.
+  var _have={};
+  try{
+    const { data } = await supaClient.from('member_origin')
+      .select('scope_kind,scope_id,source,expires_at').eq('user_id', currentUser.id);
+    (data||[]).forEach(function(r){ _have[r.scope_kind+':'+r.scope_id]=r; });
+  }catch(e){}
+  var _put=rows.filter(function(r){
+    var ex=_have[r.scope_kind+':'+r.scope_id];
+    if(!ex) return true;                                   // první dotek
+    if(ex.source!=='own_link') return false;               // zdroj rozhodnutý jinak, nesaháme
+    if(!ex.expires_at) return false;                       // bez data = trvalé, neměníme
+    return new Date(r.expires_at).getTime() > new Date(ex.expires_at).getTime();
+  });
+  if(!_put.length) return;
+  try{ await supaClient.from('member_origin').upsert(_put, { onConflict:'user_id,scope_kind,scope_id' }); }catch(e){}
 }
+
 // Zapíše první dotek. Nikdy nepřepisuje — o tom, co bylo dřív, rozhoduje databáze, ne tenhle klik.
 async function _stampOrigin(kind, id, source){
   if(!(currentUser && currentUser.id && id && source)) return;
@@ -12360,7 +12397,7 @@ function _acqSrc(g){
   // platba nemůže vyjít jinak než první jen proto, že se člověk proklikal jinudy.
   var _lk=_lockedOrigin('gym', _gid); if(_lk) return (_lk==='own_link')?'direct':_lk;
   var _src='direct';
-  try{ if(localStorage.getItem('mtl_owngym_'+_gid)) _src='own_link'; }catch(e){}
+  try{ if(_ownClickFresh('mtl_owngym_'+_gid)) _src='own_link'; }catch(e){}
   if(_src==='direct'){ try{
     if(window._gymRef && window._gymRef.gym===_gid) _src='referral';
     else if(window._curGymOpenSrc && window._curGymOpenSrc.gym===_gid && (window._curGymOpenSrc.src==='deck'||window._curGymOpenSrc.src==='search')) _src='mtl_discovery';
@@ -12375,7 +12412,7 @@ function _acqSrcCoach(c){
   var _id=(c&&(c.profileId||c.id))||'';
   var _lk=_lockedOrigin('coach', _id); if(_lk) return (_lk==='own_link')?'direct':_lk;
   var _src='mtl_discovery';
-  try{ if(localStorage.getItem('mtl_owncoach_'+_id)) _src='own_link'; }catch(e){}
+  try{ if(_ownClickFresh('mtl_owncoach_'+_id)) _src='own_link'; }catch(e){}
   try{ if(_id && typeof _stampOrigin==='function') _stampOrigin('coach', _id, _src); }catch(e){}
   return (_src==='own_link')?'direct':_src;
 }
@@ -34924,8 +34961,8 @@ async function showPaidPopup(){
     // Pozvanka do klubu si taky zaslouzi to, co slibuje: pridat klub do oblibenych. Doted to
     // delal jen odkaz s own=1, takze pozvany clen dorazil a nic se mu nestalo.
     try{ localStorage.setItem('mtl_gym_pending', _grg); }catch(e){} } }catch(e){}
-  try{ const _own=params.get('own'), _og=params.get('club')||params.get('gym')||params.get('klub'); if(_own==='1'&&_og){ try{ localStorage.setItem('mtl_owngym_'+_og,'1'); }catch(e){} try{ localStorage.setItem('mtl_gym_pending', _og); }catch(e){} } }catch(e){}
-  try{ const _ownc=params.get('own'), _oc=params.get('coach'); if(_ownc==='1'&&_oc){ try{ localStorage.setItem('mtl_owncoach_'+_oc,'1'); }catch(e){} try{ localStorage.setItem('mtl_coach_pending', _oc); }catch(e){} } }catch(e){}
+  try{ const _own=params.get('own'), _og=params.get('club')||params.get('gym')||params.get('klub'); if(_own==='1'&&_og){ try{ localStorage.setItem('mtl_owngym_'+_og,String(Date.now())); }catch(e){} try{ localStorage.setItem('mtl_gym_pending', _og); }catch(e){} } }catch(e){}
+  try{ const _ownc=params.get('own'), _oc=params.get('coach'); if(_ownc==='1'&&_oc){ try{ localStorage.setItem('mtl_owncoach_'+_oc,String(Date.now())); }catch(e){} try{ localStorage.setItem('mtl_coach_pending', _oc); }catch(e){} } }catch(e){}
   try{ const _jt=params.get('join'); if(_jt){ try{ localStorage.setItem('mtl_join', _jt); }catch(e){} } }catch(e){}
   try{
     const _otpEm=params.get('otp'); if(_otpEm!==null){ try{ _openOtpClaim(_otpEm); }catch(e){} return; }
@@ -35337,7 +35374,7 @@ async function showPaidPopup(){
             currency: bkCurr,
             actual_stripe_fee: _txStripeFee,
             coach_keep_pct: (coachProf&&coachProf.partner)?0.99:((coachProf&&coachProf.founding)?0.965:0.965),
-            acq_source: (function(){ try{ return localStorage.getItem('mtl_owncoach_'+slotData.coach_profile_id)?'direct':'mtl_discovery'; }catch(e){ return 'mtl_discovery'; } })()
+            acq_source: (function(){ try{ return _ownClickFresh('mtl_owncoach_'+slotData.coach_profile_id)?'direct':'mtl_discovery'; }catch(e){ return 'mtl_discovery'; } })()
           }, '*');
           if(_bkRow && _bkRow.error) console.error('[MTL booking inperson]', _bkRow.error.message);
           if(_bookDiscLS && _bkRow && _bkRow.data){ try{ await supaClient.from('bookings').update({ discipline: _bookDiscLS }).eq('id', _bkRow.data.id); }catch(e){} }
@@ -35400,7 +35437,7 @@ async function showPaidPopup(){
           status: 'active', type: 'online', currency: currency,
           online_format: orderFmt,
           coach_keep_pct: (coachProf&&coachProf.partner)?0.99:((coachProf&&coachProf.founding)?0.965:0.965),
-          acq_source: (function(){ try{ return localStorage.getItem('mtl_owncoach_'+coachId)?'direct':'mtl_discovery'; }catch(e){ return 'mtl_discovery'; } })()
+          acq_source: (function(){ try{ return _ownClickFresh('mtl_owncoach_'+coachId)?'direct':'mtl_discovery'; }catch(e){ return 'mtl_discovery'; } })()
         }); if(_bkOn && _bkOn.error) console.error('[MTL booking online]', _bkOn.error.message); }
         const sym = _curSym(currency);
         const _amtStr = (_txNet!=null) ? fmtPrice(_txNet/100, currency) : fmtPrice(amount*coachPctV, currency);
