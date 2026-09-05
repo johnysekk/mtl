@@ -49,6 +49,15 @@ function parseJson(v, fallback) {
   try { return JSON.parse(v); } catch (e) { return fallback; }
 }
 
+function addrLine(g) {
+  const street = String((g && g.address) || '').trim();
+  const zip = String((g && g.postal_code) || '').trim();
+  const city = String((g && g.city) || '').trim();
+  const has = (v) => v && street.toLowerCase().indexOf(v.toLowerCase()) >= 0;
+  const tail = [has(zip) ? '' : zip, has(city) ? '' : city].filter(Boolean).join(' ');
+  return [street, tail].filter(Boolean).join(', ');
+}
+
 const DOW = ['Neděle', 'Pondělí', 'Úterý', 'Středa', 'Čtvrtek', 'Pátek', 'Sobota'];
 const DOW3 = ['Ne', 'Po', 'Út', 'St', 'Čt', 'Pá', 'So'];
 
@@ -269,7 +278,7 @@ h2{font-family:'Bebas Neue',sans-serif;font-size:23px;letter-spacing:.05em;margi
   <div class="heroIn">
     <div class="wordmark">MARTIAL TRAINING LAB</div>
     <h1>${esc(g.name || 'Klub')}</h1>
-    ${g.city ? `<div class="city">${esc(g.city)}${g.address ? (' \u00b7 ' + esc(g.address)) : ''}</div>` : ''}
+    ${addrLine(g) ? `<div class="city">${esc(addrLine(g))}</div>` : ''}
     ${stars}
     ${discs.length ? `<div class="chips">${discs.map(d => `<span class="chip">${esc(discLabel(d))}</span>`).join('')}</div>` : ''}
   </div>
