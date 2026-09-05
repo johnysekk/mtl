@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MTL build: TCG opens the change-of-date confirmation the way a receipt opens: a full-screen overlay with Back and Print in its own bar, rather than a new browser tab with nothing to go back to. The coach also stopped getting the same news twice -- one message about the move with a link into the diary, another right under it linking to the confirmation. The confirmation is the student\u2019s document; the coach keeps the diary message. -->
+<!-- MTL build: TCH stops the change-of-date link depending on one fragile chain. The map from payment to booking was built only from the bookings a confirmation pointed at, and those ids went to gym_bookings too, where the key is a uuid -- so that query failed and took the mapping with it. Each table is now asked for the student\u2019s own rows with its own kind of key, and if the chain still comes up empty the confirmation is matched on the session time it records against the time frozen on the receipt. The console prints what was found. -->
 <!--
   NAMING BRIDGE - read this before touching any query.
   The DATABASE says `gym`. The PRODUCT says "klub" / "club". They are THE SAME THING.
@@ -33627,21 +33627,28 @@ async function _loadMyPayments(){
   window._mpResched=[];
   try{
     const { data:_rc }=await supaClient.from('reschedule_confirmations')
-      .select('id,created_at,seq,provider_name,transaction_id,booking_id')
+      .select('id,created_at,seq,provider_name,transaction_id,booking_id,from_at')
       .eq('student_id', currentUser.id).order('created_at',{ascending:false}).limit(50);
     window._mpResched=_rc||[];
     // Transakce nese payment_intent, potvrzení booking_id. Spojka jsou rezervace: bez ní
     // se párovalo přes source_booking_id, které u Stripe platby není vyplněné.
     window._mpPiToBk={};
+    // Mapa se stavěla jen z rezervací, na které ukazovala nalezená potvrzení -- a ty id se
+    // posílala i do gym_bookings, kde je klíč uuid, takže dotaz končil chybou 400. Bereme
+    // rovnou všechny rezervace toho studenta; každá tabulka dostane jen svoje typy klíčů.
     try{
-      const _bids=[...new Set((_rc||[]).map(c=>c.booking_id).filter(Boolean))].map(String);
-      if(_bids.length){
-        const { data:_bk }=await supaClient.from('bookings').select('id,payment_intent').in('id', _bids);
-        (_bk||[]).forEach(function(b){ if(b.payment_intent) window._mpPiToBk[b.payment_intent]=String(b.id); });
-        const { data:_gb }=await supaClient.from('gym_bookings').select('id,payment_intent').in('id', _bids);
-        (_gb||[]).forEach(function(b){ if(b.payment_intent) window._mpPiToBk[b.payment_intent]=String(b.id); });
-      }
+      const { data:_bk }=await supaClient.from('bookings')
+        .select('id,payment_intent').eq('student_id', currentUser.id).limit(300);
+      (_bk||[]).forEach(function(b){ if(b.payment_intent) window._mpPiToBk[b.payment_intent]=String(b.id); });
     }catch(e){}
+    try{
+      const { data:_gb }=await supaClient.from('gym_bookings')
+        .select('id,payment_intent').eq('student_id', currentUser.id).limit(300);
+      (_gb||[]).forEach(function(b){ if(b.payment_intent) window._mpPiToBk[b.payment_intent]=String(b.id); });
+    }catch(e){}
+    console.log('[resched] potvrzeni:', (window._mpResched||[]).length,
+                '| rezervace v mape:', Object.keys(window._mpPiToBk||{}).length,
+                '| booking_id:', (window._mpResched||[]).map(function(c){ return c.booking_id; }));
   }catch(e){}
   // Kde student nakoupil -- gym_name/coach_name na transakci nejsou, dohledají se jedním dotazem
   // na kluby a jedním na kouče.
@@ -33683,11 +33690,21 @@ function _mpRender(){
     if(c.transaction_id) _rscByTx['tx:'+c.transaction_id]=c.id;
     if(c.booking_id) _rscByTx['bk:'+c.booking_id]=c.id;
   });
+  // Poslední záchrana: potvrzení nese původní termín (from_at) a doklad má termín zafixovaný
+  // při platbě (session_at_issue). Když řetěz přes rezervaci selže, spáruje je datum a čas.
+  const _rscBySess={};
+  (window._mpResched||[]).forEach(function(c){ if(c.from_at) _rscBySess[String(c.from_at).slice(0,16)]=c.id; });
   const _rscFor=function(t){
     if(_rscByTx['tx:'+t.id]) return _rscByTx['tx:'+t.id];
     if(t.source_booking_id && _rscByTx['bk:'+String(t.source_booking_id)]) return _rscByTx['bk:'+String(t.source_booking_id)];
     const _b=t.payment_intent && window._mpPiToBk ? window._mpPiToBk[t.payment_intent] : null;
-    return (_b && _rscByTx['bk:'+_b]) || null;
+    if(_b && _rscByTx['bk:'+_b]) return _rscByTx['bk:'+_b];
+    if(t.session_at_issue){
+      const _k=String(t.session_at_issue).replace('T',' ').slice(0,16);
+      if(_rscBySess[_k]) return _rscBySess[_k];
+      if(_rscBySess[_k.slice(0,10)]) return _rscBySess[_k.slice(0,10)];
+    }
+    return null;
   };
 
   box.innerHTML=sel.map(function(t,idx){
