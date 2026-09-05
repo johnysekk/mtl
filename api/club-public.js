@@ -108,14 +108,17 @@ export default async function handler(req, res) {
 
   // Trenéři: jen ti, kteří u klubu opravdu jsou. Jméno a nic víc -- kontakty patří do appky,
   // ne na veřejnou stránku.
-  let coaches = [];
+  let coaches = [], ownerRef = '';
   try {
     const links = await sbGet(`gym_coaches?gym_id=eq.${encodeURIComponent(id)}&status=eq.active&select=coach_id&limit=40`);
     const ids = [...new Set((links || []).map(l => l.coach_id).filter(Boolean))];
     if (g.owner_id) ids.push(g.owner_id);
     if (ids.length) {
-      const profs = await sbGet(`profiles?id=in.(${ids.join(',')})&select=id,name,photo_url,disciplines&limit=40`);
+      const profs = await sbGet(`profiles?id=in.(${ids.join(',')})&select=id,name,photo_url,disciplines,referral_code&limit=40`);
       coaches = (profs || []).filter(p => p.name);
+      // Doporučovací kód MAJITELE. Nese ho tlačítko vedle own=1 (viz linkOwn níž).
+      const _ow = (profs || []).find(p => p.id === g.owner_id);
+      ownerRef = (_ow && _ow.referral_code) || '';
     }
   } catch (e) { /* stránka se ukáže i bez nich */ }
 
@@ -134,7 +137,17 @@ export default async function handler(req, res) {
   console.log('[club-public]', g.id, 'fotky:', photos.length, 'rozvrh:', schedule.length,
               'plány:', plans.length, 'trenéři:', coaches.length, 'popis:', !!g.description);
 
-  const linkOwn = origin + '/?own=1&club=' + encodeURIComponent(g.id);
+  // DVA PARAMETRY, DVĚ NEZÁVISLÉ VĚTVE -- ověřeno proti index.html, nekolidují:
+  //   own=1&club= čte showPaidPopup() na svém začátku -> localStorage mtl_owngym_<id>.
+  //     Odpouští akviziční provizi (acq_source vyjde 'direct'), platí 60 dnů.
+  //   ref=       čte samostatný blok dřív v souboru -> mtl_ref_pending + mtl_gym_ref.
+  //     Při registraci nastaví profiles.referred_by; referral-cron pak přičte majiteli
+  //     +1 do coach_ref_score, ale AŽ když z toho člověka vyroste aktivní poskytovatel
+  //     (10 odučených soukromek nebo 25 aktivních členství).
+  // Ani jeden blok query nemaže a _acqSrc() testuje own_link dřív než referral, takže
+  // ref nemůže klubu sebrat odpuštění poplatku. Bez kódu se parametr prostě nepřidá.
+  const linkOwn = origin + '/?own=1&club=' + encodeURIComponent(g.id)
+                + (ownerRef ? ('&ref=' + encodeURIComponent(ownerRef)) : '');
   const title = (g.name || 'Klub') + (g.city ? (' \u00b7 ' + g.city) : '');
   const discTxt = discs.map(discLabel).join(' \u00b7 ');
   const desc = (g.description ? String(g.description).slice(0, 160)
@@ -255,7 +268,7 @@ h2{font-family:'Bebas Neue',sans-serif;font-size:23px;letter-spacing:.05em;margi
   ${g.description ? `<section><p class="desc">${esc(g.description)}</p></section>` : ''}
   ${schedHtml ? `<section><h2>Rozvrh</h2>${schedHtml}</section>` : ''}
   ${priceHtml}
-  ${coaches.length ? `<section><h2>Kdo tu trénuje</h2><div class="people">${coaches.map(c =>
+  ${coaches.length ? `<section><h2>Trenéři</h2><div class="people">${coaches.map(c =>
       `<div class="p">${c.photo_url ? `<img src="${esc(c.photo_url)}" alt="">` : '<div class="ph">\u{1F94A}</div>'}<span>${esc(c.name)}</span></div>`
     ).join('')}</div></section>` : ''}
   ${gallery.length ? `<section><h2>Fotky</h2><div class="gal">${gallery.map(u => `<img src="${esc(u)}" alt="" loading="lazy">`).join('')}</div></section>` : ''}
