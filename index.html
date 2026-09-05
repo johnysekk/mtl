@@ -1514,6 +1514,10 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
     <p style="font-size:11.5px;color:var(--light);line-height:1.4;margin:0 0 6px;">Doplní se z adresy. Používá se při vyhledávání klubů.</p>
     <input id="gymCity" type="text" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';margin-bottom:16px;">
 
+    <div class="sec-lbl">PSČ</div>
+    <p style="font-size:11.5px;color:var(--light);line-height:1.4;margin:0 0 6px;">Doplní se z adresy. Když ho nenajde, dopiš ho ručně.</p>
+    <input id="gymPostal" type="text" inputmode="numeric" autocomplete="postal-code" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';margin-bottom:16px;">
+
     <div class="sec-lbl">Hlavní trenér (nepovinné)</div>
     <input id="gymHeadCoach" type="text" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';margin-bottom:16px;">
 
@@ -11888,7 +11892,7 @@ async function openGymProfile(g){
   } }catch(e){}
   $('gymProfContent').innerHTML = `${_gymHero}
     ${gallery}
-    <div style="font-size:14px;color:var(--mid);margin-bottom:4px;">📍 ${g.address?g.address+', ':''}${g.city||''}</div>
+    <div style="font-size:14px;color:var(--mid);margin-bottom:4px;">📍 ${escapeHtml(gymAddrLine(g))}</div>
     ${statsStrip}
     ${ratingBlock}
     ${g.description?`<p style="font-size:14px;color:var(--dark);line-height:1.6;margin:10px 0 16px;">${escapeHtml(g.description)}</p>`:''}
@@ -22247,7 +22251,7 @@ function renderGymAmenities(){
 }
 
 const GYM_DRAFT_KEY='mtl_gym_draft';
-function gymDraftFields(){ return ['gymName','gymCity','gymAddress','gymHeadCoach','gymDesc','gymDropinPrice','gymCurrency','gymMembName','gymMembPrice','gymTaxId','gymVatId','gymLegalName']; }
+function gymDraftFields(){ return ['gymName','gymCity','gymPostal','gymAddress','gymHeadCoach','gymDesc','gymDropinPrice','gymCurrency','gymMembName','gymMembPrice','gymTaxId','gymVatId','gymLegalName']; }
 function saveGymDraft(){
   try{
     if(!$('shGymApp') || !$('shGymApp').classList.contains('open')) return;
@@ -22395,8 +22399,14 @@ async function openGymApp(){
   openSheet('shGymApp');
   // Našeptávač adres i v přihlášce -- adresa tu vzniká poprvé a právě z ní se počítá poloha.
   try{ _attachAddrSuggest('gymAddress', function(){ return ($('gymCity')&&$('gymCity').value)||''; },
-    function(p){ window._gaPickedGeo={ lat:p.lat, lng:p.lng, addr:($('gymAddress')&&$('gymAddress').value)||'' };
-      if(p.city && $('gymCity')) $('gymCity').value=p.city; }); }catch(e){}
+    function(p){
+      // Do pole adresy patří jen ulice a číslo -- město a PSČ mají vlastní pole a plná
+      // adresa by je zdvojila. line1 nese přesně ulici a číslo z vybraného výsledku.
+      if(p.line1 && $('gymAddress')) $('gymAddress').value=p.line1;
+      if(p.city && $('gymCity')) $('gymCity').value=p.city;
+      if(p.postal && $('gymPostal')) $('gymPostal').value=p.postal;
+      window._gaPickedGeo={ lat:p.lat, lng:p.lng, addr:($('gymAddress')&&$('gymAddress').value)||'' };
+    }); }catch(e){}
   try{ if(typeof _gaApplyMode==='function'){ var _ck=document.querySelector('input[name=gaPayMode]:checked'); _gaApplyMode(_ck?_ck.value:null); } }catch(e){}
   try{ if(!_sheetParent['shGymApp']) _sheetParent['shGymApp']=(window._myGyms&&window._myGyms.length)?'shGymManage':'shMe'; }catch(e){}
   try{ let st=1; if(hadDraft){ const raw=localStorage.getItem(GYM_DRAFT_KEY); const d=raw?JSON.parse(raw):null; st=1; } gaGoStep(1);
@@ -22504,7 +22514,7 @@ if($('shGymApp')){ ['input','change'].forEach(ev=>$('shGymApp').addEventListener
 if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
   const name=$('gymName').value.trim();
   const city=$('gymCity').value.trim();
-  const address=$('gymAddress').value.trim();
+  const address=$('gymAddress').value.trim(); const postal=($('gymPostal')&&$('gymPostal').value.trim())||'';
   const headCoach=$('gymHeadCoach').value.trim();
   const desc=$('gymDesc').value.trim();
   const price=parseInt($('gymDropinPrice').value)||0;
@@ -22582,7 +22592,7 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
     const { data: newGym, error } = await supaClient.from('gyms').insert({
       terms_accepted_at: new Date().toISOString(),
       owner_id: currentUser.id, referred_by: _gymRefBy, referred_at: _gymRefBy?new Date().toISOString():null, name, city, country: countryName, city_lat:lat, city_lng:lng,
-      address: address || null, description: fullDesc || null,
+      address: address || null, postal_code: postal || null, description: fullDesc || null,
       photos: JSON.stringify(showcasePhotos),
       facility_photos: JSON.stringify(facilityPhotos),
       facilities_claimed: JSON.stringify(claimed),
@@ -30623,6 +30633,19 @@ async function _dokladPreview(which, opts){
   ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
 }
 
+// Adresa klubu k zobrazení: ulice, PSČ a město v pořadí, jak se píše na obálku.
+// Prázdné části se vynechají, takže starý klub s plnou adresou v address a bez PSČ
+// vypadá pořád stejně jako dřív.
+function gymAddrLine(g){
+  if(!g) return '';
+  const street=String(g.address||'').trim();
+  const zip=String(g.postal_code||'').trim();
+  const city=String(g.city||'').trim();
+  // Starší záznamy mají město i PSČ zapečené uvnitř address -- pak se nepřidává znovu.
+  const has=(v)=> v && street.toLowerCase().indexOf(v.toLowerCase())>=0;
+  const tail=[has(zip)?'':zip, has(city)?'':city].filter(Boolean).join(' ');
+  return [street, tail].filter(Boolean).join(', ');
+}
 function _fmtAddr(a){
   a=a||{};
   const cc=String(a.country_code||'').toUpperCase();
