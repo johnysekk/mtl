@@ -251,6 +251,17 @@ h2{font-family:'Bebas Neue',sans-serif;font-size:23px;letter-spacing:.05em;margi
 .empty{color:var(--mid);background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:16px;margin:0}
 .cta{position:fixed;left:0;right:0;bottom:0;background:rgba(255,255,255,.94);backdrop-filter:blur(12px);border-top:1px solid var(--border);padding:12px 20px calc(env(safe-area-inset-bottom,0px) + 12px)}
 .cta a{display:block;max-width:580px;margin:0 auto;text-align:center;background:linear-gradient(135deg,#C9A227,#F4D87A);color:#241c00;text-decoration:none;padding:16px;border-radius:14px;font-weight:700;font-size:16.5px;box-shadow:0 4px 18px rgba(201,162,39,.28)}
+.mOv{position:fixed;inset:0;z-index:60;background:rgba(8,8,8,.66);backdrop-filter:blur(3px);display:none;align-items:flex-end;justify-content:center;padding:16px}
+.mOv.on{display:flex}
+.mCard{position:relative;width:100%;max-width:420px;background:radial-gradient(120% 90% at 50% 0%,#2a2200 0%,#0c0c0c 62%);border:1px solid rgba(244,216,122,.22);border-radius:20px;padding:26px 22px 22px;text-align:center;box-shadow:0 -8px 50px rgba(0,0,0,.5);animation:mUp .22s ease-out}
+@keyframes mUp{from{transform:translateY(16px);opacity:0}to{transform:translateY(0);opacity:1}}
+.mX{position:absolute;top:10px;right:12px;width:32px;height:32px;border:none;background:transparent;color:rgba(255,255,255,.45);font-size:22px;line-height:1;cursor:pointer;font-family:inherit}
+.mWm{font-family:'Bebas Neue',sans-serif;font-size:13px;letter-spacing:.18em;color:var(--gold);margin-bottom:12px}
+.mCard h3{font-family:'Bebas Neue',sans-serif;font-size:27px;letter-spacing:.02em;color:#fff;margin:0 0 8px;line-height:1.1}
+.mCard p{color:rgba(255,255,255,.60);font-size:14px;line-height:1.55;margin:0 0 18px}
+.mGo{display:block;background:linear-gradient(135deg,#C9A227,#F4D87A);color:#241c00;text-decoration:none;padding:15px;border-radius:13px;font-weight:700;font-size:16px}
+.mAlt{display:block;margin-top:10px;color:rgba(255,255,255,.55);text-decoration:none;font-size:13.5px;font-weight:600;padding:9px}
+@media(min-width:560px){.mOv{align-items:center}}
 @media(min-width:560px){h1{font-size:52px}.hero{padding:44px 20px 38px}}
 </style></head><body>
 <div class="hero">
@@ -273,7 +284,36 @@ h2{font-family:'Bebas Neue',sans-serif;font-size:23px;letter-spacing:.05em;margi
     ).join('')}</div></section>` : ''}
   ${gallery.length ? `<section><h2>Fotky</h2><div class="gal">${gallery.map(u => `<img src="${esc(u)}" alt="" loading="lazy">`).join('')}</div></section>` : ''}
 </div>
-<div class="cta"><a href="${esc(linkOwn)}">Rezervovat trénink \u2192</a></div>
+<div class="cta"><a id="bookBtn" href="${esc(linkOwn)}">Rezervovat trénink \u2192</a></div>
+
+<div class="mOv" id="mOv" role="dialog" aria-modal="true" aria-labelledby="mTit">
+  <div class="mCard">
+    <button class="mX" id="mX" aria-label="Zavřít">\u00d7</button>
+    <div class="mWm">MARTIAL TRAINING LAB</div>
+    <h3 id="mTit">Rezervace přes MTL</h3>
+    <p>Rozvrh, členství i platby ${esc(g.name || 'klubu')} běží v aplikaci MTL. Účet si vytvoříš zdarma a klub se ti rovnou uloží mezi oblíbené.</p>
+    <a class="mGo" href="${esc(linkOwn)}">Vytvořit účet zdarma</a>
+    <a class="mAlt" href="${esc(linkOwn)}">Už mám účet — přihlásit se</a>
+  </div>
+</div>
+
+<script>
+// Klik na Rezervovat nenaviguje pryč: otevře se okno nad stránkou klubu, která zůstane vidět.
+// Odkaz v tlačítku zůstává platný, takže bez JavaScriptu (nebo při chybě) funguje po staru.
+(function(){
+  var b=document.getElementById('bookBtn'), o=document.getElementById('mOv'), x=document.getElementById('mX');
+  if(!b||!o) return;
+  var sy=0;
+  function open(e){ if(e) e.preventDefault(); sy=window.scrollY; o.classList.add('on');
+    document.body.style.position='fixed'; document.body.style.top=(-sy)+'px'; document.body.style.width='100%'; }
+  function close(){ o.classList.remove('on');
+    document.body.style.position=''; document.body.style.top=''; document.body.style.width=''; window.scrollTo(0,sy); }
+  b.addEventListener('click', open);
+  if(x) x.addEventListener('click', close);
+  o.addEventListener('click', function(e){ if(e.target===o) close(); });
+  document.addEventListener('keydown', function(e){ if(e.key==='Escape' && o.classList.contains('on')) close(); });
+})();
+</script>
 </body></html>`;
 
   // Krátká cache: rozvrh se mění, ale ne po vteřinách. Robot sociální sítě si stránku stáhne
