@@ -27,6 +27,16 @@ function esc(v) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// gyms.photos je pole OBJEKTŮ {space,url} (viz showcasePhotos v index.html), ne pole stringů.
+// Vložit objekt do src dá "[object Object]" -> rozbitý obrázek přes celou stránku.
+// Starší řádky mohou nést holý string, takže bereme obojí a cokoli jiného zahodíme.
+function photoUrl(p) {
+  if (!p) return '';
+  if (typeof p === 'string') return p;
+  if (typeof p === 'object' && typeof p.url === 'string') return p.url;
+  return '';
+}
+
 function parseJson(v, fallback) {
   if (v == null) return fallback;
   if (typeof v !== 'string') return v;
@@ -93,19 +103,30 @@ export default async function handler(req, res) {
     }
   } catch (e) { /* stránka se ukáže i bez nich */ }
 
+  console.log('[club-public]', g.id, 'fotky:', photos.length, 'rozvrh:', schedule.length,
+              'plány:', plans.length, 'trenéři:', coaches.length, 'popis:', !!g.description);
+
   const linkOwn = origin + '/?own=1&club=' + encodeURIComponent(g.id);
   const title = (g.name || 'Klub') + (g.city ? (' · ' + g.city) : '');
   const discTxt = discs.map(discLabel).join(' · ');
   const desc = (g.description ? String(g.description).slice(0, 160)
               : (discTxt ? (discTxt + (g.city ? (' v ' + g.city) : '')) : 'Tréninky a rozvrh')) ;
-  const hero = photos[0] || '';
+  const hero = photoUrl(photos[0]);
 
   // ── rozvrh ────────────────────────────────────────────────────────────────────────────
+  // Jedna položka rozvrhu může nést další termíny v extraSlots (stejná třída, jiný den).
+  // Appka je rozbaluje; bez toho tu klub se dvěma skupinovkami ukáže jen tu první.
   const byDay = {};
   (schedule || []).forEach(c => {
-    const d = Number(c.day);
-    if (isNaN(d)) return;
-    (byDay[d] = byDay[d] || []).push(c);
+    const slots = [{ day: c.day, time: c.time }];
+    if (Array.isArray(c.extraSlots)) {
+      c.extraSlots.forEach(x => { if (x && x.day != null && x.time) slots.push({ day: x.day, time: x.time }); });
+    }
+    slots.forEach(sl => {
+      const d = Number(sl.day);
+      if (isNaN(d)) return;
+      (byDay[d] = byDay[d] || []).push({ time: sl.time, name: c.name, disc: c.disc, level: c.level });
+    });
   });
   let schedHtml = '';
   [1, 2, 3, 4, 5, 6, 0].forEach(d => {
@@ -123,7 +144,12 @@ export default async function handler(req, res) {
   let priceHtml = '';
   const priceRows = [];
   if (g.dropin_price) priceRows.push(['Jednorázový vstup', g.dropin_price]);
-  (plans || []).forEach(p => { if (p && p.name && p.price) priceRows.push([p.name, p.price]); });
+  (plans || []).forEach(p => {
+    if (!p || !p.name || !p.price) return;
+    const m = Number(p.months) || 1;
+    const per = m === 1 ? ' / měsíc' : (' / ' + m + (m < 5 ? ' měsíce' : ' měsíců'));
+    priceRows.push([p.name + per, p.price]);
+  });
   if (priceRows.length) {
     priceHtml = '<section><h2>Ceník</h2><div class="prices">' +
       priceRows.map(r => '<div class="pr"><span>' + esc(r[0]) + '</span><strong>' + esc(r[1]) + ' ' + esc(cur) + '</strong></div>').join('') +
@@ -131,12 +157,14 @@ export default async function handler(req, res) {
   }
 
   // Počet hodnocení klub v řádku nenese -- spočítá se z gym_ratings.
-  let nRat = 0;
+  // gyms žádný sloupec s průměrem nenese -- appka si ho počítá z gym_ratings a my taky.
+  let nRat = 0, _avg = null;
   try {
-    const rr = await sbGet(`gym_ratings?gym_id=eq.${encodeURIComponent(id)}&select=id&limit=500`);
-    nRat = (rr || []).length;
+    const rr = await sbGet(`gym_ratings?gym_id=eq.${encodeURIComponent(id)}&select=rating&limit=500`);
+    const vals = (rr || []).map(r => Number(r.rating)).filter(v => v > 0);
+    nRat = vals.length;
+    if (nRat) _avg = vals.reduce((a, b) => a + b, 0) / nRat;
   } catch (e) { /* hvězdičky nejsou povinné */ }
-  const _avg = g.rating || g.avg_rating || null;
   const stars = (_avg && nRat > 0)
     ? ('<div class="stars">★ ' + Number(_avg).toFixed(1) + ' <span>(' + nRat + ' hodnocení)</span></div>')
     : '';
@@ -158,7 +186,8 @@ ${hero ? `<meta property="og:image" content="${esc(hero)}">` : ''}
 *{box-sizing:border-box}
 body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;color:var(--dark);background:#fff;line-height:1.55}
 .wrap{max-width:620px;margin:0 auto;padding:0 18px 100px}
-.hero{width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:#eee}
+.heroWrap{max-width:620px;margin:0 auto}
+.hero{width:100%;aspect-ratio:16/9;max-height:44vh;object-fit:cover;display:block;background:var(--surf)}
 h1{font-size:26px;margin:18px 0 4px;line-height:1.2}
 .city{color:var(--light);font-size:15px;margin-bottom:10px}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px}
@@ -182,23 +211,24 @@ h2{font-size:17px;margin:28px 0 10px}
 .gal img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px;background:var(--surf)}
 .cta{position:fixed;left:0;right:0;bottom:0;background:#fff;border-top:1px solid var(--border);padding:12px 18px calc(env(safe-area-inset-bottom,0px) + 12px)}
 .cta a{display:block;max-width:584px;margin:0 auto;text-align:center;background:var(--dark);color:#fff;text-decoration:none;padding:15px;border-radius:14px;font-weight:800;font-size:16px}
+.empty{color:var(--mid);background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:14px}
 .foot{color:var(--light);font-size:12px;text-align:center;margin-top:30px}
 .foot a{color:var(--light)}
 </style></head><body>
-${hero ? `<img class="hero" src="${esc(hero)}" alt="${esc(g.name || '')}">` : ''}
+${hero ? `<div class="heroWrap"><img class="hero" src="${esc(hero)}" alt="${esc(g.name || '')}"></div>` : ''}
 <div class="wrap">
   <h1>${esc(g.name || 'Klub')}</h1>
   ${g.city ? `<div class="city">${esc(g.city)}${g.address ? (' · ' + esc(g.address)) : ''}</div>` : ''}
   ${stars}
   ${discs.length ? `<div class="chips">${discs.map(d => `<span class="chip">${esc(discLabel(d))}</span>`).join('')}</div>` : ''}
   ${g.description ? `<section><p class="desc">${esc(g.description)}</p></section>` : ''}
-  ${(!schedHtml && !priceHtml && !coaches.length && !g.description) ? `<section><p style="color:var(--light);">Klub zatím nemá vyplněný rozvrh ani ceník. Otevři si ho v aplikaci.</p></section>` : ''}
+  ${(!schedHtml && !priceHtml && !coaches.length && !g.description) ? `<section><p class="empty">Tenhle klub zatím nemá v MTL vyplněný rozvrh, ceník ani trenéry. Otevři si ho v aplikaci.</p></section>` : ''}
   ${schedHtml ? `<section><h2>Rozvrh</h2>${schedHtml}</section>` : ''}
   ${priceHtml}
   ${coaches.length ? `<section><h2>Kdo tu trénuje</h2><div class="people">${coaches.map(c =>
       `<div class="p">${c.photo_url ? `<img src="${esc(c.photo_url)}" alt="">` : '<div class="ph">🥊</div>'}<span>${esc(c.name)}</span></div>`
     ).join('')}</div></section>` : ''}
-  ${photos.length > 1 ? `<section><h2>Fotky</h2><div class="gal">${photos.slice(1, 10).map(p => `<img src="${esc(p)}" alt="" loading="lazy">`).join('')}</div></section>` : ''}
+  ${(function(){ const rest = photos.slice(1, 10).map(photoUrl).filter(Boolean); return rest.length ? `<section><h2>Fotky</h2><div class="gal">${rest.map(u => `<img src="${esc(u)}" alt="" loading="lazy">`).join('')}</div></section>` : ''; })()}
   <p class="foot">Rezervace, členství a docházku vede <a href="${esc(origin)}">Martial Training Lab</a>.</p>
 </div>
 <div class="cta"><a href="${esc(linkOwn)}">Rezervovat trénink →</a></div>
