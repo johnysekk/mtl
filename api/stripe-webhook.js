@@ -357,6 +357,24 @@ async function applySubRate(stripe, acct, subId, sub, ladderPct) {
   return true;
 }
 
+// Zástupce zaplatil za mladistvého -> mladistvý se to musí dozvědět. Na QR koleji mu to
+// říká klient hned po potvrzení platby; na Stripe koleji se platí mimo appku, takže tady
+// je jediné místo, kde se to dá spolehlivě poslat.
+async function notifyPaidForMinor(m, item, amount, currency) {
+  try {
+    const forWhom = m && m.student_id, payer = m && m.paid_by;
+    if (!forWhom || !payer || forWhom === payer) return;
+    const who = (m.paid_by_name || '').trim();
+    const price = (Number(amount) || 0) + ' ' + String(currency || 'CZK').toUpperCase();
+    await sbPost('notifications', {
+      user_id: forWhom, type: 'system', read: false,
+      data: JSON.stringify({ kind: 'paid_for_you', item: item || '', amount: amount, currency: currency }),
+      message: '\u2705 ' + (who ? (who + ' za tebe zaplatil') : 'Z\u00E1stupce za tebe zaplatil')
+             + ': ' + (item || 'tr\u00E9nink') + ' \u00B7 ' + price + '. Rezervace plat\u00ED.',
+    });
+  } catch (e) { console.error('notifyPaidForMinor', e.message); }
+}
+
 async function recordTransaction(acct, pi, fields) {
   if (!pi) return;
   try {
@@ -422,8 +440,9 @@ async function recordTransaction(acct, pi, fields) {
       payment_intent: pi, charge_id: chargeId, payee_account: acct || null, type: fields.type,
       payee_id: _payee.id, payee_kind: _payee.kind,
       member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null,
-      discipline: fields.discipline || null,
-      acq_source: fields.acq_source || null,
+      // Plátce zvlášť od účastníka -- stejná dvojice, jakou zapisuje record-cash.js.
+      // Bez toho doklad neví, na koho má znít Odběratel a koho uvést jako Účastníka.
+      paid_by: fields.paid_by || null, paid_by_name: fields.paid_by_name || null,
       gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, mtl_rate: ((gross>0 && (mtlFee)>0) ? Math.round((((mtlFee)/gross))*10000)/10000 : 0), mtl_fee_refunded: 0, net_amount: net, currency,
       ...(fields.acq_months != null ? { acq_months: fields.acq_months } : {}),
       ...(fields.base_rate != null ? { base_rate: fields.base_rate } : {}),
@@ -555,7 +574,10 @@ export default async function handler(req, res) {
                 slot_id: slot.id, student_id: m.student_id || null, coach_id: slot.coach_profile_id,
                 coach_name: m.coach_name || 'Kouč', payment_intent: pi, amount,
                 training_date: slot.date, training_time: slot.time,
-                status: 'active', type: 'inperson', currency, discipline: m.discipline || null, acq_source: m.mtl_acq_src || null,
+                status: 'active', type: 'inperson', currency, discipline: m.discipline || null,
+                student_name: m.student_name || null,
+                paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null,
+                minor_booking: !!(m.paid_by && m.student_id && m.paid_by !== m.student_id),
               });
               // ODSTRANENO: druha notifikace kouci o te same rezervaci. Klient ji posila taky, na
               // navratu ze Stripe (kind coach_new_inperson) -- a posila ji bohatsi: format lekce,
@@ -563,19 +585,24 @@ export default async function handler(req, res) {
               // a nemela ani `data`, takze se nedala prokliknout. Dve notifikace o jedne veci jsou
               // horsi nez jedna; nechavame tu popisnejsi.
               await payAmbassador(slot.coach_profile_id, amount, currency, m.discipline, pi);
-              await recordTransaction(event.account, pi, { type: 'coach_inperson',  member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', discipline: (m.disc || m.discipline || slot.discipline || null), acq_source: (m.mtl_acq_src || null), gross: amount, currency });
+              await recordTransaction(event.account, pi, { type: 'coach_inperson',  member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', gross: amount, currency, paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
+            await notifyPaidForMinor(m, 'Lekce 1:1', amount, currency);
             }
           } else if (m.booking_type === 'online' && m.coach_profile_id) {
             await sbPost('bookings', {
               slot_id: null, student_id: m.student_id || null, coach_id: m.coach_profile_id,
               coach_name: m.coach_name || 'Kouč', payment_intent: pi, amount,
               training_date: new Date().toISOString().slice(0, 10), training_time: null,
-              status: 'active', type: 'online', currency, online_format: m.online_fmt || null, discipline: m.discipline || null, acq_source: m.mtl_acq_src || null,
+              status: 'active', type: 'online', currency, online_format: m.online_fmt || null, discipline: m.discipline || null,
+              student_name: m.student_name || null,
+              paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null,
+              minor_booking: !!(m.paid_by && m.student_id && m.paid_by !== m.student_id),
             });
             // ODSTRANENO ze stejneho duvodu: klient posila kind coach_new_online s formatem
             // objednavky, castkou a referral bonusem.
             await payAmbassador(m.coach_profile_id, amount, currency, m.discipline, pi);
-            await recordTransaction(event.account, pi, { type: 'coach_online',  member_id: m.student_id, coach_id: m.coach_profile_id, plan: m.online_fmt || 'Online', discipline: (m.disc || m.discipline || null), acq_source: (m.mtl_acq_src || null), gross: amount, currency });
+            await recordTransaction(event.account, pi, { type: 'coach_online',  member_id: m.student_id, coach_id: m.coach_profile_id, plan: m.online_fmt || 'Online', gross: amount, currency, paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
+            await notifyPaidForMinor(m, m.online_fmt || 'Online lekce', amount, currency);
           }
         }
       } else if (m.mtl_payment_type === 'drop_in' || m.mtl_payment_type === 'membership') {

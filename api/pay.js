@@ -67,6 +67,10 @@ async function _assertAcctReady(acct, res) {
 
 export default async function handler(req, res) {
   const type = String(req.query.type || 'coach');
+  // Kdo platí, když se to liší od toho, komu služba patří (zástupce za mladistvého).
+  // Klient je posílá stejně jako u QR koleje; bez nich webhook zástupce nepozná.
+  const payerId = String(req.query.payerId || '');
+  const payerName = String(req.query.payerName || '').slice(0, 120);
   try {
     if (type === 'coach')      return await coachCheckout(req, res);
     if (type === 'gym')        return await gymCheckout(req, res);
@@ -152,6 +156,9 @@ async function coachCheckout(req, res) {
       mtl_ref_pct: _credRow ? String(Math.round((MK - STUDENT_MARKUP) * 100)) : '0',
       mtl_list_amount: String(Math.round(rate * 100)),
       student_id: studentId || '',
+      paid_by: payerId || '',
+      paid_by_name: payerName || '',
+      student_name: String(req.query.studentName || '').slice(0, 120),
       slot_id: slotId || '',
       coach_profile_id: coachProfileId || '',
       base_amount: String(rate),
@@ -523,7 +530,6 @@ async function membershipCheckout(req, res) {
           ...(_acqMonthsM ? { mtl_acq_months: String(_acqMonthsM) } : {}),
           ...(_baseRateM != null ? { mtl_base_rate: String(_baseRateM) } : {}),
           mtl_acq_base: String(FEE_PCT),
-        mtl_acq_src: String(acq || ''),
           mtl_income: income || 'side',
           mtl_payment_type: 'membership',
           gym_id: gymId || '',
