@@ -67,10 +67,6 @@ async function _assertAcctReady(acct, res) {
 
 export default async function handler(req, res) {
   const type = String(req.query.type || 'coach');
-  // Kdo platí, když se to liší od toho, komu služba patří (zástupce za mladistvého).
-  // Klient je posílá stejně jako u QR koleje; bez nich webhook zástupce nepozná.
-  const payerId = String(req.query.payerId || '');
-  const payerName = String(req.query.payerName || '').slice(0, 120);
   try {
     if (type === 'coach')      return await coachCheckout(req, res);
     if (type === 'gym')        return await gymCheckout(req, res);
@@ -86,6 +82,10 @@ export default async function handler(req, res) {
 
 // ───────────────────────── COACH (lekce / online) ─────────────────────────
 async function coachCheckout(req, res) {
+  // Kdo platí, když se to liší od toho, komu služba patří (zástupce za mladistvého).
+  // Čte se TADY, ne v handleru: handler je jiná funkce a její proměnné sem nedosáhnou.
+  const payerId = String(req.query.payerId || '');
+  const payerName = String(req.query.payerName || '').slice(0, 120);
   const {
     coachId, coachName, amount, currency = 'CZK', slotId, online,
     coachProfileId, fmt, commission, nomarkup, credit, studentId, disc, markup, refDisc, acq,
