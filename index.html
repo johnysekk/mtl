@@ -12041,10 +12041,11 @@ async function doRelease(){
     }catch(e){}
     toast(reason?(LANG==='en'?'✅ Spot released — coach notified':'✅ Místo uvolněno — kouč ví'):(LANG==='en'?'✅ Spot released':'✅ Místo uvolněno'));
     // anti-spam marker: důvod pro tuhle lekci jde uvést jen jednou
-    if(reason){ try{ await supaClient.from('gym_excuses').insert({ gym_id:g.id, student_id:currentUser.id, class_name:occ.name||null, class_date:occ.date||null, class_time:occ.time||null,
+    { try{ await supaClient.from('gym_excuses').insert({ gym_id:g.id, student_id:currentUser.id, class_name:occ.name||null, class_date:occ.date||null, class_time:occ.time||null,
         // Důvod a poznámka se ukládají, aby je trenér viděl v docházce. Dřív žily jen
         // v notifikaci, takže po jejím přečtení se ztratily.
-        reason_key:(_excuseSel||null), note:(reason||null), student_name:(currentUser.name||null) }); }catch(e){} }
+        reason_key:(_excuseSel||null), note:(reason||null), student_name:(currentUser.name||null) });
+    }catch(e){} }
     openGymProfile(g);
   }catch(e){ console.error('doRelease',e); toast('⚠️ '+e.message); }
 }
@@ -12258,6 +12259,9 @@ async function _recordExcuse(gymId, occ, cx){
     if(_ex && _ex.length) return false;   // uz omluven -> volajici nema posilat notifikaci podruhe
     await supaClient.from('gym_excuses').insert({ gym_id:gymId, student_id:currentUser.id, student_name:(currentUser.name||null),
       class_name:_cn, class_date:_cd, class_time:_ct, reason_key:((cx&&cx.key)||null), note:((cx&&cx.text)||null) });
+    // Zadna notifikace s dokladem: potvrzeni se vystavuje jen u ZRUSENI jednorazove lekce,
+    // kde se vraci penize. Omluva clena z permanentky ani z lekce kurzu nic neobjednava
+    // ani nevraci -- staci, ze je videt v appce a v dochazce.
     return true;
   }catch(e){ console.error('_recordExcuse',e); return false; }
 }
@@ -12839,6 +12843,80 @@ async function showRescheduleConfirmation(id){
   ov.querySelector('#_rcPrint').onclick=function(){ try{ _rif.contentWindow.focus(); _rif.contentWindow.print(); }catch(e){} };
 }
 
+// POTVRZENI O ZRUSENI LEKCE. Jen u jednorazove (zaplacene) lekce -- tam se rusi objednavka
+// a vraci penize, takze obe strany potrebuji doklad o tom, co se zrusilo, kdy a kolik se vratilo.
+// U clenstvi ani u kurzu se nic neobjednava ani nevraci; tam staci stav v appce.
+// Zadna nova tabulka: kdo/co/kdy se bere z radku v gym_excuses, vracena castka z notifikace,
+// ktera potvrzeni doprovazi.
+// d = { gym_id, class_name, class_date, class_time, refund, currency }
+async function showCancelConfirmation(d){
+  d=d||{};
+  return _showCancelConf(d.gym_id, d.class_name, d.class_date, d.class_time, d);
+}
+async function _showCancelConf(gymId, className, classDate, classTime, d){
+  const EN=LANG==='en';
+  let c=null;
+  try{
+    let _q=supaClient.from('gym_excuses').select('*').eq('gym_id',gymId).eq('class_name',className||null).eq('class_date',classDate||null);
+    if(currentUser && currentUser.id) _q=_q.eq('student_id',currentUser.id);
+    if(classTime) _q=_q.eq('class_time',classTime);
+    const { data }=await _q.limit(1);
+    c=(data&&data[0])||null;
+  }catch(e){}
+  if(!c){ toast('\u26a0\ufe0f '+(EN?'Confirmation not found':'Potvrzen\u00ed se nena\u0161lo')); return; }
+  let prov='';
+  try{ const { data:_g }=await supaClient.from('gyms').select('legal_name,name').eq('id',gymId).maybeSingle(); prov=(_g&&(_g.legal_name||_g.name))||''; }catch(e){}
+  const esc=(typeof escapeHtml==='function')?escapeHtml:(x=>String(x==null?'':x));
+  // Cas ZAPISU omluvy, ne jen datum -- v pripadnem sporu rozhoduje, jak dlouho pred lekci prisla.
+  let issued='', issuedFull='';
+  try{
+    const _d=new Date(c.created_at);
+    issued=_d.toLocaleDateString(EN?'en-GB':'cs-CZ');
+    issuedFull=_d.toLocaleString(EN?'en-GB':'cs-CZ',{ day:'numeric', month:'numeric', year:'numeric', hour:'2-digit', minute:'2-digit' });
+  }catch(e){ issued=String(c.created_at||'').slice(0,10); issuedFull=issued; }
+  const _rr=(typeof EXCUSE_REASONS!=='undefined')?EXCUSE_REASONS.find(function(x){ return x.k===c.reason_key; }):null;
+  const _lbl=_rr?(EN?_rr.en:_rr.cs):(EN?'no reason given':'bez uveden\u00ed d\u016fvodu');
+  const _note=(typeof _excNote==='function')?_excNote(_lbl,(c.note||'')):(c.note||'');
+  const _sess=[classDate?_cohD(classDate):'', classTime||''].filter(Boolean).join(' \u00b7 ');
+  const row=(l,v)=>'<div class="row"><span>'+l+'</span><strong>'+esc(v)+'</strong></div>';
+  // Vracena castka: 0 je legitimni vysledek (zruseni min nez 6 h pred lekci), takze se rozlisuje
+  // "nevracelo se nic" od "nevime". Pise se jen tam, kde ta informace opravdu je.
+  const _hasRef=(d && d.refund!=null && d.refund!=='');
+  const _refStr=_hasRef ? (fmtPrice(Number(d.refund)||0, d.currency||'CZK')+' '+((typeof symOf==='function')?symOf(d.currency||'CZK'):'')) : '';
+  const _html=('<html><head><meta charset="utf-8"><title>'+(EN?'Confirmation of cancellation':'Potvrzen\u00ed o zru\u0161en\u00ed lekce')+'</title>'
+    +'<style>body{font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;max-width:640px;margin:24px auto;padding:0 18px;line-height:1.5;}'
+    +'h1{font-size:19px;margin:0 0 2px;}.row{display:flex;justify-content:space-between;gap:16px;padding:7px 0;border-bottom:1px solid #eee;font-size:13px;}'
+    +'.row span{color:#666;}.note{font-size:11px;color:#999;margin-top:16px;line-height:1.6;}@media print{button{display:none;}}</style></head><body>'
+    +'<h1>'+(EN?'Confirmation of cancellation':'Potvrzen\u00ed o zru\u0161en\u00ed lekce')+'</h1>'
+    +(window._TEST_MODE?'<div style="margin:10px 0;padding:9px 12px;background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font-size:12px;font-weight:700;">\u{1F9EA} '+(EN?'TEST MODE':'TESTOVAC\u00cd RE\u017dIM')+'</div>':'')
+    +'<div style="font-size:13px;color:#666;margin-bottom:14px;">'+(EN?'Issued: ':'Vystaveno: ')+esc(issued)+'</div>'
+    +'<div style="margin-top:18px;">'
+    +row(EN?'Provider':'Poskytovatel', prov||'\u2014')
+    +row(EN?'Customer':'Odb\u011bratel', c.student_name||(currentUser&&currentUser.name)||'\u2014')
+    +row(EN?'Session':'Lekce', className||'\u2014')
+    +row(EN?'Date':'Term\u00edn', _sess||'\u2014')
+    +row(EN?'Reason':'D\u016fvod', _lbl+(_note?(' \u2014 '+_note):''))
+    +row(EN?'Cancelled at':'Zru\u0161eno dne', issuedFull)
+    +(_hasRef?row(EN?'Refunded':'Vr\u00e1cen\u00e1 \u010d\u00e1stka', _refStr):'')
+    +'</div>'
+    +'<p class="note">'+(EN
+      ? 'This document records the cancellation of the session above, when it was made and what was refunded. The original receipt is unchanged and remains valid as the record of the payment.'
+      : 'Tento dokument dokl\u00e1d\u00e1 zru\u0161en\u00ed uveden\u00e9 lekce, kdy k n\u011bmu do\u0161lo a kolik bylo vr\u00e1ceno. P\u016fvodn\u00ed doklad se nem\u011bn\u00ed a z\u016fst\u00e1v\u00e1 v platnosti jako doklad o zaplacen\u00ed.')+'</p>'
+    +'</body></html>');
+  var ov=document.getElementById('excConfOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='excConfOv';
+  ov.style.cssText='position:fixed;inset:0;z-index:100050;background:#fff;display:flex;flex-direction:column;';
+  ov.innerHTML='<div style="display:flex;align-items:center;gap:10px;padding:calc(env(safe-area-inset-top,0px) + 10px) 14px 10px;border-bottom:1px solid #eee;background:#fafafa;">'
+    +'<button id="_ecBack" style="padding:9px 15px;background:#1a1a1a;color:#fff;border:none;border-radius:9px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\',sans-serif;">\u2039 '+(EN?'Back':'Zp\u011bt')+'</button>'
+    +'<button id="_ecPrint" style="margin-left:auto;padding:9px 15px;background:none;border:1px solid #1a1a1a;color:#1a1a1a;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\',sans-serif;">'+(EN?'Print / PDF':'Tisk / PDF')+'</button></div>'
+    +'<iframe id="_ecFrame" style="flex:1;border:none;width:100%;"></iframe>';
+  document.body.appendChild(ov);
+  var _eif=ov.querySelector('#_ecFrame');
+  try{ _eif.srcdoc=_html; }catch(e){ try{ _eif.contentWindow.document.open(); _eif.contentWindow.document.write(_html); _eif.contentWindow.document.close(); }catch(_e){} }
+  ov.querySelector('#_ecBack').onclick=function(){ ov.remove(); };
+  ov.querySelector('#_ecPrint').onclick=function(){ try{ _eif.contentWindow.focus(); _eif.contentWindow.print(); }catch(e){} };
+}
+
 async function _issueRescheduleConfirmation(o){
   // Příznak platí jen pro tenhle přesun -- bez vynulování by druhý přesun zprávu neposlal.
   window._reschedConfSent=false;
@@ -13029,6 +13107,21 @@ async function gymOwnerRefund(btn){
     } else { toast('⚠️ '+((j&&j.error)||'')); btn.disabled=false; btn.textContent=_t; }
   }catch(e){ console.error('gymOwnerRefund', e); toast('⚠️ '+e.message); btn.disabled=false; btn.textContent=_t; }
 }
+// Vystavi studentovi potvrzeni o zruseni: notifikace s odkazem na doklad. Vracena castka jde
+// s ni, protoze ji zna jen tahle chvile -- gym_excuses ji nenese a doplnovat kvuli tomu sloupec
+// by bylo drazsi nez ji poslat.
+async function _issueCancelConf(b, occ, refund){
+  try{
+    if(!currentUser || !currentUser.id || !b || !b.gym_id) return;
+    const _d=occ&&occ.date?new Date(occ.date):null;
+    const _ds=_d?(_d.getDate()+'.'+(_d.getMonth()+1)+'.'):'';
+    await supaClient.from('notifications').insert({ user_id:currentUser.id, type:'system', read:false,
+      data: JSON.stringify({ kind:'cancel_conf', gym_id:b.gym_id, class_name:(occ&&occ.name)||null,
+        class_date:(occ&&occ.date)||null, class_time:(occ&&occ.time)||null,
+        refund:(refund!=null?refund:null), currency:(b.currency||'CZK') }),
+      message:'\u{1F9FE} '+(LANG==='en'?'Class cancelled: ':'Lekce zru\u0161ena: ')+((occ&&occ.name)||'')+' ('+_ds+' '+((occ&&occ.time)||'')+')' });
+  }catch(e){ console.error('_issueCancelConf', e&&e.message); }
+}
 async function cancelGymDropin(b, _after){
   if(!b) return;
   const _done=()=>{ if(typeof _after==='function') _after(); else loadMyMemberships(); };
@@ -13046,6 +13139,9 @@ async function cancelGymDropin(b, _after){
       confirmLabel:(LANG==='en'?'Send the excuse':'Omluvit se') });
     if(!_cxLate) return;
     let _fresh=false; try{ _fresh=await _recordExcuse(b.gym_id, _occ, _cxLate); }catch(e){}
+    // Pod 6 h se nevraci nic -- a prave to je potreba mit cerne na bilem, takze refund:0,
+    // ne vynechane pole.
+    if(_fresh) try{ await _issueCancelConf(b, _occ, 0); }catch(e){}
     if(_fresh) try{ await _notifyCancelReason(b.gym_id, null, (await (async function(){ try{ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',b.gym_id).single(); return _g&&_g.owner_id; }catch(e){ return null; } })()), _occ, _cxLate); }catch(e){}
     toast(LANG==='en'?'✅ Coach notified — no refund this late.':'✅ Kouč ví — takhle těsně před lekcí se již nevrací.');
     _done(); return;
@@ -13060,6 +13156,7 @@ async function cancelGymDropin(b, _after){
   try{ await _recordExcuse(b.gym_id, _occ, _cx); }catch(e){}
   try{ await _notifyCancelReason(b.gym_id, null, (await (async function(){ try{ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',b.gym_id).single(); return _g&&_g.owner_id; }catch(e){ return null; } })()), _occ, _cx); }catch(e){}
   try{
+    // Nezaplacena rezervace: rusi se, ale nebylo co vracet -- doklad by nemel co dolozit.
     if(!b.payment_intent){ await supaClient.from('gym_bookings').update({ status:'cancelled' }).eq('id', b.id); toast(LANG==='en'?'✅ Cancelled.':'✅ Zrušeno.'); _done(); return; }
     const { data:g } = await supaClient.from('gyms').select('stripe_account').eq('id', b.gym_id).single();
     if(!g || !g.stripe_account){ toast(L('⚠️ Chyba')); return; }
@@ -13070,6 +13167,7 @@ async function cancelGymDropin(b, _after){
     const j = await r.json();
     if(j && (j.refunded!=null || j.id)){
       await supaClient.from('gym_bookings').update({ status:'cancelled' }).eq('id', b.id);
+      try{ await _issueCancelConf(b, _occ, ((j&&j.refunded!=null)?j.refunded:refundAmt)); }catch(e){}
       toast(LANG==='en'?'✅ Cancelled — 95% refunded.':'✅ Zrušeno — 95 % vráceno.');
       _done();
     } else { toast('⚠️ '+((j&&j.error)||'')); }
@@ -23664,7 +23762,7 @@ async function loadNotifications(append){
     const isCoachRefAdmin = false; /* referral EP grants removed — rewards are Shikai/Bankai */
     // beta_pending sem musí být přidané, jinak se notifikace vykreslí jako neklikatelná a obsluha
   // se vůbec nenapojí -- větev, která má otevřít admin, pak nemá kdo spustit.
-  const clickable = isStudResched || k==='beta_pending' || k==='minor_waiver_req' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked';
+  const clickable = isStudResched || k==='beta_pending' || k==='minor_waiver_req' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked';
     let linkLabel = L('otevřít ›');
     if(k==='payment_confirmed'){ var _pcd={}; try{ _pcd=JSON.parse(n.data||'{}'); }catch(e){} var _gg=_pcd.goto; linkLabel = (_gg==='dropin'||_gg==='bookings') ? (LANG==='en'?'booking details ›':'detail rezervace ›') : (_gg==='tickets') ? (LANG==='en'?'my ticket ›':'moje vstupenka ›') : (_gg==='courses') ? (LANG==='en'?'my course ›':'můj kurz ›') : (_gg==='merch') ? (LANG==='en'?'view ›':'zobrazit ›') : (LANG==='en'?'membership details ›':'detail členství ›'); } else if(k==='qr_intent') linkLabel = LANG==='en'?'To confirm ›':'K potvrzení ›'; else if(k==='qr_released'||k==='qr_reservation_expired') linkLabel = LANG==='en'?'Book again ›':'Rezervovat znovu ›'; else if(k==='qr_requeued') linkLabel = LANG==='en'?'Pay again ›':'Zaplatit znovu ›'; else if(k==='sounding_ask') linkLabel = LANG==='en'?'Answer ›':'Odpovědět ›'; else if(k==='cover_needed') linkLabel = LANG==='en'?'Take the cover ›':'Vzít záskok ›'; else if(k==='cover_filled'||k==='cover_filled_owner') linkLabel = LANG==='en'?'View ›':'Zobrazit ›'; else if(k==='doklad_vat_needed') linkLabel = LANG==='en'?'Add VAT ID ›':'Doplnit DIČ ›'; else if(k==='course_new') linkLabel = LANG==='en'?'Course details ›':'Detail kurzu ›'; else if(k==='slot_demand') linkLabel = LANG==='en'?'Open my diary ›':'Otevřít diář ›'; else if(k==='cohort_month_due') linkLabel = LANG==='en'?'Pay now ›':'Doplatit ›'; else if(k==='cohort_month_collect') linkLabel = LANG==='en'?'Open roster ›':'Otevřít roster ›'; else if(k==='cohort_deposit_paid') linkLabel = LANG==='en'?'View roster ›':'Otevřít účastníky ›'; else if(k==='cohort_qr_claim') linkLabel = LANG==='en'?'View roster ›':'Otevřít účastníky ›'; else if(k==='cohort_deposit_mine') linkLabel = LANG==='en'?'My course ›':'Můj kurz ›';
       else if(k==='doklad_unified') linkLabel = LANG==='en'?'Open the receipt ›':'Otevřít doklad ›';
@@ -23720,6 +23818,7 @@ async function loadNotifications(append){
     else if(k==='minor_waiver_done') linkLabel = LANG==='en'?'Open club ›':'Otevřít klub ›';
     else if(k==='pay_request') linkLabel = LANG==='en'?'Pay ›':'Zaplatit ›';
     else if(k==='resched_conf') linkLabel = LANG==='en'?'Open confirmation ›':'Otevřít potvrzení ›';
+    else if(k==='cancel_conf') linkLabel = LANG==='en'?'Open confirmation ›':'Otevřít potvrzení ›';
     else if(k==='beta_pending') linkLabel = LANG==='en'?'Open admin ›':'Otevřít admin ›';
     else if(k==='minor_waiver_req') linkLabel = LANG==='en'?'Approve ›':'Schválit ›';
     el.style.cssText=`background:${n.read?'var(--surf)':'#FFF8E6'};border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px;${clickable?'cursor:pointer;':''}`;
@@ -23732,6 +23831,11 @@ async function loadNotifications(append){
         // (beta_pending, minor_waiver_req, cohort_id), padaly na undefined.
         var _pd={}; try{ _pd=JSON.parse(n.data||'{}'); }catch(e){ _pd={}; }
         // Rodinné věci nahoru. Řetězec pod tím je dlouhý a snadno je předběhne něco jiného.
+        if(k==='cancel_conf'){
+          try{ const _ec=JSON.parse(n.data||'{}');
+            if(_ec.gym_id && typeof showCancelConfirmation==='function') showCancelConfirmation(_ec); }catch(e){}
+          return;
+        }
         if(k==='resched_conf'){
           try{ const _rc=JSON.parse(n.data||'{}');
             if(_rc.conf_id && typeof showRescheduleConfirmation==='function') showRescheduleConfirmation(_rc.conf_id); }catch(e){}
@@ -29951,7 +30055,7 @@ function subscribeRealtime(){
       occ.forEach(function(o){
         const _mo=_monthOf(o.date);
         // Zamceno = mesic kurzu, ktery jeste neni zaplaceny. U jednomesicniho kurzu se nezamyka nic.
-        const _locked=(_tot>1 && _paid>0 && _mo>_paid);
+        const _locked=(_tot>1 && _mo>Math.max(1,_paid));
         sessions.push({ date:o.date, time:o.time||'', name:c.name||'Kurz', gym:gymMap[c.gym_id]||'', disc:c.discipline||'', gym_id:c.gym_id||null, cohort_id:c.id, upcoming:(mode!=='past'), month:_mo, months_total:_tot, months_paid:_paid, locked:_locked });
       });
     });
@@ -30037,7 +30141,7 @@ function subscribeRealtime(){
     const _pays=(window._cohPays||[]).filter(function(t){ return String(t.cohort_id||'')===String(c.id); })
       .sort(function(x,y){ return String(x.created_at||'').localeCompare(String(y.created_at||'')); });
     const _paysHtml=_pays.length
-      ? `<div style="margin-top:11px;border-top:1px solid var(--border);padding-top:9px;">
+      ? `<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:9px;">
           <div style="font-size:10.5px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;">${EN?'Paid':'Zaplaceno'}</div>
           ${_pays.map(function(t,ix){
             const _amt=(Number(t.gross_amount||0)/100);
@@ -30062,8 +30166,9 @@ function subscribeRealtime(){
           <div style="font-size:12.5px;color:var(--mid);margin-top:2px;">${escapeHtml(meta)}</div>
         </div>${acts}
       </div>
+      ${_paysHtml}
       ${n?`<div style="font-size:10.5px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.04em;margin-top:11px;">${EN?'Next':'Nejbližší'}</div>`:''}
-      ${n?_cohSessRow(ss[0],true):''}${_rest}${_paysHtml}
+      ${n?_cohSessRow(ss[0],true):''}${_rest}
     </div>`;
   }
   // Platby, ktere student sam zaplatil. Cte se pres /api/my-transactions, ne z prohlizece:
