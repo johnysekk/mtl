@@ -29,7 +29,10 @@ async function sb(path, opts = {}) {
   return j;
 }
 
-const ALLOWED_TYPES = ['drop_in', 'membership', 'custom', 'event_ticket', 'coach_1to1', 'course'];
+// 'merch' CHYBELO. index.html posila hotovostni/QR prodej merche jako type:'merch' (odbaveni
+// objednavky v klubu), tenhle whitelist ho odmitl s 400 a prodej se do transakci nezapsal
+// vubec -- klub zbozi vydal, penize vzal a MTL o tom nevedelo. Nalez D z auditu ze 7. 8.
+const ALLOWED_TYPES = ['drop_in', 'membership', 'custom', 'event_ticket', 'coach_1to1', 'course', 'merch'];
 function ladderRate(profile) {
   // cash/qr/pis = BANK-TRANSFER track. Single source of truth in _rate.js: same EP/FP/ladder as
   // Stripe (Bankai is Stripe-only, so the bank track floors at Shikai).
