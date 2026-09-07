@@ -19380,15 +19380,16 @@ function _ladderRate(mode, o){
   //   Organizace  1,5 %    1,5 %
   //   EP          0,5 %    0,5 %
   // Founding Partner zrušen: základ 2 % je dnes nižší, než býval FP. Ranou výhodou je EP zdarma.
-  if(o.partner) return 0.005;                        // EP
-  if(o.org) return 0.015;                            // schválená organizace, obě koleje
+  // VYHRÁVÁ NEJLEPŠÍ SAZBA, ne první v pořadí -- jinak organizace, která si vydřela Bankai,
+  // platí 1,5 % místo 1 %. Stejná změna je v _rate.js; tyhle dva se nesmí rozejít.
   var s = o.score || 0;
-  if(mode === 'stripe'){
-    if(s >= 5 && o.bankai) return 0.01;              // Bankai
-    return (s >= 2) ? 0.015 : 0.02;                  // Shikai / base
-  }
-  if(s >= 5 && o.bankai) return 0.0125;              // Bankai na bance
-  return (s >= 2) ? 0.02 : 0.025;                    // Shikai / base
+  var stripe = (mode === 'stripe');
+  var cand = [ stripe ? 0.02 : 0.025 ];              // základ
+  if(s >= 2) cand.push(stripe ? 0.015 : 0.02);       // Shikai
+  if(s >= 5 && o.bankai) cand.push(stripe ? 0.01 : 0.0125);  // Bankai
+  if(o.org) cand.push(0.015);                        // schválená organizace, obě koleje
+  if(o.partner) cand.push(0.005);                    // EP
+  return Math.min.apply(null, cand);
 }
 
 window._checkModePromotion=async function(){
@@ -22606,6 +22607,35 @@ function renderGymPhotoSlots(){
     box.appendChild(wrap);
   };
   const sc=$('gymShowcase'); if(sc){ sc.innerHTML=''; GYM_SHOWCASE.forEach(sp=>mkSlot(sc,sp,'showcase')); }
+  // Tyhle inputy se vyrabely, ale NIKDY se jim nenavesila obsluha -- v celem souboru nebyl
+  // druhy vyskyt tridy gpInp. Vybrany soubor se tedy nikam nenahral, gymShowcaseUrls zustalo
+  // prazdne a krok 2 prihlasky klubu se neslo projit: appka hlasila "Nahraj nejdriv fotky klubu"
+  // nad formularem, kde nazvy souboru videt byly (ty vykresluje prohlizec sam).
+  // Nahravani je stejne jako u ostatnich fotek klubu: orez, bucket gym-photos, verejna URL.
+  document.querySelectorAll('.gpInp').forEach(function(inp){
+    inp.onchange=async function(e){
+      const file=e.target.files&&e.target.files[0]; if(!file) return;
+      const _g=e.target.dataset.group, _k=e.target.dataset.k;
+      let blob=null;
+      try{ blob=await cropImage(file, 5/3); }catch(err){}
+      if(!blob){ toast(L('⚠️ Fotku se nepodařilo zpracovat')); e.target.value=''; return; }
+      toast(L('⬆️ Nahrávám...'));
+      try{
+        const fileName=`${(currentUser&&currentUser.id)||'anon'}-${_g}-${_k}-${Date.now()}.jpg`;
+        const { error }=await supaClient.storage.from('gym-photos').upload(fileName, blob, { contentType:'image/jpeg', upsert:false });
+        if(error){ toast('⚠️ '+error.message); e.target.value=''; return; }
+        const { data }=supaClient.storage.from('gym-photos').getPublicUrl(fileName);
+        const _url=data&&data.publicUrl; if(!_url){ toast(L('⚠️ Nepovedlo se získat adresu fotky')); return; }
+        if(_g==='showcase') gymShowcaseUrls[_k]=_url;
+        else if(_g==='facility') gymFacilityUrls[_k]=_url;
+        else if(_g==='amenity') gymAmenityUrls[_k]=_url;
+        const _prev=$('gp_'+_g+'_'+_k);
+        if(_prev){ _prev.style.backgroundImage="url('"+_url+"')"; _prev.style.display='block'; }
+        try{ saveGymDraft(); }catch(err){}
+        toast(LANG==='en'?'✅ Photo added':'✅ Fotka přidána');
+      }catch(err){ toast('⚠️ '+(err.message||'error')); }
+    };
+  });
   renderGymAmenities();
 }
 // Checklist vybavení. Bez fotek -- jen co klub nabízí; student to vidí na profilu jako ikonky.
@@ -27052,7 +27082,7 @@ async function renderCoachAnalytics(coachId, containerId){
 
     </div>
     <div style="font-size:11.5px;font-weight:800;color:var(--mid);text-transform:uppercase;letter-spacing:.03em;margin-bottom:9px;">🤝 ${LANG==='en'?'Active coaches':'Aktivní kouči'}: ${(prof?.coach_ref_score)||0}</div>
-    ${(function(){ var EN=LANG==='en'; var _m=_self?((currentUser&&currentUser.payment_mode)||(currentUser&&currentUser.stripe_account?'stripe':'qr_bank')):((typeof _mtlPayMode==='function'?_mtlPayMode(prof):null)||(prof&&prof.stripe_account?'stripe':'qr_bank')); var _sc=(prof&&prof.coach_ref_score)||0, _bk=!!(prof&&prof.bankai_eligible); var _shOk=_sc>=2, _bnOk=_sc>=5&&_bk; var _shRate=_m==='stripe'?'2,5 %':'3 %', _shKeep=_m==='stripe'?'97,5 %':'97 %'; var card=function(icon,name,rate,keep,ok,pct,req){ return '<div style="background:var(--surf);border:1px solid '+(ok?'#A8E6C0':'var(--border)')+';border-radius:12px;padding:12px 14px;margin-bottom:10px;">'+'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="font-size:14px;font-weight:800;color:var(--dark);">'+icon+' '+name+(ok?' <span style=\'color:#0A7A4F;font-size:12px;\'>✓ '+(EN?'unlocked':'odemčeno')+'</span>':'')+'</div><div style="font-size:13px;font-weight:800;color:var(--dark);white-space:nowrap;">'+rate+'</div></div>'+'<div style="height:7px;background:var(--bg);border-radius:99px;overflow:hidden;margin:9px 0 5px;"><div style="height:100%;width:'+Math.min(100,Math.max(5,pct))+'%;background:'+(ok?'#0A7A4F':'var(--red)')+';border-radius:99px;transition:width .35s;"></div></div>'+'<div style="font-size:11px;color:var(--mid);line-height:1.45;">'+req+'</div></div>'; }; var h=card('🗡️','Shikai',_shRate,_shKeep,_shOk,_sc/2*100, _shOk?(EN?'Unlocked — a better rate on all your prices.':'Odemčeno — výhodnější sazba na všechny tvé ceny.'):(EN?('2 activated referrals ('+_sc+'/2) — activated = they reached 10 privates or 25 memberships themselves.'):('2 aktivovaní přivedení ('+_sc+'/2) — aktivovaný = sám už má 10 soukromek nebo 25 členství.'))); if(_m==='stripe'){ h+=card('🔥','Bankai','2 %','98 %',_bnOk,_sc/5*100, _bnOk?(EN?'Unlocked — the lowest rate.':'Odemčeno — nejnižší sazba.'):(EN?('5 activated referrals ('+_sc+'/5) + 10 privates or 25 memberships of your own.'):('5 aktivovaných přivedených ('+_sc+'/5) + 10 soukromek nebo 25 členství u tebe.'))); } else { h+='<div style="font-size:11px;color:var(--light);line-height:1.45;margin:2px 0 8px;">'+(EN?'🔥 Bankai (the lowest 2 % rate) unlocks on Stripe mode.':'🔥 Bankai (nejnižší sazba 2 %) se odemyká v režimu Stripe.')+'</div>'; } return h; })()}
+    ${(function(){ var EN=LANG==='en'; var _m=_self?((currentUser&&currentUser.payment_mode)||(currentUser&&currentUser.stripe_account?'stripe':'qr_bank')):((typeof _mtlPayMode==='function'?_mtlPayMode(prof):null)||(prof&&prof.stripe_account?'stripe':'qr_bank')); var _sc=(prof&&prof.coach_ref_score)||0, _bk=!!(prof&&prof.bankai_eligible); var _shOk=_sc>=2, _bnOk=_sc>=5&&_bk; var _shRate=_m==='stripe'?'1,5 %':'2 %', _shKeep=_m==='stripe'?'98,5 %':'98 %'; var card=function(icon,name,rate,keep,ok,pct,req){ return '<div style="background:var(--surf);border:1px solid '+(ok?'#A8E6C0':'var(--border)')+';border-radius:12px;padding:12px 14px;margin-bottom:10px;">'+'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="font-size:14px;font-weight:800;color:var(--dark);">'+icon+' '+name+(ok?' <span style=\'color:#0A7A4F;font-size:12px;\'>✓ '+(EN?'unlocked':'odemčeno')+'</span>':'')+'</div><div style="font-size:13px;font-weight:800;color:var(--dark);white-space:nowrap;">'+rate+'</div></div>'+'<div style="height:7px;background:var(--bg);border-radius:99px;overflow:hidden;margin:9px 0 5px;"><div style="height:100%;width:'+Math.min(100,Math.max(5,pct))+'%;background:'+(ok?'#0A7A4F':'var(--red)')+';border-radius:99px;transition:width .35s;"></div></div>'+'<div style="font-size:11px;color:var(--mid);line-height:1.45;">'+req+'</div></div>'; }; var h=card('🗡️','Shikai',_shRate,_shKeep,_shOk,_sc/2*100, _shOk?(EN?'Unlocked — a better rate on all your prices.':'Odemčeno — výhodnější sazba na všechny tvé ceny.'):(EN?('2 activated referrals ('+_sc+'/2) — activated = they reached 10 privates or 25 memberships themselves.'):('2 aktivovaní přivedení ('+_sc+'/2) — aktivovaný = sám už má 10 soukromek nebo 25 členství.'))); if(_m==='stripe'){ h+=card('🔥','Bankai',_m==='stripe'?'1 %':'1,25 %',_m==='stripe'?'99 %':'98,75 %',_bnOk,_sc/5*100, _bnOk?(EN?'Unlocked — the lowest rate.':'Odemčeno — nejnižší sazba.'):(EN?('5 activated referrals ('+_sc+'/5) + 10 privates or 25 memberships of your own.'):('5 aktivovaných přivedených ('+_sc+'/5) + 10 soukromek nebo 25 členství u tebe.'))); } else { h+='<div style="font-size:11px;color:var(--light);line-height:1.45;margin:2px 0 8px;">'+(EN?'🔥 Bankai (the lowest 2 % rate) unlocks on Stripe mode.':'🔥 Bankai (nejnižší sazba 1 %) se odemyká v režimu Stripe.')+'</div>'; } return h; })()}
     </div>
     ` : ''}
     <div class="sec-lbl">${LANG==='en'?'Bookings':'Rezervace'}</div>
