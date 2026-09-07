@@ -33318,16 +33318,38 @@ async function checkAuth(){
     try{ if(currentUser && currentUser.password_set===false) setTimeout(function(){ if(typeof openSetPassword==='function') openSetPassword(); }, 800); }catch(e){}
   }
 }
+// Kterou fakturační identitu karta zrovna edituje. '' = režim kouč (1:1),
+// 'payout_' = režim klub (skupinovky, členství). Drží se mimo funkci, aby přežila
+// překreslení po uložení.
+var _billMode = window._billMode || '';
 async function renderCoachBilling(){
   const box=$('acmBillingSec'); if(!box) return;
+  const CP = _billMode;                       // prefix sloupců v profiles
   const me=currentUser||{};
   if(me.coach_status!=='approved'){ box.style.display='none'; box.innerHTML=''; return; }
   box.style.display=''; const EN=LANG==='en';
   let pr={};
-  try{ const { data }=await supaClient.from('profiles').select('legal_name,tax_id,vat_id,billing_address,billing_country,billing_phone,vat_payer,vat_rate,invoice_email').eq('id',me.id).maybeSingle(); pr=data||{}; }catch(e){}
+  try{ const _cols=['legal_name','tax_id','vat_id','billing_address','billing_country','billing_phone','vat_payer','vat_rate','invoice_email'].map(function(c){ return CP+c; }).join(',');
+    const { data }=await supaClient.from('profiles').select(_cols).eq('id',me.id).maybeSingle();
+    // Dál se pracuje s bezprefixovými názvy, ať zbytek karty zůstane beze změny.
+    pr={}; if(data) Object.keys(data).forEach(function(k){ pr[CP?k.slice(CP.length):k]=data[k]; }); }catch(e){}
   const ev=(x)=>String(x==null?'':x).replace(/"/g,'&quot;');
   { const _lb=$('csLblBilling'); if(_lb) _lb.textContent='🧾 '+(EN?'Billing details':'Fakturační údaje'); }
-  box.innerHTML=`
+  // Přepínač se ukáže jen autonomnímu trenérovi -- ostatní mají jedinou identitu.
+  const _autoBill = !!(me.gym_payout_account || me.payout_receiver_id_value || window._cpAutonomy || (window._myTeamAutonomy===true));
+  const _bsw = !_autoBill ? '' : (
+    '<div style="display:flex;gap:6px;margin:0 0 12px;">'
+    + [['', EN?'Coach mode \u2013 1:1':'Re\u017eim kou\u010d \u2013 1:1'], ['payout_', EN?'Club mode \u2013 group classes':'Re\u017eim klub \u2013 skupinovky']]
+        .map(function(o){ var on=(_billMode===o[0]);
+          return '<button class="acmBillSw" data-m="'+o[0]+'" style="flex:1;padding:9px 8px;border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;border:1.5px solid '
+            +(on?'var(--dark)':'var(--border)')+';background:'+(on?'var(--dark)':'#fff')+';color:'+(on?'#fff':'var(--mid)')+';">'+o[1]+'</button>'; }).join('')
+    + '</div>'
+    + '<p style="font-size:11.5px;color:var(--mid);background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:8px 10px;margin:0 0 12px;line-height:1.45;">'
+    + (EN?'Two separate billing identities \u2014 each goes on the receipts for that mode and matches the account the money lands on.'
+         :'Dv\u011b samostatn\u00e9 fakturac\u00ed identity \u2014 ka\u017ed\u00e1 jde na doklady sv\u00e9ho re\u017eimu a odpov\u00edd\u00e1 \u00fa\u010dtu, na kter\u00fd p\u0159ijdou pen\u00edze.')
+    + '</p>');
+
+  box.innerHTML=_bsw+`
     <p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:0 0 10px;">${EN?'Shown on the receipts your students get for 1:1 / online lessons. As a VAT payer, receipts break the price into net + VAT.':'Zobrazí se na dokladech, které studenti dostanou za 1:1 / online lekce. Jako plátce DPH se cena na dokladu rozepíše na základ daně + DPH.'}</p>
     ${_countrySel('acmCountry', pr.billing_country)}
     <input id="acmLegalName" value="${ev(pr.legal_name)}" placeholder="${EN?'Legal name (you / your business)':'Jméno / název (ty / tvá firma)'}" style="width:100%;padding:13px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:'DM Sans';box-sizing:border-box;margin-bottom:8px;">
@@ -33349,6 +33371,8 @@ async function renderCoachBilling(){
     <p style="font-size:11px;color:var(--light);line-height:1.45;margin:0 0 12px;">${EN?'MTL sends your monthly commission invoice here.':'MTL sem pos\u00edl\u00e1 tvou m\u011bs\u00ed\u010dn\u00ed fakturu za provizi.'}</p>
     <button id="acmSaveBilling" style="width:100%;padding:13px;background:var(--red);color:#fff;border:none;border-radius:11px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'Save billing details':'Uložit fakturační údaje'}</button>
   `;
+  box.querySelectorAll('.acmBillSw').forEach(function(b){ b.onclick=function(){
+    _billMode=b.getAttribute('data-m')||''; window._billMode=_billMode; renderCoachBilling(); }; });
   $('acmVatPayer').onchange=function(){ const r=$('acmVatRateRow'); if(r) r.style.display=this.checked?'':'none'; };
   // ARES / VIES on EDIT. The verifier existed but was wired only into the two onboardings, so a
   // provider could pass onboarding with a real ICO and then change it here to anything at all --
@@ -33393,8 +33417,10 @@ async function renderCoachBilling(){
     }
   }catch(e){}
   const btn=$('acmSaveBilling'); const _o=btn.textContent; btn.disabled=true; btn.textContent=L('Ukládám...');
-    const upd={ billing_phone:_phoneFieldVal('acmBillingPhone'), billing_country:(($('acmCountry')&&$('acmCountry').value)||null), legal_name:($('acmLegalName').value.trim()||null), billing_address:($('acmBillingAddr').value.trim()||null), tax_id:($('acmTaxId').value.trim()||null), vat_id:($('acmVatId').value.trim()||null), invoice_email:(($('acmInvoiceEmail')&&$('acmInvoiceEmail').value.trim())||null), vat_payer:!!$('acmVatPayer').checked };
-    { const r=parseFloat($('acmVatRate').value); if(upd.vat_payer && isFinite(r) && r>=0) upd.vat_rate=r; }
+    const _u0={ billing_phone:_phoneFieldVal('acmBillingPhone'), billing_country:(($('acmCountry')&&$('acmCountry').value)||null), legal_name:($('acmLegalName').value.trim()||null), billing_address:($('acmBillingAddr').value.trim()||null), tax_id:($('acmTaxId').value.trim()||null), vat_id:($('acmVatId').value.trim()||null), invoice_email:(($('acmInvoiceEmail')&&$('acmInvoiceEmail').value.trim())||null), vat_payer:!!$('acmVatPayer').checked };
+    { const r=parseFloat($('acmVatRate').value); if(_u0.vat_payer && isFinite(r) && r>=0) _u0.vat_rate=r; }
+    // Přejmenování na sloupce zvolené identity: '' = režim kouč, 'payout_' = režim klub.
+    const upd={}; Object.keys(_u0).forEach(function(k){ upd[_billMode+k]=_u0[k]; });
     try{ const { error }=await supaClient.from('profiles').update(upd).eq('id',currentUser.id); if(error) throw error; Object.assign(currentUser,upd); toast(EN?'✓ Saved':'✓ Uloženo'); }catch(e){ toast('⚠️ '+(e.message||'')); }
     btn.disabled=false; btn.textContent=_o; };
 }
@@ -36033,10 +36059,6 @@ function renderPayModeSheet(){
               receiver_declared_at:currentUser.payout_receiver_declared_at, commission_card_status:currentUser.commission_card_status };
     _ihd+=_bankRow('payMdIbanPayout',(EN?'Club mode \u2013 group classes, memberships':'Re\u017eim klub \u2013 skupinovky, \u010dlenstv\u00ed aj.'),_pv,'');
   }
-  if(_isC && _autoPayBank) _ihd+='<div style="font-size:11.5px;color:var(--mid);background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:8px 10px;margin:-4px 0 10px;line-height:1.45;">'
-    +(EN?'One account covers both \u2014 unlike Stripe, a bank transfer needs no separate account for club classes.'
-        :'Jeden \u00fa\u010det sta\u010d\u00ed na oboj\u00ed \u2014 na rozd\u00edl od Stripe nepot\u0159ebuje bankovn\u00ed p\u0159evod pro klubov\u00e9 lekce zvl\u00e1\u0161tn\u00ed \u00fa\u010det.')
-    +'</div>';
   (window._myGyms||[]).forEach(function(gg){ _ihd+=_bankRow('payMdIbanGym',escapeHtml(gg.name||'Klub'),gg,'data-gid="'+gg.id+'"'); });
   _iw.innerHTML=_ihd; body.appendChild(_iw);
   var _dc=_iw.querySelector('.payMdIbanCoach'); if(_dc) _dc.onclick=function(){ if(typeof openCommissionCard==='function') openCommissionCard('coach',{accountOnly:true, asSheet:true, viewMode:'qr_bank'}); };
