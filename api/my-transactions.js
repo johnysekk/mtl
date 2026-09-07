@@ -5,6 +5,12 @@
 //   coachTx = transactions where coach_id = the caller (their 1:1 lessons + any gym classes they taught;
 //             coach_id is stamped on both paid_to='coach' and paid_to='gym' rows)
 //   gymTx   = transactions for every gym the caller OWNS
+//   memberTx = transactions where member_id = the caller, i.e. what THEY paid for. This is what
+//             lets a student open their own doklad. It has to come from here and not from the
+//             browser client, because `transactions` is RLS-subject: the moment RLS is switched on
+//             a direct client read returns zero rows SILENTLY, and every student doklad would
+//             quietly disappear. The service role behind a verified token is the only read that
+//             survives that.
 // Security: caller must send their Supabase access token; we verify it server-side.
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
@@ -49,7 +55,13 @@ export default async function handler(req, res) {
       gymTx = tres.ok ? await tres.json() : [];
     }
 
-    return res.status(200).json({ ok: true, coachTx, gymTx });
+    // 4) what the caller themselves paid for -- one row per payment, which is what a doklad is
+    //    issued from. A course pays in several instalments (deposit, first month, month N) and each
+    //    is its own row, so each gets its own fixed document instead of one that changes.
+    const mres = await fetch(`${SB}/rest/v1/transactions?member_id=eq.${encodeURIComponent(uid)}${sinceQ}&order=created_at.desc`, { headers: svc });
+    const memberTx = mres.ok ? await mres.json() : [];
+
+    return res.status(200).json({ ok: true, coachTx, gymTx, memberTx });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
