@@ -29929,8 +29929,23 @@ function subscribeRealtime(){
     const sessions=[];
     cohs.forEach(function(c){
       let occ=[]; try{ occ=(mode==='past')?_cohPastOcc(c):(cohortOccurrences(c,{horizonDays:60})||[]); }catch(e){}
-      occ.forEach(function(o){ sessions.push({ date:o.date, time:o.time||'', name:c.name||'Kurz', gym:gymMap[c.gym_id]||'', disc:c.discipline||'' }); });
+      // gym_id a cohort_id musi jit s sebou: omluvenka se zapisuje pod KLUB (dochazka ji tak
+      // hleda) a bez nej ji trener nikdy neuvidi.
+      occ.forEach(function(o){ sessions.push({ date:o.date, time:o.time||'', name:c.name||'Kurz', gym:gymMap[c.gym_id]||'', disc:c.discipline||'', gym_id:c.gym_id||null, cohort_id:c.id, upcoming:(mode!=='past') }); });
     });
+    // Uz omluvene lekce se necheme ptat podruhe -- jednim dotazem na vsechny me omluvy dopredu.
+    if(mode!=='past' && currentUser.id && sessions.length){
+      try{
+        const _gids=[...new Set(sessions.map(function(x){ return x.gym_id; }).filter(Boolean))];
+        if(_gids.length){
+          const _today=new Date().toISOString().slice(0,10);
+          const { data:_mex } = await supaClient.from('gym_excuses').select('gym_id,class_name,class_date,class_time')
+            .eq('student_id',currentUser.id).in('gym_id',_gids).gte('class_date',_today);
+          const _set=new Set((_mex||[]).map(function(e){ return String(e.gym_id)+'|'+String(e.class_name||'')+'|'+String(e.class_date||'')+'|'+String(e.class_time||''); }));
+          sessions.forEach(function(x){ if(_set.has(String(x.gym_id)+'|'+String(x.name||'')+'|'+String(x.date||'')+'|'+String(x.time||''))) x.excused=true; });
+        }
+      }catch(e){}
+    }
     sessions.sort(function(a,b){ return (a.date+(a.time||'')).localeCompare(b.date+(b.time||'')); });
     if(mode==='past'){ sessions.reverse(); return sessions.slice(0,40); }
     return sessions;
@@ -29940,10 +29955,18 @@ function subscribeRealtime(){
     const dn=(typeof dowShort==='function')?dowShort():['Ne','Po','Út','St','Čt','Pá','So'];
     const discTag=(s.disc && typeof isMultiDiscipline==='function' && isMultiDiscipline())?` · ${disciplineEmoji(s.disc)} ${disciplineLabel(s.disc)}`:'';
     const _dow=dn[new Date(`${s.date}T00:00:00`).getDay()]||'';
+    // Omluva z JEDNE lekce kurzu. Nic se nevraci a zadne misto se neuvolnuje -- kapacita je na
+    // cely kurz, ne na lekci -- takze jediny smysl je, aby kouc vedel, ze student nedorazi.
+    // Odejit z celeho kurzu se dal da tlacitkem "Opustit" u nazvu kurzu.
+    const _exBtn = (s.upcoming && s.gym_id && currentUser)
+      ? (s.excused
+        ? `<div style="display:inline-block;font-size:11px;font-weight:800;color:var(--mid);background:var(--surf);border:1px solid var(--border);border-radius:8px;padding:3px 9px;margin-top:8px;margin-left:6px;">📋 ${EN?'Excused':'Omluven/a'}</div>`
+        : `<button class="cohExcBtn" data-gym="${escapeHtml(String(s.gym_id))}" data-name="${escapeHtml(String(s.name||''))}" data-date="${escapeHtml(String(s.date||''))}" data-time="${escapeHtml(String(s.time||''))}" style="font-size:11px;font-weight:800;color:#9A5B00;background:#FFF4E5;border:1px solid #F0D9B5;border-radius:8px;padding:4px 10px;margin-top:8px;margin-left:6px;cursor:pointer;font-family:inherit;">${EN?'Let the coach know':'Omluvit se'}</button>`)
+      : '';
     return `<div data-ym="${String(s.date||'').slice(0,7)}" data-hrow="1" style="background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px;">
-      <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.03em;color:var(--dark);">${escapeHtml(s.name)}</div>
+      <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.03em;color:var(--dark);${s.excused?'text-decoration:line-through;opacity:.6;':''}">${escapeHtml(s.name)}</div>
       <div style="font-size:14px;color:var(--mid);margin:3px 0 0;">🎓 ${s.gym?escapeHtml(s.gym)+' · ':''}${_dow} ${_cohD(s.date)}${s.time?(' · '+s.time):''}${discTag}</div>
-      <div style="display:inline-block;font-size:11px;font-weight:800;color:#5B3FB0;background:#EDE7FF;border-radius:8px;padding:2px 9px;margin-top:8px;">${EN?'Course':'Kurz'}</div>
+      <div style="display:inline-block;font-size:11px;font-weight:800;color:#5B3FB0;background:#EDE7FF;border-radius:8px;padding:2px 9px;margin-top:8px;">${EN?'Course':'Kurz'}</div>${_exBtn}
     </div>`;
   }
   async function _cohMyList(){
@@ -29959,6 +29982,27 @@ function subscribeRealtime(){
   }
   // The student cancels their OWN participation. Deposits are non-refundable, so leaving forfeits what
   // was paid; we say so plainly. Sets their row to 'cancelled', which frees the spot for others.
+  // Omluva z jedne lekce kurzu. Stejny dialog i stejny zapis jako u lekci klubu, takze se to
+  // studentovi ovlada uplne stejne a dochazka to umi zobrazit bez dalsi prace.
+  async function _cohExcuse(gymId, name, date, time){
+    const EN=LANG==='en';
+    if(!gymId || !currentUser){ toast(L('⚠️ Chyba')); return; }
+    const _occ={ name:name, date:date, time:time };
+    const _cx=await _askCancelReason({
+      title:(EN?'Excuse yourself from this session?':'Omluvit se z této lekce?'),
+      note:(EN?'Nothing is refunded and your place in the course stays — the coach just knows you will not be there.':'Nic se nevrací a místo v kurzu ti zůstává — kouč jen bude vědět, že nepřijdeš.'),
+      confirmLabel:(EN?'Send the excuse':'Omluvit se') });
+    if(!_cx) return;
+    let _fresh=false; try{ _fresh=await _recordExcuse(gymId, _occ, _cx); }catch(e){}
+    if(_fresh){
+      try{
+        let _own=null; try{ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',gymId).single(); _own=_g&&_g.owner_id; }catch(e){}
+        await _notifyCancelReason(gymId, null, _own, _occ, _cx);
+      }catch(e){}
+    }
+    toast(EN?'✅ Coach notified':'✅ Kouč ví');
+    try{ _loadCohortTrainings(); }catch(e){}
+  }
   async function _cohLeave(cohortId, memberId, paid){
     const EN=LANG==='en';
     const msg=paid
@@ -29983,6 +30027,7 @@ function subscribeRealtime(){
     const empty='<p style="text-align:center;color:var(--light);padding:30px 40px;font-size:14px;">'+(EN?'No upcoming course sessions.':'\u017d\u00e1dn\u00e9 nadch\u00e1zej\u00edc\u00ed tr\u00e9ninky v kurzu.')+'</p>';
     box.innerHTML=head+(up.length?up.map(_cohSessionCard).join(''):empty);
     box.querySelectorAll('.cohLeaveBtn').forEach(function(b){ b.onclick=function(){ _cohLeave(b.dataset.coh, b.dataset.mem, b.dataset.paid==='1'); }; });
+    box.querySelectorAll('.cohExcBtn').forEach(function(b){ b.onclick=function(){ _cohExcuse(b.dataset.gym, b.dataset.name, b.dataset.date, b.dataset.time); }; });
     box.querySelectorAll('.cohDokBtn').forEach(function(b){ b.onclick=function(){ const c=(window._cohRcpt||[]).find(x=>String(x.id)===String(b.dataset.coh)); if(!c) return; showReceipt({ test_mode:c.test_mode, gym_id:c.gym_id, amount:c.amount, currency:c.currency, created_at:'', item_label:(c.name||'Kurz'), type:'course' }); }; });
   }
   // Append the student's past COURSE sessions to a History list (below the private-lesson history).
