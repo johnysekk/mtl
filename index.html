@@ -29921,12 +29921,14 @@ function subscribeRealtime(){
     let mems=[];
     try{
       const _or=[]; if(currentUser.id)_or.push('student_id.eq.'+currentUser.id); if(currentUser.email)_or.push('email.eq.'+currentUser.email);
-      if(_or.length){ const { data }=await supaClient.from('cohort_members').select('cohort_id,status').in('status',['deposit_paid','enrolled','completed','converted']).or(_or.join(',')); mems=data||[]; }
+      if(_or.length){ const { data }=await supaClient.from('cohort_members').select('cohort_id,status,months_paid').in('status',['deposit_paid','enrolled','completed','converted']).or(_or.join(',')); mems=data||[]; }
     }catch(e){}
     const cohIds=[...new Set((mems||[]).map(m=>m.cohort_id).filter(Boolean))];
     if(!cohIds.length) return [];
     let cohs=[];
-    try{ const { data }=await supaClient.from('gym_cohorts').select('id,name,gym_id,discipline,schedule,start_date,end_date').in('id',cohIds); cohs=data||[]; }catch(e){}
+    try{ const { data }=await supaClient.from('gym_cohorts').select('id,name,gym_id,discipline,schedule,start_date,end_date,months').in('id',cohIds); cohs=data||[]; }catch(e){}
+    // Kolik mesicu ma student u ktereho kurzu zaplaceno. Podle toho se zamykaji lekce dal.
+    const paidBy={}; (mems||[]).forEach(function(m){ if(m.cohort_id) paidBy[m.cohort_id]=Math.max(Number(paidBy[m.cohort_id]||0), Number(m.months_paid||0)); });
     const gymIds=[...new Set(cohs.map(c=>c.gym_id).filter(Boolean))]; let gymMap={};
     try{ if(gymIds.length){ const { data }=await supaClient.from('gyms').select('id,name').in('id',gymIds); (data||[]).forEach(g=>{ gymMap[g.id]=g.name; }); } }catch(e){}
     const sessions=[];
@@ -29934,7 +29936,24 @@ function subscribeRealtime(){
       let occ=[]; try{ occ=(mode==='past')?_cohPastOcc(c):(cohortOccurrences(c,{horizonDays:60})||[]); }catch(e){}
       // gym_id a cohort_id musi jit s sebou: omluvenka se zapisuje pod KLUB (dochazka ji tak
       // hleda) a bez nej ji trener nikdy neuvidi.
-      occ.forEach(function(o){ sessions.push({ date:o.date, time:o.time||'', name:c.name||'Kurz', gym:gymMap[c.gym_id]||'', disc:c.discipline||'', gym_id:c.gym_id||null, cohort_id:c.id, upcoming:(mode!=='past') }); });
+      // Do ktereho mesice kurzu lekce patri. Stejne 30denni okno, jake pouziva cohort-month-cron
+      // pri vybirani plateb -- kdyby se to tu pocitalo jinak, appka by studentovi zamykala jine
+      // lekce, nez za ktere po nem klub chce penize.
+      const _tot=Math.max(1, Number(c.months||1));
+      const _paid=Math.max(0, Number(paidBy[c.id]||0));
+      const _start=c.start_date?new Date(c.start_date+'T00:00:00'):null;
+      const _monthOf=function(d){
+        if(!_start) return 1;
+        const _dd=new Date(d+'T00:00:00');
+        const _n=Math.floor((_dd-_start)/86400000/30)+1;
+        return Math.min(_tot, Math.max(1,_n));
+      };
+      occ.forEach(function(o){
+        const _mo=_monthOf(o.date);
+        // Zamceno = mesic kurzu, ktery jeste neni zaplaceny. U jednomesicniho kurzu se nezamyka nic.
+        const _locked=(_tot>1 && _paid>0 && _mo>_paid);
+        sessions.push({ date:o.date, time:o.time||'', name:c.name||'Kurz', gym:gymMap[c.gym_id]||'', disc:c.discipline||'', gym_id:c.gym_id||null, cohort_id:c.id, upcoming:(mode!=='past'), month:_mo, months_total:_tot, months_paid:_paid, locked:_locked });
+      });
     });
     // Uz omluvene lekce se necheme ptat podruhe -- jednim dotazem na vsechny me omluvy dopredu.
     if(mode!=='past' && currentUser.id && sessions.length){
@@ -29978,6 +29997,14 @@ function subscribeRealtime(){
     const EN=LANG==='en';
     const dn=(typeof dowShort==='function')?dowShort():['Ne','Po','Út','St','Čt','Pá','So'];
     const _dow=dn[new Date(`${s.date}T00:00:00`).getDay()]||'';
+    // Zamcena lekce: student ji vidi, ale je za nezaplacenym mesicem. Neomlouva se z ni --
+    // omlouvat se z lekce, na kterou zatim nema narok, nedava smysl.
+    if(s.locked){
+      return `<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--border);opacity:.55;">
+        <div style="font-size:13.5px;font-weight:600;color:var(--light);min-width:0;">🔒 ${_dow} ${_cohD(s.date)}${s.time?(' · '+s.time):''}</div>
+        <div style="margin-left:auto;flex:none;font-size:10.5px;font-weight:800;color:var(--mid);white-space:nowrap;">${EN?((s.month||2)+'. month — unpaid'):((s.month||2)+'. měsíc — nezaplaceno')}</div>
+      </div>`;
+    }
     const btn=(s.gym_id && currentUser)
       ? (s.excused
         ? `<span style="font-size:10.5px;font-weight:800;color:var(--mid);background:var(--surf);border:1px solid var(--border);border-radius:8px;padding:3px 8px;white-space:nowrap;">📋 ${EN?'Excused':'Omluven/a'}</span>`
@@ -29996,9 +30023,35 @@ function subscribeRealtime(){
     const gymName=(ss[0]&&ss[0].gym)||'';
     const _pl=EN?(n===1?'session':'sessions'):(n===1?'lekce':(n<5?'lekce':'lekcí'));
     const _last=n?ss[n-1]:null;
-    const meta=[gymName, (n?(n+' '+_pl):(EN?'nothing upcoming':'nic nadcházejícího')), (_last?((EN?'until ':'do ')+_cohD(_last.date)):'')].filter(Boolean).join(' · ');
+    // U vicemesicniho kurzu je stav plateb to hlavni, co student resi -- proto do hlavicky.
+    const _tot=(ss[0]&&Number(ss[0].months_total))||1;
+    const _paidM=(ss[0]&&Number(ss[0].months_paid))||0;
+    const _mstr=(_tot>1 && _paidM>0) ? ((EN?'paid ':'zaplaceno ')+_paidM+'/'+_tot+(EN?' months':' měsíců')) : '';
+    const meta=[gymName, (n?(n+' '+_pl):(EN?'nothing upcoming':'nic nadcházejícího')), (_last?((EN?'until ':'do ')+_cohD(_last.date)):''), _mstr].filter(Boolean).join(' · ');
+    const _lockedN=ss.filter(function(x){ return x.locked; }).length;
     const acts=c.memberId
-      ? `<div style="display:flex;gap:6px;flex-shrink:0;">${c.paid?`<button class="cohDokBtn" data-coh="${escapeHtml(String(c.id))}" style="background:none;border:1px solid var(--border);border-radius:8px;color:var(--mid);font-size:10.5px;font-weight:700;cursor:pointer;padding:5px 9px;font-family:inherit;">Doklad</button>`:''}<button class="cohLeaveBtn" data-coh="${escapeHtml(String(c.id))}" data-mem="${escapeHtml(String(c.memberId||''))}" data-paid="${c.paid?'1':''}" style="background:none;border:1px solid var(--border);border-radius:8px;color:var(--mid);font-size:10.5px;font-weight:700;cursor:pointer;padding:5px 10px;font-family:inherit;">${EN?'Leave':'Opustit'}</button></div>`
+      ? `<div style="display:flex;gap:6px;flex-shrink:0;"><button class="cohLeaveBtn" data-coh="${escapeHtml(String(c.id))}" data-mem="${escapeHtml(String(c.memberId||''))}" data-paid="${c.paid?'1':''}" style="background:none;border:1px solid var(--border);border-radius:8px;color:var(--mid);font-size:10.5px;font-weight:700;cursor:pointer;padding:5px 10px;font-family:inherit;">${EN?'Leave':'Opustit'}</button></div>`
+      : '';
+    // Doklad na KAZDOU zaplacenou cast zvlast. Driv tu bylo jedno tlacitko, ktere vystavilo doklad
+    // na soucet zaplaceneho -- takze se s kazdou dalsi platbou zpetne zmenil doklad na tu prvni.
+    // Kazdy radek tady je jedna transakce: vlastni castka, vlastni datum, uz se nezmeni.
+    const _pays=(window._cohPays||[]).filter(function(t){ return String(t.cohort_id||'')===String(c.id); })
+      .sort(function(x,y){ return String(x.created_at||'').localeCompare(String(y.created_at||'')); });
+    const _paysHtml=_pays.length
+      ? `<div style="margin-top:11px;border-top:1px solid var(--border);padding-top:9px;">
+          <div style="font-size:10.5px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;">${EN?'Paid':'Zaplaceno'}</div>
+          ${_pays.map(function(t,ix){
+            const _amt=(Number(t.gross_amount||0)/100);
+            const _d=String(t.created_at||'').slice(0,10);
+            return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;">
+              <div style="font-size:12.5px;color:var(--dark);min-width:0;">${escapeHtml(_cohPayLabel(t, c.name))}<span style="color:var(--mid);"> · ${_d?escapeHtml(_cohD(_d)):''}</span></div>
+              <div style="margin-left:auto;flex:none;display:flex;align-items:center;gap:7px;">
+                <span style="font-size:12.5px;font-weight:700;color:var(--dark);white-space:nowrap;">${fmtPrice(_amt, t.currency||'CZK')} ${typeof symOf==='function'?symOf(t.currency||'CZK'):''}</span>
+                <button class="cohTxDokBtn" data-coh="${escapeHtml(String(c.id))}" data-ix="${ix}" style="background:none;border:1px solid var(--border);border-radius:8px;color:var(--mid);font-size:10.5px;font-weight:700;cursor:pointer;padding:4px 9px;font-family:inherit;white-space:nowrap;">Doklad</button>
+              </div>
+            </div>`;
+          }).join('')}
+        </div>`
       : '';
     const _rest=n>1
       ? `<details style="margin-top:2px;"><summary style="cursor:pointer;list-style:none;font-size:12px;font-weight:800;color:var(--blue);padding:9px 0 3px;">${EN?('Other dates ('+(n-1)+')'):('Další termíny ('+(n-1)+')')} ›</summary>${ss.slice(1).map(function(x){ return _cohSessRow(x,false); }).join('')}</details>`
@@ -30012,7 +30065,34 @@ function subscribeRealtime(){
       </div>
       ${n?`<div style="font-size:10.5px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.04em;margin-top:11px;">${EN?'Next':'Nejbližší'}</div>`:''}
       ${n?_cohSessRow(ss[0],true):''}${_rest}
+      ${_lockedN?`<div style="margin-top:9px;background:#FFF4E5;border:1px solid #F0D9B5;border-radius:10px;padding:9px 11px;font-size:12px;color:#7A4A00;line-height:1.45;">🔒 ${EN?(_lockedN+' session(s) are behind an unpaid month. Settle it with the club and they unlock.'):(_lockedN+' '+(_lockedN===1?'lekce je':(_lockedN<5?'lekce jsou':'lekcí je'))+' za nezaplaceným měsícem. Domluv se s klubem na doplatku a odemknou se.')}</div>`:''}${_paysHtml}
     </div>`;
+  }
+  // Platby, ktere student sam zaplatil. Cte se pres /api/my-transactions, ne z prohlizece:
+  // `transactions` je pod RLS a primy klientsky dotaz po jejim zapnuti vrati TICHE nula radku,
+  // takze by studentovi doklady zmizely a nikdo by si toho nevsiml.
+  // Jeden radek = jedna platba = jeden PEVNY doklad. Zaloha, 1. mesic i kazdy dalsi mesic maji
+  // vlastni castku a vlastni datum, takze se nemeni jeden doklad, ale pribyva dalsi.
+  async function _cohMyPayments(){
+    if(!currentUser) return [];
+    try{
+      const _tok=await _freshTok();
+      const r=await fetch('/api/my-transactions', { headers:{'x-access-token':_tok} });
+      const j=await r.json().catch(function(){ return {}; });
+      if(!j || !j.ok) return [];
+      return (j.memberTx||[]).filter(function(t){ return t.type==='course'; });
+    }catch(e){ return []; }
+  }
+  // Nazev polozky na dokladu podle toho, ZA CO ta platba byla. Bere se z income_class, kterou
+  // zapisuje jak hotovostni, tak Stripe cesta.
+  function _cohPayLabel(t, cohName){
+    const EN=LANG==='en';
+    const ic=String(t.income_class||'');
+    const part = ic==='cohort_deposit' ? (EN?'deposit':'záloha')
+      : ic==='cohort_first_month' ? (EN?'1st month':'1. měsíc')
+      : ic==='cohort_month' ? (EN?'month':'další měsíc')
+      : (EN?'payment':'platba');
+    return (cohName||'Kurz')+' — '+part;
   }
   async function _cohMyList(){
     if(!currentUser) return [];
@@ -30068,6 +30148,7 @@ function subscribeRealtime(){
     const list=await _cohMyList();
     const up=await _cohMySessions('upcoming');
     window._cohRcpt=list;
+    window._cohPays=await _cohMyPayments();
     const empty='<p style="text-align:center;color:var(--light);padding:30px 40px;font-size:14px;">'+(EN?'No upcoming course sessions.':'\u017d\u00e1dn\u00e9 nadch\u00e1zej\u00edc\u00ed tr\u00e9ninky v kurzu.')+'</p>';
     // Seskupeni podle kurzu. Kurz, ktery uz nema zadny nadchazejici termin, se ukaze taky --
     // jinak by z nej zmizel i Doklad a Opustit.
@@ -30080,7 +30161,19 @@ function subscribeRealtime(){
     box.innerHTML=_html||empty;
     box.querySelectorAll('.cohLeaveBtn').forEach(function(b){ b.onclick=function(){ _cohLeave(b.dataset.coh, b.dataset.mem, b.dataset.paid==='1'); }; });
     box.querySelectorAll('.cohExcBtn').forEach(function(b){ b.onclick=function(){ _cohExcuse(b.dataset.gym, b.dataset.name, b.dataset.date, b.dataset.time); }; });
-    box.querySelectorAll('.cohDokBtn').forEach(function(b){ b.onclick=function(){ const c=(window._cohRcpt||[]).find(x=>String(x.id)===String(b.dataset.coh)); if(!c) return; showReceipt({ test_mode:c.test_mode, gym_id:c.gym_id, amount:c.amount, currency:c.currency, created_at:'', item_label:(c.name||'Kurz'), type:'course' }); }; });
+    // Doklad se vystavuje z KONKRETNI transakce -- vlastni castka, vlastni datum, vlastni
+    // payment_intent. Presne jako doklad k listku, clenstvi nebo soukromce; kurz byl jediny,
+    // kdo si drzel vlastni cestu se souctem.
+    box.querySelectorAll('.cohTxDokBtn').forEach(function(b){ b.onclick=function(){
+      const c=(window._cohRcpt||[]).find(x=>String(x.id)===String(b.dataset.coh));
+      const _rows=(window._cohPays||[]).filter(function(t){ return String(t.cohort_id||'')===String(b.dataset.coh); })
+        .sort(function(x,y){ return String(x.created_at||'').localeCompare(String(y.created_at||'')); });
+      const t=_rows[parseInt(b.dataset.ix,10)]; if(!t) return;
+      showReceipt({ test_mode:t.test_mode, gym_id:t.gym_id||null, coach_id:t.coach_id||null, paid_to:t.paid_to||null,
+        amount:(Number(t.gross_amount||0)/100), currency:t.currency||'CZK', created_at:t.created_at,
+        payment_intent:t.payment_intent||null, type:'course',
+        item_label:_cohPayLabel(t, (c&&c.name)||(t.plan||'Kurz')) });
+    }; });
   }
   // Append the student's past COURSE sessions to a History list (below the private-lesson history).
   async function _appendCohortHistory(listEl){
