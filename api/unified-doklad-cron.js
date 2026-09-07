@@ -324,7 +324,10 @@ export default async function handler(req, res) {
       const cur = (t.currency || 'czk').toLowerCase();
       // attribution: a coach payout (own account / 1:1) goes to the coach; otherwise the gym.
       const isCoach = (t.paid_to === 'coach') || (t.coach_id && !t.gym_id);
-      if (isCoach && t.coach_id) add(bucket(coachB, t.coach_id, cur), t);
+      // Klubové plnění kouče (skupinovka, členství) nese gym_id a jde na jeho účet režimu
+      // klub -- fakturuje se tedy jeho druhé identitě. Klíč kbelíku to nese v příponě.
+      const _clubMode = !!(isCoach && t.coach_id && t.gym_id);
+      if (isCoach && t.coach_id) add(bucket(coachB, t.coach_id + (_clubMode ? '|payout' : ''), cur), t);
       else if (t.gym_id) add(bucket(gymB, t.gym_id, cur), t);
       else if (t.coach_id) add(bucket(coachB, t.coach_id, cur), t);
     }
@@ -335,6 +338,11 @@ export default async function handler(req, res) {
     if (gymIds.length) { const gs = await sb(`gyms?id=in.(${gymIds.join(',')})&select=id,name,owner_id`); (gs || []).forEach(g => { gymMap[g.id] = g; }); }
 
     async function issue(kind, entityId, ownerId, cur, data) {
+      // Přípona |payout na klíči znamená klubové plnění kouče -> druhá fakturační identita.
+      const _payout = /\|payout$/.test(String(entityId));
+      if (_payout) entityId = String(entityId).replace(/\|payout$/, '');
+      if (_payout) ownerId = entityId;
+      const _bp = _payout ? 'payout_' : '';
       const col = kind === 'gym' ? 'gym_id' : 'coach_id';
       // Zaváděcí období: provize se neúčtovala, takže "doklad o stržené provizi" by lhal.
       // Místo něj přehled odebrané služby -- viz introSummaryHtml.
@@ -362,9 +370,24 @@ export default async function handler(req, res) {
       try {
         const _sel = (kind === 'gym')
           ? `gyms?id=eq.${entityId}&select=name,legal_name,billing_address,tax_id,vat_id,billing_country,country&limit=1`
-          : `profiles?id=eq.${entityId}&select=name,legal_name,billing_address,tax_id,vat_id,country,billing_country&limit=1`;
+          : `profiles?id=eq.${entityId}&select=name,${_bp}legal_name,${_bp}billing_address,${_bp}tax_id,${_bp}vat_id,country,${_bp}billing_country&limit=1`;
         const _b = await sb(_sel);
         buyer = _b && _b[0];
+        // Zbytek funkce pracuje s bezprefixovými názvy, ať se nemusí měnit každé použití.
+        if (buyer && _bp) {
+          buyer = { name: buyer.name,
+            legal_name: buyer[_bp + 'legal_name'], billing_address: buyer[_bp + 'billing_address'],
+            tax_id: buyer[_bp + 'tax_id'], vat_id: buyer[_bp + 'vat_id'],
+            billing_country: buyer[_bp + 'billing_country'], country: buyer.country };
+        }
+        // Bez druhé identity se doklad NEVYSTAVÍ. Vystavit ho na osobní údaje kouče by
+        // znamenalo fakturovat provizi jiné entitě, než která plnění poskytla -- stejný
+        // důvod, proč se bez účtu režimu klub nenabídne ani platba. Provize zůstane
+        // pending a doúčtuje se, jakmile kouč druhou identitu vyplní.
+        if (_payout && !(buyer && buyer.legal_name)) {
+          console.log('[doklad] kouc', entityId, 'nema fakturacni identitu rezimu klub, doklad odlozen');
+          return;
+        }
       } catch (e) {}
       if (!DAILY && ME && ME.require_vat_foreign) {
         const home = ctryCode({ country: ME.home_country }) || 'CZ';
