@@ -30,13 +30,15 @@ async function sb(path, opts = {}) {
 }
 
 // --- fee logic: mirrors record-cash.js exactly ---
-function ladderRate(profile) {
-  // reconcile-cash backfills cash/qr/pis = the BANK-TRANSFER track, and MUST agree with
-  // record-cash.js exactly: base 3.5%, Shikai 3% at ref_score>=2, NO Bankai. EP = 1%.
-  // It used to grant a 2.5% "Bankai" that does not exist on the bank track, so the SAME
-  // sale was charged 3% if recorded normally and 2.5% if it happened to be backfilled.
-  if (!profile) return 0.025;  // base na bankovní koleji (bylo 0.035, pak 0.03)
-  return _mtlLadder('qr_bank', { partner: profile.partner, founding: profile.founding, score: profile.coach_ref_score, bankai: profile.bankai_eligible });
+// MUSI SOUHLASIT S record-cash.js NA SAZBU PRESNE -- jinak stoji tatáž prodejní transakce jinak
+// podle toho, jestli ji zapsal klient, nebo ji dopsal tenhle cron. Presne to uz se tu jednou stalo.
+// Kolej urcuje REZIM POSKYTOVATELE (payment_mode), ne zpusob platby: hotovost se veze na tom,
+// co klub uz ma, takze klub v rezimu Stripe plati 2 % i za hotovost.
+function _railOf(mode) { return (String(mode || '') === 'qr_bank') ? 'qr_bank' : 'stripe'; }
+function ladderRate(profile, mode) {
+  const _rail = _railOf(mode);
+  if (!profile) return (_rail === 'qr_bank') ? 0.025 : 0.02;
+  return _mtlLadder(_rail, { partner: profile.partner, founding: profile.founding, score: profile.coach_ref_score, bankai: profile.bankai_eligible });
 }
 
 // ODSTRANENO: welcomeKillSwitch(), welcomeCapReached() a isWelcomeZeroReadOnly(). Uvitaci okno
@@ -93,9 +95,9 @@ export default async function handler(req, res) {
         const type = 'drop_in';
         let row;
         if (b.paid_to === 'coach' && b.coach_id) {
-          const cs = await sb(`profiles?id=eq.${b.coach_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,created_at,gym_payout_account,stripe_account,referral_optin`);
+          const cs = await sb(`profiles?id=eq.${b.coach_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,created_at,gym_payout_account,stripe_account,referral_optin,payment_mode`);
           const coach = cs && cs[0]; if (!coach) { out.skipped++; continue; }
-          const rate = ladderRate(coach);
+          const rate = ladderRate(coach, coach.payment_mode);
           const _cc = (b.credit_used === 'student' && b.student_id && coach.referral_optin !== false) ? await findStudentCredit(b.student_id) : null;
           if (_cc) _creditRow = { memberId: b.student_id, id: _cc.id, sc: _cc.sc };
           const _acq = _cc ? null : await acquisitionRate(b.acq_source, type, coach, b.student_id, 'coach_id', b.coach_id);
@@ -106,11 +108,11 @@ export default async function handler(req, res) {
           // now; status-vocabulary.sql normalises the rows written before this.
           row = { gym_id: b.gym_id || null, coach_id: b.coach_id, member_id: b.student_id || null, paid_to: 'coach', payee_id: (cs && cs[0] && cs[0].id) || b.coach_id, payee_kind: 'profile', payee_account: (coach.gym_payout_account || coach.stripe_account || null), gross_amount: gross, stripe_fee: 0, mtl_fee, refund_amount: 0, mtl_fee_refunded: 0, currency: (b.currency || 'czk'), type, status: 'paid', payment_method: 'qr', commission_status: 'pending', commission_month: month, cash_payer_name: b.student_name || null, acq_source: b.acq_source || 'direct', source_booking_id: b.id };
         } else {
-          const gyms = await sb(`gyms?id=eq.${b.gym_id}&select=id,owner_id,currency,stripe_account,account_suspended,created_at`);
+          const gyms = await sb(`gyms?id=eq.${b.gym_id}&select=id,owner_id,currency,stripe_account,account_suspended,created_at,payment_mode`);
           const gym = gyms && gyms[0]; if (!gym) { out.skipped++; continue; }
-          const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,created_at,referral_optin`);
+          const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,created_at,referral_optin,payment_mode`);
           const ownerProf = (owners && owners[0]) || { id: gym.owner_id };
-          const rate = ladderRate(ownerProf);
+          const rate = ladderRate(ownerProf, gym.payment_mode || ownerProf.payment_mode);
           const _cc = (b.credit_used === 'student' && b.student_id && ownerProf.referral_optin !== false) ? await findStudentCredit(b.student_id) : null;
           if (_cc) _creditRow = { memberId: b.student_id, id: _cc.id, sc: _cc.sc };
           const _acq = _cc ? null : await acquisitionRate(b.acq_source, type, ownerProf, b.student_id, 'gym_id', b.gym_id);

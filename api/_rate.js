@@ -55,15 +55,19 @@ export function ladderRate(mode, o) {
   // udělené zdarma, tedy partner=true bez partner_sub. Parametr `founding` se schválně nemaže
   // ze signatury ani ze selectů: sloupec v DB zůstává a ignorovat ho je bezpečnější než honit
   // jeho odstranění napříč šesti soubory kvůli něčemu, co se nepoužívá.
-  if (o.partner) return 0.005;                                   // EP
-  if (o.org) return 0.015;                                       // schválená organizace, obě koleje
+  // VYHRÁVÁ NEJLEPŠÍ SAZBA, ne první, která sedí. Dřív se stupně zkoušely po řadě a první
+  // shoda vracela -- takže schválená organizace, která si vydřela Bankai, platila 1,5 %
+  // místo 1 %, zatímco běžný klub se stejným výkonem platil 1 %. Organizace tím byla za to,
+  // že je organizace, TRESTÁNA. Stupně se nevylučují, jsou to důvody ke slevě, a když jich
+  // někdo splní víc, má dostat tu nejlepší. Čísla se nemění, mění se jen výběr mezi nimi.
   const s = o.score || 0;
-  if (mode === 'stripe') {
-    if (s >= 5 && o.bankai) return 0.01;                         // Bankai
-    return (s >= 2) ? 0.015 : 0.02;                              // Shikai / base
-  }
-  if (s >= 5 && o.bankai) return 0.0125;                         // Bankai na bance
-  return (s >= 2) ? 0.02 : 0.025;                                // Shikai / base
+  const stripe = (mode === 'stripe');
+  const cand = [ stripe ? 0.02 : 0.025 ];                        // základ
+  if (s >= 2) cand.push(stripe ? 0.015 : 0.02);                  // Shikai
+  if (s >= 5 && o.bankai) cand.push(stripe ? 0.01 : 0.0125);     // Bankai
+  if (o.org) cand.push(0.015);                                   // schválená organizace, obě koleje
+  if (o.partner) cand.push(0.005);                               // EP
+  return Math.min.apply(null, cand);
 }
 
 
