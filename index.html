@@ -19451,6 +19451,13 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom){
     if(occ&&occ.coach){ try{ let { data:_cpr }=await supaClient.from('profiles').select('id,name,payment_mode,receiver_id_type,receiver_id_value,receiver_name,payout_receiver_id_type,payout_receiver_id_value,payout_receiver_name,payout_receiver_declared_at,referral_optin,pis_test').eq('id', occ.coach).single();
       // Skupinovka je klubové plnění -> účet režimu klub, ne ten od soukromek.
       if(_cpr) _cpr=Object.assign({}, _cpr, _recvOf(_cpr, true));
+      // Trenér inkasuje na sebe, ale účet režimu klub nevyplnil. Bez fallbacku se platba
+      // nenabídne, takže je potřeba říct proč -- jinak je to mrtvé tlačítko.
+      if(_cpr && (typeof _isQrProv==='function' && _isQrProv(_cpr)) && !_cpr.receiver_id_value){
+        toast(LANG==='en'
+          ? '\u26a0\ufe0f This class cannot be paid yet \u2014 the coach has no club-mode account set up.'
+          : '\u26a0\ufe0f Tuhle lekci zat\u00edm nejde zaplatit \u2014 tren\u00e9r nem\u00e1 nastaven\u00fd \u00fa\u010det pro re\u017eim klub.', 6000);
+      }
       if(_cpr && (typeof _isQrProv==='function' && _isQrProv(_cpr)) && _cpr.receiver_id_value){ // id a pis_test MUSÍ projít dál. Bez nich _pisAllowed nepozná, že má kouč pískoviště zapnuté,
           // a platbu z účtu zamítne -- proto u drop-inu placeného koučovi PIS nešel, i když v adminu
           // zapnutý byl. U platby klubu se tenhle objekt nestaví, tak se to tam neprojevilo.
@@ -36077,15 +36084,19 @@ function renderPayModeSheet(){
     sv.disabled=false; sv.textContent=EN?'Save mode':'Ulo\u017eit re\u017eim'; renderPayModeSheet(); try{ if(typeof renderPaymentsPage==='function') renderPaymentsPage(); }catch(e){} return;
   } } sv.disabled=true; sv.textContent=EN?'Saving...':'Ukl\u00e1d\u00e1m...'; try{ await supaClient.from('profiles').update({payment_mode:m, target_payment_mode:null}).eq('id',currentUser.id); await supaClient.from('gyms').update({payment_mode:m}).eq('owner_id',currentUser.id); currentUser.payment_mode=m; currentUser.target_payment_mode=null; toast(EN?'\u2705 Saved':'\u2705 Ulo\u017eeno',1); renderPayModeSheet(); try{ if(typeof renderPaymentsPage==='function') renderPaymentsPage(); }catch(e){} }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); sv.disabled=false; sv.textContent=EN?'Save mode':'Ulo\u017eit re\u017eim'; } };
 }
-// Který příjemce platí pro danou situaci. U klubového plnění (skupinovky, členství)
-// má autonomní trenér vlastní účet payout_receiver_*, u soukromek receiver_*. Když
-// druhý účet nevyplnil, spadne se zpět na ten první, aby platba neskončila nikde.
+// Který příjemce platí pro danou situaci. U klubového plnění (skupinovky, členství) je to
+// účet režimu klub payout_receiver_*, u soukromek receiver_*.
+//
+// ŽÁDNÝ FALLBACK. Když trenér účet režimu klub nevyplnil, vrátí se prázdný příjemce a
+// platba se nenabídne. Poslat klubovou platbu na jeho osobní účet by znamenalo poslat ji
+// JINÉ fakturační entitě, než která plnění poskytuje -- to je přesně ten důvod, proč jsou
+// ty účty dva. Chybějící účet musí platbu zastavit, ne ji tiše přesměrovat.
 function _recvOf(ent, clubMode){
   if(!ent) return null;
-  if(clubMode && ent.payout_receiver_id_value){
+  if(clubMode){
     return { receiver_id_type: ent.payout_receiver_id_type || 'iban',
-             receiver_id_value: ent.payout_receiver_id_value,
-             receiver_name: ent.payout_receiver_name || ent.receiver_name || null,
+             receiver_id_value: ent.payout_receiver_id_value || null,
+             receiver_name: ent.payout_receiver_name || null,
              receiver_declared_at: ent.payout_receiver_declared_at || null };
   }
   return { receiver_id_type: ent.receiver_id_type || 'iban',
