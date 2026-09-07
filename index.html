@@ -17899,12 +17899,22 @@ async function openClassAttendance(occ){
   const releasedIds=new Set(rs.filter(r=>r.status==='released'&&rk(r)===k).map(_pk));
   const auto=mems.filter(m=> planCovers({access:accOf(m), classes:_memClasses(m)}, occ.level||'all', occ) && ((occ.level!=='kids') || !!m.child_name || ((accOf(m)||[]).indexOf('kids')>=0)) && (!m.discipline || (occ.disc||null)===m.discipline) && !releasedIds.has(_pk(m)));
   const autoIds=new Set(auto.map(_pk));
-  const dropList=drops.filter(d=>`${d.class_date}|${d.class_time}|${d.class_name}`===k);
+  const _excR=rs.filter(r=> r.status==='released' && rk(r)===k);
+  // gym_excuses se nacetly uz vys (_attExcList), ale TENHLE vypis je ignoroval. Omluvenka clena
+  // proto prochazela jen proto, ze po sobe necha uvolnenou rezervaci; jednorazovka zadnou nema,
+  // takze omluveny jednorazovkar tu nebyl videt vubec. Nacteni vys uz filtruje na tuhle lekci.
+  const _exHere=((window._attExcList)||[]);
+  const _exIds=new Set(_excR.map(function(r){ return String(r.student_id); }).concat(_exHere.map(function(e){ return String(e.student_id); })));
+  const dropList=drops.filter(d=>`${d.class_date}|${d.class_time}|${d.class_name}`===k && !_exIds.has(String(d.student_id)));
   const explicit=rs.filter(r=> r.status!=='released' && rk(r)===k && !autoIds.has(_pk(r)));
-  const excused=rs.filter(r=> r.status==='released' && rk(r)===k);
+  const _seenEx=new Set(_excR.map(function(r){ return String(r.student_id); }));
+  const excused=_excR.concat(_exHere.filter(function(e){
+    if(!e.student_id || _seenEx.has(String(e.student_id))) return false;
+    _seenEx.add(String(e.student_id)); return true;
+  }).map(function(e){ return { student_id:e.student_id, student_name:e.student_name||'', reason:null }; }));
   const _kpill=tagPill(EN?'kid':'dítě','#9A5B00');
   const _cpill=tagPill(EN?'course':'kurz','#5B3FB0');
-  const attendees=cohMems ? cohMems.map(function(m){ return { sid:m.student_id||null, name:(m.name||m.email||(EN?'Participant':'Účastník')), pill:_cpill }; }) : [
+  const attendees=cohMems ? cohMems.filter(function(m){ return !m.student_id || !_exIds.has(String(m.student_id)); }).map(function(m){ return { sid:m.student_id||null, name:(m.name||m.email||(EN?'Participant':'Účastník')), pill:_cpill }; }) : [
     ...auto.map(m=>(m.child_name?{sid:m.student_id, child:m.child_name, name:kidEmoji(m.child_age)+' '+m.child_name, pill:_kpill}:{sid:m.student_id, name:m.student_name||(EN?'Member':'Člen'), pill:tagPill(EN?'member':'členství','#006040')})),
     ...explicit.map(r=>(r.child_name?{sid:r.student_id, child:r.child_name, name:kidEmoji(r.child_age)+' '+r.child_name, pill:_kpill}:{sid:r.student_id, name:r.student_name||(EN?'Member':'Člen'), pill:tagPill(EN?'reserved':'rezervace','#1E6FD9')})),
     ...dropList.map(d=>(d.child_name?{sid:d.student_id, child:d.child_name, name:kidEmoji(d.child_age)+' '+d.child_name, pill:_kpill}:{sid:d.student_id, name:d.student_name||'Student', pill:tagPill(EN?'drop-in':'jednoráz','#C0392B')}))
@@ -17945,7 +17955,14 @@ async function openClassAttendance(occ){
   else {
     if(started && attendees.length) html+=`<div style="font-size:11px;color:var(--light);margin-bottom:4px;">${EN?'Tap ◯ to check in who actually attended':'Klepni na ◯ kdo reálně dorazil'}</div>`;
     html+=attendees.map(attRow).join('');
-    if(excused.length){ html+=`<div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:8px;"><div style="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:4px;">📋 ${EN?'Excused':'Omluveni'} (${excused.length})</div>${excused.map(r=>`<div style="font-size:13px;color:var(--dark);padding:3px 0;">• ${escapeHtml(r.student_name||(EN?'Member':'Člen'))}${r.reason?` <span style="color:var(--mid);">— ${escapeHtml(r.reason)}</span>`:''}</div>`).join('')}</div>`; }
+    if(excused.length){ html+=`<div style="margin-top:10px;border-top:1px dashed var(--border);padding-top:8px;"><div style="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:4px;">📋 ${EN?'Excused':'Omluveni'} (${excused.length})</div>${excused.map(r=>{
+      const _e=(window._attExcuses||{})[r.student_id]||{};
+      const _rr=(typeof EXCUSE_REASONS!=='undefined') ? EXCUSE_REASONS.find(x=>x.k===_e.reason_key) : null;
+      // Bez duvodu se to rekne rovnou -- prazdno by trener cetl jako chybu.
+      const _lbl=_rr ? (EN?_rr.en:_rr.cs) : (EN?'no reason given':'bez důvodu');
+      const _note=(_e.note||r.reason||'');
+      return `<div style="font-size:13px;color:var(--light);padding:3px 0;">• <span style="text-decoration:line-through;">${escapeHtml(r.student_name||(EN?'Member':'Člen'))}</span> <span style="color:var(--mid);">— ${escapeHtml(_lbl)}</span>${_note?` <span style="color:var(--light);font-size:12px;">„${escapeHtml(_note)}"</span>`:''}</div>`;
+    }).join('')}</div>`; }
   }
 
   var _caQr=(typeof _isQrProv==='function' && _isQrProv(_myGymData));
