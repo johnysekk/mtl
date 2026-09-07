@@ -12030,7 +12030,10 @@ async function doRelease(){
     }catch(e){}
     toast(reason?(LANG==='en'?'✅ Spot released — coach notified':'✅ Místo uvolněno — kouč ví'):(LANG==='en'?'✅ Spot released':'✅ Místo uvolněno'));
     // anti-spam marker: důvod pro tuhle lekci jde uvést jen jednou
-    if(reason){ try{ await supaClient.from('gym_excuses').insert({ gym_id:g.id, student_id:currentUser.id, class_name:occ.name||null, class_date:occ.date||null, class_time:occ.time||null }); }catch(e){} }
+    if(reason){ try{ await supaClient.from('gym_excuses').insert({ gym_id:g.id, student_id:currentUser.id, class_name:occ.name||null, class_date:occ.date||null, class_time:occ.time||null,
+        // Důvod a poznámka se ukládají, aby je trenér viděl v docházce. Dřív žily jen
+        // v notifikaci, takže po jejím přečtení se ztratily.
+        reason_key:(_excuseSel||null), note:(reason||null), student_name:(currentUser.name||null) }); }catch(e){} }
     openGymProfile(g);
   }catch(e){ console.error('doRelease',e); toast('⚠️ '+e.message); }
 }
@@ -17698,7 +17701,14 @@ async function loadGymRoster(){
     const attRow=(a)=>{ const present=a.sid?presentSet.has(`${o.date}|${o.time}|${o.name||''}|${a.sid}|${a.child||''}`):false;
       const chk = a.sid ? `<button class="attChk" data-sid="${a.sid||''}" data-name="${esc(a.name)}" data-date="${o.date}" data-time="${o.time}" data-cn="${esc(o.name||'')}" data-coach="${o.coach||''}" data-disc="${esc(o.disc||'')}" data-child="${esc(a.child||'')}" data-present="${present?1:0}" style="margin-left:auto;flex-shrink:0;width:26px;height:26px;border-radius:50%;border:1.5px solid ${present?'#006040':'var(--border)'};background:${present?'#006040':'transparent'};color:#fff;font-size:13px;font-weight:700;cursor:pointer;">${present?'✓':''}</button>` : '';
       return `<div style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--dark);padding:4px 0;">• ${a.name}${a.pill}${chk}</div>`; };
-    const excusedHtml = excused.length ? `<div style="margin-top:8px;border-top:1px dashed var(--border);padding-top:8px;"><div style="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:4px;">📋 ${LANG==='en'?'Excused':'Omluveni'} (${excused.length})</div>${excused.map(r=>`<div style="font-size:13px;color:var(--dark);padding:3px 0;">• ${escapeHtml(r.student_name||(LANG==='en'?'Member':'Člen'))}${r.reason?` <span style="color:var(--mid);">— ${escapeHtml(r.reason)}</span>`:''}</div>`).join('')}</div>` : '';
+    const excusedHtml = excused.length ? `<div style="margin-top:8px;border-top:1px dashed var(--border);padding-top:8px;"><div style="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:4px;">📋 ${LANG==='en'?'Excused':'Omluveni'} (${excused.length})</div>${excused.map(r=>{
+        const _e=(window._attExcuses||{})[r.student_id]||{};
+        const _rr=(typeof EXCUSE_REASONS!=='undefined') ? EXCUSE_REASONS.find(x=>x.k===_e.reason_key) : null;
+        // Bez důvodu se to řekne rovnou -- prázdno by trenér četl jako chybu.
+        const _lbl=_rr ? (LANG==='en'?_rr.en:_rr.cs) : (LANG==='en'?'no reason given':'bez důvodu');
+        const _note=(_e.note||r.reason||'');
+        return `<div style="font-size:13px;color:var(--light);padding:3px 0;">• <span style="text-decoration:line-through;">${escapeHtml(r.student_name||(LANG==='en'?'Member':'Člen'))}</span> <span style="color:var(--mid);">— ${escapeHtml(_lbl)}</span>${_note?` <span style="color:var(--light);font-size:12px;">„${escapeHtml(_note)}"</span>`:''}</div>`;
+      }).join('')}</div>` : '';
     return `<div style="border:1px solid var(--border);border-radius:12px;padding:11px;margin-bottom:8px;">
       <div class="rosterHead" data-i="${i}" style="display:flex;justify-content:space-between;align-items:center;${(n||excused.length)?'cursor:pointer;':''}">
         <div style="font-size:13px;"><strong style="${o.cancelled?'text-decoration:line-through;opacity:.6;':''}">${o.name}</strong>${lvl}${o.cancelled?' <span style="font-size:10px;font-weight:700;color:#C0392B;background:#C0392B1a;border-radius:6px;padding:1px 6px;">'+(LANG==='en'?'not held':'neproběhlo')+'</span>':''}<div style="color:var(--mid);font-size:12px;">${dn[dd.getDay()]} ${o.time} · ${dd.getDate()}.${dd.getMonth()+1}.</div></div>
@@ -17803,6 +17813,15 @@ async function openClassAttendance(occ){
   try{ const { data } = await supaClient.from('gym_bookings').select('student_id,student_name,class_date,class_time,class_name,status,child_name,child_age').eq('gym_id',gid).eq('status','active').eq('class_date',occ.date); drops=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_memberships').select('student_id,student_name,plan_access,coach_id,status,child_name,child_age,discipline').eq('gym_id',gid).in('status',['active','cancelling']); mems=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_attendance').select('student_id,student_name,class_date,class_time,class_name,child_name').eq('gym_id',gid).eq('class_date',occ.date); att=data||[]; }catch(e){}
+  // Kdo se z TÉHLE lekce omluvil. Zůstane v seznamu zešedlý -- trenér tak pozná rozdíl
+  // mezi "omluvil se" a "nikdy se nepřihlásil".
+  let exc={};
+  try{
+    const { data:_ex } = await supaClient.from('gym_excuses').select('student_id,reason_key,note')
+      .eq('gym_id',gid).eq('class_date',occ.date).eq('class_time',occ.time||null);
+    (_ex||[]).forEach(function(e){ if(e.student_id) exc[e.student_id]=e; });
+  }catch(e){}
+  window._attExcuses=exc;
   // A COURSE session: the people who belong there are the paid-up cohort members, exactly the way
   // a membership auto-fills a normal class. Same gym_attendance table, same toggle, same XP.
   let cohMems=null;
@@ -17936,7 +17955,14 @@ async function loadCoachRoster(gymId, gymName){
     const attRow=(a)=>{ const present=a.sid?presentSet.has(`${o.date}|${o.time}|${o.name||''}|${a.sid}|${a.child||''}`):false;
       const chk = a.sid ? `<button class="attChk" data-sid="${a.sid||''}" data-name="${esc(a.name)}" data-date="${o.date}" data-time="${o.time}" data-cn="${esc(o.name||'')}" data-coach="${o.coach||''}" data-disc="${esc(o.disc||'')}" data-child="${esc(a.child||'')}" data-present="${present?1:0}" data-gymid="${gymId}" data-gname="${gn}" style="margin-left:auto;flex-shrink:0;width:26px;height:26px;border-radius:50%;border:1.5px solid ${present?'#006040':'var(--border)'};background:${present?'#006040':'transparent'};color:#fff;font-size:13px;font-weight:700;cursor:pointer;">${present?'✓':''}</button>` : '';
       return `<div style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--dark);padding:4px 0;">• ${a.name}${a.pill}${chk}</div>`; };
-    const excusedHtml = excused.length ? `<div style="margin-top:8px;border-top:1px dashed var(--border);padding-top:8px;"><div style="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:4px;">📋 ${LANG==='en'?'Excused':'Omluveni'} (${excused.length})</div>${excused.map(r=>`<div style="font-size:13px;color:var(--dark);padding:3px 0;">• ${escapeHtml(r.student_name||(LANG==='en'?'Member':'Člen'))}${r.reason?` <span style="color:var(--mid);">— ${escapeHtml(r.reason)}</span>`:''}</div>`).join('')}</div>` : '';
+    const excusedHtml = excused.length ? `<div style="margin-top:8px;border-top:1px dashed var(--border);padding-top:8px;"><div style="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:4px;">📋 ${LANG==='en'?'Excused':'Omluveni'} (${excused.length})</div>${excused.map(r=>{
+        const _e=(window._attExcuses||{})[r.student_id]||{};
+        const _rr=(typeof EXCUSE_REASONS!=='undefined') ? EXCUSE_REASONS.find(x=>x.k===_e.reason_key) : null;
+        // Bez důvodu se to řekne rovnou -- prázdno by trenér četl jako chybu.
+        const _lbl=_rr ? (LANG==='en'?_rr.en:_rr.cs) : (LANG==='en'?'no reason given':'bez důvodu');
+        const _note=(_e.note||r.reason||'');
+        return `<div style="font-size:13px;color:var(--light);padding:3px 0;">• <span style="text-decoration:line-through;">${escapeHtml(r.student_name||(LANG==='en'?'Member':'Člen'))}</span> <span style="color:var(--mid);">— ${escapeHtml(_lbl)}</span>${_note?` <span style="color:var(--light);font-size:12px;">„${escapeHtml(_note)}"</span>`:''}</div>`;
+      }).join('')}</div>` : '';
     return `<div style="border:1px solid var(--border);border-radius:12px;padding:11px;margin-bottom:8px;">
       <div class="crosterHead" data-i="${i}" style="display:flex;justify-content:space-between;align-items:center;${(n||excused.length)?'cursor:pointer;':''}">
         <div style="font-size:13px;"><strong style="${o.cancelled?'text-decoration:line-through;opacity:.6;':''}">${o.name}</strong>${lvl}${o.cancelled?' <span style="font-size:10px;font-weight:700;color:#C0392B;background:#C0392B1a;border-radius:6px;padding:1px 6px;">'+(LANG==='en'?'not held':'neproběhlo')+'</span>':''}<div style="color:var(--mid);font-size:12px;">${dn[dd.getDay()]} ${o.time} · ${dd.getDate()}.${dd.getMonth()+1}.</div></div>
