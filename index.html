@@ -11820,8 +11820,17 @@ async function openGymProfile(g){
   try {
     const _scIds=[...new Set((occs||[]).map(o=>o.coach).filter(Boolean))];
     if(_scIds.length){
-      const { data:_nrc } = await supaClient.from('profiles').select('id,charges_enabled,gym_payout_account,payment_mode,receiver_id_value').in('id', _scIds);
-      const _badPayee=new Set((_nrc||[]).filter(p=>(p.charges_enabled===false && (p.payment_mode||'stripe')==='stripe') || (p.payment_mode==='qr_bank' && !p.receiver_id_value)).map(p=>p.id));
+      const { data:_nrc } = await supaClient.from('profiles').select('id,charges_enabled,gym_payout_account,payment_mode,receiver_id_value,payout_receiver_id_value,payout_legal_name').in('id', _scIds);
+      const _badPayee=new Set((_nrc||[]).filter(function(p){
+        // Autonomní trenér inkasuje skupinovku na REŽIM KLUB, ne na účet od soukromek.
+        // Na Stripe koleji je to gym_payout_account, na bankovní payout_receiver_id_value
+        // spolu s fakturační identitou -- bez ní by doklad zněl na jinou entitu, než která
+        // peníze dostala.
+        const _auto = !!(p.gym_payout_account || p.payout_receiver_id_value || p.payout_legal_name);
+        const _m = p.payment_mode || 'stripe';
+        if(_m==='stripe') return _auto ? !p.gym_payout_account : (p.charges_enabled===false);
+        return _auto ? !(p.payout_receiver_id_value && p.payout_legal_name) : !p.receiver_id_value;
+      }).map(p=>p.id));
       if(_badPayee.size){ for(let _z=occs.length-1;_z>=0;_z--){ if(occs[_z].coach && _badPayee.has(occs[_z].coach)) occs.splice(_z,1); } }
     }
     _leadingCoaches = new Set((occs||[]).map(o=>o.coach).filter(Boolean));
@@ -19448,15 +19457,18 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom){
     let _dp=g.dropin_price||0;
     if(occ&&occ.coach){ try{ const { data:_cp }=await supaClient.from('gym_coach_pricing').select('dropin_price,currency').eq('gym_id',g.id).eq('coach_id',occ.coach).eq('status','approved').maybeSingle(); if(_cp&&_cp.dropin_price){ _dp=_cp.dropin_price; } }catch(e){} }
     price=_dp; label=(occ&&occ.name)||(EN?'Drop-in':'Drop-in'); try{ if(occ&&occ.date){ var _dt=new Date(occ.date); if(!isNaN(_dt.getTime())){ var _ds=_dt.toLocaleDateString(EN?'en-GB':'cs-CZ',{weekday:'long',day:'numeric',month:'numeric'}); label += (EN?(' on '+_ds+(occ.time?(' '+occ.time):'')):(' konající se v '+_ds+(occ.time?(' '+occ.time):''))); } } }catch(e){} disc=(occ&&occ.disc)||(parseDisc(g.disciplines)[0]||null); lvl=(occ&&occ.level&&occ.level!=='all')?occ.level:null;
-    if(occ&&occ.coach){ try{ let { data:_cpr }=await supaClient.from('profiles').select('id,name,payment_mode,receiver_id_type,receiver_id_value,receiver_name,payout_receiver_id_type,payout_receiver_id_value,payout_receiver_name,payout_receiver_declared_at,referral_optin,pis_test').eq('id', occ.coach).single();
+    if(occ&&occ.coach){ try{ let { data:_cpr }=await supaClient.from('profiles').select('id,name,payment_mode,receiver_id_type,receiver_id_value,receiver_name,payout_receiver_id_type,payout_receiver_id_value,payout_receiver_name,payout_receiver_declared_at,payout_legal_name,referral_optin,pis_test').eq('id', occ.coach).single();
       // Skupinovka je klubové plnění -> účet režimu klub, ne ten od soukromek.
       if(_cpr) _cpr=Object.assign({}, _cpr, _recvOf(_cpr, true));
       // Trenér inkasuje na sebe, ale účet režimu klub nevyplnil. Bez fallbacku se platba
       // nenabídne, takže je potřeba říct proč -- jinak je to mrtvé tlačítko.
-      if(_cpr && (typeof _isQrProv==='function' && _isQrProv(_cpr)) && !_cpr.receiver_id_value){
+      if(_cpr && (typeof _isQrProv==='function' && _isQrProv(_cpr)) && (!_cpr.receiver_id_value || !_cpr.payout_legal_name)){
+        // Účet BEZ fakturační identity je horší než nic: peníze by přišly jedné entitě
+        // a doklad by zněl na druhou. Platba se proto nenabídne, dokud není obojí.
+        _cpr.receiver_id_value=null;
         toast(LANG==='en'
-          ? '\u26a0\ufe0f This class cannot be paid yet \u2014 the coach has no club-mode account set up.'
-          : '\u26a0\ufe0f Tuhle lekci zat\u00edm nejde zaplatit \u2014 tren\u00e9r nem\u00e1 nastaven\u00fd \u00fa\u010det pro re\u017eim klub.', 6000);
+          ? '\u26a0\ufe0f This class cannot be paid yet \u2014 the coach has not finished the club-mode account and billing details.'
+          : '\u26a0\ufe0f Tuhle lekci zat\u00edm nejde zaplatit \u2014 tren\u00e9r nem\u00e1 dokon\u010den\u00fd \u00fa\u010det a fakturac\u010dn\u00ed \u00fadaje pro re\u017eim klub.', 6000);
       }
       if(_cpr && (typeof _isQrProv==='function' && _isQrProv(_cpr)) && _cpr.receiver_id_value){ // id a pis_test MUSÍ projít dál. Bez nich _pisAllowed nepozná, že má kouč pískoviště zapnuté,
           // a platbu z účtu zamítne -- proto u drop-inu placeného koučovi PIS nešel, i když v adminu
@@ -34165,7 +34177,25 @@ async function showReceipt(b){
     let gymRec=null;
     if(b.gym_id && !_toCoach){ try{ const { data:_g }=await supaClient.from('gyms').select('legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,contact_phone,contact_email,contact_on_doklad').eq('id',b.gym_id).maybeSingle(); gymRec=_g||null; }catch(e){} }
     let coachRec=null;
-    if(!gymRec){ const _cid=b.coach_id||b.coach_profile_id; if(_cid){ try{ const { data:_c }=await supaClient.from('profiles').select('legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,contact_phone,contact_email,contact_on_doklad').eq('id',_cid).maybeSingle(); coachRec=_c||null; }catch(e){} } }
+    if(!gymRec){ const _cid=b.coach_id||b.coach_profile_id; if(_cid){ try{ const { data:_c }=await supaClient.from('profiles').select('legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,contact_phone,contact_email,contact_on_doklad,payout_legal_name,payout_tax_id,payout_vat_id,payout_vat_payer,payout_vat_rate,payout_billing_address').eq('id',_cid).maybeSingle(); coachRec=_c||null; }catch(e){} } }
+    // Klubové plnění kouče -> jeho druhá fakturační identita, ta samá, na jejíž účet přišly
+    // peníze. Soukromka zůstává na jeho vlastní. Když druhou identitu nemá, použije se ta
+    // jediná: doklad studentovi vzniknout musí.
+    // Bez fallbacku: klubovou platbu nelze přijmout, dokud trenér nemá účet i fakturační
+    // identitu režimu klub, takže sem se nedostane plnění, ke kterému by identita chyběla.
+    if(coachRec && b.gym_id){
+      coachRec = Object.assign({}, coachRec, {
+        // Přebíjí se i name. Kdyby identita chyběla (stav, který platební brána nepustí),
+        // nesmí na doklad prosáknout osobní jméno kouče jako náhrada.
+        name: coachRec.payout_legal_name || null,
+        legal_name: coachRec.payout_legal_name,
+        tax_id: coachRec.payout_tax_id || null,
+        vat_id: coachRec.payout_vat_id || null,
+        vat_payer: !!coachRec.payout_vat_payer,
+        vat_rate: (coachRec.payout_vat_rate != null ? coachRec.payout_vat_rate : coachRec.vat_rate),
+        billing_address: coachRec.payout_billing_address || null
+      });
+    }
     const rec=gymRec||coachRec;
     const seller=(rec&&(rec.legal_name||rec.name))||b.gym_name||b.coach_name||(EN?'Provider':'Poskytovatel');
     // ODBĚRATEL je ten, kdo platil. Když zástupce hradil za mladistvého, rezervace je vedená na
