@@ -9,6 +9,12 @@
 // source_booking_id makes a double-insert impossible, and we re-check right before insert.
 // Run on a schedule (e.g. every 30 min). Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
 
+// CHYBEJICI IMPORT. Soubor volal _mtlLadder() i _mtlAcq(), ale neimportoval je odnikud --
+// v celem souboru nebyl jediny import. Kazdy pokus o dopsani zapomenute QR platby proto skoncil
+// ReferenceError, tedy prave ta zachranna sit, ktera ma chytat vypadky record-cash.js, nefungovala
+// nikdy. Stejna rodina chyby jako _wsbGet v record-cash.js.
+import { ladderRate as _mtlLadder, acquisitionRate as _mtlAcq } from './_rate.js';
+
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 

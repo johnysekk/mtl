@@ -29,9 +29,8 @@ async function sb(path, opts = {}) {
   return j;
 }
 
-// 'merch' CHYBELO. index.html posila hotovostni/QR prodej merche jako type:'merch' (odbaveni
-// objednavky v klubu), tenhle whitelist ho odmitl s 400 a prodej se do transakci nezapsal
-// vubec -- klub zbozi vydal, penize vzal a MTL o tom nevedelo. Nalez D z auditu ze 7. 8.
+// 'merch' CHYBELO. index.html posila hotovostni/QR prodej merche jako type:'merch', tenhle
+// whitelist ho odmitl s 400 a prodej se nezapsal vubec. Nalez D z auditu ze 7. 8.
 const ALLOWED_TYPES = ['drop_in', 'membership', 'custom', 'event_ticket', 'coach_1to1', 'course', 'merch'];
 function ladderRate(profile) {
   // cash/qr/pis = BANK-TRANSFER track. Single source of truth in _rate.js: same EP/FP/ladder as
@@ -198,9 +197,13 @@ export default async function handler(req, res) {
       // uvnitř effectiveRateBreakdown (kudy jde Stripe) jinak obešla.
       // Země z přihlášky poskytovatele: u klubu jeho vlastní, u kouče z profilu. Majitel může
       // bydlet jinde, než odkud fakturuje klub -- doklad zní na klub, tak rozhoduje jeho země.
-      const _intro = await _introFree(_wsbGet,
-        (gym && gym.billing_country) || (ownerProf && ownerProf.billing_country)
-        || (coach && coach.billing_country));
+      // DVE CHYBY NA JEDNOM RADKU, obe ReferenceError, obe shodily CELY zapis:
+      //   1) `_wsbGet` v tomhle souboru neexistuje -- zije jen v pay.js. Spravny getter je `sb`.
+      //   2) `coach` je deklarovany az v DRUHE vetvi (kouc), takze tady nema co delat.
+      // Handler to chytil svym vnejsim catch a vratil 500 s textem chyby -- proto se v appce
+      // objevilo "_wsbGet is not defined" a do transactions se nezapsalo nic.
+      const _intro = await _introFree(sb,
+        (gym && gym.billing_country) || (ownerProf && ownerProf.billing_country));
       let mtl_fee = (_cc || _intro) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
       // Podlaha jen u PIS a jen když se opravdu něco účtuje -- uplatněný kredit zůstává nulový.
       if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, gross));
@@ -247,9 +250,9 @@ export default async function handler(req, res) {
       // uvnitř effectiveRateBreakdown (kudy jde Stripe) jinak obešla.
       // Země z přihlášky poskytovatele: u klubu jeho vlastní, u kouče z profilu. Majitel může
       // bydlet jinde, než odkud fakturuje klub -- doklad zní na klub, tak rozhoduje jeho země.
-      const _intro = await _introFree(_wsbGet,
-        (gym && gym.billing_country) || (ownerProf && ownerProf.billing_country)
-        || (coach && coach.billing_country));
+      // Totez zrcadlove: `_wsbGet` neexistuje a `gym`/`ownerProf` se deklaruji az ve vetvi klubu,
+      // takze tady byly rovnez ReferenceError. Zeme se u kouce bere z jeho vlastniho profilu.
+      const _intro = await _introFree(sb, (coach && coach.billing_country));
       let mtl_fee = (_cc || _intro) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
       // Podlaha jen u PIS a jen když se opravdu něco účtuje -- uplatněný kredit zůstává nulový.
       if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, gross));
