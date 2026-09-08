@@ -7335,7 +7335,7 @@ async function loadMoreGyms(){
     if(data.length < _GYM_PAGE) _gymExhausted = true;
     _gymOffset = from;
     const have = new Set(GYMS.map(x=>x.id));
-    const add = data.filter(g=>!g.suspended && !g.deleted_at && !have.has(g.id) && _gymHasTerms(g));
+    const add = data.filter(g=>!g.suspended && !g.deleted_at && !have.has(g.id) && _gymTermsReady(g));
     if(add.length){
       GYMS = GYMS.concat(add.map(_mapGymRow));
       try{ if(typeof init==='function') init(); }catch(e){}
@@ -7349,6 +7349,11 @@ async function loadMoreGyms(){
 // pravidla, a MTL by ho pritom nabizelo. Chybejici podminky jsou tedy prekazka publikace,
 // ne kosmeticky nedostatek; klub na to upozorni prouzek v nastaveni.
 function _gymHasTerms(g){ return !!(g && typeof g.terms_text==='string' && g.terms_text.trim()); }
+// SPOLEK POTREBUJE I DOKUMENT. Kdo se stava clenem spolku, musi mit k dispozici stanovy
+// a souhlasit s nimi -- podminky treninku (urazy, zdravotni zpusobilost, storno) jsou vedle
+// toho jina vec. U s.r.o. zadne stanovy k odsouhlaseni nejsou, staci podminky treninku.
+function _gymNeedsFile(g){ return !!(g && g.org_form==='nonprofit'); }
+function _gymTermsReady(g){ return _gymHasTerms(g) && (!_gymNeedsFile(g) || !!(g && g.terms_file_url)); }
 async function ensureGymsLoaded(force){
   if(_gymsLoaded && !force){ return; }
   try{
@@ -7357,7 +7362,7 @@ async function ensureGymsLoaded(force){
     const _hc = _deckHomeCountry();
     if(_hc && !_deckAbroad) _q = _q.eq('country', _hc);
     const { data } = await _q.order('created_at',{ascending:false}).range(0, _GYM_PAGE - 1);
-    const gyms=(data||[]).filter(g=>!g.suspended && !g.deleted_at && _gymHasTerms(g));
+    const gyms=(data||[]).filter(g=>!g.suspended && !g.deleted_at && _gymTermsReady(g));
     if(!data || data.length < _GYM_PAGE) _gymExhausted = true;
     GYMS=gyms.map(_mapGymRow);
     try{ const _oids=[...new Set(gyms.map(x=>x.owner_id).filter(Boolean))]; if(_oids.length){ const { data:_ow } = await supaClient.from('profiles').select('id,partner').in('id',_oids); const _opm={}; (_ow||[]).forEach(o=>_opm[o.id]=!!o.partner); GYMS.forEach(c=>{ if(c.ownerId) c.ownerPartner=!!_opm[c.ownerId]; }); } }catch(e){}
@@ -11629,7 +11634,10 @@ async function gymTermsGate(g, onAgree, isMembership){
   try{ const _mi=await _famMineInfo(); if(_mi.minor){ return _minorWaiverGate(g, onAgree, isMembership); } }catch(e){}
   const _base=(g && g.terms_text && g.terms_text.trim())?g.terms_text.trim():'';
   const _clause=(isMembership && g && g.org_form==='nonprofit' && g.membership_clause_on && g.membership_clause && g.membership_clause.trim())?g.membership_clause.trim():'';
-  if(!_base && !_clause){ onAgree(); return; }
+  // Dokument sam o sobe staci k tomu, aby se brana otevrela: u spolku je to prave on, s cim
+  // student souhlasi. Drive by se pri prazdnem textu proslo bez ptani.
+  const _fileUrl=(g&&g.terms_file_url)||'';
+  if(!_base && !_clause && !_fileUrl){ onAgree(); return; }
   const _title=(g.terms_title||(LANG==='en'?'Terms & club rules':'Podmínky a pravidla klubu'));
   const _fullText=[_base,_clause].filter(Boolean).join('\n\n---\n\n');
   const _hash=_waiverHash(((g.terms_title&&g.terms_title.trim())?g.terms_title.trim():'')+'|'+_fullText);
@@ -11640,6 +11648,7 @@ async function gymTermsGate(g, onAgree, isMembership){
   ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px;padding:20px;max-height:82vh;display:flex;flex-direction:column;">
     <div style="font-size:17px;font-weight:800;margin-bottom:8px;color:var(--dark);">${_title.replace(/</g,'&lt;')}</div>
     <div style="overflow-y:auto;font-size:13px;color:var(--dark);line-height:1.6;white-space:pre-wrap;border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:12px;flex:1;">${_fullText.replace(/</g,'&lt;')}</div>
+    ${_fileUrl?`<a href="${_fileUrl.replace(/"/g,'&quot;')}" target="_blank" rel="noopener" style="display:block;border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:10px;font-size:13px;font-weight:700;color:var(--blue);text-decoration:none;">\ud83d\udcc4 ${(g.terms_file_name||(LANG==='en'?'Document':'Dokument')).replace(/</g,'&lt;')}${g.terms_file_size?`<span style="color:var(--light);font-weight:400;"> \u00b7 ${g.terms_file_size>=1048576?(Math.round(g.terms_file_size/104857.6)/10)+' MB':Math.max(1,Math.round(g.terms_file_size/1024))+' kB'}</span>`:''}</a>`:''}
     <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:12px;cursor:pointer;color:var(--dark);"><input type="checkbox" id="termsAgree" style="width:18px;height:18px;flex-shrink:0;"> ${LANG==='en'?'I have read and agree to these terms':'Přečetl/a jsem si podmínky a souhlasím s nimi'}</label>
     <div style="display:flex;gap:8px;">
       <button id="termsCancel" style="flex:1;padding:13px;background:var(--surf);border:1px solid var(--border);border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';color:var(--dark);">${LANG==='en'?'Cancel':'Zrušit'}</button>
@@ -11650,7 +11659,7 @@ async function gymTermsGate(g, onAgree, isMembership){
   const cb=ov.querySelector('#termsAgree'), go=ov.querySelector('#termsGo');
   cb.onchange=()=>{ go.disabled=!cb.checked; go.style.opacity=cb.checked?'1':'.5'; };
   ov.querySelector('#termsCancel').onclick=()=>ov.remove();
-  go.onclick=async()=>{ if(!cb.checked) return; try{ if(currentUser&&currentUser.id) await supaClient.from('waiver_acceptances').insert({ gym_id:g.id, version:_wv, student_id:currentUser.id, student_name:currentUser.name||null, body_hash:_hash, body_text:_fullText, body_title:_title, accepted_at:new Date().toISOString() }); }catch(e){} try{ if(typeof _recordConsent==='function') _recordConsent('waiver', _wv, LANG, _fullText, { gym_id:g.id, title:_title||null }, g.id); }catch(e){} ov.remove(); onAgree(); };
+  go.onclick=async()=>{ if(!cb.checked) return; try{ if(currentUser&&currentUser.id) await supaClient.from('waiver_acceptances').insert({ gym_id:g.id, version:_wv, student_id:currentUser.id, student_name:currentUser.name||null, body_hash:_hash, body_text:_fullText, body_title:_title, terms_file_url:(g.terms_file_url||null), terms_file_hash:(g.terms_file_hash||null), accepted_at:new Date().toISOString() }); }catch(e){} try{ if(typeof _recordConsent==='function') _recordConsent('waiver', _wv, LANG, _fullText, { gym_id:g.id, title:_title||null }, g.id); }catch(e){} ov.remove(); onAgree(); };
   ov.onclick=(e)=>{ if(e.target===ov && !_ovHasForm(ov)) ov.remove(); };
 }
 async function _guestTermsGate(g, guestName, guestToken, onAgree){
@@ -17364,6 +17373,12 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
       : 'Povinn\u00e9. Nahraj obchodn\u00ed podm\u00ednky klubu nebo jeho stanovy. \u010clen\u016fm se uk\u00e1\u017eou p\u0159ed platbou a mus\u00ed s nimi souhlasit \u2014 bez nich se klub v decku nezobrazuje.'}</p>
     <input id="mgTermsTitle" type="text" value="${(_myGymData.terms_title||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Title (e.g. Club rules)':'Nadpis (např. Pravidla klubu)'}" style="width:100%;box-sizing:border-box;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';margin-bottom:8px;">
     <textarea id="mgTermsText" rows="5" placeholder="${LANG==='en'?'Your terms / rules here…':'Sem napiš podmínky / pravidla…'}" style="width:100%;box-sizing:border-box;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';line-height:1.5;resize:vertical;margin-bottom:16px;">${(_myGymData.terms_text||'').replace(/</g,'&lt;')}</textarea>${_gymOrgForm==='nonprofit'?`<div style="border-top:1px solid var(--border);margin:4px 0 12px;"></div><label style="display:flex;align-items:center;gap:9px;cursor:pointer;font-size:13.5px;font-weight:700;color:var(--dark);margin-bottom:6px;"><input type="checkbox" id="mgMembClauseOn" ${_myGymData.membership_clause_on?'checked':''} style="width:18px;height:18px;flex-shrink:0;"> ${LANG==='en'?'Membership-formation clause (spolek)':'Klauzule o vzniku členství (spolek)'}</label><p style="font-size:11.5px;color:var(--light);line-height:1.5;margin-bottom:6px;">${LANG==='en'?'Shown & recorded ONLY at membership checkout (not drop-in). Paying = becoming a member. Have your lawyer match it to your statutes.':'Ukáže se a zaznamená JEN u členského předplatného (ne u jednorázového vstupu). Úhrada = vznik členství. Text nech právníkem sladit se stanovami.'}</p><textarea id="mgMembClause" rows="4" placeholder="${LANG==='en'?'By paying the monthly membership fee I apply for membership of [club], z.s. and agree to its statutes.':'Úhradou měsíčního členského příspěvku podávám přihlášku za člena spolku [název], z.s. a souhlasím s jeho stanovami.'}" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:11px;font-family:'DM Sans';font-size:13px;margin-bottom:6px;resize:vertical;">${(_myGymData.membership_clause||'').replace(/</g,'&lt;')}</textarea>`:''}
+    <div id="mgTermsFileBox" style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:10px;">
+      <div style="font-size:12.5px;font-weight:800;color:var(--dark);margin-bottom:3px;">${LANG==='en'?'Statutes / terms document':'Stanovy / dokument s podm\u00ednkami'}${_gymNeedsFile(_myGymData)?' <span style="font-size:11px;color:#8a1c1c;">'+(LANG==='en'?'\u2014 required for associations':'\u2014 povinn\u00e9 u spolku')+'</span>':''}</div>
+      <div style="font-size:11.5px;color:var(--light);line-height:1.5;margin-bottom:8px;">${LANG==='en'?'PDF up to 10 MB. Members see a link next to the consent box and open it only if they want to.':'PDF do 10 MB. \u010clen\u016fm se uk\u00e1\u017ee odkaz u souhlasu a otev\u0159ou ho, jen kdy\u017e cht\u011bj\u00ed.'}</div>
+      <div id="mgTermsFileCur" style="font-size:12.5px;margin-bottom:8px;"></div>
+      <input type="file" id="mgTermsFile" accept="application/pdf" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:13px;font-family:'DM Sans';box-sizing:border-box;">
+    </div>
     <div style="display:flex;gap:8px;margin-bottom:10px;"><button id="mgWaiverTpl" type="button" onclick="if($('mgTermsText')){ $('mgTermsText').value=_waiverTemplate(); }" style="flex:1;padding:10px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">📋 ${LANG==='en'?'Use template':'Použít vzor'}</button><button id="mgWaiverExport" type="button" onclick="exportWaiverAcceptances()" style="flex:1;padding:10px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">⬇ ${LANG==='en'?'Export acceptances':'Exportovat souhlasy'}</button></div><label style="display:flex;align-items:flex-start;gap:8px;font-size:11.5px;margin-bottom:16px;cursor:pointer;color:var(--dark);line-height:1.45;"><input type="checkbox" id="mgWaiverAuthor" ${_myGymData.waiver_author_confirmed_at?'checked':''} style="width:18px;height:18px;flex-shrink:0;margin-top:1px;"> <span>${LANG==='en'?'As the club owner I am the author of this document and bear responsibility for its content and validity; MTL only stores it in the form I provide, without reviewing its content and without any guarantee of availability or permanence — I keep my own copy, and any outage, data loss, account deletion or fault on either side does not make MTL responsible for the document or its consequences.':'Jako majitel klubu jsem autorem tohoto dokumentu a nesu odpovědnost za jeho obsah i platnost; MTL jej pouze technicky ukládá v podobě, v jaké jsem jej vložil, bez kontroly obsahu a bez jakékoli záruky dostupnosti či trvalosti — uchovávám si vlastní kopii a výpadek, ztráta dat, smazání účtu ani porucha na kterékoli straně nečiní MTL odpovědným za dokument ani jeho důsledky.'}</span></label>
     <button class="mgSaveSec" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-top:8px;">${LANG==='en'?'Save changes':'Uložit změny'}</button>
     </div></details>
@@ -17459,6 +17474,52 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
   box.querySelectorAll('.partnerLearnBtn').forEach(b=>b.onclick=openPartnerInfo);
   document.querySelectorAll('.orgFormBtn').forEach(b=>b.onclick=()=>{ _gymOrgForm=b.dataset.v; setOrgFormUI(); renderPlansEditor(); loadGymManageBookings(); });
   // Prouzek musi vest primo do te sekce, jinak je to jen vycitka bez cesty ven.
+  // Dokument s podminkami: nahrani, hash a vypis toho, co uz je nahrane.
+  { const _cur=$('mgTermsFileCur');
+    const _fmtSize=function(n){ n=Number(n)||0; return n>=1048576 ? (Math.round(n/104857.6)/10)+' MB' : Math.max(1,Math.round(n/1024))+' kB'; };
+    const _paint=function(){
+      if(!_cur) return;
+      const g=_myGymData||{};
+      _cur.innerHTML = g.terms_file_url
+        ? ('<a href="'+escapeHtml(g.terms_file_url)+'" target="_blank" rel="noopener" style="color:var(--blue);font-weight:700;text-decoration:none;">\ud83d\udcc4 '+escapeHtml(g.terms_file_name||'dokument.pdf')+'</a>'
+           +'<span style="color:var(--light);"> \u00b7 '+_fmtSize(g.terms_file_size)+'</span>'
+           +' <button id="mgTermsFileDel" style="margin-left:8px;background:none;border:1px solid var(--border);border-radius:8px;color:var(--mid);font-size:11.5px;font-weight:700;padding:3px 9px;cursor:pointer;font-family:inherit;">'+(LANG==='en'?'Remove':'Odebrat')+'</button>')
+        : ('<span style="color:var(--light);">'+(LANG==='en'?'No document uploaded':'Zat\u00edm nic nahran\u00e9ho')+'</span>');
+      const _d=$('mgTermsFileDel');
+      if(_d) _d.onclick=async function(){
+        if(!confirm(LANG==='en'?'Remove the document?':'Odebrat dokument?')) return;
+        try{ await supaClient.from('gyms').update({ terms_file_url:null, terms_file_name:null, terms_file_hash:null, terms_file_size:null }).eq('id',_myGymData.id);
+          _myGymData.terms_file_url=null; _myGymData.terms_file_name=null; _myGymData.terms_file_hash=null; _myGymData.terms_file_size=null; _paint();
+          toast(LANG==='en'?'\u2705 Removed':'\u2705 Odebr\u00e1no');
+        }catch(e){ toast('\u26a0\ufe0f '+(e.message||'error')); }
+      };
+    };
+    _paint();
+    const _fi=$('mgTermsFile');
+    if(_fi) _fi.onchange=async function(e){
+      const f=e.target.files&&e.target.files[0]; if(!f) return;
+      // Limit je kvuli prenosu, ne ulozeni: dokument stahuje kazdy student, ktery na nej klepne.
+      if(f.size>10*1024*1024){ e.target.value=''; toast(LANG==='en'?'\u26a0\ufe0f Maximum is 10 MB':'\u26a0\ufe0f Nejv\u00fd\u0161 10 MB'); return; }
+      if(f.type && f.type.indexOf('pdf')<0){ e.target.value=''; toast(LANG==='en'?'\u26a0\ufe0f PDF only':'\u26a0\ufe0f Jen PDF'); return; }
+      toast(LANG==='en'?'\u2b06\ufe0f Uploading\u2026':'\u2b06\ufe0f Nahr\u00e1v\u00e1m\u2026');
+      try{
+        // Otisk souboru. Diky nemu jde u kazdeho souhlasu dolozit, KTERY dokument tehdy platil,
+        // i kdyz klub pozdeji nahraje jiny.
+        let _hash='';
+        try{ const _buf=await f.arrayBuffer(); const _h=await crypto.subtle.digest('SHA-256', _buf);
+             _hash=[...new Uint8Array(_h)].map(b=>b.toString(16).padStart(2,'0')).join(''); }catch(_e){}
+        const _fn=_myGymData.id+'-terms-'+Date.now()+'.pdf';
+        const { error }=await supaClient.storage.from('gym-photos').upload(_fn, f, { contentType:'application/pdf', upsert:false });
+        if(error){ toast('\u26a0\ufe0f '+error.message); e.target.value=''; return; }
+        const { data }=supaClient.storage.from('gym-photos').getPublicUrl(_fn);
+        const _url=data&&data.publicUrl; if(!_url){ toast('\u26a0\ufe0f '+(LANG==='en'?'No URL':'Nepovedlo se z\u00edskat adresu')); return; }
+        await supaClient.from('gyms').update({ terms_file_url:_url, terms_file_name:f.name, terms_file_hash:_hash||null, terms_file_size:f.size }).eq('id',_myGymData.id);
+        _myGymData.terms_file_url=_url; _myGymData.terms_file_name=f.name; _myGymData.terms_file_hash=_hash||null; _myGymData.terms_file_size=f.size;
+        e.target.value=''; _paint();
+        toast(LANG==='en'?'\u2705 Document uploaded':'\u2705 Dokument nahr\u00e1n');
+      }catch(err){ toast('\u26a0\ufe0f '+(err.message||'error')); }
+    };
+  }
   { const _tb=$('mgTermsBanner'); if(_tb) _tb.onclick=function(){
       const sec=$('mgTermsSec'); if(!sec) return;
       try{ sec.open=true; }catch(e){}
