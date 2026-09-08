@@ -722,7 +722,7 @@ export default async function handler(req, res) {
           const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
           const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : (Math.round(amount * 0.03 * 100) / 100)  /* Stripe base 3% (was 0.035 = old ladder) */;
           const _sFee = await cohortStripeFee(pi, event.account);
-          await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'first_month', amount, currency: cur, mtl_fee: fee, stripe_fee: _sFee, payment_method: 'stripe', stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
+          await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'first_month', amount, months: Math.max(1, parseInt(m.mtl_months || '1', 10) || 1), currency: cur, mtl_fee: fee, stripe_fee: _sFee, payment_method: 'stripe', stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
           {
             const _prev2 = Number((((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=paid_amount`)) || [])[0] || {}).paid_amount || 0);
             // months_paid: 1 bylo natvrdo. Kdyz student zaplati doplatek 1. mesice A ROVNOU
@@ -749,7 +749,7 @@ export default async function handler(req, res) {
           const cur = (m.mtl_currency || s.currency || 'CZK').toUpperCase();
           const fee = (m.mtl_rate != null && m.mtl_rate !== '') ? Math.round(amount * parseFloat(m.mtl_rate) * 100) / 100 : (Math.round(amount * 0.03 * 100) / 100);
           const _sFee = await cohortStripeFee(pi, event.account);
-          await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'month', amount, currency: cur, mtl_fee: fee, stripe_fee: _sFee, payment_method: 'stripe', stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
+          await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'month', amount, months: Math.max(1, parseInt(m.mtl_months || '1', 10) || 1), currency: cur, mtl_fee: fee, stripe_fee: _sFee, payment_method: 'stripe', stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
           {
             const _mr = (((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=paid_amount,months_paid`)) || [])[0]) || {};
             const _prevPaid = Number(_mr.paid_amount || 0);

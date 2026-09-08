@@ -22,7 +22,9 @@ export default async function handler(req, res) {
     // Member lookup (?cm=<id>) for the on-site first-month remainder page
     const cm = (req.query && req.query.cm) || '';
     if (cm) {
-      const mr = await sbGet(`cohort_members?id=eq.${encodeURIComponent(cm)}&select=id,cohort_id,name,tier,status`);
+      // months_paid: bez nej stranka nepozna, jestli clovek plati doplatek 1. mesice, nebo uz
+      // dalsi mesic -- a u kazdeho 'enrolled' hlasila "vse zaplaceno", i kdyz dluzil.
+      const mr = await sbGet(`cohort_members?id=eq.${encodeURIComponent(cm)}&select=id,cohort_id,name,tier,status,months_paid,paid_amount`);
       const mem = mr && mr[0];
       if (!mem) return res.status(404).json({ ok: false, error: 'member not found' });
       const cr = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(mem.cohort_id)}&select=id,gym_id,stripe_account,name,discipline,currency,deposit_amount,price_student,price_regular,price_tiers,start_date,end_date,months,schedule,schedule_note`);
@@ -42,7 +44,7 @@ export default async function handler(req, res) {
         tierPrice = Number((mem.tier === 'student') ? co.price_student : co.price_regular) || 0;
       }
       const remainder = Math.max(0, tierPrice - Number(co.deposit_amount || 0));
-      return res.status(200).json({ ok: true, member: { id: mem.id, name: mem.name, tier: mem.tier, status: mem.status }, cohort: { id: co.id, name: co.name, leader_name: (Array.isArray(co.schedule)?((co.schedule.find(r=>r&&r.leaderName)||{}).leaderName||null):null), discipline: co.discipline || null, gym_name: gymName, currency: co.currency || 'CZK', tier_price: tierPrice, start_date: co.start_date || null, end_date: co.end_date || null, months: co.months || null, schedule: (Array.isArray(co.schedule) ? co.schedule : []), schedule_note: co.schedule_note || null, stripe_account: co.stripe_account || null, payment_mode: _cmPay.payment_mode, receiver_id_type: _cmPay.receiver_id_type, receiver_id_value: _cmPay.receiver_id_value, receiver_name: _cmPay.receiver_name }, remainder });
+      return res.status(200).json({ ok: true, member: { id: mem.id, name: mem.name, tier: mem.tier, status: mem.status, months_paid: Number(mem.months_paid || 0), paid_amount: Number(mem.paid_amount || 0) }, cohort: { id: co.id, name: co.name, leader_name: (Array.isArray(co.schedule)?((co.schedule.find(r=>r&&r.leaderName)||{}).leaderName||null):null), discipline: co.discipline || null, gym_name: gymName, currency: co.currency || 'CZK', tier_price: tierPrice, start_date: co.start_date || null, end_date: co.end_date || null, months: co.months || null, schedule: (Array.isArray(co.schedule) ? co.schedule : []), schedule_note: co.schedule_note || null, stripe_account: co.stripe_account || null, payment_mode: _cmPay.payment_mode, receiver_id_type: _cmPay.receiver_id_type, receiver_id_value: _cmPay.receiver_id_value, receiver_name: _cmPay.receiver_name }, remainder });
     }
 
     const id = (req.query && req.query.cohort) || '';

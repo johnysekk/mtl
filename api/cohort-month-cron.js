@@ -38,15 +38,18 @@ async function sb(path, opts) {
 // out, so the member pays ahead rather than in arrears. days since start = D; the highest N whose
 // window start ((N-1)*MONTH_DAYS + REMIND_DAY days) has passed is the month currently due.
 const MONTH_DAYS = 30;
-const REMIND_DAY = 25; // ~3.5 weeks into the running month
+// ZMENA: pripominka chodi 7 DNI PRED zacatkem dalsiho mesice, ne 25. den bezicího (to bylo
+// 5 dni predem). Mesice se pocitaji od START_DATE KURZU, ne od kalendarniho prvniho -- kurz,
+// ktery zacne 15. 9., ma druhy mesic od 15. 10. a upominka jde 8. 10.
+const REMIND_LEAD_DAYS = 7;
 function dueMonth(startISO, now) {
   const s = new Date(startISO + 'T00:00:00');
   if (isNaN(s.getTime())) return 1;
   const days = Math.floor((now - s) / 86400000);
-  // month 2 becomes due at day 25, month 3 at day 55, month N at (N-2)*30 + 25
+  // mesic N zacina (N-1)*30 dni po startu; upominka na nej jde o REMIND_LEAD_DAYS driv
   let n = 1;
-  while (days >= (n - 1) * MONTH_DAYS + REMIND_DAY) n += 1;
-  return n; // 1 = nothing beyond month 1 due yet
+  while (days >= (n) * MONTH_DAYS - REMIND_LEAD_DAYS) n += 1;
+  return n; // 1 = zatim neni splatny zadny dalsi mesic
 }
 
 export default async function handler(req, res) {
