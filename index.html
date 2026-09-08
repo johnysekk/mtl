@@ -10595,7 +10595,9 @@ async function _cohDepositConfirm(memberId){
   // or build a PDF, so this went out on Stripe and never on QR. Fire-and-forget: the confirmation
   // itself has already been recorded, and a mail failure must not undo it.
   try{
-    const _mt=(await supaClient.auth.getSession()).data.session.access_token;
+    // BYLO (await getSession()).data.session.access_token -- kdyz session chybi, tohle nespadne
+    // do prazdneho tokenu, ale rovnou na TypeError na `undefined.access_token`.
+    const _mt=await _freshTok();
     fetch('/api/cohort-deposit-mail',{ method:'POST', headers:{'Content-Type':'application/json','x-access-token':_mt}, body:JSON.stringify({ cohort_member_id:memberId }) });
   }catch(e){}
   try{ fetch('/api/cohort-capi',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ cohort_id:window._crCohortId, event:'Purchase', event_id:'cp_'+memberId, value:dep, currency:cur, email:m.email||undefined, phone:m.phone||undefined, fbp:m.fbp||undefined, fbc:m.fbc||undefined }) }); }catch(e){}
@@ -12893,21 +12895,30 @@ async function showRescheduleConfirmation(id){
 // d = { gym_id, class_name, class_date, class_time, refund, currency }
 async function showCancelConfirmation(d){
   d=d||{};
-  return _showCancelConf(d.gym_id, d.class_name, d.class_date, d.class_time, d);
+  return _showCancelConf(d.gym_id||null, d.class_name, d.class_date, d.class_time, d);
 }
 async function _showCancelConf(gymId, className, classDate, classTime, d){
+  d=d||{};
   const EN=LANG==='en';
   let c=null;
-  try{
-    let _q=supaClient.from('gym_excuses').select('*').eq('gym_id',gymId).eq('class_name',className||null).eq('class_date',classDate||null);
-    if(currentUser && currentUser.id) _q=_q.eq('student_id',currentUser.id);
-    if(classTime) _q=_q.eq('class_time',classTime);
-    const { data }=await _q.limit(1);
-    c=(data&&data[0])||null;
-  }catch(e){}
-  if(!c){ toast('\u26a0\ufe0f '+(EN?'Confirmation not found':'Potvrzen\u00ed se nena\u0161lo')); return; }
+  // U skupinovky je pramenem radek v gym_excuses. U soukromky zadny neexistuje -- tam ho
+  // nahradi to, co s sebou nese notifikace. Bez tohohle by potvrzeni u 1:1 nikdy nevzniklo.
+  if(gymId){
+    try{
+      let _q=supaClient.from('gym_excuses').select('*').eq('gym_id',gymId).eq('class_name',className||null).eq('class_date',classDate||null);
+      if(currentUser && currentUser.id) _q=_q.eq('student_id',currentUser.id);
+      if(classTime) _q=_q.eq('class_time',classTime);
+      const { data }=await _q.limit(1);
+      c=(data&&data[0])||null;
+    }catch(e){}
+  }
+  if(!c){
+    if(!(d && (d.refund!=null || d.coach_id || d.cancelled_at))){ toast('\u26a0\ufe0f '+(EN?'Confirmation not found':'Potvrzen\u00ed se nena\u0161lo')); return; }
+    c={ student_name:(currentUser&&currentUser.name)||'', reason_key:(d.reason_key||null), note:(d.note||''), created_at:(d.cancelled_at||new Date().toISOString()) };
+  }
   let prov='';
-  try{ const { data:_g }=await supaClient.from('gyms').select('legal_name,name').eq('id',gymId).maybeSingle(); prov=(_g&&(_g.legal_name||_g.name))||''; }catch(e){}
+  if(gymId){ try{ const { data:_g }=await supaClient.from('gyms').select('legal_name,name').eq('id',gymId).maybeSingle(); prov=(_g&&(_g.legal_name||_g.name))||''; }catch(e){} }
+  else if(d.coach_id){ try{ const { data:_p }=await supaClient.from('profiles').select('legal_name,name').eq('id',d.coach_id).maybeSingle(); prov=(_p&&(_p.legal_name||_p.name))||''; }catch(e){} }
   const esc=(typeof escapeHtml==='function')?escapeHtml:(x=>String(x==null?'':x));
   // Cas ZAPISU omluvy, ne jen datum -- v pripadnem sporu rozhoduje, jak dlouho pred lekci prisla.
   let issued='', issuedFull='';
@@ -13163,6 +13174,24 @@ async function _issueCancelConf(b, occ, refund){
         refund:(refund!=null?refund:null), currency:(b.currency||'CZK') }),
       message:'\u{1F9FE} '+(LANG==='en'?'Class cancelled: ':'Lekce zru\u0161ena: ')+((occ&&occ.name)||'')+' ('+_ds+' '+((occ&&occ.time)||'')+')' });
   }catch(e){ console.error('_issueCancelConf', e&&e.message); }
+}
+// Potvrzeni o zruseni SOUKROMKY. Posila se OBEMA stranam: student potrebuje doklad, ze zrusil
+// a kolik mu prislo zpatky, kouc potrebuje doklad, ze zrusenou lekci ma podlozenou. U skupinovky
+// staci student, protoze klub ma vlastni prehled -- tady jsou strany jen dve.
+async function _issuePrivateCancelConf(o){
+  try{
+    const _d=o.date?new Date(o.date):null;
+    const _ds=_d?(_d.getDate()+'.'+(_d.getMonth()+1)+'.'):'';
+    const _data={ kind:'cancel_conf', gym_id:null, coach_id:o.coach_id||null,
+      class_name:o.name||(LANG==='en'?'1:1 lesson':'Soukrom\u00e1 lekce'), class_date:o.date||null, class_time:o.time||null,
+      refund:(o.refund!=null?o.refund:null), currency:(o.currency||'CZK'),
+      note:(o.reason||''), cancelled_at:new Date().toISOString() };
+    const _msg='\u{1F9FE} '+(LANG==='en'?'Lesson cancelled: ':'Lekce zru\u0161ena: ')+_ds+' '+(o.time||'');
+    const _rows=[];
+    if(o.student_id) _rows.push({ user_id:o.student_id, type:'system', read:false, data:JSON.stringify(_data), message:_msg });
+    if(o.coach_id)   _rows.push({ user_id:o.coach_id,   type:'system', read:false, data:JSON.stringify(_data), message:_msg });
+    if(_rows.length) await supaClient.from('notifications').insert(_rows);
+  }catch(e){ console.error('_issuePrivateCancelConf', e&&e.message); }
 }
 async function cancelGymDropin(b, _after){
   if(!b) return;
@@ -15259,7 +15288,9 @@ async function openCohortDash(cohortId, cohortName){
 
   let coh=null, pays=[], members=[];
   try{ const { data }=await supaClient.from('gym_cohorts').select('id,name,currency,ad_spend,months,stripe_account').eq('id',cohortId).single(); coh=data; }catch(e){}
-  try{ var _ps=await supaClient.auth.getSession(); var _pt=(_ps&&_ps.data&&_ps.data.session&&_ps.data.session.access_token)||'';
+  // BYLO getSession(): ten vraci i PROSLY token, takze endpoint odpovedel 401 "bad token"
+  // a klub videl "Nelze nacist platby" misto plateb. _freshTok() token obnovi.
+  try{ var _pt=await _freshTok();
     const _pr=await fetch('/api/cohort-payments?cohort='+encodeURIComponent(cohortId), { headers:{ 'x-access-token':_pt } });
     if(_pr.ok){ const _pj=await _pr.json(); pays=((_pj&&_pj.payments)||[]).filter(function(p){ return p.status!=='refunded'; }); }
   }catch(e){}
@@ -15438,7 +15469,8 @@ async function _cohMemberPayments(memberId, wrap){
   if(!wrap) return; const EN=LANG==='en';
   wrap.innerHTML='<div style="font-size:11px;color:var(--light);padding:6px 0;">'+(EN?'Loading...':'Na\u010d\u00edt\u00e1m...')+'</div>';
   let rows=[]; let _err='';
-  try{ var _s=await supaClient.auth.getSession(); var _tok=(_s&&_s.data&&_s.data.session&&_s.data.session.access_token)||'';
+  // BYLO getSession(): prosly token -> 401 "bad token" v "Co zaplatil". _freshTok() ho obnovi.
+  try{ var _tok=await _freshTok();
     const r=await fetch('/api/cohort-payments?member='+encodeURIComponent(memberId), { headers:{ 'x-access-token':_tok } });
     if(!r.ok){ try{ var _ej=await r.json(); _err=(_ej&&_ej.error)||('HTTP '+r.status); }catch(e){ _err='HTTP '+r.status; } }
     else { const j=await r.json(); rows=((j&&j.payments)||[]).filter(function(p){ return p.status!=='refunded'; }); window._cohLastPA=Number((j&&j.paid_amount)||0); window._cohLastCur=(j&&j.currency)||'CZK'; }
@@ -15755,11 +15787,14 @@ async function openCohortRemainder(memberId){
     }catch(e){ toast('\u26a0\ufe0f '+e.message); pb.disabled=false; pb.textContent=(EN?'Pay ':'Zaplatit ')+fmtPrice(rem,cur); }
   };
 }
-function _cohEnrolledThanks(){
+// months = kolik mesicu ta platba pokryla. Bylo tu natvrdo "1. mesic je doplaceny", takze kdo
+// zaplatil dva mesice naraz, precetl si, ze ma zaplaceny jeden -- a sel se ptat klubu.
+function _cohEnrolledThanks(months){
   const EN=LANG==='en';
+  const _n=Math.max(1, parseInt(months,10)||1);
   let ov=document.getElementById('cohSignupOv'); if(ov) ov.remove();
   ov=document.createElement('div'); ov.id='cohSignupOv'; ov.style.cssText='position:fixed;inset:0;background:#fff;z-index:100001;display:flex;align-items:center;justify-content:center;padding:24px;';
-  ov.innerHTML='<div style="max-width:400px;text-align:center;"><div style="font-size:46px;margin-bottom:10px;">\u2705</div><div style="font-family:Bebas Neue;font-size:28px;color:var(--dark);">'+(EN?'Enrolled!':'Zaps\u00e1no!')+'</div><p style="font-size:14px;color:var(--mid);line-height:1.55;margin:10px 0 20px;">'+(EN?'Month 1 is paid in full. See you on the mats!':'1. m\u011bs\u00edc je doplacen\u00fd. Ahoj na tr\u00e9ninku!')+'</p><button onclick="document.getElementById(\'cohSignupOv\').remove();location.href=\'/\';" style="padding:13px 22px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:pointer;">'+(EN?'Done':'Hotovo')+'</button></div>';
+  ov.innerHTML='<div style="max-width:400px;text-align:center;"><div style="font-size:46px;margin-bottom:10px;">\u2705</div><div style="font-family:Bebas Neue;font-size:28px;color:var(--dark);">'+(EN?'Enrolled!':'Zaps\u00e1no!')+'</div><p style="font-size:14px;color:var(--mid);line-height:1.55;margin:10px 0 20px;">'+(EN?(_n>1?('Months 1–'+_n+' are paid in full. See you on the mats!'):'Month 1 is paid in full. See you on the mats!'):(_n>1?('1.\u2013'+_n+'. m\u011bs\u00edc je zaplacen\u00fd. Ahoj na tr\u00e9ninku!'):'1. m\u011bs\u00edc je doplacen\u00fd. Ahoj na tr\u00e9ninku!'))+'</p><button onclick="document.getElementById(\'cohSignupOv\').remove();location.href=\'/\';" style="padding:13px 22px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:pointer;">'+(EN?'Done':'Hotovo')+'</button></div>';
   document.body.appendChild(ov);
 }
 
@@ -29986,6 +30021,7 @@ async function openChatWithCoach(coachId){
 }
 
 async function coachCancelBooking(d){
+  let _refunded=null;
   if(!confirm(LANG==='en'?'Really cancel this booking? The student will be refunded 100%.':'Opravdu zrušit tuto rezervaci? Studentovi se vrátí 100% částky.')) return;
   const reason = (prompt(LANG==='en'?'Reason for cancelling (required — the student will see it):':'Důvod zrušení (povinné — uvidí ho student):', '')||'').trim();
   if(!reason){ toast(L('⚠️ Důvod zrušení je povinný')); return; }
@@ -29996,7 +30032,10 @@ async function coachCancelBooking(d){
       const j = await r.json();
       if(j.error){ toast((LANG==='en'?'⚠️ Refund error: ':'⚠️ Chyba refundu: ')+j.error); return; }
       try{ window._myTxCache=null; window._myTxCacheAt=0; }catch(e){} // refund mění čísla v přehledu
-      toast(LANG==='en'?`✅ Cancelled. Refunded to student: ${j.refunded} Kč`:`✅ Zrušeno. Studentovi vráceno: ${j.refunded} Kč`);
+      if(j.refunded!=null) _refunded=Number(j.refunded);
+      // Mena byla natvrdo "Kč" -- u eurove soukromky to lhalo. A castka se brala az z odpovedi
+      // serveru, ne z d.amt, protoze server pocita procenta a je jedinym pramenem.
+      toast((LANG==='en'?'✅ Cancelled. Refunded to student: ':'✅ Zrušeno. Studentovi vráceno: ')+fmtPrice(j.refunded, d.cur||'CZK')+' '+_curSym(d.cur||'CZK'));
     } else {
       toast(L('✅ Rezervace zrušena'));
     }
@@ -30008,8 +30047,10 @@ async function coachCancelBooking(d){
     await supaClient.from('notifications').insert({
       user_id: d.student, type:'cancelled', read:false,
       data: JSON.stringify({ kind:'coach_cancelled_booking', coach: currentUser.name||'Kouč', date: d.date, time: d.time, reason: reason||'', amt: d.amt }),
-      message:`❌ Tvůj kouč ${currentUser.name || 'Kouč'} ti zrušil lekci na ${d.date} v ${d.time}.${reason ? ' Důvod: '+reason : ''} Vrátili jsme ti 100% částky (${d.amt} Kč).`
+      message:`❌ Tvůj kouč ${currentUser.name || 'Kouč'} ti zrušil lekci na ${d.date} v ${d.time}.${reason ? ' Důvod: '+reason : ''} Vrátili jsme ti 100 % částky (${fmtPrice((_refunded!=null?_refunded:d.amt), d.cur||'CZK')} ${_curSym(d.cur||'CZK')}).`
     });
+    try{ await _issuePrivateCancelConf({ student_id:d.student, coach_id:(currentUser&&currentUser.id)||null, name:(d.disc||null),
+      date:d.date, time:d.time, refund:(_refunded!=null?_refunded:Number(d.amt)||0), currency:(d.cur||'CZK'), reason:reason||'' }); }catch(e){}
     loadCoachBookings();
   } catch(e){
     console.error('Coach cancel error:', e);
@@ -30609,7 +30650,7 @@ async function cancelBooking(d){
         ? (LANG==='en'?`Really cancel this booking? We'll refund you ${refundInfo} of the amount.`:`Opravdu zrušit rezervaci? Vrátíme ti ${refundInfo} částky.`)
         : (LANG==='en'?'Really cancel this booking? You paid by transfer, so settle the money with the coach.':'Opravdu zrušit rezervaci? Platil jsi převodem, takže peníze řeš přímo s koučem.')
       )) return;
-  let _srvPct=null;
+  let _srvPct=null, _refunded=null;
   const reason = prompt(LANG==='en'?'Reason for cancelling (optional, the coach will see it):':'Důvod zrušení (volitelné, uvidí ho kouč):', '') || '';
 
   try {
@@ -30621,8 +30662,12 @@ async function cancelBooking(d){
         // Procento počítá server a vrací ho v odpovědi. Dopočítávat si ho tady znovu znamená
         // dvě pravdy o jedné částce, které se rozejdou při první změně sazebníku.
         if(j.pct!=null) _srvPct=Number(j.pct);
+        if(j.refunded!=null) _refunded=Number(j.refunded);
       toast((LANG==='en'?'✅ Cancelled. Refunded: ':'✅ Zrušeno. Vráceno: ')+fmtPrice(j.refunded, d.cur||'CZK')+' '+_curSym(d.cur||'CZK'));
     } else {
+      // Prevodem: MTL penize nedrzi, takze se nic nevraci pres appku -- 0 je tu pravdiva
+      // odpoved, ne chybejici udaj, a doklad to tak i napise.
+      _refunded=0;
       toast(L('✅ Rezervace zrušena'));
     }
     // Uvolni slot
@@ -30639,6 +30684,10 @@ async function cancelBooking(d){
         data: JSON.stringify({ kind:'student_cancelled_booking', student: currentUser.name||'Student', date: d.date, time: d.time, reason: reason||'' }),
         message:`❌ Zrušená rezervace: ${currentUser.name || 'Student'} zrušil lekci na ${d.date} v ${d.time}.${reason ? ' Důvod: '+reason : ''}`
       });
+      // Doklad o zruseni obema stranam -- vcetne toho, kolik se opravdu vratilo.
+      // _refunded je castka od serveru, ne dopocet z klienta.
+      try{ await _issuePrivateCancelConf({ student_id:currentUser.id, coach_id:bk.coach_id, name:(d.disc||null),
+        date:d.date, time:d.time, refund:_refunded, currency:(d.cur||'CZK'), reason:reason||'' }); }catch(e){}
     }
     try{ window._myTxCache=null; window._myTxCacheAt=0; }catch(e){}
     try{ if($('shCoachDash') && $('shCoachDash').classList.contains('open') && typeof openCoachDash==='function') openCoachDash(); }catch(e){}
@@ -35895,7 +35944,7 @@ async function showPaidPopup(){
     if(_coh){
       try{ const _src=params.get('src'); if(_src) _setCohSrc(_src); }catch(e){}
       if(params.get('deposit')==='ok'){ try{ _cohThankYou(_coh, params.get('cm')||''); }catch(e){} try{ window.history.replaceState({}, '', location.pathname); }catch(e){} return; }
-      if(params.get('firstmonth')==='ok'){ try{ _cohEnrolledThanks(); }catch(e){} try{ window.history.replaceState({}, '', location.pathname); }catch(e){} return; }
+      if(params.get('firstmonth')==='ok'){ try{ _cohEnrolledThanks(params.get('m')||1); }catch(e){} try{ window.history.replaceState({}, '', location.pathname); }catch(e){} return; }
       if(params.get('monthpaid')==='ok'){ try{ toast(LANG==='en'?'\u2705 Month paid \u2014 thank you!':'\u2705 M\u011bs\u00edc zaplacen \u2014 d\u00edky!'); }catch(e){} try{ window.history.replaceState({}, '', location.pathname); }catch(e){} return; }
       try{ openCohortSignup(_coh, true); }catch(e){}
       return;
