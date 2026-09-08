@@ -55,21 +55,40 @@ export function ladderRate(mode, o) {
   // udělené zdarma, tedy partner=true bez partner_sub. Parametr `founding` se schválně nemaže
   // ze signatury ani ze selectů: sloupec v DB zůstává a ignorovat ho je bezpečnější než honit
   // jeho odstranění napříč šesti soubory kvůli něčemu, co se nepoužívá.
-  // VYHRÁVÁ NEJLEPŠÍ SAZBA, ne první, která sedí. Dřív se stupně zkoušely po řadě a první
-  // shoda vracela -- takže schválená organizace, která si vydřela Bankai, platila 1,5 %
-  // místo 1 %, zatímco běžný klub se stejným výkonem platil 1 %. Organizace tím byla za to,
-  // že je organizace, TRESTÁNA. Stupně se nevylučují, jsou to důvody ke slevě, a když jich
-  // někdo splní víc, má dostat tu nejlepší. Čísla se nemění, mění se jen výběr mezi nimi.
+  if (o.partner) return 0.005;                                   // EP
+  if (o.org) return 0.015;                                       // schválená organizace, obě koleje
   const s = o.score || 0;
-  const stripe = (mode === 'stripe');
-  const cand = [ stripe ? 0.02 : 0.025 ];                        // základ
-  if (s >= 2) cand.push(stripe ? 0.015 : 0.02);                  // Shikai
-  if (s >= 5 && o.bankai) cand.push(stripe ? 0.01 : 0.0125);     // Bankai
-  if (o.org) cand.push(0.015);                                   // schválená organizace, obě koleje
-  if (o.partner) cand.push(0.005);                               // EP
-  return Math.min.apply(null, cand);
+  if (mode === 'stripe') {
+    if (s >= 5 && o.bankai) return 0.01;                         // Bankai
+    return (s >= 2) ? 0.015 : 0.02;                              // Shikai / base
+  }
+  if (s >= 5 && o.bankai) return 0.0125;                         // Bankai na bance
+  return (s >= 2) ? 0.02 : 0.025;                                // Shikai / base
 }
 
+
+// ── ORGANIZACE ───────────────────────────────────────────────────────────────────────────
+// Organizace nejde po zebricku. Ten je stavěný na opakovaný prodej treninku -- Shikai i Bankai
+// se odemykaji poctem privatek nebo clenstvi, coz poradatel akci nikdy mit nebude. Sazba je
+// proto pevna a odviji se od toho, CO organizace prodava:
+//   promotion  -- 1 % ze vseho. Rezim plateb je u nej natvrdo Stripe.
+//   federation -- 1 % ze souteze a fight nights, 0 % ze skoleni, seminaru, kempu a zkousek.
+//                 Vzdelavani trenéru roste cely ekosystem, tak ho nezdanujeme.
+// Zavadeci nula (intro_free_until) prebiji obojí, stejne jako u zeme v platform_config.
+const ORG_PAID_EVENT_TYPES = ['fight_night', 'competition'];
+
+export function orgRate(org, eventType) {
+  if (!org) return 0.01;
+  // Zavadeci obdobi: do uvedeneho dne VCETNE se neuctuje nic.
+  if (org.intro_free_until) {
+    const end = new Date(String(org.intro_free_until) + 'T23:59:59');
+    if (!isNaN(end.getTime()) && end.getTime() >= Date.now()) return 0;
+  }
+  if (org.kind === 'federation') {
+    return ORG_PAID_EVENT_TYPES.includes(String(eventType || '')) ? 0.01 : 0;
+  }
+  return 0.01;   // promotion
+}
 
 // Resolve the profile of whoever owns the money (ownerId, or via gymId / gym stripe_account).
 export async function resolveOwner(sbGet, { ownerId, gymId, gymAccount }) {
