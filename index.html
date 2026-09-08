@@ -26132,6 +26132,90 @@ function _openCommissionDoklad(d){
   if(currentUser && typeof openAccounting==='function'){ openAccounting({ coachId: currentUser.id, paidTo:'coach' }, _t+(currentUser.name||'')); return; }
   toast(LANG==='en'?'⚠️ Pick a club or coach first':'⚠️ Nejdřív vyber klub nebo kouče');
 }
+// PROVIZE A DOKLADY VUCI MTL. Mesicni prehled toho, co MTL uctuje poskytovateli -- opacny
+// smer penez nez "Vsechny doklady studentum".
+// DVE KOLEJE, ktere se chovaji jinak a nesmi se michat:
+//   Stripe          -- provize se strhne rovnou z platby, nic se neakumuluje, zbyva jen doklad.
+//   hotovost/QR/PIS -- provize se nasbira za mesic a strhne z karty k 6. dni dalsiho mesice.
+// Vse se cte z `transactions` (commission_month, commission_status, commission_collected_at),
+// takze rozklik mesice nestoji zadny dalsi dotaz -- data uz v prohlizeci jsou.
+async function openMtlCommissions(scope){
+  const EN=LANG==='en';
+  let ov=document.getElementById('mtlCommOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='mtlCommOv';
+  ov.style.cssText='position:fixed;inset:0;z-index:100040;background:var(--bg);overflow-y:auto;';
+  ov.innerHTML='<div style="display:flex;align-items:center;gap:10px;padding:calc(env(safe-area-inset-top,0px) + 12px) 16px 12px;border-bottom:1px solid var(--border);">'
+    +'<button id="_mcBack" style="padding:8px 14px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">\u2039 '+(EN?'Back':'Zp\u011bt')+'</button>'
+    +'<div style="font-family:\'Bebas Neue\';font-size:20px;letter-spacing:.03em;">'+(EN?'Commissions to MTL':'Provize v\u016f\u010di MTL')+'</div></div>'
+    +'<div id="_mcBody" style="padding:16px 16px 60px;"><p style="color:var(--light);font-size:13px;text-align:center;padding:30px;">'+(EN?'Loading\u2026':'Na\u010d\u00edt\u00e1m\u2026')+'</p></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#_mcBack').onclick=function(){ ov.remove(); };
+  const body=ov.querySelector('#_mcBody');
+  let tx=[];
+  try{
+    const _tok=await _freshTok();
+    if(scope&&scope.gymId){
+      const r=await fetch('/api/gym-transactions?gymId='+encodeURIComponent(scope.gymId), { headers:{'x-access-token':_tok} });
+      const j=await r.json(); tx=(j&&j.transactions)||[];
+    } else {
+      const r=await fetch('/api/my-transactions', { headers:{'x-access-token':_tok} });
+      const j=await r.json(); tx=((j&&j.coachTx)||[]).filter(function(t){ return t.paid_to==='coach'; });
+    }
+  }catch(e){}
+  const _mo=function(t){ return t.commission_month || String(t.created_at||'').slice(0,7); };
+  const _fee=function(t){ return (Number(t.mtl_fee||0)-Number(t.mtl_fee_refunded||0))/100; };
+  const _byM={};
+  tx.forEach(function(t){
+    if(!(Number(t.mtl_fee||0)>0)) return;
+    const k=_mo(t); if(!k) return;
+    const _bank=(t.payment_method==='cash'||t.payment_method==='qr'||t.payment_method==='pis');
+    const m=_byM[k]||(_byM[k]={ key:k, cur:(t.currency||'CZK').toUpperCase(), stripe:0, bank:0, rows:[], status:null, at:null });
+    if(_bank){ m.bank+=_fee(t); if(t.commission_status){ m.status=(t.commission_status==='failed')?'failed':((m.status==='failed')?'failed':t.commission_status); } if(t.commission_collected_at) m.at=t.commission_collected_at; }
+    else m.stripe+=_fee(t);
+    m.rows.push(t);
+  });
+  const months=Object.keys(_byM).sort().reverse();
+  if(!months.length){ body.innerHTML='<p style="color:var(--light);font-size:13px;text-align:center;padding:40px;">'+(EN?'No commissions yet.':'Zat\u00edm \u017e\u00e1dn\u00e9 provize.')+'</p>'; return; }
+  const _MO=EN?['January','February','March','April','May','June','July','August','September','October','November','December']:['Leden','\u00danor','B\u0159ezen','Duben','Kv\u011bten','\u010cerven','\u010cervenec','Srpen','Z\u00e1\u0159\u00ed','\u0158\u00edjen','Listopad','Prosinec'];
+  const _mName=function(k){ const p=String(k).split('-'); return (_MO[(parseInt(p[1],10)||1)-1]||k)+' '+p[0]; };
+  const _curM=new Date().toISOString().slice(0,7);
+  const _pill=function(m){
+    if(m.bank<=0) return '<span style="font-size:11px;background:#EEF4FF;color:var(--blue);padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'via Stripe':'sr\u00e1\u017eeno Stripem')+'</span>';
+    if(m.key>=_curM) return '<span style="font-size:11px;background:#FFF4E5;color:#9A5B00;padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'running':'b\u011b\u017e\u00ed')+'</span>';
+    if(m.status==='collected') return '<span style="font-size:11px;background:#E8F5EE;color:#006040;padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'charged':'str\u017eeno')+'</span>';
+    if(m.status==='failed') return '<span style="font-size:11px;background:#FDECEC;color:#8a1c1c;padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'failed':'nezda\u0159ilo')+'</span>';
+    return '<span style="font-size:11px;background:var(--surf);color:var(--mid);padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'pending':'\u010dek\u00e1')+'</span>';
+  };
+  body.innerHTML=months.map(function(k){
+    const m=_byM[k]; const _tot=m.stripe+m.bank;
+    const _sub=[ (m.stripe>0?('Stripe '+fmtPrice(m.stripe,m.cur)):''),
+                 (m.bank>0?((EN?'cash/QR ':'hotovost/QR ')+fmtPrice(m.bank,m.cur)):''),
+                 (m.at?((EN?'charged ':'str\u017eeno ')+new Date(m.at).toLocaleDateString(EN?'en-GB':'cs-CZ')):'') ].filter(Boolean).join(' \u00b7 ');
+    return '<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;margin-bottom:10px;overflow:hidden;">'
+      +'<button class="mcMonth" data-k="'+k+'" style="width:100%;display:flex;align-items:center;gap:10px;padding:13px 14px;background:none;border:none;cursor:pointer;font-family:inherit;text-align:left;">'
+        +'<div style="flex:1;min-width:0;"><div style="font-size:15px;font-weight:700;color:var(--dark);">'+_mName(k)+'</div>'
+        +'<div style="font-size:12px;color:var(--mid);margin-top:2px;">'+escapeHtml(_sub)+'</div></div>'
+        +'<div style="font-size:15px;font-weight:700;color:var(--dark);white-space:nowrap;">'+fmtPrice(_tot,m.cur)+'</div>'
+        +_pill(m)+'</button>'
+      +'<div class="mcRows" data-k="'+k+'" style="display:none;border-top:1px solid var(--border);padding:4px 14px 10px;"></div>'
+      +'</div>';
+  }).join('');
+  body.querySelectorAll('.mcMonth').forEach(function(b){ b.onclick=function(){
+    const wrap=body.querySelector('.mcRows[data-k="'+b.dataset.k+'"]'); if(!wrap) return;
+    if(wrap.style.display!=='none'){ wrap.style.display='none'; return; }
+    const m=_byM[b.dataset.k];
+    wrap.innerHTML=m.rows.sort(function(x,y){ return String(y.created_at||'').localeCompare(String(x.created_at||'')); }).map(function(t){
+      const _pm={ stripe:'\ud83d\udcb3', qr:'\ud83d\udcf2', pis:'\ud83c\udfe6', cash:'\ud83d\udcb5' }[t.payment_method]||'';
+      const _d=t.created_at?new Date(t.created_at).toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric'}):'';
+      const _r=(t.mtl_rate!=null)?(' \u00b7 '+(Math.round(Number(t.mtl_rate)*1000)/10)+' %'):'';
+      return '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);font-size:12.5px;">'
+        +'<div style="flex:1;min-width:0;color:var(--dark);">'+_pm+' '+escapeHtml(_mpItemLabel(t))+'<span style="color:var(--light);"> \u00b7 '+_d+'</span></div>'
+        +'<div style="color:var(--mid);white-space:nowrap;">'+fmtPrice(Number(t.gross_amount||0)/100,(t.currency||m.cur))+_r+'</div>'
+        +'<div style="font-weight:700;color:var(--dark);white-space:nowrap;min-width:64px;text-align:right;">'+fmtPrice(_fee(t),(t.currency||m.cur))+'</div></div>';
+    }).join('');
+    wrap.style.display='block';
+  }; });
+}
 function openAccounting(filter, title){
   // Účetnictví bez filtru nedává smysl: sečetlo by dohromady kouče a všechny jeho kluby a
   // neukázalo by doklady, které jsou vždycky za jeden subjekt. Volání bez cíle je vždycky chyba
@@ -34514,9 +34598,16 @@ window._myPayRows=null;
 function _mpItemLabel(t){
   const EN=LANG==='en';
   if(t.type==='course'){
+    // Kolik mesicu ta platba pokryla. Stalo tu natvrdo "1. mesic" i tehdy, kdyz clovek zaplatil
+    // dva naraz -- doklad pak zněl na neco jineho, nez za co bylo zaplaceno.
+    const _n=Math.max(1, parseInt(t.months,10)||1);
     if(t.income_class==='cohort_deposit') return EN?'Course \u00b7 deposit':'Kurz \u00b7 z\u00e1loha';
-    if(t.income_class==='cohort_first_month') return EN?'Course \u00b7 month 1':'Kurz \u00b7 1. m\u011bs\u00edc';
-    if(t.income_class==='cohort_month') return EN?'Course \u00b7 month':'Kurz \u00b7 m\u011bs\u00edc';
+    if(t.income_class==='cohort_first_month') return (_n>1)
+      ? (EN?('Course \u00b7 months 1\u2013'+_n):('Kurz \u00b7 1.\u2013'+_n+'. m\u011bs\u00edc'))
+      : (EN?'Course \u00b7 month 1':'Kurz \u00b7 1. m\u011bs\u00edc');
+    if(t.income_class==='cohort_month') return (_n>1)
+      ? (EN?('Course \u00b7 '+_n+' months'):('Kurz \u00b7 '+_n+' m\u011bs\u00edce'))
+      : (EN?'Course \u00b7 month':'Kurz \u00b7 m\u011bs\u00edc');
     return EN?'Course':'Kurz';
   }
   if(t.type==='membership') return EN?'Membership':'\u010clenstv\u00ed';
@@ -34693,24 +34784,28 @@ async function _openFinance(mode){
     // vytažený jako samostatnou položku v nastavení, takže dvě tlačítka vedle sebe vedla do
     // financí a nikdo netušil, čím se liší -- přitom je to jedna a ta samá agenda.
     box.innerHTML='<div style="'+lbl+'">'+(EN?'Receipts & exports':'Doklady & v\u00fdkazy')+'</div>'
-      +'<button id="mgDokladyBtn" style="'+bs+'background:#F5F2EE;color:var(--dark);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;gap:8px;">\ud83e\uddfe '+(EN?'History & receipts':'V\u0161echny doklady')+'</button>'
+      +'<button id="mgDokladyBtn" style="'+bs+'background:#F5F2EE;color:var(--dark);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;gap:8px;">\ud83e\uddfe '+(EN?'Receipts issued to students':'V\u0161echny doklady student\u016fm')+'</button>'
       +'<button id="mgAccBtn" style="'+bs+'background:#EEF4FF;color:var(--blue);border:1px solid #CFE0FF;">\ud83d\udcd2 '+(EN?'Accounting export (for your accountant)':'Podklady pro \u00fa\u010detn\u00ed (export)')+'</button>'
+      +'<button id="mgMtlCommBtn" style="'+bs+'background:var(--surf);color:var(--dark);border:1px solid var(--border);">\ud83e\uddfe '+(EN?'Commissions & receipts to MTL':'Provize a doklady v\u016f\u010di MTL')+'</button>'
       +(_hasCoachStripe?('<div style="'+lbl+'margin-top:14px;">'+(EN?'Payouts':'V\u00fdplaty')+'</div>'+'<button id="mgCoachStripeBtn" style="'+bs+'background:#635BFF;color:#fff;border:none;">\ud83d\udcb3 '+(EN?'Open my Stripe \u2014 balance & payouts \u2192':'Otev\u0159\u00edt m\u016fj Stripe \u2014 z\u016fstatek a vyplacen\u00ed \u2192')+'</button>'):'');
     if($('mgDokladyBtn')) $('mgDokladyBtn').onclick=()=>{ openSheet('shClubDoklady'); _loadClubDoklady('coach'); };
     if($('mgAccBtn')) $('mgAccBtn').onclick=()=>openAccounting({ coachId: currentUser.id, paidTo:'coach' }, (EN?'Accounting \u00b7 ':'Podklady \u00b7 ')+(currentUser.name||''));
+    if($('mgMtlCommBtn')) $('mgMtlCommBtn').onclick=()=>openMtlCommissions({ coachId: currentUser.id });
     if($('mgCoachStripeBtn')) $('mgCoachStripeBtn').onclick=()=>openMyStripe(null, true);
     return;
   }
     box.innerHTML=
     '<div style="'+lbl+'">'+(EN?'Receipts & exports':'Doklady & v\u00fdkazy')+'</div>'
-    +'<button id="mgDokladyBtn" style="'+bs+'background:#F5F2EE;color:var(--dark);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;gap:8px;">\ud83e\uddfe '+(EN?'History & receipts':'V\u0161echny doklady')+'</button>'
+    +'<button id="mgDokladyBtn" style="'+bs+'background:#F5F2EE;color:var(--dark);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;gap:8px;">\ud83e\uddfe '+(EN?'Receipts issued to students':'V\u0161echny doklady student\u016fm')+'</button>'
     +'<button id="mgAccBtn" style="'+bs+'background:#EEF4FF;color:var(--blue);border:1px solid #CFE0FF;">\ud83d\udcd2 '+(EN?'Accounting export (for your accountant)':'Podklady pro \u00fa\u010detn\u00ed (export)')+'</button>'
+      +'<button id="mgMtlCommBtn" style="'+bs+'background:var(--surf);color:var(--dark);border:1px solid var(--border);">\ud83e\uddfe '+(EN?'Commissions & receipts to MTL':'Provize a doklady v\u016f\u010di MTL')+'</button>'
     +(g.stripe_account?(
       '<div style="'+lbl+'margin-top:14px;">'+(EN?'Payouts':'V\u00fdplaty')+'</div>'
       +'<button id="mgStripeBtn" style="'+bs+'background:#635BFF;color:#fff;border:none;">\ud83d\udcb3 '+(EN?'Open club Stripe \u2014 balance & payouts \u2192':'Otev\u0159\u00edt Stripe klubu \u2014 z\u016fstatek a vyplacen\u00ed \u2192')+'</button>'
       +'<button id="mgStripeSwapBtn" style="'+bs+'background:var(--surf);color:var(--mid);border:1px solid var(--border);">\ud83d\udd04 '+(EN?'Change payout account (e.g. new company)':'Zm\u011bnit v\u00fdplatn\u00ed \u00fa\u010det (nap\u0159. nov\u00e9 s.r.o.)')+'</button>'
     ):'');
   if($('mgDokladyBtn')) $('mgDokladyBtn').onclick=()=>{ openSheet('shClubDoklady'); _loadClubDoklady((typeof g!=='undefined'&&g&&g.id)||null); };
+  if($('mgMtlCommBtn')) $('mgMtlCommBtn').onclick=()=>openMtlCommissions({ gymId: g.id, gymName: g.name||'' });
   if($('mgAccBtn')) $('mgAccBtn').onclick=()=>openAccounting({ payeeAccount: g.stripe_account, gymId: g.id }, (EN?'Accounting \u00b7 ':'Podklady \u00b7 ')+(g.name||''));
   if($('mgStripeBtn')) $('mgStripeBtn').onclick=()=>openMyStripe(g.id);
   if($('mgStripeSwapBtn')) $('mgStripeSwapBtn').onclick=()=>openGymStripeSwap(g.id, g.name);
@@ -34740,7 +34835,7 @@ async function _loadClubDoklady(_gidIn){
     _who=(_gg&&_gg.name)||((_myGymData&&_myGymData.name)||'');
   }
   // Do nadpisu, ať je vidět, čí doklady to jsou -- dvě entity, dva seznamy.
-  try{ const _t=document.getElementById('cdkTitle'); if(_t) _t.textContent=(EN?'History & receipts':'V\u0161echny doklady')+(_who?(' \u00b7 '+_who):''); }catch(e){}
+  try{ const _t=document.getElementById('cdkTitle'); if(_t) _t.textContent=(EN?'Receipts issued to students':'V\u0161echny doklady student\u016fm')+(_who?(' \u00b7 '+_who):''); }catch(e){}
   let rows=[];
   try{ const { data }=await supaClient.from('transactions').select('id,gross_amount,currency,type,payment_method,created_at,payment_intent,gym_id,coach_id,member_id,income_class,status,plan,cash_payer_name,test_mode').eq(_filter.col,_filter.val).order('created_at',{ascending:false}); rows=(data||[]).filter(function(t){ return t.status!=='refunded' && Number(t.gross_amount||0)>0; }); }catch(e){}
   // Jméno kupujícího je v member_id. Ověřeno na datech: chybí JEN u nákupu bez účtu -- lístek
