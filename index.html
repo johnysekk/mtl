@@ -7357,6 +7357,17 @@ function _termsBannerHidden(gid){ try{ return localStorage.getItem('mtl_terms_ba
 //   promotion  1 % ze vseho
 //   federation 1 % ze souteze a fight night, jinak 0 % (vzdelavani trenéru nezdanujeme)
 //   zavadeci nula (intro_free_until) prebiji obojí
+// Kdo je poskytovatel: schvaleny kouc nebo majitel klubu. Jen ten vidi akce oznacene
+// "pouze pro kouce a kluby" -- skoleni trenéru, rozhodcovske kurzy, jednani federace.
+function _isProviderUser(){
+  try{
+    if(!currentUser) return false;
+    if(currentUser.coach_status==='approved') return true;
+    if((window._myGyms||[]).length) return true;
+    if(_myGymData) return true;
+    return false;
+  }catch(e){ return false; }
+}
 const ORG_PAID_EVENT_TYPES=['fight_night','competition'];
 function orgRate(org, eventType){
   if(!org) return 0.01;
@@ -8599,6 +8610,9 @@ async function loadMoreEvents(){
   try{
     const today=new Date(); today.setHours(0,0,0,0);
     let q = supaClient.from('events').select('*').eq('status','approved').gte('starts_at', today.toISOString());
+    // Akce jen pro poskytovatele se studentovi vubec nenactou -- filtruje se na serveru,
+    // ne az pri vykresleni, aby se v odpovedi neobjevily ani nazvy.
+    if(!_isProviderUser()) q=q.or('providers_only.is.null,providers_only.eq.false');
     const hc=_deckHomeCountry(); if(hc && !_deckAbroad) q=q.eq('country', hc);
     const from=_evOffset + _EVENT_PAGE;
     const { data } = await q.order('starts_at',{ascending:true}).range(from, from + _EVENT_PAGE - 1);
@@ -8619,6 +8633,9 @@ async function renderEventsAsync(box){
   try{
     const today=new Date(); today.setHours(0,0,0,0);
     let _eq = supaClient.from('events').select('*').eq('status','approved').gte('starts_at', today.toISOString());
+    // Akce jen pro poskytovatele se studentovi vubec nenactou -- filtruje se na serveru,
+    // ne az pri vykresleni, aby se v odpovedi neobjevily ani nazvy.
+    if(!_isProviderUser()) _eq=_eq.or('providers_only.is.null,providers_only.eq.false');
     { const _ehc=_deckHomeCountry(); if(_ehc && !_deckAbroad) _eq=_eq.eq('country', _ehc); }
     const { data:evs } = await _eq.order('starts_at',{ascending:true}).range(0, _EVENT_PAGE - 1);
     _evOffset = 0; _evExhausted = !evs || evs.length < _EVENT_PAGE;
@@ -8754,9 +8771,13 @@ function openEventGymPick(elig){
 }
 function toLocalInput(iso){ if(!iso) return ''; const d=new Date(iso); const z=n=>String(n).padStart(2,'0'); return `${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}T${z(d.getHours())}:${z(d.getMinutes())}`; }
 async function openEventCreate(club, ev){
+  // Hostitelem muze byt klub i organizace. Kdyz se preda organizace (ma `kind`), jde akce
+  // pod ni: v radku bude organization_id misto gym_id a nabidne se volba "jen pro poskytovatele".
+  const _isOrgHost = !!(club && club.kind && (club.kind==='promotion'||club.kind==='federation'));
+  window._evOrg = _isOrgHost ? club : null;
   const g = club || _myGymData; if(!g){ toast(LANG==='en'?'⚠️ No club':'⚠️ Není klub'); return; }
   window._evEditing = ev||null;
-  window._evGym=g;
+  window._evGym=_isOrgHost?null:g;
   let _eds=[], _ets=[{name:'',price:''}];
   if(ev){ try{_eds=JSON.parse(ev.disciplines||'[]');}catch(e){} try{ const tt=JSON.parse(ev.ticket_tiers||'[]'); _ets = tt.length?tt:[{name:'',price:ev.ticket_price||''}]; }catch(e){ _ets=[{name:'',price:ev.ticket_price||''}]; } }
   window._evPoster = ev?(ev.poster||''):''; window._evDisc=_eds; window._evTiers=_ets; window._evIncome=(ev&&ev.income)||'side';
@@ -8801,6 +8822,9 @@ async function openEventCreate(club, ev){
     <label style="display:flex;gap:9px;align-items:center;font-size:13.5px;font-weight:600;cursor:pointer;margin-bottom:12px;"><input type="checkbox" id="evFree"><span>${LANG==='en'?'This event is free':'Akce je zdarma'}</span></label>
     <div id="evTiers"></div>
     <button type="button" id="evAddTier" style="width:100%;padding:10px;background:var(--surf);border:1px dashed var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:14px;font-size:13px;">+ ${LANG==='en'?'Add variant':'Přidat variantu'}</button>
+    <div id="evProvOnlyWrap" style="display:none;border:1px solid var(--border);border-radius:12px;padding:11px 13px;margin-bottom:12px;">
+      <label style="display:flex;align-items:flex-start;gap:9px;font-size:13.5px;font-weight:600;cursor:pointer;"><input type="checkbox" id="evProvOnly" style="width:18px;height:18px;flex:none;margin-top:1px;"> <span>🎓 ${LANG==='en'?'For coaches and clubs only':'Pouze pro kouče a kluby'}<br><span style="font-size:12px;font-weight:400;color:var(--mid);line-height:1.5;">${LANG==='en'?'Coach courses, referee training, federation meetings. Students will not see this event and cannot buy a ticket.':'Školení trenérů, rozhodčovské kurzy, jednání federace. Studenti akci neuvidí a lístek si nekoupí.'}</span></span></label>
+    </div>
     <div id="evSeekWrap" style="display:none;"><label style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600;margin-bottom:10px;cursor:pointer;"><input type="checkbox" id="evSeek" style="width:18px;height:18px;"> 🥊 ${LANG==='en'?'Looking for fighters':'Hledáme fightery'}</label>
     <textarea id="evFighterInfo" rows="2" style="${inp}display:none;resize:vertical;" placeholder="${LANG==='en'?'What fighters you want (weight, level, rules…)':'Jaké fightery chceš (váha, úroveň, pravidla…)'}"></textarea></div>
     <div style="margin-bottom:4px;"><label style="display:block;font-size:13px;font-weight:700;color:var(--dark);margin-bottom:6px;">${LANG==='en'?'Cancellation / event terms (optional)':'Storno / podmínky akce (nepovinné)'}</label>
@@ -8813,6 +8837,10 @@ async function openEventCreate(club, ev){
   if($('evPosterRemove')) $('evPosterRemove').onclick=function(){ window._evPoster=''; var pv=$('evPosterPv'); if(pv){ pv.style.backgroundImage=''; pv.style.display='none'; } this.style.display='none'; var _eab=$('evPosterBtn'); if(_eab) _eab.textContent=(LANG==='en'?'\ud83d\uddbc\ufe0f Add poster':'\ud83d\uddbc\ufe0f P\u0159idat poster'); toast(LANG==='en'?'Poster removed':'Poster odebr\u00e1n'); };
   $('evPosterInput').onchange=async(e)=>{ const file=e.target.files&&e.target.files[0]; if(!file) return; const blob=await cropImage(file, 2/1); e.target.value=''; if(!blob) return; toast(L('⬆️ Nahrávám...')); try{ const fileName=`${currentUser.id}-event-${Date.now()}.jpg`; const { error }=await supaClient.storage.from('gym-photos').upload(fileName, blob, { contentType:'image/jpeg', upsert:false }); if(error){ toast('⚠️ '+error.message); return; } const { data }=supaClient.storage.from('gym-photos').getPublicUrl(fileName); window._evPoster=data.publicUrl; const pv=$('evPosterPv'); if(pv){ pv.style.backgroundImage=`url('${data.publicUrl}')`; pv.style.display='block'; } toast(LANG==='en'?'✅ Poster added':'✅ Poster nahrán'); var _erb=$('evPosterRemove'); if(_erb) _erb.style.display='block'; var _eab=$('evPosterBtn'); if(_eab) _eab.textContent=(LANG==='en'?'\ud83d\uddbc\ufe0f Change poster':'\ud83d\uddbc\ufe0f Zm\u011bnit poster'); }catch(err){ toast('⚠️'); } };
   $('evSeek').onchange=()=>{ $('evFighterInfo').style.display=$('evSeek').checked?'block':'none'; };
+  // Volba "jen pro poskytovatele" se ukazuje jen u akce porádané organizací -- klub skoleni
+  // trenéru neporada a mel by tam zbytecny checkbox.
+  { const w=$('evProvOnlyWrap'); if(w) w.style.display=window._evOrg?'block':'none';
+    const c=$('evProvOnly'); if(c) c.checked=!!(window._evEditing&&window._evEditing.providers_only); }
   const _evSeekToggle=()=>{ const t=($('evType')&&$('evType').value)||''; const show=(t==='fight_night'||t==='competition'); const w=$('evSeekWrap'); if(w) w.style.display=show?'block':'none'; if(!show && $('evSeek')){ $('evSeek').checked=false; if($('evFighterInfo')) $('evFighterInfo').style.display='none'; } const _mc=$('evMinorConsent'); if(_mc) _mc.checked=(['seminar','camp','open_mat','grading','competition'].indexOf(t)>=0); };
   if($('evType')) $('evType').addEventListener('change', _evSeekToggle);
   document.querySelectorAll('.evDiscChip').forEach(c=>c.onclick=()=>{ const v=c.dataset.v; if(window._evDisc.includes(v)){ window._evDisc=window._evDisc.filter(x=>x!==v); c.style.background='var(--surf)'; c.style.borderColor='var(--border)'; c.style.color='var(--dark)'; } else { window._evDisc.push(v); c.style.background='var(--red)'; c.style.borderColor='var(--red)'; c.style.color='#fff'; } });
@@ -8891,7 +8919,11 @@ function evCheckSave(){
   const sv=$('evSave'); if(sv){ sv.disabled=bad; sv.style.opacity=bad?'0.45':'1'; sv.style.cursor=bad?'not-allowed':'pointer'; }
 }
 async function saveEvent(){
-  const g=window._evGym||_myGymData; if(!g){ toast('⚠️'); return; }
+  // Akci porada bud KLUB, nebo ORGANIZACE. Dosud slo jen o klub, takze poradatel bez
+  // treninkoveho klubu akci nevytvoril vubec. `host` je to, co ma mesto, menu a majitele;
+  // do radku jde bud gym_id, nebo organization_id, nikdy obojí.
+  const _org=window._evOrg||null;
+  const g=_org||window._evGym||_myGymData; if(!g){ toast('⚠️'); return; }
   const cur=window._evCur||g.currency||'CZK';
   const min=MIN_EVENT[cur]||MIN_EVENT.CZK;
   const title=($('evTitle').value||'').trim();
@@ -8915,7 +8947,10 @@ async function saveEvent(){
   const payeeSel=($('evPayee')&&$('evPayee').value)||'gym';
   const payout_coach_id = payeeSel==='gym' ? null : payeeSel;
   const isOwner = g.owner_id===currentUser.id;
-  const row={ gym_id:g.id, income:(window._evIncome||'side'), created_by:currentUser.id, status: isOwner?'approved':'pending', type:$('evType').value||'other', title, description:($('evDesc').value||'').trim()||null, poster: window._evPoster||null, disciplines: JSON.stringify(window._evDisc||[]), city: g.city||null, country: g.country||null, venue:($('evVenue').value||'').trim()||null, address:($('evAddr')?($('evAddr').value||'').trim():null)||null, city_lat: g.city_lat||null, city_lng: g.city_lng||null, starts_at: new Date($('evStart').value).toISOString(), ends_at: $('evEnd').value ? new Date($('evEnd').value).toISOString() : null, capacity: parseInt($('evCap').value)||null, min_age: (($('evAgeOn')&&$('evAgeOn').checked)?(parseInt($('evMinAge')&&$('evMinAge').value,10)||null):null), ticket_price: priceMin, ticket_tiers: JSON.stringify(tiers), payout_coach_id, currency: cur, seeking_fighters: !!$('evSeek').checked, fighter_info: ($('evFighterInfo').value||'').trim()||null, terms_text: ($('evTerms')?($('evTerms').value||'').trim():'')||null, minor_consent: tiers.some(t=>!!t.participant) };
+  const row={ gym_id:(_org?null:g.id), organization_id:(_org?_org.id:null),
+    // Skoleni trenéru, rozhodcovske kurzy: uvidi je jen kouc nebo majitel klubu.
+    providers_only: !!(_org && $('evProvOnly') && $('evProvOnly').checked),
+    income:(window._evIncome||'side'), created_by:currentUser.id, status: isOwner?'approved':'pending', type:$('evType').value||'other', title, description:($('evDesc').value||'').trim()||null, poster: window._evPoster||null, disciplines: JSON.stringify(window._evDisc||[]), city: g.city||null, country: g.country||null, venue:($('evVenue').value||'').trim()||null, address:($('evAddr')?($('evAddr').value||'').trim():null)||null, city_lat: g.city_lat||null, city_lng: g.city_lng||null, starts_at: new Date($('evStart').value).toISOString(), ends_at: $('evEnd').value ? new Date($('evEnd').value).toISOString() : null, capacity: parseInt($('evCap').value)||null, min_age: (($('evAgeOn')&&$('evAgeOn').checked)?(parseInt($('evMinAge')&&$('evMinAge').value,10)||null):null), ticket_price: priceMin, ticket_tiers: JSON.stringify(tiers), payout_coach_id, currency: cur, seeking_fighters: !!$('evSeek').checked, fighter_info: ($('evFighterInfo').value||'').trim()||null, terms_text: ($('evTerms')?($('evTerms').value||'').trim():'')||null, minor_consent: tiers.some(t=>!!t.participant) };
   const sv=$('evSave'); if(sv){ sv.disabled=true; sv.textContent='…'; }
   if(window._evEditing){
     const upd={ income:row.income, type:row.type, title:row.title, description:row.description, poster:row.poster, disciplines:row.disciplines, venue:row.venue, address:row.address, starts_at:row.starts_at, ends_at:row.ends_at, capacity:row.capacity, min_age:row.min_age, ticket_price:row.ticket_price, ticket_tiers:row.ticket_tiers, payout_coach_id:row.payout_coach_id, currency:row.currency, seeking_fighters:row.seeking_fighters, fighter_info:row.fighter_info, terms_text:row.terms_text, minor_consent:row.minor_consent };
@@ -26852,7 +26887,8 @@ async function openOrgApply(kind){
       ? (EN?(' 0 % until '+new Date(o.intro_free_until).toLocaleDateString('en-GB')+'.')
            :(' 0 % do '+new Date(o.intro_free_until).toLocaleDateString('cs-CZ')+'.'))
       : '';
-    head=`<div style="background:#E8F5EE;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:13px;color:#006040;line-height:1.5;">\u2705 ${EN?'Approved. You can create events.':'Schv\u00e1leno. M\u016f\u017ee\u0161 vytv\u00e1\u0159et akce.'}<br>${_sazba}${_intro}</div>`;
+    head=`<div style="background:#E8F5EE;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:13px;color:#006040;line-height:1.5;">\u2705 ${EN?'Approved. You can create events.':'Schv\u00e1leno. M\u016f\u017ee\u0161 vytv\u00e1\u0159et akce.'}<br>${_sazba}${_intro}</div>
+    <button id="orgNewEvent" style="width:100%;padding:14px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:'DM Sans';margin-bottom:14px;">\u2795 ${EN?'Create an event':'Vytvo\u0159it akci'}</button>`;
   }
   else if(o.status==='rejected') head=`<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:13px;color:#8a1c1c;line-height:1.5;">${EN?'Rejected':'Zam\u00edtnuto'}${o.reject_reason?(' \u2014 '+String(o.reject_reason).replace(/</g,'&lt;')):''}</div>`;
   ov.innerHTML=`<div class="shdr"><div class="shdr-title">${_isFed?'\u{1F3C5}':'\u{1F3A4}'} ${_isFed?(EN?'Association / federation':'Asociace / federace'):(EN?'Event promoter':'Po\u0159adatel akc\u00ed')}</div><button class="btn-close" id="_orgClose">\u2715</button></div>
@@ -26892,6 +26928,13 @@ async function openOrgApply(kind){
       if(p.city && $('orgBillingCity')) $('orgBillingCity').value=p.city;
       if(p.postal && $('orgBillingPostal')) $('orgBillingPostal').value=p.postal;
     }); }catch(e){}
+  { const nb=ov.querySelector('#orgNewEvent');
+    if(nb) nb.onclick=function(){
+      // Organizace se predava jako hostitel; openEventCreate pozna podle `kind`, ze nejde o klub.
+      try{ closeSheet('shOrgApply'); }catch(e){}
+      try{ openEventCreate(_orgMine); }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||e)); }
+    };
+  }
   const sb=ov.querySelector('#orgSubmit');
   if(sb) sb.onclick=async function(){
     const v=id=>(($(id)&&$(id).value)||'').trim();
