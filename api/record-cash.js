@@ -291,8 +291,67 @@ export default async function handler(req, res) {
 
     const ins = await sb('transactions', { method: 'POST', prefer: 'return=representation', body: JSON.stringify(row) });
     if (_creditRow) await consumeStudentCredit(_creditRow.memberId, _creditRow.id, _creditRow.sc);
+    // Doklad hned po zapsani platby. Nesmi shodit zapis -- proto vlastni try uvnitr issueDoklad.
+    try {
+      await issueDoklad(sb, {
+        transactionId: (ins && ins[0] && ins[0].id) || null,
+        paymentIntent: null,
+        gymId: row.gym_id || null, coachId: row.gym_id ? null : (row.coach_id || null),
+        customerName: cash_payer_name || paid_by_name || null, customerEmail: null,
+        itemLabel: row.plan || row.type, amount: row.gross_amount,
+        currency: row.currency, paymentMethod: row.payment_method, testMode: false,
+      });
+    } catch (e) {}
     return res.status(200).json({ ok: true, mtl_fee: row.mtl_fee, credit_redeemed: !!_creditRow, id: (ins && ins[0] && ins[0].id) || null });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
+}
+
+// ── VYSTAVENÍ DOKLADU ────────────────────────────────────────────────────────────────────
+// Doklad se pořizuje jako SNÍMEK ve chvíli platby: identita dodavatele, odběratel, popis
+// a částka se opíšou tak, jak platí teď. Vykreslení už nikdy nesahá na živé `gyms`/`profiles`,
+// takže pozdější změna názvu nebo vstup do DPH staré doklady nepřepíše.
+// Číslo přiděluje doklad_next(series_key) atomicky; klíč je IČO poskytovatele V TOMTO OKAMŽIKU.
+// Selhání nesmí shodit zápis platby -- peníze jsou důležitější než papír, doklad se dá doplnit.
+async function issueDoklad(sb, { transactionId, paymentIntent, gymId, coachId, customerName, customerEmail, itemLabel, amount, currency, paymentMethod, testMode }) {
+  try {
+    if (!transactionId && !paymentIntent) return null;
+    let sup = null;
+    if (gymId) {
+      sup = (await sb(`gyms?id=eq.${encodeURIComponent(gymId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address`))[0] || null;
+    } else if (coachId) {
+      sup = (await sb(`profiles?id=eq.${encodeURIComponent(coachId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address`))[0] || null;
+    }
+    if (!sup) return null;
+    const ico = String(sup.tax_id || '').trim();
+    if (!ico) return null;                      // bez IČO nemá řada klíč; přihláška ho vyžaduje
+    const key = 'ico:' + ico;
+
+    const r = await fetch(`${SB}/rest/v1/rpc/doklad_next`, {
+      method: 'POST',
+      headers: { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ p_key: key }),
+    });
+    if (!r.ok) return null;
+    let no = await r.json();
+    if (no && typeof no === 'object') no = Array.isArray(no) ? no[0] : Object.values(no)[0];
+    if (!no) return null;
+
+    await sb('doklady', {
+      method: 'POST', prefer: 'return=minimal',
+      body: JSON.stringify({
+        doklad_no: String(no), series_key: key,
+        transaction_id: transactionId || null, payment_intent: paymentIntent || null,
+        sup_name: sup.legal_name || sup.name || null,
+        sup_ico: ico, sup_dic: sup.vat_id || null, sup_address: sup.billing_address || null,
+        sup_vat_payer: !!sup.vat_payer, sup_vat_rate: (sup.vat_rate != null ? sup.vat_rate : null),
+        cust_name: customerName || null, cust_email: customerEmail || null,
+        item_label: itemLabel || null,
+        amount: Math.round(Number(amount) || 0), currency: String(currency || 'CZK').toUpperCase(),
+        payment_method: paymentMethod || null, test_mode: !!testMode,
+      }),
+    });
+    return String(no);
+  } catch (e) { console.error('issueDoklad', e && e.message); return null; }
 }

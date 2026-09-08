@@ -61,7 +61,20 @@ export default async function handler(req, res) {
     const mres = await fetch(`${SB}/rest/v1/transactions?member_id=eq.${encodeURIComponent(uid)}${sinceQ}&order=created_at.desc`, { headers: svc });
     const memberTx = mres.ok ? await mres.json() : [];
 
-    return res.status(200).json({ ok: true, coachTx, gymTx, memberTx });
+    // Snímky dokladů k těmto platbám. Doklad se od nasazení neskládá z živých dat, ale čte se
+    // odsud -- proto musí dojet spolu s transakcemi, ne dalším dotazem na řádek.
+    const _ids = [...new Set([].concat(coachTx, gymTx, memberTx).map(t => t && t.id).filter(Boolean))];
+    const _dok = {};
+    for (let i = 0; i < _ids.length; i += 100) {
+      const chunk = _ids.slice(i, i + 100).map(encodeURIComponent).join(',');
+      const dr = await fetch(`${SB}/rest/v1/doklady?transaction_id=in.(${chunk})&select=*`, { headers: svc });
+      if (!dr.ok) continue;
+      const rows = await dr.json();
+      (rows || []).forEach(d => { if (d.transaction_id) _dok[d.transaction_id] = d; });
+    }
+    const _merge = list => (list || []).map(t => (t && _dok[t.id]) ? Object.assign({}, t, { doklad: _dok[t.id] }) : t);
+
+    return res.status(200).json({ ok: true, coachTx: _merge(coachTx), gymTx: _merge(gymTx), memberTx: _merge(memberTx) });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }

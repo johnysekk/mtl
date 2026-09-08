@@ -455,6 +455,22 @@ async function recordTransaction(acct, pi, fields) {
       status: 'paid', created_at: new Date().toISOString(),
     });
     try { if (fields.member_id && gross != null) await ecoPurchase(fields.member_id, gross / 100, currency, pi); } catch (e) {}
+    // Doklad jako SNIMEK hned po zapsani platby -- stejne jako u hotovosti. Bez nej se doklad
+    // sklada pri kazdem zobrazeni z zivych dat a zmena nazvu nebo vstup do DPH prepise i roky
+    // stare doklady. Selhani nesmi shodit zapis platby.
+    try {
+      const _txId = (((await sbGet(`transactions?payment_intent=eq.${encodeURIComponent(pi)}&select=id&limit=1`)) || [])[0] || {}).id || null;
+      let _cust = null;
+      if (fields.member_id) _cust = ((await sbGet(`profiles?id=eq.${encodeURIComponent(fields.member_id)}&select=name,email`)) || [])[0] || null;
+      await issueDoklad({
+        transactionId: _txId, paymentIntent: pi,
+        gymId: fields.gym_id || null, coachId: fields.gym_id ? null : (fields.coach_id || null),
+        customerName: (_cust && _cust.name) || fields.paid_by_name || null,
+        customerEmail: (_cust && _cust.email) || null,
+        itemLabel: fields.plan || fields.type, amount: gross,
+        currency: currency, paymentMethod: 'stripe', testMode: false,
+      });
+    } catch (e) { console.error('issueDoklad', e && e.message); }
   } catch (e) { console.error('recordTransaction', e.message); }
 }
 
@@ -874,4 +890,49 @@ export default async function handler(req, res) {
     console.error('Webhook handler error:', err.message);
     res.status(200).json({ received: true, error: err.message }); // 200, ať Stripe neretryuje donekonečna na našich chybách
   }
+}
+
+// ── VYSTAVENÍ DOKLADU ────────────────────────────────────────────────────────────────────
+// Doklad se pořizuje jako SNÍMEK ve chvíli platby: identita dodavatele, odběratel, popis
+// a částka se opíšou tak, jak platí teď. Vykreslení už nikdy nesahá na živé `gyms`/`profiles`,
+// takže pozdější změna názvu nebo vstup do DPH staré doklady nepřepíše.
+// Číslo přiděluje doklad_next(series_key) atomicky; klíč je IČO poskytovatele V TOMTO OKAMŽIKU.
+// Selhání nesmí shodit zápis platby -- peníze jsou důležitější než papír, doklad se dá doplnit.
+async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, customerName, customerEmail, itemLabel, amount, currency, paymentMethod, testMode }) {
+  try {
+    if (!transactionId && !paymentIntent) return null;
+    let sup = null;
+    if (gymId) {
+      sup = (await sbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address`))[0] || null;
+    } else if (coachId) {
+      sup = (await sbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address`))[0] || null;
+    }
+    if (!sup) return null;
+    const ico = String(sup.tax_id || '').trim();
+    if (!ico) return null;                      // bez IČO nemá řada klíč; přihláška ho vyžaduje
+    const key = 'ico:' + ico;
+
+    const r = await fetch(`${SB}/rest/v1/rpc/doklad_next`, {
+      method: 'POST',
+      headers: sbHeaders,
+      body: JSON.stringify({ p_key: key }),
+    });
+    if (!r.ok) return null;
+    let no = await r.json();
+    if (no && typeof no === 'object') no = Array.isArray(no) ? no[0] : Object.values(no)[0];
+    if (!no) return null;
+
+    await sbPost('doklady', {
+        doklad_no: String(no), series_key: key,
+        transaction_id: transactionId || null, payment_intent: paymentIntent || null,
+        sup_name: sup.legal_name || sup.name || null,
+        sup_ico: ico, sup_dic: sup.vat_id || null, sup_address: sup.billing_address || null,
+        sup_vat_payer: !!sup.vat_payer, sup_vat_rate: (sup.vat_rate != null ? sup.vat_rate : null),
+        cust_name: customerName || null, cust_email: customerEmail || null,
+        item_label: itemLabel || null,
+        amount: Math.round(Number(amount) || 0), currency: String(currency || 'CZK').toUpperCase(),
+        payment_method: paymentMethod || null, test_mode: !!testMode,
+    });
+    return String(no);
+  } catch (e) { console.error('issueDoklad', e && e.message); return null; }
 }
