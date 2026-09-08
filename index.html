@@ -7352,6 +7352,21 @@ async function loadMoreGyms(){
 // Zavreny prouzek si pamatujeme na zarizeni. Je to rada, ne evidence -- do databaze nepatri
 // a klub, ktery si ji zavre na mobilu, ji nepotrebuje resit znovu na notebooku hned pristi den.
 function _termsBannerHidden(gid){ try{ return localStorage.getItem('mtl_terms_banner_off_'+gid)==='1'; }catch(e){ return false; } }
+// Zrcadlo orgRate() z _rate.js. Kdyz menis jedno, musíš obojí -- appka nesmi ukazovat jinou
+// sazbu, nez jakou server strhne.
+//   promotion  1 % ze vseho
+//   federation 1 % ze souteze a fight night, jinak 0 % (vzdelavani trenéru nezdanujeme)
+//   zavadeci nula (intro_free_until) prebiji obojí
+const ORG_PAID_EVENT_TYPES=['fight_night','competition'];
+function orgRate(org, eventType){
+  if(!org) return 0.01;
+  if(org.intro_free_until){
+    const end=new Date(String(org.intro_free_until)+'T23:59:59');
+    if(!isNaN(end.getTime()) && end.getTime()>=Date.now()) return 0;
+  }
+  if(org.kind==='federation') return ORG_PAID_EVENT_TYPES.indexOf(String(eventType||''))>=0 ? 0.01 : 0;
+  return 0.01;
+}
 function _gymHasTerms(g){ return !!(g && typeof g.terms_text==='string' && g.terms_text.trim()); }
 // SPOLEK POTREBUJE I DOKUMENT. Kdo se stava clenem spolku, musi mit k dispozici stanovy
 // a souhlasit s nimi -- podminky treninku (urazy, zdravotni zpusobilost, storno) jsou vedle
@@ -19256,8 +19271,14 @@ function _recRenderCashMenu(hasCash){
   // POZOR: onclick=openCashRecord predalo jako `prov` KLIKACI UDALOST, ne klub. Uvnitr pak
   // g = ta udalost, takze g.currency i g.id byly undefined a obrazovka se vubec nevykreslila.
   // Handler proto funkci VOLA, misto aby ji podstrcil misto obsluhy.
-  if($('recCashMemberBtn')) $('recCashMemberBtn').onclick=function(){ openCashRecord(_recGym); };
-  if($('recGuestCashBtn')) $('recGuestCashBtn').onclick=function(){ openGuestDropin('cash'); };
+  // Kdyz uvnitr neco spadne, prohlizec to spolkne a navenek to vypada, ze se nestalo nic.
+  // Chyba se proto vypisuje na obrazovku -- jinak ji bez vyvojarske konzole nikdo neuvidi.
+  const _recSafe=function(name, fn){
+    return function(){ try{ const r=fn(); if(r && r.catch) r.catch(function(e){ toast('\u26a0\ufe0f '+name+': '+((e&&e.message)||e)); }); }
+      catch(e){ toast('\u26a0\ufe0f '+name+': '+((e&&e.message)||e)); } };
+  };
+  if($('recCashMemberBtn')) $('recCashMemberBtn').onclick=_recSafe('hotovost/app', function(){ return openCashRecord(_recGym); });
+  if($('recGuestCashBtn')) $('recGuestCashBtn').onclick=_recSafe('hotovost/host', function(){ return openGuestDropin('cash'); });
 }
 function recStatus(m){
   if(!m) return { valid:false, expired:false, pe:null, none:true };
@@ -19644,8 +19665,10 @@ function openGuestDropin(fm){
   }
   list.innerHTML=html;
   if($('recBackBtn')) $('recBackBtn').onclick=()=>{ if(window._recMode&&window._recMode!=='checkin') _recSetMode(window._recMode); else renderReceptionList(($('recSearch')&&$('recSearch').value)||''); };
-  list.querySelectorAll('.recGuestMembBtn').forEach(function(b){ b.onclick=function(){ var pl=_gmPlans[+b.getAttribute('data-i')]; if(pl) _guestMemb(pl); }; });
-  list.querySelectorAll('.recGuestClsBtn').forEach(b=>b.onclick=()=>{ var occ=_recTodayClasses[+b.dataset.i]; var fmm=window._recGuestFM; if(fmm==='cash'){ _guestCash(occ); } else if(fmm==='qr'){ var gg=_recGym; if(gg&&typeof _mtlPayMode==='function'&&_mtlPayMode(gg)==='qr_bank'&&gg.receiver_id_value){ _guestCash(occ,'qr'); } else if(gg&&gg.stripe_account){ showGuestQR(occ); } else { _guestPayPick(occ); } } else { _guestPayPick(occ); } });
+  // Tyz duvod jako u tlacitek hotovosti: bez vypsani chyby vypada spadnuty klik jako necinnost.
+  const _gSafe=function(name, fn){ return function(){ try{ const r=fn(); if(r&&r.catch) r.catch(function(e){ toast('\u26a0\ufe0f '+name+': '+((e&&e.message)||e)); }); }catch(e){ toast('\u26a0\ufe0f '+name+': '+((e&&e.message)||e)); } }; };
+  list.querySelectorAll('.recGuestMembBtn').forEach(function(b){ b.onclick=_gSafe('permanentka', function(){ var pl=_gmPlans[+b.getAttribute('data-i')]; if(!pl){ toast('\u26a0\ufe0f permanentka: nenalezena'); return; } return _guestMemb(pl); }); });
+  list.querySelectorAll('.recGuestClsBtn').forEach(b=>b.onclick=_gSafe('lekce', ()=>{ var occ=_recTodayClasses[+b.dataset.i]; if(!occ){ toast('\u26a0\ufe0f lekce: nenalezena'); return; } var fmm=window._recGuestFM; if(fmm==='cash'){ _guestCash(occ); } else if(fmm==='qr'){ var gg=_recGym; if(gg&&typeof _mtlPayMode==='function'&&_mtlPayMode(gg)==='qr_bank'&&gg.receiver_id_value){ _guestCash(occ,'qr'); } else if(gg&&gg.stripe_account){ showGuestQR(occ); } else { _guestPayPick(occ); } } else { _guestPayPick(occ); } }));
 }
 function _qrCrc16(s){ var crc=0xFFFF; for(var i=0;i<s.length;i++){ crc^=(s.charCodeAt(i)<<8); for(var j=0;j<8;j++){ crc=(crc&0x8000)?(((crc<<1)^0x1021)&0xFFFF):((crc<<1)&0xFFFF); } } return ('000'+(crc&0xFFFF).toString(16).toUpperCase()).slice(-4); }
 function _emv(id,val){ var l=('00'+String(val.length)).slice(-2); return id+l+val; }
@@ -26683,14 +26706,22 @@ async function openAdminOrgs(mode){
     if(!o) return;
     const reason = approve ? null : (prompt(EN?'Reason (the applicant will see it):':'D\u016fvod (\u017eadatel ho uvid\u00ed):')||'').trim();
     if(!approve && reason===null) return;
+    // Zavadeci nula. Vychozi nabidka 6 mesicu, ale zadat jde cokoli vcetne nuly.
+    let _introUntil=null;
+    if(approve){
+      const _m=prompt(EN?'Months with 0 % commission (0 = none):':'Kolik m\u011bs\u00edc\u016f 0 % provize (0 = \u017e\u00e1dn\u00e1):','6');
+      if(_m===null) return;
+      const _n=Math.max(0, parseInt(_m,10)||0);
+      if(_n>0){ const d=new Date(); d.setMonth(d.getMonth()+_n); _introUntil=d.toISOString().slice(0,10); }
+    }
     try{
       await supaClient.from('organizations').update(approve
-        ? { status:'approved', approved_at:new Date().toISOString(), approved_by:currentUser.id, reject_reason:null }
+        ? { status:'approved', approved_at:new Date().toISOString(), approved_by:currentUser.id, reject_reason:null, intro_free_until:_introUntil }
         : { status:'rejected', reject_reason:reason||null }).eq('id', o.id);
       // Zadatel se to musi dozvedet, jinak ceka na neco, co uz je rozhodnute.
       try{ await supaClient.from('notifications').insert({ user_id:o.owner_id, type:'system', read:false,
         data:JSON.stringify({ kind:'org_decision' }),
-        message: approve ? ('\u2705 Organizace '+(o.name||'')+' byla schv\u00e1lena. M\u016f\u017ee\u0161 vytv\u00e1\u0159et akce.')
+        message: approve ? ('\u2705 Organizace '+(o.name||'')+' byla schv\u00e1lena. M\u016f\u017ee\u0161 vytv\u00e1\u0159et akce.'+(_introUntil?(' Provize 0 % do '+new Date(_introUntil).toLocaleDateString('cs-CZ')+'.'):''))
                          : ('\u274C P\u0159ihl\u00e1\u0161ka organizace '+(o.name||'')+' byla zam\u00edtnuta.'+(reason?(' D\u016fvod: '+reason):'')) }); }catch(e){}
       openAdminOrgs((window._aoF&&window._aoF.status==='pending')?'pending':'all');
     }catch(e){ toast('\u26a0\ufe0f '+(e.message||'error')); }
@@ -26730,6 +26761,7 @@ async function openAdminOrgs(mode){
             ${_row(EN?'Description':'Popis', o.description)}
             ${_row(EN?'Applied':'Pod\u00e1no', o.applied_at?new Date(o.applied_at).toLocaleString(EN?'en-GB':'cs-CZ'):'')}
             ${_row(EN?'Approved':'Schv\u00e1leno', o.approved_at?new Date(o.approved_at).toLocaleString(EN?'en-GB':'cs-CZ'):'')}
+            ${_row(EN?'0 % until':'0 % provize do', o.intro_free_until?new Date(o.intro_free_until).toLocaleDateString(EN?'en-GB':'cs-CZ'):'')}
             ${_row(EN?'Reject reason':'D\u016fvod zam\u00edtnut\u00ed', o.reject_reason)}
           </div>
         </details>
@@ -26807,7 +26839,21 @@ async function openOrgApply(kind){
   const _locked=(o.status==='approved'||o.status==='suspended');
   let head='';
   if(o.status==='pending') head=`<div style="background:#FFF4E5;border:1px solid #F0D9B5;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:13px;color:#7A4A00;line-height:1.5;">\u23F3 ${EN?'Submitted \u2014 waiting for MTL approval. We will let you know.':'Odesl\u00e1no \u2014 \u010dek\u00e1 na schv\u00e1len\u00ed MTL. D\u00e1me v\u011bd\u011bt.'}</div>`;
-  else if(o.status==='approved') head=`<div style="background:#E8F5EE;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:13px;color:#006040;line-height:1.5;">\u2705 ${EN?'Approved. You can create events.':'Schv\u00e1leno. M\u016f\u017ee\u0161 vytv\u00e1\u0159et akce.'}</div>`;
+  else if(o.status==='approved'){
+    // Sazba i konec zavadeciho obdobi patri organizaci pred oci, ne do adminu. Kdo neví,
+    // kdy mu nula skonci, dozvi se to az z prvni strzené provize.
+    const _r=orgRate(o,'fight_night'), _r0=orgRate(o,'seminar');
+    const _pct=v=>(Math.round(v*1000)/10)+' %';
+    const _sazba=(o.kind==='federation')
+      ? (EN?('Commission: '+_pct(_r)+' on competitions and fight nights, '+_pct(_r0)+' on seminars and courses.')
+           :('Provize: '+_pct(_r)+' ze sout\u011b\u017e\u00ed a fight nights, '+_pct(_r0)+' ze semin\u00e1\u0159\u016f a \u0161kolen\u00ed.'))
+      : (EN?('Commission: '+_pct(_r)+' of ticket sales.'):('Provize: '+_pct(_r)+' z prodeje l\u00edstk\u016f.'));
+    const _intro=o.intro_free_until
+      ? (EN?(' 0 % until '+new Date(o.intro_free_until).toLocaleDateString('en-GB')+'.')
+           :(' 0 % do '+new Date(o.intro_free_until).toLocaleDateString('cs-CZ')+'.'))
+      : '';
+    head=`<div style="background:#E8F5EE;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:13px;color:#006040;line-height:1.5;">\u2705 ${EN?'Approved. You can create events.':'Schv\u00e1leno. M\u016f\u017ee\u0161 vytv\u00e1\u0159et akce.'}<br>${_sazba}${_intro}</div>`;
+  }
   else if(o.status==='rejected') head=`<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:13px;color:#8a1c1c;line-height:1.5;">${EN?'Rejected':'Zam\u00edtnuto'}${o.reject_reason?(' \u2014 '+String(o.reject_reason).replace(/</g,'&lt;')):''}</div>`;
   ov.innerHTML=`<div class="shdr"><div class="shdr-title">${_isFed?'\u{1F3C5}':'\u{1F3A4}'} ${_isFed?(EN?'Association / federation':'Asociace / federace'):(EN?'Event promoter':'Po\u0159adatel akc\u00ed')}</div><button class="btn-close" id="_orgClose">\u2715</button></div>
   <div style="padding:16px 18px 44px;">${head}
