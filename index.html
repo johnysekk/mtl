@@ -10410,6 +10410,35 @@ function _cohTierPrice(coh, tierName){
   return Number((tierName==='student') ? (coh&&coh.price_student) : (coh&&coh.price_regular)) || 0;
 }
 // Cash modal: enter amount RECEIVED, shows change to return. Resolves true (record) / false (cancel).
+// Kolik mesicu se plati NARAZ. Existuje kvuli studentum, kteri nechteji chodit platit kazdy
+// mesic -- klub to vybere jednou a ma pokoj. Neni to novy zpusob platby: vysledek jde do uplne
+// stejneho zapisu jako dosud, jen s vetsi castkou a s poctem mesicu na transakci.
+// firstAmount = doplatek 1. mesice (u dalsich mesicu se rovna mesicni cene).
+// Vraci pocet mesicu, nebo null pri zavreni.
+function _cohMonthsPick(maxN, firstAmount, monthly, cur, isFirst){
+  const EN=LANG==='en';
+  if(!(maxN>1)) return Promise.resolve(1);
+  const _sum=function(n){ return Math.round((firstAmount+monthly*(n-1))*100)/100; };
+  return new Promise(function(resolve){
+    var mv=document.createElement('div'); mv.style.cssText='position:fixed;inset:0;z-index:100002;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:20px;';
+    var opts='';
+    for(var i=1;i<=maxN;i++){
+      var _lbl = isFirst
+        ? (i===1 ? (EN?'1st month only':'jen 1. m\u011bs\u00edc') : ((EN?('months 1\u2013'+i):('1.\u2013'+i+'. m\u011bs\u00edc'))))
+        : (i===1 ? (EN?'1 month':'1 m\u011bs\u00edc') : (i+' '+(EN?'months':(i<5?'m\u011bs\u00edce':'m\u011bs\u00edc\u016f'))));
+      opts+='<option value="'+i+'">'+_lbl+' \u00b7 '+fmtPrice(_sum(i),cur)+'</option>';
+    }
+    mv.innerHTML='<div style="background:#fff;border-radius:16px;padding:22px;max-width:360px;width:100%;box-sizing:border-box;font-family:\'DM Sans\';">'
+      +'<div style="font-size:17px;font-weight:800;color:var(--dark);margin-bottom:4px;">'+(EN?'How many months?':'Kolik m\u011bs\u00edc\u016f?')+'</div>'
+      +'<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:14px;">'+(EN?'One payment, one receipt. The student can settle several months at once.':'Jedna platba, jeden doklad. Student m\u016f\u017ee zaplatit i v\u00edc m\u011bs\u00edc\u016f najednou.')+'</div>'
+      +'<select id="_cmN" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:10px;font-size:15px;font-family:inherit;margin-bottom:18px;background:var(--surf);color:var(--dark);">'+opts+'</select>'
+      +'<div style="display:flex;gap:8px;"><button id="_cmCancel" style="flex:1;padding:12px;background:#eee;border:none;border-radius:11px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Cancel':'Zru\u0161it')+'</button>'
+      +'<button id="_cmOk" style="flex:1;padding:12px;background:var(--red);color:#fff;border:none;border-radius:11px;font-weight:800;cursor:pointer;font-family:inherit;">'+(EN?'Continue':'Pokra\u010dovat')+'</button></div></div>';
+    document.body.appendChild(mv);
+    mv.querySelector('#_cmCancel').onclick=function(){ mv.remove(); resolve(null); };
+    mv.querySelector('#_cmOk').onclick=function(){ var n=parseInt(mv.querySelector('#_cmN').value,10)||1; mv.remove(); resolve(n); };
+  });
+}
 function _cohCashModal(due, cur){
   const EN=LANG==='en';
   return new Promise(function(resolve){
@@ -10449,17 +10478,25 @@ async function _cohRemainderCash(memberId){
   let cardOk=false;
   try{ const { data:g } = await supaClient.from('gyms').select('commission_card_status').eq('id',coh.gym_id).single(); cardOk=!!(g&&g.commission_card_status==='active'); }catch(e){}
   if(!cardOk){ toast(EN?'\u26a0\ufe0f Set up a commission card first (Club \u2192 Payments \u2192 "I also take cash")':'\u26a0\ufe0f Nejd\u0159\u00edv nastav kartu na provizi (Klub \u2192 Platby \u2192 \u201ebr\u00e1t i hotovost\u201c)'); return; }
-  const _ok = await _cohCashModal(remainder, cur);
-  if(!_ok) return;
   // POZOR: _multi musi byt deklarovane PRED volanim _recordCashTx. Bylo az za nim, takze se
   // cetlo v TDZ -> ReferenceError, funkce spadla jeste pred zapisem a tlacitko "Zaznamenat"
   // navenek nedelalo vubec nic. Stejna trida chyby jako kdysi payerId.
   const _multi = Number(coh.months||1) > 1;
-  const res=await _recordCashTx({ provider:'gym', gym_id:coh.gym_id, member_id:m.student_id||null, gross_amount:Math.round(remainder*100), currency:cur, type:'course', payment_method:'cash', cohort_member_id:memberId, cohort_id:coh.id, income_class:(_multi?'cohort_first_month':'cohort_deposit') });
+  // Doplatek 1. mesice + volitelne rovnou dalsi mesice v JEDNE platbe. Nic se neduplikuje:
+  // je to tentyz zapis jako dosud, jen s vetsi castkou a s poctem mesicu na transakci.
+  const _totalM = Math.max(1, Number(coh.months||1));
+  const _nM = await _cohMonthsPick(_totalM, remainder, monthly, cur, true);
+  if(_nM==null) return;
+  const _due = Math.round((remainder + monthly*(_nM-1))*100)/100;
+  const _ok = await _cohCashModal(_due, cur);
+  if(!_ok) return;
+  const res=await _recordCashTx({ provider:'gym', gym_id:coh.gym_id, member_id:m.student_id||null, gross_amount:Math.round(_due*100), currency:cur, type:'course', payment_method:'cash', cohort_member_id:memberId, cohort_id:coh.id, income_class:(_multi?'cohort_first_month':'cohort_deposit'), months:_nM });
   if(res.error){ toast('\u26a0\ufe0f '+(res.error.message||res.error)); return; }
-  const _newPaid = Math.round(((Number(m.paid_amount||0))+remainder)*100)/100;
+  const _newPaid = Math.round(((Number(m.paid_amount||0))+_due)*100)/100;
   const _upd = { status:'enrolled', paid_amount:_newPaid };
-  if(_multi) _upd.months_paid = Math.max(1, Number(m.months_paid||0));   // the remainder completes the FIRST month
+  // Doplatek uzavira 1. mesic; kazdy dalsi zaplaceny mesic posouva o dalsi. Bez tohohle by
+  // zustaly zamcene lekce zamcene, i kdyz je student ma zaplacene.
+  if(_multi) _upd.months_paid = Math.min(_totalM, Math.max(1, Number(m.months_paid||0)) + (_nM-1));
   try{ await supaClient.from('cohort_members').update(_upd).eq('id',memberId); }catch(e){}
   // Breakdown row so "Co zaplatil" shows deposit + first-month remainder separately (best-effort; RLS/columns permitting).
   // If no deposit row exists yet (e.g. the deposit was paid before cohort_payments had these columns),
@@ -10468,7 +10505,7 @@ async function _cohRemainderCash(memberId){
     if((!_depQ.data||!_depQ.data.length) && Number(m.paid_amount||0)>0){
       await supaClient.from('cohort_payments').insert({ cohort_member_id:memberId, cohort_id:coh.id, kind:'deposit', amount:Number(m.paid_amount||0), currency:cur, status:'paid' });
     } }catch(e){}
-  try{ await supaClient.from('cohort_payments').insert({ cohort_member_id:memberId, cohort_id:coh.id, kind:(_multi?'first_month':'deposit'), amount:remainder, currency:cur, payment_method:'cash', mtl_fee:(res.mtl_fee||0)/100, status:'paid' }); }catch(e){}
+  try{ await supaClient.from('cohort_payments').insert({ cohort_member_id:memberId, cohort_id:coh.id, kind:(_multi?'first_month':'deposit'), amount:_due, currency:cur, payment_method:'cash', mtl_fee:(res.mtl_fee||0)/100, status:'paid' }); }catch(e){}
   toast((EN?'\u2705 Enrolled \u00b7 cash remainder recorded':'\u2705 Zaps\u00e1n \u00b7 doplatek hotov\u011b zaznamen\u00e1n'),1);
   _cohRosterRender();
 }
@@ -10487,14 +10524,19 @@ async function _cohMonthCash(memberId, memberName){
   let cardOk=false;
   try{ const { data:g } = await supaClient.from('gyms').select('commission_card_status').eq('id',coh.gym_id).single(); cardOk=!!(g&&g.commission_card_status==='active'); }catch(e){}
   if(!cardOk){ toast(EN?'\u26a0\ufe0f Set up a commission card first (Club \u2192 Payments)':'\u26a0\ufe0f Nejd\u0159\u00edv nastav kartu na provizi (Klub \u2192 Platby)'); return; }
-  const _ok = await _cohCashModal(amount, cur);
+  // Kolik mesicu naraz. Strop je to, co ze kurzu zbyva -- vic mesicu, nez kurz ma, nejde vybrat.
+  const _left = _total - _done;
+  const _nM = await _cohMonthsPick(_left, amount, amount, cur, false);
+  if(_nM==null) return;
+  const _due = Math.round(amount*_nM*100)/100;
+  const _ok = await _cohCashModal(_due, cur);
   if(!_ok) return;
-  const res=await _recordCashTx({ provider:'gym', gym_id:coh.gym_id, member_id:m.student_id||null, gross_amount:Math.round(amount*100), currency:cur, type:'course', payment_method:'cash', cohort_member_id:memberId, cohort_id:coh.id, income_class:'cohort_month' });
+  const res=await _recordCashTx({ provider:'gym', gym_id:coh.gym_id, member_id:m.student_id||null, gross_amount:Math.round(_due*100), currency:cur, type:'course', payment_method:'cash', cohort_member_id:memberId, months:_nM, cohort_id:coh.id, income_class:'cohort_month' });
   if(res.error){ toast('\u26a0\ufe0f '+res.error.message); return; }
-  const _newMonths=Math.min(_total, _done+1);
-  const _newPaid=Math.round(((Number(m.paid_amount||0))+amount)*100)/100;
+  const _newMonths=Math.min(_total, _done+_nM);
+  const _newPaid=Math.round(((Number(m.paid_amount||0))+_due)*100)/100;
   try{ await supaClient.from('cohort_members').update({ status:'enrolled', months_paid:_newMonths, paid_amount:_newPaid }).eq('id',memberId); }catch(e){}  // completion is date-based (after the last training), not payment-based
-  try{ await supaClient.from('cohort_payments').insert({ cohort_member_id:memberId, cohort_id:coh.id, kind:'month', amount:amount, currency:cur, payment_method:'cash', mtl_fee:(res.mtl_fee||0)/100, status:'paid' }); }catch(e){}
+  try{ await supaClient.from('cohort_payments').insert({ cohort_member_id:memberId, cohort_id:coh.id, kind:'month', amount:_due, currency:cur, payment_method:'cash', mtl_fee:(res.mtl_fee||0)/100, status:'paid' }); }catch(e){}
   toast((EN?('\u2705 Month '+_newMonths+'/'+_total+' recorded'):('\u2705 M\u011bs\u00edc '+_newMonths+'/'+_total+' zaznamen\u00e1n')),1);
   _cohRosterRender();
 }
@@ -15348,12 +15390,14 @@ async function _cohAddWalkIn(){
 // Owner/coach collects a Stripe cohort payment by showing the MEMBER a QR of the Stripe checkout
 // URL — the member scans & pays on THEIR phone. We must NOT redirect the owner's device. Stripe
 // confirms via webhook, so no manual "confirm" step (unlike the bank-QR flow). kind: first_month|month.
-async function _cohStripeQr(memberId, memberName, kind){
+async function _cohStripeQr(memberId, memberName, kind, months){
   const EN=LANG==='en';
   toast(EN?'Preparing QR…':'Připravuji QR…');
   let url=null, err=null, doneAlready=false;
   try{
-    const r=await fetch('/api/cohort-pay',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ kind:kind, cohort_member_id:memberId }) });
+    // months jde na server jako pozadavek; castku i tak pocita cohort-pay.js sam z ceniku,
+    // aby se nedala poslat vlastni cena.
+    const r=await fetch('/api/cohort-pay',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ kind:kind, cohort_member_id:memberId, months:Math.max(1,parseInt(months,10)||1) }) });
     const j=await r.json();
     if(j&&j.ok&&j.url){ url=j.url; }
     else if(j&&j.ok&&(j.enrolled||j.done)){ doneAlready=true; }
@@ -15378,7 +15422,16 @@ async function _cohStripeQr(memberId, memberName, kind){
   try{ if(window.QRCode){ new QRCode(box,{text:url,width:220,height:220,correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined)}); } else { box.innerHTML='<p style="font-size:10px;word-break:break-all;max-width:240px;">'+url+'</p>'; } }catch(e){ box.innerHTML='<p style="font-size:10px;word-break:break-all;max-width:240px;">'+url+'</p>'; }
 }
 // Deposit remainder (enrol the member): show the member a Stripe QR, don't redirect the owner.
-async function _cohRemainderStripe(memberId, memberName){ return _cohStripeQr(memberId, memberName, 'first_month'); }
+async function _cohRemainderStripe(memberId, memberName){
+  var _m=(window._crMembers||[]).find(function(x){ return String(x.id)===String(memberId); })||{};
+  var _coh=window._crCohort||{};
+  var _tot=Math.max(1, Number(_coh.months||1));
+  var _price=Number(_cohTierPrice(_coh, _m.tier))||0;
+  var _rem=Math.max(0, _price-Number(_m.paid_amount||0));
+  var _n=1;
+  if(_tot>1 && _price>0 && _rem>0){ _n=await _cohMonthsPick(_tot, _rem, _price, (_coh.currency||'CZK'), true); if(_n==null) return; }
+  return _cohStripeQr(memberId, memberName, 'first_month', _n);
+}
 // Read-only per-member payment breakdown: exactly what this member paid and how much,
 // labelled Zaloha / 1. mesic / Mesic N, from cohort_payments (deposit|first_month|month).
 async function _cohMemberPayments(memberId, wrap){
@@ -15459,6 +15512,9 @@ async function _cohRosterRender(){
   let _cohMonths=1, _cohGymId=null; try{ const { data:_cd }=await supaClient.from('gym_cohorts').select('months,gym_id').eq('id',cohortId).single(); _cohMonths=Number(_cd&&_cd.months)||1; _cohGymId=_cd&&_cd.gym_id; }catch(e){}
   let _cohPayMode='stripe', _cohGym=null; if(_cohGymId){ try{ const { data:_g }=await supaClient.from('gyms').select('id,payment_mode,receiver_id_type,receiver_id_value,receiver_name,currency,commission_card_status').eq('id',_cohGymId).single(); _cohGym=_g; _cohPayMode=(_g&&_g.payment_mode==='qr_bank')?'qr_bank':'stripe'; }catch(e){} }
   window._crGym=_cohGym; window._crPayMode=_cohPayMode;
+  // Cely kurz do window: volba poctu mesicu z nej potrebuje cenu (_cohTierPrice), menu a delku.
+  // Dotaz vys uz bezi, jen si bral jen dva sloupce.
+  try{ const { data:_cfull }=await supaClient.from('gym_cohorts').select('id,months,currency,price_student,price_regular,price_tiers').eq('id',cohortId).single(); window._crCohort=_cfull||null; }catch(e){ window._crCohort=null; }
   let members=[]; try{ const { data }=await supaClient.from('cohort_members').select('*').eq('cohort_id',cohortId).order('created_at',{ascending:true}); members=data||[]; }catch(e){}
   window._crMembers=members;
   const f={lead:0,deposit_claimed:0,deposit_paid:0,enrolled:0,completed:0,converted:0,cancelled:0};
@@ -15561,7 +15617,16 @@ async function _cohCollectMonth(memberId, memberName){
   // member a Stripe-checkout QR to scan & pay on their phone — the webhook bumps months_paid. Either
   // way the OWNER's device is never redirected.
   if(window._crPayMode==='qr_bank'){ return _cohMonthQr(memberId, memberName); }
-  return _cohStripeQr(memberId, memberName, 'month');
+  // Stejna volba poctu mesicu jako u hotovosti -- jinak by student u Stripe klubu nemohl
+  // zaplatit dopredu a klub by ho musel honit kazdy mesic.
+  var _m=(window._crMembers||[]).find(function(x){ return String(x.id)===String(memberId); })||{};
+  var _coh=window._crCohort||{};
+  var _tot=Math.max(1, Number(_coh.months||1));
+  var _left=Math.max(1, _tot - Number(_m.months_paid||0));
+  var _price=Number(_cohTierPrice(_coh, _m.tier))||0;
+  var _n=1;
+  if(_left>1 && _price>0){ _n=await _cohMonthsPick(_left, _price, _price, (_coh.currency||'CZK'), false); if(_n==null) return; }
+  return _cohStripeQr(memberId, memberName, 'month', _n);
 }
 // QR/PIS month collection: show a bank QR (+ PIS button) for the full monthly (tier) price, then the
 // club confirms receipt, which records the cash/PIS transaction and bumps months_paid. Mirrors the
@@ -19948,7 +20013,7 @@ async function _recordCashTx(row){
     const tok=await _freshTok(force);
     if(!tok) return { data:null, error:{ message:(LANG==='en'?'Not signed in':'Nejsi přihlášen'), _retriable:true } };
     let r;
-    try{ r=await fetch('/api/record-cash',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ token:tok, provider:row.provider||'gym', gym_id:row.gym_id, member_id:row.member_id, coach_id:row.coach_id, paid_by:row.paid_by, paid_by_name:row.paid_by_name, session_at_issue:row.session_at_issue, gross_amount:row.gross_amount, currency:row.currency, type:row.type, payment_method:row.payment_method, cash_payer_name:row.cash_payer_name, acq_source:row.acq_source, source_booking_id:row.source_booking_id, credit:row.credit, cohort_id:row.cohort_id, income_class:row.income_class }) }); }
+    try{ r=await fetch('/api/record-cash',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ token:tok, provider:row.provider||'gym', gym_id:row.gym_id, member_id:row.member_id, coach_id:row.coach_id, paid_by:row.paid_by, paid_by_name:row.paid_by_name, session_at_issue:row.session_at_issue, gross_amount:row.gross_amount, currency:row.currency, type:row.type, payment_method:row.payment_method, cash_payer_name:row.cash_payer_name, acq_source:row.acq_source, source_booking_id:row.source_booking_id, credit:row.credit, cohort_id:row.cohort_id, income_class:row.income_class, months:row.months }) }); }
     catch(e){ return { data:null, error:{ message:(e&&e.message)||'network', _retriable:true } }; }
     const j=await r.json().catch(function(){ return {}; });
     if(!r.ok) return { data:null, error:{ message:(j&&j.error)||('HTTP '+r.status), _retriable:(r.status===401||r.status===403||r.status===408||r.status>=500) } };
@@ -27098,7 +27163,7 @@ async function renderCoachAnalytics(coachId, containerId){
 
     </div>
     <div style="font-size:11.5px;font-weight:800;color:var(--mid);text-transform:uppercase;letter-spacing:.03em;margin-bottom:9px;">🤝 ${LANG==='en'?'Active coaches':'Aktivní kouči'}: ${(prof?.coach_ref_score)||0}</div>
-    ${(function(){ var EN=LANG==='en'; var _m=_self?((currentUser&&currentUser.payment_mode)||(currentUser&&currentUser.stripe_account?'stripe':'qr_bank')):((typeof _mtlPayMode==='function'?_mtlPayMode(prof):null)||(prof&&prof.stripe_account?'stripe':'qr_bank')); var _sc=(prof&&prof.coach_ref_score)||0, _bk=!!(prof&&prof.bankai_eligible); var _shOk=_sc>=2, _bnOk=_sc>=5&&_bk; var _shRate=_m==='stripe'?'1,5 %':'2 %', _shKeep=_m==='stripe'?'98,5 %':'98 %'; var card=function(icon,name,rate,keep,ok,pct,req){ return '<div style="background:var(--surf);border:1px solid '+(ok?'#A8E6C0':'var(--border)')+';border-radius:12px;padding:12px 14px;margin-bottom:10px;">'+'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="font-size:14px;font-weight:800;color:var(--dark);">'+icon+' '+name+(ok?' <span style=\'color:#0A7A4F;font-size:12px;\'>✓ '+(EN?'unlocked':'odemčeno')+'</span>':'')+'</div><div style="font-size:13px;font-weight:800;color:var(--dark);white-space:nowrap;">'+rate+'</div></div>'+'<div style="height:7px;background:var(--bg);border-radius:99px;overflow:hidden;margin:9px 0 5px;"><div style="height:100%;width:'+Math.min(100,Math.max(5,pct))+'%;background:'+(ok?'#0A7A4F':'var(--red)')+';border-radius:99px;transition:width .35s;"></div></div>'+'<div style="font-size:11px;color:var(--mid);line-height:1.45;">'+req+'</div></div>'; }; var h=card('🗡️','Shikai',_shRate,_shKeep,_shOk,_sc/2*100, _shOk?(EN?'Unlocked — a better rate on all your prices.':'Odemčeno — výhodnější sazba na všechny tvé ceny.'):(EN?('2 activated referrals ('+_sc+'/2) — activated = they reached 10 privates or 25 memberships themselves.'):('2 aktivovaní přivedení ('+_sc+'/2) — aktivovaný = sám už má 10 soukromek nebo 25 členství.'))); if(_m==='stripe'){ h+=card('🔥','Bankai',_m==='stripe'?'1 %':'1,25 %',_m==='stripe'?'99 %':'98,75 %',_bnOk,_sc/5*100, _bnOk?(EN?'Unlocked — the lowest rate.':'Odemčeno — nejnižší sazba.'):(EN?('5 activated referrals ('+_sc+'/5) + 10 privates or 25 memberships of your own.'):('5 aktivovaných přivedených ('+_sc+'/5) + 10 soukromek nebo 25 členství u tebe.'))); } else { h+='<div style="font-size:11px;color:var(--light);line-height:1.45;margin:2px 0 8px;">'+(EN?'🔥 Bankai (the lowest 2 % rate) unlocks on Stripe mode.':'🔥 Bankai (nejnižší sazba 1 %) se odemyká v režimu Stripe.')+'</div>'; } return h; })()}
+    ${(function(){ var EN=LANG==='en'; var _m=_self?((currentUser&&currentUser.payment_mode)||(currentUser&&currentUser.stripe_account?'stripe':'qr_bank')):((typeof _mtlPayMode==='function'?_mtlPayMode(prof):null)||(prof&&prof.stripe_account?'stripe':'qr_bank')); var _sc=(prof&&prof.coach_ref_score)||0, _bk=!!(prof&&prof.bankai_eligible); var _shOk=_sc>=2, _bnOk=_sc>=5&&_bk; var _shRate=_m==='stripe'?'1,5 %':'2 %', _shKeep=_m==='stripe'?'98,5 %':'98 %'; var card=function(icon,name,rate,keep,ok,pct,req){ return '<div style="background:var(--surf);border:1px solid '+(ok?'#A8E6C0':'var(--border)')+';border-radius:12px;padding:12px 14px;margin-bottom:10px;">'+'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="font-size:14px;font-weight:800;color:var(--dark);">'+icon+' '+name+(ok?' <span style=\'color:#0A7A4F;font-size:12px;\'>✓ '+(EN?'unlocked':'odemčeno')+'</span>':'')+'</div><div style="font-size:13px;font-weight:800;color:var(--dark);white-space:nowrap;">'+rate+'</div></div>'+'<div style="height:7px;background:var(--bg);border-radius:99px;overflow:hidden;margin:9px 0 5px;"><div style="height:100%;width:'+Math.min(100,Math.max(5,pct))+'%;background:'+(ok?'#0A7A4F':'var(--red)')+';border-radius:99px;transition:width .35s;"></div></div>'+'<div style="font-size:11px;color:var(--mid);line-height:1.45;">'+req+'</div></div>'; }; var h=card('🗡️','Shikai',_shRate,_shKeep,_shOk,_sc/2*100, _shOk?(EN?'Unlocked — a better rate on all your prices.':'Odemčeno — výhodnější sazba na všechny tvé ceny.'):(EN?('2 activated referrals ('+_sc+'/2) — activated = they reached 10 privates or 25 memberships themselves.'):('2 aktivovaní přivedení ('+_sc+'/2) — aktivovaný = sám už má 10 soukromek nebo 25 členství.'))); { h+=card('🔥','Bankai',_m==='stripe'?'1 %':'1,25 %',_m==='stripe'?'99 %':'98,75 %',_bnOk,_sc/5*100, _bnOk?(EN?'Unlocked — the lowest rate.':'Odemčeno — nejnižší sazba.'):(EN?('5 activated referrals ('+_sc+'/5) + 10 privates or 25 memberships of your own.'):('5 aktivovaných přivedených ('+_sc+'/5) + 10 soukromek nebo 25 členství u tebe.'))); }  return h; })()}
     </div>
     ` : ''}
     <div class="sec-lbl">${LANG==='en'?'Bookings':'Rezervace'}</div>
@@ -30241,9 +30306,13 @@ function subscribeRealtime(){
   function _cohPayLabel(t, cohName){
     const EN=LANG==='en';
     const ic=String(t.income_class||'');
+    // Kolik mesicu platba pokryla. Bez toho by doklad za tri mesice vypadal jako jedna
+    // podivne velka platba za jeden. Stare radky maji months prazdne = jeden mesic.
+    const _n=Math.max(1, parseInt(t.months,10)||1);
+    const _rng=function(from){ return (_n<=1) ? (from+'. '+(EN?'month':'měsíc')) : (from+'.–'+(from+_n-1)+'. '+(EN?'month':'měsíc')); };
     const part = ic==='cohort_deposit' ? (EN?'deposit':'záloha')
-      : ic==='cohort_first_month' ? (EN?'1st month':'1. měsíc')
-      : ic==='cohort_month' ? (EN?'month':'další měsíc')
+      : ic==='cohort_first_month' ? (_n<=1 ? (EN?'1st month':'1. měsíc') : _rng(1))
+      : ic==='cohort_month' ? (_n<=1 ? (EN?'month':'další měsíc') : (_n+' '+(EN?'months':(_n<5?'měsíce':'měsíců'))))
       : (EN?'payment':'platba');
     return (cohName||'Kurz')+' — '+part;
   }
