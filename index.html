@@ -35187,12 +35187,31 @@ async function showReceipt(b){
     if(!b){ return; }
     const esc=(typeof escapeHtml==='function')?escapeHtml:(x=>String(x==null?'':x));
     const fmt=n=>{ const v=Math.round((Number(n)||0)*100)/100; try{ return v.toLocaleString(EN?'en-US':'cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2}); }catch(e){ return v.toFixed(2); } };
+    // SNÍMEK MÁ PŘEDNOST. Doklad vystavený po zavedení snímků nese vlastní číslo a opsanou
+    // identitu dodavatele -- kreslí se tedy z něj a k živým `gyms`/`profiles` se vůbec nesahá.
+    // Bez toho by se roky starý doklad přepsal, jakmile klub změní název nebo vstoupí do DPH.
+    // Kde snímek není (platby z doby před zavedením), dokreslí se postaru z živých dat.
+    if(b && b.doklad){
+      const _dk=b.doklad;
+      b=Object.assign({}, b, {
+        _snap:true,
+        doklad_no:_dk.doklad_no, issued_at:_dk.issued_at,
+        sup_name:_dk.sup_name, sup_ico:_dk.sup_ico, sup_dic:_dk.sup_dic, sup_address:_dk.sup_address,
+        sup_vat_payer:_dk.sup_vat_payer, sup_vat_rate:_dk.sup_vat_rate,
+        cust_name:_dk.cust_name, cust_email:_dk.cust_email,
+        item_label:(b.item_label||_dk.item_label),
+        amount:(Number(_dk.amount||0)/100), currency:(_dk.currency||b.currency),
+        payment_method:(_dk.payment_method||b.payment_method), test_mode:_dk.test_mode
+      });
+    }
     // POSKYTOVATEL = ten, komu peníze šly. Dosud se rozhodovalo podle gym_id, takže drop-in
     // zaplacený koučovi v klubu měl na dokladu klub -- prodávajícím byl přitom kouč.
     // Řídíme se paid_to, které nese sama transakce.
     const _toCoach = (b.paid_to==='coach') || (!b.gym_id && !!(b.coach_id||b.coach_profile_id));
     let gymRec=null;
-    if(b.gym_id && !_toCoach){ try{ const { data:_g }=await supaClient.from('gyms').select('legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,contact_phone,contact_email,contact_on_doklad').eq('id',b.gym_id).maybeSingle(); gymRec=_g||null; }catch(e){} }
+    if(b._snap){ gymRec={ legal_name:b.sup_name, name:b.sup_name, tax_id:b.sup_ico, vat_id:b.sup_dic,
+      vat_payer:b.sup_vat_payer, vat_rate:b.sup_vat_rate, billing_address:b.sup_address }; }
+    else if(b.gym_id && !_toCoach){ try{ const { data:_g }=await supaClient.from('gyms').select('legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,contact_phone,contact_email,contact_on_doklad').eq('id',b.gym_id).maybeSingle(); gymRec=_g||null; }catch(e){} }
     let coachRec=null;
     if(!gymRec){ const _cid=b.coach_id||b.coach_profile_id; if(_cid){ try{ const { data:_c }=await supaClient.from('profiles').select('legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,contact_phone,contact_email,contact_on_doklad,payout_legal_name,payout_tax_id,payout_vat_id,payout_vat_payer,payout_vat_rate,payout_billing_address').eq('id',_cid).maybeSingle(); coachRec=_c||null; }catch(e){} } }
     // Klubové plnění kouče -> jeho druhá fakturační identita, ta samá, na jejíž účet přišly
@@ -35256,7 +35275,8 @@ async function showReceipt(b){
     }catch(e){}
     const html=`<!doctype html><html><head><meta charset="utf-8"><title>${EN?'Payment confirmation':'Potvrzení o platbě'}</title>`
       +`<style>body{font-family:-apple-system,Arial,sans-serif;color:#1a1a1a;max-width:600px;margin:30px auto;padding:0 20px;line-height:1.5}h1{font-size:22px;margin:0 0 2px;letter-spacing:.04em}.muted{color:#777;font-size:13px}.row{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #eee;font-size:14px}.row span:first-child{color:#777}.tot{font-weight:700;font-size:16px;border-top:2px solid #1a1a1a;margin-top:8px;padding-top:10px;border-bottom:none}.note{font-size:11px;color:#999;margin-top:26px;line-height:1.6;border-top:1px solid #eee;padding-top:12px}.btn{margin-top:22px;padding:12px 20px;background:#1a1a1a;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}@media print{.btn{display:none}}</style></head><body>`
-      +`<h1>MTL</h1><div class="muted">${EN?'Payment confirmation':'Potvrzení o platbě'}</div>`+(_wasTest?`<div style="margin-top:12px;padding:9px 12px;background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font-size:12px;font-weight:700;">\ud83e\uddea ${EN?'TEST MODE — not a formal tax document; no actual transaction took place':'TESTOVACÍ REŽIM — nejde o formální daňový doklad a k žádné skutečné transakci nedošlo'}</div>`:'')
+      +`<h1>${EN?'Payment confirmation':'Potvrzení o platbě'}</h1>`
+      +(b.doklad_no?`<div class="muted">${esc(b.doklad_no)}${b.issued_at?(' \u00b7 '+(EN?'issued ':'vystaveno ')+new Date(b.issued_at).toLocaleDateString(EN?'en-GB':'cs-CZ')):''}</div>`:'')+(_wasTest?`<div style="margin-top:12px;padding:9px 12px;background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font-size:12px;font-weight:700;">\ud83e\uddea ${EN?'TEST MODE — not a formal tax document; no actual transaction took place':'TESTOVACÍ REŽIM — nejde o formální daňový doklad a k žádné skutečné transakci nedošlo'}</div>`:'')
       +`<div style="margin-top:22px">`
       +`<div class="row"><span>${EN?'Provider (seller)':'Poskytovatel (prodejce)'}</span><strong>${esc(seller)}</strong></div>`
       +`<div class="row"><span>${EN?'Issue date':'Datum vystaven\u00ed'}</span><strong>${(function(){ try{ var _d=b.created_at||b.charged_at||b.paid_at; var dd=_d?new Date(_d):new Date(); return dd.toLocaleDateString(EN?'en-GB':'cs-CZ'); }catch(e){ return new Date().toLocaleDateString(EN?'en-GB':'cs-CZ'); } })()}</strong></div>`
