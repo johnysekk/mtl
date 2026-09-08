@@ -118,7 +118,20 @@ export async function resolveOwner(sbGet, { ownerId, gymId, gymAccount }) {
 // The owner's ongoing ladder rate (no acquisition). Cohorts (courses) use this directly.
 export async function resolveRate(sbGet, { ownerId, gymId, gymAccount, mode }) {
   const p = await resolveOwner(sbGet, { ownerId, gymId, gymAccount });
-  return ladderRate(mode, { partner: p.partner, founding: p.founding, score: p.coach_ref_score, bankai: p.bankai_eligible });
+  // ČLENSTVÍ VE FEDERACI. Sazba 1,5 % patří KLUBU, ne osobě -- jeden člověk může mít klub
+  // ve federaci i klub mimo ni. Platí do org_rate_until a pak sama vyprší; kdyby to byl
+  // příznak, jedna zaplacená sezóna by dala slevu navždy.
+  // Vyhrává lepší sazba, stejně jako v celém žebříčku: Bankai (1 %) se členstvím nezhorší.
+  const _base = ladderRate(mode, { partner: p.partner, founding: p.founding, score: p.coach_ref_score, bankai: p.bankai_eligible });
+  if (gymId) {
+    try {
+      const g = (await sbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=org_rate_until`))[0];
+      if (g && g.org_rate_until && new Date(g.org_rate_until + 'T23:59:59').getTime() >= Date.now()) {
+        return Math.min(_base, 0.015);
+      }
+    } catch (e) {}
+  }
+  return _base;
 }
 
 // Acquisition finder's fee, or null if it doesn't apply. Only when acqSource === 'mtl_discovery'

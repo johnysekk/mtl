@@ -152,6 +152,61 @@ export default async function handler(req, res) {
     if (!rec) { const e = await sb.from('event_tickets').select('id,status,buyer_id,event_id,amount,currency,buyer_name').eq('pis_payment_id', paymentId).maybeSingle(); if (e.data) { rec = e.data; tbl = 'event_tickets'; } }
     if (!rec) { const co = await sb.from('cohort_members').select('id,status,student_id,cohort_id,name,attribution').eq('pis_payment_id', paymentId).maybeSingle(); if (co.data) { rec = co.data; tbl = 'cohort_members'; } }
     if (!rec) { const mo = await sb.from('merch_orders').select('id,status,student_id,gym_id,coach_id,merch_id,item_name,amount,currency,buyer_name').eq('pis_payment_id', paymentId).maybeSingle(); if (mo.data) { rec = mo.data; tbl = 'merch_orders'; } }
+    // ČLENSKÝ POPLATEK KLUBU VE FEDERACI. Vlastní větev, protože se nechová jako prodej:
+    // nevzniká rezervace ani lístek, ale členství na OBDOBÍ -- a teprve tím klub získá
+    // zvýhodněnou sazbu 1,5 %. Řídí se konečným stavem od banky (ACSC/ACCC…), ne odesláním.
+    if (!rec) {
+      const oc = await sb.from('organization_clubs')
+        .select('id,organization_id,gym_id,status,fee_amount,fee_currency,fee_period,valid_until')
+        .eq('fee_payment_intent', paymentId).maybeSingle();
+      if (oc.data) {
+        const r = oc.data;
+        if (!PAID_STATUSES.has(String(status))) return res.status(200).json({ ok: true, note: 'org fee not settled' });
+
+        // Období běží od dneška, nebo navazuje na dosud platné členství -- kdo zaplatí dřív,
+        // nesmí o zbytek zaplaceného období přijít.
+        const _now = new Date();
+        const _from = (r.valid_until && new Date(r.valid_until + 'T00:00:00') > _now)
+          ? new Date(r.valid_until + 'T00:00:00') : _now;
+        const _to = new Date(_from);
+        if (r.fee_period === 'month') _to.setMonth(_to.getMonth() + 1);
+        else if (r.fee_period === 'once') _to.setFullYear(_to.getFullYear() + 100);   // bez konce
+        else _to.setFullYear(_to.getFullYear() + 1);                                   // výchozí: rok
+        const _until = _to.toISOString().slice(0, 10);
+
+        try {
+          await sb.from('organization_clubs')
+            .update({ status: 'active', fee_paid_at: new Date().toISOString(), valid_until: _until })
+            .eq('id', r.id);
+        } catch (e) {}
+
+        // Sazba patří KLUBU a má vlastní datum konce, aby sama vypršela.
+        try { await sb.from('gyms').update({ org_rate_until: _until }).eq('id', r.gym_id); } catch (e) {}
+
+        try {
+          const g = await sb.from('gyms').select('owner_id,name').eq('id', r.gym_id).maybeSingle();
+          const o = await sb.from('organizations').select('name,abbr,owner_id').eq('id', r.organization_id).maybeSingle();
+          const _abbr = (o.data && (o.data.abbr || o.data.name)) || '';
+          const _du = new Date(_until).toLocaleDateString('cs-CZ');
+          if (g.data && g.data.owner_id) {
+            await sb.from('notifications').insert({
+              user_id: g.data.owner_id, type: 'system', read: false,
+              data: JSON.stringify({ kind: 'org_fee_paid', org_id: r.organization_id }),
+              message: `\u2705 \u010clensk\u00fd poplatek ${_abbr} zaplacen. \u010clenstv\u00ed plat\u00ed do ${_du} a klub m\u00e1 sazbu 1,5 %.`,
+            });
+          }
+          if (o.data && o.data.owner_id) {
+            await sb.from('notifications').insert({
+              user_id: o.data.owner_id, type: 'system', read: false,
+              data: JSON.stringify({ kind: 'org_fee_in', gym_id: r.gym_id }),
+              message: `\u{1F3E6} ${(g.data && g.data.name) || 'Klub'} zaplatil \u010dlensk\u00fd poplatek. \u010clenstv\u00ed do ${_du}.`,
+            });
+          }
+        } catch (e) {}
+        return res.status(200).json({ ok: true, org_fee: true, valid_until: _until });
+      }
+    }
+
     if (!rec) return res.status(200).json({ ok: true, note: 'no matching record' });
 
     const _paidStatus = (tbl === 'event_tickets' || tbl === 'merch_orders') ? 'paid' : (tbl === 'cohort_members') ? 'deposit_paid' : 'active';
