@@ -21972,10 +21972,19 @@ async function loadGymManageBookings(){
     const monthLabel = _gymMonth==='all' ? (LANG==='en'?'all time':'celkem') : (()=>{ const mm=fdMonthList().find(x=>x.ym===_gymMonth); return mm?mm.lbl:_gymMonth; })();
     const _evCur=_myGymData.currency||'CZK';
     const evTixM=_gymEvTix.filter(t=>(!t.currency||t.currency===_evCur) && (_gymMonth==='all'?true:((t.created_at||'').slice(0,7)===_gymMonth)));
+    // SKUTECNE CASTKY Z UCTU, ne dopocet ze sazby. Ucetni radky uz v _gymTx jsou -- pouziva je
+    // ledger o par radku niz -- takze nebylo proc odhadovat. Sazba se lisi podle stupne, kreditu
+    // i refundaci a odhad se s ni rozejde hned, jak se cokoli z toho zmeni.
+    const _txFee=function(types, cls){
+      return (_gymTx||[]).filter(inGM).reduce(function(sum,t){
+        if(types && types.indexOf(t.type)<0) return sum;
+        return sum + Number((cls==='stripe')?(t.stripe_fee||0):((t.mtl_fee||0)-(t.mtl_fee_refunded||0)))/100;
+      },0);
+    };
     const _evTake=(currentUser&&currentUser.partner)?0.005:0.02;
     const evGross=evTixM.reduce((s,t)=>s+(t.amount||0),0);
-    const evMtl=evGross*_evTake;
-    const evFeeEst=evTixM.reduce((s,t)=>s+((t.amount||0)*0.014+6),0);
+    const evMtl=_txFee(['event_ticket','event'],'mtl')||evGross*_evTake;
+    const evFeeEst=_txFee(['event_ticket','event'],'stripe');
     const evNet=Math.max(0, evGross-evMtl-evFeeEst);
     const evCount=evTixM.length;
     const monthOpts = '<option value="all"'+(_gymMonth==='all'?' selected':'')+'>'+(LANG==='en'?'All time':'Vše')+'</option>' + fdMonthList().map(m=>'<option value="'+m.ym+'"'+(m.ym===_gymMonth?' selected':'')+'>'+m.lbl+'</option>').join('');
@@ -21983,7 +21992,7 @@ async function loadGymManageBookings(){
     const dropsM = drops.filter(inGM);
     const dropBase=dropsM.reduce((s,b)=>s+netAmt(b),0);
     const isEP=!!(currentUser&&currentUser.partner); const dropGym=dropsM.reduce((s,b)=>s+netAmt(b)*(b.gym_keep_pct!=null?b.gym_keep_pct:(isEP?0.99:0.965)),0);
-    const dropFee=dropsM.reduce((s,b)=>s+(netAmt(b)*1*0.014+6),0);
+    const dropFee=_txFee(['drop_in'],'stripe');
     const dropNet=Math.max(0,dropGym-dropFee);
     // členství
     const activeNow = mems.filter(m=>m.status==='active');
@@ -21992,7 +22001,10 @@ async function loadGymManageBookings(){
     const epMul = isEP?0.995:((currentUser&&currentUser.founding)?0.98:0.965);
     const memsM = _gymMonth==='all' ? mems.filter(m=>(m.status==='active'||m.status==='cancelling') && (m.payment_status==='past_due' || !m.period_end || new Date(m.period_end).getTime() >= Date.now()-86400000)) : mems.filter(m => (inGM(m)||beforeGM(m)) && !(m.cancelled_at && String(m.cancelled_at).slice(0,7) < _gymMonth));
     const memMRR=memsM.reduce((s,m)=>s+_memMonthlyValue(m),0), memGym=memsM.reduce((s,m)=>s+(m.amount||0)*(m.gym_keep_pct!=null?m.gym_keep_pct:epMul),0);
-    const memFeeMo=memsM.reduce((s,m)=>s+((m.amount||0)*0.014+6),0);
+    // Clenstvi: MRR je pohled DOPREDU -- poplatek za jeste neprobehlou platbu nikdo znat nemuze.
+    // Bereme proto skutecny poplatek z uctovanych clenstvi za zvoleny mesic; kdyz zadne nebylo,
+    // je to nula, ne vymysleny odhad.
+    const memFeeMo=_txFee(['membership'],'stripe');
     const memNetMo=Math.max(0,memGym-memFeeMo);
     // ── LEDGER (skutečné platby ze Stripe, refund-adjusted) ──
     
@@ -25678,10 +25690,13 @@ function fdMonthStats(ym){
   if(!_fdData) return null;
   const inM=x=>(x.created_at||'').slice(0,7)===ym;
   const lessons=_fdData.Bact.filter(inM), drops=_fdData.GBact.filter(inM), newMem=_fdData.activeMem.filter(inM);
-  const coachGross=lessons.reduce((s,b)=>s+netAmt(b)*0.17,0);
-  const coachStripe=lessons.reduce((s,b)=>s+(netAmt(b)*1*0.014+6),0);
-  const dropGross=drops.reduce((s,b)=>s+netAmt(b)*0.02,0);
-  const memGross=newMem.reduce((s,m)=>s+(m.amount||0)*0.02,0);
+  // Skutečně naúčtované provize za ten měsíc, ne částky rezervací vynásobené sazbou.
+  const _F=window._fdFee||function(){ return 0; };
+  const coachGross=_F(['coach_1to1','coach_inperson','coach_online'], ym);
+  const _S=window._fdStripe||function(){ return 0; };
+  const coachStripe=_S(['coach_1to1','coach_inperson','coach_online'], ym);
+  const dropGross=_F(['drop_in'], ym);
+  const memGross=_F(['membership'], ym);
   const gross=coachGross+dropGross+memGross;
   return { gross, stripe:coachStripe, net:gross-coachStripe, newCoaches:_fdData.coaches.filter(inM).length, newMembers:newMem.length, lessons:lessons.length, drops:drops.length };
 }
@@ -25854,20 +25869,52 @@ async function renderFounderDash(){
     coaches=coaches.filter(c=>(coachDiscMap[c.id]||[]).includes(_fdDisc));
     gyms=gyms.filter(g=>parseDisc(g.disciplines).includes(_fdDisc));
   }
+  // SKUTECNE PROVIZE, ZADNY ODHAD. Driv se obrat MTL pocital jako (castka rezervace x sazba),
+  // takze cislo bylo spravne jen dokud meli vsichni zakladni sazbu a nic se nerefundovalo.
+  // /api/mtl-revenue vraci uctovane radky z `transactions` -- mtl_fee minus mtl_fee_refunded,
+  // presne to, co MTL opravdu vydelalo. Sazba, stupen, kredit i refundace jsou v tom uz zapocitane.
+  window._fdTx=[];
+  try{
+    const _t=await _freshTok();
+    const _r=await fetch('/api/mtl-revenue', { headers:{'x-access-token':_t} });
+    const _j=await _r.json(); if(_j&&_j.ok) window._fdTx=_j.rows||[];
+  }catch(e){}
+  // Souctuje realne provize podle typu (a volitelne mesice). Vraci koruny, ne halere.
+  // Skutecny Stripe poplatek z uctu. Driv se odhadoval jako "1,4 % + 6 Kc", coz neplati pro
+  // karty mimo EHP ani pro jinou menu -- a MTL si podle toho pocitalo vlastni cisty prijem.
+  window._fdStripe=function(types, ym){
+    return (window._fdTx||[]).reduce(function(sum,t){
+      if(types && types.indexOf(t.type)<0) return sum;
+      if(ym && String(t.created_at||'').slice(0,7)!==ym) return sum;
+      return sum + Number(t.stripe_fee||0)/100;
+    },0);
+  };
+  window._fdFee=function(types, ym){
+    return (window._fdTx||[]).reduce(function(sum,t){
+      if(types && types.indexOf(t.type)<0) return sum;
+      if(ym && String(t.created_at||'').slice(0,7)!==ym) return sum;
+      return sum + (Number(t.mtl_fee||0)-Number(t.mtl_fee_refunded||0))/100;
+    },0);
+  };
+  const _FD_1TO1=['coach_1to1','coach_inperson','coach_online'];
   const _fdFoundingCount = coaches.filter(c=>c.founding).length;
   const _fdFoundingLeft = Math.max(0, _foundingCap - _fdFoundingCount);
   const Bact=B.filter(b=>b.status==='active'), GBact=GB.filter(b=>b.status==='active');
-  const estFee = b => (b.amount||0)*1*0.014 + 6; // odhad Stripe fee (MTL ho nese jen u lekcí koučů)
+  // Skutecny Stripe poplatek z transakci, ne odhad. (MTL ho nese jen u lekci koucu.)
   let coachBase=0; Bact.forEach(b=>coachBase+=(b.amount||0));
-  const mtlCoachGross = coachBase*0.02;            // odhad (founding/kredity mírně sníží)
-  const coachStripe = Bact.reduce((s,b)=>s+estFee(b),0);
+  const mtlCoachGross = window._fdFee(_FD_1TO1);   // skutečně naúčtováno, ne odhad
+  const coachStripe = window._fdStripe(_FD_1TO1);
   const coachNet = mtlCoachGross - coachStripe;
   let dropBase=0; GBact.forEach(b=>dropBase+=(b.amount||0));
-  const dropTurnover=dropBase*1, mtlDrop=dropBase*0.02; // klub nese Stripe fee → MTL net = celá provize
+  const dropTurnover=dropBase*1, mtlDrop=window._fdFee(['drop_in']); // klub nese Stripe fee → MTL net = celá provize
   const activeMem=GM.filter(m=>m.status==='active'||m.status==='cancelling');
   const cancellingMem=GM.filter(m=>m.status==='cancelling').length;
   let memMRR=0; activeMem.forEach(m=>memMRR+=(m.amount||0));
-  const mtlMemMo=memMRR*0.02, mtlARR=mtlMemMo*12;
+  // Členství: MRR je pohled dopředu, ale podíl MTL se bere z toho, co se za POSLEDNÍ CELÝ MĚSÍC
+  // opravdu naúčtovalo. Je to měření, ne odhad; ARR z něj je pak projekce téhož čísla, ne sazby.
+  const _prevYm=(function(){ const d=new Date(); d.setMonth(d.getMonth()-1); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); })();
+  const _memPrev=window._fdFee(['membership'], _prevYm);
+  const mtlMemMo=_memPrev||window._fdFee(['membership'], (new Date()).toISOString().slice(0,7)), mtlARR=mtlMemMo*12;
   const oneOffNet = coachNet + mtlDrop;
   _fdData = { Bact, GBact, activeMem, coaches };
   if(!_fdMonth){ const d=new Date(); _fdMonth=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; }
@@ -26206,28 +26253,31 @@ async function openMtlCommissions(scope){
                  (m.bank>0?((EN?'cash/QR ':'hotovost/QR ')+fmtPrice(m.bank,m.cur)):''),
                  (m.at?((EN?'charged ':'str\u017eeno ')+new Date(m.at).toLocaleDateString(EN?'en-GB':'cs-CZ')):'') ].filter(Boolean).join(' \u00b7 ');
     return '<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;margin-bottom:10px;overflow:hidden;">'
-      +'<button class="mcMonth" data-k="'+k+'" style="width:100%;display:flex;align-items:center;gap:10px;padding:13px 14px;background:none;border:none;cursor:pointer;font-family:inherit;text-align:left;">'
-        +'<div style="flex:1;min-width:0;"><div style="font-size:15px;font-weight:700;color:var(--dark);">'+_mName(k)+'</div>'
-        +'<div style="font-size:12px;color:var(--mid);margin-top:2px;">'+escapeHtml(_sub)+'</div></div>'
-        +'<div style="font-size:15px;font-weight:700;color:var(--dark);white-space:nowrap;">'+fmtPrice(_tot,m.cur)+'</div>'
-        +_pill(m)
-        +'<span class="mcChev" data-k="'+k+'" style="color:var(--light);font-size:15px;transition:transform .15s;display:inline-block;">\u203a</span>'
-        +'</button>'
-      +(_dok[k]?('<div style="padding:0 14px 12px;"><button class="mcDok" data-k="'+k+'" style="background:none;border:1px solid var(--border);border-radius:9px;color:var(--mid);font-size:12px;font-weight:700;padding:6px 12px;cursor:pointer;font-family:inherit;">\ud83d\udcc4 '+(EN?'Receipt for the charge \u203a':'Doklad za str\u017een\u00ed \u203a')+'</button></div>'):'')
+      +'<div style="display:flex;align-items:center;gap:10px;padding:9px 14px 8px;">'
+        +'<div style="flex:1;min-width:0;"><div style="font-size:14.5px;font-weight:700;color:var(--dark);line-height:1.25;">'+_mName(k)+'</div>'
+        +'<div style="font-size:11.5px;color:var(--mid);margin-top:1px;">'+escapeHtml(_sub)+'</div></div>'
+        +'<div style="font-size:14.5px;font-weight:700;color:var(--dark);white-space:nowrap;">'+fmtPrice(_tot,m.cur)+'</div>'
+        +_pill(m)+'</div>'
+      +'<div style="padding:0 14px 10px;"><button class="mcMonth" data-k="'+k+'" style="background:none;border:1px solid var(--border);border-radius:9px;color:var(--mid);font-size:12px;font-weight:700;padding:5px 11px;cursor:pointer;font-family:inherit;">'
+        +'<span class="mcChev" data-k="'+k+'">\u203a</span> '+(EN?'Show transactions':'Zobrazit detail transakc\u00ed')+'</button></div>'
+      +(_dok[k]?('<div style="padding:0 14px 11px;"><button class="mcDok" data-k="'+k+'" data-dok="'+escapeHtml(String(_dok[k].id))+'" style="background:none;border:1px solid var(--border);border-radius:9px;color:var(--mid);font-size:12px;font-weight:700;padding:5px 11px;cursor:pointer;font-family:inherit;">\ud83d\udcc4 '+(EN?'Receipt for the charge \u203a':'Doklad za str\u017een\u00ed \u203a')+'</button></div>'):'')
       +'<div class="mcRows" data-k="'+k+'" style="display:none;border-top:1px solid var(--border);padding:4px 14px 10px;"></div>'
       +'</div>';
   }).join('');
   body.querySelectorAll('.mcDok').forEach(function(b){ b.onclick=function(ev){
     ev.stopPropagation();
-    // Tentyz prohlizec, jaky uz visi pod "Podklady pro ucetni" -- jen se do nej jde primo
-    // od mesice, ke kteremu doklad patri.
-    try{ openCommissionDoklady((scope&&scope.gymId)||null); }catch(e){}
+    // PRIMO ten jeden doklad, ne seznam vsech. Seznam byl mezikrok navic -- uzivatel uz vi,
+    // ktery mesic chce, protoze klepl na jeho radek.
+    const _id=b.dataset.dok; if(!_id) return;
+    try{ window.__comDok=window.__comDok||{}; window.__comDok[_id]=_dok[b.dataset.k]; }catch(e){}
+    try{ showCommissionDoklad(_id); }catch(e){}
   }; });
   body.querySelectorAll('.mcMonth').forEach(function(b){ b.onclick=function(){
     const wrap=body.querySelector('.mcRows[data-k="'+b.dataset.k+'"]'); if(!wrap) return;
-    const _ch=body.querySelector('.mcChev[data-k="'+b.dataset.k+'"]');
-    if(wrap.style.display!=='none'){ wrap.style.display='none'; if(_ch) _ch.style.transform='none'; return; }
-    if(_ch) _ch.style.transform='rotate(90deg)';
+    const _ch=b.querySelector('.mcChev');
+    const _lbl=function(open){ b.innerHTML='<span class="mcChev">'+(open?'\u2039':'\u203a')+'</span> '+(open?(EN?'Hide transactions':'Skr\u00fdt detail transakc\u00ed'):(EN?'Show transactions':'Zobrazit detail transakc\u00ed')); };
+    if(wrap.style.display!=='none'){ wrap.style.display='none'; _lbl(false); return; }
+    _lbl(true);
     const m=_byM[b.dataset.k];
     wrap.innerHTML=m.rows.sort(function(x,y){ return String(y.created_at||'').localeCompare(String(x.created_at||'')); }).map(function(t){
       const _pm={ stripe:'\ud83d\udcb3', qr:'\ud83d\udcf2', pis:'\ud83c\udfe6', cash:'\ud83d\udcb5' }[t.payment_method]||'';
