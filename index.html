@@ -12861,7 +12861,7 @@ async function showRescheduleConfirmation(id){
     +'.row span{color:#666;}.note{font-size:11px;color:#999;margin-top:16px;line-height:1.6;}@media print{button{display:none;}}</style></head><body>'
     +'<h1>'+(EN?'Change of session date':'Potvrzení o změně termínu')+'</h1>'
     +(c.test_mode?'<div style="margin:10px 0;padding:9px 12px;background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font-size:12px;font-weight:700;">\u{1F9EA} '+(EN?'TEST MODE':'TESTOVACÍ REŽIM')+'</div>':'')
-    +'<div style="font-size:13px;color:#666;margin-bottom:14px;">'+(EN?'Issued: ':'Vystaveno: ')+issued+' \u00b7 '+(EN?'change no. ':'změna č. ')+(c.seq||1)+'/'+((typeof RESCHED_MAX!=='undefined')?RESCHED_MAX:1)+'</div>'
+    +'<div style="font-size:13px;color:#666;margin-bottom:14px;">'+(EN?'Issued: ':'Vystaveno: ')+issued+(((c.seq||1)>1)?(' \u00b7 '+(EN?'change no. ':'změna č. ')+(c.seq)):'')+'</div>'
     +'<div style="margin-top:18px;">'
     +row(EN?'Provider':'Poskytovatel', c.provider_name||'—')
     +row(EN?'Customer':'Odběratel', c.student_name||'—')
@@ -13186,10 +13186,26 @@ async function _issuePrivateCancelConf(o){
       class_name:o.name||(LANG==='en'?'1:1 lesson':'Soukrom\u00e1 lekce'), class_date:o.date||null, class_time:o.time||null,
       refund:(o.refund!=null?o.refund:null), currency:(o.currency||'CZK'),
       note:(o.reason||''), cancelled_at:new Date().toISOString() };
-    const _msg='\u{1F9FE} '+(LANG==='en'?'Lesson cancelled: ':'Lekce zru\u0161ena: ')+_ds+' '+(o.time||'');
+    // Jedna zprava pro oba byla nijaka -- "Lekce zrusena: 11.9. 10:00" nerekne, kdo ji zrusil
+    // ani co se deje s penezi. Kazda strana proto dostane svoji, ve stejnem tvaru jako ostatni
+    // zpravy v appce: co se stalo, s kym, kdy, a kolik se vratilo.
+    const EN=LANG==='en';
+    const _who=(o.byCoach ? (o.coach_name||(EN?'the coach':'kou\u010d')) : (o.student_name||(EN?'the student':'student')));
+    const _when=_ds+' '+(o.time||'');
+    const _ref=(o.refund!=null) ? (fmtPrice(Number(o.refund)||0, o.currency||'CZK')+' '+((typeof _curSym==='function')?_curSym(o.currency||'CZK'):'')) : null;
+    const _msgStudent = o.byCoach
+      ? ('\u274C '+(EN?('Your coach '+_who+' cancelled the lesson on '+_when+'.'):('Kou\u010d '+_who+' ti zru\u0161il lekci '+_when+'.'))
+         + (_ref?(' '+(EN?('Refunded: '+_ref+'.'):('Vr\u00e1ceno: '+_ref+'.'))):''))
+      : ('\u{1F9FE} '+(EN?('You cancelled your lesson on '+_when+'.'):('Zru\u0161il jsi svou lekci '+_when+'.'))
+         + (_ref?(' '+(EN?('Refunded: '+_ref+'.'):('Vr\u00e1ceno: '+_ref+'.'))):''));
+    const _msgCoach = o.byCoach
+      ? ('\u{1F9FE} '+(EN?('You cancelled the lesson on '+_when+'.'):('Zru\u0161il jsi lekci '+_when+'.'))
+         + (_ref?(' '+(EN?('Refunded to the student: '+_ref+'.'):('Studentovi vr\u00e1ceno: '+_ref+'.'))):''))
+      : ('\u274C '+(EN?(_who+' cancelled the lesson on '+_when+'.'):(_who+' zru\u0161il lekci '+_when+'.'))
+         + (_ref?(' '+(EN?('Refunded: '+_ref+'.'):('Vr\u00e1ceno: '+_ref+'.'))):''));
     const _rows=[];
-    if(o.student_id) _rows.push({ user_id:o.student_id, type:'system', read:false, data:JSON.stringify(_data), message:_msg });
-    if(o.coach_id)   _rows.push({ user_id:o.coach_id,   type:'system', read:false, data:JSON.stringify(_data), message:_msg });
+    if(o.student_id) _rows.push({ user_id:o.student_id, type:'system', read:false, data:JSON.stringify(_data), message:_msgStudent });
+    if(o.coach_id)   _rows.push({ user_id:o.coach_id,   type:'system', read:false, data:JSON.stringify(_data), message:_msgCoach });
     if(_rows.length) await supaClient.from('notifications').insert(_rows);
   }catch(e){ console.error('_issuePrivateCancelConf', e&&e.message); }
 }
@@ -23982,8 +23998,10 @@ async function loadNotifications(append){
         var _pd={}; try{ _pd=JSON.parse(n.data||'{}'); }catch(e){ _pd={}; }
         // Rodinné věci nahoru. Řetězec pod tím je dlouhý a snadno je předběhne něco jiného.
         if(k==='cancel_conf'){
+          // POZOR: podminka byla `if(_ec.gym_id)`. Soukromka zadny klub nema, takze u ni odkaz
+          // "Otevrit potvrzeni" existoval, ale po klepnuti se nestalo nic.
           try{ const _ec=JSON.parse(n.data||'{}');
-            if(_ec.gym_id && typeof showCancelConfirmation==='function') showCancelConfirmation(_ec); }catch(e){}
+            if((_ec.gym_id||_ec.coach_id||_ec.class_date) && typeof showCancelConfirmation==='function') showCancelConfirmation(_ec); }catch(e){}
           return;
         }
         if(k==='resched_conf'){
@@ -30050,7 +30068,8 @@ async function coachCancelBooking(d){
       message:`❌ Tvůj kouč ${currentUser.name || 'Kouč'} ti zrušil lekci na ${d.date} v ${d.time}.${reason ? ' Důvod: '+reason : ''} Vrátili jsme ti 100 % částky (${fmtPrice((_refunded!=null?_refunded:d.amt), d.cur||'CZK')} ${_curSym(d.cur||'CZK')}).`
     });
     try{ await _issuePrivateCancelConf({ student_id:d.student, coach_id:(currentUser&&currentUser.id)||null, name:(d.disc||null),
-      date:d.date, time:d.time, refund:(_refunded!=null?_refunded:Number(d.amt)||0), currency:(d.cur||'CZK'), reason:reason||'' }); }catch(e){}
+      date:d.date, time:d.time, refund:(_refunded!=null?_refunded:Number(d.amt)||0), currency:(d.cur||'CZK'), reason:reason||'',
+      byCoach:true, coach_name:(currentUser.name||''), student_name:(d.studentName||d.student_name||'') }); }catch(e){}
     loadCoachBookings();
   } catch(e){
     console.error('Coach cancel error:', e);
@@ -30687,7 +30706,8 @@ async function cancelBooking(d){
       // Doklad o zruseni obema stranam -- vcetne toho, kolik se opravdu vratilo.
       // _refunded je castka od serveru, ne dopocet z klienta.
       try{ await _issuePrivateCancelConf({ student_id:currentUser.id, coach_id:bk.coach_id, name:(d.disc||null),
-        date:d.date, time:d.time, refund:_refunded, currency:(d.cur||'CZK'), reason:reason||'' }); }catch(e){}
+        date:d.date, time:d.time, refund:_refunded, currency:(d.cur||'CZK'), reason:reason||'',
+        byCoach:false, student_name:(currentUser.name||''), coach_name:(d.coach||'') }); }catch(e){}
     }
     try{ window._myTxCache=null; window._myTxCacheAt=0; }catch(e){}
     try{ if($('shCoachDash') && $('shCoachDash').classList.contains('open') && typeof openCoachDash==='function') openCoachDash(); }catch(e){}
@@ -34489,9 +34509,12 @@ async function _loadMyPayments(){
     // posílala i do gym_bookings, kde je klíč uuid, takže dotaz končil chybou 400. Bereme
     // rovnou všechny rezervace toho studenta; každá tabulka dostane jen svoje typy klíčů.
     try{
+      // Ke stavu rezervace navic: zrusena soukromka ma mit v Dokladech odkaz na potvrzeni
+      // o zruseni, uplne stejne jako presun. Zadna nova tabulka -- rezervace uz to vsechno vi.
       const { data:_bk }=await supaClient.from('bookings')
-        .select('id,payment_intent').eq('student_id', currentUser.id).limit(300);
-      (_bk||[]).forEach(function(b){ if(b.payment_intent) window._mpPiToBk[b.payment_intent]=String(b.id); });
+        .select('id,payment_intent,status,refund_pct,training_date,training_time,amount,currency,coach_id').eq('student_id', currentUser.id).limit(300);
+      window._mpBkById={};
+      (_bk||[]).forEach(function(b){ if(b.payment_intent) window._mpPiToBk[b.payment_intent]=String(b.id); window._mpBkById[String(b.id)]=b; });
     }catch(e){}
     try{
       const { data:_gb }=await supaClient.from('gym_bookings')
@@ -34546,6 +34569,22 @@ function _mpRender(){
   // při platbě (session_at_issue). Když řetěz přes rezervaci selže, spáruje je datum a čas.
   const _rscBySess={};
   (window._mpResched||[]).forEach(function(c){ if(c.from_at) _rscBySess[String(c.from_at).slice(0,16)]=c.id; });
+  // Zrusena rezervace k teto transakci, pokud existuje. Podle toho se vedle dokladu ukaze
+  // "Potvrzeni o zruseni" -- tam, kde uz uzivatel hleda "Potvrzeni o presunu".
+  const _cancFor=function(t){
+    try{
+      var _id=(t.source_booking_id && window._mpBkById && window._mpBkById[String(t.source_booking_id)]) ? String(t.source_booking_id)
+        : ((t.payment_intent && window._mpPiToBk) ? window._mpPiToBk[t.payment_intent] : null);
+      if(!_id) return null;
+      var b=(window._mpBkById||{})[String(_id)];
+      if(!b || b.status!=='cancelled') return null;
+      var _pct=(b.refund_pct!=null)?Number(b.refund_pct):null;
+      var _amt=(_pct!=null)?Math.round((Number(b.amount)||0)*_pct)/100:null;
+      return { gym_id:null, coach_id:b.coach_id||null, class_name:null,
+        class_date:b.training_date||null, class_time:b.training_time||null,
+        refund:_amt, currency:b.currency||t.currency||'CZK', cancelled_at:t.created_at };
+    }catch(e){ return null; }
+  };
   const _rscFor=function(t){
     if(_rscByTx['tx:'+t.id]) return _rscByTx['tx:'+t.id];
     if(t.source_booking_id && _rscByTx['bk:'+String(t.source_booking_id)]) return _rscByTx['bk:'+String(t.source_booking_id)];
@@ -34573,10 +34612,15 @@ function _mpRender(){
       +'<div style="flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:2px;">'
       +'<button class="mpDokBtn" data-idx="'+idx+'" style="background:none;border:none;color:#635BFF;font-size:12.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';white-space:nowrap;">'+(EN?'Receipt \u203a':'Doklad \u203a')+'</button>'
       +(_rscFor(t)?('<button class="mpResched" data-id="'+_rscFor(t)+'" style="background:none;border:none;color:var(--mid);font-size:11.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';white-space:nowrap;">'+(EN?'Change of date \u203a':'Změna termínu \u203a')+'</button>'):'')
+      +(_cancFor(t)?('<button class="mpCanc" data-c=\''+escapeHtml(JSON.stringify(_cancFor(t)))+'\' style="background:none;border:none;color:var(--mid);font-size:11.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';white-space:nowrap;">'+(EN?'Cancellation \u203a':'Zru\u0161en\u00ed \u203a')+'</button>'):'')
       +'</div></div>';
   }).join('');
   try{
     box.querySelectorAll('.mpResched').forEach(function(el){
+  // Stejny vzor jako presun: doklad zustava, vedle nej odkaz na potvrzeni o zruseni.
+  box.querySelectorAll('.mpCanc').forEach(function(b){ b.onclick=function(){
+    try{ var _d=JSON.parse(b.dataset.c||'{}'); if(typeof showCancelConfirmation==='function') showCancelConfirmation(_d); }catch(e){}
+  }; });
       el.onclick=function(){ if(typeof showRescheduleConfirmation==='function') showRescheduleConfirmation(el.dataset.id); };
     });
   }catch(e){}
