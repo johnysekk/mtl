@@ -7335,7 +7335,7 @@ async function loadMoreGyms(){
     if(data.length < _GYM_PAGE) _gymExhausted = true;
     _gymOffset = from;
     const have = new Set(GYMS.map(x=>x.id));
-    const add = data.filter(g=>!g.suspended && !g.deleted_at && !have.has(g.id));
+    const add = data.filter(g=>!g.suspended && !g.deleted_at && !have.has(g.id) && _gymHasTerms(g));
     if(add.length){
       GYMS = GYMS.concat(add.map(_mapGymRow));
       try{ if(typeof init==='function') init(); }catch(e){}
@@ -7344,6 +7344,11 @@ async function loadMoreGyms(){
     return add.length > 0;
   }catch(e){ _gymLoadingMore=false; return false; }
 }
+// Klub bez vlastnich podminek se v decku NEUKAZUJE. Student u nej rezervuje trenink, kde muze
+// prijit k urazu -- bez podminek, se kterymi souhlasil, nema klub o co oprit ani zakladni
+// pravidla, a MTL by ho pritom nabizelo. Chybejici podminky jsou tedy prekazka publikace,
+// ne kosmeticky nedostatek; klub na to upozorni prouzek v nastaveni.
+function _gymHasTerms(g){ return !!(g && typeof g.terms_text==='string' && g.terms_text.trim()); }
 async function ensureGymsLoaded(force){
   if(_gymsLoaded && !force){ return; }
   try{
@@ -7352,7 +7357,7 @@ async function ensureGymsLoaded(force){
     const _hc = _deckHomeCountry();
     if(_hc && !_deckAbroad) _q = _q.eq('country', _hc);
     const { data } = await _q.order('created_at',{ascending:false}).range(0, _GYM_PAGE - 1);
-    const gyms=(data||[]).filter(g=>!g.suspended && !g.deleted_at);
+    const gyms=(data||[]).filter(g=>!g.suspended && !g.deleted_at && _gymHasTerms(g));
     if(!data || data.length < _GYM_PAGE) _gymExhausted = true;
     GYMS=gyms.map(_mapGymRow);
     try{ const _oids=[...new Set(gyms.map(x=>x.owner_id).filter(Boolean))]; if(_oids.length){ const { data:_ow } = await supaClient.from('profiles').select('id,partner').in('id',_oids); const _opm={}; (_ow||[]).forEach(o=>_opm[o.id]=!!o.partner); GYMS.forEach(c=>{ if(c.ownerId) c.ownerPartner=!!_opm[c.ownerId]; }); } }catch(e){}
@@ -17240,6 +17245,11 @@ async function renderGymManage(){
   const _gymBar = levelBarHtml(await computeXPFor(g.id,'gym'), (EN?'Club':'Gym'),'🏛️',true);
   const partnerBadge = '';
   box.innerHTML = `
+    ${_gymHasTerms(g)?'':`<div id="mgTermsBanner" style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;cursor:pointer;">
+      <div style="font-size:13.5px;font-weight:800;color:#8a1c1c;">\u26A0\uFE0F ${LANG==='en'?'Add your club terms':'Dopl\u0148 podm\u00ednky tr\u00e9nov\u00e1n\u00ed ve tv\u00e9m klubu'}</div>
+      <div style="font-size:12px;color:#8a1c1c;line-height:1.5;margin-top:3px;">${LANG==='en'?'Upload your club\'s terms or its statutes. Until then the club is not shown in the deck.':'Nahraj obchodn\u00ed podm\u00ednky klubu nebo jeho stanovy k odsouhlasen\u00ed. Do t\u00e9 doby se klub v decku nezobrazuje.'}</div>
+      <div style="font-size:12px;font-weight:800;color:#8a1c1c;margin-top:6px;">${LANG==='en'?'Open the section \u203A':'Otev\u0159\u00edt sekci \u203A'}</div>
+    </div>`}
     <div style="font-size:15px;font-weight:800;color:var(--dark);margin-bottom:6px;">${escapeHtml(g.name||'')}</div>
     
     ${(window._myGyms&&window._myGyms.length>1)?`<div style="display:flex;gap:8px;margin-bottom:12px;"><button onclick="openGymPicker()" style="width:100%;padding:10px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">🔁 ${LANG==='en'?'Switch club':'Přepnout klub'}</button></div>`:''}
@@ -17348,8 +17358,10 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
       <div id="recpList"></div>
     </div>
     </div></details>
-    <details class="setSec"><summary>📜 ${LANG==='en'?'Terms, club rules & waiver':'Podmínky, pravidla klubu a souhlas'}</summary><div class="setBody">
-    <p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:8px;">${LANG==='en'?'Optional. Shown to members before they pay — they must agree to continue. Good for house rules, cancellation policy, code of conduct, what to bring.':'Nepovinné. Zobrazí se členovi před platbou — musí odsouhlasit, aby mohl pokračovat. Hodí se na pravidla chování, storno podmínky, co si vzít na trénink.'}</p>
+    <details class="setSec" id="mgTermsSec"><summary>📜 ${LANG==='en'?'Terms, club rules & waiver':'Podmínky, pravidla klubu a souhlas'}${_gymHasTerms(_myGymData)?'':' <span style="font-size:11px;font-weight:800;color:#8a1c1c;background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;padding:2px 8px;margin-left:6px;">'+(LANG==='en'?'required':'chybí')+'</span>'}</summary><div class="setBody">
+    <p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:8px;">${LANG==='en'
+      ? 'Required. Upload your club\'s terms or its statutes. Members see them before they pay and must agree to continue \u2014 without them the club is not listed in the deck.'
+      : 'Povinn\u00e9. Nahraj obchodn\u00ed podm\u00ednky klubu nebo jeho stanovy. \u010clen\u016fm se uk\u00e1\u017eou p\u0159ed platbou a mus\u00ed s nimi souhlasit \u2014 bez nich se klub v decku nezobrazuje.'}</p>
     <input id="mgTermsTitle" type="text" value="${(_myGymData.terms_title||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Title (e.g. Club rules)':'Nadpis (např. Pravidla klubu)'}" style="width:100%;box-sizing:border-box;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';margin-bottom:8px;">
     <textarea id="mgTermsText" rows="5" placeholder="${LANG==='en'?'Your terms / rules here…':'Sem napiš podmínky / pravidla…'}" style="width:100%;box-sizing:border-box;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';line-height:1.5;resize:vertical;margin-bottom:16px;">${(_myGymData.terms_text||'').replace(/</g,'&lt;')}</textarea>${_gymOrgForm==='nonprofit'?`<div style="border-top:1px solid var(--border);margin:4px 0 12px;"></div><label style="display:flex;align-items:center;gap:9px;cursor:pointer;font-size:13.5px;font-weight:700;color:var(--dark);margin-bottom:6px;"><input type="checkbox" id="mgMembClauseOn" ${_myGymData.membership_clause_on?'checked':''} style="width:18px;height:18px;flex-shrink:0;"> ${LANG==='en'?'Membership-formation clause (spolek)':'Klauzule o vzniku členství (spolek)'}</label><p style="font-size:11.5px;color:var(--light);line-height:1.5;margin-bottom:6px;">${LANG==='en'?'Shown & recorded ONLY at membership checkout (not drop-in). Paying = becoming a member. Have your lawyer match it to your statutes.':'Ukáže se a zaznamená JEN u členského předplatného (ne u jednorázového vstupu). Úhrada = vznik členství. Text nech právníkem sladit se stanovami.'}</p><textarea id="mgMembClause" rows="4" placeholder="${LANG==='en'?'By paying the monthly membership fee I apply for membership of [club], z.s. and agree to its statutes.':'Úhradou měsíčního členského příspěvku podávám přihlášku za člena spolku [název], z.s. a souhlasím s jeho stanovami.'}" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:11px;font-family:'DM Sans';font-size:13px;margin-bottom:6px;resize:vertical;">${(_myGymData.membership_clause||'').replace(/</g,'&lt;')}</textarea>`:''}
     <div style="display:flex;gap:8px;margin-bottom:10px;"><button id="mgWaiverTpl" type="button" onclick="if($('mgTermsText')){ $('mgTermsText').value=_waiverTemplate(); }" style="flex:1;padding:10px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">📋 ${LANG==='en'?'Use template':'Použít vzor'}</button><button id="mgWaiverExport" type="button" onclick="exportWaiverAcceptances()" style="flex:1;padding:10px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">⬇ ${LANG==='en'?'Export acceptances':'Exportovat souhlasy'}</button></div><label style="display:flex;align-items:flex-start;gap:8px;font-size:11.5px;margin-bottom:16px;cursor:pointer;color:var(--dark);line-height:1.45;"><input type="checkbox" id="mgWaiverAuthor" ${_myGymData.waiver_author_confirmed_at?'checked':''} style="width:18px;height:18px;flex-shrink:0;margin-top:1px;"> <span>${LANG==='en'?'As the club owner I am the author of this document and bear responsibility for its content and validity; MTL only stores it in the form I provide, without reviewing its content and without any guarantee of availability or permanence — I keep my own copy, and any outage, data loss, account deletion or fault on either side does not make MTL responsible for the document or its consequences.':'Jako majitel klubu jsem autorem tohoto dokumentu a nesu odpovědnost za jeho obsah i platnost; MTL jej pouze technicky ukládá v podobě, v jaké jsem jej vložil, bez kontroly obsahu a bez jakékoli záruky dostupnosti či trvalosti — uchovávám si vlastní kopii a výpadek, ztráta dat, smazání účtu ani porucha na kterékoli straně nečiní MTL odpovědným za dokument ani jeho důsledky.'}</span></label>
@@ -17446,6 +17458,13 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
   setOrgFormUI();
   box.querySelectorAll('.partnerLearnBtn').forEach(b=>b.onclick=openPartnerInfo);
   document.querySelectorAll('.orgFormBtn').forEach(b=>b.onclick=()=>{ _gymOrgForm=b.dataset.v; setOrgFormUI(); renderPlansEditor(); loadGymManageBookings(); });
+  // Prouzek musi vest primo do te sekce, jinak je to jen vycitka bez cesty ven.
+  { const _tb=$('mgTermsBanner'); if(_tb) _tb.onclick=function(){
+      const sec=$('mgTermsSec'); if(!sec) return;
+      try{ sec.open=true; }catch(e){}
+      try{ sec.scrollIntoView({behavior:'smooth', block:'center'}); }catch(e){ sec.scrollIntoView(); }
+      setTimeout(function(){ const t=$('mgTermsText'); if(t) t.focus(); }, 350);
+    }; }
   { const _mle=$('mgLegalEntity'); if(_mle) _mle.onchange=function(){ const on=this.checked; const w=$('mgOrgFormWrap'); if(w) w.style.display=on?'':'none';  if(!on){ _gymOrgForm='profit'; setOrgFormUI(); renderPlansEditor(); } }; }
   if($('mgAddPlan')) $('mgAddPlan').onclick=()=>{ const _np={ id:'p'+Date.now().toString(36), name:'', price:0, access:['all'] }; _gymPlans.push(_np); window._planOpen=window._planOpen||{}; window._planOpen[_np.id]=true; renderPlansEditor(); };
   if($('mgAddRepeat')) $('mgAddRepeat').onclick=()=>{ const pn=$('mgRepeatPanel'); if(pn) pn.style.display = pn.style.display==='none' ? 'block' : 'none'; };
