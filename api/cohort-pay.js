@@ -163,7 +163,7 @@ export default async function handler(req, res) {
         payment_method_types: ['card'],
         billing_address_collection: 'required',
         tax_id_collection: { enabled: true },
-        success_url: `${proto}://${host}/?cohort=${encodeURIComponent(mem.cohort_id)}&firstmonth=ok&cm=${encodeURIComponent(cmId)}&session={CHECKOUT_SESSION_ID}`,
+        success_url: `${proto}://${host}/?cohort=${encodeURIComponent(mem.cohort_id)}&firstmonth=ok&m=${_nM}&cm=${encodeURIComponent(cmId)}&session={CHECKOUT_SESSION_ID}`,
         cancel_url: `${proto}://${host}/?cohortpay=${encodeURIComponent(cmId)}`,
         customer_email: mem.email || undefined,
         metadata: { mtl_payment_type: 'cohort_first_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_currency: cur, mtl_welcome: wz ? '1' : '0', mtl_rate: String(rate), mtl_months: String(_nM) },
