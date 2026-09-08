@@ -144,13 +144,19 @@ export default async function handler(req, res) {
       const tierPrice = tierPriceOf(coh, mem.tier);
       const alreadyPaid = Number(mem.paid_amount || 0);
       const remainder = Math.max(0, tierPrice - alreadyPaid);
+      // Student muze zaplatit i nekolik mesicu naraz. Pocet chodi z klienta, ale CENU pocitame
+      // tady z ceniku -- klient posila jen pozadavek, ne castku. Strop je delka kurzu.
+      const _totM = Math.max(1, Number(coh.months || 1));
+      const _nM = Math.min(_totM, Math.max(1, parseInt(b.months, 10) || 1));
+      const _extra = tierPrice * (_nM - 1);
       if (!(remainder > 0)) { await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'enrolled' }); return res.status(200).json({ ok: true, enrolled: true, url: null, remainder: 0 }); }
       const cur = String(coh.currency || 'CZK').toUpperCase();
       const isCZK = cur === 'CZK';
-      const unit = isCZK ? Math.floor(remainder) * 100 : Math.round(remainder * 100);
+      const _due = remainder + _extra;
+      const unit = isCZK ? Math.floor(_due) * 100 : Math.round(_due * 100);
       const wz = await isWelcomeZero(coh.stripe_account);
       const rate = wz ? 0 : await providerCommission(coh.owner_id, coh.gym_id);
-      const fee = Math.round(remainder * rate * 100);
+      const fee = Math.round(_due * rate * 100);
       const host = req.headers.host; const proto = host && host.includes('localhost') ? 'http' : 'https';
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
@@ -160,11 +166,11 @@ export default async function handler(req, res) {
         success_url: `${proto}://${host}/?cohort=${encodeURIComponent(mem.cohort_id)}&firstmonth=ok&cm=${encodeURIComponent(cmId)}&session={CHECKOUT_SESSION_ID}`,
         cancel_url: `${proto}://${host}/?cohortpay=${encodeURIComponent(cmId)}`,
         customer_email: mem.email || undefined,
-        metadata: { mtl_payment_type: 'cohort_first_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_currency: cur, mtl_welcome: wz ? '1' : '0', mtl_rate: String(rate) },
-        line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: `${coh.name || 'Course'} - 1. mesic (doplatek)` }, unit_amount: unit }, quantity: 1 }],
-        payment_intent_data: { application_fee_amount: fee, metadata: { mtl_payment_type: 'cohort_first_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_rate: String(rate), mtl_welcome: wz ? '1' : '0' } }
+        metadata: { mtl_payment_type: 'cohort_first_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_currency: cur, mtl_welcome: wz ? '1' : '0', mtl_rate: String(rate), mtl_months: String(_nM) },
+        line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: `${coh.name || 'Course'} - ${_nM > 1 ? ('1.-' + _nM + '. mesic') : '1. mesic (doplatek)'}` }, unit_amount: unit }, quantity: 1 }],
+        payment_intent_data: { application_fee_amount: fee, metadata: { mtl_payment_type: 'cohort_first_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_rate: String(rate), mtl_welcome: wz ? '1' : '0', mtl_months: String(_nM) } }
       }, { stripeAccount: coh.stripe_account });
-      return res.status(200).json({ ok: true, url: session.url, remainder });
+      return res.status(200).json({ ok: true, url: session.url, remainder, months: _nM, amount: _due });
     }
 
     // Month 2+ of a multi-month course: a FULL monthly (tier) payment, like an on-site payer buying
@@ -187,12 +193,18 @@ export default async function handler(req, res) {
       const tierPrice = tierPriceOf(coh, mem.tier);
       if (!(tierPrice > 0)) return res.status(400).json({ ok: false, error: 'no price set' });
       const nextMonth = paidMonths + 1;
+      // Vic mesicu naraz. Strop je to, co z kurzu zbyva; cenu pocitame z ceniku, ne z klienta.
+      // mtl_month uz webhook cte jako "posledni zaplaceny mesic", takze staci poslat ten posledni
+      // z rozsahu a months_paid se posune spravne bez zasahu do webhooku.
+      const _nM = Math.min(totalMonths - paidMonths, Math.max(1, parseInt(b.months, 10) || 1));
+      const lastMonth = paidMonths + _nM;
+      const _due = tierPrice * _nM;
       const cur = String(coh.currency || 'CZK').toUpperCase();
       const isCZK = cur === 'CZK';
-      const unit = isCZK ? Math.floor(tierPrice) * 100 : Math.round(tierPrice * 100);
+      const unit = isCZK ? Math.floor(_due) * 100 : Math.round(_due * 100);
       const wz = await isWelcomeZero(coh.stripe_account);
       const rate = wz ? 0 : await providerCommission(coh.owner_id, coh.gym_id);
-      const fee = Math.round(tierPrice * rate * 100);
+      const fee = Math.round(_due * rate * 100);
       const host = req.headers.host; const proto = host && host.includes('localhost') ? 'http' : 'https';
       const session = await stripe.checkout.sessions.create({
         mode: 'payment',
@@ -202,11 +214,11 @@ export default async function handler(req, res) {
         success_url: `${proto}://${host}/?cohort=${encodeURIComponent(mem.cohort_id)}&monthpaid=ok&cm=${encodeURIComponent(cmId)}&session={CHECKOUT_SESSION_ID}`,
         cancel_url: `${proto}://${host}/?cohortpay=${encodeURIComponent(cmId)}`,
         customer_email: mem.email || undefined,
-        metadata: { mtl_payment_type: 'cohort_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_currency: cur, mtl_welcome: wz ? '1' : '0', mtl_rate: String(rate), mtl_month: String(nextMonth) },
-        line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: `${coh.name || 'Course'} - ${nextMonth}. mesic z ${totalMonths}` }, unit_amount: unit }, quantity: 1 }],
-        payment_intent_data: { application_fee_amount: fee, metadata: { mtl_payment_type: 'cohort_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_rate: String(rate), mtl_welcome: wz ? '1' : '0', mtl_month: String(nextMonth) } }
+        metadata: { mtl_payment_type: 'cohort_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_currency: cur, mtl_welcome: wz ? '1' : '0', mtl_rate: String(rate), mtl_month: String(lastMonth), mtl_months: String(_nM) },
+        line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: `${coh.name || 'Course'} - ${_nM > 1 ? (nextMonth + '.-' + lastMonth + '. mesic') : (nextMonth + '. mesic')} z ${totalMonths}` }, unit_amount: unit }, quantity: 1 }],
+        payment_intent_data: { application_fee_amount: fee, metadata: { mtl_payment_type: 'cohort_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_rate: String(rate), mtl_welcome: wz ? '1' : '0', mtl_month: String(lastMonth), mtl_months: String(_nM) } }
       }, { stripeAccount: coh.stripe_account });
-      return res.status(200).json({ ok: true, url: session.url, amount: tierPrice, month: nextMonth, totalMonths });
+      return res.status(200).json({ ok: true, url: session.url, amount: _due, month: nextMonth, lastMonth, months: _nM, totalMonths });
     }
 
     const cohortId = b.cohort_id;

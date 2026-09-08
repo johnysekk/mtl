@@ -447,6 +447,9 @@ async function recordTransaction(acct, pi, fields) {
       ...(fields.acq_months != null ? { acq_months: fields.acq_months } : {}),
       ...(fields.base_rate != null ? { base_rate: fields.base_rate } : {}),
       income_class: fields.income_class || null,
+      // Kolik mesicu platba pokryla. Pise se jen kdyz to volajici vi, at se u vsech ostatnich
+      // typu plateb nic nemeni a stary radek bez toho sloupce se cte jako jeden mesic.
+      ...(fields.months != null ? { months: Math.max(1, parseInt(fields.months, 10) || 1) } : {}),
       cohort_id: fields.cohort_id || null,
       payment_method: 'stripe', commission_status: 'collected', commission_month: new Date().toISOString().slice(0,7),
       status: 'paid', created_at: new Date().toISOString(),
@@ -722,12 +725,16 @@ export default async function handler(req, res) {
           await sbPost('cohort_payments', { cohort_member_id: cmId, cohort_id: cohId || null, kind: 'first_month', amount, currency: cur, mtl_fee: fee, stripe_fee: _sFee, payment_method: 'stripe', stripe_pi: pi || null, status: 'paid', created_at: new Date().toISOString() });
           {
             const _prev2 = Number((((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=paid_amount`)) || [])[0] || {}).paid_amount || 0);
-            await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'enrolled', paid_amount: Math.round((_prev2 + amount) * 100) / 100, months_paid: 1 });
+            // months_paid: 1 bylo natvrdo. Kdyz student zaplati doplatek 1. mesice A ROVNOU
+            // dalsi mesice jednou platbou, pokryva to mesicu vic -- mtl_months rika kolik.
+            // Bez toho by mu appka zamkla lekce, ktere ma zaplacene.
+            const _mn = Math.max(1, parseInt(m.mtl_months || '1', 10) || 1);
+            await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'enrolled', paid_amount: Math.round((_prev2 + amount) * 100) / 100, months_paid: _mn });
           }
           try {
             const _cg = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=gym_id`)) || [])[0];
             const _cm = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=student_id`)) || [])[0];
-            await recordTransaction(event.account, pi, { type: 'course', member_id: (_cm && _cm.student_id) || null, gym_id: (_cg && _cg.gym_id) || null, income_class: 'cohort_first_month', cohort_id: (m.cohort_id || null) });
+            await recordTransaction(event.account, pi, { type: 'course', member_id: (_cm && _cm.student_id) || null, gym_id: (_cg && _cg.gym_id) || null, income_class: 'cohort_first_month', months: Math.max(1, parseInt(m.mtl_months || '1', 10) || 1), cohort_id: (m.cohort_id || null) });
           } catch (e) { console.error('cohort first_month tx', e.message); }
           try { const _cd2 = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=discipline`)) || [])[0]; if (_cd2 && _cd2.discipline) await payGymAmbassador(_cd2.discipline, amount, cur, s.id, pi); } catch (e) { console.error('cohort amb firstmonth', e.message); }
         }
@@ -753,7 +760,7 @@ export default async function handler(req, res) {
           try {
             const _cg = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=gym_id`)) || [])[0];
             const _cm = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=student_id`)) || [])[0];
-            await recordTransaction(event.account, pi, { type: 'course', member_id: (_cm && _cm.student_id) || null, gym_id: (_cg && _cg.gym_id) || null, income_class: 'cohort_month', cohort_id: (m.cohort_id || null) });
+            await recordTransaction(event.account, pi, { type: 'course', member_id: (_cm && _cm.student_id) || null, gym_id: (_cg && _cg.gym_id) || null, income_class: 'cohort_month', months: Math.max(1, parseInt(m.mtl_months || '1', 10) || 1), cohort_id: (m.cohort_id || null) });
           } catch (e) { console.error('cohort month tx', e.message); }
           try { const _cd3 = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=discipline`)) || [])[0]; if (_cd3 && _cd3.discipline) await payGymAmbassador(_cd3.discipline, amount, cur, s.id, pi); } catch (e) { console.error('cohort amb month', e.message); }
         }

@@ -238,6 +238,10 @@ export default async function handler(req, res) {
         currency: cur, type, status: 'paid', payment_method, cohort_id: cohort_id || null, income_class: income_class || null,
         commission_status: _cc ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct', source_booking_id: source_booking_id || null,
+        // Kolik mesicu tahle JEDNA platba pokryva. `months` sem chodilo uz driv, ale slouzilo jen
+        // k rozpoctu akvizicni sazby a nikam se nezapisovalo -- takze doklad za tri mesice nemel
+        // odkud vedet, ze jsou tri, a v prehledu vypadal jako jedna podivne velka platba.
+        months: Math.max(1, parseInt(months, 10) || 1),
       };
     } else {
       // coach pays out -> the coach authorizes their own cash/QR, rate from coach profile.
@@ -278,6 +282,10 @@ export default async function handler(req, res) {
         currency: cur, type, status: 'paid', payment_method, cohort_id: cohort_id || null, income_class: income_class || null,
         commission_status: _cc ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct', source_booking_id: source_booking_id || null,
+        // Kolik mesicu tahle JEDNA platba pokryva. `months` sem chodilo uz driv, ale slouzilo jen
+        // k rozpoctu akvizicni sazby a nikam se nezapisovalo -- takze doklad za tri mesice nemel
+        // odkud vedet, ze jsou tri, a v prehledu vypadal jako jedna podivne velka platba.
+        months: Math.max(1, parseInt(months, 10) || 1),
       };
     }
 
