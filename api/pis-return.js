@@ -225,8 +225,13 @@ export default async function handler(req, res){
               else if(_per==='once') _to.setFullYear(_to.getFullYear()+100);
               else _to.setFullYear(_to.getFullYear()+1);
               const _until=_to.toISOString().slice(0,10);
-              await sb.from('organization_clubs').update({ status:'active', fee_paid_at:new Date().toISOString(), valid_until:_until }).eq('id',oc.id);
-              await sb.from('gyms').update({ org_rate_until:_until }).eq('id',oc.gym_id);
+              // Platba zaplati POPLATEK, neprijme klub do asociace -- to zustava na asociaci.
+              // Kdyby platba sama nastavila 'active', klub by schvaleni obesel penezi.
+              const _accepted = (oc.status === 'active');
+              await sb.from('organization_clubs')
+                .update({ fee_paid_at:new Date().toISOString(), valid_until:_until }).eq('id',oc.id);
+              // Zvyhodnena sazba plati az kdyz je oboji: prijato A zaplaceno.
+              if (_accepted) await sb.from('gyms').update({ org_rate_until:_until }).eq('id',oc.gym_id);
               const g=(await sb.from('gyms').select('owner_id,name').eq('id',oc.gym_id).maybeSingle()).data;
               const _du=new Date(_until).toLocaleDateString('cs-CZ');
               if(g && g.owner_id) await sb.from('notifications').insert({ user_id:g.owner_id, type:'system', read:false,

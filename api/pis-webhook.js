@@ -175,13 +175,16 @@ export default async function handler(req, res) {
         const _until = _to.toISOString().slice(0, 10);
 
         try {
+          // Platba zaplati POPLATEK, neprijme klub do asociace -- to zustava na asociaci.
+          const _accepted = (r.status === 'active');
           await sb.from('organization_clubs')
-            .update({ status: 'active', fee_paid_at: new Date().toISOString(), valid_until: _until })
+            .update({ fee_paid_at: new Date().toISOString(), valid_until: _until })
             .eq('id', r.id);
         } catch (e) {}
 
         // Sazba patří KLUBU a má vlastní datum konce, aby sama vypršela.
-        try { await sb.from('gyms').update({ org_rate_until: _until }).eq('id', r.gym_id); } catch (e) {}
+        // Sazba az kdyz je oboji: prijato asociaci A zaplaceno.
+        if (_accepted) { try { await sb.from('gyms').update({ org_rate_until: _until }).eq('id', r.gym_id); } catch (e) {} }
 
         try {
           const g = await sb.from('gyms').select('owner_id,name').eq('id', r.gym_id).maybeSingle();
