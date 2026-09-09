@@ -16,6 +16,20 @@ const ENVN = (process.env.NEONOMICS_ENV || 'sandbox').toLowerCase();
 const AUTH_BASE = 'https://' + ENVN + '.neonomics.io/auth/realms/' + ENVN + '/protocol/openid-connect/token';
 const ICS_BASE  = 'https://' + ENVN + '.neonomics.io/ics/v3';
 const APP_URL  = process.env.APP_URL || 'https://app.martialtraininglab.com';
+
+// Kam člověka vrátit. Vždy tam, odkud odešel platit -- jinak ho pevná APP_URL přehodí na jinou
+// doménu projektu, kde může být přihlášený někdo úplně jiný. Cizí adresy se ignorují: parametr
+// přichází z URL a bez kontroly by z něj byla otevřená brána pro přesměrování kamkoli.
+function _backTo(req) {
+  try {
+    const o = (req.query && (req.query.o || req.query.origin)) || '';
+    if (!o) return APP_URL;
+    const u = new URL(String(o));
+    const okHost = /(^|\.)martialtraininglab\.com$/i.test(u.hostname);
+    if (u.protocol === 'https:' && okHost) return u.origin;
+  } catch (e) {}
+  return APP_URL;
+}
 const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 // ISO 20022: ACSC = settled (final success). Accepted-and-beyond are treated as paid (bank transfer rarely
 // reverses post-acceptance); webhook/reconcile is the backstop. Production may tighten to ACSC-only.
@@ -226,10 +240,10 @@ export default async function handler(req, res){
         }
         // Číslo lístku s sebou: bez něj by děkovací stránka nevěděla, co kupujícímu ukázat,
         // a nepřihlášený člověk by po zaplacení skončil na přihlašovací obrazovce.
-        return res.redirect(302, APP_URL+'/?pis=ok'
+        return res.redirect(302, _backTo(req)+'/?pis=ok'
           + ((tbl==='event_tickets' && rec && rec.id) ? ('&tk='+encodeURIComponent(rec.id)) : ''));
       }
     }
-    return res.redirect(302, APP_URL+'/?pis=pending&'+_dbg);
-  }catch(e){ return res.redirect(302, APP_URL+'/?pis=err&msg='+encodeURIComponent((e.message||'').slice(0,120))); }
+    return res.redirect(302, _backTo(req)+'/?pis=pending&'+_dbg);
+  }catch(e){ return res.redirect(302, _backTo(req)+'/?pis=err&msg='+encodeURIComponent((e.message||'').slice(0,120))); }
 }

@@ -123,7 +123,16 @@ export default async function handler(req, res) {
     const iban = String(gymIban).replace(/\s+/g, '');
     const e2e = (String(vs || bookingId).replace(/[^A-Za-z0-9]/g, '').slice(0, 35)) || ('MTL' + Date.now());
     const remit = nordicSafe(message || vs || ('MTL ' + bookingId), 140) || ('MTL ' + String(bookingId).slice(0, 8));
-    const redirect = RETURN_URL + (RETURN_URL.indexOf('?') >= 0 ? '&' : '?') + 'state=' + encodeURIComponent(bookingId);
+    // ODKUD ČLOVĚK PLATIL. Návrat dosud vedl vždy na pevnou APP_URL, takže kdo začal jinde
+    // (dashboard, jiná doména projektu), skončil na app -- a když tam měl přihlášený jiný účet,
+    // vrátil se jako někdo jiný. Původ si proto neseme s sebou.
+    let _origin = '';
+    try {
+      _origin = String(req.headers.origin || '');
+      if (!_origin && req.headers.referer) _origin = new URL(req.headers.referer).origin;
+    } catch (e) { _origin = ''; }
+    const redirect = RETURN_URL + (RETURN_URL.indexOf('?') >= 0 ? '&' : '?') + 'state=' + encodeURIComponent(bookingId)
+      + (_origin ? ('&o=' + encodeURIComponent(_origin)) : '');
 
     const payBody = {
       creditorAccount: { accountScheme: 'IBAN', identifier: iban },
