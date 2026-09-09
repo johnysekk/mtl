@@ -903,14 +903,22 @@ async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, custo
     if (!transactionId && !paymentIntent) return null;
     let sup = null;
     if (gymId) {
-      sup = (await sbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address`))[0] || null;
+      sup = (await sbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,owner_id`))[0] || null;
     } else if (coachId) {
-      sup = (await sbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address`))[0] || null;
+      sup = (await sbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,owner_id`))[0] || null;
     }
     if (!sup) return null;
-    const ico = String(sup.tax_id || '').trim();
+    const ico = String(sup.tax_id || '').replace(/\s/g, '');
     if (!ico) return null;                      // bez IČO nemá řada klíč; přihláška ho vyžaduje
-    const key = 'ico:' + ico;
+
+    // ŘADA SE SLUČUJE V RÁMCI ÚČTU, NE V RÁMCI IČO.
+    // Kdo má pod jedním IČO dva kluby a k tomu profil kouče, má JEDNU souvislou řadu -- je to
+    // jeden účetní subjekt a jeden člověk, který ji vykazuje. Kdyby ale totéž IČO používaly dva
+    // různé účty (v testu to povolujeme), sdílenou řadou by si navzájem braly čísla a ani jeden
+    // by neviděl, proč mu v ní chybí. Proto je v klíči i vlastník účtu.
+    const ownerId = gymId ? (sup.owner_id || null) : (coachId || null);
+    if (!ownerId) return null;
+    const key = 'ico:' + ico + ':acct:' + ownerId;
 
     const r = await fetch(`${SB}/rest/v1/rpc/doklad_next`, {
       method: 'POST',
