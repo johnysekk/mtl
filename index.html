@@ -27053,6 +27053,9 @@ async function openFindOrg(){
     }, 350);
   };
 }
+// PROFIL ASOCIACE OČIMA KLUBU. Soukromý -- otevře ho jen klub, který je členem nebo o členství
+// požádal. Není to stav vztahu na jednom řádku, ale místo, kde klub najde všechno: kdo asociace
+// je, co po něm chce, kolik to stojí a co je nového.
 async function openClubOrgPanel(ocId){
   const EN=LANG==='en';
   let oc=null, org=null;
@@ -27060,64 +27063,85 @@ async function openClubOrgPanel(ocId){
   if(!oc){ toast('\u26a0\ufe0f'); return; }
   try{ const { data }=await supaClient.from('organizations').select('*').eq('id',oc.organization_id).single(); org=data; }catch(e){}
   if(!org){ toast('\u26a0\ufe0f'); return; }
+
+  // Poplatky za obdobi. Aktualni je ten, do jehoz rozsahu spada dnesek -- podle nej se plati.
+  let fees=[], feeNow=null;
+  try{ const { data }=await supaClient.from('org_member_fees').select('*').eq('organization_id',org.id).order('period_from',{ascending:false}); fees=data||[]; }catch(e){}
+  { const t=new Date();
+    feeNow=fees.find(function(f){ return new Date(f.period_from+'T00:00:00')<=t && new Date(f.period_to+'T23:59:59')>=t; })||null; }
+
+  const _d=v=>{ try{ return new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ'); }catch(e){ return ''; } };
+  const _valid = oc.valid_until && new Date(oc.valid_until+'T23:59:59')>=new Date();
+  const _paidOk = !!oc.fee_paid_at && _valid;
+  const _member = _paidOk && oc.status==='active';
+  // Castka: snimek na vztahu, kdyz uz byla vyzva; jinak aktualni obdobi.
+  const _amt = Number(oc.fee_amount!=null ? oc.fee_amount : (feeNow ? feeNow.amount : 0));
+  const _cur = oc.fee_currency || (feeNow && feeNow.currency) || 'CZK';
+
   let ov=document.getElementById('shClubOrg');
   if(!ov){ ov=document.createElement('div'); ov.id='shClubOrg'; ov.className='sheet'; ov.style.zIndex='92';
     (document.querySelector('.app')||document.body).appendChild(ov); }
-  const _d=v=>{ try{ return new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ'); }catch(e){ return ''; } };
-  const _valid=oc.valid_until && new Date(oc.valid_until+'T23:59:59')>=new Date();
-  const _cur=oc.fee_currency||'CZK';
-  const _amt=Number(oc.fee_amount||0);
-  // Stav clenstvi se ridi datem, ne priznakem -- proslé clenstvi vypada jinak nez zadné.
-  const _stav=_valid
+
+  const _stav = _member
     ? ('<div style="background:#E8F5EE;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;font-size:13px;color:#006040;line-height:1.55;">\u2705 '
         +(EN?'Member until ':'\u010clenstv\u00ed plat\u00ed do ')+_d(oc.valid_until)
         +'<br>'+(EN?'Your club pays 1.5 % MTL commission on both rails.':'Klub m\u00e1 sazbu MTL 1,5 % na obou kolej\u00edch.')+'</div>')
     : (oc.status==='pending'
-        ? ('<div style="background:#FFF4E5;border:1px solid #F0D9B5;border-radius:12px;padding:12px 14px;font-size:13px;color:#7A4A00;line-height:1.55;">\u23F3 '+(EN?'Request sent. The association will confirm it. You can pay the fee now \u2014 membership starts once both are done.':'\u017d\u00e1dost odesl\u00e1na, asociace ji potvrd\u00ed. Poplatek m\u016f\u017ee\u0161 uhradit rovnou \u2014 \u010dlenstv\u00ed za\u010dne, a\u017e bude oboj\u00ed.')+'</div>')
+        ? ('<div style="background:#FFF4E5;border:1px solid #F0D9B5;border-radius:12px;padding:12px 14px;font-size:13px;color:#7A4A00;line-height:1.55;">\u23F3 '
+           +(_paidOk ? (EN?'Fee paid. Waiting for the association to accept your club \u2014 membership starts then.':'Poplatek zaplacen. \u010cek\u00e1 se, a\u017e asociace klub p\u0159ijme \u2014 t\u00edm \u010dlenstv\u00ed za\u010dne.')
+                     : (EN?'Request sent. The association will accept it and then membership starts.':'\u017d\u00e1dost odesl\u00e1na. Asociace klub p\u0159ijme a t\u00edm \u010dlenstv\u00ed za\u010dne.'))+'</div>')
         : ('<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:12px;padding:12px 14px;font-size:13px;color:#8a1c1c;line-height:1.55;">'
-            +(oc.valid_until?(EN?('Membership expired on '+_d(oc.valid_until)+'.'):('\u010clenstv\u00ed vypr\u0161elo '+_d(oc.valid_until)+'.')):(EN?'Not paid yet.':'Zat\u00edm nezaplaceno.'))
-            +'<br>'+(EN?'The badge and the 1.5 % rate are inactive.':'Odznak i sazba 1,5 % jsou neaktivn\u00ed.')+'</div>'));
+           +(oc.valid_until?(EN?('Membership expired on '+_d(oc.valid_until)+'.'):('\u010clenstv\u00ed vypr\u0161elo '+_d(oc.valid_until)+'.')):(EN?'Fee not paid yet.':'Poplatek zat\u00edm nezaplacen.'))+'</div>'));
+
+  const _feeRows = fees.length ? fees.map(function(f){
+    const _now=(feeNow && f.id===feeNow.id);
+    const _mine=(oc.fee_id===f.id && oc.fee_paid_at);
+    return '<div style="display:flex;align-items:center;gap:9px;padding:9px 11px;border:1px solid '+(_now?'#A8E6C0':'var(--border)')+';background:'+(_now?'#E8F5EE':'var(--surf)')+';border-radius:11px;margin-bottom:7px;">'
+      +'<div style="flex:1;min-width:0;"><div style="font-size:13.5px;font-weight:700;color:var(--dark);">'+fmtPrice(f.amount,f.currency||'CZK')+' '+_curSym(f.currency||'CZK')+'</div>'
+      +'<div style="font-size:11.5px;color:var(--mid);margin-top:2px;">'+escapeHtml(f.name||'')+(f.name?' \u00b7 ':'')+_d(f.period_from)+' \u2013 '+_d(f.period_to)+'</div></div>'
+      +(_mine?('<span style="font-size:11px;background:#E8F5EE;color:#006040;padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'paid':'zaplaceno')+'</span>'):'')+'</div>';
+  }).join('') : ('<p style="font-size:12.5px;color:var(--light);padding:4px 0;">'+(EN?'The association has not set a fee yet.':'Asociace zat\u00edm nem\u00e1 nastaven\u00fd poplatek.')+'</p>');
+
   ov.innerHTML='<div class="shdr"><div class="shdr-title">\u{1F3C5} '+escapeHtml(org.abbr||org.name||'')+'</div><button class="btn-close" id="_cpClose">\u2715</button></div>'
     +'<div style="padding:16px 18px 44px;">'
-    +'<div style="font-size:15px;font-weight:800;color:var(--dark);margin-bottom:2px;">'+escapeHtml(org.name||'')+'</div>'
-    +(org.website?('<a href="'+escapeHtml(org.website)+'" target="_blank" rel="noopener" style="font-size:12.5px;color:var(--blue);text-decoration:none;">'+escapeHtml(org.website)+'</a>'):'')
-    +'<div style="margin:12px 0;">'+_stav+'</div>'
-    
-    +((!_valid)?('<button id="_cpPay" style="width:100%;padding:14px;background:#0a8f5b;color:#fff;border:none;border-radius:12px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:inherit;margin-bottom:10px;">\u{1F3E6} '+(EN?'Pay the membership fee':'Uhradit \u010dlensk\u00fd poplatek')+' \u00b7 '+fmtPrice(_amt,_cur)+' '+_curSym(_cur)+'</button>'):'')
-    +'<button id="_cpLeave" style="width:100%;padding:11px;background:none;border:1px solid var(--border);border-radius:11px;color:var(--mid);font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:10px;">'
-      +(oc.status==='pending'?(EN?'Withdraw the request':'Zru\u0161it \u017e\u00e1dost'):(EN?'End membership':'Ukon\u010dit \u010dlenstv\u00ed'))+'</button>'
-    +(org.board_text?('<div style="border:1px solid var(--border);border-radius:12px;padding:13px 14px;margin-top:6px;">'
-        +'<div style="font-size:11px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">'+(EN?'From the federation':'Od federace')+(org.board_updated_at?(' \u00b7 '+_d(org.board_updated_at)):'')+'</div>'
+    +'<div style="font-size:17px;font-weight:800;color:var(--dark);">'+escapeHtml(org.name||'')+'</div>'
+    +'<div style="font-size:12.5px;color:var(--mid);margin-top:2px;">'+escapeHtml([org.city, org.legal_name].filter(Boolean).join(' \u00b7 '))+'</div>'
+    +(org.website?('<a href="'+escapeHtml(org.website)+'" target="_blank" rel="noopener" style="font-size:12.5px;color:var(--blue);text-decoration:none;display:inline-block;margin-top:4px;">'+escapeHtml(org.website)+'</a>'):'')
+    +(org.description?('<p style="font-size:13px;color:var(--dark);line-height:1.6;margin:10px 0 0;white-space:pre-wrap;">'+escapeHtml(org.description)+'</p>'):'')
+    +'<div style="margin:14px 0;">'+_stav+'</div>'
+    +((!_paidOk && _amt>0)?('<button id="_cpPay" style="width:100%;padding:14px;background:#0a8f5b;color:#fff;border:none;border-radius:12px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:inherit;margin-bottom:10px;">\u{1F3E6} '+(EN?'Pay the membership fee':'Uhradit \u010dlensk\u00fd poplatek')+' \u00b7 '+fmtPrice(_amt,_cur)+' '+_curSym(_cur)+'</button>'):'')
+    +'<div style="font-size:11px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.04em;margin:14px 0 6px;">'+(EN?'Membership fees':'\u010clensk\u00e9 poplatky')+'</div>'
+    +_feeRows
+    +(org.board_text?('<div style="border:1px solid var(--border);border-radius:12px;padding:13px 14px;margin-top:14px;">'
+        +'<div style="font-size:11px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.04em;margin-bottom:5px;">'+(EN?'From the association':'Od asociace')+(org.board_updated_at?(' \u00b7 '+_d(org.board_updated_at)):'')+'</div>'
         +'<div style="font-size:13.5px;color:var(--dark);line-height:1.6;white-space:pre-wrap;">'+escapeHtml(org.board_text)+'</div></div>'):'')
+    +((org.contact_email||org.contact_phone)?('<div style="font-size:12px;color:var(--mid);line-height:1.7;margin-top:14px;">'
+        +(org.contact_email?('\u2709\ufe0f '+escapeHtml(org.contact_email)+'<br>'):'')
+        +(org.contact_phone?('\u260e\ufe0f '+escapeHtml(org.contact_phone)):'')+'</div>'):'')
+    +'<button id="_cpLeave" style="width:100%;padding:11px;background:none;border:1px solid var(--border);border-radius:11px;color:var(--mid);font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;margin-top:18px;">'
+      +(oc.status==='pending'?(EN?'Withdraw the request':'Zru\u0161it \u017e\u00e1dost'):(EN?'End membership':'Ukon\u010dit \u010dlenstv\u00ed'))+'</button>'
     +'</div>';
   try{ if(!_sheetParent['shClubOrg']) _sheetParent['shClubOrg']='shGymManage'; }catch(e){}
   try{ openSheet('shClubOrg'); }catch(e){}
   ov.querySelector('#_cpClose').onclick=function(){ try{ closeSheet('shClubOrg'); }catch(e){ ov.remove(); } };
-
   const _p=ov.querySelector('#_cpPay');
   if(_p) _p.onclick=function(){ openOrgFeePay(oc.id); };
-  // Odchod. Zaplacene clenstvi se NEMAZE -- ukonci se k dnesku, aby zustalo dohledatelne,
-  // ze klub ve federaci nejakou dobu byl. Nepotvrzena zadost nebo pozvanka se smaze cela.
   const _lv=ov.querySelector('#_cpLeave');
   if(_lv) _lv.onclick=async function(){
-    // Kdyz uz vztah mezitim ukoncila federace, neni co delat -- jen to rict a zavrit.
     if(oc.status==='ended'||oc.status==='rejected'){
       toast(EN?'Membership already ended':'\u010clenstv\u00ed u\u017e bylo ukon\u010deno');
       try{ closeSheet('shClubOrg'); }catch(e){}
       try{ renderGymManage(); }catch(e){}
       return;
     }
-    const _paid=!!oc.fee_paid_at;
-    const q=(oc.status==='pending')
-      ? (EN?'Withdraw the request?':'Zru\u0161it \u017e\u00e1dost?')
-      : (EN?'End membership in this association?':'Ukon\u010dit \u010dlenstv\u00ed v t\u00e9hle asociaci?');
+    const q=(oc.status==='pending') ? (EN?'Withdraw the request?':'Zru\u0161it \u017e\u00e1dost?')
+                                    : (EN?'End membership in this association?':'Ukon\u010dit \u010dlenstv\u00ed v t\u00e9hle asociaci?');
     if(!confirm(q)) return;
     try{
-      if(oc.status==='pending' && !_paid){
+      if(oc.status==='pending' && !oc.fee_paid_at){
         await supaClient.from('organization_clubs').delete().eq('id',oc.id);
       } else {
         await supaClient.from('organization_clubs').update({ status:'ended', ended_at:new Date().toISOString() }).eq('id',oc.id);
-        // Zvyhodnena sazba konci s clenstvim; jinak by klub platil 1,5 % dal, prestoze uz clenem neni.
         try{ await supaClient.from('gyms').update({ org_rate_until:null }).eq('id',oc.gym_id); }catch(e){}
       }
       try{ if(org.owner_id) await supaClient.from('notifications').insert({ user_id:org.owner_id, type:'system', read:false,
@@ -27129,6 +27153,7 @@ async function openClubOrgPanel(ocId){
     }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||e)); }
   };
 }
+
 async function openOrgFeePay(ocId){
   const EN=LANG==='en';
   let oc=null, org=null;
@@ -27385,6 +27410,11 @@ async function openOrgClubs(org, filter){
       const r=rows.find(x=>String(x.id)===b.dataset.id); if(!r) return;
       try{
         await supaClient.from('organization_clubs').update({ status:'active', confirmed_at:new Date().toISOString() }).eq('id',r.id);
+        // Kdyz klub zaplatil driv, nez ho asociace prijala, sazba nabehne az ted -- jinak by
+        // cekal na dalsi platbu, prestoze uz ma zaplaceno.
+        if(r.fee_paid_at && r.valid_until){
+          try{ await supaClient.from('gyms').update({ org_rate_until:r.valid_until }).eq('id',r.gym_id); }catch(e){}
+        }
         try{ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',r.gym_id).single();
           if(_g&&_g.owner_id) await supaClient.from('notifications').insert({ user_id:_g.owner_id, type:'system', read:false,
             data:JSON.stringify({ kind:'org_fee_paid', org_id:org.id }),
