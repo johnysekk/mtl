@@ -116,6 +116,12 @@ export default async function handler(req, res){
       if(!r0){ const e0=await sb.from('event_tickets').select('pis_payment_id').eq('id',bookingId).maybeSingle(); if(e0.data) r0=e0.data; }
       if(!r0){ const co0=await sb.from('cohort_members').select('pis_payment_id').eq('id',bookingId).maybeSingle(); if(co0.data) r0=co0.data; }
       if(!r0){ const mo0=await sb.from('merch_orders').select('pis_payment_id').eq('id',bookingId).maybeSingle(); if(mo0.data) r0=mo0.data; }
+      // Členský poplatek klubu ve federaci. Reference má tvar "orgfee:<id vztahu>".
+      if(!r0 && String(bookingId).startsWith('orgfee:')){
+        const _ocId=String(bookingId).slice(7);
+        const oc0=await sb.from('organization_clubs').select('fee_payment_intent').eq('id',_ocId).maybeSingle();
+        if(oc0.data && oc0.data.fee_payment_intent) r0={ pis_payment_id: oc0.data.fee_payment_intent };
+      }
       if(r0 && r0.pis_payment_id) paymentId=r0.pis_payment_id; else _dbg='st=NO_STORED_PID';
     }
     if(paymentId){
@@ -188,6 +194,35 @@ export default async function handler(req, res){
             const _msg='\u2705 '+(nd.item||'')+(_amt?(' \u00b7 '+_amt):'');
             await sb.from('notifications').insert({ user_id:_buyerId, type:'booking', read:false, message:_msg, data:JSON.stringify(nd) }); }catch(e){}
           await pisSideEffects(rec, tbl);
+        }
+        // Členský poplatek: banka potvrdila, takže členství platí OD TEĎ. Ruční potvrzení
+        // federací zůstává jen pro platby mimo appku (hotovost, převod z účtu).
+        if(String(bookingId).startsWith('orgfee:')){
+          try{
+            const _ocId=String(bookingId).slice(7);
+            const oc=(await sb.from('organization_clubs').select('*').eq('id',_ocId).maybeSingle()).data;
+            if(oc){
+              const org=(await sb.from('organizations').select('name,abbr,owner_id,member_fee_period').eq('id',oc.organization_id).maybeSingle()).data;
+              const _now=new Date();
+              const _from=(oc.valid_until && new Date(oc.valid_until+'T00:00:00')>_now) ? new Date(oc.valid_until+'T00:00:00') : _now;
+              const _to=new Date(_from);
+              const _per=oc.fee_period||(org&&org.member_fee_period)||'year';
+              if(_per==='month') _to.setMonth(_to.getMonth()+1);
+              else if(_per==='once') _to.setFullYear(_to.getFullYear()+100);
+              else _to.setFullYear(_to.getFullYear()+1);
+              const _until=_to.toISOString().slice(0,10);
+              await sb.from('organization_clubs').update({ status:'active', fee_paid_at:new Date().toISOString(), valid_until:_until }).eq('id',oc.id);
+              await sb.from('gyms').update({ org_rate_until:_until }).eq('id',oc.gym_id);
+              const g=(await sb.from('gyms').select('owner_id,name').eq('id',oc.gym_id).maybeSingle()).data;
+              const _du=new Date(_until).toLocaleDateString('cs-CZ');
+              if(g && g.owner_id) await sb.from('notifications').insert({ user_id:g.owner_id, type:'system', read:false,
+                data:JSON.stringify({ kind:'org_fee_paid', org_id:oc.organization_id }),
+                message:'\u2705 \u010clensk\u00fd poplatek '+((org&&(org.abbr||org.name))||'')+' zaplacen. \u010clenstv\u00ed plat\u00ed do '+_du+' a klub m\u00e1 sazbu 1,5 %.' });
+              if(org && org.owner_id) await sb.from('notifications').insert({ user_id:org.owner_id, type:'system', read:false,
+                data:JSON.stringify({ kind:'org_fee_in', gym_id:oc.gym_id }),
+                message:'\u{1F3E6} '+((g&&g.name)||'Klub')+' zaplatil \u010dlensk\u00fd poplatek. \u010clenstv\u00ed do '+_du+'.' });
+            }
+          }catch(e){}
         }
         // Číslo lístku s sebou: bez něj by děkovací stránka nevěděla, co kupujícímu ukázat,
         // a nepřihlášený člověk by po zaplacení skončil na přihlašovací obrazovce.
