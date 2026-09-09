@@ -27061,8 +27061,8 @@ async function openClubOrgPanel(ocId){
     (document.querySelector('.app')||document.body).appendChild(ov); }
   const _d=v=>{ try{ return new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ'); }catch(e){ return ''; } };
   const _valid=oc.valid_until && new Date(oc.valid_until+'T23:59:59')>=new Date();
-  const _cur=oc.fee_currency||org.member_fee_currency||'CZK';
-  const _amt=Number(oc.fee_amount||org.member_fee||0);
+  const _cur=oc.fee_currency||'CZK';
+  const _amt=Number(oc.fee_amount||0);
   // Stav clenstvi se ridi datem, ne priznakem -- proslé clenstvi vypada jinak nez zadné.
   const _stav=_valid
     ? ('<div style="background:#E8F5EE;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;font-size:13px;color:#006040;line-height:1.55;">\u2705 '
@@ -27144,8 +27144,18 @@ async function openOrgFeePay(ocId){
   if(!org){ toast('\u26a0\ufe0f'); return; }
   // Castka: bud uz vyzvana (snimek na vztahu), nebo aktualni poplatek federace. Klub nemusi
   // cekat, az na nej nekdo klikne "Vyzvat" -- prijal pozvanku, tak at zaplati.
-  const amt=Number(oc.fee_amount||org.member_fee||0), cur=(oc.fee_currency||org.member_fee_currency||'CZK');
-  if(!(amt>0)){ toast(EN?'\u26a0\ufe0f The federation has not set a membership fee yet':'\u26a0\ufe0f Federace zat\u00edm nem\u00e1 nastaven\u00fd \u010dlensk\u00fd poplatek'); return; }
+  // Platne obdobi ke dnesku. Kdyz uz byla vyzva, drzi se snimek na vztahu.
+  let _fee=null;
+  if(oc.fee_amount==null){
+    try{ const _t=new Date().toISOString().slice(0,10);
+      const { data }=await supaClient.from('org_member_fees').select('*').eq('organization_id',org.id)
+        .lte('period_from',_t).gte('period_to',_t).limit(1);
+      _fee=(data&&data[0])||null; }catch(e){}
+  }
+  const amt=Number(oc.fee_amount!=null?oc.fee_amount:(_fee?_fee.amount:0));
+  const cur=(oc.fee_currency||(_fee&&_fee.currency)||'CZK');
+  if(!(amt>0)){ toast(EN?'\u26a0\ufe0f No membership fee is set for this period':'\u26a0\ufe0f Na tohle obdob\u00ed nen\u00ed nastaven\u00fd \u010dlensk\u00fd poplatek'); return; }
+  const _periodLbl=_fee?((_fee.name||'')+(_fee.name?' \u00b7 ':'')+new Date(_fee.period_from).toLocaleDateString(EN?'en-GB':'cs-CZ')+' \u2013 '+new Date(_fee.period_to).toLocaleDateString(EN?'en-GB':'cs-CZ')):'';
 
   let ov=document.getElementById('orgFeeOv'); if(ov) ov.remove();
   ov=document.createElement('div'); ov.id='orgFeeOv';
@@ -27157,7 +27167,7 @@ async function openOrgFeePay(ocId){
     +'<div style="font-family:\'Bebas Neue\';font-size:24px;color:var(--dark);">'+(EN?'Membership fee':'\u010clensk\u00fd poplatek')+'</div>'
     +'<div style="font-size:13px;color:var(--mid);margin-top:2px;">'+escapeHtml(org.name||'')+'</div>'
     +'<div style="font-size:30px;font-weight:800;color:var(--dark);margin:12px 0 4px;">'+fmtPrice(amt,cur)+' '+_curSym(cur)+'</div>'
-    +(oc.fee_period||org.member_fee_period?('<div style="font-size:12px;color:var(--light);margin-bottom:12px;">'+({year:(EN?'per year':'ro\u010dn\u011b'),month:(EN?'per month':'m\u011bs\u00ed\u010dn\u011b'),once:(EN?'one-off':'jednor\u00e1zov\u011b')}[oc.fee_period||org.member_fee_period]||'')+'</div>'):'')
+    +(_periodLbl?('<div style="font-size:12px;color:var(--light);margin-bottom:12px;">'+escapeHtml(_periodLbl)+'</div>'):'')
     +((org.receiver_id_value&&(window._PIS_ENABLED||org.pis_test))?('<button id="orgFeePis" style="width:100%;padding:14px;background:#0a8f5b;color:#fff;border:none;border-radius:12px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:inherit;margin:6px 0 10px;">\u{1F3E6} '+(EN?'Pay from my bank':'Zaplatit z m\u00e9 banky')+(org.pis_test?(' \u00b7 '+(EN?'test':'test')):'')+'</button>'):'')
     +(_payload?('<div id="orgFeeQr" style="display:flex;justify-content:center;margin:10px 0 12px;"></div>'
        +'<p style="font-size:12px;color:var(--mid);line-height:1.5;">'+(EN?'Scan with your banking app.':'Na\u010dti ho v bankovn\u00ed aplikaci.')+'</p>')
@@ -27427,11 +27437,16 @@ async function openOrgClubs(org, filter){
       // Poplatek je jeden pro vsechny kluby a zadava se JEDNOU v udajich federace -- stejne
       // jako klub nastavuje cenu clenstvi. Na vztah se ulozi jako SNIMEK, aby pozdejsi zmena
       // sazby neprepsala uz vystavene vyzvy a zaplacene poplatky.
-      const _n=Math.round((Number(org.member_fee)||0)*100)/100;
-      if(!(_n>0)){ toast(EN?'\u26a0\ufe0f Set the membership fee in the federation details first':'\u26a0\ufe0f Nejd\u0159\u00edv nastav \u010dlensk\u00fd poplatek v \u00fadaj\u00edch federace'); return; }
+      let _fee=null;
+      try{ const _t=new Date().toISOString().slice(0,10);
+        const { data }=await supaClient.from('org_member_fees').select('*').eq('organization_id',org.id)
+          .lte('period_from',_t).gte('period_to',_t).limit(1);
+        _fee=(data&&data[0])||null; }catch(e){}
+      const _n=Math.round((Number(_fee&&_fee.amount)||0)*100)/100;
+      if(!(_n>0)){ toast(EN?'\u26a0\ufe0f No fee set for the current period':'\u26a0\ufe0f Na aktu\u00e1ln\u00ed obdob\u00ed nen\u00ed nastaven\u00fd poplatek'); return; }
       if(!confirm((EN?'Request ':'Vyzvat k \u00fahrad\u011b ')+fmtPrice(_n,_cur)+' '+_curSym(_cur)+'?')) return;
       try{
-        await supaClient.from('organization_clubs').update({ fee_amount:_n, fee_currency:_cur, fee_period:(org.member_fee_period||'year'), fee_due_at:null, fee_paid_at:null }).eq('id',r.id);
+        await supaClient.from('organization_clubs').update({ fee_amount:_n, fee_currency:(_fee.currency||_cur), fee_id:_fee.id, fee_due_at:_fee.period_to, fee_paid_at:null }).eq('id',r.id);
         const g=gm[r.gym_id]||{};
         // Majitel klubu se to musi dozvedet v appce; jinak by vyzva zila jen ve federaci.
         try{ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',r.gym_id).single();
@@ -27472,6 +27487,50 @@ async function openOrgClubs(org, filter){
         }catch(e){ toast('\u26a0\ufe0f '+(e.message||'error')); }
       }; });
     }, 350);
+  };
+}
+
+// Pridani obdobi poplatku. Datum od-do a castka -- perioda uz se nikde nedopocitava,
+// protoze "rocne" nerika, KTERY rok, a pri vybirani na dalsi sezonu je to to jedine podstatne.
+function _orgFeeAdd(org, done){
+  const EN=LANG==='en';
+  let ov=document.getElementById('orgFeeAddOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='orgFeeAddOv';
+  ov.style.cssText='position:fixed;inset:0;z-index:100035;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center;';
+  const _st="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-family:'DM Sans';margin-bottom:8px;background:var(--surf);color:var(--dark);";
+  const _y=new Date().getFullYear();
+  ov.innerHTML='<div style="background:var(--bg);width:100%;max-width:460px;border-radius:20px 20px 0 0;padding:18px 18px calc(env(safe-area-inset-bottom,0px) + 18px);">'
+    +'<div style="font-family:\'Bebas Neue\';font-size:21px;color:var(--dark);margin-bottom:10px;">'+(EN?'Membership period':'Obdob\u00ed \u010dlenstv\u00ed')+'</div>'
+    +'<input id="_ofName" placeholder="'+(EN?'Name (e.g. Membership '+_y+')':'N\u00e1zev (nap\u0159. \u010clenstv\u00ed '+_y+')')+'" style="'+_st+'">'
+    +'<div style="display:flex;gap:8px;">'
+      +'<div style="flex:1;min-width:0;"><div style="font-size:11.5px;color:var(--mid);margin-bottom:3px;">'+(EN?'From':'Od')+'</div><input id="_ofFrom" type="date" value="'+_y+'-01-01" style="'+_st+'width:auto;"></div>'
+      +'<div style="flex:1;min-width:0;"><div style="font-size:11.5px;color:var(--mid);margin-bottom:3px;">'+(EN?'To':'Do')+'</div><input id="_ofTo" type="date" value="'+_y+'-12-31" style="'+_st+'width:auto;"></div>'
+    +'</div>'
+    +'<input id="_ofAmt" type="number" min="0" step="1" placeholder="'+(EN?'Amount':'\u010c\u00e1stka')+'" style="'+_st+'">'
+    +'<button id="_ofSave" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Save':'Ulo\u017eit')+'</button>'
+    +'<button id="_ofCancel" style="width:100%;padding:12px;background:none;border:none;color:var(--mid);font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Cancel':'Zru\u0161it')+'</button></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#_ofCancel').onclick=function(){ ov.remove(); };
+  ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
+  ov.querySelector('#_ofSave').onclick=async function(){
+    const f=(ov.querySelector('#_ofFrom')||{}).value, t=(ov.querySelector('#_ofTo')||{}).value;
+    const amt=parseFloat((ov.querySelector('#_ofAmt')||{}).value);
+    if(!f||!t||!(amt>0)){ toast(EN?'\u26a0\ufe0f Fill in the dates and the amount':'\u26a0\ufe0f Vypl\u0148 data a \u010d\u00e1stku'); return; }
+    if(new Date(t)<new Date(f)){ toast(EN?'\u26a0\ufe0f The end is before the start':'\u26a0\ufe0f Konec je d\u0159\u00edv ne\u017e za\u010d\u00e1tek'); return; }
+    // Prekryv obdobi by znamenal, ze na jeden den plati dve ceny -- a klub by nevedel, kterou.
+    try{
+      const { data:ex }=await supaClient.from('org_member_fees').select('id,period_from,period_to')
+        .eq('organization_id',org.id).lte('period_from',t).gte('period_to',f).limit(1);
+      if(ex&&ex.length){ toast(EN?'\u26a0\ufe0f This overlaps an existing period':'\u26a0\ufe0f Obdob\u00ed se p\u0159ekr\u00fdv\u00e1 s ji\u017e zadan\u00fdm'); return; }
+    }catch(e){}
+    const btn=ov.querySelector('#_ofSave'); btn.disabled=true; btn.textContent='\u2026';
+    try{
+      await supaClient.from('org_member_fees').insert({ organization_id:org.id,
+        name:((ov.querySelector('#_ofName')||{}).value||'').trim()||null,
+        period_from:f, period_to:t, amount:amt,
+        currency:(org.billing_country==='SK'?'EUR':((currentUser&&currentUser.currency)||'CZK')) });
+      ov.remove(); done();
+    }catch(e){ btn.disabled=false; toast('\u26a0\ufe0f '+((e&&e.message)||e)); }
   };
 }
 async function openOrgPicker(){
@@ -27564,16 +27623,10 @@ async function openOrgApply(kind){
       <input id="orgBillingPostal" value="${ev(o.billing_postal)}" placeholder="${EN?'Postcode':'PS\u010c'}" style="${_st}width:auto;flex:0 0 34%;min-width:0;">
       <input id="orgBillingCity" value="${ev(o.billing_city)}" placeholder="${EN?'City':'M\u011bsto'}" style="${_st}width:auto;flex:1;min-width:0;">
     </div>
-    ${_isFed?`<div class="sec-lbl">${EN?'Membership fee':'\u010clensk\u00fd poplatek'}</div>
-    <div style="display:flex;gap:8px;">
-      <input id="orgFee" type="number" min="0" step="1" value="${o.member_fee!=null?o.member_fee:''}" placeholder="${EN?'Amount':'\u010c\u00e1stka'}" style="${_st}width:auto;flex:1;min-width:0;">
-      <select id="orgFeePeriod" style="${_st}width:auto;flex:0 0 42%;min-width:0;">
-        <option value="year"${(o.member_fee_period||'year')==='year'?' selected':''}>${EN?'per year':'ro\u010dn\u011b'}</option>
-        <option value="month"${o.member_fee_period==='month'?' selected':''}>${EN?'per month':'m\u011bs\u00ed\u010dn\u011b'}</option>
-        <option value="once"${o.member_fee_period==='once'?' selected':''}>${EN?'one-off':'jednor\u00e1zov\u011b'}</option>
-      </select>
-    </div>
-    <p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:-2px 0 12px;">${EN?'Default for new clubs. You can set a different amount for each club.':'V\u00fdchoz\u00ed pro nov\u00e9 kluby. Ka\u017ed\u00e9mu klubu m\u016f\u017ee\u0161 nastavit jinou \u010d\u00e1stku.'}</p>`:''}
+    ${_isFed?`<div class="sec-lbl">${EN?'Membership fees':'\u010clensk\u00e9 poplatky'}</div>
+    <p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:0 0 8px;">${EN?'One fee per period. Next year is a new row \u2014 the old one keeps the price clubs already paid.':'Jeden poplatek na obdob\u00ed. Dal\u0161\u00ed rok se p\u0159id\u00e1 jako nov\u00fd \u0159\u00e1dek, ten star\u00fd si nech\u00e1 cenu, kterou u\u017e kluby zaplatily.'}</p>
+    <div id="orgFeeList" style="margin-bottom:10px;"></div>
+    <button id="orgFeeAdd" type="button" style="width:100%;padding:11px;background:var(--surf);color:var(--dark);border:1px dashed var(--border);border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:12px;">+ ${EN?'Add a period':'P\u0159idat obdob\u00ed'}</button>`:''}
     <div class="sec-lbl">${EN?'Where the money goes':'Kam chod\u00ed pen\u00edze'}</div>
     <p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:0 0 8px;">${_isFed
       ? (EN?'Bank transfer or QR. Independent of your clubs \u2014 the organization is a separate payee.':'P\u0159evodem nebo QR k\u00f3dem. Nez\u00e1visle na tv\u00fdch klubech \u2014 organizace je samostatn\u00fd p\u0159\u00edjemce.')
@@ -27603,6 +27656,36 @@ async function openOrgApply(kind){
       if(p.city && $('orgBillingCity')) $('orgBillingCity').value=p.city;
       if(p.postal && $('orgBillingPostal')) $('orgBillingPostal').value=p.postal;
     }); }catch(e){}
+  // Poplatky za obdobi. Zijí ve vlastni tabulce, protoze pristi rok je NOVY radek -- prepsat
+  // ten letosni by zmenilo cenu i u uz zaplacenych clenstvi.
+  if(_isFed && _orgMine && _orgMine.id){
+    const _list=ov.querySelector('#orgFeeList');
+    const _dd=v=>{ try{ return new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ'); }catch(e){ return v||''; } };
+    const _paint=async function(){
+      if(!_list) return;
+      let fees=[];
+      try{ const { data }=await supaClient.from('org_member_fees').select('*').eq('organization_id',_orgMine.id).order('period_from',{ascending:false}); fees=data||[]; }catch(e){}
+      const _now=new Date();
+      _list.innerHTML=fees.length?fees.map(function(f){
+        const _run=(new Date(f.period_from+'T00:00:00')<=_now && new Date(f.period_to+'T23:59:59')>=_now);
+        return '<div style="display:flex;align-items:center;gap:9px;padding:9px 11px;border:1px solid '+(_run?'#A8E6C0':'var(--border)')+';background:'+(_run?'#E8F5EE':'var(--surf)')+';border-radius:11px;margin-bottom:7px;">'
+          +'<div style="flex:1;min-width:0;"><div style="font-size:13.5px;font-weight:700;color:var(--dark);">'+fmtPrice(f.amount,f.currency||'CZK')+' '+_curSym(f.currency||'CZK')+'</div>'
+          +'<div style="font-size:11.5px;color:var(--mid);margin-top:2px;">'+_dd(f.period_from)+' \u2013 '+_dd(f.period_to)+(_run?(' \u00b7 '+(EN?'current':'aktu\u00e1ln\u00ed')):'')+'</div></div>'
+          +'<button class="ofDel" data-id="'+f.id+'" style="background:none;border:1px solid var(--border);border-radius:9px;color:var(--mid);font-size:12px;font-weight:700;padding:5px 9px;cursor:pointer;font-family:inherit;">\u2715</button></div>';
+      }).join(''):('<p style="font-size:12.5px;color:var(--light);padding:4px 0;">'+(EN?'No fee set yet \u2014 clubs cannot pay.':'Zat\u00edm \u017e\u00e1dn\u00fd poplatek \u2014 kluby nemaj\u00ed co platit.')+'</p>');
+      _list.querySelectorAll('.ofDel').forEach(function(b){ b.onclick=async function(){
+        // Obdobi, ktere uz nekdo zaplatil, se nemaze -- prisel by o doklad k cemu se vztahuje.
+        try{ const { data:used }=await supaClient.from('organization_clubs').select('id').eq('fee_id',b.dataset.id).limit(1);
+          if(used&&used.length){ toast(EN?'\u26a0\ufe0f Someone has already paid this period':'\u26a0\ufe0f Tohle obdob\u00ed u\u017e n\u011bkdo zaplatil'); return; } }catch(e){}
+        if(!confirm(EN?'Remove this period?':'Odebrat obdob\u00ed?')) return;
+        try{ await supaClient.from('org_member_fees').delete().eq('id',b.dataset.id); _paint(); }
+        catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||e)); }
+      }; });
+    };
+    _paint();
+    const _add=ov.querySelector('#orgFeeAdd');
+    if(_add) _add.onclick=function(){ _orgFeeAdd(_orgMine, _paint); };
+  }
   { const cb=ov.querySelector('#orgClubsBtn'); if(cb) cb.onclick=function(){ openOrgClubs(_orgMine); }; }
   { const nb=ov.querySelector('#orgNewEvent');
     if(nb) nb.onclick=function(){
@@ -27634,9 +27717,7 @@ async function openOrgApply(kind){
       takes_cash: !!($('orgTakesCash')&&$('orgTakesCash').checked),
       // Poradatel bude na lístky potrebovat Stripe; federace vystaci s bankou.
       payment_mode: (v('orgRcvValue') ? 'qr_bank' : 'stripe'),
-      member_fee:(_isFed?(parseFloat(v('orgFee'))||null):null),
-      member_fee_period:(_isFed?((($('orgFeePeriod')||{}).value)||'year'):null),
-      member_fee_currency:(_isFed?((currentUser&&currentUser.currency)||'CZK'):null),
+
     };
     try{
       if(_orgMine&&_orgMine.id) await supaClient.from('organizations').update(row).eq('id',_orgMine.id);
