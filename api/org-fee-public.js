@@ -18,12 +18,41 @@ async function sbGet(path) {
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'content-type');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   try {
     if (!SB || !SKEY) return res.status(500).json({ error: 'server not configured' });
-    const token = String((req.query && req.query.t) || '').trim();
+    const token = String((req.query && req.query.t) || (req.body && req.body.t) || '').trim();
+
+    // KROK 1 PŘIHLÁŠKY PRO KLUB BEZ ÚČTU. Vyplňuje tytéž údaje, které z appky předává klub
+    // s účtem -- jinak by asociace měla u poloviny členů jiný rozsah dat než u druhé.
+    // Zapisuje se jen do JEDNOHO řádku, který ke klíči patří; nic jiného odsud nejde změnit.
+    if (req.method === 'POST') {
+      if (!token || token.length < 20) return res.status(400).json({ error: 'bad token' });
+      const cur = (await sbGet(`organization_clubs?guest_token=eq.${encodeURIComponent(token)}&select=id,fee_paid_at&limit=1`))[0];
+      if (!cur) return res.status(404).json({ error: 'not found' });
+      // Po zaplacení se údaje nemění -- doklad už je vystavený na to, co v nich bylo.
+      if (cur.fee_paid_at) return res.status(409).json({ error: 'already paid' });
+
+      const b = req.body || {};
+      const t = (v) => (v == null ? null : String(v).trim().slice(0, 200) || null);
+      if (!t(b.name)) return res.status(400).json({ error: 'name required' });
+      const patch = {
+        ext_name: t(b.name), ext_legal_name: t(b.legal_name), ext_tax_id: t(b.tax_id),
+        ext_address: t(b.address), ext_city: t(b.city),
+        ext_email: t(b.email), ext_phone: t(b.phone),
+        guest_name: t(b.name), guest_email: t(b.email),
+      };
+      try {
+        const r = await fetch(`${SB}/rest/v1/organization_clubs?id=eq.${encodeURIComponent(cur.id)}`, {
+          method: 'PATCH', headers: { ...svc, Prefer: 'return=minimal' }, body: JSON.stringify(patch),
+        });
+        if (!r.ok) return res.status(500).json({ error: 'save failed' });
+      } catch (e) { return res.status(500).json({ error: 'save failed' }); }
+      return res.status(200).json({ ok: true, saved: true });
+    }
+
     // Klíč musí vypadat jako klíč. Bez téhle kontroly by šlo tabulku prohledávat dotazem.
     if (!token || token.length < 20) return res.status(400).json({ error: 'bad token' });
 
