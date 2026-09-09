@@ -212,8 +212,16 @@ export default async function handler(req, res) {
 
     // stash the payment id on the target row (reconcile lookup, same as before)
     try {
-      const tbl = (kind === 'memb') ? 'gym_memberships' : (kind === 'coach1') ? 'bookings' : (kind === 'event') ? 'event_tickets' : (kind === 'cohort') ? 'cohort_members' : (kind === 'merch') ? 'merch_orders' : 'gym_bookings';
-      if (paymentId) await sb.from(tbl).update({ pis_payment_id: paymentId, pis_status: status }).eq('id', bookingId);
+      // ČLENSKÝ POPLATEK má vlastní tabulku i vlastní sloupec. Bez téhle větve se číslo platby
+      // neuložilo nikam a návrat z banky ji pak nenašel -- platba proto vždy skončila jako
+      // "čeká na potvrzení bankou", přestože banka potvrdila hned.
+      if (String(bookingId).startsWith('orgfee:')) {
+        if (paymentId) await sb.from('organization_clubs')
+          .update({ fee_payment_intent: paymentId }).eq('id', String(bookingId).slice(7));
+      } else {
+        const tbl = (kind === 'memb') ? 'gym_memberships' : (kind === 'coach1') ? 'bookings' : (kind === 'event') ? 'event_tickets' : (kind === 'cohort') ? 'cohort_members' : (kind === 'merch') ? 'merch_orders' : 'gym_bookings';
+        if (paymentId) await sb.from(tbl).update({ pis_payment_id: paymentId, pis_status: status }).eq('id', bookingId);
+      }
     } catch (e) { /* non-fatal */ }
 
     // stash session_id + device_id so pis-return can call Get Payment by ID with the same context
