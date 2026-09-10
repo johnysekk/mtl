@@ -20571,8 +20571,20 @@ async function showCommissionDoklad(id){
   if(!dk){ try{ const { data } = await supaClient.from('commission_doklady').select('*').eq('id', id).single(); dk = data; }catch(e){} }
   if(!dk){ toast('\u26a0\ufe0f'); return; }
   await _loadMtlEnt(); const ME = window._mtlEnt || MTL_ENTITY;
-  let gym = (typeof _myGymData !== 'undefined' && _myGymData && _myGymData.id === dk.gym_id) ? _myGymData : null;
-  if(!gym){ try{ const { data } = await supaClient.from('gyms').select('name,legal_name,billing_address,tax_id,vat_id,billing_country').eq('id', dk.gym_id).single(); gym = data; }catch(e){} }
+  // ODBERATEL ZE SNIMKU. Doklad je zaznam o tom, co bylo vystaveno -- kdyz klub pozdeji
+  // zmeni nazev nebo vstoupi do DPH, uz vystaveny doklad se menit nesmi.
+  let gym = null, _fromSnap = false;
+  if(dk.cust_name || dk.cust_ico){
+    _fromSnap = true;
+    gym = { name: dk.cust_name, legal_name: dk.cust_name, tax_id: dk.cust_ico,
+      vat_id: dk.cust_dic, billing_address: dk.cust_address,
+      billing_country: dk.cust_country, vat_payer: !!dk.cust_vat_payer };
+  }
+  // Bez snimku (doklady z doby pred jeho zavedenim) dokreslime ze zivych dat, ale receme to.
+  if(!gym){
+    gym = (typeof _myGymData !== 'undefined' && _myGymData && _myGymData.id === dk.gym_id) ? _myGymData : null;
+    if(!gym){ try{ const { data } = await supaClient.from('gyms').select('name,legal_name,billing_address,tax_id,vat_id,billing_country').eq('id', dk.gym_id).single(); gym = data; }catch(e){} }
+  }
   gym = gym || {};
   if(!dk.gym_id && dk.coach_id){ try{ const { data:_cp } = await supaClient.from('profiles').select('name,legal_name,billing_address,tax_id,vat_id').eq('id', dk.coach_id).single(); // U kouče je name jeho vlastní jméno, ne název klubu -- bez tohohle příznaku by pod právním
       // názvem stálo "Klub v MTL: Petr Haiser", což nedává smysl.
@@ -20606,7 +20618,11 @@ async function showCommissionDoklad(id){
     // Nahoře zůstává jen to, co doklad popisuje: období a čí je (klub / kouč), jako v PDF.
     + '<div style="font-size:13px;color:#666;margin-bottom:14px;">'+(EN?'Period ':'Období ')+escapeHtml(String(dk.period_month||''))
       +'  \u00b7  '+(dk.kind==='coach'?(EN?'coach':'kouč'):(EN?'club':'klub'))+'</div>'
-    + '<div class="cols"><div class="col"><div class="lbl">'+(EN?'Supplier':'Dodavatel')+'</div>'+supLines+'</div><div class="col"><div class="lbl">'+(EN?'Customer':'Odb\u011bratel')+'</div>'+buyLines+'</div></div>'
+    + '<div class="cols"><div class="col"><div class="lbl">'+(EN?'Supplier':'Dodavatel')+'</div>'+supLines+'</div><div class="col"><div class="lbl">'+(EN?'Customer':'Odb\u011bratel')+'</div>'+buyLines
+      +(_fromSnap?'':('<div style="font-size:10.5px;color:#9A5B00;background:#FFF4E5;border:1px solid #F0D9B5;border-radius:8px;padding:6px 8px;margin-top:6px;line-height:1.4;">'
+        +(EN?'Issued before receipt snapshots \u2014 the customer details are current, not as of issue.'
+            :'Vystaveno p\u0159ed zaveden\u00edm sn\u00edmk\u016f \u2014 \u00fadaje odb\u011bratele jsou aktu\u00e1ln\u00ed, ne z okam\u017eiku vystaven\u00ed.')+'</div>'))
+      +'</div></div>'
     + '<table>'+_liRows+vatBlock+'<tr class="tot"><td>'+(EN?'Total':'Celkem')+'</td><td style="text-align:right;">'+f(amt)+'</td></tr></table>'
     + '<p style="font-size:12px;color:#666;margin-top:14px;">'+(EN?('The commission was automatically charged to the card on file on '+charged+'.'):('Provize byla automaticky str\u017eena z ulo\u017een\u00e9 platebn\u00ed karty dne '+charged+'.'))+'</p>'
     + '<button onclick="window.print()" style="margin-top:16px;padding:10px 18px;background:#111;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;">'+(EN?'Print / Save PDF':'Tisk / Ulo\u017eit PDF')+'</button>'
@@ -38034,32 +38050,33 @@ async function showReceipt(b){
     // zaplacený koučovi v klubu měl na dokladu klub -- prodávajícím byl přitom kouč.
     // Řídíme se paid_to, které nese sama transakce.
     const _toCoach = (b.paid_to==='coach') || (!b.gym_id && !!(b.coach_id||b.coach_profile_id));
-    let gymRec=null;
-    if(b._snap){ gymRec={ legal_name:b.sup_name, name:b.sup_name, tax_id:b.sup_ico, vat_id:b.sup_dic,
-      vat_payer:b.sup_vat_payer, vat_rate:b.sup_vat_rate, billing_address:b.sup_address }; }
-    else if(b.gym_id && !_toCoach){ try{ const { data:_g }=await supaClient.from('gyms').select('legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,contact_phone,contact_email,contact_on_doklad').eq('id',b.gym_id).maybeSingle(); gymRec=_g||null; }catch(e){} }
-    let coachRec=null;
-    if(!gymRec){ const _cid=b.coach_id||b.coach_profile_id; if(_cid){ try{ const { data:_c }=await supaClient.from('profiles').select('legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,contact_phone,contact_email,contact_on_doklad,payout_legal_name,payout_tax_id,payout_vat_id,payout_vat_payer,payout_vat_rate,payout_billing_address').eq('id',_cid).maybeSingle(); coachRec=_c||null; }catch(e){} } }
-    // Klubové plnění kouče -> jeho druhá fakturační identita, ta samá, na jejíž účet přišly
-    // peníze. Soukromka zůstává na jeho vlastní. Když druhou identitu nemá, použije se ta
-    // jediná: doklad studentovi vzniknout musí.
-    // Bez fallbacku: klubovou platbu nelze přijmout, dokud trenér nemá účet i fakturační
-    // identitu režimu klub, takže sem se nedostane plnění, ke kterému by identita chyběla.
-    if(coachRec && b.gym_id){
-      coachRec = Object.assign({}, coachRec, {
-        // Přebíjí se i name. Kdyby identita chyběla (stav, který platební brána nepustí),
-        // nesmí na doklad prosáknout osobní jméno kouče jako náhrada.
-        name: coachRec.payout_legal_name || null,
-        legal_name: coachRec.payout_legal_name,
-        tax_id: coachRec.payout_tax_id || null,
-        vat_id: coachRec.payout_vat_id || null,
-        vat_payer: !!coachRec.payout_vat_payer,
-        vat_rate: (coachRec.payout_vat_rate != null ? coachRec.payout_vat_rate : coachRec.vat_rate),
-        billing_address: coachRec.payout_billing_address || null
-      });
+    // DOKLAD JE SNIMEK. Kdyz existuje, kresli se VYHRADNE z nej -- zadne dokreslovani ze
+    // zivych dat, protoze to by znamenalo, ze se uz vystaveny doklad meni pokazde, kdyz
+    // poskytovatel prejmenuje klub nebo vstoupi do DPH.
+    let gymRec=null, coachRec=null;
+    if(b._snap){
+      gymRec={ legal_name:b.sup_name, name:b.sup_name, tax_id:b.sup_ico, vat_id:b.sup_dic,
+        vat_payer:b.sup_vat_payer, vat_rate:b.sup_vat_rate, billing_address:b.sup_address };
     }
-    const rec=gymRec||coachRec;
-    const seller=(rec&&(rec.legal_name||rec.name))||b.gym_name||b.coach_name||(EN?'Provider':'Poskytovatel');
+    // Bez snimku (platby z doby pred jeho zavedenim) se doklad NEDOKRESLUJE. Dokument
+    // slozeny z dnesnich dat by nebyl tim, co bylo vystaveno -- radeji to rekneme nahlas.
+    if(!b._snap){
+      // Snimek chybi -- doklad k teto platbe nebyl vystaven. Skladat ho dnes ze zivych dat
+      // by dalo dokument, ktery se meni v case; to neni doklad, to je odhad.
+      try{
+        const _bx=document.getElementById('receiptBody')||document.getElementById('rcptBody');
+        if(_bx) _bx.innerHTML='<div style="padding:22px;font-size:13.5px;line-height:1.6;color:var(--mid);">'
+          +'<div style="font-size:15px;font-weight:800;color:var(--dark);margin-bottom:8px;">'
+          +(EN?'No receipt was issued for this payment':'K t\u00e9to platb\u011b nebyl vystaven doklad')+'</div>'
+          +(EN?'It predates receipt snapshots. We will not rebuild it from today\u2019s data \u2014 that would not be the document that was issued.'
+              :'Platba je z doby p\u0159ed zaveden\u00edm doklad\u016f. Nebudeme ho skl\u00e1dat z dne\u0161n\u00edch dat \u2014 nebyl by to doklad, kter\u00fd byl vystaven.')
+          +'</div>';
+      }catch(e){}
+      try{ openSheet('shReceipt'); }catch(e){}
+      return;
+    }
+    const rec=gymRec;
+    const seller=(rec&&(rec.legal_name||rec.name))||(EN?'Provider':'Poskytovatel');
     // ODBĚRATEL je ten, kdo platil. Když zástupce hradil za mladistvého, rezervace je vedená na
   // mladistvého, ale doklad musí znít na plátce -- ten ho dává do účetnictví a jemu se vrací
   // peníze. Komu služba patří, se uvede zvlášť jako účastník.
