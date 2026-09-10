@@ -61,7 +61,11 @@ async function pisSideEffects(rec, tbl) {
         ? { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: (rec.coach_id ? 'coach' : 'gym'), gym_id: (rec.coach_id ? null : rec.gym_id), coach_id: rec.coach_id || null, member_id: rec.student_id || null, gross_amount: Math.round((rec.amount || 0) * 100), currency: rec.currency || 'CZK', type: 'merch', payment_method: 'pis', acq_source: 'direct', source_booking_id: rec.id }
         : _cohort
         ? { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: 'gym', gym_id: _cohGym, member_id: rec.student_id || null, gross_amount: Math.round(_cohDep * 100), currency: _cohCur, type: 'course', payment_method: 'pis', cash_payer_name: rec.name || null, acq_source: rec.attribution || 'direct', source_booking_id: rec.id }
-        : { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: 'gym', gym_id: rec.gym_id, coach_id: rec.coach_id || null, member_id: rec.student_id || null, gross_amount: Math.round((rec.amount || 0) * 100), type: (tbl === 'gym_memberships' ? 'membership' : 'drop_in'), payment_method: 'pis', acq_source: rec.acq_source || 'direct', credit: ((tbl !== 'gym_memberships' && rec.credit_used === 'student') ? 'student' : undefined), source_booking_id: rec.id };
+        : { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: 'gym', gym_id: rec.gym_id, coach_id: rec.coach_id || null, member_id: rec.student_id || null, gross_amount: Math.round((rec.amount || 0) * 100), type: (tbl === 'gym_memberships' ? 'membership' : 'drop_in'), payment_method: 'pis', acq_source: rec.acq_source || 'direct', credit: ((tbl !== 'gym_memberships' && rec.credit_used === 'student') ? 'student' : undefined), source_booking_id: rec.id,
+        // Vybrana pojmenovana cena z rezervace. Bez toho zustane dropin_plan_id null,
+        // v dochazce neni co overovat a nikdo nezjisti, kdo si vzal slevu.
+        dropin_plan_id: rec.dropin_plan_id || null,
+        proof_checked: (rec.need_proof ? false : null) };
       await fetch(APP_URL + '/api/record-cash', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(_body) });
     }
   } catch (e) { /* non-fatal */ }
@@ -146,89 +150,12 @@ export default async function handler(req, res) {
 
     // reconcile against gym_bookings OR gym_memberships (PIS can pay either)
     let tbl = 'gym_bookings';
-    let rec = (await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name,amount,coach_id,acq_source,student_name,credit_used').eq('pis_payment_id', paymentId).maybeSingle()).data;
+    let rec = (await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name,amount,coach_id,acq_source,student_name,credit_used,dropin_plan_id,need_proof').eq('pis_payment_id', paymentId).maybeSingle()).data;
     if (!rec) { const m = await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name,amount,coach_id,acq_source,student_name,months').eq('pis_payment_id', paymentId).maybeSingle(); if (m.data) { rec = m.data; tbl = 'gym_memberships'; } }
-    if (!rec) { const c = await sb.from('bookings').select('id,status,student_id,coach_id,amount,currency,coach_name,slot_id,acq_source,credit_used').eq('pis_payment_id', paymentId).maybeSingle(); if (c.data) { rec = c.data; tbl = 'bookings'; } }
+    if (!rec) { const c = await sb.from('bookings').select('id,status,student_id,coach_id,amount,currency,coach_name,slot_id,acq_source,credit_used,dropin_plan_id,need_proof').eq('pis_payment_id', paymentId).maybeSingle(); if (c.data) { rec = c.data; tbl = 'bookings'; } }
     if (!rec) { const e = await sb.from('event_tickets').select('id,status,buyer_id,event_id,amount,currency,buyer_name').eq('pis_payment_id', paymentId).maybeSingle(); if (e.data) { rec = e.data; tbl = 'event_tickets'; } }
     if (!rec) { const co = await sb.from('cohort_members').select('id,status,student_id,cohort_id,name,attribution').eq('pis_payment_id', paymentId).maybeSingle(); if (co.data) { rec = co.data; tbl = 'cohort_members'; } }
     if (!rec) { const mo = await sb.from('merch_orders').select('id,status,student_id,gym_id,coach_id,merch_id,item_name,amount,currency,buyer_name').eq('pis_payment_id', paymentId).maybeSingle(); if (mo.data) { rec = mo.data; tbl = 'merch_orders'; } }
-    // ČLENSKÝ POPLATEK KLUBU VE FEDERACI. Vlastní větev, protože se nechová jako prodej:
-    // nevzniká rezervace ani lístek, ale členství na OBDOBÍ -- a teprve tím klub získá
-    // zvýhodněnou sazbu 1,5 %. Řídí se konečným stavem od banky (ACSC/ACCC…), ne odesláním.
-    if (!rec) {
-      const oc = await sb.from('organization_clubs')
-        .select('id,organization_id,gym_id,status,fee_amount,fee_currency,fee_period,valid_until')
-        .eq('fee_payment_intent', paymentId).maybeSingle();
-      if (oc.data) {
-        const r = oc.data;
-        if (!PAID_STATUSES.has(String(status))) return res.status(200).json({ ok: true, note: 'org fee not settled' });
-
-        // Období běží od dneška, nebo navazuje na dosud platné členství -- kdo zaplatí dřív,
-        // nesmí o zbytek zaplaceného období přijít.
-        // PLATNOST SE BERE Z OBDOBI POPLATKU, ne z periody. Poplatek je "Clenstvi 2026,
-        // 1. 1. - 31. 12. 2026" a clenstvi plati presne do konce toho obdobi. Drive se pocitalo
-        // z fee_period ('year'/'once'), takze 'once' delalo +100 let a datum bylo nesmyslne.
-        let _until = null;
-        try {
-          let _f = null;
-          if (r.fee_id) _f = (await sb.from('org_member_fees').select('period_to').eq('id', r.fee_id).maybeSingle()).data;
-          if (!_f) {
-            const _t = new Date().toISOString().slice(0, 10);
-            _f = (await sb.from('org_member_fees').select('period_to')
-              .eq('organization_id', r.organization_id)
-              .lte('period_from', _t).gte('period_to', _t).limit(1).maybeSingle()).data;
-          }
-          if (_f && _f.period_to) _until = _f.period_to;
-        } catch (e) {}
-        // Bez obdobi (poplatek smazan) padame na rok od dneska, at clenstvi nezustane bez konce.
-        if (!_until) { const _d = new Date(); _d.setFullYear(_d.getFullYear() + 1); _until = _d.toISOString().slice(0, 10); }
-
-        try {
-          // Platba zaplati POPLATEK, neprijme klub do asociace -- to zustava na asociaci.
-          const _accepted = (r.status === 'active');
-          await sb.from('organization_clubs')
-            .update({ fee_paid_at: new Date().toISOString(), valid_until: _until })
-            .eq('id', r.id);
-        } catch (e) {}
-
-        // Sazba patří KLUBU a má vlastní datum konce, aby sama vypršela.
-        // Sazba az kdyz je oboji: prijato asociaci A zaplaceno.
-        // Sazba se zapisuje POSKYTOVATELI -- platí na všechny jeho entity, ne jen na klub,
-        // kterým do asociace vstoupil.
-        // Zaúčtování: transakce + doklad klubu, provize MTL nulová.
-        try { await fetch(`${APP_URL}/api/org-fee-record`, { method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ oc_id: r.id, method:'pis' }) }); } catch (e) {}
-        if (_accepted && r.gym_id) {
-          try {
-            const _g = (await sb.from('gyms').select('owner_id').eq('id', r.gym_id).maybeSingle()).data;
-            if (_g && _g.owner_id) await sb.from('profiles').update({ org_rate_until: _until }).eq('id', _g.owner_id);
-          } catch (e) {}
-        }
-
-        try {
-          const g = await sb.from('gyms').select('owner_id,name').eq('id', r.gym_id).maybeSingle();
-          const o = await sb.from('organizations').select('name,abbr,owner_id').eq('id', r.organization_id).maybeSingle();
-          const _abbr = (o.data && (o.data.abbr || o.data.name)) || '';
-          const _du = new Date(_until).toLocaleDateString('cs-CZ');
-          if (g.data && g.data.owner_id) {
-            await sb.from('notifications').insert({
-              user_id: g.data.owner_id, type: 'system', read: false,
-              data: JSON.stringify({ kind: 'org_fee_paid', org_id: r.organization_id }),
-              message: `\u2705 \u010clensk\u00fd poplatek ${_abbr} zaplacen. \u010clenstv\u00ed plat\u00ed do ${_du} a klub m\u00e1 sazbu 1,5 %.`,
-            });
-          }
-          if (o.data && o.data.owner_id) {
-            await sb.from('notifications').insert({
-              user_id: o.data.owner_id, type: 'system', read: false,
-              data: JSON.stringify({ kind: 'org_fee_in', gym_id: r.gym_id }),
-              message: `\u{1F3E6} ${(g.data && g.data.name) || 'Klub'} zaplatil \u010dlensk\u00fd poplatek. \u010clenstv\u00ed do ${_du}.`,
-            });
-          }
-        } catch (e) {}
-        return res.status(200).json({ ok: true, org_fee: true, valid_until: _until });
-      }
-    }
-
     if (!rec) return res.status(200).json({ ok: true, note: 'no matching record' });
 
     const _paidStatus = (tbl === 'event_tickets' || tbl === 'merch_orders') ? 'paid' : (tbl === 'cohort_members') ? 'deposit_paid' : 'active';
