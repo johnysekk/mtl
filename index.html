@@ -20586,7 +20586,9 @@ async function showCommissionDoklad(id){
     if(!gym){ try{ const { data } = await supaClient.from('gyms').select('name,legal_name,billing_address,tax_id,vat_id,billing_country').eq('id', dk.gym_id).single(); gym = data; }catch(e){} }
   }
   gym = gym || {};
-  if(!dk.gym_id && dk.coach_id){ try{ const { data:_cp } = await supaClient.from('profiles').select('name,legal_name,billing_address,tax_id,vat_id').eq('id', dk.coach_id).single(); // U kouče je name jeho vlastní jméno, ne název klubu -- bez tohohle příznaku by pod právním
+  // Jen kdyz snimek NENI. Driv tato vetev prepsala i snimek, takze u kouce se doklad
+  // kreslil z dnesniho profilu bez ohledu na to, co bylo vystaveno.
+  if(!_fromSnap && !dk.gym_id && dk.coach_id){ try{ const { data:_cp } = await supaClient.from('profiles').select('name,legal_name,billing_address,tax_id,vat_id').eq('id', dk.coach_id).single(); // U kouče je name jeho vlastní jméno, ne název klubu -- bez tohohle příznaku by pod právním
       // názvem stálo "Klub v MTL: Petr Haiser", což nedává smysl.
       if(_cp){ gym = { name:_cp.name, legal_name:_cp.legal_name, billing_address:_cp.billing_address, tax_id:_cp.tax_id, vat_id:_cp.vat_id, _isCoach:true }; } }catch(e){} }
   const w = window.open('', '_blank'); if(!w){ toast(EN?'Allow pop-ups to view the doklad':'Povol vyskakovac\u00ed okna'); return; }
@@ -31506,11 +31508,15 @@ async function _openGymMemberDetailInner(sid, name){
   try{ const { data } = await supaClient.from('gym_memberships').select('*').eq('gym_id',_myGymData.id).eq('student_id',sid).order('created_at',{ascending:true}); mems=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_attendance').select('class_date,class_name').eq('gym_id',_myGymData.id).eq('student_id',sid); att=data||[]; }catch(e){}
   let _belts={}; let _mdFighter=false, _mdRec=null;
+  // Nad blokem, protoze se pouziva i za nim. Driv to bylo const uvnitr try a karta padala
+  // na "_pr is not defined" -- coz vypadalo jako chybejici sloupec v databazi.
+  let _pr=null, _grd=null;
   try{ // Kontakt na zástupce se čte ZVLÁŠŤ. Když ty sloupce v databázi nejsou (guardian-contact.sql
       // ještě neproběhlo), PostgREST odmítne celý dotaz a detail člena zůstane na "Načítám...".
       // Takhle se nejvýš nezobrazí kontakt, ale zbytek karty se vykreslí.
-      const { data: _pr } = await supaClient.from('profiles').select('belts,is_fighter,fight_record,is_minor,phone,phone_show,email').eq('id',sid).single();
-      let _grd=null;
+      const { data: _prData } = await supaClient.from('profiles').select('belts,is_fighter,fight_record,is_minor,phone,phone_show,email').eq('id',sid).single();
+      _pr=_prData||null;
+      // _grd je deklarovane nad blokem
       try{ const { data:_g2 }=await supaClient.from('profiles').select('guardian_name,guardian_email,guardian_phone').eq('id',sid).maybeSingle(); _grd=_g2||null; }
       catch(e){ console.log('[memberDetail] kontakt na zastupce:', e&&e.message); } _belts=beltsOf(_pr&&_pr.belts); _mdFighter=!!(_pr&&_pr.is_fighter); try{ _mdRec=_pr&&_pr.fight_record?(typeof _pr.fight_record==='string'?JSON.parse(_pr.fight_record):_pr.fight_record):null; }catch(_){ _mdRec=null; } }catch(e){}
   try{ const { data } = await supaClient.from('gym_bookings').select('id,status').eq('gym_id',_myGymData.id).eq('student_id',sid); drops=data||[]; }catch(e){}
@@ -38037,6 +38043,18 @@ async function showReceipt(b){
     // identitu dodavatele -- kreslí se tedy z něj a k živým `gyms`/`profiles` se vůbec nesahá.
     // Bez toho by se roky starý doklad přepsal, jakmile klub změní název nebo vstoupí do DPH.
     // Kde snímek není (platby z doby před zavedením), dokreslí se postaru z živých dat.
+    // SNIMEK SI DOHLEDAME SAMI podle transakce nebo platby -- volajici ho vetsinou
+    // neprikladaji, predavaji rezervaci. Bez tohohle by doklad neslo zobrazit vubec.
+    if(b && !b.doklad){
+      try{
+        const _tid=b.transaction_id||b.tx_id||null;
+        const _pi=b.payment_intent||b.stripe_payment_intent||b.pis_payment_id||null;
+        let _q=null;
+        if(_tid) _q=supaClient.from('doklady').select('*').eq('transaction_id',_tid).limit(1);
+        else if(_pi) _q=supaClient.from('doklady').select('*').eq('payment_intent',_pi).limit(1);
+        if(_q){ const { data:_dd }=await _q; if(_dd && _dd.length) b=Object.assign({}, b, { doklad:_dd[0] }); }
+      }catch(e){}
+    }
     if(b && b.doklad){
       const _dk=b.doklad;
       b=Object.assign({}, b, {
