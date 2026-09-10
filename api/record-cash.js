@@ -18,6 +18,15 @@ import { ladderRate as _mtlRate, acquisitionRate as _mtlAcq, introFreeFor as _in
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
+// _introFree() ocekava cteci funkci vracejici pole radku. Volalo se _wsbGet, ale nikde
+// nebyla definovana -- potvrzeni QR platby proto padalo na "_wsbGet is not defined".
+async function _wsbGet(path) {
+  try {
+    const r = await sb(path);
+    return Array.isArray(r) ? r : (r ? [r] : []);
+  } catch (e) { return []; }
+}
+
 async function sb(path, opts = {}) {
   const r = await fetch(`${SB}/rest/v1/${path}`, {
     method: opts.method || 'GET',
