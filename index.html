@@ -11998,7 +11998,7 @@ async function openGymProfile(g){
     const gm = (_pGymMemb && _pGymMemb.data) || [];
     _gymMembers=gm||[];
   }catch(e){}
-  const relKey=(r)=>`${_dt(r.class_date)}|${r.class_time}|${r.class_name}`;
+  const relKey=(r)=>`${r.class_date}|${r.class_time}|${r.class_name}`;
   const _pkS=(x)=>String(x.student_id)+'|'+(x.child_name||'');
   const isReleased=(sid,k,child)=> _resvAll.some(r=> r.student_id===sid && String(r.child_name||'')===String(child||'') && relKey(r)===k && r.status==='released');
   _resvAll.forEach(r=>{ if(r.status==='released') return; const k=relKey(r); if(currentUser&&r.student_id===currentUser.id) mineSet.add(k); });
@@ -12061,7 +12061,7 @@ async function openGymProfile(g){
     const cap=(o.cap!=null&&Number(o.cap)>0)?Number(o.cap):(g.capacity||0);
     const autoMembers=_gymMembers.filter(m=> _memLive(m) && membCovers(m,o) && !isReleased(m.student_id,k,m.child_name));
     const autoIds=new Set(autoMembers.map(_pkS));
-    const dropCount=_dropAll.filter(d=>`${_dt(d.class_date)}|${d.class_time}|${d.class_name}`===k).length;
+    const dropCount=_dropAll.filter(d=>`${d.class_date}|${d.class_time}|${d.class_name}`===k).length;
     const explicitCount=_resvAll.filter(r=> r.status!=='released' && relKey(r)===k && !autoIds.has(_pkS(r))).length;
     const count=autoMembers.length + dropCount + explicitCount;
     const _left = cap ? Math.max(0, cap-count) : null;
@@ -12761,6 +12761,45 @@ async function subscribeGymMembership(g, plan, _child, _cleared){
     setTimeout(()=>{ window.location.href = url; }, 500);
   } catch(e){ console.error('subscribeGymMembership', e); toast('⚠️ '+e.message); }
 }
+
+// Vyber ceny pri rezervaci. Vraci vybranou cenu, nebo false, kdyz clovek vyber zavrel --
+// zavreni NESMI rezervaci pustit dal za zakladni cenu, to by byl tichy prodej dražší
+// varianty, nez si clovek myslel.
+function _dpAskStudent(plans, cur){
+  return new Promise(function(resolve){
+    try{
+      var EN=LANG==='en';
+      var sym=(typeof _curSym==='function')?_curSym(cur):cur;
+      var ov=document.createElement('div');
+      ov.style.cssText='position:fixed;inset:0;z-index:420;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;';
+      var h='<div style="width:100%;max-height:80vh;overflow-y:auto;background:#fff;border-radius:20px 20px 0 0;padding:18px 20px 22px;font-family:\'DM Sans\';">'
+        +'<div style="font-size:16px;font-weight:800;color:#111;margin-bottom:3px;">'+(EN?'Which price applies to you?':'Kter\u00e1 cena pro tebe plat\u00ed?')+'</div>'
+        +'<p style="font-size:12.5px;color:#777;line-height:1.5;margin:0 0 14px;">'+(EN?'Pick honestly \u2014 the club checks it at the door.':'Vyber podle skute\u010dnosti \u2014 klub to na m\u00edst\u011b kontroluje.')+'</p>';
+      plans.forEach(function(dp,i){
+        var needs=dp.proof && dp.proof_text;
+        h+='<button class="dpPickBtn" data-i="'+i+'" style="width:100%;text-align:left;background:#F7F7F5;border:1.5px solid #E6E4DE;border-radius:12px;padding:12px 14px;margin-bottom:9px;cursor:pointer;font-family:\'DM Sans\';">'
+          +'<div style="display:flex;align-items:baseline;gap:8px;">'
+          +'<span style="font-size:14.5px;font-weight:800;color:#111;">'+escapeHtml(dp.name)+'</span>'
+          +'<span style="margin-left:auto;font-size:14.5px;font-weight:800;color:#111;">'+fmtPrice(dp.price||0,cur)+' '+sym+'</span></div>'
+          + (needs ? ('<div style="font-size:11.5px;color:#9A5B00;margin-top:4px;line-height:1.4;">\u26a0\ufe0f '+(EN?'Bring: ':'Vezmi s sebou: ')+escapeHtml(dp.proof_text)+'</div>') : '')
+          +'</button>';
+      });
+      h+='<button id="dpPickClose" style="width:100%;padding:12px;background:none;border:none;color:#888;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-top:4px;">'+(EN?'Cancel':'Zru\u0161it')+'</button></div>';
+      ov.innerHTML=h;
+      document.body.appendChild(ov);
+
+      var done=false;
+      function fin(v){ if(done) return; done=true; try{ ov.remove(); }catch(e){} resolve(v); }
+      ov.querySelectorAll('.dpPickBtn').forEach(function(b){
+        b.onclick=function(){ fin(plans[+b.dataset.i]||null); };
+      });
+      var c=ov.querySelector('#dpPickClose'); if(c) c.onclick=function(){ fin(false); };
+      // Klik mimo = zruseni, ne potvrzeni zakladni ceny.
+      ov.onclick=function(ev){ if(ev.target===ov) fin(false); };
+    }catch(e){ resolve(null); }
+  });
+}
+
 async function bookGymDropin(g, occ, _child){
   // Zástupce platí za mladistvého: rezervace i Stripe metadata musí nést JEHO id, ne id toho,
   // kdo zrovna platí. Bez parametru se nic nemění.
@@ -12771,6 +12810,26 @@ async function bookGymDropin(g, occ, _child){
   if(occ && occ.kids && _child===undefined){ return openChildPicker({parentReq:occ.parentReq, ageMin:occ.ageMin, ageMax:occ.ageMax}, (ch)=>bookGymDropin(g, occ, ch)); }
   let _dp=g.dropin_price||0, _dcur=g.currency||'CZK';
   if(occ && occ.coach){ try{ const { data: _cp } = await supaClient.from('gym_coach_pricing').select('dropin_price,currency').eq('gym_id',g.id).eq('coach_id',occ.coach).eq('status','approved').maybeSingle(); if(_cp && _cp.dropin_price){ _dp=_cp.dropin_price; _dcur=_cp.currency||_dcur; } }catch(e){} }
+  // VYBER POJMENOVANE CENY. Nabizime jen verejne a jen ty, na ktere ma clovek podle veku
+  // narok -- nabidnout slevu, kterou klub pak odmitne, je horsi nez ji nenabidnout.
+  var _dpPick=null;
+  try{
+    if(typeof _dpList==='function'){
+      var _all=_dpList(g).filter(function(dp){
+        if(dp.public===false) return false;
+        if(dp._base) return true;
+        var el=(typeof _dpEligible==='function')?_dpEligible(dp,{birthdate:(currentUser&&currentUser.birthdate)||null}):{ok:true};
+        return !!el.ok;
+      });
+      if(_all.length>1){
+        _dpPick=await _dpAskStudent(_all, _dcur);
+        if(_dpPick===false) return;              // clovek vyber zavrel
+        if(_dpPick) _dp=_dpPick.price;
+      }
+    }
+  }catch(e){}
+  window._dpPickLast = _dpPick || null;
+
   if(typeof _mtlPayMode==='function' && _mtlPayMode(g)==='qr_bank'){ return _onlineQrPay(g, occ, _child, 'dropin', null); }
   const payee = await resolveGymPayee(g, occ);
   if(!payee.account){ toast(LANG==='en'?'⚠️ The coach/club for this class has no payments set up yet':'⚠️ Kouč/klub u této lekce zatím nemá nastavené platby'); return; }
@@ -12802,7 +12861,7 @@ async function bookGymDropin(g, occ, _child){
     try{ localStorage.setItem('mtl_credit_used', _dropCreditUsed); }catch(e){}
     try{ localStorage.setItem('mtl_ref_disc', String(_dropRefD)); }catch(e){}
     if(_dropCreditUsed==='student'){ const _ccG=await _askCreditChoice((currentUser.student_credits||1), _dropRefD, _dp, _dcur); if(!_ccG){ _dropCreditUsed=''; _dropRefD=0; } }
-    const url = `/api/pay?type=gym&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&className=${encodeURIComponent(occ&&occ.name?occ.name:'Drop-in')}&amount=${_dp}&currency=${_dcur}&bookingId=${encodeURIComponent(bk.id)}&income=${encodeURIComponent(g.dropin_income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&level=${encodeURIComponent((occ&&occ.level)||'')}&disc=${encodeURIComponent((occ&&occ.disc)?occ.disc:parseDisc(g.disciplines).join(','))}&partner=${_gymOwnerPartner?1:0}&take=${_ladderRate('stripe',{partner:_gymOwnerPartner,org:_ownerOrg,score:_ownerScore,bankai:_ownerBankai})}&credit=${_dropCreditUsed||'none'}&refDisc=${_dropRefD}&gymId=${encodeURIComponent(g.id)}&studentId=${_payFor||(currentUser?currentUser.id:'')}&acq=${encodeURIComponent((typeof _acqSrc==='function'?_acqSrc(g):'')||'')}&coachId=${encodeURIComponent((occ&&occ.coach)||'')}`;
+    const url = `/api/pay?type=gym&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&className=${encodeURIComponent(occ&&occ.name?occ.name:'Drop-in')}&amount=${_dp}&currency=${_dcur}&bookingId=${encodeURIComponent(bk.id)}&income=${encodeURIComponent(g.dropin_income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&level=${encodeURIComponent((occ&&occ.level)||'')}&disc=${encodeURIComponent((occ&&occ.disc)?occ.disc:parseDisc(g.disciplines).join(','))}&partner=${_gymOwnerPartner?1:0}&take=${_ladderRate('stripe',{partner:_gymOwnerPartner,org:_ownerOrg,score:_ownerScore,bankai:_ownerBankai})}&credit=${_dropCreditUsed||'none'}&refDisc=${_dropRefD}&gymId=${encodeURIComponent(g.id)}&studentId=${_payFor||(currentUser?currentUser.id:'')}&acq=${encodeURIComponent((typeof _acqSrc==='function'?_acqSrc(g):'')||'')}&coachId=${encodeURIComponent((occ&&occ.coach)||'')}&dropinPlan=${encodeURIComponent((_dpPick&&_dpPick.id)||'')}&needProof=${(_dpPick&&_dpPick.proof)?1:0}`;
     setTimeout(()=>{ window.location.href = url; }, 500);
   } catch(e){ console.error('bookGymDropin', e); toast('⚠️ '+e.message); }
 }
@@ -12821,7 +12880,7 @@ async function loadMyMemberships(){
   try{ const gymIds=[...new Set([...ms,...pend].map(m=>m.gym_id).filter(Boolean))]; if(gymIds.length){ const { data: gg } = await supaClient.from('gyms').select('*').in('id', gymIds); (gg||[]).forEach(g=>{ gymMap[g.id]=g; }); } }catch(e){}
   window._membGymMap = gymMap;
   window._membReleased = new Set();
-  try{ const _td=new Date().toISOString().slice(0,10); const { data: _rv } = await supaClient.from('gym_class_reservations').select('gym_id,class_date,class_time,class_name,status').eq('student_id', currentUser.id).eq('status','released').gte('class_date', _td); (_rv||[]).forEach(r=>{ window._membReleased.add(`${r.gym_id}|${_dt(r.class_date)}|${r.class_time||''}|${r.class_name||''}`); }); }catch(e){}
+  try{ const _td=new Date().toISOString().slice(0,10); const { data: _rv } = await supaClient.from('gym_class_reservations').select('gym_id,class_date,class_time,class_name,status').eq('student_id', currentUser.id).eq('status','released').gte('class_date', _td); (_rv||[]).forEach(r=>{ window._membReleased.add(`${r.gym_id}|${r.class_date}|${r.class_time||''}|${r.class_name||''}`); }); }catch(e){}
   let attMap={};
   try{ const { data: aa } = await supaClient.from('gym_attendance').select('gym_id').eq('student_id', currentUser.id).is('child_name',null); (aa||[]).forEach(a=>{ attMap[a.gym_id]=(attMap[a.gym_id]||0)+1; }); }catch(e){}
   // ── drop-iny + Já/Děti pohled (kid obsah žije v memberships + gym_bookings) ──
@@ -12955,15 +13014,15 @@ async function openGymReschedule(b){
   let ownerName=''; try{ if(gym&&gym.owner_id){ const { data:ow } = await supaClient.from('profiles').select('name').eq('id', gym.owner_id).single(); ownerName=(ow&&ow.name)||''; } }catch(e){}
   let sched=[]; try{ sched = (gym&&typeof gym.schedule==='string')?JSON.parse(gym.schedule):((gym&&gym.schedule)||[]); }catch(e){}
   const occs = upcomingClasses(sched, 21);
-  let _cxSet=new Set(); try{ const { data:_cxl } = await supaClient.from('gym_class_log').select('class_date,class_time,class_name').eq('gym_id', b.gym_id).eq('status','cancelled'); (_cxl||[]).forEach(c=>_cxSet.add(`${_dt(c.class_date)}|${c.class_time||''}|${c.class_name||''}`)); }catch(e){}
+  let _cxSet=new Set(); try{ const { data:_cxl } = await supaClient.from('gym_class_log').select('class_date,class_time,class_name').eq('gym_id', b.gym_id).eq('status','cancelled'); (_cxl||[]).forEach(c=>_cxSet.add(`${c.class_date}|${c.class_time||''}|${c.class_name||''}`)); }catch(e){}
   const now=new Date();
   const minTime=new Date(now.getTime()+6*60*60*1000); // aspoň 6h dopředu
   // obsazenost cílových lekcí (rezervace + aktivní jednorázové lekce) pro kontrolu kapacity
   const today2 = new Date().toISOString().slice(0,10);
   const countMap={};
   if(gym && gym.capacity){
-    try{ const { data: rv } = await supaClient.from('gym_class_reservations').select('class_date,class_time,class_name').eq('gym_id', b.gym_id).gte('class_date', today2); (rv||[]).forEach(r=>{ const k=`${_dt(r.class_date)}|${r.class_time}|${r.class_name||''}`; countMap[k]=(countMap[k]||0)+1; }); }catch(e){}
-    try{ const { data: db2 } = await supaClient.from('gym_bookings').select('class_date,class_time,class_name,id').eq('gym_id', b.gym_id).eq('status','active').gte('class_date', today2); (db2||[]).forEach(d=>{ if(String(d.id)===String(b.id)) return; const k=`${_dt(d.class_date)}|${d.class_time}|${d.class_name||''}`; countMap[k]=(countMap[k]||0)+1; }); }catch(e){}
+    try{ const { data: rv } = await supaClient.from('gym_class_reservations').select('class_date,class_time,class_name').eq('gym_id', b.gym_id).gte('class_date', today2); (rv||[]).forEach(r=>{ const k=`${r.class_date}|${r.class_time}|${r.class_name||''}`; countMap[k]=(countMap[k]||0)+1; }); }catch(e){}
+    try{ const { data: db2 } = await supaClient.from('gym_bookings').select('class_date,class_time,class_name,id').eq('gym_id', b.gym_id).eq('status','active').gte('class_date', today2); (db2||[]).forEach(d=>{ if(String(d.id)===String(b.id)) return; const k=`${d.class_date}|${d.class_time}|${d.class_name||''}`; countMap[k]=(countMap[k]||0)+1; }); }catch(e){}
   }
   const valid = occs.filter(o=>{
     const dt=new Date(`${o.date}T${(o.time||'00:00')}:00`);
@@ -18289,7 +18348,7 @@ async function renderGymMembers(){
 }
 async function loadGymRoster(){
   const box=$('mgRoster'); if(!box||!_myGymData) return;
-  window._cancelledOcc = new Set(); try{ const { data:_cd } = await supaClient.from('gym_class_log').select('class_date,class_time,class_name').eq('gym_id', _myGymData.id).eq('status','cancelled'); (_cd||[]).forEach(c=>window._cancelledOcc.add(`${_dt(c.class_date)}|${c.class_time||''}|${c.class_name||''}`)); }catch(e){}
+  window._cancelledOcc = new Set(); try{ const { data:_cd } = await supaClient.from('gym_class_log').select('class_date,class_time,class_name').eq('gym_id', _myGymData.id).eq('status','cancelled'); (_cd||[]).forEach(c=>window._cancelledOcc.add(`${c.class_date}|${c.class_time||''}|${c.class_name||''}`)); }catch(e){}
   window._occOverride = {}; try{ const { data:_ov } = await supaClient.from('gym_class_overrides').select('*').eq('gym_id', _myGymData.id); (_ov||[]).forEach(o=>{ window._occOverride[o.class_date+'|'+(o.class_time||'')+'|'+(o.class_name||'')] = { coach:o.payee_coach_id||null, coachName:o.payee_coach_name||null, leader:o.lead_coach_id||o.payee_coach_id||null, leaderName:o.lead_coach_name||o.payee_coach_name||null }; }); }catch(e){}
   const today=new Date().toISOString().slice(0,10);
   const occs=upcomingClasses(_gymSchedule,7,4).filter(o=> o.date>=today); // jen nadcházející (minulé neproběhlé sem nepatří; plný rozvrh je v záložce Rozvrh)
@@ -18301,8 +18360,8 @@ async function loadGymRoster(){
   if(!occs.length){ box.innerHTML=`<p style="color:var(--light);font-size:13px;">${LANG==='en'?'No classes scheduled.':'Žádné naplánované lekce.'}</p>`; return; }
   const dn=dayNames(); const cap=_myGymData.capacity||0;
   const accOf=(m)=>{ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
-  const rk=(r)=>`${_dt(r.class_date)}|${r.class_time}|${r.class_name}`;
-  const presentSet=new Set(att.map(a=>`${_dt(a.class_date)}|${a.class_time}|${a.class_name||''}|${a.student_id}|${a.child_name||''}`));
+  const rk=(r)=>`${r.class_date}|${r.class_time}|${r.class_name}`;
+  const presentSet=new Set(att.map(a=>`${a.class_date}|${a.class_time}|${a.class_name||''}|${a.student_id}|${a.child_name||''}`));
   const tagPill=(t,c)=>`<span style="font-size:10px;font-weight:700;color:${c};background:${c}1a;border-radius:6px;padding:1px 6px;margin-left:6px;">${t}</span>`;
   const esc=s=>String(s||'').replace(/"/g,'&quot;');
   box.innerHTML=occs.slice(0,20).map((o,i)=>{
@@ -18319,7 +18378,7 @@ async function loadGymRoster(){
     // rezervace 'active' i po omluvě těsně před lekcí, takže bez tohohle filtru by byl v seznamu dvakrát.
     const _exIds=new Set(_excR.map(function(r){ return String(r.student_id); }).concat(_exHere.map(function(e){ return String(e.student_id); })));
     const _memIds=new Set((mems||[]).map(function(m){ return String(m.student_id); }));
-    const dropList=drops.filter(d=>`${_dt(d.class_date)}|${d.class_time}|${d.class_name}`===k && !_exIds.has(String(d.student_id)));
+    const dropList=drops.filter(d=>`${d.class_date}|${d.class_time}|${d.class_name}`===k && !_exIds.has(String(d.student_id)));
     const explicit=rs.filter(r=> r.status!=='released' && rk(r)===k && !autoIds.has(_pk(r)));
     // Sloučení se záznamy z gym_excuses -- ty se nikdy nemažou, takže omluvený student
     // v docházce zůstane i po úklidu rezervací. Podle student_id, ať tam není dvakrát.
@@ -18452,6 +18511,15 @@ async function openClassAttendance(occ){
   let rs=[],drops=[],mems=[],att=[];
   try{ const { data } = await supaClient.from('gym_class_reservations').select('*').eq('gym_id',gid).eq('class_date',occ.date); rs=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_bookings').select('student_id,student_name,class_date,class_time,class_name,status,child_name,child_age').eq('gym_id',gid).eq('status','active').eq('class_date',occ.date); drops=data||[]; }catch(e){}
+    // Kdo si vzal zlevnenou cenu a jeste nedolozil narok. Tahne se zvlast, protoze to
+    // sedi na transakci, ne na rezervaci -- rezervace nevi, na jake cene se platilo.
+    window._attProof={};
+    try{
+      const { data:_pf } = await supaClient.from('transactions')
+        .select('id,member_id,dropin_plan_id,proof_checked,created_at')
+        .eq('gym_id',gid).not('dropin_plan_id','is',null).is('proof_checked',false);
+      (_pf||[]).forEach(function(t){ if(t.member_id) window._attProof[String(t.member_id)]=t; });
+    }catch(e){}
   try{ const { data } = await supaClient.from('gym_memberships').select('student_id,student_name,plan_access,coach_id,status,child_name,child_age,discipline').eq('gym_id',gid).in('status',['active','cancelling']); mems=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_attendance').select('student_id,student_name,class_date,class_time,class_name,child_name').eq('gym_id',gid).eq('class_date',occ.date); att=data||[]; }catch(e){}
   // Kdo se z TÉHLE lekce omluvil. Zůstane v seznamu zešedlý -- trenér tak pozná rozdíl
@@ -18496,9 +18564,9 @@ async function openClassAttendance(occ){
     }
   }catch(e){}
   const accOf=(m)=>{ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
-  const rk=(r)=>`${_dt(r.class_date)}|${r.class_time}|${r.class_name}`;
+  const rk=(r)=>`${r.class_date}|${r.class_time}|${r.class_name}`;
   const _whoKey=(sid,nm)=> sid?String(sid):('n:'+String(nm||''));
-  const presentSet=new Set(att.map(a=>`${_dt(a.class_date)}|${a.class_time}|${a.class_name||''}|`+_whoKey(a.student_id,a.student_name)+'|'+(a.child_name||'')));
+  const presentSet=new Set(att.map(a=>`${a.class_date}|${a.class_time}|${a.class_name||''}|`+_whoKey(a.student_id,a.student_name)+'|'+(a.child_name||'')));
   const tagPill=(t,c)=>`<span style="font-size:10px;font-weight:700;color:${c};background:${c}1a;border-radius:6px;padding:1px 6px;margin-left:6px;">${t}</span>`;
   const esc=v=>String(v||'').replace(/"/g,'&quot;');
   const _pk=(x)=>String(x.student_id)+'|'+(x.child_name||'');
@@ -18512,7 +18580,7 @@ async function openClassAttendance(occ){
   const _exHere=((window._attExcList)||[]);
   const _exIds=new Set(_excR.map(function(r){ return String(r.student_id); }).concat(_exHere.map(function(e){ return String(e.student_id); })));
   const _memIds=new Set((mems||[]).map(function(m){ return String(m.student_id); }));
-  const dropList=drops.filter(d=>`${_dt(d.class_date)}|${d.class_time}|${d.class_name}`===k && !_exIds.has(String(d.student_id)));
+  const dropList=drops.filter(d=>`${d.class_date}|${d.class_time}|${d.class_name}`===k && !_exIds.has(String(d.student_id)));
   const explicit=rs.filter(r=> r.status!=='released' && rk(r)===k && !autoIds.has(_pk(r)));
   const _seenEx=new Set(_excR.map(function(r){ return String(r.student_id); }));
   const excused=_excR.concat(_exHere.filter(function(e){
@@ -18628,8 +18696,8 @@ async function loadCoachRoster(gymId, gymName){
   if(!occs.length){ box.innerHTML=`<p style="color:var(--light);font-size:13px;padding:8px 0;line-height:1.5;">${LANG==='en'?'No upcoming classes of yours at this club.':'Žádné tvoje nadcházející lekce v tomto klubu.'}</p>`; return; }
   const dn=dayNames(); const cap=g.capacity||0;
   const accOf=(m)=>{ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
-  const rk=(r)=>`${_dt(r.class_date)}|${r.class_time}|${r.class_name}`;
-  const presentSet=new Set(att.map(a=>`${_dt(a.class_date)}|${a.class_time}|${a.class_name||''}|${a.student_id}|${a.child_name||''}`));
+  const rk=(r)=>`${r.class_date}|${r.class_time}|${r.class_name}`;
+  const presentSet=new Set(att.map(a=>`${a.class_date}|${a.class_time}|${a.class_name||''}|${a.student_id}|${a.child_name||''}`));
   const tagPill=(t,c)=>`<span style="font-size:10px;font-weight:700;color:${c};background:${c}1a;border-radius:6px;padding:1px 6px;margin-left:6px;">${t}</span>`;
   const esc=s=>String(s||'').replace(/"/g,'&quot;');
   const gn=esc(gymName||g.name||'');
@@ -18647,7 +18715,7 @@ async function loadCoachRoster(gymId, gymName){
     // rezervace 'active' i po omluvě těsně před lekcí, takže bez tohohle filtru by byl v seznamu dvakrát.
     const _exIds=new Set(_excR.map(function(r){ return String(r.student_id); }).concat(_exHere.map(function(e){ return String(e.student_id); })));
     const _memIds=new Set((mems||[]).map(function(m){ return String(m.student_id); }));
-    const dropList=drops.filter(d=>`${_dt(d.class_date)}|${d.class_time}|${d.class_name}`===k && !_exIds.has(String(d.student_id)));
+    const dropList=drops.filter(d=>`${d.class_date}|${d.class_time}|${d.class_name}`===k && !_exIds.has(String(d.student_id)));
     const explicit=rs.filter(r=> r.status!=='released' && rk(r)===k && !autoIds.has(_pk(r)));
     // Sloučení se záznamy z gym_excuses -- ty se nikdy nemažou, takže omluvený student
     // v docházce zůstane i po úklidu rezervací. Podle student_id, ať tam není dvakrát.
