@@ -28001,9 +28001,12 @@ async function openOrgPicker(){
 // která se dají spočítat z toho, co v databázi opravdu je -- ne odhady.
 // Vědomě NEUKAZUJE obrat z lístků, dokud přes organizaci neteče prodej: prázdná nula
 // vypadá jako chyba a mate víc, než kdyby tam nebyla.
-async function openOrgStats(org){
+async function openOrgStats(org, ym){
   const EN=LANG==='en';
   if(!org||!org.id) return;
+  // Mesic z tehoz seznamu, jaky ma kouc a klub -- at se to nikde neliší.
+  const _now=new Date();
+  const _ym=ym||(_now.getFullYear()+'-'+String(_now.getMonth()+1).padStart(2,'0'));
   let ov=document.getElementById('shOrgStats');
   if(!ov){ ov=document.createElement('div'); ov.id='shOrgStats'; ov.className='sheet'; ov.style.zIndex='93';
     (document.querySelector('.app')||document.body).appendChild(ov); }
@@ -28031,20 +28034,43 @@ async function openOrgStats(org){
 
   const cur=(fees[0]&&fees[0].currency)||'CZK';
   const feeAmt=Number((fees[0]&&fees[0].amount)||0);
-  const collected=tx.filter(t=>t.type==='org_fee').reduce((a,t)=>a+(Number(t.amount)||0),0);
+  const inMonth=t=>String(t.created_at||'').slice(0,7)===_ym;
+  const txM=tx.filter(inMonth);
+  const collected=txM.filter(t=>t.type==='org_fee').reduce((a,t)=>a+(Number(t.amount)||0),0);
+  const collectedAll=tx.filter(t=>t.type==='org_fee').reduce((a,t)=>a+(Number(t.amount)||0),0);
+  // Listky: obrat a provize za vybrany mesic. Karta se ukaze az kdyz nejaky prodej je.
+  const tickM=txM.filter(t=>t.type==='event_ticket');
+  const tickGross=tickM.reduce((a,t)=>a+(Number(t.amount)||0),0);
+  const tickCount=tickM.length;
   // Co jeste nedoslo: pocet nezaplacenych x aktualni poplatek. Odhad, tak je i popsany.
   const owed=unpaid.length*feeAmt;
-  const mtlFee=tx.reduce((a,t)=>a+(Number(t.mtl_fee)||0),0);
+  const mtlFee=txM.reduce((a,t)=>a+(Number(t.mtl_fee)||0),0);
 
   const _st="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px 13px;";
   const _num=(l,v,c)=>'<div style="'+_st+'"><div style="font-size:11px;color:var(--mid);text-transform:uppercase;letter-spacing:.03em;">'+l+'</div><div style="font-size:22px;font-weight:800;margin-top:3px;'+(c?('color:'+c+';'):'')+'">'+v+'</div></div>';
 
+  let _mopts='';
+  try{
+    const ms=(typeof fdMonthList==='function')?fdMonthList():[];
+    _mopts=ms.map(m=>'<option value="'+m.ym+'"'+(m.ym===_ym?' selected':'')+'>'+m.lbl+'</option>').join('');
+  }catch(e){}
+  if(!_mopts){
+    for(let k=0;k<12;k++){ const d=new Date(_now.getFullYear(), _now.getMonth()-k, 1);
+      const v=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
+      _mopts+='<option value="'+v+'"'+(v===_ym?' selected':'')+'>'+d.toLocaleDateString(EN?'en-GB':'cs-CZ',{month:'long',year:'numeric'})+'</option>'; }
+  }
   body.innerHTML=
-    '<div style="background:linear-gradient(135deg,#0A7A4F,#005A3C);color:#fff;border-radius:14px;padding:14px 16px;margin-bottom:14px;">'
+    '<select id="_osMonth" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:\'DM Sans\';background:var(--surf);color:var(--dark);margin-bottom:12px;">'+_mopts+'</select>'
+    +'<div style="background:linear-gradient(135deg,#0A7A4F,#005A3C);color:#fff;border-radius:14px;padding:14px 16px;margin-bottom:14px;">'
       +'<div style="font-size:11.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:rgba(255,255,255,.75);">'+(EN?'Fees collected':'Vybran\u00e9 poplatky')+'</div>'
       +'<div style="font-size:28px;font-weight:800;line-height:1.1;margin-top:3px;">'+fmtPrice(collected,cur)+' '+_curSym(cur)+'</div>'
-      +'<div style="font-size:11.5px;color:rgba(255,255,255,.8);margin-top:6px;">'+(EN?'MTL commission on fees: 0 %':'Provize MTL z poplatk\u016f: 0 %')+'</div>'
+      +'<div style="font-size:11.5px;color:rgba(255,255,255,.8);margin-top:6px;">'+(EN?'MTL commission on fees: 0 %':'Provize MTL z poplatk\u016f: 0 %')
+      +(collectedAll!==collected?(' \u00b7 '+(EN?'all-time ':'celkem ')+fmtPrice(collectedAll,cur)+' '+_curSym(cur)):'')+'</div>'
     +'</div>'
+    +((tickCount>0)?('<div style="background:var(--surf);border:1px solid var(--border);border-radius:14px;padding:13px 15px;margin-bottom:14px;">'
+      +'<div style="font-size:11px;color:var(--mid);text-transform:uppercase;letter-spacing:.03em;">'+(EN?'Tickets sold':'Prodan\u00e9 l\u00edstky')+'</div>'
+      +'<div style="font-size:24px;font-weight:800;margin-top:3px;color:var(--dark);">'+fmtPrice(tickGross,cur)+' '+_curSym(cur)+'</div>'
+      +'<div style="font-size:11.5px;color:var(--light);margin-top:4px;">'+tickCount+' '+(EN?'tickets':'l\u00edstk\u016f')+(mtlFee>0?(' \u00b7 '+(EN?'MTL commission ':'provize MTL ')+fmtPrice(mtlFee,cur)+' '+_curSym(cur)):'')+'</div></div>'):'')
     +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:14px;">'
       +_num(EN?'Paid members':'Zaplacen\u00ed \u010dlenov\u00e9', paidMembers.length)
       +_num(EN?'Awaiting payment':'\u010cek\u00e1 na \u00fahradu', unpaid.length, unpaid.length?'#9A5B00':'')
@@ -28068,6 +28094,7 @@ async function openOrgStats(org){
       +'<button id="_osClubs" style="flex:1;padding:12px;background:var(--surf);border:1px solid var(--border);border-radius:11px;font-size:13px;font-weight:700;color:var(--dark);cursor:pointer;font-family:inherit;">\u{1F3C5} '+(EN?'Member clubs':'\u010clensk\u00e9 kluby')+'</button>'
       +'<button id="_osFin" style="flex:1;padding:12px;background:var(--surf);border:1px solid var(--border);border-radius:11px;font-size:13px;font-weight:700;color:var(--dark);cursor:pointer;font-family:inherit;">\u{1F4B0} '+(EN?'Documents':'Doklady')+'</button>'
     +'</div>';
+  { const m=body.querySelector('#_osMonth'); if(m) m.onchange=function(){ openOrgStats(org, m.value); }; }
   { const b=body.querySelector('#_osClubs'); if(b) b.onclick=function(){ openOrgClubs(org); }; }
   { const b=body.querySelector('#_osFin'); if(b) b.onclick=function(){ openOrgFinance(org); }; }
 }
@@ -28184,7 +28211,9 @@ async function openOrgApply(kind){
            :'Zast\u0159e\u0161uje kluby. Po schv\u00e1len\u00ed potvrzuje\u0161, kter\u00e9 kluby k tob\u011b pat\u0159\u00ed, a m\u016f\u017ee\u0161 po\u0159\u00e1dat vlastn\u00ed akce. Ka\u017edou p\u0159ihl\u00e1\u0161ku schvaluje MTL ru\u010dn\u011b.')
       : (EN?'For event organizers \u2014 expos, fight nights, seminars. You sell tickets, not training, so there is no schedule and no memberships. Every application is approved by MTL by hand.'
            :'Pro po\u0159adatele akc\u00ed \u2014 veletrhy, galave\u010dery, semin\u00e1\u0159e. Prod\u00e1v\u00e1\u0161 vstupenky, ne tr\u00e9ninky, tak\u017ee \u017e\u00e1dn\u00fd rozvrh ani \u010dlenstv\u00ed. Ka\u017edou p\u0159ihl\u00e1\u0161ku schvaluje MTL ru\u010dn\u011b.')}</p>
-<details class="setSec"><summary>✏️ ${EN?'Organization info':'Údaje o organizaci'}</summary><div class="setBody">
+${_orgMine&&_orgMine.id?`<button id="orgSetToggle" style="width:100%;border:1px solid var(--border);border-radius:14px;margin-bottom:12px;background:var(--surf);padding:14px 16px;font-size:14px;font-weight:800;color:var(--dark);display:flex;justify-content:space-between;align-items:center;gap:10px;cursor:pointer;font-family:'DM Sans';text-align:left;"><span>⚙️ ${EN?'Organization settings':'Nastavení organizace'}</span><span style="color:var(--light);font-size:16px;">›</span></button>`:''}
+    <div id="orgSetBox" style="${(_orgMine&&_orgMine.id)?'display:none;':''}">
+    <details class="setSec"><summary>✏️ ${EN?'Organization info':'Údaje o organizaci'}</summary><div class="setBody">
     <div class="sec-lbl">${EN?'Organization':'Organizace'}</div>
     <input id="orgName" value="${ev(o.name)}" placeholder="${EN?'Name (as people know it)':'N\u00e1zev (jak ho lid\u00e9 znaj\u00ed)'}" style="${_st}">
     ${_isFed?`<input id="orgAbbr" value="${ev(o.abbr)}" maxlength="10" placeholder="${EN?'Abbreviation (badge on club profiles, e.g. WAKO)':'Zkratka (odznak na profilech klub\u016f, nap\u0159. WAKO)'}" style="${_st}">`:''}
@@ -28234,6 +28263,7 @@ async function openOrgApply(kind){
     ${_orgMine&&_orgMine.id?`<button id="orgFinanceBtn" style="width:100%;border:1px solid var(--border);border-radius:14px;margin-bottom:12px;background:var(--surf);padding:14px 16px;font-size:14px;font-weight:800;color:var(--dark);display:flex;justify-content:space-between;align-items:center;gap:10px;cursor:pointer;font-family:'DM Sans';text-align:left;"><span>💰 ${EN?'Payments & documents':'Finance a doklady'}</span><span style="color:var(--light);font-size:16px;">›</span></button>`:''}
     
     <button id="orgSubmit" style="width:100%;padding:15px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:'DM Sans';margin-top:6px;">${(o.status==='pending'||_approved)?(EN?'Save changes':'Ulo\u017eit zm\u011bny'):(EN?'Submit application':'Odeslat p\u0159ihl\u00e1\u0161ku')}</button>`}
+    </div>
   </div>`;
   try{ if(!_sheetParent['shOrgApply']) _sheetParent['shOrgApply']='shMe'; }catch(e){}
   try{ openSheet('shOrgApply'); }catch(e){}
@@ -28276,6 +28306,15 @@ async function openOrgApply(kind){
   }
   // Finance maji vlastni obrazovku, stejne jako u klubu -- ne sekci v nastaveni.
   { const _fb=ov.querySelector('#orgFinanceBtn'); if(_fb) _fb.onclick=function(){ openOrgFinance(_orgMine); }; }
+  // Nastaveni se rozbali az na vyzadani -- organizace neni formular, je to misto, kde se neco dela.
+  { const _t=ov.querySelector('#orgSetToggle'), _b=ov.querySelector('#orgSetBox');
+    if(_t&&_b) _t.onclick=function(){
+      const open=(_b.style.display!=='none');
+      _b.style.display=open?'none':'block';
+      const arr=_t.querySelector('span:last-child'); if(arr) arr.textContent=open?'\u203a':'\u02c5';
+      if(!open) try{ _b.scrollIntoView({behavior:'smooth',block:'start'}); }catch(e){}
+    };
+  }
   { const sb2=ov.querySelector('#orgStatsBtn'); if(sb2) sb2.onclick=function(){ openOrgStats(_orgMine); }; }
   { const cb=ov.querySelector('#orgClubsBtn'); if(cb) cb.onclick=function(){ openOrgClubs(_orgMine); }; }
   { const nb=ov.querySelector('#orgNewEvent');
