@@ -440,6 +440,11 @@ async function recordTransaction(acct, pi, fields) {
       payment_intent: pi, charge_id: chargeId, payee_account: acct || null, type: fields.type,
       payee_id: _payee.id, payee_kind: _payee.kind,
       member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null,
+      // Pojmenovana cena za vstup: prichazi z metadata (mtl_dropin_plan / mtl_need_proof).
+      // proof_checked=false znamena "klub jeste musi videt doklad". Bez tohohle by sleva
+      // pres Stripe zmizela beze stopy.
+      dropin_plan_id: fields.dropin_plan_id || null,
+      proof_checked: (fields.need_proof ? false : null),
       // Plátce zvlášť od účastníka -- stejná dvojice, jakou zapisuje record-cash.js.
       // Bez toho doklad neví, na koho má znít Odběratel a koho uvést jako Účastníka.
       paid_by: fields.paid_by || null, paid_by_name: fields.paid_by_name || null,
@@ -627,7 +632,9 @@ export default async function handler(req, res) {
       } else if (m.mtl_payment_type === 'drop_in' || m.mtl_payment_type === 'membership') {
         // GYM skupinová lekce (direct charge na účtu gymu) → 0,5 % ambassadorovi disciplíny
         await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id, s.payment_intent);
-        if (m.mtl_payment_type === 'drop_in') { const dpi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id); if (dpi) await recordTransaction(event.account, dpi, { type: 'drop_in',  member_id: m.student_id || m.member_id, gym_id: m.gym_id, coach_id: m.coach_profile_id || m.coach_id, plan: m.mtl_plan || 'Drop-in', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side' }); }
+        if (m.mtl_payment_type === 'drop_in') { const dpi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id); if (dpi) await recordTransaction(event.account, dpi, { type: 'drop_in',  member_id: m.student_id || m.member_id, gym_id: m.gym_id, coach_id: m.coach_profile_id || m.coach_id, plan: m.mtl_plan || 'Drop-in', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side',
+          dropin_plan_id: m.mtl_dropin_plan || null,
+          need_proof: (String(m.mtl_need_proof || '') === '1') }); }
         else if (m.mtl_membership_kind === 'one_time') {
           // MULTI-MONTH MEMBERSHIP (3/6/12 months) — a ONE-TIME payment, no subscription. Activate
           // the row and stamp period_end = now + N months; nothing renews, it simply expires then.

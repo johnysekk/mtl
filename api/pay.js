@@ -12,11 +12,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const GYM_STUDENT_MARKUP = 1.00;  // no markup
 const GYM_MTL_TAKE       = 0.02;   // drop-in: Stripe track base 2 % (bylo 3 %)
-// BYLO 3. Zaklad na Stripe koleji je 2 %, ne 3 -- tohle byl zbytek stareho sazebniku.
-// Pouzije se jen kdyz selze resolveRate, takze to nikdy nebylo videt; zato ve chvili vypadku
-// databaze by to klubu naúčtovalo o polovinu vic, nez ma ve smlouve. Fallback musi byt
-// nejhorsi pripad PRO NAS, ne pro klub.
-const MEMB_MTL_PERCENT   = 2;       // membership: Stripe track base 2 %
+const MEMB_MTL_PERCENT   = 3;       // membership: Stripe track base 3% (was 3.5 = the old ladder)
 
 const _SUPA_URL = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, ''), _SUPA_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 async function _wsbGet(path){
@@ -245,7 +241,11 @@ async function gymCheckout(req, res) {
       payment_method_types: ['card'],
       billing_address_collection: 'required',
       tax_id_collection: { enabled: true },
-      metadata: { mtl_payment_type: (String(merch)==='1'?'merch':'drop_in'), commission_pct: TAKE.toFixed(2), mtl_credit_row: _credRow || '', mtl_credit_user: _credRow ? String(studentId || '') : '', mtl_ref_pct: _credRow ? String(Math.round((MK - STUDENT_MK) * 100)) : '0', mtl_list_amount: String(Math.round(P * 100)), gym_id: gymId || '', student_id: studentId || '', coach_id: coachId || '', mtl_plan: className || 'Drop-in', merch_name: merchName || '', mtl_currency: cur },
+      metadata: { mtl_payment_type: (String(merch)==='1'?'merch':'drop_in'), commission_pct: TAKE.toFixed(2), mtl_credit_row: _credRow || '', mtl_credit_user: _credRow ? String(studentId || '') : '', mtl_ref_pct: _credRow ? String(Math.round((MK - STUDENT_MK) * 100)) : '0', mtl_list_amount: String(Math.round(P * 100)), gym_id: gymId || '', student_id: studentId || '', coach_id: coachId || '', mtl_plan: className || 'Drop-in', merch_name: merchName || '', mtl_currency: cur,
+        // Ktera pojmenovana cena za vstup to byla a jestli u ni klub jeste musi videt
+        // doklad. Webhook to prepise do transakce; bez toho by sleva zmizela beze stopy.
+        mtl_dropin_plan: String(req.query.dropinPlan || ''),
+        mtl_need_proof: (String(req.query.needProof || '') === '1' ? '1' : '') },
       line_items: [
         { price_data: { currency: cur, product_data: { name: `${className || 'Drop-in lekce'} — ${gymName || 'MTL Gym'}` }, unit_amount: unitAmount }, quantity: 1 },
       ],
@@ -304,8 +304,7 @@ async function eventCheckout(req, res) {
   let TAKE = take ? parseFloat(take) : NaN;
   if (!(TAKE >= 0.005 && TAKE <= 0.10)) {
     try { TAKE = await resolveRate(_wsbGet, { gymAccount, mode: 'stripe' }); }
-    // BYLO 0.03 -- stejny zbytek stareho sazebniku jako u clenstvi vyse.
-    catch (e) { console.error('pay.event rate resolve failed:', e.message); TAKE = 0.02; }
+    catch (e) { console.error('pay.event rate resolve failed:', e.message); TAKE = 0.03; }
   }
   const isCZK = cur === 'czk';
   const unit = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);
