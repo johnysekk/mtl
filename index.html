@@ -10453,7 +10453,7 @@ async function _coach1to1QrRender(){
   let rows=[];
   try{ const { data } = await supaClient.from('bookings').select('id,student_id,amount,currency,type,training_date,training_time,online_format,slot_id,status').eq('coach_id',currentUser.id).eq('payment_method','qr').eq('status','paid_claimed').order('created_at',{ascending:true}); rows=data||[]; }catch(e){ rows=[]; }
   try{ const _exC=new Date(Date.now()-2*3600*1000).toISOString(); const { data:_ex } = await supaClient.from('bookings').select('id,student_id,amount,currency,type,training_date,training_time,online_format,slot_id,status').eq('coach_id',currentUser.id).eq('payment_method','qr').eq('status','expired').gte('created_at',_exC).order('created_at',{ascending:true}); (_ex||[]).forEach(function(x){ rows.push(x); }); }catch(e){}
-  try{ const { data:_gd } = await supaClient.from('gym_bookings').select('id,student_id,student_name,amount,currency,class_name,class_date,class_time,gym_id,gym_name,status,credit_used').eq('coach_id',currentUser.id).eq('paid_to','coach').eq('payment_method','qr').eq('status','paid_claimed').order('created_at',{ascending:true}); (_gd||[]).forEach(function(x){ x._src='gym'; rows.push(x); }); }catch(e){}
+  try{ const { data:_gd } = await supaClient.from('gym_bookings').select('id,student_id,student_name,amount,currency,class_name,class_date,class_time,gym_id,gym_name,status,credit_used,dropin_plan_id,need_proof').eq('coach_id',currentUser.id).eq('paid_to','coach').eq('payment_method','qr').eq('status','paid_claimed').order('created_at',{ascending:true}); (_gd||[]).forEach(function(x){ x._src='gym'; rows.push(x); }); }catch(e){}
   try{ var _needN=rows.filter(function(x){ return !x.student_name && x.student_id; }); if(_needN.length){ var _nids=Array.from(new Set(_needN.map(function(x){ return x.student_id; }))); const { data:_pf }=await supaClient.from('profiles').select('id,name').in('id',_nids); var _nmap={}; (_pf||[]).forEach(function(p){ _nmap[p.id]=p.name||''; }); rows.forEach(function(x){ if(!x.student_name && _nmap[x.student_id]) x.student_name=_nmap[x.student_id]; }); } }catch(e){}
   window._c1QrPend=rows;
   if(!rows.length){ box.innerHTML=''; return; }
@@ -10483,7 +10483,9 @@ async function _coach1QrConfirmGym(b, ok){
   try{
     if(!ok){ await _qrRequeue('gym_bookings', b.id, b.student_id||null, b.class_name||null); toast(EN?'Sent back to the student \u00b7 spot still held':'Vr\u00e1ceno studentovi \u00b7 m\u00edsto dr\u017e\u00edme',1); _coach1to1QrRender(); return; }
     const amount_minor=Math.round((b.amount||0)*100);
-    const res=await _recordCashTx({ provider:'coach', coach_id:currentUser.id, gym_id:b.gym_id, member_id:b.student_id||null, gross_amount:amount_minor, currency:b.currency||'CZK', type:'drop_in', payment_method:'qr', acq_source:'direct', source_booking_id:b.id, credit:(b.credit_used==='student'?'student':undefined) });
+    const res=await _recordCashTx({ provider:'coach', coach_id:currentUser.id, gym_id:b.gym_id, member_id:b.student_id||null, gross_amount:amount_minor, currency:b.currency||'CZK', type:'drop_in', payment_method:'qr', acq_source:'direct', source_booking_id:b.id, credit:(b.credit_used==='student'?'student':undefined),
+        // Vybrana cena z rezervace do transakce -- odtud ji cte dochazka.
+        dropin_plan_id:(b.dropin_plan_id||null), proof_checked:(b.need_proof?false:null) });
     if(res.error){ toast('\u26a0\ufe0f '+res.error.message); return; }
     await supaClient.from('gym_bookings').update({ status:'active' }).eq('id',b.id);
     try{ if(b.student_id){ await supaClient.from('notifications').insert({ user_id:b.student_id, type:'system', read:false, data:JSON.stringify({kind:'payment_confirmed', gym_name:(currentUser.name||b.gym_name||'Coach'), amount:fmtPrice(b.amount||0,b.currency||'CZK'), item:(b.class_name||''), goto:'dropin'}), message:'\u2705 '+(currentUser.name||'Coach')+' '+(EN?'confirmed your payment':'potvrdil tvou platbu') }); } }catch(e){}
@@ -12765,6 +12767,63 @@ async function subscribeGymMembership(g, plan, _child, _cleared){
 // Vyber ceny pri rezervaci. Vraci vybranou cenu, nebo false, kdyz clovek vyber zavrel --
 // zavreni NESMI rezervaci pustit dal za zakladni cenu, to by byl tichy prodej dražší
 // varianty, nez si clovek myslel.
+
+// ── OVĚŘENÍ NÁROKU ──────────────────────────────────────────────────────────────────────
+// Doklad se ověřuje JEDNOU. Pak už se student neobtěžuje -- kdyby kartičku tahal při každé
+// návštěvě, klub by to po měsíci přestal dělat a sleva by byla na čestné slovo.
+// Klub může ověření kdykoli odebrat (dostudoval, doklad byl falešný) a od té chvíle se
+// vyžaduje znovu. Jeden mechanismus pro vstupy i pro členství -- rozlišuje je jen scope.
+function _pvScope(kind, planId){ return String(kind==='memb'?'memb:':'plan:')+String(planId||''); }
+
+// Načte živá ověření pro klub. Vrací množinu "studentId|scope".
+async function _pvLoad(gymId){
+  var out=new Set();
+  try{
+    if(!gymId) return out;
+    const { data } = await supaClient.from('proof_verifications')
+      .select('student_id,scope').eq('gym_id', gymId);
+    (data||[]).forEach(function(r){ out.add(String(r.student_id)+'|'+String(r.scope)); });
+  }catch(e){}
+  window._pvSet=out;
+  return out;
+}
+
+function _pvHas(studentId, kind, planId){
+  try{
+    if(!studentId) return false;
+    return !!(window._pvSet && window._pvSet.has(String(studentId)+'|'+_pvScope(kind,planId)));
+  }catch(e){ return false; }
+}
+
+// Potvrzeni. Vraci true pri uspechu -- volajici podle toho schova odznak.
+async function _pvGrant(gymId, studentId, kind, planId, note){
+  try{
+    if(!gymId || !studentId) return false;
+    const scope=_pvScope(kind,planId);
+    // Upsert na unikatnim indexu: druhe potvrzeni tehoz nesmi spadnout na duplicitu.
+    const { error } = await supaClient.from('proof_verifications')
+      .upsert({ gym_id:gymId, student_id:studentId, scope:scope,
+        verified_by:(currentUser&&currentUser.id)||null,
+        verified_note:(note||null) }, { onConflict:'gym_id,student_id,scope' });
+    if(error) throw error;
+    if(window._pvSet) window._pvSet.add(String(studentId)+'|'+scope);
+    return true;
+  }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||e)); return false; }
+}
+
+// Odebrani. Od te chvile se doklad vyzaduje pri kazde dalsi rezervaci.
+async function _pvRevoke(gymId, studentId, kind, planId){
+  try{
+    if(!gymId || !studentId) return false;
+    const scope=_pvScope(kind,planId);
+    const { error } = await supaClient.from('proof_verifications').delete()
+      .eq('gym_id',gymId).eq('student_id',studentId).eq('scope',scope);
+    if(error) throw error;
+    if(window._pvSet) window._pvSet.delete(String(studentId)+'|'+scope);
+    return true;
+  }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||e)); return false; }
+}
+
 function _dpAskStudent(plans, cur){
   return new Promise(function(resolve){
     try{
@@ -12830,7 +12889,7 @@ async function bookGymDropin(g, occ, _child){
   }catch(e){}
   window._dpPickLast = _dpPick || null;
 
-  if(typeof _mtlPayMode==='function' && _mtlPayMode(g)==='qr_bank'){ return _onlineQrPay(g, occ, _child, 'dropin', null); }
+  if(typeof _mtlPayMode==='function' && _mtlPayMode(g)==='qr_bank'){ return _onlineQrPay(g, occ, _child, 'dropin', null, null, _dpPick); }
   const payee = await resolveGymPayee(g, occ);
   if(!payee.account){ toast(LANG==='en'?'⚠️ The coach/club for this class has no payments set up yet':'⚠️ Kouč/klub u této lekce zatím nemá nastavené platby'); return; }
   toast(L('💳 Přesměrovávám na platbu...'));
@@ -17473,7 +17532,9 @@ async function renderGymManage(){
   try{ const _ds=parseDisc(g.disciplines)||[]; localStorage.setItem('mtl_dash_disc', _ds.length===1?_ds[0]:(_ds.length>1?'multi':'')); }catch(e){}
   try{ _gymSchedule = JSON.parse(g.schedule||'[]'); }catch(e){ _gymSchedule=[]; }
   try{ _dpLoadEditor(g); }catch(e){}
-  _gymPlans = gymMembPlans(g).map(p=>({ id:p.id, name:p.name, price:p.price, access:(p.access||['all']).slice(), income:p.income||'main', member_cat:p.member_cat||null, coach:p.coach||null, coachName:p.coachName||null, disc:p.disc||null, lead:p.lead||null, leadName:p.leadName||null, kids:(p.access&&p.access.includes('kids'))||false, ageMin:(p.ageMin!=null&&p.ageMin!==''?parseInt(p.ageMin):null), ageMax:(p.ageMax!=null&&p.ageMax!==''?parseInt(p.ageMax):null), parentReq:!!p.parentReq, months:(parseInt(p.months,10)||1) }));
+  _gymPlans = gymMembPlans(g).map(p=>({ id:p.id, name:p.name, price:p.price,
+    // Dolozeni naroku u zlevnene permanentky -- stejny princip jako u vstupu.
+    proof:!!p.proof, proof_text:(p.proof_text||''), access:(p.access||['all']).slice(), income:p.income||'main', member_cat:p.member_cat||null, coach:p.coach||null, coachName:p.coachName||null, disc:p.disc||null, lead:p.lead||null, leadName:p.leadName||null, kids:(p.access&&p.access.includes('kids'))||false, ageMin:(p.ageMin!=null&&p.ageMin!==''?parseInt(p.ageMin):null), ageMax:(p.ageMax!=null&&p.ageMax!==''?parseInt(p.ageMax):null), parentReq:!!p.parentReq, months:(parseInt(p.months,10)||1) }));
   _gymOrgForm = g.org_form==='nonprofit' ? 'nonprofit' : 'profit';
   const _le = g.legal_entity!=null ? !!g.legal_entity : (g.org_form==='nonprofit' || !!g.vat_id);
   _gymDropinIncome = g.dropin_income==='main' ? 'main' : 'side';
@@ -18511,14 +18572,23 @@ async function openClassAttendance(occ){
   let rs=[],drops=[],mems=[],att=[];
   try{ const { data } = await supaClient.from('gym_class_reservations').select('*').eq('gym_id',gid).eq('class_date',occ.date); rs=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_bookings').select('student_id,student_name,class_date,class_time,class_name,status,child_name,child_age').eq('gym_id',gid).eq('status','active').eq('class_date',occ.date); drops=data||[]; }catch(e){}
-    // Kdo si vzal zlevnenou cenu a jeste nedolozil narok. Tahne se zvlast, protoze to
-    // sedi na transakci, ne na rezervaci -- rezervace nevi, na jake cene se platilo.
+    // Kdo si vzal cenu vyzadujici doklad. Transakce rika JEN to, ze takovou cenu ma --
+    // jestli uz doklad ukazal, rozhoduje proof_verifications, ne priznak na platbe.
+    // Diky tomu se student neobtezuje pri kazde navsteve a klub muze overeni odebrat.
     window._attProof={};
+    try{ await _pvLoad(gid); }catch(e){}
     try{
       const { data:_pf } = await supaClient.from('transactions')
-        .select('id,member_id,dropin_plan_id,proof_checked,created_at')
-        .eq('gym_id',gid).not('dropin_plan_id','is',null).is('proof_checked',false);
-      (_pf||[]).forEach(function(t){ if(t.member_id) window._attProof[String(t.member_id)]=t; });
+        .select('id,member_id,dropin_plan_id,created_at')
+        .eq('gym_id',gid).not('dropin_plan_id','is',null)
+        .order('created_at',{ascending:false});
+      (_pf||[]).forEach(function(t){
+        if(!t.member_id) return;
+        // Uz overene se neukazuje. Kdyz klub overeni odebere, odznak se vrati sam.
+        if(_pvHas(t.member_id,'plan',t.dropin_plan_id)) return;
+        var k=String(t.member_id);
+        if(!window._attProof[k]) window._attProof[k]=t;
+      });
     }catch(e){}
   try{ const { data } = await supaClient.from('gym_memberships').select('student_id,student_name,plan_access,coach_id,status,child_name,child_age,discipline').eq('gym_id',gid).in('status',['active','cancelling']); mems=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_attendance').select('student_id,student_name,class_date,class_time,class_name,child_name').eq('gym_id',gid).eq('class_date',occ.date); att=data||[]; }catch(e){}
@@ -18599,7 +18669,8 @@ async function openClassAttendance(occ){
               var _pf=(window._attProof||{})[String(d.student_id||'')]||null;
               return { sid:d.student_id, name:d.student_name||'Student',
                 pill:tagPill(EN?'drop-in':'jednoráz','#C0392B'),
-                proofTx:(_pf?_pf.id:null) };
+                // Overuje se NAROK na cenu, ne jedna platba -- proto se veze id ceny.
+                proofPlan:(_pf?(_pf.dropin_plan_id||''):null) };
             })
   ];
   { const _as=new Set(), _rm=[]; attendees.forEach(function(a,_i){ var _ky=(a.sid?('s:'+a.sid):('n:'+(a.name||'')))+'|'+(a.child||''); if(_as.has(_ky)) _rm.push(_i); else _as.add(_ky); }); for(var _j=_rm.length-1;_j>=0;_j--) attendees.splice(_rm[_j],1); }
@@ -18626,7 +18697,7 @@ async function openClassAttendance(occ){
   };
   const attRow=(a)=>{ const present=presentSet.has(`${occ.date}|${occ.time}|${occ.name||''}|`+_whoKey(a.sid,a.name)+'|'+(a.child||''));
     const chk=(!_roLock && started)?`<button class="caChk" data-sid="${a.sid||''}" data-name="${esc(a.name)}" data-date="${occ.date}" data-time="${occ.time}" data-cn="${esc(occ.name||'')}" data-coach="${occ.coach||''}" data-disc="${esc(occ.disc||'')}" data-child="${esc(a.child||'')}" data-present="${present?1:0}" style="margin-left:auto;flex-shrink:0;width:28px;height:28px;border-radius:50%;border:1.5px solid ${present?'#006040':'var(--border)'};background:${present?'#006040':'transparent'};color:#fff;font-size:14px;font-weight:700;cursor:pointer;">${present?'✓':''}</button>`:'';
-    return `<div style="display:flex;align-items:center;gap:9px;font-size:14px;color:var(--dark);padding:7px 2px;border-bottom:1px solid var(--border);">${_attAv(a.sid,false)}${escapeHtml(a.name)}${a.pill}${a.proofTx?('<button class="caProof" data-tx="'+a.proofTx+'" title="'+(EN?'Mark proof as shown':'Ozna\u010dit jako dolo\u017een\u00e9')+'" style="font-size:11px;color:#9A5B00;background:#FFF4E5;border:1px solid #F0D9B5;border-radius:8px;padding:3px 8px;font-weight:700;white-space:nowrap;cursor:pointer;font-family:inherit;">\u26a0\ufe0f '+(EN?'proof?':'doklad?')+'</button>'):''}${chk}${(!a.sid)?('<span style="margin-left:auto;font-size:11px;color:#0A7A4F;background:#EAF7F0;border-radius:8px;padding:3px 8px;font-weight:700;white-space:nowrap;">'+((LANG==='en')?'paid · guest':'zaplaceno · host')+'</span>'):''}</div>`; };
+    return `<div style="display:flex;align-items:center;gap:9px;font-size:14px;color:var(--dark);padding:7px 2px;border-bottom:1px solid var(--border);">${_attAv(a.sid,false)}${escapeHtml(a.name)}${a.pill}${a.proofPlan?('<button class="caProof" data-sid="'+(a.sid||'')+'" data-plan="'+a.proofPlan+'" title="'+(EN?'Mark proof as shown':'Ozna\u010dit jako dolo\u017een\u00e9')+'" style="font-size:11px;color:#9A5B00;background:#FFF4E5;border:1px solid #F0D9B5;border-radius:8px;padding:3px 8px;font-weight:700;white-space:nowrap;cursor:pointer;font-family:inherit;">\u26a0\ufe0f '+(EN?'proof?':'doklad?')+'</button>'):''}${chk}${(!a.sid)?('<span style="margin-left:auto;font-size:11px;color:#0A7A4F;background:#EAF7F0;border-radius:8px;padding:3px 8px;font-weight:700;white-space:nowrap;">'+((LANG==='en')?'paid · guest':'zaplaceno · host')+'</span>'):''}</div>`; };
   const _ocOwner = _myGymData && currentUser && _myGymData.owner_id===currentUser.id;
   let _ocOvHtml='';
   if(_ocOwner && !isPast){
@@ -18680,18 +18751,17 @@ async function openClassAttendance(occ){
   box.querySelectorAll('.caChk').forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); toggleAttendance(Object.assign({gymid:gid}, b.dataset)); });
   box.querySelectorAll('.caProof').forEach(function(b){ b.onclick=async function(e){
     e.stopPropagation();
-    var tx=b.dataset.tx; if(!tx) return;
+    var sid=b.dataset.sid, plan=b.dataset.plan;
+    if(!sid){ toast(LANG==='en'?'\u26a0\ufe0f Guest \u2014 nothing to verify against':'\u26a0\ufe0f Host \u2014 nen\u00ed ke komu ov\u011b\u0159en\u00ed p\u0159ipsat'); return; }
     b.disabled=true; b.textContent='\u2026';
-    try{
-      await supaClient.from('transactions').update({ proof_checked:true }).eq('id',tx);
-      // Odznak zmizi hned, at je videt, ze se to zapsalo, a nemusi se prekreslovat celá lekce.
-      try{ if(window._attProof) Object.keys(window._attProof).forEach(function(k){ if(String(window._attProof[k].id)===String(tx)) delete window._attProof[k]; }); }catch(_){}
+    // Overeni plati DO ODEBRANI, ne jen pro tuhle platbu -- jinak by clovek tahal doklad
+    // pri kazde navsteve a klub by to po mesici prestal delat. Odebrat lze v detailu clena.
+    var ok=await _pvGrant(gid, sid, 'plan', plan, null);
+    if(ok){
+      try{ if(window._attProof) delete window._attProof[String(sid)]; }catch(_){}
       b.remove();
-      toast(LANG==='en'?'\u2705 Proof recorded':'\u2705 Dolo\u017eeno');
-    }catch(err){
-      b.disabled=false; b.textContent=(LANG==='en'?'\u26a0\ufe0f proof?':'\u26a0\ufe0f doklad?');
-      toast('\u26a0\ufe0f '+((err&&err.message)||err));
-    }
+      toast(LANG==='en'?'\u2705 Verified \u2014 won\u2019t ask again':'\u2705 Ov\u011b\u0159eno \u2014 u\u017e se nebude pt\u00e1t');
+    } else { b.disabled=false; b.textContent=(LANG==='en'?'\u26a0\ufe0f proof?':'\u26a0\ufe0f doklad?'); }
   }; });
   const _cahY=$('caHappenedYes'); if(_cahY) _cahY.onclick=async()=>{ try{ await supaClient.from('gym_class_log').insert({ gym_id:gid, class_date:occ.date, class_time:occ.time||null, class_name:occ.name||null, coach_id:occ.coach||null, status:'held', logged_by:currentUser?currentUser.id:null }); }catch(e){} const b=$('caHappenedBanner'); if(b) b.outerHTML='<div style="background:#F0FBF0;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-weight:700;font-size:14px;color:#006040;">'+(EN?'✅ Marked: class took place':'✅ Označeno: lekce proběhla')+'</div>'; toast(EN?'✅ Marked as held':'✅ Označeno jako proběhlá'); try{ if(typeof loadGymRoster==='function') loadGymRoster(); }catch(e){} };
   const _cahN=$('caHappenedNo'); if(_cahN) _cahN.onclick=()=>{ const _b=$('caHappenedBanner'); if(!_b) return; _b.innerHTML='<div style="font-weight:800;font-size:13.5px;margin-bottom:8px;color:var(--dark);">'+(EN?'Why did it not happen?':'Pro\u010d neprob\u011bhla?')+'</div>'+'<button id="caNhZero" style="width:100%;padding:11px;margin-bottom:6px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;text-align:left;font-family:DM Sans;line-height:1.35;">'+(EN?'It was on, but nobody came':'M\u011bla prob\u011bhnout, ale nikdo nep\u0159i\u0161el')+'</button>'+'<button id="caNhForgot" style="width:100%;padding:11px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;text-align:left;font-family:DM Sans;line-height:1.35;">'+(EN?'We forgot to cancel it (it should not have run)':'Zapomn\u011bli jsme ji zru\u0161it (nem\u011bla b\u00fdt)')+'</button>'; const _doLog=async(reason)=>{ try{ await supaClient.from('gym_class_log').insert({ gym_id:gid, class_date:occ.date, class_time:occ.time||null, class_name:occ.name||null, coach_id:occ.coach||null, status:'cancelled', reason:reason, logged_by:currentUser?currentUser.id:null }); }catch(e){} try{ await supaClient.from('attend_reminders').delete().eq('gym_id',gid).eq('class_date',occ.date).eq('class_time',occ.time||null).eq('class_name',occ.name||null); }catch(e){} try{ if(window._cancelledOcc) window._cancelledOcc.add(`${occ.date}|${occ.time||''}|${occ.name||''}`); }catch(e){} if(_b) _b.outerHTML='<div style="background:#FEECEC;border:1px solid #F3C9C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-weight:700;font-size:14px;color:var(--red);">'+(reason===String.fromCharCode(122,101,114,111)?(EN?'\u2715 Logged: nobody came':'\u2715 Zalogov\u00e1no: nikdo nep\u0159i\u0161el'):(EN?'\u2715 Logged: did not run':'\u2715 Zalogov\u00e1no: neprob\u011bhla'))+'</div>'; toast(EN?'\u2705 Logged':'\u2705 Zalogov\u00e1no'); try{ if(typeof loadGymRoster==='function') loadGymRoster(); }catch(e){} }; const _z=$('caNhZero'); if(_z) _z.onclick=()=>_doLog('zero'); const _f=$('caNhForgot'); if(_f) _f.onclick=()=>_doLog('forgot'); };
@@ -20347,7 +20417,7 @@ function _recpMembPay(pi){
 // _forWhom: zástupce platí za mladistvého. Rezervace se pak zapíše NA MLADISTVÉHO -- docházka,
 // statistiky i XP zůstávají jemu, mění se jen to, kdo účet uhradil. Bez toho parametru se nic
 // nemění a člověk platí sám za sebe.
-async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom){
+async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom, _dpick){
   const _stuId=(_forWhom&&_forWhom.id)||currentUser.id;
   let _qrPayeeObj=g, _qrPaidTo='gym', _qrPayeeCoach=null, _qrCredit='', _qrRefD=0;
   const EN=LANG==='en';
@@ -20361,7 +20431,11 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom){
   else {
     let _dp=g.dropin_price||0;
     if(occ&&occ.coach){ try{ const { data:_cp }=await supaClient.from('gym_coach_pricing').select('dropin_price,currency').eq('gym_id',g.id).eq('coach_id',occ.coach).eq('status','approved').maybeSingle(); if(_cp&&_cp.dropin_price){ _dp=_cp.dropin_price; } }catch(e){} }
-    price=_dp; label=(occ&&occ.name)||(EN?'Drop-in':'Drop-in'); try{ if(occ&&occ.date){ var _dt=new Date(occ.date); if(!isNaN(_dt.getTime())){ var _ds=_dt.toLocaleDateString(EN?'en-GB':'cs-CZ',{weekday:'long',day:'numeric',month:'numeric'}); label += (EN?(' on '+_ds+(occ.time?(' '+occ.time):'')):(' konající se v '+_ds+(occ.time?(' '+occ.time):''))); } } }catch(e){} disc=(occ&&occ.disc)||(parseDisc(g.disciplines)[0]||null); lvl=(occ&&occ.level&&occ.level!=='all')?occ.level:null;
+    // VYBRANA POJMENOVANA CENA MA PREDNOST. Driv si tato funkce cenu pocitala znovu ze
+    // zakladni, takze vyber studenta probehl a zaplatila se plna cena -- clovek vybral
+    // 220 a na QR mu naskocilo 250. Cena kouce se prebiji taky: vybral si ji clovek.
+    if(_dpick && Number(_dpick.price)>=0){ _dp=Number(_dpick.price)||0; }
+    price=_dp; label=(occ&&occ.name)||(EN?'Drop-in':'Drop-in'); try{ if(occ&&occ.date){ var _dObj=new Date(occ.date); if(!isNaN(_dObj.getTime())){ var _ds=_dObj.toLocaleDateString(EN?'en-GB':'cs-CZ',{weekday:'long',day:'numeric',month:'numeric'}); label += (EN?(' on '+_ds+(occ.time?(' '+occ.time):'')):(' konající se v '+_ds+(occ.time?(' '+occ.time):''))); } } }catch(e){} disc=(occ&&occ.disc)||(parseDisc(g.disciplines)[0]||null); lvl=(occ&&occ.level&&occ.level!=='all')?occ.level:null;
     if(occ&&occ.coach){ try{ let { data:_cpr }=await supaClient.from('profiles').select('id,name,payment_mode,receiver_id_type,receiver_id_value,receiver_name,payout_receiver_id_type,payout_receiver_id_value,payout_receiver_name,payout_receiver_declared_at,payout_legal_name,referral_optin,pis_test').eq('id', occ.coach).single();
       // Skupinovka je klubové plnění -> účet režimu klub, ne ten od soukromek.
       if(_cpr) _cpr=Object.assign({}, _cpr, _recvOf(_cpr, true));
@@ -20424,7 +20498,10 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom){
           discipline:disc, acq_source:_acqSrc(g),
           reminder_sent:_remSentAtBooking((occ&&occ.date)||_today,(occ&&occ.time)||'18:00') };
         if(_child){ rec.child_name=_child.name; rec.child_age=_kidAge(_child); }
-        const { data:bk, error:e2 } = await supaClient.from('gym_bookings').insert(Object.assign({ attr_src:_attrGet() }, rec)).select('id').single();
+        // Vybrana cena musi prezit az k potvrzeni koucem -- tam vznika transakce a bez toho
+    // by se sleva nedostala nikam a v dochazce nebylo co overovat.
+    if(_dpick){ rec.dropin_plan_id=_dpick.id||null; rec.need_proof=!!_dpick.proof; }
+    const { data:bk, error:e2 } = await supaClient.from('gym_bookings').insert(Object.assign({ attr_src:_attrGet() }, rec)).select('id').single();
         if(e2){ toast('\u26a0\ufe0f '+e2.message); return null; }
         intentId=bk&&bk.id;
         try{ await supaClient.from('gym_class_reservations').insert({ gym_id:g.id, gym_name:g.name||'Gym', student_id:_stuId, student_name:sName, class_name:(occ&&occ.name)||null, class_date:(occ&&occ.date)||null, class_time:(occ&&occ.time)||null, status:'reserved' }); }catch(e){}
@@ -21280,7 +21357,7 @@ function renderPlansEditor(){
       ${_gymOrgForm==='nonprofit'?`<div style="font-size:11px;color:var(--light);margin:6px 0 2px;">${LANG==='en'?'Income type:':'Druh příjmu:'}</div><div style="margin-bottom:4px;">${[{v:'main',cs:'Hlavní (příspěvek)',en:'Main (contribution)'},{v:'side',cs:'Vedlejší (služba)',en:'Side (service)'}].map(o=>{ const on=(p.income||'main')===o.v; return `<span class="planIncome" data-i="${i}" data-v="${o.v}" style="display:inline-block;padding:6px 10px;margin:3px;border-radius:14px;font-size:12px;font-weight:600;cursor:pointer;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'transparent'};color:${on?'#fff':'var(--mid)'};">${LANG==='en'?o.en:o.cs}</span>`; }).join('')}</div>`:''}
       ${_gymOrgForm==='nonprofit'?`<div style="font-size:11px;color:var(--light);margin:8px 0 2px;">${LANG==='en'?'Membership category (per statutes)':'Kategorie členství (dle stanov)'}</div><input class="planMemberCat" data-i="${i}" type="text" value="${(p.member_cat||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'e.g. associate member':'např. přidružený člen'}" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:'DM Sans';font-size:13px;margin-bottom:6px;">`:''}
       ${payeeSelectHtml('planCoach', i, p.coach)}
-      ${leadSelectHtml('planLead', i, p.lead)}${access.includes('kids')?`<div style="display:flex;gap:6px;margin-top:8px;align-items:flex-end;"><div style="flex:1;"><div style="font-size:10px;color:var(--mid);margin-bottom:3px;font-weight:600;">${LANG==='en'?'Age from':'Věk od'}</div><input class="planAgeMin" data-i="${i}" type="number" min="0" max="18" inputmode="numeric" value="${p.ageMin!=null?p.ageMin:''}" placeholder="6" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:'DM Sans';"></div><div style="flex:1;"><div style="font-size:10px;color:var(--mid);margin-bottom:3px;font-weight:600;">${LANG==='en'?'Age to':'Věk do'}</div><input class="planAgeMax" data-i="${i}" type="number" min="0" max="18" inputmode="numeric" value="${p.ageMax!=null?p.ageMax:''}" placeholder="12" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:'DM Sans';"></div></div><label style="display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600;cursor:pointer;margin-top:8px;color:var(--mid);"><input type="checkbox" class="planParentReq" data-i="${i}" ${p.parentReq?'checked':''} style="width:16px;height:16px;"> ${LANG==='en'?"Requires a parent's presence":'Vyžaduje přítomnost rodiče'}</label>`:''}
+      ${leadSelectHtml('planLead', i, p.lead)}<label style="display:flex;align-items:flex-start;gap:7px;font-size:12px;line-height:1.4;margin-top:9px;cursor:pointer;color:var(--dark);"><input class="planProof" data-i="${i}" type="checkbox" ${p.proof?'checked':''} style="margin-top:2px;width:auto;"><span>${LANG==='en'?'Requires proof (student ID etc.)':'Vy\u017eaduje dolo\u017een\u00ed n\u00e1roku (ISIC apod.)'}</span></label><input class="planProofText" data-i="${i}" type="text" value="${escapeHtml(p.proof_text||'')}" placeholder="${LANG==='en'?'Student ID or proof of study':'Pr\u016fkaz ISIC nebo potvrzen\u00ed o studiu'}" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:'DM Sans';margin-top:5px;display:${p.proof?'block':'none'};">${access.includes('kids')?`<div style="display:flex;gap:6px;margin-top:8px;align-items:flex-end;"><div style="flex:1;"><div style="font-size:10px;color:var(--mid);margin-bottom:3px;font-weight:600;">${LANG==='en'?'Age from':'Věk od'}</div><input class="planAgeMin" data-i="${i}" type="number" min="0" max="18" inputmode="numeric" value="${p.ageMin!=null?p.ageMin:''}" placeholder="6" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:'DM Sans';"></div><div style="flex:1;"><div style="font-size:10px;color:var(--mid);margin-bottom:3px;font-weight:600;">${LANG==='en'?'Age to':'Věk do'}</div><input class="planAgeMax" data-i="${i}" type="number" min="0" max="18" inputmode="numeric" value="${p.ageMax!=null?p.ageMax:''}" placeholder="12" style="width:100%;box-sizing:border-box;padding:9px;border:1.5px solid var(--border);border-radius:9px;font-family:'DM Sans';"></div></div><label style="display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600;cursor:pointer;margin-top:8px;color:var(--mid);"><input type="checkbox" class="planParentReq" data-i="${i}" ${p.parentReq?'checked':''} style="width:16px;height:16px;"> ${LANG==='en'?"Requires a parent's presence":'Vyžaduje přítomnost rodiče'}</label>`:''}
       ${isMultiDiscipline()?(()=>{ const spec=!!(p.disc); return `<div style="font-size:11px;color:var(--light);margin:6px 0 2px;">${LANG==='en'?'Sport / discipline:':'Sport / disciplína:'}</div><div style="margin-bottom:4px;"><span class="planDiscMode" data-i="${i}" data-mode="all" style="display:inline-block;padding:6px 12px;margin:3px 3px 3px 0;border-radius:14px;font-size:12px;font-weight:600;cursor:pointer;border:1.5px solid ${!spec?'var(--dark)':'var(--border)'};background:${!spec?'var(--dark)':'transparent'};color:${!spec?'#fff':'var(--mid)'};">🌐 ${LANG==='en'?'All sports':'Všechny sporty'}</span><span class="planDiscMode" data-i="${i}" data-mode="specific" style="display:inline-block;padding:6px 12px;margin:3px;border-radius:14px;font-size:12px;font-weight:600;cursor:pointer;border:1.5px solid ${spec?'var(--dark)':'var(--border)'};background:${spec?'var(--dark)':'transparent'};color:${spec?'#fff':'var(--mid)'};">${LANG==='en'?'Choose specific':'Vybrat konkrétní'}</span></div><select class="planDisc" data-i="${i}" style="display:${spec?'block':'none'};width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;margin-bottom:4px;">${discOptsHtml(activeDisciplines().filter(o=>!(_gymMgDisc&&_gymMgDisc.length)||_gymMgDisc.includes(o.v)), (p.disc||''))}</select>`; })():''}
     </div></details>`;
   }).join('');
@@ -21322,6 +21399,17 @@ function renderPlansEditor(){
   box.querySelectorAll('.planDisc').forEach(el=>el.onchange=()=>{ _gymPlans[+el.dataset.i].disc=el.value||null; });
   box.querySelectorAll('.planKids').forEach(el=>el.onchange=()=>{ _gymPlans[+el.dataset.i].kids=el.checked; renderPlansEditor(); });
   box.querySelectorAll('.planAgeMin').forEach(el=>el.oninput=()=>{ _gymPlans[+el.dataset.i].ageMin=el.value===''?null:(parseInt(el.value)||0); });
+  box.querySelectorAll('.planProof').forEach(function(el){ el.onchange=function(){
+    var i=+el.dataset.i; if(!_gymPlans[i]) return;
+    _gymPlans[i].proof=!!el.checked;
+    // Text se odkryva a schovava hned, at je videt, ze na nem zalezi.
+    var t=box.querySelector('.planProofText[data-i="'+i+'"]');
+    if(t) t.style.display = el.checked ? 'block' : 'none';
+    if(!el.checked) _gymPlans[i].proof_text='';
+  }; });
+  box.querySelectorAll('.planProofText').forEach(function(el){ el.oninput=function(){
+    var i=+el.dataset.i; if(_gymPlans[i]) _gymPlans[i].proof_text=String(el.value||'').trim();
+  }; });
   box.querySelectorAll('.planAgeMax').forEach(el=>el.oninput=()=>{ _gymPlans[+el.dataset.i].ageMax=el.value===''?null:(parseInt(el.value)||0); });
   box.querySelectorAll('.planParentReq').forEach(el=>el.onchange=()=>{ _gymPlans[+el.dataset.i].parentReq=el.checked; });
 }
@@ -31890,7 +31978,58 @@ async function _openGymMemberDetailInner(sid, name){
   html+=`<button id="mdBlockBtn" data-blocked="${_gymBl?1:0}" style="width:100%;margin-top:8px;padding:11px;background:${_gymBl?'var(--surf)':'#FFF4F4'};color:${_gymBl?'var(--blue)':'var(--red)'};border:1px solid ${_gymBl?'var(--border)':'#F3C9C0'};border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${_gymBl?(EN?'✅ Unblock from club':'✅ Odblokovat z klubu'):(EN?'⛔ Block from club':'⛔ Zablokovat z klubu')}</button>`;
   html+=`<button id="mdReportBtn" style="width:100%;margin-top:8px;padding:11px;background:#FFF7EE;color:#B8860B;border:1px solid #F0C97A;border-radius:11px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';">⚠️ ${EN?'Report to MTL':'Nahlásit MTL'}</button>`;
 
+  // OVERENA ZLEVNENA CENA. Ukazuje se jen kdyz nejake overeni existuje, at karta nebobtna
+  // o prazdnou sekci. Odebrat ho musi byt mozne prave tady -- klub se o dostudovani dozvi
+  // pri rozhovoru s clovekem, ne v docházce.
+  try{
+    var _pvRows=[];
+    if(_myGymData && _myGymData.id && sid){
+      const { data:_pv } = await supaClient.from('proof_verifications')
+        .select('scope,verified_at').eq('gym_id',_myGymData.id).eq('student_id',sid);
+      _pvRows=_pv||[];
+    }
+    if(_pvRows.length){
+      var _dpAll=[];
+      try{ _dpAll=(typeof _dpList==='function')?_dpList(_myGymData||{}):[]; }catch(e){}
+      var _mbAll=[];
+      try{ _mbAll=(typeof gymMembPlans==='function')?(gymMembPlans(_myGymData||{})||[]):[]; }catch(e){}
+      var _nameOf=function(scope){
+        try{
+          var kind=String(scope).split(':')[0], id=String(scope).slice(kind.length+1);
+          var src=(kind==='memb')?_mbAll:_dpAll;
+          var hit=(src||[]).filter(function(x){ return String(x.id)===id; })[0];
+          return (hit&&hit.name) || (kind==='memb'?(EN?'Membership':'\u010clenstv\u00ed'):(EN?'Drop-in':'Vstup'));
+        }catch(e){ return scope; }
+      };
+      html+=`<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border);">
+        <div style="font-size:12px;font-weight:800;color:var(--mid);margin-bottom:6px;">\u2705 ${EN?'Verified discounts':'Ov\u011b\u0159en\u00e9 slevy'}</div>`;
+      _pvRows.forEach(function(r){
+        html+='<div style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--dark);padding:6px 0;border-bottom:1px solid var(--border);">'
+          +'<span>'+escapeHtml(_nameOf(r.scope))+'</span>'
+          +'<span style="color:var(--light);font-size:11.5px;">'+((typeof _dt==='function')?_dt(r.verified_at):'')+'</span>'
+          +'<button class="pvRevoke" data-scope="'+escapeHtml(r.scope)+'" style="margin-left:auto;background:none;border:1px solid var(--border);border-radius:8px;padding:4px 9px;font-size:11px;font-weight:700;color:var(--red);cursor:pointer;font-family:inherit;">'
+          +(EN?'Revoke':'Odebrat')+'</button></div>';
+      });
+      html+=`<p style="font-size:11px;color:var(--light);line-height:1.45;margin:6px 0 0;">${EN?'After revoking, proof is required again on the next booking.':'Po odebr\u00e1n\u00ed se doklad vy\u017eaduje znovu p\u0159i dal\u0161\u00ed rezervaci.'}</p></div>`;
+    }
+  }catch(e){}
+
   if(body) body.innerHTML=html;
+
+  // Odebrani overeni. Potvrzujeme dotazem -- je to krok, ktery cloveku zdrazi vstup.
+  try{
+    (body||document).querySelectorAll('.pvRevoke').forEach(function(b){
+      b.onclick=async function(){
+        var sc=b.dataset.scope; if(!sc) return;
+        if(!confirm(EN?'Revoke this verification? Proof will be required again.':'Odebrat ov\u011b\u0159en\u00ed? Doklad se bude vy\u017eadovat znovu.')) return;
+        var kind=String(sc).split(':')[0], id=String(sc).slice(kind.length+1);
+        b.disabled=true; b.textContent='\u2026';
+        var ok=await _pvRevoke(_myGymData && _myGymData.id, sid, kind, id);
+        if(ok){ b.closest('div').style.display='none'; toast(EN?'\u2705 Revoked':'\u2705 Odebr\u00e1no'); }
+        else { b.disabled=false; b.textContent=(EN?'Revoke':'Odebrat'); }
+      };
+    });
+  }catch(e){}
   // Telefon se nevytáčí sám -- na mobilu stačí omylem ťuknout a volá se rodiči.
   { const _cb=document.getElementById('mdGuardCall');
     if(_cb) _cb.onclick=function(){
@@ -38464,17 +38603,24 @@ async function showReceipt(b){
     // slozeny z dnesnich dat by nebyl tim, co bylo vystaveno -- radeji to rekneme nahlas.
     if(!b._snap){
       // Snimek chybi -- doklad k teto platbe nebyl vystaven. Skladat ho dnes ze zivych dat
-      // by dalo dokument, ktery se meni v case; to neni doklad, to je odhad.
+      // by dalo dokument, ktery se meni v case; to neni doklad. Zobrazujeme to stejnym
+      // overlayem jako doklad sam (#dokladOv), ne sheetem -- ten pro doklad neexistuje.
       try{
-        const _bx=document.getElementById('receiptBody')||document.getElementById('rcptBody');
-        if(_bx) _bx.innerHTML='<div style="padding:22px;font-size:13.5px;line-height:1.6;color:var(--mid);">'
-          +'<div style="font-size:15px;font-weight:800;color:var(--dark);margin-bottom:8px;">'
+        var _nv=document.getElementById('dokladOv'); if(_nv) _nv.remove();
+        _nv=document.createElement('div'); _nv.id='dokladOv';
+        _nv.style.cssText='position:fixed;inset:0;z-index:100050;background:#fff;display:flex;flex-direction:column;';
+        _nv.innerHTML='<div style="display:flex;align-items:center;gap:10px;padding:calc(env(safe-area-inset-top,0px) + 10px) 14px 10px;border-bottom:1px solid #E6E4DE;">'
+          +'<button id="_nvClose" style="background:none;border:none;font-size:22px;cursor:pointer;color:#111;line-height:1;">\u2190</button>'
+          +'<strong style="font-family:\'DM Sans\';font-size:15px;color:#111;">'+(EN?'Receipt':'Doklad')+'</strong></div>'
+          +'<div style="padding:22px;font-family:\'DM Sans\';font-size:13.5px;line-height:1.6;color:#555;">'
+          +'<div style="font-size:15px;font-weight:800;color:#111;margin-bottom:8px;">'
           +(EN?'No receipt was issued for this payment':'K t\u00e9to platb\u011b nebyl vystaven doklad')+'</div>'
-          +(EN?'It predates receipt snapshots. We will not rebuild it from today\u2019s data \u2014 that would not be the document that was issued.'
-              :'Platba je z doby p\u0159ed zaveden\u00edm doklad\u016f. Nebudeme ho skl\u00e1dat z dne\u0161n\u00edch dat \u2014 nebyl by to doklad, kter\u00fd byl vystaven.')
+          +(EN?'It predates receipt snapshots. We will not rebuild it from today\u2019s data \u2014 that would not be the document that was issued. The amount is in your payment history.'
+              :'Platba je z doby p\u0159ed zaveden\u00edm doklad\u016f. Nebudeme ho skl\u00e1dat z dne\u0161n\u00edch dat \u2014 nebyl by to doklad, kter\u00fd byl vystaven. \u010c\u00e1stku najde\u0161 v historii plateb.')
           +'</div>';
+        document.body.appendChild(_nv);
+        var _cb=_nv.querySelector('#_nvClose'); if(_cb) _cb.onclick=function(){ _nv.remove(); };
       }catch(e){}
-      try{ openSheet('shReceipt'); }catch(e){}
       return;
     }
     const rec=gymRec;
