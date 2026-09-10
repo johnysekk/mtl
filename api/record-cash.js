@@ -35,7 +35,8 @@ const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 // transakce gym_id, plnění patří do klubového režimu a doklad musí znít na tu druhou.
 // Selhání nesmí shodit zápis platby -- peníze jsou důležitější než papír a doklad se doplní.
 async function _issueDokladBank({ transactionId, gymId, coachId, clubMode, customerName,
-                                  customerEmail, itemLabel, amount, currency, paymentMethod, testMode }) {
+                                  customerEmail, participantName, itemLabel, amount, currency,
+                                  paymentMethod, testMode }) {
   try {
     if (!transactionId) return null;
     // clubMode je PARAMETR -- znovu ho deklarovat by prebilo to, co poslal volajici.
@@ -88,6 +89,10 @@ async function _issueDokladBank({ transactionId, gymId, coachId, clubMode, custo
         sup_ico: ico, sup_dic: sup.vat_id || null, sup_address: sup.billing_address || null,
         sup_vat_payer: !!sup.vat_payer, sup_vat_rate: (sup.vat_rate != null ? sup.vat_rate : null),
         cust_name: customerName || null, cust_email: customerEmail || null,
+        // Ucastnik jen kdyz se lisi od odberatele -- u dospeleho, ktery jde trenovat sam,
+        // by dvakrat totez jmeno nic nerikalo.
+        participant_name: ((participantName && String(participantName).trim() &&
+          String(participantName).trim() !== String(customerName||'').trim()) ? String(participantName).trim() : null),
         item_label: itemLabel || null,
         amount: Math.round(Number(amount) || 0),
         currency: String(currency || 'CZK').toUpperCase(),
@@ -398,6 +403,19 @@ export default async function handler(req, res) {
     // o tez platbu se neulozí a cislo v rade se nespotrebuje nadarmo.
     let _dokNo = null;
     if (_txId) {
+      // KDO JE ODBERATEL A KDO UCASTNIK.
+      // Odberatel = kdo platil: zastupce (paid_by_name), plátce v hotovosti
+      // (cash_payer_name), jinak clovek sam. Ucastnik = komu sluzba patri (member_id);
+      // uvadi se jen kdyz se lisi. Jmeno ucastnika dohledame, record-cash zna jen id.
+      let _partName = null;
+      try {
+        if (row.member_id) {
+          const _mp = await _wsbGet(`profiles?id=eq.${encodeURIComponent(row.member_id)}&select=name`);
+          _partName = (_mp && _mp[0] && _mp[0].name) || null;
+        }
+      } catch (e) {}
+      const _custName = row.paid_by_name || row.cash_payer_name || _partName || null;
+
       _dokNo = await _issueDokladBank({
         transactionId: _txId,
         // Klubove plneni vyplacene koucovi -> jeho payout_ identita; jinak dodavatel podle
@@ -405,8 +423,9 @@ export default async function handler(req, res) {
         gymId: _dokladPayoutCoach ? null : (row.gym_id || null),
         coachId: _dokladPayoutCoach || row.coach_id || null,
         clubMode: !!_dokladPayoutCoach,
-        customerName: row.paid_by_name || row.cash_payer_name || null,
+        customerName: _custName,
         customerEmail: null,
+        participantName: _partName,
         itemLabel: (type || null),
         amount: row.gross_amount,
         currency: row.currency,

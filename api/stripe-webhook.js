@@ -470,8 +470,11 @@ async function recordTransaction(acct, pi, fields) {
       await issueDoklad({
         transactionId: _txId, paymentIntent: pi,
         gymId: fields.gym_id || null, coachId: fields.gym_id ? null : (fields.coach_id || null),
-        customerName: (_cust && _cust.name) || fields.paid_by_name || null,
+        // ODBERATEL JE PLATCE. Driv to bylo obracene -- jako odberatel se dostal ucastnik
+        // a zastupce az druhy, takze doklad znel na dite, ktere neplatilo.
+        customerName: fields.paid_by_name || (_cust && _cust.name) || null,
         customerEmail: (_cust && _cust.email) || null,
+        participantName: (_cust && _cust.name) || null,
         itemLabel: fields.plan || fields.type, amount: gross,
         currency: currency, paymentMethod: 'stripe', testMode: false,
       });
@@ -905,7 +908,7 @@ export default async function handler(req, res) {
 // takže pozdější změna názvu nebo vstup do DPH staré doklady nepřepíše.
 // Číslo přiděluje doklad_next(series_key) atomicky; klíč je IČO poskytovatele V TOMTO OKAMŽIKU.
 // Selhání nesmí shodit zápis platby -- peníze jsou důležitější než papír, doklad se dá doplnit.
-async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, customerName, customerEmail, itemLabel, amount, currency, paymentMethod, testMode }) {
+async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, customerName, customerEmail, participantName, itemLabel, amount, currency, paymentMethod, testMode }) {
   try {
     if (!transactionId && !paymentIntent) return null;
     let sup = null;
@@ -944,6 +947,10 @@ async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, custo
         sup_ico: ico, sup_dic: sup.vat_id || null, sup_address: sup.billing_address || null,
         sup_vat_payer: !!sup.vat_payer, sup_vat_rate: (sup.vat_rate != null ? sup.vat_rate : null),
         cust_name: customerName || null, cust_email: customerEmail || null,
+        // Ucastnik jen kdyz se lisi od odberatele -- u dospeleho, ktery jde trenovat sam,
+        // by dvakrat totez jmeno nic nerikalo.
+        participant_name: ((participantName && String(participantName).trim() &&
+          String(participantName).trim() !== String(customerName || '').trim()) ? String(participantName).trim() : null),
         item_label: itemLabel || null,
         amount: Math.round(Number(amount) || 0), currency: String(currency || 'CZK').toUpperCase(),
         payment_method: paymentMethod || null, test_mode: !!testMode,
