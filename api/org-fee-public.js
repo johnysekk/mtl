@@ -25,6 +25,64 @@ export default async function handler(req, res) {
     if (!SB || !SKEY) return res.status(500).json({ error: 'server not configured' });
     const token = String((req.query && req.query.t) || (req.body && req.body.t) || '').trim();
 
+    // VEŘEJNÁ PŘIHLÁŠKA. Klub mimo MTL se přihlásí sám z odkazu asociace; vznikne mu vztah
+    // se stavem 'pending' a vlastní klíč, kterým se pak vrátí k platbě. Bez tohohle by
+    // asociace musela každého zájemce zapsat ručně dřív, než o sobě vůbec dá vědět.
+    if (req.method === 'POST' && String((req.body && req.body.join) || '') === '1') {
+      const jt = String((req.body && req.body.j) || '').trim();
+      if (!jt || jt.length < 20) return res.status(400).json({ error: 'bad token' });
+      const org = (await sbGet(`organizations?join_token=eq.${encodeURIComponent(jt)}&status=eq.approved&select=id,name&limit=1`))[0];
+      if (!org) return res.status(404).json({ error: 'not found' });
+
+      const b = req.body || {};
+      const t = (v) => (v == null ? null : String(v).trim().slice(0, 200) || null);
+      if (!t(b.name)) return res.status(400).json({ error: 'name required' });
+
+      // Vlastní klíč k platbě dostane rovnou -- klub nemá účet, takže se k žádosti musí umět
+      // vrátit sám. Asociace mu ho může poslat i mailem.
+      let gt = '';
+      try { gt = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID().replace(/-/g, '') : String(Date.now()) + Math.random().toString(36).slice(2); }
+      catch (e) { gt = String(Date.now()) + Math.random().toString(36).slice(2); }
+
+      const row = {
+        organization_id: org.id, gym_id: null, status: 'pending',
+        ext_name: t(b.name), ext_city: t(b.city), ext_legal_name: t(b.legal_name),
+        ext_tax_id: t(b.tax_id), ext_address: t(b.address), ext_email: t(b.email), ext_phone: t(b.phone),
+        guest_token: gt, guest_name: t(b.name), guest_email: t(b.email),
+      };
+      try {
+        const r = await fetch(`${SB}/rest/v1/organization_clubs`, {
+          method: 'POST', headers: { ...svc, Prefer: 'return=minimal' }, body: JSON.stringify(row),
+        });
+        if (!r.ok) return res.status(500).json({ error: 'save failed' });
+      } catch (e) { return res.status(500).json({ error: 'save failed' }); }
+
+      // Asociaci to musí dojít, jinak by žádost čekala, dokud si někdo nevšimne.
+      try {
+        const o2 = (await sbGet(`organizations?id=eq.${encodeURIComponent(org.id)}&select=owner_id&limit=1`))[0];
+        if (o2 && o2.owner_id) {
+          await fetch(`${SB}/rest/v1/notifications`, {
+            method: 'POST', headers: { ...svc, Prefer: 'return=minimal' },
+            body: JSON.stringify({ user_id: o2.owner_id, type: 'system', read: false,
+              data: JSON.stringify({ kind: 'org_join_req' }),
+              message: `\u{1F3C5} Klub ${t(b.name)} se chce p\u0159ipojit k tv\u00e9 asociaci.` }),
+          });
+        }
+      } catch (e) {}
+      return res.status(200).json({ ok: true, token: gt });
+    }
+
+    // Veřejná hlavička asociace pro přihlašovací stránku -- jen to, co smí vidět kdokoli.
+    if (req.method === 'GET' && req.query && req.query.j) {
+      const jt = String(req.query.j).trim();
+      if (!jt || jt.length < 20) return res.status(400).json({ error: 'bad token' });
+      const org = (await sbGet(`organizations?join_token=eq.${encodeURIComponent(jt)}&status=eq.approved&select=id,name,abbr,city,description,website&limit=1`))[0];
+      if (!org) return res.status(404).json({ error: 'not found' });
+      const today = new Date().toISOString().slice(0, 10);
+      const fee = (await sbGet(`org_member_fees?organization_id=eq.${encodeURIComponent(org.id)}&period_from=lte.${today}&period_to=gte.${today}&select=name,amount,currency,period_from,period_to&limit=1`))[0] || null;
+      return res.status(200).json({ ok: true, join: true, org, fee });
+    }
+
     // KROK 1 PŘIHLÁŠKY PRO KLUB BEZ ÚČTU. Vyplňuje tytéž údaje, které z appky předává klub
     // s účtem -- jinak by asociace měla u poloviny členů jiný rozsah dat než u druhé.
     // Zapisuje se jen do JEDNOHO řádku, který ke klíči patří; nic jiného odsud nejde změnit.
