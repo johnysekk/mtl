@@ -27207,7 +27207,7 @@ async function openClubOrgPanel(ocId){
   const _stav = _member
     ? ('<div style="background:#E8F5EE;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;font-size:13px;color:#006040;line-height:1.55;">\u2705 '
         +(EN?'Member until ':'\u010clenstv\u00ed plat\u00ed do ')+_d(oc.valid_until)
-        +'<br>'+(EN?'Your club pays 1.5 % MTL commission on both rails.':'Klub m\u00e1 sazbu MTL 1,5 % na obou kolej\u00edch.')+'</div>')
+        +'<br>'+(EN?'You pay 1.5 % MTL commission on all your entities, both rails.':'M\u00e1\u0161 sazbu MTL 1,5 % na v\u0161echny sv\u00e9 entity, na obou kolej\u00edch.')+'</div>')
     : (oc.status==='pending'
         ? ('<div style="background:#FFF4E5;border:1px solid #F0D9B5;border-radius:12px;padding:12px 14px;font-size:13px;color:#7A4A00;line-height:1.55;">\u23F3 '
            +(_paidOk ? (EN?'Fee paid. Waiting for the association to accept your club \u2014 membership starts then.':'Poplatek zaplacen. \u010cek\u00e1 se, a\u017e asociace klub p\u0159ijme \u2014 t\u00edm \u010dlenstv\u00ed za\u010dne.')
@@ -27265,7 +27265,8 @@ async function openClubOrgPanel(ocId){
         await supaClient.from('organization_clubs').delete().eq('id',oc.id);
       } else {
         await supaClient.from('organization_clubs').update({ status:'ended', ended_at:new Date().toISOString() }).eq('id',oc.id);
-        try{ await supaClient.from('gyms').update({ org_rate_until:null }).eq('id',oc.gym_id); }catch(e){}
+        try{ if(oc.gym_id){ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',oc.gym_id).single();
+          if(_g&&_g.owner_id) await supaClient.from('profiles').update({ org_rate_until:null }).eq('id',_g.owner_id); } }catch(e){}
       }
       try{ if(org.owner_id) await supaClient.from('notifications').insert({ user_id:org.owner_id, type:'system', read:false,
         data:JSON.stringify({ kind:'org_left' }),
@@ -27752,8 +27753,9 @@ async function openOrgClubs(org, filter){
         await supaClient.from('organization_clubs').update({ status:'active', confirmed_at:new Date().toISOString() }).eq('id',r.id);
         // Kdyz klub zaplatil driv, nez ho asociace prijala, sazba nabehne az ted -- jinak by
         // cekal na dalsi platbu, prestoze uz ma zaplaceno.
-        if(r.fee_paid_at && r.valid_until){
-          try{ await supaClient.from('gyms').update({ org_rate_until:r.valid_until }).eq('id',r.gym_id); }catch(e){}
+        if(r.fee_paid_at && r.valid_until && r.gym_id){
+          try{ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',r.gym_id).single();
+            if(_g&&_g.owner_id) await supaClient.from('profiles').update({ org_rate_until:r.valid_until }).eq('id',_g.owner_id); }catch(e){}
         }
         try{ const { data:_g }=r.gym_id ? await supaClient.from('gyms').select('owner_id').eq('id',r.gym_id).single() : { data:null };
           if(_g&&_g.owner_id) await supaClient.from('notifications').insert({ user_id:_g.owner_id, type:'system', read:false,
@@ -27772,7 +27774,8 @@ async function openOrgClubs(org, filter){
         if(_hard) await supaClient.from('organization_clubs').delete().eq('id',r.id);
         else{
           await supaClient.from('organization_clubs').update({ status:'ended', ended_at:new Date().toISOString() }).eq('id',r.id);
-          try{ await supaClient.from('gyms').update({ org_rate_until:null }).eq('id',r.gym_id); }catch(e){}
+        try{ if(r.gym_id){ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',r.gym_id).single();
+          if(_g&&_g.owner_id) await supaClient.from('profiles').update({ org_rate_until:null }).eq('id',_g.owner_id); } }catch(e){}
         }
         try{ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',r.gym_id).single();
           if(_g&&_g.owner_id) await supaClient.from('notifications').insert({ user_id:_g.owner_id, type:'system', read:false,
@@ -38764,8 +38767,13 @@ async function renderPaymentsPage(){
   }catch(e){}
   var _rmode=(typeof _mtlPayMode==='function'?_mtlPayMode(currentUser):currentUser.payment_mode)||'qr_bank';
   var _rrate=(typeof _ladderRate==='function')?_ladderRate(_rmode,{partner:currentUser.partner,score:currentUser.coach_ref_score,bankai:currentUser.bankai_eligible,founding:currentUser.founding}):0.02;
+  // Clenstvi v asociaci: 1,5 % na vsechny entity, dokud plati. Vyhrava lepsi sazba, takze
+  // Bankai ani EP se tim nezhorsi.
+  var _orgUntil=(currentUser&&currentUser.org_rate_until)||null;
+  var _orgRate=!!(_orgUntil && new Date(_orgUntil+'T23:59:59')>=new Date());
+  if(_orgRate) _rrate=Math.min(_rrate, 0.015);
   var _rpct=(Math.round(_rrate*1000)/10).toString().replace('.',(EN?'.':','));
-  var _rtier=currentUser.partner?'EP':((_rmode==='stripe'?((currentUser.coach_ref_score>=5&&currentUser.bankai_eligible)?'Bankai':(currentUser.coach_ref_score>=2?'Shikai':(EN?'Base':'Z\u00e1klad'))):(currentUser.coach_ref_score>=2?'Shikai':(EN?'Base':'Z\u00e1klad'))));
+  var _rtier=currentUser.partner?'EP':(_orgRate?(EN?'Association':'Asociace'):((_rmode==='stripe'?((currentUser.coach_ref_score>=5&&currentUser.bankai_eligible)?'Bankai':(currentUser.coach_ref_score>=2?'Shikai':(EN?'Base':'Z\u00e1klad'))):(currentUser.coach_ref_score>=2?'Shikai':(EN?'Base':'Z\u00e1klad')))));
   var _rmodeLbl=(_rmode==='stripe'?'Stripe':(EN?'Bank transfer':'Bankovn\u00ed p\u0159evod'));
   var _rateCard='<div style="background:linear-gradient(135deg,#0A7A4F,#005A3C);color:#fff;border-radius:14px;padding:13px 16px;margin-bottom:14px;box-shadow:0 2px 10px rgba(0,96,64,.18);"><div style="font-size:11.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:rgba(255,255,255,.75);margin-bottom:5px;">'+(EN?'Your MTL commission':'Tvoje provize MTL')+'</div><div class="mtlRatePct" style="font-size:26px;font-weight:800;line-height:1;">'+_rpct+' %</div>'
     // Minimalni provize patri hned pod sazbu, ne do tooltipu o akvizici -- jsou to dve nesouvisejici
