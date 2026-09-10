@@ -43,7 +43,12 @@ export function hasOrgRate(profile) {
     if (!profile) return false;
     if (profile.org_rate) return true;                       // ruční příznak od MTL
     const u = profile.org_rate_until;
-    return !!(u && new Date(u + 'T23:59:59').getTime() >= Date.now());
+    if (!u) return false;
+    // Bereme jen DEN. Slepovat 'T23:59:59' k celé hodnotě funguje jen tehdy, když sloupec
+    // vrátí čisté datum; u časové značky vznikne neplatné datum a členství tiše zmizí.
+    const day = String(u).slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
+    return new Date(day + 'T23:59:59').getTime() >= Date.now();
   } catch (e) { return false; }
 }
 
