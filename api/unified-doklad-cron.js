@@ -421,7 +421,15 @@ export default async function handler(req, res) {
       const items = Object.values(data.rates);
       const bank = items.filter(i => i.method !== 'stripe').reduce((a, i) => a + i.fee, 0);
       const strp = items.filter(i => i.method === 'stripe').reduce((a, i) => a + i.fee, 0);
-      const body = { period_month: period, currency: cur, amount: data.total, bank_amount: bank, stripe_amount: strp, line_items: items, status: 'issued', kind: 'unified', owner_id: ownerId, charged_at: new Date().toISOString() };
+      const body = { period_month: period, currency: cur, amount: data.total, bank_amount: bank, stripe_amount: strp, line_items: items, status: 'issued', kind: 'unified', owner_id: ownerId, charged_at: new Date().toISOString(),
+      // SNIMEK ODBERATELE. Doklad musi zustat tim, co bylo vystaveno -- pozdejsi prejmenovani
+      // klubu nebo vstup do DPH ho nesmi zmenit.
+      cust_name: (buyer && (buyer.legal_name || buyer.name)) || null,
+      cust_ico: (buyer && buyer.tax_id) || null,
+      cust_dic: (buyer && buyer.vat_id) || null,
+      cust_address: (buyer && buyer.billing_address) || null,
+      cust_vat_payer: !!(buyer && buyer.vat_id),
+      cust_country: (buyer && (buyer.billing_country || buyer.country)) || null };
       body[col] = entityId;
       await sb('commission_doklady', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify(body) });
       issued++;
