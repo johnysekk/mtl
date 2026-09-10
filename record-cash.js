@@ -14,9 +14,18 @@
 // Rate: BANK track - EP 1%, else base 3.5% / Shikai 3% at coach_ref_score>=2. No Bankai.
 // Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
 
-import { ladderRate as _mtlRate, acquisitionRate as _mtlAcq, introFreeFor as _introFree } from './_rate.js';
+import { ladderRate as _mtlRate, acquisitionRate as _mtlAcq, introFreeFor as _introFree, hasOrgRate as _hasOrgRate } from './_rate.js';
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+// _introFree() ocekava cteci funkci vracejici pole radku. Volalo se _wsbGet, ale nikde
+// nebyla definovana -- potvrzeni QR platby proto padalo na "_wsbGet is not defined".
+async function _wsbGet(path) {
+  try {
+    const r = await sb(path);
+    return Array.isArray(r) ? r : (r ? [r] : []);
+  } catch (e) { return []; }
+}
 
 async function sb(path, opts = {}) {
   const r = await fetch(`${SB}/rest/v1/${path}`, {
@@ -29,19 +38,12 @@ async function sb(path, opts = {}) {
   return j;
 }
 
-// 'merch' CHYBELO. index.html posila hotovostni/QR prodej merche jako type:'merch', tenhle
-// whitelist ho odmitl s 400 a prodej se nezapsal vubec. Nalez D z auditu ze 7. 8.
-const ALLOWED_TYPES = ['drop_in', 'membership', 'custom', 'event_ticket', 'coach_1to1', 'course', 'merch'];
-// ZMENA PRAVIDLA. Drive tenhle soubor uctoval VSECHNO natvrdo po bankovni koleji, protoze
-// hotovost/QR/PIS se braly jako "ne-Stripe". To je spatne: kolej urcuje REZIM POSKYTOVATELE
-// (payment_mode), ne zpusob platby. Hotovost je jen prilepena k tomu, co klub uz ma -- klub
-// v rezimu Stripe plati za hotovost 2 %, klub v rezimu QR/banka 2,5 %. Jinak by klub v rezimu
-// Stripe videl v prehledu sazbu, ktera v jeho Sazebniku vubec nestoji.
-function _railOf(mode) { return (String(mode || '') === 'qr_bank') ? 'qr_bank' : 'stripe'; }
-function ladderRate(profile, mode) {
-  const _rail = _railOf(mode);
-  if (!profile) return (_rail === 'qr_bank') ? 0.025 : 0.02;   // base te koleje
-  return _mtlRate(_rail, { partner: profile.partner, founding: profile.founding, score: profile.coach_ref_score, bankai: profile.bankai_eligible });
+const ALLOWED_TYPES = ['drop_in', 'membership', 'custom', 'event_ticket', 'coach_1to1', 'course'];
+function ladderRate(profile) {
+  // cash/qr/pis = BANK-TRANSFER track. Single source of truth in _rate.js: same EP/FP/ladder as
+  // Stripe (Bankai is Stripe-only, so the bank track floors at Shikai).
+  if (!profile) return 0.025;  // base na bankovní koleji (bylo 0.035, pak 0.03)
+  return _mtlRate('qr_bank', { partner: profile.partner, founding: profile.founding, score: profile.coach_ref_score, bankai: profile.bankai_eligible, org: _hasOrgRate(profile) });
 }
 
 
@@ -185,16 +187,15 @@ export default async function handler(req, res) {
 
     if (provider === 'gym') {
       // gym pays out -> gym owner authorizes, rate from owner profile
-      const gyms = await sb(`gyms?id=eq.${gym_id}&select=id,owner_id,currency,account_suspended,stripe_account,created_at,billing_country,payment_mode`);
+      const gyms = await sb(`gyms?id=eq.${gym_id}&select=id,owner_id,currency,account_suspended,stripe_account,created_at,billing_country`);
       const gym = gyms && gyms[0];
       if (!gym) return res.status(404).json({ error: 'gym not found' });
       if (!_trusted && gym.owner_id !== uid) return res.status(403).json({ error: 'not your gym' });
       if (!_trusted && gym.account_suspended) return res.status(403).json({ error: 'account suspended' });
-      const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,created_at,referral_optin,billing_country,payment_mode`);
+      const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,created_at,referral_optin,billing_country,org_rate_until`);
       const ownerProf = (owners && owners[0]) || {};
       if (!ownerProf.id) ownerProf.id = gym.owner_id;
-      // Rezim klubu ma prednost pred rezimem majitele; reconcile-mode.js je stejne drzi shodne.
-      rate = ladderRate(ownerProf, gym.payment_mode || ownerProf.payment_mode);
+      rate = ladderRate(ownerProf);
       cur = currency || gym.currency || 'czk';
       const _cc = (_wantCredit && ownerProf.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
@@ -203,13 +204,9 @@ export default async function handler(req, res) {
       // uvnitř effectiveRateBreakdown (kudy jde Stripe) jinak obešla.
       // Země z přihlášky poskytovatele: u klubu jeho vlastní, u kouče z profilu. Majitel může
       // bydlet jinde, než odkud fakturuje klub -- doklad zní na klub, tak rozhoduje jeho země.
-      // DVE CHYBY NA JEDNOM RADKU, obe ReferenceError, obe shodily CELY zapis:
-      //   1) `_wsbGet` v tomhle souboru neexistuje -- zije jen v pay.js. Spravny getter je `sb`.
-      //   2) `coach` je deklarovany az v DRUHE vetvi (kouc), takze tady nema co delat.
-      // Handler to chytil svym vnejsim catch a vratil 500 s textem chyby -- proto se v appce
-      // objevilo "_wsbGet is not defined" a do transactions se nezapsalo nic.
-      const _intro = await _introFree(sb,
-        (gym && gym.billing_country) || (ownerProf && ownerProf.billing_country));
+      const _intro = await _introFree(_wsbGet,
+        (gym && gym.billing_country) || (ownerProf && ownerProf.billing_country)
+        || (coach && coach.billing_country));
       let mtl_fee = (_cc || _intro) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
       // Podlaha jen u PIS a jen když se opravdu něco účtuje -- uplatněný kredit zůstává nulový.
       if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, gross));
@@ -241,13 +238,13 @@ export default async function handler(req, res) {
       };
     } else {
       // coach pays out -> the coach authorizes their own cash/QR, rate from coach profile.
-      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,account_suspended,cash_blocked,created_at,referral_optin,billing_country,gym_payout_account,stripe_account,payment_mode`);
+      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,account_suspended,cash_blocked,created_at,referral_optin,billing_country,gym_payout_account,stripe_account`);
       const coach = cs && cs[0];
       if (!coach) return res.status(404).json({ error: 'coach not found' });
       if (!_trusted && coach.id !== uid) return res.status(403).json({ error: 'not your account' });
       if (!_trusted && coach.account_suspended) return res.status(403).json({ error: 'account suspended' });
       if (!_trusted && coach.cash_blocked) return res.status(403).json({ error: 'cash blocked' });
-      rate = ladderRate(coach, coach.payment_mode);
+      rate = ladderRate(coach);
       cur = currency || 'czk';
       const _cc = (_wantCredit && coach.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
@@ -256,9 +253,9 @@ export default async function handler(req, res) {
       // uvnitř effectiveRateBreakdown (kudy jde Stripe) jinak obešla.
       // Země z přihlášky poskytovatele: u klubu jeho vlastní, u kouče z profilu. Majitel může
       // bydlet jinde, než odkud fakturuje klub -- doklad zní na klub, tak rozhoduje jeho země.
-      // Totez zrcadlove: `_wsbGet` neexistuje a `gym`/`ownerProf` se deklaruji az ve vetvi klubu,
-      // takze tady byly rovnez ReferenceError. Zeme se u kouce bere z jeho vlastniho profilu.
-      const _intro = await _introFree(sb, (coach && coach.billing_country));
+      const _intro = await _introFree(_wsbGet,
+        (/* v koucovske vetvi zadny klub neni -- kouc fakturuje sam za sebe */ null) || (ownerProf && ownerProf.billing_country)
+        || (coach && coach.billing_country));
       let mtl_fee = (_cc || _intro) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
       // Podlaha jen u PIS a jen když se opravdu něco účtuje -- uplatněný kredit zůstává nulový.
       if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, gross));
