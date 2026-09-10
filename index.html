@@ -7759,7 +7759,7 @@ function addToCalendar(b){
   $('calChooseOv').style.display = 'flex';
 }
 function _calDates(b){
-  const start = new Date(`${_dt(b.training_date)}T${(b.training_time||'09:00')}:00`);
+  const start = new Date(`${b.training_date}T${(b.training_time||'09:00')}:00`);
   const end = new Date(start.getTime() + 60*60*1000);
   return { start, end };
 }
@@ -10527,6 +10527,20 @@ async function _coach1to1QrConfirm(bookingId, ok){
     const res=await _recordCashTx({ provider:'coach', coach_id:currentUser.id, member_id:b.student_id||null, gross_amount:amount_minor, currency:b.currency||'CZK', type:'coach_1to1', payment_method:'qr', acq_source:'direct', credit:(b.credit_used==='student'?'student':undefined) });
     if(res.error){ toast('\u26a0\ufe0f '+res.error.message); return; }
     await supaClient.from('bookings').update({ status:'active' }).eq('id',bookingId);
+    // Student musi vedet, ze kouc platbu potvrdil -- zaplatil a bez zpravy nema jak zjistit,
+    // ze je rezervace hotova. Proklik vede na Nadchazejici lekce.
+    try{
+      if(b.student_id){
+        const _kdy=_dt(b.training_date)+(b.training_time?(' '+String(b.training_time).slice(0,5)):'');
+        await supaClient.from('notifications').insert({
+          user_id:b.student_id, type:'booking', read:false,
+          data:JSON.stringify({ kind:'payment_confirmed', booking_id:bookingId, target:'coach' }),
+          message:'\u2705 '+((currentUser&&currentUser.name)||(EN?'The coach':'Kou\u010d'))
+            +(EN?(' confirmed your payment. Lesson '+_kdy+' is booked.')
+                :(' potvrdil tvou platbu. Lekce '+_kdy+' je rezervovan\u00e1.'))
+        });
+      }
+    }catch(e){}
     if(b.slot_id){ try{ await supaClient.from('slots').update({ booked:true }).eq('id',b.slot_id); }catch(e){} }
     try{ if(b.student_id){ const { data:_cv } = await supaClient.from('conversations').select('id').eq('student_id', b.student_id).eq('coach_id', currentUser.id); if(!_cv||!_cv.length){ await supaClient.from('conversations').insert({ student_id:b.student_id, coach_id:currentUser.id, coach_name:currentUser.name||'Kou\u010d', student_name:b.student_name||'Student' }); } } }catch(e){}
     const fee=(res.mtl_fee||0)/100;
@@ -12825,7 +12839,7 @@ async function loadMyMemberships(){
   let drops=[];
   try{ const { data: dd } = await supaClient.from('gym_bookings').select('*').eq('student_id', currentUser.id).eq('status','active').gte('class_date', today).order('class_date',{ascending:true}); drops=dd||[]; }catch(e){}
   const now=new Date();
-  const upDrops = drops.filter(b=>{ if(!b.class_date) return false; const dt=new Date(`${_dt(b.class_date)}T${(b.class_time||'00:00')}:00`); return dt>=now; });
+  const upDrops = drops.filter(b=>{ if(!b.class_date) return false; const dt=new Date(`${b.class_date}T${(b.class_time||'00:00')}:00`); return dt>=now; });
   const EN=LANG==='en';
   const _hasKid = ms.some(m=>m.child_name) || pend.some(m=>m.child_name) || upDrops.some(b=>b.child_name);
   const _kv = window._membKidView||'me';
@@ -13391,7 +13405,7 @@ async function cancelGymDropin(b, _after){
   if(!b) return;
   const _done=()=>{ if(typeof _after==='function') _after(); else loadMyMemberships(); };
   const now=new Date();
-  const dt=new Date(`${_dt(b.class_date)}T${(b.class_time||'00:00')}:00`);
+  const dt=new Date(`${b.class_date}T${(b.class_time||'00:00')}:00`);
   const _occ={ name:b.class_name, date:b.class_date, time:b.class_time };
   // POD 6 H: penize se nevraci a rezervace zustava (student zaplatil, muze klidne dorazit),
   // ale omluva se zapise a kouc ji dostane. Driv to tady skoncilo hlaskou a trener se nedozvedel
@@ -30149,7 +30163,7 @@ async function renderCoachAnalytics(coachId, containerId){
   const all = allB || [];
   const cpct = prof?.partner ? 0.99 : (prof?.founding ? 0.98 : 0.965);
   const now = new Date();
-  const isPast = b => b.type==='online' ? !!b.fulfilled : (new Date(`${_dt(b.training_date)}T${(b.training_time||'00:00')}:00`) < now);
+  const isPast = b => b.type==='online' ? !!b.fulfilled : (new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`) < now);
 
   // anti-scam signály
   const onlineAll = all.filter(b=>b.type==='online');
@@ -32169,7 +32183,7 @@ async function openCoachStudentDetail(sid, name, coachId){
   try{ const { data } = await supaClient.from('bookings').select('*').eq('coach_id', coachId).eq('student_id', sid); bks=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_attendance').select('class_date,class_name').eq('coach_id', coachId).eq('student_id', sid); att=data||[]; }catch(e){}
   const now=new Date();
-  const isPast = b => b.type==='online' ? !!b.fulfilled : (new Date(`${_dt(b.training_date)}T${(b.training_time||'00:00')}:00`) < now);
+  const isPast = b => b.type==='online' ? !!b.fulfilled : (new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`) < now);
   const activeB=bks.filter(b=>b.status==='active');
   const happened=activeB.filter(isPast);
   const inPersonH=happened.filter(b=>b.type!=='online');
@@ -33141,7 +33155,7 @@ function subscribeRealtime(){
     let rows=[];
     try{ const today=new Date().toISOString().slice(0,10); const { data }=await supaClient.from('gym_bookings').select('*').eq('student_id',currentUser.id).in('status',['active','paid_claimed']).gte('class_date',today).order('class_date',{ascending:true}); rows=data||[]; }catch(e){}
     const now=new Date();
-    rows=rows.filter(function(b){ if(!b.class_date) return false; const dt=new Date(`${_dt(b.class_date)}T${(b.class_time||'00:00')}:00`); return dt>=now; });
+    rows=rows.filter(function(b){ if(!b.class_date) return false; const dt=new Date(`${b.class_date}T${(b.class_time||'00:00')}:00`); return dt>=now; });
     window._skupRows=rows;
     if(!rows.length){ box.innerHTML=`<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">${LANG==='en'?'No group sessions. Reservations awaiting payment show above.':'Žádné skupinové lekce. Rezervace čekající na platbu jsou nahoře.'}</p>`; return; }
     const EN=LANG==='en';
@@ -33150,7 +33164,7 @@ function subscribeRealtime(){
     const shown = _hasKid ? rows.filter(function(b){ return _kv==='kids' ? !!b.child_name : !b.child_name; }) : rows;
     const _kidToggle = _hasKid ? ('<div style="display:flex;gap:6px;margin-bottom:14px;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:4px;">'+'<button class="skupKidTab" data-kv="me" style="flex:1;padding:9px;border:none;border-radius:9px;font-size:13px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';background:'+(_kv==='me'?'var(--dark)':'transparent')+';color:'+(_kv==='me'?'#fff':'var(--mid)')+';">'+(EN?'Me':'J\u00e1')+'</button>'+'<button class="skupKidTab" data-kv="kids" style="flex:1;padding:9px;border:none;border-radius:9px;font-size:13px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';background:'+(_kv==='kids'?'var(--dark)':'transparent')+';color:'+(_kv==='kids'?'#fff':'var(--mid)')+';">\ud83d\udc76 '+(EN?'Children':'D\u011bti')+'</button>'+'</div>') : '';
     const _rowsHtml=shown.map(function(b){
-      const dt=new Date(`${_dt(b.class_date)}T${(b.class_time||'00:00')}:00`);
+      const dt=new Date(`${b.class_date}T${(b.class_time||'00:00')}:00`);
       const hrs=(dt-now)/(1000*60*60);
       const claimed=b.status==='paid_claimed';
       const canChange=!claimed && hrs>=6;
@@ -33529,7 +33543,7 @@ async function loadBookings(mode){
   const now = new Date();
   const all = (data || []).filter(b=>b.type!=='online'); // online má vlastní sekci
   const filtered = all.filter(b=>{
-    const dt=new Date(`${_dt(b.training_date)}T${(b.training_time||'00:00')}:00`);
+    const dt=new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`);
     return mode==='upcoming' ? dt>=now : dt<now;
   });
 
@@ -33582,7 +33596,7 @@ async function loadBookings(mode){
       list.appendChild(el);
       return;
     }
-    const dt=new Date(`${_dt(b.training_date)}T${b.training_time}:00`);
+    const dt=new Date(`${b.training_date}T${b.training_time}:00`);
     // Nárok na vrácení se počítá z PŮVODNÍHO termínu, když už byla rezervace přesunutá. Jinak by
     // šlo storno obejít: přesunout lekci 7 h předem (kde je 50 %) na termín za týden a tam ji
     const hours=(dt - now)/(1000*60*60);
@@ -36481,7 +36495,7 @@ if(status==='approved'){
 }
 
   function isPastLesson(b){
-  const dt = new Date(`${_dt(b.training_date)}T${(b.training_time||'00:00')}:00`);
+  const dt = new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`);
   return dt < new Date();
 }
 
@@ -38422,7 +38436,7 @@ async function renderCoachAnalyticsCompact(coachId, containerId){
   const { data: prof } = await supaClient.from('profiles').select('rating, reviews').eq('id', coachId).single();
   const all = allB || [];
   const now = new Date();
-  const isPast = b => b.type==='online' ? !!b.fulfilled : (new Date(`${_dt(b.training_date)}T${(b.training_time||'00:00')}:00`) < now);
+  const isPast = b => b.type==='online' ? !!b.fulfilled : (new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`) < now);
   const active = all.filter(b=>b.status==='active');
   const cancelled = all.filter(b=>b.status==='cancelled');
   const happened = active.filter(isPast);
@@ -38529,11 +38543,11 @@ async function renderMtl(){
     .eq('status','active');
   const all = data || [];
   const now = new Date();
-  const upcoming = all.filter(b=>{ const dt=new Date(`${_dt(b.training_date)}T${(b.training_time||'00:00')}:00`); return dt>=now; });
-  const past = all.filter(b=>{ const dt=new Date(`${_dt(b.training_date)}T${(b.training_time||'00:00')}:00`); return dt<now; });
+  const upcoming = all.filter(b=>{ const dt=new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`); return dt>=now; });
+  const past = all.filter(b=>{ const dt=new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`); return dt<now; });
   // also count klub drop-ins (gym_bookings), not just coach 1:1 (bookings)
   let gUp=0, gPast=0;
-  try{ const { data:gb } = await supaClient.from('gym_bookings').select('id, class_date, class_time').eq('student_id', currentUser.id).eq('status','active'); (gb||[]).forEach(function(b){ const dt=new Date(`${_dt(b.class_date)}T${(b.class_time||'00:00')}:00`); if(dt>=now) gUp++; else gPast++; }); }catch(e){}
+  try{ const { data:gb } = await supaClient.from('gym_bookings').select('id, class_date, class_time').eq('student_id', currentUser.id).eq('status','active'); (gb||[]).forEach(function(b){ const dt=new Date(`${b.class_date}T${(b.class_time||'00:00')}:00`); if(dt>=now) gUp++; else gPast++; }); }catch(e){}
   const cnt=$('bookCount');
   if(cnt) cnt.textContent=upcoming.length+gUp;
   const hist=$('histCount');
@@ -38557,7 +38571,7 @@ async function checkPastLessons(){
   (sb||[]).forEach(b=>{
     const isOnline = b.type==='online';
     if(isOnline){ if(b.fulfilled && !b.rated) _rateQueue.push({type:'student', booking:b, online:true}); return; }
-    const dt = new Date(`${_dt(b.training_date)}T${(b.training_time||'00:00')}:00`);
+    const dt = new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`);
     if(dt < cutoff && !b.rated) _rateQueue.push({type:'student', booking:b, online:false});
   });
 
@@ -38567,7 +38581,7 @@ async function checkPastLessons(){
   (cb||[]).forEach(b=>{
     if(b.type==='online') return; // online kouč potvrzuje přes "Vyřízeno", ne tady
     if(b.student_id === currentUser.id) return; // self-booking (test) — neptat se dvakrát
-    const dt = new Date(`${_dt(b.training_date)}T${(b.training_time||'00:00')}:00`);
+    const dt = new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`);
     if(dt < cutoff && !b.confirm_asked) _rateQueue.push({type:'coach', booking:b, online:false});
   });
 
