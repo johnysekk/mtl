@@ -23,6 +23,30 @@ const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const sbHeaders = { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json' };
 
+// ── FAKTURAČNÍ ADRESA ────────────────────────────────────────────────────────────────────
+// Pravda je v rozpadu billing_line1/line2/city/postal (potřebuje ho DAC7). Jednořádkový
+// tvar je jen pro zobrazení na dokladu, takže se SKLÁDÁ při čtení, ne ukládá zvlášť --
+// dvě kopie téže adresy se vždy rozejdou.
+// Prefix pokrývá druhou fakturační identitu kouče (payout_).
+function _billAddr(row, prefix) {
+  try {
+    if (!row) return null;
+    const p = prefix || '';
+    const g = (k) => {
+      const v = row[p + k];
+      return (v == null) ? '' : String(v).trim();
+    };
+    const l1 = g('billing_line1'), l2 = g('billing_line2');
+    const city = g('billing_city'), zip = g('billing_postal');
+    const parts = [l1, l2, ((zip ? zip + ' ' : '') + city).trim()]
+      .filter((x) => x && x.trim());
+    if (parts.length) return parts.join(', ');
+    // Záloha pro řádky z doby před rozpadem, kde je jen složený tvar.
+    const legacy = g('billing_address');
+    return legacy || null;
+  } catch (e) { return null; }
+}
+
 async function sbGet(path) {
   const r = await fetch(`${SB}/rest/v1/${path}`, { headers: sbHeaders });
   return r.ok ? r.json() : [];
@@ -80,7 +104,7 @@ function cohortDokladHtml(o){
     + (o.providerContact ? row('Kontakt na poskytovatele', _esc(o.providerContact), true) : '')
     + (rec.tax_id ? row('IČO', _esc(rec.tax_id), true) : '')
     + (rec.vat_id ? row('DIČ', _esc(rec.vat_id), true) : '')
-    + (rec.billing_address ? row('Sídlo', _esc(rec.billing_address), true) : '')
+    + (_billAddr(rec) ? row('Sídlo', _esc(_billAddr(rec)), true) : '')
     + row('Odběratel', _esc(o.buyer || ''), true)
     + (o.participant ? row('Účastník', _esc(o.participant), true) : '')
     + row('Položka', _esc(o.item || ''), true)
@@ -140,7 +164,7 @@ function cohortDokladPdf(o){
       if (o.providerContact) row('Kontakt na poskytovatele', o.providerContact);
       if (rec.tax_id) row('IČO', rec.tax_id);
       if (rec.vat_id) row('DIČ', rec.vat_id);
-      if (rec.billing_address) row('Sídlo', rec.billing_address);
+      if (_billAddr(rec)) row('Sídlo', _billAddr(rec));
       row('Odběratel', o.buyer || '');
       if (o.participant) row('Účastník', o.participant);
       row('Položka', o.item || '');
@@ -944,7 +968,7 @@ async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, custo
         doklad_no: String(no), series_key: key,
         transaction_id: transactionId || null, payment_intent: paymentIntent || null,
         sup_name: sup.legal_name || sup.name || null,
-        sup_ico: ico, sup_dic: sup.vat_id || null, sup_address: sup.billing_address || null,
+        sup_ico: ico, sup_dic: sup.vat_id || null, sup_address: _billAddr(sup) || null,   // sklada se z billing_line1/2/city/postal
         sup_vat_payer: !!sup.vat_payer, sup_vat_rate: (sup.vat_rate != null ? sup.vat_rate : null),
         cust_name: customerName || null, cust_email: customerEmail || null,
         // Ucastnik jen kdyz se lisi od odberatele -- u dospeleho, ktery jde trenovat sam,

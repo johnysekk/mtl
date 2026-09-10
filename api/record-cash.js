@@ -34,6 +34,30 @@ const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 // KOUČ MÁ DVĚ FAKTURAČNÍ IDENTITY: vlastní (soukromky) a payout_ (klubové plnění). Když má
 // transakce gym_id, plnění patří do klubového režimu a doklad musí znít na tu druhou.
 // Selhání nesmí shodit zápis platby -- peníze jsou důležitější než papír a doklad se doplní.
+// ── FAKTURAČNÍ ADRESA ────────────────────────────────────────────────────────────────────
+// Pravda je v rozpadu billing_line1/line2/city/postal (potřebuje ho DAC7). Jednořádkový
+// tvar je jen pro zobrazení na dokladu, takže se SKLÁDÁ při čtení, ne ukládá zvlášť --
+// dvě kopie téže adresy se vždy rozejdou.
+// Prefix pokrývá druhou fakturační identitu kouče (payout_).
+function _billAddr(row, prefix) {
+  try {
+    if (!row) return null;
+    const p = prefix || '';
+    const g = (k) => {
+      const v = row[p + k];
+      return (v == null) ? '' : String(v).trim();
+    };
+    const l1 = g('billing_line1'), l2 = g('billing_line2');
+    const city = g('billing_city'), zip = g('billing_postal');
+    const parts = [l1, l2, ((zip ? zip + ' ' : '') + city).trim()]
+      .filter((x) => x && x.trim());
+    if (parts.length) return parts.join(', ');
+    // Záloha pro řádky z doby před rozpadem, kde je jen složený tvar.
+    const legacy = g('billing_address');
+    return legacy || null;
+  } catch (e) { return null; }
+}
+
 async function _issueDokladBank({ transactionId, gymId, coachId, clubMode, customerName,
                                   customerEmail, participantName, itemLabel, amount, currency,
                                   paymentMethod, testMode }) {
@@ -49,12 +73,16 @@ async function _issueDokladBank({ transactionId, gymId, coachId, clubMode, custo
       // clubMode urcuje volajici: v record-cash jde klubove plneni klubovou vetvi a pozna
       // se tim, ze se prijemce prepnul na koucuv klubovy ucet. Z gym_id to poznat nejde,
       // protoze koucova vetev zapisuje gym_id vzdy null.
-      const p = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,payout_legal_name,payout_tax_id,payout_vat_id,payout_vat_payer,payout_vat_rate,payout_billing_address`))[0] || null;
+      const p = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,billing_line1,billing_line2,billing_city,billing_postal,payout_legal_name,payout_tax_id,payout_vat_id,payout_vat_payer,payout_vat_rate,payout_billing_address,payout_billing_line1,payout_billing_line2,payout_billing_city,payout_billing_postal`))[0] || null;
       if (p) {
         sup = clubMode
           ? { legal_name: p.payout_legal_name, name: p.payout_legal_name,
               tax_id: p.payout_tax_id, vat_id: p.payout_vat_id,
               vat_payer: p.payout_vat_payer, vat_rate: p.payout_vat_rate,
+              // Adresa se sklada z rozpadu s prefixem payout_; billing_address je jen
+              // zaloha pro radky z doby pred rozpadem.
+              billing_line1: p.payout_billing_line1, billing_line2: p.payout_billing_line2,
+              billing_city: p.payout_billing_city, billing_postal: p.payout_billing_postal,
               billing_address: p.payout_billing_address }
           : p;
       }
@@ -86,7 +114,7 @@ async function _issueDokladBank({ transactionId, gymId, coachId, clubMode, custo
         doklad_no: String(no), series_key: key,
         transaction_id: transactionId,
         sup_name: sup.legal_name || sup.name || null,
-        sup_ico: ico, sup_dic: sup.vat_id || null, sup_address: sup.billing_address || null,
+        sup_ico: ico, sup_dic: sup.vat_id || null, sup_address: _billAddr(sup) || null,   // sklada se z billing_line1/2/city/postal
         sup_vat_payer: !!sup.vat_payer, sup_vat_rate: (sup.vat_rate != null ? sup.vat_rate : null),
         cust_name: customerName || null, cust_email: customerEmail || null,
         // Ucastnik jen kdyz se lisi od odberatele -- u dospeleho, ktery jde trenovat sam,
