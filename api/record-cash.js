@@ -20,6 +20,84 @@ const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 // _introFree() ocekava cteci funkci vracejici pole radku. Volalo se _wsbGet, ale nikde
 // nebyla definovana -- potvrzeni QR platby proto padalo na "_wsbGet is not defined".
+
+// ── DOKLAD NA BANKOVNÍ KOLEJI ────────────────────────────────────────────────────────────
+// Hotovost, QR a PIS dosud doklad NEVYSTAVOVALY vůbec: snímek tvořil jen Stripe. Student,
+// který zaplatil převodem, tedy neměl co dát účetní. Vystavujeme ho tady, ve chvíli platby,
+// stejně jako to dělá stripe-webhook -- identita dodavatele, odběratel, popis a částka se
+// OPÍŠOU tak, jak platí teď, a vykreslení už na živá data nikdy nesahá.
+//
+// Řada se slučuje v rámci ÚČTU, ne jen IČO: kdo má pod jedním IČO dva kluby a k tomu profil
+// kouče, má jednu souvislou řadu. Kdyby totéž IČO používaly dva různé účty, sdílenou řadou
+// by si navzájem brali čísla a ani jeden by nevěděl, proč mu v ní chybí.
+//
+// KOUČ MÁ DVĚ FAKTURAČNÍ IDENTITY: vlastní (soukromky) a payout_ (klubové plnění). Když má
+// transakce gym_id, plnění patří do klubového režimu a doklad musí znít na tu druhou.
+// Selhání nesmí shodit zápis platby -- peníze jsou důležitější než papír a doklad se doplní.
+async function _issueDokladBank({ transactionId, gymId, coachId, clubMode, customerName,
+                                  customerEmail, itemLabel, amount, currency, paymentMethod, testMode }) {
+  try {
+    if (!transactionId) return null;
+    // clubMode je PARAMETR -- znovu ho deklarovat by prebilo to, co poslal volajici.
+    let sup = null, ownerId = null;
+
+    if (gymId && !coachId) {
+      sup = (await _wsbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,owner_id`))[0] || null;
+      ownerId = sup && sup.owner_id;
+    } else if (coachId) {
+      // clubMode urcuje volajici: v record-cash jde klubove plneni klubovou vetvi a pozna
+      // se tim, ze se prijemce prepnul na koucuv klubovy ucet. Z gym_id to poznat nejde,
+      // protoze koucova vetev zapisuje gym_id vzdy null.
+      const p = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,payout_legal_name,payout_tax_id,payout_vat_id,payout_vat_payer,payout_vat_rate,payout_billing_address`))[0] || null;
+      if (p) {
+        sup = clubMode
+          ? { legal_name: p.payout_legal_name, name: p.payout_legal_name,
+              tax_id: p.payout_tax_id, vat_id: p.payout_vat_id,
+              vat_payer: p.payout_vat_payer, vat_rate: p.payout_vat_rate,
+              billing_address: p.payout_billing_address }
+          : p;
+      }
+      ownerId = coachId;
+    }
+    if (!sup || !ownerId) return null;
+
+    const ico = String(sup.tax_id || '').replace(/\s/g, '');
+    // Bez IČO nemá řada klíč. U klubového režimu kouče to znamená, že druhou identitu ještě
+    // nevyplnil -- doklad se tedy nevystaví teď a doplní se, až ji doplní. Radši žádný doklad
+    // než doklad znějící na nesprávný subjekt.
+    if (!ico) return null;
+
+    const key = 'ico:' + ico + ':acct:' + ownerId;
+
+    const r = await fetch(`${SB}/rest/v1/rpc/doklad_next`, {
+      method: 'POST',
+      headers: { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ p_key: key }),
+    });
+    if (!r.ok) return null;
+    let no = await r.json();
+    if (no && typeof no === 'object') no = Array.isArray(no) ? no[0] : Object.values(no)[0];
+    if (!no) return null;
+
+    await sb('doklady', {
+      method: 'POST', prefer: 'return=minimal',
+      body: JSON.stringify({
+        doklad_no: String(no), series_key: key,
+        transaction_id: transactionId,
+        sup_name: sup.legal_name || sup.name || null,
+        sup_ico: ico, sup_dic: sup.vat_id || null, sup_address: sup.billing_address || null,
+        sup_vat_payer: !!sup.vat_payer, sup_vat_rate: (sup.vat_rate != null ? sup.vat_rate : null),
+        cust_name: customerName || null, cust_email: customerEmail || null,
+        item_label: itemLabel || null,
+        amount: Math.round(Number(amount) || 0),
+        currency: String(currency || 'CZK').toUpperCase(),
+        payment_method: paymentMethod || null, test_mode: !!testMode,
+      }),
+    });
+    return String(no);
+  } catch (e) { console.error('_issueDokladBank', e && e.message); return null; }
+}
+
 async function _wsbGet(path) {
   try {
     const r = await sb(path);
@@ -184,6 +262,9 @@ export default async function handler(req, res) {
     let _creditRow = null;   // {memberId,id,sc} to consume after a successful insert (referral-credit redemption)
     const _wantCredit = (credit === 'student' && member_id && ['coach_1to1', 'drop_in'].includes(type));
     const month = new Date().toISOString().slice(0, 7);
+    // Kdyz klubove plneni vyplaci kouc ze svého klubového účtu, doklad zní na jeho payout_
+    // identitu. Deklarace nad vetvemi, protoze doklad se vystavuje az za nimi.
+    let _dokladPayoutCoach = null;
 
     if (provider === 'gym') {
       // gym pays out -> gym owner authorizes, rate from owner profile
@@ -215,7 +296,7 @@ export default async function handler(req, res) {
       const _acqMonths = (_acq != null && !_cc) ? 1 : null;
       const _baseRate  = (_acq != null && !_cc) ? rate : null;
       let _gymPayee = gym.stripe_account || null;
-      if (coach_id) { try { const _cp = await sb(`profiles?id=eq.${coach_id}&select=gym_payout_account`); const _cpa = _cp && _cp[0] && _cp[0].gym_payout_account; if (_cpa) _gymPayee = _cpa; } catch(e){} }
+      if (coach_id) { try { const _cp = await sb(`profiles?id=eq.${coach_id}&select=gym_payout_account`); const _cpa = _cp && _cp[0] && _cp[0].gym_payout_account; if (_cpa) { _gymPayee = _cpa; _dokladPayoutCoach = coach_id; } } catch(e){} }
       row = {
         // Kdo doopravdy platil, když to není účastník (zástupce za mladistvého). Doklad musí
         // znít na plátce, ale docházka patří účastníkovi -- proto obojí zvlášť.
@@ -275,8 +356,31 @@ export default async function handler(req, res) {
     }
 
     const ins = await sb('transactions', { method: 'POST', prefer: 'return=representation', body: JSON.stringify(row) });
+    const _txId = (ins && ins[0] && ins[0].id) || null;
+
+    // DOKLAD. Bankovni kolej ho dosud nevystavovala vubec -- student, ktery zaplatil
+    // prevodem, nemel co dat ucetni. doklady.transaction_id je UNIQUE, takze druhy pokus
+    // o tez platbu se neulozí a cislo v rade se nespotrebuje nadarmo.
+    let _dokNo = null;
+    if (_txId) {
+      _dokNo = await _issueDokladBank({
+        transactionId: _txId,
+        // Klubove plneni vyplacene koucovi -> jeho payout_ identita; jinak dodavatel podle
+        // toho, komu penize doopravdy prisly.
+        gymId: _dokladPayoutCoach ? null : (row.gym_id || null),
+        coachId: _dokladPayoutCoach || row.coach_id || null,
+        clubMode: !!_dokladPayoutCoach,
+        customerName: row.paid_by_name || row.cash_payer_name || null,
+        customerEmail: null,
+        itemLabel: (type || null),
+        amount: row.gross_amount,
+        currency: row.currency,
+        paymentMethod: row.payment_method,
+        testMode: row.test_mode,
+      });
+    }
     if (_creditRow) await consumeStudentCredit(_creditRow.memberId, _creditRow.id, _creditRow.sc);
-    return res.status(200).json({ ok: true, mtl_fee: row.mtl_fee, credit_redeemed: !!_creditRow, id: (ins && ins[0] && ins[0].id) || null });
+    return res.status(200).json({ ok: true, mtl_fee: row.mtl_fee, credit_redeemed: !!_creditRow, id: _txId, doklad_no: _dokNo });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
