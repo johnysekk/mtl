@@ -34,7 +34,7 @@ export default async function handler(req, res) {
     // stays in the DB and is simply not consulted, which is why it is no longer selected here.
     let tier;
     if (cond.partner) tier = 'EP';
-    else if (cond.org) tier = 'Organization';
+    else if (cond.org) tier = 'Členem asociace';
     else if (cond.score >= 5 && cond.bankai) tier = 'Bankai';
     else if (cond.score >= 2) tier = 'Shikai';
     else tier = 'base';
