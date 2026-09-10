@@ -18592,7 +18592,15 @@ async function openClassAttendance(occ){
   const attendees=cohMems ? cohMems.filter(function(m){ return !m.student_id || !_exIds.has(String(m.student_id)); }).map(function(m){ return { sid:m.student_id||null, name:(m.name||m.email||(EN?'Participant':'Účastník')), pill:_cpill }; }) : [
     ...auto.map(m=>(m.child_name?{sid:m.student_id, child:m.child_name, name:kidEmoji(m.child_age)+' '+m.child_name, pill:_kpill}:{sid:m.student_id, name:m.student_name||(EN?'Member':'Člen'), pill:tagPill(EN?'member':'členství','#006040')})),
     ...explicit.map(r=>(r.child_name?{sid:r.student_id, child:r.child_name, name:kidEmoji(r.child_age)+' '+r.child_name, pill:_kpill}:{sid:r.student_id, name:r.student_name||(EN?'Member':'Člen'), pill:tagPill(EN?'reserved':'rezervace','#1E6FD9')})),
-    ...dropList.map(d=>(d.child_name?{sid:d.student_id, child:d.child_name, name:kidEmoji(d.child_age)+' '+d.child_name, pill:_kpill}:{sid:d.student_id, name:d.student_name||'Student', pill:tagPill(EN?'drop-in':'jednoráz','#C0392B')}))
+    ...dropList.map(function(d){
+              if(d.child_name) return { sid:d.student_id, child:d.child_name, name:kidEmoji(d.child_age)+' '+d.child_name, pill:_kpill };
+              // Kdo si vzal zlevnenou cenu s dokladem a jeste ho neukazal. Bez tohohle by
+              // sleva byla na cestne slovo -- appka ji nabidne a klub o tom nikdy nevi.
+              var _pf=(window._attProof||{})[String(d.student_id||'')]||null;
+              return { sid:d.student_id, name:d.student_name||'Student',
+                pill:tagPill(EN?'drop-in':'jednoráz','#C0392B'),
+                proofTx:(_pf?_pf.id:null) };
+            })
   ];
   { const _as=new Set(), _rm=[]; attendees.forEach(function(a,_i){ var _ky=(a.sid?('s:'+a.sid):('n:'+(a.name||'')))+'|'+(a.child||''); if(_as.has(_ky)) _rm.push(_i); else _as.add(_ky); }); for(var _j=_rm.length-1;_j>=0;_j--) attendees.splice(_rm[_j],1); }
   const lvl=(occ.level&&occ.level!=='all')?` · ${levelLabel(occ.level)}`:'';
@@ -18618,7 +18626,7 @@ async function openClassAttendance(occ){
   };
   const attRow=(a)=>{ const present=presentSet.has(`${occ.date}|${occ.time}|${occ.name||''}|`+_whoKey(a.sid,a.name)+'|'+(a.child||''));
     const chk=(!_roLock && started)?`<button class="caChk" data-sid="${a.sid||''}" data-name="${esc(a.name)}" data-date="${occ.date}" data-time="${occ.time}" data-cn="${esc(occ.name||'')}" data-coach="${occ.coach||''}" data-disc="${esc(occ.disc||'')}" data-child="${esc(a.child||'')}" data-present="${present?1:0}" style="margin-left:auto;flex-shrink:0;width:28px;height:28px;border-radius:50%;border:1.5px solid ${present?'#006040':'var(--border)'};background:${present?'#006040':'transparent'};color:#fff;font-size:14px;font-weight:700;cursor:pointer;">${present?'✓':''}</button>`:'';
-    return `<div style="display:flex;align-items:center;gap:9px;font-size:14px;color:var(--dark);padding:7px 2px;border-bottom:1px solid var(--border);">${_attAv(a.sid,false)}${escapeHtml(a.name)}${a.pill}${chk}${(!a.sid)?('<span style="margin-left:auto;font-size:11px;color:#0A7A4F;background:#EAF7F0;border-radius:8px;padding:3px 8px;font-weight:700;white-space:nowrap;">'+((LANG==='en')?'paid · guest':'zaplaceno · host')+'</span>'):''}</div>`; };
+    return `<div style="display:flex;align-items:center;gap:9px;font-size:14px;color:var(--dark);padding:7px 2px;border-bottom:1px solid var(--border);">${_attAv(a.sid,false)}${escapeHtml(a.name)}${a.pill}${a.proofTx?('<button class="caProof" data-tx="'+a.proofTx+'" title="'+(EN?'Mark proof as shown':'Ozna\u010dit jako dolo\u017een\u00e9')+'" style="font-size:11px;color:#9A5B00;background:#FFF4E5;border:1px solid #F0D9B5;border-radius:8px;padding:3px 8px;font-weight:700;white-space:nowrap;cursor:pointer;font-family:inherit;">\u26a0\ufe0f '+(EN?'proof?':'doklad?')+'</button>'):''}${chk}${(!a.sid)?('<span style="margin-left:auto;font-size:11px;color:#0A7A4F;background:#EAF7F0;border-radius:8px;padding:3px 8px;font-weight:700;white-space:nowrap;">'+((LANG==='en')?'paid · guest':'zaplaceno · host')+'</span>'):''}</div>`; };
   const _ocOwner = _myGymData && currentUser && _myGymData.owner_id===currentUser.id;
   let _ocOvHtml='';
   if(_ocOwner && !isPast){
@@ -18670,6 +18678,21 @@ async function openClassAttendance(occ){
   }
   { const _s=$('ocOvSave'); if(_s) _s.onclick=function(){ saveOccOverride(occ); }; const _r=$('ocOvReset'); if(_r) _r.onclick=function(){ resetOccOverride(occ); }; }
   box.querySelectorAll('.caChk').forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); toggleAttendance(Object.assign({gymid:gid}, b.dataset)); });
+  box.querySelectorAll('.caProof').forEach(function(b){ b.onclick=async function(e){
+    e.stopPropagation();
+    var tx=b.dataset.tx; if(!tx) return;
+    b.disabled=true; b.textContent='\u2026';
+    try{
+      await supaClient.from('transactions').update({ proof_checked:true }).eq('id',tx);
+      // Odznak zmizi hned, at je videt, ze se to zapsalo, a nemusi se prekreslovat celá lekce.
+      try{ if(window._attProof) Object.keys(window._attProof).forEach(function(k){ if(String(window._attProof[k].id)===String(tx)) delete window._attProof[k]; }); }catch(_){}
+      b.remove();
+      toast(LANG==='en'?'\u2705 Proof recorded':'\u2705 Dolo\u017eeno');
+    }catch(err){
+      b.disabled=false; b.textContent=(LANG==='en'?'\u26a0\ufe0f proof?':'\u26a0\ufe0f doklad?');
+      toast('\u26a0\ufe0f '+((err&&err.message)||err));
+    }
+  }; });
   const _cahY=$('caHappenedYes'); if(_cahY) _cahY.onclick=async()=>{ try{ await supaClient.from('gym_class_log').insert({ gym_id:gid, class_date:occ.date, class_time:occ.time||null, class_name:occ.name||null, coach_id:occ.coach||null, status:'held', logged_by:currentUser?currentUser.id:null }); }catch(e){} const b=$('caHappenedBanner'); if(b) b.outerHTML='<div style="background:#F0FBF0;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-weight:700;font-size:14px;color:#006040;">'+(EN?'✅ Marked: class took place':'✅ Označeno: lekce proběhla')+'</div>'; toast(EN?'✅ Marked as held':'✅ Označeno jako proběhlá'); try{ if(typeof loadGymRoster==='function') loadGymRoster(); }catch(e){} };
   const _cahN=$('caHappenedNo'); if(_cahN) _cahN.onclick=()=>{ const _b=$('caHappenedBanner'); if(!_b) return; _b.innerHTML='<div style="font-weight:800;font-size:13.5px;margin-bottom:8px;color:var(--dark);">'+(EN?'Why did it not happen?':'Pro\u010d neprob\u011bhla?')+'</div>'+'<button id="caNhZero" style="width:100%;padding:11px;margin-bottom:6px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;text-align:left;font-family:DM Sans;line-height:1.35;">'+(EN?'It was on, but nobody came':'M\u011bla prob\u011bhnout, ale nikdo nep\u0159i\u0161el')+'</button>'+'<button id="caNhForgot" style="width:100%;padding:11px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;text-align:left;font-family:DM Sans;line-height:1.35;">'+(EN?'We forgot to cancel it (it should not have run)':'Zapomn\u011bli jsme ji zru\u0161it (nem\u011bla b\u00fdt)')+'</button>'; const _doLog=async(reason)=>{ try{ await supaClient.from('gym_class_log').insert({ gym_id:gid, class_date:occ.date, class_time:occ.time||null, class_name:occ.name||null, coach_id:occ.coach||null, status:'cancelled', reason:reason, logged_by:currentUser?currentUser.id:null }); }catch(e){} try{ await supaClient.from('attend_reminders').delete().eq('gym_id',gid).eq('class_date',occ.date).eq('class_time',occ.time||null).eq('class_name',occ.name||null); }catch(e){} try{ if(window._cancelledOcc) window._cancelledOcc.add(`${occ.date}|${occ.time||''}|${occ.name||''}`); }catch(e){} if(_b) _b.outerHTML='<div style="background:#FEECEC;border:1px solid #F3C9C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-weight:700;font-size:14px;color:var(--red);">'+(reason===String.fromCharCode(122,101,114,111)?(EN?'\u2715 Logged: nobody came':'\u2715 Zalogov\u00e1no: nikdo nep\u0159i\u0161el'):(EN?'\u2715 Logged: did not run':'\u2715 Zalogov\u00e1no: neprob\u011bhla'))+'</div>'; toast(EN?'\u2705 Logged':'\u2705 Zalogov\u00e1no'); try{ if(typeof loadGymRoster==='function') loadGymRoster(); }catch(e){} }; const _z=$('caNhZero'); if(_z) _z.onclick=()=>_doLog('zero'); const _f=$('caNhForgot'); if(_f) _f.onclick=()=>_doLog('forgot'); };
   if(!_roLock && _myGymData && _myGymData.owner_id===(currentUser&&currentUser.id) && (typeof _mtlPayMode==='function'&&_mtlPayMode(_myGymData)==='qr_bank')){
