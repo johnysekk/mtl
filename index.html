@@ -12068,7 +12068,18 @@ async function openGymProfile(g){
         if(_m==='stripe') return _auto ? !p.gym_payout_account : (p.charges_enabled===false);
         return _auto ? !(p.payout_receiver_id_value && p.payout_legal_name) : !p.receiver_id_value;
       }).map(p=>p.id));
-      if(_badPayee.size){ for(let _z=occs.length-1;_z>=0;_z--){ if(occs[_z].coach && _badPayee.has(occs[_z].coach)) occs.splice(_z,1); } }
+      if(_badPayee.size){ for(let _z=occs.length-1;_z>=0;_z--){ if(occs[_z].coach && _badPayee.has(occs[_z].coach)) occs.splice(_z,1); }
+        // Nejen rozvrh: i PERMANENTKY vedene tim koucem. Driv zustavaly na profilu a daly
+        // se koupit, prestoze penize nemely kam jit -- a doklad by znel na jinou entitu,
+        // nez ktera je dostala. Neni rezervace, neni chybny doklad.
+        try{
+          for(let _p=_coachPlans.length-1;_p>=0;_p--){
+            if(_coachPlans[_p] && _coachPlans[_p].coach && _badPayee.has(_coachPlans[_p].coach)) _coachPlans.splice(_p,1);
+          }
+          // A z ciselniku, ze ktereho se ceny cerpaji dal.
+          _badPayee.forEach(function(_cid){ try{ if(window._gymCoachPricing) delete window._gymCoachPricing[_cid]; }catch(e){} });
+        }catch(e){}
+      }
     }
     _leadingCoaches = new Set((occs||[]).map(o=>o.coach).filter(Boolean));
   } catch(e){}
@@ -20573,24 +20584,32 @@ async function showCommissionDoklad(id){
   await _loadMtlEnt(); const ME = window._mtlEnt || MTL_ENTITY;
   // ODBERATEL ZE SNIMKU. Doklad je zaznam o tom, co bylo vystaveno -- kdyz klub pozdeji
   // zmeni nazev nebo vstoupi do DPH, uz vystaveny doklad se menit nesmi.
-  let gym = null, _fromSnap = false;
+  // SNIMEK, NEBO NIC. Doklad je zaznam o tom, co bylo vystaveno -- skladat ho z dnesnich
+  // dat znamena vyrobit dokument, ktery se v case meni. To uz neni doklad.
+  let gym = null;
   if(dk.cust_name || dk.cust_ico){
-    _fromSnap = true;
     gym = { name: dk.cust_name, legal_name: dk.cust_name, tax_id: dk.cust_ico,
       vat_id: dk.cust_dic, billing_address: dk.cust_address,
       billing_country: dk.cust_country, vat_payer: !!dk.cust_vat_payer };
+  } else {
+    // Bez snimku doklad NEVYSTAVUJEME. Radeji rekneme, co se stalo.
+    try{
+      const _bx=document.getElementById('comDokBody')||document.getElementById('cdBody');
+      if(_bx) _bx.innerHTML='<div style="padding:22px;font-size:13.5px;line-height:1.6;color:var(--mid);">'
+        +'<div style="font-size:15px;font-weight:800;color:var(--dark);margin-bottom:8px;">'
+        +(EN?'This document has no snapshot':'Tenhle doklad nem\u00e1 sn\u00edmek')+'</div>'
+        +(EN?'It was issued before snapshots were stored. We will not rebuild it from today\u2019s data \u2014 that would not be the document that was issued. The amounts are in Accounting.'
+            :'Byl vystaven p\u0159ed zaveden\u00edm sn\u00edmk\u016f. Nebudeme ho skl\u00e1dat z dne\u0161n\u00edch dat \u2014 nebyl by to doklad, kter\u00fd byl vystaven. \u010c\u00e1stky najde\u0161 v \u00fa\u010detnictv\u00ed.')
+        +'</div>';
+    }catch(e){}
+    try{ toast(EN?'\u26a0\ufe0f No snapshot for this document':'\u26a0\ufe0f Tenhle doklad nem\u00e1 sn\u00edmek'); }catch(e){}
+    return;
   }
-  // Bez snimku (doklady z doby pred jeho zavedenim) dokreslime ze zivych dat, ale receme to.
-  if(!gym){
-    gym = (typeof _myGymData !== 'undefined' && _myGymData && _myGymData.id === dk.gym_id) ? _myGymData : null;
-    if(!gym){ try{ const { data } = await supaClient.from('gyms').select('name,legal_name,billing_address,tax_id,vat_id,billing_country').eq('id', dk.gym_id).single(); gym = data; }catch(e){} }
-  }
-  gym = gym || {};
   // Jen kdyz snimek NENI. Driv tato vetev prepsala i snimek, takze u kouce se doklad
   // kreslil z dnesniho profilu bez ohledu na to, co bylo vystaveno.
-  if(!_fromSnap && !dk.gym_id && dk.coach_id){ try{ const { data:_cp } = await supaClient.from('profiles').select('name,legal_name,billing_address,tax_id,vat_id').eq('id', dk.coach_id).single(); // U kouče je name jeho vlastní jméno, ne název klubu -- bez tohohle příznaku by pod právním
-      // názvem stálo "Klub v MTL: Petr Haiser", což nedává smysl.
-      if(_cp){ gym = { name:_cp.name, legal_name:_cp.legal_name, billing_address:_cp.billing_address, tax_id:_cp.tax_id, vat_id:_cp.vat_id, _isCoach:true }; } }catch(e){} }
+  // Kouc vs klub se pozna ze snimku: doklad kouce nema ICO klubu. Ziva data uz se
+  // nikde nectou, takze tady neni co dohledavat.
+  if(gym && !dk.gym_id && dk.coach_id) gym._isCoach = true;
   const w = window.open('', '_blank'); if(!w){ toast(EN?'Allow pop-ups to view the doklad':'Povol vyskakovac\u00ed okna'); return; }
   const amt = (dk.amount/100); const cur = (dk.currency||'czk').toUpperCase();
   const f = function(v){ return v.toLocaleString(EN?'en-GB':'cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2})+' '+cur; };
