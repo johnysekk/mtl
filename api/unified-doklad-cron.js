@@ -265,7 +265,7 @@ export default async function handler(req, res) {
   try {
     const _dg = await sb('gyms?commission_daily=is.true&select=id&limit=1');
     const _dc = await sb('profiles?commission_daily=is.true&select=id&limit=1');
-    dailyAny = !!((_dg && _dg.length) || (_dc && _dc.length));
+    const _do = await sb('organizations?commission_daily=is.true&select=id&limit=1'); dailyAny = !!((_dg && _dg.length) || (_dc && _dc.length) || (_do && _do.length));
   } catch (e) {}
   const DAILY = TEST || dailyAny;
   // Testovací režim platformy. Doklad vystavený v testu musí být jako testovací poznat i v mailu,

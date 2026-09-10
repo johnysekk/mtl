@@ -63,6 +63,16 @@ export default async function handler(req, res) {
 
   const now = new Date();
   const billDay = now.getUTCDate() >= 6;
+
+// STRIPE MA MINIMALNI CASTKU. Pod ni kartu odmitne a paymentIntents.create spadne -- coz cron
+// dosud pocital jako SELHANI PLATBY: odlozil o tri dny, poslal "provizi se nepodarilo strhnout"
+// a po dvou tydnech pozastavil ucet. Pritom klub nic neudelal, jen mu za den narostla provize
+// mensi, nez co Stripe umi strhnout. U denniho rezimu to nastava skoro vzdycky.
+// Spravne: pod minimem se NESTRHAVA a NIC se neoznaci -- castka zustane pending a pricte se
+// k dalsimu dni. Jednou minimum pretece a strhne se najednou.
+const STRIPE_MIN = { czk: 1500, eur: 50, usd: 50, gbp: 30, pln: 200, huf: 17500, chf: 50, sek: 300, dkk: 250, nok: 300 };
+const belowMin = (amount, cur) => amount < (STRIPE_MIN[String(cur || 'czk').toLowerCase()] || 50);
+let deferredMin = 0;
   const curMonth = now.toISOString().slice(0, 7);
   let marked = 0, markErr = null;
   let collected = 0, failed = 0, suspended = 0, lifted = 0;
@@ -74,12 +84,15 @@ export default async function handler(req, res) {
   let dailyGyms = new Set(), dailyCoaches = new Set();
   try { dailyGyms = new Set(((await sb('gyms?commission_daily=is.true&select=id')) || []).map(g => g.id)); } catch (e) {}
   try { dailyCoaches = new Set(((await sb('profiles?commission_daily=is.true&select=id')) || []).map(x => x.id)); } catch (e) {}
+  let dailyOrgs = new Set();
+  try { dailyOrgs = new Set(((await sb('organizations?commission_daily=is.true&select=id')) || []).map(o => o.id)); } catch (e) {}
+  const orgDaily = (id) => TEST || dailyOrgs.has(id);
   const gymDaily = (id) => TEST || dailyGyms.has(id);
   const coachDaily = (id) => TEST || dailyCoaches.has(id);
   const today = new Date().toISOString().slice(0, 10);
   // The wide fetch takes the running month too; rows belonging to anybody NOT on daily are
   // dropped again during grouping, so nothing changes for them.
-  const monthOp = (TEST || dailyGyms.size || dailyCoaches.size) ? 'lte' : 'lt';
+  const monthOp = (TEST || dailyGyms.size || dailyCoaches.size || dailyOrgs.size) ? 'lte' : 'lt';
 
   try {
     // ---- gather unpaid cash/qr commission, grouped by gym + currency ----
@@ -112,6 +125,8 @@ export default async function handler(req, res) {
         let anyFail = false, anyCharge = false;
         for (const cur of Object.keys(byGym[gid])) {
           const amount = Math.round(byGym[gid][cur]);
+          // Pod minimem Stripe: nechame to na priste, at se z toho nestane "selhalo".
+          if (amount > 0 && belowMin(amount, cur)) { deferredMin++; continue; }
           if (!amount || amount <= 0) continue;
           anyCharge = true;
           let pi = null;
@@ -225,6 +240,8 @@ export default async function handler(req, res) {
         let anyFail = false, anyCharge = false;
         for (const cur of Object.keys(byCoach[cid])) {
           const amount = Math.round(byCoach[cid][cur]);
+          // Pod minimem Stripe: nechame to na priste, at se z toho nestane "selhalo".
+          if (amount > 0 && belowMin(amount, cur)) { deferredMin++; continue; }
           if (!amount || amount <= 0) continue;
           anyCharge = true;
           let pi = null;
@@ -301,7 +318,7 @@ export default async function handler(req, res) {
     for (const t of (otx || [])) {
       if (!t.organization_id) continue;
       // Běžný provoz účtuje po měsíci; denní režim je jen pro testovací účty.
-      if (t.commission_month === curMonth && !TEST) continue;
+      if (t.commission_month === curMonth && !orgDaily(t.organization_id)) continue;
       const cur = (t.currency || 'czk').toLowerCase();
       (byOrg[t.organization_id] = byOrg[t.organization_id] || {});
       byOrg[t.organization_id][cur] = (byOrg[t.organization_id][cur] || 0) + ((t.mtl_fee || 0) - (t.mtl_fee_refunded || 0));
@@ -328,6 +345,8 @@ export default async function handler(req, res) {
         let anyFail = false, anyCharge = false;
         for (const cur of Object.keys(byOrg[oid])) {
           const amount = Math.round(byOrg[oid][cur]);
+          // Pod minimem Stripe: nechame to na priste, at se z toho nestane "selhalo".
+          if (amount > 0 && belowMin(amount, cur)) { deferredMin++; continue; }
           if (!amount || amount <= 0) continue;
           anyCharge = true;
           let pi = null;
@@ -338,11 +357,11 @@ export default async function handler(req, res) {
               off_session: true, confirm: true,
               description: `MTL provize (hotovost/QR) ${o.name || 'organizace'}`,
               metadata: { organization_id: oid, kind: 'mtl_commission', month: curMonth },
-            }, { idempotencyKey: `comm_org_${oid}_${TEST ? today : curMonth}_${cur}` });
+            }, { idempotencyKey: `comm_org_${oid}_${orgDaily(oid) ? today : curMonth}_${cur}` });
           } catch (e) { pi = null; }
           if (pi && pi.status === 'succeeded') {
             // Označit transakce jako vybrané -- bez toho nemá unified-doklad-cron co vystavit.
-            const _scope = TEST ? '' : `&commission_month=lt.${curMonth}`;
+            const _scope = orgDaily(oid) ? '' : `&commission_month=lt.${curMonth}`;
             const r = await sb(`transactions?organization_id=eq.${oid}&currency=eq.${cur.toUpperCase()}&commission_status=in.(pending,failed)&payment_method=in.(cash,qr,pis)${_scope}`, {
               method: 'PATCH', prefer: 'return=representation',
               body: JSON.stringify({ commission_status: 'collected', commission_collected_at: new Date().toISOString(), commission_payment_intent: pi.id }),
@@ -391,7 +410,8 @@ export default async function handler(req, res) {
 
     // marked = kolik transakcí dostalo commission_collected_at. Když je collected > 0 a marked = 0,
     // strhlo se, ale neoznačilo -- a pak nemá unified-doklad-cron co vystavit.
-    return res.status(200).json({ ok: true, billDay, collected, failed, suspended, lifted, marked, markErr });
+    // deferredMin = kolikrat byla castka pod minimem Stripe a proto se necekala jako chyba.
+    return res.status(200).json({ ok: true, billDay, collected, failed, suspended, lifted, marked, deferredMin, markErr });
   } catch (e) {
     return res.status(500).json({ error: e.message, collected, failed, suspended, lifted });
   }
