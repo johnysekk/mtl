@@ -12,20 +12,23 @@ export default async function handler(req, res) {
     const proto = host && host.includes('localhost') ? 'http' : 'https';
 
     // (volitelné) předvyplň zemi/e-mail z query, jinak je gym zadá v onboardingu
-    const { email, country, gymProfileId, for: forRole } = req.query;
+    const { email, country, gymProfileId, gymId, for: forRole } = req.query;
     const isCoach = String(forRole) === 'coach';
+    // Existujici klub nese svoje id az do navratove adresy. Bez nej appka po navratu nepozna,
+    // ze jde o klub, ktery uz existuje, otevre prihlasku noveho klubu a ucet se nikam nezapise.
+    const gymQ = (!isCoach && gymId) ? `&gym=${encodeURIComponent(String(gymId))}` : '';
 
     const account = await stripe.accounts.create({
       type: 'standard',
       ...(email ? { email } : {}),
       ...(country ? { country: String(country).toUpperCase() } : {}),
-      metadata: { mtl_role: isCoach ? 'coach_payout' : 'gym', gym_profile_id: gymProfileId || '' },
+      metadata: { mtl_role: isCoach ? 'coach_payout' : 'gym', gym_profile_id: gymProfileId || '', gym_id: (!isCoach && gymId) ? String(gymId) : '' },
     });
 
     const link = await stripe.accountLinks.create({
       account: account.id,
-      refresh_url: `${proto}://${host}/?${isCoach ? 'coach_payout=refresh' : 'gym_stripe=refresh'}`,
-      return_url: `${proto}://${host}/?${isCoach ? 'coach_payout=done' : 'gym_stripe=done'}&acct=${account.id}`,
+      refresh_url: `${proto}://${host}/?${isCoach ? 'coach_payout=refresh' : 'gym_stripe=refresh'}${gymQ}`,
+      return_url: `${proto}://${host}/?${isCoach ? 'coach_payout=done' : 'gym_stripe=done'}&acct=${account.id}${gymQ}`,
       type: 'account_onboarding',
     });
 
