@@ -88,10 +88,10 @@ export default async function handler(req, res) {
       expired++;
     }
 
-    // ---- Pass 3: expire unpaid QR coach 1:1 reservations 1 hour after booking --------------
+    // ---- Pass 3: expire unpaid QR coach 1:1 reservations 30 min after booking --------------
     try {
-      const cutoff1h = new Date(Date.now() - 30 * 60 * 1000).toISOString(); // 30 min unpaid window
-      const b1 = await sb(`bookings?payment_method=eq.qr&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoff1h)}&select=id,slot_id,student_id,coach_name&limit=3000`);
+      const cutoff30m = new Date(Date.now() - 30 * 60 * 1000).toISOString(); // 30 min unpaid window
+      const b1 = await sb(`bookings?payment_method=eq.qr&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoff30m)}&select=id,slot_id,student_id,coach_name&limit=3000`);
       for (const b of (b1 || [])) {
         await sb(`bookings?id=eq.${b.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'expired' }) });
         if (b.slot_id) { try { await sb(`slots?id=eq.${encodeURIComponent(b.slot_id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ booked: false }) }); } catch (e) {} }
@@ -105,10 +105,10 @@ export default async function handler(req, res) {
       }
     } catch (e) { /* bookings pass non-fatal */ }
 
-    // ---- Pass 4: expire unpaid QR event-ticket reservations 1 hour after booking ----------
+    // ---- Pass 4: expire unpaid QR event-ticket reservations 30 min after booking ----------
     try {
-      const cutoff1hE = new Date(Date.now() - 30 * 60 * 1000).toISOString(); // 30 min unpaid window
-      const e1 = await sb(`event_tickets?payment_method=eq.qr&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoff1hE)}&select=id&limit=3000`);
+      const cutoff30mE = new Date(Date.now() - 30 * 60 * 1000).toISOString(); // 30 min unpaid window
+      const e1 = await sb(`event_tickets?payment_method=eq.qr&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoff30mE)}&select=id&limit=3000`);
       for (const t of (e1 || [])) {
         await sb(`event_tickets?id=eq.${t.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'expired' }) });
         expired1h++;
