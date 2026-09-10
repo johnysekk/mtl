@@ -22,6 +22,30 @@ const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const RESEND = process.env.RESEND_API_KEY;
 const MAIL_FROM = process.env.INVITE_FROM || 'Martial Training Lab <no-reply@martialtraininglab.com>';
 
+// ── FAKTURAČNÍ ADRESA ────────────────────────────────────────────────────────────────────
+// Pravda je v rozpadu billing_line1/line2/city/postal (potřebuje ho DAC7). Jednořádkový
+// tvar je jen pro zobrazení na dokladu, takže se SKLÁDÁ při čtení, ne ukládá zvlášť --
+// dvě kopie téže adresy se vždy rozejdou.
+// Prefix pokrývá druhou fakturační identitu kouče (payout_).
+function _billAddr(row, prefix) {
+  try {
+    if (!row) return null;
+    const p = prefix || '';
+    const g = (k) => {
+      const v = row[p + k];
+      return (v == null) ? '' : String(v).trim();
+    };
+    const l1 = g('billing_line1'), l2 = g('billing_line2');
+    const city = g('billing_city'), zip = g('billing_postal');
+    const parts = [l1, l2, ((zip ? zip + ' ' : '') + city).trim()]
+      .filter((x) => x && x.trim());
+    if (parts.length) return parts.join(', ');
+    // Záloha pro řádky z doby před rozpadem, kde je jen složený tvar.
+    const legacy = g('billing_address');
+    return legacy || null;
+  } catch (e) { return null; }
+}
+
 async function sb(path, opts = {}) {
   const r = await fetch(`${SB}/rest/v1/${path}`, {
     method: opts.method || 'GET',
@@ -142,7 +166,7 @@ function dokladHtml(ME, buyer, kind, period, cur, data, test, testMode){
   const supLines = ['<b>'+esc(ME.name||'Martial Training Lab s.r.o.')+'</b>', ME.ico?('I\u010cO: '+esc(ME.ico)):(_ph?('I\u010cO: '+_ph):''), ME.sidlo?esc(ME.sidlo):'', ME.dic?('DI\u010c: '+esc(ME.dic)):(_ph?('DI\u010c: '+_ph):''), ME.vat_id?('VAT ID: '+esc(ME.vat_id)):'', ME.contact_phone?('Kontaktn\u00ed telefon: '+esc(ME.contact_phone)):'', ME.contact_email?('Kontaktn\u00ed e-mail: '+esc(ME.contact_email)):''].filter(Boolean).join('<br>');
   const bName = (buyer && (buyer.legal_name || buyer.name)) || '\u2014';
   const buyLines = ['<b>'+esc(bName)+'</b>',
-    (buyer&&buyer.name&&buyer.name!==bName)?(((kind==='coach')?'Kou\u010d v MTL: ':'Klub v MTL: ')+esc(buyer.name)):'', (buyer&&buyer.tax_id)?('I\u010cO: '+esc(buyer.tax_id)):(_ph?('I\u010cO: '+_ph):''), (buyer&&buyer.billing_address)?esc(buyer.billing_address):'', (buyer&&buyer.vat_id)?('DI\u010c: '+esc(buyer.vat_id)):(_ph?('DI\u010c: '+_ph):'')].filter(Boolean).join('<br>');
+    (buyer&&buyer.name&&buyer.name!==bName)?(((kind==='coach')?'Kou\u010d v MTL: ':'Klub v MTL: ')+esc(buyer.name)):'', (buyer&&buyer.tax_id)?('I\u010cO: '+esc(buyer.tax_id)):(_ph?('I\u010cO: '+_ph):''), _billAddr(buyer)?esc(_billAddr(buyer)):'', (buyer&&buyer.vat_id)?('DI\u010c: '+esc(buyer.vat_id)):(_ph?('DI\u010c: '+_ph):'')].filter(Boolean).join('<br>');
   let vatBlock;
   if(ME.vat_payer){ const rate=ME.vat_rate||21; const base=total/(1+rate/100); const vat=total-base; vatBlock='<tr><td>Z\u00e1klad dan\u011b</td><td style="text-align:right;">'+_money(base,cur)+'</td></tr><tr><td>DPH '+rate+'%</td><td style="text-align:right;">'+_money(vat,cur)+'</td></tr>'; }
   else { vatBlock='<tr><td colspan="2" style="font-size:11px;color:#666;padding-top:6px;">Dodavatel nen\u00ed pl\u00e1tcem DPH.</td></tr>'; }
@@ -212,7 +236,7 @@ function dokladPdf(ME, buyer, kind, period, cur, data, test, testMode){
       }
       if (B.tax_id) doc.fontSize(10).fillColor('#555555').text('I\u010cO: ' + B.tax_id, 315, doc.y, { width:230 });
       if (B.vat_id) doc.fontSize(10).fillColor('#555555').text('DI\u010c: ' + B.vat_id, 315, doc.y, { width:230 });
-      if (B.billing_address) doc.fontSize(10).fillColor('#555555').text(B.billing_address, 315, doc.y, { width:230 });
+      if (_billAddr(B)) doc.fontSize(10).fillColor('#555555').text(_billAddr(B), 315, doc.y, { width:230 });
       doc.y = Math.max(yLeft, doc.y) + 18;
 
       const cols = [50, 190, 260, 340, 440];
@@ -379,14 +403,14 @@ export default async function handler(req, res) {
       let buyer = null;
       try {
         const _sel = (kind === 'gym')
-          ? `gyms?id=eq.${entityId}&select=name,legal_name,billing_address,tax_id,vat_id,billing_country,country&limit=1`
-          : `profiles?id=eq.${entityId}&select=name,${_bp}legal_name,${_bp}billing_address,${_bp}tax_id,${_bp}vat_id,country,${_bp}billing_country&limit=1`;
+          ? `gyms?id=eq.${entityId}&select=name,legal_name,billing_address,billing_line1,billing_line2,billing_city,billing_postal,tax_id,vat_id,billing_country,country&limit=1`
+          : `profiles?id=eq.${entityId}&select=name,${_bp}legal_name,${_bp}billing_address,${_bp}billing_line1,${_bp}billing_line2,${_bp}billing_city,${_bp}billing_postal,${_bp}tax_id,${_bp}vat_id,country,${_bp}billing_country&limit=1`;
         const _b = await sb(_sel);
         buyer = _b && _b[0];
         // Zbytek funkce pracuje s bezprefixovými názvy, ať se nemusí měnit každé použití.
         if (buyer && _bp) {
           buyer = { name: buyer.name,
-            legal_name: buyer[_bp + 'legal_name'], billing_address: buyer[_bp + 'billing_address'],
+            legal_name: buyer[_bp + 'legal_name'], billing_address: _billAddr(buyer, _bp),
             tax_id: buyer[_bp + 'tax_id'], vat_id: buyer[_bp + 'vat_id'],
             billing_country: buyer[_bp + 'billing_country'], country: buyer.country };
         }
@@ -427,7 +451,7 @@ export default async function handler(req, res) {
       cust_name: (buyer && (buyer.legal_name || buyer.name)) || null,
       cust_ico: (buyer && buyer.tax_id) || null,
       cust_dic: (buyer && buyer.vat_id) || null,
-      cust_address: (buyer && buyer.billing_address) || null,
+      cust_address: _billAddr(buyer) || null,
       cust_vat_payer: !!(buyer && buyer.vat_id),
       cust_country: (buyer && (buyer.billing_country || buyer.country)) || null };
       body[col] = entityId;
@@ -471,8 +495,8 @@ export default async function handler(req, res) {
 
     if (preview) {
       let firstHtml = '';
-      for (const gid of gymIds) { const g = gymMap[gid]; if (!g) continue; for (const cur of Object.keys(gymB[gid])) { const _b = (await sb(`gyms?id=eq.${gid}&select=name,legal_name,billing_address,tax_id,vat_id,billing_country,country&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'gym', period, cur, gymB[gid][cur], TEST); break; } if (firstHtml) break; }
-      if (!firstHtml) { for (const cid of Object.keys(coachB)) { for (const cur of Object.keys(coachB[cid])) { const _b = (await sb(`profiles?id=eq.${cid}&select=name,legal_name,billing_address,tax_id,vat_id,country,billing_country&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'coach', period, cur, coachB[cid][cur], TEST); break; } if (firstHtml) break; } }
+      for (const gid of gymIds) { const g = gymMap[gid]; if (!g) continue; for (const cur of Object.keys(gymB[gid])) { const _b = (await sb(`gyms?id=eq.${gid}&select=name,legal_name,billing_address,billing_line1,billing_line2,billing_city,billing_postal,tax_id,vat_id,billing_country,country&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'gym', period, cur, gymB[gid][cur], TEST); break; } if (firstHtml) break; }
+      if (!firstHtml) { for (const cid of Object.keys(coachB)) { for (const cur of Object.keys(coachB[cid])) { const _b = (await sb(`profiles?id=eq.${cid}&select=name,legal_name,billing_address,billing_line1,billing_line2,billing_city,billing_postal,tax_id,vat_id,country,billing_country&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'coach', period, cur, coachB[cid][cur], TEST); break; } if (firstHtml) break; } }
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       return res.status(200).send(firstHtml || ('<p style="font-family:sans-serif;padding:24px;">\u017d\u00e1dn\u00e1 provize za ' + period + ' (zkus jin\u00fd ?month=RRRR-MM).</p>'));
     }

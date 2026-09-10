@@ -12,6 +12,30 @@
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
+// ── FAKTURAČNÍ ADRESA ────────────────────────────────────────────────────────────────────
+// Pravda je v rozpadu billing_line1/line2/city/postal (potřebuje ho DAC7). Jednořádkový
+// tvar je jen pro zobrazení na dokladu, takže se SKLÁDÁ při čtení, ne ukládá zvlášť --
+// dvě kopie téže adresy se vždy rozejdou.
+// Prefix pokrývá druhou fakturační identitu kouče (payout_).
+function _billAddr(row, prefix) {
+  try {
+    if (!row) return null;
+    const p = prefix || '';
+    const g = (k) => {
+      const v = row[p + k];
+      return (v == null) ? '' : String(v).trim();
+    };
+    const l1 = g('billing_line1'), l2 = g('billing_line2');
+    const city = g('billing_city'), zip = g('billing_postal');
+    const parts = [l1, l2, ((zip ? zip + ' ' : '') + city).trim()]
+      .filter((x) => x && x.trim());
+    if (parts.length) return parts.join(', ');
+    // Záloha pro řádky z doby před rozpadem, kde je jen složený tvar.
+    const legacy = g('billing_address');
+    return legacy || null;
+  } catch (e) { return null; }
+}
+
 async function sb(path, opts = {}) {
   const r = await fetch(`${SB}/rest/v1/${path}`, {
     method: opts.method || 'GET',
@@ -49,9 +73,9 @@ async function issueOrgDoklad(oc, org, amount, currency, method, testMode, trans
     let cust = { name: oc.ext_legal_name || oc.ext_name || null, email: oc.ext_email || oc.guest_email || null,
                  ico: oc.ext_tax_id || null, address: oc.ext_address || null };
     if (oc.gym_id) {
-      const g = (await sb(`gyms?id=eq.${encodeURIComponent(oc.gym_id)}&select=name,legal_name,tax_id,vat_id,billing_address,invoice_email`))[0];
+      const g = (await sb(`gyms?id=eq.${encodeURIComponent(oc.gym_id)}&select=name,legal_name,tax_id,vat_id,billing_address,billing_line1,billing_line2,billing_city,billing_postal,invoice_email`))[0];
       if (g) cust = { name: g.legal_name || g.name || null, email: g.invoice_email || null,
-                      ico: g.tax_id || null, address: g.billing_address || null };
+                      ico: g.tax_id || null, address: _billAddr(g) || null };
     }
 
     const label = oc.fee_label || 'Členský poplatek';
@@ -61,7 +85,7 @@ async function issueOrgDoklad(oc, org, amount, currency, method, testMode, trans
         doklad_no: String(no), series_key: key,
         transaction_id: transactionId || null, payment_intent: oc.fee_payment_intent || null,
         sup_name: org.legal_name || org.name || null,
-        sup_ico: ico, sup_dic: org.vat_id || null, sup_address: org.billing_address || null,
+        sup_ico: ico, sup_dic: org.vat_id || null, sup_address: _billAddr(org) || null,
         sup_vat_payer: !!org.vat_payer, sup_vat_rate: (org.vat_rate != null ? org.vat_rate : null),
         cust_name: cust.name, cust_email: cust.email,
         item_label: label,
@@ -88,7 +112,7 @@ export default async function handler(req, res) {
     const dup = await sb(`transactions?org_fee_id=eq.${encodeURIComponent(oc_id)}&select=id&limit=1`);
     if (dup && dup.length) return res.status(200).json({ ok: true, already: true });
 
-    const org = (await sb(`organizations?id=eq.${encodeURIComponent(oc.organization_id)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_address,owner_id`))[0];
+    const org = (await sb(`organizations?id=eq.${encodeURIComponent(oc.organization_id)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_address,billing_line1,billing_line2,billing_city,billing_postal,owner_id`))[0];
     if (!org) return res.status(404).json({ error: 'org not found' });
 
     // Popis se opíše z období, aby na dokladu stálo, ZA CO klub platil.
