@@ -67,13 +67,13 @@ async function _issueDokladBank({ transactionId, gymId, coachId, clubMode, custo
     let sup = null, ownerId = null;
 
     if (gymId && !coachId) {
-      sup = (await _wsbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,owner_id`))[0] || null;
+      sup = (await _wsbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,owner_id`))[0] || null;
       ownerId = sup && sup.owner_id;
     } else if (coachId) {
       // clubMode urcuje volajici: v record-cash jde klubove plneni klubovou vetvi a pozna
       // se tim, ze se prijemce prepnul na koucuv klubovy ucet. Z gym_id to poznat nejde,
       // protoze koucova vetev zapisuje gym_id vzdy null.
-      const p = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,billing_line1,billing_line2,billing_city,billing_postal,payout_legal_name,payout_tax_id,payout_vat_id,payout_vat_payer,payout_vat_rate,payout_billing_address,payout_billing_line1,payout_billing_line2,payout_billing_city,payout_billing_postal`))[0] || null;
+      const p = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,payout_legal_name,payout_tax_id,payout_vat_id,payout_vat_payer,payout_vat_rate,payout_billing_line1,payout_billing_line2,payout_billing_city,payout_billing_postal`))[0] || null;
       if (p) {
         sup = clubMode
           ? { legal_name: p.payout_legal_name, name: p.payout_legal_name,
@@ -82,8 +82,7 @@ async function _issueDokladBank({ transactionId, gymId, coachId, clubMode, custo
               // Adresa se sklada z rozpadu s prefixem payout_; billing_address je jen
               // zaloha pro radky z doby pred rozpadem.
               billing_line1: p.payout_billing_line1, billing_line2: p.payout_billing_line2,
-              billing_city: p.payout_billing_city, billing_postal: p.payout_billing_postal,
-              billing_address: p.payout_billing_address }
+              billing_city: p.payout_billing_city, billing_postal: p.payout_billing_postal }
           : p;
       }
       ownerId = coachId;
