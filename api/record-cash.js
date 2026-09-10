@@ -355,6 +355,33 @@ export default async function handler(req, res) {
       };
     }
 
+    // KDO BUDE FAKTUROVAT. Bez ICO nejde vystavit doklad, a platba bez dokladu je horsi
+    // nez odmitnuta platba -- clovek zaplati a nema co dat ucetni. Skryti na profilu je jen
+    // prvni obrana; stara stranka nebo prime volani ji obejdou, proto to hlida i server.
+    {
+      let _supIco = null, _who = null;
+      try {
+        if (_dokladPayoutCoach) {
+          const _pp = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(_dokladPayoutCoach)}&select=payout_tax_id,payout_legal_name`))[0];
+          _supIco = _pp && _pp.payout_tax_id; _who = 'coach_payout';
+        } else if (row.gym_id) {
+          const _gg = (await _wsbGet(`gyms?id=eq.${encodeURIComponent(row.gym_id)}&select=tax_id`))[0];
+          _supIco = _gg && _gg.tax_id; _who = 'gym';
+        } else if (row.coach_id) {
+          const _cc2 = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(row.coach_id)}&select=tax_id`))[0];
+          _supIco = _cc2 && _cc2.tax_id; _who = 'coach';
+        }
+      } catch (e) {}
+      if (!String(_supIco || '').replace(/\s/g, '')) {
+        return res.status(409).json({
+          error: 'payout_identity_missing', who: _who,
+          message: (_who === 'coach_payout')
+            ? 'Trenér nemá vyplněnou fakturační identitu pro režim klub (IČO). Bez ní by doklad zněl na jiný subjekt, než který dostal peníze.'
+            : 'Poskytovatel nemá vyplněné IČO. Bez něj nelze vystavit doklad.'
+        });
+      }
+    }
+
     const ins = await sb('transactions', { method: 'POST', prefer: 'return=representation', body: JSON.stringify(row) });
     const _txId = (ins && ins[0] && ins[0].id) || null;
 
