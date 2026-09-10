@@ -204,9 +204,7 @@ export default async function handler(req, res) {
       // uvnitř effectiveRateBreakdown (kudy jde Stripe) jinak obešla.
       // Země z přihlášky poskytovatele: u klubu jeho vlastní, u kouče z profilu. Majitel může
       // bydlet jinde, než odkud fakturuje klub -- doklad zní na klub, tak rozhoduje jeho země.
-      const _intro = await _introFree(_wsbGet,
-        (gym && gym.billing_country) || (ownerProf && ownerProf.billing_country)
-        || (coach && coach.billing_country));
+      const _intro = await _introFree(_wsbGet, (gym && gym.billing_country) || (ownerProf && ownerProf.billing_country));
       let mtl_fee = (_cc || _intro) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
       // Podlaha jen u PIS a jen když se opravdu něco účtuje -- uplatněný kredit zůstává nulový.
       if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, gross));
@@ -253,9 +251,7 @@ export default async function handler(req, res) {
       // uvnitř effectiveRateBreakdown (kudy jde Stripe) jinak obešla.
       // Země z přihlášky poskytovatele: u klubu jeho vlastní, u kouče z profilu. Majitel může
       // bydlet jinde, než odkud fakturuje klub -- doklad zní na klub, tak rozhoduje jeho země.
-      const _intro = await _introFree(_wsbGet,
-        (/* v koucovske vetvi zadny klub neni -- kouc fakturuje sam za sebe */ null) || (ownerProf && ownerProf.billing_country)
-        || (coach && coach.billing_country));
+      const _intro = await _introFree(_wsbGet, (coach && coach.billing_country));
       let mtl_fee = (_cc || _intro) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
       // Podlaha jen u PIS a jen když se opravdu něco účtuje -- uplatněný kredit zůstává nulový.
       if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, gross));
