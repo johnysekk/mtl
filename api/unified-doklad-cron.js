@@ -301,7 +301,7 @@ export default async function handler(req, res) {
     const _dailyFilter = preview
       ? `created_at=gte.${dayStart}&created_at=lt.${dayEnd}`
       : `commission_collected_at=gte.${dayStart}&commission_collected_at=lt.${dayEnd}`;
-    const tx = await sb(`transactions?select=gym_id,coach_id,paid_to,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method&commission_status=in.(collected${preview?',pending,failed':''})&${DAILY?_dailyFilter:`commission_month=eq.${period}`}&mtl_fee=gt.0&limit=50000`);
+    const tx = await sb(`transactions?select=gym_id,coach_id,organization_id,paid_to,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method&commission_status=in.(collected${preview?',pending,failed':''})&${DAILY?_dailyFilter:`commission_month=eq.${period}`}&mtl_fee=gt.0&limit=50000`);
 
     // Posbírat diagnostiku hned tady -- tx a buckety jsou lokální pro tenhle blok a u návratové
     // hodnoty už neexistují. Bez toho se z odpovědi nedá poznat, jestli filtr nic nenašel, nebo
@@ -310,7 +310,7 @@ export default async function handler(req, res) {
                     txFound: (tx || []).length,
                     txWithFee: (tx || []).filter(r => (Number(r.mtl_fee) || 0) > 0).length };
     // bucket per provider + currency, with a per-(form,rate) breakdown
-    const gymB = {}, coachB = {};
+    const gymB = {}, coachB = {}, orgB = {};
     const bucket = (store, id, cur) => { store[id] = store[id] || {}; store[id][cur] = store[id][cur] || { total: 0, rates: {} }; return store[id][cur]; };
     const add = (b, t) => {
       const net = (t.mtl_fee || 0) - (t.mtl_fee_refunded || 0);
@@ -327,9 +327,19 @@ export default async function handler(req, res) {
       // Klubové plnění kouče (skupinovka, členství) nese gym_id a jde na jeho účet režimu
       // klub -- fakturuje se tedy jeho druhé identitě. Klíč kbelíku to nese v příponě.
       const _clubMode = !!(isCoach && t.coach_id && t.gym_id);
-      if (isCoach && t.coach_id) add(bucket(coachB, t.coach_id + (_clubMode ? '|payout' : ''), cur), t);
+      // Organizace fakturuje MTL jako samostatny subjekt -- ani klub, ani kouc.
+      if (t.paid_to === 'organization' && t.organization_id) add(bucket(orgB, t.organization_id, cur), t);
+      else if (isCoach && t.coach_id) add(bucket(coachB, t.coach_id + (_clubMode ? '|payout' : ''), cur), t);
       else if (t.gym_id) add(bucket(gymB, t.gym_id, cur), t);
       else if (t.coach_id) add(bucket(coachB, t.coach_id, cur), t);
+    }
+
+    // Majitele organizaci -- doklad zni na organizaci, ale plati ji jeji vlastnik.
+    const orgIds = Object.keys(orgB);
+    const orgMap = {};
+    if (orgIds.length) {
+      const os = await sb(`organizations?id=in.(${orgIds.join(',')})&select=id,name,owner_id`);
+      (os || []).forEach(o => { orgMap[o.id] = o; });
     }
 
     // resolve gym owners
@@ -343,7 +353,7 @@ export default async function handler(req, res) {
       if (_payout) entityId = String(entityId).replace(/\|payout$/, '');
       if (_payout) ownerId = entityId;
       const _bp = _payout ? 'payout_' : '';
-      const col = kind === 'gym' ? 'gym_id' : 'coach_id';
+      const col = kind === 'gym' ? 'gym_id' : (kind === 'organization' ? 'organization_id' : 'coach_id');
       // Zaváděcí období: provize se neúčtovala, takže "doklad o stržené provizi" by lhal.
       // Místo něj přehled odebrané služby -- viz introSummaryHtml.
       let _intro = null;
@@ -415,17 +425,19 @@ export default async function handler(req, res) {
       body[col] = entityId;
       await sb('commission_doklady', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify(body) });
       issued++;
-      if (ownerId) { try { await notify(ownerId, 'doklad_unified', `Doklad k provizi MTL${(kind === 'gym' && buyer && buyer.name) ? (' — ' + buyer.name) : ''} za ${periodLabel(period)} (${(data.total / 100).toFixed(2)} ${cur.toUpperCase()}) je připraven. Najdeš ho v účetnictví.`, { period, currency: cur,
+      if (ownerId) { try { await notify(ownerId, 'doklad_unified', `Doklad k provizi MTL${((kind === 'gym' || kind === 'organization') && buyer && buyer.name) ? (' — ' + buyer.name) : ''} za ${periodLabel(period)} (${(data.total / 100).toFixed(2)} ${cur.toUpperCase()}) je připraven. Najdeš ho v účetnictví.`, { period, currency: cur,
         // Kam ta notifikace vede: bez identifikátoru otevře obecné účetnictví, kde tlačítko
         // na doklady vůbec není -- a přesně kvůli němu na ni člověk klikne.
         gym_id: (kind === 'gym' ? entityId : null),
-        coach_id: (kind === 'gym' ? null : entityId),
-        gym_name: ((kind === 'gym' && buyer && buyer.name) ? buyer.name : null) }); } catch (e) {} }
+        organization_id: (kind === 'organization' ? entityId : null),
+        coach_id: ((kind === 'gym' || kind === 'organization') ? null : entityId),
+        gym_name: (((kind === 'gym' || kind === 'organization') && buyer && buyer.name) ? buyer.name : null) }); } catch (e) {} }
       try {
         // Route the commission invoice to the RIGHT billing e-mail: a gym's on gyms.invoice_email,
         // a coach's on profiles.invoice_email (they can differ). Fall back to the owner's account e-mail.
         let em = null;
-        if (kind === 'gym') { const gr = await sb(`gyms?id=eq.${entityId}&select=invoice_email&limit=1`); em = (gr && gr[0] && gr[0].invoice_email) || null; }
+        if (kind === 'organization') { const orr = await sb(`organizations?id=eq.${entityId}&select=contact_email&limit=1`); em = (orr && orr[0] && orr[0].contact_email) || null; }
+        else if (kind === 'gym') { const gr = await sb(`gyms?id=eq.${entityId}&select=invoice_email&limit=1`); em = (gr && gr[0] && gr[0].invoice_email) || null; }
         else { const pr = await sb(`profiles?id=eq.${ownerId}&select=invoice_email&limit=1`); em = (pr && pr[0] && pr[0].invoice_email) || null; }
         if (!em && ownerId) { const pr2 = await sb(`profiles?id=eq.${ownerId}&select=email&limit=1`); em = pr2 && pr2[0] && pr2[0].email; }
         if (em) {
@@ -433,7 +445,7 @@ export default async function handler(req, res) {
           // žádný není. Text v těle stačí a nesvádí to k tomu brát ho jako doklad.
           if (_intro) {
             await sendEmail(em,
-              `${_TESTMODE ? '[TEST] ' : ''}Přehled zprostředkovaných plateb — ${periodShort(period)}${(kind === 'gym' && buyer && buyer.name) ? (' — ' + buyer.name) : ''}`,
+              `${_TESTMODE ? '[TEST] ' : ''}Přehled zprostředkovaných plateb — ${periodShort(period)}${((kind === 'gym' || kind === 'organization') && buyer && buyer.name) ? (' — ' + buyer.name) : ''}`,
               introSummaryHtml(ME, buyer, kind, period, cur, data, _TESTMODE, _intro.until), []);
             issued++;
             return;
@@ -445,7 +457,7 @@ export default async function handler(req, res) {
           } catch (e) { console.error('doklad pdf', e.message); }
           // Předmět nese název klubu. Kdo má dva kluby, dostane dva e-maily naráz a bez toho by musel
           // otevírat přílohy, aby zjistil, který je který.
-          await sendEmail(em, `${_TESTMODE ? '[TEST] ' : ''}Doklad o provizi MTL — ${periodShort(period)}${(kind === 'gym' && buyer && buyer.name) ? (' — ' + buyer.name) : ''}`, dokladMailHtml(ME, buyer, kind, period, cur, data, DAILY, _TESTMODE, !!(_att && _att.length)), _att);
+          await sendEmail(em, `${_TESTMODE ? '[TEST] ' : ''}Doklad o provizi MTL — ${periodShort(period)}${((kind === 'gym' || kind === 'organization') && buyer && buyer.name) ? (' — ' + buyer.name) : ''}`, dokladMailHtml(ME, buyer, kind, period, cur, data, DAILY, _TESTMODE, !!(_att && _att.length)), _att);
         } } catch (e) {}
     }
 
@@ -458,6 +470,9 @@ export default async function handler(req, res) {
     }
     for (const gid of gymIds) { const g = gymMap[gid]; if (!g) continue; for (const cur of Object.keys(gymB[gid])) await issue('gym', gid, g.owner_id, cur, gymB[gid][cur]); }
     for (const cid of Object.keys(coachB)) { for (const cur of Object.keys(coachB[cid])) await issue('coach', cid, cid, cur, coachB[cid][cur]); }
+    // Organizace: doklad zni na ni, ale plati ji jeji majitel -- proto se ownerId bere z nej.
+    for (const oid of orgIds) { const o = orgMap[oid]; if (!o) continue;
+      for (const cur of Object.keys(orgB[oid])) await issue('organization', oid, o.owner_id, cur, orgB[oid][cur]); }
 
     // DIAGNOSTIKA. issued/skipped/deferred = 0 znamená, že se nenašlo nic k vystavení -- ale
     // neřekne PROČ. Tohle ukáže, kolik transakcí filtr vůbec vrátil, kolik z nich mělo provizi
