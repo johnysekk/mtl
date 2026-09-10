@@ -10456,7 +10456,15 @@ async function _coach1to1QrPay(c, payee, opts){
   };
   const pb=ov.querySelector('#c1qrPaid'); if(pb) pb.onclick=async function(){
     pb.disabled=true; pb.textContent='\u2026';
-    try{ if(bookingId){ await supaClient.from('bookings').update({ status:'paid_claimed', claimed_at:new Date().toISOString() }).eq('id',bookingId); } }catch(e){}
+    // Seznam k potvrzeni u kouce chce ZAROVEN payment_method='qr'. Bez nej rezervace v seznamu
+    // nebyla, kouc nemel co potvrdit a student ji nevidel ani v nadchazejicich.
+    try{ if(bookingId){ await supaClient.from('bookings')
+      .update({ status:'paid_claimed', payment_method:'qr', claimed_at:new Date().toISOString() })
+      .eq('id',bookingId); } }catch(e){}
+    // Bez rezervace nema notifikace komu co ukazat -- kouc by dostal zpravu o platbe,
+    // kterou nema kde potvrdit.
+    if(!bookingId){ pb.disabled=false; pb.textContent=(EN?'I\u2019ve paid':'Zaplaceno');
+      toast(EN?'\u26a0\ufe0f The reservation was not created \u2014 try again':'\u26a0\ufe0f Rezervace nevznikla \u2014 zkus to znovu'); return; }
     try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'booking', read:false, data:JSON.stringify({ kind:'coach_qr_intent', booking_id:bookingId }), message:'\ud83d\udcf2 '+sName+(EN?(' claims they paid for a '+(isOnline?'online lesson':'1:1 lesson')+' (QR). Confirm in your diary.'):(' tvrd\u00ed, \u017ee zaplatil za '+(isOnline?'online lekci':'soukromku')+' (QR). Potvrď v p\u0159ehledu kou\u010de.')) }); }catch(e){}
     toast(EN?'\u2705 Lesson reserved \u00b7 coach will confirm':'\u2705 Lekce rezervov\u00e1na \u00b7 kou\u010d potvrd\u00ed', 1);
     close();
@@ -38201,8 +38209,8 @@ async function loadMyNet(force){
   const myAccts=[me.stripe_account,me.gym_payout_account].filter(Boolean);
   const gymAccts=gyms.map(g=>g.stripe_account).filter(Boolean);
   const _mt=await _fetchMyTx(force);
-  const _cRaw=(_mt.coachTx||[]).filter(r=>(r.created_at||'')>=since);
-  const _gRaw=(_mt.gymTx||[]).filter(r=>(r.created_at||'')>=since);
+  const _cRaw=(_mt.coachTx||[]).filter(r=>(r.created_at||'')>=since && !_isOrgFeeTx(r));
+  const _gRaw=(_mt.gymTx||[]).filter(r=>(r.created_at||'')>=since && !_isOrgFeeTx(r));
   if(hasCoach||me.gym_payout_account){ coachTx=_cRaw.filter(r=>{ if(!r.gym_id) return true; if(gymIds.indexOf(r.gym_id)>=0) return false; if(!myAccts.length) return false; const _pa=String(r.payee_account||'').trim(); return !_pa || myAccts.some(x=>String(x||'').trim()===_pa); }); }
   if(hasGym){ gymTx=(!gymAccts.length)?_gRaw:_gRaw.filter(r=>{ const _pa=String(r.payee_account||'').trim(); return !_pa || gymAccts.some(x=>String(x||'').trim()===_pa); }); if(!gymTx.length && _gRaw.length) gymTx=_gRaw; }
   const cur=((coachTx[0]||gymTx[0]||{}).currency)||(me.currency)||'CZK';
@@ -38231,6 +38239,13 @@ function _netOfMonthByCur(rows){
   return out;
 }
 function _netOfMonth(rows){ const mk=_curMonthKey(); return rows.filter(r=>(r.created_at||'').slice(0,7)===mk).reduce((a,r)=>a+_txNetEff(r),0)/100; }
+// Clensky poplatek asociaci nese gym_id, aby klub nasel svuj doklad -- prijem klubu ani
+// kouce to ale NENI, platili ho. Jedna funkce pro vsechny obrazovky, at se to nerozejde.
+function _isOrgFeeTx(r){
+  try{ return !!(r && (r.org_fee_id || r.type==='org_fee' || r.paid_to==='organization')); }
+  catch(e){ return false; }
+}
+
 async function renderMeNetHero(){
   const box=$('meNetHero'); if(!box||!currentUser) return;
   if(typeof window._myGyms==='undefined'||window._myGyms===null){ try{ if(typeof checkGymOwnership==='function') await checkGymOwnership(); }catch(e){} }
