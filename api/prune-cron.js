@@ -69,14 +69,15 @@ export default async function handler(req, res) {
   out.push(await del('coach_checkin_tokens (týden po expiraci)',
     `coach_checkin_tokens?expires_at=lt.${daysAgo(7)}`));
 
-  // Přenos dítěte mezi zástupci má okno na vrácení. Po něm je záznam mrtvý.
-  out.push(await del('kid_transfers (30 dnů po okně na vrácení)',
-    `kid_transfers?undo_until=lt.${daysAgo(30)}&status=neq.pending`));
+  // PRENOSY DITETE SE NEMAZOU. Je to zaznam o tom, kdo predal dite komu -- presne ta vec,
+  // na kterou se nekdo za rok zpetne ptat bude. Do uklidu nepatri.
 
   // ── DRŽENÁ MÍSTA ─────────────────────────────────────────────────────────────────────
   // Držení místa v lekci, která už proběhla, nikoho neblokuje ani neinformuje.
-  out.push(await del('gym_class_reservations (po lekci, 14 dnů)',
-    `gym_class_reservations?class_date=lt.${daysAgo(14).slice(0, 10)}`));
+  // NENI to dochazka -- ta je v gym_attendance a nemaze se. Tohle je jen drzene misto
+  // v lekci (reserved / released). Po 90 dnech uz podle nej nikdo nic neresi.
+  out.push(await del('gym_class_reservations (drzena mista, 90 dnů po lekci)',
+    `gym_class_reservations?class_date=lt.${daysAgo(90).slice(0, 10)}`));
 
   // Záskok na lekci, která dávno byla.
   // cover_requests ma class_date, zadne created_at -- s created_at by PostgREST dotaz odmitl.
@@ -88,6 +89,11 @@ export default async function handler(req, res) {
   // NEPŘEČTENÉ necháváme bez ohledu na věk -- to je nedodělaná práce, ne odpad.
   out.push(await del('notifications (přečtené, starší 180 dnů)',
     `notifications?read=is.true&created_at=lt.${daysAgo(180)}`));
+  // Neprectene po ROKU taky. "Necháváme navždy" znamena, ze u opusteneho uctu roste seznam
+  // bez konce -- a po roce uz neni co resit, at je zprava jakakoli. Rok je zamerne dlouhy:
+  // sezona ma deset mesicu, takze se do nej vejde cely rocni cyklus klubu.
+  out.push(await del('notifications (nepřečtené, starší 365 dnů)',
+    `notifications?read=is.false&created_at=lt.${daysAgo(365)}`));
 
   const total = out.reduce((a, x) => a + (x.deleted || 0), 0);
   return res.status(200).json({ ok: true, total, steps: out });
