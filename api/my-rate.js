@@ -26,7 +26,7 @@ export default async function handler(req, res) {
     const uid = user && user.id;
     if (!uid) return res.status(401).json({ error: 'no user' });
 
-    const p = (await (await fetch(`${SB}/rest/v1/profiles?id=eq.${encodeURIComponent(uid)}&select=partner,founding,coach_ref_score,bankai_eligible,org_rate,org_rate_until`, { headers: svc })).json())[0] || {};
+    const p = (await (await fetch(`${SB}/rest/v1/profiles?id=eq.${encodeURIComponent(uid)}&select=partner,founding,coach_ref_score,bankai_eligible,org_rate_until`, { headers: svc })).json())[0] || {};
     const cond = { partner: !!p.partner, founding: !!p.founding, score: p.coach_ref_score || 0, bankai: !!p.bankai_eligible, org: hasOrgRate(p) };
     const rate = ladderRate(mode, cond);
 

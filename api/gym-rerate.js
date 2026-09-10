@@ -72,7 +72,7 @@ export default async function handler(req, res) {
     const owner = req.query.owner;
     if (!owner) return res.status(400).json({ error: 'missing owner' });
 
-    const prof = (await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=coach_ref_score,partner,founding,bankai_eligible,org_rate,org_rate_until`))[0];
+    const prof = (await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=coach_ref_score,partner,founding,bankai_eligible,org_rate_until`))[0];
     if (!prof) return res.status(404).json({ error: 'owner not found' });
 
     const score = prof.coach_ref_score || 0;

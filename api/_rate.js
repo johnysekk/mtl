@@ -41,7 +41,8 @@ const ACQ_RATE_EP = 0.10;  // EP perk: half the acquisition fee (was 0.05 across
 export function hasOrgRate(profile) {
   try {
     if (!profile) return false;
-    if (profile.org_rate) return true;                       // ruční příznak od MTL
+    // Sloupec profiles.org_rate NEEXISTUJE -- kdyz se dostal do select, PostgREST odmitl
+    // cely dotaz, profil prisel prazdny a sazba spadla na zakladni. Ridime se jen datem.
     const u = profile.org_rate_until;
     if (!u) return false;
     // Bereme jen DEN. Slepovat 'T23:59:59' k celé hodnotě funguje jen tehdy, když sloupec
