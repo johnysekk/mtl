@@ -111,7 +111,11 @@ export default async function handler(req, res) {
       method: 'POST', prefer: 'return=representation',
       body: JSON.stringify({
         organization_id: org.id, org_fee_id: oc.id,
+        gym_id: oc.gym_id || null,
         type: 'org_fee', status: 'completed',
+        // Provize je nulova, takze neni co vybirat -- rovnou uzavreno, aby commission-cron
+        // nepocital nuly a nechodily prazdne vyzvy.
+        commission_status: 'collected', commission_month: new Date().toISOString().slice(0, 7),
         amount: Math.round(amount), currency: String(currency).toUpperCase(),
         mtl_fee: 0, base_rate: 0,
         payment_method: method || 'pis',
