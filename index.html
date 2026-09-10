@@ -20339,7 +20339,23 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom){
   var _bx2=ov.querySelector('#oqrBox'); if(_bx2){ _bx2.style.cursor='pointer'; _bx2.ondblclick=function(){ try{ var cv=_bx2.querySelector('canvas'); var im=_bx2.querySelector('img'); var blob=null; if(cv&&cv.toDataURL){ var durl=cv.toDataURL('image/png'); var bs=atob(durl.split(',')[1]); var n=bs.length, u8=new Uint8Array(n); while(n--){ u8[n]=bs.charCodeAt(n); } blob=new Blob([u8],{type:'image/png'}); } if(!blob){ return; } var file=null; try{ file=new File([blob],'MTL-platba-QR.png',{type:'image/png'}); }catch(e){} if(file && navigator.canShare && navigator.canShare({files:[file]})){ navigator.share({files:[file], title:'MTL platba QR'}).catch(function(){}); } else { var url=URL.createObjectURL(blob); var a=document.createElement('a'); a.href=url; a.download='MTL-platba-QR.png'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(function(){ try{ URL.revokeObjectURL(url); }catch(e){} },1500); } }catch(e){} }; } if(pb) pb.onclick=async function(){
     pb.disabled=true; pb.textContent='\u2026';
     { const _iid=await _ensureIntent(); if(!_iid){ pb.disabled=false; pb.textContent='\u2713 '+(EN?'I\u2019ve paid':'Zaplaceno'); return; } }
-    try{ if(kind==='dropin' && intentId){ await supaClient.from('gym_bookings').update({ status:'paid_claimed', claimed_at:new Date().toISOString() }).eq('id',intentId); } }catch(e){}
+    try{
+      if(kind!=='memb'){
+        const _cl={ status:'paid_claimed', payment_method:'qr', claimed_at:new Date().toISOString() };
+        if(intentId){
+          await supaClient.from('gym_bookings').update(_cl).eq('id',intentId);
+        } else {
+          // Rezervace ze skupinovky vznika jinou cestou (status 'pending', bez payment_method),
+          // takze intentId je prazdne. Bez dohledani uvizne ve stavu, ktery nezobrazuje ani
+          // sekce "ceka na platbu", ani seznam skupinovek -- student nevidi nic.
+          let _q=supaClient.from('gym_bookings').update(_cl)
+            .eq('gym_id',g.id).eq('student_id',_stuId).in('status',['pending','reserved']);
+          if(occ&&occ.date) _q=_q.eq('class_date',occ.date);
+          if(occ&&occ.time) _q=_q.eq('class_time',occ.time);
+          await _q;
+        }
+      }
+    }catch(e){}
     try{ if(_qrPaidTo==='coach' && _qrPayeeCoach){ await supaClient.from('notifications').insert({ user_id:_qrPayeeCoach, type:'booking', read:false, data:JSON.stringify({ kind:'coach_qr_intent', student:sName }), message:'\ud83d\udcf2 '+sName+(EN?(' claims they paid for '+label+' (QR). Confirm in your diary.'):(' tvrd\u00ed, \u017ee zaplatil za '+label+' (QR). Potvr\u010f v di\u00e1\u0159i.')) }); } else if(g.owner_id){ const realtime=(g.confirm_mode==='realtime'); const m=realtime?(EN?(sName+' claims they paid for '+label+' (QR).'):(sName+' tvrd\u00ed, \u017ee zaplatil za '+label+' (QR).')):(EN?(sName+' reserved '+label+' (QR).'):(sName+' si rezervoval '+label+' (QR).')); await supaClient.from('notifications').insert({ user_id:g.owner_id, type:'booking', read:false, data:JSON.stringify({ kind:'qr_intent', student:sName, gym:g.id, gym_name:g.name||'', what:label, occ:{ date:(occ&&occ.date)||null, time:(occ&&occ.time)||null, name:(occ&&occ.name)||null }, confirm_mode:(g.confirm_mode||'') }), message:m }); } }catch(e){}
     toast((kind==='memb')?(EN?('\u2705 Membership reserved \u00b7 '+(g.name||'the klub')+' will confirm the payment'):('\u2705 \u010clenstv\u00ed rezervov\u00e1no \u00b7 '+(g.name||'gym')+' potvrd\u00ed platbu')):(EN?('\u2705 Spot reserved \u00b7 '+(g.name||'the klub')+' will confirm the payment'):('\u2705 M\u00edsto rezervov\u00e1no \u00b7 '+(g.name||'gym')+' potvrd\u00ed platbu')), 1);
     close(); try{ openGymProfile(g); }catch(e){}
@@ -23531,6 +23547,7 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
       // neudělil, takže ten stupeň byl mrtvý.
       dropin_price: price, currency, status:'approved',
       contact_phone:(_gPubPh||null), contact_email:(_gPubEm||null),
+      pis_test: true,   // testovaci PIS zapnuty od zalozeni; do ostreho provozu to vypina admin
       billing_phone: ((typeof _phoneFieldVal==='function')?_phoneFieldVal('gymBillingPhone'):null),
       invoice_email: (($('gymInvoiceEmail')&&$('gymInvoiceEmail').value.trim())||null),
       timezone: (Intl.DateTimeFormat().resolvedOptions().timeZone || null),
@@ -24333,7 +24350,7 @@ async function loadNotifications(append){
     const isCoachRefAdmin = false; /* referral EP grants removed — rewards are Shikai/Bankai */
     // beta_pending sem musí být přidané, jinak se notifikace vykreslí jako neklikatelná a obsluha
   // se vůbec nenapojí -- větev, která má otevřít admin, pak nemá kdo spustit.
-  const clickable = isStudResched || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='beta_pending' || k==='minor_waiver_req' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked';
+  const clickable = isStudResched || k==='coach_qr_intent' || k==='event_qr_intent' || k==='walkin_drop' || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='beta_pending' || k==='minor_waiver_req' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked';
     let linkLabel = L('otevřít ›');
     if(k==='payment_confirmed'){ var _pcd={}; try{ _pcd=JSON.parse(n.data||'{}'); }catch(e){} var _gg=_pcd.goto; linkLabel = (_gg==='dropin'||_gg==='bookings') ? (LANG==='en'?'booking details ›':'detail rezervace ›') : (_gg==='tickets') ? (LANG==='en'?'my ticket ›':'moje vstupenka ›') : (_gg==='courses') ? (LANG==='en'?'my course ›':'můj kurz ›') : (_gg==='merch') ? (LANG==='en'?'view ›':'zobrazit ›') : (LANG==='en'?'membership details ›':'detail členství ›'); } else if(k==='qr_intent') linkLabel = LANG==='en'?'To confirm ›':'K potvrzení ›'; else if(k==='qr_released'||k==='qr_reservation_expired') linkLabel = LANG==='en'?'Book again ›':'Rezervovat znovu ›'; else if(k==='qr_requeued') linkLabel = LANG==='en'?'Pay again ›':'Zaplatit znovu ›'; else if(k==='sounding_ask') linkLabel = LANG==='en'?'Answer ›':'Odpovědět ›'; else if(k==='cover_needed') linkLabel = LANG==='en'?'Take the cover ›':'Vzít záskok ›'; else if(k==='cover_filled'||k==='cover_filled_owner') linkLabel = LANG==='en'?'View ›':'Zobrazit ›'; else if(k==='doklad_vat_needed') linkLabel = LANG==='en'?'Add VAT ID ›':'Doplnit DIČ ›'; else if(k==='course_new') linkLabel = LANG==='en'?'Course details ›':'Detail kurzu ›'; else if(k==='slot_demand') linkLabel = LANG==='en'?'Open my diary ›':'Otevřít diář ›'; else if(k==='cohort_month_due') linkLabel = LANG==='en'?'Pay now ›':'Doplatit ›'; else if(k==='cohort_month_collect') linkLabel = LANG==='en'?'Open roster ›':'Otevřít roster ›'; else if(k==='cohort_deposit_paid') linkLabel = LANG==='en'?'View roster ›':'Otevřít účastníky ›'; else if(k==='cohort_qr_claim') linkLabel = LANG==='en'?'View roster ›':'Otevřít účastníky ›'; else if(k==='cohort_deposit_mine') linkLabel = LANG==='en'?'My course ›':'Můj kurz ›';
       else if(k==='doklad_unified') linkLabel = LANG==='en'?'Open the receipt ›':'Otevřít doklad ›';
@@ -24392,6 +24409,9 @@ async function loadNotifications(append){
     else if(k==='cancel_conf') linkLabel = LANG==='en'?'Open confirmation ›':'Otevřít potvrzení ›';
     else if(k==='org_fee') linkLabel = LANG==='en'?'Pay the fee ›':'Uhradit členský poplatek ›';
     else if(k==='org_accepted') linkLabel = LANG==='en'?'Pay the fee ›':'Uhradit členský poplatek ›';
+    else if(k==='coach_qr_intent') linkLabel = LANG==='en'?'To confirm ›':'K potvrzení ›';
+    else if(k==='event_qr_intent') linkLabel = LANG==='en'?'Event management ›':'Správa akce ›';
+    else if(k==='walkin_drop') linkLabel = LANG==='en'?'Reception ›':'Recepce ›';
     else if(k==='org_linked') linkLabel = LANG==='en'?'Open the association ›':'Otevřít asociaci ›';
     else if(k==='org_left') linkLabel = LANG==='en'?'Ended \u203a':'Ukon\u010den\u00e9 \u203a';
     else if(k==='org_removed') linkLabel = LANG==='en'?'Past memberships \u203a':'D\u0159\u00edv\u011bj\u0161\u00ed \u010dlenstv\u00ed \u203a';
@@ -24532,6 +24552,18 @@ async function loadNotifications(append){
         else if(k==='org_left'){ try{ if(window._orgApproved) openOrgClubs(window._orgApproved, 'ended'); }catch(e){} }
         else if(k==='org_removed'){ try{ openClubOrgHistory(); }catch(e){} }
         else if(k==='org_invite'||k==='org_fee_paid'){ try{ openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); }catch(e){} }
+        // Tvrzeni o QR platbe: kouc potvrzuje v Dochazce (zalozka Uhrady k potvrzeni), klub
+        // v Recepci, poradatel ve sprave akce. Dosud nemely proklik vubec zadny.
+        else if(k==='coach_qr_intent'){
+          try{ openSheet('shMyEvManage'); if(typeof renderMyEvManage==='function') renderMyEvManage(); }catch(e){}
+          try{ toast(LANG==='en'?'Confirm in Attendance → Payments to confirm':'Potvrď v Docházce → Úhrady k potvrzení'); }catch(e){}
+        }
+        else if(k==='walkin_drop'){
+          try{ if(_myGymData && typeof openReception==='function') openReception(_myGymData.id, _myGymData.name); }catch(e){}
+        }
+        else if(k==='event_qr_intent'){
+          try{ openSheet('shMyEvManage'); if(typeof renderMyEvManage==='function') renderMyEvManage(); }catch(e){}
+        }
         else if(k==='org_linked'){ try{ var _ol=JSON.parse(n.data||'{}'); if(_ol.oc_id) openClubOrgPanel(_ol.oc_id); }catch(e){} }
         else if(k==='org_accepted'){ try{ var _oa=JSON.parse(n.data||'{}'); if(_oa.oc_id) openClubOrgPanel(_oa.oc_id); }catch(e){} }
         else if(k==='org_fee'){ try{ var _of=JSON.parse(n.data||'{}'); if(_of.oc_id) openOrgFeePay(_of.oc_id); }catch(e){} }
@@ -24580,7 +24612,10 @@ async function loadNotifications(append){
             // pod ním. Když se admin otevřel hned, zavírání ho přebilo a člověk skončil tam,
             // odkud notifikaci otevřel. Otevírá se proto až po dozavření.
             setTimeout(function(){
-              const _ab=$('btnAdmin'); if(_ab) _ab.click();
+              // Prime otevreni sheetu; klepnuti na #btnAdmin v dashmode neproslo.
+              try{ openSheet('shAdmin'); }catch(e){}
+              try{ if(typeof renderFoundingToggle==='function') renderFoundingToggle(); }catch(e){}
+              try{ if(typeof renderFeatureToggles==='function') renderFeatureToggles(); }catch(e){}
               setTimeout(function(){
                 try{ if(typeof _loadBetaPending==='function') _loadBetaPending(); }catch(e){}
                 setTimeout(function(){ try{ const _w=document.getElementById('betaPendingWrap');
@@ -29004,7 +29039,7 @@ ${_orgMine&&_orgMine.id?`<button id="orgSetToggle" style="width:100%;box-sizing:
     };
     try{
       if(_orgMine&&_orgMine.id) await supaClient.from('organizations').update(row).eq('id',_orgMine.id);
-      else await supaClient.from('organizations').insert(Object.assign({status:'pending'},row));
+      else await supaClient.from('organizations').insert(Object.assign({status:'pending', pis_test:true},row));
       // MTL musi vedet, ze je co schvalovat -- jinak prihlaska lezi, dokud si ji nekdo nevsimne.
       // Hlasit zakladateli jen NOVOU prihlasku, ne kazdou pozdejsi upravu udaju.
       if(!_orgMine) { try{ await _notifyFounderNew('org', row.name, (_isFed?'federace':'po\u0159adatel')+' \u00b7 I\u010cO '+(row.tax_id||'')); }catch(e){} }
