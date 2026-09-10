@@ -218,20 +218,37 @@ export default async function handler(req, res){
             if(oc){
               const org=(await sb.from('organizations').select('name,abbr,owner_id,member_fee_period').eq('id',oc.organization_id).maybeSingle()).data;
               const _now=new Date();
-              const _from=(oc.valid_until && new Date(oc.valid_until+'T00:00:00')>_now) ? new Date(oc.valid_until+'T00:00:00') : _now;
-              const _to=new Date(_from);
-              const _per=oc.fee_period||(org&&org.member_fee_period)||'year';
-              if(_per==='month') _to.setMonth(_to.getMonth()+1);
-              else if(_per==='once') _to.setFullYear(_to.getFullYear()+100);
-              else _to.setFullYear(_to.getFullYear()+1);
-              const _until=_to.toISOString().slice(0,10);
+              // PLATNOST SE BERE Z OBDOBI POPLATKU, ne z periody. Poplatek je "Clenstvi 2026,
+              // 1. 1. - 31. 12. 2026" a clenstvi plati presne do konce toho obdobi. Drive se pocitalo
+              // z fee_period ('year'/'once'), takze 'once' delalo +100 let a datum bylo nesmyslne.
+              let _until = null;
+              try {
+                let _f = null;
+                if (oc.fee_id) _f = (await sb.from('org_member_fees').select('period_to').eq('id', oc.fee_id).maybeSingle()).data;
+                if (!_f) {
+                  const _t = new Date().toISOString().slice(0, 10);
+                  _f = (await sb.from('org_member_fees').select('period_to')
+                    .eq('organization_id', oc.organization_id)
+                    .lte('period_from', _t).gte('period_to', _t).limit(1).maybeSingle()).data;
+                }
+                if (_f && _f.period_to) _until = _f.period_to;
+              } catch (e) {}
+              // Bez obdobi (poplatek smazan) padame na rok od dneska, at clenstvi nezustane bez konce.
+              if (!_until) { const _d = new Date(); _d.setFullYear(_d.getFullYear() + 1); _until = _d.toISOString().slice(0, 10); }
               // Platba zaplati POPLATEK, neprijme klub do asociace -- to zustava na asociaci.
               // Kdyby platba sama nastavila 'active', klub by schvaleni obesel penezi.
               const _accepted = (oc.status === 'active');
               await sb.from('organization_clubs')
                 .update({ fee_paid_at:new Date().toISOString(), valid_until:_until }).eq('id',oc.id);
               // Zvyhodnena sazba plati az kdyz je oboji: prijato A zaplaceno.
-              if (_accepted) await sb.from('gyms').update({ org_rate_until:_until }).eq('id',oc.gym_id);
+              // Sazba se zapisuje POSKYTOVATELI -- platí na všechny jeho entity, ne jen na klub,
+        // kterým do asociace vstoupil.
+        if (_accepted && oc.gym_id) {
+          try {
+            const _g = (await sb.from('gyms').select('owner_id').eq('id', oc.gym_id).maybeSingle()).data;
+            if (_g && _g.owner_id) await sb.from('profiles').update({ org_rate_until: _until }).eq('id', _g.owner_id);
+          } catch (e) {}
+        }
               const g=(await sb.from('gyms').select('owner_id,name').eq('id',oc.gym_id).maybeSingle()).data;
               const _du=new Date(_until).toLocaleDateString('cs-CZ');
               if(g && g.owner_id) await sb.from('notifications').insert({ user_id:g.owner_id, type:'system', read:false,

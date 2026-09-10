@@ -165,14 +165,23 @@ export default async function handler(req, res) {
 
         // Období běží od dneška, nebo navazuje na dosud platné členství -- kdo zaplatí dřív,
         // nesmí o zbytek zaplaceného období přijít.
-        const _now = new Date();
-        const _from = (r.valid_until && new Date(r.valid_until + 'T00:00:00') > _now)
-          ? new Date(r.valid_until + 'T00:00:00') : _now;
-        const _to = new Date(_from);
-        if (r.fee_period === 'month') _to.setMonth(_to.getMonth() + 1);
-        else if (r.fee_period === 'once') _to.setFullYear(_to.getFullYear() + 100);   // bez konce
-        else _to.setFullYear(_to.getFullYear() + 1);                                   // výchozí: rok
-        const _until = _to.toISOString().slice(0, 10);
+        // PLATNOST SE BERE Z OBDOBI POPLATKU, ne z periody. Poplatek je "Clenstvi 2026,
+        // 1. 1. - 31. 12. 2026" a clenstvi plati presne do konce toho obdobi. Drive se pocitalo
+        // z fee_period ('year'/'once'), takze 'once' delalo +100 let a datum bylo nesmyslne.
+        let _until = null;
+        try {
+          let _f = null;
+          if (r.fee_id) _f = (await sb.from('org_member_fees').select('period_to').eq('id', r.fee_id).maybeSingle()).data;
+          if (!_f) {
+            const _t = new Date().toISOString().slice(0, 10);
+            _f = (await sb.from('org_member_fees').select('period_to')
+              .eq('organization_id', r.organization_id)
+              .lte('period_from', _t).gte('period_to', _t).limit(1).maybeSingle()).data;
+          }
+          if (_f && _f.period_to) _until = _f.period_to;
+        } catch (e) {}
+        // Bez obdobi (poplatek smazan) padame na rok od dneska, at clenstvi nezustane bez konce.
+        if (!_until) { const _d = new Date(); _d.setFullYear(_d.getFullYear() + 1); _until = _d.toISOString().slice(0, 10); }
 
         try {
           // Platba zaplati POPLATEK, neprijme klub do asociace -- to zustava na asociaci.
@@ -184,7 +193,14 @@ export default async function handler(req, res) {
 
         // Sazba patří KLUBU a má vlastní datum konce, aby sama vypršela.
         // Sazba az kdyz je oboji: prijato asociaci A zaplaceno.
-        if (_accepted) { try { await sb.from('gyms').update({ org_rate_until: _until }).eq('id', r.gym_id); } catch (e) {} }
+        // Sazba se zapisuje POSKYTOVATELI -- platí na všechny jeho entity, ne jen na klub,
+        // kterým do asociace vstoupil.
+        if (_accepted && r.gym_id) {
+          try {
+            const _g = (await sb.from('gyms').select('owner_id').eq('id', r.gym_id).maybeSingle()).data;
+            if (_g && _g.owner_id) await sb.from('profiles').update({ org_rate_until: _until }).eq('id', _g.owner_id);
+          } catch (e) {}
+        }
 
         try {
           const g = await sb.from('gyms').select('owner_id,name').eq('id', r.gym_id).maybeSingle();

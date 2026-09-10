@@ -108,7 +108,7 @@ export async function resolveOwner(sbGet, { ownerId, gymId, gymAccount }) {
     }
   }
   if (!oid) throw new Error('resolveOwner: no owner (ownerId/gymId/gymAccount all unresolved)');
-  let p = (await sbGet(`profiles?id=eq.${encodeURIComponent(oid)}&select=id,partner,founding,coach_ref_score,bankai_eligible,billing_country`))[0];
+  let p = (await sbGet(`profiles?id=eq.${encodeURIComponent(oid)}&select=id,partner,founding,coach_ref_score,bankai_eligible,org_rate_until,billing_country`))[0];
   if (!p) throw new Error('resolveOwner: owner profile not found');
   // Země klubu má přednost před zemí majitele.
   if (gymCC) p = Object.assign({}, p, { billing_country: gymCC });
@@ -123,14 +123,13 @@ export async function resolveRate(sbGet, { ownerId, gymId, gymAccount, mode }) {
   // příznak, jedna zaplacená sezóna by dala slevu navždy.
   // Vyhrává lepší sazba, stejně jako v celém žebříčku: Bankai (1 %) se členstvím nezhorší.
   const _base = ladderRate(mode, { partner: p.partner, founding: p.founding, score: p.coach_ref_score, bankai: p.bankai_eligible });
-  if (gymId) {
-    try {
-      const g = (await sbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=org_rate_until`))[0];
-      if (g && g.org_rate_until && new Date(g.org_rate_until + 'T23:59:59').getTime() >= Date.now()) {
-        return Math.min(_base, 0.015);
-      }
-    } catch (e) {}
-  }
+  // Sazba patří POSKYTOVATELI a platí na všechny jeho entity -- v "Platby a provize" vidí
+  // jednu sazbu, takže dvě různé podle klubu by tam nešlo ukázat.
+  try {
+    if (p && p.org_rate_until && new Date(p.org_rate_until + 'T23:59:59').getTime() >= Date.now()) {
+      return Math.min(_base, 0.015);
+    }
+  } catch (e) {}
   return _base;
 }
 
