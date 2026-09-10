@@ -116,7 +116,7 @@ export default async function handler(req, res) {
         // Provize je nulova, takze neni co vybirat -- rovnou uzavreno, aby commission-cron
         // nepocital nuly a nechodily prazdne vyzvy.
         commission_status: 'collected', commission_month: new Date().toISOString().slice(0, 7),
-        amount: Math.round(amount), currency: String(currency).toUpperCase(),
+        gross_amount: Math.round(amount), currency: String(currency).toUpperCase(),
         mtl_fee: 0, base_rate: 0,
         payment_method: method || 'pis',
         paid_to: 'organization',

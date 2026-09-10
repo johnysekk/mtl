@@ -105,7 +105,7 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         organization_id: org.id, event_id: event_id || null, ticket_id: ticket_id || null,
         type: 'event_ticket', status: 'completed',
-        amount: gross, gross_amount: gross, currency: String(currency || 'CZK').toUpperCase(),
+        gross_amount: gross, currency: String(currency || 'CZK').toUpperCase(),
         mtl_fee: fee, mtl_rate: rate, base_rate: rate,
         payment_method: payment_method || 'pis',
         paid_to: 'organization', payee_id: org.id, payee_kind: 'organization',
