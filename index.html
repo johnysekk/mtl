@@ -22089,7 +22089,28 @@ async function saveGymManage(){
       if(_hx && _hx.length){ _curSel = _myGymData.currency; try{ if($('mgCurrency')) $('mgCurrency').value=_myGymData.currency; }catch(e){}
         toast(LANG==='en'?'Currency is locked \u2014 this club already has payments.':'M\u011bnu nelze zm\u011bnit \u2014 klub u\u017e m\u00e1 platby.'); } }catch(e){}
   }
-  const patch = { currency:_curSel, dropin_price:dropin,
+  // FAKTURACNI IDENTITA. Nastaveni ta pole zobrazuje a overuje v ARES, ale do patche je
+    // nedavalo -- klub si ICO vyplnil, ulozil a nic se neulozilo. Bez nich nelze vystavit
+    // doklad, protoze rada dokladu nema bez ICO klic.
+    const _gv=function(id){ var e=$(id); return e?String(e.value||'').trim():''; };
+    const _billLine1=_gv('mgBillingLine1'), _billCity=_gv('mgBillingCity'), _billPostal=_gv('mgBillingPostal');
+    const patch = { currency:_curSel, dropin_price:dropin,
+      tax_id: (_gv('mgTaxId').replace(/\s/g,'') || null),
+      legal_name: (_gv('mgLegalName') || null),
+      vat_id: (_gv('mgVatId').replace(/\s/g,'') || null),
+      vat_payer: !!($('mgVatPayer') && $('mgVatPayer').checked),
+      vat_rate: (parseFloat(_gv('mgVatRate')) || 21),
+      billing_line1: (_billLine1 || null),
+      billing_line2: (_gv('mgBillingLine2') || null),
+      billing_city: (_billCity || null),
+      billing_postal: (_billPostal || null),
+      // Slozeny tvar pro doklad, at ho doklad nemusi skladat sam. Prazdno radeji nez
+      // polovicni adresa -- z te by ucetni nic nemela.
+      billing_address: (function(){
+        var out=[_billLine1, ((_billPostal?(_billPostal+' '):'')+_billCity).trim()]
+          .filter(function(x){ return x && x.trim(); });
+        return out.length ? out.join(', ') : null;
+      })(),
       // Pojmenovane ceny nad zakladni. Zakladni zustava v dropin_price a do seznamu se
       // nekopiruje, jinak by existovala dvakrat a rozesla by se.
       dropin_plans: JSON.stringify(_gymDropinPlans||[]),
@@ -23750,6 +23771,16 @@ async function openGymApp(){
     }
   }catch(e){ /* on error, fall through to the normal form - never block a legit owner */ }
   gymShowcaseUrls={}; gymFacilityUrls={}; gymAmenityUrls={}; gymAmenityClaimed={};
+  // Zeme se predvoli podle uzivatele. Bez toho zustal select na prazdne polozce a
+  // billing_country se ulozil prazdny -- DAC7 pak nema zemi danoveho domicilu.
+  try{
+    var _cs=$('gymCountry');
+    if(_cs && !String(_cs.value||'').trim()){
+      var _cc=((typeof _guessCC==='function') ? _guessCC() : '') ||
+              (currentUser && (currentUser.billing_country || currentUser.country_code)) || '';
+      if(_cc) _cs.value=String(_cc).toUpperCase();
+    }
+  }catch(e){}
   const hadDraft=loadGymDraft();
   renderGymPhotoSlots();
   let acct=null; try{ acct=localStorage.getItem('mtl_gym_acct'); }catch(e){}
@@ -24026,10 +24057,12 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
       // pravni nazev z prihlasky se nikam neprojevil a na dokladech stal bezny nazev klubu.
       // billing_name uz se nezapisuje; sloupec je zbytecny a da se z databaze odstranit.
       legal_name: (($('gymLegalName')&&$('gymLegalName').value.trim())||null),
-      billing_line1: (($('gymBillingLine1')&&$('gymBillingLine1').value.trim())||null),
+      // Fakturacni adresa se prebira z adresy klubu, kdyz ji clovek nevyplnil zvlast --
+      // jinak zustane rozpad pro DAC7 prazdny, protoze adresu uz zadal z mapy.
+      billing_line1: (($('gymBillingLine1')&&$('gymBillingLine1').value.trim())||address||null),
       billing_line2: (($('gymBillingLine2')&&$('gymBillingLine2').value.trim())||null),
-      billing_city: (($('gymBillingCity')&&$('gymBillingCity').value.trim())||null),
-      billing_postal: (($('gymBillingPostal')&&$('gymBillingPostal').value.trim())||null),
+      billing_city: (($('gymBillingCity')&&$('gymBillingCity').value.trim())||city||null),
+      billing_postal: (($('gymBillingPostal')&&$('gymBillingPostal').value.trim())||postal||null),
       venue_type: (($('gymVenueType')&&$('gymVenueType').value)||null)
     }).select('id').single();
     if(error){ toast('⚠️ '+error.message); btn.textContent=L('Odeslat přihlášku klubu →'); btn.disabled=false; return; }
@@ -34580,7 +34613,44 @@ window._taxVer = window._taxVer || {};
 function _taxNorm(s){ try{ return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[.,]/g,' ').replace(/\s+/g,' ').trim(); }catch(e){ return String(s||'').toLowerCase().trim(); } }
 function _taxMatchState(inputId, legalId){ var v=window._taxVer[inputId]; if(!v||!v.valid||!v.name) return null; var le=$(legalId); if(!le||!le.value.trim()) return null; return _taxNorm(le.value)===_taxNorm(v.name)?'match':'mismatch'; }
 function _taxRefreshMatch(inputId, statusId, legalId){ var st=$(statusId), v=window._taxVer[inputId]; if(!st) return; st.onclick=null; st.style.cursor=''; if(!v||!v.valid||!v.name){ return; } var ms=_taxMatchState(inputId,legalId); var _fill=function(){ var le=$(legalId); if(le){ le.value=v.name; _taxRefreshMatch(inputId,statusId,legalId); try{ if(typeof saveGymDraft==='function') saveGymDraft(); }catch(e){} try{ if(typeof saveCoachDraft==='function') saveCoachDraft(); }catch(e){} } }; if(ms==='match'){ st.textContent='✓ '+v.name+(LANG==='en'?' · matches the legal name':' · odpovídá právnímu jménu'); st.style.color='var(--green)'; } else if(ms===null){ st.textContent='✓ '+v.name+(LANG==='en'?' · tap to use as legal name':' · klepni a použij jako právní jméno'); st.style.color='var(--green)'; st.style.cursor='pointer'; st.onclick=_fill; } else { st.textContent='✗ '+v.name+(LANG==='en'?' · does NOT match the name above — tap to use it':' · NESOUHLASÍ se jménem výše — klepni a použij'); st.style.color='var(--red)'; st.style.cursor='pointer'; st.onclick=_fill; } }
-function _taxGate(legalId, ids){ for(var i=0;i<ids.length;i++){ var _tv=window._taxVer[ids[i]]; if(_tv && _tv.valid===false && ids[i].indexOf('Vat')<0){ toast(LANG==='en'?('\u26a0\ufe0f '+'Business reg. no.'+' not found in the register \u2014 check the number'):('\u26a0\ufe0f '+'I\u010cO'+' nebylo v rejst\u0159\u00edku nalezeno \u2014 zkontroluj \u010d\u00edslo')); var _e=$(ids[i]); if(_e){ try{ var _d=_e.closest('details'); if(_d) _d.open=true; _e.focus(); }catch(e){} } return false; } if(_taxMatchState(ids[i], legalId)==='mismatch'){ var v=window._taxVer[ids[i]]; toast(LANG==='en'?('⚠️ Legal name must match ARES/VIES: “'+v.name+'”'):('⚠️ Právní jméno musí odpovídat ARES/VIES: „'+v.name+'"')); return false; } } return true; }
+function _taxGate(legalId, ids){
+  var _EN=LANG==='en';
+  // PRAZDNE ICO a spatny format blokujeme vzdy. Nedotazany ARES ne -- rejstrik muze byt
+  // nedostupny a clovek by se nedostal dal. Osmiciferna kontrola plati jen pro CZ.
+  for(var _z=0;_z<ids.length;_z++){
+    if(ids[_z].indexOf('Vat')>=0) continue;   // DIC je nepovinne
+    var _el=document.getElementById(ids[_z]);
+    if(!_el) continue;
+    var _val=String(_el.value||'').replace(/\s/g,'');
+    if(!_val){
+      toast(_EN?'\u26a0\ufe0f Fill in the business ID':'\u26a0\ufe0f Vypl\u0148 I\u010cO');
+      try{ var _d=_el.closest('details'); if(_d) _d.open=true; _el.focus(); }catch(e){}
+      return false;
+    }
+    var _cc='';
+    try{
+      var _sel=document.getElementById(ids[_z].indexOf('mg')===0?'mgCountry':'gymCountry');
+      _cc=String((_sel&&_sel.value)||'').toUpperCase();
+    }catch(e){}
+    // Jen ceske ICO ma osm cislic. U jine zeme by to byla nesmyslna prekazka.
+    var _isCz = (!_cc || _cc==='CZ' || _cc.indexOf('esk')>=0 || _cc==='CZECHIA');
+    if(_isCz && !/^\d{8}$/.test(_val)){
+      toast(_EN?'\u26a0\ufe0f Czech business ID has 8 digits':'\u26a0\ufe0f \u010cesk\u00e9 I\u010cO m\u00e1 8 \u010d\u00edslic');
+      try{ _el.focus(); }catch(e){}
+      return false;
+    }
+  }
+  // Pravni nazev je na dokladu jako fakturacni entita -- bez nej doklad nema dodavatele.
+  try{
+    var _ln=document.getElementById(legalId);
+    if(_ln && !String(_ln.value||'').trim()){
+      toast(_EN?'\u26a0\ufe0f Fill in the legal name \u2014 it goes on receipts':'\u26a0\ufe0f Vypl\u0148 pr\u00e1vn\u00ed n\u00e1zev \u2014 je na dokladech');
+      try{ _ln.focus(); }catch(e){}
+      return false;
+    }
+  }catch(e){}
+
+  for(var i=0;i<ids.length;i++){ var _tv=window._taxVer[ids[i]]; if(_tv && _tv.valid===false && ids[i].indexOf('Vat')<0){ toast(LANG==='en'?('\u26a0\ufe0f '+'Business reg. no.'+' not found in the register \u2014 check the number'):('\u26a0\ufe0f '+'I\u010cO'+' nebylo v rejst\u0159\u00edku nalezeno \u2014 zkontroluj \u010d\u00edslo')); var _e=$(ids[i]); if(_e){ try{ var _d=_e.closest('details'); if(_d) _d.open=true; _e.focus(); }catch(e){} } return false; } if(_taxMatchState(ids[i], legalId)==='mismatch'){ var v=window._taxVer[ids[i]]; toast(LANG==='en'?('⚠️ Legal name must match ARES/VIES: “'+v.name+'”'):('⚠️ Právní jméno musí odpovídat ARES/VIES: „'+v.name+'"')); return false; } } return true; }
 
 // ── IČO UŽ NĚKDO MÁ ──────────────────────────────────────────────────────────────────────────
 // Číslo se ověřovalo proti rejstříku, ale ne proti vlastní databázi. Dva lidé si tak mohli
@@ -34829,7 +34899,13 @@ async function _dokladPreview(which, opts){
   // Poskytovatel: co je právě ve formuláři, ne co je uložené v databázi.
   const prov={
     name: v(opts.nameId||(P+'LegalName')) || (currentUser&&currentUser.name) || '—',
-    ico:  v(P+'TaxId'), dic: v(P+'VatId'), addr: v(P+'BillingAddr'),
+    ico:  v(P+'TaxId'), dic: v(P+'VatId'), // Adresa se zadava do CTYR poli (rozpad pro DAC7). Jedno pole BillingAddr uz
+        // neexistuje, takze nahled hlasil "chybi adresa", i kdyz vyplnena byla.
+        addr: (function(){
+          var _l1=v(P+'BillingLine1'), _c=v(P+'BillingCity'), _z=v(P+'BillingPostal');
+          var out=[_l1, ((_z?(_z+' '):'')+_c).trim()].filter(function(x){ return x && x.trim(); });
+          return out.length ? out.join(', ') : v(P+'BillingAddr');
+        })(),
     phone: v(opts.phoneId||'csPhone'), email: v(opts.emailId||'csEmail'),
     onDok: ck(opts.dokId||'csDok')
   };
