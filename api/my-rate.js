@@ -3,7 +3,7 @@
 // asks here: we read the caller's CONDITIONS from profiles (partner=EP, founding=FP,
 // coach_ref_score -> Shikai/Bankai, bankai_eligible) and run the SAME _rate.js ladder the charge
 // paths use, so the displayed % is exactly the charged %.
-import { ladderRate } from './_rate.js';
+import { ladderRate, hasOrgRate } from './_rate.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -26,22 +26,16 @@ export default async function handler(req, res) {
     const uid = user && user.id;
     if (!uid) return res.status(401).json({ error: 'no user' });
 
-    const p = (await (await fetch(`${SB}/rest/v1/profiles?id=eq.${encodeURIComponent(uid)}&select=partner,founding,coach_ref_score,bankai_eligible,org_rate`, { headers: svc })).json())[0] || {};
-    // org_rate se sem nikdy nenačítal, takže `cond.org` bylo vždy undefined -- schválená
-    // organizace viděla v appce základní sazbu, i když se jí účtovala ta její.
-    const cond = { partner: !!p.partner, founding: !!p.founding, score: p.coach_ref_score || 0, bankai: !!p.bankai_eligible, org: !!p.org_rate };
+    const p = (await (await fetch(`${SB}/rest/v1/profiles?id=eq.${encodeURIComponent(uid)}&select=partner,founding,coach_ref_score,bankai_eligible,org_rate,org_rate_until`, { headers: svc })).json())[0] || {};
+    const cond = { partner: !!p.partner, founding: !!p.founding, score: p.coach_ref_score || 0, bankai: !!p.bankai_eligible, org: hasOrgRate(p) };
     const rate = ladderRate(mode, cond);
 
     // Founding Partner is gone from the ladder; the early perk is a free EP instead. The column
     // stays in the DB and is simply not consulted, which is why it is no longer selected here.
-    // Název stupně musí odpovídat sazbě, která se OPRAVDU účtuje. Žebříček nově vrací nejlepší
-    // z dosažených sazeb, ne první v pořadí, takže organizace s Bankai platí Bankai -- a kdyby
-    // se tu držel starý řetěz else-if, appka by jí psala "Organizace" a účtovala Bankai.
-    // Pojmenováváme proto podle výsledné sazby.
     let tier;
     if (cond.partner) tier = 'EP';
-    else if (cond.score >= 5 && cond.bankai && rate === ladderRate(mode, { score: 5, bankai: true })) tier = 'Bankai';
     else if (cond.org) tier = 'Organization';
+    else if (cond.score >= 5 && cond.bankai) tier = 'Bankai';
     else if (cond.score >= 2) tier = 'Shikai';
     else tier = 'base';
 

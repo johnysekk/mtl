@@ -243,6 +243,9 @@ export default async function handler(req, res){
               // Zvyhodnena sazba plati az kdyz je oboji: prijato A zaplaceno.
               // Sazba se zapisuje POSKYTOVATELI -- platí na všechny jeho entity, ne jen na klub,
         // kterým do asociace vstoupil.
+        // Zaúčtování: transakce + doklad klubu, provize MTL nulová.
+        try { await fetch(`${APP_URL}/api/org-fee-record`, { method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ oc_id: oc.id, method:'pis' }) }); } catch (e) {}
         if (_accepted && oc.gym_id) {
           try {
             const _g = (await sb.from('gyms').select('owner_id').eq('id', oc.gym_id).maybeSingle()).data;

@@ -1,5 +1,5 @@
 import Stripe from 'stripe';
-import { ladderRate } from './_rate.js';
+import { ladderRate, hasOrgRate } from './_rate.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -72,13 +72,13 @@ export default async function handler(req, res) {
     const owner = req.query.owner;
     if (!owner) return res.status(400).json({ error: 'missing owner' });
 
-    const prof = (await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=coach_ref_score,partner,founding,bankai_eligible`))[0];
+    const prof = (await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=coach_ref_score,partner,founding,bankai_eligible,org_rate,org_rate_until`))[0];
     if (!prof) return res.status(404).json({ error: 'owner not found' });
 
     const score = prof.coach_ref_score || 0;
     // Single source of truth -- a local copy of the ladder had drifted: EP was billed 1% instead
     // of 0.5% and founding was not handled at all, so every run raised a Founding Partner's rate.
-    const pct = ladderRate('stripe', { partner: prof.partner, founding: prof.founding, score, bankai: prof.bankai_eligible }) * 100;
+    const pct = ladderRate('stripe', { partner: prof.partner, founding: prof.founding, score, bankai: prof.bankai_eligible, org: hasOrgRate(prof) }) * 100;
 
     let rerated = 0;
     const gyms = await sbGet(`gyms?owner_id=eq.${encodeURIComponent(owner)}&select=id,stripe_account`);

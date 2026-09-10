@@ -36,6 +36,17 @@ const ACQ_RATE_EP = 0.10;  // EP perk: half the acquisition fee (was 0.05 across
 
 // mode: 'stripe' (Stripe track) | anything else (QR/bank/cash/pis track)
 // o: { partner, founding, score, bankai }
+// Má poskytovatel právě teď sazbu z členství v asociaci? Datum, ne příznak -- členství
+// vyprší samo a nikdo ho nemusí odklikávat. Používá se všude, kde se sazba počítá.
+export function hasOrgRate(profile) {
+  try {
+    if (!profile) return false;
+    if (profile.org_rate) return true;                       // ruční příznak od MTL
+    const u = profile.org_rate_until;
+    return !!(u && new Date(u + 'T23:59:59').getTime() >= Date.now());
+  } catch (e) { return false; }
+}
+
 export function ladderRate(mode, o) {
   o = o || {};
   // ── SAZEBNÍK ────────────────────────────────────────────────────────────────────────────
@@ -122,14 +133,8 @@ export async function resolveRate(sbGet, { ownerId, gymId, gymAccount, mode }) {
   // ve federaci i klub mimo ni. Platí do org_rate_until a pak sama vyprší; kdyby to byl
   // příznak, jedna zaplacená sezóna by dala slevu navždy.
   // Vyhrává lepší sazba, stejně jako v celém žebříčku: Bankai (1 %) se členstvím nezhorší.
-  const _base = ladderRate(mode, { partner: p.partner, founding: p.founding, score: p.coach_ref_score, bankai: p.bankai_eligible });
-  // Sazba patří POSKYTOVATELI a platí na všechny jeho entity -- v "Platby a provize" vidí
-  // jednu sazbu, takže dvě různé podle klubu by tam nešlo ukázat.
-  try {
-    if (p && p.org_rate_until && new Date(p.org_rate_until + 'T23:59:59').getTime() >= Date.now()) {
-      return Math.min(_base, 0.015);
-    }
-  } catch (e) {}
+  const _base = ladderRate(mode, { partner: p.partner, founding: p.founding, score: p.coach_ref_score,
+    bankai: p.bankai_eligible, org: hasOrgRate(p) });
   return _base;
 }
 
