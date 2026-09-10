@@ -38566,12 +38566,30 @@ async function showReceipt(b){
     // neprikladaji, predavaji rezervaci. Bez tohohle by doklad neslo zobrazit vubec.
     if(b && !b.doklad){
       try{
-        const _tid=b.transaction_id||b.tx_id||null;
-        const _pi=b.payment_intent||b.stripe_payment_intent||b.pis_payment_id||null;
-        let _q=null;
-        if(_tid) _q=supaClient.from('doklady').select('*').eq('transaction_id',_tid).limit(1);
-        else if(_pi) _q=supaClient.from('doklady').select('*').eq('payment_intent',_pi).limit(1);
-        if(_q){ const { data:_dd }=await _q; if(_dd && _dd.length) b=Object.assign({}, b, { doklad:_dd[0] }); }
+        // Rezervace NEMA transaction_id -- ma bud payment_intent (Stripe), nebo se
+        // transakce najde podle source_booking_id (hotovost, QR, PIS). Hledani podle
+        // neexistujiciho sloupce byl duvod, proc se doklad nenasel nikdy.
+        const _pi=b.payment_intent||b.stripe_payment_intent||null;
+        let _dd=null;
+
+        if(b.transaction_id){
+          const r=await supaClient.from('doklady').select('*').eq('transaction_id',b.transaction_id).limit(1);
+          _dd=(r&&r.data&&r.data.length)?r.data[0]:null;
+        }
+        if(!_dd && _pi){
+          const r=await supaClient.from('doklady').select('*').eq('payment_intent',_pi).limit(1);
+          _dd=(r&&r.data&&r.data.length)?r.data[0]:null;
+        }
+        if(!_dd && b.id){
+          // Bankovni kolej: transakce si nese id rezervace, doklad si nese id transakce.
+          const t=await supaClient.from('transactions').select('id').eq('source_booking_id',String(b.id)).limit(1);
+          const _txid=(t&&t.data&&t.data.length)?t.data[0].id:null;
+          if(_txid){
+            const r=await supaClient.from('doklady').select('*').eq('transaction_id',_txid).limit(1);
+            _dd=(r&&r.data&&r.data.length)?r.data[0]:null;
+          }
+        }
+        if(_dd) b=Object.assign({}, b, { doklad:_dd });
       }catch(e){}
     }
     if(b && b.doklad){
@@ -38603,24 +38621,28 @@ async function showReceipt(b){
     // slozeny z dnesnich dat by nebyl tim, co bylo vystaveno -- radeji to rekneme nahlas.
     if(!b._snap){
       // Snimek chybi -- doklad k teto platbe nebyl vystaven. Skladat ho dnes ze zivych dat
-      // by dalo dokument, ktery se meni v case; to neni doklad. Zobrazujeme to stejnym
-      // overlayem jako doklad sam (#dokladOv), ne sheetem -- ten pro doklad neexistuje.
+      // by dalo dokument, ktery se meni v case; to uz neni doklad.
+      // Overlay se stavi STEJNE jako doklad sam (hlavicka + iframe), jinak se v dashmode
+      // chytne za layoutem a zbyde prazdna obrazovka.
       try{
+        var _nvHtml='<!doctype html><html><head><meta charset="utf-8">'
+          +'<meta name="viewport" content="width=device-width,initial-scale=1">'
+          +'<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:26px 22px;color:#333;line-height:1.65;font-size:14px;}h1{font-size:17px;color:#111;margin:0 0 10px;}</style>'
+          +'</head><body><h1>'+(EN?'No receipt was issued for this payment':'K t\u00e9to platb\u011b nebyl vystaven doklad')+'</h1><p>'
+          +(EN?'It predates receipt snapshots. We will not rebuild it from today\u2019s data \u2014 that would not be the document that was issued. The amount is in your payment history.'
+              :'Platba je z doby p\u0159ed zaveden\u00edm doklad\u016f. Nebudeme ho skl\u00e1dat z dne\u0161n\u00edch dat \u2014 nebyl by to doklad, kter\u00fd byl vystaven. \u010c\u00e1stku najde\u0161 v historii plateb.')
+          +'</p></body></html>';
         var _nv=document.getElementById('dokladOv'); if(_nv) _nv.remove();
         _nv=document.createElement('div'); _nv.id='dokladOv';
         _nv.style.cssText='position:fixed;inset:0;z-index:100050;background:#fff;display:flex;flex-direction:column;';
-        _nv.innerHTML='<div style="display:flex;align-items:center;gap:10px;padding:calc(env(safe-area-inset-top,0px) + 10px) 14px 10px;border-bottom:1px solid #E6E4DE;">'
-          +'<button id="_nvClose" style="background:none;border:none;font-size:22px;cursor:pointer;color:#111;line-height:1;">\u2190</button>'
-          +'<strong style="font-family:\'DM Sans\';font-size:15px;color:#111;">'+(EN?'Receipt':'Doklad')+'</strong></div>'
-          +'<div style="padding:22px;font-family:\'DM Sans\';font-size:13.5px;line-height:1.6;color:#555;">'
-          +'<div style="font-size:15px;font-weight:800;color:#111;margin-bottom:8px;">'
-          +(EN?'No receipt was issued for this payment':'K t\u00e9to platb\u011b nebyl vystaven doklad')+'</div>'
-          +(EN?'It predates receipt snapshots. We will not rebuild it from today\u2019s data \u2014 that would not be the document that was issued. The amount is in your payment history.'
-              :'Platba je z doby p\u0159ed zaveden\u00edm doklad\u016f. Nebudeme ho skl\u00e1dat z dne\u0161n\u00edch dat \u2014 nebyl by to doklad, kter\u00fd byl vystaven. \u010c\u00e1stku najde\u0161 v historii plateb.')
-          +'</div>';
+        _nv.innerHTML='<div style="display:flex;align-items:center;gap:10px;padding:calc(env(safe-area-inset-top,0px) + 10px) 14px 10px;border-bottom:1px solid #eee;background:#fafafa;">'
+          +'<button id="_nvBack" style="padding:9px 15px;background:#1a1a1a;color:#fff;border:none;border-radius:9px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\',sans-serif;">\u2039 '+(EN?'Back':'Zp\u011bt')+'</button></div>'
+          +'<iframe id="_nvFrame" style="flex:1;border:none;width:100%;"></iframe>';
         document.body.appendChild(_nv);
-        var _cb=_nv.querySelector('#_nvClose'); if(_cb) _cb.onclick=function(){ _nv.remove(); };
-      }catch(e){}
+        var _nf=_nv.querySelector('#_nvFrame');
+        try{ _nf.srcdoc=_nvHtml; }catch(e){ try{ _nf.contentDocument.write(_nvHtml); }catch(_){} }
+        var _nb=_nv.querySelector('#_nvBack'); if(_nb) _nb.onclick=function(){ _nv.remove(); };
+      }catch(e){ try{ toast(EN?'\u26a0\ufe0f No receipt for this payment':'\u26a0\ufe0f K t\u00e9to platb\u011b nen\u00ed doklad'); }catch(_){} }
       return;
     }
     const rec=gymRec;
