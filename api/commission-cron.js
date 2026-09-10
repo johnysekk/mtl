@@ -38,6 +38,37 @@ async function sb(path, opts = {}) {
   if (!r.ok) throw new Error(`SB ${r.status} ${path}: ${typeof j === 'string' ? j : JSON.stringify(j)}`);
   return j;
 }
+// E-MAIL VEDLE NOTIFIKACE. notify() zapisuje jen zpravu v appce -- kdo ji neotevre, o selhane
+// provizi se nedozvi a po dvou tydnech mu cron pozastavi ucet. Zprava, ktera clovek nevidi,
+// nema smysl: penize a pozastaveni patri do mailu.
+const RESEND = process.env.RESEND_API_KEY;
+const MAIL_FROM = process.env.MAIL_FROM || 'MTL <noreply@martialtraininglab.com>';
+async function sendEmail(to, subject, html) {
+  if (!RESEND || !to) return;
+  try {
+    await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + RESEND, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: MAIL_FROM, to: [to], subject, html }),
+    });
+  } catch (e) { console.error('commission email', e.message); }
+}
+function mailHtml(title, body) {
+  return `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:520px;margin:0 auto;padding:22px;">
+    <div style="font-size:19px;font-weight:800;color:#111;margin-bottom:10px;">${title}</div>
+    <div style="font-size:14px;color:#333;line-height:1.6;">${body}</div>
+    <div style="font-size:12px;color:#888;margin-top:22px;">Martial Training Lab</div>
+  </div>`;
+}
+// Notifikace v appce a k tomu mail u toho, co se tyka penez nebo pozastaveni uctu.
+async function notifyMail(userId, subject, body) {
+  try {
+    if (!userId) return;
+    const p = (await sb(`profiles?id=eq.${userId}&select=email`))[0];
+    if (p && p.email) await sendEmail(p.email, subject, mailHtml(subject, body));
+  } catch (e) {}
+}
+
 const notify = (user_id, kind, message, extra = {}) =>
   sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id, type: 'system', read: false, data: JSON.stringify({ kind, ...extra }), message }) });
 const CZ_MONTHS = ['leden','\u00fanor','b\u0159ezen','duben','kv\u011bten','\u010derven','\u010dervenec','srpen','z\u00e1\u0159\u00ed','\u0159\u00edjen','listopad','prosinec'];
@@ -179,7 +210,7 @@ let deferredMin = 0;
           const patch = { commission_next_retry: new Date(Date.now() + 3 * 86400000).toISOString() };
           if (!g.commission_failed_at) { patch.commission_failed_at = new Date().toISOString(); g.commission_failed_at = patch.commission_failed_at; }
           await sb(`gyms?id=eq.${gid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) });
-          await notify(g.owner_id, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, účet bude pozastaven.`, { gym_id: gid });
+          await notifyMail(g.owner_id, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Zkontroluj prosím platební kartu v Platby a provize — po dvou týdnech bez úhrady se účet pozastaví.'); await notify(g.owner_id, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, účet bude pozastaven.`, { gym_id: gid });
         } else if (anyCharge && !anyFail) {
           unpaidSet.delete(gid);
           await sb(`gyms?id=eq.${gid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_next_retry: null, commission_last_billed: prevMonth(curMonth) }) });
@@ -276,7 +307,7 @@ let deferredMin = 0;
           const patch = { commission_next_retry: new Date(Date.now() + 3 * 86400000).toISOString() };
           if (!c.commission_failed_at) { patch.commission_failed_at = new Date().toISOString(); c.commission_failed_at = patch.commission_failed_at; }
           await sb(`profiles?id=eq.${cid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) });
-          await notify(cid, 'commission_failed', `Strzeni provize MTL z karty selhalo. Aktualizuj kartu - dalsi pokus za 3 dny. Pokud neuhradis do 2 tydnu, zaznamenavani hotovosti se pozastavi.`, { coach_id: cid });
+          await notifyMail(cid, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Zkontroluj prosím platební kartu v Platby a provize — po dvou týdnech bez úhrady se účet pozastaví.'); await notify(cid, 'commission_failed', `Strzeni provize MTL z karty selhalo. Aktualizuj kartu - dalsi pokus za 3 dny. Pokud neuhradis do 2 tydnu, zaznamenavani hotovosti se pozastavi.`, { coach_id: cid });
         } else if (anyCharge && !anyFail) {
           unpaidCoach.delete(cid);
           await sb(`profiles?id=eq.${cid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_next_retry: null, commission_last_billed: prevMonth(curMonth) }) });
@@ -379,20 +410,20 @@ let deferredMin = 0;
           const next = new Date(Date.now() + 3 * 86400000).toISOString();
           await sb(`organizations?id=eq.${oid}`, { method: 'PATCH', prefer: 'return=minimal',
             body: JSON.stringify({ commission_failed_at: first, commission_next_retry: next }) });
-          if (o.owner_id) await notify(o.owner_id, 'commission_failed', `Provizi MTL se nepodarilo strhnout. Zkusime to za tri dny.`, { organization_id: oid });
+          if (o.owner_id) await notifyMail(o.owner_id, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Zkontroluj prosím platební kartu v Platby a provize — po dvou týdnech bez úhrady se účet pozastaví.'); await notify(o.owner_id, 'commission_failed', `Provizi MTL se nepodarilo strhnout. Zkusime to za tri dny.`, { organization_id: oid });
           failed++;
         }
       }
       // Karta chybí: bez ní se nedá strhnout nic a organizace o tom musí vědět dřív,
       // než jí to zastaví prodej lístků.
       if (billDay && !(o.commission_card_customer && o.commission_card_pm) && o.owner_id) {
-        await notify(o.owner_id, 'commission_no_card', `Doplň platební kartu pro provizi MTL, jinak se pozastavi prodej listku.`, { organization_id: oid });
+        await notifyMail(o.owner_id, 'Doplň platební kartu pro provizi MTL', 'Bez karty nejde provizi z hotovosti a QR plateb strhnout. Doplň ji v Platby a provize.'); await notify(o.owner_id, 'commission_no_card', `Doplň platební kartu pro provizi MTL, jinak se pozastavi prodej listku.`, { organization_id: oid });
       }
       // ---- POZASTAVENÍ po dvou týdnech neuhrazené provize, stejně jako u klubu ----
       if (o.commission_failed_at && (Date.now() - new Date(o.commission_failed_at).getTime()) > 14 * 86400000 && !o.account_suspended) {
         await sb(`organizations?id=eq.${oid}`, { method: 'PATCH', prefer: 'return=minimal',
           body: JSON.stringify({ account_suspended: true, cash_blocked: true }) });
-        if (o.owner_id) await notify(o.owner_id, 'commission_suspended', `Neuhrazena provize MTL - prodej listku je pozastaveny.`, { organization_id: oid });
+        if (o.owner_id) await notifyMail(o.owner_id, 'Účet je pozastavený — neuhrazená provize MTL', 'Provize se nepodařilo strhnout dva týdny. Po uhrazení se účet obnoví sám.'); await notify(o.owner_id, 'commission_suspended', `Neuhrazena provize MTL - prodej listku je pozastaveny.`, { organization_id: oid });
         suspended++;
       }
     }
