@@ -300,7 +300,8 @@ export default async function handler(req, res) {
             headers: { apikey: _KEY, Authorization: `Bearer ${_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
             body: JSON.stringify({
               user_id: ownerId, type: 'system', read: false,
-              data: JSON.stringify({ kind: 'cohort_qr_claim', cohort_id: cohortId, cohort_member_id: memberQ && memberQ.id, cohort_name: c.name || '' }),
+              data: JSON.stringify({ kind: 'cohort_qr_claim', cohort_id: cohortId, cohort_member_id: memberQ && memberQ.id, cohort_name: c.name || '',
+                msg_en: `\u{1F4CB} ${name || 'A prospect'} opened the QR to pay the deposit ${depQ} ${_cur}${c.name ? (' \u2014 course \u201c' + c.name + '\u201d') : ''}. Once the payment reaches your account, confirm it under participants.` }),
               message: `\u{1F4CB} ${name || 'Z\u00e1jemce'} si zobrazil/a QR k \u00fahrad\u011b z\u00e1lohy ${depQ} ${_cur}${c.name ? (' \u2014 kurz \u201e' + c.name + '\u201c') : ''}. A\u017e platba dorazi na \u00fa\u010det, potvrd ji v \u00fa\u010dastnic\u00edch.`
             })
           });

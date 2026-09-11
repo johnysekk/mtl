@@ -85,7 +85,7 @@ async function pisSideEffects(rec, tbl) {
     } else if (_merch) {
       let mt = rec.coach_id || null;
       if (!mt && rec.gym_id) { const g = await sb.from('gyms').select('owner_id').eq('id', rec.gym_id).maybeSingle(); mt = g.data && g.data.owner_id; }
-      if (mt) await sb.from('notifications').insert({ user_id: mt, type: 'booking', read: false, message: '\ud83d\udecd\ufe0f Nov\u00fd prodej merche (p\u0159evodem): ' + (rec.item_name || 'polo\u017eka') + (rec.buyer_name ? (' \u00b7 ' + rec.buyer_name) : ''), data: JSON.stringify({ kind: 'merch_order', merch_id: rec.merch_id }) });
+      if (mt) await sb.from('notifications').insert({ user_id: mt, type: 'booking', read: false, message: '\ud83d\udecd\ufe0f Nov\u00fd prodej merche (p\u0159evodem): ' + (rec.item_name || 'polo\u017eka') + (rec.buyer_name ? (' \u00b7 ' + rec.buyer_name) : ''), data: JSON.stringify({ kind: 'merch_order', merch_id: rec.merch_id, msg_en: '\ud83d\udecd\ufe0f New merch sale (bank transfer): ' + (rec.item_name || 'item') + (rec.buyer_name ? (' \u00b7 ' + rec.buyer_name) : '') }) });
     } else if (_cohort) {
       if (_cohGym) { const g = await sb.from('gyms').select('owner_id').eq('id', _cohGym).maybeSingle(); const ownerId = g.data && g.data.owner_id; if (ownerId) await sb.from('notifications').insert({ user_id: ownerId, type: 'booking', read: false, message: '\ud83c\udf93 Nov\u00e1 z\u00e1loha kurzu (p\u0159evodem): ' + (rec.name || 'Z\u00e1jemce'), data: JSON.stringify({ kind: 'pis_payment_in', cohort_id: rec.cohort_id }) }); }
     } else {

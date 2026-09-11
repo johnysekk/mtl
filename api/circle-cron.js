@@ -121,7 +121,7 @@ export default async function handler(req, res) {
         for (const uid of creators) {
           await notify(uid, 'circle_market',
             `\u{1F534} MTL Circle: ${m.city} je ODEMČENO. ${m.live} živých klubů — dost na to, aby si student vybral. Jsi jeden ze spolutvůrců téhle scény.`,
-            { city: m.city });
+            { city: m.city, msg_en: `\u{1F534} MTL Circle: ${m.city} is UNLOCKED. ${m.live} live clubs — enough for students to choose. You are one of the co-creators of this scene.` });
           out.notified++;
         }
 
@@ -135,7 +135,7 @@ export default async function handler(req, res) {
         for (const uid of owners) {
           await notify(uid, 'circle_market',
             `\u{1F534} MTL Circle: ${m.city} je ODEMČENO. Scéna je dost silná na to, aby sem MTL přivádělo studenty.`,
-            { city: m.city });
+            { city: m.city, msg_en: `\u{1F534} MTL Circle: ${m.city} is UNLOCKED. The scene is strong enough for MTL to bring students here.` });
           out.notified++;
         }
       } catch (e) { out.errors.push(`${m.city}: ${e.message}`); }

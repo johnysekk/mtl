@@ -64,7 +64,7 @@ export default async function handler(req, res) {
           await fetch(`${SB}/rest/v1/notifications`, {
             method: 'POST', headers: { ...svc, Prefer: 'return=minimal' },
             body: JSON.stringify({ user_id: o2.owner_id, type: 'system', read: false,
-              data: JSON.stringify({ kind: 'org_join_req' }),
+              data: JSON.stringify({ kind: 'org_join_req', msg_en: `\u{1F3C5} The club ${t(b.name)} wants to join your association.` }),
               message: `\u{1F3C5} Klub ${t(b.name)} se chce p\u0159ipojit k tv\u00e9 asociaci.` }),
           });
         }

@@ -54,10 +54,10 @@ export default async function handler(req, res) {
     }
 
     if (stripeApplied) {
-      await sbPost('notifications', { user_id: refUser, type: 'system', read: false, data: JSON.stringify({ kind: 'gym_member_ref_reward', gym_id: gymId, pct }), message: '🎁 Tvé doporučení se přidalo! -' + pct + ' % se ti automaticky strhne z příští faktury členství.' });
+      await sbPost('notifications', { user_id: refUser, type: 'system', read: false, data: JSON.stringify({ kind: 'gym_member_ref_reward', gym_id: gymId, pct, msg_en: '🎁 Your referral joined! -' + pct + ' % comes off your next membership invoice automatically.' }), message: '🎁 Tvé doporučení se přidalo! -' + pct + ' % se ti automaticky strhne z příští faktury členství.' });
     } else {
       await sbPost('gym_member_ref_credits', { gym_id: gymId, referrer_id: refUser, pct, status: 'pending', source: 'cash', created_at: new Date().toISOString() });
-      await sbPost('notifications', { user_id: refUser, type: 'system', read: false, data: JSON.stringify({ kind: 'gym_member_ref_reward', gym_id: gymId, pct }), message: '🎁 Tvé doporučení se přidalo! -' + pct + ' % se ti automaticky uplatní na další období členství (QR/hotovost).' });
+      await sbPost('notifications', { user_id: refUser, type: 'system', read: false, data: JSON.stringify({ kind: 'gym_member_ref_reward', gym_id: gymId, pct, msg_en: '🎁 Your referral joined! -' + pct + ' % applies automatically to your next membership period (QR/cash).' }), message: '🎁 Tvé doporučení se přidalo! -' + pct + ' % se ti automaticky uplatní na další období členství (QR/hotovost).' });
     }
     return res.status(200).json({ ok: true, stripe: stripeApplied, pct });
   } catch (e) { return res.status(500).json({ error: String((e && e.message) || e) }); }

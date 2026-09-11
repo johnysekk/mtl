@@ -215,7 +215,7 @@ async function handler(req, res) {
         if (!acct && b.coach_id) { const c = await sbGet(`profiles?id=eq.${b.coach_id}&select=stripe_account`); acct = c[0] && c[0].stripe_account; }
         if (acct && b.payment_intent) { try { await stripe.refunds.create({ payment_intent: b.payment_intent }, { stripeAccount: acct }); } catch (e) { console.error('dispute refund', b.id, e.message); } }
         await sbPatch('bookings', `id=eq.${b.id}`, { dispute_status: 'refunded', status: 'refunded', refund_requested: false, dispute_auto: true });
-        if (b.student_id) await sbPost('notifications', { user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'dispute_auto_refunded', id: b.id }), message: `\u21a9\ufe0f Spor #${b.id}: pen\u00edze se ti vr\u00e1tily v pln\u00e9 v\u00fd\u0161i.` });
+        if (b.student_id) await sbPost('notifications', { user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'dispute_auto_refunded', id: b.id, msg_en: `\u21a9\ufe0f Dispute #${b.id}: you were refunded in full.` }), message: `\u21a9\ufe0f Spor #${b.id}: pen\u00edze se ti vr\u00e1tily v pln\u00e9 v\u00fd\u0161i.` });
         autoRefunded++;
       }
 

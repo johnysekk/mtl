@@ -53,6 +53,7 @@ async function sendEmail(to, subject, html) {
     });
   } catch (e) { console.error('commission email', e.message); }
 }
+// Jazyk e-mailu podle profilu příjemce (profiles.lang zapisuje appka). Bez něj česky.
 function mailHtml(title, body) {
   return `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:520px;margin:0 auto;padding:22px;">
     <div style="font-size:19px;font-weight:800;color:#111;margin-bottom:10px;">${title}</div>
@@ -61,11 +62,12 @@ function mailHtml(title, body) {
   </div>`;
 }
 // Notifikace v appce a k tomu mail u toho, co se tyka penez nebo pozastaveni uctu.
-async function notifyMail(userId, subject, body) {
+async function notifyMail(userId, subject, body, subjectEn, bodyEn) {
   try {
     if (!userId) return;
-    const p = (await sb(`profiles?id=eq.${userId}&select=email`))[0];
-    if (p && p.email) await sendEmail(p.email, subject, mailHtml(subject, body));
+    const p = (await sb(`profiles?id=eq.${userId}&select=email,lang`))[0];
+    const en = !!(p && p.lang === 'en' && subjectEn);
+    if (p && p.email) await sendEmail(p.email, en ? subjectEn : subject, mailHtml(en ? subjectEn : subject, en ? bodyEn : body));
   } catch (e) {}
 }
 
@@ -199,7 +201,7 @@ let deferredMin = 0;
           const patch = { commission_next_retry: new Date(Date.now() + 3 * 86400000).toISOString() };
           if (!g.commission_failed_at) { patch.commission_failed_at = new Date().toISOString(); g.commission_failed_at = patch.commission_failed_at; }
           await sb(`gyms?id=eq.${gid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) });
-          await notifyMail(g.owner_id, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Zkontroluj prosím platební kartu v Platby a provize — po dvou týdnech bez úhrady se účet pozastaví.'); await notify(g.owner_id, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, účet bude pozastaven.`, { gym_id: gid });
+          await notifyMail(g.owner_id, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Zkontroluj prosím platební kartu v Platby a provize — po dvou týdnech bez úhrady se účet pozastaví.', 'We could not charge the MTL commission', 'We will try again in three days. Please check your payment card in Payments & commission — after two weeks without payment the account will be suspended.'); await notify(g.owner_id, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, účet bude pozastaven.`, { gym_id: gid, msg_en: `⚠️ Charging the MTL commission to your card failed. Update your card — next attempt in 3 days. If it isn't paid within 2 weeks, the account will be suspended.` });
         } else if (anyCharge && !anyFail) {
           unpaidSet.delete(gid);
           await sb(`gyms?id=eq.${gid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_next_retry: null, commission_last_billed: prevMonth(curMonth) }) });
@@ -212,11 +214,11 @@ let deferredMin = 0;
         if (overdue) {
           if (g.payment_mode === 'qr_bank' && !g.account_suspended) {
             await sb(`gyms?id=eq.${gid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ account_suspended: true }) });
-            await notify(g.owner_id, 'account_suspended', `🚫 Účet byl pozastaven kvůli neuhrazené provizi MTL. Gym je skrytý a nelze ho používat (tebou ani studenty), dokud provizi neuhradíš (aktualizuj kartu).`, { gym_id: gid });
+            await notify(g.owner_id, 'account_suspended', `🚫 Účet byl pozastaven kvůli neuhrazené provizi MTL. Gym je skrytý a nelze ho používat (tebou ani studenty), dokud provizi neuhradíš (aktualizuj kartu).`, { gym_id: gid, msg_en: `🚫 The account was suspended because of an unpaid MTL commission. The club is hidden and can't be used (by you or students) until the commission is paid (update your card).` });
             suspended++;
           } else if (g.payment_mode !== 'qr_bank' && g.takes_cash && !g.cash_blocked) {
             await sb(`gyms?id=eq.${gid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ cash_blocked: true }) });
-            await notify(g.owner_id, 'cash_blocked', `🚫 Zaznamenávání hotovosti bylo pozastaveno kvůli neuhrazené provizi z hotovostních plateb. Stripe platby běží dál; cash odblokuješ úhradou provize (aktualizuj kartu).`, { gym_id: gid });
+            await notify(g.owner_id, 'cash_blocked', `🚫 Zaznamenávání hotovosti bylo pozastaveno kvůli neuhrazené provizi z hotovostních plateb. Stripe platby běží dál; cash odblokuješ úhradou provize (aktualizuj kartu).`, { gym_id: gid, msg_en: `🚫 Recording cash was paused because of an unpaid commission on cash payments. Stripe payments keep working; paying the commission unblocks cash (update your card).` });
             suspended++;
           }
         }
@@ -228,7 +230,7 @@ let deferredMin = 0;
     for (const g of (susGyms || [])) {
       if (unpaidSet.has(g.id)) continue; // still owes
       await sb(`gyms?id=eq.${g.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_failed_at: null, account_suspended: false, cash_blocked: false }) });
-      if (g.account_suspended || g.cash_blocked) await notify(g.owner_id, 'commission_cleared', `✅ Provize uhrazena — účet je opět plně aktivní.`, { gym_id: g.id });
+      if (g.account_suspended || g.cash_blocked) await notify(g.owner_id, 'commission_cleared', `✅ Provize uhrazena — účet je opět plně aktivní.`, { gym_id: g.id, msg_en: `✅ Commission paid — the account is fully active again.` });
       lifted++;
     }
 
@@ -295,7 +297,7 @@ let deferredMin = 0;
           const patch = { commission_next_retry: new Date(Date.now() + 3 * 86400000).toISOString() };
           if (!c.commission_failed_at) { patch.commission_failed_at = new Date().toISOString(); c.commission_failed_at = patch.commission_failed_at; }
           await sb(`profiles?id=eq.${cid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) });
-          await notifyMail(cid, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Zkontroluj prosím platební kartu v Platby a provize — po dvou týdnech bez úhrady se účet pozastaví.'); await notify(cid, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, zaznamenávání hotovosti se pozastaví.`, { coach_id: cid });
+          await notifyMail(cid, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Zkontroluj prosím platební kartu v Platby a provize — po dvou týdnech bez úhrady se účet pozastaví.', 'We could not charge the MTL commission', 'We will try again in three days. Please check your payment card in Payments & commission — after two weeks without payment the account will be suspended.'); await notify(cid, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, zaznamenávání hotovosti se pozastaví.`, { coach_id: cid, msg_en: `⚠️ Charging the MTL commission to your card failed. Update your card — next attempt in 3 days. If it isn't paid within 2 weeks, recording cash will be paused.` });
         } else if (anyCharge && !anyFail) {
           unpaidCoach.delete(cid);
           await sb(`profiles?id=eq.${cid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_next_retry: null, commission_last_billed: prevMonth(curMonth) }) });
@@ -308,11 +310,11 @@ let deferredMin = 0;
         if (overdue) {
           if (c.payment_mode === 'qr_bank' && !c.account_suspended) {
             await sb(`profiles?id=eq.${cid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ account_suspended: true }) });
-            await notify(cid, 'account_suspended', `🚫 Účet byl pozastaven kvůli neuhrazené provizi MTL. Tvůj profil je skrytý. Aktualizuj kartu a uhraď provizi.`, { coach_id: cid });
+            await notify(cid, 'account_suspended', `🚫 Účet byl pozastaven kvůli neuhrazené provizi MTL. Tvůj profil je skrytý. Aktualizuj kartu a uhraď provizi.`, { coach_id: cid, msg_en: `🚫 The account was suspended because of an unpaid MTL commission. Your profile is hidden. Update your card and pay the commission.` });
             suspended++;
           } else if (c.payment_mode !== 'qr_bank' && c.takes_cash && !c.cash_blocked) {
             await sb(`profiles?id=eq.${cid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ cash_blocked: true }) });
-            await notify(cid, 'cash_blocked', `🚫 Zaznamenávání hotovosti bylo pozastaveno kvůli neuhrazené provizi. Stripe platby běží dál.`, { coach_id: cid });
+            await notify(cid, 'cash_blocked', `🚫 Zaznamenávání hotovosti bylo pozastaveno kvůli neuhrazené provizi. Stripe platby běží dál.`, { coach_id: cid, msg_en: `🚫 Recording cash was paused because of an unpaid commission. Stripe payments keep working.` });
             suspended++;
           }
         }
@@ -324,7 +326,7 @@ let deferredMin = 0;
     for (const c of (susCoaches || [])) {
       if (unpaidCoach.has(c.id)) continue;
       await sb(`profiles?id=eq.${c.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_failed_at: null, account_suspended: false, cash_blocked: false, commission_next_retry: null }) });
-      if (c.account_suspended || c.cash_blocked) await notify(c.id, 'commission_cleared', `✅ Provize uhrazena — účet je opět plně aktivní.`, { coach_id: c.id });
+      if (c.account_suspended || c.cash_blocked) await notify(c.id, 'commission_cleared', `✅ Provize uhrazena — účet je opět plně aktivní.`, { coach_id: c.id, msg_en: `✅ Commission paid — the account is fully active again.` });
       lifted++;
     }
 
@@ -392,20 +394,20 @@ let deferredMin = 0;
           const next = new Date(Date.now() + 3 * 86400000).toISOString();
           await sb(`organizations?id=eq.${oid}`, { method: 'PATCH', prefer: 'return=minimal',
             body: JSON.stringify({ commission_failed_at: first, commission_next_retry: next }) });
-          if (o.owner_id) await notifyMail(o.owner_id, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Zkontroluj prosím platební kartu v Platby a provize — po dvou týdnech bez úhrady se účet pozastaví.'); await notify(o.owner_id, 'commission_failed', `⚠️ Provizi MTL se nepodařilo strhnout. Zkusíme to znovu za tři dny.`, { organization_id: oid });
+          if (o.owner_id) await notifyMail(o.owner_id, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Zkontroluj prosím platební kartu v Platby a provize — po dvou týdnech bez úhrady se účet pozastaví.', 'We could not charge the MTL commission', 'We will try again in three days. Please check your payment card in Payments & commission — after two weeks without payment the account will be suspended.'); await notify(o.owner_id, 'commission_failed', `⚠️ Provizi MTL se nepodařilo strhnout. Zkusíme to znovu za tři dny.`, { organization_id: oid, msg_en: `⚠️ We could not charge the MTL commission. We'll try again in three days.` });
           failed++;
         }
       }
       // Karta chybí: bez ní se nedá strhnout nic a organizace o tom musí vědět dřív,
       // než jí to zastaví prodej lístků.
       if (billDay && !(o.commission_card_customer && o.commission_card_pm) && o.owner_id) {
-        await notifyMail(o.owner_id, 'Doplň platební kartu pro provizi MTL', 'Bez karty nejde provizi z hotovosti a QR plateb strhnout. Doplň ji v Platby a provize.'); await notify(o.owner_id, 'commission_no_card', `Doplň platební kartu pro provizi MTL, jinak se pozastaví prodej lístků.`, { organization_id: oid });
+        await notifyMail(o.owner_id, 'Doplň platební kartu pro provizi MTL', 'Bez karty nejde provizi z hotovosti a QR plateb strhnout. Doplň ji v Platby a provize.', 'Add a payment card for the MTL commission', 'Without a card we cannot charge the commission on cash and QR payments. Add it in Payments & commission.'); await notify(o.owner_id, 'commission_no_card', `Doplň platební kartu pro provizi MTL, jinak se pozastaví prodej lístků.`, { organization_id: oid, msg_en: `Add a payment card for the MTL commission, otherwise ticket sales will be paused.` });
       }
       // ---- POZASTAVENÍ po dvou týdnech neuhrazené provize, stejně jako u klubu ----
       if (o.commission_failed_at && (Date.now() - new Date(o.commission_failed_at).getTime()) > 14 * 86400000 && !o.account_suspended) {
         await sb(`organizations?id=eq.${oid}`, { method: 'PATCH', prefer: 'return=minimal',
           body: JSON.stringify({ account_suspended: true, cash_blocked: true }) });
-        if (o.owner_id) await notifyMail(o.owner_id, 'Účet je pozastavený — neuhrazená provize MTL', 'Provize se nepodařilo strhnout dva týdny. Po uhrazení se účet obnoví sám.'); await notify(o.owner_id, 'commission_suspended', `🚫 Neuhrazená provize MTL — prodej lístků je pozastavený.`, { organization_id: oid });
+        if (o.owner_id) await notifyMail(o.owner_id, 'Účet je pozastavený — neuhrazená provize MTL', 'Provize se nepodařilo strhnout dva týdny. Po uhrazení se účet obnoví sám.', 'Account suspended — unpaid MTL commission', 'We have not been able to charge the commission for two weeks. The account is restored automatically once it is paid.'); await notify(o.owner_id, 'commission_suspended', `🚫 Neuhrazená provize MTL — prodej lístků je pozastavený.`, { organization_id: oid, msg_en: `🚫 Unpaid MTL commission — ticket sales are paused.` });
         suspended++;
       }
     }
@@ -416,7 +418,7 @@ let deferredMin = 0;
         if (unpaidOrg.has(o.id)) continue;
         await sb(`organizations?id=eq.${o.id}`, { method: 'PATCH', prefer: 'return=minimal',
           body: JSON.stringify({ commission_failed_at: null, account_suspended: false, cash_blocked: false, commission_next_retry: null }) });
-        if ((o.account_suspended || o.cash_blocked) && o.owner_id) await notify(o.owner_id, 'commission_cleared', `✅ Provize uhrazena — organizace je opět plně aktivní.`, { organization_id: o.id });
+        if ((o.account_suspended || o.cash_blocked) && o.owner_id) await notify(o.owner_id, 'commission_cleared', `✅ Provize uhrazena — organizace je opět plně aktivní.`, { organization_id: o.id, msg_en: `✅ Commission paid — the organisation is fully active again.` });
         lifted++;
       }
     }

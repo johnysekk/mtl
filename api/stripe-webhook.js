@@ -392,7 +392,8 @@ async function notifyPaidForMinor(m, item, amount, currency) {
     const price = (Number(amount) || 0) + ' ' + String(currency || 'CZK').toUpperCase();
     await sbPost('notifications', {
       user_id: forWhom, type: 'system', read: false,
-      data: JSON.stringify({ kind: 'paid_for_you', item: item || '', amount: amount, currency: currency }),
+      data: JSON.stringify({ kind: 'paid_for_you', item: item || '', amount: amount, currency: currency,
+        msg_en: '\u2705 ' + (who ? (who + ' paid for you') : 'Your guardian paid for you') + ': ' + (item || 'training') + ' \u00B7 ' + price + '. The booking is confirmed.' }),
       message: '\u2705 ' + (who ? (who + ' za tebe zaplatil') : 'Z\u00E1stupce za tebe zaplatil')
              + ': ' + (item || 'tr\u00E9nink') + ' \u00B7 ' + price + '. Rezervace plat\u00ED.',
     });
@@ -738,13 +739,13 @@ export default async function handler(req, res) {
           try {
             const coh = cohId ? ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=owner_id,name,gym_id,deposit_amount,price_student,price_regular,currency,start_date,gym_meta_pixel,capi_token`)) || [])[0] : null;
             const mem = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=name,email,tier,fbp,fbc,student_id`)) || [])[0];
-            if (coh && coh.owner_id) await sbPost('notifications', { user_id: coh.owner_id, type: 'system', read: false, data: JSON.stringify({ kind: 'cohort_deposit_paid', cohort_id: cohId || null, cohort_member_id: cmId || null, cohort_name: coh.name || '' }), message: '\uD83D\uDCDA Nov\u00FD zaplacen\u00FD z\u00E1pis do kurzu' + (coh.name ? (' "' + coh.name + '"') : '') + '.' });
+            if (coh && coh.owner_id) await sbPost('notifications', { user_id: coh.owner_id, type: 'system', read: false, data: JSON.stringify({ kind: 'cohort_deposit_paid', cohort_id: cohId || null, cohort_member_id: cmId || null, cohort_name: coh.name || '', msg_en: '\uD83D\uDCDA New paid course enrolment' + (coh.name ? (' "' + coh.name + '"') : '') + '.' }), message: '\uD83D\uDCDA Nov\u00FD zaplacen\u00FD z\u00E1pis do kurzu' + (coh.name ? (' "' + coh.name + '"') : '') + '.' });
             // In-app notification to the student too (match the accountless member by e-mail to a profile).
             try {
               if (mem && mem.email) {
                 const _sp = await sbGet(`profiles?email=eq.${encodeURIComponent(mem.email)}&select=id&limit=1`);
                 const _sid = _sp && _sp[0] && _sp[0].id;
-                if (_sid) await sbPost('notifications', { user_id: _sid, type: 'system', read: false, data: JSON.stringify({ kind: 'cohort_deposit_mine', cohort_id: cohId || null, cohort_member_id: cmId || null, cohort_name: coh.name || '' }), message: '\u2705 Z\u00E1loha za kurz' + (coh.name ? (' "' + coh.name + '"') : '') + ' p\u0159ijata. M\u00EDsto m\u00E1\u0161 rezervovan\u00E9.' });
+                if (_sid) await sbPost('notifications', { user_id: _sid, type: 'system', read: false, data: JSON.stringify({ kind: 'cohort_deposit_mine', cohort_id: cohId || null, cohort_member_id: cmId || null, cohort_name: coh.name || '', msg_en: '\u2705 Course deposit' + (coh.name ? (' "' + coh.name + '"') : '') + ' received. Your spot is reserved.' }), message: '\u2705 Z\u00E1loha za kurz' + (coh.name ? (' "' + coh.name + '"') : '') + ' p\u0159ijata. M\u00EDsto m\u00E1\u0161 rezervovan\u00E9.' });
               }
             } catch (e) { console.error('cohort student notif', e.message); }
             if (mem && mem.email && coh && !mem.student_id) {  // app users get the doklad in-app, no e-mail
@@ -918,7 +919,7 @@ export default async function handler(req, res) {
       const sub = typeof inv.subscription === 'string' ? inv.subscription : (inv.subscription && inv.subscription.id);
       if (sub) {
         await sbPatch('gym_memberships', `stripe_subscription=eq.${encodeURIComponent(sub)}`, { payment_status: 'past_due', payment_failed_at: new Date().toISOString(), last_invoice_url: inv.hosted_invoice_url || null });
-        try { const mem = (await sbGet(`gym_memberships?stripe_subscription=eq.${encodeURIComponent(sub)}&select=*`))[0]; if (mem && (mem.student_id || mem.member_id)) await sbPost('notifications', { user_id: mem.student_id || mem.member_id, type: 'system', read: false, data: JSON.stringify({ kind: 'membership_payment_failed', url: inv.hosted_invoice_url || '', gym_id: mem.gym_id }), message: '⚠️ Platba členství ' + (mem.plan_name || '') + ' se nezdařila. Aktualizuj kartu / zaplať odkaz v appce.' }); } catch (e) { console.error('notify failed pay', e.message); }
+        try { const mem = (await sbGet(`gym_memberships?stripe_subscription=eq.${encodeURIComponent(sub)}&select=*`))[0]; if (mem && (mem.student_id || mem.member_id)) await sbPost('notifications', { user_id: mem.student_id || mem.member_id, type: 'system', read: false, data: JSON.stringify({ kind: 'membership_payment_failed', url: inv.hosted_invoice_url || '', gym_id: mem.gym_id, msg_en: '\u26a0\ufe0f The payment for your membership ' + (mem.plan_name || '') + ' failed. Update your card or pay via the link in the app.' }), message: '⚠️ Platba členství ' + (mem.plan_name || '') + ' se nezdařila. Aktualizuj kartu / zaplať odkaz v appce.' }); } catch (e) { console.error('notify failed pay', e.message); }
       }
     } else if (event.type === 'account.updated') {
       const acct = event.data.object;

@@ -98,7 +98,7 @@ export default async function handler(req, res) {
         const d = new Date(r.valid_until).toLocaleDateString('cs-CZ');
         await sb('notifications', { method: 'POST', prefer: 'return=minimal',
           body: JSON.stringify({ user_id: g.owner_id, type: 'system', read: false,
-            data: JSON.stringify({ kind: 'org_expiring', oc_id: r.id }),
+            data: JSON.stringify({ kind: 'org_expiring', oc_id: r.id, msg_en: `\u23F3 Membership in ${(o && (o.abbr || o.name)) || 'the association'} ends ${new Date(r.valid_until).toLocaleDateString('en-GB')}. After that day you lose the 1.5 % rate.` }),
             message: `\u23F3 Členství v ${(o && (o.abbr || o.name)) || 'asociaci'} končí ${d}. Po tomto dni ztrácíš sazbu 1,5 %.` }) });
         out.reminders++;
       } catch (e) {}

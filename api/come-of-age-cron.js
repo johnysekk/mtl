@@ -50,7 +50,7 @@ async function greetBirthdays() {
         user_id: r.id,
         type: 'system',
         read: false,
-        data: JSON.stringify({ kind: 'birthday' }),
+        data: JSON.stringify({ kind: 'birthday', msg_en: '\u{1F382} Happy birthday! Have a great session.' }),
         message: '\u{1F382} Všechno nejlepší k narozeninám! Ať ti to na tréninku jde.'
       })))
     });

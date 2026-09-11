@@ -255,8 +255,9 @@ export default async function handler(req, res) {
 
     const payload = ids.map(u => ({
       user_id: u, type: 'system', read: false,
-      data: JSON.stringify({ kind: 'welcome_offer', gym_id: gymId, disc: topDisc, discount_pct: pct || null, expires_at: expires }),
-      message: msgCz + ' / ' + msgEn,
+      // Dřív obě řeči v jedné zprávě za lomítkem. Teď zvlášť a appka ukáže jazyk čtenáře.
+      data: JSON.stringify({ kind: 'welcome_offer', gym_id: gymId, disc: topDisc, discount_pct: pct || null, expires_at: expires, msg_cs: msgCz, msg_en: msgEn }),
+      message: msgCz,
     }));
     let notified = 0;
     for (let i = 0; i < payload.length; i += 500) {
