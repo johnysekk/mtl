@@ -4454,7 +4454,7 @@ async function _kidTransferToFamily(i, targetId, targetName){
   try{
     const { error }=await supaClient.from('kid_transfers').insert({ token:_xferToken(), from_guardian:currentUser.id, from_guardian_name:(currentUser.name||''), to_guardian:targetId, to_guardian_name:targetName, kid_name:k.name, kid_first:(k.firstName||k.name||''), kid_dob:(k.dob||null), status:'pending', undo_until:undo });
     if(error){ toast('\u26a0\ufe0f '+error.message); return; }
-    try{ await supaClient.from('notifications').insert({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'kidxfer'}), message:(EN?('\ud83e\udd1d '+(currentUser.name||'Someone')+' wants to transfer a child to you \u2014 open Family to accept'):('\ud83e\udd1d '+(currentUser.name||'Někdo')+' ti chce předat dítě \u2014 otevři Rodina a přijmi')) }); }catch(e){}
+    try{ await supaClient.from('notifications').insert(_bi({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'kidxfer'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?('\ud83e\udd1d '+(currentUser.name||'Someone')+' wants to transfer a child to you \u2014 open Family to accept'):('\ud83e\udd1d '+(currentUser.name||'Někdo')+' ti chce předat dítě \u2014 otevři Rodina a přijmi'))); })); }catch(e){}
     toast(EN?'\u2705 Sent \u2014 they accept in their app':'\u2705 Odesláno \u2014 přijme to ve své appce',1);
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
 }
@@ -4621,7 +4621,7 @@ async function _kidXferDoAccept(transferId){
     try{ await supaClient.from('guardian_consents').insert({ guardian_id:me, guardian_name:(currentUser.name||''), kid_id:(kid.id||null), kid_name:kidName, kid_dob:(kid.dob||null), version:(typeof KID_CONSENT_VERSION!=='undefined'?KID_CONSENT_VERSION:'v1') }); try{ if(typeof _recordConsent==='function') _recordConsent('guardian_consent', KID_CONSENT_VERSION, LANG, (LANG==='en'?GUARDIAN_CONSENT_EN:GUARDIAN_CONSENT_CS), { context:'transfer_out', kid_id:(kid.id||null) }); }catch(e){} }catch(e){}
     const undo=new Date(Date.now()+24*60*60*1000).toISOString();
     await supaClient.from('kid_transfers').update({ status:'accepted', accepted_at:new Date().toISOString(), undo_until:undo, consent_version:(typeof KID_CONSENT_VERSION!=='undefined'?KID_CONSENT_VERSION:'v1') }).eq('id',row.id);
-    try{ await supaClient.from('notifications').insert({ user_id:fromG, type:'system', read:false, data:JSON.stringify({kind:'kidxfer_done'}), message:(EN?('\u2705 '+(kid.firstName||kidName)+' was transferred to '+(currentUser.name||'the new guardian')):('\u2705 '+(kid.firstName||kidName)+' byl/a předán/a uživateli '+(currentUser.name||'nový zákonný zástupce'))) }); }catch(e){}
+    try{ await supaClient.from('notifications').insert(_bi({ user_id:fromG, type:'system', read:false, data:JSON.stringify({kind:'kidxfer_done'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?('\u2705 '+(kid.firstName||kidName)+' was transferred to '+(currentUser.name||'the new guardian')):('\u2705 '+(kid.firstName||kidName)+' byl/a předán/a uživateli '+(currentUser.name||'nový zákonný zástupce')))); })); }catch(e){}
     toast(EN?'\u2705 Child received':'\u2705 Dítě převzato',1);
     renderMyKids();
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
@@ -5667,10 +5667,27 @@ const NOTIF_T = {
   "Recepce":"Reception",
   "Celé jméno":"Full name",
 };
+// ZPRÁVA PRO DRUHÉHO ČLOVĚKA v obou jazycích. mk(EN) vrátí text pro danou řeč; do dat se uloží
+// msg_cs i msg_en a notifText ukáže čtenáři tu jeho. Dřív dostal příjemce jazyk toho, kdo akci
+// udělal -- tester v angličtině tak četl české zprávy od českého klubu.
+function _bi(row, mk){
+  try{
+    const cs=String(mk(false)||''), en=String(mk(true)||'');
+    let d={}; try{ d=row.data?(typeof row.data==='string'?JSON.parse(row.data):row.data):{}; }catch(e){ d={}; }
+    d.msg_cs=cs; d.msg_en=en;
+    row.data=JSON.stringify(d);
+    row.message=(LANG==='en')?en:cs;
+  }catch(e){}
+  return row;
+}
 function notifText(n){
   try{
     const d = n.data ? (typeof n.data==='string'?JSON.parse(n.data):n.data) : null;
     if(d && d.kind && NOTIF_T[d.kind]) return NOTIF_T[d.kind](d);
+    // Zprávy bez vlastního rendereru nesou obě řeči (server a appka pro druhého člověka):
+    // čtenář dostane svoji, ne jazyk toho, kdo zprávu poslal.
+    if(d && LANG==='en' && d.msg_en) return d.msg_en;
+    if(d && LANG!=='en' && d.msg_cs) return d.msg_cs;
   }catch(e){}
   return n.message || '';
 }
@@ -5822,6 +5839,7 @@ function _relangOpenSheet(){
 function setLang(l){
   if(l===LANG) return;
   LANG=l; try{ localStorage.setItem('mtl_lang', l); }catch(e){}
+  try{ _syncProfileLang(); }catch(e){}
   document.documentElement.lang = l;
   applyStaticI18n();
   updateLangButtons();
@@ -9211,21 +9229,21 @@ async function saveEvent(){
   }
   const { error } = await supaClient.from('events').insert(row);
   if(error){ toast('⚠️ '+error.message); if(sv){ sv.disabled=false; } return; }
-  if(!isOwner && g.owner_id){ try{ await supaClient.from('notifications').insert({ user_id:g.owner_id, type:'system', read:false, data: JSON.stringify({ kind:'event_proposal', gym_id:g.id, title }), message:'🥊 '+(currentUser.name||'Kouč')+(LANG==='en'?' proposed an event — review it.':' navrhl událost — schval ji.') }); }catch(e){} }
+  if(!isOwner && g.owner_id){ try{ await supaClient.from('notifications').insert(_bi({ user_id:g.owner_id, type:'system', read:false, data: JSON.stringify({ kind:'event_proposal', gym_id:g.id, title }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('🥊 '+(currentUser.name||'Kouč')+(LANG==='en'?' proposed an event — review it.':' navrhl událost — schval ji.')); })); }catch(e){} }
   toast(isOwner ? (LANG==='en'?'✅ Event published':'✅ Událost zveřejněna') : (LANG==='en'?'✅ Sent for approval':'✅ Odesláno ke schválení'));
   closeSheet('shEventCreate'); renderEvents();
 }
 async function approveEvent(id, coachId, title){
   const { error } = await supaClient.from('events').update({ status:'approved' }).eq('id', id);
   if(error){ toast('⚠️ '+error.message); return; }
-  if(coachId){ try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'system', read:false, data: JSON.stringify({ kind:'event_approved', title }), message:'✅ '+(LANG==='en'?`Your event "${title}" was approved`:`Tvoje událost „${title}" byla schválena`) }); }catch(e){} }
+  if(coachId){ try{ await supaClient.from('notifications').insert(_bi({ user_id:coachId, type:'system', read:false, data: JSON.stringify({ kind:'event_approved', title }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('✅ '+(LANG==='en'?`Your event "${title}" was approved`:`Tvoje událost „${title}" byla schválena`)); })); }catch(e){} }
   toast(LANG==='en'?'✅ Approved':'✅ Schváleno'); if(typeof renderMyEvManage==='function') renderMyEvManage();
 }
 async function rejectEvent(id, coachId, title){
   if(!confirm(LANG==='en'?`Reject "${title}"?`:`Zamítnout „${title}"?`)) return;
   const { error } = await supaClient.from('events').update({ status:'rejected' }).eq('id', id);
   if(error){ toast('⚠️ '+error.message); return; }
-  if(coachId){ try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'system', read:false, data: JSON.stringify({ kind:'event_rejected', title }), message:'❌ '+(LANG==='en'?`Your event "${title}" was not approved`:`Tvoje událost „${title}" nebyla schválena`) }); }catch(e){} }
+  if(coachId){ try{ await supaClient.from('notifications').insert(_bi({ user_id:coachId, type:'system', read:false, data: JSON.stringify({ kind:'event_rejected', title }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('❌ '+(LANG==='en'?`Your event "${title}" was not approved`:`Tvoje událost „${title}" nebyla schválena`)); })); }catch(e){} }
   toast(LANG==='en'?'Rejected':'Zamítnuto'); if(typeof renderMyEvManage==='function') renderMyEvManage();
 }
 function evTiersOf(ev){ let t=[]; try{ t=JSON.parse(ev.ticket_tiers||'[]'); }catch(e){} if(!t.length) t=[{name:'',price:ev.ticket_price||0}]; return t; }
@@ -9566,7 +9584,7 @@ async function _minorEventGate(ev, onAgree){
   if(!guards.length){ _minorInfoPopup(EN?'Guardian needed':'Potřebuješ zástupce', EN?'To buy an event ticket, link your legal guardian in the Family section. They approve once, then you can buy.':'Abys mohl/a koupit lístek na akci, napoj si v sekci Rodina zákonného zástupce. Ten jednou schválí a pak můžeš koupit.', EN?'Open Family':'Otevřít Rodinu', ()=>{ try{ openMyKids(); }catch(e){} }); return; }
   let sent=0;
   for(const gid of guards){
-    try{ await supaClient.from('notifications').insert({ user_id:gid, type:'system', read:false, data:JSON.stringify({ kind:'minor_event_consent', event_id:_evId, event_name:_evName, minor_id:me, minor_name:currentUser.name||'' }), message:'🎟️ '+(currentUser.name||(EN?'Your minor':'Tvůj svěřenec'))+(EN?' wants a ticket for ':' chce lístek na ')+_evName+(EN?' — review & approve.':' — zkontroluj a schval.') }); sent++; }catch(e){}
+    try{ await supaClient.from('notifications').insert(_bi({ user_id:gid, type:'system', read:false, data:JSON.stringify({ kind:'minor_event_consent', event_id:_evId, event_name:_evName, minor_id:me, minor_name:currentUser.name||'' }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('🎟️ '+(currentUser.name||(EN?'Your minor':'Tvůj svěřenec'))+(EN?' wants a ticket for ':' chce lístek na ')+_evName+(EN?' — review & approve.':' — zkontroluj a schval.')); })); sent++; }catch(e){}
   }
   _minorInfoPopup(EN?'Sent to your guardian':'Odesláno zástupci', (EN?('We asked your guardian to approve your ticket for '+escapeHtml(_evName)+'. Once they approve, come back and buy.'):('Požádali jsme tvého zástupce o souhlas s lístkem na '+escapeHtml(_evName)+'. Až schválí, vrať se a kup.')), 'OK', null);
 }
@@ -10434,7 +10452,7 @@ async function doEventCheckout(ev, tier, _confirmed, _minorOk, _qty, _cartIn, _w
     if(!_evPayee){ const { data:g } = await supaClient.from('gyms').select('id,stripe_account,payment_mode,receiver_id_type,receiver_id_value,receiver_name,confirm_mode,name,owner_id,currency').eq('id', ev.gym_id).single(); if(g){ _evPayee=g; _evPayeeKind='gym'; if(!acct) acct=g.stripe_account||null; } }
   }catch(e){}
   if(base<=0){
-    try{ const { data:_frt } = await supaClient.from('event_tickets').insert({ attr_src:_attrGet(), event_id:ev.id, buyer_id:currentUser.id, buyer_name:currentUser.name||'', qty:1, amount:0, currency:cur, status:'paid' }).select('id').single(); if(_frt&&_frt.id){ try{ fetch('/api/ticket-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticketId:_frt.id})}); }catch(e){} } if(ev.created_by){ await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'event_rsvp', event_id:ev.id, title:ev.title}), message:'🎟️ '+(currentUser.name||'Někdo')+(LANG==='en'?` is coming to "${ev.title}"`:` přijde na „${ev.title}"`) }); } }catch(e){}
+    try{ const { data:_frt } = await supaClient.from('event_tickets').insert({ attr_src:_attrGet(), event_id:ev.id, buyer_id:currentUser.id, buyer_name:currentUser.name||'', qty:1, amount:0, currency:cur, status:'paid' }).select('id').single(); if(_frt&&_frt.id){ try{ fetch('/api/ticket-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticketId:_frt.id})}); }catch(e){} } if(ev.created_by){ await supaClient.from('notifications').insert(_bi({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'event_rsvp', event_id:ev.id, title:ev.title}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('🎟️ '+(currentUser.name||'Někdo')+(LANG==='en'?` is coming to "${ev.title}"`:` přijde na „${ev.title}"`)); })); } }catch(e){}
     toast(LANG==='en'?'🎟️ You are on the list!':'🎟️ Jsi na seznamu!'); closeSheet('shEventView'); return;
   }
   if(_evPayee && typeof _mtlPayMode==='function' && _mtlPayMode(_evPayee)==='qr_bank'){ return _eventQrPay(ev, tier, _evPayee, _evPayeeKind, _qty, _cartIn, _whoIn); }
@@ -10516,7 +10534,7 @@ async function _eventQrPay(ev, tier, payee, payeeKind, _qty, _cartIn, _whoIn){
   const pb=ov.querySelector('#evqrPaid'); if(pb) pb.onclick=async function(){
     pb.disabled=true; pb.textContent='\u2026';
     try{ if(ticketId){ await supaClient.from('event_tickets').update({ status:'paid_claimed', claimed_at:new Date().toISOString() }).eq('id',ticketId); } }catch(e){}
-    try{ if(ev.created_by){ await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({ kind:'event_qr_intent', event_id:ev.id, title:ev.title }), message:'\ud83d\udcf2 '+sName+(EN?(' claims they paid for "'+(ev.title||'event')+'" (QR). Confirm in event management.'):(' tvrd\u00ed, \u017ee zaplatil za \u201e'+(ev.title||'akci')+'\u201c (QR). Potvrď ve spr\u00e1v\u011b akce.')) }); } }catch(e){}
+    try{ if(ev.created_by){ await supaClient.from('notifications').insert(_bi({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({ kind:'event_qr_intent', event_id:ev.id, title:ev.title }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('\ud83d\udcf2 '+sName+(EN?(' claims they paid for "'+(ev.title||'event')+'" (QR). Confirm in event management.'):(' tvrd\u00ed, \u017ee zaplatil za \u201e'+(ev.title||'akci')+'\u201c (QR). Potvrď ve spr\u00e1v\u011b akce.'))); })); } }catch(e){}
     toast(EN?'\u2705 Ticket reserved \u00b7 organizer will confirm':'\u2705 L\u00edstek rezervov\u00e1n \u00b7 po\u0159adatel potvrd\u00ed', 1);
     close(); try{ closeSheet('shEventView'); }catch(e){}
   };
@@ -10646,7 +10664,7 @@ async function _coach1to1QrPay(c, payee, opts){
     // kterou nema kde potvrdit.
     if(!bookingId){ pb.disabled=false; pb.textContent=(EN?'I\u2019ve paid':'Zaplaceno');
       toast(EN?'\u26a0\ufe0f The reservation was not created \u2014 try again':'\u26a0\ufe0f Rezervace nevznikla \u2014 zkus to znovu'); return; }
-    try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'booking', read:false, data:JSON.stringify({ kind:'coach_qr_intent', booking_id:bookingId }), message:'\ud83d\udcf2 '+sName+(EN?(' claims they paid for a '+(isOnline?'online lesson':'1:1 lesson')+' (QR). Confirm in your diary.'):(' tvrd\u00ed, \u017ee zaplatil za '+(isOnline?'online lekci':'soukromku')+' (QR). Potvrď v p\u0159ehledu kou\u010de.')) }); }catch(e){}
+    try{ await supaClient.from('notifications').insert(_bi({ user_id:coachId, type:'booking', read:false, data:JSON.stringify({ kind:'coach_qr_intent', booking_id:bookingId }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('\ud83d\udcf2 '+sName+(EN?(' claims they paid for a '+(isOnline?'online lesson':'1:1 lesson')+' (QR). Confirm in your diary.'):(' tvrd\u00ed, \u017ee zaplatil za '+(isOnline?'online lekci':'soukromku')+' (QR). Potvrď v p\u0159ehledu kou\u010de.'))); })); }catch(e){}
     toast(EN?'\u2705 Lesson reserved \u00b7 coach will confirm':'\u2705 Lekce rezervov\u00e1na \u00b7 kou\u010d potvrd\u00ed', 1);
     close();
   };
@@ -10952,13 +10970,12 @@ async function _cohDepositConfirm(memberId){
   // Accountless leads have no student_id and were never reachable in-app; unchanged for them.
   try{
     if(m.student_id){
-      await supaClient.from('notifications').insert({
+      await supaClient.from('notifications').insert(_bi({
         user_id: m.student_id, type: 'system', read: false,
         data: JSON.stringify({ kind:'cohort_deposit_mine', cohort_id: window._crCohortId, cohort_member_id: memberId, cohort_name: (coh.name||'') }),
-        message: (EN
+        message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN
           ? ('\u2705 Deposit for the course' + (coh.name?(' \u201c'+coh.name+'\u201d'):'') + ' received. Your spot is reserved.')
-          : ('\u2705 Z\u00e1loha za kurz' + (coh.name?(' \u201e'+coh.name+'\u201c'):'') + ' p\u0159ijata. M\u00edsto m\u00e1\u0161 rezervovan\u00e9.'))
-      });
+          : ('\u2705 Z\u00e1loha za kurz' + (coh.name?(' \u201e'+coh.name+'\u201c'):'') + ' p\u0159ijata. M\u00edsto m\u00e1\u0161 rezervovan\u00e9.'))); }));
     }
   }catch(e){}
   const fee=(res.mtl_fee||0)/100;
@@ -11485,21 +11502,21 @@ function _sfStep2(ov, ev, gid, fid, fname, ds, inp, close){
     const btn=ov.querySelector('#frSubmit'); btn.disabled=true; btn.textContent='\u2026';
     const { error }=await supaClient.from('fighter_requests').insert(row);
     if(error){ toast('\u26a0\ufe0f '+error.message); btn.disabled=false; btn.textContent=(EN?'Send request':'Odeslat \u017e\u00e1dost'); return; }
-    if(ev.created_by){ try{ await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'fighter_request', event_id:ev.id, title:ev.title}), message:'\ud83e\udd4a '+(currentUser.name||'Kou\u010d')+(EN?` suggested a fighter for "${ev.title}"`:` navrhl fightera na \u201e${ev.title}\u201c`) }); }catch(e){} }
+    if(ev.created_by){ try{ await supaClient.from('notifications').insert(_bi({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'fighter_request', event_id:ev.id, title:ev.title}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('\ud83e\udd4a '+(currentUser.name||'Kou\u010d')+(EN?` suggested a fighter for "${ev.title}"`:` navrhl fightera na \u201e${ev.title}\u201c`)); })); }catch(e){} }
     close(); toast(EN?'\u2705 Fighter suggested':'\u2705 Fighter navr\u017een');
   };
 }
 async function acceptFighter(id, coachId, fn){
   const { error }=await supaClient.from('fighter_requests').update({status:'accepted'}).eq('id',id);
   if(error){ toast('⚠️ '+error.message); return; }
-  if(coachId){ try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'system', read:false, data:JSON.stringify({kind:'fighter_accepted'}), message:'✅ '+(LANG==='en'?`Fighter ${fn} was accepted`:`Fighter ${fn} byl přijat`) }); }catch(e){} }
+  if(coachId){ try{ await supaClient.from('notifications').insert(_bi({ user_id:coachId, type:'system', read:false, data:JSON.stringify({kind:'fighter_accepted'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('✅ '+(LANG==='en'?`Fighter ${fn} was accepted`:`Fighter ${fn} byl přijat`)); })); }catch(e){} }
   toast(LANG==='en'?'✅ Accepted':'✅ Přijato'); if(typeof renderMyEvManage==='function') renderMyEvManage();
 }
 async function declineFighter(id, coachId, fn){
   if(!confirm(LANG==='en'?`Decline ${fn}?`:`Odmítnout ${fn}?`)) return;
   const { error }=await supaClient.from('fighter_requests').update({status:'declined'}).eq('id',id);
   if(error){ toast('⚠️ '+error.message); return; }
-  if(coachId){ try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'system', read:false, data:JSON.stringify({kind:'fighter_declined'}), message:'❌ '+(LANG==='en'?`Fighter ${fn} was not selected`:`Fighter ${fn} nebyl vybrán`) }); }catch(e){} }
+  if(coachId){ try{ await supaClient.from('notifications').insert(_bi({ user_id:coachId, type:'system', read:false, data:JSON.stringify({kind:'fighter_declined'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('❌ '+(LANG==='en'?`Fighter ${fn} was not selected`:`Fighter ${fn} nebyl vybrán`)); })); }catch(e){} }
   toast(LANG==='en'?'Declined':'Odmítnuto'); if(typeof renderMyEvManage==='function') renderMyEvManage();
 }
 function closeAllSheets(){ _sheetParent={}; SHEETS.forEach(s=>{ const _e=$(s); if(_e) _e.classList.remove('open'); }); }
@@ -11649,13 +11666,13 @@ async function _linkedGuardian(){
 async function _minorWaiverInApp(gp, g, title, body, hash, version, onSent){
   const EN=LANG==='en';
   try{
-    await supaClient.from('notifications').insert({
+    await supaClient.from('notifications').insert(_bi({
       user_id: gp.id, type:'system', read:false,
-      message:'\ud83d\udd12 '+((currentUser&&currentUser.name)||(EN?'Your child':'Tvoje dítě'))+(EN?' needs your approval to train at ':' potřebuje tvůj souhlas s tréninkem v ')+((g&&g.name)||'klubu'),
+      message:'',
       data: JSON.stringify({ kind:'minor_waiver_req', minor_id:currentUser.id,
         minor_name:(currentUser&&currentUser.name)||'', gym_id:(g&&g.id)||null,
         gym_name:(g&&g.name)||'', title:title||'', body:body||'', hash:hash||'', version:version||null })
-    });
+    }, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('\ud83d\udd12 '+((currentUser&&currentUser.name)||(EN?'Your child':'Tvoje dítě'))+(EN?' needs your approval to train at ':' potřebuje tvůj souhlas s tréninkem v ')+((g&&g.name)||'klubu')); }));
     toast(EN?('\u2705 Sent to '+(gp.name||'your guardian')):('\u2705 Odesláno '+(gp.name||'zástupci')), 1);
     if(typeof onSent==='function') onSent();
   }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
@@ -11894,9 +11911,9 @@ async function openMinorWaiverApprove(d){
         guardian_name:(currentUser&&currentUser.name)||null,
         guardian_email:(currentUser&&currentUser.email)||null
       }).eq('id', d.minor_id); }catch(e){}
-      try{ await supaClient.from('notifications').insert({ user_id:d.minor_id, type:'system', read:false,
-        message:'\u2705 '+(EN?'Your guardian approved it — you can book now.':'Zástupce to schválil — můžeš si rezervovat.'),
-        data: JSON.stringify({ kind:'minor_waiver_ok' }) }); }catch(e){}
+      try{ await supaClient.from('notifications').insert(_bi({ user_id:d.minor_id, type:'system', read:false,
+        message:'',
+        data: JSON.stringify({ kind:'minor_waiver_ok' }) }, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('\u2705 '+(EN?'Your guardian approved it — you can book now.':'Zástupce to schválil — můžeš si rezervovat.')); })); }catch(e){}
       toast(EN?'\u2705 Approved':'\u2705 Schváleno', 1);
       ov.remove();
     }catch(e){
@@ -12587,9 +12604,9 @@ async function _sendPayRequest(what, amount, currency, extra){
   if(!gp){ toast(EN?'Your guardian has not enabled payment requests.':'Zástupce zatím žádosti o úhradu nepovolil.'); return false; }
   const _amt=(amount!=null && amount!=='') ? (fmtPrice(amount, currency||'CZK')+' '+_curSym(currency||'CZK')) : '';
   try{
-    const { error:_ne }=await supaClient.from('notifications').insert({
+    const { error:_ne }=await supaClient.from('notifications').insert(_bi({
       user_id: gp.id, type:'system', read:false,
-      message:'\u{1F4B3} '+((currentUser&&currentUser.name)||'')+(EN?' asks you to pay for ':' tě žádá o úhradu: ')+String(what||'')+(_amt?(' \u00b7 '+_amt):''),
+      message:'',
       // POZOR na pořadí: extra nese vlastní kind (dropin/memb/event/merch) a přepsalo by tím
       // kind:'pay_request', podle kterého se notifikace pozná. Druh položky proto jde zvlášť
       // jako item_kind a kind se dosazuje AŽ NAKONEC.
@@ -12597,7 +12614,7 @@ async function _sendPayRequest(what, amount, currency, extra){
         minor_name:(currentUser&&currentUser.name)||'', what:String(what||''),
         amount:amount, currency:currency||'CZK' }, extra||{},
         { kind:'pay_request', item_kind:((extra&&extra.kind)||'dropin') }))
-    });
+    }, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('\u{1F4B3} '+((currentUser&&currentUser.name)||'')+(EN?' asks you to pay for ':' tě žádá o úhradu: ')+String(what||'')+(_amt?(' \u00b7 '+_amt):'')); }));
     // Chyba zápisu se dřív spolkla a ohlásilo se "odesláno", i když nic nedorazilo.
     if(_ne){ console.log('[payRequest] notifikace se nezapsala:', _ne.message); toast('\u26a0\ufe0f '+_ne.message); return false; }
     toast(EN?('\u2705 Sent to '+(gp.name||'your guardian')):('\u2705 Odesláno '+(gp.name||'zástupci')), 1);
@@ -13571,8 +13588,10 @@ async function _issueRescheduleConfirmation(o){
         const _msg=_mine
           ? ('\u{1F504} '+(LANG==='en'?'Session moved: ':'Lekce přesunuta: ')+_fmtSess(o.from_at)+' \u2192 '+_fmtSess(o.to_at))
           : ('\u{1F504} '+(row.student_name||'Student')+(LANG==='en'?' moved a session: ':' přesunul lekci: ')+_fmtSess(o.from_at)+' \u2192 '+_fmtSess(o.to_at));
-        await supaClient.from('notifications').insert({ user_id:_t, type:'system', read:false,
-          message:_msg, data:JSON.stringify({ kind:'resched_conf', conf_id:_cid }) });
+        await supaClient.from('notifications').insert(_bi({ user_id:_t, type:'system', read:false,
+          message:'', data:JSON.stringify({ kind:'resched_conf', conf_id:_cid }) }, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return (_mine
+          ? ('\u{1F504} '+(LANG==='en'?'Session moved: ':'Lekce přesunuta: ')+_fmtSess(o.from_at)+' \u2192 '+_fmtSess(o.to_at))
+          : ('\u{1F504} '+(row.student_name||'Student')+(LANG==='en'?' moved a session: ':' přesunul lekci: ')+_fmtSess(o.from_at)+' \u2192 '+_fmtSess(o.to_at))); }));
       }
     }catch(e){}
     return (_ins&&_ins.id)||null;
@@ -13769,7 +13788,8 @@ async function _issuePrivateCancelConf(o){
     // Jedna zprava pro oba byla nijaka -- "Lekce zrusena: 11.9. 10:00" nerekne, kdo ji zrusil
     // ani co se deje s penezi. Kazda strana proto dostane svoji, ve stejnem tvaru jako ostatni
     // zpravy v appce: co se stalo, s kym, kdy, a kolik se vratilo.
-    const EN=LANG==='en';
+    // Zpravy v OBOU jazycich: druha strana muze appku pouzivat v jine reci nez ten, kdo rusil.
+    const _mkMsg=function(EN){
     const _who=(o.byCoach ? (o.coach_name||(EN?'the coach':'kou\u010d')) : (o.student_name||(EN?'the student':'student')));
     const _when=_ds+' '+(o.time||'');
     const _ref=(o.refund!=null) ? (fmtPrice(Number(o.refund)||0, o.currency||'CZK')+' '+((typeof _curSym==='function')?_curSym(o.currency||'CZK'):'')) : null;
@@ -13783,9 +13803,12 @@ async function _issuePrivateCancelConf(o){
          + (_ref?(' '+(EN?('Refunded to the student: '+_ref+'.'):('Studentovi vr\u00e1ceno: '+_ref+'.'))):''))
       : ('\u274C '+(EN?(_who+' cancelled the lesson on '+_when+'.'):(_who+' zru\u0161il lekci '+_when+'.'))
          + (_ref?(' '+(EN?('Refunded: '+_ref+'.'):('Vr\u00e1ceno: '+_ref+'.'))):''));
+      return { student:_msgStudent, coach:_msgCoach };
+    };
+    const _mCs=_mkMsg(false), _mEn=_mkMsg(true), _mMine=(LANG==='en')?_mEn:_mCs;
     const _rows=[];
-    if(o.student_id) _rows.push({ user_id:o.student_id, type:'system', read:false, data:JSON.stringify(_data), message:_msgStudent });
-    if(o.coach_id)   _rows.push({ user_id:o.coach_id,   type:'system', read:false, data:JSON.stringify(_data), message:_msgCoach });
+    if(o.student_id) _rows.push({ user_id:o.student_id, type:'system', read:false, data:JSON.stringify(Object.assign({}, _data, { msg_cs:_mCs.student, msg_en:_mEn.student })), message:_mMine.student });
+    if(o.coach_id)   _rows.push({ user_id:o.coach_id,   type:'system', read:false, data:JSON.stringify(Object.assign({}, _data, { msg_cs:_mCs.coach, msg_en:_mEn.coach })), message:_mMine.coach });
     if(_rows.length) await supaClient.from('notifications').insert(_rows);
   }catch(e){ console.error('_issuePrivateCancelConf', e&&e.message); }
 }
@@ -13873,8 +13896,12 @@ async function cancelMembership(id, gymId, subId){
         const msg = LANG==='en'
           ? `📉 ${currentUser.name||'A student'} cancelled membership${(mb&&mb.plan_name)?' ('+mb.plan_name+')':''}${endTxt?' — ends '+endTxt:''}.`
           : `📉 ${currentUser.name||'Student'} zrušil členství${(mb&&mb.plan_name)?' ('+mb.plan_name+')':''}${endTxt?' — končí '+endTxt:''}.`;
-        if(gym.owner_id){ await supaClient.from('notifications').insert({ user_id:gym.owner_id, type:'system', read:false, data:dataFor('owner'), message:msg }); }
-        if(mb && mb.coach_id && mb.coach_id!==gym.owner_id){ await supaClient.from('notifications').insert({ user_id:mb.coach_id, type:'system', read:false, data:dataFor('coach'), message:msg }); }
+        if(gym.owner_id){ await supaClient.from('notifications').insert(_bi({ user_id:gym.owner_id, type:'system', read:false, data:dataFor('owner'), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return (LANG==='en'
+          ? `📉 ${currentUser.name||'A student'} cancelled membership${(mb&&mb.plan_name)?' ('+mb.plan_name+')':''}${endTxt?' — ends '+endTxt:''}.`
+          : `📉 ${currentUser.name||'Student'} zrušil členství${(mb&&mb.plan_name)?' ('+mb.plan_name+')':''}${endTxt?' — končí '+endTxt:''}.`); })); }
+        if(mb && mb.coach_id && mb.coach_id!==gym.owner_id){ await supaClient.from('notifications').insert(_bi({ user_id:mb.coach_id, type:'system', read:false, data:dataFor('coach'), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return (LANG==='en'
+          ? `📉 ${currentUser.name||'A student'} cancelled membership${(mb&&mb.plan_name)?' ('+mb.plan_name+')':''}${endTxt?' — ends '+endTxt:''}.`
+          : `📉 ${currentUser.name||'Student'} zrušil členství${(mb&&mb.plan_name)?' ('+mb.plan_name+')':''}${endTxt?' — končí '+endTxt:''}.`); })); }
       }catch(e){}
       toast(LANG==='en'?'✅ Will cancel at period end.':'✅ Zruší se na konci období.');
       loadMyMemberships();
@@ -14223,11 +14250,10 @@ async function gymTeamRespond(n, dd, accept){
     if(accept){ try{ if(typeof _loadTrainerGyms==='function') await _loadTrainerGyms(); }catch(e){} }
     if(n.id) await supaClient.from('notifications').delete().eq('id', n.id);
     if(dd.owner_id){
-      await supaClient.from('notifications').insert({
+      await supaClient.from('notifications').insert(_bi({
         user_id: dd.owner_id, type:'system', read:false,
         data: JSON.stringify({ kind: accept?'gym_team_joined':'gym_team_declined', coach_name: currentUser.name||'Kouč', role: dd.is_reception?'reception':'coach' }),
-        message: accept ? `✅ ${currentUser.name||'Kouč'} se přidal do týmu.` : `${currentUser.name||'Kouč'} odmítl pozvánku do týmu.`
-      });
+        message:''}, function(EN){ return EN ? (accept ? `✅ ${currentUser.name||'A coach'} joined the team.` : `${currentUser.name||'A coach'} declined the team invitation.`) : (accept ? `✅ ${currentUser.name||'Kouč'} se přidal do týmu.` : `${currentUser.name||'Kouč'} odmítl pozvánku do týmu.`); }));
     }
     toast(accept?L('✅ Přidán do týmu'):L('Pozvánka odmítnuta'));
     loadNotifications(); updateNotifBadge();
@@ -14310,7 +14336,7 @@ async function approveJoin(coachId, kind){
   if(!_myGymData) return;
   const { error } = await supaClient.from('gym_coaches').update({ status:'active' }).eq('gym_id',_myGymData.id).eq('coach_id',coachId).eq('status','requested');
   if(error){ toast('⚠️ '+error.message); return; }
-  try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'system', read:false, data:JSON.stringify({kind:'gym_team_approved', gym_id:_myGymData.id, gym_name:_myGymData.name||'Gym'}), message:(LANG==='en'? `✅ You were added to ${_myGymData.name||'the gym'} team.` : `✅ Byl jsi přidán do týmu ${_myGymData.name||'klubu'}.`) }); }catch(e){}
+  try{ await supaClient.from('notifications').insert(_bi({ user_id:coachId, type:'system', read:false, data:JSON.stringify({kind:'gym_team_approved', gym_id:_myGymData.id, gym_name:_myGymData.name||'Gym'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((LANG==='en'? `✅ You were added to ${_myGymData.name||'the gym'} team.` : `✅ Byl jsi přidán do týmu ${_myGymData.name||'klubu'}.`)); })); }catch(e){}
   toast(LANG==='en'?'Approved':'Schváleno');
   loadPending(kind);
   if(kind==='recep'){ if(typeof loadMyReception==='function') loadMyReception(); } else { if(typeof loadGymTeam==='function') loadGymTeam(); }
@@ -14338,7 +14364,7 @@ async function processPendingJoin(){
   if(!confirm(LANG==='en'?('Request to join '+(g.name||'this klub')+' as '+role+'?'):('Požádat o vstup do '+(g.name||'tohoto klubu')+' jako '+role+'?'))) return;
   const { error } = await supaClient.from('gym_coaches').insert({ gym_id:g.id, coach_id:currentUser.id, status:'requested', is_reception:isRecep });
   if(error){ toast('⚠️ '+error.message); return; }
-  try{ if(g.owner_id) await supaClient.from('notifications').insert({ user_id:g.owner_id, type:'system', read:false, data:JSON.stringify({kind:'gym_join_request', who:currentUser.name||'Někdo', is_reception:isRecep}), message:(LANG==='en'? ((currentUser.name||'Someone')+' wants to join your team') : ((currentUser.name||'Někdo')+' chce do tvého týmu')) }); }catch(e){}
+  try{ if(g.owner_id) await supaClient.from('notifications').insert(_bi({ user_id:g.owner_id, type:'system', read:false, data:JSON.stringify({kind:'gym_join_request', who:currentUser.name||'Někdo', is_reception:isRecep}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((LANG==='en'? ((currentUser.name||'Someone')+' wants to join your team') : ((currentUser.name||'Někdo')+' chce do tvého týmu'))); })); }catch(e){}
   toast(LANG==='en'?'Request sent — waiting for approval':'Žádost odeslána — čeká na schválení');
 }
 function _ownerHideRowHtml(){ if(_myGymData && _myGymData._isCoOwner) return ''; var hid=!!(_myGymData&&_myGymData.owner_hidden_from_profile); var EN=LANG==='en'; return '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;margin-bottom:10px;background:var(--surf);"><div style="font-size:12.5px;color:var(--dark);line-height:1.4;">'+(EN?'Hide me (founder) from the public club profile':'Skr\u00fdt m\u011b (zakladatele) z ve\u0159ejn\u00e9ho profilu klubu')+'</div><button id="gtOwnerHideBtn" data-hid="'+(hid?'1':'0')+'" style="flex-shrink:0;padding:7px 12px;border-radius:8px;border:1px solid '+(hid?'#CFC0FF':'var(--border)')+';background:'+(hid?'#EDE7FF':'var(--bg)')+';color:'+(hid?'#5B3FB0':'var(--mid)')+';font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;font-family:\'DM Sans\';">'+(hid?(EN?'Hidden':'Skryt\u00fd'):(EN?'Visible':'Zobrazen\u00fd'))+'</button></div>'; }
@@ -14789,7 +14815,7 @@ async function coachRemoveMember(mid, subId, mname){
       await supaClient.from('gym_memberships').update({ status:'ended', cancelled_at:new Date().toISOString(), period_end:new Date().toISOString() }).eq('id', mid);
       toast((EN?'\u2713 Ended + refunded':'\u2713 Ukon\u010deno + vr\u00e1ceno')+(refunded?(' '+refunded):''));
     }
-    try{ const { data: mb }=await supaClient.from('gym_memberships').select('student_id,plan_name').eq('id',mid).single(); if(mb&&mb.student_id){ const pn=mb.plan_name?' ('+mb.plan_name+')':''; const cn=(currentUser&&currentUser.name)||(EN?'your coach':'tv\u016fj kou\u010d'); const rmsg = mode==='refund' ? (EN?`Your membership${pn} with ${cn} was ended and fully refunded.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} u ${cn} bylo ukon\u010deno a pln\u011b vr\u00e1ceno.`) : (mode==='now' ? (EN?`Your membership${pn} with ${cn} was ended.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} u ${cn} bylo ukon\u010deno.`) : (EN?`Your membership${pn} with ${cn} will end at the period end.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} u ${cn} skon\u010d\u00ed na konci obdob\u00ed.`)); await supaClient.from('notifications').insert({ user_id:mb.student_id, type:'system', read:false, message:rmsg }); } }catch(e){}
+    try{ const { data: mb }=await supaClient.from('gym_memberships').select('student_id,plan_name').eq('id',mid).single(); if(mb&&mb.student_id){ const pn=mb.plan_name?' ('+mb.plan_name+')':''; const cn=(currentUser&&currentUser.name)||(EN?'your coach':'tv\u016fj kou\u010d'); const rmsg = mode==='refund' ? (EN?`Your membership${pn} with ${cn} was ended and fully refunded.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} u ${cn} bylo ukon\u010deno a pln\u011b vr\u00e1ceno.`) : (mode==='now' ? (EN?`Your membership${pn} with ${cn} was ended.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} u ${cn} bylo ukon\u010deno.`) : (EN?`Your membership${pn} with ${cn} will end at the period end.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} u ${cn} skon\u010d\u00ed na konci obdob\u00ed.`)); await supaClient.from('notifications').insert(_bi({ user_id:mb.student_id, type:'system', read:false, message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return (mode==='refund' ? (EN?`Your membership${pn} with ${cn} was ended and fully refunded.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} u ${cn} bylo ukon\u010deno a pln\u011b vr\u00e1ceno.`) : (mode==='now' ? (EN?`Your membership${pn} with ${cn} was ended.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} u ${cn} bylo ukon\u010deno.`) : (EN?`Your membership${pn} with ${cn} will end at the period end.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} u ${cn} skon\u010d\u00ed na konci obdob\u00ed.`))); })); } }catch(e){}
     if(typeof renderGymTeamDash==='function') renderGymTeamDash();
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
 }
@@ -15025,7 +15051,7 @@ async function _parentConfirmMigration(reqId, kidName, targetId, approve){
     try{
       await _doKidTransfer(currentUser.id, kidName, kBelts, targetId);
       await supaClient.from('migration_requests').update({ status:'approved', parent_confirmed:true, resolved_at:new Date().toISOString() }).eq('id',reqId);
-      try{ await supaClient.from('notifications').insert({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_done'}), message:(EN?'\u2705 Your guardian confirmed you — your old belts and training history are now on this account!':'\u2705 Rodič tě potvrdil — tvoje staré pásky i historie tréninků jsou teď na tomto účtu!') }); }catch(e){}
+      try{ await supaClient.from('notifications').insert(_bi({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_done'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?'\u2705 Your guardian confirmed you — your old belts and training history are now on this account!':'\u2705 Rodič tě potvrdil — tvoje staré pásky i historie tréninků jsou teď na tomto účtu!')); })); }catch(e){}
       toast(EN?'\u2705 Confirmed & transferred':'\u2705 Potvrzeno a přeneseno',1);
     }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
   } else {
@@ -15033,7 +15059,7 @@ async function _parentConfirmMigration(reqId, kidName, targetId, approve){
     try{
       await supaClient.from('migration_requests').update({ status:'rejected', parent_confirmed:false, resolved_at:new Date().toISOString() }).eq('id',reqId);
       try{ await supaClient.from('profiles').update({ risk_flag:true, risk_note:('Migration claim denied by guardian '+new Date().toISOString().slice(0,10)) }).eq('id',targetId); }catch(e){}
-      try{ await supaClient.from('notifications').insert({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_rejected'}), message:(EN?'Your stats-transfer request was not confirmed by the guardian.':'Tvoji žádost o přenos statistik rodič nepotvrdil.') }); }catch(e){}
+      try{ await supaClient.from('notifications').insert(_bi({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_rejected'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?'Your stats-transfer request was not confirmed by the guardian.':'Tvoji žádost o přenos statistik rodič nepotvrdil.')); })); }catch(e){}
       try{ await supaClient.from('notifications').insert({ user_id:FOUNDER_UUID, type:'system', read:false, data:JSON.stringify({kind:'migration_denied'}), message:('\u26a0\ufe0f Guardian denied a migration claim — possible false claim, requester flagged') }); }catch(e){}
       toast(EN?'Rejected':'Zamítnuto');
     }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
@@ -15049,8 +15075,8 @@ async function _forceMigration(reqId, parentId, kidName, targetId){
   try{
     await _doKidTransfer(parentId, kidName, kBelts, targetId);
     await supaClient.from('migration_requests').update({ status:'approved', resolved_by:currentUser.id, resolved_at:new Date().toISOString(), forced:true }).eq('id',reqId);
-    try{ await supaClient.from('notifications').insert({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_done'}), message:(EN?'\u2705 MTL verified you — your old belts and training history are now on this account!':'\u2705 MTL tě ověřilo — tvoje staré pásky i historie tréninků jsou teď na tomto účtu!') }); }catch(e){}
-    try{ await supaClient.from('notifications').insert({ user_id:parentId, type:'system', read:false, data:JSON.stringify({kind:'migration_forced'}), message:(EN?('The training history of '+kidName+' was moved to their own account. If this is not right, contact MTL support and we will reverse it.'):('Historie dítěte '+kidName+' byla přenesena na jeho vlastní účet. Pokud to není správně, napiš podpoře MTL a vrátíme to.')) }); }catch(e){}
+    try{ await supaClient.from('notifications').insert(_bi({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_done'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?'\u2705 MTL verified you — your old belts and training history are now on this account!':'\u2705 MTL tě ověřilo — tvoje staré pásky i historie tréninků jsou teď na tomto účtu!')); })); }catch(e){}
+    try{ await supaClient.from('notifications').insert(_bi({ user_id:parentId, type:'system', read:false, data:JSON.stringify({kind:'migration_forced'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?('The training history of '+kidName+' was moved to their own account. If this is not right, contact MTL support and we will reverse it.'):('Historie dítěte '+kidName+' byla přenesena na jeho vlastní účet. Pokud to není správně, napiš podpoře MTL a vrátíme to.'))); })); }catch(e){}
     toast(EN?'\u2705 Transferred (override)':'\u2705 Přeneseno (override)',1);
     openMigrationRequests();
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
@@ -15061,8 +15087,8 @@ async function _sendVouchToGym(reqId, gymId, kidName, parentId, targetId){
   if(!gymId){ toast(EN?'No club to vouch':'Není gym k ověření'); return; }
   try{
     await supaClient.from('migration_requests').update({ status:'gym_pending', vouch_gym_id:gymId, parent_id:(parentId||null), resolved_by:currentUser.id }).eq('id',reqId);
-    try{ const { data:g }=await supaClient.from('gyms').select('owner_id,name').eq('id',gymId).single(); if(g&&g.owner_id){ await supaClient.from('notifications').insert({ user_id:g.owner_id, type:'system', read:false, data:JSON.stringify({kind:'migration_vouch'}), message:(EN?('A former junior member ('+kidName+') wants their training history. Open Manage klub to verify.'):('Bývalý dětský člen ('+kidName+') chce svou historii. Otevři Spravovat klub a ověř.')) }); } }catch(e){}
-    try{ await supaClient.from('notifications').insert({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_sent_gym'}), message:(EN?'Your request was sent to your old club to verify.':'Tvoje žádost byla poslána tvému starému klubu k ověření.') }); }catch(e){}
+    try{ const { data:g }=await supaClient.from('gyms').select('owner_id,name').eq('id',gymId).single(); if(g&&g.owner_id){ await supaClient.from('notifications').insert(_bi({ user_id:g.owner_id, type:'system', read:false, data:JSON.stringify({kind:'migration_vouch'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?('A former junior member ('+kidName+') wants their training history. Open Manage klub to verify.'):('Bývalý dětský člen ('+kidName+') chce svou historii. Otevři Spravovat klub a ověř.'))); })); } }catch(e){}
+    try{ await supaClient.from('notifications').insert(_bi({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_sent_gym'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?'Your request was sent to your old club to verify.':'Tvoje žádost byla poslána tvému starému klubu k ověření.')); })); }catch(e){}
     toast(EN?'\u2705 Sent to the club':'\u2705 Posláno klubu',1);
     openMigrationRequests();
   }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
@@ -15102,7 +15128,7 @@ async function _gymVouchMigration(reqId, kidName, parentId, targetId, approve){
     try{
       await supaClient.from('migration_requests').update({ status:'rejected', resolved_at:new Date().toISOString() }).eq('id',reqId);
       try{ await supaClient.from('profiles').update({ risk_flag:true, risk_note:('Migration claim denied by klub '+new Date().toISOString().slice(0,10)) }).eq('id',targetId); }catch(e){}
-      try{ await supaClient.from('notifications').insert({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_rejected'}), message:(EN?'Your stats-transfer request was not confirmed.':'Tvoji žádost o přenos statistik se nepodařilo potvrdit.') }); }catch(e){}
+      try{ await supaClient.from('notifications').insert(_bi({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_rejected'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?'Your stats-transfer request was not confirmed.':'Tvoji žádost o přenos statistik se nepodařilo potvrdit.')); })); }catch(e){}
       toast(EN?'Rejected':'Zamítnuto');
     }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
   }
@@ -15136,8 +15162,8 @@ async function _idApproveMigration(reqId, pid, kidName, targetId, contactParent)
   try{
     await _doKidTransfer(pid, kidName, kBelts, targetId);
     await supaClient.from('migration_requests').update({ status:'approved', resolved_at:new Date().toISOString() }).eq('id',reqId);
-    try{ await supaClient.from('notifications').insert({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_done'}), message:(EN?'\u2705 Verified \u2014 your old belts and training history are now on this account!':'\u2705 Ov\u011b\u0159eno \u2014 tvoje star\u00e9 p\u00e1sky i historie tr\u00e9nink\u016f jsou te\u010f na tomto \u00fa\u010dtu!') }); }catch(e){}
-    if(contactParent!==false){ try{ await supaClient.from('notifications').insert({ user_id:pid, type:'system', read:false, data:JSON.stringify({kind:'migration_forced'}), message:(EN?('The training history of '+kidName+' was moved to their own account. If this is not right, contact MTL.'):('Historie d\u00edt\u011bte '+kidName+' byla p\u0159enesena na jeho \u00fa\u010det. Pokud to nen\u00ed spr\u00e1vn\u011b, napi\u0161 MTL.')) }); }catch(e){} }
+    try{ await supaClient.from('notifications').insert(_bi({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_done'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?'\u2705 Verified \u2014 your old belts and training history are now on this account!':'\u2705 Ov\u011b\u0159eno \u2014 tvoje star\u00e9 p\u00e1sky i historie tr\u00e9nink\u016f jsou te\u010f na tomto \u00fa\u010dtu!')); })); }catch(e){}
+    if(contactParent!==false){ try{ await supaClient.from('notifications').insert(_bi({ user_id:pid, type:'system', read:false, data:JSON.stringify({kind:'migration_forced'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?('The training history of '+kidName+' was moved to their own account. If this is not right, contact MTL.'):('Historie d\u00edt\u011bte '+kidName+' byla p\u0159enesena na jeho \u00fa\u010det. Pokud to nen\u00ed spr\u00e1vn\u011b, napi\u0161 MTL.'))); })); }catch(e){} }
     toast(EN?'\u2705 Approved & transferred':'\u2705 Schv\u00e1leno a p\u0159eneseno',1);
     openMigrationRequests();
   }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
@@ -15467,8 +15493,8 @@ async function _approveMigration(reqId, parentId, kidName, targetId){
   if(!confirm(EN?('Send this to the guardian of '+kidName+' to confirm? They must approve before any transfer.'):('Poslat rodiči dítěte '+kidName+' k potvrzení? Bez jeho souhlasu se nic nepřenese.'))) return;
   try{
     await supaClient.from('migration_requests').update({ status:'parent_pending', parent_id:parentId, resolved_by:currentUser.id }).eq('id',reqId);
-    try{ await supaClient.from('notifications').insert({ user_id:parentId, type:'system', read:false, data:JSON.stringify({kind:'migration_parent_confirm'}), message:(EN?('Someone claims to be your child '+kidName+' and wants their training history. Open Family to confirm or reject.'):('Někdo tvrdí, že je tvé dítě '+kidName+', a chce jeho historii. Otevři Rodinu a potvrď nebo zamítni.')) }); }catch(e){}
-    try{ await supaClient.from('notifications').insert({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_sent_parent'}), message:(EN?'Your request was sent to the guardian to confirm.':'Tvoje žádost byla poslána rodiči k potvrzení.') }); }catch(e){}
+    try{ await supaClient.from('notifications').insert(_bi({ user_id:parentId, type:'system', read:false, data:JSON.stringify({kind:'migration_parent_confirm'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?('Someone claims to be your child '+kidName+' and wants their training history. Open Family to confirm or reject.'):('Někdo tvrdí, že je tvé dítě '+kidName+', a chce jeho historii. Otevři Rodinu a potvrď nebo zamítni.'))); })); }catch(e){}
+    try{ await supaClient.from('notifications').insert(_bi({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_sent_parent'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?'Your request was sent to the guardian to confirm.':'Tvoje žádost byla poslána rodiči k potvrzení.')); })); }catch(e){}
     toast(EN?'✅ Sent to the guardian':'✅ Posláno rodiči k potvrzení',1);
     openMigrationRequests();
   }catch(e){ toast('⚠️ '+(e.message||'')); }
@@ -15483,7 +15509,7 @@ async function _approveMigrationLEGACY(reqId, parentId, kidName, targetId){
   try{
     await _doKidTransfer(parentId, kidName, kBelts, targetId);
     await supaClient.from('migration_requests').update({ status:'approved', resolved_by:currentUser.id, resolved_at:new Date().toISOString() }).eq('id',reqId);
-    try{ await supaClient.from('notifications').insert({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_done'}), message:(EN?'✅ MTL verified you — your old belts and training history are now on this account!':'✅ MTL tě ověřilo — tvoje staré pásky i historie tréninků jsou teď na tomto účtu!') }); }catch(e){}
+    try{ await supaClient.from('notifications').insert(_bi({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_done'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?'✅ MTL verified you — your old belts and training history are now on this account!':'✅ MTL tě ověřilo — tvoje staré pásky i historie tréninků jsou teď na tomto účtu!')); })); }catch(e){}
     toast(EN?'✅ Transferred':'✅ Přeneseno',1);
     openMigrationRequests();
   }catch(e){ toast('⚠️ '+(e.message||'')); }
@@ -15494,7 +15520,7 @@ async function _rejectMigration(reqId, targetId){
   if(!confirm(EN?'Reject this request?':'Zamítnout tuto žádost?')) return;
   try{
     await supaClient.from('migration_requests').update({ status:'rejected', resolved_by:currentUser.id, resolved_at:new Date().toISOString() }).eq('id',reqId);
-    try{ await supaClient.from('notifications').insert({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_rejected'}), message:(EN?'Your stats-transfer request could not be verified. Contact MTL support if you think this is a mistake.':'Tvoji žádost o přenos statistik se nepodařilo ověřit. Pokud je to omyl, napiš podpoře MTL.') }); }catch(e){}
+    try{ await supaClient.from('notifications').insert(_bi({ user_id:targetId, type:'system', read:false, data:JSON.stringify({kind:'migration_rejected'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?'Your stats-transfer request could not be verified. Contact MTL support if you think this is a mistake.':'Tvoji žádost o přenos statistik se nepodařilo ověřit. Pokud je to omyl, napiš podpoře MTL.')); })); }catch(e){}
     toast(EN?'Rejected':'Zamítnuto');
     openMigrationRequests();
   }catch(e){ toast('⚠️ '+(e.message||'')); }
@@ -17346,7 +17372,7 @@ async function toggleCoachSchedulePerm(linkId, coachId, coachName, cur){
   const { error } = await supaClient.from('gym_coaches').update({ can_manage_schedule: nv }).eq('id', linkId);
   if(error){ toast('⚠️ '+error.message); return; }
   toast(nv ? (LANG==='en'?`✅ ${coachName} can manage their schedule`:`✅ ${coachName} může spravovat svůj rozvrh`) : (LANG==='en'?'Schedule permission removed':'Oprávnění k rozvrhu zrušeno'));
-  try{ await supaClient.from('notifications').insert({ user_id: coachId, type:'system', read:false, data: JSON.stringify({kind: nv?'schedule_perm_on':'schedule_perm_off', gym_id:(_myGymData&&_myGymData.id)||null, gym_name:(_myGymData&&_myGymData.name)||'Gym'}), message: nv?`📅 Můžeš teď spravovat své lekce v rozvrhu klubu.`:`Oprávnění ke správě rozvrhu bylo zrušeno.` }); }catch(e){}
+  try{ await supaClient.from('notifications').insert(_bi({ user_id: coachId, type:'system', read:false, data: JSON.stringify({kind: nv?'schedule_perm_on':'schedule_perm_off', gym_id:(_myGymData&&_myGymData.id)||null, gym_name:(_myGymData&&_myGymData.name)||'Gym'}), message:''}, function(EN){ return EN ? (nv?`📅 You can now manage your classes in the club schedule.`:`Your permission to manage the schedule was removed.`) : (nv?`📅 Můžeš teď spravovat své lekce v rozvrhu klubu.`:`Oprávnění ke správě rozvrhu bylo zrušeno.`); })); }catch(e){}
   loadGymTeam();
 }
 async function loadMyTeams(){
@@ -19513,7 +19539,7 @@ function _recLeaveAction(){
     try{
       var ownerId=_recGym&&_recGym.owner_id;
       await supaClient.from('gym_coaches').delete().eq('gym_id', _recGymId).eq('coach_id', currentUser.id).eq('is_reception', true);
-      if(ownerId){ try{ await supaClient.from('notifications').insert({ user_id:ownerId, type:'system', read:false, data:JSON.stringify({kind:'gym_recep_left', gym_id:_recGymId, who:currentUser.name||'Recepční'}), message:(LANG==='en'?((currentUser.name||'Receptionist')+' left the reception.'):((currentUser.name||'Recepční')+' opustil/a recepci.')) }); }catch(e){} }
+      if(ownerId){ try{ await supaClient.from('notifications').insert(_bi({ user_id:ownerId, type:'system', read:false, data:JSON.stringify({kind:'gym_recep_left', gym_id:_recGymId, who:currentUser.name||'Recepční'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((LANG==='en'?((currentUser.name||'Receptionist')+' left the reception.'):((currentUser.name||'Recepční')+' opustil/a recepci.'))); })); }catch(e){} }
       _myRecGym=null; if($('meReception')) $('meReception').style.display='none';
       toast(LANG==='en'?'You left the reception':'Opustil/a jsi recepci');
       if(typeof closeSheet==='function') closeSheet('shReception');
@@ -19908,7 +19934,7 @@ function _recRowHtml(r){
 async function recSendPayLink(sid, url){
   if(!sid) return;
   try{
-    await supaClient.from('notifications').insert({ user_id: sid, type:'system', read:false, data: JSON.stringify({ kind:'membership_payment_failed', url: url||'' }), message: '\u26a0\ufe0f '+(LANG==='en'?'Your membership payment failed. Tap to update your card or pay.':'Platba tv\u00e9ho \u010dlenstv\u00ed selhala. Klepni a aktualizuj kartu nebo zapla\u0165.') });
+    await supaClient.from('notifications').insert(_bi({ user_id: sid, type:'system', read:false, data: JSON.stringify({ kind:'membership_payment_failed', url: url||'' }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('\u26a0\ufe0f '+(LANG==='en'?'Your membership payment failed. Tap to update your card or pay.':'Platba tv\u00e9ho \u010dlenstv\u00ed selhala. Klepni a aktualizuj kartu nebo zapla\u0165.')); }));
     toast(LANG==='en'?'Payment link sent to the member \u2705':'Platebn\u00ed odkaz odesl\u00e1n \u010dlenovi \u2705');
   }catch(e){ toast(LANG==='en'?'Could not send':'Nepoda\u0159ilo se odeslat'); }
 }
@@ -19997,7 +20023,8 @@ async function _notifyGymDesk(gymId, ownerId, message, data){
   const recips=new Set();
   if(ownerId) recips.add(String(ownerId));
   try{ const { data:r }=await supaClient.from('gym_coaches').select('coach_id').eq('gym_id',gymId).eq('status','active').eq('is_reception',true); (r||[]).forEach(x=>{ if(x.coach_id) recips.add(String(x.coach_id)); }); }catch(e){}
-  for(const uid of recips){ try{ await supaClient.from('notifications').insert({ user_id:uid, type:'booking', read:false, data:JSON.stringify(data||{}), message:message }); }catch(e){} }
+  // message muze byt funkce mk(EN): kazdy prijemce pak cte svou rec (majitel a recepce muzou mluvit jinak).
+  for(const uid of recips){ try{ await supaClient.from('notifications').insert((typeof message==='function')?_bi({ user_id:uid, type:'booking', read:false, data:JSON.stringify(data||{}), message:'' }, message):{ user_id:uid, type:'booking', read:false, data:JSON.stringify(data||{}), message:message }); }catch(e){} }
 }
 async function finalizeGuestBookings(){
   if(!currentUser||!currentUser.email) return;
@@ -20234,7 +20261,7 @@ function _guestMemb(plan){
         var nd=new Date(); nd.setMonth(nd.getMonth()+(parseInt(plan.months,10)||1));   /* 1 = monthly (unchanged); 3/6/12 = one-time term */
         await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:(_acct?_acct.id:null), student_name:nnm, guest_email:(_acct?null:v.email), guest_name:(_acct?null:nnm), guest_phone:(_acct?null:(v.phone||null)), guest_token:(_acct?null:tok), paid_to:'gym', coach_id:plan.coach||null, amount:price, currency:cur, status:'active', period_end:nd.toISOString(), plan_name:plan.name||null, plan_access:JSON.stringify((plan.access&&plan.access.length)?plan.access:['all']), discipline:plan.disc||null, acq_source:'direct' });
         try{ await supaClient.auth.signInWithOtp({ email:v.email, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } }); }catch(e){}
-        try{ if(g.id) await _notifyGymDesk(g.id, g.owner_id, (EN?('Walk-in membership: '+nnm+' ('+(plan.name||'')+')'):('Walk-in permanentka: '+nnm+' ('+(plan.name||'')+')'))); }catch(e){}
+        try{ if(g.id) await _notifyGymDesk(g.id, g.owner_id, function(EN){ var LANG=EN?'en':'cs'; return ((EN?('Walk-in membership: '+nnm+' ('+(plan.name||'')+')'):('Walk-in permanentka: '+nnm+' ('+(plan.name||'')+')'))); }); }catch(e){}
         toast((EN?'\u2705 Membership active \u00b7 link sent':'\u2705 \u010clenstv\u00ed aktivn\u00ed \u00b7 odkaz odesl\u00e1n'),1);
         renderReceptionList(($('recSearch')&&$('recSearch').value)||'');
       }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); btns.forEach(function(b){ if(b) b.disabled=false; }); }
@@ -20538,7 +20565,7 @@ function _guestCash(occ, method){
         // QR: reception does NOT confirm the money. Create a pending intent; the owner confirms when it arrives in the bank.
         try{ await supaClient.from('gym_bookings').insert({ attr_src:_attrGet(), gym_id:g.id, paid_to:'gym', amount:(pr.dp||0), currency:cur, status:'paid_claimed', claimed_at:new Date().toISOString(), payment_method:'qr', reception_checkin:true, student_id:(_acct?_acct.id:null), guest_token:(_acct?null:tok), guest_name:(_acct?null:name), guest_email:(_acct?null:email), student_name:name, date:occ.date, time:occ.time, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, level:occ.level||'all', coach_id:occ.coach||null, discipline:occ.disc||null, gym_name:g.name||'Klub' }); }catch(e){}
         if(email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){ try{ await supaClient.auth.signInWithOtp({ email:email, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } }); }catch(e){} }
-        try{ if(g.id){ await _notifyGymDesk(g.id, g.owner_id, (EN?('Walk-in (QR): '+(name||'a guest')+' says they paid for a drop-in \u2014 confirm in Reception when it arrives in the bank.'):('Walk-in (QR): '+(name||'host')+' tvrd\u00ed, \u017ee zaplatil drop-in \u2014 potvr\u010f v Recepci, a\u017e platba p\u0159ijde na \u00fa\u010det.')), { kind:'walkin_drop', student:(name||''), gym:g.id, gym_name:(g.name||''), occ:((typeof occ!=='undefined'&&occ&&occ.date)?{date:occ.date,time:occ.time,name:occ.name||'',level:occ.level||'all',disc:occ.disc||null}:null) }); } }catch(e){}
+        try{ if(g.id){ await _notifyGymDesk(g.id, g.owner_id, function(EN){ var LANG=EN?'en':'cs'; return ((EN?('Walk-in (QR): '+(name||'a guest')+' says they paid for a drop-in \u2014 confirm in Reception when it arrives in the bank.'):('Walk-in (QR): '+(name||'host')+' tvrd\u00ed, \u017ee zaplatil drop-in \u2014 potvr\u010f v Recepci, a\u017e platba p\u0159ijde na \u00fa\u010det.'))); }, { kind:'walkin_drop', student:(name||''), gym:g.id, gym_name:(g.name||''), occ:((typeof occ!=='undefined'&&occ&&occ.date)?{date:occ.date,time:occ.time,name:occ.name||'',level:occ.level||'all',disc:occ.disc||null}:null) }); } }catch(e){}
         toast(EN?'\u2705 Reserved \u00b7 owner confirms the QR payment when it arrives':'\u2705 Rezervov\u00e1no \u00b7 klub potvrd\u00ed QR platbu, a\u017e p\u0159ijde', 1);
         renderReceptionList(($('recSearch')&&$('recSearch').value)||''); return;
       }
@@ -20547,7 +20574,7 @@ function _guestCash(occ, method){
       if(r1&&r1.error){ toast('\u26a0\ufe0f '+r1.error.message); btn.disabled=false; btn.textContent=(EN?'\u2713 Received in cash':'\u2713 P\u0159ijato v hotovosti'); return; }
       try{ await supaClient.from('gym_bookings').insert({ attr_src:_attrGet(), gym_id:g.id, paid_to:'gym', amount:(pr.dp||0), currency:cur, status:'active', reception_checkin:true, student_id:(_acct?_acct.id:null), guest_token:(_acct?null:tok), guest_name:(_acct?null:name), guest_email:(_acct?null:email), student_name:name, date:occ.date, time:occ.time, class_name:occ.name||null, class_date:occ.date, class_time:occ.time, level:occ.level||'all', coach_id:occ.coach||null, discipline:occ.disc||null, gym_name:g.name||'Klub' }); }catch(e){}
       if(email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){ try{ await supaClient.auth.signInWithOtp({ email:email, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } }); }catch(e){} }
-      try{ if(g.id){ await _notifyGymDesk(g.id, g.owner_id, (EN?('Walk-in: '+(name||'a guest')+' paid a drop-in (cash).'):('Walk-in: '+(name||'host')+' zaplatil jednor\u00e1zov\u00fd vstup (hotov\u011b).')), { kind:'walkin_drop', student:(name||''), gym:g.id, gym_name:(g.name||''), occ:((typeof occ!=='undefined'&&occ&&occ.date)?{date:occ.date,time:occ.time,name:occ.name||'',level:occ.level||'all',disc:occ.disc||null}:null) }); } }catch(e){}
+      try{ if(g.id){ await _notifyGymDesk(g.id, g.owner_id, function(EN){ var LANG=EN?'en':'cs'; return ((EN?('Walk-in: '+(name||'a guest')+' paid a drop-in (cash).'):('Walk-in: '+(name||'host')+' zaplatil jednor\u00e1zov\u00fd vstup (hotov\u011b).'))); }, { kind:'walkin_drop', student:(name||''), gym:g.id, gym_name:(g.name||''), occ:((typeof occ!=='undefined'&&occ&&occ.date)?{date:occ.date,time:occ.time,name:occ.name||'',level:occ.level||'all',disc:occ.disc||null}:null) }); } }catch(e){}
       toast((EN?'\u2705 Recorded':'\u2705 Zaznamen\u00e1no')+(email?(EN?' \u00b7 link sent':' \u00b7 odkaz odesl\u00e1n'):''), 1);
       renderReceptionList(($('recSearch')&&$('recSearch').value)||'');
     }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); btn.disabled=false; btn.textContent=isQr?(EN?'\ud83d\udcf2 Host plat\u00ed p\u0159es QR':'\ud83d\udcf2 Host plat\u00ed p\u0159es QR'):(EN?'\u2713 Received in cash':'\u2713 P\u0159ijato v hotovosti'); }
@@ -20816,7 +20843,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom, _dpick){
         }
       }
     }catch(e){}
-    try{ if(_qrPaidTo==='coach' && _qrPayeeCoach){ await supaClient.from('notifications').insert({ user_id:_qrPayeeCoach, type:'booking', read:false, data:JSON.stringify({ kind:'coach_qr_intent', student:sName }), message:'\ud83d\udcf2 '+sName+(EN?(' claims they paid for '+label+' (QR). Confirm in your diary.'):(' tvrd\u00ed, \u017ee zaplatil za '+label+' (QR). Potvr\u010f v di\u00e1\u0159i.')) }); } else if(g.owner_id){ const realtime=(g.confirm_mode==='realtime'); const m=realtime?(EN?(sName+' claims they paid for '+label+' (QR).'):(sName+' tvrd\u00ed, \u017ee zaplatil za '+label+' (QR).')):(EN?(sName+' reserved '+label+' (QR).'):(sName+' si rezervoval '+label+' (QR).')); await supaClient.from('notifications').insert({ user_id:g.owner_id, type:'booking', read:false, data:JSON.stringify({ kind:'qr_intent', student:sName, gym:g.id, gym_name:g.name||'', what:label, occ:{ date:(occ&&occ.date)||null, time:(occ&&occ.time)||null, name:(occ&&occ.name)||null }, confirm_mode:(g.confirm_mode||'') }), message:m }); } }catch(e){}
+    try{ if(_qrPaidTo==='coach' && _qrPayeeCoach){ await supaClient.from('notifications').insert(_bi({ user_id:_qrPayeeCoach, type:'booking', read:false, data:JSON.stringify({ kind:'coach_qr_intent', student:sName }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('\ud83d\udcf2 '+sName+(EN?(' claims they paid for '+label+' (QR). Confirm in your diary.'):(' tvrd\u00ed, \u017ee zaplatil za '+label+' (QR). Potvr\u010f v di\u00e1\u0159i.'))); })); } else if(g.owner_id){ const realtime=(g.confirm_mode==='realtime'); const m=realtime?(EN?(sName+' claims they paid for '+label+' (QR).'):(sName+' tvrd\u00ed, \u017ee zaplatil za '+label+' (QR).')):(EN?(sName+' reserved '+label+' (QR).'):(sName+' si rezervoval '+label+' (QR).')); await supaClient.from('notifications').insert(_bi({ user_id:g.owner_id, type:'booking', read:false, data:JSON.stringify({ kind:'qr_intent', student:sName, gym:g.id, gym_name:g.name||'', what:label, occ:{ date:(occ&&occ.date)||null, time:(occ&&occ.time)||null, name:(occ&&occ.name)||null }, confirm_mode:(g.confirm_mode||'') }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return (realtime?(EN?(sName+' claims they paid for '+label+' (QR).'):(sName+' tvrd\u00ed, \u017ee zaplatil za '+label+' (QR).')):(EN?(sName+' reserved '+label+' (QR).'):(sName+' si rezervoval '+label+' (QR).'))); })); } }catch(e){}
     toast((kind==='memb')?(EN?('\u2705 Membership reserved \u00b7 '+(g.name||'the klub')+' will confirm the payment'):('\u2705 \u010clenstv\u00ed rezervov\u00e1no \u00b7 '+(g.name||'gym')+' potvrd\u00ed platbu')):(EN?('\u2705 Spot reserved \u00b7 '+(g.name||'the klub')+' will confirm the payment'):('\u2705 M\u00edsto rezervov\u00e1no \u00b7 '+(g.name||'gym')+' potvrd\u00ed platbu')), 1);
     close(); try{ openGymProfile(g); }catch(e){}
   };
@@ -21166,7 +21193,7 @@ async function loadRecpList(){
   let pmap={};
   try{ const ids=rows.map(r=>r.coach_id); const { data: profs } = await supaClient.from('profiles').select('id,name').in('id', ids); (profs||[]).forEach(pp=>pmap[pp.id]=pp); }catch(e){}
   box.innerHTML=rows.map(r=>{ const pr=pmap[r.coach_id]||{}; const active=r.status==='active'; return '<div style="display:flex;align-items:center;gap:10px;padding:9px;border:1px solid var(--border);border-radius:10px;margin-bottom:6px;"><div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:700;">'+escapeHtml(pr.name||'\u2014')+'</div><div style="font-size:11px;color:'+(active?'var(--green)':'var(--mid)')+';">'+(active?(LANG==='en'?'Receptionist':'Recepční'):(LANG==='en'?'Invited (pending)':'Pozván (čeká)'))+'</div></div><button class="recpRemoveBtn" data-id="'+r.coach_id+'" style="padding:7px 10px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';flex-shrink:0;">'+(LANG==='en'?'Remove':'Odebrat')+'</button></div>'; }).join('');
-  box.querySelectorAll('.recpRemoveBtn').forEach(b=>b.onclick=async()=>{ if(!confirm(LANG==='en'?'Remove this receptionist?':'Odebrat recepčního?')) return; try{ await supaClient.from('gym_coaches').delete().eq('gym_id', _myGymData.id).eq('coach_id', b.dataset.id).eq('is_reception', true); try{ await supaClient.from('notifications').insert({ user_id:b.dataset.id, type:'system', read:false, data:JSON.stringify({kind:'gym_recep_removed', gym_id:_myGymData.id, gym_name:_myGymData.name||'Gym'}), message:(LANG==='en'?('You were removed from reception at '+(_myGymData.name||'the gym')+'.'):('Byl/a jsi odebrán/a z recepce '+(_myGymData.name||'klubu')+'.')) }); }catch(_e){} }catch(e){} loadRecpList(); });
+  box.querySelectorAll('.recpRemoveBtn').forEach(b=>b.onclick=async()=>{ if(!confirm(LANG==='en'?'Remove this receptionist?':'Odebrat recepčního?')) return; try{ await supaClient.from('gym_coaches').delete().eq('gym_id', _myGymData.id).eq('coach_id', b.dataset.id).eq('is_reception', true); try{ await supaClient.from('notifications').insert(_bi({ user_id:b.dataset.id, type:'system', read:false, data:JSON.stringify({kind:'gym_recep_removed', gym_id:_myGymData.id, gym_name:_myGymData.name||'Gym'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((LANG==='en'?('You were removed from reception at '+(_myGymData.name||'the gym')+'.'):('Byl/a jsi odebrán/a z recepce '+(_myGymData.name||'klubu')+'.'))); })); }catch(_e){} }catch(e){} loadRecpList(); });
 }
 let _myRecGym=null;
 async function loadMyReception(){
@@ -22693,7 +22720,7 @@ async function renderMerchOrders(){
 }
 async function _notifyMerchFulfilled(studentId, item, gymName, orderId){
   if(!studentId) return;
-  try{ await supaClient.from('notifications').insert({ user_id:studentId, type:'system', read:false, data: JSON.stringify({ kind:'merch_fulfilled', item:item||'', order_id:orderId||null }), message:`📦 ${LANG==='en'?('Your order "'+(item||'merch')+'" is ready — pick it up at '+(gymName||'the gym')+'.'):('Tvoje objednávka „'+(item||'merch')+'" je připravená — vyzvedni si ji v '+(gymName||'klubu')+'.')}` }); if(typeof updateNotifBadge==='function') updateNotifBadge(); }catch(e){}
+  try{ await supaClient.from('notifications').insert(_bi({ user_id:studentId, type:'system', read:false, data: JSON.stringify({ kind:'merch_fulfilled', item:item||'', order_id:orderId||null }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return (`📦 ${LANG==='en'?('Your order "'+(item||'merch')+'" is ready — pick it up at '+(gymName||'the gym')+'.'):('Tvoje objednávka „'+(item||'merch')+'" je připravená — vyzvedni si ji v '+(gymName||'klubu')+'.')}`); })); if(typeof updateNotifBadge==='function') updateNotifBadge(); }catch(e){}
 }
 async function renderMyMerch(){
   const wrap=$('myMerchWrap'), list=$('myMerchList'); if(!wrap||!list||!currentUser) return;
@@ -24338,7 +24365,7 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
         data: JSON.stringify({ kind:'new_listing', target_type:'gym', target_id:_gid, target_name:name, disc:_gdl }),
         message:`🆕 ${LANG==='en'?'New club: ':'Nový klub: '}${name} (${city}). ${LANG==='en'?'Check the photos and form an opinion about the club quality.':'Omrkni fotky a udělej si obrázek o kvalitě klubu.'}`
       });
-      try{ const _ors=_gd.map(d=>'verify_disciplines.like.*"'+d+'"*').join(','); const { data: _ambs } = await supaClient.from('profiles').select('id,mute_new_listing').or(_ors); for(const _a of (_ambs||[])){ if(_a.id===FOUNDER_UUID||_a.id===currentUser.id||_a.mute_new_listing) continue; await supaClient.from('notifications').insert({ user_id:_a.id, type:'system', read:false, data: JSON.stringify({ kind:'new_listing', target_type:'gym', target_id:_gid, target_name:name, disc:_gdl }), message:`🆕 ${LANG==='en'?'New club in your discipline: ':'Nový klub ve tvé disciplíně: '}${name} (${city}). ${LANG==='en'?'Check the photos and form an opinion about the club quality.':'Omrkni fotky a udělej si obrázek o kvalitě klubu.'}` }); } }catch(e){}
+      try{ const _ors=_gd.map(d=>'verify_disciplines.like.*"'+d+'"*').join(','); const { data: _ambs } = await supaClient.from('profiles').select('id,mute_new_listing').or(_ors); for(const _a of (_ambs||[])){ if(_a.id===FOUNDER_UUID||_a.id===currentUser.id||_a.mute_new_listing) continue; await supaClient.from('notifications').insert(_bi({ user_id:_a.id, type:'system', read:false, data: JSON.stringify({ kind:'new_listing', target_type:'gym', target_id:_gid, target_name:name, disc:_gdl }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return (`🆕 ${LANG==='en'?'New club in your discipline: ':'Nový klub ve tvé disciplíně: '}${name} (${city}). ${LANG==='en'?'Check the photos and form an opinion about the club quality.':'Omrkni fotky a udělej si obrázek o kvalitě klubu.'}`); })); } }catch(e){}
     } catch(e){}
 
     try{ localStorage.removeItem('mtl_gym_acct'); }catch(e){}
@@ -26632,11 +26659,11 @@ async function toggleEP(userId){
     const { error } = await supaClient.from('profiles').update({ partner: next }).eq('id',userId);
     if(error){ toast('⚠️ '+error.message); return; }
     if(currentUser && currentUser.id===userId){ currentUser.partner=next; }
-    try{ await supaClient.from('notifications').insert({ user_id:userId, type:'system', read:false,
+    try{ await supaClient.from('notifications').insert(_bi({ user_id:userId, type:'system', read:false,
       data: JSON.stringify({ kind: next?'partner_granted':'partner_removed' }),
-      message: next
+      message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return (next
         ? (EN?'⭐ You are now an Exclusive MTL Partner — 0.5% on everything you bill.':'⭐ Jsi Exclusive MTL Partner — 0,5 % ze všeho, co účtuješ.')
-        : (EN?'Your Exclusive Partner status has ended.':'Tvůj status Exclusive Partner skončil.') }); }catch(e){ console.error('partner notify', e); toast('\u26a0\ufe0f '+(LANG==='en'?'Notification failed: ':'Notifikace neode\u0161la: ')+((e&&e.message)||'')); }
+        : (EN?'Your Exclusive Partner status has ended.':'Tvůj status Exclusive Partner skončil.')); })); }catch(e){ console.error('partner notify', e); toast('\u26a0\ufe0f '+(LANG==='en'?'Notification failed: ':'Notifikace neode\u0161la: ')+((e&&e.message)||'')); }
     toast(next?(EN?'⭐ Exclusive Partner granted — 0.5% on everything they bill':'⭐ Exclusive Partner udělen — 0,5 % ze všeho, co účtuje'):(EN?'Exclusive Partner removed':'Exclusive Partner odebrán'));
   }catch(e){ toast('⚠️ '+((e&&e.message)||'error')); }
 }
@@ -26689,7 +26716,7 @@ async function decideAdminGymRequest(id, approve){
     // Approval verifies the OPERATOR: set the durable flag so every future club is instant,
     // no more requests. (Rejection leaves the flag false.)
     if(approve && ownerId){ try{ await supaClient.from('profiles').update({ chain_verified:true, chain_verified_at:new Date().toISOString() }).eq('id',ownerId); }catch(e){} }
-    if(ownerId){ try{ await supaClient.from('notifications').insert({ user_id:ownerId, type:'gym_request', message: approve?'✅ Schváleno! Teď můžeš zakládat kluby bez omezení.':'Tvoje žádost o další klub byla zamítnuta. Napiš nám pro detaily.', read:false }); }catch(e){} }
+    if(ownerId){ try{ await supaClient.from('notifications').insert(_bi({ user_id:ownerId, type:'gym_request', message:'', read:false }, function(EN){ return EN ? (approve?'✅ Approved! You can now set up clubs without limits.':'Your request for another club was declined. Write to us for details.') : (approve?'✅ Schváleno! Teď můžeš zakládat kluby bez omezení.':'Tvoje žádost o další klub byla zamítnuta. Napiš nám pro detaily.'); })); }catch(e){} }
     toast(approve?'✅ Schváleno':'Zamítnuto');
     if(typeof loadAdminGymRequests==='function') loadAdminGymRequests();
   }catch(e){ console.error('decideAdminGymRequest',e); toast('⚠️ '+e.message); }
@@ -26832,7 +26859,7 @@ async function founderResolveRevoke(d){
       const msg = outcome==='suspended' ? ('✅ '+(d.name||'')+' byl suspendován (skryt z decku).')
         : outcome==='cert_revoked' ? ('✅ Odebrána certifikace: '+(d.name||'')+'.')
         : ('ℹ️ Tvoje žádost o odebrání u '+(d.name||'')+' byla posouzena — bez zásahu.');
-      try{ await supaClient.from('notifications').insert({ user_id:d.rb, type:'system', read:false, data: JSON.stringify({ kind:'cert_revoke_result', outcome, target_name:d.name||'' }), message:msg }); }catch(e){}
+      try{ await supaClient.from('notifications').insert(_bi({ user_id:d.rb, type:'system', read:false, data: JSON.stringify({ kind:'cert_revoke_result', outcome, target_name:d.name||'' }), message:''}, function(EN){ return EN ? ((outcome==='suspended' ? ('✅ '+(d.name||'')+' was suspended (hidden from the deck).') : outcome==='cert_revoked' ? ('✅ Certification removed: '+(d.name||'')+'.') : ('ℹ️ Your removal request for '+(d.name||'')+' was reviewed — no action taken.'))) : ((outcome==='suspended' ? ('✅ '+(d.name||'')+' byl suspendován (skryt z decku).') : outcome==='cert_revoked' ? ('✅ Odebrána certifikace: '+(d.name||'')+'.') : ('ℹ️ Tvoje žádost o odebrání u '+(d.name||'')+' byla posouzena — bez zásahu.'))); })); }catch(e){}
     }
     toast(EN?'✅ Done':'✅ Hotovo');
     renderFdRevokes();
@@ -27781,10 +27808,10 @@ async function openAdminOrgs(mode){
         ? { status:'approved', approved_at:new Date().toISOString(), approved_by:currentUser.id, reject_reason:null, intro_free_until:_introUntil }
         : { status:'rejected', reject_reason:reason||null }).eq('id', o.id);
       // Zadatel se to musi dozvedet, jinak ceka na neco, co uz je rozhodnute.
-      try{ await supaClient.from('notifications').insert({ user_id:o.owner_id, type:'system', read:false,
+      try{ await supaClient.from('notifications').insert(_bi({ user_id:o.owner_id, type:'system', read:false,
         data:JSON.stringify({ kind:'org_decision' }),
-        message: approve ? ('\u2705 Organizace '+(o.name||'')+' byla schv\u00e1lena. M\u016f\u017ee\u0161 vytv\u00e1\u0159et akce.'+(_introUntil?(' Provize 0 % do '+new Date(_introUntil).toLocaleDateString('cs-CZ')+'.'):''))
-                         : ('\u274C P\u0159ihl\u00e1\u0161ka organizace '+(o.name||'')+' byla zam\u00edtnuta.'+(reason?(' D\u016fvod: '+reason):'')) }); }catch(e){}
+        message:''}, function(EN){ return EN ? (approve ? ('\u2705 The organisation '+(o.name||'')+' was approved. You can create events.'+(_introUntil?(' 0 % commission until '+new Date(_introUntil).toLocaleDateString('en-GB')+'.'):'')) : ('\u274C The application of the organisation '+(o.name||'')+' was declined.'+(reason?(' Reason: '+reason):''))) : (approve ? ('\u2705 Organizace '+(o.name||'')+' byla schv\u00e1lena. M\u016f\u017ee\u0161 vytv\u00e1\u0159et akce.'+(_introUntil?(' Provize 0 % do '+new Date(_introUntil).toLocaleDateString('cs-CZ')+'.'):''))
+                         : ('\u274C P\u0159ihl\u00e1\u0161ka organizace '+(o.name||'')+' byla zam\u00edtnuta.'+(reason?(' D\u016fvod: '+reason):''))); })); }catch(e){}
       openAdminOrgs((window._aoF&&window._aoF.status==='pending')?'pending':'all');
     }catch(e){ toast('\u26a0\ufe0f '+(e.message||'error')); }
   };
@@ -27999,7 +28026,7 @@ function _foConfirm(orgId, orgName, parentOv){
       if(error) throw error;
       try{ const { data:_o }=await supaClient.from('organizations').select('owner_id').eq('id',orgId).single();
         if(_o&&_o.owner_id) await supaClient.from('notifications').insert({ user_id:_o.owner_id, type:'system', read:false,
-          data:JSON.stringify({ kind:'org_join_req' }),
+          data:JSON.stringify({ kind:'org_join_req', msg_cs:'\u{1F3C5} Klub '+(g.name||'')+' se chce p\u0159ipojit k tv\u00e9 asociaci.', msg_en:'\u{1F3C5} The club '+(g.name||'')+' wants to join your association.' }),
           message:'\u{1F3C5} Klub '+(g.name||'')+' se chce p\u0159ipojit k tv\u00e9 asociaci.' }); }catch(e){}
       ov.remove(); if(parentOv) parentOv.remove();
       toast(EN?'\u2705 Request sent':'\u2705 \u017d\u00e1dost odesl\u00e1na');
@@ -28054,7 +28081,7 @@ async function openFindOrg(){
           if(error) throw error;
           try{ const { data:_o }=await supaClient.from('organizations').select('owner_id').eq('id',b.dataset.id).single();
             if(_o&&_o.owner_id) await supaClient.from('notifications').insert({ user_id:_o.owner_id, type:'system', read:false,
-              data:JSON.stringify({ kind:'org_join_req' }),
+              data:JSON.stringify({ kind:'org_join_req', msg_cs:'\u{1F3C5} '+(_myGymData.name||'Klub')+' \u017e\u00e1d\u00e1 o \u010dlenstv\u00ed ve tv\u00e9 federaci.', msg_en:'\u{1F3C5} '+(_myGymData.name||'A club')+' is asking to join your federation.' }),
               message:'\u{1F3C5} '+(_myGymData.name||'Klub')+' \u017e\u00e1d\u00e1 o \u010dlenstv\u00ed ve tv\u00e9 federaci.' }); }catch(e){}
           ov.remove(); toast(EN?'\u2705 Request sent':'\u2705 \u017d\u00e1dost odesl\u00e1na');
           try{ renderGymManage(); }catch(e){}
@@ -28165,9 +28192,9 @@ async function openClubOrgPanel(ocId){
         // Kdyz ma poskytovatel dalsi platne clenstvi, cron sazbu tentyz den vrati na spravne datum.
         try{ await fetch('/api/org-rate-cron',{ method:'POST' }); }catch(e){}
       }
-      try{ if(org.owner_id) await supaClient.from('notifications').insert({ user_id:org.owner_id, type:'system', read:false,
+      try{ if(org.owner_id) await supaClient.from('notifications').insert(_bi({ user_id:org.owner_id, type:'system', read:false,
         data:JSON.stringify({ kind:'org_left' }),
-        message:'\u2139\ufe0f '+((_myGymData&&_myGymData.name)||'Klub')+((oc.status==='pending')?' zru\u0161il \u017e\u00e1dost o \u010dlenstv\u00ed.':' ukon\u010dil \u010dlenstv\u00ed.') }); }catch(e){}
+        message:''}, function(EN){ return EN ? ('\u2139\ufe0f '+((_myGymData&&_myGymData.name)||'A club')+((oc.status==='pending')?' withdrew its membership request.':' ended its membership.')) : ('\u2139\ufe0f '+((_myGymData&&_myGymData.name)||'Klub')+((oc.status==='pending')?' zru\u0161il \u017e\u00e1dost o \u010dlenstv\u00ed.':' ukon\u010dil \u010dlenstv\u00ed.')); })); }catch(e){}
       toast(EN?'\u2705 Done':'\u2705 Hotovo');
       try{ closeSheet('shClubOrg'); }catch(e){}
       try{ renderGymManage(); }catch(e){}
@@ -28775,9 +28802,9 @@ async function openOrgClubs(org, filter){
         // Klub se to musi dozvedet -- asociace mu prave pripojila historii clenstvi k uctu.
         // Kdyby to byl omyl, ukonci clenstvi sam.
         try{ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',hit.id).single();
-          if(_g&&_g.owner_id) await supaClient.from('notifications').insert({ user_id:_g.owner_id, type:'system', read:false,
+          if(_g&&_g.owner_id) await supaClient.from('notifications').insert(_bi({ user_id:_g.owner_id, type:'system', read:false,
             data:JSON.stringify({ kind:'org_linked', oc_id:b.dataset.id }),
-            message:'\u{1F3C5} '+(org.abbr||org.name)+' t\u011b eviduje jako sv\u016fj \u010dlensk\u00fd klub a p\u0159ipojila historii \u010dlenstv\u00ed k tv\u00e9mu \u00fa\u010dtu.' }); }catch(e){}
+            message:''}, function(EN){ return EN ? ('\u{1F3C5} '+(org.abbr||org.name)+' lists you as its member club and linked the membership history to your account.') : ('\u{1F3C5} '+(org.abbr||org.name)+' t\u011b eviduje jako sv\u016fj \u010dlensk\u00fd klub a p\u0159ipojila historii \u010dlenstv\u00ed k tv\u00e9mu \u00fa\u010dtu.'); })); }catch(e){}
         toast(EN?'\u2705 Linked':'\u2705 Sp\u00e1rov\u00e1no'); _load();
       }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||e)); }
     }; });
@@ -28798,9 +28825,9 @@ async function openOrgClubs(org, filter){
             if(_g&&_g.owner_id) await supaClient.from('profiles').update({ org_rate_until:r.valid_until }).eq('id',_g.owner_id); }catch(e){}
         }
         try{ const { data:_g }=r.gym_id ? await supaClient.from('gyms').select('owner_id').eq('id',r.gym_id).single() : { data:null };
-          if(_g&&_g.owner_id) await supaClient.from('notifications').insert({ user_id:_g.owner_id, type:'system', read:false,
+          if(_g&&_g.owner_id) await supaClient.from('notifications').insert(_bi({ user_id:_g.owner_id, type:'system', read:false,
             data:JSON.stringify({ kind:'org_accepted', oc_id:r.id }),
-            message:'\u2705 '+(org.abbr||org.name)+' schv\u00e1lila tv\u016fj klub. Te\u010f m\u016f\u017ee\u0161 uhradit \u010dlensk\u00fd poplatek.' }); }catch(e){}
+            message:''}, function(EN){ return EN ? ('\u2705 '+(org.abbr||org.name)+' approved your club. You can now pay the membership fee.') : ('\u2705 '+(org.abbr||org.name)+' schv\u00e1lila tv\u016fj klub. Te\u010f m\u016f\u017ee\u0161 uhradit \u010dlensk\u00fd poplatek.'); })); }catch(e){}
         toast(EN?'\u2705 Accepted':'\u2705 P\u0159ijato'); _load();
       }catch(e){ toast('\u26a0\ufe0f '+(e.message||'error')); }
     }; });
@@ -28820,9 +28847,9 @@ async function openOrgClubs(org, filter){
         try{ await fetch('/api/org-rate-cron',{ method:'POST' }); }catch(e){}
         }
         try{ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',r.gym_id).single();
-          if(_g&&_g.owner_id) await supaClient.from('notifications').insert({ user_id:_g.owner_id, type:'system', read:false,
+          if(_g&&_g.owner_id) await supaClient.from('notifications').insert(_bi({ user_id:_g.owner_id, type:'system', read:false,
             data:JSON.stringify({ kind:'org_removed' }),
-            message:'\u2139\ufe0f '+(org.abbr||org.name)+(_hard?' zam\u00edtla tvou \u017e\u00e1dost o \u010dlenstv\u00ed.':' ukon\u010dila \u010dlenstv\u00ed tv\u00e9ho klubu.') }); }catch(e){}
+            message:''}, function(EN){ return EN ? ('\u2139\ufe0f '+(org.abbr||org.name)+(_hard?' declined your membership request.':' ended your club\u2019s membership.')) : ('\u2139\ufe0f '+(org.abbr||org.name)+(_hard?' zam\u00edtla tvou \u017e\u00e1dost o \u010dlenstv\u00ed.':' ukon\u010dila \u010dlenstv\u00ed tv\u00e9ho klubu.')); })); }catch(e){}
         toast(EN?'\u2705 Done':'\u2705 Hotovo'); _load();
       }catch(e){ toast('\u26a0\ufe0f '+(e.message||'error')); }
     }; });
@@ -28836,7 +28863,7 @@ async function openOrgClubs(org, filter){
           body:JSON.stringify({ oc_id:r.id, method:'bank' }) }); }catch(e){}
         try{ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',r.gym_id).single();
           if(_g&&_g.owner_id) await supaClient.from('notifications').insert({ user_id:_g.owner_id, type:'system', read:false,
-            data:JSON.stringify({ kind:'org_fee_paid' }),
+            data:JSON.stringify({ kind:'org_fee_paid', msg_cs:'\u2705 '+(org.abbr||org.name)+' potvrdila p\u0159ijet\u00ed \u010dlensk\u00e9ho poplatku.', msg_en:'\u2705 '+(org.abbr||org.name)+' confirmed receiving the membership fee.' }),
             message:'\u2705 '+(org.abbr||org.name)+' potvrdila p\u0159ijet\u00ed \u010dlensk\u00e9ho poplatku.' }); }catch(e){}
         toast(EN?'\u2705 Marked':'\u2705 Ozna\u010deno'); _load();
       }catch(e){ toast('\u26a0\ufe0f '+(e.message||'error')); }
@@ -28859,9 +28886,9 @@ async function openOrgClubs(org, filter){
         const g=gm[r.gym_id]||{};
         // Majitel klubu se to musi dozvedet v appce; jinak by vyzva zila jen ve federaci.
         try{ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',r.gym_id).single();
-          if(_g&&_g.owner_id) await supaClient.from('notifications').insert({ user_id:_g.owner_id, type:'system', read:false,
+          if(_g&&_g.owner_id) await supaClient.from('notifications').insert(_bi({ user_id:_g.owner_id, type:'system', read:false,
             data:JSON.stringify({ kind:'org_fee', org_id:org.id, oc_id:r.id }),
-            message:'\u{1F3C5} '+(org.abbr||org.name)+' t\u011b vyzv\u00e1 k \u00fahrad\u011b \u010dlensk\u00e9ho poplatku: '+fmtPrice(_n,_cur)+' '+_curSym(_cur) }); }catch(e){}
+            message:''}, function(EN){ return EN ? ('\u{1F3C5} '+(org.abbr||org.name)+' asks you to pay the membership fee: '+fmtPrice(_n,_cur)+' '+_curSym(_cur)) : ('\u{1F3C5} '+(org.abbr||org.name)+' t\u011b vyzv\u00e1 k \u00fahrad\u011b \u010dlensk\u00e9ho poplatku: '+fmtPrice(_n,_cur)+' '+_curSym(_cur)); })); }catch(e){}
         toast(EN?'\u2705 Requested':'\u2705 V\u00fdzva odesl\u00e1na'); _load();
       }catch(e){ toast('\u26a0\ufe0f '+(e.message||'error')); }
     }; });
@@ -30218,7 +30245,7 @@ async function approveDiscRequest(coachId, disc){
 async function denyDiscRequest(coachId){
   try{
     await supaClient.from('profiles').update({ pending_discipline: null }).eq('id', coachId);
-    try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'system', read:false, data: JSON.stringify({kind:'disc_denied'}), message:'Tvoje žádost o novou disciplínu byla zamítnuta.' }); }catch(e){}
+    try{ await supaClient.from('notifications').insert(_bi({ user_id:coachId, type:'system', read:false, data: JSON.stringify({kind:'disc_denied'}), message:''}, function(EN){ return EN ? ('Your request for a new discipline was declined.') : ('Tvoje žádost o novou disciplínu byla zamítnuta.'); })); }catch(e){}
     toast(LANG==='en'?'Declined':'Zamítnuto');
     renderCoachAnalytics(coachId, 'coachStatsBody');
   }catch(e){ console.error('denyDiscRequest', e); toast('⚠️ '+e.message); }
@@ -32096,7 +32123,7 @@ async function ownerRemoveMember(mid, subId, mname){
       await supaClient.from('gym_memberships').update({ status:'ended', cancelled_at:new Date().toISOString(), period_end:new Date().toISOString() }).eq('id', mid);
       toast((EN?'\u2713 Ended + refunded':'\u2713 Ukon\u010deno + vr\u00e1ceno')+(refunded?(' '+refunded):''));
     }
-    try{ const { data: mb }=await supaClient.from('gym_memberships').select('student_id,plan_name').eq('id',mid).single(); if(mb&&mb.student_id){ const pn=mb.plan_name?' ('+mb.plan_name+')':''; const gn=_myGymData.name||(EN?'the club':'klubu'); const rmsg = mode==='refund' ? (EN?`Your membership${pn} at ${gn} was ended and fully refunded.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} v ${gn} bylo ukon\u010deno a pln\u011b vr\u00e1ceno.`) : (mode==='now' ? (EN?`Your membership${pn} at ${gn} was ended by the gym.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} v ${gn} bylo ukon\u010deno klubem.`) : (EN?`Your membership${pn} at ${gn} will end at the period end.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} v ${gn} skon\u010d\u00ed na konci obdob\u00ed.`)); await supaClient.from('notifications').insert({ user_id:mb.student_id, type:'system', read:false, message:rmsg }); } }catch(e){}
+    try{ const { data: mb }=await supaClient.from('gym_memberships').select('student_id,plan_name').eq('id',mid).single(); if(mb&&mb.student_id){ const pn=mb.plan_name?' ('+mb.plan_name+')':''; const gn=_myGymData.name||(EN?'the club':'klubu'); const rmsg = mode==='refund' ? (EN?`Your membership${pn} at ${gn} was ended and fully refunded.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} v ${gn} bylo ukon\u010deno a pln\u011b vr\u00e1ceno.`) : (mode==='now' ? (EN?`Your membership${pn} at ${gn} was ended by the gym.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} v ${gn} bylo ukon\u010deno klubem.`) : (EN?`Your membership${pn} at ${gn} will end at the period end.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} v ${gn} skon\u010d\u00ed na konci obdob\u00ed.`)); await supaClient.from('notifications').insert(_bi({ user_id:mb.student_id, type:'system', read:false, message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return (mode==='refund' ? (EN?`Your membership${pn} at ${gn} was ended and fully refunded.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} v ${gn} bylo ukon\u010deno a pln\u011b vr\u00e1ceno.`) : (mode==='now' ? (EN?`Your membership${pn} at ${gn} was ended by the gym.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} v ${gn} bylo ukon\u010deno klubem.`) : (EN?`Your membership${pn} at ${gn} will end at the period end.`:`Tv\u00e9 \u010dlenstv\u00ed${pn} v ${gn} skon\u010d\u00ed na konci obdob\u00ed.`))); })); } }catch(e){}
     if(window._mdSid) openGymMemberDetail(window._mdSid, window._mdName); else if(window._mdKid) openGymKidDetail(window._mdKid.parentId, window._mdKid.childName); if(typeof renderGymMembers==='function') renderGymMembers();
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
 }
@@ -35801,7 +35828,7 @@ await supaClient.from('notifications').insert({
     updateRoleUI();
     try{ const _cd=(_caDisc&&_caDisc.length)?_caDisc:[defaultDiscipline()]; const _dl=_cd.map(x=>disciplineLabel(x)).join(', '); const _nm=currentUser.name||'Coach';
       if(!(await _founderMutesNewListing())) await supaClient.from('notifications').insert({ user_id: FOUNDER_UUID, type:'system', read:false, data: JSON.stringify({ kind:'new_listing', target_type:'coach', target_id: currentUser.id, target_name:_nm, disc:_dl }), message:('🆕 '+(LANG==='en'?'New coach: ':'Nový kouč: ')+_nm+' ('+_dl+'). '+(LANG==='en'?'Check the certification video and form an opinion about the coach quality.':'Omrkni certifikační video a udělej si obrázek o kvalitě kouče.')) });
-      try{ const _ors=_cd.map(d=>'verify_disciplines.like.*"'+d+'"*').join(','); const { data: _ambs } = await supaClient.from('profiles').select('id,mute_new_listing').or(_ors); for(const _a of (_ambs||[])){ if(_a.id===FOUNDER_UUID||_a.id===currentUser.id||_a.mute_new_listing) continue; await supaClient.from('notifications').insert({ user_id:_a.id, type:'system', read:false, data: JSON.stringify({ kind:'new_listing', target_type:'coach', target_id: currentUser.id, target_name:_nm, disc:_dl }), message:('🆕 '+(LANG==='en'?'New coach in your discipline: ':'Nový kouč ve tvé disciplíně: ')+_nm+' ('+_dl+'). '+(LANG==='en'?'Check the certification video and form an opinion about the coach quality.':'Omrkni certifikační video a udělej si obrázek o kvalitě kouče.')) }); } }catch(e){}
+      try{ const _ors=_cd.map(d=>'verify_disciplines.like.*"'+d+'"*').join(','); const { data: _ambs } = await supaClient.from('profiles').select('id,mute_new_listing').or(_ors); for(const _a of (_ambs||[])){ if(_a.id===FOUNDER_UUID||_a.id===currentUser.id||_a.mute_new_listing) continue; await supaClient.from('notifications').insert(_bi({ user_id:_a.id, type:'system', read:false, data: JSON.stringify({ kind:'new_listing', target_type:'coach', target_id: currentUser.id, target_name:_nm, disc:_dl }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return (('🆕 '+(LANG==='en'?'New coach in your discipline: ':'Nový kouč ve tvé disciplíně: ')+_nm+' ('+_dl+'). '+(LANG==='en'?'Check the certification video and form an opinion about the coach quality.':'Omrkni certifikační video a udělej si obrázek o kvalitě kouče.'))); })); } }catch(e){}
     }catch(e){}
     
     toast(LANG==='en'?'🎉 Done! Your profile is approved and now listed.':'🎉 Hotovo! Tvůj profil je schválený a jsi v nabídce.',1);
@@ -37180,7 +37207,19 @@ function updateAvailNotifUI(){
   const v=$('vAvailNotif'); if(v) v.textContent = availNotifMuted() ? L('Vypnuto') : L('Zapnuto');
   const b=$('btnMuteAvail'); if(b) b.textContent = availNotifMuted() ? L('🔔 Zapnout notifikace o dostupnosti koučů') : L('🔕 Ztišit notifikace o dostupnosti koučů');
 }
+// Jazyk uživatele do profilu. Server podle něj volí jazyk e-mailů a PDF dokladů -- sám nemá
+// jak poznat, v jaké řeči appku používá. Zapíše se jen změna.
+function _syncProfileLang(){
+  try{
+    if(!currentUser || !currentUser.id) return;
+    const l=(LANG==='en')?'en':'cs';
+    if(currentUser.lang===l) return;
+    currentUser.lang=l;
+    supaClient.from('profiles').update({ lang:l }).eq('id', currentUser.id).then(function(){}, function(){});
+  }catch(e){}
+}
 function applyCertUI(){
+  try{ _syncProfileLang(); }catch(e){}
   const approved = currentUser && currentUser.coach_status==='approved';
   
   try{ if($('meMtlCircle')){ const _p=(typeof _payProv==='function') ? _payProv() : (approved || !!(window._myGyms&&window._myGyms.length)); $('meMtlCircle').style.display = (_p && !(typeof _featOff==='function' && _featOff('circle'))) ? 'flex' : 'none'; } }catch(e){}
@@ -39977,12 +40016,12 @@ async function openDisputeRespond(bookingId){
   ov.querySelector('#drCancel').onclick=close;
   // "Mark resolved" (keep money) exists ONLY for Certified (MTL-overseen). Verified never gets it.
   const _res=ov.querySelector('#drResolve');
-  if(_res) _res.onclick=async()=>{ _res.disabled=true; _res.textContent=L('Ukládám...'); try{ await supaClient.from('bookings').update({ dispute_status:'resolved', refund_requested:false }).eq('id', b.id); if(b.student_id){ await supaClient.from('notifications').insert({ user_id:b.student_id, type:'system', read:false, data: JSON.stringify({kind:'dispute_resolved', id:b.id}), message:(EN?`Your dispute (#${b.id}) was marked resolved by the coach/gym. If you disagree, contact support.`:`Tvůj spor (#${b.id}) označil kouč/klub za vyřešený. Pokud nesouhlasíš, napiš podpoře.`) }); } toast(EN?'✅ Marked resolved':'✅ Označeno za vyřešené'); close(); }catch(e){ toast('⚠️ '+(e.message||'')); _res.disabled=false; } };
+  if(_res) _res.onclick=async()=>{ _res.disabled=true; _res.textContent=L('Ukládám...'); try{ await supaClient.from('bookings').update({ dispute_status:'resolved', refund_requested:false }).eq('id', b.id); if(b.student_id){ await supaClient.from('notifications').insert(_bi({ user_id:b.student_id, type:'system', read:false, data: JSON.stringify({kind:'dispute_resolved', id:b.id}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?`Your dispute (#${b.id}) was marked resolved by the coach/gym. If you disagree, contact support.`:`Tvůj spor (#${b.id}) označil kouč/klub za vyřešený. Pokud nesouhlasíš, napiš podpoře.`)); })); } toast(EN?'✅ Marked resolved':'✅ Označeno za vyřešené'); close(); }catch(e){ toast('⚠️ '+(e.message||'')); _res.disabled=false; } };
   // "Dispute this" (Verified): logs the coach's side; the student is STILL refunded (does NOT stop the auto-refund).
   const _con=ov.querySelector('#drContest');
   if(_con) _con.onclick=async()=>{ const txt=(prompt(EN?'What happened? (MTL sees this; helps catch abuse). The student is still refunded.':'Co se stalo? (uvidí MTL, pomáhá chytit zneužití). Studentovi se peníze stejně vrátí.','')||'').trim(); if(!txt) return; _con.disabled=true; _con.textContent=L('Ukládám...'); try{ await supaClient.from('bookings').update({ coach_contested:true, coach_response:txt }).eq('id', b.id); toast(EN?'✅ Logged — the student has already been refunded':'✅ Zaznamenáno — studentovi už byla částka vrácena'); close(); }catch(e){ toast('⚠️ '+(e.message||'')); _con.disabled=false; _con.textContent='🛡️ '+(EN?'I was there — dispute this':'Byl jsem tam — zpochybnit'); } };
   // "Refund now" (voluntary 100%) — available to both.
-  ov.querySelector('#drRefund').onclick=async()=>{ const btn=ov.querySelector('#drRefund'); btn.disabled=true; btn.textContent=L('Vracím...'); try{ let acct=null; if(b.gym_id){ try{ const { data:g } = await supaClient.from('gyms').select('stripe_account').eq('id', b.gym_id).single(); acct=g&&g.stripe_account; }catch(e){} } if(!acct) acct=(currentUser&&currentUser.stripe_account)||null; const pi=b.payment_intent||b.payment_intent_id; if(!acct || !pi){ toast(EN?'⚠️ Missing payment info':'⚠️ Chybí údaje o platbě'); btn.disabled=false; btn.textContent='↩️ '+(EN?'Refund the student 100% now':'Vrátit studentovi 100 % hned'); return; } const r=await fetch(`/api/gym-refund?gymAccount=${encodeURIComponent(acct)}&paymentIntent=${encodeURIComponent(pi)}&refundApp=1`); const j=await r.json().catch(()=>({})); if(j && j.error){ toast('⚠️ '+j.error); btn.disabled=false; return; } await supaClient.from('bookings').update({ dispute_status:'refunded', status:'refunded', refund_requested:false }).eq('id', b.id); try{ if(b.coach_id && typeof recalcCoachStudents==='function') await recalcCoachStudents(b.coach_id); }catch(e){} if(b.student_id){ await supaClient.from('notifications').insert({ user_id:b.student_id, type:'system', read:false, data: JSON.stringify({kind:'dispute_refunded', id:b.id}), message:(EN?`You were refunded 100% for dispute #${b.id}.`:`Za spor #${b.id} ti bylo vráceno 100 %.`) }); } toast(EN?'✅ Refunded 100%':'✅ Vráceno 100 %'); close(); }catch(e){ toast('⚠️ '+(e.message||'')); btn.disabled=false; } };
+  ov.querySelector('#drRefund').onclick=async()=>{ const btn=ov.querySelector('#drRefund'); btn.disabled=true; btn.textContent=L('Vracím...'); try{ let acct=null; if(b.gym_id){ try{ const { data:g } = await supaClient.from('gyms').select('stripe_account').eq('id', b.gym_id).single(); acct=g&&g.stripe_account; }catch(e){} } if(!acct) acct=(currentUser&&currentUser.stripe_account)||null; const pi=b.payment_intent||b.payment_intent_id; if(!acct || !pi){ toast(EN?'⚠️ Missing payment info':'⚠️ Chybí údaje o platbě'); btn.disabled=false; btn.textContent='↩️ '+(EN?'Refund the student 100% now':'Vrátit studentovi 100 % hned'); return; } const r=await fetch(`/api/gym-refund?gymAccount=${encodeURIComponent(acct)}&paymentIntent=${encodeURIComponent(pi)}&refundApp=1`); const j=await r.json().catch(()=>({})); if(j && j.error){ toast('⚠️ '+j.error); btn.disabled=false; return; } await supaClient.from('bookings').update({ dispute_status:'refunded', status:'refunded', refund_requested:false }).eq('id', b.id); try{ if(b.coach_id && typeof recalcCoachStudents==='function') await recalcCoachStudents(b.coach_id); }catch(e){} if(b.student_id){ await supaClient.from('notifications').insert(_bi({ user_id:b.student_id, type:'system', read:false, data: JSON.stringify({kind:'dispute_refunded', id:b.id}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?`You were refunded 100% for dispute #${b.id}.`:`Za spor #${b.id} ti bylo vráceno 100 %.`)); })); } toast(EN?'✅ Refunded 100%':'✅ Vráceno 100 %'); close(); }catch(e){ toast('⚠️ '+(e.message||'')); btn.disabled=false; } };
 }
 async function submitDispute(){
   const b = _rateCurrent && _rateCurrent.booking;
@@ -40030,7 +40069,7 @@ async function submitDispute(){
     : ` \u2014 klikni a reaguj.`);
   await supaClient.from('notifications').insert({ user_id: b.coach_id, type:'dispute', read:false, data: JSON.stringify(online ? { kind:'dispute_online_coach', student, id: b.id, reason, handler:'coach' } : { kind:'dispute_noshow_coach', student, id: b.id, reason, handler:'coach' }), message: coachMsg });
 
-  try{ if(b.gym_id){ const { data:g2 } = await supaClient.from('gyms').select('owner_id').eq('id', b.gym_id).maybeSingle(); if(g2 && g2.owner_id && g2.owner_id!==b.coach_id){ await supaClient.from('notifications').insert({ user_id: g2.owner_id, type:'dispute', read:false, data: JSON.stringify({ kind:'dispute_gym_owner', student, id:b.id, reason }), message: `\u2696\ufe0f Spor u tv\u00e9ho kou\u010de (#${b.id}): ${student}. D\u016fvod: ${reason}` }); } } }catch(e){}
+  try{ if(b.gym_id){ const { data:g2 } = await supaClient.from('gyms').select('owner_id').eq('id', b.gym_id).maybeSingle(); if(g2 && g2.owner_id && g2.owner_id!==b.coach_id){ await supaClient.from('notifications').insert(_bi({ user_id: g2.owner_id, type:'dispute', read:false, data: JSON.stringify({ kind:'dispute_gym_owner', student, id:b.id, reason }), message:''}, function(EN){ return EN ? (`\u2696\ufe0f Dispute with your coach (#${b.id}): ${student}. Reason: ${reason}`) : (`\u2696\ufe0f Spor u tv\u00e9ho kou\u010de (#${b.id}): ${student}. D\u016fvod: ${reason}`); })); } } }catch(e){}
 
   toast(_refunded
     ? (LANG==='en'?'\u21a9\ufe0f Reported \u2014 you have been refunded in full':'\u21a9\ufe0f Nahl\u00e1\u0161eno \u2014 pen\u00edze se ti vr\u00e1tily v pln\u00e9 v\u00fd\u0161i')
@@ -40280,7 +40319,7 @@ async function showPaidPopup(){
     if(sessionId){ try{ const r=await fetch('/api/session?sessionId='+sessionId+(gAcct?'&gymAccount='+encodeURIComponent(gAcct):'')); const j=await r.json(); email=j.customerEmail||null; name=j.customerName||null; pi=j.paymentIntent||null; }catch(e){} }
     let gymId=null, _occN=null;
     if(bookingId){ try{ const { data:_bk } = await supaClient.from('gym_bookings').update({ status:'active', payment_intent:pi, guest_email:email, guest_name:name, student_name:name }).eq('id', bookingId).select('gym_id,class_date,class_time,class_name,level').single(); gymId=_bk&&_bk.gym_id; if(_bk&&_bk.class_date) _occN={date:_bk.class_date,time:_bk.class_time,name:_bk.class_name||'',level:_bk.level||'all'}; }catch(e){} }
-    if(gymId){ try{ const { data:_g } = await supaClient.from('gyms').select('owner_id,name').eq('id',gymId).single(); if(_g){ await _notifyGymDesk(gymId, _g.owner_id, (EN?('💳 Payment received from '+(name||'a guest')+' for a drop-in — you can let them in.'):('💳 Přišla platba od '+(name||'hosta')+' za jednorázový vstup (drop-in) — můžeš ho pustit dovnitř.')), { kind:'walkin_drop', student:(name||''), gym:gymId, gym_name:(_g.name||''), occ:_occN }); } }catch(e){} }
+    if(gymId){ try{ const { data:_g } = await supaClient.from('gyms').select('owner_id,name').eq('id',gymId).single(); if(_g){ await _notifyGymDesk(gymId, _g.owner_id, function(EN){ var LANG=EN?'en':'cs'; return ((EN?('💳 Payment received from '+(name||'a guest')+' for a drop-in — you can let them in.'):('💳 Přišla platba od '+(name||'hosta')+' za jednorázový vstup (drop-in) — můžeš ho pustit dovnitř.'))); }, { kind:'walkin_drop', student:(name||''), gym:gymId, gym_name:(_g.name||''), occ:_occN }); } }catch(e){} }
     window.history.replaceState({}, '', location.pathname);
     const wrap=document.getElementById('gdWrap'); if(!wrap){ return; }
     const isMemb = (params.get('kind')==='memb' || params.get('memb')==='1');
@@ -40321,7 +40360,7 @@ async function showPaidPopup(){
           await supaClient.from('merch_orders').insert({ attr_src:_attrGet(), gym_id:gid, coach_id:prod.coach_id||null, merch_id:mid, student_id:currentUser.id, item_name:prod.name, qty, variant:variant||null, amount:(prod.price||0)*qty, currency:prod.currency||'CZK', status:'paid', buyer_name:currentUser.name||null, category:prod.category||null });
           if(prod.stock!=null){ const ns=Math.max(0,(prod.stock||0)-qty); await supaClient.from('gym_merch').update({ stock:ns }).eq('id',mid); }
           const { data: _gym } = await supaClient.from('gyms').select('owner_id,name').eq('id',gid).single();
-          const _notifyTo=prod.coach_id||(_gym&&_gym.owner_id); if(_notifyTo){ await supaClient.from('notifications').insert({ user_id:_notifyTo, type:'booking', read:false, data: JSON.stringify({ kind:'merch_order', item:prod.name }), message:`🛍️ ${LANG==='en'?((currentUser?.name||'A member')+' bought '+prod.name+(variant?(' ('+variant+')'):'')):((currentUser?.name||'Člen')+' koupil '+prod.name+(variant?(' ('+variant+')'):''))}` }); if(typeof updateNotifBadge==='function') updateNotifBadge(); }
+          const _notifyTo=prod.coach_id||(_gym&&_gym.owner_id); if(_notifyTo){ await supaClient.from('notifications').insert({ user_id:_notifyTo, type:'booking', read:false, data: JSON.stringify({ kind:'merch_order', item:prod.name, msg_cs:'🛍️ '+(currentUser?.name||'Člen')+' koupil '+prod.name+(variant?(' ('+variant+')'):''), msg_en:'🛍️ '+(currentUser?.name||'A member')+' bought '+prod.name+(variant?(' ('+variant+')'):'') }), message:`🛍️ ${LANG==='en'?((currentUser?.name||'A member')+' bought '+prod.name+(variant?(' ('+variant+')'):'')):((currentUser?.name||'Člen')+' koupil '+prod.name+(variant?(' ('+variant+')'):''))}` }); if(typeof updateNotifBadge==='function') updateNotifBadge(); }
         }
         toast(LANG==='en'?'✅ Order placed — thank you!':'✅ Objednávka odeslána — díky!');
       }catch(e){ console.error('merch_pay',e); }
@@ -40337,7 +40376,7 @@ async function showPaidPopup(){
       try{
         await supaClient.from('grace_visits').update({ settled:true, settlement:'charged', settled_at:new Date().toISOString() }).eq('gym_id',gid).eq('student_id',currentUser.id).eq('settled',false).eq('settlement','billed');
         const { data: _gym } = await supaClient.from('gyms').select('owner_id,name').eq('id',gid).single();
-        if(_gym && _gym.owner_id){ await supaClient.from('notifications').insert({ user_id:_gym.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'grace_settled', student: currentUser?.name||'Student' }), message:`💳 ${LANG==='en'?((currentUser?.name||'A member')+' paid the settlement for tolerated visits.'):((currentUser?.name||'Člen')+' uhradil doplatek za tolerované příchody.')}` }); updateNotifBadge(); }
+        if(_gym && _gym.owner_id){ await supaClient.from('notifications').insert(_bi({ user_id:_gym.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'grace_settled', student: currentUser?.name||'Student' }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return (`💳 ${LANG==='en'?((currentUser?.name||'A member')+' paid the settlement for tolerated visits.'):((currentUser?.name||'Člen')+' uhradil doplatek za tolerované příchody.')}`); })); updateNotifBadge(); }
         toast(LANG==='en'?'✅ Settlement paid — thank you!':'✅ Doplatek uhrazen — díky!');
       }catch(e){ console.error('grace_pay',e); }
     }
@@ -40396,7 +40435,7 @@ async function showPaidPopup(){
         const { data:tk } = await supaClient.from('event_tickets').update({ status:'paid', stripe_ref: pi }).eq('id', ticketId).select().single();
         if(tk){
           try{ fetch('/api/ticket-email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ticketId:tk.id})}); }catch(e){}
-          try{ const { data:ev } = await supaClient.from('events').select('created_by,title').eq('id', tk.event_id).single(); if(ev&&ev.created_by){ const _evPaid=(tk.amount||tk.price); const _evP=_evPaid?(' '+(LANG==='en'?'for ':'za ')+fmtPrice(_evPaid, tk.currency||'CZK')):''; await supaClient.from('notifications').insert({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'event_ticket_sold', event_id:tk.event_id, title:ev.title}), message:'🎟️ '+(LANG==='en'?`Congrats! ${currentUser?.name||'Someone'} just bought a ticket for "${ev.title}"${_evP}.`:`Gratulujeme! Student ${currentUser?.name||''} si právě zakoupil lístek na „${ev.title}"${_evP}.`) }); } }catch(e){}
+          try{ const { data:ev } = await supaClient.from('events').select('created_by,title').eq('id', tk.event_id).single(); if(ev&&ev.created_by){ const _evPaid=(tk.amount||tk.price); const _evP=_evPaid?(' '+(LANG==='en'?'for ':'za ')+fmtPrice(_evPaid, tk.currency||'CZK')):''; await supaClient.from('notifications').insert(_bi({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({kind:'event_ticket_sold', event_id:tk.event_id, title:ev.title}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('🎟️ '+(LANG==='en'?`Congrats! ${currentUser?.name||'Someone'} just bought a ticket for "${ev.title}"${_evP}.`:`Gratulujeme! Student ${currentUser?.name||''} si právě zakoupil lístek na „${ev.title}"${_evP}.`)); })); } }catch(e){}
           try{ if(currentUser){ await supaClient.from('notifications').insert({ user_id: currentUser.id, type:'system', read:false, data: JSON.stringify({ kind:'event_ticket_mine', event_id: tk.event_id }), message:'🎟️ '+(LANG==='en'?'Ticket confirmed — find it in Upcoming events':'Lístek potvrzen — najdeš ho v Nadcházejících akcích') }); updateNotifBadge(); } }catch(e){}
           toast(LANG==='en'?'🎟️ Ticket confirmed! See you there.':'🎟️ Lístek potvrzen! Uvidíme se tam.');
         }
@@ -40457,7 +40496,7 @@ async function showPaidPopup(){
         if(mb){
           const { data: gym } = await supaClient.from('gyms').select('owner_id, name, membership_price, currency').eq('id', mb.gym_id).single();
           const _membCoach=(mb.paid_to==='coach' && mb.coach_id)?mb.coach_id:null;
-          if(_membCoach){ const _sym=_curSym(gym&&gym.currency); const _sp=fmtPrice(mb.amount||(gym&&gym.membership_price)||0, gym&&gym.currency); await supaClient.from('notifications').insert({ user_id:_membCoach, type:'booking', read:false, data: JSON.stringify({ kind:'gym_member_joined_coach', student: currentUser?.name||'Student', amt:_sp, sym:_sym, gym_id: mb.gym_id }), message:`🎟️ ${LANG==='en'?`Congrats! ${currentUser?.name||'A student'} just bought your membership for ${_sp} ${_sym}/mo.`:`Gratulujeme! Student ${currentUser?.name||''} si právě zakoupil tvoje členství za ${_sp} ${_sym}/měs.`}` }); if(typeof updateNotifBadge==='function') updateNotifBadge(); }
+          if(_membCoach){ const _sym=_curSym(gym&&gym.currency); const _sp=fmtPrice(mb.amount||(gym&&gym.membership_price)||0, gym&&gym.currency); await supaClient.from('notifications').insert(_bi({ user_id:_membCoach, type:'booking', read:false, data: JSON.stringify({ kind:'gym_member_joined_coach', student: currentUser?.name||'Student', amt:_sp, sym:_sym, gym_id: mb.gym_id }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return (`🎟️ ${LANG==='en'?`Congrats! ${currentUser?.name||'A student'} just bought your membership for ${_sp} ${_sym}/mo.`:`Gratulujeme! Student ${currentUser?.name||''} si právě zakoupil tvoje členství za ${_sp} ${_sym}/měs.`}`); })); if(typeof updateNotifBadge==='function') updateNotifBadge(); }
           else if(gym && gym.owner_id){
             const sym = _curSym(gym.currency);
             const studentPaid = fmtPrice(mb.amount||gym.membership_price||0, gym.currency);
