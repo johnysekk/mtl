@@ -23634,7 +23634,10 @@ const GYM_DRAFT_KEY='mtl_gym_draft';
 function gymDraftFields(){ return ['gymName','gymCity','gymPostal','gymAddress','gymDesc','gymDropinPrice','gymCurrency','gymTaxId','gymVatId','gymLegalName',
   // Kontakt pro studenty a fakturacni adresa: bez nich se po prekresleni formulare mazaly
   // a validace pak zadala neco, co clovek uz jednou vyplnil.
-  'gaPubEmail','gaPubPhone','gaPubPhoneCC','gymBillingLine1','gymBillingLine2','gymBillingCity','gymBillingPostal','gymInvoiceEmail','gymBillingPhone','gymBillingPhoneCC']; }
+  'gaPubEmail','gaPubPhone','gaPubPhoneCC','gymBillingLine1','gymBillingLine2','gymBillingCity','gymBillingPostal','gymInvoiceEmail','gymBillingPhone','gymBillingPhoneCC',
+  // Zeme (danovy domicil) -- bez ni se po navratu do rozpracovane prihlasky vyber vynuloval
+  // a klub vznikl s billing_country = null.
+  'gymCountry']; }
 function saveGymDraft(){
   try{
     if(!$('shGymApp') || !$('shGymApp').classList.contains('open')) return;
@@ -24012,6 +24015,12 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
   if(_gaPm==='stripe'){ if(!acct){ toast(L('⚠️ Nejprve připoj Stripe účet klubu')); return; } if($('gaStripeCash')&&$('gaStripeCash').checked&&!(currentUser&&currentUser.commission_card_status==='active')){ toast(L('⚠️ Pro příjem hotovosti ulož kartu na provizi')); return; } }
   else { if(!(currentUser&&currentUser.commission_card_status==='active')){ toast(L('⚠️ Nejdřív ulož kartu na provizi')); return; } var _qv=($('gaQrIban')&&$('gaQrIban').value.trim())||''; if(!_qv){ toast(L('⚠️ Doplň příjemce platby (IBAN/PIX/UPI)')); return; } if(!($('gaQrDecl')&&$('gaQrDecl').checked)){ toast(L('⚠️ Potvrď prohlášení o účtu')); return; } }
   if(!name||!city){ toast(L('⚠️ Vyplň název a město')); return; }
+  // ZEMĚ JE POVINNÁ. Řídí se podle ní provize (zaváděcí nula podle země), doklad i DAC7.
+  if(!(($('gymCountry')&&$('gymCountry').value)||'')){
+    toast(LANG==='en'?'⚠️ Select the country in the billing details':'⚠️ Vyber zemi ve fakturačních údajích');
+    try{ const _gc=$('gymCountry'); if(_gc){ _gc.scrollIntoView({behavior:'smooth',block:'center'}); _gc.focus(); } }catch(e){}
+    return;
+  }
   if(!price){ toast(L('⚠️ Vyplň cenu jednorázové lekce')); return; }
   if(!$('gaTerms')||!$('gaTerms').checked){ toast(LANG==='en'?'⚠️ Please accept the partner terms':'⚠️ Potvrď souhlas s podmínkami spolupráce'); return; }
   const missShow = GYM_SHOWCASE.filter(sp=>!gymShowcaseUrls[sp.k]);
@@ -27166,97 +27175,134 @@ function _openCommissionDoklad(d){
 //   hotovost/QR/PIS -- provize se nasbira za mesic a strhne z karty k 6. dni dalsiho mesice.
 // Vse se cte z `transactions` (commission_month, commission_status, commission_collected_at),
 // takze rozklik mesice nestoji zadny dalsi dotaz -- data uz v prohlizeci jsou.
+// KDO DLUŽÍ PROVIZI = komu přišly peníze. Banka a hotovost to píšou do paid_to, Stripe do payee_kind
+// (gym / profile). Stejné pravidlo je v unified-doklad-cron (commissionOwner) a v commission-cron,
+// takže obrazovka ukazuje přesně to, co se strhne a co bude na dokladu.
+function _commOwner(t){
+  if(!t) return null;
+  var pk=t.paid_to || (t.payee_kind==='profile'?'coach':t.payee_kind) || null;
+  if(pk==='organization' && t.organization_id) return { kind:'organization', id:String(t.organization_id) };
+  if(pk==='coach' && t.coach_id) return { kind:'coach', id:String(t.coach_id), identity:(t.gym_id?'payout':'own') };
+  if(pk==='gym' && t.gym_id) return { kind:'gym', id:String(t.gym_id) };
+  if(t.organization_id) return { kind:'organization', id:String(t.organization_id) };
+  if(t.gym_id) return { kind:'gym', id:String(t.gym_id) };
+  if(t.coach_id) return { kind:'coach', id:String(t.coach_id), identity:'own' };
+  return null;
+}
 async function openMtlCommissions(scope){
   const EN=LANG==='en';
+  scope=scope||{};
+  // Jedna obrazovka pro klub, kouče i organizaci. Liší se jen tím, čí provize ukazuje.
+  const _kind=scope.organizationId?'organization':(scope.gymId?'gym':'coach');
+  const _id=String(scope.organizationId||scope.gymId||scope.coachId||(currentUser&&currentUser.id)||'');
+  const _isCoachScope=(_kind==='coach');
   // BEZNY SHEET, ne vlastni fixed overlay. Fixed pres cely viewport prekryl v dashmode
-  // levy sidebar a navic sedel nad prohlizecem dokladu (z-index 380), takze tlacitko
-  // "Doklad za strzeni" vypadalo, ze nic nedela -- doklad se otevrel pod nim.
+  // levy sidebar a navic sedel nad prohlizecem dokladu.
   let ov=document.getElementById('shMtlComm');
   if(!ov){
-    ov=document.createElement('div'); ov.id='shMtlComm'; ov.className='sheet'; ov.style.zIndex='89';
+    ov=document.createElement('div'); ov.id='shMtlComm'; ov.className='sheet'; ov.style.zIndex='95';
     (document.querySelector('.app')||document.body).appendChild(ov);
   }
   ov.innerHTML='<div class="shdr"><div class="shdr-title">\ud83e\uddfe '+(EN?'Commissions to MTL':'Provize v\u016f\u010di MTL')+'</div><button class="btn-close" id="_mcClose">\u2715</button></div>'
     +'<div id="_mcBody" style="padding:16px 18px 44px;"><p style="color:var(--light);font-size:13px;text-align:center;padding:30px;">'+(EN?'Loading\u2026':'Na\u010d\u00edt\u00e1m\u2026')+'</p></div>';
   // Odkud jsme prisli -- closeSheet podle toho vrati puvodni obrazovku misto prazdna.
-  try{ if(!_sheetParent['shMtlComm']) _sheetParent['shMtlComm']=(scope&&scope.gymId)?'shGymManage':'shMe'; }catch(e){}
+  try{ _sheetParent['shMtlComm']=(_kind==='organization')?'shOrgFinance':((_kind==='gym')?'shGymManage':'shMe'); }catch(e){}
   try{ openSheet('shMtlComm'); }catch(e){}
   ov.querySelector('#_mcClose').onclick=function(){ try{ closeSheet('shMtlComm'); }catch(e){ ov.remove(); } };
   const body=ov.querySelector('#_mcBody');
   let tx=[];
   try{
-    const _tok=await _freshTok();
-    if(scope&&scope.gymId){
-      const r=await fetch('/api/gym-transactions?gymId='+encodeURIComponent(scope.gymId), { headers:{'x-access-token':_tok} });
-      const j=await r.json(); tx=(j&&j.transactions)||[];
+    if(_kind==='organization'){
+      const { data }=await supaClient.from('transactions').select('*').eq('organization_id', _id).order('created_at',{ascending:false}).limit(5000);
+      tx=data||[];
     } else {
-      const r=await fetch('/api/my-transactions', { headers:{'x-access-token':_tok} });
-      const j=await r.json(); tx=((j&&j.coachTx)||[]).filter(function(t){ return t.paid_to==='coach'; });
+      const _tok=await _freshTok();
+      if(_kind==='gym'){
+        const r=await fetch('/api/gym-transactions?gymId='+encodeURIComponent(_id), { headers:{'x-access-token':_tok} });
+        const j=await r.json(); tx=(j&&j.transactions)||[];
+      } else {
+        const r=await fetch('/api/my-transactions', { headers:{'x-access-token':_tok} });
+        const j=await r.json(); tx=(j&&j.coachTx)||[];
+      }
     }
   }catch(e){}
-  // Doklady za strzenou provizi uz existuji v commission_doklady (vystavuje je cron pri
-  // strzeni). Navazujeme se na ne pres period_month, misto abychom stavěli druhy seznam.
-  let _dok={};
+  // Jen provize, které dluží TENTO subjekt. Klub dřív viděl i provize kouče ze skupinovek v režimu
+  // klub (nesou gym_id) a kouč neviděl žádnou provizi ze Stripe (paid_to tam není vyplněné).
+  tx=tx.filter(function(t){ const o=_commOwner(t); return !!(o && o.kind===_kind && o.id===_id); });
+  // Doklady za strženou provizi: VŠECHNY za měsíc. V denním režimu je jich víc a kouč má za
+  // měsíc dva (1:1 a režim klub) -- dřív se ukázal jen poslední.
+  const _dok={};
   try{
-    let _q=supaClient.from('commission_doklady').select('id,period_month,amount,currency,charged_at');
-    _q=(scope&&scope.gymId) ? _q.eq('gym_id',scope.gymId) : _q.eq('coach_id',currentUser.id);
-    const { data:_dd }=await _q;
-    (_dd||[]).forEach(function(d){ if(d.period_month) _dok[String(d.period_month).slice(0,7)]=d; });
+    let _q=supaClient.from('commission_doklady').select('*');
+    _q=(_kind==='organization')?_q.eq('organization_id',_id):((_kind==='gym')?_q.eq('gym_id',_id):_q.eq('coach_id',_id));
+    const { data:_dd }=await _q.order('charged_at',{ascending:true});
+    window.__comDok=window.__comDok||{};
+    (_dd||[]).forEach(function(d){ window.__comDok[d.id]=d; if(!d.period_month) return; const k=String(d.period_month).slice(0,7)+'|'+String(d.currency||'CZK').toUpperCase(); (_dok[k]=_dok[k]||[]).push(d); });
   }catch(e){}
   const _mo=function(t){ return t.commission_month || String(t.created_at||'').slice(0,7); };
   const _fee=function(t){ return (Number(t.mtl_fee||0)-Number(t.mtl_fee_refunded||0))/100; };
+  // Měsíc A MĚNA. Dvě měny se v jednom součtu sčítat nesmí.
   const _byM={};
   tx.forEach(function(t){
     if(!(Number(t.mtl_fee||0)>0)) return;
-    const k=_mo(t); if(!k) return;
+    const mk=_mo(t); if(!mk) return;
+    const cur=(t.currency||'CZK').toUpperCase();
+    const k=mk+'|'+cur;
     const _bank=(t.payment_method==='cash'||t.payment_method==='qr'||t.payment_method==='pis');
-    const m=_byM[k]||(_byM[k]={ key:k, cur:(t.currency||'CZK').toUpperCase(), stripe:0, bank:0, rows:[], status:null, at:null });
-    if(_bank){ m.bank+=_fee(t); if(t.commission_status){ m.status=(t.commission_status==='failed')?'failed':((m.status==='failed')?'failed':t.commission_status); } if(t.commission_collected_at) m.at=t.commission_collected_at; }
+    const m=_byM[k]||(_byM[k]={ key:k, month:mk, cur:cur, stripe:0, bank:0, rows:[], status:null, at:null });
+    if(_bank){
+      m.bank+=_fee(t);
+      if(t.commission_status){ m.status=(t.commission_status==='failed')?'failed':((m.status==='failed')?'failed':(m.status==='pending'?'pending':t.commission_status)); }
+      if(t.commission_collected_at && (!m.at || String(t.commission_collected_at)>String(m.at))) m.at=t.commission_collected_at;
+    }
     else m.stripe+=_fee(t);
     m.rows.push(t);
   });
   const months=Object.keys(_byM).sort().reverse();
   if(!months.length){ body.innerHTML='<p style="color:var(--light);font-size:13px;text-align:center;padding:40px;">'+(EN?'No commissions yet.':'Zat\u00edm \u017e\u00e1dn\u00e9 provize.')+'</p>'; return; }
   const _MO=EN?['January','February','March','April','May','June','July','August','September','October','November','December']:['Leden','\u00danor','B\u0159ezen','Duben','Kv\u011bten','\u010cerven','\u010cervenec','Srpen','Z\u00e1\u0159\u00ed','\u0158\u00edjen','Listopad','Prosinec'];
-  const _mName=function(k){ const p=String(k).split('-'); return (_MO[(parseInt(p[1],10)||1)-1]||k)+' '+p[0]; };
+  const _mName=function(mk){ const p=String(mk).split('-'); return (_MO[(parseInt(p[1],10)||1)-1]||mk)+' '+p[0]; };
   const _curM=new Date().toISOString().slice(0,7);
+  const _money=function(v,cur){ return fmtPrice(v,cur)+' '+_curSym(cur); };
   const _pill=function(m){
     if(m.bank<=0) return '<span style="font-size:11px;background:#EEF4FF;color:var(--blue);padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'via Stripe':'sr\u00e1\u017eeno Stripem')+'</span>';
-    if(m.key>=_curM) return '<span style="font-size:11px;background:#FFF4E5;color:#9A5B00;padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'running':'b\u011b\u017e\u00ed')+'</span>';
-    if(m.status==='collected') return '<span style="font-size:11px;background:#E8F5EE;color:#006040;padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'charged':'str\u017eeno')+'</span>';
     if(m.status==='failed') return '<span style="font-size:11px;background:#FDECEC;color:#8a1c1c;padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'failed':'nezda\u0159ilo')+'</span>';
+    if(m.month>=_curM) return '<span style="font-size:11px;background:#FFF4E5;color:#9A5B00;padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'running':'b\u011b\u017e\u00ed')+'</span>';
+    if(m.status==='collected') return '<span style="font-size:11px;background:#E8F5EE;color:#006040;padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'charged':'str\u017eeno')+'</span>';
     return '<span style="font-size:11px;background:var(--surf);color:var(--mid);padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'pending':'\u010dek\u00e1')+'</span>';
+  };
+  const _dokLbl=function(d){
+    var _p=String(d.period_month||''); var _day=/^\d{4}-\d{2}-\d{2}$/.test(_p)?(' '+(+_p.slice(8,10))+'. '+(+_p.slice(5,7))+'.'):'';
+    var _idl=(_isCoachScope && d.billing_identity==='payout')?(EN?' \u00b7 club mode':' \u00b7 re\u017eim klub'):((_isCoachScope && d.billing_identity==='own')?(EN?' \u00b7 1:1':' \u00b7 1:1'):'');
+    return '\ud83d\udcc4 '+_dokladNo(d.id)+_day+_idl+' \u00b7 '+(Number(d.amount||0)/100).toLocaleString(EN?'en-GB':'cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2})+' '+_curSym(d.currency||'CZK')+' \u203a';
   };
   body.innerHTML='<p style="font-size:12.5px;color:var(--mid);line-height:1.55;margin:0 0 12px;">'
     +(EN?'Tap a month to see the payments it was collected from.':'Klepnut\u00edm na m\u011bs\u00edc uvid\u00ed\u0161 platby, ze kter\u00fdch se provize se\u010detla.')
     +'</p>'+months.map(function(k){
     const m=_byM[k]; const _tot=m.stripe+m.bank;
-    const _sub=[ (m.stripe>0?('Stripe '+fmtPrice(m.stripe,m.cur)):''),
-                 (m.bank>0?((EN?'cash/QR ':'hotovost/QR ')+fmtPrice(m.bank,m.cur)):''),
+    const _sub=[ (m.stripe>0?('Stripe '+_money(m.stripe,m.cur)):''),
+                 (m.bank>0?((EN?'cash/QR/bank ':'hotovost/QR/banka ')+_money(m.bank,m.cur)):''),
                  (m.at?((EN?'charged ':'str\u017eeno ')+new Date(m.at).toLocaleDateString(EN?'en-GB':'cs-CZ')):'') ].filter(Boolean).join(' \u00b7 ');
+    const _ds=_dok[k]||[];
     return '<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;margin-bottom:10px;overflow:hidden;">'
       +'<div style="display:flex;align-items:center;gap:10px;padding:9px 14px 8px;">'
-        +'<div style="flex:1;min-width:0;"><div style="font-size:14.5px;font-weight:700;color:var(--dark);line-height:1.25;">'+_mName(k)+'</div>'
+        +'<div style="flex:1;min-width:0;"><div style="font-size:14.5px;font-weight:700;color:var(--dark);line-height:1.25;">'+_mName(m.month)+'</div>'
         +'<div style="font-size:11.5px;color:var(--mid);margin-top:1px;">'+escapeHtml(_sub)+'</div></div>'
-        +'<div style="font-size:14.5px;font-weight:700;color:var(--dark);white-space:nowrap;">'+fmtPrice(_tot,m.cur)+'</div>'
+        +'<div style="font-size:14.5px;font-weight:700;color:var(--dark);white-space:nowrap;">'+_money(_tot,m.cur)+'</div>'
         +_pill(m)+'</div>'
-      +'<div style="padding:0 14px 10px;"><button class="mcMonth" data-k="'+k+'" style="background:none;border:1px solid var(--border);border-radius:9px;color:var(--mid);font-size:12px;font-weight:700;padding:5px 11px;cursor:pointer;font-family:inherit;">'
-        +'<span class="mcChev" data-k="'+k+'">\u203a</span> '+(EN?'Show transactions':'Zobrazit detail transakc\u00ed')+'</button></div>'
-      +(_dok[k]?('<div style="padding:0 14px 11px;"><button class="mcDok" data-k="'+k+'" data-dok="'+escapeHtml(String(_dok[k].id))+'" style="background:#fff;border:1px solid var(--border);border-radius:9px;color:var(--dark);font-size:12px;font-weight:700;padding:5px 11px;cursor:pointer;font-family:inherit;">\ud83d\udcc4 '+(EN?'Receipt for the charge \u203a':'Doklad za str\u017een\u00ed \u203a')+'</button></div>'):'')
-      +'<div class="mcRows" data-k="'+k+'" style="display:none;border-top:1px solid var(--border);padding:4px 14px 10px;"></div>'
+      +'<div style="padding:0 14px 10px;"><button class="mcMonth" data-k="'+escapeHtml(k)+'" style="background:none;border:1px solid var(--border);border-radius:9px;color:var(--mid);font-size:12px;font-weight:700;padding:5px 11px;cursor:pointer;font-family:inherit;">'
+        +'<span class="mcChev">\u203a</span> '+(EN?'Show transactions':'Zobrazit detail transakc\u00ed')+'</button></div>'
+      +(_ds.length?('<div style="padding:0 14px 11px;display:flex;flex-wrap:wrap;gap:6px;">'+_ds.map(function(d){ return '<button class="mcDok" data-dok="'+escapeHtml(String(d.id))+'" style="background:#fff;border:1px solid var(--border);border-radius:9px;color:var(--dark);font-size:12px;font-weight:700;padding:5px 11px;cursor:pointer;font-family:inherit;">'+escapeHtml(_dokLbl(d))+'</button>'; }).join('')+'</div>'):'')
+      +'<div class="mcRows" data-k="'+escapeHtml(k)+'" style="display:none;border-top:1px solid var(--border);padding:4px 14px 10px;"></div>'
       +'</div>';
   }).join('');
   body.querySelectorAll('.mcDok').forEach(function(b){ b.onclick=function(ev){
     ev.stopPropagation();
-    // PRIMO ten jeden doklad, ne seznam vsech. Seznam byl mezikrok navic -- uzivatel uz vi,
-    // ktery mesic chce, protoze klepl na jeho radek.
-    const _id=b.dataset.dok; if(!_id) return;
-    try{ window.__comDok=window.__comDok||{}; window.__comDok[_id]=_dok[b.dataset.k]; }catch(e){}
-    try{ showCommissionDoklad(_id); }catch(e){}
+    const _did=b.dataset.dok; if(!_did) return;
+    try{ showCommissionDoklad(_did); }catch(e){}
   }; });
   body.querySelectorAll('.mcMonth').forEach(function(b){ b.onclick=function(){
     const wrap=body.querySelector('.mcRows[data-k="'+b.dataset.k+'"]'); if(!wrap) return;
-    const _ch=b.querySelector('.mcChev');
     const _lbl=function(open){ b.innerHTML='<span class="mcChev">'+(open?'\u2039':'\u203a')+'</span> '+(open?(EN?'Hide transactions':'Skr\u00fdt detail transakc\u00ed'):(EN?'Show transactions':'Zobrazit detail transakc\u00ed')); };
     if(wrap.style.display!=='none'){ wrap.style.display='none'; _lbl(false); return; }
     _lbl(true);
@@ -27273,33 +27319,17 @@ async function openMtlCommissions(scope){
       const _cu=(t.currency||m.cur);
       return '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);font-size:12.5px;">'
         +'<div style="flex:1;min-width:0;color:var(--dark);">'+_pm+' '+escapeHtml(_mpItemLabel(t))+'<span style="color:var(--light);"> \u00b7 '+_d+'</span>'
+        +((_isCoachScope && t.gym_id)?('<span style="font-size:11px;background:#EEF4FF;color:var(--blue);border-radius:7px;padding:1px 7px;margin-left:6px;white-space:nowrap;">'+(EN?'club mode':'re\u017eim klub')+'</span>'):'')
         +(_rf>0?('<span style="font-size:11px;background:var(--surf);color:var(--mid);border:1px solid var(--border);border-radius:7px;padding:1px 7px;margin-left:6px;white-space:nowrap;">'+(EN?'refunded':'refundov\u00e1no')+'</span>'):'')+'</div>'
-        +'<div style="color:var(--mid);white-space:nowrap;">'+fmtPrice(Number(t.gross_amount||0)/100,_cu)+_r+'</div>'
+        +'<div style="color:var(--mid);white-space:nowrap;">'+fmtPrice(Number(t.gross_amount||0)/100,_cu)+' '+_curSym(_cu)+_r+'</div>'
         +'<div style="white-space:nowrap;min-width:76px;text-align:right;">'
-          +(_rf>0?('<span style="color:var(--light);text-decoration:line-through;font-size:11.5px;margin-right:5px;">'+fmtPrice(_gross0,_cu)+'</span>'):'')
-          +'<span style="font-weight:700;color:var(--dark);">'+fmtPrice(_fee(t),_cu)+'</span>'
+          +(_rf>0?('<span style="color:var(--light);text-decoration:line-through;font-size:11.5px;margin-right:5px;">'+fmtPrice(_gross0,_cu)+' '+_curSym(_cu)+'</span>'):'')
+          +'<span style="font-weight:700;color:var(--dark);">'+fmtPrice(_fee(t),_cu)+' '+_curSym(_cu)+'</span>'
         +'</div></div>';
     }).join('');
     wrap.style.display='block';
   }; });
 }
-// MOJE SOUHLASY. Protejsek "Moje doklady": co jsem odsouhlasil, kdy, a PRESNE V JAKEM ZNENI.
-// Znění se nesklada znovu -- vraci se text ulozeny v okamziku prijeti. U dokladu je spravne
-// opak (rozhoduji data), tady rozhoduje to, co clovek opravdu cetl.
-const CONSENT_LBL={
-  terms:['Terms of use','Podm\u00ednky u\u017eit\u00ed'],
-  privacy:['Privacy policy','Z\u00e1sady ochrany osobn\u00edch \u00fadaj\u016f'],
-  partner:['Partner terms','Podm\u00ednky spolupr\u00e1ce'],
-  beta_terms:['Beta terms','Beta podm\u00ednky'],
-  beta_privacy:['Beta privacy','Beta \u2014 ochrana \u00fadaj\u016f'],
-  minor_private:['Minor 1:1 consent','Souhlas se soukromkou mladistv\u00e9ho'],
-  ticket:['Ticket terms','Podm\u00ednky vstupenky'],
-  provider_marketing:['Provider marketing consent','Souhlas se zas\u00edl\u00e1n\u00edm sd\u011blen\u00ed'],
-  receiver_declaration:['Payout account declaration','Prohl\u00e1\u0161en\u00ed k v\u00fdplatn\u00edmu \u00fa\u010dtu'],
-  provider_terms:['Provider terms','Podm\u00ednky poskytovatele'],
-  gym_terms:['Club terms','Podm\u00ednky klubu'],
-  event_minor:['Minor at event','Souhlas s \u00fa\u010dast\u00ed nezletil\u00e9ho']
-};
 async function openMyConsents(){
   const EN=LANG==='en';
   let ov=document.getElementById('shMyConsents');
@@ -29357,6 +29387,7 @@ async function openOrgFinance(org){
     +((currentUser&&currentUser.role==='founder')?('<label style="display:flex;align-items:center;gap:8px;margin:0 0 14px;padding:11px 13px;border:1px solid var(--border);border-radius:12px;cursor:pointer;">'
       +'<input type="checkbox" id="orgDailyChk"'+(org.commission_daily?' checked':'')+' style="width:16px;height:16px;cursor:pointer;">'
       +'<span style="font-size:12px;color:var(--mid);">'+(EN?'Charge daily instead of monthly (testing)':'Strh\u00e1vat provizi denn\u011b m\u00edsto m\u011bs\u00ed\u010dn\u011b (testov\u00e1n\u00ed)')+'</span></label>'):'')
+    +'<button id="orgMtlCommBtn" style="'+bs+'background:var(--surf);color:var(--dark);border:1px solid var(--border);">\ud83e\uddfe '+(EN?'Commissions & receipts to MTL':'Provize a doklady v\u016f\u010di MTL')+'</button>'
     +'<div id="orgDocsBox"></div>'
     +'</div>';
   try{ if(!_sheetParent['shOrgFinance']) _sheetParent['shOrgFinance']='shOrgApply'; }catch(e){}
@@ -29375,6 +29406,7 @@ async function openOrgFinance(org){
       }catch(e){ _dc.checked=!on; toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
     };
   }
+  { const _mc=ov.querySelector('#orgMtlCommBtn'); if(_mc) _mc.onclick=function(){ openMtlCommissions({ organizationId: org.id, orgName: org.name||'' }); }; }
   try{ renderOrgDocs(org, ov.querySelector('#orgDocsBox')); }catch(e){}
 }
 async function renderOrgDocs(org, box){
