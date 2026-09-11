@@ -20787,13 +20787,15 @@ async function showCommissionDoklad(id){
   let dk = (window.__comDok && window.__comDok[id]) || null;
   if(!dk){ try{ const { data } = await supaClient.from('commission_doklady').select('*').eq('id', id).single(); dk = data; }catch(e){} }
   if(!dk){ toast('\u26a0\ufe0f'); return; }
-  await _loadMtlEnt(); const ME = window._mtlEnt || MTL_ENTITY;
+  // DODAVATEL (MTL) ZE SNIMKU, stejne jako odberatel. Driv se bral z dnesnich platform_settings,
+  // takze by stary doklad ukazal nove sidlo nebo DPH, jakmile se MTL zmeni. Bez snimku se nekresli (viz nize).
+  const ME = { name:dk.sup_name, ico:dk.sup_ico, dic:dk.sup_dic, sidlo:dk.sup_address, vat_payer:!!dk.sup_vat_payer, vat_rate:dk.sup_vat_rate };
   // ODBERATEL ZE SNIMKU. Doklad je zaznam o tom, co bylo vystaveno -- kdyz klub pozdeji
   // zmeni nazev nebo vstoupi do DPH, uz vystaveny doklad se menit nesmi.
   // SNIMEK, NEBO NIC. Doklad je zaznam o tom, co bylo vystaveno -- skladat ho z dnesnich
   // dat znamena vyrobit dokument, ktery se v case meni. To uz neni doklad.
   let gym = null;
-  if(dk.cust_name || dk.cust_ico){
+  if((dk.cust_name || dk.cust_ico) && (dk.sup_name || dk.sup_ico)){
     gym = { name: dk.cust_name, legal_name: dk.cust_name, tax_id: dk.cust_ico,
       vat_id: dk.cust_dic, billing_address: dk.cust_address,
       billing_country: dk.cust_country, vat_payer: !!dk.cust_vat_payer };
@@ -20846,9 +20848,6 @@ async function showCommissionDoklad(id){
     + '<div style="font-size:13px;color:#666;margin-bottom:14px;">'+(EN?'Period ':'Období ')+escapeHtml(String(dk.period_month||''))
       +'  \u00b7  '+(dk.kind==='coach'?(EN?'coach':'kouč'):(EN?'club':'klub'))+'</div>'
     + '<div class="cols"><div class="col"><div class="lbl">'+(EN?'Supplier':'Dodavatel')+'</div>'+supLines+'</div><div class="col"><div class="lbl">'+(EN?'Customer':'Odb\u011bratel')+'</div>'+buyLines
-      +(_fromSnap?'':('<div style="font-size:10.5px;color:#9A5B00;background:#FFF4E5;border:1px solid #F0D9B5;border-radius:8px;padding:6px 8px;margin-top:6px;line-height:1.4;">'
-        +(EN?'Issued before receipt snapshots \u2014 the customer details are current, not as of issue.'
-            :'Vystaveno p\u0159ed zaveden\u00edm sn\u00edmk\u016f \u2014 \u00fadaje odb\u011bratele jsou aktu\u00e1ln\u00ed, ne z okam\u017eiku vystaven\u00ed.')+'</div>'))
       +'</div></div>'
     + '<table>'+_liRows+vatBlock+'<tr class="tot"><td>'+(EN?'Total':'Celkem')+'</td><td style="text-align:right;">'+f(amt)+'</td></tr></table>'
     + '<p style="font-size:12px;color:#666;margin-top:14px;">'+(EN?('The commission was automatically charged to the card on file on '+charged+'.'):('Provize byla automaticky str\u017eena z ulo\u017een\u00e9 platebn\u00ed karty dne '+charged+'.'))+'</p>'
@@ -38754,9 +38753,9 @@ async function showReceipt(b){
         sup_name:_dk.sup_name, sup_ico:_dk.sup_ico, sup_dic:_dk.sup_dic, sup_address:_dk.sup_address,
         sup_vat_payer:_dk.sup_vat_payer, sup_vat_rate:_dk.sup_vat_rate,
         cust_name:_dk.cust_name, cust_email:_dk.cust_email,
-        item_label:(b.item_label||_dk.item_label),
-        amount:(Number(_dk.amount||0)/100), currency:(_dk.currency||b.currency),
-        payment_method:(_dk.payment_method||b.payment_method), test_mode:_dk.test_mode
+        item_label:_dk.item_label,
+        amount:(Number(_dk.amount||0)/100), currency:_dk.currency,
+        payment_method:_dk.payment_method, test_mode:_dk.test_mode
       });
     }
     // POSKYTOVATEL = ten, komu peníze šly. Dosud se rozhodovalo podle gym_id, takže drop-in
@@ -38783,8 +38782,8 @@ async function showReceipt(b){
           +'<meta name="viewport" content="width=device-width,initial-scale=1">'
           +'<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:26px 22px;color:#333;line-height:1.65;font-size:14px;}h1{font-size:17px;color:#111;margin:0 0 10px;}</style>'
           +'</head><body><h1>'+(EN?'No receipt was issued for this payment':'K t\u00e9to platb\u011b nebyl vystaven doklad')+'</h1><p>'
-          +(EN?'It predates receipt snapshots. We will not rebuild it from today\u2019s data \u2014 that would not be the document that was issued. The amount is in your payment history.'
-              :'Platba je z doby p\u0159ed zaveden\u00edm doklad\u016f. Nebudeme ho skl\u00e1dat z dne\u0161n\u00edch dat \u2014 nebyl by to doklad, kter\u00fd byl vystaven. \u010c\u00e1stku najde\u0161 v historii plateb.')
+          +(EN?'We will not rebuild it from today\u2019s data \u2014 that would not be the document that was issued. The amount is in your payment history.'
+              :'Nebudeme ho skl\u00e1dat z dne\u0161n\u00edch dat \u2014 nebyl by to doklad, kter\u00fd byl vystaven. \u010c\u00e1stku najde\u0161 v historii plateb.')
           +'</p></body></html>';
         var _nv=document.getElementById('dokladOv'); if(_nv) _nv.remove();
         _nv=document.createElement('div'); _nv.id='dokladOv';
@@ -38806,50 +38805,41 @@ async function showReceipt(b){
   // peníze. Komu služba patří, se uvede zvlášť jako účastník.
   // Pozor: dosud se odběratel bral z currentUser, takže na dokladu stál ten, kdo si ho zrovna
   // otevřel -- klub prohlížející doklad studenta tam viděl sám sebe.
-  const _payerName=(b.paid_by_name||'').trim();
-  const _partName=((b.doklad && b.doklad.participant_name) || b.participant_name || '').trim();
-  // Odberatel se bere VYHRADNE z dokladu a rezervace. Driv to padalo na currentUser, takze
+  // VSE NIZE JE ZE SNIMKU (b.doklad). Zadne pole se nebere z predane rezervace, z transakce ani
+  // z dneska -- volajici predava zive radky a ty se po vystaveni meni (presun, prejmenovani, refund).
+  const _dkS=b.doklad||{};
+  const _payerName=String(_dkS.cust_name||'').trim();
+  const _partName=String(_dkS.participant_name||'').trim();
+  // Odberatel se bere VYHRADNE ze snimku. Driv to padalo na currentUser, takze
   // kdyz u rezervace chybelo jmeno, doklad ukazal toho, kdo se na nej kouka -- kouc videl
   // v dokladu studenta sam sebe. Na danovem dokladu je cizi jmeno horsi nez zadne.
-  const buyer=_payerName || ((b&&b.cust_name)?String(b.cust_name).trim():'') || _partName || '—';
+  const buyer=_payerName || _partName || '—';
   // Účastníka uvádět jen tehdy, když se od plátce liší.
-  const _participant=(_payerName && _partName && _payerName!==_partName) ? _partName : '';
+  const _participant=(_partName && _partName!==_payerName) ? _partName : '';
     // Termín ZAFIXOVANÝ při vystavení. Doklad se nesmí zpětně měnit -- dosud se kreslil z aktuální
   // rezervace, takže po přesunu ukázal jiný termín než v okamžiku platby. Změny řeší samostatné
   // potvrzení o změně termínu, do dokladu se nezasahuje.
-  const date=b.session_at_issue||b.class_date||b.training_date||(b.created_at||'').slice(0,10)||'';
-    const time=b.class_time||b.training_time||'';
-    const item=b.item_label||(b.gym_name?((b.discipline||b.class_date||b.class_time)?(EN?'Single class':'Jednorázová lekce'):((b.plan_discipline?(b.plan_discipline+' \u2013 '):'')+(b.class_name||(EN?'Membership':'Členství')))):(b.type==='online'?(EN?'Online coaching':'Online kočink'):(((Number(b.capacity)||1)>1)?((EN?'Group lesson 1:':'Skupinová lekce 1:')+(Number(b.capacity)||1)):(EN?'1:1 lesson':'Lekce 1:1'))));
-    const disc=b.discipline?((typeof disciplineLabel==='function')?disciplineLabel(b.discipline):b.discipline):''; const cur=b.currency||'CZK';
-    const _listAmt=Number(b.amount)||0;
-    let _paidAmt=null;
-    try{ if(b.payment_intent){ const { data:_tr }=await supaClient.from('transactions').select('gross_amount').eq('payment_intent',b.payment_intent).limit(1); if(_tr&&_tr[0]&&_tr[0].gross_amount!=null) _paidAmt=Number(_tr[0].gross_amount)/100; } }catch(e){}
-    const amt=(_paidAmt!=null)?_paidAmt:_listAmt;
-    const _discPct=(_paidAmt!=null && _listAmt>0 && _paidAmt<_listAmt-0.005)?Math.round((1-(_paidAmt/_listAmt))*100):0;
+  const _sessS=String(_dkS.session_at||'').trim();   // 'RRRR-MM-DD HH:MM', zapsane pri vystaveni
+    const date=_sessS.slice(0,10); const time=_sessS.slice(11).trim();
+    const item=String(_dkS.item_label||'').trim()||(EN?'Payment':'Platba');
+    const disc=''; const cur=_dkS.currency||'CZK';
+    // Castka je ta ze snimku. Driv ji prebijela ziva transakce a z rozdilu se dopocitavala sleva.
+    const amt=Number(_dkS.amount||0)/100; const _listAmt=amt; const _discPct=0;
     const sellerIco=rec&&rec.tax_id; const sellerDic=rec&&rec.vat_id; const isPayer=!!(rec&&rec.vat_payer); const rate=isPayer?(rec.vat_rate!=null?Number(rec.vat_rate):21):0; const base=isPayer?Math.round((amt/(1+rate/100))*100)/100:amt; const vat=isPayer?Math.round((amt-base)*100)/100:0;
-    const sym=_curSym(cur); const ref=b.payment_intent||'';
+    const sym=_curSym(cur); const ref=_dkS.payment_intent||'';
     // Rámeček se řídí stavem PŘI VZNIKU, ne tím, co je zapnuté teď. Bez toho by doklad vystavený
     // během testu po přepnutí na ostro vypadal jako pravý daňový doklad -- rámeček by z něj
     // zmizel. Razítko nese transactions.test_mode (trigger v test-mode-stamp.sql); když chybí,
     // rozhodne aktuální režim, což je stav před tou migrací.
-    let _wasTest=!!window._TEST_MODE;
-    try{
-      // Razítko nese sám záznam (trigger v test-mode-stamp-2.sql), takže se nic nedohledává.
-      // Dřív se u převodu hledala transakce podle času vzniku -- to sáhlo po jakékoli transakci
-      // v tom okně, ne nutně po té správné.
-      if(b && b.test_mode!=null) _wasTest=!!b.test_mode;
-      else if(ref){
-        const { data:_tm }=await supaClient.from('transactions').select('test_mode').eq('payment_intent',ref).limit(1);
-        if(_tm && _tm.length && _tm[0].test_mode!=null) _wasTest=!!_tm[0].test_mode;
-      }
-    }catch(e){}
+    // Testovaci ramecek podle razitka ve snimku (NOT NULL), nikdy podle dnesniho rezimu.
+    const _wasTest=!!_dkS.test_mode;
     const html=`<!doctype html><html><head><meta charset="utf-8"><title>${EN?'Payment confirmation':'Potvrzení o platbě'}</title>`
       +`<style>body{font-family:-apple-system,Arial,sans-serif;color:#1a1a1a;max-width:600px;margin:30px auto;padding:0 20px;line-height:1.5}h1{font-size:22px;margin:0 0 2px;letter-spacing:.04em}.muted{color:#777;font-size:13px}.row{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #eee;font-size:14px}.row span:first-child{color:#777}.tot{font-weight:700;font-size:16px;border-top:2px solid #1a1a1a;margin-top:8px;padding-top:10px;border-bottom:none}.note{font-size:11px;color:#999;margin-top:26px;line-height:1.6;border-top:1px solid #eee;padding-top:12px}.btn{margin-top:22px;padding:12px 20px;background:#1a1a1a;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}@media print{.btn{display:none}}</style></head><body>`
       +`<h1>${EN?'Payment confirmation':'Potvrzení o platbě'}</h1>`
       +(b.doklad_no?`<div class="muted">${esc(b.doklad_no)}${b.issued_at?(' \u00b7 '+(EN?'issued ':'vystaveno ')+new Date(b.issued_at).toLocaleDateString(EN?'en-GB':'cs-CZ')):''}</div>`:'')+(_wasTest?`<div style="margin-top:12px;padding:9px 12px;background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font-size:12px;font-weight:700;">\ud83e\uddea ${EN?'TEST MODE — not a formal tax document; no actual transaction took place':'TESTOVACÍ REŽIM — nejde o formální daňový doklad a k žádné skutečné transakci nedošlo'}</div>`:'')
       +`<div style="margin-top:22px">`
       +`<div class="row"><span>${EN?'Provider (seller)':'Poskytovatel (prodejce)'}</span><strong>${esc(seller)}</strong></div>`
-      +`<div class="row"><span>${EN?'Issue date':'Datum vystaven\u00ed'}</span><strong>${(function(){ try{ var _d=b.created_at||b.charged_at||b.paid_at; var dd=_d?new Date(_d):new Date(); return dd.toLocaleDateString(EN?'en-GB':'cs-CZ'); }catch(e){ return new Date().toLocaleDateString(EN?'en-GB':'cs-CZ'); } })()}</strong></div>`
+      +`<div class="row"><span>${EN?'Issue date':'Datum vystaven\u00ed'}</span><strong>${(function(){ try{ return _dkS.issued_at?new Date(_dkS.issued_at).toLocaleDateString(EN?'en-GB':'cs-CZ'):''; }catch(e){ return ''; } })()}</strong></div>`
       +(_discPct>0?`<div class="row"><span>${EN?'Price before discount':'Cena p\u0159ed slevou'}</span><span>${fmt(_listAmt)} ${sym}</span></div><div class="row"><span>${EN?'Referral discount':'Referral sleva'}</span><span>\u2212${_discPct} %</span></div>`:'')
       +(sellerIco?`<div class="row"><span>IČO</span><strong>${esc(sellerIco)}</strong></div>`:'')
       +(sellerDic?`<div class="row"><span>DIČ</span><strong>${esc(sellerDic)}</strong></div>`:'')
