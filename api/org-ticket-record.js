@@ -102,7 +102,7 @@ export default async function handler(req, res) {
 
     if (!organization_id || !(Number(amount) > 0)) return res.status(400).json({ error: 'bad input' });
 
-    const org = (await sb(`organizations?id=eq.${encodeURIComponent(organization_id)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_address,billing_line1,billing_line2,billing_city,billing_postal,owner_id,status,intro_free_until,kind,account_suspended`))[0];
+    const org = (await sb(`organizations?id=eq.${encodeURIComponent(organization_id)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,owner_id,status,intro_free_until,kind,account_suspended`))[0];
     if (!org) return res.status(404).json({ error: 'org not found' });
     if (org.status !== 'approved') return res.status(403).json({ error: 'org not approved' });
 
@@ -116,7 +116,7 @@ export default async function handler(req, res) {
     // orgRate() to řeší na jednom místě, ať se to nerozejde s tím, co appka ukazuje.
     let evType = null;
     if (event_id) {
-      const ev = (await sb(`events?id=eq.${encodeURIComponent(event_id)}&select=event_type,title`))[0];
+      const ev = (await sb(`events?id=eq.${encodeURIComponent(event_id)}&select=event_type:type,title`))[0];
       evType = (ev && ev.event_type) || null;
     }
     const rate = orgRate(org, evType);

@@ -208,7 +208,7 @@ async function handler(req, res) {
       // The refund now happens the moment a dispute is filed, so this sweep is only a safety net
       // for reports whose refund call failed at the time -- dispute_status still 'open' past the
       // deadline. Without the guard it would refund a second time.
-      const od = await sbGet(`bookings?dispute_handler=eq.coach&dispute_status=eq.open&dispute_deadline=lt.${encodeURIComponent(nowISO)}&select=id,coach_id,student_id,payment_intent,gym_id,amount`);
+      const od = await sbGet(`bookings?dispute_handler=eq.coach&dispute_status=eq.open&dispute_deadline=lt.${encodeURIComponent(nowISO)}&select=id,coach_id,student_id,payment_intent,amount`);
       for (const b of (od || [])) {
         let acct = null;
         if (b.gym_id) { const g = await sbGet(`gyms?id=eq.${b.gym_id}&select=stripe_account`); acct = g[0] && g[0].stripe_account; }

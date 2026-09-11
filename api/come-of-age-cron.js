@@ -88,7 +88,10 @@ module.exports = async (req, res) => {
     );
 
     if (!rows || !rows.length) {
-      return res.status(200).json({ ok: true, cutoff, promoted: 0 });
+      // Narozeniny se přejí i ve dny, kdy nikdo nedovršil osmnáct. Dřív tu byl návrat bez
+      // greetBirthdays(), takže přání odešlo jen v den něčích osmnáctin.
+      const greeted = await greetBirthdays();
+      return res.status(200).json({ ok: true, cutoff, promoted: 0, birthdays: greeted });
     }
 
     const ids = rows.map(r => r.id);

@@ -117,7 +117,7 @@ export default async function handler(req, res) {
     const oc = (await sbGet(`organization_clubs?guest_token=eq.${encodeURIComponent(token)}&select=id,organization_id,status,ext_name,ext_legal_name,ext_tax_id,ext_email,fee_amount,fee_currency,fee_id,fee_paid_at,valid_until,guest_email,guest_name&limit=1`))[0];
     if (!oc) return res.status(404).json({ error: 'not found' });
 
-    const org = (await sbGet(`organizations?id=eq.${encodeURIComponent(oc.organization_id)}&select=id,name,abbr,legal_name,tax_id,billing_address,payment_mode,stripe_account,receiver_id_type,receiver_id_value,receiver_name,pis_test&limit=1`))[0];
+    const org = (await sbGet(`organizations?id=eq.${encodeURIComponent(oc.organization_id)}&select=id,name,abbr,legal_name,tax_id,payment_mode,stripe_account,receiver_id_type,receiver_id_value,receiver_name,pis_test&limit=1`))[0];
     if (!org) return res.status(404).json({ error: 'not found' });
 
     // Částka: snímek na vztahu, jinak poplatek za období platné ke dnešku.

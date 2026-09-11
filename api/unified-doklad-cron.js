@@ -403,8 +403,8 @@ export default async function handler(req, res) {
       let buyer = null;
       try {
         const _sel = (kind === 'gym')
-          ? `gyms?id=eq.${entityId}&select=name,legal_name,billing_address,billing_line1,billing_line2,billing_city,billing_postal,tax_id,vat_id,billing_country,country&limit=1`
-          : `profiles?id=eq.${entityId}&select=name,${_bp}legal_name,${_bp}billing_address,${_bp}billing_line1,${_bp}billing_line2,${_bp}billing_city,${_bp}billing_postal,${_bp}tax_id,${_bp}vat_id,country,${_bp}billing_country&limit=1`;
+          ? `gyms?id=eq.${entityId}&select=name,legal_name,billing_line1,billing_line2,billing_city,billing_postal,tax_id,vat_id,billing_country,country&limit=1`
+          : `profiles?id=eq.${entityId}&select=name,${_bp}legal_name,${_bp}billing_line1,${_bp}billing_line2,${_bp}billing_city,${_bp}billing_postal,${_bp}tax_id,${_bp}vat_id,country,${_bp}billing_country&limit=1`;
         const _b = await sb(_sel);
         buyer = _b && _b[0];
         // Zbytek funkce pracuje s bezprefixovými názvy, ať se nemusí měnit každé použití.
@@ -495,8 +495,8 @@ export default async function handler(req, res) {
 
     if (preview) {
       let firstHtml = '';
-      for (const gid of gymIds) { const g = gymMap[gid]; if (!g) continue; for (const cur of Object.keys(gymB[gid])) { const _b = (await sb(`gyms?id=eq.${gid}&select=name,legal_name,billing_address,billing_line1,billing_line2,billing_city,billing_postal,tax_id,vat_id,billing_country,country&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'gym', period, cur, gymB[gid][cur], TEST); break; } if (firstHtml) break; }
-      if (!firstHtml) { for (const cid of Object.keys(coachB)) { for (const cur of Object.keys(coachB[cid])) { const _b = (await sb(`profiles?id=eq.${cid}&select=name,legal_name,billing_address,billing_line1,billing_line2,billing_city,billing_postal,tax_id,vat_id,country,billing_country&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'coach', period, cur, coachB[cid][cur], TEST); break; } if (firstHtml) break; } }
+      for (const gid of gymIds) { const g = gymMap[gid]; if (!g) continue; for (const cur of Object.keys(gymB[gid])) { const _b = (await sb(`gyms?id=eq.${gid}&select=name,legal_name,billing_line1,billing_line2,billing_city,billing_postal,tax_id,vat_id,billing_country,country&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'gym', period, cur, gymB[gid][cur], TEST); break; } if (firstHtml) break; }
+      if (!firstHtml) { for (const cid of Object.keys(coachB)) { for (const cur of Object.keys(coachB[cid])) { const _b = (await sb(`profiles?id=eq.${cid}&select=name,legal_name,billing_line1,billing_line2,billing_city,billing_postal,tax_id,vat_id,country,billing_country&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'coach', period, cur, coachB[cid][cur], TEST); break; } if (firstHtml) break; } }
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       return res.status(200).send(firstHtml || ('<p style="font-family:sans-serif;padding:24px;">\u017d\u00e1dn\u00e1 provize za ' + period + ' (zkus jin\u00fd ?month=RRRR-MM).</p>'));
     }

@@ -13,6 +13,16 @@ import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+// Sloupec billing_address je dropnuty. Jednoradkovy tvar se sklada z rozpadu
+// billing_line1/line2/city/postal -- stejne jako _billAddr v ostatnich souborech.
+function _billAddr(row) {
+  if (!row) return null;
+  const g = (k) => (row[k] == null ? '' : String(row[k]).trim());
+  const zip = g('billing_postal'), city = g('billing_city');
+  const parts = [g('billing_line1'), g('billing_line2'), ((zip ? zip + ' ' : '') + city).trim()].filter(Boolean);
+  return parts.length ? parts.join(', ') : null;
+}
 const supa = createClient(
   process.env.SUPABASE_URL || 'https://iqeovcvchtyfwtyzpqrh.supabase.co',
   process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -28,7 +38,7 @@ export default async function handler(req, res) {
     // 1) Gather all partner subscription IDs from Supabase.
     const { data: profs, error: dbErr } = await supa
       .from('profiles')
-      .select('id, name, email, partner_sub, legal_name, tax_id, vat_id, billing_address, invoice_email')
+      .select('id, name, email, partner_sub, legal_name, tax_id, vat_id, billing_line1, billing_line2, billing_city, billing_postal, invoice_email')
       .not('partner_sub', 'is', null);
     if (dbErr) return res.status(200).json({ ok: false, error: dbErr.message });
 
@@ -101,7 +111,7 @@ export default async function handler(req, res) {
         if (!inv.has_more) break;
         starting_after = inv.data[inv.data.length - 1].id;
       }
-      if (_curP) { Object.keys(_curP).forEach(c => { _curP[c].gross = Math.round(_curP[c].gross*100)/100; _curP[c].fee = Math.round(_curP[c].fee*100)/100; _curP[c].net = Math.round(_curP[c].net*100)/100; }); partnersRows.push({ id: p.id, name: p.name || '', legal_name: p.legal_name || '', tax_id: p.tax_id || '', vat_id: p.vat_id || '', billing_address: p.billing_address || '', invoice_email: p.invoice_email || p.email || '', partner_sub: p.partner_sub, byCur: _curP }); _curP = null; }
+      if (_curP) { Object.keys(_curP).forEach(c => { _curP[c].gross = Math.round(_curP[c].gross*100)/100; _curP[c].fee = Math.round(_curP[c].fee*100)/100; _curP[c].net = Math.round(_curP[c].net*100)/100; }); partnersRows.push({ id: p.id, name: p.name || '', legal_name: p.legal_name || '', tax_id: p.tax_id || '', vat_id: p.vat_id || '', billing_address: _billAddr(p) || '', invoice_email: p.invoice_email || p.email || '', partner_sub: p.partner_sub, byCur: _curP }); _curP = null; }
     }
 
     // round to 2 decimals

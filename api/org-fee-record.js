@@ -73,7 +73,7 @@ async function issueOrgDoklad(oc, org, amount, currency, method, testMode, trans
     let cust = { name: oc.ext_legal_name || oc.ext_name || null, email: oc.ext_email || oc.guest_email || null,
                  ico: oc.ext_tax_id || null, address: oc.ext_address || null };
     if (oc.gym_id) {
-      const g = (await sb(`gyms?id=eq.${encodeURIComponent(oc.gym_id)}&select=name,legal_name,tax_id,vat_id,billing_address,billing_line1,billing_line2,billing_city,billing_postal,invoice_email`))[0];
+      const g = (await sb(`gyms?id=eq.${encodeURIComponent(oc.gym_id)}&select=name,legal_name,tax_id,vat_id,billing_line1,billing_line2,billing_city,billing_postal,invoice_email`))[0];
       if (g) cust = { name: g.legal_name || g.name || null, email: g.invoice_email || null,
                       ico: g.tax_id || null, address: _billAddr(g) || null };
     }
@@ -112,7 +112,7 @@ export default async function handler(req, res) {
     const dup = await sb(`transactions?org_fee_id=eq.${encodeURIComponent(oc_id)}&select=id&limit=1`);
     if (dup && dup.length) return res.status(200).json({ ok: true, already: true });
 
-    const org = (await sb(`organizations?id=eq.${encodeURIComponent(oc.organization_id)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_address,billing_line1,billing_line2,billing_city,billing_postal,owner_id`))[0];
+    const org = (await sb(`organizations?id=eq.${encodeURIComponent(oc.organization_id)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,owner_id`))[0];
     if (!org) return res.status(404).json({ error: 'org not found' });
 
     // Popis se opíše z období, aby na dokladu stálo, ZA CO klub platil.

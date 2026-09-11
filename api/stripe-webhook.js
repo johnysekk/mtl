@@ -742,7 +742,7 @@ export default async function handler(req, res) {
             } catch (e) { console.error('cohort student notif', e.message); }
             if (mem && mem.email && coh && !mem.student_id) {  // app users get the doklad in-app, no e-mail
               let gymName = ''; let gymRec = null;
-              try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(coh.gym_id)}&select=name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_address`); gymRec = (g && g[0]) || null; gymName = (gymRec && gymRec.name) || ''; } catch (e) {}
+              try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(coh.gym_id)}&select=name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal`); gymRec = (g && g[0]) || null; gymName = (gymRec && gymRec.name) || ''; } catch (e) {}
               let ownerEmail = '';
               try { if (coh.owner_id) { const op = await sbGet(`profiles?id=eq.${encodeURIComponent(coh.owner_id)}&select=email`); ownerEmail = (op && op[0] && op[0].email) || ''; } } catch (e) {}
               const cur2 = (coh.currency || cur || 'CZK');
@@ -937,9 +937,9 @@ async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, custo
     if (!transactionId && !paymentIntent) return null;
     let sup = null;
     if (gymId) {
-      sup = (await sbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,owner_id`))[0] || null;
+      sup = (await sbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,owner_id`))[0] || null;
     } else if (coachId) {
-      sup = (await sbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_address,owner_id`))[0] || null;
+      sup = (await sbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal`))[0] || null;
     }
     if (!sup) return null;
     const ico = String(sup.tax_id || '').replace(/\s/g, '');
