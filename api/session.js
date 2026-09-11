@@ -1,4 +1,5 @@
 import Stripe from 'stripe';
+import { issueStripeDokladForPi } from './stripe-webhook.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -119,9 +120,18 @@ async function recordTransaction(acct, pi, fields) {
       if (pr && pr.ok === false) return { status: 'update-failed', http: pr.status, dberror: pr.error, gross, stripeFee, mtlFee, net };
       return { status: 'updated', gross, stripeFee, mtlFee, net };
     }
-    const ir = await sbPost('transactions', { payment_intent: pi, ...row, created_at: new Date().toISOString() });
+    // Stejna pole, podle kterych webhook urcuje kolej, provizi a odberatele dokladu. Bez nich
+    // transakce z teto zalohy nemela payment_method ani commission_status a do rozpadu provize
+    // se nedostala; doklad by znel na ucastnika i tam, kde platil zastupce.
+    const ir = await sbPost('transactions', { payment_intent: pi, ...row,
+      payment_method: 'stripe', commission_status: 'collected', commission_month: new Date().toISOString().slice(0, 7),
+      paid_by: fields.paid_by || null, paid_by_name: fields.paid_by_name || null,
+      created_at: new Date().toISOString() });
     if (ir && ir.ok === false) return { status: 'insert-failed', http: ir.status, dberror: ir.error, dburl: ir.url, gross, stripeFee, mtlFee, net };
-    return { status: 'recorded', gross, stripeFee, mtlFee, net };
+    // Transakci zalozila tahle cesta, doklad tedy vystavuje ona. Webhook po ni najde transakci
+    // hotovou a doklad nevystavi -- driv proto nevznikl vubec.
+    const dokladNo = await issueStripeDokladForPi(pi);
+    return { status: 'recorded', gross, stripeFee, mtlFee, net, dokladNo };
   } catch (e) { console.error('recordTransaction', e.message); return { status: 'error:' + e.message }; }
 }
 
@@ -221,6 +231,7 @@ export default async function handler(req, res) {
       else if (m.mtl_payment_type === 'merch') { txType = 'merch'; f.member_id = m.student_id; f.gym_id = m.gym_id; f.plan = m.merch_name || m.mtl_plan || 'Merch'; }
       else if (m.mtl_payment_type === 'event_ticket') { txType = 'event_ticket'; f.member_id = m.student_id || m.buyer_id; f.gym_id = m.gym_id; f.coach_id = m.payout_coach_id || null; f.plan = m.mtl_event || 'Event'; }
       else if (m.booking_type === 'inperson' || m.booking_type === 'online') { txType = (m.booking_type === 'online') ? 'coach_online' : 'coach_inperson'; f.member_id = m.student_id; f.coach_id = m.coach_profile_id; f.plan = m.online_fmt || 'Lekce 1:1'; f.currency = m.booking_currency || session.currency; f.discipline = m.discipline || null; }
+      f.paid_by = m.paid_by || null; f.paid_by_name = m.paid_by_name || null;
       if (!txType) _tx = { recorded: false, reason: 'no mtl_payment_type / booking_type in the session metadata — redeploy pay.js (LX/LY) and make a NEW payment; old sessions have no metadata' };
       else if (!payId) _tx = { recorded: false, reason: 'could not resolve a payment id from the session (subscription invoice may lack payment_intent/charge on this API version)', txType };
       else if (!gymAccount) _tx = { recorded: false, reason: 'no gymAccount/acct passed to /api/session', txType, payId };

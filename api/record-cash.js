@@ -297,6 +297,12 @@ export default async function handler(req, res) {
     // Kdyz klubove plneni vyplaci kouc ze svého klubového účtu, doklad zní na jeho payout_
     // identitu. Deklarace nad vetvemi, protoze doklad se vystavuje az za nimi.
     let _dokladPayoutCoach = null;
+    // Jmeno platce, kdyz volajici posle jen jeho id (potvrzeni QR soukromky koucem). Bez nej by
+    // doklad u ditete placeneho zastupcem znel na ucastnika, ktery neplatil.
+    let _payerName = paid_by_name || null;
+    if (!_payerName && paid_by) {
+      try { const _pp = await _wsbGet(`profiles?id=eq.${encodeURIComponent(paid_by)}&select=name`); _payerName = (_pp && _pp[0] && _pp[0].name) || null; } catch (e) {}
+    }
 
     if (provider === 'gym') {
       // gym pays out -> gym owner authorizes, rate from owner profile
@@ -333,7 +339,7 @@ export default async function handler(req, res) {
         // Kdo doopravdy platil, když to není účastník (zástupce za mladistvého). Doklad musí
         // znít na plátce, ale docházka patří účastníkovi -- proto obojí zvlášť.
         gym_id, coach_id: coach_id || null, member_id: member_id || null,
-        paid_by: paid_by || null, paid_by_name: paid_by_name || null,
+        paid_by: paid_by || null, paid_by_name: _payerName,
         // Termín zafixovaný při vystavení -- doklad se z něj kreslí a pozdější přesun ho nemění.
         session_at_issue: session_at_issue || null,
         paid_to: 'gym', payee_account: _gymPayee,
@@ -380,7 +386,7 @@ export default async function handler(req, res) {
       const _baseRate  = (_acq != null && !_cc) ? rate : null;
       row = {
         gym_id: null, coach_id, member_id: member_id || null,
-        paid_by: paid_by || null, paid_by_name: paid_by_name || null,
+        paid_by: paid_by || null, paid_by_name: _payerName,
         session_at_issue: session_at_issue || null,
         paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null),
         payee_id: coach.id, payee_kind: 'profile',

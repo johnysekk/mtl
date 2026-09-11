@@ -460,7 +460,7 @@ async function recordTransaction(acct, pi, fields) {
       } catch (e) { console.error('recordTransaction fee', e.message); }
     }
     const _payee = await resolvePayee(acct);
-    await sbPost('transactions', {
+    const _txIns = await sbPost('transactions', {
       payment_intent: pi, charge_id: chargeId, payee_account: acct || null, type: fields.type,
       payee_id: _payee.id, payee_kind: _payee.kind,
       member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null,
@@ -483,26 +483,13 @@ async function recordTransaction(acct, pi, fields) {
       payment_method: 'stripe', commission_status: 'collected', commission_month: new Date().toISOString().slice(0,7),
       status: 'paid', created_at: new Date().toISOString(),
     });
+    // INSERT neprosel = transakci mezitim zapsal /api/session a doklad vystavuje on. Druhe cislo
+    // v rade by zustalo jako dira (vlozeni dokladu pak spadne na unikatnim transaction_id).
+    if (_txIns && _txIns.ok === false) return;
     try { if (fields.member_id && gross != null) await ecoPurchase(fields.member_id, gross / 100, currency, pi); } catch (e) {}
-    // Doklad jako SNIMEK hned po zapsani platby -- stejne jako u hotovosti. Bez nej se doklad
-    // sklada pri kazdem zobrazeni z zivych dat a zmena nazvu nebo vstup do DPH prepise i roky
-    // stare doklady. Selhani nesmi shodit zapis platby.
-    try {
-      const _txId = (((await sbGet(`transactions?payment_intent=eq.${encodeURIComponent(pi)}&select=id&limit=1`)) || [])[0] || {}).id || null;
-      let _cust = null;
-      if (fields.member_id) _cust = ((await sbGet(`profiles?id=eq.${encodeURIComponent(fields.member_id)}&select=name,email`)) || [])[0] || null;
-      await issueDoklad({
-        transactionId: _txId, paymentIntent: pi,
-        gymId: fields.gym_id || null, coachId: fields.gym_id ? null : (fields.coach_id || null),
-        // ODBERATEL JE PLATCE. Driv to bylo obracene -- jako odberatel se dostal ucastnik
-        // a zastupce az druhy, takze doklad znel na dite, ktere neplatilo.
-        customerName: fields.paid_by_name || (_cust && _cust.name) || null,
-        customerEmail: (_cust && _cust.email) || null,
-        participantName: (_cust && _cust.name) || null,
-        itemLabel: fields.plan || fields.type, amount: gross,
-        currency: currency, paymentMethod: 'stripe', testMode: false,
-      });
-    } catch (e) { console.error('issueDoklad', e && e.message); }
+    // Doklad jako SNIMEK hned po zapsani platby -- stejne jako u hotovosti. Vystavuje ho ten, komu
+    // se povedl INSERT transakce (unikatni payment_intent pusti jen jednoho): webhook, nebo /api/session.
+    await issueStripeDokladForPi(pi);
   } catch (e) { console.error('recordTransaction', e.message); }
 }
 
@@ -612,7 +599,7 @@ export default async function handler(req, res) {
       if (m.booking_type === 'inperson' || m.booking_type === 'online') {
         const pi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id);
         // IDEMPOTENCE: existuje už booking pro tento payment_intent?
-        const existing = pi ? await sbGet(`bookings?payment_intent=eq.${encodeURIComponent(pi)}&select=id`) : [];
+        const existing = pi ? await sbGet(`bookings?payment_intent=eq.${encodeURIComponent(pi)}&select=id,coach_id,student_id`) : [];
         if (!existing.length) {
           const amount = parseInt(m.base_amount || '0', 10);
           const currency = m.booking_currency || 'CZK';
@@ -655,6 +642,13 @@ export default async function handler(req, res) {
             await recordTransaction(event.account, pi, { type: 'coach_online',  member_id: m.student_id, coach_id: m.coach_profile_id, plan: m.online_fmt || 'Online', gross: amount, currency, paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
             await notifyPaidForMinor(m, m.online_fmt || 'Online lekce', amount, currency);
           }
+        } else {
+          // Rezervaci uz zalozila appka po navratu ze Stripe. Driv tu webhook skoncil a transakci
+          // ani doklad nezapsal -- kdyz je nezapsal ani /api/session, nevznikly vubec.
+          // recordTransaction je idempotentni: existujici transakci nezmeni.
+          const _b0 = existing[0] || {};
+          const _onl = (m.booking_type === 'online');
+          await recordTransaction(event.account, pi, { type: _onl ? 'coach_online' : 'coach_inperson', member_id: m.student_id || _b0.student_id || null, coach_id: _b0.coach_id || m.coach_profile_id || null, plan: _onl ? (m.online_fmt || 'Online') : 'Lekce 1:1', gross: parseInt(m.base_amount || '0', 10), currency: m.booking_currency || 'CZK', paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
         }
       } else if (m.mtl_payment_type === 'drop_in' || m.mtl_payment_type === 'membership') {
         // GYM skupinová lekce (direct charge na účtu gymu) → 0,5 % ambassadorovi disciplíny
@@ -932,6 +926,31 @@ export default async function handler(req, res) {
 // takže pozdější změna názvu nebo vstup do DPH staré doklady nepřepíše.
 // Číslo přiděluje doklad_next(series_key) atomicky; klíč je IČO poskytovatele V TOMTO OKAMŽIKU.
 // Selhání nesmí shodit zápis platby -- peníze jsou důležitější než papír, doklad se dá doplnit.
+// Doklad ke Stripe platbe podle zapsane transakce. Vola ho ten, kdo transakci zalozil -- webhook
+// i /api/session (zaloha, kdyz webhook nedorazi). Data bere z radku transakce, takze doklad je
+// stejny bez ohledu na to, ktera cesta vyhrala. Kdyz doklad k platbe uz je, nevystavi druhy.
+export async function issueStripeDokladForPi(pi) {
+  try {
+    if (!pi) return null;
+    const tx = ((await sbGet(`transactions?payment_intent=eq.${encodeURIComponent(pi)}&select=id,gross_amount,currency,member_id,coach_id,gym_id,plan,type,paid_by_name,test_mode&limit=1`)) || [])[0];
+    if (!tx || tx.gross_amount == null) return null;
+    const ex = (await sbGet(`doklady?or=(payment_intent.eq.${encodeURIComponent(pi)},transaction_id.eq.${tx.id})&select=doklad_no&limit=1`)) || [];
+    if (ex.length) return String(ex[0].doklad_no);
+    let _cust = null;
+    if (tx.member_id) _cust = ((await sbGet(`profiles?id=eq.${encodeURIComponent(tx.member_id)}&select=name,email`)) || [])[0] || null;
+    return await issueDoklad({
+      transactionId: tx.id, paymentIntent: pi,
+      gymId: tx.gym_id || null, coachId: tx.gym_id ? null : (tx.coach_id || null),
+      // ODBERATEL JE PLATCE, ucastnik je ten, komu sluzba patri (uvede se jen kdyz se lisi).
+      customerName: tx.paid_by_name || (_cust && _cust.name) || null,
+      customerEmail: (_cust && _cust.email) || null,
+      participantName: (_cust && _cust.name) || null,
+      itemLabel: tx.plan || tx.type, amount: tx.gross_amount,
+      currency: tx.currency, paymentMethod: 'stripe', testMode: !!tx.test_mode,
+    });
+  } catch (e) { console.error('issueStripeDokladForPi', e && e.message); return null; }
+}
+
 async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, customerName, customerEmail, participantName, itemLabel, amount, currency, paymentMethod, testMode }) {
   try {
     if (!transactionId && !paymentIntent) return null;
