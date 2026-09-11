@@ -282,7 +282,7 @@ export default async function handler(req, res) {
   if (!SB || !KEY) return res.status(500).json({ error: 'env not set' });
   try {
     const b = (typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body) || {};
-    const { token, gym_id, coach_id, member_id, paid_by, paid_by_name, participant_name, session_at_issue, gross_amount, currency, type, payment_method, cash_payer_name, acq_source, credit, source_booking_id, cohort_id, income_class, months, dropin_plan_id, proof_checked } = b;
+    const { token, gym_id, coach_id, member_id, paid_by, paid_by_name, participant_name, item_name, session_at_issue, gross_amount, currency, type, payment_method, cash_payer_name, acq_source, credit, source_booking_id, cohort_id, income_class, months, dropin_plan_id, proof_checked } = b;
     // trusted internal call (PIS server-side confirm) — reuses ALL the commission logic, no user token
     const _trusted = !!(b.internal && b.intSecret && process.env.PIS_INTERNAL_SECRET && b.intSecret === process.env.PIS_INTERNAL_SECRET);
     const provider = b.provider === 'coach' ? 'coach' : 'gym';
@@ -468,21 +468,21 @@ export default async function handler(req, res) {
       const _custName = row.paid_by_name || row.cash_payer_name || _memberName || _partName || null;
       // Termin lekce ZAFIXOVANY TED: z rezervace, ke ktere platba patri (soukromka nebo vstup).
       // Termin lekce a nazev polozky ZAFIXOVANE TED, z rezervace, ke ktere platba patri.
-      let _sessAt = session_at_issue || null, _itemName = null;
+      let _sessAt = session_at_issue || null, _itemName = (item_name && String(item_name).trim()) || null;
       const _isUuid = (v) => /^[0-9a-f-]{36}$/i.test(String(v || ''));
       if (source_booking_id) {
         try {
           if (['coach_1to1', 'coach_inperson', 'coach_online'].includes(type) && /^\d+$/.test(String(source_booking_id))) {
             const _bk = ((await _wsbGet(`bookings?id=eq.${encodeURIComponent(source_booking_id)}&select=training_date,training_time,type,online_format`)) || [])[0];
             if (_bk && _bk.type !== 'online' && _bk.training_date && !_sessAt) _sessAt = _bk.training_date + (_bk.training_time ? ' ' + _bk.training_time : '');
-            if (_bk && _bk.type === 'online') _itemName = _bk.online_format || null;
+            if (_bk && _bk.type === 'online') _itemName = _bk.online_format || _itemName;
           } else if (type === 'drop_in' && _isUuid(source_booking_id)) {
             const _gb = ((await _wsbGet(`gym_bookings?id=eq.${encodeURIComponent(source_booking_id)}&select=class_date,class_time,class_name`)) || [])[0];
             if (_gb && _gb.class_date && !_sessAt) _sessAt = String(_gb.class_date).slice(0, 10) + (_gb.class_time ? ' ' + _gb.class_time : '');
-            if (_gb) _itemName = _gb.class_name || null;
+            if (_gb) _itemName = _gb.class_name || _itemName;
           } else if (type === 'membership' && _isUuid(source_booking_id)) {
             const _gm = ((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(source_booking_id)}&select=plan_name`)) || [])[0];
-            if (_gm) _itemName = _gm.plan_name || null;
+            if (_gm) _itemName = _gm.plan_name || _itemName;
           } else if (type === 'merch' && _isUuid(source_booking_id)) {
             const _mo = ((await _wsbGet(`merch_orders?id=eq.${encodeURIComponent(source_booking_id)}&select=item_name,variant`)) || [])[0];
             if (_mo) _itemName = (_mo.item_name || '') + (_mo.variant ? ' (' + _mo.variant + ')' : '');
