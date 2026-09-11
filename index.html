@@ -20816,77 +20816,68 @@ async function openCommissionDoklady(gymId){
 }
 
 async function showCommissionDoklad(id){
+  // DOKLAD O PROVIZI SE KRESLI JEN ZE SNIMKU (commission_doklady), se stejnym obsahem jako PDF
+  // v e-mailu: cislo, datum, obdobi, dodavatel s kontaktem, odberatel se vsim, co je ve snimku,
+  // rozpis podle formy platby a sazby, DPH, celkem a jak byla provize stržena.
   const EN = LANG === 'en';
   let dk = (window.__comDok && window.__comDok[id]) || null;
   if(!dk){ try{ const { data } = await supaClient.from('commission_doklady').select('*').eq('id', id).single(); dk = data; }catch(e){} }
-  if(!dk){ toast('\u26a0\ufe0f'); return; }
-  // DODAVATEL (MTL) ZE SNIMKU, stejne jako odberatel. Driv se bral z dnesnich platform_settings,
-  // takze by stary doklad ukazal nove sidlo nebo DPH, jakmile se MTL zmeni. Bez snimku se nekresli (viz nize).
-  const ME = { name:dk.sup_name, ico:dk.sup_ico, dic:dk.sup_dic, sidlo:dk.sup_address, vat_payer:!!dk.sup_vat_payer, vat_rate:dk.sup_vat_rate };
-  // ODBERATEL ZE SNIMKU. Doklad je zaznam o tom, co bylo vystaveno -- kdyz klub pozdeji
-  // zmeni nazev nebo vstoupi do DPH, uz vystaveny doklad se menit nesmi.
-  // SNIMEK, NEBO NIC. Doklad je zaznam o tom, co bylo vystaveno -- skladat ho z dnesnich
-  // dat znamena vyrobit dokument, ktery se v case meni. To uz neni doklad.
-  let gym = null;
-  if((dk.cust_name || dk.cust_ico) && (dk.sup_name || dk.sup_ico)){
-    gym = { name: dk.cust_name, legal_name: dk.cust_name, tax_id: dk.cust_ico,
-      vat_id: dk.cust_dic, billing_address: dk.cust_address,
-      billing_country: dk.cust_country, vat_payer: !!dk.cust_vat_payer };
+  if(!dk){ toast(EN?'\u26a0\ufe0f Receipt not found':'\u26a0\ufe0f Doklad se nepoda\u0159ilo naj\u00edt'); return; }
+  const esc=(typeof escapeHtml==='function')?escapeHtml:(x=>String(x==null?'':x));
+  const cur=String(dk.currency||'CZK').toUpperCase();
+  const money=function(minor){ return (Number(minor||0)/100).toLocaleString(EN?'en-GB':'cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2})+' '+cur; };
+  const dt=function(v){ try{ return new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ'); }catch(e){ return ''; } };
+  const per=(function(p){ p=String(p||''); var d=/^(\d{4})-(\d{2})-(\d{2})$/.exec(p); if(d) return (+d[3])+'. '+(+d[2])+'. '+d[1]; var m=/^(\d{4})-(\d{2})$/.exec(p); if(m){ var MO=EN?['January','February','March','April','May','June','July','August','September','October','November','December']:['leden','\u00fanor','b\u0159ezen','duben','kv\u011bten','\u010derven','\u010dervenec','srpen','z\u00e1\u0159\u00ed','\u0159\u00edjen','listopad','prosinec']; return MO[+m[2]-1]+' '+m[1]; } return p; })(dk.period_month);
+  const kindLbl=dk.organization_id?(EN?'organisation':'organizace'):(dk.gym_id?(EN?'club':'klub'):(dk.billing_identity==='payout'?(EN?'coach \u00b7 club mode':'kou\u010d \u00b7 re\u017eim klub'):(EN?'coach':'kou\u010d')));
+  const hasSnap=!!((dk.cust_name||dk.cust_ico) && (dk.sup_name||dk.sup_ico));
+  let body;
+  if(!hasSnap){
+    body='<h1>'+(EN?'This receipt has no snapshot':'Tenhle doklad nem\u00e1 sn\u00edmek')+'</h1><p style="font-size:13px;color:#555;">'+(EN?'We will not rebuild it from today\u2019s data \u2014 that would not be the document that was issued. The amounts are in Accounting.':'Nebudeme ho skl\u00e1dat z dne\u0161n\u00edch dat \u2014 nebyl by to doklad, kter\u00fd byl vystaven. \u010c\u00e1stky najde\u0161 v \u00fa\u010detnictv\u00ed.')+'</p>';
   } else {
-    // Bez snimku doklad NEVYSTAVUJEME. Radeji rekneme, co se stalo.
-    try{
-      const _bx=document.getElementById('comDokBody')||document.getElementById('cdBody');
-      if(_bx) _bx.innerHTML='<div style="padding:22px;font-size:13.5px;line-height:1.6;color:var(--mid);">'
-        +'<div style="font-size:15px;font-weight:800;color:var(--dark);margin-bottom:8px;">'
-        +(EN?'This document has no snapshot':'Tenhle doklad nem\u00e1 sn\u00edmek')+'</div>'
-        +(EN?'It was issued before snapshots were stored. We will not rebuild it from today\u2019s data \u2014 that would not be the document that was issued. The amounts are in Accounting.'
-            :'Byl vystaven p\u0159ed zaveden\u00edm sn\u00edmk\u016f. Nebudeme ho skl\u00e1dat z dne\u0161n\u00edch dat \u2014 nebyl by to doklad, kter\u00fd byl vystaven. \u010c\u00e1stky najde\u0161 v \u00fa\u010detnictv\u00ed.')
-        +'</div>';
-    }catch(e){}
-    try{ toast(EN?'\u26a0\ufe0f No snapshot for this document':'\u26a0\ufe0f Tenhle doklad nem\u00e1 sn\u00edmek'); }catch(e){}
-    return;
+    const sup=[dk.sup_name, dk.sup_address, dk.sup_ico?('I\u010cO: '+dk.sup_ico):'', dk.sup_dic?('DI\u010c: '+dk.sup_dic):'', dk.sup_phone?((EN?'Phone: ':'Tel.: ')+dk.sup_phone):'', dk.sup_email?('E-mail: '+dk.sup_email):''].filter(Boolean);
+    const tradeLbl=dk.organization_id?(EN?'Organisation in MTL: ':'Organizace v MTL: '):(dk.gym_id?(EN?'Club in MTL: ':'Klub v MTL: '):(EN?'Coach in MTL: ':'Kou\u010d v MTL: '));
+    const cust=[dk.cust_name||'\u2014', dk.cust_trade_name?(tradeLbl+dk.cust_trade_name):'', dk.cust_address, dk.cust_ico?('I\u010cO: '+dk.cust_ico):'', dk.cust_dic?('DI\u010c: '+dk.cust_dic):'', (dk.cust_country && String(dk.cust_country).toUpperCase()!=='CZ')?((EN?'Country: ':'St\u00e1t: ')+dk.cust_country):'', dk.cust_phone?((EN?'Phone: ':'Tel.: ')+dk.cust_phone):'', dk.cust_email?('E-mail: '+dk.cust_email):''].filter(Boolean);
+    const col=function(lbl, lines){ return '<div class="col"><div class="lbl">'+lbl+'</div>'+lines.map(function(l,ix){ return ix===0?('<b>'+esc(l)+'</b>'):esc(l); }).join('<br>')+'</div>'; };
+    const ML=function(m){ return m==='stripe'?(EN?'Stripe (card)':'Stripe (karta)'):(m==='pis'?(EN?'Bank payment':'Platba z banky'):(m==='qr'?(EN?'QR payment':'QR platba'):(m==='cash'?(EN?'Cash':'Hotovost'):(m||'\u2014')))); };
+    const PC=function(r){ return r!=null?((Math.round(r*1000)/10).toString().replace('.',EN?'.':',')+' %'):'\u2014'; };
+    const items=dk.line_items||[];
+    const rows=items.map(function(it){ return '<tr><td>'+esc(ML(it.method))+'</td><td class="c">'+PC(it.rate)+'</td><td class="c">'+(it.count||0)+'</td><td class="r">'+money(it.gross)+'</td><td class="r">'+money(it.fee)+'</td></tr>'; }).join('');
+    let vat;
+    if(dk.sup_vat_payer){ const rate=dk.sup_vat_rate||21; const base=Number(dk.amount||0)/(1+rate/100); vat='<tr><td>'+(EN?'Tax base':'Z\u00e1klad dan\u011b')+'</td><td class="r">'+money(base)+'</td></tr><tr><td>DPH '+rate+' %</td><td class="r">'+money(Number(dk.amount||0)-base)+'</td></tr>'; }
+    else vat='<tr><td colspan="2" style="font-size:11px;color:#666;border:none;">'+(EN?'Supplier is not a VAT payer.':'Dodavatel nen\u00ed pl\u00e1tcem DPH.')+'</td></tr>';
+    const cnt=items.reduce(function(a,i){ return a+(i.count||0); },0), vol=items.reduce(function(a,i){ return a+(i.gross||0); },0);
+    const how=[];
+    if(Number(dk.bank_amount)>0) how.push(EN?('Commission on cash, QR and bank payments ('+money(dk.bank_amount)+') was charged to the card on file on '+dt(dk.charged_at)+'.'):('Provize z hotovosti, QR a plateb z banky ('+money(dk.bank_amount)+') byla str\u017eena z ulo\u017een\u00e9 platebn\u00ed karty dne '+dt(dk.charged_at)+'.'));
+    if(Number(dk.stripe_amount)>0) how.push(EN?('Commission on card payments ('+money(dk.stripe_amount)+') was taken directly with each payment.'):('Provize z plateb kartou ('+money(dk.stripe_amount)+') byla str\u017eena p\u0159\u00edmo p\u0159i ka\u017ed\u00e9 platb\u011b.'));
+    body='<h1>'+(EN?'MTL commission receipt':'Doklad o provizi MTL')+'</h1>'
+      +(dk.test_mode?'<div class="test">\u{1F9EA} '+(EN?'TEST MODE \u2014 not a formal tax document; no actual transaction took place':'TESTOVAC\u00cd RE\u017dIM \u2014 nejde o form\u00e1ln\u00ed da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo')+'</div>':'')
+      +'<div class="meta">'+esc(_dokladNo(dk.id))+' \u00b7 '+(EN?'Issued ':'Vystaveno ')+esc(dt(dk.charged_at))+' \u00b7 '+(EN?'Period ':'Obdob\u00ed ')+esc(per)+' \u00b7 '+esc(kindLbl)+'</div>'
+      +'<div class="cols">'+col(EN?'Supplier':'Dodavatel', sup)+col(EN?'Customer':'Odb\u011bratel', cust)+'</div>'
+      +'<table class="it"><thead><tr><th>'+(EN?'Payment form':'Forma platby')+'</th><th class="c">'+(EN?'Rate':'Sazba')+'</th><th class="c">'+(EN?'Payments':'Plateb')+'</th><th class="r">'+(EN?'Volume':'Objem plateb')+'</th><th class="r">'+(EN?'Commission':'Provize')+'</th></tr></thead><tbody>'+rows+'</tbody></table>'
+      +'<table class="sum">'+vat+'<tr class="tot"><td>'+(EN?'Total':'Celkem')+'</td><td class="r">'+money(dk.amount)+'</td></tr></table>'
+      +'<div class="note2">'+(EN?'Payments intermediated: ':'Zprost\u0159edkovan\u00fdch plateb: ')+'<b>'+cnt+'</b> \u00b7 '+(EN?'volume ':'objem ')+'<b>'+money(vol)+'</b></div>'
+      +'<p class="note">'+esc(how.join(' '))+' '+(EN?'This is not a request for payment.':'Nejde o v\u00fdzvu k platb\u011b.')+'</p>';
   }
-  // Jen kdyz snimek NENI. Driv tato vetev prepsala i snimek, takze u kouce se doklad
-  // kreslil z dnesniho profilu bez ohledu na to, co bylo vystaveno.
-  // Kouc vs klub se pozna ze snimku: doklad kouce nema ICO klubu. Ziva data uz se
-  // nikde nectou, takze tady neni co dohledavat.
-  if(gym && !dk.gym_id && dk.coach_id) gym._isCoach = true;
-  const w = window.open('', '_blank'); if(!w){ toast(EN?'Allow pop-ups to view the doklad':'Povol vyskakovac\u00ed okna'); return; }
-  const amt = (dk.amount/100); const cur = (dk.currency||'czk').toUpperCase();
-  const f = function(v){ return v.toLocaleString(EN?'en-GB':'cs-CZ',{minimumFractionDigits:2,maximumFractionDigits:2})+' '+cur; };
-  const charged = new Date(dk.charged_at).toLocaleDateString(EN?'en-GB':'cs-CZ');
-  const supLines = [ '<b>'+escapeHtml(ME.name)+'</b>', ME.ico?('I\u010cO: '+escapeHtml(ME.ico)):'I\u010cO: \u2014', ME.sidlo?escapeHtml(ME.sidlo):'\u2014', ME.dic?('DI\u010c (VAT ID): '+escapeHtml(ME.dic)):'' ].filter(Boolean).join('<br>');
-  const buyName = gym.legal_name || gym.name || '\u2014';
-  const buyLines = [ '<b>'+escapeHtml(buyName)+'</b>',
-    (gym.name && gym.name!==buyName)
-      ? (((dk.kind==='coach'||gym._isCoach) ? (EN?'Coach in MTL: ':'Kouč v MTL: ') : (EN?'Club in MTL: ':'Klub v MTL: '))+escapeHtml(gym.name))
-      : '', gym.tax_id?('I\u010cO: '+escapeHtml(gym.tax_id)):'', _billAddr(gym)?escapeHtml(_billAddr(gym)):'', gym.vat_id?('DI\u010c: '+escapeHtml(gym.vat_id)):'' ].filter(Boolean).join('<br>');
-  let vatBlock;
-  if(ME.vat_payer){ const rate=ME.vat_rate||21; const base=amt/(1+rate/100); const vat=amt-base; vatBlock = '<tr><td>'+(EN?'Tax base':'Z\u00e1klad dan\u011b')+'</td><td style="text-align:right;">'+f(base)+'</td></tr><tr><td>DPH '+rate+'%</td><td style="text-align:right;">'+f(vat)+'</td></tr>'; }
-  else { vatBlock = '<tr><td colspan="2" style="font-size:11px;color:#666;padding-top:6px;">'+(EN?'Supplier is not a VAT payer.':'Dodavatel nen\u00ed pl\u00e1tcem DPH.')+'</td></tr>'; }
-  var _liRows='';
-  if(dk.line_items && dk.line_items.length){ var _ml=function(m){ return m==='stripe'?'Stripe':(m==='pis'?(EN?'Bank payment':'Platba z banky'):(m==='qr'?'QR':(m==='cash'?(EN?'Cash':'Hotovost'):(m||'\u2014')))); };
-    dk.line_items.forEach(function(li){ var _r=(li.rate!=null?((Math.round(li.rate*1000)/10).toString().replace('.',(EN?'.':',')))+' %':'\u2014'); _liRows+='<tr><td>'+(EN?'Commission ':'Provize ')+_ml(li.method)+' \u00b7 '+_r+' \u00b7 '+li.count+'\u00d7</td><td style="text-align:right;">'+f((li.fee||0)/100)+'</td></tr>'; }); }
-  else { _liRows='<tr><td>'+(EN?'Intermediation commission for ':'Provize za zprost\u0159edkov\u00e1n\u00ed plateb za ')+(dk.period_month||'')+'</td><td style="text-align:right;">'+f(amt)+'</td></tr>'; }
-  const html = '<html><head><meta charset="utf-8"><title>'+_dokladNo(dk.id)+'</title><style>body{font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;max-width:640px;margin:24px auto;padding:0 18px;line-height:1.5;}h1{font-size:19px;margin:0 0 2px;}table{width:100%;border-collapse:collapse;margin-top:14px;}td{padding:7px 0;border-bottom:1px solid #eee;font-size:14px;}.tot td{font-weight:800;font-size:16px;border-top:2px solid #333;border-bottom:none;}.cols{display:flex;gap:24px;margin-top:16px;}.col{flex:1;font-size:13px;}.lbl{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:4px;}@media print{button{display:none;}}</style></head><body>'
-    + '<h1>'+(EN?'MTL commission receipt':'Doklad o provizi MTL')+'</h1>'
-    // Razítko z doby vzniku (commission_doklady.test_mode), ne aktuální režim -- jinak by doklad
-    // z testu po přepnutí na ostro vypadal jako pravý daňový doklad.
-    + ((dk.test_mode!=null?dk.test_mode:window._TEST_MODE)?('<div style="margin:10px 0;padding:9px 12px;background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font-size:12px;font-weight:700;">\ud83e\uddea '+(EN?'TEST MODE — not a formal tax document; no actual transaction took place':'TESTOVACÍ REŽIM — nejde o formální daňový doklad a k žádné skutečné transakci nedošlo')+'</div>'):'')
-    // Období a klub sem patří stejně jako do PDF -- bez nich není poznat, ZA CO doklad je,
-    // a kdo má dva kluby, nerozliší je od sebe.
-    + '<div style="font-size:13px;color:#666;">'+_dokladNo(dk.id)+' \u00b7 '+(EN?'Issued: ':'Vystaveno: ')+charged+'</div>'
-    // Klub NENÍ nahoře u data -- patří k odběrateli, vedle IČO a adresy, kde už stejně je.
-    // Nahoře zůstává jen to, co doklad popisuje: období a čí je (klub / kouč), jako v PDF.
-    + '<div style="font-size:13px;color:#666;margin-bottom:14px;">'+(EN?'Period ':'Období ')+escapeHtml(String(dk.period_month||''))
-      +'  \u00b7  '+(dk.kind==='coach'?(EN?'coach':'kouč'):(EN?'club':'klub'))+'</div>'
-    + '<div class="cols"><div class="col"><div class="lbl">'+(EN?'Supplier':'Dodavatel')+'</div>'+supLines+'</div><div class="col"><div class="lbl">'+(EN?'Customer':'Odb\u011bratel')+'</div>'+buyLines
-      +'</div></div>'
-    + '<table>'+_liRows+vatBlock+'<tr class="tot"><td>'+(EN?'Total':'Celkem')+'</td><td style="text-align:right;">'+f(amt)+'</td></tr></table>'
-    + '<p style="font-size:12px;color:#666;margin-top:14px;">'+(EN?('The commission was automatically charged to the card on file on '+charged+'.'):('Provize byla automaticky str\u017eena z ulo\u017een\u00e9 platebn\u00ed karty dne '+charged+'.'))+'</p>'
-    + '<button onclick="window.print()" style="margin-top:16px;padding:10px 18px;background:#111;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;">'+(EN?'Print / Save PDF':'Tisk / Ulo\u017eit PDF')+'</button>'
-    + '</body></html>';
-  w.document.write(html); w.document.close();
+  const _html='<html><head><meta charset="utf-8"><title>'+(hasSnap?esc(_dokladNo(dk.id)):'')+'</title><style>'
+    +'body{font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;max-width:700px;margin:24px auto;padding:0 18px;line-height:1.5;}'
+    +'h1{font-size:20px;margin:0 0 4px;}.meta{font-size:13px;color:#555;margin-bottom:6px;}'
+    +'.test{margin:10px 0;padding:9px 12px;background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font-size:12px;font-weight:700;}'
+    +'.cols{display:flex;flex-wrap:wrap;gap:24px;margin:18px 0 8px;}.col{flex:1;min-width:220px;font-size:13px;line-height:1.55;}.lbl{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:4px;}'
+    +'table{width:100%;border-collapse:collapse;}.it{margin-top:12px;font-size:13px;}.it th{background:#f5f2ee;padding:8px 10px;font-size:11px;color:#666;text-align:left;}.it td{padding:7px 10px;border-bottom:1px solid #eee;}'
+    +'.c{text-align:center !important;}.r{text-align:right !important;}.sum{margin-top:4px;font-size:14px;}.sum td{padding:7px 0;}.tot td{font-weight:800;font-size:16px;border-top:2px solid #333;}'
+    +'.note2{margin-top:10px;font-size:12px;color:#555;}.note{font-size:12px;color:#555;margin-top:10px;line-height:1.55;}</style></head><body>'+body+'</body></html>';
+  var ov=document.getElementById('comDokViewOv'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='comDokViewOv';
+  ov.style.cssText='position:fixed;inset:0;z-index:100050;background:#fff;display:flex;flex-direction:column;';
+  ov.innerHTML='<div style="display:flex;align-items:center;gap:10px;padding:calc(env(safe-area-inset-top,0px) + 10px) 14px 10px;border-bottom:1px solid #eee;background:#fafafa;">'
+    +'<button id="_cdkBack" style="padding:9px 15px;background:#1a1a1a;color:#fff;border:none;border-radius:9px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\',sans-serif;">\u2039 '+(EN?'Back':'Zp\u011bt')+'</button>'
+    +(hasSnap?('<button id="_cdkPrint" style="margin-left:auto;padding:9px 15px;background:none;border:1px solid #1a1a1a;color:#1a1a1a;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\',sans-serif;">'+(EN?'Print / PDF':'Tisk / PDF')+'</button>'):'')+'</div>'
+    +'<iframe id="_cdkFrame" style="flex:1;border:none;width:100%;"></iframe>';
+  document.body.appendChild(ov);
+  var _f=ov.querySelector('#_cdkFrame');
+  try{ _f.srcdoc=_html; }catch(e){ try{ _f.contentWindow.document.open(); _f.contentWindow.document.write(_html); _f.contentWindow.document.close(); }catch(_e){} }
+  ov.querySelector('#_cdkBack').onclick=function(){ ov.remove(); };
+  var _pb=ov.querySelector('#_cdkPrint'); if(_pb) _pb.onclick=function(){ try{ _f.contentWindow.focus(); _f.contentWindow.print(); }catch(e){} };
 }
 function showGuestQR(occ){
   const g=_recGym; const list=$('recList'); if(!g||!list||!occ) return;
@@ -25154,7 +25145,9 @@ async function loadNotifications(append){
           // vykresluje jen když je nastavený _acFilter.gymId, takže bez zacílení dovede notifikace
           // člověka na obrazovku, kde doklad není z čeho otevřít -- a to je jediné, proč tam šel.
           var _dd={}; try{ _dd=JSON.parse(n.data||'{}'); }catch(e){}
-          if(typeof openAccounting==='function'){
+          // Nove notifikace nesou id dokladu -- otevre se rovnou on. Starsi bez id vedou do seznamu jako driv.
+          if(_dd.doklad_id && typeof showCommissionDoklad==='function'){ showCommissionDoklad(_dd.doklad_id); }
+          else if(typeof openAccounting==='function'){
             if(_dd.gym_id){ openAccounting({ gymId:_dd.gym_id }, (_dd.gym_name||'')||undefined); }
             else if(_dd.coach_id){ openAccounting({ coachId:_dd.coach_id }, (LANG==='en'?'Coach':'Kouč')); }
             // Sem se dostane jen notifikace bez identifikátoru, což by nemělo nastat -- a kdyby
