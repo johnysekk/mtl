@@ -202,18 +202,42 @@ async function handler(req, res) {
       } catch (e) { console.error('risk flagging', e.message); }
     } catch (e) { console.error('cron dispute auto-refund', e.message); }
 
-    // ── Purge accounts/gyms past the 30-day deletion grace (anonymize PII, keep rows for booking/accounting FK integrity) ──
+    // ── Účty a kluby po 30 dnech od smazání: skryjí se, ale HISTORIE ZŮSTÁVÁ ────────────────
+    // Nemaže se nic. Přepíše se jen to, co je osobní údaj a živě se zobrazuje: jméno v profilu,
+    // fotka, popis, kontakty. Doklady, transakce, docházka, vstupenky, výsledky zápasů, souhlasy
+    // a členství v organizaci se nedotknou -- klub i kouč se k nim musí dostat po celou dobu
+    // archivace, a jméno na už vystaveném dokladu je součást snímku, ne živý údaj.
+    // Sloupec "photo" v profiles neexistuje (je to photo_url) -- PATCH proto celý padal na 400
+    // a neanonymizoval se ani jeden účet.
     try {
       const cutoff = new Date(Date.now() - 30 * 864e5).toISOString();
       const delProfiles = await sbGet(`profiles?deleted_at=lt.${encodeURIComponent(cutoff)}&purged_at=is.null&select=id`);
       for (const pr of (delProfiles || [])) {
-        await sbPatch('profiles', `id=eq.${pr.id}`, { name: 'Deleted user', photo: null, bio: null, coach_status: 'deleted', purged_at: new Date().toISOString() });
+        const pk = await sbPatch('profiles', `id=eq.${pr.id}`, {
+          name: 'Smazaný uživatel', photo_url: null, bio: null, emoji: null,
+          phone: null, contact_phone: null, contact_email: null, billing_phone: null, invoice_email: null,
+          health_note: null, guardian_email: null, guardian_name: null, guardian_phone: null,
+          children: null, coach_status: 'deleted', purged_at: new Date().toISOString(),
+        });
+        if (!pk.ok) { console.error('purge profile', pr.id, pk.status); continue; }
+        // Přihlášení se ruší, e-mail v auth zůstat nesmí. Řádek v profiles zůstává kvůli vazbám
+        // z dokladů a docházky -- bez něj by historie klubu ztratila, ke komu patřila.
         try { await fetch(`${SB}/auth/v1/admin/users/${pr.id}`, { method: 'DELETE', headers: sbHeaders }); } catch (e) {}
         purged++;
       }
       const delGyms = await sbGet(`gyms?deleted_at=lt.${encodeURIComponent(cutoff)}&purged_at=is.null&select=id`);
       for (const g of (delGyms || [])) {
-        await sbPatch('gyms', `id=eq.${g.id}`, { name: 'Deleted gym', photos: null, description: null, status: 'deleted', purged_at: new Date().toISOString() });
+        // Klub: skryje se z vyhledávání a zmizí obsah profilu. Fakturační identita (právní název,
+        // IČO, adresa) ZŮSTÁVÁ -- je na dokladech, které klub i studenti musí mít dohledatelné,
+        // a je potřeba pro dodanění provizí. Stejně tak rozvrh, ceny a smluvní texty.
+        const gk = await sbPatch('gyms', `id=eq.${g.id}`, {
+          // Název klubu zůstává: je v dokladech, docházce i v historii členství v organizaci
+          // a bez něj by student neměl jak poznat, kde trénoval.
+          photos: null, facility_photos: null, description: null, contact_phone: null, contact_email: null,
+          contact_public: false, contact_phone_public: false, contact_email_public: false,
+          status: 'deleted', suspended: true, purged_at: new Date().toISOString(),
+        });
+        if (!gk.ok) { console.error('purge gym', g.id, gk.status); continue; }
         purgedG++;
       }
     } catch (e) { console.error('cron purge', e.message); }
