@@ -247,11 +247,11 @@ async function gymCheckout(req, res) {
         mtl_dropin_plan: String(req.query.dropinPlan || ''),
         mtl_need_proof: (String(req.query.needProof || '') === '1' ? '1' : '') },
       line_items: [
-        { price_data: { currency: cur, product_data: { name: `${className || 'Drop-in lekce'} — ${gymName || 'MTL Gym'}` }, unit_amount: unitAmount }, quantity: 1 },
+        { price_data: { currency: cur, product_data: { name: `${String(merch)==='1' ? 'Zboží' : 'Jednorázový vstup'} · ${className || 'Lekce'} — ${gymName || 'MTL Gym'}` }, unit_amount: unitAmount }, quantity: 1 },
       ],
       payment_intent_data: {
         application_fee_amount: applicationFee,
-        description: `${className || 'Drop-in'}${level ? ' [' + level + ']' : ''} — ${gymName || 'MTL Gym'} (drop-in)`,
+        description: `${String(merch)==='1' ? 'Zboží' : 'Jednorázový vstup'} · ${className || 'Lekce'} — ${gymName || 'MTL Gym'}`,
         metadata: {
           mtl_payment_type: (String(merch)==='1'?'merch':'drop_in'),
           merch_name: merchName || '',
@@ -485,7 +485,7 @@ async function membershipCheckout(req, res) {
         tax_id_collection: { enabled: true },
         metadata: _meta,
         line_items: [
-          { price_data: { currency: cur, product_data: { name: `${planName || 'Membership'}${access ? ' [' + access + ']' : ''} — ${gymName || ''} (${_months} m)` }, unit_amount: _amtMinor }, quantity: 1 }
+          { price_data: { currency: cur, product_data: { name: `Členství · ${planName || 'Členství'} (${_months} měs.) — ${gymName || ''}` }, unit_amount: _amtMinor }, quantity: 1 }
         ],
         payment_intent_data: {
           ...(_feeMinor > 0 ? { application_fee_amount: _feeMinor } : {}),
@@ -519,7 +519,7 @@ async function membershipCheckout(req, res) {
         mtl_ref_pct: String(refPctN || 0),
       },
       line_items: [
-        { price_data: { currency: cur, product_data: { name: `${planName || 'Membership'}${access ? ' [' + access + ']' : ''} — ${gymName || 'MTL Gym'}` }, unit_amount: Math.round(P * 100), recurring: { interval: ivl } }, quantity: 1 },
+        { price_data: { currency: cur, product_data: { name: `Členství · ${planName || 'Členství'} — ${gymName || 'MTL Gym'}` }, unit_amount: Math.round(P * 100), recurring: { interval: ivl } }, quantity: 1 },
       ],
       subscription_data: {
         application_fee_percent: FEE_NOW,

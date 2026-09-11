@@ -58,6 +58,19 @@ function _billAddr(row, prefix) {
   } catch (e) { return null; }
 }
 
+// POLOZKA NA DOKLADU: druh + nazev ("Clenstvi · Zacatecnici", "Jednorazovy vstup · Bordelari").
+// Pise se do snimku pri vystaveni. Driv tam byl jen nazev tarifu, nebo u banky syrovy typ "drop_in".
+function _dokItemLabel(type, name) {
+  const T = { membership: 'Členství', drop_in: 'Jednorázový vstup', coach_inperson: 'Soukromá lekce 1:1', coach_1to1: 'Soukromá lekce 1:1',
+    coach_online: 'Online lekce', event_ticket: 'Vstupenka', event: 'Vstupenka', merch: 'Zboží', course: 'Kurz' };
+  const t = T[String(type || '')] || '';
+  const n = String(name || '').trim();
+  // Obecne zastupne nazvy, ktere by jen opakovaly druh.
+  const generic = /^(membership|drop-in|drop-in lekce|lekce 1:1|online|event|merch|platba)$/i;
+  if (!t) return n || 'Platba';
+  if (!n || generic.test(n) || n.toLowerCase() === t.toLowerCase()) return t;
+  return t + ' · ' + n;
+}
 async function _issueDokladBank({ transactionId, gymId, coachId, clubMode, customerName,
                                   customerEmail, participantName, itemLabel, amount, currency,
                                   paymentMethod, testMode, sessionAt }) {
@@ -454,18 +467,27 @@ export default async function handler(req, res) {
       // vlastni ucet nema -- to je ucastnik, ne ten, kdo platil.
       const _custName = row.paid_by_name || row.cash_payer_name || _memberName || _partName || null;
       // Termin lekce ZAFIXOVANY TED: z rezervace, ke ktere platba patri (soukromka nebo vstup).
-      let _sessAt = session_at_issue || null;
-      if (!_sessAt && source_booking_id) {
+      // Termin lekce a nazev polozky ZAFIXOVANE TED, z rezervace, ke ktere platba patri.
+      let _sessAt = session_at_issue || null, _itemName = null;
+      const _isUuid = (v) => /^[0-9a-f-]{36}$/i.test(String(v || ''));
+      if (source_booking_id) {
         try {
-          const _bk = ((await _wsbGet(`bookings?id=eq.${encodeURIComponent(source_booking_id)}&select=training_date,training_time,type`)) || [])[0];
-          if (_bk && _bk.type !== 'online' && _bk.training_date) _sessAt = _bk.training_date + (_bk.training_time ? ' ' + _bk.training_time : '');
+          if (['coach_1to1', 'coach_inperson', 'coach_online'].includes(type) && /^\d+$/.test(String(source_booking_id))) {
+            const _bk = ((await _wsbGet(`bookings?id=eq.${encodeURIComponent(source_booking_id)}&select=training_date,training_time,type,online_format`)) || [])[0];
+            if (_bk && _bk.type !== 'online' && _bk.training_date && !_sessAt) _sessAt = _bk.training_date + (_bk.training_time ? ' ' + _bk.training_time : '');
+            if (_bk && _bk.type === 'online') _itemName = _bk.online_format || null;
+          } else if (type === 'drop_in' && _isUuid(source_booking_id)) {
+            const _gb = ((await _wsbGet(`gym_bookings?id=eq.${encodeURIComponent(source_booking_id)}&select=class_date,class_time,class_name`)) || [])[0];
+            if (_gb && _gb.class_date && !_sessAt) _sessAt = String(_gb.class_date).slice(0, 10) + (_gb.class_time ? ' ' + _gb.class_time : '');
+            if (_gb) _itemName = _gb.class_name || null;
+          } else if (type === 'membership' && _isUuid(source_booking_id)) {
+            const _gm = ((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(source_booking_id)}&select=plan_name`)) || [])[0];
+            if (_gm) _itemName = _gm.plan_name || null;
+          } else if (type === 'merch' && _isUuid(source_booking_id)) {
+            const _mo = ((await _wsbGet(`merch_orders?id=eq.${encodeURIComponent(source_booking_id)}&select=item_name,variant`)) || [])[0];
+            if (_mo) _itemName = (_mo.item_name || '') + (_mo.variant ? ' (' + _mo.variant + ')' : '');
+          }
         } catch (e) {}
-        if (!_sessAt) {
-          try {
-            const _gb = ((await _wsbGet(`gym_bookings?id=eq.${encodeURIComponent(source_booking_id)}&select=class_date,class_time`)) || [])[0];
-            if (_gb && _gb.class_date) _sessAt = String(_gb.class_date).slice(0, 10) + (_gb.class_time ? ' ' + _gb.class_time : '');
-          } catch (e) {}
-        }
       }
 
       _dokNo = await _issueDokladBank({
@@ -478,7 +500,7 @@ export default async function handler(req, res) {
         customerName: _custName,
         customerEmail: null,
         participantName: _partName,
-        itemLabel: (type || null),
+        itemLabel: _dokItemLabel(type, _itemName),
         amount: row.gross_amount,
         currency: row.currency,
         paymentMethod: row.payment_method,

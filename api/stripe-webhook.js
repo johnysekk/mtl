@@ -942,6 +942,19 @@ export default async function handler(req, res) {
 // Doklad ke Stripe platbe podle zapsane transakce. Vola ho ten, kdo transakci zalozil -- webhook
 // i /api/session (zaloha, kdyz webhook nedorazi). Data bere z radku transakce, takze doklad je
 // stejny bez ohledu na to, ktera cesta vyhrala. Kdyz doklad k platbe uz je, nevystavi druhy.
+// POLOZKA NA DOKLADU: druh + nazev ("Clenstvi · Zacatecnici", "Jednorazovy vstup · Bordelari").
+// Pise se do snimku pri vystaveni. Driv tam byl jen nazev tarifu, nebo u banky syrovy typ "drop_in".
+function _dokItemLabel(type, name) {
+  const T = { membership: 'Členství', drop_in: 'Jednorázový vstup', coach_inperson: 'Soukromá lekce 1:1', coach_1to1: 'Soukromá lekce 1:1',
+    coach_online: 'Online lekce', event_ticket: 'Vstupenka', event: 'Vstupenka', merch: 'Zboží', course: 'Kurz' };
+  const t = T[String(type || '')] || '';
+  const n = String(name || '').trim();
+  // Obecne zastupne nazvy, ktere by jen opakovaly druh.
+  const generic = /^(membership|drop-in|drop-in lekce|lekce 1:1|online|event|merch|platba)$/i;
+  if (!t) return n || 'Platba';
+  if (!n || generic.test(n) || n.toLowerCase() === t.toLowerCase()) return t;
+  return t + ' · ' + n;
+}
 export async function issueStripeDokladForPi(pi, hint) {
   try {
     if (!pi) return null;
@@ -967,7 +980,7 @@ export async function issueStripeDokladForPi(pi, hint) {
       customerName: tx.paid_by_name || (_cust && _cust.name) || null,
       customerEmail: (_cust && _cust.email) || null,
       participantName: (_cust && _cust.name) || null,
-      itemLabel: tx.plan || tx.type, amount: tx.gross_amount,
+      itemLabel: _dokItemLabel(tx.type, tx.plan), amount: tx.gross_amount,
       currency: tx.currency, paymentMethod: 'stripe', testMode: !!tx.test_mode,
     });
   } catch (e) { console.error('issueStripeDokladForPi', e && e.message); return null; }
