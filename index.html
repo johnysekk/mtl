@@ -13173,7 +13173,8 @@ async function showRescheduleConfirmation(id){
     +'<div style="font-size:13px;color:#666;margin-bottom:14px;">'+(EN?'Issued: ':'Vystaveno: ')+issued+'</div>'
     +'<div style="margin-top:18px;">'
     +row(EN?'Provider':'Poskytovatel', c.provider_name||'—')
-    +row(EN?'Customer':'Odběratel', c.student_name||'—')
+    +row(EN?'Customer':'Odběratel', c.payer_name||c.student_name||'—')
+    +((c.payer_name && c.student_name && c.student_name!==c.payer_name)?row(EN?'Participant':'Účastník', c.student_name):'')
     +row(EN?'Original date':'Původní termín', _fmtSess(c.from_at))
     +row(EN?'New date':'Nový termín', _fmtSess(c.to_at))
     +row(EN?'Price':'Cena', (EN?'unchanged':'beze změny'))
@@ -13220,15 +13221,23 @@ async function showCancelConfirmation(d){
     const _note=(typeof _excNote==='function')?_excNote(_lbl,(c.note||'')):(c.note||'');
     const _ss=String(c.session_at||'');
     const _sess=_ss?(((typeof _dt==='function')?_dt(_ss.slice(0,10)):_ss.slice(0,10))+(_ss.length>10?(' '+_ss.slice(11)):'')):'';
-    const _cur=c.currency||'CZK'; const _sym=(typeof symOf==='function')?symOf(_cur):_cur;
+    const _cur=c.currency||'CZK'; const _sym=(typeof _curSym==='function')?_curSym(_cur):_cur;
     const _refStr=(c.refund_amount!=null)?(fmtPrice(Number(c.refund_amount)||0,_cur)+' '+_sym):'';
-    const _by=(c.cancelled_by_name||'\u2014')+' ('+(c.cancelled_by_role==='coach'?(EN?'provider':'poskytovatel'):(EN?'customer':'z\u00e1kazn\u00edk'))+')';
+    // Odberatel = kdo platil, Ucastnik jen kdyz je to nekdo jiny (dite, mladistvy). Stary snimek
+    // bez payer_name bere odberatele z ucastnika, jak byl vystaven.
+    const _payer=c.payer_name||c.participant_name||'';
+    const _part=(c.participant_name && c.participant_name!==_payer)?c.participant_name:'';
+    const _role=(c.cancelled_by_role==='coach')?(EN?'provider':'poskytovatel')
+      :((c.cancelled_by_name && c.cancelled_by_name===_payer)?(EN?'customer':'odb\u011bratel')
+      :((c.cancelled_by_name && c.cancelled_by_name===c.participant_name)?(EN?'participant':'\u00fa\u010dastn\u00edk'):''));
+    const _by=(c.cancelled_by_name||'\u2014')+(_role?(' ('+_role+')'):'');
     body='<h1>'+(EN?'Confirmation of cancellation':'Potvrzen\u00ed o zru\u0161en\u00ed lekce')+'</h1>'
       +(c.test_mode?'<div style="margin:10px 0;padding:9px 12px;background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font-size:12px;font-weight:700;">\u{1F9EA} '+(EN?'TEST MODE':'TESTOVAC\u00cd RE\u017dIM')+'</div>':'')
       +'<div style="font-size:13px;color:#666;margin-bottom:14px;">'+(EN?'Issued: ':'Vystaveno: ')+esc(issued)+'</div>'
       +'<div style="margin-top:18px;">'
       +row(EN?'Provider':'Poskytovatel', c.provider_name||'\u2014')
-      +row(EN?'Participant':'\u00da\u010dastn\u00edk', c.participant_name||'\u2014')
+      +row(EN?'Customer':'Odb\u011bratel', _payer||'\u2014')
+      +(_part?row(EN?'Participant':'\u00da\u010dastn\u00edk', _part):'')
       +row(EN?'Session':'Lekce', c.class_name||'\u2014')
       +row(EN?'Date':'Term\u00edn', _sess||'\u2014')
       +row(EN?'Cancelled by':'Zru\u0161il', _by)
@@ -13260,6 +13269,37 @@ async function showCancelConfirmation(d){
   ov.querySelector('#_ecPrint').onclick=function(){ try{ _eif.contentWindow.focus(); _eif.contentWindow.print(); }catch(e){} };
 }
 
+// STRANY POTVRZENI (zmena terminu i zruseni) zjistene VE CHVILI VYSTAVENI, stejne jako u dokladu:
+// Poskytovatel = pravni nazev klubu/kouce, Odberatel = kdo platil, Ucastnik = komu lekce patri.
+// Klub uz nesmi byt podepsany svym obchodnim nazvem -- potvrzeni o presunu tam melo "Bordel House".
+async function _confParties(o){
+  o=o||{};
+  const r={ txId:o.transaction_id||null, stuId:o.student_id||null, participant:o.participant_name||'', payer:'', provider:'', testMode:!!window._TEST_MODE, paid:null, cur:o.currency||'CZK' };
+  const nameOf=async function(id){ if(!id) return ''; try{ const { data }=await supaClient.from('profiles').select('name').eq('id', id).maybeSingle(); return (data&&data.name)||''; }catch(e){ return ''; } };
+  try{
+    if(o.booking_id!=null){
+      const _isPriv=(o.booking_kind==='coach_1to1');
+      const { data:_b }=await supaClient.from(_isPriv?'bookings':'gym_bookings').select(_isPriv?'payment_intent,test_mode,amount,currency,student_id,paid_by':'payment_intent,test_mode,amount,currency,student_id,child_name,paid_by,paid_by_name').eq('id', o.booking_id).maybeSingle();
+      let _payTx='';
+      if(_b){
+        r.testMode=!!_b.test_mode; r.paid=(_b.amount!=null?Number(_b.amount):null); r.cur=_b.currency||r.cur;
+        if(_b.student_id) r.stuId=_b.student_id;
+        if(!r.txId && _b.payment_intent){ const { data:_t }=await supaClient.from('transactions').select('id,paid_by_name').eq('payment_intent', _b.payment_intent).limit(1); if(_t&&_t[0]){ r.txId=_t[0].id; _payTx=_t[0].paid_by_name||''; } }
+      }
+      if(!r.txId){ const { data:_t2 }=await supaClient.from('transactions').select('id,paid_by_name').eq('source_booking_id', String(o.booking_id)).limit(1); if(_t2&&_t2[0]){ r.txId=_t2[0].id; _payTx=_t2[0].paid_by_name||''; } }
+      // Drzitel uctu, na ktery je rezervace. U ditete vedeneho pod rodicem je to rodic.
+      const _holder=await nameOf(r.stuId);
+      if(!r.participant) r.participant=(_b&&_b.child_name)||_holder;
+      r.payer=_payTx || (_b&&_b.paid_by_name) || ((_b&&_b.paid_by)?(await nameOf(_b.paid_by)):'') || _holder;
+    }
+  }catch(e){}
+  try{
+    if(o.gym_id){ const { data:_g }=await supaClient.from('gyms').select('legal_name,name').eq('id', o.gym_id).maybeSingle(); r.provider=(_g&&(_g.legal_name||_g.name))||''; }
+    else if(o.coach_id){ const { data:_p }=await supaClient.from('profiles').select('legal_name,name').eq('id', o.coach_id).maybeSingle(); r.provider=(_p&&(_p.legal_name||_p.name))||''; }
+  }catch(e){}
+  if(!r.provider) r.provider=o.provider_name||'';
+  return r;
+}
 async function _issueRescheduleConfirmation(o){
   // Příznak platí jen pro tenhle přesun -- bez vynulování by druhý přesun zprávu neposlal.
   window._reschedConfSent=false;
@@ -13281,30 +13321,16 @@ async function _issueRescheduleConfirmation(o){
         _prevId=(_p&&_p[0]&&_p[0].id)||null;
       }
     }catch(e){}
-    // Potvrzeni patri k PLATBE. transaction_id se driv nevyplnovalo a seznamy dokladu ho hledaly
-    // oklikou pres rezervace -- u Stripe soukromky ho proto kouc ani student v Dokladech nevideli.
-    // Ucastnik je ten, komu lekce patri (z rezervace), ne kdo zrovna klika.
-    let _txId=o.transaction_id||null, _stuId=(currentUser&&currentUser.id)||null, _stuName=(currentUser&&currentUser.name)||'';
-    try{
-      if(o.booking_id!=null){
-        const _isPriv=(o.booking_kind==='coach_1to1');
-        const { data:_rbk }=await supaClient.from(_isPriv?'bookings':'gym_bookings').select(_isPriv?'payment_intent,student_id':'payment_intent,student_id,child_name').eq('id', o.booking_id).maybeSingle();
-        if(_rbk){
-          if(_rbk.student_id) _stuId=_rbk.student_id;
-          if(_rbk.child_name) _stuName=_rbk.child_name;
-          else if(_rbk.student_id && (!currentUser || String(_rbk.student_id)!==String(currentUser.id))){ const { data:_rsp }=await supaClient.from('profiles').select('name').eq('id', _rbk.student_id).maybeSingle(); if(_rsp && _rsp.name) _stuName=_rsp.name; }
-          if(!_txId && _rbk.payment_intent){ const { data:_rt }=await supaClient.from('transactions').select('id').eq('payment_intent', _rbk.payment_intent).limit(1); _txId=(_rt&&_rt[0]&&_rt[0].id)||null; }
-        }
-        if(!_txId){ const { data:_rt2 }=await supaClient.from('transactions').select('id').eq('source_booking_id', String(o.booking_id)).limit(1); _txId=(_rt2&&_rt2[0]&&_rt2[0].id)||null; }
-      }
-    }catch(e){}
+    // Potvrzeni patri k PLATBE (transaction_id) a strany se zjisti ted, ze stejnych zdroju jako doklad.
+    const _cp=await _confParties({ booking_id:o.booking_id, booking_kind:o.booking_kind, transaction_id:o.transaction_id, gym_id:o.gym_id, coach_id:o.coach_id, provider_name:o.provider_name });
+    const _txId=_cp.txId, _stuId=_cp.stuId||((currentUser&&currentUser.id)||null), _stuName=_cp.participant||((currentUser&&currentUser.name)||'');
     const row={
       booking_id:(o.booking_id!=null?String(o.booking_id):null), booking_kind:o.booking_kind||'dropin',
       transaction_id:_txId, prev_conf_id:_prevId,
       student_id:_stuId,
       student_name:_stuName,
       gym_id:o.gym_id||null, coach_id:o.coach_id||null,
-      provider_name:o.provider_name||'',
+      provider_name:_cp.provider||'', payer_name:(_cp.payer||null), test_mode:!!_cp.testMode,
       seq:_seq, from_at:String(o.from_at), to_at:String(o.to_at),
       amount:(o.amount!=null?o.amount:null), currency:o.currency||'CZK'
     };
@@ -13476,25 +13502,10 @@ async function gymOwnerRefund(btn){
 async function _issueCancelSnapshot(o){
   try{
     if(!currentUser || !currentUser.id || !o || o.booking_id==null) return null;
-    const _isPriv=(o.booking_kind==='coach_1to1');
-    let prov='', part=o.participant_name||'', txId=null, testMode=!!window._TEST_MODE, paid=null, cur=o.currency||'CZK', stuId=o.student_id||null;
-    try{
-      const { data:_cb }=await supaClient.from(_isPriv?'bookings':'gym_bookings').select(_isPriv?'payment_intent,test_mode,amount,currency,student_id':'payment_intent,test_mode,amount,currency,student_id,child_name').eq('id', o.booking_id).maybeSingle();
-      if(_cb){
-        testMode=!!_cb.test_mode; paid=(_cb.amount!=null?Number(_cb.amount):null); cur=_cb.currency||cur;
-        if(_cb.student_id) stuId=_cb.student_id;
-        if(!part && _cb.child_name) part=_cb.child_name;
-        if(_cb.payment_intent){ const { data:_ct }=await supaClient.from('transactions').select('id').eq('payment_intent', _cb.payment_intent).limit(1); txId=(_ct&&_ct[0]&&_ct[0].id)||null; }
-      }
-      if(!txId){ const { data:_ct2 }=await supaClient.from('transactions').select('id').eq('source_booking_id', String(o.booking_id)).limit(1); txId=(_ct2&&_ct2[0]&&_ct2[0].id)||null; }
-    }catch(e){}
-    try{ if(!part && stuId){ const { data:_cs }=await supaClient.from('profiles').select('name').eq('id', stuId).maybeSingle(); part=(_cs&&_cs.name)||''; } }catch(e){}
-    try{
-      if(o.gym_id){ const { data:_cg }=await supaClient.from('gyms').select('legal_name,name').eq('id', o.gym_id).maybeSingle(); prov=(_cg&&(_cg.legal_name||_cg.name))||''; }
-      else if(o.coach_id){ const { data:_cp }=await supaClient.from('profiles').select('legal_name,name').eq('id', o.coach_id).maybeSingle(); prov=(_cp&&(_cp.legal_name||_cp.name))||''; }
-    }catch(e){}
+    const _cp=await _confParties(o);
+    const prov=_cp.provider, part=_cp.participant, txId=_cp.txId, testMode=_cp.testMode, paid=_cp.paid, cur=_cp.cur, stuId=_cp.stuId;
     const row={ booking_id:String(o.booking_id), booking_kind:(o.booking_kind||'dropin'), transaction_id:txId,
-      student_id:stuId, participant_name:(part||null),
+      student_id:stuId, participant_name:(part||null), payer_name:(_cp.payer||null),
       cancelled_by:currentUser.id, cancelled_by_name:(currentUser.name||null), cancelled_by_role:(o.by_role||'student'),
       gym_id:(o.gym_id||null), coach_id:(o.coach_id||null), provider_name:(prov||null), class_name:(o.class_name||null),
       session_at:(o.session_at||null), reason_key:(o.reason_key||null), note:(o.note||null),
