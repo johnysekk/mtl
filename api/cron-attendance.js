@@ -30,12 +30,12 @@ async function sbPatch(table, query, row) {
 const DOW = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
 // Aktuální čas v timezone gymu → {date 'YYYY-MM-DD', dow 0-6, mins od půlnoci}
-function gymNow(tz) {
+function gymNow(tz, at) {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: tz || 'UTC',
     year: 'numeric', month: '2-digit', day: '2-digit',
     weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
-  }).formatToParts(new Date());
+  }).formatToParts(at || new Date());
   const g = {}; parts.forEach(p => g[p.type] = p.value);
   return {
     date: `${g.year}-${g.month}-${g.day}`,
@@ -44,57 +44,19 @@ function gymNow(tz) {
   };
 }
 
-export default 
-// ---------------------------------------------------------------------------
-// THE ONE RULE for what application_fee_percent a membership subscription carries.
-//
-// This field was being set from THREE places that knew nothing about each other:
-//   * pay.js at creation        -> welcome 0% / acquisition 10% (5% EP) / ladder
-//   * cron-attendance at renewal -> ALWAYS base, which silently threw
-//     away an acquisition window that was still running
-//   * gym-rerate when the owner crossed a tier -> ALWAYS the ladder rate, which blew away
-//     BOTH a running welcome window (breaking a 0% promise made to the provider) and an
-//     open acquisition window (MTL losing its own finder's fee)
-// and nothing at all ever ended an acquisition window, so an MTL-sourced membership was
-// billed 10% forever. mtl_acq had one writer and zero readers.
-//
-// PRECEDENCE: welcome (0) beats acquisition (10 / 5) beats the provider's ladder rate.
-// Welcome wins because it is a promise made to the provider; when it ends, the sub lands
-// on whatever is correct AT THAT MOMENT (still inside the 2 months -> acquisition; else ladder).
-//
-// Returns null when it cannot decide (Stripe call failed) -> the caller must CHANGE NOTHING.
-// Never guess with someone's money.
-async function subRateFor(stripe, acct, subId, sub, ladderPct) {
-  // ODSTRANENO: `if (welcomeActive) return 0;`. Uvitaci okno bylo zruseno -- pri zakladu 2 %
-  // na Stripe a 2,5 % na bance uz neni co zlevnovat, a to okno stalo za vic kodu na penezni
-  // ceste nez samotny zebricek. Zbyva precedence: akvizice > zebricek.
-  const md = (sub && sub.metadata) || {};
-  if (md.mtl_acq === '1') {
-    const pct = parseFloat(md.mtl_acq_pct || '0') || 0;
-    if (pct > 0) {
-      let paid;
-      try {
-        const invs = await stripe.invoices.list({ subscription: subId, status: 'paid', limit: 3 }, { stripeAccount: acct });
-        paid = ((invs && invs.data) || []).length;
-      } catch (e) { return null; }            // cannot count -> do not touch the rate
-      // CHANGED: was `paid < 2` -- the acquisition rate rode the first TWO paid invoices.
-      // Acquisition is now a single 20% (10% EP) charge on the first month only, so it comes
-      // off after one. The rule lives in _rate.js; this is the subscription mirror of it.
-      if (paid < 1) return pct;               // first month only -> the acquisition rate
-    }
+// Připomíná se jen lekce, která v rozvrhu OPRAVDU BYLA, když měla začít (stejné pravidlo jako
+// _classRemindable v appce). Lekce přidaná večer na dnešní den s už uplynulým časem proběhnout
+// nemohla. Čas vytvoření se převádí do časové zóny klubu, stejně jako "teď".
+function remindable(c, date, startMins, tz) {
+  if (!c || c.once) return false;
+  if (c.since && date < String(c.since)) return false;
+  if (c.until && date > String(c.until)) return false;
+  if (c.created_at) {
+    const at = new Date(c.created_at);
+    if (!isNaN(at)) { const cr = gymNow(tz, at); if (cr.date > date || (cr.date === date && cr.mins > startMins)) return false; }
+  } else if (c.since && String(c.since) === date) {
+    return false;   // starší záznam bez času vytvoření přidaný dnes: nevíme, jestli před lekcí
   }
-  return ladderPct;
-}
-
-// Apply it. Returns true if the rate actually changed.
-async function applySubRate(stripe, acct, subId, sub, ladderPct) {
-  const want = await subRateFor(stripe, acct, subId, sub, ladderPct);
-  if (want === null) return false;                                  // undecidable -> leave alone
-  const cur = (sub.application_fee_percent != null) ? Number(sub.application_fee_percent) : null;
-  if (cur === want) return false;
-  const md = Object.assign({}, (sub && sub.metadata) || {});
-  if (md.mtl_acq === '1' && want !== 0 && want === ladderPct) md.mtl_acq = 'done';   // window closed
-  await stripe.subscriptions.update(subId, { application_fee_percent: want, metadata: md }, { stripeAccount: acct });
   return true;
 }
 
@@ -120,7 +82,7 @@ async function handler(req, res) {
         const h = Number(t[0]), m = Number(t[1] || 0);
         if (isNaN(h)) return false;
         const diff = (mins - (h * 60 + m)) / 60;
-        return diff >= 2 && diff <= 12; // lekce začala 2–12 h zpět
+        return diff >= 2 && diff <= 12 && remindable(c, date, h * 60 + m, gym.timezone); // lekce začala 2–12 h zpět a v rozvrhu tehdy byla
       });
       if (!due.length) continue;
 
@@ -268,3 +230,8 @@ async function handler(req, res) {
     res.status(200).json({ ok: false, error: err.message });
   }
 }
+
+// Výchozí export MUSÍ být handler. Dřív tu viselo "export default" nad komentářem, takže se exportovala
+// první následující funkce (subRateFor) a Vercel každých 30 minut volal ji -- celý cron se nikdy neprovedl.
+// subRateFor/applySubRate tu nikdo nevolal (sazbu řeší sub-rate-cron.js a stripe-webhook.js), smazány.
+export default handler;
