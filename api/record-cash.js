@@ -60,7 +60,7 @@ function _billAddr(row, prefix) {
 
 async function _issueDokladBank({ transactionId, gymId, coachId, clubMode, customerName,
                                   customerEmail, participantName, itemLabel, amount, currency,
-                                  paymentMethod, testMode }) {
+                                  paymentMethod, testMode, sessionAt }) {
   try {
     if (!transactionId) return null;
     // clubMode je PARAMETR -- znovu ho deklarovat by prebilo to, co poslal volajici.
@@ -124,6 +124,7 @@ async function _issueDokladBank({ transactionId, gymId, coachId, clubMode, custo
         amount: Math.round(Number(amount) || 0),
         currency: String(currency || 'CZK').toUpperCase(),
         payment_method: paymentMethod || null, test_mode: !!testMode,
+        session_at: sessionAt || null,   // termin lekce pri vystaveni; presun ho uz nezmeni
       }),
     });
     return String(no);
@@ -448,6 +449,20 @@ export default async function handler(req, res) {
         }
       } catch (e) {}
       const _custName = row.paid_by_name || row.cash_payer_name || _partName || null;
+      // Termin lekce ZAFIXOVANY TED: z rezervace, ke ktere platba patri (soukromka nebo vstup).
+      let _sessAt = session_at_issue || null;
+      if (!_sessAt && source_booking_id) {
+        try {
+          const _bk = ((await _wsbGet(`bookings?id=eq.${encodeURIComponent(source_booking_id)}&select=training_date,training_time,type`)) || [])[0];
+          if (_bk && _bk.type !== 'online' && _bk.training_date) _sessAt = _bk.training_date + (_bk.training_time ? ' ' + _bk.training_time : '');
+        } catch (e) {}
+        if (!_sessAt) {
+          try {
+            const _gb = ((await _wsbGet(`gym_bookings?id=eq.${encodeURIComponent(source_booking_id)}&select=class_date,class_time`)) || [])[0];
+            if (_gb && _gb.class_date) _sessAt = String(_gb.class_date).slice(0, 10) + (_gb.class_time ? ' ' + _gb.class_time : '');
+          } catch (e) {}
+        }
+      }
 
       _dokNo = await _issueDokladBank({
         transactionId: _txId,
@@ -464,6 +479,7 @@ export default async function handler(req, res) {
         currency: row.currency,
         paymentMethod: row.payment_method,
         testMode: row.test_mode,
+        sessionAt: _sessAt,
       });
     }
     if (_creditRow) await consumeStudentCredit(_creditRow.memberId, _creditRow.id, _creditRow.sc);

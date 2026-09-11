@@ -453,7 +453,10 @@ export default async function handler(req, res) {
       cust_dic: (buyer && buyer.vat_id) || null,
       cust_address: _billAddr(buyer) || null,
       cust_vat_payer: !!(buyer && buyer.vat_id),
-      cust_country: (buyer && (buyer.billing_country || buyer.country)) || null };
+      cust_country: (buyer && (buyer.billing_country || buyer.country)) || null,
+      // SNIMEK DODAVATELE (MTL) ze stejne chvile. Appka uz nekresli dodavatele z dnesnich platform_settings.
+      sup_name: ME.name || null, sup_ico: ME.ico || null, sup_dic: ME.dic || null, sup_address: ME.sidlo || null,
+      sup_vat_payer: !!ME.vat_payer, sup_vat_rate: (ME.vat_rate != null ? ME.vat_rate : null) };
       body[col] = entityId;
       await sb('commission_doklady', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify(body) });
       issued++;

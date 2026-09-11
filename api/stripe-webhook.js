@@ -489,7 +489,7 @@ async function recordTransaction(acct, pi, fields) {
     try { if (fields.member_id && gross != null) await ecoPurchase(fields.member_id, gross / 100, currency, pi); } catch (e) {}
     // Doklad jako SNIMEK hned po zapsani platby -- stejne jako u hotovosti. Vystavuje ho ten, komu
     // se povedl INSERT transakce (unikatni payment_intent pusti jen jednoho): webhook, nebo /api/session.
-    await issueStripeDokladForPi(pi);
+    await issueStripeDokladForPi(pi, { slotId: fields.slot_id || null });
   } catch (e) { console.error('recordTransaction', e.message); }
 }
 
@@ -623,7 +623,7 @@ export default async function handler(req, res) {
               // a nemela ani `data`, takze se nedala prokliknout. Dve notifikace o jedne veci jsou
               // horsi nez jedna; nechavame tu popisnejsi.
               await payAmbassador(slot.coach_profile_id, amount, currency, m.discipline, pi);
-              await recordTransaction(event.account, pi, { type: 'coach_inperson',  member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', gross: amount, currency, paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
+              await recordTransaction(event.account, pi, { type: 'coach_inperson', slot_id: m.slot_id || null, member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', gross: amount, currency, paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
             await notifyPaidForMinor(m, 'Lekce 1:1', amount, currency);
             }
           } else if (m.booking_type === 'online' && m.coach_profile_id) {
@@ -648,7 +648,7 @@ export default async function handler(req, res) {
           // recordTransaction je idempotentni: existujici transakci nezmeni.
           const _b0 = existing[0] || {};
           const _onl = (m.booking_type === 'online');
-          await recordTransaction(event.account, pi, { type: _onl ? 'coach_online' : 'coach_inperson', member_id: m.student_id || _b0.student_id || null, coach_id: _b0.coach_id || m.coach_profile_id || null, plan: _onl ? (m.online_fmt || 'Online') : 'Lekce 1:1', gross: parseInt(m.base_amount || '0', 10), currency: m.booking_currency || 'CZK', paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
+          await recordTransaction(event.account, pi, { type: _onl ? 'coach_online' : 'coach_inperson', slot_id: _onl ? null : (m.slot_id || null), member_id: m.student_id || _b0.student_id || null, coach_id: _b0.coach_id || m.coach_profile_id || null, plan: _onl ? (m.online_fmt || 'Online') : 'Lekce 1:1', gross: parseInt(m.base_amount || '0', 10), currency: m.booking_currency || 'CZK', paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
         }
       } else if (m.mtl_payment_type === 'drop_in' || m.mtl_payment_type === 'membership') {
         // GYM skupinová lekce (direct charge na účtu gymu) → 0,5 % ambassadorovi disciplíny
@@ -929,7 +929,7 @@ export default async function handler(req, res) {
 // Doklad ke Stripe platbe podle zapsane transakce. Vola ho ten, kdo transakci zalozil -- webhook
 // i /api/session (zaloha, kdyz webhook nedorazi). Data bere z radku transakce, takze doklad je
 // stejny bez ohledu na to, ktera cesta vyhrala. Kdyz doklad k platbe uz je, nevystavi druhy.
-export async function issueStripeDokladForPi(pi) {
+export async function issueStripeDokladForPi(pi, hint) {
   try {
     if (!pi) return null;
     const tx = ((await sbGet(`transactions?payment_intent=eq.${encodeURIComponent(pi)}&select=id,gross_amount,currency,member_id,coach_id,gym_id,plan,type,paid_by_name,test_mode&limit=1`)) || [])[0];
@@ -938,7 +938,16 @@ export async function issueStripeDokladForPi(pi) {
     if (ex.length) return String(ex[0].doklad_no);
     let _cust = null;
     if (tx.member_id) _cust = ((await sbGet(`profiles?id=eq.${encodeURIComponent(tx.member_id)}&select=name,email`)) || [])[0] || null;
-    return await issueDoklad({
+    // Termin lekce ZAFIXOVANY TED. Slot z metadat platby (rezervace jeste nemusi existovat),
+    // jinak rezervace podle platby. Nic se nenajde = doklad termin neuvede, nedokresli ho.
+    let _sess = null;
+    try {
+      const _slotId = hint && hint.slotId;
+      if (_slotId) { const _sl = ((await sbGet(`slots?id=eq.${encodeURIComponent(_slotId)}&select=date,time`)) || [])[0]; if (_sl && _sl.date) _sess = _sl.date + (_sl.time ? ' ' + _sl.time : ''); }
+      if (!_sess) { const _bk = ((await sbGet(`bookings?payment_intent=eq.${encodeURIComponent(pi)}&select=training_date,training_time,type&limit=1`)) || [])[0]; if (_bk && _bk.type !== 'online' && _bk.training_date) _sess = _bk.training_date + (_bk.training_time ? ' ' + _bk.training_time : ''); }
+      if (!_sess) { const _gb = ((await sbGet(`gym_bookings?payment_intent=eq.${encodeURIComponent(pi)}&select=class_date,class_time&limit=1`)) || [])[0]; if (_gb && _gb.class_date) _sess = String(_gb.class_date).slice(0, 10) + (_gb.class_time ? ' ' + _gb.class_time : ''); }
+    } catch (e) {}
+    return await issueDoklad({ sessionAt: _sess,
       transactionId: tx.id, paymentIntent: pi,
       gymId: tx.gym_id || null, coachId: tx.gym_id ? null : (tx.coach_id || null),
       // ODBERATEL JE PLATCE, ucastnik je ten, komu sluzba patri (uvede se jen kdyz se lisi).
@@ -951,7 +960,7 @@ export async function issueStripeDokladForPi(pi) {
   } catch (e) { console.error('issueStripeDokladForPi', e && e.message); return null; }
 }
 
-async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, customerName, customerEmail, participantName, itemLabel, amount, currency, paymentMethod, testMode }) {
+async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, customerName, customerEmail, participantName, itemLabel, amount, currency, paymentMethod, testMode, sessionAt }) {
   try {
     if (!transactionId && !paymentIntent) return null;
     let sup = null;
@@ -997,6 +1006,7 @@ async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, custo
         item_label: itemLabel || null,
         amount: Math.round(Number(amount) || 0), currency: String(currency || 'CZK').toUpperCase(),
         payment_method: paymentMethod || null, test_mode: !!testMode,
+        session_at: sessionAt || null,   // termin lekce pri vystaveni; presun ho uz nezmeni
     });
     return String(no);
   } catch (e) { console.error('issueDoklad', e && e.message); return null; }

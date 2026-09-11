@@ -130,7 +130,7 @@ async function recordTransaction(acct, pi, fields) {
     if (ir && ir.ok === false) return { status: 'insert-failed', http: ir.status, dberror: ir.error, dburl: ir.url, gross, stripeFee, mtlFee, net };
     // Transakci zalozila tahle cesta, doklad tedy vystavuje ona. Webhook po ni najde transakci
     // hotovou a doklad nevystavi -- driv proto nevznikl vubec.
-    const dokladNo = await issueStripeDokladForPi(pi);
+    const dokladNo = await issueStripeDokladForPi(pi, { slotId: fields.slot_id || null });
     return { status: 'recorded', gross, stripeFee, mtlFee, net, dokladNo };
   } catch (e) { console.error('recordTransaction', e.message); return { status: 'error:' + e.message }; }
 }
@@ -232,6 +232,7 @@ export default async function handler(req, res) {
       else if (m.mtl_payment_type === 'event_ticket') { txType = 'event_ticket'; f.member_id = m.student_id || m.buyer_id; f.gym_id = m.gym_id; f.coach_id = m.payout_coach_id || null; f.plan = m.mtl_event || 'Event'; }
       else if (m.booking_type === 'inperson' || m.booking_type === 'online') { txType = (m.booking_type === 'online') ? 'coach_online' : 'coach_inperson'; f.member_id = m.student_id; f.coach_id = m.coach_profile_id; f.plan = m.online_fmt || 'Lekce 1:1'; f.currency = m.booking_currency || session.currency; f.discipline = m.discipline || null; }
       f.paid_by = m.paid_by || null; f.paid_by_name = m.paid_by_name || null;
+      if (m.booking_type === 'inperson') f.slot_id = m.slot_id || null;
       if (!txType) _tx = { recorded: false, reason: 'no mtl_payment_type / booking_type in the session metadata — redeploy pay.js (LX/LY) and make a NEW payment; old sessions have no metadata' };
       else if (!payId) _tx = { recorded: false, reason: 'could not resolve a payment id from the session (subscription invoice may lack payment_intent/charge on this API version)', txType };
       else if (!gymAccount) _tx = { recorded: false, reason: 'no gymAccount/acct passed to /api/session', txType, payId };
