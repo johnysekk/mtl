@@ -20,7 +20,7 @@ const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 const SB  = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const RESEND = process.env.RESEND_API_KEY;
-const MAIL_FROM = process.env.INVITE_FROM || 'Martial Training Lab <no-reply@martialtraininglab.com>';
+const MAIL_FROM = process.env.INVITE_FROM || process.env.MAIL_FROM || 'Martial Training Lab <no-reply@martialtraininglab.com>';
 
 // ── FAKTURAČNÍ ADRESA ────────────────────────────────────────────────────────────────────
 // Pravda je v rozpadu billing_line1/line2/city/postal (potřebuje ho DAC7). Jednořádkový
@@ -101,180 +101,190 @@ function prevMonth(ym) { const [y, m] = ym.split('-').map(Number); const d = new
 
 function _methodLabel(m){ return m==='stripe'?'Stripe (karta)':(m==='pis'?'Platba z banky':(m==='qr'?'QR platba':(m==='cash'?'Hotovost':(m||'\u2014')))); }
 function _pct(r){ return r!=null ? (Math.round(r*1000)/10).toString().replace('.',',')+' %' : '\u2014'; }
-function _money(minor, cur){ return (minor/100).toFixed(2).replace('.',',')+' '+String(cur).toUpperCase(); }
+function _money(minor, cur){ return (Number(minor||0)/100).toFixed(2).replace('.',',')+' '+String(cur||'').toUpperCase(); }
+// Na urovni modulu. Driv byla definovana jen uvnitr dokladHtml, ale pouzival ji i text e-mailu
+// a prehled zavadeciho obdobi -- ReferenceError padl do tichého catch a E-MAIL NEODESEL NIKDY.
+function esc(x){ return String(x==null?'':x).replace(/[<>&"]/g,function(c){ return c==='<'?'&lt;':c==='>'?'&gt;':c==='&'?'&amp;':'&quot;'; }); }
+function _czDate(d){ try{ const x=new Date(d); return x.getUTCDate()+'. '+(x.getUTCMonth()+1)+'. '+x.getUTCFullYear(); }catch(e){ return String(d||''); } }
+function _dokNo(id){ return 'MTL-' + id; }
+function _kindLabel(s){ return s.organization_id ? 'organizace' : (s.gym_id ? 'klub' : (s.billing_identity==='payout' ? 'kou\u010d \u00b7 re\u017eim klub' : 'kou\u010d')); }
 
-// Krátký průvodní text k příloze. Celý doklad se dřív vypisoval i do těla e-mailu, takže ho
-// člověk dostal dvakrát -- a v mobilu musel dlouhou tabulkou prorolovat, aby se dostal k příloze,
-// která je to podstatné. Když příloha z nějakého důvodu nevznikne, pošle se doklad v těle dál.
-function dokladMailHtml(ME, buyer, kind, period, cur, data, test, testMode, hasPdf){
-  if(!hasPdf) return dokladHtml(ME, buyer, kind, period, cur, data, test, testMode);
-  const nm = (buyer && buyer.name) ? String(buyer.name) : '';
-  const tot = (data && data.total != null) ? data.total : null;
-  return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.6;">'
-    + (testMode ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:14px;">\u{1F9EA} TESTOVAC\u00cd RE\u017dIM \u2014 nejde o form\u00e1ln\u00ed da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo</div>' : '')
-    + '<p style="margin:0 0 10px;">Dobr\u00fd den' + (nm ? (', ' + esc(nm)) : '') + ',</p>'
-    + '<p style="margin:0 0 10px;">v p\u0159\u00edloze posíl\u00e1me doklad o provizi MTL za obdob\u00ed <b>' + esc(periodLabel(period)) + '</b>'
-    + (tot != null ? (' \u2014 celkem <b>' + esc(_money(tot, cur)) + '</b>') : '') + '.</p>'
-    + '<p style="margin:0 0 10px;color:#666;font-size:13px;">Provize je ji\u017e str\u017een\u00e1 nebo na\u00fa\u010dtovan\u00e1. Nejde o v\u00fdzvu k platb\u011b.</p>'
-    + '<p style="margin:18px 0 0;color:#888;font-size:12px;">Martial Training Lab</p></div>';
+// ── ODBĚRATEL ────────────────────────────────────────────────────────────────────────────
+// Jedno čtení pro všechny tři druhy. Organizace se dřív četla z profiles podle id organizace,
+// takže doklad organizace neměl odběratele vůbec.
+async function loadBuyer(kind, entityId, ownerId, bp) {
+  let sel;
+  if (kind === 'gym') sel = `gyms?id=eq.${entityId}&select=name,legal_name,billing_line1,billing_line2,billing_city,billing_postal,tax_id,vat_id,vat_payer,billing_country,country,invoice_email,contact_email,billing_phone,contact_phone&limit=1`;
+  else if (kind === 'organization') sel = `organizations?id=eq.${entityId}&select=name,legal_name,billing_line1,billing_line2,billing_city,billing_postal,tax_id,vat_id,vat_payer,billing_country,country,invoice_email,contact_email,contact_phone&limit=1`;
+  else sel = `profiles?id=eq.${entityId}&select=name,email,country,${bp}legal_name,${bp}billing_line1,${bp}billing_line2,${bp}billing_city,${bp}billing_postal,${bp}tax_id,${bp}vat_id,${bp}vat_payer,${bp}billing_country,${bp}invoice_email,${bp}billing_phone&limit=1`;
+  const r = ((await sb(sel)) || [])[0];
+  if (!r) return null;
+  const g = (k) => r[(kind === 'coach' ? bp : '') + k];
+  const b = { name: r.name || null, legal_name: g('legal_name') || null, tax_id: g('tax_id') || null, vat_id: g('vat_id') || null,
+    vat_payer: !!g('vat_payer'), billing_country: g('billing_country') || null, country: r.country || null,
+    address: _billAddr(r, kind === 'coach' ? bp : '') || null,
+    email: g('invoice_email') || r.contact_email || null, phone: g('billing_phone') || r.contact_phone || null };
+  // Kam doklad poslat: fakturační e-mail subjektu, jinak účet toho, kdo platí.
+  if (!b.email && ownerId) { try { const o = ((await sb(`profiles?id=eq.${ownerId}&select=email&limit=1`)) || [])[0]; b.email = (o && o.email) || null; } catch (e) {} }
+  return b;
 }
 
+// ── SNÍMEK ───────────────────────────────────────────────────────────────────────────────
+// Jediný popis dokladu. Z něj se ukládá řádek, kreslí PDF, tělo e-mailu i zobrazení v appce --
+// dřív měl každý z nich jiný obsah a appka ukazovala nejchudší verzi.
+function buildSnap(kind, entityId, ownerId, identity, period, cur, data, ME, buyer, testMode) {
+  const items = Object.values(data.rates || {});
+  const bank = items.filter(i => i.method !== 'stripe').reduce((a, i) => a + i.fee, 0);
+  const strp = items.filter(i => i.method === 'stripe').reduce((a, i) => a + i.fee, 0);
+  const B = buyer || {};
+  const legal = B.legal_name || B.name || null;
+  const snap = { period_month: period, currency: cur, amount: data.total, bank_amount: bank, stripe_amount: strp, line_items: items,
+    status: 'issued', kind: 'unified', owner_id: ownerId, charged_at: new Date().toISOString(), test_mode: !!testMode,
+    billing_identity: (kind === 'coach') ? (identity || 'own') : null,
+    cust_name: legal, cust_trade_name: (B.name && B.name !== legal) ? B.name : null,
+    cust_ico: B.tax_id || null, cust_dic: B.vat_id || null, cust_address: B.address || null,
+    cust_vat_payer: !!B.vat_payer, cust_country: B.billing_country || B.country || null,
+    cust_email: B.email || null, cust_phone: B.phone || null,
+    sup_name: ME.name || 'Martial Training Lab s.r.o.', sup_ico: ME.ico || null, sup_dic: ME.dic || null, sup_address: ME.sidlo || null,
+    sup_vat_payer: !!ME.vat_payer, sup_vat_rate: (ME.vat_rate != null ? ME.vat_rate : null),
+    sup_phone: ME.contact_phone || null, sup_email: ME.contact_email || null,
+    gym_id: null, coach_id: null, organization_id: null };
+  snap[kind === 'gym' ? 'gym_id' : (kind === 'organization' ? 'organization_id' : 'coach_id')] = entityId;
+  return snap;
+}
+function _supLines(s){ return [s.sup_name, s.sup_address, s.sup_ico ? ('I\u010cO: ' + s.sup_ico) : '', s.sup_dic ? ('DI\u010c: ' + s.sup_dic) : '', s.sup_phone ? ('Tel.: ' + s.sup_phone) : '', s.sup_email ? ('E-mail: ' + s.sup_email) : ''].filter(Boolean); }
+function _custLines(s){ return [s.cust_name || '\u2014', s.cust_trade_name ? ((s.organization_id ? 'Organizace v MTL: ' : (s.gym_id ? 'Klub v MTL: ' : 'Kou\u010d v MTL: ')) + s.cust_trade_name) : '', s.cust_address, s.cust_ico ? ('I\u010cO: ' + s.cust_ico) : '', s.cust_dic ? ('DI\u010c: ' + s.cust_dic) : '', (s.cust_country && String(s.cust_country).toUpperCase() !== 'CZ') ? ('St\u00e1t: ' + s.cust_country) : '', s.cust_phone ? ('Tel.: ' + s.cust_phone) : '', s.cust_email ? ('E-mail: ' + s.cust_email) : ''].filter(Boolean); }
+function _howCharged(s){
+  const parts = [];
+  if (s.bank_amount > 0) parts.push('Provize z hotovosti, QR a plateb z banky (' + _money(s.bank_amount, s.currency) + ') byla str\u017eena z ulo\u017een\u00e9 platebn\u00ed karty dne ' + _czDate(s.charged_at) + '.');
+  if (s.stripe_amount > 0) parts.push('Provize z plateb kartou (' + _money(s.stripe_amount, s.currency) + ') byla str\u017eena p\u0159\u00edmo p\u0159i ka\u017ed\u00e9 platb\u011b.');
+  return parts.join(' ');
+}
+const _TEST_BANNER = '\u{1F9EA} TESTOVAC\u00cd RE\u017dIM \u2014 nejde o form\u00e1ln\u00ed da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo';
 
-// ── PŘEHLED PŘI NULOVÉ PROVIZI ───────────────────────────────────────────────────────────────
-// V zaváděcím období se provize neúčtuje, takže "Doklad o provizi MTL" by tvrdil něco, co se
-// nestalo -- stojí v něm, že provize byla stržena nebo naúčtována. Vystavit ho beze změny by
-// bylo horší než nevystavit nic.
-//
-// Klub ale má vidět, že službu odebíral. Posílá se proto PŘEHLED: kolik transakcí přes MTL
-// prošlo a jaký objem, s jasným "za toto období nebyla účtována žádná provize". Až nula skončí,
-// má klub v předchozích přehledech vidět, co ta služba obnáší.
-function introSummaryHtml(ME, buyer, kind, period, cur, data, testMode, until){
-  const bName = (buyer && (buyer.legal_name || buyer.name)) || '\u2014';
-  const _cnt = Object.values(data.rates || {}).reduce((a, i) => a + (i.count || 0), 0);
-  const _vol = Object.values(data.rates || {}).reduce((a, i) => a + (i.gross || 0), 0);
-  const _u = until ? _czDate(until) : null;
-  return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;color:#1a1a1a;">'
-    + (testMode ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:12px;">\u{1F9EA} TESTOVAC\u00cd RE\u017dIM \u2014 nejde o form\u00e1ln\u00ed da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo</div>' : '')
-    + '<h2 style="margin:0 0 2px;">P\u0159ehled zprost\u0159edkovan\u00fdch plateb</h2>'
-    + '<div style="font-size:13px;color:#666;margin-bottom:14px;">Obdob\u00ed ' + esc(periodLabel(period))
-    + '  \u00b7  ' + (kind === 'coach' ? 'kou\u010d' : 'klub') + '</div>'
-    + '<div class="cols" style="display:flex;gap:24px;margin-bottom:16px;">'
-      + '<div style="flex:1;font-size:13px;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:4px;">Poskytovatel slu\u017eby</div><b>' + esc(ME.name) + '</b></div>'
-      + '<div style="flex:1;font-size:13px;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:4px;">Odb\u011bratel</div><b>' + esc(bName) + '</b>'
-      + ((buyer && buyer.name && buyer.name !== bName) ? ('<br>' + (kind === 'coach' ? 'Kou\u010d v MTL: ' : 'Klub v MTL: ') + esc(buyer.name)) : '')
-      + ((buyer && buyer.tax_id) ? ('<br>I\u010cO: ' + esc(buyer.tax_id)) : '') + '</div>'
-    + '</div>'
-    + '<table style="width:100%;border-collapse:collapse;margin-top:8px;">'
-      + '<tr><td style="padding:8px 0;border-bottom:1px solid #eee;">Zprost\u0159edkovan\u00fdch plateb</td><td style="padding:8px 0;border-bottom:1px solid #eee;text-align:right;"><b>' + _cnt + '</b></td></tr>'
-      + '<tr><td style="padding:8px 0;border-bottom:1px solid #eee;">Objem</td><td style="padding:8px 0;border-bottom:1px solid #eee;text-align:right;"><b>' + esc(_money(_vol, cur)) + '</b></td></tr>'
-      + '<tr><td style="padding:10px 0;font-weight:700;">Provize MTL</td><td style="padding:10px 0;text-align:right;font-weight:700;">0,00 ' + String(cur).toUpperCase() + '</td></tr>'
-    + '</table>'
-    + '<p style="font-size:12px;color:#666;line-height:1.6;margin-top:14px;">Za toto obdob\u00ed nebyla \u00fa\u010dtov\u00e1na \u017e\u00e1dn\u00e1 provize'
-    + (_u ? (' \u2014 zav\u00e1d\u011bc\u00ed obdob\u00ed plat\u00ed do ' + esc(_u) + '.') : '.')
-    + ' P\u0159ehled slou\u017e\u00ed jako doklad o odeb\u00edran\u00e9 slu\u017eb\u011b zprost\u0159edkov\u00e1n\u00ed plateb. Nejde o da\u0148ov\u00fd doklad.</p>'
+function dokladHtml(s){
+  const items = s.line_items || [];
+  const cur = s.currency;
+  const th = 'padding:8px 10px;font-size:11px;color:#666;font-weight:700;';
+  const rows = items.map(function(i){ return '<tr><td style="padding:7px 10px;border-bottom:1px solid #eee;">'+esc(_methodLabel(i.method))+'</td><td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:center;">'+_pct(i.rate)+'</td><td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:center;">'+(i.count||0)+'</td><td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:right;">'+_money(i.gross,cur)+'</td><td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:right;">'+_money(i.fee,cur)+'</td></tr>'; }).join('');
+  let vat = '';
+  if (s.sup_vat_payer) { const rate = s.sup_vat_rate || 21; const base = s.amount / (1 + rate / 100); vat = '<tr><td>Z\u00e1klad dan\u011b</td><td style="text-align:right;">'+_money(base,cur)+'</td></tr><tr><td>DPH '+rate+' %</td><td style="text-align:right;">'+_money(s.amount - base,cur)+'</td></tr>'; }
+  else vat = '<tr><td colspan="2" style="font-size:11px;color:#666;padding-top:6px;">Dodavatel nen\u00ed pl\u00e1tcem DPH.</td></tr>';
+  const cnt = items.reduce((a, i) => a + (i.count || 0), 0), vol = items.reduce((a, i) => a + (i.gross || 0), 0);
+  const col = function(lbl, lines){ return '<div style="flex:1;min-width:220px;font-size:13px;line-height:1.55;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:4px;">'+lbl+'</div>'+lines.map(function(l,ix){ return ix===0?('<b>'+esc(l)+'</b>'):esc(l); }).join('<br>')+'</div>'; };
+  return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:680px;margin:0 auto;color:#1a1a1a;">'
+    + (s.test_mode ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:12px;">'+_TEST_BANNER+'</div>' : '')
+    + '<h2 style="margin:0 0 4px;">Doklad o provizi MTL</h2>'
+    + '<div style="font-size:13px;color:#555;">'+(s.id?(esc(_dokNo(s.id))+' \u00b7 '):'')+'Vystaveno '+esc(_czDate(s.charged_at))+' \u00b7 Obdob\u00ed '+esc(periodLabel(s.period_month))+' \u00b7 '+esc(_kindLabel(s))+'</div>'
+    + '<div style="display:flex;flex-wrap:wrap;gap:24px;margin:18px 0 6px;">'+col('Dodavatel', _supLines(s))+col('Odb\u011bratel', _custLines(s))+'</div>'
+    + '<table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:12px;"><thead><tr style="background:#f5f2ee;"><th style="'+th+'text-align:left;">Forma platby</th><th style="'+th+'">Sazba</th><th style="'+th+'">Plateb</th><th style="'+th+'text-align:right;">Objem plateb</th><th style="'+th+'text-align:right;">Provize</th></tr></thead><tbody>'+rows+'</tbody></table>'
+    + '<table style="width:100%;border-collapse:collapse;font-size:14px;margin-top:4px;">'+vat+'<tr style="font-weight:800;"><td style="border-top:2px solid #333;padding-top:8px;">Celkem</td><td style="text-align:right;border-top:2px solid #333;padding-top:8px;">'+_money(s.amount,cur)+'</td></tr></table>'
+    + '<div style="margin-top:10px;font-size:12px;color:#555;">Zprost\u0159edkovan\u00fdch plateb: <b>'+cnt+'</b> \u00b7 objem <b>'+_money(vol,cur)+'</b></div>'
+    + '<p style="font-size:12px;color:#555;margin-top:10px;line-height:1.55;">'+esc(_howCharged(s))+' Nejde o v\u00fdzvu k platb\u011b.</p>'
     + '</div>';
 }
 
-function dokladHtml(ME, buyer, kind, period, cur, data, test, testMode){
-  const _ph = test ? 'Nevypln\u011bno' : '';
-  ME = ME || {}; const esc=function(x){ return String(x==null?'':x).replace(/[<>&]/g,function(c){return c==='<'?'&lt;':c==='>'?'&gt;':'&amp;';}); };
-  const items = Object.values(data.rates);
-  const rows = items.map(function(i){ return '<tr><td style="padding:6px 10px;border-bottom:1px solid #eee;">'+_methodLabel(i.method)+'</td><td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:center;">'+_pct(i.rate)+'</td><td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:center;">'+i.count+'</td><td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:right;">'+_money(i.gross,cur)+'</td><td style="padding:6px 10px;border-bottom:1px solid #eee;text-align:right;">'+_money(i.fee,cur)+'</td></tr>'; }).join('');
-  const bank = items.filter(function(i){return i.method!=='stripe';}).reduce(function(a,i){return a+i.fee;},0);
-  const strp = items.filter(function(i){return i.method==='stripe';}).reduce(function(a,i){return a+i.fee;},0);
-  const total = data.total;
-  const supLines = ['<b>'+esc(ME.name||'Martial Training Lab s.r.o.')+'</b>', ME.ico?('I\u010cO: '+esc(ME.ico)):(_ph?('I\u010cO: '+_ph):''), ME.sidlo?esc(ME.sidlo):'', ME.dic?('DI\u010c: '+esc(ME.dic)):(_ph?('DI\u010c: '+_ph):''), ME.vat_id?('VAT ID: '+esc(ME.vat_id)):'', ME.contact_phone?('Kontaktn\u00ed telefon: '+esc(ME.contact_phone)):'', ME.contact_email?('Kontaktn\u00ed e-mail: '+esc(ME.contact_email)):''].filter(Boolean).join('<br>');
-  const bName = (buyer && (buyer.legal_name || buyer.name)) || '\u2014';
-  const buyLines = ['<b>'+esc(bName)+'</b>',
-    (buyer&&buyer.name&&buyer.name!==bName)?(((kind==='coach')?'Kou\u010d v MTL: ':'Klub v MTL: ')+esc(buyer.name)):'', (buyer&&buyer.tax_id)?('I\u010cO: '+esc(buyer.tax_id)):(_ph?('I\u010cO: '+_ph):''), _billAddr(buyer)?esc(_billAddr(buyer)):'', (buyer&&buyer.vat_id)?('DI\u010c: '+esc(buyer.vat_id)):(_ph?('DI\u010c: '+_ph):'')].filter(Boolean).join('<br>');
-  let vatBlock;
-  if(ME.vat_payer){ const rate=ME.vat_rate||21; const base=total/(1+rate/100); const vat=total-base; vatBlock='<tr><td>Z\u00e1klad dan\u011b</td><td style="text-align:right;">'+_money(base,cur)+'</td></tr><tr><td>DPH '+rate+'%</td><td style="text-align:right;">'+_money(vat,cur)+'</td></tr>'; }
-  else { vatBlock='<tr><td colspan="2" style="font-size:11px;color:#666;padding-top:6px;">Dodavatel nen\u00ed pl\u00e1tcem DPH.</td></tr>'; }
-  // Doklad vystavený v testovacím režimu musí být jako testovací poznat i v e-mailu -- ten
-  // člověku zůstane ve schránce i po smazání testovacích dat z databáze.
-  const _tm = testMode
-    ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:12px;">\u{1F9EA} TESTOVAC\u00cd RE\u017dIM \u2014 nejde o form\u00e1ln\u00ed da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo</div>'
-    : '';
-  return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;color:#1a1a1a;">'
-    +_tm
-    +'<h2 style="margin:0 0 2px;">Doklad o provizi MTL</h2>'
-    +'<div style="font-size:13px;color:#666;margin-bottom:14px;">Obdob\u00ed '+periodLabel(period)+'  \u00b7  '+(kind==='gym'?'klub':'kou\u010d')+'</div>'
-    +'<div style="display:flex;gap:24px;margin-bottom:8px;"><div style="flex:1;font-size:13px;"><div style="font-size:11px;text-transform:uppercase;color:#888;margin-bottom:4px;">Dodavatel</div>'+supLines+'</div><div style="flex:1;font-size:13px;"><div style="font-size:11px;text-transform:uppercase;color:#888;margin-bottom:4px;">Odb\u011bratel</div>'+buyLines+'</div></div>'
-    +'<table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:12px;"><thead><tr style="background:#f5f2ee;"><th style="padding:8px 10px;text-align:left;">Forma</th><th style="padding:8px 10px;">Sazba</th><th style="padding:8px 10px;">Transakc\u00ed</th><th style="padding:8px 10px;text-align:right;">Z\u00e1klad</th><th style="padding:8px 10px;text-align:right;">Provize</th></tr></thead><tbody>'+rows+'</tbody></table>'
-    +'<table style="width:100%;border-collapse:collapse;font-size:14px;margin-top:2px;">'+vatBlock+'<tr style="font-weight:800;"><td style="border-top:2px solid #333;padding-top:8px;">Celkem</td><td style="text-align:right;border-top:2px solid #333;padding-top:8px;">'+_money(total,cur)+'</td></tr></table>'
-    +'<div style="margin-top:10px;font-size:12px;color:#555;">Zprost\u0159edkovan\u00fdch plateb: <b>'
-      +Object.values(data.rates||{}).reduce(function(a,i){ return a+(i.count||0); },0)
-      +'</b> \u00b7 objem <b>'+_money(Object.values(data.rates||{}).reduce(function(a,i){ return a+(i.gross||0); },0), cur)+'</b></div>'
-    +'<div style="margin-top:4px;font-size:12px;color:#555;">Bankovn\u00ed p\u0159evod (str\u017eeno z karty): <b>'+_money(bank,cur)+'</b> \u00b7 Stripe (\u017eiv\u011b): <b>'+_money(strp,cur)+'</b></div>'
-    +'<p style="color:#999;font-size:11px;margin-top:18px;">Doklad o ji\u017e str\u017een\u00e9 / na\u00fa\u010dtovan\u00e9 provizi MTL za uveden\u00e9 obdob\u00ed. Nejde o v\u00fdzvu k platb\u011b.</p></div>';
-}
-// The receipt went out as HTML in the body, which cannot be filed or handed to an accountant.
-// Same approach stripe-webhook already uses for its payment receipts: pdfkit with the DejaVu font,
-// because the built-in fonts have no diacritics and Czech names come out mangled.
-function dokladPdf(ME, buyer, kind, period, cur, data, test, testMode){
+function dokladPdf(s){
   return new Promise(function(resolve, reject){
     try{
       const doc = new PDFDocument({ size:'A4', margin:50 });
       const chunks=[]; doc.on('data', function(d){ chunks.push(d); }); doc.on('end', function(){ resolve(Buffer.concat(chunks)); }); doc.on('error', reject);
       doc.registerFont('cz', DEJAVU_CZ); doc.font('cz');
-      const ph = test ? 'Nevypln\u011bno' : '';
-      const B = buyer || {};
-      // Razítko testovacího režimu i v PDF. Příloha z mailu člověku zůstane na disku i po
-      // smazání testovacích dat, takže bez něj vypadá jako pravý daňový doklad.
-      if(testMode){
-        // fillAndStroke posune doc.y, takže dopočítávat pozici textu z něj znamenalo psát přes
-        // rámeček -- a logo pod ním se pak kreslilo taky do něj. Souřadnice se proto drží pevně
-        // a kurzor se nastaví AŽ POTOM, pod celý pruh.
+      const cur = s.currency;
+      if (s.test_mode) {
         const _ty = doc.y;
         doc.rect(50, _ty, 495, 24).fillAndStroke('#FDECEC', '#F3C0C0');
-        doc.fillColor('#8a1c1c').fontSize(9)
-           .text('TESTOVAC\u00cd RE\u017dIM \u2014 nejde o form\u00e1ln\u00ed da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo',
-                 58, _ty + 8, { width: 479, align: 'center', lineBreak: false });
-        doc.y = _ty + 24 + 14;
-        doc.x = 50;
+        doc.fillColor('#8a1c1c').fontSize(9).text(_TEST_BANNER.replace('\u{1F9EA} ', ''), 58, _ty + 8, { width: 479, align: 'center', lineBreak: false });
+        doc.y = _ty + 38; doc.x = 50;
       }
-      doc.fontSize(22).fillColor('#E11111').text('MTL');
+      doc.fontSize(22).fillColor('#E11111').text('MTL', 50, doc.y);
       doc.moveDown(0.15).fontSize(15).fillColor('#111111').text('Doklad o provizi MTL');
-      doc.moveDown(0.1).fontSize(10).fillColor('#777777').text('Obdob\u00ed ' + periodLabel(period) + '  \u00b7  ' + (kind === 'gym' ? ('klub' + (B.name ? (' ' + B.name) : '')) : 'kou\u010d'));
+      doc.moveDown(0.1).fontSize(10).fillColor('#555555').text((s.id ? (_dokNo(s.id) + '  \u00b7  ') : '') + 'Vystaveno ' + _czDate(s.charged_at) + '  \u00b7  Obdob\u00ed ' + periodLabel(s.period_month) + '  \u00b7  ' + _kindLabel(s));
       doc.moveDown(1);
-
       const yTop = doc.y;
-      doc.fontSize(9).fillColor('#888888').text('DODAVATEL', 50, yTop, { width:230 });
-      doc.fontSize(11).fillColor('#111111').text(ME.name || 'Martial Training Lab s.r.o.', 50, doc.y, { width:230 });
-      if (ME.ico) doc.fontSize(10).fillColor('#555555').text('I\u010cO: ' + ME.ico, 50, doc.y, { width:230 });
-      if (ME.dic) doc.fontSize(10).fillColor('#555555').text('DI\u010c: ' + ME.dic, 50, doc.y, { width:230 });
-      if (ME.sidlo) doc.fontSize(10).fillColor('#555555').text(ME.sidlo, 50, doc.y, { width:230 });
-      const yLeft = doc.y;
-
-      doc.fontSize(9).fillColor('#888888').text('ODB\u011aRATEL', 315, yTop, { width:230 });
-      doc.fontSize(11).fillColor('#111111').text(B.legal_name || B.name || ph, 315, doc.y, { width:230 });
-      // Provozní název klubu pod právním. Provize se strhává ZA KAŽDÝ KLUB ZVLÁŠŤ, takže kdo má
-      // dva kluby pod jednou firmou, dostane dva doklady se stejným odběratelem a bez tohohle
-      // řádku by je nerozeznal -- ani on, ani jeho účetní.
-      if (kind === 'gym' && B.name && B.legal_name && B.name !== B.legal_name) {
-        doc.fontSize(10).fillColor('#555555').text('Klub: ' + B.name, 315, doc.y, { width:230 });
-      }
-      if (B.tax_id) doc.fontSize(10).fillColor('#555555').text('I\u010cO: ' + B.tax_id, 315, doc.y, { width:230 });
-      if (B.vat_id) doc.fontSize(10).fillColor('#555555').text('DI\u010c: ' + B.vat_id, 315, doc.y, { width:230 });
-      if (_billAddr(B)) doc.fontSize(10).fillColor('#555555').text(_billAddr(B), 315, doc.y, { width:230 });
-      doc.y = Math.max(yLeft, doc.y) + 18;
-
-      const cols = [50, 190, 260, 340, 440];
-      const head = ['Forma','Sazba','Transakc\u00ed','Z\u00e1klad','Provize'];
+      const colText = function(x, label, lines){
+        doc.fontSize(9).fillColor('#888888').text(label, x, yTop, { width:230 });
+        lines.forEach(function(l, ix){ if (ix === 0) doc.fontSize(11).fillColor('#111111').text(l, x, doc.y, { width:230 }); else doc.fontSize(10).fillColor('#555555').text(l, x, doc.y, { width:230 }); });
+        return doc.y;
+      };
+      const yL = colText(50, 'DODAVATEL', _supLines(s));
+      const yR = colText(315, 'ODB\u011aRATEL', _custLines(s));
+      doc.y = Math.max(yL, yR) + 18;
+      const cols = [50, 190, 260, 330, 440];
+      const head = ['Forma platby','Sazba','Plateb','Objem plateb','Provize'];
       let y = doc.y;
       doc.fontSize(9).fillColor('#888888');
       head.forEach(function(h,i){ doc.text(h, cols[i], y, { width: (i>=3?105:(i===0?135:70)), align: (i>=3?'right':(i===0?'left':'center')) }); });
-      y = doc.y + 4;
-      doc.moveTo(50,y).lineTo(545,y).strokeColor('#dddddd').stroke(); y += 6;
-
-      Object.values(data.rates).forEach(function(it){
+      y = doc.y + 4; doc.moveTo(50,y).lineTo(545,y).strokeColor('#dddddd').stroke(); y += 6;
+      (s.line_items || []).forEach(function(it){
         doc.fontSize(10).fillColor('#111111');
         doc.text(_methodLabel(it.method), cols[0], y, { width:135 });
         doc.text(_pct(it.rate), cols[1], y, { width:70, align:'center' });
-        doc.text(String(it.count), cols[2], y, { width:70, align:'center' });
+        doc.text(String(it.count || 0), cols[2], y, { width:70, align:'center' });
         doc.text(_money(it.gross, cur), cols[3], y, { width:105, align:'right' });
         doc.text(_money(it.fee, cur), cols[4], y, { width:105, align:'right' });
-        y = doc.y + 5;
-        doc.moveTo(50,y).lineTo(545,y).strokeColor('#eeeeee').stroke(); y += 5;
+        y = doc.y + 5; doc.moveTo(50,y).lineTo(545,y).strokeColor('#eeeeee').stroke(); y += 5;
       });
-
       doc.y = y + 4;
-      if (!ME.vat_payer) doc.fontSize(9).fillColor('#777777').text('Dodavatel nen\u00ed pl\u00e1tcem DPH.', 50, doc.y, { width:495 });
+      if (s.sup_vat_payer) {
+        const rate = s.sup_vat_rate || 21; const base = s.amount / (1 + rate / 100);
+        doc.fontSize(10).fillColor('#555555').text('Z\u00e1klad dan\u011b: ' + _money(base, cur) + '   \u00b7   DPH ' + rate + ' %: ' + _money(s.amount - base, cur), 50, doc.y, { width:495 });
+      } else doc.fontSize(9).fillColor('#777777').text('Dodavatel nen\u00ed pl\u00e1tcem DPH.', 50, doc.y, { width:495 });
       doc.moveDown(0.5);
       const yT = doc.y;
       doc.fontSize(13).fillColor('#111111').text('Celkem', 50, yT, { width:230 });
-      doc.text(_money(data.total, cur), 315, yT, { width:230, align:'right' });
-      doc.y = Math.max(doc.y, yT) + 8;
-      doc.fontSize(9).fillColor('#666666').text('Bankovn\u00ed p\u0159evod (str\u017eeno z karty): ' + _money(data.bank || 0, cur) + '  \u00b7  Stripe (\u017eiv\u011b): ' + _money(data.stripe || 0, cur), 50, doc.y, { width:495 });
-      doc.moveDown(1).fontSize(9).fillColor('#999999').text('Doklad o ji\u017e str\u017een\u00e9 / na\u00fa\u010dtovan\u00e9 provizi MTL za uveden\u00e9 obdob\u00ed. Nejde o v\u00fdzvu k platb\u011b.', 50, doc.y, { width:495 });
+      doc.text(_money(s.amount, cur), 315, yT, { width:230, align:'right' });
+      doc.y = Math.max(doc.y, yT) + 10;
+      const items = s.line_items || [];
+      doc.fontSize(9).fillColor('#555555').text('Zprost\u0159edkovan\u00fdch plateb: ' + items.reduce((a, i) => a + (i.count || 0), 0) + '  \u00b7  objem ' + _money(items.reduce((a, i) => a + (i.gross || 0), 0), cur), 50, doc.y, { width:495 });
+      doc.moveDown(0.6).fontSize(9).fillColor('#666666').text(_howCharged(s) + ' Nejde o v\u00fdzvu k platb\u011b.', 50, doc.y, { width:495 });
       doc.end();
     }catch(e){ reject(e); }
   });
 }
 
+// Krátký průvodní text k příloze. Když PDF nevznikne, jde celý doklad v těle.
+function dokladMailHtml(s, hasPdf){
+  if (!hasPdf) return dokladHtml(s);
+  return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.6;">'
+    + (s.test_mode ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:14px;">'+_TEST_BANNER+'</div>' : '')
+    + '<p style="margin:0 0 10px;">Dobr\u00fd den' + (s.cust_name ? (', ' + esc(s.cust_trade_name || s.cust_name)) : '') + ',</p>'
+    + '<p style="margin:0 0 10px;">v p\u0159\u00edloze pos\u00edl\u00e1me doklad ' + esc(_dokNo(s.id)) + ' o provizi MTL za obdob\u00ed <b>' + esc(periodLabel(s.period_month)) + '</b> \u2014 celkem <b>' + esc(_money(s.amount, s.currency)) + '</b>.</p>'
+    + '<p style="margin:0 0 10px;color:#666;font-size:13px;">' + esc(_howCharged(s)) + ' Nejde o v\u00fdzvu k platb\u011b.</p>'
+    + '<p style="margin:18px 0 0;color:#888;font-size:12px;">' + esc(s.sup_name || 'Martial Training Lab') + (s.sup_email ? (' \u00b7 ' + esc(s.sup_email)) : '') + (s.sup_phone ? (' \u00b7 ' + esc(s.sup_phone)) : '') + '</p></div>';
+}
+
+// ── PŘEHLED PŘI NULOVÉ PROVIZI ───────────────────────────────────────────────────────────────
+// V zaváděcím období se provize neúčtuje, takže "Doklad o provizi MTL" by tvrdil něco, co se
+// nestalo. Posílá se PŘEHLED odebrané služby s jasným "provize nebyla účtována".
+function introSummaryHtml(s, until){
+  const items = s.line_items || [];
+  const _cnt = items.reduce((a, i) => a + (i.count || 0), 0);
+  const _vol = items.reduce((a, i) => a + (i.gross || 0), 0);
+  return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:640px;margin:0 auto;color:#1a1a1a;">'
+    + (s.test_mode ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:12px;">'+_TEST_BANNER+'</div>' : '')
+    + '<h2 style="margin:0 0 2px;">P\u0159ehled zprost\u0159edkovan\u00fdch plateb</h2>'
+    + '<div style="font-size:13px;color:#666;margin-bottom:14px;">Obdob\u00ed ' + esc(periodLabel(s.period_month)) + '  \u00b7  ' + esc(_kindLabel(s)) + '</div>'
+    + '<div style="font-size:13px;margin-bottom:14px;"><b>' + esc(s.cust_name || '\u2014') + '</b>' + (s.cust_ico ? ('<br>I\u010cO: ' + esc(s.cust_ico)) : '') + '</div>'
+    + '<table style="width:100%;border-collapse:collapse;">'
+      + '<tr><td style="padding:8px 0;border-bottom:1px solid #eee;">Zprost\u0159edkovan\u00fdch plateb</td><td style="padding:8px 0;border-bottom:1px solid #eee;text-align:right;"><b>' + _cnt + '</b></td></tr>'
+      + '<tr><td style="padding:8px 0;border-bottom:1px solid #eee;">Objem</td><td style="padding:8px 0;border-bottom:1px solid #eee;text-align:right;"><b>' + esc(_money(_vol, s.currency)) + '</b></td></tr>'
+      + '<tr><td style="padding:10px 0;font-weight:700;">Provize MTL</td><td style="padding:10px 0;text-align:right;font-weight:700;">' + esc(_money(0, s.currency)) + '</td></tr>'
+    + '</table>'
+    + '<p style="font-size:12px;color:#666;line-height:1.6;margin-top:14px;">Za toto obdob\u00ed nebyla \u00fa\u010dtov\u00e1na \u017e\u00e1dn\u00e1 provize' + (until ? (' \u2014 zav\u00e1d\u011bc\u00ed obdob\u00ed plat\u00ed do ' + esc(_czDate(until)) + '.') : '.') + ' Nejde o da\u0148ov\u00fd doklad.</p>'
+    + '</div>';
+}
+
+// Odeslání přes Resend. Vrací, jestli to prošlo -- dřív se odpověď nečetla, takže odmítnutý
+// e-mail (neověřená doména, špatný odesílatel) vypadal stejně jako odeslaný.
 async function sendEmail(to, subject, html, attachments){
-  if(!RESEND || !to) return;
-  try{ await fetch('https://api.resend.com/emails', { method:'POST', headers:{ Authorization:'Bearer '+RESEND, 'Content-Type':'application/json' }, body: JSON.stringify(Object.assign({ from: MAIL_FROM, to:[to], subject, html }, (attachments && attachments.length) ? { attachments } : {})) }); }catch(e){ console.error('doklad email', e.message); }
+  if (!RESEND) return { ok: false, error: 'RESEND_API_KEY není nastavený' };
+  if (!to) return { ok: false, error: 'chybí adresa' };
+  try{
+    const r = await fetch('https://api.resend.com/emails', { method:'POST', headers:{ Authorization:'Bearer '+RESEND, 'Content-Type':'application/json' }, body: JSON.stringify(Object.assign({ from: MAIL_FROM, to:[to], subject, html }, (attachments && attachments.length) ? { attachments } : {})) });
+    if (!r.ok) { const t = await r.text(); console.error('doklad email', r.status, t.slice(0, 300)); return { ok: false, error: 'Resend ' + r.status + ': ' + t.slice(0, 200) }; }
+    return { ok: true };
+  }catch(e){ console.error('doklad email', e.message); return { ok: false, error: e.message }; }
 }
 
 export default async function handler(req, res) {
@@ -371,137 +381,99 @@ export default async function handler(req, res) {
     const gymMap = {};
     if (gymIds.length) { const gs = await sb(`gyms?id=in.(${gymIds.join(',')})&select=id,name,owner_id`); (gs || []).forEach(g => { gymMap[g.id] = g; }); }
 
+    const mailDiag = { sent: 0, failed: 0, lastError: null };
     async function issue(kind, entityId, ownerId, cur, data) {
       // Přípona |payout na klíči znamená klubové plnění kouče -> druhá fakturační identita.
       const _payout = /\|payout$/.test(String(entityId));
       if (_payout) entityId = String(entityId).replace(/\|payout$/, '');
       if (_payout) ownerId = entityId;
       const _bp = _payout ? 'payout_' : '';
+      const identity = (kind === 'coach') ? (_payout ? 'payout' : 'own') : null;
       const col = kind === 'gym' ? 'gym_id' : (kind === 'organization' ? 'organization_id' : 'coach_id');
-      // Zaváděcí období: provize se neúčtovala, takže "doklad o stržené provizi" by lhal.
-      // Místo něj přehled odebrané služby -- viz introSummaryHtml.
       let _intro = null;
       try {
         const _p = (await sb(`profiles?id=eq.${encodeURIComponent(ownerId)}&select=billing_country`))[0];
         _intro = await introFreeFor(sb, _p && _p.billing_country);
       } catch (e) { console.error('issue introFreeFor:', e.message); }
       if (TEST && !dailyAny && String(ownerId) !== FOUNDER_UUID) { skipped++; return; }
-      // idempotent: one unified doklad per entity+period+currency
-      // period is the DAY in daily mode and the month otherwise, so one receipt per entity per
-      // charge either way -- a second run on the same day cannot issue a duplicate.
-            // ilike i tady. Kontrola duplicity porovnává měnu s dřív vystavenými doklady, a kdyby se
-      // v nich lišila velikost písmen, nenajde je a vystaví doklad DRUHÝ RÁZ na to samé období.
-      const ex = await sb(`commission_doklady?select=id&${col}=eq.${entityId}&period_month=eq.${period}&currency=ilike.${encodeURIComponent(cur)}&kind=eq.unified&limit=1`);
+      // Jeden doklad na subjekt + období + měnu. U kouče ZVLÁŠŤ za každou identitu: vlastní 1:1 a
+      // režim klub jsou dva plátci -- dřív druhý doklad narazil na první a nevznikl.
+      const _idf = (kind === 'coach') ? (_payout ? '&billing_identity=eq.payout' : '&or=(billing_identity.is.null,billing_identity.eq.own)') : '';
+      const ex = await sb(`commission_doklady?select=id&${col}=eq.${entityId}&period_month=eq.${period}&currency=ilike.${encodeURIComponent(cur)}&kind=eq.unified${_idf}&limit=1`);
       if (ex && ex.length) { skipped++; return; }
 
-      // ---- FOREIGN-VAT GATE (toggle: platform_settings.require_vat_foreign) --------------------
-      // A cross-border EU B2B service must be reported in the souhrnne hlaseni, and that report
-      // needs the CUSTOMER'S VAT ID. Without it we cannot file, so (when the toggle is on) we do
-      // NOT issue the doklad: the commission simply stays pending and is invoiced retroactively
-      // once the provider supplies their VAT ID. Nothing is lost, nobody is blocked from trading.
-      // Safety: unknown country is treated as domestic -> we never block on uncertainty.
       let buyer = null;
-      try {
-        const _sel = (kind === 'gym')
-          ? `gyms?id=eq.${entityId}&select=name,legal_name,billing_line1,billing_line2,billing_city,billing_postal,tax_id,vat_id,billing_country,country&limit=1`
-          : `profiles?id=eq.${entityId}&select=name,${_bp}legal_name,${_bp}billing_line1,${_bp}billing_line2,${_bp}billing_city,${_bp}billing_postal,${_bp}tax_id,${_bp}vat_id,country,${_bp}billing_country&limit=1`;
-        const _b = await sb(_sel);
-        buyer = _b && _b[0];
-        // Zbytek funkce pracuje s bezprefixovými názvy, ať se nemusí měnit každé použití.
-        if (buyer && _bp) {
-          buyer = { name: buyer.name,
-            legal_name: buyer[_bp + 'legal_name'], billing_address: _billAddr(buyer, _bp),
-            tax_id: buyer[_bp + 'tax_id'], vat_id: buyer[_bp + 'vat_id'],
-            billing_country: buyer[_bp + 'billing_country'], country: buyer.country };
-        }
-        // Bez druhé identity se doklad NEVYSTAVÍ. Vystavit ho na osobní údaje kouče by
-        // znamenalo fakturovat provizi jiné entitě, než která plnění poskytla -- stejný
-        // důvod, proč se bez účtu režimu klub nenabídne ani platba. Provize zůstane
-        // pending a doúčtuje se, jakmile kouč druhou identitu vyplní.
-        if (_payout && !(buyer && buyer.legal_name)) {
-          console.log('[doklad] kouc', entityId, 'nema fakturacni identitu rezimu klub, doklad odlozen');
-          return;
-        }
-      } catch (e) {}
+      try { buyer = await loadBuyer(kind, entityId, ownerId, _bp); } catch (e) { console.error('loadBuyer', e.message); }
+      // Bez druhé identity se doklad NEVYSTAVÍ -- fakturovat provizi osobním údajům kouče by
+      // znamenalo jiný subjekt, než který plnění poskytl. record-cash platbu bez identity odmítne,
+      // takže sem se v praxi nedojde.
+      if (_payout && !(buyer && buyer.legal_name)) { console.log('[doklad] kouc', entityId, 'nema identitu rezimu klub, doklad odlozen'); deferred++; return; }
+      // ---- FOREIGN-VAT GATE (platform_settings.require_vat_foreign) ----
       if (!DAILY && ME && ME.require_vat_foreign) {
         const home = ctryCode({ country: ME.home_country }) || 'CZ';
         const bc = ctryCode(buyer);
-        // defer ONLY for intra-EU cross-border B2B with no VAT ID. Unknown country, domestic, or a
-        // non-EU buyer (US/TH/GB/CH) all issue normally - we never block on uncertainty or on exports.
         const euForeign = !!bc && bc !== home && EU_VAT.has(bc) && EU_VAT.has(home);
         const hasVat = !!(buyer && String(buyer.vat_id || '').trim());
         if (euForeign && !hasVat) {
           deferred++;
           if (ownerId) {
-            try {
-              await notify(ownerId, 'doklad_vat_needed',
-                `\u26a0\ufe0f Doklad za ${period} zat\u00edm nevystaven \u2014 dopl\u0148 DI\u010c (VAT ID), a\u0165 ti ho m\u016f\u017eeme vystavit podle EU pravidel. Provize z\u016fst\u00e1v\u00e1 evidovan\u00e1 a douc\u0165ujeme ji zp\u011btn\u011b.`,
-                { period, currency: cur, needs: 'vat_id' });
-            } catch (e) {}
+            try { await notify(ownerId, 'doklad_vat_needed', `\u26a0\ufe0f Doklad za ${periodLabel(period)} zat\u00edm nevystaven \u2014 dopl\u0148 DI\u010c (VAT ID), a\u0165 ti ho m\u016f\u017eeme vystavit podle EU pravidel. Provize z\u016fst\u00e1v\u00e1 evidovan\u00e1 a vystav\u00edme ho zp\u011btn\u011b.`, { period, currency: cur, needs: 'vat_id' }); } catch (e) {}
           }
           return;
         }
       }
-      const items = Object.values(data.rates);
-      const bank = items.filter(i => i.method !== 'stripe').reduce((a, i) => a + i.fee, 0);
-      const strp = items.filter(i => i.method === 'stripe').reduce((a, i) => a + i.fee, 0);
-      const body = { period_month: period, currency: cur, amount: data.total, bank_amount: bank, stripe_amount: strp, line_items: items, status: 'issued', kind: 'unified', owner_id: ownerId, charged_at: new Date().toISOString(),
-      // SNIMEK ODBERATELE. Doklad musi zustat tim, co bylo vystaveno -- pozdejsi prejmenovani
-      // klubu nebo vstup do DPH ho nesmi zmenit.
-      cust_name: (buyer && (buyer.legal_name || buyer.name)) || null,
-      cust_ico: (buyer && buyer.tax_id) || null,
-      cust_dic: (buyer && buyer.vat_id) || null,
-      cust_address: _billAddr(buyer) || null,
-      cust_vat_payer: !!(buyer && buyer.vat_id),
-      cust_country: (buyer && (buyer.billing_country || buyer.country)) || null,
-      // SNIMEK DODAVATELE (MTL) ze stejne chvile. Appka uz nekresli dodavatele z dnesnich platform_settings.
-      sup_name: ME.name || null, sup_ico: ME.ico || null, sup_dic: ME.dic || null, sup_address: ME.sidlo || null,
-      sup_vat_payer: !!ME.vat_payer, sup_vat_rate: (ME.vat_rate != null ? ME.vat_rate : null) };
-      body[col] = entityId;
-      await sb('commission_doklady', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify(body) });
+
+      const snap = buildSnap(kind, entityId, ownerId, identity, period, cur, data, ME, buyer, _TESTMODE);
+      const _ins = await sb('commission_doklady', { method: 'POST', prefer: 'return=representation', body: JSON.stringify(snap) });
+      const row = Array.isArray(_ins) ? _ins[0] : _ins;
+      snap.id = row && row.id;
       issued++;
-      if (ownerId) { try { await notify(ownerId, 'doklad_unified', `Doklad k provizi MTL${((kind === 'gym' || kind === 'organization') && buyer && buyer.name) ? (' — ' + buyer.name) : ''} za ${periodLabel(period)} (${(data.total / 100).toFixed(2)} ${cur.toUpperCase()}) je připraven. Najdeš ho v účetnictví.`, { period, currency: cur,
-        // Kam ta notifikace vede: bez identifikátoru otevře obecné účetnictví, kde tlačítko
-        // na doklady vůbec není -- a přesně kvůli němu na ni člověk klikne.
-        gym_id: (kind === 'gym' ? entityId : null),
-        organization_id: (kind === 'organization' ? entityId : null),
-        coach_id: ((kind === 'gym' || kind === 'organization') ? null : entityId),
-        gym_name: (((kind === 'gym' || kind === 'organization') && buyer && buyer.name) ? buyer.name : null) }); } catch (e) {} }
-      try {
-        // Route the commission invoice to the RIGHT billing e-mail: a gym's on gyms.invoice_email,
-        // a coach's on profiles.invoice_email (they can differ). Fall back to the owner's account e-mail.
-        let em = null;
-        if (kind === 'organization') { const orr = await sb(`organizations?id=eq.${entityId}&select=contact_email&limit=1`); em = (orr && orr[0] && orr[0].contact_email) || null; }
-        else if (kind === 'gym') { const gr = await sb(`gyms?id=eq.${entityId}&select=invoice_email&limit=1`); em = (gr && gr[0] && gr[0].invoice_email) || null; }
-        else { const pr = await sb(`profiles?id=eq.${ownerId}&select=invoice_email&limit=1`); em = (pr && pr[0] && pr[0].invoice_email) || null; }
-        if (!em && ownerId) { const pr2 = await sb(`profiles?id=eq.${ownerId}&select=email&limit=1`); em = pr2 && pr2[0] && pr2[0].email; }
-        if (em) {
-          // Při nulové provizi jde přehled bez přílohy: PDF je formát daňového dokladu a tohle
-          // žádný není. Text v těle stačí a nesvádí to k tomu brát ho jako doklad.
-          if (_intro) {
-            await sendEmail(em,
-              `${_TESTMODE ? '[TEST] ' : ''}Přehled zprostředkovaných plateb — ${periodShort(period)}${((kind === 'gym' || kind === 'organization') && buyer && buyer.name) ? (' — ' + buyer.name) : ''}`,
-              introSummaryHtml(ME, buyer, kind, period, cur, data, _TESTMODE, _intro.until), []);
-            issued++;
-            return;
-          }
-          let _att = [];
-          try {
-            const _buf = await dokladPdf(ME, buyer, kind, period, cur, data, DAILY, _TESTMODE);
-            _att = [{ filename: `MTL-provize-${String(period).replace(/-/g,'')}.pdf`, content: _buf.toString('base64') }];
-          } catch (e) { console.error('doklad pdf', e.message); }
-          // Předmět nese název klubu. Kdo má dva kluby, dostane dva e-maily naráz a bez toho by musel
-          // otevírat přílohy, aby zjistil, který je který.
-          await sendEmail(em, `${_TESTMODE ? '[TEST] ' : ''}Doklad o provizi MTL — ${periodShort(period)}${((kind === 'gym' || kind === 'organization') && buyer && buyer.name) ? (' — ' + buyer.name) : ''}`, dokladMailHtml(ME, buyer, kind, period, cur, data, DAILY, _TESTMODE, !!(_att && _att.length)), _att);
-        } } catch (e) {}
+      // Kdo dostane víc zpráv naráz, musí poznat, která je která: klub/organizace jménem, kouč identitou.
+      const _nm = ((kind === 'gym' || kind === 'organization') && buyer && buyer.name) ? (' \u2014 ' + buyer.name)
+        : (kind === 'coach' ? (_payout ? ' \u2014 kou\u010d, re\u017eim klub' : ' \u2014 kou\u010d, soukrom\u00e9 lekce') : '');
+
+      // JEDNA NOTIFIKACE za provizi: kolik, jak se strhlo, a proklik PŘÍMO na doklad.
+      if (ownerId) {
+        const how = (snap.bank_amount > 0 && snap.stripe_amount > 0)
+          ? (_money(snap.bank_amount, cur) + ' str\u017eeno z karty, ' + _money(snap.stripe_amount, cur) + ' p\u0159i platb\u00e1ch kartou')
+          : (snap.bank_amount > 0 ? 'str\u017eeno z ulo\u017een\u00e9 karty' : 'str\u017eeno p\u0159i platb\u00e1ch kartou');
+        try { await notify(ownerId, 'doklad_unified', `Provize MTL${_nm} za ${periodLabel(period)}: ${_money(snap.amount, cur)} (${how}). Doklad je vystaven\u00fd.`,
+          { period, currency: cur, doklad_id: snap.id || null,
+            gym_id: (kind === 'gym' ? entityId : null), organization_id: (kind === 'organization' ? entityId : null),
+            coach_id: (kind === 'coach' ? entityId : null), gym_name: ((kind !== 'coach' && buyer && buyer.name) ? buyer.name : null) }); } catch (e) {}
+      }
+
+      // E-MAIL na fakturační adresu ze snímku -- stejnou, jaká je na dokladu.
+      const em = snap.cust_email;
+      if (!em) { mailDiag.failed++; mailDiag.lastError = 'bez adresy: ' + kind + ' ' + entityId; return; }
+      let sent;
+      if (_intro) {
+        sent = await sendEmail(em, `${_TESTMODE ? '[TEST] ' : ''}P\u0159ehled zprost\u0159edkovan\u00fdch plateb \u2014 ${periodShort(period)}${_nm}`, introSummaryHtml(snap, _intro.until), []);
+      } else {
+        let _att = [];
+        try {
+          const _buf = await dokladPdf(snap);
+          _att = [{ filename: `${_dokNo(snap.id || 'X')}-provize-${String(period).replace(/-/g,'')}.pdf`, content: _buf.toString('base64') }];
+        } catch (e) { console.error('doklad pdf', e.message); }
+        sent = await sendEmail(em, `${_TESTMODE ? '[TEST] ' : ''}Doklad o provizi MTL ${_dokNo(snap.id || '')} \u2014 ${periodShort(period)}${_nm}`, dokladMailHtml(snap, _att.length > 0), _att);
+      }
+      if (sent && sent.ok) mailDiag.sent++; else { mailDiag.failed++; mailDiag.lastError = (sent && sent.error) || 'nezn\u00e1m\u00e1 chyba'; }
     }
 
     if (preview) {
       let firstHtml = '';
-      for (const gid of gymIds) { const g = gymMap[gid]; if (!g) continue; for (const cur of Object.keys(gymB[gid])) { const _b = (await sb(`gyms?id=eq.${gid}&select=name,legal_name,billing_line1,billing_line2,billing_city,billing_postal,tax_id,vat_id,billing_country,country&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'gym', period, cur, gymB[gid][cur], TEST); break; } if (firstHtml) break; }
-      if (!firstHtml) { for (const cid of Object.keys(coachB)) { for (const cur of Object.keys(coachB[cid])) { const _b = (await sb(`profiles?id=eq.${cid}&select=name,legal_name,billing_line1,billing_line2,billing_city,billing_postal,tax_id,vat_id,country,billing_country&limit=1`))[0] || null; firstHtml = dokladHtml(ME, _b, 'coach', period, cur, coachB[cid][cur], TEST); break; } if (firstHtml) break; } }
+      const firstOf = (store) => { for (const id of Object.keys(store)) for (const c of Object.keys(store[id])) return [id, c]; return null; };
+      const pick = firstOf(gymB) ? ['gym', ...firstOf(gymB)] : (firstOf(coachB) ? ['coach', ...firstOf(coachB)] : (firstOf(orgB) ? ['organization', ...firstOf(orgB)] : null));
+      if (pick) {
+        const [pk, pid, pc] = pick;
+        const store = pk === 'gym' ? gymB : (pk === 'coach' ? coachB : orgB);
+        const _pay = /\|payout$/.test(pid); const eid = String(pid).replace(/\|payout$/, '');
+        const owner = pk === 'gym' ? (gymMap[eid] && gymMap[eid].owner_id) : (pk === 'organization' ? (orgMap[eid] && orgMap[eid].owner_id) : eid);
+        const b = await loadBuyer(pk, eid, owner, _pay ? 'payout_' : '');
+        firstHtml = dokladHtml(buildSnap(pk, eid, owner, pk === 'coach' ? (_pay ? 'payout' : 'own') : null, period, pc, store[pid][pc], ME, b, _TESTMODE));
+      }
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      return res.status(200).send(firstHtml || ('<p style="font-family:sans-serif;padding:24px;">\u017d\u00e1dn\u00e1 provize za ' + period + ' (zkus jin\u00fd ?month=RRRR-MM).</p>'));
+      return res.status(200).send(firstHtml || ('<p style="font-family:sans-serif;padding:24px;">\u017d\u00e1dn\u00e1 provize za ' + esc(period) + ' (zkus jin\u00fd ?month=RRRR-MM).</p>'));
     }
     for (const gid of gymIds) { const g = gymMap[gid]; if (!g) continue; for (const cur of Object.keys(gymB[gid])) await issue('gym', gid, g.owner_id, cur, gymB[gid][cur]); }
     for (const cid of Object.keys(coachB)) { for (const cur of Object.keys(coachB[cid])) await issue('coach', cid, cid, cur, coachB[cid][cur]); }
@@ -509,11 +481,8 @@ export default async function handler(req, res) {
     for (const oid of orgIds) { const o = orgMap[oid]; if (!o) continue;
       for (const cur of Object.keys(orgB[oid])) await issue('organization', oid, o.owner_id, cur, orgB[oid][cur]); }
 
-    // DIAGNOSTIKA. issued/skipped/deferred = 0 znamená, že se nenašlo nic k vystavení -- ale
-    // neřekne PROČ. Tohle ukáže, kolik transakcí filtr vůbec vrátil, kolik z nich mělo provizi
-    // a kolik poskytovatelů z toho vzniklo, takže je hned vidět, kde se to láme.
-    return res.status(200).json({ ok: true, period, issued, skipped, deferred,
-      diag: window_diag });
+    // DIAGNOSTIKA: kolik transakcí filtr našel, kolik dokladů vzniklo a JESTLI ODEŠEL E-MAIL.
+    return res.status(200).json({ ok: true, period, issued, skipped, deferred, mail: mailDiag, mailFrom: MAIL_FROM, diag: window_diag });
   } catch (e) {
     console.error('unified-doklad-cron', e.message);
     return res.status(500).json({ error: e.message });
