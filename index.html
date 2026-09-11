@@ -5358,13 +5358,13 @@ const NOTIF_T = {
     ? `${d.approved?'✅':'❌'} MTL ${d.approved?'approved':'rejected'} your info change for ${d.gym_name||'your klub'}.`
     : `${d.approved?'✅':'❌'} MTL ${d.approved?'schválil':'zamítl'} změnu údajů u ${d.gym_name||'tvého klubu'}.`,
   gym_dropin_booked: (d)=> LANG==='en'
-    ? `🏛️ Congrats! ${d.student||'A student'} just bought a drop-in session for ${d.amt} ${d.sym}${d.className?((EN?' for ':' na lekci ')+d.className+(d.date?((EN?' on ':' v ')+(typeof dayNames==='function'?dayNames()[new Date(d.date+'T00:00:00').getDay()]:d.date)+(d.time?(' '+d.time):'')):'')):''}.`
-    : `🏛️ Gratulujeme! Student ${d.student||''} si právě zakoupil jednorázovou lekci za ${d.amt} ${d.sym}${d.className?((EN?' for ':' na lekci ')+d.className+(d.date?((EN?' on ':' v ')+(typeof dayNames==='function'?dayNames()[new Date(d.date+'T00:00:00').getDay()]:d.date)+(d.time?(' '+d.time):'')):'')):''}.`,
+    ? `🏛️ Congrats! ${d.student||'A student'} just bought a drop-in session for ${d.amt} ${d.sym}${d.className?((LANG==='en'?' for ':' na lekci ')+d.className+(d.date?((LANG==='en'?' on ':' v ')+_notifWhen(d.date, d.time)):'')):''}.`
+    : `🏛️ Gratulujeme! Student ${d.student||''} si právě zakoupil jednorázovou lekci za ${d.amt} ${d.sym}${d.className?((LANG==='en'?' for ':' na lekci ')+d.className+(d.date?((LANG==='en'?' on ':' v ')+_notifWhen(d.date, d.time)):'')):''}.`,
   pis_payment_in: (d)=>{
     const EN2 = LANG==='en';
     const _amt = d.amt ? (' '+d.amt+(d.sym?(' '+d.sym):'')) : '';
     const _cls = d.className ? ((EN2?' for ':' na lekci ')+d.className) : '';
-    const _dt  = d.date ? ((EN2?' on ':' v ')+((typeof dayNames==='function')?dayNames()[new Date(d.date+'T00:00:00').getDay()]:d.date)+(d.time?(' '+d.time):'')) : '';
+    const _dt  = d.date ? ((EN2?' on ':' v ')+_notifWhen(d.date, d.time)) : '';
     const _by  = EN2?' (bank transfer)':' (převodem)';
     if(d.booking_id) return EN2?`🥊 Congrats! ${d.student||'A student'} just paid for a 1:1${_amt}${_dt}${_by}.`:`🥊 Gratulujeme! Student ${d.student||''} právě zaplatil soukromku${_amt}${_dt}${_by}.`;
     if(d.event_id){
@@ -13245,7 +13245,10 @@ async function showCancelConfirmation(d){
       +row(EN?'Reason':'D\u016fvod', _lbl+(_note?(' \u2014 '+_note):''))
       +row(EN?'Cancelled at':'Zru\u0161eno dne', issuedFull)
       +(c.amount_paid!=null?row(EN?'Paid':'Zaplaceno', fmtPrice(Number(c.amount_paid)||0,_cur)+' '+_sym):'')
-      +(_refStr?row(EN?'Refunded':'Vr\u00e1cen\u00e1 \u010d\u00e1stka', _refStr):'')
+      // Prevod / hotovost: pres MTL se nic nevraci. "Vraceno 0 Kc" by znelo jako zamitnuty refund.
+      +((['qr','pis','cash'].indexOf(String(c.payment_method||''))>=0)
+        ?row(EN?'Refund':'Vr\u00e1cen\u00ed pen\u011bz', EN?'settled directly with the provider (paid by transfer / cash)':'\u0159e\u0161\u00ed se p\u0159\u00edmo s poskytovatelem (platba p\u0159evodem / hotov\u011b)')
+        :(_refStr?row(EN?'Refunded':'Vr\u00e1cen\u00e1 \u010d\u00e1stka', _refStr):''))
       +'</div>'
       +'<p class="note">'+(EN
         ? 'This document records the cancellation of the session above, when it was made and what was refunded. The original receipt is unchanged and remains valid as the record of the payment.'
@@ -13275,15 +13278,15 @@ async function showCancelConfirmation(d){
 // Klub uz nesmi byt podepsany svym obchodnim nazvem -- potvrzeni o presunu tam melo "Bordel House".
 async function _confParties(o){
   o=o||{};
-  const r={ txId:o.transaction_id||null, stuId:o.student_id||null, participant:o.participant_name||'', payer:'', provider:'', testMode:!!window._TEST_MODE, paid:null, cur:o.currency||'CZK' };
+  const r={ txId:o.transaction_id||null, stuId:o.student_id||null, participant:o.participant_name||'', payer:'', provider:'', testMode:!!window._TEST_MODE, paid:null, cur:o.currency||'CZK', pm:null };
   const nameOf=async function(id){ if(!id) return ''; try{ const { data }=await supaClient.from('profiles').select('name').eq('id', id).maybeSingle(); return (data&&data.name)||''; }catch(e){ return ''; } };
   try{
     if(o.booking_id!=null){
       const _isPriv=(o.booking_kind==='coach_1to1');
-      const { data:_b }=await supaClient.from(_isPriv?'bookings':'gym_bookings').select(_isPriv?'payment_intent,test_mode,amount,currency,student_id,paid_by':'payment_intent,test_mode,amount,currency,student_id,child_name,paid_by,paid_by_name').eq('id', o.booking_id).maybeSingle();
+      const { data:_b }=await supaClient.from(_isPriv?'bookings':'gym_bookings').select(_isPriv?'payment_intent,test_mode,amount,currency,student_id,paid_by,payment_method':'payment_intent,test_mode,amount,currency,student_id,child_name,paid_by,paid_by_name,payment_method').eq('id', o.booking_id).maybeSingle();
       let _payTx='';
       if(_b){
-        r.testMode=!!_b.test_mode; r.paid=(_b.amount!=null?Number(_b.amount):null); r.cur=_b.currency||r.cur;
+        r.testMode=!!_b.test_mode; r.paid=(_b.amount!=null?Number(_b.amount):null); r.cur=_b.currency||r.cur; r.pm=_b.payment_method||(_b.payment_intent?'stripe':null);
         if(_b.student_id) r.stuId=_b.student_id;
         if(!r.txId && _b.payment_intent){ const { data:_t }=await supaClient.from('transactions').select('id,paid_by_name').eq('payment_intent', _b.payment_intent).limit(1); if(_t&&_t[0]){ r.txId=_t[0].id; _payTx=_t[0].paid_by_name||''; } }
       }
@@ -13510,7 +13513,7 @@ async function _issueCancelSnapshot(o){
       cancelled_by:currentUser.id, cancelled_by_name:(currentUser.name||null), cancelled_by_role:(o.by_role||'student'),
       gym_id:(o.gym_id||null), coach_id:(o.coach_id||null), provider_name:(prov||null), class_name:(o.class_name||null),
       session_at:(o.session_at||null), reason_key:(o.reason_key||null), note:(o.note||null),
-      amount_paid:paid, refund_amount:((o.refund!=null && o.refund!=='')?Number(o.refund):null), currency:cur, test_mode:testMode };
+      amount_paid:paid, refund_amount:((o.refund!=null && o.refund!=='')?Number(o.refund):null), currency:cur, test_mode:testMode, payment_method:(_cp.pm||null) };
     const { data:_ci, error }=await supaClient.from('cancel_confirmations').insert(row).select('id').single();
     if(error){
       console.log('[cancel_conf] potvrzeni se nezapsalo:', error.message);
@@ -13601,16 +13604,25 @@ async function cancelGymDropin(b, _after){
   }
   const _cx=await _askCancelReason({
     title:(LANG==='en'?'Cancel this class?':'Zrušit tuto lekci?'),
-    note:((b.payment_method==='qr'||b.payment_method==='pis')
-      ?(LANG==='en'?'The spot is freed for others.':'Místo se uvolní pro další.')
+    note:((b.payment_method==='qr'||b.payment_method==='pis'||b.payment_method==='cash')
+      ?(LANG==='en'?'The spot is freed for others. You paid by transfer, so settle any refund directly with the club.':'Místo se uvolní pro další. Platil jsi převodem, takže vrácení peněz řeš přímo s klubem.')
       :(LANG==='en'?'You get 95% back; the club keeps the rest.':'Vrátí se ti 95 %, zbytek si nechá klub.')),
     confirmLabel:(LANG==='en'?'Cancel the class':'Zrušit lekci') });
   if(!_cx) return;
   try{ await _recordExcuse(b.gym_id, _occ, _cx); }catch(e){}
   try{ await _notifyCancelReason(b.gym_id, null, (await (async function(){ try{ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',b.gym_id).single(); return _g&&_g.owner_id; }catch(e){ return null; } })()), _occ, _cx); }catch(e){}
   try{
-    // Nezaplacena rezervace: rusi se, ale nebylo co vracet -- doklad by nemel co dolozit.
-    if(!b.payment_intent){ await supaClient.from('gym_bookings').update({ status:'cancelled' }).eq('id', b.id); toast(LANG==='en'?'✅ Cancelled.':'✅ Zrušeno.'); _done(); return; }
+    // Bez payment_intent jsou DVE ruzne veci: nezaplacena rezervace (nic nevzniklo) a zaplacena
+    // prevodem/hotove (PIS, QR, cash payment_intent nemaji nikdy). Driv se obe braly jako
+    // nezaplacene -- zaplaceny vstup pres banku skoncil bez potvrzeni o zruseni i bez notifikace.
+    if(!b.payment_intent){
+      const _paidBank=(['qr','pis','cash'].indexOf(String(b.payment_method||''))>=0) && b.status==='active';
+      await supaClient.from('gym_bookings').update({ status:'cancelled' }).eq('id', b.id);
+      // MTL penize prevodem nedrzi, pres appku se nic nevraci -- potvrzeni to tak i napise.
+      if(_paidBank) try{ await _issueCancelConf(b, _occ, 0, _cx); }catch(e){}
+      toast(_paidBank?(LANG==='en'?'✅ Cancelled. You paid by transfer — settle the refund with the club.':'✅ Zrušeno. Platil jsi převodem — vrácení peněz řeš s klubem.'):(LANG==='en'?'✅ Cancelled.':'✅ Zrušeno.'));
+      _done(); return;
+    }
     const { data:g } = await supaClient.from('gyms').select('stripe_account').eq('id', b.gym_id).single();
     if(!g || !g.stripe_account){ toast(L('⚠️ Chyba')); return; }
     const isCZK = String(b.currency||'CZK').toUpperCase()==='CZK';
@@ -13757,6 +13769,19 @@ async function checkAttendanceReminders(){
     try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'system', read:false, data: JSON.stringify({ kind:'attend_reminder', gym_id:_myGymData.id, gym_name:_myGymData.name||'', className:c.name||'', date:today, time:c.time||'', day:dow }), message:`📋 Doplň docházku na proběhlou lekci ${c.name||''} (${c.time||''}).` }); if(coachId===currentUser.id) sentToMe=true; }catch(e){}
   }
   if(sentToMe){ try{ updateNotifBadge(); }catch(e){} }
+}
+// Kdy -- pro TEXT notifikaci: "Pá 11. 9. 2026 v 18:00". Data notifikace nesou datum syrove
+// (RRRR-MM-DD) a nic z toho se zpatky nikam nezapisuje ani neporovnava. Stara notifikace s uz
+// naformatovanym datem se ukaze tak, jak je.
+function _notifWhen(date, time){
+  if(!date) return '';
+  const ds=String(date).slice(0,10);
+  const d=/^\d{4}-\d{2}-\d{2}$/.test(ds)?new Date(ds+'T00:00:00'):null;
+  const t=time?String(time).slice(0,5):'';
+  if(!d || isNaN(d)) return String(date)+(t?((LANG==='en'?' at ':' v ')+t):'');
+  const day=dayNames()[d.getDay()];
+  const txt=(LANG==='en')?d.toLocaleDateString('en-GB',{ day:'numeric', month:'short', year:'numeric' }):(d.getDate()+'. '+(d.getMonth()+1)+'. '+d.getFullYear());
+  return day+' '+txt+(t?((LANG==='en'?' at ':' v ')+t):'');
 }
 function dayNames(){ return LANG==='en' ? ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'] : ['Ne','Po','Út','St','Čt','Pá','So']; }
 var _gymTeamCoaches = [];
@@ -27190,6 +27215,22 @@ function _commOwner(t){
   if(t.coach_id) return { kind:'coach', id:String(t.coach_id), identity:'own' };
   return null;
 }
+// ÚČASTNÍK (dítě, mladistvý) ze SNÍMKU DOKLADU. Transakce ho nenese, doklad ano -- a jen tehdy,
+// když se liší od plátce. Dotahuje se po dávkách jen pro řádky, které jsou zrovna vidět.
+window._dokPart=window._dokPart||{};
+window._dokItem=window._dokItem||{};
+async function _loadParticipants(txIds){
+  const need=(txIds||[]).map(String).filter(function(id){ return id && !Object.prototype.hasOwnProperty.call(window._dokPart, id); });
+  if(!need.length) return false;
+  need.forEach(function(id){ window._dokPart[id]=''; });
+  let found=false;
+  for(let i=0;i<need.length;i+=100){
+    // I polozku ze snimku ("Jednorazovy vstup · Super deti") -- student v Mych dokladech vidi, o kterou lekci slo.
+    try{ const { data }=await supaClient.from('doklady').select('transaction_id,participant_name,item_label').in('transaction_id', need.slice(i,i+100));
+      (data||[]).forEach(function(d){ const k=String(d.transaction_id); if(d.participant_name){ window._dokPart[k]=d.participant_name; found=true; } if(d.item_label){ window._dokItem[k]=d.item_label; found=true; } }); }catch(e){}
+  }
+  return found;
+}
 async function openMtlCommissions(scope){
   const EN=LANG==='en';
   scope=scope||{};
@@ -27315,6 +27356,7 @@ async function openMtlCommissions(scope){
     if(wrap.style.display!=='none'){ wrap.style.display='none'; _lbl(false); return; }
     _lbl(true);
     const m=_byM[b.dataset.k];
+    const _draw=function(){
     wrap.innerHTML=m.rows.sort(function(x,y){ return String(y.created_at||'').localeCompare(String(x.created_at||'')); }).map(function(t){
       const _pm={ stripe:'\ud83d\udcb3', qr:'\ud83d\udcf2', pis:'\ud83c\udfe6', cash:'\ud83d\udcb5' }[t.payment_method]||'';
       const _d=t.created_at?new Date(t.created_at).toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric'}):'';
@@ -27328,6 +27370,7 @@ async function openMtlCommissions(scope){
       return '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);font-size:12.5px;">'
         +'<div style="flex:1;min-width:0;color:var(--dark);">'+_pm+' '+escapeHtml(_mpItemLabel(t))
         +((t.paid_by_name||t.cash_payer_name||_names[String(t.member_id)])?('<span style="color:var(--mid);"> \u00b7 '+escapeHtml(t.paid_by_name||t.cash_payer_name||_names[String(t.member_id)])+'</span>'):'')
+        +((window._dokPart[String(t.id)] && window._dokPart[String(t.id)]!==(t.paid_by_name||t.cash_payer_name||_names[String(t.member_id)]))?('<span style="color:var(--mid);"> \u00b7 '+(EN?'for ':'pro ')+escapeHtml(window._dokPart[String(t.id)])+'</span>'):'')
         +'<span style="color:var(--light);"> \u00b7 '+_d+'</span>'
         +((_isCoachScope && t.gym_id)?('<span style="font-size:11px;background:#EEF4FF;color:var(--blue);border-radius:7px;padding:1px 7px;margin-left:6px;white-space:nowrap;">'+(EN?'club mode':'re\u017eim klub')+'</span>'):'')
         +(_rf>0?('<span style="font-size:11px;background:var(--surf);color:var(--mid);border:1px solid var(--border);border-radius:7px;padding:1px 7px;margin-left:6px;white-space:nowrap;">'+(EN?'refunded':'refundov\u00e1no')+'</span>'):'')+'</div>'
@@ -27337,6 +27380,9 @@ async function openMtlCommissions(scope){
           +'<span style="font-weight:700;color:var(--dark);">'+fmtPrice(_fee(t),_cu)+' '+_curSym(_cu)+'</span>'
         +'</div></div>';
     }).join('');
+    };
+    _draw();
+    _loadParticipants(m.rows.map(function(t){ return t.id; })).then(function(ch){ if(ch && wrap.style.display!=='none') _draw(); });
     wrap.style.display='block';
   }; });
 }
@@ -38479,8 +38525,10 @@ function _mpRender(){
     // protože se na ten doklad zrovna dívá. Patří sem, KDE nakoupil, ne od koho.
     const from=(window._mpFrom&&(window._mpFrom[t.gym_id]||window._mpFrom[t.coach_id]))||'';
     return '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 2px;border-bottom:1px solid var(--border);">'
-      +'<div style="min-width:0;"><div style="font-size:13.5px;font-weight:700;color:var(--dark);">'+escapeHtml(_cdkTypeLabel(t))+'</div>'
-      +'<div style="font-size:11.5px;color:var(--mid);margin-top:2px;">'+(from?(escapeHtml(from)+' \u00b7 '):'')+ds+' \u00b7 '+(pmE[t.payment_method]||'')+' '+amt+((t.status==='refunded'||t.status==='partial_refund')?(' \u00b7 <span style="color:var(--red);font-weight:700;">\u21a9\ufe0e '+(EN?'refunded ':'vr\u00e1ceno ')+(t.refund_amount!=null?fmtPrice(Number(t.refund_amount)/100,cur):'')+'</span>'):'')+'</div></div>'
+      // Polozka ze SNIMKU dokladu ("Jednorazovy vstup · Super deti", "Clenstvi · Zacatecnici"), a pro koho,
+      // kdyz to nebyl student sam. Starsi doklady bez polozky ukazou druh jako driv.
+      +'<div style="min-width:0;"><div style="font-size:13.5px;font-weight:700;color:var(--dark);">'+escapeHtml((window._dokItem&&window._dokItem[String(t.id)])||_cdkTypeLabel(t))+'</div>'
+      +'<div style="font-size:11.5px;color:var(--mid);margin-top:2px;">'+(from?(escapeHtml(from)+' \u00b7 '):'')+((window._dokPart&&window._dokPart[String(t.id)])?((EN?'for ':'pro ')+escapeHtml(window._dokPart[String(t.id)])+' \u00b7 '):'')+ds+' \u00b7 '+(pmE[t.payment_method]||'')+' '+amt+((t.status==='refunded'||t.status==='partial_refund')?(' \u00b7 <span style="color:var(--red);font-weight:700;">\u21a9\ufe0e '+(EN?'refunded ':'vr\u00e1ceno ')+(t.refund_amount!=null?fmtPrice(Number(t.refund_amount)/100,cur):'')+'</span>'):'')+'</div></div>'
       +'<div style="flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:2px;">'
       +'<button class="mpDokBtn" data-idx="'+idx+'" style="background:none;border:none;color:#635BFF;font-size:12.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';white-space:nowrap;">'+(EN?'Receipt \u203a':'Doklad \u203a')+'</button>'
       +(_rscFor(t)?('<button class="mpResched" data-id="'+_rscFor(t)+'" style="background:none;border:none;color:var(--mid);font-size:11.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';white-space:nowrap;">'+(EN?'Change of date \u203a':'Změna termínu \u203a')+'</button>'):'')
@@ -38497,6 +38545,7 @@ function _mpRender(){
     });
   }catch(e){}
   const _sel=sel;
+  _loadParticipants(sel.map(function(t){ return t.id; })).then(function(ch){ if(ch) _mpRender(); });
   box.querySelectorAll('.mpDokBtn').forEach(function(b){ b.onclick=function(){ const t=_sel[parseInt(b.dataset.idx,10)]; if(!t) return; showReceipt({ amount:(Number(t.gross_amount||0)/100), currency:t.currency, type:t.type, created_at:t.created_at, payment_intent:t.payment_intent,
           // Doklad se dohleda podle transaction_id. payment_intent je u hotovosti a QR
           // prazdny, takze bez tohohle by se snimek nenasel u nekaretnich plateb.
@@ -38583,7 +38632,7 @@ async function _loadClubDoklady(_gidIn){
   // Do nadpisu, ať je vidět, čí doklady to jsou -- dvě entity, dva seznamy.
   try{ const _t=document.getElementById('cdkTitle'); if(_t) _t.textContent=(EN?'Receipts issued to students':'V\u0161echny doklady student\u016fm')+(_who?(' \u00b7 '+_who):''); }catch(e){}
   let rows=[];
-  try{ const { data }=await supaClient.from('transactions').select('id,gross_amount,currency,type,payment_method,created_at,payment_intent,gym_id,coach_id,member_id,income_class,status,plan,cash_payer_name,test_mode,source_booking_id,session_at_issue,refund_amount').eq(_filter.col,_filter.val).order('created_at',{ascending:false}); rows=(data||[]).filter(function(t){ return Number(t.gross_amount||0)>0; }); }catch(e){}
+  try{ const { data }=await supaClient.from('transactions').select('id,gross_amount,currency,type,payment_method,created_at,payment_intent,gym_id,coach_id,member_id,income_class,status,plan,cash_payer_name,paid_by_name,test_mode,source_booking_id,session_at_issue,refund_amount').eq(_filter.col,_filter.val).order('created_at',{ascending:false}); rows=(data||[]).filter(function(t){ return Number(t.gross_amount||0)>0; }); }catch(e){}
   // Jméno kupujícího je v member_id. Ověřeno na datech: chybí JEN u nákupu bez účtu -- lístek
   // koupený z veřejné stránky, kde kupující žádný profil nemá. "Bez účtu" je tam tedy pravda,
   // ne chyba, a pomlčka by tu informaci zbytečně zahodila.
@@ -38709,7 +38758,7 @@ function _cdkRender(){
     if(q){
       // Hledá se přes jméno kupujícího i název položky -- majitel hledá jednou "Novák",
       // podruhé "Roční", a nutit ho vybírat čím to bude, nemá smysl.
-      var hay=((window._cdkNames&&window._cdkNames[t.member_id])||'')+' '+(t.cash_payer_name||'')+' '+(t.plan||'')+' '+_cdkTypeLabel(t);
+      var hay=((window._cdkNames&&window._cdkNames[t.member_id])||'')+' '+(t.cash_payer_name||'')+' '+(t.paid_by_name||'')+' '+(window._dokPart[String(t.id)]||'')+' '+(t.plan||'')+' '+_cdkTypeLabel(t);
       if(hay.toLowerCase().indexOf(q)<0) return false;
     }
     return true;
@@ -38727,7 +38776,9 @@ function _cdkRender(){
   box.innerHTML=sel.map(function(t,idx){
     var d=new Date(t.created_at); var ds=d.toLocaleDateString(EN?'en-GB':'cs-CZ');
     var cur=t.currency||'CZK'; var amt=fmtPrice(Number(t.gross_amount||0)/100,cur);
-    var who=(window._cdkNames&&window._cdkNames[t.member_id])||t.cash_payer_name||(EN?'Walk-in':'Bez účtu');
+    // Kdo platil (zastupce, platce v hotovosti, drzitel uctu) a pro koho, kdyz je to nekdo jiny.
+    var who=t.paid_by_name||(window._cdkNames&&window._cdkNames[t.member_id])||t.cash_payer_name||(EN?'Walk-in':'Bez účtu');
+    var _prt=window._dokPart[String(t.id)]||''; if(_prt && _prt!==who) who=who+' \u00b7 '+(EN?'for ':'pro ')+_prt;
     return '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 2px;border-bottom:1px solid var(--border);">'
       // Nahoře CO se prodalo i s názvem, dole komu, kdy a jak. Dřív bylo nahoře jméno kupujícího
       // a pod ním obecný druh, takže na řádku nebylo vidět, na kterou akci nebo jaký tarif to je.
@@ -38740,6 +38791,7 @@ function _cdkRender(){
       +'</div></div>';
   }).join('');
   var _sel=sel;
+  _loadParticipants(sel.map(function(t){ return t.id; })).then(function(ch){ if(ch) _cdkRender(); });
   box.querySelectorAll('.cdkCancBtn').forEach(function(b){ b.onclick=function(){ if(typeof showCancelConfirmation==='function') showCancelConfirmation({ conf_id:b.dataset.id }); }; });
   box.querySelectorAll('.cdkReschedBtn').forEach(function(b){ b.onclick=function(){ if(typeof showRescheduleConfirmation==='function') showRescheduleConfirmation(b.dataset.id); }; });
   box.querySelectorAll('.cdkDokBtn').forEach(function(b){ b.onclick=function(){ var t=_sel[parseInt(b.dataset.idx,10)]; if(!t) return; showReceipt({ amount:(Number(t.gross_amount||0)/100), currency:t.currency, type:t.type, created_at:t.created_at, payment_intent:t.payment_intent,
