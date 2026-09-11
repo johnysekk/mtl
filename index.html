@@ -10451,7 +10451,7 @@ async function _coach1to1QrPay(c, payee, opts){
 async function _coach1to1QrRender(){
   const box=$('coach1QrBox'); if(!box||!currentUser) return;
   let rows=[];
-  try{ const { data } = await supaClient.from('bookings').select('id,student_id,amount,currency,type,training_date,training_time,online_format,slot_id,status').eq('coach_id',currentUser.id).eq('payment_method','qr').eq('status','paid_claimed').order('created_at',{ascending:true}); rows=data||[]; }catch(e){ rows=[]; }
+  try{ const { data } = await supaClient.from('bookings').select('id,student_id,paid_by,amount,currency,type,training_date,training_time,online_format,slot_id,status').eq('coach_id',currentUser.id).eq('payment_method','qr').eq('status','paid_claimed').order('created_at',{ascending:true}); rows=data||[]; }catch(e){ rows=[]; }
   try{ const _exC=new Date(Date.now()-2*3600*1000).toISOString(); const { data:_ex } = await supaClient.from('bookings').select('id,student_id,amount,currency,type,training_date,training_time,online_format,slot_id,status').eq('coach_id',currentUser.id).eq('payment_method','qr').eq('status','expired').gte('created_at',_exC).order('created_at',{ascending:true}); (_ex||[]).forEach(function(x){ rows.push(x); }); }catch(e){}
   try{ const { data:_gd } = await supaClient.from('gym_bookings').select('id,student_id,student_name,amount,currency,class_name,class_date,class_time,gym_id,gym_name,status,credit_used,dropin_plan_id,need_proof').eq('coach_id',currentUser.id).eq('paid_to','coach').eq('payment_method','qr').eq('status','paid_claimed').order('created_at',{ascending:true}); (_gd||[]).forEach(function(x){ x._src='gym'; rows.push(x); }); }catch(e){}
   try{ var _needN=rows.filter(function(x){ return !x.student_name && x.student_id; }); if(_needN.length){ var _nids=Array.from(new Set(_needN.map(function(x){ return x.student_id; }))); const { data:_pf }=await supaClient.from('profiles').select('id,name').in('id',_nids); var _nmap={}; (_pf||[]).forEach(function(p){ _nmap[p.id]=p.name||''; }); rows.forEach(function(x){ if(!x.student_name && _nmap[x.student_id]) x.student_name=_nmap[x.student_id]; }); } }catch(e){}
@@ -10504,7 +10504,7 @@ async function _coach1to1QrConfirm(bookingId, ok){
       toast(EN?'Sent back to the student \u00b7 spot still held':'Vr\u00e1ceno studentovi \u00b7 m\u00edsto dr\u017e\u00edme',1); _coach1to1QrRender(); return;
     }
     const amount_minor=Math.round((b.amount||0)*100);
-    const res=await _recordCashTx({ provider:'coach', coach_id:currentUser.id, member_id:b.student_id||null, gross_amount:amount_minor, currency:b.currency||'CZK', type:'coach_1to1', payment_method:'qr', acq_source:'direct', credit:(b.credit_used==='student'?'student':undefined) });
+    const res=await _recordCashTx({ provider:'coach', coach_id:currentUser.id, member_id:b.student_id||null, gross_amount:amount_minor, currency:b.currency||'CZK', type:'coach_1to1', payment_method:'qr', acq_source:'direct', credit:(b.credit_used==='student'?'student':undefined), source_booking_id:bookingId, paid_by:(b.paid_by||null) });
     if(res.error){ toast('\u26a0\ufe0f '+res.error.message); return; }
     await supaClient.from('bookings').update({ status:'active' }).eq('id',bookingId);
     // Student musi vedet, ze kouc platbu potvrdil -- zaplatil a bez zpravy nema jak zjistit,
@@ -34137,7 +34137,7 @@ async function loadBookings(mode){
   filtered.forEach(b=>{
     const sym = _curSym(b.currency);
     window._myBkRcpt[b.id]=b;
-    const _dok=(b.payment_intent && Number(b.amount)>0 && b.status!=='refunded' && b.status!=='cancelled');
+    const _dok=(Number(b.amount)>0 && b.status==='active' && !!(b.payment_intent || ['qr','pis','cash'].indexOf(String(b.payment_method||''))>=0));
     const _rsB=window._bkResched&&window._bkResched[String(b.id)];
     const reschedDokBtn=_rsB?`<button class="bkReschedBtn" data-rid="${_rsB}" style="width:100%;padding:9px;background:var(--bg);color:var(--mid);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans';margin-top:8px;">\u{1F504} ${LANG==='en'?'Change of date':'Potvrzení o změně termínu'}</button>`:'';
     const dokladBtn=_dok?`<button class="bkDokladBtn" data-id="${b.id}" style="width:100%;padding:9px;background:var(--bg);color:var(--mid);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;font-family:'DM Sans';margin-top:8px;">\u{1F9FE} ${LANG==='en'?'Receipt':'Doklad'}</button>`:'';
@@ -34176,6 +34176,8 @@ async function loadBookings(mode){
         <button class="calBtn" data-id="${b.id}" data-coach="${b.coach_name}" data-date="${_dt(b.training_date)}" data-time="${b.training_time}" style="width:100%;padding:11px;background:#F0FBF0;color:#006040;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">${L('📅 Přidat do kalendáře')}</button>
         ${_reschedBlocked(b.reschedule_count, b.training_date, b.training_time) ? (((b.reschedule_count||0)>=RESCHED_MAX) ? `<div style="font-size:12px;color:var(--light);text-align:center;margin-bottom:8px;">${LANG==='en'?`Max reschedules used (${b.reschedule_count||0}/${RESCHED_MAX})`:`Limit přesunů využit (${b.reschedule_count||0}/${RESCHED_MAX})`}</div>` : `<div style="font-size:12px;color:var(--light);text-align:center;margin-bottom:8px;">${LANG==='en'?`Too late to reschedule (${RESCHED_MIN_HOURS_1TO1} h before)`:`Na přesun už je pozdě (${RESCHED_MIN_HOURS_1TO1} h předem)`}</div>`) : `<button class="rescheduleBtn" data-id="${b.id}" data-slot="${b.slot_id}" data-coachid="${b.coach_id}" data-coachname="${b.coach_name}" data-date="${_dt(b.training_date)}" data-time="${b.training_time}" data-rcount="${b.reschedule_count||0}" data-amt="${b.amount||''}" data-cur="${b.currency||'CZK'}" style="width:100%;padding:11px;background:#E8F0FF;color:var(--blue);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">${L('🔄 Přesunout termín')}</button>`}
         <button class="cancelBtn" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-slot="${b.slot_id}" data-date="${_dt(b.training_date)}" data-time="${b.training_time}" data-pm="${b.payment_method||'stripe'}" data-cur="${b.currency||'CZK'}" style="width:100%;padding:11px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${L('Zrušit rezervaci')}</button>
+        ${dokladBtn}
+        ${reschedDokBtn}
       `;
     } else {
       // proběhlé — bez zrušení, jen info
