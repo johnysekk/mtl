@@ -18717,81 +18717,6 @@ async function renderGymMembers(){
     }
   }catch(e){ console.error('winback',e); }
 }
-async function loadGymRoster(){
-  const box=$('mgRoster'); if(!box||!_myGymData) return;
-  window._cancelledOcc = new Set(); try{ const { data:_cd } = await supaClient.from('gym_class_log').select('class_date,class_time,class_name').eq('gym_id', _myGymData.id).eq('status','cancelled'); (_cd||[]).forEach(c=>window._cancelledOcc.add(`${c.class_date}|${c.class_time||''}|${c.class_name||''}`)); }catch(e){}
-  window._occOverride = {}; try{ const { data:_ov } = await supaClient.from('gym_class_overrides').select('*').eq('gym_id', _myGymData.id); (_ov||[]).forEach(o=>{ window._occOverride[o.class_date+'|'+(o.class_time||'')+'|'+(o.class_name||'')] = { coach:o.payee_coach_id||null, coachName:o.payee_coach_name||null, leader:o.lead_coach_id||o.payee_coach_id||null, leaderName:o.lead_coach_name||o.payee_coach_name||null }; }); }catch(e){}
-  const today=new Date().toISOString().slice(0,10);
-  const occs=upcomingClasses(_gymSchedule,7,4).filter(o=> o.date>=today); // jen nadcházející (minulé neproběhlé sem nepatří; plný rozvrh je v záložce Rozvrh)
-  let rs=[], drops=[], mems=[], att=[];
-  try{ const { data } = await supaClient.from('gym_class_reservations').select('*').eq('gym_id', _myGymData.id).gte('class_date', today); rs=data||[]; }catch(e){}
-  try{ const { data } = await supaClient.from('gym_bookings').select('student_id,student_name,class_date,class_time,class_name,status,child_name,child_age').eq('gym_id', _myGymData.id).eq('status','active').gte('class_date', today); drops=data||[]; }catch(e){}
-  try{ const { data } = await supaClient.from('gym_memberships').select('student_id,student_name,plan_access,coach_id,status,child_name,child_age,discipline').eq('gym_id', _myGymData.id).in('status',['active','cancelling']); mems=data||[]; }catch(e){}
-  try{ const { data } = await supaClient.from('gym_attendance').select('student_id,class_date,class_time,class_name,child_name').eq('gym_id', _myGymData.id).gte('class_date', today); att=data||[]; }catch(e){}
-  if(!occs.length){ box.innerHTML=`<p style="color:var(--light);font-size:13px;">${LANG==='en'?'No classes scheduled.':'Žádné naplánované lekce.'}</p>`; return; }
-  const dn=dayNames(); const cap=_myGymData.capacity||0;
-  const accOf=(m)=>{ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
-  const rk=(r)=>`${r.class_date}|${r.class_time}|${r.class_name}`;
-  const presentSet=new Set(att.map(a=>`${a.class_date}|${a.class_time}|${a.class_name||''}|${a.student_id}|${a.child_name||''}`));
-  const tagPill=(t,c)=>`<span style="font-size:10px;font-weight:700;color:${c};background:${c}1a;border-radius:6px;padding:1px 6px;margin-left:6px;">${t}</span>`;
-  const esc=s=>String(s||'').replace(/"/g,'&quot;');
-  box.innerHTML=occs.slice(0,20).map((o,i)=>{
-    const k=`${o.date}|${o.time}|${o.name}`;
-    const _pk=(x)=>String(x.student_id)+'|'+(x.child_name||'');
-    const releasedIds=new Set(rs.filter(r=>r.status==='released'&&rk(r)===k).map(_pk));
-    const auto=mems.filter(m=> planCovers({access:accOf(m), classes:_memClasses(m)}, o.level||'all', o) && ((o.level!=='kids') || !!m.child_name || ((accOf(m)||[]).indexOf('kids')>=0)) && (!m.discipline || (o.disc||null)===m.discipline) && !releasedIds.has(_pk(m)));
-    const autoIds=new Set(auto.map(_pk));
-    const _excR=rs.filter(r=> r.status==='released' && rk(r)===k);
-    // Omluvy patří k TÉHLE lekci, ne ke všem na daný den -- jinak by se omluva z ranní
-    // lekce ukazovala i u večerní. Stejná shoda, jakou dělá načtení výš.
-    const _exHere=((window._attExcList)||[]).filter(function(e){ return String(e.class_name||'')===String(o.name||'') && (!e.class_time || !o.time || e.class_time===o.time); });
-    // Kdo se omluvil, patří mezi omluvené, ne mezi přítomné. U jednorázovky zůstává
-    // rezervace 'active' i po omluvě těsně před lekcí, takže bez tohohle filtru by byl v seznamu dvakrát.
-    const _exIds=new Set(_excR.map(function(r){ return _excKey(r.student_id, r.child_name); }).concat(_exHere.map(function(e){ return _excKey(e.student_id, e.child_name); })));
-    const _memIds=new Set((mems||[]).map(function(m){ return String(m.student_id); }));
-    const dropList=drops.filter(d=>`${d.class_date}|${d.class_time}|${d.class_name}`===k && !_exIds.has(_excKey(d.student_id, d.child_name)));
-    const explicit=rs.filter(r=> r.status!=='released' && r.status!=='reserved' && rk(r)===k && !autoIds.has(_pk(r)));   // 'reserved' = drzene misto k platbe prevodem, vstup je v gym_bookings
-    // Sloučení se záznamy z gym_excuses -- ty se nikdy nemažou, takže omluvený student
-    // v docházce zůstane i po úklidu rezervací. Podle student_id, ať tam není dvakrát.
-    const _seenEx=new Set(_excR.map(r=>_excKey(r.student_id, r.child_name)));
-    const excused=_excR.map(function(r){ return Object.assign({ source:'membership' }, r); }).concat(_exHere.filter(function(e){
-      if(!e.student_id || _seenEx.has(_excKey(e.student_id, e.child_name))) return false;
-      _seenEx.add(_excKey(e.student_id, e.child_name)); return true;
-    }).map(function(e){ return { student_id:e.student_id, student_name:e.student_name||'', child_name:(e.child_name||null), source:(e.source||null), reason:null }; }));
-    const _kpill=tagPill(LANG==='en'?'kid':'dítě','#9A5B00');
-    const attendees=[
-      ...auto.map(m=>(m.child_name?{sid:m.student_id, child:m.child_name, name:kidEmoji(m.child_age)+' '+m.child_name, pill:_kpill}:{sid:m.student_id, name:m.student_name||(LANG==='en'?'Member':'Člen'), pill:tagPill(LANG==='en'?'member':'členství','#006040')})),
-      ...explicit.map(r=>(r.child_name?{sid:r.student_id, child:r.child_name, name:kidEmoji(r.child_age)+' '+r.child_name, pill:_kpill}:{sid:r.student_id, name:r.student_name||(LANG==='en'?'Member':'Člen'), pill:tagPill(LANG==='en'?'reserved':'rezervace','#1E6FD9')})),
-      ...dropList.map(d=>(d.child_name?{sid:d.student_id, child:d.child_name, name:kidEmoji(d.child_age)+' '+d.child_name, pill:_kpill}:{sid:d.student_id, name:d.student_name||'Student', pill:tagPill(LANG==='en'?'drop-in':'jednoráz','#C0392B')}))
-    ];
-    const n=attendees.length;
-    const dd=new Date(o.date);
-    const lvl=(o.level&&o.level!=='all')?` · ${levelLabel(o.level)}`:'';
-    const attRow=(a)=>{ const present=a.sid?presentSet.has(`${o.date}|${o.time}|${o.name||''}|${a.sid}|${a.child||''}`):false;
-      const chk = a.sid ? `<button class="attChk" data-sid="${a.sid||''}" data-name="${esc(a.name)}" data-date="${o.date}" data-time="${o.time}" data-cn="${esc(o.name||'')}" data-coach="${o.coach||''}" data-disc="${esc(o.disc||'')}" data-child="${esc(a.child||'')}" data-present="${present?1:0}" style="margin-left:auto;flex-shrink:0;width:26px;height:26px;border-radius:50%;border:1.5px solid ${present?'#006040':'var(--border)'};background:${present?'#006040':'transparent'};color:#fff;font-size:13px;font-weight:700;cursor:pointer;">${present?'✓':''}</button>` : '';
-      return `<div style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--dark);padding:4px 0;">• ${a.name}${a.pill}${chk}</div>`; };
-    const excusedHtml = excused.length ? `<div style="margin-top:8px;border-top:1px dashed var(--border);padding-top:8px;"><div style="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:4px;">📋 ${LANG==='en'?'Excused':'Omluveni'} (${excused.length})</div>${excused.map(r=>{
-        const _e=(window._attExcuses||{})[_excKey(r.student_id, r.child_name)]||(window._attExcuses||{})[r.student_id]||{};
-        const _rr=(typeof EXCUSE_REASONS!=='undefined') ? EXCUSE_REASONS.find(x=>x.k===_e.reason_key) : null;
-        // Bez důvodu se to řekne rovnou -- prázdno by trenér četl jako chybu.
-        const _lbl=_rr ? (LANG==='en'?_rr.en:_rr.cs) : (LANG==='en'?'no reason given':'bez důvodu');
-        const _note=_excNote(_lbl, (_e.note||r.reason||''));
-        const _src=r.source||(_memIds.has(String(r.student_id))?'membership':'dropin');
-        const _wpill=(_src==='cohort'?tagPill(LANG==='en'?'course':'kurz','#5B3FB0'):(_src==='membership'?tagPill(LANG==='en'?'member':'členství','#006040'):tagPill(LANG==='en'?'drop-in':'jednoráz','#C0392B')))+(r.child_name?_kpill:'');
-        return `<div style="font-size:13px;color:var(--light);padding:3px 0;">• <span style="text-decoration:line-through;">${escapeHtml(r.child_name?(kidEmoji(null)+' '+r.child_name):(r.student_name||(LANG==='en'?'Member':'Člen')))}</span>${_wpill} <span style="color:var(--mid);">— ${escapeHtml(_lbl)}</span>${_note?` <span style="color:var(--light);font-size:12px;">„${escapeHtml(_note)}"</span>`:''}</div>`;
-      }).join('')}</div>` : '';
-    return `<div style="border:1px solid var(--border);border-radius:12px;padding:11px;margin-bottom:8px;">
-      <div class="rosterHead" data-i="${i}" style="display:flex;justify-content:space-between;align-items:center;${(n||excused.length)?'cursor:pointer;':''}">
-        <div style="font-size:13px;"><strong style="${o.cancelled?'text-decoration:line-through;opacity:.6;':''}">${o.name}</strong>${lvl}${o.cancelled?' <span style="font-size:10px;font-weight:700;color:#C0392B;background:#C0392B1a;border-radius:6px;padding:1px 6px;">'+(LANG==='en'?'not held':'neproběhlo')+'</span>':''}<div style="color:var(--mid);font-size:12px;">${dn[dd.getDay()]} ${o.time} · ${dd.getDate()}.${dd.getMonth()+1}.</div></div>
-        <div style="font-weight:700;font-size:14px;color:${cap&&n>=cap?'var(--red)':'var(--dark)'};">${n}${cap?`/${cap}`:''} 👥${excused.length?` <span style="font-size:11px;color:var(--light);font-weight:600;">· ${excused.length}📋</span>`:''}</div>
-      </div>
-      ${(n||excused.length)?`<div class="rosterList" data-i="${i}" style="display:none;margin-top:8px;border-top:1px solid var(--border);padding-top:8px;">${n?`<div style="font-size:11px;color:var(--light);margin-bottom:4px;">${LANG==='en'?'Tap ◯ to check in who actually attended':'Klepni na ◯ kdo reálně dorazil'}</div>`:''}${attendees.map(attRow).join('')}${excusedHtml}</div>`:''}
-    </div>`;
-  }).join('');
-  box.querySelectorAll('.rosterHead').forEach(h=>h.onclick=()=>{ const l=box.querySelector(`.rosterList[data-i="${h.dataset.i}"]`); if(l) l.style.display=l.style.display==='none'?'block':'none'; });
-  box.querySelectorAll('.attChk').forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); toggleAttendance(b.dataset); });
-}
-const ATTEND_MILESTONES=[5,10,25,50,100,150,200,300,500];
 async function toggleAttendance(d){
   const gid = d.gymid || (_myGymData && _myGymData.id); if(!gid) return;
   const gname = (_myGymData && _myGymData.id===gid) ? (_myGymData.name||'') : (d.gname||'');
@@ -18822,7 +18747,8 @@ async function toggleAttendance(d){
         }
       }catch(e){}
     }
-    if(_myGymData && _myGymData.id===gid) loadGymRoster(); else loadCoachRoster(gid, gname);
+    // Majitel klubu přehled lekcí nemá (odbavuje v detailu lekce), obnovuje se jen přehled kouče.
+    if(!(_myGymData && _myGymData.id===gid)) loadCoachRoster(gid, gname);
     try{ if(_classAttendOpen && window._classAttendOcc) openClassAttendance(window._classAttendOcc); }catch(e){}
   }catch(e){ console.error('toggleAttendance',e); toast('⚠️ '+e.message); }
 }
@@ -19075,8 +19001,8 @@ async function openClassAttendance(occ){
       toast(LANG==='en'?'\u2705 Verified \u2014 won\u2019t ask again':'\u2705 Ov\u011b\u0159eno \u2014 u\u017e se nebude pt\u00e1t');
     } else { b.disabled=false; b.textContent=(LANG==='en'?'\u26a0\ufe0f proof?':'\u26a0\ufe0f doklad?'); }
   }; });
-  const _cahY=$('caHappenedYes'); if(_cahY) _cahY.onclick=async()=>{ try{ await supaClient.from('gym_class_log').insert({ gym_id:gid, class_date:occ.date, class_time:occ.time||null, class_name:occ.name||null, coach_id:occ.coach||null, status:'held', logged_by:currentUser?currentUser.id:null }); }catch(e){} const b=$('caHappenedBanner'); if(b) b.outerHTML='<div style="background:#F0FBF0;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-weight:700;font-size:14px;color:#006040;">'+(EN?'✅ Marked: class took place':'✅ Označeno: lekce proběhla')+'</div>'; toast(EN?'✅ Marked as held':'✅ Označeno jako proběhlá'); try{ if(typeof loadGymRoster==='function') loadGymRoster(); }catch(e){} };
-  const _cahN=$('caHappenedNo'); if(_cahN) _cahN.onclick=()=>{ const _b=$('caHappenedBanner'); if(!_b) return; _b.innerHTML='<div style="font-weight:800;font-size:13.5px;margin-bottom:8px;color:var(--dark);">'+(EN?'Why did it not happen?':'Pro\u010d neprob\u011bhla?')+'</div>'+'<button id="caNhZero" style="width:100%;padding:11px;margin-bottom:6px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;text-align:left;font-family:DM Sans;line-height:1.35;">'+(EN?'It was on, but nobody came':'M\u011bla prob\u011bhnout, ale nikdo nep\u0159i\u0161el')+'</button>'+'<button id="caNhForgot" style="width:100%;padding:11px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;text-align:left;font-family:DM Sans;line-height:1.35;">'+(EN?'We forgot to cancel it (it should not have run)':'Zapomn\u011bli jsme ji zru\u0161it (nem\u011bla b\u00fdt)')+'</button>'; const _doLog=async(reason)=>{ try{ await supaClient.from('gym_class_log').insert({ gym_id:gid, class_date:occ.date, class_time:occ.time||null, class_name:occ.name||null, coach_id:occ.coach||null, status:'cancelled', reason:reason, logged_by:currentUser?currentUser.id:null }); }catch(e){} try{ await supaClient.from('attend_reminders').delete().eq('gym_id',gid).eq('class_date',occ.date).eq('class_time',occ.time||null).eq('class_name',occ.name||null); }catch(e){} try{ if(window._cancelledOcc) window._cancelledOcc.add(`${occ.date}|${occ.time||''}|${occ.name||''}`); }catch(e){} if(_b) _b.outerHTML='<div style="background:#FEECEC;border:1px solid #F3C9C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-weight:700;font-size:14px;color:var(--red);">'+(reason===String.fromCharCode(122,101,114,111)?(EN?'\u2715 Logged: nobody came':'\u2715 Zalogov\u00e1no: nikdo nep\u0159i\u0161el'):(EN?'\u2715 Logged: did not run':'\u2715 Zalogov\u00e1no: neprob\u011bhla'))+'</div>'; toast(EN?'\u2705 Logged':'\u2705 Zalogov\u00e1no'); try{ if(typeof loadGymRoster==='function') loadGymRoster(); }catch(e){} }; const _z=$('caNhZero'); if(_z) _z.onclick=()=>_doLog('zero'); const _f=$('caNhForgot'); if(_f) _f.onclick=()=>_doLog('forgot'); };
+  const _cahY=$('caHappenedYes'); if(_cahY) _cahY.onclick=async()=>{ try{ await supaClient.from('gym_class_log').insert({ gym_id:gid, class_date:occ.date, class_time:occ.time||null, class_name:occ.name||null, coach_id:occ.coach||null, status:'held', logged_by:currentUser?currentUser.id:null }); }catch(e){} const b=$('caHappenedBanner'); if(b) b.outerHTML='<div style="background:#F0FBF0;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-weight:700;font-size:14px;color:#006040;">'+(EN?'✅ Marked: class took place':'✅ Označeno: lekce proběhla')+'</div>'; toast(EN?'✅ Marked as held':'✅ Označeno jako proběhlá'); };
+  const _cahN=$('caHappenedNo'); if(_cahN) _cahN.onclick=()=>{ const _b=$('caHappenedBanner'); if(!_b) return; _b.innerHTML='<div style="font-weight:800;font-size:13.5px;margin-bottom:8px;color:var(--dark);">'+(EN?'Why did it not happen?':'Pro\u010d neprob\u011bhla?')+'</div>'+'<button id="caNhZero" style="width:100%;padding:11px;margin-bottom:6px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;text-align:left;font-family:DM Sans;line-height:1.35;">'+(EN?'It was on, but nobody came':'M\u011bla prob\u011bhnout, ale nikdo nep\u0159i\u0161el')+'</button>'+'<button id="caNhForgot" style="width:100%;padding:11px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;text-align:left;font-family:DM Sans;line-height:1.35;">'+(EN?'We forgot to cancel it (it should not have run)':'Zapomn\u011bli jsme ji zru\u0161it (nem\u011bla b\u00fdt)')+'</button>'; const _doLog=async(reason)=>{ try{ await supaClient.from('gym_class_log').insert({ gym_id:gid, class_date:occ.date, class_time:occ.time||null, class_name:occ.name||null, coach_id:occ.coach||null, status:'cancelled', reason:reason, logged_by:currentUser?currentUser.id:null }); }catch(e){} try{ await supaClient.from('attend_reminders').delete().eq('gym_id',gid).eq('class_date',occ.date).eq('class_time',occ.time||null).eq('class_name',occ.name||null); }catch(e){} try{ if(window._cancelledOcc) window._cancelledOcc.add(`${occ.date}|${occ.time||''}|${occ.name||''}`); }catch(e){} if(_b) _b.outerHTML='<div style="background:#FEECEC;border:1px solid #F3C9C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-weight:700;font-size:14px;color:var(--red);">'+(reason===String.fromCharCode(122,101,114,111)?(EN?'\u2715 Logged: nobody came':'\u2715 Zalogov\u00e1no: nikdo nep\u0159i\u0161el'):(EN?'\u2715 Logged: did not run':'\u2715 Zalogov\u00e1no: neprob\u011bhla'))+'</div>'; toast(EN?'\u2705 Logged':'\u2705 Zalogov\u00e1no'); }; const _z=$('caNhZero'); if(_z) _z.onclick=()=>_doLog('zero'); const _f=$('caNhForgot'); if(_f) _f.onclick=()=>_doLog('forgot'); };
   if(!_roLock && _myGymData && _myGymData.owner_id===(currentUser&&currentUser.id) && (typeof _mtlPayMode==='function'&&_mtlPayMode(_myGymData)==='qr_bank')){
     _recGym=_myGymData; _recGymOwnerPartner=false; _recGymOwnerScore=0; _recGymOwnerBankai=false;
     var _oid2=_myGymData.owner_id||(currentUser&&currentUser.id);
@@ -19098,6 +19024,15 @@ async function loadCoachRoster(gymId, gymName){
   try{ const { data } = await supaClient.from('gym_bookings').select('student_id,student_name,class_date,class_time,class_name,status,child_name,child_age').eq('gym_id', gymId).eq('status','active').gte('class_date', today); drops=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_memberships').select('student_id,student_name,plan_access,coach_id,status,child_name,child_age,discipline').eq('gym_id', gymId).in('status',['active','cancelling']); mems=data||[]; }catch(e){}
   try{ const { data } = await supaClient.from('gym_attendance').select('student_id,class_date,class_time,class_name,child_name').eq('gym_id', gymId).gte('class_date', today); att=data||[]; }catch(e){}
+  // Omluvy pro VŠECHNY zobrazené dny, jedním dotazem. Dřív si je přehled bral z paměti po naposledy
+  // otevřeném detailu lekce: po startu žádné, jinak jen z jednoho dne -- a přikládal je ke stejné
+  // lekci i v jiné dny, protože neporovnával datum.
+  let _rosterExc=[]; const _rosterExcMap={};
+  try{
+    const _days=[...new Set(occs.slice(0,20).map(function(o){ return o.date; }))];
+    if(_days.length){ const { data:_rx } = await supaClient.from('gym_excuses').select('student_id,student_name,reason_key,note,class_name,class_date,class_time,child_name,source').eq('gym_id', gymId).in('class_date', _days); _rosterExc=_rx||[]; }
+    _rosterExc.forEach(function(e){ const _k=String(e.class_date)+'|'+_excKey(e.student_id, e.child_name); if(!_rosterExcMap[_k]) _rosterExcMap[_k]=e; });
+  }catch(e){}
   if(!occs.length){ box.innerHTML=`<p style="color:var(--light);font-size:13px;padding:8px 0;line-height:1.5;">${LANG==='en'?'No upcoming classes of yours at this club.':'Žádné tvoje nadcházející lekce v tomto klubu.'}</p>`; return; }
   const dn=dayNames(); const cap=g.capacity||0;
   const accOf=(m)=>{ try{ const pa=typeof m.plan_access==='string'?JSON.parse(m.plan_access):m.plan_access; return (pa&&pa.length)?pa:['all']; }catch(e){ return ['all']; } };
@@ -19115,7 +19050,7 @@ async function loadCoachRoster(gymId, gymName){
     const _excR=rs.filter(r=> r.status==='released' && rk(r)===k);
     // Omluvy patří k TÉHLE lekci, ne ke všem na daný den -- jinak by se omluva z ranní
     // lekce ukazovala i u večerní. Stejná shoda, jakou dělá načtení výš.
-    const _exHere=((window._attExcList)||[]).filter(function(e){ return String(e.class_name||'')===String(o.name||'') && (!e.class_time || !o.time || e.class_time===o.time); });
+    const _exHere=_rosterExc.filter(function(e){ return String(e.class_date||'')===String(o.date||'') && String(e.class_name||'')===String(o.name||'') && (!e.class_time || !o.time || e.class_time===o.time); });
     // Kdo se omluvil, patří mezi omluvené, ne mezi přítomné. U jednorázovky zůstává
     // rezervace 'active' i po omluvě těsně před lekcí, takže bez tohohle filtru by byl v seznamu dvakrát.
     const _exIds=new Set(_excR.map(function(r){ return _excKey(r.student_id, r.child_name); }).concat(_exHere.map(function(e){ return _excKey(e.student_id, e.child_name); })));
@@ -19141,7 +19076,7 @@ async function loadCoachRoster(gymId, gymName){
       const chk = a.sid ? `<button class="attChk" data-sid="${a.sid||''}" data-name="${esc(a.name)}" data-date="${o.date}" data-time="${o.time}" data-cn="${esc(o.name||'')}" data-coach="${o.coach||''}" data-disc="${esc(o.disc||'')}" data-child="${esc(a.child||'')}" data-present="${present?1:0}" data-gymid="${gymId}" data-gname="${gn}" style="margin-left:auto;flex-shrink:0;width:26px;height:26px;border-radius:50%;border:1.5px solid ${present?'#006040':'var(--border)'};background:${present?'#006040':'transparent'};color:#fff;font-size:13px;font-weight:700;cursor:pointer;">${present?'✓':''}</button>` : '';
       return `<div style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--dark);padding:4px 0;">• ${a.name}${a.pill}${chk}</div>`; };
     const excusedHtml = excused.length ? `<div style="margin-top:8px;border-top:1px dashed var(--border);padding-top:8px;"><div style="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:4px;">📋 ${LANG==='en'?'Excused':'Omluveni'} (${excused.length})</div>${excused.map(r=>{
-        const _e=(window._attExcuses||{})[_excKey(r.student_id, r.child_name)]||(window._attExcuses||{})[r.student_id]||{};
+        const _e=_rosterExcMap[String(o.date)+'|'+_excKey(r.student_id, r.child_name)]||{};
         const _rr=(typeof EXCUSE_REASONS!=='undefined') ? EXCUSE_REASONS.find(x=>x.k===_e.reason_key) : null;
         // Bez důvodu se to řekne rovnou -- prázdno by trenér četl jako chybu.
         const _lbl=_rr ? (LANG==='en'?_rr.en:_rr.cs) : (LANG==='en'?'no reason given':'bez důvodu');
