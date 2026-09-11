@@ -269,7 +269,7 @@ export default async function handler(req, res) {
   if (!SB || !KEY) return res.status(500).json({ error: 'env not set' });
   try {
     const b = (typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body) || {};
-    const { token, gym_id, coach_id, member_id, paid_by, paid_by_name, session_at_issue, gross_amount, currency, type, payment_method, cash_payer_name, acq_source, credit, source_booking_id, cohort_id, income_class, months, dropin_plan_id, proof_checked } = b;
+    const { token, gym_id, coach_id, member_id, paid_by, paid_by_name, participant_name, session_at_issue, gross_amount, currency, type, payment_method, cash_payer_name, acq_source, credit, source_booking_id, cohort_id, income_class, months, dropin_plan_id, proof_checked } = b;
     // trusted internal call (PIS server-side confirm) — reuses ALL the commission logic, no user token
     const _trusted = !!(b.internal && b.intSecret && process.env.PIS_INTERNAL_SECRET && b.intSecret === process.env.PIS_INTERNAL_SECRET);
     const provider = b.provider === 'coach' ? 'coach' : 'gym';
@@ -441,14 +441,18 @@ export default async function handler(req, res) {
       // Odberatel = kdo platil: zastupce (paid_by_name), plátce v hotovosti
       // (cash_payer_name), jinak clovek sam. Ucastnik = komu sluzba patri (member_id);
       // uvadi se jen kdyz se lisi. Jmeno ucastnika dohledame, record-cash zna jen id.
-      let _partName = null;
+      let _memberName = null;
       try {
         if (row.member_id) {
           const _mp = await _wsbGet(`profiles?id=eq.${encodeURIComponent(row.member_id)}&select=name`);
-          _partName = (_mp && _mp[0] && _mp[0].name) || null;
+          _memberName = (_mp && _mp[0] && _mp[0].name) || null;
         }
       } catch (e) {}
-      const _custName = row.paid_by_name || row.cash_payer_name || _partName || null;
+      // Ucastnik: dite vedene jen jmenem pod uctem rodice (child_name / attendee_name), jinak drzitel uctu.
+      const _partName = (participant_name && String(participant_name).trim()) || _memberName;
+      // Odberatel = kdo platil: zastupce, platce v hotovosti, jinak drzitel uctu. Nikdy dite, ktere
+      // vlastni ucet nema -- to je ucastnik, ne ten, kdo platil.
+      const _custName = row.paid_by_name || row.cash_payer_name || _memberName || _partName || null;
       // Termin lekce ZAFIXOVANY TED: z rezervace, ke ktere platba patri (soukromka nebo vstup).
       let _sessAt = session_at_issue || null;
       if (!_sessAt && source_booking_id) {

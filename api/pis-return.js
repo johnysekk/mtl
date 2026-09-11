@@ -99,6 +99,12 @@ async function pisSideEffects(rec, tbl){
         // months rozlozi akvizici na JEDEN mesic z celeho obdobi. Bez nej by rocni clenstvi
         // dostalo akvizicni sazbu na celych 16 000, coz je dvanactinasobek toho, co nalezi.
         months:(tbl==='gym_memberships'?(parseInt(rec.months,10)||1):undefined), payment_method:'pis', acq_source:rec.acq_source||'direct', credit:((tbl!=='gym_memberships'&&rec.credit_used==='student')?'student':undefined), source_booking_id:rec.id };
+      // Platce a ucastnik stejne jako u karty: odberatel zastupce, ucastnik dite/mladistvy.
+      _body.paid_by = rec.paid_by || null; _body.paid_by_name = rec.paid_by_name || null;
+      if (rec.child_name || rec.attendee_name) _body.participant_name = rec.child_name || rec.attendee_name;
+      // Pojmenovana cena ze vstupu -- pis-webhook ji posilal, tahle cesta ne. Kdo vyhral, urcoval,
+      // jestli se v dochazce objevi "doklad?".
+      if (tbl === 'gym_bookings') { _body.dropin_plan_id = rec.dropin_plan_id || null; _body.proof_checked = (rec.need_proof ? false : null); }
       await fetch(APP_URL+'/api/record-cash',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(_body) }); } }catch(e){}
   if(_event){ try{ await fetch(APP_URL+'/api/ticket-email',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ ticketId:rec.id }) }); }catch(e){} }
   try{ if(_event){ let target=(_evP==='coach')?_evC:null; if(!target && _evG){ const g=await sb.from('gyms').select('owner_id').eq('id',_evG).maybeSingle(); target=g.data&&g.data.owner_id; } if(target) await sb.from('notifications').insert({ user_id:target, type:'booking', read:false, message:'\ud83c\udf9f\ufe0f Nov\u00fd prodej vstupenky (p\u0159evodem): '+(rec.buyer_name||'Z\u00e1kazn\u00edk'), data:JSON.stringify({ kind:'pis_payment_in', event_id:rec.event_id, student:(rec.buyer_name||''), amt:(rec.amount!=null?String(rec.amount):''), sym:(rec.currency||'CZK') }) }); }
@@ -152,10 +158,10 @@ export default async function handler(req, res){
       _dbg = 'st='+encodeURIComponent(String(status||'?'))+'&http='+r.status+'&cp='+((_cp&&_cp.http)||0)+((_cp&&_cp.code)?('_'+_cp.code):'');
       if(r.ok && PAID_STATUSES.has(String(status))){
         let tbl='gym_bookings';
-        let rec=(await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name,class_date,class_time,amount,currency,coach_id,acq_source,student_name,credit_used').eq('pis_payment_id',paymentId).maybeSingle()).data;
-        if(!rec){ const m=await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name,amount,currency,coach_id,acq_source,student_name,months').eq('pis_payment_id',paymentId).maybeSingle(); if(m.data){ rec=m.data; tbl='gym_memberships'; } }
-        if(!rec){ const c=await sb.from('bookings').select('id,status,student_id,coach_id,amount,currency,coach_name,training_date,training_time,slot_id,acq_source,credit_used').eq('pis_payment_id',paymentId).maybeSingle(); if(c.data){ rec=c.data; tbl='bookings'; } }
-        if(!rec){ const e=await sb.from('event_tickets').select('id,status,buyer_id,event_id,amount,currency,buyer_name,order_id').eq('pis_payment_id',paymentId).maybeSingle(); if(e.data){ rec=e.data; tbl='event_tickets'; } }
+        let rec=(await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name,class_date,class_time,amount,currency,coach_id,acq_source,student_name,credit_used,dropin_plan_id,need_proof,paid_by,paid_by_name,child_name').eq('pis_payment_id',paymentId).maybeSingle()).data;
+        if(!rec){ const m=await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name,amount,currency,coach_id,acq_source,student_name,months,paid_by,paid_by_name,child_name').eq('pis_payment_id',paymentId).maybeSingle(); if(m.data){ rec=m.data; tbl='gym_memberships'; } }
+        if(!rec){ const c=await sb.from('bookings').select('id,status,student_id,coach_id,amount,currency,coach_name,training_date,training_time,slot_id,acq_source,credit_used,paid_by').eq('pis_payment_id',paymentId).maybeSingle(); if(c.data){ rec=c.data; tbl='bookings'; } }
+        if(!rec){ const e=await sb.from('event_tickets').select('id,status,buyer_id,event_id,amount,currency,buyer_name,order_id,paid_by,paid_by_name,attendee_name').eq('pis_payment_id',paymentId).maybeSingle(); if(e.data){ rec=e.data; tbl='event_tickets'; } }
         if(!rec){ const co=await sb.from('cohort_members').select('id,status,student_id,cohort_id,name,attribution').eq('pis_payment_id',paymentId).maybeSingle(); if(co.data){ rec=co.data; tbl='cohort_members'; } }
         if(!rec){ const mo=await sb.from('merch_orders').select('id,status,student_id,gym_id,coach_id,merch_id,item_name,amount,currency,buyer_name').eq('pis_payment_id',paymentId).maybeSingle(); if(mo.data){ rec=mo.data; tbl='merch_orders'; } }
         const _paidStatus=(tbl==='event_tickets'||tbl==='merch_orders')?'paid':(tbl==='cohort_members')?'deposit_paid':'active';

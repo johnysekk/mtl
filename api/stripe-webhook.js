@@ -399,11 +399,15 @@ async function notifyPaidForMinor(m, item, amount, currency) {
   } catch (e) { console.error('notifyPaidForMinor', e.message); }
 }
 
-async function recordTransaction(acct, pi, fields) {
-  if (!pi) return;
+// JEDINY zapis Stripe transakce. Vola ho webhook i /api/session (zaloha pri navratu studenta).
+// Session mela driv vlastni chudsi kopii, takze podle toho, kdo vyhral, v transakci chybely
+// dropin_plan_id, proof_checked, platce, payee, acq_months nebo disciplina.
+export async function recordTransaction(acct, pi, fields) {
+  if (!pi) return { status: 'no-pi' };
   try {
-    const ex = await sbGet(`transactions?payment_intent=eq.${encodeURIComponent(pi)}&select=id`);
-    if (ex && ex.length) return;
+    const ex = await sbGet(`transactions?payment_intent=eq.${encodeURIComponent(pi)}&select=id,gross_amount`);
+    const _existing = (ex && ex.length) ? ex[0] : null;
+    if (_existing && _existing.gross_amount != null) return { status: 'exists', gross: _existing.gross_amount };
     let gross = fields.gross != null ? fields.gross : null, stripeFee = null, mtlFee = null, net = null, currency = fields.currency || null, chargeId = null;
     if (acct) {
       try {
@@ -459,11 +463,19 @@ async function recordTransaction(acct, pi, fields) {
         }
       } catch (e) { console.error('recordTransaction fee', e.message); }
     }
+    if (_existing) {
+      // Radek bez penez (ulozeny driv, kdyz Stripe data nevydal): doplnit castky, nic jineho neprepisovat.
+      if (gross == null) return { status: 'no-charge-data', payId: pi };
+      await sbPatch('transactions', `payment_intent=eq.${encodeURIComponent(pi)}`, { charge_id: chargeId, gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, net_amount: net, currency });
+      const _dnU = await issueStripeDokladForPi(pi, { slotId: fields.slot_id || null });
+      return { status: 'updated', gross, stripeFee, mtlFee, net, dokladNo: _dnU };
+    }
     const _payee = await resolvePayee(acct);
     const _txIns = await sbPost('transactions', {
       payment_intent: pi, charge_id: chargeId, payee_account: acct || null, type: fields.type,
       payee_id: _payee.id, payee_kind: _payee.kind,
       member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null,
+      discipline: fields.discipline || null,
       // Pojmenovana cena za vstup: prichazi z metadata (mtl_dropin_plan / mtl_need_proof).
       // proof_checked=false znamena "klub jeste musi videt doklad". Bez tohohle by sleva
       // pres Stripe zmizela beze stopy.
@@ -485,12 +497,13 @@ async function recordTransaction(acct, pi, fields) {
     });
     // INSERT neprosel = transakci mezitim zapsal /api/session a doklad vystavuje on. Druhe cislo
     // v rade by zustalo jako dira (vlozeni dokladu pak spadne na unikatnim transaction_id).
-    if (_txIns && _txIns.ok === false) return;
+    if (_txIns && _txIns.ok === false) return { status: 'insert-failed', http: _txIns.status, dberror: _txIns.error };
     try { if (fields.member_id && gross != null) await ecoPurchase(fields.member_id, gross / 100, currency, pi); } catch (e) {}
     // Doklad jako SNIMEK hned po zapsani platby -- stejne jako u hotovosti. Vystavuje ho ten, komu
     // se povedl INSERT transakce (unikatni payment_intent pusti jen jednoho): webhook, nebo /api/session.
-    await issueStripeDokladForPi(pi, { slotId: fields.slot_id || null });
-  } catch (e) { console.error('recordTransaction', e.message); }
+    const dokladNo = await issueStripeDokladForPi(pi, { slotId: fields.slot_id || null });
+    return { status: 'recorded', gross, stripeFee, mtlFee, net, dokladNo };
+  } catch (e) { console.error('recordTransaction', e.message); return { status: 'error:' + e.message }; }
 }
 
 
@@ -623,7 +636,7 @@ export default async function handler(req, res) {
               // a nemela ani `data`, takze se nedala prokliknout. Dve notifikace o jedne veci jsou
               // horsi nez jedna; nechavame tu popisnejsi.
               await payAmbassador(slot.coach_profile_id, amount, currency, m.discipline, pi);
-              await recordTransaction(event.account, pi, { type: 'coach_inperson', slot_id: m.slot_id || null, member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', gross: amount, currency, paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
+              await recordTransaction(event.account, pi, { type: 'coach_inperson', slot_id: m.slot_id || null, discipline: m.discipline || null, member_id: m.student_id, coach_id: slot.coach_profile_id, plan: 'Lekce 1:1', gross: amount, currency, paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
             await notifyPaidForMinor(m, 'Lekce 1:1', amount, currency);
             }
           } else if (m.booking_type === 'online' && m.coach_profile_id) {
@@ -639,7 +652,7 @@ export default async function handler(req, res) {
             // ODSTRANENO ze stejneho duvodu: klient posila kind coach_new_online s formatem
             // objednavky, castkou a referral bonusem.
             await payAmbassador(m.coach_profile_id, amount, currency, m.discipline, pi);
-            await recordTransaction(event.account, pi, { type: 'coach_online',  member_id: m.student_id, coach_id: m.coach_profile_id, plan: m.online_fmt || 'Online', gross: amount, currency, paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
+            await recordTransaction(event.account, pi, { type: 'coach_online', discipline: m.discipline || null, member_id: m.student_id, coach_id: m.coach_profile_id, plan: m.online_fmt || 'Online', gross: amount, currency, paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
             await notifyPaidForMinor(m, m.online_fmt || 'Online lekce', amount, currency);
           }
         } else {
@@ -648,12 +661,12 @@ export default async function handler(req, res) {
           // recordTransaction je idempotentni: existujici transakci nezmeni.
           const _b0 = existing[0] || {};
           const _onl = (m.booking_type === 'online');
-          await recordTransaction(event.account, pi, { type: _onl ? 'coach_online' : 'coach_inperson', slot_id: _onl ? null : (m.slot_id || null), member_id: m.student_id || _b0.student_id || null, coach_id: _b0.coach_id || m.coach_profile_id || null, plan: _onl ? (m.online_fmt || 'Online') : 'Lekce 1:1', gross: parseInt(m.base_amount || '0', 10), currency: m.booking_currency || 'CZK', paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
+          await recordTransaction(event.account, pi, { type: _onl ? 'coach_online' : 'coach_inperson', slot_id: _onl ? null : (m.slot_id || null), discipline: m.discipline || null, member_id: m.student_id || _b0.student_id || null, coach_id: _b0.coach_id || m.coach_profile_id || null, plan: _onl ? (m.online_fmt || 'Online') : 'Lekce 1:1', gross: parseInt(m.base_amount || '0', 10), currency: m.booking_currency || 'CZK', paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null });
         }
       } else if (m.mtl_payment_type === 'drop_in' || m.mtl_payment_type === 'membership') {
         // GYM skupinová lekce (direct charge na účtu gymu) → 0,5 % ambassadorovi disciplíny
         await payGymAmbassador(m.mtl_disc, parseInt(m.mtl_base || '0', 10), m.mtl_currency || 'CZK', s.id, s.payment_intent);
-        if (m.mtl_payment_type === 'drop_in') { const dpi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id); if (dpi) await recordTransaction(event.account, dpi, { type: 'drop_in',  member_id: m.student_id || m.member_id, gym_id: m.gym_id, coach_id: m.coach_profile_id || m.coach_id, plan: m.mtl_plan || 'Drop-in', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side',
+        if (m.mtl_payment_type === 'drop_in') { const dpi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id); if (dpi) await recordTransaction(event.account, dpi, { type: 'drop_in', discipline: m.discipline || m.disc || null, member_id: m.student_id || m.member_id, gym_id: m.gym_id, coach_id: m.coach_profile_id || m.coach_id, plan: m.mtl_plan || 'Drop-in', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side',
           dropin_plan_id: m.mtl_dropin_plan || null,
           need_proof: (String(m.mtl_need_proof || '') === '1') }); }
         else if (m.mtl_membership_kind === 'one_time') {

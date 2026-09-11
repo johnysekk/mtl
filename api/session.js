@@ -1,5 +1,5 @@
 import Stripe from 'stripe';
-import { issueStripeDokladForPi } from './stripe-webhook.js';
+import { recordTransaction as recordStripeTransaction } from './stripe-webhook.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -36,104 +36,8 @@ async function sbPatch(path, body) {
   } catch (e) { console.error('sbPatch', e.message); return { ok: false, status: 0, error: e.message }; }
 }
 
-// Record a transaction with EXACT Stripe fees (idempotent on payment_intent).
-// Backstop so the ledger is correct even if the Stripe webhook isn't delivering
-// connected-account events. Mirrors stripe-webhook.js recordTransaction.
-async function recordTransaction(acct, pi, fields) {
-  if (!pi) return { status: 'no-pi' };
-  try {
-    // idempotent, but FIX rows that were previously saved with null money
-    const ex = await sbGet(`transactions?payment_intent=eq.${encodeURIComponent(pi)}&select=id,gross_amount`);
-    const existing = ex && ex.length ? ex[0] : null;
-    if (existing && existing.gross_amount != null) return { status: 'exists', gross: existing.gross_amount };
-
-    let gross = null, stripeFee = null, mtlFee = null, net = null, currency = fields.currency || null, chargeId = null;
-    if (acct) {
-      try {
-        // resolve the CHARGE object explicitly (expand can return latest_charge as a string id)
-        let ch = null;
-        if (String(pi).startsWith('ch_')) {
-          ch = await stripe.charges.retrieve(pi, { expand: ['balance_transaction'] }, { stripeAccount: acct });
-        } else {
-          const intent = await stripe.paymentIntents.retrieve(pi, { expand: ['latest_charge.balance_transaction'] }, { stripeAccount: acct });
-          ch = intent && intent.latest_charge;
-          if (typeof ch === 'string') ch = await stripe.charges.retrieve(ch, { expand: ['balance_transaction'] }, { stripeAccount: acct });
-        }
-        if (ch && typeof ch === 'object') {
-          chargeId = ch.id; currency = ch.currency || currency;
-          let bt = ch.balance_transaction;
-          if (typeof bt === 'string') { try { bt = await stripe.balanceTransactions.retrieve(bt, { stripeAccount: acct }); } catch (e) {} }
-          if (bt && typeof bt === 'object') {
-            // Direct charges: connected-account balance_transaction.fee is the COMBINED fee
-            // (Stripe processing + our application fee); .net already nets BOTH out.
-            // Split them via fee_details so we can report each separately.
-            let sFee = 0, aFee = 0;
-            if (Array.isArray(bt.fee_details)) {
-              for (const fd of bt.fee_details) {
-                if (fd.type === 'stripe_fee') sFee += fd.amount;
-                else if (fd.type === 'application_fee') aFee += fd.amount;
-              }
-            }
-            if (sFee === 0 && aFee === 0) { aFee = ch.application_fee_amount || 0; sFee = (bt.fee || 0) - aFee; }
-
-            // Same trap as stripe-webhook: the balance transaction is in the account's SETTLEMENT
-            // currency. A EUR charge on a CZK-settled account returns bt.currency='czk' with an
-            // already-converted amount, which would record a EUR club's income in Kc. Keep what the
-            // student was actually charged and convert the fees back with bt.exchange_rate.
-            const _settled = String(bt.currency || '').toLowerCase();
-            const _charged = String(ch.currency || '').toLowerCase();
-            if (_settled && _charged && _settled !== _charged) {
-              const rate = Number(bt.exchange_rate) || 0;
-              const back = (v) => (rate > 0 ? Math.round((Number(v) || 0) / rate) : 0);
-              currency = ch.currency;
-              gross = ch.amount;
-              aFee = ch.application_fee_amount != null ? ch.application_fee_amount : back(aFee);
-              sFee = back(sFee);
-              net = gross - aFee - sFee;
-            } else {
-              currency = bt.currency || currency;
-              gross = bt.amount;
-              net = bt.net;
-            }
-            stripeFee = sFee; mtlFee = aFee;
-          } else {
-            gross = ch.amount; mtlFee = ch.application_fee_amount || 0; net = gross - mtlFee;
-          }
-        }
-      } catch (e) { console.error('recordTransaction fee', e.message); return { status: 'fee-error:' + e.message }; }
-    }
-    if (gross == null) return { status: 'no-charge-data', payId: pi };
-
-    // WELCOME 0%: a REFERRED provider's first 30 days = MTL takes 0% (we refund our application fee
-    // back to them). The window opens at their FIRST sale (set once here) and is checked PER CHARGE, so a
-    // membership renewal that bills after 30 days pays the normal rate — it can NEVER become "0% forever".
-    // Welcome 0% is now applied UP FRONT in pay.js (application_fee 0 during the window) -> no charge, no refund here.
-
-    const row = {
-      charge_id: chargeId, payee_account: acct || null, type: fields.type,
-      member_id: fields.member_id || null, coach_id: fields.coach_id || null, gym_id: fields.gym_id || null, plan: fields.plan || null, discipline: fields.discipline || null,
-      gross_amount: gross, stripe_fee: stripeFee, mtl_fee: (((fields.welcome_waived||0)>0 && (mtlFee===0||mtlFee==null)) ? (fields.welcome_waived||0) : mtlFee), mtl_fee_refunded: ((fields.welcome_waived||0)>0 ? (fields.welcome_waived||0) : 0), net_amount: net, currency, status: 'paid',
-      income_class: fields.income_class || null,
-    };
-    if (existing) {
-      const pr = await sbPatch(`transactions?payment_intent=eq.${encodeURIComponent(pi)}`, row);
-      if (pr && pr.ok === false) return { status: 'update-failed', http: pr.status, dberror: pr.error, gross, stripeFee, mtlFee, net };
-      return { status: 'updated', gross, stripeFee, mtlFee, net };
-    }
-    // Stejna pole, podle kterych webhook urcuje kolej, provizi a odberatele dokladu. Bez nich
-    // transakce z teto zalohy nemela payment_method ani commission_status a do rozpadu provize
-    // se nedostala; doklad by znel na ucastnika i tam, kde platil zastupce.
-    const ir = await sbPost('transactions', { payment_intent: pi, ...row,
-      payment_method: 'stripe', commission_status: 'collected', commission_month: new Date().toISOString().slice(0, 7),
-      paid_by: fields.paid_by || null, paid_by_name: fields.paid_by_name || null,
-      created_at: new Date().toISOString() });
-    if (ir && ir.ok === false) return { status: 'insert-failed', http: ir.status, dberror: ir.error, dburl: ir.url, gross, stripeFee, mtlFee, net };
-    // Transakci zalozila tahle cesta, doklad tedy vystavuje ona. Webhook po ni najde transakci
-    // hotovou a doklad nevystavi -- driv proto nevznikl vubec.
-    const dokladNo = await issueStripeDokladForPi(pi, { slotId: fields.slot_id || null });
-    return { status: 'recorded', gross, stripeFee, mtlFee, net, dokladNo };
-  } catch (e) { console.error('recordTransaction', e.message); return { status: 'error:' + e.message }; }
-}
+// Zapis transakce je jediny, ve stripe-webhook.js (recordTransaction). Vlastni kopie tady byla
+// chudsi a podle toho, kdo vyhral souboj s webhookem, se transakce lisila.
 
 // Vrátí detaily checkout session.
 // Pro gym flows (direct charge / subscription) je session vytvořená NA connected accountu,
@@ -226,17 +130,17 @@ export default async function handler(req, res) {
         if (invId) { try { const inv = await stripe.invoices.retrieve(invId, opts); payId = (inv.payment_intent && (typeof inv.payment_intent === 'string' ? inv.payment_intent : inv.payment_intent.id)) || (inv.charge && (typeof inv.charge === 'string' ? inv.charge : inv.charge.id)); } catch (e) {} }
       }
       let txType = null; const f = { currency: m.mtl_currency || session.currency, income_class: m.mtl_income || null, welcome_waived: parseInt(m.mtl_welcome_waived||'0',10)||0 };
-      if (m.mtl_payment_type === 'membership') { txType = 'membership'; f.member_id = m.student_id; f.gym_id = m.gym_id; f.plan = m.mtl_plan || 'Membership'; }
-      else if (m.mtl_payment_type === 'drop_in') { txType = 'drop_in'; f.member_id = m.student_id || m.member_id; f.gym_id = m.gym_id; f.coach_id = m.coach_id || m.coach_profile_id || null; f.plan = m.mtl_plan || 'Drop-in'; f.discipline = m.discipline || m.disc || null; }
+      if (m.mtl_payment_type === 'membership') { txType = 'membership'; f.member_id = m.student_id || m.member_id; f.gym_id = m.gym_id; f.plan = m.mtl_plan || 'Membership'; f.income_class = m.mtl_income || 'side'; f.acq_months = (m.mtl_acq_months ? parseInt(m.mtl_acq_months, 10) : null); f.base_rate = (m.mtl_base_rate ? parseFloat(m.mtl_base_rate) : null); }
+      else if (m.mtl_payment_type === 'drop_in') { txType = 'drop_in'; f.member_id = m.student_id || m.member_id; f.gym_id = m.gym_id; f.coach_id = m.coach_id || m.coach_profile_id || null; f.plan = m.mtl_plan || 'Drop-in'; f.discipline = m.discipline || m.disc || null; f.income_class = m.mtl_income || 'side'; f.dropin_plan_id = m.mtl_dropin_plan || null; f.need_proof = (String(m.mtl_need_proof || '') === '1'); }
       else if (m.mtl_payment_type === 'merch') { txType = 'merch'; f.member_id = m.student_id; f.gym_id = m.gym_id; f.plan = m.merch_name || m.mtl_plan || 'Merch'; }
-      else if (m.mtl_payment_type === 'event_ticket') { txType = 'event_ticket'; f.member_id = m.student_id || m.buyer_id; f.gym_id = m.gym_id; f.coach_id = m.payout_coach_id || null; f.plan = m.mtl_event || 'Event'; }
+      else if (m.mtl_payment_type === 'event_ticket') { txType = 'event_ticket'; f.member_id = m.student_id || m.buyer_id; f.gym_id = m.gym_id; f.coach_id = m.payout_coach_id || null; f.plan = m.mtl_event || 'Event'; f.income_class = m.mtl_income || 'side'; }
       else if (m.booking_type === 'inperson' || m.booking_type === 'online') { txType = (m.booking_type === 'online') ? 'coach_online' : 'coach_inperson'; f.member_id = m.student_id; f.coach_id = m.coach_profile_id; f.plan = m.online_fmt || 'Lekce 1:1'; f.currency = m.booking_currency || session.currency; f.discipline = m.discipline || null; }
       f.paid_by = m.paid_by || null; f.paid_by_name = m.paid_by_name || null;
       if (m.booking_type === 'inperson') f.slot_id = m.slot_id || null;
       if (!txType) _tx = { recorded: false, reason: 'no mtl_payment_type / booking_type in the session metadata — redeploy pay.js (LX/LY) and make a NEW payment; old sessions have no metadata' };
       else if (!payId) _tx = { recorded: false, reason: 'could not resolve a payment id from the session (subscription invoice may lack payment_intent/charge on this API version)', txType };
       else if (!gymAccount) _tx = { recorded: false, reason: 'no gymAccount/acct passed to /api/session', txType, payId };
-      else { const r = await recordTransaction(gymAccount, payId, { type: txType, ...f }); _tx = { recorded: ['recorded','updated','exists'].includes(r.status), ...r, txType, payId, gymAccount, gymId: f.gym_id, memberId: f.member_id }; }
+      else { const r = await recordStripeTransaction(gymAccount, payId, { type: txType, ...f }); _tx = { recorded: ['recorded','updated','exists'].includes(r.status), ...r, txType, payId, gymAccount, gymId: f.gym_id, memberId: f.member_id }; }
     } catch (e) { _tx = { recorded: false, reason: 'exception: ' + e.message }; }
 
     // ---- referral credit consumption (idempotent backstop for a non-delivering webhook) ----

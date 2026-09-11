@@ -66,6 +66,9 @@ async function pisSideEffects(rec, tbl) {
         // v dochazce neni co overovat a nikdo nezjisti, kdo si vzal slevu.
         dropin_plan_id: rec.dropin_plan_id || null,
         proof_checked: (rec.need_proof ? false : null) };
+      // Platce a ucastnik stejne jako u karty: odberatel zastupce, ucastnik dite/mladistvy.
+      _body.paid_by = rec.paid_by || null; _body.paid_by_name = rec.paid_by_name || null;
+      if (rec.child_name || rec.attendee_name) _body.participant_name = rec.child_name || rec.attendee_name;
       await fetch(APP_URL + '/api/record-cash', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(_body) });
     }
   } catch (e) { /* non-fatal */ }
@@ -150,10 +153,10 @@ export default async function handler(req, res) {
 
     // reconcile against gym_bookings OR gym_memberships (PIS can pay either)
     let tbl = 'gym_bookings';
-    let rec = (await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name,amount,coach_id,acq_source,student_name,credit_used,dropin_plan_id,need_proof').eq('pis_payment_id', paymentId).maybeSingle()).data;
-    if (!rec) { const m = await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name,amount,coach_id,acq_source,student_name,months').eq('pis_payment_id', paymentId).maybeSingle(); if (m.data) { rec = m.data; tbl = 'gym_memberships'; } }
-    if (!rec) { const c = await sb.from('bookings').select('id,status,student_id,coach_id,amount,currency,coach_name,slot_id,acq_source,credit_used,dropin_plan_id,need_proof').eq('pis_payment_id', paymentId).maybeSingle(); if (c.data) { rec = c.data; tbl = 'bookings'; } }
-    if (!rec) { const e = await sb.from('event_tickets').select('id,status,buyer_id,event_id,amount,currency,buyer_name').eq('pis_payment_id', paymentId).maybeSingle(); if (e.data) { rec = e.data; tbl = 'event_tickets'; } }
+    let rec = (await sb.from('gym_bookings').select('id,status,student_id,gym_id,class_name,amount,coach_id,acq_source,student_name,credit_used,dropin_plan_id,need_proof,paid_by,paid_by_name,child_name').eq('pis_payment_id', paymentId).maybeSingle()).data;
+    if (!rec) { const m = await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name,amount,coach_id,acq_source,student_name,months,paid_by,paid_by_name,child_name').eq('pis_payment_id', paymentId).maybeSingle(); if (m.data) { rec = m.data; tbl = 'gym_memberships'; } }
+    if (!rec) { const c = await sb.from('bookings').select('id,status,student_id,coach_id,amount,currency,coach_name,slot_id,acq_source,credit_used,dropin_plan_id,need_proof,paid_by').eq('pis_payment_id', paymentId).maybeSingle(); if (c.data) { rec = c.data; tbl = 'bookings'; } }
+    if (!rec) { const e = await sb.from('event_tickets').select('id,status,buyer_id,event_id,amount,currency,buyer_name,paid_by,paid_by_name,attendee_name').eq('pis_payment_id', paymentId).maybeSingle(); if (e.data) { rec = e.data; tbl = 'event_tickets'; } }
     if (!rec) { const co = await sb.from('cohort_members').select('id,status,student_id,cohort_id,name,attribution').eq('pis_payment_id', paymentId).maybeSingle(); if (co.data) { rec = co.data; tbl = 'cohort_members'; } }
     if (!rec) { const mo = await sb.from('merch_orders').select('id,status,student_id,gym_id,coach_id,merch_id,item_name,amount,currency,buyer_name').eq('pis_payment_id', paymentId).maybeSingle(); if (mo.data) { rec = mo.data; tbl = 'merch_orders'; } }
     if (!rec) return res.status(200).json({ ok: true, note: 'no matching record' });
