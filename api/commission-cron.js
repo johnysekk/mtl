@@ -115,10 +115,14 @@ let deferredMin = 0;
 
   try {
     // ---- gather unpaid cash/qr commission, grouped by gym + currency ----
-    const tx = await sb(`transactions?select=gym_id,currency,mtl_fee,mtl_rate,gross_amount,mtl_fee_refunded,payment_method,commission_status,commission_month&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&commission_month=${monthOp}.${curMonth}&limit=20000`);
+    const tx = await sb(`transactions?select=gym_id,paid_to,currency,mtl_fee,mtl_rate,gross_amount,mtl_fee_refunded,payment_method,commission_status,commission_month&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&commission_month=${monthOp}.${curMonth}&limit=20000`);
     const byGym = {};
     for (const t of (tx || [])) {
       if (!t.gym_id) continue;
+      // PROVIZI DLUZI TEN, KOMU PRISLY PENIZE. Skupinovka kouce v rezimu klub nese gym_id, ale penize
+      // sly na kouce (paid_to='coach') -- driv se jeho provize strhla z karty KLUBU a jeho radek se
+      // oznacil jako zaplaceny. Organizace stejne.
+      if (t.paid_to && t.paid_to !== 'gym') continue;
       if (t.commission_month === curMonth && !gymDaily(t.gym_id)) continue;
       const cur = (t.currency || 'czk').toLowerCase();
       (byGym[t.gym_id] = byGym[t.gym_id] || {});
@@ -176,7 +180,7 @@ let deferredMin = 0;
               // pending, unified-doklad-cron nemá co vystavit a nikdo se to nedozví -- přesně
               // ten stav, kdy notifikace chodí a doklad ne.
               try{
-                const _upd = await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=ilike.${encodeURIComponent(cur)}${_scope}`,
+                const _upd = await sb(`transactions?gym_id=eq.${gid}&or=(paid_to.is.null,paid_to.eq.gym)&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&currency=ilike.${encodeURIComponent(cur)}${_scope}`,
                   { method: 'PATCH', prefer: 'return=representation', body: JSON.stringify({ commission_status: 'collected', commission_collected_at: new Date().toISOString() }) });
                 marked += (Array.isArray(_upd) ? _upd.length : 0);
               }catch(e){ markErr = markErr || String(e.message || e).slice(0, 200); }
@@ -187,7 +191,7 @@ let deferredMin = 0;
             collected++;
           } else {
             anyFail = true;
-            if (!gymDaily(gid)) await sb(`transactions?gym_id=eq.${gid}&payment_method=in.(cash,qr,pis)&commission_status=eq.pending&currency=ilike.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
+            if (!gymDaily(gid)) await sb(`transactions?gym_id=eq.${gid}&or=(paid_to.is.null,paid_to.eq.gym)&payment_method=in.(cash,qr,pis)&commission_status=eq.pending&currency=ilike.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
             failed++;
           }
         }
@@ -328,10 +332,11 @@ let deferredMin = 0;
     // ===== ORGANIZACE: provize z akcí pořádaných organizací (paid_to='organization') =====
     // Postaveno stejně jako klubová a koučovská větev výše: sečti nezaplacené, po 6. dni
     // strhni z karty, při selhání odlož a nakonec pozastav. Nic vlastního, jen jiný vlastník.
-    const otx = await sb(`transactions?select=organization_id,currency,mtl_fee,mtl_rate,gross_amount,mtl_fee_refunded,payment_method,commission_status,commission_month&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&organization_id=not.is.null&commission_month=${monthOp}.${curMonth}&limit=20000`);
+    const otx = await sb(`transactions?select=organization_id,paid_to,currency,mtl_fee,mtl_rate,gross_amount,mtl_fee_refunded,payment_method,commission_status,commission_month&payment_method=in.(cash,qr,pis)&commission_status=in.(pending,failed)&organization_id=not.is.null&commission_month=${monthOp}.${curMonth}&limit=20000`);
     const byOrg = {};
     for (const t of (otx || [])) {
       if (!t.organization_id) continue;
+      if (t.paid_to && t.paid_to !== 'organization') continue;
       // Běžný provoz účtuje po měsíci; denní režim je jen pro testovací účty.
       if (t.commission_month === curMonth && !orgDaily(t.organization_id)) continue;
       const cur = (t.currency || 'czk').toLowerCase();
@@ -370,7 +375,7 @@ let deferredMin = 0;
           if (pi && pi.status === 'succeeded') {
             // Označit transakce jako vybrané -- bez toho nemá unified-doklad-cron co vystavit.
             const _scope = orgDaily(oid) ? '' : `&commission_month=lt.${curMonth}`;
-            const r = await sb(`transactions?organization_id=eq.${oid}&currency=ilike.${encodeURIComponent(cur)}&commission_status=in.(pending,failed)&payment_method=in.(cash,qr,pis)${_scope}`, {
+            const r = await sb(`transactions?organization_id=eq.${oid}&or=(paid_to.is.null,paid_to.eq.organization)&currency=ilike.${encodeURIComponent(cur)}&commission_status=in.(pending,failed)&payment_method=in.(cash,qr,pis)${_scope}`, {
               method: 'PATCH', prefer: 'return=representation',
               body: JSON.stringify({ commission_status: 'collected', commission_collected_at: new Date().toISOString() }),
             });

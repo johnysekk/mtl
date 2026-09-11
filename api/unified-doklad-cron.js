@@ -107,6 +107,19 @@ function _money(minor, cur){ return (Number(minor||0)/100).toFixed(2).replace('.
 function esc(x){ return String(x==null?'':x).replace(/[<>&"]/g,function(c){ return c==='<'?'&lt;':c==='>'?'&gt;':c==='&'?'&amp;':'&quot;'; }); }
 function _czDate(d){ try{ const x=new Date(d); return x.getUTCDate()+'. '+(x.getUTCMonth()+1)+'. '+x.getUTCFullYear(); }catch(e){ return String(d||''); } }
 function _dokNo(id){ return 'MTL-' + id; }
+// KDO DLUŽÍ PROVIZI = komu přišly peníze. Banka a hotovost to píšou do paid_to, Stripe do payee_kind
+// (gym / profile). Stejné pravidlo je v appce (_commOwner) a v commission-cron. Dřív se Stripe platba
+// kouče na výplatní účet u skupinovky přičítala klubu, protože nesla gym_id a paid_to prázdné.
+function commissionOwner(t) {
+  const pk = t.paid_to || (t.payee_kind === 'profile' ? 'coach' : t.payee_kind) || null;
+  if (pk === 'organization' && t.organization_id) return { kind: 'organization', id: t.organization_id };
+  if (pk === 'coach' && t.coach_id) return { kind: 'coach', id: t.coach_id, identity: t.gym_id ? 'payout' : 'own' };
+  if (pk === 'gym' && t.gym_id) return { kind: 'gym', id: t.gym_id };
+  if (t.organization_id) return { kind: 'organization', id: t.organization_id };
+  if (t.gym_id) return { kind: 'gym', id: t.gym_id };
+  if (t.coach_id) return { kind: 'coach', id: t.coach_id, identity: 'own' };
+  return null;
+}
 function _kindLabel(s){ return s.organization_id ? 'organizace' : (s.gym_id ? 'klub' : (s.billing_identity==='payout' ? 'kou\u010d \u00b7 re\u017eim klub' : 'kou\u010d')); }
 
 // ── ODBĚRATEL ────────────────────────────────────────────────────────────────────────────
@@ -335,7 +348,7 @@ export default async function handler(req, res) {
     const _dailyFilter = preview
       ? `created_at=gte.${dayStart}&created_at=lt.${dayEnd}`
       : `commission_collected_at=gte.${dayStart}&commission_collected_at=lt.${dayEnd}`;
-    const tx = await sb(`transactions?select=gym_id,coach_id,organization_id,paid_to,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method&commission_status=in.(collected${preview?',pending,failed':''})&${DAILY?_dailyFilter:`commission_month=eq.${period}`}&mtl_fee=gt.0&limit=50000`);
+    const tx = await sb(`transactions?select=gym_id,coach_id,organization_id,paid_to,payee_kind,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method&commission_status=in.(collected${preview?',pending,failed':''})&${DAILY?_dailyFilter:`commission_month=eq.${period}`}&mtl_fee=gt.0&limit=50000`);
 
     // Posbírat diagnostiku hned tady -- tx a buckety jsou lokální pro tenhle blok a u návratové
     // hodnoty už neexistují. Bez toho se z odpovědi nedá poznat, jestli filtr nic nenašel, nebo
@@ -356,16 +369,11 @@ export default async function handler(req, res) {
     };
     for (const t of (tx || [])) {
       const cur = (t.currency || 'czk').toLowerCase();
-      // attribution: a coach payout (own account / 1:1) goes to the coach; otherwise the gym.
-      const isCoach = (t.paid_to === 'coach') || (t.coach_id && !t.gym_id);
-      // Klubové plnění kouče (skupinovka, členství) nese gym_id a jde na jeho účet režimu
-      // klub -- fakturuje se tedy jeho druhé identitě. Klíč kbelíku to nese v příponě.
-      const _clubMode = !!(isCoach && t.coach_id && t.gym_id);
-      // Organizace fakturuje MTL jako samostatny subjekt -- ani klub, ani kouc.
-      if (t.paid_to === 'organization' && t.organization_id) add(bucket(orgB, t.organization_id, cur), t);
-      else if (isCoach && t.coach_id) add(bucket(coachB, t.coach_id + (_clubMode ? '|payout' : ''), cur), t);
-      else if (t.gym_id) add(bucket(gymB, t.gym_id, cur), t);
-      else if (t.coach_id) add(bucket(coachB, t.coach_id, cur), t);
+      const o = commissionOwner(t);
+      if (!o) continue;
+      if (o.kind === 'organization') add(bucket(orgB, o.id, cur), t);
+      else if (o.kind === 'coach') add(bucket(coachB, o.id + (o.identity === 'payout' ? '|payout' : ''), cur), t);
+      else add(bucket(gymB, o.id, cur), t);
     }
 
     // Majitele organizaci -- doklad zni na organizaci, ale plati ji jeji vlastnik.
