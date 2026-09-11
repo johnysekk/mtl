@@ -13988,12 +13988,24 @@ async function checkGymOwnership(){
 }
 // Připomínka doplnit docházku: lekce, co začaly >=2 h zpět (dnes), bez označené docházky.
 // Bez cronu — kontroluje se při otevření appky majitelem klubu; jedna připomínka na lekci.
+// Připomíná se jen lekce, která v rozvrhu OPRAVDU BYLA, když měla začít. Lekce přidaná večer na dnešní
+// den, jejíž čas už uplynul, proběhnout nemohla -- dřív na ni přesto přišlo "Doplň docházku".
+// Stejné pravidlo je v cron-attendance.js.
+function _classRemindable(c, dayYmd, start){
+  if(!c || c.once) return false;
+  if(c.since && dayYmd < String(c.since)) return false;
+  if(c.until && dayYmd > String(c.until)) return false;
+  if(c.created_at){ const cr=new Date(c.created_at); if(!isNaN(cr) && cr > start) return false; }
+  // Starší záznam bez času vytvoření, přidaný dnes: nevíme, jestli před lekcí, nebo po ní -- radši nic.
+  else if(c.since && String(c.since)===dayYmd) return false;
+  return true;
+}
 async function checkAttendanceReminders(){
   if(!_myGymData || !currentUser) return;
   let sch=[]; try{ sch = _myGymData.schedule ? (typeof _myGymData.schedule==='string'?JSON.parse(_myGymData.schedule):_myGymData.schedule) : []; }catch(e){}
   if(!sch.length) return;
   const now=new Date(); const today=now.toISOString().slice(0,10); const dow=now.getDay();
-  const due=[]; (sch||[]).forEach(c=>{ if(c.once) return; _classSlots(c).forEach(function(sl){ if(Number(sl.day)!==dow) return; const t=String(sl.time||'').split(':'); const h=Number(t[0]), m=Number(t[1]||0); if(isNaN(h)) return; const start=new Date(now); start.setHours(h,m,0,0); const diff=(now-start)/3600000; if(diff>=2 && diff<=12) due.push({ c:c, time:sl.time }); }); });
+  const due=[]; (sch||[]).forEach(c=>{ if(c.once) return; _classSlots(c).forEach(function(sl){ if(Number(sl.day)!==dow) return; const t=String(sl.time||'').split(':'); const h=Number(t[0]), m=Number(t[1]||0); if(isNaN(h)) return; const start=new Date(now); start.setHours(h,m,0,0); const diff=(now-start)/3600000; if(diff>=2 && diff<=12 && _classRemindable(c, _rcYmd(now), start)) due.push({ c:c, time:sl.time }); }); });
   if(!due.length) return;
   let attSet=new Set(), remSet=new Set();
   try{ const { data: att } = await supaClient.from('gym_attendance').select('class_name,class_time').eq('gym_id',_myGymData.id).eq('class_date',today); (att||[]).forEach(a=>attSet.add(`${a.class_time}|${a.class_name||''}`)); }catch(e){}
@@ -14725,7 +14737,7 @@ async function saveCoachSchedule(){
   try{ const { data: g } = await supaClient.from('gyms').select('schedule').eq('id', _csGymId).single(); fresh = g&&g.schedule ? (typeof g.schedule==='string'?JSON.parse(g.schedule):g.schedule) : []; }catch(e){ fresh=[]; }
   const others=(fresh||[]).filter(c=>c.coach!==currentUser.id);
   const oldMine=(fresh||[]).filter(c=>c.coach===currentUser.id);
-  const mine=_csSched.map(c=>{ const nm=(c.name&&c.name.trim())?c.name.trim():levelLabel(c.level||'all'); return { day:Number(c.day)||0, time:c.time||'18:00', name:nm, level:c.level||'all', dur:Number(c.dur)||60, leader:currentUser.id, leaderName:currentUser.name||null, coach:currentUser.id, coachName:currentUser.name||null, coachOwned:true, cap:(Number(c.cap)>0?Number(c.cap):null), altPlace:c.altPlace||null, altAddr:c.altAddr||null }; });
+  const mine=_csSched.map(c=>{ const nm=(c.name&&c.name.trim())?c.name.trim():levelLabel(c.level||'all'); return { day:Number(c.day)||0, time:c.time||'18:00', name:nm, level:c.level||'all', dur:Number(c.dur)||60, leader:currentUser.id, leaderName:currentUser.name||null, coach:currentUser.id, coachName:currentUser.name||null, coachOwned:true, cap:(Number(c.cap)>0?Number(c.cap):null), altPlace:c.altPlace||null, altAddr:c.altAddr||null, since:c.since||null, until:c.until||null, created_at:c.created_at||null }; });
   const { error } = await supaClient.from('gyms').update({ schedule: JSON.stringify(others.concat(mine)) }).eq('id', _csGymId);
   if(error){ toast('⚠️ '+error.message); return; }
   toast(LANG==='en'?'✅ Saved':'✅ Uloženo');
@@ -18218,7 +18230,7 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
     const days=Array.from(document.querySelectorAll('.rpDay:checked')).map(c=>+c.value);
     if(!name){ toast(LANG==='en'?'⚠️ Enter a class name':'⚠️ Zadej název třídy'); return; }
     if(!days.length){ toast(LANG==='en'?'⚠️ Pick at least one day':'⚠️ Vyber aspoň jeden den'); return; }
-    const _since=(new Date().toISOString().slice(0,10)); days.forEach(d=>{ _gymSchedule.push({ day:d, time, name, level, disc, dur:60, since:_since }); });
+    const _since=(new Date().toISOString().slice(0,10)); days.forEach(d=>{ _gymSchedule.push({ day:d, time, name, level, disc, dur:60, since:_since, created_at:new Date().toISOString() }); });
     if($('rpName')) $('rpName').value='';
     document.querySelectorAll('.rpDay:checked').forEach(c=>c.checked=false);
     const pn=$('mgRepeatPanel'); if(pn) pn.style.display='none';
@@ -21831,7 +21843,7 @@ function _rcApplyPending(){
     const endD=new Date(now); endD.setDate(endD.getDate()-(ranToday?0:1));
     const startD=new Date(now); startD.setDate(startD.getDate()+(ranToday?1:0));
     let copy; try{ copy=JSON.parse(JSON.stringify(c)); }catch(e){ copy=Object.assign({},c); }
-    copy.time=nt; copy.name=nn; copy.since=_rcYmd(startD); delete copy.until;
+    copy.time=nt; copy.name=nn; copy.since=_rcYmd(startD); delete copy.until; copy.created_at=new Date().toISOString();
     c.until=_rcYmd(endD);
     _gymSchedule.push(copy);
   });
@@ -22155,7 +22167,7 @@ function renderScheduleEditor(){
   if($('schPrev')) $('schPrev').onclick=()=>{ _schedWeek--; renderScheduleEditor(); };
   if($('schNext')) $('schNext').onclick=()=>{ _schedWeek++; renderScheduleEditor(); };
   box.querySelectorAll('.schDayCell').forEach(el=>el.onclick=()=>{ _schedSelDow=+el.dataset.dow; _schedEdit=-1; renderScheduleEditor(); });
-  if($('schAddSel')) $('schAddSel').onclick=()=>{ _gymSchedule.push({day:_schedSelDow, time:'18:00', name:'', level:'', dur:60, disc:(isMultiDiscipline()?defaultDiscipline():null), since:_rcToday()});
+  if($('schAddSel')) $('schAddSel').onclick=()=>{ _gymSchedule.push({day:_schedSelDow, time:'18:00', name:'', level:'', dur:60, disc:(isMultiDiscipline()?defaultDiscipline():null), since:_rcToday(), created_at:new Date().toISOString()});
     // creating a weekly class is a TEMPLATE action -> take the owner straight to it, where there is
     // no past-lock and every field lives
     const _ni=_gymSchedule.length-1; _schedEdit=-1; window._rcOpen=true; window._rcOpenLesson=_ni; renderScheduleEditor();
@@ -25579,7 +25591,7 @@ if($('btnFoundingToggle')) $('btnFoundingToggle').onclick=toggleFoundingWindow;
 $('btnCloseAdmin').onclick=()=>closeSheet('shAdmin');
 $('btnCloseCoachStats').onclick=()=>closeSheet('shCoachStats');
 if($('btnCloseCoachSched')) $('btnCloseCoachSched').onclick=()=>{ window._csEditGym=null; closeSheet('shCoachSched'); };
-if($('coachSchedAdd')) $('coachSchedAdd').onclick=()=>{ _csSched.push({day:1,time:'18:00',name:'',level:'',dur:60}); renderScheduleEditor(); };
+if($('coachSchedAdd')) $('coachSchedAdd').onclick=()=>{ _csSched.push({day:1,time:'18:00',name:'',level:'',dur:60, since:_rcToday(), created_at:new Date().toISOString()}); renderScheduleEditor(); };
 if($('coachSchedSave')) $('coachSchedSave').onclick=saveCoachSchedule;
 if($('btnCloseCoachRoster')) $('btnCloseCoachRoster').onclick=()=>closeSheet('shCoachRoster');
 $('btnAdminOnline').onclick=()=>{ openOnline('founder'); };
