@@ -5269,12 +5269,25 @@ const NOTIF_T = {
   support_ticket: (d)=> LANG==='en'
     ? `✉️ New support request${d.category?' ('+d.category+')':''}${d.who?' from '+d.who:''}.`
     : `✉️ Nový dotaz na podporu${d.category?' ('+d.category+')':''}${d.who?' od '+d.who:''}.`,
-  coach_lesson_reminder: (d)=> LANG==='en'
-    ? `⏰ Lesson with ${d.student||'a student'} soon${d.date?' — '+d.date:''}${d.time?' '+d.time:''}. Tap to open it in your diary.`
-    : `⏰ Lekce s ${d.student||'studentem'} brzy${d.date?' — '+d.date:''}${d.time?' '+d.time:''}. Klepni pro otevření v diáři.`,
-  class_reminder: (d)=> LANG==='en'
-    ? `⏰ Reminder: ${d.label||'your training'} starts soon${d.time?' ('+d.time+')':''}.`
-    : `⏰ Připomínka: ${d.label||'tvůj trénink'} brzy začíná${d.time?' ('+d.time+')':''}.`,
+  // Datum se formátuje AŽ TADY (_notifWhen). V datech notifikace zůstává syrové RRRR-MM-DD,
+  // takže se nikde nerozbije porovnávání ani proklik.
+  coach_lesson_reminder: (d)=>{
+    const _w=(typeof _notifWhen==='function')?_notifWhen(d.date, d.time):((d.date||'')+(d.time?(' '+d.time):''));
+    const _who=d.student||(LANG==='en'?'a student':'studentem');
+    const _what=d.what||(LANG==='en'?'1:1 lesson':'Soukromá lekce 1:1');
+    const _price=(d.amount!=null&&Number(d.amount)>0)?((typeof fmtPrice==='function'?fmtPrice(Number(d.amount)/100,d.currency||'CZK'):String(Number(d.amount)/100))+' '+((typeof _curSym==='function')?_curSym(d.currency||'CZK'):'')):'';
+    const _place=d.online?(LANG==='en'?'online':'online'):'';
+    const _det=[_what,_place,_price].filter(Boolean).join(' · ');
+    return LANG==='en'
+      ? `⏰ ${_who} — ${_w}. ${_det}. Tap to open it in your diary.`
+      : `⏰ ${_who} — ${_w}. ${_det}. Klepni pro otevření v diáři.`;
+  },
+  class_reminder: (d)=>{
+    const _w=(typeof _notifWhen==='function')?_notifWhen(d.date, d.time):(d.time||'');
+    return LANG==='en'
+      ? `⏰ Reminder: ${d.label||'your training'} starts soon${_w?' — '+_w:''}.`
+      : `⏰ Připomínka: ${d.label||'tvůj trénink'} brzy začíná${_w?' — '+_w:''}.`;
+  },
   milestone: (d)=> LANG==='en'
     ? `🎉 New milestone unlocked! Open Milestones to see it.`
     : `🎉 Odemkl jsi nový milník! Mrkni do Milestones.`,
@@ -11070,6 +11083,28 @@ async function _qrRequeue(tbl, id, studentId, what){
 // 'paid_claimed' skryvaji, takze ji nemohl ani stahnout, ani si zarezervovat cokoli jineho.
 // Ze seznamu ale nemizi -- viz _renderPendingQr, kde se z ni stane "Kouc nepotvrdil".
 const QR_STALE_H=48;
+const QR_NUDGE_H=12;      // připomenout smí jednou za 12 hodin
+const QR_CANCEL_MAX=3;    // kolik zaplacených rezervací smí člověk zrušit za 24 h
+// Komu platba patří -- podle toho appka mluví. „Poskytovatel" nikomu nic neřekne.
+function _qrWho(r, cap){
+  const EN=LANG==='en';
+  let w;
+  if(r.tbl==='event_tickets') w=EN?'the organiser':'organizátor';
+  else if(r.tbl==='bookings') w=EN?'the coach':'kouč';
+  else if(r.paid_to==='coach') w=EN?'the coach':'kouč';
+  else w=EN?'the club':'klub';
+  return cap ? (w.charAt(0).toUpperCase()+w.slice(1)) : w;
+}
+function _qrMoney(r){
+  const cur=r.currency||'CZK';
+  return fmtPrice(r.amount||0,cur)+' '+((typeof _curSym==='function')?_curSym(cur):cur);
+}
+// Kolik hodin zbývá do dalšího připomenutí (0 = může hned).
+function _qrNudgeLeft(r){
+  if(!r.claim_reminded) return 0;
+  const left=QR_NUDGE_H*3600e3-(Date.now()-new Date(r.claim_reminded).getTime());
+  return left>0 ? Math.ceil(left/3600e3) : 0;
+}
 const QR_OPEN_MAX=2;   // kolik nezaplacených QR rezervací smí člověk držet naráz
 function _qrOverdue(r){
   try{
@@ -11105,11 +11140,11 @@ async function _renderPendingQr(){
   try{
     const [b,gb,et]=await Promise.all([
       supaClient.from('bookings').select('id,coach_id,slot_id,coach_name,training_date,training_time,type,online_format,amount,currency,status,created_at,claimed_at,claim_reminded,requeued_at').eq('student_id',currentUser.id).eq('payment_method','qr').in('status',['reserved','paid_claimed']),
-      supaClient.from('gym_bookings').select('id,gym_id,gym_name,class_name,class_date,class_time,amount,currency,status,created_at,claimed_at,claim_reminded,pis_payment_id,requeued_at').eq('student_id',currentUser.id).eq('payment_method','qr').in('status',['reserved','paid_claimed']),
+      supaClient.from('gym_bookings').select('id,gym_id,gym_name,class_name,class_date,class_time,amount,currency,status,created_at,claimed_at,claim_reminded,paid_to,coach_id,pis_payment_id,requeued_at').eq('student_id',currentUser.id).eq('payment_method','qr').in('status',['reserved','paid_claimed']),
       supaClient.from('event_tickets').select('id,event_id,amount,currency,status,created_at,claimed_at,claim_reminded,requeued_at').eq('buyer_id',currentUser.id).eq('payment_method','qr').in('status',['reserved','paid_claimed'])
     ]);
     (b.data||[]).forEach(function(x){ rows.push({ tbl:'bookings', id:x.id, coach_id:x.coach_id, slot_id:x.slot_id, training_date:x.training_date, training_time:x.training_time, claimed_at:x.claimed_at, claim_reminded:x.claim_reminded, k:'1:1', title:x.coach_name||'Soukromka', sub:(x.type==='online'?('Online'+(x.online_format?(' \u00b7 '+x.online_format):'')):((_dt(x.training_date)||'')+(x.training_time?(' '+String(x.training_time).slice(0,5)):''))), amount:x.amount, currency:x.currency, status:x.status, created_at:x.created_at }); });
-    (gb.data||[]).forEach(function(x){ rows.push({ tbl:'gym_bookings', id:x.id, gym_id:x.gym_id, class_date:x.class_date, class_time:x.class_time, claimed_at:x.claimed_at, claim_reminded:x.claim_reminded, class_name:x.class_name, pis:x.pis_payment_id, k:'Drop-in', title:x.class_name||x.gym_name||'Drop-in', sub:((_dt(x.class_date)||'')+(x.class_time?(' '+String(x.class_time).slice(0,5)):'')), amount:x.amount, currency:x.currency, status:x.status, created_at:x.created_at }); });
+    (gb.data||[]).forEach(function(x){ rows.push({ tbl:'gym_bookings', id:x.id, gym_id:x.gym_id, class_date:x.class_date, class_time:x.class_time, claimed_at:x.claimed_at, claim_reminded:x.claim_reminded, paid_to:x.paid_to, coach_id:x.coach_id, class_name:x.class_name, pis:x.pis_payment_id, k:'Drop-in', title:x.class_name||x.gym_name||'Drop-in', sub:((_dt(x.class_date)||'')+(x.class_time?(' '+String(x.class_time).slice(0,5)):'')), amount:x.amount, currency:x.currency, status:x.status, created_at:x.created_at }); });
     (et.data||[]).forEach(function(x){ rows.push({ tbl:'event_tickets', id:x.id, event_id:x.event_id, claimed_at:x.claimed_at, claim_reminded:x.claim_reminded, k:'Event', title:(LANG==='en'?'Ticket':'L\u00edstek'), sub:'', amount:x.amount, currency:x.currency, status:x.status, created_at:x.created_at }); });
   }catch(e){}
   if(!rows.length){ host.innerHTML=''; return; }
@@ -11120,33 +11155,46 @@ async function _renderPendingQr(){
     const claimed=r.status==='paid_claimed';
     const overdue = claimed && _qrOverdue(r);
     const pisProc = !!r.pis && !claimed;
-    const exp=new Date(r.created_at||Date.now()).getTime()+30*60*1000;
+    // Po odmítnutí běží 30 minut znovu od vrácení -- stejně jako v release-cronu.
+    const exp=new Date(r.requeued_at||r.created_at||Date.now()).getTime()+30*60*1000;
     const cd = pisProc
       ? '<span style="font-size:12px;font-weight:800;color:#635BFF;">\u23f3 '+(EN?'Payment processing\u2026':'Platba se zpracov\u00e1v\u00e1\u2026')+'</span>'
       : overdue
-      ? '<span style="font-size:11px;font-weight:700;color:#8a1c1c;">'+(EN?'\u26a0\ufe0f not confirmed by the provider':'\u26a0\ufe0f poskytovatel nepotvrdil')+'</span>'
+      ? '<span style="font-size:11px;font-weight:700;color:#8a1c1c;">\u26a0\ufe0f '+escapeHtml(EN?(_qrWho(r)+' has not confirmed'):(_qrWho(r)+' nepotvrdil'))+'</span>'
       : claimed
       ? '<span style="font-size:11px;font-weight:700;color:#0a8f5b;">'+(EN?'\u2713 paid \u00b7 awaiting confirmation':'\u2713 zaplaceno \u00b7 \u010dek\u00e1 na potvrzen\u00ed')+'</span>'
       : '<span class="pendQrCd" data-exp="'+exp+'" style="font-size:12px;font-weight:800;color:#9a5a00;">\u2026</span>';
-    // Zaplatil jsem, druha strana nereaguje a lekce uz probehla: dve moznosti, obe zanechaji stopu.
-    // Pripomenout = notifikace poskytovateli (jednou za 24 h). Vyresit = zruseni s POTVRZENIM,
-    // ve kterem stoji, ze bylo zaplaceno a nikdo to nepotvrdil -- to je doklad pro vymahani penez.
+    // Zaplaceno, druhá strana nereaguje. Před lekcí i po ní má student stejné dvě možnosti:
+    // připomenout (nejvýš 1x za 12 h) a zrušit. Zrušení po lekci navíc vystaví POTVRZENÍ.
+    const _nleft=_qrNudgeLeft(r);
+    const _btn=function(fn, label, primary){
+      return '<button onclick="'+fn+'(\''+r.tbl+'\',\''+r.id+'\')" style="flex:1;padding:9px;'
+        +(primary?'background:var(--dark);color:#fff;border:none;':'background:none;color:var(--red);border:1px solid var(--border);')
+        +'border-radius:9px;font-size:12px;font-weight:'+(primary?'800':'700')+';cursor:pointer;font-family:\'DM Sans\';">'+label+'</button>';
+    };
+    const _nudgeBtn = _nleft
+      ? '<div style="flex:1;padding:9px;text-align:center;font-size:11.5px;color:var(--light);">'+(EN?('Remind again in '+_nleft+' h'):('P\u0159ipomenout zas za '+_nleft+' h'))+'</div>'
+      : _btn('_qrNudgeProvider', '\ud83d\udd14 '+(EN?'Remind':'P\u0159ipomenout'), true);
     const actions = overdue
       ? ('<div style="font-size:11.5px;color:var(--mid);line-height:1.5;margin-top:7px;">'
-          +(EN?'You marked this as paid, but the provider has not confirmed it. Money for bank transfers goes straight to them \u2014 MTL does not hold it.'
-              :'Ozna\u010dil jsi to jako zaplacen\u00e9, ale poskytovatel to nepotvrdil. Pen\u00edze za p\u0159evod jdou p\u0159\u00edmo jemu \u2014 MTL je nedr\u017e\u00ed.')
+          +(EN?('You marked this as paid, but '+_qrWho(r)+' has not confirmed it.')
+              :('Ozna\u010dil jsi to jako zaplacen\u00e9, ale '+_qrWho(r)+' to nepotvrdil.'))
+          +' '+(EN?('You can remind them once every '+QR_NUDGE_H+' h.'):('P\u0159ipomenout m\u016f\u017ee\u0161 jednou za '+QR_NUDGE_H+' h.'))
           +'</div>'
-          +'<div style="display:flex;gap:6px;margin-top:9px;">'
-          +'<button onclick="_qrNudgeProvider(\''+r.tbl+'\',\''+r.id+'\')" style="flex:1;padding:9px;background:var(--dark);color:#fff;border:none;border-radius:9px;font-size:12px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">\ud83d\udd14 '+(EN?'Remind':'P\u0159ipomenout')+'</button>'
-          +'<button onclick="_qrUnconfirmedClose(\''+r.tbl+'\',\''+r.id+'\')" style="flex:1;padding:9px;background:none;color:var(--red);border:1px solid var(--border);border-radius:9px;font-size:12px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close it':'Vy\u0159e\u0161it')+'</button>'
-          +'</div>')
-      : (claimed || pisProc) ? '' :
+          +'<div style="display:flex;gap:6px;margin-top:9px;">'+_nudgeBtn+_btn('_qrUnconfirmedClose', (EN?'Close it':'Vy\u0159e\u0161it'), false)+'</div>')
+      : claimed
+      ? ('<div style="font-size:11.5px;color:var(--mid);line-height:1.5;margin-top:7px;">'
+          +(EN?(_qrWho(r,true)+' has not confirmed the payment yet. You can remind them once every '+QR_NUDGE_H+' h, or cancel if you have not sent the money.')
+              :(_qrWho(r,true)+' platbu zat\u00edm nepotvrdil. Jednou za '+QR_NUDGE_H+' h m\u016f\u017ee\u0161 p\u0159ipomenout, nebo zru\u0161it, pokud jsi pen\u00edze neposlal.'))
+          +'</div>'
+          +'<div style="display:flex;gap:6px;margin-top:9px;">'+_nudgeBtn+_btn('_withdrawPendingQr', (EN?'Cancel':'Zru\u0161it'), false)+'</div>')
+      : pisProc ? '' :
       ('<div style="display:flex;gap:6px;margin-top:9px;">'
         +'<button onclick="_reopenPendingQr(\''+r.tbl+'\',\''+r.id+'\')" style="flex:1;padding:9px;background:#0a8f5b;color:#fff;border:none;border-radius:9px;font-size:12px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">\ud83d\udcf2 '+(EN?'Pay':'Zaplatit')+'</button>'
-        +'<button onclick="_withdrawPendingQr(\''+r.tbl+'\',\''+r.id+'\')" style="flex:1;padding:9px;background:none;color:var(--red);border:1px solid var(--border);border-radius:9px;font-size:12px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Cancel':'Zru\u0161it')+'</button>'
+        +_btn('_withdrawPendingQr', (EN?'Cancel':'Zru\u0161it'), false)
         +'</div>');
     return '<div style="background:#FFF7ED;border:1px solid #FCD9A8;border-radius:12px;padding:11px 12px;margin-bottom:8px;">'
-      +'<div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;"><div style="font-weight:700;font-size:14px;min-width:0;">'+escapeHtml(r.title)+'</div><div style="font-size:12px;font-weight:800;color:#006040;white-space:nowrap;">'+fmtPrice(r.amount||0,r.currency||'CZK')+'</div></div>'
+      +'<div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;"><div style="font-weight:700;font-size:14px;min-width:0;">'+escapeHtml(r.title)+'</div><div style="font-size:12px;font-weight:800;color:#006040;white-space:nowrap;">'+_qrMoney(r)+'</div></div>'
       +'<div style="font-size:12px;color:var(--mid);margin:1px 0 4px;">'+escapeHtml(r.k+(r.sub?(' \u00b7 '+r.sub):''))+'</div>'
       +'<div style="display:flex;justify-content:space-between;align-items:center;"><span style="font-size:11px;color:var(--light);">'+(EN?'Reserved':'Rezervov\u00e1no')+'</span>'+cd+'</div>'
       +actions
@@ -11170,9 +11218,8 @@ async function _renderPendingQr(){
 async function _qrNudgeProvider(tbl,id){
   const r=(window._pendQrRows||{})[tbl+':'+id]; if(!r) return;
   const EN=LANG==='en';
-  if(r.claim_reminded && (Date.now()-new Date(r.claim_reminded).getTime())<24*3600e3){
-    toast(EN?'You already reminded them today \u2014 try again tomorrow.':'Dnes u\u017e jsi p\u0159ipom\u00ednal \u2014 zkus to z\u00edtra.'); return;
-  }
+  const _left=_qrNudgeLeft(r);
+  if(_left){ toast(EN?('You can remind again in '+_left+' h.'):('P\u0159ipomenout m\u016f\u017ee\u0161 zas za '+_left+' h.')); return; }
   try{
     let target=r.coach_id||null;
     if(!target && r.gym_id){ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',r.gym_id).maybeSingle(); target=(_g&&_g.owner_id)||null; }
@@ -11214,10 +11261,32 @@ async function _qrUnconfirmedClose(tbl,id){
   }catch(e){ toast('\u26a0\ufe0f '+e.message); }
   _renderPendingQr();
 }
+// Kolik zaplacených rezervací člověk zrušil za posledních 24 h. Proti tomu, aby si někdo
+// (nebo bot) donekonečna rezervoval, klikal „Zaplaceno" a rušil -- každé takové zrušení pošle
+// protistraně zprávu. Nezaplacených rezervací se limit netýká, ty nikoho neobtěžují.
+async function _qrClaimedCancels24h(){
+  try{
+    const since=new Date(Date.now()-24*3600e3).toISOString();
+    const [a,b]=await Promise.all([
+      supaClient.from('bookings').select('id').eq('student_id',currentUser.id).eq('payment_method','qr').eq('status','cancelled').not('claimed_at','is',null).gte('claimed_at',since),
+      supaClient.from('gym_bookings').select('id').eq('student_id',currentUser.id).eq('payment_method','qr').eq('status','cancelled').not('claimed_at','is',null).gte('claimed_at',since)
+    ]);
+    return ((a.data||[]).length)+((b.data||[]).length);
+  }catch(e){ return 0; }
+}
 async function _withdrawPendingQr(tbl,id){
   const r=(window._pendQrRows||{})[tbl+':'+id]; if(!r) return;
   const EN=LANG==='en';
-  if(!confirm(EN?'Withdraw this reservation? The slot is released immediately.':'St\u00e1hnout tuto rezervaci? M\u00edsto se okam\u017eit\u011b uvoln\u00ed.')) return;
+  const _wasClaimed=(r.status==='paid_claimed');
+  if(_wasClaimed){
+    if(await _qrClaimedCancels24h()>=QR_CANCEL_MAX){
+      toast(EN?('You have cancelled '+QR_CANCEL_MAX+' paid reservations in the last 24 h. Try again tomorrow or write to the provider.')
+              :('Za posledn\u00edch 24 h jsi zru\u0161il '+QR_CANCEL_MAX+' zaplacen\u00e9 rezervace. Zkus to z\u00edtra, nebo napi\u0161 poskytovateli.'));
+      return;
+    }
+    if(!confirm(EN?('Cancel this reservation? You marked it as paid \u2014 if you did send the money, settle it with '+_qrWho(r)+' first.')
+                 :('Zru\u0161it tuto rezervaci? Ozna\u010dil jsi ji jako zaplacenou \u2014 pokud jsi pen\u00edze poslal, dohodni se nejd\u0159\u00edv s '+(r.tbl==='bookings'?'kou\u010dem':(r.tbl==='event_tickets'?'organiz\u00e1torem':(r.paid_to==='coach'?'kou\u010dem':'klubem'))+'.')))) return;
+  } else if(!confirm(EN?'Withdraw this reservation? The slot is released immediately.':'St\u00e1hnout tuto rezervaci? M\u00edsto se okam\u017eit\u011b uvoln\u00ed.')) return;
   try{
     if(tbl==='bookings'){
       await supaClient.from('bookings').update({ status:'cancelled' }).eq('id',id);
@@ -11227,6 +11296,22 @@ async function _withdrawPendingQr(tbl,id){
       if(r.gym_id && r.class_date){ try{ let q=supaClient.from('gym_class_reservations').delete().eq('gym_id',r.gym_id).eq('student_id',currentUser.id).eq('class_date',r.class_date); if(r.class_name){ q=q.eq('class_name',r.class_name); } await q; }catch(e){} }
     } else if(tbl==='event_tickets'){
       await supaClient.from('event_tickets').update({ status:'void' }).eq('id',id);
+    }
+    // Zaplacenou rezervaci nelze zrušit potichu: druhá strana s tím místem počítala a mohla
+    // peníze čekat. Nezaplacená nikoho neobtěžuje, tam se nic neposílá.
+    if(_wasClaimed){
+      try{
+        let target=r.coach_id||null;
+        if(!target && r.gym_id){ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',r.gym_id).maybeSingle(); target=(_g&&_g.owner_id)||null; }
+        if(target){
+          const who=(currentUser&&currentUser.name)||(EN?'A student':'Student');
+          const what=(r.title||'')+(r.sub?(' \u00b7 '+r.sub):'');
+          await supaClient.from('notifications').insert(_bi({ user_id:target, type:'system', read:false, data:JSON.stringify({ kind:'qr_unconfirmed', tbl:tbl, row_id:String(id), for_provider:true }), message:'' },
+            function(EN2){ return EN2
+              ? ('\u2139\ufe0f '+who+' cancelled a reservation they had marked as paid ('+what+'). The spot is free again \u2014 check whether the money actually arrived.')
+              : ('\u2139\ufe0f '+who+' zru\u0161il rezervaci, kterou ozna\u010dil za zaplacenou ('+what+'). M\u00edsto je zase voln\u00e9 \u2014 zkontroluj, jestli platba dorazila.'); }));
+        }
+      }catch(e){}
     }
     toast(EN?'\u2705 Reservation withdrawn':'\u2705 Rezervace sta\u017eena',1);
   }catch(e){ toast('\u26a0\ufe0f '+e.message); }
@@ -25359,7 +25444,7 @@ async function loadNotifications(append){
     else if(k==='coach_qr_intent') linkLabel = LANG==='en'?'To confirm ›':'K potvrzení ›';
     // Nepotvrzená platba převodem: poskytovatele pošli tam, kde se potvrzuje, studenta k jeho rezervaci.
     else if(k==='qr_unconfirmed') linkLabel = (_pd.tbl==='gym_bookings' && _pd.for_provider)
-      ? (LANG==='en'?'Reception ›':'Recepce ›')
+      ? (LANG==='en'?'Payments to confirm ›':'Úhrady k potvrzení ›')
       : (_pd.for_provider ? (LANG==='en'?'To confirm ›':'K potvrzení ›') : (LANG==='en'?'Upcoming lessons ›':'Nadcházející lekce ›'));
     else if(k==='event_qr_intent') linkLabel = LANG==='en'?'Event management ›':'Správa akce ›';
     else if(k==='walkin_drop') linkLabel = LANG==='en'?'Reception ›':'Recepce ›';
@@ -25596,7 +25681,9 @@ async function loadNotifications(append){
             // Poskytovatel: 1:1 se potvrzuje v Přehledu kouče, vstup do klubu v Recepci.
             // Student: ve svých Nadcházejících, kde má Připomenout / Vyřešit.
             if(_pd.for_provider && _pd.tbl==='gym_bookings'){
-              try{ if(typeof openReception==='function') openReception(); else openSheet('shReception'); }catch(e){}
+              // Vstup do klubu se potvrzuje v DOCHÁZCE u dané lekce (záložka „Úhrady k potvrzení"),
+              // ne v Recepci -- ta jen ukazuje QR k zaplacení.
+              try{ window._caTab='pay'; if(typeof openGymManage==='function') openGymManage(); else openSheet('shGymManage'); }catch(e){}
             } else if(_pd.for_provider){
               try{ if(typeof openCoachDash==='function') openCoachDash(); else openSheet('shCoachDash'); }catch(e){}
               try{ setTimeout(function(){ const _b=document.getElementById('coach1QrBox'); if(_b) _b.scrollIntoView({behavior:'smooth', block:'center'}); }, 400); }catch(e){}
