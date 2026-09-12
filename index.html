@@ -265,6 +265,10 @@ body.dashmode .nav{display:none}
 body.dashmode .app>.loc-bar,body.dashmode .app>.search-wrap,body.dashmode .app>.filters,body.dashmode .app>.stack,body.dashmode .hdr{display:none!important}
 body.dashmode #authScreen{max-width:none!important}
 @media (min-width:900px){ body.dashmode .sheet{transform:none!important;transition:none!important;box-shadow:none;background:#EBE9E5;padding:16px 28px 48px}
+/* V dashmode je .app vysoká celý obsah, takze absolutne umistene prekryvy skoncily uprostred
+   STRANKY, tedy klidne tisic pixelu pod obrazovkou -- klepnuti na Jazyk pak vypadalo, ze nic
+   nedela. Fixed je vazane na obrazovku. */
+body.dashmode .picker-ov,body.dashmode .city-ov,body.dashmode .gps-ov{position:fixed}
 body.dashmode .picker-ov{align-items:center;justify-content:center;padding:24px;box-sizing:border-box}
 body.dashmode .picker-sh{width:auto;min-width:400px;max-width:520px;border-radius:16px;max-height:min(76vh,640px);transform:none}
 body.dashmode .picker-title{padding:12px 16px;font-size:12.5px}
@@ -2104,8 +2108,8 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
   <div class="shdr"><div class="shdr-title" data-noi18n>🌐 Jazyk & region</div><button class="btn-close" data-setback="1">✕</button></div>
   <div style="padding:16px 20px 44px;">
     <div class="sgrp">
-      <div class="srow" id="sLang"><div class="srow-l"><div class="sicon" style="background:#F0FBF0;">🗣️</div><div class="slbl">Jazyk</div></div><div class="sval" id="vLang"></div></div>
       <div class="srow" id="sLoc"><div class="srow-l"><div class="sicon" style="background:#F0FBF0;">📍</div><div class="slbl">Moje poloha</div></div><div class="sval" id="vLoc"></div></div>
+      <div class="srow" id="sLang"><div class="srow-l"><div class="sicon" style="background:#F0FBF0;">🗣️</div><div class="slbl">Jazyk</div></div><div class="sval" id="vLang"></div></div>
     </div>
   </div>
 </div>
@@ -7690,6 +7694,13 @@ function _offerAbroad(kind){
     if(await _goAbroad()) el.remove();
   };
 }
+// SLOUPCE PRO DECK. Dřív se tahalo select('*'), tedy i fotky provozovny, vybavení, smluvní
+// texty, fakturační a daňové údaje, plány členství -- desítky kilobajtů na klub, které karta
+// nikdy nezobrazí. Plný záznam si načte až openGymProfile, když člověk klub otevře.
+// Pozor: co přibude do _mapGymRow, fillGymCard, buildGymFiltered nebo _mtlPayReady, musí přibýt i sem.
+// Pozn.: country_code ani bio v tabulce gyms NEEXISTUJÍ (kód je čte, ale vždy dostane undefined --
+// se select('*') to bylo tiché, ve výčtu by to shodilo celý dotaz). Do výčtu proto nepatří.
+const GYM_DECK_COLS = 'id,name,city,country,city_lat,city_lng,photos,disciplines,dropin_price,membership_price,owner_id,currency,venue_type,schedule,capacity,payment_mode,stripe_account,receiver_id_value,commission_card_status,account_suspended,cert_level,created_at,description,status,suspended,deleted_at';
 function _mapGymRow(g){
   const coords = (g.city_lat!=null && g.city_lng!=null) ? {lat:+g.city_lat,lng:+g.city_lng} : null;
   return { isGym:true, g, id:g.id, name:g.name||'Klub', payment_mode:(g.payment_mode||null), certLevel:(g.cert_level||'verified'),
@@ -7703,7 +7714,7 @@ async function loadMoreGyms(){
   if(_gymLoadingMore || _gymExhausted) return false;
   _gymLoadingMore = true;
   try{
-    let q = supaClient.from('gyms').select('*').eq('status','approved');
+    let q = supaClient.from('gyms').select(GYM_DECK_COLS).eq('status','approved');
     const hc = _deckHomeCountry();
     if(_deckAbroad && window._deckCountryPick) q = q.eq('country', window._deckCountryPick);
     else if(hc && !_deckAbroad) q = q.eq('country', hc);
@@ -7796,7 +7807,7 @@ async function ensureGymsLoaded(force){
   if(_gymsLoaded && !force){ return; }
   try{
     _gymOffset = 0; _gymExhausted = false;
-    let _q = supaClient.from('gyms').select('*').eq('status','approved');
+    let _q = supaClient.from('gyms').select(GYM_DECK_COLS).eq('status','approved');
     const _hc = _deckHomeCountry();
     // Doma: jen domovská země. V zahraničí: jen ta jedna zvolená -- nikdy celý svět.
     if(_deckAbroad && window._deckCountryPick) _q = _q.eq('country', window._deckCountryPick);
@@ -23742,8 +23753,8 @@ function onLocSet(){
   try{ localStorage.setItem('mtl_gps_skip','1'); }catch(e){}
   $('locBar').classList.add('show');
   _setLocText();
-  $('vLoc').textContent=userLoc.city;
   fillUserProfile();
+  $('vLoc').textContent=userLoc.city;   // po fillUserProfile, ať ho nepřepíše starou hodnotou
   persistMyLocation();
   init();
   toast(LANG==='en'?`📍 Location: ${userLoc.city}`:`📍 Poloha: ${userLoc.city}`);
@@ -37837,7 +37848,14 @@ function fillUserProfile(){
   }
   // Settings "Moje poloha" + obnova in-memory userLoc z uložené polohy na profilu (po reopen)
   try{
-    if($('vLoc')) $('vLoc').textContent = (currentUser.city || (userLoc&&userLoc.city) || L('Nenastavena'));
+    // POŘADÍ: nejdřív právě zvolená poloha, teprve pak uložená v profilu. Obráceně to ukazovalo
+    // starou hodnotu, protože zápis do profilu běží na pozadí a u kouče se neukládá vůbec --
+    // proto vypadalo, že nastavení má "o jedno zpoždění".
+    if($('vLoc')) $('vLoc').textContent = ((userLoc&&userLoc.city) || currentUser.city || L('Nenastavena'));
+    // Aktuální jazyk. Dosud se vyplnil jen při přepnutí nebo při startu v angličtině, takže
+    // v češtině zůstalo pole prázdné a nešlo poznat, co je zvolené.
+    if($('vLang')) $('vLang').textContent = (LANG==='en'?'English':'Čeština');
+    try{ if(typeof PICKERS!=='undefined' && PICKERS.lang) PICKERS.lang.sel=(LANG==='en'?'English':'Čeština'); }catch(e){}
     if((!userLoc || userLoc.lat==null) && currentUser.city_lat!=null){
       userLoc={lat:+currentUser.city_lat, lng:(currentUser.city_lng!=null?+currentUser.city_lng:null), city:currentUser.city||'', country:currentUser.country||''};
       if(currentUser.city && $('locBar')){ $('locBar').classList.add('show'); if($('locText')) $('locText').textContent=(LANG==='en'?('📍 '+currentUser.city+' — coaches sorted by distance'):('📍 '+currentUser.city+' — kouči seřazeni dle vzdálenosti')); }
@@ -38758,7 +38776,11 @@ function setupDangerZone(){
       document.addEventListener('click', function(ev){
         try{
           const o = ev.target && ev.target.closest && ev.target.closest('[data-setopen]');
-          if(o){ openSheet(o.dataset.setopen); return; }
+          if(o){ openSheet(o.dataset.setopen);
+            // Jazyk a poloha se čtou z paměti, ne z HTML -- při otevření je potřeba je doplnit,
+            // jinak zůstane prázdno nebo stará hodnota.
+            if(o.dataset.setopen==='shLang'){ try{ if(typeof fillUserProfile==='function') fillUserProfile(); }catch(e){} }
+            return; }
           const b = ev.target && ev.target.closest && ev.target.closest('[data-setback]');
           if(b){ const sh = b.closest('.sheet'); if(sh) closeSheet(sh.id); return; }
         }catch(e){}
