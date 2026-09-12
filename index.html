@@ -19087,6 +19087,8 @@ async function _notifOpenAttendance(gymId, occ){
   else if(typeof openReception==='function') openReception(gymId);
 }
 async function openClassAttendance(occ){
+  // Pro obnovení seznamu po zápisu docházky odjinud (potvrzení platby).
+  try{ window._caOcc=occ; }catch(e){}
   if(!occ || !_myGymData) return;
   window._classAttendOcc=occ; _classAttendOpen=true;
   openSheet('shClassAttend');
@@ -19112,7 +19114,9 @@ async function openClassAttendance(occ){
   const k=`${occ.date}|${occ.time}|${occ.name||''}`;
   let rs=[],drops=[],mems=[],att=[];
   try{ const { data } = await supaClient.from('gym_class_reservations').select('*').eq('gym_id',gid).eq('class_date',occ.date); rs=data||[]; }catch(e){}
-  try{ const { data } = await supaClient.from('gym_bookings').select('student_id,student_name,class_date,class_time,class_name,status,child_name,child_age').eq('gym_id',gid).eq('status','active').eq('class_date',occ.date); drops=data||[]; }catch(e){}
+  // I 'paid_claimed': student zaplatil převodem a klub to ještě nepotvrdil. Do teď v docházce
+  // vůbec nebyl, takže kdo přišel na lekci, nešel odbavit -- kouč ho neviděl.
+  try{ const { data } = await supaClient.from('gym_bookings').select('id,student_id,student_name,class_date,class_time,class_name,status,child_name,child_age,amount,currency,paid_to').eq('gym_id',gid).in('status',['active','paid_claimed']).eq('class_date',occ.date); drops=data||[]; }catch(e){}
     // Kdo si vzal cenu vyzadujici doklad. Transakce rika JEN to, ze takovou cenu ma --
     // jestli uz doklad ukazal, rozhoduje proof_verifications, ne priznak na platbe.
     // Diky tomu se student neobtezuje pri kazde navsteve a klub muze overeni odebrat.
@@ -19204,12 +19208,15 @@ async function openClassAttendance(occ){
     ...auto.map(m=>(m.child_name?{sid:m.student_id, child:m.child_name, name:kidEmoji(m.child_age)+' '+m.child_name, pill:_kpill}:{sid:m.student_id, name:m.student_name||(EN?'Member':'Člen'), pill:tagPill(EN?'member':'členství','#006040')})),
     ...explicit.map(r=>(r.child_name?{sid:r.student_id, child:r.child_name, name:kidEmoji(r.child_age)+' '+r.child_name, pill:_kpill}:{sid:r.student_id, name:r.student_name||(EN?'Member':'Člen'), pill:tagPill(EN?'reserved':'rezervace','#1E6FD9')})),
     ...dropList.map(function(d){
-              if(d.child_name) return { sid:d.student_id, child:d.child_name, name:kidEmoji(d.child_age)+' '+d.child_name, pill:_kpill };
+              // Nepotvrzená platba: štítek navíc a proklik na potvrzení. Odbavit ho jde hned.
+              const _unc=(d.status==='paid_claimed');
+              const _upill=_unc?('<button class="caUnconf" data-id="'+(d.id||'')+'" style="font-size:11px;color:#9A5B00;background:#FFF4E5;border:1px solid #F0D9B5;border-radius:8px;padding:3px 8px;font-weight:700;white-space:nowrap;cursor:pointer;font-family:inherit;">\u23f3 '+(EN?'confirm payment':'potvrdit platbu')+'</button>'):'';
+              if(d.child_name) return { sid:d.student_id, child:d.child_name, name:kidEmoji(d.child_age)+' '+d.child_name, pill:_kpill+_upill, unconfirmed:_unc };
               // Kdo si vzal zlevnenou cenu s dokladem a jeste ho neukazal. Bez tohohle by
               // sleva byla na cestne slovo -- appka ji nabidne a klub o tom nikdy nevi.
               var _pf=(window._attProof||{})[String(d.student_id||'')]||null;
               return { sid:d.student_id, name:d.student_name||'Student',
-                pill:tagPill(EN?'drop-in':'jednoráz','#C0392B'),
+                pill:tagPill(EN?'drop-in':'jednoráz','#C0392B')+_upill, unconfirmed:_unc,
                 // Overuje se NAROK na cenu, ne jedna platba -- proto se veze id ceny.
                 proofPlan:(_pf?(_pf.dropin_plan_id||''):null) };
             })
@@ -19239,6 +19246,12 @@ async function openClassAttendance(occ){
   const attRow=(a)=>{ const present=presentSet.has(`${occ.date}|${occ.time}|${occ.name||''}|`+_whoKey(a.sid,a.name)+'|'+(a.child||''));
     const chk=(!_roLock && started)?`<button class="caChk" data-sid="${a.sid||''}" data-name="${esc(a.name)}" data-date="${occ.date}" data-time="${occ.time}" data-cn="${esc(occ.name||'')}" data-coach="${occ.coach||''}" data-disc="${esc(occ.disc||'')}" data-child="${esc(a.child||'')}" data-present="${present?1:0}" style="margin-left:auto;flex-shrink:0;width:28px;height:28px;border-radius:50%;border:1.5px solid ${present?'#006040':'var(--border)'};background:${present?'#006040':'transparent'};color:#fff;font-size:14px;font-weight:700;cursor:pointer;">${present?'✓':''}</button>`:'';
     return `<div style="display:flex;align-items:center;gap:9px;font-size:14px;color:var(--dark);padding:7px 2px;border-bottom:1px solid var(--border);">${_attAv(a.sid,false)}${escapeHtml(a.name)}${a.pill}${a.proofPlan?('<button class="caProof" data-sid="'+(a.sid||'')+'" data-plan="'+a.proofPlan+'" title="'+(EN?'Mark proof as shown':'Ozna\u010dit jako dolo\u017een\u00e9')+'" style="font-size:11px;color:#9A5B00;background:#FFF4E5;border:1px solid #F0D9B5;border-radius:8px;padding:3px 8px;font-weight:700;white-space:nowrap;cursor:pointer;font-family:inherit;">\u26a0\ufe0f '+(EN?'proof?':'doklad?')+'</button>'):''}${chk}${(!a.sid)?('<span style="margin-left:auto;font-size:11px;color:#0A7A4F;background:#EAF7F0;border-radius:8px;padding:3px 8px;font-weight:700;white-space:nowrap;">'+((LANG==='en')?'paid · guest':'zaplaceno · host')+'</span>'):''}</div>`; };
+  // Proklik ze štítku rovnou na potvrzení platby (záložka Úhrady k potvrzení u téhle lekce).
+  setTimeout(function(){ try{ document.querySelectorAll('.caUnconf').forEach(function(b){ b.onclick=function(ev){
+    ev.stopPropagation();
+    try{ window._caTab='pay'; if(typeof _caSetTab==='function') _caSetTab('pay'); }catch(e){}
+    try{ const _pc=document.getElementById('caPayConfirm'); if(_pc) _pc.scrollIntoView({behavior:'smooth', block:'center'}); }catch(e){}
+  }; }); }catch(e){} }, 60);
   const _ocOwner = _myGymData && currentUser && _myGymData.owner_id===currentUser.id;
   let _ocOvHtml='';
   if(_ocOwner && !isPast){
@@ -21191,6 +21204,41 @@ async function _recordCashTx(row){
   if(res && res.error && res.error._retriable){ await new Promise(function(rz){ setTimeout(rz, 400); }); res=await _attempt(true); }
   return res;
 }
+// „Byl na lekci?" hned po potvrzení platby, když lekce už začala. Ano = zapíše docházku,
+// Ne = nic; student zůstane v seznamu jako nezaškrtnutý. Zavření okna se bere jako Ne.
+async function _askAttendedAfterConfirm(b, g){
+  try{
+    const EN=LANG==='en';
+    const st=new Date(String(b.class_date).slice(0,10)+'T'+String(b.class_time||'00:00').slice(0,5)+':00');
+    if(isNaN(st) || st.getTime()>Date.now()) return;   // lekce ještě nezačala
+    const who=b.child_name||b.student_name||(EN?'the student':'student');
+    const yes=await new Promise(function(resolve){
+      const ov=document.createElement('div');
+      ov.style.cssText='position:fixed;inset:0;z-index:100070;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:18px;';
+      ov.innerHTML='<div style="background:#fff;border-radius:16px;max-width:380px;width:100%;padding:20px;font-family:\'DM Sans\';text-align:center;">'
+        +'<div style="font-size:17px;font-weight:800;color:var(--dark);margin-bottom:6px;">'+(EN?'Was they at the class?':'Byl na lekci?')+'</div>'
+        +'<div style="font-size:13.5px;color:var(--mid);line-height:1.55;margin-bottom:16px;">'+escapeHtml(who)+' \u00b7 '+escapeHtml(b.class_name||'')+'<br>'+(EN?'Yes ticks them off in attendance. No leaves them unticked.':'Ano ho rovnou za\u0161krtne v doch\u00e1zce. Ne ho nech\u00e1 nezat\u017een\u00e9ho.')+'</div>'
+        +'<div style="display:flex;gap:8px;">'
+          +'<button id="_aaNo" style="flex:1;padding:12px;background:none;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'No':'Ne')+'</button>'
+          +'<button id="_aaYes" style="flex:1;padding:12px;background:#006040;color:#fff;border:none;border-radius:11px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;">'+(EN?'Yes, was there':'Ano, byl')+'</button>'
+        +'</div></div>';
+      document.body.appendChild(ov);
+      const done=function(v){ try{ ov.remove(); }catch(e){} resolve(v); };
+      ov.querySelector('#_aaNo').onclick=function(){ done(false); };
+      ov.querySelector('#_aaYes').onclick=function(){ done(true); };
+      ov.onclick=function(e){ if(e.target===ov) done(false); };
+    });
+    if(!yes) return;
+    await supaClient.from('gym_attendance').insert({
+      gym_id:(g&&g.id)||b.gym_id, student_id:b.student_id||null, student_name:b.student_name||null,
+      class_name:b.class_name||null, class_date:String(b.class_date).slice(0,10), class_time:b.class_time||null,
+      coach_id:b.coach_id||null, marked_by:(currentUser&&currentUser.id)||null,
+      child_name:b.child_name||null, discipline:b.discipline||null,
+    });
+    toast(EN?'\u2705 Marked as attended':'\u2705 Zaps\u00e1no do doch\u00e1zky',1);
+    try{ if(typeof openClassAttendance==='function' && window._caOcc) openClassAttendance(window._caOcc); }catch(e){}
+  }catch(e){ console.log('[attended]', e&&e.message); }
+}
 async function _qrcConfirm(id, kind, ok, drops, membs){
   var _rer=window._qrcRerender||function(){ _recpQrConfirm(window._qrcOpts); };
   const g=_recGym; if(!g) return; const EN=LANG==='en'; const cur=g.currency||'CZK'; const sym=_curSym(cur);
@@ -21206,6 +21254,8 @@ async function _qrcConfirm(id, kind, ok, drops, membs){
       // Rezervace si nese vlastní paid_to z doby vzniku -- řídíme se jím.
       _recordCashTx({ gym_id:(b.paid_to==='coach'?null:g.id), member_id:b.student_id||null, coach_id:b.coach_id||null, paid_to:(b.paid_to==='coach'?'coach':'gym'), provider:(b.paid_to==='coach'?'coach':'gym'), gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:b.currency||cur, type:'drop_in', status:'completed', payment_method:'qr', commission_status:'pending', commission_month:month, cash_payer_name:b.student_name||null, acq_source:b.acq_source||'direct', source_booking_id:b.id, credit:(b.credit_used==='student'?'student':undefined) }); if(_txB&&_txB.error){ toast('\u26a0\ufe0f '+(EN?'Confirmed, but the bookkeeping write failed \u2014 ':'Potvrzeno, ale zápis do účetnictví selhal \u2014 ')+(_txB.error.message||'')); } try{ if(b&&b.student_id){ await supaClient.from('notifications').insert({ user_id:b.student_id, type:'booking', read:false, message:(LANG==='en'?'\u2705 Payment confirmed':'\u2705 Platba potvrzena'), data:JSON.stringify({ kind:'payment_confirmed', gym:g.id, gym_name:(g.name||''), amount:(fmtPrice(b.amount||0, b.currency||cur)+' '+_curSym(b.currency||cur)), item:(b.class_name||''), goto:'dropin' }) }); } }catch(e){}
       toast((EN?'\u2705 Confirmed':'\u2705 Potvrzeno'), 1);
+      // Lekce už začala? Pak jedna otázka navíc, ať to kouč nemusí hledat v docházce znovu.
+      try{ if(b && b.class_date) await _askAttendedAfterConfirm(b, g); }catch(e){}
     } else {
       let m=(membs||[]).find(function(x){ return String(x.id)===String(id); }); if(!m){ try{ const r=await supaClient.from('gym_memberships').select('*').eq('id',id).single(); m=(r&&r.data)||null; }catch(e){} } if(!m){ toast(EN?'\u26a0\ufe0f Membership not found':'\u26a0\ufe0f \u010clenstv\u00ed nenalezeno'); return _rer(); } if(ok && (m.status==='active'||m.status==='completed')){ toast(EN?'Already handled':'Ji\u017e vy\u0159\u00edzeno', 1); return _rer(); }
       if(!ok){ await supaClient.from('gym_memberships').update({ status:'ended', cancelled_at:new Date().toISOString(), period_end:new Date().toISOString() }).eq('id',id); toast(EN?'Voided':'Zru\u0161eno'); return _rer(); }
@@ -35554,6 +35604,10 @@ async function _dokladPreview(which, opts){
       +_row(EN?'Customer':'Odběratel', EN?'Student name':'Jméno studenta', true)
       +_row(EN?'Item':'Položka', EN?'Single class':'Jednorázová lekce')
       +_row(EN?'Total':'Celkem', '200,00 CZK', true)
+      +(prov.onDok&&(prov.phone||prov.email)
+        ? '<p style="font-size:11.5px;color:var(--light);margin-top:12px;">'+(EN
+          ? ('Contact details on receipts are ON. You can turn them off in '+(opts.where||'your settings')+'.')
+          : ('Kontaktn\u00ed \u00fadaje na dokladu m\u00e1\u0161 zapnut\u00e9. Vypnout je m\u016f\u017ee\u0161 v '+(opts.where||'Nastaven\u00ed')+'.'))+'</p>' : '')
       +(!prov.onDok&&(prov.phone||prov.email)
         ? '<p style="font-size:11.5px;color:#8a5a00;margin-top:12px;">'+(EN
           ? ('Contact is filled in but not ticked for receipts, so it does not appear here. Tick it in '+(opts.where||'your profile settings')+'.')
