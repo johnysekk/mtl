@@ -710,7 +710,6 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
     <h3>To je všechno!</h3>
     <p>Prošel jsi všechny dostupné kouče. Uprav filtry nebo se vrať za chvíli.</p>
     <button class="btn-reset" id="btnReset">Zobrazit od začátku</button>
-    <button id="btnGeoSearch" style="display:none;margin-top:10px;background:var(--red);color:#fff;border:none;border-radius:12px;padding:11px 18px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">🌍 Hledat kouče jinde</button>
   </div>
 
   <!-- Back card -->
@@ -6109,11 +6108,14 @@ async function loadCoaches() {
   await loadFounderConfig();
   const ulat = (userLoc&&userLoc.lat!=null) ? userLoc.lat : ((currentUser&&currentUser.city_lat!=null)?+currentUser.city_lat:null);
   const ulng = (userLoc&&userLoc.lng!=null) ? userLoc.lng : ((currentUser&&currentUser.city_lng!=null)?+currentUser.city_lng:null);
-  const ucountry = (currentUser&&currentUser.country) || (userLoc&&userLoc.country) || null;
+  // V režimu zahraničí se kouči berou z vybrané země, ne z domovské.
+  const ucountry = (_deckAbroad && window._deckCountryPick) ? window._deckCountryPick : ((currentUser&&currentUser.country) || (userLoc&&userLoc.country) || null);
   // PostGIS nearest-N (GiST-indexed) when we know the user's location; offset-paginated via load-more.
   _coachCenter = (ulat!=null && ulng!=null) ? {lat:ulat, lng:ulng} : null;
   _coachOffset = 0;
   let data, error;
+  // V zahraničí nedává „nejbližší okolo mě" smysl -- načti zvolenou zemi.
+  if(_deckAbroad && window._deckCountryPick) _coachCenter=null;
   if(_coachCenter){
     const r = await supaClient.rpc('coaches_near', { p_lat: ulat, p_lng: ulng, p_limit: _COACH_PAGE, p_offset: 0 });
     data = r.data; error = r.error;
@@ -7399,14 +7401,8 @@ function renderCards(){
         + '</div>';
       var _mb=$('deckMoreBtn'); if(_mb) _mb.onclick=function(){ _deckExtended=true; renderCards(); };
       var _ab=$('deckAbroadBtn'); if(_ab) _ab.onclick=async function(){
-        _ab.disabled=true; _ab.textContent='\u2026';
-        try{ _deckAbroad=true; _gymsLoaded=false; _gymOffset=0; _gymExhausted=false; _coachOffset=0;
-          if(typeof renderCountryFilter==='function') renderCountryFilter();
-          await ensureGymsLoaded(true);
-          if(typeof loadCoaches==='function') await loadCoaches();
-          if(typeof init==='function') init();
-          toast(EN?'\ud83c\udf0d Showing other countries too':'\ud83c\udf0d Zobrazuji i dal\u0161\u00ed zem\u011b');
-        }catch(e){ _ab.disabled=false; }
+        _ab.disabled=true; const _t0=_ab.textContent; _ab.textContent='\u2026';
+        try{ if(!await _goAbroad()){ _ab.disabled=false; _ab.textContent=_t0; } }catch(e){ _ab.disabled=false; _ab.textContent=_t0; }
       };
       var _rb=$('deckRestartBtn'); if(_rb) _rb.onclick=function(){ idx=0; _deckExtended=false; renderCards(); };
       var _ob=$('deckOnlineBtn'); if(_ob) _ob.onclick=_browseOnline;
@@ -7420,12 +7416,10 @@ function renderCards(){
       if(searchQuery){
         const EN=LANG==='en';
         h3.textContent=L('Nic nenalezeno');
-        // Hledá se v tom, co je načtené kolem tebe. Když to nic nedá a zadané slovo může být
-        // město, nabídni přesun -- jinak se člověk do jiného města nedostane.
+        // Hledá se v tom, co je načtené kolem tebe. Polohu se odsud NEMĚNÍ -- na to je „Změnit"
+        // v pruhu s polohou, kde je to vědomé rozhodnutí, ne vedlejší účinek hledání.
         p.innerHTML=(EN?('Nothing found for \u201e'+escapeHtml(searchQuery)+'\u201c nearby.'):('Pro \u201e'+escapeHtml(searchQuery)+'\u201c jsme tu nic nena\u0161li.'))
-          +'<div style="font-size:12.5px;color:var(--light);line-height:1.5;margin-top:10px;">'+(EN?'If it is a city, you can move the search there:':'Pokud je to m\u011bsto, m\u016f\u017ee\u0161 se tam p\u0159esunout:')+'</div>'
-          +'<button id="deckGoCityBtn" style="width:100%;max-width:300px;margin-top:8px;padding:12px 18px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;">\ud83d\udccd '+(EN?('Move to \u201e'+escapeHtml(searchQuery)+'\u201c'):('P\u0159esunout se do \u201e'+escapeHtml(searchQuery)+'\u201c'))+'</button>';
-        var _gc=$('deckGoCityBtn'); if(_gc) _gc.onclick=function(){ geoReloadFromSearch(searchQuery); };
+          +'<div style="font-size:12.5px;color:var(--light);line-height:1.5;margin-top:8px;">'+(EN?'Try a different name, or change your location at the top.':'Zkus jin\u00fd n\u00e1zev, nebo zm\u011b\u0148 polohu naho\u0159e.')+'</div>';
       }
       else if(!filtered.length && (typeof _deckAbroad==='undefined' || !_deckAbroad)){
         // V zemi není ani jeden klub. Sem se dostane každý první uživatel v nové zemi -- bez
@@ -7439,14 +7433,8 @@ function renderCards(){
           +'<div style="margin-top:14px;font-size:12.5px;"><button id="deckInviteBtn2" style="background:none;border:none;color:var(--mid);text-decoration:underline;cursor:pointer;font-family:inherit;font-size:inherit;">'+(EN2?'Invite your club':'Pozvi sv\u016fj klub')+'</button></div>';
         var _ib3=$('deckInviteBtn2'); if(_ib3) _ib3.onclick=_copyReferralLink;
         var _ab2=$('deckAbroadBtn'); if(_ab2) _ab2.onclick=async function(){
-          _ab2.disabled=true; _ab2.textContent='\u2026';
-          try{ _deckAbroad=true; _gymsLoaded=false; _gymOffset=0; _gymExhausted=false; _coachOffset=0;
-            if(typeof renderCountryFilter==='function') renderCountryFilter();
-            await ensureGymsLoaded(true);
-            if(typeof loadCoaches==='function') await loadCoaches();
-            if(typeof init==='function') init();
-            toast(EN2?'\ud83c\udf0d Showing other countries too':'\ud83c\udf0d Zobrazuji i dal\u0161\u00ed zem\u011b');
-          }catch(e){ _ab2.disabled=false; }
+          _ab2.disabled=true; const _t0=_ab2.textContent; _ab2.textContent='\u2026';
+          try{ if(!await _goAbroad()){ _ab2.disabled=false; _ab2.textContent=_t0; } }catch(e){ _ab2.disabled=false; _ab2.textContent=_t0; }
         };
       }
       else { h3.textContent=(LANG==='en'?'That is all!':'To je všechno!'); p.innerHTML=(LANG==='en'?'You have gone through all available clubs. Adjust your filters or check back soon.':'Prošel jsi všechny dostupné kluby. Uprav filtry nebo se vrať za chvíli.')+_gymInviteHtml()+_demandBtnHtml(); var _db=$('deckDemandBtn'); if(_db) _db.onclick=function(){ _openDemandChips(); }; }
@@ -7616,6 +7604,55 @@ let gymFavorites=[];
 // a dead end either.
 // Only appears once the deck has been widened -- before that there is nothing to filter by,
 // since everything on screen is from one country anyway.
+// NEJDŘÍV VÝBĚR ZEMĚ, POTOM STAHOVÁNÍ. Dřív „Zobrazit další země" načetlo 50 klubů a 100 koučů
+// z celého světa naráz a teprve z nich se postavila lišta zemí -- tedy: stáhni svět, pak filtruj.
+// Při tisících zvědavců je to zbytečný odběr dat a pomalé načítání. Teď se nejdřív zeptáme
+// jedním malým dotazem (jediný sloupec), kde MTL vůbec kluby má, a stáhne se jen zvolená země.
+async function _pickAbroadCountry(){
+  const EN=LANG==='en';
+  const home=(typeof _deckHomeCountry==='function')?_deckHomeCountry():null;
+  let counts={};
+  try{
+    const { data }=await supaClient.from('gyms').select('country').eq('status','approved').is('deleted_at', null);
+    (data||[]).forEach(function(r){ const c=(r.country||'').trim(); if(c && c!==home) counts[c]=(counts[c]||0)+1; });
+  }catch(e){}
+  const keys=Object.keys(counts).sort(function(a,b){ return counts[b]-counts[a] || a.localeCompare(b); });
+  return await new Promise(function(resolve){
+    const ov=document.createElement('div');
+    ov.style.cssText='position:fixed;inset:0;z-index:100090;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;justify-content:center;';
+    const rows = keys.length
+      ? keys.map(function(k){ return '<button class="_acRow" data-c="'+escapeHtml(k)+'" style="width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;padding:13px 14px;background:#fff;border:none;border-bottom:1px solid var(--border);font-size:14.5px;font-weight:700;color:var(--dark);cursor:pointer;font-family:inherit;text-align:left;">'
+          +'<span>'+escapeHtml(k)+'</span><span style="font-size:12.5px;font-weight:700;color:var(--mid);">'+counts[k]+' '+(EN?(counts[k]===1?'club':'clubs'):_plCz(counts[k],'klub','kluby','klub\u016f'))+'</span></button>'; }).join('')
+      : '<div style="padding:22px 14px;text-align:center;color:var(--mid);font-size:13.5px;">'+(EN?'No clubs in other countries yet.':'V jin\u00fdch zem\u00edch zat\u00edm \u017e\u00e1dn\u00e9 kluby nem\u00e1me.')+'</div>';
+    ov.innerHTML='<div style="background:#fff;border-radius:18px 18px 0 0;max-width:460px;width:100%;max-height:80vh;display:flex;flex-direction:column;font-family:\'DM Sans\';">'
+      +'<div style="padding:16px 16px 10px;">'
+        +'<div style="font-size:17px;font-weight:800;color:var(--dark);">'+(EN?'Which country?':'Kter\u00e1 zem\u011b?')+'</div>'
+        +'<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-top:3px;">'+(EN?'We load only the country you pick.':'Na\u010dteme jen tu zemi, kterou vybere\u0161.')+'</div>'
+      +'</div>'
+      +'<div style="overflow:auto;border-top:1px solid var(--border);">'+rows+'</div>'
+      +'<div style="padding:12px 16px calc(env(safe-area-inset-bottom,0px) + 12px);">'
+        +'<button id="_acCancel" style="width:100%;padding:12px;background:none;border:1.5px solid var(--border);border-radius:11px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Back':'Zp\u011bt')+'</button>'
+      +'</div></div>';
+    document.body.appendChild(ov);
+    const done=function(v){ try{ ov.remove(); }catch(e){} resolve(v); };
+    ov.querySelectorAll('._acRow').forEach(function(b){ b.onclick=function(){ done(b.dataset.c); }; });
+    ov.querySelector('#_acCancel').onclick=function(){ done(null); };
+    ov.onclick=function(e){ if(e.target===ov) done(null); };
+  });
+}
+// Zapne zahraničí pro JEDNU zvolenou zemi a načte jen ji.
+async function _goAbroad(){
+  const cc=await _pickAbroadCountry();
+  if(!cc) return false;
+  _deckAbroad=true; window._deckCountryPick=cc;
+  _gymsLoaded=false; _gymOffset=0; _gymExhausted=false; _coachOffset=0;
+  try{ if(typeof renderCountryFilter==='function') renderCountryFilter(); }catch(e){}
+  try{ await ensureGymsLoaded(true); }catch(e){}
+  try{ if(typeof loadCoaches==='function') await loadCoaches(); }catch(e){}
+  try{ if(typeof init==='function') init(); }catch(e){}
+  toast((LANG==='en'?'\ud83c\udf0d Showing ':'\ud83c\udf0d Zobrazuji ')+cc);
+  return true;
+}
 function renderCountryFilter(){
   const box=document.getElementById('countryFilters'); if(!box) return;
   if(!_deckAbroad){ box.style.display='none'; box.innerHTML=''; return; }
@@ -7651,15 +7688,7 @@ function _offerAbroad(kind){
   host.appendChild(el);
   const b=document.getElementById('abroadGo');
   if(b) b.onclick=async function(){
-    _deckAbroad = true;
-    el.remove();
-    _gymsLoaded = false; _gymOffset = 0; _gymExhausted = false;
-    _coachOffset = 0;
-    try{ if(typeof renderCountryFilter==='function') renderCountryFilter(); }catch(e){}
-    try{ await ensureGymsLoaded(true); }catch(e){}
-    try{ if(typeof loadCoaches==='function') await loadCoaches(); }catch(e){}
-    try{ if(typeof init==='function') init(); }catch(e){}
-    toast(LANG==='en'?'\ud83c\udf0d Showing other countries too':'\ud83c\udf0d Zobrazuji i dal\u0161\u00ed zem\u011b');
+    if(await _goAbroad()) el.remove();
   };
 }
 function _mapGymRow(g){
@@ -7677,7 +7706,8 @@ async function loadMoreGyms(){
   try{
     let q = supaClient.from('gyms').select('*').eq('status','approved');
     const hc = _deckHomeCountry();
-    if(hc && !_deckAbroad) q = q.eq('country', hc);
+    if(_deckAbroad && window._deckCountryPick) q = q.eq('country', window._deckCountryPick);
+    else if(hc && !_deckAbroad) q = q.eq('country', hc);
     const from = _gymOffset + _GYM_PAGE;
     const { data } = await q.order('created_at',{ascending:false}).range(from, from + _GYM_PAGE - 1);
     if(!data || !data.length){ _gymExhausted = true; _gymLoadingMore = false; try{ _offerAbroad('gyms'); }catch(e){} return false; }
@@ -7769,7 +7799,9 @@ async function ensureGymsLoaded(force){
     _gymOffset = 0; _gymExhausted = false;
     let _q = supaClient.from('gyms').select('*').eq('status','approved');
     const _hc = _deckHomeCountry();
-    if(_hc && !_deckAbroad) _q = _q.eq('country', _hc);
+    // Doma: jen domovská země. V zahraničí: jen ta jedna zvolená -- nikdy celý svět.
+    if(_deckAbroad && window._deckCountryPick) _q = _q.eq('country', window._deckCountryPick);
+    else if(_hc && !_deckAbroad) _q = _q.eq('country', _hc);
     const { data } = await _q.order('created_at',{ascending:false}).range(0, _GYM_PAGE - 1);
     const gyms=(data||[]).filter(g=>!g.suspended && !g.deleted_at);
     if(!data || data.length < _GYM_PAGE) _gymExhausted = true;
@@ -8992,7 +9024,7 @@ async function loadMoreEvents(){
     // Akce jen pro poskytovatele se studentovi vubec nenactou -- filtruje se na serveru,
     // ne az pri vykresleni, aby se v odpovedi neobjevily ani nazvy.
     if(!_isProviderUser()) q=q.or('providers_only.is.null,providers_only.eq.false');
-    const hc=_deckHomeCountry(); if(hc && !_deckAbroad) q=q.eq('country', hc);
+    const hc=_deckHomeCountry(); if(_deckAbroad && window._deckCountryPick) q=q.eq('country', window._deckCountryPick); else if(hc && !_deckAbroad) q=q.eq('country', hc);
     const from=_evOffset + _EVENT_PAGE;
     const { data } = await q.order('starts_at',{ascending:true}).range(from, from + _EVENT_PAGE - 1);
     if(!data || !data.length){ _evExhausted=true; _evLoadingMore=false; try{ _offerAbroad('events'); }catch(e){} return false; }
@@ -9015,7 +9047,7 @@ async function renderEventsAsync(box){
     // Akce jen pro poskytovatele se studentovi vubec nenactou -- filtruje se na serveru,
     // ne az pri vykresleni, aby se v odpovedi neobjevily ani nazvy.
     if(!_isProviderUser()) _eq=_eq.or('providers_only.is.null,providers_only.eq.false');
-    { const _ehc=_deckHomeCountry(); if(_ehc && !_deckAbroad) _eq=_eq.eq('country', _ehc); }
+    { const _ehc=_deckHomeCountry(); if(_deckAbroad && window._deckCountryPick) _eq=_eq.eq('country', window._deckCountryPick); else if(_ehc && !_deckAbroad) _eq=_eq.eq('country', _ehc); }
     const { data:evs } = await _eq.order('starts_at',{ascending:true}).range(0, _EVENT_PAGE - 1);
     _evOffset = 0; _evExhausted = !evs || evs.length < _EVENT_PAGE;
     window._evList = evs||[];
@@ -23845,44 +23877,6 @@ async function confirmCity(){
   }
 }
 
-// Geo-reload: type a place in the search bar (Enter or the empty-state button) -> recentre the deck on that place
-async function geoReloadFromSearch(term){
-  term=(term||'').trim(); if(term.length<2) return;
-  const EN=LANG==='en';
-  toast(EN?('🔍 Searching '+term+'...'):('🔍 Hledám '+term+'...'));
-  try{
-    const m=(typeof CITY_COORDS!=='undefined')?Object.entries(CITY_COORDS).find(([c])=>c.toLowerCase()===term.toLowerCase()):null;
-    if(m){ userLoc={lat:m[1].lat,lng:m[1].lng,city:m[0]}; }
-    else{
-      const res=await fetch(`https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q=${encodeURIComponent(term)}`);
-      const data=await res.json();
-      if(!(data&&data.length)){ toast(EN?('⚠️ Place not found: '+term):('⚠️ Místo nenalezeno: '+term)); return; }
-      const cn=(data[0].address&&data[0].address.country)||null;
-      userLoc={ lat:parseFloat(data[0].lat), lng:parseFloat(data[0].lon), city:term, country:cn };
-    }
-    searchQuery=''; if($('searchInp')) $('searchInp').value=''; if($('searchClear')) $('searchClear').classList.remove('show'); if($('btnGeoSearch')) $('btnGeoSearch').style.display='none';
-    toast((typeof _deckMode!=='undefined' && _deckMode==='gyms')
-      ? (EN?('📍 Clubs near '+userLoc.city):('📍 Kluby v '+userLoc.city))
-      : (EN?('📍 Coaches near '+userLoc.city):('📍 Kouči v '+userLoc.city)));
-    if(typeof onLocSet==='function') onLocSet();
-    else if(typeof loadCoaches==='function'){ await loadCoaches(); if(typeof init==='function') init(); }
-  }catch(e){ toast(EN?'⚠️ Search failed':'⚠️ Hledání selhalo'); console.error('geoReloadFromSearch',e); }
-}
-
-// ════════════════════════════════════════
-// PICKER
-// ════════════════════════════════════════
-const PICKERS={
-  lang:{title:'Jazyk',valEl:'vLang',opts:['Čeština','English'],sel:'Čeština'},
-  country:{title:'Země kouče',valEl:'vCountry',opts:['Vše'],sel:'Vše'},
-  type:{title:'Typ koučování',valEl:'vType',opts:['Vše','🌐 Pouze online','📍 Pouze osobní lekce'],sel:'Vše'},
-  coachLang:{title:'Jazyk kouče',valEl:'vCoachLang',opts:['Vše','🇨🇿 Čeština','🇬🇧 English','🇸🇰 Slovenčina','🇩🇪 Deutsch','🇪🇸 Español','🇫🇷 Français','🇮🇹 Italiano','🇵🇱 Polski','🇵🇹 Português','🇷🇺 Русский','🇺🇦 Українська','🇹🇭 ไทย'],sel:'Vše'},
-  dist:{title:'Max. vzdálenost',valEl:'vDist',opts:['10 km','25 km','50 km','100 km','Celá ČR','Celý svět'],sel:'50 km'},
-  price:{title:'Cenové rozpětí / hod',valEl:'vPrice',opts:['Bez limitu','Do 500 Kč','Do 1 000 Kč','Do 2 000 Kč','2 000+ Kč'],sel:'Bez limitu'},
-};
-
-let curPicker=null;
-
 function openPicker(key){
   curPicker=key;
   const p=PICKERS[key];
@@ -24850,17 +24844,16 @@ $('searchInp').addEventListener('input',e=>{
   // Tlačítko NEHLEDÁ -- přenastaví polohu na zadané město a načte deck odtamtud. Ukazuje se
   // JEN když hledání nic nenašlo: dokud výsledky jsou, nemá co nabízet a jen mate. Text i
   // podobu si řídí renderCards, kde je vidět, jestli je seznam prázdný.
-  if($('btnGeoSearch')) $('btnGeoSearch').style.display='none';
 });
-$('searchInp').addEventListener('keydown',ev=>{ if(ev.key==='Enter'){ ev.preventDefault(); if(searchQuery.length>1) geoReloadFromSearch(searchQuery); } });
+// Enter jen zavře klávesnici. Dřív tiše přenastavil polohu na napsané slovo a přepsal
+// zemi v profilu -- to se z vyhledávacího pole dít nesmí.
+$('searchInp').addEventListener('keydown',ev=>{ if(ev.key==='Enter'){ ev.preventDefault(); try{ ev.target.blur(); }catch(e){} } });
 $('searchClear').onclick=()=>{
   searchQuery='';
   $('searchInp').value='';
   $('searchClear').classList.remove('show');
-  if($('btnGeoSearch')) $('btnGeoSearch').style.display='none';
   init();
 };
-(function(){ const _bgs=$('btnGeoSearch'); if(_bgs) _bgs.onclick=()=>geoReloadFromSearch(searchQuery); })();
 
 // Filters
 document.querySelectorAll('.pill').forEach(p=>{
