@@ -3,6 +3,11 @@
 // consent_versions; every acceptance is a small row in consent_acceptances that
 // references that version by id + stores the hash of the exact text the user saw,
 // the timestamp, the user_id, the request IP and the user-agent.
+//
+// JMÉNO A E-MAIL SE OPISUJÍ DO ŘÁDKU, jako u dokladu. Dřív tu bylo jen user_id a jméno se
+// dohledávalo z profilu -- po anonymizaci smazaného účtu z toho zbylo "Smazaný uživatel"
+// a nešlo doložit, KDO s čím souhlasil. To je přitom jediný účel téhle tabulky.
+// Snímek se bere v okamžiku přijetí a už se nikdy nemění.
 // Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
 
 import crypto from 'crypto';
@@ -66,10 +71,18 @@ export default async function handler(req, res) {
     }
 
     // 2) record the acceptance (who / when / what-hash / from-where)
+    // KDO: opsané jméno a e-mail z profilu v tuhle chvíli. Bere je server, ne klient -- podpis
+    // nesmí být na tom, co pošle prohlížeč.
+    let _uname = null, _uemail = null;
+    try {
+      const pr = await sb(`profiles?id=eq.${encodeURIComponent(user_id)}&select=name,email&limit=1`);
+      if (pr && pr[0]) { _uname = pr[0].name || null; _uemail = pr[0].email || null; }
+    } catch (e) { console.error('[record-consent] profil', e.message); }
     const _meta = meta || {};
     if (versionMismatch) _meta.__version_hash_mismatch = versionMismatch;
     const row = {
       user_id, kind, scope: _scope, version, lang: _lang, version_id: versionId, body_hash,
+      user_name: _uname, user_email: _uemail,
       accepted_at: new Date().toISOString(),
       ip: clientIp(req),
       user_agent: req.headers['user-agent'] || null,

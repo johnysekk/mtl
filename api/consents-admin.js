@@ -89,7 +89,7 @@ export default async function handler(req, res) {
     }
 
     // ── ostatní souhlasy (consent_acceptances) ────────────────────────────────────────────
-    let f = 'consent_acceptances?select=id,user_id,kind,scope,version,lang,version_id,body_hash,accepted_at';
+    let f = 'consent_acceptances?select=id,user_id,user_name,user_email,kind,scope,version,lang,version_id,body_hash,accepted_at';
     if (scope === 'coach') f += `&scope=eq.${encodeURIComponent(uid)}`;
     if (scope === 'mtl') {
       const branch = String(q.branch || 'all');
@@ -99,7 +99,7 @@ export default async function handler(req, res) {
     }
     if (ids) f += `&user_id=in.(${ids.map(encodeURIComponent).join(',')})`;
 
-    const total = await sbCount(f.replace('select=id,user_id,kind,scope,version,lang,version_id,body_hash,accepted_at', 'select=id'));
+    const total = await sbCount(f.replace('select=id,user_id,user_name,user_email,kind,scope,version,lang,version_id,body_hash,accepted_at', 'select=id'));
     const acc = await sbGet(`${f}&order=accepted_at.desc&limit=${per}&offset=${from}`);
 
     // Jména a znění se dotahují jen pro tuhle stránku, ne pro celou historii.
@@ -120,7 +120,8 @@ export default async function handler(req, res) {
       const v = a.version_id ? vmap[a.version_id] : null;
       return {
         id: a.id, kind: a.kind, version: a.version, lang: a.lang,
-        who: names[a.user_id] || '—', accepted_at: a.accepted_at,
+        // Jméno ZE SNÍMKU souhlasu; živý profil jen u starších řádků, které snímek nemají.
+        who: a.user_name || a.user_email || names[a.user_id] || '—', accepted_at: a.accepted_at,
         body_text: (v && v.body_text) || null,
         hash_mismatch: !!(v && v.body_hash && a.body_hash && v.body_hash !== a.body_hash),
       };
