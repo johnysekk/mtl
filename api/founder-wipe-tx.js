@@ -1,5 +1,6 @@
-// /api/founder-wipe-tx — FOUNDER-ONLY. Smaže všechny řádky z `transactions` a z tabulek,
-// které na ně odkazují (`doklady`, `reschedule_confirmations`).
+// /api/founder-wipe-tx — FOUNDER-ONLY. Smaže řádky z `transactions` a z tabulek, které na ně
+// odkazují (`doklady`, `reschedule_confirmations`). Ostré doklady chrání spouštěč v databázi
+// a ten zůstává v platnosti -- projdou jen doklady z testovacího režimu (sql-32).
 //
 // PROČ SERVER: tabulka transactions je uzamčená tak, že do ní smí jen server (zápisy chodí
 // přes record-cash.js a stripe-webhook.js se service-role klíčem). Úklid testovacích dat
@@ -47,29 +48,31 @@ export default async function handler(req, res) {
       if (cr2 && cr2 !== '*') before = Number(cr2);
     } catch (e) {}
 
-    // Mazání dělá databázová funkce founder_wipe_transactions (sql-32). Mazat odsud po řádcích
-    // nejde: na `doklady` je spouštěč, který vystavený doklad chrání před smazáním
-    // („Vystavený doklad nelze měnit ani mazat"). Ta funkce pojistku vypne jen na dobu úklidu.
-    const rp = await fetch(`${SB}/rest/v1/rpc/founder_wipe_transactions`, {
-      method: 'POST',
-      headers: Object.assign({}, svc, { Authorization: `Bearer ${token}` }),
-      body: '{}',
-    });
-    const rtext = await rp.text();
-    if (!rp.ok) {
-      return res.status(500).json({ error: 'wipe failed', detail: rtext.slice(0, 400) });
+    // POŘADÍ: nejdřív to, co na transakce odkazuje (doklady.transaction_id,
+    // reschedule_confirmations.transaction_id), jinak to databáze odmítne kvůli cizímu klíči.
+    // Doklady chrání spouštěč před smazáním; výjimku má jen doklad z testovacího režimu
+    // (sql-32). Ostrý doklad se tudy smazat NEDÁ a to je správně -- je to účetní dokument.
+    const steps = [];
+    for (const t of ['doklady', 'reschedule_confirmations', 'transactions']) {
+      const r = await fetch(`${SB}/rest/v1/${t}?id=not.is.null`, {
+        method: 'DELETE',
+        headers: Object.assign({}, svc, { Prefer: 'return=minimal' }),
+      });
+      if (!r.ok) {
+        const body = await r.text();
+        return res.status(500).json({ error: 'delete failed', table: t, detail: body.slice(0, 400), done: steps });
+      }
+      steps.push(t);
     }
-    let rows = [];
-    try { rows = JSON.parse(rtext); } catch (e) {}
-    const r0 = (Array.isArray(rows) ? rows[0] : rows) || {};
 
-    return res.status(200).json({
-      ok: true,
-      deleted: (r0.transakce_smazano != null ? Number(r0.transakce_smazano) : before),
-      tables: ['doklady (' + (r0.doklady_smazano ?? '?') + ')',
-               'reschedule_confirmations (' + (r0.potvrzeni_smazano ?? '?') + ')',
-               'transactions (' + (r0.transakce_smazano ?? '?') + ')'],
-    });
+    // Číslování dokladů začne znovu od jedničky; jinak by po úklidu pokračovalo starou řadou.
+    try {
+      await fetch(`${SB}/rest/v1/doklad_series?series_key=not.is.null`, {
+        method: 'DELETE', headers: Object.assign({}, svc, { Prefer: 'return=minimal' }),
+      });
+    } catch (e) {}
+
+    return res.status(200).json({ ok: true, deleted: before, tables: steps });
   } catch (e) {
     return res.status(500).json({ error: (e && e.message) || 'error' });
   }
