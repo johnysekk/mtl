@@ -79,7 +79,12 @@ async function handler(req, res) {
       // JEDNA LEKCE MŮŽE MÍT VÍC TERMÍNŮ V TÝDNU (extraSlots) -- appka to tak umí zadat.
       // Tenhle cron je dosud ignoroval a koukal jen na základní den a čas, takže na lekci
       // ve druhém termínu připomínka nikdy nepřišla. Sloty se rozbalí stejně jako v appce.
+      // Nový tvar: `slots` -- všechny termíny si jsou rovné. Starý tvar (day/time/extraSlots)
+      // se čte dál, dokud kluby rozvrh znovu neuloží; appka ho zatím zapisuje vedle nového.
       const slotsOf = (c) => {
+        if (Array.isArray(c.slots)) {
+          return c.slots.filter(s2 => s2 && s2.day != null && s2.time).map(s2 => ({ day: s2.day, time: s2.time }));
+        }
         const base = [{ day: c.day, time: c.time }];
         if (Array.isArray(c.extraSlots)) {
           for (const s2 of c.extraSlots) if (s2 && s2.day != null && s2.time) base.push({ day: s2.day, time: s2.time });

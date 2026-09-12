@@ -167,10 +167,17 @@ export default async function handler(req, res) {
   // Appka je rozbaluje; bez toho tu klub se dvěma skupinovkami ukáže jen tu první.
   const byDay = {};
   (schedule || []).forEach(c => {
-    const slots = [{ day: c.day, time: c.time }];
-    if (Array.isArray(c.extraSlots)) {
-      c.extraSlots.forEach(x => { if (x && x.day != null && x.time) slots.push({ day: x.day, time: x.time }); });
-    }
+    // Nový tvar `slots` (rovnocenné termíny) má přednost; starý se čte, dokud kluby rozvrh
+    // znovu neuloží.
+    const slots = Array.isArray(c.slots)
+      ? c.slots.filter(x => x && x.day != null && x.time).map(x => ({ day: x.day, time: x.time }))
+      : (function () {
+          const b2 = [{ day: c.day, time: c.time }];
+          if (Array.isArray(c.extraSlots)) {
+            c.extraSlots.forEach(x => { if (x && x.day != null && x.time) b2.push({ day: x.day, time: x.time }); });
+          }
+          return b2;
+        })();
     slots.forEach(sl => {
       const d = Number(sl.day);
       if (isNaN(d)) return;
