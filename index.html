@@ -14771,19 +14771,15 @@ function cohScheduleSummary(sch){
 // A recurring class can run on several {day,time} SLOTS (economical: one definition, no duplicate
 // rows). Legacy classes have a single c.day + c.time and NO c.slots -> normalise to one slot so all
 // occurrence/capacity/reminder logic can just iterate _classSlots(c).
-// TERMÍNY LEKCE. Nový tvar je pole `slots` -- všechny termíny si jsou rovné, žádný „hlavní".
-// Starý tvar (day/time/dur + extraSlots) se pořád čte, aby fungovaly kluby, které ještě nebyly
-// uložené, a serverové crony. Při uložení se zapisuje obojí (viz _slotsToLegacy).
-function _slotsOf(c){
-  if(!c) return [];
-  if(Array.isArray(c.slots)){
-    return c.slots.filter(function(s){ return s && s.day!=null && s.time; })
-      .map(function(s){ return { day:Number(s.day), time:s.time, dur:(s.dur!=null?Number(s.dur):(Number(c.dur)||60)) }; });
-  }
-  return null;   // starý tvar -> vyřídí _classSlots níž
+// TERMÍNY LEKCE. Pole `slots` -- všechny termíny si jsou rovné, žádný „hlavní".
+function _classSlots(c){
+  // JEDINÝ TVAR TERMÍNŮ: pole `slots`, všechny si rovné. Starý tvar (day/time + extraSlots)
+  // se už nečte ani nezapisuje -- rozvrhy jsou převedené (sql-30).
+  if(!c || !Array.isArray(c.slots)) return [];
+  const _cd=Number(c.dur)||60;
+  return c.slots.filter(function(s){ return s && s.day!=null && s.time; })
+    .map(function(s){ return { day:Number(s.day), time:s.time, dur:(s.dur!=null?Number(s.dur):_cd) }; });
 }
-function _classSlots(c){ if(!c) return [{day:0,time:'',dur:60}];
-  const _ns=_slotsOf(c); if(_ns) return _ns.length?_ns:[]; var _cd=Number(c.dur)||60; var base=[{ day:c.day, time:c.time, dur:_cd }]; if(Array.isArray(c.extraSlots)) base=base.concat(c.extraSlots.filter(function(s){return s && s.day!=null && s.time;}).map(function(s){ return { day:s.day, time:s.time, dur:(s.dur!=null?Number(s.dur):_cd) }; })); return base; }
 function upcomingClasses(schedule, days, backDays){
   days = days||7; backDays = backDays||0; const out=[]; const now=new Date();
   for(let d=-backDays; d<days; d++){
@@ -15269,8 +15265,7 @@ async function openCoachScheduleEditor(gymId, gymName, readOnly){ window._csRead
     const { data: g } = await supaClient.from('gyms').select('id, name, currency, dropin_price, schedule').eq('id', gymId).single();
     _csGym=g||null;
     let sch=[]; try{ sch = g&&g.schedule ? (typeof g.schedule==='string'?JSON.parse(g.schedule):g.schedule) : []; }catch(e){ sch=[]; }
-    // Vlastní lekce v původním tvaru, VČETNĚ extraSlots -- editor si je zobrazí jako jednu
-    // položku s víc dny, stejně jako je vidí majitel.
+    // Vlastní lekce i s termíny -- editor je zobrazí jako jednu položku s víc dny.
     _csSched = (sch||[]).filter(function(c){ return c && c.coach===currentUser.id; });
     _gymSchedule = _csSched;
     window._csEditGym = g || { id: gymId };
@@ -22447,8 +22442,7 @@ async function saveScheduleOnly(_onlyIdx){
   // POJISTKA PŘED ULOŽENÍM: dva termíny téže lekce v jednom dni se do databáze nedostanou.
   try{ const _rm=_dedupeAllSlots(); if(_rm) console.log('[rozvrh] slouceno duplicitnich terminu:', _rm); }catch(e){}
   const sched = JSON.stringify(_gymSchedule.map(function(c){
-    // Uloží se rovnocenné termíny (`slots`) a zároveň starý tvar (day/time/extraSlots),
-    // aby serverové crony a neaktualizované appky viděly totéž.
+    // Ukládají se jen rovnocenné termíny (`slots`); zbytky starého tvaru se z lekce odstraní.
     const _out=Object.assign({}, c, { name: (c.name&&String(c.name).trim()) ? c.name.trim() : levelLabel(c.level||'all') });
     if(!c.once){
       const _sl=_classSlots(c);
@@ -22539,26 +22533,24 @@ function _occPanel(c,i){
 // mluvila o druhém a docházka se zapisovala pod dvěma klíči. Tohle to srovná: v každém dni
 // zůstane jeden termín (ten hlavní má přednost) a vrátí, kolik jich zmizelo.
 function _dedupeSlots(c){
-  if(!c) return 0;
-  if(!Array.isArray(c.extraSlots) || !c.extraSlots.length) return 0;
-  const seen=new Set([Number(c.day)]);
-  const before=c.extraSlots.length;
-  c.extraSlots=c.extraSlots.filter(function(sl){
+  // V jednom dni smí být jeden termín. Do zadání se to nedostane (den je v nabídce zašedlý),
+  // tohle je pojistka pro data zvenčí. Vrací, kolik termínů zmizelo.
+  if(!c || !Array.isArray(c.slots)) return 0;
+  const seen=new Set(); const before=c.slots.length;
+  c.slots=c.slots.filter(function(sl){
     if(!sl || sl.day==null || !sl.time) return false;
     const d=Number(sl.day);
     if(seen.has(d)) return false;
     seen.add(d); return true;
   });
-  if(!c.extraSlots.length) delete c.extraSlots;
-  return before-(c.extraSlots?c.extraSlots.length:0);
+  return before-c.slots.length;
 }
 function _dedupeAllSlots(){
   let n=0; (_gymSchedule||[]).forEach(function(c){ n+=_dedupeSlots(c); }); return n;
 }
 function _rcChip(i, d){
   const c=_gymSchedule[i]; if(!c) return; d=Number(d);
-  // ROVNOCENNÉ TERMÍNY: pracuje se s polem `slots`, žádný z nich není „hlavní". Starý tvar
-  // (day/time/extraSlots) se sem převede při prvním doteku a při uložení se zase zrcadlí zpět.
+  // ROVNOCENNÉ TERMÍNY: pracuje se s polem `slots`, žádný z nich není „hlavní".
   if(!Array.isArray(c.slots)) c.slots=_classSlots(c).map(function(s){ return { day:Number(s.day), time:s.time, dur:Number(s.dur)||60 }; });
   const at=c.slots.findIndex(function(s){ return Number(s.day)===d; });
   if(at>=0){
@@ -22908,7 +22900,7 @@ function renderScheduleEditor(){
   html+=`</div>`;
   const _today0=new Date(); _today0.setHours(0,0,0,0); const _selDate=(weekDates.find(d=>d.getDay()===_schedSelDow)||weekDates[0]||new Date()); const _selPast=_selDate < _today0; const _selYmd=_selDate.getFullYear()+'-'+String(_selDate.getMonth()+1).padStart(2,'0')+'-'+String(_selDate.getDate()).padStart(2,'0');
   // JEDNA KARTA NA KAŽDÝ TERMÍN, ne na lekci. Lekce může mít ve stejný den víc termínů
-  // (základní + extraSlots). Dřív se hledal jen PRVNÍ termín toho dne, takže druhý nebyl
+  // Dřív se hledal jen PRVNÍ termín toho dne, takže druhý nebyl
   // v rozvrhu vidět vůbec -- ale připomínka na něj přišla a docházka se zapisovala pod jeho
   // časem. Odtud „dvě verze téže lekce": rozvrh ukazoval 18:00, notifikace mluvila o 9:00.
   const idxs=[];
@@ -23188,8 +23180,7 @@ async function saveGymManage(){
   // POJISTKA PŘED ULOŽENÍM: dva termíny téže lekce v jednom dni se do databáze nedostanou.
   try{ const _rm=_dedupeAllSlots(); if(_rm) console.log('[rozvrh] slouceno duplicitnich terminu:', _rm); }catch(e){}
   const sched = JSON.stringify(_gymSchedule.map(function(c){
-    // Uloží se rovnocenné termíny (`slots`) a zároveň starý tvar (day/time/extraSlots),
-    // aby serverové crony a neaktualizované appky viděly totéž.
+    // Ukládají se jen rovnocenné termíny (`slots`); zbytky starého tvaru se z lekce odstraní.
     const _out=Object.assign({}, c, { name: (c.name&&String(c.name).trim()) ? c.name.trim() : levelLabel(c.level||'all') });
     if(!c.once){
       const _sl=_classSlots(c);
