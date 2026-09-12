@@ -14660,7 +14660,11 @@ async function checkAttendanceReminders(){
     const coachId = c.coach || _myGymData.owner_id;
     const { error: insErr } = await supaClient.from('attend_reminders').insert({ gym_id:_myGymData.id, coach_id:coachId, class_name:c.name||null, class_date:today, class_time:_dt||null });
     if(insErr) continue; // už existuje (unique) → nezduplikuj
-    try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'system', read:false, data: JSON.stringify({ kind:'attend_reminder', gym_id:_myGymData.id, gym_name:_myGymData.name||'', className:c.name||'', date:today, time:c.time||'', day:dow }), message:`📋 Doplň docházku na proběhlou lekci ${c.name||''} (${c.time||''}).` }); if(coachId===currentUser.id) sentToMe=true; }catch(e){}
+    // ČAS MUSÍ BÝT TEN Z KONKRÉTNÍHO TERMÍNU (_dt), ne základní čas lekce (c.time). Lekce může
+    // mít víc termínů v týdnu s různými časy; do notifikace se dosud zapisoval c.time, takže
+    // proklik otevřel docházku pod jiným klíčem než rozvrh. Označení „neproběhla" se pak uložilo
+    // na jiný čas a rozvrh se ptal znovu -- vypadalo to jako dvě různé lekce.
+    try{ await supaClient.from('notifications').insert({ user_id:coachId, type:'system', read:false, data: JSON.stringify({ kind:'attend_reminder', gym_id:_myGymData.id, gym_name:_myGymData.name||'', className:c.name||'', date:today, time:_dt||'', day:dow }), message:`📋 Doplň docházku na proběhlou lekci ${c.name||''} (${_dt||''}).` }); if(coachId===currentUser.id) sentToMe=true; }catch(e){}
   }
   if(sentToMe){ try{ updateNotifBadge(); }catch(e){} }
 }
@@ -26257,7 +26261,29 @@ async function loadNotifications(append){
         }
         else if(isGymRatePrompt){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ const { data: gg }=await supaClient.from('gyms').select('*').eq('id',dd.gym_id).single(); if(gg){ await openGymProfile(gg); setTimeout(()=>{ const f=$('gymRateForm'); if(f){ f.style.display='block'; f.scrollIntoView({behavior:'smooth',block:'center'}); } }, 300); } else toast(L('⚠️ Klub nenalezen')); } }catch(e){ toast(L('⚠️ Klub nenalezen')); } }
         else if(isEpCancelled){ openEPFeedback(); }
-        else if(isAttendReminder){ try{ const dd=JSON.parse(n.data||'{}'); const gid=dd.gym_id; const owns=gid&&((window._myGyms||[]).some(g=>g.id===gid)||(_myGymData&&_myGymData.id===gid)); if(owns){ if(!(_myGymData&&_myGymData.id===gid)){ try{ await renderGymManage(); }catch(e){} } const sc=(_gymSchedule||[]).find(c=>String(c.time)===String(dd.time)&&((c.name||'')===(dd.className||''))); openClassAttendance({ date:dd.date, time:dd.time, name:dd.className||'', level:sc?(sc.level||'all'):'all', coach:sc?(sc.coach||null):null, coachName:sc?(sc.coachName||''):'', disc:sc?(sc.disc||null):null }); _sheetParent['shClassAttend']=null; } else if(gid){ openSheet('shCoachRoster'); loadCoachRoster(gid, dd.gym_name||''); _sheetParent['shCoachRoster']=null; } }catch(e){} }
+        else if(isAttendReminder){ try{
+          const dd=JSON.parse(n.data||'{}'); const gid=dd.gym_id;
+          const owns=gid&&((window._myGyms||[]).some(g=>g.id===gid)||(_myGymData&&_myGymData.id===gid));
+          if(owns){
+            // DVĚ CESTY DĚLALY TOTÉŽ a tahle to dělala hůř: spoléhala na _myGymData a _gymSchedule
+            // právě načteného klubu. Kdo má víc klubů (nebo přišel rovnou z notifikace), otevřel
+            // docházku pro JINÝ klub -- lekce vypadala prázdná, i když účastníky měla.
+            // _notifOpenAttendance správný klub napřed dotáhne; rozvrh se pak čte z něj.
+            let _occ={ date:dd.date, time:dd.time, name:dd.className||'', level:'all', coach:null, coachName:'', disc:null };
+            if(typeof _notifOpenAttendance==='function'){
+              try{
+                if(!_myGymData || _myGymData.id!==gid){ const { data:_g }=await supaClient.from('gyms').select('*').eq('id',gid).single(); if(_g){ _myGymData=_g; window._selectedGymId=_g.id; window._myGymData=_g; } }
+                let _sch=[]; try{ _sch=JSON.parse((_myGymData&&_myGymData.schedule)||'[]')||[]; }catch(e){}
+                const _sc=_sch.find(c=>String(c.time)===String(dd.time)&&((c.name||'')===(dd.className||'')));
+                if(_sc) _occ=Object.assign(_occ, { level:_sc.level||'all', coach:_sc.coach||null, coachName:_sc.coachName||'', disc:_sc.disc||null });
+              }catch(e){}
+              await _notifOpenAttendance(gid, _occ);
+            } else {
+              openClassAttendance(_occ);
+            }
+            _sheetParent['shClassAttend']=null;
+          } else if(gid){ openSheet('shCoachRoster'); loadCoachRoster(gid, dd.gym_name||''); _sheetParent['shCoachRoster']=null; }
+        }catch(e){} }
         else if(k==='schedule_perm_on'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ openCoachScheduleEditor(dd.gym_id, dd.gym_name||'Gym'); _sheetParent['shCoachSched']=null; } }catch(e){} }
         else if(k==='coach_pricing_request'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ openCoachPricingRequests(dd.gym_id); _sheetParent['shCoachPricing']=null; } }catch(e){} }
         else if(k==='coach_pricing_approved'||k==='coach_pricing_rejected'){ try{ const dd=JSON.parse(n.data||'{}'); if(dd.gym_id){ openCoachScheduleEditor(dd.gym_id, dd.gym_name||'Gym'); _sheetParent['shCoachSched']=null; } }catch(e){} }
