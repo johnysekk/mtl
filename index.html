@@ -11083,8 +11083,9 @@ async function _qrRequeue(tbl, id, studentId, what){
 // 'paid_claimed' skryvaji, takze ji nemohl ani stahnout, ani si zarezervovat cokoli jineho.
 // Ze seznamu ale nemizi -- viz _renderPendingQr, kde se z ni stane "Kouc nepotvrdil".
 const QR_STALE_H=48;
-const QR_NUDGE_H=12;      // připomenout smí jednou za 12 hodin
-const QR_CANCEL_MAX=3;    // kolik zaplacených rezervací smí člověk zrušit za 24 h
+const QR_NUDGE_FIRST_H=2; // první připomenutí až 2 h po „Zaplaceno" -- dřív je to jen nervozita
+const QR_NUDGE_H=12;      // pak jednou za 12 hodin
+const QR_CANCEL_MAX=2;    // kolik zaplacených rezervací smí člověk zrušit za 24 h
 // Komu platba patří -- podle toho appka mluví. „Poskytovatel" nikomu nic neřekne.
 function _qrWho(r, cap){
   const EN=LANG==='en';
@@ -11101,7 +11102,13 @@ function _qrMoney(r){
 }
 // Kolik hodin zbývá do dalšího připomenutí (0 = může hned).
 function _qrNudgeLeft(r){
-  if(!r.claim_reminded) return 0;
+  // Poprvé se čeká 2 h od zaplacení: druhá strana si toho musí mít šanci všimnout.
+  if(!r.claim_reminded){
+    const c=new Date(r.claimed_at||r.created_at||0).getTime();
+    if(!c) return 0;
+    const l0=QR_NUDGE_FIRST_H*3600e3-(Date.now()-c);
+    return l0>0 ? Math.ceil(l0/3600e3) : 0;
+  }
   const left=QR_NUDGE_H*3600e3-(Date.now()-new Date(r.claim_reminded).getTime());
   return left>0 ? Math.ceil(left/3600e3) : 0;
 }
@@ -11179,13 +11186,14 @@ async function _renderPendingQr(){
       ? ('<div style="font-size:11.5px;color:var(--mid);line-height:1.5;margin-top:7px;">'
           +(EN?('You marked this as paid, but '+_qrWho(r)+' has not confirmed it.')
               :('Ozna\u010dil jsi to jako zaplacen\u00e9, ale '+_qrWho(r)+' to nepotvrdil.'))
-          +' '+(EN?('You can remind them once every '+QR_NUDGE_H+' h.'):('P\u0159ipomenout m\u016f\u017ee\u0161 jednou za '+QR_NUDGE_H+' h.'))
+          +' '+(EN?('Remind once every '+QR_NUDGE_H+' h; you can close it at most '+QR_CANCEL_MAX+'x a day.')
+                  :('P\u0159ipomenout jednou za '+QR_NUDGE_H+' h, uzav\u0159\u00edt nejv\u00fd\u0161 '+QR_CANCEL_MAX+'x denn\u011b.'))
           +'</div>'
           +'<div style="display:flex;gap:6px;margin-top:9px;">'+_nudgeBtn+_btn('_qrUnconfirmedClose', (EN?'Close it':'Vy\u0159e\u0161it'), false)+'</div>')
       : claimed
       ? ('<div style="font-size:11.5px;color:var(--mid);line-height:1.5;margin-top:7px;">'
-          +(EN?(_qrWho(r,true)+' has not confirmed the payment yet. You can remind them once every '+QR_NUDGE_H+' h, or cancel if you have not sent the money.')
-              :(_qrWho(r,true)+' platbu zat\u00edm nepotvrdil. Jednou za '+QR_NUDGE_H+' h m\u016f\u017ee\u0161 p\u0159ipomenout, nebo zru\u0161it, pokud jsi pen\u00edze neposlal.'))
+          +(EN?(_qrWho(r,true)+' has not confirmed the payment yet. Remind once every '+QR_NUDGE_H+' h; cancelling a paid reservation works at most '+QR_CANCEL_MAX+'x a day.')
+              :(_qrWho(r,true)+' platbu zat\u00edm nepotvrdil. P\u0159ipomenout jednou za '+QR_NUDGE_H+' h; zru\u0161it zaplacenou rezervaci jde nejv\u00fd\u0161 '+QR_CANCEL_MAX+'x denn\u011b.'))
           +'</div>'
           +'<div style="display:flex;gap:6px;margin-top:9px;">'+_nudgeBtn+_btn('_withdrawPendingQr', (EN?'Cancel':'Zru\u0161it'), false)+'</div>')
       : pisProc ? '' :
@@ -11280,8 +11288,10 @@ async function _withdrawPendingQr(tbl,id){
   const _wasClaimed=(r.status==='paid_claimed');
   if(_wasClaimed){
     if(await _qrClaimedCancels24h()>=QR_CANCEL_MAX){
-      toast(EN?('You have cancelled '+QR_CANCEL_MAX+' paid reservations in the last 24 h. Try again tomorrow or write to the provider.')
-              :('Za posledn\u00edch 24 h jsi zru\u0161il '+QR_CANCEL_MAX+' zaplacen\u00e9 rezervace. Zkus to z\u00edtra, nebo napi\u0161 poskytovateli.'));
+      // Jen zrušení je zastavené. Připomenout jde dál a po termínu lekce se z rezervace stane
+      // "nepotvrzeno" s tlačítkem Vyřešit, které vystaví potvrzení -- ani tady tedy neuvázne.
+      toast(EN?('You have cancelled '+QR_CANCEL_MAX+' paid reservations in the last 24 h. Use Remind, or wait until tomorrow \u2014 after the session you can close it with a confirmation.')
+              :('Za posledn\u00edch 24 h jsi zru\u0161il '+QR_CANCEL_MAX+' zaplacen\u00e9 rezervace. Pou\u017eij P\u0159ipomenout, nebo po\u010dkej do z\u00edtra \u2014 po term\u00ednu lekce ji uzav\u0159e\u0161 s potvrzen\u00edm.'));
       return;
     }
     if(!confirm(EN?('Cancel this reservation? You marked it as paid \u2014 if you did send the money, settle it with '+_qrWho(r)+' first.')
@@ -11308,8 +11318,8 @@ async function _withdrawPendingQr(tbl,id){
           const what=(r.title||'')+(r.sub?(' \u00b7 '+r.sub):'');
           await supaClient.from('notifications').insert(_bi({ user_id:target, type:'system', read:false, data:JSON.stringify({ kind:'qr_unconfirmed', tbl:tbl, row_id:String(id), for_provider:true }), message:'' },
             function(EN2){ return EN2
-              ? ('\u2139\ufe0f '+who+' cancelled a reservation they had marked as paid ('+what+'). The spot is free again \u2014 check whether the money actually arrived.')
-              : ('\u2139\ufe0f '+who+' zru\u0161il rezervaci, kterou ozna\u010dil za zaplacenou ('+what+'). M\u00edsto je zase voln\u00e9 \u2014 zkontroluj, jestli platba dorazila.'); }));
+              ? ('\u2139\ufe0f '+who+' cancelled a reservation they had marked as paid ('+what+'). The spot is free again \u2014 check whether the money arrived; if it did, agree with them on a refund.')
+              : ('\u2139\ufe0f '+who+' zru\u0161il rezervaci, kterou ozna\u010dil za zaplacenou ('+what+'). M\u00edsto je zase voln\u00e9 \u2014 zkontroluj, jestli platba nedorazila; pokud ano, domluvte se na vr\u00e1cen\u00ed.'); }));
         }
       }catch(e){}
     }
