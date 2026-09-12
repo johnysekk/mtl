@@ -7363,13 +7363,17 @@ function renderCards(){
           +(primary?'background:var(--red);color:#fff;border:none;':'background:transparent;color:var(--dark);border:1.5px solid var(--border);')
           +'border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;">'+label+'</button>';
       };
+      // Nic tu není a ani nikde v zemi: nabídnout zahraničí. Bez toho člověk v zemi bez klubů
+      // (třeba tester ze zahraničí) neuvidí nic a nemá kudy dál -- nabídka „další země" se
+      // dosud spouštěla až při stránkování, ke kterému se u prázdného seznamu nedošlo.
+      const _noneAtAll = (_seen===0 && _farN===0 && !searchQuery && (typeof _deckAbroad==='undefined' || !_deckAbroad));
       p.innerHTML =
         '<div style="font-size:14px;color:var(--mid);line-height:1.6;">'
         + (_seen
-            ? (EN ? ('You have gone through <b>'+_seen+'</b> certified '+(_seen===1?'club':'clubs')+' near you.')
-                  : ('Pro\u0161el jsi <b>'+_seen+'</b> '+_plCz(_seen,'ov\u011b\u0159en\u00fd klub','ov\u011b\u0159en\u00e9 kluby','ov\u011b\u0159en\u00fdch klub\u016f')+' ve sv\u00e9m okol\u00ed.'))
-            : (EN ? ('No verified club within '+GYM_LOCAL_KM+' km of you yet.')
-                  : ('V okruhu '+GYM_LOCAL_KM+' km u tebe zat\u00edm \u017e\u00e1dn\u00fd ov\u011b\u0159en\u00fd klub nem\u00e1me.')))
+            ? (EN ? ('You have gone through <b>'+_seen+'</b> '+(_seen===1?'club':'clubs')+' near you.')
+                  : ('Pro\u0161el jsi <b>'+_seen+'</b> '+_plCz(_seen,'klub','kluby','klub\u016f')+' ve sv\u00e9m okol\u00ed.'))
+            : (EN ? ('No club within '+GYM_LOCAL_KM+' km of you yet.')
+                  : ('V okruhu '+GYM_LOCAL_KM+' km u tebe zat\u00edm \u017e\u00e1dn\u00fd klub nem\u00e1me.')))
         + (_farN>0
             ? (EN ? (' There '+(_farN===1?'is':'are')+' <b>'+_farN+'</b> more further away.')
                   : (' D\u00e1l od tebe '+_plCz(_farN,'je','jsou','je')+' <b>'+_farN+'</b> '+_plCz(_farN,'dal\u0161\u00ed','dal\u0161\u00ed','dal\u0161\u00edch')+'.'))
@@ -7377,7 +7381,9 @@ function renderCards(){
         + '</div>'
         + (_farN>0
             ? _btn('deckMoreBtn', (EN?('\ud83d\udd0d Show the '+_farN+' further away'):('\ud83d\udd0d Uk\u00e1zat '+_farN+' '+_plCz(_farN,'dal\u0161\u00ed klub','dal\u0161\u00ed kluby','dal\u0161\u00edch klub\u016f'))), true)
-            : _btn('deckInviteBtn2', (EN?"Don't see your club? Invite it \u2192":'Nevid\u00ed\u0161 sv\u016fj klub? Pozvi ho \u2192'), true))
+            : (_noneAtAll
+                ? _btn('deckAbroadBtn', '\ud83c\udf0d '+(EN?'Show other countries':'Zobrazit dal\u0161\u00ed zem\u011b'), true)
+                : _btn('deckInviteBtn2', (EN?"Don't see your club? Invite it \u2192":'Nevid\u00ed\u0161 sv\u016fj klub? Pozvi ho \u2192'), true)))
         + (_hasOnline ? _btn('deckOnlineBtn', '\ud83c\udf10 '+(EN?'Try online coaching':'Zkus online kou\u010dink'), false) : '')
         // Vedlejší volby drobně, ať nekonkurují té hlavní.
         // Dotazník má vlastní kartu: je to nejcennější zpětná vazba z téhle obrazovky a mezi
@@ -7392,6 +7398,16 @@ function renderCards(){
           + (_seen ? ('<button id="deckRestartBtn" style="background:none;border:none;color:var(--mid);text-decoration:underline;cursor:pointer;font-family:inherit;font-size:inherit;">\u21ba '+(EN?'Show from the start':'Zobrazit od za\u010d\u00e1tku')+'</button>') : '')
         + '</div>';
       var _mb=$('deckMoreBtn'); if(_mb) _mb.onclick=function(){ _deckExtended=true; renderCards(); };
+      var _ab=$('deckAbroadBtn'); if(_ab) _ab.onclick=async function(){
+        _ab.disabled=true; _ab.textContent='\u2026';
+        try{ _deckAbroad=true; _gymsLoaded=false; _gymOffset=0; _gymExhausted=false; _coachOffset=0;
+          if(typeof renderCountryFilter==='function') renderCountryFilter();
+          await ensureGymsLoaded(true);
+          if(typeof loadCoaches==='function') await loadCoaches();
+          if(typeof init==='function') init();
+          toast(EN?'\ud83c\udf0d Showing other countries too':'\ud83c\udf0d Zobrazuji i dal\u0161\u00ed zem\u011b');
+        }catch(e){ _ab.disabled=false; }
+      };
       var _rb=$('deckRestartBtn'); if(_rb) _rb.onclick=function(){ idx=0; _deckExtended=false; renderCards(); };
       var _ob=$('deckOnlineBtn'); if(_ob) _ob.onclick=_browseOnline;
       var _ib2=$('deckInviteBtn2'); if(_ib2) _ib2.onclick=_copyReferralLink;
@@ -7401,7 +7417,38 @@ function renderCards(){
     if(idx>=filtered.length){
       front.style.display='none'; back.style.display='none'; empty.classList.add('show'); _deckActs(false);
       const h3=empty.querySelector('h3'), p=empty.querySelector('p');
-      if(searchQuery){ h3.textContent=L('Nic nenalezeno'); p.textContent=(LANG==='en')?`No gyms found for "${searchQuery}".`:`Pro "${searchQuery}" jsme nenašli žádný gym.`; }
+      if(searchQuery){
+        const EN=LANG==='en';
+        h3.textContent=L('Nic nenalezeno');
+        // Hledá se v tom, co je načtené kolem tebe. Když to nic nedá a zadané slovo může být
+        // město, nabídni přesun -- jinak se člověk do jiného města nedostane.
+        p.innerHTML=(EN?('Nothing found for \u201e'+escapeHtml(searchQuery)+'\u201c nearby.'):('Pro \u201e'+escapeHtml(searchQuery)+'\u201c jsme tu nic nena\u0161li.'))
+          +'<div style="font-size:12.5px;color:var(--light);line-height:1.5;margin-top:10px;">'+(EN?'If it is a city, you can move the search there:':'Pokud je to m\u011bsto, m\u016f\u017ee\u0161 se tam p\u0159esunout:')+'</div>'
+          +'<button id="deckGoCityBtn" style="width:100%;max-width:300px;margin-top:8px;padding:12px 18px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;">\ud83d\udccd '+(EN?('Move to \u201e'+escapeHtml(searchQuery)+'\u201c'):('P\u0159esunout se do \u201e'+escapeHtml(searchQuery)+'\u201c'))+'</button>';
+        var _gc=$('deckGoCityBtn'); if(_gc) _gc.onclick=function(){ geoReloadFromSearch(searchQuery); };
+      }
+      else if(!filtered.length && (typeof _deckAbroad==='undefined' || !_deckAbroad)){
+        // V zemi není ani jeden klub. Sem se dostane každý první uživatel v nové zemi -- bez
+        // nabídky „další země" by neviděl vůbec nic a nemá kudy dál.
+        const EN2=LANG==='en';
+        h3.textContent = EN2?'No clubs here yet':'Zatím tu nemáme žádné kluby';
+        p.innerHTML='<div style="font-size:14px;color:var(--mid);line-height:1.6;">'
+          +(EN2?'We have no clubs in your country yet. You can look across the border, or invite the club you train at.'
+               :'Ve tv\u00e9 zemi zat\u00edm \u017e\u00e1dn\u00fd klub nem\u00e1me. M\u016f\u017ee\u0161 se pod\u00edvat za hranice, nebo pozvat klub, kam chod\u00ed\u0161.')+'</div>'
+          +'<button id="deckAbroadBtn" style="width:100%;max-width:300px;margin-top:12px;padding:13px 18px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;">\ud83c\udf0d '+(EN2?'Show other countries':'Zobrazit dal\u0161\u00ed zem\u011b')+'</button>'
+          +'<div style="margin-top:14px;font-size:12.5px;"><button id="deckInviteBtn2" style="background:none;border:none;color:var(--mid);text-decoration:underline;cursor:pointer;font-family:inherit;font-size:inherit;">'+(EN2?'Invite your club':'Pozvi sv\u016fj klub')+'</button></div>';
+        var _ib3=$('deckInviteBtn2'); if(_ib3) _ib3.onclick=_copyReferralLink;
+        var _ab2=$('deckAbroadBtn'); if(_ab2) _ab2.onclick=async function(){
+          _ab2.disabled=true; _ab2.textContent='\u2026';
+          try{ _deckAbroad=true; _gymsLoaded=false; _gymOffset=0; _gymExhausted=false; _coachOffset=0;
+            if(typeof renderCountryFilter==='function') renderCountryFilter();
+            await ensureGymsLoaded(true);
+            if(typeof loadCoaches==='function') await loadCoaches();
+            if(typeof init==='function') init();
+            toast(EN2?'\ud83c\udf0d Showing other countries too':'\ud83c\udf0d Zobrazuji i dal\u0161\u00ed zem\u011b');
+          }catch(e){ _ab2.disabled=false; }
+        };
+      }
       else { h3.textContent=(LANG==='en'?'That is all!':'To je všechno!'); p.innerHTML=(LANG==='en'?'You have gone through all available clubs. Adjust your filters or check back soon.':'Prošel jsi všechny dostupné kluby. Uprav filtry nebo se vrať za chvíli.')+_gymInviteHtml()+_demandBtnHtml(); var _db=$('deckDemandBtn'); if(_db) _db.onclick=function(){ _openDemandChips(); }; }
       return;
     }
@@ -24800,12 +24847,10 @@ $('searchInp').addEventListener('input',e=>{
   $('searchClear').classList.toggle('show', searchQuery.length>0);
   if(_deckMode==='events'){ const ev=$('eventsView'); if(ev) renderEventsAsync(ev); return; }
   init();
-  if($('btnGeoSearch')){ if(searchQuery.length>1 && _deckMode!=='events'){ // Tlačítko NEHLEDÁ -- přenastaví polohu na zadané město a znovu načte deck odtamtud.
-      // Vyhledávací pole nad tím filtruje jen to, co je načtené kolem tebe; tohle je jediná
-      // cesta, jak se podívat do jiného města. Text to teď říká rovnou.
-      $('btnGeoSearch').textContent=(LANG==='en')
-        ? ('📍 Look around "'+searchQuery+'" instead')
-        : ('📍 Přesunout se do „'+searchQuery+'"'); $('btnGeoSearch').style.display='block'; } else $('btnGeoSearch').style.display='none'; }
+  // Tlačítko NEHLEDÁ -- přenastaví polohu na zadané město a načte deck odtamtud. Ukazuje se
+  // JEN když hledání nic nenašlo: dokud výsledky jsou, nemá co nabízet a jen mate. Text i
+  // podobu si řídí renderCards, kde je vidět, jestli je seznam prázdný.
+  if($('btnGeoSearch')) $('btnGeoSearch').style.display='none';
 });
 $('searchInp').addEventListener('keydown',ev=>{ if(ev.key==='Enter'){ ev.preventDefault(); if(searchQuery.length>1) geoReloadFromSearch(searchQuery); } });
 $('searchClear').onclick=()=>{
