@@ -1,4 +1,5 @@
-// /api/founder-wipe-tx — FOUNDER-ONLY. Smaže všechny řádky z `transactions`.
+// /api/founder-wipe-tx — FOUNDER-ONLY. Smaže všechny řádky z `transactions` a z tabulek,
+// které na ně odkazují (`doklady`, `reschedule_confirmations`).
 //
 // PROČ SERVER: tabulka transactions je uzamčená tak, že do ní smí jen server (zápisy chodí
 // přes record-cash.js a stripe-webhook.js se service-role klíčem). Úklid testovacích dat
@@ -46,16 +47,29 @@ export default async function handler(req, res) {
       if (cr2 && cr2 !== '*') before = Number(cr2);
     } catch (e) {}
 
-    const del = await fetch(`${SB}/rest/v1/transactions?id=not.is.null`, {
-      method: 'DELETE',
-      headers: Object.assign({}, svc, { Prefer: 'return=minimal' }),
+    // Mazání dělá databázová funkce founder_wipe_transactions (sql-32). Mazat odsud po řádcích
+    // nejde: na `doklady` je spouštěč, který vystavený doklad chrání před smazáním
+    // („Vystavený doklad nelze měnit ani mazat"). Ta funkce pojistku vypne jen na dobu úklidu.
+    const rp = await fetch(`${SB}/rest/v1/rpc/founder_wipe_transactions`, {
+      method: 'POST',
+      headers: Object.assign({}, svc, { Authorization: `Bearer ${token}` }),
+      body: '{}',
     });
-    if (!del.ok) {
-      const body = await del.text();
-      return res.status(500).json({ error: 'delete failed', detail: body.slice(0, 300) });
+    const rtext = await rp.text();
+    if (!rp.ok) {
+      return res.status(500).json({ error: 'wipe failed', detail: rtext.slice(0, 400) });
     }
+    let rows = [];
+    try { rows = JSON.parse(rtext); } catch (e) {}
+    const r0 = (Array.isArray(rows) ? rows[0] : rows) || {};
 
-    return res.status(200).json({ ok: true, deleted: before });
+    return res.status(200).json({
+      ok: true,
+      deleted: (r0.transakce_smazano != null ? Number(r0.transakce_smazano) : before),
+      tables: ['doklady (' + (r0.doklady_smazano ?? '?') + ')',
+               'reschedule_confirmations (' + (r0.potvrzeni_smazano ?? '?') + ')',
+               'transactions (' + (r0.transakce_smazano ?? '?') + ')'],
+    });
   } catch (e) {
     return res.status(500).json({ error: (e && e.message) || 'error' });
   }
