@@ -33,10 +33,21 @@ export default async function handler(req, res) {
     const uid = user && user.id;
     if (!uid) return res.status(401).json({ error: 'no user' });
 
-    // 2) confirm this user OWNS the gym
+    // 2) confirm this user OWNS the gym -- nebo je to founder.
+    // Founder dosud četl transakce klubu přímo z prohlížeče, kde na něj platí RLS, takže
+    // v jeho přehledu klubu stálo "MTL provize 0 Kč" i u klubu, který reálně vydělával.
     const gres = await fetch(`${SB}/rest/v1/gyms?id=eq.${encodeURIComponent(gymId)}&select=owner_id`, { headers: svc });
     const grows = gres.ok ? await gres.json() : [];
-    if (!grows.length || grows[0].owner_id !== uid) return res.status(403).json({ error: 'not owner' });
+    if (!grows.length) return res.status(404).json({ error: 'gym not found' });
+    if (grows[0].owner_id !== uid) {
+      let _isFounder = false;
+      try {
+        const pr = await fetch(`${SB}/rest/v1/profiles?id=eq.${encodeURIComponent(uid)}&select=role`, { headers: svc });
+        const prow = pr.ok ? await pr.json() : [];
+        _isFounder = !!(prow[0] && prow[0].role === 'founder');
+      } catch (e) {}
+      if (!_isFounder) return res.status(403).json({ error: 'not owner' });
+    }
 
     // 3) read the gym's transactions via the service role (bypasses RLS)
     const sinceQ = since ? `&created_at=gte.${encodeURIComponent(since)}` : '';
