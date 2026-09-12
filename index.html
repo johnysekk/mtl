@@ -26346,7 +26346,15 @@ async function loadNotifications(append){
               try{
                 if(!_myGymData || _myGymData.id!==gid){ const { data:_g }=await supaClient.from('gyms').select('*').eq('id',gid).single(); if(_g){ _myGymData=_g; window._selectedGymId=_g.id; window._myGymData=_g; } }
                 let _sch=[]; try{ _sch=JSON.parse((_myGymData&&_myGymData.schedule)||'[]')||[]; }catch(e){}
-                const _sc=_sch.find(c=>String(c.time)===String(dd.time)&&((c.name||'')===(dd.className||'')));
+                // Termín se hledá podle DNE A ČASU z notifikace, ne podle základního času lekce.
+                // Základní čas patří jen k základnímu dni; pro ostatní dny je jiný.
+                const _dow2=(function(){ try{ return new Date(String(dd.date)+'T00:00:00').getDay(); }catch(e){ return null; } })();
+                const _sc=_sch.find(function(c){
+                  if((c.name||'')!==(dd.className||'')) return false;
+                  if(c.since && dd.date < c.since) return false;
+                  if(c.until && dd.date > c.until) return false;
+                  return _classSlots(c).some(function(sl){ return Number(sl.day)===_dow2 && String(sl.time||'')===String(dd.time||''); });
+                });
                 if(_sc) _occ=Object.assign(_occ, { level:_sc.level||'all', coach:_sc.coach||null, coachName:_sc.coachName||'', disc:_sc.disc||null });
               }catch(e){}
               await _notifOpenAttendance(gid, _occ);
@@ -32375,7 +32383,16 @@ async function loadDiaryData(){
       const { data:gs } = await supaClient.from('gyms').select('id,name,schedule').in('id', gids);
       (gs||[]).forEach(g=>{ let sc=[]; try{ sc=(typeof g.schedule==='string')?JSON.parse(g.schedule||'[]'):(g.schedule||[]); }catch(e){ sc=[]; } // Lekce bez uvedeného vedoucího vede majitel -- v rozvrhu se leader často nevyplňuje.
         const _mine=(_ownGids.indexOf(g.id)>=0);
-        (sc||[]).filter(c=>{ const _l=(c.leader||c.coach); return _l ? (_l===currentUser.id) : _mine; }).forEach(c=>{ diaryClasses.push({ gymId:g.id, gymName:g.name||'', day:Number(c.day)||0, time:c.time||'18:00', dur:Number(c.dur)||60, name:c.name||'', level:c.level||'all' }); }); });
+        // KAŽDÝ TERMÍN LEKCE, ne jen základní. Lekce v pondělí v 9:00, která běží i v sobotu
+        // v 18:00, se dosud v diáři objevila jen jednou a se špatným časem: c.time patří
+        // k c.day, pro ostatní dny platí čas z jejich termínu.
+        (sc||[]).filter(c=>{ const _l=(c.leader||c.coach); return _l ? (_l===currentUser.id) : _mine; }).forEach(c=>{
+          _classSlots(c).forEach(function(sl){
+            diaryClasses.push({ gymId:g.id, gymName:g.name||'', day:Number(sl.day)||0, time:sl.time||c.time||'18:00',
+              dur:Number(sl.dur!=null?sl.dur:c.dur)||60, name:c.name||'', level:c.level||'all',
+              since:c.since||null, until:c.until||null });
+          });
+        }); });
     }
   }catch(e){ diaryClasses=[]; }
 }
@@ -32488,7 +32505,7 @@ function showDiaryDay(dateStr){
   const dayBookings = diaryBookings.filter(b=>b.training_date===dateStr && b.type!=='online' && (!window._diaryFilterDisc || b.discipline===window._diaryFilterDisc)).sort((a,b)=>(a.training_time||'').localeCompare(b.training_time||''));
   const dayFreeSlots = diarySlots.filter(s=>s.date===dateStr && !s.booked && (!window._diaryFilterDisc || s.discipline===window._diaryFilterDisc)).sort((a,b)=>a.time.localeCompare(b.time));
   const _ddow = new Date(+y,+m-1,+d).getDay();
-  const dayClasses = []; (diaryClasses||[]).forEach(function(c){ _classSlots(c).forEach(function(sl){ if(Number(sl.day)===_ddow) dayClasses.push(Object.assign({}, c, { time: sl.time, dur:(sl.dur!=null?sl.dur:c.dur) })); }); }); dayClasses.sort((a,b)=>String(a.time||'').localeCompare(String(b.time||'')));
+  const dayClasses = []; (diaryClasses||[]).filter(function(c){ if(c.since && dateStr < c.since) return false; if(c.until && dateStr > c.until) return false; return true; }).forEach(function(c){ _classSlots(c).forEach(function(sl){ if(Number(sl.day)===_ddow) dayClasses.push(Object.assign({}, c, { time: sl.time, dur:(sl.dur!=null?sl.dur:c.dur) })); }); }); dayClasses.sort((a,b)=>String(a.time||'').localeCompare(String(b.time||'')));
 
   let html = `<div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.04em;margin-bottom:12px;">${LANG==='en'?`${monthName(parseInt(m)-1)} ${parseInt(d)}`:`${parseInt(d)}. ${MONTH_NAMES[parseInt(m)-1]}`}</div>`;
 
