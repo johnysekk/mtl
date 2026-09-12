@@ -19442,10 +19442,44 @@ async function _notifOpenAttendance(gymId, occ){
   if(_myGymData && typeof openClassAttendance==='function') openClassAttendance(occ);
   else if(typeof openReception==='function') openReception(gymId);
 }
+// JEDEN ZÁZNAM NA LEKCI A DEN. Dřív se při každém kliknutí vložil nový řádek, takže jedna
+// lekce mohla mít „proběhla" i „neproběhla" zároveň (stalo se, když notifikace poslala na
+// jiný čas). Upsert přepíše ten existující; unikátní index v databázi to hlídá i kdyby se
+// zapisovalo odjinud (sql-29).
+async function _logClassStatus(gid, occ, status, reason){
+  const row={ gym_id:gid, class_date:occ.date, class_time:occ.time||null, class_name:occ.name||null,
+              coach_id:occ.coach||null, status:status, logged_by:currentUser?currentUser.id:null };
+  if(reason!==undefined) row.reason=reason;
+  const { error }=await supaClient.from('gym_class_log')
+    .upsert(row, { onConflict:'gym_id,class_date,class_time,class_name' });
+  if(error) throw error;
+}
 async function openClassAttendance(occ){
   // Pro obnovení seznamu po zápisu docházky odjinud (potvrzení platby).
   try{ window._caOcc=occ; }catch(e){}
   if(!occ || !_myGymData) return;
+  // TERMÍN MUSÍ EXISTOVAT V ROZVRHU. Bez téhle kontroly šlo otevřít docházku pro čas, který
+  // klub nemá (třeba ze staré notifikace) a zapsat do ní stav i docházku -- vznikl tak druhý,
+  // nespárovatelný záznam. Kurzy a jednorázovky mají vlastní cestu, ty se nekontrolují.
+  try{
+    if(!occ.cohortId && occ.date && occ.time){
+      let _sch=[]; try{ _sch=(typeof _gymSchedule!=='undefined' && _gymSchedule.length)?_gymSchedule:(JSON.parse(_myGymData.schedule||'[]')||[]); }catch(e){ _sch=[]; }
+      if(_sch.length){
+        const _dow=new Date(occ.date+'T00:00:00').getDay();
+        const _ok=_sch.some(function(c){
+          if((c.name||'')!==(occ.name||'')) return false;
+          if(c.since && occ.date < c.since) return false;
+          if(c.until && occ.date > c.until) return false;
+          return _classSlots(c).some(function(sl){ return Number(sl.day)===_dow && String(sl.time||'')===String(occ.time||''); });
+        });
+        if(!_ok){
+          toast(LANG==='en'?'This class is not in the schedule at that time — open it from the schedule.'
+                           :'Tuhle lekci klub v ten \u010das nem\u00e1 \u2014 otev\u0159i ji z Rozvrhu.');
+          return;
+        }
+      }
+    }
+  }catch(e){}
   window._classAttendOcc=occ; _classAttendOpen=true;
   openSheet('shClassAttend');
   const EN=LANG==='en'; const dn=dayNames();
@@ -19680,8 +19714,8 @@ async function openClassAttendance(occ){
       toast(LANG==='en'?'\u2705 Verified \u2014 won\u2019t ask again':'\u2705 Ov\u011b\u0159eno \u2014 u\u017e se nebude pt\u00e1t');
     } else { b.disabled=false; b.textContent=(LANG==='en'?'\u26a0\ufe0f proof?':'\u26a0\ufe0f doklad?'); }
   }; });
-  const _cahY=$('caHappenedYes'); if(_cahY) _cahY.onclick=async()=>{ try{ await supaClient.from('gym_class_log').insert({ gym_id:gid, class_date:occ.date, class_time:occ.time||null, class_name:occ.name||null, coach_id:occ.coach||null, status:'held', logged_by:currentUser?currentUser.id:null }); }catch(e){} const b=$('caHappenedBanner'); if(b) b.outerHTML='<div style="background:#F0FBF0;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-weight:700;font-size:14px;color:#006040;">'+(EN?'✅ Marked: class took place':'✅ Označeno: lekce proběhla')+'</div>'; toast(EN?'✅ Marked as held':'✅ Označeno jako proběhlá'); };
-  const _cahN=$('caHappenedNo'); if(_cahN) _cahN.onclick=()=>{ const _b=$('caHappenedBanner'); if(!_b) return; _b.innerHTML='<div style="font-weight:800;font-size:13.5px;margin-bottom:8px;color:var(--dark);">'+(EN?'Why did it not happen?':'Pro\u010d neprob\u011bhla?')+'</div>'+'<button id="caNhZero" style="width:100%;padding:11px;margin-bottom:6px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;text-align:left;font-family:DM Sans;line-height:1.35;">'+(EN?'It was on, but nobody came':'M\u011bla prob\u011bhnout, ale nikdo nep\u0159i\u0161el')+'</button>'+'<button id="caNhForgot" style="width:100%;padding:11px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;text-align:left;font-family:DM Sans;line-height:1.35;">'+(EN?'We forgot to cancel it (it should not have run)':'Zapomn\u011bli jsme ji zru\u0161it (nem\u011bla b\u00fdt)')+'</button>'; const _doLog=async(reason)=>{ try{ await supaClient.from('gym_class_log').insert({ gym_id:gid, class_date:occ.date, class_time:occ.time||null, class_name:occ.name||null, coach_id:occ.coach||null, status:'cancelled', reason:reason, logged_by:currentUser?currentUser.id:null }); }catch(e){} try{ await supaClient.from('attend_reminders').delete().eq('gym_id',gid).eq('class_date',occ.date).eq('class_time',occ.time||null).eq('class_name',occ.name||null); }catch(e){} try{ if(window._cancelledOcc) window._cancelledOcc.add(`${occ.date}|${occ.time||''}|${occ.name||''}`); }catch(e){} if(_b) _b.outerHTML='<div style="background:#FEECEC;border:1px solid #F3C9C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-weight:700;font-size:14px;color:var(--red);">'+(reason===String.fromCharCode(122,101,114,111)?(EN?'\u2715 Logged: nobody came':'\u2715 Zalogov\u00e1no: nikdo nep\u0159i\u0161el'):(EN?'\u2715 Logged: did not run':'\u2715 Zalogov\u00e1no: neprob\u011bhla'))+'</div>'; toast(EN?'\u2705 Logged':'\u2705 Zalogov\u00e1no'); }; const _z=$('caNhZero'); if(_z) _z.onclick=()=>_doLog('zero'); const _f=$('caNhForgot'); if(_f) _f.onclick=()=>_doLog('forgot'); };
+  const _cahY=$('caHappenedYes'); if(_cahY) _cahY.onclick=async()=>{ try{ await _logClassStatus(gid, occ, 'held'); }catch(e){} const b=$('caHappenedBanner'); if(b) b.outerHTML='<div style="background:#F0FBF0;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-weight:700;font-size:14px;color:#006040;">'+(EN?'✅ Marked: class took place':'✅ Označeno: lekce proběhla')+'</div>'; toast(EN?'✅ Marked as held':'✅ Označeno jako proběhlá'); };
+  const _cahN=$('caHappenedNo'); if(_cahN) _cahN.onclick=()=>{ const _b=$('caHappenedBanner'); if(!_b) return; _b.innerHTML='<div style="font-weight:800;font-size:13.5px;margin-bottom:8px;color:var(--dark);">'+(EN?'Why did it not happen?':'Pro\u010d neprob\u011bhla?')+'</div>'+'<button id="caNhZero" style="width:100%;padding:11px;margin-bottom:6px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;text-align:left;font-family:DM Sans;line-height:1.35;">'+(EN?'It was on, but nobody came':'M\u011bla prob\u011bhnout, ale nikdo nep\u0159i\u0161el')+'</button>'+'<button id="caNhForgot" style="width:100%;padding:11px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;text-align:left;font-family:DM Sans;line-height:1.35;">'+(EN?'We forgot to cancel it (it should not have run)':'Zapomn\u011bli jsme ji zru\u0161it (nem\u011bla b\u00fdt)')+'</button>'; const _doLog=async(reason)=>{ try{ await _logClassStatus(gid, occ, 'cancelled', reason); }catch(e){} try{ await supaClient.from('attend_reminders').delete().eq('gym_id',gid).eq('class_date',occ.date).eq('class_time',occ.time||null).eq('class_name',occ.name||null); }catch(e){} try{ if(window._cancelledOcc) window._cancelledOcc.add(`${occ.date}|${occ.time||''}|${occ.name||''}`); }catch(e){} if(_b) _b.outerHTML='<div style="background:#FEECEC;border:1px solid #F3C9C0;border-radius:12px;padding:12px 14px;margin-bottom:12px;font-weight:700;font-size:14px;color:var(--red);">'+(reason===String.fromCharCode(122,101,114,111)?(EN?'\u2715 Logged: nobody came':'\u2715 Zalogov\u00e1no: nikdo nep\u0159i\u0161el'):(EN?'\u2715 Logged: did not run':'\u2715 Zalogov\u00e1no: neprob\u011bhla'))+'</div>'; toast(EN?'\u2705 Logged':'\u2705 Zalogov\u00e1no'); }; const _z=$('caNhZero'); if(_z) _z.onclick=()=>_doLog('zero'); const _f=$('caNhForgot'); if(_f) _f.onclick=()=>_doLog('forgot'); };
   if(!_roLock && _myGymData && _myGymData.owner_id===(currentUser&&currentUser.id) && (typeof _mtlPayMode==='function'&&_mtlPayMode(_myGymData)==='qr_bank')){
     _recGym=_myGymData; _recGymOwnerPartner=false; _recGymOwnerScore=0; _recGymOwnerBankai=false;
     var _oid2=_myGymData.owner_id||(currentUser&&currentUser.id);
