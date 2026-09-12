@@ -67,38 +67,49 @@ async function applySubRate(stripe, acct, subId, sub, ladderPct) {
   return true;
 }
 
+// Přepočet sazby u existujících předplatných majitele. Vytaženo z handleru, protože ho
+// bankai-cron.js a referral-cron.js importují jako rerateOwner -- ten se ale nikdy neexportoval,
+// takže oba crony padaly hned na prvním řádku a NIKDY SE NEPROVEDLY. Handler i crony teď volají
+// stejnou funkci.
+export async function rerateOwner(owner) {
+  if (!owner) throw new Error('missing owner');
+  const prof = (await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=coach_ref_score,partner,founding,bankai_eligible,org_rate_until`))[0];
+  if (!prof) throw new Error('owner not found');
+
+  const score = prof.coach_ref_score || 0;
+  // Single source of truth -- a local copy of the ladder had drifted: EP was billed 1% instead
+  // of 0.5% and founding was not handled at all, so every run raised a Founding Partner's rate.
+  const pct = ladderRate('stripe', { partner: prof.partner, founding: prof.founding, score, bankai: prof.bankai_eligible, org: hasOrgRate(prof) }) * 100;
+
+  let rerated = 0;
+  const gyms = await sbGet(`gyms?owner_id=eq.${encodeURIComponent(owner)}&select=id,stripe_account`);
+  for (const g of gyms || []) {
+    if (!g.stripe_account) continue;
+    // Was: blindly set application_fee_percent = pct on EVERY active subscription, which
+    // wiped out an open acquisition charge (20%/10% EP).
+    // Now every sub goes through the one shared rule.
+    const mems = await sbGet(`gym_memberships?gym_id=eq.${encodeURIComponent(g.id)}&status=in.(active,cancelling)&select=stripe_subscription`);
+    for (const m of mems || []) {
+      if (!m.stripe_subscription) continue;
+      try {
+        const sub = await stripe.subscriptions.retrieve(m.stripe_subscription, { stripeAccount: g.stripe_account });
+        if (await applySubRate(stripe, g.stripe_account, m.stripe_subscription, sub, pct)) rerated++;
+      } catch (e) { console.error('rerate sub', m.stripe_subscription, e.message); }
+    }
+  }
+  return { pct, rerated };
+}
+
 export default async function handler(req, res) {
   try {
     const owner = req.query.owner;
     if (!owner) return res.status(400).json({ error: 'missing owner' });
-
-    const prof = (await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=coach_ref_score,partner,founding,bankai_eligible,org_rate_until`))[0];
-    if (!prof) return res.status(404).json({ error: 'owner not found' });
-
-    const score = prof.coach_ref_score || 0;
-    // Single source of truth -- a local copy of the ladder had drifted: EP was billed 1% instead
-    // of 0.5% and founding was not handled at all, so every run raised a Founding Partner's rate.
-    const pct = ladderRate('stripe', { partner: prof.partner, founding: prof.founding, score, bankai: prof.bankai_eligible, org: hasOrgRate(prof) }) * 100;
-
-    let rerated = 0;
-    const gyms = await sbGet(`gyms?owner_id=eq.${encodeURIComponent(owner)}&select=id,stripe_account`);
-    for (const g of gyms || []) {
-      if (!g.stripe_account) continue;
-      // Was: blindly set application_fee_percent = pct on EVERY active subscription, which
-      // wiped out an open acquisition charge (20%/10% EP).
-      // Now every sub goes through the one shared rule.
-      const mems = await sbGet(`gym_memberships?gym_id=eq.${encodeURIComponent(g.id)}&status=in.(active,cancelling)&select=stripe_subscription`);
-      for (const m of mems || []) {
-        if (!m.stripe_subscription) continue;
-        try {
-          const sub = await stripe.subscriptions.retrieve(m.stripe_subscription, { stripeAccount: g.stripe_account });
-          if (await applySubRate(stripe, g.stripe_account, m.stripe_subscription, sub, pct)) rerated++;
-        } catch (e) { console.error('rerate sub', m.stripe_subscription, e.message); }
-      }
-    }
-    res.status(200).json({ ok: true, pct, rerated });
+    const out = await rerateOwner(owner);
+    res.status(200).json({ ok: true, pct: out.pct, rerated: out.rerated });
   } catch (err) {
     console.error('gym-rerate', err);
-    res.status(500).json({ error: err.message });
+    const code = /missing owner/.test(err.message) ? 400 : (/owner not found/.test(err.message) ? 404 : 500);
+    res.status(code).json({ error: err.message });
   }
 }
+
