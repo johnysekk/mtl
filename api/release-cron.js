@@ -52,7 +52,7 @@ export default async function handler(req, res) {
   try {
     // ---- Pass 1: auto-release unpaid QR drop-in reservations 30 min after reservation --------------
     const yest = new Date(Date.now() - 36 * 3600 * 1000).toISOString().slice(0, 10);
-    const rows = await sb(`gym_bookings?payment_method=eq.qr&status=eq.reserved&pis_payment_id=is.null&class_date=gte.${yest}&select=id,gym_id,student_id,student_name,class_name,class_date,class_time,created_at&limit=3000`);
+    const rows = await sb(`gym_bookings?payment_method=eq.qr&status=eq.reserved&pis_payment_id=is.null&class_date=gte.${yest}&select=requeued_at,id,gym_id,student_id,student_name,class_name,class_date,class_time,created_at&limit=3000`);
 
     const gymIds = [...new Set((rows || []).map(r => r.gym_id).filter(Boolean))];
     const tzMap = {};
@@ -65,7 +65,11 @@ export default async function handler(req, res) {
       const gm = tzMap[b.gym_id] || { tz: DEFAULT_TZ };
       // release 30 min after reservation (matches the in-app 30-min countdown + coach 1:1 Pass 3);
       // the old 45-min-before-class rule did not match what the student was shown.
-      if (!b.created_at || new Date(b.created_at).getTime() > Date.now() - 30 * 60 * 1000) continue;
+      // POZOR: po odmítnutí ("nedorazilo") jde rezervace zpátky na 'reserved' a odpočet začíná
+      // ZNOVU od requeued_at. Dřív se počítal od created_at, takže rezervace vrácená po dvou
+      // hodinách vypršela hned při dalším průchodu -- student ani nestihl zaplatit znovu.
+      const _from = b.requeued_at || b.created_at;
+      if (!_from || new Date(_from).getTime() > Date.now() - 30 * 60 * 1000) continue;
 
       await sb(`gym_bookings?id=eq.${b.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'released' }) });
       try {
@@ -91,8 +95,12 @@ export default async function handler(req, res) {
     // ---- Pass 3: expire unpaid QR coach 1:1 reservations 30 min after booking --------------
     try {
       const cutoff30m = new Date(Date.now() - 30 * 60 * 1000).toISOString(); // 30 min unpaid window
-      const b1 = await sb(`bookings?payment_method=eq.qr&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoff30m)}&select=id,slot_id,student_id,coach_name&limit=3000`);
+      // Stejné pravidlo jako u vstupů: po odmítnutí běží 30 minut znovu od requeued_at.
+      // Filtr proto bere i řádky, které byly vrácené, a rozhodne se až v cyklu.
+      const b1 = await sb(`bookings?payment_method=eq.qr&status=eq.reserved&or=(created_at.lt.${encodeURIComponent(cutoff30m)},requeued_at.not.is.null)&select=id,slot_id,student_id,coach_name,created_at,requeued_at&limit=3000`);
       for (const b of (b1 || [])) {
+        const _from1 = b.requeued_at || b.created_at;
+        if (!_from1 || new Date(_from1).getTime() > Date.now() - 30 * 60 * 1000) continue;
         await sb(`bookings?id=eq.${b.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'expired' }) });
         if (b.slot_id) { try { await sb(`slots?id=eq.${encodeURIComponent(b.slot_id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ booked: false }) }); } catch (e) {} }
         try {
@@ -216,8 +224,12 @@ export default async function handler(req, res) {
             if (remindedAt) continue;   // po 24 h připomeneme jen jednou
             // Kde se potvrzuje: 1:1 v Přehledu kouče, vstup do klubu v Recepci. Notifikace tam vede.
             await note(target, 'qr_unconfirmed',
-              `\u23f3 \u010cek\u00e1 na potvrzen\u00ed platba p\u0159evodem (${what}, ${amount}). Potvr\u010f ji, nebo odm\u00edtni.`,
-              `\u23f3 A bank payment is waiting for your confirmation (${what}, ${amount}). Confirm or reject it.`, { tbl: t.tbl, row_id: String(r.id), for_provider: true });
+              (t.tbl === 'bookings'
+                ? `\u23f3 \u010cek\u00e1 na potvrzen\u00ed platba p\u0159evodem (${what}, ${amount}). Potvr\u010f ji, nebo odm\u00edtni v P\u0159ehledu kou\u010de.`
+                : `\u23f3 \u010cek\u00e1 na potvrzen\u00ed platba p\u0159evodem (${what}, ${amount}). Potvr\u010f ji, nebo odm\u00edtni v doch\u00e1zce u lekce.`),
+              (t.tbl === 'bookings'
+                ? `\u23f3 A bank payment is waiting for your confirmation (${what}, ${amount}). Confirm or reject it in your coach dashboard.`
+                : `\u23f3 A bank payment is waiting for your confirmation (${what}, ${amount}). Confirm or reject it in the class attendance.`), { tbl: t.tbl, row_id: String(r.id), for_provider: true });
             nudged++;
           }
           try { await sb(`${t.tbl}?id=eq.${r.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ claim_reminded: new Date().toISOString() }) }); } catch (e) {}

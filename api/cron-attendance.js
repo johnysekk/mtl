@@ -140,7 +140,7 @@ async function handler(req, res) {
       const dISO = (d) => d.toISOString().slice(0, 10);
       const nowD = new Date();
       const lo = dISO(new Date(nowD.getTime() - 86400000)), hi = dISO(new Date(nowD.getTime() + 2 * 86400000));
-      const bks = await sbGet(`bookings?type=neq.online&status=eq.active&training_date=gte.${lo}&training_date=lte.${hi}&or=(reminder_sent.eq.false,coach_reminder_sent.eq.false)&select=id,coach_id,student_id,coach_name,training_date,training_time,reminder_sent,coach_reminder_sent`);
+      const bks = await sbGet(`bookings?type=neq.online&status=eq.active&training_date=gte.${lo}&training_date=lte.${hi}&or=(reminder_sent.eq.false,coach_reminder_sent.eq.false)&select=id,coach_id,student_id,coach_name,student_name,training_date,training_time,type,amount,currency,reminder_sent,coach_reminder_sent`);
       if (bks && bks.length) {
         const coachIds = [...new Set(bks.map(b => b.coach_id).filter(Boolean))];
         const tzMap = {};
@@ -154,11 +154,12 @@ async function handler(req, res) {
           if (isNaN(cm)) continue; const diff = cm - mins; if (diff < 450 || diff > 510) continue; // ~8h ahead, aligned with the group-class window
           if (b.reminder_sent === false && b.student_id && !mutedRem.has(b.student_id)) {
             const pk = await sbPatch('bookings', `id=eq.${b.id}&reminder_sent=eq.false`, { reminder_sent: true });
-            if (pk.ok) { await sbPost('notifications', { user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'class_reminder', label: (b.coach_name ? ('Lekce s ' + b.coach_name) : 'Tvoje lekce'), time: b.training_time || '' }), message: `⏰ Připomínka: lekce${b.coach_name ? (' s ' + b.coach_name) : ''} brzy začíná (${b.training_time || ''}). Máš zdravotní omezení? Řekni ho v profilu, uvidí jen tvůj kouč.` }); created++; }
+            if (pk.ok) { await sbPost('notifications', { user_id: b.student_id, type: 'system', read: false, // Datum syrove (RRRR-MM-DD); do citelneho tvaru ho prevede az appka.
+              data: JSON.stringify({ kind: 'class_reminder', label: (b.coach_name ? ('Lekce s ' + b.coach_name) : 'Tvoje lekce'), date: b.training_date || '', time: b.training_time || '', amount: b.amount, currency: b.currency }), message: `⏰ Připomínka: lekce${b.coach_name ? (' s ' + b.coach_name) : ''} brzy začíná (${b.training_time || ''}). Máš zdravotní omezení? Řekni ho v profilu, uvidí jen tvůj kouč.` }); created++; }
           }
           if (b.coach_reminder_sent === false && !coachMuted.has(b.coach_id)) {
             const pk = await sbPatch('bookings', `id=eq.${b.id}&coach_reminder_sent=eq.false`, { coach_reminder_sent: true });
-            if (pk.ok) { await sbPost('notifications', { user_id: b.coach_id, type: 'system', read: false, data: JSON.stringify({ kind: 'coach_lesson_reminder', student: b.student_name || 'student', date: b.training_date, time: b.training_time || '' }), message: `⏰ Lekce s ${b.student_name || 'studentem'} brzy (${b.training_date} ${b.training_time || ''}).` }); created++; }
+            if (pk.ok) { await sbPost('notifications', { user_id: b.coach_id, type: 'system', read: false, data: JSON.stringify({ kind: 'coach_lesson_reminder', student: b.student_name || null, date: b.training_date, time: b.training_time || '', amount: b.amount, currency: b.currency, online: (b.type === 'online') }), message: `⏰ Lekce s ${b.student_name || 'studentem'} brzy (${b.training_date} ${b.training_time || ''}).` }); created++; }
           }
         }
       }
@@ -211,8 +212,17 @@ async function handler(req, res) {
     // a neanonymizoval se ani jeden účet.
     try {
       const cutoff = new Date(Date.now() - 30 * 864e5).toISOString();
-      const delProfiles = await sbGet(`profiles?deleted_at=lt.${encodeURIComponent(cutoff)}&purged_at=is.null&select=id`);
+      const delProfiles = await sbGet(`profiles?deleted_at=lt.${encodeURIComponent(cutoff)}&purged_at=is.null&select=id,name,email,deleted_at`);
       for (const pr of (delProfiles || [])) {
+        // KDO TO BYL -- zapíše se DŘÍV, než se profil vyprázdní. Starší záznamy (souhlasy, docházka,
+        // rezervace) nesou jen user_id a jméno si dohledávaly z profilu; po vyprázdnění by z nich
+        // zbylo "Smazaný uživatel". Souhlasy jsou v databázi jen k zápisu (append-only) a doplnit
+        // do nich jméno zpětně nejde -- proto tahle jedna tabulka navíc.
+        const ident = await sbPost('deleted_identities', {
+          user_id: pr.id, name: pr.name || null, email: pr.email || null,
+          deleted_at: pr.deleted_at || null, purged_at: new Date().toISOString(),
+        });
+        if (ident && ident.ok === false) { console.error('purge identity', pr.id, ident.status); continue; }
         const pk = await sbPatch('profiles', `id=eq.${pr.id}`, {
           name: 'Smazaný uživatel', photo_url: null, bio: null, emoji: null,
           phone: null, contact_phone: null, contact_email: null, billing_phone: null, invoice_email: null,
