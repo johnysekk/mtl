@@ -18524,6 +18524,9 @@ async function renderGymManage(){
   try{ _loadGymVouches(); }catch(e){}
   try{ const _ds=parseDisc(g.disciplines)||[]; localStorage.setItem('mtl_dash_disc', _ds.length===1?_ds[0]:(_ds.length>1?'multi':'')); }catch(e){}
   try{ _gymSchedule = JSON.parse(g.schedule||'[]'); }catch(e){ _gymSchedule=[]; }
+  // Starší data mohou mít dva termíny v jednom dni. Srovnat hned při načtení, ať rozvrh,
+  // docházka i připomínky mluví o tomtéž; do databáze se to propíše při nejbližším uložení.
+  try{ if(typeof _dedupeAllSlots==='function') _dedupeAllSlots(); }catch(e){}
   try{ _dpLoadEditor(g); }catch(e){}
   _gymPlans = gymMembPlans(g).map(p=>({ id:p.id, name:p.name, price:p.price,
     // Dolozeni naroku u zlevnene permanentky -- stejny princip jako u vstupu.
@@ -18567,19 +18570,9 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
       <!-- Správa akcí byla jen v dashmode. Pod Kurzy, protože obojí je "co klub pořádá". -->
       <button id="mgEvManageBtn" style="display:none;width:100%;padding:11px;margin-bottom:16px;background:var(--dark);color:#fff;border:none;border-radius:11px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">🎪 ${LANG==='en'?'Events':'Události'}</button>    <div class="sec-lbl">${LANG==='en'?'Weekly class schedule':'Týdenní rozvrh tříd'}</div>
     <div id="mgSchedule"></div>
-    <button id="mgAddRepeat" style="width:100%;padding:11px;background:var(--bg);border:1px dashed var(--border);border-radius:10px;font-weight:600;color:var(--dark);cursor:pointer;font-family:'DM Sans';margin-bottom:10px;">📅 ${LANG==='en'?'Add recurring (multiple days)':'Přidat opakovaně (více dní)'}</button>
-    <div id="mgRepeatPanel" style="display:none;border:1.5px solid var(--border);border-radius:12px;padding:12px;margin-bottom:16px;background:var(--surf);">
-      <div style="font-size:13px;font-weight:700;color:var(--dark);margin-bottom:8px;">📅 ${LANG==='en'?'Recurring class':'Opakovaná lekce'}</div>
-      <input id="rpName" type="text" placeholder="${LANG==='en'?'Class name':'Název třídy'}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';margin-bottom:6px;">
-      <div style="display:flex;gap:6px;margin-bottom:6px;">
-        <input id="rpTime" type="time" value="18:00" style="flex:1;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';">
-        <select id="rpLevel" style="flex:1;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${levelOptionsHtml('')}</select>
-      </div>
-      ${isMultiDiscipline()?`<select id="rpDisc" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;margin-bottom:6px;">${discOptsHtml(activeDisciplines())}</select>`:''}
-      <div style="font-size:12px;color:var(--mid);margin:6px 0 4px;">${LANG==='en'?'Which days? Each becomes its own class you can fine-tune.':'Které dny? Z každého vznikne samostatná lekce, kterou pak doladíš.'}</div>
-      <div id="rpDays" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;">${[1,2,3,4,5,6,0].map(di=>`<label style="display:flex;align-items:center;gap:5px;padding:6px 10px;border:1.5px solid var(--border);border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;background:#fff;"><input type="checkbox" class="rpDay" value="${di}" style="width:15px;height:15px;"> ${dayNames()[di]}</label>`).join('')}</div>
-      <button id="rpCreate" style="width:100%;padding:11px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Create classes':'Vytvořit lekce'}</button>
-    </div>
+    <!-- „Přidat opakovaně (více dní)" odebráno: z jednoho zadání zakládalo několik SAMOSTATNÝCH
+         lekcí, ale vypadalo to jako jedna lekce s víc termíny. Na víc dnů slouží dny přímo
+         u lekce (chipy v jejím detailu). -->
     </div>
     <div id="gmDash" style="display:none;">
     <div class="sec-lbl">📊 ${LANG==='en'?'Overview':'Přehled'}</div>
@@ -18865,23 +18858,7 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
   // Zmena zakladni ceny musi seznam prekreslit hned, at "Zakladni" nelze cenu.
   if($('mgDropin')) $('mgDropin').addEventListener('input', function(){ try{ renderDropinPlansEditor(); }catch(e){} });
   if($('mgAddPlan')) $('mgAddPlan').onclick=()=>{ const _np={ id:'p'+Date.now().toString(36), name:'', price:0, access:[] }; _gymPlans.push(_np); window._planOpen=window._planOpen||{}; window._planOpen[_np.id]=true; renderPlansEditor(); };
-  if($('mgAddRepeat')) $('mgAddRepeat').onclick=()=>{ const pn=$('mgRepeatPanel'); if(pn) pn.style.display = pn.style.display==='none' ? 'block' : 'none'; };
-  if($('rpCreate')) $('rpCreate').onclick=()=>{
-    const name=($('rpName')&&$('rpName').value.trim())||'';
-    const time=($('rpTime')&&$('rpTime').value)||'18:00';
-    const level=($('rpLevel')&&$('rpLevel').value)||'';
-    if(!level){ toast('\u26a0\ufe0f '+(LANG==='en'?'Pick a level':'Vyber \u00farove\u0148')); return; }
-    const disc=isMultiDiscipline()?(($('rpDisc')&&$('rpDisc').value)||defaultDiscipline()):null;
-    const days=Array.from(document.querySelectorAll('.rpDay:checked')).map(c=>+c.value);
-    if(!name){ toast(LANG==='en'?'⚠️ Enter a class name':'⚠️ Zadej název třídy'); return; }
-    if(!days.length){ toast(LANG==='en'?'⚠️ Pick at least one day':'⚠️ Vyber aspoň jeden den'); return; }
-    const _since=(new Date().toISOString().slice(0,10)); days.forEach(d=>{ _gymSchedule.push({ day:d, time, name, level, disc, dur:60, since:_since, created_at:new Date().toISOString() }); });
-    if($('rpName')) $('rpName').value='';
-    document.querySelectorAll('.rpDay:checked').forEach(c=>c.checked=false);
-    const pn=$('mgRepeatPanel'); if(pn) pn.style.display='none';
-    renderScheduleEditor();
-    toast(LANG==='en'?`✅ ${days.length} classes added`:`✅ Přidáno ${days.length} lekcí`);
-  };
+
   // Zaškrtávátka vybavení -- stejný seznam i pořadí jako v přihlášce a na profilu.
   try{
     const _am=$('mgAmenities');
@@ -22402,6 +22379,8 @@ async function saveScheduleOnly(_onlyIdx){
       return;
     }
   }
+  // POJISTKA PŘED ULOŽENÍM: dva termíny téže lekce v jednom dni se do databáze nedostanou.
+  try{ const _rm=_dedupeAllSlots(); if(_rm) console.log('[rozvrh] slouceno duplicitnich terminu:', _rm); }catch(e){}
   const sched = JSON.stringify(_gymSchedule.map(c=>({ ...c, name: (c.name&&String(c.name).trim()) ? c.name.trim() : levelLabel(c.level||'all') })));
   try{
     const { error } = await (async function(){
@@ -22476,6 +22455,27 @@ function _occPanel(c,i){
 }
 // Add another weekly session to the SAME recurring class: clone every template field onto a fresh
 // row (a new day/time the owner then sets), so a 1x/week class becomes 2x/week without re-typing.
+// Lekce nesmí mít v jednom dni dva termíny. Vzniklo to tak, že se změnil hlavní den lekce
+// na den, který už měla mezi vedlejšími termíny -- rozvrh pak ukazoval jeden čas, připomínka
+// mluvila o druhém a docházka se zapisovala pod dvěma klíči. Tohle to srovná: v každém dni
+// zůstane jeden termín (ten hlavní má přednost) a vrátí, kolik jich zmizelo.
+function _dedupeSlots(c){
+  if(!c) return 0;
+  if(!Array.isArray(c.extraSlots) || !c.extraSlots.length) return 0;
+  const seen=new Set([Number(c.day)]);
+  const before=c.extraSlots.length;
+  c.extraSlots=c.extraSlots.filter(function(sl){
+    if(!sl || sl.day==null || !sl.time) return false;
+    const d=Number(sl.day);
+    if(seen.has(d)) return false;
+    seen.add(d); return true;
+  });
+  if(!c.extraSlots.length) delete c.extraSlots;
+  return before-(c.extraSlots?c.extraSlots.length:0);
+}
+function _dedupeAllSlots(){
+  let n=0; (_gymSchedule||[]).forEach(function(c){ n+=_dedupeSlots(c); }); return n;
+}
 function _rcChip(i, d){
   const c=_gymSchedule[i]; if(!c) return; d=Number(d);
   const act=_classSlots(c).map(function(s){ return Number(s.day); });
@@ -22490,6 +22490,9 @@ function _rcChip(i, d){
     if(Array.isArray(c.extraSlots) && !c.extraSlots.length) delete c.extraSlots;
   } else {
     if(!Array.isArray(c.extraSlots)) c.extraSlots=[];
+    // Poslední pojistka: nikdy nepřidat den, který lekce už má. (Sem se to nedostane, protože
+    // se to kontroluje výš, ale kdyby se funkce zavolala odjinud, duplicita nevznikne.)
+    if(_classSlots(c).some(function(s2){ return Number(s2.day)===d; })) return;
     c.extraSlots.push({ day:d, time:(c.time||'18:00'), dur:(Number(c.dur)||60) });   // inherit primary time/dur
   }
   window._rcOpen=true;
@@ -22772,7 +22775,13 @@ function renderScheduleEditor(){
   const editFields=(c,i)=>`
     <div style="margin-top:8px;border-top:1px dashed var(--border);padding-top:8px;">
       <div style="display:flex;gap:6px;margin-bottom:6px;align-items:flex-end;">
-        <div style="width:72px;"><div style="font-size:10px;color:var(--mid);margin-bottom:3px;font-weight:600;">${LANG==='en'?'Day':'Den'}</div><select class="schDay" data-i="${i}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${days.map((d,di)=>`<option value="${di}" ${di===Number(c.day)?'selected':''}>${d}</option>`).join('')}</select></div>
+        <div style="width:72px;"><div style="font-size:10px;color:var(--mid);margin-bottom:3px;font-weight:600;">${LANG==='en'?'Day':'Den'}</div><select class="schDay" data-i="${i}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';background:#fff;">${(function(){
+           // Den, který tahle lekce už má (jako vedlejší termín), NELZE vybrat. Jinak by měla
+           // v jednom dni dva termíny -- rozvrh by ukázal jeden čas, připomínka mluvila o druhém.
+           const _taken=new Set(_classSlots(c).map(function(s2){ return Number(s2.day); }));
+           _taken.delete(Number(c.day));
+           return days.map((d,di)=>`<option value="${di}" ${di===Number(c.day)?'selected':''} ${_taken.has(di)?'disabled':''}>${d}${_taken.has(di)?' •':''}</option>`).join('');
+         })()}</select></div>
         <div style="flex:1;min-width:0;"><div style="font-size:10px;color:var(--mid);margin-bottom:3px;font-weight:600;">${LANG==='en'?'Start':'Začátek'}</div><input class="schTime" data-i="${i}" type="time" value="${c.time||'18:00'}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';"></div>
         <div style="flex:1;min-width:0;"><div style="font-size:10px;color:var(--mid);margin-bottom:3px;font-weight:600;">${LANG==='en'?'End':'Konec'}</div><input class="schEnd" data-i="${i}" type="time" value="${_classEnd(c.time,c.dur||60)}" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:'DM Sans';"></div>
         <button class="schDel" data-i="${i}" style="padding:10px 11px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-weight:700;cursor:pointer;">✕</button>
@@ -22908,7 +22917,17 @@ function renderScheduleEditor(){
   };
   box.querySelectorAll('.schCardOpen').forEach(el=>el.onclick=()=>{ if(_selPast || el.dataset.cpast==='1') return; const i=+el.dataset.i; _schedEdit=(_schedEdit===i?-1:i); renderScheduleEditor(); });
   box.querySelectorAll('.schAtt').forEach(el=>el.onclick=(e)=>{ e.stopPropagation(); const i=+el.dataset.i; const c=_gymSchedule[i]; if(!c) return; const sd=weekDates.find(d=>d.getDay()===_schedSelDow)||weekDates[0]; const ds=`${sd.getFullYear()}-${String(sd.getMonth()+1).padStart(2,'0')}-${String(sd.getDate()).padStart(2,'0')}`; openClassAttendance({ date:ds, time:(el.dataset.t||c.time), name:c.name||'', level:c.level||'all', coach:(c.leader||c.coach)||null, coachName:(c.leaderName||c.coachName)||'', disc:c.disc||null }); });
-  box.querySelectorAll('.schDay').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].day=+el.value; _schedSelDow=+el.value; renderScheduleEditor(); });
+  box.querySelectorAll('.schDay').forEach(el=>el.onchange=()=>{
+    const _i=+el.dataset.i, _c=_gymSchedule[_i]; if(!_c) return;
+    const _new=+el.value;
+    // Pojistka pro případ, že by se výběr obešel: den, který lekce už má, se prostě nepoužije.
+    const _other=_classSlots(_c).map(function(s2){ return Number(s2.day); }).filter(function(d){ return d!==Number(_c.day); });
+    if(_other.indexOf(_new)>=0){
+      toast(LANG==='en'?'This class already runs that day.':'Tuhle lekci u\u017e ten den m\u00e1\u0161.');
+      el.value=String(_c.day); return;
+    }
+    _c.day=_new; _schedSelDow=_new; renderScheduleEditor();
+  });
   box.querySelectorAll('.schTime').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].time=el.value; renderScheduleEditor(); });
   box.querySelectorAll('.schEnd').forEach(el=>el.onchange=()=>{ const _i=+el.dataset.i; _gymSchedule[_i].dur=_endToDur(_gymSchedule[_i].time, el.value); renderScheduleEditor(); });
   box.querySelectorAll('.schName').forEach(el=>el.oninput=()=>{ _gymSchedule[+el.dataset.i].name=el.value; });
@@ -23058,6 +23077,8 @@ async function saveGymManage(){
       return;
     }
   }
+  // POJISTKA PŘED ULOŽENÍM: dva termíny téže lekce v jednom dni se do databáze nedostanou.
+  try{ const _rm=_dedupeAllSlots(); if(_rm) console.log('[rozvrh] slouceno duplicitnich terminu:', _rm); }catch(e){}
   const sched = JSON.stringify(_gymSchedule.map(c=>({ ...c, name: (c.name&&String(c.name).trim()) ? c.name.trim() : levelLabel(c.level||'all') })));
   let _curSel = ($('mgCurrency')&&$('mgCurrency').value) || _myGymData.currency || 'CZK';
   // CURRENCY LOCK: once a club has taken ANY payment, its currency is fixed -- changing it would break
