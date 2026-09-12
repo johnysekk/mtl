@@ -269,6 +269,8 @@ body.dashmode #authScreen{max-width:none!important}
    STRANKY, tedy klidne tisic pixelu pod obrazovkou -- klepnuti na Jazyk pak vypadalo, ze nic
    nedela. Fixed je vazane na obrazovku. */
 body.dashmode .picker-ov,body.dashmode .city-ov,body.dashmode .gps-ov{position:fixed}
+/* Na širokém okně patří dotazník doprostřed; na spodní hraně se poslední krok schová pod okraj. */
+@media(min-width:900px){ #dqOv{align-items:center!important} #dqOv #dqCard{max-height:min(86vh,760px)} }
 body.dashmode .picker-ov{align-items:center;justify-content:center;padding:24px;box-sizing:border-box}
 body.dashmode .picker-sh{width:auto;min-width:400px;max-width:520px;border-radius:16px;max-height:min(76vh,640px);transform:none}
 body.dashmode .picker-title{padding:12px 16px;font-size:12.5px}
@@ -6328,6 +6330,68 @@ function haversine(a,b,c,d){
 // ════════════════════════════════════════
 // FILTER & SORT
 // ════════════════════════════════════════
+// HLEDÁNÍ SE PTÁ SERVERU. Dřív se filtroval jen stažený balík (kluby z tvé země, prvních 100
+// koučů), takže thajský kouč ani 51. Petr nešli najít. Teď se pošle jeden dotaz a vrátí se
+// nejvýš deset řádků s tím, co je na kartě potřeba -- pár kilobajtů bez ohledu na velikost
+// databáze. Balík v paměti zůstává pro listování decku, hledání s ním nemá nic společného.
+let _srvSearchT=null, _srvSearchQ='', _srvSearchLast='', _srvSearchCache={};
+function _renderSearchResults(rows, q){
+  const EN=LANG==='en';
+  const box=document.getElementById('empty'); if(!box) return;
+  const front=$('cardFront'), back=$('cardBack');
+  if(front) front.style.display='none'; if(back) back.style.display='none';
+  box.classList.add('show'); try{ _deckActs(false); }catch(e){}
+  const h3=box.querySelector('h3'), p2=box.querySelector('p');
+  if(!rows || !rows.length){
+    h3.textContent=L('Nic nenalezeno');
+    p2.innerHTML=(EN?('Nothing found for \u201e'+escapeHtml(q)+'\u201c.'):('Pro \u201e'+escapeHtml(q)+'\u201c jsme nic nena\u0161li.'))
+      +'<div style="font-size:12.5px;color:var(--light);margin-top:8px;">'+(EN?'Try a shorter name.':'Zkus krat\u0161\u00ed jm\u00e9no.')+'</div>';
+    return;
+  }
+  h3.textContent=(EN?('Found: '+rows.length):('Nalezeno: '+rows.length));
+  p2.innerHTML='<div style="text-align:left;max-width:340px;margin:0 auto;">'+rows.map(function(r){
+    const isC=(r.kind==='coach');
+    const dist=(userLoc && r.lat!=null && r.lng!=null)?(' \u00b7 '+Math.round(haversine(userLoc.lat,userLoc.lng,+r.lat,+r.lng))+' km'):'';
+    const flag=(typeof flagOf==='function')?flagOf(r.country_code||((typeof r.country==='string'&&/^[A-Za-z]{2}$/.test(r.country))?r.country:null)):'';
+    const where=[r.city, flag||((typeof _countryName==='function')?_countryName(r.country):r.country)].filter(Boolean).join(' ');
+    const _rc=r.currency||'CZK';
+    const price=(r.rate>0)?(fmtPrice(r.rate,_rc)+' '+((typeof _curSym==='function')?_curSym(_rc):_rc)):'';
+    return '<button class="srvHit" data-kind="'+r.kind+'" data-id="'+escapeHtml(String(r.id))+'" '
+      +'style="width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;padding:11px 12px;margin-bottom:6px;background:#fff;border:1px solid var(--border);border-radius:12px;cursor:pointer;font-family:inherit;text-align:left;">'
+      +'<span style="min-width:0;"><span style="display:block;font-size:14px;font-weight:800;color:var(--dark);">'+(isC?'\ud83e\uddd1\u200d\ud83c\udfeb ':'\ud83c\udfdb\ufe0f ')+escapeHtml(r.name||'')+'</span>'
+      +'<span style="display:block;font-size:11.5px;color:var(--mid);">'+escapeHtml(where)+dist+(r.online?(' \u00b7 '+(EN?'online':'online')):'')+'</span></span>'
+      +'<span style="font-size:12.5px;font-weight:800;color:#006040;white-space:nowrap;">'+price+'</span></button>';
+  }).join('')+'</div>';
+  box.querySelectorAll('.srvHit').forEach(function(b){
+    b.onclick=async function(){
+      const id=b.dataset.id;
+      try{
+        if(b.dataset.kind==='gym'){ const { data }=await supaClient.from('gyms').select('*').eq('id',id).single(); if(data) openGymProfile(data); }
+        else { if(typeof openProfileById==='function') openProfileById(id); }
+      }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
+    };
+  });
+}
+async function _serverSearch(q){
+  _srvSearchQ=q;
+  // Stejný dotaz podruhé se neposílá. Kdo píše „petr", smaže písmeno a napíše ho znovu,
+  // dostane odpověď z paměti. Prodleva 450 ms znamená jeden dotaz za napsané slovo, ne za písmeno.
+  if(_srvSearchCache[q]){ _renderSearchResults(_srvSearchCache[q], q); return; }
+  if(_srvSearchLast===q) return;
+  _srvSearchLast=q;
+  try{
+    const { data, error }=await supaClient.rpc('search_providers', { p_q:q, p_limit:10 });
+    if(_srvSearchQ!==q) return;            // mezitím napsal něco jiného
+    if(error) throw error;
+    _srvSearchCache[q]=data||[];
+    if(Object.keys(_srvSearchCache).length>40) _srvSearchCache={};
+    _renderSearchResults(data||[], q);
+  }catch(e){
+    // Když funkce ještě není nasazená, radši ticho a starý způsob než rozbité hledání.
+    console.log('[search]', e&&e.message);
+    _renderSearchResults(null, q);
+  }
+}
 function buildFiltered(){
   if(_deckMode==='gyms') return buildGymFiltered();
   let list = [...COACHES];
@@ -6912,6 +6976,7 @@ function _openDemandChips(){
           + '</label>'; } });
 
   var ov=document.createElement('div');
+  ov.id='dqOv';
   ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;display:flex;align-items:flex-end;justify-content:center;';
   ov.innerHTML='<div id="dqCard" style="background:var(--surf);border-radius:18px;width:100%;max-width:520px;max-height:92vh;display:flex;flex-direction:column;">'
     + '<div style="padding:14px 18px 8px;flex-shrink:0;">'
@@ -7368,6 +7433,16 @@ function _inviteEndHtml(kind){ var en=LANG==='en'; // Karatista hledá senseie, 
 // České skloňování podle počtu: 1 klub / 2-4 kluby / 5+ klubů. Bez toho v appce svítilo
 // "Prošel jsi 1 ověřených klubů".
 function _plCz(n, one, few, many){ n=Math.abs(Number(n)||0); return n===1?one:((n>=2&&n<=4)?few:many); }
+// KDE JSEM SKONČIL. Přepnutí na jiný deck (nebo obnovení stránky) dosud vrátilo člověka na
+// začátek -- kdo prošel dvě stě koučů, začínal znovu. Pozice se drží pro každý deck zvlášť.
+function _deckPosKey(){ return 'mtl_deckpos_'+((typeof _deckMode!=='undefined')?_deckMode:'coaches'); }
+function _deckPosSave(){
+  try{ if(typeof idx==='number') localStorage.setItem(_deckPosKey(), String(idx)); }catch(e){}
+}
+function _deckPosLoad(){
+  try{ const v=parseInt(localStorage.getItem(_deckPosKey()),10); return (isFinite(v)&&v>0)?v:0; }catch(e){ return 0; }
+}
+function _deckPosClear(){ try{ localStorage.removeItem(_deckPosKey()); }catch(e){} }
 function _deckActs(show){
   try{
     const a=document.querySelector('.actions'); if(a) a.style.display=show?'':'none';
@@ -7375,6 +7450,7 @@ function _deckActs(show){
   }catch(e){}
 }
 function renderCards(){
+  try{ _deckPosSave(); }catch(e){}   // pozice se ukládá při každém překreslení
   const front=$('cardFront'), back=$('cardBack'), empty=$('empty');
   if(_deckMode==='gyms'){
     const _gd = (isMultiDiscipline() && _deckDisc) ? _deckDisc : ((filtered[idx] && filtered[idx].disciplines && filtered[idx].disciplines[0]) || defaultDiscipline());
@@ -7443,7 +7519,10 @@ function renderCards(){
         _ab.disabled=true; const _t0=_ab.textContent; _ab.textContent='\u2026';
         try{ if(!await _goAbroad()){ _ab.disabled=false; _ab.textContent=_t0; } }catch(e){ _ab.disabled=false; _ab.textContent=_t0; }
       };
-      var _rb=$('deckRestartBtn'); if(_rb) _rb.onclick=function(){ idx=0; _deckExtended=false; renderCards(); };
+      var _rb=$('deckRestartBtn'); if(_rb) _rb.onclick=function(){
+        if(!confirm(EN?'Start over? You will go through everyone again from the beginning.':'Za\u010d\u00edt znovu? Projde\u0161 v\u0161echny od za\u010d\u00e1tku.')) return;
+        _deckPosClear(); idx=0; _deckExtended=false; renderCards();
+      };
       var _ob=$('deckOnlineBtn'); if(_ob) _ob.onclick=_browseOnline;
       var _ib2=$('deckInviteBtn2'); if(_ib2) _ib2.onclick=_copyReferralLink;
       var _db=$('deckDemandBtn2'); if(_db) _db.onclick=function(){ _openDemandChips(); };
@@ -7647,7 +7726,11 @@ function init(){
   renderDiscFilters();
   applyTypeFilters();
   applyDeckTerms();
-  filtered=buildFiltered(); idx=0; renderCards();
+  filtered=buildFiltered();
+  // Navázat tam, kde člověk skončil. Když se seznam mezitím zkrátil, začni od začátku.
+  const _sv=_deckPosLoad();
+  idx=(_sv>0 && _sv<filtered.length)?_sv:0;
+  renderCards();
 }
 
 // ════════════════════════════════════════
@@ -7707,6 +7790,7 @@ async function _pickAbroadCountry(){
 // kdo se stěhuje nebo jede na soustředění.
 // Počítadlo je v profilu, ne jen v prohlížeči -- jinak by stačilo otevřít anonymní okno.
 const ABROAD_MAX_PER_DAY=2;
+const HOME_MOVE_MAX_PER_DAY=1;   // změna VLASTNÍ polohy do jiné země
 function _abroadLeft(){
   try{
     const today=new Date().toISOString().slice(0,10);
@@ -7716,6 +7800,30 @@ function _abroadLeft(){
     if(d!==today) return ABROAD_MAX_PER_DAY;
     return Math.max(0, ABROAD_MAX_PER_DAY-n);
   }catch(e){ return ABROAD_MAX_PER_DAY; }
+}
+// Změna vlastní země: stejné počítadlo, jiný sloupec.
+function _homeMoveLeft(){
+  try{
+    const today=new Date().toISOString().slice(0,10);
+    let d=null,n=0;
+    if(currentUser && currentUser.move_day){ d=String(currentUser.move_day).slice(0,10); n=Number(currentUser.move_count)||0; }
+    else { try{ const raw=JSON.parse(localStorage.getItem('mtl_move')||'{}'); d=raw.d||null; n=Number(raw.n)||0; }catch(e){} }
+    if(d!==today) return HOME_MOVE_MAX_PER_DAY;
+    return Math.max(0, HOME_MOVE_MAX_PER_DAY-n);
+  }catch(e){ return HOME_MOVE_MAX_PER_DAY; }
+}
+async function _homeMoveUse(){
+  try{
+    const today=new Date().toISOString().slice(0,10);
+    let n=1;
+    const cur=(currentUser&&currentUser.move_day)?String(currentUser.move_day).slice(0,10):null;
+    if(cur===today) n=(Number(currentUser.move_count)||0)+1;
+    if(currentUser && currentUser.id){
+      currentUser.move_day=today; currentUser.move_count=n;
+      try{ await supaClient.from('profiles').update({ move_day:today, move_count:n }).eq('id',currentUser.id); }catch(e){}
+    }
+    try{ localStorage.setItem('mtl_move', JSON.stringify({ d:today, n:n })); }catch(e){}
+  }catch(e){}
 }
 async function _abroadUse(){
   try{
@@ -23973,7 +24081,19 @@ function requestGps(){
 // v paměti, do profilu se nezapisuje a pruh nahoře to hlásí, dokud se člověk nevrátí.
 // Domovská země (a tím i to, které kluby se stahují) se řídí profilem, ne tímhle.
 function _isBrowsingElsewhere(){ return !!(window._homeLoc); }
-function _setBrowseLoc(loc){
+async function _setBrowseLoc(loc){
+  // Prohlížení v CIZÍ zemi se počítá do stejného limitu jako „zobrazit další země" -- jinak
+  // by stačilo místo výběru země napsat cizí město a limit obejít.
+  const _home=(currentUser&&currentUser.country)||((window._homeLoc||userLoc||{}).country)||null;
+  const _far=!!(loc.country && _home && String(loc.country).toLowerCase()!==String(_home).toLowerCase());
+  if(_far){
+    if(_abroadLeft()<=0){
+      toast(LANG==='en'?('You have looked abroad '+ABROAD_MAX_PER_DAY+'x today. Try again tomorrow.')
+                       :('Dnes ses do zahrani\u010d\u00ed d\u00edval u\u017e '+ABROAD_MAX_PER_DAY+'\u00d7. Zkus to z\u00edtra.'));
+      return;
+    }
+    try{ await _abroadUse(); }catch(e){}
+  }
   if(!window._homeLoc && typeof userLoc!=='undefined' && userLoc) window._homeLoc=Object.assign({}, userLoc);
   userLoc=Object.assign({}, loc);
   try{ $('locBar').classList.add('show'); }catch(e){}
@@ -24002,6 +24122,10 @@ function _openLocMenu(){
   ov.innerHTML='<div style="background:#fff;border-radius:16px;max-width:360px;width:100%;padding:18px;font-family:\'DM Sans\';">'
     +btn('_lmSet',(EN?'Change my location':'Zm\u011bnit mou polohu'),(EN?'Saved to your profile.':'Ulo\u017e\u00ed se do profilu.'),true)
     +btn('_lmBrowse',(EN?'Just browse elsewhere':'Jen se pod\u00edvat jinam'),(EN?'Temporary \u2014 your location stays.':'Do\u010dasn\u011b \u2014 tvoje poloha z\u016fstane.'),false)
+    +'<div style="font-size:11px;color:var(--light);line-height:1.45;margin:2px 2px 10px;">'
+      +(EN?('Another country: '+_abroadLeft()+'/'+ABROAD_MAX_PER_DAY+' left today \u00b7 changing your country '+_homeMoveLeft()+'/'+HOME_MOVE_MAX_PER_DAY+'.')
+          :('Jin\u00e1 zem\u011b: dnes zb\u00fdv\u00e1 '+_abroadLeft()+'/'+ABROAD_MAX_PER_DAY+' \u00b7 zm\u011bna vlastn\u00ed zem\u011b '+_homeMoveLeft()+'/'+HOME_MOVE_MAX_PER_DAY+'.'))
+      +'</div>'
     +'<button id="_lmCancel" style="width:100%;padding:11px;background:none;border:none;color:var(--mid);font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Cancel':'Zru\u0161it')+'</button>'
     +'</div>';
   document.body.appendChild(ov);
@@ -24026,7 +24150,7 @@ async function confirmCity(){
   const m=Object.entries(CITY_COORDS).find(([c])=>c.toLowerCase()===val.toLowerCase());
   if(m){
     $('cityOv').classList.remove('open');
-    if(_browse){ _setBrowseLoc({lat:m[1].lat,lng:m[1].lng,city:m[0]}); return; }
+    if(_browse){ await _setBrowseLoc({lat:m[1].lat,lng:m[1].lng,city:m[0], country:((window._homeLoc&&window._homeLoc.country)||(userLoc&&userLoc.country)||null)}); return; }
     userLoc={lat:m[1].lat,lng:m[1].lng,city:m[0]};
     onLocSet();
     return;
@@ -24042,7 +24166,16 @@ async function confirmCity(){
       const ccode = data[0].address && data[0].address.country_code ? String(data[0].address.country_code).toUpperCase() : null;
       $('cityOv').classList.remove('open');
       // Prohlížení jinde NIC nepřepisuje -- ani zemi v profilu.
-      if(_browse){ _setBrowseLoc({ lat:parseFloat(data[0].lat), lng:parseFloat(data[0].lon), city:val, country:cn }); return; }
+      if(_browse){ await _setBrowseLoc({ lat:parseFloat(data[0].lat), lng:parseFloat(data[0].lon), city:val, country:cn }); return; }
+      // Přestěhování do JINÉ ZEMĚ mění, co se ti načítá, a obchází tím limit na prohlížení
+      // ciziny. Jednou denně je dost i pro toho, kdo se opravdu stěhuje.
+      const _oldC=(currentUser&&currentUser.country)||null;
+      if(cn && _oldC && String(cn).toLowerCase()!==String(_oldC).toLowerCase() && _homeMoveLeft()<=0){
+        toast(LANG==='en'?('You can change your country once a day. Use \u201eJust browse elsewhere\u201c instead.')
+                         :('Zemi si m\u016f\u017ee\u0161 zm\u011bnit jednou denn\u011b. Pou\u017eij \u201eJen se pod\u00edvat jinam\u201c.'));
+        return;
+      }
+      if(cn && _oldC && String(cn).toLowerCase()!==String(_oldC).toLowerCase()){ try{ await _homeMoveUse(); }catch(e){} }
       userLoc={ lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon), city: val, country: cn };
       if(currentUser){ currentUser.country = cn; if(ccode) currentUser.country_code = ccode; supaClient.from('profiles').update(ccode?{ country: cn, country_code: ccode }:{ country: cn }).eq('id', currentUser.id); }
       onLocSet();
@@ -25018,6 +25151,11 @@ $('btnChangeLoc').onclick=()=>_openLocMenu();
 // Search
 $('searchInp').addEventListener('input',e=>{
   searchQuery=e.target.value.trim();
+  // Hledání běží na serveru, s malou prodlevou, ať se neposílá dotaz po každém písmenu.
+  clearTimeout(_srvSearchT);
+  if(searchQuery.length>=3 && _deckMode!=='events'){
+    _srvSearchT=setTimeout(function(){ _serverSearch(searchQuery); }, 450);
+  }
   $('searchClear').classList.toggle('show', searchQuery.length>0);
   if(_deckMode==='events'){ const ev=$('eventsView'); if(ev) renderEventsAsync(ev); return; }
   init();
