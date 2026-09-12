@@ -6792,7 +6792,9 @@ function _openDemandChips(){
   var st={ disc:[], win:[], lvl:[], grp:[], want:[], why:[], note:'', commit:false,
     // Město se PTÁ, nebere se z prohlížené polohy. Kdo listuje ve Znojmě, ale bydlí v Plzni,
     // by jinak poslal poptávku za Znojmo a klub by ji dostal na špatné místo.
-    city:((typeof userLoc!=='undefined' && userLoc && userLoc.city) || (currentUser && currentUser.city) || '') };
+    // Při dočasném prohlížení jinde předvyplň DOMOVSKÉ město: poptávka se sbírá tam, kde
+    // člověk bydlí, ne kam se zrovna kouká. Přepsat si ho samozřejmě může.
+    city:((window._homeLoc && window._homeLoc.city) || (typeof userLoc!=='undefined' && userLoc && userLoc.city) || (currentUser && currentUser.city) || '') };
   var step=0;
 
   var chip=function(cls,v,label,sub){
@@ -7546,8 +7548,12 @@ function fillCard(p, c){
 
   // Location line
   let locTxt = c.loc;
-  const _fl = flagOf(c.countryCode);
-  if(_fl) locTxt += ` ${_fl}`; else if(c.country) locTxt += `, ${c.country}`;
+  // Země bývá uložená jednou jako název („Česko"), jindy jako kód („cz"). Na kartě se pak
+  // objevilo „Brno cz". Kód se převede na vlajku, název na jméno země v jazyce appky.
+  const _cc2 = c.countryCode || ((typeof c.country==='string' && /^[A-Za-z]{2}$/.test(c.country)) ? c.country : null);
+  const _fl = flagOf(_cc2);
+  if(_fl) locTxt += ` ${_fl}`;
+  else if(c.country) locTxt += `, ${(typeof _countryName==='function')?_countryName(c.country):c.country}`;
   if(c.gym && !!c.rate_inperson) locTxt += ` · ${c.gym}`;
   $(p+'Loc').textContent = locTxt;
 
@@ -7563,9 +7569,14 @@ function fillCard(p, c){
     $('frontRate').innerHTML = c.dojoSensei ? `<span style="font-size:.6em;color:var(--mid);font-weight:600;">${escapeHtml(c.dojoName||'Dojo')}</span>` : `${c.rate} <span>${L('/hod')}</span>`;
     $('frontRating').textContent = `⭐ ${c.rating} (${c.reviews})`;
     // Distance badge
+    // Vzdálenost se ukazovala jen u koučů s osobní lekcí. Jenže i u kouče, který učí online,
+    // je užitečné vidět, kde je -- a hlavně: kdo osobní lekci má, ale bydlí 30 km daleko,
+    // to musí poznat z karty, ne až z profilu.
     const db=$('frontDist');
-    if(userLoc && c.distKm!==null && !!c.rate_inperson){
+    if(userLoc && c.distKm!==null){
       db.textContent=`${c.distKm.toFixed(1)} km`; db.classList.add('show');
+    } else if(!c.rate_inperson && c.rate_online){
+      db.textContent=(LANG==='en'?'online':'online'); db.classList.add('show');
     } else { db.classList.remove('show'); }
   } else {
     $('backRate').innerHTML = c.dojoSensei ? `<span style="font-size:.6em;color:var(--mid);font-weight:600;">${escapeHtml(c.dojoName||'Dojo')}</span>` : `${c.rate} <span>${L('/hod')}</span>`;
@@ -23846,6 +23857,14 @@ function guessCityFromCoords(lat,lng){
 
 function _setLocText(){
   const lt=$('locText'); if(!lt||!userLoc||!userLoc.city) return; const EN=LANG==='en'; const c=userLoc.city;
+  // Dočasné prohlížení: jedna věta a tlačítko se změní na návrat. Žádný další prvek v pruhu.
+  const _cb=$('btnChangeLoc');
+  if(_isBrowsingElsewhere()){
+    lt.textContent=(EN?('\ud83d\udc41\ufe0f Browsing '+c+' \u00b7 your location unchanged'):('\ud83d\udc41\ufe0f Prohl\u00ed\u017e\u00ed\u0161 '+c+' \u00b7 tvoje poloha se nem\u011bn\u00ed'));
+    if(_cb) _cb.textContent=(EN?'Back \u2192':'Zp\u011bt \u2192');
+    return;
+  }
+  if(_cb) _cb.textContent=(EN?'Change \u2192':'Zm\u011bnit \u2192');
   lt.textContent = (typeof _deckMode!=='undefined' && _deckMode==='events')
     ? (EN?`📍 ${c} — events sorted by distance`:`📍 ${c} — události seřazeny dle vzdálenosti`)
     : (typeof _deckMode!=='undefined' && _deckMode==='gyms')
@@ -23864,6 +23883,9 @@ function onLocSet(){
 }
 async function persistMyLocation(){
   if(!currentUser || !userLoc) return;
+  // Pojistka: při dočasném prohlížení jinde se poloha do profilu neukládá, ať to tam nezateče
+  // jinou cestou (obnova polohy na pozadí, GPS, cokoli přibude později).
+  if(typeof _isBrowsingElsewhere==='function' && _isBrowsingElsewhere()) return;
   if(currentUser.coach_status==='approved') return; // kouč má souřadnice z přihlášky (jeho trénovací město)
   const upd = { city_lat:Math.round(userLoc.lat*100)/100, city_lng:Math.round(userLoc.lng*100)/100 };
   if(userLoc.city) upd.city = userLoc.city;
@@ -23947,6 +23969,48 @@ function requestGps(){
   );
 }
 
+// PROHLÍŽENÍ JINDE. Poloha se nepřepíše, jen se dočasně dívám jinam: userLoc se přepne
+// v paměti, do profilu se nezapisuje a pruh nahoře to hlásí, dokud se člověk nevrátí.
+// Domovská země (a tím i to, které kluby se stahují) se řídí profilem, ne tímhle.
+function _isBrowsingElsewhere(){ return !!(window._homeLoc); }
+function _setBrowseLoc(loc){
+  if(!window._homeLoc && typeof userLoc!=='undefined' && userLoc) window._homeLoc=Object.assign({}, userLoc);
+  userLoc=Object.assign({}, loc);
+  try{ $('locBar').classList.add('show'); }catch(e){}
+  _setLocText();
+  try{ if(typeof init==='function') init(); }catch(e){}
+  toast((LANG==='en'?'\ud83d\udc41\ufe0f Browsing ':'\ud83d\udc41\ufe0f Prohl\u00ed\u017e\u00ed\u0161 ')+(loc.city||''));
+}
+function _clearBrowseLoc(){
+  if(!window._homeLoc) return;
+  userLoc=window._homeLoc; window._homeLoc=null;
+  _setLocText();
+  try{ if(typeof init==='function') init(); }catch(e){}
+  toast(LANG==='en'?'\ud83d\udccd Back to your location':'\ud83d\udccd Zp\u011bt na tvou polohu');
+}
+// Jedno tlačítko, dvě možnosti -- pruh zůstává čistý.
+function _openLocMenu(){
+  if(_isBrowsingElsewhere()){ _clearBrowseLoc(); return; }
+  const EN=LANG==='en';
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;z-index:100095;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:18px;';
+  const btn=(id,t,sub,primary)=>'<button id="'+id+'" style="width:100%;text-align:left;padding:13px 14px;margin-bottom:8px;'
+    +(primary?'background:var(--dark);color:#fff;border:none;':'background:#fff;color:var(--dark);border:1.5px solid var(--border);')
+    +'border-radius:12px;cursor:pointer;font-family:inherit;">'
+    +'<div style="font-size:14px;font-weight:800;">'+t+'</div>'
+    +'<div style="font-size:11.5px;font-weight:600;opacity:.7;margin-top:2px;">'+sub+'</div></button>';
+  ov.innerHTML='<div style="background:#fff;border-radius:16px;max-width:360px;width:100%;padding:18px;font-family:\'DM Sans\';">'
+    +btn('_lmSet',(EN?'Change my location':'Zm\u011bnit mou polohu'),(EN?'Saved to your profile.':'Ulo\u017e\u00ed se do profilu.'),true)
+    +btn('_lmBrowse',(EN?'Just browse elsewhere':'Jen se pod\u00edvat jinam'),(EN?'Temporary \u2014 your location stays.':'Do\u010dasn\u011b \u2014 tvoje poloha z\u016fstane.'),false)
+    +'<button id="_lmCancel" style="width:100%;padding:11px;background:none;border:none;color:var(--mid);font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Cancel':'Zru\u0161it')+'</button>'
+    +'</div>';
+  document.body.appendChild(ov);
+  const done=()=>{ try{ ov.remove(); }catch(e){} };
+  ov.querySelector('#_lmSet').onclick=()=>{ done(); window._cityMode='set'; openCityInput(); };
+  ov.querySelector('#_lmBrowse').onclick=()=>{ done(); window._cityMode='browse'; openCityInput(); };
+  ov.querySelector('#_lmCancel').onclick=done;
+  ov.onclick=(e)=>{ if(e.target===ov) done(); };
+}
 function openCityInput(){
   $('cityInp').value='';
   $('cityOv').classList.add('open');
@@ -23958,10 +24022,12 @@ async function confirmCity(){
   if(!val){ toast(L('⚠️ Zadej město')); return; }
 
   // Nejdřív zkus předdefinovaná města (rychlé)
+  const _browse=(window._cityMode==='browse');
   const m=Object.entries(CITY_COORDS).find(([c])=>c.toLowerCase()===val.toLowerCase());
   if(m){
-    userLoc={lat:m[1].lat,lng:m[1].lng,city:m[0]};
     $('cityOv').classList.remove('open');
+    if(_browse){ _setBrowseLoc({lat:m[1].lat,lng:m[1].lng,city:m[0]}); return; }
+    userLoc={lat:m[1].lat,lng:m[1].lng,city:m[0]};
     onLocSet();
     return;
   }
@@ -23974,18 +24040,19 @@ async function confirmCity(){
     if(data && data.length){
       const cn = data[0].address && data[0].address.country || null;
       const ccode = data[0].address && data[0].address.country_code ? String(data[0].address.country_code).toUpperCase() : null;
+      $('cityOv').classList.remove('open');
+      // Prohlížení jinde NIC nepřepisuje -- ani zemi v profilu.
+      if(_browse){ _setBrowseLoc({ lat:parseFloat(data[0].lat), lng:parseFloat(data[0].lon), city:val, country:cn }); return; }
       userLoc={ lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon), city: val, country: cn };
       if(currentUser){ currentUser.country = cn; if(ccode) currentUser.country_code = ccode; supaClient.from('profiles').update(ccode?{ country: cn, country_code: ccode }:{ country: cn }).eq('id', currentUser.id); }
-      $('cityOv').classList.remove('open');
       onLocSet();
     } else {
       toast(L('⚠️ Město nenalezeno, zkus jiný název'));
     }
   } catch(e){
-    // Fallback na Prahu když API selže
-    userLoc={lat:50.0755,lng:14.4378,city:val};
-    $('cityOv').classList.remove('open');
-    onLocSet();
+    // Když geokódování selže, radši nic nenastavuj -- dosud to tiše hodilo člověka do Prahy
+    // a on si myslel, že kouká na své město.
+    toast(LANG==='en'?'\u26a0\ufe0f Could not find the city, try again':'\u26a0\ufe0f M\u011bsto se nepoda\u0159ilo naj\u00edt, zkus to znovu');
     console.error('Geocoding error:', e);
   }
 }
@@ -24946,7 +25013,7 @@ setTimeout(()=>{
 }, 0);
 
 // Location bar
-$('btnChangeLoc').onclick=()=>openCityInput();
+$('btnChangeLoc').onclick=()=>_openLocMenu();
 
 // Search
 $('searchInp').addEventListener('input',e=>{
@@ -36910,8 +36977,8 @@ if($('sTerms')) $('sTerms').onclick=openTerms;
 if($('sPrivacy')) $('sPrivacy').onclick=openPrivacy;
 const SUP_FAQ=[
   {q:['Co v MTL najdu?','What can I find in the MTL app?'], a:[
-   'Lidi, kteří tě naučí, místa, kde se trénuje, a bojové akce. Dole máš pět záložek:<br><br><b>🧑‍🏫 {R}</b> — soukromky 1:1 i online<br><b>🏛️ {V}</b> — skupinovky, permanentky, kurzy<br><b>🥊 Události</b> — akce a vstupenky<br><b>💬 Zprávy</b> — tvoje konverzace<br><b>👤 Já</b> — tvoje rezervace, doklady a statistiky<br><br>Appka je zdarma — platíš jen za trénink.',
-   'People who will teach you, places to train, and combat sports events. Five tabs at the bottom:<br><br><b>🧑‍🏫 {R}</b> — 1:1 and online<br><b>🏛️ {V}</b> — group classes, memberships, courses<br><b>🥊 Events</b> — tickets<br><b>💬 Messages</b> — your conversations<br><b>👤 Me</b> — your bookings, receipts and stats<br><br>The app is free — you only pay for training.']},
+   'Lidi, kteří tě naučí, místa, kde se trénuje, a bojové akce. Dole máš pět záložek:<br><br><b>🧑‍🏫 {R}</b> — soukromky 1:1 i online<br><b>🏛️ {V}</b> — skupinovky, permanentky, kurzy<br><b>🥊 Události</b> — akce a vstupenky<br><b>💬 Zprávy</b> — tvoje konverzace<br><b>👤 Já</b> — tvoje rezervace, doklady a statistiky<br><br>Appka je zdarma — platíš jen za trénink.<br><br><span style="color:var(--mid);font-size:12.5px;">Nabídku vidíš ve své zemi. Do jiné země se můžeš podívat dvakrát denně — vybereš si ji ze seznamu a načte se jen ta.</span>',
+   'People who will teach you, places to train, and combat sports events. Five tabs at the bottom:<br><br><b>🧑‍🏫 {R}</b> — 1:1 and online<br><b>🏛️ {V}</b> — group classes, memberships, courses<br><b>🥊 Events</b> — tickets<br><b>💬 Messages</b> — your conversations<br><b>👤 Me</b> — your bookings, receipts and stats<br><br>The app is free — you only pay for training.<br><br><span style="color:var(--mid);font-size:12.5px;">You see what is offered in your country. You can look into another country twice a day \u2014 you pick it from a list and only that one loads.</span>']},
 
   {q:['Jak si zarezervuju trénink?','How do I book?'], a:[
    'U kouče si vybereš termín z jeho diáře, u klubu lekci z rozvrhu. Zaplatíš a máš místo. Jednorázovou lekci v klubu si můžeš koupit i bez členství. Před první platbou je třeba odsouhlasit individuální podmínky klubu.',
