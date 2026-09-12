@@ -76,14 +76,27 @@ async function handler(req, res) {
       if (!sch.length) continue;
 
       const { date, dow, mins } = gymNow(gym.timezone);
-      const due = sch.filter(c => {
-        if (Number(c.day) !== dow) return false;
-        const t = String(c.time || '').split(':');
-        const h = Number(t[0]), m = Number(t[1] || 0);
-        if (isNaN(h)) return false;
-        const diff = (mins - (h * 60 + m)) / 60;
-        return diff >= 2 && diff <= 12 && remindable(c, date, h * 60 + m, gym.timezone); // lekce začala 2–12 h zpět a v rozvrhu tehdy byla
-      });
+      // JEDNA LEKCE MŮŽE MÍT VÍC TERMÍNŮ V TÝDNU (extraSlots) -- appka to tak umí zadat.
+      // Tenhle cron je dosud ignoroval a koukal jen na základní den a čas, takže na lekci
+      // ve druhém termínu připomínka nikdy nepřišla. Sloty se rozbalí stejně jako v appce.
+      const slotsOf = (c) => {
+        const base = [{ day: c.day, time: c.time }];
+        if (Array.isArray(c.extraSlots)) {
+          for (const s2 of c.extraSlots) if (s2 && s2.day != null && s2.time) base.push({ day: s2.day, time: s2.time });
+        }
+        return base;
+      };
+      const due = [];
+      for (const c of sch) {
+        for (const sl of slotsOf(c)) {
+          if (Number(sl.day) !== dow) continue;
+          const t = String(sl.time || '').split(':');
+          const h = Number(t[0]), m = Number(t[1] || 0);
+          if (isNaN(h)) continue;
+          const diff = (mins - (h * 60 + m)) / 60;
+          if (diff >= 2 && diff <= 12 && remindable(c, date, h * 60 + m, gym.timezone)) due.push({ c, time: sl.time });
+        }
+      }
       if (!due.length) continue;
 
       const att = await sbGet(`gym_attendance?gym_id=eq.${gym.id}&class_date=eq.${date}&select=class_name,class_time`);
@@ -91,17 +104,18 @@ async function handler(req, res) {
       const rem = await sbGet(`attend_reminders?gym_id=eq.${gym.id}&class_date=eq.${date}&select=class_name,class_time`);
       const remSet = new Set((rem || []).map(r => `${r.class_time}|${r.class_name || ''}`));
 
-      for (const c of due) {
-        const key = `${c.time}|${c.name || ''}`;
+      for (const d of due) {
+        const c = d.c, t0 = d.time;   // čas KONKRÉTNÍHO termínu, ne základní čas lekce
+        const key = `${t0}|${c.name || ''}`;
         if (attSet.has(key) || remSet.has(key)) continue;
         const coachId = c.coach || gym.owner_id;
         // marker (unique) → sdílený dedup s client-side; konflikt = už připomenuto
-        const mk = await sbPost('attend_reminders', { gym_id: gym.id, coach_id: coachId, class_name: c.name || null, class_date: date, class_time: c.time || null });
+        const mk = await sbPost('attend_reminders', { gym_id: gym.id, coach_id: coachId, class_name: c.name || null, class_date: date, class_time: t0 || null });
         if (!mk.ok) continue;
         await sbPost('notifications', {
           user_id: coachId, type: 'system', read: false,
-          data: JSON.stringify({ kind: 'attend_reminder', gym_id: gym.id, gym_name: gym.name || '', className: c.name || '', date, time: c.time || '', day: dow }),
-          message: `📋 Doplň docházku na proběhlou lekci ${c.name || ''} (${c.time || ''}).`,
+          data: JSON.stringify({ kind: 'attend_reminder', gym_id: gym.id, gym_name: gym.name || '', className: c.name || '', date, time: t0 || '', day: dow }),
+          message: `📋 Doplň docházku na proběhlou lekci ${c.name || ''} (${t0 || ''}).`,
         });
         created++;
       }
