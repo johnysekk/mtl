@@ -48,7 +48,7 @@ export default async function handler(req, res) {
     if (!(auth === `Bearer ${process.env.CRON_SECRET}` || req.headers['x-vercel-cron'])) return res.status(401).json({ error: 'unauthorized' });
   }
 
-  let released = 0, expired = 0, expired1h = 0, coverExpired = 0, pisExpired = 0;
+  let released = 0, expired = 0, expired1h = 0, coverExpired = 0, pisExpired = 0, nudged = 0, escalated = 0;
   try {
     // ---- Pass 1: auto-release unpaid QR drop-in reservations 30 min after reservation --------------
     const yest = new Date(Date.now() - 36 * 3600 * 1000).toISOString().slice(0, 10);
@@ -170,7 +170,63 @@ export default async function handler(req, res) {
     // housekeeping: drop stale rate-limit windows (>2h old)
     try { const _rlOld = new Date(Date.now() - 2*3600*1000).toISOString(); await sb('rate_limits?updated_at=lt.' + encodeURIComponent(_rlOld), { method: 'DELETE', prefer: 'return=minimal' }); } catch (e) {}
 
-    return res.status(200).json({ ok: true, released, expired, expired1h, coverExpired, pisExpired });
+    // ---- Pass 6: ZAPLACENO, ALE NIKDO NEPOTVRDIL --------------------------------------------
+    // Student klepl na "Zaplaceno", poskytovatel to nepotvrdil ani nezamítl. Rezervace se NERUŠÍ:
+    // peníze šly převodem přímo poskytovateli a MTL je nedrží, takže o nich nemůže rozhodnout.
+    // Po 24 h se poskytovateli připomene, po 72 h se zpraví i student a founder. Student má
+    // v appce u takové rezervace tlačítka Připomenout / Vyřešit a nová rezervace mu nic neblokuje.
+    try {
+      const H24 = new Date(Date.now() - 24 * 3600e3).toISOString();
+      const H72 = new Date(Date.now() - 72 * 3600e3).toISOString();
+      const FOUNDER = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+      const note = async (uid, kind, cs, en, extra) => {
+        if (!uid) return;
+        try {
+          await sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({
+            user_id: uid, type: 'system', read: false,
+            data: JSON.stringify(Object.assign({ kind }, extra || {}, { msg_en: en })), message: cs }) });
+        } catch (e) {}
+      };
+      const stale = [
+        { tbl: 'bookings', sel: 'id,student_id,coach_id,coach_name,training_date,training_time,amount,currency,claimed_at,claim_reminded', what: r => '1:1 ' + (r.training_date || '') },
+        { tbl: 'gym_bookings', sel: 'id,student_id,gym_id,gym_name,class_name,class_date,class_time,amount,currency,claimed_at,claim_reminded', what: r => (r.class_name || 'lekce') + ' ' + (r.class_date || '') },
+      ];
+      for (const t of stale) {
+        const rows2 = await sb(`${t.tbl}?payment_method=eq.qr&status=eq.paid_claimed&claimed_at=lt.${encodeURIComponent(H24)}&select=${t.sel}`);
+        for (const r of (rows2 || [])) {
+          const claimedAt = new Date(r.claimed_at || 0).getTime();
+          const remindedAt = r.claim_reminded ? new Date(r.claim_reminded).getTime() : 0;
+          // Komu to patří: kouč u 1:1, majitel klubu u vstupu.
+          let target = r.coach_id || null;
+          if (!target && r.gym_id) { try { const g = (await sb(`gyms?id=eq.${r.gym_id}&select=owner_id`))[0]; target = g && g.owner_id; } catch (e) {} }
+          const amount = (Number(r.amount || 0)).toString() + ' ' + String(r.currency || 'CZK').toUpperCase();
+          const what = t.what(r);
+          if (claimedAt < Date.parse(H72)) {
+            // Po třech dnech: ať o tom ví obě strany i my. Jednou -- claim_reminded se posune.
+            if (remindedAt && remindedAt > Date.parse(H24)) continue;
+            await note(target, 'qr_unconfirmed',
+              `\u26a0\ufe0f U\u017e t\u0159i dny nen\u00ed potvrzen\u00e1 platba p\u0159evodem (${what}, ${amount}). Potvr\u010f ji, nebo odm\u00edtni \u2014 student na to \u010dek\u00e1.`,
+              `\u26a0\ufe0f A bank payment has been waiting for your confirmation for three days (${what}, ${amount}). Confirm or reject it \u2014 the student is waiting.`, { tbl: t.tbl, row_id: String(r.id) });
+            await note(r.student_id, 'qr_unconfirmed',
+              `\u26a0\ufe0f Tvoje platba p\u0159evodem (${what}, ${amount}) nen\u00ed t\u0159i dny potvrzen\u00e1. V Nadch\u00e1zej\u00edc\u00edch ji m\u016f\u017ee\u0161 p\u0159ipomenout nebo uzav\u0159\u00edt s potvrzen\u00edm.`,
+              `\u26a0\ufe0f Your bank payment (${what}, ${amount}) has not been confirmed for three days. In Upcoming you can remind them or close it with a confirmation.`, { tbl: t.tbl, row_id: String(r.id) });
+            await note(FOUNDER, 'qr_unconfirmed',
+              `\u26a0\ufe0f Nepotvrzen\u00e1 platba p\u0159evodem 3+ dny: ${t.tbl} ${r.id} (${amount}).`,
+              `\u26a0\ufe0f Bank payment unconfirmed for 3+ days: ${t.tbl} ${r.id} (${amount}).`, { tbl: t.tbl, row_id: String(r.id) });
+            escalated++;
+          } else {
+            if (remindedAt) continue;   // po 24 h připomeneme jen jednou
+            await note(target, 'qr_unconfirmed',
+              `\u23f3 \u010cek\u00e1 na potvrzen\u00ed platba p\u0159evodem (${what}, ${amount}). Potvr\u010f ji, nebo odm\u00edtni v Recepci.`,
+              `\u23f3 A bank payment is waiting for your confirmation (${what}, ${amount}). Confirm or reject it in Reception.`, { tbl: t.tbl, row_id: String(r.id) });
+            nudged++;
+          }
+          try { await sb(`${t.tbl}?id=eq.${r.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ claim_reminded: new Date().toISOString() }) }); } catch (e) {}
+        }
+      }
+    } catch (e) { console.error('release-cron pass6', e.message); }
+
+    return res.status(200).json({ ok: true, released, expired, expired1h, coverExpired, pisExpired, nudged, escalated });
   } catch (e) {
     return res.status(500).json({ error: e.message, released, expired, expired1h, coverExpired, pisExpired });
   }
