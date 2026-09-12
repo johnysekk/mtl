@@ -14771,7 +14771,30 @@ function cohScheduleSummary(sch){
 // A recurring class can run on several {day,time} SLOTS (economical: one definition, no duplicate
 // rows). Legacy classes have a single c.day + c.time and NO c.slots -> normalise to one slot so all
 // occurrence/capacity/reminder logic can just iterate _classSlots(c).
-function _classSlots(c){ if(!c) return [{day:0,time:'',dur:60}]; var _cd=Number(c.dur)||60; var base=[{ day:c.day, time:c.time, dur:_cd }]; if(Array.isArray(c.extraSlots)) base=base.concat(c.extraSlots.filter(function(s){return s && s.day!=null && s.time;}).map(function(s){ return { day:s.day, time:s.time, dur:(s.dur!=null?Number(s.dur):_cd) }; })); return base; }
+// TERMÍNY LEKCE. Nový tvar je pole `slots` -- všechny termíny si jsou rovné, žádný „hlavní".
+// Starý tvar (day/time/dur + extraSlots) se pořád čte, aby fungovaly kluby, které ještě nebyly
+// uložené, a serverové crony. Při uložení se zapisuje obojí (viz _slotsToLegacy).
+function _slotsOf(c){
+  if(!c) return [];
+  if(Array.isArray(c.slots)){
+    return c.slots.filter(function(s){ return s && s.day!=null && s.time; })
+      .map(function(s){ return { day:Number(s.day), time:s.time, dur:(s.dur!=null?Number(s.dur):(Number(c.dur)||60)) }; });
+  }
+  return null;   // starý tvar -> vyřídí _classSlots níž
+}
+// Zrcadlení do starého tvaru, aby starší čtenáři (crony, neaktualizovaná appka) viděli totéž.
+function _slotsToLegacy(c){
+  const sl=_slotsOf(c);
+  if(!sl || !sl.length) return c;
+  const s0=sl[0];
+  c.day=s0.day; c.time=s0.time; c.dur=s0.dur;
+  const rest=sl.slice(1);
+  if(rest.length) c.extraSlots=rest.map(function(x){ return { day:x.day, time:x.time, dur:x.dur }; });
+  else delete c.extraSlots;
+  return c;
+}
+function _classSlots(c){ if(!c) return [{day:0,time:'',dur:60}];
+  const _ns=_slotsOf(c); if(_ns) return _ns.length?_ns:[]; var _cd=Number(c.dur)||60; var base=[{ day:c.day, time:c.time, dur:_cd }]; if(Array.isArray(c.extraSlots)) base=base.concat(c.extraSlots.filter(function(s){return s && s.day!=null && s.time;}).map(function(s){ return { day:s.day, time:s.time, dur:(s.dur!=null?Number(s.dur):_cd) }; })); return base; }
 function upcomingClasses(schedule, days, backDays){
   days = days||7; backDays = backDays||0; const out=[]; const now=new Date();
   for(let d=-backDays; d<days; d++){
@@ -22413,9 +22436,31 @@ async function saveScheduleOnly(_onlyIdx){
       return;
     }
   }
+  // KAŽDÁ LEKCE MUSÍ MÍT ASPOŇ JEDEN TERMÍN (den + čas). Bez toho nejde uložit -- jinak by
+  // v rozvrhu ležela lekce, kterou nikdo neuvidí a která mate při každé další úpravě.
+  {
+    const _t3=_rcToday();
+    const _noSlot=_gymSchedule.findIndex(function(c){ return c && !c.once && !(c.until && c.until<_t3) && !_classSlots(c).length; });
+    if(_noSlot>=0){
+      const _cl=_gymSchedule[_noSlot]||{};
+      toast(LANG==='en' ? `\u26a0\ufe0f Pick a day and time for \u201e${(_cl.name||'')}\u201c`
+                        : `\u26a0\ufe0f Vyber den a \u010das u lekce \u201e${(_cl.name||'')}\u201c`);
+      try{ window._rcOpen=true; window._rcOpenLesson=_noSlot; renderScheduleEditor(); }catch(e){}
+      return;
+    }
+  }
   // POJISTKA PŘED ULOŽENÍM: dva termíny téže lekce v jednom dni se do databáze nedostanou.
   try{ const _rm=_dedupeAllSlots(); if(_rm) console.log('[rozvrh] slouceno duplicitnich terminu:', _rm); }catch(e){}
-  const sched = JSON.stringify(_gymSchedule.map(c=>({ ...c, name: (c.name&&String(c.name).trim()) ? c.name.trim() : levelLabel(c.level||'all') })));
+  const sched = JSON.stringify(_gymSchedule.map(function(c){
+    // Uloží se rovnocenné termíny (`slots`) a zároveň starý tvar (day/time/extraSlots),
+    // aby serverové crony a neaktualizované appky viděly totéž.
+    const _out=Object.assign({}, c, { name: (c.name&&String(c.name).trim()) ? c.name.trim() : levelLabel(c.level||'all') });
+    if(!c.once){
+      const _sl=_classSlots(c);
+      if(_sl.length){ _out.slots=_sl.map(function(x){ return { day:Number(x.day), time:x.time, dur:Number(x.dur)||60 }; }); _slotsToLegacy(_out); }
+    }
+    return _out;
+  }));
   try{
     const { error } = await (async function(){
     const _g=_schedGym();
@@ -22512,22 +22557,18 @@ function _dedupeAllSlots(){
 }
 function _rcChip(i, d){
   const c=_gymSchedule[i]; if(!c) return; d=Number(d);
-  const act=_classSlots(c).map(function(s){ return Number(s.day); });
-  if(act.indexOf(d)>=0){
-    if(act.length<=1) return;                 // keep at least one day
-    if(Number(c.day)===d){                    // removing the PRIMARY day -> promote first extra
-      const ex=(c.extraSlots||[])[0]; if(!ex) return;
-      c.day=ex.day; c.time=ex.time; if(ex.dur!=null) c.dur=ex.dur; c.extraSlots.shift();
-    } else {
-      c.extraSlots=(c.extraSlots||[]).filter(function(s){ return Number(s.day)!==d; });
-    }
-    if(Array.isArray(c.extraSlots) && !c.extraSlots.length) delete c.extraSlots;
+  // ROVNOCENNÉ TERMÍNY: pracuje se s polem `slots`, žádný z nich není „hlavní". Starý tvar
+  // (day/time/extraSlots) se sem převede při prvním doteku a při uložení se zase zrcadlí zpět.
+  if(!Array.isArray(c.slots)) c.slots=_classSlots(c).map(function(s){ return { day:Number(s.day), time:s.time, dur:Number(s.dur)||60 }; });
+  const at=c.slots.findIndex(function(s){ return Number(s.day)===d; });
+  if(at>=0){
+    c.slots.splice(at,1);              // odebrat den; lekce může zůstat i bez termínu, uložit ji pak nejde
   } else {
-    if(!Array.isArray(c.extraSlots)) c.extraSlots=[];
-    // Poslední pojistka: nikdy nepřidat den, který lekce už má. (Sem se to nedostane, protože
-    // se to kontroluje výš, ale kdyby se funkce zavolala odjinud, duplicita nevznikne.)
-    if(_classSlots(c).some(function(s2){ return Number(s2.day)===d; })) return;
-    c.extraSlots.push({ day:d, time:(c.time||'18:00'), dur:(Number(c.dur)||60) });   // inherit primary time/dur
+    // Nový termín zdědí čas prvního existujícího; když žádný není, zůstane prázdný a musí se vyplnit.
+    const _t=(c.slots[0] && c.slots[0].time) || '';
+    const _d=(c.slots[0] && c.slots[0].dur) || Number(c.dur) || 60;
+    c.slots.push({ day:d, time:_t, dur:_d });
+    c.slots.sort(function(a,b){ return (a.day===0?7:a.day)-(b.day===0?7:b.day); });
   }
   window._rcOpen=true;
   if(typeof renderScheduleEditor==='function') renderScheduleEditor();
@@ -22587,17 +22628,28 @@ function _rcApplyPending(){
   keys.forEach(function(k){
     const i=+k; const c=_gymSchedule[i]; if(!c) return;
     const p=pend[k]||{};
-    const nt=(p.time!=null && p.time!=='')?p.time:(c.time||'');
+    // Termíny jsou si rovné: rozpracované časy přijdou jako {index: '18:00'}.
+    const cur=_classSlots(c).map(function(s){ return { day:Number(s.day), time:s.time, dur:Number(s.dur)||60 }; });
+    const next=cur.map(function(s,si){
+      const v=(p.slots && p.slots[si]!=null && p.slots[si]!=='') ? p.slots[si] : s.time;
+      return { day:s.day, time:v, dur:s.dur };
+    });
     const nn=(p.name!=null)?p.name:(c.name||'');
-    if(nt===(c.time||'') && nn===(c.name||'')) return;
+    const timesChanged = next.some(function(s,si){ return String(s.time||'')!==String(cur[si] && cur[si].time || ''); });
+    if(!timesChanged && nn===(c.name||'')) return;
     changed++;
-    if(!c.since || c.since>=today){ c.time=nt; c.name=nn; return; }
-    const ranToday=_classSlots(c).some(function(s){ return Number(s.day)===now.getDay() && String(s.time||'')<=hh; });
+    // Lekce, která ještě neproběhla, se prostě přepíše -- není co archivovat.
+    if(!c.since || c.since>=today){ c.slots=next; _slotsToLegacy(c); c.name=nn; return; }
+    // Proběhlá lekce: stará verze se uzavře, nová začíná od dalšího dne. Minulost se nepřepisuje,
+    // protože docházka a zrušené lekce se párují přes datum, čas a název.
+    const ranToday=cur.some(function(s){ return Number(s.day)===now.getDay() && String(s.time||'')<=hh; });
     const endD=new Date(now); endD.setDate(endD.getDate()-(ranToday?0:1));
     const startD=new Date(now); startD.setDate(startD.getDate()+(ranToday?1:0));
     let copy; try{ copy=JSON.parse(JSON.stringify(c)); }catch(e){ copy=Object.assign({},c); }
-    copy.time=nt; copy.name=nn; copy.since=_rcYmd(startD); delete copy.until; copy.created_at=new Date().toISOString();
+    copy.slots=next; _slotsToLegacy(copy);
+    copy.name=nn; copy.since=_rcYmd(startD); delete copy.until; copy.created_at=new Date().toISOString();
     c.until=_rcYmd(endD);
+    _slotsToLegacy(c);   // i uzavřená verze musí mít starý tvar, čtou ho crony
     _gymSchedule.push(copy);
   });
   return changed;
@@ -22660,9 +22712,11 @@ function _recurBlockHtml(days){
     if(!c.coachOwned){ var _lead=classLeadSelectHtml('rcLead', i, c.leader||c.coach); var _pay=payeeSelectHtml('rcCoach', i, c.coach);
       body+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;"><div style="flex:1 1 45%;min-width:150px;">'+_lead+'</div>'+(_pay?('<div style="flex:1 1 45%;min-width:150px;">'+_pay+'</div>'):'')+'</div>'; }
         // Days as toggle chips (replace the old Day dropdown + 'More sessions' list) + a compact
-    // per-day time list. Reuses rcTime/rcEnd for the PRIMARY slot (keeps time versioning) and
-    // rcXTime/rcXEnd for the extra slots; _rcChip adds/removes a day.
-    var _slots=_classSlots(c).map(function(s,k){ return { day:Number(s.day), time:s.time, dur:(s.dur!=null?Number(s.dur):(Number(c.dur)||60)), primary:(k===0), xj:(k-1) }; });
+    // per-day time list. Vsechny terminy jsou si rovne (rcSlotTime/rcSlotEnd + data-si);
+    // _rcChip pridava a odebira den.
+    // Termíny jsou si rovné; každý řádek se adresuje svým pořadím (data-si).
+    var _pv2=function(ii, si, def){ try{ var p=(window._rcPending||{})[ii]; if(p && p.slots && p.slots[si]!=null && p.slots[si]!=='') return p.slots[si]; }catch(e){} return def; };
+    var _slots=_classSlots(c).map(function(s,k){ return { day:Number(s.day), time:s.time, dur:(s.dur!=null?Number(s.dur):(Number(c.dur)||60)), si:k }; });
     var _actD=_slots.map(function(s){ return s.day; });
     body+='<div style="margin-top:8px;"><div style="'+_lab+'">'+(EN?'Days':'Dny v t\u00fddnu')+'</div>';
     body+='<div style="display:flex;gap:6px;flex-wrap:wrap;">';
@@ -22674,8 +22728,8 @@ function _recurBlockHtml(days){
     _slots.sort(function(a2,b2){ return (_ord[a2.day]||0)-(_ord[b2.day]||0); });
     body+='<div style="margin-top:8px;border:1px solid var(--border);border-radius:10px;overflow:hidden;">';
     _slots.forEach(function(sl,idx){ var _endV=_classEnd(sl.time, sl.dur);
-      var _sc=sl.primary?'rcTime':'rcXTime', _ec=sl.primary?'rcEnd':'rcXEnd', _dj=sl.primary?'':(' data-j="'+sl.xj+'"');
-      var _stV=sl.primary?escapeHtml(String(_pv(i,'time',c.time||''))):escapeHtml(String(sl.time||''));
+      var _sc='rcSlotTime', _ec='rcSlotEnd', _dj=' data-si="'+sl.si+'"';
+      var _stV=escapeHtml(String(_pv2(i, sl.si, sl.time||'')));
       body+='<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;'+(idx<_slots.length-1?'border-bottom:1px solid var(--border);':'')+'">'
         +'<span style="font-size:13px;font-weight:700;width:26px;flex-shrink:0;">'+escapeHtml(String(days[sl.day]||''))+'</span>'
         +'<input class="'+_sc+'" data-i="'+i+'"'+_dj+' type="time" value="'+_stV+'" style="height:32px;width:82px;text-align:center;padding:4px;border:1px solid var(--border);border-radius:8px;font-family:inherit;">'
@@ -22901,21 +22955,6 @@ function renderScheduleEditor(){
   box.innerHTML=_recurBlockHtml(days)+html;
   if($('rcHead')) $('rcHead').onclick=()=>{ window._rcOpen=!window._rcOpen; renderScheduleEditor(); };
   box.querySelectorAll('.rcCap').forEach(el=>el.oninput=()=>{ const v=parseInt(el.value,10); _gymSchedule[+el.dataset.i].cap=(v>0?v:null); el.style.borderColor='var(--border)'; });
-  box.querySelectorAll('.rcEnd').forEach(el=>el.onchange=()=>{ const i=+el.dataset.i; const _st=((document.querySelector('.rcTime[data-i="'+i+'"]')||{}).value)||_gymSchedule[i].time||'18:00'; const d=_endToDur(_st, el.value); if(d>0) _gymSchedule[i].dur=d; });
-  box.querySelectorAll('.rcLevel').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; it.level=el.value; it.kids=(el.value==='kids'); renderScheduleEditor(); });
-  box.querySelectorAll('.rcDisc').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].disc=el.value||null; });
-  box.querySelectorAll('.rcLead').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; const oid=(_schedGym()&&_schedGym().owner_id)||(currentUser&&currentUser.id); it.leader=el.value||oid;
-    if(it.leader===oid){ it.leaderName=(currentUser&&currentUser.name)||(LANG==='en'?'Owner':'Majitel'); } else { const cc=_gymTeamCoaches.find(x=>x.id===it.leader); it.leaderName=cc?cc.name:null; } renderScheduleEditor(); });
-  box.querySelectorAll('.rcCoach').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; it.coach=el.value||null; const cc=_gymTeamCoaches.find(x=>x.id===el.value); it.coachName=cc?cc.name:null; });
-  box.querySelectorAll('.rcChip').forEach(el=>el.onclick=()=>_rcChip(+el.dataset.i, +el.dataset.d));
-  // Single-open accordion for the recurring lessons; remember the open one across re-renders.
-  box.querySelectorAll('.rcDet').forEach(function(d){ d.addEventListener('toggle', function(){
-    if(this.open){ window._rcOpenLesson=+this.dataset.i; box.querySelectorAll('.rcDet').forEach(function(o){ if(o!==d) o.open=false; }); }
-    else if(+this.dataset.i===window._rcOpenLesson){ window._rcOpenLesson=null; }
-  }); });
-  box.querySelectorAll('.rcRowDel').forEach(el=>el.onclick=()=>_rcChip(+el.dataset.i, +el.dataset.d));
-  box.querySelectorAll('.rcXTime').forEach(el=>el.onchange=()=>{ const i=+el.dataset.i, j=+el.dataset.j; const it=_gymSchedule[i]; if(it&&it.extraSlots&&it.extraSlots[j]){ it.extraSlots[j].time=el.value; const _e=document.querySelector('.rcXEnd[data-i="'+i+'"][data-j="'+j+'"]'); if(_e){ const _d=(it.extraSlots[j].dur!=null?it.extraSlots[j].dur:(Number(it.dur)||60)); _e.value=_classEnd(el.value, _d); } } });
-  box.querySelectorAll('.rcXEnd').forEach(el=>el.onchange=()=>{ const i=+el.dataset.i, j=+el.dataset.j; const it=_gymSchedule[i]; if(it&&it.extraSlots&&it.extraSlots[j]){ const _st=((document.querySelector('.rcXTime[data-i="'+i+'"][data-j="'+j+'"]')||{}).value)||it.extraSlots[j].time||'18:00'; const _d=_endToDur(_st, el.value); if(_d>0) it.extraSlots[j].dur=_d; } });
   box.querySelectorAll('.rcAgeMin').forEach(el=>el.oninput=()=>{ _gymSchedule[+el.dataset.i].ageMin=el.value===''?null:(parseInt(el.value)||0); });
   box.querySelectorAll('.rcAgeMax').forEach(el=>el.oninput=()=>{ _gymSchedule[+el.dataset.i].ageMax=el.value===''?null:(parseInt(el.value)||0); });
   box.querySelectorAll('.rcParentReq').forEach(el=>el.onchange=()=>{ _gymSchedule[+el.dataset.i].parentReq=el.checked; });
@@ -22928,7 +22967,23 @@ function renderScheduleEditor(){
   box.querySelectorAll('.cohAtt').forEach(el=>el.onclick=()=>{ openClassAttendance({ date:el.dataset.date, time:el.dataset.time, name:el.dataset.name, disc:el.dataset.disc||null, cohortId:el.dataset.coh||null, dur:(parseInt(el.dataset.dur,10)||null), level:'all', coach:el.dataset.coach||null, coachName:el.dataset.coachname||null }); });
   box.querySelectorAll('.schToRecur').forEach(el=>el.onclick=()=>{ const i=+el.dataset.i; _schedEdit=-1; window._rcOpen=true; window._rcOpenLesson=i; renderScheduleEditor();
     setTimeout(function(){ const t=document.querySelector('.rcName[data-i="'+i+'"]'); if(t){ try{ t.focus(); t.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} } },60); });
-  box.querySelectorAll('.rcTime').forEach(el=>el.onchange=()=>{ const i=+el.dataset.i; window._rcPending=window._rcPending||{}; (window._rcPending[i]=window._rcPending[i]||{}).time=el.value; var _e=document.querySelector('.rcEnd[data-i="'+i+'"]'); if(_e){ _e.value=_classEnd(el.value, Number(_gymSchedule[i].dur)||60); } });
+  // Změna času termínu. Ukládá se jako rozpracovaná (pending) a použije se až při uložení --
+  // stejně jako dřív, aby fungovalo verzování při změně času už proběhlé lekce.
+  box.querySelectorAll('.rcSlotTime').forEach(el=>el.onchange=()=>{
+    const i=+el.dataset.i, si=+el.dataset.si;
+    window._rcPending=window._rcPending||{};
+    const p=(window._rcPending[i]=window._rcPending[i]||{});
+    (p.slots=p.slots||{})[si]=el.value;
+    const _cur=_classSlots(_gymSchedule[i])[si]||{};
+    const _e=document.querySelector('.rcSlotEnd[data-i="'+i+'"][data-si="'+si+'"]');
+    if(_e) _e.value=_classEnd(el.value, Number(_cur.dur)||Number(_gymSchedule[i].dur)||60);
+  });
+  box.querySelectorAll('.rcSlotEnd').forEach(el=>el.onchange=()=>{
+    const i=+el.dataset.i, si=+el.dataset.si; const it=_gymSchedule[i]; if(!it) return;
+    if(!Array.isArray(it.slots)) it.slots=_classSlots(it).map(function(s){ return { day:Number(s.day), time:s.time, dur:Number(s.dur)||60 }; });
+    const _st=((document.querySelector('.rcSlotTime[data-i="'+i+'"][data-si="'+si+'"]')||{}).value)||(it.slots[si]&&it.slots[si].time)||'18:00';
+    const d=_endToDur(_st, el.value); if(d>0 && it.slots[si]) it.slots[si].dur=d;
+  });
   box.querySelectorAll('.rcName').forEach(el=>el.oninput=()=>{ const i=+el.dataset.i; window._rcPending=window._rcPending||{}; (window._rcPending[i]=window._rcPending[i]||{}).name=el.value; });
   if($('rcSave')) $('rcSave').onclick=()=>{
     const split=_rcApplyPending();
@@ -22943,7 +22998,11 @@ function renderScheduleEditor(){
   if($('schPrev')) $('schPrev').onclick=()=>{ _schedWeek--; renderScheduleEditor(); };
   if($('schNext')) $('schNext').onclick=()=>{ _schedWeek++; renderScheduleEditor(); };
   box.querySelectorAll('.schDayCell').forEach(el=>el.onclick=()=>{ _schedSelDow=+el.dataset.dow; _schedEdit=-1; renderScheduleEditor(); });
-  if($('schAddSel')) $('schAddSel').onclick=()=>{ _gymSchedule.push({day:_schedSelDow, time:'18:00', name:'', level:'', dur:60, disc:(isMultiDiscipline()?defaultDiscipline():null), since:_rcToday(), created_at:new Date().toISOString()});
+  if($('schAddSel')) $('schAddSel').onclick=()=>{
+    // ŽÁDNÝ PŘEDVOLENÝ DEN ANI ČAS. Dřív se nová lekce založila rovnou na vybraný den v 18:00
+    // a kdo si toho nevšiml, měl v rozvrhu lekci, kterou nikdy nezadal. Termíny se vyplní
+    // v detailu a bez aspoň jednoho se rozvrh neuloží.
+    _gymSchedule.push({slots:[], name:'', level:'', dur:60, disc:(isMultiDiscipline()?defaultDiscipline():null), since:_rcToday(), created_at:new Date().toISOString()});
     // creating a weekly class is a TEMPLATE action -> take the owner straight to it, where there is
     // no past-lock and every field lives
     const _ni=_gymSchedule.length-1; _schedEdit=-1; window._rcOpen=true; window._rcOpenLesson=_ni; renderScheduleEditor();
@@ -23111,9 +23170,31 @@ async function saveGymManage(){
       return;
     }
   }
+  // KAŽDÁ LEKCE MUSÍ MÍT ASPOŇ JEDEN TERMÍN (den + čas). Bez toho nejde uložit -- jinak by
+  // v rozvrhu ležela lekce, kterou nikdo neuvidí a která mate při každé další úpravě.
+  {
+    const _t3=_rcToday();
+    const _noSlot=_gymSchedule.findIndex(function(c){ return c && !c.once && !(c.until && c.until<_t3) && !_classSlots(c).length; });
+    if(_noSlot>=0){
+      const _cl=_gymSchedule[_noSlot]||{};
+      toast(LANG==='en' ? `\u26a0\ufe0f Pick a day and time for \u201e${(_cl.name||'')}\u201c`
+                        : `\u26a0\ufe0f Vyber den a \u010das u lekce \u201e${(_cl.name||'')}\u201c`);
+      try{ window._rcOpen=true; window._rcOpenLesson=_noSlot; renderScheduleEditor(); }catch(e){}
+      return;
+    }
+  }
   // POJISTKA PŘED ULOŽENÍM: dva termíny téže lekce v jednom dni se do databáze nedostanou.
   try{ const _rm=_dedupeAllSlots(); if(_rm) console.log('[rozvrh] slouceno duplicitnich terminu:', _rm); }catch(e){}
-  const sched = JSON.stringify(_gymSchedule.map(c=>({ ...c, name: (c.name&&String(c.name).trim()) ? c.name.trim() : levelLabel(c.level||'all') })));
+  const sched = JSON.stringify(_gymSchedule.map(function(c){
+    // Uloží se rovnocenné termíny (`slots`) a zároveň starý tvar (day/time/extraSlots),
+    // aby serverové crony a neaktualizované appky viděly totéž.
+    const _out=Object.assign({}, c, { name: (c.name&&String(c.name).trim()) ? c.name.trim() : levelLabel(c.level||'all') });
+    if(!c.once){
+      const _sl=_classSlots(c);
+      if(_sl.length){ _out.slots=_sl.map(function(x){ return { day:Number(x.day), time:x.time, dur:Number(x.dur)||60 }; }); _slotsToLegacy(_out); }
+    }
+    return _out;
+  }));
   let _curSel = ($('mgCurrency')&&$('mgCurrency').value) || _myGymData.currency || 'CZK';
   // CURRENCY LOCK: once a club has taken ANY payment, its currency is fixed -- changing it would break
   // reconciliation, doklady and history. Only checked when a change is actually attempted (no latency otherwise).
