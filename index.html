@@ -6109,6 +6109,27 @@ async function _loadBlockedBy(){
   }catch(e){ window._blockedByCoaches=window._blockedByCoaches||new Set(); window._blockedByGyms=window._blockedByGyms||new Set(); }
 }
 
+// Online kouči napříč zeměmi. Načte se jednou za relaci a přimíchá k tomu, co už je v decku;
+// existující záznam se nepřepisuje, aby se nerozbily vzdálenosti u domácích koučů.
+let _onlineLoaded=false;
+async function _ensureOnlineCoaches(){
+  if(_onlineLoaded) return;
+  try{
+    const { data, error }=await supaClient.rpc('online_coaches', { p_limit:50, p_offset:0 });
+    if(error) throw error;
+    const have=new Set((COACHES||[]).map(function(c){ return String(c.profileId||c.id); }));
+    const add=(data||[]).filter(function(r){ return !have.has(String(r.id)); }).map(function(r){
+      return _mapCoachRow({
+        id:r.id, name:r.name, city:r.city, country:r.country, country_code:r.country_code,
+        photo_url:r.photo, rate_online:r.rate, currency:r.currency, currency_online:r.currency,
+        rating:r.rating, reviews:r.reviews, languages:r.langs,
+        coach_status:'approved', city_lat:null, city_lng:null,
+      });
+    });
+    if(add.length) COACHES=COACHES.concat(add);
+    _onlineLoaded=true;
+  }catch(e){ console.log('[online]', e&&e.message); }
+}
 async function loadCoaches() {
   try{ await _loadBlockedBy(); }catch(e){}
   await loadFounderConfig();
@@ -6814,6 +6835,19 @@ async function _reportGymDemand(discCsv, silent, commit, form){
 
     var _discs=(discCsv||'').split(',').map(function(x){return x.trim();}).filter(Boolean);
     var _hasForm = !!(form && (form.windows || form.levels || form.reasons || form.note || form.want));
+    // LIMIT NA ODESLÁNÍ. Bez něj mohl jeden člověk poslat padesát poptávek na padesát měst
+    // a přehled poptávky by ukazoval poptávku, která neexistuje. Tři za den stačí i tomu,
+    // kdo hledá pro sebe, pro dítě a v místě, kam se stěhuje. Rozhoduje server.
+    if(_hasForm){
+      var _ok=true;
+      try{ _ok=await _quotaUse('demand'); }catch(e){}
+      if(!_ok){
+        if(!silent) toast(LANG==='en'
+          ? 'You have sent 3 requests today. Try again tomorrow.'
+          : 'Dnes jsi poslal 3 popt\u00e1vky. Zkus to z\u00edtra.');
+        return;
+      }
+    }
     if(_hasForm && _discs.length){
       // One write for the whole form, mirrored onto every discipline the person is looking for.
       try{ supaClient.rpc('submit_demand_form', { p_discs:_discs, p_windows:form.windows||null,
@@ -7436,6 +7470,10 @@ function _plCz(n, one, few, many){ n=Math.abs(Number(n)||0); return n===1?one:((
 // KDE JSEM SKONČIL. Přepnutí na jiný deck (nebo obnovení stránky) dosud vrátilo člověka na
 // začátek -- kdo prošel dvě stě koučů, začínal znovu. Pozice se drží pro každý deck zvlášť.
 function _deckPosKey(){ return 'mtl_deckpos_'+((typeof _deckMode!=='undefined')?_deckMode:'coaches'); }
+// Události mají vlastní počitadlo (window._evIdx), takže potřebují vlastní ukládání.
+function _evPosSave(){ try{ if(window._evIdx!=null) localStorage.setItem('mtl_deckpos_events', String(window._evIdx)); }catch(e){} }
+function _evPosLoad(){ try{ const v=parseInt(localStorage.getItem('mtl_deckpos_events'),10); return (isFinite(v)&&v>0)?v:0; }catch(e){ return 0; } }
+function _evPosClear(){ try{ localStorage.removeItem('mtl_deckpos_events'); }catch(e){} }
 function _deckPosSave(){
   try{ if(typeof idx==='number') localStorage.setItem(_deckPosKey(), String(idx)); }catch(e){}
 }
@@ -7791,53 +7829,55 @@ async function _pickAbroadCountry(){
 // Počítadlo je v profilu, ne jen v prohlížeči -- jinak by stačilo otevřít anonymní okno.
 const ABROAD_MAX_PER_DAY=2;
 const HOME_MOVE_MAX_PER_DAY=1;   // změna VLASTNÍ polohy do jiné země
+// Jen pro zobrazení. O tom, jestli se smí, rozhoduje server při čerpání.
 function _abroadLeft(){
+  if(currentUser && currentUser._abroadLeft!=null) return Number(currentUser._abroadLeft);
   try{
     const today=new Date().toISOString().slice(0,10);
     let d=null, n=0;
     if(currentUser && currentUser.abroad_day){ d=String(currentUser.abroad_day).slice(0,10); n=Number(currentUser.abroad_count)||0; }
-    else { try{ const raw=JSON.parse(localStorage.getItem('mtl_abroad')||'{}'); d=raw.d||null; n=Number(raw.n)||0; }catch(e){} }
     if(d!==today) return ABROAD_MAX_PER_DAY;
     return Math.max(0, ABROAD_MAX_PER_DAY-n);
   }catch(e){ return ABROAD_MAX_PER_DAY; }
 }
 // Změna vlastní země: stejné počítadlo, jiný sloupec.
 function _homeMoveLeft(){
+  if(currentUser && currentUser._moveLeft!=null) return Number(currentUser._moveLeft);
   try{
     const today=new Date().toISOString().slice(0,10);
     let d=null,n=0;
     if(currentUser && currentUser.move_day){ d=String(currentUser.move_day).slice(0,10); n=Number(currentUser.move_count)||0; }
-    else { try{ const raw=JSON.parse(localStorage.getItem('mtl_move')||'{}'); d=raw.d||null; n=Number(raw.n)||0; }catch(e){} }
     if(d!==today) return HOME_MOVE_MAX_PER_DAY;
     return Math.max(0, HOME_MOVE_MAX_PER_DAY-n);
   }catch(e){ return HOME_MOVE_MAX_PER_DAY; }
 }
-async function _homeMoveUse(){
+async function _homeMoveUse(){ return await _quotaUse('move'); }
+// ČERPÁNÍ ROZHODUJE SERVER. Klient si počítadlo nepřepíše -- do těch sloupců zapisuje jen
+// funkce use_quota a hlídá to trigger v databázi. Tady se jen zeptáme a řídíme se odpovědí.
+// Vrací true, když se smí pokračovat.
+async function _quotaUse(kind){
   try{
-    const today=new Date().toISOString().slice(0,10);
-    let n=1;
-    const cur=(currentUser&&currentUser.move_day)?String(currentUser.move_day).slice(0,10):null;
-    if(cur===today) n=(Number(currentUser.move_count)||0)+1;
-    if(currentUser && currentUser.id){
-      currentUser.move_day=today; currentUser.move_count=n;
-      try{ await supaClient.from('profiles').update({ move_day:today, move_count:n }).eq('id',currentUser.id); }catch(e){}
-    }
-    try{ localStorage.setItem('mtl_move', JSON.stringify({ d:today, n:n })); }catch(e){}
+    const { data, error }=await supaClient.rpc('use_quota', { p_kind:kind });
+    if(error) throw error;
+    const r=(Array.isArray(data)?data[0]:data)||{};
+    // Pamatuj si zbytek pro zobrazení; skutečnou pravdu má vždycky server.
+    if(currentUser){ if(kind==='move') currentUser._moveLeft=r.remaining; else currentUser._abroadLeft=r.remaining; }
+    return !!r.allowed;
+  }catch(e){
+    // Když funkce ještě není nasazená, appka nesmí zamrznout -- pustí dál a limit
+    // pohlídá prohlížeč jako dosud.
+    console.log('[quota]', e&&e.message);
+    return true;
+  }
+}
+async function _quotaRefresh(){
+  try{
+    const { data }=await supaClient.rpc('quota_left');
+    const r=(Array.isArray(data)?data[0]:data)||{};
+    if(currentUser){ currentUser._abroadLeft=r.abroad_left; currentUser._moveLeft=r.move_left; }
   }catch(e){}
 }
-async function _abroadUse(){
-  try{
-    const today=new Date().toISOString().slice(0,10);
-    let n=1;
-    const cur=(currentUser&&currentUser.abroad_day)?String(currentUser.abroad_day).slice(0,10):null;
-    if(cur===today) n=(Number(currentUser.abroad_count)||0)+1;
-    if(currentUser && currentUser.id){
-      currentUser.abroad_day=today; currentUser.abroad_count=n;
-      try{ await supaClient.from('profiles').update({ abroad_day:today, abroad_count:n }).eq('id',currentUser.id); }catch(e){}
-    }
-    try{ localStorage.setItem('mtl_abroad', JSON.stringify({ d:today, n:n })); }catch(e){}
-  }catch(e){}
-}
+async function _abroadUse(){ return await _quotaUse('abroad'); }
 // Zpátky do vlastní země. Bez tohohle se člověk po přepnutí na jinou zemi nedostal zpět --
 // „Všechny země" jen zrušilo filtr nad tím, co bylo načtené, tedy nad tou jednou zemí.
 async function _goHomeDeck(){
@@ -7853,14 +7893,14 @@ async function _goHomeDeck(){
 async function _goAbroad(){
   const EN=LANG==='en';
   // Návrat do už otevřené země se nepočítá -- limit je na PŘEPNUTÍ, ne na listování.
-  if(!_deckAbroad && _abroadLeft()<=0){
+  const cc=await _pickAbroadCountry();
+  if(!cc) return false;
+  // Čerpá se AŽ po výběru a rozhoduje o tom server. Zrušený výběr limit nespotřebuje.
+  if(!_deckAbroad && !(await _abroadUse())){
     toast(EN?('You have looked at other countries '+ABROAD_MAX_PER_DAY+'x today. Try again tomorrow.')
             :('Dnes ses do jin\u00fdch zem\u00ed d\u00edval u\u017e '+ABROAD_MAX_PER_DAY+'\u00d7. Zkus to z\u00edtra.'));
     return false;
   }
-  const cc=await _pickAbroadCountry();
-  if(!cc) return false;
-  if(!_deckAbroad) try{ await _abroadUse(); }catch(e){}
   _deckAbroad=true; window._deckCountryPick=cc;
   _gymsLoaded=false; _gymOffset=0; _gymExhausted=false; _coachOffset=0;
   try{ if(typeof renderCountryFilter==='function') renderCountryFilter(); }catch(e){}
@@ -9359,7 +9399,9 @@ async function renderEventsAsync(box){
         list=clist;
       }
       if(ft!=='courses'){ _applyDeckSort(list); }
-      window._evFiltered = list; if(window._evIdx==null) window._evIdx=0;
+      window._evFiltered = list;
+      // Navázat tam, kde člověk skončil; když se seznam zkrátil, začít od začátku.
+      if(window._evIdx==null){ const _ev0=_evPosLoad(); window._evIdx=(_ev0>0 && _ev0<list.length)?_ev0:0; }
       html += list.length ? `<div id="evDeck" style="position:relative;flex:1;min-height:280px;margin-top:0;"></div>` : `<p style="text-align:center;color:var(--light);padding:24px;font-size:13px;">${(ft==='courses')?(LANG==='en'?'No open courses near you.':'Zatím tu nejsou otevřené kurzy poblíž.'):(LANG==='en'?'No events in this discipline.':'Žádné události v této disciplíně.')}</p>`;
     } else {
       html += `<div style="text-align:center;padding:40px 16px;color:var(--light);"><div style="font-size:40px;margin-bottom:10px;">🥊</div><div style="font-weight:700;color:var(--dark);margin-bottom:6px;">${LANG==='en'?'No events near you yet':'Zatím tu nejsou žádné události'}</div><div style="font-size:13px;line-height:1.5;">${LANG==='en'?'Fight nights, seminars and camps will show up here.':'Fight nights, semináře a kempy se objeví tady.'}</div></div>`;
@@ -9882,13 +9924,17 @@ function swipeCardHtml(ev){
   </div>`;
 }
 function evRenderSwipe(){
+  try{ _evPosSave(); }catch(e){}
   const deck=$('evDeck'); if(!deck) return;
   const list=window._evFiltered||[]; let idx=window._evIdx||0;
   // Same trigger as the coach deck: top up before the cards run out, never after.
   try{ if(idx >= list.length - 8) loadMoreEvents(); }catch(e){}
   if(idx>=list.length){
     deck.innerHTML=`<div style="text-align:center;padding:60px 16px;color:var(--light);"><div style="font-size:40px;">✅</div><div style="font-weight:700;color:var(--dark);margin:8px 0 14px;">${LANG==='en'?'That is all for now':'To je zatím vše'}</div><button id="evDeckReset" style="padding:10px 18px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Start over':'Od začátku'}</button></div>`;
-    const rb=$('evDeckReset'); if(rb) rb.onclick=()=>{ window._evIdx=0; evRenderSwipe(); }; return;
+    const rb=$('evDeckReset'); if(rb) rb.onclick=()=>{
+      if(!confirm(LANG==='en'?'Start over? You will go through all events again.':'Za\u010d\u00edt znovu? Projde\u0161 v\u0161echny ud\u00e1losti od za\u010d\u00e1tku.')) return;
+      _evPosClear(); window._evIdx=0; evRenderSwipe();
+    }; return;
   }
   const cur=list[idx], nxt=list[idx+1];
   deck.innerHTML = (nxt?`<div style="position:absolute;inset:0;transform:scale(.96) translateY(10px);opacity:.55;pointer-events:none;">${swipeCardHtml(nxt)}</div>`:'')
@@ -24086,13 +24132,10 @@ async function _setBrowseLoc(loc){
   // by stačilo místo výběru země napsat cizí město a limit obejít.
   const _home=(currentUser&&currentUser.country)||((window._homeLoc||userLoc||{}).country)||null;
   const _far=!!(loc.country && _home && String(loc.country).toLowerCase()!==String(_home).toLowerCase());
-  if(_far){
-    if(_abroadLeft()<=0){
-      toast(LANG==='en'?('You have looked abroad '+ABROAD_MAX_PER_DAY+'x today. Try again tomorrow.')
-                       :('Dnes ses do zahrani\u010d\u00ed d\u00edval u\u017e '+ABROAD_MAX_PER_DAY+'\u00d7. Zkus to z\u00edtra.'));
-      return;
-    }
-    try{ await _abroadUse(); }catch(e){}
+  if(_far && !(await _abroadUse())){
+    toast(LANG==='en'?('You have looked abroad '+ABROAD_MAX_PER_DAY+'x today. Try again tomorrow.')
+                     :('Dnes ses do zahrani\u010d\u00ed d\u00edval u\u017e '+ABROAD_MAX_PER_DAY+'\u00d7. Zkus to z\u00edtra.'));
+    return;
   }
   if(!window._homeLoc && typeof userLoc!=='undefined' && userLoc) window._homeLoc=Object.assign({}, userLoc);
   userLoc=Object.assign({}, loc);
@@ -24109,7 +24152,8 @@ function _clearBrowseLoc(){
   toast(LANG==='en'?'\ud83d\udccd Back to your location':'\ud83d\udccd Zp\u011bt na tvou polohu');
 }
 // Jedno tlačítko, dvě možnosti -- pruh zůstává čistý.
-function _openLocMenu(){
+async function _openLocMenu(){
+  try{ await _quotaRefresh(); }catch(e){}
   if(_isBrowsingElsewhere()){ _clearBrowseLoc(); return; }
   const EN=LANG==='en';
   const ov=document.createElement('div');
@@ -24170,12 +24214,11 @@ async function confirmCity(){
       // Přestěhování do JINÉ ZEMĚ mění, co se ti načítá, a obchází tím limit na prohlížení
       // ciziny. Jednou denně je dost i pro toho, kdo se opravdu stěhuje.
       const _oldC=(currentUser&&currentUser.country)||null;
-      if(cn && _oldC && String(cn).toLowerCase()!==String(_oldC).toLowerCase() && _homeMoveLeft()<=0){
+      if(cn && _oldC && String(cn).toLowerCase()!==String(_oldC).toLowerCase() && !(await _homeMoveUse())){
         toast(LANG==='en'?('You can change your country once a day. Use \u201eJust browse elsewhere\u201c instead.')
                          :('Zemi si m\u016f\u017ee\u0161 zm\u011bnit jednou denn\u011b. Pou\u017eij \u201eJen se pod\u00edvat jinam\u201c.'));
         return;
       }
-      if(cn && _oldC && String(cn).toLowerCase()!==String(_oldC).toLowerCase()){ try{ await _homeMoveUse(); }catch(e){} }
       userLoc={ lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon), city: val, country: cn };
       if(currentUser){ currentUser.country = cn; if(ccode) currentUser.country_code = ccode; supaClient.from('profiles').update(ccode?{ country: cn, country_code: ccode }:{ country: cn }).eq('id', currentUser.id); }
       onLocSet();
@@ -25175,10 +25218,15 @@ $('searchClear').onclick=()=>{
 
 // Filters
 document.querySelectorAll('.pill').forEach(p=>{
-  p.addEventListener('click',()=>{
+  p.addEventListener('click',async ()=>{
     document.querySelectorAll('.pill').forEach(x=>x.classList.remove('active'));
     p.classList.add('active');
     activeFilter=p.dataset.f;
+    // ONLINE NEZNÁ HRANICE. Filtr dosud prosíval jen stažený balík z domovské země, takže
+    // online kouč z Thajska se z Česka nedal najít. Teď se pro tenhle filtr dotáhnou online
+    // kouči odkudkoli -- jednou za relaci, malým dotazem. Limit cizích zemí se ho netýká:
+    // online lekce se nikam nejezdí, tak není co omezovat.
+    if(activeFilter==='online'){ try{ await _ensureOnlineCoaches(); }catch(e){} }
     init();
     toast(`🔍 ${p.textContent.trim()}`);
   });
