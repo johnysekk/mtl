@@ -6725,6 +6725,21 @@ async function _reportGymDemand(discCsv, silent, commit, form){
     var country=((_ul&&_ul.country)||'').trim();
     var lat=(_ul&&_ul.lat!=null)?_ul.lat:((currentUser.city_lat!=null)?+currentUser.city_lat:null);
     var lng=(_ul&&_ul.lng!=null)?_ul.lng:((currentUser.city_lng!=null)?+currentUser.city_lng:null);
+    // MĚSTO Z FORMULÁŘE má přednost před prohlíženou polohou. Když se liší, dohledáme k němu
+    // souřadnice -- bez nich se poptávka zahodí. Poloha uživatele se tím NEMĚNÍ.
+    if(form && form.city && form.city.trim() && form.city.trim().toLowerCase()!==city.toLowerCase()){
+      var _fc=form.city.trim();
+      try{
+        var _hit=(typeof CITY_COORDS!=='undefined') ? Object.entries(CITY_COORDS).find(function(e){ return e[0].toLowerCase()===_fc.toLowerCase(); }) : null;
+        if(_hit){ city=_hit[0]; lat=_hit[1].lat; lng=_hit[1].lng; }
+        else{
+          var _gr=await fetch('https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q='+encodeURIComponent(_fc));
+          var _gj=await _gr.json();
+          if(_gj && _gj.length){ city=_fc; lat=parseFloat(_gj[0].lat); lng=parseFloat(_gj[0].lon); country=((_gj[0].address&&_gj[0].address.country)||country); }
+          else { if(!silent) toast(LANG==='en'?('\u26a0\ufe0f City not found: '+_fc):('\u26a0\ufe0f M\u011bsto nenalezeno: '+_fc)); return; }
+        }
+      }catch(e){}
+    }
     if(!country && lat!=null && lng!=null){
       try{
         var _rr=await fetch('https://nominatim.openstreetmap.org/reverse?format=json&addressdetails=1&zoom=5&lat='+lat+'&lon='+lng);
@@ -6774,7 +6789,10 @@ function _openDemandChips(){
   // The "what does not fit" step only exists where clubs already do: with none within
   // GYM_LOCAL_KM there is nothing to have rejected, and asking would be nonsense.
   var hasLocal=(typeof _gymLocalCount!=='undefined' && _gymLocalCount>0);
-  var st={ disc:[], win:[], lvl:[], grp:[], want:[], why:[], note:'', commit:false };
+  var st={ disc:[], win:[], lvl:[], grp:[], want:[], why:[], note:'', commit:false,
+    // Město se PTÁ, nebere se z prohlížené polohy. Kdo listuje ve Znojmě, ale bydlí v Plzni,
+    // by jinak poslal poptávku za Znojmo a klub by ji dostal na špatné místo.
+    city:((typeof userLoc!=='undefined' && userLoc && userLoc.city) || (currentUser && currentUser.city) || '') };
   var step=0;
 
   var chip=function(cls,v,label,sub){
@@ -6924,9 +6942,21 @@ function _openDemandChips(){
   // Without coordinates the whole answer is discarded downstream (all three consumers skip rows
   // with a null lat/lng) and it fails silently -- the person sees a thank-you and the data never
   // appears. So ask on the first step, using the city picker that already exists.
+  // Pole s městem na prvním kroku. Předvyplněné podle polohy, ale přepsatelné.
+  var _dqCityRow=function(){
+    if(step!==0) return;
+    var b=ov.querySelector('#dqBody'); if(!b) return;
+    b.insertAdjacentHTML('afterbegin','<div style="margin-bottom:14px;">'
+      +'<div style="font-size:12px;font-weight:800;color:var(--mid);margin-bottom:4px;">'+(EN?'Which city are you looking in?':'V jak\u00e9m m\u011bst\u011b hled\u00e1\u0161?')+'</div>'
+      +'<input id="dqCityInp" type="text" value="'+String(st.city||'').replace(/"/g,'&quot;')+'" placeholder="'+(EN?'e.g. Plze\u0148':'nap\u0159. Plze\u0148')+'" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;">'
+      +'<div style="font-size:11px;color:var(--light);line-height:1.4;margin-top:4px;">'+(EN?'Where you want to train \u2014 not where you happen to be browsing.':'Kde chce\u0161 tr\u00e9novat \u2014 ne kde zrovna prohl\u00ed\u017e\u00ed\u0161.')+'</div>'
+      +'</div>');
+    var ci=ov.querySelector('#dqCityInp');
+    if(ci) ci.oninput=function(){ st.city=ci.value.trim(); };
+  };
   var _dqCityHint=function(){
     var hasLoc=(typeof userLoc!=='undefined' && userLoc && userLoc.lat!=null) || (currentUser && currentUser.city_lat!=null);
-    if(hasLoc) return;
+    if(hasLoc || st.city) return;
     var b=ov.querySelector('#dqBody'); if(!b) return;
     b.insertAdjacentHTML('afterbegin','<div style="background:#FFF4E5;border-radius:10px;padding:10px 12px;margin-bottom:12px;">'
       + '<div style="font-size:12.5px;color:#8A5A00;line-height:1.45;margin-bottom:8px;">'
@@ -6980,7 +7010,7 @@ function _openDemandChips(){
       if(nx) nx.onclick=function(){ gPage++; draw(); };
     }
     syncNext();
-    if(step===0){ try{ _dqCityHint(); }catch(e){} }
+    if(step===0){ try{ _dqCityRow(); }catch(e){} try{ _dqCityHint(); }catch(e){} }
   };
 
 
@@ -6994,7 +7024,7 @@ function _openDemandChips(){
     if(step<STEPS.length-1){ step++; draw(); return; }
     ov.remove();
     _reportGymDemand(st.disc.join(','), false, st.commit,
-      { windows:st.win.join(','), levels:st.lvl.concat(st.grp).join(','), reasons:st.why.join(','), note:st.note, want:st.want.join(',') });
+      { windows:st.win.join(','), levels:st.lvl.concat(st.grp).join(','), reasons:st.why.join(','), note:st.note, want:st.want.join(','), city:st.city });
   };
   draw();
 }
@@ -7350,7 +7380,10 @@ function renderCards(){
     const _goAl=document.querySelector('#btnGo .al'); if(_goAl) _goAl.textContent=actionVerb(_gd);
     const _ei=$('emptyIcon'); if(_ei) _ei.textContent='🏛️';
     const _yep=$('lblYep'); if(_yep) _yep.textContent=actionVerb(_gd).toUpperCase();
-    if(!_deckExtended && _gymLocalCount < filtered.length && idx >= _gymLocalCount){
+    // Dělení na „do 20 km" a „dál" má smysl doma. Po přepnutí na jinou zemi je nesmyslné:
+    // z Paříže je každý český klub „dál" a nabídka „ukázat 3 další" jen překáží.
+    const _abroadNow = (typeof _deckAbroad!=='undefined' && _deckAbroad && window._deckCountryPick);
+    if(!_abroadNow && !_deckExtended && _gymLocalCount < filtered.length && idx >= _gymLocalCount){
       front.style.display='none'; back.style.display='none'; empty.classList.add('show'); _deckActs(false);
       const h3=empty.querySelector('h3'), p=empty.querySelector('p');
       const EN=LANG==='en'; const _farN=filtered.length-_gymLocalCount;
@@ -7424,6 +7457,21 @@ function renderCards(){
         // v pruhu s polohou, kde je to vědomé rozhodnutí, ne vedlejší účinek hledání.
         p.innerHTML=(EN?('Nothing found for \u201e'+escapeHtml(searchQuery)+'\u201c nearby.'):('Pro \u201e'+escapeHtml(searchQuery)+'\u201c jsme tu nic nena\u0161li.'))
           +'<div style="font-size:12.5px;color:var(--light);line-height:1.5;margin-top:8px;">'+(EN?'Try a different name, or change your location at the top.':'Zkus jin\u00fd n\u00e1zev, nebo zm\u011b\u0148 polohu naho\u0159e.')+'</div>';
+      }
+      else if(_abroadNow){
+        // Došly kluby ve zvolené zemi. Nabídnout jinou zemi, nebo návrat domů -- poptávka
+        // („co ti tu chybí") sem nepatří, sbírá se tam, kde člověk bydlí.
+        const EN3=LANG==='en'; const _cc=window._deckCountryPick;
+        // Skloňovat název země by znamenalo tabulku tvarů pro každou zemi. Dvojtečka to obejde
+        // a čte se přirozeně: „Všechny kluby: Česko".
+        h3.textContent = filtered.length ? (EN3?('All clubs: '+_cc):('V\u0161echny kluby: '+_cc))
+                                         : (EN3?('No clubs: '+_cc):('\u017d\u00e1dn\u00e9 kluby: '+_cc));
+        p.innerHTML='<div style="font-size:14px;color:var(--mid);line-height:1.6;">'
+          +(EN3?'You are browsing another country.':'Prohl\u00ed\u017e\u00ed\u0161 si jinou zemi.')+'</div>'
+          +'<button id="deckPickOther" style="width:100%;max-width:300px;margin-top:12px;padding:12px 18px;background:none;color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;">\ud83c\udf0d '+(EN3?'Another country':'Jin\u00e1 zem\u011b')+'</button>'
+          +'<button id="deckGoHome" style="width:100%;max-width:300px;margin-top:8px;padding:12px 18px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;">\u2190 '+(EN3?'Back to my area':'Zp\u011bt do m\u00e9ho okol\u00ed')+'</button>';
+        var _po=$('deckPickOther'); if(_po) _po.onclick=function(){ _goAbroad(); };
+        var _gh=$('deckGoHome'); if(_gh) _gh.onclick=function(){ _goHomeDeck(); };
       }
       else if(!filtered.length && (typeof _deckAbroad==='undefined' || !_deckAbroad)){
         // V zemi není ani jeden klub. Sem se dostane každý první uživatel v nové zemi -- bez
@@ -7643,10 +7691,57 @@ async function _pickAbroadCountry(){
     ov.onclick=function(e){ if(e.target===ov) done(null); };
   });
 }
+// KOLIKRÁT DENNĚ SE SMÍ KOUKNOUT DO CIZINY. Bez limitu je to pro zvědavce nekonečné listování
+// cizích zemí, které nikdy nikoho nezarezervuje a jen stahuje data. Dvakrát denně stačí tomu,
+// kdo se stěhuje nebo jede na soustředění.
+// Počítadlo je v profilu, ne jen v prohlížeči -- jinak by stačilo otevřít anonymní okno.
+const ABROAD_MAX_PER_DAY=2;
+function _abroadLeft(){
+  try{
+    const today=new Date().toISOString().slice(0,10);
+    let d=null, n=0;
+    if(currentUser && currentUser.abroad_day){ d=String(currentUser.abroad_day).slice(0,10); n=Number(currentUser.abroad_count)||0; }
+    else { try{ const raw=JSON.parse(localStorage.getItem('mtl_abroad')||'{}'); d=raw.d||null; n=Number(raw.n)||0; }catch(e){} }
+    if(d!==today) return ABROAD_MAX_PER_DAY;
+    return Math.max(0, ABROAD_MAX_PER_DAY-n);
+  }catch(e){ return ABROAD_MAX_PER_DAY; }
+}
+async function _abroadUse(){
+  try{
+    const today=new Date().toISOString().slice(0,10);
+    let n=1;
+    const cur=(currentUser&&currentUser.abroad_day)?String(currentUser.abroad_day).slice(0,10):null;
+    if(cur===today) n=(Number(currentUser.abroad_count)||0)+1;
+    if(currentUser && currentUser.id){
+      currentUser.abroad_day=today; currentUser.abroad_count=n;
+      try{ await supaClient.from('profiles').update({ abroad_day:today, abroad_count:n }).eq('id',currentUser.id); }catch(e){}
+    }
+    try{ localStorage.setItem('mtl_abroad', JSON.stringify({ d:today, n:n })); }catch(e){}
+  }catch(e){}
+}
+// Zpátky do vlastní země. Bez tohohle se člověk po přepnutí na jinou zemi nedostal zpět --
+// „Všechny země" jen zrušilo filtr nad tím, co bylo načtené, tedy nad tou jednou zemí.
+async function _goHomeDeck(){
+  _deckAbroad=false; window._deckCountryPick=null;
+  _gymsLoaded=false; _gymOffset=0; _gymExhausted=false; _coachOffset=0;
+  try{ if(typeof renderCountryFilter==='function') renderCountryFilter(); }catch(e){}
+  try{ await ensureGymsLoaded(true); }catch(e){}
+  try{ if(typeof loadCoaches==='function') await loadCoaches(); }catch(e){}
+  try{ if(typeof init==='function') init(); }catch(e){}
+  toast(LANG==='en'?'\ud83d\udccd Back to your area':'\ud83d\udccd Zp\u011bt k tob\u011b');
+}
 // Zapne zahraničí pro JEDNU zvolenou zemi a načte jen ji.
 async function _goAbroad(){
+  const EN=LANG==='en';
+  // Návrat do už otevřené země se nepočítá -- limit je na PŘEPNUTÍ, ne na listování.
+  if(!_deckAbroad && _abroadLeft()<=0){
+    toast(EN?('You have looked at other countries '+ABROAD_MAX_PER_DAY+'x today. Try again tomorrow.')
+            :('Dnes ses do jin\u00fdch zem\u00ed d\u00edval u\u017e '+ABROAD_MAX_PER_DAY+'\u00d7. Zkus to z\u00edtra.'));
+    return false;
+  }
   const cc=await _pickAbroadCountry();
   if(!cc) return false;
+  if(!_deckAbroad) try{ await _abroadUse(); }catch(e){}
   _deckAbroad=true; window._deckCountryPick=cc;
   _gymsLoaded=false; _gymOffset=0; _gymExhausted=false; _coachOffset=0;
   try{ if(typeof renderCountryFilter==='function') renderCountryFilter(); }catch(e){}
@@ -7666,10 +7761,18 @@ function renderCountryFilter(){
   const keys=Object.keys(set).sort(function(a,b){ return set[b]-set[a]; });
   if(!keys.length){ box.style.display='none'; return; }
   box.style.display='flex';
-  box.innerHTML='<div class="pill'+(!window._deckCountryPick?' active':'')+'" data-cf="">'+(EN?'All countries':'V\u0161echny zem\u011b')+'</div>'
-    + keys.map(function(k){ return '<div class="pill'+(window._deckCountryPick===k?' active':'')+'" data-cf="'+escapeHtml(k)+'">'+escapeHtml(k)+' <span style="opacity:.55;">'+set[k]+'</span></div>'; }).join('');
+  // „Všechny země" tu nedává smysl -- načtená je vždy jen jedna. Místo toho návrat domů
+  // a přepnutí na jinou zemi.
+  box.innerHTML='<div class="pill" data-cf="__home">\u2190 '+(EN?'My area':'M\u00e9 okol\u00ed')+'</div>'
+    + keys.map(function(k){ return '<div class="pill'+(window._deckCountryPick===k?' active':'')+'" data-cf="'+escapeHtml(k)+'">'+escapeHtml(k)+' <span style="opacity:.55;">'+set[k]+'</span></div>'; }).join('')
+    + '<div class="pill" data-cf="__pick">\ud83c\udf0d '+(EN?'Another country':'Jin\u00e1 zem\u011b')+'</div>';
   box.querySelectorAll('.pill').forEach(function(el){
-    el.onclick=function(){ window._deckCountryPick = el.dataset.cf || null; renderCountryFilter(); try{ if(typeof init==='function') init(); }catch(e){} };
+    el.onclick=function(){
+      const v=el.dataset.cf||'';
+      if(v==='__home'){ _goHomeDeck(); return; }
+      if(v==='__pick'){ _goAbroad(); return; }
+      window._deckCountryPick = v || null; renderCountryFilter(); try{ if(typeof init==='function') init(); }catch(e){}
+    };
   });
 }
 function _offerAbroad(kind){
