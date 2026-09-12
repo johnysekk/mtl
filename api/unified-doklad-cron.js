@@ -146,6 +146,26 @@ function _money(minor, cur, lang){ return (Number(minor||0)/100).toFixed(2).repl
 function esc(x){ return String(x==null?'':x).replace(/[<>&"]/g,function(c){ return c==='<'?'&lt;':c==='>'?'&gt;':c==='&'?'&amp;':'&quot;'; }); }
 function _czDate(d, lang){ try{ const x=new Date(d); return lang==='en' ? (x.getUTCDate()+' '+EN_MONTHS[x.getUTCMonth()]+' '+x.getUTCFullYear()) : (x.getUTCDate()+'. '+(x.getUTCMonth()+1)+'. '+x.getUTCFullYear()); }catch(e){ return String(d||''); } }
 function _dokNo(id){ return 'MTL-' + id; }
+// Země jménem, v jazyce dokladu. Ukládá se dvoupísmenný kód; překlad až při vykreslení,
+// aby PDF pro zahraniční klub neříkalo "Stát: SK", ale "Country: Slovakia".
+const CC_NAMES = {
+  BE:['Belgie','Belgium'], BG:['Bulharsko','Bulgaria'], HR:['Chorvatsko','Croatia'], CY:['Kypr','Cyprus'],
+  CZ:['Česko','Czechia'], DK:['Dánsko','Denmark'], EE:['Estonsko','Estonia'], FI:['Finsko','Finland'],
+  FR:['Francie','France'], DE:['Německo','Germany'], GR:['Řecko','Greece'], HU:['Maďarsko','Hungary'],
+  IE:['Irsko','Ireland'], IT:['Itálie','Italy'], LV:['Lotyšsko','Latvia'], LT:['Litva','Lithuania'],
+  LU:['Lucembursko','Luxembourg'], MT:['Malta','Malta'], NL:['Nizozemsko','Netherlands'], PL:['Polsko','Poland'],
+  PT:['Portugalsko','Portugal'], RO:['Rumunsko','Romania'], SK:['Slovensko','Slovakia'], SI:['Slovinsko','Slovenia'],
+  ES:['Španělsko','Spain'], SE:['Švédsko','Sweden'], AT:['Rakousko','Austria'],
+  GB:['Spojené království','United Kingdom'], CH:['Švýcarsko','Switzerland'], NO:['Norsko','Norway'],
+  TR:['Turecko','Türkiye'], US:['Spojené státy','United States'], CA:['Kanada','Canada'],
+  AU:['Austrálie','Australia'], NZ:['Nový Zéland','New Zealand'], UA:['Ukrajina','Ukraine'],
+};
+function _ccName(cc, lang){
+  const v = String(cc || '').trim().toUpperCase();
+  if (!v) return '';
+  const row = CC_NAMES[v];
+  return row ? (lang === 'en' ? row[1] : row[0]) : v;
+}
 // KDO DLUŽÍ PROVIZI = komu přišly peníze. Banka a hotovost to píšou do paid_to, Stripe do payee_kind
 // (gym / profile). Stejné pravidlo je v appce (_commOwner) a v commission-cron. Dřív se Stripe platba
 // kouče na výplatní účet u skupinovky přičítala klubu, protože nesla gym_id a paid_to prázdné.
@@ -205,7 +225,7 @@ function buildSnap(kind, entityId, ownerId, identity, period, cur, data, ME, buy
   return snap;
 }
 function _supLines(s, lang){ const T=_t(lang); return [s.sup_name, s.sup_address, s.sup_ico ? (T.regno+': ' + s.sup_ico) : '', s.sup_dic ? (T.vatid+': ' + s.sup_dic) : '', s.sup_phone ? (T.phone+': ' + s.sup_phone) : '', s.sup_email ? ('E-mail: ' + s.sup_email) : ''].filter(Boolean); }
-function _custLines(s, lang){ const T=_t(lang); return [s.cust_name || '\u2014', s.cust_trade_name ? ((s.organization_id ? T.inMtlOrg : (s.gym_id ? T.inMtlGym : T.inMtlCoach)) + ': ' + s.cust_trade_name) : '', s.cust_address, s.cust_ico ? (T.regno+': ' + s.cust_ico) : '', s.cust_dic ? (T.vatid+': ' + s.cust_dic) : '', (s.cust_country && String(s.cust_country).toUpperCase() !== 'CZ') ? (T.country+': ' + s.cust_country) : '', s.cust_phone ? (T.phone+': ' + s.cust_phone) : '', s.cust_email ? ('E-mail: ' + s.cust_email) : ''].filter(Boolean); }
+function _custLines(s, lang){ const T=_t(lang); return [s.cust_name || '\u2014', s.cust_trade_name ? ((s.organization_id ? T.inMtlOrg : (s.gym_id ? T.inMtlGym : T.inMtlCoach)) + ': ' + s.cust_trade_name) : '', s.cust_address, s.cust_ico ? (T.regno+': ' + s.cust_ico) : '', s.cust_dic ? (T.vatid+': ' + s.cust_dic) : '', s.cust_country ? (T.country + ': ' + _ccName(s.cust_country, lang)) : '', s.cust_phone ? (T.phone+': ' + s.cust_phone) : '', s.cust_email ? ('E-mail: ' + s.cust_email) : ''].filter(Boolean); }
 function _howCharged(s, lang){
   const T=_t(lang); const parts = [];
   if (s.bank_amount > 0) parts.push(T.howBank(_money(s.bank_amount, s.currency, lang), _czDate(s.charged_at, lang)));
