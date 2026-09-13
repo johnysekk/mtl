@@ -5947,7 +5947,13 @@ async function _dashGo(t){ try{
   if(t==='rewards'){ openSheet('shInvite'); if(typeof fillReferral==='function') fillReferral(); return; }
   if(t==='circle'){ openMtlCircle(); return; }
   if(t==='book'){ openSheet('shBookings'); if(typeof _upTab==='function') _upTab('skup'); else if(typeof loadBookings==='function') loadBookings('upcoming'); return; }
-  if(t==='diary'){ const b=$('btnOpenDiary'); if(b) b.click(); return; }
+  // Diář se otevírá přímo. Klepnutí na tlačítko selhalo pokaždé, když tlačítko v dashmode
+  // zrovna nebylo vykreslené -- sheet se pak ukázal s prázdnou mřížkou z minula.
+  if(t==='diary'){
+    if(typeof openDiary==='function'){ openDiary(); }
+    else { const b=$('btnOpenDiary'); if(b) b.click(); }
+    return;
+  }
   if(t==='coachrec'){ if(typeof openCoachReception==='function') openCoachReception(); return; }
   if(t==='coachdash'){ openCoachDash(); return; }
   // Tvorba a správa akcí patří tam, kde je pořadatel -- pod kouče i pod klub. Kdo pořádá za obojí,
@@ -11121,7 +11127,20 @@ async function _coach1to1QrPay(c, payee, opts){
     // kterou nema kde potvrdit.
     if(!bookingId){ pb.disabled=false; pb.textContent=(EN?'I\u2019ve paid':'Zaplaceno');
       toast(EN?'\u26a0\ufe0f The reservation was not created \u2014 try again':'\u26a0\ufe0f Rezervace nevznikla \u2014 zkus to znovu'); return; }
-    try{ await supaClient.from('notifications').insert(_bi({ user_id:coachId, type:'booking', read:false, data:JSON.stringify({ kind:'coach_qr_intent', booking_id:bookingId }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('\ud83d\udcf2 '+sName+(EN?(' claims they paid for a '+(isOnline?'online lesson':'1:1 lesson')+' (QR). Confirm in your diary.'):(' tvrd\u00ed, \u017ee zaplatil za '+(isOnline?'online lekci':'soukromku')+' (QR). Potvrď v p\u0159ehledu kou\u010de.'))); })); }catch(e){}
+    // NOTIFIKACE MÁ NÉST TO PODSTATNÉ: kdo, za co, kolik, kdy a co se stane dál. Bez částky
+    // a termínu musel kouč otevřít appku, aby vůbec zjistil, o čem je řeč.
+    const _nDate=(isOnline?today:((opts.slot&&opts.slot.date)||today));
+    const _nTime=(isOnline?null:((opts.slot&&opts.slot.time)||null));
+    try{ await supaClient.from('notifications').insert(_bi({ user_id:coachId, type:'booking', read:false,
+      data:JSON.stringify({ kind:'coach_qr_intent', booking_id:bookingId, student:sName, amount:price, currency:cur, date:_nDate, time:_nTime, online:!!isOnline }),
+      message:''}, function(EN){
+        var _amt=((typeof fmtPrice==='function')?fmtPrice(price,cur):price)+' '+((typeof _curSym==='function')?_curSym(cur):cur);
+        var _when=((typeof _notifWhen==='function')?_notifWhen(_nDate,_nTime):(_nDate+(_nTime?(' '+_nTime):'')));
+        var _what=EN?(isOnline?'an online lesson':'a 1:1 lesson'):(isOnline?'online lekci':'soukromku');
+        return EN
+          ? ('\ud83d\udcf2 '+sName+' says they sent '+_amt+' by transfer for '+_what+' \u2014 '+_when+'. Confirm it once the money lands; the slot stays held until you do.')
+          : ('\ud83d\udcf2 '+sName+' tvrd\u00ed, \u017ee poslal '+_amt+' p\u0159evodem za '+_what+' \u2014 '+_when+'. A\u017e pen\u00edze doraz\u00ed, potvr\u010f to; do t\u00e9 doby je term\u00edn dr\u017een\u00fd.');
+      })); }catch(e){}
     toast(EN?'\u2705 Lesson reserved \u00b7 coach will confirm':'\u2705 Lekce rezervov\u00e1na \u00b7 kou\u010d potvrd\u00ed', 1);
     close();
   };
@@ -24634,6 +24653,20 @@ async function confirmCity(){
   }
 }
 
+// VÝBĚRY V NASTAVENÍ. Tenhle blok jsem při úklidu mrtvého kódu (odstranění „Přesunout se do
+// města") omylem smazal spolu s ním. openPicker pak sahal na neexistující PICKERS, spadl na
+// ReferenceError a klepnutí na Jazyk nedělalo vůbec nic -- v appce i v dashmode.
+const PICKERS={
+  lang:{title:'Jazyk',valEl:'vLang',opts:['Čeština','English'],sel:'Čeština'},
+  country:{title:'Země kouče',valEl:'vCountry',opts:['Vše'],sel:'Vše'},
+  type:{title:'Typ koučování',valEl:'vType',opts:['Vše','🌐 Pouze online','📍 Pouze osobní lekce'],sel:'Vše'},
+  coachLang:{title:'Jazyk kouče',valEl:'vCoachLang',opts:['Vše','🇨🇿 Čeština','🇬🇧 English','🇸🇰 Slovenčina','🇩🇪 Deutsch','🇪🇸 Español','🇫🇷 Français','🇮🇹 Italiano','🇵🇱 Polski','🇵🇹 Português','🇷🇺 Русский','🇺🇦 Українська','🇹🇭 ไทย'],sel:'Vše'},
+  dist:{title:'Max. vzdálenost',valEl:'vDist',opts:['10 km','25 km','50 km','100 km','Celá ČR','Celý svět'],sel:'50 km'},
+  price:{title:'Cenové rozpětí / hod',valEl:'vPrice',opts:['Bez limitu','Do 500 Kč','Do 1 000 Kč','Do 2 000 Kč','2 000+ Kč'],sel:'Bez limitu'},
+};
+
+let curPicker=null;
+
 function openPicker(key){
   curPicker=key;
   const p=PICKERS[key];
@@ -33043,6 +33076,24 @@ function goToDiaryDate(dateStr){
 }
 
 function renderDiary(){
+  // Cokoli uvnitř spadne, skončilo to prázdnou mřížkou bez vysvětlení a pomohlo jen F5.
+  // Tohle chybu ukáže a nabídne načtení znovu; do konzole se vypíše, co se stalo.
+  try{ return _renderDiaryInner(); }
+  catch(e){
+    console.error('[diář]', e);
+    try{
+      const g=$('diaryGrid');
+      if(g) g.innerHTML='<div style="grid-column:1/-1;text-align:center;padding:18px 10px;">'
+        +'<div style="font-size:13px;color:var(--mid);line-height:1.5;margin-bottom:10px;">'
+        +(LANG==='en'?'The diary did not load.':'Diář se nenačetl.')+'</div>'
+        +'<button id="diaryRetry" style="padding:10px 16px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:13.5px;font-weight:800;cursor:pointer;font-family:inherit;">'
+        +(LANG==='en'?'Try again':'Zkusit znovu')+'</button></div>';
+      const r=document.getElementById('diaryRetry');
+      if(r) r.onclick=async function(){ try{ await loadDiaryData(); }catch(e2){} renderDiary(); };
+    }catch(e2){}
+  }
+}
+function _renderDiaryInner(){
   $('diaryMonth').textContent = `${monthName(diaryMonth)} ${diaryYear}`;
   const grid = $('diaryGrid');
   grid.innerHTML = '';
