@@ -594,6 +594,27 @@ export default async function handler(req, res) {
       const s = event.data.object;
       const m = s.metadata || {};
 
+      // ── DOPLATEK NESTRŽENÉ PROVIZE („Zaplatit hned" z e-mailu) ───────────────────────
+      // Řádky, které cron označil jako 'failed', se tímto považují za vybrané a odpočet do
+      // pozastavení účtu se zruší. Doklad o provizi vystaví měsíční doklad-cron jako u
+      // běžného stržení -- tady se jen srovná stav, aby se nestrhávalo podruhé.
+      if (m.mtl_kind === 'commission_paynow' && m.owner_kind && m.owner_id) {
+        try {
+          const col = ({ gym: 'gym_id', coach: 'coach_id', org: 'organization_id' })[m.owner_kind];
+          if (col) {
+            const cur = String(m.currency || '').toLowerCase();
+            await sbPatch('transactions',
+              `${col}=eq.${encodeURIComponent(m.owner_id)}&commission_status=eq.failed` +
+              (cur ? `&currency=ilike.${encodeURIComponent(cur)}` : ''),
+              { commission_status: 'collected' });   // sloupec na id platby v transactions není
+            const tbl = ({ gym: 'gyms', coach: 'profiles', org: 'organizations' })[m.owner_kind];
+            await sbPatch(tbl, `id=eq.${encodeURIComponent(m.owner_id)}`,
+              { commission_failed_at: null, commission_next_retry: null, account_suspended: false, cash_blocked: false });
+          }
+        } catch (e) { console.error('[commission_paynow]', e && e.message); }
+        return res.status(200).json({ received: true });
+      }
+
       // ---- Consume a referral credit, server-side, ONLY once the payment really succeeded ----
       // This used to happen in the browser after returning from Stripe: close the tab and the
       // credit was never consumed, so it could be redeemed again and again. pay.js verifies the
