@@ -15617,9 +15617,18 @@ async function openGymAudit(gymId, gymName){
   let ids=[]; rows.forEach(function(r){ if(r.actor_id) ids.push(r.actor_id); if(r.target_id) ids.push(r.target_id); }); ids=[...new Set(ids)];
   let pmap={}; if(ids.length){ try{ const { data:ps }=await supaClient.from('profiles').select('id,name').in('id',ids); (ps||[]).forEach(function(pp){ pmap[pp.id]=pp; }); }catch(e){} }
   const nm=function(id){ return (id&&pmap[id]&&pmap[id].name)||(EN?'someone':'někdo'); };
-  const A={ coowner_granted:(EN?'granted co-ownership to':'udělil/a spolumajitelství'), coowner_revoked:(EN?'revoked co-ownership from':'odebral/a spolumajitelství'), coach_removed:(EN?'removed coach':'odebral/a kouče'), member_removed:(EN?'removed member':'odebral/a člena'), refund_issued:(EN?'issued a refund to':'vrátil/a platbu'), price_changed:(EN?'changed pricing':'změnil/a ceny'), membership_changed:(EN?'changed a membership':'změnil/a členství'), settings_changed:(EN?'changed club settings':'změnil/a nastavení klubu') };
+  const A={ coowner_granted:(EN?'granted co-ownership to':'udělil/a spolumajitelství'), coowner_revoked:(EN?'revoked co-ownership from':'odebral/a spolumajitelství'), coach_removed:(EN?'removed coach':'odebral/a kouče'), member_removed:(EN?'removed member':'odebral/a člena'), refund_issued:(EN?'issued a refund to':'vrátil/a platbu'), price_changed:(EN?'changed pricing':'změnil/a ceny'), membership_changed:(EN?'changed a membership':'změnil/a členství'), settings_changed:(EN?'changed club settings':'změnil/a nastavení klubu'), expense_added:(EN?'added an expense':'přidal/a výdaj'), expense_removed:(EN?'removed an expense':'smazal/a výdaj') };
   list.innerHTML=rows.map(function(r){
-    const act=nm(r.actor_id); const lbl=A[r.action]||r.action; const tgt=r.target_id?(' '+nm(r.target_id)):((r.meta&&r.meta.name)?(' '+r.meta.name):'');
+    const act=nm(r.actor_id); const lbl=A[r.action]||r.action;
+    // U výdaje je podstatné CO a ZA KOLIK; jméno cíle tam žádné není.
+    let tgt=r.target_id?(' '+nm(r.target_id)):((r.meta&&r.meta.name)?(' '+r.meta.name):'');
+    try{
+      const _m=(typeof r.meta==='string')?JSON.parse(r.meta||'{}'):(r.meta||{});
+      if((r.action==='expense_added'||r.action==='expense_removed') && (_m.label||_m.amount!=null)){
+        tgt=' „'+String(_m.label||'')+'\u201c'+(_m.amount!=null?(' \u00b7 '+fmtPrice(_m.amount,_m.currency||'CZK')+' '+_curSym(_m.currency||'CZK')):'')
+           +(_m.month?(' \u00b7 '+(typeof _expMonthLbl==='function'?_expMonthLbl(_m.month):_m.month)):'');
+      }
+    }catch(e){}
     let when=''; try{ when=new Date(r.created_at).toLocaleString(EN?'en-GB':'cs-CZ'); }catch(e){ when=r.created_at||''; }
     return '<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:7px;"><div style="font-size:13px;color:var(--dark);"><b>'+act+'</b> '+lbl+tgt+'</div><div style="font-size:10px;color:var(--light);margin-top:3px;">'+when+'</div></div>';
   }).join('');
@@ -18088,7 +18097,9 @@ async function toggleCoachSchedulePerm(linkId, coachId, coachName, cur){
 }
 async function loadMyTeams(){
   if(!currentUser){ window._inGymTeam=false; if($('meMyTeam')) $('meMyTeam').style.display='none'; return; }
-  let { data, error:_mtErr } = await supaClient.from('gym_coaches').select('id, gym_id, status, can_manage_schedule, is_reception, share_availability, full_autonomy').eq('coach_id', currentUser.id).eq('status','active');
+  // Načítají se VŠECHNA oprávnění, ne jen část. Bez nich se nedalo zobrazit tlačítko k tomu,
+  // co člověk v klubu smí -- kdo dostal třeba „Rozvrh", neměl to kde otevřít.
+  let { data, error:_mtErr } = await supaClient.from('gym_coaches').select('id, gym_id, status, can_manage_schedule, is_reception, share_availability, full_autonomy, co_owner, can_take_payments, can_scan_tickets, can_request_fighters').eq('coach_id', currentUser.id).eq('status','active');
   if(_mtErr){ const _r2=await supaClient.from('gym_coaches').select('id, gym_id, status, can_manage_schedule, is_reception, full_autonomy').eq('coach_id', currentUser.id).eq('status','active'); data=_r2.data; }
   const rows=(data||[]).filter(r=>!r.is_reception);
   window._inGymTeam = rows.length>0; window._gtTeamCount = rows.length; window._gtCanSched = rows.some(function(r){ return !!r.full_autonomy || !!r.can_manage_schedule; }); window._gtHasOwnAccount = !!(currentUser&&currentUser.gym_payout_account); window._gtHasGymRevenue=false; if(rows.length){ try{ const _gr=await Promise.all([ supaClient.from('gym_bookings').select('id').eq('coach_id',currentUser.id).eq('paid_to','gym').limit(1), supaClient.from('gym_memberships').select('id').eq('coach_id',currentUser.id).eq('paid_to','gym').limit(1) ]); window._gtHasGymRevenue = !!((((_gr[0]||{}).data)||[]).length || (((_gr[1]||{}).data)||[]).length); }catch(e){} }
@@ -18102,9 +18113,27 @@ async function loadMyTeams(){
   const gids=rows.map(r=>r.gym_id);
   const { data: gyms } = await supaClient.from('gyms').select('id, name, city').in('id', gids);
   const gmap={}; (gyms||[]).forEach(g=>gmap[g.id]=g);
-  box.innerHTML=rows.map(r=>{ const g=gmap[r.gym_id]||{}; const _bs="flex:1 1 calc(50% - 4px);min-width:0;padding:10px 8px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';text-align:center;box-sizing:border-box;"; return `<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;"><div style="margin-bottom:10px;"><div style="font-size:14px;font-weight:700;">🏛️ ${g.name||'Klub'}</div><div style="font-size:12px;color:var(--mid);">📍 ${g.city||'—'}</div></div><div style="display:flex;flex-wrap:wrap;gap:8px;"><button class="mtDashBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:var(--dark);color:#fff;border:none;flex-basis:100%;">📊 ${LANG==='en'?'Overview':'Přehled'}</button>${r.full_autonomy?`<button class="mtSchedBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:var(--dark);color:#fff;border:none;">📅 ${LANG==='en'?'My classes':'Moje lekce'}</button>`:''}<button class="mtTeamBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:#fff;color:var(--dark);border:1px solid var(--border);">👥 ${LANG==='en'?'Club team':'Klub tým'}</button><button class="mtShareBtn" data-id="${r.id}" data-on="${r.share_availability?1:0}" style="${_bs}background:${r.share_availability?'#FFF7E0':'#fff'};color:${r.share_availability?'#8a6a12':'var(--dark)'};border:1px solid ${r.share_availability?'#E8C24A':'var(--border)'};">📆 ${r.share_availability?(LANG==='en'?'Sharing 1:1':'Sdílím 1:1'):(LANG==='en'?'Share 1:1':'Sdílet 1:1')}</button><button class="mtScanBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:#fff;color:var(--dark);border:1px solid var(--border);">📷 ${LANG==='en'?'Tickets':'Lístky'}</button><button class="leaveTeamBtn" data-id="${r.id}" data-klub="${(g.name||'').replace(/"/g,'&quot;')}" data-gymid="${r.gym_id}" style="${_bs}background:#FEECEC;color:var(--red);border:none;">${LANG==='en'?'Leave':'Opustit'}</button></div></div>`; }).join('');
+  box.innerHTML=rows.map(r=>{ const g=gmap[r.gym_id]||{}; const _bs="flex:1 1 calc(50% - 4px);min-width:0;padding:10px 8px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';text-align:center;box-sizing:border-box;"; return `<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;"><div style="margin-bottom:10px;"><div style="font-size:14px;font-weight:700;">🏛️ ${g.name||'Klub'}</div><div style="font-size:12px;color:var(--mid);">📍 ${g.city||'—'}</div></div><div style="display:flex;flex-wrap:wrap;gap:8px;"><button class="mtDashBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:var(--dark);color:#fff;border:none;flex-basis:100%;">📊 ${LANG==='en'?'Overview':'Přehled'}</button>${r.full_autonomy?`<button class="mtSchedBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:var(--dark);color:#fff;border:none;">📅 ${LANG==='en'?'My classes':'Moje lekce'}</button>`:''}
+    ${(r.can_manage_schedule && !r.full_autonomy)?`<button class="mtGymSchedBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:var(--dark);color:#fff;border:none;">📅 ${LANG==='en'?'Club schedule':'Rozvrh klubu'}</button>`:''}
+    ${(r.can_take_payments||r.is_reception)?`<button class="mtRecepBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:#fff;color:var(--dark);border:1px solid var(--border);">🛎️ ${LANG==='en'?'Reception':'Recepce'}</button>`:''}
+    ${r.can_scan_tickets?`<button class="mtScanBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:#fff;color:var(--dark);border:1px solid var(--border);">🎟️ ${LANG==='en'?'Scan tickets':'Kontrola lístků'}</button>`:''}<button class="mtTeamBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:#fff;color:var(--dark);border:1px solid var(--border);">👥 ${LANG==='en'?'Club team':'Klub tým'}</button><button class="mtShareBtn" data-id="${r.id}" data-on="${r.share_availability?1:0}" style="${_bs}background:${r.share_availability?'#FFF7E0':'#fff'};color:${r.share_availability?'#8a6a12':'var(--dark)'};border:1px solid ${r.share_availability?'#E8C24A':'var(--border)'};">📆 ${r.share_availability?(LANG==='en'?'Sharing 1:1':'Sdílím 1:1'):(LANG==='en'?'Share 1:1':'Sdílet 1:1')}</button><button class="mtScanBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:#fff;color:var(--dark);border:1px solid var(--border);">📷 ${LANG==='en'?'Tickets':'Lístky'}</button><button class="leaveTeamBtn" data-id="${r.id}" data-klub="${(g.name||'').replace(/"/g,'&quot;')}" data-gymid="${r.gym_id}" style="${_bs}background:#FEECEC;color:var(--red);border:none;">${LANG==='en'?'Leave':'Opustit'}</button></div></div>`; }).join('');
   box.querySelectorAll('.mtDashBtn').forEach(b=>b.onclick=()=>openGymTeamDash(b.dataset.gymid, b.dataset.gym));
   box.querySelectorAll('.mtSchedBtn').forEach(b=>b.onclick=()=>openCoachScheduleEditor(b.dataset.gymid, b.dataset.gym));
+  // Rozvrh celého klubu (oprávnění „Rozvrh") -- otevře správu klubu rovnou na záložce Rozvrh.
+  box.querySelectorAll('.mtGymSchedBtn').forEach(b=>b.onclick=async()=>{
+    try{
+      const { data:_g }=await supaClient.from('gyms').select('*').eq('id',b.dataset.gymid).single();
+      if(_g){ _myGymData=_g; window._myGymData=_g; }
+      window._gmInitTab=0; openSheet('shGymManage');
+      if(typeof renderGymManage==='function') await renderGymManage();
+      setTimeout(function(){ try{ if(window._gmShowTab) window._gmShowTab(0); }catch(e){} }, 250);
+    }catch(e){ toast('⚠️'); }
+  });
+  box.querySelectorAll('.mtRecepBtn').forEach(b=>b.onclick=()=>{ try{ openReception(b.dataset.gymid, b.dataset.gym); }catch(e){ toast('⚠️'); } });
+  box.querySelectorAll('.mtScanBtn').forEach(b=>b.onclick=()=>{
+    // Kontrola lístků je součástí recepce; samostatná obrazovka pro ni není.
+    try{ openReception(b.dataset.gymid, b.dataset.gym); }catch(e){ toast('⚠️'); }
+  });
   box.querySelectorAll('.leaveTeamBtn').forEach(b=>b.onclick=()=>leaveGymTeam(b.dataset.id, b.dataset.gym, b.dataset.gymid));
   box.querySelectorAll('.mtTeamBtn').forEach(b=>b.onclick=()=>openGymTeamView(b.dataset.gymid, b.dataset.gym));
   box.querySelectorAll('.mtShareBtn').forEach(b=>b.onclick=()=>toggleShareAvail(b.dataset.id, b.dataset.on!=='1'));
@@ -24144,9 +24173,9 @@ async function loadGymManageBookings(){
       ${_expBar}
       ${(_earnCoaches&&_earnCoaches.length)?`<select id="mgCoachSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:&quot;DM Sans&quot;;background:#fff;margin-bottom:10px;"><option value="">${LANG==='en'?'— Earnings per coach —':'— Výdělek podle kouče —'}</option>${_earnCoaches.map(c=>`<option value="${c.id}"${_gymCoachSel===c.id?' selected':''}>${escapeHtml(c.name)}</option>`).join('')}</select><div id="mgCoachEarn" style="margin-bottom:14px;">${_coachEarnHtml}</div>`:''}
 
-      <div class="dashHeroSingle" style="background:linear-gradient(135deg,#0A7A4F,#005A3C);border-radius:16px;padding:15px 18px;margin-bottom:10px;color:#fff;box-shadow:0 2px 10px rgba(0,96,64,.18);"><div style="font-size:11.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">${LANG==='en'?'Net collected':'Čistě vybráno'}${_expS>0?(LANG==='en'?' after expenses':' po výdajích'):''} · ${monthLabel}</div><div style="font-size:30px;font-weight:800;line-height:1.05;margin:5px 0 3px;">${f(_heroNet-_expS)}</div>${_expS>0?`<div style="font-size:12px;opacity:.85;font-weight:700;margin-bottom:2px;">${LANG==='en'?'incl. expenses ':'včetně výdajů '}−${f(_expS)}</div>`:''}${_trend!=null?`<div style="font-size:12.5px;font-weight:700;">${_trend>=0?'▲':'▼'} ${Math.abs(_trend)}% ${LANG==='en'?'vs last month':'vs minulý měsíc'}</div>`:`<div style="font-size:11px;opacity:.75;">${_isQrProv(_myGymData)?'':(LANG==='en'?'real Stripe payments, after refunds':'reálné platby ze Stripe, po refundech')}</div>`}</div>
+      <div class="dashHeroSingle" style="background:linear-gradient(135deg,#0A7A4F,#005A3C);border-radius:16px;padding:15px 18px;margin-bottom:10px;color:#fff;box-shadow:0 2px 10px rgba(0,96,64,.18);">${_netCardHtml({ big:true, net:_heroNet, expenses:_expS, trend:_trend, monthLabel:monthLabel, fmt:f, note:(_isQrProv(_myGymData)?'':(LANG==='en'?'real Stripe payments, after refunds':'reálné platby ze Stripe, po refundech')) })}</div>
       <div class="dashCards">
-        <div class="dashCardNet"><div style="font-size:10.5px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">${LANG==='en'?'Net collected':'Čistě vybráno'}${_expS>0?(LANG==='en'?' after exp.':' po výdajích'):''}</div><div style="font-size:25px;font-weight:800;line-height:1.05;margin:5px 0 2px;">${f(_heroNet-_expS)}</div>${_expS>0?`<div style="font-size:10.5px;opacity:.85;font-weight:700;">${LANG==='en'?'incl. expenses ':'včetně výdajů '}−${f(_expS)}</div>`:''}${_trend!=null?`<div style="font-size:11.5px;font-weight:700;">${_trend>=0?'▲':'▼'} ${Math.abs(_trend)}% ${LANG==='en'?'vs last mo.':'vs min.'}</div>`:`<div style="font-size:10px;opacity:.78;">${monthLabel}</div>`}</div>
+        <div class="dashCardNet">${_netCardHtml({ big:false, net:_heroNet, expenses:_expS, trend:_trend, monthLabel:monthLabel, fmt:f })}</div>
         <div class="dashCard"><div class="dashCardLbl">${LANG==='en'?'Monthly from memberships (gross)':'Měsíčně z členství (hrubé)'}</div><div class="dashCardVal" style="color:#006040;">${f(memMRR)}</div></div>
         <div class="dashCard"><div class="dashCardLbl">${LANG==='en'?'Attendance':'Docházka'}</div><div class="dashCardVal" style="color:${_overallFill!=null?_fillColor(_overallFill):'var(--mid)'};">${_overallFill!=null?_overallFill+'%':'—'}</div>${(_fillTrend!=null&&_fillTrend!==0)?`<div style="font-size:11px;font-weight:700;color:${_fillTrend>0?'#006040':'var(--red)'};">${_fillTrend>0?'▲':'▼'}${Math.abs(_fillTrend)}${LANG==='en'?'pp':'pb'}</div>`:''}</div>
         <div class="dashCard"><div class="dashCardLbl">${LANG==='en'?'Active members':'Aktivní členové'}</div><div class="dashCardVal">${new Set((payingNow||[]).map(function(m){return (m.student_id||'')+'|'+(m.child_name||'');})).size}</div></div>
@@ -24225,7 +24254,6 @@ async function loadGymManageBookings(){
         `:''}
       </div>
 
-      <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:8px;">${LANG==='en'?'“This month” = members who joined / cancelled in the selected month. VAT with your accountant. Memberships count everyone still paying, incl. those cancelling, until their period ends.':'„Tento měsíc“ = členové, co přibyli / zrušili ve vybraném měsíci. DPH řeš s účetní. Členství počítá všechny, co ještě platí, vč. rušících, dokud jim neskončí období.'}</p>
       
       ${_gymOrgForm==='nonprofit'?`
       <div style="font-size:12px;font-weight:700;color:var(--mid);margin:14px 0 6px;">🤝 ${LANG==='en'?'Income split (orientational)':'Rozdělení příjmů (orientační)'}</div>
@@ -31627,6 +31655,30 @@ async function openCoachDash(){ openSheet('shCoachDash'); const _t=$('coachDashT
 // pak umí odečíst od čistého příjmu. Není to účetnictví: čísla nikam nechodí, nejsou na
 // dokladech a nevstupují do provizí.
 let _expCache={};                     // 'kind:id:RRRR-MM' -> pole položek
+// KARTA ČISTÉHO PŘÍJMU. Existují dvě rozvržení -- jedna velká karta na mobilu (dashHeroSingle)
+// a mřížka čtyř karet v dashmode (dashCards). Číslo je v obou stejné, ale HTML se dřív psalo
+// dvakrát, takže každá změna se musela udělat na dvou místech; když se zapomnělo, mobil a
+// dashmode ukazovaly jiné číslo. Tady se skládá jednou a rozvržení si vybere velikosti.
+function _netCardHtml(o){
+  const EN=LANG==='en';
+  const big=!!o.big;                       // true = velká karta na mobilu
+  const f=o.fmt;
+  const _sub=(o.expenses>0)
+    ? ('<div style="font-size:'+(big?'12px':'10.5px')+';opacity:.85;font-weight:700;'+(big?'margin-bottom:2px;':'')+'">'
+        +(EN?'incl. expenses ':'včetně výdajů ')+'−'+f(o.expenses)+'</div>')
+    : '';
+  const _foot=(o.trend!=null)
+    ? ('<div style="font-size:'+(big?'12.5px':'11.5px')+';font-weight:700;">'+(o.trend>=0?'▲':'▼')+' '+Math.abs(o.trend)+'% '
+        +(EN?(big?'vs last month':'vs last mo.'):(big?'vs minulý měsíc':'vs min.'))+'</div>')
+    : ('<div style="font-size:'+(big?'11px':'10px')+';opacity:'+(big?'.75':'.78')+';">'+(big?(o.note||''):(o.monthLabel||''))+'</div>');
+  return '<div style="font-size:'+(big?'11.5':'10.5')+'px;opacity:.85;font-weight:600;text-transform:uppercase;letter-spacing:.03em;">'
+      +(EN?'Net collected':'Čistě vybráno')
+      +(o.expenses>0?(EN?(big?' after expenses':' after exp.'):' po výdajích'):'')
+      +(big?(' · '+(o.monthLabel||'')):'')
+    +'</div>'
+    +'<div style="font-size:'+(big?'30':'25')+'px;font-weight:800;line-height:1.05;margin:5px 0 '+(big?'3':'2')+'px;">'+f(o.net-o.expenses)+'</div>'
+    +_sub+_foot;
+}
 function _expKeyOf(kind, id, ym){ return kind+':'+id+':'+ym; }
 // „2026-09" je strojový zápis. V okně má stát „září 2026" jako všude jinde v appce.
 function _expMonthLbl(ym){
@@ -31664,25 +31716,31 @@ function _expSum(kind, id, ym){
   return rows.reduce(function(a,r){ return a+(Number(r.amount)||0); }, 0);
 }
 // Pruh nad přehledem: přepínač + tlačítko na zadávání. Vrací HTML; obsluhu naváže _expBind.
+// ID MUSÍ BÝT JEDINEČNÉ. V dashmode jsou v DOM všechny přehledy naráz (jen skryté), takže
+// pevné id="expEditBtn" našlo tlačítko cizího přehledu -- u kouče se pak okno neotevřelo,
+// protože se obsluha navěsila na skrytý pruh klubu.
+function _expUid(kind, id){ return kind+'_'+String(id||'').replace(/[^a-zA-Z0-9]/g,''); }
 function _expBarHtml(kind, id, ym, cur){
   const EN=LANG==='en';
   const on=_expShown(kind,id);
   const sum=_expSum(kind,id,ym);
-  return '<div id="expBar" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;'
+  const u=_expUid(kind,id);
+  return '<div id="expBar_'+u+'" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;'
     +'background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:9px 11px;margin-bottom:12px;">'
     +'<label style="display:flex;align-items:center;gap:8px;cursor:pointer;flex:1;min-width:180px;">'
-      +'<input type="checkbox" id="expChk"'+(on?' checked':'')+' style="width:17px;height:17px;accent-color:var(--red);cursor:pointer;">'
+      +'<input type="checkbox" id="expChk_'+u+'"'+(on?' checked':'')+' style="width:17px;height:17px;accent-color:var(--red);cursor:pointer;">'
       +'<span style="font-size:13px;font-weight:700;color:var(--dark);">'+(EN?'Show with expenses deducted':'Zobrazovat s odečtenými výdaji')+'</span>'
     +'</label>'
     +'<span style="font-size:12px;color:var(--mid);font-weight:700;">'+(sum>0?('− '+fmtPrice(sum,cur)+' '+_curSym(cur)):(EN?'no expenses':'žádné výdaje'))+'</span>'
-    +'<button id="expEditBtn" style="padding:7px 12px;background:#fff;border:1px solid var(--border);border-radius:9px;font-size:12.5px;font-weight:800;color:var(--dark);cursor:pointer;font-family:inherit;">'
+    +'<button id="expEditBtn_'+u+'" style="padding:7px 12px;background:#fff;border:1px solid var(--border);border-radius:9px;font-size:12.5px;font-weight:800;color:var(--dark);cursor:pointer;font-family:inherit;">'
       +(EN?'Expenses':'Výdaje')+'</button>'
   +'</div>';
 }
 function _expBind(kind, id, ym, cur, onChange){
-  const c=document.getElementById('expChk');
+  const u=_expUid(kind,id);
+  const c=document.getElementById('expChk_'+u);
   if(c) c.onchange=function(){ _expSetShown(kind,id,c.checked); if(typeof onChange==='function') onChange(); };
-  const b=document.getElementById('expEditBtn');
+  const b=document.getElementById('expEditBtn_'+u);
   if(b) b.onclick=function(){ _openExpenses(kind,id,ym,cur,onChange); };
 }
 // Modální okno se seznamem položek za daný měsíc.
@@ -31732,7 +31790,9 @@ function _openExpenses(kind, id, ym, cur, onChange){
       box.querySelectorAll('.expDel').forEach(function(b){
         b.onclick=async function(){
           b.disabled=true;
+          const _row=(_expCache[_expKeyOf(kind,id,ym)]||[]).find(function(x){ return String(x.id)===String(b.dataset.id); })||{};
           try{ await supaClient.from('provider_expenses').delete().eq('id',b.dataset.id); }catch(e){ toast('⚠️ '+((e&&e.message)||'')); }
+          try{ if(kind==='gym' && typeof _auditLog==='function') await _auditLog(id, 'expense_removed', null, { month:ym, label:_row.label||null, amount:_row.amount||null, currency:_row.currency||cur }); }catch(e){}
           await paint(true); if(typeof onChange==='function') onChange();
         };
       });
@@ -31755,6 +31815,10 @@ function _openExpenses(kind, id, ym, cur, onChange){
         owner_kind:kind, owner_id:id, month:ym, label:lbl, amount:amt, currency:cur,
         created_by:(currentUser&&currentUser.id)||null });
       if(error) throw error;
+      // AUDIT. U klubu s víc majiteli je „kdo sem napsal nájem 10 000" přesně ta otázka, kvůli
+      // které audit existuje -- výdaj mění číslo v přehledu. U klubů s jediným majitelem se
+      // nezapisuje nic (o tom rozhoduje _auditLog).
+      try{ if(kind==='gym' && typeof _auditLog==='function') await _auditLog(id, 'expense_added', null, { month:ym, label:lbl, amount:amt, currency:cur }); }catch(e){}
       ov.querySelector('#expLbl').value=''; ov.querySelector('#expAmt').value='';
       await paint(true); if(typeof onChange==='function') onChange();
     }catch(e){ toast('⚠️ '+((e&&e.message)||'')); }
