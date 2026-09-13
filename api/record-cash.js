@@ -15,6 +15,7 @@
 // Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
 
 import { ladderRate as _mtlRate, acquisitionRate as _mtlAcq, introFreeFor as _introFree, hasOrgRate as _hasOrgRate } from './_rate.js';
+import { isTestMode } from './_config.js';
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -279,6 +280,12 @@ async function consumeStudentCredit(memberId, creditRowId, sc) {
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
+  // TESTOVACÍ REŽIM. Tenhle soubor příznak vůbec nenastavoval, takže KAŽDÁ hotovostní a QR
+  // transakce vypadala jako ostrá -- a doklad, který z ní vzniká, taky. Úklid testovacích dat
+  // je pak nesmazal (vystavený doklad chrání spouštěč) a v seznamu zůstávaly doklady
+  // k neexistujícím platbám. Rozhoduje o tom server, ne prohlížeč.
+  let _test = false;
+  try { _test = await isTestMode(); } catch (e) {}
   if (!SB || !KEY) return res.status(500).json({ error: 'env not set' });
   try {
     const b = (typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body) || {};
@@ -350,6 +357,7 @@ export default async function handler(req, res) {
       let _gymPayee = gym.stripe_account || null;
       if (coach_id) { try { const _cp = await sb(`profiles?id=eq.${coach_id}&select=gym_payout_account`); const _cpa = _cp && _cp[0] && _cp[0].gym_payout_account; if (_cpa) { _gymPayee = _cpa; _dokladPayoutCoach = coach_id; } } catch(e){} }
       row = {
+        test_mode: _test,
         // Kdo doopravdy platil, když to není účastník (zástupce za mladistvého). Doklad musí
         // znít na plátce, ale docházka patří účastníkovi -- proto obojí zvlášť.
         gym_id, coach_id: coach_id || null, member_id: member_id || null,
@@ -399,6 +407,7 @@ export default async function handler(req, res) {
       const _acqMonths = (_acq != null && !_cc) ? 1 : null;
       const _baseRate  = (_acq != null && !_cc) ? rate : null;
       row = {
+        test_mode: _test,
         gym_id: null, coach_id, member_id: member_id || null,
         paid_by: paid_by || null, paid_by_name: _payerName,
         session_at_issue: session_at_issue || null,

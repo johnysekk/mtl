@@ -9,6 +9,8 @@
 // Doklad vystavuje ASOCIACE KLUBU. MTL v tom není smluvní stranou, stejně jako u dokladu
 // poskytovatele studentovi.
 
+import { isTestMode } from './_config.js';
+
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -102,6 +104,10 @@ export default async function handler(req, res) {
   try {
     if (!SB || !KEY) return res.status(500).json({ error: 'server not configured' });
     const { oc_id, method, test_mode } = req.body || {};
+
+    // Testovací režim si server zjistí sám (viz org-ticket-record.js).
+    let _test = !!test_mode;
+    try { _test = _test || (await isTestMode()); } catch (e) {}
     if (!oc_id) return res.status(400).json({ error: 'oc_id required' });
 
     const oc = (await sb(`organization_clubs?id=eq.${encodeURIComponent(oc_id)}&select=*`))[0];
@@ -145,12 +151,12 @@ export default async function handler(req, res) {
         payment_method: method || 'pis',
         paid_to: 'organization',
         created_at: oc.fee_paid_at || new Date().toISOString(),
-        test_mode: !!test_mode,
+        test_mode: _test,
       }),
     });
     const txId = (tx && tx[0] && tx[0].id) || null;
 
-    const no = await issueOrgDoklad({ ...oc, fee_label: label }, org, amount, currency, method || 'pis', !!test_mode, txId);
+    const no = await issueOrgDoklad({ ...oc, fee_label: label }, org, amount, currency, method || 'pis', _test, txId);
     return res.status(200).json({ ok: true, transaction_id: txId, doklad_no: no, mtl_fee: 0 });
   } catch (e) {
     return res.status(500).json({ error: e.message });

@@ -12,6 +12,7 @@
 // Struktura je záměrně shodná s org-fee-record.js.
 
 import { orgRate } from './_rate.js';
+import { isTestMode } from './_config.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -96,6 +97,12 @@ export default async function handler(req, res) {
     const { organization_id, event_id, ticket_id, amount, currency, payment_method,
             buyer_name, buyer_email, payment_intent, test_mode } = b;
 
+    // TESTOVACÍ REŽIM ROZHODUJE SERVER, ne to, co pošle prohlížeč. Když klient příznak
+    // nepošle (nebo pošle false) a platforma je v testu, vznikl by doklad označený jako
+    // OSTRÝ -- ten pak nejde smazat při úklidu a plete se s účetními doklady.
+    let _test = !!test_mode;
+    try { _test = _test || (await isTestMode()); } catch (e) {}
+
     // Vnitřní volání: stejná ochrana jako u record-cash, ať to nejde spustit zvenčí.
     const trusted = (b.intSecret && process.env.PIS_INTERNAL_SECRET && b.intSecret === process.env.PIS_INTERNAL_SECRET);
     if (!trusted) return res.status(403).json({ error: 'forbidden' });
@@ -138,7 +145,7 @@ export default async function handler(req, res) {
         commission_status: fee > 0 ? 'pending' : 'collected',
         commission_month: month,
         paid_by_name: buyer_name || null,
-        test_mode: !!test_mode,
+        test_mode: _test,
       }),
     });
     const txId = (tx && tx[0] && tx[0].id) || null;
@@ -146,7 +153,7 @@ export default async function handler(req, res) {
     const label = evType === 'fight_night' ? 'Vstupenka · fight night'
                 : evType === 'competition' ? 'Vstupenka · soutěž' : 'Vstupenka';
     const no = await issueDoklad(org, { name: buyer_name, email: buyer_email },
-      gross, currency, payment_method || 'pis', !!test_mode, txId, label, payment_intent);
+      gross, currency, payment_method || 'pis', _test, txId, label, payment_intent);
 
     return res.status(200).json({ ok: true, transaction_id: txId, doklad_no: no, mtl_fee: fee, mtl_rate: rate });
   } catch (e) {
