@@ -5555,9 +5555,15 @@ const NOTIF_T = {
   gym_ref_thanks: (d)=> LANG==='en'
     ? `🎁 Thanks for the invite — ${d.student||'someone'} joined ${d.gym_name||'a klub'} through your link!${d.pct?` If you're a member there, your next month is ${d.pct}% off too.`:''}`
     : `🎁 Díky za pozvánku — ${d.student||'někdo'} se přes tvůj odkaz přidal do ${d.gym_name||'klubu'}!${d.pct?` Pokud tam máš členství, máš příští měsíc taky ${d.pct}% levnější.`:''}`,
-  gym_member_joined: (d)=> LANG==='en'
-    ? `🎟️ Congrats! ${d.student||'A student'} just bought a membership for ${d.amt} ${d.sym}/mo.`
-    : `🎟️ Gratulujeme! Student ${d.student||''} si právě zakoupil členství za ${d.amt} ${d.sym}/měs.`,
+  // NÁZEV KLUBU JE V HLÁŠCE POVINNÝ. Kdo má víc klubů, jinak nepozná, kam ten člen přibyl --
+  // stejný student si může koupit členství v každém z nich. Doplněno i jméno varianty.
+  gym_member_joined: (d)=>{
+    const _pl=d.className?((LANG==='en'?' (':' (')+d.className+')'):'';
+    const _wh=d.gym_name?((LANG==='en'?' at your club ':' ve tvém klubu ')+d.gym_name):'';
+    return LANG==='en'
+      ? `🎟️ Congrats! ${d.student||'A student'} just bought a membership${_pl} for ${d.amt} ${d.sym}/mo${_wh}.`
+      : `🎟️ Gratulujeme! Student ${d.student||''} si právě zakoupil členství${_pl} za ${d.amt} ${d.sym}/měs${_wh}.`;
+  },
   walkin_drop: (d)=> LANG==='en'
     ? `🚶 Walk-in: ${d.student||'a guest'} paid for a drop-in${d.amt?(' ('+d.amt+' '+(d.sym||'')+')'):''} — tap for today's attendance.`
     : `🚶 Walk-in: ${d.student||'host'} zaplatil jednorázový vstup${d.amt?(' ('+d.amt+' '+(d.sym||'')+')'):''} — klepni pro dnešní docházku.`,
@@ -13593,6 +13599,7 @@ function _planTerm(plan){
   return out;
 }
 async function subscribeGymMembership(g, plan, _child, _cleared){
+  if(!_planSellable(plan)) return;
   // Zástupce platí za mladistvého: rezervace i Stripe metadata musí nést JEHO id, ne id toho,
   // kdo zrovna platí. Bez parametru se nic nemění.
   const _payFor=(window._payOnBehalf&&window._payOnBehalf.id)||null;
@@ -13619,7 +13626,7 @@ async function subscribeGymMembership(g, plan, _child, _cleared){
     const { data: mb, error } = await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0,
       gym_id: g.id, gym_name: g.name||'Gym', student_id: currentUser.id, student_name: currentUser.name||'Student', paid_to: payee.coachId?'coach':'gym',
       amount: _term.price||0, currency: (plan._cur||g.currency||'CZK'), status:'pending', acq_source: _acqSrc(g),
-      plan_name: plan.name||null, plan_access: JSON.stringify((plan.access&&plan.access.length)?plan.access:['all']), plan_classes: ((plan.classes&&plan.classes.length)?JSON.stringify(plan.classes):null)
+      plan_name: plan.name||null, plan_access: JSON.stringify(_planAccess(plan)), plan_classes: ((plan.classes&&plan.classes.length)?JSON.stringify(plan.classes):null)
     }).select().single();
     if(error){ toast('⚠️ '+error.message); return; }
     if(payee.coachId){ try{ await supaClient.from('gym_memberships').update({ coach_id: payee.coachId }).eq('id', mb.id); }catch(e){} }
@@ -13629,7 +13636,7 @@ async function subscribeGymMembership(g, plan, _child, _cleared){
     { const _lid=plan.lead||payee.coachId||null; const _lnm=plan.lead?(plan.leadName||null):(payee.coachId?payee.name:null); if(_lid){ try{ await supaClient.from('gym_memberships').update({ lead_coach_id:_lid, lead_coach_name:_lnm }).eq('id', mb.id); }catch(e){} } }
     let _gymOwnerPartner=false, _ownerFounding=false, _ownerScore=0, _ownerBankai=false, _ownerOrg=false; try{ const _ppid=(payee&&payee.coachId)||g.owner_id; if(_ppid){ const { data: ow } = await supaClient.from('profiles').select('partner, founding, coach_ref_score,bankai_eligible,org_rate_until').eq('id', _ppid).single(); _ownerOrg=!!(ow&&ow.org_rate_until&&new Date(String(ow.org_rate_until).slice(0,10)+'T23:59:59')>=new Date()); _gymOwnerPartner=!!(ow&&ow.partner); _ownerFounding=!!(ow&&ow.founding); _ownerScore=(ow&&ow.coach_ref_score)||0; _ownerBankai=!!(ow&&ow.bankai_eligible); } }catch(e){}
     try{ if(mb&&mb.id) await supaClient.from('gym_memberships').update({gym_keep_pct:((typeof _gymOwnerPartner!=='undefined'&&_gymOwnerPartner)||(typeof _gp!=='undefined'&&_gp))?0.99:((typeof _ownerScore!=='undefined'&&_ownerScore>=10)?0.98:((typeof _ownerScore!=='undefined'&&_ownerScore>=3)?0.97:0.965))}).eq('id',mb.id); }catch(e){}
-    const url = `/api/pay?type=membership&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&planName=${encodeURIComponent(plan.name||'Membership')}&amount=${_term.price||0}&currency=${plan._cur||g.currency||'CZK'}&interval=month&months=${parseInt(plan.months,10)||1}${_term.endsOn?('&endsOn='+encodeURIComponent(_term.endsOn)):''}&membershipId=${encodeURIComponent(mb.id)}&gymId=${encodeURIComponent(g.id)}&studentId=${encodeURIComponent(_payFor||currentUser.id)}&income=${encodeURIComponent(plan.income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&access=${encodeURIComponent(((plan.access&&plan.access.length)?plan.access:['all']).join(','))}&disc=${encodeURIComponent(plan.disc||'')}&partner=${_gymOwnerPartner?1:0}&fee=${(_ladderRate('stripe',{partner:_gymOwnerPartner,score:_ownerScore,bankai:_ownerBankai})*100)}&acq=${encodeURIComponent(_acqSrc(g))}${(window._gymRef && window._gymRef.gym===g.id && (g.member_ref_pct||0)>0) ? ('&refPct='+g.member_ref_pct+'&refUser='+encodeURIComponent(window._gymRef.ref||'')) : ''}`;
+    const url = `/api/pay?type=membership&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&planName=${encodeURIComponent(plan.name||'Membership')}&amount=${_term.price||0}&currency=${plan._cur||g.currency||'CZK'}&interval=month&months=${parseInt(plan.months,10)||1}${_term.endsOn?('&endsOn='+encodeURIComponent(_term.endsOn)):''}&membershipId=${encodeURIComponent(mb.id)}&gymId=${encodeURIComponent(g.id)}&studentId=${encodeURIComponent(_payFor||currentUser.id)}&income=${encodeURIComponent(plan.income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&access=${encodeURIComponent(_planAccess(plan).join(','))}&disc=${encodeURIComponent(plan.disc||'')}&partner=${_gymOwnerPartner?1:0}&fee=${(_ladderRate('stripe',{partner:_gymOwnerPartner,score:_ownerScore,bankai:_ownerBankai})*100)}&acq=${encodeURIComponent(_acqSrc(g))}${(window._gymRef && window._gymRef.gym===g.id && (g.member_ref_pct||0)>0) ? ('&refPct='+g.member_ref_pct+'&refUser='+encodeURIComponent(window._gymRef.ref||'')) : ''}`;
     setTimeout(()=>{ window.location.href = url; }, 500);
   } catch(e){ console.error('subscribeGymMembership', e); toast('⚠️ '+e.message); }
 }
@@ -20901,6 +20908,7 @@ function showTicketQR(ticketId){
 }
 function _guestMemb(plan){
   const g=_recGym; const list=$('recList'); if(!g||!list||!plan) return;
+  if(!_planSellable(plan)) return;
   const EN=LANG==='en'; const cur=g.currency||'CZK'; const sym=_curSym(cur);
   const price=plan.price||0; const rate=_recRate(); const fee=Math.round(price*rate*100)/100;
   const qrMode=(typeof _mtlPayMode==='function'&&_mtlPayMode(g)==='qr_bank') && !!g.receiver_id_value;
@@ -20963,7 +20971,7 @@ function _guestMemb(plan){
         var r1=await _recordCashTx(txr);
         if(r1&&r1.error){ toast('\u26a0\ufe0f '+r1.error.message); btns.forEach(function(b){ if(b) b.disabled=false; }); return; }
         var nd=new Date(); nd.setMonth(nd.getMonth()+(parseInt(plan.months,10)||1));   /* 1 = monthly (unchanged); 3/6/12 = one-time term */
-        await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:(_acct?_acct.id:null), student_name:nnm, guest_email:(_acct?null:v.email), guest_name:(_acct?null:nnm), guest_phone:(_acct?null:(v.phone||null)), guest_token:(_acct?null:tok), paid_to:'gym', coach_id:plan.coach||null, amount:price, currency:cur, status:'active', period_end:nd.toISOString(), plan_name:plan.name||null, plan_access:JSON.stringify((plan.access&&plan.access.length)?plan.access:['all']), discipline:plan.disc||null, acq_source:'direct' });
+        await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:(_acct?_acct.id:null), student_name:nnm, guest_email:(_acct?null:v.email), guest_name:(_acct?null:nnm), guest_phone:(_acct?null:(v.phone||null)), guest_token:(_acct?null:tok), paid_to:'gym', coach_id:plan.coach||null, amount:price, currency:cur, status:'active', period_end:nd.toISOString(), plan_name:plan.name||null, plan_access:JSON.stringify(_planAccess(plan)), discipline:plan.disc||null, acq_source:'direct' });
         try{ await supaClient.auth.signInWithOtp({ email:v.email, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } }); }catch(e){}
         try{ if(g.id) await _notifyGymDesk(g.id, g.owner_id, function(EN){ var LANG=EN?'en':'cs'; return ((EN?('Walk-in membership: '+nnm+' ('+(plan.name||'')+')'):('Walk-in permanentka: '+nnm+' ('+(plan.name||'')+')'))); }); }catch(e){}
         toast((EN?'\u2705 Membership active \u00b7 link sent':'\u2705 \u010clenstv\u00ed aktivn\u00ed \u00b7 odkaz odesl\u00e1n'),1);
@@ -21292,6 +21300,7 @@ function _recpMembPay(pi){
   const rate=_recRate();
   const plans=(typeof gymMembPlans==='function'?gymMembPlans(g):[])||[];
   const plan=plans[+pi]; if(!plan){ toast('\u26a0\ufe0f'); return; }
+  if(!_planSellable(plan)) return;
   const price=plan.price||0; const fee=Math.round(price*rate*100)/100;
   const qrMode=(typeof _mtlPayMode==='function'&&_mtlPayMode(g)==='qr_bank');
   const hasRecv=!!g.receiver_id_value;
@@ -21348,7 +21357,7 @@ function _recpMembPay(pi){
       else if(_d2 && _d2.kind==='refer' && _refSel && _refSel.id && _refSel.id!==sid){ try{ var _rtk=(typeof _freshTok==='function')?await _freshTok():null; await fetch('/api/reward-referrer',{ method:'POST', headers:{ 'Content-Type':'application/json', 'x-access-token':_rtk||'' }, body: JSON.stringify({ refUser:_refSel.id, refPct:_refSel.pct, gymId:g.id }) }); }catch(e){} }
       var base=Date.now(); var existed=false;
       try{ const { data:ex } = await supaClient.from('gym_memberships').select('id,period_end,status').eq('gym_id',g.id).eq('student_id',sid).eq('plan_name',plan.name||null).in('status',['active','cancelling']).order('period_end',{ascending:false}).limit(1); if(ex&&ex.length){ existed=true; var pe=ex[0].period_end?new Date(ex[0].period_end).getTime():base; if(pe<base) pe=base; var nd=new Date(pe); nd.setMonth(nd.getMonth()+1); await supaClient.from('gym_memberships').update({ status:'active', period_end:nd.toISOString(), cancelled_at:null }).eq('id',ex[0].id); } }catch(e){}
-      if(!existed){ try{ var nd2=new Date(base); nd2.setMonth(nd2.getMonth()+1); await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:sid, student_name:nm||'Student', paid_to:'gym', coach_id:plan.coach||null, amount:price, currency:cur, status:'active', period_end:nd2.toISOString(), plan_name:plan.name||null, plan_access:JSON.stringify((plan.access&&plan.access.length)?plan.access:['all']), discipline:plan.disc||null, acq_source:'direct' }); }catch(e){} }
+      if(!existed){ try{ var nd2=new Date(base); nd2.setMonth(nd2.getMonth()+1); await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:sid, student_name:nm||'Student', paid_to:'gym', coach_id:plan.coach||null, amount:price, currency:cur, status:'active', period_end:nd2.toISOString(), plan_name:plan.name||null, plan_access:JSON.stringify(_planAccess(plan)), discipline:plan.disc||null, acq_source:'direct' }); }catch(e){} }
       toast((EN?'\u2705 Confirmed':'\u2705 Potvrzeno'), 1);
       openReception(g.id, g.name);
     }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); btns.forEach(function(b){ if(b) b.disabled=false; }); }
@@ -21362,6 +21371,7 @@ function _recpMembPay(pi){
 // statistiky i XP zůstávají jemu, mění se jen to, kdo účet uhradil. Bez toho parametru se nic
 // nemění a člověk platí sám za sebe.
 async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom, _dpick){
+  if(kind==='memb' && !_planSellable(plan)) return;
   const _stuId=(_forWhom&&_forWhom.id)||currentUser.id;
   let _qrPayeeObj=g, _qrPaidTo='gym', _qrPayeeCoach=null, _qrCredit='', _qrRefD=0;
   const EN=LANG==='en';
@@ -21453,7 +21463,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom, _dpick){
       return intentId;
     }
     try{
-      const { data:mb, error:e1 } = await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:_stuId, student_name:sName, paid_to:'gym', amount:price, currency:cur, status:'pending_offline', ref_by:_mbRefBy, ref_pct:(_mbRefPct||null), ref_credit_id:_mbRefCreditId, plan_name:label, plan_access:JSON.stringify((plan&&plan.access&&plan.access.length)?plan.access:['all']), discipline:disc, acq_source:_acqSrc(g) }).select('id').single();
+      const { data:mb, error:e1 } = await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:_stuId, student_name:sName, paid_to:'gym', amount:price, currency:cur, status:'pending_offline', ref_by:_mbRefBy, ref_pct:(_mbRefPct||null), ref_credit_id:_mbRefCreditId, plan_name:label, plan_access:JSON.stringify(_planAccess(plan)), discipline:disc, acq_source:_acqSrc(g) }).select('id').single();
       if(e1){ toast('\u26a0\ufe0f '+e1.message); return null; }
       intentId=mb&&mb.id; return intentId;
     }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return null; }
@@ -22067,8 +22077,30 @@ function sameAccess(a, b){
     return norm(a)===norm(b);
   }catch(e){ return false; }
 }
+// ROZSAH PRODÁVANÉHO ČLENSTVÍ. Nikdy se sem nedosazuje „všechny lekce" jen proto, že plán
+// rozsah nemá -- to je nejdražší varianta a nesmí vzniknout mlčky. Rozsah je u plánu povinný;
+// tohle chytá jen staré plány založené předtím, než ta povinnost platila.
+function _planAccess(plan){
+  const a=(plan && plan.access && plan.access.length) ? plan.access.slice() : [];
+  if(a.length) return a;
+  // Starý plán z doby, kdy klub měl jedinou cenu členství a rozsah neexistoval.
+  return (plan && plan.id==='legacy') ? ['all'] : [];
+}
+// POSLEDNÍ POJISTKA PŘED PRODEJEM. Rozsah je u plánu povinný, takže sem se nemá jak dostat
+// plán bez něj -- leda ze starých dat. Prodat ho ale nelze: členství bez rozsahu by v seznamu
+// členů svítilo „nenastaveno" a nikdo by nevěděl, co si student koupil.
+function _planSellable(plan){
+  if(_planAccess(plan).length) return true;
+  toast(LANG==='en'
+    ? 'This membership has no classes set. The club must set them before it can be sold.'
+    : 'Tohle \u010dlenstv\u00ed nem\u00e1 nastaven\u00e9 lekce. Klub je mus\u00ed doplnit, ne\u017e ho lze prodat.');
+  return false;
+}
 function accessLabel(access){
-  if(!access || !access.length || access.includes('all')) return LANG==='en'?'All classes':'Všechny lekce';
+  // Prázdno NENÍ „všechny lekce". Rozsah se u plánu vybírá povinně, takže prázdno znamená
+  // starý záznam nebo chybu -- a tvrdit u něj „všechny lekce" je nejdražší možný omyl.
+  if(!access || !access.length) return LANG==='en'?'not set':'nenastaveno';
+  if(access.includes('all')) return LANG==='en'?'All classes':'Všechny lekce';
   return access.map(levelLabel).join(', ');
 }
 function addCustomPlanTag(i){
@@ -33367,10 +33399,13 @@ async function _openGymMemberDetailInner(sid, name){
       +'</div>';
   }
   html+=`<div class="prow-group">`
-    +stat('🥋', EN?'Trainings attended (total)':'Odtrénováno (celkem)', totalTrain, '#7A3FBF')
-    +stat('🥊', EN?'Single classes bought':'Jednorázových lekcí', drops.length)
-    +stat('📅', EN?'Member for':'Členem už', monthsMember+(EN?(monthsMember===1?' month':' months'):' měs.'))
-    +stat('👀', EN?'Last attended':'Naposledy byl', fmtD(lastSeen))
+    // Popisky říkají, co to je a ČEHO SE TO TÝKÁ. Všechny čtyři dotazy jsou omezené na tenhle
+    // klub (eq gym_id), takže „u nás" není fráze, ale rozsah dat. Bez toho trenér nevěděl,
+    // jestli kouká na svůj klub, nebo na celé MTL.
+    +stat('🥋', EN?'Classes attended here':'Byl na lekcích u nás', totalTrain, '#7A3FBF')
+    +stat('🥊', EN?'Drop-ins bought here':'Koupil vstupů u nás', drops.length)
+    +stat('📅', EN?'Member here for':'Členem u nás', monthsMember+(EN?(monthsMember===1?' month':' months'):' měs.'))
+    +stat('👀', EN?'Last class here':'Naposledy u nás', fmtD(lastSeen))
     +`</div>`;
   try{ html+=memberBeltHtml(sid,_belts); }catch(e){}
   try{ html+=memberFighterHtml(sid, _mdFighter, _mdRec); }catch(e){}
@@ -33380,7 +33415,7 @@ async function _openGymMemberDetailInner(sid, name){
       return `<div style="border:1px solid var(--border);border-radius:12px;padding:11px 13px;margin-bottom:8px;">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="font-size:14px;font-weight:700;">${escapeHtml(m.plan_name||(EN?'Membership':'Členství'))} <span style="font-size:11px;color:#006040;background:#E8F5EE;border:1px solid #A8E6C0;border-radius:8px;padding:1px 7px;">${accessLabel(accOf(m))}</span></div><span style="font-size:12px;font-weight:700;color:${stCol};">${stTxt}</span></div>
         <div style="font-size:12px;color:var(--mid);margin-top:5px;line-height:1.7;">${EN?'Started':'Začátek'}: ${fmtD(m.created_at)}${m.period_end?`<br>${st==='cancelling'?(EN?'Ends':'Končí'):(EN?'Renews/ended':'Obnova/konec')}: ${fmtD(m.period_end)}`:''}<br>${EN?'Price':'Cena'}: ${fmtPrice(m.amount||0,m.currency)} ${_curSym(m.currency)}/${EN?'mo':'měs'}</div>
-        ${st!=='ended'?`<div style="font-size:11px;color:var(--light);margin-top:8px;margin-bottom:4px;">${EN?'Access (tap to change which classes this membership covers):':'Přístup (klepni a změň, na jaké lekce členství platí):'}</div><div style="display:flex;flex-wrap:wrap;gap:5px;">${[['all',EN?'🌐 All':'🌐 Vše'],['beginner','🌱 '+(EN?'Beginner':'Začátečníci')],['advanced','📈 '+(EN?'Advanced':'Pokročilí')],['fighter','🏆 '+(EN?'Fighter':'Závodníci')],['kids','🧒 '+(EN?'Kids':'Děti')],['women','🚺 '+(EN?'Women':'Ženy')],['sparring','🥊 Sparring']].map(([v,lbl])=>{ const on=accOf(m).includes(v); return `<span class="mdAcc" data-mid="${m.id}" data-v="${v}" style="cursor:pointer;font-size:11px;font-weight:700;padding:5px 10px;border-radius:12px;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'transparent'};color:${on?'#fff':'var(--mid)'};">${lbl}</span>`; }).join('')}</div>`:''}${st!=='ended'?`<button class="mdRemoveMember" data-mid="${m.id}" data-sub="${m.stripe_subscription||''}" data-mname="${escapeHtml(m.student_name||name||'')}" style="width:100%;margin-top:10px;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'End / remove membership':'Ukončit / odebrat členství'}</button>`:''}
+        ${st!=='ended'?`<div style="font-size:11px;color:var(--light);margin-top:8px;margin-bottom:4px;">${EN?'Access (tap to change which classes this membership covers):':'Přístup (klepni a změň, na jaké lekce členství platí):'}</div><div style="display:flex;flex-wrap:wrap;gap:5px;">${[['beginner','🌱 '+(EN?'Beginner':'Začátečníci')],['advanced','📈 '+(EN?'Advanced':'Pokročilí')],['fighter','🏆 '+(EN?'Fighter':'Závodníci')],['kids','🧒 '+(EN?'Kids':'Děti')],['women','🚺 '+(EN?'Women':'Ženy')],['sparring','🥊 Sparring'],['all',EN?'🌐 All':'🌐 Vše']].map(([v,lbl])=>{ const on=accOf(m).includes(v); return `<span class="mdAcc" data-mid="${m.id}" data-v="${v}" style="cursor:pointer;font-size:11px;font-weight:700;padding:5px 10px;border-radius:12px;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'transparent'};color:${on?'#fff':'var(--mid)'};">${lbl}</span>`; }).join('')}</div>`:''}${st!=='ended'?`<button class="mdRemoveMember" data-mid="${m.id}" data-sub="${m.stripe_subscription||''}" data-mname="${escapeHtml(m.student_name||name||'')}" style="width:100%;margin-top:10px;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'End / remove membership':'Ukončit / odebrat členství'}</button>`:''}
       </div>`; }).join('');
   } else { html+=`<p style="font-size:13px;color:var(--light);padding:6px 0;">${EN?'No memberships — drop-ins only.':'Bez členství — jen jednorázové lekce.'}</p>`; }
   // GRACE — tolerated visits (member checked in free while the membership was past due)
@@ -34106,7 +34141,7 @@ async function openCoachStudentDetail(sid, name, coachId){
   const discs=[...new Set(activeB.map(b=>b.discipline).filter(Boolean))].map(v=>{ const m=discMeta.find(x=>x.v===v); return m?(m.emoji+' '+(EN?m.en:m.cs)):v; });
   const stat=(ic,lbl,val,col)=>`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">${ic}</div><div class="prow-lbl">${lbl}</div></div><span class="prow-val"${col?` style="color:${col};"`:''}>${val}</span></div>`;
   let html=`<div class="prow-group">`
-    +stat('🥋', EN?'Lessons coached (total)':'Odtrénováno (celkem)', totalLessons, '#7A3FBF')
+    +stat('🥋', EN?'Classes led':'Vedl lekcí', totalLessons, '#7A3FBF')
     +stat('🤝', EN?'1-on-1 (in person)':'1-on-1 (naživo)', inPersonH.length)
     +stat('🌐', EN?'Online coaching':'Online coaching', onlineH.length)
     +stat('👥', EN?'Group classes':'Skupinových lekcí', grp)
@@ -41648,7 +41683,7 @@ async function showPaidPopup(){
           else if(gym && gym.owner_id){
             const sym = _curSym(gym.currency);
             const studentPaid = fmtPrice(mb.amount||gym.membership_price||0, gym.currency);
-            await supaClient.from('notifications').insert({ user_id: gym.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'gym_member_joined', student: currentUser?.name||'Student', amt: studentPaid, sym, sid: (mb.student_id||currentUser?.id||null), gym_id: mb.gym_id, className: (mb.plan_name||null) }), message:`🎟️ ${LANG==='en'?`Congrats! ${currentUser?.name||'A student'} just bought a membership for ${studentPaid} ${sym}/mo.`:`Gratulujeme! Student ${currentUser?.name||''} si právě zakoupil členství za ${studentPaid} ${sym}/měs.`}` });
+            await supaClient.from('notifications').insert({ user_id: gym.owner_id, type:'booking', read:false, data: JSON.stringify({ kind:'gym_member_joined', student: currentUser?.name||'Student', amt: studentPaid, sym, sid: (mb.student_id||currentUser?.id||null), gym_id: mb.gym_id, gym_name: ((gym&&gym.name)||mb.gym_name||null), className: (mb.plan_name||null) }), message:`🎟️ ${(function(){ const _pl=mb.plan_name?(' ('+mb.plan_name+')'):''; const _wh=((gym&&gym.name)||mb.gym_name)?((LANG==='en'?' at your club ':' ve tvém klubu ')+((gym&&gym.name)||mb.gym_name)):''; return LANG==='en'?`Congrats! ${currentUser?.name||'A student'} just bought a membership${_pl} for ${studentPaid} ${sym}/mo${_wh}.`:`Gratulujeme! Student ${currentUser?.name||''} si právě zakoupil členství${_pl} za ${studentPaid} ${sym}/měs${_wh}.`; })()}` });
             updateNotifBadge();
           }
           try{ const _refU=params.get('refuser'), _refP=parseInt(params.get('refpct'))||0; if(_refU && _refP>0 && _refU!==currentUser?.id){ await supaClient.from('notifications').insert({ user_id:_refU, type:'system', read:false, data: JSON.stringify({ kind:'gym_ref_thanks', gym_name:(gym&&gym.name)||mb.gym_name||'', student: currentUser?.name||'Student', pct:_refP }), message:'🎁 Někoho jsi přivedl do klubu — díky!' }); if(mb&&mb.gym_id&&gAcct){ fetch(`/api/session?sessionId=${encodeURIComponent(sessionId||'')}&gymAccount=${encodeURIComponent(gAcct)}&refUser=${encodeURIComponent(_refU)}&refPct=${_refP}&gymId=${encodeURIComponent(mb.gym_id)}`).catch(()=>{}); } } }catch(e){}
