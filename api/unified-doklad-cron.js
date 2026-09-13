@@ -405,6 +405,44 @@ export default async function handler(req, res) {
       : `commission_collected_at=gte.${dayStart}&commission_collected_at=lt.${dayEnd}`;
     const tx = await sb(`transactions?select=gym_id,coach_id,organization_id,paid_to,payee_kind,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method&commission_status=in.(collected${preview?',pending,failed':''})&${DAILY?_dailyFilter:`commission_month=eq.${period}`}&mtl_fee=gt.0&limit=50000`);
 
+    // ── DOKLAD AŽ PO STRŽENÍ ────────────────────────────────────────────────────────────
+    // Doklad se vystavuje na UHRAZENOU provizi. Karetní provize je vybraná hned při platbě,
+    // hotovost/QR/převod až strhnutím z karty od 6. dne dalšího měsíce. Tenhle cron ale běží
+    // denně, takže 1. dne vystavil doklad jen s karetní částí -- a protože na období a měnu
+    // vzniká jediný doklad, hotovostní část se pak už na žádný nedostala.
+    //
+    // Nově se pro každý subjekt a měnu čeká, dokud v tom období zůstává nestržená provize.
+    // Jakmile poslední řádek zčerná na 'collected', vystaví se doklad kompletní.
+    //
+    // VÝJIMKA: částky pod minimem Stripe zůstávají 'pending' schválně a čekají, až přeteče.
+    // Ty se ignorují, jinak by doklad nevznikl nikdy.
+    const STRIPE_MIN = { czk: 1500, eur: 50, usd: 50, gbp: 30, pln: 200, huf: 17500, chf: 50, sek: 300, dkk: 250, nok: 300 };
+    const _minFor = (cur) => (STRIPE_MIN[String(cur || 'czk').toLowerCase()] || 50);
+    const _waiting = {};   // 'kind:id:mena' -> nestržená částka
+    if (!DAILY && !preview) {
+      try {
+        const unpaid = await sb(`transactions?select=gym_id,coach_id,organization_id,paid_to,payee_kind,currency,mtl_fee,mtl_fee_refunded&commission_status=in.(pending,failed)&commission_month=eq.${period}&mtl_fee=gt.0&limit=50000`);
+        (unpaid || []).forEach(r => {
+          const net = (Number(r.mtl_fee) || 0) - (Number(r.mtl_fee_refunded) || 0);
+          if (net <= 0) return;
+          const cur = String(r.currency || 'czk').toLowerCase();
+          // Stejné klíče jako u vystavování: komu provize patří.
+          const keys = [];
+          if (r.gym_id) keys.push('gym:' + r.gym_id);
+          if (r.organization_id) keys.push('organization:' + r.organization_id);
+          if (r.coach_id) keys.push('coach:' + r.coach_id);
+          keys.forEach(k => { const kk = k + ':' + cur; _waiting[kk] = (_waiting[kk] || 0) + net; });
+        });
+      } catch (e) { console.error('[doklad] kontrola nestržených:', e.message); }
+    }
+    // true = ještě se čeká na stržení, doklad se nevystaví
+    const _holdFor = (kind, entityId, cur) => {
+      if (DAILY || preview) return false;
+      const id = String(entityId || '').replace(/\|payout$/, '');
+      const amt = _waiting[kind + ':' + id + ':' + String(cur || 'czk').toLowerCase()] || 0;
+      return amt >= _minFor(cur);
+    };
+
     // Posbírat diagnostiku hned tady -- tx a buckety jsou lokální pro tenhle blok a u návratové
     // hodnoty už neexistují. Bez toho se z odpovědi nedá poznat, jestli filtr nic nenašel, nebo
     // našel transakce s nulovou provizí.
@@ -462,6 +500,8 @@ export default async function handler(req, res) {
       if (TEST && !dailyAny && String(ownerId) !== FOUNDER_UUID) { skipped++; return; }
       // Jeden doklad na subjekt + období + měnu. U kouče ZVLÁŠŤ za každou identitu: vlastní 1:1 a
       // režim klub jsou dva plátci -- dřív druhý doklad narazil na první a nevznikl.
+      // Nestržená provize za tohle období -> doklad počká na příští běh.
+      if (_holdFor(kind, entityId, cur)) { deferred++; return; }
       const _idf = (kind === 'coach') ? (_payout ? '&billing_identity=eq.payout' : '&or=(billing_identity.is.null,billing_identity.eq.own)') : '';
       const ex = await sb(`commission_doklady?select=id&${col}=eq.${entityId}&period_month=eq.${period}&currency=ilike.${encodeURIComponent(cur)}&kind=eq.unified${_idf}&limit=1`);
       if (ex && ex.length) { skipped++; return; }
