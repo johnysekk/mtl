@@ -14,7 +14,7 @@
 
 import PDFDocument from 'pdfkit';
 import { DEJAVU_CZ } from './_dejavu-cz.js';
-import { isTestMode } from './_config.js';
+import { isTestMode, minChargeFor } from './_config.js';
 import { introFreeFor } from './_rate.js';
 const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 const SB  = process.env.SUPABASE_URL;
@@ -416,8 +416,7 @@ export default async function handler(req, res) {
     //
     // VÝJIMKA: částky pod minimem Stripe zůstávají 'pending' schválně a čekají, až přeteče.
     // Ty se ignorují, jinak by doklad nevznikl nikdy.
-    const STRIPE_MIN = { czk: 1500, eur: 50, usd: 50, gbp: 30, pln: 200, huf: 17500, chf: 50, sek: 300, dkk: 250, nok: 300 };
-    const _minFor = (cur) => (STRIPE_MIN[String(cur || 'czk').toLowerCase()] || 50);
+    const _minFor = (cur) => minChargeFor(cur);   // minima jsou v _config.js
     const _waiting = {};   // 'kind:id:mena' -> nestržená částka
     if (!DAILY && !preview) {
       try {

@@ -35,3 +35,12 @@ export async function getStripe() {
     : (process.env.STRIPE_SECRET_KEY_LIVE || process.env.STRIPE_SECRET_KEY);
   return new Stripe(key);
 }
+
+// MINIMÁLNÍ ČÁSTKA PRO STRŽENÍ PROVIZE Z KARTY.
+// Stripe nepřijme platbu pod svým minimem (u korun 15 Kč). Držet se přesně na hraně se
+// nevyplácí: poplatek za transakci by z takové částky snědl většinu a každý pokus u hranice
+// riskuje odmítnutí. Proto se čeká, až dluh přeteče přes ~20 Kč (a ekvivalent v dalších
+// měnách). Do té doby zůstane provize 'pending' a přičte se k dalšímu měsíci.
+// Používá commission-cron (kdy strhnout) i unified-doklad-cron (kdy počkat s dokladem).
+export const MIN_CHARGE = { czk: 2000, eur: 100, usd: 100, gbp: 100, pln: 400, huf: 40000, chf: 100, sek: 1200, dkk: 800, nok: 1200 };
+export const minChargeFor = (cur) => MIN_CHARGE[String(cur || 'czk').toLowerCase()] || 100;

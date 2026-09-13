@@ -23,6 +23,7 @@
 import Stripe from 'stripe';
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 import { makePayToken } from './commission-pay-now.js';
+import { minChargeFor } from './_config.js';
 const APP = process.env.APP_URL || 'https://app.martialtraininglab.com';
 
 import { isTestMode } from './_config.js';
@@ -104,8 +105,8 @@ export default async function handler(req, res) {
 // mensi, nez co Stripe umi strhnout. U denniho rezimu to nastava skoro vzdycky.
 // Spravne: pod minimem se NESTRHAVA a NIC se neoznaci -- castka zustane pending a pricte se
 // k dalsimu dni. Jednou minimum pretece a strhne se najednou.
-const STRIPE_MIN = { czk: 1500, eur: 50, usd: 50, gbp: 30, pln: 200, huf: 17500, chf: 50, sek: 300, dkk: 250, nok: 300 };
-const belowMin = (amount, cur) => amount < (STRIPE_MIN[String(cur || 'czk').toLowerCase()] || 50);
+// Minima jsou v _config.js, ať se obě strany (strhávání i vystavení dokladu) nerozejdou.
+const belowMin = (amount, cur) => amount < minChargeFor(cur);
 let deferredMin = 0;
   const curMonth = now.toISOString().slice(0, 7);
   let marked = 0, markErr = null;
