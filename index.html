@@ -6568,6 +6568,81 @@ function setLbTab(){
   Object.entries(map).forEach(([k,el])=>{ if(!el) return; const on=(_lbScope===k); el.style.background=on?'var(--dark)':'transparent'; el.style.color=on?'#fff':'var(--mid)'; });
 }
 function flagEmoji(cc){ if(!cc||cc.length!==2) return ''; const A=0x1F1E6; const a=cc.toUpperCase().charCodeAt(0)-65, b=cc.toUpperCase().charCodeAt(1)-65; if(a<0||a>25||b<0||b>25) return ''; return String.fromCodePoint(A+a, A+b); }
+// SPONZOŘI KLUBU. Výhoda Exclusive Partnera: až tři loga na profilu klubu. Ukládají se
+// v gyms.sponsors jako [{name, logo, url}]. Po skončení EP zůstávají v datech, jen se
+// přestanou zobrazovat -- po obnovení je klub nemusí nahrávat znovu.
+const SPONSOR_MAX = 3;
+// Tři sloty v nastavení klubu. Logo se ořezává na stejnou šířku jako ostatní obrázky
+// a ukládá do stejného úložiště; miniatura se u loga nedělá, je samo o sobě malé.
+let _mgSponsors=[];
+function renderMgSponsors(){
+  const box=document.getElementById('mgSponsors'); if(!box) return;
+  const EN=LANG==='en';
+  while(_mgSponsors.length<SPONSOR_MAX) _mgSponsors.push({ name:'', logo:'', url:'' });
+  box.innerHTML=_mgSponsors.slice(0,SPONSOR_MAX).map(function(sp,i){
+    return '<div style="border:1px solid var(--border);border-radius:12px;padding:11px;margin-bottom:9px;">'
+      +'<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">'
+        +'<div style="width:64px;height:40px;border-radius:8px;background:'+(sp.logo?("#fff url('"+escapeHtml(sp.logo)+"') center/contain no-repeat"):'var(--surf)')+';border:1px solid var(--border);flex:none;"></div>'
+        +'<button class="spPick" data-i="'+i+'" style="padding:8px 12px;background:var(--surf);border:1px solid var(--border);border-radius:9px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;">'+(sp.logo?(EN?'Change logo':'Změnit logo'):(EN?'Upload logo':'Nahrát logo'))+'</button>'
+        +(sp.logo?('<button class="spDel" data-i="'+i+'" style="margin-left:auto;background:none;border:none;color:var(--red);font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Remove':'Odebrat')+'</button>'):'')
+      +'</div>'
+      +'<input class="spName" data-i="'+i+'" type="text" value="'+escapeHtml(sp.name||'')+'" placeholder="'+(EN?'Sponsor name':'Název sponzora')+'" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;margin-bottom:6px;">'
+      +'<input class="spUrl" data-i="'+i+'" type="url" value="'+escapeHtml(sp.url||'')+'" placeholder="https://" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;">'
+    +'</div>';
+  }).join('');
+  box.querySelectorAll('.spName').forEach(function(el){ el.oninput=function(){ _mgSponsors[+el.dataset.i].name=el.value; }; });
+  box.querySelectorAll('.spUrl').forEach(function(el){ el.oninput=function(){ _mgSponsors[+el.dataset.i].url=el.value.trim(); }; });
+  box.querySelectorAll('.spDel').forEach(function(b){ b.onclick=function(){ _mgSponsors[+b.dataset.i]={ name:'', logo:'', url:'' }; renderMgSponsors(); }; });
+  box.querySelectorAll('.spPick').forEach(function(b){ b.onclick=function(){
+    const i=+b.dataset.i;
+    const inp=document.createElement('input'); inp.type='file'; inp.accept='image/*';
+    inp.onchange=function(){
+      const f=inp.files&&inp.files[0]; if(!f) return;
+      // Logo je široké, ne čtvercové -- stejný poměr jako fotky klubu.
+      // cropImage vrací Promise, ne callback.
+      cropImage(f, 5/3).then(async function(blob){
+        if(!blob) return;
+        try{
+          toast(LANG==='en'?'📤 Uploading…':'📤 Nahrávám…');
+          const fn=_myGymData.id+'-sponsor-'+i+'-'+Date.now()+'.jpg';
+          const { error }=await supaClient.storage.from('coach-photos').upload(fn, blob, { contentType:'image/jpeg', upsert:true });
+          if(error) throw error;
+          const { data }=supaClient.storage.from('coach-photos').getPublicUrl(fn);
+          _mgSponsors[i].logo=(data&&data.publicUrl)||'';
+          renderMgSponsors();
+          toast(LANG==='en'?'✅ Logo added':'✅ Logo přidáno');
+        }catch(e){ toast('⚠️ '+((e&&e.message)||'')); }
+      }).catch(function(){});
+    };
+    inp.click();
+  }; });
+}
+function gymSponsors(g){
+  try{
+    const raw = g && g.sponsors;
+    const arr = (typeof raw==='string') ? JSON.parse(raw||'[]') : (raw||[]);
+    return (Array.isArray(arr)?arr:[]).filter(function(x){ return x && (x.logo||x.name); }).slice(0, SPONSOR_MAX);
+  }catch(e){ return []; }
+}
+function gymSponsorsHtml(g, isEP){
+  if(!isEP) return '';
+  const list = gymSponsors(g);
+  if(!list.length) return '';
+  const EN = LANG==='en';
+  return '<div style="margin:16px 0 4px;">'
+    + '<div style="font-size:10.5px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.05em;text-align:center;margin-bottom:8px;">'
+      + (EN?'Club partners':'Partneři klubu') + '</div>'
+    + '<div style="display:flex;justify-content:center;align-items:center;gap:14px;flex-wrap:wrap;">'
+      + list.map(function(sp){
+          const img = sp.logo
+            ? ('<img src="'+escapeHtml(sp.logo)+'" alt="'+escapeHtml(sp.name||'')+'" loading="lazy" style="max-height:38px;max-width:110px;object-fit:contain;display:block;">')
+            : ('<span style="font-size:13px;font-weight:700;color:var(--mid);">'+escapeHtml(sp.name||'')+'</span>');
+          return sp.url
+            ? ('<a href="'+escapeHtml(sp.url)+'" target="_blank" rel="noopener nofollow" style="display:block;opacity:.85;">'+img+'</a>')
+            : ('<span style="display:block;opacity:.85;">'+img+'</span>');
+        }).join('')
+    + '</div></div>';
+}
 function gymFirstPhoto(pj){ try{ const x=JSON.parse(pj||'[]')[0]; return x?(typeof x==='string'?x:(x.url||'')):''; }catch(e){ return ''; } }
 function gymPhotoList(pj){ try{ return JSON.parse(pj||'[]').map(x=>typeof x==='string'?x:((x&&x.url)||'')).filter(Boolean); }catch(e){ return []; } }
 
@@ -13065,6 +13140,7 @@ async function openGymProfile(g){
       ${schedBlock||`<div style="font-size:12px;color:var(--light);padding:6px 2px;">${LANG==='en'?'No upcoming single classes.':'Žádné nadcházející jednorázové lekce.'}</div>`}
     </div></details>
     ${plansBlock}
+    ${gymSponsorsHtml(g, _gopProf)}   <!-- sponzoři jen u Exclusive Partnera -->
     <div id="gymContactSlot"></div>
   `;
   // Kontakt na klub -- stejná funkce i stejné místo jako na profilu kouče.
@@ -18873,6 +18949,13 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
     <button class="mgSaveSec" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-top:8px;">${LANG==='en'?'Save changes':'Uložit změny'}</button>
     
     </div></details>
+    ${(currentUser&&currentUser.partner)?`<details class="setSec" id="gmSponsorSec"><summary>🤝 ${LANG==='en'?'Club sponsors':'Sponzoři klubu'}</summary><div class="setBody">
+      <div style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:12px;">${LANG==='en'
+        ? 'Up to three sponsors on your club profile — logo, name and a link. Part of Exclusive Partner.'
+        : 'Až tři sponzoři na profilu klubu — logo, název a odkaz. Součást Exclusive Partnera.'}</div>
+      <div id="mgSponsors"></div>
+      <button class="mgSaveSec" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-top:8px;">${LANG==='en'?'Save changes':'Uložit změny'}</button>
+    </div></details>`:''}
     <details class="setSec" id="gmMerchSec"><summary>🛍️ Merch</summary><div class="setBody">
       <div id="gymMerchContent"></div>
     </div></details>
@@ -18904,7 +18987,8 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
   try{ renderScheduleEditor(); }catch(e){ console.error('renderGymManage renderScheduleEditor', e); }
   try{ renderPlansEditor(); }catch(e){ console.error('renderGymManage renderPlansEditor', e); }
   try{ _mgPhotos = gymPhotoList(_myGymData.photos); renderMgPhotos(); }catch(e){ console.error('renderGymManage renderMgPhotos', e); }
-  if($('mgPhotoAdd')) $('mgPhotoAdd').onchange=async(e)=>{
+
+  try{ _mgSponsors = gymSponsors(_myGymData).slice(0, SPONSOR_MAX); renderMgSponsors(); }catch(e){ console.error('renderGymManage renderMgSponsors', e); }  if($('mgPhotoAdd')) $('mgPhotoAdd').onchange=async(e)=>{
     const file=e.target.files&&e.target.files[0]; if(!file) return;
     // Strop 5 fotek. Vic uz profil klubu neprodava, jen prodluzuje nacitani studentovi.
     if((_mgPhotos||[]).length>=5){ e.target.value=''; toast(LANG==='en'?'\u26a0\ufe0f Maximum is 5 photos':'\u26a0\ufe0f Nejv\u00fd\u0161 5 fotek'); return; }
@@ -23432,6 +23516,16 @@ async function saveGymManage(){
   if(_myGymData && _myGymData.discipline_meta!==undefined){ patch.discipline_meta = _myGymData.discipline_meta?JSON.stringify(_myGymData.discipline_meta):null; } _myGymData.description=_gdesc;
   const _gfy = parseInt($('mgFounded')&&$('mgFounded').value)||null; patch.founded_year=_gfy; _myGymData.founded_year=_gfy;
   const _mrEn=!!($('mgMemberRefEnable')&&$('mgMemberRefEnable').checked); const _mrp = _mrEn?Math.max(0, Math.min(100, parseInt($('mgMemberRefPct')&&$('mgMemberRefPct').value)||0)):0; patch.member_ref_pct=_mrp; _myGymData.member_ref_pct=_mrp; const _hl=!!($('mgHideLeaders')&&$('mgHideLeaders').checked); patch.hide_leaders=_hl; _myGymData.hide_leaders=_hl;
+  // Sponzoři (Exclusive Partner). Ukládají se jen prázdné sloty vyhozené -- v datech zůstane
+  // pole bez děr. Po skončení EP se nemažou, jen se přestanou zobrazovat.
+  try{
+    if(currentUser && currentUser.partner && document.getElementById('mgSponsors')){
+      const _sp=(_mgSponsors||[]).filter(function(x){ return x && (x.logo||(x.name||'').trim()); })
+        .slice(0, SPONSOR_MAX)
+        .map(function(x){ return { name:(x.name||'').trim(), logo:x.logo||'', url:(x.url||'').trim() }; });
+      patch.sponsors=_sp; _myGymData.sponsors=_sp;
+    }
+  }catch(e){}
   patch.vat_payer = !!($('mgVatPayer')&&$('mgVatPayer').checked); { const _vr=parseFloat($('mgVatRate')&&$('mgVatRate').value); patch.vat_rate=(isFinite(_vr)&&_vr>=0)?_vr:21; } _myGymData.vat_payer=patch.vat_payer; _myGymData.vat_rate=patch.vat_rate; patch.legal_name=($('mgLegalName')&&$('mgLegalName').value.trim())||null; patch.billing_country=($('mgCountry')&&$('mgCountry').value)||null; _myGymData.billing_country=patch.billing_country; patch.tax_id=($('mgTaxId')&&$('mgTaxId').value.trim())||null; patch.vat_id=($('mgVatId')&&$('mgVatId').value.trim())||null; patch.billing_line1=($('mgBillingLine1')&&$('mgBillingLine1').value.trim())||null; patch.billing_line2=($('mgBillingLine2')&&$('mgBillingLine2').value.trim())||null; patch.billing_city=($('mgBillingCity')&&$('mgBillingCity').value.trim())||null; patch.billing_postal=($('mgBillingPostal')&&$('mgBillingPostal').value.trim())||null; /* billing_address se neuklada -- sklada se pri cteni z rozpadu */ patch.billing_phone=_phoneFieldVal('mgBillingPhone'); patch.invoice_email=($('mgInvoiceEmail')&&$('mgInvoiceEmail').value.trim())||null; patch.legal_entity=!!($('mgLegalEntity')&&$('mgLegalEntity').checked); patch.org_form = patch.legal_entity ? _gymOrgForm : 'profit'; _myGymData.org_form=patch.org_form; _myGymData.legal_name=patch.legal_name; _myGymData.tax_id=patch.tax_id; _myGymData.vat_id=patch.vat_id; /* billing_address uz se neuklada; lokalni kopie ho nesmi nulovat */ _myGymData.legal_entity=patch.legal_entity;
   if(isMultiDiscipline()){ const dd=(_gymMgDisc&&_gymMgDisc.length)?_gymMgDisc:[defaultDiscipline()]; patch.disciplines=JSON.stringify(dd); _myGymData.disciplines=patch.disciplines; }
   try{ patch.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || _myGymData.timezone || null; _myGymData.timezone=patch.timezone; }catch(e){}
@@ -24219,12 +24313,21 @@ async function loadGymManageBookings(){
       const _mtlM   = (typeof dropMtlL==='number'?dropMtlL:0) + (typeof memMtlL==='number'?memMtlL:0)
                     + (typeof evMtlL==='number'?evMtlL:0) + (typeof merchMtlL==='number'?merchMtlL:0)
                     + (typeof cohMtlL==='number'?cohMtlL:0);
-      const _epCost = 1000 + _grossM*0.005;        // paušál + 0,5 %
-      const _save   = _mtlM - _epCost;
+      // Paušál je 1 000 Kč pro všechny země. Klub, který účtuje v jiné měně, potřebuje
+      // přepočet -- jinak by se porovnávaly hrušky s jablky (např. 1000 vs. 300 EUR provize).
+      const _cCur=(_myGymData.currency||'CZK').toUpperCase();
+      let _epFlat=1000;
+      if(_cCur!=='CZK'){
+        const _fx=await _loadFx();
+        const _c=_fxFromCZK(1000, _cCur, _fx);
+        _epFlat=(_c!=null)?_c:null;      // bez kurzu radši neporovnávat vůbec
+      }
+      const _epCost = (_epFlat!=null) ? (_epFlat + _grossM*0.005) : null;        // paušál + 0,5 %
+      const _save   = (_epCost!=null) ? (_mtlM - _epCost) : 0;
       // Skryto do prvního dne dalšího měsíce: uloží se měsíc, ve kterém se křížek zmáčkl.
       let _hidM=''; try{ _hidM=localStorage.getItem('mtl_ep_hint_off_'+_myGymData.id)||''; }catch(e){}
       const _nowM=new Date().toISOString().slice(0,7);
-      if(!_isEP && _gymMonth!=='all' && _save>0 && _hidM!==_nowM && (_myGymData.currency||'CZK')==='CZK'){
+      if(!_isEP && _gymMonth!=='all' && _epCost!=null && _save>0 && _hidM!==_nowM){
         _epRowHtml='<div id="epHintRow" style="display:flex;align-items:center;gap:8px;background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:8px 10px;margin-bottom:10px;">'
           +'<span style="flex:1;min-width:0;font-size:11.5px;color:var(--mid);line-height:1.45;">'
             +(LANG==='en'
