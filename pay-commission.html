@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Úhrada provize MTL</title>
+<!-- VÝZVA K ÚHRADĚ. Není to doklad: nic zatím zaplaceno nebylo. Doklad vystaví měsíční
+     doklad-cron, až platba projde. Stránka je záměrně samostatná a bez přihlášení -- odkaz
+     z e-mailu je podepsaný a platí 30 dní, takže na zaplacení stačí jedno klepnutí. -->
+<style>
+  :root{ --dark:#1a1a1a; --mid:#5b6167; --light:#8b9199; --border:#e3e6ea; --surf:#f6f7f9; --red:#E63946; --green:#0A7A4F; }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--surf);color:var(--dark);font-family:'DM Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+       display:flex;align-items:center;justify-content:center;min-height:100vh;padding:18px;}
+  .card{background:#fff;border:1px solid var(--border);border-radius:18px;max-width:460px;width:100%;padding:26px 22px;box-shadow:0 4px 20px rgba(0,0,0,.06)}
+  h1{font-size:19px;margin:0 0 4px}
+  .sub{font-size:13px;color:var(--mid);line-height:1.5;margin-bottom:18px}
+  .amt{font-size:34px;font-weight:800;letter-spacing:-.5px;margin:10px 0 2px}
+  .row{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--border);font-size:14px}
+  .row:last-of-type{border-bottom:none}
+  .lbl{color:var(--mid)}
+  button{width:100%;padding:14px;border:none;border-radius:12px;background:var(--red);color:#fff;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit;margin-top:16px}
+  button:disabled{opacity:.6;cursor:default}
+  .note{font-size:11.5px;color:var(--light);line-height:1.5;margin-top:12px}
+  .ok{color:var(--green);font-weight:800}
+</style>
+</head>
+<body>
+<div class="card" id="card">
+  <h1 id="h">Úhrada provize MTL</h1>
+  <div class="sub" id="sub">Načítám…</div>
+  <div id="body"></div>
+</div>
+<script>
+const EN = (navigator.language || '').toLowerCase().startsWith('en');
+const T = EN
+  ? { title:'MTL commission payment', due:'Amount due', who:'Provider', month:'Period', items:'Charges',
+      pay:'Pay by card', settled:'Nothing to pay — it has already been settled.',
+      bad:'This link is no longer valid. Open the app and pay in Payments &amp; commission.',
+      note:'Payment is handled by Stripe. Once it goes through, your account is fine again and the receipt follows with the monthly one.',
+      wait:'Redirecting to payment…', err:'Payment could not be started. Try again in a moment.' }
+  : { title:'Úhrada provize MTL', due:'K úhradě', who:'Poskytovatel', month:'Období', items:'Položek',
+      pay:'Zaplatit kartou', settled:'Není co platit — už je uhrazeno.',
+      bad:'Odkaz už neplatí. Otevři appku a zaplať v Platby a provize.',
+      note:'Platbu zpracovává Stripe. Jakmile projde, účet je zase v pořádku a doklad přijde s tím měsíčním.',
+      wait:'Přesměrovávám na platbu…', err:'Platbu se nepodařilo spustit. Zkus to za chvíli.' };
+
+const $ = (id) => document.getElementById(id);
+const token = new URLSearchParams(location.search).get('token') || '';
+const fmt = (minor, cur) => (minor/100).toLocaleString(EN?'en-GB':'cs-CZ', {minimumFractionDigits:2, maximumFractionDigits:2}) + ' ' + String(cur||'').toUpperCase();
+
+$('h').textContent = T.title;
+
+(async () => {
+  if (!token) { $('sub').textContent = T.bad; return; }
+  try {
+    const r = await fetch('/api/commission-pay-now?token=' + encodeURIComponent(token));
+    const d = await r.json();
+    if (!r.ok || !d.ok) { $('sub').textContent = T.bad; return; }
+    if (d.settled) { $('sub').innerHTML = '<span class="ok">' + T.settled + '</span>'; return; }
+
+    const curs = Object.keys(d.amounts || {});
+    $('sub').textContent = '';
+    $('body').innerHTML =
+      curs.map(c => '<div class="amt">' + fmt(d.amounts[c], c) + '</div>').join('')
+      + '<div class="row"><span class="lbl">' + T.who + '</span><span>' + (d.name || '') + '</span></div>'
+      + (d.month ? '<div class="row"><span class="lbl">' + T.month + '</span><span>' + d.month + '</span></div>' : '')
+      + '<div class="row"><span class="lbl">' + T.items + '</span><span>' + (d.count || 0) + '</span></div>'
+      + '<button id="pay">' + T.pay + '</button>'
+      + '<div class="note">' + T.note + '</div>';
+
+    $('pay').onclick = async () => {
+      const b = $('pay'); b.disabled = true; b.textContent = T.wait;
+      try {
+        const rr = await fetch('/api/commission-pay-now', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }),
+        });
+        const dd = await rr.json();
+        if (dd && dd.settled) { $('body').innerHTML = '<div class="ok">' + T.settled + '</div>'; return; }
+        if (dd && dd.url) { location.href = dd.url; return; }
+        throw new Error('no url');
+      } catch (e) { b.disabled = false; b.textContent = T.pay; alert(T.err); }
+    };
+  } catch (e) { $('sub').textContent = T.bad; }
+})();
+</script>
+</body>
+</html>
