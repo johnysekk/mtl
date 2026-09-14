@@ -1040,7 +1040,23 @@ async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, custo
     }
     if (!sup) return null;
     const ico = String(sup.tax_id || '').replace(/\s/g, '');
-    if (!ico) return null;                      // bez IČO nemá řada klíč; přihláška ho vyžaduje
+    if (!ico) {
+      // TICHÉ NEVYSTAVENÍ BYLO HORŠÍ NEŽ CHYBA. Bez IČO se doklad vystavit nedá (číselná řada
+      // je vedená na IČO), ale doteď se jen vrátilo null: platba proběhla, doklad nikde a nikdo
+      // se nic nedozvěděl. Teď to jde do logu a poskytovateli přijde notifikace, ať to doplní.
+      console.error('[doklad] chybí IČO poskytovatele → nevystaveno', { transactionId, paymentIntent, gymId, coachId });
+      try {
+        const _uid = gymId ? (sup.owner_id || null) : (coachId || null);
+        if (_uid) {
+          await sbPost('notifications', {
+            user_id: _uid, type: 'system', read: false,
+            data: JSON.stringify({ kind: 'doklad_blocked', reason: 'tax_id', transaction_id: transactionId || null }),
+            message: '⚠️ Doklad k platbě se nevystavil — chybí IČO ve fakturačních údajích. Doplň ho a napiš nám, doklad pak vystavíme zpětně.',
+          });
+        }
+      } catch (e) {}
+      return null;
+    }                      // bez IČO nemá řada klíč; přihláška ho vyžaduje
 
     // ŘADA SE SLUČUJE V RÁMCI ÚČTU, NE V RÁMCI IČO.
     // Kdo má pod jedním IČO dva kluby a k tomu profil kouče, má JEDNU souvislou řadu -- je to
