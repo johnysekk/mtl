@@ -9,7 +9,7 @@
 // DŮLEŽITÉ: webhook musí číst RAW body (proto bodyParser:false), jinak selže ověření podpisu.
 
 import Stripe from 'stripe';
-import { ladderRate as _mtlLadder } from './_rate.js';
+import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate } from './_rate.js';
 import crypto from 'crypto';
 import PDFDocument from 'pdfkit';
 import { isTestMode } from './_config.js';
@@ -942,12 +942,15 @@ export default async function handler(req, res) {
           if (_mem2 && _mem2.paid_to === 'coach' && _mem2.coach_id) _ownerId = _mem2.coach_id;
           else if (_mem2 && _mem2.gym_id) { const _g=(await sbGet(`gyms?id=eq.${_mem2.gym_id}&select=owner_id`))[0]; _ownerId = _g && _g.owner_id; }
           if (_ownerId) {
-            const _op = (await sbGet(`profiles?id=eq.${_ownerId}&select=partner,coach_ref_score,bankai_eligible`))[0] || {};
+            // org_rate_until musí být v selectu: sazba z asociace se pozná jen podle toho data
+            // (sloupec profiles.org_rate neexistuje). Bez něj vyšel členovi asociace základ 2 %
+            // místo 1,5 % a webhook mu tu vyšší sazbu nastavil na předplatné.
+            const _op = (await sbGet(`profiles?id=eq.${_ownerId}&select=partner,org_rate_until,coach_ref_score,bankai_eligible`))[0] || {};
             const _sc = _op.coach_ref_score || 0;
             // Delegováno na _rate.js. Tady dřív seděla vlastní kopie žebříčku s vlastními čísly, a přesně
             // ta se rozešla: EP mělo 1 % místo 0,5 % a founding se neřešil vůbec, takže každý běh zvedal
             // sazbu tomu, komu ji gym-rerate.js právě snížil. Jedno pravidlo, jedno místo.
-            const _ladder = _mtlLadder('stripe', { partner: _op.partner, org: _op.org_rate, score: _sc, bankai: _op.bankai_eligible }) * 100;
+            const _ladder = _mtlLadder('stripe', { partner: _op.partner, org: _hasOrgRate(_op), score: _sc, bankai: _op.bankai_eligible }) * 100;
             _subLadder = _ladder / 100;
             await applySubRate(stripe, event.account, sub, _so2, _ladder);
           }

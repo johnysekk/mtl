@@ -22,7 +22,7 @@
 // They were four different rules once. That was the bug.
 // =============================================================================
 import Stripe from 'stripe';
-import { ladderRate as _mtlLadder } from './_rate.js';
+import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate } from './_rate.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
@@ -80,7 +80,11 @@ async function applySubRate(stripe, acct, subId, sub, ladderPct) {
 // Předplatné je vždycky Stripe, proto natvrdo 'stripe'. Vrací PROCENTA, protože to Stripe chce tak.
 function ladderOf(p) {
   if (!p) return 2;   // bez profilu se chováme jako base, ne jako starých 3 %
-  return _mtlLadder('stripe', { partner: p.partner, org: p.org_rate, score: p.coach_ref_score, bankai: p.bankai_eligible }) * 100;
+  // CHYBA, KTERÁ STÁLA KLUBY PENÍZE: tady se posílalo `org: p.org_rate`, jenže sloupec
+  // profiles.org_rate NEEXISTUJE (viz hasOrgRate v _rate.js -- rozhoduje datum org_rate_until)
+  // a v selectu níž se ani nenačítal. Členovi asociace tedy vyšel základ 2 % místo 1,5 %
+  // a tenhle cron mu tu vyšší sazbu ještě sám nastavil na předplatné.
+  return _mtlLadder('stripe', { partner: p.partner, org: _hasOrgRate(p), score: p.coach_ref_score, bankai: p.bankai_eligible }) * 100;
 }
 
 export default async function handler(req, res) {
@@ -119,7 +123,7 @@ export default async function handler(req, res) {
         if (!ownerId) { out.skipped++; continue; }
 
         if (profCache[ownerId] === undefined) {
-          profCache[ownerId] = (await sbGet(`profiles?id=eq.${ownerId}&select=partner,coach_ref_score,bankai_eligible,stripe_account,gym_payout_account`))[0] || null;
+          profCache[ownerId] = (await sbGet(`profiles?id=eq.${ownerId}&select=partner,org_rate_until,coach_ref_score,bankai_eligible,stripe_account,gym_payout_account`))[0] || null;
         }
         const p = profCache[ownerId];
         if (!p) { out.skipped++; continue; }
