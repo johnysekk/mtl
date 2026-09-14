@@ -269,6 +269,9 @@ body.dashmode #authScreen{max-width:none!important}
    STRANKY, tedy klidne tisic pixelu pod obrazovkou -- klepnuti na Jazyk pak vypadalo, ze nic
    nedela. Fixed je vazane na obrazovku. */
 body.dashmode .picker-ov,body.dashmode .city-ov,body.dashmode .gps-ov{position:fixed}
+/* Pole, na která se v přihlášce neptáme (doplní se až s platbami). Atribut je silnější než
+   inline style, který přepisují obsluhy jednotlivých přepínačů. */
+[data-gahide]{display:none!important}
 /* Ořez fotky je psaný pro mobil (max 430 px). Na širokém okně z toho byl úzký černý sloup
    s malinkým výřezem, takže se tam obrázku povolí víc místa. Na mobilu se nemění nic. */
 @media(min-width:900px){ #cropOv{max-width:760px!important} #cropOv #cropBox{max-width:640px!important;max-height:68vh} }
@@ -25381,20 +25384,24 @@ const GA_STEPS=2;   // přihláška má dva kroky; platby se nastavují až po z
 // (právní název, IČO, země, adresa), veřejný kontakt, souhlas a odesílací tlačítko.
 // Stripe, IBAN a karta v přihlášce zůstávají skryté -- řeší se až v Platby a provize.
 // Skryje pole i jeho popisek a nápovědu. Sousedy poznáme podle toho, že samy nemají vstup.
+// Pole, která se v přihlášce NIKDY neschovávají: podle země se rozhoduje, jestli ověřovat
+// české IČO, a bez IČO a právního názvu nejde klub ani ověřit, ani vystavit doklad.
+const _BILL_KEEP = ['gymCountry','caCountry','orgCountry','gymLegalName','caLegalName','gymTaxId','caTaxId'];
+// Skrývá se ATRIBUTEM, ne inline stylem. Inline style přepíše kterákoli obsluha, která si
+// s tím polem něco dělá (třeba přepínač právnické osoby), a pole se zase objeví.
+// Zároveň tu dřív chyběla deklarace _BILL_KEEP -- funkce tím padala na chybu a neskryla nic.
 function _gaHideField(id){
   try{
     if(_BILL_KEEP.indexOf(id)>=0) return;
     const el=document.getElementById(id); if(!el) return;
-    const hide=function(n){ if(n && n.style) n.style.display='none'; };
-    const holder=(el.tagName==='INPUT'||el.tagName==='SELECT') ? el : el;
-    const prev=holder.previousElementSibling;
-    if(prev && !prev.querySelector('input,select,textarea')) hide(prev);
-    const next=holder.nextElementSibling;
-    if(next && !next.querySelector('input,select,textarea') && (next.textContent||'').length<200) hide(next);
-    hide(holder);
-    // label kolem checkboxu
-    const lab=holder.closest && holder.closest('label');
-    if(lab && lab.querySelectorAll('input').length===1) hide(lab);
+    const mark=function(n){ if(n && n.setAttribute) n.setAttribute('data-gahide','1'); };
+    mark(el);
+    const prev=el.previousElementSibling;
+    if(prev && !prev.querySelector('input,select,textarea')) mark(prev);
+    const next=el.nextElementSibling;
+    if(next && !next.querySelector('input,select,textarea') && (next.textContent||'').length<200) mark(next);
+    const lab=el.closest && el.closest('label');
+    if(lab && lab.querySelectorAll('input').length===1) mark(lab);
   }catch(e){}
 }
 function _gaMergeSteps(){
@@ -25413,7 +25420,14 @@ function _gaMergeSteps(){
      'gymBillingPhoneWrap','gymInvoiceEmail','gaPubContact'].forEach(_gaHideField);
     // odkaz „Nenašel jsi adresu? Zadej ji ručně" patří k adrese, taky pryč
     try{ const _mn=document.querySelector('#gymTaxWrap a,#gymTaxWrap [onclick*="manual"]'); if(_mn) _mn.style.display='none'; }catch(e){}
-    // Kdyby se země schovala jako soused jiného pole, vrátíme ji zpátky.
+    // Poznámka „Nezaškrtnuto = OSVČ na IČO" v HTML leží ZA blokem neziskovky, takže když se
+    // zaškrtne právnická osoba a blok se rozbalí, poznámka se octne pod ním a vypadá, že
+    // patří k neziskovce. Vrátíme ji nad ten blok, kam významem patří.
+    try{
+      const _npw=document.getElementById('gymNonprofitWrap');
+      const _note=_npw && _npw.nextElementSibling;
+      if(_npw && _note && /OSV\u010c|sole trader/i.test(_note.textContent||'')) _npw.parentNode.insertBefore(_note, _npw);
+    }catch(e){}
     // ZEMĚ NAHORU. Podle ní se rozhoduje, jestli ověřovat české IČO, takže se má vybrat
     // dřív, než člověk IČO vyplní -- ne až pod ním.
     try{
@@ -25421,7 +25435,9 @@ function _gaMergeSteps(){
       if(_c){
         _c.style.display=''; const _lp=_c.previousElementSibling;
         if(_lp) _lp.style.display='';
-        const _anchor=document.getElementById('gymLegalName');
+        // Kotva je PRVNÍ pole v bloku, tedy IČO -- ne právní název. Země se má vybrat dřív,
+        // než člověk IČO vyplní, protože podle ní se rozhoduje, jestli ho ověřovat.
+        const _anchor=document.getElementById('gymTaxId') || document.getElementById('gymLegalName');
         const _anchorLbl=_anchor && _anchor.previousElementSibling;
         const _before=_anchorLbl || _anchor;
         if(_before && _before.parentNode){
@@ -37160,7 +37176,7 @@ function _caMergeSteps(){
       if(_c){
         _c.style.display=''; const _lp=_c.previousElementSibling;
         if(_lp) _lp.style.display='';
-        const _anchor=document.getElementById('caLegalName');
+        const _anchor=document.getElementById('caTaxId') || document.getElementById('caLegalName');
         const _anchorLbl=_anchor && _anchor.previousElementSibling;
         const _before=_anchorLbl || _anchor;
         if(_before && _before.parentNode){
@@ -37939,8 +37955,8 @@ $('btnSubmitCoachApp').onclick=async()=>{
   if(videoFile && videoFile.size > 50*1024*1024){ toast(L('⚠️ Video je větší než 50 MB')); return; }
 
   const btn=$('btnSubmitCoachApp');
-  const _catx=($('caTaxId')&&$('caTaxId').value.trim())||''; const _cavat=($('caVatId')&&$('caVatId').value.trim())||''; if(!_catx){ toast(LANG==='en'?'⚠️ Enter your Reg. number first':'⚠️ Nejprve vyplň IČO'); try{ caGoStep(3); }catch(e){} if($('caTaxId')) $('caTaxId').focus(); return; }
-  if(!_taxGate('caLegalName',['caTaxId'])){ try{ caGoStep(3); }catch(e){} if($('caLegalName')) $('caLegalName').focus(); return; }
+  const _catx=($('caTaxId')&&$('caTaxId').value.trim())||''; const _cavat=($('caVatId')&&$('caVatId').value.trim())||''; if(!_catx){ toast(LANG==='en'?'⚠️ Enter your Reg. number first':'⚠️ Nejprve vyplň IČO'); try{ caGoStep(1); }catch(e){}   /* IČO je v 1. kroku */ if($('caTaxId')) $('caTaxId').focus(); return; }
+  if(!_taxGate('caLegalName',['caTaxId'])){ try{ caGoStep(1); }catch(e){} if($('caLegalName')) $('caLegalName').focus(); return; }
   btn.textContent=L(videoFile?'Nahrávám video...':'Odesílám...'); btn.disabled=true;
 
   try {
