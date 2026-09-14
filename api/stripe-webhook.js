@@ -1077,7 +1077,10 @@ async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, custo
     if (no && typeof no === 'object') no = Array.isArray(no) ? no[0] : Object.values(no)[0];
     if (!no) return null;
 
-    await sbPost('doklady', {
+    // NÁVRATOVOU HODNOTU ZÁPISU MUSÍME ČÍST. Číslo z řady je už vyzvednuté, takže když insert
+    // selže, v řadě zůstane díra a doklad nikde -- přesně to se stalo u 2026-000009.
+    // sbPost chybu loguje, ale nikdo ji nečetl, takže se nic nedozvěděl ani poskytovatel.
+    const _dokIns = await sbPost('doklady', {
         doklad_no: String(no), series_key: key,
         transaction_id: transactionId || null, payment_intent: paymentIntent || null,
         sup_name: sup.legal_name || sup.name || null,
@@ -1093,6 +1096,20 @@ async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, custo
         payment_method: paymentMethod || null, test_mode: !!testMode,
         session_at: sessionAt || null,   // termin lekce pri vystaveni; presun ho uz nezmeni
     });
+    if (_dokIns && _dokIns.ok === false) {
+      console.error('[doklad] ZÁPIS SELHAL — číslo z řady propadlo', {
+        doklad_no: String(no), key, transactionId, paymentIntent, status: _dokIns.status, error: _dokIns.error,
+      });
+      try {
+        const _uid2 = gymId ? (sup.owner_id || null) : (coachId || null);
+        if (_uid2) await sbPost('notifications', {
+          user_id: _uid2, type: 'system', read: false,
+          data: JSON.stringify({ kind: 'doklad_failed', doklad_no: String(no), transaction_id: transactionId || null }),
+          message: '⚠️ Doklad k platbě se nepodařilo vystavit. Napiš nám, vystavíme ho zpětně — platba je v pořádku.',
+        });
+      } catch (e) {}
+      return null;
+    }
     return String(no);
   } catch (e) { console.error('issueDoklad', e && e.message); return null; }
 }
