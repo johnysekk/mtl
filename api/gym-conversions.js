@@ -126,8 +126,35 @@ export default async function handler(req, res) {
       if (isMtl) { newCount++; newRevenue += fp.amt; }
     });
 
+    // CO TO KLUB STÁLO A CO MU TO PŘINESLO CELKEM. Panel dosud ukazoval jen přínos za tenhle
+    // měsíc; cena za přivedení nikde, takže si klub nemohl udělat to jediné srovnání, které ho
+    // zajímá. Bereme akviziční provize (transactions.acq_source = 'mtl_discovery') a proti nim
+    // VŠECHNO, co ti stejní lidé klubu kdy zaplatili -- návratnost dává smysl jen kumulativně.
+    let acqFee = 0, broughtIds = new Set(), broughtNet = 0;
+    try {
+      const txAcq = await pagedGet(`transactions?gym_id=eq.${gymId}&acq_source=eq.mtl_discovery&select=member_id,mtl_fee,mtl_fee_refunded`);
+      (txAcq || []).forEach(t => {
+        const fee = (Number(t.mtl_fee) || 0) - (Number(t.mtl_fee_refunded) || 0);
+        if (fee > 0) acqFee += fee;
+        if (t.member_id) broughtIds.add(String(t.member_id));
+      });
+      if (broughtIds.size) {
+        const ids = [...broughtIds].slice(0, 300).join(',');
+        const txAll = await pagedGet(`transactions?gym_id=eq.${gymId}&member_id=in.(${ids})&select=gross_amount,mtl_fee,mtl_fee_refunded,stripe_fee,refund_amount`);
+        (txAll || []).forEach(t => {
+          const gross = Number(t.gross_amount) || 0;
+          const back = Number(t.refund_amount) || 0;
+          const mtl = (Number(t.mtl_fee) || 0) - (Number(t.mtl_fee_refunded) || 0);
+          const stripe = Number(t.stripe_fee) || 0;
+          broughtNet += Math.max(0, gross - back - mtl - stripe);
+        });
+      }
+    } catch (e) { console.error('gym-conversions acq', e.message); }
+
     return res.status(200).json({
       ok: true,
+      // v haléřích, stejně jako zbytek částek
+      broughtTotals: { students: broughtIds.size, acqFee, net: broughtNet },
       currency,
       opens: { this: openThis.size, prev: openPrev.size },
       engaged: { this: engThis.size },
