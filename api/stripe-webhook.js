@@ -1067,49 +1067,35 @@ async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, custo
     if (!ownerId) return null;
     const key = 'ico:' + ico + ':acct:' + ownerId;
 
-    const r = await fetch(`${SB}/rest/v1/rpc/doklad_next`, {
-      method: 'POST',
-      headers: sbHeaders,
-      body: JSON.stringify({ p_key: key }),
-    });
-    if (!r.ok) return null;
-    let no = await r.json();
-    if (no && typeof no === 'object') no = Array.isArray(no) ? no[0] : Object.values(no)[0];
-    if (!no) return null;
-
-    // NÁVRATOVOU HODNOTU ZÁPISU MUSÍME ČÍST. Číslo z řady je už vyzvednuté, takže když insert
-    // selže, v řadě zůstane díra a doklad nikde -- přesně to se stalo u 2026-000009.
-    // sbPost chybu loguje, ale nikdo ji nečetl, takže se nic nedozvěděl ani poskytovatel.
-    const _dokIns = await sbPost('doklady', {
-        doklad_no: String(no), series_key: key,
+    // JEDEN KROK: číslo i zápis dokladu dělá databázová funkce doklad_issue (sql-49).
+    // Dřív se číslo vyzvedlo zvlášť (doklad_next) a doklad se zapisoval druhým voláním --
+    // když to druhé selhalo, číslo bylo propálené a doklad nikde (díra po 2026-000009).
+    // Teď je to jedna transakce: buď obojí, nebo nic a číslo se vrátí do řady.
+    const _issRes = await fetch(`${SB}/rest/v1/rpc/doklad_issue`, {
+      method: 'POST', headers: sbHeaders,
+      body: JSON.stringify({ p_key: key, p_row: {
         transaction_id: transactionId || null, payment_intent: paymentIntent || null,
         sup_name: sup.legal_name || sup.name || null,
-        sup_ico: ico, sup_dic: sup.vat_id || null, sup_address: _billAddr(sup) || null,   // sklada se z billing_line1/2/city/postal
+        sup_ico: ico, sup_dic: sup.vat_id || null, sup_address: _billAddr(sup) || null,
         sup_vat_payer: !!sup.vat_payer, sup_vat_rate: (sup.vat_rate != null ? sup.vat_rate : null),
         cust_name: customerName || null, cust_email: customerEmail || null,
-        // Ucastnik jen kdyz se lisi od odberatele -- u dospeleho, ktery jde trenovat sam,
-        // by dvakrat totez jmeno nic nerikalo.
         participant_name: ((participantName && String(participantName).trim() &&
           String(participantName).trim() !== String(customerName || '').trim()) ? String(participantName).trim() : null),
         item_label: itemLabel || null,
         amount: Math.round(Number(amount) || 0), currency: String(currency || 'CZK').toUpperCase(),
         payment_method: paymentMethod || null, test_mode: !!testMode,
-        session_at: sessionAt || null,   // termin lekce pri vystaveni; presun ho uz nezmeni
+      } }),
     });
-    if (_dokIns && _dokIns.ok === false) {
-      console.error('[doklad] ZÁPIS SELHAL — číslo z řady propadlo', {
-        doklad_no: String(no), key, transactionId, paymentIntent, status: _dokIns.status, error: _dokIns.error,
+    if (!_issRes.ok) {
+      const _t = await _issRes.text().catch(() => '');
+      console.error('[doklad] doklad_issue selhalo — nic se nevystavilo, řada je celá', {
+        transactionId, paymentIntent, key, status: _issRes.status, error: _t.slice(0, 300),
       });
-      try {
-        const _uid2 = gymId ? (sup.owner_id || null) : (coachId || null);
-        if (_uid2) await sbPost('notifications', {
-          user_id: _uid2, type: 'system', read: false,
-          data: JSON.stringify({ kind: 'doklad_failed', doklad_no: String(no), transaction_id: transactionId || null }),
-          message: '⚠️ Doklad k platbě se nepodařilo vystavit. Napiš nám, vystavíme ho zpětně — platba je v pořádku.',
-        });
-      } catch (e) {}
-      return null;
+      return null;   // hodinový cron to zkusí znovu
     }
+    let no = await _issRes.json();
+    if (no && typeof no === 'object') no = Array.isArray(no) ? no[0] : Object.values(no)[0];
+    if (!no) return null;
     return String(no);
   } catch (e) { console.error('issueDoklad', e && e.message); return null; }
 }
