@@ -193,7 +193,11 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
 // The actual per-transaction rate = the higher of the owner's ladder rate and any acquisition fee.
 export async function effectiveRate(sbGet, { ownerId, gymId, gymAccount, mode, type, acqSource, memberId, scopeCol, scopeId, months }) {
   const p = await resolveOwner(sbGet, { ownerId, gymId, gymAccount });
-  const ladder = ladderRate(mode, { partner: p.partner, founding: p.founding, score: p.coach_ref_score, bankai: p.bankai_eligible });
+  // CHYBĚLO `org`. effectiveRate tím ignorovala sazbu z asociace, takže členovi asociace
+  // vycházel základ 2 % místo 1,5 % u zboží, jednorázových vstupů, lekcí 1:1 i jednorázových
+  // členství. Nahoře (effectiveRateBreakdown) to bylo správně, tady a níž ne -- a právě tuhle
+  // funkci používá pay.js při platbě, takže se účtovalo o půl procenta víc.
+  const ladder = ladderRate(mode, { partner: p.partner, founding: p.founding, score: p.coach_ref_score, bankai: p.bankai_eligible, org: hasOrgRate(p) });
   const acq = await acquisitionRate(sbGet, { acqSource, type, ownerPartner: p.partner, memberId, scopeCol, scopeId: (scopeId || p.id) });
   if (acq == null) return ladder;
 
@@ -249,7 +253,7 @@ export async function effectiveRateBreakdown(sbGet, args) {
   // billing_country = daňový domicil, u profilu i u klubu stejně.
   const _free = await introFreeFor(sbGet, p.billing_country);
   if (_free) return { rate: 0, baseRate: 0, acqMonths: 0, months: Math.max(1, parseInt(args.months, 10) || 1), introFree: true, introUntil: _free.until };
-  const ladder = ladderRate(args.mode, { partner: p.partner, founding: p.founding, score: p.coach_ref_score, bankai: p.bankai_eligible });
+  const ladder = ladderRate(args.mode, { partner: p.partner, founding: p.founding, score: p.coach_ref_score, bankai: p.bankai_eligible, org: hasOrgRate(p) });   // org viz výš
   const acq = await acquisitionRate(sbGet, { acqSource: args.acqSource, type: args.type, ownerPartner: p.partner, memberId: args.memberId, scopeCol: args.scopeCol, scopeId: (args.scopeId || p.id) });
   const bought = Math.max(1, parseInt(args.months, 10) || 1);
   if (acq == null) return { rate: ladder, baseRate: ladder, acqMonths: 0, months: bought };
