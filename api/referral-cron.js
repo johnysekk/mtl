@@ -68,16 +68,22 @@ export default async function handler(req, res) {
 
     let awarded = 0, checked = invitees.length;
     for (const inv of invitees) {
-      // a PAST, non-cancelled 1:1 lesson?  (bookings.training_date, status='active')
+      // ── 1:1 LEKCE: MUSÍ BÝT POTVRZENÁ OBĚMA ───────────────────────────────────────────
+      // Dřív stačilo, že datum přešlo a rezervace je aktivní. Kdo si lekci koupil a nepřišel,
+      // tím oběma vydělal 2+2 body za trénink, který se nestal. Rezervace 1:1 už potvrzení
+      // nese (student_confirmed / coach_confirmed), tak se na ně ptáme.
       const b1 = await sb(
-        `bookings?student_id=eq.${inv.id}&status=eq.active&training_date=lt.${today}&select=id&limit=1`
+        `bookings?student_id=eq.${inv.id}&status=eq.active&training_date=lt.${today}` +
+        `&student_confirmed=is.true&coach_confirmed=is.true&select=id&limit=1`
       );
       let qualifies = b1 && b1.length;
 
-      // ...or a PAST, non-cancelled drop-in?  (gym_bookings.date, status='active')
+      // ── JEDNORÁZOVÝ VSTUP: MUSÍ BÝT ODKLEPNUTÁ DOCHÁZKA ──────────────────────────────
+      // gym_bookings potvrzení nemá, ale docházku klub vede tak jako tak (bez ní studenti
+      // nedostávají XP). Zápis v gym_attendance je tedy důkaz, že tam ten člověk byl.
       if (!qualifies) {
         const b2 = await sb(
-          `gym_bookings?student_id=eq.${inv.id}&status=eq.active&date=lt.${today}&select=id&limit=1`
+          `gym_attendance?student_id=eq.${inv.id}&class_date=lt.${today}&select=id&limit=1`
         );
         qualifies = b2 && b2.length;
       }
