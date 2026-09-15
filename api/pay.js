@@ -65,9 +65,49 @@ async function _assertAcctReady(acct, res) {
   }
 }
 
+// ═══ POZASTAVENÝ POSKYTOVATEL NEPRODÁVÁ ═════════════════════════════════════════════════
+// Deck ho skryje, ale přímý odkaz na platbu (z e-mailu, ze staré záložky, zpětné tlačítko)
+// šel dál a student mu mohl zaplatit. Tady se to zavírá u zdroje: než vznikne Checkout,
+// ověří se, že klub ani kouč nejsou pozastavení.
+//
+// TÝKÁ SE JEN NOVÝCH PLATEB. Už běžící předplatné u Stripe jede dál — to je záměr a slibujeme
+// ho poskytovateli i studentovi.
+const _SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
+const _SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+async function _isSuspended(table, id) {
+  try {
+    if (!id) return false;
+    const r = await fetch(`${_SB}/rest/v1/${table}?id=eq.${encodeURIComponent(id)}&select=account_suspended`, {
+      headers: { apikey: _SKEY, Authorization: `Bearer ${_SKEY}` },
+    });
+    if (!r.ok) return false;              // nedostupná databáze platbu neblokuje
+    const j = await r.json();
+    return !!(j && j[0] && j[0].account_suspended);
+  } catch (e) { return false; }
+}
+async function _assertNotSuspended(req, res) {
+  const q = req.query || {};
+  const gymId = q.gymId || q.gym_id || null;
+  const coachId = q.coachProfileId || q.coachId || null;
+  const orgId = q.organizationId || q.orgId || null;
+  const hits = await Promise.all([
+    gymId ? _isSuspended('gyms', gymId) : false,
+    coachId ? _isSuspended('profiles', coachId) : false,
+    orgId ? _isSuspended('organizations', orgId) : false,
+  ]);
+  if (hits.some(Boolean)) {
+    res.status(403).json({ error: 'Tento poskytovatel má dočasně pozastavený účet a nemůže teď přijímat platby.' });
+    return false;
+  }
+  return true;
+}
+
 export default async function handler(req, res) {
   const type = String(req.query.type || 'coach');
   try {
+    // partner = platba Exclusive Partnera směrem k MTL; tu pozastavení blokovat nesmí,
+    // jinak by se poskytovatel nedostal z dluhu ven.
+    if (type !== 'partner' && !(await _assertNotSuspended(req, res))) return;
     if (type === 'coach')      return await coachCheckout(req, res);
     if (type === 'gym')        return await gymCheckout(req, res);
     if (type === 'membership') return await membershipCheckout(req, res);

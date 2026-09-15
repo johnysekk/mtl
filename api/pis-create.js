@@ -116,6 +116,27 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'missing fields (bookingId, gymIban, amount, bankId)' });
     }
 
+    // POZASTAVENÝ POSKYTOVATEL NEPŘIJÍMÁ ANI PŘEVODEM. Bez téhle kontroly stačilo obejít deck
+    // přímým odkazem a zaplatit klubu, který má pozastavený účet. Vlastníka dohledáme z řádku,
+    // ke kterému se platba váže -- ten už kind rozlišuje níž při zápisu payment_id.
+    try {
+      const _tbl = (kind === 'memb') ? 'gym_memberships' : (kind === 'coach1') ? 'bookings'
+        : (kind === 'event') ? 'event_tickets' : (kind === 'cohort') ? 'cohort_members'
+        : (kind === 'merch') ? 'merch_orders' : 'gym_bookings';
+      const _bid = String(bookingId).startsWith('orgfee:') ? String(bookingId).slice(7) : String(bookingId);
+      const { data: _row } = await sb.from(_tbl).select('gym_id,coach_id').eq('id', _bid).maybeSingle();
+      if (_row) {
+        if (_row.gym_id) {
+          const { data: _g } = await sb.from('gyms').select('account_suspended').eq('id', _row.gym_id).maybeSingle();
+          if (_g && _g.account_suspended) return res.status(403).json({ error: 'provider suspended' });
+        }
+        if (_row.coach_id) {
+          const { data: _c } = await sb.from('profiles').select('account_suspended').eq('id', _row.coach_id).maybeSingle();
+          if (_c && _c.account_suspended) return res.status(403).json({ error: 'provider suspended' });
+        }
+      }
+    } catch (e) { /* nedostupná databáze platbu neblokuje */ }
+
     const token = await neoToken();
     const deviceId = crypto.randomUUID();
     const sessionId = await neoSession(token, bankId, deviceId);

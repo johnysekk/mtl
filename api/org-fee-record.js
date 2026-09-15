@@ -112,6 +112,15 @@ export default async function handler(req, res) {
 
     const oc = (await sb(`organization_clubs?id=eq.${encodeURIComponent(oc_id)}&select=*`))[0];
     if (!oc) return res.status(404).json({ error: 'not found' });
+
+    // Pozastavená organizace nic neúčtuje. Stejné pravidlo jako u klubu a kouče -- jinak by
+    // stačilo obejít appku přímým voláním a inkasovat dál.
+    try {
+      if (oc.organization_id) {
+        const _o = (await sb(`organizations?id=eq.${encodeURIComponent(oc.organization_id)}&select=account_suspended`))[0];
+        if (_o && _o.account_suspended) return res.status(403).json({ error: 'organization suspended' });
+      }
+    } catch (e) { /* nedostupná databáze platbu neblokuje */ }
     if (!oc.fee_paid_at) return res.status(409).json({ error: 'not paid yet' });
 
     // Dvakrát zaúčtovat nejde: doklad je nevratný a druhé číslo v řadě by nešlo vzít zpět.

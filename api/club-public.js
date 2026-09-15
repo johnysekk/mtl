@@ -92,7 +92,9 @@ export default async function handler(req, res) {
 
   // Pozastavený nebo neexistující klub nedostane stránku. Ne kvůli utajení, ale proto, že
   // odkaz v biu, který ukazuje neaktivní klub, škodí klubu i MTL.
-  if (!g || (g.status && g.status !== 'approved')) {
+  // account_suspended patří do stejné podmínky: pozastavený klub je pro veřejnost stejně
+  // neaktivní jako neschválený a odkaz v biu na něj nemá vést.
+  if (!g || (g.status && g.status !== 'approved') || g.account_suspended) {
     res.setHeader('Cache-Control', 'public, max-age=60');
     return res.status(404).send(
       '<!doctype html><html lang="cs"><meta charset="utf-8">'
