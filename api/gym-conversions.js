@@ -81,11 +81,23 @@ export default async function handler(req, res) {
     const pd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
     const prevM = `${pd.getUTCFullYear()}-${String(pd.getUTCMonth() + 1).padStart(2, '0')}`;
 
+    // ── KDO SE DO TRYCHTÝŘE NEPOČÍTÁ ───────────────────────────────────────────────────
+    // Stávající zákazníci (mají u klubu členství nebo rezervaci) si profil otevírají pořád --
+    // koukají na rozvrh. Když se počítali do „otevření profilu" a „zaujatých", číslo bylo
+    // astronomické a konverze směšná, protože člen si členství znovu nekoupí. Trychtýř
+    // je o LIDECH ZVENKU, takže existující zákazníci z něj ven.
+    const _existing = new Set();
+    try {
+      (books || []).forEach(x => { if (x.student_id) _existing.add(String(x.student_id)); });
+      (mems || []).forEach(x => { if (x.student_id) _existing.add(String(x.student_id)); });
+    } catch (e) {}
+
     // opens / engaged (unique viewers per month) + source mix
     const openThis = new Set(), openPrev = new Set(), engThis = new Set();
     const sources = { deck: 0, search: 0, app: 0 };
     const organicByViewer = {}; // viewer -> earliest organic (deck/search) view_date
     views.forEach(v => {
+      if (v.viewer_id && _existing.has(String(v.viewer_id))) return;   // stávající zákazník
       const m = ym(v.view_date);
       if (m === thisM) {
         openThis.add(v.viewer_id);
@@ -161,6 +173,15 @@ export default async function handler(req, res) {
       ok: true,
       // v haléřích, stejně jako zbytek částek
       broughtTotals: { students: broughtIds.size, acqFee, net: broughtNet, acqFeeMonth, netMonth: broughtNetMonth },
+      // Konverze trychtýře: z lidí zvenku, kteří si letos otevřeli profil, kolik si koupilo.
+      // Existující zákazníci jsou z čitatele i jmenovatele venku, jinak by to nic neříkalo.
+      funnel: {
+        opens: openThis.size,
+        engaged: engThis.size,
+        bought: newCount || 0,
+        rateOpen: openThis.size ? Math.round(((newCount || 0) / openThis.size) * 1000) / 10 : null,
+        rateEngaged: engThis.size ? Math.round(((newCount || 0) / engThis.size) * 1000) / 10 : null,
+      },
       currency,
       opens: { this: openThis.size, prev: openPrev.size },
       engaged: { this: engThis.size },
