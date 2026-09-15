@@ -60,6 +60,18 @@ function remindable(c, date, startMins, tz) {
   return true;
 }
 
+// „pondělí 15. 9. ve 20:00" z data (YYYY-MM-DD) a času (HH:MM). Kouč může mít stejně
+// pojmenovanou lekci ve víc dnech, takže bez dne se připomínka nedala přiřadit.
+const _CZ_DAYS = ["neděle", "pondělí", "úterý", "středa", "čtvrtek", "pátek", "sobota"];
+function _czWhen(date, time) {
+  try {
+    const d = new Date(date + 'T00:00:00Z');
+    const day = _CZ_DAYS[d.getUTCDay()] || '';
+    const dm = d.getUTCDate() + '. ' + (d.getUTCMonth() + 1) + '.';
+    return [day, dm, time ? ('ve ' + time) : ''].filter(Boolean).join(' ');
+  } catch (e) { return [date, time].filter(Boolean).join(' '); }
+}
+
 async function handler(req, res) {
   // Ověření, že volá Vercel cron (nebo externí scheduler se správným tajemstvím)
   const auth = req.headers.authorization || '';
