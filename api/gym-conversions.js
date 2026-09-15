@@ -131,22 +131,28 @@ export default async function handler(req, res) {
     // zajímá. Bereme akviziční provize (transactions.acq_source = 'mtl_discovery') a proti nim
     // VŠECHNO, co ti stejní lidé klubu kdy zaplatili -- návratnost dává smysl jen kumulativně.
     let acqFee = 0, broughtIds = new Set(), broughtNet = 0;
+    // Měsíční čísla vedle celkových: zbytek panelu je za tenhle měsíc, takže samotné „celkem"
+    // se s ním nedalo srovnat.
+    const _mStart = new Date().toISOString().slice(0, 7) + '-01';
+    let acqFeeMonth = 0, broughtNetMonth = 0;
     try {
-      const txAcq = await pagedGet(`transactions?gym_id=eq.${gymId}&acq_source=eq.mtl_discovery&select=member_id,mtl_fee,mtl_fee_refunded`);
+      const txAcq = await pagedGet(`transactions?gym_id=eq.${gymId}&acq_source=eq.mtl_discovery&select=member_id,mtl_fee,mtl_fee_refunded,created_at`);
       (txAcq || []).forEach(t => {
         const fee = (Number(t.mtl_fee) || 0) - (Number(t.mtl_fee_refunded) || 0);
-        if (fee > 0) acqFee += fee;
+        if (fee > 0) { acqFee += fee; if (String(t.created_at || '') >= _mStart) acqFeeMonth += fee; }
         if (t.member_id) broughtIds.add(String(t.member_id));
       });
       if (broughtIds.size) {
         const ids = [...broughtIds].slice(0, 300).join(',');
-        const txAll = await pagedGet(`transactions?gym_id=eq.${gymId}&member_id=in.(${ids})&select=gross_amount,mtl_fee,mtl_fee_refunded,stripe_fee,refund_amount`);
+        const txAll = await pagedGet(`transactions?gym_id=eq.${gymId}&member_id=in.(${ids})&select=gross_amount,mtl_fee,mtl_fee_refunded,stripe_fee,refund_amount,created_at`);
         (txAll || []).forEach(t => {
           const gross = Number(t.gross_amount) || 0;
           const back = Number(t.refund_amount) || 0;
           const mtl = (Number(t.mtl_fee) || 0) - (Number(t.mtl_fee_refunded) || 0);
           const stripe = Number(t.stripe_fee) || 0;
-          broughtNet += Math.max(0, gross - back - mtl - stripe);
+          const net = Math.max(0, gross - back - mtl - stripe);
+          broughtNet += net;
+          if (String(t.created_at || '') >= _mStart) broughtNetMonth += net;
         });
       }
     } catch (e) { console.error('gym-conversions acq', e.message); }
@@ -154,7 +160,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: true,
       // v haléřích, stejně jako zbytek částek
-      broughtTotals: { students: broughtIds.size, acqFee, net: broughtNet },
+      broughtTotals: { students: broughtIds.size, acqFee, net: broughtNet, acqFeeMonth, netMonth: broughtNetMonth },
       currency,
       opens: { this: openThis.size, prev: openPrev.size },
       engaged: { this: engThis.size },
