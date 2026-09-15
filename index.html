@@ -25589,7 +25589,7 @@ const GYM_SHOWCASE = [
   // skutečná fotka s lidmi výrazně překonává prázdné prostory a stock fotky: tváře zvedají
   // zapojení a autentické fotky od klubu mají znatelně nižší cenu za proklik. Prázdná žíněnka
   // je pravý opak toho, co funguje.
-  { k:'training',  lbl:'🥊 Náhledová fotka — bude všude vidět jako první. Nejlíp funguje skupina lidí při tréninku nebo po něm, s obličeji. Vyhni se prázdné ploše a fotkám ze stocku.' },
+  { k:'training',  lbl:'🥊 Náhledová fotka — bude všude vidět jako první. Nejlépe funguje skupina lidí při tréninku nebo po něm, s viditelnými tvářemi. Vyhni se prázdné ploše nebo pouze vybavení.' },
   { k:'equipment', lbl:'🛍️ Vybavení (pytle, ring, lapy)' },
   { k:'entrance',  lbl:'🚪 Vchod / recepce' },
 ]; // povinné — vidí student
@@ -28780,7 +28780,38 @@ async function _renderGymAnalyticsInner(gymId, box){
   const memGymMo = memMonthly*_keepRate, memMtlMo = memMonthly*_mtlRate;
   const _isFounder = !!(currentUser && (currentUser.role==='founder'||currentUser.id===FOUNDER_UUID));
   let _upDrops=0, _mtlNet=0, _lastAct='', _new30=0;
+  // KDO KLUB ZALOŽIL A KDO HO MÁ TEĎ. Zakladatel se v gyms nevede zvlášť, ale první vlastník
+  // je v auditu (gym_audit, akce created); když audit nic nemá, je zakladatel = dnešní
+  // vlastník, což u nepřevedených klubů sedí.
+  window._admGymPeople={ creator:'', owner:'', coowners:[] };
   if(_isFounder){
+    try{
+      const _ids=new Set(); if(gym?.owner_id) _ids.add(gym.owner_id);
+      let _creatorId=gym?.owner_id||null;
+      try{
+        const { data:_au }=await supaClient.from('gym_audit').select('actor_id,action,created_at')
+          .eq('gym_id',gymId).order('created_at',{ascending:true}).limit(50);
+        const _first=(_au||[]).find(function(x){ return String(x.action||'').indexOf('created')>=0; });
+        if(_first&&_first.actor_id){ _creatorId=_first.actor_id; _ids.add(_first.actor_id); }
+      }catch(e){}
+      let _co=[];
+      try{
+        const { data:_cc }=await supaClient.from('gym_coaches').select('coach_id')
+          .eq('gym_id',gymId).eq('co_owner',true).eq('status','active');
+        _co=(_cc||[]).map(function(x){ return x.coach_id; }).filter(Boolean);
+        _co.forEach(function(x){ _ids.add(x); });
+      }catch(e){}
+      if(_ids.size){
+        const { data:_pp }=await supaClient.from('profiles').select('id,name').in('id',[..._ids]);
+        const _nm={}; (_pp||[]).forEach(function(x){ _nm[x.id]=x.name||'—'; });
+        window._admGymPeople={
+          creator:_nm[_creatorId]||'—',
+          owner:_nm[gym?.owner_id]||'—',
+          coowners:_co.map(function(x){ return _nm[x]||'—'; }),
+        };
+      }
+    }catch(e){}
+
     const _today=new Date().toISOString().slice(0,10);
     const _30ago=new Date(Date.now()-30*864e5).toISOString();
     try{ const { data:_ud }=await supaClient.from('gym_bookings').select('id').eq('gym_id',gymId).in('status',['reserved','active','paid_claimed']).gte('class_date',_today); _upDrops=(_ud||[]).length; }catch(e){}
@@ -28838,12 +28869,20 @@ async function _renderGymAnalyticsInner(gymId, box){
       </label>
     </div>` : ''}
     ${_isFounder ? `
+    <div class="sec-lbl">${LANG==='en'?'Club details':'Údaje o klubu'}</div>
+    <div class="prow-group" style="margin-bottom:16px;">
+      ${_fdRow('🥊', LANG==='en'?'Club name in MTL':'Název klubu v MTL', gym?.name)}
+      ${_fdRow('🏠', LANG==='en'?'Venue address':'Adresa provozovny', [gym?.address, [gym?.postal_code, gym?.city].filter(Boolean).join(' ')].filter(Boolean).join(', '))}
+      ${_fdRow('📅', LANG==='en'?'Founded':'Rok založení', gym?.founded_year)}
+      ${_fdRow('🧑\u200d💼', LANG==='en'?'Registered by':'Kdo založil', window._admGymPeople?.creator)}
+      ${_fdRow('👑', LANG==='en'?'Current owner':'Současný majitel', window._admGymPeople?.owner)}
+      ${(window._admGymPeople?.coowners||[]).length ? _fdRow('🤝', LANG==='en'?'Co-owners':'Spolumajitelé', (window._admGymPeople.coowners||[]).join(', ')) : ''}
+    </div>
     <div class="sec-lbl">${LANG==='en'?'Billing details':'Fakturační údaje'}</div>
     <div class="prow-group" style="margin-bottom:16px;">
       ${_fdRow('🏛️', LANG==='en'?'Legal name':'Právní název', gym?.legal_name)}
       ${_fdRow('🧾', LANG==='en'?'Reg. number':'IČO', gym?.tax_id)}
       ${_fdRow('🧾', LANG==='en'?'VAT ID':'DIČ', gym?.vat_id)}
-      ${_fdRow('🏠', LANG==='en'?'Venue address':'Adresa provozovny', [gym?.address, [gym?.postal_code, gym?.city].filter(Boolean).join(' ')].filter(Boolean).join(', '))}
       ${_fdRow('🧾', LANG==='en'?'Registered address (invoices)':'Sídlo (na fakturách)', [gym?.billing_line1, gym?.billing_line2, [gym?.billing_postal, gym?.billing_city].filter(Boolean).join(' ')].filter(Boolean).join(', '))}
       ${_fdRow('🌍', LANG==='en'?'Country':'Stát', (typeof _countryName==='function')?_countryName(gym?.billing_country||gym?.country):(gym?.billing_country||gym?.country))}
       ${_fdRow('📨', LANG==='en'?'Invoice e-mail':'Fakturační e-mail', gym?.invoice_email)}
@@ -28974,6 +29013,8 @@ async function toggleEP(userId){
 // dostane rozbalování zdarma a nemusí o něm vědět.
 //
 // První sekce zůstává otevřená, ať obrazovka nevypadá prázdně.
+// openFirst=false: v adminu jsou všechny sekce sbalené. Otevřená první sekce jen zabírala
+// místo a nutila scrollovat k tomu, co člověk hledá.
 function _admCollapseSections(boxId, openFirst){
   try{
     const box=document.getElementById(boxId); if(!box || box.dataset.collapsed) return;
@@ -29010,7 +29051,7 @@ async function openGymStats(gymId, gymName, fromAdmin){
   const _p=renderGymAnalytics(gymId, 'gymStatsBody');
   // Sbalit až po dokreslení. Render je asynchronní, takže se to volá i s odstupem pro případ,
   // že dokresluje na etapy.
-  const _fix=function(){ try{ const b=document.getElementById('gymStatsBody'); if(b) delete b.dataset.collapsed; }catch(e){} _admCollapseSections('gymStatsBody', true); };
+  const _fix=function(){ try{ const b=document.getElementById('gymStatsBody'); if(b) delete b.dataset.collapsed; }catch(e){} _admCollapseSections('gymStatsBody', false); };
   try{ if(_p && _p.then) _p.then(_fix); }catch(e){}
   setTimeout(_fix, 700); setTimeout(_fix, 1600);
 }
@@ -29600,7 +29641,7 @@ async function openCoachStats(coachId, coachName, fromAdmin){
   $('coachStatsTitle').textContent = `📊 ${coachName||(LANG==='en'?'Coach':'Kouč')}`;
   openSheet('shCoachStats');
   const _p=renderCoachAnalytics(coachId, 'coachStatsBody');
-  const _fix=function(){ try{ const b=document.getElementById('coachStatsBody'); if(b) delete b.dataset.collapsed; }catch(e){} _admCollapseSections('coachStatsBody', true); };
+  const _fix=function(){ try{ const b=document.getElementById('coachStatsBody'); if(b) delete b.dataset.collapsed; }catch(e){} _admCollapseSections('coachStatsBody', false); };
   try{ if(_p && _p.then) _p.then(_fix); }catch(e){}
   setTimeout(_fix, 700); setTimeout(_fix, 1600);
 }
