@@ -176,11 +176,47 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
     try {
       // Okno běží od PRVNÍ platby toho člověka u toho poskytovatele. Když žádnou nemá,
       // je tohle ta první a okno teprve začíná.
-      const first = await sbGet(
+      // ── UŽ PLATÍ Z REKLAMY? ────────────────────────────────────────────────────────
+      // Rozhoduje, jestli je tohle PRVNÍ platba po kliku z reklamy, nebo další v řadě. Bez
+      // toho rozlišení by kontrola „stávající člen" níž zabila i druhý měsíc člena, kterého
+      // reklama opravdu přivedla: jeho vlastní první platba by ho prohlásila za stávajícího.
+      const priorAds = await sbGet(
         `transactions?select=created_at&member_id=eq.${encodeURIComponent(memberId)}` +
-        `&${scopeCol}=eq.${encodeURIComponent(scopeId)}&status=in.(paid,completed)` +
-        `&order=created_at.asc&limit=1`
+        `&${scopeCol}=eq.${encodeURIComponent(scopeId)}&acq_source=eq.mtl_ads` +
+        `&status=in.(paid,completed)&order=created_at.asc&limit=1`
       );
+      const hasPriorAds = !!(priorAds && priorAds.length);
+
+      if (!hasPriorAds) {
+        // ── STÁVAJÍCÍ ČLEN NENÍ AKVIZICE ─────────────────────────────────────────────
+        // Kdo u klubu za posledního půl roku platil nebo trénoval, není nikdo, koho přivedla
+        // reklama. Jinak by stačilo, aby člen měsíc nechodil, ze zvědavosti klikl na reklamu,
+        // a klub by platil 30 % za svého vlastního člověka.
+        // Kdo nebyl půl roku, se bere jako nový: přivést odejdeného člena zpátky je práce.
+        const back = new Date();
+        back.setMonth(back.getMonth() - ADS_WINDOW_MONTHS);
+        const backISO = back.toISOString();
+        const recentPay = await sbGet(
+          `transactions?select=id&member_id=eq.${encodeURIComponent(memberId)}` +
+          `&${scopeCol}=eq.${encodeURIComponent(scopeId)}&status=in.(paid,completed)` +
+          `&created_at=gte.${encodeURIComponent(backISO)}&limit=1`
+        );
+        if (recentPay && recentPay.length) return null;
+        if (scopeCol === 'gym_id') {
+          // U klubu se dá trénovat i bez platby v MTL (stará permanentka, hotovost mimo
+          // systém). I to je vztah, který reklama nezaložila.
+          const recentAtt = await sbGet(
+            `gym_attendance?select=id&student_id=eq.${encodeURIComponent(memberId)}` +
+            `&gym_id=eq.${encodeURIComponent(scopeId)}` +
+            `&class_date=gte.${encodeURIComponent(backISO.slice(0, 10))}&limit=1`
+          );
+          if (recentAtt && recentAtt.length) return null;
+        }
+      }
+
+      // Okno běží od první platby Z REKLAMY. U prvního nákupu žádná není a okno teprve
+      // začíná; u dalších se počítá, kolik z těch šesti měsíců zbývá.
+      const first = hasPriorAds ? priorAds : [];
       const firstAt = (first && first[0] && first[0].created_at) ? new Date(first[0].created_at) : null;
       let left = ADS_WINDOW_MONTHS;
       if (firstAt) {
