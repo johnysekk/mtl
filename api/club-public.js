@@ -144,6 +144,19 @@ export default async function handler(req, res) {
 
   const hero = photoUrl(photos[0]);
   const gallery = photos.slice(1, 10).map(photoUrl).filter(Boolean);
+  // KARUSEL místo jedné fotky v pozadí: na stránku vodíme reklamu a fotky z tréninku jsou
+  // to jediné, co o klubu řekne víc než text. Bere se všechno, co klub nahrál.
+  const slides = photos.slice(0, 10).map(photoUrl).filter(Boolean);
+
+  // Napsané recenze. Hvězdičky samy o sobě nikoho nepřesvědčí, věta od člena ano.
+  let reviews = [];
+  try {
+    const rv = await sbGet(`gym_ratings?gym_id=eq.${encodeURIComponent(id)}&select=rating,comment,student_name,created_at&order=created_at.desc&limit=30`);
+    reviews = (rv || [])
+      .filter(r => r && r.comment && String(r.comment).trim().length > 2)
+      .slice(0, 6)
+      .map(r => ({ rating: Number(r.rating) || 0, text: String(r.comment).trim().slice(0, 400), who: String(r.student_name || '').trim() }));
+  } catch (e) { /* recenze nejsou povinné */ }
 
   console.log('[club-public]', g.id, 'fotky:', photos.length, 'rozvrh:', schedule.length,
               'plány:', plans.length, 'trenéři:', coaches.length, 'popis:', !!g.description);
@@ -272,6 +285,24 @@ h2{font-family:'Bebas Neue',sans-serif;font-size:23px;letter-spacing:.05em;margi
 .mCard p{color:rgba(255,255,255,.60);font-size:14px;line-height:1.55;margin:0 0 18px}
 .mGo{display:block;background:linear-gradient(135deg,#C9A227,#F4D87A);color:#241c00;text-decoration:none;padding:15px;border-radius:13px;font-weight:700;font-size:16px}
 .mAlt{display:block;margin-top:10px;color:rgba(255,255,255,.55);text-decoration:none;font-size:13.5px;font-weight:600;padding:9px}
+/* KARUSEL. Vodorovný scroll s přichytáváním -- na mobilu se posouvá prstem, na počítači
+   jsou k tomu šipky. Žádná knihovna, stránka pro reklamu musí být rychlá. */
+.car{position:relative;background:#0c0c0c}
+.carTrack{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none;-ms-overflow-style:none}
+.carTrack::-webkit-scrollbar{display:none}
+.carSlide{flex:0 0 100%;scroll-snap-align:center}
+.carSlide img{display:block;width:100%;height:clamp(240px,46vw,420px);object-fit:cover}
+.carNav{position:absolute;top:50%;transform:translateY(-50%);width:38px;height:38px;border-radius:50%;border:none;background:rgba(0,0,0,.45);color:#fff;font-size:22px;line-height:1;cursor:pointer;display:none}
+.carPrev{left:10px}.carNext{right:10px}
+.carDots{position:absolute;bottom:10px;left:0;right:0;display:flex;justify-content:center;gap:6px}
+.carDot{width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,.45);cursor:pointer}
+.carDot.on{background:var(--gold);width:18px;border-radius:99px}
+@media(min-width:760px){.carNav{display:block}}
+/* RECENZE */
+.rev{border:1px solid var(--border);border-radius:14px;padding:13px 15px;margin-bottom:10px;background:var(--surf)}
+.rev p{margin:0;font-size:14.5px;color:var(--ink);line-height:1.6}
+.revStars{color:#C9A227;font-size:13px;letter-spacing:.08em;margin-bottom:6px}
+.revWho{margin-top:8px;font-size:12.5px;color:var(--light);font-weight:600}
 @media(min-width:560px){.mOv{align-items:center}}
 @media(min-width:560px){h1{font-size:52px}.hero{padding:44px 20px 38px}}
 </style></head><body>
@@ -294,6 +325,7 @@ h2{font-family:'Bebas Neue',sans-serif;font-size:23px;letter-spacing:.05em;margi
       `<div class="p">${c.photo_url ? `<img src="${esc(c.photo_url)}" alt="">` : '<div class="ph">\u{1F94A}</div>'}<span>${esc(c.name)}</span></div>`
     ).join('')}</div></section>` : ''}
   ${gallery.length ? `<section><h2>Fotky</h2><div class="gal">${gallery.map(u => `<img src="${esc(u)}" alt="" loading="lazy">`).join('')}</div></section>` : ''}
+  ${reviews.length ? `<section><h2>Co \u0159\u00edkaj\u00ed \u010dlenov\u00e9</h2>${reviews.map(r => `<div class="rev">${r.rating ? `<div class="revStars">${'\u2605'.repeat(Math.max(1, Math.min(5, Math.round(r.rating))))}</div>` : ''}<p>${esc(r.text)}</p>${r.who ? `<div class="revWho">${esc(r.who)}</div>` : ''}</div>`).join('')}</section>` : ''}
 </div>
 <div class="cta"><a id="bookBtn" href="${esc(linkOwn)}">Rezervovat trénink \u2192</a></div>
 
@@ -309,6 +341,21 @@ h2{font-family:'Bebas Neue',sans-serif;font-size:23px;letter-spacing:.05em;margi
 </div>
 
 <script>
+// Karusel: tečky, šipky a posun prstem. Bez knihovny.
+(function(){
+  var tr=document.getElementById('carTrack'); if(!tr) return;
+  var dots=[].slice.call(document.querySelectorAll('.carDot'));
+  var go=function(i){ var w=tr.clientWidth; tr.scrollTo({ left:i*w, behavior:'smooth' }); };
+  var cur=function(){ return Math.round(tr.scrollLeft/Math.max(1,tr.clientWidth)); };
+  tr.addEventListener('scroll', function(){
+    var i=cur(); dots.forEach(function(d,k){ d.classList.toggle('on', k===i); });
+  }, { passive:true });
+  dots.forEach(function(d){ d.onclick=function(){ go(+d.dataset.i||0); }; });
+  var p=document.getElementById('carPrev'), n=document.getElementById('carNext');
+  if(p) p.onclick=function(){ go(Math.max(0, cur()-1)); };
+  if(n) n.onclick=function(){ go(Math.min(dots.length-1, cur()+1)); };
+})();
+
 // Klik na Rezervovat nenaviguje pryč: otevře se okno nad stránkou klubu, která zůstane vidět.
 // Odkaz v tlačítku zůstává platný, takže bez JavaScriptu (nebo při chybě) funguje po staru.
 (function(){
