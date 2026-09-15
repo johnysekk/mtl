@@ -22147,6 +22147,8 @@ function _commissionBanner(row, kind){
   const _entP = (kind==='coach') ? (LANG==='en'?'Your profile':'Tv\u016fj profil') : (LANG==='en'?'Your club':'Klub'); if(!g) return '';
   const EN = LANG === 'en';
   const fmtD = function(iso){ try{ return new Date(iso).toLocaleDateString(EN?'en-GB':'cs-CZ', { day:'numeric', month:'numeric' }); }catch(e){ return ''; } };
+  // Ať štítky měsíců v „Provize vůči MTL" vědí, že stržení selhalo (viz _pill).
+  try{ window._commFailedAt = g.commission_failed_at || null; }catch(e){}
   const retry = g.commission_next_retry ? fmtD(g.commission_next_retry) : '';
   const deadline = g.commission_failed_at ? fmtD(new Date(new Date(g.commission_failed_at).getTime() + 14*86400000).toISOString()) : '';
   const retryLine = retry ? ('<div style="font-size:11.5px;color:#b91c1c;margin-top:5px;">'+(EN?'Next charge attempt: ':'P\u0159\u00ed\u0161t\u00ed pokus o str\u017een\u00ed: ')+'<b>'+retry+'</b></div>') : '';
@@ -22155,7 +22157,13 @@ function _commissionBanner(row, kind){
   if(g.account_suspended) return wrap('\ud83d\udeab '+(EN?'Account paused \u2014 unpaid commission':'\u00da\u010det pozastaven \u2014 neuhrazen\u00e1 provize'), (EN?_entP+' is hidden and bookings are blocked until the MTL commission is paid.':_entP+' je skryt\u00fd a rezervace jsou zablokovan\u00e9, dokud neuhrad\u00ed\u0161 provizi MTL.'));
   if(g.cash_blocked) return wrap('\ud83d\udeab '+(EN?'Cash recording paused':'Zaznamen\u00e1v\u00e1n\u00ed hotovosti pozastaveno'), (EN?'Unpaid cash commission. Stripe still works; pay to re-enable cash.':'Neuhrazen\u00e1 provize z hotovosti. Stripe b\u011b\u017e\u00ed d\u00e1l; cash odbloku\u0161 \u00fahradou.'));
   if(g.commission_failed_at){
-    const body = (EN?('Update your card. Pay by '+deadline+' or the account will be paused.'):('Aktualizuj kartu. Uhraď do '+deadline+', jinak bude \u00fa\u010det pozastaven.'));
+    const body = (EN
+        ? ('Pay now, or update your card. Settle by '+deadline+' or the account will be paused: '
+           + 'students will not see you in the app, online payments and reservations stop, '
+           + 'and you will not be able to take cash. Your data and schedule stay as they are.')
+        : ('Zapla\u0165 hned, p\u0159\u00edpadn\u011b aktualizuj kartu. Uhra\u010f do '+deadline+', jinak bude \u00fa\u010det pozastaven: '
+           + 'studenti t\u011b p\u0159estanou vid\u011bt v appce, zastav\u00ed se platby i rezervace a nep\u016fjde p\u0159ij\u00edmat hotovost. '
+           + 'Data ani rozvrh nep\u0159ijdou nazmar.'));
     return '<div style="background:#FFF7ED;border:1px solid #FCD9A8;border-radius:12px;padding:12px 14px;margin-bottom:14px;"><div style="font-size:13px;font-weight:800;color:#9a5a00;margin-bottom:4px;">\u26a0\ufe0f '+(EN?'Commission charge failed':'Str\u017een\u00ed provize selhalo')+'</div><div style="font-size:12px;color:#9a5a00;line-height:1.5;">'+body+(retry?('<br>'+(EN?'Next attempt: ':'P\u0159\u00ed\u0161t\u00ed pokus: ')+'<b>'+retry+'</b>'):'')+'</div><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">'
       /* Zaplatit hned vedle aktualizace karty: opravit kartu a uhradit dluh jsou dvě různé věci
          a člověk obvykle chce nejdřív to druhé, aby mu neběžela lhůta do pozastavení. */
@@ -29393,10 +29401,23 @@ async function openMtlCommissions(scope){
   const _MO=EN?['January','February','March','April','May','June','July','August','September','October','November','December']:['Leden','\u00danor','B\u0159ezen','Duben','Kv\u011bten','\u010cerven','\u010cervenec','Srpen','Z\u00e1\u0159\u00ed','\u0158\u00edjen','Listopad','Prosinec'];
   const _mName=function(mk){ const p=String(mk).split('-'); return (_MO[(parseInt(p[1],10)||1)-1]||mk)+' '+p[0]; };
   const _curM=new Date().toISOString().slice(0,7);
+  // Příznak selhání si načteme sami: přehled se dá otevřít i bez toho, aby se předtím
+  // vykreslil pruh v dashboardu, který ho jinak nastavuje.
+  try{
+    const _ent=(_isCoachScope||!_myGymData)
+      ? await supaClient.from('profiles').select('commission_failed_at').eq('id',currentUser.id).maybeSingle()
+      : await supaClient.from('gyms').select('commission_failed_at').eq('id',_myGymData.id).maybeSingle();
+    window._commFailedAt=(_ent&&_ent.data&&_ent.data.commission_failed_at)||null;
+  }catch(e){}
   const _money=function(v,cur){ return fmtPrice(v,cur)+' '+_curSym(cur); };
   const _pill=function(m){
     if(m.bank<=0) return '<span style="font-size:11px;background:#EEF4FF;color:var(--blue);padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'via Stripe':'sr\u00e1\u017eeno Stripem')+'</span>';
     if(m.status==='failed') return '<span style="font-size:11px;background:#FDECEC;color:#8a1c1c;padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'failed':'nezda\u0159ilo')+'</span>';
+    // UZAVŘENÝ MĚSÍC, KTERÝ SE NESTRHL. V denním režimu cron řádky na 'failed' nepřepisuje,
+    // takže by tu u nezaplaceného minulého měsíce svítilo „běží" -- což je opak pravdy.
+    // Rozhoduje příznak selhání na entitě: když je nastavený, stržení opravdu selhalo.
+    if(m.month<_curM && m.status!=='collected' && window._commFailedAt)
+      return '<span style="font-size:11px;background:#FDECEC;color:#8a1c1c;padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'charge failed':'str\u017een\u00ed selhalo')+'</span>';
     if(m.month>=_curM) return '<span style="font-size:11px;background:#FFF4E5;color:#9A5B00;padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'running':'b\u011b\u017e\u00ed')+'</span>';
     if(m.status==='collected') return '<span style="font-size:11px;background:#E8F5EE;color:#006040;padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'charged':'str\u017eeno')+'</span>';
     return '<span style="font-size:11px;background:var(--surf);color:var(--mid);padding:3px 9px;border-radius:8px;white-space:nowrap;">'+(EN?'pending':'\u010dek\u00e1')+'</span>';
