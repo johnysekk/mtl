@@ -19748,7 +19748,29 @@ async function renderGymMembers(){
     </div>`; };
   const grid=(arr)=>`<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">${arr.map(compactCard).join('')}</div>`;
   const _isDeskDash = document.body.classList.contains('dashmode') && window.innerWidth>=900;
+  // JEDEN ČLOVĚK = JEDEN ŘÁDEK. Kdo má víc členství naráz (roční + měsíční, nebo přechod na
+  // jiný plán), se v tabulce objevoval tolikrát, kolik jich má, a seznam pak neodpovídal
+  // počtu lidí. Necháváme to nejnovější a ostatní se přidají jako „+1".
+  const _memOnePerPerson=(arr)=>{
+    const by=new Map();
+    (arr||[]).forEach(function(m){
+      // Dětské profily mají stejné student_id jako rodič, ale jsou to jiní lidé.
+      const key=String(m.student_id||'')+'|'+String(m.child_name||'');
+      const prev=by.get(key);
+      if(!prev){ by.set(key, Object.assign({}, m, { _more:0, _others:[] })); return; }
+      // Novější vyhrává; starší se jen připočte.
+      const a=new Date(prev.created_at||0).getTime(), b=new Date(m.created_at||0).getTime();
+      if(b>a){
+        const merged=Object.assign({}, m, { _more:(prev._more||0)+1, _others:(prev._others||[]).concat([prev]) });
+        by.set(key, merged);
+      } else {
+        prev._more=(prev._more||0)+1; prev._others=(prev._others||[]).concat([m]);
+      }
+    });
+    return [...by.values()];
+  };
   const _memTable=(arr)=>{
+    arr=_memOnePerPerson(arr);
     const cols=[['name',EN?'Name':'Jméno'],['plan',EN?'Plan':'Plán'],['att',EN?'Attendance':'Docházka'],['mrr',EN?'Monthly':'Měsíčně'],['joined',EN?'Joined':'Od'],['status',EN?'Status':'Stav'],['ends',EN?'Ends':'Končí']];
     const head=cols.map(c=>`<th data-k="${c[0]}">${c[1]} <span class="mtSort">↕</span></th>`).join('');
     const rows=arr.map(m=>{
@@ -19763,7 +19785,7 @@ async function renderGymMembers(){
       const jtxt=jd?jd.toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric'}):'—';
       let stav=cancel?(EN?'Cancelling':'Ruší se'):(EN?'Active':'Aktivní');
       if(window._gmMembKid==='history'){ stav = (window._histDropSet&&window._histDropSet.has(m.student_id)) ? (EN?'🟡 drop-ins':'🟡 jednorázky') : (EN?'🔴 left':'🔴 odešel'); }
-      return `<tr class="mbCard mtRow" data-sid="${m.student_id||''}" data-child="${(m.child_name||'').replace(/"/g,'&quot;')}" data-name="${(m.student_name||'').replace(/"/g,'&quot;')}" data-vname="${escapeHtml((m.student_name||'')).toLowerCase()}" data-plan="${escapeHtml((m.plan_name||'')).toLowerCase()}" data-mrr="${mrr}" data-status="${cancel?1:0}" data-joined="${jd?jd.getTime():0}" data-att="${ai.perWeek.toFixed(2)}" data-ends="${(_dl===null)?9e15:new Date(m.period_end).getTime()}"><td style="font-weight:700;">${nm}</td><td style="color:var(--mid);">${escapeHtml(m.plan_name||'—')}</td><td style="color:${ai.color};font-weight:800;">${ai.txt}</td><td style="font-weight:700;">${fmtPrice(mrr,m.currency||'CZK')}</td><td style="color:var(--mid);">${jtxt}</td><td><span style="color:${cancel?'var(--red)':'#006040'};font-weight:700;font-size:12px;">${stav}</span></td><td style="color:${_endCol};font-weight:${_memExpiryCol(_dl)?'800':'600'};">${_endTxt}</td></tr>`;
+      return `<tr class="mbCard mtRow" data-sid="${m.student_id||''}" data-child="${(m.child_name||'').replace(/"/g,'&quot;')}" data-name="${(m.student_name||'').replace(/"/g,'&quot;')}" data-vname="${escapeHtml((m.student_name||'')).toLowerCase()}" data-plan="${escapeHtml((m.plan_name||'')).toLowerCase()}" data-mrr="${mrr}" data-status="${cancel?1:0}" data-joined="${jd?jd.getTime():0}" data-att="${ai.perWeek.toFixed(2)}" data-ends="${(_dl===null)?9e15:new Date(m.period_end).getTime()}"><td style="font-weight:700;">${nm}</td><td style="color:var(--mid);">${escapeHtml(m.plan_name||'—')}${m._more?('<span title="'+escapeHtml((m._others||[]).map(function(o){ return (o.plan_name||'—')+' · '+fmtPrice(o.amount||0,o.currency||'CZK'); }).join(' | '))+'" style="margin-left:6px;font-size:10.5px;font-weight:800;color:var(--mid);background:var(--surf);border:1px solid var(--border);border-radius:7px;padding:1px 6px;">+'+m._more+'</span>'):''}</td><td style="color:${ai.color};font-weight:800;">${ai.txt}</td><td style="font-weight:700;">${fmtPrice(mrr,m.currency||'CZK')}</td><td style="color:var(--mid);">${jtxt}</td><td><span style="color:${cancel?'var(--red)':'#006040'};font-weight:700;font-size:12px;">${stav}</span></td><td style="color:${_endCol};font-weight:${_memExpiryCol(_dl)?'800':'600'};">${_endTxt}</td></tr>`;
     }).join('');
     return `<table class="mtTable"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
   };
@@ -29664,7 +29686,7 @@ async function openMtlCommissions(scope){
     +(EN?'Tap a month to see the payments it was collected from.':'Klepnut\u00edm na m\u011bs\u00edc uvid\u00ed\u0161 platby, ze kter\u00fdch se provize se\u010detla.')
     +'</p>'+months.map(function(k){
     const m=_byM[k]; const _tot=m.stripe+m.bank;
-    const _sub=[ (m.stripe>0?('Stripe '+_money(m.stripe,m.cur)):''),
+    const _sub=[ (m.stripe>0?((EN?'Stripe (already taken) ':'Stripe (u\u017e str\u017eeno) ')+_money(m.stripe,m.cur)):''),
                  (m.bank>0?((EN?'cash/QR/bank ':'hotovost/QR/banka ')+_money(m.bank,m.cur)):''),
                  (m.at?((EN?'charged ':'str\u017eeno ')+new Date(m.at).toLocaleDateString(EN?'en-GB':'cs-CZ')):'') ].filter(Boolean).join(' \u00b7 ');
     const _ds=_dok[k]||[];
@@ -29672,7 +29694,15 @@ async function openMtlCommissions(scope){
       +'<div style="display:flex;align-items:center;gap:10px;padding:9px 14px 8px;">'
         +'<div style="flex:1;min-width:0;"><div style="font-size:14.5px;font-weight:700;color:var(--dark);line-height:1.25;">'+_mName(m.month)+'</div>'
         +'<div style="font-size:11.5px;color:var(--mid);margin-top:1px;">'+escapeHtml(_sub)+'</div></div>'
-        +'<div style="font-size:14.5px;font-weight:700;color:var(--dark);white-space:nowrap;">'+_money(_tot,m.cur)+'</div>'
+        // DVĚ RŮZNÁ ČÍSLA. Velké je provize CELKEM za měsíc, ale z karty se strhává jen
+        // hotovostní/QR/bankovní část -- karetní si MTL vzalo rovnou při platbě. Když měl klub
+        // obojí, vypadalo to, že se strhne celá částka, a hned u ní svítilo „stržení selhalo".
+        +'<div style="text-align:right;white-space:nowrap;">'
+          +'<div style="font-size:14.5px;font-weight:700;color:var(--dark);line-height:1.2;">'+_money(_tot,m.cur)+'</div>'
+          +((m.stripe>0 && m.bank>0)
+             ? ('<div style="font-size:11px;color:var(--mid);margin-top:2px;">'+(EN?'to charge ':'ke stržení ')+_money(m.bank,m.cur)+'</div>')
+             : '')
+        +'</div>'
         +_pill(m)+'</div>'
       +'<div style="padding:0 14px 10px;"><button class="mcMonth" data-k="'+escapeHtml(k)+'" style="background:none;border:1px solid var(--border);border-radius:9px;color:var(--mid);font-size:12px;font-weight:700;padding:5px 11px;cursor:pointer;font-family:inherit;">'
         +'<span class="mcChev">\u203a</span> '+(EN?'Show transactions':'Zobrazit detail transakc\u00ed')+'</button></div>'
