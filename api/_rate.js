@@ -182,13 +182,22 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
         `&order=created_at.asc&limit=1`
       );
       const firstAt = (first && first[0] && first[0].created_at) ? new Date(first[0].created_at) : null;
+      let left = ADS_WINDOW_MONTHS;
       if (firstAt) {
         const end = new Date(firstAt.getTime());
         end.setMonth(end.getMonth() + ADS_WINDOW_MONTHS);
         if (Date.now() > end.getTime()) return null;    // okno vypršelo -> běžná sazba
+        // Kolik měsíců okna ještě zbývá. Roční permanentka koupená hned po příchodu tedy
+        // nese vyšší sazbu jen na prvních 6 měsíců, zbytek jede za běžnou sazbu; půlroční
+        // celá, tříměsíční celá.
+        left = Math.max(0, Math.ceil((end.getTime() - Date.now()) / (30.44 * 86400000)));
+        if (left <= 0) return null;
       }
-    } catch (e) { /* výpadek databáze nesmí cenu ani zdražit, ani zlevnit */ }
-    return ownerPartner ? ADS_RATE_EP : ADS_RATE;
+      return { rate: (ownerPartner ? ADS_RATE_EP : ADS_RATE), months: Math.min(ADS_WINDOW_MONTHS, left) };
+    } catch (e) {
+      // Výpadek databáze nesmí cenu zdražit ani zlevnit: bereme celé okno.
+      return { rate: (ownerPartner ? ADS_RATE_EP : ADS_RATE), months: ADS_WINDOW_MONTHS };
+    }
   }
   let max;
   if (type === 'membership') max = 1;                   // CHANGED: was 2 (first two months)
