@@ -409,6 +409,9 @@ export // PŮVOD ČLENA Z METADAT. pay.js posílá jen příznak mtl_acq='1' (ne
 function _acqSrcFrom(m) {
   try {
     if (!m) return null;
+    // Reklamní zdroj se musí přenést, ne sloučit s organickým objevem -- jinak by nešlo
+    // doložit, že za ten příchod MTL zaplatilo.
+    if (String(m.acq || '') === 'mtl_ads' || String(m.acq_source || '') === 'mtl_ads') return 'mtl_ads';
     if (String(m.mtl_acq || '') === '1') return 'mtl_discovery';
     if (String(m.acq || '') === 'mtl_discovery') return 'mtl_discovery';
     if (String(m.acq_source || '') === 'mtl_discovery') return 'mtl_discovery';
@@ -517,7 +520,8 @@ async function recordTransaction(acct, pi, fields) {
     // INSERT neprosel = transakci mezitim zapsal /api/session a doklad vystavuje on. Druhe cislo
     // v rade by zustalo jako dira (vlozeni dokladu pak spadne na unikatnim transaction_id).
     if (_txIns && _txIns.ok === false) return { status: 'insert-failed', http: _txIns.status, dberror: _txIns.error };
-    try { if (fields.member_id && gross != null) await ecoPurchase(fields.member_id, gross / 100, currency, pi); } catch (e) {}
+    try { if (fields.member_id && gross != null) await ecoPurchase(fields.member_id, gross / 100, currency, pi,
+      { type: fields.type || null, gymId: fields.gym_id || null, acqSource: fields.acq_source || null }); } catch (e) {}
     // Doklad jako SNIMEK hned po zapsani platby -- stejne jako u hotovosti. Vystavuje ho ten, komu
     // se povedl INSERT transakce (unikatni payment_intent pusti jen jednoho): webhook, nebo /api/session.
     const dokladNo = await issueStripeDokladForPi(pi, { slotId: fields.slot_id || null });
@@ -562,7 +566,11 @@ async function _ecoCfg() {
   } catch (e) { _ECO_CFG = { pixel: '', token: '' }; }
   return _ECO_CFG;
 }
-async function ecoPurchase(buyerId, amount, cur, pi) {
+// OPTIMALIZACE NA ČLENSTVÍ. Meta hledá takové lidi, jaké události jí hlásíš. Když dostane
+// jen „Purchase", natlačí ti levné jednorázové vstupy; členství je přitom pro klub i pro MTL
+// mnohem cennější. Posílá se proto navíc událost 'Subscribe' s hodnotou -- na tu se pak
+// kampaň optimalizuje. Druh nákupu jde i do custom_data, ať se dá filtrovat.
+async function ecoPurchase(buyerId, amount, cur, pi, meta) {
   try {
     if (!buyerId || !amount) return;
     const cfg = await _ecoCfg();
@@ -581,10 +589,35 @@ async function ecoPurchase(buyerId, amount, cur, pi) {
       action_source: 'website',
       event_id: 'mtlpur_' + (pi || (buyerId + '_' + Date.now())),
       user_data,
-      custom_data: { value: Number(amount || 0), currency: (cur || 'CZK'), content_type: 'customer' }
+      custom_data: {
+        value: Number(amount || 0), currency: (cur || 'CZK'), content_type: 'customer',
+        content_category: (meta && meta.type) || undefined,
+        content_ids: (meta && meta.gymId) ? [String(meta.gymId)] : undefined,
+        // Odkud ten člověk přišel. V Ads Manageru se podle toho dá poznat, co přinesla reklama.
+        acq_source: (meta && meta.acqSource) || undefined,
+      }
     };
     const url = 'https://graph.facebook.com/v21.0/' + encodeURIComponent(cfg.pixel) + '/events?access_token=' + encodeURIComponent(cfg.token);
-    await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: [evt] }) });
+    const batch = [evt];
+
+    // U ČLENSTVÍ NAVÍC 'Subscribe'. Je to standardní událost Mety, takže na ni jde kampaň
+    // rovnou optimalizovat; vlastní událost by se musela učit od nuly. Vlastní event_id, aby
+    // se nesloučila s Purchase.
+    if (meta && meta.type === 'membership') {
+      batch.push({
+        event_name: 'Subscribe',
+        event_time: Math.floor(Date.now() / 1000),
+        action_source: 'website',
+        event_id: 'mtlsub_' + (pi || (buyerId + '_' + Date.now())),
+        user_data,
+        custom_data: {
+          value: Number(amount || 0), currency: (cur || 'CZK'),
+          content_ids: meta.gymId ? [String(meta.gymId)] : undefined,
+          acq_source: meta.acqSource || undefined,
+        },
+      });
+    }
+    await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: batch }) });
   } catch (e) { console.error('ecoPurchase', e.message); }
 }
 
