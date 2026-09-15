@@ -43,9 +43,9 @@ const ACQ_RATE_EP = 0.05;      // objev v appce, EP
 const ADS_RATE = 0.30;         // z reklamy MTL, opakovaně po dobu okna níž
 const ADS_RATE_EP = 0.15;      // z reklamy MTL, EP
 // JAK DLOUHO SE REKLAMA ÚČTUJE. Ne navždy: MTL zaplatilo za ZÍSKÁNÍ člena, ne za jeho život.
-// Rok je dost na to, aby se kampaň zaplatila, a dá se to vysvětlit jednou větou („první rok").
-// Po uplynutí okna platí poskytovatel svou běžnou sazbu.
-const ADS_WINDOW_MONTHS = 12;
+// Půl roku pokryje i drahou akvizici a pro klub je to snesitelné číslo, které se dá říct
+// jednou větou („z lidí z reklamy platíš prvního půl roku"). Pak běžná sazba.
+const ADS_WINDOW_MONTHS = 6;
 
 // mode: 'stripe' (Stripe track) | anything else (QR/bank/cash/pis track)
 // o: { partner, founding, score, bankai }

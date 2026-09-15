@@ -40,6 +40,18 @@ const firstPhoto = (photos) => {
   return '';
 };
 
+// Umí klub přijmout platbu? Kam poslat peníze A čím vystavit doklad -- shodné s canSell
+// v appce a can_sell v databázi. Kdyby se to rozešlo, reklama by vodila lidi do slepé uličky.
+function canSell(g) {
+  const mode = g.payment_mode || 'stripe';
+  const payout = (mode === 'stripe')
+    ? (!!g.stripe_account && g.charges_enabled !== false)
+    : (!!g.receiver_id_value && !!g.receiver_name && g.commission_card_status === 'active');
+  if (!payout) return false;
+  return ['legal_name', 'tax_id', 'billing_line1', 'billing_city', 'billing_postal', 'billing_country']
+    .every(f => String(g[f] || '').trim() !== '');
+}
+
 // CSV podle pravidel Mety: uvozovky se zdvojují, pole s čárkou nebo koncem řádku se obalí.
 const csvCell = (v) => {
   const s = String(v == null ? '' : v).replace(/\r?\n/g, ' ').trim();
@@ -57,10 +69,16 @@ export default async function handler(req, res) {
     if (on) {
       const gyms = await sbGet(
         'gyms?ads_opt_in=eq.true&status=eq.approved&deleted_at=is.null&suspended=eq.false' +
-        '&select=id,name,city,country,description,photos,dropin_price,currency,account_suspended'
+        '&select=id,name,city,country,description,photos,dropin_price,currency,account_suspended,' +
+        'payment_mode,stripe_account,charges_enabled,receiver_id_value,receiver_name,commission_card_status,' +
+        'legal_name,tax_id,billing_line1,billing_city,billing_postal,billing_country'
       );
       rows = (gyms || [])
         .filter(g => !g.account_suspended)         // pozastavený účet se nepropaguje
+        // KDO NEUMÍ PŘIJMOUT PLATBU, DO REKLAMY NEPATŘÍ. Stejná podmínka, jaká klub skrývá
+        // z decku (canSell v appce, can_sell v databázi) -- jinak bys platil za kliky lidí,
+        // kteří u něj stejně nemůžou nic koupit.
+        .filter(g => canSell(g))
         .filter(g => firstPhoto(g.photos))         // bez fotky by reklama vypadala bídně
         .map(g => ({
           id: g.id,
