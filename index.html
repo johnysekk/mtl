@@ -12011,10 +12011,22 @@ async function _coachChatLocked(coachId){
   try{
     const { data:cp } = await supaClient.from('profiles').select('account_suspended').eq('id',coachId).single();
     if(!cp || !cp.account_suspended) return false;
+    // KDO ZAPLATIL, TEN SMÍ PSÁT. Dřív se chat odemykal jen při nadcházející rezervaci, takže
+    // po odtrénování lekce student ztratil možnost se ozvat -- i když zaplatil a třeba řešil
+    // vrácení peněz nebo náhradní termín. Blokace má dopadat na cizí lidi, ne na zákazníky.
     const nowD = new Date().toISOString().slice(0,10);
-    const { data:bk } = await supaClient.from('bookings').select('id,training_date,type').eq('student_id',currentUser.id).eq('coach_id',coachId).eq('status','active');
-    const hasActive = (bk||[]).some(function(b){ return b.type==='online' || !b.training_date || b.training_date >= nowD; });
-    return !hasActive;
+    const { data:bk } = await supaClient.from('bookings').select('id,training_date,type,status').eq('student_id',currentUser.id).eq('coach_id',coachId);
+    const hasActive = (bk||[]).some(function(b){ return b.status==='active' && (b.type==='online' || !b.training_date || b.training_date >= nowD); });
+    if(hasActive) return false;
+    // Historie: jakákoli dřívější rezervace u toho kouče stačí.
+    const hasPast = (bk||[]).some(function(b){ return b.status!=='cancelled'; });
+    if(hasPast) return false;
+    // A členství v jeho klubu taky -- to je vztah stejně jako rezervace.
+    try{
+      const { data:mb } = await supaClient.from('gym_memberships').select('id').eq('student_id',currentUser.id).eq('coach_id',coachId).limit(1);
+      if(mb && mb.length) return false;
+    }catch(e){}
+    return true;
   }catch(e){ return false; }
 }
 
