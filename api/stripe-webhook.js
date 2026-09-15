@@ -621,10 +621,15 @@ export default async function handler(req, res) {
           const col = ({ gym: 'gym_id', coach: 'coach_id', org: 'organization_id' })[m.owner_kind];
           if (col) {
             const cur = String(m.currency || '').toLowerCase();
+            // Stejný rozsah, jaký spočítala platební stránka (commission-pay-now): pending
+            // i failed. V denním režimu cron řádky na 'failed' nepřepisuje, takže samotné
+            // 'failed' by doplatek nespároval a provize by se strhla ještě jednou.
+            const _curM = new Date().toISOString().slice(0, 7);
             await sbPatch('transactions',
-              `${col}=eq.${encodeURIComponent(m.owner_id)}&commission_status=eq.failed` +
+              `${col}=eq.${encodeURIComponent(m.owner_id)}&commission_status=in.(pending,failed)` +
+              `&commission_month=lte.${_curM}&payment_method=in.(cash,qr,pis)` +
               (cur ? `&currency=ilike.${encodeURIComponent(cur)}` : ''),
-              { commission_status: 'collected' });   // sloupec na id platby v transactions není
+              { commission_status: 'collected', commission_collected_at: new Date().toISOString() });
             const tbl = ({ gym: 'gyms', coach: 'profiles', org: 'organizations' })[m.owner_kind];
             await sbPatch(tbl, `id=eq.${encodeURIComponent(m.owner_id)}`,
               { commission_failed_at: null, commission_next_retry: null, account_suspended: false, cash_blocked: false });

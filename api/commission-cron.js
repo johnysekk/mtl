@@ -89,7 +89,67 @@ function payNowBlock(link, en) {
   return `<p style="margin:18px 0;"><a href="${link}" style="display:inline-block;padding:12px 22px;background:#E63946;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;">${en ? 'Pay now' : 'Zaplatit hned'}</a></p>`
        + `<p style="font-size:12px;color:#666;">${en ? 'The link is valid for 30 days and stops working once the amount is settled.' : 'Odkaz platí 30 dní a přestane fungovat, jakmile bude uhrazeno.'}</p>`;
 }
+
+// CO MUSÍ VÝZVA OBSAHOVAT. Není to reklama, je to výzva k úhradě mezi podnikateli a zároveň
+// první krok k pozastavení účtu. Nařízení P2B (2019/1150) vyžaduje u omezení nebo pozastavení
+// služby ODŮVODNĚNÍ, přiměřenou lhůtu a možnost se vyjádřit -- proto je v e-mailu důvod, datum
+// pozastavení a kontakt na stížnost. K tomu patří identifikace toho, kdo částku žádá, za jaké
+// období a z čeho vznikla, jinak příjemce nemá jak zkontrolovat, že je požadavek správný.
+// Identita MTL se bere z platform_settings, kde ji už drží doklad o provizi. Žádné proměnné
+// prostředí: údaj na výzvě k úhradě a na dokladu za tutéž provizi se nesmí rozejít.
+let MTL_ID = { name: 'Martial Training Lab', ico: '', email: 'info@martialtraininglab.com' };
+async function loadMtlIdentity() {
+  try {
+    const r = await sb('platform_settings?id=eq.1&select=name,ico,contact_email');
+    const p = (r && r[0]) || {};
+    MTL_ID = {
+      name: p.name || MTL_ID.name,
+      ico: p.ico || '',
+      email: p.contact_email || MTL_ID.email,
+    };
+  } catch (e) {}
+}
+// Součet dluhu po měnách. Rozsah je záměrně TOTOŽNÝ s commission-pay-now a s tím, co po
+// úhradě uzavírá webhook: pending i failed, uzavřená i aktuální období, jen kolej mimo Stripe.
+// Kdyby se rozsahy rozešly, e-mail by tvrdil jinou částku, než se pak strhne.
+async function dueSumFor(kind, id) {
+  try {
+    const col = ({ gym: 'gym_id', coach: 'coach_id', org: 'organization_id' })[kind];
+    if (!col) return {};
+    const cm = new Date().toISOString().slice(0, 7);
+    const rows = await sb(`transactions?${col}=eq.${encodeURIComponent(id)}&commission_status=in.(pending,failed)&commission_month=lte.${cm}&payment_method=in.(cash,qr,pis)&select=mtl_fee,mtl_fee_refunded,currency`);
+    const by = {};
+    (rows || []).forEach((r) => {
+      const net = (Number(r.mtl_fee) || 0) - (Number(r.mtl_fee_refunded) || 0);
+      if (net <= 0) return;
+      const cur = String(r.currency || 'CZK').toLowerCase();
+      by[cur] = (by[cur] || 0) + net;
+    });
+    return by;
+  } catch (e) { return {}; }
+}
+function payDueBlock(en, sumsByCur, ym, suspendAt) {
+  const amounts = Object.keys(sumsByCur || {}).map(function (c) {
+    return (Math.round(sumsByCur[c]) / 100).toLocaleString(en ? 'en-GB' : 'cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + c.toUpperCase();
+  }).join(' + ');
+  const row = (k, v) => `<tr><td style="padding:4px 14px 4px 0;color:#666;">${k}</td><td style="padding:4px 0;font-weight:700;">${v}</td></tr>`;
+  const d = suspendAt ? new Date(suspendAt) : null;
+  const dStr = d ? (en ? d.toISOString().slice(0, 10) : (d.getUTCDate() + '. ' + (d.getUTCMonth() + 1) + '. ' + d.getUTCFullYear())) : '';
+  return '<table style="font-size:14px;border-collapse:collapse;margin:14px 0;">'
+    + (amounts ? row(en ? 'Amount due' : 'K úhradě', amounts) : '')
+    + (ym ? row(en ? 'Period' : 'Období', ym) : '')
+    + row(en ? 'What for' : 'Za co', en ? 'MTL commission on cash, QR and bank payments' : 'provize MTL z hotovosti, QR a převodů')
+    + row(en ? 'Charged by' : 'Vyúčtoval', MTL_ID.name + (MTL_ID.ico ? (', IČO ' + MTL_ID.ico) : ''))
+    + (dStr ? row(en ? 'Account suspended on' : 'Pozastavení účtu', dStr) : '')
+    + '</table>'
+    + `<p style="font-size:12px;color:#666;line-height:1.6;">`
+    + (en
+      ? `The breakdown of individual payments is in the app under Payments &amp; commission. A receipt follows once the amount is settled. If you believe the amount is wrong, reply to this e-mail or write to ${MTL_ID.email} before the date above — we will pause the suspension while we look into it.`
+      : `Rozpad jednotlivých plateb najdeš v appce v Platby a provize. Doklad vystavíme po úhradě. Pokud je částka podle tebe špatná, odpověz na tento e-mail nebo napiš na ${MTL_ID.email} ještě před uvedeným datem — do vyřešení pozastavení odložíme.`)
+    + '</p>';
+}
 export default async function handler(req, res) {
+  await loadMtlIdentity();   // kdo částku žádá — na výzvu k úhradě i do e-mailu
   if (!SB || !KEY) return res.status(500).json({ error: 'env not set' });
   if (process.env.CRON_SECRET) {
     const auth = req.headers.authorization || '';
@@ -215,11 +275,13 @@ let deferredMin = 0;
           const patch = { commission_next_retry: new Date(Date.now() + 3 * 86400000).toISOString() };
           if (!g.commission_failed_at) { patch.commission_failed_at = new Date().toISOString(); g.commission_failed_at = patch.commission_failed_at; }
           await sb(`gyms?id=eq.${gid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) });
-          { const _pl=payNowLink('gym', gid, curMonth);
+          { const _suspendAt=new Date(Date.parse(g.commission_failed_at||new Date().toISOString())+14*86400000).toISOString();
+            const _dueSum=await dueSumFor('gym', gid);
+            const _pl=payNowLink('gym', gid, curMonth);
             await notifyMail(g.owner_id, 'Provizi MTL se nepodařilo strhnout',
-              'Zkusíme to znovu za tři dny. Můžeš ji ale uhradit hned.' + payNowBlock(_pl, false) + 'Zkontroluj prosím i platební kartu v Platby a provize — po dvou týdnech bez úhrady se účet pozastaví.',
+              'Zkusíme to znovu za tři dny. Můžeš ji ale uhradit hned.' + payDueBlock(false, _dueSum, curMonth, _suspendAt) + payNowBlock(_pl, false) + 'Zkontroluj prosím i platební kartu v Platby a provize.',
               'We could not charge the MTL commission',
-              'We will try again in three days. You can also pay it right away.' + payNowBlock(_pl, true) + 'Please check your payment card in Payments &amp; commission — after two weeks without payment the account will be suspended.'); } await notify(g.owner_id, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, účet bude pozastaven.`, { gym_id: gid, msg_en: `⚠️ Charging the MTL commission to your card failed. Update your card — next attempt in 3 days. If it isn't paid within 2 weeks, the account will be suspended.` });
+              'We will try again in three days. You can also pay it right away.' + payDueBlock(true, _dueSum, curMonth, _suspendAt) + payNowBlock(_pl, true) + 'Please check your payment card in Payments &amp; commission.'); } await notify(g.owner_id, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, účet bude pozastaven.`, { gym_id: gid, msg_en: `⚠️ Charging the MTL commission to your card failed. Update your card — next attempt in 3 days. If it isn't paid within 2 weeks, the account will be suspended.` });
         } else if (anyCharge && !anyFail) {
           unpaidSet.delete(gid);
           await sb(`gyms?id=eq.${gid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_next_retry: null, commission_last_billed: prevMonth(curMonth) }) });
@@ -315,8 +377,10 @@ let deferredMin = 0;
           const patch = { commission_next_retry: new Date(Date.now() + 3 * 86400000).toISOString() };
           if (!c.commission_failed_at) { patch.commission_failed_at = new Date().toISOString(); c.commission_failed_at = patch.commission_failed_at; }
           await sb(`profiles?id=eq.${cid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) });
-          { const _pl=payNowLink('coach', cid, curMonth);
-            await notifyMail(cid, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Můžeš ji ale uhradit hned.' + payNowBlock(_pl, false) + 'Zkontroluj prosím i platební kartu v Platby a provize — po dvou týdnech bez úhrady se účet pozastaví.', 'We could not charge the MTL commission', 'We will try again in three days. You can also pay it right away.' + payNowBlock(_pl, true) + 'Please check your payment card in Payments &amp; commission — after two weeks without payment the account will be suspended.'); } await notify(cid, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, zaznamenávání hotovosti se pozastaví.`, { coach_id: cid, msg_en: `⚠️ Charging the MTL commission to your card failed. Update your card — next attempt in 3 days. If it isn't paid within 2 weeks, recording cash will be paused.` });
+          { const _suspendAt=new Date(Date.parse((c&&c.commission_failed_at)||new Date().toISOString())+14*86400000).toISOString();
+            const _dueSum=await dueSumFor('coach', cid);
+            const _pl=payNowLink('coach', cid, curMonth);
+            await notifyMail(cid, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Můžeš ji ale uhradit hned.' + payDueBlock(false, _dueSum, curMonth, _suspendAt) + payNowBlock(_pl, false) + 'Zkontroluj prosím i platební kartu v Platby a provize.', 'We could not charge the MTL commission', 'We will try again in three days. You can also pay it right away.' + payDueBlock(true, _dueSum, curMonth, _suspendAt) + payNowBlock(_pl, true) + 'Please check your payment card in Payments &amp; commission.'); } await notify(cid, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, zaznamenávání hotovosti se pozastaví.`, { coach_id: cid, msg_en: `⚠️ Charging the MTL commission to your card failed. Update your card — next attempt in 3 days. If it isn't paid within 2 weeks, recording cash will be paused.` });
         } else if (anyCharge && !anyFail) {
           unpaidCoach.delete(cid);
           await sb(`profiles?id=eq.${cid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_next_retry: null, commission_last_billed: prevMonth(curMonth) }) });
@@ -413,8 +477,10 @@ let deferredMin = 0;
           const next = new Date(Date.now() + 3 * 86400000).toISOString();
           await sb(`organizations?id=eq.${oid}`, { method: 'PATCH', prefer: 'return=minimal',
             body: JSON.stringify({ commission_failed_at: first, commission_next_retry: next }) });
-          if (o.owner_id) { const _pl=payNowLink('org', oid, curMonth);
-            await notifyMail(o.owner_id, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Můžeš ji ale uhradit hned.' + payNowBlock(_pl, false) + 'Zkontroluj prosím i platební kartu v Platby a provize — po dvou týdnech bez úhrady se účet pozastaví.', 'We could not charge the MTL commission', 'We will try again in three days. You can also pay it right away.' + payNowBlock(_pl, true) + 'Please check your payment card in Payments &amp; commission — after two weeks without payment the account will be suspended.'); } await notify(o.owner_id, 'commission_failed', `⚠️ Provizi MTL se nepodařilo strhnout. Zkusíme to znovu za tři dny.`, { organization_id: oid, msg_en: `⚠️ We could not charge the MTL commission. We'll try again in three days.` });
+          if (o.owner_id) { const _suspendAt=new Date(Date.parse((o&&o.commission_failed_at)||new Date().toISOString())+14*86400000).toISOString();
+            const _dueSum=await dueSumFor('org', oid);
+            const _pl=payNowLink('org', oid, curMonth);
+            await notifyMail(o.owner_id, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Můžeš ji ale uhradit hned.' + payDueBlock(false, _dueSum, curMonth, _suspendAt) + payNowBlock(_pl, false) + 'Zkontroluj prosím i platební kartu v Platby a provize.', 'We could not charge the MTL commission', 'We will try again in three days. You can also pay it right away.' + payDueBlock(true, _dueSum, curMonth, _suspendAt) + payNowBlock(_pl, true) + 'Please check your payment card in Payments &amp; commission.'); } await notify(o.owner_id, 'commission_failed', `⚠️ Provizi MTL se nepodařilo strhnout. Zkusíme to znovu za tři dny.`, { organization_id: oid, msg_en: `⚠️ We could not charge the MTL commission. We'll try again in three days.` });
           failed++;
         }
       }

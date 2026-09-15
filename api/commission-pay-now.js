@@ -60,7 +60,12 @@ const OWNER_COL = { gym: 'gym_id', coach: 'coach_id', org: 'organization_id' };
 async function owedFor(kind, id) {
   const col = OWNER_COL[kind];
   if (!col) return null;
-  const rows = await sb(`transactions?${col}=eq.${encodeURIComponent(id)}&commission_status=eq.failed&select=id,mtl_fee,mtl_fee_refunded,currency,commission_month`);
+  // POZOR NA STAV ŘÁDKŮ. Původně se sčítalo jen commission_status='failed', ale cron takhle
+  // řádky označí jen v měsíčním režimu -- v denním (a u organizací) zůstanou 'pending', i když
+  // stržení selhalo a e-mail s odkazem odešel. Stránka pak hlásila „není co platit", přestože
+  // dluh existoval. Dluhem je tedy pending i failed za uzavřené i aktuální období.
+  const curMonth = new Date().toISOString().slice(0, 7);
+  const rows = await sb(`transactions?${col}=eq.${encodeURIComponent(id)}&commission_status=in.(pending,failed)&commission_month=lte.${curMonth}&payment_method=in.(cash,qr,pis)&select=id,mtl_fee,mtl_fee_refunded,currency,commission_month`);
   const by = {};
   (rows || []).forEach(r => {
     const cur = String(r.currency || 'CZK').toLowerCase();
