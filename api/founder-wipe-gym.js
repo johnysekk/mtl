@@ -4,8 +4,8 @@
 // Zůstane sirotek, na kterého se zapomene a platí se za něj. Tady se nejdřív smažou soubory
 // přes Storage API a pak data databázovou funkcí wipe_gyms (sql-53).
 //
-// POST { user_id, gym_ids: [...], confirm: 'SMAZAT' }
-// Jen founder. Bez confirm nic nedělá.
+// POST { gym_ids: [...], confirm: 'SMAZAT' } + hlavička Authorization: Bearer <access token>
+// Jen founder (ověřuje se token proti databázi, ne id z těla). Bez confirm nic nedělá.
 //
 // CO MAŽE:
 //   • soubory: fotky klubu a zázemí, logo, merch, plakáty akcí a kurzů, nahrané podmínky,
@@ -18,7 +18,6 @@
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const svc = { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' };
-const FOUNDER = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 
 const sbGet = async (path) => {
   const r = await fetch(`${SB}/rest/v1/${path}`, { headers: svc });
@@ -88,8 +87,26 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
 
   try {
-    const { user_id, gym_ids, confirm } = req.body || {};
-    if (user_id !== FOUNDER) return res.status(403).json({ error: 'founder only' });
+    // ── OVĚŘENÍ VOLAJÍCÍHO ─────────────────────────────────────────────────────────────
+    // POZOR, tady byla vážná chyba: původně se věřilo user_id z TĚLA požadavku. Jenže id
+    // foundera je v kódu appky, který si každý stáhne, takže by stačilo poslat ten samý
+    // požadavek s cizím id a smazat komukoli klub. Ověřuje se proto TOKEN přihlášeného
+    // uživatele proti databázi, stejně jako to dělá founder-wipe-tx.
+    const token = req.headers['x-access-token'] ||
+                  ((req.headers.authorization || '').replace(/^Bearer\s+/i, ''));
+    if (!token) return res.status(401).json({ error: 'no token' });
+
+    const ures = await fetch(`${SB}/auth/v1/user`, { headers: { apikey: KEY, Authorization: `Bearer ${token}` } });
+    if (!ures.ok) return res.status(401).json({ error: 'bad token' });
+    const user = await ures.json();
+    const uid = user && user.id;
+    if (!uid) return res.status(401).json({ error: 'no user' });
+
+    const pr = await fetch(`${SB}/rest/v1/profiles?id=eq.${encodeURIComponent(uid)}&select=role`, { headers: svc });
+    const prows = pr.ok ? await pr.json() : [];
+    if (!prows.length || prows[0].role !== 'founder') return res.status(403).json({ error: 'founder only' });
+
+    const { gym_ids, confirm } = req.body || {};
     if (confirm !== 'SMAZAT') return res.status(400).json({ error: 'chybi confirm: "SMAZAT"' });
     const ids = (Array.isArray(gym_ids) ? gym_ids : []).filter(Boolean);
     if (!ids.length) return res.status(400).json({ error: 'zadny gym_id' });
