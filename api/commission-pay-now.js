@@ -22,6 +22,16 @@ const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const svc = { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' };
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const APP = process.env.APP_URL || 'https://app.martialtraininglab.com';
+// Odkud požadavek přišel. Bere se jen z vlastních domén, aby se z toho nedal udělat
+// přesměrovač na cizí web.
+function _backTo(req) {
+  try {
+    const raw = req.headers.origin || req.headers.referer || '';
+    const u = new URL(raw);
+    if (/(^|\.)martialtraininglab\.com$/i.test(u.hostname)) return u.origin;
+  } catch (e) {}
+  return APP;
+}
 
 const sb = async (path, opts = {}) => {
   const r = await fetch(`${SB}/rest/v1/${path}`, { ...opts, headers: { ...svc, ...(opts.headers || {}) } });
@@ -136,8 +146,10 @@ export default async function handler(req, res) {
       }],
       // Podle metadat webhook pozná, které řádky označit za vybrané a komu vystavit doklad.
       metadata: { mtl_kind: 'commission_paynow', owner_kind: o.k, owner_id: String(o.i), month: String(o.m || ''), currency: cur },
-      success_url: `${APP}/?commission_paid=1`,
-      cancel_url: `${APP}/?commission_paid=0`,
+      // VRÁTIT SE TAM, ODKUD PŘIŠEL. Dashmode je jiná doména (dashboard.…), takže pevné APP
+      // vracelo člověka z dashboardu do mobilní appky.
+      success_url: `${_backTo(req)}/?commission_paid=1`,
+      cancel_url: `${_backTo(req)}/?commission_paid=0`,
     });
 
     return res.status(200).json({ ok: true, url: session.url, amount, currency: cur });
