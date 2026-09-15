@@ -1834,6 +1834,7 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
          „Propagace od MTL" v nastavení vůbec neukáže. -->
     <div style="border-top:1px dashed var(--border);margin-top:22px;padding-top:16px;">
       <div style="font-size:11px;font-weight:700;color:var(--mid);letter-spacing:.06em;margin-bottom:8px;" data-noi18n>📣 REKLAMA NA PROFILY KLUBŮ</div>
+      <button id="btnAdsPanel" style="width:100%;padding:14px;margin-bottom:8px;background:#171717;color:#F4D87A;border:1.5px solid #E8C24A;border-radius:12px;font-size:13.5px;font-weight:800;cursor:pointer;" data-noi18n>📊 MTL Ads — panel</button>
       <button id="btnAdsProgram" style="width:100%;padding:14px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-size:13.5px;font-weight:800;cursor:pointer;" data-noi18n>📣 Reklamní program: —</button>
       <div id="adsProgramInfo" style="font-size:11.5px;color:var(--light);line-height:1.5;margin-top:7px;" data-noi18n></div>
     </div>
@@ -26330,6 +26331,9 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
       // skládá, takže by do té doby nesl jen jméno klubu.
       legal_name: (($('gymLegalName')&&$('gymLegalName').value.trim())||null),
       legal_entity: !!($('gymLegalEntity')&&$('gymLegalEntity').checked),
+      // Zakladatel napevno: vlastnictví se dá převést na spolumajitele a owner_id pak už
+      // neřekne, kdo klub v MTL skutečně založil.
+      founder_id: currentUser.id,
       // legal_entity se do insertu nedostalo vubec, proto bylo NULL misto true/false --
       // doklad pak nevi, jestli fakturuje firma nebo fyzicka osoba.
       legal_entity: !!($('gymLegalEntity') && $('gymLegalEntity').checked),
@@ -28322,6 +28326,90 @@ async function _openMtlAnnounce(){
   };
 }
 if($('btnMtlAnnounce')) $('btnMtlAnnounce').onclick=_openMtlAnnounce;
+
+// ═══ PANEL MTL ADS (jen founder) ════════════════════════════════════════════════════════
+// Ads Manager ukáže, co kampaň STÁLA. Tohle ukazuje, co se vrátilo: kolik lidí reklama
+// přivedla, co u poskytovatelů utratili a kolik z toho zůstalo MTL. Teprve rozdíl těch dvou
+// čísel říká, jestli se to vyplácí.
+let _adsTab='prehled', _adsData=null, _adsMonths=6;
+async function _openAdsPanel(){
+  if(!currentUser || currentUser.role!=='founder'){ toast('⚠️'); return; }
+  let sh=document.getElementById('shAdsPanel');
+  if(!sh){ sh=document.createElement('div'); sh.id='shAdsPanel'; sh.className='sheet'; document.body.appendChild(sh); }
+  sh.innerHTML='<div class="shdr"><div class="shdr-title" data-noi18n>📊 MTL Ads</div>'
+    +'<button class="btn-close" onclick="closeSheet(\'shAdsPanel\')">✕</button></div>'
+    +'<div id="adsPanelBody" style="padding:12px 16px max(40px,calc(env(safe-area-inset-bottom) + 26px));" data-noi18n>'
+    +'<p style="font-size:13px;color:var(--light);">Načítám…</p></div>';
+  openSheet('shAdsPanel');
+  _adsLoad();
+}
+async function _adsLoad(){
+  const box=document.getElementById('adsPanelBody'); if(!box) return;
+  try{
+    const { data:_s }=await supaClient.auth.getSession();
+    const t=(_s&&_s.session&&_s.session.access_token)||'';
+    const r=await fetch('/api/mtl-ads-stats?months='+_adsMonths, { headers:{ Authorization:'Bearer '+t } });
+    _adsData=await r.json();
+    if(!_adsData || !_adsData.ok) throw new Error((_adsData&&_adsData.error)||'chyba');
+    _adsRender();
+  }catch(e){ box.innerHTML='<p style="font-size:13px;color:var(--red);">Nepodařilo se načíst: '+escapeHtml((e&&e.message)||'')+'</p>'; }
+}
+function _adsRender(){
+  const box=document.getElementById('adsPanelBody'); const d=_adsData; if(!box||!d) return;
+  const cur=(d.totals&&d.totals.currency)||'CZK';
+  const kc=function(minor){ return fmtPrice((Number(minor)||0)/100, cur)+' '+_curSym(cur); };
+  const TABS=[['prehled','Přehled'],['kluby','Kluby'],['vyvoj','Vývoj'],['nastaveni','Nastavení']];
+  let h='<div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;">'
+    +TABS.map(function(t){ return '<button class="adsTab" data-t="'+t[0]+'" style="padding:7px 13px;border-radius:9px;border:1px solid '+(_adsTab===t[0]?'var(--dark)':'var(--border)')+';background:'+(_adsTab===t[0]?'var(--dark)':'var(--surf)')+';color:'+(_adsTab===t[0]?'#fff':'var(--dark)')+';font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;">'+t[1]+'</button>'; }).join('')
+    +'</div>';
+
+  if(!d.program_on) h+='<div style="background:#FFF4E5;border:1px solid #F0D9B5;border-radius:11px;padding:10px 12px;font-size:12.5px;color:#9A5B00;margin-bottom:12px;">Program je vypnutý — feed nic nevrací. Čísla níž jsou z dřívějška.</div>';
+
+  const row=function(icon,label,val,sub){
+    return '<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:var(--surf);">'+icon+'</div>'
+      +'<div><div class="prow-lbl">'+label+'</div>'+(sub?('<div style="font-size:11px;color:var(--light);line-height:1.4;">'+sub+'</div>'):'')+'</div></div>'
+      +'<span class="prow-val">'+val+'</span></div>';
+  };
+
+  if(_adsTab==='prehled'){
+    const t=d.totals||{};
+    h+='<div class="prow-group">'
+      +row('🧲','Přivedení lidé',(t.members||0),'unikátní, za posledních '+d.months+' měs.')
+      +row('🧾','Transakcí',(t.transactions||0),(t.memberships||0)+' členství · '+(t.dropins||0)+' ostatní')
+      +row('💳','Utratili u poskytovatelů',kc(t.gross))
+      +row('💰','Z toho provize MTL',kc(t.fee))
+      +row('🎯','Provize na jednoho člověka',kc(t.fee_per_member),'tolik smí stát jedna konverze, aby to vyšlo na nulu')
+      +'</div>'
+      +'<div style="font-size:11.5px;color:var(--light);line-height:1.55;margin-top:10px;">Porovnej „provizi na jednoho" s cenou za konverzi v Ads Manageru. Když je cena nižší, kampaň vydělává. Testovací transakce se nepočítají.</div>';
+  }
+  else if(_adsTab==='kluby'){
+    const g=d.gyms||[];
+    h+= g.length ? ('<div class="prow-group">'+g.map(function(x){
+      return row('🥊',escapeHtml(x.name),kc(x.fee),(x.members||0)+' lidí · '+kc(x.gross)+' obrat');
+    }).join('')+'</div>') : '<p style="font-size:13px;color:var(--light);">Zatím žádné transakce z reklamy.</p>';
+  }
+  else if(_adsTab==='vyvoj'){
+    const m=d.months_series||[];
+    h+= m.length ? ('<div class="prow-group">'+m.slice().reverse().map(function(x){
+      return row('📅',x.month,kc(x.fee),(x.members||0)+' lidí · '+x.transactions+' transakcí · '+kc(x.gross)+' obrat');
+    }).join('')+'</div>') : '<p style="font-size:13px;color:var(--light);">Zatím žádná data.</p>';
+  }
+  else {
+    const f=d.feed||{};
+    h+='<div class="prow-group">'
+      +row('📣','Program',d.program_on?'ZAPNUTÝ':'vypnutý')
+      +row('✅','Klubů se souhlasem',(f.clubs_opt_in||0)+' z '+(f.clubs_total||0),'do katalogu jdou jen ty, co umí přijmout platbu a mají fotku')
+      +'</div>'
+      +'<div style="font-size:12px;color:var(--mid);line-height:1.6;margin-top:10px;word-break:break-all;">Feed pro Metu:<br><b>'+escapeHtml(f.feed_url||'')+'</b></div>'
+      +'<div style="display:flex;gap:6px;margin-top:12px;flex-wrap:wrap;">'
+        +[3,6,12,24].map(function(n){ return '<button class="adsMo" data-m="'+n+'" style="padding:7px 12px;border-radius:9px;border:1px solid '+(_adsMonths===n?'var(--dark)':'var(--border)')+';background:var(--surf);font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;">'+n+' měs.</button>'; }).join('')
+      +'</div>';
+  }
+  box.innerHTML=h;
+  box.querySelectorAll('.adsTab').forEach(function(b){ b.onclick=function(){ _adsTab=b.dataset.t; _adsRender(); }; });
+  box.querySelectorAll('.adsMo').forEach(function(b){ b.onclick=function(){ _adsMonths=+b.dataset.m||6; _adsLoad(); }; });
+}
+if($('btnAdsPanel')) $('btnAdsPanel').onclick=_openAdsPanel;
 // Přidání země: dvě písmena, výchozí stav "vypnutá" -- protože právě proto ji zakládáš.
   if($('btnIntroRateAdd')) $('btnIntroRateAdd').onclick=async function(){
     const _f=$('introRateCC'); const cc=String((_f&&_f.value)||'').trim().toUpperCase();
@@ -28787,13 +28875,18 @@ async function _renderGymAnalyticsInner(gymId, box){
   if(_isFounder){
     try{
       const _ids=new Set(); if(gym?.owner_id) _ids.add(gym.owner_id);
-      let _creatorId=gym?.owner_id||null;
-      try{
-        const { data:_au }=await supaClient.from('gym_audit').select('actor_id,action,created_at')
-          .eq('gym_id',gymId).order('created_at',{ascending:true}).limit(50);
-        const _first=(_au||[]).find(function(x){ return String(x.action||'').indexOf('created')>=0; });
-        if(_first&&_first.actor_id){ _creatorId=_first.actor_id; _ids.add(_first.actor_id); }
-      }catch(e){}
+      // Zakladatel se od sql-57 ukládá napevno (gyms.founder_id). Audit zůstává jako záloha
+      // pro kluby založené dřív, než ten sloupec vznikl.
+      let _creatorId=gym?.founder_id||gym?.owner_id||null;
+      if(gym?.founder_id){ _ids.add(gym.founder_id); }
+      else {
+        try{
+          const { data:_au }=await supaClient.from('gym_audit').select('actor_id,action,created_at')
+            .eq('gym_id',gymId).order('created_at',{ascending:true}).limit(50);
+          const _first=(_au||[]).find(function(x){ return String(x.action||'').indexOf('created')>=0; });
+          if(_first&&_first.actor_id){ _creatorId=_first.actor_id; _ids.add(_first.actor_id); }
+        }catch(e){}
+      }
       let _co=[];
       try{
         const { data:_cc }=await supaClient.from('gym_coaches').select('coach_id')
