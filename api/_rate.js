@@ -40,8 +40,12 @@
 // EP má u obojího poloviční sazbu.
 const ACQ_RATE = 0.10;         // objev v appce, jednorázově
 const ACQ_RATE_EP = 0.05;      // objev v appce, EP
-const ADS_RATE = 0.20;         // z reklamy MTL, OPAKOVANĚ z každé jeho platby
-const ADS_RATE_EP = 0.10;      // z reklamy MTL, EP
+const ADS_RATE = 0.30;         // z reklamy MTL, opakovaně po dobu okna níž
+const ADS_RATE_EP = 0.15;      // z reklamy MTL, EP
+// JAK DLOUHO SE REKLAMA ÚČTUJE. Ne navždy: MTL zaplatilo za ZÍSKÁNÍ člena, ne za jeho život.
+// Rok je dost na to, aby se kampaň zaplatila, a dá se to vysvětlit jednou větou („první rok").
+// Po uplynutí okna platí poskytovatel svou běžnou sazbu.
+const ADS_WINDOW_MONTHS = 12;
 
 // mode: 'stripe' (Stripe track) | anything else (QR/bank/cash/pis track)
 // o: { partner, founding, score, bankai }
@@ -166,11 +170,25 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
   // REKLAMA SE ÚČTUJE Z KAŽDÉ PLATBY toho člověka, ne jen z první. Nehledá se tedy žádná
   // předchozí transakce -- právě tím se liší od organického objevu.
   if (acqSource === 'mtl_ads') {
-    if (type === 'membership' || type === 'drop_in' || type === 'coach_1to1'
-        || type === 'coach_inperson' || type === 'coach_online') {
-      return ownerPartner ? ADS_RATE_EP : ADS_RATE;
-    }
-    return null;   // akce a kurzy zůstávají mimo, stejně jako u objevu
+    if (!(type === 'membership' || type === 'drop_in' || type === 'coach_1to1'
+        || type === 'coach_inperson' || type === 'coach_online')) return null;   // akce a kurzy mimo
+    if (!scopeCol || !scopeId) return null;
+    try {
+      // Okno běží od PRVNÍ platby toho člověka u toho poskytovatele. Když žádnou nemá,
+      // je tohle ta první a okno teprve začíná.
+      const first = await sbGet(
+        `transactions?select=created_at&member_id=eq.${encodeURIComponent(memberId)}` +
+        `&${scopeCol}=eq.${encodeURIComponent(scopeId)}&status=in.(paid,completed)` +
+        `&order=created_at.asc&limit=1`
+      );
+      const firstAt = (first && first[0] && first[0].created_at) ? new Date(first[0].created_at) : null;
+      if (firstAt) {
+        const end = new Date(firstAt.getTime());
+        end.setMonth(end.getMonth() + ADS_WINDOW_MONTHS);
+        if (Date.now() > end.getTime()) return null;    // okno vypršelo -> běžná sazba
+      }
+    } catch (e) { /* výpadek databáze nesmí cenu ani zdražit, ani zlevnit */ }
+    return ownerPartner ? ADS_RATE_EP : ADS_RATE;
   }
   let max;
   if (type === 'membership') max = 1;                   // CHANGED: was 2 (first two months)
