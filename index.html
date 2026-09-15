@@ -16597,20 +16597,61 @@ function _provHqEasterEgg(d){
   function _proceed(){ try{ ov.remove(); }catch(e){} try{ _provClaimRoute(d); }catch(e){} }
   const cb=ov.querySelector('#hqContinue'); if(cb) cb.onclick=_proceed;
 }
+// ═══ NAVÁZÁNÍ PŘIHLÁŠKY MIMO APPKU NA TU V APPCE ════════════════════════════════════════
+// Dřív se předvyplnění dělalo tak, že se sahalo přímo na jednotlivá pole ($('gymName').value
+// = ...). Jakmile se formulář přestavěl (dva kroky, přesunutá fakturační identita), přestalo
+// to sedět a tiše nevyplnilo nic.
+//
+// Teď se to zapíše do ROZPRACOVANÉ PŘIHLÁŠKY (stejný koncept, jaký se ukládá při psaní) a
+// formulář se naplní sám svou vlastní cestou. Jediný seznam polí je gymDraftFields() /
+// coachDraftFields(), takže při další přestavbě se mění jedno místo, ne dvě.
+//
+// PŘEKLAD přihlášky mimo appku → pole formuláře. Cokoli, co v seznamu polí není, se přeskočí
+// a zapíše do konzole, ať se na to přijde při první změně, a ne až u zákazníka.
+const PROV_PREFILL = {
+  gym:   { gym_name:'gymName', city:'gymCity', name:'gymLegalName', email:'gaPubEmail' },
+  coach: { city:'caCity', name:'caLegalName' },   // e-mail kouč v přihlášce nemá, má ho z účtu
+};
+function _provWriteDraft(kind, d){
+  try{
+    const map=PROV_PREFILL[kind]||{};
+    const known=(kind==='gym')
+      ? ((typeof gymDraftFields==='function')?gymDraftFields():[])
+      : ((typeof coachDraftFields==='function')?coachDraftFields():[]);
+    const key=(kind==='gym')?GYM_DRAFT_KEY:COACH_DRAFT_KEY;
+    let cur={}; try{ cur=JSON.parse(localStorage.getItem(key)||'{}')||{}; }catch(e){}
+    cur.v=cur.v||{};
+    Object.keys(map).forEach(function(src){
+      const target=map[src];
+      if(known.indexOf(target)<0){ console.warn('[provider-claim] pole '+target+' už ve formuláři není'); return; }
+      const val=d[src];
+      if(val==null || String(val).trim()==='') return;
+      if(cur.v[target]) return;            // co už člověk napsal, nepřepisujeme
+      cur.v[target]=String(val);
+    });
+    if(Array.isArray(d.disciplines) && d.disciplines.length) cur.disc=d.disciplines.slice();
+    cur.ts=Date.now();
+    localStorage.setItem(key, JSON.stringify(cur));
+    return true;
+  }catch(e){ return false; }
+}
 function _provClaimRoute(d){
   if(!d) return;
   try{ if(d.ref_code){ localStorage.setItem('mtl_gym_ref', JSON.stringify({code:d.ref_code, ts:Date.now()})); try{ supaClient.from('profiles').update({pending_gym_ref:d.ref_code, pending_gym_ref_at:new Date().toISOString()}).eq('id', currentUser.id); }catch(e){} } }catch(e){}
   var ds=Array.isArray(d.disciplines)?d.disciplines.slice():[];
+  // Zapsat do konceptu PŘED otevřením: přihláška si ho při otevření sama načte a vyplní se
+  // vlastní cestou. Tím se odpadá sahání na konkrétní pole, které se při přestavbě formuláře
+  // rozejde (a přesně to se stalo).
   if(d.kind==='gym'){
     try{ _gymDisc = ds.length?ds.slice():_gymDisc; }catch(e){}
+    _provWriteDraft('gym', d);
     if(typeof openGymApp==='function') openGymApp();
     setTimeout(function(){ try{
-      if(d.gym_name && $('gymName') && !$('gymName').value) $('gymName').value=d.gym_name;
-      if(d.city && $('gymCity') && !$('gymCity').value) $('gymCity').value=d.city;
       if(ds.length && typeof renderDiscChips==='function'){ _gymDisc=ds.slice(); renderDiscChips('gymDisc', _gymDisc); }
       toast(LANG==='en'?'Welcome — finish setting up your club':'Vítej — dokonči nastavení klubu');
     }catch(e){} }, 550);
   } else {
+    _provWriteDraft('coach', d);
     setTimeout(function(){
       try{ var b=$('btnBecomeCoachApply'); if(b && b.onclick) b.onclick(); }catch(e){}
       setTimeout(function(){ try{ if(ds.length){ _caDisc=ds.slice(); if(typeof renderDiscChips==='function') renderDiscChips('caDisc', _caDisc); } toast(LANG==='en'?'Welcome — finish your coach profile':'Vítej — dokonči svůj kouč profil'); }catch(e){} }, 450);
