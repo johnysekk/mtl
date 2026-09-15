@@ -22142,6 +22142,61 @@ async function _payCommissionNow(){
     throw new Error((d&&d.error)||'no url');
   }catch(e){ toast('⚠️ '+(EN?'Could not start the payment':'Platbu se nepodařilo spustit')); }
 }
+// ═══ ZÁMEK PŘI POZASTAVENÍ ══════════════════════════════════════════════════════════════
+// Dosud pozastavení skrylo poskytovatele z decku a zablokovalo nové rezervace, ale on sám
+// appku dál používal -- zapisoval docházku, vydával lístky, měnil rozvrh. Když říkáme
+// „aplikace nepůjde využívat", musí to platit.
+//
+// CO ZÁMEK NEBLOKUJE ZÁMĚRNĚ: Platby a provize (tam se platí), přehled provizí (tam je vidět
+// dluh) a doklady. Zamknout cestu k úhradě by znamenalo, že se dluh nedá zaplatit.
+function _provSuspended(){
+  try{
+    const g=(typeof _myGymData!=='undefined')?_myGymData:null;
+    if(g && (g.account_suspended || g.cash_blocked)) return { kind:'gym', row:g };
+    if(currentUser && (currentUser.account_suspended || currentUser.cash_blocked)) return { kind:'coach', row:currentUser };
+  }catch(e){}
+  return null;
+}
+function _showSuspendedGate(){
+  const EN=LANG==='en';
+  const s=_provSuspended(); if(!s) return;
+  const f=s.row.commission_failed_at;
+  let due='';
+  try{ if(f) due=new Date(new Date(f).getTime()+14*86400000).toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric'}); }catch(e){}
+  let ov=document.getElementById('shSuspended');
+  if(!ov){ ov=document.createElement('div'); ov.id='shSuspended'; ov.className='sheet'; document.body.appendChild(ov); }
+  ov.innerHTML='<div class="shdr"><div class="shdr-title">\u26a0\ufe0f '+(EN?'Account paused':'Ú\u010det je pozastaven')+'</div><button class="btn-close" onclick="closeSheet(\'shSuspended\')">\u2715</button></div>'
+    +'<div style="padding:18px 16px;">'
+    +'<div style="font-size:14px;color:var(--dark);line-height:1.6;margin-bottom:14px;">'
+      +(EN
+        ? ('The MTL commission has not been settled'+(due?(' (due '+due+')'):'')+', so the account is paused. Auto-renewing memberships already running keep going and your data, schedule and members stay unchanged \u2014 but the app is not usable until it is paid.')
+        : ('Provize MTL nen\u00ed uhrazen\u00e1'+(due?(' (termín byl '+due+')'):'')+', proto je ú\u010det pozastaven\u00fd. U\u017e b\u011b\u017e\u00edc\u00ed automaticky obnovovan\u00e1 \u010dlenstv\u00ed b\u011b\u017e\u00ed d\u00e1l a data, rozvrh i \u010dlenov\u00e9 z\u016fstávaj\u00ed beze zm\u011bny \u2014 appka ale nep\u016fjde vyu\u017e\u00edvat, dokud nen\u00ed zaplaceno.'))
+    +'</div>'
+    +'<button onclick="_payCommissionNow()" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Pay now':'Zaplatit hned')+'</button>'
+    +'<button onclick="closeSheet(\'shSuspended\'); if(typeof openCommissionCard===\'function\') openCommissionCard();" style="width:100%;padding:12px;margin-top:8px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Update card':'Aktualizovat kartu')+'</button>'
+    +'<div style="font-size:11.5px;color:var(--light);line-height:1.5;margin-top:12px;">'
+      +(EN?'If you believe the amount is wrong, write to us \u2014 we will pause the block while we look into it.':'Pokud je částka podle tebe špatn\u011b, napi\u0161 n\u00e1m \u2014 do vy\u0159e\u0161en\u00ed blokaci odlo\u017e\u00edme.')
+    +'</div></div>';
+  openSheet('shSuspended');
+}
+// Zamkne vyjmenované funkce: při pozastavení místo akce ukáže platební obrazovku.
+(function _installSuspendGate(){
+  // Zamykají se jen akce, které uživatel sám vyvolá. Vykreslovací funkce (renderGymManage,
+  // renderGymMembers, renderScheduleEditor) ne: volají se i po uložení a hlavně jimi vede
+  // cesta do Fakturačních údajů, kterou poskytovatel potřebuje k úhradě.
+  const LOCKED=['openReception','openCoachReception','openCashRecord','openEventCreate',
+                'openCoachScheduleEditor','recDoCheckin','openClassAttendance','openDiary'];
+  LOCKED.forEach(function(name){
+    try{
+      const orig=window[name];
+      if(typeof orig!=='function') return;
+      window[name]=function(){
+        if(_provSuspended()){ _showSuspendedGate(); return; }
+        return orig.apply(this, arguments);
+      };
+    }catch(e){}
+  });
+})();
 function _commissionBanner(row, kind){
   const g = row || ((typeof _myGymData !== 'undefined') ? _myGymData : null); kind = kind || 'gym';
   const _entP = (kind==='coach') ? (LANG==='en'?'Your profile':'Tv\u016fj profil') : (LANG==='en'?'Your club':'Klub'); if(!g) return '';
@@ -22163,12 +22218,11 @@ function _commissionBanner(row, kind){
       // platby" by byla nepravda.
       (EN
         ? ('Pay now, or update your card. Settle by '+deadline+' or the account will be paused: '
-           + 'students will not see you in the app, new bookings and new memberships will be blocked '
-           + 'and you will not be able to take cash. Memberships already running on a card keep going. '
-           + 'Your data, schedule and members stay as they are.')
+           + 'auto-renewing memberships already running keep going. Your data, schedule and members '
+           + 'stay unchanged, but the app will not be usable.')
         : ('Zapla\u0165 hned, p\u0159\u00edpadn\u011b aktualizuj kartu. Uhra\u010f do '+deadline+', jinak bude \u00fa\u010det pozastaven: '
-           + 'studenti t\u011b p\u0159estanou vid\u011bt v appce, nep\u016fjdou nov\u00e9 rezervace ani nov\u00e1 \u010dlenstv\u00ed a nep\u016fjde p\u0159ij\u00edmat hotovost. '
-           + 'U\u017e b\u011b\u017e\u00edc\u00ed \u010dlenstv\u00ed na kart\u011b se nep\u0159eru\u0161\u00ed. Data, rozvrh ani \u010dlenov\u00e9 nep\u0159ijdou nazmar.'));
+           + 'U\u017e b\u011b\u017e\u00edc\u00ed automaticky obnovovan\u00e1 \u010dlenstv\u00ed se nep\u0159eru\u0161\u00ed. Data, rozvrh i \u010dlenov\u00e9 z\u016fstanou beze zm\u011bny, '
+           + 'aplikace ale nep\u016fjde vyu\u017e\u00edvat.'));
     return '<div style="background:#FFF7ED;border:1px solid #FCD9A8;border-radius:12px;padding:12px 14px;margin-bottom:14px;"><div style="font-size:13px;font-weight:800;color:#9a5a00;margin-bottom:4px;">\u26a0\ufe0f '+(EN?'Commission charge failed':'Str\u017een\u00ed provize selhalo')+'</div><div style="font-size:12px;color:#9a5a00;line-height:1.5;">'+body+(retry?('<br>'+(EN?'Next attempt: ':'P\u0159\u00ed\u0161t\u00ed pokus: ')+'<b>'+retry+'</b>'):'')+'</div><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">'
       /* Zaplatit hned vedle aktualizace karty: opravit kartu a uhradit dluh jsou dvě různé věci
          a člověk obvykle chce nejdřív to druhé, aby mu neběžela lhůta do pozastavení. */
