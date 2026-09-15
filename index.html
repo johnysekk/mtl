@@ -272,6 +272,10 @@ body.dashmode .picker-ov,body.dashmode .city-ov,body.dashmode .gps-ov{position:f
 /* Pole, na která se v přihlášce neptáme (doplní se až s platbami). Atribut je silnější než
    inline style, který přepisují obsluhy jednotlivých přepínačů. */
 [data-gahide]{display:none!important}
+/* Rozbalovací sekce v detailu klubu/kouče: skrýt výchozí trojúhelník a dát vlastní. */
+#gymStatsBody details>summary::-webkit-details-marker,#coachStatsBody details>summary::-webkit-details-marker{display:none}
+#gymStatsBody details>summary::after,#coachStatsBody details>summary::after{content:'\25be';float:right;color:var(--light);font-size:13px;letter-spacing:0}
+#gymStatsBody details[open]>summary::after,#coachStatsBody details[open]>summary::after{content:'\25b4'}
 /* Ořez fotky je psaný pro mobil (max 430 px). Na širokém okně z toho byl úzký černý sloup
    s malinkým výřezem, takže se tam obrázku povolí víc místa. Na mobilu se nemění nic. */
 @media(min-width:900px){ #cropOv{max-width:760px!important} #cropOv #cropBox{max-width:640px!important;max-height:68vh} }
@@ -28552,6 +28556,9 @@ async function _renderGymAnalyticsInner(gymId, box){
       if(_tx&&_tx.length){ _mtlNet=_tx.reduce((a,r)=>a+((Number(r.mtl_fee)||0)-(Number(r.mtl_fee_refunded)||0)),0);
         _lastAct=(_tx.map(function(r){ return r.created_at||''; }).sort().pop())||''; } }catch(e){}
     try{ const { data:_nm }=await supaClient.from('gym_memberships').select('id').eq('gym_id',gymId).gte('created_at',_30ago); _new30=(_nm||[]).length; }catch(e){}
+    // Do _lastAct padá i poslední rezervace a členství, ne jen platba. Řádek se proto jmenuje
+    // „Poslední aktivita" -- jako „Poslední platba" tvrdil, že klub platil, i když jen někdo
+    // klikl na rezervaci.
     try{ const { data:_gbk }=await supaClient.from('gym_bookings').select('created_at').eq('gym_id',gymId).order('created_at',{ascending:false}).limit(1); if(_gbk&&_gbk[0]&&_gbk[0].created_at && (!_lastAct || _gbk[0].created_at>_lastAct)) _lastAct=_gbk[0].created_at; }catch(e){}
     try{ const { data:_gml }=await supaClient.from('gym_memberships').select('created_at').eq('gym_id',gymId).order('created_at',{ascending:false}).limit(1); if(_gml&&_gml[0]&&_gml[0].created_at && (!_lastAct || _gml[0].created_at>_lastAct)) _lastAct=_gml[0].created_at; }catch(e){}
   }
@@ -28616,7 +28623,7 @@ async function _renderGymAnalyticsInner(gymId, box){
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">📉</div><div class="prow-lbl">${LANG==='en'?'Churn (cancelling)':'Churn (ruší se)'}</div></div><span class="prow-val">${cancellingMems}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#EDE9FE;">✨</div><div class="prow-lbl">${LANG==='en'?'New members (30d)':'Noví členové (30 dní)'}</div></div><span class="prow-val">${_new30}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FFF8E6;">💰</div><div class="prow-lbl">${LANG==='en'?'MTL commission (net, all-time)':'MTL provize (netto, celkem)'}</div></div><span class="prow-val">${fmt(_mtlNet/100)}</span></div>
-      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">🕒</div><div class="prow-lbl">${LANG==='en'?'Last payment':'Poslední platba'}</div></div><span class="prow-val">${_lastAct?((typeof _dt==='function')?_dt(_lastAct.slice(0,10)):_lastAct.slice(0,10)):'—'}</span></div>
+      <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">🕒</div><div class="prow-lbl">${LANG==='en'?'Last activity':'Poslední aktivita'}</div></div><span class="prow-val">${_lastAct?((typeof _dt==='function')?_dt(_lastAct.slice(0,10)):_lastAct.slice(0,10)):'—'}</span></div>
     </div>` : ''}
     ${!_isFounder ? `<div class="sec-lbl">${LANG==='en'?'Drop-ins':'Jednorázové vstupy'}</div>
     <div class="prow-group" style="margin-bottom:16px;">
@@ -28723,13 +28730,52 @@ async function toggleEP(userId){
   }catch(e){ toast('⚠️ '+((e&&e.message)||'error')); }
 }
 
+// ═══ SEKCE V DETAILU JAKO ROZBALOVACÍ ═══════════════════════════════════════════════════
+// Detail klubu i kouče má šest až osm sekcí za sebou a v adminu se v tom scrolluje dlouho.
+// Místo přepisování šablon se po vykreslení projdou nadpisy (.sec-lbl) a každý se svým
+// blokem (.prow-group) se zabalí do <details>. Výhoda: kdo do šablony přidá další sekci,
+// dostane rozbalování zdarma a nemusí o něm vědět.
+//
+// První sekce zůstává otevřená, ať obrazovka nevypadá prázdně.
+function _admCollapseSections(boxId, openFirst){
+  try{
+    const box=document.getElementById(boxId); if(!box || box.dataset.collapsed) return;
+    const lbls=[...box.querySelectorAll('.sec-lbl')];
+    let idx=0;
+    lbls.forEach(function(lbl){
+      // Blok patřící k nadpisu: bezprostředně následující prvek (.prow-group nebo jiný obal).
+      const body=lbl.nextElementSibling;
+      if(!body || body.classList.contains('sec-lbl')) return;
+      const d=document.createElement('details');
+      d.style.cssText='border:1px solid var(--border);border-radius:12px;margin-bottom:10px;background:#fff;overflow:hidden;';
+      const sum=document.createElement('summary');
+      sum.style.cssText='cursor:pointer;padding:12px 14px;font-size:11.5px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--dark);list-style:none;';
+      sum.textContent=(lbl.textContent||'').trim();
+      lbl.parentNode.insertBefore(d, lbl);
+      d.appendChild(sum);
+      const wrap=document.createElement('div');
+      wrap.style.cssText='padding:0 12px 12px;';
+      wrap.appendChild(body);
+      d.appendChild(wrap);
+      lbl.remove();
+      if(openFirst && idx===0) d.open=true;
+      idx++;
+    });
+    box.dataset.collapsed='1';
+  }catch(e){}
+}
 async function openGymStats(gymId, gymName, fromAdmin){
   // Same rule as the coach panel: opened from an admin list this is an administrative view, even
   // of your own club, and your own money does not belong on a screen for looking at other people's.
   window._gsAdminView = !!fromAdmin;
   $('gymStatsTitle').textContent = `📊 ${gymName||'Gym'}`;
   openSheet('shGymStats');
-  renderGymAnalytics(gymId, 'gymStatsBody');
+  const _p=renderGymAnalytics(gymId, 'gymStatsBody');
+  // Sbalit až po dokreslení. Render je asynchronní, takže se to volá i s odstupem pro případ,
+  // že dokresluje na etapy.
+  const _fix=function(){ try{ const b=document.getElementById('gymStatsBody'); if(b) delete b.dataset.collapsed; }catch(e){} _admCollapseSections('gymStatsBody', true); };
+  try{ if(_p && _p.then) _p.then(_fix); }catch(e){}
+  setTimeout(_fix, 700); setTimeout(_fix, 1600);
 }
 async function loadAdminGymRequests(){
   const box=document.getElementById('adminGymReqList'); if(!box) return;
@@ -29316,7 +29362,10 @@ async function openCoachStats(coachId, coachName, fromAdmin){
   window._csAdminView = !!fromAdmin;
   $('coachStatsTitle').textContent = `📊 ${coachName||(LANG==='en'?'Coach':'Kouč')}`;
   openSheet('shCoachStats');
-  renderCoachAnalytics(coachId, 'coachStatsBody');
+  const _p=renderCoachAnalytics(coachId, 'coachStatsBody');
+  const _fix=function(){ try{ const b=document.getElementById('coachStatsBody'); if(b) delete b.dataset.collapsed; }catch(e){} _admCollapseSections('coachStatsBody', true); };
+  try{ if(_p && _p.then) _p.then(_fix); }catch(e){}
+  setTimeout(_fix, 700); setTimeout(_fix, 1600);
 }
 
 function renderMyDisciplines(){
