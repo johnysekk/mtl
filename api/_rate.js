@@ -40,12 +40,14 @@
 // EP má u obojího poloviční sazbu.
 const ACQ_RATE = 0.10;         // objev v appce, jednorázově
 const ACQ_RATE_EP = 0.05;      // objev v appce, EP
-const ADS_RATE = 0.30;         // z reklamy MTL, opakovaně po dobu okna níž
-const ADS_RATE_EP = 0.15;      // z reklamy MTL, EP
+const ADS_RATE = 0.25;         // z reklamy MTL, JEN ČLENSTVÍ, po dobu okna níž
+const ADS_RATE_EP = 0.10;      // z reklamy MTL, EP
 // JAK DLOUHO SE REKLAMA ÚČTUJE. Ne navždy: MTL zaplatilo za ZÍSKÁNÍ člena, ne za jeho život.
-// Půl roku pokryje i drahou akvizici a pro klub je to snesitelné číslo, které se dá říct
-// jednou větou („z lidí z reklamy platíš prvního půl roku"). Pak běžná sazba.
-const ADS_WINDOW_MONTHS = 6;
+// Okno je KALENDÁŘNÍ, běží od první platby z reklamy. Přerušené členství ho tedy neprodlužuje:
+// kdo platí 3 měsíce, dva vynechá a pak platí další 3, zaplatí vyšší sazbu ze šesti plateb,
+// které se do těch dvanácti měsíců vešly. Počítat „12 zaplacených měsíců" by se u někoho
+// táhlo roky a nikdo by nevěděl, kdy to skončí.
+const ADS_WINDOW_MONTHS = 12;
 
 // mode: 'stripe' (Stripe track) | anything else (QR/bank/cash/pis track)
 // o: { partner, founding, score, bankai }
@@ -170,8 +172,10 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
   // REKLAMA SE ÚČTUJE Z KAŽDÉ PLATBY toho člověka, ne jen z první. Nehledá se tedy žádná
   // předchozí transakce -- právě tím se liší od organického objevu.
   if (acqSource === 'mtl_ads') {
-    if (!(type === 'membership' || type === 'drop_in' || type === 'coach_1to1'
-        || type === 'coach_inperson' || type === 'coach_online')) return null;   // akce a kurzy mimo
+    // JEN ČLENSTVÍ. Jednorázový vstup za 200 Kč by dal 50 Kč, což nestojí ani za vysvětlování,
+    // a 1:1 lekce u klubu z reklamy je spíš výjimka. Členství je zároveň to, co má pro klub
+    // i pro MTL největší hodnotu, takže se vyšší sazba váže právě na něj.
+    if (type !== 'membership') return null;
     if (!scopeCol || !scopeId) return null;
     try {
       // Okno běží od PRVNÍ platby toho člověka u toho poskytovatele. Když žádnou nemá,
