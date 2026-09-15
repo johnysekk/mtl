@@ -48,6 +48,9 @@ const ADS_RATE_EP = 0.10;      // z reklamy MTL, EP
 // které se do těch dvanácti měsíců vešly. Počítat „12 zaplacených měsíců" by se u někoho
 // táhlo roky a nikdo by nevěděl, kdy to skončí.
 const ADS_WINDOW_MONTHS = 12;
+// Jak dlouhá pauza ukončí „období" u klubu. Stejné číslo hlídá i to, kdo je stávající člen:
+// kdo za posledního půl roku platil nebo trénoval, není akvizice.
+const ADS_GAP_MONTHS = 6;
 
 // mode: 'stripe' (Stripe track) | anything else (QR/bank/cash/pis track)
 // o: { partner, founding, score, bankai }
@@ -172,73 +175,67 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
   // REKLAMA SE ÚČTUJE Z KAŽDÉ PLATBY toho člověka, ne jen z první. Nehledá se tedy žádná
   // předchozí transakce -- právě tím se liší od organického objevu.
   if (acqSource === 'mtl_ads') {
-    // JEN ČLENSTVÍ. Jednorázový vstup za 200 Kč by dal 50 Kč, což nestojí ani za vysvětlování,
-    // a 1:1 lekce u klubu z reklamy je spíš výjimka. Členství je zároveň to, co má pro klub
-    // i pro MTL největší hodnotu, takže se vyšší sazba váže právě na něj.
+    // JEN ČLENSTVÍ. Jednorázový vstup za 200 Kč by dal 50 Kč, což nestojí za vysvětlování,
+    // a členství je zároveň to, co má hodnotu pro klub i pro MTL.
     if (type !== 'membership') return null;
     if (!scopeCol || !scopeId) return null;
     try {
-      // Okno běží od PRVNÍ platby toho člověka u toho poskytovatele. Když žádnou nemá,
-      // je tohle ta první a okno teprve začíná.
-      // ── UŽ PLATÍ Z REKLAMY? ────────────────────────────────────────────────────────
-      // Rozhoduje, jestli je tohle PRVNÍ platba po kliku z reklamy, nebo další v řadě. Bez
-      // toho rozlišení by kontrola „stávající člen" níž zabila i druhý měsíc člena, kterého
-      // reklama opravdu přivedla: jeho vlastní první platba by ho prohlásila za stávajícího.
-      const priorAds = await sbGet(
-        `transactions?select=created_at&member_id=eq.${encodeURIComponent(memberId)}` +
-        `&${scopeCol}=eq.${encodeURIComponent(scopeId)}&acq_source=eq.mtl_ads` +
-        `&status=in.(paid,completed)&order=created_at.asc&limit=1`
+      const MS_MONTH = 30.44 * 86400000;
+      const gapMs = ADS_GAP_MONTHS * MS_MONTH;
+
+      // ── SOUČASNÉ OBDOBÍ U KLUBU ────────────────────────────────────────────────────
+      // „Období" je řada plateb, mezi kterými není mezera delší než půl roku. Kdo přestal
+      // chodit a po půl roce se vrátil, začíná nové období -- a přivést ho zpátky je nová
+      // akvizice. Bez tohohle se okno počítalo od vůbec první platby z reklamy, takže
+      // člověk, který se vrátil po dvou letech, už nikdy akvizicí být nemohl.
+      const pays = await sbGet(
+        `transactions?select=created_at,acq_source&member_id=eq.${encodeURIComponent(memberId)}` +
+        `&${scopeCol}=eq.${encodeURIComponent(scopeId)}&status=in.(paid,completed)` +
+        `&order=created_at.desc&limit=200`
       );
-      const hasPriorAds = !!(priorAds && priorAds.length);
+      const spell = [];
+      let prev = Date.now();
+      for (const p of (pays || [])) {
+        const t = Date.parse(p.created_at || '');
+        if (!t) continue;
+        if (prev - t > gapMs) break;      // mezera delší než půl roku = konec období
+        spell.push({ t, acq: p.acq_source || '' });
+        prev = t;
+      }
 
-      if (!hasPriorAds) {
-        // ── STÁVAJÍCÍ ČLEN NENÍ AKVIZICE ─────────────────────────────────────────────
-        // Kdo u klubu za posledního půl roku platil nebo trénoval, není nikdo, koho přivedla
-        // reklama. Jinak by stačilo, aby člen měsíc nechodil, ze zvědavosti klikl na reklamu,
-        // a klub by platil 30 % za svého vlastního člověka.
-        // Kdo nebyl půl roku, se bere jako nový: přivést odejdeného člena zpátky je práce.
-        const back = new Date();
-        back.setMonth(back.getMonth() - ADS_WINDOW_MONTHS);
-        const backISO = back.toISOString();
-        const recentPay = await sbGet(
-          `transactions?select=id&member_id=eq.${encodeURIComponent(memberId)}` +
-          `&${scopeCol}=eq.${encodeURIComponent(scopeId)}&status=in.(paid,completed)` +
-          `&created_at=gte.${encodeURIComponent(backISO)}&limit=1`
-        );
-        if (recentPay && recentPay.length) return null;
+      // Nejstarší platba Z REKLAMY v tomhle období. Od ní běží okno.
+      const adsInSpell = spell.filter(x => x.acq === 'mtl_ads');
+      const anchor = adsInSpell.length ? adsInSpell[adsInSpell.length - 1].t : null;
+
+      if (anchor == null) {
+        // V tomhle období ještě žádná platba z reklamy není, takže tahle by okno zakládala.
+        // Ale jen u někoho, kdo u klubu opravdu nebyl: kdo platil nebo trénoval v posledním
+        // půlroce, je klubův člověk, i kdyby na reklamu klikl.
+        if (spell.length) return null;
         if (scopeCol === 'gym_id') {
-          // U klubu se dá trénovat i bez platby v MTL (stará permanentka, hotovost mimo
-          // systém). I to je vztah, který reklama nezaložila.
-          const recentAtt = await sbGet(
+          const back = new Date(Date.now() - gapMs).toISOString().slice(0, 10);
+          const att = await sbGet(
             `gym_attendance?select=id&student_id=eq.${encodeURIComponent(memberId)}` +
-            `&gym_id=eq.${encodeURIComponent(scopeId)}` +
-            `&class_date=gte.${encodeURIComponent(backISO.slice(0, 10))}&limit=1`
+            `&gym_id=eq.${encodeURIComponent(scopeId)}&class_date=gte.${encodeURIComponent(back)}&limit=1`
           );
-          if (recentAtt && recentAtt.length) return null;
+          if (att && att.length) return null;
         }
+        return { rate: (ownerPartner ? ADS_RATE_EP : ADS_RATE), months: ADS_WINDOW_MONTHS };
       }
 
-      // Okno běží od první platby Z REKLAMY. U prvního nákupu žádná není a okno teprve
-      // začíná; u dalších se počítá, kolik z těch šesti měsíců zbývá.
-      const first = hasPriorAds ? priorAds : [];
-      const firstAt = (first && first[0] && first[0].created_at) ? new Date(first[0].created_at) : null;
-      let left = ADS_WINDOW_MONTHS;
-      if (firstAt) {
-        const end = new Date(firstAt.getTime());
-        end.setMonth(end.getMonth() + ADS_WINDOW_MONTHS);
-        if (Date.now() > end.getTime()) return null;    // okno vypršelo -> běžná sazba
-        // Kolik měsíců okna ještě zbývá. Roční permanentka koupená hned po příchodu tedy
-        // nese vyšší sazbu jen na prvních 6 měsíců, zbytek jede za běžnou sazbu; půlroční
-        // celá, tříměsíční celá.
-        left = Math.max(0, Math.ceil((end.getTime() - Date.now()) / (30.44 * 86400000)));
-        if (left <= 0) return null;
-      }
+      // Okno běží od první platby z reklamy v tomhle období.
+      const end = new Date(anchor);
+      end.setMonth(end.getMonth() + ADS_WINDOW_MONTHS);
+      if (Date.now() > end.getTime()) return null;              // okno vypršelo
+      const left = Math.max(0, Math.ceil((end.getTime() - Date.now()) / MS_MONTH));
+      if (left <= 0) return null;
       return { rate: (ownerPartner ? ADS_RATE_EP : ADS_RATE), months: Math.min(ADS_WINDOW_MONTHS, left) };
     } catch (e) {
       // Výpadek databáze nesmí cenu zdražit ani zlevnit: bereme celé okno.
       return { rate: (ownerPartner ? ADS_RATE_EP : ADS_RATE), months: ADS_WINDOW_MONTHS };
     }
   }
+
   let max;
   if (type === 'membership') max = 1;                   // CHANGED: was 2 (first two months)
   else if (type === 'drop_in' || type === 'coach_1to1') max = 1;
