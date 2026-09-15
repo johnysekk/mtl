@@ -31,8 +31,17 @@
 // A multi-month payment still blends, and that is what makes a yearly membership fair: the fee
 // lands on one month's worth of it. 16 000 / 12 months -> 20% of 1 333 = 267, not 20% of 16 000.
 // effectiveRate() below does that from { rate, months: 1 }; nothing extra is needed.
-const ACQ_RATE = 0.20;     // finder's fee, standard providers  (was 0.10 across two months)
-const ACQ_RATE_EP = 0.10;  // EP perk: half the acquisition fee (was 0.05 across two months)
+// ── AKVIZIČNÍ SAZBY ────────────────────────────────────────────────────────────────────
+// Dvě různé věci, dvě různé ceny:
+//   • ORGANICKÝ OBJEV (mtl_discovery) — člověk si klub našel sám v appce. MTL za ten příchod
+//     nic nezaplatilo, jen ho zprostředkovalo, takže JEDNORÁZOVĚ a levně.
+//   • REKLAMA (mtl_ads) — MTL za ten klik zaplatilo z vlastní kapsy. Proto OPAKOVANĚ, dokud
+//     ten člověk u poskytovatele platí; jinak by se kampaň nezaplatila.
+// EP má u obojího poloviční sazbu.
+const ACQ_RATE = 0.10;         // objev v appce, jednorázově
+const ACQ_RATE_EP = 0.05;      // objev v appce, EP
+const ADS_RATE = 0.20;         // z reklamy MTL, OPAKOVANĚ z každé jeho platby
+const ADS_RATE_EP = 0.10;      // z reklamy MTL, EP
 
 // mode: 'stripe' (Stripe track) | anything else (QR/bank/cash/pis track)
 // o: { partner, founding, score, bankai }
@@ -149,7 +158,20 @@ export async function resolveRate(sbGet, { ownerId, gymId, gymAccount, mode }) {
 // (Was: membership = first 2 months. Single charge now -- see the header.) Window is bounded by counting prior COMPLETED tx of this type for this member at
 // this provider (Stripe + cash together). ownerPartner => EP pays half.
 export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, memberId, scopeCol, scopeId }) {
-  if (acqSource !== 'mtl_discovery' || !memberId) return null;
+  // 'mtl_ads' = člověk přišel z kampaně, kterou zaplatilo MTL. Je to akvizice se stejnou
+  // sazbou jako organický objev; rozdíl je jen ve zdroji, aby se dalo doložit, odkud přišel
+  // (a u reklamy je ten nárok nejsilnější -- MTL za ten klik opravdu zaplatilo).
+  if ((acqSource !== 'mtl_discovery' && acqSource !== 'mtl_ads') || !memberId) return null;
+
+  // REKLAMA SE ÚČTUJE Z KAŽDÉ PLATBY toho člověka, ne jen z první. Nehledá se tedy žádná
+  // předchozí transakce -- právě tím se liší od organického objevu.
+  if (acqSource === 'mtl_ads') {
+    if (type === 'membership' || type === 'drop_in' || type === 'coach_1to1'
+        || type === 'coach_inperson' || type === 'coach_online') {
+      return ownerPartner ? ADS_RATE_EP : ADS_RATE;
+    }
+    return null;   // akce a kurzy zůstávají mimo, stejně jako u objevu
+  }
   let max;
   if (type === 'membership') max = 1;                   // CHANGED: was 2 (first two months)
   else if (type === 'drop_in' || type === 'coach_1to1') max = 1;
