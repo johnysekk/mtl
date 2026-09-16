@@ -7015,7 +7015,7 @@ async function _reportGymDemand(discCsv, silent, commit, form){
         var _hit=(typeof CITY_COORDS!=='undefined') ? Object.entries(CITY_COORDS).find(function(e){ return e[0].toLowerCase()===_fc.toLowerCase(); }) : null;
         if(_hit){ city=_hit[0]; lat=_hit[1].lat; lng=_hit[1].lng; }
         else{
-          var _gr=await fetch('https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q='+encodeURIComponent(_fc));
+          var _gr=await fetch('/api/geo-search?limit=1&q='+encodeURIComponent(_fc));
           var _gj=await _gr.json();
           if(_gj && _gj.length){ city=_fc; lat=parseFloat(_gj[0].lat); lng=parseFloat(_gj[0].lon); country=((_gj[0].address&&_gj[0].address.country)||country); }
           else { if(!silent) toast(LANG==='en'?('\u26a0\ufe0f City not found: '+_fc):('\u26a0\ufe0f M\u011bsto nenalezeno: '+_fc)); return; }
@@ -14170,9 +14170,11 @@ async function bookGymDropin(g, occ, _child){
   window._dpPickLast = _dpPick || null;
 
   // ── ZKUŠEBNÍ TRÉNINK ZDARMA ────────────────────────────────────────────────────────────
-  // Musí se rozhodnout PŘED platební cestou: nulová platba nejde ani přes Stripe, ani přes QR.
-  // Vytvoří se rezervace za nulu a záznam o využitém zkušebním; docházku zapíše klub jako
-  // u každé jiné lekce, takže XP i statistiky běží normálně.
+  // Rezervaci NEVYTVÁŘÍ appka. Volá se databázová funkce book_trial (sql-64), která si sama
+  // zkontroluje nárok a zapíše rezervaci i evidenci v jedné transakci. Prohlížeč rezervaci
+  // za nulu vůbec vytvořit nemůže -- databáze to odmítne. Bez toho by si kdokoli s konzolí
+  // naklikal tréninků zdarma, kolik by chtěl, a u klubu s velkým obratem lidí by si toho
+  // nikdo nevšiml.
   try{
     const _tl=await trialLeft(g, _child && _child.name);
     if(_tl>0){
@@ -14182,21 +14184,23 @@ async function bookGymDropin(g, occ, _child){
         ? ('Book your free trial class? ('+_ord+' of '+_total+')')
         : ('Rezervovat zkušební trénink zdarma? ('+_ord+'. z '+_total+')');
       if(!confirm(_q)) return;
-      const _today=new Date().toISOString().slice(0,10);
-      const rec0={ gym_id:g.id, student_id:currentUser.id, paid_to:'gym',
-        acq_source:_acqSrc(g), amount:0, currency:_dcur, status:'paid',
-        date:(occ&&occ.date)||_today, time:(occ&&occ.time)||'18:00',
-        student_name:currentUser.name||'Student', gym_name:g.name||'Klub' };
-      if(occ){ rec0.class_name=occ.name||null; rec0.class_date=occ.date||null; rec0.class_time=occ.time||null; }
-      if(_child){ rec0.child_name=_child.name; rec0.child_age=_kidAge(_child); }
-      const { data:_bk0, error:_e0 }=await supaClient.from('gym_bookings')
-        .insert(Object.assign({ attr_src:_attrGet() }, rec0)).select().single();
-      if(_e0){ toast('⚠️ '+_e0.message); return; }
-      try{
-        await supaClient.from('gym_trials').insert({ gym_id:g.id, student_id:currentUser.id,
-          child_name:(_child&&_child.name)||'', class_date:rec0.class_date||rec0.date,
-          class_time:rec0.class_time||rec0.time });
-      }catch(e){ console.warn('gym_trials', e && e.message); }
+      const { data:_tid, error:_te }=await supaClient.rpc('book_trial', {
+        p_gym: g.id,
+        p_child: (_child && _child.name) || null,
+        p_date: (occ&&occ.date) || new Date().toISOString().slice(0,10),
+        p_time: (occ&&occ.time) || null,
+        p_class_name: (occ&&occ.name) || null,
+      });
+      if(_te){
+        // Hlášky ze serveru přeložíme; „už zaplatil" a „vyčerpáno" nejsou chyby, ale stav.
+        const _m=String(_te.message||'');
+        const _t=(/already_paid/.test(_m)) ? (LANG==='en'?'You have already paid at this club':'U tohoto klubu už jsi platil')
+          : (/trials_used_up/.test(_m)) ? (LANG==='en'?'Free trials are used up':'Zkušební tréninky jsou vyčerpané')
+          : (/trials_off/.test(_m)) ? (LANG==='en'?'This club does not offer free trials':'Tento klub zkušební tréninky nenabízí')
+          : ('⚠️ '+_m);
+        toast(_t);
+        return;
+      }
       toast((LANG==='en'?'✅ Free trial class booked':'✅ Zkušební trénink zarezervován'), 1);
       try{ if(typeof loadMyBookings==='function') loadMyBookings(); }catch(e){}
       try{ closeSheet('shProfile'); }catch(e){}
@@ -23959,10 +23963,10 @@ async function submitGymChangeRequest(){
     if(_pg && _pg.addr===next.address && _pg.lat!=null){ patch.city_lat=_pg.lat; patch.city_lng=_pg.lng; }
     else try{
       const _q=(next.address? (next.address+', ') : '')+next.city;
-      let _r=await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q='+encodeURIComponent(_q));
+      let _r=await fetch('/api/geo-search?limit=1&q='+encodeURIComponent(_q));
       let _d=await _r.json();
       if((!_d||!_d.length) && next.city){
-        _r=await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q='+encodeURIComponent(next.city));
+        _r=await fetch('/api/geo-search?limit=1&q='+encodeURIComponent(next.city));
         _d=await _r.json();
       }
       if(_d && _d.length){ patch.city_lat=parseFloat(_d[0].lat); patch.city_lng=parseFloat(_d[0].lon); }
@@ -25425,7 +25429,7 @@ async function confirmCity(){
   // Jinak geokóduj přes Nominatim (jakékoliv město na světě)
   toast(L('🔍 Hledám město...'));
   try {
-    const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q=${encodeURIComponent(val)}`);
+    const res = await fetch(`/api/geo-search?limit=1&q=${encodeURIComponent(val)}`);
     const data = await res.json();
     if(data && data.length){
       const cn = data[0].address && data[0].address.country || null;
@@ -26583,10 +26587,10 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
       const _pg=window._gaPickedGeo;
       if(_pg && _pg.addr===address && _pg.lat!=null){ lat=_pg.lat; lng=_pg.lng; }
       const _q1 = (address && String(address).trim()) ? (String(address).trim()+', '+city) : city;
-      let geo=await fetch(`https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q=${encodeURIComponent(_q1)}`);
+      let geo=await fetch(`/api/geo-search?limit=1&q=${encodeURIComponent(_q1)}`);
       let gd=await geo.json();
       if((!gd || !gd.length) && _q1!==city){
-        geo=await fetch(`https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q=${encodeURIComponent(city)}`);
+        geo=await fetch(`/api/geo-search?limit=1&q=${encodeURIComponent(city)}`);
         gd=await geo.json();
       }
       if(gd && gd.length){ lat=parseFloat(gd[0].lat); lng=parseFloat(gd[0].lon); countryName=gd[0].address&&gd[0].address.country||null; }
@@ -38923,9 +38927,13 @@ function _attachAddrSuggest(inputId, cityGetter, onPick){
       // OSM má limit na dotazy a občas odpoví 403 nebo 429. Dřív se v tom případě nabídka jen
       // nezobrazila a vypadalo to, že našeptávač „přestal fungovat". Teď se to řekne a nabídne
       // se ruční zadání, ať člověk není zaseknutý.
-      const r=await fetch('https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=12&q='
-        +encodeURIComponent(q+(city && q.toLowerCase().indexOf(city.toLowerCase())<0 ? (', '+city) : '')),
-        { headers:{ 'Accept':'application/json' } });
+      // PŘES NÁŠ SERVER, NE PŘÍMO. OSM vyžaduje identifikující User-Agent, který z prohlížeče
+      // nastavit nejde, takže přímé dotazy odmítalo (403) nebo přiškrtilo (429) -- odtud
+      // „našeptávač přestal fungovat". /api/geo-search posílá dotaz jménem MTL a krátce
+      // drží výsledky, takže při psaní adresy odejde jeden dotaz místo dvaceti.
+      const r=await fetch('/api/geo-search?lang='+encodeURIComponent(LANG||'cs')
+        +'&city='+encodeURIComponent(city||'')
+        +'&q='+encodeURIComponent(q));
       if(!r.ok){
         box.innerHTML='<div style="padding:10px 12px;font-size:12.5px;color:var(--mid);line-height:1.45;">'
           +(LANG==='en'?'Address lookup is unavailable right now — use “Enter it manually”.'
@@ -38992,7 +39000,7 @@ async function _caGeoCity(){
   try{
     var el=$('caCity'); if(!el) return; var v=(el.value||'').trim();
     if(!v || v===window._caGeoLast) return; window._caGeoLast=v;
-    var res=await fetch('https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q='+encodeURIComponent(v));
+    var res=await fetch('/api/geo-search?limit=1&q='+encodeURIComponent(v));
     var d=await res.json(); if(!(d&&d.length&&d[0].address)) return;
     var cn=d[0].address.country||null, cc=d[0].address.country_code?String(d[0].address.country_code).toUpperCase():null;
     if(currentUser){ if(cn)currentUser.country=cn; if(cc)currentUser.country_code=cc;
@@ -39260,7 +39268,7 @@ $('btnSubmitCoachApp').onclick=async()=>{
     btn.textContent=L('Hledám město...');
     let lat=null,lng=null,countryName=null,countryCode=null;
     try {
-      const geo=await fetch(`https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&limit=1&q=${encodeURIComponent(city)}`);
+      const geo=await fetch(`/api/geo-search?limit=1&q=${encodeURIComponent(city)}`);
       const geoData=await geo.json();
       if(geoData && geoData.length){ lat=parseFloat(geoData[0].lat); lng=parseFloat(geoData[0].lon); countryName=geoData[0].address && geoData[0].address.country || null; countryCode=geoData[0].address && geoData[0].address.country_code || null; }
     } catch(e){ console.error('Geocode error',e); }
@@ -39394,7 +39402,18 @@ async function _lockDobAndNext(){
 }
 var _ctyClosed=false;
 function _ctyTexts(){ const en=LANG==='en'; if($('authCtyTitle')) $('authCtyTitle').textContent=en?'Where do you live?':'Kde \u017eije\u0161?'; // Podtitulek zrušen -- otázka "Kde žiješ?" je srozumitelná sama.
-  if($('authCtySub')) $('authCtySub').textContent=''; if($('authCountryBtn')) $('authCountryBtn').textContent=en?'Continue':'Pokračovat'; const sel=$('authCountrySel'); if(sel && (!sel.options||!sel.options.length)){ try{ sel.innerHTML=_countryOptsHtml((typeof _guessCC==='function'?_guessCC():'')); }catch(e){} }
+  if($('authCtySub')) $('authCtySub').textContent=''; if($('authCountryBtn')) $('authCountryBtn').textContent=en?'Continue':'Pokračovat'; const sel=$('authCountrySel');
+  // PŘEPLNIT I PŘI ZMĚNĚ JAZYKA. Dřív se seznam naplnil jednou a zůstal v jazyce, ve kterém
+  // appka právě byla; po přepnutí na angličtinu tak zůstaly české názvy zemí. Volba se
+  // zachová, mění se jen text.
+  if(sel && (!sel.options || !sel.options.length || sel.dataset.lang!==LANG)){
+    try{
+      const _keep=sel.value||'';
+      sel.innerHTML=_countryOptsHtml(_keep || (typeof _guessCC==='function'?_guessCC():''));
+      if(_keep) sel.value=_keep;
+      sel.dataset.lang=LANG;
+    }catch(e){}
+  }
   // Žádná otevřená země = registraci nelze dokončit. Říct to rovnou a nabídnout odchod;
   // prázdný rozbalovač s hláškou "vyber zemi" je slepá ulička, ze které účet už existuje.
   _ctyClosed=false;
