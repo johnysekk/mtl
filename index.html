@@ -6197,12 +6197,15 @@ function updateAuthTexts(){
 // ════════════════════════════════════════
 // DATA
 // ════════════════════════════════════════
+// Zkratka pro pár největších měst, ať se na ně nemusí volat geokódování. Všechna jsou
+// česká, takže nesou i kód země -- bez něj se u člověka s jinou domovskou zemí nastavilo
+// jen město a země zůstala stará, takže deck vypadal, jako by se nic nestalo.
 const CITY_COORDS = {
-  Praha:   {lat:50.0755,lng:14.4378},
-  Brno:    {lat:49.1951,lng:16.6068},
-  Ostrava: {lat:49.8209,lng:18.2625},
-  Plzeň:   {lat:49.7384,lng:13.3736},
-  Liberec: {lat:50.7663,lng:15.0543},
+  Praha:   {lat:50.0755,lng:14.4378,cc:'CZ'},
+  Brno:    {lat:49.1951,lng:16.6068,cc:'CZ'},
+  Ostrava: {lat:49.8209,lng:18.2625,cc:'CZ'},
+  Plzeň:   {lat:49.7384,lng:13.3736,cc:'CZ'},
+  Liberec: {lat:50.7663,lng:15.0543,cc:'CZ'},
 };
 
   
@@ -8171,6 +8174,13 @@ async function _goHomeDeck(){
 async function _goAbroad(){
   const EN=LANG==='en';
   // Návrat do už otevřené země se nepočítá -- limit je na PŘEPNUTÍ, ne na listování.
+  // Když je denní kvóta vyčerpaná, řekneme to PŘED výběrem země, ne po něm. Vybrat zemi
+  // a pak dostat „zkus to zítra" je zbytečná práce navíc.
+  if(currentUser && currentUser._abroadLeft===0 && !_deckAbroad){
+    toast(EN?('Browsing other countries is limited to '+ABROAD_MAX_PER_DAY+'x a day — try again tomorrow.')
+            :('Prohlížení jiných zemí je omezené na '+ABROAD_MAX_PER_DAY+'\u00d7 denně — zkus to zítra.'), 1);
+    return false;
+  }
   const cc=await _pickAbroadCountry();
   if(!cc) return false;
   // Čerpá se AŽ po výběru a rozhoduje o tom server. Zrušený výběr limit nespotřebuje.
@@ -8207,11 +8217,9 @@ function renderCountryFilter(){
   // a přepnutí na jinou zemi.
   box.innerHTML='<div class="pill" data-cf="__home">\u2190 '+(EN?'My area':'M\u00e9 okol\u00ed')+'</div>'
     + keys.map(function(k){ return '<div class="pill'+(window._deckCountryPick===k?' active':'')+'" data-cf="'+escapeHtml(k)+'">'+escapeHtml(_lbl(k))+' <span style="opacity:.55;">'+set[k]+'</span></div>'; }).join('')
-    // NABÍDKA JEN KDYŽ JE Z ČEHO ČERPAT. Dřív tu „Jiná země" svítila i po vyčerpání denní
-    // kvóty a klik skončil hláškou -- nabízet něco, co nejde, je horší než to neukázat.
-    + ((currentUser && currentUser._abroadLeft===0)
-        ? '<div class="pill" style="opacity:.45;" title="'+(EN?'Daily limit reached':'Denní limit vyčerpán')+'">\ud83c\udf0d '+(EN?'Limit reached':'Limit vyčerpán')+'</div>'
-        : '<div class="pill" data-cf="__pick">\ud83c\udf0d '+(EN?'Another country':'Jin\u00e1 zem\u011b')+'</div>');
+    // Nabídka zůstává vždycky. Samotné „Limit vyčerpán" bez kontextu nikomu nic neřekne --
+    // po vyčerpání kvóty se tedy ukáže tatáž nabídka a klik vysvětlí, co se děje.
+    + '<div class="pill" data-cf="__pick"'+((currentUser && currentUser._abroadLeft===0)?' style="opacity:.55;"':'')+'>\ud83c\udf0d '+(EN?'Another country':'Jin\u00e1 zem\u011b')+'</div>';
   box.querySelectorAll('.pill').forEach(function(el){
     el.onclick=function(){
       const v=el.dataset.cf||'';
@@ -25539,7 +25547,35 @@ async function confirmCity(){
   if(m){
     $('cityOv').classList.remove('open');
     if(_browse){ await _setBrowseLoc({lat:m[1].lat,lng:m[1].lng,city:m[0], country:((window._homeLoc&&window._homeLoc.country)||(userLoc&&userLoc.country)||null)}); return; }
-    userLoc={lat:m[1].lat,lng:m[1].lng,city:m[0]};
+    // ZMĚNA ZEMĚ PATŘÍ I SEM. Dřív se u předdefinovaného města uložily jen souřadnice,
+    // takže Francouz, který napsal „Brno", zůstal s domovskou zemí FR a v decku se nic
+    // nezměnilo. Kontrola i zápis jsou proto stejné jako u geokódované adresy.
+    const _cc2=m[1].cc || null;
+    const _oldCC2=(currentUser&&(currentUser.country_code||currentUser.residence_country))||null;
+    if(_cc2 && _oldCC2 && _cc2!==String(_oldCC2).toUpperCase()){
+      const _lm=(typeof _ccMoveLeftMs==='function')?_ccMoveLeftMs():0;
+      if(_lm>0){
+        const _h=Math.ceil(_lm/3600000);
+        toast(LANG==='en'?('You can change your country again in '+_h+' h — use “Just browse elsewhere” instead.')
+                         :('Zemi můžeš změnit znovu za '+_h+' h — zkus „Jen se podívat jinam".'));
+        return;
+      }
+    }
+    userLoc={lat:m[1].lat,lng:m[1].lng,city:m[0],country:(typeof _ccName==='function'&&_cc2)?_ccName(_cc2):null,countryCode:_cc2};
+    try{
+      if(currentUser){
+        const _patch={ city:m[0], city_lat:m[1].lat, city_lng:m[1].lng };
+        if(_cc2){ _patch.country_code=_cc2; _patch.country=(typeof _ccName==='function'?_ccName(_cc2):null); }
+        const { error:_e2 }=await supaClient.from('profiles').update(_patch).eq('id', currentUser.id);
+        if(_e2 && /country_change_too_soon/.test(String(_e2.message||''))){
+          toast(LANG==='en'?'You can change your country again later':'Zemi můžeš změnit znovu později');
+          return;
+        }
+        currentUser.city=m[0]; currentUser.city_lat=m[1].lat; currentUser.city_lng=m[1].lng;
+        if(_cc2){ currentUser.country_code=_cc2; currentUser.country=(typeof _ccName==='function'?_ccName(_cc2):currentUser.country); currentUser.country_changed_at=new Date().toISOString(); }
+        try{ if(typeof _syncCountryRow==='function') _syncCountryRow(); }catch(e){}
+      }
+    }catch(e){}
     onLocSet();
     return;
   }
@@ -38283,6 +38319,19 @@ try{ _syncCountryRow(); }catch(e){}
 // Deck se řídí zemí, ale nastavit se dalo jen město. Kdo se přestěhoval do jiné země, neměl
 // jak to appce říct. Změna země se počítá do stejného limitu jako přesun prohlížení do
 // zahraničí (jednou za den), jinak by šlo přeskakovat mezi trhy bez omezení.
+// ZÁMEK 24 H DRŽÍ DATABÁZE (sql-68). Zůstává schválně: u klubu v cizí zemi se dá zaplatit
+// i jen přes prohlížení, takže kdo chce trénovat za hranicí, účet přesouvat nemusí. Přesun
+// je změna domovského trhu, ne cestování. Appka sem jen čte, aby dopředu řekla, kolik hodin
+// zbývá; rozhoduje spouštěč.
+const CC_MOVE_MS = 24*3600*1000;
+function _ccMoveLeftMs(){
+  try{
+    const t=(currentUser && currentUser.country_changed_at) ? Date.parse(currentUser.country_changed_at) : 0;
+    if(!t) return 0;
+    const left=CC_MOVE_MS-(Date.now()-t);
+    return left>0 ? left : 0;
+  }catch(e){ return 0; }
+}
 function _syncCountryRow(){
   try{
     const v=document.getElementById('vCountry'); if(!v) return;
@@ -38294,16 +38343,25 @@ async function openCountryPicker(){
   const EN=LANG==='en';
   if(!currentUser){ toast(L('⚠️ Nejdřív se přihlas')); return; }
   try{ if(typeof _loadIntroRates==='function') await _loadIntroRates(); }catch(e){}
-  const list=(typeof _countriesOpen==='function')?_countriesOpen():[];
-  if(!list.length){ toast(EN?'No countries are open yet':'Zatím není otevřená žádná země'); return; }
+  let list=(typeof _countriesOpen==='function')?_countriesOpen():[];
   const cur=(currentUser.country_code||currentUser.residence_country||'').toUpperCase();
+  // VLASTNÍ ZEMĚ TAM MUSÍ BÝT VŽDYCKY. Otevřené země určuje Admin, ale kdo se registroval
+  // s jinou zemí (nebo ji Admin později zavřel), by ve výběru neviděl ani tu svou a nešlo
+  // by se z ní hnout -- ani zpátky do ní.
+  try{
+    if(cur && !list.some(function(c){ return c[0]===cur; })){
+      const _hit=(typeof MTL_COUNTRIES!=='undefined'?MTL_COUNTRIES:[]).filter(function(x){ return x[0]===cur; })[0];
+      if(_hit) list=[_hit].concat(list);
+    }
+  }catch(e){}
+  if(!list.length){ toast(EN?'No countries are open yet':'Zatím není otevřená žádná země'); return; }
   const ov=document.createElement('div');
   ov.style.cssText='position:fixed;inset:0;z-index:100095;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:18px;';
   ov.innerHTML='<div style="background:#fff;border-radius:16px;max-width:380px;width:100%;padding:20px;font-family:\'DM Sans\';">'
     +'<div style="font-size:17px;font-weight:800;color:var(--dark);margin-bottom:6px;">'+(EN?'Where do you live?':'Kde žiješ?')+'</div>'
     +'<div style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:12px;">'
-      +(EN?'The deck shows coaches, clubs and events from this country. You can change it once a day.'
-          :'Deck ti ukazuje kouče, kluby a akce z téhle země. Změnit ji můžeš jednou za den.')+'</div>'
+      +(EN?'The deck shows coaches, clubs and events from this country. You can change it once a day — for a single session abroad you do not need to move, just browse that country.'
+          :'Deck ti ukazuje kouče, kluby a akce z téhle země. Změnit ji můžeš jednou za den — na jeden trénink v zahraničí se přesouvat nemusíš, stačí tu zemi prohlížet.')+'</div>'
     +'<select id="_ccSel" style="width:100%;box-sizing:border-box;padding:11px 12px;border:1.5px solid var(--border);border-radius:11px;font-size:15px;font-family:inherit;background:var(--surf);margin-bottom:14px;">'
       +list.map(function(c){ return '<option value="'+c[0]+'"'+(c[0]===cur?' selected':'')+'>'+escapeHtml(EN?c[2]:c[1])+'</option>'; }).join('')
     +'</select>'
@@ -38318,9 +38376,13 @@ async function openCountryPicker(){
     const cc=(ov.querySelector('#_ccSel').value||'').toUpperCase();
     if(!cc){ done(); return; }
     if(cc===cur){ done(); return; }
-    // BEZ ZÁMKU. Kdo cestuje, může být každý den jinde a právě tam chce najít trénink;
-    // zámek by trestal přesně to použití, které má appka podporovat. Server si jen zapíše
-    // čas změny (sql-69), aby bylo vidět, kdo po zemích skáče.
+    const left=_ccMoveLeftMs();
+    if(left>0){
+      const h=Math.ceil(left/3600000);
+      toast(EN?('You can change your country again in '+h+' h — to train abroad you can just browse that country.')
+              :('Zemi můžeš změnit znovu za '+h+' h — na trénink v zahraničí stačí tu zemi prohlížet.'));
+      return;
+    }
 
     const nm=(typeof _ccName==='function' && _ccName(cc)) || cc;
     if(!confirm(EN?('Move your account to '+nm+'? Your city will be cleared — set it again so distances work.')
@@ -38334,8 +38396,10 @@ async function openCountryPicker(){
         // půjde znovu. Uživateli ukážeme hodiny, ne hlášku z Postgresu.
         const _m=String((error && (error.message||error.details))||'');
     if(/country_change_too_soon/.test(_m)){
-          // Starší verze sql-68 mohla mít ještě zámek; kdyby se ozval, řekneme to lidsky.
-          toast(EN?'You can change your country again later today':'Zemi můžeš změnit znovu později dnes');
+          // Přesný čas posílá spouštěč v detailu chyby (sql-68).
+          let _h=24;
+          try{ const _at=Date.parse(String(error.details||'')); if(_at) _h=Math.max(1, Math.ceil((_at-Date.now())/3600000)); }catch(e){}
+          toast(EN?('You can change your country again in '+_h+' h'):('Zemi můžeš změnit znovu za '+_h+' h'));
           return;
         }
         toast('⚠️ '+(error.message||''));
