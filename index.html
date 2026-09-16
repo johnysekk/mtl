@@ -31520,7 +31520,24 @@ async function openOrgClubs(org, filter){
       const r=rows.find(x=>String(x.id)===b.dataset.id); if(!r) return;
       if(!confirm(EN?'Mark the fee as received?':'Ozna\u010dit poplatek jako p\u0159ijat\u00fd?')) return;
       try{
-        await supaClient.from('organization_clubs').update({ fee_paid_at:new Date().toISOString() }).eq('id',r.id);
+        // CENA A MĚNA SE MUSÍ ZAPSAT SPOLU S PLATBOU. Dřív se uložilo jen fee_paid_at, řádek zůstal
+        // bez fee_id i fee_amount, a zaúčtování pak nemělo z čeho vzít částku -- po platbě
+        // nezůstala žádná transakce ani doklad.
+        const _fp={ fee_paid_at:new Date().toISOString() };
+        if(!r.fee_id && !(Number(r.fee_amount)>0)){
+          try{
+            const _day=new Date().toISOString().slice(0,10);
+            let _f=(await supaClient.from('org_member_fees').select('id,amount,currency,period_to')
+              .eq('organization_id', r.organization_id)
+              .lte('period_from', _day).gte('period_to', _day)
+              .order('period_from',{ascending:false}).limit(1).maybeSingle()).data;
+            if(!_f) _f=(await supaClient.from('org_member_fees').select('id,amount,currency,period_to')
+              .eq('organization_id', r.organization_id).eq('active', true)
+              .order('period_from',{ascending:false}).limit(1).maybeSingle()).data;
+            if(_f){ _fp.fee_id=_f.id; _fp.fee_amount=_f.amount; _fp.fee_currency=_f.currency||'CZK'; if(_f.period_to) _fp.fee_due_at=_f.period_to; }
+          }catch(e){}
+        }
+        await supaClient.from('organization_clubs').update(_fp).eq('id',r.id);
         // Zauctovani: transakce + doklad klubu. Provize MTL je nulova.
         try{ await fetch('/api/org-fee-record',{ method:'POST', headers:{'Content-Type':'application/json'},
           body:JSON.stringify({ oc_id:r.id, method:'bank' }) }); }catch(e){}
