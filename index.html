@@ -13402,15 +13402,32 @@ async function openGymProfile(g){
   }); }catch(e){}
   {
     const bb=$('btnBookGym'); if(bb) bb.onclick=()=>gymTermsGate(g, ()=>bookGymDropin(g));
-    // NÁROK NA ZKUŠEBNÍ TRÉNINK ŘEKNEME UŽ NA PROFILU. Dozvědět se to až v potvrzovacím
-    // dialogu je pozdě -- právě tohle je důvod, proč to člověk zkusí.
+    // NÁROK NA ZKUŠEBNÍ TRÉNINK ŘEKNEME UŽ NA PROFILU, a to na VŠECH tlačítkách. Dřív se
+    // přepsalo jen hlavní tlačítko a u jednotlivých lekcí v rozvrhu svítila cena; člověk se
+    // o tom, že je to zdarma, dozvěděl teprve z potvrzovacího dialogu.
     try{
-      if(bb && typeof trialLeft==='function'){
+      if(typeof trialLeft==='function'){
         trialLeft(g).then(function(n){
           if(!n) return;
           const EN=LANG==='en';
-          bb.textContent=EN?('Book a free trial class ('+n+' left)'):('Rezervovat zkušební trénink zdarma ('+n+'\u00d7)');
-          bb.style.background='#FFD86B'; bb.style.color='#3B2A00';
+          if(bb){
+            bb.textContent=EN?('Book a free trial class ('+n+' left)'):('Rezervovat zkušební trénink zdarma ('+n+'\u00d7)');
+            bb.style.background='#FFD86B'; bb.style.color='#3B2A00';
+          }
+          // Tlačítka u jednotlivých lekcí v rozvrhu: stejná barva jako odznak v decku,
+          // ať je na první pohled vidět, že se za tuhle lekci neplatí.
+          // Rozvrh se dokresluje i po otevření profilu, takže se přepis zopakuje.
+          const _paint=function(){
+            try{
+              document.querySelectorAll('#gymProfContent .bookClassBtn').forEach(function(b2){
+                if(b2.dataset.freeDone) return;
+                b2.textContent=EN?'Book · free':'Rezervovat · zdarma';
+                b2.style.background='#FFD86B'; b2.style.color='#3B2A00'; b2.style.fontWeight='800';
+                b2.dataset.freeDone='1';
+              });
+            }catch(e){}
+          };
+          _paint(); setTimeout(_paint, 600); setTimeout(_paint, 1600);
         });
       }
     }catch(e){}
@@ -28375,7 +28392,19 @@ async function _wipeTestData(){
 // v _rate.js přes introFreeFor(); tohle je jen správa té hodnoty.
 const _CC_NAMES = { CZ:'Česko', SK:'Slovensko', PL:'Polsko', AT:'Rakousko', DE:'Německo',
   HU:'Maďarsko', GB:'Velká Británie', TH:'Thajsko', US:'USA' };
-function _ccName(cc){ return _CC_NAMES[cc] || cc; }
+function _ccName(cc){
+  // _CC_NAMES pokrývá jen hrst zemí (zbytek vracel kód místo názvu, takže Francouzovi se do
+  // profilu zapsalo „FR" a deck ho pak neporovnal s klubem, který má country „Francie").
+  // Doplňujeme z MTL_COUNTRIES, kde jsou názvy všech otevřených zemí.
+  const c=String(cc||'').toUpperCase();
+  if(!c) return null;
+  if(_CC_NAMES[c]) return _CC_NAMES[c];
+  try{
+    const hit=(typeof MTL_COUNTRIES!=='undefined'?MTL_COUNTRIES:[]).filter(function(x){ return x[0]===c; })[0];
+    if(hit) return (LANG==='en') ? hit[2] : hit[1];
+  }catch(e){}
+  return c;
+}
 async function _loadIntroRates(){
   try{
     const { data }=await supaClient.from('platform_config').select('intro_rates').eq('id',1).maybeSingle();
@@ -39448,7 +39477,14 @@ async function _finishReg(){ if(!_suUserId){ toast(LANG==='en'?'⚠️ Session e
   // vesele pokračovala: v databázi žádný řádek, žádný is_minor, žádný beta_status -- a člověk
   // skončil uvnitř appky jako běžný dospělý uživatel úplně bez profilu.
   try{
-    const { error:_pe }=await supaClient.from('profiles').upsert({ id:_suUserId, email:_suEmail, name:nm, role:'student', password_set:true, birthdate:_signupDob||null, is_minor:_signupMinor, guardian_email:_signupGuardian||null, residence_country:_signupCountry||null, beta_status:(await _testModeNow()?'pending':null) });
+    const { error:_pe }=await supaClient.from('profiles').upsert({ id:_suUserId, email:_suEmail, name:nm, role:'student', password_set:true, birthdate:_signupDob||null, is_minor:_signupMinor, guardian_email:_signupGuardian||null, residence_country:_signupCountry||null,
+      // DECK JEDE PODLE country, NE PODLE residence_country. Registrace ukládala jen bydliště,
+      // takže country zůstalo prázdné a appka padla na zemi odhadnutou z polohy/IP -- Francouz
+      // pak v decku viděl české kluby. Zapisujeme obojí: kód i český název, protože kluby mají
+      // v country lokalizovaný název (Česko, Francie), podle kterého se deck filtruje.
+      country_code:(_signupCountry||null),
+      country:((typeof _ccName==='function' && _ccName(_signupCountry)) || null),
+      beta_status:(await _testModeNow()?'pending':null) });
     if(_pe) throw _pe;
     // Kdo u klubu chodil bez appky, má historii na svém e-mailu. Připíšeme mu ji rovnou, ať
     // nezačíná od nuly a nemusí o tom vědět předem. Tiše -- uvítací obrazovka teď není na hlášky.
@@ -39506,7 +39542,10 @@ if($('authNmBtn')) $('authNmBtn').onclick=async()=>{ const name=($('authNmInput'
   // Obnovená registrace: zemi ani datum narození ještě neznáme -> pokračuj v pořadí,
   // profil se zapíše až po datu narození.
   if(!_signupDob){ _regStep='country'; applyDobGate(); return; }
-  try{ await supaClient.from('profiles').upsert({ id:_suUserId, email:_suEmail, name, role:'student', password_set:true, birthdate:_signupDob||null, is_minor:_signupMinor, guardian_email:_signupGuardian||null, residence_country:_signupCountry||null, beta_status:(await _testModeNow()?'pending':null) }); }catch(e){} { const _isTest=await _testModeNow();
+  try{ await supaClient.from('profiles').upsert({ id:_suUserId, email:_suEmail, name, role:'student', password_set:true, birthdate:_signupDob||null, is_minor:_signupMinor, guardian_email:_signupGuardian||null, residence_country:_signupCountry||null,
+      country_code:(_signupCountry||null),
+      country:((typeof _ccName==='function' && _ccName(_signupCountry)) || null),
+      beta_status:(await _testModeNow()?'pending':null) }); }catch(e){} { const _isTest=await _testModeNow();
     // V testu se souhlasí s testovacími dokumenty, ne s ostrými. Ostré si _maybeTermsGate vyžádá
     // po přechodu -- a v consents zůstane doložené obojí.
     try{
@@ -40447,6 +40486,23 @@ function enterApp(){
   if(typeof checkGymOwnership==='function') checkGymOwnership();
   if(typeof checkPastLessons==='function') setTimeout(checkPastLessons, 1500);
   if(typeof maybePromptLocationUpdate==='function') setTimeout(maybePromptLocationUpdate, 3500);
+  // NOVÝ ÚČET BEZ MĚSTA SE MUSÍ ZEPTAT. maybePromptLocationUpdate schválně pracuje jen
+  // s oprávněním, které už uživatel dal -- po registraci ho nikdo nemá, takže se appka
+  // nezeptala vůbec a deck jel podle odhadu z IP. Kdo polohu odmítne, dostane výběr města.
+  try{
+    if(currentUser && currentUser.role==='student' && !currentUser.city
+       && !(typeof userLoc!=='undefined' && userLoc && userLoc.city)){
+      let _asked=0; try{ _asked=+(localStorage.getItem('mtl_loc_asked')||0); }catch(e){}
+      if(!_asked){
+        setTimeout(function(){
+          try{ localStorage.setItem('mtl_loc_asked', String(Date.now())); }catch(e){}
+          // requestGps si při odmítnutí sám otevře ruční zadání města (openCityInput).
+          if(typeof requestGps==='function') requestGps();
+          else if(typeof openCityInput==='function') openCityInput();
+        }, 1200);
+      }
+    }
+  }catch(e){}
   if(((location.hostname||'').toLowerCase().split('.')[0]==='dashboard')){ try{
     document.body.classList.add('dashmode');
     buildDashSide();
