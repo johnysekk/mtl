@@ -8167,7 +8167,7 @@ function _offerAbroad(kind){
 // Pozor: co přibude do _mapGymRow, fillGymCard, buildGymFiltered nebo _mtlPayReady, musí přibýt i sem.
 // Pozn.: country_code ani bio v tabulce gyms NEEXISTUJÍ (kód je čte, ale vždy dostane undefined --
 // se select('*') to bylo tiché, ve výčtu by to shodilo celý dotaz). Do výčtu proto nepatří.
-const GYM_DECK_COLS = 'id,name,city,country,city_lat,city_lng,photos,disciplines,dropin_price,membership_price,owner_id,currency,venue_type,schedule,capacity,payment_mode,stripe_account,receiver_id_value,commission_card_status,account_suspended,cert_level,created_at,description,status,suspended,deleted_at,receiver_name,takes_cash,legal_name,tax_id,billing_city,billing_country,charges_enabled,billing_line1,billing_postal';
+const GYM_DECK_COLS = 'id,name,city,country,city_lat,city_lng,photos,disciplines,dropin_price,membership_price,owner_id,currency,venue_type,schedule,capacity,payment_mode,stripe_account,receiver_id_value,commission_card_status,account_suspended,cert_level,created_at,description,status,suspended,deleted_at,receiver_name,takes_cash,legal_name,tax_id,billing_city,billing_country,charges_enabled,billing_line1,billing_postal,trial_classes';   // trial_classes: odznak „1. trénink zdarma" v decku
 // ═══ UMÍ PRODÁVAT ══════════════════════════════════════════════════════════════════════
 // Jedna podmínka pro kouče, klub i organizaci. Dřív existovala jen pro kouče (_coachNotReady)
 // a hlídala pouze výplatní kanál; kluby se v decku ukazovaly i bez možnosti zaplatit, takže
@@ -8210,6 +8210,26 @@ function _sellMissing(e, kind){
     if((f in e) && !String(e[f]||'').trim()) miss.push(f);
   });
   return miss;
+}
+// ═══ PRVNÍ TRÉNINKY ZDARMA ══════════════════════════════════════════════════════════════
+// Klub si volí 0 až 3. Není to cena, je to jiný druh vstupu: nulová platba nevytváří
+// transakci ani doklad, ale docházku a XP ano -- ten člověk skutečně trénoval.
+// Nárok má jen ten, kdo u klubu ještě nikdy nic nezaplatil. Tím se to nedá cyklit a zároveň
+// to nesebere akvizici: okno reklamy se počítá od první ZAPLACENÉ platby.
+function gymTrialCount(g){ try{ return Math.max(0, Math.min(3, parseInt((g&&g.trial_classes)||0, 10)||0)); }catch(e){ return 0; } }
+async function trialLeft(g, childName){
+  try{
+    const total=gymTrialCount(g);
+    if(!total || !currentUser || !g || !g.id) return 0;
+    // Kdo u klubu zaplatil, zkušební už nedostane.
+    const { data:_paid } = await supaClient.from('transactions').select('id')
+      .eq('gym_id', g.id).eq('member_id', currentUser.id).limit(1);
+    if(_paid && _paid.length) return 0;
+    const { data:_used } = await supaClient.from('gym_trials').select('id')
+      .eq('gym_id', g.id).eq('student_id', currentUser.id)
+      .eq('child_name', childName || '');
+    return Math.max(0, total - ((_used||[]).length));
+  }catch(e){ return 0; }
 }
 function canSell(e, kind){ return _sellMissing(e, kind).length===0; }
 // Lidsky, do pruhu v přehledu.
@@ -8617,6 +8637,18 @@ function fillGymCard(p,c){
     $('backRate').innerHTML = studentPays ? `${studentPays} ${sym} <span>${LANG==='en'?'/class':'/lekce'}</span>` : '';
   }
   const tagsEl=$(p+'Tags'); tagsEl.innerHTML='';
+  // ZKUŠEBNÍ TRÉNINK JAKO PRVNÍ ŠTÍTEK. Je to nejsilnější důvod, proč na kartu kliknout,
+  // takže stojí před disciplínami. Nárok se prověřuje až při rezervaci -- tady jen to, že
+  // klub zkušební nabízí.
+  try{
+    const _tc=(typeof gymTrialCount==='function')?gymTrialCount(c.g||c):0;
+    if(_tc>0){
+      const _tb=document.createElement('div'); _tb.className='tag';
+      _tb.style.cssText='background:#FFD86B;color:#3B2A00;font-weight:800;';
+      _tb.textContent=(LANG==='en')?((_tc===1?'1st class':_tc+' classes')+' free'):((_tc===1?'1. trénink':_tc+' tréninky')+' zdarma');
+      tagsEl.appendChild(_tb);
+    }
+  }catch(e){}
   if(typeof _isNewProvider==='function' && _isNewProvider(c.g && c.g.created_at)){ const _nb=document.createElement('div'); _nb.className='tag'; _nb.style.cssText='background:#16a34a;color:#fff;font-weight:700;'; _nb.textContent=(LANG==='en'?'🌱 New on MTL':'🌱 Nově v MTL'); tagsEl.appendChild(_nb); }
   c.disciplines.forEach(v=>{ const el=document.createElement('div'); el.className='tag'; el.style.cssText='background:#1f2937;color:#fff;'; el.textContent=`${disciplineEmoji(v)} ${disciplineLabel(v)}`; tagsEl.appendChild(el); });
   (c.levels||[]).forEach(v=>{ const el=document.createElement('div'); el.className='tag'; el.style.cssText='background:var(--surf);color:var(--mid);border:1px solid var(--border);'; el.textContent=(LANG==='en'?(CLASS_LEVELS.find(l=>l.v===v)||{}).en:(CLASS_LEVELS.find(l=>l.v===v)||{}).cs)||v; tagsEl.appendChild(el); });
@@ -13370,6 +13402,18 @@ async function openGymProfile(g){
   }); }catch(e){}
   {
     const bb=$('btnBookGym'); if(bb) bb.onclick=()=>gymTermsGate(g, ()=>bookGymDropin(g));
+    // NÁROK NA ZKUŠEBNÍ TRÉNINK ŘEKNEME UŽ NA PROFILU. Dozvědět se to až v potvrzovacím
+    // dialogu je pozdě -- právě tohle je důvod, proč to člověk zkusí.
+    try{
+      if(bb && typeof trialLeft==='function'){
+        trialLeft(g).then(function(n){
+          if(!n) return;
+          const EN=LANG==='en';
+          bb.textContent=EN?('Book a free trial class ('+n+' left)'):('Rezervovat zkušební trénink zdarma ('+n+'\u00d7)');
+          bb.style.background='#FFD86B'; bb.style.color='#3B2A00';
+        });
+      }
+    }catch(e){}
     $('gymProfContent').querySelectorAll('.gymCoachCard').forEach(function(_k){ _k.onclick=function(){ if(_k.dataset.noclick==='1') return; var _id=_k.dataset.cid; if(!_id) return; if(typeof openProfileById==='function'){ openProfileById(_id); } else if(typeof COACHES!=='undefined' && COACHES){ var _r=COACHES.find(function(x){return x.id===_id||x.profileId===_id;}); if(_r && typeof openProfile==='function') openProfile(_r); } }; });
     $('gymProfContent').querySelectorAll('.lvlHead').forEach(h=>h.onclick=()=>{ const v=h.dataset.v; const body=$('gymProfContent').querySelector('.lvlBody[data-v="'+v+'"]'); const arr=$('gymProfContent').querySelector('.lvlArr[data-v="'+v+'"]'); if(!body) return; const open=body.style.display==='none'; body.style.display=open?'block':'none'; if(arr) arr.style.transform=open?'rotate(180deg)':'none'; });
     $('gymProfContent').querySelectorAll('.subPlanBtn').forEach(b=>{ b.onclick=()=>{ const sel=plansAll[+b.dataset.pi]; if(myMemb && sel && sel.coach && myMemb.coach_id && sel.coach===myMemb.coach_id){ if(!confirm(LANG==='en'?'If you want a different class level with the same coach, talk to them first. Continue anyway?':'Pokud chceš navštěvovat jinou úroveň lekcí u stejného kouče, zkus se s ním nejdřív domluvit. Přesto pokračovat?')) return; } gymTermsGate(g, ()=>subscribeGymMembership(g, sel), true); }; });
@@ -14124,6 +14168,41 @@ async function bookGymDropin(g, occ, _child){
     }
   }catch(e){}
   window._dpPickLast = _dpPick || null;
+
+  // ── ZKUŠEBNÍ TRÉNINK ZDARMA ────────────────────────────────────────────────────────────
+  // Musí se rozhodnout PŘED platební cestou: nulová platba nejde ani přes Stripe, ani přes QR.
+  // Vytvoří se rezervace za nulu a záznam o využitém zkušebním; docházku zapíše klub jako
+  // u každé jiné lekce, takže XP i statistiky běží normálně.
+  try{
+    const _tl=await trialLeft(g, _child && _child.name);
+    if(_tl>0){
+      const _total=gymTrialCount(g);
+      const _ord=(_total-_tl)+1;
+      const _q=(LANG==='en')
+        ? ('Book your free trial class? ('+_ord+' of '+_total+')')
+        : ('Rezervovat zkušební trénink zdarma? ('+_ord+'. z '+_total+')');
+      if(!confirm(_q)) return;
+      const _today=new Date().toISOString().slice(0,10);
+      const rec0={ gym_id:g.id, student_id:currentUser.id, paid_to:'gym',
+        acq_source:_acqSrc(g), amount:0, currency:_dcur, status:'paid',
+        date:(occ&&occ.date)||_today, time:(occ&&occ.time)||'18:00',
+        student_name:currentUser.name||'Student', gym_name:g.name||'Klub' };
+      if(occ){ rec0.class_name=occ.name||null; rec0.class_date=occ.date||null; rec0.class_time=occ.time||null; }
+      if(_child){ rec0.child_name=_child.name; rec0.child_age=_kidAge(_child); }
+      const { data:_bk0, error:_e0 }=await supaClient.from('gym_bookings')
+        .insert(Object.assign({ attr_src:_attrGet() }, rec0)).select().single();
+      if(_e0){ toast('⚠️ '+_e0.message); return; }
+      try{
+        await supaClient.from('gym_trials').insert({ gym_id:g.id, student_id:currentUser.id,
+          child_name:(_child&&_child.name)||'', class_date:rec0.class_date||rec0.date,
+          class_time:rec0.class_time||rec0.time });
+      }catch(e){ console.warn('gym_trials', e && e.message); }
+      toast((LANG==='en'?'✅ Free trial class booked':'✅ Zkušební trénink zarezervován'), 1);
+      try{ if(typeof loadMyBookings==='function') loadMyBookings(); }catch(e){}
+      try{ closeSheet('shProfile'); }catch(e){}
+      return;
+    }
+  }catch(e){ console.warn('trial', e && e.message); }
 
   if(typeof _mtlPayMode==='function' && _mtlPayMode(g)==='qr_bank'){ return _onlineQrPay(g, occ, _child, 'dropin', null, null, _dpPick); }
   const payee = await resolveGymPayee(g, occ);
@@ -19230,6 +19309,15 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
     <div id="mgOrgBtns"></div>
     </div></details>
     <details class="setSec"><summary>💰 ${LANG==='en'?'Pricing & membership':'Ceny & členství'}</summary><div class="setBody">
+    <!-- PRVNÍ TRÉNINKY ZDARMA. Klub si volí 0 až 3. Není to cena, takže se to netýká minim
+         ani provize; nulová platba nevytvoří transakci ani doklad, ale docházku a XP ano. -->
+    <div class="sec-lbl">${LANG==='en'?'Free trial classes':'První tréninky zdarma'}</div>
+    <select id="mgTrialClasses" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;margin-bottom:6px;">
+      ${[0,1,2,3].map(function(n){ return '<option value="'+n+'"'+((Number(g.trial_classes||0)===n)?' selected':'')+'>'+(n===0?(LANG==='en'?'Off':'Vypnuto'):(n+'\u00d7'))+'</option>'; }).join('')}
+    </select>
+    <p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:0 0 16px;">${LANG==='en'
+      ? 'A new student can book this many classes for free before paying anything. It counts towards attendance and XP; no payment, no receipt, no commission. Anyone who has already paid you is not eligible.'
+      : 'Nový student si může tolik lekcí zarezervovat zdarma, než u tebe cokoli zaplatí. Počítá se do docházky i XP, ale nevzniká platba, doklad ani provize. Kdo už u tebe zaplatil, nárok nemá.'}</p>
     <div class="sec-lbl">${LANG==='en'?'Entry price':'Cena za vstup'}</div>
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;">
       <input id="mgDropin" type="number" inputmode="numeric" value="${g.dropin_price||''}" style="flex:1;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';">
@@ -24026,6 +24114,9 @@ async function saveGymManage(){
   if(_myGymData && _myGymData.discipline_meta!==undefined){ patch.discipline_meta = _myGymData.discipline_meta?JSON.stringify(_myGymData.discipline_meta):null; } _myGymData.description=_gdesc;
   const _gfy = parseInt($('mgFounded')&&$('mgFounded').value)||null; patch.founded_year=_gfy; _myGymData.founded_year=_gfy;
   const _mrEn=!!($('mgMemberRefEnable')&&$('mgMemberRefEnable').checked); const _mrp = _mrEn?Math.max(0, Math.min(100, parseInt($('mgMemberRefPct')&&$('mgMemberRefPct').value)||0)):0; patch.member_ref_pct=_mrp; _myGymData.member_ref_pct=_mrp; const _hl=!!($('mgHideLeaders')&&$('mgHideLeaders').checked); patch.hide_leaders=_hl; _myGymData.hide_leaders=_hl;
+  // První tréninky zdarma (0-3).
+  { const _tc=Math.max(0, Math.min(3, parseInt(($('mgTrialClasses')&&$('mgTrialClasses').value)||0, 10)||0));
+    if(_tc!==Number(_myGymData.trial_classes||0)){ patch.trial_classes=_tc; _myGymData.trial_classes=_tc; } }
   // Souhlas s propagací + čas, kdy byl dán (doložitelnost).
   { const _ads=!!($('mgAdsOptIn')&&$('mgAdsOptIn').checked);
     if(_ads!==!!_myGymData.ads_opt_in){ patch.ads_opt_in=_ads; patch.ads_opt_in_at=_ads?new Date().toISOString():null; _myGymData.ads_opt_in=_ads; } }
