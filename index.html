@@ -19305,6 +19305,8 @@ if($('irSelAll')) $('irSelAll').onchange=function(e){ var on=e.target.checked; (
 // ===== end member import step 2 =====
 
 async function renderGymManage(){
+  // Seznam otevřených zemí musí být k dispozici, jinak zůstane výběr zemí neúplný.
+  try{ if(typeof ensureOpenCountries==='function'){ await ensureOpenCountries(); if(typeof _fillCountrySelects==='function') _fillCountrySelects(true); } }catch(e){}
   const box=$('gymManageContent'); if(!box) return;
   await checkGymOwnership();
   if(!_myGymData){ box.innerHTML=`<p style="color:var(--light);text-align:center;padding:20px;">${LANG==='en'?'No approved club found.':'Žádný schválený gym.'}</p>`; return; }
@@ -20971,7 +20973,7 @@ var _admCountry='',_admCity='',_admCert='all',_admGCountry='',_admGCity='',_admG
 async function loadFounderConfig(){
   // Otevřené země potřebuje znát každý, ne jen zakladatel -- řídí se podle nich nabídka
   // při registraci i v přihláškách poskytovatele.
-  try{ if(typeof _loadIntroRates==='function') await _loadIntroRates(); }catch(e){}
+  try{ if(typeof ensureOpenCountries==='function') await ensureOpenCountries(); }catch(e){}
   try{ const { data } = await supaClient.from('profiles').select('active_disciplines,mtl_eco_pixel').eq('id', FOUNDER_UUID).single(); if(data && data.active_disciplines){ const a=typeof data.active_disciplines==='string'?JSON.parse(data.active_disciplines):data.active_disciplines; if(Array.isArray(a)&&a.length) ACTIVE_DISC=a; } if(data && data.mtl_eco_pixel){ MTL_ECO_PIXEL=String(data.mtl_eco_pixel); } }catch(e){}
   try{ const { data: vs } = await supaClient.from('profiles').select('verify_disciplines'); const set=new Set(['muay_thai']); (vs||[]).forEach(r=>{ try{ const a=r.verify_disciplines?(typeof r.verify_disciplines==='string'?JSON.parse(r.verify_disciplines):r.verify_disciplines):[]; (Array.isArray(a)?a:[]).forEach(x=>set.add(x)); }catch(e){} }); _certifiableDisc=[...set]; }catch(e){}
 }
@@ -25561,8 +25563,9 @@ async function _openLocMenu(){
   ov.querySelector('#_lmCancel').onclick=done;
   ov.onclick=(e)=>{ if(e.target===ov) done(); };
 }
-function openCityInput(){
-  $('cityInp').value='';
+// Naplnění zemí v dialogu polohy. Zvlášť, aby se dalo zavolat znovu, až dorazí seznam
+// otevřených zemí (ensureOpenCountries) nebo se přepne jazyk.
+function _fillCityCountries(){
   // Seznam zemí: otevřené z Adminu + vždycky ta vlastní, ať se dá vrátit zpátky.
   try{
     const sel=$('cityCountry');
@@ -25587,6 +25590,11 @@ function openCityInput(){
       };
     }
   }catch(e){}
+}
+function openCityInput(){
+  $('cityInp').value='';
+  try{ _fillCityCountries(); }catch(e){}
+  try{ if(typeof ensureOpenCountries==='function') ensureOpenCountries().then(function(){ try{ _fillCityCountries(); }catch(e){} }); }catch(e){}
   $('cityOv').classList.add('open');
   setTimeout(()=>$('cityInp').focus(),350);
 }
@@ -26504,7 +26512,7 @@ async function openGymApp(){
   // podobě se všemi fakturačními políčky. Tohle je ta oprava.
   // Povolené země přicházejí z Adminu (intro_rates). Když nejsou načtené, _countriesOpen()
   // vrátí VŠECHNY země -- proto se v přihlášce nabízela i země, kterou jsi neotevřel.
-  try{ if(typeof _loadIntroRates==='function'){ await _loadIntroRates(); if(typeof _fillCountrySelects==='function') _fillCountrySelects(true); } }catch(e){}
+  try{ if(typeof ensureOpenCountries==='function'){ await ensureOpenCountries(); if(typeof _fillCountrySelects==='function') _fillCountrySelects(true); } }catch(e){}
   try{ gaGoStep(1); }catch(e){}
   // Přeskládání a skrývání se dělá AŽ NAKONEC (viz konec téhle funkce). Našeptávač adresy
   // si po sobě přidává odkaz „Nenašel jsi adresu?" a výběr země se dopl\u0148uje zvlášť --
@@ -28627,6 +28635,9 @@ async function _saveIntroRates(map){
     const { error }=await supaClient.from('platform_config').update({ intro_rates:map }).eq('id',1);
     if(error){ toast('\u26a0\ufe0f '+error.message); return false; }
     window._introRates=map;
+    // Otevření nebo zavření země musí být vidět hned, ne až po restartu appky.
+    try{ if(typeof invalidateOpenCountries==='function') invalidateOpenCountries(); }catch(e){}
+    try{ if(typeof _fillCountrySelects==='function') _fillCountrySelects(true); }catch(e){}
     return true;
   }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); return false; }
 }
@@ -32946,6 +32957,8 @@ async function renderOrgDocs(org, box){
   }; });
 }
 async function openOrgApply(kind){
+  // Seznam otevřených zemí musí být k dispozici, jinak zůstane výběr zemí neúplný.
+  try{ if(typeof ensureOpenCountries==='function'){ await ensureOpenCountries(); if(typeof _fillCountrySelects==='function') _fillCountrySelects(true); } }catch(e){}
   const EN=LANG==='en';
   await loadMyOrg();
   // Typ urcuje vybrany drive; u uz podane prihlasky se prebira z ni a nemeni se.
@@ -33369,6 +33382,26 @@ function _curForCC(cc){
   if(MTL_EUROZONE.indexOf(c)>=0) return 'EUR';
   return MTL_CUR_BY_CC[c] || null;
 }
+// ═══ OTEVŘENÉ ZEMĚ: JEDNO NAČTENÍ, VŠUDE STEJNÉ ════════════════════════════════════════
+// Seznam otevřených zemí (Admin) potřebuje registrace, nastavení, dialog polohy i přihlášky.
+// Každé to místo si ho dřív načítalo samo nebo vůbec, takže stačilo, aby jedno načtení přišlo
+// pozdě, a nabídka zemí byla prázdná. Tady se načte JEDNOU a kdo ho potřebuje, počká na slib
+// a pak se překreslí.
+let _openCCsReady=null;
+function ensureOpenCountries(){
+  if(_openCCsReady) return _openCCsReady;
+  _openCCsReady=(async function(){
+    try{
+      if(!window._introRates || !Object.keys(window._introRates||{}).length){
+        if(typeof _loadIntroRates==='function') await _loadIntroRates();
+      }
+    }catch(e){}
+    return (typeof _openCCs==='function') ? _openCCs() : null;
+  })();
+  return _openCCsReady;
+}
+// Po zásahu v Adminu se seznam musí zapomenout, ať se načte znovu.
+function invalidateOpenCountries(){ _openCCsReady=null; }
 function _countriesOpen(){
   const o=_openCCs();
   if(o===null) return MTL_COUNTRIES;
@@ -38413,7 +38446,7 @@ function _syncCountryRow(){
 async function openCountryPicker(){
   const EN=LANG==='en';
   if(!currentUser){ toast(L('⚠️ Nejdřív se přihlas')); return; }
-  try{ if(typeof _loadIntroRates==='function') await _loadIntroRates(); }catch(e){}
+  try{ if(typeof ensureOpenCountries==='function') await ensureOpenCountries(); }catch(e){}
   let list=(typeof _countriesOpen==='function')?_countriesOpen():[];
   const cur=(currentUser.country_code||currentUser.residence_country||'').toUpperCase();
   // VLASTNÍ ZEMĚ TAM MUSÍ BÝT VŽDYCKY. Otevřené země určuje Admin, ale kdo se registroval
@@ -39788,6 +39821,8 @@ async function _lockDobAndNext(){
 var _ctyClosed=false;
 function _ctyTexts(){ const en=LANG==='en'; if($('authCtyTitle')) $('authCtyTitle').textContent=en?'Where do you live?':'Kde \u017eije\u0161?'; // Podtitulek zrušen -- otázka "Kde žiješ?" je srozumitelná sama.
   if($('authCtySub')) $('authCtySub').textContent=''; if($('authCountryBtn')) $('authCountryBtn').textContent=en?'Continue':'Pokračovat'; const sel=$('authCountrySel');
+  // Seznam zemí musí být načtený, jinak výběr zůstane prázdný nebo neúplný.
+  try{ if(typeof ensureOpenCountries==='function') ensureOpenCountries().then(function(){ try{ if(sel) sel.dataset.lang=''; _ctyTexts(); }catch(e){} }); }catch(e){}
   // PŘEPLNIT I PŘI ZMĚNĚ JAZYKA. Dřív se seznam naplnil jednou a zůstal v jazyce, ve kterém
   // appka právě byla; po přepnutí na angličtinu tak zůstaly české názvy zemí. Volba se
   // zachová, mění se jen text.
@@ -42032,7 +42067,7 @@ async function _resumeReg(userId, email){
   authMode  = 'register';
   _regStep  = 'name';
   // Seznam otevřených zemí musí být načtený, jinak by se krok ukázal prázdný.
-  try{ if(typeof _loadIntroRates==='function') await _loadIntroRates(); }catch(e){}
+  try{ if(typeof ensureOpenCountries==='function') await ensureOpenCountries(); }catch(e){}
   try{ if($('authScreen')) $('authScreen').style.display='flex'; }catch(e){}
   try{ applyDobGate(); }catch(e){}
   try{ toast(LANG==='en'
@@ -42062,6 +42097,8 @@ async function checkAuth(){
 // překreslení po uložení.
 var _billMode = window._billMode || '';
 async function renderCoachBilling(){
+  // Seznam otevřených zemí musí být k dispozici, jinak zůstane výběr zemí neúplný.
+  try{ if(typeof ensureOpenCountries==='function'){ await ensureOpenCountries(); if(typeof _fillCountrySelects==='function') _fillCountrySelects(true); } }catch(e){}
   const box=$('acmBillingSec'); if(!box) return;
   const CP = _billMode;                       // prefix sloupců v profiles
   const me=currentUser||{};
