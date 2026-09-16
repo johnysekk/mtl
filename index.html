@@ -15204,6 +15204,27 @@ async function checkGymOwnership(){
   }catch(e){}
   if($('meGymManage')) $('meGymManage').style.display = approved.length ? '' : 'none';
   try{ if(typeof _renderSellGate==='function') _renderSellGate(); }catch(e){}   // pruh „Studenti tě nevidí"
+  // KLUB BEZ SOUŘADNIC SE DOPOČÍTÁ SÁM. U klubu francouzského testera zůstalo city_lat
+  // i city_lng prázdné, protože geokódování v té době selhávalo (OSM bez našeho serveru).
+  // Bez souřadnic klub nemá vzdálenost a v decku propadá dolů, takže se to hodí spravit
+  // hned, jak si klub někdo otevře -- ne čekat na ruční zásah.
+  (async function(){
+    try{
+      const g=_myGymData; if(!g || !g.id) return;
+      if(g.city_lat!=null && g.city_lng!=null) return;
+      const _q=[g.address, g.city, (typeof _ccName==='function' && g.country_code)?_ccName(g.country_code):g.country].filter(Boolean).join(', ');
+      if(!_q) return;
+      const r=await fetch('/api/geo-search?limit=1&q='+encodeURIComponent(_q));
+      if(!r.ok) return;
+      const d=await r.json();
+      if(!d || !d.length) return;
+      const lat=parseFloat(d[0].lat), lng=parseFloat(d[0].lon);
+      if(!isFinite(lat) || !isFinite(lng)) return;
+      await supaClient.from('gyms').update({ city_lat:lat, city_lng:lng }).eq('id', g.id);
+      g.city_lat=lat; g.city_lng=lng;
+      console.log('[klub] souřadnice dopočítány', g.id, lat, lng);
+    }catch(e){}
+  })();
   // Řádek přepínačů je jinak vázaný na schváleného kouče; vlastník klubu ho musí vidět taky.
   try{ if(typeof _syncModeSwitchForClub==='function') _syncModeSwitchForClub(); }catch(e){}
   try{ if(typeof applyCertUI==='function' && currentUser) applyCertUI(); }catch(e){}
@@ -33320,7 +33341,11 @@ function _openCCs(){
     const m=window._introRates;
     if(!m || typeof m!=='object') return null;          // nenačteno -> bez omezení
     const ks=Object.keys(m).map(function(x){ return String(x||'').toUpperCase(); }).filter(Boolean);
-    return ks.length ? ks : [];                          // prázdné = zakladatel zatím neotevřel nic
+    // PRÁZDNÉ ZNAMENÁ „NEVÍM", NE „NIC NENÍ OTEVŘENÉ". Když čtení platform_config selže
+    // (RLS, výpadek, neodpovídá), přišel prázdný objekt a appka z něj udělala „žádná země
+    // není otevřená" -- ve výběru pak zůstala jen ta, kterou tam dolepil fallback, nebo
+    // nic. Bez informace je správné neomezovat: omezení je věc Adminu, ne selhání sítě.
+    return ks.length ? ks : null;
   }catch(e){ return null; }
 }
 function _ccOpen(cc){
