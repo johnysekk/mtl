@@ -537,12 +537,6 @@ body.gate-pending #bootSplash{animation:none !important;opacity:1 !important;}
 .btn-gps-allow:active{transform:scale(.97)}
 .btn-gps-deny{width:100%;padding:13px;background:transparent;color:var(--mid);border:none;border-radius:14px;font-size:15px;font-weight:500;cursor:pointer;font-family:'DM Sans'}
 
-/* Tlačítko, které rozbalí hledání. Stejná velikost textu jako pruh s polohou. */
-.search-open{display:block;width:100%;box-sizing:border-box;background:var(--surf);color:var(--mid);
-  border:1px solid var(--border);border-radius:12px;padding:9px 12px;font-size:12.5px;font-weight:600;
-  text-align:left;cursor:pointer;font-family:'DM Sans'}
-.search-open:active{background:var(--bg)}
-
 /* ── CITY INPUT ── */
 .city-ov{position:absolute;inset:0;background:rgba(0,0,0,.7);z-index:600;display:flex;align-items:flex-end;opacity:0;pointer-events:none;transition:opacity .3s}
 .city-ov.open{opacity:1;pointer-events:all}
@@ -716,15 +710,18 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
     <div class="loc-dot"></div>
     <span id="locText">Určuji polohu...</span>
   </div>
-  <button class="btn-loc" id="btnChangeLoc">Změnit →</button>
+  <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;">
+    <!-- Hledání jako lupa v pruhu polohy. Vlastní řádek s tlačítkem zabíral celou výšku
+         (~44 px), kterou na nižších telefonech potřebují karty. Pole se rozbalí až po kliku. -->
+    <button class="btn-loc" id="locSearchBtn" aria-label="Hledat" style="font-size:14px;">🔍</button>
+    <button class="btn-loc" id="btnChangeLoc">Změnit →</button>
+  </div>
 </div>
 
 <!-- SEARCH BAR -->
-<div class="search-wrap">
-  <!-- Pole je schované za tlačítkem: v decku zabíralo místo, které patří kartám, a většina
-       lidí listuje, místo aby hledala. Text má stejnou velikost jako pruh s polohou. -->
-  <button id="searchOpen" class="search-open" type="button">🔍 <span id="searchOpenLbl">Hledat kouče, klub nebo akci</span></button>
-  <div class="search-box" id="searchBox" style="display:none;">
+<div class="search-wrap" id="searchWrap" style="display:none;">
+  <!-- Rozbalí se z lupy v pruhu polohy. Dokud je zavřené, nezabírá vůbec nic. -->
+  <div class="search-box" id="searchBox">
     <span class="search-icon">🔍</span>
     <input class="search-inp" id="searchInp" type="text" placeholder="Hledat kouče, město nebo klub...">
     <span class="search-clear" id="searchClear">✕</span>
@@ -6265,8 +6262,11 @@ async function loadCoaches() {
   // Stejné pravidlo jako u klubů a událostí: v režimu zahraničí vybraná země, při prohlížení
   // jiného města jeho země, jinak profil. Dřív tu profil přebil prohlíženou zemi, takže
   // „Prohlížíš Paris" ukázalo pořád české kouče.
-  const ucountry = (_deckAbroad && window._deckCountryPick) ? window._deckCountryPick
-    : ((typeof _deckHomeCountry==='function') ? _deckHomeCountry() : ((currentUser&&currentUser.country)||null));
+  // _deckCountryPick nese KÓD země (viz _pickAbroadCountry). Porovnávat ho s názvem
+  // v databázi („Czechia") nikdy nevyjde -- odtud „NO CLUBS: CZ".
+  const _uCC = (_deckAbroad && window._deckCountryPick) ? String(window._deckCountryPick).toUpperCase()
+    : ((typeof _deckHomeCC==='function') ? _deckHomeCC() : null);
+  const ucountry = (typeof _ccName==='function' && _uCC) ? _ccName(_uCC) : _uCC;
   // PostGIS nearest-N (GiST-indexed) when we know the user's location; offset-paginated via load-more.
   _coachCenter = (ulat!=null && ulng!=null) ? {lat:ulat, lng:ulng} : null;
   _coachOffset = 0;
@@ -6595,7 +6595,14 @@ function buildFiltered(){
   if(_deckMode==='gyms') return buildGymFiltered();
   let list = [...COACHES];
   // Country pick only exists once the deck has been widened past home.
-  if(_deckAbroad && window._deckCountryPick) list = list.filter(c=> c.country === window._deckCountryPick);
+  // Kód NEBO název: řádky bez kódu (starší data) se musí poznat podle názvu.
+  if(_deckAbroad && window._deckCountryPick){
+    const _pc=String(window._deckCountryPick).toUpperCase();
+    list = list.filter(function(c){
+      const _cc=String((c&&(c.countryCode||c.country_code))||'').toUpperCase() || ((typeof _ccOf==='function')?_ccOf(c&&c.country):null);
+      return _cc===_pc;
+    });
+  }
   // nezobrazuj sám sebe v nabídce
   if(currentUser) list = list.filter(c=>c.id!==currentUser.id && c.profileId!==currentUser.id);
   list = list.filter(c=> !c.account_suspended);
@@ -7841,7 +7848,9 @@ function renderCards(){
       else if(_abroadNow){
         // Došly kluby ve zvolené zemi. Nabídnout jinou zemi, nebo návrat domů -- poptávka
         // („co ti tu chybí") sem nepatří, sbírá se tam, kde člověk bydlí.
-        const EN3=LANG==='en'; const _cc=window._deckCountryPick;
+        const EN3=LANG==='en';
+        // Ukazujeme NÁZEV země v jazyce appky; _deckCountryPick je kód.
+        const _cc=(typeof _ccName==='function' && window._deckCountryPick) ? _ccName(window._deckCountryPick) : window._deckCountryPick;
         // Skloňovat název země by znamenalo tabulku tvarů pro každou zemi. Dvojtečka to obejde
         // a čte se přirozeně: „Všechny kluby: Česko".
         h3.textContent = filtered.length ? (EN3?('All clubs: '+_cc):('V\u0161echny kluby: '+_cc))
@@ -8198,7 +8207,11 @@ function renderCountryFilter(){
   // a přepnutí na jinou zemi.
   box.innerHTML='<div class="pill" data-cf="__home">\u2190 '+(EN?'My area':'M\u00e9 okol\u00ed')+'</div>'
     + keys.map(function(k){ return '<div class="pill'+(window._deckCountryPick===k?' active':'')+'" data-cf="'+escapeHtml(k)+'">'+escapeHtml(_lbl(k))+' <span style="opacity:.55;">'+set[k]+'</span></div>'; }).join('')
-    + '<div class="pill" data-cf="__pick">\ud83c\udf0d '+(EN?'Another country':'Jin\u00e1 zem\u011b')+'</div>';
+    // NABÍDKA JEN KDYŽ JE Z ČEHO ČERPAT. Dřív tu „Jiná země" svítila i po vyčerpání denní
+    // kvóty a klik skončil hláškou -- nabízet něco, co nejde, je horší než to neukázat.
+    + ((currentUser && currentUser._abroadLeft===0)
+        ? '<div class="pill" style="opacity:.45;" title="'+(EN?'Daily limit reached':'Denní limit vyčerpán')+'">\ud83c\udf0d '+(EN?'Limit reached':'Limit vyčerpán')+'</div>'
+        : '<div class="pill" data-cf="__pick">\ud83c\udf0d '+(EN?'Another country':'Jin\u00e1 zem\u011b')+'</div>');
   box.querySelectorAll('.pill').forEach(function(el){
     el.onclick=function(){
       const v=el.dataset.cf||'';
@@ -8663,7 +8676,14 @@ const NEW_PROV_DAYS=30, NEW_PROV_COACH_BOOST=15, NEW_PROV_GYM_KM=12;
 function _isNewProvider(createdAt){ if(!createdAt) return false; const t=new Date(createdAt).getTime(); if(isNaN(t)) return false; return (Date.now()-t) < NEW_PROV_DAYS*86400000; }
 function buildGymFiltered(){
   let list=[...GYMS].filter(function(x){ try{ return ((_mtlPayReady(x.g).ready && !x.g.account_suspended) || (currentUser && x.ownerId===currentUser.id)); }catch(e){ return true; } });
-  if(_deckAbroad && window._deckCountryPick) list = list.filter(g=> g.country === window._deckCountryPick);
+  if(_deckAbroad && window._deckCountryPick){
+    const _pc=String(window._deckCountryPick).toUpperCase();
+    list = list.filter(function(g){
+      const _src=g&&(g.g||g);
+      const _cc=String((_src&&(_src.country_code||g.countryCode))||'').toUpperCase() || ((typeof _ccOf==='function')?_ccOf(_src&&_src.country):null);
+      return _cc===_pc;
+    });
+  }
   if(window._blockedByGyms && window._blockedByGyms.size) list=list.filter(g=> !window._blockedByGyms.has(g.id));
   /* vlastní kluby zůstávají v decku (owner/tým si může rezervovat lekci) */
   list.forEach(g=>{ g.distKm = (userLoc && g.coords) ? haversine(userLoc.lat,userLoc.lng,g.coords.lat,g.coords.lng) : null; });
@@ -25336,11 +25356,18 @@ function _setLocText(){
     return;
   }
   if(_cb) _cb.textContent=(EN?'Change \u2192':'Zm\u011bnit \u2192');
-  lt.textContent = (typeof _deckMode!=='undefined' && _deckMode==='events')
+  // JEN MĚSTO. Celá věta („Brno — clubs sorted by distance") se na úzkém displeji lámala
+  // do druhého řádku a člověk ji potřebuje jednou, ne pořád. Vysvětlení je v title a po
+  // tapnutí na text se ukáže jako toast.
+  const _full = (typeof _deckMode!=='undefined' && _deckMode==='events')
     ? (EN?`📍 ${c} — events sorted by distance`:`📍 ${c} — události seřazeny dle vzdálenosti`)
     : (typeof _deckMode!=='undefined' && _deckMode==='gyms')
     ? (EN?`📍 ${c} — clubs sorted by distance`:`📍 ${c} — kluby seřazeny dle vzdálenosti`)
     : (EN?`📍 ${c} — coaches sorted by distance & quality`:`📍 ${c} — kouči seřazeni dle vzdálenosti a kvality`);
+  lt.textContent='📍 '+c;
+  lt.title=_full.replace(/^📍\s*/, '');
+  lt.style.cursor='pointer';
+  lt.onclick=function(){ try{ toast(_full, 1); }catch(e){} };
 }
 function onLocSet(){
   try{ localStorage.setItem('mtl_gps_skip','1'); }catch(e){}
@@ -38256,17 +38283,6 @@ try{ _syncCountryRow(); }catch(e){}
 // Deck se řídí zemí, ale nastavit se dalo jen město. Kdo se přestěhoval do jiné země, neměl
 // jak to appce říct. Změna země se počítá do stejného limitu jako přesun prohlížení do
 // zahraničí (jednou za den), jinak by šlo přeskakovat mezi trhy bez omezení.
-const CC_MOVE_MS = 24*3600*1000;
-// LIMIT DRŽÍ DATABÁZE (sql-68), ne prohlížeč. Tady se jen čte, aby se dalo předem říct, kolik
-// hodin zbývá -- kdyby si někdo tuhle kontrolu obešel, spouštěč v databázi změnu odmítne.
-function _ccMoveLeftMs(){
-  try{
-    const t=currentUser && currentUser.country_changed_at ? Date.parse(currentUser.country_changed_at) : 0;
-    if(!t) return 0;
-    const left=CC_MOVE_MS-(Date.now()-t);
-    return left>0 ? left : 0;
-  }catch(e){ return 0; }
-}
 function _syncCountryRow(){
   try{
     const v=document.getElementById('vCountry'); if(!v) return;
@@ -38302,12 +38318,10 @@ async function openCountryPicker(){
     const cc=(ov.querySelector('#_ccSel').value||'').toUpperCase();
     if(!cc){ done(); return; }
     if(cc===cur){ done(); return; }
-    const left=_ccMoveLeftMs();
-    if(left>0){
-      const h=Math.ceil(left/3600000);
-      toast(EN?('You can change your country again in '+h+' h'):('Zemi můžeš změnit znovu za '+h+' h'));
-      return;
-    }
+    // BEZ ZÁMKU. Kdo cestuje, může být každý den jinde a právě tam chce najít trénink;
+    // zámek by trestal přesně to použití, které má appka podporovat. Server si jen zapíše
+    // čas změny (sql-69), aby bylo vidět, kdo po zemích skáče.
+
     const nm=(typeof _ccName==='function' && _ccName(cc)) || cc;
     if(!confirm(EN?('Move your account to '+nm+'? Your city will be cleared — set it again so distances work.')
                  :('Přesunout účet do '+nm+'? Město se vymaže — nastav si ho znovu, ať fungují vzdálenosti.'))) return;
@@ -38319,10 +38333,9 @@ async function openCountryPicker(){
         // Spouštěč v databázi hlásí country_change_too_soon a v detailu posílá čas, kdy to
         // půjde znovu. Uživateli ukážeme hodiny, ne hlášku z Postgresu.
         const _m=String((error && (error.message||error.details))||'');
-        if(/country_change_too_soon/.test(_m)){
-          let _h=24;
-          try{ const _at=Date.parse(String(error.details||'')); if(_at) _h=Math.max(1, Math.ceil((_at-Date.now())/3600000)); }catch(e){}
-          toast(EN?('You can change your country again in '+_h+' h'):('Zemi můžeš změnit znovu za '+_h+' h'));
+    if(/country_change_too_soon/.test(_m)){
+          // Starší verze sql-68 mohla mít ještě zámek; kdyby se ozval, řekneme to lidsky.
+          toast(EN?'You can change your country again later today':'Zemi můžeš změnit znovu později dnes');
           return;
         }
         toast('⚠️ '+(error.message||''));
@@ -38349,22 +38362,30 @@ function _searchLabel(){
             : (m==='gyms'?'Hledat klub':(m==='events'?'Hledat akci':'Hledat kouče'));
 }
 function _searchToggle(open){
-  const btn=document.getElementById('searchOpen'), box=document.getElementById('searchBox');
-  if(!btn||!box) return;
+  const wrap=document.getElementById('searchWrap');
+  if(!wrap) return;
+  wrap.style.display = open ? '' : 'none';
   if(open){
-    btn.style.display='none'; box.style.display='';
     const i=document.getElementById('searchInp');
-    if(i) setTimeout(function(){ try{ i.focus(); }catch(e){} }, 60);
-  } else { box.style.display='none'; btn.style.display=''; }
+    if(i){ i.placeholder=_searchLabel()+'…'; setTimeout(function(){ try{ i.focus(); }catch(e){} }, 60); }
+  }
 }
 function _searchSyncLabel(){
-  try{ const l=document.getElementById('searchOpenLbl'); if(l) l.textContent=_searchLabel(); }catch(e){}
+  try{
+    const i=document.getElementById('searchInp');
+    if(i) i.placeholder=_searchLabel()+'…';
+  }catch(e){}
 }
 try{
-  const _so=document.getElementById('searchOpen');
-  if(_so) _so.onclick=function(){ _searchToggle(true); };
+  const _sb=document.getElementById('locSearchBtn');
+  if(_sb) _sb.onclick=function(){
+    const w=document.getElementById('searchWrap');
+    const open=!(w && w.style.display!=='none');
+    _searchToggle(open);
+  };
   _searchSyncLabel();
   const _si=document.getElementById('searchInp');
+  // Prázdné pole se po opuštění složí zpátky, ať řádek nezabírá místo zbytečně.
   if(_si) _si.addEventListener('blur', function(){ if(!String(_si.value||'').trim()) _searchToggle(false); });
 }catch(e){}
 $('sLang').onclick=()=>openPicker('lang');
