@@ -6228,7 +6228,11 @@ async function loadCoaches() {
   const ulat = (userLoc&&userLoc.lat!=null) ? userLoc.lat : ((currentUser&&currentUser.city_lat!=null)?+currentUser.city_lat:null);
   const ulng = (userLoc&&userLoc.lng!=null) ? userLoc.lng : ((currentUser&&currentUser.city_lng!=null)?+currentUser.city_lng:null);
   // V režimu zahraničí se kouči berou z vybrané země, ne z domovské.
-  const ucountry = (_deckAbroad && window._deckCountryPick) ? window._deckCountryPick : ((currentUser&&currentUser.country) || (userLoc&&userLoc.country) || null);
+  // Stejné pravidlo jako u klubů a událostí: v režimu zahraničí vybraná země, při prohlížení
+  // jiného města jeho země, jinak profil. Dřív tu profil přebil prohlíženou zemi, takže
+  // „Prohlížíš Paris" ukázalo pořád české kouče.
+  const ucountry = (_deckAbroad && window._deckCountryPick) ? window._deckCountryPick
+    : ((typeof _deckHomeCountry==='function') ? _deckHomeCountry() : ((currentUser&&currentUser.country)||null));
   // PostGIS nearest-N (GiST-indexed) when we know the user's location; offset-paginated via load-more.
   _coachCenter = (ulat!=null && ulng!=null) ? {lat:ulat, lng:ulng} : null;
   _coachOffset = 0;
@@ -6402,7 +6406,17 @@ const _EVENT_PAGE = 50;
 let _gymOffset = 0, _gymLoadingMore = false, _gymExhausted = false;
 let _evOffset = 0, _evLoadingMore = false, _evExhausted = false;
 let _deckAbroad = false;
-function _deckHomeCountry(){ return (currentUser && currentUser.country) || (typeof userLoc!=='undefined' && userLoc && userLoc.country) || null; }   // nearest-N per page (PostGIS); load-more appends the next page
+function _deckHomeCountry(){
+  // PŘI PROHLÍŽENÍ JINDE ROZHODUJE PROHLÍŽENÁ ZEMĚ. Dřív se brala země z profilu, takže když
+  // si Čech nechal zobrazit Paříž, decky dál stahovaly jen české kluby: pruh hlásil
+  // „Prohlížíš Paris", ale nezměnilo se nic. Profil zůstává nedotčený, mění se jen to, co
+  // se zobrazuje -- stejně jako u „Zobrazit další země".
+  try{
+    if(typeof _isBrowsingElsewhere==='function' && _isBrowsingElsewhere()
+       && typeof userLoc!=='undefined' && userLoc && userLoc.country) return userLoc.country;
+  }catch(e){}
+  return (currentUser && currentUser.country) || (typeof userLoc!=='undefined' && userLoc && userLoc.country) || null;
+}   // nearest-N per page (PostGIS); load-more appends the next page
 let favorites = [];
 let _openProfileId = null;
 let lastCoach = null;
@@ -9568,6 +9582,7 @@ async function loadMoreEvents(){
     // ne az pri vykresleni, aby se v odpovedi neobjevily ani nazvy.
     if(!_isProviderUser()) q=q.or('providers_only.is.null,providers_only.eq.false');
     const hc=_deckHomeCountry(); if(_deckAbroad && window._deckCountryPick) q=q.eq('country', window._deckCountryPick); else if(hc && !_deckAbroad) q=q.eq('country', hc);
+    if(typeof _deckCountry!=='undefined' && _deckCountry) q=q.eq('country', _deckCountry);   // stejně jako u koučů a klubů
     const from=_evOffset + _EVENT_PAGE;
     const { data } = await q.order('starts_at',{ascending:true}).range(from, from + _EVENT_PAGE - 1);
     if(!data || !data.length){ _evExhausted=true; _evLoadingMore=false; try{ _offerAbroad('events'); }catch(e){} return false; }
@@ -9591,6 +9606,9 @@ async function renderEventsAsync(box){
     // ne az pri vykresleni, aby se v odpovedi neobjevily ani nazvy.
     if(!_isProviderUser()) _eq=_eq.or('providers_only.is.null,providers_only.eq.false');
     { const _ehc=_deckHomeCountry(); if(_deckAbroad && window._deckCountryPick) _eq=_eq.eq('country', window._deckCountryPick); else if(_ehc && !_deckAbroad) _eq=_eq.eq('country', _ehc); }
+    // RUČNÍ FILTR ZEMĚ. Kouči (buildFiltered) i kluby (buildGymFiltered) ho respektují,
+    // u událostí se na něj zapomnělo -- tři decky se mají chovat stejně.
+    if(typeof _deckCountry!=='undefined' && _deckCountry) _eq=_eq.eq('country', _deckCountry);
     const { data:evs } = await _eq.order('starts_at',{ascending:true}).range(0, _EVENT_PAGE - 1);
     _evOffset = 0; _evExhausted = !evs || evs.length < _EVENT_PAGE;
     window._evList = evs||[];
@@ -9890,7 +9908,11 @@ async function saveEvent(){
   // do radku jde bud gym_id, nebo organization_id, nikdy obojí.
   const _org=window._evOrg||null;
   const g=_org||window._evGym||_myGymData; if(!g){ toast('⚠️'); return; }
-  const cur=window._evCur||g.currency||'CZK';
+  // MĚNA AKCE. Organizace nemá sloupec currency (má jen member_fee_currency), takže se u ní
+  // dřív spadlo na 'CZK' -- proto asociace s eurovým členstvím vypsala vstupenku v korunách.
+  // Bere se tedy: výslovná volba → měna klubu → měna členského poplatku organizace → měna
+  // poskytovatele → CZK.
+  const cur=window._evCur||g.currency||g.member_fee_currency||(currentUser&&(currentUser.currency_inperson||currentUser.currency))||'CZK';
   const min=MIN_EVENT[cur]||MIN_EVENT.CZK;
   const title=($('evTitle').value||'').trim();
   if(!title){ toast(LANG==='en'?'⚠️ Add a title':'⚠️ Doplň název'); return; }
@@ -14210,7 +14232,7 @@ async function loadMyMemberships(){
       const _byGym={}; _gv.forEach(v=>{ _byGym[v.gym_id]=(_byGym[v.gym_id]||0)+1; });
       let _gh='';
       Object.keys(_byGym).forEach(gid=>{ const g=gymMap[gid]; if(!g) return; const n=_byGym[gid]; const dp=g.dropin_price||0; const cur=g.currency||'CZK'; const sym=_curSym(cur); const amt=n*dp;
-        _gh += `<div style="background:#FFF7EE;border:1px solid #F3C9A0;border-radius:14px;padding:15px;margin-bottom:12px;"><div style="font-weight:800;color:#9A5B00;font-size:14px;margin-bottom:4px;">💳 ${LANG==='en'?'Settlement due':'Doplatek k úhradě'} — ${escapeHtml(g.name||'Klub')}</div><div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:10px;">${LANG==='en'?(n+' tolerated check-in(s) while your membership was past due. Settle as '+n+'× drop-in.'):(n+' tolerovaných příchodů, když byla tvá permanentka po splatnosti. Doplať jako '+n+'× jednorázový vstup.')}</div><button class="graceDoplatekBtn" data-klub="${gid}" style="width:100%;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💳 ${LANG==='en'?'Pay':'Zaplatit'} ${fmtPrice(amt,cur)} ${sym}</button></div>`;
+        _gh += `<div style="background:#FFF7EE;border:1px solid #F3C9A0;border-radius:14px;padding:15px;margin-bottom:12px;"><div style="font-weight:800;color:#9A5B00;font-size:14px;margin-bottom:4px;">💳 ${LANG==='en'?'Settlement due':'Doplatek k úhradě'} — ${escapeHtml(g.name||'Klub')}</div><div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:10px;">${LANG==='en'?(n+' tolerated check-in(s) while your membership was past due. Settle as '+n+'× drop-in.'):(n+' tolerovaných příchodů, když byla tvá permanentka po splatnosti. Doplať jako '+n+'× jednorázový vstup.')}</div><button class="graceDoplatekBtn" data-gym="${gid}" style="width:100%;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">💳 ${LANG==='en'?'Pay':'Zaplatit'} ${fmtPrice(amt,cur)} ${sym}</button></div>`;
       });
       html = _gh + html;
     }
@@ -16551,7 +16573,7 @@ async function openMigrationRequests(){
       <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
         ${r.contact_parent===false?`<div style="flex:1;padding:9px;background:#FEECEC;color:#8a2018;border-radius:10px;font-size:11px;line-height:1.4;font-weight:600;text-align:center;">⚠️ ${EN?'Requester asked NOT to involve the parent — verify via club or ID only':'Žadatel zvolil rodiče NEzapojovat — ověř jen přes klub nebo doklad'}</div>`:(r.status==='parent_pending'?`<button class="migForce" data-id="${r.id}" data-pid="${pid||''}" data-kid="${escapeHtml(r.kid_name)}" data-target="${r.requester_id}" ${(!pid||!kidFound)?'disabled':''} style="flex:1;padding:10px;background:#B8860B;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;${(!pid||!kidFound)?'opacity:.4;':''}">⏳ ${EN?'Guardian not responding? Transfer anyway':'Rodič nereaguje? Přenést i tak'}</button>`:`<button class="migApprove" data-id="${r.id}" data-pid="${pid||''}" data-kid="${escapeHtml(r.kid_name)}" data-target="${r.requester_id}" ${(!pid||!kidFound)?'disabled':''} style="flex:1;padding:10px;background:#006040;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;${(!pid||!kidFound)?'opacity:.4;':''}">${EN?'Send to guardian':'Poslat rodiči'}</button>`)}
         <button class="migReject" data-id="${r.id}" data-target="${r.requester_id}" style="flex:1;padding:10px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">${EN?'Reject':'Zamítnout'}</button>
-        ${r.gym_vouched?`<button class="migGymApprove" data-id="${r.id}" data-pid="${pid||''}" data-kid="${escapeHtml(r.kid_name)}" data-target="${r.requester_id}" ${(!pid||!kidFound)?'disabled':''} style="flex:1 0 100%;padding:10px;background:#0E7A4A;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;${(!pid||!kidFound)?'opacity:.4;':''}">✅ ${EN?'Club confirmed — approve & transfer':'Klub ověřil — schválit a přenést'}</button>`:(vouchGym?`<button class="migVouch" data-id="${r.id}" data-klub="${vouchGym}" data-kid="${escapeHtml(r.kid_name)}" data-pid="${pid||''}" data-target="${r.requester_id}" style="flex:1 0 100%;padding:10px;background:#0E5A8A;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;">🥋 ${EN?'Verify via the club they trained at':'Ověřit přes klub, kde trénoval'}</button>`:'')}
+        ${r.gym_vouched?`<button class="migGymApprove" data-id="${r.id}" data-pid="${pid||''}" data-kid="${escapeHtml(r.kid_name)}" data-target="${r.requester_id}" ${(!pid||!kidFound)?'disabled':''} style="flex:1 0 100%;padding:10px;background:#0E7A4A;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;${(!pid||!kidFound)?'opacity:.4;':''}">✅ ${EN?'Club confirmed — approve & transfer':'Klub ověřil — schválit a přenést'}</button>`:(vouchGym?`<button class="migVouch" data-id="${r.id}" data-gym="${vouchGym}" data-kid="${escapeHtml(r.kid_name)}" data-pid="${pid||''}" data-target="${r.requester_id}" style="flex:1 0 100%;padding:10px;background:#0E5A8A;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;">🥋 ${EN?'Verify via the club they trained at':'Ověřit přes klub, kde trénoval'}</button>`:'')}
         ${r.id_verified?`<button class="migIdApprove" data-id="${r.id}" data-pid="${pid||''}" data-kid="${escapeHtml(r.kid_name)}" data-target="${r.requester_id}" data-cp="${r.contact_parent===false?'0':'1'}" ${!pid?'disabled':''} style="flex:1 0 100%;padding:10px;background:#0E7A4A;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;${!pid?'opacity:.4;':''}">🆔 ${EN?'ID verified — approve & transfer':'Doklad ověřen — schválit a přenést'}</button>`:(r.id_doc_path?`<div style="flex:1 0 100%;display:flex;gap:6px;flex-wrap:wrap;"><button class="migIdView" data-p="${escapeHtml(r.id_doc_path)}" style="flex:1;padding:9px;background:#0E5A8A;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">🆔 ${EN?'View ID':'Zobrazit doklad'}</button><button class="migIdOk" data-id="${r.id}" data-p="${escapeHtml(r.id_doc_path)}" style="flex:1;padding:9px;background:#0E7A4A;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">✅ ${EN?'Match':'Sedí'}</button><button class="migIdNo" data-id="${r.id}" data-p="${escapeHtml(r.id_doc_path)}" style="flex:1;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">${EN?'No':'Ne'}</button></div>`:'')}
       </div>`;
     box.appendChild(el);
@@ -18544,7 +18566,7 @@ async function loadMyTeams(){
   box.innerHTML=rows.map(r=>{ const g=gmap[r.gym_id]||{}; const _bs="flex:1 1 calc(50% - 4px);min-width:0;padding:10px 8px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';text-align:center;box-sizing:border-box;"; return `<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:8px;"><div style="margin-bottom:10px;"><div style="font-size:14px;font-weight:700;">🏛️ ${g.name||'Klub'}</div><div style="font-size:12px;color:var(--mid);">📍 ${g.city||'—'}</div></div><div style="display:flex;flex-wrap:wrap;gap:8px;"><button class="mtDashBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:var(--dark);color:#fff;border:none;flex-basis:100%;">📊 ${LANG==='en'?'Overview':'Přehled'}</button>${r.full_autonomy?`<button class="mtSchedBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:var(--dark);color:#fff;border:none;">📅 ${LANG==='en'?'My classes':'Moje lekce'}</button>`:''}
     ${(r.can_manage_schedule && !r.full_autonomy)?`<button class="mtGymSchedBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:var(--dark);color:#fff;border:none;">📅 ${LANG==='en'?'Club schedule':'Rozvrh klubu'}</button>`:''}
     ${(r.can_take_payments||r.is_reception)?`<button class="mtRecepBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:#fff;color:var(--dark);border:1px solid var(--border);">🛎️ ${LANG==='en'?'Reception':'Recepce'}</button>`:''}
-    ${r.can_scan_tickets?`<button class="mtScanBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:#fff;color:var(--dark);border:1px solid var(--border);">🎟️ ${LANG==='en'?'Scan tickets':'Kontrola lístků'}</button>`:''}<button class="mtTeamBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:#fff;color:var(--dark);border:1px solid var(--border);">👥 ${LANG==='en'?'Club team':'Klub tým'}</button><button class="mtShareBtn" data-id="${r.id}" data-on="${r.share_availability?1:0}" style="${_bs}background:${r.share_availability?'#FFF7E0':'#fff'};color:${r.share_availability?'#8a6a12':'var(--dark)'};border:1px solid ${r.share_availability?'#E8C24A':'var(--border)'};">📆 ${r.share_availability?(LANG==='en'?'Sharing 1:1':'Sdílím 1:1'):(LANG==='en'?'Share 1:1':'Sdílet 1:1')}</button><button class="mtScanBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:#fff;color:var(--dark);border:1px solid var(--border);">📷 ${LANG==='en'?'Tickets':'Lístky'}</button><button class="leaveTeamBtn" data-id="${r.id}" data-klub="${(g.name||'').replace(/"/g,'&quot;')}" data-gymid="${r.gym_id}" style="${_bs}background:#FEECEC;color:var(--red);border:none;">${LANG==='en'?'Leave':'Opustit'}</button></div></div>`; }).join('');
+    ${r.can_scan_tickets?`<button class="mtScanBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:#fff;color:var(--dark);border:1px solid var(--border);">🎟️ ${LANG==='en'?'Scan tickets':'Kontrola lístků'}</button>`:''}<button class="mtTeamBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:#fff;color:var(--dark);border:1px solid var(--border);">👥 ${LANG==='en'?'Club team':'Klub tým'}</button><button class="mtShareBtn" data-id="${r.id}" data-on="${r.share_availability?1:0}" style="${_bs}background:${r.share_availability?'#FFF7E0':'#fff'};color:${r.share_availability?'#8a6a12':'var(--dark)'};border:1px solid ${r.share_availability?'#E8C24A':'var(--border)'};">📆 ${r.share_availability?(LANG==='en'?'Sharing 1:1':'Sdílím 1:1'):(LANG==='en'?'Share 1:1':'Sdílet 1:1')}</button><button class="mtScanBtn" data-gymid="${r.gym_id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" style="${_bs}background:#fff;color:var(--dark);border:1px solid var(--border);">📷 ${LANG==='en'?'Tickets':'Lístky'}</button><button class="leaveTeamBtn" data-id="${r.id}" data-gym="${(g.name||'').replace(/"/g,'&quot;')}" data-gymid="${r.gym_id}" style="${_bs}background:#FEECEC;color:var(--red);border:none;">${LANG==='en'?'Leave':'Opustit'}</button></div></div>`; }).join('');
   box.querySelectorAll('.mtDashBtn').forEach(b=>b.onclick=()=>openGymTeamDash(b.dataset.gymid, b.dataset.gym));
   box.querySelectorAll('.mtSchedBtn').forEach(b=>b.onclick=()=>openCoachScheduleEditor(b.dataset.gymid, b.dataset.gym));
   // Rozvrh celého klubu (oprávnění „Rozvrh") -- otevře správu klubu rovnou na záložce Rozvrh.
@@ -18578,9 +18600,12 @@ async function loadMyTeams(){
   const op=$('mtOpenPayout'); if(op) op.onclick=()=>openMyStripe(null, true);
 }
 async function leaveGymTeam(rowId, gymName, gymId){
-  if(!confirm(LANG==='en'?`Leave ${gymName}'s team?`:`Opustit tým ${gymName}?`)) return;
+  // Jméno klubu chybělo, protože tlačítko ho ukládalo do data-klub, ale čtelo se data-gym.
+  // Kdyby se to někdy zopakovalo, radši obecné „tento klub" než „undefined".
+  const _gn=(gymName && String(gymName).trim()) ? String(gymName) : (LANG==='en'?'this club':'tento klub');
+  if(!confirm(LANG==='en'?`Leave ${_gn}'s team?`:`Opustit tým ${_gn}?`)) return;
   await supaClient.from('gym_coaches').delete().eq('id', rowId);
-  if(gymName){ await supaClient.from('profiles').update({ gym_official:null }).eq('id', currentUser.id).eq('gym_official', gymName); if(currentUser.gym_official===gymName) currentUser.gym_official=null; }
+  if(gymName){ await supaClient.from('profiles').update({ gym_official:null }).eq('id', currentUser.id).eq('gym_official', gymName); if(currentUser.gym_official===gymName) currentUser.gym_official=null; }   /* porovnává se skutečné jméno, ne náhrada */
   try{ const { data: g } = await supaClient.from('gyms').select('owner_id, name').eq('id', gymId).single(); if(g&&g.owner_id){ await supaClient.from('notifications').insert({ user_id: g.owner_id, type:'system', read:false, data: JSON.stringify({ kind:'gym_team_left', coach_name: currentUser.name||'Kouč' }), message:`${currentUser.name||'Kouč'} opustil tým tvého klubu.` }); } }catch(e){}
   toast(LANG==='en'?'Left the team':'Tým opuštěn');
   loadMyTeams();
@@ -25770,6 +25795,28 @@ function _billCompact(pfx){
     try{ if(typeof mtlTaxI18n==='function') mtlTaxI18n(); }catch(e){}
   }catch(e){}
 }
+// SKRÝVÁNÍ SE MUSÍ DÁT ZOPAKOVAT. Našeptávač adresy a doplňování zemí prvky v DOM nahrazují,
+// a nový prvek přichází bez atributu data-gahide -- pole se tím vrátí na světlo. Proto je
+// skrývání zvlášť a _gaFix/_caFix ho volají opakovaně, ne jen jednou při přeskládání.
+const _BILL_HIDE = {
+  gym: ['gymBillingLine1','gymBillingLine2','gymBillingCity','gymBillingPostal','gymBillingHint',
+        'gymVatId','gymVatHint','gymVatStatus','gymVatPayer','gymVatRateRow',
+        'gymBillingPhoneWrap','gymInvoiceEmail','gaPubContact'],
+  ca:  ['caBillingLine1','caBillingLine2','caBillingCity','caBillingPostal','caBillingHint',
+        'caVatId','caVatHint','caVatStatus','caVatPayer','caVatRateRow',
+        'caPubContact','caPubContactHint','caPubPhoneWrap','caPubEmail'],
+};
+function _billHideAll(pfx){
+  try{
+    (_BILL_HIDE[pfx]||[]).forEach(_gaHideField);
+    // Odkaz „zadej adresu ručně" vyrábí našeptávač až po nás.
+    [pfx+'BillingLine1',pfx+'BillingCity',pfx+'BillingPostal'].forEach(function(id){
+      const el=document.getElementById(id);
+      if(el && el._manualLink) el._manualLink.setAttribute('data-gahide','1');
+    });
+    _billCompact(pfx);
+  }catch(e){}
+}
 function _gaHideField(id){
   try{
     if(_BILL_KEEP.indexOf(id)>=0) return;
@@ -26101,6 +26148,7 @@ async function openGymApp(){
   // takže jedno volání na začátku je nechá viset.
   const _gaFix=function(){
     try{ _gaMergeSteps(); }catch(e){}
+    try{ _billHideAll('gym'); }catch(e){}   // opakovaně, viz komentář u _billHideAll
     try{
       // Odkaz „zadej adresu ručně" patří ke skryté adrese, takže taky pryč.
       ['gymBillingLine1','gymBillingCity','gymBillingPostal'].forEach(function(id){
@@ -26113,7 +26161,7 @@ async function openGymApp(){
       if(_c){ _c.removeAttribute('data-gahide'); const _l=_c.previousElementSibling; if(_l) _l.removeAttribute('data-gahide'); }
     }catch(e){}
   };
-  _gaFix(); setTimeout(_gaFix, 260); setTimeout(_gaFix, 900);
+  _gaFix(); setTimeout(_gaFix, 260); setTimeout(_gaFix, 900); setTimeout(_gaFix, 2000);
 }
 
 function updateGymPriceBreakdown(){ var _gpbX=document.getElementById('gymPriceBreakdown'); if(_gpbX) _gpbX.style.display='none'; return; /* per-price breakdown removed */
@@ -29062,6 +29110,7 @@ async function _renderGymAnalyticsInner(gymId, box){
     <div class="prow-group" style="margin-bottom:16px;">
       ${_fdRow('🥊', LANG==='en'?'Club name in MTL':'Název klubu v MTL', gym?.name)}
       ${_fdRow('🏠', LANG==='en'?'Venue address':'Adresa provozovny', [gym?.address, [gym?.postal_code, gym?.city].filter(Boolean).join(' ')].filter(Boolean).join(', '))}
+      ${_fdRow('💱', LANG==='en'?'Currency':'Měna klubu', gym?.currency)}
       ${_fdRow('📅', LANG==='en'?'Founded':'Rok založení', gym?.founded_year)}
       ${_fdRow('🧑\u200d💼', LANG==='en'?'Registered by':'Kdo založil', window._admGymPeople?.creator)}
       ${_fdRow('👑', LANG==='en'?'Current owner':'Současný majitel', window._admGymPeople?.owner)}
@@ -33868,6 +33917,15 @@ async function openMtlCircle(){
   }
 }
 
+// Vlastní řádkovač. _fdRow je lokální const v detailu KLUBU, takže odsud není vidět --
+// použít ho by skončilo na „_fdRow is not defined" a rozbilo celý detail kouče.
+function _cdRow(ico, lbl, val){
+  const v=(val==null||String(val).trim()==='') ? '—' : String(val);
+  const miss=(v==='—');
+  return '<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:var(--surf);">'+ico+'</div>'
+    +'<div class="prow-lbl">'+lbl+'</div></div>'
+    +'<span class="prow-val"'+(miss?' style="color:var(--light);"':'')+'>'+escapeHtml(v)+'</span></div>';
+}
 async function renderCoachAnalytics(coachId, containerId){
   const box=$(containerId);
   if(!box) return;
@@ -33933,6 +33991,14 @@ async function renderCoachAnalytics(coachId, containerId){
     ${(function(){ var EN=LANG==='en'; var _m=_self?((currentUser&&currentUser.payment_mode)||(currentUser&&currentUser.stripe_account?'stripe':'qr_bank')):((typeof _mtlPayMode==='function'?_mtlPayMode(prof):null)||(prof&&prof.stripe_account?'stripe':'qr_bank')); var _sc=(prof&&prof.coach_ref_score)||0, _bk=!!(prof&&prof.bankai_eligible); var _shOk=_sc>=2, _bnOk=_sc>=5&&_bk; var _shRate=_m==='stripe'?'1,5 %':'2 %', _shKeep=_m==='stripe'?'98,5 %':'98 %'; var card=function(icon,name,rate,keep,ok,pct,req){ return '<div style="background:var(--surf);border:1px solid '+(ok?'#A8E6C0':'var(--border)')+';border-radius:12px;padding:12px 14px;margin-bottom:10px;">'+'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="font-size:14px;font-weight:800;color:var(--dark);">'+icon+' '+name+(ok?' <span style=\'color:#0A7A4F;font-size:12px;\'>✓ '+(EN?'unlocked':'odemčeno')+'</span>':'')+'</div><div style="font-size:13px;font-weight:800;color:var(--dark);white-space:nowrap;">'+rate+'</div></div>'+'<div style="height:7px;background:var(--bg);border-radius:99px;overflow:hidden;margin:9px 0 5px;"><div style="height:100%;width:'+Math.min(100,Math.max(5,pct))+'%;background:'+(ok?'#0A7A4F':'var(--red)')+';border-radius:99px;transition:width .35s;"></div></div>'+'<div style="font-size:11px;color:var(--mid);line-height:1.45;">'+req+'</div></div>'; }; var h=card('🗡️','Shikai',_shRate,_shKeep,_shOk,_sc/2*100, _shOk?(EN?'Unlocked — a better rate on all your prices.':'Odemčeno — výhodnější sazba na všechny tvé ceny.'):(EN?('2 activated referrals ('+_sc+'/2) — activated = they reached 10 privates or 25 memberships themselves.'):('2 aktivovaní přivedení ('+_sc+'/2) — aktivovaný = sám už má 10 soukromek nebo 25 členství.'))); { h+=card('🔥','Bankai',_m==='stripe'?'1 %':'1,25 %',_m==='stripe'?'99 %':'98,75 %',_bnOk,_sc/5*100, _bnOk?(EN?'Unlocked — the lowest rate.':'Odemčeno — nejnižší sazba.'):(EN?('5 activated referrals ('+_sc+'/5) + 10 privates or 25 memberships of your own.'):('5 aktivovaných přivedených ('+_sc+'/5) + 10 soukromek nebo 25 členství u tebe.'))); }  return h; })()}
     </div>
     ` : ''}
+    ${_self ? '' : `
+    <div class="sec-lbl">${LANG==='en'?'Coach details':'Údaje o koučovi'}</div>
+    <div class="prow-group" style="margin-bottom:16px;">
+      ${_cdRow('🥊', LANG==='en'?'Name':'Jméno', cp?.name)}
+      ${_cdRow('📍', LANG==='en'?'City':'Město', [cp?.city, cp?.country].filter(Boolean).join(', '))}
+      ${_cdRow('💱', LANG==='en'?'Currency':'Měna', cp?.currency_inperson || cp?.currency)}
+      ${_cdRow('🌐', LANG==='en'?'Online currency':'Měna online', cp?.currency_online)}
+    </div>` }
     <div class="sec-lbl">${LANG==='en'?'Bookings':'Rezervace'}</div>
     <div class="prow-group" style="margin-bottom:16px;">
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F0FBF0;">✅</div><div class="prow-lbl">${L('Proběhlé')}</div></div><span class="prow-val">${happened.length}</span></div>
@@ -37862,6 +37928,7 @@ function setupCoachAppPhoto(){
   // dodělávají prvky po nás, takže jedno volání nestačí.
   { const _caFix=function(){
       try{ _caMergeSteps(); }catch(e){}
+      try{ _billHideAll('ca'); }catch(e){}
       try{
         ['caBillingLine1','caBillingCity','caBillingPostal'].forEach(function(id){
           const el=document.getElementById(id);
@@ -37871,7 +37938,7 @@ function setupCoachAppPhoto(){
         if(_c){ _c.removeAttribute('data-gahide'); const _l=_c.previousElementSibling; if(_l) _l.removeAttribute('data-gahide'); }
       }catch(e){}
     };
-    _caFix(); setTimeout(_caFix, 260); setTimeout(_caFix, 900); }
+    _caFix(); setTimeout(_caFix, 260); setTimeout(_caFix, 900); setTimeout(_caFix, 2000); }
   if(currentUser && currentUser.photo_url){
     $('caPhotoExisting').style.display='flex';
     $('caPhotoPreview').style.backgroundImage=`url('${currentUser.photo_url}')`;
@@ -44144,7 +44211,9 @@ async function _modeSwitchGate(m, skipId){
     var EN=LANG==='en'; if(!currentUser||!currentUser.id) return {ready:true, missing:[]};
     var uid=currentUser.id; var missing=[];
     async function _sr(acct){ if(!acct) return false; try{ var r=await fetch('/api/stripe-account-info?account='+encodeURIComponent(acct)); var j=await r.json(); return !!(j && j.chargesEnabled); }catch(e){ return false; } }
-    if(currentUser.coach_status==='approved' && String(skipId)!==String(uid)){
+    // Kontrola se dřív týkala jen kouče; majitel klubu, který koučem není, přepnul kolej
+    // bez jediného varování, i když na ní neměl kam poslat peníze.
+    if((currentUser.coach_status==='approved' || (window._myGyms||[]).length) && String(skipId)!==String(uid)){
       if(m==='stripe'){ if(!(await _sr(currentUser.stripe_account))) missing.push(EN?'your coaching':'tv\u016fj kou\u010dink'); }
       else if(!(currentUser.receiver_id_value&&currentUser.receiver_name&&currentUser.receiver_declared_at)) missing.push(EN?'your coaching (bank details)':'tv\u016fj kou\u010dink (bankovn\u00ed \u00fadaje)');
     }
@@ -44556,7 +44625,9 @@ async function checkStripeReturn(){
     await supaClient.from('profiles').update({ stripe_account: acct }).eq('id', currentUser.id);
     currentUser.stripe_account = acct;
     let _payoutSwap=false; try{ _payoutSwap=localStorage.getItem('mtl_coach_payout_swap')==='1'; }catch(e){}
-    if(_payoutSwap || currentUser.coach_status==='approved'){
+    // I majitel klubu se vrací ze Stripe se svým účtem, i když kouč není. Bez tohohle
+    // se mu po návratu nic nedopočítalo a vypadalo to, že se propojení nepovedlo.
+    if(_payoutSwap || currentUser.coach_status==='approved' || (window._myGyms||[]).length){
       try{ localStorage.removeItem('mtl_coach_payout_swap'); }catch(e){}
       toast(_ready?(LANG==='en'?'✅ Payout account changed':'✅ Výplatní účet změněn'):(LANG==='en'?'✅ Stripe connected — finish verification, otherwise you cannot receive payments':'✅ Stripe připojen — dokonči verifikaci, jinak ti nepůjdou přijímat platby'));
       try{ if($('shCoachDash')&&$('shCoachDash').classList.contains('open')&&typeof renderCoachDash==='function') renderCoachDash(); }catch(e){}
