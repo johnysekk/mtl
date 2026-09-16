@@ -26320,7 +26320,8 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
         }
       }
     }catch(e){}
-    const { data: newGym, error } = await supaClient.from('gyms').insert({
+    // Payload zvlášť, ať se dá při chybě poslat znovu bez nepovinných sloupců (viz níž).
+    const _gymPayload = {
       terms_accepted_at: new Date().toISOString(),
       owner_id: currentUser.id, referred_by: _gymRefBy, referred_at: _gymRefBy?new Date().toISOString():null, name, city, country: countryName, city_lat:lat, city_lng:lng,
       address: address || null, postal_code: postal || null, description: fullDesc || null,
@@ -26389,7 +26390,22 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
       billing_city: (($('gymBillingCity')&&$('gymBillingCity').value.trim())||city||null),
       billing_postal: (($('gymBillingPostal')&&$('gymBillingPostal').value.trim())||postal||null),
       venue_type: (($('gymVenueType')&&$('gymVenueType').value)||null)
-    }).select('id').single();
+    };
+    let { data: newGym, error } = await supaClient.from('gyms').insert(_gymPayload).select('id').single();
+    // NEZÁVISLOST NA POŘADÍ NASAZENÍ. Appka posílá i sloupce, které přišly s novějším SQL
+    // (founder_id z sql-57). Když SQL ještě nasazené není, celý insert spadne na „column
+    // does not exist" a klub nevznikne -- přesně to vypadá jako „klub se nezaložil a pořád
+    // vidím Přidat klub". Při takové chybě se nepovinná pole odeberou a zkusí se to znovu.
+    let _gymIns = { data: newGym, error };
+    if(_gymIns.error && /column|schema cache|does not exist/i.test(String(_gymIns.error.message||''))){
+      const _opt=['founder_id','legal_entity','org_form','ads_opt_in','ads_opt_in_at'];
+      const _retry=Object.assign({}, _gymPayload);
+      _opt.forEach(function(k){ delete _retry[k]; });
+      console.warn('[klub] insert bez nepovinných sloupců:', _gymIns.error.message);
+      _gymIns = await supaClient.from('gyms').insert(_retry).select('id').single();
+      if(!_gymIns.error) toast(LANG==='en'?'Club created (some fields need a DB update)':'Klub založen (část údajů čeká na aktualizaci databáze)');
+    }
+    newGym = _gymIns.data; error = _gymIns.error;
     if(error){ toast('⚠️ '+error.message); btn.textContent=L('Odeslat přihlášku klubu →'); btn.disabled=false; return; }
     if(newGym && newGym.id){
       // Zakladatel se o novem klubu dozvi hned, ne az z databaze.
