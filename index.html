@@ -8285,10 +8285,13 @@ const SELL_BILLING_FIELDS = ['legal_name','tax_id','billing_line1','billing_city
 function _sellMissing(e, kind){
   const miss=[];
   if(!e) return ['entity'];
-  // NEVYBRANÁ KOLEJ NENÍ STRIPE. Dokud si poskytovatel nevybere, jak chce platby přijímat,
-  // nemá smysl psát „připoj účet Stripe" -- Stripe možná vůbec nechce. Prázdná hodnota se
-  // proto hlásí jako „vybrat formu přijímání platby".
-  const mode=(e.payment_mode || null);
+  // NEVYBRANÁ KOLEJ NENÍ STRIPE, ale ani důvod vyhodit z decku klub, který peníze přijímat
+  // umí. Starší kluby mají payment_mode prázdný, přitom mají propojený Stripe nebo IBAN --
+  // po zavedení stavu „nevybráno" by z decku zmizely. Kolej se proto dovodí z toho, co je
+  // nastavené, a prázdná zůstane jen tam, kde není nastavené vůbec nic.
+  const mode=(e.payment_mode
+    || (e.stripe_account ? 'stripe'
+      : ((e.receiver_id_value || e.receiver_name) ? 'qr_bank' : null)));
   // 1) výplatní kanál
   if(!mode){ miss.push('paymode'); }
   else if(mode==='stripe'){
@@ -25699,7 +25702,25 @@ async function confirmCity(){
         return;
       }
       userLoc={ lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon), city: val, country: cn };
-      if(currentUser){ currentUser.country = cn; if(ccode) currentUser.country_code = ccode; supaClient.from('profiles').update(ccode?{ country: cn, country_code: ccode }:{ country: cn }).eq('id', currentUser.id); }
+      // ROZHODUJE VÝBĚR ZEMĚ, ne to, co vrátil geokodér. Geokodér zemi občas nevrátí vůbec
+      // (a pak zůstala prázdná, takže v Nastavení nic nesvítilo a deck nevěděl, kde jsi),
+      // nebo ji vrátí v jiném jazyce. Zapisujeme kód i název a rovnou srovnáme nastavení.
+      const _wcc = _selCC || ccode || null;
+      const _wnm = (_wcc && typeof _ccName==='function') ? _ccName(_wcc) : (cn || null);
+      if(currentUser){
+        currentUser.country = _wnm; if(_wcc) currentUser.country_code = _wcc;
+        const _up={ city: val, city_lat: parseFloat(data[0].lat), city_lng: parseFloat(data[0].lon), country: _wnm };
+        if(_wcc) _up.country_code=_wcc;
+        try{
+          const { error:_ue }=await supaClient.from('profiles').update(_up).eq('id', currentUser.id);
+          if(_ue && /country_change_too_soon/.test(String(_ue.message||''))){
+            toast(LANG==='en'?'You can change your country again later':'Zemi můžeš změnit znovu později');
+            return;
+          }
+          if(_wcc) currentUser.country_changed_at=new Date().toISOString();
+        }catch(e){}
+        try{ if(typeof _syncCountryRow==='function') _syncCountryRow(); }catch(e){}
+      }
       onLocSet();
     } else {
       toast(L('⚠️ Město nenalezeno, zkus jiný název'));
@@ -42260,7 +42281,7 @@ function setupDangerZone(){
           if(o){ openSheet(o.dataset.setopen);
             // Jazyk a poloha se čtou z paměti, ne z HTML -- při otevření je potřeba je doplnit,
             // jinak zůstane prázdno nebo stará hodnota.
-            if(o.dataset.setopen==='shLang'){ try{ if(typeof fillUserProfile==='function') fillUserProfile(); }catch(e){} }
+            if(o.dataset.setopen==='shLang'){ try{ if(typeof fillUserProfile==='function') fillUserProfile(); }catch(e){} try{ if(typeof _syncCountryRow==='function') _syncCountryRow(); }catch(e){} }   /* země taky, jinak zůstane prázdná */
             return; }
           const b = ev.target && ev.target.closest && ev.target.closest('[data-setback]');
           if(b){ const sh = b.closest('.sheet'); if(sh) closeSheet(sh.id); return; }
