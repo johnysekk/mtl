@@ -6420,6 +6420,42 @@ const _EVENT_PAGE = 50;
 let _gymOffset = 0, _gymLoadingMore = false, _gymExhausted = false;
 let _evOffset = 0, _evLoadingMore = false, _evExhausted = false;
 let _deckAbroad = false;
+// KÓD ZEMĚ JE ROZHODUJÍCÍ (sql-66). Názvy se lokalizují a „Česko" se nikdy nespáruje
+// s „Czechia"; kód je stejný v každém jazyce. Dokud nejsou kódy doplněné u všech řádků,
+// filtr bere OBOJÍ: kód nebo název (viz _deckCountryFilter).
+function _ccOf(nameOrCc){
+  const v=String(nameOrCc||'').trim();
+  if(!v) return null;
+  if(/^[A-Za-z]{2}$/.test(v)) return v.toUpperCase();
+  try{
+    const hit=(typeof MTL_COUNTRIES!=='undefined'?MTL_COUNTRIES:[]).filter(function(c){
+      return c[1].toLowerCase()===v.toLowerCase() || c[2].toLowerCase()===v.toLowerCase();
+    })[0];
+    if(hit) return hit[0];
+  }catch(e){}
+  return null;
+}
+function _deckHomeCC(){
+  try{
+    if(typeof _isBrowsingElsewhere==='function' && _isBrowsingElsewhere()
+       && typeof userLoc!=='undefined' && userLoc && (userLoc.countryCode||userLoc.country))
+      return _ccOf(userLoc.countryCode||userLoc.country);
+  }catch(e){}
+  if(currentUser && (currentUser.country_code||currentUser.residence_country))
+    return String(currentUser.country_code||currentUser.residence_country).toUpperCase();
+  return _ccOf((currentUser&&currentUser.country) || (typeof userLoc!=='undefined' && userLoc && userLoc.country) || '');
+}
+// Podmínka pro dotaz: kód NEBO název, ať se během přechodu neztratí starší řádky.
+function _deckCountryOr(cc){
+  const c=String(cc||'').toUpperCase(); if(!c) return null;
+  const names=[];
+  try{
+    const hit=(typeof MTL_COUNTRIES!=='undefined'?MTL_COUNTRIES:[]).filter(function(x){ return x[0]===c; })[0];
+    if(hit){ names.push(hit[1]); names.push(hit[2]); }
+  }catch(e){}
+  const parts=['country_code.eq.'+c].concat(names.map(function(n){ return 'country.eq.'+n; }));
+  return parts.join(',');
+}
 function _deckHomeCountry(){
   // PŘI PROHLÍŽENÍ JINDE ROZHODUJE PROHLÍŽENÁ ZEMĚ. Dřív se brala země z profilu, takže když
   // si Čech nechal zobrazit Paříž, decky dál stahovaly jen české kluby: pruh hlásil
@@ -7024,7 +7060,7 @@ async function _reportGymDemand(discCsv, silent, commit, form){
     }
     if(!country && lat!=null && lng!=null){
       try{
-        var _rr=await fetch('https://nominatim.openstreetmap.org/reverse?format=json&addressdetails=1&zoom=5&lat='+lat+'&lon='+lng);
+        var _rr=await fetch('/api/geo-reverse?zoom=5&lat='+lat+'&lon='+lng);
         var _rj=await _rr.json();
         country=((_rj&&_rj.address&&_rj.address.country)||'').trim();
       }catch(e){}
@@ -8297,9 +8333,10 @@ async function loadMoreGyms(){
   _gymLoadingMore = true;
   try{
     let q = supaClient.from('gyms').select(GYM_DECK_COLS).eq('status','approved');
-    const hc = _deckHomeCountry();
-    if(_deckAbroad && window._deckCountryPick) q = q.eq('country', window._deckCountryPick);
-    else if(hc && !_deckAbroad) q = q.eq('country', hc);
+    // Kód země, s přechodovým fallbackem na název (sql-66).
+    { const _cc=(_deckAbroad && window._deckCountryPick) ? _ccOf(window._deckCountryPick) : (!_deckAbroad ? _deckHomeCC() : null);
+      const _or=_deckCountryOr(_cc);
+      if(_or) q=q.or(_or); }
     const from = _gymOffset + _GYM_PAGE;
     const { data } = await q.order('created_at',{ascending:false}).range(from, from + _GYM_PAGE - 1);
     if(!data || !data.length){ _gymExhausted = true; _gymLoadingMore = false; try{ _offerAbroad('gyms'); }catch(e){} return false; }
@@ -8390,10 +8427,11 @@ async function ensureGymsLoaded(force){
   try{
     _gymOffset = 0; _gymExhausted = false;
     let _q = supaClient.from('gyms').select(GYM_DECK_COLS).eq('status','approved');
-    const _hc = _deckHomeCountry();
     // Doma: jen domovská země. V zahraničí: jen ta jedna zvolená -- nikdy celý svět.
-    if(_deckAbroad && window._deckCountryPick) _q = _q.eq('country', window._deckCountryPick);
-    else if(_hc && !_deckAbroad) _q = _q.eq('country', _hc);
+    // Rozhoduje KÓD země; název zůstává jako přechodový fallback (sql-66).
+    { const _cc=(_deckAbroad && window._deckCountryPick) ? _ccOf(window._deckCountryPick) : (!_deckAbroad ? _deckHomeCC() : null);
+      const _or=_deckCountryOr(_cc);
+      if(_or) _q=_q.or(_or); }
     const { data } = await _q.order('created_at',{ascending:false}).range(0, _GYM_PAGE - 1);
     // Klub bez možnosti zaplatit do decku nepatří -- student by doklikal k rezervaci
     // a nedostal se dál.
@@ -9632,7 +9670,8 @@ async function loadMoreEvents(){
     // Akce jen pro poskytovatele se studentovi vubec nenactou -- filtruje se na serveru,
     // ne az pri vykresleni, aby se v odpovedi neobjevily ani nazvy.
     if(!_isProviderUser()) q=q.or('providers_only.is.null,providers_only.eq.false');
-    const hc=_deckHomeCountry(); if(_deckAbroad && window._deckCountryPick) q=q.eq('country', window._deckCountryPick); else if(hc && !_deckAbroad) q=q.eq('country', hc);
+    { const _cc=(_deckAbroad && window._deckCountryPick) ? _ccOf(window._deckCountryPick) : (!_deckAbroad ? _deckHomeCC() : null);
+      const _or=_deckCountryOr(_cc); if(_or) q=q.or(_or); }
     if(typeof _deckCountry!=='undefined' && _deckCountry) q=q.eq('country', _deckCountry);   // stejně jako u koučů a klubů
     const from=_evOffset + _EVENT_PAGE;
     const { data } = await q.order('starts_at',{ascending:true}).range(from, from + _EVENT_PAGE - 1);
@@ -9656,7 +9695,8 @@ async function renderEventsAsync(box){
     // Akce jen pro poskytovatele se studentovi vubec nenactou -- filtruje se na serveru,
     // ne az pri vykresleni, aby se v odpovedi neobjevily ani nazvy.
     if(!_isProviderUser()) _eq=_eq.or('providers_only.is.null,providers_only.eq.false');
-    { const _ehc=_deckHomeCountry(); if(_deckAbroad && window._deckCountryPick) _eq=_eq.eq('country', window._deckCountryPick); else if(_ehc && !_deckAbroad) _eq=_eq.eq('country', _ehc); }
+    { const _cc=(_deckAbroad && window._deckCountryPick) ? _ccOf(window._deckCountryPick) : (!_deckAbroad ? _deckHomeCC() : null);
+      const _or=_deckCountryOr(_cc); if(_or) _eq=_eq.or(_or); }
     // RUČNÍ FILTR ZEMĚ. Kouči (buildFiltered) i kluby (buildGymFiltered) ho respektují,
     // u událostí se na něj zapomnělo -- tři decky se mají chovat stejně.
     if(typeof _deckCountry!=='undefined' && _deckCountry) _eq=_eq.eq('country', _deckCountry);
@@ -25318,7 +25358,7 @@ async function maybePromptLocationUpdate(){
         if(plat==null||plng==null) return;
         if(!(haversine(rlat,rlng,plat,plng) > 75)) return;              // same area -> nothing to do
         let nc='', ncn='';
-        try{ const r=await fetch('https://nominatim.openstreetmap.org/reverse?format=json&addressdetails=1&zoom=10&lat='+rlat+'&lon='+rlng); const j=await r.json(); const a=(j&&j.address)||{}; nc=a.city||a.town||a.village||a.county||''; ncn=a.country||''; }catch(e){}
+        try{ const r=await fetch('/api/geo-reverse?zoom=10&lat='+rlat+'&lon='+rlng); const j=await r.json(); const a=(j&&j.address)||{}; nc=a.city||a.town||a.village||a.county||''; ncn=a.country||''; }catch(e){}
         _showLocUpdatePrompt(rlat,rlng,nc,ncn);
       }catch(e){}
     }, function(){}, {timeout:6000, maximumAge:600000});
@@ -25359,7 +25399,7 @@ function requestGps(){
       const rlat=Math.round(pos.coords.latitude*100)/100, rlng=Math.round(pos.coords.longitude*100)/100;
       userLoc={lat:rlat,lng:rlng,city:city||'Moje poloha'};
       onLocSet();
-      try{ fetch('https://nominatim.openstreetmap.org/reverse?format=json&addressdetails=1&zoom=10&lat='+rlat+'&lon='+rlng).then(function(r){return r.json();}).then(function(j){ if(j&&j.address&&userLoc&&userLoc.lat===rlat){ if(j.address.country) userLoc.country=j.address.country; var _cc=j.address.city||j.address.town||j.address.village; if(_cc) userLoc.city=_cc; } }).catch(function(){}); }catch(e){}
+      try{ fetch('/api/geo-reverse?zoom=10&lat='+rlat+'&lon='+rlng).then(function(r){return r.json();}).then(function(j){ if(j&&j.address&&userLoc&&userLoc.lat===rlat){ if(j.address.country) userLoc.country=j.address.country; var _cc=j.address.city||j.address.town||j.address.village; if(_cc) userLoc.city=_cc; } }).catch(function(){}); }catch(e){}
     },
     ()=>{ openCityInput(); }, // silent fallback — no error toast
     {timeout:6000,maximumAge:60000}
@@ -26692,6 +26732,9 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
       // billing_country z prihlasky NIKDY neulozilo -- proto se zeme musela v Nastaveni
       // volit znovu, i kdyz ji clovek v prihlasce vybral.
       billing_country: (($('gymCountry')&&$('gymCountry').value)||null),
+      // Kód země klubu: podle něj se filtruje deck (sql-66). Název dopíše geokódování města,
+      // ale to může selhat (OSM limity) -- kód z fakturační země je spolehlivý.
+      country_code: (($('gymCountry')&&$('gymCountry').value)||null),
       // PROPSAT DO FAKTURAČNÍCH ÚDAJŮ. Právní název a příznak právnické osoby se z přihlášky
       // neukládaly vůbec, takže je klub musel v nastavení psát znovu -- a doklad se z nich
       // skládá, takže by do té doby nesl jen jméno klubu.
@@ -29134,7 +29177,7 @@ async function loadAdminCoachList(){
     (async()=>{
       for(const c of missing){
         try{
-          const r=await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&addressdetails=1&lat=${c.city_lat}&lon=${c.city_lng}`);
+          const r=await fetch(`/api/geo-reverse?lat=${c.city_lat}&lon=${c.city_lng}`);
           const j=await r.json();
           const cn=j.address && j.address.country;
           const cc=j.address && j.address.country_code;
