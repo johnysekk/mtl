@@ -134,6 +134,31 @@ export default async function handler(req, res) {
     let label = 'Členský poplatek';
     let amount = Number(oc.fee_amount || 0);
     let currency = oc.fee_currency || 'CZK';
+
+    // ── KDYŽ ŘÁDEK NEMÁ ANI CENU, ANI fee_id ──────────────────────────────────────────
+    // Tohle je reálný stav dat: platba se označí jako zaplacená (fee_paid_at), ale cena ani
+    // odkaz na ceníkovou položku se na řádek klubu nezapíšou. Zaúčtování pak nemá z čeho
+    // vzít částku, skončí na „no amount" a po platbě nezůstane účetně nic.
+    // Dohledáme položku ceníku, jejíž období pokrývá den platby; když žádná nesedí, vezmeme
+    // nejnovější aktivní. Lepší zaúčtovat podle ceníku než nezaúčtovat vůbec.
+    if (!oc.fee_id && !(amount > 0) && oc.organization_id) {
+      try {
+        const day = String(oc.fee_paid_at || new Date().toISOString()).slice(0, 10);
+        let f = (await sb(`org_member_fees?organization_id=eq.${encodeURIComponent(oc.organization_id)}` +
+          `&period_from=lte.${day}&period_to=gte.${day}&order=period_from.desc&limit=1`))[0];
+        if (!f) {
+          f = (await sb(`org_member_fees?organization_id=eq.${encodeURIComponent(oc.organization_id)}` +
+            `&active=is.true&order=period_from.desc&limit=1`))[0];
+        }
+        if (f) {
+          amount = Number(f.amount || 0);
+          currency = f.currency || currency;
+          oc.fee_id = f.id;   // ať se popis níž složí ze stejné položky
+          console.log('[org-fee-record] fee_id doplněn z ceníku:', f.id, amount, currency);
+        }
+      } catch (e) { /* když ceník nedohledáme, spadne to níž na „no amount" jako dřív */ }
+    }
+
     if (oc.fee_id) {
       const f = (await sb(`org_member_fees?id=eq.${encodeURIComponent(oc.fee_id)}&select=name,amount,currency,period_from,period_to`))[0];
       if (f) {
