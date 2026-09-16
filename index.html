@@ -2779,12 +2779,21 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
     <div class="gps-icon">🏙️</div>
     <div class="gps-title">Zadej své město</div>
     <p class="gps-sub" style="margin-bottom:20px;">Zobrazíme ti kouče ve tvém okolí.</p>
+    <!-- ZEMĚ A MĚSTO SPOLU. Samotné město nestačí: „Brno" neřekne, jestli se člověk
+         přestěhoval, a hledat město naslepo v cizí zemi vede k nesmyslům. -->
+    <div class="loc-group" style="margin-bottom:12px;text-align:left;">
+      <div class="loc-row">
+        <div class="loc-icon">🌍</div>
+        <select class="loc-inp" id="cityCountry" data-noi18n style="border:none;background:transparent;width:100%;font-family:inherit;font-size:15px;"></select>
+      </div>
+    </div>
     <div class="loc-group" style="margin-bottom:24px;text-align:left;">
       <div class="loc-row">
         <div class="loc-icon">🏙️</div>
         <input class="loc-inp" id="cityInp" type="text" placeholder="Např. Praha, Brno, Ostrava...">
       </div>
     </div>
+    <p id="cityCcNote" style="font-size:11.5px;color:var(--light);line-height:1.45;margin:0 0 16px;text-align:left;display:none;"></p>
     <button class="btn-gps-allow" id="btnCityOk">Potvrdit město</button>
     <button class="btn-gps-deny" id="btnCityCancel">Zrušit</button>
   </div>
@@ -25533,6 +25542,30 @@ async function _openLocMenu(){
 }
 function openCityInput(){
   $('cityInp').value='';
+  // Seznam zemí: otevřené z Adminu + vždycky ta vlastní, ať se dá vrátit zpátky.
+  try{
+    const sel=$('cityCountry');
+    if(sel){
+      const cur=String((currentUser&&(currentUser.country_code||currentUser.residence_country))||'').toUpperCase();
+      let list=(typeof _countriesOpen==='function')?_countriesOpen().slice():[];
+      if(cur && !list.some(function(c){ return c[0]===cur; })){
+        const h=(typeof MTL_COUNTRIES!=='undefined'?MTL_COUNTRIES:[]).filter(function(x){ return x[0]===cur; })[0];
+        if(h) list=[h].concat(list);
+      }
+      const EN=LANG==='en';
+      sel.innerHTML=list.map(function(c){ return '<option value="'+c[0]+'"'+(c[0]===cur?' selected':'')+'>'+escapeHtml(EN?c[2]:c[1])+'</option>'; }).join('');
+      const note=$('cityCcNote');
+      if(note) note.style.display='none';
+      sel.onchange=function(){
+        if(!note) return;
+        const changed=String(sel.value||'').toUpperCase()!==cur;
+        note.style.display=changed?'block':'none';
+        if(changed) note.textContent=(EN
+          ? 'Changing your country moves your whole account — once a day. For a single session abroad just browse that country instead.'
+          : 'Změnou země se přesouvá celý účet — jde to jednou za den. Na jeden trénink v zahraničí stačí tu zemi jen prohlížet.');
+      };
+    }
+  }catch(e){}
   $('cityOv').classList.add('open');
   setTimeout(()=>$('cityInp').focus(),350);
 }
@@ -25540,17 +25573,28 @@ function openCityInput(){
 async function confirmCity(){
   const val=$('cityInp').value.trim();
   if(!val){ toast(L('⚠️ Zadej město')); return; }
+  // ZEMĚ Z VÝBĚRU JE ROZHODUJÍCÍ. Město se pak hledá uvnitř té země, takže „Brno" u
+  // francouzského účtu znamená přesun do Česka, a ne nic.
+  const _selCC=String(($('cityCountry')&&$('cityCountry').value)||'').toUpperCase() || null;
+  const _oldCC=String((currentUser&&(currentUser.country_code||currentUser.residence_country))||'').toUpperCase() || null;
+  const _ccChange=!!(_selCC && _oldCC && _selCC!==_oldCC);
 
   // Nejdřív zkus předdefinovaná města (rychlé)
   const _browse=(window._cityMode==='browse');
-  const m=Object.entries(CITY_COORDS).find(([c])=>c.toLowerCase()===val.toLowerCase());
+  // Zkratka pro předdefinovaná města platí jen tehdy, když vybraná země souhlasí s tou
+  // u města -- „Brno" ve Francii neexistuje a musí se dohledat geokódováním.
+  const m=Object.entries(CITY_COORDS).find(function(e){
+    if(e[0].toLowerCase()!==val.toLowerCase()) return false;
+    if(_selCC && e[1].cc && _selCC!==e[1].cc) return false;
+    return true;
+  });
   if(m){
     $('cityOv').classList.remove('open');
     if(_browse){ await _setBrowseLoc({lat:m[1].lat,lng:m[1].lng,city:m[0], country:((window._homeLoc&&window._homeLoc.country)||(userLoc&&userLoc.country)||null)}); return; }
     // ZMĚNA ZEMĚ PATŘÍ I SEM. Dřív se u předdefinovaného města uložily jen souřadnice,
     // takže Francouz, který napsal „Brno", zůstal s domovskou zemí FR a v decku se nic
     // nezměnilo. Kontrola i zápis jsou proto stejné jako u geokódované adresy.
-    const _cc2=m[1].cc || null;
+    const _cc2=_selCC || m[1].cc || null;
     const _oldCC2=(currentUser&&(currentUser.country_code||currentUser.residence_country))||null;
     if(_cc2 && _oldCC2 && _cc2!==String(_oldCC2).toUpperCase()){
       const _lm=(typeof _ccMoveLeftMs==='function')?_ccMoveLeftMs():0;
@@ -25583,7 +25627,9 @@ async function confirmCity(){
   // Jinak geokóduj přes Nominatim (jakékoliv město na světě)
   toast(L('🔍 Hledám město...'));
   try {
-    const res = await fetch(`/api/geo-search?limit=1&q=${encodeURIComponent(val)}`);
+    // Město se hledá UVNITŘ vybrané země, jinak „Brno" najde první Brno na světě.
+    const _ccNm=(_selCC && typeof _ccName==='function') ? _ccName(_selCC) : '';
+    const res = await fetch(`/api/geo-search?limit=1&q=${encodeURIComponent(val + (_ccNm ? (', ' + _ccNm) : ''))}`);
     const data = await res.json();
     if(data && data.length){
       const cn = data[0].address && data[0].address.country || null;
