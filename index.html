@@ -38257,9 +38257,11 @@ try{ _syncCountryRow(); }catch(e){}
 // jak to appce říct. Změna země se počítá do stejného limitu jako přesun prohlížení do
 // zahraničí (jednou za den), jinak by šlo přeskakovat mezi trhy bez omezení.
 const CC_MOVE_MS = 24*3600*1000;
+// LIMIT DRŽÍ DATABÁZE (sql-68), ne prohlížeč. Tady se jen čte, aby se dalo předem říct, kolik
+// hodin zbývá -- kdyby si někdo tuhle kontrolu obešel, spouštěč v databázi změnu odmítne.
 function _ccMoveLeftMs(){
   try{
-    const t=Number(localStorage.getItem('mtl_cc_move_at')||0);
+    const t=currentUser && currentUser.country_changed_at ? Date.parse(currentUser.country_changed_at) : 0;
     if(!t) return 0;
     const left=CC_MOVE_MS-(Date.now()-t);
     return left>0 ? left : 0;
@@ -38313,10 +38315,22 @@ async function openCountryPicker(){
       const { error }=await supaClient.from('profiles')
         .update({ country_code:cc, country:nm, city:null, city_lat:null, city_lng:null })
         .eq('id', currentUser.id);
-      if(error){ toast('⚠️ '+error.message); return; }
+      if(error){
+        // Spouštěč v databázi hlásí country_change_too_soon a v detailu posílá čas, kdy to
+        // půjde znovu. Uživateli ukážeme hodiny, ne hlášku z Postgresu.
+        const _m=String((error && (error.message||error.details))||'');
+        if(/country_change_too_soon/.test(_m)){
+          let _h=24;
+          try{ const _at=Date.parse(String(error.details||'')); if(_at) _h=Math.max(1, Math.ceil((_at-Date.now())/3600000)); }catch(e){}
+          toast(EN?('You can change your country again in '+_h+' h'):('Zemi můžeš změnit znovu za '+_h+' h'));
+          return;
+        }
+        toast('⚠️ '+(error.message||''));
+        return;
+      }
       currentUser.country_code=cc; currentUser.country=nm;
       currentUser.city=null; currentUser.city_lat=null; currentUser.city_lng=null;
-      try{ localStorage.setItem('mtl_cc_move_at', String(Date.now())); }catch(e){}
+      currentUser.country_changed_at=new Date().toISOString();   // čas hlídá databáze, tohle je jen pro zobrazení
       // Prohlížení jinde je teď bezpředmětné: bydliště je nové.
       try{ window._deckCountryPick=null; if(typeof _deckAbroad!=='undefined') _deckAbroad=false; }catch(e){}
       done();
