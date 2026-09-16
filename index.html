@@ -2164,6 +2164,10 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
   <div style="padding:16px 20px 44px;">
     <div class="sgrp">
       <div class="srow" id="sLoc"><div class="srow-l"><div class="sicon" style="background:#F0FBF0;">📍</div><div class="slbl">Moje poloha</div></div><div class="sval" id="vLoc"></div></div>
+      <!-- ZEMĚ ZVLÁŠŤ. Město samo neurčuje zemi (Brno je jen jedno, ale „Frankfurt" jsou dva
+           a některá města appka nezná), a deck se řídí zemí. Změna země se počítá do stejného
+           limitu jako přesun prohlížení do zahraničí: jednou za den. -->
+      <div class="srow" id="sCountry"><div class="srow-l"><div class="sicon" style="background:#F0FBF0;">🌍</div><div class="slbl">Země</div></div><div class="sval" id="vCountry"></div></div>
       <div class="srow" id="sLang"><div class="srow-l"><div class="sicon" style="background:#F0FBF0;">🗣️</div><div class="slbl">Jazyk</div></div><div class="sval" id="vLang"></div></div>
     </div>
   </div>
@@ -2944,6 +2948,8 @@ const I18N = { en: {
   "Přidat do kalendáře ›":"Add to calendar ›",
   "💰 Finance a doklady":"💰 Payments & documents",
   "Platby & provize":"Payments & commission",
+  "Země":"Country",
+  "Nenastaveno":"Not set",
   // Doplněno: tyhle texty byly vyřazené z překladu, ale anglický protějšek chyběl.
   "+ Přidat zemi":"+ Add a country",
   "Hlášení se podává":"A report is filed",
@@ -5990,6 +5996,11 @@ function setLang(l){
   try{ if(typeof updateAuthTexts==='function') updateAuthTexts(); }catch(e){}
   try{ if(typeof init==='function') init(); }catch(e){}   // překreslí deck
   try{ if(typeof buildDashSide==='function') buildDashSide(); }catch(e){}   // rebuild dashboard sidebar in new language
+  // Názvy zemí a popisek hledání se skládají v kódu, takže je po změně jazyka nutné
+  // přepsat -- jinak zůstanou v původním jazyce až do dalšího načtení appky.
+  try{ if(typeof renderCountryFilter==='function') renderCountryFilter(); }catch(e){}
+  try{ if(typeof _searchSyncLabel==='function') _searchSyncLabel(); }catch(e){}
+  try{ if(typeof _syncCountryRow==='function') _syncCountryRow(); }catch(e){}
   try{ if(typeof fillRateEditor==='function' && currentUser && currentUser.coach_status==='approved') fillRateEditor(); }catch(e){}
   try{ if(typeof updateFoundingUI==='function') updateFoundingUI(); }catch(e){}
   // dynamické sekce s data-noi18n / inline ternáry se musí znovu vykreslit
@@ -38236,9 +38247,87 @@ const { data, error } = await supaClient
 
 // Settings pickers
 $('sLoc').onclick=()=>openCityInput();
+if($('sCountry')) $('sCountry').onclick=()=>openCountryPicker();
+try{ _syncCountryRow(); }catch(e){}
 
 // ROZBALENÍ HLEDÁNÍ. Tlačítko zmizí, pole se ukáže a zaostří; prázdné pole se po opuštění
 // složí zpátky, ať v decku nezůstane prázdný řádek navíc. Popisek se mění podle decku.
+// ═══ ZEMĚ V NASTAVENÍ ═══════════════════════════════════════════════════════════════════
+// Deck se řídí zemí, ale nastavit se dalo jen město. Kdo se přestěhoval do jiné země, neměl
+// jak to appce říct. Změna země se počítá do stejného limitu jako přesun prohlížení do
+// zahraničí (jednou za den), jinak by šlo přeskakovat mezi trhy bez omezení.
+const CC_MOVE_MS = 24*3600*1000;
+function _ccMoveLeftMs(){
+  try{
+    const t=Number(localStorage.getItem('mtl_cc_move_at')||0);
+    if(!t) return 0;
+    const left=CC_MOVE_MS-(Date.now()-t);
+    return left>0 ? left : 0;
+  }catch(e){ return 0; }
+}
+function _syncCountryRow(){
+  try{
+    const v=document.getElementById('vCountry'); if(!v) return;
+    const cc=(currentUser && (currentUser.country_code||currentUser.residence_country)) || null;
+    v.textContent=cc ? ((typeof _ccName==='function' && _ccName(cc)) || cc) : (LANG==='en'?'Not set':'Nenastaveno');
+  }catch(e){}
+}
+async function openCountryPicker(){
+  const EN=LANG==='en';
+  if(!currentUser){ toast(L('⚠️ Nejdřív se přihlas')); return; }
+  try{ if(typeof _loadIntroRates==='function') await _loadIntroRates(); }catch(e){}
+  const list=(typeof _countriesOpen==='function')?_countriesOpen():[];
+  if(!list.length){ toast(EN?'No countries are open yet':'Zatím není otevřená žádná země'); return; }
+  const cur=(currentUser.country_code||currentUser.residence_country||'').toUpperCase();
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;z-index:100095;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:18px;';
+  ov.innerHTML='<div style="background:#fff;border-radius:16px;max-width:380px;width:100%;padding:20px;font-family:\'DM Sans\';">'
+    +'<div style="font-size:17px;font-weight:800;color:var(--dark);margin-bottom:6px;">'+(EN?'Where do you live?':'Kde žiješ?')+'</div>'
+    +'<div style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:12px;">'
+      +(EN?'The deck shows coaches, clubs and events from this country. You can change it once a day.'
+          :'Deck ti ukazuje kouče, kluby a akce z téhle země. Změnit ji můžeš jednou za den.')+'</div>'
+    +'<select id="_ccSel" style="width:100%;box-sizing:border-box;padding:11px 12px;border:1.5px solid var(--border);border-radius:11px;font-size:15px;font-family:inherit;background:var(--surf);margin-bottom:14px;">'
+      +list.map(function(c){ return '<option value="'+c[0]+'"'+(c[0]===cur?' selected':'')+'>'+escapeHtml(EN?c[2]:c[1])+'</option>'; }).join('')
+    +'</select>'
+    +'<button id="_ccOk" style="width:100%;padding:13px;border:none;border-radius:12px;background:var(--dark);color:#fff;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit;">'+(EN?'Save':'Uložit')+'</button>'
+    +'<button id="_ccCancel" style="width:100%;margin-top:8px;padding:11px;border:none;background:none;color:var(--light);font-size:13.5px;cursor:pointer;font-family:inherit;">'+(EN?'Cancel':'Zrušit')+'</button>'
+    +'</div>';
+  document.body.appendChild(ov);
+  const done=function(){ try{ ov.remove(); }catch(e){} };
+  ov.querySelector('#_ccCancel').onclick=done;
+  ov.onclick=function(e){ if(e.target===ov) done(); };
+  ov.querySelector('#_ccOk').onclick=async function(){
+    const cc=(ov.querySelector('#_ccSel').value||'').toUpperCase();
+    if(!cc){ done(); return; }
+    if(cc===cur){ done(); return; }
+    const left=_ccMoveLeftMs();
+    if(left>0){
+      const h=Math.ceil(left/3600000);
+      toast(EN?('You can change your country again in '+h+' h'):('Zemi můžeš změnit znovu za '+h+' h'));
+      return;
+    }
+    const nm=(typeof _ccName==='function' && _ccName(cc)) || cc;
+    if(!confirm(EN?('Move your account to '+nm+'? Your city will be cleared — set it again so distances work.')
+                 :('Přesunout účet do '+nm+'? Město se vymaže — nastav si ho znovu, ať fungují vzdálenosti.'))) return;
+    try{
+      const { error }=await supaClient.from('profiles')
+        .update({ country_code:cc, country:nm, city:null, city_lat:null, city_lng:null })
+        .eq('id', currentUser.id);
+      if(error){ toast('⚠️ '+error.message); return; }
+      currentUser.country_code=cc; currentUser.country=nm;
+      currentUser.city=null; currentUser.city_lat=null; currentUser.city_lng=null;
+      try{ localStorage.setItem('mtl_cc_move_at', String(Date.now())); }catch(e){}
+      // Prohlížení jinde je teď bezpředmětné: bydliště je nové.
+      try{ window._deckCountryPick=null; if(typeof _deckAbroad!=='undefined') _deckAbroad=false; }catch(e){}
+      done();
+      _syncCountryRow();
+      toast((EN?'✅ Moved to ':'✅ Přesunuto do ')+nm, 1);
+      // Nové město si vybere hned, jinak by deck neměl podle čeho řadit.
+      setTimeout(function(){ try{ if(typeof openCityInput==='function') openCityInput(); }catch(e){} }, 400);
+      try{ if(typeof init==='function') init(); }catch(e){}
+    }catch(e){ toast('⚠️ '+((e&&e.message)||'')); }
+  };
+}
 function _searchLabel(){
   const EN=LANG==='en';
   const m=(typeof _deckMode!=='undefined')?_deckMode:'coaches';
