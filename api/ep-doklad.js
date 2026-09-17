@@ -24,16 +24,27 @@ const sb = async (path, opts = {}) => {
   return t ? JSON.parse(t) : null;
 };
 
-// Jak se plnění zdaňuje. MTL je český plátce; příjemce v jiné zemi EU s platným DIČ =
-// přenesená daňová povinnost, mimo EU = plnění bez české DPH.
-function vatMode(supCountry, custCountry, custDic, custIsBusiness) {
+// DAŇOVÝ REŽIM. Rozhoduje v tomhle pořadí:
+//   1) MTL není plátce DPH  -> na dokladu žádná DPH, ať je odběratel kdekoli
+//   2) odběratel v ČR       -> česká DPH (status odběratele na tom nic nemění)
+//   3) odběratel v EU s DIČ -> přenesená daňová povinnost, daň odvede on
+//   4) odběratel v EU bez DIČ -> nelze účtovat českou DPH: místem plnění je jeho zem
+//      (elektronicky poskytovaná služba). Doklad se označí 'oss_pending' a NEVYSTAVÍ se
+//      automaticky s českou daní -- tohle musí projít účetní a režimem OSS.
+//   5) odběratel mimo EU    -> bez české DPH
+// Tohle je mechanika, ne daňové poradenství: sazby a režim si nech potvrdit účetní.
+function vatMode(supCountry, custCountry, custDic, custIsBusiness, supIsVatPayer) {
   const sc = String(supCountry || 'CZ').toUpperCase();
   const cc = String(custCountry || sc).toUpperCase();
+  if (!supIsVatPayer) return { mode: 'no_vat_supplier', note: 'Dodavatel není plátcem DPH.' };
   if (cc === sc) return { mode: 'domestic', note: null };
   if (EU.indexOf(cc) >= 0) {
-    return custDic && custIsBusiness
-      ? { mode: 'reverse_charge', note: 'Daň odvede příjemce plnění (reverse charge, čl. 196 směrnice 2006/112/ES).' }
-      : { mode: 'domestic', note: null };   // bez DIČ se chová jako domácí plnění
+    if (custDic) {
+      return { mode: 'reverse_charge',
+        note: 'Daň odvede příjemce plnění (reverse charge, čl. 196 směrnice 2006/112/ES).' };
+    }
+    return { mode: 'oss_pending',
+      note: 'Odběratel bez DIČ v jiném státě EU — místem plnění je jeho stát (režim OSS). Doklad prověří účetní.' };
   }
   return { mode: 'outside_eu', note: 'Plnění mimo EU — bez české DPH (§ 9 zákona o DPH).' };
 }
@@ -76,7 +87,7 @@ export default async function handler(req, res) {
       country: (ps.mtl_country || 'CZ').toUpperCase(),
     };
 
-    const V = vatMode(ME.country, custCountry, pr.vat_id, !!pr.tax_id);
+    const V = vatMode(ME.country, custCountry, pr.vat_id, !!pr.tax_id, ME.vat_payer);
 
     const period = String(b.period_start || new Date().toISOString()).slice(0, 7);
     const label = 'Exclusive MTL Partner — předplatné ' + period;
@@ -86,7 +97,7 @@ export default async function handler(req, res) {
       period_month: period, currency: cur, amount,
       pi_id: b.invoice_id || null,
       kind: 'partner_sub',
-      status: 'issued',
+      status: (V.mode === 'oss_pending' ? 'review' : 'issued'),   // OSS ruční kontrola
       charged_at: new Date().toISOString(),
       issued_at: new Date().toISOString(),
       test_mode: !!b.test_mode,
@@ -100,6 +111,7 @@ export default async function handler(req, res) {
       cust_country: custCountry, cust_email: pr.email || null, cust_phone: pr.phone || null,
       // dodavatel
       sup_name: ME.name, sup_ico: ME.ico, sup_dic: ME.dic, sup_address: ME.address,
+      // DPH jen u domácího plnění. U ostatních režimů nula a důvod je v vat_note.
       sup_vat_payer: ME.vat_payer, sup_vat_rate: (V.mode === 'domestic' ? ME.vat_rate : 0),
       sup_phone: ME.phone, sup_email: ME.email, sup_country: ME.country,
       // daňový režim
