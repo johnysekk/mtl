@@ -40,12 +40,18 @@ export default async function handler(req, res) {
   const limit = Math.max(1, Math.min(12, parseInt((req.query && req.query.limit) || '12', 10) || 12));
   const city = String((req.query && req.query.city) || '').trim();
   const lang = String((req.query && req.query.lang) || 'cs').slice(0, 5);
+  // TVRDÉ OMEZENÍ NA ZEMI. Dřív se země přilepovala k dotazu („Paris, Czechia") -- Nominatim
+  // to bere jako nápovědu, ne podmínku, a vrátil Paříž ve Francii. Appka pak měla město
+  // z jedné země a country_code z druhé. countrycodes je podmínka: co v té zemi není,
+  // se nevrátí vůbec. Bere i seznam oddělený čárkou („cz,sk").
+  const cc = String((req.query && req.query.cc) || '')
+    .toLowerCase().replace(/[^a-z,]/g, '').slice(0, 64);
 
   // Krátké dotazy nemá smysl posílat dál: vrátí půl města a stejně se přepisují.
   if (q.length < 3) { res.setHeader('Cache-Control', 'no-store'); return res.status(200).json([]); }
 
   const full = q + (city && q.toLowerCase().indexOf(city.toLowerCase()) < 0 ? (', ' + city) : '');
-  const key = lang + '|' + limit + '|' + full.toLowerCase();
+  const key = lang + '|' + limit + '|' + cc + '|' + full.toLowerCase();
 
   const hit = cacheGet(key);
   if (hit) {
@@ -56,6 +62,7 @@ export default async function handler(req, res) {
   try {
     const url = 'https://nominatim.openstreetmap.org/search'
       + '?format=json&addressdetails=1&limit=' + limit
+      + (cc ? '&countrycodes=' + cc : '')
       + '&accept-language=' + encodeURIComponent(lang)
       + '&q=' + encodeURIComponent(full);
 
@@ -72,6 +79,8 @@ export default async function handler(req, res) {
     const out = (Array.isArray(d) ? d : []).slice(0, limit).map((x) => ({
       display_name: x.display_name,
       lat: x.lat, lon: x.lon,
+      // Obálka se posílá dál: plní se z ní country_codes.lat_min/lat_max/... (sql-83).
+      boundingbox: x.boundingbox || null,
       address: x.address || {},
       type: x.type, class: x.class,
     }));
