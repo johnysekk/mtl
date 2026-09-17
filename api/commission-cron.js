@@ -213,8 +213,52 @@ let deferredMin = 0;
       (gyms || []).forEach(g => { gymMap[g.id] = g; });
     }
 
+    // ---- CHYBEJICI DIC U ZAHRANICNIHO POSKYTOVATELE ----
+    // Bez DIC nejde vystavit doklad podle pravidel EU (a OSS nechceme). Provizi proto
+    // NESTRHNEME: chova se to jako neuspesne strzeni -- bezi hodiny do pozastaveni uctu,
+    // aby to nesla ignorovat, ale penize nebereme, dokud nemuzeme vystavit doklad.
+    let _vatBlock = {};
+    try {
+      const _ps = (await sb('platform_settings?id=eq.1&select=require_vat_foreign,home_country'))[0] || {};
+      if (_ps.require_vat_foreign && gymIds.length) {
+        const EU = ['AT','BE','BG','CY','CZ','DE','DK','EE','ES','FI','FR','GR','HR','HU','IE','IT',
+                    'LT','LU','LV','MT','NL','PL','PT','RO','SE','SI','SK'];
+        const home = String(_ps.home_country || 'CZ').toUpperCase();
+        const _owners = [...new Set(gymIds.map(id => gymMap[id] && gymMap[id].owner_id).filter(Boolean))];
+        const _profs = _owners.length
+          ? await sb(`profiles?id=in.(${_owners.join(',')})&select=id,vat_id,billing_country,country_code`)
+          : [];
+        const _pm = {}; (_profs || []).forEach(p => { _pm[p.id] = p; });
+        gymIds.forEach(id => {
+          const gg = gymMap[id]; if (!gg) return;
+          const pr = _pm[gg.owner_id] || {};
+          const bc = String(gg.billing_country || pr.billing_country || pr.country_code || home).toUpperCase();
+          const euForeign = bc && bc !== home && EU.indexOf(bc) >= 0 && EU.indexOf(home) >= 0;
+          if (euForeign && !String(pr.vat_id || '').trim()) _vatBlock[id] = true;
+        });
+      }
+    } catch (e) { console.error('[commission] vat gate', e.message); }
+
     for (const gid of gymIds) {
       const g = gymMap[gid]; if (!g) continue;
+
+      // Chybi DIC -> nestrhavame, jen bezi hodiny (stejne jako pri selhani karty).
+      if (_vatBlock[gid]) {
+        try {
+          if (!g.commission_failed_at) {
+            await sb(`gyms?id=eq.${gid}`, { method:'PATCH', prefer:'return=minimal',
+              body: JSON.stringify({ commission_failed_at: new Date().toISOString() }) });
+          }
+          if (g.owner_id) {
+            const _sa = new Date(new Date(g.commission_failed_at || Date.now()).getTime() + GRACE_DAYS*86400000);
+            await notify(g.owner_id, 'commission_vat_needed',
+              '⚠️ Doplň DIČ (VAT ID), jinak se do 14 dnů tvůj účet pozastaví. Bez DIČ ti nemůžeme vystavit doklad podle pravidel EU, takže provizi nestrháváme a zůstává evidovaná.',
+              { needs:'vat_id', suspend_at: _sa.toISOString(),
+                msg_en:'⚠️ Add your VAT ID or your account will be suspended within 14 days. Without it we cannot issue a receipt under EU rules, so the commission stays on record and is not charged.' });
+          }
+        } catch (e) { console.error('[commission] vat notify', e.message); }
+        continue;
+      }
 
       // ---- BILLING (on/after the 6th, needs a card, 3-day retry spacing) ----
       const retryReady = !g.commission_next_retry || new Date(g.commission_next_retry).getTime() <= Date.now();

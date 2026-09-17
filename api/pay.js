@@ -606,9 +606,9 @@ async function membershipCheckout(req, res) {
 // Localized EP price by the provider's region. Mirrors _epRegion() in index.html.
 // SK is a cheaper EUR tier than the EU default; both are EUR, so we MUST key on COUNTRY, not currency.
 function epTierForCountry(cc){
-  // FLAT EP pricing: 1000 CZK/mo for everyone (founding price, first 100 PAID partners).
-  // Single currency = zero FX on MTL books. Client shows an indicative ECB conversion only.
-  // When the 100 founding spots fill, raise this to 2000 (and _epPrice() in index.html).
+  // Jedna cena pro všechny: 1000 CZK/měs, zakládající cena pro prvních 50 PLATÍCÍCH.
+  // Jedna měna = žádné kurzové rozdíly v účetnictví MTL; klient zobrazí orientační přepočet.
+  // Až se 50 míst zaplní, zvednout na 1500 (a _epPrice() v index.html).
   return { currency:'czk', amount:1000 };
 }
 
@@ -633,6 +633,24 @@ async function partnerCheckout(req, res) {
     if(!cc) cc = String(prof.country || '').toUpperCase();
   } catch(e){}
   const tier = epTierForCountry(cc);
+
+  // DIČ U ZAHRANIČNÍHO POSKYTOVATELE JE PODMÍNKA. Bez něj bychom u odběratele z jiné země
+  // EU museli řešit režim OSS (místem plnění je jeho stát). Tomu se vyhýbáme: předplatné
+  // se bez DIČ nezaloží, takže nevznikne platba, ke které nejde vystavit doklad.
+  try {
+    const _ps = (await _wsbGet('platform_settings?id=eq.1&select=require_vat_foreign,home_country'))[0] || {};
+    if (_ps.require_vat_foreign) {
+      const EU = ['AT','BE','BG','CY','CZ','DE','DK','EE','ES','FI','FR','GR','HR','HU','IE','IT',
+                  'LT','LU','LV','MT','NL','PL','PT','RO','SE','SI','SK'];
+      const home = String(_ps.home_country || 'CZ').toUpperCase();
+      const p2 = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(userId)}&select=vat_id,billing_country,country_code`))[0] || {};
+      const bc = String(p2.billing_country || p2.country_code || cc || home).toUpperCase();
+      const euForeign = bc && bc !== home && EU.indexOf(bc) >= 0 && EU.indexOf(home) >= 0;
+      if (euForeign && !String(p2.vat_id || '').trim()) {
+        return res.redirect(303, `${proto}://${host}/?partner_sub=need_vat`);
+      }
+    }
+  } catch (e) { console.error('[ep] vat gate', e.message); }
   // Test mode bills EP daily instead of monthly, so the whole loop -- charge, Stripe invoice,
   // e-mail, renewal -- can be seen the next morning rather than in a month.
   let _epDaily = false;

@@ -77,17 +77,34 @@ export default async function handler(req, res) {
     const custCountry = (pr.billing_country || pr.country_code || 'CZ').toUpperCase();
 
     // Dodavatel: MTL z platform_settings, aby se údaje neopisovaly na dvou místech.
+    // Dodavatel z platform_settings -- ta samá tabulka i sloupce, které používá Admin
+    // (plátce DPH, sazba, požadovat DIČ u cizinců) a doklad za provizi.
     const ps = (await sb('platform_settings?id=eq.1&select=*'))[0] || {};
     const ME = {
-      name: ps.mtl_name || 'Martial Training Lab s.r.o.',
-      ico: ps.mtl_ico || null, dic: ps.mtl_dic || null,
-      address: ps.mtl_sidlo || ps.mtl_address || null,
-      vat_payer: !!ps.mtl_vat_payer, vat_rate: (ps.mtl_vat_rate != null ? ps.mtl_vat_rate : null),
-      phone: ps.mtl_contact_phone || null, email: ps.mtl_contact_email || null,
-      country: (ps.mtl_country || 'CZ').toUpperCase(),
+      name: ps.name || 'Martial Training Lab s.r.o.',
+      ico: ps.ico || null, dic: ps.dic || null, address: ps.sidlo || null,
+      vat_payer: !!ps.vat_payer, vat_rate: (ps.vat_rate != null ? ps.vat_rate : null),
+      phone: ps.contact_phone || null, email: ps.contact_email || null,
+      country: String(ps.home_country || 'CZ').toUpperCase(),
+      require_vat_foreign: !!ps.require_vat_foreign,
     };
 
     const V = vatMode(ME.country, custCountry, pr.vat_id, !!pr.tax_id, ME.vat_payer);
+
+    // OSS NECHCEME. Odběratel z jiné země EU bez DIČ = doklad se nevystaví, stejně jako to
+    // dělá doklad za provizi (require_vat_foreign). Platba zůstává evidovaná a doklad
+    // vystavíme zpětně, jak DIČ doplní.
+    if (V.mode === 'oss_pending' && ME.require_vat_foreign) {
+      try {
+        await sb('notifications', { method: 'POST', headers: { Prefer: 'return=minimal' },
+          body: JSON.stringify({ user_id: uid, type: 'system', read: false,
+            message: '⚠️ Doklad za Exclusive MTL Partner zatím nevystaven — doplň DIČ (VAT ID), ať ho můžeme vystavit podle EU pravidel.',
+            data: JSON.stringify({ kind: 'doklad_vat_needed', needs: 'vat_id', period: String(b.period_start || '').slice(0,7),
+              amount, currency: cur,
+              msg_en: '⚠️ The Exclusive MTL Partner receipt is not issued yet — add your VAT ID so we can issue it under EU rules.' }) }) });
+      } catch (e) {}
+      return res.status(200).json({ ok: true, deferred: 'vat_id_required' });
+    }
 
     const period = String(b.period_start || new Date().toISOString()).slice(0, 7);
     const label = 'Exclusive MTL Partner — předplatné ' + period;
