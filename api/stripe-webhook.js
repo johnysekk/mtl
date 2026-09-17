@@ -960,6 +960,31 @@ export default async function handler(req, res) {
     } else if (event.type === 'invoice.paid') {
       // Renewal of a membership subscription on a connected (gym) account -> extend the period
       const inv = event.data.object;
+
+      // DOKLAD ZA EP PŘEDPLATNÉ. Faktura od Stripe není doklad od MTL, takže si ho
+      // vystavujeme sami (ep-doklad) -- pro účetnictví poskytovatele i pro dotace.
+      try {
+        const _subId = typeof inv.subscription === 'string' ? inv.subscription : (inv.subscription && inv.subscription.id);
+        if (_subId && !event.account) {           // EP běží na platformním účtu, ne na connected
+          const _who = await sbGet(`profiles?partner_sub=eq.${encodeURIComponent(_subId)}&select=id&limit=1`);
+          const _uid = _who && _who[0] && _who[0].id;
+          if (_uid) {
+            const _line = (inv.lines && inv.lines.data && inv.lines.data[0]) || null;
+            await fetch(`${APP_URL}/api/ep-doklad`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                intSecret: process.env.PIS_INTERNAL_SECRET,
+                invoice_id: inv.id, user_id: _uid,
+                amount: (inv.amount_paid != null ? inv.amount_paid : inv.total) / 100,
+                currency: inv.currency, test_mode: !inv.livemode,
+                period_start: _line && _line.period ? new Date(_line.period.start * 1000).toISOString() : null,
+                period_end: _line && _line.period ? new Date(_line.period.end * 1000).toISOString() : null,
+              }),
+            });
+          }
+        }
+      } catch (e) { console.error('ep doklad', e.message); }
+
       const sub = typeof inv.subscription === 'string' ? inv.subscription : (inv.subscription && inv.subscription.id);
       if (sub) {
         let periodEnd = null;
