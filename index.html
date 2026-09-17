@@ -7367,7 +7367,7 @@ function _openDemandChips(){
       + '</div><button id="dqCity" style="width:100%;padding:9px;background:#8A5A00;color:#fff;border:none;border-radius:9px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:inherit;">'
       + (EN?'Choose a city':'Vybrat m\u011bsto')+'</button></div>');
     var cb=ov.querySelector('#dqCity');
-    if(cb) cb.onclick=function(){ try{ if(typeof openCityInput==='function') openCityInput(); }catch(e){} };
+    if(cb) cb.onclick=function(){ try{ if(typeof openCityInput==='function') openCityInput('set'); }catch(e){} };
   };
 
   var draw=function(){
@@ -25680,15 +25680,27 @@ async function persistMyLocation(){
   // jinou cestou (obnova polohy na pozadí, GPS, cokoli přibude později).
   if(typeof _isBrowsingElsewhere==='function' && _isBrowsingElsewhere()) return;
   if(currentUser.coach_status==='approved') return; // kouč má souřadnice z přihlášky (jeho trénovací město)
+  // MIMO DOMOVSKOU ZEMI SE NEUKLÁDÁ NIC. GPS na soustředění nebo dovolené jinak přepsala
+  // město na cizí, zatímco country_code zůstal domácí -- deck načítal domov a vzdálenosti
+  // se počítaly z ciziny. Kdo se opravdu přestěhoval, změní zemi v Nastavení.
+  const _homeCC=String((currentUser.country_code||currentUser.residence_country||'')).toUpperCase()||null;
+  let _locCC=String(userLoc.countryCode||'').toUpperCase()||null;
+  if(!_locCC && userLoc.country && typeof _ccOf==='function'){ try{ _locCC=_ccOf(userLoc.country)||null; }catch(e){} }
+  if(_homeCC && _locCC && _locCC!==_homeCC){
+    toast(LANG==='en'?'Saved location kept \u2014 you are outside your country. Use \u201cJust browse elsewhere\u201d, or change your country in Settings.'
+                     :'Ulo\u017een\u00e1 poloha z\u016fstala \u2014 jsi mimo svou zemi. Pou\u017eij \u201eJen se pod\u00edvat jinam\u201c, nebo si zem\u011b zm\u011b\u0148 v Nastaven\u00ed.');
+    return;
+  }
   const upd = { city_lat:Math.round(userLoc.lat*100)/100, city_lng:Math.round(userLoc.lng*100)/100 };
   if(userLoc.city) upd.city = userLoc.city;
-  if(userLoc.country) upd.country = userLoc.country;
+  // country ANI country_code tahle cesta nemění -- patří výhradně výběru země. Dřív se sem
+  // zapisoval název ze reverzního geokódování, takže se název rozešel s kódem.
   const { error } = await supaClient.from('profiles').update(upd).eq('id', currentUser.id);
   if(error){ console.error('[location] uložení selhalo:', error.message); }
   else {
     console.log('[location] uloženo:', upd);
     currentUser.city_lat = userLoc.lat; currentUser.city_lng = userLoc.lng;
-    if(upd.city) currentUser.city = upd.city; if(upd.country) currentUser.country = upd.country;
+    if(upd.city) currentUser.city = upd.city;
   }
 }
 
@@ -25747,7 +25759,7 @@ function _showLocUpdatePrompt(lat,lng,city,country){
 
 function requestGps(){
   $('gpsOv').classList.remove('open');
-  if(!navigator.geolocation){ openCityInput(); return; }
+  if(!navigator.geolocation){ openCityInput('set'); return; }
   navigator.geolocation.getCurrentPosition(
     pos=>{
       const city=guessCityFromCoords(pos.coords.latitude,pos.coords.longitude);
@@ -25757,7 +25769,7 @@ function requestGps(){
       onLocSet();
       try{ fetch('/api/geo-reverse?zoom=10&lat='+rlat+'&lon='+rlng).then(function(r){return r.json();}).then(function(j){ if(j&&j.address&&userLoc&&userLoc.lat===rlat){ if(j.address.country) userLoc.country=j.address.country; var _cc=j.address.city||j.address.town||j.address.village; if(_cc) userLoc.city=_cc; } }).catch(function(){}); }catch(e){}
     },
-    ()=>{ openCityInput(); }, // silent fallback — no error toast
+    ()=>{ openCityInput('set'); }, // silent fallback — no error toast
     {timeout:6000,maximumAge:60000}
   );
 }
@@ -25769,8 +25781,12 @@ function _isBrowsingElsewhere(){ return !!(window._homeLoc); }
 async function _setBrowseLoc(loc){
   // Prohlížení v CIZÍ zemi se počítá do stejného limitu jako „zobrazit další země" -- jinak
   // by stačilo místo výběru země napsat cizí město a limit obejít.
-  const _home=(currentUser&&currentUser.country)||((window._homeLoc||userLoc||{}).country)||null;
-  const _far=!!(loc.country && _home && String(loc.country).toLowerCase()!==String(_home).toLowerCase());
+  // POROVNÁVÁ SE KÓD, NE NÁZEV. Názvy se lišily jazykem („France" vs „Francie", „Czechia"
+  // vs „Česko"), takže limit čerpal i ten, kdo se nikam nepřepnul.
+  const _homeCC=String((currentUser&&(currentUser.country_code||currentUser.residence_country))||'').toUpperCase()||null;
+  let _locCC=String(loc.countryCode||'').toUpperCase()||null;
+  if(!_locCC && loc.country && typeof _ccOf==='function'){ try{ _locCC=_ccOf(loc.country)||null; }catch(e){} }
+  const _far=!!(_locCC && _homeCC && _locCC!==_homeCC);
   if(_far && !(await _abroadUse())){
     toast(LANG==='en'?('You have looked abroad '+ABROAD_MAX_PER_DAY+'x today. Try again tomorrow.')
                      :('Dnes ses do zahrani\u010d\u00ed d\u00edval u\u017e '+ABROAD_MAX_PER_DAY+'\u00d7. Zkus to z\u00edtra.'));
@@ -25813,40 +25829,61 @@ async function _openLocMenu(){
     +'</div>';
   document.body.appendChild(ov);
   const done=()=>{ try{ ov.remove(); }catch(e){} };
-  ov.querySelector('#_lmSet').onclick=()=>{ done(); window._cityMode='set'; openCityInput(); };
-  ov.querySelector('#_lmBrowse').onclick=()=>{ done(); window._cityMode='browse'; openCityInput(); };
+  ov.querySelector('#_lmSet').onclick=()=>{ done(); openCityInput('set'); };
+  ov.querySelector('#_lmBrowse').onclick=()=>{ done(); openCityInput('browse'); };
   ov.querySelector('#_lmCancel').onclick=done;
   ov.onclick=(e)=>{ if(e.target===ov) done(); };
 }
 // Naplnění zemí v dialogu polohy. Zvlášť, aby se dalo zavolat znovu, až dorazí seznam
 // otevřených zemí (ensureOpenCountries) nebo se přepne jazyk.
 function _fillCityCountries(){
-  // Seznam zemí: otevřené z Adminu + vždycky ta vlastní, ať se dá vrátit zpátky.
   try{
-    const sel=$('cityCountry');
-    if(sel){
-      const cur=String((currentUser&&(currentUser.country_code||currentUser.residence_country))||'').toUpperCase();
-      let list=(typeof _countriesOpen==='function')?_countriesOpen().slice():[];
-      if(cur && !list.some(function(c){ return c[0]===cur; })){
-        const h=(typeof MTL_COUNTRIES!=='undefined'?MTL_COUNTRIES:[]).filter(function(x){ return x[0]===cur; })[0];
-        if(h) list=[h].concat(list);
+    const sel=$('cityCountry'); if(!sel) return;
+    const EN=LANG==='en';
+    const note=$('cityCcNote');
+    const _browse=(window._cityMode==='browse');
+    const cur=String((currentUser&&(currentUser.country_code||currentUser.residence_country))||'').toUpperCase();
+    let list=(typeof _countriesOpen==='function')?_countriesOpen().slice():[];
+    if(cur && !list.some(function(c){ return c[0]===cur; })){
+      const h=(typeof MTL_COUNTRIES!=='undefined'?MTL_COUNTRIES:[]).filter(function(x){ return x[0]===cur; })[0];
+      if(h) list=[h].concat(list);
+    }
+    const _nm=function(c){ return EN?c[2]:c[1]; };
+    if(!_browse){
+      // NASTAVENÍ MĚSTA ZEMI NEMĚNÍ. Výběr země tady byla druhá, nehlídaná cesta ke změně
+      // domovského trhu: stačilo nechat vlastní zemi a napsat cizí město -- v profilu pak
+      // zůstal country_code CZ a souřadnice Paříže. Země se mění jen v Nastavení → Moje
+      // země, kde to hlídá spouštěč (jednou za 24 h).
+      const own=list.filter(function(c){ return c[0]===cur; })[0];
+      sel.innerHTML = own
+        ? ('<option value="'+cur+'" selected>'+escapeHtml(_nm(own))+'</option>')
+        : ('<option value="'+escapeHtml(cur)+'" selected>'+escapeHtml(cur||'\u2014')+'</option>');
+      sel.disabled=true; sel.style.opacity='.65'; sel.onchange=null;
+      if(note){
+        note.style.display='block';
+        note.textContent=EN
+          ? 'City is set inside your country. Moving abroad is Settings \u2192 My country; for a single session there use \u201cJust browse elsewhere\u201d.'
+          : 'M\u011bsto se nastavuje ve tv\u00e9 zemi. P\u0159esun do jin\u00e9 zem\u011b je v Nastaven\u00ed \u2192 Moje zem\u011b; na jeden tr\u00e9nink v zahrani\u010d\u00ed pou\u017eij \u201eJen se pod\u00edvat jinam\u201c.';
       }
-      const EN=LANG==='en';
-      sel.innerHTML=list.map(function(c){ return '<option value="'+c[0]+'"'+(c[0]===cur?' selected':'')+'>'+escapeHtml(EN?c[2]:c[1])+'</option>'; }).join('');
-      const note=$('cityCcNote');
-      if(note) note.style.display='none';
-      sel.onchange=function(){
-        if(!note) return;
-        const changed=String(sel.value||'').toUpperCase()!==cur;
-        note.style.display=changed?'block':'none';
-        if(changed) note.textContent=(EN
-          ? 'Changing your country moves your whole account — once a day. For a single session abroad just browse that country instead.'
-          : 'Změnou země se přesouvá celý účet — jde to jednou za den. Na jeden trénink v zahraničí stačí tu zemi jen prohlížet.');
-      };
+      return;
+    }
+    // Prohlížení: země je volba, do profilu se nic nezapisuje.
+    sel.disabled=false; sel.style.opacity='';
+    sel.innerHTML=list.map(function(c){ return '<option value="'+c[0]+'"'+(c[0]===cur?' selected':'')+'>'+escapeHtml(_nm(c))+'</option>'; }).join('');
+    sel.onchange=null;
+    if(note){
+      note.style.display='block';
+      note.textContent=EN ? 'Temporary \u2014 your saved location and country stay as they are.'
+                          : 'Do\u010dasn\u011b \u2014 tvoje ulo\u017een\u00e1 poloha a zem\u011b z\u016fstanou, jak jsou.';
     }
   }catch(e){}
 }
-function openCityInput(){
+function openCityInput(mode){
+  // REŽIM PATŘÍ K OTEVŘENÍ, NE DO GLOBÁLU NAVĚKY. window._cityMode zůstávalo po „Jen se
+  // podívat jinam" nastavené na 'browse', takže každé další otevření (Nastavení, fallback
+  // po odmítnuté GPS, návrat po změně země) se tvářilo jako prohlížení a do profilu
+  // neuložilo nic.
+  window._cityMode = (mode === 'browse') ? 'browse' : 'set';
   $('cityInp').value='';
   try{ _fillCityCountries(); }catch(e){}
   try{ if(typeof ensureOpenCountries==='function') ensureOpenCountries().then(function(){ try{ _fillCityCountries(); }catch(e){} }); }catch(e){}
@@ -25855,18 +25892,22 @@ function openCityInput(){
 }
 
 async function confirmCity(){
+  const EN=LANG==='en';
   const val=$('cityInp').value.trim();
-  if(!val){ toast(L('⚠️ Zadej město')); return; }
-  // ZEMĚ Z VÝBĚRU JE ROZHODUJÍCÍ. Město se pak hledá uvnitř té země, takže „Brno" u
-  // francouzského účtu znamená přesun do Česka, a ne nic.
-  const _selCC=String(($('cityCountry')&&$('cityCountry').value)||'').toUpperCase() || null;
-  const _oldCC=String((currentUser&&(currentUser.country_code||currentUser.residence_country))||'').toUpperCase() || null;
-  const _ccChange=!!(_selCC && _oldCC && _selCC!==_oldCC);
-
-  // Nejdřív zkus předdefinovaná města (rychlé)
+  if(!val){ toast(L('\u26a0\ufe0f Zadej m\u011bsto')); return; }
   const _browse=(window._cityMode==='browse');
-  // Zkratka pro předdefinovaná města platí jen tehdy, když vybraná země souhlasí s tou
-  // u města -- „Brno" ve Francii neexistuje a musí se dohledat geokódováním.
+  // ZEMĚ JE DANÁ PROFILEM, MĚSTO SE HLEDÁ V NÍ. Dřív rozhodoval výběr země v tomhle dialogu
+  // a ten přebil i to, co vrátil geokodér: kdo nechal „Česko" a napsal „Paris", dostal do
+  // profilu country_code CZ a souřadnice Paříže -- deck načítal české kluby a vzdálenosti
+  // se počítaly z Francie. Přesun do jiné země je vlastní krok (Nastavení → Moje země,
+  // hlídá spouštěč), koukat jinam se dá přes „Jen se podívat jinam" (denní limit).
+  const _homeCC=String((currentUser&&(currentUser.country_code||currentUser.residence_country))||'').toUpperCase()||null;
+  const _selCC=_browse
+    ? (String(($('cityCountry')&&$('cityCountry').value)||'').toUpperCase()||_homeCC)
+    : _homeCC;
+  const _ccNm=function(c){ try{ return (typeof _ccName==='function' && _ccName(c)) || c; }catch(e){ return c; } };
+
+  // Předdefinovaná města (rychlá cesta). Platí jen když sedí země.
   const m=Object.entries(CITY_COORDS).find(function(e){
     if(e[0].toLowerCase()!==val.toLowerCase()) return false;
     if(_selCC && e[1].cc && _selCC!==e[1].cc) return false;
@@ -25874,89 +25915,70 @@ async function confirmCity(){
   });
   if(m){
     $('cityOv').classList.remove('open');
-    if(_browse){ await _setBrowseLoc({lat:m[1].lat,lng:m[1].lng,city:m[0], country:((window._homeLoc&&window._homeLoc.country)||(userLoc&&userLoc.country)||null)}); return; }
-    // ZMĚNA ZEMĚ PATŘÍ I SEM. Dřív se u předdefinovaného města uložily jen souřadnice,
-    // takže Francouz, který napsal „Brno", zůstal s domovskou zemí FR a v decku se nic
-    // nezměnilo. Kontrola i zápis jsou proto stejné jako u geokódované adresy.
-    const _cc2=_selCC || m[1].cc || null;
-    const _oldCC2=(currentUser&&(currentUser.country_code||currentUser.residence_country))||null;
-    if(_cc2 && _oldCC2 && _cc2!==String(_oldCC2).toUpperCase()){
-      const _lm=(typeof _ccMoveLeftMs==='function')?_ccMoveLeftMs():0;
-      if(_lm>0){
-        const _h=Math.ceil(_lm/3600000);
-        toast(LANG==='en'?('You can change your country again in '+_h+' h — use “Just browse elsewhere” instead.')
-                         :('Zemi můžeš změnit znovu za '+_h+' h — zkus „Jen se podívat jinam".'));
-        return;
-      }
-    }
-    userLoc={lat:m[1].lat,lng:m[1].lng,city:m[0],country:(typeof _ccName==='function'&&_cc2)?_ccName(_cc2):null,countryCode:_cc2};
-    try{
-      if(currentUser){
-        const _patch={ city:m[0], city_lat:m[1].lat, city_lng:m[1].lng };
-        if(_cc2){ _patch.country_code=_cc2; _patch.country=(typeof _ccName==='function'?_ccName(_cc2):null); }
-        const { error:_e2 }=await supaClient.from('profiles').update(_patch).eq('id', currentUser.id);
-        if(_e2 && /country_change_too_soon/.test(String(_e2.message||''))){
-          toast(LANG==='en'?'You can change your country again later':'Zemi můžeš změnit znovu později');
+    if(_browse){ await _setBrowseLoc({ lat:m[1].lat, lng:m[1].lng, city:m[0], country:_ccNm(m[1].cc), countryCode:(m[1].cc||null) }); return; }
+    userLoc={ lat:m[1].lat, lng:m[1].lng, city:m[0], country:(_homeCC?_ccNm(_homeCC):null), countryCode:_homeCC };
+    if(currentUser){
+      // Mění se JEN město a souřadnice. Země sem nepatří.
+      const { error:_e2 }=await supaClient.from('profiles')
+        .update({ city:m[0], city_lat:m[1].lat, city_lng:m[1].lng }).eq('id', currentUser.id);
+      if(_e2){
+        if(/city_outside_country/.test(String(_e2.message||''))){
+          toast(EN?'That city is not in your country.':'To m\u011bsto nen\u00ed v tv\u00e9 zemi.');
           return;
         }
-        currentUser.city=m[0]; currentUser.city_lat=m[1].lat; currentUser.city_lng=m[1].lng;
-        if(_cc2){ currentUser.country_code=_cc2; currentUser.country=(typeof _ccName==='function'?_ccName(_cc2):currentUser.country); currentUser.country_changed_at=new Date().toISOString(); }
-        try{ if(typeof _syncCountryRow==='function') _syncCountryRow(); }catch(e){}
+        toast('\u26a0\ufe0f '+(_e2.message||'')); return;
       }
-    }catch(e){}
+      currentUser.city=m[0]; currentUser.city_lat=m[1].lat; currentUser.city_lng=m[1].lng;
+      try{ if(typeof _syncCountryRow==='function') _syncCountryRow(); }catch(e){}
+    }
     onLocSet();
     return;
   }
 
-  // Jinak geokóduj přes Nominatim (jakékoliv město na světě)
-  toast(L('🔍 Hledám město...'));
-  try {
-    // Město se hledá UVNITŘ vybrané země, jinak „Brno" najde první Brno na světě.
-    const _ccNm=(_selCC && typeof _ccName==='function') ? _ccName(_selCC) : '';
-    const res = await fetch(`/api/geo-search?limit=1&q=${encodeURIComponent(val + (_ccNm ? (', ' + _ccNm) : ''))}`);
-    const data = await res.json();
-    if(data && data.length){
-      const cn = data[0].address && data[0].address.country || null;
-      const ccode = data[0].address && data[0].address.country_code ? String(data[0].address.country_code).toUpperCase() : null;
-      $('cityOv').classList.remove('open');
-      // Prohlížení jinde NIC nepřepisuje -- ani zemi v profilu.
-      if(_browse){ await _setBrowseLoc({ lat:parseFloat(data[0].lat), lng:parseFloat(data[0].lon), city:val, country:cn }); return; }
-      // Přestěhování do JINÉ ZEMĚ mění, co se ti načítá, a obchází tím limit na prohlížení
-      // ciziny. Jednou denně je dost i pro toho, kdo se opravdu stěhuje.
-      const _oldC=(currentUser&&currentUser.country)||null;
-      if(cn && _oldC && String(cn).toLowerCase()!==String(_oldC).toLowerCase() && !(await _homeMoveUse())){
-        toast(LANG==='en'?('You can change your country once a day. Use \u201eJust browse elsewhere\u201c instead.')
-                         :('Zemi si m\u016f\u017ee\u0161 zm\u011bnit jednou denn\u011b. Pou\u017eij \u201eJen se pod\u00edvat jinam\u201c.'));
-        return;
-      }
-      userLoc={ lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon), city: val, country: cn };
-      // ROZHODUJE VÝBĚR ZEMĚ, ne to, co vrátil geokodér. Geokodér zemi občas nevrátí vůbec
-      // (a pak zůstala prázdná, takže v Nastavení nic nesvítilo a deck nevěděl, kde jsi),
-      // nebo ji vrátí v jiném jazyce. Zapisujeme kód i název a rovnou srovnáme nastavení.
-      const _wcc = _selCC || ccode || null;
-      const _wnm = (_wcc && typeof _ccName==='function') ? _ccName(_wcc) : (cn || null);
-      if(currentUser){
-        currentUser.country = _wnm; if(_wcc) currentUser.country_code = _wcc;
-        const _up={ city: val, city_lat: parseFloat(data[0].lat), city_lng: parseFloat(data[0].lon), country: _wnm };
-        if(_wcc) _up.country_code=_wcc;
-        try{
-          const { error:_ue }=await supaClient.from('profiles').update(_up).eq('id', currentUser.id);
-          if(_ue && /country_change_too_soon/.test(String(_ue.message||''))){
-            toast(LANG==='en'?'You can change your country again later':'Zemi můžeš změnit znovu později');
-            return;
-          }
-          if(_wcc) currentUser.country_changed_at=new Date().toISOString();
-        }catch(e){}
-        try{ if(typeof _syncCountryRow==='function') _syncCountryRow(); }catch(e){}
-      }
-      onLocSet();
-    } else {
-      toast(L('⚠️ Město nenalezeno, zkus jiný název'));
+  toast(L('\ud83d\udd0d Hled\u00e1m m\u011bsto...'));
+  try{
+    // Hledá se UVNITŘ země přes countrycodes. Země přilepená k dotazu („Paris, Czechia")
+    // je pro Nominatim jen nápověda a klidně vrátí Paříž ve Francii.
+    const res=await fetch('/api/geo-search?limit=1'
+      +(_selCC?('&cc='+encodeURIComponent(_selCC)):'')
+      +'&lang='+encodeURIComponent(LANG||'cs')
+      +'&q='+encodeURIComponent(val));
+    const data=await res.json();
+    if(!(data && data.length)){
+      toast(_selCC ? (EN?('No such city in '+_ccNm(_selCC)+' \u2014 check the spelling.')
+                        :('Takov\u00e9 m\u011bsto v '+_ccNm(_selCC)+' nenajdeme \u2014 zkontroluj n\u00e1zev.'))
+                   : L('\u26a0\ufe0f M\u011bsto nenalezeno, zkus jin\u00fd n\u00e1zev'));
+      return;
     }
-  } catch(e){
+    const a=(data[0].address||{});
+    const ccode=a.country_code?String(a.country_code).toUpperCase():null;
+    // Pojistka za geokodérem: countrycodes drží, ale kdyby někdy vrátil mimo, radši nic.
+    if(_selCC && ccode && ccode!==_selCC){
+      toast(EN?(val+' is not in '+_ccNm(_selCC)+'.'):(val+' nen\u00ed v '+_ccNm(_selCC)+'.'));
+      return;
+    }
+    const lat=parseFloat(data[0].lat), lng=parseFloat(data[0].lon);
+    $('cityOv').classList.remove('open');
+    if(_browse){ await _setBrowseLoc({ lat:lat, lng:lng, city:val, country:(a.country||_ccNm(_selCC)), countryCode:(ccode||_selCC||null) }); return; }
+    userLoc={ lat:lat, lng:lng, city:val, country:(_homeCC?_ccNm(_homeCC):(a.country||null)), countryCode:(_homeCC||ccode) };
+    if(currentUser){
+      const { error:_ue }=await supaClient.from('profiles')
+        .update({ city:val, city_lat:lat, city_lng:lng }).eq('id', currentUser.id);
+      if(_ue){
+        if(/city_outside_country/.test(String(_ue.message||''))){
+          toast(EN?'That city is not in your country.':'To m\u011bsto nen\u00ed v tv\u00e9 zemi.');
+          return;
+        }
+        toast('\u26a0\ufe0f '+(_ue.message||'')); return;
+      }
+      currentUser.city=val; currentUser.city_lat=lat; currentUser.city_lng=lng;
+      try{ if(typeof _syncCountryRow==='function') _syncCountryRow(); }catch(e){}
+    }
+    onLocSet();
+  }catch(e){
     // Když geokódování selže, radši nic nenastavuj -- dosud to tiše hodilo člověka do Prahy
     // a on si myslel, že kouká na své město.
-    toast(LANG==='en'?'\u26a0\ufe0f Could not find the city, try again':'\u26a0\ufe0f M\u011bsto se nepoda\u0159ilo naj\u00edt, zkus to znovu');
+    toast(EN?'\u26a0\ufe0f Could not find the city, try again':'\u26a0\ufe0f M\u011bsto se nepoda\u0159ilo naj\u00edt, zkus to znovu');
     console.error('Geocoding error:', e);
   }
 }
@@ -38728,7 +38750,7 @@ const { data, error } = await supaClient
 }
 
 // Settings pickers
-$('sLoc').onclick=()=>openCityInput();
+$('sLoc').onclick=()=>openCityInput('set');
 if($('sMyCountry')) $('sMyCountry').onclick=()=>openCountryPicker();
 try{ _syncCountryRow(); }catch(e){}
 
@@ -38833,7 +38855,7 @@ async function openCountryPicker(){
       _syncCountryRow();
       toast((EN?'✅ Moved to ':'✅ Přesunuto do ')+nm, 1);
       // Nové město si vybere hned, jinak by deck neměl podle čeho řadit.
-      setTimeout(function(){ try{ if(typeof openCityInput==='function') openCityInput(); }catch(e){} }, 400);
+      setTimeout(function(){ try{ if(typeof openCityInput==='function') openCityInput('set'); }catch(e){} }, 400);
       try{ if(typeof init==='function') init(); }catch(e){}
     }catch(e){ toast('⚠️ '+((e&&e.message)||'')); }
   };
@@ -41204,7 +41226,7 @@ function enterApp(){
           try{ localStorage.setItem('mtl_loc_asked', String(Date.now())); }catch(e){}
           // requestGps si při odmítnutí sám otevře ruční zadání města (openCityInput).
           if(typeof requestGps==='function') requestGps();
-          else if(typeof openCityInput==='function') openCityInput();
+          else if(typeof openCityInput==='function') openCityInput('set');
         }, 1200);
       }
     }
