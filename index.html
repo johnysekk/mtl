@@ -20416,6 +20416,24 @@ async function _logClassStatus(gid, occ, status, reason){
     .upsert(row, { onConflict:'gym_id,class_date,class_time,class_name' });
   if(error) throw error;
 }
+// ŠTÍTEK ZKUŠEBNÍHO TRÉNINKU. Ukazuje pořadí i celkový nárok („1/2 zdarma"), aby kouč
+// věděl, jestli je to poslední zkouška, nebo teprve první. Pořadí se počítá z evidence
+// zkušebních u toho klubu; když se nepodaří načíst, ukáže se aspoň „zdarma".
+function _trialPill(d){
+  try{
+    const EN=LANG==='en';
+    const tot=(_myGymData && _myGymData.trial_classes) ? Number(_myGymData.trial_classes) : 0;
+    const key=String(d.student_id||'')+'|'+String(d.child_name||'');
+    const ord=(window._attTrialOrd||{})[key] || null;
+    // Srozumitelně, ne zlomkem. Kouč u tabule nemá luštit „1/2".
+    let txt;
+    if(!ord || !tot) txt = EN ? 'free trial' : 'zkušební zdarma';
+    else if(tot===1)  txt = EN ? 'free trial' : 'zkušební zdarma';
+    else if(ord>=tot) txt = EN ? ('free · last of '+tot) : ('zdarma · poslední z '+tot);
+    else              txt = EN ? ('free · '+ord+' of '+tot) : ('zdarma · '+ord+'. z '+tot);
+    return tagPill('🎁 '+txt, '#B8860B');
+  }catch(e){ return ''; }
+}
 async function openClassAttendance(occ){
   // Pro obnovení seznamu po zápisu docházky odjinud (potvrzení platby).
   try{ window._caOcc=occ; }catch(e){}
@@ -20468,10 +20486,23 @@ async function openClassAttendance(occ){
   try{ const { data } = await supaClient.from('gym_class_reservations').select('*').eq('gym_id',gid).eq('class_date',occ.date); rs=data||[]; }catch(e){}
   // I 'paid_claimed': student zaplatil převodem a klub to ještě nepotvrdil. Do teď v docházce
   // vůbec nebyl, takže kdo přišel na lekci, nešel odbavit -- kouč ho neviděl.
-  try{ const { data } = await supaClient.from('gym_bookings').select('id,student_id,student_name,class_date,class_time,class_name,status,child_name,child_age,amount,currency,paid_to').eq('gym_id',gid).in('status',['active','paid_claimed']).eq('class_date',occ.date); drops=data||[]; }catch(e){}
+  try{ const { data } = await supaClient.from('gym_bookings').select('id,student_id,student_name,class_date,class_time,class_name,status,child_name,child_age,amount,currency,paid_to,is_trial').eq('gym_id',gid).in('status',['active','paid_claimed']).eq('class_date',occ.date); drops=data||[]; }catch(e){}
     // Kdo si vzal cenu vyzadujici doklad. Transakce rika JEN to, ze takovou cenu ma --
     // jestli uz doklad ukazal, rozhoduje proof_verifications, ne priznak na platbe.
     // Diky tomu se student neobtezuje pri kazde navsteve a klub muze overeni odebrat.
+    // Kolikátý zkušební to u klubu je (pro štítek „1/2 zdarma").
+    window._attTrialOrd={};
+    try{
+      const { data:_tr } = await supaClient.from('gym_trials')
+        .select('student_id,child_name,created_at').eq('gym_id',gid)
+        .order('created_at',{ascending:true});
+      const _cnt={};
+      (_tr||[]).forEach(function(t){
+        const k=String(t.student_id||'')+'|'+String(t.child_name||'');
+        _cnt[k]=(_cnt[k]||0)+1;
+        window._attTrialOrd[k]=_cnt[k];
+      });
+    }catch(e){}
     window._attProof={};
     try{ await _pvLoad(gid); }catch(e){}
     try{
@@ -20563,12 +20594,17 @@ async function openClassAttendance(occ){
               // Nepotvrzená platba: štítek navíc a proklik na potvrzení. Odbavit ho jde hned.
               const _unc=(d.status==='paid_claimed');
               const _upill=_unc?('<button class="caUnconf" data-id="'+(d.id||'')+'" style="font-size:11px;color:#9A5B00;background:#FFF4E5;border:1px solid #F0D9B5;border-radius:8px;padding:3px 8px;font-weight:700;white-space:nowrap;cursor:pointer;font-family:inherit;">\u23f3 '+(EN?'confirm payment':'potvrdit platbu')+'</button>'):'';
-              if(d.child_name) return { sid:d.student_id, child:d.child_name, name:kidEmoji(d.child_age)+' '+d.child_name, pill:_kpill+_upill, unconfirmed:_unc };
+              // ZKUŠEBNÍ TRÉNINK MÁ VLASTNÍ ŠTÍTEK. Kouč u tabule musí poznat, kdo je tu
+              // poprvé zdarma: chová se k němu jinak než ke členovi a klub ví, že za něj
+              // nepřišly peníze. Kolikátý z kolika řekne _trialPill.
+              const _tpill=(d.is_trial ? _trialPill(d) : '');
+              if(d.child_name) return { sid:d.student_id, child:d.child_name, name:kidEmoji(d.child_age)+' '+d.child_name, pill:_kpill+_tpill+_upill, unconfirmed:_unc };
               // Kdo si vzal zlevnenou cenu s dokladem a jeste ho neukazal. Bez tohohle by
               // sleva byla na cestne slovo -- appka ji nabidne a klub o tom nikdy nevi.
               var _pf=(window._attProof||{})[String(d.student_id||'')]||null;
               return { sid:d.student_id, name:d.student_name||'Student',
-                pill:tagPill(EN?'drop-in':'jednoráz','#C0392B')+_upill, unconfirmed:_unc,
+                // U zkušebního se „jednoráz" nehodí: nezaplatil, je to zkouška zdarma.
+                pill:(d.is_trial ? _tpill : tagPill(EN?'drop-in':'jednoráz','#C0392B'))+_upill, unconfirmed:_unc,
                 // Overuje se NAROK na cenu, ne jedna platba -- proto se veze id ceny.
                 proofPlan:(_pf?(_pf.dropin_plan_id||''):null) };
             })
