@@ -5502,6 +5502,12 @@ const NOTIF_T = {
   gym_announce: (d)=> '📣 ' + (d.gym_name ? (d.gym_name + ': ') : '') + (d.body || ''),
   // Oficiální oznámení od MTL. Vypadá stejně jako oznámení klubu, jen odesílatelem je MTL.
   mtl_announce: (d)=> '📣 MTL' + (d.subject ? (' · ' + d.subject) : '') + ': ' + (d.body || ''),
+  // Zkušební trénink zdarma: klub potřebuje vědět kdo, kdy a na kterou lekci, a dostat se
+  // odtud rovnou do docházky.
+  trial_booked: (d)=> '🎁 ' + (d.student_name||'Student')
+      + (LANG==='en' ? ' booked a free trial class' : ' si rezervoval(a) zkušební trénink zdarma')
+      + (d.class_name ? (' — ' + d.class_name) : '')
+      + (d.class_date ? (' ' + _notifWhenCz(d.class_date, d.class_time, LANG==='en')) : ''),
   coowner_granted: (d)=> LANG==='en' ? `🤝 ${d.gym_name||'A klub'} made you a CO-OWNER — you now share full operational control of the gym.` : `🤝 ${d.gym_name||'Gym'} z tebe udělal SPOLUMAJITELE — sdílíš teď plnou provozní kontrolu nad klubem.`,
   coowner_revoked: (d)=> LANG==='en' ? `${d.gym_name||'A klub'} removed your co-owner status — you're back to a regular coach.` : `${d.gym_name||'Klub'} ti odebral status spolumajitele — jsi zpět běžný kouč.`,
   gym_team_invite: (d)=> LANG==='en' ? `🏛️ ${d.gym_name} invites you to join their team on MTL.` : `🏛️ ${d.gym_name} tě zve do svého týmu na MTL.`,
@@ -14330,7 +14336,9 @@ async function bookGymDropin(g, occ, _child){
       }
       toast((LANG==='en'?'✅ Free trial class booked':'✅ Zkušební trénink zarezervován'), 1);
       try{ if(typeof loadMyBookings==='function') loadMyBookings(); }catch(e){}
-      try{ closeSheet('shProfile'); }catch(e){}
+      // Obsazenost lekce se počítá z načtených rezervací, takže profil klubu je potřeba
+      // překreslit -- jinak u lekce dál svítí „poslední místo", i když už je plno.
+      try{ if(typeof openGymProfile==='function' && g && g.id) await openGymProfile(g.id); }catch(e){}
       return;
     }
   }catch(e){ console.warn('trial', e && e.message); }
@@ -16307,6 +16315,31 @@ async function openGymAudit(gymId, gymName){
   }).join('');
 }
 async function _recpDropinConfirm(g, occ){
+  // NÁROK NA ZKUŠEBNÍ VSTUP NA RECEPCI. Kdo přijde na recepci a má u klubu zkušební zdarma,
+  // nemá platit. Recepce to musí vědět dřív, než začne vybírat peníze.
+  try{
+    if(typeof trialLeft==='function' && g){
+      const _tl=await trialLeft(g);
+      if(_tl>0){
+        const _ok=confirm(LANG==='en'
+          ? ('This student still has '+_tl+' free trial class(es) here. Book it as free?')
+          : ('Tenhle student má u vás ještě '+_tl+'\u00d7 zkušební trénink zdarma. Zapsat jako zdarma?'));
+        if(_ok){
+          try{
+            const { error:_te }=await supaClient.rpc('book_trial', {
+              p_gym: g.id, p_child: null,
+              p_date: (occ&&occ.date)||new Date().toISOString().slice(0,10),
+              p_time: (occ&&occ.time)||null, p_class_name: (occ&&occ.name)||null,
+            });
+            if(_te){ toast('⚠️ '+(_te.message||'')); return; }
+            toast(LANG==='en'?'✅ Free trial class booked':'✅ Zkušební trénink zapsán', 1);
+            return;
+          }catch(e){ toast('⚠️ '+((e&&e.message)||'')); return; }
+        }
+      }
+    }
+  }catch(e){}
+
   var EN=LANG==='en'; var cur=g.currency||'CZK'; var sym=_curSym(cur);
   var _dp=g.dropin_price||0, _dcur=g.currency||'CZK';
   if(occ && occ.coach){ try{ const { data:_cp }=await supaClient.from('gym_coach_pricing').select('dropin_price,currency').eq('gym_id',g.id).eq('coach_id',occ.coach).maybeSingle(); if(_cp&&_cp.dropin_price){ _dp=_cp.dropin_price; _dcur=_cp.currency||_dcur; } }catch(e){} }
@@ -27865,6 +27898,7 @@ async function loadNotifications(append){
     let linkLabel = L('Otevřít ›');
     if(k==='payment_confirmed'){ var _pcd={}; try{ _pcd=JSON.parse(n.data||'{}'); }catch(e){} var _gg=_pcd.goto; linkLabel = (_gg==='dropin'||_gg==='bookings') ? (LANG==='en'?'Booking details ›':'Detail rezervace ›') : (_gg==='tickets') ? (LANG==='en'?'my ticket ›':'moje vstupenka ›') : (_gg==='courses') ? (LANG==='en'?'my course ›':'můj kurz ›') : (_gg==='merch') ? (LANG==='en'?'view ›':'zobrazit ›') : (LANG==='en'?'membership details ›':'detail členství ›'); } else if(k==='qr_intent') linkLabel = LANG==='en'?'To confirm ›':'K potvrzení ›'; else if(k==='qr_released'||k==='qr_reservation_expired') linkLabel = LANG==='en'?'Book again ›':'Rezervovat znovu ›'; else if(k==='qr_requeued') linkLabel = LANG==='en'?'Pay again ›':'Zaplatit znovu ›'; else if(k==='sounding_ask') linkLabel = LANG==='en'?'Answer ›':'Odpovědět ›'; else if(k==='cover_needed') linkLabel = LANG==='en'?'Take the cover ›':'Vzít záskok ›'; else if(k==='cover_filled'||k==='cover_filled_owner') linkLabel = LANG==='en'?'View ›':'Zobrazit ›'; else if(k==='doklad_vat_needed') linkLabel = LANG==='en'?'Add VAT ID ›':'Doplnit DIČ ›'; else if(k==='course_new') linkLabel = LANG==='en'?'Course details ›':'Detail kurzu ›'; else if(k==='slot_demand') linkLabel = LANG==='en'?'Open my diary ›':'Otevřít diář ›'; else if(k==='cohort_month_due') linkLabel = LANG==='en'?'Pay now ›':'Doplatit ›'; else if(k==='cohort_month_collect') linkLabel = LANG==='en'?'Open roster ›':'Otevřít roster ›'; else if(k==='cohort_deposit_paid') linkLabel = LANG==='en'?'View roster ›':'Otevřít účastníky ›'; else if(k==='cohort_qr_claim') linkLabel = LANG==='en'?'View roster ›':'Otevřít účastníky ›'; else if(k==='cohort_deposit_mine') linkLabel = LANG==='en'?'My course ›':'Můj kurz ›';
       else if(k==='doklad_unified') linkLabel = LANG==='en'?'Open the receipt ›':'Otevřít doklad ›';
+      else if(k==='trial_booked') linkLabel = LANG==='en'?'Open attendance ›':'Otevřít docházku ›';
       // Nový poskytovatel: u organizace to znamená ke SCHVÁLENÍ, u kouče a klubu jen na profil.
       // Bez prokliku musel founder hledat sekci v Adminu ručně, což u věci, která čeká na jeho
       // rozhodnutí, nemá smysl.
@@ -28108,6 +28142,10 @@ async function loadNotifications(append){
         else if(k==='cohort_qr_claim'){ try{ const _q=JSON.parse(n.data||'{}'); if(_q.cohort_id && typeof openCohortRoster==='function'){ closeSheet('shNotif'); openCohortRoster(_q.cohort_id, _q.cohort_name||''); } }catch(e){} }
         else if(k==='cohort_deposit_mine'){ closeSheet('shNotif'); if(typeof openSheet==='function') openSheet('shBookings'); if(typeof _upTab==='function') _upTab('kurzy'); }
         else if(k==='cover_filled'||k==='cover_filled_owner'){ /* informational — no navigation */ }
+        else if(k==='trial_booked'){
+          // Stejná cesta jako u ostatních notifikací o lekci: rovnou do docházky té lekce.
+          try{ _notifOpenAttendance(d.gym_id, { name:d.class_name, date:d.class_date, time:d.class_time }); }catch(e){}
+        }
         else if(k==='new_provider'){
           var _np={}; try{ _np=JSON.parse(n.data||'{}'); }catch(e){}
           closeSheet('shNotif');
