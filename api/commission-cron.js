@@ -481,7 +481,7 @@ let deferredMin = 0;
     const unpaidOrg = new Set(orgIds);
     let orgMap = {};
     if (orgIds.length) {
-      const orgs = await sb(`organizations?id=in.(${orgIds.join(',')})&select=id,name,owner_id,payment_mode,commission_card_customer,commission_card_pm,commission_failed_at,commission_next_retry,account_suspended,cash_blocked`);
+      const orgs = await sb(`organizations?id=in.(${orgIds.join(',')})&select=id,name,owner_id,payment_mode,takes_cash,commission_card_customer,commission_card_pm,commission_failed_at,commission_next_retry,account_suspended,cash_blocked`);
       (orgs || []).forEach(o => { orgMap[o.id] = o; });
     }
     for (const oid of orgIds) {
@@ -538,12 +538,24 @@ let deferredMin = 0;
       if (billDay && !(o.commission_card_customer && o.commission_card_pm) && o.owner_id) {
         await notifyMail(o.owner_id, 'Doplň platební kartu pro provizi MTL', 'Bez karty nejde provizi z hotovosti a QR plateb strhnout. Doplň ji v Platby a provize.', 'Add a payment card for the MTL commission', 'Without a card we cannot charge the commission on cash and QR payments. Add it in Payments & commission.'); await notify(o.owner_id, 'commission_no_card', `Doplň platební kartu pro provizi MTL, jinak se pozastaví prodej lístků.`, { organization_id: oid, msg_en: `Add a payment card for the MTL commission, otherwise ticket sales will be paused.` });
       }
-      // ---- POZASTAVENÍ po dvou týdnech neuhrazené provize, stejně jako u klubu ----
-      if (o.commission_failed_at && (Date.now() - new Date(o.commission_failed_at).getTime()) > 14 * 86400000 && !o.account_suspended) {
-        await sb(`organizations?id=eq.${oid}`, { method: 'PATCH', prefer: 'return=minimal',
-          body: JSON.stringify({ account_suspended: true, cash_blocked: true }) });
-        if (o.owner_id) await notifyMail(o.owner_id, 'Účet je pozastavený — neuhrazená provize MTL', 'Provize se nepodařilo strhnout dva týdny. Po uhrazení se účet obnoví sám.', 'Account suspended — unpaid MTL commission', 'We have not been able to charge the commission for two weeks. The account is restored automatically once it is paid.'); await notify(o.owner_id, 'commission_suspended', `🚫 Neuhrazená provize MTL — prodej lístků je pozastavený.`, { organization_id: oid, msg_en: `🚫 Unpaid MTL commission — ticket sales are paused.` });
-        suspended++;
+      // ---- POZASTAVENÍ po dvou týdnech neuhrazené provize ----
+      // PODLE KOLEJE, STEJNĚ JAKO U KLUBU. Dřív se nastavovalo account_suspended i
+      // cash_blocked naráz bez ohledu na režim. Na bankovní koleji peníze přes MTL
+      // neprojdou, takže jediná páka je pozastavit účet; na Stripe koleji se provize bere
+      // z každé platby a nedoplatek může vzniknout jen z hotovosti, takže se zastaví
+      // zaznamenávání hotovosti a karetní platby běží dál.
+      if (o.commission_failed_at && (Date.now() - new Date(o.commission_failed_at).getTime()) > 14 * 86400000) {
+        if (o.payment_mode !== 'stripe' && !o.account_suspended) {
+          await sb(`organizations?id=eq.${oid}`, { method: 'PATCH', prefer: 'return=minimal',
+            body: JSON.stringify({ account_suspended: true }) });
+          if (o.owner_id) await notifyMail(o.owner_id, 'Účet je pozastavený — neuhrazená provize MTL', 'Provize se nepodařilo strhnout dva týdny. Po uhrazení se účet obnoví sám.', 'Account suspended — unpaid MTL commission', 'We have not been able to charge the commission for two weeks. The account is restored automatically once it is paid.'); await notify(o.owner_id, 'commission_suspended', `🚫 Neuhrazená provize MTL — organizace je pozastavená.`, { organization_id: oid, msg_en: `🚫 Unpaid MTL commission — the organisation is suspended.` });
+          suspended++;
+        } else if (o.payment_mode === 'stripe' && o.takes_cash && !o.cash_blocked) {
+          await sb(`organizations?id=eq.${oid}`, { method: 'PATCH', prefer: 'return=minimal',
+            body: JSON.stringify({ cash_blocked: true }) });
+          if (o.owner_id) await notify(o.owner_id, 'cash_blocked', `🚫 Zaznamenávání hotovosti bylo pozastaveno kvůli neuhrazené provizi. Karetní platby běží dál; hotovost odblokuje úhrada provize.`, { organization_id: oid, msg_en: `🚫 Recording cash was paused because of an unpaid commission. Card payments keep working; paying the commission unblocks cash.` });
+          suspended++;
+        }
       }
     }
     // ---- UVOLNĚNÍ: organizace s hodinami selhání, ale bez dluhu ----

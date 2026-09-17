@@ -24,7 +24,14 @@ async function _sbPatch(path, body){
   return r.ok;
 }
 
-function tableFor(kind){ return String(kind) === 'coach' ? 'profiles' : 'gyms'; }
+// Organizace je vlastni prijemce (vlastni ucet, vlastni doklady), takze ma i vlastni
+// kartu na provizi -- nesmi se michat s kartou majitele ani jeho klubu.
+function tableFor(kind){
+  const k = String(kind);
+  if (k === 'coach') return 'profiles';
+  if (k === 'org' || k === 'organization') return 'organizations';
+  return 'gyms';
+}
 
 export default async function handler(req, res){
   try{
