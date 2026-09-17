@@ -32431,6 +32431,9 @@ async function openOrgClubs(org, filter){
     }; });
     body.querySelectorAll('.ocPaid').forEach(function(b){ b.onclick=async function(){
       const r=rows.find(x=>String(x.id)===b.dataset.id); if(!r) return;
+      // BEZ KOLEJE A KARTY SE NEVYBÍRÁ. Stejné pravidlo jako u klubu a kouče: dokud není
+      // kam peníze poslat a z čeho strhnout provizi, nejde příjem zaúčtovat.
+      if(typeof _orgPayGate==='function' && _orgPayGate(org)) return;
       if(!confirm(EN?'Mark the fee as received?':'Ozna\u010dit poplatek jako p\u0159ijat\u00fd?')) return;
       try{
         // CENA A MĚNA SE MUSÍ ZAPSAT SPOLU S PLATBOU. Dřív se uložilo jen fee_paid_at, řádek zůstal
@@ -32463,6 +32466,8 @@ async function openOrgClubs(org, filter){
     }; });
     body.querySelectorAll('.ocFee').forEach(function(b){ b.onclick=async function(){
       const r=rows.find(x=>String(x.id)===b.dataset.id); if(!r) return;
+      // Výzva k úhradě bez účtu je výzva, kterou klub nemá jak zaplatit.
+      if(typeof _orgPayGate==='function' && _orgPayGate(org)) return;
       // Poplatek je jeden pro vsechny kluby a zadava se JEDNOU v udajich federace -- stejne
       // jako klub nastavuje cenu clenstvi. Na vztah se ulozi jako SNIMEK, aby pozdejsi zmena
       // sazby neprepsala uz vystavene vyzvy a zaplacene poplatky.
@@ -33210,47 +33215,197 @@ async function openOrgStats(org, ym, tab){
   { const b=body.querySelector('#_osClubs'); if(b) b.onclick=function(){ openOrgClubs(org); }; }
   { const b=body.querySelector('#_osFin'); if(b) b.onclick=function(){ openOrgFinance(org); }; }
 }
+// ═══ PLATBY A PROVIZE ORGANIZACE ════════════════════════════════════════════════════════
+// Samostatné nastavení, ne sekce v Údajích o organizaci. Organizace je vlastní příjemce:
+// vlastní účet, vlastní karta na provizi, vlastní doklady. Dřív se kolej dovozovala z toho,
+// jestli je vyplněný IBAN, a přepočítávala se při každém uložení nastavení.
+// STEJNÉ POŘADÍ JAKO U KOUČE A KLUBU: co chybí → sazba → režim plateb → účet → karta.
+const ORG_BILLING_FIELDS = ['legal_name','tax_id','billing_line1','billing_city','billing_postal','billing_country'];
+function _orgPayMissing(o){
+  const miss=[];
+  if(!o) return ['entity'];
+  const mode=(o.payment_mode || (o.stripe_account ? 'stripe' : ((o.receiver_id_value||o.receiver_name) ? 'qr_bank' : null)));
+  if(!mode) miss.push('paymode');
+  else if(mode==='stripe'){ if(!o.stripe_account) miss.push('stripe'); }
+  else if(!o.receiver_id_value || !o.receiver_name) miss.push('iban');
+  // KARTA JE PODMÍNKA VÝBĚRU PENĚZ. Na bankovní koleji peníze přes MTL neprojdou, takže
+  // provizi (1 % ze soutěží) nelze vzít odjinud než z uložené karty.
+  if(mode!=='stripe' && o.commission_card_status!=='active') miss.push('card');
+  ORG_BILLING_FIELDS.forEach(function(f){ if((f in o) && !String(o[f]||'').trim()) miss.push(f); });
+  return miss;
+}
+function _orgPayLabels(miss){
+  const EN=LANG==='en';
+  const M={ paymode:EN?'choose how you want to receive payments':'zvolit způsob, jakým budete přijímat platby',
+            stripe:EN?'connect a Stripe account':'připojit účet Stripe',
+            iban:EN?'add IBAN and account holder':'doplnit IBAN a jméno majitele účtu',
+            card:EN?'save a card for the commission charge':'uložit kartu ke stržení provize',
+            legal_name:EN?'legal name':'právní název', tax_id:EN?'Reg. number':'IČO',
+            billing_line1:EN?'billing address':'fakturační adresu', billing_city:EN?'city':'město',
+            billing_postal:EN?'postcode':'PSČ', billing_country:EN?'country':'zemi',
+            entity:EN?'unknown':'neznámé' };
+  return (miss||[]).map(function(k){ return M[k]||k; });
+}
+// Výběr peněz (vyzvat klub, označit poplatek, prodat lístek) se bez koleje a karty nepustí.
+// Vrací true, když je něco potřeba doplnit, a rovnou to ukáže.
+function _orgPayGate(org){
+  const miss=_orgPayMissing(org||{});
+  const _hard=miss.filter(function(k){ return k==='paymode'||k==='iban'||k==='stripe'||k==='card'; });
+  if(!_hard.length) return false;
+  toast((LANG==='en'?'⚠️ Finish payments first: ':'⚠️ Nejdřív dokonči platby: ')+_orgPayLabels(_hard).join(', '));
+  try{ openOrgFinance(org); }catch(e){}
+  return true;
+}
 async function openOrgFinance(org){
   const EN=LANG==='en';
   if(!org||!org.id) return;
+  // Vždycky ze serveru: karta i kolej se mění jinde (návrat ze Stripe, jiné zařízení) a
+  // obrazovka, která slibuje jinou sazbu, než se účtuje, je ta, co bere důvěru.
+  try{ const { data:_fresh }=await supaClient.from('organizations').select('*').eq('id',org.id).maybeSingle();
+    if(_fresh) org=Object.assign(org,_fresh); }catch(e){}
   let ov=document.getElementById('shOrgFinance');
   if(!ov){ ov=document.createElement('div'); ov.id='shOrgFinance'; ov.className='sheet'; ov.style.zIndex='94';
     (document.querySelector('.app')||document.body).appendChild(ov); }
   const bs="width:100%;padding:13px;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:10px;";
-  ov.innerHTML='<div class="shdr"><div class="shdr-title">\u{1F4B0} '+(EN?'Payments & documents':'Finance a doklady')+'</div><button class="btn-close" id="_ofClose">\u2715</button></div>'
+  const rowS="width:100%;box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 15px;background:var(--surf);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;color:var(--dark);cursor:pointer;font-family:'DM Sans';margin-bottom:10px;";
+  const _mode=(org.payment_mode||null);
+  const _modeLbl=(_mode==='stripe')?'Stripe':((_mode==='qr_bank')?(EN?'Bank transfer':'Bankovní převod'):(EN?'Not set':'Nenastaveno'));
+  const _intro=!!(org.intro_free_until && new Date(String(org.intro_free_until)+'T23:59:59')>=new Date());
+  const _miss=_orgPayMissing(org);
+  const _RAIL={paymode:1,stripe:1,iban:1,card:1};
+  const _needRail=_miss.some(function(k){ return _RAIL[k]; });
+  const _needBill=_miss.some(function(k){ return !_RAIL[k]; });
+  // ── co chybí ──────────────────────────────────────────────────────────────────────────
+  const _warn=_miss.length?('<div style="background:#FFF7ED;border:1px solid #FCD9A8;border-radius:12px;padding:11px 13px;margin-bottom:14px;font-size:12.5px;color:#9a5a00;line-height:1.55;">'
+    +'⚠️ <b>'+(EN?'You cannot collect money yet':'Zatím nemůžete vybírat peníze')+'</b><br>'
+    +escapeHtml(_orgPayLabels(_miss).join(', '))
+    +'<div style="margin-top:9px;display:flex;gap:7px;flex-wrap:wrap;">'
+      +(_needRail?('<button id="opGoMode" style="padding:8px 12px;background:#9a5a00;border:1px solid #9a5a00;border-radius:9px;font-size:12px;font-weight:800;color:#fff;cursor:pointer;font-family:inherit;">🔁 '+(EN?'Payment mode':'Režim plateb')+'</button>'):'')
+      +(_needBill?('<button id="opGoBill" style="padding:8px 12px;background:#fff;border:1px solid #FCD9A8;border-radius:9px;font-size:12px;font-weight:800;color:#9a5a00;cursor:pointer;font-family:inherit;">🧾 '+(EN?'Billing details':'Fakturační údaje')+'</button>'):'')
+    +'</div></div>'):'';
+  // ── sazba ─────────────────────────────────────────────────────────────────────────────
+  const _rateRow=function(lbl,val){ return '<div style="display:flex;justify-content:space-between;gap:12px;"><span>'+lbl+'</span><b>'+val+'</b></div>'; };
+  const _rateCard='<div style="background:linear-gradient(135deg,#0A7A4F,#005A3C);color:#fff;border-radius:14px;padding:13px 16px;margin-bottom:14px;box-shadow:0 2px 10px rgba(0,96,64,.18);">'
+    +'<div style="font-size:11.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:rgba(255,255,255,.75);margin-bottom:5px;">'+(EN?'Your MTL commission':'Vaše provize MTL')+'</div>'
+    +'<div class="mtlRatePct" style="font-size:26px;font-weight:800;line-height:1;">'+(_intro?'0 %':'1 %')+'</div>'
+    +'<div style="font-size:12px;color:rgba(255,255,255,.85);margin-top:7px;line-height:1.4;">'
+      +(_intro?(EN?'Introductory period — nothing is charged until ':'Zaváděcí období — do ')+String(org.intro_free_until).slice(0,10)+(EN?'':' se neúčtuje nic')
+             :(EN?'Competitions and fight nights · taken from each payment through MTL':'Soutěže a fight nights · strženo z každé platby přes MTL'))+'</div>'
+    +'<div style="font-size:12.5px;line-height:1.9;margin-top:8px;padding-top:7px;border-top:1px solid rgba(255,255,255,.18);">'
+      +_rateRow((EN?'Membership fees':'Členské poplatky'),'0 %')
+      +_rateRow((EN?'Courses and seminars':'Školení a semináře'),'0 %')
+      +_rateRow((EN?'Competitions and fight nights':'Soutěže a fight nights'),(_intro?'0 %':'1 %'))
+    +'</div></div>';
+  // ── účet a karta ──────────────────────────────────────────────────────────────────────
+  const _rcv=org.receiver_id_value
+    ? ('<div style="font-size:12.5px;color:var(--mid);line-height:1.7;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:11px 13px;margin-bottom:10px;">'
+       +'<div><span style="color:var(--light);">'+(EN?'Account':'Účet')+':</span> <b style="color:var(--dark);">'+escapeHtml(org.receiver_id_value)+'</b></div>'
+       +'<div><span style="color:var(--light);">'+(EN?'Holder':'Majitel')+':</span> <b style="color:var(--dark);">'+escapeHtml(org.receiver_name||'—')+'</b></div></div>')
+    : '';
+  const _cardLbl=(org.commission_card_status==='active')
+    ? ((org.commission_card_brand||'card')+' •••• '+(org.commission_card_last4||'')+(org.commission_card_exp?(' · '+org.commission_card_exp):''))
+    : (EN?'Not saved':'Neuložena');
+  ov.innerHTML='<div class="shdr"><div class="shdr-title">💳 '+(EN?'Payments & commission':'Platby a provize')+'</div><button class="btn-close" id="_ofClose">✕</button></div>'
     +'<div style="padding:16px 18px 44px;">'
-    +'<div style="background:linear-gradient(135deg,#0A7A4F,#005A3C);color:#fff;border-radius:14px;padding:13px 16px;margin-bottom:14px;">'
-      +'<div style="font-size:11.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:rgba(255,255,255,.75);margin-bottom:7px;">'+(EN?'MTL commission':'Provize MTL')+'</div>'
-      +'<div style="font-size:13px;line-height:1.9;">'
-        +'<div style="display:flex;justify-content:space-between;gap:12px;"><span>'+(EN?'Membership fees':'\u010clensk\u00e9 poplatky')+'</span><b>0 %</b></div>'
-        +'<div style="display:flex;justify-content:space-between;gap:12px;"><span>'+(EN?'Courses and seminars':'\u0160kolen\u00ed a semin\u00e1\u0159e')+'</span><b>0 %</b></div>'
-        +'<div style="display:flex;justify-content:space-between;gap:12px;border-top:1px solid rgba(255,255,255,.18);margin-top:4px;padding-top:4px;"><span>'+(EN?'Competitions and fight nights':'Sout\u011b\u017ee a fight nights')+'</span><b>1 %</b></div>'
-      +'</div>'
-    +'</div>'
-    +((currentUser&&currentUser.role==='founder')?('<label style="display:flex;align-items:center;gap:8px;margin:0 0 14px;padding:11px 13px;border:1px solid var(--border);border-radius:12px;cursor:pointer;">'
-      +'<input type="checkbox" id="orgDailyChk"'+(org.commission_daily?' checked':'')+' style="width:16px;height:16px;cursor:pointer;">'
-      +'<span style="font-size:12px;color:var(--mid);">'+(EN?'Charge daily instead of monthly (testing)':'Strh\u00e1vat provizi denn\u011b m\u00edsto m\u011bs\u00ed\u010dn\u011b (testov\u00e1n\u00ed)')+'</span></label>'):'')
-    +'<button id="orgMtlCommBtn" style="'+bs+'background:var(--surf);color:var(--dark);border:1px solid var(--border);">\ud83e\uddfe '+(EN?'Commissions & receipts to MTL':'Provize a doklady v\u016f\u010di MTL')+'</button>'
+    +_warn
+    +_rateCard
+    +'<button id="opRowMode" style="'+rowS+'"><span>🔁 '+(EN?'Payment mode':'Režim plateb')+'</span><span style="display:flex;align-items:center;gap:8px;"><span style="color:var(--mid);font-weight:700;font-size:13px;">'+_modeLbl+'</span><span style="color:var(--red);font-weight:700;">›</span></span></button>'
+    +((_mode==='qr_bank')?(_rcv
+      +'<button id="opRowCard" style="'+rowS+'"><span>💳 '+(EN?'Commission card':'Karta na provizi')+'</span><span style="display:flex;align-items:center;gap:8px;"><span style="color:'+((org.commission_card_status==='active')?'var(--mid)':'#b3261e')+';font-weight:700;font-size:13px;">'+escapeHtml(_cardLbl)+'</span><span style="color:var(--red);font-weight:700;">›</span></span></button>'):'')
+    +'<button id="opRowBill" style="'+rowS+'"><span>🧾 '+(EN?'Billing details':'Fakturační údaje')+'</span><span style="color:var(--red);font-weight:700;">›</span></button>'
+    +((currentUser&&currentUser.role==='founder')?('<label style="display:flex;align-items:center;gap:8px;margin:4px 0 14px;padding:11px 13px;border:1px solid var(--border);border-radius:12px;cursor:pointer;">'
+      +'<input type="checkbox" id="opDailyChk"'+(org.commission_daily?' checked':'')+' style="width:16px;height:16px;cursor:pointer;">'
+      +'<span style="font-size:12px;color:var(--mid);">'+(EN?'Charge daily instead of monthly (testing)':'Strhávat provizi denně místo měsíčně (testování)')+'</span></label>'):'')
+    +'<button id="orgMtlCommBtn" style="'+bs+'background:var(--surf);color:var(--dark);border:1px solid var(--border);">🧾 '+(EN?'Commissions & receipts to MTL':'Provize a doklady vůči MTL')+'</button>'
     +'<div id="orgDocsBox"></div>'
     +'</div>';
   try{ if(!_sheetParent['shOrgFinance']) _sheetParent['shOrgFinance']='shOrgApply'; }catch(e){}
   try{ openSheet('shOrgFinance'); }catch(e){}
   ov.querySelector('#_ofClose').onclick=function(){ try{ closeSheet('shOrgFinance'); }catch(e){ ov.remove(); } };
+  { const b=ov.querySelector('#opRowMode'); if(b) b.onclick=function(){ openOrgPayMode(org); }; }
+  { const b=ov.querySelector('#opGoMode'); if(b) b.onclick=function(){ openOrgPayMode(org); }; }
+  { const b=ov.querySelector('#opRowCard'); if(b) b.onclick=function(){ _startCardSetup('org', org.id, org.invoice_email||org.contact_email||''); }; }
+  // Fakturační údaje zůstávají v Údajích o organizaci -- odtud se tam jen doklikne.
+  { const _bill=function(){ try{ closeSheet('shOrgFinance'); }catch(e){} try{ openOrgApply(); }catch(e){} };
+    const b1=ov.querySelector('#opRowBill'), b2=ov.querySelector('#opGoBill');
+    if(b1) b1.onclick=_bill; if(b2) b2.onclick=_bill; }
   // Zapisuje do sloupce, ktery ctou oba crony -- cely retezec (strhnuti, doklad, mail) se tak
   // da overit druhy den rano, ne az prvniho.
-  { const _dc=ov.querySelector('#orgDailyChk');
+  { const _dc=ov.querySelector('#opDailyChk');
     if(_dc) _dc.onchange=async function(){
       const on=!!_dc.checked;
       try{
         const { error }=await supaClient.from('organizations').update({ commission_daily:on }).eq('id',org.id);
         if(error) throw error;
         org.commission_daily=on;
-        toast(on?(EN?'\u2705 Daily charging on':'\u2705 Denn\u00ed str\u017een\u00ed zapnuto'):(EN?'Back to monthly':'Zp\u011bt na m\u011bs\u00ed\u010dn\u00ed'));
-      }catch(e){ _dc.checked=!on; toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
+        toast(on?(EN?'✅ Daily charging on':'✅ Denní strhávání zapnuto'):(EN?'Back to monthly':'Zpět na měsíční'));
+      }catch(e){ _dc.checked=!on; toast('⚠️ '+((e&&e.message)||'')); }
     };
   }
   { const _mc=ov.querySelector('#orgMtlCommBtn'); if(_mc) _mc.onclick=function(){ openMtlCommissions({ organizationId: org.id, orgName: org.name||'' }); }; }
   try{ renderOrgDocs(org, ov.querySelector('#orgDocsBox')); }catch(e){}
+}
+// VÝBĚR KOLEJE. Banka je první a jediná hotová: Stripe Connect pro organizace (vlastní
+// účet, ne účet majitele) se staví zvlášť, takže se tu nabízí, ale nejde vybrat -- slíbit
+// kolej, která neexistuje, znamená organizaci s režimem, ve kterém nemůže nic přijmout.
+function openOrgPayMode(org){
+  const EN=LANG==='en';
+  if(!org||!org.id) return;
+  let ov=document.getElementById('shOrgPayMode');
+  if(!ov){ ov=document.createElement('div'); ov.id='shOrgPayMode'; ov.className='sheet'; ov.style.zIndex='96';
+    (document.querySelector('.app')||document.body).appendChild(ov); }
+  const _st="width:100%;box-sizing:border-box;padding:12px 13px;border:1px solid var(--border);border-radius:11px;font-size:14px;font-family:'DM Sans';background:#fff;color:var(--dark);margin-bottom:8px;";
+  const mode=org.payment_mode||'';
+  const _t=org.receiver_id_type||'iban';
+  const _opt=function(v,l){ return '<option value="'+v+'"'+(_t===v?' selected':'')+'>'+l+'</option>'; };
+  ov.innerHTML='<div class="shdr"><div class="shdr-title">🔁 '+(EN?'Payment mode':'Režim plateb')+'</div><button class="btn-close" id="_opmClose">✕</button></div>'
+    +'<div style="padding:16px 18px 44px;">'
+    +'<label style="display:flex;gap:9px;align-items:flex-start;padding:12px;border:1.5px solid '+((mode==='qr_bank')?'var(--red)':'var(--border)')+';border-radius:12px;margin-bottom:8px;cursor:pointer;">'
+      +'<input type="radio" name="opPayMode" value="qr_bank"'+((mode==='qr_bank')?' checked':'')+' style="margin-top:2px;">'
+      +'<div><div style="font-weight:700;font-size:14.5px;margin-bottom:5px;">🏦 '+(EN?'Bank transfer':'Bankovní převod')+'</div>'
+      +'<div style="font-size:12.5px;color:var(--mid);line-height:1.45;">'+(EN?'Clubs pay membership fees by transfer or QR straight to your account. The MTL commission (competitions only) is charged monthly from a saved card.':'Kluby platí členské poplatky převodem nebo QR přímo na váš účet. Provizi MTL (jen ze soutěží) strhneme měsíčně z uložené karty.')+'</div></div></label>'
+    +'<label style="display:flex;gap:9px;align-items:flex-start;padding:12px;border:1.5px dashed var(--border);border-radius:12px;margin-bottom:14px;opacity:.6;cursor:not-allowed;">'
+      +'<input type="radio" disabled style="margin-top:2px;">'
+      +'<div><div style="font-weight:700;font-size:14.5px;margin-bottom:5px;">💳 Stripe · '+(EN?'coming soon':'připravujeme')+'</div>'
+      +'<div style="font-size:12.5px;color:var(--mid);line-height:1.45;">'+(EN?'Card payments for tickets, with the commission taken from each payment. Needs its own Stripe account for the organization — we are building it.':'Karetní platby za lístky, provize se bere z každé platby. Vyžaduje vlastní účet Stripe pro organizaci — staví se.')+'</div></div></label>'
+    +'<div id="opBankBox" style="'+((mode==='qr_bank')?'':'display:none;')+'">'
+      +'<div class="sec-lbl">'+(EN?'Where the money goes':'Kam chodí peníze')+'</div>'
+      +'<select id="opRcvType" style="'+_st+'">'+_opt('iban','IBAN (SEPA / CZ)')+_opt('pix','PIX (BR)')+_opt('upi','UPI (IN)')+_opt('venmo','Venmo (US)')+_opt('cashapp','Cash App (US)')+'</select>'
+      +'<input id="opRcvValue" value="'+escapeHtml(org.receiver_id_value||'')+'" placeholder="'+(EN?'IBAN / PIX key / UPI VPA':'IBAN / PIX klíč / UPI VPA')+'" style="'+_st+'">'
+      +'<input id="opRcvName" value="'+escapeHtml(org.receiver_name||'')+'" placeholder="'+(EN?'Account holder (as at the bank)':'Majitel účtu (jak ho má banka)')+'" style="'+_st+'">'
+      +'<label style="display:flex;gap:9px;align-items:flex-start;cursor:pointer;font-size:13px;font-weight:600;color:var(--dark);margin:2px 0 12px;"><input id="opCash" type="checkbox" '+(org.takes_cash?'checked':'')+' style="width:16px;height:16px;margin-top:1px;"><span>'+(EN?'We also take cash on site':'Bereme i hotovost na místě')+'</span></label>'
+      +'<button id="opRcvSave" style="width:100%;padding:14px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Save':'Uložit')+'</button>'
+    +'</div></div>';
+  try{ if(!_sheetParent['shOrgPayMode']) _sheetParent['shOrgPayMode']='shOrgFinance'; }catch(e){}
+  try{ openSheet('shOrgPayMode'); }catch(e){}
+  ov.querySelector('#_opmClose').onclick=function(){ try{ closeSheet('shOrgPayMode'); }catch(e){ ov.remove(); } };
+  try{ ov.querySelectorAll('input[name="opPayMode"]').forEach(function(r){ r.onchange=function(){
+    const bb=ov.querySelector('#opBankBox'); if(bb) bb.style.display=(this.value==='qr_bank')?'':'none';
+  }; }); }catch(e){}
+  { const sb=ov.querySelector('#opRcvSave');
+    if(sb) sb.onclick=async function(){
+      const _ty=(ov.querySelector('#opRcvType')&&ov.querySelector('#opRcvType').value)||'iban';
+      const _va=((ov.querySelector('#opRcvValue')&&ov.querySelector('#opRcvValue').value)||'').trim();
+      const _nm=((ov.querySelector('#opRcvName')&&ov.querySelector('#opRcvName').value)||'').trim();
+      if(!_va || !_nm){ toast(EN?'⚠️ Fill in the account and the holder':'⚠️ Doplňte účet i majitele'); return; }
+      // Stejná kontrola jako u klubu: špatný IBAN se pozná teď, ne až u první platby.
+      if(typeof _validReceiver==='function' && !_validReceiver(_ty,_va)){
+        toast(EN?'⚠️ That does not look like a valid account':'⚠️ Tohle nevypadá jako platný účet'); return;
+      }
+      sb.disabled=true;
+      try{
+        const _up={ payment_mode:'qr_bank', receiver_id_type:_ty, receiver_id_value:_va, receiver_name:_nm,
+          takes_cash:!!(ov.querySelector('#opCash')&&ov.querySelector('#opCash').checked),
+          confirm_mode:'realtime', receiver_declared_at:new Date().toISOString(), stripe_account:null };
+        const { error }=await supaClient.from('organizations').update(_up).eq('id',org.id);
+        if(error) throw error;
+        Object.assign(org,_up);
+        toast(EN?'✅ Saved':'✅ Uloženo');
+        try{ closeSheet('shOrgPayMode'); }catch(e){}
+        try{ openOrgFinance(org); }catch(e){}
+      }catch(e){ sb.disabled=false; toast('⚠️ '+((e&&e.message)||e)); }
+    };
+  }
 }
 async function renderOrgDocs(org, box){
   const EN=LANG==='en';
@@ -33324,7 +33479,8 @@ async function openOrgApply(kind){
       ? (EN?(' 0 % until '+new Date(o.intro_free_until).toLocaleDateString('en-GB')+'.')
            :(' 0 % do '+new Date(o.intro_free_until).toLocaleDateString('cs-CZ')+'.'))
       : '';
-    head=`<div style="background:#E8F5EE;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:13px;color:#006040;line-height:1.5;">\u2705 ${EN?'Approved. You can create events.':'Schv\u00e1leno. M\u016f\u017ee\u0161 vytv\u00e1\u0159et akce.'}<br>${_sazba}${_intro}</div>
+    head=`<div style="background:#E8F5EE;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:13px;color:#006040;line-height:1.5;">\u2705 ${EN?'Approved. You can create events.':'Schv\u00e1leno. M\u016f\u017ee\u0161 vytv\u00e1\u0159et akce.'}<br><span style="font-size:12.5px;">${_sazba}${_intro}</span>
+      <div style="font-size:11.5px;color:#0a7a4f;margin-top:6px;">${EN?'Details in Payments & commission.':'Podrobnosti v Platby a provize.'}</div></div>
     <button id="orgStatsBtn" style="width:100%;box-sizing:border-box;padding:14px 16px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:14px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:'DM Sans';margin-bottom:10px;text-align:center;">\u{1F4CA} ${EN?'Dashboard':'P\u0159ehled'}</button>
         ${_isFed?`<button id="orgClubsBtn" style="width:100%;box-sizing:border-box;padding:14px 16px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:14px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:'DM Sans';margin-bottom:10px;text-align:center;">\u{1F3C5} ${EN?'Member clubs':'\u010clensk\u00e9 kluby'}</button>`:'<div style="height:4px;"></div>'}
     <button id="orgNewEvent" style="width:100%;box-sizing:border-box;padding:14px 16px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:14px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:'DM Sans';margin-bottom:10px;text-align:center;">\u2795 ${EN?'Create an event':'Vytvo\u0159it akci'}</button>`;
@@ -33368,24 +33524,8 @@ ${_orgMine&&_orgMine.id?`<button id="orgSetToggle" style="width:100%;box-sizing:
     <div id="orgFeeList" style="margin-bottom:10px;"></div>
     <button id="orgFeeAdd" type="button" style="width:100%;padding:11px;background:var(--surf);color:var(--dark);border:1px dashed var(--border);border-radius:11px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:12px;">+ ${EN?'Add a period':'P\u0159idat obdob\u00ed'}</button>`:''}
     </div></details>
-    <details class="setSec"><summary>🔄 ${EN?'Where the money goes':'Kam chodí peníze'}</summary><div class="setBody">
-    <div class="sec-lbl">${EN?'Where the money goes':'Kam chod\u00ed pen\u00edze'}</div>
-    <p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:0 0 8px;">${_isFed
-      ? (EN?'Bank transfer or QR. Independent of your clubs \u2014 the organization is a separate payee.':'P\u0159evodem nebo QR k\u00f3dem. Nez\u00e1visle na tv\u00fdch klubech \u2014 organizace je samostatn\u00fd p\u0159\u00edjemce.')
-      : (EN?'Ticket sales need a card payment account (Stripe) \u2014 that comes later. Bank details are used for membership and invoices.':'Prodej l\u00edstk\u016f bude pot\u0159ebovat karetn\u00ed \u00fa\u010det (Stripe) \u2014 ten p\u0159ibude pozd\u011bji. Bankovn\u00ed \u00fadaje slou\u017e\u00ed pro poplatky a faktury.')}</p>
-    <select id="orgRcvType" style="${_st}">
-      <option value="">${EN?'\u2014 Type \u2014':'\u2014 Typ \u2014'}</option>
-      <option value="iban"${o.receiver_id_type==='iban'?' selected':''}>IBAN (SEPA / CZ)</option>
-      <option value="pix"${o.receiver_id_type==='pix'?' selected':''}>PIX (BR)</option>
-      <option value="upi"${o.receiver_id_type==='upi'?' selected':''}>UPI (IN)</option>
-      <option value="venmo"${o.receiver_id_type==='venmo'?' selected':''}>Venmo (US)</option>
-      <option value="cashapp"${o.receiver_id_type==='cashapp'?' selected':''}>Cash App (US)</option>
-    </select>
-    <input id="orgRcvValue" value="${ev(o.receiver_id_value)}" placeholder="${EN?'IBAN / PIX key / UPI VPA':'IBAN / PIX kl\u00ed\u010d / UPI VPA'}" style="${_st}">
-    <input id="orgRcvName" value="${ev(o.receiver_name)}" placeholder="${EN?'Account holder (as at the bank)':'Majitel \u00fa\u010dtu (jak ho m\u00e1 banka)'}" style="${_st}">
-    <label style="display:flex;gap:9px;align-items:flex-start;cursor:pointer;font-size:13px;font-weight:600;color:var(--dark);margin:2px 0 12px;"><input id="orgTakesCash" type="checkbox" ${o.takes_cash?'checked':''} style="width:18px;height:18px;flex:none;margin-top:1px;"> <span>${EN?'We also take cash on the spot':'Bereme i hotovost na m\u00edst\u011b'}<br><span style="font-size:11.5px;font-weight:400;color:var(--mid);">${EN?'Payments recorded by hand; MTL commission is collected monthly from the card.':'Platby se zaznamen\u00e1vaj\u00ed ru\u010dn\u011b, provize MTL se strhne m\u011bs\u00ed\u010dn\u011b z karty.'}</span></span></label>
-    </div></details>
-    ${_orgMine&&_orgMine.id?`<button id="orgFinanceBtn" style="width:100%;box-sizing:border-box;padding:14px 16px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:14px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:'DM Sans';margin-bottom:10px;text-align:left;">💰 ${EN?'Payments & documents':'Finance a doklady'}</button>`:''}
+    
+    ${_orgMine&&_orgMine.id?`<button id="orgFinanceBtn" style="width:100%;box-sizing:border-box;padding:14px 16px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:14px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:'DM Sans';margin-bottom:10px;text-align:left;">💰 ${EN?'Payments & commission':'Platby a provize'}</button>`:''}
     
     <button id="orgSubmit" style="width:100%;padding:15px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:'DM Sans';margin-top:6px;">${(o.status==='pending'||_approved)?(EN?'Save changes':'Ulo\u017eit zm\u011bny'):(EN?'Submit application':'Odeslat p\u0159ihl\u00e1\u0161ku')}</button>`}
     </div>
@@ -33478,8 +33618,8 @@ ${_orgMine&&_orgMine.id?`<button id="orgSetToggle" style="width:100%;box-sizing:
       // billing_address se neuklada -- sklada se pri cteni z rozpadu
       
       contact_email:v('orgContactEmail')||null, contact_phone:_phoneFieldVal('orgContactPhone'),
-      receiver_id_type:v('orgRcvType')||null, receiver_id_value:v('orgRcvValue')||null, receiver_name:v('orgRcvName')||null,
-      takes_cash: !!($('orgTakesCash')&&$('orgTakesCash').checked),
+      // Účet, hotovost ani kolej se odsud neukládají -- mají vlastní obrazovku
+      // (Platby a provize organizace), stejně jako u klubu a kouče.
       // KOLEJ SE TADY NENASTAVUJE. Dřív se dovozovala z jednoho pole formuláře
       // (`orgRcvValue ? 'qr_bank' : 'stripe'`) a přepočítávala se při KAŽDÉM uložení:
       // smazání IBANu překlopilo organizaci na Stripe, který v appce neumí připojit.
@@ -45274,6 +45414,9 @@ async function _saveCardReturn(params){
     toast((EN?'✅ Card saved: ':'✅ Karta uložena: ')+(j.brand||'')+' ····'+(j.last4||''), 1);
     try{ if(kind==='gym' && typeof _myGymData!=='undefined' && _myGymData && String(_myGymData.id)===String(id)){ _myGymData.commission_card_status='active'; _myGymData.commission_card_brand=j.brand; _myGymData.commission_card_last4=j.last4; _myGymData.commission_card_exp=j.exp; } }catch(e){}
     try{ if(kind==='coach' && typeof currentUser!=='undefined' && currentUser){ currentUser.commission_card_status='active'; currentUser.commission_card_brand=j.brand; currentUser.commission_card_last4=j.last4; currentUser.commission_card_exp=j.exp; } }catch(e){}
+    // Organizace má vlastní obrazovku plateb -- po uložení karty ji znovu otevřeme, ať je
+    // hned vidět, že karta je aktivní a výzva „nemůžete vybírat peníze" zmizela.
+    try{ if(kind==='org' && id){ setTimeout(function(){ try{ supaClient.from('organizations').select('*').eq('id',id).maybeSingle().then(function(r){ if(r&&r.data && typeof openOrgFinance==='function') openOrgFinance(r.data); }); }catch(e){} }, 400); return; } }catch(e){}
     try{ var _k=params.get('kind')||'gym'; var _id=params.get('id')||''; setTimeout(function(){ try{ if(typeof openCommissionCard==='function') openCommissionCard(_k, {accountOnly:true, asSheet:true, gymId:(_k==='gym'?_id:undefined)}); }catch(e){} }, 500); }catch(e){}
   }catch(e){}
 }
