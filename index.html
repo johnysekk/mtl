@@ -5502,6 +5502,12 @@ const NOTIF_T = {
   gym_announce: (d)=> '📣 ' + (d.gym_name ? (d.gym_name + ': ') : '') + (d.body || ''),
   // Oficiální oznámení od MTL. Vypadá stejně jako oznámení klubu, jen odesílatelem je MTL.
   mtl_announce: (d)=> '📣 MTL' + (d.subject ? (' · ' + d.subject) : '') + ': ' + (d.body || ''),
+  // Zrušený zkušební trénink: klub ví, že se místo uvolnilo, a jestli si student nárok
+  // zachoval (zrušil včas), nebo ho utratil (nezrušil před lekcí).
+  trial_cancelled: (d)=> '❌ ' + (d.student_name||'Student')
+      + (LANG==='en' ? ' cancelled their free trial class' : ' zrušil(a) zkušební trénink')
+      + (d.class_name ? (' — ' + d.class_name) : '')
+      + (d.class_date ? (' ' + _notifWhenCz(d.class_date, d.class_time, LANG==='en')) : ''),
   // Zkušební trénink zdarma: klub potřebuje vědět kdo, kdy a na kterou lekci, a dostat se
   // odtud rovnou do docházky.
   trial_booked: (d)=> '🎁 ' + (d.student_name||'Student')
@@ -8349,10 +8355,14 @@ async function trialLeft(g, childName){
     const { data:_paid } = await supaClient.from('transactions').select('id')
       .eq('gym_id', g.id).eq('member_id', currentUser.id).limit(1);
     if(_paid && _paid.length) return 0;
-    const { data:_used } = await supaClient.from('gym_trials').select('id')
+// Zrušené záznamy se do vyčerpaného nepočítají, ale dvě zrušení u klubu nárok končí.
+    const { data:_used } = await supaClient.from('gym_trials').select('id,cancelled_at')
       .eq('gym_id', g.id).eq('student_id', currentUser.id)
       .eq('child_name', childName || '');
-    return Math.max(0, total - ((_used||[]).length));
+    const _rows=_used||[];
+    const _canc=_rows.filter(function(x){ return !!x.cancelled_at; }).length;
+    if(_canc>1) return 0;
+    return Math.max(0, total - _rows.filter(function(x){ return !x.cancelled_at; }).length);
   }catch(e){ return 0; }
 }
 function canSell(e, kind){ return _sellMissing(e, kind).length===0; }
@@ -14343,6 +14353,7 @@ async function bookGymDropin(g, occ, _child){
         const _m=String(_te.message||'');
         const _t=(/already_paid/.test(_m)) ? (LANG==='en'?'You have already paid at this club':'U tohoto klubu už jsi platil')
           : (/trials_used_up/.test(_m)) ? (LANG==='en'?'Free trials are used up':'Zkušební tréninky jsou vyčerpané')
+          : (/trials_cancelled_too_often/.test(_m)) ? (LANG==='en'?'Cancelled twice here — no free trial left':'Tady jsi zrušil dvakrát, nárok je pryč')
           : (/trials_off/.test(_m)) ? (LANG==='en'?'This club does not offer free trials':'Tento klub zkušební tréninky nenabízí')
           : ('⚠️ '+_m);
         toast(_t);
@@ -14533,6 +14544,11 @@ async function loadMyMemberships(){
   box.querySelectorAll('.gymDropCalBtn').forEach(btn=>{ btn.onclick=()=>{ const b=upDrops.find(x=>String(x.id)===String(btn.dataset.id)); if(!b) return; addToCalendar({ training_date:b.class_date, training_time:b.class_time, id:b.id, title:`🥊 ${b.class_name||(LANG==='en'?'Class':'Lekce')} — ${b.gym_name||'Klub'}` }); }; });
   box.querySelectorAll('.gymDropCancelBtn').forEach(b=>{ b.onclick=()=>cancelGymDropin(upDrops.find(x=>String(x.id)===String(b.dataset.id))); });
   box.querySelectorAll('.trialConfBtn').forEach(b=>{ b.onclick=()=>showTrialConfirmation(upDrops.find(x=>String(x.id)===String(b.dataset.id))); });
+  // Check-in QR přes stejnou funkci jako u členství -- recepce to zná a nic nového se neučí.
+  box.querySelectorAll('.trialQrBtn').forEach(b=>{ b.onclick=()=>{
+    const r=upDrops.find(x=>String(x.id)===String(b.dataset.id)); if(!r) return;
+    showMemberCheckinQR(r.gym_id, r.gym_name, { name:r.class_name, date:r.class_date, time:r.class_time });
+  }; });
   box.querySelectorAll('.membRelBtn').forEach(b=>{ b.onclick=()=>{ const g=(window._membGymMap||{})[b.dataset.gym]; const occ=((window._membUpc&&window._membUpc[b.dataset.gym])||[])[+b.dataset.i]; if(!g||!occ) return; if(b.dataset.rel==='1'){ if(typeof rejoinClass==='function') rejoinClass(g, occ); } else { if(typeof releaseClass==='function') releaseClass(g, occ); } }; });
   box.querySelectorAll('.membKidTab').forEach(b=>{ b.onclick=()=>{ window._membKidView=b.dataset.kv; loadMyMemberships(); }; });
 }
@@ -14565,7 +14581,8 @@ function showTrialConfirmation(b){
     +'<span style="font-size:12.5px;color:var(--mid);">'+l+'</span>'
     +'<span style="font-size:13.5px;color:var(--dark);font-weight:700;text-align:right;">'+escapeHtml(String(v))+'</span></div>'):'';
   const code=String(b.id||'').slice(0,8).toUpperCase();
-  sh.innerHTML='<div class="shdr"><div class="shdr-title">🧾 '+(EN?'Free trial booking confirmation':'Potvrzení o rezervaci zkušebního tréninku zdarma')+'</div>'
+  sh.innerHTML='<div class="shdr"><div><div class="shdr-title">🧾 '+(EN?'Booking confirmation':'Potvrzení o rezervaci')+'</div>'
+    +'<div style="font-size:12px;color:var(--mid);font-weight:600;margin-top:1px;">'+(EN?'Free trial class':'Zkušební trénink zdarma')+'</div></div>'
     +'<button class="btn-close" onclick="closeSheet(\'shTrialConf\')">✕</button></div>'
     +'<div style="padding:16px 16px max(40px,calc(env(safe-area-inset-bottom) + 26px));">'
       +'<div style="background:#FFF8E6;border:1px solid #E8C24A;border-radius:12px;padding:12px 14px;margin-bottom:16px;font-size:13px;color:#8a5a00;line-height:1.55;">'
@@ -14578,30 +14595,13 @@ function showTrialConfirmation(b){
         +row(EN?'When':'Kdy', when)
         +row(EN?'Name':'Jméno', b.child_name || b.student_name)
       +'</div>'
-      // QR JE TO, CO SE NA RECEPCI SKENUJE. Číslo rezervace nemělo kde být ověřeno -- recepce
-      // umí skenovat QR studenta, takže potvrzení ukazuje ten samý kód a klub ho odbaví
-      // stejným tlačítkem jako kohokoli jiného.
-      +'<div style="text-align:center;margin-top:16px;">'
-        +'<div id="tcQr" style="display:inline-flex;justify-content:center;align-items:center;padding:12px;background:#fff;border:1px solid var(--border);border-radius:16px;min-height:200px;min-width:200px;"></div>'
-        +'<div style="font-size:11.5px;color:var(--light);line-height:1.5;margin-top:8px;">'
-          +(EN?'Show this at the desk — the club scans it like any other check-in.'
-              :'Tohle ukaž na recepci — klub to naskenuje jako každý jiný check-in.')
-        +'</div>'
-      +'</div>'
+      // QR sem nepatří: check-in QR má v appce své místo (tlačítko „Ukázat check-in QR"
+      // u členství), takže ho nabízíme tam, ne v potvrzení.
       +'<button id="tcShare" style="width:100%;margin-top:16px;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:inherit;">'+(EN?'Share':'Sdílet')+'</button>'
       +'<button id="tcCal" style="width:100%;margin-top:8px;padding:12px;background:#F0FBF0;color:#006040;border:1px solid #CDEBD6;border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:inherit;">📅 '+(EN?'Add to calendar':'Přidat do kalendáře')+'</button>'
     +'</div>';
   try{ _dashBackAdd(sh); }catch(e){}
   openSheet('shTrialConf');
-  // QR se vykreslí do potvrzení stejnou cestou jako check-in QR člena.
-  (async function(){
-    try{
-      const box=document.getElementById('tcQr'); if(!box) return;
-      if(typeof _issueStudentCheckinQr==='function'){ await _issueStudentCheckinQr(box); return; }
-      const url=_appOrigin()+'/?checkin=1&student='+encodeURIComponent(currentUser.id);
-      if(window.QRCode) new QRCode(box,{text:url,width:200,height:200,correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined)});
-    }catch(e){}
-  })();
   const txt=(EN?'Free trial class':'Zkušební trénink zdarma')+' — '+(b.gym_name||'')+' · '
     +(b.class_name||'')+' · '+when;
   const sb=document.getElementById('tcShare');
@@ -15162,6 +15162,29 @@ async function _issuePrivateCancelConf(o){
 }
 async function cancelGymDropin(b, _after){
   if(!b) return;
+  // ZKUŠEBNÍ TRÉNINK MÁ VLASTNÍ ZRUŠENÍ. Běžná cesta řeší refundaci a storno okno, což tady
+  // nedává smysl -- nic se neplatilo. A nárok zpět smí vrátit jen databáze (sql-79):
+  // před lekcí se vrátí, po ní je utracený, aby nešlo držet místo a nechodit.
+  if(b.is_trial){
+    const EN=LANG==='en';
+    // Včas = nárok zpět (jednou), po začátku = utracený.
+    const _bef=(function(){ try{ return new Date((b.class_date||b.date)+'T'+(b.class_time||'23:59')+':00') > new Date(); }catch(e){ return true; } })();
+    if(!confirm(EN
+      ? ('Cancel your free trial class?\n\n'+(_bef?'Trial comes back. You can cancel once per club.':'Class already started — the trial counts as used.'))
+      : ('Zrušit zkušební trénink zdarma?\n\n'+(_bef?'Nárok se vrátí. Zrušit jde jednou na klub.':'Lekce už začala, zkušební se počítá jako využitý.')))) return;
+    try{
+      const { data, error }=await supaClient.rpc('cancel_trial', { p_booking: b.id });
+      if(error){ toast('⚠️ '+(error.message||'')); return; }
+      const _r=String(data||'');
+      toast(_r==='cancelled_no_more_trials'
+        ? (EN?'✅ Cancelled · no free trial left here':'✅ Zrušeno · nárok je pryč')
+        : (_r==='cancelled_last_chance' || _r==='cancelled_entitlement_back')
+          ? (EN?'✅ Cancelled · free trial is back':'✅ Zrušeno · zkušební máš zpátky')
+          : (EN?'✅ Cancelled':'✅ Zrušeno'), 1);
+    }catch(e){ toast('⚠️ '+((e&&e.message)||'')); return; }
+    try{ if(typeof _after==='function') _after(); else loadMyMemberships(); }catch(e){}
+    return;
+  }
   const _done=()=>{ if(typeof _after==='function') _after(); else loadMyMemberships(); };
   const now=new Date();
   const dt=new Date(`${b.class_date}T${(b.class_time||'00:00')}:00`);
@@ -20210,7 +20233,10 @@ async function renderGymMembers(){
   const _isDefault=(_gmPage===0 && !_sQ && !_kid && !_lvl);
   // attendance frequency (group-class "seriousness" signal) per member
   const _freqMap={}; try{ const { data:_fa } = await supaClient.rpc('gym_member_frequency',{ p_gym:_myGymData.id }); (_fa||[]).forEach(f=>{ _freqMap[f.student_id]={v30:+f.v30||0, v90:+f.v90||0}; }); }catch(e){}
-  const _attInfo=(m)=>{ const f=_freqMap[m.student_id]; const v30=f?f.v30:0, v90=f?f.v90:0; const perWeek=v30/4.345; const prev=(v90-v30)/8.69; const trend=(!f)?'':(perWeek>prev+0.25?' ↑':(perWeek<prev-0.25?' ↓':'')); let color='var(--light)'; if(f&&(v30>0||v90>0)){ color = perWeek>=3?'#006040':(perWeek>=1?'var(--mid)':'var(--red)'); } const num=(EN?perWeek.toFixed(1):perWeek.toFixed(1).replace('.',',')); const txt=(!f||(v30===0&&v90===0))?'—':(num+'×/'+(EN?'wk':'týd')+trend); return { perWeek, color, txt }; };
+  const _attInfo=(m)=>{ const f=_freqMap[m.student_id]; const v30=f?f.v30:0, v90=f?f.v90:0; const perWeek=v30/4.345; const prev=(v90-v30)/8.69; const trend=(!f)?'':(perWeek>prev+0.25?' ↑':(perWeek<prev-0.25?' ↓':'')); let color='var(--light)'; if(f&&(v30>0||v90>0)){ color = perWeek>=3?'#006040':(perWeek>=1?'var(--mid)':'var(--red)'); } // „0,2×/týd" nikomu nic neřekne. Pod 1× za týden ukazujeme počet za měsíc.
+  const num=(EN?perWeek.toFixed(1):perWeek.toFixed(1).replace('.',','));
+  const txt=(!f||(v30===0&&v90===0)) ? '—'
+    : (perWeek<1 ? (v30+'×/'+(EN?'mo':'m\u011bs')+trend) : (num+'×/'+(EN?'wk':'t\u00fdd')+trend)); return { perWeek, color, txt }; };
   const _memSids=new Set(mems.map(function(m){ return m.student_id; }).filter(Boolean));
   // fighters filter: fetch is_fighter for the shown members, filter the list in memory
   if(_kid==='fighters'){
@@ -25098,8 +25124,8 @@ async function _loadGymConversions(gymId, box){
     // Vysvětlivka k POČTŮM (otevření profilu, zaujatí) musí být u nich, ne až pod penězi --
     // pod řádkem „Zaplatili ti dohromady" vypadala, že mluví o částkách.
     html+='<div style="font-size:10.5px;color:var(--light);line-height:1.45;padding:6px 4px 8px;">'
-      +(LANG==='en'?'One person counts once a day, no matter how many times they look. We never hand out names of who viewed you — only these totals.'
-                   :'Jeden člověk se za den počítá jednou, i když se podívá desetkrát. Jmenovité seznamy návštěvníků profilu se nikam nedávají — jen tyhle součty.')
+      +(LANG==='en'?'One person counts once a day, no matter how many times they look.'
+                   :'Jeden člověk se za den počítá jednou, i když se podívá desetkrát.')
       +'</div>';
     // KONVERZE TRYCHTÝŘE. Bez ní jsou čísla nad sebou, ale nikdo nevidí, kolik z nich
     // skutečně koupilo. Počítá se jen z lidí ZVENKU (stávající zákazníci jsou vyřazení už
@@ -37866,6 +37892,9 @@ function subscribeRealtime(){
         ${claimed?`<div style="display:inline-block;font-size:11px;font-weight:700;color:#0a8f5b;background:#E8F5EE;border:1px solid #A8E6C0;border-radius:8px;padding:2px 9px;margin-bottom:8px;">✓ ${EN?'paid · awaiting club confirmation':'zaplaceno · čeká na potvrzení klubem'}</div>`:`<div style="display:inline-block;font-size:11px;font-weight:700;color:#006040;background:#E8F5EE;border:1px solid #A8E6C0;border-radius:8px;padding:2px 9px;margin-bottom:8px;">✅ ${EN?'Reserved':'Rezervováno'}</div>`}
         ${(!b.is_trial && windowTxt)?`<div style="font-size:12px;color:${canChange?'#006040':'var(--light)'};margin-bottom:12px;">${windowTxt}${rc>0?` · ${EN?`reschedules used ${rc}/${RESCHED_MAX}`:`přesunů ${rc}/${RESCHED_MAX}`}`:''}</div>`:'<div style="margin-bottom:10px;"></div>'}
         <button class="gymDropCalBtn" data-id="${b.id}" style="width:100%;padding:11px;background:#F0FBF0;color:#006040;border:1px solid #CDEBD6;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">📅 ${EN?'Add to calendar':'Přidat do kalendáře'}</button>
+        <!-- CHECK-IN QR MÁ MÍT I JEDNORÁZOVKA. Členství ho má, zkušební taky; kdo si koupil
+             jeden vstup, se na recepci odbavuje stejně. -->
+        <button class="trialQrBtn" data-id="${b.id}" style="width:100%;padding:11px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">📲 ${EN?'Show check-in QR':'Ukázat check-in QR'}</button>
         ${b.is_trial ? `
         <!-- ZKUŠEBNÍ LEKCE: žádná refundace ani přesun. Nic se neplatilo, takže mluvit
              o „95 % zpět" je nesmysl. Zůstává potvrzení o rezervaci a zrušení. -->
