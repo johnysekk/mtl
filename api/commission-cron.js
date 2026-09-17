@@ -158,6 +158,10 @@ export default async function handler(req, res) {
 
   const now = new Date();
   const billDay = now.getUTCDate() >= 6;
+  // Ruční dobití: /api/commission-cron?force=1&gym=<id> strhne hned, bez ohledu na den
+  // v mesici. Pouziva to appka po doplneni DIC, aby poskytovatel necekal na dalsi beh.
+  const _forceGym = String((req.query && req.query.gym) || '') || null;
+  const _force = !!(req.query && (req.query.force === '1' || req.query.force === 'true'));
 
 // STRIPE MA MINIMALNI CASTKU. Pod ni kartu odmitne a paymentIntents.create spadne -- coz cron
 // dosud pocital jako SELHANI PLATBY: odlozil o tri dny, poslal "provizi se nepodarilo strhnout"
@@ -261,8 +265,9 @@ let deferredMin = 0;
       }
 
       // ---- BILLING (on/after the 6th, needs a card, 3-day retry spacing) ----
-      const retryReady = !g.commission_next_retry || new Date(g.commission_next_retry).getTime() <= Date.now();
-      if (billDay && retryReady && g.commission_card_customer && g.commission_card_pm) {
+      const retryReady = !g.commission_next_retry || new Date(g.commission_next_retry).getTime() <= Date.now()
+        || (_force && _forceGym === String(gid));   // vynucene dobiti prijde hned
+      if ((billDay || (_force && _forceGym === String(gid))) && retryReady && g.commission_card_customer && g.commission_card_pm) {
         let anyFail = false, anyCharge = false;
         for (const cur of Object.keys(byGym[gid])) {
           const amount = Math.round(byGym[gid][cur]);
