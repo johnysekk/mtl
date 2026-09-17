@@ -82,11 +82,27 @@ async function completePayment(token, paymentId, sessionId, deviceId) {
 async function pisSideEffects(rec, tbl){
   const _coach1=(tbl==='bookings'); const _event=(tbl==='event_tickets');
   let _evP='gym', _evG=null, _evC=null;
-  if(_event){ try{ const ev=await sb.from('events').select('gym_id,payout_coach_id').eq('id',rec.event_id).maybeSingle(); if(ev.data){ if(ev.data.payout_coach_id){ _evP='coach'; _evC=ev.data.payout_coach_id; } else { _evG=ev.data.gym_id; } } }catch(e){} }
+  let _evOrg=null;
+  if(_event){ try{ const ev=await sb.from('events').select('gym_id,payout_coach_id,organization_id').eq('id',rec.event_id).maybeSingle(); if(ev.data){ if(ev.data.payout_coach_id){ _evP='coach'; _evC=ev.data.payout_coach_id; } else if(ev.data.gym_id){ _evG=ev.data.gym_id; } else if(ev.data.organization_id){ _evP='organization'; _evOrg=ev.data.organization_id; } } }catch(e){} }
+  // AKCE ORGANIZACE MA VLASTNI ZAUCTOVANI. record-cash zna jen klub a kouce, takze listek
+  // z akce federace/promotera by skoncil s prazdnym gym_id a nezaucoval se vubec.
+  if(_event && _evOrg){
+    try{
+      const ex=await sb.from('transactions').select('id').eq('ticket_id',rec.id).limit(1);
+      if(!(ex.data && ex.data.length)){
+        await fetch(APP_URL+'/api/org-ticket-record',{ method:'POST', headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({ internal:true, intSecret:process.env.PIS_INTERNAL_SECRET,
+            organization_id:_evOrg, event_id:rec.event_id, ticket_id:rec.id,
+            amount:Math.round((rec.amount||0)*100), currency:rec.currency||'CZK',
+            payment_method:'pis', buyer_name:rec.buyer_name||null }) });
+      }
+    }catch(e){}
+  }
   const _cohort=(tbl==='cohort_members'); let _cohGym=null, _cohDep=0, _cohCur='CZK';
   if(_cohort){ try{ const co=await sb.from('gym_cohorts').select('gym_id,deposit_amount,currency').eq('id',rec.cohort_id).maybeSingle(); if(co.data){ _cohGym=co.data.gym_id; _cohDep=co.data.deposit_amount||0; _cohCur=co.data.currency||'CZK'; } }catch(e){} }
   const _merch=(tbl==='merch_orders');
-  try{ const ex=await sb.from('transactions').select('id').eq('source_booking_id',rec.id).limit(1);
+  // Akce organizace uz zauctovana vys -- record-cash by pro ni nemel ani gym_id, ani coach_id.
+  if(!(_event && _evOrg)) try{ const ex=await sb.from('transactions').select('id').eq('source_booking_id',rec.id).limit(1);
     if(!(ex.data && ex.data.length)){ const _body=_event
       ? { internal:true, intSecret:process.env.PIS_INTERNAL_SECRET, provider:_evP, gym_id:_evG, coach_id:_evC, member_id:rec.buyer_id||null, gross_amount:Math.round((rec.amount||0)*100), currency:rec.currency||'CZK', type:'event_ticket', payment_method:'pis', acq_source:'direct', source_booking_id:rec.id }
       : _coach1
@@ -107,7 +123,7 @@ async function pisSideEffects(rec, tbl){
       if (tbl === 'gym_bookings') { _body.dropin_plan_id = rec.dropin_plan_id || null; _body.proof_checked = (rec.need_proof ? false : null); }
       await fetch(APP_URL+'/api/record-cash',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(_body) }); } }catch(e){}
   if(_event){ try{ await fetch(APP_URL+'/api/ticket-email',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ ticketId:rec.id }) }); }catch(e){} }
-  try{ if(_event){ let target=(_evP==='coach')?_evC:null; if(!target && _evG){ const g=await sb.from('gyms').select('owner_id').eq('id',_evG).maybeSingle(); target=g.data&&g.data.owner_id; } if(target) await sb.from('notifications').insert({ user_id:target, type:'booking', read:false, message:'\ud83c\udf9f\ufe0f Nov\u00fd prodej vstupenky (p\u0159evodem): '+(rec.buyer_name||'Z\u00e1kazn\u00edk'), data:JSON.stringify({ kind:'pis_payment_in', event_id:rec.event_id, student:(rec.buyer_name||''), amt:(rec.amount!=null?String(rec.amount):''), sym:(rec.currency||'CZK') }) }); }
+  try{ if(_event){ let target=(_evP==='coach')?_evC:null; if(!target && _evOrg){ const o=await sb.from('organizations').select('owner_id').eq('id',_evOrg).maybeSingle(); target=o.data&&o.data.owner_id; } if(!target && _evG){ const g=await sb.from('gyms').select('owner_id').eq('id',_evG).maybeSingle(); target=g.data&&g.data.owner_id; } if(target) await sb.from('notifications').insert({ user_id:target, type:'booking', read:false, message:'\ud83c\udf9f\ufe0f Nov\u00fd prodej vstupenky (p\u0159evodem): '+(rec.buyer_name||'Z\u00e1kazn\u00edk'), data:JSON.stringify({ kind:'pis_payment_in', event_id:rec.event_id, student:(rec.buyer_name||''), amt:(rec.amount!=null?String(rec.amount):''), sym:(rec.currency||'CZK') }) }); }
     else if(_coach1){
       // U soukromky bývá student_name prázdné -> dohledat jméno z profilu, ať notifikace
       // neříká jen "Student".

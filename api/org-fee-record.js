@@ -58,7 +58,11 @@ async function issueOrgDoklad(oc, org, amount, currency, method, testMode, trans
   try {
     const ico = String(org.tax_id || '').replace(/\s/g, '');
     if (!ico || !org.owner_id) return null;
-    const key = 'ico:' + ico + ':acct:' + org.owner_id;
+    // RADA PATRI ORGANIZACI, NE JEJIMU MAJITELI. Klic 'ico:<ICO>:acct:<majitel>' je tentyz,
+    // jaky pouziva poskytovatel (record-cash.js, stripe-webhook.js). Kdo ma organizaci na
+    // stejne ICO a stejny ucet jako svuj klub, mel jednu radu pro oboji: doklady asociace
+    // klubum se michaly s doklady klubu studentum.
+    const key = 'ico:' + ico + ':org:' + org.id;
 
     const r = await fetch(`${SB}/rest/v1/rpc/doklad_next`, {
       method: 'POST',
@@ -91,7 +95,10 @@ async function issueOrgDoklad(oc, org, amount, currency, method, testMode, trans
         sup_vat_payer: !!org.vat_payer, sup_vat_rate: (org.vat_rate != null ? org.vat_rate : null),
         cust_name: cust.name, cust_email: cust.email,
         item_label: label,
-        amount: Math.round(Number(amount) || 0), currency: String(currency || 'CZK').toUpperCase(),
+        // HALERE, jako transactions.gross_amount a jako zbytek doklady.amount (klient pri
+        // zobrazeni deli stem). Drive se sem ukladala cela koruna, takze doklad asociace
+        // ukazoval stonasobek.
+        amount: Math.round((Number(amount) || 0) * 100), currency: String(currency || 'CZK').toUpperCase(),
         payment_method: method || null, test_mode: !!testMode,
       }),
     });
@@ -180,7 +187,9 @@ export default async function handler(req, res) {
         // Provize je nulova, takze neni co vybirat -- rovnou uzavreno, aby commission-cron
         // nepocital nuly a nechodily prazdne vyzvy.
         commission_status: 'collected', commission_month: new Date().toISOString().slice(0, 7),
-        gross_amount: Math.round(amount), currency: String(currency).toUpperCase(),
+        // HALERE, jako vsude jinde v transactions.gross_amount. Drive se sem ukladala cela
+        // koruna, takze prehled organizace ukazoval stonasobne mensi vybrane penize.
+        gross_amount: Math.round(Number(amount) * 100), currency: String(currency).toUpperCase(),
         mtl_fee: 0, base_rate: 0,
         payment_method: method || 'pis',
         paid_to: 'organization',

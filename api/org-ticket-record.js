@@ -61,7 +61,11 @@ async function issueDoklad(org, cust, amount, currency, method, testMode, transa
   try {
     const ico = String(org.tax_id || '').replace(/\s/g, '');
     if (!ico || !org.owner_id) return null;
-    const key = 'ico:' + ico + ':acct:' + org.owner_id;
+    // RADA PATRI ORGANIZACI, NE JEJIMU MAJITELI. Klic 'ico:<ICO>:acct:<majitel>' je tentyz,
+    // jaky pouziva poskytovatel (record-cash.js, stripe-webhook.js). Kdo ma organizaci na
+    // stejne ICO a stejny ucet jako svuj klub, mel jednu radu pro oboji: doklady asociace
+    // klubum se michaly s doklady klubu studentum.
+    const key = 'ico:' + ico + ':org:' + org.id;
     const r = await fetch(`${SB}/rest/v1/rpc/doklad_next`, {
       method: 'POST',
       headers: { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' },
@@ -81,6 +85,8 @@ async function issueDoklad(org, cust, amount, currency, method, testMode, transa
         sup_vat_payer: !!org.vat_payer, sup_vat_rate: (org.vat_rate != null ? org.vat_rate : null),
         cust_name: (cust && cust.name) || null, cust_email: (cust && cust.email) || null,
         item_label: label || 'Vstupenka',
+        // HALERE, jako transactions.gross_amount a jako zbytek doklady.amount (klient pri
+        // zobrazeni deli stem). Sem prichazi uz gross v halerich, takze se nenasobi.
         amount: Math.round(Number(amount) || 0), currency: String(currency || 'CZK').toUpperCase(),
         payment_method: method || null, test_mode: !!testMode,
       }),
@@ -103,9 +109,23 @@ export default async function handler(req, res) {
     let _test = !!test_mode;
     try { _test = _test || (await isTestMode()); } catch (e) {}
 
-    // Vnitřní volání: stejná ochrana jako u record-cash, ať to nejde spustit zvenčí.
+    // Vnitrni volani (PIS potvrzeni na serveru): stejna ochrana jako u record-cash.
     const trusted = (b.intSecret && process.env.PIS_INTERNAL_SECRET && b.intSecret === process.env.PIS_INTERNAL_SECRET);
-    if (!trusted) return res.status(403).json({ error: 'forbidden' });
+    // MAJITEL ORGANIZACE TOTEZ Z APPKY. Potvrzeni QR platby dela clovek, ne server: poradatel
+    // vidi, ze penize dorazily na ucet, a klikne "Potvrdit". Bez teto cesty by lístek zaplaceny
+    // prevodem nemel nikdy transakci ani doklad -- a provize 1 % by nevznikla.
+    let _byOwner = false;
+    if (!trusted && b.token && organization_id) {
+      try {
+        const ur = await fetch(`${SB}/auth/v1/user`, { headers: { apikey: KEY, Authorization: `Bearer ${b.token}` } });
+        if (!ur.ok) return res.status(401).json({ error: 'bad token' });
+        const u = await ur.json();
+        const _o = (await sb(`organizations?id=eq.${encodeURIComponent(organization_id)}&select=owner_id`))[0];
+        _byOwner = !!(u && u.id && _o && String(_o.owner_id) === String(u.id));
+      } catch (e) { _byOwner = false; }
+      if (!_byOwner) return res.status(403).json({ error: 'not the organization owner' });
+    }
+    if (!trusted && !_byOwner) return res.status(403).json({ error: 'forbidden' });
 
     if (!organization_id || !(Number(amount) > 0)) return res.status(400).json({ error: 'bad input' });
 

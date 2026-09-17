@@ -112,6 +112,20 @@ export default async function handler(req, res) {
           payee = { payment_mode: gg.payment_mode || null, receiver_id_type: gg.receiver_id_type || null, receiver_id_value: gg.receiver_id_value || null, receiver_name: gg.receiver_name || null };
         }
       }
+      // ORGANIZACE JAKO PRIJEMCE. Akci pori i federace nebo promoter a ta nema gym_id --
+      // verejna stranka akce pak nemela komu platit a nabidla jen "nelze zaplatit".
+      if (!payee.receiver_id_value && !payee.payment_mode && ev.organization_id) {
+        const o = await sbGet(`organizations?id=eq.${encodeURIComponent(ev.organization_id)}&select=name,legal_name,payment_mode,receiver_id_type,receiver_id_value,receiver_name,stripe_account,account_suspended`);
+        const oo = o && o[0];
+        if (oo && !oo.account_suspended) {
+          hostKind = 'organization'; hostId = ev.organization_id;
+          gymName = oo.name || '';
+          legalName = oo.legal_name || oo.receiver_name || '';
+          stripeAccount = oo.stripe_account || null;
+          payee = { payment_mode: oo.payment_mode || null, receiver_id_type: oo.receiver_id_type || null,
+                    receiver_id_value: oo.receiver_id_value || null, receiver_name: oo.receiver_name || null };
+        }
+      }
     } catch (e) {}
 
     // Pravni nazev porizujeme z MTL, ne ze Stripe. Puvodne se tahal pres stripe.accounts.retrieve,

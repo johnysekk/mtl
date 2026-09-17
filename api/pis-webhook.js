@@ -21,10 +21,13 @@ async function pisSideEffects(rec, tbl) {
   const _coach1 = (tbl === 'bookings');
   const _event  = (tbl === 'event_tickets');
   // events: derive the payee (coach if the event has a payout coach, else the gym) — mirrors _evtQrConfirm
-  let _evProvider = 'gym', _evGym = null, _evCoach = null;
+  let _evProvider = 'gym', _evGym = null, _evCoach = null, _evOrg = null;
   if (_event) {
-    try { const ev = await sb.from('events').select('gym_id,payout_coach_id').eq('id', rec.event_id).maybeSingle();
-      if (ev.data) { if (ev.data.payout_coach_id) { _evProvider = 'coach'; _evCoach = ev.data.payout_coach_id; } else { _evGym = ev.data.gym_id; } } } catch (e) {}
+    try { const ev = await sb.from('events').select('gym_id,payout_coach_id,organization_id').eq('id', rec.event_id).maybeSingle();
+      if (ev.data) { if (ev.data.payout_coach_id) { _evProvider = 'coach'; _evCoach = ev.data.payout_coach_id; }
+        else if (ev.data.gym_id) { _evGym = ev.data.gym_id; }
+        // AKCE ORGANIZACE: vlastni zauctovani (org-ticket-record), record-cash zna jen klub a kouce.
+        else if (ev.data.organization_id) { _evProvider = 'organization'; _evOrg = ev.data.organization_id; } } } catch (e) {}
   }
   const _cohort = (tbl === 'cohort_members');
   let _cohGym = null, _cohDep = 0, _cohCur = 'CZK';
@@ -50,7 +53,23 @@ async function pisSideEffects(rec, tbl) {
     } catch (e) { /* non-fatal */ }
   }
 
-  try {
+  // AKCE ORGANIZACE MA VLASTNI ZAUCTOVANI (transakce + doklad organizace + provize podle
+  // typu akce). record-cash zna jen klub a kouce, takze bez teto odbocky by listek z akce
+  // federace nebo promotera nemel ani transakci, ani doklad.
+  if (_event && _evOrg) {
+    try {
+      const ex0 = await sb.from('transactions').select('id').eq('ticket_id', rec.id).limit(1);
+      if (!(ex0.data && ex0.data.length)) {
+        await fetch(APP_URL + '/api/org-ticket-record', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ internal: true, intSecret: process.env.PIS_INTERNAL_SECRET,
+            organization_id: _evOrg, event_id: rec.event_id, ticket_id: rec.id,
+            amount: Math.round((rec.amount || 0) * 100), currency: rec.currency || 'CZK',
+            payment_method: 'pis', buyer_name: rec.buyer_name || null }) });
+      }
+    } catch (e) { /* non-fatal */ }
+  }
+
+  if (!(_event && _evOrg)) try {
     const ex = await sb.from('transactions').select('id').eq('source_booking_id', rec.id).limit(1);
     if (!(ex.data && ex.data.length)) {
       const _body = _event
