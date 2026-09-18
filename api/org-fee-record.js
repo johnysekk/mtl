@@ -11,7 +11,7 @@
 
 import { isTestMode } from './_config.js';
 
-import { vatMode, vatRateFor } from './_vat.js';
+import { vatMode, vatRateFor, needVatBeforePay } from './_vat.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -156,6 +156,33 @@ export default async function handler(req, res) {
 
     const org = (await sb(`organizations?id=eq.${encodeURIComponent(oc.organization_id)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,billing_country,country,owner_id`))[0];
     if (!org) return res.status(404).json({ error: 'org not found' });
+
+    // PREHRANICNI PLNENI V EU BEZ DIC SE NEUCTUJE. Kdyz uz platba nejak prisla (prevod mimo
+    // appku, hotovost), radeji ji neevidujeme a rekneme obema stranam proc: doklad by nesel
+    // vystavit a evidovana platba bez dokladu je horsi nez platba, ktera ceka na DIC.
+    {
+      let _custCC = null, _custDic = null, _custOwner = null, _custName = null;
+      if (oc.gym_id) {
+        const _g = (await sb(`gyms?id=eq.${encodeURIComponent(oc.gym_id)}&select=owner_id,name,vat_id,billing_country,country_code`))[0];
+        if (_g) { _custCC = _g.billing_country || _g.country_code || null; _custDic = _g.vat_id || null; _custOwner = _g.owner_id || null; _custName = _g.name || null; }
+      } else {
+        _custCC = oc.ext_country || null; _custDic = oc.ext_vat_id || null; _custName = oc.ext_name || null;
+      }
+      const _supCC0 = String(org.billing_country || org.country || 'CZ').toUpperCase();
+      if (needVatBeforePay(_supCC0, _custCC, _custDic, !!org.vat_payer)) {
+        try {
+          if (_custOwner) await sb('notifications', { method: 'POST', prefer: 'return=minimal',
+            body: JSON.stringify({ user_id: _custOwner, type: 'system', read: false,
+              data: JSON.stringify({ kind: 'need_vat', organization_id: org.id }),
+              message: '\u26a0\ufe0f Dopln DIC (VAT ID) \u2014 bez neho nejde zaplatit clensky poplatek ' + (org.name || 'organizaci') + ' (preshranicni plneni v EU).' }) });
+          if (org.owner_id) await sb('notifications', { method: 'POST', prefer: 'return=minimal',
+            body: JSON.stringify({ user_id: org.owner_id, type: 'system', read: false,
+              data: JSON.stringify({ kind: 'need_vat_cust' }),
+              message: '\u26a0\ufe0f ' + (_custName || 'Klub') + ' je v jinem state EU a nema DIC \u2014 poplatek nejde zauctovat, dokud ho nedoplni.' }) });
+        } catch (e) { /* oznameni neni duvod shodit odpoved */ }
+        return res.status(409).json({ error: 'need_vat', club: _custName || null });
+      }
+    }
 
     // Popis se opíše z období, aby na dokladu stálo, ZA CO klub platil.
     let label = 'Členský poplatek';

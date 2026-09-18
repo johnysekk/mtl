@@ -8,6 +8,8 @@
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+import { needVatBeforePay } from './_vat.js';
+
 const svc = { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json' };
 
 async function sbGet(path) {
@@ -96,10 +98,15 @@ export default async function handler(req, res) {
       const b = req.body || {};
       const t = (v) => (v == null ? null : String(v).trim().slice(0, 200) || null);
       if (!t(b.name)) return res.status(400).json({ error: 'name required' });
+      // FAKTURACNI ZEME JE POVINNA. Bez ni nejde poznat, jestli jde o prehranicni plneni
+      // v EU, a doklad by vznikl v domacim rezimu i pro klub ze Slovenska.
+      const _cc = String(b.country || '').trim().toUpperCase().slice(0, 2);
+      if (!/^[A-Z]{2}$/.test(_cc)) return res.status(400).json({ error: 'country required' });
       const patch = {
         ext_name: t(b.name), ext_legal_name: t(b.legal_name), ext_tax_id: t(b.tax_id),
         ext_address: t(b.address), ext_city: t(b.city),
         ext_email: t(b.email), ext_phone: t(b.phone),
+        ext_country: _cc, ext_vat_id: t(b.vat_id),
         guest_name: t(b.name), guest_email: t(b.email),
       };
       try {
@@ -114,10 +121,10 @@ export default async function handler(req, res) {
     // Klíč musí vypadat jako klíč. Bez téhle kontroly by šlo tabulku prohledávat dotazem.
     if (!token || token.length < 20) return res.status(400).json({ error: 'bad token' });
 
-    const oc = (await sbGet(`organization_clubs?guest_token=eq.${encodeURIComponent(token)}&select=id,organization_id,status,ext_name,ext_legal_name,ext_tax_id,ext_email,fee_amount,fee_currency,fee_id,fee_paid_at,valid_until,guest_email,guest_name&limit=1`))[0];
+    const oc = (await sbGet(`organization_clubs?guest_token=eq.${encodeURIComponent(token)}&select=id,organization_id,status,ext_name,ext_legal_name,ext_tax_id,ext_email,ext_country,ext_vat_id,fee_amount,fee_currency,fee_id,fee_paid_at,valid_until,guest_email,guest_name&limit=1`))[0];
     if (!oc) return res.status(404).json({ error: 'not found' });
 
-    const org = (await sbGet(`organizations?id=eq.${encodeURIComponent(oc.organization_id)}&select=id,name,abbr,legal_name,tax_id,payment_mode,stripe_account,receiver_id_type,receiver_id_value,receiver_name,pis_test&limit=1`))[0];
+    const org = (await sbGet(`organizations?id=eq.${encodeURIComponent(oc.organization_id)}&select=id,name,abbr,legal_name,tax_id,vat_payer,billing_country,country,payment_mode,stripe_account,receiver_id_type,receiver_id_value,receiver_name,pis_test&limit=1`))[0];
     if (!org) return res.status(404).json({ error: 'not found' });
 
     // Částka: snímek na vztahu, jinak poplatek za období platné ke dnešku.
@@ -133,7 +140,10 @@ export default async function handler(req, res) {
       ok: true,
       paid: !!oc.fee_paid_at,
       valid_until: oc.valid_until || null,
-      club: { name: oc.ext_name, legal_name: oc.ext_legal_name, tax_id: oc.ext_tax_id, email: oc.guest_email || oc.ext_email },
+      club: { name: oc.ext_name, legal_name: oc.ext_legal_name, tax_id: oc.ext_tax_id,
+              email: oc.guest_email || oc.ext_email, country: oc.ext_country || null, vat_id: oc.ext_vat_id || null },
+      // Prehranicni plneni v EU bez DIC: stranka nesmi nabidnout platbu, jen vyzvu k doplneni.
+      need_vat: needVatBeforePay(String(org.billing_country || org.country || 'CZ'), oc.ext_country, oc.ext_vat_id, !!org.vat_payer),
       org: { id: org.id, name: org.name, abbr: org.abbr, legal_name: org.legal_name, tax_id: org.tax_id,
              payment_mode: org.payment_mode, stripe_account: org.stripe_account,
              receiver_id_type: org.receiver_id_type, receiver_id_value: org.receiver_id_value,

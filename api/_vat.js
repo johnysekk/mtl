@@ -61,3 +61,16 @@ export function vatMode(supCountry, custCountry, custDic, opts = {}) {
 export function vatRateFor(mode, supRate) {
   return (mode === 'domestic') ? (supRate != null ? supRate : null) : 0;
 }
+
+// BRANA PRED PLATBOU. Prehranicni plneni v ramci EU se bez DIC odberatele nesmi vubec
+// zaplatit: doklad by pak nesel vystavit a penize uz by lezely na uctu. Kontroluje se drive,
+// nez se klubu ukaze QR kod nebo platebni tlacitko, ne az u vystavovani dokladu.
+export function needVatBeforePay(supCountry, custCountry, custDic, supIsVatPayer) {
+  if (!supIsVatPayer) return false;                    // neplatce DPH rezim neresi
+  const sc = String(supCountry || 'CZ').toUpperCase();
+  const cc = String(custCountry || '').toUpperCase();
+  if (!cc) return false;                               // zemi neznam -> nelze rozhodnout
+  if (cc === sc) return false;                         // domaci plneni
+  if (!isEU(cc)) return false;                         // mimo EU se DIC neuplatnuje
+  return !String(custDic || '').trim();
+}
