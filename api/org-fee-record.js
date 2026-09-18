@@ -92,7 +92,7 @@ async function issueOrgDoklad(oc, org, amount, currency, method, testMode, trans
     // o prenesenou danovou povinnost, mimo EU je mimo ceskou DPH. Bez rezimu nesl doklad
     // sazbu dodavatele bez ohledu na to, odkud odberatel je.
     const _supCC = String(org.billing_country || org.country || 'CZ').toUpperCase();
-    const V = vatMode(_supCC, cust.country, cust.dic, { kind: 'service', supIsVatPayer: !!org.vat_payer });
+    const V = vatMode(_supCC, cust.country, cust.dic, { kind: 'membership', feeExempt: !!org.fee_vat_exempt, supIsVatPayer: !!org.vat_payer });
     // Bez DIC odberatele v jinem state EU rezim urcit nejde. Se zapnutou branou se doklad
     // nevystavi a klub se vyzve k doplneni DIC (stejne jako u provizi MTL); s vypnutou se
     // vystavi domaci rezim, protoze bez DIC se odberatel bere jako osoba nepovinna k dani.
@@ -154,7 +154,7 @@ export default async function handler(req, res) {
     const dup = await sb(`transactions?org_fee_id=eq.${encodeURIComponent(oc_id)}&select=id&limit=1`);
     if (dup && dup.length) return res.status(200).json({ ok: true, already: true });
 
-    const org = (await sb(`organizations?id=eq.${encodeURIComponent(oc.organization_id)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,billing_country,country,owner_id`))[0];
+    const org = (await sb(`organizations?id=eq.${encodeURIComponent(oc.organization_id)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,billing_country,country,fee_vat_exempt,owner_id`))[0];
     if (!org) return res.status(404).json({ error: 'org not found' });
 
     // PREHRANICNI PLNENI V EU BEZ DIC SE NEUCTUJE. Kdyz uz platba nejak prisla (prevod mimo
@@ -169,7 +169,7 @@ export default async function handler(req, res) {
         _custCC = oc.ext_country || null; _custDic = oc.ext_vat_id || null; _custName = oc.ext_name || null;
       }
       const _supCC0 = String(org.billing_country || org.country || 'CZ').toUpperCase();
-      if (needVatBeforePay(_supCC0, _custCC, _custDic, !!org.vat_payer)) {
+      if (needVatBeforePay(_supCC0, _custCC, _custDic, !!org.fee_vat_exempt)) {
         try {
           if (_custOwner) await sb('notifications', { method: 'POST', prefer: 'return=minimal',
             body: JSON.stringify({ user_id: _custOwner, type: 'system', read: false,

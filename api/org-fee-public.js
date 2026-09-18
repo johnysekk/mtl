@@ -124,7 +124,7 @@ export default async function handler(req, res) {
     const oc = (await sbGet(`organization_clubs?guest_token=eq.${encodeURIComponent(token)}&select=id,organization_id,status,ext_name,ext_legal_name,ext_tax_id,ext_email,ext_country,ext_vat_id,fee_amount,fee_currency,fee_id,fee_paid_at,valid_until,guest_email,guest_name&limit=1`))[0];
     if (!oc) return res.status(404).json({ error: 'not found' });
 
-    const org = (await sbGet(`organizations?id=eq.${encodeURIComponent(oc.organization_id)}&select=id,name,abbr,legal_name,tax_id,vat_payer,billing_country,country,payment_mode,stripe_account,receiver_id_type,receiver_id_value,receiver_name,pis_test&limit=1`))[0];
+    const org = (await sbGet(`organizations?id=eq.${encodeURIComponent(oc.organization_id)}&select=id,name,abbr,legal_name,tax_id,vat_payer,fee_vat_exempt,billing_country,country,payment_mode,stripe_account,receiver_id_type,receiver_id_value,receiver_name,pis_test&limit=1`))[0];
     if (!org) return res.status(404).json({ error: 'not found' });
 
     // Částka: snímek na vztahu, jinak poplatek za období platné ke dnešku.
@@ -143,7 +143,7 @@ export default async function handler(req, res) {
       club: { name: oc.ext_name, legal_name: oc.ext_legal_name, tax_id: oc.ext_tax_id,
               email: oc.guest_email || oc.ext_email, country: oc.ext_country || null, vat_id: oc.ext_vat_id || null },
       // Prehranicni plneni v EU bez DIC: stranka nesmi nabidnout platbu, jen vyzvu k doplneni.
-      need_vat: needVatBeforePay(String(org.billing_country || org.country || 'CZ'), oc.ext_country, oc.ext_vat_id, !!org.vat_payer),
+      need_vat: needVatBeforePay(String(org.billing_country || org.country || 'CZ'), oc.ext_country, oc.ext_vat_id, !!org.fee_vat_exempt),
       org: { id: org.id, name: org.name, abbr: org.abbr, legal_name: org.legal_name, tax_id: org.tax_id,
              payment_mode: org.payment_mode, stripe_account: org.stripe_account,
              receiver_id_type: org.receiver_id_type, receiver_id_value: org.receiver_id_value,

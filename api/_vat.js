@@ -31,6 +31,17 @@ export function vatMode(supCountry, custCountry, custDic, opts = {}) {
 
   if (!supIsVatPayer) return { mode: 'no_vat_supplier', note: 'Dodavatel není plátcem DPH.', rate: 0 };
 
+  // CLENSKY PRISPEVEK SPOLKU VLASTNIM CLENUM je podle § 61 písm. a) zákona o DPH plnění
+  // osvobozené od daně bez nároku na odpočet. Pak se rezim neresi vubec: neni co prenaset,
+  // neni potreba DIC odberatele a poskytovatel se nestava identifikovanou osobou (§ 6i ma
+  // pro osvobozene sluzby vyjimku). JE TO VOLBA ORGANIZACE, ne odhad appky -- judikatura
+  // (NSS) rika, ze nalepka "clensky prispevek" sama nestaci, rozhoduji stanovy a to, za co
+  // se plati. U preshranicniho odberatele navic posuzuje osvobozeni pravo JEHO statu.
+  if (kind === 'membership' && opts.feeExempt) {
+    return { mode: 'exempt_membership', rate: 0,
+      note: 'Osvobozeno od DPH — plnění jako protihodnota členského příspěvku vlastním členům (§ 61 písm. a) zákona o DPH).' };
+  }
+
   if (kind === 'event') {
     return { mode: 'domestic', rate: null,
       note: 'Vstup na akci — zdaněno v místě konání akce (čl. 53 směrnice 2006/112/ES).' };
@@ -65,8 +76,14 @@ export function vatRateFor(mode, supRate) {
 // BRANA PRED PLATBOU. Prehranicni plneni v ramci EU se bez DIC odberatele nesmi vubec
 // zaplatit: doklad by pak nesel vystavit a penize uz by lezely na uctu. Kontroluje se drive,
 // nez se klubu ukaze QR kod nebo platebni tlacitko, ne az u vystavovani dokladu.
-export function needVatBeforePay(supCountry, custCountry, custDic, supIsVatPayer) {
-  if (!supIsVatPayer) return false;                    // neplatce DPH rezim neresi
+export function needVatBeforePay(supCountry, custCountry, custDic, feeExempt) {
+  // PLATCOVSTVI DODAVATELE O NICEM NEROZHODUJE. Drive tu stalo `if (!supIsVatPayer) return
+  // false`, jako by neplatce nic neresil. Podle § 6i ZDPH se cesky NEPLATCE stava
+  // identifikovanou osobou uz dnem poskytnuti sluzby s mistem plneni v jinem clenskem state
+  // a musi podat souhrnne hlaseni -- a v tom je DIC odberatele podstatnou naleziostí, bez
+  // nej ho podat nelze. Rozhoduje tedy charakter plneni: osvobozene -> nic, zdanitelne ->
+  // DIC je podminka.
+  if (feeExempt) return false;
   const sc = String(supCountry || 'CZ').toUpperCase();
   const cc = String(custCountry || '').toUpperCase();
   if (!cc) return false;                               // zemi neznam -> nelze rozhodnout
