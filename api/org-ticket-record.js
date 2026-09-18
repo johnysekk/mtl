@@ -14,6 +14,8 @@
 import { orgRate } from './_rate.js';
 import { isTestMode } from './_config.js';
 
+import { vatMode, vatRateFor } from './_vat.js';
+
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -66,6 +68,7 @@ async function issueDoklad(org, cust, amount, currency, method, testMode, transa
     // stejne ICO a stejny ucet jako svuj klub, mel jednu radu pro oboji: doklady asociace
     // klubum se michaly s doklady klubu studentum.
     const key = 'ico:' + ico + ':org:' + org.id;
+    const V = vatMode(String(org.billing_country || org.country || 'CZ'), null, null, { kind: 'event', supIsVatPayer: !!org.vat_payer });
     const r = await fetch(`${SB}/rest/v1/rpc/doklad_next`, {
       method: 'POST',
       headers: { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' },
@@ -82,7 +85,12 @@ async function issueDoklad(org, cust, amount, currency, method, testMode, transa
         transaction_id: transactionId || null, payment_intent: paymentIntent || null,
         sup_name: org.legal_name || org.name || null,
         sup_ico: ico, sup_dic: org.vat_id || null, sup_address: _billAddr(org) || null,
-        sup_vat_payer: !!org.vat_payer, sup_vat_rate: (org.vat_rate != null ? org.vat_rate : null),
+        // VSTUP NA AKCI se dani v miste konani, at je kupujici odkudkoli a at je to firma
+        // nebo divak -- zadne DIC, zadna prenesena povinnost. Rezim se proto jen prevezme od
+        // poradatele; stitek na dokladu je tu proto, aby bylo videt, podle ceho vznikl.
+        sup_vat_payer: !!org.vat_payer, sup_vat_rate: vatRateFor(V.mode, org.vat_rate),
+        vat_mode: V.mode, vat_note: V.note || null,
+        cust_country: null, cust_dic: null,
         cust_name: (cust && cust.name) || null, cust_email: (cust && cust.email) || null,
         item_label: label || 'Vstupenka',
         // HALERE, jako transactions.gross_amount a jako zbytek doklady.amount (klient pri
@@ -129,7 +137,7 @@ export default async function handler(req, res) {
 
     if (!organization_id || !(Number(amount) > 0)) return res.status(400).json({ error: 'bad input' });
 
-    const org = (await sb(`organizations?id=eq.${encodeURIComponent(organization_id)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,owner_id,status,intro_free_until,kind,account_suspended`))[0];
+    const org = (await sb(`organizations?id=eq.${encodeURIComponent(organization_id)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,billing_country,country,owner_id,status,intro_free_until,kind,account_suspended`))[0];
     if (!org) return res.status(404).json({ error: 'org not found' });
     if (org.status !== 'approved') return res.status(403).json({ error: 'org not approved' });
 

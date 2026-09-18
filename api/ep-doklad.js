@@ -8,14 +8,15 @@
 // Interní endpoint: POST { intSecret, invoice_id, user_id, amount, currency, period_start,
 //                          period_end, test_mode }
 
+import { vatMode } from './_vat.js';
+
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const svc = { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' };
 
 // Země EU. Rozhoduje o tom, jestli jde o běžné plnění, přenesenou daňovou povinnost,
 // nebo plnění mimo EU.
-const EU = ['AT','BE','BG','CY','CZ','DE','DK','EE','ES','FI','FR','GR','HR','HU','IE','IT',
-            'LT','LU','LV','MT','NL','PL','PT','RO','SE','SI','SK'];
+// Seznam statu EU je v _vat.js -- jedna definice pro cely system.
 
 const sb = async (path, opts = {}) => {
   const r = await fetch(`${SB}/rest/v1/${path}`, { ...opts, headers: { ...svc, ...(opts.headers || {}) } });
@@ -33,21 +34,13 @@ const sb = async (path, opts = {}) => {
 //      automaticky s českou daní -- tohle musí projít účetní a režimem OSS.
 //   5) odběratel mimo EU    -> bez české DPH
 // Tohle je mechanika, ne daňové poradenství: sazby a režim si nech potvrdit účetní.
-function vatMode(supCountry, custCountry, custDic, custIsBusiness, supIsVatPayer) {
-  const sc = String(supCountry || 'CZ').toUpperCase();
-  const cc = String(custCountry || sc).toUpperCase();
-  if (!supIsVatPayer) return { mode: 'no_vat_supplier', note: 'Dodavatel není plátcem DPH.' };
-  if (cc === sc) return { mode: 'domestic', note: null };
-  if (EU.indexOf(cc) >= 0) {
-    if (custDic) {
-      return { mode: 'reverse_charge',
-        note: 'Daň odvede příjemce plnění (reverse charge, čl. 196 směrnice 2006/112/ES).' };
-    }
-    return { mode: 'oss_pending',
-      note: 'Odběratel bez DIČ v jiném státě EU — místem plnění je jeho stát (režim OSS). Doklad prověří účetní.' };
-  }
-  return { mode: 'outside_eu', note: 'Plnění mimo EU — bez české DPH (§ 9 zákona o DPH).' };
+// Rezim urcuje spolecna funkce v _vat.js -- stejna pro doklad za EP, za clensky poplatek
+// federace i za listek. Drive tahle logika zila jen tady a doklad organizace zadny rezim
+// nenesl. Predplatne EP je elektronicky poskytovana sluzba, proto kind 'electronic'.
+function _vatForEp(supCountry, custCountry, custDic, supIsVatPayer) {
+  return vatMode(supCountry, custCountry, custDic, { kind: 'electronic', supIsVatPayer });
 }
+
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
@@ -89,7 +82,8 @@ export default async function handler(req, res) {
       require_vat_foreign: !!ps.require_vat_foreign,
     };
 
-    const V = vatMode(ME.country, custCountry, pr.vat_id, !!pr.tax_id, ME.vat_payer);
+    // Status odberatele (ICO) na rezim nema vliv: rozhoduje zeme a DIC, proto se uz nepredava.
+    const V = _vatForEp(ME.country, custCountry, pr.vat_id, ME.vat_payer);
 
     // OSS NECHCEME. Odběratel z jiné země EU bez DIČ = doklad se nevystaví, stejně jako to
     // dělá doklad za provizi (require_vat_foreign). Platba zůstává evidovaná a doklad

@@ -11,6 +11,8 @@
 
 import { isTestMode } from './_config.js';
 
+import { vatMode, vatRateFor } from './_vat.js';
+
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -54,7 +56,7 @@ async function sb(path, opts = {}) {
 
 // Číslo dokladu i klíč řady se počítají STEJNĚ jako u poskytovatele: IČO + účet.
 // Asociace je samostatný účetní subjekt, takže má vlastní souvislou řadu.
-async function issueOrgDoklad(oc, org, amount, currency, method, testMode, transactionId) {
+async function issueOrgDoklad(oc, org, amount, currency, method, testMode, transactionId, requireVatForeign) {
   try {
     const ico = String(org.tax_id || '').replace(/\s/g, '');
     if (!ico || !org.owner_id) return null;
@@ -77,11 +79,27 @@ async function issueOrgDoklad(oc, org, amount, currency, method, testMode, trans
     // Odběratel: klub v MTL, nebo klub vedený jen asociací. Údaje se OPISUJÍ -- pozdější
     // změna názvu nebo adresy nesmí přepsat už vystavený doklad.
     let cust = { name: oc.ext_legal_name || oc.ext_name || null, email: oc.ext_email || oc.guest_email || null,
-                 ico: oc.ext_tax_id || null, address: oc.ext_address || null };
+                 ico: oc.ext_tax_id || null, address: oc.ext_address || null, dic: null, country: null };
     if (oc.gym_id) {
-      const g = (await sb(`gyms?id=eq.${encodeURIComponent(oc.gym_id)}&select=name,legal_name,tax_id,vat_id,billing_line1,billing_line2,billing_city,billing_postal,invoice_email`))[0];
+      const g = (await sb(`gyms?id=eq.${encodeURIComponent(oc.gym_id)}&select=name,legal_name,tax_id,vat_id,billing_line1,billing_line2,billing_city,billing_postal,invoice_email,billing_country,country_code`))[0];
       if (g) cust = { name: g.legal_name || g.name || null, email: g.invoice_email || null,
-                      ico: g.tax_id || null, address: _billAddr(g) || null };
+                      ico: g.tax_id || null, address: _billAddr(g) || null,
+                      dic: g.vat_id || null,
+                      country: (g.billing_country || g.country_code || null) };
+    }
+
+    // DANOVY REZIM. Clensky poplatek je obecna sluzba: pres hranice v EU s DIC odberatele jde
+    // o prenesenou danovou povinnost, mimo EU je mimo ceskou DPH. Bez rezimu nesl doklad
+    // sazbu dodavatele bez ohledu na to, odkud odberatel je.
+    const _supCC = String(org.billing_country || org.country || 'CZ').toUpperCase();
+    const V = vatMode(_supCC, cust.country, cust.dic, { kind: 'service', supIsVatPayer: !!org.vat_payer });
+    // Bez DIC odberatele v jinem state EU rezim urcit nejde. Se zapnutou branou se doklad
+    // nevystavi a klub se vyzve k doplneni DIC (stejne jako u provizi MTL); s vypnutou se
+    // vystavi domaci rezim, protoze bez DIC se odberatel bere jako osoba nepovinna k dani.
+    if (V.mode === 'need_vat') {
+      if (requireVatForeign) return { needVat: true, custName: cust.name, custId: (oc.gym_id || null) };
+      V.mode = 'domestic';
+      V.note = 'Odběratel bez DIČ — účtováno v režimu státu dodavatele.';
     }
 
     const label = oc.fee_label || 'Členský poplatek';
@@ -92,8 +110,10 @@ async function issueOrgDoklad(oc, org, amount, currency, method, testMode, trans
         transaction_id: transactionId || null, payment_intent: oc.fee_payment_intent || null,
         sup_name: org.legal_name || org.name || null,
         sup_ico: ico, sup_dic: org.vat_id || null, sup_address: _billAddr(org) || null,
-        sup_vat_payer: !!org.vat_payer, sup_vat_rate: (org.vat_rate != null ? org.vat_rate : null),
+        sup_vat_payer: !!org.vat_payer, sup_vat_rate: vatRateFor(V.mode, org.vat_rate),
         cust_name: cust.name, cust_email: cust.email,
+        cust_country: cust.country || null, cust_dic: cust.dic || null,
+        vat_mode: V.mode, vat_note: V.note || null,
         item_label: label,
         // HALERE, jako transactions.gross_amount a jako zbytek doklady.amount (klient pri
         // zobrazeni deli stem). Drive se sem ukladala cela koruna, takze doklad asociace
@@ -134,7 +154,7 @@ export default async function handler(req, res) {
     const dup = await sb(`transactions?org_fee_id=eq.${encodeURIComponent(oc_id)}&select=id&limit=1`);
     if (dup && dup.length) return res.status(200).json({ ok: true, already: true });
 
-    const org = (await sb(`organizations?id=eq.${encodeURIComponent(oc.organization_id)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,owner_id`))[0];
+    const org = (await sb(`organizations?id=eq.${encodeURIComponent(oc.organization_id)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,billing_country,country,owner_id`))[0];
     if (!org) return res.status(404).json({ error: 'org not found' });
 
     // Popis se opíše z období, aby na dokladu stálo, ZA CO klub platil.
@@ -199,7 +219,29 @@ export default async function handler(req, res) {
     });
     const txId = (tx && tx[0] && tx[0].id) || null;
 
-    const no = await issueOrgDoklad({ ...oc, fee_label: label }, org, amount, currency, method || 'pis', _test, txId);
+    // Brana na DIC je stejny prepinac, jaky hlida doklady MTL (platform_settings).
+    let _reqVat = false;
+    try { const ps = (await sb('platform_settings?id=eq.1&select=require_vat_foreign'))[0]; _reqVat = !!(ps && ps.require_vat_foreign); } catch (e) {}
+
+    const no = await issueOrgDoklad({ ...oc, fee_label: label }, org, amount, currency, method || 'pis', _test, txId, _reqVat);
+    // Platba probehla a je zauctovana; chybi jen doklad. Obe strany se to musi dozvedet,
+    // jinak klub ceka na doklad, ktery nikdy neprijde.
+    if (no && typeof no === 'object' && no.needVat) {
+      try {
+        if (no.custId) {
+          const g = (await sb(`gyms?id=eq.${encodeURIComponent(no.custId)}&select=owner_id,name`))[0];
+          if (g && g.owner_id) await sb('notifications', { method: 'POST', prefer: 'return=minimal',
+            body: JSON.stringify({ user_id: g.owner_id, type: 'system', read: false,
+              data: JSON.stringify({ kind: 'need_vat', organization_id: org.id }),
+              message: '⚠️ Doplň DIČ (VAT ID) — bez něj ti ' + (org.name || 'organizace') + ' nemůže vystavit doklad za členský poplatek.' }) });
+        }
+        if (org.owner_id) await sb('notifications', { method: 'POST', prefer: 'return=minimal',
+          body: JSON.stringify({ user_id: org.owner_id, type: 'system', read: false,
+            data: JSON.stringify({ kind: 'need_vat_cust' }),
+            message: '⚠️ Doklad pro ' + (no.custName || 'klub') + ' nešel vystavit: klub v jiném státě EU nemá DIČ. Jakmile ho doplní, doklad vystavíme.' }) });
+      } catch (e) { /* oznameni neni duvod shodit platbu */ }
+      return res.status(200).json({ ok: true, transaction_id: txId, doklad_no: null, need_vat: true, mtl_fee: 0 });
+    }
     return res.status(200).json({ ok: true, transaction_id: txId, doklad_no: no, mtl_fee: 0 });
   } catch (e) {
     return res.status(500).json({ error: e.message });
