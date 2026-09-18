@@ -31711,9 +31711,20 @@ async function openClubOrgHistory(){
 
 // KROK 1 PŘIHLÁŠKY. Klub uvidí, které údaje asociace dostane, a teprve pak odešle.
 // Předání fakturačních údajů není maličkost -- kdo je předává, má vědět které.
-function _foConfirm(orgId, orgName, parentOv){
+async function _foConfirm(orgId, orgName, parentOv){
   const EN=LANG==='en';
   const g=_myGymData||{};
+  // DIČ SE ŘEŠÍ TADY, NE U PLATBY. Klub má vědět, že u asociace v jiném státě EU je DIČ
+  // podmínkou úhrady poplatku, už když žádost posílá -- ne až mu appka po schválení
+  // odmítne otevřít platbu. Přeshraniční členství je v praxi vzácné (národní svaz se
+  // registruje pod mezinárodní federaci, klub ne), ale když k němu dojde, tak s tímhle.
+  let _org=null;
+  try{ const { data }=await supaClient.from('organizations')
+    .select('name,billing_country,country,vat_payer').eq('id',orgId).maybeSingle(); _org=data; }catch(e){}
+  const _needVat=!!(_org && typeof _needVatBeforePay==='function'
+    && _needVatBeforePay(_org.billing_country||_org.country, g.billing_country||g.country_code, g.vat_id, !!_org.vat_payer));
+  const _foreign=!!(_org && String(_org.billing_country||_org.country||'').toUpperCase()
+    && String(_org.billing_country||_org.country||'').toUpperCase()!==String(g.billing_country||g.country_code||'').toUpperCase());
   const _row=function(l,v){ return '<div style="display:flex;justify-content:space-between;gap:14px;padding:6px 0;border-bottom:1px solid var(--border);font-size:12.5px;"><span style="color:var(--mid);">'+l+'</span><strong style="text-align:right;color:var(--dark);">'+escapeHtml(String(v||'\u2014'))+'</strong></div>'; };
   let ov=document.getElementById('foConfOv'); if(ov) ov.remove();
   ov=document.createElement('div'); ov.id='foConfOv';
@@ -31733,13 +31744,25 @@ function _foConfirm(orgId, orgName, parentOv){
       +_row(EN?'Invoice e-mail':'E-mail pro faktury', g.invoice_email)
       +_row(EN?'Billing phone':'Telefon (faktura\u010dn\u00ed)', g.billing_phone)
     +'</div>'
+    +(_needVat?('<div style="background:#FFF7ED;border:1px solid #FCD9A8;border-radius:12px;padding:11px 13px;margin-bottom:12px;font-size:12.5px;color:#9a5a00;line-height:1.55;">'
+      +'⚠️ <b>'+(EN?'You will need a VAT ID to pay':'K \u00fahrad\u011b bude\u0161 potřebovat DI\u010c')+'</b><br>'
+      +(EN?('This association is in another EU country, so the membership fee is a cross-border supply. Without your VAT ID it cannot issue you a receipt, and we will not open the payment. You can send the request now and add the VAT ID before you pay.')
+          :('Tato asociace je v jin\u00e9m st\u00e1t\u011b EU, take \u010dlensk\u00fd poplatek je p\u0159eshrani\u010dn\u00ed pln\u011bn\u00ed. Bez DI\u010c ti nem\u016f\u017ee vystavit doklad a platbu ti neotev\u0159eme. \u017d\u00e1dost m\u016f\u017ee\u0161 poslat te\u010f a DI\u010c doplnit ne\u017e bude\u0161 platit.'))
+      +'<div style="margin-top:9px;"><button id="_foVat" style="padding:8px 12px;background:#9a5a00;border:none;border-radius:9px;font-size:12px;font-weight:800;color:#fff;cursor:pointer;font-family:inherit;">\ud83e\uddfe '+(EN?'Add VAT ID':'Doplnit DI\u010c')+'</button></div>'
+      +'</div>'):(_foreign?('<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:var(--mid);line-height:1.5;">'
+      +(EN?'This association is in another EU country — the fee will be invoiced with reverse charge against your VAT ID.'
+          :'Tato asociace je v jin\u00e9m st\u00e1t\u011b EU \u2014 poplatek ti vyfakturuje v p\u0159enesen\u00e9 da\u0148ov\u00e9 povinnosti na tvoje DI\u010c.')+'</div>'):''))
     +'<p style="font-size:11.5px;color:var(--light);line-height:1.55;margin:0 0 14px;">'+(EN?'The association needs these to issue a receipt for the membership fee. Members of your club are not shared.':'Asociace je potřebuje k vystaven\u00ed dokladu za \u010dlensk\u00fd poplatek. \u010clenov\u00e9 tv\u00e9ho klubu se nep\u0159ed\u00e1vaj\u00ed.')+'</p>'
     +'<button id="_foSend" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Send the request':'Odeslat \u017e\u00e1dost')+'</button>'
     +'<button id="_foBack" style="width:100%;padding:12px;background:none;border:none;color:var(--mid);font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Back':'Zp\u011bt')+'</button></div>';
   document.body.appendChild(ov);
   ov.querySelector('#_foBack').onclick=function(){ ov.remove(); };
   ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
+  { const _v=ov.querySelector('#_foVat'); if(_v) _v.onclick=function(){ ov.remove(); try{ if(typeof _openBillingSection==='function') _openBillingSection(); }catch(e){} }; }
   ov.querySelector('#_foSend').onclick=async function(){
+    // Žádost se poslat dá, jen ať klub ví, co ho čeká: členství není platba.
+    if(_needVat && !confirm(EN?'Send the request without a VAT ID? You will not be able to pay the fee until you add it.'
+                              :'Poslat \u017e\u00e1dost bez DI\u010c? Poplatek nezaplat\u00ed\u0161, dokud ho nedopln\u00ed\u0161.')) return;
     const btn=ov.querySelector('#_foSend'); btn.disabled=true; btn.textContent='\u2026';
     try{
       const { data:_ex }=await supaClient.from('organization_clubs').select('id')
@@ -31878,7 +31901,15 @@ async function openClubOrgPanel(ocId){
     +(org.description?('<p style="font-size:13px;color:var(--dark);line-height:1.6;margin:10px 0 0;white-space:pre-wrap;">'+escapeHtml(org.description)+'</p>'):'')
     +'<div style="margin:14px 0;">'+_stav+'</div>'
     +((oc.status==='pending')?('<div style="border:1px dashed var(--border);border-radius:12px;padding:12px 14px;margin-bottom:10px;font-size:12.5px;color:var(--light);line-height:1.55;">\u{1F512} '+(EN?'Step 2 \u2014 payment unlocks once the association accepts your club.':'Krok 2 \u2014 platba se odemkne, jakmile asociace klub schv\u00e1l\u00ed.')+'</div>'):'')
-    +((oc.status==='active' && !_paidOk && _amt>0)?('<button id="_cpPay" style="width:100%;padding:14px;background:#0a8f5b;color:#fff;border:none;border-radius:12px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:inherit;margin-bottom:10px;">\u{1F3E6} '+(EN?'Pay the membership fee':'Uhradit \u010dlensk\u00fd poplatek')+' \u00b7 '+fmtPrice(_amt,_cur)+' '+_curSym(_cur)+'</button>'):'')
+    +(((oc.status==='active' && !_paidOk && _amt>0) && (typeof _needVatBeforePay==='function' && _needVatBeforePay(org.billing_country||org.country, (_myGymData&&(_myGymData.billing_country||_myGymData.country_code)), (_myGymData&&_myGymData.vat_id), !!org.vat_payer)))
+      // BEZ DIC SE PLATBA NENABIDNE, a je u toho napsane proc. Drive tu bylo zelene tlacitko
+      // Zaplatit, ktere po kliknuti odmitlo otevrit platbu -- to je horsi nez ho neukazat.
+      ?('<div style="background:#FFF7ED;border:1px solid #FCD9A8;border-radius:12px;padding:12px 13px;margin-bottom:10px;font-size:12.5px;color:#9a5a00;line-height:1.55;">'
+        +'\u26a0\ufe0f <b>'+(EN?'Add your VAT ID to pay':'K \u00fahrad\u011b dopl\u0148 DI\u010c')+'</b><br>'
+        +(EN?('This association is in another EU country, so the fee is a cross-border supply: without your VAT ID it cannot issue you a receipt.')
+            :('Tato asociace je v jin\u00e9m st\u00e1t\u011b EU, take poplatek je p\u0159eshrani\u010dn\u00ed pln\u011bn\u00ed: bez DI\u010c ti nem\u016f\u017ee vystavit doklad.'))
+        +'<div style="margin-top:9px;"><button id="_cpVat" style="padding:9px 13px;background:#9a5a00;border:none;border-radius:9px;font-size:12.5px;font-weight:800;color:#fff;cursor:pointer;font-family:inherit;">\ud83e\uddfe '+(EN?'Billing details':'Faktura\u010dn\u00ed \u00fadaje')+'</button></div></div>')
+      :((oc.status==='active' && !_paidOk && _amt>0)?('<button id="_cpPay" style="width:100%;padding:14px;background:#0a8f5b;color:#fff;border:none;border-radius:12px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:inherit;margin-bottom:10px;">\u{1F3E6} '+(EN?'Pay the membership fee':'Uhradit \u010dlensk\u00fd poplatek')+' \u00b7 '+fmtPrice(_amt,_cur)+' '+_curSym(_cur)+'</button>'):''))
     +'<div style="font-size:11px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.04em;margin:14px 0 6px;">'+(EN?'Membership fees':'\u010clensk\u00e9 poplatky')+'</div>'
     +_feeRows
     +(org.board_text?('<div style="border:1px solid var(--border);border-radius:12px;padding:13px 14px;margin-top:14px;">'
@@ -31895,6 +31926,8 @@ async function openClubOrgPanel(ocId){
   ov.querySelector('#_cpClose').onclick=function(){ try{ closeSheet('shClubOrg'); }catch(e){ ov.remove(); } };
   const _p=ov.querySelector('#_cpPay');
   if(_p) _p.onclick=function(){ openOrgFeePay(oc.id); };
+  // Z výzvy rovnou do fakturačních údajů, kde se DIČ doplňuje.
+  { const _v=ov.querySelector('#_cpVat'); if(_v) _v.onclick=function(){ try{ closeSheet('shClubOrg'); }catch(e){} try{ if(typeof _openBillingSection==='function') _openBillingSection(); }catch(e){} }; }
   const _lv=ov.querySelector('#_cpLeave');
   if(_lv) _lv.onclick=async function(){
     if(oc.status==='ended'||oc.status==='rejected'){
@@ -32034,6 +32067,14 @@ async function openOrgFeeGuest(token){
       +'<input id="_gLegal" value="'+escapeHtml(c.legal_name||'')+'" placeholder="'+(EN?'Legal name':'Pr\u00e1vn\u00ed n\u00e1zev')+'" style="'+_st+'">'
       +'<input id="_gIco" value="'+escapeHtml(c.tax_id||'')+'" placeholder="'+(EN?'Reg. number':'I\u010cO')+'" style="'+_st+'">'
       +'<input id="_gAddr" value="'+escapeHtml(c.address||'')+'" placeholder="'+(EN?'Billing address':'Faktura\u010dn\u00ed adresa')+'" style="'+_st+'">'
+      // FAKTURAČNÍ ZEMĚ A DIČ. Bez země nejde poznat přeshraniční plnění v EU a doklad by
+      // vznikl v domácím režimu i pro slovenský klub. DIČ je u přeshraničního plnění podmínka
+      // platby, ne nepovinný údaj -- proto je tu pořád, ne až když se na něco přijde.
+      +'<select id="_gCountry" style="'+_st+'">'+_ccOptions(c.country||'')+'</select>'
+      +'<input id="_gDic" value="'+escapeHtml(c.vat_id||'')+'" placeholder="'+(EN?'VAT ID (if registered)':'DI\u010c (pokud jste pl\u00e1tce)')+'" style="'+_st+'">'
+      +'<p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:-4px 0 10px;">'
+      +(EN?'If the association is in another EU country, the fee is a cross-border supply and the payment will not open without a VAT ID.'
+          :'Pokud je asociace v jin\u00e9m st\u00e1t\u011b EU, je poplatek p\u0159eshrani\u010dn\u00ed pln\u011bn\u00ed a bez DI\u010c se platba neotev\u0159e.')+'</p>'
       +'<input id="_gMail" type="email" value="'+escapeHtml(c.email||'')+'" placeholder="'+(EN?'Invoice e-mail':'E-mail pro faktury')+'" style="'+_st+'">'
       +'<input id="_gTel" value="'+escapeHtml(c.phone||'')+'" placeholder="'+(EN?'Phone':'Telefon')+'" style="'+_st+'">'
       +'<p style="font-size:11.5px;color:var(--light);line-height:1.55;margin:2px 0 14px;">'+(EN?'The association needs these to issue a receipt for the membership fee.':'Asociace je pot\u0159ebuje k vystaven\u00ed dokladu za \u010dlensk\u00fd poplatek.')+'</p>'
@@ -32042,11 +32083,13 @@ async function openOrgFeeGuest(token){
     ov.querySelector('#_gNext').onclick=async function(){
       const v=id=>((ov.querySelector(id)||{}).value||'').trim();
       if(!v('#_gName')){ toast(EN?'\u26a0\ufe0f Add the club name':'\u26a0\ufe0f Dopl\u0148 n\u00e1zev klubu'); return; }
+      if(!v('#_gCountry')){ toast(EN?'\u26a0\ufe0f Pick the billing country':'\u26a0\ufe0f Vyber faktura\u010dn\u00ed zemi'); return; }
       const btn=ov.querySelector('#_gNext'); btn.disabled=true; btn.textContent='\u2026';
       try{
         const r=await fetch('/api/org-fee-public',{ method:'POST', headers:{'Content-Type':'application/json'},
           body:JSON.stringify({ t:token, name:v('#_gName'), city:v('#_gCity'), legal_name:v('#_gLegal'),
-            tax_id:v('#_gIco'), address:v('#_gAddr'), email:v('#_gMail'), phone:v('#_gTel') }) });
+            tax_id:v('#_gIco'), address:v('#_gAddr'), email:v('#_gMail'), phone:v('#_gTel'),
+            country:v('#_gCountry'), vat_id:v('#_gDic') }) });
         const j=await r.json();
         if(!j||!j.ok) throw new Error((j&&j.error)||'save failed');
         d=await _fetch(); _step2();
@@ -32057,6 +32100,18 @@ async function openOrgFeeGuest(token){
   // KROK 2: platba. NENI zamcena -- asociace nema jak schvalit nekoho, kdo v appce ucet nema,
   // a odkaz uz sama poslala, cimz clenstvi odsouhlasila.
   const _step2=function(){
+    // Přeshraniční plnění v EU bez DIČ: platba se vůbec nenabídne. Server to hlídá taky
+    // (need_vat v org-fee-public), tohle je ta část, kterou klub uvidí.
+    if(d && d.need_vat){
+      ov.innerHTML='<div style="background:#fff;width:100%;max-width:460px;border-radius:18px;padding:22px;">'
+        +'<div style="font-family:\'Bebas Neue\';font-size:22px;color:var(--dark);margin-bottom:6px;">'+(EN?'Add your VAT ID':'Dopl\u0148te DI\u010c')+'</div>'
+        +'<p style="font-size:13px;color:var(--mid);line-height:1.6;margin:0 0 14px;">'
+        +(EN?('The association is in another EU country, so the membership fee is a cross-border supply. Without your VAT ID the receipt cannot be issued, so the payment cannot be made yet.')
+            :('Asociace je v jin\u00e9m st\u00e1t\u011b EU, take \u010dlensk\u00fd poplatek je p\u0159eshrani\u010dn\u00ed pln\u011bn\u00ed. Bez DI\u010c nejde vystavit doklad, proto se platba zat\u00edm neotev\u0159e.'))+'</p>'
+        +'<button id="_gvBack" style="width:100%;padding:14px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Back to the details':'Zp\u011bt na \u00fadaje')+'</button></div>';
+      const _b=ov.querySelector('#_gvBack'); if(_b) _b.onclick=function(){ _step1(); };
+      return;
+    }
     const _cur=(d.fee&&d.fee.currency)||'CZK';
     const _per=(d.fee&&d.fee.period_from&&d.fee.period_to)
       ? (new Date(d.fee.period_from).toLocaleDateString(EN?'en-GB':'cs-CZ')+' \u2013 '+new Date(d.fee.period_to).toLocaleDateString(EN?'en-GB':'cs-CZ')) : '';
@@ -32121,6 +32176,23 @@ async function openOrgFeePay(ocId){
   const amt=Number(oc.fee_amount!=null?oc.fee_amount:(_fee?_fee.amount:0));
   const cur=(oc.fee_currency||(_fee&&_fee.currency)||'CZK');
   if(!(amt>0)){ toast(EN?'\u26a0\ufe0f No membership fee is set for this period':'\u26a0\ufe0f Na tohle obdob\u00ed nen\u00ed nastaven\u00fd \u010dlensk\u00fd poplatek'); return; }
+  // PŘESHRANIČNÍ PLNĚNÍ V EU BEZ DIČ SE NEPLATÍ. Dřív klub zaplatil a doklad pak nešel
+  // vystavit -- peníze na účtu a v ruce nic. Kontroluje se dřív, než se ukáže QR kód.
+  {
+    let _cCC=null, _cDic=null;
+    if(oc.gym_id){
+      try{ const { data:_g }=await supaClient.from('gyms').select('vat_id,billing_country,country_code').eq('id',oc.gym_id).maybeSingle();
+        if(_g){ _cCC=_g.billing_country||_g.country_code||null; _cDic=_g.vat_id||null; } }catch(e){}
+    } else { _cCC=oc.ext_country||null; _cDic=oc.ext_vat_id||null; }
+    if(_needVatBeforePay(org.billing_country||org.country, _cCC, _cDic, !!org.vat_payer)){
+      const _isMine=!!(oc.gym_id && (window._myGyms||[]).some(function(x){ return String(x.id)===String(oc.gym_id); }));
+      alert(EN?('Add your VAT ID first.\n\n'+(org.name||'The association')+' is in another EU country, so the fee is a cross-border supply: without your VAT ID the receipt cannot be issued, and we will not let you pay for something you would have no document for.')
+             :('Nejd\u0159\u00edv dopl\u0148 DI\u010c.\n\n'+(org.name||'Asociace')+' je v jin\u00e9m st\u00e1t\u011b EU, take jde o p\u0159eshrani\u010dn\u00ed pln\u011bn\u00ed: bez DI\u010c nejde vystavit doklad, a nepust\u00edme t\u011b platit n\u011bco, k \u010demu bys doklad nedostal.'));
+      // Vlastní klub: otevřít rovnou fakturační údaje, kde se DIČ doplňuje.
+      if(_isMine){ try{ if(typeof _openBillingSection==='function') _openBillingSection(); }catch(e){} }
+      return;
+    }
+  }
   const _periodLbl=_fee?((_fee.name||'')+(_fee.name?' \u00b7 ':'')+new Date(_fee.period_from).toLocaleDateString(EN?'en-GB':'cs-CZ')+' \u2013 '+new Date(_fee.period_to).toLocaleDateString(EN?'en-GB':'cs-CZ')):'';
 
   let ov=document.getElementById('orgFeeOv'); if(ov) ov.remove();
@@ -32358,6 +32430,27 @@ async function openEventDivisions(ev, org){
 
 // KLUB VEDENÝ JEN ASOCIACÍ. Většina členů appku používat nebude a evidence členství na tom
 // nesmí stát -- jinak by si asociace musela vést druhý seznam mimo appku.
+// Seznam zemí pro fakturační údaje. Nepoužívá _countriesOpen (tam jsou jen otevřené trhy) --
+// klub v asociaci může být odkudkoli, i ze země, kde MTL ještě není.
+function _ccOptions(sel){
+  const EN=LANG==='en';
+  const cur=String(sel||'').toUpperCase();
+  const list=(typeof MTL_COUNTRIES!=='undefined'?MTL_COUNTRIES:[]).slice()
+    .sort(function(a,b){ return String(EN?a[2]:a[1]).localeCompare(String(EN?b[2]:b[1]), EN?'en':'cs'); });
+  return '<option value=""'+(cur?'':' selected')+'>'+(EN?'Billing country\u2026':'Faktura\u010dn\u00ed zem\u011b\u2026')+'</option>'
+    + list.map(function(c){ return '<option value="'+c[0]+'"'+(c[0]===cur?' selected':'')+'>'+escapeHtml(EN?c[2]:c[1])+'</option>'; }).join('');
+}
+// BRANA NA DIC PRED PLATBOU, klientská strana. Server ji hlídá taky (api/_vat.js), ale klub
+// nesmí vůbec vidět QR kód: zaplacenou platbu bez dokladu už nikdo nevrátí zpátky.
+// EU_CC je definované u VIES kontroly; 'GR'/'EL' jsou tam obě kvůli řeckému DIČ.
+const _EU_VAT=new Set(['AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR','EL','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SK','SI','ES','SE']);
+function _needVatBeforePay(supCC, custCC, custDic, supIsVatPayer){
+  if(!supIsVatPayer) return false;
+  const sc=String(supCC||'CZ').toUpperCase(), cc=String(custCC||'').toUpperCase();
+  if(!cc || cc===sc) return false;
+  if(!_EU_VAT.has(cc)) return false;
+  return !String(custDic||'').trim();
+}
 function _orgAddExtClub(org, done){
   const EN=LANG==='en';
   let ov=document.getElementById('orgExtOv'); if(ov) ov.remove();
@@ -32372,6 +32465,12 @@ function _orgAddExtClub(org, done){
     +'<input id="_exLegal" placeholder="'+(EN?'Legal name':'Pr\u00e1vn\u00ed n\u00e1zev')+'" style="'+_st+'">'
     +'<input id="_exIco" placeholder="'+(EN?'Reg. number':'I\u010cO')+'" style="'+_st+'">'
     +'<input id="_exAddr" placeholder="'+(EN?'Address':'Adresa')+'" style="'+_st+'">'
+    // Země rozhoduje o daňovém režimu dokladu, DIČ o tom, jestli klub může vůbec zaplatit.
+    +'<select id="_exCountry" style="'+_st+'">'+_ccOptions((org&&(org.billing_country||org.country))||'')+'</select>'
+    +'<input id="_exDic" placeholder="'+(EN?'VAT ID (if registered)':'DI\u010c (pokud je pl\u00e1tce)')+'" style="'+_st+'">'
+    +'<p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:-4px 0 10px;">'
+    +(EN?'A club in another EU country cannot pay the fee without a VAT ID — the receipt could not be issued.'
+        :'Klub v jin\u00e9m st\u00e1t\u011b EU bez DI\u010c nem\u016f\u017ee poplatek zaplatit \u2014 ne\u0161el by mu vystavit doklad.')+'</p>'
     +'<input id="_exMail" type="email" placeholder="E-mail" style="'+_st+'">'
     +'<input id="_exTel" placeholder="'+(EN?'Phone':'Telefon')+'" style="'+_st+'">'
     +'<button id="_exSave" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Add as member':'P\u0159idat jako \u010dlena')+'</button>'
@@ -32382,6 +32481,7 @@ function _orgAddExtClub(org, done){
   ov.querySelector('#_exSave').onclick=async function(){
     const v=id=>((ov.querySelector(id)||{}).value||'').trim();
     if(!v('#_exName')){ toast(EN?'\u26a0\ufe0f Add the club name':'\u26a0\ufe0f Dopl\u0148 n\u00e1zev klubu'); return; }
+    if(!v('#_exCountry')){ toast(EN?'\u26a0\ufe0f Pick the billing country':'\u26a0\ufe0f Vyber faktura\u010dn\u00ed zemi'); return; }
     const btn=ov.querySelector('#_exSave'); btn.disabled=true; btn.textContent='\u2026';
     try{
       // Rovnou 'active': asociace si ho pridava sama, neni koho schvalovat.
@@ -32389,6 +32489,7 @@ function _orgAddExtClub(org, done){
         status:'active', confirmed_at:new Date().toISOString(), requested_by:currentUser.id,
         ext_name:v('#_exName'), ext_city:v('#_exCity')||null, ext_legal_name:v('#_exLegal')||null,
         ext_tax_id:v('#_exIco')||null, ext_address:v('#_exAddr')||null,
+        ext_country:v('#_exCountry')||null, ext_vat_id:v('#_exDic')||null,
         ext_email:v('#_exMail')||null, ext_phone:v('#_exTel')||null });
       ov.remove(); done();
     }catch(e){ btn.disabled=false; toast('\u26a0\ufe0f '+((e&&e.message)||e)); }
@@ -32582,6 +32683,7 @@ async function openOrgClubs(org, filter){
       // BEZ KOLEJE A KARTY SE NEVYBÍRÁ. Stejné pravidlo jako u klubu a kouče: dokud není
       // kam peníze poslat a z čeho strhnout provizi, nejde příjem zaúčtovat.
       if(typeof _orgPayGate==='function' && _orgPayGate(org)) return;
+      // Klub v jiném státě EU bez DIČ: server to odmítne (need_vat) a poplatek se nezaúčtuje.
       if(!confirm(EN?'Mark the fee as received?':'Ozna\u010dit poplatek jako p\u0159ijat\u00fd?')) return;
       try{
         // CENA A MĚNA SE MUSÍ ZAPSAT SPOLU S PLATBOU. Dřív se uložilo jen fee_paid_at, řádek zůstal
