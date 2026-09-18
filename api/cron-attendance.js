@@ -258,6 +258,12 @@ async function handler(req, res) {
         if (!pk.ok) { console.error('purge profile', pr.id, pk.status); continue; }
         // Přihlášení se ruší, e-mail v auth zůstat nesmí. Řádek v profiles zůstává kvůli vazbám
         // z dokladů a docházky -- bez něj by historie klubu ztratila, ke komu patřila.
+        // POPTAVKA SE MAZE. demand_signals nesou user_id, souradnice, mesto a volny text --
+        // po smazani uctu to zustavalo lezet navzdy: osobni udaj po vymazu a zaroven duch
+        // v hotspotech, takze MTL oslovovalo kluby kvuli lidem, kteri uz v appce nejsou.
+        for (const t of ['demand_signals', 'demand_sounding_replies', 'course_alerts', 'slot_alerts']) {
+          try { await fetch(`${SB}/rest/v1/${t}?user_id=eq.${pr.id}`, { method: 'DELETE', headers: sbHeaders }); } catch (e) {}
+        }
         try { await fetch(`${SB}/auth/v1/admin/users/${pr.id}`, { method: 'DELETE', headers: sbHeaders }); } catch (e) {}
         purged++;
       }
