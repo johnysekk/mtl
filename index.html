@@ -6340,6 +6340,10 @@ async function loadCoaches() {
   // Stará verze hlídala jen výplatní kanál a fakturační údaje ignorovala.
   (function(){ if(typeof window._coachNotReady!=='function'){ window._coachNotReady=function(r){ return !canSell(r,'coach'); }; } })();
   data = (data||[]).filter(function(r){ return !window._coachNotReady(r); });
+  // ZEMĚ PLATÍ I PRO KOUČE. coaches_near vrací nejbližší bez ohledu na hranice, takže se
+  // filtruje tady -- stejné pravidlo jako u klubů a událostí: v režimu zahraničí vybraná
+  // země, při prohlížení jiného města jeho země, jinak domovská.
+  if(_uCC) data = (data||[]).filter(function(r){ return _deckRowInCountry(r, _uCC); });
   COACHES = (data||[]).map(_mapCoachRow);
   try{ await appendDojoSenseis(); }catch(e){ console.error('appendDojoSenseis',e); }
   init();
@@ -6362,6 +6366,11 @@ async function appendDojoSenseis(){
   vis.forEach(l=>{
     const g=gymMap[l.gym_id], p=pm[l.coach_id];
     if(!g||!p||p.coach_status!=='approved') return;
+    // Senseiové z klubů se připojují mimo coaches_near, takže i na ně musí platit hranice --
+    // jinak by cizí zemí prošel aspoň tudy. Rozhoduje země KLUBU, kde učí.
+    { const _cc=(_deckAbroad && window._deckCountryPick) ? String(window._deckCountryPick).toUpperCase()
+        : ((typeof _deckHomeCC==='function') ? _deckHomeCC() : null);
+      if(_cc && typeof _deckRowInCountry==='function' && !_deckRowInCountry(g, _cc) && !_deckRowInCountry(p, _cc)) return; }
     const gdiscs=parseDisc(g.disciplines).filter(d=>discCat(d)==='traditional');
     if(!gdiscs.length) return;
     if(out[p.id]){ out[p.id].disciplines=[...new Set(out[p.id].disciplines.concat(gdiscs))]; return; }
@@ -6468,7 +6477,10 @@ async function loadMoreCoaches(){
     if(r.error || !r.data || !r.data.length){ _coachLoadingMore=false; return false; }
     _coachOffset += _COACH_PAGE;
     const have = new Set(COACHES.map(c=>c.id));
-    const more = r.data.filter(c=>!have.has(c.id)).map(_mapCoachRow);
+    // Stejná hranice i na dalších stránkách, jinak by se cizí kouči doplnili při doskrolování.
+    const _cc=(_deckAbroad && window._deckCountryPick) ? String(window._deckCountryPick).toUpperCase()
+      : ((typeof _deckHomeCC==='function') ? _deckHomeCC() : null);
+    const more = r.data.filter(function(c){ return !have.has(c.id) && (!_cc || _deckRowInCountry(c, _cc)); }).map(_mapCoachRow);
     if(more.length){ COACHES = COACHES.concat(more); const _i=idx; filtered=buildFiltered(); idx=_i; renderCards(); }
     _coachLoadingMore = false;
     return more.length>0;
@@ -6511,6 +6523,23 @@ function _deckHomeCC(){
   if(currentUser && (currentUser.country_code||currentUser.residence_country))
     return String(currentUser.country_code||currentUser.residence_country).toUpperCase();
   return _ccOf((currentUser&&currentUser.country) || (typeof userLoc!=='undefined' && userLoc && userLoc.country) || '');
+}
+// TOTÉŽ, ALE NAD UŽ NAČTENÝM ŘÁDKEM. Kluby a události filtruje země přímo v dotazu
+// (_deckCountryOr), kouči ale chodí z PostGIS funkce coaches_near, která zemi nezná a vrací
+// prostě nejbližší. Při prohlížení Toulouse tak v decku koučů zůstal brněnský kouč 1038 km
+// daleko, zatímco kluby se přepnuly správně. Tohle je ten samý filtr použitý po načtení.
+function _deckRowInCountry(row, cc){
+  const c=String(cc||'').toUpperCase(); if(!c) return true;
+  const rc=String((row&&(row.country_code||row.countryCode))||'').toUpperCase();
+  if(rc) return rc===c;
+  // Starší řádek bez kódu: zkusíme název v obou jazycích (viz _deckCountryOr).
+  const nm=String((row&&row.country)||'').trim().toLowerCase();
+  if(!nm) return false;
+  try{
+    const hit=(typeof MTL_COUNTRIES!=='undefined'?MTL_COUNTRIES:[]).filter(function(x){ return x[0]===c; })[0];
+    if(hit) return nm===String(hit[1]).toLowerCase() || nm===String(hit[2]).toLowerCase();
+  }catch(e){}
+  return false;
 }
 // Podmínka pro dotaz: kód NEBO název, ať se během přechodu neztratí starší řádky.
 function _deckCountryOr(cc){
