@@ -328,11 +328,22 @@ export default async function handler(req, res) {
 
     if (provider === 'gym') {
       // gym pays out -> gym owner authorizes, rate from owner profile
-      const gyms = await sb(`gyms?id=eq.${gym_id}&select=id,owner_id,currency,account_suspended,stripe_account,created_at,billing_country`);
+      const gyms = await sb(`gyms?id=eq.${gym_id}&select=id,owner_id,currency,account_suspended,terms_text,terms_file_url,org_form,stripe_account,created_at,billing_country`);
       const gym = gyms && gyms[0];
       if (!gym) return res.status(404).json({ error: 'gym not found' });
       if (!_trusted && gym.owner_id !== uid) return res.status(403).json({ error: 'not your gym' });
       if (!_trusted && gym.account_suspended) return res.status(403).json({ error: 'account suspended' });
+      // PODMINKY TRENOVANI JSOU PODMINKA PRODEJE. Clenove je odsouhlasi pred platbou
+      // (waiver_acceptances) -- kdyz je klub nema, sbira podpisy pod prazdny papir. Klient
+      // to hlida taky (_mtlPayReady), ale tady se to neda obejit mimo appku.
+      if (!_trusted) {
+        const _tt = String(gym.terms_text || '').trim();
+        const _needFile = (gym.org_form === 'nonprofit');
+        if (!_tt || (_needFile && !String(gym.terms_file_url || '').trim())) {
+          return res.status(403).json({ error: 'terms missing',
+            message: 'Klub nema vyplnena pravidla treninku a podminky. Doplnte je v Nastaveni klubu; do te doby nelze prijimat platby.' });
+        }
+      }
       const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,created_at,referral_optin,billing_country,org_rate_until`);
       const ownerProf = (owners && owners[0]) || {};
       if (!ownerProf.id) ownerProf.id = gym.owner_id;
