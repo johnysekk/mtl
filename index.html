@@ -20162,9 +20162,23 @@ async function setClassReminderMute(muted){
   const v=$('vClassRem'); if(v) v.textContent = muted ? L('Vypnuto') : L('Zapnuto');
   try{ await supaClient.from('profiles').update({ mute_class_reminder: muted }).eq('id', currentUser.id); }catch(e){}
 }
+// ČASOVÉ PÁSMO PROFILU. Podle něj cron rozhoduje, kdy je u člověka „dnes" a kolik hodin
+// zbývá do lekce (cron-attendance). Dosud se zapisovalo JEN uvnitř checkUpcomingReminders,
+// a tu volá jen otevření notifikací -- kdo je neotevřel, měl v profilu null a cron mu počítal
+// všechno v UTC: připomínka na lekci v 9:00 chodila ve 2:30 místo v 1:00. Volá se při startu
+// a po každém načtení profilu, takže se srovná i po přestěhování do jiné země.
+async function _syncTimezone(){
+  try{
+    if(!currentUser || !currentUser.id) return;
+    const tz=Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if(!tz || currentUser.timezone===tz) return;
+    currentUser.timezone=tz;
+    await supaClient.from('profiles').update({ timezone: tz }).eq('id', currentUser.id);
+  }catch(e){}
+}
 async function checkUpcomingReminders(){
   if(!currentUser) return;
-  if(!_tzSet){ _tzSet=true; try{ const tz=Intl.DateTimeFormat().resolvedOptions().timeZone; if(tz && currentUser.timezone!==tz){ currentUser.timezone=tz; supaClient.from('profiles').update({timezone:tz}).eq('id',currentUser.id); } }catch(e){} }
+  try{ _syncTimezone(); }catch(e){}
   try{
     // Client-side reminder generation is DISABLED. Class/lesson reminders are sent by ONE reliable
     // server path only (cron-attendance), which avoids the duplicate-notification storm two
@@ -27807,7 +27821,7 @@ document.querySelector('.app').addEventListener('touchend',async()=>{
     if(currentUser && currentUser.role==='founder') await updateAdminBadge();
     if(currentUser){
       const { data: prof } = await supaClient.from('profiles').select('*').eq('id', currentUser.id).single();
-      if(prof){ currentUser=prof; updateRoleUI(); fillUserProfile(); try{ _claimCohorts(); }catch(e){} try{ _claimTickets(); }catch(e){} }
+      if(prof){ currentUser=prof; updateRoleUI(); fillUserProfile(); try{ _syncTimezone(); }catch(e){} try{ _claimCohorts(); }catch(e){} try{ _claimTickets(); }catch(e){} }
     }
     toast(L('✅ Obnoveno'));
   }
@@ -28238,6 +28252,7 @@ async function loadNotifications(append){
     else if(isSlotOpen) linkLabel = L('Rezervovat ›');
     else if(isDiscReq) linkLabel = (k==='disc_review') ? L('posoudit ›') : L('otevřít žádost ›');
     else if(isCoachInperson) linkLabel = L('Otevřít v diáři ›');
+    else if(isCoachLessonRem) linkLabel = L('Otevřít v diáři ›');
     else if(isCoachOnline) linkLabel = L('Otevřít online feedback ›');
     else if(isFavAvail) linkLabel = L('Rezervovat ›');
     else if(n.type==='dispute' && currentUser.role!=='founder' && n.message.includes('nedorazil na trénink')) linkLabel = L('Reagovat na hlášení ›');
@@ -28383,6 +28398,9 @@ async function loadNotifications(append){
           const dm = dd ? [dd,dd] : n.message.match(/(\d{4}-\d{2}-\d{2})/);
           openDiaryAt(dm ? dm[1] : null);
         }
+        // Obsluha tu byla celou dobu, jen se k ní nikdo nedostal: kind chyběl v seznamu
+        // `clickable`, takže se notifikace vykreslila jako neklikatelný text -- a přitom
+        // v něm stálo „Klepni pro otevření v diáři".
         else if(isCoachLessonRem){ try{ const dd=JSON.parse(n.data||'{}'); openDiaryAt(dd.date||null); }catch(e){ openDiary(); } }
         else if(isCoachOnline){ openOnline('coach'); }
         else if(isOnlineDone){ openOnline('student'); }
@@ -28662,7 +28680,7 @@ async function updateNotifBadge(){
   if(currentUser && currentUser.role==='founder') await updateAdminBadge();
   if(currentUser){
     const { data: prof } = await supaClient.from('profiles').select('*').eq('id', currentUser.id).single();
-    if(prof){ currentUser=prof; updateRoleUI(); fillUserProfile(); try{ _claimCohorts(); }catch(e){} try{ _claimTickets(); }catch(e){} }
+    if(prof){ currentUser=prof; updateRoleUI(); fillUserProfile(); try{ _syncTimezone(); }catch(e){} try{ _claimCohorts(); }catch(e){} try{ _claimTickets(); }catch(e){} }
   }
   try{ window._myNetCache=null; window._myTxCache=null; window._fdRevData=null; }catch(e){}
   try{ if(typeof loadMyNet==='function') await loadMyNet(true); }catch(e){}
@@ -42772,7 +42790,12 @@ function openCoachSettings(){
         +'<input id="csEmail" type="email" placeholder="E-mail" style="width:100%;box-sizing:border-box;padding:10px;border:1px solid var(--border);border-radius:10px;font-size:14px;font-family:\'DM Sans\';">'
         
         +'<label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--dark);margin-top:10px;cursor:pointer;"><input type="checkbox" id="csDok" style="width:16px;height:16px;flex:none;"><span>Zobrazit na dokladech studentům</span></label>';
-      _b.parentNode.appendChild(w);
+      // NAD TLAČÍTKO, NE POD NĚJ. Blok se přidával na konec rodiče, takže skončil pod
+      // „Uložit profil" -- vypadalo to, že se kontakt tím tlačítkem neukládá (ukládá,
+      // csSaveProfile bere i csPhone/csEmail/csDok).
+      { const _save=document.getElementById('csSaveProfile');
+        if(_save && _save.parentNode===_b.parentNode) _b.parentNode.insertBefore(w, _save);
+        else _b.parentNode.appendChild(w); }
       
       if($('csEmail')) $('csEmail').value=currentUser.contact_email||'';
       if($('csDok')) $('csDok').checked=!!currentUser.contact_on_doklad;
@@ -42783,6 +42806,20 @@ function openCoachSettings(){
   if($('csSaveProfile')) $('csSaveProfile').textContent = LANG==='en'?'Save profile':'Uložit profil';
   if($('csVideoLbl')) $('csVideoLbl').textContent = LANG==='en'?'Profile video (optional)':'Video na profil (nepovinné)';
   if($('csVideoStatus')) $('csVideoStatus').textContent = currentUser.profile_video_url ? (LANG==='en'?'✓ Video uploaded — pick a file to replace it':'✓ Video nahráno — vyber soubor pro nahrazení') : (LANG==='en'?'No video yet — optional, but it helps you sell yourself':'Zatím bez videa — nepovinné, ale pomůže ti lépe se prodat');
+  // „Video nahráno" bez videa je tvrzení, které si člověk nemá jak ověřit -- ukážeme ho.
+  try{
+    const _vs=$('csVideoStatus');
+    if(_vs && _vs.parentNode){
+      let _pv=document.getElementById('csVideoPrev');
+      if(currentUser.profile_video_url){
+        if(!_pv){ _pv=document.createElement('video'); _pv.id='csVideoPrev'; _pv.controls=true; _pv.preload='metadata';
+          _pv.style.cssText='width:100%;max-height:220px;border-radius:12px;background:#000;margin:8px 0;';
+          _vs.parentNode.insertBefore(_pv, _vs.nextSibling); }
+        if(_pv.src!==currentUser.profile_video_url) _pv.src=currentUser.profile_video_url;
+        _pv.style.display='block';
+      } else if(_pv){ _pv.removeAttribute('src'); _pv.style.display='none'; }
+    }
+  }catch(e){}
   if($('csRemoveVideo')){ $('csRemoveVideo').style.display = currentUser.profile_video_url ? 'block' : 'none'; $('csRemoveVideo').textContent = LANG==='en'?'🗑️ Remove uploaded video':'🗑️ Odebrat nahrané video'; }
   try{ currentUser.disc_stats = currentUser.disc_stats || {}; }catch(e){}
   const sc=$('csStats');
