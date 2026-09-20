@@ -15828,7 +15828,8 @@ async function loadPending(kind, pfx){
   const box=$(boxId); if(!box||!_myGymData) return;
   const isRecep = kind==='recep';
   const { data } = await supaClient.from('gym_coaches').select('id,coach_id,is_reception,created_at').eq('gym_id',_myGymData.id).eq('status','requested').order('created_at',{ascending:true});
-  const rows=(data||[]).filter(r=> !!r.is_reception===isRecep);
+  // Žádosti se nerozdělují podle toho, kterým odkazem přišly -- schvalují se na jednom místě.
+  const rows=(pfx==='tm'||!isRecep) ? (data||[]) : (data||[]).filter(r=> !!r.is_reception===isRecep);
   if(!rows.length){ box.innerHTML=''; return; }
   const ids=rows.map(r=>r.coach_id);
   const { data:profs } = await supaClient.from('profiles').select('id,name,photo_url,photo_thumb,city').in('id', ids);
@@ -15880,9 +15881,55 @@ async function processPendingJoin(){
   try{ if(g.owner_id) await supaClient.from('notifications').insert(_bi({ user_id:g.owner_id, type:'system', read:false, data:JSON.stringify({kind:'gym_join_request', who:currentUser.name||'Někdo', is_reception:isRecep}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((LANG==='en'? ((currentUser.name||'Someone')+' wants to join your team') : ((currentUser.name||'Někdo')+' chce do tvého týmu'))); })); }catch(e){}
   toast(LANG==='en'?'Request sent — waiting for approval':'Žádost odeslána — čeká na schválení');
 }
-function _ownerHideRowHtml(){ if(_myGymData && _myGymData._isCoOwner) return ''; var hid=!!(_myGymData&&_myGymData.owner_hidden_from_profile); var EN=LANG==='en'; return '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;margin-bottom:10px;background:var(--surf);"><div style="font-size:12.5px;color:var(--dark);line-height:1.4;">'+(EN?'Hide me (founder) from the public club profile':'Skr\u00fdt m\u011b (zakladatele) z ve\u0159ejn\u00e9ho profilu klubu')+'</div><button id="gtOwnerHideBtn" data-hid="'+(hid?'1':'0')+'" style="flex-shrink:0;padding:7px 12px;border-radius:8px;border:1px solid '+(hid?'#CFC0FF':'var(--border)')+';background:'+(hid?'#EDE7FF':'var(--bg)')+';color:'+(hid?'#5B3FB0':'var(--mid)')+';font-size:12px;font-weight:800;cursor:pointer;white-space:nowrap;font-family:\'DM Sans\';">'+(hid?(EN?'Hidden':'Skryt\u00fd'):(EN?'Visible':'Zobrazen\u00fd'))+'</button></div>'; }
-function _wireOwnerHide(box){ var b=box.querySelector('#gtOwnerHideBtn'); if(b) b.onclick=function(e){ e.stopPropagation(); toggleOwnerHidden(b.getAttribute('data-hid')==='1'); }; }
-async function toggleOwnerHidden(currentlyHidden){ if(!_myGymData) return; var nv=!currentlyHidden; try{ var r=await supaClient.from('gyms').update({ owner_hidden_from_profile:nv }).eq('id',_myGymData.id).eq('owner_id',currentUser.id); if(r.error){ toast('\u26a0\ufe0f '+r.error.message); return; } _myGymData.owner_hidden_from_profile=nv; var g=(window._myGyms||[]).find(function(x){ return String(x.id)===String(_myGymData.id); }); if(g) g.owner_hidden_from_profile=nv; toast(nv?(LANG==='en'?'Hidden from the club profile':'Skryt z profilu klubu'):(LANG==='en'?'Visible on the club profile':'Zobrazen na profilu klubu')); loadGymTeam(); }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||e)); } }
+// SPOLUMAJITEL = MAJITEL, kromě smazání klubu. Dřív se na patnácti místech ptalo
+// `owner_id===currentUser.id`, takže spolumajitel sice klub v menu viděl, ale polovinu
+// ovládání neměl -- třeba si nemohl přepnout vlastní viditelnost na profilu klubu.
+function _isGymBoss(g){
+  try{
+    if(!g || !currentUser) return false;
+    if(String(g.owner_id)===String(currentUser.id)) return true;
+    if(g._isCoOwner) return true;
+    const _m=(window._myGyms||[]).filter(function(x){ return String(x.id)===String(g.id); })[0];
+    return !!(_m && _m._isCoOwner);
+  }catch(e){ return false; }
+}
+// VLASTNÍ VIDITELNOST NA PROFILU KLUBU. Řádek patří tomu, kdo klub vede a není v seznamu
+// týmu sám za sebe: majiteli vždycky, spolumajiteli za jeho vlastní řádek v gym_coaches.
+// Každý přepíná SÁM SEBE -- majitel spolumajiteli viditelnost nepřepíná a naopak.
+function _ownerHideRowHtml(){
+  var EN=LANG==='en';
+  var _own=!!(_myGymData && currentUser && String(_myGymData.owner_id)===String(currentUser.id));
+  var _me=window._gtMeRow||null;
+  if(!_own && !_me) return '';
+  var hid=_own ? !!(_myGymData&&_myGymData.owner_hidden_from_profile) : !!(_me&&_me.hidden_from_profile);
+  var lbl=_own ? (EN?'Hide me (founder) from the public club profile':'Skrýt mě (zakladatele) z veřejného profilu klubu')
+               : (EN?'Hide me (co-owner) from the public club profile':'Skrýt mě (spolumajitele) z veřejného profilu klubu');
+  return '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px;">'
+    + '<span style="font-size:12.5px;color:var(--dark);line-height:1.4;">'+lbl+'</span>'
+    + '<button id="gtOwnerHideBtn" data-hid="'+(hid?'1':'0')+'" data-own="'+(_own?'1':'0')+'" style="padding:7px 12px;border-radius:8px;font-size:12px;font-weight:800;cursor:pointer;font-family:inherit;flex-shrink:0;white-space:nowrap;background:'+(hid?'var(--surf)':'#E8F8EE')+';color:'+(hid?'var(--mid)':'#0A7A3D')+';border:1px solid '+(hid?'var(--border)':'#A8E6C0')+';">'
+    + (hid?'':'✓ ')+(EN?'On profile':'Na profilu')+'</button></div>';
+}
+function _wireOwnerHide(box){ var b=box.querySelector('#gtOwnerHideBtn'); if(b) b.onclick=function(e){ e.stopPropagation(); toggleOwnerHidden(b.getAttribute('data-hid')==='1', b.getAttribute('data-own')==='1'); }; }
+async function toggleOwnerHidden(currentlyHidden, isOwner){
+  if(!_myGymData) return;
+  var nv=!currentlyHidden;
+  try{
+    var r;
+    if(isOwner){
+      r=await supaClient.from('gyms').update({ owner_hidden_from_profile:nv }).eq('id',_myGymData.id).eq('owner_id',currentUser.id);
+      if(!r.error) _myGymData.owner_hidden_from_profile=nv;
+    } else {
+      // Spolumajitel má vlastní řádek v týmu -- skrývá se jím, ne sloupcem majitele.
+      var _me=window._gtMeRow;
+      if(!_me){ toast('⚠️ '+(LANG==='en'?'Your team row was not found':'Nenašel se tvůj řádek v týmu')); return; }
+      r=await supaClient.from('gym_coaches').update({ hidden_from_profile:nv }).eq('id',_me.id).eq('coach_id',currentUser.id);
+      if(!r.error) _me.hidden_from_profile=nv;
+    }
+    if(r.error){ toast('⚠️ '+r.error.message); return; }
+    toast(nv ? (LANG==='en'?'Hidden from the club profile':'Skryto z profilu klubu') : (LANG==='en'?'Shown on the club profile':'Zobrazeno na profilu klubu'));
+    loadGymTeam(window._gtPfx||'');
+  }catch(e){ toast('⚠️ '+((e&&e.message)||e)); }
+}
 // ROLE PERSONÁLU. Dřív tu bylo pět nezávislých přepínačů a majitel z nich nepoznal, co daná
 // kombinace znamená. Role je předvolba: vybere se, co má člověk dělat, a oprávnění se nastaví
 // podle toho. Jednotlivé přepínače zůstávají pod tím, takže výjimka je pořád možná.
@@ -15895,12 +15942,14 @@ const STAFF_ROLES = {
   // trenér v klubu nic nezmohl. Co mu nepatří, se odebere; to je rychlejší než skládat.
   // Zvát a schvalovat lidi do týmu je jediná výjimka: to je moc nad ostatními, ne nástroj
   // k práci, takže se uděluje zvlášť.
-  trainer:   { can_manage_schedule:true,  can_take_payments:true,  can_scan_tickets:true,  can_request_fighters:true  },
-  reception: { can_manage_schedule:false, can_take_payments:true,  can_scan_tickets:true,  can_request_fighters:false },
+  // is_reception se přepíná spolu s rolí: podle něj se člověku otevírá obrazovka Recepce.
+  trainer:   { is_reception:false, can_manage_schedule:true,  can_take_payments:true,  can_scan_tickets:true,  can_request_fighters:true  },
+  reception: { is_reception:true,  can_manage_schedule:false, can_take_payments:true,  can_scan_tickets:true,  can_request_fighters:false },
 };
 function _staffRoleOf(r){
   if(r.co_owner) return 'coowner';
   if(r.full_autonomy) return 'autonomy';
+  if(r.is_reception) return 'reception';
   if(r.can_take_payments && r.can_scan_tickets && !r.can_manage_schedule) return 'reception';
   return 'trainer';
 }
@@ -15945,18 +15994,18 @@ async function _staffSetRole(linkId, role){
 function _permHelpHtml(linkId){
   const EN=LANG==='en';
   const items = EN ? [
-    ['Schedule', 'Creates, edits and deletes THEIR OWN classes in this club. Classes made by the owner stay untouched.'],
+    ['Schedule', 'Creates, edits and deletes THEIR OWN classes in this club. Cannot touch classes made by the owner or a co-owner.'],
     ['Fighters', 'Signs up fighters of this club for events and matches.'],
-    ['Payments', 'Takes payments at the desk: cash, QR, card terminal. Every payment is recorded with their name.'],
+    ['Payments', 'Collects and accepts payments: cashless, or in cash.'],
     ['Tickets', 'Scans tickets at the door of the club events.'],
     ['Manage staff', 'Invites people into the club and approves their requests. Does not see club money.'],
     ['On profile', 'Shown among the coaches on the public club profile. Off = works in the club, not listed publicly.'],
     ['Co-owner', 'Everything except deleting the club, including club money.'],
     ['Grant autonomy', 'Their own paid classes with their own price list; the money goes to them, not the club.'],
   ] : [
-    ['Rozvrh', 'Vytváří, upravuje a maže SVOJE lekce v tomhle klubu. Lekce, které vytvořil majitel, nechává být.'],
+    ['Rozvrh', 'Vytváří, upravuje a maže SVOJE lekce v tomhle klubu. Lekce, které vytvořil majitel nebo spolumajitel, spravovat nemůže.'],
     ['Fighteři', 'Přihlašuje závodníky klubu na akce a zápasy.'],
-    ['Platby', 'Přijímá platby u pultu: hotovost, QR, terminál. Každá platba se zapíše pod jeho jménem.'],
+    ['Platby', 'Vybírá a přijímá platby: bezhotovostně, popřípadě v hotovosti.'],
     ['Lístky', 'Kontroluje lístky u vstupu na akce klubu.'],
     ['Spravovat tým', 'Zve lidi do klubu a schvaluje jejich žádosti. Na peníze klubu nevidí.'],
     ['Na profilu', 'Je vidět mezi kouči na veřejném profilu klubu. Vypnuté = v klubu pracuje, ale veřejně uvedený není.'],
@@ -16012,8 +16061,14 @@ async function loadGymTeam(pfx){
   // Řádek „Skrýt mě (zakladatele)" patří majiteli; ve správcovském sheetu nemá co dělat.
   const _isOwn=!!(_myGymData && currentUser && _myGymData.owner_id===currentUser.id);
   const { data } = await supaClient.from('gym_coaches').select('*').eq('gym_id', _myGymData.id).in('status',['invited','active']).order('created_at',{ascending:false});
-  const rows=(data||[]).filter(r=>!r.is_reception);
-  if(!rows.length){ box.innerHTML=(_isOwn?_ownerHideRowHtml():'')+`<p style="font-size:12px;color:var(--light);">${LANG==='en'?'Nobody in the club staff yet.':'Zatím nikdo v týmu klubu.'}</p>`; if(_isOwn) _wireOwnerHide(box); return; }
+  // RECEPČNÍ JSOU SOUČÁST TÝMU. Měli vlastní sekci s vlastním odkazem a vlastním seznamem,
+  // přitom je to tentýž řádek v gym_coaches, jen s jinou rolí. Dvě místa znamenala dva
+  // zvací odkazy a dvě místa, kde hledat žádost.
+  const rows=(data||[]);
+  // Vlastní řádek (spolumajitel) a použitý prefix -- potřebuje je řádek „Skrýt mě".
+  window._gtPfx=(pfx||'');
+  window._gtMeRow=rows.filter(function(r){ return currentUser && String(r.coach_id)===String(currentUser.id); })[0]||null;
+  if(!rows.length){ box.innerHTML=_ownerHideRowHtml()+`<p style="font-size:12px;color:var(--light);">${LANG==='en'?'Nobody in the club staff yet.':'Zatím nikdo v týmu klubu.'}</p>`; _wireOwnerHide(box); return; }
   const ids=rows.map(r=>r.coach_id);
   const { data: profs } = await supaClient.from('profiles').select('id, name, photo_url, photo_thumb, city, avail_status, coach_status, gym_payout_account, payment_mode, receiver_id_value').in('id', ids);
   const pmap={}; (profs||[]).forEach(p=>pmap[p.id]=p);
@@ -16028,7 +16083,7 @@ async function loadGymTeam(pfx){
              <span style="font-size:10.5px;color:var(--light);align-self:center;">${LANG==='en'?'set below':'nastavuje se níže'}</span>`
           // SPOLUMAJITEL PATŘÍ K ROLÍM, ne mezi přepínače oprávnění dole -- je to role, ne
           // zaškrtávátko, a stojí nad Trenérem i Recepčním. Proto je první zleva.
-          : (((_myGymData&&_myGymData.owner_id===currentUser.id&&!r.parent_coach_id)
+          : ((((typeof _isGymBoss==='function'?_isGymBoss(_myGymData):(_myGymData&&_myGymData.owner_id===currentUser.id))&&!r.parent_coach_id)
               ? `<button class="gtCoBtn" data-id="${r.coach_id}" data-name="${(p.name||'').replace(/"/g,'&quot;')}" data-link="${r.id}" style="padding:6px 10px;border-radius:8px;font-size:11px;font-weight:800;cursor:pointer;font-family:inherit;background:#fff;color:#1452B0;border:1px solid #BBD3F5;">${LANG==='en'?'Co-owner':'Spolumajitel'}</button>`
               : '')
             + ['trainer','reception'].map(function(k){
@@ -16038,7 +16093,7 @@ async function loadGymTeam(pfx){
             }).join(''))
       }</div>
       <div style="font-size:11px;color:var(--light);line-height:1.4;margin-top:5px;">${_staffRoleDesc(_staffRoleOf(r))}</div></div>`:''}
-    <div style="display:flex;flex-wrap:wrap;gap:7px;margin-top:10px;">${active&&(p.gym_payout_account||p.receiver_id_value)&&!r.parent_coach_id?(r.full_autonomy?`<button class="gtAutoInfoBtn" style="padding:7px 9px;background:#EDE7FF;color:#5B3FB0;border:1px solid #CFC0FF;border-radius:8px;font-size:11px;font-weight:800;flex-shrink:0;white-space:nowrap;cursor:pointer;font-family:inherit;">${LANG==='en'?'Full autonomy':'Plná autonomie'}: ✅</button>`:`<button class="gtAutoBtn" data-id="${r.coach_id}" data-name="${(p.name||'').replace(/"/g,'&quot;')}" data-link="${r.id}" style="padding:7px 9px;background:var(--surf);color:#5B3FB0;border:1px solid #CFC0FF;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">⭐ ${LANG==='en'?'Grant autonomy':'Udělit autonomii'}</button>`):''}${(active && !r.full_autonomy && !r.co_owner && _myGymData && _myGymData.owner_id===currentUser.id && !r.parent_coach_id)?`<button class="gtSchedBtn" data-link="${r.id}" data-id="${r.coach_id}" data-name="${(p.name||'').replace(/"/g,'&quot;')}" data-cur="${r.can_manage_schedule?'1':'0'}" style="padding:7px 10px;background:${r.can_manage_schedule?'#E8F8EE':'var(--surf)'};color:${r.can_manage_schedule?'#0A7A3D':'var(--mid)'};border:1px solid ${r.can_manage_schedule?'#A8E6C0':'var(--border)'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">${r.can_manage_schedule?'✓ ':''}${LANG==='en'?'Schedule':'Rozvrh'}</button><button class="gtFighterBtn" data-link="${r.id}" data-id="${r.coach_id}" data-cur="${r.can_request_fighters?'1':'0'}" style="padding:7px 10px;background:${r.can_request_fighters?'#E8F8EE':'var(--surf)'};color:${r.can_request_fighters?'#0A7A3D':'var(--mid)'};border:1px solid ${r.can_request_fighters?'#A8E6C0':'var(--border)'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">${r.can_request_fighters?'✓ ':''}${LANG==='en'?'Fighters':'Fighteři'}</button><button class="gtPayBtn" data-link="${r.id}" data-cur="${r.can_take_payments?'1':'0'}" style="padding:7px 10px;background:${r.can_take_payments?'#E8F8EE':'var(--surf)'};color:${r.can_take_payments?'#0A7A3D':'var(--mid)'};border:1px solid ${r.can_take_payments?'#A8E6C0':'var(--border)'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">${r.can_take_payments?'✓ ':''}${LANG==='en'?'Payments':'Platby'}</button><button class="gtScanBtn" data-link="${r.id}" data-cur="${r.can_scan_tickets?'1':'0'}" style="padding:7px 10px;background:${r.can_scan_tickets?'#E8F8EE':'var(--surf)'};color:${r.can_scan_tickets?'#0A7A3D':'var(--mid)'};border:1px solid ${r.can_scan_tickets?'#A8E6C0':'var(--border)'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">${r.can_scan_tickets?'✓ ':''}${LANG==='en'?'Tickets':'Lístky'}</button><button class="gtTeamBtn" data-link="${r.id}" data-cur="${r.can_manage_team?'1':'0'}" style="padding:7px 10px;background:${r.can_manage_team?'#E8F8EE':'var(--surf)'};color:${r.can_manage_team?'#0A7A3D':'var(--mid)'};border:1px solid ${r.can_manage_team?'#A8E6C0':'var(--border)'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">${r.can_manage_team?'✓ ':''}${LANG==='en'?'Manage staff':'Spravovat tým'}</button>`:''}${active?`<button class="gtHideBtn" data-link="${r.id}" data-hid="${r.hidden_from_profile?'1':'0'}" style="padding:7px 10px;background:${r.hidden_from_profile?'var(--surf)':'#E8F8EE'};color:${r.hidden_from_profile?'var(--mid)':'#0A7A3D'};border:1px solid ${r.hidden_from_profile?'var(--border)':'#A8E6C0'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">${r.hidden_from_profile?'':'✓ '}${LANG==='en'?'On profile':'Na profilu'}</button>`:''}${(active && !r.full_autonomy && !r.co_owner && !(p.gym_payout_account||p.receiver_id_value) && !r.parent_coach_id)?`<div style="font-size:10.5px;color:var(--light);line-height:1.4;width:100%;margin-top:2px;">${LANG==='en'?'Autonomy can be granted once this coach connects their own payout account (Club settings → Payout account).':'Autonomii lze udělit, až si kouč připojí vlastní výplatní účet (Nastavení klubu → Výplatní účet).'}</div>`:''}<button class="gtRemoveBtn" data-id="${r.coach_id}" data-name="${(p.name||'').replace(/"/g,'&quot;')}" style="padding:7px 10px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;">${LANG==='en'?'Remove from club team':'Odebrat z týmu klubu'}</button></div>${active?_permHelpHtml(r.id):''}</div>`; }).join('');
+    <div style="display:flex;flex-wrap:wrap;gap:7px;margin-top:10px;">${active&&(p.gym_payout_account||p.receiver_id_value)&&!r.parent_coach_id?(r.full_autonomy?`<button class="gtAutoInfoBtn" style="padding:7px 9px;background:#EDE7FF;color:#5B3FB0;border:1px solid #CFC0FF;border-radius:8px;font-size:11px;font-weight:800;flex-shrink:0;white-space:nowrap;cursor:pointer;font-family:inherit;">${LANG==='en'?'Full autonomy':'Plná autonomie'}: ✅</button>`:`<button class="gtAutoBtn" data-id="${r.coach_id}" data-name="${(p.name||'').replace(/"/g,'&quot;')}" data-link="${r.id}" style="padding:7px 9px;background:var(--surf);color:#5B3FB0;border:1px solid #CFC0FF;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">⭐ ${LANG==='en'?'Grant autonomy':'Udělit autonomii'}</button>`):''}${(active && !r.full_autonomy && !r.co_owner && (typeof _isGymBoss==='function'?_isGymBoss(_myGymData):false) && !r.parent_coach_id)?`<button class="gtSchedBtn" data-link="${r.id}" data-id="${r.coach_id}" data-name="${(p.name||'').replace(/"/g,'&quot;')}" data-cur="${r.can_manage_schedule?'1':'0'}" style="padding:7px 10px;background:${r.can_manage_schedule?'#E8F8EE':'var(--surf)'};color:${r.can_manage_schedule?'#0A7A3D':'var(--mid)'};border:1px solid ${r.can_manage_schedule?'#A8E6C0':'var(--border)'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">${r.can_manage_schedule?'✓ ':''}${LANG==='en'?'Schedule':'Rozvrh'}</button><button class="gtFighterBtn" data-link="${r.id}" data-id="${r.coach_id}" data-cur="${r.can_request_fighters?'1':'0'}" style="padding:7px 10px;background:${r.can_request_fighters?'#E8F8EE':'var(--surf)'};color:${r.can_request_fighters?'#0A7A3D':'var(--mid)'};border:1px solid ${r.can_request_fighters?'#A8E6C0':'var(--border)'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">${r.can_request_fighters?'✓ ':''}${LANG==='en'?'Fighters':'Fighteři'}</button><button class="gtPayBtn" data-link="${r.id}" data-cur="${r.can_take_payments?'1':'0'}" style="padding:7px 10px;background:${r.can_take_payments?'#E8F8EE':'var(--surf)'};color:${r.can_take_payments?'#0A7A3D':'var(--mid)'};border:1px solid ${r.can_take_payments?'#A8E6C0':'var(--border)'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">${r.can_take_payments?'✓ ':''}${LANG==='en'?'Payments':'Platby'}</button><button class="gtScanBtn" data-link="${r.id}" data-cur="${r.can_scan_tickets?'1':'0'}" style="padding:7px 10px;background:${r.can_scan_tickets?'#E8F8EE':'var(--surf)'};color:${r.can_scan_tickets?'#0A7A3D':'var(--mid)'};border:1px solid ${r.can_scan_tickets?'#A8E6C0':'var(--border)'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">${r.can_scan_tickets?'✓ ':''}${LANG==='en'?'Tickets':'Lístky'}</button><button class="gtTeamBtn" data-link="${r.id}" data-cur="${r.can_manage_team?'1':'0'}" style="padding:7px 10px;background:${r.can_manage_team?'#E8F8EE':'var(--surf)'};color:${r.can_manage_team?'#0A7A3D':'var(--mid)'};border:1px solid ${r.can_manage_team?'#A8E6C0':'var(--border)'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">${r.can_manage_team?'✓ ':''}${LANG==='en'?'Manage staff':'Spravovat tým'}</button>`:''}${active?`<button class="gtHideBtn" data-link="${r.id}" data-hid="${r.hidden_from_profile?'1':'0'}" style="padding:7px 10px;background:${r.hidden_from_profile?'var(--surf)':'#E8F8EE'};color:${r.hidden_from_profile?'var(--mid)':'#0A7A3D'};border:1px solid ${r.hidden_from_profile?'var(--border)':'#A8E6C0'};border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;white-space:nowrap;">${r.hidden_from_profile?'':'✓ '}${LANG==='en'?'On profile':'Na profilu'}</button>`:''}${(active && !r.full_autonomy && !r.co_owner && !(p.gym_payout_account||p.receiver_id_value) && !r.parent_coach_id)?`<div style="font-size:10.5px;color:var(--light);line-height:1.4;width:100%;margin-top:2px;">${LANG==='en'?'Autonomy can be granted once this coach connects their own payout account (Club settings → Payout account).':'Autonomii lze udělit, až si kouč připojí vlastní výplatní účet (Nastavení klubu → Výplatní účet).'}</div>`:''}<button class="gtRemoveBtn" data-id="${r.coach_id}" data-name="${(p.name||'').replace(/"/g,'&quot;')}" style="padding:7px 10px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';flex-shrink:0;">${LANG==='en'?'Remove from club team':'Odebrat z týmu klubu'}</button></div>${active?_permHelpHtml(r.id):''}</div>`; }).join('');
   box.querySelectorAll('.gtTeamRow').forEach(r=>r.onclick=(e)=>{ if(e.target.closest('button')) return; openTeamCoachStats(r.dataset.id, r.dataset.name); });
   box.querySelectorAll('.gtRemoveBtn').forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); gymTeamRemove(b.dataset.id, b.dataset.name); });
   box.querySelectorAll('.gtAutoBtn').forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); openAutonomyGrant(b.dataset.id, b.dataset.name, b.dataset.link); });
@@ -16055,7 +16110,8 @@ async function loadGymTeam(pfx){
     const x=document.getElementById('gtHelp_'+b.dataset.link); if(x) x.style.display = (x.style.display==='none'?'block':'none'); });
   box.querySelectorAll('.gtRoleBtn').forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); _staffSetRole(b.dataset.link, b.dataset.role); });
   box.querySelectorAll('.gtAutoInfoBtn').forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); toast(LANG==='en'?'You granted full autonomy - you cannot revoke it, only remove the coach from the team entirely.':'Koučovi jsi udělil plnou autonomii - nemůžeš mu ji vzít, pouze jej kompletně odebrat z týmu.'); });
-  if(_isOwn){ box.insertAdjacentHTML('afterbegin', _ownerHideRowHtml()); _wireOwnerHide(box); _auditButtonInject(box, _myGymData); }
+  box.insertAdjacentHTML('afterbegin', _ownerHideRowHtml()); _wireOwnerHide(box);
+  if(_isOwn || (typeof _isGymBoss==='function' && _isGymBoss(_myGymData))) _auditButtonInject(box, _myGymData);
 }
 async function gymTeamRemove(coachId, coachName){
   if(!_myGymData) return;
@@ -16142,10 +16198,69 @@ function openCoOwnerGrant(coachId, coachName, linkId){
     close(); toast(EN?'\u2705 Co-owner granted':'\u2705 Spolumajitel ud\u011blen'); loadGymTeam();
   };
 }
-function openTeamCoachStats(coachId, coachName){
-  if($('coachStatsTitle')) $('coachStatsTitle').textContent = `📊 ${coachName||(LANG==='en'?'Coach':'Kouč')}`;
+// CO SE DOZVÍ MAJITEL O ČLENOVI TÝMU. Dřív se tu otevřely statistiky z `bookings` podle
+// coach_id -- tedy VŠECHNY soukromé lekce toho člověka napříč aplikací, včetně jeho vlastního
+// byznysu mimo tenhle klub, a k tomu seznam jeho klientů. Do toho klubu nic není.
+// Teď se ukazuje jen práce pro TENHLE klub: kolik lekcí odvedl, kolik na ně přišlo lidí,
+// kdy učil naposledy a kolik lekcí odpadlo. Peníze tu nejsou schválně -- kdo je má vidět,
+// vidí je v Přehledu klubu.
+async function openTeamCoachStats(coachId, coachName){
+  const EN=LANG==='en';
+  if($('coachStatsTitle')) $('coachStatsTitle').textContent = `📊 ${coachName||(EN?'Coach':'Kouč')}`;
   openSheet('shCoachStats');
-  renderCoachAnalyticsCompact(coachId, 'coachStatsBody');
+  const box=$('coachStatsBody');
+  if(!box) return;
+  box.innerHTML='<p style="text-align:center;color:var(--light);padding:20px;">'+L('Načítám...')+'</p>';
+  try{
+    const gid=(_myGymData&&_myGymData.id)||null;
+    if(!gid){ box.innerHTML='<p style="color:var(--light);font-size:13px;padding:8px 0;">'+(EN?'No club selected.':'Není vybraný klub.')+'</p>'; return; }
+    const d90=new Date(Date.now()-90*86400000).toISOString().slice(0,10);
+    const { data:att } = await supaClient.from('gym_attendance')
+      .select('student_id,class_name,class_date,class_time,child_name')
+      .eq('gym_id',gid).eq('coach_id',coachId).gte('class_date',d90);
+    const rows=att||[];
+    // Lekce = jedinečná kombinace datum + čas + název; docházka je počet zápisů.
+    const lessons={}; const people={};
+    rows.forEach(function(r){
+      lessons[(r.class_date||'')+'|'+(r.class_time||'')+'|'+(r.class_name||'')]=1;
+      const k=r.student_id||('h:'+(r.child_name||''));
+      if(k) people[k]=1;
+    });
+    const nLessons=Object.keys(lessons).length;
+    const nAtt=rows.length;
+    const nPeople=Object.keys(people).length;
+    const last=rows.map(r=>r.class_date).filter(Boolean).sort().slice(-1)[0]||null;
+    const avg=nLessons?Math.round((nAtt/nLessons)*10)/10:0;
+    let nCancel=0;
+    try{
+      const { data:cl } = await supaClient.from('gym_class_log').select('status')
+        .eq('gym_id',String(gid)).eq('coach_id',coachId).gte('class_date',d90);
+      nCancel=(cl||[]).filter(function(c){ return String(c.status||'')==='cancelled'; }).length;
+    }catch(e){}
+    let nCovers=0;
+    try{
+      const { data:cv } = await supaClient.from('cover_requests').select('id')
+        .eq('gym_id',gid).eq('substitute_id',coachId).eq('status','filled').gte('class_date',d90);
+      nCovers=(cv||[]).length;
+    }catch(e){}
+    const _fd=v=>{ try{ return v?new Date(v+'T12:00:00').toLocaleDateString(EN?'en-GB':'cs-CZ'):'—'; }catch(e){ return '—'; } };
+    const row=(ico,lbl,val)=>`<div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">${ico}</div><div class="prow-lbl">${lbl}</div></div><span class="prow-val">${val}</span></div>`;
+    box.innerHTML = `<div class="sec-lbl">${EN?'In this club, last 90 days':'V tomhle klubu, posledních 90 dní'}</div>
+      <div class="prow-group" style="margin-bottom:14px;">
+        ${row('🥊', EN?'Classes taught':'Odučených lekcí', nLessons)}
+        ${row('👥', EN?'Attendance recorded':'Zápisů v docházce', nAtt)}
+        ${row('📈', EN?'Average per class':'Průměr na lekci', avg)}
+        ${row('🧑\u200d🤝\u200d🧑', EN?'Different people':'Různých lidí', nPeople)}
+        ${row('🔁', EN?'Classes covered for others':'Zástupů za kolegy', nCovers)}
+        ${row('🚫', EN?'Classes cancelled':'Zrušených lekcí', nCancel)}
+        ${row('📅', EN?'Last class':'Naposledy učil', _fd(last))}
+      </div>
+      <p style="font-size:11.5px;color:var(--light);line-height:1.55;">${EN
+        ? 'Only work for this club. What this person does elsewhere in the app is their own business.'
+        : 'Jen práce pro tenhle klub. Co ten člověk dělá jinde v aplikaci, je jeho věc.'}</p>`;
+  }catch(e){
+    box.innerHTML='<p style="color:var(--red);font-size:13px;padding:8px 0;">'+((e&&e.message)||e)+'</p>';
+  }
 }
 var _csGymId=null, _csGym=null, _csSched=[], _csView='mine', _csFullSched=[], _csTeamSlots={};
 let _cpDropin='', _cpCurrency='CZK', _cpPlans=[], _cpStatus=null, _cpReason=null, _cpAutonomy=false;
@@ -16590,7 +16705,7 @@ async function openGymAudit(gymId, gymName){
   let ids=[]; rows.forEach(function(r){ if(r.actor_id) ids.push(r.actor_id); if(r.target_id) ids.push(r.target_id); }); ids=[...new Set(ids)];
   let pmap={}; if(ids.length){ try{ const { data:ps }=await supaClient.from('profiles').select('id,name').in('id',ids); (ps||[]).forEach(function(pp){ pmap[pp.id]=pp; }); }catch(e){} }
   const nm=function(id){ return (id&&pmap[id]&&pmap[id].name)||(EN?'someone':'někdo'); };
-  const A={ coowner_granted:(EN?'granted co-ownership to':'udělil/a spolumajitelství'), coowner_revoked:(EN?'revoked co-ownership from':'odebral/a spolumajitelství'), coach_removed:(EN?'removed coach':'odebral/a kouče'), member_removed:(EN?'removed member':'odebral/a člena'), refund_issued:(EN?'issued a refund to':'vrátil/a platbu'), price_changed:(EN?'changed pricing':'změnil/a ceny'), membership_changed:(EN?'changed a membership':'změnil/a členství'), settings_changed:(EN?'changed club settings':'změnil/a nastavení klubu'), expense_added:(EN?'added an expense':'přidal/a výdaj'), expense_removed:(EN?'removed an expense':'smazal/a výdaj') };
+  const A={ coowner_granted:(EN?'granted co-ownership to':'udělil/a spolumajitelství'), coowner_revoked:(EN?'revoked co-ownership from':'odebral/a spolumajitelství'), coach_removed:(EN?'removed coach':'odebral/a kouče'), member_removed:(EN?'removed member':'odebral/a člena'), refund_issued:(EN?'issued a refund to':'vrátil/a platbu'), price_changed:(EN?'changed pricing':'změnil/a ceny'), membership_changed:(EN?'changed a membership':'změnil/a členství'), settings_changed:(EN?'changed club settings':'změnil/a nastavení klubu'), expense_added:(EN?'added an expense':'přidal/a výdaj'), expense_removed:(EN?'removed an expense':'smazal/a výdaj'), cash_taken:(EN?'took a payment':'přijal/a platbu') };
   list.innerHTML=rows.map(function(r){
     const act=nm(r.actor_id); const lbl=A[r.action]||r.action;
     // U výdaje je podstatné CO a ZA KOLIK; jméno cíle tam žádné není.
@@ -19775,14 +19890,6 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
     <div id="gtPending" style="margin-bottom:10px;"></div>
     <div id="gtTeam" style="margin-bottom:8px;"></div>
     </div></details>
-    <details class="setSec" id="gmRecpSec"><summary>🛂 ${LANG==='en'?'Receptionists':'Recepční'}</summary><div class="setBody">
-    <div id="recpSection">
-      <p style="font-size:11.5px;color:var(--light);line-height:1.5;margin-bottom:8px;">${LANG==='en'?'Invite any app user to run reception. They can check members in — and see nothing else from your club.':'Pozvi libovolného uživatele aplikace na recepci. Vidí jen check-in členů — nic dalšího z tvého klubu.'}</p>
-      <div id="recpLinkBox" style="margin-bottom:8px;"></div>
-        <div id="recpPending" style="margin-bottom:8px;"></div>
-      <div id="recpList"></div>
-    </div>
-    </div></details>
     <details class="setSec" id="mgTermsSec"><summary>📜 ${LANG==='en'?'Terms, club rules & waiver':'Podmínky, pravidla klubu a souhlas'}${_gymHasTerms(_myGymData)?'':' <span style="font-size:11px;font-weight:800;color:#8a1c1c;background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;padding:2px 8px;margin-left:6px;">'+(LANG==='en'?'required':'chybí')+'</span>'}</summary><div class="setBody">
     <p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:8px;">${LANG==='en'
       ? 'Strongly recommended. Your own terms or the association statutes. Members see them before they pay and must agree to continue. The file name appears exactly as uploaded — members see it when they agree, so name it clearly (e.g. “Stanovy 2026.pdf”).'
@@ -20153,6 +20260,8 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData):''}${(type
   try{ _syncEvManageBtns(); }catch(e){}
   if($('mgCohortsBtn')) $('mgCohortsBtn').onclick=()=>openCohorts(_myGymData.id, _myGymData.name, currentUser.id, _myGymData.stripe_account, _myGymData.currency, parseDisc(_myGymData.disciplines));
   if($('recpSearchBtn')) $('recpSearchBtn').onclick=recpSearchUsers;
+  // Samostatná sekce Recepční zrušena -- recepční se zvou a spravují v Týmu klubu.
+  // Volání zůstávají pro starší rozvržení (guard na existenci prvku je vypne).
   if($('recpLinkBox')) renderInviteLink('recep');
   if($('recpPending')) loadPending('recep');
   if($('recpSearch')) $('recpSearch').addEventListener('keydown', e=>{ if(e.key==='Enter') recpSearchUsers(); });
@@ -22919,6 +23028,19 @@ async function _recordCashTx(row){
   }
   let res=await _attempt(false);
   if(res && res.error && res.error._retriable){ await new Promise(function(rz){ setTimeout(rz, 400); }); res=await _attempt(true); }
+  // DENÍK KLUBU. Kdo platbu přijal, se od teď ukládá k transakci (recorded_by) -- tohle je
+  // ta lidsky čitelná stopa vedle toho: v Týmu klubu je vidět pod tlačítkem s historií.
+  // Audit se po 90 dnech maže, proto je to doplněk k transakci, ne náhrada.
+  try{
+    if(res && !res.error && row && row.gym_id && typeof _auditLog==='function'
+       && (row.payment_method==='cash' || row.payment_method==='qr')){
+      await _auditLog(row.gym_id, 'cash_taken', row.member_id||null, {
+        amount: row.gross_amount, curr: row.currency||'CZK',
+        method: row.payment_method, kind: row.type||null,
+        payer: row.cash_payer_name||row.paid_by_name||null
+      });
+    }
+  }catch(e){}
   return res;
 }
 // „Byl na lekci?" hned po potvrzení platby, když lekce už začala. Ano = zapíše docházku,
