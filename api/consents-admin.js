@@ -85,6 +85,8 @@ export default async function handler(req, res) {
         id: w.id, kind: 'gym_terms', title: w.body_title || null, body_text: w.body_text || null,
         who: w.student_name || w.guest_email || '—', accepted_at: w.accepted_at,
         version: w.version, guardian_name: w.guardian_name || null,
+        body_hash: w.body_hash || null,
+        file_url: w.terms_file_url || null, file_hash: w.terms_file_hash || null,
       })), total, page, per });
     }
 
