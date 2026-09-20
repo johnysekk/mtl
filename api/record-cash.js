@@ -303,11 +303,12 @@ export default async function handler(req, res) {
     if (provider === 'coach' && !coach_id) return res.status(400).json({ error: 'missing coach_id' });
 
     // verify caller identity (skipped for trusted internal PIS confirm)
-    let uid = null;
+    let uid = null, _recName = null;
     if (!_trusted) {
       const ur = await fetch(`${SB}/auth/v1/user`, { headers: { apikey: KEY, Authorization: `Bearer ${token}` } });
       if (!ur.ok) return res.status(401).json({ error: 'bad token' });
       const u = await ur.json(); uid = u && u.id;
+      try { const _pr = await _wsbGet(`profiles?id=eq.${uid}&select=name`); _recName = (_pr && _pr[0] && _pr[0].name) || null; } catch (e) {}
       if (!uid) return res.status(401).json({ error: 'no user' });
     }
 
@@ -374,6 +375,10 @@ export default async function handler(req, res) {
         currency: cur, type, status: 'paid', payment_method, cohort_id: cohort_id || null, income_class: income_class || null,
         commission_status: _cc ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct',
+        // KDO PLATBU PRIJAL. Drive se ukladalo jen `cash_payer_name` = kdo platil; kdo penize
+        // vzal u pultu, se nikam nezapsalo, takze pri nesrovnalosti v kase nebylo co dohledat.
+        // U internich potvrzeni (PIS) zustava prazdne -- tam penize nikdo do ruky nebere.
+        recorded_by: uid || null, recorded_by_name: _recName || null,
         // Ktera pojmenovana cena za vstup to byla; proof_checked=false znamena, ze klub
         // jeste musi videt doklad. Bez toho by slo vzit slevu bez naroku nedohledatelne.
         dropin_plan_id: dropin_plan_id || null,
@@ -417,6 +422,10 @@ export default async function handler(req, res) {
         currency: cur, type, status: 'paid', payment_method, cohort_id: cohort_id || null, income_class: income_class || null,
         commission_status: _cc ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct',
+        // KDO PLATBU PRIJAL. Drive se ukladalo jen `cash_payer_name` = kdo platil; kdo penize
+        // vzal u pultu, se nikam nezapsalo, takze pri nesrovnalosti v kase nebylo co dohledat.
+        // U internich potvrzeni (PIS) zustava prazdne -- tam penize nikdo do ruky nebere.
+        recorded_by: uid || null, recorded_by_name: _recName || null,
         // Ktera pojmenovana cena za vstup to byla; proof_checked=false znamena, ze klub
         // jeste musi videt doklad. Bez toho by slo vzit slevu bez naroku nedohledatelne.
         dropin_plan_id: dropin_plan_id || null,
