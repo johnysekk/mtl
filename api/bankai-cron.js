@@ -20,13 +20,14 @@ export default async function handler(req, res) {
       const priv = await sbGet(`transactions?coach_id=eq.${encodeURIComponent(p.id)}&type=in.(coach_1to1,coach_inperson,coach_online)&select=id&limit=10`);
       let elig = (priv || []).length >= 10;
       if (!elig) {
-        // else >=25 active memberships across gyms this profile owns?
+        // else >=20 active memberships across gyms this profile owns? (drive 25; stejna hranice
+        // jako v referral-cron, aby "aktivni" znamenalo vsude totez)
         const gyms = await sbGet(`gyms?owner_id=eq.${encodeURIComponent(p.id)}&select=id`);
         const ids = (gyms || []).map(g => g.id).filter(Boolean);
         if (ids.length) {
           const inList = ids.map(encodeURIComponent).join(',');
-          const mems = await sbGet(`gym_memberships?gym_id=in.(${inList})&status=in.(active,cancelling)&select=id&limit=25`);
-          elig = (mems || []).length >= 25;
+          const mems = await sbGet(`gym_memberships?gym_id=in.(${inList})&status=in.(active,cancelling)&select=id&limit=20`);
+          elig = (mems || []).length >= 20;
         }
       }
       if (!!p.bankai_eligible !== elig) {

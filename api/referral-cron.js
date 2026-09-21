@@ -1,8 +1,11 @@
 import { rerateOwner } from './gym-rerate.js';
 // /api/referral-cron.js
-// Daily job: award +2 referral points to BOTH the invitee and the referrer,
-// but only AFTER the invitee's first 1:1 or drop-in lesson has PASSED and was
-// NOT cancelled/refunded (award-on-completion, not on payment).
+// Daily job: award +2 referral points to BOTH the invitee and the referrer (and +10 XP to
+// the referrer, computed in the app from referral_rewarded), only once the invitee has
+//   - a 1:1 lesson confirmed by BOTH sides, or
+//   - a PAID group class with attendance marked by the club (never a free trial), or
+//   - a bought membership (active or cancelling -- the payment already happened).
+// XP for the referrer (+10) is computed in the app from referral_rewarded.
 //
 // Configure in vercel.json:
 //   { "crons": [ { "path": "/api/referral-cron", "schedule": "0 3 * * *" } ] }
@@ -80,29 +83,44 @@ export default async function handler(req, res) {
 
       // ── JEDNORÁZOVÝ VSTUP: MUSÍ BÝT ODKLEPNUTÁ DOCHÁZKA ──────────────────────────────
       // gym_bookings potvrzení nemá, ale docházku klub vede tak jako tak (bez ní studenti
-      // nedostávají XP). Zápis v gym_attendance je tedy důkaz, že tam ten člověk byl.
+      // ── SKUPINOVÁ LEKCE: DOCHÁZKA ODKLEPNUTÁ KLUBEM A ZAPLACENÁ ────────────────────
+      // Odměna je za člověka, který opravdu začal trénovat A platit. Proto nestačí:
+      //   - samotné koupené členství bez jediné odklepnuté lekce (dřív stačilo),
+      //   - jakákoli docházka -- i zkušební trénink zdarma (gym_trials / is_trial) nebo
+      //     tolerovaná návštěva bez platby (grace_visits) by jinak vydělala 2+2 body.
+      // Platí: záznam v docházce z minulého dne u klubu, kde má člověk v tu dobu aktivní
+      // členství, nebo zaplacený jednorázový vstup na ten den, který není zkušební.
       if (!qualifies) {
-        const b2 = await sb(
-          `gym_attendance?student_id=eq.${inv.id}&class_date=lt.${today}&select=id&limit=1`
+        const att = await sb(
+          `gym_attendance?student_id=eq.${inv.id}&class_date=lt.${today}&test_mode=is.false&select=gym_id,class_date&order=class_date.asc&limit=50`
         );
-        qualifies = b2 && b2.length;
+        for (const a of (att || [])) {
+          if (!a.gym_id || !a.class_date) continue;
+          const mem = await sb(
+            `gym_memberships?student_id=eq.${inv.id}&gym_id=eq.${a.gym_id}&status=in.(active,cancelling,expired,cancelled)` +
+            `&created_at=lte.${a.class_date}T23:59:59Z&select=id,period_end,status&limit=5`
+          );
+          const coveredByMembership = (mem || []).some((m) =>
+            (m.status === 'active' || m.status === 'cancelling') || (m.period_end && String(m.period_end).slice(0, 10) >= a.class_date));
+          if (coveredByMembership) { qualifies = true; break; }
+          const drop = await sb(
+            `gym_bookings?student_id=eq.${inv.id}&gym_id=eq.${a.gym_id}&is_trial=is.false&amount=gt.0` +
+            `&status=in.(active,paid,confirmed)&date=eq.${a.class_date}&select=id&limit=1`
+          );
+          if (drop && drop.length) { qualifies = true; break; }
+        }
       }
-
-      // ...or did they simply BUY A MEMBERSHIP?  (Petr, 2026-07-20)
-      // This used to be a real hole: the most valuable conversion of all - the invitee walks in,
-      // signs up for a membership and never books a single drop-in or private - awarded nobody
-      // anything, because both tests above only look at per-lesson rows. A membership that is
-      // active (or cancelling, i.e. paid to the end of the period) is at least as strong a proof
-      // of "this person actually started training" as one attended lesson.
-      // Deliberately NOT gated on a past date: a membership is paid up front and the money has
-      // already moved, unlike a booking that can still be a no-show. pending_offline is excluded
-      // on purpose - an unconfirmed QR/bank membership is not paid yet.
+      // ── KOUPENÉ ČLENSTVÍ STAČÍ ─────────────────────────────────────────────────────
+      // Je to platba, ne jen registrace: peníze se už pohnuly, na rozdíl od rezervace, ze
+      // které může být no-show. Počítá se aktivní nebo dobíhající (cancelling) členství;
+      // nepotvrzené QR/převod (pending_offline) ne, to ještě zaplacené není.
       if (!qualifies) {
         const b3 = await sb(
-          `gym_memberships?student_id=eq.${inv.id}&status=in.(active,cancelling)&select=id&limit=1`
+          `gym_memberships?student_id=eq.${inv.id}&status=in.(active,cancelling)&test_mode=is.false&select=id&limit=1`
         );
         qualifies = b3 && b3.length;
       }
+
       if (!qualifies) continue;
 
       // set rewarded FIRST (idempotency) + grant invitee +2 in one PATCH
@@ -153,7 +171,7 @@ export default async function handler(req, res) {
 
     // ── RECRUIT ACTIVATION (universal) ──
     // ONE rule for EVERYBODY, coach or club: a referred provider counts as ACTIVE once they
-    // have >= 10 taught 1:1 privates OR >= 25 active memberships. This is Petr's rule and it
+    // have >= 10 taught 1:1 privates OR >= 20 active memberships. This is Petr's rule and it
     // replaces the two stale, inconsistent tests that used to live here:
     //   - coach: 5 lessons logged as held (a client-side counter, ref_coach_lessons)
     //   - gym:   revenue in 2 distinct calendar months
@@ -162,7 +180,7 @@ export default async function handler(req, res) {
     // (bankai-cron.js), so "active" means the same thing everywhere in the product.
     // ref_coach_qualified stays the single idempotency flag → each referred person counts once.
     const ACT_PRIVATES = 10;   // taught 1:1 privates
-    const ACT_MEMBERS  = 25;   // active memberships across the clubs they own
+    const ACT_MEMBERS  = 20;   // active memberships across the clubs they own (drive 25)
 
     async function isActiveProvider(uid) {
       // >= 10 taught 1:1 privates?
