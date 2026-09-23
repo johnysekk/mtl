@@ -74,6 +74,8 @@ async function notifyMail(userId, subject, body, subjectEn, bodyEn) {
   } catch (e) {}
 }
 
+// Datum do textu notifikace: „25. 9.", ne kus ISO retezce.
+const czDate = (iso) => { try { const d = new Date(iso); return d.getUTCDate() + '. ' + (d.getUTCMonth() + 1) + '.'; } catch (e) { return ''; } };
 const notify = (user_id, kind, message, extra = {}) =>
   sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id, type: 'system', read: false, data: JSON.stringify({ kind, ...extra }), message }) });
 function prevMonth(ym) { const [y, m] = ym.split('-').map(Number); return new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 7); }
@@ -337,6 +339,12 @@ let deferredMin = 0;
               'Zkusíme to znovu za tři dny. Můžeš ji ale uhradit hned.' + payDueBlock(false, _dueSum, curMonth, _suspendAt, _retryAt) + payNowBlock(_pl, false) + 'Zkontroluj prosím i platební kartu v Platby a provize.',
               'We could not charge the MTL commission',
               'We will try again in three days. You can also pay it right away.' + payDueBlock(true, _dueSum, curMonth, _suspendAt, _retryAt) + payNowBlock(_pl, true) + 'Please check your payment card in Payments &amp; commission.'); } await notify(g.owner_id, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, účet bude pozastaven.`, { gym_id: gid, msg_en: `⚠️ Charging the MTL commission to your card failed. Update your card — next attempt in 3 days. If it isn't paid within 2 weeks, the account will be suspended.` });
+            // V APPCE, NEJEN MAILEM. Selhání provize chodilo jen e-mailem -- kdo si ho nevšiml,
+            // nevěděl nic až do pozastavení účtu. Notifikace vede na výzvu s tlačítky.
+            await notify(g.owner_id, 'commission_failed',
+              `\u26a0\ufe0f Str\u017een\u00ed provize MTL z karty selhalo. Zaplatit m\u016f\u017ee\u0161 hned, nebo po\u010dkat na dal\u0161\u00ed pokus ${czDate(_retryAt)}. Bez \u00fahrady do ${czDate(_suspendAt)} bude \u00fa\u010det pozastaven.`,
+              { gym_id: gid, retry_at: _retryAt, suspend_at: _suspendAt,
+                msg_en: `\u26a0\ufe0f Charging the MTL commission to your card failed. You can pay now, or wait for the next attempt. Without payment the account will be suspended.` });
         } else if (anyCharge && !anyFail) {
           unpaidSet.delete(gid);
           await sb(`gyms?id=eq.${gid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_next_retry: null, commission_last_billed: prevMonth(curMonth) }) });
@@ -436,6 +444,12 @@ let deferredMin = 0;
             const _dueSum=await dueSumFor('coach', cid);
             const _pl=payNowLink('coach', cid, curMonth);
             await notifyMail(cid, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Můžeš ji ale uhradit hned.' + payDueBlock(false, _dueSum, curMonth, _suspendAt, _retryAt) + payNowBlock(_pl, false) + 'Zkontroluj prosím i platební kartu v Platby a provize.', 'We could not charge the MTL commission', 'We will try again in three days. You can also pay it right away.' + payDueBlock(true, _dueSum, curMonth, _suspendAt, _retryAt) + payNowBlock(_pl, true) + 'Please check your payment card in Payments &amp; commission.'); } await notify(cid, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, zaznamenávání hotovosti se pozastaví.`, { coach_id: cid, msg_en: `⚠️ Charging the MTL commission to your card failed. Update your card — next attempt in 3 days. If it isn't paid within 2 weeks, recording cash will be paused.` });
+            // V APPCE, NEJEN MAILEM. Selhání provize chodilo jen e-mailem -- kdo si ho nevšiml,
+            // nevěděl nic až do pozastavení účtu. Notifikace vede na výzvu s tlačítky.
+            await notify(cid, 'commission_failed',
+              `\u26a0\ufe0f Str\u017een\u00ed provize MTL z karty selhalo. Zaplatit m\u016f\u017ee\u0161 hned, nebo po\u010dkat na dal\u0161\u00ed pokus ${czDate(_retryAt)}. Bez \u00fahrady do ${czDate(_suspendAt)} bude \u00fa\u010det pozastaven.`,
+              { coach_id: cid, retry_at: _retryAt, suspend_at: _suspendAt,
+                msg_en: `\u26a0\ufe0f Charging the MTL commission to your card failed. You can pay now, or wait for the next attempt. Without payment the account will be suspended.` });
         } else if (anyCharge && !anyFail) {
           unpaidCoach.delete(cid);
           await sb(`profiles?id=eq.${cid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_next_retry: null, commission_last_billed: prevMonth(curMonth) }) });
@@ -536,6 +550,12 @@ let deferredMin = 0;
             const _dueSum=await dueSumFor('org', oid);
             const _pl=payNowLink('org', oid, curMonth);
             await notifyMail(o.owner_id, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Můžeš ji ale uhradit hned.' + payDueBlock(false, _dueSum, curMonth, _suspendAt, _retryAt) + payNowBlock(_pl, false) + 'Zkontroluj prosím i platební kartu v Platby a provize.', 'We could not charge the MTL commission', 'We will try again in three days. You can also pay it right away.' + payDueBlock(true, _dueSum, curMonth, _suspendAt, _retryAt) + payNowBlock(_pl, true) + 'Please check your payment card in Payments &amp; commission.'); } await notify(o.owner_id, 'commission_failed', `⚠️ Provizi MTL se nepodařilo strhnout. Zkusíme to znovu za tři dny.`, { organization_id: oid, msg_en: `⚠️ We could not charge the MTL commission. We'll try again in three days.` });
+            // V APPCE, NEJEN MAILEM. Selhání provize chodilo jen e-mailem -- kdo si ho nevšiml,
+            // nevěděl nic až do pozastavení účtu. Notifikace vede na výzvu s tlačítky.
+            await notify(o.owner_id, 'commission_failed',
+              `\u26a0\ufe0f Str\u017een\u00ed provize MTL z karty selhalo. Zaplatit m\u016f\u017ee\u0161 hned, nebo po\u010dkat na dal\u0161\u00ed pokus ${czDate(_retryAt)}. Bez \u00fahrady do ${czDate(_suspendAt)} bude \u00fa\u010det pozastaven.`,
+              { organization_id: oid, retry_at: _retryAt, suspend_at: _suspendAt,
+                msg_en: `\u26a0\ufe0f Charging the MTL commission to your card failed. You can pay now, or wait for the next attempt. Without payment the account will be suspended.` });
           failed++;
         }
       }
