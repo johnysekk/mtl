@@ -68,7 +68,8 @@ async function greetBirthdays() {
 module.exports = async (req, res) => {
   // Vercel cron posílá Authorization: Bearer <CRON_SECRET>. Bez něj endpoint nikoho nepřeklápí.
   const auth = (req.headers && (req.headers.authorization || req.headers.Authorization)) || '';
-  if (CRON_SECRET && auth !== 'Bearer ' + CRON_SECRET) {
+  if (!CRON_SECRET) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+  if (auth !== 'Bearer ' + CRON_SECRET) {
     return res.status(401).json({ error: 'unauthorized' });
   }
   if (!SUPABASE_URL || !SERVICE_KEY) {

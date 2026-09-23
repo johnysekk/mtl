@@ -181,9 +181,8 @@ export default async function handler(req, res) {
   {
     const secret = process.env.CRON_SECRET;
     const auth = req.headers.authorization || '';
-    const fromVercel = !!req.headers['x-vercel-cron'];
     if (!secret) return res.status(500).json({ error: 'CRON_SECRET not configured' });
-    if (!(auth === `Bearer ${secret}` || fromVercel)) return res.status(401).json({ error: 'unauthorized' });
+    if (auth !== `Bearer ${secret}`) return res.status(401).json({ error: 'unauthorized' });
   }
 
   const now = new Date();

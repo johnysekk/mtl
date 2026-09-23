@@ -89,7 +89,8 @@ function ladderOf(p) {
 
 export default async function handler(req, res) {
   const auth = req.headers.authorization || '';
-  if (process.env.CRON_SECRET && auth !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!process.env.CRON_SECRET) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+  if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
     return res.status(401).json({ error: 'unauthorized' });
   }
   const out = { checked: 0, fixed: 0, skipped: 0, errors: [] };

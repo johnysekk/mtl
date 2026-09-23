@@ -32,10 +32,10 @@ async function sb(path, opts = {}) {
 export default async function handler(req, res) {
   // Stejná ochrana jako u ostatních cronů: bez tajemství se to nespustí zvenčí.
   const secret = process.env.CRON_SECRET;
-  if (secret) {
-    const got = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || (req.query && req.query.k) || '';
-    if (got !== secret) return res.status(401).json({ error: 'unauthorized' });
-  }
+  const got = req.headers.authorization || '';
+  // Zavreno napevno: bez CRON_SECRET endpoint nebezi.
+  if (!secret) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+  if (got !== `Bearer ${secret}`) return res.status(401).json({ error: 'unauthorized' });
   try {
     if (!SB || !KEY) return res.status(500).json({ error: 'server not configured' });
     const today = new Date().toISOString().slice(0, 10);

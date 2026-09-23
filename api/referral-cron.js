@@ -37,11 +37,15 @@ export default async function handler(req, res) {
   if (!SB || !KEY) return res.status(500).json({ error: 'SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set' });
 
   // optional lock
-  if (process.env.CRON_SECRET) {
-    const auth = req.headers.authorization || '';
-    const okHdr = auth === `Bearer ${process.env.CRON_SECRET}` || req.headers['x-vercel-cron'];
-    if (!okHdr) return res.status(401).json({ error: 'unauthorized' });
+  // ZAVRENO NAPEVNO: bez nastaveneho CRON_SECRET endpoint nebezi. Driv se kontrola delala
+  // jen kdyz promenna existovala -- kdyz chybela, byl cron otevreny komukoli.
+  {
+    const _sec = process.env.CRON_SECRET;
+    const _auth = req.headers.authorization || '';
+    if (!_sec) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+    if (_auth !== `Bearer ${_sec}`) return res.status(401).json({ error: 'unauthorized' });
   }
+
 
   try {
     const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD

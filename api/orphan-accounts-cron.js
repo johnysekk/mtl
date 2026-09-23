@@ -44,14 +44,19 @@ const MAX_PAGES = 50;    // strop, ať jeden běh neběží donekonečna
 const MAX_DELETE = 500;  // strop na jeden běh; zbytek dojede zítra
 
 export default async function handler(req, res) {
-  // Vercel Cron posílá Authorization: Bearer <CRON_SECRET> a hlavičku x-vercel-cron.
+  // POZOR: hlavicku x-vercel-cron umi poslat kdokoli -- Vercel ji z prichozich pozadavku
+// neodstranuje, takze jako autorizace neplati. Jedine, co plati, je Authorization:
+// Bearer <CRON_SECRET>, kterou Vercel k volani crona pridava sam.
   // Stejný tvar jako commission-cron.js.
-  if (process.env.CRON_SECRET) {
-    const auth = req.headers.authorization || '';
-    if (!(auth === `Bearer ${process.env.CRON_SECRET}` || req.headers['x-vercel-cron'])) {
-      return res.status(401).json({ ok: false, error: 'unauthorized' });
-    }
+  // ZAVRENO NAPEVNO: bez nastaveneho CRON_SECRET endpoint nebezi. Driv se kontrola delala
+  // jen kdyz promenna existovala -- kdyz chybela, byl cron otevreny komukoli.
+  {
+    const _sec = process.env.CRON_SECRET;
+    const _auth = req.headers.authorization || '';
+    if (!_sec) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+    if (_auth !== `Bearer ${_sec}`) return res.status(401).json({ error: 'unauthorized' });
   }
+
 
   const SB = process.env.SUPABASE_URL;
   const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;

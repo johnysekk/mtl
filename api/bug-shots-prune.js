@@ -20,7 +20,8 @@ async function sb(path, init = {}) {
 
 export default async function handler(req, res) {
   const auth = String(req.headers.authorization || '');
-  if (CRON && auth !== `Bearer ${CRON}`) return res.status(401).json({ error: 'unauthorized' });
+  if (!CRON) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+  if (auth !== `Bearer ${CRON}`) return res.status(401).json({ error: 'unauthorized' });
   if (!SB || !KEY) return res.status(500).json({ error: 'not configured' });
 
   const cutoff = new Date(Date.now() - 90 * 86400000).toISOString();

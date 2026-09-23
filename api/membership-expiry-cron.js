@@ -40,15 +40,20 @@ export default async function handler(req, res) {
   if (req.method !== 'POST' && req.method !== 'GET') {
     return res.status(405).json({ ok: false, error: 'method' });
   }
-  // Vercel Cron sends `Authorization: Bearer <CRON_SECRET>` plus an `x-vercel-cron` header.
+  // POZOR: hlavicku x-vercel-cron umi poslat kdokoli -- Vercel ji z prichozich pozadavku
+// neodstranuje, takze jako autorizace neplati. Jedine, co plati, je Authorization:
+// Bearer <CRON_SECRET>, kterou Vercel k volani crona pridava sam.
   // It does NOT send `x-cron-secret`, and vercel.json carries no `?secret=`, so the previous
   // gate rejected every scheduled run with 401. Same shape as commission-cron.js.
-  if (process.env.CRON_SECRET) {
+  // ZAVRENO NAPEVNO: bez nastaveneho CRON_SECRET endpoint nebezi. Driv se kontrola delala
+  // jen kdyz promenna existovala -- kdyz chybela, byl cron otevreny komukoli.
+  {
+    const _sec = process.env.CRON_SECRET;
     const _auth = req.headers.authorization || '';
-    if (!(_auth === `Bearer ${process.env.CRON_SECRET}` || req.headers['x-vercel-cron'])) {
-      return res.status(401).json({ ok: false, error: 'unauthorized' });
-    }
+    if (!_sec) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+    if (_auth !== `Bearer ${_sec}`) return res.status(401).json({ error: 'unauthorized' });
   }
+
 
   const now = new Date().toISOString();
   let ended = 0;

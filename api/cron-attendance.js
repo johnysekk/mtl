@@ -75,7 +75,8 @@ function _czWhen(date, time) {
 async function handler(req, res) {
   // Ověření, že volá Vercel cron (nebo externí scheduler se správným tajemstvím)
   const auth = req.headers.authorization || '';
-  if (process.env.CRON_SECRET && auth !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!process.env.CRON_SECRET) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+  if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
     return res.status(401).json({ error: 'unauthorized' });
   }
   try {

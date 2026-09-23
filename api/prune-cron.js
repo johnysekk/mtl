@@ -46,7 +46,8 @@ export default async function handler(req, res) {
   const secret = process.env.CRON_SECRET;
   if (secret) {
     const got = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || (req.query && req.query.k) || '';
-    if (got !== secret && !req.headers['x-vercel-cron']) return res.status(401).json({ error: 'unauthorized' });
+    if (!secret) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+  if (got !== secret) return res.status(401).json({ error: 'unauthorized' });
   }
   if (!SB || !KEY) return res.status(500).json({ error: 'server not configured' });
 

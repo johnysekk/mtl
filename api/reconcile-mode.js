@@ -22,7 +22,10 @@ async function sb(path, opts = {}) {
 export default async function handler(req, res) {
   if (!SB || !KEY) return res.status(500).json({ error: 'SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set' });
   const auth = req.headers.authorization || '';
-  if (!(auth === `Bearer ${process.env.CRON_SECRET}` || req.headers['x-vercel-cron'])) return res.status(401).json({ error: 'unauthorized' });
+  // Hlavicku x-vercel-cron umi poslat kdokoli (Vercel ji neodstranuje), takze jako autorizace
+  // neplati. Plati jen Authorization: Bearer <CRON_SECRET>, kterou Vercel pridava sam.
+  if (!process.env.CRON_SECRET) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+  if (auth !== `Bearer ${process.env.CRON_SECRET}`) return res.status(401).json({ error: 'unauthorized' });
   try {
     let fixed = 0, checked = 0;
     const gyms = await sb('gyms?owner_id=not.is.null&select=id,owner_id,payment_mode&limit=10000');

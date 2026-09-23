@@ -55,10 +55,15 @@ const norm  = (s) => String(s || '').trim().toLowerCase();
 const discs = (s) => String(s || '').split(',').map((x) => x.trim()).filter(Boolean);
 
 export default async function handler(req, res) {
-  if (process.env.CRON_SECRET) {
-    const auth = req.headers.authorization || '';
-    if (auth !== `Bearer ${process.env.CRON_SECRET}`) return res.status(401).json({ error: 'unauthorized' });
+  // ZAVRENO NAPEVNO: bez nastaveneho CRON_SECRET endpoint nebezi. Driv se kontrola delala
+  // jen kdyz promenna existovala -- kdyz chybela, byl cron otevreny komukoli.
+  {
+    const _sec = process.env.CRON_SECRET;
+    const _auth = req.headers.authorization || '';
+    if (!_sec) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+    if (_auth !== `Bearer ${_sec}`) return res.status(401).json({ error: 'unauthorized' });
   }
+
 
   const out = { unlocked: 0, notified: 0, markets: [], errors: [] };
 

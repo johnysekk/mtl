@@ -25,7 +25,8 @@ function prevMonths(n) {
 
 export default async function handler(req, res) {
   const auth = req.headers.authorization || '';
-  if (SECRET && auth !== `Bearer ${SECRET}`) return res.status(401).json({ error: 'unauthorized' });
+  if (!SECRET) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+  if (auth !== `Bearer ${SECRET}`) return res.status(401).json({ error: 'unauthorized' });
 
   const months = prevMonths(6);
   const out = { months: [], errors: [] };
