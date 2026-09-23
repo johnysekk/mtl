@@ -26079,7 +26079,9 @@ async function loadGymManageBookings(){
         const _r=$('epHintRow'); if(_r) _r.remove();
       }; }
     { const _o=$('epHintOpen'); if(_o) _o.onclick=function(){
-        try{ if(typeof openPartnerInfo==='function') openPartnerInfo(); else toast('⚠️'); }catch(e){ toast('⚠️'); }
+        // „Ukázat" vede na rozpad transakcí, ne na popis programu: o EP se rozhoduje podle čísel.
+        try{ openMtlCommissions({ gymId:(_myGymData&&_myGymData.id), epCompare:true }); }
+        catch(e){ try{ if(typeof openPartnerInfo==='function') openPartnerInfo(); }catch(_e){ toast('⚠️'); } }
       }; }
     const csel=$('mgCoachSel'); if(csel) csel.onchange=()=>{ _gymCoachSel=csel.value; loadGymManageBookings(); };
     try{ var _mord={'💰':-1,'🔁':0,'🥊':1,'🛍️':2,'📋':3,'👥':4,'📊':5,'🎪':6,'🏷️':7,'🧲':8}; var _mrank=function(t){ for(var k in _mord){ if(t.indexOf(k)>=0) return _mord[k]; } return 9; }; var _mp=[]; Array.prototype.slice.call(stats.querySelectorAll('.dashSecHdr')).forEach(function(h){ var b=h.nextElementSibling; if(b&&b.classList&&b.classList.contains('dashSecHdr')) b=null; _mp.push({h:h,b:b,r:_mrank(h.textContent||'')}); }); _mp.map(function(pp,i){pp.i=i;return pp;}).sort(function(a,b){return (a.r-b.r)||(a.i-b.i);}).forEach(function(pp){ stats.appendChild(pp.h); if(pp.b) stats.appendChild(pp.b); }); }catch(e){}
@@ -31514,6 +31516,10 @@ async function openMtlCommissions(scope){
   const _kind=scope.organizationId?'organization':(scope.gymId?'gym':'coach');
   const _id=String(scope.organizationId||scope.gymId||scope.coachId||(currentUser&&currentUser.id)||'');
   const _isCoachScope=(_kind==='coach');
+  // SROVNÁNÍ S EXCLUSIVE PARTNEREM. Tatáž obrazovka, jen se u každé transakce vedle dnešní
+  // sazby ukáže, co by z ní bylo s EP (0,5 % z hrubé částky). Otevírá se z nápovědy v Přehledu;
+  // bez `epCompare` se obrazovka chová přesně jako dřív.
+  const _epCmp=!!scope.epCompare;
   // BEZNY SHEET, ne vlastni fixed overlay. Fixed pres cely viewport prekryl v dashmode
   // levy sidebar a navic sedel nad prohlizecem dokladu.
   let ov=document.getElementById('shMtlComm');
@@ -31632,7 +31638,20 @@ async function openMtlCommissions(scope){
         // hotovostní/QR/bankovní část -- karetní si MTL vzalo rovnou při platbě. Když měl klub
         // obojí, vypadalo to, že se strhne celá částka, a hned u ní svítilo „stržení selhalo".
         +'<div style="text-align:right;white-space:nowrap;">'
-          +'<div style="font-size:14.5px;font-weight:700;color:var(--dark);line-height:1.2;">'+_money(_tot,m.cur)+'</div>'
+          +'<div style="font-size:14.5px;font-weight:700;color:var(--dark);line-height:1.2;'+(_epCmp?'text-decoration:line-through;opacity:.5;':'')+'">'+_money(_tot,m.cur)+'</div>'
+          // Součet s EP: 0,5 % z hrubých částek měsíce + paušál. Paušál je 1 000 Kč; klub
+          // účtující v jiné měně by potřeboval přepočet, proto se u něj ukáže jen procentní část.
+          +(_epCmp?(function(){
+              const _g=(m.rows||[]).reduce(function(a,t){ return a+Number(t.gross_amount||0)/100; },0);
+              const _flat=(String(m.cur||'CZK').toUpperCase()==='CZK')?1000:null;
+              const _ep=_g*0.005+(_flat||0);
+              return '<div style="font-size:15px;font-weight:800;color:#0A7A3D;line-height:1.2;">'+_money(_ep,m.cur)+'</div>'
+                +'<div style="font-size:10.5px;color:var(--mid);margin-top:1px;">'
+                +(_flat!=null
+                  ? ((EN?'flat ':'paušál ')+_money(_flat,m.cur)+' + 0,5 % = '+_money(_g*0.005,m.cur))
+                  : (EN?'0.5 % + flat fee converted from 1 000 CZK':'0,5 % + paušál přepočtený z 1 000 Kč'))
+                +'</div>';
+            })():'')
           +((m.stripe>0 && m.bank>0)
              ? ('<div style="font-size:11px;color:var(--mid);margin-top:2px;">'+(EN?'to charge ':'ke stržení ')+_money(m.bank,m.cur)+'</div>')
              : '')
@@ -31706,10 +31725,14 @@ async function openMtlCommissions(scope){
         +'<span style="color:var(--light);"> \u00b7 '+_d+'</span>'
         +((_isCoachScope && t.gym_id)?('<span style="font-size:11px;background:#EEF4FF;color:var(--blue);border-radius:7px;padding:1px 7px;margin-left:6px;white-space:nowrap;">'+(EN?'club mode':'re\u017eim klub')+'</span>'):'')
         +(_rf>0?('<span style="font-size:11px;background:var(--surf);color:var(--mid);border:1px solid var(--border);border-radius:7px;padding:1px 7px;margin-left:6px;white-space:nowrap;">'+(EN?'refunded':'refundov\u00e1no')+'</span>'):'')+'</div>'
-        +'<div style="color:var(--mid);white-space:nowrap;text-align:right;">'+fmtPrice(Number(t.gross_amount||0)/100,_cu)+' '+_curSym(_cu)+_r+_rNote+'</div>'
+        +'<div style="color:var(--mid);white-space:nowrap;text-align:right;">'+fmtPrice(Number(t.gross_amount||0)/100,_cu)+' '+_curSym(_cu)
+          +(_epCmp?('<span style="text-decoration:line-through;opacity:.55;">'+_r+'</span><span style="color:#0A7A3D;font-weight:700;"> \u00b7 0,5 %</span>'):_r)+_rNote+'</div>'
         +'<div style="white-space:nowrap;min-width:76px;text-align:right;">'
           +(_rf>0?('<span style="color:var(--light);text-decoration:line-through;font-size:11.5px;margin-right:5px;">'+fmtPrice(_gross0,_cu)+' '+_curSym(_cu)+'</span>'):'')
-          +'<span style="font-weight:700;color:var(--dark);">'+fmtPrice(_fee(t),_cu)+' '+_curSym(_cu)+'</span>'
+          +(_epCmp
+            ? ('<span style="color:var(--light);text-decoration:line-through;font-size:11.5px;margin-right:5px;">'+fmtPrice(_fee(t),_cu)+' '+_curSym(_cu)+'</span>'
+               +'<span style="font-weight:800;color:#0A7A3D;">'+fmtPrice(Number(t.gross_amount||0)/100*0.005,_cu)+' '+_curSym(_cu)+'</span>')
+            : ('<span style="font-weight:700;color:var(--dark);">'+fmtPrice(_fee(t),_cu)+' '+_curSym(_cu)+'</span>'))
         +'</div></div>';
     }).join('')
       + (_hasAcq ? ('<div style="font-size:11px;color:var(--light);line-height:1.5;padding:8px 2px 2px;">\ud83e\uddf2 '
