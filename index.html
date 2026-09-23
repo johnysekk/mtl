@@ -31520,6 +31520,30 @@ async function openMtlCommissions(scope){
   // sazby ukáže, co by z ní bylo s EP (0,5 % z hrubé částky). Otevírá se z nápovědy v Přehledu;
   // bez `epCompare` se obrazovka chová přesně jako dřív.
   const _epCmp=!!scope.epCompare;
+  // SAZBY S EXCLUSIVE PARTNEREM. EP nesnižuje všechno na 0,5 % -- to je jen ZÁKLADNÍ provize.
+  // Akvizice (člena přivedlo MTL) je s EP 5 % místo 10 %, akvizice z reklamy MTL 10 % místo
+  // 25 %, a u víceměsíčního členství se akviziční sazba bere jen z prvního měsíce, zbytek jde
+  // za základní. Čísla jsou stejná jako na serveru (api/_rate.js): ACQ 10/5, ADS 25/10,
+  // základ EP 0,005.
+  const EP_BASE=0.005, EP_ACQ=0.05, EP_ADS=0.10;
+  // Vrací {fee, note} -- kolik by ta transakce stála s EP a čím se to skládá.
+  const _epFor=function(t){
+    const gross=Number(t.gross_amount||0)/100;
+    const mo=Math.max(1, parseInt(t.months,10)||1);
+    const acqMo=Math.max(1, parseInt(t.acq_months,10)||1);
+    const rn=(t.mtl_rate!=null)?Number(t.mtl_rate):null;
+    const isAds=(t.acq_source==='mtl_ads');
+    const isAcq=isAds || (t.acq_source==='mtl_discovery') || (rn!=null && rn>=0.099);
+    if(!isAcq) return { fee: gross*EP_BASE, note: null };
+    const epRate=isAds?EP_ADS:EP_ACQ;
+    const nAcq=Math.min(mo, isAds?Math.min(12, mo):acqMo);   // reklama běží až 12 měsíců
+    if(mo<=1 || nAcq>=mo) return { fee: gross*epRate, note: (Math.round(epRate*1000)/10)+' %' };
+    const per=gross/mo;                                       // částka na měsíc
+    const fee=per*nAcq*epRate + per*(mo-nAcq)*EP_BASE;
+    return { fee: fee,
+      note: (EN ? (nAcq+' mo at '+(Math.round(epRate*1000)/10)+' % + '+(mo-nAcq)+' mo at 0,5 %')
+                : (nAcq+'. m\u011bs. '+(Math.round(epRate*1000)/10)+' % + zbyl\u00fdch '+(mo-nAcq)+' m\u011bs. 0,5 %')) };
+  };
   // BEZNY SHEET, ne vlastni fixed overlay. Fixed pres cely viewport prekryl v dashmode
   // levy sidebar a navic sedel nad prohlizecem dokladu.
   let ov=document.getElementById('shMtlComm');
@@ -31527,7 +31551,12 @@ async function openMtlCommissions(scope){
     ov=document.createElement('div'); ov.id='shMtlComm'; ov.className='sheet'; ov.style.zIndex='95';
     (document.querySelector('.app')||document.body).appendChild(ov);
   }
-  ov.innerHTML='<div class="shdr"><div class="shdr-title">\ud83e\uddfe '+(EN?'Commissions to MTL':'Provize v\u016f\u010di MTL')+'</div><button class="btn-close" id="_mcClose">\u2715</button></div>'
+  ov.innerHTML='<div class="shdr"><div class="shdr-title">\ud83e\uddfe '+(_epCmp?(EN?'With Exclusive Partner':'S Exclusive Partnerem'):(EN?'Commissions to MTL':'Provize v\u016f\u010di MTL'))+'</div><button class="btn-close" id="_mcClose">\u2715</button></div>'
+    + (_epCmp ? ('<div style="margin:12px 18px 0;padding:11px 13px;background:#F2FBF5;border:1px solid #A8E6C0;border-radius:11px;font-size:12px;color:#0A5A32;line-height:1.55;">'
+        + (EN
+          ? 'Each line shows what you pay now and what it would be with Exclusive Partner: base commission 0.5 %, a member MTL found for you 5 % instead of 10 %, a member from MTL ads 10 % instead of 25 % for 12 months. Plus the flat 1 000 CZK per month, which you pay even in a month with no income.'
+          : 'U ka\u017ed\u00e9 polo\u017eky vid\u00ed\u0161, co plat\u00ed\u0161 te\u010f a co by to bylo s Exclusive Partnerem: z\u00e1kladn\u00ed provize 0,5 %, \u010dlen, kter\u00e9ho ti na\u0161lo MTL, 5 % m\u00edsto 10 %, \u010dlen z reklamy MTL 10 % m\u00edsto 25 % po dobu 12 m\u011bs\u00edc\u016f. K tomu pau\u0161\u00e1l 1 000 K\u010d m\u011bs\u00ed\u010dn\u011b, kter\u00fd zaplat\u00ed\u0161 i v m\u011bs\u00edci bez p\u0159\u00edjm\u016f.')
+        + '</div>') : '')
     +'<div id="_mcBody" style="padding:16px 18px 44px;"><p style="color:var(--light);font-size:13px;text-align:center;padding:30px;">'+(EN?'Loading\u2026':'Na\u010d\u00edt\u00e1m\u2026')+'</p></div>';
   // Odkud jsme prisli -- closeSheet podle toho vrati puvodni obrazovku misto prazdna.
   try{ _sheetParent['shMtlComm']=(_kind==='organization')?'shOrgFinance':((_kind==='gym')?'shGymManage':'shMe'); }catch(e){}
@@ -31642,13 +31671,13 @@ async function openMtlCommissions(scope){
           // Součet s EP: 0,5 % z hrubých částek měsíce + paušál. Paušál je 1 000 Kč; klub
           // účtující v jiné měně by potřeboval přepočet, proto se u něj ukáže jen procentní část.
           +(_epCmp?(function(){
-              const _g=(m.rows||[]).reduce(function(a,t){ return a+Number(t.gross_amount||0)/100; },0);
+              const _var=(m.rows||[]).reduce(function(a,t){ return a+_epFor(t).fee; },0);
               const _flat=(String(m.cur||'CZK').toUpperCase()==='CZK')?1000:null;
-              const _ep=_g*0.005+(_flat||0);
+              const _ep=_var+(_flat||0);
               return '<div style="font-size:15px;font-weight:800;color:#0A7A3D;line-height:1.2;">'+_money(_ep,m.cur)+'</div>'
                 +'<div style="font-size:10.5px;color:var(--mid);margin-top:1px;">'
                 +(_flat!=null
-                  ? ((EN?'flat ':'paušál ')+_money(_flat,m.cur)+' + 0,5 % = '+_money(_g*0.005,m.cur))
+                  ? ((EN?'flat ':'paušál ')+_money(_flat,m.cur)+' + '+(EN?'commission ':'provize ')+_money(_var,m.cur))
                   : (EN?'0.5 % + flat fee converted from 1 000 CZK':'0,5 % + paušál přepočtený z 1 000 Kč'))
                 +'</div>';
             })():'')
@@ -31726,12 +31755,14 @@ async function openMtlCommissions(scope){
         +((_isCoachScope && t.gym_id)?('<span style="font-size:11px;background:#EEF4FF;color:var(--blue);border-radius:7px;padding:1px 7px;margin-left:6px;white-space:nowrap;">'+(EN?'club mode':'re\u017eim klub')+'</span>'):'')
         +(_rf>0?('<span style="font-size:11px;background:var(--surf);color:var(--mid);border:1px solid var(--border);border-radius:7px;padding:1px 7px;margin-left:6px;white-space:nowrap;">'+(EN?'refunded':'refundov\u00e1no')+'</span>'):'')+'</div>'
         +'<div style="color:var(--mid);white-space:nowrap;text-align:right;">'+fmtPrice(Number(t.gross_amount||0)/100,_cu)+' '+_curSym(_cu)
-          +(_epCmp?('<span style="text-decoration:line-through;opacity:.55;">'+_r+'</span><span style="color:#0A7A3D;font-weight:700;"> \u00b7 0,5 %</span>'):_r)+_rNote+'</div>'
+          +(_epCmp?(function(){ const _e=_epFor(t);
+              return '<span style="text-decoration:line-through;opacity:.55;">'+_r+'</span>'
+                +'<span style="color:#0A7A3D;font-weight:700;"> \u00b7 '+(_e.note||'0,5 %')+'</span>'; })():_r)+_rNote+'</div>'
         +'<div style="white-space:nowrap;min-width:76px;text-align:right;">'
           +(_rf>0?('<span style="color:var(--light);text-decoration:line-through;font-size:11.5px;margin-right:5px;">'+fmtPrice(_gross0,_cu)+' '+_curSym(_cu)+'</span>'):'')
           +(_epCmp
             ? ('<span style="color:var(--light);text-decoration:line-through;font-size:11.5px;margin-right:5px;">'+fmtPrice(_fee(t),_cu)+' '+_curSym(_cu)+'</span>'
-               +'<span style="font-weight:800;color:#0A7A3D;">'+fmtPrice(Number(t.gross_amount||0)/100*0.005,_cu)+' '+_curSym(_cu)+'</span>')
+               +'<span style="font-weight:800;color:#0A7A3D;">'+fmtPrice(_epFor(t).fee,_cu)+' '+_curSym(_cu)+'</span>')
             : ('<span style="font-weight:700;color:var(--dark);">'+fmtPrice(_fee(t),_cu)+' '+_curSym(_cu)+'</span>'))
         +'</div></div>';
     }).join('')
