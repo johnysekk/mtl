@@ -175,9 +175,15 @@ function payDueBlock(en, sumsByCur, ym, suspendAt, retryAt) {
 export default async function handler(req, res) {
   await loadMtlIdentity();   // kdo částku žádá — na výzvu k úhradě i do e-mailu
   if (!SB || !KEY) return res.status(500).json({ error: 'env not set' });
-  if (process.env.CRON_SECRET) {
+  // ZAVRENO NAPEVNO. Driv se autorizace kontrolovala JEN kdyz je CRON_SECRET nastaveny --
+  // kdyz promenna chybela nebo se preklepla, endpoint byl otevreny komukoli na internetu.
+  // A tenhle endpoint strhava penize z karet: `?force=1&gym=<id>` je prikaz k platbe.
+  {
+    const secret = process.env.CRON_SECRET;
     const auth = req.headers.authorization || '';
-    if (!(auth === `Bearer ${process.env.CRON_SECRET}` || req.headers['x-vercel-cron'])) return res.status(401).json({ error: 'unauthorized' });
+    const fromVercel = !!req.headers['x-vercel-cron'];
+    if (!secret) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+    if (!(auth === `Bearer ${secret}` || fromVercel)) return res.status(401).json({ error: 'unauthorized' });
   }
 
   const now = new Date();
