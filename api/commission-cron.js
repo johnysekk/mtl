@@ -65,16 +65,32 @@ function mailHtml(title, body) {
   </div>`;
 }
 // Notifikace v appce a k tomu mail u toho, co se tyka penez nebo pozastaveni uctu.
+// POSTA SELHAVALA POTICHU. `catch (e) {}` znamenalo, ze kdyz se mail neodeslal (chybny klic,
+// vypadek odesilatele, profil bez e-mailu), nikdo se to nedozvedel -- ani prijemce, ani beh
+// cronu, ktery skoncil hlaskou "ok". Ted se kazde selhani pocita a vraci ve vysledku behu.
+const mailFails = [];
 async function notifyMail(userId, subject, body, subjectEn, bodyEn) {
   try {
-    if (!userId) return;
+    if (!userId) { mailFails.push('no-user'); return; }
     const p = (await sb(`profiles?id=eq.${userId}&select=email,lang`))[0];
-    const en = !!(p && p.lang === 'en' && subjectEn);
-    if (p && p.email) await sendEmail(p.email, en ? subjectEn : subject, mailHtml(en ? subjectEn : subject, en ? bodyEn : body));
-  } catch (e) {}
+    if (!p || !p.email) { mailFails.push(`no-email:${userId}`); return; }
+    const en = !!(p.lang === 'en' && subjectEn);
+    await sendEmail(p.email, en ? subjectEn : subject, mailHtml(en ? subjectEn : subject, en ? bodyEn : body));
+  } catch (e) {
+    mailFails.push(`${userId}:${String(e && e.message || e).slice(0, 120)}`);
+    console.error('[commission] mail', userId, e && e.message);
+  }
 }
 
 // Datum do textu notifikace: „25. 9.", ne kus ISO retezce.
+// TERMIN DALSIHO POKUSU. Driv se ukladal jako "ted + 3 dny" na milisekundu, jenze cron bezi
+// kazdy den v tutez vterinu -- kdyz byl dalsi beh o sest sekund rychlejsi nez ten predchozi,
+// podminka "termin <= ted" neplatila, klub se preskocil a NIC se nestalo: zadny pokus, zadny
+// mail, zadna notifikace. Termin se proto uklada na PULNOC ciloveho dne a pri cteni se navic
+// pripocitava tolerance, takze na presnych sekundach uz nic nezavisi.
+const RETRY_DAYS = 3;
+const retryAfter = (days) => { const d = new Date(Date.now() + (days || RETRY_DAYS) * 86400000); d.setUTCHours(0, 0, 0, 0); return d.toISOString(); };
+const isRetryReady = (v) => !v || new Date(v).getTime() <= Date.now() + 6 * 3600 * 1000;
 const czDate = (iso) => { try { const d = new Date(iso); return d.getUTCDate() + '. ' + (d.getUTCMonth() + 1) + '.'; } catch (e) { return ''; } };
 const notify = (user_id, kind, message, extra = {}) =>
   sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id, type: 'system', read: false, data: JSON.stringify({ kind, ...extra }), message }) });
@@ -188,6 +204,7 @@ let deferredMin = 0;
   // founder sets on one club or coach. The second exists because the first turns the whole
   // platform into a test, which is no use while the only real data is your own.
   let TEST = false; try { TEST = await isTestMode(); } catch (e) {}
+  const skipped = [];
   let dailyGyms = new Set(), dailyCoaches = new Set();
   try { dailyGyms = new Set(((await sb('gyms?commission_daily=is.true&select=id')) || []).map(g => g.id)); } catch (e) {}
   try { dailyCoaches = new Set(((await sb('profiles?commission_daily=is.true&select=id')) || []).map(x => x.id)); } catch (e) {}
@@ -273,8 +290,15 @@ let deferredMin = 0;
       }
 
       // ---- BILLING (on/after the 6th, needs a card, 3-day retry spacing) ----
-      const retryReady = !g.commission_next_retry || new Date(g.commission_next_retry).getTime() <= Date.now()
-        || (_force && _forceGym === String(gid));   // vynucene dobiti prijde hned
+      // POJISTKA. Kdyby se termin z jakehokoli duvodu zasekl v budoucnosti (spatne ulozena
+      // hodnota, zmena casoveho pasma), po peti dnech od posledniho selhani se zkusi tak jako tak.
+      const _stuck = g.commission_failed_at
+        && (Date.now() - new Date(g.commission_failed_at).getTime() > 5 * 86400000)
+        && (Date.now() - new Date(g.commission_next_retry || 0).getTime() > -5 * 86400000);
+      const retryReady = isRetryReady(g.commission_next_retry) || _stuck || (_force && _forceGym === String(gid));
+      if (!(billDay || (_force && _forceGym === String(gid)))) skipped.push({ gym: gid, why: 'not-bill-day' });
+      else if (!retryReady) skipped.push({ gym: gid, why: 'waiting', until: g.commission_next_retry });
+      else if (!(g.commission_card_customer && g.commission_card_pm)) skipped.push({ gym: gid, why: 'no-card' });
       if ((billDay || (_force && _forceGym === String(gid))) && retryReady && g.commission_card_customer && g.commission_card_pm) {
         let anyFail = false, anyCharge = false;
         for (const cur of Object.keys(byGym[gid])) {
@@ -329,10 +353,10 @@ let deferredMin = 0;
           }
         }
         if (anyCharge && anyFail) {
-          const patch = { commission_next_retry: new Date(Date.now() + 3 * 86400000).toISOString() };
+          const patch = { commission_next_retry: retryAfter() };
           if (!g.commission_failed_at) { patch.commission_failed_at = new Date().toISOString(); g.commission_failed_at = patch.commission_failed_at; }
           await sb(`gyms?id=eq.${gid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) });
-          { const _retryAt=new Date(Date.now()+3*86400000).toISOString(); const _suspendAt=new Date(Date.parse(g.commission_failed_at||new Date().toISOString())+14*86400000).toISOString();
+          { const _retryAt=retryAfter(); const _suspendAt=new Date(Date.parse(g.commission_failed_at||new Date().toISOString())+14*86400000).toISOString();
             const _dueSum=await dueSumFor('gym', gid);
             const _pl=payNowLink('gym', gid, curMonth);
             await notifyMail(g.owner_id, 'Provizi MTL se nepodařilo strhnout',
@@ -398,7 +422,7 @@ let deferredMin = 0;
       const c = coachMap[cid]; if (!c) continue;
 
       // ---- BILLING (on/after the 6th, needs a card, 3-day retry spacing) ----
-      const retryReady = !c.commission_next_retry || new Date(c.commission_next_retry).getTime() <= Date.now();
+      const retryReady = isRetryReady(c.commission_next_retry);
       if (billDay && retryReady && c.commission_card_customer && c.commission_card_pm) {
         let anyFail = false, anyCharge = false;
         for (const cur of Object.keys(byCoach[cid])) {
@@ -437,10 +461,10 @@ let deferredMin = 0;
           }
         }
         if (anyCharge && anyFail) {
-          const patch = { commission_next_retry: new Date(Date.now() + 3 * 86400000).toISOString() };
+          const patch = { commission_next_retry: retryAfter() };
           if (!c.commission_failed_at) { patch.commission_failed_at = new Date().toISOString(); c.commission_failed_at = patch.commission_failed_at; }
           await sb(`profiles?id=eq.${cid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) });
-          { const _retryAt=new Date(Date.now()+3*86400000).toISOString(); const _suspendAt=new Date(Date.parse((c&&c.commission_failed_at)||new Date().toISOString())+14*86400000).toISOString();
+          { const _retryAt=retryAfter(); const _suspendAt=new Date(Date.parse((c&&c.commission_failed_at)||new Date().toISOString())+14*86400000).toISOString();
             const _dueSum=await dueSumFor('coach', cid);
             const _pl=payNowLink('coach', cid, curMonth);
             await notifyMail(cid, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Můžeš ji ale uhradit hned.' + payDueBlock(false, _dueSum, curMonth, _suspendAt, _retryAt) + payNowBlock(_pl, false) + 'Zkontroluj prosím i platební kartu v Platby a provize.', 'We could not charge the MTL commission', 'We will try again in three days. You can also pay it right away.' + payDueBlock(true, _dueSum, curMonth, _suspendAt, _retryAt) + payNowBlock(_pl, true) + 'Please check your payment card in Payments &amp; commission.'); } await notify(cid, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, zaznamenávání hotovosti se pozastaví.`, { coach_id: cid, msg_en: `⚠️ Charging the MTL commission to your card failed. Update your card — next attempt in 3 days. If it isn't paid within 2 weeks, recording cash will be paused.` });
@@ -507,7 +531,7 @@ let deferredMin = 0;
     for (const oid of orgIds) {
       const o = orgMap[oid];
       if (!o) continue;
-      const retryReady = !o.commission_next_retry || new Date(o.commission_next_retry).getTime() <= Date.now();
+      const retryReady = isRetryReady(o.commission_next_retry);
       if (billDay && retryReady && o.commission_card_customer && o.commission_card_pm) {
         let anyFail = false, anyCharge = false;
         for (const cur of Object.keys(byOrg[oid])) {
@@ -546,7 +570,7 @@ let deferredMin = 0;
           const next = new Date(Date.now() + 3 * 86400000).toISOString();
           await sb(`organizations?id=eq.${oid}`, { method: 'PATCH', prefer: 'return=minimal',
             body: JSON.stringify({ commission_failed_at: first, commission_next_retry: next }) });
-          if (o.owner_id) { const _retryAt=new Date(Date.now()+3*86400000).toISOString(); const _suspendAt=new Date(Date.parse((o&&o.commission_failed_at)||new Date().toISOString())+14*86400000).toISOString();
+          if (o.owner_id) { const _retryAt=retryAfter(); const _suspendAt=new Date(Date.parse((o&&o.commission_failed_at)||new Date().toISOString())+14*86400000).toISOString();
             const _dueSum=await dueSumFor('org', oid);
             const _pl=payNowLink('org', oid, curMonth);
             await notifyMail(o.owner_id, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Můžeš ji ale uhradit hned.' + payDueBlock(false, _dueSum, curMonth, _suspendAt, _retryAt) + payNowBlock(_pl, false) + 'Zkontroluj prosím i platební kartu v Platby a provize.', 'We could not charge the MTL commission', 'We will try again in three days. You can also pay it right away.' + payDueBlock(true, _dueSum, curMonth, _suspendAt, _retryAt) + payNowBlock(_pl, true) + 'Please check your payment card in Payments &amp; commission.'); } await notify(o.owner_id, 'commission_failed', `⚠️ Provizi MTL se nepodařilo strhnout. Zkusíme to znovu za tři dny.`, { organization_id: oid, msg_en: `⚠️ We could not charge the MTL commission. We'll try again in three days.` });
@@ -599,7 +623,19 @@ let deferredMin = 0;
     // marked = kolik transakcí dostalo commission_collected_at. Když je collected > 0 a marked = 0,
     // strhlo se, ale neoznačilo -- a pak nemá unified-doklad-cron co vystavit.
     // deferredMin = kolikrat byla castka pod minimem Stripe a proto se necekala jako chyba.
-    return res.status(200).json({ ok: true, billDay, collected, failed, suspended, lifted, marked, deferredMin, markErr });
+    // DIAGNOSTIKA BEHU. Driv vracel jen pocty a pri "nic se nestalo" nebylo jak zjistit proc.
+    // `skipped` rekne u kazdeho poskytovatele duvod: ceka na termin, nema kartu, neni billDay.
+    // OTISK BEHU. Bez nej nejde poznat rozdil mezi "cron nebezel" a "bezel a nemel co delat".
+    const _stamp = { at: new Date().toISOString(), billDay, collected, failed, suspended,
+                     deferredMin, mailFails: mailFails.length, skipped: skipped.length };
+    try {
+      await sb('platform_settings?id=eq.1', { method: 'PATCH', prefer: 'return=minimal',
+        body: JSON.stringify({ commission_cron_last: _stamp }) });
+    } catch (e) { console.error('[commission] stamp', e.message); }
+
+    return res.status(200).json({ ok: true, at: new Date().toISOString(), billDay, test: TEST,
+      collected, failed, suspended, lifted, marked, deferredMin, markErr,
+      mailFails: mailFails.slice(0, 20), skipped: skipped.slice(0, 50) });
   } catch (e) {
     return res.status(500).json({ error: e.message, collected, failed, suspended, lifted });
   }
