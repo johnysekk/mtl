@@ -31525,25 +31525,42 @@ async function openMtlCommissions(scope){
   // 25 %, a u víceměsíčního členství se akviziční sazba bere jen z prvního měsíce, zbytek jde
   // za základní. Čísla jsou stejná jako na serveru (api/_rate.js): ACQ 10/5, ADS 25/10,
   // základ EP 0,005.
-  const EP_BASE=0.005, EP_ACQ=0.05, EP_ADS=0.10;
-  // Vrací {fee, note} -- kolik by ta transakce stála s EP a čím se to skládá.
+  const EP_BASE=0.005;
+  // POČÍTÁ SE ZE SKUTEČNĚ ZAPLACENÉ SAZBY, ne znovu od nuly. Dřív stačilo, že transakce měla
+  // `acq_source='mtl_discovery'`, a přepočet jí naúčtoval akvizici 5 % -- i když se akvizice
+  // ve skutečnosti vůbec neuplatnila (člen už u klubu členství měl, nebo šlo o další měsíc
+  // ročního) a zaplatilo se 1,5 %. Z 240 Kč pak vyšlo 800 Kč a EP vycházel dráž než dnešek.
+  //
+  // Skutečná sazba je v `mtl_rate`, žebříčková v `base_rate`. Když se rovnají, akvizice se
+  // neuplatnila a s EP by z toho bylo 0,5 %. Když je vyšší, dopočítá se z ní akviziční část
+  // (u víceměsíčního členství je smíchaná) a ta se s EP dělí dvěma: 10 % → 5 %, 25 % → 10 %.
   const _epFor=function(t){
     const gross=Number(t.gross_amount||0)/100;
     const mo=Math.max(1, parseInt(t.months,10)||1);
-    const acqMo=Math.max(1, parseInt(t.acq_months,10)||1);
     const rn=(t.mtl_rate!=null)?Number(t.mtl_rate):null;
-    const isAds=(t.acq_source==='mtl_ads');
-    const isAcq=isAds || (t.acq_source==='mtl_discovery') || (rn!=null && rn>=0.099);
-    if(!isAcq) return { fee: gross*EP_BASE, note: null };
-    const epRate=isAds?EP_ADS:EP_ACQ;
-    const nAcq=Math.min(mo, isAds?Math.min(12, mo):acqMo);   // reklama běží až 12 měsíců
-    if(mo<=1 || nAcq>=mo) return { fee: gross*epRate, note: (Math.round(epRate*1000)/10)+' %' };
-    const per=gross/mo;                                       // částka na měsíc
-    const fee=per*nAcq*epRate + per*(mo-nAcq)*EP_BASE;
+    const br=(t.base_rate!=null)?Number(t.base_rate):null;
+    if(rn==null) return { fee: gross*EP_BASE, note: null };
+    // Žebříčková sazba: buď zapsaná, nebo (u starších řádků) sama skutečná, pokud je nízká.
+    const base=(br!=null)?br:((rn<=0.03)?rn:null);
+    if(base==null || rn<=base+0.0001) return { fee: gross*EP_BASE, note: null };
+    // Kolik měsíců neslo akvizici: zapsané, jinak dopočet z toho, o kolik je sazba vyšší.
+    let cov=Math.max(0, parseInt(t.acq_months,10)||0);
+    if(cov<=0 || cov>mo){
+      const acqGuess=(rn>=0.2)?0.25:0.10;                     // reklama vs. objev v appce
+      cov=Math.max(1, Math.min(mo, Math.round(((rn-base)*mo)/(acqGuess-base))));
+    }
+    // EP sazba podle DNEŠNÍHO ceníku, ne polovina té zaplacené: starší transakce nesou
+    // akvizici 20 % z doby před snížením a půlka z ní (9,75 %) by dnes neplatila pro nikoho.
+    const epAcq=(t.acq_source==='mtl_ads') ? 0.10 : 0.05;      // reklama 10 %, objev v appce 5 %
+    const fee=gross*((epAcq*cov + EP_BASE*(mo-cov))/mo);
+    const pct=function(x){ return (Math.round(x*1000)/10)+' %'; };
     return { fee: fee,
-      note: (EN ? (nAcq+' mo at '+(Math.round(epRate*1000)/10)+' % + '+(mo-nAcq)+' mo at 0,5 %')
-                : (nAcq+'. m\u011bs. '+(Math.round(epRate*1000)/10)+' % + zbyl\u00fdch '+(mo-nAcq)+' m\u011bs. 0,5 %')) };
+      note: (mo>cov)
+        ? (EN ? (cov+' mo at '+pct(epAcq)+' + '+(mo-cov)+' mo at 0,5 %')
+              : (cov+'. m\u011bs. '+pct(epAcq)+' + zbyl\u00fdch '+(mo-cov)+' m\u011bs. 0,5 %'))
+        : pct(epAcq) };
   };
+
   // BEZNY SHEET, ne vlastni fixed overlay. Fixed pres cely viewport prekryl v dashmode
   // levy sidebar a navic sedel nad prohlizecem dokladu.
   let ov=document.getElementById('shMtlComm');
