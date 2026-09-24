@@ -397,7 +397,11 @@ export default async function handler(req, res) {
         // KDO PLATBU PRIJAL. Drive se ukladalo jen `cash_payer_name` = kdo platil; kdo penize
         // vzal u pultu, se nikam nezapsalo, takze pri nesrovnalosti v kase nebylo co dohledat.
         // U internich potvrzeni (PIS) zustava prazdne -- tam penize nikdo do ruky nebere.
-        recorded_by: uid || null, recorded_by_name: _recName || null,
+        // JEN KDYZ JE CO ZAPSAT. U bankovni platby a QR nikdo penize fyzicky neprijima, takze
+        // tyhle sloupce zustavaji prazdne -- a posilat prazdny sloupec znamena, ze cely zapis
+        // spadne, kdyz ho databaze nezna (PGRST204). Kvuli tomu se nezauctovala ANI JEDNA
+        // platba, prestoze se toho pole vubec netykalo.
+        ...(uid ? { recorded_by: uid, recorded_by_name: _recName || null } : {}),
         // Ktera pojmenovana cena za vstup to byla; proof_checked=false znamena, ze klub
         // jeste musi videt doklad. Bez toho by slo vzit slevu bez naroku nedohledatelne.
         dropin_plan_id: dropin_plan_id || null,
@@ -448,7 +452,11 @@ export default async function handler(req, res) {
         // KDO PLATBU PRIJAL. Drive se ukladalo jen `cash_payer_name` = kdo platil; kdo penize
         // vzal u pultu, se nikam nezapsalo, takze pri nesrovnalosti v kase nebylo co dohledat.
         // U internich potvrzeni (PIS) zustava prazdne -- tam penize nikdo do ruky nebere.
-        recorded_by: uid || null, recorded_by_name: _recName || null,
+        // JEN KDYZ JE CO ZAPSAT. U bankovni platby a QR nikdo penize fyzicky neprijima, takze
+        // tyhle sloupce zustavaji prazdne -- a posilat prazdny sloupec znamena, ze cely zapis
+        // spadne, kdyz ho databaze nezna (PGRST204). Kvuli tomu se nezauctovala ANI JEDNA
+        // platba, prestoze se toho pole vubec netykalo.
+        ...(uid ? { recorded_by: uid, recorded_by_name: _recName || null } : {}),
         // Ktera pojmenovana cena za vstup to byla; proof_checked=false znamena, ze klub
         // jeste musi videt doklad. Bez toho by slo vzit slevu bez naroku nedohledatelne.
         dropin_plan_id: dropin_plan_id || null,
