@@ -212,8 +212,12 @@ export async function pisSettle(rec, tbl, status){
           else { nd={ kind:'payment_confirmed', auto:true, goto:'dropin', gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.class_name||''), date:_dte, time:_tme, class_name:rec.class_name }; }
           const _msg='\u2705 '+(nd.item||'')+(_amt?(' \u00b7 '+_amt):'');
           await sb.from('notifications').insert({ user_id:_buyerId, type:'booking', read:false, message:_msg, data:JSON.stringify(nd) }); }catch(e){}
-        await pisSideEffects(rec, tbl);
   }
+  // ZAUCTOVANI BEZI VZDYCKY, i kdyz uz rezervace stav "zaplaceno" ma. Drive bylo uvnitr
+  // podminky na zmenu stavu: kdyz zapis stavu prosel a record-cash pak selhal, nebylo jak
+  // to zopakovat -- platba zustala bez transakce a dokladu navzdy. pisSideEffects si sama
+  // hlida, ze transakce jeste neexistuje, takze opakovane volani nic nezdvoji.
+  await pisSideEffects(rec, tbl);
 }
 
 // ── FINBRICKS: NAVRAT Z BANKY A POTVRZENI ────────────────────────────────────────────────
