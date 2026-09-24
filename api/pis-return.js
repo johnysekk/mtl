@@ -253,7 +253,17 @@ async function fbxReturn(req, res, mtid){
     try{ await pisSettle(rec, tbl, out.code); }
     catch(e){ console.error('[pis-return/fbx] settle', tbl, rec.id, e && e.message);
       return wantsHtml ? back('fbx=err') : res.status(500).json({ error:'settle failed', detail:String((e&&e.message)||e), table:tbl, id:rec.id }); }
-    return wantsHtml ? back('fbx=ok') : res.status(200).json({ ok:true, status:out.code, paid:true, table:tbl, id:rec.id });
+    // OVERIT, ZE PENIZE SKUTECNE DOSLY DO UCETNICTVI. Zauctovani bezi v pisSettle a jeho
+    // chyby konci v logu, ktery nikdo necte. Odpoved proto rovnou rekne, jestli k platbe
+    // existuje transakce a doklad -- bez toho se hledalo naslepo.
+    let _tx=null, _dok=null;
+    try{
+      const t=await sb.from('transactions').select('id').eq('source_booking_id', String(rec.id)).limit(1);
+      _tx=(t.data&&t.data[0]&&t.data[0].id)||null;
+      if(_tx){ const d=await sb.from('doklady').select('doklad_no').eq('transaction_id', _tx).limit(1);
+        _dok=(d.data&&d.data[0]&&d.data[0].doklad_no)||null; }
+    }catch(e){}
+    return wantsHtml ? back('fbx=ok') : res.status(200).json({ ok:true, status:out.code, paid:true, table:tbl, id:rec.id, transakce:_tx, doklad:_dok });
   }
   if(out.failed){ try{ await sb.from(tbl).update({ status:'cancelled', pis_failed_at:new Date().toISOString() }).eq('id', rec.id); }catch(e){} }
   return wantsHtml ? back('fbx=fail') : res.status(200).json({ ok:true, status:out.code, paid:false });
