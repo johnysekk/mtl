@@ -50,7 +50,12 @@ export default async function handler(req, res) {
     // 3) Dokud neni stav konecny, NIC se nezauctovava. Uzivatel se vrati do appky s informaci,
     //    ze platba probiha; potvrzeni dorazi pozdeji dalsim volanim teto adresy.
     if (!out.final) {
-      return wantsHtml ? backToApp(res, 'fbx=pending') : res.status(200).json({ ok: true, status: out.code, final: false });
+      // NEDOKONCENOU PLATBU LZE DOKONCIT. Finbricks vraci transactionRecoveryUrl -- odkaz,
+      // kterym se proces znovu spusti bez zakladani nove platby. Kdo zavrel banku v pulce
+      // (stav OPENED), se tak nemusi vracet na zacatek a rezervace mu zustane.
+      const recovery = r.data && r.data.transactionRecoveryUrl;
+      if (recovery) { try { await sb.from(tbl).update({ pis_recovery_url: recovery }).eq('id', rec.id); } catch (e) {} }
+      return wantsHtml ? backToApp(res, 'fbx=pending') : res.status(200).json({ ok: true, status: out.code, final: false, recoveryUrl: recovery || null });
     }
 
     if (out.paid) {
