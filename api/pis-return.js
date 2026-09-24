@@ -223,7 +223,10 @@ export async function pisSettle(rec, tbl, status){
 import { fbxCall, fbxOutcome, MERCHANT_ID as FBX_MERCHANT } from './_fbx.js';
 
 async function fbxReturn(req, res, mtid){
-  const wantsHtml=String(req.headers.accept||'').includes('text/html');
+  // ?json=1 vynuti vypis misto presmerovani -- prohlizec se hlasi jako HTML, takze bez toho
+  // se na odpoved neda podivat jinak nez pres curl.
+  const _wantJson=String((req.query&&req.query.json)||'')==='1';
+  const wantsHtml=!_wantJson && String(req.headers.accept||'').includes('text/html');
   const back=function(q){ res.setHeader('Location', APP_URL+'/?'+q); return res.status(302).end(); };
   if(!FBX_MERCHANT) return res.status(500).json({ error:'FINBRICKS_MERCHANT_ID not configured' });
   const TBL=['gym_bookings','gym_memberships','bookings','event_tickets','cohort_members','merch_orders'];
