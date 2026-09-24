@@ -15076,8 +15076,13 @@ async function showCancelConfirmation(d){
   const row=(l,v)=>'<div class="row"><span>'+l+'</span><strong>'+esc(v)+'</strong></div>';
   let body='';
   if(!c){
-    body='<h1>'+(EN?'No cancellation confirmation was issued':'K tomuto zru\u0161en\u00ed nebylo vystaveno potvrzen\u00ed')+'</h1>'
-      +'<p style="font-size:13px;color:#555;">'+(EN?'We will not rebuild it from today\u2019s data \u2014 that would not be the document that was issued.':'Nebudeme ho skl\u00e1dat z dne\u0161n\u00edch dat \u2014 nebylo by to potvrzen\u00ed, kter\u00e9 bylo vystaveno.')+'</p>';
+    body='<h1>'+(EN?'No confirmation for this cancellation':'K tomuto zru\u0161en\u00ed nen\u00ed potvrzen\u00ed')+'</h1>'
+      // Potvrzeni je doklad o tom, co se stalo s penezi. U rezervace, za kterou se nikdy
+      // nezaplatilo, zadne nevzniklo a nema proc -- driv tu stala veta o "neskladani
+      // z dnesnich dat", ktera cloveka jen matla.
+      +'<p style="font-size:13px;color:#555;">'+(EN
+        ? 'It is issued only when money changed hands. This reservation was cancelled before it was paid.'
+        : 'Vystavuje se jen tam, kde se platilo. Tahle rezervace byla zru\u0161ena d\u0159\u00edv, ne\u017e se za ni zaplatilo.')+'</p>';
   } else {
     let issued='', issuedFull='';
     try{ const _d=new Date(c.created_at); issued=_d.toLocaleDateString(EN?'en-GB':'cs-CZ'); issuedFull=_d.toLocaleString(EN?'en-GB':'cs-CZ',{ day:'numeric', month:'numeric', year:'numeric', hour:'2-digit', minute:'2-digit' }); }catch(e){}
@@ -15389,6 +15394,10 @@ async function _issueCancelSnapshot(o){
   try{
     if(!currentUser || !currentUser.id || !o || o.booking_id==null) return null;
     const _cp=await _confParties(o);
+    // NEZAPLACENÁ REZERVACE SE NEPOTVRZUJE. Potvrzení o zrušení je doklad o tom, co se stalo
+    // s penězi -- když žádné neproběhly (rezervace čekala na QR platbu a kouč ji nepotvrdil),
+    // není co potvrzovat a vystavovat papír na „vráceno 0 Kč" nedává smysl.
+    if(!(Number(_cp.paid)>0)) return null;
     const prov=_cp.provider, part=_cp.participant, txId=_cp.txId, testMode=_cp.testMode, paid=_cp.paid, cur=_cp.cur, stuId=_cp.stuId;
     const row={ booking_id:String(o.booking_id), booking_kind:(o.booking_kind||'dropin'), transaction_id:txId,
       student_id:stuId, participant_name:(part||null), payer_name:(_cp.payer||null),
@@ -15402,8 +15411,9 @@ async function _issueCancelSnapshot(o){
       doklad_no:(await _dokladNoForTx(txId)) };
     const { data:_ci, error }=await supaClient.from('cancel_confirmations').insert(row).select('id').single();
     if(error){
-      console.log('[cancel_conf] potvrzeni se nezapsalo:', error.message);
-      toast('\u26a0\ufe0f '+(LANG==='en'?'Cancellation confirmation was not issued: ':'Potvrzen\u00ed o zru\u0161en\u00ed se nevystavilo: ')+error.message);
+      // Chyba zápisu patří do konzole, ne uživateli: zrušení proběhlo a on s tím nic nezmůže.
+      // Hláška s názvem chybějícího sloupce ho jen vyděsí uprostřed rušení lekce.
+      console.error('[cancel_conf] potvrzeni se nezapsalo:', error.message);
       return null;
     }
     return (_ci&&_ci.id)||null;
@@ -15448,7 +15458,11 @@ async function _issuePrivateCancelConf(o){
     const _mkMsg=function(EN){
     const _who=(o.byCoach ? (o.coach_name||(EN?'the coach':'kou\u010d')) : (o.student_name||(EN?'the student':'student')));
     const _when=_ds+' '+(o.time||'');
-    const _ref=(o.refund!=null) ? (fmtPrice(Number(o.refund)||0, o.currency||'CZK')+' '+((typeof _curSym==='function')?_curSym(o.currency||'CZK'):'')) : null;
+    // „Vráceno: 0 Kč" se nepíše. U nezaplacené rezervace se nic nevracelo, protože se nic
+    // nezaplatilo -- nula v oznámení jen mate a vypadá, jako by o peníze někdo přišel.
+    const _ref=(o.refund!=null && Number(o.refund)>0)
+      ? (fmtPrice(Number(o.refund)||0, o.currency||'CZK')+' '+((typeof _curSym==='function')?_curSym(o.currency||'CZK'):''))
+      : null;
     const _msgStudent = o.byCoach
       ? ('\u274C '+(EN?('Your coach '+_who+' cancelled the lesson on '+_when+'.'):('Kou\u010d '+_who+' ti zru\u0161il lekci '+_when+'.'))
          + (_ref?(' '+(EN?('Refunded: '+_ref+'.'):('Vr\u00e1ceno: '+_ref+'.'))):''))
@@ -28796,7 +28810,9 @@ async function loadNotifications(append){
     else if(k==='minor_waiver_done') linkLabel = LANG==='en'?'Open club ›':'Otevřít klub ›';
     else if(k==='pay_request') linkLabel = LANG==='en'?'Pay ›':'Zaplatit ›';
     else if(k==='resched_conf') linkLabel = LANG==='en'?'Open confirmation ›':'Otevřít potvrzení ›';
-    else if(k==='cancel_conf') linkLabel = LANG==='en'?'Open confirmation ›':'Otevřít potvrzení ›';
+    // Odkaz jen tam, kde potvrzení opravdu vzniklo: u nezaplacené rezervace se nevystavuje,
+    // takže slib „Otevřít potvrzení" vedl na prázdnou stránku.
+    else if(k==='cancel_conf' && (function(){ try{ return !!JSON.parse(n.data||'{}').conf_id; }catch(e){ return false; } })()) linkLabel = LANG==='en'?'Open confirmation ›':'Otevřít potvrzení ›';
     else if(k==='org_fee') linkLabel = LANG==='en'?'Pay the fee ›':'Uhradit členský poplatek ›';
     else if(k==='org_accepted') linkLabel = LANG==='en'?'Pay the fee ›':'Uhradit členský poplatek ›';
     else if(k==='coach_pay_ok') linkLabel = LANG==='en'?'Upcoming lessons ›':'Nadcházející lekce ›';
