@@ -12267,7 +12267,10 @@ async function _renderPendingQr(){
   // nekdo jiny, takze tlacitko "Zaplatit" by slibovalo neco, co neplati. Cron je po dvou
   // hodinach prepne na 'expired', ale student nema cekat dve hodiny na to, az z jeho seznamu
   // zmizi nesmysl -- schovaji se hned, jakmile lhuta vyprsi.
-  const _holdMs = 2*60*60*1000;
+  // JEDNO ČÍSLO PRO VŠECHNY. Držení místa je 30 minut: po nich cron rezervaci prohlásí za
+  // propadlou, limit dvou rozdělaných plateb ji přestane počítat a box ji přestane ukazovat.
+  // Dřív tu byly dvě hodiny, takže „vypršelo" viselo v seznamu ještě hodinu a půl potom.
+  const _holdMs = 30*60*1000;
   rows = rows.filter(function(r){
     if(r.status==='paid_claimed') return true;           // zaplaceno, ceka na potvrzeni
     const t = new Date(r.requeued_at || r.created_at || 0).getTime();
@@ -22867,14 +22870,23 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMo
   let country=_ibanCC(iban);  // picker country = the klub's IBAN country (students bank locally)
   let payCur=cur;  // klub currency drives it (settable in gym settings)
   const gymNm=(payee&&(payee.receiver_name||payee.name))||(g&&g.name)||'Klub';
-  // NORSKÁ OBJÍŽĎKA JEN PRO NEONOMICS. Jeho sandbox neměl jedinou českou banku, tak se
-  // testovalo přes norskou DNB. Finbricks má české banky i testovací Mock Cobs, takže
-  // přepisovat mu zemi na Norsko znamená prázdný seznam a pád na QR.
-  const _fbx=(String(window._PIS_PROVIDER||'')==='finbricks');
-  if(testMode && !_fbx){ country='NO'; iban='NO2712073650567'; payCur='NOK'; }
   if(!iban){ toast(EN?'No IBAN on file':'Chybí IBAN'); return; }
-  let banks=[];
-  try{ const r=await fetch('/api/pis-aspsps?country='+country); const d=await r.json(); banks=(d.aspsps||[]).filter(function(b){ return (b.psu_types||[]).indexOf('personal')>=0; }); }catch(e){}
+  // KDO JE POSKYTOVATEL, ŘEKNE SERVER. Dřív se to bralo z window._PIS_PROVIDER, jenže ten se
+  // plní asynchronně při startu a když se to nestihne (nebo dotaz selže), zůstane prázdný --
+  // appka pak spadla do norské objížďky pro Neonomics i s Finbricks a seznam bank byl prázdný.
+  // Odpověď z /api/pis-aspsps nese `provider`, takže se nemusí nic hádat.
+  let banks=[], _fbx=false;
+  try{
+    const r=await fetch('/api/pis-aspsps?country='+country); const d=await r.json();
+    _fbx=(String(d&&d.provider||'')==='finbricks');
+    banks=((d&&d.aspsps)||[]).filter(function(b){ return (b.psu_types||[]).indexOf('personal')>=0; });
+  }catch(e){}
+  // Neonomics nemá v sandboxu českou banku -- jen tam se testuje přes norskou DNB.
+  if(testMode && !_fbx && !banks.length){
+    country='NO'; iban='NO2712073650567'; payCur='NOK';
+    try{ const r2=await fetch('/api/pis-aspsps?country=NO'); const d2=await r2.json();
+      banks=((d2&&d2.aspsps)||[]).filter(function(b){ return (b.psu_types||[]).indexOf('personal')>=0; }); }catch(e){}
+  }
   if(!banks.length){
     // Seznam bank je prázdný -- pro tuhle zemi PIS nejede. Místo hlášky o zemi, která uživateli
     // nic neříká, spadneme na QR: to je přesně stav "banku v seznamu nemám".
