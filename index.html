@@ -11804,12 +11804,19 @@ async function _coach1to1QrPay(c, payee, opts){
   // Když banka v seznamu není, odkryje se QR jako záloha -- stejně jako u klubu. Bez toho
   // student uviděl toast a prázdné okno.
   const _c1pb=ov.querySelector('#c1PisBtn'); if(_c1pb) _c1pb.onclick=async function(){
-    // Rezervace vzniká teprve teď, při skutečném spuštění platby.
-    _c1pb.disabled=true;
-    const _bid=await _ensureBooking('pis');
-    _c1pb.disabled=false;
-    if(!_bid) return;
-    _pisPayFlow(_bid, payee, null, price, cur, msg, close, _pisTestFor(payee), function(){
+    // Rezervace se zakládá až ve výběru banky (funkce _ensureBooking níž) -- kdo se tam
+    // zastaví a zavře to, nezanechá po sobě drženou lekci. Když ji založit nejde (limit dvou
+    // rozdělaných plateb), řekne se to přímo v okně, ne jen toastem.
+    const _showErr=function(){
+      let _w=ov.querySelector('#c1Err');
+      if(!_w){ _w=document.createElement('div'); _w.id='c1Err';
+        _w.style.cssText='margin-top:10px;padding:10px 12px;background:#FFF1E8;border:1px solid #FCD9A8;border-radius:10px;font-size:12.5px;color:#9a5a00;line-height:1.5;';
+        _c1pb.parentNode.insertBefore(_w, _c1pb.nextSibling); }
+      _w.textContent=(EN?'Reservation was not created — check unpaid reservations in Upcoming.'
+                        :'Rezervace nevznikla — podívej se na nezaplacené rezervace v Nadcházejících.');
+    };
+    const _ensure=async function(how){ const id=await _ensureBooking(how); if(!id) _showErr(); return id; };
+    _pisPayFlow(null, payee, null, price, cur, msg, close, _pisTestFor(payee), function(){
       // Banka není v seznamu -- teprve TEĎ se z toho stává QR platba, kterou kouč potvrzuje ručně.
       var _w=ov.querySelector('#c1qrWrap'); if(_w) _w.style.display='block';
       var _b=ov.querySelector('#c1PisBtn'); if(_b) _b.style.display='none';
@@ -11824,7 +11831,7 @@ async function _coach1to1QrPay(c, payee, opts){
       try{ if(opts && opts.slot && opts.slot.id) supaClient.from('slots').update({ booked:false, student:null }).eq('id', opts.slot.id); }catch(_e){}
       supaClient.from('bookings').delete().eq('id',bookingId);
     } }catch(e){}
-    });
+    }, _ensure);
   };
   const pb=ov.querySelector('#c1qrPaid'); if(pb) pb.onclick=async function(){
     pb.disabled=true; pb.textContent='\u2026';
@@ -22865,7 +22872,9 @@ function _pisAllowed(ent, id){
 function _pisTestAmount(){
   return (1 + Math.floor(Math.random()*899)/100).toFixed(2);
 }
-async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMode, onQrFallback, kind, onAbandon){
+async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMode, onQrFallback, kind, onAbandon, ensureRow){
+  // ensureRow (volitelné): funkce, která rezervaci teprve založí a vrátí její id. Používá ji
+  // soukromka, aby řádek vznikl až po výběru banky.
   // Pojistka i tady: PIS se spouští i z míst, která mají vlastní okno.
   if(!(await _unpaidGuard())) return;
   const EN=LANG==='en';
@@ -22935,11 +22944,24 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMo
   bx.appendChild(_cx);
   bx.querySelectorAll('.pisBankBtn').forEach(function(btn){ btn.onclick=async function(){
     const b=banks[+btn.dataset.i]; const _t=btn.textContent; btn.textContent='\u2026'; btn.disabled=true;
+    // REZERVACE AŽ TEĎ. Vzniká ve chvíli, kdy je vybraná banka a platba se opravdu zakládá --
+    // ne při otevření okna a ne při kliknutí na „Zaplatit z účtu". Kdo se zastaví u výběru
+    // banky a zavře ho, nezanechá po sobě drženou lekci.
+    if(typeof ensureRow==='function'){
+      const _id=await ensureRow('pis');
+      if(!_id){ btn.disabled=false; btn.textContent=_t; return; }
+      bookingId=_id;
+    }
     try{
       const r=await fetch('/api/pis-create',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ bookingId:bookingId, gymName:gymNm, gymIban:iban, amount:(testMode?_pisTestAmount():price), currency:payCur, message:(msg||'').slice(0,140), bankId:b.bankId, aspspName:b.name, aspspCountry:b.country, psuType:'personal', kind:kind }) });
       const d=await r.json();
-      if(d && d.url){ _launched=true; if(closeQr) closeQr(); window.location.href=d.url; return; }
-      toast('\u26a0\ufe0f '+((d&&d.error)||'PIS error')); btn.disabled=false; btn.textContent=_t;
+      // Adresa banky musí být absolutní https; jinak Safari spadne na „The string did not
+      // match the expected pattern" a není poznat, co server vrátil.
+      const _u=String((d&&d.url)||'');
+      if(/^https?:\/\//i.test(_u)){ _launched=true; if(closeQr) closeQr(); window.location.href=_u; return; }
+      try{ console.error('[pis-create]', d); }catch(e){}
+      toast('\u26a0\ufe0f '+((d&&d.error)||('PIS: '+JSON.stringify(d||{}).slice(0,160))));
+      btn.disabled=false; btn.textContent=_t;
     }catch(e){ toast('\u26a0\ufe0f '+e.message); btn.disabled=false; btn.textContent=_t; }
   }; });
 }
