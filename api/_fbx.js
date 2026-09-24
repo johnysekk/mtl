@@ -97,7 +97,13 @@ export function psuIpFrom(req) {
 export function fbxOutcome(st) {
   const code = String((st && st.resultCode) || '').toUpperCase();
   const final = !!(st && st.finalBankStatus);
-  const good = ['BOOKED', 'SETTLED', 'ACCEPTED', 'ACSC', 'ACCC', 'ACSP'].includes(code);
-  const bad = ['REJECTED', 'RJCT', 'CANCELLED', 'CANC', 'EXPIRED', 'FAILED'].includes(code);
+  // Doložené stavy z dokumentace: OPENED (zalozeno, ceka na cloveka, finalBankStatus=false),
+  // BOOKED (zauctovano), ACCEPTED. O tom, jestli je to konecne, rozhoduje finalBankStatus --
+  // nazvy stavu se u bank lisi a spolehat se jen na ne by byla chyba.
+  // COMPLETED vraci Finbricks u dokoncene platby (videno v jejich prehledu) -- bez nej se
+  // uspesna platba vyhodnotila jako "ani zaplaceno, ani zamitnuto" a NIC se nestalo:
+  // rezervace zustala nezaplacena, nepriletela notifikace, nezauctovalo se.
+  const good = ['COMPLETED', 'BOOKED', 'SETTLED', 'ACCEPTED', 'ACSC', 'ACCC', 'ACSP', 'ACWC'].includes(code);
+  const bad = ['REJECTED', 'RJCT', 'CANCELLED', 'CANC', 'EXPIRED', 'FAILED', 'TIMEOUT'].includes(code);
   return { code, final, paid: final && good, failed: final && bad };
 }

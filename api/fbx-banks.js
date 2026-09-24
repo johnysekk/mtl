@@ -31,8 +31,20 @@ export default async function handler(req, res) {
       });
     }
     const rows = Array.isArray(r.data) ? r.data : [];
+
+    // BEZ IBANU PLATCE JEN TRI BANKY. /transaction/platform/init prijme samotny kod banky
+    // pouze u tech, kde si platce vybere ucet az na strane banky; u ostatnich chce cislo uctu
+    // platce a vraci 266 "Add Debtor IBAN or use supported payment provider". Nemelo by smysl
+    // nabizet cloveku patnact bank, z nichz dvanact skonci chybou.
+    // MOCK_COBS je simulator banky pro sandbox -- prihlasi se testovacimi udaji a plati se
+    // nanecisto, takze se da projit cely tok az po potvrzeni a zauctovani. Filtrovat ho pryc
+    // bylo to nejhorsi, co se dalo udelat: prave v nem se ma testovat.
+    const PLATFORM_OK = ['MBANK', 'RAIFFEISEN', 'UNICREDIT', 'MOCK_COBS'];
+    const flow = String((req.query && req.query.flow) || 'platform').toLowerCase();
+
     const aspsps = rows
       .filter((b) => b && b.paymentProvider)
+      .filter((b) => flow !== 'platform' || PLATFORM_OK.includes(String(b.paymentProvider).toUpperCase()))
       .map((b) => ({
         name: b.bankName || b.paymentProvider,
         country: b.countryCode || cc,
@@ -43,9 +55,13 @@ export default async function handler(req, res) {
         psu_types: ['personal'],
         instant: !!(b.domesticInstantPaymentDebtorSupported),
       }))
-      .sort((a, b) => a.name.localeCompare(b.name, 'cs'));
+      .sort((a, b) => {
+        // V sandboxu patri testovaci banka nahoru -- je to jedina, kde jde platba dokoncit.
+        const am = a.bankId === 'MOCK_COBS' ? 0 : 1, bm = b.bankId === 'MOCK_COBS' ? 0 : 1;
+        return (am - bm) || a.name.localeCompare(b.name, 'cs');
+      });
 
-    return res.status(200).json({ ok: true, aspsps });
+    return res.status(200).json({ ok: true, flow, aspsps, total: rows.length });
   } catch (e) {
     return res.status(500).json({ error: String((e && e.message) || e), aspsps: [] });
   }
