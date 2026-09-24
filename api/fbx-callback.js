@@ -63,9 +63,14 @@ export default async function handler(req, res) {
       const already = ['paid', 'active', 'confirmed'].includes(String(rec.status || '').toLowerCase());
       if (!already) {
         await sb.from(tbl).update({ status: 'paid', paid_at: new Date().toISOString(), payment_method: 'pis' }).eq('id', rec.id);
+        // Bez PIS_INTERNAL_SECRET record-cash interni volani odmitne a platba se nezauctuje.
+        // Radeji to rict nahlas v odpovedi, nez ticho a chybejici doklad.
+        if (!process.env.PIS_INTERNAL_SECRET) console.error('[fbx] PIS_INTERNAL_SECRET chybi -- platba se nezauctuje');
         try { await pisSideEffects({ ...rec, status: 'paid' }, tbl); } catch (e) { console.error('[fbx] sideEffects', e && e.message); }
       }
-      return wantsHtml ? backToApp(res, 'fbx=ok') : res.status(200).json({ ok: true, status: out.code, paid: true });
+      return wantsHtml ? backToApp(res, 'fbx=ok')
+        : res.status(200).json({ ok: true, status: out.code, paid: true, table: tbl, id: rec.id,
+            accounting: process.env.PIS_INTERNAL_SECRET ? 'attempted' : 'SKIPPED: PIS_INTERNAL_SECRET not configured' });
     }
 
     // 4) Konecne neuspesne: uvolnit rezervaci, at misto nezustane blokovane.

@@ -154,7 +154,10 @@ export default async function handler(req, res) {
   // navrat uzivatele z banky (pis-return). Kdyz se clovek nevrati, platba zustane nepotvrzena.
   // arrives late (Model A: money lands on the gym IBAN directly, so a late confirm = real money).
   try {
-    const cutoffPis = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    // 30 MINUT, NE DVE HODINY. Drzet termin dve hodiny kvuli rozdelane bankovni platbe je moc:
+    // stejnou lhutu ma QR i karta a misto mezitim nikdo jiny nekoupi. Kdo platbu dokonci pozdeji,
+    // ji ma stale u Finbricks a rezervaci si obnovi -- prazdny termin je horsi nez to.
+    const cutoffPis = new Date(Date.now() - 30 * 60 * 1000).toISOString();
     // VSECHNY KOLEJE, NEJEN SKUPINOVKY. Driv se cistily jen gym_bookings, takze rozdelana
     // platba za soukromku nebo listek zustala viset ve stavu 'reserved' navzdy -- studentovi
     // se hromadila v boxu "Ceka na uhradu" a koucovi blokovala termin.

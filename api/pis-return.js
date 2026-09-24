@@ -123,7 +123,13 @@ export async function pisSideEffects(rec, tbl){
       // Pojmenovana cena ze vstupu -- pis-webhook ji posilal, tahle cesta ne. Kdo vyhral, urcoval,
       // jestli se v dochazce objevi "doklad?".
       if (tbl === 'gym_bookings') { _body.dropin_plan_id = rec.dropin_plan_id || null; _body.proof_checked = (rec.need_proof ? false : null); }
-      await fetch(APP_URL+'/api/record-cash',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(_body) }); } }catch(e){}
+      // ZAUCTOVANI NESMI SELHAT POTICHU. Kdyz record-cash odmitne (chybejici PIS_INTERNAL_SECRET,
+      // spatny typ, nulova castka), platba probehne a v MTL po ni nezustane transakce, doklad
+      // ani provize -- a nikdo se to nedozvi. Chyba proto jde do logu i s odpovedi serveru.
+      const _rc=await fetch(APP_URL+'/api/record-cash',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(_body) });
+      if(!_rc.ok){ let _t=''; try{ _t=await _rc.text(); }catch(_e){}
+        console.error('[pis] record-cash', _rc.status, _t.slice(0,300), 'tbl='+tbl, 'row='+rec.id); }
+      } }catch(e){ console.error('[pis] record-cash throw', e && e.message); }
   if(_event){ try{ await fetch(APP_URL+'/api/ticket-email',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ ticketId:rec.id }) }); }catch(e){} }
   try{ if(_event){ let target=(_evP==='coach')?_evC:null; if(!target && _evOrg){ const o=await sb.from('organizations').select('owner_id').eq('id',_evOrg).maybeSingle(); target=o.data&&o.data.owner_id; } if(!target && _evG){ const g=await sb.from('gyms').select('owner_id').eq('id',_evG).maybeSingle(); target=g.data&&g.data.owner_id; } if(target) await sb.from('notifications').insert({ user_id:target, type:'booking', read:false, message:'\ud83c\udf9f\ufe0f Nov\u00fd prodej vstupenky (p\u0159evodem): '+(rec.buyer_name||'Z\u00e1kazn\u00edk'), data:JSON.stringify({ kind:'pis_payment_in', event_id:rec.event_id, student:(rec.buyer_name||''), amt:(rec.amount!=null?String(rec.amount):''), sym:(rec.currency||'CZK') }) }); }
     else if(_coach1){
