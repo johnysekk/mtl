@@ -251,7 +251,11 @@ async function acquisitionRate(acq, type, payee, memberId, scopeCol, scopeId, la
   const covered = Math.max(0, Math.min(bought, r.months));
   if (covered <= 0) return null;
   const hi = Math.max(Number(ladder) || 0, r.rate);
-  return (covered >= bought) ? hi : ((hi * covered + (Number(ladder) || 0) * (bought - covered)) / bought);
+  const eff = (covered >= bought) ? hi : ((hi * covered + (Number(ladder) || 0) * (bought - covered)) / bought);
+  // ROZPAD SE MUSI ULOZIT, ne jen vysledna sazba. Z ulozeneho "3 %" uz nikdo nepozna, ze to
+  // byl 1 mesic za 10 % a 11 mesicu za 1,5 % -- a appka to pak nema jak rozepsat ani porovnat
+  // s jinym tarifem. Vraci se proto i pocet mesicu a akvizicni sazba.
+  return { rate: eff, months: bought, acqMonths: covered, acqRate: r.rate };
 }
 
 // Referral-credit redemption (parity with the Stripe client flow): MTL waives its WHOLE fee when a
@@ -352,20 +356,24 @@ export default async function handler(req, res) {
       const _cc = (_wantCredit && ownerProf.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
       const _acq = await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id, rate, months);
+      const _acqB = (_acq && typeof _acq === 'object') ? _acq : null;
+      const _acqR = _acqB ? _acqB.rate : _acq;
       // Zaváděcí nulová provize. Tahle cesta počítá sazbu sama přes ladderRate, takže by kontrolu
       // uvnitř effectiveRateBreakdown (kudy jde Stripe) jinak obešla.
       // Země z přihlášky poskytovatele: u klubu jeho vlastní, u kouče z profilu. Majitel může
       // bydlet jinde, než odkud fakturuje klub -- doklad zní na klub, tak rozhoduje jeho země.
       const _intro = await _introFree(_wsbGet, (gym && gym.billing_country) || (ownerProf && ownerProf.billing_country));
-      let mtl_fee = (_cc || _intro) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
+      let mtl_fee = (_cc || _intro) ? 0 : Math.round(gross * (_acqR != null ? _acqR : rate));
       // Podlaha jen u PIS a jen když se opravdu něco účtuje -- uplatněný kredit zůstává nulový.
       if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, gross));
-      const _effRate = (_cc || _intro) ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
+      const _effRate = (_cc || _intro) ? 0 : (_acqR != null ? _acqR : rate); // per-tx rate -> doklad can itemise by tier
       // Rozklad na akvizici a běžnou sazbu. Bez těchhle dvou sloupců nechá export pro účetní pět
       // sloupců prázdných (akviz. měsíců/sazba/částka, běžná sazba/částka) -- _sp() se z nich počítá
       // a bez nich vrací prázdno. Píše se jen tam, kde akvizice opravdu padla.
-      const _acqMonths = (_acq != null && !_cc) ? 1 : null;
-      const _baseRate  = (_acq != null && !_cc) ? rate : null;
+      // Skutecny pocet mesicu, ktere nesly akvizici (drive natvrdo 1).
+      const _acqMonths = (_acqR != null && !_cc) ? ((_acqB && _acqB.acqMonths) || 1) : null;
+      const _baseRate  = (_acqR != null && !_cc) ? rate : null;
+      const _monthsCol = Math.max(1, parseInt(months, 10) || 1);
       let _gymPayee = gym.stripe_account || null;
       if (coach_id) { try { const _cp = await sb(`profiles?id=eq.${coach_id}&select=gym_payout_account`); const _cpa = _cp && _cp[0] && _cp[0].gym_payout_account; if (_cpa) { _gymPayee = _cpa; _dokladPayoutCoach = coach_id; } } catch(e){} }
       row = {
@@ -378,7 +386,7 @@ export default async function handler(req, res) {
         session_at_issue: session_at_issue || null,
         paid_to: 'gym', payee_account: _gymPayee,
         payee_id: gym.id, payee_kind: 'gym',
-        gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, acq_months: _acqMonths, base_rate: _baseRate, refund_amount: 0, mtl_fee_refunded: 0,
+        gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, acq_months: _acqMonths, base_rate: _baseRate, months: _monthsCol, refund_amount: 0, mtl_fee_refunded: 0,
         // CHANGED: was 'completed'. The column's own DB default is 'paid' and the Stripe rail writes
         // 'paid', so 'completed' was the odd one out -- and every reader of prior turnover asked for
         // 'completed' only, which is why none of them could see a Stripe transaction. One vocabulary
@@ -408,20 +416,24 @@ export default async function handler(req, res) {
       const _cc = (_wantCredit && coach.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
       const _acq = await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id, rate, months);
+      const _acqB = (_acq && typeof _acq === 'object') ? _acq : null;
+      const _acqR = _acqB ? _acqB.rate : _acq;
       // Zaváděcí nulová provize. Tahle cesta počítá sazbu sama přes ladderRate, takže by kontrolu
       // uvnitř effectiveRateBreakdown (kudy jde Stripe) jinak obešla.
       // Země z přihlášky poskytovatele: u klubu jeho vlastní, u kouče z profilu. Majitel může
       // bydlet jinde, než odkud fakturuje klub -- doklad zní na klub, tak rozhoduje jeho země.
       const _intro = await _introFree(_wsbGet, (coach && coach.billing_country));
-      let mtl_fee = (_cc || _intro) ? 0 : Math.round(gross * (_acq != null ? _acq : rate));
+      let mtl_fee = (_cc || _intro) ? 0 : Math.round(gross * (_acqR != null ? _acqR : rate));
       // Podlaha jen u PIS a jen když se opravdu něco účtuje -- uplatněný kredit zůstává nulový.
       if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, gross));
-      const _effRate = (_cc || _intro) ? 0 : (_acq != null ? _acq : rate); // per-tx rate -> doklad can itemise by tier
+      const _effRate = (_cc || _intro) ? 0 : (_acqR != null ? _acqR : rate); // per-tx rate -> doklad can itemise by tier
       // Rozklad na akvizici a běžnou sazbu. Bez těchhle dvou sloupců nechá export pro účetní pět
       // sloupců prázdných (akviz. měsíců/sazba/částka, běžná sazba/částka) -- _sp() se z nich počítá
       // a bez nich vrací prázdno. Píše se jen tam, kde akvizice opravdu padla.
-      const _acqMonths = (_acq != null && !_cc) ? 1 : null;
-      const _baseRate  = (_acq != null && !_cc) ? rate : null;
+      // Skutecny pocet mesicu, ktere nesly akvizici (drive natvrdo 1).
+      const _acqMonths = (_acqR != null && !_cc) ? ((_acqB && _acqB.acqMonths) || 1) : null;
+      const _baseRate  = (_acqR != null && !_cc) ? rate : null;
+      const _monthsCol = Math.max(1, parseInt(months, 10) || 1);
       row = {
         test_mode: _test,
         gym_id: null, coach_id, member_id: member_id || null,
@@ -429,7 +441,7 @@ export default async function handler(req, res) {
         session_at_issue: session_at_issue || null,
         paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null),
         payee_id: coach.id, payee_kind: 'profile',
-        gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, acq_months: _acqMonths, base_rate: _baseRate, refund_amount: 0, mtl_fee_refunded: 0,
+        gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, acq_months: _acqMonths, base_rate: _baseRate, months: _monthsCol, refund_amount: 0, mtl_fee_refunded: 0,
         currency: cur, type, status: 'paid', payment_method, cohort_id: cohort_id || null, income_class: income_class || null,
         commission_status: _cc ? 'collected' : 'pending', commission_month: month,
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct',
