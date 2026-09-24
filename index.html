@@ -11679,7 +11679,46 @@ async function _evtQrConfirm(ticketId, ok){
   }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
 }
 
+// ═══ LIMIT ROZDĚLANÝCH PLATEB ══════════════════════════════════════════════════════════
+// Nejvýš DVĚ nedokončené platby na člověka, napříč celou appkou: soukromky, skupinovky,
+// členství, lístky, kurzy, zboží. Každá z nich totiž něco DRŽÍ -- termín kouče, místo na
+// lekci, lístek na akci -- a dokud se nevyřeší, nikdo jiný si to koupit nemůže. Bez limitu
+// stačilo třikrát kliknout a v decku zmizely tři termíny, za které nikdo nezaplatil.
+//
+// Za nedokončenou se počítá všechno, co ještě nemá peníze na účtu: `reserved` (čeká na
+// platbu), `pending_offline` (QR/převod odeslán, klub nepotvrdil) i `paid_claimed`
+// (student tvrdí, že zaplatil). Kdo narazí, má dvě cesty: dokončit platbu, nebo zrušit.
+const UNPAID_MAX = 2;
+async function _unpaidOpenCount(){
+  if(!currentUser) return 0;
+  const OPEN=['reserved','pending_offline','paid_claimed'];
+  const q=[
+    supaClient.from('bookings').select('id',{count:'exact',head:true}).eq('student_id',currentUser.id).in('status',OPEN),
+    supaClient.from('gym_bookings').select('id',{count:'exact',head:true}).eq('student_id',currentUser.id).in('status',OPEN),
+    supaClient.from('gym_memberships').select('id',{count:'exact',head:true}).eq('student_id',currentUser.id).in('status',OPEN),
+    supaClient.from('event_tickets').select('id',{count:'exact',head:true}).eq('buyer_id',currentUser.id).in('status',OPEN),
+    supaClient.from('cohort_members').select('id',{count:'exact',head:true}).eq('student_id',currentUser.id).in('status',OPEN),
+    supaClient.from('merch_orders').select('id',{count:'exact',head:true}).eq('buyer_id',currentUser.id).in('status',OPEN),
+  ];
+  let n=0;
+  try{ const rs=await Promise.all(q); rs.forEach(function(r){ n+=(r&&r.count)||0; }); }catch(e){}
+  return n;
+}
+// Vrací true, když se SMÍ pokračovat. Jinak to řekne a nabídne, kde to vyřešit.
+async function _unpaidGuard(){
+  try{
+    const n=await _unpaidOpenCount();
+    if(n < UNPAID_MAX) return true;
+    const EN=LANG==='en';
+    toast(EN ? ('⚠️ You have ' + n + ' unpaid reservations. Finish or cancel one first.')
+             : ('⚠️ Máš ' + n + ' nezaplacené rezervace. Nejdřív jednu dokonči nebo zruš.'));
+    // Rovnou tam, kde se to řeší -- box „Čeká na úhradu" je v Nadcházejících.
+    setTimeout(function(){ try{ openSheet('shBookings'); if(typeof _upTab==='function') _upTab('skup'); }catch(e){} }, 900);
+    return false;
+  }catch(e){ return true; }   // když se počet nepodaří zjistit, uživatele neblokujeme
+}
 async function _coach1to1QrPay(c, payee, opts){
+  if(!(await _unpaidGuard())) return;
   const EN=LANG==='en';
   opts=opts||{};
   if(currentUser && await _hasOpenQrReservation(currentUser.id)){ toast(EN?('\u26a0\ufe0f You have '+QR_OPEN_MAX+' reservations waiting to be paid \u2014 settle one before booking another.'):('M\u00e1\u0161 '+QR_OPEN_MAX+' rezervace \u010dekaj\u00edc\u00ed na \u00fahradu \u2014 nejd\u0159\u00edv jednu vy\u0159e\u0161.')); return; }
@@ -22827,6 +22866,8 @@ async function _fbxPickBank(country){
   });
 }
 async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMode, onQrFallback, kind, onAbandon){
+  // Pojistka i tady: PIS se spouští i z míst, která mají vlastní okno.
+  if(!(await _unpaidGuard())) return;
   const EN=LANG==='en';
   // Whether we actually handed the person over to their bank. Everything else -- backdrop, the
   // my-bank-is-not-listed link, walking away -- means no payment was started, and the caller may
@@ -23180,6 +23221,8 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom, _dpick){
   // z banky skoncila jako QR rezervace, kterou klub musel rucne potvrzovat nebo rusit.
   async function _ensureIntent(_how){
     if(intentId) return intentId;
+    // Limit rozdělaných plateb platí i tady: rezervace vzniká až teď, při kliknutí na platbu.
+    if(!(await _unpaidGuard())) return null;
     // Drop-in: rezervaci vytvořit až tady, tedy při kliknutí, které platbu opravdu spouští.
     // Dřív vznikala hned při otevření okna jako QR -- i pro toho, kdo si vzápětí zvolil PIS.
     if(kind!=='memb'){
@@ -25479,6 +25522,7 @@ function _cohIcsDownload(coh, occ){
   const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='mtl-kurz.ics'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),1500);
 }
 async function _merchQrPay(orderId, payee, m, price, cur, msg){
+  if(!(await _unpaidGuard())) return;
   const EN=LANG==='en'; const sym=_curSym(cur);
   if(!payee || !payee.receiver_id_value){ toast(EN?'\u26a0\ufe0f No IBAN on file':'\u26a0\ufe0f Chyb\u00ed IBAN'); return; }
   const _pisOn=(await _pisAvailable(String(String((payee&&payee.receiver_id_value)||'').replace(/\s+/g,'').slice(0,2)||'CZ').toUpperCase(), payee, (payee&&payee.gym_id)||null)) && !!payee.receiver_id_value;
