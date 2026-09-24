@@ -1843,6 +1843,14 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
     <div style="border-top:1px dashed var(--border);margin-top:22px;padding-top:16px;">
       <div style="font-size:11px;font-weight:700;color:var(--mid);letter-spacing:.06em;margin-bottom:8px;" data-noi18n>🐞 HLÁŠENÍ OD UŽIVATELŮ</div>
       <button id="btnBugReports" style="width:100%;padding:14px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-size:13.5px;font-weight:800;cursor:pointer;font-family:'DM Sans';">🐞 Chyby a podněty</button>
+      <div style="margin-top:10px;padding:11px 13px;background:var(--surf);border:1px solid var(--border);border-radius:12px;">
+        <div style="font-size:12px;font-weight:800;color:var(--dark);margin-bottom:6px;">🏦 Bankovní platby (PIS)</div>
+        <div style="display:flex;gap:6px;">
+          <button class="pisProvBtn" data-p="neonomics" style="flex:1;padding:9px;border-radius:9px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:'DM Sans';border:1px solid var(--border);background:#fff;color:var(--dark);">Neonomics</button>
+          <button class="pisProvBtn" data-p="finbricks" style="flex:1;padding:9px;border-radius:9px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:'DM Sans';border:1px solid var(--border);background:#fff;color:var(--dark);">Finbricks</button>
+        </div>
+        <div style="font-size:11px;color:var(--light);line-height:1.45;margin-top:6px;">Neonomics má v sandboxu jen norskou DNB. Finbricks jede na české banky a vybírá je na své stránce.</div>
+      </div>
       <button id="btnStuckProviders" style="width:100%;margin-top:8px;padding:14px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-size:13.5px;font-weight:800;cursor:pointer;font-family:'DM Sans';">🚧 Schválení, ale neviditelní</button>
     </div>
     <div id="featToggles" style="display:none;border-top:1px dashed var(--border);margin-top:22px;padding-top:16px;"></div>
@@ -22749,6 +22757,22 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMo
   // need to undo a row it created just to have an id to send here.
   let _launched=false;
   const _abandon=function(){ if(_launched) return; _launched=true; if(typeof onAbandon==='function'){ try{ onAbandon(); }catch(e){} } };
+  // ── KTERÁ BANKOVNÍ KOLEJ ──────────────────────────────────────────────────────────────
+  // Finbricks (e-commerce) si banku vybírá sám na své stránce, takže se celý výběr banky
+  // i norský sandbox DNB přeskočí: jeden dotaz a přesměrování. Přepínač je v Adminu
+  // (platform_config.pis_provider), ať se dá při testu skákat mezi poskytovateli.
+  if(String(window._PIS_PROVIDER||'')==='finbricks'){
+    try{
+      const _tbl=(kind==='membership'?'gym_memberships':(kind==='booking1'?'bookings':(kind==='ticket'?'event_tickets':(kind==='cohort'?'cohort_members':(kind==='merch'?'merch_orders':'gym_bookings')))));
+      const r=await fetch('/api/fbx-create',{ method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({ table:_tbl, id:bookingId, description:(msg||''), lang:LANG }) });
+      const d=await r.json();
+      if(d && d.redirectUrl){ _launched=true; if(closeQr) closeQr(); window.location.href=d.redirectUrl; return; }
+      toast('\u26a0\ufe0f '+((d&&(d.error||(d.detail&&d.detail.message)))||'Finbricks error'));
+      if(typeof onQrFallback==='function') onQrFallback();
+      _abandon(); return;
+    }catch(e){ toast('\u26a0\ufe0f '+e.message); _abandon(); return; }
+  }
   let iban=String((payee&&payee.receiver_id_value)||(g&&g.receiver_id_value)||'').replace(/\s+/g,'');
   let country=_ibanCC(iban);  // picker country = the klub's IBAN country (students bank locally)
   let payCur=cur;  // klub currency drives it (settable in gym settings)
@@ -28410,6 +28434,21 @@ if($('adminOpenDash')) $('adminOpenDash').onclick=()=>{ window._fdRevData=null; 
 if($('btnAdminConsents')) $('btnAdminConsents').onclick=()=>openEntityConsents({ mtl:true });
 if($('btnBugReports')) $('btnBugReports').onclick=()=>openBugReportsAdmin();
 if($('btnStuckProviders')) $('btnStuckProviders').onclick=()=>openStuckProviders();
+// Přepínač poskytovatele: zapíše se do platform_config a platí hned pro všechny.
+(function(){
+  const _paint=function(){ document.querySelectorAll('.pisProvBtn').forEach(function(b){
+    const on=(String(window._PIS_PROVIDER||'neonomics')===b.dataset.p);
+    b.style.background=on?'var(--dark)':'#fff'; b.style.color=on?'#fff':'var(--dark)'; b.style.borderColor=on?'var(--dark)':'var(--border)'; }); };
+  document.querySelectorAll('.pisProvBtn').forEach(function(b){ b.onclick=async function(){
+    try{
+      const { error }=await supaClient.from('platform_config').update({ pis_provider:b.dataset.p }).eq('id',1);
+      if(error) throw error;
+      window._PIS_PROVIDER=b.dataset.p; _paint();
+      toast('✅ '+(b.dataset.p==='finbricks'?'Finbricks':'Neonomics'));
+    }catch(e){ toast('⚠️ '+((e&&e.message)||e)); }
+  }; });
+  _paint();
+})();
 if($('btnAdminOrgs2')) $('btnAdminOrgs2').onclick=()=>openAdminOrgs('pending');
 if($('btnAllOrgs')) $('btnAllOrgs').onclick=()=>openAdminOrgs('all');
 if($('meMemberships')) $('meMemberships').onclick=()=>{ openSheet('shMemberships'); loadMyMemberships(); };
@@ -29425,8 +29464,11 @@ function _gateHold(on){
   else { clearTimeout(window._gateHoldT); }
 }
 async function _loadTestMode(){
-  try{ const { data } = await supaClient.from('platform_config').select('test_mode').eq('id',1).single();
+  try{ const { data } = await supaClient.from('platform_config').select('test_mode,pis_provider').eq('id',1).single();
     window._TEST_MODE = !!(data && data.test_mode);
+    // Který poskytovatel bankovních plateb se právě používá: 'neonomics' (výchozí) nebo
+    // 'finbricks'. Přepíná se v Adminu, ať se dá při testu skákat mezi oběma bez nasazování.
+    window._PIS_PROVIDER = String((data && data.pis_provider) || 'neonomics');
   }catch(e){ window._TEST_MODE = !!window._TEST_MODE; }
   // Načítá se na pozadí, takže při rychlém přihlášení doběhne AŽ PO enterApp -- v tu chvíli je
   // _TEST_MODE ještě false a brána nikoho nezastaví. Proto se po načtení přepočítá.
