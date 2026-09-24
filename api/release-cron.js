@@ -149,7 +149,9 @@ export default async function handler(req, res) {
 
   // ---- Pass 6: expire abandoned/failed PIS gym-booking reservations after 2h -------------
   // PIS-in-progress is protected (Pass 1 skips pis_payment_id!=null). After 2h with no
-  // confirmation we free the spot; pis-webhook STILL recovers it to 'active' if the payment
+  // confirmation we free the spot; POZOR: asynchronni potvrzeni (webhook) dnes NEEXISTUJE --
+  // Enable Banking byl odstranen a Finbricks jeste neni napojeny, takze jedina cesta zpet je
+  // navrat uzivatele z banky (pis-return). Kdyz se clovek nevrati, platba zustane nepotvrzena.
   // arrives late (Model A: money lands on the gym IBAN directly, so a late confirm = real money).
   try {
     const cutoffPis = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();

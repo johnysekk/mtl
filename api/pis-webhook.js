@@ -1,12 +1,19 @@
-// /api/pis-webhook.js — Enable Banking payment-status webhook (the reliable async confirmation).
-// Enable signs the webhook with a JWT: header {alg:RS256, x5u:<https url to X.509 pubkey on enablebanking.com>},
-// payload { sub:<appId>, environment:'PRODUCTION'|'SANDBOX', msgi:'sha256-<base64 digest of the raw body>' }.
-// Handler MUST verify: (1) x5u is https + enablebanking.com host, (2) JWT signature against that cert,
-// (3) msgi matches the sha256 of the raw request body, (4) sub === our app id.
+// /api/pis-webhook.js -- ASYNCHRONNI POTVRZENI PLATBY (spolehliva zaloha k navratu z banky).
 //
-// IMPORTANT (Vercel): msgi is computed over the RAW body bytes, so disable JSON body-parsing for this route:
-//   export const config = { api: { bodyParser: false } };
-// and read the raw body yourself (below). Then JSON.parse it after verification.
+// STAV: overeni podpisu je zatim po ENABLE BANKING (x5u + RS256 + msgi digest). Enable uz
+// nepouzivame; cast `verify()` se vymeni, az bude jasne, jak callback podepisuje Finbricks.
+// VSE OSTATNI ZUSTAVA: dohledani objednavky podle pis_payment_id, zapis platby, notifikace
+// kupujicimu i majiteli, doklad -- to je na poskytovateli nezavisle a prezilo uz dve migrace.
+//
+// DOKUD SE verify() NEVYMENI, ENDPOINT NIC NEPROPUSTI (kazdy cizi podpis spadne) -- coz je
+// spravne: radeji zadne potvrzeni nez potvrzeni od kohokoli, kdo zna adresu.
+//
+// FINBRICKS -- co bude potreba doplnit (ze sekce Callback v jejich dokumentaci):
+//   1) jak je callback podepsany (hlavicka, algoritmus, kde je verejny klic)
+//   2) tvar tela: kde je nase merchantTransactionId a kde stav platby
+//   3) ktere stavy jsou konecne uspesne a ktere konecne neuspesne
+// Parovani uz mame vyresene: merchantTransactionId je nase vlastni ID, takze se objednavka
+// najde bez hadani -- na rozdil od Neonomics, kde se hleda podle jejich payment id.
 
 import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
