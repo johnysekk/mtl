@@ -103,11 +103,29 @@ export default async function handler(req, res) {
     };
     Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);
 
-    const r = await fbxCall('POST', '/ecommerce/transaction/init', payload, {
+    const opts = {
       psuIp: psuIpFrom(req),
       psuUa: req.headers['user-agent'] || 'MTL/1.0',
       lang: (b.lang === 'en' ? 'en' : 'cs'),
-    });
+    };
+
+    // DVE CESTY, JAK ZALOZIT PLATBU:
+    //   /ecommerce/transaction/init      banku si vybira uzivatel na strance Finbricks
+    //   /transaction/platform/init       banku musime poslat my (paymentProvider), nebo IBAN platce
+    // Ktera z nich je pro ucet povolena, se pozna az za behu: nepovolena vraci 308
+    // "Business service is not allowed". Zkusi se proto e-commerce a pri 308 se prejde na
+    // platform -- bez zasahu do appky a bez hadani.
+    let r = await fbxCall('POST', '/ecommerce/transaction/init', payload, opts);
+    let used = 'ecommerce';
+    if (!r.ok && r.data && (r.data.code === 308 || r.data.code === 300 || r.data.code === 302)) {
+      // platform/init nema shoppingCartUrl a banku ceka v paymentProvider; bez nej ji necha
+      // vybrat jen u bank, ktere to umi na sve strane (MBANK, RAIFFEISEN, UNICREDIT).
+      const p2 = { ...payload };
+      delete p2.shoppingCartUrl;
+      if (b.paymentProvider) p2.paymentProvider = String(b.paymentProvider);
+      r = await fbxCall('POST', '/transaction/platform/init', p2, opts);
+      used = 'platform';
+    }
     if (!r.ok || !r.data || !r.data.redirectUrl) {
       // CHYBA OD FINBRICKS PATRI VEN, ne schovana pod "init failed". Jejich odpoved ma tvar
       // { code, message, xrequestId } -- podle kodu se pozna, jestli nesedi podpis (100/106),
@@ -115,8 +133,8 @@ export default async function handler(req, res) {
       const d = r.data || {};
       console.error('[fbx-create]', r.status, JSON.stringify(d));
       return res.status(502).json({
-        error: d.message ? ('Finbricks ' + (d.code != null ? d.code : r.status) + ': ' + d.message)
-                         : ('Finbricks HTTP ' + r.status),
+        error: d.message ? ('Finbricks ' + (d.code != null ? d.code : r.status) + ': ' + d.message + ' [' + used + ']')
+                         : ('Finbricks HTTP ' + r.status + ' [' + used + ']'),
         code: d.code != null ? d.code : null,
         httpStatus: r.status,
         xrequestId: d.xrequestId || null,
@@ -131,7 +149,7 @@ export default async function handler(req, res) {
       pis_started_at: new Date().toISOString(),
     }).eq('id', rowId);
 
-    return res.status(200).json({ ok: true, redirectUrl: r.data.redirectUrl, merchantTransactionId: mtid });
+    return res.status(200).json({ ok: true, via: used, redirectUrl: r.data.redirectUrl, merchantTransactionId: mtid });
   } catch (e) {
     return res.status(500).json({ error: String((e && e.message) || e) });
   }
