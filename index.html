@@ -12186,10 +12186,13 @@ async function _renderPendingQr(){
   try{ if(window._pendQrTimer){ clearInterval(window._pendQrTimer); window._pendQrTimer=null; } }catch(e){}
   let rows=[]; window._pendQrRows={};
   try{
+    // I PLATBA Z ÚČTU ČEKÁ NA ÚHRADU. Box bral jen rezervace s payment_method='qr', jenže
+    // rezervace založená přes platbu z účtu má 'pis' -- když se člověk z banky nevrátil,
+    // nebyla vidět nikde: ani tady, ani mezi nadcházejícími lekcemi.
     const [b,gb,et]=await Promise.all([
-      supaClient.from('bookings').select('id,coach_id,slot_id,coach_name,training_date,training_time,type,online_format,amount,currency,status,created_at,claimed_at,claim_reminded,requeued_at').eq('student_id',currentUser.id).eq('payment_method','qr').in('status',['reserved','paid_claimed']),
-      supaClient.from('gym_bookings').select('id,gym_id,gym_name,class_name,class_date,class_time,amount,currency,status,created_at,claimed_at,claim_reminded,paid_to,coach_id,pis_payment_id,requeued_at').eq('student_id',currentUser.id).eq('payment_method','qr').in('status',['reserved','paid_claimed']),
-      supaClient.from('event_tickets').select('id,event_id,amount,currency,status,created_at,claimed_at,claim_reminded,requeued_at').eq('buyer_id',currentUser.id).eq('payment_method','qr').in('status',['reserved','paid_claimed'])
+      supaClient.from('bookings').select('id,coach_id,slot_id,coach_name,training_date,training_time,type,online_format,amount,currency,status,created_at,claimed_at,claim_reminded,requeued_at').eq('student_id',currentUser.id).in('payment_method',['qr','pis']).in('status',['reserved','paid_claimed']),
+      supaClient.from('gym_bookings').select('id,gym_id,gym_name,class_name,class_date,class_time,amount,currency,status,created_at,claimed_at,claim_reminded,paid_to,coach_id,pis_payment_id,requeued_at').eq('student_id',currentUser.id).in('payment_method',['qr','pis']).in('status',['reserved','paid_claimed']),
+      supaClient.from('event_tickets').select('id,event_id,amount,currency,status,created_at,claimed_at,claim_reminded,requeued_at').eq('buyer_id',currentUser.id).in('payment_method',['qr','pis']).in('status',['reserved','paid_claimed'])
     ]);
     (b.data||[]).forEach(function(x){ rows.push({ tbl:'bookings', id:x.id, coach_id:x.coach_id, slot_id:x.slot_id, training_date:x.training_date, training_time:x.training_time, claimed_at:x.claimed_at, claim_reminded:x.claim_reminded, k:'1:1', title:x.coach_name||'Soukromka', sub:(x.type==='online'?('Online'+(x.online_format?(' \u00b7 '+x.online_format):'')):((_dt(x.training_date)||'')+(x.training_time?(' '+String(x.training_time).slice(0,5)):''))), amount:x.amount, currency:x.currency, status:x.status, created_at:x.created_at }); });
     (gb.data||[]).forEach(function(x){ rows.push({ tbl:'gym_bookings', id:x.id, gym_id:x.gym_id, class_date:x.class_date, class_time:x.class_time, claimed_at:x.claimed_at, claim_reminded:x.claim_reminded, paid_to:x.paid_to, coach_id:x.coach_id, class_name:x.class_name, pis:x.pis_payment_id, k:'Drop-in', title:x.class_name||x.gym_name||'Drop-in', sub:((_dt(x.class_date)||'')+(x.class_time?(' '+String(x.class_time).slice(0,5)):'')), amount:x.amount, currency:x.currency, status:x.status, created_at:x.created_at }); });
@@ -12323,7 +12326,7 @@ async function _qrUnconfirmedClose(tbl,id){
     if(tbl==='bookings'){
       await supaClient.from('bookings').update({ status:'cancelled' }).eq('id',id);
       if(r.slot_id){ try{ await supaClient.from('slots').update({ booked:false, student:null }).eq('id',r.slot_id); }catch(e){} }
-      try{ await _issuePrivateCancelConf({ booking_id:id, student_id:currentUser.id, coach_id:(r.coach_id||null), date:(r.training_date||null), time:(r.training_time||null), refund:null, currency:(r.currency||'CZK'), reason:note, byCoach:false, student_name:(currentUser&&currentUser.name)||'', coach_name:(r.title||'') }); }catch(e){}
+      try{ await _issuePrivateCancelConf({ booking_id:id, booking_status:(r.status||null), student_id:currentUser.id, coach_id:(r.coach_id||null), date:(r.training_date||null), time:(r.training_time||null), refund:null, currency:(r.currency||'CZK'), reason:note, byCoach:false, student_name:(currentUser&&currentUser.name)||'', coach_name:(r.title||'') }); }catch(e){}
     } else if(tbl==='gym_bookings'){
       await supaClient.from('gym_bookings').update({ status:'cancelled' }).eq('id',id);
       if(r.gym_id && r.class_date){ try{ await supaClient.from('gym_class_reservations').delete().eq('gym_id',r.gym_id).eq('student_id',currentUser.id).eq('class_date',r.class_date).eq('class_name',r.class_name||''); }catch(e){} }
@@ -15394,10 +15397,12 @@ async function _issueCancelSnapshot(o){
   try{
     if(!currentUser || !currentUser.id || !o || o.booking_id==null) return null;
     const _cp=await _confParties(o);
-    // NEZAPLACENÁ REZERVACE SE NEPOTVRZUJE. Potvrzení o zrušení je doklad o tom, co se stalo
-    // s penězi -- když žádné neproběhly (rezervace čekala na QR platbu a kouč ji nepotvrdil),
-    // není co potvrzovat a vystavovat papír na „vráceno 0 Kč" nedává smysl.
-    if(!(Number(_cp.paid)>0)) return null;
+    // NEZAPLACENÁ REZERVACE SE NEPOTVRZUJE. `paid` je CENA lekce, ne důkaz, že se zaplatilo --
+    // proto se potvrzení vystavilo i u rezervace, za kterou nikdy nepřišly peníze. Rozhoduje
+    // tedy skutečná platba: transakce, platba kartou, nebo stav, který potvrdil poskytovatel.
+    const _reallyPaid = !!_cp.txId
+      || (o.booking_status ? ['active','paid','confirmed'].includes(String(o.booking_status).toLowerCase()) : false);
+    if(!_reallyPaid) return null;
     const prov=_cp.provider, part=_cp.participant, txId=_cp.txId, testMode=_cp.testMode, paid=_cp.paid, cur=_cp.cur, stuId=_cp.stuId;
     const row={ booking_id:String(o.booking_id), booking_kind:(o.booking_kind||'dropin'), transaction_id:txId,
       student_id:stuId, participant_name:(part||null), payer_name:(_cp.payer||null),
@@ -15422,7 +15427,7 @@ async function _issueCancelSnapshot(o){
 async function _issueCancelConf(b, occ, refund, cx){
   try{
     if(!currentUser || !currentUser.id || !b || !b.gym_id) return;
-    const _confId=await _issueCancelSnapshot({ booking_id:b.id, booking_kind:'dropin', gym_id:b.gym_id, coach_id:(b.coach_id||null),
+    const _confId=await _issueCancelSnapshot({ booking_id:b.id, booking_kind:'dropin', booking_status:(b.status||null), gym_id:b.gym_id, coach_id:(b.coach_id||null),
       class_name:((occ&&occ.name)||b.class_name||null),
       session_at:((occ&&occ.date)?(String(occ.date).slice(0,10)+((occ&&occ.time)?(' '+occ.time):'')):null),
       refund:refund, currency:(b.currency||'CZK'), reason_key:((cx&&cx.key)||null), note:((cx&&cx.text)||null), by_role:'student' });
@@ -15441,7 +15446,7 @@ async function _issueCancelConf(b, occ, refund, cx){
 
 async function _issuePrivateCancelConf(o){
   try{
-    const _confId=await _issueCancelSnapshot({ booking_id:o.booking_id, booking_kind:'coach_1to1', coach_id:(o.coach_id||null), student_id:(o.student_id||null),
+    const _confId=await _issueCancelSnapshot({ booking_id:o.booking_id, booking_kind:'coach_1to1', booking_status:(o.booking_status||null), coach_id:(o.coach_id||null), student_id:(o.student_id||null),
       class_name:(o.name||(LANG==='en'?'1:1 lesson':'Soukrom\u00e1 lekce')),
       session_at:(o.date?(String(o.date).slice(0,10)+(o.time?(' '+o.time):'')):null),
       refund:o.refund, currency:(o.currency||'CZK'), note:(o.reason||null), by_role:(o.byCoach?'coach':'student') });
@@ -39636,7 +39641,7 @@ async function coachCancelBooking(d){
       data: JSON.stringify({ kind:'coach_cancelled_booking', coach: currentUser.name||'Kouč', date: d.date, time: d.time, reason: reason||'', amt: d.amt }),
       message:`❌ Tvůj kouč ${currentUser.name || 'Kouč'} ti zrušil lekci na ${_dt(d.date)} v ${d.time}.${reason ? ' Důvod: '+reason : ''} Vrátili jsme ti 100 % částky (${fmtPrice((_refunded!=null?_refunded:d.amt), d.cur||'CZK')} ${_curSym(d.cur||'CZK')}).`
     });
-    try{ await _issuePrivateCancelConf({ booking_id:d.id, student_id:d.student, coach_id:(currentUser&&currentUser.id)||null, name:(d.disc||null),
+    try{ await _issuePrivateCancelConf({ booking_id:d.id, booking_status:(d.status||null), student_id:d.student, coach_id:(currentUser&&currentUser.id)||null, name:(d.disc||null),
       date:d.date, time:d.time, refund:(_refunded!=null?_refunded:Number(d.amt)||0), currency:(d.cur||'CZK'), reason:reason||'',
       byCoach:true, coach_name:(currentUser.name||''), student_name:(d.studentName||d.student_name||'') }); }catch(e){}
   } catch(e){
@@ -40114,13 +40119,13 @@ async function loadBookings(mode){
   try{ const _ph=$('pendQrHost'); if(_ph){ if(mode==='upcoming'){ _renderPendingQr(); } else { _ph.innerHTML=''; if(window._pendQrTimer){ clearInterval(window._pendQrTimer); window._pendQrTimer=null; } } } }catch(e){}
   const list=$('bookingsList');
   list.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${L('Načítám...')}</p>`;
-  // NEZAPLACENA REZERVACE PATRI DO SEZNAMU TAKY. Rezervace ceka na QR platbu ve stavu
-  // 'reserved' -- bez ni v seznamu nemel student kam kliknout: nemohl ji zrusit ani si znovu
-  // otevrit QR kod, a misto mu blokovalo termin, dokud nevyprselo.
+  // Nezaplacená rezervace sem NEPATŘÍ: má vlastní místo v boxu „Čeká na úhradu" nad seznamem,
+  // stejně jako u skupinovek. V seznamu nadcházejících lekcí by vypadala jako potvrzená
+  // a nabízela přesun termínu, který u nezaplacené rezervace nedává smysl.
   const { data } = await supaClient
     .from('bookings').select('*')
     .eq('student_id', currentUser.id)
-    .in('status',['active','paid_claimed','reserved'])
+    .in('status',['active','paid_claimed'])
     .order('training_date',{ascending: mode==='upcoming'});
 
   const now = new Date();
@@ -40189,16 +40194,7 @@ async function loadBookings(mode){
     const _byCard=((b.payment_method||'stripe')==='stripe');
     const refundInfo = _byCard ? (hours>=16 ? L('95% zpět') : hours>=0 ? L('50% zpět') : L('bez vrácení')) : '';
     if(mode==='upcoming'){
-      // NEZAPLACENA REZERVACE. Ceka na QR platbu a kouc ji musi potvrdit -- dokud se tak
-      // nestane, neni to potvrzena lekce a musi to byt na prvni pohled videt.
-      const _unpaid=(String(b.status||'')==='reserved');
-      const _unpaidBar=_unpaid
-        ? ('<div style="background:#FFF7ED;border:1px solid #FCD9A8;border-radius:10px;padding:9px 11px;margin-bottom:10px;font-size:12px;color:#9a5a00;line-height:1.5;">\u23f3 '
-            +(LANG==='en'?'Waiting for payment. Send it and the coach will confirm the lesson.'
-                         :'\u010ceka na zaplaceni. Po\u0161li platbu a kou\u010d lekci potvrd\u00ed.')+'</div>')
-        : '';
       el.innerHTML=`
-        ${_unpaidBar}
         <div style="font-family:'Bebas Neue';font-size:20px;letter-spacing:.04em;">${b.coach_name}</div>
         <div style="font-size:14px;color:var(--mid);margin:4px 0;">📅 ${_dt(b.training_date)} · ${b.training_time}</div>
         <div style="font-size:12px;font-weight:700;color:${(Number(b.capacity)||1)>1?'#6B4FBB':'var(--light)'};margin:2px 0 4px;">${(Number(b.capacity)||1)>1?('👥 '+(LANG==='en'?'Group':'Skupinová')+' 1:'+(Number(b.capacity)||1)):('🥊 1:1')}</div>
@@ -40310,7 +40306,7 @@ async function cancelBooking(d){
       });
       // Doklad o zruseni obema stranam -- vcetne toho, kolik se opravdu vratilo.
       // _refunded je castka od serveru, ne dopocet z klienta.
-      try{ await _issuePrivateCancelConf({ booking_id:d.id, student_id:currentUser.id, coach_id:bk.coach_id, name:(d.disc||null),
+      try{ await _issuePrivateCancelConf({ booking_id:d.id, booking_status:(bk&&bk.status)||null, student_id:currentUser.id, coach_id:bk.coach_id, name:(d.disc||null),
         date:d.date, time:d.time, refund:_refunded, currency:(d.cur||'CZK'), reason:reason||'',
         byCoach:false, student_name:(currentUser.name||''), coach_name:(d.coach||'') }); }catch(e){}
     }
