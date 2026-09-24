@@ -155,10 +155,15 @@ export default async function handler(req, res) {
   // arrives late (Model A: money lands on the gym IBAN directly, so a late confirm = real money).
   try {
     const cutoffPis = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-    const pb = await sb(`gym_bookings?pis_payment_id=not.is.null&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoffPis)}&select=id&limit=2000`);
-    for (const b of (pb || [])) {
-      await sb(`gym_bookings?id=eq.${b.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'expired' }) });
-      pisExpired++;
+    // VSECHNY KOLEJE, NEJEN SKUPINOVKY. Driv se cistily jen gym_bookings, takze rozdelana
+    // platba za soukromku nebo listek zustala viset ve stavu 'reserved' navzdy -- studentovi
+    // se hromadila v boxu "Ceka na uhradu" a koucovi blokovala termin.
+    for (const t of ['gym_bookings', 'bookings', 'event_tickets']) {
+      const pb = await sb(`${t}?pis_payment_id=not.is.null&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoffPis)}&select=id&limit=2000`);
+      for (const b of (pb || [])) {
+        await sb(`${t}?id=eq.${b.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'expired' }) });
+        pisExpired++;
+      }
     }
   } catch (e) { /* pis expiry pass non-fatal */ }
 

@@ -100,6 +100,9 @@ export default async function handler(req, res) {
     // jednou do sve banky prihlasil a prihlaseni plati, banka ho pri dalsi platbe prihlasovat
     // nebude. Bez nej zustava "ID klienta: N/A" a kazda platba zacina od prihlaseni znovu.
     const payerId = row.student_id || row.buyer_id || row.member_id || b.clientId || null;
+    // JEDNA ROZDELANA PLATBA NA REZERVACI. Kazdy pokus zakladal novou -- po trech kliknutich
+    // mel clovek tri rezervace na tentyz termin a vsechny mu drzely misto. Kdyz uz nejaka na
+    // radku visi a neni dokoncena, prepise se; historie je u Finbricks.
     const mtid = crypto.randomUUID();
     const payload = {
       merchantId: MERCHANT_ID,
