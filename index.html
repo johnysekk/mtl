@@ -22843,40 +22843,6 @@ function _pisAllowed(ent, id){
 function _pisTestAmount(){
   return (1 + Math.floor(Math.random()*899)/100).toFixed(2);
 }
-// VÝBĚR BANKY PRO FINBRICKS. Vrací kód banky (paymentProvider), nebo null, když člověk okno
-// zavřel. Seznam je z /api/fbx-banks a obsahuje jen banky, které má účet nasmlouvané.
-async function _fbxPickBank(country){
-  const EN=LANG==='en';
-  let banks=[];
-  // flow=platform: server vrátí jen banky, u kterých platba bez čísla účtu plátce projde.
-  try{ const r=await fetch('/api/fbx-banks?flow=platform&country='+encodeURIComponent(country||'CZ')); const d=await r.json(); banks=d.aspsps||[]; }catch(e){}
-  return new Promise(function(resolve){
-    const ov=document.createElement('div');
-    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100060;display:flex;align-items:flex-end;justify-content:center;';
-    const inner=document.createElement('div');
-    inner.style.cssText="background:#fff;border-radius:18px 18px 0 0;max-width:460px;width:100%;max-height:82vh;overflow:auto;padding:18px 18px 28px;font-family:'DM Sans';";
-    if(!banks.length){
-      inner.innerHTML='<div style="font-size:16px;font-weight:800;color:var(--dark);margin-bottom:8px;">'+(EN?'No bank available':'Žádná banka k dispozici')+'</div>'
-        +'<p style="font-size:13px;color:var(--mid);line-height:1.5;">'+(EN?'Pay by QR instead.':'Zaplať zatím QR kódem.')+'</p>';
-    } else {
-      inner.innerHTML='<div style="font-size:16px;font-weight:800;color:var(--dark);margin-bottom:10px;">'+(EN?'Your bank':'Tvoje banka')+'</div>'
-        +banks.map(function(b,i){ return '<button class="fbxBankBtn" data-i="'+i+'" style="width:100%;text-align:left;padding:13px;margin-bottom:8px;border:1px solid var(--border);border-radius:12px;background:#fff;font-size:14px;font-weight:700;color:var(--dark);cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:10px;">'
-          +(b.logo?('<img src="'+escapeHtml(b.logo)+'" alt="" style="width:24px;height:24px;object-fit:contain;">'):'')
-          +'<span>'+escapeHtml(b.name)+'</span>'+(b.instant?'<span style="margin-left:auto;font-size:10.5px;font-weight:800;color:#0A7A3D;">'+(EN?'instant':'okamžitá')+'</span>':'')+'</button>'; }).join('');
-    }
-    const cx=document.createElement('button');
-    cx.style.cssText="width:100%;padding:11px;background:none;color:var(--light);border:none;font-size:12.5px;cursor:pointer;font-family:'DM Sans';";
-    cx.textContent=(EN?'Cancel':'Zrušit');
-    cx.onclick=function(){ ov.remove(); resolve(null); };
-    inner.appendChild(cx);
-    ov.onclick=function(e){ if(e.target===ov){ ov.remove(); resolve(null); } };
-    ov.appendChild(inner); document.body.appendChild(ov);
-    inner.querySelectorAll('.fbxBankBtn').forEach(function(btn){ btn.onclick=function(){
-      const b=banks[+btn.dataset.i]; btn.textContent='…'; btn.disabled=true;
-      ov.remove(); resolve(b && b.bankId);
-    }; });
-  });
-}
 async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMode, onQrFallback, kind, onAbandon){
   // Pojistka i tady: PIS se spouští i z míst, která mají vlastní okno.
   if(!(await _unpaidGuard())) return;
@@ -22890,35 +22856,8 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMo
   // Finbricks (e-commerce) si banku vybírá sám na své stránce, takže se celý výběr banky
   // i norský sandbox DNB přeskočí: jeden dotaz a přesměrování. Přepínač je v Adminu
   // (platform_config.pis_provider), ať se dá při testu skákat mezi poskytovateli.
-  // Členský poplatek organizaci ('orgfee:<id>') zatím přes Finbricks neumíme -- není to řádek
-  // v žádné z platebních tabulek. Jde dál starou cestou.
-  if(String(window._PIS_PROVIDER||'')==='finbricks' && !String(bookingId||'').startsWith('orgfee:')){
-    try{
-      // Napověda, ne rozhodnutí: server si řádek najde podle id, i když se netrefíme.
-      const _tbl=(kind==='memb'?'gym_memberships':(kind==='event'?'event_tickets':(kind==='cohort'?'cohort_members':(kind==='merch'?'merch_orders':''))));
-      const _post=function(prov){ return fetch('/api/fbx-create',{ method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({ table:_tbl||undefined, id:bookingId, description:(msg||''), lang:LANG, paymentProvider:prov||undefined }) })
-        .then(function(x){ return x.json(); }); };
-      let d=await _post(null);
-      // 264 = „řekni, ze které banky se platí". E-commerce si banku vybere sám, čistý PIS ne --
-      // v tom případě se ukáže náš výběr (stejné okno jako u Neonomics) a pošle se znovu.
-      if(d && (d.code===264 || d.code===265 || d.code===266)){
-        const _prov=await _fbxPickBank(_ibanCC(String((payee&&payee.receiver_id_value)||(g&&g.receiver_id_value)||''))||'CZ');
-        if(!_prov){ _abandon(); return; }
-        d=await _post(_prov);
-      }
-      if(d && d.redirectUrl){ _launched=true; if(closeQr) closeQr(); window.location.href=d.redirectUrl; return; }
-      // Cela hlaska od Finbricks, ne nase shrnuti -- pri ladeni je rozhodujici kod chyby.
-      try{ console.error('[fbx]', d); }catch(e){}
-      const _fe=(d&&(d.error||(d.detail&&d.detail.message)))||'Finbricks error';
-      toast('\u26a0\ufe0f '+_fe);
-      // Chyba od banky se nesmi ztratit driv, nez si ji clovek stihne precist -- toast mizi
-      // za 2,2 s. Proto zustane i v okne, odkud se da zkopirovat.
-      try{ const _b=document.getElementById('fbxErrBox'); if(_b){ _b.textContent=_fe; _b.style.display='block'; } }catch(e){}
-      if(typeof onQrFallback==='function') onQrFallback();
-      _abandon(); return;
-    }catch(e){ toast('\u26a0\ufe0f '+e.message); _abandon(); return; }
-  }
+  // Poskytovatel (Neonomics / Finbricks) se rozhoduje na serveru v /api/pis-create podle
+  // platform_config. Appka o tom nemusí vědět: pošle rezervaci a dostane adresu banky.
   let iban=String((payee&&payee.receiver_id_value)||(g&&g.receiver_id_value)||'').replace(/\s+/g,'');
   let country=_ibanCC(iban);  // picker country = the klub's IBAN country (students bank locally)
   let payCur=cur;  // klub currency drives it (settable in gym settings)
