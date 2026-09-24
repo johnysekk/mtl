@@ -120,7 +120,11 @@ export default async function handler(req, res) {
     if (!r.ok && r.data && (r.data.code === 308 || r.data.code === 300 || r.data.code === 302)) {
       // platform/init nema shoppingCartUrl a banku ceka v paymentProvider; bez nej ji necha
       // vybrat jen u bank, ktere to umi na sve strane (MBANK, RAIFFEISEN, UNICREDIT).
-      const p2 = { ...payload };
+      // POLE SE JMENUJI JINAK. E-commerce bere `amount`, platform `totalPrice` -- pri prostem
+      // preposlani tela proto prislo 201 "Invalid input parameter 'totalPrice' with value 'null'".
+      // shoppingCartUrl platform nezna a banku ceka v paymentProvider.
+      const p2 = { ...payload, totalPrice: payload.amount };
+      delete p2.amount;
       delete p2.shoppingCartUrl;
       if (b.paymentProvider) p2.paymentProvider = String(b.paymentProvider);
       r = await fbxCall('POST', '/transaction/platform/init', p2, opts);
