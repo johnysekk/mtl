@@ -13,7 +13,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { fbxCall, fbxOutcome, MERCHANT_ID } from './_fbx.js';
-import { pisSideEffects } from './pis-return.js';
+import { pisSettle } from './pis-return.js';
 
 const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false },
@@ -59,18 +59,20 @@ export default async function handler(req, res) {
     }
 
     if (out.paid) {
-      // Idempotence: kdyz uz je zaplaceno, podruhe se nic nedela (callback muze prijit vicekrat).
-      const already = ['paid', 'active', 'confirmed'].includes(String(rec.status || '').toLowerCase());
-      if (!already) {
-        await sb.from(tbl).update({ status: 'paid', paid_at: new Date().toISOString(), payment_method: 'pis' }).eq('id', rec.id);
-        // Bez PIS_INTERNAL_SECRET record-cash interni volani odmitne a platba se nezauctuje.
-        // Radeji to rict nahlas v odpovedi, nez ticho a chybejici doklad.
-        if (!process.env.PIS_INTERNAL_SECRET) console.error('[fbx] PIS_INTERNAL_SECRET chybi -- platba se nezauctuje');
-        try { await pisSideEffects({ ...rec, status: 'paid' }, tbl); } catch (e) { console.error('[fbx] sideEffects', e && e.message); }
+      // ZAUCTOVANI JE SPOLECNE, NE VLASTNI. Driv tu byla zkracena kopie toho, co dela
+      // pis-return -- a chybelo v ni prave to podstatne: notifikace STUDENTOVI o zaplaceni,
+      // datum konce u clenstvi, preklopeni vsech listku jedne objednavky a spravny nazev
+      // stavu pro danou tabulku. Proto prisla zprava jen kouci a nic se nezauctovalo.
+      // Ted se vola tataz funkce jako u Neonomics.
+      try {
+        await pisSettle(rec, tbl, out.code);
+      } catch (e) {
+        console.error('[fbx] settle', tbl, rec.id, e && e.message);
+        return wantsHtml ? backToApp(res, 'fbx=err')
+          : res.status(500).json({ error: 'settle failed', detail: String((e && e.message) || e), table: tbl, id: rec.id });
       }
       return wantsHtml ? backToApp(res, 'fbx=ok')
-        : res.status(200).json({ ok: true, status: out.code, paid: true, table: tbl, id: rec.id,
-            accounting: process.env.PIS_INTERNAL_SECRET ? 'attempted' : 'SKIPPED: PIS_INTERNAL_SECRET not configured' });
+        : res.status(200).json({ ok: true, status: out.code, paid: true, table: tbl, id: rec.id });
     }
 
     // 4) Konecne neuspesne: uvolnit rezervaci, at misto nezustane blokovane.

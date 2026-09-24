@@ -144,6 +144,74 @@ export async function pisSideEffects(rec, tbl){
       if(ownerId){ const what=(tbl==='gym_memberships')?(rec.plan_name||'permanentka'):(rec.class_name||'drop-in'); const who=rec.student_name||'Student'; const _amtO=(rec.amount!=null)?(' \u00b7 '+rec.amount+' '+(rec.currency||'CZK')):''; const _whenO=(tbl!=='gym_memberships' && rec.class_date)?(' \u00b7 '+rec.class_date+(rec.class_time?(' '+rec.class_time):'')):''; const msg=(tbl==='gym_memberships')?('\ud83c\udf9f\ufe0f Nov\u00fd \u010dlen (p\u0159evodem): '+who+' \u00b7 '+what+_amtO):('\ud83d\udcc5 Nov\u00e1 rezervace (p\u0159evodem): '+who+' \u00b7 '+what+_whenO+_amtO); await sb.from('notifications').insert({ user_id:ownerId, type:'booking', read:false, message:msg, data:JSON.stringify({ kind:'pis_payment_in', gym_id:rec.gym_id, what, student:who, membership:(tbl==='gym_memberships'), amt:(rec.amount!=null?String(rec.amount):''), sym:(rec.currency||'CZK'), className:what, date:(rec.class_date||null), time:(rec.class_time||null), occ:(tbl==='gym_bookings'?{ date:rec.class_date||null, time:rec.class_time||null, name:rec.class_name||null }:null) }) }); } } }catch(e){}
 }
 
+
+// ZAUCTOVANI PLATBY -- SPOLECNE PRO VSECHNY POSKYTOVATELE.
+// Presunuto sem z tela handleru, aby to nemusel opisovat kazdy dalsi poskytovatel (Finbricks:
+// fbx-callback). Prave tim, ze fbx-callback mel vlastni zkracenou verzi, chybela studentovi
+// notifikace, clenstvi nedostalo datum konce a listky z jedne objednavky se neprepnuly.
+//
+// rec: radek objednavky, tbl: jeji tabulka, status: stav od banky (jen do pis_status).
+export async function pisSettle(rec, tbl, status){
+      const _paidStatus=(tbl==='event_tickets'||tbl==='merch_orders')?'paid':(tbl==='cohort_members')?'deposit_paid':'active';
+      if(rec && rec.status!==_paidStatus){
+        // Clenstvi potrebuje i datum konce. Vsech osm ostatnich cest, ktere clenstvi aktivuji,
+        // ho nastavuje; tahle jedina ne, takze PIS clenstvi zustalo aktivni bez konce. Dusledky
+        // dva: clenovi se ukazovalo 'neobnovuje se' bez informace DOKDY, a membership-expiry-cron
+        // nema co porovnat, takze takove clenstvi nikdy samo nevyprsi -- ani rocni za 16 000.
+        const _upd={ status:_paidStatus, pis_status:status };
+        if(tbl==='gym_memberships'){
+          const _mo=Math.max(1, parseInt(rec.months,10)||1);
+          const _pe=new Date(); _pe.setMonth(_pe.getMonth()+_mo);
+          _upd.period_end=_pe.toISOString();
+        }
+        // Objednávka může nést víc lístků na jednu platbu -- překlopit je všechny, jinak by
+        // zbytek zůstal viset jako rezervace a release-cron by je uvolnil, přestože jsou
+        // zaplacené. U ostatních tabulek order_id neexistuje a jede se po id jako dosud.
+        if(tbl==='event_tickets' && rec.order_id){ await sb.from(tbl).update(_upd).eq('order_id',rec.order_id); }
+        else { await sb.from(tbl).update(_upd).eq('id',rec.id); }
+        if(tbl==='cohort_members'){ try{ const _exC=await sb.from('cohort_payments').select('id').eq('cohort_member_id',rec.id).eq('kind','deposit').limit(1); if(!(_exC.data&&_exC.data.length)){ const _prevC=Number(rec.paid_amount||0); await sb.from('cohort_members').update({ paid_amount: Math.round((_prevC+Number(_cohDep||0))*100)/100, months_paid:1 }).eq('id',rec.id); await sb.from('cohort_payments').insert({ cohort_member_id:rec.id, cohort_id:rec.cohort_id||null, kind:'deposit', amount:Number(_cohDep||0), currency:_cohCur||'CZK', mtl_fee: Math.round(Number(_cohDep||0)*0.03*100)/100, payment_method:'pis', status:'paid' }); } }catch(e){} }
+        if(tbl==='bookings' && rec.slot_id){ try{ await sb.from('slots').update({ booked:true }).eq('id',rec.slot_id); }catch(e){} }
+        try{ const _buyerId=(tbl==='event_tickets')?rec.buyer_id:rec.student_id;
+          const _cur=(rec.currency||'CZK'); let _amt=(rec.amount!=null)?(rec.amount+' '+_cur):'';
+          // U objednávky s víc lístky je rec.amount cena JEDNOHO. Hlásit 400 Kč u pěti kusů za
+          // dva tisíce vede pořadatele k tomu, že si špatně spočítá tržbu -- sečteme celou
+          // objednávku a přidáme počet i varianty.
+          let _oQty=0, _oTiers='';
+          if(tbl==='event_tickets' && rec.order_id){
+            try{
+              const _sib=await sb.from('event_tickets').select('amount,tier_name').eq('order_id',rec.order_id);
+              const _rows=(_sib&&_sib.data)||[];
+              if(_rows.length){
+                _oQty=_rows.length;
+                _amt=_rows.reduce(function(a,r){ return a+(Number(r.amount)||0); },0)+' '+_cur;
+                const _cnt={}; _rows.forEach(function(r){ const k=r.tier_name||''; if(k) _cnt[k]=(_cnt[k]||0)+1; });
+                _oTiers=Object.keys(_cnt).map(function(k){ return _cnt[k]>1?(k+' \u00d7'+_cnt[k]):k; }).join(', ');
+              }
+            }catch(e){}
+          }
+          const _dte=(rec.class_date||rec.training_date)||''; const _tme=(rec.class_time||rec.training_time)||'';
+          // _cohGym/_evG zily v handleru; po presunu do pisSettle uz tu nejsou, takze se
+          // gym dohleda primo z radku (u kurzu z gym_cohorts, u akce z events).
+          let _gid2=rec.gym_id||null;
+          try{
+            if(!_gid2 && tbl==='cohort_members' && rec.cohort_id){ const _c=await sb.from('gym_cohorts').select('gym_id').eq('id',rec.cohort_id).maybeSingle(); _gid2=(_c.data&&_c.data.gym_id)||null; }
+            if(!_gid2 && tbl==='event_tickets' && rec.event_id){ const _e=await sb.from('events').select('gym_id').eq('id',rec.event_id).maybeSingle(); _gid2=(_e.data&&_e.data.gym_id)||null; }
+          }catch(e){}
+          let _gname=''; try{ const _gid=_gid2; if(_gid){ const _gn=await sb.from('gyms').select('name').eq('id',_gid).maybeSingle(); _gname=(_gn.data&&_gn.data.name)||''; } }catch(e){}
+          // auto:true => the bank confirmed it (PIS), not the club. The client renderer builds the visible text from these fields.
+          let nd;
+          if(tbl==='gym_memberships'){ nd={ kind:'payment_confirmed', auto:true, goto:'memberships', gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.plan_name||'') }; }
+          else if(tbl==='bookings'){ nd={ kind:'payment_confirmed', auto:true, goto:'bookings', amount:_amt, date:_dte, time:_tme, coach:(rec.coach_name||'') }; }
+          else if(tbl==='event_tickets'){ nd={ kind:'payment_confirmed', auto:true, goto:'tickets', event_id:rec.event_id, gym_name:_gname, amount:_amt, qty:(_oQty||1), tiers:_oTiers }; }
+          else if(tbl==='merch_orders'){ nd={ kind:'payment_confirmed', auto:true, goto:'merch', merch_id:rec.merch_id, gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.item_name||'') }; }
+          else if(tbl==='cohort_members'){ nd={ kind:'payment_confirmed', auto:true, goto:'courses', cohort_id:rec.cohort_id, member_id:rec.id, gym_name:_gname, amount:_amt }; }
+          else { nd={ kind:'payment_confirmed', auto:true, goto:'dropin', gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.class_name||''), date:_dte, time:_tme, class_name:rec.class_name }; }
+          const _msg='\u2705 '+(nd.item||'')+(_amt?(' \u00b7 '+_amt):'');
+          await sb.from('notifications').insert({ user_id:_buyerId, type:'booking', read:false, message:_msg, data:JSON.stringify(nd) }); }catch(e){}
+        await pisSideEffects(rec, tbl);
+  }
+}
+
 export default async function handler(req, res){
   let _dbg='st=NO_PAYMENT_ID';
   try{
@@ -188,57 +256,8 @@ export default async function handler(req, res){
         if(!rec){ const e=await sb.from('event_tickets').select('id,status,buyer_id,event_id,amount,currency,buyer_name,order_id,paid_by,paid_by_name,attendee_name').eq('pis_payment_id',paymentId).maybeSingle(); if(e.data){ rec=e.data; tbl='event_tickets'; } }
         if(!rec){ const co=await sb.from('cohort_members').select('id,status,student_id,cohort_id,name,attribution').eq('pis_payment_id',paymentId).maybeSingle(); if(co.data){ rec=co.data; tbl='cohort_members'; } }
         if(!rec){ const mo=await sb.from('merch_orders').select('id,status,student_id,gym_id,coach_id,merch_id,item_name,amount,currency,buyer_name').eq('pis_payment_id',paymentId).maybeSingle(); if(mo.data){ rec=mo.data; tbl='merch_orders'; } }
-        const _paidStatus=(tbl==='event_tickets'||tbl==='merch_orders')?'paid':(tbl==='cohort_members')?'deposit_paid':'active';
-        if(rec && rec.status!==_paidStatus){
-          // Clenstvi potrebuje i datum konce. Vsech osm ostatnich cest, ktere clenstvi aktivuji,
-          // ho nastavuje; tahle jedina ne, takze PIS clenstvi zustalo aktivni bez konce. Dusledky
-          // dva: clenovi se ukazovalo 'neobnovuje se' bez informace DOKDY, a membership-expiry-cron
-          // nema co porovnat, takze takove clenstvi nikdy samo nevyprsi -- ani rocni za 16 000.
-          const _upd={ status:_paidStatus, pis_status:status };
-          if(tbl==='gym_memberships'){
-            const _mo=Math.max(1, parseInt(rec.months,10)||1);
-            const _pe=new Date(); _pe.setMonth(_pe.getMonth()+_mo);
-            _upd.period_end=_pe.toISOString();
-          }
-          // Objednávka může nést víc lístků na jednu platbu -- překlopit je všechny, jinak by
-          // zbytek zůstal viset jako rezervace a release-cron by je uvolnil, přestože jsou
-          // zaplacené. U ostatních tabulek order_id neexistuje a jede se po id jako dosud.
-          if(tbl==='event_tickets' && rec.order_id){ await sb.from(tbl).update(_upd).eq('order_id',rec.order_id); }
-          else { await sb.from(tbl).update(_upd).eq('id',rec.id); }
-          if(tbl==='cohort_members'){ try{ const _exC=await sb.from('cohort_payments').select('id').eq('cohort_member_id',rec.id).eq('kind','deposit').limit(1); if(!(_exC.data&&_exC.data.length)){ const _prevC=Number(rec.paid_amount||0); await sb.from('cohort_members').update({ paid_amount: Math.round((_prevC+Number(_cohDep||0))*100)/100, months_paid:1 }).eq('id',rec.id); await sb.from('cohort_payments').insert({ cohort_member_id:rec.id, cohort_id:rec.cohort_id||null, kind:'deposit', amount:Number(_cohDep||0), currency:_cohCur||'CZK', mtl_fee: Math.round(Number(_cohDep||0)*0.03*100)/100, payment_method:'pis', status:'paid' }); } }catch(e){} }
-          if(tbl==='bookings' && rec.slot_id){ try{ await sb.from('slots').update({ booked:true }).eq('id',rec.slot_id); }catch(e){} }
-          try{ const _buyerId=(tbl==='event_tickets')?rec.buyer_id:rec.student_id;
-            const _cur=(rec.currency||'CZK'); let _amt=(rec.amount!=null)?(rec.amount+' '+_cur):'';
-            // U objednávky s víc lístky je rec.amount cena JEDNOHO. Hlásit 400 Kč u pěti kusů za
-            // dva tisíce vede pořadatele k tomu, že si špatně spočítá tržbu -- sečteme celou
-            // objednávku a přidáme počet i varianty.
-            let _oQty=0, _oTiers='';
-            if(tbl==='event_tickets' && rec.order_id){
-              try{
-                const _sib=await sb.from('event_tickets').select('amount,tier_name').eq('order_id',rec.order_id);
-                const _rows=(_sib&&_sib.data)||[];
-                if(_rows.length){
-                  _oQty=_rows.length;
-                  _amt=_rows.reduce(function(a,r){ return a+(Number(r.amount)||0); },0)+' '+_cur;
-                  const _cnt={}; _rows.forEach(function(r){ const k=r.tier_name||''; if(k) _cnt[k]=(_cnt[k]||0)+1; });
-                  _oTiers=Object.keys(_cnt).map(function(k){ return _cnt[k]>1?(k+' \u00d7'+_cnt[k]):k; }).join(', ');
-                }
-              }catch(e){}
-            }
-            const _dte=(rec.class_date||rec.training_date)||''; const _tme=(rec.class_time||rec.training_time)||'';
-            let _gname=''; try{ const _gid=rec.gym_id||_cohGym||_evG||null; if(_gid){ const _gn=await sb.from('gyms').select('name').eq('id',_gid).maybeSingle(); _gname=(_gn.data&&_gn.data.name)||''; } }catch(e){}
-            // auto:true => the bank confirmed it (PIS), not the club. The client renderer builds the visible text from these fields.
-            let nd;
-            if(tbl==='gym_memberships'){ nd={ kind:'payment_confirmed', auto:true, goto:'memberships', gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.plan_name||'') }; }
-            else if(tbl==='bookings'){ nd={ kind:'payment_confirmed', auto:true, goto:'bookings', amount:_amt, date:_dte, time:_tme, coach:(rec.coach_name||'') }; }
-            else if(tbl==='event_tickets'){ nd={ kind:'payment_confirmed', auto:true, goto:'tickets', event_id:rec.event_id, gym_name:_gname, amount:_amt, qty:(_oQty||1), tiers:_oTiers }; }
-            else if(tbl==='merch_orders'){ nd={ kind:'payment_confirmed', auto:true, goto:'merch', merch_id:rec.merch_id, gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.item_name||'') }; }
-            else if(tbl==='cohort_members'){ nd={ kind:'payment_confirmed', auto:true, goto:'courses', cohort_id:rec.cohort_id, member_id:rec.id, gym_name:_gname, amount:_amt }; }
-            else { nd={ kind:'payment_confirmed', auto:true, goto:'dropin', gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.class_name||''), date:_dte, time:_tme, class_name:rec.class_name }; }
-            const _msg='\u2705 '+(nd.item||'')+(_amt?(' \u00b7 '+_amt):'');
-            await sb.from('notifications').insert({ user_id:_buyerId, type:'booking', read:false, message:_msg, data:JSON.stringify(nd) }); }catch(e){}
-          await pisSideEffects(rec, tbl);
-        }
+        // Zauctovani je spolecne pro vsechny poskytovatele (viz pisSettle).
+        await pisSettle(rec, tbl, status);
         // Členský poplatek: banka potvrdila, takže členství platí OD TEĎ. Ruční potvrzení
         // federací zůstává jen pro platby mimo appku (hotovost, převod z účtu).
         if(String(bookingId).startsWith('orgfee:')){
