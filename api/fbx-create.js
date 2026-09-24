@@ -33,6 +33,18 @@ const sym = (v) => {
   const s = String(v == null ? '' : v).replace(/\D/g, '').slice(0, 10);
   return s || undefined;
 };
+
+// VARIABILNI SYMBOL SE MUSI POSLAT VZDYCKY. U rezervace ho nikdo nezadava, takze v bance i ve
+// vypisu klubu stalo "N/A" -- a prave podle nej klub pozna, ktera platba komu patri, kdyz se
+// na vypis podiva sam. Odvozuje se z naseho id platby, aby byl stabilni a dohledatelny.
+function vsFrom(uuid) {
+  const hex = String(uuid || '').replace(/[^0-9a-f]/gi, '').slice(0, 12);
+  if (!hex) return undefined;
+  // Prvnich 12 hex znaku -> cislo; oriznute na 9 cifer, at se vejde do limitu 10 znaku
+  // i po pripadnem doplneni nuly na zacatku nekterymi bankami.
+  const n = parseInt(hex, 16) % 1000000000;
+  return String(n).padStart(9, '0');
+}
 // Popis: 140 znaku a jen povolena sada (diakritika ano, emoji ne).
 const desc = (v) => String(v || '')
   .replace(/[^a-zA-Z0-9áčďéěíňóřšťúůýžäĺľôŕÁČĎÉĚÍŇÓŘŠŤÚŮÝŽÄĹĽÔŔ()_\-@".,/':+\s]/g, ' ')
@@ -84,6 +96,10 @@ export default async function handler(req, res) {
     // uctovani a dokladu propsala koruna.
     const amount = FBX_SANDBOX ? Math.min(amountReal, FBX_MAX_SANDBOX) : amountReal;
 
+    // KDO PLATI. clientId je nas identifikator koncoveho uzivatele u Finbricks: kdyz uz se
+    // jednou do sve banky prihlasil a prihlaseni plati, banka ho pri dalsi platbe prihlasovat
+    // nebude. Bez nej zustava "ID klienta: N/A" a kazda platba zacina od prihlaseni znovu.
+    const payerId = row.student_id || row.buyer_id || row.member_id || b.clientId || null;
     const mtid = crypto.randomUUID();
     const payload = {
       merchantId: MERCHANT_ID,
@@ -91,9 +107,10 @@ export default async function handler(req, res) {
       amount: amount,
       creditorAccountIban: String(iban).replace(/\s+/g, ''),
       creditorName: payeeName ? String(payeeName).slice(0, 100) : undefined,
-      variableSymbol: sym(b.variableSymbol || row.variable_symbol),
+      variableSymbol: sym(b.variableSymbol || row.variable_symbol) || vsFrom(mtid),
       description: desc(b.description || row.class_name || row.item_name || 'Platba MTL'),
       initiatorName: 'Martial Training Lab',
+      clientId: payerId ? String(payerId).slice(0, 100) : undefined,
       // INST = okamzita platba: penize jsou na uctu klubu hned a potvrzeni prijde v radu vterin.
       // Kdyz banka INST neumi, Finbricks to resi vlastni logikou.
       instructionPriority: 'INST',
@@ -116,7 +133,13 @@ export default async function handler(req, res) {
     // "Business service is not allowed". Zkusi se proto e-commerce a pri 308 se prejde na
     // platform -- bez zasahu do appky a bez hadani.
     if (b.paymentProvider) payload.paymentProvider = String(b.paymentProvider);
-    let r = await fbxCall('POST', '/ecommerce/transaction/init', payload, opts);
+    // Nema smysl zkouset e-commerce pokazde, kdyz uz vime, ze pro ucet zapnuta neni (308).
+    // FINBRICKS_FLOW='platform' ji preskoci; az ji Finbricks povoli, staci promennou prepnout
+    // zpatky na 'ecommerce' -- tam si banku vybira clovek na jejich strance a nase okno odpada.
+    const FLOW = (process.env.FINBRICKS_FLOW || 'ecommerce').toLowerCase();
+    let r = (FLOW === 'platform')
+      ? { ok: false, data: { code: 308 } }
+      : await fbxCall('POST', '/ecommerce/transaction/init', payload, opts);
     let used = 'ecommerce';
     if (!r.ok && r.data && (r.data.code === 308 || r.data.code === 300 || r.data.code === 302)) {
       // platform/init nema shoppingCartUrl a banku ceka v paymentProvider; bez nej ji necha
