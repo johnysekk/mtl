@@ -212,7 +212,50 @@ export async function pisSettle(rec, tbl, status){
   }
 }
 
+// ── FINBRICKS: NAVRAT Z BANKY A POTVRZENI ────────────────────────────────────────────────
+// Stejna adresa jako u Neonomics. Finbricks se pozna podle parametru ?mtid=; telu callbacku
+// se neveri -- stav si overime vlastnim podepsanym dotazem. Zauctovani pak dela pisSettle,
+// tedy tatáž funkce jako u Neonomics.
+import { fbxCall, fbxOutcome, MERCHANT_ID as FBX_MERCHANT } from './_fbx.js';
+
+async function fbxReturn(req, res, mtid){
+  const wantsHtml=String(req.headers.accept||'').includes('text/html');
+  const back=function(q){ res.setHeader('Location', APP_URL+'/?'+q); return res.status(302).end(); };
+  if(!FBX_MERCHANT) return res.status(500).json({ error:'FINBRICKS_MERCHANT_ID not configured' });
+  const TBL=['gym_bookings','gym_memberships','bookings','event_tickets','cohort_members','merch_orders'];
+  let tbl=null, rec=null;
+  for(const t of TBL){
+    const r=await sb.from(t).select('*').eq('pis_payment_id', mtid).maybeSingle();
+    if(r.data){ tbl=t; rec=r.data; break; }
+  }
+  if(!rec) return wantsHtml ? back('fbx=unknown') : res.status(200).json({ ok:true, note:'unknown mtid' });
+
+  const path='/transaction/platform/status?merchantId='+encodeURIComponent(FBX_MERCHANT)+'&merchantTransactionId='+encodeURIComponent(mtid);
+  const r=await fbxCall('GET', path, null);
+  const out=fbxOutcome(r.data);
+
+  if(!out.final){
+    // Rozdelanou platbu lze dokoncit pozdeji -- odkaz se ulozi k rezervaci.
+    const recovery=r.data && r.data.transactionRecoveryUrl;
+    if(recovery){ try{ await sb.from(tbl).update({ pis_recovery_url:recovery }).eq('id', rec.id); }catch(e){} }
+    return wantsHtml ? back('fbx=pending') : res.status(200).json({ ok:true, status:out.code, final:false, recoveryUrl:recovery||null });
+  }
+  if(out.paid){
+    try{ await pisSettle(rec, tbl, out.code); }
+    catch(e){ console.error('[pis-return/fbx] settle', tbl, rec.id, e && e.message);
+      return wantsHtml ? back('fbx=err') : res.status(500).json({ error:'settle failed', detail:String((e&&e.message)||e), table:tbl, id:rec.id }); }
+    return wantsHtml ? back('fbx=ok') : res.status(200).json({ ok:true, status:out.code, paid:true, table:tbl, id:rec.id });
+  }
+  if(out.failed){ try{ await sb.from(tbl).update({ status:'cancelled', pis_failed_at:new Date().toISOString() }).eq('id', rec.id); }catch(e){} }
+  return wantsHtml ? back('fbx=fail') : res.status(200).json({ ok:true, status:out.code, paid:false });
+}
+
 export default async function handler(req, res){
+  // Finbricks posila zpet ?mtid=; Neonomics svoje vlastni parametry. Jedna adresa pro oba.
+  try{
+    const _mtid=String((req.query&&(req.query.mtid||req.query.merchantTransactionId))||'');
+    if(_mtid) return await fbxReturn(req, res, _mtid);
+  }catch(e){ console.error('[pis-return/fbx]', e && e.message); }
   let _dbg='st=NO_PAYMENT_ID';
   try{
     const bookingId = req.query.state;

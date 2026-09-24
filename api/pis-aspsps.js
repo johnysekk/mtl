@@ -29,7 +29,50 @@ async function neoToken() {
   return d.access_token;
 }
 
+// ── FINBRICKS: SEZNAM BANK ───────────────────────────────────────────────────────────────
+// Stejny endpoint jako u Neonomics, jen jiny zdroj. Appka se nemeni.
+import { createClient } from '@supabase/supabase-js';
+import { fbxCall, MERCHANT_ID as FBX_MERCHANT, FBX_BASE } from './_fbx.js';
+
+const _sbCfg = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
+
+async function fbxBanks(country) {
+  // Bez IBANu platce prijme /transaction/platform/init jen banky, ktere resi vyber uctu na sve
+  // strane; ostatni vraci 266. MOCK_COBS je sandboxovy simulator -- jedina banka, kde se da
+  // v testu platbu dokoncit.
+  const PLATFORM_OK = ['MBANK', 'RAIFFEISEN', 'UNICREDIT', 'MOCK_COBS'];
+  const path = `/status/bankInfo?merchantId=${encodeURIComponent(FBX_MERCHANT)}&countryCode=${encodeURIComponent(country)}`
+    + '&domesticPaymentSupported=true&enabledForMerchant=true';
+  const r = await fbxCall('GET', path, null);
+  const rows = (r.ok && Array.isArray(r.data)) ? r.data : [];
+  const ecom = (process.env.FINBRICKS_FLOW || 'ecommerce').toLowerCase() === 'ecommerce';
+  return rows
+    .filter((b) => b && b.paymentProvider)
+    .filter((b) => ecom || PLATFORM_OK.includes(String(b.paymentProvider).toUpperCase()))
+    .map((b) => ({
+      name: b.bankName || b.paymentProvider,
+      country: b.countryCode || country,
+      bankId: b.paymentProvider,
+      bic: b.bic || null,
+      logo: b.logoUrl ? (String(b.logoUrl).startsWith('http') ? b.logoUrl : (FBX_BASE.replace('api.', 'cdn.') + b.logoUrl)) : null,
+      psu_types: ['personal'],
+    }))
+    .sort((a, b) => {
+      const am = a.bankId === 'MOCK_COBS' ? 0 : 1, bm = b.bankId === 'MOCK_COBS' ? 0 : 1;
+      return (am - bm) || a.name.localeCompare(b.name, 'cs');
+    });
+}
+
 export default async function handler(req, res) {
+  // Podle prepinace v Adminu: Neonomics, nebo Finbricks.
+  try {
+    const cfg = await _sbCfg.from('platform_config').select('pis_provider').eq('id', 1).maybeSingle();
+    if (String((cfg.data && cfg.data.pis_provider) || 'neonomics') === 'finbricks') {
+      const cc = String((req.query && req.query.country) || 'CZ').toUpperCase().slice(0, 2);
+      return res.status(200).json({ aspsps: await fbxBanks(cc) });
+    }
+  } catch (e) { console.error('[pis-aspsps/fbx]', e && e.message); }
+
   try {
     const country = String((req.query && req.query.country) || 'CZ').toUpperCase();
     const token = await neoToken();

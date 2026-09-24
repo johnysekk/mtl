@@ -98,9 +98,109 @@ function pickBankUrl(links) {
   return ext ? ext.href : (links[0] && links[0].href) || null;
 }
 
+// ── FINBRICKS ────────────────────────────────────────────────────────────────────────────
+// Zalozeni platby u druheho poskytovatele. Nema vlastni endpoint: appka vola porad
+// /api/pis-create a rozhoduje se tady podle platform_config.pis_provider. Drive to byl
+// samostatny soubor a skoncilo to tim, ze se v nem opakovaly chyby, ktere tady uz davno
+// vyresene byly -- specificke je jen prihlaseni, adresy a tvar tela.
+import crypto from 'crypto';
+import { fbxCall, psuIpFrom, FBX_SANDBOX, FBX_MAX_SANDBOX, MERCHANT_ID as FBX_MERCHANT } from './_fbx.js';
+
+const PIS_TABLES = ['gym_bookings', 'gym_memberships', 'bookings', 'event_tickets', 'cohort_members', 'merch_orders'];
+
+async function pisProvider(sb) {
+  try {
+    const r = await sb.from('platform_config').select('pis_provider').eq('id', 1).maybeSingle();
+    return String((r.data && r.data.pis_provider) || 'neonomics');
+  } catch (e) { return 'neonomics'; }
+}
+
+// Variabilni symbol se posila vzdycky: podle nej klub pozna platbu ve vlastnim vypisu.
+function fbxVs(uuid) {
+  const hex = String(uuid || '').replace(/[^0-9a-f]/gi, '').slice(0, 12);
+  if (!hex) return undefined;
+  return String(parseInt(hex, 16) % 1000000000).padStart(9, '0');
+}
+const fbxSym = (v) => { const x = String(v == null ? '' : v).replace(/\D/g, '').slice(0, 10); return x || undefined; };
+const fbxDesc = (v) => String(v || '')
+  .replace(/[^a-zA-Z0-9\u00C0-\u024F()_\-@".,/':+\s]/g, ' ').trim().slice(0, 140) || 'Platba MTL';
+
+// Vraci stejny tvar jako Neonomics vetev: { payment_id, url } nebo { error }.
+async function fbxCreate(sb, req, body) {
+  if (!FBX_MERCHANT) return { error: 'FINBRICKS_MERCHANT_ID not configured' };
+  const rowId = String(body.bookingId || '');
+  if (!rowId) return { error: 'no id' };
+
+  // Tabulku neuhadneme z "kind" -- appka ho nepouziva jednotne. Radek se najde podle id.
+  let tbl = null, row = null;
+  for (const t of PIS_TABLES) {
+    const r = await sb.from(t).select('*').eq('id', rowId).maybeSingle();
+    if (r.data) { tbl = t; row = r.data; break; }
+  }
+  if (!row) return { error: 'row not found' };
+
+  // IBAN prijemce VZDY z databaze, nikdy z pozadavku prohlizece.
+  let iban = null, payeeName = null;
+  if (row.gym_id) {
+    const g = (await sb.from('gyms').select('receiver_id_value,legal_name,name').eq('id', row.gym_id).maybeSingle()).data;
+    iban = g && g.receiver_id_value; payeeName = g && (g.legal_name || g.name);
+  } else if (row.coach_id) {
+    const c = (await sb.from('profiles').select('receiver_id_value,payout_receiver_id_value,legal_name,name').eq('id', row.coach_id).maybeSingle()).data;
+    iban = c && (c.payout_receiver_id_value || c.receiver_id_value); payeeName = c && (c.legal_name || c.name);
+  }
+  if (!iban) return { error: 'payee has no IBAN' };
+
+  const real = Number(row.amount || body.amount || 0);
+  if (!(real > 0)) return { error: 'bad amount' };
+  // Sandbox ma strop 1 Kc; na radku zustava skutecna castka, aby se do uctovani nepropsala koruna.
+  const amount = FBX_SANDBOX ? Math.min(real, FBX_MAX_SANDBOX) : real;
+
+  const mtid = crypto.randomUUID();
+  const payerId = row.student_id || row.buyer_id || row.member_id || null;
+  const payload = {
+    merchantId: FBX_MERCHANT,
+    merchantTransactionId: mtid,
+    amount,
+    creditorAccountIban: String(iban).replace(/\s+/g, ''),
+    creditorName: payeeName ? String(payeeName).slice(0, 100) : undefined,
+    variableSymbol: fbxSym(body.vs) || fbxVs(mtid),
+    description: fbxDesc(body.message || row.class_name || row.item_name),
+    initiatorName: 'Martial Training Lab',
+    clientId: payerId ? String(payerId).slice(0, 100) : undefined,
+    instructionPriority: 'INST',
+    callbackUrl: (process.env.APP_URL || 'https://app.martialtraininglab.com') + '/api/pis-return?mtid=' + mtid,
+    shoppingCartUrl: (process.env.APP_URL || 'https://app.martialtraininglab.com') + '/?fbxcancel=1',
+    paymentProvider: body.bankId ? String(body.bankId) : undefined,
+  };
+  Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);
+
+  const opts = { psuIp: psuIpFrom(req), psuUa: req.headers['user-agent'] || 'MTL/1.0', lang: (body.lang === 'en' ? 'en' : 'cs') };
+  const FLOW = (process.env.FINBRICKS_FLOW || 'ecommerce').toLowerCase();
+  let r = (FLOW === 'platform') ? { ok: false, data: { code: 308 } }
+                                : await fbxCall('POST', '/ecommerce/transaction/init', payload, opts);
+  if (!r.ok && r.data && [308, 300, 302].includes(r.data.code)) {
+    const p2 = { ...payload, totalPrice: payload.amount };
+    delete p2.amount; delete p2.shoppingCartUrl;
+    r = await fbxCall('POST', '/transaction/platform/init', p2, opts);
+  }
+  if (!r.ok || !r.data || !r.data.redirectUrl) {
+    const d = r.data || {};
+    console.error('[pis-create/fbx]', r.status, JSON.stringify(d));
+    return { error: d.message ? ('Finbricks ' + (d.code != null ? d.code : r.status) + ': ' + d.message) : ('Finbricks HTTP ' + r.status), code: d.code ?? null };
+  }
+
+  await sb.from(tbl).update({ pis_payment_id: mtid, pis_provider: 'finbricks', pis_started_at: new Date().toISOString() }).eq('id', rowId);
+  return { payment_id: mtid, url: r.data.redirectUrl };
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
   try {
+    // Ktery poskytovatel prave plati. Prepina se v Adminu, ne nasazenim.
+    if ((await pisProvider(sb)) === 'finbricks') {
+      const out = await fbxCreate(sb, req, req.body || {});
+      return res.status(200).json(out);
+    }
     const {
       bookingId,
       gymName, gymIban,
