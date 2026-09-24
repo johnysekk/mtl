@@ -115,6 +115,7 @@ export default async function handler(req, res) {
     // Ktera z nich je pro ucet povolena, se pozna az za behu: nepovolena vraci 308
     // "Business service is not allowed". Zkusi se proto e-commerce a pri 308 se prejde na
     // platform -- bez zasahu do appky a bez hadani.
+    if (b.paymentProvider) payload.paymentProvider = String(b.paymentProvider);
     let r = await fbxCall('POST', '/ecommerce/transaction/init', payload, opts);
     let used = 'ecommerce';
     if (!r.ok && r.data && (r.data.code === 308 || r.data.code === 300 || r.data.code === 302)) {
@@ -135,7 +136,7 @@ export default async function handler(req, res) {
       // { code, message, xrequestId } -- podle kodu se pozna, jestli nesedi podpis (100/106),
       // chybi parametr (2xx) nebo nesmime poslat penize na cizi IBAN (301/10000).
       const d = r.data || {};
-      console.error('[fbx-create]', r.status, JSON.stringify(d));
+      console.error('[fbx-create]', used, r.status, JSON.stringify(d));
       return res.status(502).json({
         error: d.message ? ('Finbricks ' + (d.code != null ? d.code : r.status) + ': ' + d.message + ' [' + used + ']')
                          : ('Finbricks HTTP ' + r.status + ' [' + used + ']'),
