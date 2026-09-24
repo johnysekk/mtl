@@ -79,7 +79,9 @@ async function completePayment(token, paymentId, sessionId, deviceId) {
   } catch (e) { return { http: 0, code: 'exception' }; }
 }
 
-async function pisSideEffects(rec, tbl){
+// Exportovano, aby si to nemusel kopirovat kazdy poskytovatel zvlast (Finbricks: fbx-callback).
+// Je to cast nezavisla na bance: zauctovani, notifikace, doklad.
+export async function pisSideEffects(rec, tbl){
   const _coach1=(tbl==='bookings'); const _event=(tbl==='event_tickets');
   let _evP='gym', _evG=null, _evC=null;
   let _evOrg=null;
