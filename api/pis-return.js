@@ -231,14 +231,23 @@ async function fbxReturn(req, res, mtid){
   if(!rec) return wantsHtml ? back('fbx=unknown') : res.status(200).json({ ok:true, note:'unknown mtid' });
 
   const path='/transaction/platform/status?merchantId='+encodeURIComponent(FBX_MERCHANT)+'&merchantTransactionId='+encodeURIComponent(mtid);
-  const r=await fbxCall('GET', path, null);
-  const out=fbxOutcome(r.data);
+  // BANKA POTVRZUJE S MALYM ZPOZDENIM. Hned po navratu je stav casto jeste OPENED a platba
+  // se za vterinu zmeni na COMPLETED -- doptat se jednou navic je levnejsi nez poslat cloveka
+  // pryc s "platba se zpracovava" a cekat, az se vrati sam.
+  let r=await fbxCall('GET', path, null);
+  let out=fbxOutcome(r.data);
+  for(let i=0; i<2 && !out.final; i++){
+    await new Promise(function(res){ setTimeout(res, 1500); });
+    r=await fbxCall('GET', path, null);
+    out=fbxOutcome(r.data);
+  }
 
   if(!out.final){
     // Rozdelanou platbu lze dokoncit pozdeji -- odkaz se ulozi k rezervaci.
     const recovery=r.data && r.data.transactionRecoveryUrl;
     if(recovery){ try{ await sb.from(tbl).update({ pis_recovery_url:recovery }).eq('id', rec.id); }catch(e){} }
-    return wantsHtml ? back('fbx=pending') : res.status(200).json({ ok:true, status:out.code, final:false, recoveryUrl:recovery||null });
+    // mtid jde s sebou: appka se muze doptat sama, az banka stav dopise.
+    return wantsHtml ? back('fbx=pending&mtid='+encodeURIComponent(mtid)) : res.status(200).json({ ok:true, status:out.code, final:false, recoveryUrl:recovery||null });
   }
   if(out.paid){
     try{ await pisSettle(rec, tbl, out.code); }
