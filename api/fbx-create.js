@@ -44,12 +44,27 @@ export default async function handler(req, res) {
 
   try {
     const b = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
-    const table = String(b.table || '');
     const rowId = String(b.id || '');
-    if (!TABLES.includes(table) || !rowId) return res.status(400).json({ error: 'bad target' });
+    if (!rowId) return res.status(400).json({ error: 'no id' });
 
-    const { data: row, error } = await sb.from(table).select('*').eq('id', rowId).maybeSingle();
-    if (error || !row) return res.status(404).json({ error: 'row not found' });
+    // NEHADAT TABULKU PODLE DRUHU PLATBY. Appka vola tenhle endpoint z peti ruznych mist a
+    // "kind" se u nich nepouziva jednotne -- soukroma lekce 1:1 ho neposila vubec, takze
+    // odhad spadl na gym_bookings a radek se nenasel ("row not found"), i kdyz existoval
+    // v bookings. Napoveda se pouzije, kdyz sedi; jinak se radek najde podle id.
+    const hint = String(b.table || '');
+    let table = null, row = null;
+    if (TABLES.includes(hint)) {
+      const r = await sb.from(hint).select('*').eq('id', rowId).maybeSingle();
+      if (r.data) { table = hint; row = r.data; }
+    }
+    if (!row) {
+      for (const t of TABLES) {
+        if (t === hint) continue;
+        const r = await sb.from(t).select('*').eq('id', rowId).maybeSingle();
+        if (r.data) { table = t; row = r.data; break; }
+      }
+    }
+    if (!row) return res.status(404).json({ error: 'row not found', id: rowId });
 
     // KOMU PENIZE JDOU. IBAN prijemce se bere z klubu nebo kouce, nikdy z pozadavku prohlizece
     // -- jinak by si kdokoli mohl presmerovat cizi platbu na svuj ucet.
