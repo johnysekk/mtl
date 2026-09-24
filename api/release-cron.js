@@ -162,9 +162,15 @@ export default async function handler(req, res) {
     // platba za soukromku nebo listek zustala viset ve stavu 'reserved' navzdy -- studentovi
     // se hromadila v boxu "Ceka na uhradu" a koucovi blokovala termin.
     for (const t of ['gym_bookings', 'bookings', 'event_tickets']) {
-      const pb = await sb(`${t}?pis_payment_id=not.is.null&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoffPis)}&select=id&limit=2000`);
+      const sel = (t === 'bookings') ? 'id,slot_id' : 'id';
+      const pb = await sb(`${t}?pis_payment_id=not.is.null&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoffPis)}&select=${sel}&limit=2000`);
       for (const b of (pb || [])) {
         await sb(`${t}?id=eq.${b.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'expired' }) });
+        // TERMIN SE MUSI VRATIT MEZI VOLNE. Bez toho zustal slot navzdy 'booked' a kouc o nej
+        // prisel, i kdyz za nej nikdo nezaplatil -- presne to, co se stalo u rozdelanych plateb.
+        if (t === 'bookings' && b.slot_id) {
+          try { await sb(`slots?id=eq.${encodeURIComponent(b.slot_id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ booked: false, student: null }) }); } catch (e) {}
+        }
         pisExpired++;
       }
     }
