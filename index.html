@@ -11748,6 +11748,15 @@ async function _coach1to1QrPay(c, payee, opts){
   let bookingId=null;
   async function _ensureBooking(_how){
     if(bookingId) return bookingId;
+    // NEJDŘÍV UKLIDIT PO SOBĚ. Dřívější pokus o tentýž termín, který skončil na půli cesty,
+    // pořád visí jako nezaplacená rezervace: drží místo a počítá se do limitu dvou. Nový
+    // pokus o stejný termín ho nahrazuje, takže ten starý jde pryč.
+    try{
+      if(!isOnline && opts.slot && opts.slot.id && currentUser){
+        await supaClient.from('bookings').update({ status:'expired' })
+          .eq('student_id', currentUser.id).eq('slot_id', opts.slot.id).eq('status','reserved');
+      }
+    }catch(e){}
     if(!(await _unpaidGuard())) return null;
     try{
       const row={ slot_id:(isOnline?null:((opts.slot&&opts.slot.id)||null)), student_id:((window._payOnBehalf&&window._payOnBehalf.id)||currentUser.id), minor_booking:!!(window._payOnBehalf&&window._payOnBehalf.minor), paid_by:((window._payOnBehalf&&window._payOnBehalf.id)?currentUser.id:null), coach_id:coachId, coach_name:c.name||'Kouč', amount:price, training_date:(isOnline?today:((opts.slot&&opts.slot.date)||today)), training_time:(isOnline?null:((opts.slot&&opts.slot.time)||null)), status:'reserved', type:(isOnline?'online':'inperson'), currency:cur,
@@ -22981,6 +22990,9 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMo
       const _u=String((d&&d.url)||'');
       if(/^https?:\/\//i.test(_u)){ _launched=true; if(closeQr) closeQr(); window.location.href=_u; return; }
       try{ console.error('[pis-create]', d); }catch(e){}
+      // Platba se nezaložila -- rezervace nemá důvod existovat. Bez tohohle zůstávala viset
+      // po každém neúspěšném pokusu a blokovala termín i limit.
+      if(bookingId && typeof onAbandon==='function'){ try{ onAbandon(); }catch(e){} bookingId=null; }
       toast('\u26a0\ufe0f '+((d&&d.error)||('PIS: '+JSON.stringify(d||{}).slice(0,160))));
       btn.disabled=false; btn.textContent=_t;
     }catch(e){
