@@ -409,7 +409,10 @@ export default async function handler(req, res) {
       };
     } else {
       // coach pays out -> the coach authorizes their own cash/QR, rate from coach profile.
-      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,account_suspended,cash_blocked,created_at,referral_optin,billing_country,gym_payout_account,stripe_account`);
+      // org_rate_until CHYBELO: sazbova funkce pak nevedela, ze je kouc clenem asociace, a
+      // uctovala zakladni 2,5 % misto 1,5 %. V appce se pritom cetl tentyz sloupec, takze
+      // "Tvoje provize 1,5 % -- clenem asociace" slibovalo neco jineho, nez se strhlo.
+      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,org_rate_until,account_suspended,cash_blocked,created_at,referral_optin,billing_country,gym_payout_account,stripe_account`);
       const coach = cs && cs[0];
       if (!coach) return res.status(404).json({ error: 'coach not found' });
       if (!_trusted && coach.id !== uid) return res.status(403).json({ error: 'not your account' });
