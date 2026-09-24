@@ -109,7 +109,19 @@ export default async function handler(req, res) {
       lang: (b.lang === 'en' ? 'en' : 'cs'),
     });
     if (!r.ok || !r.data || !r.data.redirectUrl) {
-      return res.status(502).json({ error: 'init failed', detail: r.data || null });
+      // CHYBA OD FINBRICKS PATRI VEN, ne schovana pod "init failed". Jejich odpoved ma tvar
+      // { code, message, xrequestId } -- podle kodu se pozna, jestli nesedi podpis (100/106),
+      // chybi parametr (2xx) nebo nesmime poslat penize na cizi IBAN (301/10000).
+      const d = r.data || {};
+      console.error('[fbx-create]', r.status, JSON.stringify(d));
+      return res.status(502).json({
+        error: d.message ? ('Finbricks ' + (d.code != null ? d.code : r.status) + ': ' + d.message)
+                         : ('Finbricks HTTP ' + r.status),
+        code: d.code != null ? d.code : null,
+        httpStatus: r.status,
+        xrequestId: d.xrequestId || null,
+        detail: d,
+      });
     }
 
     // Az kdyz Finbricks platbu prijal, zapiseme si ji k objednavce.
