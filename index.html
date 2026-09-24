@@ -11740,22 +11740,29 @@ async function _coach1to1QrPay(c, payee, opts){
   const _pisOn=(await _pisAvailable(String(String((payee&&payee.receiver_id_value)||'').replace(/\s+/g,'').slice(0,2)||'CZ').toUpperCase(), payee, (payee&&payee.gym_id)||null)) && !!(payee&&payee.receiver_id_value);
   const sName=currentUser.name||'Student';
   const today=new Date().toISOString().slice(0,10);
+  // ── REZERVACE AŽ PŘI PLATBĚ ────────────────────────────────────────────────────────────
+  // Dřív vznikla hned při otevření tohohle okna, tedy i tomu, kdo si to rozmyslel a zavřel
+  // ho. Držela termín, hromadila se v „Čeká na úhradu" a započítávala se do limitu. Stejně
+  // jako u skupinovek (_ensureIntent) se teď zakládá až ve chvíli, kdy se platba opravdu
+  // spouští -- při odeslání do banky nebo při volbě „nemám banku, zaplatím QR".
   let bookingId=null;
-  try{
-    const row={ slot_id:(isOnline?null:((opts.slot&&opts.slot.id)||null)), student_id:((window._payOnBehalf&&window._payOnBehalf.id)||currentUser.id), minor_booking:!!(window._payOnBehalf&&window._payOnBehalf.minor), paid_by:((window._payOnBehalf&&window._payOnBehalf.id)?currentUser.id:null), coach_id:coachId, coach_name:c.name||'Kou\u010d', amount:price, training_date:(isOnline?today:((opts.slot&&opts.slot.date)||today)), training_time:(isOnline?null:((opts.slot&&opts.slot.time)||null)), status:'reserved', type:(isOnline?'online':'inperson'), currency:cur,
-      // Přes PIS platbu potvrzuje banka -- označit ji jako 'qr' znamenalo, že se lekce objevila
-      // koučovi v "QR platby k potvrzení" a čekala na ruční odklepnutí, které tam nepatří.
-      // Na 'qr' se přepne, teprve když student řekne, že banku v seznamu nemá.
-      payment_method:(_pisOn?'pis':'qr'), credit_used:(_qrCredOk?'student':null), discipline:opts.disc||null, online_format:(isOnline?(opts.fmt||null):null), acq_source:((typeof _acqSrcCoach==='function')?_acqSrcCoach(c):'direct') };
-    const _bi=await _sbInsertTolerant('bookings', row, 'id'); const bk=_bi&&_bi.data, e1=_bi&&_bi.error;
-    if(e1){ toast('\u26a0\ufe0f '+e1.message); return; } bookingId=bk&&bk.id;
-    // KDO TERMÍN DRŽÍ, MÁ BÝT VIDĚT. Slot se označoval jen jako obsazený (`booked`), ale bez
-    // studenta -- v diáři kouče proto termín zmizel ze seznamu volných a zároveň se neukázal
-    // jako zamluvený, protože rezervace je teprve `reserved` a diář kreslí potvrzené lekce.
-    // Zápis studenta do slotu z něj udělá viditelné „drženo", stejně jako u přesunu termínu.
-    if(!isOnline && opts.slot && opts.slot.id){ try{ await supaClient.from('slots')
-      .update({ booked:true, student:(currentUser&&currentUser.id)||null }).eq('id', opts.slot.id); }catch(e){} }
-  }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
+  async function _ensureBooking(_how){
+    if(bookingId) return bookingId;
+    if(!(await _unpaidGuard())) return null;
+    try{
+      const row={ slot_id:(isOnline?null:((opts.slot&&opts.slot.id)||null)), student_id:((window._payOnBehalf&&window._payOnBehalf.id)||currentUser.id), minor_booking:!!(window._payOnBehalf&&window._payOnBehalf.minor), paid_by:((window._payOnBehalf&&window._payOnBehalf.id)?currentUser.id:null), coach_id:coachId, coach_name:c.name||'Kouč', amount:price, training_date:(isOnline?today:((opts.slot&&opts.slot.date)||today)), training_time:(isOnline?null:((opts.slot&&opts.slot.time)||null)), status:'reserved', type:(isOnline?'online':'inperson'), currency:cur,
+        // Kolej se zapíše podle toho, čím se právě platí: banka potvrzuje sama ('pis'),
+        // QR potvrzuje kouč ručně.
+        payment_method:(_how==='pis'?'pis':'qr'), credit_used:(_qrCredOk?'student':null), discipline:opts.disc||null, online_format:(isOnline?(opts.fmt||null):null), acq_source:((typeof _acqSrcCoach==='function')?_acqSrcCoach(c):'direct') };
+      const _bi=await _sbInsertTolerant('bookings', row, 'id'); const bk=_bi&&_bi.data, e1=_bi&&_bi.error;
+      if(e1){ toast('⚠️ '+e1.message); return null; }
+      bookingId=bk&&bk.id;
+      // Držený termín musí být v diáři vidět i se studentem, jinak z něj zmizí úplně.
+      if(!isOnline && opts.slot && opts.slot.id){ try{ await supaClient.from('slots')
+        .update({ booked:true, student:(currentUser&&currentUser.id)||null }).eq('id', opts.slot.id); }catch(e){} }
+      return bookingId;
+    }catch(e){ toast('⚠️ '+(e.message||'')); return null; }
+  }
   const msg=sName+(opts.disc?(' - '+opts.disc):'')+' - '+(isOnline?'online':(EN?'1:1':'soukromka'));
   const payload=(typeof _bankQrPayload==='function')?_bankQrPayload(payee, price, msg):null;
   const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100000;display:flex;align-items:center;justify-content:center;padding:20px;';
@@ -11796,8 +11803,13 @@ async function _coach1to1QrPay(c, payee, opts){
   };
   // Když banka v seznamu není, odkryje se QR jako záloha -- stejně jako u klubu. Bez toho
   // student uviděl toast a prázdné okno.
-  const _c1pb=ov.querySelector('#c1PisBtn'); if(_c1pb) _c1pb.onclick=function(){
-    _pisPayFlow(bookingId, payee, null, price, cur, msg, close, _pisTestFor(payee), function(){
+  const _c1pb=ov.querySelector('#c1PisBtn'); if(_c1pb) _c1pb.onclick=async function(){
+    // Rezervace vzniká teprve teď, při skutečném spuštění platby.
+    _c1pb.disabled=true;
+    const _bid=await _ensureBooking('pis');
+    _c1pb.disabled=false;
+    if(!_bid) return;
+    _pisPayFlow(_bid, payee, null, price, cur, msg, close, _pisTestFor(payee), function(){
       // Banka není v seznamu -- teprve TEĎ se z toho stává QR platba, kterou kouč potvrzuje ručně.
       var _w=ov.querySelector('#c1qrWrap'); if(_w) _w.style.display='block';
       var _b=ov.querySelector('#c1PisBtn'); if(_b) _b.style.display='none';
@@ -11816,6 +11828,8 @@ async function _coach1to1QrPay(c, payee, opts){
   };
   const pb=ov.querySelector('#c1qrPaid'); if(pb) pb.onclick=async function(){
     pb.disabled=true; pb.textContent='\u2026';
+    // Kdo zaplatil QR kódem bez toho, aby předtím zkoušel banku, tu ještě rezervaci nemá.
+    await _ensureBooking('qr');
     // Seznam k potvrzeni u kouce chce ZAROVEN payment_method='qr'. Bez nej rezervace v seznamu
     // nebyla, kouc nemel co potvrdit a student ji nevidel ani v nadchazejicich.
     try{ if(bookingId){ await supaClient.from('bookings')
