@@ -31526,40 +31526,47 @@ async function openMtlCommissions(scope){
   // za základní. Čísla jsou stejná jako na serveru (api/_rate.js): ACQ 10/5, ADS 25/10,
   // základ EP 0,005.
   const EP_BASE=0.005;
-  // POČÍTÁ SE ZE SKUTEČNĚ ZAPLACENÉ SAZBY, ne znovu od nuly. Dřív stačilo, že transakce měla
-  // `acq_source='mtl_discovery'`, a přepočet jí naúčtoval akvizici 5 % -- i když se akvizice
-  // ve skutečnosti vůbec neuplatnila (člen už u klubu členství měl, nebo šlo o další měsíc
-  // ročního) a zaplatilo se 1,5 %. Z 240 Kč pak vyšlo 800 Kč a EP vycházel dráž než dnešek.
+  // JAK SE POČÍTÁ SAZBA S EP. Tři kategorie, nic jiného neexistuje:
+  //   běžná provize        žebříček klubu (2–2,5 % základ, 1,5 % asociace/Shikai, …) → 0,5 %
+  //   člen z appky 🧲      10 % → 5 %, jen za měsíce, které akvizice kryje
+  //   člen z reklamy 📣    25 % → 10 %, po dobu okna (až 12 měsíců)
   //
-  // Skutečná sazba je v `mtl_rate`, žebříčková v `base_rate`. Když se rovnají, akvizice se
-  // neuplatnila a s EP by z toho bylo 0,5 %. Když je vyšší, dopočítá se z ní akviziční část
-  // (u víceměsíčního členství je smíchaná) a ta se s EP dělí dvěma: 10 % → 5 %, 25 % → 10 %.
+  // Skutečné rozdělení je od teď v transakci: `base_rate` (žebříček), `acq_months` (kolik
+  // měsíců neslo akvizici) a `months` (kolik měsíců platba pokrývá). U starších řádků, kde
+  // tahle pole chybí, se podíl dopočítá ze sazby -- a protože dřív byla akvizice 20 %, hledá
+  // se i ten stupeň, jinak by z 3 % vyšel nesmysl.
   const _epFor=function(t){
     const gross=Number(t.gross_amount||0)/100;
-    const mo=Math.max(1, parseInt(t.months,10)||1);
     const rn=(t.mtl_rate!=null)?Number(t.mtl_rate):null;
     const br=(t.base_rate!=null)?Number(t.base_rate):null;
+    const isAds=(t.acq_source==='mtl_ads');
+    const epAcq=isAds?0.10:0.05;
+    const pct=function(x){ return (Math.round(x*1000)/10).toString().replace('.',',')+' %'; };
     if(rn==null) return { fee: gross*EP_BASE, note: null };
-    // Žebříčková sazba: buď zapsaná, nebo (u starších řádků) sama skutečná, pokud je nízká.
-    const base=(br!=null)?br:((rn<=0.03)?rn:null);
-    if(base==null || rn<=base+0.0001) return { fee: gross*EP_BASE, note: null };
-    // Kolik měsíců neslo akvizici: zapsané, jinak dopočet z toho, o kolik je sazba vyšší.
+    const base=(br!=null)?br:null;
+    // Žádná akvizice: buď se sazba rovná žebříčku, nebo je tak nízká, že jinou být nemůže.
+    if((base!=null && rn<=base+0.0001) || (base==null && rn<=0.03))
+      return { fee: gross*EP_BASE, note: pct(EP_BASE) };
+    const mo=Math.max(1, parseInt(t.months,10)||1);
     let cov=Math.max(0, parseInt(t.acq_months,10)||0);
-    if(cov<=0 || cov>mo){
-      const acqGuess=(rn>=0.2)?0.25:0.10;                     // reklama vs. objev v appce
-      cov=Math.max(1, Math.min(mo, Math.round(((rn-base)*mo)/(acqGuess-base))));
+    if(cov>mo) cov=mo;
+    if(cov>0 && base!=null){
+      const rate=(epAcq*cov + EP_BASE*(mo-cov))/mo;
+      return { fee: gross*rate,
+        note: (mo>cov)
+          ? (EN ? (cov+' mo at '+pct(epAcq)+' + '+(mo-cov)+' mo at '+pct(EP_BASE))
+                : (cov+'. m\u011bs. '+pct(epAcq)+' + zbyl\u00fdch '+(mo-cov)+' m\u011bs. '+pct(EP_BASE)))
+          : pct(epAcq) };
     }
-    // EP sazba podle DNEŠNÍHO ceníku, ne polovina té zaplacené: starší transakce nesou
-    // akvizici 20 % z doby před snížením a půlka z ní (9,75 %) by dnes neplatila pro nikoho.
-    const epAcq=(t.acq_source==='mtl_ads') ? 0.10 : 0.05;      // reklama 10 %, objev v appce 5 %
-    const fee=gross*((epAcq*cov + EP_BASE*(mo-cov))/mo);
-    const pct=function(x){ return (Math.round(x*1000)/10)+' %'; };
-    return { fee: fee,
-      note: (mo>cov)
-        ? (EN ? (cov+' mo at '+pct(epAcq)+' + '+(mo-cov)+' mo at 0,5 %')
-              : (cov+'. m\u011bs. '+pct(epAcq)+' + zbyl\u00fdch '+(mo-cov)+' m\u011bs. 0,5 %'))
-        : pct(epAcq) };
+    // Starší řádek bez rozpadu: podíl akvizice se dopočítá ze sazby.
+    const _base=(base!=null)?base:0.015;
+    const tier=isAds?0.25:((rn>=0.15)?0.20:0.10);
+    let f=(tier>_base)?((rn-_base)/(tier-_base)):1;
+    f=Math.max(0, Math.min(1, f));
+    const rate=epAcq*f + EP_BASE*(1-f);
+    return { fee: gross*rate, note: pct(rate) };
   };
+
 
   // BEZNY SHEET, ne vlastni fixed overlay. Fixed pres cely viewport prekryl v dashmode
   // levy sidebar a navic sedel nad prohlizecem dokladu.
@@ -31744,7 +31751,12 @@ async function openMtlCommissions(scope){
       const _acqPct=(_rn!=null && _blend && _br!=null)
         ? Math.round((((_rn*_mo)-(_br*(_mo-_acqMo2)))/_acqMo2)*1000)/10
         : null;
-      const _r=(_rn!=null)?(' \u00b7 '+(Math.round(_rn*1000)/10)+' %'+(_isAcq?' \ud83e\uddf2':'')):'';
+      // MAGNET vs. MEGAFON. Obojí je akvizice, ale jiná: 🧲 člen, kterého si našel sám v appce,
+      // 📣 člen z placené reklamy MTL. Liší se sazbou (10 % vs. 25 %) i tím, jak dlouho platí
+      // (jednou vs. 12 měsíců) -- se stejnou ikonou to majitel nemá jak rozlišit.
+      const _isAds=(t.acq_source==='mtl_ads');
+      const _acqIco=_isAds?' \ud83d\udce3':' \ud83e\uddf2';
+      const _r=(_rn!=null)?(' \u00b7 '+(Math.round(_rn*1000)/10)+' %'+(_isAcq?_acqIco:'')):'';
       // Když známe obě sazby, vypíšou se; když ne, řekne se aspoň princip. Bez čísel je to
       // pořád lepší než holé „3 %", u kterého nikdo nepozná, z čeho vyšlo.
       const _rNote=_blend
@@ -31783,10 +31795,21 @@ async function openMtlCommissions(scope){
             : ('<span style="font-weight:700;color:var(--dark);">'+fmtPrice(_fee(t),_cu)+' '+_curSym(_cu)+'</span>'))
         +'</div></div>';
     }).join('')
-      + (_hasAcq ? ('<div style="font-size:11px;color:var(--light);line-height:1.5;padding:8px 2px 2px;">\ud83e\uddf2 '
-          + (EN ? 'One-off finder\u2019s fee for a member MTL brought you. Their next payments go at your normal rate.'
-                : 'Jednor\u00e1zov\u00fd poplatek za \u010dlena, kter\u00e9ho ti p\u0159ivedlo MTL. Jeho dal\u0161\u00ed platby u\u017e jdou za b\u011b\u017enou sazbu.')
-          + '</div>') : '');
+      + (function(){
+          // Dvě vysvětlivky, každá jen když se v seznamu opravdu vyskytuje.
+          const _rows=(m.rows||[]);
+          const _anyAds=_rows.some(function(t){ return t.acq_source==='mtl_ads'; });
+          const _anyFind=_hasAcq && _rows.some(function(t){ return t.acq_source!=='mtl_ads'; });
+          const _st='<div style="font-size:11px;color:var(--light);line-height:1.5;padding:8px 2px 0;">';
+          return (_anyFind?(_st+'\ud83e\uddf2 '
+              + (EN ? 'One-off finder\u2019s fee for a member who found you in the app. Their next payments go at your normal rate.'
+                    : 'Jednor\u00e1zov\u00fd poplatek za \u010dlena, kter\u00fd t\u011b na\u0161el v appce. Jeho dal\u0161\u00ed platby u\u017e jdou za b\u011b\u017enou sazbu.')
+              +'</div>'):'')
+            + (_anyAds?(_st+'\ud83d\udce3 '
+              + (EN ? 'A member who came from paid MTL advertising. The higher rate applies to their membership for 12 months.'
+                    : '\u010clen, kter\u00fd p\u0159i\u0161el z placen\u00e9 reklamy MTL. Vy\u0161\u0161\u00ed sazba plat\u00ed na jeho \u010dlenstv\u00ed 12 m\u011bs\u00edc\u016f.')
+              +'</div>'):'');
+        })();
     };
     _draw();
     _loadParticipants(m.rows.map(function(t){ return t.id; })).then(function(ch){ if(ch && wrap.style.display!=='none') _draw(); });
