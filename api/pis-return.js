@@ -128,7 +128,11 @@ export async function pisSideEffects(rec, tbl){
       // ani provize -- a nikdo se to nedozvi. Chyba proto jde do logu i s odpovedi serveru.
       const _rc=await fetch(APP_URL+'/api/record-cash',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(_body) });
       if(!_rc.ok){ let _t=''; try{ _t=await _rc.text(); }catch(_e){}
-        console.error('[pis] record-cash', _rc.status, _t.slice(0,300), 'tbl='+tbl, 'row='+rec.id); }
+        console.error('[pis] record-cash', _rc.status, _t.slice(0,300), 'tbl='+tbl, 'row='+rec.id);
+        // Duvod musi jit i VEN z funkce, ne jen do logu: jinak se na nej neda podivat jinak
+        // nez pres konzoli Vercelu a hleda se naslepo.
+        try{ globalThis.__mtlRecordCash={ status:_rc.status, text:String(_t).slice(0,300), url:APP_URL+'/api/record-cash' }; }catch(_e){}
+      } else { try{ globalThis.__mtlRecordCash={ status:_rc.status, ok:true }; }catch(_e){} }
       } }catch(e){ console.error('[pis] record-cash throw', e && e.message); }
   if(_event){ try{ await fetch(APP_URL+'/api/ticket-email',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ ticketId:rec.id }) }); }catch(e){} }
   try{ if(_event){ let target=(_evP==='coach')?_evC:null; if(!target && _evOrg){ const o=await sb.from('organizations').select('owner_id').eq('id',_evOrg).maybeSingle(); target=o.data&&o.data.owner_id; } if(!target && _evG){ const g=await sb.from('gyms').select('owner_id').eq('id',_evG).maybeSingle(); target=g.data&&g.data.owner_id; } if(target) await sb.from('notifications').insert({ user_id:target, type:'booking', read:false, message:'\ud83c\udf9f\ufe0f Nov\u00fd prodej vstupenky (p\u0159evodem): '+(rec.buyer_name||'Z\u00e1kazn\u00edk'), data:JSON.stringify({ kind:'pis_payment_in', event_id:rec.event_id, student:(rec.buyer_name||''), amt:(rec.amount!=null?String(rec.amount):''), sym:(rec.currency||'CZK') }) }); }
@@ -257,13 +261,14 @@ async function fbxReturn(req, res, mtid){
     // chyby konci v logu, ktery nikdo necte. Odpoved proto rovnou rekne, jestli k platbe
     // existuje transakce a doklad -- bez toho se hledalo naslepo.
     let _tx=null, _dok=null;
+    const _rcDiag=(function(){ try{ return globalThis.__mtlRecordCash||null; }catch(e){ return null; } })();
     try{
       const t=await sb.from('transactions').select('id').eq('source_booking_id', String(rec.id)).limit(1);
       _tx=(t.data&&t.data[0]&&t.data[0].id)||null;
       if(_tx){ const d=await sb.from('doklady').select('doklad_no').eq('transaction_id', _tx).limit(1);
         _dok=(d.data&&d.data[0]&&d.data[0].doklad_no)||null; }
     }catch(e){}
-    return wantsHtml ? back('fbx=ok') : res.status(200).json({ ok:true, status:out.code, paid:true, table:tbl, id:rec.id, transakce:_tx, doklad:_dok });
+    return wantsHtml ? back('fbx=ok') : res.status(200).json({ ok:true, status:out.code, paid:true, table:tbl, id:rec.id, transakce:_tx, doklad:_dok, zauctovani:_rcDiag });
   }
   if(out.failed){ try{ await sb.from(tbl).update({ status:'cancelled', pis_failed_at:new Date().toISOString() }).eq('id', rec.id); }catch(e){} }
   return wantsHtml ? back('fbx=fail') : res.status(200).json({ ok:true, status:out.code, paid:false });
