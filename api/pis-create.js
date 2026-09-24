@@ -103,7 +103,7 @@ function pickBankUrl(links) {
 // /api/pis-create a rozhoduje se tady podle platform_config.pis_provider. Drive to byl
 // samostatny soubor a skoncilo to tim, ze se v nem opakovaly chyby, ktere tady uz davno
 // vyresene byly -- specificke je jen prihlaseni, adresy a tvar tela.
-import crypto from 'crypto';
+// (crypto se importuje nahoře na řádku 21 -- druhý import by shodil celou funkci)
 import { fbxCall, psuIpFrom, FBX_SANDBOX, FBX_MAX_SANDBOX, MERCHANT_ID as FBX_MERCHANT } from './_fbx.js';
 
 const PIS_TABLES = ['gym_bookings', 'gym_memberships', 'bookings', 'event_tickets', 'cohort_members', 'merch_orders'];
