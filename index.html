@@ -9593,15 +9593,52 @@ async function loadCoachReviews(coachId){
     .not('rating','is',null)
     .order('created_at',{ascending:false});
   const allReviews = (data||[]).filter(r=>r.rating);
-  if(!allReviews.length){ box.innerHTML = `<p style="font-size:13px;color:var(--light);">${L('Zatím žádné hodnocení.')}</p>`; return; }
-  const withText = allReviews.filter(r=>r.review && r.review.trim());
-  const starOnly = allReviews.filter(r=>!(r.review && r.review.trim()));
-  const shown = [...withText.slice(0,5), ...starOnly.slice(0,5)];
-  // dohledej jména studentů z profiles
+  if(!allReviews.length){ box.innerHTML = `<p style="font-size:13px;color:var(--light);">${L('Zat\u00edm \u017e\u00e1dn\u00e9 hodnocen\u00ed.')}</p>`; return; }
+
+  // JEDNA KARTA NA STUDENTA. Skóre počítá jeden hlas na studenta (ten poslední), ale profil
+  // ukazoval všechna hodnocení -- kdo chodí týdně, zaplnil kouči profil dvaceti recenzemi,
+  // z nichž do průměru šla jedna. Číslo nad seznamem a seznam si tak odporovaly.
+  // Novější hodnocení převáží, starší se skryje pod ně a jde rozbalit.
+  const byStudent = {};
+  allReviews.forEach(function(r){
+    const k = r.student_id || ('x'+Math.random());
+    if(!byStudent[k]) byStudent[k] = [];
+    byStudent[k].push(r);
+  });
+  const latest = Object.keys(byStudent).map(function(k){
+    const arr = byStudent[k].sort(function(a,b){ return new Date(b.created_at) - new Date(a.created_at); });
+    return Object.assign({}, arr[0], { _older: arr.slice(1) });
+  });
+
+  // Kolik potvrzených lekcí měl student u kouče ke dni hodnocení -- „po 14 lekcích" říká víc
+  // než hvězdičky samotné a je to údaj, který nikdo jiný nemá.
+  const lessonCount = {};
+  try{
+    const { data: all } = await supaClient.from('bookings')
+      .select('student_id,training_date,student_confirmed,coach_confirmed')
+      .eq('coach_id', coachId).eq('student_confirmed', true).eq('coach_confirmed', true);
+    latest.forEach(function(r){
+      const den = new Date(r.created_at).getTime();
+      lessonCount[r.student_id] = (all||[]).filter(function(b){
+        return b.student_id===r.student_id && new Date(b.training_date||0).getTime() <= den;
+      }).length;
+    });
+  }catch(e){}
+
+  const withText  = latest.filter(r=>r.review && r.review.trim());
+  const starOnly  = latest.filter(r=>!(r.review && r.review.trim()));
+  // Nejdřív podle zkušenosti pisatele, pak podle data: recenze po čtrnácti lekcích má jinou
+  // váhu než dojem z první hodiny.
+  withText.sort(function(a,b){
+    const la=lessonCount[a.student_id]||0, lb=lessonCount[b.student_id]||0;
+    return (lb-la) || (new Date(b.created_at)-new Date(a.created_at));
+  });
+  const shown = withText.slice(0,5);
   const ids = [...new Set(shown.map(r=>r.student_id))];
   const { data: profs } = await supaClient.from('profiles').select('id, name').in('id', ids);
   const nameMap = {};
   (profs||[]).forEach(p=>{ nameMap[p.id]=p.name; });
+
   const card = (r)=>{
     const full = nameMap[r.student_id] || 'Student';
     const parts = full.trim().split(/\s+/);
@@ -9612,9 +9649,19 @@ async function loadCoachReviews(coachId){
       ? `<span style="font-size:11px;font-weight:600;color:var(--blue);background:#E8F0FF;border-radius:6px;padding:1px 6px;margin-left:6px;">${L('🌐 Online')}</span>`
       : `<span style="font-size:11px;font-weight:600;color:var(--mid);background:var(--bg);border-radius:6px;padding:1px 6px;margin-left:6px;">${L('📍 Osobní lekce')}</span>`;
     const disputed = (r.coach_confirmed===false) ? ` <span style="color:var(--light);font-size:11px;">${L('· kouč nepotvrdil že lekce proběhla')}</span>` : '';
+    // Po kolika lekcích recenze vznikla a případná starší hodnocení téhož studenta.
+    const _ln = lessonCount[r.student_id] || 0;
+    const _po = _ln>1 ? `<div style="font-size:11.5px;color:var(--light);margin-bottom:4px;">${LANG==='en'?('after '+_ln+' lessons'):('po '+_ln+' lekc\u00edch')}</div>` : '';
+    const _old = (r._older && r._older.length)
+      ? `<details style="margin-top:6px;"><summary style="font-size:11.5px;color:var(--light);cursor:pointer;">${LANG==='en'?('older ratings ('+r._older.length+')'):('star\u0161\u00ed hodnocen\u00ed ('+r._older.length+')')}</summary>`
+        + r._older.map(function(o){ return `<div style="font-size:12px;color:var(--light);margin-top:6px;">${'\u2b50'.repeat(o.rating)} \u00b7 ${timeAgo(o.created_at)}${o.review?(' \u2014 \u201e'+escapeHtml(o.review)+'\u201c'):''}</div>`; }).join('')
+        + `</details>`
+      : '';
     return `<div class="review">
-      <div class="review-head"><div class="review-name">${display}${typeBadge}</div><div class="review-meta">${stars} · ${when}${disputed}</div></div>
-      ${r.review ? `<p class="review-text">"${escapeHtml(r.review)}"</p>` : ''}
+      <div class="review-head"><div class="review-name">${display}${typeBadge}</div><div class="review-meta">${stars} \u00b7 ${when}${disputed}</div></div>
+      ${_po}
+      ${r.review ? `<p class="review-text">\"${escapeHtml(r.review)}\"</p>` : ''}
+      ${_old}
     </div>`;
   };
   const subhdr = (t)=>`<div style="font-size:12px;font-weight:700;color:var(--mid);margin:4px 0 8px;">${t}</div>`;
@@ -9624,10 +9671,15 @@ async function loadCoachReviews(coachId){
     withText.slice(0,5).forEach(r=>{ html += card(r); });
     if(withText.length>5) html += `<p style="font-size:12px;color:var(--light);text-align:center;padding:2px 0 10px;">+ ${withText.length-5} ${LANG==='en'?'more written reviews':'dalších psaných recenzí'}</p>`;
   }
+  // HVĚZDIČKY BEZ TEXTU NEJSOU RECENZE. Pět prázdných karet nic neříká; stačí je sečíst.
+  // Do průměru nad seznamem jdou dál stejně jako dřív.
   if(starOnly.length){
-    html += subhdr(L('⭐ Další hodnocení')+(withText.length?'':' '));
-    starOnly.slice(0,5).forEach(r=>{ html += card(r); });
-    if(starOnly.length>5) html += `<p style="font-size:12px;color:var(--light);text-align:center;padding:2px 0 0;">+ ${starOnly.length-5} ${LANG==='en'?'more ratings':'dalších hodnocení'}</p>`;
+    const _pr = starOnly.reduce(function(a,r){ return a+(Number(r.rating)||0); },0)/starOnly.length;
+    const _prS = (Math.round(_pr*10)/10).toString().replace('.', LANG==='en'?'.':',');
+    html += `<p style="font-size:12px;color:var(--light);text-align:center;padding:10px 0 0;">`
+      + (LANG==='en' ? ('and ' + starOnly.length + ' more ratings without a comment \u00b7 \u2300 ' + _prS)
+                     : ('a dal\u0161\u00edch ' + starOnly.length + ' hodnocen\u00ed bez koment\u00e1\u0159e \u00b7 \u2300 ' + _prS))
+      + `</p>`;
   }
   box.innerHTML = html;
 }
@@ -46030,8 +46082,46 @@ let _rateQueue = [];
 let _rateCurrent = null;
 let _rateStars = 0;
 
+// ═══ KDY SE PTÁT NA HODNOCENÍ ═══════════════════════════════════════════════════════════
+// Po PRVNÍ potvrzené lekci u daného kouče vždycky. Pak už jen když od posledního hodnocení
+// uplynuly TŘI MĚSÍCE a přibylo aspoň PĚT lekcí. Dřív se appka ptala po každé lekci: kdo
+// chodí dvakrát týdně, dostal výzvu osmkrát měsíčně a přestal ji číst. Skóre přitom počítá
+// jeden hlas na studenta, takže těch dalších sedm hodnocení stejně nikam nešlo.
+const RATE_COOLDOWN_DAYS = 90;
+const RATE_COOLDOWN_LESSONS = 5;
+// Vrací množinu id koučů, na které se teď ptát NEMÁ.
+async function _ratingCooldown(){
+  const mute=new Set();
+  if(!currentUser) return mute;
+  try{
+    const { data } = await supaClient.from('bookings')
+      .select('coach_id,rating,created_at,training_date,status,student_confirmed,coach_confirmed')
+      .eq('student_id', currentUser.id).not('coach_id','is',null);
+    const rows=data||[];
+    const lastRated={};                       // kouč -> datum posledního hodnocení
+    rows.forEach(function(b){
+      if(b.rating==null) return;
+      const t=new Date(b.created_at||b.training_date||0).getTime();
+      if(!lastRated[b.coach_id] || t>lastRated[b.coach_id]) lastRated[b.coach_id]=t;
+    });
+    Object.keys(lastRated).forEach(function(cid){
+      const since=lastRated[cid];
+      const dnu=(Date.now()-since)/86400000;
+      // Kolik potvrzených lekcí u toho kouče od té doby přibylo.
+      const lekci=rows.filter(function(b){
+        if(b.coach_id!==cid) return false;
+        if(!(b.student_confirmed && b.coach_confirmed)) return false;
+        return new Date(b.training_date||b.created_at||0).getTime() > since;
+      }).length;
+      if(!(dnu>=RATE_COOLDOWN_DAYS && lekci>=RATE_COOLDOWN_LESSONS)) mute.add(cid);
+    });
+  }catch(e){}
+  return mute;
+}
+
 async function checkPastLessons(){
   if(!currentUser) return;
+  const _muted = await _ratingCooldown();
   const now = new Date();
   const cutoff = new Date(now.getTime() - 3*3600*1000); // 3h po in-person lekci
   const cutoffOnline = new Date(now.getTime() - 3*24*3600*1000); // 3 dny po online objednávce
@@ -46040,6 +46130,9 @@ async function checkPastLessons(){
   const { data: sb } = await supaClient.from('bookings').select('*')
     .eq('student_id', currentUser.id).eq('status','active').is('rating', null);
   (sb||[]).forEach(b=>{
+    // Kouč, u kterého student nedávno hodnotil, se přeskočí -- hodnotí se kouč, ne formát,
+    // takže lhůta platí pro online i osobní lekce dohromady.
+    if(b.coach_id && _muted.has(b.coach_id)) return;
     const isOnline = b.type==='online';
     if(isOnline){ if(b.fulfilled && !b.rated) _rateQueue.push({type:'student', booking:b, online:true}); return; }
     const dt = new Date(`${b.training_date}T${(b.training_time||'00:00')}:00`);
