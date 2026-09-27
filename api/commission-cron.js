@@ -163,7 +163,9 @@ function payDueBlock(en, sumsByCur, ym, suspendAt, retryAt) {
     + row(en ? 'What for' : 'Za co', en ? 'MTL commission on cash, QR and bank payments' : 'provize MTL z hotovosti, QR a převodů')
     // "Vyuctoval" znelo, jako by slo o vystaveny doklad -- ten se vystavuje az po uhrade.
     + row(en ? 'Payee' : 'Příjemce platby', MTL_ID.name + (MTL_ID.ico ? (', IČO ' + MTL_ID.ico) : ''))
-    + (rStr ? row(en ? 'Next automatic attempt' : 'Další automatický pokus o stržení', rStr) : '')
+    // DALSI POKUS SE NESLIBUJE, KDYZ UZ ZADNY NEBUDE. Kdyz by pripadl az za datum pozastaveni,
+    // mail tvrdil "zkusime 30. 9." a o radek niz "ucet pozastavime 29. 9.".
+    + ((rStr && (!suspendAt || new Date(retryAt) < new Date(suspendAt))) ? row(en ? 'Next automatic attempt' : 'Další automatický pokus o stržení', rStr) : '')
     + (dStr ? row(en ? 'Account suspended on' : 'Pozastavení účtu', dStr) : '')
     + '</table>'
     + `<p style="font-size:12px;color:#666;line-height:1.6;">`
@@ -297,10 +299,17 @@ let deferredMin = 0;
       // ---- BILLING (on/after the 6th, needs a card, 3-day retry spacing) ----
       // POJISTKA. Kdyby se termin z jakehokoli duvodu zasekl v budoucnosti (spatne ulozena
       // hodnota, zmena casoveho pasma), po peti dnech od posledniho selhani se zkusi tak jako tak.
-      const _stuck = g.commission_failed_at
-        && (Date.now() - new Date(g.commission_failed_at).getTime() > 5 * 86400000)
-        && (Date.now() - new Date(g.commission_next_retry || 0).getTime() > -5 * 86400000);
-      const retryReady = isRetryReady(g.commission_next_retry) || _stuck || (_force && _forceGym === String(gid));
+      // POJISTKA JEN PRO ZASEKNUTY TERMIN, ne pro stare selhani. Puvodne se ptala na stari
+      // commission_failed_at -- jenze to je datum PRVNIHO selhani a zustava, takze po peti
+      // dnech zacal cron zkouset strhavat KAZDY DEN misto jednou za tri.
+      const _stuck = !g.commission_next_retry
+        || (Date.now() - new Date(g.commission_next_retry).getTime() > 5 * 86400000);
+      // POZASTAVENY UCET SE UZ NESTRHAVA. Sluzba je zastavena, takze automaticke pokusy nemaji
+      // co vymahat -- klub uhradi tlacitkem "Zaplatit hned" a tim se pozastaveni zrusi.
+      // Vynucene dobiti (?force=1) projde i tak, kvuli reseni sporu.
+      const retryReady = !g.account_suspended
+        && (isRetryReady(g.commission_next_retry) || _stuck)
+        || (_force && _forceGym === String(gid));
       if (!(billDay || (_force && _forceGym === String(gid)))) skipped.push({ gym: gid, why: 'not-bill-day' });
       else if (!retryReady) skipped.push({ gym: gid, why: 'waiting', until: g.commission_next_retry });
       else if (!(g.commission_card_customer && g.commission_card_pm)) skipped.push({ gym: gid, why: 'no-card' });
