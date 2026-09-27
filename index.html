@@ -9210,6 +9210,10 @@ const { data, error } = await supaClient
     const dayName = dowShort()[d.getDay()];
     const dateStr = `${dayName} ${d.getDate()}.${d.getMonth()+1}.`;
     const _soon = new Date(`${slot.date}T${slot.time}:00`) < _lowRefundFrom;
+    // Pravidlo o vraceni 50 % plati jen u karty -- tam penize vraci MTL pres Stripe. U prevodu
+    // a QR je MTL nedrzi, takze vraceni je vec kouce a slibovat konkretni procento by bylo
+    // zavadejici. `c` je tady kouc, jehoz sloty se kresli.
+    const _cIsQr = (typeof _isQrProv==='function') ? _isQrProv(c) : false;
     const el = document.createElement('div');
     el.className = 'slot-item';
     const _scap=Number(slot.capacity)||1;
@@ -9223,7 +9227,7 @@ const { data, error } = await supaClient
     const _sk=(_scap>1?`<div style="font-size:11px;font-weight:700;color:var(--red);margin-top:3px;">👥 ${LANG==='en'?'Private':'Soukromka'} 1:${_scap}${_sPx?(' · '+_sPx):''}</div>`:(_sPx?`<div style="font-size:11px;font-weight:600;color:var(--mid);margin-top:3px;">${_sPx}</div>`:''))+_sWhy;
     // Datum je v pásu nahoře -- v každém řádku by se jen opakovalo, u osmdesáti termínů
     // osmdesátkrát ten samý text.
-    el.innerHTML = `<div><div class="slot-time">${slot.time}${slot.end_time?('\u2013'+slot.end_time):''}</div>${_sk}${_soon?`<div style="font-size:11px;color:#B26A00;font-weight:600;margin-top:3px;">⚠️ ${LANG==='en'?'Under 16 h ahead — cancelling returns 50%':'Méně než 16 h předem — při zrušení 50 %'}</div>`:''}</div><div class="slot-arrow">→</div>`;
+    el.innerHTML = `<div><div class="slot-time">${slot.time}${slot.end_time?('\u2013'+slot.end_time):''}</div>${_sk}${(_soon && !_cIsQr)?`<div style="font-size:11px;color:#B26A00;font-weight:600;margin-top:3px;">\u26a0\ufe0f ${LANG==='en'?'Under 16 h ahead \u2014 cancelling returns 50%':'M\u00e9n\u011b ne\u017e 16 h p\u0159edem \u2014 p\u0159i zru\u0161en\u00ed 50 %'}</div>`:((_soon && _cIsQr)?`<div style="font-size:11px;color:#B26A00;font-weight:600;margin-top:3px;">\u26a0\ufe0f ${LANG==='en'?'Under 16 h ahead \u2014 refund is up to the coach':'M\u00e9n\u011b ne\u017e 16 h p\u0159edem \u2014 vr\u00e1cen\u00ed \u0159e\u0161\u00ed\u0161 s kou\u010dem'}</div>`:'')}</div><div class="slot-arrow">→</div>`;
     el.onclick = ()=>selectSlot(slot, c);
     list.appendChild(el);
   });
@@ -9433,8 +9437,8 @@ function openProfile(coachObj){
       if(_isQrProv(c)){
         if(_ti) _ti.textContent='🏦';
         _tt.innerHTML = (LANG==='en'
-          ? '<strong>You pay by bank transfer.</strong> Payment for services is non-refundable by default. Any refund is for you to arrange with the provider directly.'
-          : '<strong>Platíš bankovním převodem.</strong> Úhrada za služby je v základu nevratná. Případné možnosti vrácení řeš s poskytovatelem přímo.');
+          ? '<strong>You pay by bank transfer.</strong> The money goes straight to the provider; MTL never holds it. Refunds are therefore arranged with them under their terms; your statutory rights are not affected.'
+          : '<strong>Platíš bankovním převodem.</strong> Peníze jdou přímo poskytovateli, MTL je nedrží. Vrácení proto řešíš s ním podle jeho podmínek; tvoje zákonná práva tím nejsou dotčena.');
       } else {
         if(_ti) _ti.textContent='💳';
         // Soukromka má jinou hranici než klubová lekce: 16 h, pak 50 %, po termínu nic.
@@ -11704,10 +11708,19 @@ async function _unpaidOpenCount(){
     supaClient.from('gym_memberships').select('id',{count:'exact',head:true}).eq('student_id',currentUser.id).in('status',OPEN).gte('created_at',SINCE),
     supaClient.from('event_tickets').select('id',{count:'exact',head:true}).eq('buyer_id',currentUser.id).in('status',OPEN).gte('created_at',SINCE),
     supaClient.from('cohort_members').select('id',{count:'exact',head:true}).eq('student_id',currentUser.id).in('status',OPEN).gte('created_at',SINCE),
-    supaClient.from('merch_orders').select('id',{count:'exact',head:true}).eq('buyer_id',currentUser.id).in('status',OPEN).gte('created_at',SINCE),
+    // merch_orders nema buyer_id (to ma jen event_tickets) -- dotaz na nej padal a cely
+    // vypocet limitu s nim.
+    supaClient.from('merch_orders').select('id',{count:'exact',head:true}).eq('student_id',currentUser.id).in('status',OPEN).gte('created_at',SINCE),
   ];
   let n=0;
-  try{ const rs=await Promise.all(q); rs.forEach(function(r){ n+=(r&&r.count)||0; }); }catch(e){}
+  // Kazda tabulka zvlast: kdyz jeden dotaz spadne (chybejici sloupec, politika), nesmi
+  // shodit vypocet limitu -- a hlavne se musi dat poznat KTERY.
+  const NAMES=['bookings','gym_bookings','gym_memberships','event_tickets','cohort_members','merch_orders'];
+  const rs=await Promise.allSettled(q);
+  rs.forEach(function(r,i){
+    if(r.status==='fulfilled'){ n+=(r.value&&r.value.count)||0; if(r.value&&r.value.error) console.error('[limit] '+NAMES[i], r.value.error.message); }
+    else console.error('[limit] '+NAMES[i], (r.reason&&r.reason.message)||r.reason);
+  });
   return n;
 }
 // Vrací true, když se SMÍ pokračovat. Jinak to řekne a nabídne, kde to vyřešit.
@@ -13131,7 +13144,9 @@ function _waiverLang(){ return (WAIVER_TPL[LANG]?LANG:'cs'); }
 function _waiverTemplate(){
   const g=_myGymData||{};
   const L=_waiverLang();
-  const nm=g.name||(L==='en'?'[Club name]':'[N\u00e1zev klubu]');
+  // PRAVNI NAZEV, ne nazev v appce. Provozni rad je pravni dokument: musi v nem stat subjekt,
+  // ktery sluzbu poskytuje ("Muay Thai Lab s.r.o."), ne prezdivka klubu v MTL ("MTL Brno").
+  const nm=g.legal_name||g.name||(L==='en'?'[Legal name]':'[Pr\u00e1vn\u00ed n\u00e1zev]');
   const ico=g.tax_id||'';
   let discs=[];
   try{ discs=(typeof parseDisc==='function'?parseDisc(g.disciplines):[])||[]; }catch(e){}
@@ -13964,7 +13979,7 @@ async function openGymProfile(g){
     <div id="gpMerchSection" style="margin:4px 0 14px;"></div>
     <div class="sec-lbl" style="margin-top:18px;">${LANG==='en'?'Why book through MTL':'Proč rezervovat přes MTL'}</div>
     ${(_isQrProv(g) ? '' : `<div class="info-box" style="background:#EEF2F6;"><span style="font-size:20px;flex-shrink:0;">☑️</span><p style="color:#475569;"><strong>Stripe:</strong> ${LANG==='en'?'Payments via Stripe — the reservation is prepaid, so the spot is held, and MTL returns the money if the class falls through.':'Platby přes Stripe — rezervace je předplacená, takže místo drží, a když lekce odpadne, MTL peníze vrátí.'}</p></div>`)}
-    <div class="info-box" style="background:#EEF3F8;"><span style="font-size:20px;flex-shrink:0;">${_isQrProv(g)?'🏦':'💳'}</span><p style="color:#2b4a63;"><strong>${_isQrProv(g)?(LANG==='en'?'You pay by bank transfer.':'Platíš bankovním převodem.'):(LANG==='en'?'You pay the club through Stripe.':'Platíš klubu přes Stripe.')}</strong> ${_isQrProv(g)?(LANG==='en'?' Payment for services is non-refundable by default. Any refund is for you to arrange with the provider directly.':' Úhrada za služby je v základu nevratná. Případné možnosti vrácení řeš s poskytovatelem přímo.'):(LANG==='en'?' Cancel 6+ h ahead → 95% back; if the club cancels, 100% back automatically.':' Zrušíš 6+ h předem → 95 % zpět; když zruší klub, 100 % zpět automaticky.')}</p></div>
+    <div class="info-box" style="background:#EEF3F8;"><span style="font-size:20px;flex-shrink:0;">${_isQrProv(g)?'🏦':'💳'}</span><p style="color:#2b4a63;"><strong>${_isQrProv(g)?(LANG==='en'?'You pay by bank transfer.':'Platíš bankovním převodem.'):(LANG==='en'?'You pay the club through Stripe.':'Platíš klubu přes Stripe.')}</strong> ${_isQrProv(g)?(LANG==='en'?' The money goes straight to the provider; MTL never holds it. Refunds are therefore arranged with them under their terms; your statutory rights are not affected.':' Peníze jdou přímo poskytovateli, MTL je nedrží. Vrácení proto řešíš s ním podle jeho podmínek; tvoje zákonná práva tím nejsou dotčena.'):(LANG==='en'?' Cancel 6+ h ahead → 95% back; if the club cancels, 100% back automatically.':' Zrušíš 6+ h předem → 95 % zpět; když zruší klub, 100 % zpět automaticky.')}</p></div>
     <div class="info-box" style="background:#FFF4E5;"><span style="font-size:20px;flex-shrink:0;">🔄</span><p style="color:#9A5B00;"><strong>${LANG==='en'?'Free reschedule:':'Přesun zdarma:'}</strong> ${LANG==='en'?'Something came up? Move your booking to another date — once, at least 6 h ahead, no cancellation fee.':'Něco ti do toho vlezlo? Přesuň si rezervaci na jiný termín — jednou a nejpozději 6 h předem, bez storna.'}</p></div>
     <div class="info-box" style="background:#F0FBF0;margin-bottom:16px;"><span style="font-size:20px;flex-shrink:0;">📅</span><p style="color:#006040;"><strong>${LANG==='en'?'Smart calendar:':'Smart kalendář:'}</strong> ${LANG==='en'?'After booking, add the class to Google / Apple calendar in one tap.':'Po rezervaci si lekci přidáš do Google / Apple kalendáře jedním kliknutím.'}</p></div>
     <p style="font-size:11px;color:var(--light);line-height:1.5;margin:-6px 2px 14px;">${LANG==='en'?'Note: by booking, the club sees your attendance and membership.':'Pozn.: rezervací uvidí klub tvou docházku a členství.'}</p>
