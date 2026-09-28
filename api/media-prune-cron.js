@@ -5,8 +5,8 @@
 //   2) OSIŘELÁ videa — na soubor se neodkazuje žádný profil ani žádost o ověření
 //   3) fotky klubů po smazaných klubech
 //
-// Certifikační videa se nemažou hned po schválení: zůstávají 90 dní jako doklad o tom, na
-// základě čeho byla disciplína uznána. Teprve pak jdou pryč.
+// Certifikační videa už appka nesbírá (uznávání disciplín bylo zrušeno), takže všechno, na
+// co se neodkazuje profil, je po 90 dnech k mazání.
 //
 // Soubory v coach-videos se jmenují "<uuid vlastníka>-<timestamp>.<přípona>", takže vlastník
 // se pozná z názvu i u souboru, na který se už nic neodkazuje.
@@ -65,15 +65,8 @@ export default async function handler(req, res) {
       if (n) referenced.add(decodeURIComponent(n.split('?')[0]));
     });
 
-    // Certifikacni video ceka na posouzeni primo v profilu (pending_disc_video) -- dokud tam
-    // je, nesmi zmizet, jinak by zakladatel nemel podle ceho disciplinu uznat.
-    try {
-      const pend = await sb('profiles?select=pending_disc_video&pending_disc_video=not.is.null&limit=5000');
-      pend.forEach((q) => {
-        const n2 = String(q.pending_disc_video || '').split('/coach-videos/')[1];
-        if (n2) referenced.add(decodeURIComponent(n2.split('?')[0]));
-      });
-    } catch (e) { out.errors.push('pending_disc_video: ' + e.message); }
+    // Certifikacni videa uz neexistuji: discipliny se pridavaji rovnou, bez schvalovani.
+    // V bucketu po nich zustaly soubory z jara 2026 a tenhle cron je uklidi jako osirela.
 
     const files = await listBucket('coach-videos');
     out.checked += files.length;
