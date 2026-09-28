@@ -20373,7 +20373,7 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData, { subject:
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;">
       <input id="mgDropin" type="number" inputmode="numeric" value="${g.dropin_price||''}" style="flex:1;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:16px;font-family:'DM Sans';">
       <select id="mgCurrency" style="width:108px;padding:13px 8px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';background:#fff;">
-        ${_curOptsHTML(g.currency||_epRegion().currency)}
+        ${_curOptsHTML(g.currency||_regionCur())}
       </select>
     </div>
     <div id="mgDropinBreak" style="display:none;font-size:11.5px;line-height:1.4;border-radius:9px;padding:7px 10px;margin-top:-8px;margin-bottom:8px;"></div>
@@ -37271,7 +37271,23 @@ function showEpReceipt(p){
     w.document.open(); w.document.write(html); w.document.close();
   }catch(e){ try{ w.close(); }catch(_e){} toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
 }
-function _epPrice(){ return {amount:1000, currency:'CZK', label:(LANG==='en'?'1000 CZK':'1000 Kč'), sym:'Kč'}; }
+// CENA PARTNERSTVÍ. Jedno místo pro celou appku; server má protějšek v pay.js
+// (epTierForCountry) a obě čísla musí souhlasit -- kalkulačka „vyplatí se mi EP" už jednou
+// počítala s cenou, kterou nikdo neplatil.
+//
+// Zakládající cena platí pro prvních EP_SPOTS partnerů a zůstává jim, dokud partnerství sami
+// nezruší. Zahraniční pásma (eurozóna 20/40 EUR, USA 25/50 USD) zatím zapojená nejsou:
+// účtuje se v korunách a pod cenou se ukáže přepočet kurzem ECB.
+const EP_SPOTS        = 10;
+const EP_FOUNDING_CZK = 500;
+const EP_LIST_CZK     = 1000;
+function _epPrice(){
+  // Dokud počet obsazených míst neznáme, nabízí se zakládající cena -- server ji při platbě
+  // stejně ověří a je lepší slíbit míň než víc.
+  const founding = (window._epSpotsLeft == null) || (window._epSpotsLeft > 0);
+  const a = founding ? EP_FOUNDING_CZK : EP_LIST_CZK;
+  return { amount:a, currency:'CZK', label:(LANG==='en'?(a+' CZK'):(a+' K\u010d')), sym:'K\u010d', founding:founding };
+}
 function _userCur(){
   var cc=String((currentUser&&(currentUser.stripe_country||currentUser.residence_country||currentUser.billing_country||currentUser.country_code||currentUser.country))||'').toUpperCase();
   if(!cc){ var cu=String((currentUser&&currentUser.currency)||'').toUpperCase(); if(cu) return cu; }
@@ -37317,36 +37333,20 @@ async function _epEnrich(){
     // Počítá se KAŽDÉ aktivní EP, i ručně udělené. Dřív se bral jen ten s předplatným, takže
     // ručně udělená místa se z padesátky neodečítala a počítadlo lhalo.
     const { count }=await supaClient.from('profiles').select('id',{count:'exact',head:true}).eq('partner',true);
-    const EP_SPOTS=50;   // zakládající cena platí pro prvních 50 klubů, pak jde nahoru
-    const left=Math.max(0,EP_SPOTS-(count||0)); const el=$('piSpots');
+    // Počet míst i cena jsou nahoře u _epPrice(), ať se nerozejdou.
+    const left=Math.max(0,EP_SPOTS-(count||0)); window._epSpotsLeft=left; const el=$('piSpots');
     if(el){
       if(left>0){ el.innerHTML='<div style="display:flex;align-items:center;gap:9px;background:#FFF8E6;border:1px solid #E8C24A;border-radius:10px;padding:7px 10px;"><span style="font-size:13px;">\u2b50</span><div style="flex:1;min-width:0;"><div style="font-size:11px;font-weight:800;color:#8a5a00;line-height:1.35;">'+(EN?(left+'/'+EP_SPOTS+' spots at 1000 Kč · then 1500 Kč/mo'):(left+'/'+EP_SPOTS+' míst za 1000 Kč · poté 1500 Kč/měs'))+'</div><div style="height:4px;background:#F0E2B8;border-radius:3px;margin-top:5px;overflow:hidden;"><div style="height:100%;width:'+Math.min(100,Math.round(left/EP_SPOTS*100))+'%;background:linear-gradient(90deg,#E8C24A,#C9A227);"></div></div></div></div>'; }
       else { el.innerHTML='<div style="font-size:12px;color:var(--light);text-align:center;padding:4px 0;">'+(EN?''+EP_SPOTS+' founding places are taken.':'Zakládajících míst ('+EP_SPOTS+') je vyčerpáno.')+'</div>'; }
     }
   }catch(e){}
 }
-function _epRegion(){
-  var cc = String((currentUser&&(currentUser.stripe_country||currentUser.residence_country||currentUser.billing_country||currentUser.country_code||currentUser.country))||'').toUpperCase();
-  if(!cc){ var cu=String((currentUser&&currentUser.currency)||'').toUpperCase(); var M={CZK:'CZ',USD:'US',EUR:'EU_',GBP:'GB',CHF:'CH',PLN:'PL',SEK:'SE',DKK:'DK',NOK:'NO',HUF:'HU',RON:'RO',CAD:'CA',AUD:'AU',NZD:'NZ'}; if(M[cu]) cc=M[cu]; }
-  var EUR89=['AT','BE','HR','CY','EE','FI','FR','DE','GR','IE','IT','LV','LT','LU','MT','NL','PT','SI','ES','BG','EU_']; // SK & CZ are their own tiers; BG joined the euro 1.1.2026
-  function T(co,cu,a,l,sy){ return {country:co,currency:cu,amount:a,label:l,sym:sy}; }
-  if(cc==='CZ') return T('CZ','CZK',1400,'1400 Kč','Kč');
-  if(cc==='SK') return T('SK','EUR',59,'€59','€');
-  if(cc==='GB') return T('GB','GBP',75,'£75','£');
-  if(cc==='CH'||cc==='LI') return T(cc,'CHF',89,'Fr. 89','Fr.');
-  if(cc==='SE') return T('SE','SEK',990,'990 kr','kr');
-  if(cc==='DK') return T('DK','DKK',649,'649 kr','kr');
-  if(cc==='NO') return T('NO','NOK',990,'990 kr','kr');
-  if(cc==='PL') return T('PL','PLN',249,'249 zł','zł');
-  if(cc==='HU') return T('HU','HUF',19900,'19 900 Ft','Ft');
-  if(cc==='RO') return T('RO','RON',229,'229 lei','lei');
-  if(cc==='CA') return T('CA','CAD',139,'CAD 139','CAD');
-  if(cc==='AU') return T('AU','AUD',149,'AUD 149','AUD');
-  if(cc==='NZ') return T('NZ','NZD',169,'NZD 169','NZD');
-  if(EUR89.indexOf(cc)>=0) return T(cc,'EUR',89,'€89','€');
-  return T(cc||'','USD',99,'$99','$');
-}
-// Make sure currentUser.stripe_country is known so _epRegion() shows the right localized EP price
+// Starý regionální ceník EP (Česko 1400 Kč, eurozóna 89 €, USA 99 $ ...) byl zrušen: účtuje
+// se jednotná cena z _epPrice() v korunách a uživateli se pod ní ukáže orientační přepočet
+// kurzem ECB. Funkce zůstávala v kódu a kalkulačka „vyplatí se mi EP" z ní brala částku,
+// takže počítala s cenou, kterou nikdo neplatí. Odstraněno; region se nadále používá jen
+// k výběru měny (_regionCur).
+// Země připojeného Stripe účtu se hodí i bez regionálního ceníku: podíe se podle ní měna
 // (esp. SK vs the EU default - both EUR, only the COUNTRY tells them apart). Reads the connected
 // account's country once via /api/account-status and caches it (in-memory + profile if column exists).
 async function _ensureStripeCountry(){
@@ -37365,7 +37365,7 @@ async function _ensureStripeCountry(){
   }catch(e){}
   return (currentUser&&(currentUser.stripe_country||currentUser.country))||null;
 }
-function _regionCur(){ try{ return _epRegion().currency; }catch(e){ return 'CZK'; } }
+function _regionCur(){ try{ return _epPrice().currency; }catch(e){ return 'CZK'; } }
 function _curSym(c){ c=String(c||'').toUpperCase(); var M={CZK:'Kč',EUR:'€',USD:'$',GBP:'£',CHF:'Fr.',PLN:'zł',SEK:'kr',DKK:'kr',NOK:'kr',HUF:'Ft',RON:'lei',CAD:'CAD',AUD:'AUD',NZD:'NZD'}; return M[c]||c||'Kč'; }
 function _curOptsHTML(sel){ sel=String(sel||'').toUpperCase(); var L=[['CZK','CZK Kč'],['EUR','EUR €'],['USD','USD $'],['GBP','GBP £'],['CHF','CHF Fr.'],['PLN','PLN zł'],['SEK','SEK kr'],['DKK','DKK kr'],['NOK','NOK kr'],['HUF','HUF Ft'],['RON','RON lei'],['CAD','CAD $'],['AUD','AUD $'],['NZD','NZD $']]; return L.map(function(c){ return '<option value="'+c[0]+'"'+(c[0]===sel?' selected':'')+'>'+c[1]+'</option>'; }).join(''); }
 // One delegated listener instead of wiring the toggle at each of the five places that render this
@@ -37521,8 +37521,12 @@ async function _epPaysOff(){
     if(typeof currentUser==='undefined' || !currentUser) return null;
     if(currentUser.partner) return { paysOff:false, isPartner:true };
     if(typeof _ensureStripeCountry==='function'){ try{ await _ensureStripeCountry(); }catch(e){} }
-    const reg=(typeof _epRegion==='function')?_epRegion():{amount:99,currency:'USD',country:''};
-    const monthlyCost=reg.amount, ecur=reg.currency;
+    // SKUTEČNÁ CENA, NE STARÝ REGIONÁLNÍ CENÍK. Tahle kalkulačka brala částku z _epRegion(),
+    // kde má Česko 1400 Kč a eurozóna 89 € -- jenže účtuje se jednotně to, co vrací _epPrice()
+    // (dnes 1000 Kč). Čechovi to tedy tvrdilo, že se partnerství vyplatí od vyššího obratu, než
+    // je pravda, a cizinci to porovnávalo 89 EUR proti obratu v korunách, tedy dvě různé měny.
+    const _ep=(typeof _epPrice==='function')?_epPrice():{amount:1000,currency:'CZK'};
+    const monthlyCost=_ep.amount, ecur=_ep.currency;
     const since=new Date(Date.now()-30*86400000).toISOString();
     let gmv=0;
     try{ const { data }=await supaClient.from('transactions').select('gross_amount,created_at').eq('coach_id',currentUser.id).is('gym_id',null).neq('status','refunded').gte('created_at',since); (data||[]).forEach(t=>{ gmv += (t.gross_amount||0)/100; }); }catch(e){}
@@ -37532,7 +37536,7 @@ async function _epPaysOff(){
     const saving=gainPct*gmv;
     const net=Math.round(saving-monthlyCost);
     const paysOff = (monthlyCost!=null && gainPct>0 && saving>=monthlyCost);
-    return { gmv:Math.round(gmv), saving:Math.round(saving), monthlyCost, ecur, net, paysOff, inCZ:(reg.country==='CZ') };
+    return { gmv:Math.round(gmv), saving:Math.round(saving), monthlyCost, ecur, net, paysOff, inCZ:(ecur==='CZK') };
   }catch(e){ return null; }
 }
 function _epHighlightHtml(po){
