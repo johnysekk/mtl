@@ -905,7 +905,15 @@ export default async function handler(req, res) {
         const sub = typeof s.subscription === 'string' ? s.subscription : (s.subscription && s.subscription.id);
         const cust = typeof s.customer === 'string' ? s.customer : (s.customer && s.customer.id);
         if (uid) {
-          await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: true, partner_sub: sub || null, stripe_customer: cust || null });
+          // CENA SE ULOZI K PROFILU. Stripe si ji drzi u predplatneho, takze klub plati porad
+          // svou -- ale v MTL nebylo nikde videt, kdo ma zakladajicich 500 a kdo cenikovych
+          // 1000. V Adminu se to bez toho nedalo zjistit jinak nez otevrenim Stripe.
+          const _paid = (typeof s.amount_total === 'number') ? Math.round(s.amount_total / 100) : null;
+          const _pcur = String(s.currency || 'czk').toUpperCase();
+          await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, {
+            partner: true, partner_sub: sub || null, stripe_customer: cust || null,
+            ...(_paid ? { partner_price: _paid, partner_currency: _pcur } : {}),
+          });
           await rerateGymMemberships(uid, 3); // existující členství → 3 % od příští faktury (Exclusive Partner)
           await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Byla ti udělena sazba Exclusive MTL Partner — od teď je provize MTL 0,5 % a akviziční pouze 5 %. 🥊' });
           await sbPost('notifications', { user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'system', read: false, message: `⭐ Nový Exclusive MTL Partner (user ${uid}).` });
