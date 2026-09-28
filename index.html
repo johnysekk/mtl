@@ -6477,6 +6477,7 @@ function _mapCoachRow(c){
       rating: c.rating || '5.0',
       reviews: c.reviews || 0,
       textReviews: c.text_reviews || 0,
+      textReviewsFresh: (c.text_reviews_fresh == null ? null : c.text_reviews_fresh),
       discRatings: (function(){ try{ return typeof c.disc_ratings==='string'?JSON.parse(c.disc_ratings||'{}'):(c.disc_ratings||{}); }catch(e){ return {}; } })(),
       discStats: (function(){ try{ return typeof c.disc_stats==='string'?JSON.parse(c.disc_stats||'{}'):(c.disc_stats||{}); }catch(e){ return {}; } })(),
       students: c.students || 0,
@@ -6795,7 +6796,13 @@ function scoreParts(c){
   const volIp=Math.min(Math.log10(ip+1)*18, 16);     // in-person až 16
   const volOn=Math.min(Math.log10(on+1)*16, 10);     // online až 10
   const volume=Math.round(Math.min(volIp+volOn, 25)); // celkem cap 25
-  const engage=Math.round(Math.min((+(c.textReviews||0))*1.4, 15)); // až 15 — jen psané recenze
+  // ČERSTVOST RECENZÍ. Recenze z posledních 12 měsíců váží 1,4 bodu, starší 0,5 -- text
+  // z předloňska pořád něco vypovídá, ale kouč, který rok netrénuje, nemá držet plných 15.
+  // text_reviews_fresh plní recompute_coach_stats (sql-105); dokud migrace neproběhla,
+  // chová se to jako dřív, protože se čerstvé rovnají celku.
+  const _tr=+(c.textReviews||0);
+  const _trF=(c.textReviewsFresh==null) ? _tr : Math.min(+(c.textReviewsFresh||0), _tr);
+  const engage=Math.round(Math.min(_trF*1.4 + Math.max(0,_tr-_trF)*0.5, 15)); // až 15 — jen psané recenze
   let _actR=+(c.activity); if(!(_actR>=0)){ var _ll=c.last_lesson_at||c.lastLesson; if(_ll){ var _dd=(Date.now()-new Date(_ll).getTime())/86400000; _actR=_dd<=30?15:(_dd>=90?0:15*(90-_dd)/60); } else { _actR=0; } }
   const activity=Math.round(Math.min(Math.max(_actR,0), 15)); // až 15 — nedávná aktivita: profil z lekcí (c.activity), deck z last_lesson_at
   return { quality, volume, engage, activity, br:br.toFixed(2), ip, on, lessons:ip+on, reviews:n, treviews:+(c.textReviews||0), total: quality+volume+engage+activity };
@@ -6815,14 +6822,14 @@ function scoreBreakdownHtml(c){
   const en = LANG==='en';
   const title = en ? 'How the score works' : 'Jak se počítá skóre';
   const qDesc = en
-    ? `Average rating from students (avg ${p.br}/5 from ${p.reviews||0}). While there are only a few, the score stays closer to the average of all coaches — so a single enthusiastic rating does not decide it.`
-    : `Průměr hodnocení od studentů (Ø ${p.br}/5 od ${p.reviews||0}). Dokud jich je málo, drží se skóre blíž průměru všech koučů — jedno nadšené hodnocení tedy nerozhodne.`;
+    ? `Average rating from students (avg ${p.br}/5). While there are only a few ratings, the score stays closer to the average of all coaches — so a single enthusiastic rating does not decide it.`
+    : `Průměr hodnocení od studentů (Ø ${p.br}/5). Dokud je hodnocení málo, drží se skóre blíž průměru všech koučů — jedno nadšené hodnocení tedy nerozhodne.`;
   const vDesc = en
-    ? `${p.ip} in-person lessons and ${p.on} online feedbacks (in-person counts more). Another 5 in-person lessons add about ${Math.max(1, Math.round(Math.min(Math.log10(p.ip+6)*18,16)-Math.min(Math.log10(p.ip+1)*18,16)))} points — points rise fast at first, then slower, so skilled newcomers can break in among the seasoned coaches.`
-    : `${p.ip} lekcí naživo a ${p.on} online feedbacků (naživo váží víc). Dalších 5 lekcí naživo přidá asi ${Math.max(1, Math.round(Math.min(Math.log10(p.ip+6)*18,16)-Math.min(Math.log10(p.ip+1)*18,16)))} bodů — body rostou rychle na začátku a pak pomaleji, aby se mezi ostřílené kouče dostali i šikovní nováčci.`;
+    ? `${p.ip} lessons taught${p.on?(' and '+p.on+' online feedbacks'):''}. Another 5 lessons add about ${Math.max(1, Math.round(Math.min(Math.log10(p.ip+6)*18,16)-Math.min(Math.log10(p.ip+1)*18,16)))} points — points rise fast at first, then slower, so skilled newcomers can break in among the seasoned coaches.`
+    : `${p.ip} odtrénovaných lekcí${p.on?(' a '+p.on+' online zpětných vazeb'):''}. Dalších 5 lekcí přidá asi ${Math.max(1, Math.round(Math.min(Math.log10(p.ip+6)*18,16)-Math.min(Math.log10(p.ip+1)*18,16)))} bodů — body rostou rychle na začátku a pak pomaleji, aby se mezi ostřílené kouče dostali i šikovní nováčci.`;
   const eDesc = en
-    ? `${p.treviews} written reviews · each further one adds 1.4 points, up to 15. Only real written feedback counts — stars without text don't belong here.`
-    : `${p.treviews} napsaných recenzí · každá další přidá 1,4 bodu, až do 15. Počítá se jen reálně napsaná zpětná vazba — samotné hvězdičky bez textu sem nepatří.`;
+    ? `${p.treviews} written reviews · 1.4 points each, 0.5 once older than a year, up to 15. Stars without text don't count here.`
+    : `${p.treviews} napsaných recenzí · každá 1,4 bodu, po roce 0,5, až do 15. Samotné hvězdičky bez textu se sem nepočítají.`;
   const aDesc = en
     ? `Recent activity — keeps your score fresh. Full points if you've had a confirmed in-person lesson in the last 30 days, fading to zero by ~90 days idle.`
     : `Nedávná aktivita — drží skóre svěží. Plné body, když jsi měl potvrzenou lekci naživo za posledních 30 dní; klesá k nule kolem 90 dní bez lekce.`;
@@ -6832,6 +6839,10 @@ function scoreBreakdownHtml(c){
       ${bar(en?'🥊 Trained':'🥊 Odtrénováno', p.volume, 25, vDesc, '#2F6FED')}
       ${bar(en?'💬 Written reviews':'💬 Psané recenze', p.engage, 15, eDesc, '#6D4AD1')}
       ${bar(en?'🔥 Activity':'🔥 Aktivita', p.activity, 15, aDesc, '#0F766E')}
+      ${self ? `<div style="font-size:11.5px;color:var(--light);line-height:1.5;border-top:1px dashed var(--border);margin-top:4px;padding-top:9px;">${
+        en ? 'In the student deck distance counts too \u2014 being far can cost more points than the score itself. Where you actually train, you rank higher than this number suggests.'
+           : 'V nab\u00eddce student\u016fm se pod\u00edl\u00ed i vzd\u00e1lenost \u2014 daleko m\u016f\u017ee ub\u00edrat v\u00edc bod\u016f ne\u017e samotn\u00e9 sk\u00f3re. Tam, kde opravdu tr\u00e9nuje\u0161, jsi v\u00fd\u0161, ne\u017e podle tohohle \u010d\u00edsla vypad\u00e1.'
+      }</div>` : ''}
     </div>`;
 }
 
@@ -9383,7 +9394,7 @@ function _renderProfRank(c, disc, discLes, discStu, discOnFb, discOnStu){
   // titul nad ním; číslo se dá ověřit, "Mistr" je jen slovo.
   if($('profRankLabel')) $('profRankLabel').innerHTML = L('MTL skóre');
   if($('profRankScore')){ $('profRankScore').textContent = sc; $('profRankScore').style.color = 'var(--dark)'; }
-  if($('profScoreBreak')){ $('profScoreBreak').innerHTML = scoreBreakdownHtml(cc); $('profScoreBreak').style.display='none'; if($('profRankToggle')) $('profRankToggle').textContent=L('Rozbalit ›'); }
+  if($('profScoreBreak')){ $('profScoreBreak').innerHTML = scoreBreakdownHtml(cc, !!(currentUser && String(cc.profileId||cc.id)===String(currentUser.id))); $('profScoreBreak').style.display='none'; if($('profRankToggle')) $('profRankToggle').textContent=L('Rozbalit ›'); }
   if($('profTier')){
     // Nálepka zrušena -- viz openProfile. Zůstává jen "nový kouč", což je fakt o MTL, ne soud
     // o jeho koučování.
@@ -36454,7 +36465,7 @@ async function _renderCoachAnalyticsInner(coachId, box){
       </label></div>
     </div>
     <div style="font-size:11.5px;font-weight:800;color:var(--mid);text-transform:uppercase;letter-spacing:.03em;margin-bottom:9px;">🤝 ${LANG==='en'?'Active coaches':'Aktivní kouči'}: ${(prof?.coach_ref_score)||0}</div>
-    ${(function(){ var EN=LANG==='en'; var _m=_self?((currentUser&&currentUser.payment_mode)||(currentUser&&currentUser.stripe_account?'stripe':'qr_bank')):((typeof _mtlPayMode==='function'?_mtlPayMode(prof):null)||(prof&&prof.stripe_account?'stripe':'qr_bank')); var _sc=(prof&&prof.coach_ref_score)||0, _bk=!!(prof&&prof.bankai_eligible); var _shOk=_sc>=2, _bnOk=_sc>=5&&_bk; var _shRate=_m==='stripe'?'1,5 %':'2 %', _shKeep=_m==='stripe'?'98,5 %':'98 %'; var card=function(icon,name,rate,keep,ok,pct,req){ return '<div style="background:var(--surf);border:1px solid '+(ok?'#A8E6C0':'var(--border)')+';border-radius:12px;padding:12px 14px;margin-bottom:10px;">'+'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="font-size:14px;font-weight:800;color:var(--dark);">'+icon+' '+name+(ok?' <span style=\'color:#0A7A4F;font-size:12px;\'>✓ '+(EN?'unlocked':'odemčeno')+'</span>':'')+'</div><div style="font-size:13px;font-weight:800;color:var(--dark);white-space:nowrap;">'+rate+'</div></div>'+'<div style="height:7px;background:var(--bg);border-radius:99px;overflow:hidden;margin:9px 0 5px;"><div style="height:100%;width:'+Math.min(100,Math.max(5,pct))+'%;background:'+(ok?'#0A7A4F':'var(--red)')+';border-radius:99px;transition:width .35s;"></div></div>'+'<div style="font-size:11px;color:var(--mid);line-height:1.45;">'+req+'</div></div>'; }; var h=card('🗡️','Shikai',_shRate,_shKeep,_shOk,_sc/2*100, _shOk?(EN?'Unlocked — a better rate on all your prices.':'Odemčeno — výhodnější sazba na všechny tvé ceny.'):(EN?('2 activated referrals ('+_sc+'/2) — activated = they have taught 10 private lessons or have 20 active memberships.'):('2 aktivovaní přivedení ('+_sc+'/2) — aktivovaný = sám už odtrénoval 10 soukromek nebo má 20 aktivních členství.'))); { h+=card('🔥','Bankai',_m==='stripe'?'1 %':'1,25 %',_m==='stripe'?'99 %':'98,75 %',_bnOk,_sc/5*100, _bnOk?(EN?'Unlocked — the lowest rate.':'Odemčeno — nejnižší sazba.'):(EN?('5 active referrals ('+_sc+'/5) — active = they have taught 10 private lessons or have 20 active memberships.'):('5 aktivních přivedených ('+_sc+'/5) — aktivní = sám už odtrénoval 10 soukromek nebo má 20 aktivních členství.'))); }  return h; })()}
+    ${(function(){ var EN=LANG==='en'; var _m=_self?((currentUser&&currentUser.payment_mode)||(currentUser&&currentUser.stripe_account?'stripe':'qr_bank')):((typeof _mtlPayMode==='function'?_mtlPayMode(prof):null)||(prof&&prof.stripe_account?'stripe':'qr_bank')); var _sc=(prof&&prof.coach_ref_score)||0, _bk=!!(prof&&prof.bankai_eligible); var _shOk=_sc>=2, _bnOk=_sc>=5&&_bk; var _shRate=_m==='stripe'?'1,5 %':'2 %', _shKeep=_m==='stripe'?'98,5 %':'98 %'; var card=function(icon,name,rate,keep,ok,pct,req){ return '<div style="background:var(--surf);border:1px solid '+(ok?'#A8E6C0':'var(--border)')+';border-radius:12px;padding:12px 14px;margin-bottom:10px;">'+'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;"><div style="font-size:14px;font-weight:800;color:var(--dark);">'+icon+' '+name+(ok?' <span style=\'color:#0A7A4F;font-size:12px;\'>✓ '+(EN?'unlocked':'odemčeno')+'</span>':'')+'</div><div style="font-size:13px;font-weight:800;color:var(--dark);white-space:nowrap;">'+rate+'</div></div>'+'<div style="height:7px;background:var(--bg);border-radius:99px;overflow:hidden;margin:9px 0 5px;"><div style="height:100%;width:'+Math.min(100,Math.max(5,pct))+'%;background:'+(ok?'#0A7A4F':'var(--red)')+';border-radius:99px;transition:width .35s;"></div></div>'+'<div style="font-size:11px;color:var(--mid);line-height:1.45;">'+req+'</div></div>'; }; var h=card('🗡️','Shikai',_shRate,_shKeep,_shOk,_sc/2*100, _shOk?(EN?'Unlocked — a better rate on all your prices.':'Odemčeno — výhodnější sazba na všechny tvé ceny.'):(EN?('2 activated referrals ('+_sc+'/2) — activated = they have taught 10 private lessons or have 20 active memberships.'):('2 aktivovaní přivedení ('+_sc+'/2) — aktivovaný = sám už odtrénoval 10 soukromek nebo má 20 aktivních členství.'))); { h+=card('🔥','Bankai',_m==='stripe'?'1 %':'1,25 %',_m==='stripe'?'99 %':'98,75 %',_bnOk,_sc/5*100, _bnOk?(EN?'Unlocked — the lowest rate.':'Odemčeno — nejnižší sazba.'):(EN?('5 active referrals ('+_sc+'/5) — active = they have taught 10 private lessons or have 20 active memberships in their own club.'):('5 aktivních přivedených ('+_sc+'/5) — aktivní = sám už odtrénoval 10 soukromek nebo má 20 aktivních členství ve svém klubu.'))); }  return h; })()}
     </div>
     ` : ''}
     ${_self ? '' : `
