@@ -135,24 +135,47 @@ async function handler(req, res) {
 
       // ── Class reminders (~8 h before start): gym classes & drop-ins, gym-local time ──
       try {
-        const win = (cm) => { const d = cm - mins; return d >= 450 && d <= 510; }; // ~8h ahead (7.5–8.5h): matches the 8h client no-remind threshold and clears the 6h Stripe cancel deadline; 60-min wide so the 30-min cron never skips it
-        const resv = await sbGet(`gym_class_reservations?gym_id=eq.${gym.id}&class_date=eq.${date}&reminder_sent=eq.false&select=id,student_id,class_name,class_time,status`);
+        // KDY POSLAT PRIPOMINKU. Tri pravidla, aby nikomu nepiskl telefon v jednu rano:
+        //   rano (zacatek do 9:30)  -> vecer PREDEM, 12,5 h napred; u 9:30 to vyjde presne na 21:00
+        //   pozdeji, kdyz 8 h napred padne pred 7:00 -> rano v 7:00
+        //   jinak                   -> beze zmeny 7,5-8,5 h napred
+        // "Rano" je tu zacatek do 9:30; poptavkovy formular ma vlastni definici (konec do 8:30),
+        // ta se tyka hledani terminu, ne pripominani.
+        const DAY_START = 720;        // 12:00 -- vse, co zacina do poledne, se rika vecer predem
+        const EARLIEST  = 420;        // 7:00  -- driv se nepipa
+        const LATEST_EVE = 1230;      // 20:30 -- pozdeji uz taky ne
+        const LEAD_EVE  = 750;        // 12,5 h napred, pokud se to do stropu vejde
+        // remindAt: cas (min od pulnoci) dne, kdy ma pripominka odejit.
+        // sameDay=false znamena, ze jde o lekci ZITRA a pripomina se dnes vecer.
+        const remindFor = (cm) => (cm <= DAY_START)
+          // 7:00 -> 18:30, 9:30 -> 21:00 by bylo pozde, takze strop: 20:30. 12:00 -> 20:30.
+          ? { at: Math.min(cm + 1440 - LEAD_EVE, LATEST_EVE), sameDay: false }
+          : { at: Math.max(cm - 510, EARLIEST), sameDay: true };
+        const win = (cm, sameDay) => {
+          const r = remindFor(cm);
+          if (r.sameDay !== !!sameDay) return false;
+          return mins >= r.at && mins < r.at + 30;         // cron bezi po 30 minutach
+        };
+        // Ranni lekce se pripomina vecer PREDEM, takze se musi divat i na zitrek.
+        const tomorrow = (function(){ const d=new Date(date+'T12:00:00Z'); d.setUTCDate(d.getUTCDate()+1); return d.toISOString().slice(0,10); })();
+        const resv = await sbGet(`gym_class_reservations?gym_id=eq.${gym.id}&class_date=in.(${date},${tomorrow})&or=(reminder_sent.is.null,reminder_sent.eq.false)&select=id,student_id,class_name,class_date,class_time,status,gym_id`);
         for (const r of (resv || [])) {
           if (!r.student_id || mutedRem.has(r.student_id) || r.status === 'released' || r.status === 'cancelled') continue;
           const t = String(r.class_time || '').split(':'); const cm = Number(t[0]) * 60 + Number(t[1] || 0);
-          if (isNaN(cm) || !win(cm)) continue;
-          const pk = await sbPatch('gym_class_reservations', `id=eq.${r.id}&reminder_sent=eq.false`, { reminder_sent: true });
+          if (isNaN(cm) || !win(cm, r.class_date === date)) continue;
+          // NULL je stejne "neposlano" jako false -- clenske rezervace se zakladaji bez toho pole.
+          const pk = await sbPatch('gym_class_reservations', `id=eq.${r.id}&or=(reminder_sent.is.null,reminder_sent.eq.false)`, { reminder_sent: true });
           if (!pk.ok) continue;
           await sbPost('notifications', { user_id: r.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'class_reminder', gym_id: r.gym_id || null, label: r.class_name || 'Your class', date: r.class_date || '', time: r.class_time || '' }), message: `⏰ Připomínka: ${r.class_name || 'tvůj trénink'} brzy začíná (${r.class_time || ''}). Máš zdravotní omezení? Řekni ho v profilu, uvidí jen tvůj kouč.` });
           created++;
         }
-        const drops = await sbGet(`gym_bookings?gym_id=eq.${gym.id}&class_date=eq.${date}&reminder_sent=eq.false&status=eq.active&select=id,student_id,class_name,class_time,coach_id`);
+        const drops = await sbGet(`gym_bookings?gym_id=eq.${gym.id}&class_date=in.(${date},${tomorrow})&or=(reminder_sent.is.null,reminder_sent.eq.false)&status=eq.active&select=id,student_id,class_name,class_date,class_time,coach_id`);
         const _coachNm = {};
         for (const b of (drops || [])) {
           if (!b.student_id || mutedRem.has(b.student_id)) continue;
           const t = String(b.class_time || '').split(':'); const cm = Number(t[0]) * 60 + Number(t[1] || 0);
-          if (isNaN(cm) || !win(cm)) continue;
-          const pk = await sbPatch('gym_bookings', `id=eq.${b.id}&reminder_sent=eq.false`, { reminder_sent: true });
+          if (isNaN(cm) || !win(cm, b.class_date === date)) continue;
+          const pk = await sbPatch('gym_bookings', `id=eq.${b.id}&or=(reminder_sent.is.null,reminder_sent.eq.false)`, { reminder_sent: true });
           if (!pk.ok) continue;
           let _cn = '';
           if (b.coach_id) { if (_coachNm[b.coach_id] === undefined) { try { const cp = await sbGet(`profiles?id=eq.${b.coach_id}&select=name`); _coachNm[b.coach_id] = (cp[0] && cp[0].name) || ''; } catch (e) { _coachNm[b.coach_id] = ''; } } _cn = _coachNm[b.coach_id]; }
@@ -167,7 +190,7 @@ async function handler(req, res) {
       const dISO = (d) => d.toISOString().slice(0, 10);
       const nowD = new Date();
       const lo = dISO(new Date(nowD.getTime() - 86400000)), hi = dISO(new Date(nowD.getTime() + 2 * 86400000));
-      const bks = await sbGet(`bookings?type=neq.online&status=eq.active&training_date=gte.${lo}&training_date=lte.${hi}&or=(reminder_sent.eq.false,coach_reminder_sent.eq.false)&select=id,coach_id,student_id,coach_name,student_name,training_date,training_time,type,amount,currency,reminder_sent,coach_reminder_sent`);
+      const bks = await sbGet(`bookings?type=neq.online&status=eq.active&training_date=gte.${lo}&training_date=lte.${hi}&or=(reminder_sent.is.null,reminder_sent.eq.false,coach_reminder_sent.is.null,coach_reminder_sent.eq.false)&select=id,coach_id,student_id,coach_name,student_name,training_date,training_time,type,amount,currency,reminder_sent,coach_reminder_sent`);
       if (bks && bks.length) {
         const coachIds = [...new Set(bks.map(b => b.coach_id).filter(Boolean))];
         const tzMap = {};
@@ -176,11 +199,24 @@ async function handler(req, res) {
         for (const b of bks) {
           if (!b.training_date || !b.coach_id) continue;
           const { date, mins } = gymNow(tzMap[b.coach_id] || 'UTC');
-          if (b.training_date !== date) continue;
+          // Ranni lekce se pripomina vecer predem, takze "jen dnesek" uz neplati -- den resi
+          // pravidlo niz (_sameDay).
+          const _tom = (function(){ const d=new Date(date+'T12:00:00Z'); d.setUTCDate(d.getUTCDate()+1); return d.toISOString().slice(0,10); })();
+          if (b.training_date !== date && b.training_date !== _tom) continue;
           const t = String(b.training_time || '').split(':'); const cm = Number(t[0]) * 60 + Number(t[1] || 0);
-          if (isNaN(cm)) continue; const diff = cm - mins; if (diff < 450 || diff > 510) continue; // ~8h ahead, aligned with the group-class window
+          // Stejny nocni klid jako u skupinovek: mezi 21:00 a 7:00 se nepripomina a co by
+          // padlo do noci, dostane clovek rano v prvnim behu po sedme.
+          if (isNaN(cm)) continue;
+          const diff = cm - mins;
+          // Stejna tri pravidla jako u skupinovek; tady se ale porovnava primo cas lekce,
+          // protoze b.training_date uz vime.
+          const _DAY=720, _EARLY=420, _LATE=1230, _LEAD=750;
+          const _at = (cm <= _DAY) ? Math.min(cm + 1440 - _LEAD, _LATE) : Math.max(cm - 510, _EARLY);
+          const _sameDay = (cm > _DAY);
+          if (_sameDay !== (b.training_date === date)) continue;
+          if (!(mins >= _at && mins < _at + 30)) continue;
           if (b.reminder_sent === false && b.student_id && !mutedRem.has(b.student_id)) {
-            const pk = await sbPatch('bookings', `id=eq.${b.id}&reminder_sent=eq.false`, { reminder_sent: true });
+            const pk = await sbPatch('bookings', `id=eq.${b.id}&or=(reminder_sent.is.null,reminder_sent.eq.false)`, { reminder_sent: true });
             if (pk.ok) { await sbPost('notifications', { user_id: b.student_id, type: 'system', read: false, // Datum syrove (RRRR-MM-DD); do citelneho tvaru ho prevede az appka.
               // "Tvoje lekce s koucem X" rika rovnou, o co jde; "Lekce s X" znelo jako pozvanka.
               // booking_id jde s sebou, aby notifikace vedla na tu konkretni lekci.
@@ -188,7 +224,7 @@ async function handler(req, res) {
                 label: (b.coach_name ? ('Tvoje lekce s kou\u010dem ' + b.coach_name) : 'Tvoje lekce'), date: b.training_date || '', time: b.training_time || '', amount: b.amount, currency: b.currency }), message: `⏰ Připomínka: lekce${b.coach_name ? (' s ' + b.coach_name) : ''} brzy začíná (${b.training_time || ''}). Máš zdravotní omezení? Řekni ho v profilu, uvidí jen tvůj kouč.` }); created++; }
           }
           if (b.coach_reminder_sent === false && !coachMuted.has(b.coach_id)) {
-            const pk = await sbPatch('bookings', `id=eq.${b.id}&coach_reminder_sent=eq.false`, { coach_reminder_sent: true });
+            const pk = await sbPatch('bookings', `id=eq.${b.id}&or=(coach_reminder_sent.is.null,coach_reminder_sent.eq.false)`, { coach_reminder_sent: true });
             if (pk.ok) { await sbPost('notifications', { user_id: b.coach_id, type: 'system', read: false, data: JSON.stringify({ kind: 'coach_lesson_reminder', student: b.student_name || null, date: b.training_date, time: b.training_time || '', amount: b.amount, currency: b.currency, online: (b.type === 'online') }), message: `⏰ Lekce s ${b.student_name || 'studentem'} brzy (${b.training_date} ${b.training_time || ''}).` }); created++; }
           }
         }
