@@ -166,7 +166,7 @@ async function handler(req, res) {
           // NULL je stejne "neposlano" jako false -- clenske rezervace se zakladaji bez toho pole.
           const pk = await sbPatch('gym_class_reservations', `id=eq.${r.id}&or=(reminder_sent.is.null,reminder_sent.eq.false)`, { reminder_sent: true });
           if (!pk.ok) continue;
-          await sbPost('notifications', { user_id: r.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'class_reminder', gym_id: r.gym_id || null, label: r.class_name || 'Your class', date: r.class_date || '', time: r.class_time || '' }), message: `⏰ Připomínka: ${r.class_name || 'tvůj trénink'} brzy začíná (${r.class_time || ''}). Máš zdravotní omezení? Řekni ho v profilu, uvidí jen tvůj kouč.` });
+          await sbPost('notifications', { user_id: r.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'class_reminder', gym_id: r.gym_id || null, label: r.class_name || 'Your class', date: r.class_date || '', time: r.class_time || '' }), message: `⏰ Připomínka: ${r.class_name || 'tvůj trénink'} brzy začíná (${r.class_time || ''}).` });
           created++;
         }
         const drops = await sbGet(`gym_bookings?gym_id=eq.${gym.id}&class_date=in.(${date},${tomorrow})&or=(reminder_sent.is.null,reminder_sent.eq.false)&status=eq.active&select=id,student_id,class_name,class_date,class_time,coach_id`);
@@ -180,7 +180,7 @@ async function handler(req, res) {
           let _cn = '';
           if (b.coach_id) { if (_coachNm[b.coach_id] === undefined) { try { const cp = await sbGet(`profiles?id=eq.${b.coach_id}&select=name`); _coachNm[b.coach_id] = (cp[0] && cp[0].name) || ''; } catch (e) { _coachNm[b.coach_id] = ''; } } _cn = _coachNm[b.coach_id]; }
           const _lbl = (b.class_name || 'tvůj trénink') + (_cn ? ' s koučem ' + _cn : '');
-          await sbPost('notifications', { user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'class_reminder', gym_id: b.gym_id || null, label: _lbl, date: b.class_date || '', time: b.class_time || '' }), message: `⏰ Připomínka: ${_lbl} brzy začíná (${b.class_time || ''}). Máš zdravotní omezení? Řekni ho v profilu, uvidí jen tvůj kouč.` });
+          await sbPost('notifications', { user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'class_reminder', gym_id: b.gym_id || null, label: _lbl, date: b.class_date || '', time: b.class_time || '' }), message: `⏰ Připomínka: ${_lbl} brzy začíná (${b.class_time || ''}).` });
           created++;
         }
       } catch (e) { console.error('cron reminder', e.message); }
@@ -221,7 +221,7 @@ async function handler(req, res) {
               // "Tvoje lekce s koucem X" rika rovnou, o co jde; "Lekce s X" znelo jako pozvanka.
               // booking_id jde s sebou, aby notifikace vedla na tu konkretni lekci.
               data: JSON.stringify({ kind: 'class_reminder', booking_id: b.id,
-                label: (b.coach_name ? ('Tvoje lekce s kou\u010dem ' + b.coach_name) : 'Tvoje lekce'), date: b.training_date || '', time: b.training_time || '', amount: b.amount, currency: b.currency }), message: `⏰ Připomínka: lekce${b.coach_name ? (' s ' + b.coach_name) : ''} brzy začíná (${b.training_time || ''}). Máš zdravotní omezení? Řekni ho v profilu, uvidí jen tvůj kouč.` }); created++; }
+                label: (b.coach_name ? ('Tvoje lekce s kou\u010dem ' + b.coach_name) : 'Tvoje lekce'), date: b.training_date || '', time: b.training_time || '', amount: b.amount, currency: b.currency }), message: `⏰ Připomínka: lekce${b.coach_name ? (' s ' + b.coach_name) : ''} brzy začíná (${b.training_time || ''}).` }); created++; }
           }
           if (b.coach_reminder_sent === false && !coachMuted.has(b.coach_id)) {
             const pk = await sbPatch('bookings', `id=eq.${b.id}&or=(coach_reminder_sent.is.null,coach_reminder_sent.eq.false)`, { coach_reminder_sent: true });
