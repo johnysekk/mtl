@@ -16,20 +16,12 @@ export default async function handler(req, res) {
     const cands = await sbGet(`profiles?coach_ref_score=gte.5&select=id,bankai_eligible&limit=5000`);
     let changed = 0;
     for (const p of cands || []) {
-      // >=10 taught privates (paid coach 1:1)?
-      const priv = await sbGet(`transactions?coach_id=eq.${encodeURIComponent(p.id)}&type=in.(coach_1to1,coach_inperson,coach_online)&select=id&limit=10`);
-      let elig = (priv || []).length >= 10;
-      if (!elig) {
-        // else >=20 active memberships across gyms this profile owns? (drive 25; stejna hranice
-        // jako v referral-cron, aby "aktivni" znamenalo vsude totez)
-        const gyms = await sbGet(`gyms?owner_id=eq.${encodeURIComponent(p.id)}&select=id`);
-        const ids = (gyms || []).map(g => g.id).filter(Boolean);
-        if (ids.length) {
-          const inList = ids.map(encodeURIComponent).join(',');
-          const mems = await sbGet(`gym_memberships?gym_id=in.(${inList})&status=in.(active,cancelling)&select=id&limit=20`);
-          elig = (mems || []).length >= 20;
-        }
-      }
+      // BANKAI STOJI JEN NA PRIVEDENYCH. Drive se navic chtelo, aby mel kouc SAM 10
+      // odtrenovanych soukromek nebo 20 aktivnich clenstvi -- jenze kdo ma maly obrat, toho
+      // nizsi sazba stejne skoro nic nestoji, a hlavne to pracovalo proti sobe: novacek vedel,
+      // ze Bankai nedosahne, tak nikoho neprivadel. Podminka "aktivni" zustava u PRIVEDENYCH
+      // (resi ji referral-cron), takze deset prazdnych uctu se stale nepocita.
+      const elig = true;
       if (!!p.bankai_eligible !== elig) {
         await sbPatch(`profiles?id=eq.${encodeURIComponent(p.id)}`, { bankai_eligible: elig });
         changed++;
