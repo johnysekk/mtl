@@ -605,11 +605,29 @@ async function membershipCheckout(req, res) {
 // ───────────────────────── Exclusive MTL Partner (localized price by region, platform account) ─────────────────────────
 // Localized EP price by the provider's region. Mirrors _epRegion() in index.html.
 // SK is a cheaper EUR tier than the EU default; both are EUR, so we MUST key on COUNTRY, not currency.
-function epTierForCountry(cc){
-  // Jedna cena pro všechny: 1000 CZK/měs, zakládající cena pro prvních 50 PLATÍCÍCH.
-  // Jedna měna = žádné kurzové rozdíly v účetnictví MTL; klient zobrazí orientační přepočet.
-  // Až se 50 míst zaplní, zvednout na 1500 (a _epPrice() v index.html).
-  return { currency:'czk', amount:1000 };
+// CENA PARTNERSTVI. Musi souhlasit s _epPrice() v index.html.
+//   zakladajici cena  500 CZK -- pro prvnich EP_SPOTS partneru, plati jim, dokud nezrusi
+//   ceníková cena    1000 CZK
+// Zahranicni pasma (eurozona 20/40 EUR, USA 25/50 USD) jsou pripravena, ale zatim se
+// neuctuji: dokud nemame poskytovatele mimo CR, uctuje se vsem v korunach a appka pod cenou
+// ukaze prepocet kurzem ECB. Az se zapnou, musi se zaroven doresit ulozeni zamcene ceny
+// (profiles.partner_price/partner_currency) a u USA i stat, ktery dnes nikde nemame.
+const EP_SPOTS = 10;
+const EP_FOUNDING_CZK = 500;
+const EP_LIST_CZK = 1000;
+
+async function epTierForCountry(cc) {
+  // Kolik zakladajicich mist jeste zbyva. Pocitaji se vsichni aktivni partneri, i rucne udeleni.
+  let taken = 0;
+  try {
+    const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/profiles?select=id&partner=is.true`, {
+      headers: { apikey: process.env.SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`, Prefer: 'count=exact' },
+    });
+    const cr = r.headers.get('content-range') || '';
+    taken = Number(String(cr).split('/')[1] || 0) || 0;
+  } catch (e) { taken = 0; }
+  const amount = (taken < EP_SPOTS) ? EP_FOUNDING_CZK : EP_LIST_CZK;
+  return { currency: 'czk', amount };
 }
 
 async function partnerCheckout(req, res) {
@@ -632,7 +650,7 @@ async function partnerCheckout(req, res) {
     }
     if(!cc) cc = String(prof.country || '').toUpperCase();
   } catch(e){}
-  const tier = epTierForCountry(cc);
+  const tier = await epTierForCountry(cc);   // ceka na zjisteni, kolik zakladajicich mist zbyva
 
   // DIČ U ZAHRANIČNÍHO POSKYTOVATELE JE PODMÍNKA. Bez něj bychom u odběratele z jiné země
   // EU museli řešit režim OSS (místem plnění je jeho stát). Tomu se vyhýbáme: předplatné
