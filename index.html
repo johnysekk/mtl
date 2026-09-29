@@ -2885,6 +2885,11 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
     <div style="padding:8px 20px 4px;">
       <div id="rcCurRow" style="display:flex;gap:6px;margin-bottom:10px;"></div>
       <input id="rcPrice" type="number" min="0" inputmode="decimal" placeholder="0" oninput="if(typeof renderRateCalc==='function')renderRateCalc()" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:12px;font-size:18px;font-weight:700;font-family:'DM Sans';text-align:center;margin-bottom:14px;">
+      <!-- DRUHÝ ŘÁDEK: KOLIK Z OBRATU JE OD ČLENŮ, KTERÉ PŘIVEDLO MTL. Bez toho kalkulačka
+           tvrdila, že klub se sazbou 1,5 % zaplatí z obratu 100 000 přesně 1 500 Kč — jenže
+           za každého člena z appky platí 10 %, ne 1,5 %. -->
+      <input id="rcAcq" type="number" min="0" inputmode="decimal" placeholder="0" oninput="if(typeof renderRateCalc==='function')renderRateCalc()" style="width:100%;box-sizing:border-box;padding:13px 14px;margin-top:8px;border:1px solid var(--border);border-radius:11px;font-size:15px;font-family:'DM Sans';background:var(--surf);color:var(--dark);">
+      <div id="rcAcqHint" style="font-size:11.5px;color:var(--light);margin:4px 2px 10px;"></div>
       <div id="rcBody"></div>
     </div>
     <div style="padding:16px 20px max(40px,calc(env(safe-area-inset-bottom) + 26px));">
@@ -37696,7 +37701,11 @@ async function openRateCalc(){
   if($('rcTitle')) $('rcTitle').textContent=EN?'MARGIN DIFFERENCE':'ROZDÍL V MARŽI';
   if($('rcHint')) $('rcHint').textContent=EN?'Enter your monthly turnover':'Zadej měsíční obrat';
   if($('rcClose')) $('rcClose').textContent=EN?'Close':'Zavřít';
-  if($('rcPrice')){ $('rcPrice').value=''; $('rcPrice').setAttribute('placeholder', EN?'e.g. 30000':'např. 30000'); }
+  if($('rcPrice')){ $('rcPrice').value=''; $('rcPrice').setAttribute('placeholder', EN?'monthly turnover, e.g. 100000':'měsíční obrat, např. 100000'); }
+  if($('rcAcq')){ $('rcAcq').value=''; $('rcAcq').setAttribute('placeholder', EN?'of that, first payments from MTL members':'z toho první platby členů z MTL'); }
+  if($('rcAcqHint')) $('rcAcqHint').textContent = EN
+    ? 'A member MTL brings you costs 10 % of their first payment (25 % from ads); a partner pays 5 % (10 %).'
+    : 'Člen, kterého ti přivede MTL, stojí 10 % z první platby (z reklamy 25 %), partnera 5 % (10 %).';
   _rcCur='CZK'; _rcType='1:1'; try{ await _loadFx(); }catch(e){}
   // Count every Exclusive Partner, granted or purchased -- the hundred seats are seats.
   try{
@@ -37740,11 +37749,20 @@ function renderRateCalc(){
   // sloupcích a poslední řádek je to jediné, co ho zajímá. Sazba se navíc pojmenuje, ať je
   // jasné, že se neporovnává s obecnou tabulkou, ale s TOU JEHO.
   const pctS=(x)=>String(Math.round(x*1000)/10).replace('.', EN?'.':',')+' %';
-  const diff=base*(rt.std-rt.ep);
+  // AKVIZICE SE POČÍTÁ ZVLÁŠŤ. Část obratu od členů, které přivedlo MTL, nejde za běžnou
+  // sazbou: 10 %, partner 5 %. Bez toho kalkulačka u klubu se sazbou 1,5 % tvrdila, že ze
+  // 100 000 zaplatí 1 500 Kč — ve skutečnosti víc.
+  const acqPart=Math.max(0, Math.min(base, parseFloat(($('rcAcq')&&$('rcAcq').value)||'0')||0));
+  const plain=base-acqPart;
+  const ACQ_STD=0.10, ACQ_EP=0.05;
+  const feeStd=plain*rt.std + acqPart*ACQ_STD;
+  const feeEp =plain*rt.ep  + acqPart*ACQ_EP;
   const epCost=_epC;
+  const diff=feeStd-feeEp;
   const worth=diff>epCost;
   const net=diff-epCost;
-  const breakeven=(rt.std>rt.ep) ? Math.ceil(epCost/(rt.std-rt.ep)) : null;
+  const _gain=(base>0)?(diff/base):0;                       // úspora na koruně obratu
+  const breakeven=(_gain>0) ? Math.ceil(epCost/_gain) : null;
   const cell=(v,bold,color)=>'<td style="text-align:right;padding:9px 0;font-size:'+(bold?'14.5px':'13px')+';font-weight:'+(bold?800:600)+';color:'+(color||'var(--dark)')+';white-space:nowrap;">'+v+'</td>';
   const head=(t)=>'<th style="text-align:right;padding:0 0 8px;font-size:11.5px;font-weight:800;letter-spacing:.03em;text-transform:uppercase;color:var(--light);">'+t+'</th>';
   const rowL=(t)=>'<td style="padding:9px 0;font-size:13px;color:var(--mid);">'+t+'</td>';
@@ -37756,11 +37774,14 @@ function renderRateCalc(){
     + '<tr style="border-top:1px solid var(--border);">' + rowL(EN?'Commission rate':'Sazba provize')
     +   cell(pctS(rt.std)) + cell(pctS(rt.ep), false, '#8a6a12') + '</tr>'
     + '<tr style="border-top:1px solid var(--border);">' + rowL(EN?'Commission from turnover':'Provize z obratu')
-    +   cell(r(base*rt.std)+' '+sym) + cell(r(base*rt.ep)+' '+sym, false, '#8a6a12') + '</tr>'
+    +   cell(r(plain*rt.std)+' '+sym) + cell(r(plain*rt.ep)+' '+sym, false, '#8a6a12') + '</tr>'
+    + (acqPart>0 ? ('<tr style="border-top:1px solid var(--border);">'
+        + rowL((EN?'Members from MTL':'\u010clenov\u00e9 z MTL')+' \u00b7 '+pctS(ACQ_STD)+' / '+pctS(ACQ_EP))
+        + cell(r(acqPart*ACQ_STD)+' '+sym) + cell(r(acqPart*ACQ_EP)+' '+sym, false, '#8a6a12') + '</tr>') : '')
     + '<tr style="border-top:1px solid var(--border);">' + rowL(EN?'Partner fee':'Pau\u0161\u00e1l partnerstv\u00ed')
     +   cell('\u2014', false, 'var(--light)') + cell(r(epCost)+' '+sym, false, '#8a6a12') + '</tr>'
     + '<tr style="border-top:2px solid var(--border);">' + '<td style="padding:11px 0;font-size:13.5px;font-weight:800;color:var(--dark);">'+(EN?'Total to MTL':'Celkem MTL')+'</td>'
-    +   cell(r(base*rt.std)+' '+sym, true) + cell(r(base*rt.ep+epCost)+' '+sym, true, worth?'#067647':'var(--dark)') + '</tr>'
+    +   cell(r(feeStd)+' '+sym, true) + cell(r(feeEp+epCost)+' '+sym, true, worth?'#067647':'var(--dark)') + '</tr>'
     + '</table>'
     + '<div style="margin-top:14px;padding:13px 14px;border-radius:12px;background:'+(worth?'#F0FBF0':'var(--surf)')+';border:1px solid '+(worth?'#CDEBD6':'var(--border)')+';">'
       + '<div style="font-size:'+(worth?'17px':'14px')+';font-weight:800;color:'+(worth?'#067647':'var(--mid)')+';">'
@@ -37773,8 +37794,8 @@ function renderRateCalc(){
           + '</div>') : '')
     + '</div>'
     + '<p style="font-size:11.5px;color:var(--light);line-height:1.6;margin-top:11px;">'
-      + (EN ? ('Compared against <b>your current rate '+pctS(rt.std)+'</b>, not a generic one \u2014 it already includes your association, Bankai and founding status. Applies to every payment: 1:1 lessons, memberships, drop-ins, events. Fees for members MTL brings you are not included here; exact numbers are in Payments and commission. Estimate, before VAT.')
-            : ('Po\u010d\u00edt\u00e1 se proti <b>tv\u00e9 sou\u010dasn\u00e9 sazb\u011b '+pctS(rt.std)+'</b>, ne proti obecn\u00e9 \u2014 u\u017e je v n\u00ed zapo\u010dten\u00e1 asociace, Bankai i zakl\u00e1daj\u00edc\u00ed status. Plat\u00ed pro ka\u017edou platbu: lekce 1:1, \u010dlenstv\u00ed, jednor\u00e1zovky, ud\u00e1losti. Poplatky za \u010dleny, kter\u00e9 ti p\u0159ivede MTL, v tom nejsou \u2014 p\u0159esn\u00e1 \u010d\u00edsla najde\u0161 v Platb\u00e1ch a proviz\u00edch. Odhad, p\u0159ed DPH.'))
+      + (EN ? 'Every payment counts: 1:1 lessons, memberships, drop-ins, events. Estimate, before VAT.'
+            : 'Po\u010d\u00edt\u00e1 se ka\u017ed\u00e1 platba: lekce 1:1, \u010dlenstv\u00ed, jednor\u00e1zovky, ud\u00e1losti. Odhad, p\u0159ed DPH.')
     + '</p>';
 }
 // EP auto-surface: compute the provider's rolling 30-day GMV across ALL their revenue
