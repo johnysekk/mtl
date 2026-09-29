@@ -26267,26 +26267,13 @@ async function loadGymManageBookings(){
       // Kolik z té platby bylo opravdu za akviziční sazbu. `months` u starších řádků chybí
       // a brát 1 znamenalo počítat akvizici z celé roční permanentky — proto se podíl
       // dopočítá ze skutečně stržené sazby, stejně jako to dělá rozpad v Provizích.
-      let _epAcqExtra=0;
-      try{
-        (_gymTx||[]).forEach(function(t){
-          const src=t.acq_source; if(src!=='mtl_ads' && src!=='mtl_discovery') return;
-          const g=Number(t.gross_amount||0)/100; if(!(g>0)) return;
-          const epAcq=(src==='mtl_ads')?0.10:0.05;
-          const rn=(t.mtl_rate!=null)?Number(t.mtl_rate):null;
-          const base=(t.base_rate!=null)?Number(t.base_rate):null;
-          const mo=parseInt(t.months,10)||0;
-          const cov=parseInt(t.acq_months,10)||0;
-          let f;                                   // podíl platby účtovaný akviziční sazbou
-          if(mo>0 && cov>0) f=Math.min(1, cov/mo);
-          else if(rn!=null && base!=null && rn>base){
-            const tier=(src==='mtl_ads')?0.25:0.10;
-            f=(tier>base) ? Math.max(0, Math.min(1, (rn-base)/(tier-base))) : 1;
-          } else f=1;
-          _epAcqExtra += g*f*(epAcq-0.005);
-        });
-      }catch(e){}
-      const _epCost = (_epFlat!=null) ? (_epFlat + _grossM*0.005 + _epAcqExtra) : null;
+      // STEJNÝ VÝPOČET JAKO V PROVIZÍCH. Odhad „0,5 % z obratu plus příplatek za akvizici"
+      // se od rozpadu po platbách lišil o stovky korun, protože bral obrat i z položek,
+      // které v rozpadu nejsou, a akvizici počítal paušálně. Teď se sčítají tytéž řádky
+      // toutéž funkcí, takže obě obrazovky musí ukázat totéž.
+      let _epVar=0;
+      try{ (_txM||[]).forEach(function(t){ _epVar += _epFeeForTx(t); }); }catch(e){}
+      const _epCost = (_epFlat!=null) ? (_epFlat + _epVar) : null;
       const _save   = (_epCost!=null) ? (_mtlM - _epCost) : 0;
       // Skryto do prvního dne dalšího měsíce: uloží se měsíc, ve kterém se křížek zmáčkl.
       // Křížek schová pruh jen do konce sezení, ne na celý měsíc. Měsíční skrytí znamenalo,
@@ -32048,6 +32035,34 @@ async function _loadParticipants(txIds){
   }
   return found;
 }
+// ═══ CENA JEDNÉ TRANSAKCE S PARTNERSTVÍM ════════════════════════════════════════════════
+// Jedna funkce pro celou appku. Dřív to počítala dvě různá místa dvěma způsoby: pruh
+// v Přehledu odhadem z obratu (0,5 % ze všeho plus příplatek za akvizici), rozpad v Provizích
+// po jednotlivých platbách. Výsledky se lišily o stovky korun a klub viděl na dvou
+// obrazovkách dvě různá čísla za tentýž měsíc.
+function _epFeeForTx(t){
+  const EP_BASE=0.005;
+  const gross=Number(t.gross_amount||0)/100;
+  if(!(gross>0)) return 0;
+  const rn=(t.mtl_rate!=null)?Number(t.mtl_rate):null;
+  const base=(t.base_rate!=null)?Number(t.base_rate):null;
+  const isAds=(t.acq_source==='mtl_ads');
+  const epAcq=isAds?0.10:0.05;
+  if(rn==null) return gross*EP_BASE;
+  // Bez akvizice: sazba se rovná žebříčku, nebo je tak nízká, že jiná být nemůže.
+  if((base!=null && rn<=base+0.0001) || (base==null && rn<=0.03)) return gross*EP_BASE;
+  const mo=parseInt(t.months,10)||0;
+  let cov=Math.max(0, parseInt(t.acq_months,10)||0);
+  if(mo>0 && cov>mo) cov=mo;
+  if(mo>0 && cov>0 && base!=null) return gross*((epAcq*cov + EP_BASE*(mo-cov))/mo);
+  // Starý řádek bez rozpadu: podíl akvizice se dopočítá ze skutečně stržené sazby.
+  const _base=(base!=null)?base:0.015;
+  const tier=isAds?0.25:0.10;
+  let f=(tier>_base)?((rn-_base)/(tier-_base)):1;
+  f=Math.max(0, Math.min(1, f));
+  return gross*(epAcq*f + EP_BASE*(1-f));
+}
+
 async function openMtlCommissions(scope){
   const EN=LANG==='en';
   scope=scope||{};
@@ -32090,42 +32105,12 @@ async function openMtlCommissions(scope){
   // měsíců neslo akvizici) a `months` (kolik měsíců platba pokrývá). U starších řádků, kde
   // tahle pole chybí, se podíl dopočítá ze sazby -- a protože dřív byla akvizice 20 %, hledá
   // se i ten stupeň, jinak by z 3 % vyšel nesmysl.
+  // Delegace na sdílenou _epFeeForTx, ať Přehled i tenhle rozpad počítají stejně.
   const _epFor=function(t){
+    const fee=_epFeeForTx(t);
     const gross=Number(t.gross_amount||0)/100;
-    const rn=(t.mtl_rate!=null)?Number(t.mtl_rate):null;
-    const br=(t.base_rate!=null)?Number(t.base_rate):null;
-    // Reklama JEN podle acq_source. Hádat ji ze sazby nejde: 20 % je stará sazba za objev
-    // v appce z doby, kdy byla dvacetiprocentní -- ne reklama.
-    const isAds=(t.acq_source==='mtl_ads');
-    const epAcq=isAds?0.10:0.05;
     const pct=function(x){ return (Math.round(x*1000)/10).toString().replace('.',',')+' %'; };
-    if(rn==null) return { fee: gross*EP_BASE, note: null };
-    const base=(br!=null)?br:null;
-    // Žádná akvizice: buď se sazba rovná žebříčku, nebo je tak nízká, že jinou být nemůže.
-    if((base!=null && rn<=base+0.0001) || (base==null && rn<=0.03))
-      return { fee: gross*EP_BASE, note: pct(EP_BASE) };
-    // KOLIK MĚSÍCŮ PLATBA POKRÝVÁ. Bere se jen ze zapsaného `months`. Dopočítávat ho ze sazby
-    // nejde: u roční permanentky za 16 000 vyšlo šest měsíců místo dvanácti, protože základ
-    // byl 1,5 %, ne 2,5 %. Když počet chybí, spočítá se podíl akvizice rovnou ze sazby
-    // (větev níž) a měsíce se v popisku vůbec neuvádějí — vymyšlené číslo je horší než žádné.
-    const mo=parseInt(t.months,10)||0;
-    let cov=Math.max(0, parseInt(t.acq_months,10)||0);
-    if(mo>0 && cov>mo) cov=mo;
-    if(mo>0 && cov>0 && base!=null){
-      const rate=(epAcq*cov + EP_BASE*(mo-cov))/mo;
-      return { fee: gross*rate,
-        note: (mo>cov)
-          ? (EN ? (cov+' mo at '+pct(epAcq)+' + '+(mo-cov)+' mo at '+pct(EP_BASE))
-                : (cov+'. m\u011bs. '+pct(epAcq)+' + zbyl\u00fdch '+(mo-cov)+' m\u011bs. '+pct(EP_BASE)))
-          : pct(epAcq) };
-    }
-    // Starší řádek bez rozpadu: podíl akvizice se dopočítá ze sazby.
-    const _base=(base!=null)?base:0.015;
-    const tier=isAds?0.25:((rn>=0.15)?0.20:0.10);
-    let f=(tier>_base)?((rn-_base)/(tier-_base)):1;
-    f=Math.max(0, Math.min(1, f));
-    const rate=epAcq*f + EP_BASE*(1-f);
-    return { fee: gross*rate, note: pct(rate) };
+    return { fee: fee, note: (gross>0)?pct(fee/gross):null };
   };
 
 
