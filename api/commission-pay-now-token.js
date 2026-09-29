@@ -13,6 +13,15 @@ const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const svc = { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' };
 const APP = process.env.APP_URL || 'https://app.martialtraininglab.com';
 
+// Domena, ze ktere pozadavek prisel (app. nebo dashboard.), jinak zaloha na APP_URL.
+function _backTo(req) {
+  try {
+    const u = new URL(req.headers.origin || req.headers.referer || '');
+    if (/(^|\.)martialtraininglab\.com$/i.test(u.hostname)) return u.origin;
+  } catch (e) {}
+  return APP;
+}
+
 const sbGet = async (path) => {
   const r = await fetch(`${SB}/rest/v1/${path}`, { headers: svc });
   return r.ok ? r.json() : [];
@@ -62,7 +71,9 @@ export default async function handler(req, res) {
     const ym = new Date().toISOString().slice(0, 7);
     return res.status(200).json({
       ok: true,
-      url: `${APP}/pay-commission?token=${makePayToken(best.kind, best.id, ym)}`,
+      // VRATIT SE TAM, ODKUD CLOVEK PRISEL. Odkaz se skladal natvrdo z APP_URL, takze kdo
+      // platil z dashboardu (jina domena), skoncil po navratu ze Stripe v mobilni appce.
+      url: `${_backTo(req)}/pay-commission?token=${makePayToken(best.kind, best.id, ym)}`,
     });
   } catch (e) {
     return res.status(500).json({ error: (e && e.message) || 'error' });
