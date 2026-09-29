@@ -31199,28 +31199,17 @@ async function openGymOrigins(gymId, gymName){
 
   const box=ov.querySelector('#goBody');
   const since=new Date(Date.now()-365*86400000).toISOString();
-  const counts={}; let mtlPeople=0, ownPeople=0;
+  // DVA RŮZNÉ ZDROJE DAT, NEPLÉST. `acq_source` u transakce říká, jestli toho člověka
+  // přivedlo MTL (a účtuje se za to akvizice). `attr_src` u členství a rezervací je
+  // marketingová atribuce z webu — odkud člověk přišel na stránku. Dřív se počítalo jen
+  // to druhé, takže „Přivedlo MTL" ukazovalo nulu, i když se za akvizici platilo.
+  const ownCounts={}; const mtlCounts={ mtl_ads:new Set(), mtl_discovery:new Set() };
+  let ownPeople=0;
   let acqFee=0, acqGross=0, acqPeople=new Set();
   let adsFee=0, adsGross=0, adsPeople=new Set();
   let cur='CZK';
   try{
-    // 1) ODKUD PŘIŠLI: členství a jednorázové rezervace mají `attr_src`.
-    const [mem, bk] = await Promise.all([
-      supaClient.from('gym_memberships').select('attr_src,student_id,created_at').eq('gym_id',gymId).gte('created_at',since),
-      supaClient.from('gym_bookings').select('attr_src,student_id,created_at').eq('gym_id',gymId).gte('created_at',since),
-    ]);
-    const seen=new Set();
-    [...(mem.data||[]), ...(bk.data||[])].forEach(function(r){
-      const key=String(r.student_id||'')+'|'+String(r.attr_src||'');
-      if(!r.student_id || seen.has(key)) return;            // jeden člověk = jeden hlas na zdroj
-      seen.add(key);
-      let v=String(r.attr_src||'direct').split(':')[0];
-      if(!_ORIGIN_LABELS[v]) v='other';
-      counts[v]=(counts[v]||0)+1;
-      if(_MTL_ORIGINS.indexOf(v)>=0) mtlPeople++; else ownPeople++;
-    });
-
-    // 2) CO TO STÁLO: akvizice se účtuje jen u plateb, které přišly přes MTL.
+    // 1) KOHO PŘIVEDLO MTL — z transakcí, tedy z toho, za co se opravdu platilo.
     const { data:tx } = await supaClient.from('transactions')
       .select('acq_source,mtl_fee,gross_amount,currency,member_id,created_at')
       .eq('gym_id',gymId).gte('created_at',since).not('acq_source','is',null);
@@ -31229,24 +31218,50 @@ async function openGymOrigins(gymId, gymName){
       if(src!=='mtl_ads' && src!=='mtl_discovery') return;
       const fee=Number(t.mtl_fee||0)/100, gross=Number(t.gross_amount||0)/100;
       acqFee+=fee; acqGross+=gross;
-      if(t.member_id) acqPeople.add(t.member_id);
+      if(t.member_id){ acqPeople.add(t.member_id); mtlCounts[src].add(t.member_id); }
       if(t.currency) cur=String(t.currency).toUpperCase();
-      // Reklama zvlášť: má nejvyšší sazbu a právě u ní klub nejvíc potřebuje vidět poměr
-      // mezi tím, co zaplatil, a tím, co mu ti lidé přinesli.
       if(src==='mtl_ads'){ adsFee+=fee; adsGross+=gross; if(t.member_id) adsPeople.add(t.member_id); }
+    });
+
+    // 2) VLASTNÍ ZDROJE — z atribuce u členství a rezervací, bez lidí, které přivedlo MTL.
+    const [mem, bk] = await Promise.all([
+      supaClient.from('gym_memberships').select('attr_src,student_id').eq('gym_id',gymId).gte('created_at',since),
+      supaClient.from('gym_bookings').select('attr_src,student_id').eq('gym_id',gymId).gte('created_at',since),
+    ]);
+    const seen=new Set();
+    [...(mem.data||[]), ...(bk.data||[])].forEach(function(r){
+      if(!r.student_id || acqPeople.has(r.student_id)) return;    // přivedené MTL sem nepatří
+      if(seen.has(r.student_id)) return;
+      seen.add(r.student_id);
+      let v=String(r.attr_src||'direct');
+      const parts=v.split(':');
+      let src=(parts.length>1 ? (parts[0]==='app' ? 'app' : parts[1]) : v) || 'direct';
+      if(String(src).indexOf('web|')===0) src='web';
+      ownCounts[src]=(ownCounts[src]||0)+1;
+      ownPeople++;
     });
   }catch(e){
     box.innerHTML='<p style="font-size:13px;color:var(--red);">'+escapeHtml((e&&e.message)||'')+'</p>'; return;
   }
-
+  const mtlPeople=acqPeople.size;
   const _m=function(v){ try{ return fmtPrice(v, cur)+' '+((typeof _curSym==='function')?_curSym(cur):''); }catch(e){ return String(Math.round(v)); } };
   const _ratio=function(f,g){ return (f>0) ? (Math.round(g/f*10)/10).toString().replace('.', EN?'.':',') : null; };
-  const rows=Object.keys(counts).sort(function(a,b){ return counts[b]-counts[a]; }).map(function(k){
-    const L3=_ORIGIN_LABELS[k]||_ORIGIN_LABELS.other;
+  const _line=function(icon,label,val){
     return '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;font-size:13.5px;">'
-      +'<span style="color:var(--mid);">'+L3[0]+' '+escapeHtml(EN?L3[2]:L3[1])+'</span>'
-      +'<b style="color:var(--dark);">'+counts[k]+'</b></div>';
+      +'<span style="color:var(--mid);">'+icon+' '+escapeHtml(label)+'</span>'
+      +'<b style="color:var(--dark);">'+val+'</b></div>';
+  };
+  // Zdroje MTL nejdřív, pak vlastní -- odděleně, protože jen ty první něco stojí.
+  const rowsMtl=['mtl_ads','mtl_discovery'].filter(function(k){ return mtlCounts[k].size>0; }).map(function(k){
+    const L3=_ORIGIN_LABELS[k]; return _line(L3[0], EN?L3[2]:L3[1], mtlCounts[k].size);
   }).join('');
+  const rowsOwn=Object.keys(ownCounts).sort(function(a,b){ return ownCounts[b]-ownCounts[a]; }).map(function(k){
+    // Popisky vlastních zdrojů umí _attrLabel (Instagram, web, přímý odkaz...).
+    let lb=k;
+    try{ if(typeof _attrLabel==='function') lb=_attrLabel(k); }catch(e){}
+    return _line('', String(lb), ownCounts[k]);
+  }).join('');
+  const rows=rowsMtl+rowsOwn;
 
   box.innerHTML =
     '<div style="display:flex;gap:10px;margin-bottom:14px;">'
