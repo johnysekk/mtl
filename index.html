@@ -32016,7 +32016,11 @@ async function openMtlCommissions(scope){
     const gross=Number(t.gross_amount||0)/100;
     const rn=(t.mtl_rate!=null)?Number(t.mtl_rate):null;
     const br=(t.base_rate!=null)?Number(t.base_rate):null;
-    const isAds=(t.acq_source==='mtl_ads');
+    // REKLAMU POZNÁME I BEZ ZNÁMKY. Starší řádky nemají acq_source vyplněný, ale sazba nad
+    // 15 % může vzniknout jedině z reklamy (objev v appce je 10 %). Bez toho se u nich
+    // počítalo s partnerskou sazbou 5 % místo 10 % a srovnání vycházelo příznivěji, než je pravda.
+    const _rnEarly=(t.mtl_rate!=null)?Number(t.mtl_rate):0;
+    const isAds=(t.acq_source==='mtl_ads') || (!t.acq_source && _rnEarly>=0.15);
     const epAcq=isAds?0.10:0.05;
     const pct=function(x){ return (Math.round(x*1000)/10).toString().replace('.',',')+' %'; };
     if(rn==null) return { fee: gross*EP_BASE, note: null };
@@ -32024,7 +32028,16 @@ async function openMtlCommissions(scope){
     // Žádná akvizice: buď se sazba rovná žebříčku, nebo je tak nízká, že jinou být nemůže.
     if((base!=null && rn<=base+0.0001) || (base==null && rn<=0.03))
       return { fee: gross*EP_BASE, note: pct(EP_BASE) };
-    const mo=Math.max(1, parseInt(t.months,10)||1);
+    // KOLIK MĚSÍCŮ PLATBA POKRÝVÁ. U starších řádků `months` chybí a padalo to na 1 — u roční
+    // permanentky za 16 000 to znamenalo, že se akviziční sazba počítala z celé částky
+    // (800 Kč místo ~140 Kč). Když počet chybí, dopočítá se ze skutečně stržené sazby:
+    // rn = (tier·cov + base·(mo−cov)) / mo, tedy mo = (tier−base)/(rn−base) při cov=1.
+    let mo=Math.max(1, parseInt(t.months,10)||0);
+    if(!parseInt(t.months,10) && base!=null && rn>base){
+      const _tier=isAds?0.25:0.10;
+      const _est=(_tier>base && rn>base) ? Math.round((_tier-base)/(rn-base)) : 1;
+      mo=Math.max(1, Math.min(24, _est||1));
+    }
     let cov=Math.max(0, parseInt(t.acq_months,10)||0);
     if(cov>mo) cov=mo;
     if(cov>0 && base!=null){
