@@ -9952,6 +9952,8 @@ function closeSheet(id){
   // Po zavření sheetu se pruh přepočítá: v nastavení mohl klub něco doplnit, nebo naopak
   // vzniknout nový klub, který ještě není připravený k prodeji.
   try{ setTimeout(function(){ if(typeof _renderSellGate==='function') _renderSellGate(); else if(typeof _sellGateSync==='function') _sellGateSync(); }, 120); }catch(e){}
+  // Rozpad příjmů si půjčuje panely z Přehledu; vrátit se musí při každém zavření.
+  try{ if(id==='shGymIncome' && typeof window._giReturn==='function') window._giReturn(); }catch(e){}
   $(id).classList.remove('open');
   const par=_sheetParent[id]; _sheetParent[id]=null;
   if(par && $(par)){
@@ -31250,11 +31252,19 @@ function openGymIncome(){
   const body=ov.querySelector('#giBody');
   src.style.display='';
   body.appendChild(src);
+  // Panely patří Přehledu, sheet si je jen půjčuje -- vrátit je musí i šipka zpět, ne jen
+  // křížek, jinak by Přehled zůstal bez poloviny obsahu.
+  const _giReturn=function(){
+    try{ const st=document.getElementById('mgStats'); if(st && src.parentNode!==st){ src.style.display='none'; st.appendChild(src); } }catch(e){}
+  };
+  window._giReturn=_giReturn;
   ov.querySelector('#_giClose').onclick=function(){
-    // Panely patří Přehledu, sheet si je jen půjčuje.
-    try{ const st=document.getElementById('mgStats'); if(st){ src.style.display='none'; st.appendChild(src); } }catch(e){}
+    _giReturn();
     try{ closeSheet('shGymIncome'); }catch(e){ ov.classList.remove('open'); }
   };
+  // Rodič je správa klubu: šipka zpět musí vrátit tam, odkud se sem kliklo. Bez toho
+  // _dashBack rodiče nenašel a spadl na výchozí obrazovku (Rozvrh).
+  try{ if(!_sheetParent['shGymIncome']) _sheetParent['shGymIncome']='shGymManage'; }catch(e){}
   try{ openSheet('shGymIncome'); }catch(e){ ov.classList.add('open'); }
 }
 
@@ -31273,6 +31283,7 @@ async function openGymOrigins(gymId, gymName, range){
         +fdMonthList().map(function(m){ return '<option value="'+m.ym+'"'+(m.ym===_gymMonth?' selected':'')+'>'+m.lbl+'</option>'; }).join('')
       +'</select>'
       +'<div id="goBody"><p style="color:var(--light);font-size:13px;text-align:center;padding:24px;">'+L('Na\u010d\u00edt\u00e1m...')+'</p></div></div>';
+  try{ if(!_sheetParent['shGymOrigins']) _sheetParent['shGymOrigins']='shGymManage'; }catch(e){}
   try{ openSheet('shGymOrigins'); }catch(e){ ov.classList.add('open'); }
   // Přepínač období překreslí celou obrazovku se stejným klubem.
   try{
@@ -32173,7 +32184,11 @@ function _epFeeForTx(t){
   const isAds=(t.acq_source==='mtl_ads');
   const epAcq=isAds?0.10:0.05;
   if(rn==null) return gross*EP_BASE;
-  // Bez akvizice: sazba se rovná žebříčku, nebo je tak nízká, že jiná být nemůže.
+  // Účtovala se akvizice? Říká to `acq_months` od serveru, ne odhad ze sazby. Když sloupec
+  // chybí (starší řádky), rozhodne zdroj -- a teprve když není ani ten, sazba.
+  const _amRaw=(t.acq_months==null || t.acq_months==='') ? null : (parseInt(t.acq_months,10)||0);
+  if(_amRaw!=null && _amRaw<=0) return gross*EP_BASE;
+  if(_amRaw==null && t.acq_source!=='mtl_discovery' && t.acq_source!=='mtl_ads') return gross*EP_BASE;
   if((base!=null && rn<=base+0.0001) || (base==null && rn<=0.03)) return gross*EP_BASE;
   const mo=parseInt(t.months,10)||0;
   let cov=Math.max(0, parseInt(t.acq_months,10)||0);
@@ -32443,7 +32458,15 @@ async function openMtlCommissions(scope){
       // člena, kterého klubu přivedlo MTL. Bez označení to v seznamu vypadá jako by MTL někdy
       // účtovalo osminásobek -- a majitel nemá jak zjistit proč.
       const _rn=(t.mtl_rate!=null)?Number(t.mtl_rate):null;
-      const _isAcq=(t.acq_source==='mtl_discovery') || (t.acq_source==='mtl_ads') || (_rn!=null && _rn>=0.099);
+      // ROZHODUJE `acq_months`, KTERÝ ZAPSAL SERVER. Je to počet měsíců, za které se akvizice
+      // opravdu účtovala: record-cash tam dá null, když se neúčtovala vůbec. Dřív se to bralo
+      // podle `acq_source`, jenže ten má i druhé členství téhož studenta, u kterého se už nic
+      // neplatí -- odtud 16 000 Kč za 240 Kč (čistá 1,5 %) s magnetem a rozpadem.
+      // U řádků z doby před tímhle sloupcem (acq_months chybí) se vezme zdroj, jak to bylo dřív.
+      const _acqMoRaw=(t.acq_months==null || t.acq_months==='') ? null : (parseInt(t.acq_months,10)||0);
+      const _isAcq=(_acqMoRaw!=null)
+        ? (_acqMoRaw>0)
+        : (t.acq_source==='mtl_discovery' || t.acq_source==='mtl_ads');
       // SMÍCHANÁ SAZBA. U ročního členství se akvizice bere jen z PRVNÍHO měsíce, zbytek jde
       // za běžnou sazbu -- z 16 000 na 12 měsíců to je 20 % z 1 333 Kč plus 1,5 % ze zbytku,
       // tedy 486,67 Kč a v přepočtu 3 %. To číslo pak vypadá vymyšleně, dokud se nerozepíše.
