@@ -612,7 +612,7 @@ async function membershipCheckout(req, res) {
 // neuctuji: dokud nemame poskytovatele mimo CR, uctuje se vsem v korunach a appka pod cenou
 // ukaze prepocet kurzem ECB. Az se zapnou, musi se zaroven doresit ulozeni zamcene ceny
 // (profiles.partner_price/partner_currency) a u USA i stat, ktery dnes nikde nemame.
-const EP_SPOTS = 10;
+const EP_SPOTS = 50;
 const EP_FOUNDING_CZK = 500;
 const EP_LIST_CZK = 1000;
 
