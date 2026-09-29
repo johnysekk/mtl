@@ -31198,31 +31198,47 @@ async function openGymOrigins(gymId, gymName, range){
   ov.innerHTML='<div class="shdr"><div class="shdr-title">'+(EN?'Where students come from':'Odkud chod\u00ed studenti')+'</div>'
     +'<button class="btn-close" id="_goClose">\u2715</button></div>'
     +'<div style="padding:14px 18px 44px;max-width:620px;margin:0 auto;">'
-      +'<div id="goRange" style="display:flex;gap:6px;margin-bottom:14px;">'
-        +[['30d',(EN?'30 days':'30 dn\u00ed')],['12m',(EN?'12 months':'12 m\u011bs\u00edc\u016f')],['all',(EN?'All time':'Od za\u010d\u00e1tku')]]
-          .map(function(o2){ const on=(_goRange===o2[0]);
-            return '<button data-r="'+o2[0]+'" style="flex:1;padding:8px;border-radius:9px;cursor:pointer;font-family:\'DM Sans\';font-size:12.5px;font-weight:700;'
-              +(on?'background:var(--dark);color:#fff;border:1px solid var(--dark);':'background:var(--surf);color:var(--mid);border:1px solid var(--border);')
-              +'">'+o2[1]+'</button>'; }).join('')
-      +'</div>'
+      // Výběr období: posledních 12 měsíců jmenovitě, pak celé roky a od začátku.
+      +'<select id="goRange" style="width:100%;padding:11px 12px;margin-bottom:14px;border:1px solid var(--border);border-radius:11px;font-family:\'DM Sans\';font-size:14px;background:var(--surf);color:var(--dark);">'
+        +(function(){
+            const out=[]; const now=new Date(); const years={};
+            for(let k=0;k<12;k++){
+              const d=new Date(now.getFullYear(), now.getMonth()-k, 1);
+              const v=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
+              years[d.getFullYear()]=1;
+              const lb=d.toLocaleDateString(EN?'en-GB':'cs-CZ',{month:'long',year:'numeric'});
+              out.push('<option value="'+v+'"'+(_goRange===v?' selected':'')+'>'+lb+'</option>');
+            }
+            Object.keys(years).sort().reverse().forEach(function(y){
+              out.push('<option value="'+y+'"'+(_goRange===y?' selected':'')+'>'+(EN?('Year '+y):('Cel\u00fd rok '+y))+'</option>');
+            });
+            out.push('<option value="all"'+(_goRange==='all'?' selected':'')+'>'+(EN?'All time':'Od za\u010d\u00e1tku')+'</option>');
+            return out.join('');
+          })()
+      +'</select>'
       +'<div id="goBody"><p style="color:var(--light);font-size:13px;text-align:center;padding:24px;">'+L('Na\u010d\u00edt\u00e1m...')+'</p></div></div>';
   try{ openSheet('shGymOrigins'); }catch(e){ ov.classList.add('open'); }
   // Přepínač období překreslí celou obrazovku se stejným klubem.
   try{
-    ov.querySelectorAll('#goRange button').forEach(function(b){
-      b.onclick=function(){ openGymOrigins(gymId, gymName, b.getAttribute('data-r')); };
-    });
+    const _sel=ov.querySelector('#goRange');
+    if(_sel) _sel.onchange=function(){ openGymOrigins(gymId, gymName, _sel.value); };
   }catch(e){}
   ov.querySelector('#_goClose').onclick=function(){ try{ closeSheet('shGymOrigins'); }catch(e){ ov.classList.remove('open'); } };
 
   const box=ov.querySelector('#goBody');
-  // Období: 30 dní, 12 měsíců nebo od začátku.
-  const _sinceFor=function(r){
-    if(r==='30d') return new Date(Date.now()-30*86400000).toISOString();
-    if(r==='all') return '1970-01-01T00:00:00Z';
-    return new Date(Date.now()-365*86400000).toISOString();
+  // Období: konkrétní měsíc (2026-09), celý rok (2026) nebo od začátku (all). Výchozí je
+  // tenhle měsíc, stejně jako v Přehledu -- aby se dvě obrazovky o stejných penězích
+  // neptaly na jiné období.
+  if(!_goRange){ const _d=new Date(); _goRange=_d.getFullYear()+'-'+String(_d.getMonth()+1).padStart(2,'0'); }
+  const _bounds=function(r){
+    if(r==='all') return { from:'1970-01-01T00:00:00Z', to:null };
+    if(/^\d{4}$/.test(r)) return { from:r+'-01-01T00:00:00Z', to:(Number(r)+1)+'-01-01T00:00:00Z' };
+    const y=Number(r.slice(0,4)), m=Number(r.slice(5,7));
+    const nm=(m===12)?((y+1)+'-01'):(y+'-'+String(m+1).padStart(2,'0'));
+    return { from:r+'-01T00:00:00Z', to:nm+'-01T00:00:00Z' };
   };
-  const since=_sinceFor(_goRange);
+  const _bd=_bounds(_goRange);
+  const since=_bd.from, until=_bd.to;
   // DVA RŮZNÉ ZDROJE DAT, NEPLÉST. `acq_source` u transakce říká, jestli toho člověka
   // přivedlo MTL (a účtuje se za to akvizice). `attr_src` u členství a rezervací je
   // marketingová atribuce z webu — odkud člověk přišel na stránku. Dřív se počítalo jen
@@ -31236,7 +31252,7 @@ async function openGymOrigins(gymId, gymName, range){
     // 1) KOHO PŘIVEDLO MTL — z transakcí, tedy z toho, za co se opravdu platilo.
     const { data:tx } = await supaClient.from('transactions')
       .select('acq_source,mtl_fee,gross_amount,currency,member_id,created_at')
-      .eq('gym_id',gymId).gte('created_at',since).not('acq_source','is',null);
+      .eq('gym_id',gymId).gte('created_at',since).lt('created_at', until||'2999-01-01').not('acq_source','is',null);
     (tx||[]).forEach(function(t){
       const src=t.acq_source;
       if(src!=='mtl_ads' && src!=='mtl_discovery') return;
@@ -31249,8 +31265,8 @@ async function openGymOrigins(gymId, gymName, range){
 
     // 2) VLASTNÍ ZDROJE — z atribuce u členství a rezervací, bez lidí, které přivedlo MTL.
     const [mem, bk] = await Promise.all([
-      supaClient.from('gym_memberships').select('attr_src,student_id').eq('gym_id',gymId).gte('created_at',since),
-      supaClient.from('gym_bookings').select('attr_src,student_id').eq('gym_id',gymId).gte('created_at',since),
+      supaClient.from('gym_memberships').select('attr_src,student_id').eq('gym_id',gymId).gte('created_at',since).lt('created_at', until||'2999-01-01'),
+      supaClient.from('gym_bookings').select('attr_src,student_id').eq('gym_id',gymId).gte('created_at',since).lt('created_at', until||'2999-01-01'),
     ]);
     const seen=new Set();
     [...(mem.data||[]), ...(bk.data||[])].forEach(function(r){
@@ -31261,9 +31277,10 @@ async function openGymOrigins(gymId, gymName, range){
       const parts=v.split(':');
       let src=(parts.length>1 ? (parts[0]==='app' ? 'app' : parts[1]) : v) || 'direct';
       if(String(src).indexOf('web|')===0) src='web';
-      // „app" neříká, ODKUD člověk přišel -- jen že byl při nákupu přihlášený v appce. Do
-      // přehledu zdrojů to tedy nepatří jako zdroj; je to prostě neznámý původ.
-      if(src==='app') src='unknown';
+      // „app" není zdroj: říká jen, že člověk byl při nákupu přihlášený v appce. Kdo přes
+      // MTL opravdu přišel, je výš podle acq_source; tyhle řádky jsou nákupy lidí, které
+      // klub už měl. Do přehledu zdrojů proto nepatří vůbec.
+      if(src==='app') return;
       ownCounts[src]=(ownCounts[src]||0)+1;
       ownPeople++;
     });
@@ -31286,7 +31303,7 @@ async function openGymOrigins(gymId, gymName, range){
     // Popisky vlastních zdrojů umí _attrLabel (Instagram, web, přímý odkaz...).
     let lb=k;
     try{ if(typeof _attrLabel==='function') lb=_attrLabel(k); }catch(e){}
-    if(k==='unknown') lb=(EN?'\u2753 Source not known':'\u2753 Zdroj nezn\u00e1me');
+
     return _line('', String(lb), ownCounts[k]);
   }).join('');
   const rows=rowsMtl+rowsOwn;
