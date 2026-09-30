@@ -766,6 +766,17 @@ export default async function handler(req, res) {
             } catch (e) { console.error('one-time membership activate', e.message); }
           }
           try {
+            // Přijetí za člena u spolku s předchozím rozhodnutím: platba činí rozhodnutí účinným.
+            try {
+              const _g2 = (await sbGet(`gyms?id=eq.${encodeURIComponent(m.gym_id)}&select=org_form,member_app_auto,member_app_auto_ref,member_app_body`) || [])[0];
+              const _sid = m.student_id || m.member_id;
+              if (_g2 && _g2.org_form === 'nonprofit' && _g2.member_app_auto && _sid) {
+                await sbPatch('gym_member_applications',
+                  `gym_id=eq.${encodeURIComponent(m.gym_id)}&student_id=eq.${encodeURIComponent(_sid)}&status=eq.pending`,
+                  { status: 'approved', decided_at: new Date().toISOString(),
+                    decided_note: _g2.member_app_auto_ref || ((_g2.member_app_body || 'Prislusny organ') + ': predchozi rozhodnuti, ucinne zaplacenim') });
+              }
+            } catch (e) { console.error('member application approve (membership)', e); }
             if (_pi) await recordTransaction(event.account, _pi, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id, plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side', acq_source: _acqSrcFrom(m), acq_months: (m.mtl_acq_months ? parseInt(m.mtl_acq_months,10) : null), base_rate: (m.mtl_base_rate ? parseFloat(m.mtl_base_rate) : null) });
           } catch (e) { console.error('record one-time membership', e.message); }
         }
@@ -804,6 +815,24 @@ export default async function handler(req, res) {
             const _prev = Number((((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=paid_amount`)) || [])[0] || {}).paid_amount || 0);
             await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}`, { status: 'deposit_paid', paid_amount: Math.round((_prev + amount) * 100) / 100 });
           }
+          // PRIJETI ZA CLENA U SPOLKU. Vzor prihlasky rika: "clenstvi vznika dnem rozhodnuti
+          // vyboru; ucinnost rozhodnuti je vazana na zaplaceni prispevku". Kdyz ma klub
+          // predchozi usneseni vyboru (member_app_auto), zaplacenim zalohy se rozhodnuti stava
+          // ucinnym a prihlaska se schvali. Zaloha tim prestava byt vratnou zalohou a stava se
+          // soucasti clenskeho prispevku. Bez usneseni zustava prihlaska cekat na klub.
+          try {
+            const _coh = (await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=gym_id`) || [])[0];
+            const _gid = _coh && _coh.gym_id;
+            if (_gid) {
+              const _g = (await sbGet(`gyms?id=eq.${encodeURIComponent(_gid)}&select=org_form,member_app_auto,member_app_auto_ref,member_app_body`) || [])[0];
+              if (_g && _g.org_form === 'nonprofit' && _g.member_app_auto) {
+                await sbPatch('gym_member_applications',
+                  `gym_id=eq.${encodeURIComponent(_gid)}&cohort_id=eq.${encodeURIComponent(cohId)}&status=eq.pending`,
+                  { status: 'approved', decided_at: new Date().toISOString(),
+                    decided_note: _g.member_app_auto_ref || ((_g.member_app_body||'Prislusny organ')+': predchozi rozhodnuti, ucinne zaplacenim') });
+              }
+            }
+          } catch (e) { console.error('member application approve', e); }
           // Also record a ledger transaction so the club DASHBOARD shows this cohort deposit
           // (dashboards read `transactions`, not `cohort_payments`). Idempotent on payment_intent.
           try {
