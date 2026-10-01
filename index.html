@@ -17494,6 +17494,25 @@ async function _doKidTransfer(parentId, kidName, kidBelts, targetId){
   }catch(e){}
 }
 
+// ZMENŠENÍ FOTKY PŘED NAHRÁNÍM. Fotka z telefonu má 3--8 MB, na přečtení dokladu stačí
+// delší strana 2000 px (vyjde kolem 0,5 MB). Kdyby převod selhal (neznámý formát), jde
+// originál a o velikosti rozhodne limit bucketu.
+async function _shrinkPhoto(file, maxSide, q){
+  const orig={ blob:file, type:(file.type||'image/jpeg'),
+    ext:((file.name||'').split('.').pop()||'jpg').toLowerCase().replace(/[^a-z0-9]/g,'')||'jpg' };
+  try{
+    const url=URL.createObjectURL(file);
+    const img=await new Promise(function(ok, ko){ const i=new Image(); i.onload=function(){ ok(i); }; i.onerror=ko; i.src=url; });
+    const k=Math.min(1, maxSide/Math.max(img.naturalWidth||1, img.naturalHeight||1));
+    const c=document.createElement('canvas');
+    c.width=Math.max(1, Math.round(img.naturalWidth*k)); c.height=Math.max(1, Math.round(img.naturalHeight*k));
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    URL.revokeObjectURL(url);
+    const blob=await new Promise(function(ok){ c.toBlob(ok, 'image/jpeg', q); });
+    if(!blob || blob.size>=file.size) return orig;
+    return { blob:blob, type:'image/jpeg', ext:'jpg' };
+  }catch(e){ return orig; }
+}
 function _openMigrateRequest(){
   const EN=LANG==='en';
   let ov=document.getElementById('migReqOv'); if(ov) ov.remove();
@@ -17537,7 +17556,7 @@ function _openMigrateRequest(){
       // a founder dostal notifikaci o zadosti, ktera v databazi neexistuje.
       if(_ins && _ins.error) throw _ins.error;
       const _reqId=(_ins&&_ins.data&&_ins.data.id)||null;
-      try{ const _f=document.getElementById('mrId'); if(_f&&_f.files&&_f.files[0]&&_reqId){ const _file=_f.files[0]; const _ext=((_file.name.split('.').pop()||'jpg').toLowerCase().replace(/[^a-z0-9]/g,'')||'jpg'); const _path=_reqId+'.'+_ext; const { error:_ue }=await supaClient.storage.from('migration-id').upload(_path,_file,{upsert:false}); if(!_ue){ await supaClient.from('migration_requests').update({ id_doc_path:_path, id_doc_at:new Date().toISOString() }).eq('id',_reqId); } else { console.error('migration id upload', _ue); window._migIdFail=true; } } }catch(e){ console.error('migration id upload', e); window._migIdFail=true; }
+      try{ const _f=document.getElementById('mrId'); if(_f&&_f.files&&_f.files[0]&&_reqId){ const _sh=await _shrinkPhoto(_f.files[0], 2000, 0.85); const _file=_sh.blob; const _ext=_sh.ext; const _path=_reqId+'.'+_ext; const { error:_ue }=await supaClient.storage.from('migration-id').upload(_path,_file,{upsert:false, contentType:_sh.type}); if(!_ue){ await supaClient.from('migration_requests').update({ id_doc_path:_path, id_doc_at:new Date().toISOString() }).eq('id',_reqId); } else { console.error('migration id upload', _ue); window._migIdFail=true; } } }catch(e){ console.error('migration id upload', e); window._migIdFail=true; }
       try{ await supaClient.from('notifications').insert({ user_id:FOUNDER_UUID, type:'system', read:false, data:JSON.stringify({kind:'migration_request', from:currentUser.id, kid:kid}), message:('🎓 '+(currentUser.name||'Student')+' žádá o přenos starých statistik dítěte: '+kid) }); }catch(e){}
       ov.remove();
       // Dřív se chyba nahrání dokladu tiše spolkla a hlásilo se „Odesláno" -- MTL pak čekalo
@@ -24450,8 +24469,8 @@ function setOrgFormUI(){
       // stanovami odpovídá klub; appka je u každého klubu číst nemůže.
       if(_a) _a.onchange=function(){
         if(_a.checked && !confirm(LANG==='en'
-          ? 'By turning this on you confirm on behalf of the club that:\n\u2022 the club may admit members in advance under its own rules, and\n\u2022 it has decided to admit everyone who pays.\n\nPeople then become members by paying, with no further approval. The club is responsible for this matching its statutes. Continue?'
-          : 'Zapnut\u00edm potvrzuje\u0161 za klub, \u017ee:\n\u2022 klub sm\u00ed podle sv\u00fdch pravidel p\u0159ij\u00edmat \u010dleny p\u0159edem a\n\u2022 rozhodl, \u017ee p\u0159ijme ka\u017ed\u00e9ho, kdo zaplat\u00ed.\n\n\u010clenem se pak \u010dlov\u011bk stane zaplacen\u00edm, bez dal\u0161\u00edho schvalov\u00e1n\u00ed. Za soulad se stanovami odpov\u00edd\u00e1 klub. Pokra\u010dovat?')){
+          ? 'When this is on, the club admits everyone who submits the membership application, and they can pay straight away \u2014 paying makes them a member. Use it to make the whole process quicker and simpler; otherwise you approve each application yourself.\n\nThe club and its responsible person are accountable for this matching the statutes. Continue?'
+          : 'Zapnut\u00edm klub p\u0159ijme ka\u017ed\u00e9ho, kdo ode\u0161le \u010dlenskou p\u0159ihl\u00e1\u0161ku, a umo\u017en\u00ed mu hned zaplatit \u2014 zaplacen\u00edm se st\u00e1v\u00e1 \u010dlenem. Vyu\u017eij, pokud chce\u0161 cel\u00fd proces urychlit a zjednodu\u0161it; jinak schvaluje\u0161 jednotliv\u00e9 p\u0159ihl\u00e1\u0161ky s\u00e1m.\n\nZa soulad se stanovami odpov\u00edd\u00e1 klub a jeho odpov\u011bdn\u00e1 osoba. Pokra\u010dovat?')){
           _a.checked=false; }
         _syncAuto();
       };
