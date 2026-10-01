@@ -14719,12 +14719,7 @@ async function _memberAppGate(g){
     if(ex && ex.length) return true;
   }catch(e){}
   const EN=LANG==='en';
-  const body=g.member_app_body||(EN?'the competent body':'p\u0159\u00edslu\u0161n\u00fd org\u00e1n');
-  const txt=(g.member_app_text||_memberAppDefault(g))
-    +'\n\n'+(EN?('Membership arises on the decision of '+body+'; payment makes that decision effective.')
-                :('\u010clenstv\u00ed vznik\u00e1 rozhodnut\u00edm, kter\u00e9 \u010din\u00ed '+body+'; zaplacen\u00edm se rozhodnut\u00ed st\u00e1v\u00e1 \u00fa\u010dinn\u00fdm.'));
-  if(!confirm(txt+'\n\n'+(EN?('I have read the full application and I apply for membership of '+(g.name||'the club'))
-                            :('Seznámil jsem se s cel\u00fdm obsahem p\u0159ihl\u00e1\u0161ky a \u017e\u00e1d\u00e1m o p\u0159ijet\u00ed za \u010dlena klubu '+(g.name||''))))) return false;
+  if(!confirm(_memberAppConfirmText(g, EN))) return false;
   try{
     await supaClient.from('gym_member_applications').insert({
       gym_id:g.id, student_id:currentUser.id,
@@ -18131,6 +18126,51 @@ function _phoneCCOptions(sel){
     sel=map[cc]||'+420'; }catch(e){ sel='+420'; } }
   return ccs.map(function(c){ return '<option value="'+c+'"'+(c===sel?' selected':'')+'>'+c+'</option>'; }).join('');
 }
+// KDY SE ČLOVĚK STANE ČLENEM. Jedna věta pro všechna místa (přihláška v kurzu, nákup členství,
+// náhled v nastavení), jinak se rozešly: kurz vždy psal „záloha je vratná, dokud nerozhodne",
+// nákup členství vždy „zaplacením se rozhodnutí stává účinným" -- bez ohledu na to, jestli
+// orgán rozhodl předem. kind: 'deposit' (záloha do kurzu) | 'membership' (nákup členství).
+function _memberAppDecision(g, kind, EN){
+  const body=(g&&g.member_app_body)||(EN?'the competent body':'p\u0159\u00edslu\u0161n\u00fd org\u00e1n');
+  if(g && g.member_app_auto){
+    // Bez slovesa v minulém čase: „rozhodl výbor" / „rozhodla rada" / „rozhodlo předsednictvo".
+    const ref=(g.member_app_auto_ref)?(' ('+String(g.member_app_auto_ref).replace(/^U/,'u').replace(/^R/,'r')+')'):'';
+    return EN ? ('Applicants have been admitted in advance by the club\u2019s deciding body: '+body+ref+'. The decision takes effect on payment \u2014 by paying you become a member.')
+              : ('O p\u0159ijet\u00ed \u017eadatel\u016f rozhodl p\u0159edem org\u00e1n klubu: '+body+ref+'. Rozhodnut\u00ed nab\u00fdv\u00e1 \u00fa\u010dinnosti zaplacen\u00edm \u2014 zaplacen\u00edm se st\u00e1v\u00e1\u0161 \u010dlenem.');
+  }
+  if(kind==='deposit'){
+    return EN ? ('Your admission will be decided by '+body+'. Your deposit is refundable until then; once admitted, it counts towards your membership contribution.')
+              : ('O p\u0159ijet\u00ed rozhodne '+body+'. Z\u00e1loha je do t\u00e9 doby vratn\u00e1; po p\u0159ijet\u00ed se st\u00e1v\u00e1 sou\u010d\u00e1st\u00ed \u010dlensk\u00e9ho p\u0159\u00edsp\u011bvku.');
+  }
+  return EN ? ('Your admission will be decided by '+body+'. You become a member only by that decision; if you are not admitted, your payment is refunded.')
+            : ('O p\u0159ijet\u00ed rozhodne '+body+'. \u010clenem se st\u00e1v\u00e1\u0161 a\u017e jeho rozhodnut\u00edm; kdy\u017e t\u011b nep\u0159ijme, platba se vrac\u00ed.');
+}
+// Text potvrzovacího okna před nákupem členství -- stejný pro studenta i pro náhled klubu.
+function _memberAppConfirmText(g, EN){
+  return (g.member_app_text||_memberAppDefault(g))+'\n\n'+_memberAppDecision(g, 'membership', EN)
+    +'\n\n'+(EN?('I have read the full application and I apply for membership of '+(g.name||'the club'))
+              :('Sezn\u00e1mil jsem se s cel\u00fdm obsahem p\u0159ihl\u00e1\u0161ky a \u017e\u00e1d\u00e1m o p\u0159ijet\u00ed za \u010dlena klubu '+(g.name||'')));
+}
+// Usnesení se ukládá jako jeden čitelný text (tak ho zapisuje i webhook k přijaté přihlášce):
+// „Usnesení výboru č. 3/2026 ze dne 12. 9. 2026". Datum se z něj při načtení vytáhne zpět.
+function _memberAppRefCompose(no, iso, body){
+  const m=String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if(!m) return '';
+  const d=parseInt(m[3],10)+'. '+parseInt(m[2],10)+'. '+m[1];
+  return (LANG==='en')
+    ? ('Resolution'+(String(no||'').trim()?(' no. '+String(no).trim()):'')+' of '+d)
+    : ('Usnesen\u00ed'+(String(no||'').trim()?(' \u010d. '+String(no).trim()):'')+' ze dne '+d);
+}
+function _memberAppRefParse(ref){
+  const out={ no:'', date:'' };
+  const s=String(ref||'').trim(); if(!s) return out;
+  const dm=s.match(/(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})\s*$/);
+  if(dm) out.date=dm[3]+'-'+('0'+dm[2]).slice(-2)+'-'+('0'+dm[1]).slice(-2);
+  const nm=s.match(/(?:\u010d\.|no\.)\s*(.+?)\s+(?:ze dne|of)\s+\d/);
+  if(nm) out.no=nm[1];
+  else if(!dm) out.no=s;   // starý volný text bez data -- ať o něj klub nepřijde
+  return out;
+}
 // Výchozí znění přihlášky za člena. Klub si ho může přepsat (gyms.member_app_text), stejně
 // jako má vzor provozního řádu. Drží se textu, který spolky do přihlášek běžně dávají.
 function _memberAppDefault(g){
@@ -18247,8 +18287,7 @@ async function openCohortSignup(cohortId, fromColdLink){
         // Co se stane se zálohou, dokud výbor nerozhodne. Bez toho by to vypadalo, že člověk
         // platí za členství, které ještě nemá.
         +'<div style="font-size:11.5px;color:#7a4f00;line-height:1.5;margin-top:8px;border-top:1px dashed #E8C24A;padding-top:7px;">'
-        +(EN?('Your deposit is refundable until '+((d.member_app_body)||'the club')+' decides on your admission. Once admitted, it counts towards your membership contribution.')
-            :('Z\u00e1loha je vratn\u00e1, dokud '+((d.member_app_body)||'klub')+' nerozhodne o p\u0159ijet\u00ed. Po p\u0159ijet\u00ed se st\u00e1v\u00e1 sou\u010d\u00e1st\u00ed \u010dlensk\u00e9ho p\u0159\u00edsp\u011bvku.'))
+        +escapeHtml(_memberAppDecision(d, 'deposit', EN))
         +'</div>'
         +'</details>'
         +'<label style="display:flex;gap:9px;align-items:flex-start;font-size:12px;color:var(--dark);line-height:1.45;margin-bottom:12px;cursor:pointer;"><input id="cohMemberApp" type="checkbox" style="margin-top:2px;flex-shrink:0;"><span>'
@@ -20499,14 +20538,31 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData, { subject:
       </div>
 
       <div class="sec-lbl">${LANG==='en'?'Deciding on admission':'Rozhodování o přijetí'}</div>
-      <input id="mgMemberAppBody" placeholder="${LANG==='en'?'Name of the deciding body (e.g. committee, board)':'Název rozhodujícího orgánu (např. výbor, předsednictvo, rada)'}" style="width:100%;box-sizing:border-box;padding:11px 12px;margin-bottom:10px;border:1px solid var(--border);border-radius:10px;font-size:13.5px;font-family:'DM Sans';">
+      <label for="mgMemberAppBody" style="display:block;font-size:12px;font-weight:700;color:var(--mid);margin:0 0 5px;">${LANG==='en'?'Who decides on admission (per your statutes)':'Kdo o přijetí rozhoduje (podle stanov)'}</label>
+      <input id="mgMemberAppBody" placeholder="${LANG==='en'?'e.g. committee, board':'např. výbor, předsednictvo, rada'}" style="width:100%;box-sizing:border-box;padding:11px 12px;margin-bottom:10px;border:1px solid var(--border);border-radius:10px;font-size:16px;font-family:'DM Sans';">
       <label style="display:flex;gap:9px;align-items:flex-start;font-size:13px;color:var(--dark);line-height:1.45;cursor:pointer;">
         <input id="mgMemberAppAuto" type="checkbox" style="margin-top:3px;flex-shrink:0;">
         <span>${LANG==='en'?'The deciding body has admitted applicants in advance; the decision takes effect on payment'
                            :'Rozhodující orgán rozhodl o přijetí žadatelů předem; rozhodnutí nabývá účinnosti zaplacením'}</span>
       </label>
-      <input id="mgMemberAppRef" placeholder="${LANG==='en'?'Resolution reference and date':'Označení a datum usnesení'}" style="width:100%;box-sizing:border-box;padding:10px 12px;margin-top:8px;border:1px solid var(--border);border-radius:10px;font-size:13px;font-family:'DM Sans';">
-      <p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:6px;">${LANG==='en'?'Without this, applications wait for your approval and the deposit stays refundable until then.'
+      <!-- USNESENÍ. Ke každé přihlášce přijaté zaplacením se zapíše, na základě čeho člověk
+           členem je -- při kontrole (dotace, spor) se to musí dát doložit. Datum je výběr
+           data, ne volný text: dřív jedno pole „označení a datum" nikdo nepochopil. -->
+      <div id="mgMemberAppRefWrap" style="display:none;margin-top:10px;padding:11px 12px;border:1px solid var(--border);border-radius:10px;background:var(--surf);">
+        <div style="display:flex;gap:8px;">
+          <div style="flex:1;min-width:0;">
+            <label for="mgMemberAppRefNo" style="display:block;font-size:11.5px;font-weight:700;color:var(--mid);margin:0 0 4px;">${LANG==='en'?'Resolution no. (optional)':'Číslo usnesení (nepovinné)'}</label>
+            <input id="mgMemberAppRefNo" placeholder="${LANG==='en'?'e.g. 3/2026':'např. 3/2026'}" style="width:100%;box-sizing:border-box;padding:10px 11px;border:1px solid var(--border);border-radius:9px;font-size:16px;font-family:'DM Sans';background:#fff;">
+          </div>
+          <div style="flex:1;min-width:0;">
+            <label for="mgMemberAppRefDate" style="display:block;font-size:11.5px;font-weight:700;color:var(--mid);margin:0 0 4px;">${LANG==='en'?'Date of the resolution':'Datum usnesení'}</label>
+            <input id="mgMemberAppRefDate" type="date" style="width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid var(--border);border-radius:9px;font-size:16px;font-family:'DM Sans';background:#fff;">
+          </div>
+        </div>
+        <p style="font-size:11px;color:var(--light);line-height:1.5;margin:7px 0 0;">${LANG==='en'?'Recorded with every application admitted by payment, as proof of the decision it rests on.'
+          :'Zapíše se ke každé přihlášce přijaté zaplacením jako doklad, na základě jakého rozhodnutí se člověk stal členem.'}</p>
+      </div>
+      <p id="mgMemberAppAutoHint" style="font-size:11px;color:var(--light);line-height:1.5;margin-top:6px;">${LANG==='en'?'Without this, applications wait for your approval and the deposit stays refundable until then.'
         :'Bez toho přihlášky čekají na tvoje schválení a záloha zůstává do té doby vratná.'}</p>
     </div>
 
@@ -24392,23 +24448,30 @@ function setOrgFormUI(){
       // Text z dřívější „klauzule o vzniku členství" se převezme, ať o něj klub nepřijde.
       if(_t && !_t.value) _t.value=_myGymData.member_app_text || _myGymData.membership_clause || '';
       const _a=$('mgMemberAppAuto'); if(_a) _a.checked=!!_myGymData.member_app_auto;
-      const _r=$('mgMemberAppRef');  if(_r) _r.value=_myGymData.member_app_auto_ref||'';
+      { const _pr=_memberAppRefParse(_myGymData.member_app_auto_ref);
+        const _rn=$('mgMemberAppRefNo'); if(_rn) _rn.value=_pr.no;
+        const _rd=$('mgMemberAppRefDate'); if(_rd) _rd.value=_pr.date; }
       const _b=$('mgMemberAppBody'); if(_b) _b.value=_myGymData.member_app_body||'';
+      const _rw=$('mgMemberAppRefWrap');
+      const _syncRef=function(){ if(_rw) _rw.style.display=(_a&&_a.checked)?'block':'none'; };
+      if(_a) _a.onchange=_syncRef; _syncRef();
     }
     const _tpl=$('mgMemberAppTpl');
     if(_tpl) _tpl.onclick=function(){ const _t=$('mgMemberAppText'); if(_t) _t.value=_memberAppDefault(_myGymData||{}); };
     const _pv=$('mgMemberAppPrev');
     if(_pv) _pv.onclick=function(){
-      // Náhled přesně tak, jak to uvidí student před platbou.
-      const g=_myGymData||{};
-      const txt=(($('mgMemberAppText')&&$('mgMemberAppText').value.trim())||_memberAppDefault(g));
-      const body=(($('mgMemberAppBody')&&$('mgMemberAppBody').value.trim())||(LANG==='en'?'the competent body':'p\u0159\u00edslu\u0161n\u00fd org\u00e1n'));
-      alert(txt+'\n\n'
-        +(LANG==='en'?('Your deposit is refundable until '+body+' decides on your admission. Once admitted, it counts towards your membership contribution.')
-                     :('Z\u00e1loha je vratn\u00e1, dokud '+body+' nerozhodne o p\u0159ijet\u00ed. Po p\u0159ijet\u00ed se st\u00e1v\u00e1 sou\u010d\u00e1st\u00ed \u010dlensk\u00e9ho p\u0159\u00edsp\u011bvku.'))
-        +'\n\n\u2610 '
-        +(LANG==='en'?('I have read the full application and I apply for membership of '+(g.name||'the club'))
-                     :('Seznámil jsem se s cel\u00fdm obsahem p\u0159ihl\u00e1\u0161ky a \u017e\u00e1d\u00e1m o p\u0159ijet\u00ed za \u010dlena klubu '+(g.name||''))));
+      // Náhled = TOTÉŽ okno, které student dostane před nákupem členství, z hodnot, které
+      // jsou teď ve formuláři (i neuložených). Dřív tu byl vlastní text, který se od
+      // skutečného lišil.
+      const EN=LANG==='en';
+      const _gv2=function(id){ const e=$(id); return e?String(e.value||'').trim():''; };
+      const _auto=!!($('mgMemberAppAuto')&&$('mgMemberAppAuto').checked);
+      const g=Object.assign({}, _myGymData||{}, {
+        member_app_text: _gv2('mgMemberAppText')||null,
+        member_app_body: _gv2('mgMemberAppBody')||null,
+        member_app_auto: _auto,
+        member_app_auto_ref: _auto ? (_memberAppRefCompose(_gv2('mgMemberAppRefNo'), _gv2('mgMemberAppRefDate'), _gv2('mgMemberAppBody'))||null) : null });
+      alert(_memberAppConfirmText(g, EN));
     };
   }catch(e){}
 }
@@ -25549,10 +25612,17 @@ async function saveGymManage(){
       dropin_plans: JSON.stringify(_gymDropinPlans||[]),
       // Usnesení výboru o předchozím přijetí žadatelů (jen spolek).
       member_app_auto: !!($('mgMemberAppAuto') && $('mgMemberAppAuto').checked),
-      member_app_auto_ref: (($('mgMemberAppRef') && $('mgMemberAppRef').value.trim()) || null),
+      member_app_auto_ref: (($('mgMemberAppAuto') && $('mgMemberAppAuto').checked)
+        ? (_memberAppRefCompose(_gv('mgMemberAppRefNo'), _gv('mgMemberAppRefDate'), _gv('mgMemberAppBody')) || null) : null),
       member_app_body: (($('mgMemberAppBody') && $('mgMemberAppBody').value.trim()) || null),
       member_app_text: (($('mgMemberAppText') && $('mgMemberAppText').value.trim()) || null),
       membership_plans:JSON.stringify(plans), membership_name:first?first.name:null, membership_price:first?first.price:null, schedule:sched, terms_title:termsTitle, terms_text:termsText };
+  // Rozhodnutí předem bez data a bez orgánu nejde doložit -- studentovi by appka tvrdila,
+  // že zaplacením je členem, a nebylo by čím to podložit.
+  if(patch.member_app_auto && document.getElementById('mgMemberAppSec') && document.getElementById('mgMemberAppSec').style.display!=='none'){
+    if(!_gv('mgMemberAppBody')){ toast(LANG==='en'?'\u26a0\ufe0f Fill in who decides on admission':'\u26a0\ufe0f Vypl\u0148, kdo o p\u0159ijet\u00ed rozhoduje'); try{ $('mgMemberAppBody').focus(); }catch(e){} return; }
+    if(!_gv('mgMemberAppRefDate')){ toast(LANG==='en'?'\u26a0\ufe0f Fill in the date of the resolution':'\u26a0\ufe0f Vypl\u0148 datum usnesen\u00ed'); try{ $('mgMemberAppRefDate').focus(); }catch(e){} return; }
+  }
   // FORMA ORGANIZACE SE ZAPISUJE JEN Z VYKRESLENÉHO PŘEPÍNAČE. `_gymOrgForm` je globál:
   // držel hodnotu z klubu, který byl otevřený naposledy, a uložení nastavení JINÉHO klubu
   // mu ji tiše přepsalo -- odtud spolky tam, kde nikdo spolek nezaškrtl.
@@ -25626,6 +25696,10 @@ async function saveGymManage(){
   if((termsText||'').trim() && !($('mgWaiverAuthor')&&$('mgWaiverAuthor').checked)){ toast(LANG==='en'?'⚠️ Confirm you are the author first':'⚠️ Potvrď, že jsi autorem dokumentu'); return; }
   const { error } = await supaClient.from('gyms').update(patch).eq('id', _myGymData.id);
   if(!error) _auditLog(_myGymData.id,'settings_changed',null,null);
+  // „TypeError: Load failed" je Safari pro požadavek, na který nepřišla žádná odpověď (výpadek
+  // spojení, přerušené načítání). Databáze nic neodmítla -- jen se to nedostalo na server.
+  if(error && /load failed|failed to fetch|networkerror/i.test(String(error.message||''))){
+    toast(LANG==='en'?'\u26a0\ufe0f No connection to the server \u2014 nothing was saved. Try again.':'\u26a0\ufe0f Spojen\u00ed se serverem selhalo \u2014 nic se neulo\u017eilo. Zkus to znovu.'); return; }
   if(error){ toast('⚠️ '+error.message); return; }
   if((termsText||'').trim()){ const _ch=(termsText!==_oldWaiverText)||!(_myGymData.waiver_version); if(_ch){ const _nv=(_myGymData.waiver_version||0)+1; const _h=_waiverHash((termsTitle||'')+'|'+termsText); try{ await supaClient.from('waiver_versions').insert({ gym_id:_myGymData.id, version:_nv, title:termsTitle||null, body:termsText, body_hash:_h, author_confirmed:true }); await supaClient.from('gyms').update({ waiver_version:_nv, waiver_author_confirmed_at:new Date().toISOString() }).eq('id', _myGymData.id); _myGymData.waiver_version=_nv; }catch(e){ console.warn('waiver ver', e); } } }
   _myGymData.dropin_price=dropin; _myGymData.membership_plans=JSON.stringify(plans); _myGymData.membership_name=first?first.name:null; _myGymData.membership_price=first?first.price:null; _myGymData.schedule=sched; _myGymData.terms_title=termsTitle; _myGymData.terms_text=termsText; _myGymData.org_form=_gymOrgForm; 
@@ -39193,6 +39267,17 @@ async function openStuckProviders(){
 // Vlastní obrazovka, oddělená od hlášení chyb: chyba je závada v appce, dotaz je otázka
 // od člověka. Dosud `support_tickets` žádný pohled neměl, takže zprávy padaly do tabulky,
 // kterou nikdo nečte, a notifikace o nich neměla kam odkázat.
+// Odpověď z Adminu: předmět a původní zpráva v citaci, stejně jako tlačítko v e-mailu.
+// Citace je zkrácená -- dlouhé mailto odkazy některé poštovní aplikace neotevřou.
+function _supReplyHref(r){
+  const cat=supCatLabel(r.category||'general');
+  const when=r.created_at?new Date(r.created_at).toLocaleString('cs-CZ'):'';
+  const msg=String(r.message||'');
+  const q=(msg.length>1500?msg.slice(0,1500)+'\u2026':msg).split('\n').map(function(l){ return '> '+l; }).join('\r\n');
+  const subj='Re: [Podpora] '+cat+' \u2014 '+(r.name||r.email||'');
+  const body='\r\n\r\n\u2014\u2014\u2014\r\n'+(r.name||'')+(when?(', '+when):'')+':\r\n'+q;
+  return 'mailto:'+String(r.email||'').trim()+'?subject='+encodeURIComponent(subj)+'&body='+encodeURIComponent(body);
+}
 async function openSupportTickets(status, focusId){
   const EN=LANG==='en';
   let ov=document.getElementById('shSupportAdmin');
@@ -39233,8 +39318,8 @@ async function openSupportTickets(status, focusId){
         +'<span style="margin-left:auto;font-size:11px;color:var(--light);">'+_d(r.created_at)+'</span>'
       +'</div>'
       +'<p style="font-size:13.5px;color:var(--dark);line-height:1.5;white-space:pre-wrap;margin:6px 0 8px;">'+escapeHtml(r.message||'')+'</p>'
-      +(r.email?('<a href="mailto:'+escapeHtml(r.email)+'" style="font-size:12.5px;font-weight:700;color:var(--blue);text-decoration:none;">'+escapeHtml(r.email)+'</a>'):'')
-      +(r.status==='open'?('<button data-done="'+escapeHtml(String(r.id))+'" style="float:right;padding:7px 12px;background:var(--surf);border:1px solid var(--border);border-radius:9px;font-size:12px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Mark done':'Vy\u0159\u00ed\u0161eno')+'</button>'):'')
+      +(r.email?('<a href="'+escapeHtml(_supReplyHref(r))+'" style="font-size:12.5px;font-weight:700;color:var(--blue);text-decoration:none;">'+escapeHtml(r.email)+'</a>'):'')
+      +(r.status==='open'?('<button data-done="'+escapeHtml(String(r.id))+'" style="float:right;padding:7px 12px;background:var(--surf);border:1px solid var(--border);border-radius:9px;font-size:12px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Mark done':'Vy\u0159\u00edzeno')+'</button>'):'')
       +'<div style="clear:both;"></div></div>';
   }).join('');
 
