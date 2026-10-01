@@ -357,6 +357,17 @@ async function sendEmail(to, subject, html, attachments){
 
 export default async function handler(req, res) {
   if (!SB || !KEY) return res.status(500).json({ error: 'env' });
+  // ZAVŘENO. Dřív endpoint neověřoval nic: kdokoli mohl spustit vystavování dokladů a přes
+  // ?preview=1 si stáhnout doklad prvního subjektu i s fakturačními údaji (jméno, IČO,
+  // adresa, e-mail). Vercel cron posílá Authorization: Bearer <CRON_SECRET> sám, stejně tak
+  // doklad-catchup-cron a stripe-webhook. Náhled z prohlížeče tím končí -- doklady se
+  // prohlížejí v appce (Doklady provize MTL).
+  {
+    const _sec = process.env.CRON_SECRET;
+    const _auth = (req && req.headers && req.headers.authorization) || '';
+    if (!_sec) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+    if (_auth !== `Bearer ${_sec}`) return res.status(401).json({ error: 'unauthorized' });
+  }
   const q = (req && req.query) || {};
   const preview = (q.preview === '1' || q.preview === 'true');
   // TEST MODE: daily doklad for the founder only, so Petr sees the commission receipt in real time.
