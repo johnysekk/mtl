@@ -199,7 +199,7 @@ async function notifyCreditorOutage(tbl, row) {
   const en = '\u26a0\ufe0f The bank you connected is not accepting instant payments right now' + (name ? (' (' + name + ')') : '') +
     '. Bank payments through the app will fail until it does. Check the reason with your bank. Students can still pay by QR transfer, which you confirm by hand.';
   await sb.from('notifications').insert({ user_id: ownerId, type: 'system', read: false,
-    data: JSON.stringify({ kind: 'pis_creditor_outage', who, msg_cs: cs, msg_en: en }), message: cs });
+    data: JSON.stringify({ kind: 'pis_creditor_outage', who, gym_id: row.gym_id || null, msg_cs: cs, msg_en: en }), message: cs });
 }
 
 async function fbxCreate(sb, req, body) {
