@@ -2,7 +2,7 @@
 //
 // KDO SOUHLASÍ: odesílatel při odeslání (prohlášení „předávám"), příjemce při přijetí.
 // Zápis proběhne až po souhlasu obou, tedy při přijetí.
-// KOMU: jen partnerovi propojenému v Rodině -- stejné pravidlo jako nabídka v appce, tady
+// KOMU: jen blízké osobě propojené v Rodině (relation='partner' = vazba dvou dospělých) -- stejné pravidlo jako nabídka v appce, tady
 // ale vynucené. Odkaz „pro kohokoli" je zrušený.
 //
 // Proč tady: předání sahá do účtů DVOU lidí (odebrat dítě jednomu, přidat druhému, přepsat
@@ -50,7 +50,7 @@ async function whoami(req) {
   return (u && u.id) ? u.id : null;
 }
 
-// Propojení v Rodině jako partneři (záznam může být v kterémkoli směru).
+// Propojení dvou dospělých v Rodině, blízká osoba (záznam může být v kterémkoli směru).
 async function familyLinked(from, to) {
   const rows = (await sb(`family_links?status=eq.active&relation=eq.partner&or=${q(`(and(guardian_id.eq.${from},member_id.eq.${to}),and(guardian_id.eq.${to},member_id.eq.${from}))`)}&select=id`)) || [];
   return rows.length > 0;
