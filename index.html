@@ -468,6 +468,11 @@ body.no-emoji [data-keep-emoji] .prow-icon,body.no-emoji [data-keep-emoji] .sico
 .toggle.on{background:var(--green)}
 .toggle::after{content:'';width:22px;height:22px;background:#fff;border-radius:50%;position:absolute;left:2px;top:2px;box-shadow:0 1px 4px rgba(0,0,0,.2);transition:transform .2s}
 .toggle.on::after{transform:translateX(18px)}
+/* Přepínač nad skutečným checkboxem: vzhled .toggle, chování i .checked zůstávají checkboxu. */
+.tglIn{position:absolute;opacity:0;width:0;height:0;pointer-events:none}
+.tglIn:checked + .toggle{background:var(--green)}
+.tglIn:checked + .toggle::after{transform:translateX(18px)}
+.tglIn:focus-visible + .toggle{outline:2px solid var(--dark);outline-offset:2px}
 
 /* ── PICKER ── */
 .picker-ov{position:absolute;inset:0;background:rgba(0,0,0,.5);z-index:300;display:flex;align-items:flex-end;opacity:0;pointer-events:none;transition:opacity .25s}
@@ -13592,7 +13597,9 @@ async function openMinorWaiverApprove(d){
 async function _minorWaiverGate(g, onAgree, isMembership){
   const EN=LANG==='en'; const me=currentUser&&currentUser.id; if(!me){ if(typeof onAgree==='function') onAgree(); return; }
   const _base=(g && g.terms_text && g.terms_text.trim())?g.terms_text.trim():_minorDefaultWaiver(g);
-  const _clause=(isMembership && g && g.org_form==='nonprofit' && g.membership_clause_on && g.membership_clause && g.membership_clause.trim())?g.membership_clause.trim():'';
+  // Klauzuli o vzniku členství nahradila přihláška za člena (_memberAppGate); dvě různá tvrzení o tom,
+  // kdy vzniká členství, by si odporovala. Sloupce zůstávají jen jako zdroj textu pro převod.
+  const _clause='';
   const _title=(g.terms_title||(EN?'Minor participation consent':'Souhlas zástupce s účastí nezletilého'));
   // Prohlášení o roli MTL je VIDITELNOU součástí klubového textu (je ve vzoru), ne něčím,
   // co se sem tiše přilepí. Tiché připojování se ukázalo jako zbytečně rozbitelné: jazyk
@@ -13650,7 +13657,9 @@ async function _approveMinorWaiver(d){
 async function gymTermsGate(g, onAgree, isMembership){
   try{ const _mi=await _famMineInfo(); if(_mi.minor){ return _minorWaiverGate(g, onAgree, isMembership); } }catch(e){}
   const _base=(g && g.terms_text && g.terms_text.trim())?g.terms_text.trim():'';
-  const _clause=(isMembership && g && g.org_form==='nonprofit' && g.membership_clause_on && g.membership_clause && g.membership_clause.trim())?g.membership_clause.trim():'';
+  // Klauzuli o vzniku členství nahradila přihláška za člena (_memberAppGate); dvě různá tvrzení o tom,
+  // kdy vzniká členství, by si odporovala. Sloupce zůstávají jen jako zdroj textu pro převod.
+  const _clause='';
   // Dokument sam o sobe staci k tomu, aby se brana otevrela: u spolku je to prave on, s cim
   // student souhlasi. Drive by se pri prazdnem textu proslo bez ptani.
   const _fileUrl=(g&&g.terms_file_url)||'';
@@ -18132,6 +18141,10 @@ function _phoneCCOptions(sel){
 // orgán rozhodl předem. kind: 'deposit' (záloha do kurzu) | 'membership' (nákup členství).
 function _memberAppDecision(g, kind, EN){
   const body=(g&&g.member_app_body)||(EN?'the competent body':'p\u0159\u00edslu\u0161n\u00fd org\u00e1n');
+  if(g && g.member_app_auto && /^(stanovy|statutes)/i.test(String(g.member_app_auto_ref||''))){
+    return EN ? 'Under the club\u2019s statutes, membership arises on payment \u2014 by paying you become a member.'
+              : 'Podle stanov klubu vznik\u00e1 \u010dlenstv\u00ed zaplacen\u00edm \u2014 zaplacen\u00edm se st\u00e1v\u00e1\u0161 \u010dlenem.';
+  }
   if(g && g.member_app_auto){
     // Bez slovesa v minulém čase: „rozhodl výbor" / „rozhodla rada" / „rozhodlo předsednictvo".
     const ref=(g.member_app_auto_ref)?(' ('+String(g.member_app_auto_ref).replace(/^U/,'u').replace(/^R/,'r')+')'):'';
@@ -18151,24 +18164,23 @@ function _memberAppConfirmText(g, EN){
     +'\n\n'+(EN?('I have read the full application and I apply for membership of '+(g.name||'the club'))
               :('Sezn\u00e1mil jsem se s cel\u00fdm obsahem p\u0159ihl\u00e1\u0161ky a \u017e\u00e1d\u00e1m o p\u0159ijet\u00ed za \u010dlena klubu '+(g.name||'')));
 }
-// Usnesení se ukládá jako jeden čitelný text (tak ho zapisuje i webhook k přijaté přihlášce):
-// „Usnesení výboru č. 3/2026 ze dne 12. 9. 2026". Datum se z něj při načtení vytáhne zpět.
-function _memberAppRefCompose(no, iso, body){
+// Na základě čeho appka přijímá zaplacením -- ukládá se jako jeden čitelný text (webhook ho
+// zapisuje k přijaté přihlášce): „Stanovy klubu" nebo „Usnesení ze dne 12. 9. 2026".
+function _memberAppRefCompose(basis, iso){
+  const EN=(LANG==='en');
+  if(basis==='statutes') return EN?'Club statutes':'Stanovy klubu';
   const m=String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if(!m) return '';
   const d=parseInt(m[3],10)+'. '+parseInt(m[2],10)+'. '+m[1];
-  return (LANG==='en')
-    ? ('Resolution'+(String(no||'').trim()?(' no. '+String(no).trim()):'')+' of '+d)
-    : ('Usnesen\u00ed'+(String(no||'').trim()?(' \u010d. '+String(no).trim()):'')+' ze dne '+d);
+  return EN?('Resolution of '+d):('Usnesen\u00ed ze dne '+d);
 }
 function _memberAppRefParse(ref){
-  const out={ no:'', date:'' };
+  const out={ basis:'statutes', date:'' };
   const s=String(ref||'').trim(); if(!s) return out;
+  if(/^(stanovy|statutes)/i.test(s)) return out;
   const dm=s.match(/(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})\s*$/);
+  out.basis='body';
   if(dm) out.date=dm[3]+'-'+('0'+dm[2]).slice(-2)+'-'+('0'+dm[1]).slice(-2);
-  const nm=s.match(/(?:\u010d\.|no\.)\s*(.+?)\s+(?:ze dne|of)\s+\d/);
-  if(nm) out.no=nm[1];
-  else if(!dm) out.no=s;   // starý volný text bez data -- ať o něj klub nepřijde
   return out;
 }
 // Výchozí znění přihlášky za člena. Klub si ho může přepsat (gyms.member_app_text), stejně
@@ -20510,19 +20522,24 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData, { subject:
     <details class="setSec" id="mgTermsSec"><summary>📜 ${(_myGymData&&_myGymData.org_form==='nonprofit')
       ? (LANG==='en'?'Membership & internal rules':'Členství a vnitřní pravidla')
       : (LANG==='en'?'Club rules & terms':'Provozní řád a pravidla klubu')}${_gymHasTerms(_myGymData)?'':' <span style="font-size:11px;font-weight:800;color:#8a1c1c;background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;padding:2px 8px;margin-left:6px;">'+(LANG==='en'?'required':'chybí')+'</span>'}</summary><div class="setBody">
-    <p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:8px;">${LANG==='en'
-      ? 'Strongly recommended. Your own terms or the association statutes. Members see them before they pay and must agree to continue. The file name appears exactly as uploaded — members see it when they agree, so name it clearly (e.g. “Stanovy 2026.pdf”).'
-      : 'D\u016frazn\u011b doporu\u010deno. Vlastn\u00ed podm\u00ednky nebo stanovy spolku. \u010clen\u016fm se uk\u00e1\u017eou p\u0159ed platbou a mus\u00ed s nimi souhlasit, aby mohli pokra\u010dovat. N\u00e1zev souboru z\u016fst\u00e1v\u00e1 p\u0159esn\u011b tak, jak ho nahraje\u0161 \u2014 studenti ho vid\u00ed p\u0159i ud\u011blen\u00ed souhlasu, tak\u017ee ho pojmenuj srozumiteln\u011b (nap\u0159. \u201eStanovy 2026.pdf\u201c).'}</p>
+    <p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:10px;">${LANG==='en'
+      ? 'Required \u2014 without club rules nothing can be bought at your club. Members see them before their first payment and must agree to continue.'
+      : 'Povinn\u00e9 \u2014 bez provozn\u00edho \u0159\u00e1du nejde v klubu nic koupit. \u010clen ho uvid\u00ed p\u0159ed prvn\u00ed platbou a mus\u00ed s n\u00edm souhlasit, jinak nem\u016f\u017ee pokra\u010dovat.'}</p>
+    <div class="sec-lbl">${LANG==='en'?'Club rules':'Provozn\u00ed \u0159\u00e1d a pravidla klubu'}</div>
     <input id="mgTermsTitle" type="text" value="${(_myGymData.terms_title||'').replace(/"/g,'&quot;')}" placeholder="${LANG==='en'?'Title (e.g. Club rules)':'Nadpis (např. Pravidla klubu)'}" style="width:100%;box-sizing:border-box;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';margin-bottom:8px;">
-    <textarea id="mgTermsText" rows="5" placeholder="${LANG==='en'?'Your terms / rules here…':'Sem napiš podmínky / pravidla…'}" style="width:100%;box-sizing:border-box;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';line-height:1.5;resize:vertical;margin-bottom:16px;">${(_myGymData.terms_text||'').replace(/</g,'&lt;')}</textarea>${_gymOrgForm==='nonprofit'?`<div style="border-top:1px solid var(--border);margin:4px 0 12px;"></div><label style="display:flex;align-items:center;gap:9px;cursor:pointer;font-size:13.5px;font-weight:700;color:var(--dark);margin-bottom:6px;"><input type="checkbox" id="mgMembClauseOn" ${_myGymData.membership_clause_on?'checked':''} style="width:18px;height:18px;flex-shrink:0;"> ${LANG==='en'?'Membership-formation clause (spolek)':'Klauzule o vzniku členství (spolek)'}</label><p style="font-size:11.5px;color:var(--light);line-height:1.5;margin-bottom:6px;">${LANG==='en'?'Shown & recorded ONLY at membership checkout (not drop-in). Paying = becoming a member. Have your lawyer match it to your statutes.':'Ukáže se a zaznamená JEN u členského předplatného (ne u jednorázového vstupu). Úhrada = vznik členství. Text nech právníkem sladit se stanovami.'}</p><textarea id="mgMembClause" rows="4" placeholder="${LANG==='en'?'By paying the monthly membership fee I apply for membership of [club], z.s. and agree to its statutes.':'Úhradou měsíčního členského příspěvku podávám přihlášku za člena spolku [název], z.s. a souhlasím s jeho stanovami.'}" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:11px;font-family:'DM Sans';font-size:13px;margin-bottom:6px;resize:vertical;">${(_myGymData.membership_clause||'').replace(/</g,'&lt;')}</textarea>`:''}
-    <div id="mgTermsFileBox" style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:10px;">
-      <div style="font-size:12.5px;font-weight:800;color:var(--dark);margin-bottom:3px;">${LANG==='en'?'Statutes / terms document':'Stanovy / dokument s podm\u00ednkami'}${_gymNeedsFile(_myGymData)?' <span style="font-size:11px;color:#8a1c1c;">'+(LANG==='en'?'\u2014 required for associations':'\u2014 povinn\u00e9 u spolku')+'</span>':''}</div>
-      <div style="font-size:11.5px;color:var(--light);line-height:1.5;margin-bottom:8px;">${LANG==='en'?'PDF up to 5 MB. Members see a link next to the consent box and open it only if they want to.':'PDF do 5 MB. \u010clen\u016fm se uk\u00e1\u017ee odkaz u souhlasu a otev\u0159ou ho, jen kdy\u017e cht\u011bj\u00ed.'}</div>
+    <textarea id="mgTermsText" rows="5" placeholder="${LANG==='en'?'Your terms / rules here…':'Sem napiš podmínky / pravidla…'}" style="width:100%;box-sizing:border-box;padding:13px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';line-height:1.5;resize:vertical;margin-bottom:16px;">${(_myGymData.terms_text||'').replace(/</g,'&lt;')}</textarea>
+    <div style="font-size:11.5px;color:var(--light);line-height:1.5;margin:0 0 8px;">${LANG==='en'?'The template is complete and ready to use \u2014 read it through and change what does not match your gym.':'Vzor je hotový a použitelný rovnou \u2014 projdi si ho a uprav, co u vás neplatí.'}</div>
+    <div style="display:flex;gap:8px;margin-bottom:10px;"><button id="mgWaiverTpl" type="button" onclick="if($('mgTermsText')){ $('mgTermsText').value=_waiverTemplate(); if($('mgTermsTitle')&&!$('mgTermsTitle').value.trim()) $('mgTermsTitle').value=(LANG==='en'?'Club rules':'Provozní řád a pravidla klubu'); $('mgTermsText').focus(); }" style="flex:1;padding:10px;background:var(--dark);border:1px solid var(--dark);color:#fff;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">📋 ${LANG==='en'?'Use the template':'Použít vzor'}</button><button id="mgWaiverExport" type="button" onclick="exportWaiverAcceptances()" style="flex:1;padding:10px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">⬇ ${LANG==='en'?'Export acceptances':'Exportovat souhlasy'}</button></div><label style="display:flex;align-items:flex-start;gap:8px;font-size:11.5px;margin-bottom:16px;cursor:pointer;color:var(--dark);line-height:1.45;"><input type="checkbox" id="mgWaiverAuthor" ${_myGymData.waiver_author_confirmed_at?'checked':''} style="width:18px;height:18px;flex-shrink:0;margin-top:1px;"> <span>${LANG==='en'?'As the club owner I am the author of this document and bear responsibility for its content and validity; MTL only stores it in the form I provide, without reviewing its content and without any guarantee of availability or permanence — I keep my own copy, and any outage, data loss, account deletion or fault on either side does not make MTL responsible for the document or its consequences.':'Jako majitel klubu jsem autorem tohoto dokumentu a nesu odpovědnost za jeho obsah i platnost; MTL jej pouze technicky ukládá v podobě, v jaké jsem jej vložil, bez kontroly obsahu a bez jakékoli záruky dostupnosti či trvalosti — uchovávám si vlastní kopii a výpadek, ztráta dat, smazání účtu ani porucha na kterékoli straně nečiní MTL odpovědným za dokument ani jeho důsledky.'}</span></label>
+    <div id="mgTermsFileBox" style="border:1px solid var(--border);border-radius:12px;padding:12px;margin:4px 0 10px;">
+      <div style="font-size:12.5px;font-weight:800;color:var(--dark);margin-bottom:3px;">${_gymNeedsFile(_myGymData)
+        ? ((LANG==='en'?'Association statutes (PDF)':'Stanovy spolku (PDF)')+' <span style="font-size:11px;color:#8a1c1c;">'+(LANG==='en'?'\u2014 required':'\u2014 povinn\u00e9')+'</span>')
+        : ((LANG==='en'?'Your own terms document (PDF)':'Vlastn\u00ed dokument s podm\u00ednkami (PDF)')+' <span style="font-size:11px;color:var(--light);font-weight:600;">'+(LANG==='en'?'\u2014 optional':'\u2014 nepovinn\u00e9')+'</span>')}</div>
+      <div style="font-size:11.5px;color:var(--light);line-height:1.5;margin-bottom:8px;">${LANG==='en'
+        ? 'PDF up to 5 MB. Members see a link next to the consent box, with the file name exactly as uploaded \u2014 name it clearly (e.g. \u201cStatutes 2026.pdf\u201d).'
+        : 'PDF do 5 MB. \u010clen u souhlasu uvid\u00ed odkaz s n\u00e1zvem souboru p\u0159esn\u011b tak, jak ho nahraje\u0161 \u2014 pojmenuj ho srozumiteln\u011b (nap\u0159. \u201eStanovy 2026.pdf\u201c).'}</div>
       <div id="mgTermsFileCur" style="font-size:12.5px;margin-bottom:8px;"></div>
       <input type="file" id="mgTermsFile" accept="application/pdf" style="width:100%;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:13px;font-family:'DM Sans';box-sizing:border-box;">
     </div>
-    <div style="font-size:11.5px;color:var(--light);line-height:1.5;margin:-2px 0 8px;">${LANG==='en'?'The template is complete and ready to use \u2014 read it through and change what does not match your gym.':'Vzor je hotový a použitelný rovnou \u2014 projdi si ho a uprav, co u vás neplatí.'}</div>
-    <div style="display:flex;gap:8px;margin-bottom:10px;"><button id="mgWaiverTpl" type="button" onclick="if($('mgTermsText')){ $('mgTermsText').value=_waiverTemplate(); if($('mgTermsTitle')&&!$('mgTermsTitle').value.trim()) $('mgTermsTitle').value=(LANG==='en'?'Club rules':'Provozní řád a pravidla klubu'); $('mgTermsText').focus(); }" style="flex:1;padding:10px;background:var(--dark);border:1px solid var(--dark);color:#fff;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">📋 ${LANG==='en'?'Use the template':'Použít vzor'}</button><button id="mgWaiverExport" type="button" onclick="exportWaiverAcceptances()" style="flex:1;padding:10px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">⬇ ${LANG==='en'?'Export acceptances':'Exportovat souhlasy'}</button></div><label style="display:flex;align-items:flex-start;gap:8px;font-size:11.5px;margin-bottom:16px;cursor:pointer;color:var(--dark);line-height:1.45;"><input type="checkbox" id="mgWaiverAuthor" ${_myGymData.waiver_author_confirmed_at?'checked':''} style="width:18px;height:18px;flex-shrink:0;margin-top:1px;"> <span>${LANG==='en'?'As the club owner I am the author of this document and bear responsibility for its content and validity; MTL only stores it in the form I provide, without reviewing its content and without any guarantee of availability or permanence — I keep my own copy, and any outage, data loss, account deletion or fault on either side does not make MTL responsible for the document or its consequences.':'Jako majitel klubu jsem autorem tohoto dokumentu a nesu odpovědnost za jeho obsah i platnost; MTL jej pouze technicky ukládá v podobě, v jaké jsem jej vložil, bez kontroly obsahu a bez jakékoli záruky dostupnosti či trvalosti — uchovávám si vlastní kopii a výpadek, ztráta dat, smazání účtu ani porucha na kterékoli straně nečiní MTL odpovědným za dokument ani jeho důsledky.'}</span></label>
     <!-- PRIHLASKA ZA CLENA. Jen u spolku a prave tady, ne u cen: patri k vnitrnim pravidlum,
          se kterymi se zadatel seznamuje. Driv tu byla klauzule o vzniku clenstvi, ktera
          tvrdila, ze clenstvi vznika uhradou; nahrazuje ji prihlaska a rozhodnuti o prijeti. -->
@@ -20540,30 +20557,35 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData, { subject:
       <div class="sec-lbl">${LANG==='en'?'Deciding on admission':'Rozhodování o přijetí'}</div>
       <label for="mgMemberAppBody" style="display:block;font-size:12px;font-weight:700;color:var(--mid);margin:0 0 5px;">${LANG==='en'?'Who decides on admission (per your statutes)':'Kdo o přijetí rozhoduje (podle stanov)'}</label>
       <input id="mgMemberAppBody" placeholder="${LANG==='en'?'e.g. committee, board':'např. výbor, předsednictvo, rada'}" style="width:100%;box-sizing:border-box;padding:11px 12px;margin-bottom:10px;border:1px solid var(--border);border-radius:10px;font-size:16px;font-family:'DM Sans';">
-      <label style="display:flex;gap:9px;align-items:flex-start;font-size:13px;color:var(--dark);line-height:1.45;cursor:pointer;">
-        <input id="mgMemberAppAuto" type="checkbox" style="margin-top:3px;flex-shrink:0;">
-        <span>${LANG==='en'?'The deciding body has admitted applicants in advance; the decision takes effect on payment'
-                           :'Rozhodující orgán rozhodl o přijetí žadatelů předem; rozhodnutí nabývá účinnosti zaplacením'}</span>
+      <!-- PŘIJETÍ PO ZAPLACENÍ. Přepínač, ne zaškrtávátko: je to režim, ne souhlas. -->
+      <label style="display:flex;gap:12px;align-items:flex-start;cursor:pointer;margin-top:4px;">
+        <span style="flex:1;min-width:0;font-size:13.5px;font-weight:700;color:var(--dark);line-height:1.4;">${LANG==='en'?'Admit automatically on payment':'P\u0159ijmout za \u010dlena automaticky po zaplacen\u00ed'}
+          <span style="display:block;font-size:11.5px;font-weight:500;color:var(--light);line-height:1.5;margin-top:3px;">${LANG==='en'
+            ? '(Turn on if your statutes or your deciding body already allow admitting everyone who pays. Off = you approve each application yourself and the payment stays refundable until then.)'
+            : '(Zapni, pokud va\u0161e stanovy nebo rozhoduj\u00edc\u00ed org\u00e1n u\u017e dovolují p\u0159ijmout ka\u017ed\u00e9ho, kdo zaplat\u00ed. Vypnuto = ka\u017edou p\u0159ihl\u00e1\u0161ku schvaluje\u0161 s\u00e1m a platba je do t\u00e9 doby vratn\u00e1.)'}</span></span>
+        <input id="mgMemberAppAuto" type="checkbox" class="tglIn"><span class="toggle" style="margin-top:2px;"></span>
       </label>
-      <!-- USNESENÍ. Ke každé přihlášce přijaté zaplacením se zapíše, na základě čeho člověk
-           členem je -- při kontrole (dotace, spor) se to musí dát doložit. Datum je výběr
-           data, ne volný text: dřív jedno pole „označení a datum" nikdo nepochopil. -->
+      <!-- NA ZÁKLADĚ ČEHO. Zapíše se ke každému, koho appka přijme zaplacením, aby se dalo
+           doložit, proč je členem. Dřív to bylo jedno pole „označení a datum usnesení",
+           kterému nikdo nerozuměl. -->
       <div id="mgMemberAppRefWrap" style="display:none;margin-top:10px;padding:11px 12px;border:1px solid var(--border);border-radius:10px;background:var(--surf);">
-        <div style="display:flex;gap:8px;">
-          <div style="flex:1;min-width:0;">
-            <label for="mgMemberAppRefNo" style="display:block;font-size:11.5px;font-weight:700;color:var(--mid);margin:0 0 4px;">${LANG==='en'?'Resolution no. (optional)':'Číslo usnesení (nepovinné)'}</label>
-            <input id="mgMemberAppRefNo" placeholder="${LANG==='en'?'e.g. 3/2026':'např. 3/2026'}" style="width:100%;box-sizing:border-box;padding:10px 11px;border:1px solid var(--border);border-radius:9px;font-size:16px;font-family:'DM Sans';background:#fff;">
-          </div>
-          <div style="flex:1;min-width:0;">
-            <label for="mgMemberAppRefDate" style="display:block;font-size:11.5px;font-weight:700;color:var(--mid);margin:0 0 4px;">${LANG==='en'?'Date of the resolution':'Datum usnesení'}</label>
-            <input id="mgMemberAppRefDate" type="date" style="width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid var(--border);border-radius:9px;font-size:16px;font-family:'DM Sans';background:#fff;">
-          </div>
+        <div style="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:6px;">${LANG==='en'?'Based on what?':'Na z\u00e1klad\u011b \u010deho?'}</div>
+        <input type="hidden" id="mgMemberAppBasis" value="statutes">
+        <div style="display:flex;gap:6px;margin-bottom:8px;">
+          <button type="button" class="mgMaBasis" data-b="statutes" style="flex:1;padding:9px 8px;border-radius:9px;border:1px solid var(--border);background:#fff;font-size:12.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Our statutes say so':'Ur\u010duj\u00ed to stanovy'}</button>
+          <button type="button" class="mgMaBasis" data-b="body" style="flex:1;padding:9px 8px;border-radius:9px;border:1px solid var(--border);background:#fff;font-size:12.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Our body decided it':'Rozhodl o tom org\u00e1n'}</button>
         </div>
-        <p style="font-size:11px;color:var(--light);line-height:1.5;margin:7px 0 0;">${LANG==='en'?'Recorded with every application admitted by payment, as proof of the decision it rests on.'
-          :'Zapíše se ke každé přihlášce přijaté zaplacením jako doklad, na základě jakého rozhodnutí se člověk stal členem.'}</p>
+        <p id="mgMaHintStat" style="font-size:11px;color:var(--light);line-height:1.5;margin:0;">${LANG==='en'
+          ? 'Fits when your statutes say membership arises by paying the contribution. Nothing else to fill in.'
+          : 'Plat\u00ed, kdy\u017e ve stanov\u00e1ch stoj\u00ed, \u017ee \u010dlenstv\u00ed vznik\u00e1 zaplacen\u00edm p\u0159\u00edsp\u011bvku. Nic dal\u0161\u00edho vypl\u0148ovat nemus\u00ed\u0161.'}</p>
+        <div id="mgMaDateBox" style="display:none;">
+          <label for="mgMemberAppRefDate" style="display:block;font-size:11.5px;font-weight:700;color:var(--mid);margin:0 0 4px;">${LANG==='en'?'When did it decide?':'Kdy o tom rozhodl?'}</label>
+          <input id="mgMemberAppRefDate" type="date" style="width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid var(--border);border-radius:9px;font-size:16px;font-family:'DM Sans';background:#fff;">
+          <p style="font-size:11px;color:var(--light);line-height:1.5;margin:6px 0 0;">${LANG==='en'
+            ? 'The date of the meeting where your committee voted to admit everyone who pays (see the minutes). It is recorded with each new member as proof.'
+            : 'Datum sch\u016fze, na kter\u00e9 v\u00fdbor odhlasoval, \u017ee p\u0159ijme ka\u017ed\u00e9ho, kdo zaplat\u00ed (najde\u0161 v z\u00e1pisu). Zap\u00ed\u0161e se u ka\u017ed\u00e9ho nov\u00e9ho \u010dlena jako doklad.'}</p>
+        </div>
       </div>
-      <p id="mgMemberAppAutoHint" style="font-size:11px;color:var(--light);line-height:1.5;margin-top:6px;">${LANG==='en'?'Without this, applications wait for your approval and the deposit stays refundable until then.'
-        :'Bez toho přihlášky čekají na tvoje schválení a záloha zůstává do té doby vratná.'}</p>
     </div>
 
     <!-- Přehled souhlasů patří na konec sekce, k uložení: je to výstup, ne nastavení. -->
@@ -24449,11 +24471,19 @@ function setOrgFormUI(){
       if(_t && !_t.value) _t.value=_myGymData.member_app_text || _myGymData.membership_clause || '';
       const _a=$('mgMemberAppAuto'); if(_a) _a.checked=!!_myGymData.member_app_auto;
       { const _pr=_memberAppRefParse(_myGymData.member_app_auto_ref);
-        const _rn=$('mgMemberAppRefNo'); if(_rn) _rn.value=_pr.no;
+        const _bs=$('mgMemberAppBasis'); if(_bs) _bs.value=_pr.basis;
         const _rd=$('mgMemberAppRefDate'); if(_rd) _rd.value=_pr.date; }
       const _b=$('mgMemberAppBody'); if(_b) _b.value=_myGymData.member_app_body||'';
       const _rw=$('mgMemberAppRefWrap');
-      const _syncRef=function(){ if(_rw) _rw.style.display=(_a&&_a.checked)?'block':'none'; };
+      const _syncRef=function(){
+        if(_rw) _rw.style.display=(_a&&_a.checked)?'block':'none';
+        const _v=($('mgMemberAppBasis')&&$('mgMemberAppBasis').value)||'statutes';
+        document.querySelectorAll('.mgMaBasis').forEach(function(x){ const on=x.dataset.b===_v;
+          x.style.background=on?'var(--dark)':'#fff'; x.style.color=on?'#fff':'var(--dark)'; x.style.borderColor=on?'var(--dark)':'var(--border)'; });
+        const _hs=$('mgMaHintStat'); if(_hs) _hs.style.display=(_v==='statutes')?'block':'none';
+        const _db=$('mgMaDateBox'); if(_db) _db.style.display=(_v==='body')?'block':'none';
+      };
+      document.querySelectorAll('.mgMaBasis').forEach(function(x){ x.onclick=function(){ const _bs=$('mgMemberAppBasis'); if(_bs) _bs.value=x.dataset.b; _syncRef(); }; });
       if(_a) _a.onchange=_syncRef; _syncRef();
     }
     const _tpl=$('mgMemberAppTpl');
@@ -24470,7 +24500,7 @@ function setOrgFormUI(){
         member_app_text: _gv2('mgMemberAppText')||null,
         member_app_body: _gv2('mgMemberAppBody')||null,
         member_app_auto: _auto,
-        member_app_auto_ref: _auto ? (_memberAppRefCompose(_gv2('mgMemberAppRefNo'), _gv2('mgMemberAppRefDate'), _gv2('mgMemberAppBody'))||null) : null });
+        member_app_auto_ref: _auto ? (_memberAppRefCompose(_gv2('mgMemberAppBasis')||'statutes', _gv2('mgMemberAppRefDate'))||null) : null });
       alert(_memberAppConfirmText(g, EN));
     };
   }catch(e){}
@@ -25613,15 +25643,15 @@ async function saveGymManage(){
       // Usnesení výboru o předchozím přijetí žadatelů (jen spolek).
       member_app_auto: !!($('mgMemberAppAuto') && $('mgMemberAppAuto').checked),
       member_app_auto_ref: (($('mgMemberAppAuto') && $('mgMemberAppAuto').checked)
-        ? (_memberAppRefCompose(_gv('mgMemberAppRefNo'), _gv('mgMemberAppRefDate'), _gv('mgMemberAppBody')) || null) : null),
+        ? (_memberAppRefCompose(_gv('mgMemberAppBasis')||'statutes', _gv('mgMemberAppRefDate')) || null) : null),
       member_app_body: (($('mgMemberAppBody') && $('mgMemberAppBody').value.trim()) || null),
       member_app_text: (($('mgMemberAppText') && $('mgMemberAppText').value.trim()) || null),
       membership_plans:JSON.stringify(plans), membership_name:first?first.name:null, membership_price:first?first.price:null, schedule:sched, terms_title:termsTitle, terms_text:termsText };
   // Rozhodnutí předem bez data a bez orgánu nejde doložit -- studentovi by appka tvrdila,
   // že zaplacením je členem, a nebylo by čím to podložit.
   if(patch.member_app_auto && document.getElementById('mgMemberAppSec') && document.getElementById('mgMemberAppSec').style.display!=='none'){
-    if(!_gv('mgMemberAppBody')){ toast(LANG==='en'?'\u26a0\ufe0f Fill in who decides on admission':'\u26a0\ufe0f Vypl\u0148, kdo o p\u0159ijet\u00ed rozhoduje'); try{ $('mgMemberAppBody').focus(); }catch(e){} return; }
-    if(!_gv('mgMemberAppRefDate')){ toast(LANG==='en'?'\u26a0\ufe0f Fill in the date of the resolution':'\u26a0\ufe0f Vypl\u0148 datum usnesen\u00ed'); try{ $('mgMemberAppRefDate').focus(); }catch(e){} return; }
+    if(_gv('mgMemberAppBasis')==='body' && !_gv('mgMemberAppBody')){ toast(LANG==='en'?'\u26a0\ufe0f Fill in who decides on admission':'\u26a0\ufe0f Vypl\u0148, kdo o p\u0159ijet\u00ed rozhoduje'); try{ $('mgMemberAppBody').focus(); }catch(e){} return; }
+    if(_gv('mgMemberAppBasis')==='body' && !_gv('mgMemberAppRefDate')){ toast(LANG==='en'?'\u26a0\ufe0f Fill in the date of the resolution':'\u26a0\ufe0f Vypl\u0148, kdy org\u00e1n rozhodl'); try{ $('mgMemberAppRefDate').focus(); }catch(e){} return; }
   }
   // FORMA ORGANIZACE SE ZAPISUJE JEN Z VYKRESLENÉHO PŘEPÍNAČE. `_gymOrgForm` je globál:
   // držel hodnotu z klubu, který byl otevřený naposledy, a uložení nastavení JINÉHO klubu
