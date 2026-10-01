@@ -75,19 +75,38 @@ export default async function handler(req, res) {
     }
 
     // ── podmínky klubu (waiver_acceptances) ───────────────────────────────────────────────
-    if (scope === 'gym') {
-      let f = `waiver_acceptances?gym_id=eq.${encodeURIComponent(gymId)}`;
+    // Klub vidí svoje; zakladatel ve větvi 'clubs' všechny kluby (dřív je neviděl vůbec).
+    if (scope === 'gym' || (scope === 'mtl' && String(q.branch || '') === 'clubs')) {
+      let f = scope === 'gym' ? `waiver_acceptances?gym_id=eq.${encodeURIComponent(gymId)}` : 'waiver_acceptances?id=not.is.null';
       if (ids) f += `&student_id=in.(${ids.map(encodeURIComponent).join(',')})`;
-      else if (search) f += '';
       const total = await sbCount(`${f}&select=id`);
-      const rows = await sbGet(`${f}&select=id,student_id,student_name,guest_email,guardian_name,version,body_title,body_text,accepted_at&order=accepted_at.desc&limit=${per}&offset=${from}`);
-      return res.status(200).json({ ok: true, rows: (rows || []).map(w => ({
-        id: w.id, kind: 'gym_terms', title: w.body_title || null, body_text: w.body_text || null,
-        who: w.student_name || w.guest_email || '—', accepted_at: w.accepted_at,
-        version: w.version, guardian_name: w.guardian_name || null,
-        body_hash: w.body_hash || null,
-        file_url: w.terms_file_url || null, file_hash: w.terms_file_hash || null,
-      })), total, page, per });
+      const rows = (await sbGet(`${f}&select=id,gym_id,student_id,student_name,guest_email,guardian_id,guardian_name,version,body_title,body_text,body_hash,terms_file_url,terms_file_hash,accepted_at&order=accepted_at.desc&limit=${per}&offset=${from}`)) || [];
+      // ZÁKONNÝ ZÁSTUPCE MIMO APPKU: jméno sám napsal, doklad o tom, kdo to byl, je jinde --
+      // odkaz šel na konkrétní e-mail a máme čas, IP a jestli klikl ze stejného zařízení
+      // jako mladistvý (nejsilnější známka, že si souhlas dal sám). Přidá se k řádku.
+      const ext = rows.filter((w) => w.guardian_name && !w.guardian_id && w.student_id);
+      const ev = {};
+      if (ext.length) {
+        const mids = [...new Set(ext.map((w) => w.student_id))];
+        const reqs = (await sbGet(`guardian_consent_requests?status=eq.approved&minor_id=in.(${mids.map(encodeURIComponent).join(',')})&select=gym_id,minor_id,body_hash,guardian_email,same_device,approved_at,approved_ip`)) || [];
+        reqs.forEach((r) => { ev[`${r.gym_id}|${r.minor_id}|${r.body_hash}`] = r; });
+      }
+      const gids = scope === 'mtl' ? [...new Set(rows.map((w) => w.gym_id).filter(Boolean))] : [];
+      const gn = {};
+      if (gids.length) ((await sbGet(`gyms?id=in.(${gids.map(encodeURIComponent).join(',')})&select=id,name`)) || []).forEach((g) => { gn[g.id] = g.name; });
+      return res.status(200).json({ ok: true, rows: rows.map((w) => {
+        const e = ev[`${w.gym_id}|${w.student_id}|${w.body_hash}`] || null;
+        return {
+          id: w.id, kind: 'gym_terms', title: w.body_title || null, body_text: w.body_text || null,
+          who: w.student_name || w.guest_email || '—', accepted_at: w.accepted_at,
+          version: w.version, guardian_name: w.guardian_name || null,
+          guardian_outside: !!(w.guardian_name && !w.guardian_id),
+          guardian_email: e ? e.guardian_email : null, same_device: e ? !!e.same_device : null,
+          gym_name: gn[w.gym_id] || null,
+          body_hash: w.body_hash || null,
+          file_url: w.terms_file_url || null, file_hash: w.terms_file_hash || null,
+        };
+      }), total, page, per });
     }
 
     // ── ostatní souhlasy (consent_acceptances) ────────────────────────────────────────────

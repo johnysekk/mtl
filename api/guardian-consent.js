@@ -72,7 +72,32 @@ module.exports = async (req, res) => {
             return res.status(400).json({ error: 'Zadaný e-mail patří tvému účtu.' });
           }
           if (owner[0].is_minor) {
-            return res.status(400).json({ error: 'Ten účet patří mladistvému — zástupce musí být dospělý.' });
+            return res.status(400).json({ error: 'Ten účet patří mladistvému — zákonný zástupce musí být dospělý.' });
+          }
+          // ZÁKONNÝ ZÁSTUPCE UŽ MÁ ÚČET V MTL. Místo e-mailu „bez účtu" je lepší propojení
+          // v Rodině: souhlas pak dá v appce, uvidí tréninky a může platit. Appka se zeptá
+          // (mode chybí); 'family' pošle žádost o propojení, 'email' pošle odkaz jako dřív.
+          // Jméno majitele účtu se nevrací -- jinak by šlo zkoušet, komu patří který e-mail.
+          const mode = String(body.mode || '');
+          if (!mode) return res.status(200).json({ ok: false, has_account: true });
+          if (mode === 'family') {
+            const gid = owner[0].id;
+            const { data: ex } = await admin.from('family_links').select('id,status')
+              .eq('guardian_id', gid).eq('member_id', uid).in('status', ['requested', 'active']).limit(1);
+            if (!(ex && ex.length)) {
+              const { error: fe } = await admin.from('family_links').insert({ guardian_id: gid, member_id: uid,
+                relation: 'guardian', status: 'requested', initiated_by: uid, token: 'f' + cryptoUUID().replace(/-/g, '').slice(0, 14) });
+              if (fe) return res.status(500).json({ error: fe.message });
+              const mn = (body.minor_name || '').toString().slice(0, 120) || 'Mladistvý';
+              try {
+                await admin.from('notifications').insert({ user_id: gid, type: 'system', read: false,
+                  data: JSON.stringify({ kind: 'family_request', from: uid, name: mn,
+                    msg_cs: `👪 ${mn} tě žádá o propojení v Rodině jako zákonného zástupce (kvůli tréninku v ${row_gym(body)}).`,
+                    msg_en: `👪 ${mn} asks you to link in Family as their legal guardian (to train at ${row_gym(body)}).` }),
+                  message: `👪 ${mn} tě žádá o propojení v Rodině jako zákonného zástupce (kvůli tréninku v ${row_gym(body)}).` });
+              } catch (e) { /* non-fatal */ }
+            }
+            return res.status(200).json({ ok: true, family_request: true });
           }
         }
       }
@@ -86,7 +111,7 @@ module.exports = async (req, res) => {
         requested_ua: String(req.headers['user-agent'] || '').slice(0, 300) || null,
         minor_name: (body.minor_name || '').toString().slice(0, 120) || null,
         gym_id: gymId,
-        gym_name: (body.gym_name || 'Gym').toString().slice(0, 160),
+        gym_name: (body.gym_name || 'Klub').toString().slice(0, 160),
         guardian_email: email,
         body_hash: (body.body_hash || '').toString(),
         title: (body.title || '').toString().slice(0, 200),
@@ -104,7 +129,7 @@ module.exports = async (req, res) => {
         body: JSON.stringify({
           from: FROM,
           to: [email],
-          subject: 'Souhlas s tréninkem nezletilého — ' + row.gym_name,
+          subject: 'Souhlas zákonného zástupce s tréninkem — ' + row.gym_name,
           html: consentHtml(row.gym_name, row.minor_name, link)
         })
       });
@@ -165,7 +190,7 @@ module.exports = async (req, res) => {
         await admin.from('notifications').insert({
           user_id: rq.minor_id, type: 'system', read: false,
           data: JSON.stringify({ kind: 'minor_waiver_done', ok: true, gym_name: rq.gym_name }),
-          message: '✅ Zástupce schválil — teď můžeš trénovat v ' + (rq.gym_name || 'gym') + '.'
+          message: '✅ Zákonný zástupce schválil — teď můžeš trénovat v klubu ' + (rq.gym_name || '') + '.'
         });
       } catch (e) { /* non-fatal */ }
 
@@ -183,6 +208,8 @@ function cryptoUUID() {
   return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 }
 
+function row_gym(b) { return String((b && b.gym_name) || 'klubu').slice(0, 160); }
+
 function consentHtml(gymName, minorName, link) {
   const who = minorName ? esc(minorName) : 'svěřenec';
   return `<!doctype html><html><body style="margin:0;background:#f4f1ec;font-family:Arial,Helvetica,sans-serif;color:#171717;">
@@ -190,12 +217,12 @@ function consentHtml(gymName, minorName, link) {
     <div style="font-size:22px;font-weight:800;letter-spacing:.04em;color:#E11;margin-bottom:4px;">MARTIAL TRAINING LAB</div>
     <div style="font-size:12px;color:#888;margin-bottom:22px;">Be More.</div>
     <p style="font-size:15px;line-height:1.6;">Dobrý den,</p>
-    <p style="font-size:15px;line-height:1.6;"><b>${esc(who)}</b> chce trénovat v <b>${esc(gymName)}</b> přes aplikaci Martial Training Lab. Jako zákonný zástupce prosím potvrď souhlas s podmínkami gymu — stačí jeden klik, účet není potřeba.</p>
+    <p style="font-size:15px;line-height:1.6;"><b>${esc(who)}</b> chce trénovat v klubu <b>${esc(gymName)}</b> přes aplikaci Martial Training Lab. Jako zákonného zástupce Vás prosíme o souhlas s provozním řádem a pravidly klubu. Stačí jedno kliknutí, účet v aplikaci nepotřebujete.</p>
     <p style="text-align:center;margin:26px 0;">
       <a href="${link}" style="display:inline-block;background:#E11;color:#fff;text-decoration:none;font-weight:800;font-size:16px;padding:14px 30px;border-radius:12px;">Zobrazit a schválit</a>
     </p>
-    <p style="font-size:13px;line-height:1.6;color:#555;">Na odkazu uvidíš podmínky gymu a souhlas potvrdíš zaškrtnutím. Bez tvého souhlasu nezletilý trénovat nezačne.</p>
-    <p style="font-size:12px;color:#aaa;line-height:1.6;margin-top:24px;">Pokud o tom nic nevíš nebo nesouhlasíš, e-mail klidně ignoruj — nic se nestane.</p>
+    <p style="font-size:13px;line-height:1.6;color:#555;">Na odkazu uvidíte provozní řád klubu a souhlas potvrdíte zaškrtnutím. Bez Vašeho souhlasu nezletilý trénovat nezačne.</p>
+    <p style="font-size:12px;color:#aaa;line-height:1.6;margin-top:24px;">Pokud o tom nic nevíte nebo nesouhlasíte, e-mail prosím ignorujte. Nic se nestane.</p>
   </div></body></html>`;
 }
 function esc(t) { return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
