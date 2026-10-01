@@ -20,7 +20,7 @@ export default async function handler(req, res) {
     // for the student to send the money.
     let _hideLeaders = false;
     // Spolek ukazuje přihlášku za člena rovnou v přihlášce do kurzu.
-    let _gymOrgForm = null, _memberAppText = null, _memberAppFile = null, _memberAppBody = null;
+    let _gymOrgForm = null, _memberAppText = null, _memberAppFile = null, _memberAppBody = null, _memberAppAuto = false, _memberAppRef = null;
     // Member lookup (?cm=<id>) for the on-site first-month remainder page
     const cm = (req.query && req.query.cm) || '';
     if (cm) {
@@ -63,7 +63,7 @@ export default async function handler(req, res) {
     }
 
     let gymName = '', gymPay = {};
-    try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(c.gym_id)}&select=name,payment_mode,receiver_id_type,receiver_id_value,receiver_name,hide_leaders,org_form,member_app_text,member_app_file_url,member_app_body`); const gg = g && g[0]; if (gg) { _hideLeaders = !!gg.hide_leaders; gymName = gg.name || ''; _gymOrgForm = gg.org_form || null; _memberAppText = gg.member_app_text || null; _memberAppFile = gg.member_app_file_url || null; _memberAppBody = gg.member_app_body || null; gymPay = { payment_mode: gg.payment_mode || null, receiver_id_type: gg.receiver_id_type || null, receiver_id_value: gg.receiver_id_value || null, receiver_name: gg.receiver_name || null }; } } catch (e) {}
+    try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(c.gym_id)}&select=name,payment_mode,receiver_id_type,receiver_id_value,receiver_name,hide_leaders,org_form,member_app_text,member_app_file_url,member_app_body,member_app_auto,member_app_auto_ref`); const gg = g && g[0]; if (gg) { _hideLeaders = !!gg.hide_leaders; gymName = gg.name || ''; _gymOrgForm = gg.org_form || null; _memberAppText = gg.member_app_text || null; _memberAppFile = gg.member_app_file_url || null; _memberAppBody = gg.member_app_body || null; _memberAppAuto = !!gg.member_app_auto; _memberAppRef = gg.member_app_auto_ref || null; gymPay = { payment_mode: gg.payment_mode || null, receiver_id_type: gg.receiver_id_type || null, receiver_id_value: gg.receiver_id_value || null, receiver_name: gg.receiver_name || null }; } } catch (e) {}
 
     // provider legal name from the connected Stripe account (controller for the lead's data)
     let providerName = '';
@@ -88,6 +88,8 @@ export default async function handler(req, res) {
         price_regular: c.price_regular, price_tiers: (Array.isArray(c.price_tiers) ? c.price_tiers : null), currency: c.currency, description: c.description, poster: c.poster || null,
         // Spolek: přihláška za člena se ukazuje rovnou v přihlášce do kurzu.
         gym_id: c.gym_id, gym_org_form: _gymOrgForm, member_app_text: _memberAppText, member_app_file_url: _memberAppFile, member_app_body: _memberAppBody,
+        // Rozhodl orgán předem? Podle toho se studentovi řekne, kdy se stane členem.
+        member_app_auto: _memberAppAuto, member_app_auto_ref: _memberAppRef,
         gym_name: gymName, provider_name: providerName, hide_leaders: _hideLeaders, meta_pixel: c.gym_meta_pixel || '', marketing_note: c.marketing_note || '',
         payment_mode: gymPay.payment_mode || null, receiver_id_type: gymPay.receiver_id_type || null, receiver_id_value: gymPay.receiver_id_value || null, receiver_name: gymPay.receiver_name || null
       }

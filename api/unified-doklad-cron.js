@@ -581,10 +581,15 @@ export default async function handler(req, res) {
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       return res.status(200).send(firstHtml || ('<p style="font-family:sans-serif;padding:24px;">\u017d\u00e1dn\u00e1 provize za ' + esc(period) + ' (zkus jin\u00fd ?month=RRRR-MM).</p>'));
     }
-    for (const gid of gymIds) { const g = gymMap[gid]; if (!g) continue; for (const cur of Object.keys(gymB[gid])) await issue('gym', gid, g.owner_id, cur, gymB[gid][cur]); }
-    for (const cid of Object.keys(coachB)) { for (const cur of Object.keys(coachB[cid])) await issue('coach', cid, cid, cur, coachB[cid][cur]); }
+    // ?only=gym:<id> | coach:<id> | organization:<id> -- vystaví jen pro jeden subjekt. Volá to
+    // stripe-webhook hned po úhradě přes „Zaplatit hned", aby doklad nečekal na ranní běh
+    // a aby se kvůli jednomu klubu neprocházeli všichni ostatní.
+    const _only = String(q.only || '').trim();
+    const _want = (kind, id) => !_only || _only === (kind + ':' + String(id).replace(/\|payout$/, ''));
+    for (const gid of gymIds) { const g = gymMap[gid]; if (!g || !_want('gym', gid)) continue; for (const cur of Object.keys(gymB[gid])) await issue('gym', gid, g.owner_id, cur, gymB[gid][cur]); }
+    for (const cid of Object.keys(coachB)) { if (!_want('coach', cid)) continue; for (const cur of Object.keys(coachB[cid])) await issue('coach', cid, cid, cur, coachB[cid][cur]); }
     // Organizace: doklad zni na ni, ale plati ji jeji majitel -- proto se ownerId bere z nej.
-    for (const oid of orgIds) { const o = orgMap[oid]; if (!o) continue;
+    for (const oid of orgIds) { const o = orgMap[oid]; if (!o || !_want('organization', oid)) continue;
       for (const cur of Object.keys(orgB[oid])) await issue('organization', oid, o.owner_id, cur, orgB[oid][cur]); }
 
     // DIAGNOSTIKA: kolik transakcí filtr našel, kolik dokladů vzniklo a JESTLI ODEŠEL E-MAIL.

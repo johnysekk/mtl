@@ -621,6 +621,107 @@ async function ecoPurchase(buyerId, amount, cur, pi, meta) {
   } catch (e) { console.error('ecoPurchase', e.message); }
 }
 
+
+// ── „ZAPLATIT HNED": CO SE DĚJE PO ÚHRADĚ ───────────────────────────────────────────────────
+// Dřív webhook jen srovnal stav: řádky na collected, účet odblokovaný. Majitel se nedozvěděl
+// nic -- upozornění „provize uhrazena" posílal jen commission-cron, a to jen u účtů, které
+// měly ještě commission_failed_at; ten tady ale mažeme, takže se k nim cron už nedostal.
+
+// Uvidí klub student? Stejné podmínky jako deck v appce (ensureGymsLoaded + canSell +
+// _mtlPayReady). Když se změní tam, musí se změnit i tady.
+function _gymMissing(g) {
+  const miss = [];
+  if (g.status !== 'approved') miss.push('approved');
+  if (g.suspended) miss.push('suspended');
+  if (g.deleted_at) miss.push('deleted');
+  const mode = g.payment_mode || (g.stripe_account ? 'stripe' : ((g.receiver_id_value || g.receiver_name) ? 'qr_bank' : null));
+  if (!mode) miss.push('paymode');
+  else if (mode === 'stripe') { if (!g.stripe_account) miss.push('stripe'); else if (g.charges_enabled === false) miss.push('stripe_pending'); }
+  else if (!g.receiver_id_value || !g.receiver_name) miss.push('iban');
+  if (mode !== 'stripe' && g.commission_card_status !== 'active') miss.push('card');
+  ['legal_name', 'tax_id', 'billing_line1', 'billing_city', 'billing_postal', 'billing_country']
+    .forEach((f) => { if (!String(g[f] || '').trim()) miss.push(f); });
+  if (!String(g.terms_text || '').trim()) miss.push('terms');
+  else if (g.org_form === 'nonprofit' && !g.terms_file_url) miss.push('statutes');
+  return miss;
+}
+const _MISS = {
+  approved: ['schválení klubu', 'club approval'], suspended: ['zrušení pozastavení ze strany MTL', 'MTL lifting its suspension'],
+  deleted: ['obnovení klubu', 'restoring the club'], paymode: ['výběr způsobu plateb', 'choosing a payment mode'],
+  stripe: ['připojení Stripe', 'connecting Stripe'], stripe_pending: ['dokončení ověření u Stripe', 'finishing Stripe verification'],
+  iban: ['IBAN a jméno majitele účtu', 'IBAN and account holder'], card: ['uloženou kartu ke stržení provize', 'a saved card for the commission charge'],
+  legal_name: ['právní název', 'legal name'], tax_id: ['IČO', 'company ID'], billing_line1: ['fakturační adresu', 'billing address'],
+  billing_city: ['město', 'city'], billing_postal: ['PSČ', 'postcode'], billing_country: ['zemi', 'country'],
+  terms: ['provozní řád a pravidla klubu', 'club rules'], statutes: ['stanovy (u spolku povinné)', 'statutes (required for a non-profit)'],
+};
+
+async function _paynowNotify(m, s) {
+  const kind = m.owner_kind, id = String(m.owner_id);
+  let ownerId = null, gym = null, name = '';
+  if (kind === 'gym') {
+    gym = ((await sbGet(`gyms?id=eq.${encodeURIComponent(id)}&select=*`)) || [])[0];
+    if (!gym) return; ownerId = gym.owner_id; name = gym.name || '';
+  } else if (kind === 'org') {
+    const o = ((await sbGet(`organizations?id=eq.${encodeURIComponent(id)}&select=owner_id,name`)) || [])[0];
+    if (!o) return; ownerId = o.owner_id; name = o.name || '';
+  } else { ownerId = id; }
+  if (!ownerId) return;
+  const p = ((await sbGet(`profiles?id=eq.${encodeURIComponent(ownerId)}&select=lang`)) || [])[0];
+  const en = !!(p && p.lang === 'en');
+
+  const cur = String(m.currency || s.currency || 'czk').toUpperCase();
+  const amt = (Number(s.amount_total || 0) / 100).toFixed(2);
+  const money = (lg) => (lg === 'en' ? amt : amt.replace('.', ',')) + ' ' + (cur === 'CZK' && lg !== 'en' ? 'Kč' : cur);
+
+  let vis = '', visEn = '';
+  if (gym) {
+    const miss = _gymMissing(gym);
+    if (!miss.length) {
+      vis = 'Klub je zase vidět v hledání a studenti u něj můžou platit.';
+      visEn = 'The club is visible in search again and students can pay.';
+    } else {
+      vis = 'V hledání se klub ukáže, až bude hotové: ' + miss.map((k) => (_MISS[k] || [k])[0]).join(', ') + '.';
+      visEn = 'The club will show in search once this is done: ' + miss.map((k) => (_MISS[k] || [k, k])[1]).join(', ') + '.';
+    }
+  } else if (kind === 'coach') {
+    vis = 'Tvůj profil je zase aktivní.'; visEn = 'Your profile is active again.';
+  } else {
+    vis = 'Organizace je zase aktivní.'; visEn = 'The organization is active again.';
+  }
+  const who = name ? (' (' + name + ')') : '';
+  const msg = `\u2705 Provize MTL uhrazena${who}: ${money('cs')}. ${vis} Doklad o provizi ti přijde e-mailem, jakmile bude vystavený.`;
+  const msgEn = `\u2705 MTL commission paid${who}: ${money('en')}. ${visEn} The commission receipt will arrive by e-mail once it is issued.`;
+  await sbPost('notifications', {
+    user_id: ownerId, type: 'system', read: false,
+    data: JSON.stringify({ kind: 'commission_cleared', gym_id: kind === 'gym' ? id : null, coach_id: kind === 'coach' ? id : null,
+      organization_id: kind === 'org' ? id : null, msg_en: msgEn }),
+    message: en ? msgEn : msg,
+  });
+}
+
+// DOKLAD HNED, kde to jde. Doklad se vystavuje za UZAVŘENÉ období a jen když je v něm
+// všechno stržené -- což úhrada právě zařídila. Proto se pro každý uzavřený měsíc v úhradě
+// zavolá unified-doklad-cron hned, jen pro tenhle subjekt. Za běžící měsíc doklad přijde
+// po jeho skončení jako vždy.
+// V DENNÍM REŽIMU (testovací provoz nebo commission_daily) se nevolá: tam je období den a
+// na den vzniká jediný doklad. Vystavit ho teď by vyřadilo ranní stržení téhož dne.
+async function _paynowDoklad(m, rows, curM) {
+  const pc = ((await sbGet('platform_config?id=eq.1&select=test_mode')) || [])[0];
+  if (pc && pc.test_mode) return;
+  for (const t of ['gyms', 'profiles', 'organizations']) {
+    const d = await sbGet(`${t}?commission_daily=is.true&select=id&limit=1`);
+    if (d && d.length) return;
+  }
+  const months = [...new Set(rows.map((r) => String(r.commission_month || '')).filter((x) => x && x < curM))];
+  const only = ({ gym: 'gym', coach: 'coach', org: 'organization' })[m.owner_kind] + ':' + String(m.owner_id);
+  const base = (process.env.APP_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '');
+  const sec = process.env.CRON_SECRET || '';
+  for (const mo of months.sort()) {
+    await fetch(`${base}/api/unified-doklad-cron?month=${encodeURIComponent(mo)}&only=${encodeURIComponent(only)}`,
+      { headers: sec ? { Authorization: 'Bearer ' + sec } : {} });
+  }
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
   let event;
@@ -658,14 +759,21 @@ export default async function handler(req, res) {
             // i failed. V denním režimu cron řádky na 'failed' nepřepisuje, takže samotné
             // 'failed' by doplatek nespároval a provize by se strhla ještě jednou.
             const _curM = new Date().toISOString().slice(0, 7);
-            await sbPatch('transactions',
-              `${col}=eq.${encodeURIComponent(m.owner_id)}&commission_status=in.(pending,failed)` +
+            const _flt = `${col}=eq.${encodeURIComponent(m.owner_id)}&commission_status=in.(pending,failed)` +
               `&commission_month=lte.${_curM}&payment_method=in.(cash,qr,pis)` +
-              (cur ? `&currency=ilike.${encodeURIComponent(cur)}` : ''),
+              (cur ? `&currency=ilike.${encodeURIComponent(cur)}` : '');
+            // Které měsíce se tímhle uhrazují -- kvůli okamžitému dokladu níž. Prázdný seznam
+            // znamená opakované doručení webhooku: nic se nemění a nic se znovu neoznamuje.
+            const _rows = (await sbGet(`transactions?${_flt}&select=commission_month`)) || [];
+            await sbPatch('transactions', _flt,
               { commission_status: 'collected', commission_collected_at: new Date().toISOString() });
             const tbl = ({ gym: 'gyms', coach: 'profiles', org: 'organizations' })[m.owner_kind];
             await sbPatch(tbl, `id=eq.${encodeURIComponent(m.owner_id)}`,
               { commission_failed_at: null, commission_next_retry: null, account_suspended: false, cash_blocked: false });
+            if (_rows.length) {
+              try { await _paynowNotify(m, s); } catch (e) { console.error('[commission_paynow] notify', e && e.message); }
+              try { await _paynowDoklad(m, _rows, _curM); } catch (e) { console.error('[commission_paynow] doklad', e && e.message); }
+            }
           }
         } catch (e) { console.error('[commission_paynow]', e && e.message); }
         return res.status(200).json({ received: true });

@@ -29,12 +29,12 @@ function html(lang, name) {
   const en = lang === 'en';
   const hi = name ? (en ? `Hi ${name},` : `Ahoj ${name},`) : (en ? 'Hi,' : 'Ahoj,');
   const lines = en
-    ? [`Your access to the Martial Training Lab test run has been approved.`,
-       `You can log in with the e-mail and password you registered with.`,
-       `This is a test run: payments are simulated and no real money moves. If anything looks wrong, use the bug report button in the app \u2014 that is what we need from you most.`]
-    : [`Tv\u016fj p\u0159\u00edstup do testovac\u00edho provozu Martial Training Lab byl schv\u00e1len.`,
-       `P\u0159ihl\u00e1s\u00ed se e-mailem a heslem, kter\u00e9 jsi zadal p\u0159i registraci.`,
-       `Jde o testovac\u00ed provoz: platby jsou simulovan\u00e9 a \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 pen\u00edze se nep\u0159esouvaj\u00ed. Kdy\u017e ti n\u011bco nebude sedět, pou\u017eij v appce tla\u010d\u00edtko pro hl\u00e1\u0161en\u00ed chyby \u2014 to je to, co od tebe pot\u0159ebujeme nejv\u00edc.`];
+    ? [`Your access to the test run of the Martial Training Lab app has been approved.`,
+       `You can log in with the e-mail and password you used when registering.`,
+       `This is a test run: payments are simulated and no real money moves. If anything feels off, use the bug report button in the app (tap the question mark in the top bar) \u2014 that is what helps us most.`]
+    : [`Tv\u016fj p\u0159\u00edstup do testovac\u00edho provozu aplikace Martial Training Lab byl schv\u00e1len.`,
+       `P\u0159ihl\u00e1s\u00ed\u0161 se e-mailem a heslem, kter\u00e9 jsi zadal p\u0159i registraci.`,
+       `Jde o testovac\u00ed provoz: platby jsou simulovan\u00e9 a \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 pen\u00edze se nep\u0159esouvaj\u00ed. Kdy\u017e ti n\u011bco nebude sed\u011bt, pou\u017eij v appce tla\u010d\u00edtko pro hl\u00e1\u0161en\u00ed chyby (p\u0159es emoji otazn\u00edku v horn\u00ed li\u0161t\u011b) \u2014 to je to, co n\u00e1m od tebe pom\u016f\u017ee nejv\u00edc.`];
   return `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:520px;margin:0 auto;padding:24px;">
     <div style="font-size:20px;font-weight:800;color:#111;margin-bottom:14px;">${en ? 'Your access is ready' : 'M\u00e1\u0161 p\u0159\u00edstup'}</div>
     <p style="font-size:15px;color:#333;line-height:1.6;margin:0 0 10px;">${hi}</p>

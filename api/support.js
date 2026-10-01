@@ -67,11 +67,22 @@ async function sendMail(t) {
   }
   if (!to) return 'no recipient';
   const cat = CATS[t.category] || 'Obecný dotaz';
+  // Předmět nese i začátek zprávy, ať je ve schránce vidět, o co jde, bez otevírání.
+  const one = String(t.message || '').replace(/\s+/g, ' ').trim();
+  const preview = one.length > 60 ? one.slice(0, 60) + '…' : one;
+  const subject = `[Podpora] ${cat} — ${t.name || t.email || 'uživatel'}${preview ? ': ' + preview : ''}`;
+  // Tlačítko Odpovědět: předmět Re: a původní zpráva v citaci. Dřív to byl holý mailto
+  // bez předmětu i bez historie. Citace je zkrácená -- dlouhé mailto některé aplikace neotevřou.
+  const when = t.created_at ? new Date(t.created_at).toLocaleString('cs-CZ', { timeZone: 'Europe/Prague' }) : '';
+  const msg = String(t.message || '');
+  const quoted = (msg.length > 1500 ? msg.slice(0, 1500) + '…' : msg).split('\n').map((l) => '> ' + l).join('\r\n');
+  const replyHref = t.email ? ('mailto:' + t.email + '?subject=' + encodeURIComponent('Re: ' + subject)
+    + '&body=' + encodeURIComponent('\r\n\r\n———\r\n' + (t.name || t.email) + (when ? ', ' + when : '') + ':\r\n' + quoted)) : '';
   const html = `<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto;padding:24px;">
     <div style="font-size:18px;font-weight:800;color:#111;margin-bottom:4px;">${esc(cat)}</div>
     <div style="font-size:13px;color:#888;margin-bottom:14px;">${esc(t.name || 'Neznámý')}${t.email ? ' · ' + esc(t.email) : ''}</div>
     <div style="font-size:15px;color:#222;line-height:1.6;white-space:pre-wrap;border-left:3px solid #ddd;padding-left:12px;margin-bottom:18px;">${esc(t.message || '')}</div>
-    ${t.email ? `<a href="mailto:${esc(t.email)}" style="display:inline-block;padding:11px 18px;background:#111;color:#fff;text-decoration:none;border-radius:9px;font-weight:700;font-size:14px;">Odpovědět</a>` : ''}
+    ${t.email ? `<a href="${esc(replyHref)}" style="display:inline-block;padding:11px 18px;background:#111;color:#fff;text-decoration:none;border-radius:9px;font-weight:700;font-size:14px;">Odpovědět</a>` : ''}
     <p style="font-size:12px;color:#999;margin-top:20px;">Vyřídit v appce: ${APP} → Admin → Dotazy na podporu</p>
   </div>`;
   const r = await fetch('https://api.resend.com/emails', {
@@ -80,7 +91,7 @@ async function sendMail(t) {
     body: JSON.stringify({
       from: MAIL_FROM, to: [to],
       ...(t.email ? { reply_to: t.email } : {}),
-      subject: `[Podpora] ${cat} — ${t.name || t.email || 'uživatel'}`,
+      subject,
       html,
     }),
   });
@@ -105,12 +116,12 @@ async function create(me, b, res) {
   const prof = await sb(`profiles?id=eq.${me.id}&select=name&limit=1`).catch(() => []);
   const name = String((prof[0] && prof[0].name) || '').trim() || null;
 
-  const ins = await sb('support_tickets?select=id', {
+  const ins = await sb('support_tickets?select=id,created_at', {
     method: 'POST', prefer: 'return=representation',
     body: JSON.stringify({ user_id: me.id, name, email: me.email, category, message, status: 'open' }),
   });
   const id = ins && ins[0] && ins[0].id;
-  const t = { id, name, email: me.email, category, message };
+  const t = { id, name, email: me.email, category, message, created_at: ins && ins[0] && ins[0].created_at };
 
   // Doručení zakladateli. Selhání e-mailu ani notifikace nesmí shodit už uložený dotaz.
   let mail = null;
