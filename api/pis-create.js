@@ -266,10 +266,19 @@ async function fbxCreate(sb, req, body) {
     delete p2.amount; delete p2.shoppingCartUrl;
     r = await fbxCall('POST', '/transaction/platform/init', p2, opts);
   }
+  // Platba se zadává VŽDY jako okamžitá (INST): appka ji potvrzuje hned podle stavu z banky.
+  // Běžná platba by dorazila až další pracovní den -- to je pro rezervaci k ničemu, takže se
+  // na ni nepřechází. Kód 258 (banka příjemce teď okamžitou platbu nepřijme) jde appce,
+  // která člověku vysvětlí, co se děje a co může udělat.
   if (!r.ok || !r.data || !r.data.redirectUrl) {
     const d = r.data || {};
     console.error('[pis-create/fbx]', r.status, JSON.stringify(d));
-    return { error: d.message ? ('Finbricks ' + (d.code != null ? d.code : r.status) + ': ' + d.message) : ('Finbricks HTTP ' + r.status), code: d.code ?? null };
+    // Člověk dostane srozumitelnou větu; technický kód a text Finbricks jde do logu a do detail.
+    const tech = d.message ? ('Finbricks ' + (d.code != null ? d.code : r.status) + ': ' + d.message) : ('Finbricks HTTP ' + r.status);
+    const human = (body.lang === 'en')
+      ? 'Payment from this bank is not possible right now.'
+      : 'Platba z této banky teď nejde.';
+    return { error: human, detail: tech, code: d.code ?? null };
   }
 
   if (tbl === 'organization_clubs') {
