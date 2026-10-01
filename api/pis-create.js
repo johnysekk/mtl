@@ -178,6 +178,30 @@ const fbxDesc = (v) => String(v || '')
   .replace(/[^a-zA-Z0-9\u00C0-\u024F()_\-@".,/':+\s]/g, ' ').trim().slice(0, 140) || 'Platba MTL';
 
 // Vraci stejny tvar jako Neonomics vetev: { payment_id, url } nebo { error }.
+// Komu notifikace o výpadku: majitel klubu / kouč / majitel organizace (podle řádku platby).
+async function notifyCreditorOutage(tbl, row) {
+  let ownerId = null, who = 'gym', name = '';
+  if (tbl === 'organization_clubs') {
+    const o = (await sb.from('organizations').select('owner_id,name').eq('id', row.organization_id).maybeSingle()).data;
+    ownerId = o && o.owner_id; who = 'org'; name = (o && o.name) || '';
+  } else if (row.gym_id) {
+    const g = (await sb.from('gyms').select('owner_id,name').eq('id', row.gym_id).maybeSingle()).data;
+    ownerId = g && g.owner_id; name = (g && g.name) || '';
+  } else if (row.coach_id) { ownerId = row.coach_id; who = 'coach'; }
+  if (!ownerId) return;
+  const since = new Date(Date.now() - 12 * 3600 * 1000).toISOString();
+  // data je jsonb s JSON v řetězci -- filtr ilike na něm v PostgREST nejde, tak se projdou
+  // poslední notifikace toho člověka.
+  const ex = await sb.from('notifications').select('data').eq('user_id', ownerId).gte('created_at', since).limit(100);
+  if ((ex.data || []).some((n) => String(typeof n.data === 'string' ? n.data : JSON.stringify(n.data || '')).indexOf('pis_creditor_outage') >= 0)) return;
+  const cs = '\u26a0\ufe0f Na straně tebou připojené banky teď není možné přijímat okamžité platby' + (name ? (' (' + name + ')') : '') +
+    '. Platby z účtu přes appku proto teď neprojdou. Důvod zjisti u své banky. Studenti mohou dál platit QR převodem, který potvrzuješ ručně.';
+  const en = '\u26a0\ufe0f The bank you connected is not accepting instant payments right now' + (name ? (' (' + name + ')') : '') +
+    '. Bank payments through the app will fail until it does. Check the reason with your bank. Students can still pay by QR transfer, which you confirm by hand.';
+  await sb.from('notifications').insert({ user_id: ownerId, type: 'system', read: false,
+    data: JSON.stringify({ kind: 'pis_creditor_outage', who, msg_cs: cs, msg_en: en }), message: cs });
+}
+
 async function fbxCreate(sb, req, body) {
   if (!FBX_MERCHANT) return { error: 'FINBRICKS_MERCHANT_ID not configured' };
   const rowId = String(body.bookingId || '');
@@ -273,6 +297,9 @@ async function fbxCreate(sb, req, body) {
   if (!r.ok || !r.data || !r.data.redirectUrl) {
     const d = r.data || {};
     console.error('[pis-create/fbx]', r.status, JSON.stringify(d));
+    // 258: banka PŘÍJEMCE teď nepřijímá okamžité platby. Dát vědět tomu, komu peníze patří --
+    // jinak se o tom dozví až od naštvaného zákazníka. Jednou za 12 hodin, ne při každém pokusu.
+    if (Number(d.code) === 258) { try { await notifyCreditorOutage(tbl, row); } catch (e) { console.error('[pis-create] outage notify', e && e.message); } }
     // Člověk dostane srozumitelnou větu; technický kód a text Finbricks jde do logu a do detail.
     const tech = d.message ? ('Finbricks ' + (d.code != null ? d.code : r.status) + ': ' + d.message) : ('Finbricks HTTP ' + r.status);
     const human = (body.lang === 'en')
