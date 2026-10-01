@@ -4871,7 +4871,50 @@ async function _kidShareApi(body){
   if(!r.ok || !j.ok){ const e=new Error(j.error||('HTTP '+r.status)); e.code=j.error; throw e; }
   return j;
 }
+// Sdílené děti, za které smím jednat. Načte se jednou (při vstupu do appky a při otevření
+// výběru); invalidace = window._sharedActKids=undefined (přijetí, odchod, potvrzení zástupce).
+async function _sharedActKidsLoad(){
+  if(window._sharedActKids!==undefined) return window._sharedActKids;
+  window._sharedActKids=[];
+  try{ const j=await _kidShareApi({ action:'with_me' }); window._kidSharedCache=j.items||[]; window._sharedActKids=(j.items||[]).filter(function(x){ return x.status==='active' && x.can_act; }); }catch(e){}
+  return window._sharedActKids;
+}
 function _kidKey(k){ return (k && k.id) ? String(k.id) : ('name:'+String((k&&k.name)||'')); }
+function _kidCareOpenByKey(key){
+  const kids=_myChildren(); const i=kids.findIndex(function(k){ return _kidKey(k)===String(key) && !k._archived; });
+  if(i>=0) _kidCareOpen(i);
+}
+// U napojené blízké osoby v Rodině: s kým a které dítě sdílím (s proklikem do nastavení)
+// a které děti sdílí ona se mnou. Dřív to bylo vidět jen schované v nastavení dítěte.
+async function _famFillShareLines(){
+  const lines=document.querySelectorAll('.famShareLine'); if(!lines.length) return;
+  const EN=LANG==='en'; const kids=_myChildren();
+  let mine={ shares:[] }; try{ mine=await _kidShareApi({ action:'mine' }); }catch(e){}
+  const withMe=window._kidSharedCache||[];
+  lines.forEach(function(el){
+    const oid=el.dataset.oid; let h='';
+    const out=(mine.shares||[]).filter(function(x){ return x.person_id===oid; });
+    out.forEach(function(x){
+      const i=kids.findIndex(function(k){ return _kidKey(k)===x.kid_id && !k._archived; }); if(i<0) return;
+      const k=kids[i];
+      h+='<div style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:11.5px;color:var(--mid);"><span style="flex:1;min-width:0;">\ud83d\udc6a '
+        +(EN?'You share ':'Sd\u00edl\u00ed\u0161 ')+'<b style="color:var(--dark);">'+escapeHtml(k.firstName||k.name||'')+'</b>'
+        +(x.status==='pending'?(' \u00b7 '+(EN?'waiting':'\u010dek\u00e1 na p\u0159ijet\u00ed')):'')+'</span>'
+        +'<button class="famShareOpt" data-i="'+i+'" style="padding:5px 9px;background:#fff;border:1px solid var(--border);border-radius:8px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';font-size:11px;">'+(EN?'Options':'Mo\u017enosti')+' \u203a</button></div>';
+    });
+    const sharedKeys=out.map(function(x){ return x.kid_id; });
+    const rest=kids.map(function(k,i){ return {k:k,i:i}; }).filter(function(o){ return !o.k._archived && sharedKeys.indexOf(_kidKey(o.k))<0; });
+    rest.forEach(function(o){
+      h+='<button class="famShareOpt" data-i="'+o.i+'" style="display:block;margin-top:6px;padding:0;background:none;border:none;color:var(--blue);font-weight:700;cursor:pointer;font-family:\'DM Sans\';font-size:11.5px;">+ '+(EN?'Share ':'Sd\u00edlet ')+escapeHtml(o.k.firstName||o.k.name||'')+'</button>';
+    });
+    withMe.filter(function(x){ return x.holder_id===oid; }).forEach(function(x){
+      h+='<div style="margin-top:6px;font-size:11.5px;color:var(--mid);">\ud83d\udc6a '+(EN?'Shares with you: ':'Sd\u00edl\u00ed s tebou: ')+'<b style="color:var(--dark);">'+escapeHtml(x.kid.first||x.kid.name||'')+'</b>'
+        +(x.status==='pending'?(' \u00b7 '+(EN?'accept below':'p\u0159ijmi n\u00ed\u017ee')):'')+'</div>';
+    });
+    el.innerHTML=h;
+  });
+  document.querySelectorAll('.famShareOpt').forEach(function(b){ b.onclick=function(){ _kidCareOpen(+b.dataset.i); }; });
+}
 async function _kidCareOpen(i){
   const EN=LANG==='en'; const kids=_myChildren(); const k=kids[i]; if(!k) return;
   let data={ people:[], shares:[] };
@@ -4887,17 +4930,17 @@ async function _kidCareOpen(i){
       +'<label style="display:flex;align-items:center;gap:12px;cursor:pointer;"><span style="flex:1;min-width:0;"><span style="display:block;font-size:14px;font-weight:700;color:var(--dark);">'+escapeHtml(p.name||'\u2014')+'</span>'
       +'<span class="kcSt" style="display:block;font-size:11.5px;color:var(--mid);margin-top:2px;">'+escapeHtml(st)+'</span></span>'
       +'<input type="checkbox" class="tglIn kcOn" '+(on?'checked':'')+'><span class="toggle"></span></label>'
-      +'<label class="kcHealthRow" style="display:'+(on?'flex':'none')+';align-items:center;gap:12px;cursor:pointer;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">'
-      +'<span style="flex:1;font-size:12.5px;color:var(--dark);">'+(EN?'Can see the health note':'Vid\u00ed zdravotn\u00ed pozn\u00e1mku')+'</span>'
-      +'<input type="checkbox" class="tglIn kcHealth" '+((sh&&sh.see_health)?'checked':'')+'><span class="toggle"></span></label>'
-      +'<label class="kcActRow" style="display:'+(on?'flex':'none')+';align-items:center;gap:12px;cursor:pointer;margin-top:10px;">'
-      +'<span style="flex:1;font-size:12.5px;color:var(--dark);">'+(EN?'Can act (book, excuse, pay)':'M\u016f\u017ee jednat (p\u0159ihl\u00e1sit, omluvit, zaplatit)')+'</span>'
-      +'<input type="checkbox" class="tglIn kcAct" '+((sh&&sh.can_act)?'checked':'')+'><span class="toggle"></span></label>'
-      +'<label class="kcGuardRow" style="display:'+((on&&sh&&sh.can_act)?'flex':'none')+';align-items:center;gap:12px;cursor:pointer;margin-top:10px;">'
+      +'<label class="kcGuardRow" style="display:'+(on?'flex':'none')+';align-items:center;gap:12px;cursor:pointer;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">'
       +'<span style="flex:1;font-size:12.5px;color:var(--dark);">'+(EN?'Is the child\u2019s legal guardian':'Je z\u00e1konn\u00fdm z\u00e1stupcem d\u00edt\u011bte')
-      +'<span style="display:block;font-size:11px;color:var(--light);margin-top:2px;">'+(EN?'(may accept club terms and the membership application for the child; they confirm it themselves)':'(sm\u00ed za d\u00edt\u011b odsouhlasit podm\u00ednky klubu a p\u0159ihl\u00e1\u0161ku za \u010dlena; potvrd\u00ed to s\u00e1m)')+'</span>'
+      +'<span style="display:block;font-size:11px;color:var(--light);margin-top:2px;">'+(EN?'(full rights incl. accepting club terms for the child; they confirm it themselves)':'(pln\u00e1 pr\u00e1va v\u010detn\u011b souhlas\u016f s podm\u00ednkami klubu za d\u00edt\u011b; potvrd\u00ed to s\u00e1m)')+'</span>'
       +((sh&&sh.is_guardian)?('<span style="display:block;font-size:11px;color:'+(sh.guardian_confirmed_at?'#0E7A4A':'#9A5B00')+';margin-top:2px;">'+(sh.guardian_confirmed_at?(EN?'Confirmed':'Potvrzeno'):(EN?'Waiting for their confirmation':'\u010cek\u00e1 na jeho potvrzen\u00ed'))+'</span>'):'')
       +'</span><input type="checkbox" class="tglIn kcGuard" '+((sh&&sh.is_guardian)?'checked':'')+'><span class="toggle"></span></label>'
+      +'<label class="kcHealthRow" style="display:'+(on?'flex':'none')+';align-items:center;gap:12px;cursor:pointer;margin-top:10px;">'
+      +'<span style="flex:1;font-size:12.5px;color:var(--dark);">'+(EN?'Can see the health note':'Vid\u00ed zdravotn\u00ed pozn\u00e1mku')+'</span>'
+      +'<input type="checkbox" class="tglIn kcHealth" '+((sh&&(sh.see_health||sh.is_guardian))?'checked':'')+'><span class="toggle"></span></label>'
+      +'<label class="kcActRow" style="display:'+(on?'flex':'none')+';align-items:center;gap:12px;cursor:pointer;margin-top:10px;">'
+      +'<span style="flex:1;font-size:12.5px;color:var(--dark);">'+(EN?'Can act (book, excuse, pay)':'M\u016f\u017ee jednat (p\u0159ihl\u00e1sit, omluvit, zaplatit)')+'</span>'
+      +'<input type="checkbox" class="tglIn kcAct" '+((sh&&(sh.can_act||sh.is_guardian))?'checked':'')+'><span class="toggle"></span></label>'
       +'</div>';
   }).join('');
   ov.innerHTML='<div style="background:#fff;width:100%;max-width:480px;border-radius:18px 18px 0 0;padding:20px 20px max(22px,env(safe-area-inset-bottom));max-height:88vh;overflow-y:auto;">'
@@ -4916,26 +4959,41 @@ async function _kidCareOpen(i){
   ov.querySelectorAll('.kcRow').forEach(function(row){
     const on=row.querySelector('.kcOn'), hl=row.querySelector('.kcHealth'), hr=row.querySelector('.kcHealthRow'), stEl=row.querySelector('.kcSt');
     const ac=row.querySelector('.kcAct'), ar=row.querySelector('.kcActRow'), gd=row.querySelector('.kcGuard'), gr=row.querySelector('.kcGuardRow');
+    // Zákonný zástupce = plná práva: zdravotní poznámka i jednání se zapnou a zamknou.
+    const lock=function(){ const g=gd.checked; if(g){ hl.checked=true; ac.checked=true; } hl.disabled=g; ac.disabled=g;
+      hr.style.opacity=g?'.55':'1'; ar.style.opacity=g?'.55':'1'; };
+    lock();
     const save=async function(){
       if(!on.checked){ hl.checked=false; ac.checked=false; gd.checked=false; }
-      if(!ac.checked) gd.checked=false;
+      lock();
       [on,hl,ac,gd].forEach(function(x){ x.disabled=true; });
       try{
         const j=await _kidShareApi({ action:'set', kid_key:key, person_id:row.dataset.pid, enabled:on.checked, see_health:hl.checked, can_act:ac.checked, is_guardian:gd.checked });
-        hr.style.display=on.checked?'flex':'none'; ar.style.display=on.checked?'flex':'none'; gr.style.display=(on.checked&&ac.checked)?'flex':'none';
+        hr.style.display=on.checked?'flex':'none'; ar.style.display=on.checked?'flex':'none'; gr.style.display=on.checked?'flex':'none';
         stEl.textContent = !on.checked ? '' : (j.status==='active' ? (EN?'Shared':'Sd\u00edleno') : (EN?'Waiting for them to accept':'\u010cek\u00e1 na p\u0159ijet\u00ed'));
       }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
-      [on,hl,ac,gd].forEach(function(x){ x.disabled=false; });
+      on.disabled=false; gd.disabled=false; lock();
+      try{ _famFillShareLines(); }catch(e){}
     };
     on.onchange=save; hl.onchange=save; ac.onchange=save; gd.onchange=save;
   });
 }
+// Vykreslí se hned z posledního známého stavu (načteného při vstupu do appky) a pak se
+// tiše obnoví ze serveru. Dřív se čekalo na server, pozvánka naskočila až po 2--3 s.
 async function _loadKidShared(){
-  const box=$('kidSharedBox'); if(!box) return; const EN=LANG==='en';
+  const box=$('kidSharedBox'); if(!box) return;
   if(!currentUser){ box.innerHTML=''; return; }
-  let items=[];
-  try{ items=(await _kidShareApi({ action:'with_me' })).items||[]; }catch(e){ box.innerHTML=''; return; }
-  if(!items.length){ box.innerHTML=''; return; }
+  if(window._kidSharedCache) _paintKidShared(window._kidSharedCache);
+  let items=null;
+  try{ items=(await _kidShareApi({ action:'with_me' })).items||[]; }catch(e){ return; }
+  window._kidSharedCache=items;
+  window._sharedActKids=items.filter(function(x){ return x.status==='active' && x.can_act; });
+  _paintKidShared(items);
+  try{ _famFillShareLines(); }catch(e){}
+}
+function _paintKidShared(items){
+  const box=$('kidSharedBox'); if(!box) return; const EN=LANG==='en';
+  if(!items || !items.length){ box.innerHTML=''; return; }
   const pend=items.filter(function(x){ return x.status==='pending'; });
   const act=items.filter(function(x){ return x.status==='active'; });
   let h='';
@@ -4955,7 +5013,7 @@ async function _loadKidShared(){
         const rec=(x.recent||[]).map(function(r){ return '<div style="font-size:11.5px;color:var(--mid);line-height:1.5;">'+escapeHtml(String(r.date||'').slice(0,10))+' \u00b7 '+escapeHtml(r.cls||'')+(r.gym?(' \u00b7 '+escapeHtml(r.gym)):'')+'</div>'; }).join('');
         return '<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:8px;">'
           +'<div style="font-weight:700;font-size:14px;">'+kidEmoji(k.age)+' '+escapeHtml(k.name||'')+'</div>'
-          +'<div style="font-size:12px;color:var(--mid);">'+(k.age!=null?(k.age+' '+(EN?'years':'let')):'')+(bn?(' \u00b7 '+bn+'\u00d7 '+(EN?'belt':'p\u00e1sek')):'')+' \u00b7 '+(EN?'with ':'u ')+escapeHtml(x.holder_name)+'</div>'
+          +'<div style="font-size:12px;color:var(--mid);">'+(k.age!=null?(k.age+' '+(EN?'years':'let')):'')+(bn?(' \u00b7 '+bn+'\u00d7 '+(EN?'belt':'p\u00e1sek')):'')+' \u00b7 '+(EN?'shared by ':'sd\u00edl\u00ed ')+escapeHtml(x.holder_name)+'</div>'
           +(k.health?('<div style="margin-top:9px;background:#FFF4F4;border:1px solid #F5C2C2;border-radius:10px;padding:8px 10px;"><div style="font-size:10.5px;font-weight:800;color:#B23A3A;">\ud83e\ude79 '+(EN?'HEALTH NOTE':'ZDRAVOTN\u00cd OMEZEN\u00cd')+'</div><div style="font-size:13px;color:var(--dark);white-space:pre-wrap;">'+escapeHtml(k.health)+'</div></div>'):'')
           +(k.trophy_img?('<div style="margin-top:9px;text-align:center;"><img src="'+escapeHtml(k.trophy_img)+'" alt="" loading="lazy" style="max-width:100%;max-height:150px;border-radius:12px;"></div>'):'')
           +(x.needs_guardian_confirm?('<div style="margin-top:9px;background:#FFF8E6;border:1px solid #E8C24A;border-radius:10px;padding:9px 11px;font-size:12px;color:#141414;line-height:1.45;">'+escapeHtml(x.holder_name)+' '+(EN?'marked you as the legal guardian.':'t\u011b ozna\u010dil/a jako z\u00e1konn\u00e9ho z\u00e1stupce.')
@@ -4964,12 +5022,17 @@ async function _loadKidShared(){
           +((x.upcoming&&x.upcoming.length)?('<div style="margin-top:9px;"><div style="font-size:11px;font-weight:800;color:var(--dark);margin-bottom:2px;">'+(EN?'Upcoming':'Nadch\u00e1zej\u00edc\u00ed')+'</div>'
             +x.upcoming.map(function(u){ return '<div style="display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--mid);line-height:1.5;margin-bottom:3px;"><span style="flex:1;min-width:0;">'+escapeHtml(String(u.date||'').slice(0,10))+(u.time?(' '+escapeHtml(u.time)):'')+' \u00b7 '+escapeHtml(u.cls||'')+(u.gym?(' \u00b7 '+escapeHtml(u.gym)):'')+'</span>'
               +(u.excused?('<span style="font-weight:700;color:#9A5B00;">'+(EN?'Excused':'Omluveno')+'</span>'):(x.can_act?('<button class="ksExcuse" data-id="'+escapeHtml(x.id)+'" data-b="'+escapeHtml(u.id)+'" style="padding:5px 9px;background:#fff;border:1px solid var(--border);border-radius:8px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';font-size:11px;">'+(EN?'Excuse':'Omluvit')+'</button>'):''))+'</div>'; }).join('')+'</div>'):'')
+          +((x.memberships&&x.memberships.length)?('<div style="margin-top:9px;"><div style="font-size:11px;font-weight:800;color:var(--dark);margin-bottom:2px;">'+(EN?'Memberships':'\u010clenstv\u00ed')+'</div>'
+            +x.memberships.map(function(m){ return '<div style="font-size:11.5px;color:var(--mid);line-height:1.5;">'+escapeHtml(m.gym||'')+' \u00b7 '+escapeHtml(m.plan||'')+(m.until?(' \u00b7 '+(EN?'until ':'do ')+escapeHtml(String(m.until).slice(0,10))):'')+'</div>'; }).join('')+'</div>'):'')
+          +((x.reservations&&x.reservations.length)?('<div style="margin-top:9px;"><div style="font-size:11px;font-weight:800;color:var(--dark);margin-bottom:2px;">'+(EN?'Reserved classes':'Rezervovan\u00e9 lekce')+'</div>'
+            +x.reservations.map(function(u){ return '<div style="display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--mid);line-height:1.5;margin-bottom:3px;"><span style="flex:1;min-width:0;">'+escapeHtml(String(u.date||'').slice(0,10))+(u.time?(' '+escapeHtml(u.time)):'')+' \u00b7 '+escapeHtml(u.cls||'')+(u.gym?(' \u00b7 '+escapeHtml(u.gym)):'')+'</span>'
+              +(x.can_act?('<button class="ksRelease" data-id="'+escapeHtml(x.id)+'" data-r="'+escapeHtml(u.id)+'" style="padding:5px 9px;background:#fff;border:1px solid var(--border);border-radius:8px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';font-size:11px;">'+(EN?'Excuse':'Omluvit')+'</button>'):'')+'</div>'; }).join('')+'</div>'):'')
           +(x.can_act?('<div style="margin-top:9px;font-size:11px;color:var(--light);line-height:1.45;">'+(EN?'To book or pay, open the club and choose ':'P\u0159ihl\u00e1sit nebo zaplatit: otev\u0159i klub a v \u201ePro koho?\u201c vyber ')+escapeHtml(k.first||k.name||'')+'.</div>'):'')
           +'<button class="ksLeave" data-id="'+escapeHtml(x.id)+'" style="margin-top:9px;background:none;border:none;padding:0;color:var(--mid);font-size:11.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';text-decoration:underline;">'+(EN?'Stop sharing':'Ukon\u010dit sd\u00edlen\u00ed')+'</button>'
           +'</div>'; }).join('');
   }
   box.innerHTML=h;
-  const act2=async function(body, b){ b.disabled=true; try{ await _kidShareApi(body); }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); } _loadKidShared(); };
+  const act2=async function(body, b){ b.disabled=true; try{ await _kidShareApi(body); }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); } window._kidSharedCache=null; _loadKidShared(); };
   box.querySelectorAll('.ksAcc').forEach(function(b){ b.onclick=function(){
     const g=box.querySelector('.ksGuard[data-id="'+b.dataset.id+'"]'); const gc=!!(g&&g.checked);
     if(gc){ try{ if(typeof _recordConsent==='function') _recordConsent('guardian_consent', KID_CONSENT_VERSION, LANG, (LANG==='en'?GUARDIAN_CONSENT_EN:GUARDIAN_CONSENT_CS), { context:'kid_share' }); }catch(e){} }
@@ -4980,6 +5043,9 @@ async function _loadKidShared(){
     try{ if(typeof _recordConsent==='function') _recordConsent('guardian_consent', KID_CONSENT_VERSION, LANG, (LANG==='en'?GUARDIAN_CONSENT_EN:GUARDIAN_CONSENT_CS), { context:'kid_share' }); }catch(e){}
     window._sharedActKids=undefined;
     act2({ action:'confirm_guardian', id:b.dataset.id }, b); }; });
+  box.querySelectorAll('.ksRelease').forEach(function(b){ b.onclick=function(){
+    const why=prompt(EN?'Reason (optional):':'D\u016fvod (nepovinn\u00e9):',''); if(why===null) return;
+    act2({ action:'release', id:b.dataset.id, reservation_id:b.dataset.r, reason:why }, b); }; });
   box.querySelectorAll('.ksExcuse').forEach(function(b){ b.onclick=function(){
     const why=prompt(EN?'Reason (optional):':'D\u016fvod (nepovinn\u00e9):',''); if(why===null) return;
     act2({ action:'excuse', id:b.dataset.id, booking_id:b.dataset.b, reason:why }, b); }; });
@@ -5201,7 +5267,7 @@ async function _loadFamilyAccts(){
           if(!_iAmG || !p.is_minor) return '';
           return `<label style="display:flex;align-items:flex-start;gap:7px;margin-top:8px;font-size:11.5px;color:var(--mid);line-height:1.4;cursor:pointer;"><input type="checkbox" class="famPayReq" data-id="${r.id}" ${r.can_request_pay?'checked':''} style="margin-top:1px;width:15px;height:15px;flex:none;"><span>${EN?'May send me payment requests':'Může mi posílat žádosti o úhradu'}</span></label>`;
         }catch(e){ return ''; }
-      })()}</div>${canUnlink?`<button class="famUnlink" data-id="${r.id}" style="padding:6px 10px;background:#FEECEC;color:var(--red);border:none;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:11.5px;flex:none;">${EN?'Unlink':'Odpojit'}</button>`:''}</div>`;
+      })()}${r.relation==='partner'?`<div class="famShareLine" data-oid="${oid}"></div>`:''}</div>${canUnlink?`<button class="famUnlink" data-id="${r.id}" style="padding:6px 10px;background:#FEECEC;color:var(--red);border:none;border-radius:9px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:11.5px;flex:none;">${EN?'Unlink':'Odpojit'}</button>`:''}</div>`;
     }).join('');
   }
 
@@ -5241,6 +5307,7 @@ async function _loadFamilyAccts(){
 
   wrap.innerHTML=html;
   wrap.querySelectorAll('.famUnlink').forEach(b=>b.onclick=()=>_famUnlink(b.dataset.id));
+  try{ _famFillShareLines(); }catch(e){}
   wrap.querySelectorAll('.famApprove').forEach(b=>b.onclick=()=>_famApprove(b.dataset.id));
   wrap.querySelectorAll('.famReject').forEach(b=>b.onclick=()=>_famReject(b.dataset.id));
   wrap.querySelectorAll('.famCancel').forEach(b=>b.onclick=()=>_famCancelLink(b.dataset.id));
@@ -9315,6 +9382,8 @@ async function _bookingFamilyOptions(){
   const out=[];
   // under-15 children (JSON, not archived)
   try{ (_myChildren()||[]).forEach((k,i)=>{ if(k&&!k._archived) out.push({ key:'child:'+i, name:k.name||'', isMinor:true, isChild:true }); }); }catch(e){}
+  // Sdílené děti, za které smím jednat -- jdou na lekci se mnou.
+  try{ ((await _sharedActKidsLoad())||[]).forEach(function(x){ out.push({ key:'shared:'+x.id, name:x.kid.name||'', isMinor:true, isChild:true }); }); }catch(e){}
   // linked accounts (family_links active)
   let rows=[];
   try{ const { data }=await supaClient.from('family_links').select('guardian_id,member_id,relation,status').or('guardian_id.eq.'+me+',member_id.eq.'+me).eq('status','active'); rows=data||[]; }catch(e){}
@@ -10889,7 +10958,11 @@ function openTierPick(ev, tiers){
   const cart=tiers.map(()=>0);
   // Rodič má děti v profilu, takže se jejich jména nepíšou ručně jako venku -- vybírá se ze
   // seznamu. Věk známe z data narození, takže limit akce ověříme sami.
-  const _kids=(typeof _myChildren==='function')?_myChildren():[];
+  // Vlastní děti + sdílené, za které smím jednat. U akce se souhlasem zástupce s účastí
+  // nezletilého jen tam, kde jsem potvrzený zákonný zástupce.
+  const _kids=((typeof _myChildren==='function')?_myChildren():[]).concat(
+    (window._sharedActKids||[]).filter(function(x){ return !ev.minor_consent || x.guardian; })
+      .map(function(x){ return { name:x.kid.name, dob:x.kid.dob, firstName:x.kid.first, _shared:true }; }));
   const maxTot=Math.max(1, Math.min(20, ev.capacity? Math.max(1, Number(ev.capacity)-(Number(window._evTaken)||0)) : 20));
   const ov=document.createElement('div');
   ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:240;display:flex;align-items:flex-end;justify-content:center;';
@@ -14441,7 +14514,9 @@ async function reserveClass(g, occ, myMemb, _cleared){
     const { data: rr, error } = await supaClient.from('gym_class_reservations').insert({
       gym_id:g.id, gym_name:g.name||'Gym', student_id:currentUser.id, student_name:currentUser.name||'Student',
       class_name:occ.name||null, class_date:occ.date||null, class_time:occ.time||null, class_level:occ.level||'all',
-      membership_id: myMemb?myMemb.id:null
+      membership_id: myMemb?myMemb.id:null,
+      // Rezervace z dětského členství patří dítěti -- jinak nejde odlišit od rodičovy a omluvit.
+      child_name: (myMemb&&myMemb.child_name)||null
     }).select('id').single();
     if(error){ toast('⚠️ '+error.message); return; }
     if(occ.coach && rr && rr.id){ try{ await supaClient.from('gym_class_reservations').update({ coach_id: occ.coach }).eq('id', rr.id); }catch(e){} }
@@ -14575,13 +14650,7 @@ function openChildPicker(info, cb){
     return;
   }
   // Sdílené děti (blízká osoba smí jednat). Načtou se jednou a picker se pak otevře znovu.
-  if(window._sharedActKids===undefined){
-    window._sharedActKids=[];
-    _kidShareApi({ action:'with_me' }).then(function(j){
-      window._sharedActKids=(j.items||[]).filter(function(x){ return x.status==='active' && x.can_act; });
-    }).catch(function(){}).then(function(){ openChildPicker(info, cb); });
-    return;
-  }
+  if(window._sharedActKids===undefined){ _sharedActKidsLoad().then(function(){ openChildPicker(info, cb); }); return; }
   const _shk=window._sharedActKids||[];
   if(!kids.length && !_shk.length){ toast(EN?'Add a child first in "Children".':'Nejdřív přidej dítě v „Děti".'); openMyKids(); return; }
   _childPickCb=cb;
@@ -14620,7 +14689,7 @@ function openChildPicker(info, cb){
     body.insertAdjacentHTML('beforeend', '<div style="font-size:11px;font-weight:800;color:var(--mid);margin:6px 0 6px;">'+(EN?'Shared with you':'Sd\u00edlen\u00e9 s tebou')+'</div>'
       +_shk.map(function(x,j){ return '<button class="childPickShared" data-j="'+j+'" style="width:100%;text-align:left;padding:13px;margin-bottom:8px;border:1px solid var(--border);border-radius:12px;background:#fff;cursor:pointer;font-family:\'DM Sans\';">'
         +'<div style="font-weight:700;">'+kidEmoji(x.kid.age)+' '+escapeHtml(x.kid.name||'')+'</div>'
-        +'<div style="font-size:11.5px;color:var(--mid);">'+(x.kid.age!=null?(x.kid.age+' '+(EN?'yrs':'let')+' \u00b7 '):'')+(EN?'with ':'u ')+escapeHtml(x.holder_name||'')+'</div></button>'; }).join(''));
+        +'<div style="font-size:11.5px;color:var(--mid);">'+(x.kid.age!=null?(x.kid.age+' '+(EN?'yrs':'let')+' \u00b7 '):'')+(EN?'shared by ':'sd\u00edl\u00ed ')+escapeHtml(x.holder_name||'')+'</div></button>'; }).join(''));
   }
   body.querySelectorAll('.childPick').forEach(b=>b.onclick=()=>{ const k=kids[+b.dataset.i]; ov.style.display='none'; const cb=_childPickCb; _childPickCb=null; if(cb) cb({ id:k.id, name:k.name, age:_kidAge(k), dob:k.dob||null }); });
   // Sdílené dítě: záznam půjde na držitele (holder), platit bude blízká osoba.
@@ -15041,8 +15110,31 @@ async function bookGymDropin(g, occ, _child){
   // za nulu vůbec vytvořit nemůže -- databáze to odmítne. Bez toho by si kdokoli s konzolí
   // naklikal tréninků zdarma, kolik by chtěl, a u klubu s velkým obratem lidí by si toho
   // nikdo nevšiml.
-  // Zkušební trénink zdarma zakládá databáze na přihlášeného (book_trial) -- u sdíleného
-  // dítěte by se zapsal blízké osobě, proto se tu nenabízí.
+  // ZKUŠEBNÍ TRÉNINK ZA SDÍLENÉ DÍTĚ. book_trial zapisuje na přihlášeného, takže tady jde
+  // book_trial_for: databáze ověří sdílení a zapíše rezervaci na držitele (plátce = já).
+  if(_child && _child.shared){
+    try{
+      const _tj=await _kidShareApi({ action:'trial_left', id:_child.share_id, gym_id:g.id });
+      if((_tj.left||0)>0){
+        const _ord=((_tj.total||0)-_tj.left)+1;
+        if(confirm(LANG==='en'?('Book a free trial class for '+_child.name+'? ('+_ord+' of '+_tj.total+')'):('Rezervovat zku\u0161ebn\u00ed tr\u00e9nink zdarma pro '+_child.name+'? ('+_ord+'. z '+_tj.total+')'))){
+          const { error:_te }=await supaClient.rpc('book_trial_for', { p_holder:_child.holder_id, p_gym:g.id, p_child:_child.name,
+            p_date:(occ&&occ.date)||new Date().toISOString().slice(0,10), p_time:(occ&&occ.time)||null, p_class_name:(occ&&occ.name)||null });
+          if(_te){
+            const _m=String(_te.message||'');
+            toast((/already_paid/.test(_m)) ? (LANG==='en'?'The child has already paid at this club':'D\u00edt\u011b u tohoto klubu u\u017e platilo')
+              : (/trials_used_up/.test(_m)) ? (LANG==='en'?'Free trials are used up':'Zku\u0161ebn\u00ed tr\u00e9ninky jsou vy\u010derpan\u00e9')
+              : (/not_allowed/.test(_m)) ? (LANG==='en'?'Sharing does not allow acting for the child':'Sd\u00edlen\u00ed nedovoluje za d\u00edt\u011b jednat')
+              : ('\u26a0\ufe0f '+_m));
+            return;
+          }
+          toast(LANG==='en'?'\u2705 Free trial booked':'\u2705 Zku\u0161ebn\u00ed tr\u00e9nink zarezervov\u00e1n',1);
+          try{ if(typeof openGymProfile==='function' && g && g.id) await openGymProfile(g.id); }catch(e){}
+          return;
+        }
+      }
+    }catch(e){ console.warn('trial shared', e && e.message); }
+  }
   if(!(_child && _child.shared)) try{
     const _tl=await trialLeft(g, _child && _child.name);
     if(_tl>0){
@@ -29665,7 +29757,7 @@ async function loadNotifications(append){
     const isCoachRefAdmin = false; /* referral EP grants removed — rewards are Shikai/Bankai */
     // beta_pending sem musí být přidané, jinak se notifikace vykreslí jako neklikatelná a obsluha
   // se vůbec nenapojí -- větev, která má otevřít admin, pak nemá kdo spustit.
-  const clickable = k==='support_ticket' || k==='class_reminder' || k==='fav_added_coach' || k==='fav_added_gym' || isCoachLessonRem || isStudResched || k==='coach_pay_ok' || k==='coach_qr_intent' || k==='qr_unconfirmed' || k==='event_qr_intent' || k==='walkin_drop' || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='beta_pending' || k==='minor_waiver_req' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked' || k==='commission_no_card' || k==='commission_suspended';
+  const clickable = (String(k||'').indexOf('kid_share')===0) || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed' || k==='support_ticket' || k==='class_reminder' || k==='fav_added_coach' || k==='fav_added_gym' || isCoachLessonRem || isStudResched || k==='coach_pay_ok' || k==='coach_qr_intent' || k==='qr_unconfirmed' || k==='event_qr_intent' || k==='walkin_drop' || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='beta_pending' || k==='minor_waiver_req' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked' || k==='commission_no_card' || k==='commission_suspended';
     let linkLabel = L('Otevřít ›');
     if(k==='payment_confirmed'){ var _pcd={}; try{ _pcd=JSON.parse(n.data||'{}'); }catch(e){} var _gg=_pcd.goto; linkLabel = (_gg==='dropin'||_gg==='bookings') ? (LANG==='en'?'Booking details ›':'Detail rezervace ›') : (_gg==='tickets') ? (LANG==='en'?'my ticket ›':'moje vstupenka ›') : (_gg==='courses') ? (LANG==='en'?'my course ›':'můj kurz ›') : (_gg==='merch') ? (LANG==='en'?'view ›':'zobrazit ›') : (LANG==='en'?'membership details ›':'detail členství ›'); } else if(k==='qr_intent') linkLabel = LANG==='en'?'To confirm ›':'K potvrzení ›'; else if(k==='qr_released'||k==='qr_reservation_expired') linkLabel = LANG==='en'?'Book again ›':'Rezervovat znovu ›'; else if(k==='qr_requeued') linkLabel = LANG==='en'?'Pay again ›':'Zaplatit znovu ›'; else if(k==='sounding_ask') linkLabel = LANG==='en'?'Answer ›':'Odpovědět ›'; else if(k==='cover_needed') linkLabel = LANG==='en'?'Take the cover ›':'Vzít záskok ›'; else if(k==='cover_filled'||k==='cover_filled_owner') linkLabel = LANG==='en'?'View ›':'Zobrazit ›'; else if(k==='doklad_vat_needed') linkLabel = LANG==='en'?'Add VAT ID ›':'Doplnit DIČ ›'; else if(k==='course_new') linkLabel = LANG==='en'?'Course details ›':'Detail kurzu ›'; else if(k==='slot_demand') linkLabel = LANG==='en'?'Open my diary ›':'Otevřít diář ›'; else if(k==='cohort_month_due') linkLabel = LANG==='en'?'Pay now ›':'Doplatit ›'; else if(k==='cohort_month_collect') linkLabel = LANG==='en'?'Open roster ›':'Otevřít roster ›'; else if(k==='cohort_deposit_paid') linkLabel = LANG==='en'?'View roster ›':'Otevřít účastníky ›'; else if(k==='cohort_qr_claim') linkLabel = LANG==='en'?'View roster ›':'Otevřít účastníky ›'; else if(k==='cohort_deposit_mine') linkLabel = LANG==='en'?'My course ›':'Můj kurz ›';
       else if(k==='doklad_unified') linkLabel = LANG==='en'?'Open the receipt ›':'Otevřít doklad ›';
@@ -29708,6 +29800,8 @@ async function loadNotifications(append){
     else if(isCoachInperson) linkLabel = L('Otevřít v diáři ›');
     else if(k==='bug_report') linkLabel = (LANG==='en'?'Open reports ›':'Otevřít hlášení ›');
     else if(k==='support_ticket') linkLabel = (LANG==='en'?'Open request ›':'Otevřít dotaz ›');
+    else if(k==='kid_share_accepted' || k==='kid_share_consent_ask') linkLabel = (LANG==='en'?'Sharing settings ›':'Nastaven\u00ed sd\u00edlen\u00ed ›');
+    else if(String(k||'').indexOf('kid_share')===0 || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed') linkLabel = (LANG==='en'?'Open Family ›':'Otev\u0159\u00edt Rodinu ›');
     else if(k==='class_reminder') linkLabel = (LANG==='en'?'Open lesson ›':'Otevřít lekci ›');
     else if(isCoachLessonRem) linkLabel = L('Otevřít v diáři ›');
     else if(isCoachOnline) linkLabel = L('Otevřít online feedback ›');
@@ -29794,6 +29888,13 @@ async function loadNotifications(append){
         }
         if(k==='family_active' || k==='family_request' || k==='minor_waiver' || k==='minor_event_consent' || k==='came_of_age'){
           try{ openMyKids(); }catch(e){}
+          return;
+        }
+        // Sdílení a předání dítěte: Rodina; u přijetí sdílení rovnou nastavení toho dítěte.
+        if(String(k||'').indexOf('kid_share')===0 || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed'){
+          try{ openMyKids(); }catch(e){}
+          if((k==='kid_share_accepted' || k==='kid_share_consent_ask') && _pd && _pd.kid_key){ setTimeout(function(){ try{ _kidCareOpenByKey(_pd.kid_key); }catch(e){} }, 250); }
+          else { setTimeout(function(){ try{ const el=$('kidSharedBox')||$('kidXferBox'); if(el && el.innerHTML) el.scrollIntoView({behavior:'smooth',block:'start'}); }catch(e){} }, 400); }
           return;
         }
         // Žádost o úhradu -- otevřít rovnou platbu té konkrétní věci. Posílat rodiče hledat lekci
@@ -44549,6 +44650,7 @@ async function _betaRecheck(){
   _hideBetaWaiting(); try{ enterApp(); }catch(e){ location.reload(); }
 }
 function enterApp(){
+  try{ window._sharedActKids=undefined; setTimeout(function(){ if(currentUser) _sharedActKidsLoad(); }, 1500); }catch(e){}
   // Loaded here, in enterApp, because this is the one place that always runs once the user is in.
   // It was hooked to _epRecheck, which returns on its first line unless an EP payment is pending --
   // so the flags were fetched for practically nobody and nothing was ever hidden.
