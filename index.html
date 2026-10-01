@@ -23589,6 +23589,37 @@ const FBX_TERMS={
   cs:'https://cdn.finbricks.com/terms/actual/services_inside_cz/cs/terms_and_conditions_ais_pis_finbricks.pdf',
   en:'https://cdn.finbricks.com/terms/finbricks/en/terms_and_conditions_ais_pis.pdf'
 };
+// Platba přes banku se nezaložila. 258 = banka PŘÍJEMCE (klubu) teď nepřijme okamžitou platbu
+// -- jiná banka na straně plátce nepomůže, tak to říct rovnou. Ostatní chyby jsou obvykle
+// na straně zvolené banky plátce, tam pomůže zkusit jinou. Technický kód jde jen do konzole.
+function _pisFailModal(d, toQr){
+  const EN=LANG==='en'; d=d||{};
+  try{ console.error('[pis-create] fail', d.code, d.detail||d.error); }catch(e){}
+  const creditor=(Number(d.code)===258);
+  const title=creditor
+    ? (EN?'The club\u2019s bank is not accepting instant payments right now':'Banka klubu teď nep\u0159ij\u00edm\u00e1 okam\u017eit\u00e9 platby')
+    : (EN?'Payment from this bank is not possible right now':'Platba z t\u00e9to banky te\u010f nejde');
+  const body=creditor
+    ? (EN
+      ? 'MTL only sends bank payments as instant, so the club and the app can confirm them straight away. The bank the club receives money at is not accepting instant payments at the moment \u2014 often a night-time maintenance window. Choosing another bank on your side will not help, the problem is on the receiving side. Try again later, or pay by QR transfer: the club confirms it by hand once the money arrives.'
+      : 'MTL pos\u00edl\u00e1 platby z \u00fa\u010dtu jen jako okam\u017eit\u00e9, aby je klub i appka potvrdily hned. Banka, na kterou klub p\u0159ij\u00edm\u00e1 pen\u00edze, te\u010f okam\u017eitou platbu nep\u0159ijme \u2014 \u010dasto jde o no\u010dn\u00ed \u00fadr\u017ebu banky. Jin\u00e1 banka na tv\u00e9 stran\u011b nepom\u016f\u017ee, probl\u00e9m je u p\u0159\u00edjemce. Zkus to pozd\u011bji, nebo zapla\u0165 QR p\u0159evodem: klub ho potvrd\u00ed ru\u010dn\u011b, a\u017e pen\u00edze doraz\u00ed.')
+    : (EN
+      ? 'Your bank did not accept the payment. If you have an account at another bank, choose it from the list. Or pay by QR transfer: the club confirms it by hand once the money arrives.'
+      : 'Tvoje banka platbu nep\u0159ijala. Jestli m\u00e1\u0161 \u00fa\u010det i v jin\u00e9 bance, vyber ji ze seznamu. Nebo zapla\u0165 QR p\u0159evodem: klub ho potvrd\u00ed ru\u010dn\u011b, a\u017e pen\u00edze doraz\u00ed.');
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;z-index:100080;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;';
+  ov.innerHTML='<div style="background:#fff;border-radius:18px;max-width:420px;width:100%;padding:22px;font-family:\'DM Sans\';">'
+    +'<div style="font-size:16px;font-weight:800;color:var(--dark);margin-bottom:8px;">\u26a0\ufe0f '+escapeHtml(title)+'</div>'
+    +'<div style="font-size:13px;color:var(--mid);line-height:1.55;margin-bottom:16px;">'+escapeHtml(body)+'</div>'
+    +(creditor?'':('<button class="pfOther" style="width:100%;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-weight:800;font-size:14px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Choose another bank':'Vybrat jinou banku')+'</button>'))
+    +(typeof toQr==='function'?('<button class="pfQr" style="width:100%;margin-top:8px;padding:12px;background:'+(creditor?'var(--dark)':'#fff')+';color:'+(creditor?'#fff':'var(--dark)')+';border:'+(creditor?'none':'1px solid var(--border)')+';border-radius:12px;font-weight:700;font-size:13.5px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Pay by QR transfer':'Zaplatit QR p\u0159evodem')+'</button>'):'')
+    +'<button class="pfClose" style="width:100%;margin-top:8px;padding:11px;background:none;border:none;color:var(--mid);font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(creditor?(EN?'Try later':'Zkusit pozd\u011bji'):(EN?'Close':'Zav\u0159\u00edt'))+'</button></div>';
+  document.body.appendChild(ov);
+  const x=function(){ ov.remove(); };
+  const o=ov.querySelector('.pfOther'); if(o) o.onclick=x;              // seznam bank zůstává otevřený pod tím
+  const q=ov.querySelector('.pfQr'); if(q) q.onclick=function(){ x(); toQr(); };
+  ov.querySelector('.pfClose').onclick=x;
+}
 async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMode, onQrFallback, kind, onAbandon, ensureRow){
   // ensureRow (volitelné): funkce, která rezervaci teprve založí a vrátí její id. Používá ji
   // soukromka, aby řádek vznikl až po výběru banky.
@@ -23736,8 +23767,9 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMo
       // Platba se nezaložila -- rezervace nemá důvod existovat. Bez tohohle zůstávala viset
       // po každém neúspěšném pokusu a blokovala termín i limit.
       if(bookingId && typeof onAbandon==='function'){ try{ onAbandon(); }catch(e){} bookingId=null; }
-      toast('\u26a0\ufe0f '+((d&&d.error)||('PIS: '+JSON.stringify(d||{}).slice(0,160))));
       btn.disabled=false; btn.textContent=_t;
+      // NE TOAST: zmizí dřív, než si to člověk přečte, a neřekne mu, co dál.
+      _pisFailModal(d, function(){ try{ ov.remove(); }catch(e){} try{ _abandon(); }catch(e){} if(typeof onQrFallback==='function') onQrFallback(); });
     }catch(e){
       try{ console.error('[pis] '+_step, e); }catch(_e){}
       toast('\u26a0\ufe0f '+_step+': '+((e&&e.message)||e)); btn.disabled=false; btn.textContent=_t;
