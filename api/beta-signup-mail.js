@@ -31,11 +31,14 @@ export default async function handler(req, res) {
     if (!user_id) return res.status(400).json({ error: 'missing user_id' });
     if (!RESEND) return res.status(200).json({ ok: true, skipped: 'no mail provider' });
 
-    const rows = await sbGet(`profiles?id=eq.${encodeURIComponent(user_id)}&select=name,email,phone,billing_country,is_minor,beta_status,beta_signup_mail_at,created_at`);
+    const rows = await sbGet(`profiles?id=eq.${encodeURIComponent(user_id)}&select=name,email,phone,country,residence_country,beta_status,beta_signup_mail_at,created_at`);
     const p = rows[0];
     if (!p) return res.status(404).json({ error: 'not found' });
     if (p.beta_status !== 'pending') return res.status(200).json({ ok: true, skipped: 'not pending' });
     if (p.beta_signup_mail_at) return res.status(200).json({ ok: true, skipped: 'already sent' });
+
+    // Země: registrace píše country (český název) a residence_country (kód). billing_country
+    // je fakturační údaj poskytovatele, student ho nikdy nevyplní -- proto byla v mailu pomlčka.
 
     // Kolik jich uz ceka -- at je z predmetu videt, jestli se to hromadi.
     let waiting = 0;
@@ -55,8 +58,7 @@ export default async function handler(req, res) {
         ${row('Jm\u00e9no', p.name)}
         ${row('E-mail', p.email)}
         ${row('Telefon', p.phone)}
-        ${row('Zem\u011b', p.billing_country)}
-        ${p.is_minor ? row('Pozn\u00e1mka', 'Nezletil\u00fd \u2014 pot\u0159ebuje souhlas z\u00e1stupce') : ''}
+        ${row('Zem\u011b', p.country || p.residence_country)}
       </table>
       <a href="${APP}" style="display:inline-block;padding:13px 22px;background:#111;color:#F4D87A;text-decoration:none;border-radius:10px;font-weight:700;">Otev\u0159\u00edt admin</a>
       <p style="font-size:12px;color:#888;line-height:1.5;margin-top:20px;">\u010cek\u00e1 na schv\u00e1len\u00ed celkem: ${waiting}</p>
