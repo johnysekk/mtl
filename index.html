@@ -23123,6 +23123,16 @@ function _pisAllowed(ent, id){
 function _pisTestAmount(){
   return (1 + Math.floor(Math.random()*899)/100).toFixed(2);
 }
+// SOUHLAS S PODMÍNKAMI FINBRICKS. Platbu z účtu zadává Finbricks jménem plátce a PSD2 po nich
+// chce jeho výslovný souhlas; plátce na jejich web nepřijde, takže ho sbíráme tady. Podmínka
+// Finbricks: checkbox NEZAŠKRTNUTÝ, před každou platbou, bez něj nejde pokračovat. Krátká věta
+// u checkboxu je odsouhlasená varianta, celé znění je v odkazovaném PDF.
+// Při změně textu nebo odkazu zvýšit FBX_TERMS.version -- record-consent jinak hlásí nesoulad.
+const FBX_TERMS={
+  version:'2026-10-01',
+  cs:'https://cdn.finbricks.com/terms/actual/services_inside_cz/cs/terms_and_conditions_ais_pis_finbricks.pdf',
+  en:'https://cdn.finbricks.com/terms/finbricks/en/terms_and_conditions_ais_pis.pdf'
+};
 async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMode, onQrFallback, kind, onAbandon, ensureRow){
   // ensureRow (volitelné): funkce, která rezervaci teprve založí a vrátí její id. Používá ji
   // soukromka, aby řádek vznikl až po výběru banky.
@@ -23183,6 +23193,28 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMo
   ov.innerHTML='<div style="background:#fff;border-radius:18px;padding:18px;max-width:420px;width:100%;max-height:80vh;overflow-y:auto;font-family:\'DM Sans\';"><div style="font-size:16px;font-weight:800;margin-bottom:10px;">'+(EN?'Your bank':'Tvoje banka')+'</div><div id="pisBanks"></div></div>';
   document.body.appendChild(ov); ov.onclick=function(e){ if(e.target===ov && !_ovHasForm(ov)){ ov.remove(); _abandon(); } };
   const bx=ov.querySelector('#pisBanks');
+  // Vždy: platba z účtu jede jen přes Finbricks.
+  let _fbxOk=null;
+  {
+    const _url=EN?FBX_TERMS.en:FBX_TERMS.cs;
+    const _cw=document.createElement('div');
+    _cw.id='fbxTermsWrap';
+    _cw.style.cssText='display:flex;align-items:flex-start;gap:10px;padding:12px;margin-bottom:12px;border:1px solid var(--border);border-radius:12px;background:#fff;';
+    _cw.innerHTML='<input type="checkbox" id="fbxTermsChk" style="width:20px;height:20px;margin:1px 0 0;flex-shrink:0;cursor:pointer;accent-color:var(--dark);">'
+      +'<div style="font-size:13.5px;line-height:1.45;color:var(--dark);">'
+        +'<label for="fbxTermsChk" style="cursor:pointer;">'+(EN?'I agree to the ':'Souhlas\u00edm s ')+'</label>'
+        +'<a href="'+_url+'" target="_blank" rel="noopener" style="color:var(--blue);font-weight:700;text-decoration:underline;">'
+          +(EN?'Finbricks terms of service':'podm\u00ednkami slu\u017eby Finbricks')+'</a>'
+      +'</div>';
+    bx.parentNode.insertBefore(_cw, bx);
+    _fbxOk=_cw.querySelector('#fbxTermsChk');
+    _fbxOk.checked=false;
+    // Banky jsou vidět hned (člověk ví, co ho čeká), ale bez souhlasu jsou ztlumené.
+    const _dim=function(){ bx.querySelectorAll('.pisBankBtn').forEach(function(x){ x.style.opacity=_fbxOk.checked?'1':'.45'; });
+      _cw.style.borderColor='var(--border)'; };
+    _fbxOk.onchange=_dim;
+    setTimeout(_dim,0);
+  }
   bx.innerHTML=banks.map(function(b,i){ return '<button class="pisBankBtn" data-i="'+i+'" style="width:100%;text-align:left;padding:13px;margin-bottom:8px;border:1px solid var(--border);border-radius:12px;background:var(--surf);font-size:14px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+escapeHtml(b.name)+((testMode && !_fbx)?('<span style="font-weight:600;color:var(--light);"> ('+(EN?'on the next page tap \u201cFortsett\u201d':'na dal\u0161\u00ed str\u00e1nce klikni na \u201eFortsett\u201c')+')</span>'):'')+'</button>'; }).join('');
   if(onQrFallback){ var _nb=document.createElement('button'); _nb.id='pisNoBank'; _nb.style.cssText='width:100%;padding:11px;background:none;color:var(--mid);border:none;font-size:12.5px;cursor:pointer;font-family:\'DM Sans\';text-decoration:underline;margin-top:4px;'; _nb.textContent=(EN?'My bank is not listed — pay by QR transfer':'Nemám banku v seznamu — zaplatit QR převodem'); _nb.onclick=function(){ ov.remove(); _abandon(); onQrFallback(); }; bx.appendChild(_nb); }
   // Backing out has to be a button, not a guess. The backdrop already worked, but nothing said so,
@@ -23194,7 +23226,18 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMo
   _cx.onclick=function(){ ov.remove(); _abandon(); };
   bx.appendChild(_cx);
   bx.querySelectorAll('.pisBankBtn').forEach(function(btn){ btn.onclick=async function(){
+    // ZÁVORA: bez zaškrtnutého souhlasu se platba nezaloží (ani rezervace).
+    if(_fbxOk && !_fbxOk.checked){
+      toast(EN?'\u26a0\ufe0f Agree to the Finbricks terms first':'\u26a0\ufe0f Nejd\u0159\u00edv za\u0161krtni souhlas s podm\u00ednkami Finbricks');
+      const _w=ov.querySelector('#fbxTermsWrap'); if(_w){ _w.style.borderColor='var(--red)'; try{ _w.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} }
+      return;
+    }
     const b=banks[+btn.dataset.i]; const _t=btn.textContent; btn.textContent='\u2026'; btn.disabled=true;
+    // Doložitelný záznam souhlasu (kdo, kdy, jaký text, IP). Jen přihlášený -- consent_acceptances
+    // vyžaduje user_id; host souhlas zaškrtne stejně, jen se neuloží.
+    if(_fbxOk){ try{ _recordConsent('finbricks_terms', FBX_TERMS.version, EN?'en':'cs',
+      (EN?'I agree to the Finbricks terms of service: '+FBX_TERMS.en:'Souhlas\u00edm s podm\u00ednkami slu\u017eby Finbricks: '+FBX_TERMS.cs),
+      { via:'pis', kind:kind||null, ref:bookingId||null, bank:(b&&b.name)||null }); }catch(e){} }
     // REZERVACE AŽ TEĎ. Vzniká ve chvíli, kdy je vybraná banka a platba se opravdu zakládá --
     // ne při otevření okna a ne při kliknutí na „Zaplatit z účtu". Kdo se zastaví u výběru
     // banky a zavře ho, nezanechá po sobě drženou lekci.
@@ -32888,7 +32931,8 @@ const CONSENT_LBL = {
   minor_private:        ['Private lessons with a minor','Soukromé lekce s nezletilým'],
   event_consent:        ['Event terms',                 'Podmínky akce'],
   ticket_terms:         ['Ticket terms',                'Podmínky vstupenky'],
-  gym_terms:            ['Club rules',                  'Provozní řád klubu']
+  gym_terms:            ['Club rules',                  'Provozní řád klubu'],
+  finbricks_terms:      ['Finbricks terms (bank payment)','Podmínky Finbricks (platba z účtu)']
 };
 const CONSENT_DESC = {
   terms:                ['What MTL is and is not responsible for.', 'Co MTL je a za co neodpovídá.'],
@@ -32897,6 +32941,7 @@ const CONSENT_DESC = {
   beta_privacy:         ['Data processing during the test run.',    'Zpracování údajů během testovacího provozu.'],
   marketing:            ['Consent to news and offers by e-mail.',   'Souhlas se zasíláním novinek a nabídek.'],
   provider_marketing:   ['Same, for coaches and clubs.',            'Totéž pro kouče a kluby.'],
+  finbricks_terms:      ['Agreed before each payment from a bank account.', 'Odsouhlaseno před každou platbou z účtu.'],
   partner_terms:        ['Contract between MTL and a coach or club selling on MTL, incl. the commission price list.', 'Smlouva mezi MTL a koučem či klubem, který přes MTL prodává, včetně sazebníku provizí.'],
   provider_terms:       ['Terms for selling through MTL.',          'Podmínky prodeje přes MTL.'],
   receiver_declaration: ['Confirms the money goes to your own account.', 'Potvrzení, že peníze chodí na vlastní účet.'],
