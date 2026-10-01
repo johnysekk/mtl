@@ -694,7 +694,7 @@ async function _paynowNotify(m, s) {
   await sbPost('notifications', {
     user_id: ownerId, type: 'system', read: false,
     data: JSON.stringify({ kind: 'commission_cleared', gym_id: kind === 'gym' ? id : null, coach_id: kind === 'coach' ? id : null,
-      organization_id: kind === 'org' ? id : null, msg_en: msgEn }),
+      organization_id: kind === 'org' ? id : null, msg_cs: msg, msg_en: msgEn }),
     message: en ? msgEn : msg,
   });
 }
@@ -933,9 +933,14 @@ export default async function handler(req, res) {
             const _gid = _coh && _coh.gym_id;
             if (_gid) {
               const _g = (await sbGet(`gyms?id=eq.${encodeURIComponent(_gid)}&select=org_form,member_app_auto,member_app_auto_ref,member_app_body`) || [])[0];
-              if (_g && _g.org_form === 'nonprofit' && _g.member_app_auto) {
+              // JEN PŘIHLÁŠKA TOHO, KDO ZAPLATIL. Dřív filtr bral celý kurz, takže první záloha
+              // schválila všechny čekající přihlášky v kurzu -- i lidem, kteří nezaplatili.
+              const _cm = (await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=student_id,email`) || [])[0] || {};
+              const _who = _cm.student_id ? `&student_id=eq.${encodeURIComponent(_cm.student_id)}`
+                : (_cm.email ? `&applicant_email=ilike.${encodeURIComponent(String(_cm.email).trim())}` : null);
+              if (_who && _g && _g.org_form === 'nonprofit' && _g.member_app_auto) {
                 await sbPatch('gym_member_applications',
-                  `gym_id=eq.${encodeURIComponent(_gid)}&cohort_id=eq.${encodeURIComponent(cohId)}&status=eq.pending`,
+                  `gym_id=eq.${encodeURIComponent(_gid)}&cohort_id=eq.${encodeURIComponent(cohId)}&status=eq.pending${_who}`,
                   { status: 'approved', decided_at: new Date().toISOString(),
                     decided_note: _g.member_app_auto_ref || ((_g.member_app_body||'Prislusny organ')+': predchozi rozhodnuti, ucinne zaplacenim') });
               }

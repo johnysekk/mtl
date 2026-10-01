@@ -22,7 +22,7 @@ export default async function handler(req, res) {
     // 1) find stale, still-unverified requests that still hold a scan
     const { data: stale, error: qErr } = await supa
       .from('migration_requests')
-      .select('id, id_doc_path, id_doc_at, id_verified')
+      .select('id, id_doc_path, id_doc_back_path, id_doc_at, id_verified')
       .not('id_doc_path', 'is', null)
       .lt('id_doc_at', cutoff);
     if (qErr) throw qErr;
@@ -31,13 +31,14 @@ export default async function handler(req, res) {
       if (r.id_verified) continue; // verified ones are handled in-app already
       // delete the object from the private bucket
       try {
-        const { error: dErr } = await supa.storage.from('migration-id').remove([r.id_doc_path]);
+        // přední i zadní strana
+        const { error: dErr } = await supa.storage.from('migration-id').remove([r.id_doc_path, r.id_doc_back_path].filter(Boolean));
         if (!dErr) purged++;
       } catch (e) { /* ignore individual file errors */ }
       // null the path so the UI knows to ask for a re-upload
       const { error: uErr } = await supa
         .from('migration_requests')
-        .update({ id_doc_path: null, id_doc_expired: true })
+        .update({ id_doc_path: null, id_doc_back_path: null, id_doc_expired: true })
         .eq('id', r.id);
       if (!uErr) nulled++;
     }
@@ -49,7 +50,8 @@ export default async function handler(req, res) {
         const created = f.created_at || (f.metadata && f.metadata.lastModified) || null;
         if (created && created < cutoff) {
           // if no request still references it, remove it
-          const reqId = (f.name || '').split('.')[0];
+          // <id žádosti>_front.jpg / _back.jpg (starší nahrání: <id žádosti>.jpg)
+          const reqId = (f.name || '').split('.')[0].split('_')[0];
           const { data: still } = await supa
             .from('migration_requests')
             .select('id')
