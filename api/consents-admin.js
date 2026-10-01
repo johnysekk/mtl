@@ -88,7 +88,7 @@ export default async function handler(req, res) {
       const ev = {};
       if (ext.length) {
         const mids = [...new Set(ext.map((w) => w.student_id))];
-        const reqs = (await sbGet(`guardian_consent_requests?status=eq.approved&minor_id=in.(${mids.map(encodeURIComponent).join(',')})&select=gym_id,minor_id,body_hash,guardian_email,same_device,approved_at,approved_ip`)) || [];
+        const reqs = (await sbGet(`guardian_consent_requests?status=eq.approved&minor_id=in.(${mids.map(encodeURIComponent).join(',')})&select=gym_id,minor_id,body_hash,guardian_email,same_device,approved_at,approved_ip,approved_ua,requested_ip,requested_ua,created_at`)) || [];
         reqs.forEach((r) => { ev[`${r.gym_id}|${r.minor_id}|${r.body_hash}`] = r; });
       }
       const gids = scope === 'mtl' ? [...new Set(rows.map((w) => w.gym_id).filter(Boolean))] : [];
@@ -102,6 +102,13 @@ export default async function handler(req, res) {
           version: w.version, guardian_name: w.guardian_name || null,
           guardian_outside: !!(w.guardian_name && !w.guardian_id),
           guardian_email: e ? e.guardian_email : null, same_device: e ? !!e.same_device : null,
+          // Důkazy k souhlasu mimo appku: kdy a odkud o souhlas požádal mladistvý, kdy a odkud
+          // ho zákonný zástupce potvrdil.
+          // IP a zařízení vidí jen zakladatel (případný spor řeší MTL); klub vidí, komu šel odkaz
+          // a jestli se potvrzovalo ze zařízení mladistvého.
+          requested_at: e ? e.created_at : null,
+          requested_ip: (e && scope === 'mtl') ? e.requested_ip : null, requested_ua: (e && scope === 'mtl') ? e.requested_ua : null,
+          approved_ip: (e && scope === 'mtl') ? e.approved_ip : null, approved_ua: (e && scope === 'mtl') ? e.approved_ua : null,
           gym_name: gn[w.gym_id] || null,
           body_hash: w.body_hash || null,
           file_url: w.terms_file_url || null, file_hash: w.terms_file_hash || null,
