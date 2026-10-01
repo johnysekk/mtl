@@ -2,8 +2,8 @@
 //
 // KDO SOUHLASÍ: odesílatel při odeslání (prohlášení „předávám"), příjemce při přijetí.
 // Zápis proběhne až po souhlasu obou, tedy při přijetí.
-// KOMU: jen dospělému propojenému v Rodině (partner, nebo rodič odesílatele) -- stejné
-// pravidlo jako nabídka v appce, tady ale vynucené. Odkaz „pro kohokoli" je zrušený.
+// KOMU: jen partnerovi propojenému v Rodině -- stejné pravidlo jako nabídka v appce, tady
+// ale vynucené. Odkaz „pro kohokoli" je zrušený.
 //
 // Proč tady: předání sahá do účtů DVOU lidí (odebrat dítě jednomu, přidat druhému, přepsat
 // jeho záznamy). Z prohlížeče to šlo jen proto, že profiles a gym_attendance neměly RLS.
@@ -50,10 +50,10 @@ async function whoami(req) {
   return (u && u.id) ? u.id : null;
 }
 
-// Propojení v Rodině: partner (oběma směry), nebo příjemce je rodičem odesílatele.
+// Propojení v Rodině jako partneři (záznam může být v kterémkoli směru).
 async function familyLinked(from, to) {
-  const rows = (await sb(`family_links?status=eq.active&or=${q(`(and(guardian_id.eq.${from},member_id.eq.${to}),and(guardian_id.eq.${to},member_id.eq.${from}))`)}&select=relation,guardian_id,member_id`)) || [];
-  return rows.some((r) => r.relation === 'partner' || (r.relation === 'guardian' && r.guardian_id === to && r.member_id === from));
+  const rows = (await sb(`family_links?status=eq.active&relation=eq.partner&or=${q(`(and(guardian_id.eq.${from},member_id.eq.${to}),and(guardian_id.eq.${to},member_id.eq.${from}))`)}&select=id`)) || [];
+  return rows.length > 0;
 }
 
 async function profile(id, cols) {
