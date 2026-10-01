@@ -4859,6 +4859,104 @@ async function _famRenderConsents(){
   });
 }
 
+// ═══ SDÍLENÍ PÉČE O DÍTĚ S BLÍZKOU OSOBOU ═══════════════════════════════════════════════
+// Držitel (u koho dítě je) zapíná u každého dítěte zvlášť a u každé blízké osoby zvlášť.
+// Blízká osoba přijme a vidí kartu dítěte: věk, pásky, poslední tréninky a zdravotní
+// poznámku jen se svolením držitele. Všechno přes /api/kid-share -- dítě je v profilu
+// držitele a do cizího profilu se po zapnutí RLS z prohlížeče nedostane.
+async function _kidShareApi(body){
+  const tok=await _freshTok();
+  const r=await fetch('/api/kid-share',{ method:'POST', headers:{ 'Content-Type':'application/json', Authorization:'Bearer '+(tok||'') }, body:JSON.stringify(body) });
+  const j=await r.json().catch(function(){ return {}; });
+  if(!r.ok || !j.ok){ const e=new Error(j.error||('HTTP '+r.status)); e.code=j.error; throw e; }
+  return j;
+}
+function _kidKey(k){ return (k && k.id) ? String(k.id) : ('name:'+String((k&&k.name)||'')); }
+async function _kidCareOpen(i){
+  const EN=LANG==='en'; const kids=_myChildren(); const k=kids[i]; if(!k) return;
+  let data={ people:[], shares:[] };
+  try{ data=await _kidShareApi({ action:'mine' }); }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
+  const key=_kidKey(k);
+  const ov=document.createElement('div'); ov.id='kidCareOv';
+  ov.style.cssText='position:fixed;inset:0;z-index:100058;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center;';
+  const rows=(data.people||[]).map(function(p){
+    const sh=(data.shares||[]).find(function(x){ return x.kid_id===key && x.person_id===p.id; });
+    const on=!!sh;
+    const st=sh ? (sh.status==='active' ? (EN?'Shared':'Sd\u00edleno') : (EN?'Waiting for them to accept':'\u010cek\u00e1 na p\u0159ijet\u00ed')) : '';
+    return '<div class="kcRow" data-pid="'+escapeHtml(p.id)+'" style="border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:9px;background:var(--surf);">'
+      +'<label style="display:flex;align-items:center;gap:12px;cursor:pointer;"><span style="flex:1;min-width:0;"><span style="display:block;font-size:14px;font-weight:700;color:var(--dark);">'+escapeHtml(p.name||'\u2014')+'</span>'
+      +'<span class="kcSt" style="display:block;font-size:11.5px;color:var(--mid);margin-top:2px;">'+escapeHtml(st)+'</span></span>'
+      +'<input type="checkbox" class="tglIn kcOn" '+(on?'checked':'')+'><span class="toggle"></span></label>'
+      +'<label class="kcHealthRow" style="display:'+(on?'flex':'none')+';align-items:center;gap:12px;cursor:pointer;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">'
+      +'<span style="flex:1;font-size:12.5px;color:var(--dark);">'+(EN?'Can see the health note':'Vid\u00ed zdravotn\u00ed pozn\u00e1mku')+'</span>'
+      +'<input type="checkbox" class="tglIn kcHealth" '+((sh&&sh.see_health)?'checked':'')+'><span class="toggle"></span></label>'
+      +'</div>';
+  }).join('');
+  ov.innerHTML='<div style="background:#fff;width:100%;max-width:480px;border-radius:18px 18px 0 0;padding:20px 20px max(22px,env(safe-area-inset-bottom));max-height:88vh;overflow-y:auto;">'
+    +'<div style="font-size:17px;font-weight:800;color:#141414;margin-bottom:4px;">\ud83d\udc6a '+(EN?'Share care':'Sd\u00edlet p\u00e9\u010di')+' \u2014 '+escapeHtml(k.firstName||k.name||'')+'</div>'
+    +'<div style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:14px;">'+(EN
+      ? 'The person sees the child\u2019s card: age, belts and recent training. The health note only if you allow it. You can switch it off any time.'
+      : 'Osoba uvid\u00ed kartu d\u00edt\u011bte: v\u011bk, p\u00e1sky a posledn\u00ed tr\u00e9ninky. Zdravotn\u00ed pozn\u00e1mku jen se tv\u00fdm svolen\u00edm. Vypnout jde kdykoli.')+'</div>'
+    +(rows || ('<div style="font-size:12.5px;color:var(--mid);line-height:1.5;background:var(--surf);border-radius:10px;padding:12px;">'+(EN
+      ? 'No close person linked yet. Link them in Family first (\u201cLink a child (15\u201317) or a partner/close person\u201d).'
+      : 'Zat\u00edm nem\u00e1\u0161 propojenou \u017e\u00e1dnou bl\u00edzkou osobu. Nejd\u0159\u00edv ji propoj v Rodin\u011b (\u201eNapojit d\u00edt\u011b (15\u201317) nebo partnera/bl\u00edzkou osobu\u201c).')+'</div>'))
+    +'<button id="kcClose" style="width:100%;margin-top:8px;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:11px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Done':'Hotovo')+'</button>'
+    +'</div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#kcClose').onclick=function(){ ov.remove(); };
+  ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
+  ov.querySelectorAll('.kcRow').forEach(function(row){
+    const on=row.querySelector('.kcOn'), hl=row.querySelector('.kcHealth'), hr=row.querySelector('.kcHealthRow'), stEl=row.querySelector('.kcSt');
+    const save=async function(){
+      on.disabled=true; hl.disabled=true;
+      try{
+        const j=await _kidShareApi({ action:'set', kid_key:key, person_id:row.dataset.pid, enabled:on.checked, see_health:hl.checked });
+        hr.style.display=on.checked?'flex':'none';
+        stEl.textContent = !on.checked ? '' : (j.status==='active' ? (EN?'Shared':'Sd\u00edleno') : (EN?'Waiting for them to accept':'\u010cek\u00e1 na p\u0159ijet\u00ed'));
+        if(!on.checked) hl.checked=false;
+      }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); on.checked=!on.checked; }
+      on.disabled=false; hl.disabled=false;
+    };
+    on.onchange=save; hl.onchange=save;
+  });
+}
+async function _loadKidShared(){
+  const box=$('kidSharedBox'); if(!box) return; const EN=LANG==='en';
+  if(!currentUser){ box.innerHTML=''; return; }
+  let items=[];
+  try{ items=(await _kidShareApi({ action:'with_me' })).items||[]; }catch(e){ box.innerHTML=''; return; }
+  if(!items.length){ box.innerHTML=''; return; }
+  const pend=items.filter(function(x){ return x.status==='pending'; });
+  const act=items.filter(function(x){ return x.status==='active'; });
+  let h='';
+  if(pend.length){
+    h+='<div style="font-size:11px;font-weight:800;color:#006040;margin:2px 0 6px;">'+(EN?'Shared care \u2014 invitation':'Sd\u00edlen\u00ed p\u00e9\u010de \u2014 pozv\u00e1nka')+'</div>'
+      +pend.map(function(x){ return '<div style="background:#E8F5EE;border:1px solid #BFE6CF;border-radius:12px;padding:12px;margin-bottom:8px;">'
+        +'<div style="font-size:13.5px;font-weight:700;color:#141414;margin-bottom:4px;">\ud83d\udc6a '+escapeHtml(x.holder_name)+' '+(EN?'shares the care of':'s tebou sd\u00edl\u00ed p\u00e9\u010di o')+' '+escapeHtml(x.kid.first)+'</div>'
+        +'<div style="font-size:11.5px;color:var(--mid);line-height:1.5;margin-bottom:9px;">'+(EN?'You will see the child\u2019s card. You can leave any time.':'Uvid\u00ed\u0161 kartu d\u00edt\u011bte. Kdykoli m\u016f\u017ee\u0161 odej\u00edt.')+'</div>'
+        +'<div style="display:flex;gap:8px;"><button class="ksAcc" data-id="'+escapeHtml(x.id)+'" style="flex:1;padding:10px;background:#16A34A;color:#fff;border:none;border-radius:10px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';font-size:12.5px;">'+(EN?'Accept':'P\u0159ijmout')+'</button>'
+        +'<button class="ksDec" data-id="'+escapeHtml(x.id)+'" style="padding:10px 14px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';font-size:12.5px;">'+(EN?'Decline':'Odm\u00edtnout')+'</button></div></div>'; }).join('');
+  }
+  if(act.length){
+    h+='<div style="font-size:11px;font-weight:800;color:var(--mid);margin:8px 0 6px;">'+(EN?'Children shared with you':'D\u011bti sd\u00edlen\u00e9 s tebou')+'</div>'
+      +act.map(function(x){
+        const k=x.kid; const bn=_kidBeltCount({ belts:k.belts });
+        const rec=(x.recent||[]).map(function(r){ return '<div style="font-size:11.5px;color:var(--mid);line-height:1.5;">'+escapeHtml(String(r.date||'').slice(0,10))+' \u00b7 '+escapeHtml(r.cls||'')+(r.gym?(' \u00b7 '+escapeHtml(r.gym)):'')+'</div>'; }).join('');
+        return '<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:8px;">'
+          +'<div style="font-weight:700;font-size:14px;">'+kidEmoji(k.age)+' '+escapeHtml(k.name||'')+'</div>'
+          +'<div style="font-size:12px;color:var(--mid);">'+(k.age!=null?(k.age+' '+(EN?'years':'let')):'')+(bn?(' \u00b7 '+bn+'\u00d7 '+(EN?'belt':'p\u00e1sek')):'')+' \u00b7 '+(EN?'with ':'u ')+escapeHtml(x.holder_name)+'</div>'
+          +(k.health?('<div style="margin-top:9px;background:#FFF4F4;border:1px solid #F5C2C2;border-radius:10px;padding:8px 10px;"><div style="font-size:10.5px;font-weight:800;color:#B23A3A;">\ud83e\ude79 '+(EN?'HEALTH NOTE':'ZDRAVOTN\u00cd OMEZEN\u00cd')+'</div><div style="font-size:13px;color:var(--dark);white-space:pre-wrap;">'+escapeHtml(k.health)+'</div></div>'):'')
+          +(k.trophy_img?('<div style="margin-top:9px;text-align:center;"><img src="'+escapeHtml(k.trophy_img)+'" alt="" loading="lazy" style="max-width:100%;max-height:150px;border-radius:12px;"></div>'):'')
+          +(rec?('<div style="margin-top:9px;"><div style="font-size:11px;font-weight:800;color:var(--dark);margin-bottom:2px;">'+(EN?'Recent training':'Posledn\u00ed tr\u00e9ninky')+'</div>'+rec+'</div>'):'')
+          +'<button class="ksLeave" data-id="'+escapeHtml(x.id)+'" style="margin-top:9px;background:none;border:none;padding:0;color:var(--mid);font-size:11.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';text-decoration:underline;">'+(EN?'Stop sharing':'Ukon\u010dit sd\u00edlen\u00ed')+'</button>'
+          +'</div>'; }).join('');
+  }
+  box.innerHTML=h;
+  const act2=async function(body, b){ b.disabled=true; try{ await _kidShareApi(body); }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); } _loadKidShared(); };
+  box.querySelectorAll('.ksAcc').forEach(function(b){ b.onclick=function(){ act2({ action:'respond', id:b.dataset.id, accept:true }, b); }; });
+  box.querySelectorAll('.ksDec').forEach(function(b){ b.onclick=function(){ act2({ action:'respond', id:b.dataset.id, accept:false }, b); }; });
+  box.querySelectorAll('.ksLeave').forEach(function(b){ b.onclick=function(){ if(!confirm(EN?'Stop sharing this child\u2019s care?':'Ukon\u010dit sd\u00edlen\u00ed p\u00e9\u010de o toto d\u00edt\u011b?')) return; act2({ action:'leave', id:b.dataset.id }, b); }; });
+}
 function renderMyKids(){
   const box=$('myKidsBody'); if(!box) return; const EN=LANG==='en'; const kids=_myChildren(); const _caStrict=_consentAgeForMe(); const _ca=(_caStrict!=null)?_caStrict:15;
   const _kidActiveN = kids.filter(function(x){ return !x._archived; }).length;
@@ -4904,6 +5002,7 @@ function renderMyKids(){
           ${_kidBtn('kidTrophy', i, '\ud83d\uddbc\ufe0f '+(k.trophy_img?(EN?'Change image':'Zm\u011bnit obr\u00e1zek'):(EN?'Add a picture':'P\u0159idat obr\u00e1zek')))}
           ${beltN?'':beltsBtn}
           ${(k.health&&String(k.health).trim())?'':_kidBtn('kidHealth', i, '\ud83e\ude79 '+(EN?'Health note (optional)':'Zdravotn\u00ed omezen\u00ed (nepovinn\u00e9)'))}
+          ${_kidBtn('kidCare', i, '\ud83d\udc6a '+(EN?'Share care with a close person':'Sd\u00edlet p\u00e9\u010di s bl\u00edzkou osobou'))}
           ${_kidBtn('kidXfer', i, '\ud83e\udd1d '+(EN?'Transfer to another guardian':'P\u0159edat jin\u00e9mu z\u00e1konn\u00e9mu z\u00e1stupci'))}
           ${(!grown && age!=null)?_kidBtn('kidMigrate', i, '\ud83c\udf93 '+(EN?'Move to own account (15+)':'P\u0159ej\u00edt na vlastn\u00ed \u00fa\u010det (15+)')):''}
           ${(age==null)?_kidBtn('kidMigrate', i, '\ud83c\udf93 '+(EN?'Move to own account (15+)':'P\u0159ej\u00edt na vlastn\u00ed \u00fa\u010det (15+)')):''}
@@ -4913,7 +5012,7 @@ function renderMyKids(){
     </div>`;
   })()).join('') : `<p style="color:var(--light);font-size:13px;padding:6px 0;">${EN?'No children added yet.':'Zatím žádné děti.'}</p>`;
   try{ setTimeout(_famRenderRequests, 0); setTimeout(_famRenderConsents, 0); }catch(e){}
-  box.innerHTML=`<div id="famConsentBox" style="margin-bottom:6px;"></div><div id="famReqBox" style="margin-bottom:6px;"></div><div id="famAcctBox" style="margin-bottom:6px;"></div><div id="migConfirmBox" style="margin-bottom:6px;"></div><div id="kidXferBox" style="margin-bottom:6px;"></div><div id="kidXferOutBox" style="margin-bottom:6px;"></div><div id="kidsSection" style="margin:16px 0 0;border-top:1px solid var(--border);padding-top:14px;">
+  box.innerHTML=`<div id="famConsentBox" style="margin-bottom:6px;"></div><div id="famReqBox" style="margin-bottom:6px;"></div><div id="famAcctBox" style="margin-bottom:6px;"></div><div id="migConfirmBox" style="margin-bottom:6px;"></div><div id="kidSharedBox" style="margin-bottom:6px;"></div><div id="kidXferBox" style="margin-bottom:6px;"></div><div id="kidXferOutBox" style="margin-bottom:6px;"></div><div id="kidsSection" style="margin:16px 0 0;border-top:1px solid var(--border);padding-top:14px;">
   <details id="kidsFold" style="border:1px solid var(--border);border-radius:12px;background:var(--surf);overflow:hidden;">
     <summary style="list-style:none;cursor:pointer;padding:13px 15px;display:flex;justify-content:space-between;align-items:center;gap:10px;">
       <span style="font-weight:800;font-size:13.5px;color:#141414;">${EN?'Children (under 15)':'Děti (do 15 let)'} <span id="kidGuardInfo" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:var(--border);color:var(--mid);font-size:10.5px;font-weight:800;cursor:pointer;vertical-align:middle;">i</span>${_kidActiveN?(' <span style="color:var(--mid);font-weight:600;">· '+_kidActiveN+'</span>'):''}</span>
@@ -4939,7 +5038,7 @@ function renderMyKids(){
       else toast(LANG==='en'?'\u2705 Claimed \u2014 reopen the app to see it':'\u2705 Připsáno \u2014 obnov appku, ať se to projeví', 1);
     };
   }catch(e){}
-  try{ _loadFamilyAccts(); }catch(e){} try{ _loadPendingMigrations(); }catch(e){} try{ _loadPendingKidXfers(); }catch(e){} try{ _loadOutgoingKidXfers(); }catch(e){} box.querySelectorAll('.kidDel').forEach(b=>b.onclick=()=>removeChild(+b.dataset.i));
+  try{ _loadFamilyAccts(); }catch(e){} try{ _loadKidShared(); }catch(e){} try{ _loadPendingMigrations(); }catch(e){} try{ _loadPendingKidXfers(); }catch(e){} try{ _loadOutgoingKidXfers(); }catch(e){} box.querySelectorAll('.kidDel').forEach(b=>b.onclick=()=>removeChild(+b.dataset.i));
   const kao=$('kidAddOpen'); if(kao) kao.onclick=_openAddKid;
   const kgi=$('kidGuardInfo'); if(kgi) kgi.onclick=function(ev){
     ev.preventDefault(); ev.stopPropagation();
@@ -4956,6 +5055,7 @@ function renderMyKids(){
   box.querySelectorAll('.kidBelts').forEach(b=>b.onclick=()=>_viewKidBelts(+b.dataset.i));
   box.querySelectorAll('.kidMigrate').forEach(b=>b.onclick=()=>_kidMigrateLink(+b.dataset.i));
   box.querySelectorAll('.kidXfer').forEach(b=>b.onclick=()=>_kidTransferStart(+b.dataset.i));
+  box.querySelectorAll('.kidCare').forEach(b=>b.onclick=()=>_kidCareOpen(+b.dataset.i));
   var _mrb=$('migReqBtn'); if(_mrb) _mrb.onclick=_openMigrateRequest;
   box.querySelectorAll('.kidRestore').forEach(b=>b.onclick=()=>restoreChild(+b.dataset.i));
 }
@@ -5105,7 +5205,7 @@ async function _loadFamilyAccts(){
   }
 
   if(!mine.minor){
-    html+=`<button id="famGenBtn" style="width:100%;margin-top:10px;padding:12px;background:#141414;color:#fff;border:none;border-radius:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13.5px;">+ ${EN?'Link a child (15-17) or a close person':'Napojit dítě (15-17) nebo blízkou osobu'}</button><p style="font-size:11px;color:var(--light);line-height:1.5;margin:8px 2px 0;">${EN?'Send the link to your 15-17 child or a close person. They confirm, then you approve — and you can train together (e.g. private 1:2).':'Pošli odkaz svému 15-17letému dítěti nebo blízké osobě. Potvrdí ho, ty schválíš — a můžete trénovat spolu (např. soukromka 1:2).'}</p>`;
+    html+=`<button id="famGenBtn" style="width:100%;margin-top:10px;padding:12px;background:#141414;color:#fff;border:none;border-radius:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13.5px;">+ ${EN?'Link a child (15–17) or a partner/close person':'Napojit dítě (15–17) nebo partnera/blízkou osobu'}</button><p style="font-size:11px;color:var(--light);line-height:1.5;margin:8px 2px 0;">${EN?'Send the link to your 15-17 child or a close person. They confirm, then you approve — and you can train together (e.g. private 1:2).':'Pošli odkaz svému 15-17letému dítěti nebo blízké osobě. Potvrdí ho, ty schválíš — a můžete trénovat spolu (např. soukromka 1:2).'}</p>`;
   } else if(!active.length && !incoming.length){
     html+=`<p style="font-size:12px;color:var(--light);line-height:1.5;margin:6px 2px 0;">${EN?'Your guardian manages your family links.':'Tvoje rodinné propojení spravuje zákonný zástupce.'}</p>`;
   }
