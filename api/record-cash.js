@@ -16,6 +16,7 @@
 
 import { ladderRate as _mtlRate, acquisitionRate as _mtlAcq, introFreeFor as _introFree, hasOrgRate as _hasOrgRate } from './_rate.js';
 import { isTestMode } from './_config.js';
+import { approveMemberAppOnPayment, cohortPayer } from './_member-app.js';
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -561,6 +562,15 @@ export default async function handler(req, res) {
       });
     }
     if (_creditRow) await consumeStudentCredit(_creditRow.memberId, _creditRow.id, _creditRow.sc);
+    // PŘIJETÍ ZA ČLENA PO ZAPLACENÍ (spolek, přepínač zapnutý). Sem chodí QR a hotovost od klubu
+    // i Finbricks od serveru -- dřív je neschvalovalo nic, uměl to jen Stripe webhook.
+    if (provider === 'gym' && (type === 'membership' || type === 'course')) {
+      try {
+        const _who = b.cohort_member_id ? await cohortPayer(b.cohort_member_id)
+          : { gymId: gym_id, studentId: member_id || null, email: b.guest_email || null };
+        if (_who) await approveMemberAppOnPayment(_who);
+      } catch (e) { console.error('[record-cash] member app', e && e.message); }
+    }
     return res.status(200).json({ ok: true, mtl_fee: row.mtl_fee, credit_redeemed: !!_creditRow, id: _txId, doklad_no: _dokNo });
   } catch (e) {
     return res.status(500).json({ error: e.message });

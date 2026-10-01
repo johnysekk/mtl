@@ -1,5 +1,10 @@
 // /api/kid-transfer — PŘEDÁNÍ DÍTĚTE JINÉMU ZÁKONNÉMU ZÁSTUPCI, celé na serveru.
 //
+// KDO SOUHLASÍ: odesílatel při odeslání (prohlášení „předávám"), příjemce při přijetí.
+// Zápis proběhne až po souhlasu obou, tedy při přijetí.
+// KOMU: jen dospělému propojenému v Rodině (partner, nebo rodič odesílatele) -- stejné
+// pravidlo jako nabídka v appce, tady ale vynucené. Odkaz „pro kohokoli" je zrušený.
+//
 // Proč tady: předání sahá do účtů DVOU lidí (odebrat dítě jednomu, přidat druhému, přepsat
 // jeho záznamy). Z prohlížeče to šlo jen proto, že profiles a gym_attendance neměly RLS.
 // Po zapnutí RLS by příjemce dítě dostal, ale odesílateli by zůstalo (zápis do cizího
@@ -11,7 +16,6 @@
 // Platby a doklady (transactions, doklady) se NEPŘESOUVAJÍ: jsou to účetní záznamy
 // toho, kdo platil, a doklad zní na něj.
 //
-//   POST { action:'claim',   token }        příjemce otevřel odkaz -> předání je pro něj
 //   POST { action:'accept',  id }           příjemce potvrdil -> dítě a záznamy k němu
 //   POST { action:'reverse', id, reason }   původní rodič do 24 h, nebo zakladatel kdykoli
 
@@ -44,6 +48,12 @@ async function whoami(req) {
   if (!r.ok) return null;
   const u = await r.json();
   return (u && u.id) ? u.id : null;
+}
+
+// Propojení v Rodině: partner (oběma směry), nebo příjemce je rodičem odesílatele.
+async function familyLinked(from, to) {
+  const rows = (await sb(`family_links?status=eq.active&or=${q(`(and(guardian_id.eq.${from},member_id.eq.${to}),and(guardian_id.eq.${to},member_id.eq.${from}))`)}&select=relation,guardian_id,member_id`)) || [];
+  return rows.some((r) => r.relation === 'partner' || (r.relation === 'guardian' && r.guardian_id === to && r.member_id === from));
 }
 
 async function profile(id, cols) {
@@ -115,23 +125,11 @@ export default async function handler(req, res) {
     const mp = await profile(me, 'name,lang,is_minor,birthdate');
     const myName = (mp && mp.name) || '';
 
-    if (b.action === 'claim') {
-      if (isMinor(mp)) return res.status(403).json({ error: 'minor' });
-      const row = ((await sb(`kid_transfers?token=eq.${q(String(b.token || ''))}&status=eq.pending&select=*`)) || [])[0];
-      if (!row) return res.status(404).json({ error: 'invalid' });
-      if (row.from_guardian === me) return res.status(400).json({ error: 'own' });
-      if (row.to_guardian && row.to_guardian !== me) return res.status(403).json({ error: 'other' });
-      if (!row.to_guardian) {
-        await sb(`kid_transfers?id=eq.${q(row.id)}&status=eq.pending&to_guardian=is.null`, {
-          method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ to_guardian: me, to_guardian_name: myName }) });
-      }
-      return res.status(200).json({ ok: true, id: row.id, kid_first: row.kid_first, from_name: row.from_guardian_name });
-    }
-
     if (b.action === 'accept') {
       if (isMinor(mp)) return res.status(403).json({ error: 'minor' });
       const row = ((await sb(`kid_transfers?id=eq.${q(String(b.id || ''))}&to_guardian=eq.${q(me)}&status=eq.pending&select=*`)) || [])[0];
       if (!row) return res.status(404).json({ error: 'not_available' });
+      if (!(await familyLinked(row.from_guardian, me))) return res.status(403).json({ error: 'not_family' });
       const r = await moveKid(row.from_guardian, me, myName, row.kid_name);
       if (r.error === 'kid_not_on_sender') {
         await sb(`kid_transfers?id=eq.${q(row.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'cancelled' }) });

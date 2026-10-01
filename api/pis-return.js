@@ -112,8 +112,8 @@ export async function pisSideEffects(rec, tbl){
       : _merch
       ? { internal:true, intSecret:process.env.PIS_INTERNAL_SECRET, provider:(rec.coach_id?'coach':'gym'), gym_id:(rec.coach_id?null:rec.gym_id), coach_id:rec.coach_id||null, member_id:rec.student_id||null, gross_amount:Math.round((rec.amount||0)*100), currency:rec.currency||'CZK', type:'merch', payment_method:'pis', acq_source:'direct', source_booking_id:rec.id }
       : _cohort
-      ? { internal:true, intSecret:process.env.PIS_INTERNAL_SECRET, provider:'gym', gym_id:_cohGym, member_id:rec.student_id||null, gross_amount:Math.round(_cohDep*100), currency:_cohCur, type:'course', payment_method:'pis', cash_payer_name:rec.name||null, acq_source:rec.attribution||'direct', source_booking_id:rec.id }
-      : { internal:true, intSecret:process.env.PIS_INTERNAL_SECRET, provider:'gym', gym_id:rec.gym_id, coach_id:rec.coach_id||null, member_id:rec.student_id||null, gross_amount:Math.round((rec.amount||0)*100), type:(tbl==='gym_memberships'?'membership':'drop_in'),
+      ? { internal:true, intSecret:process.env.PIS_INTERNAL_SECRET, provider:'gym', gym_id:_cohGym, member_id:rec.student_id||null, cohort_member_id:rec.id, gross_amount:Math.round(_cohDep*100), currency:_cohCur, type:'course', payment_method:'pis', cash_payer_name:rec.name||null, acq_source:rec.attribution||'direct', source_booking_id:rec.id }
+      : { internal:true, intSecret:process.env.PIS_INTERNAL_SECRET, provider:'gym', gym_id:rec.gym_id, coach_id:rec.coach_id||null, member_id:rec.student_id||null, guest_email:rec.guest_email||null, gross_amount:Math.round((rec.amount||0)*100), type:(tbl==='gym_memberships'?'membership':'drop_in'),
         // months rozlozi akvizici na JEDEN mesic z celeho obdobi. Bez nej by rocni clenstvi
         // dostalo akvizicni sazbu na celych 16 000, coz je dvanactinasobek toho, co nalezi.
         months:(tbl==='gym_memberships'?(parseInt(rec.months,10)||1):undefined), payment_method:'pis', acq_source:rec.acq_source||'direct', credit:((tbl!=='gym_memberships'&&rec.credit_used==='student')?'student':undefined), source_booking_id:rec.id };
