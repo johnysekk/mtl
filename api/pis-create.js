@@ -111,8 +111,60 @@ const PIS_TABLES = ['gym_bookings', 'gym_memberships', 'bookings', 'event_ticket
 async function pisProvider(sb) {
   try {
     const r = await sb.from('platform_config').select('pis_provider').eq('id', 1).maybeSingle();
-    return String((r.data && r.data.pis_provider) || 'neonomics');
-  } catch (e) { return 'neonomics'; }
+    return String((r.data && r.data.pis_provider) || 'finbricks');
+  } catch (e) { return 'finbricks'; }
+}
+
+// ── SOUHLAS S PODMÍNKAMI FINBRICKS ─────────────────────────────────────────────────────────
+// Ukládá se TADY, ne z prohlížeče: server má řádek platby, takže zná plátce i tehdy, když nemá
+// účet (host u vstupenky, drop-inu, členství). Přihlášený = ten z tokenu (rodič platící za
+// dítě je rodič), host = jméno a e-mail z řádku. Bez souhlasu se platba vůbec nezaloží.
+async function whoFromToken(req) {
+  const tok = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  if (!tok) return null;
+  try {
+    const r = await sb.auth.getUser(tok);
+    return (r && r.data && r.data.user && r.data.user.id) ? r.data.user.id : null;
+  } catch (e) { return null; }
+}
+
+async function recordFbxConsent(req, row, tbl, terms, paymentId) {
+  const kind = 'finbricks_terms';
+  const version = String(terms.version || '').trim();
+  const lang = terms.lang === 'en' ? 'en' : 'cs';
+  const text = String(terms.text || '');
+  const hash = crypto.createHash('sha256').update(text, 'utf8').digest('hex');
+
+  let userId = await whoFromToken(req), name = null, email = null;
+  if (userId) {
+    const p = (await sb.from('profiles').select('name,email').eq('id', userId).maybeSingle()).data;
+    name = (p && p.name) || null; email = (p && p.email) || null;
+  } else {
+    email = String(row.guest_email || row.buyer_email || row.email || '').trim() || null;
+    name = String(row.guest_name || row.buyer_name || row.name || '').trim() || null;
+  }
+  if (!userId && !email) { console.error('[pis-create/consent] no identity', tbl, row.id); return; }
+
+  // Znění je neměnné pro (kind, version, lang) -- uloží se jednou, souhlasy na něj odkazují.
+  let versionId = null;
+  const ex = await sb.from('consent_versions').select('id,body_hash')
+    .eq('kind', kind).is('scope', null).eq('version', version).eq('lang', lang).limit(1);
+  if (ex.data && ex.data[0]) {
+    versionId = ex.data[0].id;
+    if (ex.data[0].body_hash !== hash) console.error('[pis-create/consent] VERSION HASH MISMATCH', version, lang, '-- zvyš FBX_TERMS.version');
+  } else {
+    const ins = await sb.from('consent_versions')
+      .insert({ kind, scope: null, version, lang, body_text: text, body_hash: hash }).select('id').single();
+    versionId = (ins.data && ins.data.id) || null;
+  }
+
+  const r = await sb.from('consent_acceptances').insert({
+    user_id: userId, kind, scope: null, version, lang, version_id: versionId, body_hash: hash,
+    ip: psuIpFrom(req), user_agent: req.headers['user-agent'] || null,
+    meta: { via: 'pis', payment_id: paymentId, table: tbl, row: row.id, guest: !userId },
+    user_name: name, user_email: email,
+  });
+  if (r.error) console.error('[pis-create/consent]', r.error.message);
 }
 
 // Variabilni symbol se posila vzdycky: podle nej klub pozna platbu ve vlastnim vypisu.
@@ -138,6 +190,12 @@ async function fbxCreate(sb, req, body) {
     if (r.data) { tbl = t; row = r.data; break; }
   }
   if (!row) return { error: 'row not found' };
+
+  // Závora i na serveru: checkbox v appce jde obejít, tohle ne.
+  const terms = body.fbx_terms || null;
+  if (!terms || !String(terms.version || '').trim() || !String(terms.text || '').trim()) {
+    return { error: 'Chybí souhlas s podmínkami Finbricks', code: 'terms_required' };
+  }
 
   // IBAN prijemce VZDY z databaze, nikdy z pozadavku prohlizece.
   let iban = null, payeeName = null;
@@ -190,6 +248,8 @@ async function fbxCreate(sb, req, body) {
   }
 
   await sb.from(tbl).update({ pis_payment_id: mtid, pis_provider: 'finbricks', pis_started_at: new Date().toISOString() }).eq('id', rowId);
+  // Záznam souhlasu nesmí shodit už založenou platbu -- chyba jde jen do logu.
+  try { await recordFbxConsent(req, row, tbl, terms, mtid); } catch (e) { console.error('[pis-create/consent]', e && e.message); }
   return { payment_id: mtid, url: r.data.redirectUrl };
 }
 

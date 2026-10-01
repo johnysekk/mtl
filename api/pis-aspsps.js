@@ -73,7 +73,7 @@ export default async function handler(req, res) {
   // Podle prepinace v Adminu: Neonomics, nebo Finbricks.
   try {
     const cfg = await _sbCfg.from('platform_config').select('pis_provider').eq('id', 1).maybeSingle();
-    if (String((cfg.data && cfg.data.pis_provider) || 'neonomics') === 'finbricks') {
+    if (String((cfg.data && cfg.data.pis_provider) || 'finbricks') === 'finbricks') {
       const cc = String((req.query && req.query.country) || 'CZ').toUpperCase().slice(0, 2);
       // Kdyz seznam prijde prazdny, appka rekne "platba z uctu tu neni dostupna" -- a bez
       // duvodu se nepozna, jestli Finbricks nic nevratil, nebo spadlo volani. Duvod jde s tim.
