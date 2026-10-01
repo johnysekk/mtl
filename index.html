@@ -4506,20 +4506,39 @@ function _kidXferSenderClickwrap(kidFirst, targetLabel, onConfirm){
   ov.onclick=function(e){ if(e.target===ov && !_ovHasForm(ov)) ov.remove(); };
   btn.onclick=function(){ if(!c1.checked) return; ov.remove(); if(typeof onConfirm==='function') onConfirm(); };
 }
+// Předání dítěte jde přes server (/api/kid-transfer): sahá do účtů dvou lidí, což z prohlížeče
+// po zapnutí RLS nejde, a přesouvá všechny záznamy dítěte, ne jen docházku.
+async function _kidXferApi(body){
+  const tok=await _freshTok();
+  const r=await fetch('/api/kid-transfer',{ method:'POST', headers:{ 'Content-Type':'application/json', Authorization:'Bearer '+(tok||'') }, body:JSON.stringify(body) });
+  const j=await r.json().catch(function(){ return {}; });
+  if(!r.ok || !j.ok){ const e=new Error(j.error||('HTTP '+r.status)); e.code=j.error; throw e; }
+  return j;
+}
+function _kidXferErr(e){
+  const EN=LANG==='en'; const c=e&&e.code;
+  const m={
+    minor:['Only an adult can receive a child','D\u00edt\u011b m\u016f\u017ee p\u0159evz\u00edt jen dosp\u011bl\u00fd'],
+    invalid:['Transfer link is not valid or already used','Odkaz na p\u0159ed\u00e1n\u00ed nen\u00ed platn\u00fd nebo u\u017e byl pou\u017eit'],
+    own:['This is your own transfer link','To je tv\u016fj vlastn\u00ed odkaz'],
+    other:['This transfer is for someone else','Toto p\u0159ed\u00e1n\u00ed pat\u0159\u00ed n\u011bkomu jin\u00e9mu'],
+    not_available:['Transfer not available','P\u0159ed\u00e1n\u00ed nen\u00ed dostupn\u00e9'],
+    kid_not_on_sender:['Child no longer on the sender\u2019s account','D\u00edt\u011b u\u017e nen\u00ed na \u00fa\u010dtu odes\u00edlatele'],
+    kid_name_taken:['There is already a child with this name on that account','Na tom \u00fa\u010dtu u\u017e je d\u00edt\u011b se stejn\u00fdm jm\u00e9nem'],
+    not_reversible:['Transfer not reversible','P\u0159ed\u00e1n\u00ed nelze vr\u00e1tit'],
+    only_original:['Only the original guardian can undo this','Vr\u00e1tit m\u016f\u017ee jen p\u016fvodn\u00ed z\u00e1konn\u00fd z\u00e1stupce'],
+    window_passed:['The 24h undo window has passed \u2014 contact MTL','24h okno pro vr\u00e1cen\u00ed uplynulo \u2014 kontaktuj MTL'],
+    nothing:['Nothing to reverse yet','Nen\u00ed co vracet']
+  }[c];
+  toast(m ? ('\u26a0\ufe0f '+(EN?m[0]:m[1])) : ('\u26a0\ufe0f '+((e&&e.message)||'')));
+}
 async function _consumeKidXfer(token){
-  const EN=LANG==='en'; const me=currentUser&&currentUser.id; if(!me||!token) return;
+  const me=currentUser&&currentUser.id; if(!me||!token) return;
   try{
-    const mine=await _famMineInfo();
-    if(mine.minor){ toast(EN?'Only an adult can receive a child':'Dítě může převzít jen dospělý'); return; }
-    const { data:tr }=await supaClient.from('kid_transfers').select('*').eq('token',token).eq('status','pending').limit(1);
-    const row=(tr&&tr[0])||null;
-    if(!row){ toast(EN?'Transfer link is not valid or already used':'Odkaz na předání není platný nebo už byl použit'); return; }
-    if(row.from_guardian===me){ toast(EN?'This is your own transfer link':'To je tvůj vlastní odkaz'); return; }
-    if(row.to_guardian && row.to_guardian!==me){ toast(EN?'This transfer is for someone else':'Toto předání patří někomu jinému'); return; }
-    if(!row.to_guardian){ try{ await supaClient.from('kid_transfers').update({ to_guardian:me, to_guardian_name:(currentUser.name||'') }).eq('id',row.id).eq('status','pending').is('to_guardian',null); }catch(e){} }
-    _kidXferClickwrap(row.id, row.kid_first, row.from_guardian_name);
+    const j=await _kidXferApi({ action:'claim', token:token });
+    _kidXferClickwrap(j.id, j.kid_first, j.from_name);
     try{ _loadPendingKidXfers(); }catch(e){}
-  }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
+  }catch(e){ _kidXferErr(e); }
 }
 async function _validXferTargets(){
   const me=currentUser&&currentUser.id; if(!me) return [];
@@ -4577,40 +4596,17 @@ async function _kidTransferGenLink(i){
 async function _reverseKidTransfer(transferId, isMtl, reason){
   const EN=LANG==='en'; const me=currentUser&&currentUser.id; if(!me||!transferId) return;
   try{
-    const { data:tr }=await supaClient.from('kid_transfers').select('*').eq('id',transferId).eq('status','accepted').limit(1);
-    const row=(tr&&tr[0])||null; if(!row){ toast(EN?'Transfer not reversible':'Předání nelze vrátit'); return; }
-    const founder=(me===FOUNDER_UUID);
-    if(isMtl && !founder){ toast(EN?'Not allowed':'Není povoleno'); return; }
-    if(!isMtl){
-      if(row.from_guardian!==me){ toast(EN?'Only the original guardian can undo this':'Vrátit může jen původní zákonný zástupce'); return; }
-      if(!row.undo_until || new Date(row.undo_until).getTime() < Date.now()){ toast(EN?'The 24h undo window has passed \u2014 contact MTL':'24h okno pro vrácení uplynulo \u2014 kontaktuj MTL'); return; }
+    const j=await _kidXferApi({ action:'reverse', id:transferId, reason:(reason||null) });
+    // Dítě je zpátky u původního zástupce. Souhlas zaznamenává jen on -- dřív se při vrácení
+    // z Adminu zapsal souhlas zakladateli.
+    if(j.children){
+      currentUser.children=JSON.stringify(j.children);
+      try{ if(typeof _recordConsent==='function') _recordConsent('guardian_consent', KID_CONSENT_VERSION, LANG, (LANG==='en'?GUARDIAN_CONSENT_EN:GUARDIAN_CONSENT_CS), { context:'transfer_back' }); }catch(e){}
     }
-    const holder=row.to_guardian; const orig=row.from_guardian; const kidName=row.kid_name;
-    if(!holder){ toast(EN?'Nothing to reverse yet':'Není co vracet'); return; }
-    const { data:hp }=await supaClient.from('profiles').select('children').eq('id',holder).single();
-    let hkids=hp&&hp.children?(typeof hp.children==='string'?JSON.parse(hp.children):hp.children):[];
-    const idx=(hkids||[]).findIndex(function(c){ return c&&c.name===kidName; });
-    if(idx<0){ toast(EN?'Child no longer on the new guardian\u2019s account':'Dítě už není na účtu nového zástupce'); return; }
-    const kid=hkids[idx];
-    const { data:op }=await supaClient.from('profiles').select('children').eq('id',orig).single();
-    let okids=op&&op.children?(typeof op.children==='string'?JSON.parse(op.children):op.children):[];
-    if((okids||[]).some(function(c){ return c&&c.name===kidName; })){ toast(EN?'Original guardian already has this child':'Původní zákonný zástupce už toto dítě má'); return; }
-    kid.consent={ at:new Date().toISOString(), version:(typeof KID_CONSENT_VERSION!=='undefined'?KID_CONSENT_VERSION:'v1'), guardian_id:orig, guardian_name:(row.from_guardian_name||'') };
-    delete kid._archived;
-    okids.push(kid);
-    hkids.splice(idx,1);
-    await supaClient.from('profiles').update({ children:JSON.stringify(hkids) }).eq('id',holder);
-    await supaClient.from('profiles').update({ children:JSON.stringify(okids) }).eq('id',orig);
-    if(orig===me) currentUser.children=JSON.stringify(okids);
-    if(holder===me) currentUser.children=JSON.stringify(hkids);
-    try{ await supaClient.from('gym_attendance').update({ student_id:orig }).eq('student_id',holder).eq('child_name',kidName); }catch(e){}
-    try{ await supaClient.from('guardian_consents').insert({ guardian_id:orig, guardian_name:(row.from_guardian_name||''), kid_id:(kid.id||null), kid_name:kidName, kid_dob:(kid.dob||null), version:(typeof KID_CONSENT_VERSION!=='undefined'?KID_CONSENT_VERSION:'v1') }); }catch(e){} try{ if(typeof _recordConsent==='function') _recordConsent('guardian_consent', KID_CONSENT_VERSION, LANG, (LANG==='en'?GUARDIAN_CONSENT_EN:GUARDIAN_CONSENT_CS), { context:'transfer_in', kid_id:(kid.id||null) }); }catch(e){}
-    await supaClient.from('kid_transfers').update({ status:'reversed', reversed_at:new Date().toISOString(), reversed_by:me, reverse_reason:(reason||(isMtl?'MTL review':'guardian undo')) }).eq('id',row.id);
-    try{ await supaClient.from('notifications').insert([{ user_id:holder, type:'system', read:false, data:JSON.stringify({kind:'kidxfer_reversed'}), message:(EN?('\u21a9\ufe0f The transfer of '+(kid.firstName||kidName)+' was reversed'+(isMtl?' by MTL':'')):('\u21a9\ufe0f Předání dítěte '+(kid.firstName||kidName)+' bylo vráceno'+(isMtl?' ze strany MTL':''))) },{ user_id:orig, type:'system', read:false, data:JSON.stringify({kind:'kidxfer_reversed'}), message:(EN?('\u21a9\ufe0f '+(kid.firstName||kidName)+' is back on your account'):('\u21a9\ufe0f '+(kid.firstName||kidName)+' je zpět na tvém účtu')) }]); }catch(e){}
-    toast(EN?'\u2705 Transfer reversed':'\u2705 Předání vráceno',1);
+    toast(EN?'\u2705 Transfer reversed':'\u2705 P\u0159ed\u00e1n\u00ed vr\u00e1ceno',1);
     try{ renderMyKids(); }catch(e){}
     if(isMtl){ const _o=document.getElementById('kidXfersAdminOv'); if(_o){ _o.remove(); try{ openKidTransfers(); }catch(e){} } }
-  }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
+  }catch(e){ _kidXferErr(e); }
 }
 async function _loadOutgoingKidXfers(){
   const box=$('kidXferOutBox'); if(!box) return; const EN=LANG==='en'; const me=currentUser&&currentUser.id; if(!me){ box.innerHTML=''; return; }
@@ -4650,20 +4646,8 @@ async function openKidTransfers(){
 }
 async function _loadPendingKidXfers(){
   const box=$('kidXferBox'); if(!box) return; const EN=LANG==='en'; const me=currentUser&&currentUser.id; if(!me){ box.innerHTML=''; return; }
-  if(window._kidxferTok){
-    const tok=window._kidxferTok; window._kidxferTok=null;
-    try{
-      const mine=await _famMineInfo();
-      if(mine.minor){ toast(EN?'Only an adult can receive a child':'Dítě může převzít jen dospělý'); }
-      else{
-        const { data:tr }=await supaClient.from('kid_transfers').select('*').eq('token',tok).eq('status','pending').limit(1);
-        const row=(tr&&tr[0])||null;
-        if(row && !row.to_guardian && row.from_guardian!==me){
-          await supaClient.from('kid_transfers').update({ to_guardian:me, to_guardian_name:(currentUser.name||'') }).eq('id',row.id).eq('status','pending').is('to_guardian',null);
-        }
-      }
-    }catch(e){}
-  }
+  // Odkaz ?kidxfer= zpracovává _consumeKidXfer (i přes přihlášení). Tady dřív běžela druhá,
+  // souběžná kopie téhož převzetí -- odstraněna.
   let rows=[]; try{ const { data }=await supaClient.from('kid_transfers').select('*').eq('to_guardian',me).eq('status','pending'); rows=data||[]; }catch(e){}
   if(!rows.length){ box.innerHTML=''; return; }
   box.innerHTML = '<div style="font-size:11px;font-weight:800;color:#006040;margin:2px 0 6px;">'+(EN?'Incoming child transfer':'Předání dítěte k tobě')+'</div>'
@@ -4704,32 +4688,12 @@ function _kidXferClickwrap(transferId, kidFirst, fromName){
 async function _kidXferDoAccept(transferId){
   const EN=LANG==='en'; const me=currentUser&&currentUser.id; if(!me||!transferId) return;
   try{
-    const mine=await _famMineInfo(); if(mine.minor){ toast(EN?'Only an adult can receive a child':'Dítě může převzít jen dospělý'); return; }
-    const { data:tr }=await supaClient.from('kid_transfers').select('*').eq('id',transferId).eq('to_guardian',me).eq('status','pending').limit(1);
-    const row=(tr&&tr[0])||null; if(!row){ toast(EN?'Transfer not available':'Předání není dostupné'); return; }
-    const kidName=row.kid_name; const fromG=row.from_guardian;
-    const { data:fp }=await supaClient.from('profiles').select('children').eq('id',fromG).single();
-    let fkids=fp&&fp.children?(typeof fp.children==='string'?JSON.parse(fp.children):fp.children):[];
-    const idx=(fkids||[]).findIndex(function(c){ return c&&c.name===kidName; });
-    if(idx<0){ toast(EN?'Child no longer on the sender\u2019s account':'Dítě už není na účtu odesílatele'); await supaClient.from('kid_transfers').update({ status:'cancelled' }).eq('id',row.id); _loadPendingKidXfers(); return; }
-    const kid=fkids[idx];
-    let mkids=_myChildren();
-    if((mkids||[]).some(function(c){ return c&&c.name===kidName; })){ toast(EN?'You already have a child with this name':'Už máš dítě s tímto jménem'); return; }
-    kid.consent={ at:new Date().toISOString(), version:(typeof KID_CONSENT_VERSION!=='undefined'?KID_CONSENT_VERSION:'v1'), guardian_id:me, guardian_name:(currentUser.name||'') };
-    delete kid._archived;
-    mkids.push(kid);
-    fkids.splice(idx,1);
-    await supaClient.from('profiles').update({ children:JSON.stringify(fkids) }).eq('id',fromG);
-    await supaClient.from('profiles').update({ children:JSON.stringify(mkids) }).eq('id',me);
-    currentUser.children=JSON.stringify(mkids);
-    try{ await supaClient.from('gym_attendance').update({ student_id:me }).eq('student_id',fromG).eq('child_name',kidName); }catch(e){}
-    try{ await supaClient.from('guardian_consents').insert({ guardian_id:me, guardian_name:(currentUser.name||''), kid_id:(kid.id||null), kid_name:kidName, kid_dob:(kid.dob||null), version:(typeof KID_CONSENT_VERSION!=='undefined'?KID_CONSENT_VERSION:'v1') }); try{ if(typeof _recordConsent==='function') _recordConsent('guardian_consent', KID_CONSENT_VERSION, LANG, (LANG==='en'?GUARDIAN_CONSENT_EN:GUARDIAN_CONSENT_CS), { context:'transfer_out', kid_id:(kid.id||null) }); }catch(e){} }catch(e){}
-    const undo=new Date(Date.now()+24*60*60*1000).toISOString();
-    await supaClient.from('kid_transfers').update({ status:'accepted', accepted_at:new Date().toISOString(), undo_until:undo, consent_version:(typeof KID_CONSENT_VERSION!=='undefined'?KID_CONSENT_VERSION:'v1') }).eq('id',row.id);
-    try{ await supaClient.from('notifications').insert(_bi({ user_id:fromG, type:'system', read:false, data:JSON.stringify({kind:'kidxfer_done'}), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ((EN?('\u2705 '+(kid.firstName||kidName)+' was transferred to '+(currentUser.name||'the new guardian')):('\u2705 '+(kid.firstName||kidName)+' byl/a předán/a uživateli '+(currentUser.name||'nový zákonný zástupce')))); })); }catch(e){}
-    toast(EN?'\u2705 Child received':'\u2705 Dítě převzato',1);
+    const j=await _kidXferApi({ action:'accept', id:transferId });
+    currentUser.children=JSON.stringify(j.children||[]);
+    try{ if(typeof _recordConsent==='function') _recordConsent('guardian_consent', KID_CONSENT_VERSION, LANG, (LANG==='en'?GUARDIAN_CONSENT_EN:GUARDIAN_CONSENT_CS), { context:'transfer_in' }); }catch(e){}
+    toast(EN?'\u2705 Child received \u2014 memberships and history are now on your account':'\u2705 D\u00edt\u011b p\u0159evzato \u2014 \u010dlenstv\u00ed i historie jsou te\u010f na tv\u00e9m \u00fa\u010dtu',1);
     renderMyKids();
-  }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); }
+  }catch(e){ _kidXferErr(e); if(e&&e.code==='kid_not_on_sender'){ try{ _loadPendingKidXfers(); }catch(_){} } }
 }
 async function _kidXferDecline(transferId){
   const EN=LANG==='en'; if(!transferId) return;
@@ -4961,7 +4925,7 @@ function renderMyKids(){
           ${_kidBtn('kidTrophy', i, '\ud83d\uddbc\ufe0f '+(k.trophy_img?(EN?'Change image':'Zm\u011bnit obr\u00e1zek'):(EN?'Add a picture':'P\u0159idat obr\u00e1zek')))}
           ${beltN?'':beltsBtn}
           ${(k.health&&String(k.health).trim())?'':_kidBtn('kidHealth', i, '\ud83e\ude79 '+(EN?'Health note (optional)':'Zdravotn\u00ed omezen\u00ed (nepovinn\u00e9)'))}
-          ${_kidBtn('kidXfer', i, '\ud83e\udd1d '+(EN?'Transfer to another guardian':'P\u0159edat jin\u00e9mu guardianovi'))}
+          ${_kidBtn('kidXfer', i, '\ud83e\udd1d '+(EN?'Transfer to another guardian':'P\u0159edat jin\u00e9mu z\u00e1konn\u00e9mu z\u00e1stupci'))}
           ${(!grown && age!=null)?_kidBtn('kidMigrate', i, '\ud83c\udf93 '+(EN?'Move to own account (15+)':'P\u0159ej\u00edt na vlastn\u00ed \u00fa\u010det (15+)')):''}
           ${(age==null)?_kidBtn('kidMigrate', i, '\ud83c\udf93 '+(EN?'Move to own account (15+)':'P\u0159ej\u00edt na vlastn\u00ed \u00fa\u010det (15+)')):''}
           <button class="kidDel" data-i="${i}" style="width:100%;margin-top:7px;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;text-align:left;">${EN?'Remove child':'Odebrat d\u00edt\u011b'}</button>
@@ -17446,15 +17410,17 @@ async function _viewMigId(path){
 }
 async function _verifyMigId(reqId, path, ok){
   const EN=LANG==='en';
+  // Přední i zadní strana -- smažou se obě.
+  const _paths=(Array.isArray(path)?path:[path]).filter(Boolean);
   if(ok){
     if(!confirm(EN?'Confirm the name + date of birth on the ID match this child record? The scan is deleted now and only the outcome is kept.':'Potvrzuješ, že jméno + datum narození na dokladu sedí s tímto dítětem? Sken se teď smaže, zůstane jen výsledek.')) return;
-    try{ await supaClient.from('migration_requests').update({ id_verified:true, id_verified_by:currentUser.id, id_verified_at:new Date().toISOString(), id_doc_path:null }).eq('id',reqId); }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); return; }
-    try{ if(path) await supaClient.storage.from('migration-id').remove([path]); }catch(e){}
+    try{ await supaClient.from('migration_requests').update({ id_verified:true, id_verified_by:currentUser.id, id_verified_at:new Date().toISOString(), id_doc_path:null, id_doc_back_path:null }).eq('id',reqId); }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); return; }
+    try{ if(_paths.length) await supaClient.storage.from('migration-id').remove(_paths); }catch(e){}
     toast(EN?'\u2705 Verified \u2014 scan deleted':'\u2705 Ov\u011b\u0159eno \u2014 sken smaz\u00e1n',1);
   } else {
     if(!confirm(EN?'Mark the ID as NOT matching? The scan is deleted.':'Ozna\u010dit doklad jako NESED\u00cdC\u00cd? Sken se sma\u017ee.')) return;
-    try{ await supaClient.from('migration_requests').update({ id_doc_path:null }).eq('id',reqId); }catch(e){}
-    try{ if(path) await supaClient.storage.from('migration-id').remove([path]); }catch(e){}
+    try{ await supaClient.from('migration_requests').update({ id_doc_path:null, id_doc_back_path:null }).eq('id',reqId); }catch(e){}
+    try{ if(_paths.length) await supaClient.storage.from('migration-id').remove(_paths); }catch(e){}
     toast(EN?'Marked not matching \u2014 scan deleted':'Ozna\u010deno nesed\u00edc\u00ed \u2014 sken smaz\u00e1n');
   }
   openMigrationRequests();
@@ -17529,7 +17495,10 @@ function _openMigrateRequest(){
     <textarea id="mrNote" rows="2" placeholder="${EN?'Anything that helps us match you (optional)':'Cokoli, co pomůže tě spárovat (nepovinné)'}" style="${inp}resize:vertical;"></textarea>
     <div style="font-size:12px;font-weight:700;color:var(--dark);margin:4px 0 4px;">${EN?'Fastest verification (optional): your ID':'Nejrychlejší ověření (volitelné): tvůj doklad'}</div>
     <div style="font-size:10.5px;color:var(--light);margin-bottom:6px;line-height:1.4;">${EN?'We only check the name + date of birth match, then DELETE the scan immediately. We never keep ID images.':'Ověříme jen shodu jména + data narození a sken hned SMAŽEME. Doklady si neukládáme.'}</div>
-    <input id="mrId" type="file" accept="image/*" style="width:100%;box-sizing:border-box;margin-bottom:12px;font-size:12px;">
+    <div style="display:flex;gap:8px;margin-bottom:12px;">
+      <label style="flex:1;min-width:0;font-size:11.5px;font-weight:700;color:var(--mid);">${EN?'Front side':'P\u0159edn\u00ed strana'}<input id="mrIdFront" type="file" accept="image/*" style="width:100%;box-sizing:border-box;margin-top:4px;font-size:12px;font-weight:400;"></label>
+      <label style="flex:1;min-width:0;font-size:11.5px;font-weight:700;color:var(--mid);">${EN?'Back side':'Zadn\u00ed strana'}<input id="mrIdBack" type="file" accept="image/*" style="width:100%;box-sizing:border-box;margin-top:4px;font-size:12px;font-weight:400;"></label>
+    </div>
     <div style="font-size:12.5px;font-weight:700;color:var(--dark);margin:2px 0 4px;">${EN?'Can your parent/guardian confirm this?':'Může tvůj rodič/opatrovník tohle potvrdit?'}</div>
     <div style="font-size:11px;color:var(--mid);margin-bottom:8px;line-height:1.45;">${EN?'If it is not possible or not safe, choose NO and we will verify another way.':'Pokud to není možné/bezpečné, zvol NE a ověříme to jinak.'}</div>
     <div id="mrCP" style="display:flex;gap:8px;margin-bottom:12px;">
@@ -17548,6 +17517,10 @@ function _openMigrateRequest(){
     const kid=(document.getElementById('mrKid').value||'').trim();
     if(!kid){ toast(EN?'Enter your name as the child':'Zadej své jméno jako dítě'); return; }
     if(window._migCP==null){ toast(EN?'Please answer the guardian question above':'Odpověz prosím na otázku o rodiči výše'); return; }
+    // Doklad je nepovinný, ale když, tak OBĚ strany -- datum narození bývá na zadní.
+    { const _fF=document.getElementById('mrIdFront'), _fB=document.getElementById('mrIdBack');
+      const _hF=!!(_fF&&_fF.files&&_fF.files[0]), _hB=!!(_fB&&_fB.files&&_fB.files[0]);
+      if(_hF!==_hB){ toast(EN?'Add both sides of the ID, or neither':'P\u0159idej ob\u011b strany dokladu, nebo \u017e\u00e1dnou'); return; } }
     const btn=document.getElementById('mrSend'); btn.disabled=true; window._migIdFail=false;
     let _myDob=null; try{ const {data:_md}=await supaClient.from('profiles').select('birthdate').eq('id',currentUser.id).single(); _myDob=(_md&&_md.birthdate)||null; }catch(e){}
     try{
@@ -17556,7 +17529,23 @@ function _openMigrateRequest(){
       // a founder dostal notifikaci o zadosti, ktera v databazi neexistuje.
       if(_ins && _ins.error) throw _ins.error;
       const _reqId=(_ins&&_ins.data&&_ins.data.id)||null;
-      try{ const _f=document.getElementById('mrId'); if(_f&&_f.files&&_f.files[0]&&_reqId){ const _sh=await _shrinkPhoto(_f.files[0], 2000, 0.85); const _file=_sh.blob; const _ext=_sh.ext; const _path=_reqId+'.'+_ext; const { error:_ue }=await supaClient.storage.from('migration-id').upload(_path,_file,{upsert:false, contentType:_sh.type}); if(!_ue){ await supaClient.from('migration_requests').update({ id_doc_path:_path, id_doc_at:new Date().toISOString() }).eq('id',_reqId); } else { console.error('migration id upload', _ue); window._migIdFail=true; } } }catch(e){ console.error('migration id upload', e); window._migIdFail=true; }
+      // Dvě fotky: <id žádosti>_front.jpg a <id žádosti>_back.jpg. Politika bucketu pustí
+      // nahrání jen do souborů pojmenovaných id VLASTNÍ žádosti (část před „_").
+      try{
+        const _fF=document.getElementById('mrIdFront'), _fB=document.getElementById('mrIdBack');
+        if(_reqId && _fF&&_fF.files&&_fF.files[0] && _fB&&_fB.files&&_fB.files[0]){
+          const _up=async function(file, side){
+            const _sh=await _shrinkPhoto(file, 2000, 0.85);
+            const _path=_reqId+'_'+side+'.'+_sh.ext;
+            const { error }=await supaClient.storage.from('migration-id').upload(_path, _sh.blob, { upsert:false, contentType:_sh.type });
+            if(error) throw error;
+            return _path;
+          };
+          const _pF=await _up(_fF.files[0], 'front');
+          const _pB=await _up(_fB.files[0], 'back');
+          await supaClient.from('migration_requests').update({ id_doc_path:_pF, id_doc_back_path:_pB, id_doc_at:new Date().toISOString() }).eq('id',_reqId);
+        }
+      }catch(e){ console.error('migration id upload', e); window._migIdFail=true; }
       try{ await supaClient.from('notifications').insert({ user_id:FOUNDER_UUID, type:'system', read:false, data:JSON.stringify({kind:'migration_request', from:currentUser.id, kid:kid}), message:('🎓 '+(currentUser.name||'Student')+' žádá o přenos starých statistik dítěte: '+kid) }); }catch(e){}
       ov.remove();
       // Dřív se chyba nahrání dokladu tiše spolkla a hlásilo se „Odesláno" -- MTL pak čekalo
@@ -17801,7 +17790,7 @@ async function openMigrationRequests(){
         ${r.contact_parent===false?`<div style="flex:1;padding:9px;background:#FEECEC;color:#8a2018;border-radius:10px;font-size:11px;line-height:1.4;font-weight:600;text-align:center;">⚠️ ${EN?'Requester asked NOT to involve the parent — verify via club or ID only':'Žadatel zvolil rodiče NEzapojovat — ověř jen přes klub nebo doklad'}</div>`:(r.status==='parent_pending'?`<button class="migForce" data-id="${r.id}" data-pid="${pid||''}" data-kid="${escapeHtml(r.kid_name)}" data-target="${r.requester_id}" ${(!pid||!kidFound)?'disabled':''} style="flex:1;padding:10px;background:#B8860B;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;${(!pid||!kidFound)?'opacity:.4;':''}">⏳ ${EN?'Guardian not responding? Transfer anyway':'Rodič nereaguje? Přenést i tak'}</button>`:`<button class="migApprove" data-id="${r.id}" data-pid="${pid||''}" data-kid="${escapeHtml(r.kid_name)}" data-target="${r.requester_id}" ${(!pid||!kidFound)?'disabled':''} style="flex:1;padding:10px;background:#006040;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;${(!pid||!kidFound)?'opacity:.4;':''}">${EN?'Send to guardian':'Poslat rodiči'}</button>`)}
         <button class="migReject" data-id="${r.id}" data-target="${r.requester_id}" style="flex:1;padding:10px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;">${EN?'Reject':'Zamítnout'}</button>
         ${r.gym_vouched?`<button class="migGymApprove" data-id="${r.id}" data-pid="${pid||''}" data-kid="${escapeHtml(r.kid_name)}" data-target="${r.requester_id}" ${(!pid||!kidFound)?'disabled':''} style="flex:1 0 100%;padding:10px;background:#0E7A4A;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;${(!pid||!kidFound)?'opacity:.4;':''}">✅ ${EN?'Club confirmed — approve & transfer':'Klub ověřil — schválit a přenést'}</button>`:(vouchGym?`<button class="migVouch" data-id="${r.id}" data-gym="${vouchGym}" data-kid="${escapeHtml(r.kid_name)}" data-pid="${pid||''}" data-target="${r.requester_id}" style="flex:1 0 100%;padding:10px;background:#0E5A8A;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;">🥋 ${EN?'Verify via the club they trained at':'Ověřit přes klub, kde trénoval'}</button>`:'')}
-        ${r.id_verified?`<button class="migIdApprove" data-id="${r.id}" data-pid="${pid||''}" data-kid="${escapeHtml(r.kid_name)}" data-target="${r.requester_id}" data-cp="${r.contact_parent===false?'0':'1'}" ${!pid?'disabled':''} style="flex:1 0 100%;padding:10px;background:#0E7A4A;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;${!pid?'opacity:.4;':''}">🆔 ${EN?'ID verified — approve & transfer':'Doklad ověřen — schválit a přenést'}</button>`:(r.id_doc_path?`<div style="flex:1 0 100%;display:flex;gap:6px;flex-wrap:wrap;"><button class="migIdView" data-p="${escapeHtml(r.id_doc_path)}" style="flex:1;padding:9px;background:#0E5A8A;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">🆔 ${EN?'View ID':'Zobrazit doklad'}</button><button class="migIdOk" data-id="${r.id}" data-p="${escapeHtml(r.id_doc_path)}" style="flex:1;padding:9px;background:#0E7A4A;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">✅ ${EN?'Match':'Sedí'}</button><button class="migIdNo" data-id="${r.id}" data-p="${escapeHtml(r.id_doc_path)}" style="flex:1;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">${EN?'No':'Ne'}</button></div>`:'')}
+        ${r.id_verified?`<button class="migIdApprove" data-id="${r.id}" data-pid="${pid||''}" data-kid="${escapeHtml(r.kid_name)}" data-target="${r.requester_id}" data-cp="${r.contact_parent===false?'0':'1'}" ${!pid?'disabled':''} style="flex:1 0 100%;padding:10px;background:#0E7A4A;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12.5px;${!pid?'opacity:.4;':''}">🆔 ${EN?'ID verified — approve & transfer':'Doklad ověřen — schválit a přenést'}</button>`:(r.id_doc_path?`<div style="flex:1 0 100%;display:flex;gap:6px;flex-wrap:wrap;"><button class="migIdView" data-p="${escapeHtml(r.id_doc_path)}" style="flex:1;padding:9px;background:#0E5A8A;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">🆔 ${r.id_doc_back_path?(EN?'Front':'P\u0159edn\u00ed'):(EN?'View ID':'Zobrazit doklad')}</button>${r.id_doc_back_path?`<button class="migIdView" data-p="${escapeHtml(r.id_doc_back_path)}" style="flex:1;padding:9px;background:#0E5A8A;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">🆔 ${EN?'Back':'Zadn\u00ed'}</button>`:''}<button class="migIdOk" data-id="${r.id}" data-p="${escapeHtml(r.id_doc_path)}" data-p2="${escapeHtml(r.id_doc_back_path||'')}" style="flex:1;padding:9px;background:#0E7A4A;color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">✅ ${EN?'Match':'Sedí'}</button><button class="migIdNo" data-id="${r.id}" data-p="${escapeHtml(r.id_doc_path)}" data-p2="${escapeHtml(r.id_doc_back_path||'')}" style="flex:1;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:12px;">${EN?'No':'Ne'}</button></div>`:'')}
       </div>`;
     box.appendChild(el);
   }
@@ -17810,8 +17799,8 @@ async function openMigrationRequests(){
   box.querySelectorAll('.migReject').forEach(function(b){ b.onclick=function(){ _rejectMigration(b.dataset.id, b.dataset.target); }; });
   box.querySelectorAll('.migVouch').forEach(function(b){ b.onclick=function(){ _sendVouchToGym(b.dataset.id, b.dataset.gym, b.dataset.kid, b.dataset.pid, b.dataset.target); }; });
   box.querySelectorAll('.migIdView').forEach(function(b){ b.onclick=function(){ _viewMigId(b.dataset.p); }; });
-  box.querySelectorAll('.migIdOk').forEach(function(b){ b.onclick=function(){ _verifyMigId(b.dataset.id, b.dataset.p, true); }; });
-  box.querySelectorAll('.migIdNo').forEach(function(b){ b.onclick=function(){ _verifyMigId(b.dataset.id, b.dataset.p, false); }; });
+  box.querySelectorAll('.migIdOk').forEach(function(b){ b.onclick=function(){ _verifyMigId(b.dataset.id, [b.dataset.p, b.dataset.p2], true); }; });
+  box.querySelectorAll('.migIdNo').forEach(function(b){ b.onclick=function(){ _verifyMigId(b.dataset.id, [b.dataset.p, b.dataset.p2], false); }; });
   box.querySelectorAll('.migIdApprove').forEach(function(b){ b.onclick=function(){ _idApproveMigration(b.dataset.id, b.dataset.pid, b.dataset.kid, b.dataset.target, b.dataset.cp!=='0'); }; });
   box.querySelectorAll('.migGymApprove').forEach(function(b){ b.onclick=function(){ _approveMigrationLEGACY(b.dataset.id, b.dataset.pid, b.dataset.kid, b.dataset.target); }; });
 }
@@ -39644,7 +39633,6 @@ async function openSharedProfile(token, kidToken){
   var cb=$('sharedCloseBtn'); if(cb) cb.onclick=function(){ ov.style.display='none'; if(!_li && $('authScreen')) $('authScreen').style.display='flex'; };
 }
 async function maybeSharedProfileRoute(){
-  try{ var _kx=new URLSearchParams(location.search).get('kidxfer'); if(_kx) window._kidxferTok=_kx; }catch(e){}
   try{ var ref=new URLSearchParams(location.search).get('ref'); if(!ref) return; try{ var _rq=new URLSearchParams(location.search); if(_rq.get('club')||_rq.get('gym')||_rq.get('klub')) return; }catch(e){} try{ var _l=new URLSearchParams(location.search).get('l'); if((_l==='en'||_l==='cs')&&_l!==LANG){ LANG=_l; document.documentElement.lang=_l; if(typeof applyStaticI18n==='function') applyStaticI18n(); } }catch(e){} try{ if($('authScreen')) $('authScreen').style.display='none'; }catch(e){} openSharedProfile(ref, new URLSearchParams(location.search).get('kid')); }catch(e){}
 }
 async function openLevel(){
@@ -42490,6 +42478,13 @@ async function _claimGuestHistory(silent){
         }
       }catch(e){ _counts[key]=0; }
     }
+    // PŘIHLÁŠKY ZA ČLENA podané bez účtu (z veřejné stránky kurzu). E-mail je tu v
+    // applicant_email, ne v guest_email. Započítají se, ale v guest_claims nemají sloupec.
+    try{
+      const { data:_ma }=await supaClient.from('gym_member_applications').select('id').ilike('applicant_email', em).is('student_id', null);
+      const _mids=(_ma||[]).map(function(x){ return x.id; });
+      if(_mids.length){ await supaClient.from('gym_member_applications').update({ student_id: currentUser.id }).in('id', _mids); _total+=_mids.length; }
+    }catch(e){}
     if(!_total) return 0;
     // Záznam o převzetí -- kdyby si někdo stěžoval, je dohledatelné co a kdy.
     try{
