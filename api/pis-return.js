@@ -221,10 +221,102 @@ export async function pisSettle(rec, tbl, status){
 }
 
 // ── FINBRICKS: NAVRAT Z BANKY A POTVRZENI ────────────────────────────────────────────────
+// ── ČLENSKÝ POPLATEK: ZAÚČTOVÁNÍ PO POTVRZENÍ BANKOU ──────────────────────────────────────
+// Jedna funkce pro oba návraty (Finbricks i Neonomics). Dřív tohle žilo jen v návratu
+// Neonomics, takže poplatek zaplacený přes Finbricks by se nikdy nezaúčtoval.
+async function settleOrgFee(ocId){
+  const _ocId=String(ocId);
+            const oc=(await sb.from('organization_clubs').select('*').eq('id',_ocId).maybeSingle()).data;
+            if(oc){
+              const org=(await sb.from('organizations').select('name,abbr,owner_id,member_fee_period').eq('id',oc.organization_id).maybeSingle()).data;
+              const _now=new Date();
+              // PLATNOST SE BERE Z OBDOBI POPLATKU, ne z periody. Poplatek je "Clenstvi 2026,
+              // 1. 1. - 31. 12. 2026" a clenstvi plati presne do konce toho obdobi. Drive se pocitalo
+              // z fee_period ('year'/'once'), takze 'once' delalo +100 let a datum bylo nesmyslne.
+              let _until = null;
+              try {
+                let _f = null;
+                if (oc.fee_id) _f = (await sb.from('org_member_fees').select('period_to').eq('id', oc.fee_id).maybeSingle()).data;
+                if (!_f) {
+                  const _t = new Date().toISOString().slice(0, 10);
+                  _f = (await sb.from('org_member_fees').select('period_to')
+                    .eq('organization_id', oc.organization_id)
+                    .lte('period_from', _t).gte('period_to', _t).limit(1).maybeSingle()).data;
+                }
+                if (_f && _f.period_to) _until = _f.period_to;
+              } catch (e) {}
+              // Bez obdobi (poplatek smazan) padame na rok od dneska, at clenstvi nezustane bez konce.
+              if (!_until) { const _d = new Date(); _d.setFullYear(_d.getFullYear() + 1); _until = _d.toISOString().slice(0, 10); }
+              // Platba zaplati POPLATEK, neprijme klub do asociace -- to zustava na asociaci.
+              // Kdyby platba sama nastavila 'active', klub by schvaleni obesel penezi.
+              const _accepted = (oc.status === 'active');
+              await sb.from('organization_clubs')
+                .update({ fee_paid_at:new Date().toISOString(), valid_until:_until }).eq('id',oc.id);
+              // Zvyhodnena sazba plati az kdyz je oboji: prijato A zaplaceno.
+              // Sazba se zapisuje POSKYTOVATELI -- platí na všechny jeho entity, ne jen na klub,
+        // kterým do asociace vstoupil.
+        // Zaúčtování: transakce + doklad klubu, provize MTL nulová.
+        try { await fetch(`${APP_URL}/api/org-fee-record`, { method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ oc_id: oc.id, method:'pis' }) }); } catch (e) {}
+        if (_accepted && oc.gym_id) {
+          try {
+            const _g = (await sb.from('gyms').select('owner_id').eq('id', oc.gym_id).maybeSingle()).data;
+            if (_g && _g.owner_id) await sb.from('profiles').update({ org_rate_until: _until }).eq('id', _g.owner_id);
+          } catch (e) {}
+        }
+              // Klub mimo MTL nemá gym_id -- jméno pak z ext_name, upozornění klubu nemá komu jít.
+              const g=oc.gym_id ? (await sb.from('gyms').select('owner_id,name').eq('id',oc.gym_id).maybeSingle()).data : null;
+              const _du=new Date(_until).toLocaleDateString('cs-CZ');
+              if(g && g.owner_id) await sb.from('notifications').insert({ user_id:g.owner_id, type:'system', read:false,
+                data:JSON.stringify({ kind:'org_fee_paid', org_id:oc.organization_id, msg_en:'\u2705 '+((org&&(org.abbr||org.name))||'')+' membership fee paid. Membership is valid until '+new Date(_until).toLocaleDateString('en-GB')+' and the club has the 1.5 % rate.' }),
+                message:'\u2705 \u010clensk\u00fd poplatek '+((org&&(org.abbr||org.name))||'')+' zaplacen. \u010clenstv\u00ed plat\u00ed do '+_du+' a klub m\u00e1 sazbu 1,5 %.' });
+              if(org && org.owner_id) await sb.from('notifications').insert({ user_id:org.owner_id, type:'system', read:false,
+                data:JSON.stringify({ kind:'org_fee_in', gym_id:oc.gym_id, msg_en:'\u{1F3E6} '+((g&&g.name)||oc.ext_name||'A club')+' paid the membership fee. Membership until '+new Date(_until).toLocaleDateString('en-GB')+'.' }),
+                message:'\u{1F3E6} '+((g&&g.name)||oc.ext_name||'Klub')+' zaplatil \u010dlensk\u00fd poplatek. \u010clenstv\u00ed do '+_du+'.' });
+            }
+}
+
 // Stejna adresa jako u Neonomics. Finbricks se pozna podle parametru ?mtid=; telu callbacku
 // se neveri -- stav si overime vlastnim podepsanym dotazem. Zauctovani pak dela pisSettle,
 // tedy tatáž funkce jako u Neonomics.
 import { fbxCall, fbxOutcome, MERCHANT_ID as FBX_MERCHANT } from './_fbx.js';
+
+// Návrat z banky u členského poplatku. Platba je vedená na organization_clubs.fee_payment_intent.
+// Po zaúčtování se tam zapíše "paid:<mtid>" -- další návrat (callback, dotaz appky) pak
+// jen řekne „zaplaceno" a nezaúčtuje podruhé.
+async function fbxReturnOrgFee(req, res, mtid, wantsHtml){
+  let oc=(await sb.from('organization_clubs').select('*').eq('fee_payment_intent', mtid).maybeSingle()).data;
+  let done=false;
+  if(!oc){
+    oc=(await sb.from('organization_clubs').select('*').eq('fee_payment_intent', 'paid:'+mtid).maybeSingle()).data;
+    done=!!oc;
+  }
+  // Klub mimo MTL (bez účtu) se vrací na svou veřejnou stránku, kde uvidí, že je zaplaceno.
+  const back=function(q){
+    const pre=(oc && !oc.gym_id && oc.guest_token) ? ('orgfee='+encodeURIComponent(oc.guest_token)+'&') : '';
+    res.setHeader('Location', APP_URL+'/?'+pre+q); return res.status(302).end();
+  };
+  if(!oc) return wantsHtml ? back('fbx=unknown') : res.status(200).json({ ok:true, note:'unknown mtid' });
+  if(done) return wantsHtml ? back('fbx=ok') : res.status(200).json({ ok:true, paid:true, table:'organization_clubs', id:oc.id });
+
+  const path='/transaction/platform/status?merchantId='+encodeURIComponent(FBX_MERCHANT)+'&merchantTransactionId='+encodeURIComponent(mtid);
+  let r=await fbxCall('GET', path, null);
+  let out=fbxOutcome(r.data);
+  for(let i=0; i<2 && !out.final; i++){
+    await new Promise(function(ok){ setTimeout(ok, 1500); });
+    r=await fbxCall('GET', path, null);
+    out=fbxOutcome(r.data);
+  }
+  if(!out.final) return wantsHtml ? back('fbx=pending&mtid='+encodeURIComponent(mtid)) : res.status(200).json({ ok:true, status:out.code, final:false });
+  if(out.paid){
+    try{ await settleOrgFee(oc.id); }
+    catch(e){ console.error('[pis-return/fbx] orgfee settle', oc.id, e && e.message);
+      return wantsHtml ? back('fbx=err') : res.status(500).json({ error:'settle failed', detail:String((e&&e.message)||e), table:'organization_clubs', id:oc.id }); }
+    try{ await sb.from('organization_clubs').update({ fee_payment_intent:'paid:'+mtid }).eq('id', oc.id); }catch(e){}
+    return wantsHtml ? back('fbx=ok') : res.status(200).json({ ok:true, status:out.code, paid:true, table:'organization_clubs', id:oc.id });
+  }
+  return wantsHtml ? back('fbx=fail') : res.status(200).json({ ok:true, status:out.code, paid:false });
+}
 
 async function fbxReturn(req, res, mtid){
   // ?json=1 vynuti vypis misto presmerovani -- prohlizec se hlasi jako HTML, takze bez toho
@@ -239,7 +331,7 @@ async function fbxReturn(req, res, mtid){
     const r=await sb.from(t).select('*').eq('pis_payment_id', mtid).maybeSingle();
     if(r.data){ tbl=t; rec=r.data; break; }
   }
-  if(!rec) return wantsHtml ? back('fbx=unknown') : res.status(200).json({ ok:true, note:'unknown mtid' });
+  if(!rec) return await fbxReturnOrgFee(req, res, mtid, wantsHtml);
 
   const path='/transaction/platform/status?merchantId='+encodeURIComponent(FBX_MERCHANT)+'&merchantTransactionId='+encodeURIComponent(mtid);
   // BANKA POTVRZUJE S MALYM ZPOZDENIM. Hned po navratu je stav casto jeste OPENED a platba
@@ -335,56 +427,7 @@ export default async function handler(req, res){
         // Členský poplatek: banka potvrdila, takže členství platí OD TEĎ. Ruční potvrzení
         // federací zůstává jen pro platby mimo appku (hotovost, převod z účtu).
         if(String(bookingId).startsWith('orgfee:')){
-          try{
-            const _ocId=String(bookingId).slice(7);
-            const oc=(await sb.from('organization_clubs').select('*').eq('id',_ocId).maybeSingle()).data;
-            if(oc){
-              const org=(await sb.from('organizations').select('name,abbr,owner_id,member_fee_period').eq('id',oc.organization_id).maybeSingle()).data;
-              const _now=new Date();
-              // PLATNOST SE BERE Z OBDOBI POPLATKU, ne z periody. Poplatek je "Clenstvi 2026,
-              // 1. 1. - 31. 12. 2026" a clenstvi plati presne do konce toho obdobi. Drive se pocitalo
-              // z fee_period ('year'/'once'), takze 'once' delalo +100 let a datum bylo nesmyslne.
-              let _until = null;
-              try {
-                let _f = null;
-                if (oc.fee_id) _f = (await sb.from('org_member_fees').select('period_to').eq('id', oc.fee_id).maybeSingle()).data;
-                if (!_f) {
-                  const _t = new Date().toISOString().slice(0, 10);
-                  _f = (await sb.from('org_member_fees').select('period_to')
-                    .eq('organization_id', oc.organization_id)
-                    .lte('period_from', _t).gte('period_to', _t).limit(1).maybeSingle()).data;
-                }
-                if (_f && _f.period_to) _until = _f.period_to;
-              } catch (e) {}
-              // Bez obdobi (poplatek smazan) padame na rok od dneska, at clenstvi nezustane bez konce.
-              if (!_until) { const _d = new Date(); _d.setFullYear(_d.getFullYear() + 1); _until = _d.toISOString().slice(0, 10); }
-              // Platba zaplati POPLATEK, neprijme klub do asociace -- to zustava na asociaci.
-              // Kdyby platba sama nastavila 'active', klub by schvaleni obesel penezi.
-              const _accepted = (oc.status === 'active');
-              await sb.from('organization_clubs')
-                .update({ fee_paid_at:new Date().toISOString(), valid_until:_until }).eq('id',oc.id);
-              // Zvyhodnena sazba plati az kdyz je oboji: prijato A zaplaceno.
-              // Sazba se zapisuje POSKYTOVATELI -- platí na všechny jeho entity, ne jen na klub,
-        // kterým do asociace vstoupil.
-        // Zaúčtování: transakce + doklad klubu, provize MTL nulová.
-        try { await fetch(`${APP_URL}/api/org-fee-record`, { method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ oc_id: oc.id, method:'pis' }) }); } catch (e) {}
-        if (_accepted && oc.gym_id) {
-          try {
-            const _g = (await sb.from('gyms').select('owner_id').eq('id', oc.gym_id).maybeSingle()).data;
-            if (_g && _g.owner_id) await sb.from('profiles').update({ org_rate_until: _until }).eq('id', _g.owner_id);
-          } catch (e) {}
-        }
-              const g=(await sb.from('gyms').select('owner_id,name').eq('id',oc.gym_id).maybeSingle()).data;
-              const _du=new Date(_until).toLocaleDateString('cs-CZ');
-              if(g && g.owner_id) await sb.from('notifications').insert({ user_id:g.owner_id, type:'system', read:false,
-                data:JSON.stringify({ kind:'org_fee_paid', org_id:oc.organization_id, msg_en:'\u2705 '+((org&&(org.abbr||org.name))||'')+' membership fee paid. Membership is valid until '+new Date(_until).toLocaleDateString('en-GB')+' and the club has the 1.5 % rate.' }),
-                message:'\u2705 \u010clensk\u00fd poplatek '+((org&&(org.abbr||org.name))||'')+' zaplacen. \u010clenstv\u00ed plat\u00ed do '+_du+' a klub m\u00e1 sazbu 1,5 %.' });
-              if(org && org.owner_id) await sb.from('notifications').insert({ user_id:org.owner_id, type:'system', read:false,
-                data:JSON.stringify({ kind:'org_fee_in', gym_id:oc.gym_id, msg_en:'\u{1F3E6} '+((g&&g.name)||'A club')+' paid the membership fee. Membership until '+new Date(_until).toLocaleDateString('en-GB')+'.' }),
-                message:'\u{1F3E6} '+((g&&g.name)||'Klub')+' zaplatil \u010dlensk\u00fd poplatek. \u010clenstv\u00ed do '+_du+'.' });
-            }
-          }catch(e){}
+          try{ await settleOrgFee(String(bookingId).slice(7)); }catch(e){}
         }
         // Číslo lístku s sebou: bez něj by děkovací stránka nevěděla, co kupujícímu ukázat,
         // a nepřihlášený člověk by po zaplacení skončil na přihlašovací obrazovce.

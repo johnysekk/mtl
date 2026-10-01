@@ -140,8 +140,8 @@ async function recordFbxConsent(req, row, tbl, terms, paymentId) {
     const p = (await sb.from('profiles').select('name,email').eq('id', userId).maybeSingle()).data;
     name = (p && p.name) || null; email = (p && p.email) || null;
   } else {
-    email = String(row.guest_email || row.buyer_email || row.email || '').trim() || null;
-    name = String(row.guest_name || row.buyer_name || row.name || '').trim() || null;
+    email = String(row.guest_email || row.buyer_email || row.email || row.ext_email || '').trim() || null;
+    name = String(row.guest_name || row.buyer_name || row.name || row.ext_name || '').trim() || null;
   }
   if (!userId && !email) { console.error('[pis-create/consent] no identity', tbl, row.id); return; }
 
@@ -184,10 +184,18 @@ async function fbxCreate(sb, req, body) {
   if (!rowId) return { error: 'no id' };
 
   // Tabulku neuhadneme z "kind" -- appka ho nepouziva jednotne. Radek se najde podle id.
+  // ČLENSKÝ POPLATEK ORGANIZACE chodí jako "orgfee:<id vztahu>" a žije v organization_clubs.
+  // Dřív ho tahle větev nehledala vůbec, takže platba poplatku přes Finbricks končila
+  // „row not found" -- v appce i přes veřejný odkaz.
   let tbl = null, row = null;
-  for (const t of PIS_TABLES) {
-    const r = await sb.from(t).select('*').eq('id', rowId).maybeSingle();
-    if (r.data) { tbl = t; row = r.data; break; }
+  if (rowId.startsWith('orgfee:')) {
+    const oc = (await sb.from('organization_clubs').select('*').eq('id', rowId.slice(7)).maybeSingle()).data;
+    if (oc) { tbl = 'organization_clubs'; row = oc; }
+  } else {
+    for (const t of PIS_TABLES) {
+      const r = await sb.from(t).select('*').eq('id', rowId).maybeSingle();
+      if (r.data) { tbl = t; row = r.data; break; }
+    }
   }
   if (!row) return { error: 'row not found' };
 
@@ -198,8 +206,25 @@ async function fbxCreate(sb, req, body) {
   }
 
   // IBAN prijemce VZDY z databaze, nikdy z pozadavku prohlizece.
-  let iban = null, payeeName = null;
-  if (row.gym_id) {
+  let iban = null, payeeName = null, orgFeeAmount = null;
+  if (tbl === 'organization_clubs') {
+    // U poplatku je gym_id PLÁTCE (klub), příjemce je organizace.
+    const org = (await sb.from('organizations').select('receiver_id_value,legal_name,name,account_suspended').eq('id', row.organization_id).maybeSingle()).data;
+    if (!org) return { error: 'organization not found' };
+    if (org.account_suspended) return { error: 'provider suspended' };
+    iban = org.receiver_id_value; payeeName = org.legal_name || org.name;
+    const today = new Date().toISOString().slice(0, 10);
+    if (row.fee_paid_at && row.valid_until && String(row.valid_until) >= today) {
+      return { error: 'Poplatek je už zaplacený', code: 'already_paid' };
+    }
+    // Částka stejně jako v appce: snímek na vztahu, jinak poplatek platný k dnešku.
+    orgFeeAmount = row.fee_amount;
+    if (orgFeeAmount == null) {
+      const f = (await sb.from('org_member_fees').select('amount').eq('organization_id', row.organization_id)
+        .lte('period_from', today).gte('period_to', today).limit(1).maybeSingle()).data;
+      orgFeeAmount = f && f.amount;
+    }
+  } else if (row.gym_id) {
     const g = (await sb.from('gyms').select('receiver_id_value,legal_name,name').eq('id', row.gym_id).maybeSingle()).data;
     iban = g && g.receiver_id_value; payeeName = g && (g.legal_name || g.name);
   } else if (row.coach_id) {
@@ -208,7 +233,7 @@ async function fbxCreate(sb, req, body) {
   }
   if (!iban) return { error: 'payee has no IBAN' };
 
-  const real = Number(row.amount || body.amount || 0);
+  const real = Number((tbl === 'organization_clubs' ? orgFeeAmount : row.amount) || body.amount || 0);
   if (!(real > 0)) return { error: 'bad amount' };
   // Sandbox ma strop 1 Kc; na radku zustava skutecna castka, aby se do uctovani nepropsala koruna.
   const amount = FBX_SANDBOX ? Math.min(real, FBX_MAX_SANDBOX) : real;
@@ -247,7 +272,12 @@ async function fbxCreate(sb, req, body) {
     return { error: d.message ? ('Finbricks ' + (d.code != null ? d.code : r.status) + ': ' + d.message) : ('Finbricks HTTP ' + r.status), code: d.code ?? null };
   }
 
-  await sb.from(tbl).update({ pis_payment_id: mtid, pis_provider: 'finbricks', pis_started_at: new Date().toISOString() }).eq('id', rowId);
+  if (tbl === 'organization_clubs') {
+    // Vlastní sloupec: návrat z banky podle něj vztah najde (pis-return, fbxReturn).
+    await sb.from(tbl).update({ fee_payment_intent: mtid }).eq('id', row.id);
+  } else {
+    await sb.from(tbl).update({ pis_payment_id: mtid, pis_provider: 'finbricks', pis_started_at: new Date().toISOString() }).eq('id', rowId);
+  }
   // Záznam souhlasu nesmí shodit už založenou platbu -- chyba jde jen do logu.
   try { await recordFbxConsent(req, row, tbl, terms, mtid); } catch (e) { console.error('[pis-create/consent]', e && e.message); }
   return { payment_id: mtid, url: r.data.redirectUrl };
