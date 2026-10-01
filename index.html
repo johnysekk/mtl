@@ -4526,14 +4526,16 @@ function _kidXferErr(e){
     only_original:['Only the original guardian can undo this','Vr\u00e1tit m\u016f\u017ee jen p\u016fvodn\u00ed z\u00e1konn\u00fd z\u00e1stupce'],
     window_passed:['The 24h undo window has passed \u2014 contact MTL','24h okno pro vr\u00e1cen\u00ed uplynulo \u2014 kontaktuj MTL'],
     nothing:['Nothing to reverse yet','Nen\u00ed co vracet'],
-    not_family:['You can only take over a child from someone linked with you in Family','D\u00edt\u011b m\u016f\u017ee\u0161 p\u0159evz\u00edt jen od n\u011bkoho, s k\u00fdm jsi propojen\u00fd v Rodin\u011b']
+    not_family:['You can only take over a child from your partner linked in Family','D\u00edt\u011b m\u016f\u017ee\u0161 p\u0159evz\u00edt jen od partnera propojen\u00e9ho v Rodin\u011b']
   }[c];
   toast(m ? ('\u26a0\ufe0f '+(EN?m[0]:m[1])) : ('\u26a0\ufe0f '+((e&&e.message)||'')));
 }
 async function _validXferTargets(){
   const me=currentUser&&currentUser.id; if(!me) return [];
   let rows=[]; try{ const { data }=await supaClient.from('family_links').select('*').or('guardian_id.eq.'+me+',member_id.eq.'+me); rows=data||[]; }catch(e){}
-  const valid=rows.filter(function(r){ return r.status==='active' && ( r.relation==='partner' || (r.relation==='guardian' && r.member_id===me) ); });
+  // Jen partner. Vazba 'guardian' v Rodině je rodič ↔ vlastní účet mladistvého (15–17) a
+  // mladistvý dítě předávat nemůže, takže jako cíl předání nedává smysl.
+  const valid=rows.filter(function(r){ return r.status==='active' && r.relation==='partner'; });
   const ids=[...new Set(valid.map(function(r){ return r.guardian_id===me?r.member_id:r.guardian_id; }).filter(Boolean))];
   if(!ids.length) return [];
   let nm={}; try{ const { data:ps }=await supaClient.from('profiles').select('id,name').in('id',ids); (ps||[]).forEach(function(p){ nm[p.id]=p.name||''; }); }catch(e){}
@@ -4547,7 +4549,7 @@ async function _kidTransferStart(i){
   let tHtml = targets.length
     ? ('<div style="font-size:12px;font-weight:800;color:#141414;margin:4px 0 7px;">'+(EN?'Transfer to a family member':'Předat členovi rodiny')+'</div>'
        + targets.map(function(t){ return '<button class="kxTarget" data-id="'+t.id+'" data-name="'+escapeHtml(t.name)+'" style="width:100%;text-align:left;margin-bottom:7px;padding:12px;background:var(--surf);border:1px solid var(--border);border-radius:11px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';font-size:13px;">\ud83d\udc64 '+escapeHtml(t.name)+'</button>'; }).join(''))
-    : ('<div style="font-size:11.5px;color:var(--light);line-height:1.5;margin:4px 0 8px;">'+(EN?'You can only hand a child over to an adult linked with you in Family (partner or your parent). Link up there first.':'D\u00edt\u011b jde p\u0159edat jen dosp\u011bl\u00e9mu, se kter\u00fdm jsi propojen\u00fd v Rodin\u011b (partner nebo tv\u016fj rodi\u010d). Nejd\u0159\u00edv se tam propojte.')+'</div>');
+    : ('<div style="font-size:11.5px;color:var(--light);line-height:1.5;margin:4px 0 8px;">'+(EN?'You can only hand a child over to your partner linked in Family. Link up there first.':'D\u00edt\u011b jde p\u0159edat jen partnerovi propojen\u00e9mu v Rodin\u011b. Nejd\u0159\u00edv se tam propojte.')+'</div>');
   ov.innerHTML='<div style="background:#fff;width:100%;max-width:480px;border-radius:18px;padding:20px 20px max(22px,env(safe-area-inset-bottom));max-height:88vh;overflow-y:auto;">'
     +'<div style="font-size:17px;font-weight:800;color:#141414;margin-bottom:3px;">\ud83e\udd1d '+(EN?'Transfer child':'Předat dítě')+' \u2014 '+escapeHtml(k.firstName||k.name||'')+'</div>'
     +'<div style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:14px;">'+(EN?'Moves this child and all their data to another guardian\u2019s account. The new guardian must accept and re-consent. Reversible for a short time.':'Přesune toto dítě a všechna jeho data na účet jiného zákonného zástupce. Nový zástupce musí přijmout a znovu odsouhlasit. Krátkou dobu vratné.')+'</div>'
@@ -42494,15 +42496,9 @@ async function _claimGuestHistory(silent){
     // PŘIHLÁŠKY ZA ČLENA podané bez účtu (z veřejné stránky kurzu). E-mail je tu v
     // applicant_email, ne v guest_email. Započítají se, ale v guest_claims nemají sloupec.
     try{
-      const { data:_ma }=await supaClient.from('gym_member_applications').select('id,applicant_birth').ilike('applicant_email', em).is('student_id', null);
+      const { data:_ma }=await supaClient.from('gym_member_applications').select('id').ilike('applicant_email', em).is('student_id', null);
       const _mids=(_ma||[]).map(function(x){ return x.id; });
       if(_mids.length){ await supaClient.from('gym_member_applications').update({ student_id: currentUser.id }).in('id', _mids); _total+=_mids.length; }
-      // Datum narození z přihlášky do profilu -- jen když v profilu chybí, nikdy nepřepisuje.
-      const _bd=((_ma||[]).find(function(x){ return x.applicant_birth; })||{}).applicant_birth;
-      if(_bd && !currentUser.birthdate){
-        const { error:_be }=await supaClient.from('profiles').update({ birthdate:_bd }).eq('id', currentUser.id).is('birthdate', null);
-        if(!_be) currentUser.birthdate=_bd;
-      }
     }catch(e){}
     if(!_total) return 0;
     // Záznam o převzetí -- kdyby si někdo stěžoval, je dohledatelné co a kdy.
