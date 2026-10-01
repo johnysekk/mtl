@@ -4,18 +4,25 @@
 // u každého dítěte zvlášť a u každé blízké osoby zvlášť (propojené v Rodině) zapnout sdílení.
 // Blízká osoba ho musí přijmout. Držitel může kdykoli vypnout; blízká osoba může odejít.
 //
-// Co sdílení dává (fáze 1): kartu dítěte -- věk, pásky, docházku -- a zdravotní poznámku jen
-// když ji držitel povolí (see_health). Jednat za dítě (rezervace, platby, souhlasy) přijde
-// ve fázi 2 přes can_act / is_guardian; sloupce jsou připravené, appka je zatím nenastavuje.
+// Co sdílení dává: kartu dítěte (věk, pásky, docházka, nadcházející lekce), zdravotní poznámku
+// jen se svolením (see_health). S can_act navíc jednat: přihlásit na lekci, koupit členství,
+// zaplatit, omluvit. Záznam se pak vede na držitele a dítě, plátcem je blízká osoba (paid_by).
+// Souhlasy za dítě (podmínky klubu, přihláška za člena) smí dát jen zákonný zástupce:
+// is_guardian nastaví držitel a blízká osoba to musí sama potvrdit (guardian_confirmed_at).
+// Kdo zákonný zástupce není, jedná jen tam, kde souhlas už je; jinak požádá držitele.
 //
 // Dítě je v profilu držitele a do cizího profilu blízká osoba po zapnutí RLS nesmí, proto
 // všechno čte a zapisuje server. Tabulka kid_shares je za RLS bez politik.
 //
 //   POST { action:'mine' }                                   držitel: blízké osoby + sdílení
-//   POST { action:'set', kid_key, person_id, enabled, see_health }   držitel
+//   POST { action:'set', kid_key, person_id, enabled, see_health, can_act, is_guardian }  držitel
 //   POST { action:'with_me' }                                blízká osoba: pozvánky + děti
-//   POST { action:'respond', id, accept }                    blízká osoba
+//   POST { action:'respond', id, accept, guardian_confirm }  blízká osoba
+//   POST { action:'confirm_guardian', id }                   blízká osoba potvrdí prohlášení
 //   POST { action:'leave', id }                              blízká osoba ukončí sdílení
+//   POST { action:'consent_check', id, gym_id }              je u klubu souhlas za dítě?
+//   POST { action:'ask_holder', id, gym_id }                 požádat držitele o souhlas
+//   POST { action:'excuse', id, booking_id, reason }         omluvit dítě z lekce
 
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -74,7 +81,7 @@ export default async function handler(req, res) {
     if (b.action === 'mine') {
       const ids = await closePersons(me);
       const people = ids.length ? ((await sb(`profiles?id=in.(${ids.map(q).join(',')})&select=id,name`)) || []) : [];
-      const shares = (await sb(`kid_shares?holder_id=eq.${q(me)}&status=in.(pending,active)&select=id,kid_id,person_id,status,see_health`)) || [];
+      const shares = (await sb(`kid_shares?holder_id=eq.${q(me)}&status=in.(pending,active)&select=id,kid_id,person_id,status,see_health,can_act,is_guardian,guardian_confirmed_at`)) || [];
       return res.status(200).json({ ok: true, people, shares });
     }
 
@@ -89,12 +96,24 @@ export default async function handler(req, res) {
       const first = kid.firstName || kid.name;
       if (b.enabled) {
         const seeHealth = !!b.see_health;
+        const canAct = !!b.can_act;
+        const isGuard = canAct && !!b.is_guardian;   // zákonný zástupce dává smysl jen u „jednat"
         if (open) {
-          await sb(`kid_shares?id=eq.${q(open.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ see_health: seeHealth }) });
+          const cur = ((await sb(`kid_shares?id=eq.${q(open.id)}&select=is_guardian,guardian_confirmed_at`)) || [])[0] || {};
+          const patch = { see_health: seeHealth, can_act: canAct, is_guardian: isGuard };
+          // Nově označený zákonný zástupce musí prohlášení potvrdit sám; odebráním se ruší.
+          if (!isGuard || !cur.is_guardian) patch.guardian_confirmed_at = null;
+          await sb(`kid_shares?id=eq.${q(open.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) });
+          if (isGuard && !cur.is_guardian && open.status === 'active') {
+            await notify(pid, 'kid_share_guardian',
+              `\ud83d\udc6a ${(mp && mp.name) || 'Blízká osoba'} tě u dítěte ${first} označil/a jako zákonného zástupce. Potvrď to v Rodině.`,
+              `\ud83d\udc6a ${(mp && mp.name) || 'Someone close'} marked you as ${first}'s legal guardian. Confirm it in Family.`, pp && pp.lang);
+          }
           return res.status(200).json({ ok: true, id: open.id, status: open.status });
         }
         const ins = await sb('kid_shares', { method: 'POST', prefer: 'return=representation',
-          body: JSON.stringify({ holder_id: me, kid_id: kKey, kid_name: kid.name, person_id: pid, status: 'pending', see_health: seeHealth }) });
+          body: JSON.stringify({ holder_id: me, kid_id: kKey, kid_name: kid.name, person_id: pid, status: 'pending',
+            see_health: seeHealth, can_act: canAct, is_guardian: isGuard }) });
         await notify(pid, 'kid_share_invite',
           `\ud83d\udc6a ${(mp && mp.name) || 'Blízká osoba'} s tebou chce sdílet péči o dítě ${first}. Přijmi to v Rodině.`,
           `\ud83d\udc6a ${(mp && mp.name) || 'Someone close'} wants to share ${first}'s care with you. Accept it in Family.`, pp && pp.lang);
@@ -126,8 +145,12 @@ export default async function handler(req, res) {
             body: JSON.stringify({ status: 'revoked', revoked_at: new Date().toISOString() }) });
           continue;
         }
-        const item = { id: r.id, status: r.status, holder_name: (h && h.name) || '',
-          kid: { name: kid.name, first: kid.firstName || kid.name, age: age(kid.dob), belts: kid.belts || {},
+        const guardian = !!(r.is_guardian && r.guardian_confirmed_at);
+        const item = { id: r.id, status: r.status, holder_id: r.holder_id, holder_name: (h && h.name) || '',
+          can_act: !!r.can_act, is_guardian: !!r.is_guardian, guardian,
+          needs_guardian_confirm: !!(r.is_guardian && !r.guardian_confirmed_at),
+          kid: { key: r.kid_id, id: kid.id || null, name: kid.name, first: kid.firstName || kid.name, dob: kid.dob || null,
+            age: age(kid.dob), belts: kid.belts || {},
             trophy_img: kid.trophy_img || null, health: (r.see_health && kid.health) ? kid.health : null } };
         if (r.status === 'active') {
           try {
@@ -137,6 +160,15 @@ export default async function handler(req, res) {
             const gn = {}; gs.forEach((g) => { gn[g.id] = g.name; });
             item.recent = att.map((a) => ({ date: a.class_date, cls: a.class_name || '', gym: gn[a.gym_id] || '' }));
           } catch (e) { item.recent = []; }
+          // Nadcházející vstupy dítěte (jednorázové lekce) -- na ty se dá omluvit.
+          try {
+            const today = new Date().toISOString().slice(0, 10);
+            const bk = (await sb(`gym_bookings?student_id=eq.${q(r.holder_id)}&child_name=eq.${q(kid.name)}&class_date=gte.${today}&status=not.in.(cancelled,refunded)&select=id,gym_id,gym_name,class_name,class_date,class_time,status&order=class_date.asc&limit=10`)) || [];
+            const ex = bk.length ? ((await sb(`gym_excuses?student_id=eq.${q(r.holder_id)}&child_name=eq.${q(kid.name)}&class_date=gte.${today}&select=gym_id,class_date,class_time`)) || []) : [];
+            const exk = new Set(ex.map((e) => `${e.gym_id}|${e.class_date}|${e.class_time}`));
+            item.upcoming = bk.map((x) => ({ id: x.id, gym: x.gym_name || '', cls: x.class_name || '', date: x.class_date, time: x.class_time || '',
+              status: x.status, excused: exk.has(`${x.gym_id}|${x.class_date}|${x.class_time}`) }));
+          } catch (e) { item.upcoming = []; }
         }
         out.push(item);
       }
@@ -151,8 +183,9 @@ export default async function handler(req, res) {
       if (b.action === 'respond') {
         if (row.status !== 'pending') return res.status(409).json({ error: 'not_pending' });
         const ok = !!b.accept;
-        await sb(`kid_shares?id=eq.${q(row.id)}`, { method: 'PATCH', prefer: 'return=minimal',
-          body: JSON.stringify({ status: ok ? 'active' : 'declined', responded_at: new Date().toISOString() }) });
+        const patch = { status: ok ? 'active' : 'declined', responded_at: new Date().toISOString() };
+        if (ok && row.is_guardian && b.guardian_confirm) patch.guardian_confirmed_at = new Date().toISOString();
+        await sb(`kid_shares?id=eq.${q(row.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) });
         await notify(row.holder_id, ok ? 'kid_share_accepted' : 'kid_share_declined',
           ok ? `\u2705 ${(mp && mp.name) || 'Blízká osoba'} přijal/a sdílení péče o dítě ${row.kid_name}.` : `${(mp && mp.name) || 'Blízká osoba'} sdílení péče o dítě ${row.kid_name} odmítl/a.`,
           ok ? `\u2705 ${(mp && mp.name) || 'Your close person'} accepted sharing ${row.kid_name}'s care.` : `${(mp && mp.name) || 'Your close person'} declined sharing ${row.kid_name}'s care.`,
@@ -166,6 +199,62 @@ export default async function handler(req, res) {
         `${(mp && mp.name) || 'Blízká osoba'} ukončil/a sdílení péče o dítě ${row.kid_name}.`,
         `${(mp && mp.name) || 'Your close person'} stopped sharing ${row.kid_name}'s care.`, hp && hp.lang);
       return res.status(200).json({ ok: true });
+    }
+
+    // ── JEDNAT ZA DÍTĚ ────────────────────────────────────────────────────────────────
+    if (['confirm_guardian', 'consent_check', 'ask_holder', 'excuse'].includes(b.action)) {
+      const row = ((await sb(`kid_shares?id=eq.${q(String(b.id || ''))}&person_id=eq.${q(me)}&status=eq.active&select=*`)) || [])[0];
+      if (!row) return res.status(404).json({ error: 'not_found' });
+      const mp = await profile(me, 'name');
+      const myName = (mp && mp.name) || '';
+
+      if (b.action === 'confirm_guardian') {
+        if (!row.is_guardian) return res.status(409).json({ error: 'not_marked' });
+        await sb(`kid_shares?id=eq.${q(row.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ guardian_confirmed_at: new Date().toISOString() }) });
+        return res.status(200).json({ ok: true });
+      }
+      if (!row.can_act) return res.status(403).json({ error: 'cannot_act' });
+
+      if (b.action === 'consent_check') {
+        // Souhlas za dítě u klubu už existuje, když: držitel přijal provozní řád klubu, nebo
+        // dítě u klubu už něco má (zaplacený vstup / členství -- držitel to tehdy odsouhlasil).
+        const gid = String(b.gym_id || '');
+        const g = ((await sb(`gyms?id=eq.${q(gid)}&select=org_form`)) || [])[0] || {};
+        const wa = (await sb(`waiver_acceptances?gym_id=eq.${q(gid)}&or=${q(`(student_id.eq.${row.holder_id},guardian_id.eq.${row.holder_id})`)}&select=id&limit=1`)) || [];
+        const mb = (await sb(`gym_memberships?gym_id=eq.${q(gid)}&student_id=eq.${q(row.holder_id)}&child_name=eq.${q(row.kid_name)}&status=in.(active,cancelling,expired)&select=id&limit=1`)) || [];
+        const bk = (await sb(`gym_bookings?gym_id=eq.${q(gid)}&student_id=eq.${q(row.holder_id)}&child_name=eq.${q(row.kid_name)}&status=not.in.(pending,cancelled,refunded)&select=id&limit=1`)) || [];
+        const app = (await sb(`gym_member_applications?gym_id=eq.${q(gid)}&student_id=eq.${q(row.holder_id)}&applicant_name=eq.${q(row.kid_name)}&status=in.(pending,approved)&select=id&limit=1`)) || [];
+        return res.status(200).json({ ok: true, terms_ok: !!(wa.length || mb.length || bk.length), app_ok: !!app.length,
+          nonprofit: g.org_form === 'nonprofit', guardian: !!(row.is_guardian && row.guardian_confirmed_at) });
+      }
+
+      if (b.action === 'ask_holder') {
+        const g = ((await sb(`gyms?id=eq.${q(String(b.gym_id || ''))}&select=name`)) || [])[0] || {};
+        const hp = await profile(row.holder_id, 'lang');
+        await notify(row.holder_id, 'kid_share_consent_ask',
+          `\ud83d\udc6a ${myName || 'Blízká osoba'} chce přihlásit dítě ${row.kid_name} v klubu ${g.name || ''}. Podmínky klubu za dítě musíš odsouhlasit ty: otevři klub a přihlas dítě, nebo mu jako zákonnému zástupci povol souhlasy v nastavení sdílení.`,
+          `\ud83d\udc6a ${myName || 'Someone close'} wants to sign ${row.kid_name} up at ${g.name || 'a club'}. The club terms have to be accepted by you: open the club and book for the child, or mark them as legal guardian in the sharing settings.`,
+          hp && hp.lang);
+        return res.status(200).json({ ok: true });
+      }
+
+      if (b.action === 'excuse') {
+        const bk = ((await sb(`gym_bookings?id=eq.${q(String(b.booking_id || ''))}&student_id=eq.${q(row.holder_id)}&child_name=eq.${q(row.kid_name)}&select=gym_id,class_name,class_date,class_time`)) || [])[0];
+        if (!bk) return res.status(404).json({ error: 'booking_not_found' });
+        const dup = (await sb(`gym_excuses?gym_id=eq.${q(bk.gym_id)}&student_id=eq.${q(row.holder_id)}&child_name=eq.${q(row.kid_name)}&class_date=eq.${q(bk.class_date)}&class_time=eq.${q(bk.class_time)}&select=id&limit=1`)) || [];
+        if (!dup.length) {
+          const hp0 = await profile(row.holder_id, 'name');
+          await sb('gym_excuses', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({
+            gym_id: bk.gym_id, student_id: row.holder_id, student_name: (hp0 && hp0.name) || null,
+            class_name: bk.class_name, class_date: bk.class_date, class_time: bk.class_time,
+            reason_key: null, note: String(b.reason || '').slice(0, 300) || null, child_name: row.kid_name, source: 'dropin' }) });
+          const hp = await profile(row.holder_id, 'lang');
+          await notify(row.holder_id, 'kid_share_excused',
+            `${myName || 'Blízká osoba'} omluvil/a dítě ${row.kid_name} z lekce ${bk.class_name || ''} (${bk.class_date}).`,
+            `${myName || 'Someone close'} excused ${row.kid_name} from ${bk.class_name || 'a class'} (${bk.class_date}).`, hp && hp.lang);
+        }
+        return res.status(200).json({ ok: true });
+      }
     }
 
     return res.status(400).json({ error: 'unknown action' });
