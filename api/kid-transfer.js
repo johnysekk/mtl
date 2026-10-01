@@ -107,6 +107,12 @@ async function moveKid(from, to, toName, kidName) {
       moved[t] = (rows || []).length;
     } catch (e) { moved[t] = 'error'; console.error('[kid-transfer] move', t, e.message); }
   }
+  // Sdílení péče patří držiteli -- s předáním dítěte jeho sdílení končí.
+  try {
+    const _key = kid.id ? String(kid.id) : ('name:' + String(kidName));
+    await sb(`kid_shares?holder_id=eq.${q(from)}&kid_id=eq.${q(_key)}&status=in.(pending,active)`, {
+      method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'revoked', revoked_at: new Date().toISOString() }) });
+  } catch (e) { console.error('[kid-transfer] shares', e.message); }
   try {
     await sb('guardian_consents', { method: 'POST', prefer: 'return=minimal',
       body: JSON.stringify({ guardian_id: to, guardian_name: toName || (pt && pt.name) || '', kid_id: kid.id || null,
