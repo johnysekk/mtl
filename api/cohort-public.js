@@ -55,7 +55,7 @@ export default async function handler(req, res) {
 
     const id = (req.query && req.query.cohort) || '';
     if (!id) return res.status(400).json({ ok: false, error: 'missing cohort' });
-    const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(id)}&select=id,gym_id,stripe_account,name,discipline,start_date,end_date,months,capacity,deposit_amount,price_student,price_regular,price_tiers,currency,description,schedule,schedule_note,gym_meta_pixel,marketing_note,poster,status`);
+    const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(id)}&select=id,gym_id,stripe_account,name,discipline,start_date,end_date,months,capacity,deposit_amount,price_student,price_regular,price_tiers,currency,description,schedule,schedule_note,gym_meta_pixel,marketing_note,poster,status,age_min,age_max`);
     const c = rows && rows[0];
     if (!c) return res.status(404).json({ ok: false, error: 'not found' });
     // Same gate as cohort-pay: whitelist on `open`, and signups shut SIGNUPS_GRACE_DAYS after the
@@ -92,6 +92,7 @@ export default async function handler(req, res) {
       cohort: {
         id: c.id, name: c.name, leader_name: (Array.isArray(c.schedule)?((c.schedule.find(r=>r&&r.leaderName)||{}).leaderName||null):null), discipline: c.discipline, start_date: c.start_date, end_date: c.end_date, months: c.months, schedule: (Array.isArray(c.schedule) ? c.schedule : []), schedule_note: c.schedule_note || null,
         capacity: c.capacity, taken, deposit_amount: c.deposit_amount, price_student: c.price_student,
+        age_min: (c.age_min != null ? c.age_min : null), age_max: (c.age_max != null ? c.age_max : null),
         price_regular: c.price_regular, price_tiers: (Array.isArray(c.price_tiers) ? c.price_tiers : null), currency: c.currency, description: c.description, poster: c.poster || null,
         // Spolek: přihláška za člena se ukazuje rovnou v přihlášce do kurzu.
         gym_id: c.gym_id, gym_org_form: _gymOrgForm, member_app_text: _memberAppText, member_app_file_url: _memberAppFile, member_app_body: _memberAppBody,

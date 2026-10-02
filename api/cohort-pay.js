@@ -296,6 +296,24 @@ export default async function handler(req, res) {
       return res.status(400).json({ ok: false, error: 'Potvrď, že je ti 18 let nebo víc. Za mladšího přihlášku podává zákonný zástupce.' });
     }
     const _who = { for_child: forChild, child_dob: childDob, guardian_name: guardianName, guardian_contact: guardianContact, paid_by: paidBy };
+    // VĚKOVÉ OMEZENÍ KURZU (od / do / od–do). Věk účastníka: dítě z data narození, přihlášený
+    // z profilu, host z data narození, které musí u kurzu s omezením vyplnit.
+    {
+      const _cr = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(String(b.cohort_id || ''))}&select=age_min,age_max`)) || [])[0] || {};
+      const amin = (_cr.age_min != null && _cr.age_min !== '') ? parseInt(_cr.age_min, 10) : null;
+      const amax = (_cr.age_max != null && _cr.age_max !== '') ? parseInt(_cr.age_max, 10) : null;
+      if (amin != null || amax != null) {
+        let pa = null;
+        if (forChild) pa = _age(childDob);
+        else if (_uid) { const pr = ((await sbGet(`profiles?id=eq.${encodeURIComponent(_uid)}&select=birthdate`)) || [])[0] || {}; pa = _age(pr.birthdate || b.birthdate); }
+        else pa = _age(b.birthdate);
+        if (pa == null) return res.status(400).json({ ok: false, error: 'Kurz má věkové omezení — vyplň datum narození účastníka.' });
+        if ((amin != null && pa < amin) || (amax != null && pa > amax)) {
+          const rng = (amin != null && amax != null) ? `${amin}–${amax} let` : (amin != null ? `od ${amin} let` : `do ${amax} let`);
+          return res.status(400).json({ ok: false, error: `Kurz je pro věk ${rng}. Účastníkovi je ${pa}.`, age: true });
+        }
+      }
+    }
     // Keep the chosen OFFER NAME (validated against the cohort's price_tiers below); the old code
     // collapsed everything to 'regular'/'student', which would have thrown named offers away.
     const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohortId)}&select=*`);
