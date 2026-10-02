@@ -112,10 +112,18 @@ export default async function handler(req, res) {
     const mp = ((await sb(`profiles?id=eq.${q(me)}&select=name`)) || [])[0] || {};
 
     // 1) Termín je zrušený (rozvrh ho ukáže jako zrušený, nejde na něj nic koupit).
-    await sb('gym_class_log?on_conflict=gym_id,class_date,class_time,class_name', {
-      method: 'POST', prefer: 'resolution=merge-duplicates,return=minimal',
-      body: JSON.stringify({ gym_id: gym.id, class_date: occ.date, class_time: occ.time || null, class_name: occ.name || null,
-        coach_id: occ.coach || null, status: 'cancelled', reason: mode, logged_by: me }) });
+    // Bez spoléhání na unikátní index (v databázi není -- upsert s on_conflict padal): najít
+    // záznam termínu a přepsat, jinak založit.
+    {
+      const f = `gym_id=eq.${q(gym.id)}&class_date=eq.${q(occ.date)}` +
+        (occ.time ? `&class_time=eq.${q(occ.time)}` : '&class_time=is.null') +
+        (occ.name ? `&class_name=eq.${q(occ.name)}` : '&class_name=is.null');
+      const row = { gym_id: gym.id, class_date: occ.date, class_time: occ.time || null, class_name: occ.name || null,
+        coach_id: occ.coach || null, status: 'cancelled', reason: mode, logged_by: me };
+      const ex = (await sb(`gym_class_log?${f}&select=id&limit=1`)) || [];
+      if (ex[0]) await sb(`gym_class_log?id=eq.${q(ex[0].id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(row) });
+      else await sb('gym_class_log', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify(row) });
+    }
 
     const out = { refunded_card: [], bank_refund: [], moved: [], trials: [], unpaid: [], members: 0, errors: [] };
 
