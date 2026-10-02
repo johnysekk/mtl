@@ -221,6 +221,38 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, url: session.url, amount: _due, month: nextMonth, lastMonth, months: _nM, totalMonths });
     }
 
+    // „ZAPLATIL(A) JSEM" k QR záloze. Přihláška přes QR drží místo jen 30 minut ('reserved');
+    // teprve tohle hlášení ji změní na 'deposit_claimed', které místo drží, dokud klub platbu
+    // nepotvrdí nebo neodmítne. Ověří se e-mail z přihlášky, ať cizí přihlášku nikdo nepřepne.
+    if (kind === 'qr_claim') {
+      const cmId = String(b.cohort_member_id || '');
+      const em = String(b.email || '').trim().toLowerCase();
+      if (!cmId || !em) return res.status(400).json({ ok: false, error: 'missing cohort_member_id/email' });
+      const mem = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=id,cohort_id,gym_id,name,email,status`)) || [])[0];
+      if (!mem || String(mem.email || '').trim().toLowerCase() !== em) return res.status(404).json({ ok: false, error: 'not found' });
+      if (mem.status === 'deposit_claimed' || mem.status === 'deposit_paid' || mem.status === 'enrolled') return res.status(200).json({ ok: true, already: true });
+      if (mem.status !== 'reserved') return res.status(409).json({ ok: false, error: 'Rezervace místa vypršela. Přihlas se prosím znovu.', expired: true });
+      await sbPatch('cohort_members', `id=eq.${encodeURIComponent(cmId)}&status=eq.reserved`, { status: 'deposit_claimed' });
+      // Až TEĎ dát vědět klubu -- člověk tvrdí, že zaplatil. (Dřív chodila notifikace už při
+      // zobrazení QR, i když nikdo nic neposlal.)
+      try {
+        const co = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(mem.cohort_id)}&select=name,deposit_amount,currency,owner_id,gym_id`)) || [])[0] || {};
+        const ownerId = co.owner_id || (co.gym_id ? (((await sbGet(`gyms?id=eq.${encodeURIComponent(co.gym_id)}&select=owner_id`)) || [])[0] || {}).owner_id : null);
+        if (ownerId) {
+          const _cur = co.currency || 'CZK';
+          const cs = `\u{1F4CB} ${mem.name || 'Z\u00e1jemce'} hl\u00e1s\u00ed zaplacen\u00ed z\u00e1lohy ${co.deposit_amount || ''} ${_cur} QR p\u0159evodem${co.name ? (' \u2014 kurz \u201e' + co.name + '\u201c') : ''}. A\u017e platba doraz\u00ed na \u00fa\u010det, potvr\u010f ji v seznamu kurzu.`;
+          const en = `\u{1F4CB} ${mem.name || 'A prospect'} reports paying the ${co.deposit_amount || ''} ${_cur} deposit by QR transfer${co.name ? (' \u2014 course \u201c' + co.name + '\u201d') : ''}. Once the money arrives, confirm it in the course list.`;
+          await fetch(`${_SUPA}/rest/v1/notifications`, {
+            method: 'POST',
+            headers: { apikey: _KEY, Authorization: `Bearer ${_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+            body: JSON.stringify({ user_id: ownerId, type: 'system', read: false,
+              data: JSON.stringify({ kind: 'cohort_qr_claim', cohort_id: mem.cohort_id, cohort_member_id: mem.id, cohort_name: co.name || '', msg_cs: cs, msg_en: en }),
+              message: cs }) });
+        }
+      } catch (e) { console.error('cohort qr claim notif', e.message); }
+      return res.status(200).json({ ok: true, claimed: true });
+    }
+
     const cohortId = b.cohort_id;
     if (!cohortId) return res.status(400).json({ ok: false, error: 'missing cohort_id' });
     const email = (b.email || '').trim();
@@ -260,11 +292,17 @@ export default async function handler(req, res) {
       );
       if (_dupe && _dupe.length) return res.status(409).json({ ok: false, error: 'Na tento kurz už jsi přihlášený/á.', duplicate: true });
     }
+    // Opakovaný pokus stejného e-mailu do 30 minut (zavřel QR a vrátil se) dostane TU SAMOU
+    // rezervaci místa -- dřív, než se počítá kapacita, jinak by ho blokovalo jeho vlastní místo.
+    if (b.method === 'qr') {
+      const _again = ((await sbGet(`cohort_members?cohort_id=eq.${encodeURIComponent(cohortId)}&email=eq.${encodeURIComponent(email)}&status=eq.reserved&select=id,created_at&limit=1`)) || [])[0];
+      if (_again) return res.status(200).json({ ok: true, qr: true, cohort_member_id: _again.id, reserved_at: _again.created_at, reused: true });
+    }
     // place (a bare 'lead' has not paid, so it does not occupy one) and refuse once it is full.
     if (Number(c.capacity) > 0) {
       const held = await sbGet(
         `cohort_members?cohort_id=eq.${encodeURIComponent(cohortId)}` +
-        `&status=in.(deposit_claimed,deposit_paid,enrolled,completed,converted)&select=id`
+        `&status=in.(reserved,deposit_claimed,deposit_paid,enrolled,completed,converted)&select=id`
       );
       if ((held || []).length >= Number(c.capacity)) {
         return res.status(409).json({ ok: false, error: 'Kurz je plný.', full: true });
@@ -280,34 +318,20 @@ export default async function handler(req, res) {
       // page sends it, so a LOGGED-IN student paying by QR still ended up as an accountless row:
       // the course did not show under their account until claim-cohorts.js matched them by e-mail
       // on a later login, and nothing in-app could be sent to them (no user_id to address).
+      // MÍSTO JEN NA 30 MINUT. Dřív přihláška hned vznikla jako 'deposit_claimed' (záloha
+      // nahlášena) a držela místo napořád -- kdo otevřel QR a nezaplatil, blokoval kurz, dokud
+      // ho klub ručně nesmazal. Teď je to 'reserved': drží 30 minut (release-cron), pak propadne.
+      // Na 'deposit_claimed' ji změní až „Zaplatil(a) jsem" (kind:'qr_claim'), na zaplaceno
+      // návrat z banky u Finbricks.
       const memberQ = await sbInsert('cohort_members', {
         cohort_id: cohortId, gym_id: c.gym_id, name, email, phone: (b.phone || '').trim() || null,
-        tier, status: 'deposit_claimed', attribution: _attr, source: 'online',
+        tier, status: 'reserved', attribution: _attr, source: 'online',
         student_id: b.student_id || null,
         consent_at: new Date().toISOString(), consent_version: (b.consent_version || null),
         fbp: (b.fbp || null), fbc: (b.fbc || null)
       });
-      // Tell the OWNER. Nothing here ever notified anyone, so a QR course signup landed silently in
-      // the roster and the club only found it if they went looking. The accountless student can't
-      // confirm anything -- only the club can see the bank account -- so the club is the single
-      // actor and must be told the moment the QR is put in front of the person.
-      try {
-        const ownerId = c.owner_id || (c.gym_id ? ((await sbGet(`gyms?id=eq.${encodeURIComponent(c.gym_id)}&select=owner_id`))[0] || {}).owner_id : null);
-        if (ownerId) {
-          const _cur = c.currency || 'CZK';
-          await fetch(`${_SUPA}/rest/v1/notifications`, {
-            method: 'POST',
-            headers: { apikey: _KEY, Authorization: `Bearer ${_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-            body: JSON.stringify({
-              user_id: ownerId, type: 'system', read: false,
-              data: JSON.stringify({ kind: 'cohort_qr_claim', cohort_id: cohortId, cohort_member_id: memberQ && memberQ.id, cohort_name: c.name || '',
-                msg_en: `\u{1F4CB} ${name || 'A prospect'} opened the QR to pay the deposit ${depQ} ${_cur}${c.name ? (' \u2014 course \u201c' + c.name + '\u201d') : ''}. Once the payment reaches your account, confirm it under participants.` }),
-              message: `\u{1F4CB} ${name || 'Z\u00e1jemce'} si zobrazil/a QR k \u00fahrad\u011b z\u00e1lohy ${depQ} ${_cur}${c.name ? (' \u2014 kurz \u201e' + c.name + '\u201c') : ''}. A\u017e platba dorazi na \u00fa\u010det, potvrd ji v \u00fa\u010dastnic\u00edch.`
-            })
-          });
-        }
-      } catch (e) { console.error('cohort qr owner notif', e.message); }
-      return res.status(200).json({ ok: true, qr: true, cohort_member_id: memberQ && memberQ.id });
+      // Klub se dozví až při „Zaplatil(a) jsem" (qr_claim) nebo po zaplacení přes Finbricks.
+      return res.status(200).json({ ok: true, qr: true, cohort_member_id: memberQ && memberQ.id, reserved_at: (memberQ && memberQ.created_at) || new Date().toISOString() });
     }
     if (!c.stripe_account) return res.status(400).json({ ok: false, error: 'cohort has no payout account' });
     { const _g = cohortSignupGate(c); if (!_g.ok) return res.status(403).json({ ok: false, error: _g.error, closed: true }); }

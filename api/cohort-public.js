@@ -82,7 +82,7 @@ export default async function handler(req, res) {
 
     // current signup count (for capacity display only; no PII)
     let taken = 0;
-    try { const cm = await sbGet(`cohort_members?cohort_id=eq.${encodeURIComponent(id)}&status=in.(deposit_claimed,deposit_paid,enrolled,completed,converted)&select=id`); taken = Array.isArray(cm) ? cm.length : 0; } catch (e) {}
+    try { const cm = await sbGet(`cohort_members?cohort_id=eq.${encodeURIComponent(id)}&status=in.(reserved,deposit_claimed,deposit_paid,enrolled,completed,converted)&select=id`); taken = Array.isArray(cm) ? cm.length : 0; } catch (e) {}
 
     // Veřejný detail (bez osobních údajů) jde z CDN: opakované otevření stránky -- i zahlcení --
     // nejde do databáze. Osobní dotazy (?cm= / ?tk=) se nekešují, ty vrací dřívější return.

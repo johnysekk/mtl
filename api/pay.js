@@ -331,8 +331,30 @@ async function gymCheckout(req, res) {
 async function eventCheckout(req, res) {
   const { gymAccount, eventTitle, tierName, amount, currency = 'CZK', ticketId, buyerName, buyerEmail, qty, qrToken, eventId, founding, partner, disc, gymId, payoutCoachId, take } = req.query;
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
+  // ČÁSTKA A ÚČET ZE SERVERU, NE Z ADRESY. Dřív šla částka i sazba MTL do Stripe tak, jak je
+  // poslal prohlížeč: upravený odkaz zaplatil za lístek 1 Kč nebo snížil provizi. Teď se
+  // částka sečte z rezervovaných lístků objednávky a účet musí patřit pořadateli té akce.
+  let P = parseInt(amount, 10);
+  if (ticketId) {
+    const _t = ((await _wsbGet(`event_tickets?id=eq.${encodeURIComponent(ticketId)}&select=order_id,event_id`)) || [])[0];
+    if (!_t) return res.status(404).json({ error: 'Lístek nenalezen' });
+    const _rows = _t.order_id
+      ? ((await _wsbGet(`event_tickets?order_id=eq.${encodeURIComponent(_t.order_id)}&select=amount,status`)) || [])
+      : ((await _wsbGet(`event_tickets?id=eq.${encodeURIComponent(ticketId)}&select=amount,status`)) || []);
+    const _open = _rows.filter((r) => ['pending', 'reserved'].includes(String(r.status || '')));
+    const _sum = _open.reduce((a, r) => a + (Number(r.amount) || 0), 0);
+    if (!(_sum > 0)) return res.status(400).json({ error: 'Objednávka už není k zaplacení' });
+    P = _sum;
+    const _ev = ((await _wsbGet(`events?id=eq.${encodeURIComponent(_t.event_id)}&select=gym_id,payout_coach_id,organization_id`)) || [])[0] || {};
+    const _acc = new Set();
+    try {
+      if (_ev.payout_coach_id) { const pr = ((await _wsbGet(`profiles?id=eq.${encodeURIComponent(_ev.payout_coach_id)}&select=stripe_account,gym_payout_account`)) || [])[0] || {}; if (pr.gym_payout_account) _acc.add(pr.gym_payout_account); if (pr.stripe_account) _acc.add(pr.stripe_account); }
+      if (_ev.gym_id) { const g = ((await _wsbGet(`gyms?id=eq.${encodeURIComponent(_ev.gym_id)}&select=stripe_account`)) || [])[0] || {}; if (g.stripe_account) _acc.add(g.stripe_account); }
+      if (_ev.organization_id) { const o = ((await _wsbGet(`organizations?id=eq.${encodeURIComponent(_ev.organization_id)}&select=stripe_account`)) || [])[0] || {}; if (o.stripe_account) _acc.add(o.stripe_account); }
+    } catch (e) {}
+    if (_acc.size && !_acc.has(String(gymAccount))) return res.status(400).json({ error: 'Účet neodpovídá pořadateli akce' });
+  }
   if (!(await _assertAcctReady(gymAccount, res))) return;
-  const P = parseInt(amount, 10);
   // POZOR: `amount` je u akce VŽDY celková částka objednávky, ne cena za kus -- klient sčítá košík
   // sám, protože v jedné objednávce můžou být různé varianty za různé ceny, a jedno `qty` by to
   // nepopsalo. Q proto musí zůstat 1; kdyby sem někdo qty začal posílat, Stripe by tu částku
@@ -341,11 +363,11 @@ async function eventCheckout(req, res) {
   const cur = String(currency).toLowerCase();
   const MK = 1.00;
   // Rate: client _ladderRate (EP 0.5% / FP / ladder), server resolve as backstop. No partner override.
-  let TAKE = take ? parseFloat(take) : NaN;
-  if (!(TAKE >= 0.005 && TAKE <= 0.10)) {
-    try { TAKE = await resolveRate(_wsbGet, { gymAccount, mode: 'stripe' }); }
-    catch (e) { console.error('pay.event rate resolve failed:', e.message); TAKE = 0.03; }
-  }
+  // Sazba vždy ze serveru. Z adresy (take=) by si ji kupující mohl snížit.
+  let TAKE = NaN;
+  try { TAKE = await resolveRate(_wsbGet, { gymAccount, mode: 'stripe' }); }
+  catch (e) { console.error('pay.event rate resolve failed:', e.message); TAKE = NaN; }
+  if (!(TAKE >= 0.005 && TAKE <= 0.10)) { const _t2 = take ? parseFloat(take) : NaN; TAKE = (_t2 >= 0.005 && _t2 <= 0.10) ? _t2 : 0.03; }
   const isCZK = cur === 'czk';
   const unit = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);
   const fee  = Math.round(P * TAKE * 100); // exact pct (was floored to whole CZK)

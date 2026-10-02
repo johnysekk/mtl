@@ -121,12 +121,24 @@ export default async function handler(req, res) {
     // ---- Pass 4: expire unpaid QR event-ticket reservations 30 min after booking ----------
     try {
       const cutoff30mE = new Date(Date.now() - 30 * 60 * 1000).toISOString(); // 30 min unpaid window
-      const e1 = await sb(`event_tickets?payment_method=eq.qr&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoff30mE)}&select=id&limit=3000`);
+      // QR i rozpracovaná platba kartou (Stripe nebo neznámá). Finbricks řeší Pass 6 (pis_payment_id).
+      const e1 = await sb(`event_tickets?or=(payment_method.eq.qr,payment_method.eq.stripe,payment_method.is.null)&pis_payment_id=is.null&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoff30mE)}&select=id&limit=3000`);
       for (const t of (e1 || [])) {
         await sb(`event_tickets?id=eq.${t.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'expired' }) });
         expired1h++;
       }
     } catch (e) { /* events pass non-fatal */ }
+
+    // ---- Pass 4b: kurz -- rezervace místa bez zaplacení propadne po 30 minutách -----------
+    // QR i Finbricks přihláška do kurzu drží místo jako 'reserved'. Kdo do 30 minut nehlásí
+    // „Zaplatil(a) jsem" ani nezaplatí přes banku, místo uvolní pro dalšího.
+    try {
+      const cutoffC = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+      const cr = await sb(`cohort_members?status=eq.reserved&created_at=lt.${encodeURIComponent(cutoffC)}&select=id&limit=3000`);
+      for (const m of (cr || [])) {
+        await sb(`cohort_members?id=eq.${m.id}&status=eq.reserved`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'expired' }) });
+      }
+    } catch (e) { console.error('[release-cron] cohort holds', e.message); }
 
     // ---- Pass 5: expire open cover (substitute) requests once the class has started ------
     // A 'Potrebuju zaskok' request that nobody accepted before the class start is dead;
