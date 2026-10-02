@@ -2015,6 +2015,7 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
   <div class="shdr"><div class="shdr-title">📥 Import členů</div><button class="btn-close" id="btnCloseImport">✕</button></div>
   <div style="padding:20px;">
     <p style="font-size:13px;color:var(--mid);line-height:1.55;margin-bottom:12px;" data-noi18n>Přenes členy z jiného softwaru (ZenPlanner, Mindbody, MAAT, Excel…). Vlož CSV nebo nahraj soubor — první řádek musí být názvy sloupců. Pozvánky k registraci jim pošleš v dalším kroku.</p>
+    <button id="impSample" type="button" data-noi18n style="background:none;border:none;padding:0;margin:0 0 10px;color:var(--blue);font-size:12.5px;font-weight:700;cursor:pointer;text-decoration:underline;font-family:'DM Sans';">Stáhnout vzorový soubor (CSV)</button>
     <input type="file" id="impFile" accept=".csv,.txt" style="margin-bottom:10px;font-size:13px;width:100%;">
     <textarea id="impCsv" placeholder="jméno;email" style="width:100%;box-sizing:border-box;height:120px;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:monospace;font-size:12px;margin-bottom:10px;"></textarea>
     <button id="impDetect" style="width:100%;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-weight:700;cursor:pointer;margin-bottom:14px;">Načíst sloupce</button>
@@ -10116,6 +10117,9 @@ const SHEETS=['shSupport','shPartnerInfo','shRateCalc','shGymOrigins','shGymInco
 
 let _sheetParent={};
 function openSheet(id){
+  // Otevírá se list z panelu Nastavení klubu? Zapamatovat si, který panel to byl -- po zavření
+  // listu se vrátí Nastavení i ten panel (dřív to skočilo na Rozvrh).
+  try{ var _so=document.querySelector('.setSecOv'); if(_so && _so._secKey && id!=='shGymManage'){ window._gmReturnSec=_so._secKey; } }catch(e){}
   // Admin: prekreslit prepinac PIS podle stavu z databaze (nacita se asynchronne).
   try{ if(id==='shAdmin' && typeof window._pisProvPaint==='function') setTimeout(window._pisProvPaint, 50); }catch(e){}
   try{ setTimeout(function(){ if(typeof _sellGateSync==='function') _sellGateSync(); }, 0); }catch(e){}
@@ -10167,12 +10171,23 @@ function closeSheet(id){
   try{ if(id==='shGymIncome' && typeof window._giReturn==='function') window._giReturn(); }catch(e){}
   $(id).classList.remove('open');
   const par=_sheetParent[id]; _sheetParent[id]=null;
+  // Zapamatovaný panel platí jen pro návrat do Nastavení klubu.
+  if(par!=='shGymManage') window._gmReturnSec=null;
   if(par && $(par)){
     $(par).classList.add('open');
     // Club settings render their accordions (and bind the buttons inside them) in
     // renderGymManage. Coming back from a child sheet only restored the 'open' class, leaving a
     // stale DOM whose accordions no longer responded — re-render so they work again.
-    if(par==='shGymManage' && typeof renderGymManage==='function'){ try{ renderGymManage(); }catch(e){} }
+    if(par==='shGymManage' && typeof renderGymManage==='function'){
+      const _ret=window._gmReturnSec||null; window._gmReturnSec=null;
+      if(_ret) window._gmInitTab=1;   // záložka Nastavení
+      try{ renderGymManage(); }catch(e){}
+      if(_ret) setTimeout(function(){ try{
+        if(typeof window._gmShowTab==='function') window._gmShowTab(1);
+        const _sm=[].slice.call(document.querySelectorAll('#shGymManage details.setSec > summary')).find(function(x){ return (x.textContent||'').trim()===_ret; });
+        if(_sm) _sm.click();
+      }catch(e){} }, 350);
+    }
   }
 }
 function renderEvents(){
@@ -20549,6 +20564,17 @@ async function renderGymLeaderboard(){
 // ===== MEMBER IMPORT (step 1: CSV -> imported_members staging) =====
 window._impRows=null; window._impHead=null;
 function openImportMembers(){ openSheet('shImportMembers'); }
+// Stav přenosu: kolik je přidaných, připojených a kolik čeká na pozvánku -- ať je vidět, co dělat dál.
+async function _ownMemStats(){
+  const el=$('ownMemStats'); if(!el || !_myGymData) return; const EN=LANG==='en';
+  try{
+    const cnt=async function(st){ let q=supaClient.from('imported_members').select('id',{count:'exact',head:true}).eq('gym_id',_myGymData.id); if(st) q=q.eq('status',st); const r=await q; return r.count||0; };
+    const [all, claimed, pending, invited]=await Promise.all([cnt(null), cnt('claimed'), cnt('pending'), cnt('invited')]);
+    if(!all){ el.innerHTML=(EN?'Nobody added yet. Start with step 1.':'Zat\u00edm nikdo. Za\u010dni krokem 1.'); return; }
+    el.innerHTML=(EN?'Added ':'P\u0159id\u00e1no ')+'<b>'+all+'</b> \u00b7 '+(EN?'in MTL ':'v MTL ')+'<b style="color:#0A7A3D;">'+claimed+'</b> \u00b7 '+(EN?'invited ':'pozv\u00e1no ')+'<b>'+invited+'</b>'
+      +(pending?(' \u00b7 <b style="color:#9A6B00;">'+pending+' '+(EN?'waiting for an invite':'\u010dek\u00e1 na pozv\u00e1nku')+'</b>'):'');
+  }catch(e){ el.textContent=''; }
+}
 function openOwnMembers(){ openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); }   /* sheet retired; the content is now a settings accordion */
 function _impParseCSV(txt){
   var firstLine=(txt.split(/\r?\n/)[0]||'');
@@ -20699,6 +20725,13 @@ if($('btnCloseImport')) $('btnCloseImport').onclick=function(){ closeSheet('shIm
 if($('impDetect')) $('impDetect').onclick=_impDetect;
 if($('impSave')) $('impSave').onclick=_impSave;
 if($('impManual')) $('impManual').onclick=_impManual;
+// Vzorový soubor se sloupci, které import pozná sám (oddělovač středník, Excel ho otevře rovnou).
+if($('impSample')) $('impSample').onclick=function(){
+  const head='Jméno a příjmení;E-mail;Telefon;Datum narození;Členem od;Ulice;PSČ;Obec;Plán';
+  const ex='Jan Novák;jan.novak@email.cz;+420 777 123 456;15.4.1995;1.9.2021;Hrnčířská 12;602 00;Brno;Dospělí';
+  const blob=new Blob(['\ufeff'+head+'\n'+ex+'\n'], { type:'text/csv;charset=utf-8' });
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='mtl-clenove-vzor.csv'; document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 500);
+};
 if($('impFile')) $('impFile').onchange=function(e){ var f=e.target.files&&e.target.files[0]; if(!f) return; var rd=new FileReader(); rd.onload=function(){ if($('impCsv')) $('impCsv').value=rd.result||''; _impDetect(); }; rd.readAsText(f); };
 // ===== end member import =====
 
@@ -21039,12 +21072,28 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData, { subject:
     <button id="mgTermsConsBtn" type="button" onclick="(function(){ try{ closeSheet('shGymManage'); }catch(e){} try{ openEntityConsents({ gymId:(_myGymData&&_myGymData.id) }); }catch(e){} })()" style="width:100%;padding:10px;background:var(--surf);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13px;margin-bottom:10px;">✍️ ${LANG==='en'?'Student consents':'Souhlasy studentů'}</button>
     <button class="mgSaveSec" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-top:8px;">${LANG==='en'?'Save changes':'Uložit změny'}</button>
     </div></details>
-    <details class="setSec"><summary>🔗 ${LANG==='en'?'Own members & migration':'Vlastní členové a migrace'}</summary><div class="setBody">
-    <div class="sec-lbl">${LANG==='en'?'Link for your members \u00b7 no acquisition fee':'Odkaz pro tvoje \u010dleny \u00b7 bez akvizi\u010dn\u00ed provize'}</div>
-    <p style="font-size:12px;color:var(--mid);line-height:1.5;margin:0 0 10px;">${LANG==='en'?'Whoever comes through this link is your member, not someone MTL brought you \u2014 you do not pay the 10 % acquisition fee on them. The normal commission stays. It works for new people too, not only your existing members. It opens your public club page.':'Kdo p\u0159ijde p\u0159es tenhle odkaz, je tv\u016fj \u010dlen, ne akvizice MTL \u2014 neplat\u00ed\u0161 z n\u011bj akvizi\u010dn\u00ed provizi 10 %. B\u011b\u017en\u00e1 provize z\u016fst\u00e1v\u00e1. Funguje i pro \u00fapln\u011b nov\u00e9 lidi, nejen pro st\u00e1vaj\u00edc\u00ed \u010dleny. Otev\u0159e ve\u0159ejnou str\u00e1nku klubu.'}</p>
-    <button onclick="(function(){var l=_ownLink('gym');try{navigator.clipboard.writeText(l);}catch(e){}toast(LANG==='en'?'Link copied':'Odkaz zkopírován');})()" style="width:100%;padding:13px;background:#0f2233;color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-bottom:22px;">📋 ${LANG==='en'?'Copy link for your members':'Zkopírovat odkaz pro tvoje členy'}</button>
-    <div class="sec-lbl">${LANG==='en'?'Import & migration from other software':'Import & migrace z jiného softwaru'}</div>
-    <div style="display:flex;flex-direction:column;gap:8px;margin-top:6px;"><button id="btnImportMembers" style="width:100%;padding:11px;background:#171717;color:#F4D87A;border:1.5px solid #E8C24A;border-radius:11px;font-weight:700;font-size:13px;cursor:pointer;">📥 ${LANG==='en'?'Import members from other software':'Importovat členy z jiného softwaru'}</button><button id="btnImportedRoster" style="width:100%;padding:11px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:11px;font-weight:700;font-size:13px;cursor:pointer;">👥 ${LANG==='en'?'Imported members & invites':'Importovaní členové & pozvánky'}</button></div>
+    <details class="setSec"><summary>👥 ${LANG==='en'?'Your members in MTL':'Tvoji členové v MTL'}</summary><div class="setBody">
+    <!-- PŘEHLEDNĚJI: dvě samostatné karty. (1) Přenos lidí, kteří už jsou členy klubu -- kroky
+         s počty, u spolku vysvětlení přihlášek. (2) Odkaz pro členy bez akviziční provize. -->
+    <div style="border:1px solid var(--border);border-radius:14px;padding:14px;margin-bottom:12px;background:#fff;">
+      <div style="font-size:14.5px;font-weight:800;color:var(--dark);margin-bottom:3px;">📥 ${LANG==='en'?'Bring in your existing members':'Přenést stávající členy'}</div>
+      <div style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:10px;">${LANG==='en'?'People who already train with you. Add them once — whoever has an MTL account is linked straight away, the rest get an invite.':'Lidi, kte\u0159\u00ed u v\u00e1s u\u017e tr\u00e9nuj\u00ed. P\u0159id\u00e1\u0161 je jednou \u2014 kdo m\u00e1 \u00fa\u010det v MTL, propoj\u00ed se hned, ostatn\u00edm po\u0161le\u0161 pozv\u00e1nku.'}</div>
+      ${(g.org_form==='nonprofit')?`<div style="font-size:12px;color:#1452B0;background:#EEF4FF;border:1px solid #CFE0FF;border-radius:10px;padding:9px 11px;line-height:1.5;margin-bottom:10px;">\u2139\ufe0f ${LANG==='en'?'Club (association): fill in “Member since” (the date the club approved their application). MTL creates an approved membership application with that date, so they do not apply again when buying a membership in the app. The paper application stays with you.':'Spolek: u ka\u017ed\u00e9ho vypl\u0148 \u201e\u010clenem od\u201c (datum, kdy klub schv\u00e1lil jeho p\u0159ihl\u00e1\u0161ku). MTL mu vytvo\u0159\u00ed schv\u00e1lenou p\u0159ihl\u00e1\u0161ku s t\u00edmto datem, tak\u017ee p\u0159i n\u00e1kupu \u010dlenstv\u00ed v appce u\u017e p\u0159ihl\u00e1\u0161ku nepod\u00e1v\u00e1. Pap\u00edrov\u00e1 p\u0159ihl\u00e1\u0161ka z\u016fst\u00e1v\u00e1 u v\u00e1s.'}</div>`:''}
+      <div style="font-size:11px;font-weight:800;color:var(--light);letter-spacing:.04em;text-transform:uppercase;margin:4px 0 6px;">${LANG==='en'?'Step 1 · Add':'Krok 1 \u00b7 P\u0159idat'}</div>
+      <div style="display:flex;gap:8px;">
+        <button id="btnImportMembers" style="flex:1;padding:11px 8px;background:#171717;color:#F4D87A;border:1.5px solid #E8C24A;border-radius:11px;font-weight:700;font-size:12.5px;cursor:pointer;">📄 ${LANG==='en'?'From a file (CSV)':'Ze souboru (CSV)'}</button>
+        <button id="btnOwnManual" style="flex:1;padding:11px 8px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:11px;font-weight:700;font-size:12.5px;cursor:pointer;">＋ ${LANG==='en'?'One by one':'Ru\u010dn\u011b po jednom'}</button>
+      </div>
+      <div style="font-size:11px;font-weight:800;color:var(--light);letter-spacing:.04em;text-transform:uppercase;margin:14px 0 6px;">${LANG==='en'?'Step 2 · Invite':'Krok 2 \u00b7 Pozvat'}</div>
+      <div id="ownMemStats" style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:8px;">\u2026</div>
+      <button id="btnImportedRoster" style="width:100%;padding:11px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:11px;font-weight:700;font-size:13px;cursor:pointer;">👥 ${LANG==='en'?'List of added members & invites ›':'Seznam p\u0159idan\u00fdch a pozv\u00e1nky \u203a'}</button>
+    </div>
+    <div style="border:1px solid var(--border);border-radius:14px;padding:14px;background:#fff;">
+      <div style="font-size:14.5px;font-weight:800;color:var(--dark);margin-bottom:3px;">🔗 ${LANG==='en'?'Your club link · no acquisition fee':'Odkaz klubu \u00b7 bez akvizi\u010dn\u00ed provize'}</div>
+      <div style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:10px;">${LANG==='en'?'For new people you bring in yourself — Instagram bio, website, posters, friends. Whoever comes through it is yours, not MTL’s acquisition: no 10 % acquisition fee, only the normal commission. It opens your public club page.':'Pro nov\u00e9 lidi, kter\u00e9 p\u0159ivede\u0161 ty \u2014 bio na Instagramu, web, plak\u00e1t, kamar\u00e1di. Kdo p\u0159ijde p\u0159es n\u011bj, je tv\u016fj, ne akvizice MTL: \u017e\u00e1dn\u00e1 akvizi\u010dn\u00ed provize 10 %, jen b\u011b\u017en\u00e1 provize. Otev\u0159e ve\u0159ejnou str\u00e1nku klubu.'}</div>
+      ${(g.org_form==='nonprofit')?`<div style="font-size:12px;color:#9A5B00;background:#FFF8E6;border:1px solid #F0DFA8;border-radius:10px;padding:9px 11px;line-height:1.5;margin-bottom:10px;">${LANG==='en'?'Do not use it for your existing association members — add them above instead, otherwise they would have to submit a new membership application in the app.':'Na st\u00e1vaj\u00edc\u00ed \u010dleny spolku ho nepou\u017e\u00edvej \u2014 p\u0159enes je naho\u0159e, jinak by v appce museli pod\u00e1vat novou p\u0159ihl\u00e1\u0161ku.'}</div>`:''}
+      <button onclick="(function(){var l=_ownLink('gym');try{navigator.clipboard.writeText(l);}catch(e){}toast(LANG==='en'?'Link copied':'Odkaz zkop\u00edrov\u00e1n');})()" style="width:100%;padding:12px;background:#0f2233;color:#fff;border:none;border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';">📋 ${LANG==='en'?'Copy link':'Zkop\u00edrovat odkaz'}</button>
+    </div>
     </div></details>
     <details class="setSec"><summary>🏅 ${LANG==='en'?'Associations & federations':'Asociace a federace'}</summary><div class="setBody">
     <p style="font-size:12px;color:var(--light);line-height:1.5;margin:2px 0 10px;">${LANG==='en'?'Membership in an association \u2014 badge on your profile, member fee, and a 1.5 % MTL rate while it lasts.':'\u010clenstv\u00ed v asociaci \u2014 odznak na profilu, \u010dlensk\u00fd poplatek a po dobu \u010dlenstv\u00ed sazba MTL 1,5 %.'}</p>
@@ -21337,6 +21386,8 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData, { subject:
       _p.appendChild(_w); } }catch(e){} })();
   if($('btnImportMembers')) $('btnImportMembers').onclick=openImportMembers;
   if($('btnImportedRoster')) $('btnImportedRoster').onclick=openImportedRoster;
+  if($('btnOwnManual')) $('btnOwnManual').onclick=function(){ _impManual(); };
+  try{ _ownMemStats(); }catch(e){}
   if($('mgVatPayer')) $('mgVatPayer').onchange=function(){ var r=$('mgVatRateRow'); if(r) r.style.display=this.checked?'':'none'; };
   // ARES / VIES on EDIT (club). Mirrors gymTaxId / gymVatId in the club onboarding; without it a
   // club could pass onboarding with a real ICO and then rewrite it here unchecked, and these
@@ -49315,7 +49366,7 @@ function _setSecOverlay(){
         ov.appendChild(panel); document.body.appendChild(ov);
         if(det && det.id==='gmMerchSec'){ try{ renderGymMerchList(); }catch(_){ } }
         function close(){ try{ ph.parentNode.insertBefore(body, ph); }catch(_){ } try{ ph.remove(); }catch(_){ } ov.remove(); }
-        ov._close=close; x.onclick=close; ov.addEventListener('click', function(ev){ if(ev.target===ov && !_ovHasForm(ov)) close(); });
+        ov._close=close; ov._secKey=(sum.textContent||'').trim(); x.onclick=close; ov.addEventListener('click', function(ev){ if(ev.target===ov && !_ovHasForm(ov)) close(); });
         // one uniform black "close" button at the bottom of every settings panel — desktop dashboard only
         try{
           if(document.body.classList.contains('dashmode')){
@@ -49350,7 +49401,7 @@ function _csSecOverlay(){
         var ph=document.createComment('csb'); body.parentNode.insertBefore(ph, body); panel.appendChild(body);
         ov.appendChild(panel); document.body.appendChild(ov);
         function close(){ try{ ph.parentNode.insertBefore(body, ph); }catch(_){ } try{ ph.remove(); }catch(_){ } ov.remove(); }
-        ov._close=close; x.onclick=close; ov.addEventListener('click', function(ev){ if(ev.target===ov && !_ovHasForm(ov)) close(); });
+        ov._close=close; ov._secKey=(sum.textContent||'').trim(); x.onclick=close; ov.addEventListener('click', function(ev){ if(ev.target===ov && !_ovHasForm(ov)) close(); });
         // one uniform black "close" button at the bottom of every settings panel — desktop dashboard only
         try{
           if(document.body.classList.contains('dashmode')){
