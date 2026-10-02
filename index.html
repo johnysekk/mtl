@@ -13868,7 +13868,7 @@ async function _approveMinorWaiver(d){
   if(rj) rj.onclick=async()=>{ rj.disabled=true; try{ await supaClient.from('notifications').insert({ user_id:d.minor_id, type:'system', read:false, data:JSON.stringify({kind:'minor_waiver_done', ok:false, gym_name:d.gym_name}), message:'🛡️ '+(EN?'Your guardian did not approve training at ':'Tvůj zástupce neschválil trénink v ')+(d.gym_name||'Klub')+'.' }); }catch(e){} ov.remove(); toast(EN?'Rejected':'Zamítnuto'); };
   if(ap) ap.onclick=async()=>{ if(!cb.checked) return; ap.disabled=true; ap.style.opacity='.5';
     try{ await supaClient.from('waiver_acceptances').insert({ gym_id:d.gym_id, version:d.version||0, student_id:d.minor_id, student_name:d.minor_name||null, body_hash:d.hash, body_text:d.body||null, body_title:d.title||null, accepted_at:new Date().toISOString(), guardian_id:currentUser.id, guardian_name:currentUser.name||null }); try{ if(typeof _recordConsent==='function') _recordConsent('waiver', (d.version||0), LANG, (d.body||''), { gym_id:d.gym_id, minor_id:d.minor_id||null, title:d.title||null }, d.gym_id); }catch(e){} }catch(e){ toast('⚠️ '+e.message); }
-    try{ await supaClient.from('notifications').insert({ user_id:d.minor_id, type:'system', read:false, data:JSON.stringify({kind:'minor_waiver_done', ok:true, gym_name:d.gym_name}), message:'✅ '+(EN?'Your guardian approved — you can now book at ':'Zástupce schválil — teď můžeš rezervovat v ')+(d.gym_name||'Klub')+'.' }); }catch(e){}
+    try{ await supaClient.from('notifications').insert({ user_id:d.minor_id, type:'system', read:false, data:JSON.stringify({kind:'minor_waiver_done', ok:true, gym_id:(d.gym_id||null), gym_name:d.gym_name}), message:'✅ '+(EN?'Your guardian approved — you can now book at ':'Zástupce schválil — teď můžeš rezervovat v ')+(d.gym_name||'Klub')+'.' }); }catch(e){}
     ov.remove(); toast(EN?'✅ Approved':'✅ Schváleno');
   };
 }
@@ -29861,11 +29861,20 @@ function _exportMembersCsv(rows){
   const blob=new Blob(['\ufeff'+out.join('\n')], { type:'text/csv;charset=utf-8' });
   const el=document.createElement('a'); el.href=URL.createObjectURL(blob); el.download='clenove-'+new Date().toISOString().slice(0,10)+'.csv'; document.body.appendChild(el); el.click(); setTimeout(function(){ URL.revokeObjectURL(el.href); el.remove(); }, 500);
 }
-// Detail člena / dítěte: řádek „Adresa trv. bydliště".
+// Detail člena / dítěte: řádek „Adresa trv. bydliště". Dotaz se pouští hned při otevření
+// detailu (souběžně s ostatním načítáním), ne až po vykreslení -- jinak adresa naskočila pozdě.
+function _prefetchMemberAddr(sid, childName){
+  if(!_mgIsBoss() || !sid) return;
+  window._mdAddrP={ k:sid+'|'+(childName||''), p:_maCall({ action:'person', gym_id:_myGymData.id, student_id:sid, child_name:childName||null }).catch(function(){ return null; }) };
+}
 async function _fillMemberAddr(sid, childName){
   const box=$('mdAddr'); if(!box) return; const EN=LANG==='en';
   if(!_mgIsBoss()){ box.innerHTML=''; return; }
-  let d; try{ d=await _maCall({ action:'person', gym_id:_myGymData.id, student_id:sid, child_name:childName||null }); }catch(e){ box.innerHTML=''; return; }
+  const _k=sid+'|'+(childName||'');
+  let d=null;
+  if(window._mdAddrP && window._mdAddrP.k===_k) d=await window._mdAddrP.p;
+  else { try{ d=await _maCall({ action:'person', gym_id:_myGymData.id, student_id:sid, child_name:childName||null }); }catch(e){ d=null; } }
+  if(!d){ box.innerHTML=''; return; }
   if(!d.member){ box.innerHTML=''; return; }
   const a=d.address;
   const val=(d.shared&&a) ? escapeHtml([a.street, [a.postal,a.city].filter(Boolean).join(' ')].filter(Boolean).join(', '))+(a.citizenship?('<div style="font-size:12px;color:var(--mid);margin-top:2px;">'+(EN?'Citizenship: ':'Ob\u010danstv\u00ed: ')+escapeHtml(a.citizenship)+'</div>'):'')
@@ -30465,10 +30474,12 @@ async function loadNotifications(append){
         if(k==='minor_waiver_done'){
           try{
             const _wd=JSON.parse(n.data||'{}');
-            if(_wd.gym_id){
-              const { data:_g }=await supaClient.from('gyms').select('*').eq('id',_wd.gym_id).single();
-              if(_g && typeof openGymProfile==='function') openGymProfile(_g);
-            }
+            // Starší notifikace nesly jen název klubu -- dohledat podle něj.
+            let _g=null;
+            if(_wd.gym_id){ const { data }=await supaClient.from('gyms').select('*').eq('id',_wd.gym_id).maybeSingle(); _g=data||null; }
+            if(!_g && _wd.gym_name){ const { data }=await supaClient.from('gyms').select('*').eq('name',_wd.gym_name).limit(1); _g=(data&&data[0])||null; }
+            if(_g && typeof openGymProfile==='function') openGymProfile(_g);
+            else toast(LANG==='en'?'\u26a0\ufe0f Club not found':'\u26a0\ufe0f Klub nenalezen');
           }catch(e){}
           return;
         }
@@ -39474,6 +39485,7 @@ async function openGymMemberDetail(sid, name){
 }
 
 async function _openGymMemberDetailInner(sid, name){
+  try{ _prefetchMemberAddr(sid, null); }catch(e){}
   window._mdSid=sid; window._mdName=name;
   if(!sid||!_myGymData) return;
   const EN=LANG==='en';
@@ -40804,6 +40816,7 @@ function kidBeltHtml(_belts){
 }
 function _kidBeltsOf(c){ try{ return c&&c.belts?(typeof c.belts==='string'?JSON.parse(c.belts):c.belts):{}; }catch(e){ return {}; } }
 async function openGymKidDetail(parentId, childName){
+  try{ _prefetchMemberAddr(parentId, childName); }catch(e){}
   const EN=LANG==='en'; if(!parentId||!_myGymData) return;
   window._mdSid=null; window._mdKid={parentId:parentId, childName:childName};
   if($('mdTitle')) $('mdTitle').textContent='🧒 '+childName;
