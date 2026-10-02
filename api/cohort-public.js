@@ -12,6 +12,10 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   if (req.method === 'OPTIONS') return res.status(200).end();
+  // Jen známé parametry. Každá jiná adresa by byla pro CDN nová a šla by až do databáze --
+  // robot by tak obešel mezipaměť přidáváním náhodných parametrů (?event=X&x=123). Appka
+  // posílá jen tyhle, takže na normální provoz to nemá vliv. Odmítnutí databázi nezatíží.
+  { const _ok=new Set(['cohort','cm']); if (Object.keys(req.query || {}).some((k) => !_ok.has(k))) return res.status(400).json({ ok: false, error: 'bad request' }); }
   try {
     // Declared HERE, above every use. It used to be declared *after* both assignment
     // sites, so each assignment threw a TDZ ReferenceError that the surrounding catch{}
