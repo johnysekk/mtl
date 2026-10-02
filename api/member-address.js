@@ -73,6 +73,7 @@ async function members(gym) {
     const shared = S.has(String(m.student_id));
     const hasAddr = !!(a && a.street && a.city);
     rows.push({ owner_id: m.student_id, name, is_kid: isKid, guardian: isKid ? (p.name || '') : null, dob: DS.has(String(m.student_id)) ? dob : null,
+      dob_shared: DS.has(String(m.student_id)),
       email: p.email || '', phone: (p.phone_show && p.phone) ? p.phone : '', child_name: m.child_name || null,
       has_address: hasAddr, shared,
       address: (shared && a) ? { street: a.street || '', postal: a.postal || '', city: a.city || '', country: a.country || '', citizenship: a.citizenship || '' } : null });
@@ -131,22 +132,33 @@ export default async function handler(req, res) {
 
     if (b.action === 'request') {
       if (nextAt && nextAt > new Date()) return res.status(429).json({ error: 'too_soon', next_request_at: nextAt.toISOString() });
-      // Jedna notifikace na účet (rodič s dětmi dostane jednu), jen kde něco chybí.
+      // Jedna notifikace na účet (rodič s dětmi dostane jednu), jen kde něco chybí: adresa
+      // (chybí nebo ji klubu nezobrazuje) a/nebo zobrazení data narození.
       const need = {};
-      rows.forEach((r) => { if (!r.has_address || !r.shared) { (need[r.owner_id] = need[r.owner_id] || []).push(r); } });
-      const ids = Object.keys(need);
+      rows.forEach((r) => { const n = need[r.owner_id] = need[r.owner_id] || { addr: [], dob: false };
+        if (!r.has_address || !r.shared) n.addr.push(r);
+        if (!r.dob_shared) n.dob = true; });
+      const ids = Object.keys(need).filter((k) => need[k].addr.length || need[k].dob);
       for (const uid of ids) {
-        const list = need[uid];
+        const n = need[uid]; const list = n.addr;
         const kids = list.filter((r) => r.is_kid).map((r) => r.name);
         const forWhom = kids.length ? (list.some((r) => !r.is_kid) ? ` (pro tebe i ${kids.join(', ')})` : ` (pro ${kids.join(', ')})`) : '';
         const forWhomEn = kids.length ? (list.some((r) => !r.is_kid) ? ` (for you and ${kids.join(', ')})` : ` (for ${kids.join(', ')})`) : '';
-        const cs = `🏠 ${gym.name} tě prosí o doplnění adresy bydliště${forWhom} a o její zobrazení klubu. Potřebuje ji do evidence členů a pro sportovní dotace. Zabere to minutu.`;
-        const en = `🏠 ${gym.name} asks you to add your home address${forWhomEn} and share it with the club. It needs it for the member register and sports grants. Takes a minute.`;
+        const what = list.length && n.dob ? 'adresy bydliště' + forWhom + ' a o zobrazení adresy i data narození klubu'
+          : list.length ? 'adresy bydliště' + forWhom + ' a o její zobrazení klubu'
+          : null;
+        const whatEn = list.length && n.dob ? 'your home address' + forWhomEn + ' and to share it and your date of birth with the club'
+          : list.length ? 'your home address' + forWhomEn + ' and to share it with the club' : null;
+        const cs = what ? `🏠 ${gym.name} tě prosí o doplnění ${what}. Potřebuje to do evidence členů a pro sportovní dotace. Zabere to minutu.`
+          : `🎂 ${gym.name} tě prosí o zobrazení data narození klubu. Potřebuje ho do evidence členů a pro sportovní dotace. Zabere to pár vteřin.`;
+        const en = whatEn ? `🏠 ${gym.name} asks you to add ${whatEn}. It needs it for the member register and sports grants. Takes a minute.`
+          : `🎂 ${gym.name} asks you to share your date of birth with the club. It needs it for the member register and sports grants. Takes a few seconds.`;
+        const kidOnly = list.length > 0 && list.every((r) => r.is_kid);
         try {
           const lang = (((await sb(`profiles?id=eq.${q(uid)}&select=lang`)) || [])[0] || {}).lang;
           await sb('notifications', { method: 'POST', prefer: 'return=minimal',
             body: JSON.stringify({ user_id: uid, type: 'system', read: false,
-              data: JSON.stringify({ kind: 'address_request', gym_id: gym.id, gym_name: gym.name, msg_cs: cs, msg_en: en }),
+              data: JSON.stringify({ kind: 'address_request', gym_id: gym.id, gym_name: gym.name, need_addr: list.length > 0, need_dob: n.dob, kid_only: kidOnly, msg_cs: cs, msg_en: en }),
               message: lang === 'en' ? en : cs }) });
         } catch (e) { console.error('[member-address] notify', e.message); }
       }
