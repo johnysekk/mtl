@@ -158,9 +158,19 @@ async function handler(req, res) {
         };
         // Ranni lekce se pripomina vecer PREDEM, takze se musi divat i na zitrek.
         const tomorrow = (function(){ const d=new Date(date+'T12:00:00Z'); d.setUTCDate(d.getUTCDate()+1); return d.toISOString().slice(0,10); })();
-        const resv = await sbGet(`gym_class_reservations?gym_id=eq.${gym.id}&class_date=in.(${date},${tomorrow})&or=(reminder_sent.is.null,reminder_sent.eq.false)&select=id,student_id,class_name,class_date,class_time,status,gym_id`);
+        const resv = await sbGet(`gym_class_reservations?gym_id=eq.${gym.id}&class_date=in.(${date},${tomorrow})&or=(reminder_sent.is.null,reminder_sent.eq.false)&select=id,student_id,class_name,class_date,class_time,status,gym_id,membership_id`);
+        // JEDNA PŘIPOMÍNKA NA LEKCI. Platba převodem k jednorázovému vstupu zakládá i držené místo
+        // v gym_class_reservations (bez členství). Připomínalo se pak obojí -- vstup i držené
+        // místo -- a člověk dostal stejnou připomínku dvakrát. Držené místo k aktivnímu vstupu
+        // se proto přeskočí (a označí jako vyřízené); připomínku nese vstup.
+        const _actDrops = await sbGet(`gym_bookings?gym_id=eq.${gym.id}&class_date=in.(${date},${tomorrow})&status=eq.active&select=student_id,class_date,class_time,class_name`);
+        const _dropKey = new Set((_actDrops || []).map((d) => `${d.student_id}|${d.class_date}|${d.class_time || ''}|${d.class_name || ''}`));
         for (const r of (resv || [])) {
           if (!r.student_id || mutedRem.has(r.student_id) || r.status === 'released' || r.status === 'cancelled') continue;
+          if (!r.membership_id && _dropKey.has(`${r.student_id}|${r.class_date}|${r.class_time || ''}|${r.class_name || ''}`)) {
+            try { await sbPatch('gym_class_reservations', `id=eq.${r.id}`, { reminder_sent: true }); } catch (e) {}
+            continue;
+          }
           const t = String(r.class_time || '').split(':'); const cm = Number(t[0]) * 60 + Number(t[1] || 0);
           if (isNaN(cm) || !win(cm, r.class_date === date)) continue;
           // NULL je stejne "neposlano" jako false -- clenske rezervace se zakladaji bez toho pole.
