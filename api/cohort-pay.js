@@ -295,7 +295,20 @@ export default async function handler(req, res) {
     } else if (!b.adult_ok) {
       return res.status(400).json({ ok: false, error: 'Potvrď, že je ti 18 let nebo víc. Za mladšího přihlášku podává zákonný zástupce.' });
     }
-    const _who = { for_child: forChild, child_dob: childDob, guardian_name: guardianName, guardian_contact: guardianContact, paid_by: paidBy };
+    // ZNĚNÍ SOUHLASŮ, jak je člověk viděl: podmínky kurzu (text + otisk), souhlas zástupce,
+    // provozní řád (otisk), marketing (zvlášť, nepovinný). Ukládá se k přihlášce.
+    const _wh = (str) => { let h1 = 0xdeadbeef, h2 = 0x41c6ce57; const x = String(str || ''); for (let i = 0; i < x.length; i++) { const ch = x.charCodeAt(i); h1 = Math.imul(h1 ^ ch, 2654435761); h2 = Math.imul(h2 ^ ch, 1597334677); } h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507); h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909); h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507); h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909); return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16); };
+    const _cs = (b.consents && typeof b.consents === 'object') ? b.consents : {};
+    const _termsTxt = String(_cs.terms_text || '').slice(0, 20000);
+    const _consents = {
+      at: new Date().toISOString(),
+      terms: _termsTxt ? { text: _termsTxt, hash: _wh(_termsTxt), checkbox: String(_cs.terms_checkbox || '').slice(0, 500) } : null,
+      guardian: forChild ? { text: String(_cs.guardian_text || '').slice(0, 1000), name: name } : null,
+      rules: _cs.rules_accepted ? { hash: null, checkbox: String(_cs.rules_checkbox || '').slice(0, 500) } : null,
+      marketing: !!_cs.marketing,
+      marketing_text: _cs.marketing ? String(_cs.marketing_text || '').slice(0, 500) : null,
+    };
+    const _who = { for_child: forChild, child_dob: childDob, guardian_name: guardianName, guardian_contact: guardianContact, paid_by: paidBy, consents: _consents };
     // VĚKOVÉ OMEZENÍ KURZU (od / do / od–do). Věk účastníka: dítě z data narození, přihlášený
     // z profilu, host z data narození, které musí u kurzu s omezením vyplnit.
     {
@@ -408,6 +421,22 @@ export default async function handler(req, res) {
       }
     }
     const memberId = member && member.id;
+    // Provozní řád klubu: souhlas se zněním (waiver_acceptances), stejně jako před nákupem v appce.
+    try {
+      if (_cs.rules_accepted && c.gym_id) {
+        const gg = ((await sbGet(`gyms?id=eq.${encodeURIComponent(c.gym_id)}&select=terms_title,terms_text,waiver_version`)) || [])[0] || {};
+        const txt = String(gg.terms_text || '').trim();
+        if (txt) {
+          const hash = _wh((String(gg.terms_title || '').trim()) + '|' + txt);
+          const dup = participantSid ? await sbGet(`waiver_acceptances?gym_id=eq.${encodeURIComponent(c.gym_id)}&student_id=eq.${encodeURIComponent(participantSid)}&body_hash=eq.${hash}&select=id&limit=1`) : [];
+          if (!(dup && dup.length)) {
+            await sbInsert('waiver_acceptances', { gym_id: c.gym_id, version: gg.waiver_version || 0, student_id: participantSid || null, student_name: pName,
+              guest_email: participantSid ? null : email, guardian_name: forChild ? name : null,
+              body_title: gg.terms_title || 'Provozní řád', body_text: txt, body_hash: hash, accepted_at: new Date().toISOString() });
+          }
+        }
+      }
+    } catch (e) { console.error('[cohort-pay] rules acceptance', e.message); }
 
     const cur = String(c.currency || 'CZK').toUpperCase();
     const isCZK = cur === 'CZK';
