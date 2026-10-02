@@ -48,11 +48,13 @@ async function members(gym) {
   const ms = (await sb(`gym_memberships?gym_id=eq.${q(gym.id)}&status=in.(active,cancelling)&select=student_id,child_name,student_name`)) || [];
   const owners = [...new Set(ms.map((m) => m.student_id).filter(Boolean))];
   if (!owners.length) return { rows: [], owners: [] };
-  const [profs, addrs, shares] = await Promise.all([
+  const [profs, addrs, shares, dshares] = await Promise.all([
     sb(`profiles?id=in.${inList(owners)}&select=id,name,birthdate,children,email,phone,phone_show`),
     sb(`member_addresses?owner_id=in.${inList(owners)}&select=*`),
     sb(`address_shares?gym_id=eq.${q(gym.id)}&owner_id=in.${inList(owners)}&select=owner_id`),
+    sb(`birthdate_shares?gym_id=eq.${q(gym.id)}&owner_id=in.${inList(owners)}&select=owner_id`).catch(() => []),
   ]);
+  const DS = new Set((dshares || []).map((x) => String(x.owner_id)));
   const P = {}; (profs || []).forEach((p) => { P[p.id] = p; });
   const A = {}; (addrs || []).forEach((a) => { A[`${a.owner_id}|${a.person_key}`] = a; });
   const S = new Set((shares || []).map((s) => String(s.owner_id)));
@@ -70,7 +72,7 @@ async function members(gym) {
     const a = A[`${m.student_id}|${personKey}`] || null;
     const shared = S.has(String(m.student_id));
     const hasAddr = !!(a && a.street && a.city);
-    rows.push({ owner_id: m.student_id, name, is_kid: isKid, guardian: isKid ? (p.name || '') : null, dob,
+    rows.push({ owner_id: m.student_id, name, is_kid: isKid, guardian: isKid ? (p.name || '') : null, dob: DS.has(String(m.student_id)) ? dob : null,
       email: p.email || '', phone: (p.phone_show && p.phone) ? p.phone : '', child_name: m.child_name || null,
       has_address: hasAddr, shared,
       address: (shared && a) ? { street: a.street || '', postal: a.postal || '', city: a.city || '', country: a.country || '', citizenship: a.citizenship || '' } : null });
@@ -97,18 +99,24 @@ export default async function handler(req, res) {
       const sid = String(b.student_id || ''); const cn = String(b.child_name || '');
       if (!sid) return res.status(400).json({ ok: false, error: 'student_id required' });
       const memQ = `gym_memberships?gym_id=eq.${q(gym.id)}&student_id=eq.${q(sid)}&status=in.(active,cancelling)` + (cn ? `&child_name=eq.${q(cn)}` : '&child_name=is.null') + '&select=id&limit=1';
-      const [mem, prof, shares] = await Promise.all([
+      const [mem, prof, shares, dshares] = await Promise.all([
         sb(memQ),
-        cn ? sb(`profiles?id=eq.${q(sid)}&select=children`) : Promise.resolve(null),
+        sb(`profiles?id=eq.${q(sid)}&select=children,birthdate`),
         sb(`address_shares?gym_id=eq.${q(gym.id)}&owner_id=eq.${q(sid)}&select=owner_id`),
+        sb(`birthdate_shares?gym_id=eq.${q(gym.id)}&owner_id=eq.${q(sid)}&select=owner_id`).catch(() => []),
       ]);
       if (!(mem || []).length) return res.status(200).json({ ok: true, member: false });
       let key = 'self';
-      if (cn) { const kid = kidsOf((prof || [])[0]).find((x) => String(x.name || '') === cn); key = kid ? kidKey(kid) : ('name:' + cn); }
+      let dob = null;
+      if (cn) { const kid = kidsOf((prof || [])[0]).find((x) => String(x.name || '') === cn); key = kid ? kidKey(kid) : ('name:' + cn); dob = (kid && kid.dob) || null; }
+      else dob = (((prof || [])[0]) || {}).birthdate || null;
+      // Datum narození klub vidí, jen když mu ho člověk zobrazuje (u dítěte rozhoduje rodič).
+      const dobShared = (dshares || []).length > 0;
       const a = ((await sb(`member_addresses?owner_id=eq.${q(sid)}&person_key=eq.${q(key)}&select=street,postal,city,country,citizenship`)) || [])[0] || null;
       const shared = (shares || []).length > 0;
       const has = !!(a && a.street && a.city);
       return res.status(200).json({ ok: true, member: true, has_address: has, shared,
+        dob_shared: dobShared, has_dob: !!dob, dob: dobShared ? dob : null,
         address: (shared && a) ? { street: a.street || '', postal: a.postal || '', city: a.city || '', country: a.country || '', citizenship: a.citizenship || '' } : null });
     }
 
