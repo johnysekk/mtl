@@ -43,10 +43,13 @@ async function greetBirthdays() {
     );
     const today = (rows || []).filter(r => String(r.birthdate || '').slice(5, 10) === md);
     if (!today.length) return 0;
+    // Kdo dnes slaví 18, dostane jen přání k osmnáctinám (posílá ho tenhle cron níž, s proklikem
+    // do Rodiny). Obecné přání by bylo druhé stejné. Rok se mu ale označí, ať nepřijde později.
+    const greet = today.filter(r => (year - parseInt(String(r.birthdate || '').slice(0, 4), 10)) !== 18);
 
-    await sb('notifications', {
+    if (greet.length) await sb('notifications', {
       method: 'POST',
-      body: JSON.stringify(today.map(r => ({
+      body: JSON.stringify(greet.map(r => ({
         user_id: r.id,
         type: 'system',
         read: false,

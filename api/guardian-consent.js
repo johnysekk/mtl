@@ -189,7 +189,7 @@ module.exports = async (req, res) => {
       try {
         await admin.from('notifications').insert({
           user_id: rq.minor_id, type: 'system', read: false,
-          data: JSON.stringify({ kind: 'minor_waiver_done', ok: true, gym_name: rq.gym_name }),
+          data: JSON.stringify({ kind: 'minor_waiver_done', ok: true, gym_id: rq.gym_id || null, gym_name: rq.gym_name }),
           message: '✅ Zákonný zástupce schválil — teď můžeš trénovat v klubu ' + (rq.gym_name || '') + '.'
         });
       } catch (e) { /* non-fatal */ }

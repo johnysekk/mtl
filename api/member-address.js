@@ -90,15 +90,31 @@ export default async function handler(req, res) {
     if (!gym) return res.status(404).json({ error: 'gym not found' });
     if (!(await canSee(gym, me))) return res.status(403).json({ error: 'forbidden' });
 
+    // RYCHLÁ CESTA PRO DETAIL ČLENA. Dřív se kvůli jednomu člověku sestavoval celý seznam
+    // členů klubu (všechna členství, profily, adresy) -- detail čekal ~2,5 s. Teď jen dotazy na
+    // toho jednoho člověka, souběžně.
+    if (b.action === 'person') {
+      const sid = String(b.student_id || ''); const cn = String(b.child_name || '');
+      if (!sid) return res.status(400).json({ ok: false, error: 'student_id required' });
+      const memQ = `gym_memberships?gym_id=eq.${q(gym.id)}&student_id=eq.${q(sid)}&status=in.(active,cancelling)` + (cn ? `&child_name=eq.${q(cn)}` : '&child_name=is.null') + '&select=id&limit=1';
+      const [mem, prof, shares] = await Promise.all([
+        sb(memQ),
+        cn ? sb(`profiles?id=eq.${q(sid)}&select=children`) : Promise.resolve(null),
+        sb(`address_shares?gym_id=eq.${q(gym.id)}&owner_id=eq.${q(sid)}&select=owner_id`),
+      ]);
+      if (!(mem || []).length) return res.status(200).json({ ok: true, member: false });
+      let key = 'self';
+      if (cn) { const kid = kidsOf((prof || [])[0]).find((x) => String(x.name || '') === cn); key = kid ? kidKey(kid) : ('name:' + cn); }
+      const a = ((await sb(`member_addresses?owner_id=eq.${q(sid)}&person_key=eq.${q(key)}&select=street,postal,city,country,citizenship`)) || [])[0] || null;
+      const shared = (shares || []).length > 0;
+      const has = !!(a && a.street && a.city);
+      return res.status(200).json({ ok: true, member: true, has_address: has, shared,
+        address: (shared && a) ? { street: a.street || '', postal: a.postal || '', city: a.city || '', country: a.country || '', citizenship: a.citizenship || '' } : null });
+    }
+
     const { rows } = await members(gym);
     const last = ((await sb(`address_requests?gym_id=eq.${q(gym.id)}&select=last_sent_at`)) || [])[0] || null;
     const nextAt = last && last.last_sent_at ? new Date(new Date(last.last_sent_at).getTime() + REQUEST_EVERY_DAYS * 86400000) : null;
-
-    if (b.action === 'person') {
-      const r = rows.find((x) => String(x.owner_id) === String(b.student_id) && String(x.child_name || '') === String(b.child_name || ''));
-      if (!r) return res.status(200).json({ ok: true, member: false });
-      return res.status(200).json({ ok: true, member: true, has_address: r.has_address, shared: r.shared, address: r.address });
-    }
 
     if (b.action === 'list') {
       return res.status(200).json({ ok: true, rows, last_request_at: last ? last.last_sent_at : null,
