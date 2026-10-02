@@ -2111,6 +2111,7 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
 <!-- CHAT -->
 <div class="sheet" id="shChat" style="z-index:87;display:flex;flex-direction:column;">
   <div class="shdr">
+    <div id="chatAv" style="width:40px;height:40px;border-radius:50%;overflow:hidden;flex:none;background:#E8EAED;display:none;align-items:center;justify-content:center;font-size:21px;margin-right:10px;"></div>
     <div style="min-width:0;"><div class="shdr-title" id="chatTitle">Chat</div>
     <div id="chatSub" style="font-size:11px;color:var(--mid);font-weight:600;line-height:1.3;margin-top:1px;display:none;"></div></div>
     <button id="chatBlockBtn" style="display:none;background:transparent;border:none;font-size:18px;line-height:1;cursor:pointer;padding:4px 8px;margin-left:auto;margin-right:4px;">⛔</button>
@@ -18666,8 +18667,14 @@ async function openCohortSignup(cohortId, fromColdLink){
         // ÚDAJE ČLENA. Klub je potřebuje do seznamu členů (jméno, datum narození) a u
         // nezletilého zákonného zástupce. Ukáže se, až když člověk o členství žádá.
         +'<div id="cohMaData" style="display:none;margin:-4px 0 12px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:#fff;">'
-          +'<label style="display:block;font-size:11.5px;font-weight:700;color:var(--mid);margin-bottom:4px;">'+(EN?'Date of birth':'Datum narozen\u00ed')+'</label>'
-          +'<input id="cohMaBirth" type="date" value="'+escapeHtml(((typeof currentUser!=='undefined'&&currentUser&&currentUser.birthdate)?String(currentUser.birthdate).slice(0,10):''))+'" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:16px;margin-bottom:8px;">'
+          // Přihlášený s datem narození v profilu ho nezadává znovu -- vezme se z profilu.
+          // Kdo ho v profilu nemá (starší účty), vyplní ho tady a uloží se mu i do profilu.
+          +(((typeof currentUser!=='undefined'&&currentUser&&currentUser.birthdate))
+            ? ('<input id="cohMaBirth" type="hidden" value="'+escapeHtml(String(currentUser.birthdate).slice(0,10))+'">'
+               +'<div style="font-size:12.5px;color:var(--dark);margin-bottom:8px;">\ud83c\udf82 '+(EN?'Date of birth: ':'Datum narozen\u00ed: ')+'<b>'+(function(){ const t=new Date(String(currentUser.birthdate).slice(0,10)+'T00:00:00'); return isNaN(t)?escapeHtml(String(currentUser.birthdate)):(t.getDate()+'. '+(t.getMonth()+1)+'. '+t.getFullYear()); })()+'</b> <span style="color:var(--light);">'+(EN?'(from your profile)':'(z tv\u00e9ho profilu)')+'</span></div>')
+            : ('<label style="display:block;font-size:11.5px;font-weight:700;color:var(--mid);margin-bottom:4px;">'+(EN?'Date of birth':'Datum narozen\u00ed')+'</label>'
+               +'<input id="cohMaBirth" type="date" value="" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:16px;margin-bottom:8px;">'
+               +((typeof currentUser!=='undefined'&&currentUser)?('<div style="font-size:11px;color:var(--light);margin:-4px 0 8px;">'+(EN?'You do not have it in your profile yet \u2014 it will be saved there too (it cannot be changed later).':'V profilu ho zat\u00edm nem\u00e1\u0161 \u2014 ulo\u017e\u00ed se ti i tam (pozd\u011bji u\u017e nejde zm\u011bnit).')+'</div>'):'')))
           +'<div id="cohMaGuard" style="display:none;">'
             +'<div style="font-size:11.5px;color:var(--mid);line-height:1.45;margin-bottom:6px;">'+(EN?'Under 18: the application is made by a parent or guardian.':'Pod 18 let: p\u0159ihl\u00e1\u0161ku pod\u00e1v\u00e1 rodi\u010d nebo z\u00e1konn\u00fd z\u00e1stupce.')+'</div>'
             +'<input id="cohMaGName" type="text" placeholder="'+(EN?'Parent/guardian full name':'Jm\u00e9no a p\u0159\u00edjmen\u00ed z\u00e1konn\u00e9ho z\u00e1stupce')+'" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:16px;margin-bottom:8px;">'
@@ -18726,6 +18733,9 @@ async function openCohortSignup(cohortId, fromColdLink){
         else if(_age<18 && (!((ov.querySelector('#cohMaGName')&&ov.querySelector('#cohMaGName').value.trim())||'') || !((ov.querySelector('#cohMaGContact')&&ov.querySelector('#cohMaGContact').value.trim())||'')))
           _bad=EN?'Fill in the parent/guardian':'Vypl\u0148 z\u00e1konn\u00e9ho z\u00e1stupce';
         if(_bad){ toast('\u26a0\ufe0f '+_bad); return; }
+        if(typeof currentUser!=='undefined' && currentUser && !currentUser.birthdate && _bd){
+          try{ const { error:_be }=await supaClient.from('profiles').update({ birthdate:_bd }).eq('id',currentUser.id).is('birthdate',null); if(!_be) currentUser.birthdate=_bd; }catch(e){}
+        }
       }
     }
     // PŘIHLÁŠKA ZA ČLENA U SPOLKU: ukládá se rovnou při odeslání kurzu, takže se k tomu
@@ -38423,8 +38433,10 @@ async function _chatCoachClubs(coachId){
   const out=[];
   try{
     // Kluby, které ten člověk vlastní.
-    const { data:_own }=await supaClient.from('gyms').select('id,name').eq('owner_id',coachId).eq('status','approved');
-    (_own||[]).forEach(function(g){ out.push({ id:g.id, name:g.name||'', teaches:false, lead:true }); });
+    // Majitel, který v klubu sám vede lekce (je v rozvrhu jako trenér), je pro studenta trenér --
+    // dřív se mu vždy ukazovalo „vedení klubu", i když studenta sám učí.
+    const { data:_own }=await supaClient.from('gyms').select('id,name,schedule').eq('owner_id',coachId).eq('status','approved');
+    (_own||[]).forEach(function(g){ let t=false; try{ t=JSON.stringify(g.schedule||'').indexOf(String(coachId))>=0; }catch(e){} out.push({ id:g.id, name:g.name||'', teaches:t, lead:true }); });
     // A kde je v týmu.
     const { data:_tc }=await supaClient.from('gym_coaches').select('gym_id,co_owner,is_reception').eq('coach_id',coachId).eq('status','active');
     const ids=(_tc||[]).map(function(r){ return r.gym_id; }).filter(Boolean);
@@ -38473,6 +38485,9 @@ async function openChat(conv){
   const otherId = amICoach ? conv.student_id : conv.coach_id;
   const { data: otherProf } = await supaClient.from('profiles').select('photo_url, avail_status, name').eq('id', otherId).single();
   activeConv._otherPhoto = otherProf?.photo_url || null;
+  // Fotka protistrany v hlavičce (bez fotky výchozí ikona jako v seznamu studentů).
+  { const av=$('chatAv'); if(av){ av.style.display='flex';
+      av.innerHTML=activeConv._otherPhoto?('<img src="'+escapeHtml(activeConv._otherPhoto)+'" alt="" style="width:100%;height:100%;object-fit:cover;">'):'\ud83e\uddd1'; } }
   // 🌴 Dovolená druhé strany (kouče) — palmový banner + pozadí, dokud kouč nevypne
   const coachHoliday = !amICoach && otherProf && otherProf.avail_status==='holiday';
   const hb=$('chatHolidayBanner'), msgs=$('chatMessages');
@@ -38560,6 +38575,11 @@ function _chatOversightNote(){
     return d;
   }catch(e){ return null; }
 }
+// Fotka u příchozích zpráv jen u poslední v řadě (jako Messenger), ať se neopakuje u každé.
+function _chatAvatars(box){
+  try{ const kids=[].slice.call((box||document.getElementById('chatMessages')||{}).children||[]);
+    kids.forEach(function(el,i){ if(el.getAttribute && el.getAttribute('data-in')==='1'){ const nx=kids[i+1]; const last=!(nx && nx.getAttribute && nx.getAttribute('data-in')==='1'); const av=el.querySelector('.cAv'); if(av) av.style.visibility=last?'visible':'hidden'; } }); }catch(e){}
+}
 function _chatBubble(m){
   const mine = m.sender_id===currentUser.id;
   // Zpráva poslaná z klubového tlačítka. Štítek se ukáže jen jejímu odesílateli -- pro studenta
@@ -38589,6 +38609,19 @@ function _chatBubble(m){
     body.textContent=m.text;
     wrap.appendChild(hdr); wrap.appendChild(body);
     return wrap;
+  }
+  if(!mine){
+    const row=document.createElement('div'); row.setAttribute('data-in','1');
+    row.style.cssText='align-self:flex-start;display:flex;align-items:flex-end;gap:7px;max-width:85%;';
+    const av=document.createElement('div'); av.className='cAv';
+    av.style.cssText='width:28px;height:28px;border-radius:50%;overflow:hidden;flex:none;background:#E8EAED;display:flex;align-items:center;justify-content:center;font-size:15px;visibility:hidden;';
+    const ph=activeConv && activeConv._otherPhoto;
+    av.innerHTML=ph?('<img src="'+escapeHtml(ph)+'" alt="" style="width:100%;height:100%;object-fit:cover;">'):'\ud83e\uddd1';
+    const b=document.createElement('div');
+    b.style.cssText='padding:10px 14px;border-radius:16px;font-size:14px;line-height:1.4;background:var(--surf);color:var(--dark);border-bottom-left-radius:4px;min-width:0;word-break:break-word;';
+    b.textContent=m.text;
+    row.appendChild(av); row.appendChild(b);
+    return row;
   }
   const bubble=document.createElement('div');
   bubble.style.cssText=`max-width:75%;padding:10px 14px;border-radius:16px;font-size:14px;line-height:1.4;${mine?'align-self:flex-end;background:var(--red);color:#fff;border-bottom-right-radius:4px;':'align-self:flex-start;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-bottom-left-radius:4px;'}`;
@@ -38626,11 +38659,13 @@ async function loadMessages(older){
       const prevH=box.scrollHeight, prevT=box.scrollTop;
       const frag=document.createDocumentFragment();
       page.forEach(m=>frag.appendChild(_chatBubble(m)));
+      setTimeout(function(){ _chatAvatars(box); }, 0);
       box.insertBefore(frag, box.firstChild);
       box.scrollTop = box.scrollHeight - prevH + prevT;
     } else {
       { const _ov=_chatOversightNote(); if(_ov && !box.querySelector('[data-ovnote]')){ _ov.setAttribute('data-ovnote','1'); box.appendChild(_ov); } }
       page.forEach(m=>box.appendChild(_chatBubble(m)));
+      _chatAvatars(box);
       box.scrollTop=box.scrollHeight;
       await supaClient.from('messages').update({ read:true }).eq('conversation_id', activeConv.id).neq('sender_id', currentUser.id);
       updateMsgsBadge();
