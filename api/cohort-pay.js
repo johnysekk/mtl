@@ -424,8 +424,9 @@ export default async function handler(req, res) {
     // Provozní řád klubu: souhlas se zněním (waiver_acceptances), stejně jako před nákupem v appce.
     try {
       if (_cs.rules_accepted && c.gym_id) {
-        const gg = ((await sbGet(`gyms?id=eq.${encodeURIComponent(c.gym_id)}&select=terms_title,terms_text,waiver_version`)) || [])[0] || {};
-        const txt = String(gg.terms_text || '').trim();
+        const gg = ((await sbGet(`gyms?id=eq.${encodeURIComponent(c.gym_id)}&select=terms_title,terms_text,waiver_version,terms_file_url,terms_file_name,terms_file_hash`)) || [])[0] || {};
+        // Znění = text provozního řádu + odkaz na přiložený dokument (u spolku stanovy) s otiskem souboru.
+        const txt = [String(gg.terms_text || '').trim(), gg.terms_file_url ? (`Přiložený dokument: ${gg.terms_file_name || 'dokument.pdf'}${gg.terms_file_hash ? (' (otisk ' + gg.terms_file_hash + ')') : ''} — ${gg.terms_file_url}`) : ''].filter(Boolean).join('\n\n---\n\n');
         if (txt) {
           const hash = _wh((String(gg.terms_title || '').trim()) + '|' + txt);
           const dup = participantSid ? await sbGet(`waiver_acceptances?gym_id=eq.${encodeURIComponent(c.gym_id)}&student_id=eq.${encodeURIComponent(participantSid)}&body_hash=eq.${hash}&select=id&limit=1`) : [];
