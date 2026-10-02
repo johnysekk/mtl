@@ -1,4 +1,5 @@
 import Stripe from 'stripe';
+import { feeRefundableForPI, feeRefundableForTx, bankFeeRefundable } from './_fee-window.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = process.env.SUPABASE_URL;
@@ -67,7 +68,8 @@ export default async function handler(req, res) {
 
     const params = { payment_intent: paymentIntent };
     if (amount) params.amount = Math.round(parseFloat(amount) * 100); // částečný refund (minor units)
-    if (String(refundApp) === '1') params.refund_application_fee = true;
+    // Provize MTL se vrací (poměrně) jen do vystavení dokladu za období platby -- viz _fee-window.js.
+    if (String(refundApp) === '1' && await feeRefundableForPI(paymentIntent)) params.refund_application_fee = true;
 
     const refund = await stripe.refunds.create(params, { stripeAccount: gymAccount });
 

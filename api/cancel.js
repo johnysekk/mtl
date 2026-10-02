@@ -1,4 +1,5 @@
 import Stripe from 'stripe';
+import { feeRefundableForPI, feeRefundableForTx, bankFeeRefundable } from './_fee-window.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -70,7 +71,7 @@ export default async function handler(req, res) {
     if (coachAccount && !transferId) {
       // DIRECT charge: refund na účtu kouče, poměrně vrať i MTL application fee
       const refund = await stripe.refunds.create(
-        { payment_intent: paymentIntent, amount: refundToStudent, refund_application_fee: true },
+        { payment_intent: paymentIntent, amount: refundToStudent, refund_application_fee: await feeRefundableForPI(paymentIntent) },
         opts
       );
       return res.status(200).json({ refunded: refundToStudent / 100, pct: studentPct * 100, refundId: refund.id, mode: 'direct' });

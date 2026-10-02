@@ -1,4 +1,5 @@
 import Stripe from 'stripe';
+import { feeRefundableForPI, feeRefundableForTx, bankFeeRefundable } from './_fee-window.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -33,7 +34,7 @@ export default async function handler(req, res) {
             : inv.payment_intent);
           if (pi) {
             const rf = await stripe.refunds.create(
-              { payment_intent: pi, refund_application_fee: true }, opts
+              { payment_intent: pi, refund_application_fee: await feeRefundableForPI(pi) }, opts
             );
             refunded = (rf.amount || 0) / 100; refundId = rf.id;
           }

@@ -15,6 +15,7 @@
 //   POST { action:'cancel',  gym_id, occ:{date,time,name,coach}, mode:'advance'|'forgot', note, choices:{bookingId:'refund'|'move'} }
 
 import Stripe from 'stripe';
+import { feeRefundableForPI, feeRefundableForTx, bankFeeRefundable } from './_fee-window.js';
 
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -147,7 +148,7 @@ export default async function handler(req, res) {
         } else if (k === 'card') {
           // 100 % zpět automaticky, včetně provize MTL (chyba není na straně studenta).
           if (!stripe || !gym.stripe_account) throw new Error('stripe not configured');
-          await stripe.refunds.create({ payment_intent: bk.payment_intent, refund_application_fee: true }, { stripeAccount: gym.stripe_account });
+          await stripe.refunds.create({ payment_intent: bk.payment_intent, refund_application_fee: await feeRefundableForPI(bk.payment_intent) }, { stripeAccount: gym.stripe_account });
           await sb(`gym_bookings?id=eq.${q(bk.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'cancelled', club_cancelled_at: nowIso, club_cancel_choice: 'refund' }) });
           out.refunded_card.push(`${who} · ${money}`);
           await notify(bk.student_id,
@@ -168,10 +169,12 @@ export default async function handler(req, res) {
           } else {
             // MTL peníze z převodu nedrží -- vrací je klub. Provize z té platby se ruší.
             await sb(`gym_bookings?id=eq.${q(bk.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'cancelled', club_cancelled_at: nowIso, club_cancel_choice: 'refund' }) });
-            const tx = (await sb(`transactions?source_booking_id=eq.${q(bk.id)}&select=id,gross_amount,mtl_fee`)) || [];
+            // Provize se odečte jen, dokud není stržená (pak už ne -- stejné pravidlo jako u karty).
+            const tx = (await sb(`transactions?source_booking_id=eq.${q(bk.id)}&select=id,gross_amount,mtl_fee,commission_status`)) || [];
             for (const t of tx) {
-              await sb(`transactions?id=eq.${q(t.id)}`, { method: 'PATCH', prefer: 'return=minimal',
-                body: JSON.stringify({ status: 'refunded', refund_amount: t.gross_amount, mtl_fee_refunded: t.mtl_fee }) });
+              const patch = { status: 'refunded', refund_amount: t.gross_amount };
+              if (bankFeeRefundable(t)) patch.mtl_fee_refunded = t.mtl_fee;
+              await sb(`transactions?id=eq.${q(t.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) });
             }
             const how = bk.payment_method === 'cash' ? 'hotově' : 'převodem na účet, ze kterého jsi platil/a';
             const howEn = bk.payment_method === 'cash' ? 'in cash' : 'by bank transfer to the account you paid from';
