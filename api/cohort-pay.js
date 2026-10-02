@@ -258,6 +258,44 @@ export default async function handler(req, res) {
     const email = (b.email || '').trim();
     const name = (b.name || '').trim();
     if (!name || !email) return res.status(400).json({ ok: false, error: 'name + email required' });
+
+    // PRO KOHO JE PŘIHLÁŠKA. „Pro mě" = účastník je ten, kdo vyplňuje (musí být dospělý).
+    // „Pro moje dítě" = účastník je dítě (pod 18), vyplňující je jeho zákonný zástupce a souhlas
+    // s podmínkami kurzu dává za něj. Přihlášený rodič může vybrat i propojený účet mladistvého
+    // (Rodina) -- kurz se pak přidá na účet dítěte a rodič je plátce.
+    const _uid = await (async () => {
+      const tok = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim(); if (!tok) return null;
+      try { const r = await fetch(`${_SUPA}/auth/v1/user`, { headers: { apikey: _KEY, Authorization: `Bearer ${tok}` } }); if (!r.ok) return null; const u = await r.json(); return (u && u.id) || null; } catch (e) { return null; }
+    })();
+    const _age = (d) => { const t = new Date(String(d || '').slice(0, 10) + 'T00:00:00Z'); if (isNaN(t)) return null; const n = new Date(); let a = n.getUTCFullYear() - t.getUTCFullYear(); const m = n.getUTCMonth() - t.getUTCMonth(); if (m < 0 || (m === 0 && n.getUTCDate() < t.getUTCDate())) a--; return a; };
+    const forChild = !!b.for_child;
+    let pName = name, childDob = null, guardianName = null, guardianContact = null, participantSid = _uid || b.student_id || null, paidBy = null;
+    if (forChild) {
+      const cn = String(b.child_name || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+      const cd = String(b.child_dob || '').slice(0, 10);
+      const ca = _age(cd);
+      if (!cn) return res.status(400).json({ ok: false, error: 'Vyplň jméno dítěte' });
+      if (ca == null || ca < 0 || ca > 30) return res.status(400).json({ ok: false, error: 'Vyplň datum narození dítěte' });
+      if (ca >= 18) return res.status(400).json({ ok: false, error: 'Účastníkovi je 18 nebo víc — přihlašuje se sám (volba „Pro mě").' });
+      if (!b.guardian_consent) return res.status(400).json({ ok: false, error: 'Potvrď, že jsi zákonný zástupce a souhlasíš s účastí dítěte.' });
+      pName = cn; childDob = cd; guardianName = name; guardianContact = [email, (b.phone || '').trim()].filter(Boolean).join(' · ');
+      participantSid = _uid || null;   // dítě bez účtu je vedené u rodiče
+      if (b.child_student_id) {
+        // Propojený účet mladistvého -- jen když je to opravdu dítě tohoto rodiče v Rodině.
+        if (!_uid) return res.status(401).json({ ok: false, error: 'Přihlas se.' });
+        const fl = await sbGet(`family_links?guardian_id=eq.${encodeURIComponent(_uid)}&member_id=eq.${encodeURIComponent(String(b.child_student_id))}&relation=eq.guardian&status=eq.active&select=id&limit=1`);
+        if (!(fl && fl.length)) return res.status(403).json({ ok: false, error: 'Tohle dítě nemáš propojené v Rodině.' });
+        participantSid = String(b.child_student_id); paidBy = _uid;
+      }
+    } else if (_uid) {
+      // Přihlášený mladistvý se do kurzu sám nepřihlašuje -- za něj to dělá zákonný zástupce.
+      const pr = ((await sbGet(`profiles?id=eq.${encodeURIComponent(_uid)}&select=birthdate`)) || [])[0] || {};
+      const a = _age(pr.birthdate || b.birthdate);
+      if (a != null && a < 18) return res.status(403).json({ ok: false, error: 'Přihlášku za mladistvého podává zákonný zástupce — ať tě přihlásí ve své appce volbou „Pro moje dítě".', minor: true });
+    } else if (!b.adult_ok) {
+      return res.status(400).json({ ok: false, error: 'Potvrď, že je ti 18 let nebo víc. Za mladšího přihlášku podává zákonný zástupce.' });
+    }
+    const _who = { for_child: forChild, child_dob: childDob, guardian_name: guardianName, guardian_contact: guardianContact, paid_by: paidBy };
     // Keep the chosen OFFER NAME (validated against the cohort's price_tiers below); the old code
     // collapsed everything to 'regular'/'student', which would have thrown named offers away.
     const rows = await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohortId)}&select=*`);
@@ -287,15 +325,15 @@ export default async function handler(req, res) {
     {
       const _dupe = await sbGet(
         `cohort_members?cohort_id=eq.${encodeURIComponent(cohortId)}` +
-        `&email=eq.${encodeURIComponent(email)}` +
+        `&email=eq.${encodeURIComponent(email)}&name=eq.${encodeURIComponent(pName)}` +
         `&status=in.(deposit_claimed,deposit_paid,enrolled,completed,converted)&select=id&limit=1`
       );
-      if (_dupe && _dupe.length) return res.status(409).json({ ok: false, error: 'Na tento kurz už jsi přihlášený/á.', duplicate: true });
+      if (_dupe && _dupe.length) return res.status(409).json({ ok: false, error: forChild ? 'Tohle dítě už je do kurzu přihlášené.' : 'Na tento kurz už jsi přihlášený/á.', duplicate: true });
     }
     // Opakovaný pokus stejného e-mailu do 30 minut (zavřel QR a vrátil se) dostane TU SAMOU
     // rezervaci místa -- dřív, než se počítá kapacita, jinak by ho blokovalo jeho vlastní místo.
     if (b.method === 'qr') {
-      const _again = ((await sbGet(`cohort_members?cohort_id=eq.${encodeURIComponent(cohortId)}&email=eq.${encodeURIComponent(email)}&status=eq.reserved&select=id,created_at&limit=1`)) || [])[0];
+      const _again = ((await sbGet(`cohort_members?cohort_id=eq.${encodeURIComponent(cohortId)}&email=eq.${encodeURIComponent(email)}&name=eq.${encodeURIComponent(pName)}&status=eq.reserved&select=id,created_at&limit=1`)) || [])[0];
       if (_again) return res.status(200).json({ ok: true, qr: true, cohort_member_id: _again.id, reserved_at: _again.created_at, reused: true });
     }
     // place (a bare 'lead' has not paid, so it does not occupy one) and refuse once it is full.
@@ -324,9 +362,9 @@ export default async function handler(req, res) {
       // Na 'deposit_claimed' ji změní až „Zaplatil(a) jsem" (kind:'qr_claim'), na zaplaceno
       // návrat z banky u Finbricks.
       const memberQ = await sbInsert('cohort_members', {
-        cohort_id: cohortId, gym_id: c.gym_id, name, email, phone: (b.phone || '').trim() || null,
+        cohort_id: cohortId, gym_id: c.gym_id, name: pName, email, phone: (b.phone || '').trim() || null, ..._who,
         tier, status: 'reserved', attribution: _attr, source: 'online',
-        student_id: b.student_id || null,
+        student_id: participantSid,
         consent_at: new Date().toISOString(), consent_version: (b.consent_version || null),
         fbp: (b.fbp || null), fbc: (b.fbc || null)
       });
@@ -342,8 +380,8 @@ export default async function handler(req, res) {
     // (abandoned Stripe checkout leaves a 'lead'; retrying must not stack more rows).
     let member;
     {
-      const _lead = await sbGet(`cohort_members?cohort_id=eq.${encodeURIComponent(cohortId)}&email=eq.${encodeURIComponent(email)}&status=eq.lead&select=id&limit=1`);
-      const _leadFields = { name, phone: (b.phone || '').trim() || null, tier, attribution: _attr, student_id: b.student_id || null, consent_at: new Date().toISOString(), consent_version: (b.consent_version || null), fbp: (b.fbp || null), fbc: (b.fbc || null) };
+      const _lead = await sbGet(`cohort_members?cohort_id=eq.${encodeURIComponent(cohortId)}&email=eq.${encodeURIComponent(email)}&name=eq.${encodeURIComponent(pName)}&status=eq.lead&select=id&limit=1`);
+      const _leadFields = { name: pName, ..._who, phone: (b.phone || '').trim() || null, tier, attribution: _attr, student_id: participantSid, consent_at: new Date().toISOString(), consent_version: (b.consent_version || null), fbp: (b.fbp || null), fbc: (b.fbc || null) };
       if (_lead && _lead.length) {
         await sbPatch('cohort_members', `id=eq.${encodeURIComponent(_lead[0].id)}`, _leadFields);
         member = { id: _lead[0].id };
