@@ -14,8 +14,8 @@ const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABAS
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SECRET || process.env.SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
 
 // ---- level math (mirror of index.html: K=2.7, cap 80) ----
-function xpForLevel(L){ if(L<=1) return 0; if(L>80) L=80; return Math.floor(3*Math.pow(L-1,1.5)); }
-function levelOf(xp){ xp=Math.max(0,Math.round(xp||0)); let lvl=1; for(let L=80;L>=1;L--){ if(xp>=xpForLevel(L)){ lvl=L; break; } } return lvl; }
+function xpForLevel(L){ if(L<=1) return 0; if(L>90) L=90; return Math.floor(3*Math.pow(L-1,1.5)); }
+function levelOf(xp){ xp=Math.max(0,Math.round(xp||0)); let lvl=1; for(let L=90;L>=1;L--){ if(xp>=xpForLevel(L)){ lvl=L; break; } } return lvl; }
 
 // tiny REST helper against Supabase (service role bypasses RLS — safe, server-only)
 async function sb(path){
@@ -58,12 +58,17 @@ export default async function handler(req, res) {
     const sBk = await sb('bookings?student_id=eq.' + id +
       '&status=eq.active&type=neq.online&student_confirmed=eq.true&coach_confirmed=eq.true&select=id,discipline');
     const s1 = sBk.length;
-    const sGa = await sb('gym_attendance?student_id=eq.' + id + '&select=id,discipline');
+    // Jen vlastní docházka -- tréninky dětí (child_name) se rodiči do XP nepočítají (jako v appce).
+    const sGa = await sb('gym_attendance?student_id=eq.' + id + '&child_name=is.null&select=id,discipline');
     const sg = sGa.length;
     const sOnline = await sb('bookings?student_id=eq.' + id + '&status=eq.active&type=eq.online&fulfilled=eq.true&select=id');
     const onlineN = (sOnline||[]).length;
+    // STEJNÝ VZOREC JAKO computeMyXP V APPCE. Dřív se lišil (docházka i s dětmi, doporučení
+    // ×5 místo ×10, bez klubů a koučů) a veřejný profil ukazoval jinou úroveň než vlastní.
     let refN = 0; try { const rf = await sb('profiles?referred_by=eq.' + id + '&referral_rewarded=eq.true&select=id'); refN = (rf||[]).length; } catch(e){}
-    const studentXp = s1*10 + sg*2 + refN*5;
+    let gymRefN = 0; try { const gr = await sb('gyms?referred_by=eq.' + id + '&referral_rewarded=eq.true&select=id'); gymRefN = (gr||[]).length; } catch(e){}
+    let coachRefN = 0; try { const cr = await sb('profiles?referred_by=eq.' + id + '&ref_coach_qualified=eq.true&select=id'); coachRefN = (cr||[]).length; } catch(e){}
+    const studentXp = s1*10 + sg*2 + refN*10 + gymRefN*50 + coachRefN*50;
 
     // distinct sports + coaches (for milestones)
     const sportSet = new Set(); sBk.forEach(b => { if(b.discipline) sportSet.add(b.discipline); });
