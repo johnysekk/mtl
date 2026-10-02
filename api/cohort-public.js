@@ -80,6 +80,9 @@ export default async function handler(req, res) {
     let taken = 0;
     try { const cm = await sbGet(`cohort_members?cohort_id=eq.${encodeURIComponent(id)}&status=in.(deposit_claimed,deposit_paid,enrolled,completed,converted)&select=id`); taken = Array.isArray(cm) ? cm.length : 0; } catch (e) {}
 
+    // Veřejný detail (bez osobních údajů) jde z CDN: opakované otevření stránky -- i zahlcení --
+    // nejde do databáze. Osobní dotazy (?cm= / ?tk=) se nekešují, ty vrací dřívější return.
+    res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=60, stale-while-revalidate=120');
     return res.status(200).json({
       ok: true,
       cohort: {

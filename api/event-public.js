@@ -161,6 +161,9 @@ export default async function handler(req, res) {
     const cap = Number(ev.capacity || 0);
     const soldOut = !!ev.capacity_full || (cap > 0 && taken >= cap);
 
+    // Veřejný detail (bez osobních údajů) jde z CDN: opakované otevření stránky -- i zahlcení --
+    // nejde do databáze. Osobní dotazy (?cm= / ?tk=) se nekešují, ty vrací dřívější return.
+    res.setHeader('Cache-Control', 'public, max-age=30, s-maxage=60, stale-while-revalidate=120');
     return res.status(200).json({
       ok: true,
       event: {
