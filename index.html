@@ -21796,10 +21796,16 @@ async function renderGymMembers(){
     }catch(e){}
   }
   let _extras=[];
-  if(_isDefault) try{
+  try{
     const _ex={};
     try{ const { data:_ga } = await supaClient.from('gym_attendance').select('student_id,student_name,class_date').eq('gym_id',_myGymData.id).is('child_name',null); (_ga||[]).forEach(function(a){ const sid=a.student_id; if(!sid||_memSids.has(sid)) return; if(!_ex[sid]) _ex[sid]={student_id:sid, student_name:a.student_name||'', n:0, visits:0, drops:0, trials:0, last:null}; _ex[sid].visits++; if(a.class_date && (!_ex[sid].last || a.class_date>_ex[sid].last)) _ex[sid].last=a.class_date; if(!_ex[sid].student_name&&a.student_name) _ex[sid].student_name=a.student_name; }); }catch(e){}
-    try{ const { data:_gb } = await supaClient.from('gym_bookings').select('student_id,student_name,status,is_trial,class_date').eq('gym_id',_myGymData.id).in('status',['active','paid','paid_claimed']).is('child_name',null); (_gb||[]).forEach(function(b){ const sid=b.student_id; if(!sid||_memSids.has(sid)) return; if(!_ex[sid]) _ex[sid]={student_id:sid, student_name:b.student_name||'', n:0, visits:0, drops:0, trials:0, last:null}; if(b.is_trial) _ex[sid].trials++; else _ex[sid].drops++; if(!_ex[sid].student_name&&b.student_name) _ex[sid].student_name=b.student_name; }); }catch(e){}
+    try{ const { data:_gb } = await supaClient.from('gym_bookings').select('student_id,student_name,status,is_trial,class_date,club_cancelled_at').eq('gym_id',_myGymData.id).in('status',['active','paid','paid_claimed','cancelled']).is('child_name',null); (_gb||[]).forEach(function(b){ const sid=b.student_id; if(!sid||_memSids.has(sid)) return;
+      const clubCx=(b.status==='cancelled' && !!b.club_cancelled_at);
+      if(b.status==='cancelled' && !clubCx) return;   // zrušené studentem se nepočítají
+      if(!_ex[sid]) _ex[sid]={student_id:sid, student_name:b.student_name||'', n:0, visits:0, drops:0, trials:0, trialsCx:0, last:null};
+      if(clubCx){ if(b.is_trial) _ex[sid].trialsCx=(_ex[sid].trialsCx||0)+1; }
+      else if(b.is_trial) _ex[sid].trials++; else _ex[sid].drops++;
+      if(!_ex[sid].student_name&&b.student_name) _ex[sid].student_name=b.student_name; }); }catch(e){}
     _extras=Object.keys(_ex).map(function(k){ return _ex[k]; });
   }catch(e){}
   // FOTKY ČLENŮ. Stejné kolečko jako v docházce -- trenér pozná obličej dřív než jméno.
@@ -21880,7 +21886,15 @@ async function renderGymMembers(){
   // rozvrhu, zavřeno). Komu přesně, se vybírá až v tom okně.
   // POZOR na pořadí: _nExp se deklaruje až níž (const), takže tady se čte přímo z window --
   // sáhnout na const před jeho deklarací vyhodí chybu a celý render spadne na "Načítám...".
-  let html=`${actCount||canCount||(window._gmLapsedCount||0)?`<button id="gmBulkBtn" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:13px;font-weight:800;cursor:pointer;font-family:'DM Sans';">\uD83D\uDCAC ${EN?'Message members':'Napsat členům zprávu'}</button>
+  // ZÁLOŽKY: Stálí členové · Studenti bez členství · Dlouho nechodící. Otevře se poslední
+  // používaná (výchozí Stálí členové); ostatní se ukážou až po klepnutí.
+  const _paneBtn=function(k,lbl){ return '<button class="gmPaneBtn" data-p="'+k+'" style="padding:10px 6px;border:none;border-radius:10px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+lbl+' <span class="gmPaneCnt" data-p="'+k+'" style="opacity:.75;"></span></button>'; };
+  let html='<div id="gmPaneBar" style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:4px;margin-bottom:12px;">'
+      +_paneBtn('mem','\ud83d\udc65 '+(EN?'Members':'St\u00e1l\u00ed \u010dlenov\u00e9'))
+      +_paneBtn('ex','\ud83e\udd4a '+(EN?'Without membership':'Bez \u010dlenstv\u00ed'))
+      +_paneBtn('wb','\ud83d\udc4b '+(EN?'Not coming':'Dlouho nechod\u00edc\u00ed'))
+    +'</div><div class="gmPane" data-p="mem">';
+  html+=`${actCount||canCount||(window._gmLapsedCount||0)?`<button id="gmBulkBtn" style="width:100%;padding:10px;margin-bottom:10px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:12px;font-size:13px;font-weight:800;cursor:pointer;font-family:'DM Sans';">\uD83D\uDCAC ${EN?'Message members':'Napsat členům zprávu'}</button>
   ${(function(){
     // Komunikace se členy patří k psaní členům -- je to jeho následek, ne provozní položka
     // menu. Vidí ji jen majitel a spolumajitel.
@@ -21936,19 +21950,24 @@ async function renderGymMembers(){
       <button id="gmNext"${_gmPage>=_totalPages-1?' disabled':''} style="padding:8px 14px;border-radius:10px;border:1.5px solid var(--border);background:${_gmPage>=_totalPages-1?'var(--surf)':'#fff'};color:${_gmPage>=_totalPages-1?'var(--light)':'var(--dark)'};font-weight:800;font-size:15px;cursor:${_gmPage>=_totalPages-1?'default':'pointer'};font-family:'DM Sans';">›</button>
     </div>`;
   }
-  if(_isDefault && _extras.length){
+  html+='</div><div class="gmPane" data-p="ex">';
+  if(!_extras.length){ html+='<div style="font-size:13px;color:var(--mid);background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:14px;">'+(EN?'Nobody trains here without a membership right now.':'Te\u010f u v\u00e1s nikdo netr\u00e9nuje bez \u010dlenstv\u00ed.')+'</div>'; }
+  if(_extras.length){
     // STUDENTI BEZ ČLENSTVÍ: dřív schovaní v rozbalovacím řádku. Jsou to lidi, kteří k vám
     // chodí a ještě se nerozhodli -- nejlepší kandidáti na členství. Vidět hned, s tím, kolikrát
     // přišli, jestli jen zkusili zdarma, kdy byli naposledy, a s tlačítkem Napsat.
     try{ const _np=_extras.map(function(e){ return e.student_id; }).filter(function(id){ return id && !window._gmProf[id]; });
       if(_np.length){ const { data:_pp2 }=await supaClient.from('profiles').select('id,photo_url,photo_thumb').in('id',_np); (_pp2||[]).forEach(function(pr){ window._gmProf[pr.id]=pr; }); } }catch(e){}
     _extras.sort(function(a,b){ return String(b.last||'').localeCompare(String(a.last||'')); });
-    html+=`<div style="margin-top:18px;border:1px solid var(--border);border-radius:14px;background:#fff;padding:12px 14px;">
+    html+=`<div style="border:1px solid var(--border);border-radius:14px;background:#fff;padding:12px 14px;">
       <div style="font-size:14px;font-weight:800;color:var(--dark);">🥊 ${EN?'Students without a membership':'Studenti bez \u010dlenstv\u00ed'} <span style="color:var(--mid);font-weight:700;">\u00b7 ${_extras.length}</span></div>
-      <div style="font-size:12px;color:var(--mid);line-height:1.5;margin:3px 0 8px;">${EN?'They train on drop-ins or tried a free class. Your best candidates for a membership \u2014 write to them, or open them to award a belt.':'Chod\u00ed na jednor\u00e1zov\u00e9 vstupy nebo zkusili tr\u00e9nink zdarma. Nejlep\u0161\u00ed kandid\u00e1ti na \u010dlenstv\u00ed \u2014 napi\u0161 jim, nebo je otev\u0159i a ud\u011bl p\u00e1sek.'}</div>`
+      <div style="font-size:12px;color:var(--mid);line-height:1.5;margin:3px 0 8px;">${(function(){ const _tr=!!(_myGymData && parseInt(_myGymData.trial_classes||0,10)>0); const _bl=(typeof gymBeltDiscs==='function') && gymBeltDiscs().length>0;
+        return EN ? ('They come on drop-ins'+(_tr?' or booked a free trial':'')+'. Your best candidates for a membership \u2014 write to them'+(_bl?', or open them to award a belt':'')+'.')
+                  : ('Chod\u00ed na jednor\u00e1zov\u00e9 vstupy'+(_tr?' nebo rezervovali tr\u00e9nink zdarma':'')+'. Nejlep\u0161\u00ed kandid\u00e1ti na \u010dlenstv\u00ed \u2014 napi\u0161 jim'+(_bl?', nebo je otev\u0159i a ud\u011bl p\u00e1sek':'')+'.'); })()}</div>`
       +_extras.map(function(e){
         const tags=[];
-        if(e.trials && !e.drops) tags.push('<span style="font-size:10.5px;font-weight:800;color:#8A6A00;background:#FFF6D6;border-radius:7px;padding:1px 7px;">\ud83c\udf81 '+(EN?'free trial':'zku\u0161ebn\u00ed zdarma')+'</span>');
+        if(e.trials) tags.push('<span style="font-size:10.5px;font-weight:800;color:#8A6A00;background:#FFF6D6;border-radius:7px;padding:1px 7px;">\ud83c\udf81 '+(EN?'booked a free trial':'rezervoval tr\u00e9nink zdarma')+'</span>');
+        if(e.trialsCx) tags.push('<span style="font-size:10.5px;font-weight:800;color:var(--mid);background:var(--surf);border:1px solid var(--border);border-radius:7px;padding:1px 7px;">\ud83d\udeab '+(EN?'trial cancelled by the club \u2014 entitlement returned':'zku\u0161ebn\u00ed zru\u0161il klub \u2014 n\u00e1rok vr\u00e1cen')+'</span>');
         if(e.drops) tags.push('<span style="font-size:10.5px;font-weight:800;color:#8A4B00;background:#FFF0E0;border-radius:7px;padding:1px 7px;">\ud83c\udfab '+e.drops+'\u00d7 '+(EN?'drop-in':'vstup')+'</span>');
         const lastTxt=e.last?((EN?'last ':'naposledy ')+_mdRel(e.last)):(EN?'not trained yet':'zat\u00edm netr\u00e9noval');
         return `<div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--border);">
@@ -21958,8 +21977,17 @@ async function renderGymMembers(){
           <button class="exMsg" data-sid="${e.student_id}" data-name="${(e.student_name||'').replace(/"/g,'&quot;')}" style="flex:none;padding:7px 12px;background:var(--dark);color:#fff;border:none;border-radius:9px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'Message':'Napsat'}</button>
         </div>`; }).join('')
       +`</div>`;
+  html+='</div><div class="gmPane" data-p="wb" id="gmWinPane"><div style="font-size:13px;color:var(--mid);padding:14px;">\u2026</div></div>';
   }
   box.innerHTML=html;
+  // Přepínání záložek + počty
+  { const showP=function(p){ window._gmPane=p;
+      box.querySelectorAll('.gmPane').forEach(function(el){ el.style.display=(el.dataset.p===p)?'':'none'; });
+      box.querySelectorAll('.gmPaneBtn').forEach(function(b){ const on=b.dataset.p===p; b.style.background=on?'var(--dark)':'transparent'; b.style.color=on?'#fff':'var(--mid)'; }); };
+    box.querySelectorAll('.gmPaneBtn').forEach(function(b){ b.onclick=function(){ showP(b.dataset.p); }; });
+    const _c=function(p,n){ const e=box.querySelector('.gmPaneCnt[data-p="'+p+'"]'); if(e) e.textContent=(n!=null)?('\u00b7 '+n):''; };
+    _c('mem', actCount); _c('ex', _extras.length);
+    showP(window._gmPane||'mem'); }
   box.querySelectorAll('.gmLvlChip').forEach(c=>c.onclick=()=>{ _gmMembLvl=c.dataset.v||null; window._gmPage=0; renderGymMembers(); });
   box.querySelectorAll('.gmKidChip').forEach(c=>c.onclick=()=>{ window._gmMembKid=c.dataset.v||null; window._gmPage=0; renderGymMembers(); });
   // Píše se CELÉMU seznamu, ne jen zobrazené stránce -- kdo má patnáct doběhlých a dvacet na
@@ -21987,20 +22015,21 @@ async function renderGymMembers(){
     else { openGymMemberDetail(c.dataset.sid, c.dataset.name); }
   });
   box.querySelectorAll('.mtTable th').forEach(th=>th.onclick=()=>{ const k=th.dataset.k; const tb=th.closest('table').querySelector('tbody'); const rows=Array.prototype.slice.call(tb.querySelectorAll('tr')); const asc=th.dataset.dir!=='asc'; th.closest('thead').querySelectorAll('th').forEach(x=>{x.classList.remove('mtActive');x.removeAttribute('data-dir');}); th.dataset.dir=asc?'asc':'desc'; th.classList.add('mtActive'); const num=(k==='mrr'||k==='joined'||k==='status'||k==='att'||k==='ends'); rows.sort((a,b)=>{ let av,bv; if(k==='name'){av=a.dataset.vname;bv=b.dataset.vname;} else if(k==='plan'){av=a.dataset.plan;bv=b.dataset.plan;} else {av=parseFloat(a.dataset[k])||0;bv=parseFloat(b.dataset[k])||0;} if(num) return asc?av-bv:bv-av; return asc?(av<bv?-1:av>bv?1:0):(av>bv?-1:av<bv?1:0); }); rows.forEach(r=>tb.appendChild(r)); });
-  // ── Win-back: členové, kteří dlouho nedorazili ──
-  if(_isDefault) try{
+  // ── Win-back: členové, kteří dlouho nedorazili (záložka „Dlouho nechodící") ──
+  try{
     const { data: _actMems } = await supaClient.from('gym_memberships').select('student_id,student_name,created_at').eq('gym_id',gid).eq('status','active').or('paid_to.neq.coach,paid_to.is.null');
     const { data: aa } = await supaClient.rpc('gym_member_last_visit',{ p_gym_id:gid });
     const last={}; (aa||[]).forEach(a=>{ last[a.student_id]=a.last_visit; });
     const inactive=computeCold(_actMems||[], last);
+    { const _wc=box.querySelector('.gmPaneCnt[data-p="wb"]'); if(_wc) _wc.textContent='\u00b7 '+inactive.length; }
+    const _wp=box.querySelector('#gmWinPane');
+    if(_wp && !inactive.length) _wp.innerHTML='<div style="font-size:13px;color:var(--mid);background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:14px;">'+(EN?'Every member has trained within the last two weeks.':'V\u0161ichni \u010dlenov\u00e9 tr\u00e9novali v posledn\u00edch dvou t\u00fddnech.')+'</div>';
     if(inactive.length){
-      // Seznam se může vykreslit dvakrát souběžně (dvě obnovení) a každé přidalo sekci znovu.
-      { const _old=box.querySelector('#gmWinback'); if(_old) _old.remove(); }
       const wb=document.createElement('div'); wb.id='gmWinback';
-      wb.innerHTML=`<div style="font-size:12px;font-weight:700;color:#B26A00;margin:16px 0 4px;">👋 ${EN?'Reach out — drifting members':'Ozvi se — možná odcházejí'} (${inactive.length})</div>
+      wb.innerHTML=`<div style="font-size:14px;font-weight:800;color:var(--dark);margin:0 0 4px;">👋 ${EN?'Not coming for a while':'Dlouho nechod\u00edc\u00ed'} \u00b7 ${inactive.length}</div>
         <p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:0 0 8px;">${EN?'Members who have not trained for 2+ weeks. A quick message often brings them back. Highlighted red: a month or more without training, or never came yet.':'\u010clenov\u00e9, kte\u0159\u00ed 2+ t\u00fddny netr\u00e9novali. Kr\u00e1tk\u00e1 zpr\u00e1va je \u010dasto vr\u00e1t\u00ed. \u010cerven\u011b: m\u011bs\u00edc a v\u00edc bez tr\u00e9ninku, nebo je\u0161t\u011b nikdy nep\u0159i\u0161el.'}</p>`
         +inactive.map(coldItemHtml).join('');
-      box.appendChild(wb);
+      if(_wp){ _wp.innerHTML=''; _wp.appendChild(wb); } else box.appendChild(wb);
       box.querySelectorAll('.wbMsg').forEach(b=>b.onclick=()=>messageGymMember(b.dataset.sid, b.dataset.name));
       maybeNotifyCold(inactive.length, _myGymData.name);
     }
@@ -29984,7 +30013,7 @@ function _mdTilesHtml(o){
     +(o.level!=null?_mdTile('\u2b50', EN?'Level':'\u00darove\u0148', (EN?'Level ':'\u00darove\u0148 ')+o.level, '#FFF4E0'):'')
     +(o.spent!=null?_mdTile('\ud83d\udcb3', EN?'Spent here':'Utraceno u v\u00e1s', o.spent, '#EAF7F0'):'')
     +(o.drops!=null && o.spent!=null?_mdTile('\ud83c\udfab', EN?'Drop-ins bought':'Jednor\u00e1zov\u00e9 vstupy', dr+' '+(EN?(dr===1?'drop-in':'drop-ins'):_czPl(dr,'koupen\u00fd','koupen\u00e9','koupen\u00fdch')), '#FFF4E0'):'')
-    +(o.trials?_mdTile('\ud83c\udf81', EN?'Free trial':'Zku\u0161ebn\u00ed tr\u00e9nink', (EN?(o.trials+'\u00d7 free'):(o.trials+'\u00d7 zdarma')), '#FFF8E6'):'')
+    +((o.trials||o.trialsCx)?_mdTile('\ud83c\udf81', EN?'Free trial':'Zku\u0161ebn\u00ed tr\u00e9nink', (o.trials?(EN?(o.trials+'\u00d7 booked'):(o.trials+'\u00d7 rezervov\u00e1n')):'')+(o.trialsCx?('<span style="display:block;font-size:11px;font-weight:600;color:var(--mid);">'+(EN?(o.trialsCx+'\u00d7 cancelled by the club, entitlement returned'):(o.trialsCx+'\u00d7 zru\u0161il klub, n\u00e1rok vr\u00e1cen'))+'</span>'):''), '#FFF8E6'):'')
     +_mdTile('\ud83d\udcc5', EN?'Member for':'\u010clenem klubu', (o.since?(mo<1?(EN?'under a month':'m\u00e9n\u011b ne\u017e m\u011bs\u00edc'):(mo+' '+(EN?(mo===1?'month':'months'):_czPl(mo,'m\u011bs\u00edc','m\u011bs\u00edce','m\u011bs\u00edc\u016f')))):(EN?'not a member':'nen\u00ed \u010dlenem')), '#E6F7EE')
     +_mdTile('\ud83d\udc40', EN?'Last training':'Posledn\u00ed tr\u00e9nink', _mdRel(o.last), '#EAF2FF')
     +'</div>';
@@ -39678,7 +39707,7 @@ async function _openGymMemberDetailInner(sid, name){
     _q(supaClient.from('gym_attendance').select('class_date,class_name').eq('gym_id',_gid).eq('student_id',sid)),
     _q(supaClient.from('profiles').select('belts,is_fighter,fight_record,is_minor,phone,phone_show,email,photo_url').eq('id',sid).single()),
     _q(supaClient.from('profiles').select('guardian_name,guardian_email,guardian_phone').eq('id',sid).maybeSingle()),
-    _q(supaClient.from('gym_bookings').select('id,status,is_trial').eq('gym_id',_gid).eq('student_id',sid)),
+    _q(supaClient.from('gym_bookings').select('id,status,is_trial,club_cancelled_at').eq('gym_id',_gid).eq('student_id',sid)),
     _q(supaClient.from('grace_visits').select('*').eq('gym_id',_gid).eq('student_id',sid).eq('settled',false).order('visit_date',{ascending:true})),
     _q(supaClient.from('blocked_students').select('id').eq('gym_id',_gid).eq('student_id',sid).maybeSingle()),
     _q(supaClient.from('proof_verifications').select('scope,verified_at').eq('gym_id',_gid).eq('student_id',sid)),
@@ -39688,7 +39717,8 @@ async function _openGymMemberDetailInner(sid, name){
   ]);
   // Zkušební trénink zdarma není koupený vstup -- počítá se zvlášť.
   let mems=_rM.data||[], att=_rA.data||[], drops=(_rD.data||[]).filter(function(b){ return !b.is_trial && ['cancelled','refunded','expired'].indexOf(String(b.status||''))<0; });
-  const _trialsN=(_rD.data||[]).filter(function(b){ return b.is_trial; }).length;
+  const _trialsN=(_rD.data||[]).filter(function(b){ return b.is_trial && b.status!=='cancelled'; }).length;
+  const _trialsCx=(_rD.data||[]).filter(function(b){ return b.is_trial && b.status==='cancelled' && b.club_cancelled_at; }).length;
   let _belts={}; let _mdFighter=false, _mdRec=null;
   // Nad blokem, protoze se pouziva i za nim. Driv to bylo const uvnitr try a karta padala
   // na "_pr is not defined" -- coz vypadalo jako chybejici sloupec v databazi.
@@ -39761,7 +39791,7 @@ async function _openGymMemberDetailInner(sid, name){
     // Utraceno: zaplacené transakce u klubu mínus vrácené (haléře -> koruny). Celý účet, i za děti.
     let _sp=0, _cur=(_myGymData&&_myGymData.currency)||'CZK';
     (_rTx.data||[]).forEach(function(t){ if(['failed','canceled','cancelled'].indexOf(String(t.status||''))>=0) return; _sp+=(Number(t.gross_amount)||0)-(Number(t.refund_amount)||0); if(t.currency) _cur=t.currency; });
-    html+=_mdTilesHtml({ trainings:totalTrain, last30:_p[0], prev30:_p[1], drops:drops.length, trials:_trialsN, months:monthsMember, since:sinceTs, last:lastSeen,
+    html+=_mdTilesHtml({ trainings:totalTrain, last30:_p[0], prev30:_p[1], drops:drops.length, trials:_trialsN, trialsCx:_trialsCx, months:monthsMember, since:sinceTs, last:lastSeen,
       level:(_xp!=null && typeof levelInfo==='function')?levelInfo(_xp).level:null,
       spent:(fmtPrice(Math.max(0,_sp)/100,_cur)+' '+_curSym(_cur)) }); }
   try{ html+=_mdBeltSummary(_belts); }catch(e){}
@@ -40194,10 +40224,15 @@ function _bugDiag(){
   }catch(e){}
   return d;
 }
+// Odkud hlášení přišlo: název obrazovky, jak ho vidí člověk („Můj profil"), a v závorce
+// interní id pro dohledání v kódu. Dřív jen id („shMe"), kterému nikdo nerozuměl.
 function _bugWhere(){
   try{
-    const open=[...document.querySelectorAll('.sheet.open')].map(x=>x.id);
-    return open.length ? open[open.length-1] : (document.body.className||'deck');
+    const open=[...document.querySelectorAll('.sheet.open')];
+    if(!open.length) return 'Hlavn\u00ed obrazovka ('+(document.body.className||'deck')+')';
+    const sh=open[open.length-1];
+    const t=((sh.querySelector('.shdr-title')||{}).textContent||'').replace(/\s+/g,' ').trim();
+    return (t?(t.slice(0,40)+' ('+sh.id+')'):sh.id);
   }catch(e){ return null; }
 }
 // Zmenšení a překódování v prohlížeči: z 2 MB PNG je ~150 kB JPEG. Bez toho by se do
