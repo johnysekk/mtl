@@ -14165,9 +14165,9 @@ async function openGymProfile(g){
   const _pkS=(x)=>String(x.student_id)+'|'+(x.child_name||'');
   const isReleased=(sid,k,child)=> _resvAll.some(r=> r.student_id===sid && String(r.child_name||'')===String(child||'') && relKey(r)===k && r.status==='released');
   _resvAll.forEach(r=>{ if(r.status==='released') return; const k=relKey(r); if(currentUser&&r.student_id===currentUser.id) mineSet.add(k); });
-  const plans = gymMembPlans(g);
+  const plans = gymSellablePlans(g);
   let _coachPlans=[]; try{ Object.values(window._gymCoachPricing||{}).forEach(cp=>{ let pl=[]; try{ pl=(typeof cp.plans==='string'?JSON.parse(cp.plans):cp.plans)||[]; }catch(e){} pl.forEach(pp=>_coachPlans.push(Object.assign({}, pp, { coach:cp.coach_id, coachName:cp.coach_name, lead:cp.coach_id, leadName:cp.coach_name, _cur:cp.currency }))); }); }catch(e){}
-  const plansAll = plans.concat(_coachPlans);
+  const plansAll = plans;   // autonomní kouči zrušeni -- jejich ceníky se už nenabízejí
   const _memMinPrice = plansAll.length ? Math.min(...plansAll.map(p=>Number(p.price)||0)) : 0;
   const plansBlock = plansAll.length ? `
     <details style="border:1px solid var(--border);border-radius:14px;overflow:hidden;margin-bottom:12px;"><summary style="cursor:pointer;padding:13px 15px;font-weight:800;font-size:14px;display:flex;justify-content:space-between;align-items:center;"><span>\ud83c\udf9f\ufe0f ${_mTerm(g).many} <span style="color:var(--light);font-weight:600;font-size:12px;">\u00b7 ${plansAll.length}</span></span>${_memMinPrice?`<span style="font-family:'Bebas Neue';font-size:20px;color:var(--dark);letter-spacing:.02em;font-weight:400;">${LANG==='en'?'from ':'od '}${fmtPrice(_memMinPrice, g.currency)} ${symOf(g.currency)}</span>`:''}</summary><div style="padding:8px 14px 12px;">
@@ -15102,7 +15102,7 @@ function _wdGate(g, plan, priceTxt, price, cur){
 async function subscribeGymMembership(g, plan, _child, _cleared){
   // Přihláška za člena: u dětského členství až po výběru dítěte a ZA DÍTĚ (viz níž).
   if(!(plan && plan.kids) && !(await _memberAppGate(g))) return;
-  if(!_planSellable(plan)) return;
+  if(!_planSellable(plan, g)) return;
   // Zástupce platí za mladistvého: rezervace i Stripe metadata musí nést JEHO id, ne id toho,
   // kdo zrovna platí. Bez parametru se nic nemění. Zbytek po nákupu za sdílené dítě se tu
   // zahodí, aby další nákup pro sebe nešel na cizí účet.
@@ -15111,7 +15111,7 @@ async function subscribeGymMembership(g, plan, _child, _cleared){
   if(window._blockedByGyms && window._blockedByGyms.has(g.id)){ toast(LANG==='en'?'⚠️ Not available':'⚠️ Nedostupné'); return; }
   if(g && g.account_suspended){ toast(LANG==='en'?'⚠️ This club is temporarily paused':'⚠️ Tento klub je dočasně pozastavený'); return; }
   if(!currentUser){ toast(L('⚠️ Nejdřív se přihlas')); return; }
-  if(!plan){ const pl=gymMembPlans(g); plan=pl[0]; }
+  if(!plan){ const pl=gymSellablePlans(g); plan=pl[0]; }
   if(!plan){ toast(LANG==='en'?('\u26a0\ufe0f The club has no '+_mwG(g).one+' set up'):('\u26a0\ufe0f Klub nem\u00e1 nastaven\u00e9 '+(_sellKind({gym:g})==='pass'?'permanentky':'\u010dlenstv\u00ed'))); return; }
   if(plan.kids && _child===undefined){ return openChildPicker({parentReq:plan.parentReq, ageMin:plan.ageMin, ageMax:plan.ageMax, memb:true}, (ch)=>subscribeGymMembership(g, plan, ch, _cleared)); }
   if(_child && !_child._gated){
@@ -23953,7 +23953,7 @@ function showTicketQR(ticketId){
 }
 function _guestMemb(plan){
   const g=_recGym; const list=$('recList'); if(!g||!list||!plan) return;
-  if(!_planSellable(plan)) return;
+  if(!_planSellable(plan, (typeof _myGymData!=='undefined'?_myGymData:null))) return;
   const EN=LANG==='en'; const cur=g.currency||'CZK'; const sym=_curSym(cur);
   const price=plan.price||0; const rate=_recRate(); const fee=Math.round(price*rate*100)/100;
   const qrMode=(typeof _mtlPayMode==='function'&&_mtlPayMode(g)==='qr_bank') && !!g.receiver_id_value;
@@ -24500,7 +24500,7 @@ function _recpMembPay(pi){
   const rate=_recRate();
   const plans=(typeof gymMembPlans==='function'?gymMembPlans(g):[])||[];
   const plan=plans[+pi]; if(!plan){ toast('\u26a0\ufe0f'); return; }
-  if(!_planSellable(plan)) return;
+  if(!_planSellable(plan, (typeof _myGymData!=='undefined'?_myGymData:null))) return;
   const price=plan.price||0; const fee=Math.round(price*rate*100)/100;
   const qrMode=(typeof _mtlPayMode==='function'&&_mtlPayMode(g)==='qr_bank');
   const hasRecv=!!g.receiver_id_value;
@@ -24571,7 +24571,7 @@ function _recpMembPay(pi){
 // statistiky i XP zůstávají jemu, mění se jen to, kdo účet uhradil. Bez toho parametru se nic
 // nemění a člověk platí sám za sebe.
 async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom, _dpick){
-  if(kind==='memb' && !_planSellable(plan)) return;
+  if(kind==='memb' && !_planSellable(plan, g)) return;
   const _stuId=(_forWhom&&_forWhom.id)||currentUser.id;
   let _qrPayeeObj=g, _qrPaidTo='gym', _qrPayeeCoach=null, _qrCredit='', _qrRefD=0;
   const EN=LANG==='en';
@@ -25431,7 +25431,32 @@ function _planAccess(plan){
 // POSLEDNÍ POJISTKA PŘED PRODEJEM. Rozsah je u plánu povinný, takže sem se nemá jak dostat
 // plán bez něj -- leda ze starých dat. Prodat ho ale nelze: členství bez rozsahu by v seznamu
 // členů svítilo „nenastaveno" a nikdo by nevěděl, co si student koupil.
-function _planSellable(plan){
+// MÁ POLOŽKA V ROZVRHU NA CO CHODIT? Permanentka/členství se prodává jen tehdy, když v rozvrhu
+// klubu existuje opakovaná lekce, na kterou platí: u položky s vybranými lekcemi (classes) aspoň
+// jedna z nich, u úrovní (access) aspoň jedna lekce s tou úrovní, u „všech lekcí" aspoň jedna
+// lekce vůbec. Jinak se z nabídky skryje -- člověk by koupil permanentku, na kterou nic není.
+// Jednorázové termíny (once) se nepočítají, permanentka je na opakované tréninky.
+function _gymRecurring(g){
+  try{ const raw=(g && g.schedule) || '[]'; const arr=(typeof raw==='string')?JSON.parse(raw||'[]'):(raw||[]);
+    return (Array.isArray(arr)?arr:[]).filter(function(c){ return c && !c.once && !c.cancelled; }); }catch(e){ return []; }
+}
+function _planCovered(g, plan){
+  if(!g || !plan) return true;
+  const sch=_gymRecurring(g); if(!sch.length) return false;
+  const cls=(plan.classes && plan.classes.length) ? plan.classes : null;
+  if(cls){ const names=sch.map(function(c){ return String(c.name||'').trim().toLowerCase(); });
+    return cls.some(function(n){ return names.indexOf(String(n||'').trim().toLowerCase())>=0; }); }
+  const acc=_planAccess(plan); if(!acc.length) return false;
+  if(acc.indexOf('all')>=0) return true;
+  return sch.some(function(c){ return acc.indexOf(c.level||'')>=0; });
+}
+function gymSellablePlans(g){ return gymMembPlans(g).filter(function(p){ return _planCovered(g, p); }); }
+function _planSellable(plan, g){
+  if(g && _planAccess(plan).length && !_planCovered(g, plan)){
+    toast(LANG==='en' ? 'This plan currently has no class in the club\u2019s schedule \u2014 it cannot be bought.'
+                      : 'Na tuhle polo\u017eku te\u010f v rozvrhu klubu nen\u00ed \u017e\u00e1dn\u00e1 lekce \u2014 koupit ji nejde.');
+    return false;
+  }
   if(_planAccess(plan).length) return true;
   toast(LANG==='en'
     ? 'This membership has no classes set. The club must set them before it can be sold.'
@@ -25721,7 +25746,8 @@ function renderPlansEditor(){
         <div style="padding-top:8px;">
           ${(_orphan.length && !(p.classes&&p.classes.length))?`<div style="background:#FFF8E6;border:1px solid #F0DFA8;border-radius:10px;padding:9px 11px;font-size:11px;color:#7A5B12;line-height:1.5;margin-bottom:10px;">\u26a0\ufe0f ${LANG==='en'
             ? ('No class in the schedule has the level '+_orphan.join(', ')+' \u2014 a member on this plan has nowhere to go.')
-            : ('\u017d\u00e1dn\u00e1 lekce v rozvrhu nem\u00e1 \u00farove\u0148 '+_orphan.join(', ')+' \u2014 s touhle polo\u017ekou studenta nepust\u00ed\u0161 nikam.')}</div>`:''}
+            : ('\u017d\u00e1dn\u00e1 lekce v rozvrhu nem\u00e1 \u00farove\u0148 '+_orphan.join(', ')+' \u2014 '+((_planCovered(_myGymData,p))?'s touhle \u00farovn\u00ed studenta nepust\u00ed\u0161 nikam.':'polo\u017eka je proto SKRYT\u00c1 z nab\u00eddky, dokud takovou lekci do rozvrhu nep\u0159id\u00e1\u0161.'))}</div>`:''}
+          ${(!_planCovered(_myGymData,p) && !(_orphan.length && !(p.classes&&p.classes.length)) && access.length)?`<div style="background:#FEECEC;border:1px solid #F3C9C0;border-radius:10px;padding:9px 11px;font-size:11px;color:#9A2A1A;line-height:1.45;margin-top:6px;">${LANG==='en'?'Hidden from the offer \u2014 no recurring class in the schedule matches this plan.':'Skryt\u00e9 z nab\u00eddky \u2014 v rozvrhu nen\u00ed \u017e\u00e1dn\u00e1 opakovan\u00e1 lekce, na kterou by polo\u017eka platila.'}</div>`:''}
           <div style="font-size:11px;color:var(--light);margin-bottom:3px;">${LANG==='en'?'Only these classes (optional)':'Jen tyto lekce (nepovinn\u00e9)'}</div>
           <div style="margin-bottom:4px;">${(function(){
             const list=_gymClassList();
@@ -25988,7 +26014,12 @@ function _schDeleteClass(i){
   const _msg=EN
     ? ('Delete the recurring class "'+_nm+'"?\n\nOK = remove it and ALL upcoming occurrences.\nCancel = keep it (you can cancel a single date from Attendance).')
     : ('Smazat opakovanou lekci \u201e'+_nm+'"?\n\nOK = smazat ji i V\u0160ECHNY nadch\u00e1zej\u00edc\u00ed term\u00edny.\nZru\u0161it = ponechat (jednotliv\u00fd term\u00edn zru\u0161\u00ed\u0161 v Doch\u00e1zce).');
-  if(!confirm(_msg)) return;
+  // Které permanentky/členství tím přijdou o poslední lekci (a zmizí z nabídky)?
+  let _lost=[];
+  try{ const _before=Object.assign({}, _myGymData, { schedule:_gymSchedule });
+    const _after=Object.assign({}, _myGymData, { schedule:_gymSchedule.filter(function(_x,_k){ return _k!==i; }) });
+    _lost=gymMembPlans(_myGymData).filter(function(p){ return _planCovered(_before,p) && !_planCovered(_after,p); }).map(function(p){ return p.name||''; }); }catch(e){}
+  if(!confirm(_msg+(_lost.length?(EN?('\n\n\u26a0\ufe0f After this, '+_lost.join(', ')+' will have no class and will be hidden from the offer.'):('\n\n\u26a0\ufe0f Potom u\u017e '+_lost.join(', ')+' nebude m\u00edt \u017e\u00e1dnou lekci a skryje se z nab\u00eddky.')):''))) return;
   _gymSchedule.splice(i,1); _schedEdit=-1; renderScheduleEditor();
   toast(EN?'Removed — save to apply':'Odebr\u00e1no \u2014 ulo\u017e pro potvrzen\u00ed');
 }
