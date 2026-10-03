@@ -204,7 +204,7 @@ export async function pisSettle(rec, tbl, status){
           let _gname=''; try{ const _gid=_gid2; if(_gid){ const _gn=await sb.from('gyms').select('name').eq('id',_gid).maybeSingle(); _gname=(_gn.data&&_gn.data.name)||''; } }catch(e){}
           // auto:true => the bank confirmed it (PIS), not the club. The client renderer builds the visible text from these fields.
           let nd;
-          if(tbl==='gym_memberships'){ nd={ kind:'payment_confirmed', auto:true, goto:'memberships', gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.plan_name||'') }; }
+          if(tbl==='gym_memberships'){ let _sk='membership'; try{ const { data:_go }=await sb.from('gyms').select('org_form').eq('id',rec.gym_id).maybeSingle(); _sk=((rec.paid_to==='coach')||!(_go&&_go.org_form==='nonprofit'))?'pass':'membership'; }catch(e){} nd={ kind:'payment_confirmed', sk:_sk, auto:true, goto:'memberships', gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.plan_name||'') }; }
           else if(tbl==='bookings'){ nd={ kind:'payment_confirmed', auto:true, goto:'bookings', amount:_amt, date:_dte, time:_tme, coach:(rec.coach_name||'') }; }
           else if(tbl==='event_tickets'){ nd={ kind:'payment_confirmed', auto:true, goto:'tickets', event_id:rec.event_id, gym_name:_gname, amount:_amt, qty:(_oQty||1), tiers:_oTiers }; }
           else if(tbl==='merch_orders'){ nd={ kind:'payment_confirmed', auto:true, goto:'merch', merch_id:rec.merch_id, gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.item_name||'') }; }

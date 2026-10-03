@@ -1,3 +1,4 @@
+import { sellKind } from './_sell-kind.js';
 // /api/membership-expiry-cron — end memberships whose paid period has run out.
 //
 // WHY THIS EXISTS
@@ -20,6 +21,14 @@
 const SB_URL = process.env.SUPABASE_URL;
 const SB_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
+// Členství (spolek) / Permanentka (podnikatel) -- notifikace nese sk, appka podle něj volí tvary.
+const _orgCache = {};
+async function _skOf(m) {
+  try {
+    if (!(m.gym_id in _orgCache)) { const g = await sb(`gyms?id=eq.${m.gym_id}&select=org_form`); _orgCache[m.gym_id] = (g && g[0] && g[0].org_form) || null; }
+    return sellKind({ orgForm: _orgCache[m.gym_id], paidTo: m.paid_to });
+  } catch (e) { return 'membership'; }
+}
 async function sb(path, init) {
   const r = await fetch(`${SB_URL}/rest/v1/${path}`, {
     ...init,
@@ -64,7 +73,7 @@ export default async function handler(req, res) {
     // `stripe_subscription=is.null` is the whole safety net here: it is exactly the set of
     // memberships nobody else can end.
     const rows = await sb(
-      `gym_memberships?select=id,student_id,gym_id,gym_name,plan_name,period_end,months` +
+      `gym_memberships?select=id,student_id,gym_id,gym_name,plan_name,period_end,months,paid_to` +
         `&status=in.(active,cancelling)` +
         `&stripe_subscription=is.null` +
         `&period_end=lt.${encodeURIComponent(now)}` +
@@ -89,7 +98,7 @@ export default async function handler(req, res) {
               type: 'system',
               read: false,
               data: JSON.stringify({
-                kind: 'membership_expired',
+                kind: 'membership_expired', sk: await _skOf(m),
                 gym_id: m.gym_id,
                 gym_name: m.gym_name || '',
                 plan: m.plan_name || '',
@@ -116,7 +125,7 @@ export default async function handler(req, res) {
     try {
       const soon = new Date(Date.now() + 7 * 86400000).toISOString();
       const due = await sb(
-        `gym_memberships?select=id,student_id,gym_id,gym_name,plan_name,period_end,months,expiry_warned` +
+        `gym_memberships?select=id,student_id,gym_id,gym_name,plan_name,period_end,months,expiry_warned,paid_to` +
           `&status=in.(active,cancelling)` +
           `&stripe_subscription=is.null` +
           `&period_end=gte.${encodeURIComponent(now)}` +
@@ -138,7 +147,7 @@ export default async function handler(req, res) {
               type: 'system',
               read: false,
               data: JSON.stringify({
-                kind: 'membership_expiring',
+                kind: 'membership_expiring', sk: await _skOf(m),
                 gym_id: m.gym_id,
                 gym_name: m.gym_name || '',
                 plan: m.plan_name || '',
@@ -174,7 +183,7 @@ export default async function handler(req, res) {
       const RENEW_DAYS = 4;
       const horizon = new Date(Date.now() + RENEW_DAYS * 86400000).toISOString();
       const subs = await sb(
-        `gym_memberships?select=id,student_id,gym_id,gym_name,plan_name,amount,currency,period_end,renew_warned` +
+        `gym_memberships?select=id,student_id,gym_id,gym_name,plan_name,amount,currency,period_end,renew_warned,paid_to` +
           `&status=eq.active` +
           `&stripe_subscription=not.is.null` +
           `&cancelled_at=is.null` +
@@ -195,7 +204,7 @@ export default async function handler(req, res) {
               type: 'system',
               read: false,
               data: JSON.stringify({
-                kind: 'membership_renewing',
+                kind: 'membership_renewing', sk: await _skOf(m),
                 gym_id: m.gym_id,
                 gym_name: m.gym_name || '',
                 plan: m.plan_name || '',
