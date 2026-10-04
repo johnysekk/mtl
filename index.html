@@ -1260,7 +1260,7 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
       <p style="font-size:13px;color:rgba(255,255,255,.65);line-height:1.55;margin-top:10px;">MTL není jen appka na hledání kouče — je to celý ekosystém od prvního úderu až po vedení vlastního klubu. Tady je, jak se můžeš zapojit.</p>
     </div>
 
-    <!-- 1. MTL HQ (free for coaches) -->
+    <!-- 1. MTL HQ (free for coaches) -- dokud MTL_HQ_READY=false, karta se skrývá (viz níže) -->
     <div class="opp-card" id="oppHQ" style="display:none;background:var(--surf);border:1.5px solid var(--red);border-radius:16px;padding:18px;margin-bottom:14px;position:relative;overflow:hidden;">
       <div style="position:absolute;top:0;right:0;background:#1f9d57;color:#fff;font-size:10px;font-weight:800;letter-spacing:.04em;padding:4px 10px;border-bottom-left-radius:10px;">ZDARMA</div>
       <div style="display:flex;align-items:center;gap:11px;margin-top:6px;margin-bottom:8px;">
@@ -4856,6 +4856,17 @@ async function _famRenderConsents(){
     });
     // Duplicitní žádosti (mladistvý klepl víckrát) jako jedna položka -- nejnovější.
     { const _seen=new Set(); rows=rows.filter(function(x){ try{ const dd=JSON.parse(x.data||'{}'); const k=[dd.kind,dd.minor_id,dd.gym_id,dd.event_id||''].join('|'); if(_seen.has(k)) return false; _seen.add(k); return true; }catch(e){ return true; } }); }
+    // Přihláška za člena už podaná (a pravidla klubu, pokud byla součástí, odsouhlasená) se
+    // neukazuje -- rozhodují data, ne příznak na notifikaci (ten se nemusel zapsat).
+    try{ const _ma=rows.map(function(x){ try{ return JSON.parse(x.data||'{}'); }catch(e){ return {}; } }).filter(function(d){ return d.kind==='minor_member_app' && d.minor_id; });
+      if(_ma.length){ const _mids=[...new Set(_ma.map(function(d){ return d.minor_id; }))];
+        const { data:_ap }=await supaClient.from('gym_member_applications').select('student_id,gym_id').in('student_id',_mids).in('status',['pending','approved']);
+        const _hasApp=new Set((_ap||[]).map(function(a){ return a.student_id+'|'+a.gym_id; }));
+        const { data:_wa }=await supaClient.from('waiver_acceptances').select('student_id,body_hash').in('student_id',_mids);
+        const _hasW=new Set((_wa||[]).map(function(a){ return a.student_id+'|'+a.body_hash; }));
+        rows=rows.filter(function(x){ try{ const d=JSON.parse(x.data||'{}'); if(d.kind!=='minor_member_app') return true;
+          if(!_hasApp.has(d.minor_id+'|'+d.gym_id)) return true;
+          return !!(d.waiver && d.waiver.hash && !_hasW.has(d.minor_id+'|'+d.waiver.hash)); }catch(e){ return true; } }); } }catch(e){}
     // Už schválené pravidlo klubu (stejné znění) se znovu neukazuje.
     try{ const _mw=rows.map(function(x){ try{ return JSON.parse(x.data||'{}'); }catch(e){ return {}; } }).filter(function(d){ return d.kind==='minor_waiver' && d.minor_id && d.hash; });
       if(_mw.length){ const { data:_acc }=await supaClient.from('waiver_acceptances').select('student_id,body_hash').in('student_id',[...new Set(_mw.map(function(d){ return d.minor_id; }))]);
@@ -5217,7 +5228,7 @@ function renderMyKids(){
   try{ setTimeout(_famRenderRequests, 0); setTimeout(_famRenderConsents, 0); }catch(e){}
   // RODINA JAKO ROZCESTNÍK. Dřív byl všechno pod sebou na jedné dlouhé stránce; teď nahoře jen
   // to, co čeká na reakci (žádosti, souhlasy, předání), a pod tím samostatná tlačítka do sekcí.
-  const _famBack='<button class="famBack" style="background:none;border:none;padding:0 0 12px;color:var(--mid);font-weight:700;font-size:13px;cursor:pointer;font-family:\'DM Sans\';">\u2039 '+(EN?'Family':'Rodina')+'</button>';
+  const _famBack='<button class="famBack" style="display:inline-flex;align-items:center;gap:6px;background:var(--surf);border:1px solid var(--border);border-radius:11px;padding:9px 14px;margin:0 0 14px;color:var(--dark);font-weight:800;font-size:14px;cursor:pointer;font-family:\'DM Sans\';">\u2190 '+(EN?'Back to Family':'Zp\u011bt na Rodinu')+'</button>';
   const _famCard=function(v, ico, title, sub){ return '<button class="famNav" data-v="'+v+'" style="width:100%;display:flex;align-items:center;gap:12px;text-align:left;padding:14px;margin-bottom:8px;background:#fff;border:1px solid var(--border);border-radius:14px;cursor:pointer;font-family:\'DM Sans\';">'
     +'<span style="font-size:22px;flex:none;">'+ico+'</span><span style="flex:1;min-width:0;"><span style="display:block;font-size:14.5px;font-weight:800;color:var(--dark);">'+title+' <span class="famCnt" data-v="'+v+'" style="color:var(--mid);font-weight:700;"></span></span>'
     +'<span style="display:block;font-size:12px;color:var(--mid);margin-top:2px;line-height:1.4;">'+sub+'</span></span><span style="color:var(--light);font-size:18px;flex:none;">\u203a</span></button>'; };
@@ -5484,6 +5495,8 @@ async function _consumeFamilyInvite(tok){
   let row=null;
   try{ const { data }=await supaClient.from('family_links').select('*').eq('token',tok).limit(1); row=(data&&data[0])||null; }catch(e){}
   if(!row){ toast(EN?'Link is not valid':'Odkaz není platný'); return; }
+  // Odkaz, který už použil právě tenhle člověk, je hotová věc -- žádná hláška.
+  if(row.member_id && String(row.member_id)===String(me)) return;
   if(row.status!=='link' || row.member_id){ toast(EN?'This link was already used':'Tento odkaz už byl použit'); return; }
   if(row.guardian_id===me){ toast(EN?'This is your own link':'To je tvůj vlastní odkaz'); return; }
   let sName=''; try{ const { data:p }=await supaClient.from('profiles').select('name').eq('id',row.guardian_id).single(); sName=(p&&p.name)||''; }catch(e){}
@@ -12092,7 +12105,7 @@ async function _evtQrConfirm(ticketId, ok){
   const t=(window._evQrPend||[]).find(function(x){ return String(x.id)===String(ticketId); }); if(!t) return;
   const ev=(window._mineHosted||[]).find(function(x){ return String(x.id)===String(t.event_id); }); if(!ev) return;
   try{
-    if(!ok){ await _qrRequeue('event_tickets', ticketId, (t&&t.buyer_id)||null, (ev&&ev.title)||null); toast(EN?'Sent back to the student \u00b7 spot still held':'Vr\u00e1ceno studentovi \u00b7 m\u00edsto dr\u017e\u00edme',1); renderMyEvManage(); return; }
+    if(!ok){ await _qrRequeue('event_tickets', ticketId, (t&&t.buyer_id)||null, (ev&&ev.title)||null); toast(EN?'Marked as not arrived \u2014 the student was told to check the payment; the spot is held a little longer':'Ozna\u010deno jako nedorazilo \u2014 student dostal zpr\u00e1vu, a\u0165 platbu zkontroluje; m\u00edsto je\u0161t\u011b chv\u00edli dr\u017e\u00edme',1); renderMyEvManage(); return; }
     // AKCE ORGANIZACE SE ÚČTUJE JÍ. Vlastní doklad, vlastní řada, provize podle typu akce --
     // proto vlastní koncový bod, ne record-cash (ten zná jen klub a kouče).
     if(!ev.payout_coach_id && !ev.gym_id && ev.organization_id){
@@ -12362,7 +12375,7 @@ async function _coach1to1QrRender(){
 async function _coach1QrConfirmGym(b, ok){
   const EN=LANG==='en';
   try{
-    if(!ok){ await _qrRequeue('gym_bookings', b.id, b.student_id||null, b.class_name||null); toast(EN?'Sent back to the student \u00b7 spot still held':'Vr\u00e1ceno studentovi \u00b7 m\u00edsto dr\u017e\u00edme',1); _coach1to1QrRender(); return; }
+    if(!ok){ await _qrRequeue('gym_bookings', b.id, b.student_id||null, b.class_name||null); toast(EN?'Marked as not arrived \u2014 the student was told to check the payment; the spot is held a little longer':'Ozna\u010deno jako nedorazilo \u2014 student dostal zpr\u00e1vu, a\u0165 platbu zkontroluje; m\u00edsto je\u0161t\u011b chv\u00edli dr\u017e\u00edme',1); _coach1to1QrRender(); return; }
     const amount_minor=Math.round((b.amount||0)*100);
     const res=await _recordCashTx({ provider:'coach', coach_id:currentUser.id, gym_id:b.gym_id, member_id:b.student_id||null, gross_amount:amount_minor, currency:b.currency||'CZK', type:'drop_in', payment_method:'qr', acq_source:'direct', source_booking_id:b.id, credit:(b.credit_used==='student'?'student':undefined),
         // Vybrana cena z rezervace do transakce -- odtud ji cte dochazka.
@@ -12382,7 +12395,7 @@ async function _coach1to1QrConfirm(bookingId, ok){
   try{
     if(!ok){
       await _qrRequeue('bookings', bookingId, b.student_id||null, b.coach_name||null);
-      toast(EN?'Sent back to the student \u00b7 spot still held':'Vr\u00e1ceno studentovi \u00b7 m\u00edsto dr\u017e\u00edme',1); _coach1to1QrRender(); return;
+      toast(EN?'Marked as not arrived \u2014 the student was told to check the payment; the spot is held a little longer':'Ozna\u010deno jako nedorazilo \u2014 student dostal zpr\u00e1vu, a\u0165 platbu zkontroluje; m\u00edsto je\u0161t\u011b chv\u00edli dr\u017e\u00edme',1); _coach1to1QrRender(); return;
     }
     const amount_minor=Math.round((b.amount||0)*100);
     const res=await _recordCashTx({ provider:'coach', coach_id:currentUser.id, member_id:b.student_id||null, gross_amount:amount_minor, currency:b.currency||'CZK', type:'coach_1to1', payment_method:'qr', acq_source:'direct', credit:(b.credit_used==='student'?'student':undefined), source_booking_id:bookingId, paid_by:(b.paid_by||null) });
@@ -14485,8 +14498,9 @@ async function openGymProfile(g){
     <div id="gpEventsSection"></div>
     <div id="gpMerchSection" style="margin:4px 0 14px;"></div>
     <div class="sec-lbl" style="margin-top:18px;">${LANG==='en'?'Why book through MTL':'Proč rezervovat přes MTL'}</div>
-    ${(_isQrProv(g) ? '' : `<div class="info-box" style="background:#EEF2F6;"><span style="font-size:20px;flex-shrink:0;">☑️</span><p style="color:#475569;"><strong>Stripe:</strong> ${LANG==='en'?'Payments via Stripe — the reservation is prepaid, so the spot is held, and MTL returns the money if the class falls through.':'Platby přes Stripe — rezervace je předplacená, takže místo drží, a když lekce odpadne, MTL peníze vrátí.'}</p></div>`)}
-    <div class="info-box" style="background:#EEF3F8;"><span style="font-size:20px;flex-shrink:0;">${_isQrProv(g)?'🏦':'💳'}</span><p style="color:#2b4a63;"><strong>${_isQrProv(g)?(LANG==='en'?'You pay by bank transfer.':'Platíš bankovním převodem.'):(LANG==='en'?'You pay the club through Stripe.':'Platíš klubu přes Stripe.')}</strong> ${_isQrProv(g)?(LANG==='en'?' The money goes straight to the provider; MTL never holds it. Refunds are therefore arranged with them under their terms; your statutory rights are not affected.':' Peníze jdou přímo poskytovateli, MTL je nedrží. Vrácení proto řešíš s ním podle jeho podmínek; tvoje zákonná práva tím nejsou dotčena.'):(LANG==='en'?' Cancel 6+ h ahead → 95% back; if the club cancels, 100% back automatically.':' Zrušíš 6+ h předem → 95 % zpět; když zruší klub, 100 % zpět automaticky.')}</p></div>
+    ${((_isQrProv(g) || !_mtlPayMode(g)) ? '' : `<div class="info-box" style="background:#EEF2F6;"><span style="font-size:20px;flex-shrink:0;">☑️</span><p style="color:#475569;"><strong>Stripe:</strong> ${LANG==='en'?'Payments via Stripe — the reservation is prepaid, so the spot is held, and MTL returns the money if the class falls through.':'Platby přes Stripe — rezervace je předplacená, takže místo drží, a když lekce odpadne, MTL peníze vrátí.'}</p></div>`)}
+    ${!_mtlPayMode(g) ? `<div class="info-box" style="background:#F4F4F5;"><span style="font-size:20px;flex-shrink:0;">⏳</span><p style="color:#52525b;"><strong>${LANG==='en'?'Payments not set up yet.':'Platby zatím nejsou nastavené.'}</strong> ${LANG==='en'?'The club has not chosen how it takes payments yet.':'Klub si zatím nevybral, jak bude přijímat platby.'}</p></div>` : ''}
+    <div class="info-box" style="background:#EEF3F8;${!_mtlPayMode(g)?'display:none;':''}"><span style="font-size:20px;flex-shrink:0;">${_isQrProv(g)?'🏦':'💳'}</span><p style="color:#2b4a63;"><strong>${_isQrProv(g)?(LANG==='en'?'You pay by bank transfer.':'Platíš bankovním převodem.'):(LANG==='en'?'You pay the club through Stripe.':'Platíš klubu přes Stripe.')}</strong> ${_isQrProv(g)?(LANG==='en'?' The money goes straight to the provider; MTL never holds it. Refunds are therefore arranged with them under their terms; your statutory rights are not affected.':' Peníze jdou přímo poskytovateli, MTL je nedrží. Vrácení proto řešíš s ním podle jeho podmínek; tvoje zákonná práva tím nejsou dotčena.'):(LANG==='en'?' Cancel 6+ h ahead → 95% back; if the club cancels, 100% back automatically.':' Zrušíš 6+ h předem → 95 % zpět; když zruší klub, 100 % zpět automaticky.')}</p></div>
     <div class="info-box" style="background:#FFF4E5;"><span style="font-size:20px;flex-shrink:0;">🔄</span><p style="color:#9A5B00;"><strong>${LANG==='en'?'Free reschedule:':'Přesun zdarma:'}</strong> ${LANG==='en'?'Something came up? Move your booking to another date — once, at least 6 h ahead, no cancellation fee.':'Něco ti do toho vlezlo? Přesuň si rezervaci na jiný termín — jednou a nejpozději 6 h předem, bez storna.'}</p></div>
     <div class="info-box" style="background:#F0FBF0;margin-bottom:16px;"><span style="font-size:20px;flex-shrink:0;">📅</span><p style="color:#006040;"><strong>${LANG==='en'?'Smart calendar:':'Smart kalendář:'}</strong> ${LANG==='en'?'After booking, add the class to Google / Apple calendar in one tap.':'Po rezervaci si lekci přidáš do Google / Apple kalendáře jedním kliknutím.'}</p></div>
     <p style="font-size:11px;color:var(--light);line-height:1.5;margin:-6px 2px 14px;">${LANG==='en'?'Note: by booking, the club sees your attendance and membership.':('Pozn.: rezervac\u00ed uvid\u00ed klub tvou doch\u00e1zku a '+(_sellKind({gym:g})==='pass'?'permanentku':'\u010dlenstv\u00ed')+'.')}</p>
@@ -18624,7 +18638,11 @@ async function openMtlAds(){
   };
 }
 
+// MTL HQ ZATÍM NENÍ HOTOVÉ -- nenabízí se (testeři ho hlásili jako chybu). Zapnout = true.
+const MTL_HQ_READY=false;
+document.addEventListener('DOMContentLoaded', function(){ try{ if(!MTL_HQ_READY){ const b=document.querySelector('.opp-cta[data-opp="family"]'); const card=b&&b.closest('.opp-card, .info-box, div[style*="border-radius"]'); if(card) card.style.display='none'; } }catch(e){} });
 function _provHqEasterEgg(d){
+  if(!MTL_HQ_READY){ if(d && d.kind){ try{ _provClaimRoute(d); }catch(e){} } return; }
   try{ if(localStorage.getItem('mtl_hq_seen')==='1'){ if(d && d.kind){ try{ _provClaimRoute(d); }catch(e){} } return; } }catch(e){}
   try{ localStorage.setItem('mtl_hq_seen','1'); }catch(e){}
   const EN=LANG==='en';
@@ -25246,7 +25264,7 @@ async function _qrcConfirm(id, kind, ok, drops, membs){
   try{
     if(kind==='dropin'){
       let b=(drops||[]).find(function(x){ return String(x.id)===String(id); }); if(!b){ try{ const r=await supaClient.from('gym_bookings').select('*').eq('id',id).single(); b=(r&&r.data)||null; }catch(e){} } if(!b){ toast(EN?'\u26a0\ufe0f Reservation not found':'\u26a0\ufe0f Rezervace nenalezena'); return _rer(); } if(ok && (b.status==='active'||b.status==='completed'||b.status==='unpaid_void')){ toast(EN?'Already handled':'Ji\u017e vy\u0159\u00edzeno', 1); return _rer(); }
-      if(!ok){ await _qrRequeue('gym_bookings', id, b.student_id||null, b.class_name||null); toast(EN?'Sent back to the student \u00b7 spot still held':'Vr\u00e1ceno studentovi \u00b7 m\u00edsto dr\u017e\u00edme',1); return _rer(); }
+      if(!ok){ await _qrRequeue('gym_bookings', id, b.student_id||null, b.class_name||null); toast(EN?'Marked as not arrived \u2014 the student was told to check the payment; the spot is held a little longer':'Ozna\u010deno jako nedorazilo \u2014 student dostal zpr\u00e1vu, a\u0165 platbu zkontroluje; m\u00edsto je\u0161t\u011b chv\u00edli dr\u017e\u00edme',1); return _rer(); }
       const amount_minor=Math.round((b.amount||0)*100); const fee_minor=Math.round(amount_minor*rate);
       const _upB=await supaClient.from('gym_bookings').update({ status:'active' }).eq('id',id); if(_upB&&_upB.error){ toast('\u26a0\ufe0f '+(_upB.error.message||'')); return _rer(); }
       const _txB=await // paid_to rozhoduje, komu se provize připíše a komu půjde doklad. Bylo tu natvrdo 'gym',
@@ -34733,11 +34751,17 @@ async function openMyConsents(){
     const r=await fetch('/api/my-consents', { headers:{'x-access-token':_t} });
     const j=await r.json(); if(j&&j.ok) d=j;
   }catch(e){}
+  // Podané přihlášky za člena patří mezi moje souhlasy -- jako vyplněný formulář ke stažení.
+  try{ const { data:_ap }=await supaClient.from('gym_member_applications').select('id,gym_id,applicant_name,applicant_email,applicant_phone,applicant_birth,is_minor,guardian_name,guardian_contact,app_type,app_text,consent_at,consent_version,status,created_at').eq('student_id',currentUser.id).order('created_at',{ascending:false}).limit(50);
+    if(_ap && _ap.length){ const _gi=[...new Set(_ap.map(function(a){ return a.gym_id; }).filter(Boolean))]; let _gn={};
+      if(_gi.length){ try{ const { data:_gg }=await supaClient.from('gyms').select('id,name').in('id',_gi); (_gg||[]).forEach(function(g){ _gn[g.id]=g.name; }); }catch(e){} }
+      d.consents=(d.consents||[]).concat(_ap.map(function(a){ return { kind:'member_application', version:a.consent_version||null, accepted_at:a.consent_at||a.created_at, body_text:a.app_text||null, gym_name:_gn[a.gym_id]||null,
+        app:{ name:a.applicant_name, email:a.applicant_email, phone:a.applicant_phone, birth:a.applicant_birth, minor:!!a.is_minor, guardian:a.guardian_name, guardian_contact:a.guardian_contact, type:a.app_type, status:a.status } }; })); } }catch(e){}
   window._mcoData=d;
   const _dt=function(v){ try{ return new Date(v).toLocaleString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric',hour:'2-digit',minute:'2-digit'}); }catch(e){ return String(v||''); } };
   const rows=[]
     .concat((d.consents||[]).map(function(c,i){ var _lb=CONSENT_LBL[c.kind]; var _nm=_lb?_lb[EN?0:1]:String(c.kind||'').replace(/_/g,' ');
-      return { t:'c', i:i, title:_nm, sub:(c.version?((EN?'version ':'verze ')+c.version):''), at:c.accepted_at, warn:c.hash_mismatch, has:!!c.body_text }; }))
+      return { t:'c', i:i, title:_nm, sub:(c.app?(c.gym_name||''):(c.version?((EN?'version ':'verze ')+c.version):'')), at:c.accepted_at, warn:c.hash_mismatch, has:!!c.body_text }; }))
     .concat((d.waivers||[]).map(function(w,i){ return { t:'w', i:i, title:(w.title||(EN?'Club terms':'Podm\u00ednky klubu')), sub:(w.gym_name||''), at:w.accepted_at, warn:false, has:!!w.body_text }; }))
     .sort(function(a,b){ return String(b.at||'').localeCompare(String(a.at||'')); });
   if(!rows.length){ body.innerHTML='<p style="color:var(--light);font-size:13px;text-align:center;padding:40px;">'+(EN?'Nothing accepted yet.':'Zat\u00edm jsi nic neodsouhlasil.')+'</p>'; return; }
@@ -34773,6 +34797,7 @@ function _consentSafeHtml(h){
 // projevilo jen tím, že se ukazoval holý klíč („partner terms", „beta privacy").
 // [en, cs] a ke každému věta, co ten souhlas je -- jinak z klíče nikdo nepozná, co podepsal.
 const CONSENT_LBL = {
+  member_application:   ['Membership application',      'Přihláška za člena'],
   terms:                ['MTL terms of use',            'Podmínky užívání MTL'],
   privacy:              ['Privacy policy',              'Zásady ochrany osobních údajů'],
   beta_terms:           ['Beta terms',                  'Podmínky beta verze'],
@@ -34802,6 +34827,7 @@ const CONSENT_DESC = {
   provider_terms:       ['Terms for selling through MTL.',          'Podmínky prodeje přes MTL.'],
   receiver_declaration: ['Confirms the money goes to your own account.', 'Potvrzení, že peníze chodí na vlastní účet.'],
   waiver:               ['Rules of a specific club, agreed before paying.', 'Pravidla konkrétního klubu, odsouhlasená před platbou.'],
+  member_application:   ['The applicant\u2019s signed application for membership, with the details they filled in.', 'Podaná přihláška za člena s vyplněnými údaji žadatele.'],
   guardian_consent:     ['A guardian agreeing on behalf of a minor.', 'Souhlas zákonného zástupce za nezletilého.'],
   minor_private:        ['Guardian agreeing to 1:1 lessons.',       'Souhlas zástupce se soukromými lekcemi.'],
   event_consent:        ['Terms of a specific event.',              'Podmínky konkrétní akce.'],
@@ -34834,11 +34860,22 @@ function showConsentDoc(kind, idx){
     +'.note{font-size:11px;color:#999;margin-top:16px;line-height:1.6;}@media print{button{display:none;}}</style></head><body>'
     +'<h1>'+esc(title)+'</h1>'
     +(c.hash_mismatch?'<div style="margin:10px 0;padding:9px 12px;background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font-size:12px;">'+(EN?'The wording stored under this version differs from what was accepted.':'Zn\u011bn\u00ed ulo\u017een\u00e9 pod touto verz\u00ed se li\u0161\u00ed od toho, co bylo odsouhlaseno.')+'</div>':'')
+    // PŘIHLÁŠKA ZA ČLENA jako vyplněný formulář: údaje žadatele nahoře, znění pod nimi.
+    +(c.app?('<div style="margin-top:14px;">'
+      +row(EN?'Applicant':'\u017dadatel', c.app.name||'\u2014')
+      +(c.app.birth?row(EN?'Date of birth':'Datum narozen\u00ed', (function(v){ const t=new Date(String(v).slice(0,10)+'T00:00:00'); return isNaN(t)?v:(t.getDate()+'. '+(t.getMonth()+1)+'. '+t.getFullYear()); })(c.app.birth)):'')
+      +(c.app.email?row('E-mail', c.app.email):'')
+      +(c.app.phone?row(EN?'Phone':'Telefon', c.app.phone):'')
+      +(c.app.minor?row(EN?'Minor':'Nezletil\u00fd', EN?'yes':'ano'):'')
+      +(c.app.guardian?row(EN?'Legal guardian':'Z\u00e1konn\u00fd z\u00e1stupce', c.app.guardian+(c.app.guardian_contact?(' \u00b7 '+c.app.guardian_contact):'')):'')
+      +(c.app.type?row(EN?'Type of membership':'Typ \u010dlenstv\u00ed', c.app.type):'')
+      +(c.app.status?row(EN?'Status':'Stav', ({pending:(EN?'awaiting decision':'\u010dek\u00e1 na rozhodnut\u00ed'),approved:(EN?'approved':'schv\u00e1lena'),rejected:(EN?'rejected':'zam\u00edtnuta')})[c.app.status]||c.app.status):'')
+      +'</div>'):'')
     +'<div style="margin-top:14px;">'
-    +row(EN?'Accepted at':'Odsouhlaseno', _dt(c.accepted_at))
+    +row(c.app?(EN?'Submitted':'Pod\u00e1no'):(EN?'Accepted at':'Odsouhlaseno'), _dt(c.accepted_at))
     +(c.version?row(EN?'Version':'Verze', c.version):'')
     +(c.gym_name?row(EN?'Club':'Klub', c.gym_name):'')
-    +(c.guardian_name?row(EN?'Guardian':'Z\u00e1konn\u00fd z\u00e1stupce', c.guardian_name):'')
+    +((c.guardian_name && !c.app)?row(EN?'Guardian':'Z\u00e1konn\u00fd z\u00e1stupce', c.guardian_name):'')
     +(c.ip?row(EN?'From IP':'Z IP adresy', c.ip):'')
     // ZÁKONNÝ ZÁSTUPCE MIMO APPKU: z čeho se dá doložit, kdo souhlasil.
     +(c.guardian_outside?row(EN?'How':'Jak', EN?'Approval link sent by e-mail (no account)':'Odkaz ke schv\u00e1len\u00ed e-mailem (bez \u00fa\u010dtu)'):'')
@@ -34849,7 +34886,7 @@ function showConsentDoc(kind, idx){
     +((c.same_device===true||c.same_device===false)?row(EN?'Same device as the minor':'Stejn\u00e9 za\u0159\u00edzen\u00ed jako mladistv\u00fd',
       c.same_device?('\u26a0\ufe0f '+(EN?'YES \u2014 the minor may have approved it':'ANO \u2014 mohl si souhlas ud\u011blit s\u00e1m')):(EN?'No':'Ne')):'')
     +'</div>'
-    +'<div class="body">'+_consentSafeHtml(c.body_text||'')+'</div>'
+    +'<div class="body">'+(c.app?esc(c.body_text||'').replace(/\n/g,'<br>'):_consentSafeHtml(c.body_text||''))+'</div>'
     +'<p class="note">'+(EN?'This is the exact wording shown at the moment of acceptance.':'Toto je p\u0159esn\u00e9 zn\u011bn\u00ed, kter\u00e9 bylo zobrazeno v okam\u017eiku odsouhlasen\u00ed.')+'</p>'
     +'</body></html>');
   var ov=document.getElementById('consDocOv'); if(ov) ov.remove();
@@ -34942,7 +34979,7 @@ async function _caLoad(){
       // se nepřepisuje -- odkaz u souhlasu proto otevře přesně tu verzi, kterou člověk viděl.
       // Otisk je na to, aby šlo doložit, že se obsah od té doby nezměnil.
       +((r.file_url||r.file_hash||r.body_hash)?('<div style="font-size:11px;color:var(--light);margin-top:3px;word-break:break-all;">'
-        +(r.file_url?('<a href="'+escapeHtml(r.file_url)+'" target="_blank" rel="noopener" style="color:var(--blue);font-weight:700;text-decoration:none;">\ud83d\udcc4 '+(EN?'document as signed':'dokument, jak ho podepsal')+'</a>'):'')
+        +(r.file_url?('<a href="'+escapeHtml(r.file_url)+'" target="_blank" rel="noopener" style="color:var(--blue);font-weight:700;text-decoration:none;">\ud83d\udcc4 '+(EN?'document as available at the time of consent':'dokument, jak ho m\u011bl p\u0159i souhlasu k dispozici')+'</a>'):'')
         +(r.file_hash?((r.file_url?' \u00b7 ':'')+(EN?'file: ':'soubor: ')+escapeHtml(String(r.file_hash).slice(0,12))):'')
         +(r.body_hash?(((r.file_url||r.file_hash)?' \u00b7 ':'')+(EN?'text: ':'text: ')+escapeHtml(String(r.body_hash).slice(0,12))):'')
         +'</div>'):'')
@@ -34966,7 +35003,7 @@ function _caShow(ix){
   window._mcoData={ consents:[{ kind:r.kind, version:r.version, accepted_at:r.accepted_at,
     body_text:r.body_text, hash_mismatch:r.hash_mismatch, gym_name:r.gym_name||null, guardian_name:r.guardian_name||null, ip:(r.approved_ip||null),
     guardian_outside:!!r.guardian_outside, guardian_email:r.guardian_email||null, same_device:r.same_device,
-    requested_at:r.requested_at||null, requested_ip:r.requested_ip||null, requested_ua:r.requested_ua||null, approved_ua:r.approved_ua||null }], waivers:[] };
+    requested_at:r.requested_at||null, requested_ip:r.requested_ip||null, requested_ua:r.requested_ua||null, approved_ua:r.approved_ua||null, app:(r.app||null) }], waivers:[] };
   showConsentDoc('c', 0);
 }
 
@@ -45977,7 +46014,10 @@ if($('supSend')) $('supSend').onclick=()=>submitSupport();
 (function(){ async function _run(){ try{ var ref=new URLSearchParams(location.search).get('ref'); if(ref){ var _s=await supaClient.auth.getSession(); var _li=!!(_s&&_s.data&&_s.data.session); if(!_li){ try{ localStorage.setItem('mtl_ref_pending', ref); }catch(e){} } try{ localStorage.setItem('mtl_gym_ref', JSON.stringify({code:ref,ts:Date.now()})); }catch(e){} if(_li && _s.data.session.user){ try{ supaClient.from('profiles').update({pending_gym_ref:ref, pending_gym_ref_at:new Date().toISOString()}).eq('id',_s.data.session.user.id); }catch(e){} } } }catch(e){} try{ var _gp=new URLSearchParams(location.search).get('gym'); var _gr=new URLSearchParams(location.search).get('gymref'); if(_gp && _gr){ var _s2=await supaClient.auth.getSession(); var _li2=!!(_s2&&_s2.data&&_s2.data.session); if(!_li2){ try{ localStorage.setItem('mtl_gym_pending', _gp); }catch(e){} try{ if(typeof openGymLanding==='function') openGymLanding(_gp, _gr); }catch(e){} } } }catch(e){} try{ var _fam=new URLSearchParams(location.search).get('family'); if(_fam){ var _sf=await supaClient.auth.getSession(); var _lif=!!(_sf&&_sf.data&&_sf.data.session); // Token si schovat VŽDY. Tenhle kód běží při načtení stránky, kdy currentUser ještě není
         // naplněný -- _consumeFamilyInvite hned na prvním řádku vypadne na !me a odkaz neudělá nic.
         // Vyzvedne se v enterApp přes _famPendingCheck, kde už profil existuje.
-        try{ localStorage.setItem('mtl_family_pending', _fam); }catch(e){ console.log('[famURL] localStorage:', e&&e.message); } } }catch(e){}  try{ var _mig=new URLSearchParams(location.search).get('migrate'); if(_mig){ var _sm=await supaClient.auth.getSession(); var _lim=!!(_sm&&_sm.data&&_sm.data.session); if(_lim){ if(typeof _consumeMigrate==='function') _consumeMigrate(_mig); } else { try{ localStorage.setItem('mtl_migrate_pending', _mig); }catch(e){} } } else { try{ var _mp=localStorage.getItem('mtl_migrate_pending'); if(_mp){ var _sm2=await supaClient.auth.getSession(); if(_sm2&&_sm2.data&&_sm2.data.session){ localStorage.removeItem('mtl_migrate_pending'); if(typeof _consumeMigrate==='function') _consumeMigrate(_mp); } } }catch(e){} } }catch(e){} if(typeof maybeSharedProfileRoute==='function') maybeSharedProfileRoute(); } if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded',_run); } else { _run(); } })();
+        try{ localStorage.setItem('mtl_family_pending', _fam); }catch(e){ console.log('[famURL] localStorage:', e&&e.message); }
+        // Token z adresy hned smazat -- jinak zůstal v prohlížeči a každé další otevření appky
+        // ho četlo znovu a hlásilo „Tento odkaz už byl použit".
+        try{ const _u=new URL(location.href); _u.searchParams.delete('family'); history.replaceState({}, '', _u.pathname+(_u.search||'')+_u.hash); }catch(e){} } }catch(e){}  try{ var _mig=new URLSearchParams(location.search).get('migrate'); if(_mig){ var _sm=await supaClient.auth.getSession(); var _lim=!!(_sm&&_sm.data&&_sm.data.session); if(_lim){ if(typeof _consumeMigrate==='function') _consumeMigrate(_mig); } else { try{ localStorage.setItem('mtl_migrate_pending', _mig); }catch(e){} } } else { try{ var _mp=localStorage.getItem('mtl_migrate_pending'); if(_mp){ var _sm2=await supaClient.auth.getSession(); if(_sm2&&_sm2.data&&_sm2.data.session){ localStorage.removeItem('mtl_migrate_pending'); if(typeof _consumeMigrate==='function') _consumeMigrate(_mp); } } }catch(e){} } }catch(e){} if(typeof maybeSharedProfileRoute==='function') maybeSharedProfileRoute(); } if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded',_run); } else { _run(); } })();
 
 // Submit
 if($('authMagic')) $('authMagic').onclick=async()=>{
