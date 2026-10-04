@@ -5425,6 +5425,7 @@ async function _loadFamilyAccts(){
   const active = rows.filter(r=> r.status==='active' && r.member_id);
   const incoming = rows.filter(r=> r.status==='requested' && r.guardian_id===me && r.member_id);
   const outLink = rows.filter(r=> r.status==='link' && r.guardian_id===me);
+  const myGuardReq = rows.filter(r=> r.status==='link' && r.member_id===me && !r.guardian_id);
 
   const badge=(r)=>{
     const iAmGuardian = r.guardian_id===me;
@@ -5482,7 +5483,17 @@ async function _loadFamilyAccts(){
   if(!mine.minor){
     html+=`<button id="famGenBtn" style="width:100%;margin-top:10px;padding:12px;background:#141414;color:#fff;border:none;border-radius:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13.5px;">+ ${EN?'Link a child (15–17) or a partner/close person':'Napojit dítě (15–17) nebo partnera/blízkou osobu'}</button><p style="font-size:11px;color:var(--light);line-height:1.5;margin:8px 2px 0;">${EN?'Send the link to your 15-17 child or a close person. They confirm, then you approve — and you can train together (e.g. private 1:2).':'Pošli odkaz svému 15-17letému dítěti nebo blízké osobě. Potvrdí ho, ty schválíš — a můžete trénovat spolu (např. soukromka 1:2).'}</p>`;
   } else if(!active.length && !incoming.length){
-    html+=`<p style="font-size:12px;color:var(--light);line-height:1.5;margin:6px 2px 0;">${EN?'Your guardian manages your family links.':'Tvoje rodinné propojení spravuje zákonný zástupce.'}</p>`;
+    // MLADISTVÝ SI PROPOJENÍ VYŽÁDÁ SÁM: pošle rodiči odkaz, rodič ho otevře a potvrdí, že je
+    // jeho zákonný zástupce. Dřív tu byla jen věta „spravuje zákonný zástupce" a nešlo nic udělat.
+    if(myGuardReq.length){
+      const _gl=_appOrigin()+'/?family='+myGuardReq[0].token+'&l='+LANG;
+      html+=`<div style="background:#FAFAFA;border:1px dashed var(--border);border-radius:11px;padding:10px 12px;margin-top:8px;font-size:12.5px;color:var(--mid);line-height:1.5;">${EN?'Link sent to your parent / guardian \u2014 waiting for them to open it and confirm.':'Odkaz pro rodi\u010de / z\u00e1konn\u00e9ho z\u00e1stupce je p\u0159ipraven\u00fd \u2014 \u010dek\u00e1 se, a\u017e ho otev\u0159e a potvrd\u00ed.'}
+        <div style="display:flex;gap:8px;margin-top:8px;"><button class="famCopy" data-link="${_gl}" style="flex:1;padding:9px;background:#141414;color:#fff;border:none;border-radius:9px;font-weight:700;cursor:pointer;font-family:inherit;font-size:12.5px;">${EN?'Copy link again':'Zkop\u00edrovat odkaz znovu'}</button>
+        <button class="famCancelMine" data-id="${myGuardReq[0].id}" style="padding:9px 12px;background:#fff;color:var(--mid);border:1px solid var(--border);border-radius:9px;font-weight:700;cursor:pointer;font-family:inherit;font-size:12.5px;">${EN?'Cancel link':'Zru\u0161it odkaz'}</button></div></div>`;
+    } else {
+      html+=`<p style="font-size:12.5px;color:var(--mid);line-height:1.5;margin:6px 2px 8px;">${EN?'You are under 18. Link your parent or legal guardian: send them a link, they open it and confirm. Then they can approve consents and pay for you.':'Je ti m\u00e9n\u011b ne\u017e 18. Propoj se s rodi\u010dem nebo z\u00e1konn\u00fdm z\u00e1stupcem: po\u0161li mu odkaz, on ho otev\u0159e a potvrd\u00ed. Pak za tebe m\u016f\u017ee schvalovat souhlasy a platit.'}</p>
+        <button id="famGuardGenBtn" style="width:100%;padding:12px;background:#141414;color:#fff;border:none;border-radius:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:13.5px;">\ud83d\udd17 ${EN?'Copy a link for my parent / guardian':'Zkop\u00edrovat odkaz pro rodi\u010de / z\u00e1stupce'}</button>`;
+    }
   }
 
   wrap.innerHTML=html;
@@ -5494,6 +5505,23 @@ async function _loadFamilyAccts(){
   wrap.querySelectorAll('.famCancel').forEach(b=>b.onclick=()=>_famCancelLink(b.dataset.id));
   wrap.querySelectorAll('.famCopy').forEach(b=>b.onclick=async()=>{ try{ await navigator.clipboard.writeText(b.dataset.link); toast(EN?'✅ Copied':'✅ Zkopírováno'); }catch(e){ prompt(EN?'Copy this link:':'Zkopíruj odkaz:', b.dataset.link); } });
   const gb=$('famGenBtn'); if(gb) gb.onclick=_famGenLink;
+  const ggb=$('famGuardGenBtn'); if(ggb) ggb.onclick=_famGenGuardianLink;
+  wrap.querySelectorAll('.famCancelMine').forEach(b=>b.onclick=async()=>{ try{ await supaClient.from('family_links').delete().eq('id',b.dataset.id).eq('member_id',currentUser.id).eq('status','link'); }catch(e){} renderMyKids(); });
+}
+// Mladistvý založí odkaz pro rodiče: řádek s member_id = já a bez guardian_id. Kdo ho otevře
+// (dospělý), potvrdí, že je zákonný zástupce, a propojení je rovnou aktivní -- žádost vyšla od dítěte.
+async function _famGenGuardianLink(){
+  const EN=LANG==='en'; const me=currentUser&&currentUser.id; if(!me) return;
+  let tok=null;
+  try{ const { data:_ex }=await supaClient.from('family_links').select('token').eq('member_id',me).eq('status','link').is('guardian_id',null).limit(1); if(_ex && _ex.length) tok=_ex[0].token; }catch(e){}
+  if(!tok){ tok=_famTok();
+    try{ const { error }=await supaClient.from('family_links').insert({ member_id:me, relation:'guardian', status:'link', token:tok, initiated_by:me }); if(error){ toast('\u26a0\ufe0f '+error.message); return; } }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); return; } }
+  const link=_appOrigin()+'/?family='+tok+'&l='+LANG;
+  const txt=EN?('Please link me as my legal guardian in MTL: '+link):('Pros\u00edm propoj se se mnou v MTL jako m\u016fj z\u00e1konn\u00fd z\u00e1stupce: '+link);
+  // Jen zkopírovat do schránky -- žádné okno sdílení.
+  try{ await navigator.clipboard.writeText(link); toast(EN?'\u2705 Link copied \u2014 send it to your parent':'\u2705 Odkaz zkop\u00edrov\u00e1n \u2014 po\u0161li ho rodi\u010di'); }
+  catch(e){ prompt(EN?'Copy this link:':'Zkop\u00edruj odkaz:', link); }
+  if($('myKidsBody')) renderMyKids();
 }
 
 async function _famGenLink(){
@@ -5534,6 +5562,39 @@ async function _consumeFamilyInvite(tok){
   let row=null;
   try{ const { data }=await supaClient.from('family_links').select('*').eq('token',tok).limit(1); row=(data&&data[0])||null; }catch(e){}
   if(!row){ toast(EN?'Link is not valid':'Odkaz není platný'); return; }
+  // ŽÁDOST OD MLADISTVÉHO (on založil odkaz, zástupce ještě není): otevírá ji rodič.
+  if(row.status==='link' && row.member_id && !row.guardian_id){
+    if(String(row.member_id)===String(me)){ toast(EN?'This is your own link \u2014 send it to your parent':'To je tv\u016fj vlastn\u00ed odkaz \u2014 po\u0161li ho rodi\u010di'); return; }
+    const mine=await _famMineInfo(); if(mine.minor){ toast(EN?'Only an adult can be a legal guardian':'Z\u00e1konn\u00fdm z\u00e1stupcem m\u016f\u017ee b\u00fdt jen dosp\u011bl\u00fd'); return; }
+    let mName=''; try{ const { data:p }=await supaClient.from('profiles').select('name').eq('id',row.member_id).single(); mName=(p&&p.name)||''; }catch(e){}
+    // PROHLÁŠENÍ ZÁKONNÉHO ZÁSTUPCE -- výslovné zaškrtnutí, uloží se jako souhlas (kdo, kdy, znění).
+    // Bez data narození v profilu se nepotvrdí: server hlídá, že zástupce je dospělý a výrazně starší.
+    const _decl=EN?('I declare that I am the parent or legal guardian of '+(mName||'this person')+'. I understand that the club may ask me to prove it, and that a false declaration makes me liable for any consents I give.')
+                  :('Prohla\u0161uji, \u017ee jsem rodi\u010d nebo z\u00e1konn\u00fd z\u00e1stupce osoby '+(mName||'')+'. Beru na v\u011bdom\u00ed, \u017ee to po mn\u011b klub m\u016f\u017ee cht\u00edt doložit a \u017ee za souhlasy ud\u011blen\u00e9 na z\u00e1klad\u011b nepravdiv\u00e9ho prohl\u00e1\u0161en\u00ed odpov\u00edd\u00e1m.');
+    if(!(currentUser && currentUser.birthdate)){ toast(EN?'\u26a0\ufe0f Add your date of birth in your profile first':'\u26a0\ufe0f Nejd\u0159\u00edv si dopl\u0148 datum narozen\u00ed v profilu',1); try{ if(typeof _openPersonalData==='function') setTimeout(_openPersonalData,300); }catch(e){} return; }
+    const _ok=await new Promise(function(res){
+      const o=document.createElement('div'); o.style.cssText='position:fixed;inset:0;z-index:100060;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;';
+      o.innerHTML='<div style="background:#fff;border-radius:18px;max-width:400px;width:100%;padding:22px;font-family:inherit;">'
+        +'<div style="font-size:30px;text-align:center;margin-bottom:6px;">\ud83d\udc6a</div>'
+        +'<div style="font-size:17px;font-weight:800;text-align:center;margin-bottom:8px;">'+(EN?'Legal guardian link':'Propojen\u00ed se z\u00e1konn\u00fdm z\u00e1stupcem')+'</div>'
+        +'<p style="font-size:13.5px;color:#555;line-height:1.55;margin-bottom:12px;"><b>'+escapeHtml(mName||(EN?'Someone':'N\u011bkdo'))+'</b> '+(EN?'asks you to link as their parent / legal guardian. You will approve their consents and can pay for them.':'t\u011b \u017e\u00e1d\u00e1 o propojen\u00ed jako rodi\u010d / z\u00e1konn\u00fd z\u00e1stupce. Bude\u0161 schvalovat jeho souhlasy a m\u016f\u017ee\u0161 za n\u011bj platit.')+'</p>'
+        +'<label style="display:flex;gap:9px;align-items:flex-start;font-size:13px;line-height:1.5;margin-bottom:14px;cursor:pointer;"><input type="checkbox" id="fgDecl" style="width:18px;height:18px;flex:none;margin-top:1px;"><span>'+escapeHtml(_decl)+'</span></label>'
+        +'<button id="fgOk" style="width:100%;padding:13px;background:#141414;color:#fff;border:none;border-radius:12px;font-weight:800;cursor:pointer;font-family:inherit;font-size:15px;margin-bottom:8px;">'+(EN?'Confirm':'Potvrdit')+'</button>'
+        +'<button id="fgNo" style="width:100%;padding:10px;background:#F3F3F3;color:#555;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:inherit;font-size:14px;">'+(EN?'I am not their guardian':'Nejsem jeho z\u00e1stupce')+'</button></div>';
+      document.body.appendChild(o);
+      o.querySelector('#fgNo').onclick=function(){ o.remove(); res(false); };
+      o.querySelector('#fgOk').onclick=function(){ if(!o.querySelector('#fgDecl').checked){ toast(EN?'\u26a0\ufe0f Tick the declaration':'\u26a0\ufe0f Za\u0161krtni prohl\u00e1\u0161en\u00ed'); return; } o.remove(); res(true); };
+    });
+    if(!_ok) return;
+    // Přes server (RPC): ověří, že odkaz je nevyužitý a že potvrzující je dospělý.
+    try{ const { data:_r, error }=await supaClient.rpc('family_claim_guardian', { p_token: tok }); if(error){ toast('\u26a0\ufe0f '+error.message); return; }
+      if(_r!=='ok'){ toast('\u26a0\ufe0f '+({ no_dob:(EN?'Add your date of birth in your profile first':'Nejd\u0159\u00edv si dopl\u0148 datum narozen\u00ed v profilu'), used:(EN?'This link was already used':'Tento odkaz u\u017e byl pou\u017eit'), minor:(EN?'Only an adult can be a legal guardian':'Z\u00e1konn\u00fdm z\u00e1stupcem m\u016f\u017ee b\u00fdt jen dosp\u011bl\u00fd'), own:(EN?'This is your own link':'To je tv\u016fj vlastn\u00ed odkaz'), notfound:(EN?'Link is not valid':'Odkaz nen\u00ed platn\u00fd') }[_r]||String(_r))); return; } }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); return; }
+    try{ await supaClient.from('notifications').insert({ user_id:row.member_id, type:'system', read:false, data:JSON.stringify({ kind:'family_active', who:(currentUser.name||'') }), message:'\ud83d\udc6a '+(EN?('You are now linked with '+(currentUser.name||'your guardian')+'.'):('Te\u010f jsi propojen/a se z\u00e1stupcem '+(currentUser.name||'')+'.')) }); }catch(e){}
+    try{ if(typeof _recordConsent==='function') _recordConsent('guardian_declaration', '2026-10-04', LANG, _decl, { minor_id:row.member_id, minor_name:mName||null, link_id:row.id }); }catch(e){}
+    toast(EN?'\u2705 Linked as legal guardian':'\u2705 Propojeno \u2014 jsi z\u00e1konn\u00fd z\u00e1stupce',1);
+    try{ if($('myKidsBody')) renderMyKids(); }catch(e){}
+    return;
+  }
   // Odkaz, který už použil právě tenhle člověk, je hotová věc -- žádná hláška.
   if(row.member_id && String(row.member_id)===String(me)) return;
   if(row.status!=='link' || row.member_id){ toast(EN?'This link was already used':'Tento odkaz už byl použit'); return; }
@@ -9118,7 +9179,7 @@ function _renderDeckFilter(){
     const cur=_deckDisc ? (disciplineEmoji(_deckDisc)+' '+disciplineLabel(_deckDisc)) : ((typeof catAllLabel==='function')?catAllLabel(_cat,EN):'');
     h+=sec(_cat==='traditional'?(EN?'Martial art':'Um\u011bn\u00ed'):(EN?'Sport':'Sport'));
     if(_cats.length>1) h+='<div style="display:flex;gap:7px;margin-bottom:8px;">'+chip('dfCat','combat','\ud83e\udd4a '+(EN?'Combat sports':'Bojov\u00e9 sporty'),_cat==='combat')+chip('dfCat','traditional','\ud83e\udd4b '+(EN?'Martial arts':'Bojov\u00e1 um\u011bn\u00ed'),_cat==='traditional')+'</div>';
-    h+=row('dfSport','\ud83e\udd4a',(_cat==='traditional'?(EN?'Art':'Um\u011bn\u00ed'):(EN?'Sport':'Sport')),cur);
+    h+=row('dfSport',(_cat==='traditional'?'\ud83e\udd4b':'\ud83e\udd4a'),(_cat==='traditional'?(EN?'Art':'Um\u011bn\u00ed'):(EN?'Sport':'Sport')),cur);
   }
   if(gyms){
     const _emo={beginner:'\ud83c\udf31',advanced:'\ud83d\udcc8',fighter:'\ud83c\udfc6',kids:'\ud83e\uddd2',women:'\ud83d\udc69',sparring:'\ud83e\udd4a'};
@@ -35118,6 +35179,7 @@ function _consentSafeHtml(h){
 // [en, cs] a ke každému věta, co ten souhlas je -- jinak z klíče nikdo nepozná, co podepsal.
 const CONSENT_LBL = {
   member_application:   ['Membership application',      'Přihláška za člena'],
+  guardian_declaration: ['Legal guardian declaration',  'Prohlášení zákonného zástupce'],
   terms:                ['MTL terms of use',            'Podmínky užívání MTL'],
   privacy:              ['Privacy policy',              'Zásady ochrany osobních údajů'],
   beta_terms:           ['Beta terms',                  'Podmínky beta verze'],
