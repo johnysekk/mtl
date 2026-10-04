@@ -58,8 +58,10 @@ export default async function handler(req, res) {
     // 4) what the caller themselves paid for -- one row per payment, which is what a doklad is
     //    issued from. A course pays in several instalments (deposit, first month, month N) and each
     //    is its own row, so each gets its own fixed document instead of one that changes.
-    const mres = await fetch(`${SB}/rest/v1/transactions?member_id=eq.${encodeURIComponent(uid)}${sinceQ}&order=created_at.desc`, { headers: svc });
-    const memberTx = mres.ok ? await mres.json() : [];
+    // + co zaplatil ZA NĚKOHO (zástupce za dítě / mladistvého): paid_by = já. Takové řádky nesou
+    //   for_other, aby se nepletly do jeho vlastních kurzů v Můj trénink.
+    const mres = await fetch(`${SB}/rest/v1/transactions?or=(member_id.eq.${encodeURIComponent(uid)},paid_by.eq.${encodeURIComponent(uid)})${sinceQ}&order=created_at.desc`, { headers: svc });
+    const memberTx = (mres.ok ? await mres.json() : []).map(t => (t && String(t.member_id || '') !== String(uid)) ? Object.assign({}, t, { for_other: true }) : t);
 
     // Snímky dokladů k těmto platbám. Doklad se od nasazení neskládá z živých dat, ale čte se
     // odsud -- proto musí dojet spolu s transakcemi, ne dalším dotazem na řádek.
