@@ -67,12 +67,13 @@ export default async function handler(req, res) {
     }
 
     let gymName = '', gymPay = {};
-    let _seller = {}, _rules = {}, _appType = null;
-    try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(c.gym_id)}&select=name,payment_mode,receiver_id_type,receiver_id_value,receiver_name,hide_leaders,org_form,member_app_text,member_app_file_url,member_app_body,member_app_auto,member_app_auto_ref,member_app_type,legal_name,tax_id,billing_line1,billing_city,billing_postal,contact_email,invoice_email,terms_title,terms_text,terms_file_url,terms_file_name,terms_file_hash`); const gg = g && g[0]; if (gg) {
+    let _seller = {}, _rules = {}, _appType = null, _pisTest = false;
+    try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(c.gym_id)}&select=name,payment_mode,receiver_id_type,receiver_id_value,receiver_name,hide_leaders,org_form,member_app_text,member_app_file_url,member_app_body,member_app_auto,member_app_auto_ref,member_app_type,legal_name,tax_id,billing_line1,billing_city,billing_postal,contact_email,invoice_email,terms_title,terms_text,terms_file_url,terms_file_name,terms_file_hash,pis_test`); const gg = g && g[0]; if (gg) {
       // Prodávající = právnická osoba klubu (z fakturačních údajů), ne jméno majitele.
       _seller = { legal: gg.legal_name || '', ico: gg.tax_id || '', addr: [gg.billing_line1, [gg.billing_postal, gg.billing_city].filter(Boolean).join(' ')].filter(Boolean).join(', '), email: gg.contact_email || gg.invoice_email || '' };
       _rules = ((gg.terms_text && String(gg.terms_text).trim()) || gg.terms_file_url) ? { title: gg.terms_title || '', text: String(gg.terms_text || ''), file_url: gg.terms_file_url || null, file_name: gg.terms_file_name || null, file_hash: gg.terms_file_hash || null } : {};
-      _appType = gg.member_app_type || null; _hideLeaders = !!gg.hide_leaders; gymName = gg.name || ''; _gymOrgForm = gg.org_form || null; _memberAppText = gg.member_app_text || null; _memberAppFile = gg.member_app_file_url || null; _memberAppBody = gg.member_app_body || null; _memberAppAuto = !!gg.member_app_auto; _memberAppRef = gg.member_app_auto_ref || null; gymPay = { payment_mode: gg.payment_mode || null, receiver_id_type: gg.receiver_id_type || null, receiver_id_value: gg.receiver_id_value || null, receiver_name: gg.receiver_name || null }; } } catch (e) {}
+      _appType = gg.member_app_type || null;
+      _pisTest = !!gg.pis_test; _hideLeaders = !!gg.hide_leaders; gymName = gg.name || ''; _gymOrgForm = gg.org_form || null; _memberAppText = gg.member_app_text || null; _memberAppFile = gg.member_app_file_url || null; _memberAppBody = gg.member_app_body || null; _memberAppAuto = !!gg.member_app_auto; _memberAppRef = gg.member_app_auto_ref || null; gymPay = { payment_mode: gg.payment_mode || null, receiver_id_type: gg.receiver_id_type || null, receiver_id_value: gg.receiver_id_value || null, receiver_name: gg.receiver_name || null }; } } catch (e) {}
 
     // provider legal name from the connected Stripe account (controller for the lead's data)
     let providerName = '';
@@ -105,6 +106,7 @@ export default async function handler(req, res) {
         member_app_auto: _memberAppAuto, member_app_auto_ref: _memberAppRef,
         seller_legal: _seller.legal || '', seller_ico: _seller.ico || '', seller_addr: _seller.addr || '', seller_email: _seller.email || '',
         club_rules_title: _rules.title || null, club_rules_text: _rules.text || null, member_app_type: _appType,
+        pis_test: _pisTest,
         club_rules_file_url: _rules.file_url || null, club_rules_file_name: _rules.file_name || null, club_has_rules: !!(_rules.text || _rules.file_url),
         gym_name: gymName, provider_name: providerName, hide_leaders: _hideLeaders, meta_pixel: c.gym_meta_pixel || '', marketing_note: c.marketing_note || '',
         payment_mode: gymPay.payment_mode || null, receiver_id_type: gymPay.receiver_id_type || null, receiver_id_value: gymPay.receiver_id_value || null, receiver_name: gymPay.receiver_name || null
