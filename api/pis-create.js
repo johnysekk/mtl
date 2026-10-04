@@ -334,7 +334,9 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
   try {
     // Ktery poskytovatel prave plati. Prepina se v Adminu, ne nasazenim.
-    if ((await pisProvider(sb)) === 'finbricks') {
+    // Finbricks jen pro účty v CZ/SK; ostatní země (FR, DE…) jdou přes Neonomics.
+    const _ibanCC = String((req.body && req.body.gymIban) || '').replace(/\s+/g, '').slice(0, 2).toUpperCase();
+    if ((await pisProvider(sb)) === 'finbricks' && (!_ibanCC || ['CZ', 'SK'].includes(_ibanCC))) {
       const out = await fbxCreate(sb, req, req.body || {});
       return res.status(200).json(out);
     }
