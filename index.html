@@ -25384,14 +25384,20 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMo
   // doby nedělo nic -- na mobilu to vypadalo, že tlačítko nereaguje, a lidé klepali znovu.
   const _ld=document.createElement('div');
   _ld.style.cssText='position:fixed;inset:0;z-index:100199;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;';
-  _ld.innerHTML='<div style="background:#fff;border-radius:14px;padding:16px 20px;font-family:\'DM Sans\';font-size:14px;font-weight:700;color:var(--dark);">\ud83c\udfe6 '+(EN?'Loading banks\u2026':'Na\u010d\u00edt\u00e1m banky\u2026')+'</div>';
+  _ld.innerHTML='<div style="background:#fff;border-radius:14px;padding:16px 20px;font-family:\'DM Sans\';font-size:14px;font-weight:700;color:var(--dark);text-align:center;">\ud83c\udfe6 '+(EN?'Loading banks\u2026':'Na\u010d\u00edt\u00e1m banky\u2026')
+    +'<button id="pisLdX" style="display:block;margin:10px auto 0;background:none;border:none;color:var(--mid);font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;text-decoration:underline;">'+(EN?'Cancel':'Zru\u0161it')+'</button></div>';
   document.body.appendChild(_ld);
+  // ZAMRZNUTÍ NESMÍ NASTAT: načítání má časový limit i tlačítko Zrušit. Dřív, když dotaz na
+  // seznam bank v mobilu visel, zůstalo okno navždy a appka „se sekla".
+  let _ldCancelled=false; const _ldCtl=(typeof AbortController!=='undefined')?new AbortController():null;
   const _ldOff=function(){ try{ _ld.remove(); }catch(e){} };
+  try{ _ld.querySelector('#pisLdX').onclick=function(){ _ldCancelled=true; try{ if(_ldCtl) _ldCtl.abort(); }catch(e){} _ldOff(); _abandon(); }; }catch(e){}
+  const _ldTimer=setTimeout(function(){ try{ if(_ldCtl) _ldCtl.abort(); }catch(e){} }, 20000);
   // V testu mimo CZ/SK rovnou sandbox Neonomics (DNB) -- dotaz na banky dané země v testu
   // stejně nic nevrátí a jen o pár vteřin zdržel.
   const _skipLocal=!!(testMode && ['CZ','SK'].indexOf(String(country||'').toUpperCase())<0);
   try{
-    const r=await fetch('/api/pis-aspsps?country='+(_skipLocal?'NO':country)); const d=await r.json();
+    const r=await fetch('/api/pis-aspsps?country='+(_skipLocal?'NO':country), _ldCtl?{ signal:_ldCtl.signal }:undefined); const d=await r.json();
     if(_skipLocal && String(d&&d.provider||'')!=='finbricks'){ country='NO'; iban='NO2712073650567'; payCur='NOK'; }
     _fbx=(String(d&&d.provider||'')==='finbricks');
     banks=((d&&d.aspsps)||[]).filter(function(b){ return (b.psu_types||[]).indexOf('personal')>=0; });
@@ -25411,7 +25417,8 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMo
     try{ const r2=await fetch('/api/pis-aspsps?country=NO'); const d2=await r2.json();
       banks=((d2&&d2.aspsps)||[]).filter(function(b){ return (b.psu_types||[]).indexOf('personal')>=0; }); }catch(e){}
   }
-  _ldOff();
+  clearTimeout(_ldTimer); _ldOff();
+  if(_ldCancelled) return;
   if(!banks.length){
     // Seznam bank je prázdný -- pro tuhle zemi PIS nejede. Místo hlášky o zemi, která uživateli
     // nic neříká, spadneme na QR: to je přesně stav "banku v seznamu nemám".
@@ -25499,7 +25506,9 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMo
       // Token kvůli záznamu souhlasu: přihlášený souhlasí za sebe, host podle údajů na řádku.
       const _ph={'Content-Type':'application/json'};
       try{ if(typeof currentUser!=='undefined' && currentUser){ const _tk=await _freshTok(); if(_tk) _ph.Authorization='Bearer '+_tk; } }catch(e){}
-      const r=await fetch('/api/pis-create',{ method:'POST', headers:_ph, body:_body });
+      // Časový limit i tady: visící založení platby nesmí appku zamrazit.
+      const _pcCtl=(typeof AbortController!=='undefined')?new AbortController():null; const _pcT=setTimeout(function(){ try{ if(_pcCtl) _pcCtl.abort(); }catch(e){} }, 30000);
+      let r; try{ r=await fetch('/api/pis-create',{ method:'POST', headers:_ph, body:_body, signal:(_pcCtl?_pcCtl.signal:undefined) }); } finally { clearTimeout(_pcT); }
       _step='odpověď '+r.status;
       const _txt=await r.text();
       let d=null;
@@ -25512,7 +25521,23 @@ async function _pisPayFlow(bookingId, payee, g, price, cur, msg, closeQr, testMo
       // Adresa banky musí být absolutní https; jinak Safari spadne na „The string did not
       // match the expected pattern" a není poznat, co server vrátil.
       const _u=String((d&&d.url)||'');
-      if(/^https?:\/\//i.test(_u)){ _launched=true; if(closeQr) closeQr(); window.location.href=_u; return; }
+      if(/^https?:\/\//i.test(_u)){ _launched=true; if(closeQr) closeQr();
+        // APPKA NA PLOŠE (iOS/Android): přesměrování ze skriptu po dlouhém čekání systém často
+        // zahodí a appka pak „zamrzne" uprostřed odchodu. Odkaz, na který člověk klepne, projde vždy.
+        const _standalone=(function(){ try{ return !!(window.navigator.standalone || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)); }catch(e){ return false; } })();
+        if(_standalone){
+          const _go=document.createElement('div');
+          _go.style.cssText='position:fixed;inset:0;z-index:100210;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:18px;';
+          _go.innerHTML='<div style="background:#fff;border-radius:18px;max-width:380px;width:100%;padding:22px;text-align:center;font-family:\'DM Sans\';">'
+            +'<div style="font-size:30px;margin-bottom:6px;">\ud83c\udfe6</div><div style="font-size:16px;font-weight:800;margin-bottom:6px;">'+(EN?'Continue to your bank':'Pokra\u010duj do banky')+'</div>'
+            +'<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:14px;">'+(EN?'You will confirm the payment there and come back here.':'Tam platbu potvrd\u00ed\u0161 a vr\u00e1t\u00ed\u0161 se sem.')+'</div>'
+            +'<a href="'+escapeHtml(_u)+'" style="display:block;padding:14px;background:#635BFF;color:#fff;border-radius:12px;font-size:15px;font-weight:800;text-decoration:none;">'+(EN?'Open my bank':'Otev\u0159\u00edt banku')+'</a>'
+            +'<button id="pisGoX" style="width:100%;margin-top:8px;padding:10px;background:none;border:none;color:var(--light);font-weight:600;cursor:pointer;font-family:inherit;">'+(EN?'Cancel':'Zru\u0161it')+'</button></div>';
+          document.body.appendChild(_go);
+          _go.querySelector('#pisGoX').onclick=function(){ _go.remove(); };
+          return;
+        }
+        window.location.href=_u; return; }
       try{ console.error('[pis-create]', d); }catch(e){}
       // Platba se nezaložila -- rezervace nemá důvod existovat. Bez tohohle zůstávala viset
       // po každém neúspěšném pokusu a blokovala termín i limit.
