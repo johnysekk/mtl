@@ -5605,25 +5605,8 @@ async function _consumeFamilyInvite(tok){
     if(String(row.member_id)===String(me)){ toast(EN?'This is your own link \u2014 send it to your parent':'To je tv\u016fj vlastn\u00ed odkaz \u2014 po\u0161li ho rodi\u010di'); return; }
     const mine=await _famMineInfo(); if(mine.minor){ toast(EN?'Only an adult can be a legal guardian':'Z\u00e1konn\u00fdm z\u00e1stupcem m\u016f\u017ee b\u00fdt jen dosp\u011bl\u00fd'); return; }
     let mName=''; try{ const { data:p }=await supaClient.from('profiles').select('name').eq('id',row.member_id).single(); mName=(p&&p.name)||''; }catch(e){}
-    // PROHLÁŠENÍ ZÁKONNÉHO ZÁSTUPCE -- výslovné zaškrtnutí, uloží se jako souhlas (kdo, kdy, znění).
-    // Bez data narození v profilu se nepotvrdí: server hlídá, že zástupce je dospělý a výrazně starší.
-    const _decl=EN?('I declare that I am the parent or legal guardian of '+(mName||'this person')+'. I understand that the club may ask me to prove it, and that a false declaration makes me liable for any consents I give.')
-                  :('Prohla\u0161uji, \u017ee jsem rodi\u010d nebo z\u00e1konn\u00fd z\u00e1stupce osoby '+(mName||'')+'. Beru na v\u011bdom\u00ed, \u017ee to po mn\u011b klub m\u016f\u017ee cht\u00edt doložit a \u017ee za souhlasy ud\u011blen\u00e9 na z\u00e1klad\u011b nepravdiv\u00e9ho prohl\u00e1\u0161en\u00ed odpov\u00edd\u00e1m.');
-    if(!(currentUser && currentUser.birthdate)){ toast(EN?'\u26a0\ufe0f Add your date of birth in your profile first':'\u26a0\ufe0f Nejd\u0159\u00edv si dopl\u0148 datum narozen\u00ed v profilu',1); try{ if(typeof _openPersonalData==='function') setTimeout(_openPersonalData,300); }catch(e){} return; }
-    const _ok=await new Promise(function(res){
-      const o=document.createElement('div'); o.style.cssText='position:fixed;inset:0;z-index:100060;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;';
-      o.innerHTML='<div style="background:#fff;border-radius:18px;max-width:400px;width:100%;padding:22px;font-family:inherit;">'
-        +'<div style="font-size:30px;text-align:center;margin-bottom:6px;">\ud83d\udc6a</div>'
-        +'<div style="font-size:17px;font-weight:800;text-align:center;margin-bottom:8px;">'+(EN?'Legal guardian link':'Propojen\u00ed se z\u00e1konn\u00fdm z\u00e1stupcem')+'</div>'
-        +'<p style="font-size:13.5px;color:#555;line-height:1.55;margin-bottom:12px;"><b>'+escapeHtml(mName||(EN?'Someone':'N\u011bkdo'))+'</b> '+(EN?'asks you to link as their parent / legal guardian. You will approve their consents and can pay for them.':'t\u011b \u017e\u00e1d\u00e1 o propojen\u00ed jako rodi\u010d / z\u00e1konn\u00fd z\u00e1stupce. Bude\u0161 schvalovat jeho souhlasy a m\u016f\u017ee\u0161 za n\u011bj platit.')+'</p>'
-        +'<label style="display:flex;gap:9px;align-items:flex-start;font-size:13px;line-height:1.5;margin-bottom:14px;cursor:pointer;"><input type="checkbox" id="fgDecl" style="width:18px;height:18px;flex:none;margin-top:1px;"><span>'+escapeHtml(_decl)+'</span></label>'
-        +'<button id="fgOk" style="width:100%;padding:13px;background:#141414;color:#fff;border:none;border-radius:12px;font-weight:800;cursor:pointer;font-family:inherit;font-size:15px;margin-bottom:8px;">'+(EN?'Confirm':'Potvrdit')+'</button>'
-        +'<button id="fgNo" style="width:100%;padding:10px;background:#F3F3F3;color:#555;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:inherit;font-size:14px;">'+(EN?'I am not their guardian':'Nejsem jeho z\u00e1stupce')+'</button></div>';
-      document.body.appendChild(o);
-      o.querySelector('#fgNo').onclick=function(){ o.remove(); res(false); };
-      o.querySelector('#fgOk').onclick=function(){ if(!o.querySelector('#fgDecl').checked){ toast(EN?'\u26a0\ufe0f Tick the declaration':'\u26a0\ufe0f Za\u0161krtni prohl\u00e1\u0161en\u00ed'); return; } o.remove(); res(true); };
-    });
-    if(!_ok) return;
+    // PROHLÁŠENÍ ZÁKONNÉHO ZÁSTUPCE (společné pro obě cesty propojení).
+    const _gd=await _guardianDeclare(mName); if(!_gd) return; const _decl=_gd;
     // Přes server (RPC): ověří, že odkaz je nevyužitý a že potvrzující je dospělý.
     try{ const { data:_r, error }=await supaClient.rpc('family_claim_guardian', { p_token: tok }); if(error){ toast('\u26a0\ufe0f '+error.message); return; }
       if(_r!=='ok'){ toast('\u26a0\ufe0f '+({ no_dob:(EN?'Add your date of birth in your profile first':'Nejd\u0159\u00edv si dopl\u0148 datum narozen\u00ed v profilu'), used:(EN?'This link was already used':'Tento odkaz u\u017e byl pou\u017eit'), minor:(EN?'Only an adult can be a legal guardian':'Z\u00e1konn\u00fdm z\u00e1stupcem m\u016f\u017ee b\u00fdt jen dosp\u011bl\u00fd'), own:(EN?'This is your own link':'To je tv\u016fj vlastn\u00ed odkaz'), notfound:(EN?'Link is not valid':'Odkaz nen\u00ed platn\u00fd') }[_r]||String(_r))); return; } }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); return; }
@@ -5670,11 +5653,41 @@ async function _famRespondInvite(row, accept){
   toast(EN?'✅ Sent — waiting for approval':'✅ Odesláno — čeká na schválení');
 }
 
+// PROHLÁŠENÍ ZÁKONNÉHO ZÁSTUPCE -- výslovné zaškrtnutí. Stejné okno pro obě cesty propojení
+// (odkaz od mladistvého i odkaz od rodiče). Vrací přesné znění, které člověk zaškrtl, nebo null.
+// Bez data narození v profilu se nepotvrdí: server hlídá, že zástupce je dospělý.
+async function _guardianDeclare(mName){
+  const EN=LANG==='en';
+  const _decl=EN?('I declare that I am the parent or legal guardian of '+(mName||'this person')+'. I understand that the club may ask me to prove it, and that a false declaration makes me liable for any consents I give.')
+                :('Prohla\u0161uji, \u017ee jsem rodi\u010d nebo z\u00e1konn\u00fd z\u00e1stupce osoby '+(mName||'')+'. Beru na v\u011bdom\u00ed, \u017ee to po mn\u011b klub m\u016f\u017ee cht\u00edt dolo\u017eit a \u017ee za souhlasy ud\u011blen\u00e9 na z\u00e1klad\u011b nepravdiv\u00e9ho prohl\u00e1\u0161en\u00ed odpov\u00edd\u00e1m.');
+  if(!(currentUser && currentUser.birthdate)){ toast(EN?'\u26a0\ufe0f Add your date of birth in your profile first':'\u26a0\ufe0f Nejd\u0159\u00edv si dopl\u0148 datum narozen\u00ed v profilu',1); try{ if(typeof _openPersonalData==='function') setTimeout(_openPersonalData,300); }catch(e){} return null; }
+  const ok=await new Promise(function(res){
+    const o=document.createElement('div'); o.style.cssText='position:fixed;inset:0;z-index:100060;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;';
+    o.innerHTML='<div style="background:#fff;border-radius:18px;max-width:400px;width:100%;padding:22px;font-family:inherit;">'
+      +'<div style="font-size:30px;text-align:center;margin-bottom:6px;">\ud83d\udc6a</div>'
+      +'<div style="font-size:17px;font-weight:800;text-align:center;margin-bottom:8px;">'+(EN?'Legal guardian link':'Propojen\u00ed se z\u00e1konn\u00fdm z\u00e1stupcem')+'</div>'
+      +'<p style="font-size:13.5px;color:#555;line-height:1.55;margin-bottom:12px;"><b>'+escapeHtml(mName||(EN?'Someone':'N\u011bkdo'))+'</b> '+(EN?'will be linked to you as your child. You will approve their consents and can pay for them.':'bude s tebou propojen/a jako tv\u00e9 d\u00edt\u011b. Bude\u0161 schvalovat jeho souhlasy a m\u016f\u017ee\u0161 za n\u011bj platit.')+'</p>'
+      +'<label style="display:flex;gap:9px;align-items:flex-start;font-size:13px;line-height:1.5;margin-bottom:14px;cursor:pointer;"><input type="checkbox" id="fgDecl" style="width:18px;height:18px;flex:none;margin-top:1px;"><span>'+escapeHtml(_decl)+'</span></label>'
+      +'<button id="fgOk" style="width:100%;padding:13px;background:#141414;color:#fff;border:none;border-radius:12px;font-weight:800;cursor:pointer;font-family:inherit;font-size:15px;margin-bottom:8px;">'+(EN?'Confirm':'Potvrdit')+'</button>'
+      +'<button id="fgNo" style="width:100%;padding:10px;background:#F3F3F3;color:#555;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:inherit;font-size:14px;">'+(EN?'I am not their guardian':'Nejsem jeho z\u00e1stupce')+'</button></div>';
+    document.body.appendChild(o);
+    o.querySelector('#fgNo').onclick=function(){ o.remove(); res(false); };
+    o.querySelector('#fgOk').onclick=function(){ if(!o.querySelector('#fgDecl').checked){ toast(EN?'\u26a0\ufe0f Tick the declaration':'\u26a0\ufe0f Za\u0161krtni prohl\u00e1\u0161en\u00ed'); return; } o.remove(); res(true); };
+  });
+  return ok ? _decl : null;
+}
 async function _famApprove(linkId){
   const EN=LANG==='en'; const me=currentUser.id;
   let row=null; try{ const { data }=await supaClient.from('family_links').select('*').eq('id',linkId).single(); row=data; }catch(e){}
   if(!row) return; if(row.guardian_id!==me){ toast(EN?'Not allowed':'Nelze'); return; }
+  // Napojení dítěte: stejné výslovné prohlášení zákonného zástupce jako u odkazu od mladistvého.
+  let _gDecl=null, _gName='';
+  if(row.relation==='guardian'){
+    try{ const { data:_mp }=await supaClient.from('profiles').select('name').eq('id',row.member_id).single(); _gName=(_mp&&_mp.name)||''; }catch(e){}
+    _gDecl=await _guardianDeclare(_gName); if(!_gDecl) return;
+  }
   try{ const { error }=await supaClient.from('family_links').update({ status:'active', confirmed_at:new Date().toISOString() }).eq('id',linkId); if(error){ toast('⚠️ '+error.message); return; } }catch(e){ toast('⚠️ '+e.message); return; }
+  try{ if(_gDecl && typeof _recordConsent==='function') _recordConsent('guardian_declaration', '2026-10-04', LANG, _gDecl, { minor_id:row.member_id, minor_name:_gName||null, link_id:row.id }); }catch(e){}
   try{ if(row.member_id) await supaClient.from('notifications').insert({ user_id:row.member_id, type:'system', read:false, data:JSON.stringify({ kind:'family_active', who:(currentUser.name||'') }), message:'👪 '+(EN?'You are now linked as family with ':'Jsi teď napojen jako rodina s ')+(currentUser.name||'')+'.' }); }catch(e){}
   // Zástupci: nabídka, ať mu svěřenec může posílat žádosti o úhradu (zapíná se v Rodině).
   try{ if(row.relation==='guardian' && row.member_id && !row.can_request_pay){
@@ -6537,7 +6550,8 @@ async function _dashGo(t){ try{
   if(t==='home'||t==='coachhome'){ setNav('ni-me'); openSheet('shMe'); setTimeout(()=>{ const mc=$('modeCoach'); if(mc) mc.click(); }, 150); return; }
   if(t==='level'){ if(typeof openLevel==='function') openLevel(); return; }
   if(t==='miles'){ if(typeof openMilestones==='function') openMilestones(); return; }
-  if(t==='rewards'){ openSheet('shInvite'); if(typeof fillReferral==='function') fillReferral(); return; }
+  // Odměny z postranního panelu: i se seznamem pozvaných (dřív se otevřel jen odkaz bez přehledu).
+  if(t==='rewards'){ if(typeof fillReferral==='function') fillReferral(); if(typeof openInviteTracker==='function') openInviteTracker(); else openSheet('shInvite'); return; }
   if(t==='circle'){ openMtlCircle(); return; }
   if(t==='book'){ openSheet('shBookings'); if(typeof _upTab==='function') _upTab('skup'); else if(typeof loadBookings==='function') loadBookings('upcoming'); return; }
   // Diář se otevírá přímo. Klepnutí na tlačítko selhalo pokaždé, když tlačítko v dashmode
