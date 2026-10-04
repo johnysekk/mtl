@@ -94,7 +94,23 @@ export default async function handler(req, res) {
       const gids = scope === 'mtl' ? [...new Set(rows.map((w) => w.gym_id).filter(Boolean))] : [];
       const gn = {};
       if (gids.length) ((await sbGet(`gyms?id=in.(${gids.map(encodeURIComponent).join(',')})&select=id,name`)) || []).forEach((g) => { gn[g.id] = g.name; });
-      return res.status(200).json({ ok: true, rows: rows.map((w) => {
+      // PŘIHLÁŠKY ZA ČLENA (spolek) patří mezi doklady souhlasů klubu: žadatel podepsal znění
+      // přihlášky. Řádek nese i vyplněné údaje, aby šel zobrazit a stáhnout jako hotový formulář.
+      let apps = [];
+      if (scope === 'gym') {
+        let fa = `gym_member_applications?gym_id=eq.${encodeURIComponent(gymId)}`;
+        if (ids) fa += `&student_id=in.(${ids.map(encodeURIComponent).join(',')})`;
+        apps = (await sbGet(`${fa}&select=id,student_id,applicant_name,applicant_email,applicant_phone,applicant_birth,is_minor,guardian_name,guardian_contact,app_type,app_text,consent_at,consent_version,source,status,created_at&order=created_at.desc&limit=${per}`)) || [];
+      }
+      const appRows = apps.map((a) => ({
+        id: 'app:' + a.id, kind: 'member_application', title: null, body_text: a.app_text || null,
+        who: a.applicant_name || a.applicant_email || '—', accepted_at: a.consent_at || a.created_at,
+        version: a.consent_version || null, guardian_name: a.guardian_name || null, guardian_outside: false,
+        app: { name: a.applicant_name || null, email: a.applicant_email || null, phone: a.applicant_phone || null, birth: a.applicant_birth || null,
+               minor: !!a.is_minor, guardian: a.guardian_name || null, guardian_contact: a.guardian_contact || null,
+               type: a.app_type || null, source: a.source || null, status: a.status || null },
+      }));
+      const merged = rows.map((w) => {
         const e = ev[`${w.gym_id}|${w.student_id}|${w.body_hash}`] || null;
         return {
           id: w.id, kind: 'gym_terms', title: w.body_title || null, body_text: w.body_text || null,
@@ -113,7 +129,8 @@ export default async function handler(req, res) {
           body_hash: w.body_hash || null,
           file_url: w.terms_file_url || null, file_hash: w.terms_file_hash || null,
         };
-      }), total, page, per });
+      }).concat(appRows).sort((x, y) => String(y.accepted_at || '').localeCompare(String(x.accepted_at || '')));
+      return res.status(200).json({ ok: true, rows: merged, total: total + appRows.length, page, per });
     }
 
     // ── ostatní souhlasy (consent_acceptances) ────────────────────────────────────────────
