@@ -91,8 +91,9 @@ export default async function handler(req, res) {
         const reqs = (await sbGet(`guardian_consent_requests?status=eq.approved&minor_id=in.(${mids.map(encodeURIComponent).join(',')})&select=gym_id,minor_id,body_hash,guardian_email,same_device,approved_at,approved_ip,approved_ua,requested_ip,requested_ua,created_at`)) || [];
         reqs.forEach((r) => { ev[`${r.gym_id}|${r.minor_id}|${r.body_hash}`] = r; });
       }
-      // IDENTIFIKACE ČLOVĚKA k souhlasu: jméno, e-mail, telefon z profilu; datum narození, IP a
-      // zařízení jen pro MTL (zakladatel) -- klub je pro doložení souhlasu nepotřebuje.
+      // IDENTIFIKACE ČLOVĚKA k souhlasu: klub vidí jméno a e-mail; telefon, datum narození, IP a
+      // zařízení jen MTL (zakladatel). Telefon si uživatel může klubu kdykoli skrýt, takže ho klub
+      // u souhlasů nevidí nikdy.
       const sids = [...new Set(rows.map((w) => w.student_id).filter(Boolean))];
       const prof = {};
       if (sids.length) ((await sbGet(`profiles?id=in.(${sids.map(encodeURIComponent).join(',')})&select=id,name,email,phone,birthdate`)) || []).forEach((p) => { prof[p.id] = p; });
@@ -114,7 +115,8 @@ export default async function handler(req, res) {
         ident: { name: a.applicant_name || null, email: a.applicant_email || null, phone: a.applicant_phone || null, account: a.student_id || null, birth: a.applicant_birth || null, ip: null, ua: null },
         app: { name: a.applicant_name || null, email: a.applicant_email || null, phone: a.applicant_phone || null, birth: a.applicant_birth || null,
                minor: !!a.is_minor, guardian: a.guardian_name || null, guardian_contact: a.guardian_contact || null,
-               type: a.app_type || null, source: a.source || null, status: a.status || null },
+               type: a.app_type || null, source: a.source || null, status: a.status || null,
+               doc_url: a.doc_url || null, doc_name: a.doc_name || null, doc_hash: a.doc_hash || null },
       }));
       const merged = rows.map((w) => {
         const e = ev[`${w.gym_id}|${w.student_id}|${w.body_hash}`] || null;
@@ -122,7 +124,7 @@ export default async function handler(req, res) {
           id: w.id, kind: 'gym_terms', title: w.body_title || null, body_text: w.body_text || null,
           who: w.student_name || w.guest_email || '—', accepted_at: w.accepted_at,
           ident: { name: w.student_name || (prof[w.student_id] || {}).name || null, email: w.guest_email || (prof[w.student_id] || {}).email || null,
-                   phone: (prof[w.student_id] || {}).phone || null, account: w.student_id || null,
+                   phone: scope === 'mtl' ? ((prof[w.student_id] || {}).phone || null) : null, account: w.student_id || null,
                    birth: scope === 'mtl' ? ((prof[w.student_id] || {}).birthdate || null) : null,
                    ip: scope === 'mtl' ? (w.ip || null) : null, ua: scope === 'mtl' ? (w.user_agent || null) : null },
           version: w.version, guardian_name: w.guardian_name || null,
@@ -180,7 +182,7 @@ export default async function handler(req, res) {
         body_text: (v && v.body_text) || null,
         hash_mismatch: !!(v && v.body_hash && a.body_hash && v.body_hash !== a.body_hash),
         ident: (function(){ const p = names['_p_' + a.user_id] || {}; const mtl = scope === 'mtl';
-          return { name: a.user_name || p.name || null, email: a.user_email || p.email || null, phone: p.phone || null, account: a.user_id || null,
+          return { name: a.user_name || p.name || null, email: a.user_email || p.email || null, phone: mtl ? (p.phone || null) : null, account: a.user_id || null,
                    birth: mtl ? (p.birthdate || null) : null, ip: mtl ? (a.ip || null) : null, ua: mtl ? (a.user_agent || null) : null }; })(),
       };
     });

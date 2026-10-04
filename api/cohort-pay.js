@@ -307,6 +307,9 @@ export default async function handler(req, res) {
       rules: _cs.rules_accepted ? { hash: null, checkbox: String(_cs.rules_checkbox || '').slice(0, 500) } : null,
       marketing: !!_cs.marketing,
       marketing_text: _cs.marketing ? String(_cs.marketing_text || '').slice(0, 500) : null,
+      // Odkud souhlas přišel -- stejně jako u ostatních souhlasů (vidí jen MTL).
+      ip: (String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.headers['x-real-ip'] || null),
+      user_agent: (req.headers['user-agent'] ? String(req.headers['user-agent']).slice(0, 400) : null),
     };
     const _who = { for_child: forChild, child_dob: childDob, guardian_name: guardianName, guardian_contact: guardianContact, paid_by: paidBy, consents: _consents };
     // VĚKOVÉ OMEZENÍ KURZU (od / do / od–do). Věk účastníka: dítě z data narození, přihlášený
