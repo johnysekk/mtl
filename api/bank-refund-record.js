@@ -52,6 +52,11 @@ export default async function handler(req, res) {
       const gb = ((await sb(`gym_bookings?id=eq.${q(id)}&select=gym_id`)) || [])[0];
       if (!gb || !(await isGymBoss(gb.gym_id, me))) return res.status(403).json({ ok: false, error: 'forbidden' });
       tx = ((await sb(`transactions?source_booking_id=eq.${q(id)}&payment_method=in.(cash,qr,pis)&limit=1&select=id,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,commission_status`)) || [])[0];
+    } else if (kind === 'tx') {
+      // Libovolná platba převodem/hotově studenta v klubu (např. zrušený jednorázový vstup).
+      const t0 = ((await sb(`transactions?id=eq.${q(id)}&select=gym_id`)) || [])[0];
+      if (!t0 || !t0.gym_id || !(await isGymBoss(t0.gym_id, me))) return res.status(403).json({ ok: false, error: 'forbidden' });
+      tx = ((await sb(`transactions?id=eq.${q(id)}&payment_method=in.(cash,qr,pis)&select=id,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,commission_status`)) || [])[0];
     } else return res.status(400).json({ ok: false, error: 'unknown kind' });
 
     if (!tx) return res.status(200).json({ ok: true, recorded: false });   // platba v evidenci není (např. před MTL)
@@ -66,6 +71,8 @@ export default async function handler(req, res) {
       patch.mtl_fee_refunded = Math.min(Number(tx.mtl_fee) || 0, (Number(tx.mtl_fee_refunded) || 0) + feeBack);
     }
     await sb(`transactions?id=eq.${q(tx.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) });
+    // Vrácení po odstoupení od smlouvy: odstoupení je tím vyřízené.
+    if (b.withdrawal_id) { try { await sb(`withdrawal_requests?id=eq.${q(String(b.withdrawal_id))}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'refunded', refunded_at: new Date().toISOString() }) }); } catch (e) {} }
     return res.status(200).json({ ok: true, recorded: true, refunded: back / 100, fee_returned: feeBack / 100 });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
