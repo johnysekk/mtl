@@ -48,7 +48,9 @@ function gymNow(tz, at) {
 // _classRemindable v appce). Lekce přidaná večer na dnešní den s už uplynulým časem proběhnout
 // nemohla. Čas vytvoření se převádí do časové zóny klubu, stejně jako "teď".
 function remindable(c, date, startMins, tz) {
-  if (!c || c.once) return false;
+  if (!c) return false;
+  // Jednorázová lekce: připomínka jen v její den (dřív se jednorázové nepřipomínaly vůbec).
+  if (c.once && String(c.date || '') !== date) return false;
   if (c.since && date < String(c.since)) return false;
   if (c.until && date > String(c.until)) return false;
   if (c.created_at) {
@@ -96,9 +98,13 @@ async function handler(req, res) {
       // se čte dál, dokud kluby rozvrh znovu neuloží; appka ho zatím zapisuje vedle nového.
       // Termíny lekce: pole `slots`, všechny si rovné. Starý tvar (day/time + extraSlots)
       // se už nečte -- rozvrhy jsou převedené a appka ukládá jen `slots`.
-      const slotsOf = (c) => Array.isArray(c.slots)
-        ? c.slots.filter(s2 => s2 && s2.day != null && s2.time).map(s2 => ({ day: s2.day, time: s2.time }))
-        : [];
+      const slotsOf = (c) => {
+        // Jednorázová lekce nemá dny v týdnu -- jeden termín v den svého data.
+        if (c && c.once) return (c.date === date && c.time) ? [{ day: dow, time: c.time }] : [];
+        return Array.isArray(c.slots)
+          ? c.slots.filter(s2 => s2 && s2.day != null && s2.time).map(s2 => ({ day: s2.day, time: s2.time }))
+          : [];
+      };
       const due = [];
       for (const c of sch) {
         for (const sl of slotsOf(c)) {
