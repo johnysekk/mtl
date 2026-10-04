@@ -4830,6 +4830,11 @@ async function _approveMinorMemberApp(d){
 }
 // Žádost v Rodině je vyřízená: označit v notifikaci (data.done) -- nezávisle na „přečteno".
 async function _famMarkDone(d){
+  // Vyřízeno = i všechny kopie téže žádosti (stejný druh, mladistvý, klub/akce).
+  try{ if(d && d.kind && d.minor_id && currentUser){
+    const { data:_all }=await supaClient.from('notifications').select('id,data').eq('user_id',currentUser.id).gte('created_at',new Date(Date.now()-45*86400000).toISOString()).limit(80);
+    for(const n of (_all||[])){ let dd={}; try{ dd=JSON.parse(n.data||'{}'); }catch(e){} if(dd.done || String(n.id)===String(d._nid)) continue;
+      if(dd.kind===d.kind && String(dd.minor_id)===String(d.minor_id) && String(dd.gym_id||'')===String(d.gym_id||'') && String(dd.event_id||'')===String(d.event_id||'')){ dd.done=true; try{ await supaClient.from('notifications').update({ read:true, data:JSON.stringify(dd) }).eq('id', n.id); }catch(e){} } } } }catch(e){}
   try{ if(d && d._nid){ const { data:n }=await supaClient.from('notifications').select('data').eq('id',d._nid).maybeSingle();
       let dd={}; try{ dd=JSON.parse((n&&n.data)||'{}'); }catch(e){} dd.done=true;
       await supaClient.from('notifications').update({ read:true, data:JSON.stringify(dd) }).eq('id', d._nid); } }catch(e){}
@@ -4849,6 +4854,8 @@ async function _famRenderConsents(){
       try{ const d=JSON.parse(x.data||'{}'); return !d.done && (d.kind==='minor_waiver' || d.kind==='minor_event_consent' || d.kind==='pay_request' || d.kind==='minor_member_app'); }
       catch(e){ return false; }
     });
+    // Duplicitní žádosti (mladistvý klepl víckrát) jako jedna položka -- nejnovější.
+    { const _seen=new Set(); rows=rows.filter(function(x){ try{ const dd=JSON.parse(x.data||'{}'); const k=[dd.kind,dd.minor_id,dd.gym_id,dd.event_id||''].join('|'); if(_seen.has(k)) return false; _seen.add(k); return true; }catch(e){ return true; } }); }
     // Už schválené pravidlo klubu (stejné znění) se znovu neukazuje.
     try{ const _mw=rows.map(function(x){ try{ return JSON.parse(x.data||'{}'); }catch(e){ return {}; } }).filter(function(d){ return d.kind==='minor_waiver' && d.minor_id && d.hash; });
       if(_mw.length){ const { data:_acc }=await supaClient.from('waiver_acceptances').select('student_id,body_hash').in('student_id',[...new Set(_mw.map(function(d){ return d.minor_id; }))]);
@@ -5663,6 +5670,7 @@ const NOTIF_T = {
       : `⏰ Připomínka: ${d.label||'tvůj trénink'} brzy začíná${_w?' — '+_w:''}.`;
   },
   dropin_bank_cancelled: (d)=> LANG==='en' ? (d.msg_en||'') : (d.msg_cs||''),
+  guardian_request_sent: (d)=> LANG==='en' ? ('\ud83d\udcdd Sent to your guardian for approval: '+(d.gym_name||'')) : ('\ud83d\udcdd Odesl\u00e1no z\u00e1stupci ke schv\u00e1len\u00ed: '+(d.gym_name||'')),
   autonomy_sunset: (d)=> LANG==='en' ? (d.msg_en||'') : (d.msg_cs||''),
   withdrawal_done: (d)=> LANG==='en' ? (d.msg_en||'') : (d.msg_cs||''),
   withdrawal_request: (d)=> LANG==='en' ? (d.msg_en||'') : (d.msg_cs||''),
@@ -13514,8 +13522,8 @@ async function removeFavorite(coachId){
 // NAV
 // ════════════════════════════════════════
 function _waiverHash(str){ let h1=0xdeadbeef,h2=0x41c6ce57; const x=String(str||''); for(let i=0;i<x.length;i++){ const ch=x.charCodeAt(i); h1=Math.imul(h1^ch,2654435761); h2=Math.imul(h2^ch,1597334677); } h1=Math.imul(h1^(h1>>>16),2246822507); h1^=Math.imul(h2^(h2>>>13),3266489909); h2=Math.imul(h2^(h2>>>16),2246822507); h2^=Math.imul(h1^(h1>>>13),3266489909); return (4294967296*(2097151&h2)+(h1>>>0)).toString(16); }
-// ŠABLONA PODMÍNEK. Nehotový dokument, ale kostra: hranaté závorky MUSÍ klub vyplnit a
-// uložení to kontroluje (_waiverCheck). Dřív to byl hotový text na jedno kliknutí -- a text,
+// ŠABLONA PODMÍNEK. Hotový použitelný text bez závorek k vyplnění (zjednodušení zakládání
+// klubu); klub si ho upraví podle sebe. Kdyby do textu vlastní [závorky] vložil, uložení je hlídá (_waiverCheck). Dřív to byl hotový text na jedno kliknutí -- a text,
 // který sedí na každý klub na světě, si nikdo nepřečte a checkbox „jsem autorem" je pak lež.
 //
 // CO V ŠABLONĚ SCHVÁLNĚ NENÍ: zproštění odpovědnosti za újmu na zdraví. Podle § 2898
@@ -13532,24 +13540,24 @@ const WAIVER_TPL = {
 Platn\u00e9 od ${o.today||''}
 
 1. Kdo u n\u00e1s tr\u00e9nuje
-Tr\u00e9ninky vedeme v disciplin\u00e1ch: ${o.disc||'bojov\u00e9 sporty'}. Tr\u00e9novat m\u016f\u017ee \u010dlov\u011bk od [od kolika let] let; mlad\u0161\u00ed jen se souhlasem z\u00e1konn\u00e9ho z\u00e1stupce. Ten d\u00edt\u011b p\u0159ed\u00e1v\u00e1 tren\u00e9rovi na za\u010d\u00e1tku lekce a p\u0159eb\u00edr\u00e1 ho po jej\u00edm konci; mimo tuto dobu za d\u00edt\u011b neodpov\u00edd\u00e1me.
+Tr\u00e9ninky vedeme v disciplin\u00e1ch: ${o.disc||'bojov\u00e9 sporty'}. Tr\u00e9novat m\u016f\u017ee samostatn\u011b \u010dlov\u011bk od 18 let; mlad\u0161\u00ed jen se souhlasem z\u00e1konn\u00e9ho z\u00e1stupce. Ten d\u00edt\u011b p\u0159ed\u00e1v\u00e1 tren\u00e9rovi na za\u010d\u00e1tku lekce a p\u0159eb\u00edr\u00e1 ho po jej\u00edm konci; mimo tuto dobu za d\u00edt\u011b neodpov\u00edd\u00e1me.
 
 2. Zdravotn\u00ed zp\u016fsobilost
 Tr\u00e9nink je fyzicky n\u00e1ro\u010dn\u00fd a kontaktn\u00ed. Prohla\u0161uji, \u017ee jsem zdravotn\u011b zp\u016fsobil\u00fd se ho \u00fa\u010dastnit; za nezletil\u00e9ho to prohla\u0161uje z\u00e1konn\u00fd z\u00e1stupce.
-O t\u011bchto omezen\u00edch tren\u00e9ra informuji p\u0159edem: [nap\u0159. \u00farazy hlavy, epilepsie, srde\u010dn\u00ed onemocn\u011bn\u00ed, astma, t\u011bhotenstv\u00ed].
+O t\u011bchto omezen\u00edch tren\u00e9ra informuji p\u0159edem: \u00farazy hlavy, epilepsie, srde\u010dn\u00ed onemocn\u011bn\u00ed, astma, t\u011bhotenstv\u00ed a jin\u00e1 zdravotn\u00ed omezen\u00ed.
 
 3. Pln\u00fd kontakt a chr\u00e1ni\u010de
-Sparing, randori nebo voln\u00fd boj prob\u00edh\u00e1 [kdy a za jak\u00fdch podm\u00ednek \u2014 nap\u0159. a\u017e od pokro\u010dil\u00e9 \u00farovn\u011b, v\u017edy pod dohledem tren\u00e9ra].
-Povinn\u00e9 chr\u00e1ni\u010de: [vypi\u0161 \u2014 nap\u0159. chr\u00e1ni\u010d zub\u016f, band\u00e1\u017ee, rukavice, suspenzor, chr\u00e1ni\u010de holen\u00ed]. Bez nich tren\u00e9r nikoho k pln\u00e9mu kontaktu nepust\u00ed.
+Sparing, randori nebo voln\u00fd boj prob\u00edh\u00e1 jen se svolen\u00edm tren\u00e9ra a v\u017edy pod jeho dohledem.
+Povinn\u00e9 chr\u00e1ni\u010de: chr\u00e1ni\u010d zub\u016f a dal\u0161\u00ed vybaven\u00ed podle discipl\u00edny a pokyn\u016f tren\u00e9ra. Bez nich tren\u00e9r nikoho k pln\u00e9mu kontaktu nepust\u00ed.
 
 4. \u00daraz
-Ka\u017ed\u00fd \u00faraz, nevolnost nebo indispozici hl\u00e1s\u00edm tren\u00e9rovi [do kdy \u2014 nap\u0159. ihned na m\u00edst\u011b]. Klub o n\u011bm po\u0159\u00edd\u00ed z\u00e1znam.
-[Co m\u00e1te pro p\u0159\u00edpad \u00farazu \u2014 nap\u0159. l\u00e9k\u00e1rni\u010dka v s\u00e1le, tren\u00e9\u0159i s kurzem prvn\u00ed pomoci. Nepi\u0161 nic, co nem\u00e1te.]
+Ka\u017ed\u00fd \u00faraz, nevolnost nebo indispozici hl\u00e1s\u00edm tren\u00e9rovi ihned na m\u00edst\u011b. Klub o n\u011bm po\u0159\u00edd\u00ed z\u00e1znam.
+P\u0159i \u00farazu tren\u00e9r poskytne prvn\u00ed pomoc v r\u00e1mci sv\u00fdch mo\u017enost\u00ed a v p\u0159\u00edpad\u011b pot\u0159eby zavol\u00e1 z\u00e1chrannou slu\u017ebu.
 
 5. Vybaven\u00ed a hygiena
 Tr\u00e9ninkov\u00e9 oble\u010den\u00ed i chr\u00e1ni\u010de mus\u00ed b\u00fdt \u010dist\u00e9. Ost\u0159\u00edhan\u00e9 nehty na rukou i nohou. S otev\u0159enou ranou nebo ko\u017en\u00edm onemocn\u011bn\u00edm se netr\u00e9nuje.
 P\u0159ed tr\u00e9ninkem odlo\u017e prst\u00fdnky, \u0159et\u00edzky, n\u00e1u\u0161nice, piercingy a hodinky.
-[Co si \u010dlen nos\u00ed a co p\u016fj\u010duje klub, obuv do s\u00e1lu, pravidla v \u0161atn\u011b.]
+Vlastn\u00ed vybaven\u00ed si ka\u017ed\u00fd nos\u00ed s\u00e1m, pokud se s klubem nedomluv\u00ed jinak. Do s\u00e1lu se nevstupuje ve venkovn\u00ed obuvi.
 
 6. Rezervace a platby
 Rezervace lekc\u00ed a jejich ru\u0161en\u00ed \u0159e\u0161\u00ed aplikace MTL; podm\u00ednky platby a vr\u00e1cen\u00ed pen\u011bz v n\u00ed vid\u00ed\u0161 p\u0159ed ka\u017edou platbou.
@@ -13560,7 +13568,7 @@ Ego z\u016fst\u00e1v\u00e1 v \u0161atn\u011b. Sparing slou\u017e\u00ed k u\u010d
 Nau\u010den\u00e9 techniky se mimo t\u011blocvi\u010dnu nepou\u017e\u00edvaj\u00ed \u2014 vyjma nutn\u00e9 obrany a krajn\u00ed nouze podle z\u00e1kona.
 Do t\u011blocvi\u010dny se nevstupuje pod vlivem alkoholu ani jin\u00fdch n\u00e1vykov\u00fdch l\u00e1tek; v cel\u00fdch prostor\u00e1ch plat\u00ed z\u00e1kaz kou\u0159en\u00ed v\u010detn\u011b elektronick\u00fdch cigaret.
 Za cennosti odlo\u017een\u00e9 v \u0161atn\u011b neodpov\u00edd\u00e1me. Za \u0161kodu na majetku klubu odpov\u00edd\u00e1 ten, kdo ji zp\u016fsobil.
-[Co u v\u00e1s plat\u00ed nav\u00edc \u2014 nap\u0159. pozdn\u00ed p\u0159\u00edchody, nat\u00e1\u010den\u00ed v s\u00e1le, focen\u00ed pro klub.]
+Na tr\u00e9nink chod\u00edme v\u010das. Nat\u00e1\u010det nebo fotit ostatn\u00ed lze jen s jejich souhlasem.
 P\u0159i hrub\u00e9m nebo opakovan\u00e9m poru\u0161ov\u00e1n\u00ed t\u011bchto pravidel m\u016f\u017ee tren\u00e9r nebo veden\u00ed klubu ukon\u010dit ${o.np?'\u010dlenstv\u00ed':'doch\u00e1zku do klubu'}.
 
 8. Kdo je poskytovatel
@@ -13570,24 +13578,24 @@ Tr\u00e9nink poskytuje ${nm}${ico?(', I\u010cO '+ico):''}. MTL je pouze zprost\u
 Valid from ${o.today||''}
 
 1. Who trains with us
-We teach: ${o.disc||'combat sports'}. Training is open from the age of [from what age]; younger only with a guardian's consent. The guardian hands the child over to the coach at the start of the class and collects them at the end; outside that time we are not responsible for the child.
+We teach: ${o.disc||'combat sports'}. Training on your own is open from the age of 18; younger only with a guardian's consent. The guardian hands the child over to the coach at the start of the class and collects them at the end; outside that time we are not responsible for the child.
 
 2. Fitness to train
 Training is physically demanding and involves contact. I confirm I am fit to take part; for a minor the guardian confirms it.
-I will tell the coach in advance about: [e.g. head injuries, epilepsy, heart conditions, asthma, pregnancy].
+I will tell the coach in advance about: head injuries, epilepsy, heart conditions, asthma, pregnancy and any other health limitation.
 
 3. Full contact and gear
-Sparring, randori or free practice takes place [when and under what conditions \u2014 e.g. advanced level only, always supervised].
-Required gear: [list it \u2014 e.g. mouthguard, wraps, gloves, groin guard, shin guards]. Without it the coach lets nobody into full contact.
+Sparring, randori or free practice takes place only with the coach's permission and always under supervision.
+Required gear: a mouthguard and other equipment as the discipline and the coach require. Without it the coach lets nobody into full contact.
 
 4. Injury
-I report any injury, sickness or discomfort to the coach [by when \u2014 e.g. immediately, on the spot]. The club makes a record of it.
-[What you have in case of injury \u2014 e.g. a first-aid kit in the gym, coaches with first-aid training. Do not write anything you do not have.]
+I report any injury, sickness or discomfort to the coach immediately, on the spot. The club makes a record of it.
+In case of injury the coach gives first aid as far as they can and calls emergency services when needed.
 
 5. Gear and hygiene
 Training clothes and guards must be clean. Nails cut short on hands and feet. No training with an open wound or a skin condition.
 Take off rings, chains, earrings, piercings and watches before training.
-[What members bring and what the club lends, mat footwear, changing-room rules.]
+Everyone brings their own gear unless agreed otherwise with the club. No outdoor shoes on the mats.
 
 6. Bookings and payments
 Class bookings and cancellations are handled by the MTL app; the payment and refund terms are shown there before every payment.
@@ -13598,7 +13606,7 @@ Leave your ego in the changing room. Sparring is for learning, not for hurting y
 What you learn here stays here \u2014 except for lawful self-defence.
 Do not enter under the influence of alcohol or other drugs; smoking, including e-cigarettes, is banned throughout the premises.
 We are not liable for valuables left in the changing room. Whoever damages the club's property is liable for it.
-[What else applies here \u2014 e.g. late arrivals, filming in the gym, photos for the club.]
+Be on time. Filming or photographing others only with their consent.
 If these rules are broken badly or repeatedly, a coach or the club management may end ${o.np?'the membership':'access to the gym'}.
 
 8. Who provides the training
@@ -13686,6 +13694,7 @@ Schválením potvrzuji, že jsem zákonný zástupce a souhlasím s výše uvede
 }
 
 function _minorInfoPopup(title, body, btnLabel, btnAction){
+  if(btnLabel==null || btnLabel==='') btnLabel='OK';
   const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;z-index:100052;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:22px;';
   ov.innerHTML=`<div style="background:#fff;border-radius:18px;max-width:360px;width:100%;padding:24px;font-family:'DM Sans';text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.3);"><div style="font-size:32px;margin-bottom:8px;">🛡️</div><div style="font-size:17px;font-weight:800;color:#141414;margin-bottom:8px;">${title}</div><p style="font-size:13.5px;color:#555;line-height:1.55;margin-bottom:16px;white-space:pre-wrap;text-align:left;">${body}</p><button id="miOkBtn" style="width:100%;padding:12px;background:#141414;color:#fff;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';font-size:14px;">${btnLabel}</button></div>`;
   document.body.appendChild(ov);
@@ -13999,6 +14008,12 @@ async function _minorWaiverGate(g, onAgree, isMembership){
   let _wv=g.waiver_version; if(_wv==null){ try{ const { data:gg }=await supaClient.from('gyms').select('waiver_version').eq('id',g.id).single(); _wv=(gg&&gg.waiver_version)||0; }catch(e){ _wv=0; } }
   // already approved by a guardian for this exact document?
   try{ const { data:acc }=await supaClient.from('waiver_acceptances').select('id').eq('gym_id',g.id).eq('student_id',me).eq('body_hash',_hash).limit(1); if(acc&&acc.length){ if(typeof onAgree==='function') onAgree(); return; } }catch(e){}
+  // Už čeká? Stejně jako u přihlášky: znovu nejdřív za 24 h (připomenutí), ať klepání nezahltí zástupce.
+  try{ const { data:_sent }=await supaClient.from('notifications').select('created_at,data').eq('user_id',me).gte('created_at',new Date(Date.now()-86400000).toISOString()).order('created_at',{ascending:false}).limit(30);
+    const _hit=(_sent||[]).find(function(x){ try{ const dd=JSON.parse(x.data||'{}'); return dd.kind==='guardian_request_sent' && dd.req==='waiver' && String(dd.gym_id)===String(g.id); }catch(e){ return false; } });
+    if(_hit){ const _t=new Date(_hit.created_at); const _nx=new Date(_t.getTime()+86400000);
+      _minorInfoPopup(EN?'Already waiting for your guardian':'U\u017e \u010dek\u00e1 na z\u00e1stupce', EN?('You sent the request on '+_t.toLocaleString('en-GB')+'. You can send a reminder after '+_nx.toLocaleString('en-GB')+'.'):('\u017d\u00e1dost jsi poslal/a '+_t.toLocaleString('cs-CZ')+'. P\u0159ipomenout ji m\u016f\u017ee\u0161 po '+_nx.toLocaleString('cs-CZ')+'.'));
+      return; } }catch(e){}
   // find active legal guardian(s)
   let guards=[];
   try{ const { data:fl }=await supaClient.from('family_links').select('guardian_id').eq('member_id',me).eq('relation','guardian').eq('status','active'); guards=[...new Set((fl||[]).map(x=>x.guardian_id).filter(Boolean))]; }catch(e){}
@@ -14014,6 +14029,7 @@ async function _minorWaiverGate(g, onAgree, isMembership){
       // (stanovy) vůbec neviděl, i když je to právě to, s čím má souhlasit.
       file_url:(g&&g.terms_file_url)||null, file_name:(g&&g.terms_file_name)||null, file_size:(g&&g.terms_file_size)||null }), message:'🛡️ '+(currentUser.name||(EN?'Your minor':'Tvůj svěřenec'))+(EN?' wants to train at ':' chce trénovat v ')+(g.name||'Klub')+(EN?' — review & approve the waiver.':' — zkontroluj a schval souhlas.') }); sent++; }catch(e){}
   }
+  try{ await supaClient.from('notifications').insert({ user_id:me, type:'system', read:true, data:JSON.stringify({ kind:'guardian_request_sent', req:'waiver', gym_id:g.id, gym_name:g.name||'' }), message:'\ud83d\udee1\ufe0f '+(EN?('Club rules of '+(g.name||'')+' sent to your guardian.'):('Pravidla klubu '+(g.name||'')+' odesl\u00e1na z\u00e1stupci ke schv\u00e1len\u00ed.')) }); }catch(e){}
   _minorInfoPopup(EN?'Sent to your legal guardian':'Odesl\u00e1no z\u00e1konn\u00e9mu z\u00e1stupci', (EN?('We asked your guardian to approve the waiver for '+escapeHtml(g.name||'the klub')+'. Once they approve, come back and book.'):('Požádali jsme tvého zástupce o souhlas s '+escapeHtml(g.name||'klubem')+'. Až schválí, vrať se a rezervuj.')), 'OK', null);
 }
 
@@ -15148,6 +15164,14 @@ async function _memberAppGate(g, _child, _plan){
   { const _ma=(!_child && currentUser.birthdate && typeof _famAge==='function')?_famAge(currentUser.birthdate):null;
     if(_ma!=null && _ma<18){
       try{ const { data:_ex2 }=await supaClient.from('gym_member_applications').select('id').eq('gym_id',g.id).eq('student_id',currentUser.id).in('status',['pending','approved']).limit(1); if(_ex2 && _ex2.length) return true; }catch(e){}
+      // UŽ ČEKÁ? Opakované klepnutí nesmí zástupce zasypat stejnými žádostmi. Odeslání si
+      // mladistvý poznamená do svých notifikací (guardian_request_sent); dokud žádost čeká,
+      // další jde nejdřív za 24 hodin (jako připomenutí).
+      try{ const { data:_sent }=await supaClient.from('notifications').select('created_at,data').eq('user_id',currentUser.id).gte('created_at',new Date(Date.now()-86400000).toISOString()).order('created_at',{ascending:false}).limit(30);
+        const _hit=(_sent||[]).find(function(x){ try{ const dd=JSON.parse(x.data||'{}'); return dd.kind==='guardian_request_sent' && dd.req==='member_app' && String(dd.gym_id)===String(g.id); }catch(e){ return false; } });
+        if(_hit){ const _t=new Date(_hit.created_at); const _nx=new Date(_t.getTime()+86400000);
+          _minorInfoPopup(EN?'Already waiting for your guardian':'U\u017e \u010dek\u00e1 na z\u00e1stupce', EN?('You sent the request on '+_t.toLocaleString('en-GB')+'. You can send a reminder after '+_nx.toLocaleString('en-GB')+'.'):('\u017d\u00e1dost jsi poslal/a '+_t.toLocaleString('cs-CZ')+'. P\u0159ipomenout ji m\u016f\u017ee\u0161 po '+_nx.toLocaleString('cs-CZ')+'.'));
+          return false; } }catch(e){}
       let _gs=[]; try{ const { data:fl }=await supaClient.from('family_links').select('guardian_id').eq('member_id',currentUser.id).eq('relation','guardian').eq('status','active'); _gs=[...new Set((fl||[]).map(function(x){ return x.guardian_id; }))]; }catch(e){}
       if(!_gs.length){ toast(EN?'\u26a0\ufe0f Under 18 the membership application is made by your legal guardian. Link them in Family first.':'\u26a0\ufe0f Pod 18 let pod\u00e1v\u00e1 p\u0159ihl\u00e1\u0161ku za \u010dlena z\u00e1konn\u00fd z\u00e1stupce. Nejd\u0159\u00edv se s n\u00edm propoj v Rodin\u011b.',1); return false; }
       if(!confirm(EN?('You are under 18. We will send your legal guardian your application for membership of '+(g.name||'the club')+' together with the club rules \u2014 they submit the application and approve the rules in one go. Continue?')
@@ -15170,6 +15194,8 @@ async function _memberAppGate(g, _child, _plan){
         data:JSON.stringify({ kind:'minor_member_app', gym_id:g.id, gym_name:g.name||'', minor_id:currentUser.id, minor_name:currentUser.name||'', minor_birth:currentUser.birthdate||null, minor_email:currentUser.email||null, minor_phone:currentUser.phone||null,
           app_type:((_plan&&_plan.member_cat)||g.member_app_type||null), app_text:_txt, waiver:_wv }),
         message:'\ud83d\udcdd '+(currentUser.name||'')+' chce b\u00fdt \u010dlenem '+(g.name||'')+' \u2014 zkontroluj a podej p\u0159ihl\u00e1\u0161ku.' }); }catch(e){} }
+      try{ await supaClient.from('notifications').insert({ user_id:currentUser.id, type:'system', read:true, data:JSON.stringify({ kind:'guardian_request_sent', req:'member_app', gym_id:g.id, gym_name:g.name||'' }),
+        message:'\ud83d\udcdd '+(EN?('Membership application for '+(g.name||'')+' sent to your guardian.'):('P\u0159ihl\u00e1\u0161ka za \u010dlena do '+(g.name||'')+' odesl\u00e1na z\u00e1stupci.')) }); }catch(e){}
       if(typeof _minorInfoPopup==='function') _minorInfoPopup(EN?'Sent to your legal guardian':'Odesl\u00e1no z\u00e1konn\u00e9mu z\u00e1stupci', EN?('Your guardian will submit the application to '+escapeHtml(g.name||'the club')+' and approve the club rules. You will get a notification \u2014 then finish the purchase.'):('Z\u00e1stupce pod\u00e1 p\u0159ihl\u00e1\u0161ku do '+escapeHtml(g.name||'klubu')+' a odsouhlas\u00ed pravidla klubu. P\u0159ijde ti notifikace \u2014 pak dokon\u010d\u00ed\u0161 n\u00e1kup.'));
       return false;
     }
@@ -15179,7 +15205,7 @@ async function _memberAppGate(g, _child, _plan){
   const _data=_child
     ? ((EN?'APPLICATION DATA':'\u00daDAJE V P\u0158IHL\u00c1\u0160CE')+'\n'+(EN?'Applicant: ':'\u017dadatel: ')+(_child.name||'\u2014')+' \u00b7 '+(EN?'born ':'nar. ')+_fd(_child.dob)+'\n'+(EN?'Legal guardian: ':'Z\u00e1konn\u00fd z\u00e1stupce: ')+(currentUser.name||'')+' \u00b7 '+[currentUser.email,currentUser.phone].filter(Boolean).join(' \u00b7 '))
     : ((EN?'APPLICATION DATA':'\u00daDAJE V P\u0158IHL\u00c1\u0160CE')+'\n'+(EN?'Name: ':'Jm\u00e9no: ')+(currentUser.name||'')+'\n'+(EN?'Date of birth: ':'Datum narozen\u00ed: ')+_fd(currentUser.birthdate)+'\n'+(EN?'E-mail: ':'E-mail: ')+(currentUser.email||'\u2014')+'\n'+(EN?'Phone: ':'Telefon: ')+(currentUser.phone||'\u2014'));
-  if(!confirm(_data+'\n\n'+_memberAppConfirmText(g, EN, _plan))) return false;
+  if(!(await _memberAppModal(g, _data, _memberAppConfirmText(g, EN, _plan)))) return false;
   try{
     await supaClient.from('gym_member_applications').insert(_child ? {
       gym_id:g.id, student_id:_sid,
@@ -15187,7 +15213,7 @@ async function _memberAppGate(g, _child, _plan){
       guardian_name:currentUser.name||null, guardian_contact:(currentUser.email||currentUser.phone||null),
       consent_at:new Date().toISOString(),
       consent_version:(typeof LEGAL_VERSION!=='undefined'?LEGAL_VERSION:null),
-      app_type:((_plan&&_plan.member_cat)||g.member_app_type||null), app_text:_memberAppConfirmText(g, EN, _plan),
+      app_type:((_plan&&_plan.member_cat)||g.member_app_type||null), app_text:(_memberAppConfirmText(g, EN, _plan)+'\n\n\u2611 '+_memberAppAskSentence(g, EN)),
       source:'membership',
     } : {
       gym_id:g.id, student_id:currentUser.id,
@@ -15195,7 +15221,7 @@ async function _memberAppGate(g, _child, _plan){
       applicant_phone:currentUser.phone||null,
       consent_at:new Date().toISOString(),
       consent_version:(typeof LEGAL_VERSION!=='undefined'?LEGAL_VERSION:null),
-      app_type:((_plan&&_plan.member_cat)||g.member_app_type||null), app_text:_memberAppConfirmText(g, EN, _plan),
+      app_type:((_plan&&_plan.member_cat)||g.member_app_type||null), app_text:(_memberAppConfirmText(g, EN, _plan)+'\n\n\u2611 '+_memberAppAskSentence(g, EN)),
       source:'membership',
     });
   }catch(e){ console.error('member application', e); toast('\u26a0\ufe0f '+((e&&e.message)||'')); return false; }
@@ -18883,9 +18909,30 @@ function _memberAppDecision(g, kind, EN){
 // Text potvrzovacího okna před nákupem členství -- stejný pro studenta i pro náhled klubu.
 function _memberAppConfirmText(g, EN, _plan){
   const _typ=(_plan && _plan.member_cat) || g.member_app_type || '';
-  return (_typ?((EN?'Type of membership: ':'Typ \u010dlenstv\u00ed: ')+_typ+'\n\n'):'')+(g.member_app_text||_memberAppDefault(g))+'\n\n'+_memberAppDecision(g, 'membership', EN)
-    +'\n\n'+(EN?('I have read the full application and I apply for membership of '+(g.name||'the club'))
-              :('Sezn\u00e1mil jsem se s cel\u00fdm obsahem p\u0159ihl\u00e1\u0161ky a \u017e\u00e1d\u00e1m o p\u0159ijet\u00ed za \u010dlena klubu '+(g.name||'')));
+  return (_typ?((EN?'Type of membership: ':'Typ \u010dlenstv\u00ed: ')+_typ+'\n\n'):'')+(g.member_app_text||_memberAppDefault(g))+'\n\n'+_memberAppDecision(g, 'membership', EN);
+}
+// Prohlášení žadatele -- zaškrtávátko pod přihláškou (ne věta uvnitř jejího textu).
+function _memberAppAskSentence(g, EN){
+  return EN?('I have read the full application and I apply for membership of '+((g&&(g.name||g.gym_name))||'the club'))
+           :('Sezn\u00e1mil jsem se s cel\u00fdm obsahem p\u0159ihl\u00e1\u0161ky a \u017e\u00e1d\u00e1m o p\u0159ijet\u00ed za \u010dlena klubu '+((g&&(g.name||g.gym_name))||''));
+}
+// Okno přihlášky za člena: údaje, znění a povinné zaškrtnutí prohlášení. Vrací true/false.
+function _memberAppModal(g, dataTxt, appTxt){
+  return new Promise(function(res){
+    const EN=LANG==='en'; const ask=_memberAppAskSentence(g, EN);
+    const ov=document.createElement('div');
+    ov.style.cssText='position:fixed;inset:0;z-index:100050;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center;';
+    ov.innerHTML='<div style="background:var(--bg);border-radius:18px 18px 0 0;max-width:520px;width:100%;padding:20px;max-height:88vh;overflow-y:auto;font-family:inherit;">'
+      +'<div style="font-size:17px;font-weight:800;margin-bottom:10px;">'+(EN?'Membership application':'P\u0159ihl\u00e1\u0161ka za \u010dlena')+'</div>'
+      +'<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:11px 13px;font-size:13px;line-height:1.65;margin-bottom:10px;white-space:pre-wrap;">'+escapeHtml(dataTxt||'')+'</div>'
+      +'<div style="background:#fff;border:1px solid var(--border);border-radius:12px;padding:13px;font-size:13px;line-height:1.6;white-space:pre-wrap;max-height:38vh;overflow-y:auto;margin-bottom:12px;">'+escapeHtml(appTxt||'')+'</div>'
+      +'<label style="display:flex;gap:10px;align-items:flex-start;font-size:13.5px;line-height:1.5;margin-bottom:14px;cursor:pointer;"><input type="checkbox" id="maChk" style="margin-top:2px;width:18px;height:18px;flex:none;"><span>'+escapeHtml(ask)+'</span></label>'
+      +'<button id="maGo" style="width:100%;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit;">'+(EN?'Submit and continue':'Odeslat a pokra\u010dovat')+'</button>'
+      +'<button id="maNo" style="width:100%;margin-top:6px;padding:10px;background:none;border:none;color:var(--mid);font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Back':'Zp\u011bt')+'</button></div>';
+    document.body.appendChild(ov);
+    ov.querySelector('#maNo').onclick=function(){ ov.remove(); res(false); };
+    ov.querySelector('#maGo').onclick=function(){ if(!ov.querySelector('#maChk').checked){ toast(EN?'\u26a0\ufe0f Tick the statement':'\u26a0\ufe0f Za\u0161krtni prohl\u00e1\u0161en\u00ed'); return; } ov.remove(); res(true); };
+  });
 }
 // Potvrzení klubu, že přijímá každého, kdo zaplatí. Skládá se samo při uložení a webhook ho
 // zapisuje ke každé přihlášce přijaté zaplacením: „Potvrzeno v MTL 1. 10. 2026, Petr Haiser".
@@ -19281,7 +19328,7 @@ async function openCohortSignup(cohortId, fromColdLink){
           guardian_contact: (ov._cohKid?([em,ph].filter(Boolean).join(' \u00b7 ')):((ov.querySelector('#cohMaGContact')&&ov.querySelector('#cohMaGContact').value.trim())||null)),
           consent_at: new Date().toISOString(),
           consent_version: (typeof LEGAL_VERSION!=='undefined'?LEGAL_VERSION:null),
-          app_type: (d.member_app_type||null), app_text: _memberAppConfirmText(Object.assign({}, d, { name:d.gym_name||'' }), EN),
+          app_type: (d.member_app_type||null), app_text: (_memberAppConfirmText(Object.assign({}, d, { name:d.gym_name||'' }), EN)+'\n\n\u2611 '+_memberAppAskSentence({ name:d.gym_name||'' }, EN)),
           source: 'cohort', cohort_id: (d.id||null),
         });
       }
