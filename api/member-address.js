@@ -82,13 +82,15 @@ async function members(gym) {
   return { rows, owners };
 }
 
-// Věková skupina se počítá k 1. dni AKTUÁLNÍHO měsíce: skupina se tak přepne až první den
-// měsíce po narozeninách. Klub z přepnutí pozná nanejvýš měsíc narození, ne den -- a do konce
-// měsíce vidí člověka ještě v mladší skupině (bezpečnější směr: déle „nezletilý", ne kratší).
+// Věková skupina se přepne až 36–72 hodin PO skutečných narozeninách (15. a 18.). Posun je pro
+// každého člověka jiný, ale stálý (odvozený z jeho data narození), takže skupina neblikne tam
+// a zpátky a klub z okamžiku přepnutí nepozná přesný den. Do přepnutí vidí mladší skupinu --
+// bezpečnější směr (o den-dva déle „nezletilý", nikdy naopak).
+function _shiftH(dob) { let h = 0; const x = String(dob || ''); for (let i = 0; i < x.length; i++) h = (h * 31 + x.charCodeAt(i)) >>> 0; return 36 + (h % 37); }
 function _band(dob) {
   if (!dob) return null;
   const t = new Date(String(dob).slice(0, 10) + 'T00:00:00Z'); if (isNaN(t)) return null;
-  const now = new Date(); const ref = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const ref = new Date(Date.now() - _shiftH(dob) * 3600000);
   let a = ref.getUTCFullYear() - t.getUTCFullYear(); const m = ref.getUTCMonth() - t.getUTCMonth();
   if (m < 0 || (m === 0 && ref.getUTCDate() < t.getUTCDate())) a--;
   return a < 15 ? 'child' : (a < 18 ? 'minor' : 'adult');

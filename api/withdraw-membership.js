@@ -84,6 +84,28 @@ export default async function handler(req, res) {
       statement, gross_amount: gross, used_days: usedDays, total_days: totalDays, keep_amount: keep, refund_amount: refund, currency: cur,
       method: isCard ? 'card' : 'transfer', status, refunded_at: status === 'refunded' ? nowIso : null }) })) || [])[0] || {};
     await sb(`gym_memberships?id=eq.${q(m.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'ended', cancelled_at: nowIso, period_end: nowIso }) });
+    // POTVRZENÍ O ODSTOUPENÍ: stejný snímek jako „Potvrzení o zrušení lekce" (cancel_confirmations),
+    // s vazbou na původní doklad. Kreslí se jen ze snímku, takže se pozdějšími změnami nerozjede.
+    let confId = null;
+    try {
+      const who0 = ((await sbGet(`profiles?id=eq.${q(me)}&select=name`)) || [])[0] || {};
+      const cc = ((await sb('cancel_confirmations', { method: 'POST', prefer: 'return=representation', body: JSON.stringify({
+        booking_id: String(m.id), booking_kind: 'withdrawal', transaction_id: tx ? tx.id : null, student_id: me,
+        participant_name: who0.name || null, payer_name: who0.name || null, cancelled_by: me, cancelled_by_name: who0.name || null, cancelled_by_role: 'student',
+        gym_id: m.gym_id, provider_name: gym.name || m.gym_name || null, class_name: m.plan_name || null, session_at: new Date(start).toISOString().slice(0, 10),
+        note: statement, amount_paid: gross / 100, refund_amount: refund / 100, currency: cur, payment_method: (tx && tx.payment_method) || null, doklad_no: doklad,
+        keep_amount: keep / 100, used_days: usedDays, total_days: totalDays }) })) || [])[0];
+      confId = cc && cc.id;
+    } catch (e) {
+      // Starší schéma bez sloupců výpočtu: zapsat bez nich (výpočet je i v withdrawal_requests).
+      try { const who0 = ((await sbGet(`profiles?id=eq.${q(me)}&select=name`)) || [])[0] || {};
+        const cc = ((await sb('cancel_confirmations', { method: 'POST', prefer: 'return=representation', body: JSON.stringify({
+          booking_id: String(m.id), booking_kind: 'withdrawal', transaction_id: tx ? tx.id : null, student_id: me, participant_name: who0.name || null, payer_name: who0.name || null,
+          cancelled_by: me, cancelled_by_name: who0.name || null, cancelled_by_role: 'student', gym_id: m.gym_id, provider_name: gym.name || m.gym_name || null,
+          class_name: m.plan_name || null, session_at: new Date(start).toISOString().slice(0, 10), note: statement, amount_paid: gross / 100, refund_amount: refund / 100,
+          currency: cur, payment_method: (tx && tx.payment_method) || null, doklad_no: doklad }) })) || [])[0]; confId = cc && cc.id; } catch (e2) {}
+    }
+    if (confId && row.id) { try { await sb(`withdrawal_requests?id=eq.${q(row.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ confirmation_id: confId }) }); } catch (e) {} }
 
     // Notifikace: student (proklik na doklad k platbě), klub (u převodu proklik na zápis vrácení).
     const plan = m.plan_name ? (' „' + m.plan_name + '"') : '';
@@ -94,7 +116,7 @@ export default async function handler(req, res) {
       ? `↩️ You withdrew from your pass${plan} at ${gym.name || 'the club'}. For ${usedDays} of ${totalDays} days the club keeps ${fmt(keep, cur)}; ${fmt(refund, cur)} has been refunded${isCard ? ' to your card' : ''}.`
       : `↩️ You withdrew from your pass${plan} at ${gym.name || 'the club'}. For ${usedDays} of ${totalDays} days the club keeps ${fmt(keep, cur)}; the club will transfer ${fmt(refund, cur)} back to you within 14 days.`;
     try { await sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id: me, type: 'system', read: false,
-      data: JSON.stringify({ kind: 'withdrawal_done', withdrawal_id: row.id || null, transaction_id: tx ? tx.id : null, gym_id: m.gym_id, msg_cs: sCs, msg_en: sEn }), message: sCs }) }); } catch (e) {}
+      data: JSON.stringify({ kind: 'withdrawal_done', withdrawal_id: row.id || null, conf_id: confId, transaction_id: tx ? tx.id : null, gym_id: m.gym_id, msg_cs: sCs, msg_en: sEn }), message: sCs }) }); } catch (e) {}
     if (gym.owner_id) {
       const who = ((await sbGet(`profiles?id=eq.${q(me)}&select=name`)) || [])[0] || {};
       const cCs = status === 'refunded'
@@ -106,7 +128,7 @@ export default async function handler(req, res) {
       try { await sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id: gym.owner_id, type: 'system', read: false,
         data: JSON.stringify({ kind: 'withdrawal_request', withdrawal_id: row.id || null, membership_id: m.id, gym_id: m.gym_id, student_id: me, member: who.name || '', amount: refund / 100, currency: cur, pending: status !== 'refunded', msg_cs: cCs, msg_en: cEn }), message: cCs }) }); } catch (e) {}
     }
-    return res.status(200).json({ ok: true, status, refund: refund / 100, keep: keep / 100, used_days: usedDays, total_days: totalDays, currency: cur, refunded_now: refundedNow / 100 });
+    return res.status(200).json({ ok: true, conf_id: confId, status, refund: refund / 100, keep: keep / 100, used_days: usedDays, total_days: totalDays, currency: cur, refunded_now: refundedNow / 100 });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String((e && e.message) || e).slice(0, 300) });
   }
