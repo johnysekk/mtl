@@ -202,6 +202,15 @@ async function notifyCreditorOutage(tbl, row) {
     data: JSON.stringify({ kind: 'pis_creditor_outage', who, gym_id: row.gym_id || null, msg_cs: cs, msg_en: en }), message: cs });
 }
 
+function _fbxOrigin(req) {
+  try {
+    let o = String((req.headers && req.headers.origin) || '');
+    if (!o && req.headers && req.headers.referer) o = new URL(req.headers.referer).origin;
+    if (!o) return '';
+    const u = new URL(o);
+    return (u.protocol === 'https:' && /(^|\.)martialtraininglab\.com$/i.test(u.hostname)) ? u.origin : '';
+  } catch (e) { return ''; }
+}
 async function fbxCreate(sb, req, body) {
   if (!FBX_MERCHANT) return { error: 'FINBRICKS_MERCHANT_ID not configured' };
   const rowId = String(body.bookingId || '');
@@ -275,8 +284,10 @@ async function fbxCreate(sb, req, body) {
     initiatorName: 'Martial Training Lab',
     clientId: payerId ? String(payerId).slice(0, 100) : undefined,
     instructionPriority: 'INST',
-    callbackUrl: (process.env.APP_URL || 'https://app.martialtraininglab.com') + '/api/pis-return?mtid=' + mtid,
-    shoppingCartUrl: (process.env.APP_URL || 'https://app.martialtraininglab.com') + '/?fbxcancel=1',
+    // NÁVRAT NA STEJNOU DOMÉNU, ze které platba vyšla (dashboard vs. appka). Dřív se vracelo vždy
+    // na appku -- kdo platil v dashboardu, skončil v appce a v jiném přihlášeném účtu.
+    callbackUrl: (process.env.APP_URL || 'https://app.martialtraininglab.com') + '/api/pis-return?mtid=' + mtid + (_fbxOrigin(req) ? ('&o=' + encodeURIComponent(_fbxOrigin(req))) : ''),
+    shoppingCartUrl: (_fbxOrigin(req) || process.env.APP_URL || 'https://app.martialtraininglab.com') + '/?fbxcancel=1',
     paymentProvider: body.bankId ? String(body.bankId) : undefined,
   };
   Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);

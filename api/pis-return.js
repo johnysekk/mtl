@@ -176,6 +176,10 @@ export async function pisSettle(rec, tbl, status){
         // zaplacené. U ostatních tabulek order_id neexistuje a jede se po id jako dosud.
         if(tbl==='event_tickets' && rec.order_id){ await sb.from(tbl).update(_upd).eq('order_id',rec.order_id); }
         else { await sb.from(tbl).update(_upd).eq('id',rec.id); }
+        // Záloha a měna kurzu: v pisSettle se dřív četly proměnné z jiné funkce -> chyba, takže se
+        // záloha nezapsala do cohort_payments ani do paid_amount (bez povšimnutí, celé to bylo v try).
+        let _cohDep=0, _cohCur='CZK';
+        if(tbl==='cohort_members'){ try{ const _cd=await sb.from('gym_cohorts').select('deposit_amount,currency').eq('id',rec.cohort_id).maybeSingle(); _cohDep=Number((_cd.data&&_cd.data.deposit_amount)||0); _cohCur=(_cd.data&&_cd.data.currency)||'CZK'; }catch(e){} }
         if(tbl==='cohort_members'){ try{ const _exC=await sb.from('cohort_payments').select('id').eq('cohort_member_id',rec.id).eq('kind','deposit').limit(1); if(!(_exC.data&&_exC.data.length)){ const _prevC=Number(rec.paid_amount||0); await sb.from('cohort_members').update({ paid_amount: Math.round((_prevC+Number(_cohDep||0))*100)/100, months_paid:1 }).eq('id',rec.id); await sb.from('cohort_payments').insert({ cohort_member_id:rec.id, cohort_id:rec.cohort_id||null, kind:'deposit', amount:Number(_cohDep||0), currency:_cohCur||'CZK', mtl_fee: Math.round(Number(_cohDep||0)*0.03*100)/100, payment_method:'pis', status:'paid' }); } }catch(e){} }
         if(tbl==='bookings' && rec.slot_id){ try{ await sb.from('slots').update({ booked:true }).eq('id',rec.slot_id); }catch(e){} }
         try{ const _buyerId=(tbl==='event_tickets')?rec.buyer_id:rec.student_id;
@@ -205,6 +209,13 @@ export async function pisSettle(rec, tbl, status){
             if(!_gid2 && tbl==='event_tickets' && rec.event_id){ const _e=await sb.from('events').select('gym_id').eq('id',rec.event_id).maybeSingle(); _gid2=(_e.data&&_e.data.gym_id)||null; }
           }catch(e){}
           let _gname=''; try{ const _gid=_gid2; if(_gid){ const _gn=await sb.from('gyms').select('name').eq('id',_gid).maybeSingle(); _gname=(_gn.data&&_gn.data.name)||''; } }catch(e){}
+          // Kurz: název, začátek a kdo platil se dohledají TADY -- proměnné z pisSideEffects v téhle
+          // funkci neexistují (dřív tu spadla chyba a student ani zástupce notifikaci nedostali).
+          let _cohName='', _cohStart=null, _cohPayer='';
+          if(tbl==='cohort_members'){
+            try{ const _cc=await sb.from('gym_cohorts').select('name,start_date').eq('id',rec.cohort_id).maybeSingle(); _cohName=(_cc.data&&_cc.data.name)||''; _cohStart=(_cc.data&&_cc.data.start_date)||null; }catch(e){}
+            try{ if(rec.paid_by){ const _pp=await sb.from('profiles').select('name').eq('id',rec.paid_by).maybeSingle(); _cohPayer=(_pp.data&&_pp.data.name)||''; } else if(rec.for_child && rec.guardian_name){ _cohPayer=rec.guardian_name; } }catch(e){}
+          }
           // auto:true => the bank confirmed it (PIS), not the club. The client renderer builds the visible text from these fields.
           let nd;
           if(tbl==='gym_memberships'){ let _sk='membership'; try{ const { data:_go }=await sb.from('gyms').select('org_form').eq('id',rec.gym_id).maybeSingle(); _sk=((rec.paid_to==='coach')||!(_go&&_go.org_form==='nonprofit'))?'pass':'membership'; }catch(e){} nd={ kind:'payment_confirmed', sk:_sk, auto:true, goto:'memberships', gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.plan_name||'') }; }
@@ -299,7 +310,7 @@ async function fbxReturnOrgFee(req, res, mtid, wantsHtml){
   // Klub mimo MTL (bez účtu) se vrací na svou veřejnou stránku, kde uvidí, že je zaplaceno.
   const back=function(q){
     const pre=(oc && !oc.gym_id && oc.guest_token) ? ('orgfee='+encodeURIComponent(oc.guest_token)+'&') : '';
-    res.setHeader('Location', APP_URL+'/?'+pre+q); return res.status(302).end();
+    res.setHeader('Location', _backTo(req)+'/?'+pre+q); return res.status(302).end();
   };
   if(!oc) return wantsHtml ? back('fbx=unknown') : res.status(200).json({ ok:true, note:'unknown mtid' });
   if(done) return wantsHtml ? back('fbx=ok') : res.status(200).json({ ok:true, paid:true, table:'organization_clubs', id:oc.id });
@@ -328,7 +339,7 @@ async function fbxReturn(req, res, mtid){
   // se na odpoved neda podivat jinak nez pres curl.
   const _wantJson=String((req.query&&req.query.json)||'')==='1';
   const wantsHtml=!_wantJson && String(req.headers.accept||'').includes('text/html');
-  const back=function(q){ res.setHeader('Location', APP_URL+'/?'+q); return res.status(302).end(); };
+  const back=function(q){ res.setHeader('Location', _backTo(req)+'/?'+q); return res.status(302).end(); };
   if(!FBX_MERCHANT) return res.status(500).json({ error:'FINBRICKS_MERCHANT_ID not configured' });
   const TBL=['gym_bookings','gym_memberships','bookings','event_tickets','cohort_members','merch_orders'];
   let tbl=null, rec=null;
