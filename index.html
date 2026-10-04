@@ -26976,14 +26976,14 @@ async function saveGymManage(){
       const _ie = (_ieEl.value || '').trim();
       // Prázdný se vyžaduje jen tehdy, když člověk fakturační údaje právě upravuje (sekce je
       // otevřená). Jinak by nešlo uložit ani provozní řád -- chybějící údaje hlásí výzva nahoře.
-      const _billOpen = !!(_ieEl.closest('details') && _ieEl.closest('details').open);
+      const _billOpen = !!(_ieEl.closest('.setSecOv') || (_ieEl.closest('details') && _ieEl.closest('details').open));
       const _bad = (!_ie && !_billOpen) ? null : !_ie ? (LANG==='en' ? 'Fill in the club billing e-mail' : 'Vypl\u0148 faktura\u010Dn\u00ED e-mail klubu')
         : (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(_ie) ? (LANG==='en' ? 'Enter a valid billing e-mail' : 'Zadej platn\u00FD faktura\u010Dn\u00ED e-mail') : null);
       if (_bad) { toast('\u26A0\uFE0F ' + _bad); try { const _d=_ieEl.closest('details'); if(_d) _d.open=true; _ieEl.focus(); } catch(e){} return; }
     } }
   // Telefon pro MTL je povinný stejně jako u kouče -- bez něj se naléhavá věc řeší jen mailem.
   { const _bp=$('mgBillingPhone');
-    if(_bp && !_phoneFieldVal('mgBillingPhone') && _bp.closest('details') && _bp.closest('details').open){
+    if(_bp && !_phoneFieldVal('mgBillingPhone') && (_bp.closest('.setSecOv') || (_bp.closest('details') && _bp.closest('details').open))){
       toast(LANG==='en'?'\u26A0\uFE0F Enter a contact phone for MTL':'\u26A0\uFE0F Zadej kontaktní telefon pro MTL');
       try{ const _d=_bp.closest('details'); if(_d) _d.open=true; _bp.focus(); }catch(e){}
       return;
@@ -27065,6 +27065,14 @@ async function saveGymManage(){
     // doklad, protoze rada dokladu nema bez ICO klic.
     const _gv=function(id){ var e=$(id); return e?String(e.value||'').trim():''; };
     const _billLine1=_gv('mgBillingLine1'), _billCity=_gv('mgBillingCity'), _billPostal=_gv('mgBillingPostal');
+    // ADRESA SÍDLA CELÁ, NEBO VŮBEC. Dřív šla uložit ulice bez PSČ a města -- na dokladu je pak
+    // adresa, kterou nejde použít. Když je vyplněné cokoli z adresy, musí být všechno.
+    if((_billLine1 || _billCity || _billPostal) && (!_billLine1 || !_billCity || !_billPostal)){
+      const _miss=!_billLine1?['mgBillingLine1', LANG==='en'?'street and number':'ulici a \u010d\u00edslo']:(!_billPostal?['mgBillingPostal', LANG==='en'?'postcode':'PS\u010c']:['mgBillingCity', LANG==='en'?'city':'m\u011bsto']);
+      toast((LANG==='en'?'\u26a0\ufe0f Billing address: fill in the ':'\u26a0\ufe0f Faktura\u010dn\u00ed adresa: dopl\u0148 ')+_miss[1]);
+      try{ const _el=$(_miss[0]); const _d=_el&&_el.closest('details'); if(_d && !_d.open){ const _sm=_d.querySelector('summary'); if(_sm) _sm.click(); } setTimeout(function(){ try{ _el.focus(); }catch(e){} }, 250); }catch(e){}
+      return;
+    }
     const patch = { currency:_curSel, dropin_price:dropin,
       tax_id: (_gv('mgTaxId').replace(/\s/g,'') || null),
       legal_name: (_gv('mgLegalName') || null),
@@ -44882,12 +44890,15 @@ function _attachAddrSuggest(inputId, cityGetter, onPick){
     }
   }catch(e){}
   const box=document.createElement('div');
-  box.style.cssText='position:absolute;z-index:100060;background:#fff;border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);max-height:220px;overflow:auto;display:none;';
+  // FIXED, ne absolute: adresní pole bývá v okně nastavení (pevná vrstva) nebo v sheetu se
+  // zamčeným posouváním stránky -- absolutní souřadnice k dokumentu tam ujížděly mimo obrazovku
+  // a nabídka „nebyla". Pevná poloha k oknu sedí vždycky.
+  box.style.cssText='position:fixed;z-index:100060;background:#fff;border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);max-height:220px;overflow:auto;display:none;';
   document.body.appendChild(box);
   const place=function(){
     try{ const r=el.getBoundingClientRect();
-      box.style.left=(r.left+window.scrollX)+'px';
-      box.style.top=(r.bottom+window.scrollY+4)+'px';
+      box.style.left=r.left+'px';
+      box.style.top=(r.bottom+4)+'px';
       box.style.width=r.width+'px';
     }catch(e){}
   };
@@ -44918,7 +44929,14 @@ function _attachAddrSuggest(inputId, cityGetter, onPick){
         return;
       }
       let d=await r.json();
-      if(!d || !d.length){ hide(); return; }
+      // S PŘEDVYPLNĚNÝM MĚSTEM se hledalo jen v něm (např. město klubu), takže sídlo v jiném
+      // městě se nenašlo a nabídka se tiše schovala -- vypadalo to, že našeptávač nefunguje.
+      if((!d || !d.length) && city){
+        try{ const r2=await fetch('/api/geo-search?lang='+encodeURIComponent(LANG||'cs')+'&q='+encodeURIComponent(q)); if(r2.ok) d=await r2.json(); }catch(e){}
+      }
+      if(!d || !d.length){
+        box.innerHTML='<div style="padding:10px 12px;font-size:12.5px;color:var(--mid);line-height:1.45;">'+(LANG==='en'?'Nothing found yet \u2014 keep typing (street and number), or use \u201cEnter it manually\u201d.':'Zat\u00edm nic \u2014 pi\u0161 d\u00e1l (ulici a \u010d\u00edslo), nebo pou\u017eij \u201eZadej ji ru\u010dn\u011b\u201c.')+'</div>';
+        box.style.display='block'; place(); return; }
       // Vlastní formát. display_name vrací "Muay Thai Lab, 20, Kounicova, Brno" -- název podniku,
       // číslo, teprve pak ulice. Skládáme si to sami: ulice s číslem jako hlavní řádek, pod ním
       // město, a název podniku jen jako doplněk, když nějaký je.
