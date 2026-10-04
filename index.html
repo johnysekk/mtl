@@ -177,6 +177,15 @@ html,body{height:100%;overflow:hidden;background:var(--bg);font-family:'DM Sans'
 .cloc{font-size:12px;color:rgba(255,255,255,.8);margin-top:2px}
 
 .cbody{padding:14px 16px;display:flex;flex-direction:column;flex:1;overflow-y:auto;min-height:0}
+/* Karta je sloupec: obrázek nahoře, tělo dostane zbytek výšky a řádek s cenou a „Profil" je vždy
+   dole a vidět. Dřív měla karta pevnou výšku bez flexu -- na nižších displejích (iPhone s lištou
+   prohlížeče) se spodek uřízl. Na nízkých displejích se navíc zmenší obrázek. */
+.card{display:flex;flex-direction:column}
+.card .cbody{min-height:0}
+.card .cfooter{margin-top:auto;flex-shrink:0}
+.card .cbio{min-height:0}
+@media (max-height:820px){ .card .cimg{aspect-ratio:auto;height:min(50vw,32vh)} }
+@media (max-height:700px){ .card .cimg{height:min(44vw,26vh)} .card .cname{font-size:clamp(24px,7vw,30px)} }
 .ctags{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
 .tag{font-size:12px;font-weight:500;padding:3px 10px;border-radius:6px}
 .tag-online{background:#E8F0FF;color:var(--blue)}
@@ -8209,7 +8218,7 @@ function renderCards(){
       h3.textContent = _seen
         ? (EN ? ('That is every '+((typeof venueTerm==='function')?venueTerm(_gd,false):'club')+' within '+GYM_LOCAL_KM+' km')
               : ('To jsou v\u0161echny ' + _v + ' do ' + GYM_LOCAL_KM + ' km'))
-        : (EN ? ('No '+_v+' within '+GYM_LOCAL_KM+' km yet') : ('Zat\u00edm tu nem\u00e1me \u017e\u00e1dn\u00e9 ' + _v));
+        : (EN ? ('No club within '+GYM_LOCAL_KM+' km') : ('\u017d\u00e1dn\u00fd klub v okruhu ' + GYM_LOCAL_KM + ' km'));
       // Hlavní nabídka je JEDNA a odpovídá situaci: dál jsou kluby -> ukaž je; nejsou -> pozvi svůj.
       const _btn=function(id, label, primary){
         return '<button id="'+id+'" style="width:100%;max-width:300px;margin-top:10px;padding:13px 18px;'
@@ -8226,8 +8235,8 @@ function renderCards(){
         + (_seen
             ? (EN ? ('You have gone through <b>'+_seen+'</b> '+(_seen===1?'club':'clubs')+' near you.')
                   : ('Pro\u0161el jsi <b>'+_seen+'</b> '+_plCz(_seen,'klub','kluby','klub\u016f')+' ve sv\u00e9m okol\u00ed.'))
-            : (EN ? ('No club within '+GYM_LOCAL_KM+' km of you yet.')
-                  : ('V okruhu '+GYM_LOCAL_KM+' km u tebe zat\u00edm \u017e\u00e1dn\u00fd klub nem\u00e1me.')))
+            : (_farN>0 ? '' : (EN ? ('No club within '+GYM_LOCAL_KM+' km of you yet.')
+                  : ('V okruhu '+GYM_LOCAL_KM+' km u tebe zat\u00edm \u017e\u00e1dn\u00fd klub nem\u00e1me.'))))
         + (_farN>0
             ? (EN ? (' There '+(_farN===1?'is':'are')+' <b>'+_farN+'</b> more further away.')
                   : (' D\u00e1l od tebe '+_plCz(_farN,'je','jsou','je')+' <b>'+_farN+'</b> '+_plCz(_farN,'dal\u0161\u00ed','dal\u0161\u00ed','dal\u0161\u00edch')+'.'))
@@ -29990,6 +29999,8 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
     }catch(e){}
     // Payload zvlášť, ať se dá při chybě poslat znovu bez nepovinných sloupců (viz níž).
     const _gymPayload = {
+      // Jeden režim plateb pro celý profil: nový klub ho zdědí (kouč nebo jiný klub majitele už ho má).
+      ...((currentUser && currentUser.payment_mode) ? { payment_mode: currentUser.payment_mode } : {}),
       terms_accepted_at: new Date().toISOString(),
       owner_id: currentUser.id, referred_by: _gymRefBy, referred_at: _gymRefBy?new Date().toISOString():null, name, city, country: countryName, city_lat:lat, city_lng:lng,
       address: address || null, postal_code: postal || null, description: fullDesc || null,
@@ -50868,16 +50879,22 @@ async function _modeSwitchGate(m, skipId){
     async function _sr(acct){ if(!acct) return false; try{ var r=await fetch('/api/stripe-account-info?account='+encodeURIComponent(acct)); var j=await r.json(); return !!(j && j.chargesEnabled); }catch(e){ return false; } }
     // Kontrola se dřív týkala jen kouče; majitel klubu, který koučem není, přepnul kolej
     // bez jediného varování, i když na ní neměl kam poslat peníze.
-    if((currentUser.coach_status==='approved' || (window._myGyms||[]).length) && String(skipId)!==String(uid)){
+    // Koučink jen u toho, kdo KOUČEM JE. Dřív stačilo vlastnit klub a majitel bez přihlášky
+    // kouče nemohl uložit ani výplatní účet klubu („Nejdřív nastav IBAN pro: tvůj koučink").
+    if(currentUser.coach_status==='approved' && String(skipId)!==String(uid)){
       if(m==='stripe'){ if(!(await _sr(currentUser.stripe_account))) missing.push(EN?'your coaching':'tv\u016fj kou\u010dink'); }
       else if(!(currentUser.receiver_id_value&&currentUser.receiver_name&&currentUser.receiver_declared_at)) missing.push(EN?'your coaching (bank details)':'tv\u016fj kou\u010dink (bankovn\u00ed \u00fadaje)');
     }
-    var gs=(await supaClient.from('gyms').select('id,name,stripe_account,receiver_id_value,receiver_name,receiver_declared_at').eq('owner_id',uid)).data||[];
+    var gs=(await supaClient.from('gyms').select('id,name,stripe_account,receiver_id_value,receiver_name,receiver_declared_at,commission_card_status').eq('owner_id',uid)).data||[];
     for(var _gi=0;_gi<gs.length;_gi++){ var gg=gs[_gi]; if(String(gg.id)===String(skipId)) continue;
       if(m==='stripe'){ if(!(await _sr(gg.stripe_account))) missing.push(gg.name||'gym'); }
-      else if(!(gg.receiver_id_value&&gg.receiver_name&&gg.receiver_declared_at)) missing.push((gg.name||'gym')+(EN?' (bank details)':' (bankovn\u00ed \u00fadaje)'));
+      else {
+        if(!(gg.receiver_id_value&&gg.receiver_name&&gg.receiver_declared_at)) missing.push((gg.name||'gym')+(EN?' (bank details)':' (bankovn\u00ed \u00fadaje)'));
+        if(gg.commission_card_status!=='active') missing.push((gg.name||'gym')+(EN?' (commission card)':' (karta ke str\u017een\u00ed provize)'));
+      }
     }
-    if(m!=='stripe' && !(currentUser.commission_card_status==='active')) missing.push(EN?'commission card':'karta ke stržení provize');
+    // Karta kouče se hlídá jen u kouče (klub má vlastní kartu, kontroluje se výš u každého klubu).
+    if(m!=='stripe' && currentUser.coach_status==='approved' && String(skipId)!==String(uid) && !(currentUser.commission_card_status==='active')) missing.push(EN?'your coaching (commission card)':'tv\u016fj kou\u010dink (karta ke str\u017een\u00ed provize)');
     return {ready:missing.length===0, missing:missing};
   }catch(e){ return {ready:true, missing:[]}; }
 }
@@ -51113,6 +51130,12 @@ function openCommissionCard(kind, opts){ opts=opts||{}; var _acctOnly=!!opts.acc
   var g=_isCoach?((typeof currentUser!=='undefined')?currentUser:null):(opts.gymId?(((typeof window._myGyms!=='undefined'&&window._myGyms)||[]).find(function(x){return String(x.id)===String(opts.gymId);})||((typeof _myGymData!=='undefined')?_myGymData:null)):((typeof _myGymData!=='undefined')?_myGymData:null));
   if(!g){ toast(EN?(_isCoach?'Sign in first':'Open a klub first'):(_isCoach?'Nejdřív se přihlas':'Otevři nejdřív klub')); return; }
   var mode=(opts.viewMode||_mtlPayMode(g))||'';
+  // Klub bez režimu, když ho profil už má (kouč nebo jiný klub majitele): zdědí ho -- režim je
+  // jeden pro celý profil, takže se tu znovu nevybírá.
+  if(!mode && !_isCoach && currentUser && currentUser.payment_mode && !opts.viewMode){
+    mode=currentUser.payment_mode; g.payment_mode=mode;
+    try{ supaClient.from('gyms').update({ payment_mode:mode }).eq('id', g.id).then(function(){}); }catch(e){}
+  }
   // Bez zvoleného režimu nedává „jen výplatní účet" smysl (účet se vyplňuje podle režimu) --
   // ukáže se celý výběr: režim, účet pro převod, karta ke stržení provize.
   if(_acctOnly && !mode) _acctOnly=false;
@@ -51231,20 +51254,16 @@ function openCommissionCard(kind, opts){ opts=opts||{}; var _acctOnly=!!opts.acc
       var _qc=ov.querySelector('#pmQrCash')&&ov.querySelector('#pmQrCash').checked; upd.takes_cash=!!_qc; upd[_RT]=rt; upd[_RV]=rv; upd[_RN]=rn; upd.confirm_mode='realtime';
       if(_acctChg || !g[_RD]) upd[_RD]=new Date().toISOString();
     }
-    // KONTROLA PŘEPNUTÍ PATŘÍ JEN KE KOUČI. U klubu se porovnával režim z PROFILU (kouče)
-    // a hlídala se připravenost koučinku -- majitel klubu, který přihlášku kouče nikdy nepodal,
-    // nemohl uložit výplatní účet klubu („Nejdřív nastav IBAN pro: tvůj koučink…"). Klub se
-    // tady ověřuje sám: IBAN, prohlášení i kartu kontroluje větev převodu výše.
-    var _curMode=(_isCoach ? ((typeof _mtlPayMode==='function'?_mtlPayMode(currentUser):(currentUser&&currentUser.payment_mode))||'') : ((typeof _mtlPayMode==='function'?_mtlPayMode(g):g.payment_mode)||''));
-    if(_isCoach && m!==_curMode){ var _mg=await _modeSwitchGate(m, g.id); if(!_mg.ready){ toast((EN?'\u26a0\ufe0f First set up the ':'\u26a0\ufe0f Nejd\u0159\u00edv nastav ')+(m==='stripe'?(EN?'Stripe account':'Stripe \u00fa\u010det'):'IBAN')+(EN?' for: ':' pro: ')+_mg.missing.join(', '), 0); return; } }
+    // JEDEN REŽIM PRO CELÝ PROFIL (kouč i všechny jeho kluby) -- přepnutí přepne všechny, proto
+    // se hlídá připravenost všech subjektů, které člověk OPRAVDU má (viz _modeSwitchGate).
+    var _curMode=(typeof _mtlPayMode==='function'?_mtlPayMode(currentUser):(currentUser&&currentUser.payment_mode))||'';
+    if(m!==_curMode){ var _mg=await _modeSwitchGate(m, g.id); if(!_mg.ready){ toast((EN?'\u26a0\ufe0f First set up the ':'\u26a0\ufe0f Nejd\u0159\u00edv nastav ')+(m==='stripe'?(EN?'Stripe account':'Stripe \u00fa\u010det'):'IBAN')+(EN?' for: ':' pro: ')+_mg.missing.join(', '), 0); return; } }
     var btn=ov.querySelector('#pmSave'); btn.disabled=true; btn.textContent=EN?'Saving...':'Ukládám...';
     try{
       var resp=await supaClient.from(_isCoach?'profiles':'gyms').update(upd).eq('id', g.id); try{ if(ov.querySelector('#pmDecl')&&ov.querySelector('#pmDecl').checked && typeof _recordConsent==='function') _recordConsent('receiver_declaration', RECEIVER_DECL_VERSION, LANG, (LANG==='en'?RECEIVER_DECL_EN:RECEIVER_DECL_CS), { via:'settings', is_coach:_isCoach, id:g.id, receiver: rv||null }); }catch(e){}
       if(resp&&resp.error){ toast('⚠️ '+resp.error.message); btn.disabled=false; btn.textContent=EN?'Save':'Uložit'; return; }
       Object.assign(g, upd);
-      // Režim patří subjektu, který se ukládá: klub nepřepisuje profil kouče ani ostatní kluby
-      // téhož majitele (dřív se přepsalo všechno najednou).
-      try{ if(upd.payment_mode && currentUser && _isCoach){ currentUser.payment_mode=upd.payment_mode; } if(upd.payment_mode && !_isCoach && typeof _myGymData!=='undefined' && _myGymData && String(_myGymData.id)===String(g.id)){ _myGymData.payment_mode=upd.payment_mode; } }catch(e){}
+      try{ if(upd.payment_mode && currentUser){ await supaClient.from('profiles').update({payment_mode:upd.payment_mode}).eq('id', currentUser.id); await supaClient.from('gyms').update({payment_mode:upd.payment_mode}).eq('owner_id', currentUser.id); currentUser.payment_mode=upd.payment_mode; } }catch(e){}
       toast(EN?'✅ Saved':'✅ Uloženo', 1);
       refreshWhy(); btn.disabled=false; btn.textContent=EN?'Save':'Uložit';
     }catch(e){ toast('⚠️ '+(e.message||'')); btn.disabled=false; btn.textContent=EN?'Save':'Uložit'; }
@@ -51258,8 +51277,10 @@ function openCommissionCard(kind, opts){ opts=opts||{}; var _acctOnly=!!opts.acc
         if(!m){ toast(EN?'Choose a payment mode':'Zvol re\u017eim plateb'); return; }
         _sv.disabled=true; _sv.textContent='\u2026';
         try{
+          // Jeden režim pro celý profil: kouč i všechny kluby téhož majitele.
           var _r=await supaClient.from(_isCoach?'profiles':'gyms').update({ payment_mode:m }).eq('id', g.id);
           if(_r && _r.error) throw _r.error;
+          try{ if(currentUser){ await supaClient.from('profiles').update({ payment_mode:m }).eq('id', currentUser.id); await supaClient.from('gyms').update({ payment_mode:m }).eq('owner_id', currentUser.id); currentUser.payment_mode=m; } }catch(e){}
           g.payment_mode=m;
           try{ if(_isCoach && currentUser) currentUser.payment_mode=m; if(!_isCoach && typeof _myGymData!=='undefined' && _myGymData && String(_myGymData.id)===String(g.id)) _myGymData.payment_mode=m; }catch(e){}
           if(!_asSheet){ try{ ov.remove(); }catch(e){} }
