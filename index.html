@@ -4932,6 +4932,11 @@ async function _famRenderConsents(){
         rows=rows.filter(function(x){ try{ const d=JSON.parse(x.data||'{}'); if(d.kind!=='minor_member_app') return true;
           if(!_hasApp.has(d.minor_id+'|'+d.gym_id)) return true;
           return !!(d.waiver && d.waiver.hash && !_hasW.has(d.minor_id+'|'+d.waiver.hash)); }catch(e){ return true; } }); } }catch(e){}
+    // Žádost o kurz zůstává, dokud záloha za svěřence není zaplacená (rozhodují data).
+    try{ const _mc=rows.map(function(x){ try{ return JSON.parse(x.data||'{}'); }catch(e){ return {}; } }).filter(function(d){ return d.kind==='minor_course_req' && d.minor_id && d.cohort_id; });
+      if(_mc.length){ const { data:_cm }=await supaClient.from('cohort_members').select('student_id,cohort_id').in('student_id',[...new Set(_mc.map(function(d){ return d.minor_id; }))]).in('status',['deposit_claimed','deposit_paid','enrolled','completed','converted']);
+        const _paidC=new Set((_cm||[]).map(function(a){ return a.student_id+'|'+a.cohort_id; }));
+        rows=rows.filter(function(x){ try{ const d=JSON.parse(x.data||'{}'); return !(d.kind==='minor_course_req' && _paidC.has(d.minor_id+'|'+d.cohort_id)); }catch(e){ return true; } }); } }catch(e){}
     // Už schválené pravidlo klubu (stejné znění) se znovu neukazuje.
     try{ const _mw=rows.map(function(x){ try{ return JSON.parse(x.data||'{}'); }catch(e){ return {}; } }).filter(function(d){ return d.kind==='minor_waiver' && d.minor_id && d.hash; });
       if(_mw.length){ const { data:_acc }=await supaClient.from('waiver_acceptances').select('student_id,body_hash').in('student_id',[...new Set(_mw.map(function(d){ return d.minor_id; }))]);
@@ -12968,6 +12973,9 @@ async function _cohDepositQr(cohortId, d, info, fb, pb){
   const msg=(info.name||'')+' - '+((d&&d.name)||'kurz');
   const payload=(typeof _bankQrPayload==='function')?_bankQrPayload(payee, dep, msg):null;
   const _pisOn=(await _pisAvailable(String(String((payee&&payee.receiver_id_value)||'').replace(/\s+/g,'').slice(0,2)||'CZ').toUpperCase(), payee, (payee&&payee.gym_id)||null)) && !!(payee&&payee.receiver_id_value);
+  // ROZPRACOVANÁ PLATBA: po zavření se k ní dá vrátit z přihlášky kurzu („Dokončit platbu"),
+  // bez nového vyplňování. Server stejnou nezaplacenou rezervaci použije znovu (stejný čas držení).
+  try{ localStorage.setItem('mtl_coh_resume_'+cohortId, JSON.stringify({ at:_resAt, info:info, who:(info&&info.who&&info.who.child_name)||(info&&info.name)||'' })); }catch(e){}
   let ov=document.getElementById('cohSignupOv'); if(ov) ov.remove();
   // Okno platby jako karta nad ztmaveným pozadím (dřív bílá plocha přes celou obrazovku --
   // v dashmode to vypadalo jako rozbitá stránka s malým textem uprostřed).
@@ -13004,7 +13012,7 @@ async function _cohDepositQr(cohortId, d, info, fb, pb){
       const mm=Math.floor(ms/60000), ss=Math.floor((ms%60000)/1000);
       _hEl.textContent=(EN?'Place held for ':'M\u00edsto dr\u017e\u00edme je\u0161t\u011b ')+mm+':'+String(ss).padStart(2,'0'); };
     var _ht=setInterval(_tick,1000); _tick(); }
-  const dn=ov.querySelector('#cdqDone'); if(dn) dn.onclick=async function(){
+  const dn=ov.querySelector('#cdqDone'); if(dn) dn.onclick=async function(){ try{ localStorage.removeItem('mtl_coh_resume_'+cohortId); }catch(e){}
     dn.disabled=true;
     try{
       const r=await fetch('/api/cohort-pay',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ kind:'qr_claim', cohort_member_id:memberId, email:((info&&info.email)||'').trim() }) });
@@ -13020,7 +13028,7 @@ async function _cohDepositQr(cohortId, d, info, fb, pb){
     if(!confirm(EN?'Close without \u201cI have paid\u201d? If you do not pay within 30 minutes, the place is released.':'Zav\u0159\u00edt bez \u201eZaplatil(a) jsem\u201c? Kdy\u017e do 30 minut nezaplat\u00ed\u0161, m\u00edsto se uvoln\u00ed.')) return;
     try{ ov.remove(); }catch(e){} try{ location.href='/'; }catch(e){} };
   { var _qt=ov.querySelector('#cdqQrToggle'); if(_qt) _qt.onclick=function(){ var w=ov.querySelector('#cdqQrWrap'); if(w){ w.style.display='block'; _qt.style.display='none'; } var _dn=ov.querySelector('#cdqDone'); if(_dn) _dn.style.display=''; }; }
-  const _cdpb=ov.querySelector('#cdqPisBtn'); if(_cdpb) _cdpb.onclick=function(){ _pisPayFlow(memberId, payee, null, dep, cur, msg, function(){ try{ ov.remove(); }catch(e){} }, _pisTestFor(payee), function(){}, 'cohort'); };
+  const _cdpb=ov.querySelector('#cdqPisBtn'); if(_cdpb) _cdpb.onclick=function(){ _pisPayFlow(memberId, payee, null, dep, cur, msg, function(){ try{ ov.remove(); }catch(e){} try{ localStorage.removeItem('mtl_coh_resume_'+cohortId); }catch(e){} }, _pisTestFor(payee), function(){}, 'cohort'); };
 }
 async function _cohDepositConfirm(memberId){
   const EN=LANG==='en';
@@ -19589,7 +19597,7 @@ async function _cohMinorRequest(d, btn){
 function _openMinorCourseReq(d){
   window._cohPresetKid='acc:'+d.minor_id;
   try{ closeSheet('shNotif'); closeSheet('shMyKids'); }catch(e){}
-  try{ if(typeof _famMarkDone==='function') _famMarkDone(d); }catch(e){}
+  // Neodškrtávat hned: dokud záloha není zaplacená, žádost zůstává v Rodině jako cesta zpátky.
   try{ openCohortSignup(d.cohort_id); }catch(e){}
 }
 async function _cohAuthHdr(){ const h={'Content-Type':'application/json'}; try{ if(typeof currentUser!=='undefined' && currentUser){ const t=await _freshTok(); if(t) h.Authorization='Bearer '+t; } }catch(e){} return h; }
@@ -19762,6 +19770,21 @@ async function openCohortSignup(cohortId, fromColdLink){
   const box=ov.querySelector('#cohSignupBody');
   if(!d){ box.innerHTML='<div style="text-align:center;padding:50px 10px;"><div style="font-size:16px;font-weight:700;margin-bottom:8px;">'+(EN?'Cohort not available':'Kurz není dostupný')+'</div><button onclick="document.getElementById(\'cohSignupOv\').remove();location.href=\'/\';" style="padding:11px 18px;background:var(--dark);color:#fff;border:none;border-radius:11px;font-weight:700;cursor:pointer;">'+(EN?'Close':'Zavřít')+'</button></div>'; return; }
   const cur=d.currency||'CZK'; const prov=d.provider_name||d.gym_name||(EN?'the provider':'poskytovatel');
+  // ROZPRACOVANÁ PLATBA (bankovní převod): místo nového vyplňování nabídnout dokončení.
+  // Vkládá se až po vykreslení formuláře (ten obsah boxu přepisuje).
+  const _cohResumeMount=function(){ try{ const _rs=JSON.parse(localStorage.getItem('mtl_coh_resume_'+cohortId)||'null');
+    const _left=_rs&&_rs.at ? (Date.parse(_rs.at)+30*60000-Date.now()) : 0;
+    if(_rs && _left>0 && d.payment_mode==='qr_bank'){
+      const _mins=Math.max(1, Math.round(_left/60000));
+      const _bn=document.createElement('div');
+      _bn.style.cssText='background:#FFF8E6;border:1px solid #F0DFA8;border-radius:12px;padding:12px 13px;margin-bottom:14px;';
+      _bn.innerHTML='<div style="font-size:13.5px;font-weight:800;color:#7a4f00;margin-bottom:4px;">\u23f3 '+(EN?('Unfinished payment'+(_rs.who?(' for '+escapeHtml(_rs.who)):'')):('Rozpracovan\u00e1 platba'+(_rs.who?(' za '+escapeHtml(_rs.who)):'')))+'</div>'
+        +'<div style="font-size:12.5px;color:#7a4f00;line-height:1.5;margin-bottom:9px;">'+(EN?('Your place is held for another '+_mins+' min.'):('M\u00edsto dr\u017e\u00edme je\u0161t\u011b '+_mins+' min.'))+'</div>'
+        +'<button id="cohResumeBtn" style="width:100%;padding:12px;background:var(--red);color:#fff;border:none;border-radius:11px;font-size:14px;font-weight:800;cursor:pointer;font-family:inherit;">'+(EN?'Finish the payment':'Dokon\u010dit platbu')+'</button>';
+      box.insertBefore(_bn, box.firstChild);
+      _bn.querySelector('#cohResumeBtn').onclick=function(){ try{ _cohDepositQr(cohortId, d, _rs.info||{}, null, null); }catch(e){} };
+    } else if(_rs && _left<=0){ localStorage.removeItem('mtl_coh_resume_'+cohortId); }
+  }catch(e){} };
   // IN-APP DEDUP: a logged-in user who already holds a place here sees a confirmation, not the form again.
   if(typeof currentUser!=='undefined' && currentUser){
     try{ const _or=['student_id.eq.'+currentUser.id]; if(currentUser.email) _or.push('email.eq.'+String(currentUser.email));
@@ -19935,6 +19958,7 @@ async function openCohortSignup(cohortId, fromColdLink){
         _dl.textContent='\ud83d\udcc4 '+(d.club_rules_file_name||(EN2?'Rules document (PDF)':'Dokument k provozn\u00edmu \u0159\u00e1du (PDF)'));
         const _btn=_bx.querySelector('button'); if(_btn) _bx.insertBefore(_dl, _btn); else _bx.appendChild(_dl); } }catch(e){}
       w.querySelector('button').onclick=function(){ w.remove(); }; w.onclick=function(ev){ if(ev.target===w) w.remove(); }; }; }
+  try{ _cohResumeMount(); }catch(e){}
   const pb=ov.querySelector('#cohPayBtn');
   if(typeof currentUser!=='undefined' && currentUser){
     var _pn=ov.querySelector('#cohSName'); if(_pn && !_pn.value) _pn.value=currentUser.name||'';
