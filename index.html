@@ -11098,6 +11098,9 @@ function _ageFromBirth(b){
 
 function buyEventTicket(ev){
   if(!currentUser){ toast(L('⚠️ Nejprve se přihlas')); return; }
+  // Jeden nákup pro appku i veřejnou stránku (openEventSignup) -- věk, Rodina, souhlas zástupce
+  // a platba řeší tamtéž. Původní cesta (openTierPick → doEventCheckout) zůstává jen jako záloha.
+  if(ev && ev.id && typeof openEventSignup==='function'){ openEventSignup(ev.id); return; }
   // Věkový limit akce. V appce se ověří proti datu narození; kdo ho nemá vyplněné, doplní ho
   // v profilu -- pouštět ho dál "protože to nevíme" by ten limit dělalo bezcenným.
   const _mn=parseInt(ev.min_age,10)||0;
@@ -11231,6 +11234,11 @@ function _tkClaimed(t){ return String((t&&t.status)||'')==='paid_claimed'; }
 // z nich si nenainstaluje tréninkovou appku kvůli lístku za 600 Kč.
 // Vstupní bod je ?event=<id>. Data tahá /api/event-public, které je veřejné a bez auth.
 // ZÁMĚRNĚ NESAHÁ na doEventCheckout ani _eventQrPay -- ty jsou pro přihlášené a fungují.
+function _evPubClose(ov){
+  try{ ov.remove(); }catch(e){}
+  if(ov && ov._li){ try{ closeSheet('shEventView'); }catch(e){} return; }
+  try{ _evBootRelease(); }catch(e){} try{ window.history.replaceState({}, '', location.pathname); }catch(e){}
+}
 function _evPubEsc(v){ try{ return escapeHtml(String(v==null?'':v)); }catch(e){ return ''; } }
 
 // ── SDÍLENÝ ODKAZ NA AKCI ────────────────────────────────────────────────────────────────────
@@ -11525,25 +11533,31 @@ async function _evThanks(ticketId){
   ov.querySelector('#evThxClose').onclick=function(){ ov.remove(); try{ if(typeof _evBootRelease==='function') _evBootRelease(); }catch(e){} };
 }
 
+// JEDEN NÁKUP LÍSTKU pro appku i veřejnou stránku. Liší se jen tím, co dává smysl podle účtu:
+// host vyplní jméno, e-mail a telefon a za nezletilého je zadá ručně; přihlášený má údaje
+// z profilu, účastníky vybírá z Rodiny, věk se ověří z profilu, mladistvý projde souhlasem
+// zástupce a lístky jdou na jeho účet. Platba (karta / z účtu / QR) je pro oba stejná.
 async function openEventSignup(eventId){
   const EN=LANG==='en';
+  const _li=!!(typeof currentUser!=='undefined' && currentUser && currentUser.id);
   let ov=document.getElementById('evPubOv'); if(ov) ov.remove();
   ov=document.createElement('div'); ov.id='evPubOv';
   // Neprůsvitné, ne rgba. Pod tím leží přihlašovací obrazovka a průsvitným pozadím prosvítala --
   // nakupující bez účtu neměl proč koukat na login do appky, kterou nechce.
-  ov.style.cssText='position:fixed;inset:0;background:#0b0b0b;z-index:100000;display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:18px 12px;';
+  ov.style.cssText='position:fixed;inset:0;background:'+(_li?'rgba(0,0,0,.55)':'#0b0b0b')+';z-index:100000;display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:18px 12px;';
+  ov._li=_li;
   ov.innerHTML='<div style="background:var(--bg);border-radius:18px;max-width:460px;width:100%;padding:20px;"><div style="text-align:center;padding:26px;color:var(--mid);font-size:13px;">'+(EN?'Loading…':'Načítám…')+'</div></div>';
   document.body.appendChild(ov);
   // Až teď je na obrazovce něco k vidění -- předtím by pod formulářem prosvítal login.
-  try{ if(typeof _evBootDone==='function') _evBootDone('public'); }catch(e){}
+  try{ if(!_li && typeof _evBootDone==='function') _evBootDone('public'); }catch(e){}
   const box=ov.firstElementChild;
 
   let d=null;
   try{ const r=await fetch('/api/event-public?event='+encodeURIComponent(eventId)); const j=await r.json(); if(j&&j.ok) d=j.event; else if(j&&j.closed) d={__closed:j.reason||'closed'}; }catch(e){}
-  if(!d){ box.innerHTML='<div style="text-align:center;padding:26px;"><div style="font-size:14px;font-weight:700;margin-bottom:10px;">'+(EN?'Event not found':'Akce nenalezena')+'</div><button id="evPubX" style="padding:10px 18px;border:1px solid var(--border);background:var(--surf);border-radius:10px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button></div>'; ov.querySelector('#evPubX').onclick=function(){ ov.remove(); _evBootRelease(); }; return; }
+  if(!d){ box.innerHTML='<div style="text-align:center;padding:26px;"><div style="font-size:14px;font-weight:700;margin-bottom:10px;">'+(EN?'Event not found':'Akce nenalezena')+'</div><button id="evPubX" style="padding:10px 18px;border:1px solid var(--border);background:var(--surf);border-radius:10px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button></div>'; ov.querySelector('#evPubX').onclick=function(){ _evPubClose(ov); }; return; }
   if(d.__closed){
     const _why = d.__closed==='started' ? (EN?'This event has already started.':'Tato akce už začala.') : (EN?'Tickets are not on sale.':'Lístky nejsou v prodeji.');
-    box.innerHTML='<div style="text-align:center;padding:26px;"><div style="font-size:14px;font-weight:700;margin-bottom:8px;">'+_why+'</div><button id="evPubX" style="padding:10px 18px;border:1px solid var(--border);background:var(--surf);border-radius:10px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button></div>'; ov.querySelector('#evPubX').onclick=function(){ ov.remove(); _evBootRelease(); }; return;
+    box.innerHTML='<div style="text-align:center;padding:26px;"><div style="font-size:14px;font-weight:700;margin-bottom:8px;">'+_why+'</div><button id="evPubX" style="padding:10px 18px;border:1px solid var(--border);background:var(--surf);border-radius:10px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button></div>'; ov.querySelector('#evPubX').onclick=function(){ _evPubClose(ov); }; return;
   }
 
   const cur=d.currency||'CZK'; const sym=(typeof _curSym==='function')?_curSym(cur):cur;
@@ -11579,7 +11593,7 @@ async function openEventSignup(eventId){
   if(soldOut){
     h+='<div style="background:var(--surf);border-radius:12px;padding:16px;text-align:center;font-weight:700;">'+(EN?'Sold out':'Vyprodáno')+'</div>';
     box.innerHTML=h+'<button id="evPubX" style="width:100%;margin-top:12px;padding:11px;border:1px solid var(--border);background:var(--surf);border-radius:10px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button>';
-    ov.querySelector('#evPubX').onclick=function(){ ov.remove(); _evBootRelease(); }; return;
+    ov.querySelector('#evPubX').onclick=function(){ _evPubClose(ov); }; return;
   }
 
   // Košík, ne výběr jedné varianty. Kdo chce dva na sezení a tři na stání, to je jedna
@@ -11595,7 +11609,7 @@ async function openEventSignup(eventId){
     h+='<a href="'+_appOrigin()+'/?event='+encodeURIComponent(d.id)+'" style="display:block;width:100%;box-sizing:border-box;padding:13px;background:var(--red);color:#fff;border-radius:12px;font-size:15px;font-weight:800;text-align:center;text-decoration:none;font-family:\'DM Sans\';">'+(EN?'Open in the MTL app':'Otevřít v appce MTL')+'</a>';
     h+='<button id="evPubX" style="width:100%;margin-top:8px;padding:10px;background:none;border:none;color:var(--mid);font-size:12.5px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button>';
     box.innerHTML=h;
-    ov.querySelector('#evPubX').onclick=function(){ ov.remove(); _evBootRelease(); try{ window.history.replaceState({}, '', location.pathname); }catch(e){} };
+    ov.querySelector('#evPubX').onclick=function(){ _evPubClose(ov); };
     return;
   }
   h+='<div style="font-size:12px;font-weight:700;color:var(--mid);text-transform:uppercase;letter-spacing:.04em;margin:12px 0 6px;">'+(EN?'Tickets':'Lístky')+'</div>';
@@ -11616,10 +11630,11 @@ async function openEventSignup(eventId){
   });
 
   const _inp='width:100%;padding:11px;border:1px solid var(--border);border-radius:10px;font-size:14px;font-family:\'DM Sans\';background:var(--surf);margin-bottom:9px;';
-  h+='<input id="evPubName" autocomplete="name" placeholder="'+(EN?'Your full name':'Tvoje cel\u00e9 jm\u00e9no')+'" style="'+_inp+'">';
+  if(_li) h+='<div style="font-size:12.5px;color:var(--mid);margin:4px 0 8px;">'+(EN?'Buying as ':'Kupuje\u0161 jako ')+'<b style="color:var(--dark);">'+_evPubEsc(currentUser.name||'')+'</b>'+(currentUser.email?(' \u00b7 '+_evPubEsc(currentUser.email)):'')+'</div>';
+  h+='<input id="evPubName" autocomplete="name" placeholder="'+(EN?'Your full name':'Tvoje cel\u00e9 jm\u00e9no')+'" style="'+_inp+(_li?'display:none;':'')+'" value="'+(_li?_evPubEsc(currentUser.name||''):'')+'">';
   h+='<input id="evPubHp" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0;">';
-  h+='<input id="evPubMail" type="email" inputmode="email" placeholder="'+(EN?'E-mail (ticket goes here)':'E-mail (sem přijde lístek)')+'" style="'+_inp+'">';
-  h+='<div style="margin-bottom:8px;">'+_phoneFieldHtml('evPubTel','')+'</div>';
+  h+='<input id="evPubMail" type="email" inputmode="email" placeholder="'+(EN?'E-mail (ticket goes here)':'E-mail (sem přijde lístek)')+'" style="'+_inp+(_li?'display:none;':'')+'" value="'+(_li?_evPubEsc(currentUser.email||''):'')+'">';
+  h+='<div style="margin-bottom:8px;'+(_li?'display:none;':'')+'">'+_phoneFieldHtml('evPubTel',(_li?(currentUser.phone||''):''))+'</div>';
   h+='<div id="evPubTotal" style="font-size:14px;font-weight:800;text-align:right;margin:2px 0 12px;"></div>';
 
   const _terms=(d.terms_text&&d.terms_text.trim())?d.terms_text.trim():'';
@@ -11629,21 +11644,23 @@ async function openEventSignup(eventId){
   // KUPUJÍCÍHO, jestli mu je dvanáct, je nesmysl. Když jsou v košíku účastnická místa, může
   // říct, že je bere nezletilému, a doplnit jeho jméno a datum narození. Tím dává souhlas
   // zástupce on sám, což je jediná forma, která u dítěte platí.
-  if(_hasPart){
+  if(_hasPart && _li){
+    h+='<div id="evWhoWrap" style="display:none;background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:11px 12px;margin:2px 0 10px;"><div style="font-size:12px;font-weight:800;color:var(--mid);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px;">'+(EN?'Who is it for':'Pro koho')+'</div><div id="evWho"></div></div>';
+  } else if(_hasPart){
     h+='<label style="display:flex;gap:9px;align-items:flex-start;font-size:12.5px;line-height:1.45;margin-bottom:8px;cursor:pointer;"><input type="checkbox" id="evPubGuard" style="margin-top:2px;"><span>'+(EN?'I am buying for a minor as their legal guardian':'Kupuji pro nezletilého jako jeho zákonný zástupce')+'</span></label>';
     h+='<div id="evPubGuardBox" style="display:none;background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:11px 12px;margin-bottom:10px;">'
       +'<div id="evPubMinors"></div>'
       +'<div style="font-size:11.5px;color:var(--mid);line-height:1.5;">'+(EN?'As the legal guardian I consent to their participation and confirm the details above are correct.':'Jako zákonný zástupce souhlasím s jeho účastí a potvrzuji správnost uvedených údajů.')+'</div></div>';
   }
   // Věkový limit u dospělého kupujícího, který jde sám za sebe.
-  if(_minAge) h+='<label id="evPubAgeWrap" style="display:flex;gap:9px;align-items:flex-start;font-size:12.5px;line-height:1.45;margin-bottom:9px;cursor:pointer;"><input type="checkbox" id="evPubAge" style="margin-top:2px;"><span>'+(EN?('I confirm that everyone I am buying tickets for is '+_minAge+' or older.'):('Potvrzuji, \u017ee v\u0161em, pro kter\u00e9 l\u00edstky kupuji, je '+_minAge+' let nebo v\u00edc.'))+'</span></label>';
+  if(_minAge && !_li) h+='<label id="evPubAgeWrap" style="display:flex;gap:9px;align-items:flex-start;font-size:12.5px;line-height:1.45;margin-bottom:9px;cursor:pointer;"><input type="checkbox" id="evPubAge" style="margin-top:2px;"><span>'+(EN?('I confirm that everyone I am buying tickets for is '+_minAge+' or older.'):('Potvrzuji, \u017ee v\u0161em, pro kter\u00e9 l\u00edstky kupuji, je '+_minAge+' let nebo v\u00edc.'))+'</span></label>';
   h+='<label style="display:flex;gap:9px;align-items:flex-start;font-size:12.5px;line-height:1.45;margin-bottom:12px;cursor:pointer;"><input type="checkbox" id="evPubOk" style="margin-top:2px;"><span>'+_evPubEsc(_clause)+'</span></label>';
   h+='<button id="evPubGo" style="width:100%;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Continue to payment':'Pokračovat na platbu')+'</button>';
   if(legal) h+='<div style="font-size:11px;color:var(--light);text-align:center;margin-top:9px;line-height:1.4;">'+(EN?'Seller: ':'Prodávající: ')+_evPubEsc(legal)+'</div>';
   h+='<button id="evPubX" style="width:100%;margin-top:8px;padding:10px;background:none;border:none;color:var(--mid);font-size:12.5px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Cancel':'Zrušit')+'</button>';
   box.innerHTML=h;
 
-  ov.querySelector('#evPubX').onclick=function(){ ov.remove(); _evBootRelease(); try{ window.history.replaceState({}, '', location.pathname); }catch(e){} };
+  ov.querySelector('#evPubX').onclick=function(){ _evPubClose(ov); };
   // Strop je zbývající kapacita, a platí na CELÝ košík -- ne na každou variantu zvlášť. Tři na
   // stání a tři na sezení je šest míst, i když v každém řádku stojí trojka.
   var _maxTot=Math.max(1, Math.min(20, (left!==null? left : 20)));
@@ -11679,6 +11696,22 @@ async function openEventSignup(eventId){
     }
     box.innerHTML=out || ('<div style="font-size:12px;color:var(--mid);margin-bottom:6px;">'+(EN?'Add a participant ticket above first.':'Nejdřív přidej výše účastnické místo.')+'</div>');
   };
+  var _kidsLi=[];
+  if(_li){ try{ _kidsLi=((typeof _myChildren==='function')?_myChildren():[]).concat((window._sharedActKids||[]).filter(function(x){ return !d.minor_consent || x.guardian; }).map(function(x){ return { name:x.kid.name, dob:x.kid.dob, _shared:true }; })); }catch(e){} }
+  window._evWho=[];
+  var _paintWho=function(){
+    var wrap=ov.querySelector('#evWhoWrap'), wb=ov.querySelector('#evWho'); if(!wrap||!wb) return;
+    var want=0; window._evPubCart.forEach(function(q,i){ if(tiers[i]&&tiers[i].participant) want+=q; });
+    wrap.style.display=want?'block':'none'; if(!want){ window._evWho=[]; return; }
+    var prev=window._evWho.slice();
+    var opts='<option value="me">'+(EN?'Me':'J\u00e1')+'</option>';
+    _kidsLi.forEach(function(k,ki){ var a=(typeof _kidAge==='function')?_kidAge(k):null; if(_minAge && a!=null && a<_minAge) return;
+      opts+='<option value="k'+ki+'">'+_evPubEsc(k.name||('D\u00edt\u011b '+(ki+1)))+(a!=null?(' ('+a+')'):'')+'</option>'; });
+    var out=''; for(var k=0;k<want;k++) out+='<select class="evWhoSel" style="width:100%;padding:9px 10px;border:1px solid var(--border);border-radius:8px;font-size:13.5px;font-family:inherit;background:#fff;margin-bottom:6px;">'+opts+'</select>';
+    wb.innerHTML=out;
+    wb.querySelectorAll('.evWhoSel').forEach(function(sel,ix){ if(prev[ix]) sel.value=prev[ix]; sel.onchange=function(){ window._evWho[ix]=sel.value; }; window._evWho[ix]=sel.value; });
+    window._evKidsLi=_kidsLi;
+  };
   var _guardToggle=function(){
     var on=!!(ov.querySelector('#evPubGuard')||{}).checked;
     var gb=ov.querySelector('#evPubGuardBox'); if(gb) gb.style.display=on?'block':'none';
@@ -11688,10 +11721,10 @@ async function openEventSignup(eventId){
     if(on) _paintMinors();
   };
   if(ov.querySelector('#evPubGuard')) ov.querySelector('#evPubGuard').onchange=_guardToggle;
-  ov.querySelectorAll('.evQtyM').forEach(function(b){ b.onclick=function(){ var i=+b.dataset.i; if(window._evPubCart[i]>0){ window._evPubCart[i]--; _paintQ(); _paintMinors(); } }; });
+  ov.querySelectorAll('.evQtyM').forEach(function(b){ b.onclick=function(){ var i=+b.dataset.i; if(window._evPubCart[i]>0){ window._evPubCart[i]--; _paintQ(); _paintMinors(); _paintWho(); } }; });
   ov.querySelectorAll('.evQtyP').forEach(function(b){ b.onclick=function(){ var i=+b.dataset.i;
     var _lim=(tiers[i]&&tiers[i].participant)?1:_maxTot;   // účastnická varianta: strop 1
-    if(_cartTot()<_maxTot && window._evPubCart[i]<_lim){ window._evPubCart[i]++; _paintQ(); _paintMinors(); } }; });
+    if(_cartTot()<_maxTot && window._evPubCart[i]<_lim){ window._evPubCart[i]++; _paintQ(); _paintMinors(); _paintWho(); } }; });
   _paintQ();
   ov.querySelector('#evPubGo').onclick=function(){ _evPubBuy(d, tiers, ov); };
 }
@@ -11700,16 +11733,18 @@ async function openEventSignup(eventId){
 // Druhá polovina veřejného nákupu: založí lístek a pošle kupujícího zaplatit.
 // Lístek vzniká s buyer_id = NULL a buyer_email vyplněným -- claim-tickets.js si ho pak najde
 // podle e-mailu, až si ten člověk účet založí.
-async function _evPubBuy(d, tiers, ov){
-  const EN=LANG==='en';
+async function _evPubBuy(d, tiers, ov, _opt){
+  const EN=LANG==='en'; _opt=_opt||{};
+  const _li=!!ov._li;
   const btn=ov.querySelector('#evPubGo'); if(!btn) return;
   const name=((ov.querySelector('#evPubName')||{}).value||'').trim();
   const mail=((ov.querySelector('#evPubMail')||{}).value||'').trim().toLowerCase();
   const tel =((ov.querySelector('#evPubTel')||{}).value||'').trim();
   const ok  =!!(ov.querySelector('#evPubOk')||{}).checked;
   // Celé jméno: lístek je na jméno a u vstupu se podle něj dohledává.
-  { const _ne=_fullNameErr(name); if(_ne){ toast('\u26a0\ufe0f '+_ne); try{ ov.querySelector('#evPubName').focus(); }catch(e){} return; } }
-  if(!/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(mail)){ toast(EN?'⚠️ Check your e-mail':'⚠️ Zkontroluj e-mail'); return; }
+  // Přihlášený má jméno a e-mail z účtu (pole jsou skrytá) -- kontrola formuláře je jen pro hosta.
+  if(!_li){ const _ne=_fullNameErr(name); if(_ne){ toast('\u26a0\ufe0f '+_ne); try{ ov.querySelector('#evPubName').focus(); }catch(e){} return; } }
+  if(!_li && !/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(mail)){ toast(EN?'⚠️ Check your e-mail':'⚠️ Zkontroluj e-mail'); return; }
   if(!ok){ toast(EN?'⚠️ Tick the box first':'⚠️ Nejdřív zaškrtni souhlas'); return; }
   const _mnA=parseInt(d.min_age,10)||0;
   const _guard=!!((ov.querySelector('#evPubGuard')||{}).checked);
@@ -11732,7 +11767,7 @@ async function _evPubBuy(d, tiers, ov){
       if(_tooYoung){ toast(EN?('⚠️ This event is '+_mnA+'+ — '+(_tooYoung.name||'the attendee')+' is younger'):('⚠️ Akce je od '+_mnA+' let — '+(_tooYoung.name||'účastník')+' je mladší')); return; }
     }
   }
-  else if(_mnA && !((ov.querySelector('#evPubAge')||{}).checked)){ toast(EN?('⚠️ Confirm everyone is '+_mnA+'+'):('\u26a0\ufe0f Potvr\u010f, \u017ee v\u0161em je '+_mnA+' let nebo v\u00edc')); return; }
+  else if(_mnA && !_li && !((ov.querySelector('#evPubAge')||{}).checked)){ toast(EN?('⚠️ Confirm everyone is '+_mnA+'+'):('\u26a0\ufe0f Potvr\u010f, \u017ee v\u0161em je '+_mnA+' let nebo v\u00edc')); return; }
 
   // Košík: seznam {varianta, počet}. Objednávka může mít víc variant naráz.
   const cart=(window._evPubCart||[]).map(function(q,i){ return { t:tiers[i], q:parseInt(q,10)||0 }; }).filter(function(x){ return x.t && x.q>0; });
@@ -11743,6 +11778,27 @@ async function _evPubBuy(d, tiers, ov){
   // Platba i popisek se vážou na první variantu jen jako štítek; částka je součet celého košíku.
   const tier=cart[0].t;
   const price=Number(tier.price)||0;
+  // ── PŘIHLÁŠENÝ: věk z profilu, účastníci z Rodiny, jedno místo na osobu, souhlas zástupce,
+  //    záznam souhlasu s podmínkami a u mladistvého bez karty žádost o úhradu zástupci.
+  let _who=[];
+  if(_li){
+    if(_mnA){ const _a=(typeof _ageFromBirth==='function')?_ageFromBirth(currentUser.birthdate):null;
+      if(_a==null){ toast(EN?('\u26a0\ufe0f Add your date of birth in your profile \u2014 this event is '+_mnA+'+'):('\u26a0\ufe0f Dopl\u0148 si datum narozen\u00ed v profilu \u2014 akce je od '+_mnA+' let')); return; }
+      if(_a<_mnA){ toast(EN?('\u26a0\ufe0f This event is '+_mnA+'+'):('\u26a0\ufe0f Akce je od '+_mnA+' let')); return; } }
+    const _kl=window._evKidsLi||[];
+    _who=(window._evWho||[]).map(function(v){ if(!v||v==='me') return null; const k=_kl[parseInt(String(v).slice(1),10)]; return k?{ name:(k.name||''), dob:(k.dob||null) }:null; });
+    const _partT=cart.filter(function(x){ return x.t.participant; }).map(function(x){ return x.t.name||''; });
+    if(_partT.length && _who.some(function(w){ return !w; })){
+      try{ const { data:_had }=await supaClient.from('event_tickets').select('tier_name').eq('event_id',d.id).eq('buyer_id',currentUser.id).in('status',['reserved','paid_claimed','paid','active']);
+        const _mine=new Set((_had||[]).map(function(r){ return r.tier_name||''; })); const _dup=_partT.find(function(nm){ return _mine.has(nm); });
+        if(_dup){ toast(EN?('You already have a place: '+_dup):('M\u00edsto u\u017e m\u00e1\u0161: '+_dup)); return; } }catch(e){}
+    }
+    if(!_opt.minorOk && currentUser.is_minor && cart.some(function(x){ return typeof _tierNeedsConsent==='function' && _tierNeedsConsent(d, x.t); })){
+      if(typeof _minorEventGate==='function'){ _minorEventGate(d, function(){ _evPubBuy(d, tiers, ov, Object.assign({}, _opt, { minorOk:true })); }); return; } }
+    try{ if(typeof _recordConsent==='function'){ const _cl=(EN?'I understand this ticket is non-refundable. Any refund is handled by the organizer directly; MTL is not responsible for the state of payments.':'Beru na v\u011bdom\u00ed, \u017ee tento l\u00edstek je nevratn\u00fd. P\u0159\u00edpadn\u00e9 vr\u00e1cen\u00ed pen\u011bz \u0159e\u0161\u00ed p\u0159\u00edmo po\u0159adatel; MTL za stav plateb neodpov\u00edd\u00e1.');
+      _recordConsent('ticket_terms', TICKET_CONSENT_VERSION, LANG, [(d.terms_text&&d.terms_text.trim())||'', _cl].filter(Boolean).join('\n\n---\n\n'), { event_id:d.id||null, event_title:d.title||null, tier:tier.name||null }); } }catch(e){}
+    try{ if(total>0 && typeof _payReqAsk==='function' && await _payReqAsk((d.title||'akce')+(tier.name?(' \u00b7 '+tier.name):''), total, (d.currency||'CZK'), { event_id:d.id||null, kind:'event' })) return; }catch(e){}
+  }
 
   // Dřív se tu hledal účet podle zadaného e-mailu a nabízelo „připsat k tomuto účtu". Funkce
   // hledání ale tady nebyla dostupná (patří k recepci), takže blok tiše nedělal nic -- a dobře:
@@ -11759,9 +11815,14 @@ async function _evPubBuy(d, tiers, ov){
   try{
     let _tok=null; try{ _tok=(typeof _freshTok==='function' && currentUser)?(await _freshTok()):null; }catch(_e){}
     const _r=await fetch('/api/event-reserve',{ method:'POST', headers:Object.assign({'Content-Type':'application/json'}, _tok?{ Authorization:'Bearer '+_tok }:{}),
-      body:JSON.stringify({ event_id:d.id, cart:cart.map(function(x){ return { tier_name:(x.t.name||''), qty:x.q }; }),
-        name:name, email:mail, phone:tel||null, age_ok:!!((ov.querySelector('#evPubAge')||{}).checked), guard:_guard, minors:_minors,
-        lang:LANG, attr_src:(typeof _attrGet==='function'?_attrGet():null), hp:((ov.querySelector('#evPubHp')||{}).value||'') }) });
+      body:JSON.stringify(_li
+        ? { event_id:d.id, cart:cart.map(function(x){ return { tier_name:(x.t.name||''), qty:x.q }; }), age_ok:true,
+            attendees:_who.map(function(w){ return { name:(w&&w.name)||'', dob:(w&&w.dob)||null }; }),
+            method:((d.stripe_account && d.payment_mode!=='qr_bank' && d.payment_mode!=='cash' && d.payment_mode!=='pis')?'card':'qr'),
+            lang:LANG, attr_src:(typeof _attrGet==='function'?_attrGet():null) }
+        : { event_id:d.id, cart:cart.map(function(x){ return { tier_name:(x.t.name||''), qty:x.q }; }),
+            name:name, email:mail, phone:tel||null, age_ok:!!((ov.querySelector('#evPubAge')||{}).checked), guard:_guard, minors:_minors,
+            lang:LANG, attr_src:(typeof _attrGet==='function'?_attrGet():null), hp:((ov.querySelector('#evPubHp')||{}).value||'') }) });
     const _j=await _r.json().catch(function(){ return {}; });
     if(!_r.ok || !_j.ok) throw new Error((_j&&_j.error)||('HTTP '+_r.status));
     tk=_j.ticket_id;
@@ -11798,11 +11859,7 @@ async function _evPubBuy(d, tiers, ov){
   // Testovaci rezim si tahame z endpointu (d.pis_test), ne z _PIS_TEST_IDS -- ta mapa se nacita
   // v enterApp, kam se anonymni navstevnik nedostane. Bez toho by veřejnou stránku nešlo vyzkoušet.
   // V testu se pousti i kdyz _PIS_ENABLED jeste neni, presne jako uvnitr appky.
-  const _pisTest=!!d.pis_test;
-  if((window._PIS_ENABLED || _pisTest) && d.receiver_id_value && typeof _pisPayFlow==='function'){
-    try{ _pisPayFlow(tk, _payee, null, total, cur, _msg, null, _pisTest, _qrFallback, 'event', null); return; }catch(e){}
-  }
-  _qrFallback();
+  _qrFallback();   // obrazovka nabídne „Zaplatit z účtu" (PIS) i QR -- stejně v appce i venku
 }
 
 // Převodem: ukáže QR i údaje k ručnímu opsání a nechá kupujícího potvrdit, že zaplatil.
@@ -11818,8 +11875,14 @@ function _evPubQr(d, tier, ticketId, name, ov, qty, total){
   let payload=null; try{ payload=(typeof _bankQrPayload==='function')?_bankQrPayload(payee, price, msg):null; }catch(e){}
 
   const box=ov.firstElementChild;
-  let h='<div style="font-size:18px;font-weight:800;text-align:center;margin-bottom:4px;">'+(EN?'Pay by bank transfer':'Zaplať převodem')+'</div>';
+  payee.gym_id=d.gym_id||null; payee.pis_test=!!d.pis_test;
+  const _pisTest=!!d.pis_test;
+  const _pisOn=!!(d.receiver_id_value && typeof _pisPayFlow==='function' && (window._PIS_ENABLED || _pisTest || (typeof _pisAllowed==='function' && _pisAllowed(payee, d.gym_id||null))));
+  let h='<div style="font-size:18px;font-weight:800;text-align:center;margin-bottom:4px;">'+(_pisOn?(EN?'Pay':'Zapla\u0165'):(EN?'Pay by bank transfer':'Zaplať převodem'))+'</div>';
   h+='<div style="text-align:center;font-size:13px;color:var(--mid);margin-bottom:12px;">'+_evPubEsc(d.title)+' · '+price+' '+_evPubEsc(sym)+'</div>';
+  if(_pisOn){ h+='<button id="evPubPis" style="width:100%;padding:13px;background:#635BFF;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:inherit;margin:4px 0 10px;">\ud83c\udfe6 '+(EN?'Pay from your bank account':'Zaplatit z \u00fa\u010dtu')+'</button>'
+    +'<div id="evPubQrToggle" style="font-size:12.5px;color:var(--mid);cursor:pointer;margin:0 0 12px;font-weight:700;text-align:center;">'+(EN?'or scan a bank QR \u203a':'nebo naskenuj bankovn\u00ed QR \u203a')+'</div>'; }
+  h+='<div id="evPubQrWrap"'+(_pisOn?' style="display:none;"':'')+'>';
   h+='<div id="evPubQrBox" style="display:flex;justify-content:center;align-items:center;min-height:120px;margin-bottom:12px;"></div>';
   h+='<div style="background:var(--surf);border-radius:12px;padding:12px;font-size:13px;line-height:1.7;margin-bottom:12px;">';
   h+='<div><b>'+(EN?'Account':'Účet')+':</b> '+_evPubEsc(d.receiver_id_value||'—')+'</div>';
@@ -11827,15 +11890,18 @@ function _evPubQr(d, tier, ticketId, name, ov, qty, total){
   if(vs) h+='<div><b>'+(EN?'Reference':'Variabilní symbol')+':</b> '+_evPubEsc(vs)+'</div>';
   h+='<div><b>'+(EN?'Note':'Zpráva')+':</b> '+_evPubEsc(msg)+'</div></div>';
   h+='<div style="font-size:12px;color:var(--mid);text-align:center;margin-bottom:12px;line-height:1.5;">'+(EN?'Send the payment, then tap below. The organizer confirms it and your ticket lands in your e-mail.':'Pošli platbu a pak klepni níž. Pořadatel ji potvrdí a lístek ti přijde na e-mail.')+'</div>';
-  h+='<button id="evPubPaid" style="width:100%;padding:13px;background:#0A7A4F;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'I have paid':'Zaplaceno')+'</button>';
+  h+='</div>';
+  h+='<button id="evPubPaid" style="'+(_pisOn?'display:none;':'')+'width:100%;padding:13px;background:#0A7A4F;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'I have paid':'Zaplaceno')+'</button>';
   h+='<button id="evPubX2" style="width:100%;margin-top:8px;padding:10px;background:none;border:none;color:var(--mid);font-size:12.5px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Later':'Později')+'</button>';
   box.innerHTML=h;
 
+  { const _pb=ov.querySelector('#evPubPis'); if(_pb) _pb.onclick=function(){ _pisPayFlow(ticketId, payee, null, price, cur, msg, function(){ _evPubClose(ov); }, _pisTest, function(){ const w=ov.querySelector('#evPubQrWrap'); if(w) w.style.display=''; const pd=ov.querySelector('#evPubPaid'); if(pd) pd.style.display=''; }, 'event', null); };
+    const _qt=ov.querySelector('#evPubQrToggle'); if(_qt) _qt.onclick=function(){ const w=ov.querySelector('#evPubQrWrap'); if(w) w.style.display=''; const pd=ov.querySelector('#evPubPaid'); if(pd) pd.style.display=''; _qt.style.display='none'; }; }
   const qb=ov.querySelector('#evPubQrBox');
   if(qb){ if(payload && window.QRCode){ new QRCode(qb,{ text:payload, width:190, height:190, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); }
     else { qb.innerHTML='<div style="font-size:12px;color:var(--light);padding:16px;text-align:center;">'+(EN?'QR unavailable — use the details below':'QR nedostupné — použij údaje níž')+'</div>'; } }
 
-  ov.querySelector('#evPubX2').onclick=function(){ ov.remove(); _evBootRelease(); try{ window.history.replaceState({}, '', location.pathname); }catch(e){} };
+  ov.querySelector('#evPubX2').onclick=function(){ _evPubClose(ov); };
   ov.querySelector('#evPubPaid').onclick=async function(){
     const b=this; b.disabled=true; b.textContent='…';
     // Celá objednávka, ne jen ten jeden řádek -- zbytek by zůstal jako rezervace a release-cron
@@ -11845,8 +11911,10 @@ function _evPubQr(d, tier, ticketId, name, ov, qty, total){
       const _q=supaClient.from('event_tickets').update({ status:'paid_claimed', claimed_at:new Date().toISOString() });
       if(_t0 && _t0.order_id) await _q.eq('order_id', _t0.order_id); else await _q.eq('id', ticketId);
     }catch(e){}
+    // Pořadatel se dozví, že má na co čekat (stejně jako dřív v appce) -- s proklikem na potvrzení.
+    try{ if(d.created_by && typeof _bi==='function') await supaClient.from('notifications').insert(_bi({ user_id:d.created_by, type:'system', read:false, data:JSON.stringify({ kind:'event_qr_intent', event_id:d.id, title:d.title }), message:'' }, function(EN2){ return EN2?('\ud83d\udcf2 '+(name||'Someone')+' says they paid for '+(d.title||'the event')+' by QR \u2014 confirm when it arrives.'):('\ud83d\udcf2 '+(name||'N\u011bkdo')+' hl\u00e1s\u00ed platbu QR za '+(d.title||'akci')+' \u2014 potvr\u010f, a\u017e doraz\u00ed.'); })); }catch(e){}
     box.innerHTML='<div style="text-align:center;padding:26px;"><div style="font-size:34px;margin-bottom:10px;">⏳</div><div style="font-size:15px;font-weight:800;margin-bottom:6px;">'+(EN?'Thanks — waiting for confirmation':'Díky — čeká na potvrzení')+'</div><div style="font-size:13px;color:var(--mid);line-height:1.5;">'+(EN?'The organizer confirms the payment and the ticket goes to your e-mail.':'Pořadatel platbu potvrdí a lístek ti přijde na e-mail.')+'</div><button id="evPubX3" style="margin-top:16px;padding:10px 18px;border:1px solid var(--border);background:var(--surf);border-radius:10px;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Close':'Zavřít')+'</button></div>';
-    ov.querySelector('#evPubX3').onclick=function(){ ov.remove(); _evBootRelease(); try{ window.history.replaceState({}, '', location.pathname); }catch(e){} };
+    ov.querySelector('#evPubX3').onclick=function(){ _evPubClose(ov); };
   };
 }
 
@@ -37363,7 +37431,9 @@ ${_orgMine&&_orgMine.id?`<button id="orgSetToggle" style="width:100%;box-sizing:
       <input id="orgBillingCity" value="${ev(o.billing_city)}" placeholder="${EN?'City':'M\u011bsto'}" style="${_st}width:auto;flex:1;min-width:0;">
     </div>
     </div></details>
-    <details class="setSec"><summary>💰 ${EN?'Membership fees':'Cena členství'}</summary><div class="setBody">
+    <!-- Členské poplatky má jen asociace/federace (kluby se k ní hlásí). Pořadatel akcí členy nemá,
+         takže sekce u něj byla prázdná a vypadala jako chybějící pole. -->
+    <details class="setSec" ${_isFed?'':'style="display:none"'}><summary>💰 ${EN?'Membership fees':'Členské poplatky'}</summary><div class="setBody">
     ${_isFed?`<div class="sec-lbl">${EN?'Membership fees':'\u010clensk\u00e9 poplatky'}</div>
     <p style="font-size:11.5px;color:var(--light);line-height:1.5;margin:0 0 8px;">${EN?'One fee per period. Next year is a new row \u2014 the old one keeps the price clubs already paid.':'Jeden poplatek na obdob\u00ed. Dal\u0161\u00ed rok se p\u0159id\u00e1 jako nov\u00fd \u0159\u00e1dek, ten star\u00fd si nech\u00e1 cenu, kterou u\u017e kluby zaplatily.'}</p>
     <div id="orgFeeList" style="margin-bottom:10px;"></div>
