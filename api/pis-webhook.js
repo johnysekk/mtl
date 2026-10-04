@@ -37,10 +37,11 @@ async function pisSideEffects(rec, tbl) {
         else if (ev.data.organization_id) { _evProvider = 'organization'; _evOrg = ev.data.organization_id; } } } catch (e) {}
   }
   const _cohort = (tbl === 'cohort_members');
-  let _cohGym = null, _cohDep = 0, _cohCur = 'CZK';
+  let _cohGym = null, _cohDep = 0, _cohCur = 'CZK', _cohName = '', _cohStart = null, _cohPayer = '';
   if (_cohort) {
-    try { const co = await sb.from('gym_cohorts').select('gym_id,deposit_amount,currency').eq('id', rec.cohort_id).maybeSingle();
-      if (co.data) { _cohGym = co.data.gym_id; _cohDep = co.data.deposit_amount || 0; _cohCur = co.data.currency || 'CZK'; } } catch (e) {}
+    try { const co = await sb.from('gym_cohorts').select('gym_id,deposit_amount,currency,name,start_date').eq('id', rec.cohort_id).maybeSingle();
+      if (co.data) { _cohGym = co.data.gym_id; _cohDep = co.data.deposit_amount || 0; _cohCur = co.data.currency || 'CZK'; _cohName = co.data.name || ''; _cohStart = co.data.start_date || null; } } catch (e) {}
+    try { if (rec.paid_by) { const _pp = await sb.from('profiles').select('name').eq('id', rec.paid_by).maybeSingle(); _cohPayer = (_pp.data && _pp.data.name) || ''; } else if (rec.for_child && rec.guardian_name) { _cohPayer = rec.guardian_name; } } catch (e) {}
   }
   const _merch = (tbl === 'merch_orders');
 
@@ -86,7 +87,7 @@ async function pisSideEffects(rec, tbl) {
         : _merch
         ? { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: (rec.coach_id ? 'coach' : 'gym'), gym_id: (rec.coach_id ? null : rec.gym_id), coach_id: rec.coach_id || null, member_id: rec.student_id || null, gross_amount: Math.round((rec.amount || 0) * 100), currency: rec.currency || 'CZK', type: 'merch', payment_method: 'pis', acq_source: 'direct', source_booking_id: rec.id }
         : _cohort
-        ? { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: 'gym', gym_id: _cohGym, member_id: rec.student_id || null, gross_amount: Math.round(_cohDep * 100), currency: _cohCur, type: 'course', payment_method: 'pis', cash_payer_name: rec.name || null, acq_source: rec.attribution || 'direct', source_booking_id: rec.id }
+        ? { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: 'gym', gym_id: _cohGym, member_id: rec.student_id || null, gross_amount: Math.round(_cohDep * 100), currency: _cohCur, type: 'course', payment_method: 'pis', cash_payer_name: rec.name || null, acq_source: rec.attribution || 'direct', source_booking_id: rec.id , cohort_id: (rec.cohort_id || null), income_class: 'cohort_deposit', participant_name: (rec.name || null), paid_by_name: (_cohPayer || null) }
         : { internal: true, intSecret: process.env.PIS_INTERNAL_SECRET, provider: 'gym', gym_id: rec.gym_id, coach_id: rec.coach_id || null, member_id: rec.student_id || null, gross_amount: Math.round((rec.amount || 0) * 100), type: (tbl === 'gym_memberships' ? 'membership' : 'drop_in'), payment_method: 'pis', acq_source: rec.acq_source || 'direct', credit: ((tbl !== 'gym_memberships' && rec.credit_used === 'student') ? 'student' : undefined), source_booking_id: rec.id,
         // Vybrana pojmenovana cena z rezervace. Bez toho zustane dropin_plan_id null,
         // v dochazce neni co overovat a nikdo nezjisti, kdo si vzal slevu.
@@ -113,7 +114,7 @@ async function pisSideEffects(rec, tbl) {
       if (!mt && rec.gym_id) { const g = await sb.from('gyms').select('owner_id').eq('id', rec.gym_id).maybeSingle(); mt = g.data && g.data.owner_id; }
       if (mt) await sb.from('notifications').insert({ user_id: mt, type: 'booking', read: false, message: '\ud83d\udecd\ufe0f Nov\u00fd prodej merche (p\u0159evodem): ' + (rec.item_name || 'polo\u017eka') + (rec.buyer_name ? (' \u00b7 ' + rec.buyer_name) : ''), data: JSON.stringify({ kind: 'merch_order', merch_id: rec.merch_id, msg_en: '\ud83d\udecd\ufe0f New merch sale (bank transfer): ' + (rec.item_name || 'item') + (rec.buyer_name ? (' \u00b7 ' + rec.buyer_name) : '') }) });
     } else if (_cohort) {
-      if (_cohGym) { const g = await sb.from('gyms').select('owner_id').eq('id', _cohGym).maybeSingle(); const ownerId = g.data && g.data.owner_id; if (ownerId) await sb.from('notifications').insert({ user_id: ownerId, type: 'booking', read: false, message: '\ud83c\udf93 Nov\u00e1 z\u00e1loha kurzu (p\u0159evodem): ' + (rec.name || 'Z\u00e1jemce'), data: JSON.stringify({ kind: 'pis_payment_in', cohort_id: rec.cohort_id }) }); }
+      if (_cohGym) { const g = await sb.from('gyms').select('owner_id').eq('id', _cohGym).maybeSingle(); const ownerId = g.data && g.data.owner_id; if (ownerId) await sb.from('notifications').insert({ user_id: ownerId, type: 'booking', read: false, message: '\ud83c\udf93 Nov\u00e1 z\u00e1loha kurzu (p\u0159evodem): ' + (rec.name || 'Z\u00e1jemce'), data: JSON.stringify({ kind: 'pis_payment_in', cohort_id: rec.cohort_id, student: (rec.name || ''), payer: (_cohPayer || ''), for_child: !!rec.for_child, course: _cohName, amt: (_cohDep ? String(_cohDep) : ''), sym: (_cohCur || 'CZK') }) }); }
     } else {
       const g = await sb.from('gyms').select('owner_id').eq('id', rec.gym_id).maybeSingle();
       const ownerId = g.data && g.data.owner_id;
@@ -183,7 +184,7 @@ export default async function handler(req, res) {
     if (!rec) { const m = await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name,amount,coach_id,acq_source,student_name,months,paid_by,paid_by_name,child_name').eq('pis_payment_id', paymentId).maybeSingle(); if (m.data) { rec = m.data; tbl = 'gym_memberships'; } }
     if (!rec) { const c = await sb.from('bookings').select('id,status,student_id,coach_id,amount,currency,coach_name,slot_id,acq_source,credit_used,dropin_plan_id,need_proof,paid_by').eq('pis_payment_id', paymentId).maybeSingle(); if (c.data) { rec = c.data; tbl = 'bookings'; } }
     if (!rec) { const e = await sb.from('event_tickets').select('id,status,buyer_id,event_id,amount,currency,buyer_name,paid_by,paid_by_name,attendee_name').eq('pis_payment_id', paymentId).maybeSingle(); if (e.data) { rec = e.data; tbl = 'event_tickets'; } }
-    if (!rec) { const co = await sb.from('cohort_members').select('id,status,student_id,cohort_id,name,attribution').eq('pis_payment_id', paymentId).maybeSingle(); if (co.data) { rec = co.data; tbl = 'cohort_members'; } }
+    if (!rec) { const co = await sb.from('cohort_members').select('id,status,student_id,cohort_id,name,attribution,paid_by,for_child,guardian_name,email').eq('pis_payment_id', paymentId).maybeSingle(); if (co.data) { rec = co.data; tbl = 'cohort_members'; } }
     if (!rec) { const mo = await sb.from('merch_orders').select('id,status,student_id,gym_id,coach_id,merch_id,item_name,amount,currency,buyer_name').eq('pis_payment_id', paymentId).maybeSingle(); if (mo.data) { rec = mo.data; tbl = 'merch_orders'; } }
     if (!rec) return res.status(200).json({ ok: true, note: 'no matching record' });
 

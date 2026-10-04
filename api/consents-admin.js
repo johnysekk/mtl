@@ -118,6 +118,35 @@ export default async function handler(req, res) {
                type: a.app_type || null, source: a.source || null, status: a.status || null,
                doc_url: a.doc_url || null, doc_name: a.doc_name || null, doc_hash: a.doc_hash || null },
       }));
+      // SOUHLASY Z PŘIHLÁŠKY DO KURZU: podmínky kurzu, souhlas zástupce, provozní řád, marketing.
+      // Ukládají se k přihlášce (cohort_members.consents) -- tady se ukážou jako jeden doklad.
+      let cohRows = [];
+      if (scope === 'gym') {
+        let fc = `cohort_members?gym_id=eq.${encodeURIComponent(gymId)}&consents=not.is.null`;
+        if (ids) fc += `&student_id=in.(${ids.map(encodeURIComponent).join(',')})`;
+        const cms = (await sbGet(`${fc}&select=id,cohort_id,student_id,name,email,for_child,guardian_name,paid_by,consents,consent_at,created_at,status&order=created_at.desc&limit=${per}`)) || [];
+        const cids = [...new Set(cms.map((m) => m.cohort_id).filter(Boolean))];
+        const cn = {};
+        if (cids.length) ((await sbGet(`gym_cohorts?id=in.(${cids.map(encodeURIComponent).join(',')})&select=id,name`)) || []).forEach((c) => { cn[c.id] = c.name; });
+        cohRows = cms.filter((m) => m.consents && typeof m.consents === 'object').map((m) => {
+          const c = m.consents || {};
+          const lines = [];
+          if (c.terms && c.terms.text) lines.push(c.terms.text);
+          if (c.terms && c.terms.checkbox) lines.push('\u2611 ' + c.terms.checkbox);
+          if (c.guardian && c.guardian.text) lines.push('\u2611 ' + c.guardian.text);
+          if (c.rules && c.rules.checkbox) lines.push('\u2611 ' + c.rules.checkbox);
+          if (c.marketing && c.marketing_text) lines.push('\u2611 ' + c.marketing_text);
+          return {
+            id: 'coh:' + m.id, kind: 'course_signup', title: (cn[m.cohort_id] ? ('Kurz \u201e' + cn[m.cohort_id] + '\u201c') : null),
+            body_text: lines.join('\n\n') || null, plain: true,
+            who: m.name || m.email || '\u2014', accepted_at: c.at || m.consent_at || m.created_at,
+            version: null, guardian_name: (m.for_child ? (m.guardian_name || null) : null), guardian_outside: false,
+            ident: { name: m.name || null, email: m.email || null, phone: null, account: m.student_id || null, birth: null,
+                     ip: scope === 'mtl' ? (c.ip || null) : null, ua: scope === 'mtl' ? (c.user_agent || null) : null },
+            body_hash: (c.terms && c.terms.hash) || null,
+          };
+        });
+      }
       const merged = rows.map((w) => {
         const e = ev[`${w.gym_id}|${w.student_id}|${w.body_hash}`] || null;
         return {
@@ -141,8 +170,8 @@ export default async function handler(req, res) {
           body_hash: w.body_hash || null,
           file_url: w.terms_file_url || null, file_hash: w.terms_file_hash || null,
         };
-      }).concat(appRows).sort((x, y) => String(y.accepted_at || '').localeCompare(String(x.accepted_at || '')));
-      return res.status(200).json({ ok: true, rows: merged, total: total + appRows.length, page, per });
+      }).concat(appRows).concat(cohRows).sort((x, y) => String(y.accepted_at || '').localeCompare(String(x.accepted_at || '')));
+      return res.status(200).json({ ok: true, rows: merged, total: total + appRows.length + cohRows.length, page, per });
     }
 
     // ── ostatní souhlasy (consent_acceptances) ────────────────────────────────────────────
