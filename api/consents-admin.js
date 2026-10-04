@@ -80,7 +80,7 @@ export default async function handler(req, res) {
       let f = scope === 'gym' ? `waiver_acceptances?gym_id=eq.${encodeURIComponent(gymId)}` : 'waiver_acceptances?id=not.is.null';
       if (ids) f += `&student_id=in.(${ids.map(encodeURIComponent).join(',')})`;
       const total = await sbCount(`${f}&select=id`);
-      const rows = (await sbGet(`${f}&select=id,gym_id,student_id,student_name,guest_email,guardian_id,guardian_name,version,body_title,body_text,body_hash,terms_file_url,terms_file_hash,accepted_at&order=accepted_at.desc&limit=${per}&offset=${from}`)) || [];
+      let rows = (await sbGet(`${f}&select=*&order=accepted_at.desc&limit=${per}&offset=${from}`)) || [];
       // ZÁKONNÝ ZÁSTUPCE MIMO APPKU: jméno sám napsal, doklad o tom, kdo to byl, je jinde --
       // odkaz šel na konkrétní e-mail a máme čas, IP a jestli klikl ze stejného zařízení
       // jako mladistvý (nejsilnější známka, že si souhlas dal sám). Přidá se k řádku.
@@ -91,6 +91,11 @@ export default async function handler(req, res) {
         const reqs = (await sbGet(`guardian_consent_requests?status=eq.approved&minor_id=in.(${mids.map(encodeURIComponent).join(',')})&select=gym_id,minor_id,body_hash,guardian_email,same_device,approved_at,approved_ip,approved_ua,requested_ip,requested_ua,created_at`)) || [];
         reqs.forEach((r) => { ev[`${r.gym_id}|${r.minor_id}|${r.body_hash}`] = r; });
       }
+      // IDENTIFIKACE ČLOVĚKA k souhlasu: jméno, e-mail, telefon z profilu; datum narození, IP a
+      // zařízení jen pro MTL (zakladatel) -- klub je pro doložení souhlasu nepotřebuje.
+      const sids = [...new Set(rows.map((w) => w.student_id).filter(Boolean))];
+      const prof = {};
+      if (sids.length) ((await sbGet(`profiles?id=in.(${sids.map(encodeURIComponent).join(',')})&select=id,name,email,phone,birthdate`)) || []).forEach((p) => { prof[p.id] = p; });
       const gids = scope === 'mtl' ? [...new Set(rows.map((w) => w.gym_id).filter(Boolean))] : [];
       const gn = {};
       if (gids.length) ((await sbGet(`gyms?id=in.(${gids.map(encodeURIComponent).join(',')})&select=id,name`)) || []).forEach((g) => { gn[g.id] = g.name; });
@@ -100,12 +105,13 @@ export default async function handler(req, res) {
       if (scope === 'gym') {
         let fa = `gym_member_applications?gym_id=eq.${encodeURIComponent(gymId)}`;
         if (ids) fa += `&student_id=in.(${ids.map(encodeURIComponent).join(',')})`;
-        apps = (await sbGet(`${fa}&select=id,student_id,applicant_name,applicant_email,applicant_phone,applicant_birth,is_minor,guardian_name,guardian_contact,app_type,app_text,consent_at,consent_version,source,status,created_at&order=created_at.desc&limit=${per}`)) || [];
+        apps = (await sbGet(`${fa}&select=*&order=created_at.desc&limit=${per}`)) || [];
       }
       const appRows = apps.map((a) => ({
         id: 'app:' + a.id, kind: 'member_application', title: null, body_text: a.app_text || null,
         who: a.applicant_name || a.applicant_email || '—', accepted_at: a.consent_at || a.created_at,
         version: a.consent_version || null, guardian_name: a.guardian_name || null, guardian_outside: false,
+        ident: { name: a.applicant_name || null, email: a.applicant_email || null, phone: a.applicant_phone || null, account: a.student_id || null, birth: a.applicant_birth || null, ip: null, ua: null },
         app: { name: a.applicant_name || null, email: a.applicant_email || null, phone: a.applicant_phone || null, birth: a.applicant_birth || null,
                minor: !!a.is_minor, guardian: a.guardian_name || null, guardian_contact: a.guardian_contact || null,
                type: a.app_type || null, source: a.source || null, status: a.status || null },
@@ -115,6 +121,10 @@ export default async function handler(req, res) {
         return {
           id: w.id, kind: 'gym_terms', title: w.body_title || null, body_text: w.body_text || null,
           who: w.student_name || w.guest_email || '—', accepted_at: w.accepted_at,
+          ident: { name: w.student_name || (prof[w.student_id] || {}).name || null, email: w.guest_email || (prof[w.student_id] || {}).email || null,
+                   phone: (prof[w.student_id] || {}).phone || null, account: w.student_id || null,
+                   birth: scope === 'mtl' ? ((prof[w.student_id] || {}).birthdate || null) : null,
+                   ip: scope === 'mtl' ? (w.ip || null) : null, ua: scope === 'mtl' ? (w.user_agent || null) : null },
           version: w.version, guardian_name: w.guardian_name || null,
           guardian_outside: !!(w.guardian_name && !w.guardian_id),
           guardian_email: e ? e.guardian_email : null, same_device: e ? !!e.same_device : null,
@@ -134,7 +144,7 @@ export default async function handler(req, res) {
     }
 
     // ── ostatní souhlasy (consent_acceptances) ────────────────────────────────────────────
-    let f = 'consent_acceptances?select=id,user_id,user_name,user_email,kind,scope,version,lang,version_id,body_hash,accepted_at';
+    let f = 'consent_acceptances?select=id,user_id,user_name,user_email,kind,scope,version,lang,version_id,body_hash,accepted_at,ip,user_agent';
     if (scope === 'coach') f += `&scope=eq.${encodeURIComponent(uid)}`;
     if (scope === 'mtl') {
       const branch = String(q.branch || 'all');
@@ -144,15 +154,15 @@ export default async function handler(req, res) {
     }
     if (ids) f += `&user_id=in.(${ids.map(encodeURIComponent).join(',')})`;
 
-    const total = await sbCount(f.replace('select=id,user_id,user_name,user_email,kind,scope,version,lang,version_id,body_hash,accepted_at', 'select=id'));
+    const total = await sbCount(f.replace('select=id,user_id,user_name,user_email,kind,scope,version,lang,version_id,body_hash,accepted_at,ip,user_agent', 'select=id'));
     const acc = await sbGet(`${f}&order=accepted_at.desc&limit=${per}&offset=${from}`);
 
     // Jména a znění se dotahují jen pro tuhle stránku, ne pro celou historii.
     const uids = [...new Set((acc || []).map(a => a.user_id).filter(Boolean))];
     const names = {};
     if (uids.length) {
-      const ps = await sbGet(`profiles?id=in.(${uids.map(encodeURIComponent).join(',')})&select=id,name,email`);
-      (ps || []).forEach(p => { names[p.id] = p.name || p.email || ''; });
+      const ps = await sbGet(`profiles?id=in.(${uids.map(encodeURIComponent).join(',')})&select=id,name,email,phone,birthdate`);
+      (ps || []).forEach(p => { names[p.id] = p.name || p.email || ''; names['_p_' + p.id] = p; });
     }
     const vids = [...new Set((acc || []).map(a => a.version_id).filter(Boolean))];
     const vmap = {};
@@ -169,6 +179,9 @@ export default async function handler(req, res) {
         who: a.user_name || a.user_email || names[a.user_id] || '—', accepted_at: a.accepted_at,
         body_text: (v && v.body_text) || null,
         hash_mismatch: !!(v && v.body_hash && a.body_hash && v.body_hash !== a.body_hash),
+        ident: (function(){ const p = names['_p_' + a.user_id] || {}; const mtl = scope === 'mtl';
+          return { name: a.user_name || p.name || null, email: a.user_email || p.email || null, phone: p.phone || null, account: a.user_id || null,
+                   birth: mtl ? (p.birthdate || null) : null, ip: mtl ? (a.ip || null) : null, ua: mtl ? (a.user_agent || null) : null }; })(),
       };
     });
     return res.status(200).json({ ok: true, rows, total, page, per });
