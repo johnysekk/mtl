@@ -8738,6 +8738,20 @@ const GYM_DECK_COLS = 'id,name,city,country,city_lat,city_lng,photos,disciplines
 // v Fakturačních údajích a doplňuje se z Nominatimu; tady se jen kontroluje, že něco je.
 // `billing_line2` a `billing_phone` jsou nepovinné, na doklad je nepotřebuješ.
 const SELL_BILLING_FIELDS = ['legal_name','tax_id','billing_line1','billing_city','billing_postal','billing_country'];
+// MÁ KLUB CO PRODAT? Lekce v rozvrhu (opakovaná, nebo jednorázová v budoucnu) nebo vypsaný kurz
+// (e._openCourse doplní načítání). Permanentky se bez rozvrhu prodat nedají -- vážou se na lekce.
+// Klub, u kterého nejde nic koupit, do decku nepatří a majitel to vidí ve výzvě.
+function _gymHasOffer(e){
+  try{
+    if(!e) return false;
+    if(e._openCourse) return true;
+    let sc=e.schedule; if(typeof sc==='string'){ try{ sc=JSON.parse(sc); }catch(_){ sc=[]; } }
+    const t=new Date().toISOString().slice(0,10);
+    return (sc||[]).some(function(c){ if(!c) return false; if(c.until && c.until<t) return false;
+      if(c.once) return !!(c.date && c.date>=t);
+      const sl=(typeof _classSlots==='function')?_classSlots(c):[]; return (sl&&sl.length>0) || (c.day!=null && c.time); });
+  }catch(e){ return true; }
+}
 function _sellMissing(e, kind){
   const miss=[];
   if(!e) return ['entity'];
@@ -8762,6 +8776,8 @@ function _sellMissing(e, kind){
   // takového poskytovatele pouštět do decku.
   if(mode!=='stripe' && ('commission_card_status' in e) && e.commission_card_status!=='active') miss.push('card');
   // 2) fakturační údaje pro doklad
+  // 3) klub musí mít co prodat
+  if(kind==='gym' && ('schedule' in e) && !_gymHasOffer(e)) miss.push('offer');
   SELL_BILLING_FIELDS.forEach(function(f){
     // Sloupec, který entita vůbec nemá načtený, se nekontroluje -- jinak by seznam v decku
     // (kde se tahá jen pár sloupců) skryl úplně všechny.
@@ -8803,6 +8819,7 @@ function sellMissingLabels(miss){
     iban:          EN?'add IBAN and account holder':'doplnit IBAN a jméno majitele účtu',
     paymode:       EN?'choose how you want to receive payments':'zvolit způsob, jakým budeš přijímat platby',
     card:          EN?'save a card for the commission charge':'uložit kartu ke stržení provize',
+    offer:         EN?'add classes to the schedule or open a course':'přidat lekce do rozvrhu nebo vypsat kurz',
     legal_name:    EN?'legal name':'právní název',
     tax_id:        EN?'company ID':'IČO',
     billing_line1: EN?'billing address':'fakturační adresu',
@@ -8869,7 +8886,9 @@ async function loadMoreGyms(){
     if(data.length < _GYM_PAGE) _gymExhausted = true;
     _gymOffset = from;
     const have = new Set(GYMS.map(x=>x.id));
-    const add = data.filter(g=>!g.suspended && !g.deleted_at && !have.has(g.id));
+    // Stejná pravidla jako první stránka -- dřív další stránky pouštěly do decku i klub bez plateb.
+    try{ const _ids=data.map(function(x){ return x.id; }); const { data:_oc }=await supaClient.from('gym_cohorts').select('gym_id').in('gym_id',_ids).eq('status','open'); const _os=new Set((_oc||[]).map(function(x){ return String(x.gym_id); })); data.forEach(function(x){ if(_os.has(String(x.id))) x._openCourse=true; }); }catch(e){}
+    const add = data.filter(g=>!g.suspended && !g.deleted_at && !have.has(g.id) && canSell(g,'gym'));
     if(add.length){
       GYMS = GYMS.concat(add.map(_mapGymRow));
       try{ if(typeof init==='function') init(); }catch(e){}
@@ -8898,6 +8917,12 @@ document.addEventListener('click', function(e){
     }
     // Tlačítko i celá plocha vedou do téže sekce -- stejně jako u výzvy k platbám nad ní.
     // Tlačítko ve výzvě k platbám míří do téže sekce -- podmínky se doplňují na jednom místě.
+    if(e.target.closest('#payBannerSched')){
+      e.preventDefault();
+      const _goSched=function(){ const _tb=document.getElementById('gmTabSchedBtn'); if(!_tb) return false; _tb.click(); try{ const _st=document.getElementById('gmSchedTab'); if(_st) _st.scrollIntoView({behavior:'smooth', block:'start'}); }catch(_e){} return true; };
+      if(!_goSched()){ try{ openSheet('shGymManage'); }catch(_e){} try{ if(typeof renderGymManage==='function') renderGymManage(); }catch(_e){} setTimeout(_goSched, 600); }
+      return;
+    }
     if(e.target.closest('#payBannerBill')){
       e.preventDefault();
       const _openBill=function(){
@@ -8980,6 +9005,7 @@ async function ensureGymsLoaded(force){
     const { data } = await _q.order('created_at',{ascending:false}).range(0, _GYM_PAGE - 1);
     // Klub bez možnosti zaplatit do decku nepatří -- student by doklikal k rezervaci
     // a nedostal se dál.
+    try{ const _ids=(data||[]).map(function(x){ return x.id; }); if(_ids.length){ const { data:_oc }=await supaClient.from('gym_cohorts').select('gym_id').in('gym_id',_ids).eq('status','open'); const _os=new Set((_oc||[]).map(function(x){ return String(x.gym_id); })); (data||[]).forEach(function(x){ if(_os.has(String(x.id))) x._openCourse=true; }); } }catch(e){}
     const gyms=(data||[]).filter(g=>!g.suspended && !g.deleted_at && canSell(g,'gym'));
     if(!data || data.length < _GYM_PAGE) _gymExhausted = true;
     GYMS=gyms.map(_mapGymRow);
@@ -21689,6 +21715,7 @@ async function renderGymManage(){
   await checkGymOwnership();
   if(!_myGymData){ box.innerHTML=`<p style="color:var(--light);text-align:center;padding:20px;">${LANG==='en'?'No approved club found.':'Žádný schválený gym.'}</p>`; return; }
   const g=_myGymData;
+  try{ const { data:_oc }=await supaClient.from('gym_cohorts').select('id').eq('gym_id',g.id).eq('status','open').limit(1); g._openCourse=!!(_oc&&_oc.length); }catch(e){}
   try{ _loadGymVouches(); }catch(e){}
   try{ const _ds=parseDisc(g.disciplines)||[]; localStorage.setItem('mtl_dash_disc', _ds.length===1?_ds[0]:(_ds.length>1?'multi':'')); }catch(e){}
   try{ _gymSchedule = JSON.parse(g.schedule||'[]'); }catch(e){ _gymSchedule=[]; }
@@ -26898,6 +26925,17 @@ function renderScheduleEditor(){
     const d=_endToDur(_st, el.value); if(d>0 && it.slots[si]) it.slots[si].dur=d;
   });
   box.querySelectorAll('.rcName').forEach(el=>el.oninput=()=>{ const i=+el.dataset.i; window._rcPending=window._rcPending||{}; (window._rcPending[i]=window._rcPending[i]||{}).name=el.value; });
+  // OPAKOVANÉ LEKCE: dny, úroveň, disciplína, kdo vede, komu jde platba. Tahle pole se v kartě
+  // vykreslovala, ale nic je neobsluhovalo -- den nešel vybrat a úroveň se neuložila (výběr
+  // ukazoval první možnost, v datech zůstala prázdná), takže uložení hlásilo „Vyber úroveň".
+  const _rcKeepName=function(i){ try{ const n=box.querySelector('.rcName[data-i="'+i+'"]'); if(n){ window._rcPending=window._rcPending||{}; (window._rcPending[i]=window._rcPending[i]||{}).name=n.value; } }catch(e){} };
+  box.querySelectorAll('.rcChip').forEach(el=>el.onclick=(e)=>{ try{ e.preventDefault(); }catch(_){} const i=+el.dataset.i; _rcKeepName(i); window._rcOpenLesson=i; _rcChip(i, el.dataset.d); });
+  box.querySelectorAll('.rcRowDel').forEach(el=>el.onclick=(e)=>{ try{ e.preventDefault(); }catch(_){} const i=+el.dataset.i; _rcKeepName(i); window._rcOpenLesson=i; _rcChip(i, el.dataset.d); });
+  box.querySelectorAll('.rcLevel').forEach(el=>el.onchange=()=>{ const i=+el.dataset.i; const it=_gymSchedule[i]; if(!it) return; it.level=el.value; it.kids=(el.value==='kids'); _rcKeepName(i); window._rcOpenLesson=i; renderScheduleEditor(); });
+  box.querySelectorAll('.rcDisc').forEach(el=>{ const it=_gymSchedule[+el.dataset.i]; if(it && !it.disc) it.disc=el.value||defaultDiscipline(); el.onchange=()=>{ const t=_gymSchedule[+el.dataset.i]; if(t) t.disc=el.value; }; });
+  box.querySelectorAll('.rcCoach').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; if(!it) return; it.coach=el.value||null; const c=(_gymTeamCoaches||[]).find(x=>x.id===el.value); it.coachName=c?c.name:null; });
+  box.querySelectorAll('.rcLead').forEach(el=>el.onchange=()=>{ const i=+el.dataset.i; const it=_gymSchedule[i]; if(!it) return; const oid=(_schedGym()&&_schedGym().owner_id)||(currentUser&&currentUser.id); it.leader=el.value||oid;
+    if(it.leader===oid){ it.leaderName=(currentUser&&currentUser.name)||(LANG==='en'?'Owner':'Majitel'); } else { const cc=(_gymTeamCoaches||[]).find(x=>x.id===it.leader); it.leaderName=cc?cc.name:null; } _rcKeepName(i); window._rcOpenLesson=i; renderScheduleEditor(); });
   if($('rcSave')) $('rcSave').onclick=()=>{
     const split=_rcApplyPending();
     const _t=_rcToday();
@@ -41493,7 +41531,7 @@ async function openBugReportsAdmin(status){
       +'<div style="font-size:11px;color:var(--light);line-height:1.5;margin-bottom:8px;">'
         +escapeHtml([r.where_at, dg.app, dg.screen, dg.lang, dg.role].filter(Boolean).join(' · '))
         +(dg.err?('<br>'+escapeHtml(String(dg.err).slice(0,200))):'')+'</div>'
-      +(r.shot_url?('<a href="'+escapeHtml(r.shot_url)+'" target="_blank" rel="noopener"><img src="'+escapeHtml(r.shot_url)+'" alt="" style="width:100%;border:1px solid var(--border);border-radius:10px;margin-bottom:8px;"></a>'):'')
+      +(r.shot_url?('<a href="'+escapeHtml(r.shot_url)+'" target="_blank" rel="noopener"><img src="'+escapeHtml(r.shot_url)+'" alt="" style="display:block;max-width:100%;width:auto;max-height:360px;object-fit:contain;border:1px solid var(--border);border-radius:10px;margin-bottom:8px;cursor:zoom-in;"></a>'):'')
       +'<div style="display:flex;gap:6px;flex-wrap:wrap;">'
         +'<button class="baSt" data-id="'+r.id+'" data-s="doing" style="padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:#fff;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'In progress':'Řeším')+'</button>'
         +'<button class="baSt" data-id="'+r.id+'" data-s="done" style="padding:6px 10px;border-radius:8px;border:1px solid #A8E6C0;background:#E8F8EE;color:#0A7A3D;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Done':'Hotovo')+'</button>'
@@ -50713,6 +50751,7 @@ function _payMethodBanner(row, opts){
     // PODMÍNKY MAJÍ VLASTNÍ TLAČÍTKO. Slil jsem je do stejného seznamu jako kolej a kartu,
     // ale proklik vedl jen do plateb -- a do sekce s podmínkami se člověk nedostal.
     var _needTerms=_isGym && (typeof _gymTermsReady==='function') && !_gymTermsReady(row);
+    var _needOffer=_isGym && row && ('schedule' in row) && !_gymHasOffer(row);
     var _title=_isGym
       ? (EN?('Your club cannot take bookings yet'):('Klub zat\u00edm nem\u016f\u017ee br\u00e1t rezervace'))
       : (EN?'Students cannot book you right now':'Studenti si t\u011b te\u010f nemohou rezervovat');
@@ -50735,6 +50774,8 @@ function _payMethodBanner(row, opts){
       +'<div style="display:flex;gap:7px;flex-wrap:wrap;">'
       +'<button class="payBannerFix" data-club="'+(opts.clubMode?'1':'')+'" data-subject="'+(_isGym?'gym':'coach')+'" data-gym="'+(opts.gymId?String(opts.gymId):'')+'" style="background:#9a5a00;color:#fff;border:none;border-radius:9px;padding:8px 13px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:inherit;">'
         +(_isGym?(EN?'Payments \u203a':'Platby \u203a'):(EN?'Set it up \u203a':'Doplnit nastaven\u00ed \u203a'))+'</button>'
+      +(_needOffer?('<button id="payBannerSched" style="background:#fff;color:#9a5a00;border:1px solid #FCD9A8;border-radius:9px;padding:8px 13px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:inherit;">'
+        +(EN?'Schedule \u203a':'Rozvrh \u203a')+'</button>'):'')
       +(_needBill?('<button id="payBannerBill" style="background:#fff;color:#9a5a00;border:1px solid #FCD9A8;border-radius:9px;padding:8px 13px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:inherit;">'
         +(EN?'Billing details \u203a':'Faktura\u010dn\u00ed \u00fadaje \u203a')+'</button>'):'')
       +(_needTerms?('<button id="payBannerTerms" style="background:#fff;color:#9a5a00;border:1px solid #FCD9A8;border-radius:9px;padding:8px 13px;font-size:12.5px;font-weight:800;cursor:pointer;font-family:inherit;">'
@@ -50817,6 +50858,7 @@ function _mtlPayReady(row){
   // PODMÍNKY TRÉNOVÁNÍ JSOU PODMÍNKA PRODEJE, ne doporučení. Členové je odsouhlasí před
   // platbou; když je klub nemá, sbírá podpisy pod prázdný papír. Týká se jen klubu --
   // `owner_id` mají řádky gyms, profil kouče ne.
+  if(row && ('owner_id' in row) && ('schedule' in row) && !_gymHasOffer(row)){ why.push(EN?'add classes to the schedule or open a course \u2014 there is nothing to buy yet':'p\u0159idat lekce do rozvrhu nebo vypsat kurz \u2014 zat\u00edm u tebe nejde nic koupit'); }
   if(row && ('owner_id' in row) && typeof _gymTermsReady==='function' && !_gymTermsReady(row)){
     why.push((typeof _gymNeedsFile==='function' && _gymNeedsFile(row) && !row.terms_file_url && (typeof _gymHasTerms==='function' && _gymHasTerms(row)))
       ? (EN?'upload the statutes (required for a non-profit)':'nahrát stanovy (u spolku povinné)')
