@@ -544,17 +544,17 @@ export default async function handler(req, res) {
           }
         } catch (e) {}
       }
-      // KURZ: na dokladu název kurzu a za co (záloha / 1. měsíc / další měsíc). Dřív tam stálo
+      // KURZ: na dokladu za co se platilo (záloha / 1. měsíc / další měsíc). Dřív tam stálo
       // jen „Kurz". U spolku je kurz činností pro členy (přihláška za člena je povinná).
       let _courseSk = null;
       if (type === 'course') {
         try {
           if (row.cohort_id) {
-            const _co = ((await _wsbGet(`gym_cohorts?id=eq.${encodeURIComponent(row.cohort_id)}&select=name`)) || [])[0];
             const _part = row.income_class === 'cohort_deposit' ? 'záloha'
               : row.income_class === 'cohort_first_month' ? ((parseInt(row.months, 10) || 1) > 1 ? ('1.–' + (parseInt(row.months, 10)) + '. měsíc') : '1. měsíc')
               : row.income_class === 'cohort_month' ? ((parseInt(row.months, 10) || 1) > 1 ? ((parseInt(row.months, 10)) + ' měsíce') : 'další měsíc') : '';
-            if (_co && _co.name) _itemName = '„' + _co.name + '“' + (_part ? (' — ' + _part) : '');
+            // Krátce: „Kurz pro členy · záloha", „Kurz · 1. měsíc". Název kurzu by položku zbytečně natahoval.
+            if (_part) _itemName = _part;
           }
           if (row.gym_id) { const _g = ((await _wsbGet(`gyms?id=eq.${encodeURIComponent(row.gym_id)}&select=org_form`)) || [])[0]; if (_g && _g.org_form === 'nonprofit') _courseSk = 'members'; }
         } catch (e) {}
