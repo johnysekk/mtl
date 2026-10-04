@@ -4781,8 +4781,13 @@ async function _famRenderRequests(){
 // rozhoduje se ale tady, ne v seznamu upozornění. Po vyřízení se notifikace označí přečtenou,
 // takže položka zmizí a nezůstane viset jako hotová věc k udělání.
 // Zástupce podává přihlášku za člena spolku za mladistvého: vidí údaje i celé znění.
-function _approveMinorMemberApp(d){
+async function _approveMinorMemberApp(d){
   const EN=LANG==='en';
+  // Pokračování po přihlášce: pravidla klubu (provozní řád / stanovy) hned za ní. Žádost je
+  // vyřízená až po obojím -- souhlas s pravidly ji označí sám (_famMarkDone v jeho dialogu).
+  const _toWaiver=function(){ if(d.waiver && typeof _approveMinorWaiver==='function'){ _approveMinorWaiver(Object.assign({}, d.waiver, { _nid:d._nid })); return true; } return false; };
+  try{ const { data:_ex }=await supaClient.from('gym_member_applications').select('id').eq('gym_id',d.gym_id).eq('student_id',d.minor_id).in('status',['pending','approved']).limit(1);
+    if(_ex && _ex.length){ if(!_toWaiver()) await _famMarkDone(d); return; } }catch(e){}
   const fd=function(v){ if(!v) return '\u2014'; const t=new Date(String(v).slice(0,10)+'T00:00:00'); return isNaN(t)?String(v):(t.getDate()+'. '+(t.getMonth()+1)+'. '+t.getFullYear()); };
   const ov=document.createElement('div');
   ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100066;display:flex;align-items:flex-end;justify-content:center;';
@@ -4818,7 +4823,8 @@ function _approveMinorMemberApp(d){
       if(error) throw error;
       try{ await supaClient.from('notifications').insert({ user_id:d.minor_id, type:'system', read:false, data:JSON.stringify({ kind:'autonomy_sunset', gym_id:d.gym_id, msg_cs:'\u2705 Z\u00e1stupce podal tvou p\u0159ihl\u00e1\u0161ku za \u010dlena do '+(d.gym_name||'klubu')+'. Te\u010f m\u016f\u017ee\u0161 dokon\u010dit n\u00e1kup.', msg_en:'\u2705 Your guardian submitted your membership application to '+(d.gym_name||'the club')+'. You can finish the purchase now.' }),
         message:'\u2705 Z\u00e1stupce podal tvou p\u0159ihl\u00e1\u0161ku za \u010dlena do '+(d.gym_name||'klubu')+'.' }); }catch(e){}
-      await _famMarkDone(d); ov.remove(); toast(EN?'\u2705 Application submitted':'\u2705 P\u0159ihl\u00e1\u0161ka pod\u00e1na',1);
+      ov.remove(); toast(EN?'\u2705 Application submitted':'\u2705 P\u0159ihl\u00e1\u0161ka pod\u00e1na',1);
+      if(!_toWaiver()) await _famMarkDone(d);
     }catch(e){ btn.disabled=false; btn.textContent=(EN?'Submit application':'Podat p\u0159ihl\u00e1\u0161ku'); toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
   };
 }
@@ -4859,7 +4865,7 @@ async function _famRenderConsents(){
         : (d.kind==='minor_event_consent')
           ? ((EN?'event ':'akce ')+(d.event_title||d.title||''))
           : (d.kind==='minor_member_app')
-            ? ((EN?'Membership application \u00b7 ':'P\u0159ihl\u00e1\u0161ka za \u010dlena \u00b7 ')+(d.gym_name||''))
+            ? ((d.waiver?(EN?'Membership application + club rules \u00b7 ':'P\u0159ihl\u00e1\u0161ka za \u010dlena + pravidla klubu \u00b7 '):(EN?'Membership application \u00b7 ':'P\u0159ihl\u00e1\u0161ka za \u010dlena \u00b7 '))+(d.gym_name||''))
             : ((EN?'club ':'klub ')+(d.gym_name||''));
       return '<div style="background:#FFF8E6;border:1px solid #F0DFA8;border-radius:12px;padding:13px;margin-bottom:8px;">'
         +'<div style="font-size:14px;font-weight:700;color:var(--dark);">'+escapeHtml(d.minor_name||'')+'</div>'
@@ -5660,7 +5666,7 @@ const NOTIF_T = {
   autonomy_sunset: (d)=> LANG==='en' ? (d.msg_en||'') : (d.msg_cs||''),
   withdrawal_done: (d)=> LANG==='en' ? (d.msg_en||'') : (d.msg_cs||''),
   withdrawal_request: (d)=> LANG==='en' ? (d.msg_en||'') : (d.msg_cs||''),
-  minor_member_app: (d)=> LANG==='en' ? `📝 ${d.minor_name||'Your minor'} wants to become a member of ${d.gym_name||'the club'} — review and submit the application.` : `📝 ${d.minor_name||'Tvůj svěřenec'} chce být členem ${d.gym_name||'klubu'} — zkontroluj a podej přihlášku.`,
+  minor_member_app: (d)=> LANG==='en' ? `📝 ${d.minor_name||'Your minor'} wants to become a member of ${d.gym_name||'the club'} — review and submit the application${d.waiver?' and approve the club rules':''}.` : `📝 ${d.minor_name||'Tvůj svěřenec'} chce být členem ${d.gym_name||'klubu'} — zkontroluj a podej přihlášku${d.waiver?' a odsouhlas pravidla klubu':''}.`,
   milestone: (d)=> (d && d.key==='over9000') ? (LANG==='en'?'⚡ Power Level: Over 9000 — legendary!':'⚡ Power Level: Over 9000 — legenda!')
     : (LANG==='en'
       ? (d && d.label ? `🎉 Milestone unlocked: ${d.label}` : `🎉 New milestone unlocked!`)
@@ -13674,9 +13680,9 @@ By approving I confirm I am the legal guardian and agree to the above on the min
 2. Zdravotní stav. Potvrzuji, že je nezletilý zdravotně způsobilý k tréninku, a upozorním kouče na zdravotní omezení.
 3. Chování. Nezletilý se bude řídit pokyny kouče a personálu a pravidly klubu.
 4. Poskytovatel. Trénink poskytuje ${nm}; MTL pouze zprostředkovává rezervaci a platbu.
-5. Zástupce. Jako zákonný zástupce souhlasím s těmito podmínkami jménem nezletilého a beru na vědomí, že klub ověří mou totožnost při první návštěvě.
+5. Zástupce. Jako zákonný zástupce souhlasím s těmito podmínkami za nezletilého a beru na vědomí, že klub ověří mou totožnost při první návštěvě.
 
-Schválením potvrzuji, že jsem zákonný zástupce a souhlasím s výše uvedeným jménem nezletilého.`;
+Schválením potvrzuji, že jsem zákonný zástupce a souhlasím s výše uvedeným za nezletilého.`;
 }
 
 function _minorInfoPopup(title, body, btnLabel, btnAction){
@@ -13897,7 +13903,7 @@ async function openGuardianConsent(token){
     +(rq.title?('<div style="font-size:14px;font-weight:700;color:var(--dark);margin-bottom:6px;">'+escapeHtml(rq.title)+'</div>'):'')
     +'<div style="max-height:300px;overflow-y:auto;font-size:13px;color:var(--dark);line-height:1.6;white-space:pre-wrap;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:14px;">'+escapeHtml(rq.body||'')+'</div>'
     +'<input id="gcName" type="text" placeholder="'+(EN?'Your full name (guardian)':'Tvé jméno a příjmení (zástupce)')+'" style="width:100%;box-sizing:border-box;padding:14px;border:1.5px solid var(--border);border-radius:12px;font-family:\'DM Sans\';font-size:15px;margin-bottom:12px;background:#fff;">'
-    +'<label style="display:flex;align-items:flex-start;gap:9px;cursor:pointer;font-size:13px;color:var(--dark);line-height:1.5;margin-bottom:14px;"><input type="checkbox" id="gcChk" style="width:20px;height:20px;flex-shrink:0;margin-top:1px;"> <span>'+(EN?"I am the legal guardian and I approve these terms on the minor's behalf.":'Jsem zákonný zástupce a souhlasím s těmito podmínkami jménem nezletilého.')+'</span></label>'
+    +'<label style="display:flex;align-items:flex-start;gap:9px;cursor:pointer;font-size:13px;color:var(--dark);line-height:1.5;margin-bottom:14px;"><input type="checkbox" id="gcChk" style="width:20px;height:20px;flex-shrink:0;margin-top:1px;"> <span>'+(EN?"I am the legal guardian and I approve these terms on the minor's behalf.":'Jsem zákonný zástupce a souhlasím s těmito podmínkami za nezletilého.')+'</span></label>'
     +'<div id="gcMsg" style="display:none;background:#FEECEC;color:var(--red);border-radius:10px;padding:10px;font-size:12.5px;font-weight:600;margin-bottom:12px;"></div>'
     +'<button id="gcApprove" disabled style="width:100%;padding:15px;background:var(--green);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';opacity:.5;">'+(EN?'Approve':'Schválit')+'</button>';
   const chk=ov.querySelector('#gcChk'), ap=ov.querySelector('#gcApprove'), nm=ov.querySelector('#gcName');
@@ -14022,9 +14028,9 @@ async function _approveMinorWaiver(d){
     ${d.file_url?`<a href="${String(d.file_url).replace(/"/g,'&quot;')}" target="_blank" rel="noopener" style="display:block;border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:10px;font-size:13px;font-weight:700;color:var(--blue);text-decoration:none;">\ud83d\udcc4 ${String(d.file_name||(EN?'Document':'Dokument')).replace(/</g,'&lt;')}${d.file_size?`<span style="color:var(--light);font-weight:400;"> \u00b7 ${d.file_size>=1048576?(Math.round(d.file_size/104857.6)/10)+' MB':Math.max(1,Math.round(d.file_size/1024))+' kB'}</span>`:''}</a>`:''}
     <label style="display:flex;align-items:flex-start;gap:8px;font-size:12.5px;margin-bottom:12px;cursor:pointer;color:#141414;line-height:1.45;"><input type="checkbox" id="mwAgree" style="width:18px;height:18px;flex-shrink:0;margin-top:1px;"> <span>${d.file_url
       ? (EN?"I am the legal guardian. I have read these terms and the attached document and agree to them on the minor's behalf."
-          :'Jsem z\u00e1konn\u00fd z\u00e1stupce. P\u0159e\u010detl/a jsem si podm\u00ednky i p\u0159ilo\u017een\u00fd dokument a souhlas\u00edm s nimi jm\u00e9nem nezletil\u00e9ho.')
+          :'Jsem z\u00e1konn\u00fd z\u00e1stupce. P\u0159e\u010detl/a jsem si podm\u00ednky i p\u0159ilo\u017een\u00fd dokument a souhlas\u00edm s nimi za nezletil\u00e9ho.')
       : (EN?"I am the legal guardian and I agree to these terms on the minor's behalf."
-          :'Jsem z\u00e1konn\u00fd z\u00e1stupce a souhlas\u00edm s t\u011bmito podm\u00ednkami jm\u00e9nem nezletil\u00e9ho.')}</span></label>
+          :'Jsem z\u00e1konn\u00fd z\u00e1stupce a souhlas\u00edm s t\u011bmito podm\u00ednkami za nezletil\u00e9ho.')}</span></label>
     <div style="display:flex;gap:8px;">
       <button id="mwReject" style="flex:1;padding:13px;background:#FEECEC;color:var(--red);border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'Reject':'Zamítnout'}</button>
       <button id="mwApprove" style="flex:1;padding:13px;background:var(--green);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';opacity:.5;" disabled>${EN?'Approve':'Schválit'}</button>
@@ -15144,14 +15150,27 @@ async function _memberAppGate(g, _child, _plan){
       try{ const { data:_ex2 }=await supaClient.from('gym_member_applications').select('id').eq('gym_id',g.id).eq('student_id',currentUser.id).in('status',['pending','approved']).limit(1); if(_ex2 && _ex2.length) return true; }catch(e){}
       let _gs=[]; try{ const { data:fl }=await supaClient.from('family_links').select('guardian_id').eq('member_id',currentUser.id).eq('relation','guardian').eq('status','active'); _gs=[...new Set((fl||[]).map(function(x){ return x.guardian_id; }))]; }catch(e){}
       if(!_gs.length){ toast(EN?'\u26a0\ufe0f Under 18 the membership application is made by your legal guardian. Link them in Family first.':'\u26a0\ufe0f Pod 18 let pod\u00e1v\u00e1 p\u0159ihl\u00e1\u0161ku za \u010dlena z\u00e1konn\u00fd z\u00e1stupce. Nejd\u0159\u00edv se s n\u00edm propoj v Rodin\u011b.',1); return false; }
-      if(!confirm(EN?('You are under 18. We will send your legal guardian your application for membership of '+(g.name||'the club')+' to review and submit. Continue?')
-                    :('Je ti m\u00e9n\u011b ne\u017e 18. P\u0159ihl\u00e1\u0161ku za \u010dlena '+(g.name||'')+' po\u0161leme tv\u00e9mu z\u00e1konn\u00e9mu z\u00e1stupci, aby ji zkontroloval a podal. Pokra\u010dovat?'))) return false;
+      if(!confirm(EN?('You are under 18. We will send your legal guardian your application for membership of '+(g.name||'the club')+' together with the club rules \u2014 they submit the application and approve the rules in one go. Continue?')
+                    :('Je ti m\u00e9n\u011b ne\u017e 18. Tv\u00e9mu z\u00e1konn\u00e9mu z\u00e1stupci po\u0161leme p\u0159ihl\u00e1\u0161ku za \u010dlena '+(g.name||'')+' spolu s pravidly klubu \u2014 p\u0159ihl\u00e1\u0161ku pod\u00e1 a pravidla odsouhlas\u00ed najednou. Pokra\u010dovat?'))) return false;
       const _txt=_memberAppConfirmText(g, false, _plan);
+      // PRAVIDLA KLUBU V TÉŽE ŽÁDOSTI. Dřív šla nejdřív žádost o souhlas s provozním řádem, po
+      // schválení musel mladistvý nákup spustit znovu a teprve pak šla přihláška -- dvě kola.
+      // Teď jedna žádost: zástupce podá přihlášku a hned za ní odsouhlasí pravidla klubu.
+      let _wv=null;
+      try{
+        const _base=(g && g.terms_text && g.terms_text.trim())?g.terms_text.trim():(typeof _minorDefaultWaiver==='function'?_minorDefaultWaiver(g):'');
+        const _title=(g.terms_title||'Souhlas z\u00e1stupce s \u00fa\u010dast\u00ed nezletil\u00e9ho');
+        const _hash=_waiverHash(((g.terms_title&&g.terms_title.trim())?g.terms_title.trim():'')+'|'+_base);
+        const { data:_acc }=await supaClient.from('waiver_acceptances').select('id').eq('gym_id',g.id).eq('student_id',currentUser.id).eq('body_hash',_hash).limit(1);
+        if(!(_acc&&_acc.length) && _base){ let _ver=g.waiver_version; if(_ver==null){ try{ const { data:gg }=await supaClient.from('gyms').select('waiver_version').eq('id',g.id).single(); _ver=(gg&&gg.waiver_version)||0; }catch(e){ _ver=0; } }
+          _wv={ kind:'minor_waiver', gym_id:g.id, gym_name:g.name||'', minor_id:currentUser.id, minor_name:currentUser.name||'', version:_ver, hash:_hash, title:_title, body:_base,
+            file_url:(g.terms_file_url||null), file_name:(g.terms_file_name||null), file_size:(g.terms_file_size||null) }; }
+      }catch(e){}
       for(const gid of _gs){ try{ await supaClient.from('notifications').insert({ user_id:gid, type:'system', read:false,
         data:JSON.stringify({ kind:'minor_member_app', gym_id:g.id, gym_name:g.name||'', minor_id:currentUser.id, minor_name:currentUser.name||'', minor_birth:currentUser.birthdate||null, minor_email:currentUser.email||null, minor_phone:currentUser.phone||null,
-          app_type:((_plan&&_plan.member_cat)||g.member_app_type||null), app_text:_txt }),
+          app_type:((_plan&&_plan.member_cat)||g.member_app_type||null), app_text:_txt, waiver:_wv }),
         message:'\ud83d\udcdd '+(currentUser.name||'')+' chce b\u00fdt \u010dlenem '+(g.name||'')+' \u2014 zkontroluj a podej p\u0159ihl\u00e1\u0161ku.' }); }catch(e){} }
-      if(typeof _minorInfoPopup==='function') _minorInfoPopup(EN?'Sent to your legal guardian':'Odesl\u00e1no z\u00e1konn\u00e9mu z\u00e1stupci', EN?('Your guardian will review and submit the application to '+escapeHtml(g.name||'the club')+'. Once it is submitted, come back and finish.'):('Z\u00e1stupce p\u0159ihl\u00e1\u0161ku do '+escapeHtml(g.name||'klubu')+' zkontroluje a pod\u00e1. Pak se vra\u0165 a dokon\u010di to.'));
+      if(typeof _minorInfoPopup==='function') _minorInfoPopup(EN?'Sent to your legal guardian':'Odesl\u00e1no z\u00e1konn\u00e9mu z\u00e1stupci', EN?('Your guardian will submit the application to '+escapeHtml(g.name||'the club')+' and approve the club rules. You will get a notification \u2014 then finish the purchase.'):('Z\u00e1stupce pod\u00e1 p\u0159ihl\u00e1\u0161ku do '+escapeHtml(g.name||'klubu')+' a odsouhlas\u00ed pravidla klubu. P\u0159ijde ti notifikace \u2014 pak dokon\u010d\u00ed\u0161 n\u00e1kup.'));
       return false;
     }
   }
