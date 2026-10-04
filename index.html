@@ -18246,8 +18246,8 @@ async function saveCoachSchedule(){
     if(_nc>=0){
       const _c=_csSched[_nc];
       toast(LANG==='en'
-        ? `⚠️ Set a max capacity for "${(_c.name||levelLabel(_c.level||'all'))}" (${_c.time||''})`
-        : `⚠️ Vyplň max. kapacitu u lekce „${(_c.name||levelLabel(_c.level||'all'))}" (${_c.time||''})`);
+        ? `⚠️ Set a max capacity for "${(_c.name||levelLabel(_c.level||'all'))}" (${_c.time||(function(){ try{ const _dn=(typeof dowShort==='function')?dowShort():['Ne','Po','\u00dat','St','\u010ct','P\u00e1','So']; return (_classSlots(_c)||[]).map(function(x){ return _dn[x.day]+' '+x.time; }).join(', '); }catch(e){ return ''; } })()})`
+        : `⚠️ Vyplň max. kapacitu u lekce „${(_c.name||levelLabel(_c.level||'all'))}" (${_c.time||(function(){ try{ const _dn=(typeof dowShort==='function')?dowShort():['Ne','Po','\u00dat','St','\u010ct','P\u00e1','So']; return (_classSlots(_c)||[]).map(function(x){ return _dn[x.day]+' '+x.time; }).join(', '); }catch(e){ return ''; } })()})`);
       return;
     } }
   let fresh=[];
@@ -19863,7 +19863,9 @@ async function openCohortSignup(cohortId, fromColdLink){
       if(_rem>0){ h+='<div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:9px;padding-top:9px;border-top:1px dashed var(--border);"><span style="font-size:12.5px;color:var(--mid);">'+(EN?'Then top up 1st month':'Pak doplatíš 1. měsíc')+'</span><span style="font-size:13px;font-weight:700;color:var(--dark);">'+fmtPrice(_rem,cur)+' '+_sym+'</span></div>'; }
       // line 3: each further month, if multi-month
       if(_months>1){ h+='<div style="display:flex;justify-content:space-between;align-items:baseline;margin-top:7px;"><span style="font-size:12.5px;color:var(--mid);">'+(EN?('Each further month ('+(_months-1)+'\u00d7)'):('Každý další měsíc ('+(_months-1)+'\u00d7)'))+'</span><span style="font-size:13px;font-weight:700;color:var(--dark);">'+fmtPrice(_monthly,cur)+' '+_sym+'</span></div>'; }
-      if(d.capacity){ h+='<div style="font-size:11px;color:var(--light);margin-top:9px;padding-top:8px;border-top:1px dashed var(--border);">'+(d.taken||0)+' / '+d.capacity+' '+(EN?'spots taken':'míst obsazeno')+'</div>'; }
+      if(d.capacity){ const _dl=Math.max(0, Number(d.capacity)-(d.taken||0));
+    h+='<div style="font-size:11px;color:'+(_dl<=3?'#C77800':'var(--light)')+';font-weight:'+(_dl<=3?'700':'400')+';margin-top:9px;padding-top:8px;border-top:1px dashed var(--border);">'
+      +((_dl===0)?(EN?'Course is full':'Kurz je obsazen\u00fd'):(_dl<=3)?(EN?(_dl+' '+(_dl===1?'spot':'spots')+' left'):(_dl===1?'Posledn\u00ed m\u00edsto':('Posledn\u00ed '+_dl+' m\u00edsta'))):((EN?'Max. ':'Max. ')+d.capacity+(EN?' people':' \u00fa\u010dastn\u00edk\u016f')))+'</div>'; }
       h+='</div>';
       return h;
     })()
@@ -26977,15 +26979,34 @@ async function saveScheduleOnly(_onlyIdx){
   // fits 15. The club-wide fallback is gone, so the per-class number has to be there.
   // Sync every capacity field from the DOM first: a pre-filled value the owner never TOUCHED never
   // fired oninput, so _gymSchedule[i].cap stayed null and save falsely reported 'fill in capacity'.
-  try{ document.querySelectorAll('.schCap').forEach(function(el){ const i=+el.dataset.i; if(_gymSchedule[i]){ const v=parseInt(el.value,10); _gymSchedule[i].cap=(v>0?v:null); } }); }catch(e){}
+  // Synchronizace z OBOU editorů (týdenní karta .schCap i editor opakovaných lekcí .rcCap).
+  // Dřív se četla jen .schCap -- a prázdné pole ze skrytého pohledu přepsalo kapacitu, kterou
+  // člověk vyplnil v editoru opakovaných lekcí, na nic. Odtud „vyplň kapacitu" u vyplněné lekce.
+  // Prázdné pole tedy kapacitu maže, jen když je vidět; skryté pole hodnotu nepřepisuje.
+  try{ document.querySelectorAll('.schCap, .rcCap').forEach(function(el){ const i=+el.dataset.i; if(!_gymSchedule[i]) return; const v=parseInt(el.value,10);
+    if(v>0) _gymSchedule[i].cap=v; else if(el.offsetParent!==null) _gymSchedule[i].cap=null; }); }catch(e){}
+  // PRÁZDNÉ LEKCE PRYČ. „Přidat lekci" založí lekci bez dne a času; když ji člověk nevyplnil
+  // (nebo klepl dvakrát), zůstala v rozvrhu bez úrovně i kapacity a ukládání hlásilo chybu
+  // u lekce „Všechny úrovně ()", kterou nikdy nezadal. Lekce bez jediného termínu se neukládá.
+  try{ const _keepRef=(_onlyIdx!=null)?_gymSchedule[_onlyIdx]:null;
+    // Prázdná = bez termínu A bez čehokoli, co by člověk vyplnil (název, úroveň, kapacita).
+    // Rozpracovaná lekce bez termínu se NEMAŽE -- tu hlídá kontrola termínů a člověk ji doplní.
+    const _real=function(c){ if(!c) return false; if(c.once) return true;
+      let _hasSlot=true; try{ _hasSlot=(_classSlots(c)||[]).length>0; }catch(e){}
+      if(_hasSlot) return true;
+      return !!((c.name&&String(c.name).trim()) || (c.level&&c.level!=='all') || (Number(c.cap)>0)); };
+    if(_gymSchedule.some(function(c){ return !_real(c); })){
+      _gymSchedule=_gymSchedule.filter(_real);
+      if(_keepRef){ const _ni=_gymSchedule.indexOf(_keepRef); _onlyIdx=(_ni>=0)?_ni:null; }
+    } }catch(e){}
   { const _noCap=(_onlyIdx!=null)
       ? ((!(Number((_gymSchedule[_onlyIdx]||{}).cap)>0)) ? _onlyIdx : -1)
       : (function(){ const _t=_rcToday(); return _gymSchedule.findIndex(c=> c && !(c.until && c.until<_t) && !(Number(c.cap)>0)); })();
     if(_noCap>=0){
       const _c=_gymSchedule[_noCap]||{};
       toast(LANG==='en'
-        ? `⚠️ Set a max capacity for "${(_c.name||levelLabel(_c.level||'all'))}" (${_c.time||''})`
-        : `⚠️ Vyplň max. kapacitu u lekce „${(_c.name||levelLabel(_c.level||'all'))}" (${_c.time||''})`);
+        ? `⚠️ Set a max capacity for "${(_c.name||levelLabel(_c.level||'all'))}" (${_c.time||(function(){ try{ const _dn=(typeof dowShort==='function')?dowShort():['Ne','Po','\u00dat','St','\u010ct','P\u00e1','So']; return (_classSlots(_c)||[]).map(function(x){ return _dn[x.day]+' '+x.time; }).join(', '); }catch(e){ return ''; } })()})`
+        : `⚠️ Vyplň max. kapacitu u lekce „${(_c.name||levelLabel(_c.level||'all'))}" (${_c.time||(function(){ try{ const _dn=(typeof dowShort==='function')?dowShort():['Ne','Po','\u00dat','St','\u010ct','P\u00e1','So']; return (_classSlots(_c)||[]).map(function(x){ return _dn[x.day]+' '+x.time; }).join(', '); }catch(e){ return ''; } })()})`);
       return;
     } }
   {
@@ -27572,7 +27593,7 @@ function renderScheduleEditor(){
   if($('rcSave')) $('rcSave').onclick=()=>{
     const split=_rcApplyPending();
     const _t=_rcToday();
-    const bad=_gymSchedule.findIndex(c=>c && !c.once && !(c.until && c.until<_t) && !(Number(c.cap)>0));
+    const bad=_gymSchedule.findIndex(c=>c && !c.once && !(c.until && c.until<_t) && !(Number(c.cap)>0) && (function(){ try{ return (_classSlots(c)||[]).length>0; }catch(e){ return true; } })());
     if(bad>=0){
       if(split) renderScheduleEditor();
       setTimeout(function(){ const el=document.querySelector('.rcCap[data-i="'+bad+'"]'); if(el){ el.style.borderColor='var(--red)'; try{ el.focus(); el.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} } },40);
@@ -28063,7 +28084,11 @@ async function loadGymCoursesForProfile(gymId, g){
   const card=function(c, live){
     const em=disciplineEmoji(c.discipline||'')||'🥋';
     const range=dfmt(c.start_date)+(c.end_date?(' \u2013 '+dfmt(c.end_date)):'');
-    const cap=c.capacity?((taken[c.id]||0)+'/'+c.capacity):'';
+    // VEŘEJNĚ JEN KAPACITA A POSLEDNÍ MÍSTA, jako u lekcí -- kolik je přihlášeno, nikoho nezajímá.
+    const _cLeft=c.capacity?Math.max(0, Number(c.capacity)-(taken[c.id]||0)):null;
+    const cap=!c.capacity?'':((_cLeft===0)?(EN?'full':'obsazeno')
+      :(_cLeft<=3)?('<span style="color:#C77800;font-weight:700;">'+(EN?(_cLeft+' '+(_cLeft===1?'spot':'spots')+' left'):(_cLeft===1?'posledn\u00ed m\u00edsto':('posledn\u00ed '+_cLeft+' m\u00edsta')))+'</span>')
+      :((EN?'max. ':'max. ')+c.capacity+(EN?' people':' \u00fa\u010dastn\u00edk\u016f')));
     const badge=live
       ? '<span style="font-size:10px;font-weight:800;color:#9a6b00;background:#FFF4E6;border-radius:6px;padding:2px 7px;white-space:nowrap;">'+(EN?'running':'b\u011b\u017e\u00ed')+'</span>'
       : '<span style="font-size:10px;font-weight:800;color:#006040;background:#F0FBF0;border-radius:6px;padding:2px 7px;white-space:nowrap;">'+(EN?'signups open':'p\u0159ihl\u00e1\u0161ky')+'</span>';
@@ -28083,7 +28108,7 @@ async function loadGymCoursesForProfile(gymId, g){
       } else if(c.schedule_note){ body+='<div style="font-size:12.5px;color:var(--dark);margin-bottom:5px;">\u23f0 '+escapeHtml(c.schedule_note)+'</div>'; }
     }
     if(c.description) body+='<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:6px;">'+escapeHtml(c.description)+'</div>';
-    if(c.months) body+='<div style="font-size:11.5px;color:var(--light);">'+c.months+' '+(EN?'months':'m\u011bs\u00edc\u016f')+(cap?(' \u00b7 '+cap+' '+(EN?'signed up':'p\u0159ihl\u00e1\u0161eno')):'')+'</div>';
+    if(c.months||cap) body+='<div style="font-size:11.5px;color:var(--light);">'+(c.months?(c.months+' '+(EN?'months':(Number(c.months)===1?'m\u011bs\u00edc':(Number(c.months)<5?'m\u011bs\u00edce':'m\u011bs\u00edc\u016f')))):'')+((c.months&&cap)?' \u00b7 ':'')+(cap||'')+'</div>';
     body+= live
       ? '<div style="font-size:11.5px;color:var(--light);font-style:italic;margin-top:7px;">'+(EN?'This course is already running \u2014 signups are closed.':'Tento kurz u\u017e b\u011b\u017e\u00ed \u2014 z\u00e1pis je uzav\u0159en\u00fd.')+'</div>'
       : '<div class="gpCohGo" data-id="'+c.id+'" style="font-size:12.5px;color:var(--blue);font-weight:700;cursor:pointer;margin-top:8px;">'+(EN?'sign up \u203a':'p\u0159ihl\u00e1sit se \u203a')+'</div>';
