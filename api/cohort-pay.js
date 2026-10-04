@@ -381,6 +381,27 @@ export default async function handler(req, res) {
       }
     }
 
+    // Provozní řád klubu: souhlas se zněním (waiver_acceptances), stejně jako před nákupem v appce.
+    // JEDNA FUNKCE PRO KARTU I PŘEVOD -- dřív se volala až za větví převodu (QR / z účtu), takže
+    // u platby převodem se souhlas s provozním řádem neuložil nikdy.
+    const _recordRules = async function () {
+    try {
+      if (_cs.rules_accepted && c.gym_id) {
+        const gg = ((await sbGet(`gyms?id=eq.${encodeURIComponent(c.gym_id)}&select=terms_title,terms_text,waiver_version,terms_file_url,terms_file_name,terms_file_hash`)) || [])[0] || {};
+        // Znění = text provozního řádu + odkaz na přiložený dokument (u spolku stanovy) s otiskem souboru.
+        const txt = [String(gg.terms_text || '').trim(), gg.terms_file_url ? (`Přiložený dokument: ${gg.terms_file_name || 'dokument.pdf'}${gg.terms_file_hash ? (' (otisk ' + gg.terms_file_hash + ')') : ''} — ${gg.terms_file_url}`) : ''].filter(Boolean).join('\n\n---\n\n');
+        if (txt) {
+          const hash = _wh((String(gg.terms_title || '').trim()) + '|' + txt);
+          const dup = participantSid ? await sbGet(`waiver_acceptances?gym_id=eq.${encodeURIComponent(c.gym_id)}&student_id=eq.${encodeURIComponent(participantSid)}&body_hash=eq.${hash}&select=id&limit=1`) : [];
+          if (!(dup && dup.length)) {
+            await sbInsert('waiver_acceptances', { gym_id: c.gym_id, version: gg.waiver_version || 0, student_id: participantSid || null, student_name: pName,
+              guest_email: participantSid ? null : email, guardian_name: forChild ? name : null,
+              body_title: gg.terms_title || 'Provozní řád', body_text: txt, body_hash: hash, accepted_at: new Date().toISOString() });
+          }
+        }
+      }
+    } catch (e) { console.error('[cohort-pay] rules acceptance', e.message); }
+    };
     // QR/bank deposit (qr_bank gyms): no Stripe; create a claimed member, gym confirms on arrival.
     if (b.method === 'qr') {
       { const _g = cohortSignupGate(c); if (!_g.ok) return res.status(403).json({ ok: false, error: _g.error, closed: true }); }
@@ -402,6 +423,7 @@ export default async function handler(req, res) {
         consent_at: new Date().toISOString(), consent_version: (b.consent_version || null),
         fbp: (b.fbp || null), fbc: (b.fbc || null)
       });
+      await _recordRules();
       // Klub se dozví až při „Zaplatil(a) jsem" (qr_claim) nebo po zaplacení přes Finbricks.
       return res.status(200).json({ ok: true, qr: true, cohort_member_id: memberQ && memberQ.id, reserved_at: (memberQ && memberQ.created_at) || new Date().toISOString() });
     }
@@ -424,23 +446,7 @@ export default async function handler(req, res) {
       }
     }
     const memberId = member && member.id;
-    // Provozní řád klubu: souhlas se zněním (waiver_acceptances), stejně jako před nákupem v appce.
-    try {
-      if (_cs.rules_accepted && c.gym_id) {
-        const gg = ((await sbGet(`gyms?id=eq.${encodeURIComponent(c.gym_id)}&select=terms_title,terms_text,waiver_version,terms_file_url,terms_file_name,terms_file_hash`)) || [])[0] || {};
-        // Znění = text provozního řádu + odkaz na přiložený dokument (u spolku stanovy) s otiskem souboru.
-        const txt = [String(gg.terms_text || '').trim(), gg.terms_file_url ? (`Přiložený dokument: ${gg.terms_file_name || 'dokument.pdf'}${gg.terms_file_hash ? (' (otisk ' + gg.terms_file_hash + ')') : ''} — ${gg.terms_file_url}`) : ''].filter(Boolean).join('\n\n---\n\n');
-        if (txt) {
-          const hash = _wh((String(gg.terms_title || '').trim()) + '|' + txt);
-          const dup = participantSid ? await sbGet(`waiver_acceptances?gym_id=eq.${encodeURIComponent(c.gym_id)}&student_id=eq.${encodeURIComponent(participantSid)}&body_hash=eq.${hash}&select=id&limit=1`) : [];
-          if (!(dup && dup.length)) {
-            await sbInsert('waiver_acceptances', { gym_id: c.gym_id, version: gg.waiver_version || 0, student_id: participantSid || null, student_name: pName,
-              guest_email: participantSid ? null : email, guardian_name: forChild ? name : null,
-              body_title: gg.terms_title || 'Provozní řád', body_text: txt, body_hash: hash, accepted_at: new Date().toISOString() });
-          }
-        }
-      }
-    } catch (e) { console.error('[cohort-pay] rules acceptance', e.message); }
+    await _recordRules();
 
     const cur = String(c.currency || 'CZK').toUpperCase();
     const isCZK = cur === 'CZK';
