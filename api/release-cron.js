@@ -122,8 +122,11 @@ export default async function handler(req, res) {
     try {
       const cutoff30mE = new Date(Date.now() - 30 * 60 * 1000).toISOString(); // 30 min unpaid window
       // QR i rozpracovaná platba kartou (Stripe nebo neznámá). Finbricks řeší Pass 6 (pis_payment_id).
-      const e1 = await sb(`event_tickets?or=(payment_method.eq.qr,payment_method.eq.stripe,payment_method.is.null)&pis_payment_id=is.null&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoff30mE)}&select=id&limit=3000`);
+      // Po „nedorazilo" běží 30 minut znovu od requeued_at -- stejně jako u vstupů a soukromek.
+      // Dřív se počítalo od založení, takže vrácený lístek propadl při nejbližším běhu cronu.
+      const e1 = await sb(`event_tickets?or=(payment_method.eq.qr,payment_method.eq.stripe,payment_method.is.null)&pis_payment_id=is.null&status=eq.reserved&created_at=lt.${encodeURIComponent(cutoff30mE)}&select=id,requeued_at&limit=3000`);
       for (const t of (e1 || [])) {
+        if (t.requeued_at && new Date(t.requeued_at).getTime() > Date.now() - 30 * 60 * 1000) continue;
         await sb(`event_tickets?id=eq.${t.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'expired' }) });
         expired1h++;
       }
