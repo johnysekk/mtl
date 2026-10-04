@@ -278,6 +278,10 @@ html,body{height:100%;overflow:hidden;background:var(--bg);font-family:'DM Sans'
 .dashCards .dashCardLbl{font-size:10.5px;color:var(--mid);font-weight:600;text-transform:uppercase;letter-spacing:.03em;margin-bottom:5px}
 .dashCards .dashCardVal{font-size:23px;font-weight:800;color:var(--dark);line-height:1.05}
 @media(min-width:900px){ body.dashmode .dashCards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px} body.dashmode .dashHeroSingle{display:none} }
+.mtWrap{overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:14px}
+.mtWrap .mtTable{min-width:640px}
+.mtWrap .mtTable th:first-child,.mtWrap .mtTable td:first-child{position:sticky;left:0;background:#fff;z-index:1}
+@media (max-width:899px){ .mtWrap .mtTable{font-size:12.5px} .mtWrap .mtTable th,.mtWrap .mtTable td{padding:9px 10px} }
 .mtTable{width:100%;border-collapse:collapse;font-size:13.5px;background:#fff;border:1px solid var(--border);border-radius:14px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.05)}
 .mtTable th{text-align:left;padding:11px 14px;border-bottom:2px solid var(--border);color:var(--mid);font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.03em;cursor:pointer;user-select:none;white-space:nowrap}
 .mtTable th:hover{color:var(--dark)}
@@ -23050,11 +23054,21 @@ async function renderGymMembers(){
   }
   // Kdo přišel z kurzu (účastník kurzu nebo přihláška za člena z kurzu). Nenápadné 🎓 u jména
   // zůstává napořád, aby bylo vidět, kdo je z kurzu, i když už je dávno stálý člen.
-  try{ const _fcS=new Set();
-    const { data:_cmF }=await supaClient.from('cohort_members').select('student_id').eq('gym_id',_myGymData.id).not('student_id','is',null).in('status',['deposit_paid','enrolled','completed','converted']);
-    (_cmF||[]).forEach(function(x){ _fcS.add(String(x.student_id)); });
-    const { data:_apF }=await supaClient.from('gym_member_applications').select('student_id').eq('gym_id',_myGymData.id).eq('source','cohort').eq('status','approved').not('student_id','is',null);
-    (_apF||[]).forEach(function(x){ _fcS.add(String(x.student_id)); });
+  // „Z KURZU" JEN KDYŽ BYL KURZ PRVNÍ: kdo u klubu nejdřív koupil cokoli jiného (členství,
+  // vstup) a kurz až potom, je stávající člen, který si přidal kurz -- ne člověk získaný kurzem.
+  try{ const _fcS=new Set(), _firstC={}, _firstO={};
+    const _min=function(o,k,v){ if(!k||!v) return; k=String(k); if(!o[k] || v<o[k]) o[k]=v; };
+    const [{ data:_cmF }, { data:_apF }, { data:_gmF }, { data:_gbF }]=await Promise.all([
+      supaClient.from('cohort_members').select('student_id,created_at').eq('gym_id',_myGymData.id).not('student_id','is',null).in('status',['deposit_paid','enrolled','completed','converted']),
+      supaClient.from('gym_member_applications').select('student_id,created_at').eq('gym_id',_myGymData.id).eq('source','cohort').eq('status','approved').not('student_id','is',null),
+      supaClient.from('gym_memberships').select('student_id,created_at').eq('gym_id',_myGymData.id).not('student_id','is',null).neq('status','pending'),
+      supaClient.from('gym_bookings').select('student_id,created_at').eq('gym_id',_myGymData.id).not('student_id','is',null).neq('status','cancelled')
+    ]);
+    (_cmF||[]).forEach(function(x){ _min(_firstC, x.student_id, x.created_at); });
+    (_apF||[]).forEach(function(x){ _min(_firstC, x.student_id, x.created_at); });
+    (_gmF||[]).forEach(function(x){ _min(_firstO, x.student_id, x.created_at); });
+    (_gbF||[]).forEach(function(x){ _min(_firstO, x.student_id, x.created_at); });
+    Object.keys(_firstC).forEach(function(k){ if(!_firstO[k] || _firstC[k] <= _firstO[k]) _fcS.add(k); });
     window._gmFromCourse=_fcS; }catch(e){ window._gmFromCourse=window._gmFromCourse||new Set(); }
   let _extras=[];
   try{
@@ -23130,7 +23144,10 @@ async function renderGymMembers(){
       // Fotka i v tabulce na desktopu, ať je seznam všude stejný.
       const nm='<span style="display:inline-flex;align-items:center;gap:7px;">'+_mbAv(m.student_id)
         +'<span>'+(m.child_name?(kidEmoji(m.child_age)+' '+escapeHtml(m.child_name)+(m.child_age!=null?(' ('+m.child_age+')'):'')):escapeHtml(m.student_name||(EN?'Member':'Člen')))+'</span>'
-        +((!m.child_name && window._gmFromCourse && window._gmFromCourse.has(String(m.student_id)))?('<span title="'+(EN?'Came from a course':'P\u0159i\u0161el z kurzu')+'" style="font-size:11px;margin-left:5px;opacity:.75;">\ud83c\udf93</span>'):'')+'</span>';
+        +((!m.child_name && window._gmFromCourse && window._gmFromCourse.has(String(m.student_id)))?('<span title="'+(EN?'Came from a course':'P\u0159i\u0161el z kurzu')+'" style="font-size:11px;margin-left:5px;opacity:.75;">\ud83c\udf93</span>'):'')
+        // Odkud přišel: 🧲 našel klub v appce, 📣 z reklamy MTL.
+        +(m.acq_source==='mtl_discovery'?('<span title="'+(EN?'Found you in the MTL app':'Na\u0161el t\u011b v appce MTL')+'" style="font-size:11px;margin-left:4px;opacity:.85;">\ud83e\uddf2</span>'):'')
+        +(m.acq_source==='mtl_ads'?('<span title="'+(EN?'Came from an MTL ad':'P\u0159i\u0161el z reklamy MTL')+'" style="font-size:11px;margin-left:4px;opacity:.85;">\ud83d\udce3</span>'):'')+'</span>';
       const cancel=m.status==='cancelling'; const mrr=_memMonthlyValue(m); const ai=_attInfo(m);
       const _dl=_memDaysLeft(m);
       const _endTxt=(_dl===null)?'—':(new Date(m.period_end).toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric',year:'numeric'}));
@@ -23202,8 +23219,8 @@ async function renderGymMembers(){
     html+=`<div style="display:flex;gap:6px;overflow-x:auto;padding-bottom:8px;margin-bottom:4px;scrollbar-width:none;">${chips.map(c=>{ const on=(_gmMembLvl||null)===c.v; return `<div class="gmLvlChip" data-v="${c.v==null?'':c.v}" style="flex:0 0 auto;font-size:12px;font-weight:700;cursor:pointer;padding:6px 12px;border-radius:14px;white-space:nowrap;border:1.5px solid ${on?'var(--dark)':'var(--border)'};background:${on?'var(--dark)':'transparent'};color:${on?'#fff':'var(--mid)'};">${c.l}</div>`; }).join('')}</div>`;
   }
   if(!mems.length){ html+=`<p style="color:var(--light);font-size:13px;margin-top:8px;">${(_sQ||_kid||_lvl)?(EN?'Nobody matches this filter.':'Nikdo neodpovídá filtru.'):(EN?'No members yet.':'Zatím žádní členové.')}</p>`; }
-  else if(_isDeskDash){ html+=_memTable(mems); }
-  else { html+=grid(mems); }
+  // Seznam vypadá všude stejně: jeden člověk = jeden řádek (dřív na mobilu obří dlaždice).
+  else { html+='<div class="mtWrap">'+_memTable(mems)+'</div>'; }
   if(total>_gmSize || _gmPage>0){
     const _from=total?(_gmPage*_gmSize+1):0, _to=Math.min(total,(_gmPage+1)*_gmSize);
     html+=`<div style="display:flex;align-items:center;justify-content:center;gap:12px;margin-top:14px;">
@@ -23286,19 +23303,25 @@ async function renderGymMembers(){
     const { data:apps }=await supaClient.from('gym_member_applications').select('id,student_id,applicant_name,cohort_id,status,created_at').eq('gym_id',_myGymData.id).eq('source','cohort').eq('status','approved').order('created_at',{ascending:false}).limit(100);
     const { data:act }=await supaClient.from('gym_memberships').select('student_id').eq('gym_id',_myGymData.id).in('status',['active','cancelling','pending']);
     const paid=new Set((act||[]).map(function(x){ return String(x.student_id); }));
-    const list=(apps||[]).filter(function(a){ return !(a.student_id && paid.has(String(a.student_id))); });
+    const _seenFc=new Set();
+    const list=(apps||[]).filter(function(a){
+      if(a.student_id && paid.has(String(a.student_id))) return false;
+      // jen lidé, pro které byl kurz první nákup v klubu (viz _gmFromCourse)
+      if(a.student_id && window._gmFromCourse && !window._gmFromCourse.has(String(a.student_id))) return false;
+      const _k=String(a.student_id||a.applicant_name||a.id); if(_seenFc.has(_k)) return false; _seenFc.add(_k); return true;
+    });
     if(!list.length){ fc.innerHTML=''; return; }
     const cids=[...new Set(list.map(function(a){ return a.cohort_id; }).filter(Boolean))];
     let cn={}; if(cids.length){ const { data:cc }=await supaClient.from('gym_cohorts').select('id,name,end_date').in('id',cids); (cc||[]).forEach(function(c){ cn[c.id]=c; }); }
-    fc.innerHTML='<div style="margin-top:18px;border:1px solid var(--border);border-radius:14px;background:#fff;padding:12px 14px;">'
-      +'<div style="font-size:14px;font-weight:800;color:var(--dark);">\ud83c\udf93 '+(EN?'New members from courses':'Nov\u00ed \u010dlenov\u00e9 z kurz\u016f')+' \u00b7 '+list.length+'</div>'
+    fc.innerHTML='<details style="margin-top:18px;border:1px solid var(--border);border-radius:14px;background:#fff;padding:12px 14px;">'
+      +'<summary style="font-size:14px;font-weight:800;color:var(--dark);cursor:pointer;">\ud83c\udf93 '+(EN?'New members from courses':'Nov\u00ed \u010dlenov\u00e9 z kurz\u016f')+' \u00b7 '+list.length+'</summary>'
       +'<div style="font-size:12px;color:var(--mid);line-height:1.5;margin:3px 0 8px;">'+(EN?'Their membership application was approved; they have not paid a regular membership yet.':'P\u0159ihl\u00e1\u0161ka za \u010dlena je schv\u00e1len\u00e1, b\u011b\u017en\u00e9 \u010dlenstv\u00ed zat\u00edm nezaplatili.')+'</div>'
       +list.map(function(a){ const c=cn[a.cohort_id]||{};
         return '<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--border);">'
           +'<div style="min-width:0;flex:1;"><div style="font-size:13.5px;font-weight:700;">'+escapeHtml(a.applicant_name||'')+'</div>'
           +'<div style="font-size:11.5px;color:var(--mid);"><span style="font-weight:800;color:#5A3FD1;background:#F1ECFF;border-radius:7px;padding:1px 7px;">\ud83c\udf93 '+(EN?'from course':'z kurzu')+'</span> '+escapeHtml(c.name||'')+(c.end_date?(' \u00b7 '+(EN?'ends ':'kon\u010d\u00ed ')+new Date(c.end_date).toLocaleDateString(EN?'en-GB':'cs-CZ')):'')+'</div></div>'
           +(a.student_id?('<button class="gmFcMsg" data-id="'+a.student_id+'" data-n="'+escapeHtml(a.applicant_name||'')+'" style="padding:7px 12px;background:var(--dark);color:#fff;border:none;border-radius:9px;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Message':'Napsat')+'</button>'):'')
-          +'</div>'; }).join('')+'</div>';
+          +'</div>'; }).join('')+'</details>';
     fc.querySelectorAll('.gmFcMsg').forEach(function(b){ b.onclick=function(){ try{ openChatWithStudent(b.dataset.id); }catch(e){ try{ openGymMemberDetail(b.dataset.id, b.dataset.n); }catch(_){} } }; });
   }catch(e){ console.warn('fromCourse', e); } })();
   // ── Win-back: členové, kteří dlouho nedorazili (záložka „Dlouho nechodící") ──
@@ -28852,8 +28875,7 @@ async function loadGymManageBookings(){
            stejně zařadí sám. Vlastní odhad dával klubu falešnou jistotu. Zůstávají fakta --
            co se prodalo, komu a za kolik. -->
 
-      <div class="dashSecHdr" id="convHdr" style="font-size:14px;font-weight:800;color:var(--dark);margin:10px 0 8px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;">🧲 ${LANG==='en'?'Brought via the MTL App':'Přivedeno přes MTL appku'}<span class="dashAccArr" style="font-size:18px;color:var(--mid);transition:transform .15s;">▾</span></div>
-      <div class="prow-group" id="convBody" style="margin-bottom:12px;"><div style="font-size:12px;color:var(--mid);padding:10px 4px;">${LANG==='en'?'Tap to load — how many people MTL is bringing you.':'Rozbal — kolik lidí ti MTL přivádí.'}</div></div>
+      <!-- „Přivedeno přes MTL appku" je teď v Odkud chodí studenti (Jak tě lidé v appce nacházejí). -->
 </div>
 
 
@@ -28929,7 +28951,7 @@ async function loadGymManageBookings(){
     try{
       const stats2=$('mgStats');
       if(stats2 && !document.getElementById('mgIncomeBtn')){
-        const _want=['\ud83d\udcb0','\ud83d\udd01','\ud83e\udd4a','\ud83d\udecd','\ud83d\udccb','\ud83c\udff7'];
+        const _want=['\ud83d\udcb0','\ud83d\udd01','\ud83e\udd4a','\ud83d\udecd','\ud83d\udccb','\ud83c\udff7','\ud83c\udf93'];   // 🎓 Kurzy patří k příjmům
         const _box=document.createElement('div'); _box.id='mgIncomePanels'; _box.style.display='none';
         Array.prototype.slice.call(stats2.querySelectorAll('.dashSecHdr')).forEach(function(h){
           const t=h.textContent||'';
@@ -34129,7 +34151,7 @@ async function openGymOrigins(gymId, gymName, range){
   // to druhé, takže „Přivedlo MTL" ukazovalo nulu, i když se za akvizici platilo.
   const ownCounts={}; const mtlCounts={ mtl_ads:new Set(), mtl_discovery:new Set() };
   let ownPeople=0;
-  let acqFee=0, acqGross=0, acqPeople=new Set();
+  let acqFee=0, acqGross=0, acqPeople=new Set(); window._goBySrc={};
   let adsFee=0, adsGross=0, adsPeople=new Set();
   let cur='CZK';
   try{
@@ -34142,6 +34164,7 @@ async function openGymOrigins(gymId, gymName, range){
       if(src!=='mtl_ads' && src!=='mtl_discovery') return;
       const fee=Number(t.mtl_fee||0)/100, gross=Number(t.gross_amount||0)/100;
       acqFee+=fee; acqGross+=gross;
+      window._goBySrc=window._goBySrc||{}; const _bs=(window._goBySrc[src]=window._goBySrc[src]||{fee:0,gross:0}); _bs.fee+=fee; _bs.gross+=gross;
       if(t.member_id){ acqPeople.add(t.member_id); mtlCounts[src].add(t.member_id); }
       if(t.currency) cur=String(t.currency).toUpperCase();
       if(src==='mtl_ads'){ adsFee+=fee; adsGross+=gross; if(t.member_id) adsPeople.add(t.member_id); }
@@ -34192,40 +34215,42 @@ async function openGymOrigins(gymId, gymName, range){
   }).join('');
   const rows=rowsMtl+rowsOwn;
 
+  // NOVÝ VÝPIS: nahoře jedna věta, pak MTL zdroje s penězi, vlastní zdroje a trychtýř z appky.
+  const _bySrc=window._goBySrc||{};
+  const _per=(_gymMonth==='all')?(EN?'so far':'za celou dobu'):(EN?'in this period':'v tomhle obdob\u00ed');
+  const _tot=mtlPeople+ownPeople;
+  const _ppl=function(n){ return EN?(n===1?'1 student':(n+' students')):(n===1?'1 student':((n>=2&&n<=4)?(n+' studenti'):(n+' student\u016f'))); };
+  const _srcCard=function(k, icon, title, expl){
+    const n=(mtlCounts[k]||new Set()).size; if(!n) return '';
+    const b=_bySrc[k]||{fee:0,gross:0}; const r=_ratio(b.fee,b.gross);
+    return '<div style="border:1px solid var(--border);border-radius:12px;padding:12px 13px;margin-bottom:8px;background:#fff;">'
+      +'<div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;"><div style="font-size:14px;font-weight:800;">'+icon+' '+title+'</div><div style="font-size:18px;font-weight:800;">'+n+'</div></div>'
+      +'<div style="font-size:12px;color:var(--mid);line-height:1.5;margin:2px 0 8px;">'+expl+'</div>'
+      +'<div style="display:flex;justify-content:space-between;font-size:13px;padding:2px 0;"><span style="color:var(--mid);">'+(EN?'They paid you':'Zaplatili ti')+'</span><b>'+_m(b.gross)+'</b></div>'
+      +'<div style="display:flex;justify-content:space-between;font-size:13px;padding:2px 0;"><span style="color:var(--mid);">'+(EN?'Finder\u2019s fee to MTL':'Poplatek MTL za p\u0159iveden\u00ed')+'</span><b>'+_m(b.fee)+'</b></div>'
+      +(r?('<div style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border);font-size:12.5px;font-weight:800;color:#0F6E56;">'+(EN?('Each 1 '+cur+' of fee brought '+r+' '+cur):('Ka\u017ed\u00e1 koruna poplatku ti vr\u00e1tila '+r+' K\u010d'))+'</div>'):'')
+      +'</div>';
+  };
   box.innerHTML =
-    '<div style="display:flex;gap:10px;margin-bottom:14px;">'
-    + '<div style="flex:1;background:#E6F1FB;border-radius:12px;padding:12px;">'
-      + '<div style="font-size:12px;color:#185FA5;">'+(EN?'Brought by MTL':'P\u0159ivedlo MTL')+'</div>'
-      + '<div style="font-size:22px;font-weight:800;color:#0C447C;">'+mtlPeople+'</div></div>'
-    + '<div style="flex:1;background:var(--surf);border-radius:12px;padding:12px;">'
-      + '<div style="font-size:12px;color:var(--mid);">'+(EN?'Your own sources':'Tvoje vlastn\u00ed zdroje')+'</div>'
-      + '<div style="font-size:22px;font-weight:800;color:var(--dark);">'+ownPeople+'</div></div>'
-    + '</div>'
-    + (rows ? ('<div style="border-top:1px solid var(--border);padding-top:6px;margin-bottom:14px;">'+rows+'</div>') : '')
-    + (adsFee>0
-      ? ('<div style="border:1px solid #E8C24A;background:#FFF8E6;border-radius:12px;padding:12px 13px;margin-bottom:12px;">'
-         + '<div style="font-size:12px;font-weight:800;color:#8a5a00;margin-bottom:6px;">\ud83d\udce3 '+(EN?'MTL ads':'Reklama MTL')+'</div>'
-         + '<div style="display:flex;justify-content:space-between;font-size:13px;color:#7a4f00;padding:2px 0;"><span>'+(EN?'Students brought':'P\u0159ivedeno student\u016f')+'</span><b>'+adsPeople.size+'</b></div>'
-         + '<div style="display:flex;justify-content:space-between;font-size:13px;color:#7a4f00;padding:2px 0;"><span>'+(EN?'They paid you':'Zaplatili ti')+'</span><b>'+_m(adsGross)+'</b></div>'
-         + '<div style="display:flex;justify-content:space-between;font-size:13px;color:#7a4f00;padding:2px 0;"><span>'+(EN?'You paid MTL':'Zaplatil jsi MTL')+'</span><b>'+_m(adsFee)+'</b></div>'
-         + (_ratio(adsFee,adsGross) ? ('<div style="border-top:1px dashed #E8C24A;margin-top:7px;padding-top:7px;font-size:13px;font-weight:800;color:#8a5a00;">'
-            + (EN?('Every 1 '+cur+' spent brought back '+_ratio(adsFee,adsGross)):('Za ka\u017edou korunu ti p\u0159i\u0161lo '+_ratio(adsFee,adsGross)+' K\u010d'))
-            + '</div>') : '')
-         + '</div>')
-      : '')
-    + (acqFee>0
-      ? ('<div style="background:#E1F5EE;border-radius:12px;padding:12px 13px;font-size:13px;color:#0F6E56;line-height:1.6;">'
-         + (EN
-            ? (function(){ const n=acqPeople.size;
-             return 'You paid <b>'+_m(acqFee)+'</b> in acquisition fees; '+(n===1?'1 student has':(n+' students have'))+' paid you <b>'+_m(acqGross)+'</b>.'; })()
-            : (function(){ const n=acqPeople.size;
-             const _st=(n===1)?'1 student ti zaplatil':((n>=2&&n<=4)?(n+' studenti ti zaplatili'):(n+' student\u016f ti zaplatilo'));
-             return 'Za akvizici jsi zaplatil <b>'+_m(acqFee)+'</b>, '+_st+' <b>'+_m(acqGross)+'</b>.'; })())
-         + '</div>')
-      : ('<p style="font-size:12.5px;color:var(--light);line-height:1.55;">'
-         + (EN ? 'No acquisition fee yet \u2014 everyone so far came from your own sources.'
-               : 'Zat\u00edm \u017e\u00e1dn\u00e1 akvizice \u2014 v\u0161ichni dosud p\u0159i\u0161li z tv\u00fdch vlastn\u00edch zdroj\u016f.')
-         + '</p>'));
+    // 1) jedna věta
+    '<div style="background:var(--surf);border-radius:12px;padding:13px 14px;font-size:13.5px;line-height:1.6;margin-bottom:14px;">'
+      +(_tot
+        ? (EN?('<b>'+_ppl(_tot)+'</b> came to you '+_per+': <b>'+mtlPeople+'</b> brought by MTL, <b>'+ownPeople+'</b> from your own sources.')
+             :('<b>'+_ppl(_tot)+'</b> k tob\u011b p\u0159i\u0161lo '+_per+': <b>'+mtlPeople+'</b> p\u0159ivedlo MTL, <b>'+ownPeople+'</b> z tv\u00fdch vlastn\u00edch zdroj\u016f.'))
+        : (EN?'Nobody new in this period yet.':'V tomhle obdob\u00ed zat\u00edm nikdo nov\u00fd.'))
+    +'</div>'
+    // 2) přes MTL
+    +((mtlPeople)?('<div style="font-size:11.5px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.05em;margin:0 0 8px;">'+(EN?'Brought by MTL':'P\u0159ivedlo MTL')+'</div>'
+      +_srcCard('mtl_discovery','\ud83e\uddf2',(EN?'Found you in the app':'Na\u0161li t\u011b v appce'),(EN?'They found your club in MTL themselves and bought for the first time.':'Na\u0161li si tv\u016fj klub v MTL sami a poprv\u00e9 u tebe koupili.'))
+      +_srcCard('mtl_ads','\ud83d\udce3',(EN?'MTL ads':'Reklama MTL'),(EN?'They came from an ad that MTL paid for.':'P\u0159i\u0161li z reklamy, kterou zaplatilo MTL.'))):'')
+    // 3) vlastní zdroje
+    +((ownPeople)?('<div style="font-size:11.5px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.05em;margin:14px 0 6px;">'+(EN?'Your own sources':'Tvoje vlastn\u00ed zdroje')+' \u00b7 '+ownPeople+'</div>'
+      +'<div style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:4px;">'+(EN?'You pay MTL no finder\u2019s fee for these.':'Za tyhle MTL \u017e\u00e1dn\u00fd poplatek za p\u0159iveden\u00ed neplat\u00ed\u0161.')+'</div>'
+      +'<div style="border-top:1px solid var(--border);">'+rowsOwn+'</div>'):'')
+    // 4) jak tě lidé v appce nacházejí (dřív „Přivedeno přes MTL appku" v Přehledu)
+    +'<div style="font-size:11.5px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.05em;margin:18px 0 6px;">\ud83e\uddf2 '+(EN?'How people find you in the app':'Jak t\u011b lid\u00e9 v appce nach\u00e1zej\u00ed')+'</div>'
+    +'<div class="prow-group" id="goConv"></div>';
+  try{ const _gc=box.querySelector('#goConv'); if(_gc) _loadGymConversions(gymId, _gc); }catch(e){}
 }
 
 async function openGymStats(gymId, gymName, fromAdmin){
