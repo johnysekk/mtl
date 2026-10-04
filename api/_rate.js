@@ -166,7 +166,24 @@ export async function resolveRate(sbGet, { ownerId, gymId, gymAccount, mode }) {
 // AND it is their FIRST one of that kind here: first membership, first drop-in, first 1:1.
 // (Was: membership = first 2 months. Single charge now -- see the header.) Window is bounded by counting prior COMPLETED tx of this type for this member at
 // this provider (Stripe + cash together). ownerPartner => EP pays half.
+// OKNO NOVÉHO KLUBU: prvních 14 dní od založení klubu se do MTL převádějí jeho stálí členové.
+// Kdokoli se v tu dobu přidá, je klubu vlastní (direct) -- bez ohledu na to, jak přišel -- a
+// poplatek za přivedení se neúčtuje. Jediné místo s tou délkou; appka i server se ptají sem.
+export const GYM_ONBOARDING_DAYS = 14;
+export async function gymOnboardingUntil(sbGet, gymId) {
+  if (!gymId) return null;
+  try {
+    const g = await sbGet(`gyms?select=created_at&id=eq.${encodeURIComponent(gymId)}&limit=1`);
+    const c = g && g[0] && g[0].created_at; if (!c) return null;
+    const until = new Date(Date.parse(c) + GYM_ONBOARDING_DAYS * 86400000);
+    return (Date.now() < until.getTime()) ? until.toISOString() : null;
+  } catch (e) { return null; }
+}
 export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, memberId, scopeCol, scopeId }) {
+  // Nový klub v okně převodu členů: žádná akvizice.
+  if (scopeCol === 'gym_id' && scopeId && (acqSource === 'mtl_discovery' || acqSource === 'mtl_ads')) {
+    if (await gymOnboardingUntil(sbGet, scopeId)) return null;
+  }
   // 'mtl_ads' = člověk přišel z kampaně, kterou zaplatilo MTL. Je to akvizice se stejnou
   // sazbou jako organický objev; rozdíl je jen ve zdroji, aby se dalo doložit, odkud přišel
   // (a u reklamy je ten nárok nejsilnější -- MTL za ten klik opravdu zaplatilo).

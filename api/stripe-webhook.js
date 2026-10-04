@@ -9,13 +9,14 @@
 // DŮLEŽITÉ: webhook musí číst RAW body (proto bodyParser:false), jinak selže ověření podpisu.
 
 import Stripe from 'stripe';
-import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate } from './_rate.js';
+import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil } from './_rate.js';
 import crypto from 'crypto';
 import PDFDocument from 'pdfkit';
 import { isTestMode } from './_config.js';
 import { approveMemberAppOnPayment, cohortPayer } from './_member-app.js';
 const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 import { DEJAVU_CZ } from './_dejavu-cz.js';
+import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 export const config = { api: { bodyParser: false } };
@@ -488,6 +489,8 @@ async function recordTransaction(acct, pi, fields) {
       return { status: 'updated', gross, stripeFee, mtlFee, net, dokladNo: _dnU };
     }
     const _payee = await resolvePayee(acct);
+    // Okno nového klubu (14 dní): přidaní v tu dobu jsou klubu vlastní, ne přivedení MTL.
+    try { if (fields.gym_id && (fields.acq_source === 'mtl_discovery' || fields.acq_source === 'mtl_ads') && await _gymObUntil(sbGet, fields.gym_id)) fields = Object.assign({}, fields, { acq_source: 'direct' }); } catch (e) {}
     const _txIns = await sbPost('transactions', {
       // PŮVOD ČLENA. Bez tohohle sloupce nezůstala u karetních plateb žádná stopa, proč se
       // účtovalo 20 % místo běžné sazby: účtovalo se správně, ale doložit to nešlo. Navíc se
@@ -1174,8 +1177,9 @@ export default async function handler(req, res) {
 // stejny bez ohledu na to, ktera cesta vyhrala. Kdyz doklad k platbe uz je, nevystavi druhy.
 // POLOZKA NA DOKLADU: druh + nazev ("Clenstvi · Zacatecnici", "Jednorazovy vstup · Bordelari").
 // Pise se do snimku pri vystaveni. Driv tam byl jen nazev tarifu, nebo u banky syrovy typ "drop_in".
-function _dokItemLabel(type, name) {
-  const T = { membership: 'Členství', drop_in: 'Jednorázový vstup', coach_inperson: 'Soukromá lekce 1:1', coach_1to1: 'Soukromá lekce 1:1',
+function _dokItemLabel(type, name, sk) {
+  // sk = 'membership' | 'pass' (z _sell-kind.js podle prodávajícího); bez něj „Členství" jako dřív.
+  const T = { membership: (sk === 'pass' ? 'Permanentka' : 'Členství'), drop_in: 'Jednorázový vstup', coach_inperson: 'Soukromá lekce 1:1', coach_1to1: 'Soukromá lekce 1:1',
     coach_online: 'Online lekce', event_ticket: 'Vstupenka', event: 'Vstupenka', merch: 'Zboží', course: 'Kurz' };
   const t = T[String(type || '')] || '';
   const n = String(name || '').trim();
@@ -1210,7 +1214,7 @@ export async function issueStripeDokladForPi(pi, hint) {
       customerName: tx.paid_by_name || (_cust && _cust.name) || null,
       customerEmail: (_cust && _cust.email) || null,
       participantName: (_cust && _cust.name) || null,
-      itemLabel: _dokItemLabel(tx.type, tx.plan), amount: tx.gross_amount,
+      itemLabel: _dokItemLabel(tx.type, tx.plan, (tx.type === 'membership') ? await sellKindFor(sbGet, { gymId: tx.gym_id, paidTo: tx.paid_to }) : null), amount: tx.gross_amount,
       currency: tx.currency, paymentMethod: 'stripe', testMode: !!tx.test_mode,
     });
   } catch (e) { console.error('issueStripeDokladForPi', e && e.message); return null; }

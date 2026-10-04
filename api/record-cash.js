@@ -14,7 +14,7 @@
 // Rate: BANK track - EP 1%, else base 3.5% / Shikai 3% at coach_ref_score>=2. No Bankai.
 // Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
 
-import { ladderRate as _mtlRate, acquisitionRate as _mtlAcq, introFreeFor as _introFree, hasOrgRate as _hasOrgRate } from './_rate.js';
+import { ladderRate as _mtlRate, acquisitionRate as _mtlAcq, introFreeFor as _introFree, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil } from './_rate.js';
 import { isTestMode } from './_config.js';
 import { approveMemberAppOnPayment, cohortPayer } from './_member-app.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
@@ -358,7 +358,9 @@ export default async function handler(req, res) {
       cur = currency || gym.currency || 'czk';
       const _cc = (_wantCredit && ownerProf.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
-      const _acq = await acquisitionRate(acq_source, type, ownerProf, member_id, 'gym_id', gym_id, rate, months);
+      // Okno nového klubu: kdo se přidá v prvních 14 dnech, je klubu vlastní (direct).
+      const _acqG = (gym_id && (acq_source === 'mtl_discovery' || acq_source === 'mtl_ads') && await _gymObUntil(_wsbGet, gym_id)) ? 'direct' : acq_source;
+      const _acq = await acquisitionRate(_acqG, type, ownerProf, member_id, 'gym_id', gym_id, rate, months);
       const _acqB = (_acq && typeof _acq === 'object') ? _acq : null;
       const _acqR = _acqB ? _acqB.rate : _acq;
       // Zaváděcí nulová provize. Tahle cesta počítá sazbu sama přes ladderRate, takže by kontrolu
@@ -396,7 +398,7 @@ export default async function handler(req, res) {
         // now; status-vocabulary.sql normalises the rows written before this.
         currency: cur, type, status: 'paid', payment_method, cohort_id: cohort_id || null, income_class: income_class || null,
         commission_status: _cc ? 'collected' : 'pending', commission_month: month,
-        cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct',
+        cash_payer_name: cash_payer_name || null, acq_source: _acqG || 'direct',
         // KDO PLATBU PRIJAL. Drive se ukladalo jen `cash_payer_name` = kdo platil; kdo penize
         // vzal u pultu, se nikam nezapsalo, takze pri nesrovnalosti v kase nebylo co dohledat.
         // U internich potvrzeni (PIS) zustava prazdne -- tam penize nikdo do ruky nebere.
