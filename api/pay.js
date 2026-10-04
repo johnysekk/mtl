@@ -1,5 +1,6 @@
 import Stripe from 'stripe';
 import { resolveRate, effectiveRate, effectiveRateBreakdown } from './_rate.js';
+import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -422,6 +423,12 @@ async function eventCheckout(req, res) {
 }
 
 async function membershipCheckout(req, res) {
+  const _q0 = req.query || {};
+  // Členství (spolek) / Permanentka (klub podnikatele nebo kouč) -- podle prodávajícího.
+  // Prodávajícího bereme z řádku členství (paid_to: klub / kouč), ne z parametrů adresy.
+  let _skPaidTo = 'gym', _skGym = _q0.gymId || null;
+  try { if (_q0.membershipId) { const _mr = ((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(_q0.membershipId)}&select=paid_to,gym_id`)) || [])[0]; if (_mr) { _skPaidTo = _mr.paid_to || 'gym'; _skGym = _mr.gym_id || _skGym; } } } catch (e) {}
+  const _skLbl = sellLabel(await sellKindFor(_wsbGet, { gymId: _skGym, paidTo: _skPaidTo }), 'cs');
   const {
     gymAccount, gymName, planName, amount, currency = 'CZK', interval = 'month', months, endsOn,
     membershipId, income, memberName, payee, disc, access, partner, refPct, refUser, founding, acq, fee,
@@ -515,7 +522,8 @@ async function membershipCheckout(req, res) {
   // 6-month term automatically would be wrong (and a refund/dispute magnet).
   // Commission: charged ONCE on the whole amount (Petr's call), via application_fee_amount.
   const _months = Math.max(1, parseInt(months, 10) || 1);
-  if (_months > 1) {
+  // Jednorázově i měsíc (once=1): klub nabízí „Měsíční (jednorázově)" -- bez předplatného.
+  if (_months > 1 || String((req.query || {}).once || '') === '1') {
     const _amtMinor = Math.round(P * 100);
     const _feePct = FEE_NOW;
     const _feeMinor = Math.round(_amtMinor * (_feePct / 100));
@@ -547,7 +555,7 @@ async function membershipCheckout(req, res) {
         tax_id_collection: { enabled: true },
         metadata: _meta,
         line_items: [
-          { price_data: { currency: cur, product_data: { name: `Členství · ${planName || 'Členství'} (${_months} měs.) — ${gymName || ''}` }, unit_amount: _amtMinor }, quantity: 1 }
+          { price_data: { currency: cur, product_data: { name: `${_skLbl} · ${planName || _skLbl} (${_months} měs.) — ${gymName || ''}` }, unit_amount: _amtMinor }, quantity: 1 }
         ],
         payment_intent_data: {
           ...(_feeMinor > 0 ? { application_fee_amount: _feeMinor } : {}),
@@ -581,7 +589,7 @@ async function membershipCheckout(req, res) {
         mtl_ref_pct: String(refPctN || 0),
       },
       line_items: [
-        { price_data: { currency: cur, product_data: { name: `Členství · ${planName || 'Členství'} — ${gymName || 'MTL Gym'}` }, unit_amount: Math.round(P * 100), recurring: { interval: ivl } }, quantity: 1 },
+        { price_data: { currency: cur, product_data: { name: `${_skLbl} · ${planName || _skLbl} — ${gymName || 'MTL Gym'}` }, unit_amount: Math.round(P * 100), recurring: { interval: ivl } }, quantity: 1 },
       ],
       subscription_data: {
         application_fee_percent: FEE_NOW,

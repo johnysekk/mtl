@@ -82,6 +82,17 @@ async function members(gym) {
   return { rows, owners };
 }
 
+// Věková skupina se počítá k 1. dni AKTUÁLNÍHO měsíce: skupina se tak přepne až první den
+// měsíce po narozeninách. Klub z přepnutí pozná nanejvýš měsíc narození, ne den -- a do konce
+// měsíce vidí člověka ještě v mladší skupině (bezpečnější směr: déle „nezletilý", ne kratší).
+function _band(dob) {
+  if (!dob) return null;
+  const t = new Date(String(dob).slice(0, 10) + 'T00:00:00Z'); if (isNaN(t)) return null;
+  const now = new Date(); const ref = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  let a = ref.getUTCFullYear() - t.getUTCFullYear(); const m = ref.getUTCMonth() - t.getUTCMonth();
+  if (m < 0 || (m === 0 && ref.getUTCDate() < t.getUTCDate())) a--;
+  return a < 15 ? 'child' : (a < 18 ? 'minor' : 'adult');
+}
 export default async function handler(req, res) {
   if (!SB || !KEY) return res.status(500).json({ error: 'not configured' });
   if (req.method !== 'POST') return res.status(405).json({ error: 'method' });
@@ -118,6 +129,9 @@ export default async function handler(req, res) {
       const has = !!(a && a.street && a.city);
       return res.status(200).json({ ok: true, member: true, has_address: has, shared,
         dob_shared: dobShared, has_dob: !!dob, dob: dobShared ? dob : null,
+        // Věková skupina vždy (klub musí poznat nezletilého), přesný věk/datum jen se sdílením.
+        // Skupina se mění jen při 15 a 18 letech, takže datum narození z ní odvodit nejde.
+        age_band: _band(dob),
         address: (shared && a) ? { street: a.street || '', postal: a.postal || '', city: a.city || '', country: a.country || '', citizenship: a.citizenship || '' } : null });
     }
 
