@@ -10,6 +10,7 @@
 
 import Stripe from 'stripe';
 import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil, onlineRate as _mtlOnline } from './_rate.js';
+import { sendOrderMailForPi } from './_order-mail.js';
 import crypto from 'crypto';
 import PDFDocument from 'pdfkit';
 import { isTestMode } from './_config.js';
@@ -529,6 +530,8 @@ async function recordTransaction(acct, pi, fields) {
     // Doklad jako SNIMEK hned po zapsani platby -- stejne jako u hotovosti. Vystavuje ho ten, komu
     // se povedl INSERT transakce (unikatni payment_intent pusti jen jednoho): webhook, nebo /api/session.
     const dokladNo = await issueStripeDokladForPi(pi, { slotId: fields.slot_id || null });
+    // Potvrzení objednávky e-mailem (§ 1824 OZ) -- až po dokladu, bere z něj údaje prodávajícího.
+    try { await sendOrderMailForPi(pi); } catch (e) { console.error('order mail', e.message); }
     return { status: 'recorded', gross, stripeFee, mtlFee, net, dokladNo };
   } catch (e) { console.error('recordTransaction', e.message); return { status: 'error:' + e.message }; }
 }

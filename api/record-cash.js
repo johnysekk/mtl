@@ -15,6 +15,7 @@
 // Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
 
 import { onlineRate as _mtlOnline, ladderRate as _mtlRate, acquisitionRate as _mtlAcq, introFreeFor as _introFree, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil } from './_rate.js';
+import { sendOrderMail } from './_order-mail.js';
 import { isTestMode } from './_config.js';
 import { approveMemberAppOnPayment, cohortPayer } from './_member-app.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
@@ -596,6 +597,9 @@ export default async function handler(req, res) {
         if (_who) await approveMemberAppOnPayment(_who);
       } catch (e) { console.error('[record-cash] member app', e && e.message); }
     }
+    // Potvrzení objednávky e-mailem (§ 1824 OZ) jen u plateb na dálku (převod / QR / PIS).
+    // Hotovost na místě smlouvou na dálku není.
+    if (_txId && ['qr', 'pis'].includes(String(payment_method || ''))) { try { await sendOrderMail(_txId); } catch (e) { console.error('order mail', e.message); } }
     return res.status(200).json({ ok: true, mtl_fee: row.mtl_fee, credit_redeemed: !!_creditRow, id: _txId, doklad_no: _dokNo });
   } catch (e) {
     return res.status(500).json({ error: e.message });

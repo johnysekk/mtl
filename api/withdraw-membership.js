@@ -17,6 +17,7 @@
 import Stripe from 'stripe';
 import { sellKindFor } from './_sell-kind.js';
 import { feeRefundableForPI } from './_fee-window.js';
+import { sendWithdrawalMail } from './_order-mail.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '');
@@ -128,6 +129,8 @@ export default async function handler(req, res) {
       try { await sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id: gym.owner_id, type: 'system', read: false,
         data: JSON.stringify({ kind: 'withdrawal_request', withdrawal_id: row.id || null, membership_id: m.id, gym_id: m.gym_id, student_id: me, member: who.name || '', amount: refund / 100, currency: cur, pending: status !== 'refunded', msg_cs: cCs, msg_en: cEn }), message: cCs }) }); } catch (e) {}
     }
+    // Potvrzení o odstoupení e-mailem (trvalý nosič): obsah, datum a čas.
+    try { await sendWithdrawalMail({ userId: me, provider: gym.name || m.gym_name || '', label: m.plan_name || 'Permanentka', statement, at: nowIso, refundMinor: refund, keepMinor: keep, currency: cur, method: isCard ? 'card' : 'transfer', pending: status !== 'refunded' }); } catch (e) {}
     return res.status(200).json({ ok: true, conf_id: confId, status, refund: refund / 100, keep: keep / 100, used_days: usedDays, total_days: totalDays, currency: cur, refunded_now: refundedNow / 100 });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String((e && e.message) || e).slice(0, 300) });

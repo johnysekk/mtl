@@ -18,6 +18,7 @@
 import Stripe from 'stripe';
 import { feeRefundableForPI } from './_fee-window.js';
 import { prorata } from './_prorata.js';
+import { sendWithdrawalMail } from './_order-mail.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '');
@@ -139,6 +140,7 @@ export default async function handler(req, res) {
         : `↩️ ${who.name || 'A student'} withdrew from "${label}" (14-day statutory period). Please transfer ${fmtEn(refund, cur)} back within 14 days.`;
       try { await notify(coachId, { kind: 'online_withdrawal', booking_id: kind === 'service' ? id : null, membership_id: kind === 'plan' ? id : null, conf_id: confId, pending: status !== 'refunded', msg_cs: cCs, msg_en: cEn }, cCs); } catch (e) {}
     }
+    try { await sendWithdrawalMail({ userId: me, provider: coach.legal_name || coach.name || '', label, statement, at: nowIso, refundMinor: refund, keepMinor: keep, currency: cur, method, pending: status !== 'refunded' }); } catch (e) {}
     return res.status(200).json({ ok: true, status, refunded: refund / 100, keep: keep / 100, used_days: usedDays, total_days: totalDays, conf_id: confId });
   } catch (e) {
     console.error('withdraw-online', e);
