@@ -48,6 +48,17 @@ export async function checkPrice(opts) {
       if (opts.slotId) { const s = ((await sb(`slots?id=eq.${q(String(opts.slotId))}&select=price`)) || [])[0]; if (s && num(s.price) > 0 && defCur === cur) allowed.push(num(s.price)); }
       // Soukromé nabídky (zlevněné balíčky): price v měně kouče.
       parseJson(c.private_offers, []).forEach((o) => { if (o && num(o.price) > 0 && defCur === cur) allowed.push(num(o.price)); });
+    } else if (opts.kind === 'coachOnline') {
+      // Online služba: balíčky (každý ve své měně; starší bez měny = měna online), rate_online
+      // a ceny po disciplínách v měně online. Porovnává se dvojice cena + měna.
+      const c = ((await sb(`profiles?id=eq.${q(String(opts.coachProfileId || ''))}&select=online_services,online_tiers,rate_online,currency_online,currency,discipline_rates_online`)) || [])[0];
+      if (!c) return { ok: false, error: 'coach not found' };
+      const defCur = String(c.currency_online || c.currency || 'CZK').toUpperCase();
+      const tiers = parseJson(c.online_services != null ? c.online_services : c.online_tiers, []);
+      (Array.isArray(tiers) ? tiers : []).forEach((t) => { if (t && num(t.price) > 0 && String(t.cur || defCur).toUpperCase() === cur) allowed.push(num(t.price)); });
+      if (num(c.rate_online) > 0 && defCur === cur) allowed.push(num(c.rate_online));
+      Object.values(parseJson(c.discipline_rates_online, {}) || {}).forEach((v) => { if (num(v) > 0 && defCur === cur) allowed.push(num(v)); });
+      if (!allowed.length) return { ok: false, error: 'Cena neodpovídá aktuální nabídce kouče.' };
     } else if (opts.kind === 'gymDropin') {
       const g = ((await sb(`gyms?id=eq.${q(String(opts.gymId || ''))}&select=dropin_price,currency,dropin_plans`)) || [])[0];
       if (!g) return { ok: false, error: 'gym not found' };
@@ -99,4 +110,25 @@ export async function checkPrice(opts) {
   if (!allowed.length) return { ok: true };   // u entity nic nenastaveno -> necháme projít (fallback jako dřív)
   if (matches(paid, allowed, cur)) return { ok: true };
   return { ok: false, error: 'Cena neodpovídá aktuální nabídce. Obnov stránku a zkus to znovu.' };
+}
+
+// ── PŘEVOD (PIS): ŘÁDEK ZAPSALA APPKA, CENU OVĚŘÍME ──────────────────────────────────────────
+// Rezervace, vstupy, členství a merch zakládá u převodu prohlížeč -- včetně částky. PIS pak
+// platí částku z řádku, takže bez kontroly šlo převodem zaplatit libovolně málo. Akce (lístky
+// píše event-reserve ze serverového ceníku), kurzy (cohort-pay) a poplatky organizace si částku
+// zapisují samy na serveru, ty se nekontrolují.
+export async function checkRowPrice({ SB, KEY, tbl, row }) {
+  if (!row) return { ok: false, error: 'row not found' };
+  const base = { SB, KEY, amount: row.amount, currency: row.currency || 'CZK' };
+  if (tbl === 'bookings') {
+    if (String(row.type || '') === 'online') return checkPrice({ ...base, kind: 'coachOnline', coachProfileId: row.coach_id });
+    return checkPrice({ ...base, kind: 'coachPrivate', coachProfileId: row.coach_id, slotId: row.slot_id });
+  }
+  if (tbl === 'gym_bookings') return checkPrice({ ...base, kind: 'gymDropin', gymId: row.gym_id });
+  if (tbl === 'merch_orders') return checkPrice({ ...base, kind: 'merch', merchId: row.merch_id, qty: row.qty });
+  if (tbl === 'gym_memberships') {
+    if (!row.gym_id) return { ok: false, error: 'Online předplatné jde zaplatit jen kartou.' };
+    return checkPrice({ ...base, kind: 'gymMembership', gymId: row.gym_id });
+  }
+  return { ok: true };
 }

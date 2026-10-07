@@ -179,6 +179,7 @@ async function coachCheckout(req, res) {
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
   const isOnline = String(online) === '1';
+  let _onlQty = 1;   // počet kusů balíčku online služby -- bere se z nabídky kouče, ne z adresy
 
   // OSOBNÍ SOUKROMKA: cena proti slotu / ceníku kouče / soukromým nabídkám.
   if (!isOnline) {
@@ -203,11 +204,15 @@ async function coachCheckout(req, res) {
     if (!okPairs.some(([pr, cu]) => pr === rate && cu === C)) {
       return res.status(400).json({ error: 'Cena neodpovídá aktuální nabídce kouče. Obnov jeho profil a zkus to znovu.' });
     }
+    const _tl = Array.isArray(tiers) ? tiers : [];
+    const _tq = _tl.find((t) => t && Number(t.price) === rate && String(t.cur || defCur).toUpperCase() === C && String(t.label || '') === String(fmt || ''))
+             || _tl.find((t) => t && Number(t.price) === rate && String(t.cur || defCur).toUpperCase() === C);
+    _onlQty = Math.max(1, Math.min(50, parseInt(_tq && _tq.qty, 10) || 1));
   }
 
   let successUrl;
   if (isOnline) {
-    successUrl = `${proto}://${host}/?platba=ok&online=1&coach=${encodeURIComponent(coachProfileId || '')}&amount=${rate}&currency=${currency}&fmt=${encodeURIComponent(fmt || '')}&acct=${encodeURIComponent(coachId)}&session={CHECKOUT_SESSION_ID}`;
+    successUrl = `${proto}://${host}/?platba=ok&online=1&coach=${encodeURIComponent(coachProfileId || '')}&amount=${rate}&currency=${currency}&fmt=${encodeURIComponent(fmt || '')}&qty=${_onlQty}&acct=${encodeURIComponent(coachId)}&session={CHECKOUT_SESSION_ID}`;
   } else {
     successUrl = `${proto}://${host}/?platba=ok&slot=${encodeURIComponent(slotId || '')}&acct=${encodeURIComponent(coachId)}&session={CHECKOUT_SESSION_ID}`;
   }
@@ -236,6 +241,7 @@ async function coachCheckout(req, res) {
       base_amount: String(rate),
       booking_currency: currency,
       online_fmt: fmt || '',
+      online_qty: String(_onlQty),
       coach_name: coachName || '',
       discipline: disc || '',
     },

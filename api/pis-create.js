@@ -105,6 +105,8 @@ function pickBankUrl(links) {
 // vyresene byly -- specificke je jen prihlaseni, adresy a tvar tela.
 // (crypto se importuje nahoře na řádku 21 -- druhý import by shodil celou funkci)
 import { fbxCall, psuIpFrom, FBX_SANDBOX, FBX_MAX_SANDBOX, MERCHANT_ID as FBX_MERCHANT } from './_fbx.js';
+import { checkRowPrice } from './_price-check.js';
+const _PC_SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, ''), _PC_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 const PIS_TABLES = ['gym_bookings', 'gym_memberships', 'bookings', 'event_tickets', 'cohort_members', 'merch_orders'];
 
@@ -231,6 +233,11 @@ async function fbxCreate(sb, req, body) {
     }
   }
   if (!row) return { error: 'row not found' };
+  // CENA ŘÁDKU PROTI CENÍKU. Řádek (a v něm částku) zapisuje u převodu prohlížeč.
+  if (tbl !== 'organization_clubs') {
+    const _pc = await checkRowPrice({ SB: _PC_SB, KEY: _PC_KEY, tbl, row });
+    if (!_pc.ok) return { error: _pc.error || 'Cena neodpovídá nabídce', code: 'price_mismatch' };
+  }
 
   // Závora i na serveru: checkbox v appce jde obejít, tohle ne.
   const terms = body.fbx_terms || null;
@@ -376,11 +383,41 @@ export default async function handler(req, res) {
       }
     } catch (e) { /* nedostupná databáze platbu neblokuje */ }
 
+    // IBAN A ČÁSTKA Z DATABÁZE, NE Z POŽADAVKU. Dřív šel do banky IBAN i částka tak, jak je
+    // poslal prohlížeč -- šlo zaplatit málo, nebo poslat platbu na jiný účet a nechat rezervaci
+    // označit jako zaplacenou. Stejně jako u Finbricks: řádek podle id, příjemce podle řádku.
+    let _nRow = null, _nTbl = null, _nIban = null, _nAmount = null, _nCur = null;
+    {
+      const _rid = String(bookingId);
+      if (_rid.startsWith('orgfee:')) {
+        const oc = (await sb.from('organization_clubs').select('*').eq('id', _rid.slice(7)).maybeSingle()).data;
+        if (oc) { _nTbl = 'organization_clubs'; _nRow = oc; }
+      } else {
+        for (const t of PIS_TABLES) { const r = await sb.from(t).select('*').eq('id', _rid).maybeSingle(); if (r.data) { _nTbl = t; _nRow = r.data; break; } }
+      }
+      if (!_nRow) return res.status(400).json({ error: 'row not found' });
+      if (_nTbl === 'organization_clubs') {
+        const org = (await sb.from('organizations').select('receiver_id_value').eq('id', _nRow.organization_id).maybeSingle()).data;
+        _nIban = org && org.receiver_id_value;
+        let fa = _nRow.fee_amount;
+        if (fa == null) { const today = new Date().toISOString().slice(0, 10); const f = (await sb.from('org_member_fees').select('amount').eq('organization_id', _nRow.organization_id).lte('period_from', today).gte('period_to', today).limit(1).maybeSingle()).data; fa = f && f.amount; }
+        _nAmount = Number(fa) || 0; _nCur = _nRow.fee_currency || currency;
+      } else {
+        if (_nRow.gym_id) { const g = (await sb.from('gyms').select('receiver_id_value').eq('id', _nRow.gym_id).maybeSingle()).data; _nIban = g && g.receiver_id_value; }
+        else if (_nRow.coach_id) { const c = (await sb.from('profiles').select('receiver_id_value,payout_receiver_id_value').eq('id', _nRow.coach_id).maybeSingle()).data; _nIban = c && (c.payout_receiver_id_value || c.receiver_id_value); }
+        const _pc = await checkRowPrice({ SB: _PC_SB, KEY: _PC_KEY, tbl: _nTbl, row: _nRow });
+        if (!_pc.ok) return res.status(400).json({ error: _pc.error || 'Cena neodpovídá nabídce', code: 'price_mismatch' });
+        _nAmount = Number(_nRow.amount) || 0; _nCur = _nRow.currency || currency;
+      }
+      if (!_nIban) return res.status(400).json({ error: 'payee has no IBAN' });
+      if (!(_nAmount > 0)) return res.status(400).json({ error: 'bad amount' });
+    }
+
     const token = await neoToken();
     const deviceId = crypto.randomUUID();
     const sessionId = await neoSession(token, bankId, deviceId);
 
-    const iban = String(gymIban).replace(/\s+/g, '');
+    const iban = String(_nIban).replace(/\s+/g, '');
     const e2e = (String(vs || bookingId).replace(/[^A-Za-z0-9]/g, '').slice(0, 35)) || ('MTL' + Date.now());
     const remit = nordicSafe(message || vs || ('MTL ' + bookingId), 140) || ('MTL ' + String(bookingId).slice(0, 8));
     // ODKUD ČLOVĚK PLATIL. Návrat dosud vedl vždy na pevnou APP_URL, takže kdo začal jinde
@@ -397,8 +434,8 @@ export default async function handler(req, res) {
     const payBody = {
       creditorAccount: { accountScheme: 'IBAN', identifier: iban },
       creditorName: nordicSafe(gymName || 'Klub', 70) || 'Klub',
-      instrumentedAmount: String(amount),
-      currency,
+      instrumentedAmount: String(_nAmount),
+      currency: String(_nCur || 'CZK').toUpperCase(),
       remittanceInformationUnstructured: remit,
       endToEndIdentification: e2e,
       paymentMetadata: {}

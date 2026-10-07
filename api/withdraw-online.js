@@ -52,7 +52,7 @@ export default async function handler(req, res) {
 
     let coachId, studentId, gross = 0, cur = 'CZK', label = '', start, pi = null, method = 'card', txId = null, refund = 0, keep = 0, usedDays = null, totalDays = null, subId = null, bookingKey;
     if (kind === 'service') {
-      const bk = ((await sbGet(`bookings?id=eq.${q(id)}&select=id,type,student_id,paid_by,coach_id,coach_name,amount,currency,online_format,status,fulfilled,created_at,payment_intent,payment_method`)) || [])[0];
+      const bk = ((await sbGet(`bookings?id=eq.${q(id)}&select=id,type,student_id,paid_by,coach_id,coach_name,amount,currency,online_format,status,fulfilled,created_at,payment_intent,payment_method,qty,delivered_qty`)) || [])[0];
       if (!bk || bk.type !== 'online' || ![String(bk.student_id), String(bk.paid_by || '')].includes(String(me))) return res.status(404).json({ ok: false, error: 'Objednávka nenalezena.' });
       if (['cancelled', 'refunded'].includes(String(bk.status))) return res.status(400).json({ ok: false, error: 'Objednávka už je zrušená.' });
       if (bk.fulfilled) return res.status(400).json({ ok: false, error: 'Služba už byla dodána — od úplně poskytnuté služby odstoupit nelze. Pokud ti nebyla doručena, použij „Nedostal jsem feedback".' });
@@ -64,7 +64,12 @@ export default async function handler(req, res) {
       txId = tx ? tx.id : null;
       const pm = String((tx && tx.payment_method) || bk.payment_method || '');
       method = (pi && !String(pi).startsWith('pis') && !['cash', 'qr', 'pis'].includes(pm)) ? 'card' : 'transfer';
-      refund = Math.max(0, gross - (tx ? (Number(tx.refund_amount) || 0) : 0));   // nedodáno -> celá částka
+      // Balíček: vrací se poměr NEDODANÝCH kusů (dodané kusy jsou poskytnuté plnění, § 1834 OZ).
+      const _q = Math.max(1, parseInt(bk.qty, 10) || 1), _d = Math.min(_q, Math.max(0, parseInt(bk.delivered_qty, 10) || 0));
+      if (_d >= _q) return res.status(400).json({ ok: false, error: 'Celý balíček už byl dodán — odstoupit nelze.' });
+      const _due = Math.round(gross * (_q - _d) / _q);
+      keep = gross - _due; if (_d > 0) { usedDays = _d; totalDays = _q; }   // u balíčku: dodané / všechny kusy
+      refund = Math.max(0, _due - (tx ? (Number(tx.refund_amount) || 0) : 0));
     } else {
       const m = ((await sbGet(`gym_memberships?id=eq.${q(id)}&select=id,gym_id,paid_to,coach_id,student_id,paid_by,plan_name,amount,currency,status,created_at,period_end,stripe_subscription`)) || [])[0];
       if (!m || m.gym_id || m.paid_to !== 'coach' || ![String(m.student_id), String(m.paid_by || '')].includes(String(me))) return res.status(404).json({ ok: false, error: 'Předplatné nenalezeno.' });
@@ -119,7 +124,7 @@ export default async function handler(req, res) {
     // NOTIFIKACE S PROKLIKEM
     const what = kind === 'plan' ? 'předplatného' : 'služby';
     const sCs = status === 'refunded'
-      ? `↩️ Odstoupil/a jsi od ${what} „${label}" u kouče ${coach.name || ''}. ${kind === 'plan' ? `Za ${usedDays} z ${totalDays} dní se ponechává ${fmt(keep, cur)}, ` : ''}vráceno ti bylo ${fmt(refund, cur)}${method === 'card' ? ' na kartu' : ''}.`
+      ? `↩️ Odstoupil/a jsi od ${what} „${label}" u kouče ${coach.name || ''}. ${kind === 'plan' ? `Za ${usedDays} z ${totalDays} dní se ponechává ${fmt(keep, cur)}, ` : (keep > 0 ? `Za ${usedDays} z ${totalDays} dodaných kusů se ponechává ${fmt(keep, cur)}, ` : '')}vráceno ti bylo ${fmt(refund, cur)}${method === 'card' ? ' na kartu' : ''}.`
       : `↩️ Odstoupil/a jsi od ${what} „${label}" u kouče ${coach.name || ''}. ${fmt(refund, cur)} ti kouč vrátí převodem do 14 dnů.`;
     const sEn = status === 'refunded'
       ? `↩️ You withdrew from "${label}" with coach ${coach.name || ''}. ${kind === 'plan' ? `For ${usedDays} of ${totalDays} days ${fmtEn(keep, cur)} is kept; ` : ''}${fmtEn(refund, cur)} has been refunded${method === 'card' ? ' to your card' : ''}.`

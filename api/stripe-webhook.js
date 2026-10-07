@@ -835,6 +835,7 @@ export default async function handler(req, res) {
               coach_name: m.coach_name || 'Kouč', payment_intent: pi, amount,
               training_date: new Date().toISOString().slice(0, 10), training_time: null,
               status: 'active', type: 'online', currency, online_format: m.online_fmt || null, discipline: m.discipline || null,
+              qty: Math.max(1, parseInt(m.online_qty || '1', 10) || 1),
               student_name: m.student_name || null,
               paid_by: m.paid_by || null, paid_by_name: m.paid_by_name || null,
               minor_booking: !!(m.paid_by && m.student_id && m.paid_by !== m.student_id),
