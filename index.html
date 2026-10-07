@@ -5862,6 +5862,8 @@ const NOTIF_T = {
   guardian_request_sent: (d)=> LANG==='en' ? ('\ud83d\udcdd Sent to your guardian for approval: '+(d.gym_name||'')) : ('\ud83d\udcdd Odesl\u00e1no z\u00e1stupci ke schv\u00e1len\u00ed: '+(d.gym_name||'')),
   autonomy_sunset: (d)=> LANG==='en' ? (d.msg_en||'') : (d.msg_cs||''),
   withdrawal_done: (d)=> LANG==='en' ? (d.msg_en||'') : (d.msg_cs||''),
+  online_withdrawal: (d)=> LANG==='en' ? (d.msg_en||'') : (d.msg_cs||''),
+  online_plan_new: (d)=> LANG==='en' ? (d.msg_en||'') : (d.msg_cs||''),
   migration_request: (d)=>{ const dob=d&&d.dob?(function(v){ const t=new Date(String(v).slice(0,10)+'T00:00:00'); return isNaN(t)?v:(t.getDate()+'. '+(t.getMonth()+1)+'. '+t.getFullYear()); })(d.dob):'';
     return LANG==='en'
       ? ('\ud83c\udf93 '+(d.from_name||'A user')+(d.from_email?(' ('+d.from_email+')'):'')+' asks to transfer stats from a parent account \u2014 child name given: \u201c'+(d.kid||'')+'\u201d'+(dob?(' \u00b7 born '+dob):'')+' \u00b7 '+(d.contact_parent?'parent can be contacted':'no parent contact')+' \u00b7 '+(d.has_doc?'ID attached':'no ID'))
@@ -10548,7 +10550,7 @@ function renderOffers(c){
       }
       const cta = isSelf ? '' : `<button class="offer-tier" data-i="${i}" style="background:var(--blue);color:#fff;border:none;border-radius:9px;padding:8px 14px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">${L('Objednat')}</button>`;
       tiersHtml += `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:8px;">
-        <div><div style="font-size:14px;font-weight:600;color:var(--dark);">${t.label}</div><div style="font-size:13px;color:var(--mid);">${fmtPrice(studentPays, _tc(t))} ${symOf(_tc(t))}${saveHtml}</div></div>
+        <div><div style="font-size:14px;font-weight:600;color:var(--dark);">${t.label}</div><div style="font-size:13px;color:var(--mid);">${fmtPrice(studentPays, _tc(t))} ${symOf(_tc(t))}${saveHtml}</div>${t.days>0?`<div style="font-size:11.5px;color:var(--light);">${LANG==='en'?'Delivered within '+t.days+' days':'Dodání do '+t.days+' dní'}</div>`:''}</div>
         ${cta}
       </div>`;
     });
@@ -10647,6 +10649,45 @@ async function startInpersonBooking(c){
 // MĚSÍČNÍ PŘEDPLATNÉ KOUČE. Řádek členství se založí předem jako 'pending' (gym_id = null,
 // paid_to = 'coach'); server z něj vezme jen identitu a cenu si ověří proti nabídce kouče.
 // Platí se jen kartou -- kouč na převodu předplatné v editoru nastavit nemůže.
+// ODSTOUPENÍ OD SMLOUVY (online služba / předplatné). Dva kroky podle směrnice 2023/2673:
+// tlačítko otevře prohlášení, teprve jeho odeslání je odstoupení; potvrzení (snímek se zněním,
+// datem a časem) přijde hned notifikací a je v Dokladech.
+async function _openOnlineWithdraw(kind, id){
+  const EN=LANG==='en'; let label='', coach='', when='';
+  try{
+    if(kind==='service'){ const { data:b }=await supaClient.from('bookings').select('online_format,coach_name,created_at').eq('id',id).single(); label=(b&&b.online_format)||(EN?'Online coaching':'Online koučing'); coach=(b&&b.coach_name)||''; when=b&&b.created_at; }
+    else { const { data:m }=await supaClient.from('gym_memberships').select('plan_name,coach_id,created_at').eq('id',id).single(); label=(m&&m.plan_name)||''; when=m&&m.created_at; if(m&&m.coach_id){ const { data:cp }=await supaClient.from('profiles').select('name').eq('id',m.coach_id).single(); coach=(cp&&cp.name)||''; } }
+  }catch(e){}
+  const d=when?new Date(when).toLocaleDateString(EN?'en-GB':'cs-CZ'):'';
+  const stmt=EN?`I hereby withdraw from the contract for "${label}" with coach ${coach}, concluded on ${d}.`:`Odstupuji od smlouvy o ${kind==='plan'?'předplatném':'službě'} „${label}“ u kouče ${coach}, uzavřené dne ${d}.`;
+  const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;z-index:100060;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center;';
+  ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px 18px 0 0;padding:20px;font-family:'DM Sans';">
+    <div style="font-size:17px;font-weight:800;color:#141414;margin-bottom:6px;">${EN?'Withdraw from contract':'Odstoupit od smlouvy'}</div>
+    <p style="font-size:12.5px;color:var(--mid);line-height:1.5;margin:0 0 10px;">${kind==='plan'?(EN?'The subscription ends now and you get back the part for the days it was not running.':'Předplatné se hned ukončí a vrátí se ti část za dny, kdy neběželo.'):(EN?'The order is cancelled and you get 100 % back, because the service has not been delivered yet.':'Objednávka se zruší a vrátí se ti 100 %, protože služba ještě nebyla dodána.')}</p>
+    <div style="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:4px;">${EN?'Statement of withdrawal':'Prohlášení o odstoupení'}</div>
+    <textarea id="owdStmt" style="width:100%;min-height:80px;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:13.5px;font-family:'DM Sans';box-sizing:border-box;resize:vertical;">${escapeHtml(stmt)}</textarea>
+    <div style="display:flex;gap:8px;margin-top:12px;">
+      <button id="owdNo" style="flex:1;padding:13px;background:var(--surf);border:1px solid var(--border);border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';color:var(--dark);">${EN?'Back':'Zpět'}</button>
+      <button id="owdGo" style="flex:1.5;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-weight:800;cursor:pointer;font-family:'DM Sans';">${EN?'Send withdrawal':'Odeslat odstoupení'}</button>
+    </div></div>`;
+  document.body.appendChild(ov);
+  ov.querySelector('#owdNo').onclick=()=>ov.remove();
+  ov.onclick=(e)=>{ if(e.target===ov) ov.remove(); };
+  ov.querySelector('#owdGo').onclick=async function(){
+    const st=(ov.querySelector('#owdStmt').value||'').trim(); if(!st){ toast(EN?'⚠️ The statement cannot be empty':'⚠️ Prohlášení nesmí být prázdné'); return; }
+    this.disabled=true; this.textContent='…';
+    try{
+      const r=await fetch('/api/withdraw-online',{ method:'POST', headers:{'Content-Type':'application/json', Authorization:'Bearer '+((await _freshTok())||'')}, body:JSON.stringify({ kind, id, statement:st }) });
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok || !j.ok){ toast('⚠️ '+((j&&j.error)||('HTTP '+r.status))); this.disabled=false; this.textContent=EN?'Send withdrawal':'Odeslat odstoupení'; return; }
+      ov.remove();
+      toast(EN?'✓ Withdrawal sent — the confirmation is in your notifications':'✓ Odstoupení odesláno — potvrzení máš v notifikacích',1);
+      try{ window._myTxCache=null; window._myNetCache=null; }catch(e){}
+      if(kind==='service'){ if(window._onlineRole) renderOnlineList(window._onlineRole); } else if(typeof loadMyMemberships==='function') loadMyMemberships();
+      try{ if(j.conf_id && typeof showCancelConfirmation==='function') showCancelConfirmation({ conf_id:j.conf_id }); }catch(e){}
+    }catch(e){ toast('⚠️ '+((e&&e.message)||'')); this.disabled=false; }
+  };
+}
 // Zrušení online předplatného studentem: ke konci zaplaceného období (bez refundu).
 async function cancelOnlinePlan(mid){
   const EN=LANG==='en';
@@ -10665,6 +10706,51 @@ async function cancelOnlinePlan(mid){
     if(typeof loadMyMemberships==='function') loadMyMemberships();
   }catch(e){ toast('⚠️ '+((e&&e.message)||'')); }
 }
+// PŘED NÁKUPEM ONLINE KOUČINGU (spotřebitelská smlouva na dálku, § 1820 OZ):
+// kdo prodává (podnikatel, IČO, adresa), co přesně, za kolik, kdy bude dodáno, poučení o odstoupení
+// a VÝSLOVNÝ souhlas se zahájením před uplynutím 14 dnů (bez něj by kouč vracel i dodanou práci).
+// Souhlas se ukládá se zněním (consent_acceptances). Vrací Promise<boolean>.
+const ONLINE_START_CONSENT_VERSION='1';
+const _ONL_CONSENT_SERVICE_CS='Žádám o zahájení služby před uplynutím 14denní lhůty pro odstoupení od smlouvy a beru na vědomí, že úplným poskytnutím služby právo na odstoupení zaniká.';
+const _ONL_CONSENT_SERVICE_EN='I ask for the service to start before the 14-day withdrawal period ends and I acknowledge that I lose the right of withdrawal once the service has been fully provided.';
+const _ONL_CONSENT_PLAN_CS='Žádám o zahájení předplatného hned a beru na vědomí, že při odstoupení do 14 dnů zaplatím poměrnou část za dny, kdy předplatné běželo.';
+const _ONL_CONSENT_PLAN_EN='I ask for the subscription to start right away and I acknowledge that if I withdraw within 14 days I pay a proportionate part for the days it was running.';
+function _onlineBuyGate(c, o){
+  return new Promise(async (resolve)=>{
+    const EN=LANG==='en', coachId=c.profileId||c.id, isPlan=o.kind==='plan';
+    let p={}; try{ const { data }=await supaClient.from('profiles').select('name,legal_name,tax_id,billing_line1,billing_line2,billing_city,billing_postal,billing_country').eq('id',coachId).single(); p=data||{}; }catch(e){}
+    const addr=[p.billing_line1,p.billing_line2,[p.billing_postal,p.billing_city].filter(Boolean).join(' '),p.billing_country].filter(Boolean).join(', ');
+    const seller=escapeHtml(p.legal_name||p.name||c.name||'');
+    const price=`${fmtPrice(o.price,o.cur)} ${_curSym(o.cur)}${isPlan?(EN?' / month':' / měsíc'):''}`;
+    const ctext=isPlan?(EN?_ONL_CONSENT_PLAN_EN:_ONL_CONSENT_PLAN_CS):(EN?_ONL_CONSENT_SERVICE_EN:_ONL_CONSENT_SERVICE_CS);
+    const row=(k,v)=>`<div style="display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid var(--border);font-size:13px;"><span style="color:var(--mid);">${k}</span><span style="font-weight:700;color:var(--dark);text-align:right;">${v}</span></div>`;
+    const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;z-index:100060;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center;';
+    ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px 18px 0 0;padding:20px;max-height:88vh;overflow-y:auto;font-family:'DM Sans';">
+      <div style="font-size:17px;font-weight:800;color:#141414;margin-bottom:10px;">${EN?'Order summary':'Shrnutí objednávky'}</div>
+      ${row(EN?'Service':'Služba', escapeHtml(o.label||''))}
+      ${row(EN?'Price':'Cena', price)}
+      ${isPlan?row(EN?'Billing':'Platba',EN?'card, renews monthly, cancel any time':'kartou, obnovuje se měsíčně, zrušit kdykoli'):row(EN?'Delivery':'Dodání', o.days>0?(EN?'within '+o.days+' days':'do '+o.days+' dní'):(EN?'as agreed with the coach':'dle domluvy s koučem'))}
+      ${row(EN?'Seller':'Prodávající', seller+(p.tax_id?`<div style="font-weight:400;color:var(--mid);font-size:12px;">${EN?'Reg. no.':'IČO'} ${escapeHtml(p.tax_id)}</div>`:'')+(addr?`<div style="font-weight:400;color:var(--mid);font-size:12px;">${escapeHtml(addr)}</div>`:''))}
+      <p style="font-size:12px;color:var(--mid);line-height:1.5;margin:10px 0;">${EN?'The seller is the coach, a business. Martial Training Lab only mediates the order and payment. Consumer protection law applies to this contract.':'Prodávajícím je kouč jako podnikatel. Martial Training Lab objednávku a platbu jen zprostředkovává. Na smlouvu se vztahuje ochrana spotřebitele.'}</p>
+      <div style="font-size:12.5px;color:var(--dark);background:var(--surf);border:1px solid var(--border);border-radius:11px;padding:10px 12px;line-height:1.5;margin-bottom:12px;">${isPlan
+        ?(EN?'<b>Right of withdrawal:</b> you can withdraw within 14 days of the first payment with the „Withdraw from contract" button in My memberships. You get back the part for the days the subscription was not running. After 14 days you can cancel any time at the end of the paid month.':'<b>Odstoupení:</b> do 14 dnů od první platby můžeš odstoupit tlačítkem „Odstoupit od smlouvy“ v Mých členstvích. Vrátí se ti část za dny, kdy předplatné neběželo. Po 14 dnech můžeš kdykoli zrušit ke konci zaplaceného měsíce.')
+        :(EN?'<b>Right of withdrawal:</b> you can withdraw within 14 days with the „Withdraw from contract" button in My online orders. Until the coach delivers the service, you get 100 % back. Once the service has been fully delivered, the right of withdrawal ends.':'<b>Odstoupení:</b> do 14 dnů můžeš odstoupit tlačítkem „Odstoupit od smlouvy“ v Mých online objednávkách. Dokud kouč službu nedodá, vrátí se ti 100 %. Úplným dodáním služby právo na odstoupení zaniká.')}</div>
+      <label style="display:flex;gap:10px;align-items:flex-start;font-size:12.5px;color:var(--dark);line-height:1.45;cursor:pointer;margin-bottom:14px;"><input type="checkbox" id="obgCk" style="width:18px;height:18px;flex:none;margin-top:1px;"><span>${ctext}</span></label>
+      <div style="display:flex;gap:8px;">
+        <button id="obgNo" style="flex:1;padding:13px;background:var(--surf);border:1px solid var(--border);border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';color:var(--dark);">${EN?'Back':'Zpět'}</button>
+        <button id="obgGo" style="flex:1.5;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'Order with obligation to pay':'Objednat s povinností platby'}</button>
+      </div></div>`;
+    document.body.appendChild(ov);
+    const done=(v)=>{ try{ ov.remove(); }catch(e){} resolve(v); };
+    ov.querySelector('#obgNo').onclick=()=>done(false);
+    ov.onclick=(e)=>{ if(e.target===ov) done(false); };
+    ov.querySelector('#obgGo').onclick=()=>{
+      if(!ov.querySelector('#obgCk').checked){ toast(EN?'⚠️ Tick the consent to continue':'⚠️ Pro pokračování zaškrtni souhlas'); return; }
+      try{ if(typeof _recordConsent==='function') _recordConsent(isPlan?'online_plan_start':'online_service_start', ONLINE_START_CONSENT_VERSION, LANG, ctext, { coach_id:coachId, label:o.label||'', price:o.price, currency:o.cur, days:o.days||null, seller:p.legal_name||p.name||null, seller_ico:p.tax_id||null }); }catch(e){}
+      done(true);
+    };
+  });
+}
 async function startOnlinePlan(c, plan){
   const EN=LANG==='en';
   if(!currentUser){ toast(L('⚠️ Nejdřív se přihlas')); return; }
@@ -10675,9 +10761,7 @@ async function startOnlinePlan(c, plan){
   try{ const { data:_cp }=await supaClient.from('profiles').select('payment_mode,receiver_id_type,receiver_id_value,receiver_name,confirm_mode').eq('id', coachId).single(); if(_cp && typeof _mtlPayMode==='function' && _mtlPayMode(_cp)==='qr_bank'){ toast(EN?'⚠️ This coach currently takes bank transfers only — a subscription needs a card.':'⚠️ Kouč teď přijímá jen převody — předplatné jde jen kartou.'); return; } }catch(e){}
   const cur=(plan.cur||c.currencyOnline||'CZK'), price=Number(plan.price)||0;
   if(!(price>0)) return;
-  if(!confirm(EN
-    ? `${plan.name}: ${fmtPrice(price,cur)} ${_curSym(cur)} / month.\n\nPaid by card every month; you can cancel any time.\n\nContinue to payment?`
-    : `${plan.name}: ${fmtPrice(price,cur)} ${_curSym(cur)} / měsíc.\n\nPlatí se kartou každý měsíc, zrušit můžeš kdykoli.\n\nPokračovat na platbu?`)) return;
+  if(!(await _onlineBuyGate(c, { kind:'plan', label:plan.name, price:price, cur:cur }))) return;
   let mbId=null;
   try{
     const { data, error }=await supaClient.from('gym_memberships').insert({ gym_id:null, coach_id:coachId, paid_to:'coach', student_id:currentUser.id, student_name:currentUser.name||null,
@@ -10697,9 +10781,7 @@ async function startOnlineBooking(c, tier, disc){
   const rate = tier ? tier.price : c.rateOnline;
   const fmt = tier ? tier.label : (c.onlineFormat || 'Online coaching');
   const curr = (tier && tier.cur) || c.currencyOnline || 'CZK';
-  if(!confirm(LANG==='en'
-    ? 'Refund policy: cancel and get 95% back. If the coach doesn\'t deliver, you get 100%.\n\nContinue to payment?'
-    : 'Refund: při zrušení dostaneš 95 % zpět. Pokud kouč nedodá, dostaneš 100 %.\n\nPokračovat na platbu?')) return;
+  if(!(await _onlineBuyGate(c, { kind:'service', label:fmt, price:rate, cur:curr, days:(tier&&tier.days)||0 }))) return;
   toast(L('💳 Přesměrovávám na platbu...'));
   let comm = _ladderRate('stripe', {partner:c.partner, score:c.coachRefScore||0, bankai:c.coachBankai, founding:c.founding}), nomarkup=1, creditUsed='';
   if(currentUser && (currentUser.student_credits||0)>0 && (c.referral_optin!==false)){ creditUsed='student'; /* referral redemption: MTL waives its WHOLE fee (3%/2%/1%); provider funds the rest (20% new / 10% existing). Applies to founding/partner too (their acquisition cost). */ }
@@ -16325,6 +16407,7 @@ async function loadMyMemberships(){
         <div style="font-size:14.5px;font-weight:800;color:var(--dark);">🌐 ${escapeHtml(m.plan_name||'')}</div>
         <div style="font-size:12.5px;color:var(--mid);margin-top:2px;">${escapeHtml(_cn[m.coach_id]||'')} · ${fmtPrice(Number(m.amount)||0, m.currency||'CZK')} ${_curSym(m.currency||'CZK')} ${EN?'/ month':'/ měs'}</div>
         <div style="font-size:12px;color:${canc?'var(--red)':'var(--green)'};margin-top:5px;font-weight:700;">${canc?((EN?'Ends ':'Končí ')+end):((EN?'Active':'Aktivní')+(end?((EN?' · renews ':' · obnoví se ')+end):''))}</div>
+        ${(m.created_at && (Date.now()-new Date(m.created_at).getTime() <= 14*864e5)) ? `<button onclick="_openOnlineWithdraw('plan','${m.id}')" style="margin-top:10px;width:100%;padding:10px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:800;cursor:pointer;font-family:'DM Sans';">${EN?'Withdraw from contract':'Odstoupit od smlouvy'}</button><div style="font-size:11.5px;color:var(--light);margin-top:4px;">${EN?'Until '+new Date(new Date(m.created_at).getTime()+14*864e5).toLocaleDateString('en-GB')+' — you get back the unused days.':'Do '+new Date(new Date(m.created_at).getTime()+14*864e5).toLocaleDateString('cs-CZ')+' — vrátí se ti nevyužité dny.'}</div>` : ''}
         ${canc?'':`<button onclick="cancelOnlinePlan('${m.id}')" style="margin-top:10px;width:100%;padding:10px;background:#fff;border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;color:var(--dark);cursor:pointer;font-family:'DM Sans';">${EN?'Cancel at period end':'Zrušit ke konci období'}</button>`}
       </div>`;
     }).join('');
@@ -32370,7 +32453,7 @@ async function loadNotifications(append){
     const isCoachRefAdmin = false; /* referral EP grants removed — rewards are Shikai/Bankai */
     // beta_pending sem musí být přidané, jinak se notifikace vykreslí jako neklikatelná a obsluha
   // se vůbec nenapojí -- větev, která má otevřít admin, pak nemá kdo spustit.
-  const clickable = k==='family_payreq_offer' || k==='ref_joined' || k==='minor_course_req' || k==='migration_request' || k==='withdrawal_done' || k==='withdrawal_request' || k==='minor_member_app' || k==='minor_waiver' || k==='family_request' || k==='autonomy_sunset' || k==='dropin_bank_cancelled' || k==='bug_report' || k==='milestone' || k==='address_from_club' || k==='address_request' || k==='class_cancelled' || k==='trial_booked' || k==='pis_creditor_outage' || (String(k||'').indexOf('kid_share')===0) || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed' || k==='support_ticket' || k==='class_reminder' || k==='fav_added_coach' || k==='fav_added_gym' || isCoachLessonRem || isStudResched || k==='coach_pay_ok' || k==='coach_qr_intent' || k==='qr_unconfirmed' || k==='event_qr_intent' || k==='walkin_drop' || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='beta_pending' || k==='minor_waiver_req' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked' || k==='commission_no_card' || k==='commission_suspended';
+  const clickable = k==='family_payreq_offer' || k==='ref_joined' || k==='minor_course_req' || k==='migration_request' || k==='withdrawal_done' || k==='online_withdrawal' || k==='online_plan_new' || k==='withdrawal_request' || k==='minor_member_app' || k==='minor_waiver' || k==='family_request' || k==='autonomy_sunset' || k==='dropin_bank_cancelled' || k==='bug_report' || k==='milestone' || k==='address_from_club' || k==='address_request' || k==='class_cancelled' || k==='trial_booked' || k==='pis_creditor_outage' || (String(k||'').indexOf('kid_share')===0) || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed' || k==='support_ticket' || k==='class_reminder' || k==='fav_added_coach' || k==='fav_added_gym' || isCoachLessonRem || isStudResched || k==='coach_pay_ok' || k==='coach_qr_intent' || k==='qr_unconfirmed' || k==='event_qr_intent' || k==='walkin_drop' || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='beta_pending' || k==='minor_waiver_req' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked' || k==='commission_no_card' || k==='commission_suspended';
     let linkLabel = L('Otevřít ›');
     if(k==='payment_confirmed'){ var _pcd={}; try{ _pcd=JSON.parse(n.data||'{}'); }catch(e){} var _gg=_pcd.goto; linkLabel = (_pcd.for_other && _gg!=='courses') ? (LANG==='en'?'Receipt ›':'Doklad ›') : (_gg==='dropin'||_gg==='bookings') ? (LANG==='en'?'Booking details ›':'Detail rezervace ›') : (_gg==='tickets') ? (LANG==='en'?'my ticket ›':'moje vstupenka ›') : (_gg==='courses') ? (LANG==='en'?'my course ›':'můj kurz ›') : (_gg==='merch') ? (LANG==='en'?'view ›':'zobrazit ›') : (LANG==='en'?'details ›':'detail ›'); } else if(k==='qr_intent') linkLabel = LANG==='en'?'To confirm ›':'K potvrzení ›'; else if(k==='qr_released'||k==='qr_reservation_expired') linkLabel = LANG==='en'?'Book again ›':'Rezervovat znovu ›'; else if(k==='qr_requeued') linkLabel = LANG==='en'?'Pay again ›':'Zaplatit znovu ›'; else if(k==='sounding_ask') linkLabel = LANG==='en'?'Answer ›':'Odpovědět ›'; else if(k==='cover_needed') linkLabel = LANG==='en'?'Take the cover ›':'Vzít záskok ›'; else if(k==='cover_filled'||k==='cover_filled_owner') linkLabel = LANG==='en'?'View ›':'Zobrazit ›'; else if(k==='doklad_vat_needed') linkLabel = LANG==='en'?'Add VAT ID ›':'Doplnit DIČ ›'; else if(k==='course_new') linkLabel = LANG==='en'?'Course details ›':'Detail kurzu ›'; else if(k==='slot_demand') linkLabel = LANG==='en'?'Open my diary ›':'Otevřít diář ›'; else if(k==='cohort_month_due') linkLabel = LANG==='en'?'Pay now ›':'Doplatit ›'; else if(k==='cohort_month_collect') linkLabel = LANG==='en'?'Open roster ›':'Otevřít roster ›'; else if(k==='cohort_deposit_paid') linkLabel = LANG==='en'?'View roster ›':'Otevřít účastníky ›'; else if(k==='cohort_qr_claim') linkLabel = LANG==='en'?'View roster ›':'Otevřít účastníky ›'; else if(k==='cohort_deposit_mine') linkLabel = LANG==='en'?'My course ›':'Můj kurz ›';
       else if(k==='doklad_unified') linkLabel = LANG==='en'?'Open the receipt ›':'Otevřít doklad ›';
@@ -32419,6 +32502,8 @@ async function loadNotifications(append){
     else if(k==='minor_course_req') linkLabel = (LANG==='en'?'Open the course signup ›':'Otev\u0159\u00edt p\u0159ihl\u00e1\u0161ku do kurzu ›');
     else if(k==='migration_request') linkLabel = (LANG==='en'?'Open transfer requests ›':'Otev\u0159\u00edt \u017e\u00e1dosti o p\u0159enos ›');
     else if(k==='withdrawal_done') linkLabel = (LANG==='en'?'Withdrawal confirmation ›':'Potvrzen\u00ed o odstoupen\u00ed ›');
+    else if(k==='online_withdrawal') linkLabel = (LANG==='en'?'Open online orders ›':'Otev\u0159\u00edt online objedn\u00e1vky ›');
+    else if(k==='online_plan_new') linkLabel = (LANG==='en'?'Open subscribers ›':'Otev\u0159\u00edt p\u0159edplatitele ›');
     else if(k==='withdrawal_request') linkLabel = ((function(){ try{ return !!JSON.parse(n.data||'{}').pending; }catch(e){ return false; } })()) ? (LANG==='en'?'Record the refund ›':'Zapsat vr\u00e1cen\u00ed ›') : (LANG==='en'?'Student detail ›':'Detail studenta ›');
     else if(k==='minor_waiver' || k==='family_request' || k==='minor_member_app') linkLabel = (LANG==='en'?'Open Family ›':'Otev\u0159\u00edt Rodinu ›');
     else if(k==='autonomy_sunset') linkLabel = (LANG==='en'?'Open the club ›':'Otev\u0159\u00edt klub ›');
@@ -32528,6 +32613,7 @@ async function loadNotifications(append){
         if(k==='ref_joined'){ try{ closeSheet('shNotif'); }catch(e){} try{ if(typeof openInviteTracker==='function') openInviteTracker(); else { openSheet('shInvite'); if(typeof fillReferral==='function') fillReferral(); } }catch(e){} return; }
         if(k==='minor_course_req'){ try{ const _cd=JSON.parse(n.data||'{}'); _cd._nid=n.id; _openMinorCourseReq(_cd); }catch(e){} return; }
         if(k==='migration_request'){ try{ closeSheet('shNotif'); }catch(e){} try{ if(typeof openMigrationRequests==='function') openMigrationRequests(); }catch(e){} return; }
+        if(k==='online_withdrawal' || k==='online_plan_new'){ try{ closeSheet('shNotif'); }catch(e){} try{ openOnline('coach'); }catch(e){} return; }
         if(k==='withdrawal_done'){ try{ if(_pd.conf_id) showCancelConfirmation({ conf_id:_pd.conf_id }); else if(_pd.transaction_id) showReceipt({ transaction_id:_pd.transaction_id, type:'membership' }); }catch(e){} return; }
         if(k==='withdrawal_request'){ try{
           if(_pd.pending){ const EN2=LANG==='en';
@@ -46226,7 +46312,8 @@ function caValidateStep(n){
       if(!_pf){ toast(LANG==='en'?'⚠️ Add a profile photo':'⚠️ Nahraj profilovou fotku'); try{ const _ph=$('caPhotoNew')||$('caPhoto'); if(_ph) _ph.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} return false; } } if(!_caActiveStudents){ toast(LANG==='en'?'⚠️ Pick how many people you train':'⚠️ Vyber, kolik lidí trénuješ'); return false; } }
   if(n===2){ const hasIn=parseInt($('caRateInperson')&&$('caRateInperson').value)>0; let hasOnline=false; try{ hasOnline=[...$('caOnlineTiers').querySelectorAll('.t-price')].some(i=>parseInt(i.value)>0); }catch(e){} if(!hasIn && !hasOnline){ toast(LANG==='en'?'⚠️ Add at least one price (in-person or online)':'⚠️ Vyplň aspoň jednu cenu (in-person nebo online)'); return false; }
     if(hasIn && !($('caCurrency')&&$('caCurrency').value)){ toast(LANG==='en'?'⚠️ Pick a currency for your price':'⚠️ Vyber měnu k ceně'); return false; }
-    if(hasOnline && !($('caCurrencyOnline')&&$('caCurrencyOnline').value)){ toast(LANG==='en'?'⚠️ Pick a currency for online':'⚠️ Vyber měnu (online)'); return false; } const _rIn=parseInt($('caRateInperson')&&$('caRateInperson').value)||0; const _cur=($('caCurrency')&&$('caCurrency').value)||'CZK'; if(_rIn>0 && _rIn<(MIN_RATE[_cur]||0)){ toast(LANG==='en'?('⚠️ In-person price is below the minimum ('+(MIN_RATE[_cur]||0)+' '+_cur+').'):('⚠️ Cena lekce je pod minimem ('+(MIN_RATE[_cur]||0)+' '+_cur+').')); return false; } const _curO=($('caCurrencyOnline')&&$('caCurrencyOnline').value)||'CZK'; const _minO=MIN_RATE_ONLINE[_curO]||0; let _badO=null; try{ [...$('caOnlineTiers').querySelectorAll('.tier-wrap')].forEach(w=>{ const i=w.querySelector('.t-price'); const v=parseFloat(i&&i.value)||0; const cu=_tierCur(w,'caOnlineTiers'); const mn=MIN_RATE_ONLINE[cu]||0; if(!_badO && v>0 && v<mn) _badO={m:mn,c:cu}; }); }catch(e){} if(_badO){ toast(LANG==='en'?('⚠️ An online price is below the minimum ('+_badO.m+' '+_badO.c+').'):('⚠️ Online cena je pod minimem ('+_badO.m+' '+_badO.c+').')); return false; } }
+    if(hasOnline && !($('caCurrencyOnline')&&$('caCurrencyOnline').value)){ toast(LANG==='en'?'⚠️ Pick a currency for online':'⚠️ Vyber měnu (online)'); return false; } const _rIn=parseInt($('caRateInperson')&&$('caRateInperson').value)||0; const _cur=($('caCurrency')&&$('caCurrency').value)||'CZK'; if(_rIn>0 && _rIn<(MIN_RATE[_cur]||0)){ toast(LANG==='en'?('⚠️ In-person price is below the minimum ('+(MIN_RATE[_cur]||0)+' '+_cur+').'):('⚠️ Cena lekce je pod minimem ('+(MIN_RATE[_cur]||0)+' '+_cur+').')); return false; } const _curO=($('caCurrencyOnline')&&$('caCurrencyOnline').value)||'CZK'; const _minO=MIN_RATE_ONLINE[_curO]||0; let _badO=null; try{ [...$('caOnlineTiers').querySelectorAll('.tier-wrap')].forEach(w=>{ const i=w.querySelector('.t-price'); const v=parseFloat(i&&i.value)||0; const cu=_tierCur(w,'caOnlineTiers'); const mn=MIN_RATE_ONLINE[cu]||0; if(!_badO && v>0 && v<mn) _badO={m:mn,c:cu}; }); }catch(e){} if(_badO){ toast(LANG==='en'?('⚠️ An online price is below the minimum ('+_badO.m+' '+_badO.c+').'):('⚠️ Online cena je pod minimem ('+_badO.m+' '+_badO.c+').')); return false; }
+      try{ const _ndT=collectTiers('caOnlineTiers').find(t=>!(t.days>0)); if(_ndT){ toast(LANG==='en'?`⚠️ Fill in the delivery time for „${_ndT.label}"`:`⚠️ Vyplň, do kolika dní dodáš „${_ndT.label}"`); return false; } }catch(e){} }
   return true;
 }
 if($('shCoachApp')){
@@ -48513,6 +48600,7 @@ function tierRowHtml(t){
     <select class="t-cur" data-cur="${t.cur||''}" style="width:68px;padding:10px 2px;border:1.5px solid var(--border);border-radius:10px;font-size:13px;font-family:'DM Sans';box-sizing:border-box;background:#fff;"></select>
     <button type="button" class="t-remove" style="background:#FEECEC;color:var(--red);border:none;border-radius:10px;width:32px;height:38px;font-size:18px;cursor:pointer;flex-shrink:0;">×</button>
     </div>
+    <div class="t-daysrow" style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--mid);margin:-2px 0 8px;">${LANG==='en'?'Delivered within':'Dodám do'} <input class="t-days" type="number" min="1" max="90" value="${t.days||''}" placeholder="?" style="width:52px;padding:7px 4px;border:1.5px solid var(--border);border-radius:9px;font-size:13px;font-family:'DM Sans';box-sizing:border-box;text-align:center;"> ${LANG==='en'?'days':'dní'}</div>
     <div class="t-break" style="display:none;font-size:12px;color:var(--mid);background:#F0FBF0;border-radius:8px;padding:6px 10px;margin-bottom:10px;"></div>
   </div>`;
 }
@@ -48616,7 +48704,9 @@ function collectTiers(containerId){
     const qty=parseInt(row.querySelector('.t-qty').value)||1;
     const price=parseInt(row.querySelector('.t-price').value)||0;
     const cur=_tierCur(row, containerId);
-    if(label && price>0) out.push({label, qty, price, cur});
+    // Doba dodání: hledá se ve stejném obalu jako řádek (tier-wrap), je to povinná informace pro studenta.
+    const _dw=row.closest('.tier-wrap'); const days=parseInt(_dw&&_dw.querySelector('.t-days')?_dw.querySelector('.t-days').value:'')||0;
+    if(label && price>0) out.push({label, qty, price, cur, days});
   });
   return out;
 }
@@ -49014,6 +49104,7 @@ $('btnSaveRates').onclick=async()=>{
   const _edMain = _tiersMainRate(tiers, $('editCurrencyOnline').value);
   const currOn = _edMain.cur;
   const rateOn = tiers.length ? _edMain.rate : null;
+  { const _nd=tiers.find(t=>!(t.days>0)); if(_nd){ toast(LANG==='en'?`⚠️ Fill in the delivery time for „${_nd.label}"`:`⚠️ Vyplň, do kolika dní dodáš „${_nd.label}"`); return; } }
   { const _low=tiers.find(t=>t.price < (MIN_RATE_ONLINE[t.cur||currOn]||250)); if(_low){ const _c=_low.cur||currOn; toast(LANG==='en'?`⚠️ Minimum online price is ${MIN_RATE_ONLINE[_c]||250} ${_c} (${_low.label})`:`⚠️ Minimální online cena je ${MIN_RATE_ONLINE[_c]||250} ${_c} (${_low.label})`); return; } }
   const _plans = _onlineOff ? [] : _collectPlans('editOnlinePlans');
   { const _pBad=_plans.find(p=>p.price < (MIN_RATE_ONLINE[p.cur]||250)); if(_pBad){ toast(LANG==='en'?`⚠️ Minimum subscription price is ${MIN_RATE_ONLINE[_pBad.cur]||250} ${_pBad.cur} (${_pBad.name})`:`⚠️ Minimální cena předplatného je ${MIN_RATE_ONLINE[_pBad.cur]||250} ${_pBad.cur} (${_pBad.name})`); return; } }
@@ -50813,8 +50904,24 @@ async function renderOnlineList(role){
     all = [...(inp||[]), ...all];
     all.sort((a,b)=> (b.refund_requested?1:0)-(a.refund_requested?1:0));
   }
-  if(!all.length){ list.innerHTML = `<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">${role==='coach'?(LANG==='en'?'No online orders yet.':'Zatím žádné online objednávky.'):role==='founder'?(LANG==='en'?'No online orders.':'Žádné online objednávky.'):(LANG==='en'?"You haven't ordered online coaching yet.":'Zatím sis neobjednal online coaching.')}</p>`; return; }
-  list.innerHTML = '';
+  // PŘEDPLATITELÉ (kouč): online předplatné kouče -- gym_memberships bez klubu, paid_to = coach.
+  let _subsHtml='';
+  if(role==='coach'){
+    try{
+      const { data:_sm }=await supaClient.from('gym_memberships').select('id,student_id,student_name,plan_name,amount,currency,status,created_at,period_end').eq('coach_id',currentUser.id).is('gym_id',null).eq('paid_to','coach').in('status',['active','cancelling','ended']).order('created_at',{ascending:false}).limit(100);
+      const _sl=(_sm||[]);
+      if(_sl.length){
+        const EN=LANG==='en';
+        const _act=_sl.filter(m=>m.status!=='ended');
+        _subsHtml=`<div style="font-size:12px;font-weight:800;color:var(--mid);text-transform:uppercase;letter-spacing:.04em;margin:2px 0 8px;">${EN?'Subscribers':'Předplatitelé'} · ${_act.length}</div>`
+          + _sl.map(m=>{ const st=m.status==='active'?(EN?'Active':'Aktivní'):m.status==='cancelling'?(EN?'Ends ':'Končí ')+(m.period_end?new Date(m.period_end).toLocaleDateString(EN?'en-GB':'cs-CZ'):''):(EN?'Ended':'Ukončeno'); const col=m.status==='active'?'var(--green)':m.status==='cancelling'?'var(--orange)':'var(--light)';
+            return `<div style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:11px 13px;margin-bottom:8px;display:flex;justify-content:space-between;gap:10px;align-items:center;"><div style="min-width:0;"><div style="font-size:14px;font-weight:700;color:var(--dark);">${escapeHtml(m.student_name||'Student')}</div><div style="font-size:12.5px;color:var(--mid);">🌐 ${escapeHtml(m.plan_name||'')} · ${fmtPrice(Number(m.amount)||0,m.currency||'CZK')} ${_curSym(m.currency||'CZK')} ${EN?'/ mo':'/ měs'}</div></div><div style="font-size:12px;font-weight:700;color:${col};white-space:nowrap;">${st}</div></div>`; }).join('')
+          + `<div style="font-size:12px;font-weight:800;color:var(--mid);text-transform:uppercase;letter-spacing:.04em;margin:14px 0 8px;">${EN?'One-off orders':'Jednorázové objednávky'}</div>`;
+      }
+    }catch(e){}
+  }
+  if(!all.length){ list.innerHTML = _subsHtml + `<p style="text-align:center;color:var(--light);padding:40px;font-size:14px;">${role==='coach'?(LANG==='en'?'No online orders yet.':'Zatím žádné online objednávky.'):role==='founder'?(LANG==='en'?'No online orders.':'Žádné online objednávky.'):(LANG==='en'?"You haven't ordered online coaching yet.":'Zatím sis neobjednal online coaching.')}</p>`; return; }
+  list.innerHTML = _subsHtml;
   for(const b of all){
     if(role==='founder' && b.type==='inperson'){
       // in-person NO-SHOW hlášení
@@ -50888,8 +50995,10 @@ async function renderOnlineList(role){
       actions += `<button class="onRefund" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-curr="${b.currency||'CZK'}" data-student="${b.student_id}" style="width:100%;margin-top:8px;padding:9px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${L('↩️ Vrátit peníze')}</button>`;
       actions += `<button class="onDeny" data-id="${b.id}" data-student="${b.student_id}" style="width:100%;margin-top:8px;padding:9px;background:var(--bg);color:var(--mid);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${L('✖️ Zamítnout spor')}</button>`;
     } else if(role==='student' && b.status!=='cancelled' && !b.fulfilled){
-      actions = b.refund_requested ? `<div style="font-size:13px;color:var(--orange);font-weight:600;background:#FFF8E6;border-radius:10px;padding:10px 12px;margin-top:10px;">${L('⏳ Zažádáno o vrácení — čeká se na vyřízení')}</div>`
-        : `<button class="onReqRefund" data-id="${b.id}" data-coach="${b.coach_id}" style="width:100%;margin-top:10px;padding:10px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${L('Požádat o vrácení peněz')}</button>`;
+      // ODSTOUPENÍ (14 dní od objednávky, dokud není dodáno): zákonné tlačítko, vrací se 100 %.
+      const _wdOk = b.created_at && (Date.now()-new Date(b.created_at).getTime() <= 14*864e5);
+      actions = (_wdOk ? `<button onclick="_openOnlineWithdraw('service','${b.id}')" style="width:100%;margin-top:10px;padding:11px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:13.5px;font-weight:800;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Withdraw from contract':'Odstoupit od smlouvy'}</button><div style="font-size:11.5px;color:var(--light);margin-top:4px;">${LANG==='en'?'Until '+new Date(new Date(b.created_at).getTime()+14*864e5).toLocaleDateString('en-GB')+' — 100 % back while not delivered.':'Do '+new Date(new Date(b.created_at).getTime()+14*864e5).toLocaleDateString('cs-CZ')+' — dokud není dodáno, vrátí se 100 %.'}</div>` : '') + (b.refund_requested ? `<div style="font-size:13px;color:var(--orange);font-weight:600;background:#FFF8E6;border-radius:10px;padding:10px 12px;margin-top:10px;">${L('⏳ Zažádáno o vrácení — čeká se na vyřízení')}</div>`
+        : `<button class="onReqRefund" data-id="${b.id}" data-coach="${b.coach_id}" style="width:100%;margin-top:10px;padding:10px;background:#FEECEC;color:var(--red);border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${L('Požádat o vrácení peněz')}</button>`);
     } else if(role==='student' && b.fulfilled){
       if(b.refund_requested){
         actions = `<div style="display:flex;gap:8px;margin-top:12px;"><button class="onChatCoach" data-coach="${b.coach_id}" style="flex:1;padding:10px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${L('💬 Chat s koučem')}</button></div>
