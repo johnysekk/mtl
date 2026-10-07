@@ -1,5 +1,5 @@
 import Stripe from 'stripe';
-import { ladderRate, hasOrgRate } from './_rate.js';
+import { ladderRate, hasOrgRate, onlineRate } from './_rate.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -82,6 +82,19 @@ export async function rerateOwner(owner) {
   const pct = ladderRate('stripe', { partner: prof.partner, founding: prof.founding, score, bankai: prof.bankai_eligible, org: hasOrgRate(prof) }) * 100;
 
   let rerated = 0;
+  // ONLINE PŘEDPLATNÉ KOUČE (gym_id = null, paid_to = coach): vlastní online sazba na účtu kouče.
+  try {
+    const _oacct = ((await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=stripe_account`)) || [])[0];
+    const _oa = _oacct && _oacct.stripe_account ? String(_oacct.stripe_account).trim() : null;
+    if (_oa) {
+      const _opct = onlineRate({ partner: prof.partner, score, bankai: prof.bankai_eligible }) * 100;
+      const _om = await sbGet(`gym_memberships?gym_id=is.null&paid_to=eq.coach&coach_id=eq.${encodeURIComponent(owner)}&status=in.(active,cancelling)&select=stripe_subscription`);
+      for (const m of _om || []) {
+        if (!m.stripe_subscription) continue;
+        try { const sub = await stripe.subscriptions.retrieve(m.stripe_subscription, { stripeAccount: _oa }); if (await applySubRate(stripe, _oa, m.stripe_subscription, sub, _opct)) rerated++; } catch (e) { console.error('rerate online sub', m.stripe_subscription, e.message); }
+      }
+    }
+  } catch (e) { console.error('rerate online', e.message); }
   const gyms = await sbGet(`gyms?owner_id=eq.${encodeURIComponent(owner)}&select=id,stripe_account`);
   for (const g of gyms || []) {
     if (!g.stripe_account) continue;

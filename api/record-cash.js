@@ -14,7 +14,7 @@
 // Rate: BANK track - EP 1%, else base 3.5% / Shikai 3% at coach_ref_score>=2. No Bankai.
 // Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
 
-import { ladderRate as _mtlRate, acquisitionRate as _mtlAcq, introFreeFor as _introFree, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil } from './_rate.js';
+import { onlineRate as _mtlOnline, ladderRate as _mtlRate, acquisitionRate as _mtlAcq, introFreeFor as _introFree, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil } from './_rate.js';
 import { isTestMode } from './_config.js';
 import { approveMemberAppOnPayment, cohortPayer } from './_member-app.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
@@ -424,10 +424,16 @@ export default async function handler(req, res) {
       if (!_trusted && coach.account_suspended) return res.status(403).json({ error: 'account suspended' });
       if (!_trusted && coach.cash_blocked) return res.status(403).json({ error: 'cash blocked' });
       rate = ladderRate(coach);
+      // ONLINE KOUČING (rezervace typu online): vlastní sazba 1 / 0,75 / 0,5 % a žádná akvizice.
+      let _isOnl = (type === 'coach_online');
+      if (!_isOnl && type === 'coach_1to1' && /^\d+$/.test(String(source_booking_id || ''))) {
+        try { const _ob = ((await _wsbGet(`bookings?id=eq.${encodeURIComponent(source_booking_id)}&select=type`)) || [])[0]; _isOnl = !!(_ob && _ob.type === 'online'); } catch (e) {}
+      }
+      if (_isOnl) rate = _mtlOnline({ partner: coach.partner, score: coach.coach_ref_score, bankai: coach.bankai_eligible });
       cur = currency || 'czk';
       const _cc = (_wantCredit && coach.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
-      const _acq = await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id, rate, months);
+      const _acq = _isOnl ? null : await acquisitionRate(acq_source, type, coach, member_id, 'coach_id', coach_id, rate, months);
       const _acqB = (_acq && typeof _acq === 'object') ? _acq : null;
       const _acqR = _acqB ? _acqB.rate : _acq;
       // Zaváděcí nulová provize. Tahle cesta počítá sazbu sama přes ladderRate, takže by kontrolu

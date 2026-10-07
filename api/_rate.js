@@ -102,6 +102,24 @@ export function ladderRate(mode, o) {
 }
 
 
+// ── ONLINE KOUČING ───────────────────────────────────────────────────────────────────────
+// Online sekce (jednorázová služba i měsíční předplatné) má VLASTNÍ, nižší sazbu, stejnou na
+// obou kolejích, a NEMÁ akvizici (jako kurzy a vstupenky):
+//   base 1 %  ·  Shikai 0,75 %  ·  Bankai 0,5 %  ·  EP 0,5 %
+// Shikai/Bankai podle stejného ref_score a bankai_eligible jako zbytek žebříčku. Organizace
+// (1,5 %) tu nic nezlepší -- online základ 1 % je nižší, vyhrává lepší sazba.
+export function onlineRate(o) {
+  o = o || {};
+  if (o.partner) return 0.005;                                   // EP
+  const s = o.score || 0;
+  if (s >= 5 && o.bankai) return 0.005;                          // Bankai
+  return (s >= 2) ? 0.0075 : 0.01;                               // Shikai / base
+}
+export async function onlineRateFor(sbGet, ownerId) {
+  const p = await resolveOwner(sbGet, { ownerId });
+  return onlineRate({ partner: p.partner, score: p.coach_ref_score, bankai: p.bankai_eligible });
+}
+
 // ── ORGANIZACE ───────────────────────────────────────────────────────────────────────────
 // Organizace nejde po zebricku. Ten je stavěný na opakovaný prodej treninku -- Shikai i Bankai
 // se odemykaji poctem privatek nebo clenstvi, coz poradatel akci nikdy mit nebude. Sazba je

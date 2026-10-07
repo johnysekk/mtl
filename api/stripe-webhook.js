@@ -9,7 +9,7 @@
 // DŮLEŽITÉ: webhook musí číst RAW body (proto bodyParser:false), jinak selže ověření podpisu.
 
 import Stripe from 'stripe';
-import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil } from './_rate.js';
+import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil, onlineRate as _mtlOnline } from './_rate.js';
 import crypto from 'crypto';
 import PDFDocument from 'pdfkit';
 import { isTestMode } from './_config.js';
@@ -894,7 +894,7 @@ export default async function handler(req, res) {
             const invId = typeof s.invoice === 'string' ? s.invoice : (s.invoice && s.invoice.id);
             let payId = null;
             if (invId) { const invObj = await stripe.invoices.retrieve(invId, { stripeAccount: event.account }); payId = (typeof invObj.payment_intent === 'string' ? invObj.payment_intent : (invObj.payment_intent && invObj.payment_intent.id)) || (typeof invObj.charge === 'string' ? invObj.charge : (invObj.charge && invObj.charge.id)); }
-            if (payId) await recordTransaction(event.account, payId, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id, plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side', acq_source: _acqSrcFrom(m), acq_months: (m.mtl_acq_months ? parseInt(m.mtl_acq_months,10) : null), base_rate: (m.mtl_base_rate ? parseFloat(m.mtl_base_rate) : null) });
+            if (payId) await recordTransaction(event.account, payId, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id || null, ...(m.mtl_online === '1' ? { coach_id: m.coach_id || null, paid_to: 'coach', acq_source: 'direct' } : {}), plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side', acq_source: _acqSrcFrom(m), acq_months: (m.mtl_acq_months ? parseInt(m.mtl_acq_months,10) : null), base_rate: (m.mtl_base_rate ? parseFloat(m.mtl_base_rate) : null) });
           } catch (e) { console.error('record membership at checkout', e.message); }
         }
       } else if (m.mtl_payment_type === 'cohort_deposit') {
@@ -1140,7 +1140,9 @@ export default async function handler(req, res) {
             // Delegováno na _rate.js. Tady dřív seděla vlastní kopie žebříčku s vlastními čísly, a přesně
             // ta se rozešla: EP mělo 1 % místo 0,5 % a founding se neřešil vůbec, takže každý běh zvedal
             // sazbu tomu, komu ji gym-rerate.js právě snížil. Jedno pravidlo, jedno místo.
-            const _ladder = _mtlLadder('stripe', { partner: _op.partner, org: _hasOrgRate(_op), score: _sc, bankai: _op.bankai_eligible }) * 100;
+            let _ladder = _mtlLadder('stripe', { partner: _op.partner, org: _hasOrgRate(_op), score: _sc, bankai: _op.bankai_eligible }) * 100;
+            // Online předplatné kouče: vlastní online sazba, žádná akvizice.
+            if (((_so2 && _so2.metadata) || {}).mtl_online === '1') _ladder = _mtlOnline({ partner: _op.partner, score: _sc, bankai: _op.bankai_eligible }) * 100;
             _subLadder = _ladder / 100;
             await applySubRate(stripe, event.account, sub, _so2, _ladder);
           }

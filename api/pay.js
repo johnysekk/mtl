@@ -1,6 +1,8 @@
 import Stripe from 'stripe';
-import { resolveRate, effectiveRate, effectiveRateBreakdown } from './_rate.js';
+import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor } from './_rate.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
+import { checkPrice } from './_price-check.js';
+const _PC = (kind, extra) => ({ SB: _SUPA_URL, KEY: _SUPA_KEY, kind, ...extra });
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -114,6 +116,7 @@ export default async function handler(req, res) {
     if (type === 'membership') return await membershipCheckout(req, res);
     if (type === 'partner')    return await partnerCheckout(req, res);
     if (type === 'event')      return await eventCheckout(req, res);
+    if (type === 'online_plan') return await onlinePlanCheckout(req, res);
     return res.status(400).json({ error: 'Neznámý type: ' + type });
   } catch (err) {
     console.error('pay error [' + type + ']:', err);
@@ -147,7 +150,10 @@ async function coachCheckout(req, res) {
   // Server-side single source: ladder + acquisition via _rate.js (client 'commission' only a fallback).
   let COMMISSION;
   try {
-    COMMISSION = await effectiveRate(_wsbGet, { ownerId: coachProfileId, mode: 'stripe', type: 'coach_1to1', acqSource: acq, memberId: studentId, scopeCol: 'coach_id', scopeId: coachProfileId });
+    // Online koučing: vlastní sazba (1 / 0,75 / 0,5 %) a bez akvizice. Osobní lekce: žebříček + akvizice.
+    COMMISSION = (String(online) === '1')
+      ? await onlineRateFor(_wsbGet, coachProfileId)
+      : await effectiveRate(_wsbGet, { ownerId: coachProfileId, mode: 'stripe', type: 'coach_1to1', acqSource: acq, memberId: studentId, scopeCol: 'coach_id', scopeId: coachProfileId });
   } catch (e) {
     console.error('pay.coach effectiveRate failed:', e.message);
     COMMISSION = (commission && parseFloat(commission) >= 0.005 && parseFloat(commission) <= 0.10) ? parseFloat(commission) : 0.02;   // fallback = base Stripe (bylo 0.03)
@@ -174,14 +180,20 @@ async function coachCheckout(req, res) {
   const proto = host && host.includes('localhost') ? 'http' : 'https';
   const isOnline = String(online) === '1';
 
+  // OSOBNÍ SOUKROMKA: cena proti slotu / ceníku kouče / soukromým nabídkám.
+  if (!isOnline) {
+    const _pc = await checkPrice(_PC('coachPrivate', { amount: rate, currency, coachProfileId, slotId }));
+    if (!_pc.ok) return res.status(400).json({ error: _pc.error });
+  }
+
   // CENA ONLINE KOUČINGU SE OVĚŘUJE PROTI PROFILU KOUČE. Dřív server vzal částku i měnu z adresy
   // tak, jak přišly, takže šlo zaplatit libovolnou částku. Povolené dvojice cena + měna: balíčky
   // (každý ve své měně; starší bez měny = měna online), rate_online a ceny po disciplínách v měně online.
   if (isOnline) {
-    const p = ((await _wsbGet(`profiles?id=eq.${encodeURIComponent(String(coachProfileId || ''))}&select=online_tiers,rate_online,currency_online,currency,discipline_rates_online,stripe_account&limit=1`)) || [])[0];
+    const p = ((await _wsbGet(`profiles?id=eq.${encodeURIComponent(String(coachProfileId || ''))}&select=online_services,online_tiers,rate_online,currency_online,currency,discipline_rates_online,stripe_account&limit=1`)) || [])[0];
     if (!p || String(p.stripe_account || '').trim() !== String(coachId).trim()) return res.status(400).json({ error: 'Kouč nenalezen' });
     const defCur = String(p.currency_online || p.currency || 'CZK').toUpperCase();
-    let tiers = []; try { tiers = typeof p.online_tiers === 'string' ? JSON.parse(p.online_tiers) : (p.online_tiers || []); } catch (e) {}
+    let tiers = []; try { const _src = (p.online_services != null) ? p.online_services : p.online_tiers; tiers = typeof _src === 'string' ? JSON.parse(_src) : (_src || []); } catch (e) {}
     let dro = {}; try { dro = typeof p.discipline_rates_online === 'string' ? JSON.parse(p.discipline_rates_online) : (p.discipline_rates_online || {}); } catch (e) {}
     const okPairs = [];
     (Array.isArray(tiers) ? tiers : []).forEach((t) => okPairs.push([Number(t && t.price), String((t && t.cur) || defCur).toUpperCase()]));
@@ -262,6 +274,12 @@ async function gymCheckout(req, res) {
   if (!(await _assertAcctReady(gymAccount, res))) return;
 
   const P = parseInt(amount, 10);
+  // CENA PROTI DATABÁZI. Merch podle zboží; drop-in / grace / recepce podle ceníku klubu nebo kouče.
+  {
+    const _k = (String(merch) === '1') ? 'merch' : 'gymDropin';
+    const _pc = await checkPrice(_PC(_k, { amount: P, currency, gymId, coachId, merchId, qty }));
+    if (!_pc.ok) return res.status(400).json({ error: _pc.error });
+  }
   const cur = String(currency).toLowerCase();
   const isPartner = (String(partner) === '1');
   const MK   = 1.00;
@@ -455,6 +473,9 @@ async function membershipCheckout(req, res) {
   } = req.query;
 
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
+
+  // CENA PROTI CENÍKU ČLENSTVÍ KLUBU (membership_plans). Více měsíců = násobek / poměrná část.
+  { const _pc = await checkPrice(_PC('gymMembership', { amount: parseInt(amount, 10), currency, gymId: _skGym || gymId })); if (!_pc.ok) return res.status(400).json({ error: _pc.error }); }
 
   const P = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
@@ -739,5 +760,51 @@ async function partnerCheckout(req, res) {
     cancel_url: `${proto}://${host}/`,
   }, { apiVersion: '2024-09-30.acacia' });
 
+  res.redirect(303, session.url);
+}
+
+// ───────────────────────── ONLINE: MĚSÍČNÍ PŘEDPLATNÉ KOUČE ─────────────────────────
+// Kouč si v online nabídce vytvoří měsíční předplatné (profiles.online_plans: název, cena, měna,
+// co student dostane). Platí se JEN přes Stripe jako opakované předplatné na účet kouče.
+// Řádek členství zakládá appka předem (gym_memberships: gym_id = null, paid_to = 'coach',
+// status 'pending'); tady se z něj vezme JEN identita -- cena a měna se berou z nabídky kouče,
+// nikdy z adresy. Sazba je online (1 / 0,75 / 0,5 %) a bez akvizice. Webhook pak předplatné
+// propojí s řádkem a zapíše platbu stejně jako u členství v klubu.
+async function onlinePlanCheckout(req, res) {
+  const membershipId = String(req.query.membershipId || '');
+  if (!membershipId) return res.status(400).json({ error: 'Chybí membershipId' });
+  const mb = ((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(membershipId)}&select=id,coach_id,student_id,paid_by,plan_name,amount,currency,status,gym_id,paid_to`)) || [])[0];
+  if (!mb || mb.gym_id || mb.paid_to !== 'coach' || !mb.coach_id) return res.status(400).json({ error: 'Předplatné nenalezeno' });
+  if (String(mb.status) !== 'pending') return res.status(400).json({ error: 'Předplatné už není k zaplacení' });
+  const p = ((await _wsbGet(`profiles?id=eq.${encodeURIComponent(mb.coach_id)}&select=id,name,stripe_account,online_plans,account_suspended&limit=1`)) || [])[0];
+  if (!p || !p.stripe_account) return res.status(400).json({ error: 'Kouč nemá nastavené platby kartou' });
+  if (p.account_suspended) return res.status(400).json({ error: 'Účet kouče je pozastavený' });
+  const acct = String(p.stripe_account).trim();
+  if (!(await _assertAcctReady(acct, res))) return;
+  let plans = []; try { plans = typeof p.online_plans === 'string' ? JSON.parse(p.online_plans) : (p.online_plans || []); } catch (e) {}
+  const defCur = String(mb.currency || 'CZK').toUpperCase();
+  const plan = (Array.isArray(plans) ? plans : []).find((x) => x && String(x.name || '') === String(mb.plan_name || '')
+    && Number(x.price) === Number(mb.amount) && String(x.cur || defCur).toUpperCase() === defCur);
+  if (!plan || !(Number(plan.price) > 0)) return res.status(400).json({ error: 'Předplatné neodpovídá aktuální nabídce kouče. Obnov jeho profil a zkus to znovu.' });
+
+  const cur = String(plan.cur || defCur).toUpperCase();
+  const unit = (cur === 'CZK') ? Math.round(Number(plan.price)) * 100 : Math.round(Number(plan.price) * 100);
+  const pct = Math.round((await onlineRateFor(_wsbGet, mb.coach_id)) * 10000) / 100;   // procenta, 2 desetinná
+  const host = req.headers.host;
+  const proto = host && host.includes('localhost') ? 'http' : 'https';
+  const meta = {
+    mtl_payment_type: 'membership', mtl_online: '1', membership_id: mb.id,
+    coach_id: String(mb.coach_id), student_id: String(mb.student_id || ''), gym_id: '',
+    mtl_plan: String(plan.name || 'Online předplatné').slice(0, 120), mtl_currency: cur, mtl_income: 'main',
+    paid_by: String(mb.paid_by || ''), coach_name: String(p.name || '').slice(0, 120),
+  };
+  const session = await stripe.checkout.sessions.create({
+    mode: 'subscription',
+    line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: `${String(plan.name || 'Online předplatné').slice(0, 100)} — ${String(p.name || 'Kouč').slice(0, 60)}` }, unit_amount: unit, recurring: { interval: 'month' } }, quantity: 1 }],
+    subscription_data: { application_fee_percent: pct, metadata: meta },
+    metadata: meta,
+    success_url: `${proto}://${host}/?platba=ok&online_plan=1&coach=${encodeURIComponent(mb.coach_id)}&mb=${encodeURIComponent(mb.id)}&session={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${proto}://${host}/`,
+  }, { stripeAccount: acct });
   res.redirect(303, session.url);
 }

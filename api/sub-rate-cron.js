@@ -22,7 +22,7 @@
 // They were four different rules once. That was the bug.
 // =============================================================================
 import Stripe from 'stripe';
-import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate } from './_rate.js';
+import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, onlineRate as _mtlOnline } from './_rate.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
@@ -132,7 +132,9 @@ export default async function handler(req, res) {
         if (!acct) { out.skipped++; continue; }
 
         const sub = await stripe.subscriptions.retrieve(m.stripe_subscription, { stripeAccount: acct });
-        if (await applySubRate(stripe, acct, m.stripe_subscription, sub, ladderOf(p))) out.fixed++;
+        // Online předplatné kouče má vlastní sazbu (1 / 0,75 / 0,5 %), ne žebříček klubu.
+        const _want = (sub && sub.metadata && sub.metadata.mtl_online === '1') ? _mtlOnline({ partner: p.partner, score: p.coach_ref_score, bankai: p.bankai_eligible }) * 100 : ladderOf(p);
+        if (await applySubRate(stripe, acct, m.stripe_subscription, sub, _want)) out.fixed++;
       } catch (e) {
         out.errors.push(`${m.stripe_subscription}: ${e.message}`);
       }
