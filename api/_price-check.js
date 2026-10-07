@@ -51,10 +51,10 @@ export async function checkPrice(opts) {
     } else if (opts.kind === 'coachOnline') {
       // Online služba: balíčky (každý ve své měně; starší bez měny = měna online), rate_online
       // a ceny po disciplínách v měně online. Porovnává se dvojice cena + měna.
-      const c = ((await sb(`profiles?id=eq.${q(String(opts.coachProfileId || ''))}&select=online_services,online_tiers,rate_online,currency_online,currency,discipline_rates_online`)) || [])[0];
+      const c = ((await sb(`profiles?id=eq.${q(String(opts.coachProfileId || ''))}&select=online_services,rate_online,currency_online,currency,discipline_rates_online`)) || [])[0];
       if (!c) return { ok: false, error: 'coach not found' };
       const defCur = String(c.currency_online || c.currency || 'CZK').toUpperCase();
-      const tiers = parseJson(c.online_services != null ? c.online_services : c.online_tiers, []);
+      const tiers = parseJson(c.online_services, []);
       (Array.isArray(tiers) ? tiers : []).forEach((t) => { if (t && num(t.price) > 0 && String(t.cur || defCur).toUpperCase() === cur) allowed.push(num(t.price)); });
       if (num(c.rate_online) > 0 && defCur === cur) allowed.push(num(c.rate_online));
       Object.values(parseJson(c.discipline_rates_online, {}) || {}).forEach((v) => { if (num(v) > 0 && defCur === cur) allowed.push(num(v)); });

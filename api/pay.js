@@ -191,10 +191,10 @@ async function coachCheckout(req, res) {
   // tak, jak přišly, takže šlo zaplatit libovolnou částku. Povolené dvojice cena + měna: balíčky
   // (každý ve své měně; starší bez měny = měna online), rate_online a ceny po disciplínách v měně online.
   if (isOnline) {
-    const p = ((await _wsbGet(`profiles?id=eq.${encodeURIComponent(String(coachProfileId || ''))}&select=online_services,online_tiers,rate_online,currency_online,currency,discipline_rates_online,stripe_account&limit=1`)) || [])[0];
+    const p = ((await _wsbGet(`profiles?id=eq.${encodeURIComponent(String(coachProfileId || ''))}&select=online_services,rate_online,currency_online,currency,discipline_rates_online,stripe_account&limit=1`)) || [])[0];
     if (!p || String(p.stripe_account || '').trim() !== String(coachId).trim()) return res.status(400).json({ error: 'Kouč nenalezen' });
     const defCur = String(p.currency_online || p.currency || 'CZK').toUpperCase();
-    let tiers = []; try { const _src = (p.online_services != null) ? p.online_services : p.online_tiers; tiers = typeof _src === 'string' ? JSON.parse(_src) : (_src || []); } catch (e) {}
+    let tiers = []; try { const _src = p.online_services; tiers = typeof _src === 'string' ? JSON.parse(_src) : (_src || []); } catch (e) {}
     let dro = {}; try { dro = typeof p.discipline_rates_online === 'string' ? JSON.parse(p.discipline_rates_online) : (p.discipline_rates_online || {}); } catch (e) {}
     const okPairs = [];
     (Array.isArray(tiers) ? tiers : []).forEach((t) => okPairs.push([Number(t && t.price), String((t && t.cur) || defCur).toUpperCase()]));
