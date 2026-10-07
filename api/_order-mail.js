@@ -46,7 +46,7 @@ function shell(title, body, en) {
 const row = (k, v) => `<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;font-size:13px;vertical-align:top;">${k}</td><td style="padding:7px 0;border-bottom:1px solid #eee;font-size:13px;font-weight:700;text-align:right;">${v}</td></tr>`;
 
 // Druh nákupu -> poučení o odstoupení (§ 1820 odst. 1 písm. g/h/j, § 1837).
-function withdrawalText(kind, en) {
+export function withdrawalText(kind, en) {
   const C = {
     dated:  ['Jde o službu související s využitím volného času, kterou poskytovatel plní v určeném termínu. Právo na odstoupení od smlouvy do 14 dnů proto nemáš (§ 1837 písm. j) OZ). Rezervaci můžeš zrušit v appce podle storno podmínek uvedených u rezervace.',
              'This is a leisure service provided on a specific date, so the 14-day right of withdrawal does not apply (Section 1837(j) of the Czech Civil Code). You can cancel the booking in the app under the cancellation terms shown with it.'],
@@ -58,6 +58,8 @@ function withdrawalText(kind, en) {
              'You can withdraw within 14 days with the "Withdraw from contract" button in the app (My online orders). Until the coach delivers, you get 100 % back; for a package, the undelivered share. Once the service is fully delivered, the right of withdrawal ends (you gave the consent shown below).'],
     plan:   ['Od smlouvy můžeš odstoupit do 14 dnů od první platby tlačítkem „Odstoupit od smlouvy“ v appce (Moje členství) — zaplatíš poměrnou část za dny, kdy předplatné běželo, zbytek se vrátí. Předplatné se obnovuje každý měsíc a můžeš ho kdykoli zrušit ke konci zaplaceného měsíce.',
              'You can withdraw within 14 days of the first payment with the "Withdraw from contract" button in the app (My memberships) — you pay for the days it ran, the rest is refunded. The subscription renews monthly and you can cancel any time at the end of the paid month.'],
+    onsite: ['Nákup proběhl osobně u poskytovatele (v hotovosti), nejde tedy o smlouvu uzavřenou na dálku a zákonné právo odstoupit do 14 dnů se na něj nevztahuje. Případné vrácení se řídí podmínkami poskytovatele.',
+             'This purchase was made in person with the provider (cash), so it is not a distance contract and the statutory 14-day right of withdrawal does not apply. Any refund follows the provider\'s terms.'],
     goods:  ['Od kupní smlouvy můžeš odstoupit do 14 dnů od převzetí zboží; zboží vrátíš prodávajícímu a peníze dostaneš zpět do 14 dnů od odstoupení.',
              'You can withdraw from the purchase within 14 days of receiving the goods; return them to the seller and you get your money back within 14 days.'],
   };
@@ -73,9 +75,16 @@ export async function sendOrderMail(txId) {
     try { claimed = await sb(`transactions?id=eq.${q(txId)}&order_mail_at=is.null`, { method: 'PATCH', prefer: 'return=representation', body: JSON.stringify({ order_mail_at: new Date().toISOString() }) }); } catch (e) { return { ok: false, reason: 'claim: ' + e.message }; }
     const tx = claimed && claimed[0]; if (!tx) return { ok: true, skipped: 'already' };
     const type = String(tx.type || ''), pm = String(tx.payment_method || '');
-    if (pm === 'cash' || ['event_ticket', 'event', 'org_fee', 'partner_sub', 'custom'].includes(type) || tx.org_fee_id || tx.ticket_id) return { ok: true, skipped: 'type' };
+    if (['event_ticket', 'event', 'org_fee', 'partner_sub', 'custom'].includes(type) || tx.org_fee_id || tx.ticket_id) return { ok: true, skipped: 'type' };
 
-    const who = await one(`profiles?id=eq.${q(tx.paid_by || tx.member_id || '')}&select=email,name,lang`);
+    let who = await one(`profiles?id=eq.${q(tx.paid_by || tx.member_id || '')}&select=email,name,lang`);
+    // Kupující BEZ ÚČTU (kurz přes veřejnou stránku): e-mail z přihlášky do kurzu.
+    if ((!who || !who.email) && type === 'course') {
+      let cm = null;
+      if (tx.payment_intent) { const cp = await one(`cohort_payments?stripe_pi=eq.${q(tx.payment_intent)}&select=cohort_member_id`); if (cp) cm = await one(`cohort_members?id=eq.${q(cp.cohort_member_id)}&select=email,name`); }
+      if (!cm && tx.payment_intent) cm = await one(`cohort_members?pis_payment_id=eq.${q(tx.payment_intent)}&select=email,name`);
+      if (cm && cm.email) who = { email: cm.email, name: cm.name || '', lang: null };
+    }
     if (!who || !who.email) return { ok: true, skipped: 'no email' };
     const en = String(who.lang || '') === 'en';
     const dok = await one(`doklady?transaction_id=eq.${q(tx.id)}&select=doklad_no,sup_name,sup_ico,sup_address,item_label,participant_name,session_at,amount,currency`);
@@ -95,12 +104,12 @@ export async function sendOrderMail(txId) {
     else if (type === 'membership') kind = (!tx.gym_id && tx.coach_id) ? 'plan' : (nonprofit ? 'club' : 'pass');
     else if (type === 'merch') kind = 'goods';
     if (kind === 'plan') online = true;
-    // Měsíční obnova předplatného není nová smlouva -- potvrzuje se jen první platba.
-    if (type === 'membership' && tx.member_id) {
-      const scope = tx.gym_id ? `gym_id=eq.${q(tx.gym_id)}` : `coach_id=eq.${q(tx.coach_id || '')}`;
-      const prior = await one(`transactions?member_id=eq.${q(tx.member_id)}&type=eq.membership&${scope}&id=neq.${q(tx.id)}&created_at=lt.${q(tx.created_at)}&created_at=gte.${q(new Date(new Date(tx.created_at).getTime() - 40 * 86400000).toISOString())}&select=id&limit=1`);
-      if (prior) return { ok: true, skipped: 'renewal' };
-    }
+    // Hotovost na místě: zákon odstoupení u nákupu v provozovně nedává. U permanentky ho ale appka
+    // nabízí všem stejně (tlačítko v Mých členstvích, 14 dní, poměrná část) -- e-mail musí říkat
+    // totéž co appka, jinak by si odporovaly. Bez práva na odstoupení zůstává jen zboží koupené na místě.
+    if (pm === 'cash' && kind === 'goods') kind = 'onsite';
+    // Obnovu předplatného (invoice.paid) vylučuje volající (renewal) -- jednorázová permanentka
+    // nebo nové členství po vypršení se potvrzuje vždy znovu.
     if (!booking && kind === 'online' && tx.payment_intent) booking = await one(`bookings?payment_intent=eq.${q(tx.payment_intent)}&select=qty,online_format`);
 
     // Souhlas se zahájením (online) -- znění a čas ze záznamu souhlasu.
@@ -117,7 +126,7 @@ export async function sendOrderMail(txId) {
       (dok && dok.session_at) ? row(en ? 'Date' : 'Termín', esc(dok.session_at)) : '',
       (dok && dok.participant_name) ? row(en ? 'Participant' : 'Účastník', esc(dok.participant_name)) : '',
       row(en ? 'Ordered' : 'Objednáno', esc(dt(tx.created_at, en))),
-      row(en ? 'Payment' : 'Platba', esc(pm === 'qr' || pm === 'pis' ? (en ? 'bank transfer' : 'převodem') : (en ? 'card' : 'kartou'))),
+      row(en ? 'Payment' : 'Platba', esc(pm === 'qr' || pm === 'pis' ? (en ? 'bank transfer' : 'převodem') : pm === 'cash' ? (en ? 'cash' : 'hotově') : (en ? 'card' : 'kartou'))),
       dok && dok.doklad_no ? row(en ? 'Receipt no.' : 'Číslo dokladu', esc(dok.doklad_no)) : '',
       row(en ? 'Seller' : 'Prodávající', esc(sName || '') + (sIco ? `<div style="font-weight:400;color:#666;font-size:12px;">${en ? 'Reg. no.' : 'IČO'} ${esc(sIco)}</div>` : '') + (sAddr ? `<div style="font-weight:400;color:#666;font-size:12px;">${esc(sAddr)}</div>` : '') + (sMail ? `<div style="font-weight:400;color:#666;font-size:12px;">${esc(sMail)}</div>` : '')),
     ].join('');

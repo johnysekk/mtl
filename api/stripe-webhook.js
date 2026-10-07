@@ -10,7 +10,7 @@
 
 import Stripe from 'stripe';
 import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil, onlineRate as _mtlOnline } from './_rate.js';
-import { sendOrderMailForPi } from './_order-mail.js';
+import { sendOrderMailForPi, withdrawalText as _wdText } from './_order-mail.js';
 import crypto from 'crypto';
 import PDFDocument from 'pdfkit';
 import { isTestMode } from './_config.js';
@@ -195,6 +195,7 @@ function cohortDepositHtml(name, courseName, gymName, depositTxt, remainderTxt, 
     ${startTxt ? `<p style="font-size:14px;line-height:1.6;">Začátek: <b>${_esc(_czDate(startTxt))}</b></p>` : ''}
     ${remainderTxt ? `<p style="font-size:14px;line-height:1.6;color:#555;">Zbytek 1. měsíce (<b>${_esc(remainderTxt)}</b>) doplatíš na místě přímo v klubu (kartou, QR nebo hotově — dle klubu).</p>` : ''}
     <p style="font-size:13px;line-height:1.6;color:#555;margin-top:18px;">Těšíme se na tebe na tréninku! S dotazy ke kurzu se obrať přímo na svůj klub.</p>
+    <div style="background:#fff;border-radius:10px;padding:12px 14px;font-size:12.5px;line-height:1.55;color:#444;margin-top:14px;"><b>Potvrzení objednávky</b><br>Prodávajícím je ${gymName ? ('<b>' + _esc(gymName) + '</b>') : 'klub'} jako podnikatel; jeho identifikační údaje najdeš na přiloženém dokladu. Martial Training Lab objednávku a platbu jen zprostředkovává.<br><br><b>Odstoupení od smlouvy:</b> ${_esc(_wdText('dated', false))}</div>
     <p style="font-size:12px;color:#aaa;line-height:1.6;margin-top:24px;">Tenhle e-mail ti přišel, protože ses přihlásil/a do kurzu${gymName ? (' u ' + _esc(gymName)) : ''}.</p>
   </div></body></html>`;
 }
@@ -426,7 +427,12 @@ async function recordTransaction(acct, pi, fields) {
   try {
     const ex = await sbGet(`transactions?payment_intent=eq.${encodeURIComponent(pi)}&select=id,gross_amount`);
     const _existing = (ex && ex.length) ? ex[0] : null;
-    if (_existing && _existing.gross_amount != null) return { status: 'exists', gross: _existing.gross_amount };
+    if (_existing && _existing.gross_amount != null) {
+      // Transakci už zapsal někdo jiný (návrat ze Stripe, nebo invoice.paid u první platby
+      // předplatného). Potvrzení objednávky je idempotentní -- pošle se, pokud ještě neodešlo.
+      if (!fields.renewal && !fields.noOrderMail) { try { await sendOrderMailForPi(pi); } catch (e) {} }
+      return { status: 'exists', gross: _existing.gross_amount };
+    }
     let gross = fields.gross != null ? fields.gross : null, stripeFee = null, mtlFee = null, net = null, currency = fields.currency || null, chargeId = null;
     if (acct) {
       try {
@@ -531,7 +537,8 @@ async function recordTransaction(acct, pi, fields) {
     // se povedl INSERT transakce (unikatni payment_intent pusti jen jednoho): webhook, nebo /api/session.
     const dokladNo = await issueStripeDokladForPi(pi, { slotId: fields.slot_id || null });
     // Potvrzení objednávky e-mailem (§ 1824 OZ) -- až po dokladu, bere z něj údaje prodávajícího.
-    try { await sendOrderMailForPi(pi); } catch (e) { console.error('order mail', e.message); }
+    // Obnova předplatného (invoice.paid) není nová smlouva -- ta se nepotvrzuje.
+    if (!fields.renewal && !fields.noOrderMail) { try { await sendOrderMailForPi(pi); } catch (e) { console.error('order mail', e.message); } }
     return { status: 'recorded', gross, stripeFee, mtlFee, net, dokladNo };
   } catch (e) { console.error('recordTransaction', e.message); return { status: 'error:' + e.message }; }
 }
@@ -942,7 +949,7 @@ export default async function handler(req, res) {
           try {
             const _cg = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=gym_id`)) || [])[0];
             const _cm = ((await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=student_id`)) || [])[0];
-            await recordTransaction(event.account, pi, { type: 'course', member_id: (_cm && _cm.student_id) || null, gym_id: (_cg && _cg.gym_id) || null, income_class: 'cohort_deposit', cohort_id: cohId || null });
+            await recordTransaction(event.account, pi, { type: 'course', member_id: (_cm && _cm.student_id) || null, gym_id: (_cg && _cg.gym_id) || null, income_class: 'cohort_deposit', noOrderMail: true, cohort_id: cohId || null });
           } catch (e) { console.error('cohort deposit tx', e.message); }
           try { const _cd = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=discipline`)) || [])[0]; if (_cd && _cd.discipline) await payGymAmbassador(_cd.discipline, amount, cur, s.id, pi); } catch (e) { console.error('cohort amb deposit', e.message); }
           // NOTE follow-up: ambassador 0.5% on cohort deposits not wired yet (needs mtl_disc/mtl_base in metadata).
@@ -1160,7 +1167,7 @@ export default async function handler(req, res) {
             _subLadder = _ladder / 100;
             await applySubRate(stripe, event.account, sub, _so2, _ladder);
           }
-        }catch(e){ console.error('acq drop', e.message); } if (ipi && mem) await recordTransaction(event.account, ipi, { type: 'membership',  income_class: _incClass, member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency , acq_source: (_subWasAcq ? 'mtl_discovery' : null), acq_months: (_subWasAcq ? 1 : null), base_rate: (_subLadder != null ? _subLadder : null) }); } catch (e) { console.error('record membership', e.message); }
+        }catch(e){ console.error('acq drop', e.message); } if (ipi && mem) await recordTransaction(event.account, ipi, { renewal: true, type: 'membership',  income_class: _incClass, member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency , acq_source: (_subWasAcq ? 'mtl_discovery' : null), acq_months: (_subWasAcq ? 1 : null), base_rate: (_subLadder != null ? _subLadder : null) }); } catch (e) { console.error('record membership', e.message); }
       }
     } else if (event.type === 'invoice.payment_failed') {
       const inv = event.data.object;

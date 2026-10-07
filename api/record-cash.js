@@ -16,6 +16,7 @@
 
 import { onlineRate as _mtlOnline, ladderRate as _mtlRate, acquisitionRate as _mtlAcq, introFreeFor as _introFree, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil } from './_rate.js';
 import { sendOrderMail } from './_order-mail.js';
+import { checkPrice } from './_price-check.js';
 import { isTestMode } from './_config.js';
 import { approveMemberAppOnPayment, cohortPayer } from './_member-app.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
@@ -431,6 +432,16 @@ export default async function handler(req, res) {
         try { const _ob = ((await _wsbGet(`bookings?id=eq.${encodeURIComponent(source_booking_id)}&select=type`)) || [])[0]; _isOnl = !!(_ob && _ob.type === 'online'); } catch (e) {}
       }
       if (_isOnl) rate = _mtlOnline({ partner: coach.partner, score: coach.coach_ref_score, bankai: coach.bankai_eligible });
+      // OSOBNÍ SOUKROMKA (recepce kouče, potvrzení QR): jen ceny z ceníku kouče -- základní,
+      // disciplína, slot 1:N, nebo zvýhodněná, když platí její podmínka (člen klubu / méně
+      // vytížený čas). Libovolnou částku zapsat nejde, stejně jako při rezervaci v appce.
+      if (!_isOnl && ['coach_1to1', 'coach_inperson'].includes(type)) {
+        let _slot = null;
+        if (/^\d+$/.test(String(source_booking_id || ''))) { try { const _bs = ((await _wsbGet(`bookings?id=eq.${encodeURIComponent(source_booking_id)}&select=slot_id`)) || [])[0]; _slot = _bs && _bs.slot_id; } catch (e) {} }
+        const _pc = await checkPrice({ SB: process.env.SUPABASE_URL, KEY: process.env.SUPABASE_SERVICE_ROLE_KEY, kind: 'coachPrivate', strict: true,
+          amount: (Number(gross_amount) || 0) / 100, currency: currency || 'CZK', coachProfileId: coach_id, slotId: _slot, memberId: member_id, discounts: (credit === 'student') ? [0.1, 0.2] : null });
+        if (!_pc.ok) return res.status(400).json({ error: _pc.error || 'Částka neodpovídá ceníku kouče' });
+      }
       cur = currency || 'czk';
       const _cc = (_wantCredit && coach.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
@@ -597,9 +608,14 @@ export default async function handler(req, res) {
         if (_who) await approveMemberAppOnPayment(_who);
       } catch (e) { console.error('[record-cash] member app', e && e.message); }
     }
-    // Potvrzení objednávky e-mailem (§ 1824 OZ) jen u plateb na dálku (převod / QR / PIS).
-    // Hotovost na místě smlouvou na dálku není.
-    if (_txId && ['qr', 'pis'].includes(String(payment_method || ''))) { try { await sendOrderMail(_txId); } catch (e) { console.error('order mail', e.message); } }
+    // Potvrzení objednávky e-mailem u KAŽDÉ platby (jednotně). Na dálku (převod / QR / PIS) je to
+    // povinnost podle § 1824 OZ; u hotovosti na místě je to potvrzení navíc se správným poučením.
+    // Záloha kurzu přes QR: potvrzení je součástí e-mailu se zálohou (cohort-deposit-mail) -- jeden e-mail.
+    let _skipMail = false;
+    if (type === 'course' && String(payment_method || '') === 'qr' && b.cohort_member_id) {
+      try { const _cp = await _wsbGet(`cohort_payments?cohort_member_id=eq.${encodeURIComponent(b.cohort_member_id)}&select=id&limit=1`); _skipMail = !(_cp && _cp.length); } catch (e) {}
+    }
+    if (_txId && !_skipMail) { try { await sendOrderMail(_txId); } catch (e) { console.error('order mail', e.message); } }
     return res.status(200).json({ ok: true, mtl_fee: row.mtl_fee, credit_redeemed: !!_creditRow, id: _txId, doklad_no: _dokNo });
   } catch (e) {
     return res.status(500).json({ error: e.message });

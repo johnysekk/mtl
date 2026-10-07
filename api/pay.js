@@ -43,6 +43,17 @@ async function verifyStudentCredit(studentId){
     return (rows && rows[0] && rows[0].id) ? String(rows[0].id) : null;
   }catch(e){ console.error('verifyStudentCredit', e.message); return null; }
 }
+// VÝŠE REFERRAL SLEVY SE POČÍTÁ NA SERVERU. Dřív přišla v adrese (refDisc) a server ji jen omezil
+// na 0..50 %, takže kdo měl kredit, mohl si sám nastavit 50 % místo 10 / 20 %. Pravidlo z appky:
+// 20 % u poskytovatele, kde student ještě nic nezaplatil, jinak 10 %.
+async function _refDiscFor(studentId, scope) {
+  try {
+    const col = scope.gymId ? 'gym_id' : 'coach_id', id = scope.gymId || scope.coachId;
+    if (!studentId || !id) return 0.10;
+    const prior = await _wsbGet(`transactions?member_id=eq.${encodeURIComponent(studentId)}&${col}=eq.${encodeURIComponent(id)}&status=not.in.(refunded)&select=id&limit=1`);
+    return (prior && prior.length) ? 0.10 : 0.20;
+  } catch (e) { return 0.10; }
+}
 // ODSTRANENO s uvitacim oknem: _fxRates() a _toCzkMinor(). Existovaly VYHRADNE proto, aby se dal
 // stotisicovy strop porovnat napric menami. record-cash.js si svoji kopii nechava -- tam je
 // potrebuje minimalni provize u PIS.
@@ -164,8 +175,7 @@ async function coachCheckout(req, res) {
   if (_credRow) {
     // Referral reward: MTL waives its whole fee; the provider funds the rest of the discount.
     // Only ever reached when the credit was VERIFIED against the DB above.
-    let d = refDisc ? parseFloat(refDisc) : COMMISSION;
-    if (!(d >= 0 && d <= 0.5)) d = COMMISSION;
+    const d = await _refDiscFor(studentId, { coachId: coachProfileId });   // 10 / 20 % ze serveru, ne z adresy
     STUDENT_MARKUP = Math.max(0, MK - d);
     COMMISSION = 0;
   } else if (String(nomarkup) === '1') {
@@ -183,7 +193,7 @@ async function coachCheckout(req, res) {
 
   // OSOBNÍ SOUKROMKA: cena proti slotu / ceníku kouče / soukromým nabídkám.
   if (!isOnline) {
-    const _pc = await checkPrice(_PC('coachPrivate', { amount: rate, currency, coachProfileId, slotId }));
+    const _pc = await checkPrice(_PC('coachPrivate', { strict: true, amount: rate, currency, coachProfileId, slotId, memberId: studentId }));
     if (!_pc.ok) return res.status(400).json({ error: _pc.error });
   }
 
@@ -306,8 +316,7 @@ async function gymCheckout(req, res) {
   if (_credRow) {
     // Referral reward on a drop-in: MTL waives its whole fee; the gym/coach funds the rest.
     // Only ever reached when the credit was VERIFIED against the DB above.
-    let d = refDisc ? parseFloat(refDisc) : TAKE;
-    if (!(d >= 0 && d <= 0.5)) d = TAKE;
+    const d = await _refDiscFor(studentId, { gymId: gymId || null, coachId: coachId || null });   // 10 / 20 % ze serveru
     STUDENT_MK = Math.max(0, MK - d);
     TAKE = 0;
   }
@@ -482,6 +491,23 @@ async function membershipCheckout(req, res) {
 
   // CENA PROTI CENÍKU ČLENSTVÍ KLUBU (membership_plans). Více měsíců = násobek / poměrná část.
   { const _pc = await checkPrice(_PC('gymMembership', { amount: parseInt(amount, 10), currency, gymId: _skGym || gymId })); if (!_pc.ok) return res.status(400).json({ error: _pc.error }); }
+  // CENA, POČET MĚSÍCŮ A KONEC MUSÍ PATŘIT K TOMUTÉŽ PLÁNU. Dřív šlo zaplatit měsíční cenu
+  // s months=12 (nebo endsOn=2099-12-31) a webhook podle toho nastavil platnost.
+  try {
+    const _g = ((await _wsbGet(`gyms?id=eq.${encodeURIComponent(_skGym || gymId || '')}&select=membership_plans,membership_price`)) || [])[0] || {};
+    let _pl = []; try { _pl = typeof _g.membership_plans === 'string' ? JSON.parse(_g.membership_plans) : (_g.membership_plans || []); } catch (e) {}
+    if (!(Array.isArray(_pl) && _pl.length) && Number(_g.membership_price) > 0) _pl = [{ price: Number(_g.membership_price), months: 1 }];
+    const _amt = parseInt(amount, 10), _mo = Math.max(1, parseInt(months, 10) || 1), _end = endsOn ? String(endsOn).slice(0, 10) : '';
+    const _hit = (_pl || []).some((p) => {
+      const pm = Math.max(1, parseInt(p && p.months, 10) || 1); if (pm !== _mo) return false;
+      if (_end && String((p && p.ends_on) || '').slice(0, 10) !== _end) return false;
+      const full = Number(p && p.price) || 0; if (!(full > 0)) return false;
+      if (Math.abs(full - _amt) < 1) return true;
+      if (pm > 1 && p.prorate) { for (let L = 1; L <= pm; L++) if (Math.abs(Math.round((full / pm) * L) - _amt) < 1) return true; }
+      return false;
+    });
+    if (!_hit) return res.status(400).json({ error: 'Členství neodpovídá aktuální nabídce klubu. Obnov stránku a zkus to znovu.' });
+  } catch (e) { return res.status(400).json({ error: 'Nepodařilo se ověřit nabídku klubu.' }); }
 
   const P = parseInt(amount, 10);
   const cur = String(currency).toLowerCase();
@@ -536,6 +562,10 @@ async function membershipCheckout(req, res) {
   // configured member_ref_pct - so clamp to it server-side, and zero when referral is off.
   let refPctN = parseInt(refPct, 10) || 0;
   let _refUserOk = refUser || '';
+  // Bez klubu nebo bez doporučujícího žádná sleva -- dřív stačilo vynechat gymId a omezení na
+  // member_ref_pct se přeskočilo, takže šlo poslat refPct=100 a mít členství zdarma.
+  // Doporučit sám sebe taky nejde.
+  if (!gymId || !refUser || String(refUser) === String(studentId || '')) { refPctN = 0; _refUserOk = ''; }
   if (refPctN > 0 && gymId) {
     try {
       const _gRow = (await _wsbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=member_ref_pct`))[0];
