@@ -1,5 +1,6 @@
 import Stripe from 'stripe';
 import { feeRefundableForPI, feeRefundableForTx, bankFeeRefundable } from './_fee-window.js';
+import { prorata, membershipPeriodForTx } from './_prorata.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = process.env.SUPABASE_URL;
@@ -48,7 +49,8 @@ export default async function handler(req, res) {
     const me = await whoami(req);
     if (!me) return res.status(401).json({ error: 'Nejsi přihlášený' });
 
-    if (!(await isPayee(me, gymAccount))) {
+    const payee = await isPayee(me, gymAccount);
+    if (!payee) {
       // Student: jen vlastní platba.
       //  • vstup do klubu (gym_bookings): storno studentem = nejvýš 95 %;
       //  • soukromá lekce (bookings): spor / nedorazil kouč -> vrací se celé hned (pravidlo appky;
@@ -68,12 +70,30 @@ export default async function handler(req, res) {
 
     const params = { payment_intent: paymentIntent };
     if (amount) params.amount = Math.round(parseFloat(amount) * 100); // částečný refund (minor units)
-    // Provize MTL se vrací (poměrně) jen do vystavení dokladu za období platby -- viz _fee-window.js.
-    if (String(refundApp) === '1' && await feeRefundableForPI(paymentIntent)) params.refund_application_fee = true;
+
+    // ČLENSTVÍ / PERMANENTKA: vrací se nejvýš poměrná část za nevyužité dny (_prorata.js).
+    // Kdo chce vrátit víc, může to udělat přímo ve Stripe -- provize MTL se tam nevrací.
+    let pr = null;
+    const tx = ((await sb(`transactions?payment_intent=eq.${q(paymentIntent)}&select=type,gym_id,member_id,created_at,gross_amount,refund_amount&limit=1`)) || [])[0];
+    if (payee && tx && tx.type === 'membership') {
+      const per = await membershipPeriodForTx(sb, tx);
+      pr = per ? prorata(tx.gross_amount, per.startMs, per.endMs) : null;
+      if (pr) {
+        const cap = Math.max(0, pr.unused - (Number(tx.refund_amount) || 0));
+        if (!(cap > 0)) return res.status(400).json({ error: 'Členství je celé vyčerpané, není co vracet.', used_days: pr.usedDays, total_days: pr.totalDays });
+        params.amount = Math.min(params.amount || cap, cap);
+      }
+    }
+
+    // Provize MTL se vrací (poměrně) jen do vystavení dokladu za období platby a u jednorázové lekce
+    // jen před jejím začátkem -- viz _fee-window.js. Spor podaný studentem (volá student, nebo je
+    // u rezervace otevřený spor) se posuzuje jen podle dokladu.
+    if (String(refundApp) === '1' && await feeRefundableForPI(paymentIntent, { dispute: !payee })) params.refund_application_fee = true;
 
     const refund = await stripe.refunds.create(params, { stripeAccount: gymAccount });
 
-    res.status(200).json({ refunded: (refund.amount || 0) / 100, id: refund.id, status: refund.status });
+    res.status(200).json({ refunded: (refund.amount || 0) / 100, id: refund.id, status: refund.status, fee_returned: !!params.refund_application_fee,
+      ...(pr ? { prorata: true, used_days: pr.usedDays, total_days: pr.totalDays } : {}) });
   } catch (err) {
     console.error('gym-refund error:', err);
     res.status(500).json({ error: err.message });

@@ -6,7 +6,8 @@
 //
 // POST { kind:'membership'|'private'|'drop_in', id, amount }   (amount v hlavní měně, např. 1500)
 
-import { bankFeeRefundable } from './_fee-window.js';
+import { bankFeeRefundable, sessionConsumed } from './_fee-window.js';
+import { prorata, membershipPeriodForTx } from './_prorata.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -38,19 +39,21 @@ export default async function handler(req, res) {
     const amt = Math.round((parseFloat(b.amount) || 0) * 100);
     if (!id || !(amt > 0)) return res.status(400).json({ ok: false, error: 'id + amount required' });
 
-    let tx = null;
+    let tx = null, consumed = false;
     if (kind === 'membership') {
       const m = ((await sb(`gym_memberships?id=eq.${q(id)}&select=gym_id,student_id,created_at`)) || [])[0];
       if (!m) return res.status(404).json({ ok: false, error: 'membership not found' });
       if (!(await isGymBoss(m.gym_id, me))) return res.status(403).json({ ok: false, error: 'forbidden' });
-      tx = ((await sb(`transactions?gym_id=eq.${q(m.gym_id)}&member_id=eq.${q(m.student_id)}&type=eq.membership&payment_method=in.(cash,qr,pis)&order=created_at.desc&limit=1&select=id,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,commission_status`)) || [])[0];
+      tx = ((await sb(`transactions?gym_id=eq.${q(m.gym_id)}&member_id=eq.${q(m.student_id)}&type=eq.membership&payment_method=in.(cash,qr,pis)&order=created_at.desc&limit=1&select=id,gym_id,member_id,created_at,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,commission_status`)) || [])[0];
     } else if (kind === 'private') {
-      const bk = ((await sb(`bookings?id=eq.${q(id)}&select=coach_id`)) || [])[0];
+      const bk = ((await sb(`bookings?id=eq.${q(id)}&select=coach_id,training_date,training_time,type,fulfilled,checked_in_at,student_confirmed`)) || [])[0];
       if (!bk || String(bk.coach_id) !== String(me)) return res.status(403).json({ ok: false, error: 'forbidden' });
+      consumed = await sessionConsumed('private', bk);
       tx = ((await sb(`transactions?source_booking_id=eq.${q(id)}&payment_method=in.(cash,qr,pis)&limit=1&select=id,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,commission_status`)) || [])[0];
     } else if (kind === 'drop_in') {
-      const gb = ((await sb(`gym_bookings?id=eq.${q(id)}&select=gym_id`)) || [])[0];
+      const gb = ((await sb(`gym_bookings?id=eq.${q(id)}&select=gym_id,student_id,class_date,class_time,date,time,reception_checkin`)) || [])[0];
       if (!gb || !(await isGymBoss(gb.gym_id, me))) return res.status(403).json({ ok: false, error: 'forbidden' });
+      consumed = await sessionConsumed('drop_in', gb);
       tx = ((await sb(`transactions?source_booking_id=eq.${q(id)}&payment_method=in.(cash,qr,pis)&limit=1&select=id,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,commission_status`)) || [])[0];
     } else if (kind === 'tx') {
       // Libovolná platba převodem/hotově studenta v klubu (např. zrušený jednorázový vstup).
@@ -65,9 +68,18 @@ export default async function handler(req, res) {
     const back = Math.max(0, Math.min(amt, gross - already));
     if (!back) return res.status(200).json({ ok: true, recorded: false, reason: 'already refunded' });
     const patch = { refund_amount: already + back, status: (already + back >= gross) ? 'refunded' : 'partial_refund' };
+    // Provize se vrací jen z části, kterou student nevyčerpal: u jednorázové lekce nic, když už
+    // začala; u členství nejvýš z poměrné části za nevyužité dny. Peníze, které poskytovatel vrátí
+    // navíc, se zapíšou, ale provizi nesnižují (_fee-window.js, _prorata.js).
+    let feeBase = consumed ? 0 : back;
+    if (kind === 'membership' && !b.withdrawal_id) {   // odstoupení do 14 dnů už je spočítané poměrně
+      const per = await membershipPeriodForTx(sb, tx);
+      const pr = per ? prorata(gross, per.startMs, per.endMs) : null;
+      if (pr) feeBase = Math.min(back, Math.max(0, pr.unused - already));
+    }
     let feeBack = 0;
-    if (bankFeeRefundable(tx) && gross > 0) {
-      feeBack = Math.round((Number(tx.mtl_fee) || 0) * back / gross);
+    if (bankFeeRefundable(tx) && gross > 0 && feeBase > 0) {
+      feeBack = Math.round((Number(tx.mtl_fee) || 0) * feeBase / gross);
       patch.mtl_fee_refunded = Math.min(Number(tx.mtl_fee) || 0, (Number(tx.mtl_fee_refunded) || 0) + feeBack);
     }
     await sb(`transactions?id=eq.${q(tx.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(patch) });

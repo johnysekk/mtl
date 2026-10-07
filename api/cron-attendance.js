@@ -9,6 +9,7 @@
 
 import Stripe from 'stripe';
 import { ladderRate as _mtlLadder } from './_rate.js';
+import { feeRefundableForPI } from './_fee-window.js';
 
 const FOUNDER_ID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -258,7 +259,8 @@ async function handler(req, res) {
         let acct = null;
         if (b.gym_id) { const g = await sbGet(`gyms?id=eq.${b.gym_id}&select=stripe_account`); acct = g[0] && g[0].stripe_account; }
         if (!acct && b.coach_id) { const c = await sbGet(`profiles?id=eq.${b.coach_id}&select=stripe_account`); acct = c[0] && c[0].stripe_account; }
-        if (acct && b.payment_intent) { try { await stripe.refunds.create({ payment_intent: b.payment_intent }, { stripeAccount: acct }); } catch (e) { console.error('dispute refund', b.id, e.message); } }
+        // Spor podal student -> provize MTL se vrací podle pravidla dokladu (_fee-window.js), stejně jako jinde.
+        if (acct && b.payment_intent) { try { await stripe.refunds.create({ payment_intent: b.payment_intent, refund_application_fee: await feeRefundableForPI(b.payment_intent, { dispute: true }) }, { stripeAccount: acct }); } catch (e) { console.error('dispute refund', b.id, e.message); } }
         await sbPatch('bookings', `id=eq.${b.id}`, { dispute_status: 'refunded', status: 'refunded', refund_requested: false, dispute_auto: true });
         if (b.student_id) await sbPost('notifications', { user_id: b.student_id, type: 'system', read: false, data: JSON.stringify({ kind: 'dispute_auto_refunded', id: b.id, msg_en: `\u21a9\ufe0f Dispute #${b.id}: you were refunded in full.` }), message: `\u21a9\ufe0f Spor #${b.id}: pen\u00edze se ti vr\u00e1tily v pln\u00e9 v\u00fd\u0161i.` });
         autoRefunded++;

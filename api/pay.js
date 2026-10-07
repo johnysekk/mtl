@@ -174,6 +174,25 @@ async function coachCheckout(req, res) {
   const proto = host && host.includes('localhost') ? 'http' : 'https';
   const isOnline = String(online) === '1';
 
+  // CENA ONLINE KOUČINGU SE OVĚŘUJE PROTI PROFILU KOUČE. Dřív server vzal částku i měnu z adresy
+  // tak, jak přišly, takže šlo zaplatit libovolnou částku. Povolené dvojice cena + měna: balíčky
+  // (každý ve své měně; starší bez měny = měna online), rate_online a ceny po disciplínách v měně online.
+  if (isOnline) {
+    const p = ((await _wsbGet(`profiles?id=eq.${encodeURIComponent(String(coachProfileId || ''))}&select=online_tiers,rate_online,currency_online,currency,discipline_rates_online,stripe_account&limit=1`)) || [])[0];
+    if (!p || String(p.stripe_account || '').trim() !== String(coachId).trim()) return res.status(400).json({ error: 'Kouč nenalezen' });
+    const defCur = String(p.currency_online || p.currency || 'CZK').toUpperCase();
+    let tiers = []; try { tiers = typeof p.online_tiers === 'string' ? JSON.parse(p.online_tiers) : (p.online_tiers || []); } catch (e) {}
+    let dro = {}; try { dro = typeof p.discipline_rates_online === 'string' ? JSON.parse(p.discipline_rates_online) : (p.discipline_rates_online || {}); } catch (e) {}
+    const okPairs = [];
+    (Array.isArray(tiers) ? tiers : []).forEach((t) => okPairs.push([Number(t && t.price), String((t && t.cur) || defCur).toUpperCase()]));
+    if (Number(p.rate_online) > 0) okPairs.push([Number(p.rate_online), defCur]);
+    Object.values(dro || {}).forEach((v) => { if (Number(v) > 0) okPairs.push([Number(v), defCur]); });
+    const C = String(currency || 'CZK').toUpperCase();
+    if (!okPairs.some(([pr, cu]) => pr === rate && cu === C)) {
+      return res.status(400).json({ error: 'Cena neodpovídá aktuální nabídce kouče. Obnov jeho profil a zkus to znovu.' });
+    }
+  }
+
   let successUrl;
   if (isOnline) {
     successUrl = `${proto}://${host}/?platba=ok&online=1&coach=${encodeURIComponent(coachProfileId || '')}&amount=${rate}&currency=${currency}&fmt=${encodeURIComponent(fmt || '')}&acct=${encodeURIComponent(coachId)}&session={CHECKOUT_SESSION_ID}`;
