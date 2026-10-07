@@ -24684,6 +24684,29 @@ async function openCoachReception(){
   if($('cashRecTitle')) $('cashRecTitle').textContent=(EN?'\u{1F6CE}\ufe0f Reception':'\u{1F6CE}\ufe0f Recepce');
 }
 
+// Ceny soukromé lekce kouče pro recepci -- stejné zdroje jako rezervace v appce.
+function _coachCashOpts(c, isMember){
+  const EN=LANG==='en', out=[];
+  if(Number(c.rate_inperson)>0) out.push({ _coach:true, name:(EN?'Standard price':'Základní cena'), price:Number(c.rate_inperson) });
+  let dr=c.discipline_rates; try{ if(typeof dr==='string') dr=JSON.parse(dr); }catch(e){ dr=null; }
+  Object.keys(dr||{}).forEach(function(d){ const v=Number(dr[d])||0; if(v>0) out.push({ _coach:true, disc:d, name:(EN?'Standard price':'Základní cena'), price:v }); });
+  const now=new Date(), slot={ date:now.toISOString().slice(0,10), time:String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0') };
+  (typeof _privOffersOf==='function'?_privOffersOf(c):[]).forEach(function(o){
+    if(o.member_only && !isMember) return;
+    if(o.offpeak && !(typeof _privOffpeakOk==='function' && _privOffpeakOk(o, slot))) return;
+    out.push({ _coach:true, name:(o.name||(o.member_only?(EN?'Club member price':'Cena pro člena klubu'):(EN?'Off-peak price':'Cena v méně vytížený čas'))), price:Number(o.price)||0 });
+  });
+  return out.filter(function(o){ return o.price>0; });
+}
+// Je student členem klubu, který kouč vlastní nebo kde je v týmu?
+async function _coachStudentIsMember(coachId, studentId){
+  if(!coachId || !studentId) return false;
+  let gids=[];
+  try{ const t=await supaClient.from('gym_coaches').select('gym_id').eq('coach_id',coachId).eq('status','active'); (t.data||[]).forEach(function(r){ if(r.gym_id) gids.push(r.gym_id); }); }catch(e){}
+  try{ const o=await supaClient.from('gyms').select('id').eq('owner_id',coachId); (o.data||[]).forEach(function(r){ if(r.id) gids.push(r.id); }); }catch(e){}
+  gids=[...new Set(gids)]; if(!gids.length) return false;
+  try{ const m=await supaClient.from('gym_memberships').select('id').eq('student_id',studentId).in('gym_id',gids).in('status',['active','cancelling']).limit(1); return !!(m.data&&m.data.length); }catch(e){ return false; }
+}
 function openCashRecord(prov){
   // Stejná obrazovka pro klub i kouče. Klub přijde z recepce (_recGym), kouč jako
   // {coach:true, ...currentUser}. Liší se jen tím, komu se platba připíše a co je na výběr.
@@ -24695,7 +24718,9 @@ function openCashRecord(prov){
   const rate = _isCoach
     ? _ladderRate(((g.payment_mode==='qr_bank')?'qr_bank':'stripe'), {partner:!!g.partner, score:(g.coach_ref_score||0), bankai:!!g.bankai_eligible, org:_orgOn(g)})
     : _recRate();
-  const classes=_isCoach?[]:((typeof _todayGymClasses==='function'?_todayGymClasses(g):[])||[]);
+  // Kouč na recepci: JEN ceny z jeho ceníku (základní, disciplína, zvýhodněná, když platí podmínka).
+  // Libovolná částka zapsat nejde -- server (record-cash) to ověřuje stejně jako rezervaci.
+  let classes=_isCoach?_coachCashOpts(g,false):((typeof _todayGymClasses==='function'?_todayGymClasses(g):[])||[]);
   const plans=_isCoach?[]:((typeof gymMembPlans==='function'?gymMembPlans(g):[])||[]);
   let html='';
   html+='<p style="font-size:11px;color:var(--light);margin:0 0 4px;">'+(EN?'Who paid':'Kdo zaplatil')+'</p>';
@@ -24719,7 +24744,7 @@ function openCashRecord(prov){
   
   html+='</select>';
   html+='<select id="crClass" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:\'DM Sans\';margin-bottom:8px;background:var(--surf);color:var(--dark);'+(classes.length?'':'display:none;')+'">';
-  classes.forEach(function(o,i){ const pr=_recPrice(o); var _d=o.disc?(disciplineLabel(o.disc)+' \u00b7 '):''; html+='<option value="'+i+'" data-price="'+(pr.dp||0)+'">'+_d+escapeHtml(o.name||'Lekce')+' \u00b7 '+o.time+' ('+fmtPrice(pr.dp||0,pr.dcur||cur)+' '+sym+')</option>'; });
+  classes.forEach(function(o,i){ const pr=o._coach?{dp:o.price,dcur:cur}:_recPrice(o); var _d=o.disc?(disciplineLabel(o.disc)+' \u00b7 '):''; html+='<option value="'+i+'" data-price="'+(pr.dp||0)+'">'+_d+escapeHtml(o.name||'Lekce')+(o.time?(' \u00b7 '+o.time):'')+' ('+fmtPrice(pr.dp||0,pr.dcur||cur)+' '+sym+')</option>'; });
   html+='</select>';
   html+='<select id="crPlan" style="display:none;width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:\'DM Sans\';margin-bottom:8px;background:var(--surf);color:var(--dark);">';
   plans.forEach(function(p,i){ var _d=p.disc?(disciplineLabel(p.disc)+' \u00b7 '):''; html+='<option value="'+i+'" data-price="'+(p.price||0)+'">'+_d+escapeHtml(p.name||'Permanentka')+' \u00b7 '+fmtPrice(p.price||0,cur)+' '+sym+'</option>'; });
@@ -24736,7 +24761,9 @@ function openCashRecord(prov){
   list.innerHTML=html;
   const $$=function(id){ return document.getElementById(id); };
   window._crSel=null;
-  function _crSetSel(sel){ window._crSel=sel; var box=$$('crSelBox'), nmEl=$$('crSelName'); if(sel){ if(nmEl) nmEl.textContent=sel.name||(EN?'Student':'Student'); if(box) box.style.display='flex'; } else { if(box) box.style.display='none'; } }
+  function _crSetSel(sel){ window._crSel=sel; var box=$$('crSelBox'), nmEl=$$('crSelName'); if(sel){ if(nmEl) nmEl.textContent=sel.name||(EN?'Student':'Student'); if(box) box.style.display='flex'; } else { if(box) box.style.display='none'; }
+    // Kouč: po výběru studenta znovu nabídnout ceny -- člen koučova klubu může mít zvýhodněnou.
+    if(_isCoach){ (async function(){ var mem=false; try{ mem=!!(sel&&sel.id&&await _coachStudentIsMember(g.id, sel.id)); }catch(e){} classes=_coachCashOpts(g, mem); var cs=$$('crClass'); if(cs){ cs.innerHTML=classes.map(function(o,i){ return '<option value="'+i+'" data-price="'+(o.price||0)+'">'+(o.disc?(disciplineLabel(o.disc)+' \u00b7 '):'')+escapeHtml(o.name||'')+' ('+fmtPrice(o.price||0,cur)+' '+sym+')</option>'; }).join(''); cs.style.display=classes.length?'block':'none'; } try{ syncType(); }catch(e){} })(); } }
   function _crTab(t){ var hp=$$('crHistPane'), np=$$('crNewPane'), bh=$$('crTabHist'), bn=$$('crTabNew'); var hist=(t==='hist'); if(hp) hp.style.display=hist?'block':'none'; if(np) np.style.display=hist?'none':'block'; if(bh){ bh.style.background=hist?'var(--dark)':'var(--surf)'; bh.style.color=hist?'#fff':'var(--dark)'; } if(bn){ bn.style.background=hist?'var(--surf)':'var(--dark)'; bn.style.color=hist?'var(--dark)':'#fff'; } }
   if($$('crTabHist')) $$('crTabHist').onclick=function(){ _crTab('hist'); };
   if($$('crTabNew')) $$('crTabNew').onclick=function(){ _crTab('new'); };
