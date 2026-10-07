@@ -434,7 +434,9 @@ export default async function handler(req, res) {
     const payBody = {
       creditorAccount: { accountScheme: 'IBAN', identifier: iban },
       creditorName: nordicSafe(gymName || 'Klub', 70) || 'Klub',
-      instrumentedAmount: String(_nAmount),
+      // Sandbox (DNB) nehýbe skutečnými penězi a appka v testu posílá malou testovací částku --
+      // tu necháváme. Ostrý provoz platí vždy částku z databáze.
+      instrumentedAmount: String((ENVN === 'sandbox' && Number(amount) > 0) ? Number(amount) : _nAmount),
       currency: String(_nCur || 'CZK').toUpperCase(),
       remittanceInformationUnstructured: remit,
       endToEndIdentification: e2e,
