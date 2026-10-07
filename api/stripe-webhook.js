@@ -890,6 +890,16 @@ export default async function handler(req, res) {
           // Přijetí za člena i u předplatného -- dřív jen u jednorázového členství.
           await approveMemberAppOnPayment({ gymId: m.gym_id, studentId: m.student_id || m.member_id || null });
           if (m.membership_id && sub) { try { await sbPatch('gym_memberships', `id=eq.${encodeURIComponent(m.membership_id)}`, { stripe_subscription: sub, status: 'active' }); } catch (e) { console.error('link sub', e.message); } }
+          // ONLINE PŘEDPLATNÉ KOUČE: kouči podrobná notifikace s proklikem do jeho online sekce (Předplatitelé).
+          if (m.mtl_online === '1' && m.coach_id && m.membership_id) {
+            try {
+              const _om = (await sbGet(`gym_memberships?id=eq.${encodeURIComponent(m.membership_id)}&select=student_name,plan_name,amount,currency`))[0] || {};
+              const _amt = `${Number(_om.amount || 0).toLocaleString('cs-CZ')} ${String(_om.currency || m.mtl_currency || 'CZK').toUpperCase()}`;
+              const _cs = `🌐 Nový předplatitel: ${_om.student_name || 'Student'} si předplatil/a „${_om.plan_name || m.mtl_plan || ''}" za ${_amt} měsíčně. Předplatné se obnovuje každý měsíc kartou.`;
+              const _en = `🌐 New subscriber: ${_om.student_name || 'A student'} subscribed to "${_om.plan_name || m.mtl_plan || ''}" for ${_amt} a month. It renews monthly by card.`;
+              await sbPost('notifications', { user_id: m.coach_id, type: 'system', read: false, data: JSON.stringify({ kind: 'online_plan_new', membership_id: m.membership_id, student_id: m.student_id || null, msg_cs: _cs, msg_en: _en }), message: _cs });
+            } catch (e) { console.error('online plan notify', e.message); }
+          }
           try {
             const invId = typeof s.invoice === 'string' ? s.invoice : (s.invoice && s.invoice.id);
             let payId = null;
