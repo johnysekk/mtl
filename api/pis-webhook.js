@@ -223,7 +223,7 @@ export default async function handler(req, res) {
       try {
         const _buyerId = (tbl === 'event_tickets') ? rec.buyer_id : rec.student_id;
         const notifData = (tbl === 'gym_memberships')
-          ? { kind: 'payment_confirmed', auto: true, gym_id: rec.gym_id }
+          ? { kind: 'payment_confirmed', auto: true, gym_id: rec.gym_id, goto: 'memberships', item: rec.plan_name || '', ...((!rec.gym_id && rec.paid_to === 'coach') ? { sk: 'online' } : {}) }
           : (tbl === 'bookings')
           ? { kind: 'payment_confirmed', auto: true, goto: 'bookings' }
           : (tbl === 'event_tickets')
