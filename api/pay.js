@@ -1,7 +1,7 @@
 import Stripe from 'stripe';
 import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor } from './_rate.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
-import { checkPrice, offerPrices, planTermPrices } from './_price-check.js';
+import { checkPrice, offerPrices, planTermPrices, checkOnlineCountry } from './_price-check.js';
 const _PC = (kind, extra) => ({ SB: _SUPA_URL, KEY: _SUPA_KEY, kind, ...extra });
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -219,6 +219,8 @@ async function coachCheckout(req, res) {
     const _tq = _tl.find((t) => t && offerPrices(t, defCur)[C] === rate && String(t.label || '') === String(fmt || ''))
              || _tl.find((t) => t && offerPrices(t, defCur)[C] === rate);
     _onlQty = Math.max(1, Math.min(50, parseInt(_tq && _tq.qty, 10) || 1));
+    const _cc = await checkOnlineCountry({ SB: _SUPA_URL, KEY: _SUPA_KEY, coachId: coachProfileId, buyerId: payerId || studentId });
+    if (!_cc.ok) return res.status(400).json({ error: _cc.error });
   }
 
   let successUrl;
@@ -830,6 +832,8 @@ async function onlinePlanCheckout(req, res) {
   const price = plan ? Number(planTermPrices(plan, months, mainCur)[cur] || 0) : 0;
   if (!plan || !(price > 0) || Math.abs(price - Number(mb.amount)) > 0.005) return res.status(400).json({ error: 'Předplatné neodpovídá aktuální nabídce kouče. Obnov jeho profil a zkus to znovu.' });
 
+  const _cc = await checkOnlineCountry({ SB: _SUPA_URL, KEY: _SUPA_KEY, coachId: mb.coach_id, buyerId: mb.paid_by || mb.student_id });
+  if (!_cc.ok) return res.status(400).json({ error: _cc.error });
   const unit = (cur === 'CZK') ? Math.round(price) * 100 : Math.round(price * 100);
   const rate = await onlineRateFor(_wsbGet, mb.coach_id);
   const pct = Math.round(rate * 10000) / 100;   // procenta, 2 desetinná

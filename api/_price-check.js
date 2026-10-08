@@ -14,7 +14,7 @@ const q = encodeURIComponent;
 
 function sbFactory(SB, KEY) {
   return async function sb(path) {
-    const r = await fetch(`${SB.replace(/\/+$/, '')}/rest/v1/${path}`, { headers: { apikey: KEY, Authorization: `Bearer ${KEY}` } });
+    const r = await fetch(`${String(SB || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '')}/rest/v1/${path}`, { headers: { apikey: KEY, Authorization: `Bearer ${KEY}` } });
     if (!r.ok) throw new Error(`SB ${r.status}`);
     return r.json();
   };
@@ -189,6 +189,24 @@ export async function checkPrice(opts) {
   return { ok: false, error: 'Cena neodpovídá aktuální nabídce. Obnov stránku a zkus to znovu.' };
 }
 
+// ── ONLINE KOUČINK DO JINÝCH ZEMÍ ─────────────────────────────────────────────────────────
+// Kouč si v nastavení online zapíná „Umožnit zakoupit i studentům z jiných zemí" (profiles.online_intl).
+// Vypnuto = kupovat smí jen kupující (plátce) ze stejné země jako kouč (billing_country = daňový
+// domicil, jinak country_code). Neznámá země na kterékoli straně platbu neblokuje.
+export async function checkOnlineCountry({ SB, KEY, coachId, buyerId }) {
+  if (!coachId || !buyerId) return { ok: true };
+  try {
+    const sb = sbFactory(SB, KEY);
+    const rows = (await sb(`profiles?id=in.(${q(String(coachId))},${q(String(buyerId))})&select=*`)) || [];
+    const c = rows.find((r) => String(r.id) === String(coachId)), s = rows.find((r) => String(r.id) === String(buyerId));
+    if (!c || !s || c.online_intl === true || String(coachId) === String(buyerId)) return { ok: true };
+    const cc = String(c.billing_country || c.country_code || '').trim().toUpperCase();
+    const sc = String(s.country_code || s.residence_country || '').trim().toUpperCase();
+    if (!cc || !sc || cc === sc) return { ok: true };
+    return { ok: false, error: `Tento kouč prodává online koučink jen studentům ze své země (${cc}).` };
+  } catch (e) { return { ok: true }; }
+}
+
 // ── PŘEVOD (PIS): ŘÁDEK ZAPSALA APPKA, CENU OVĚŘÍME ──────────────────────────────────────────
 // Rezervace, vstupy, členství a merch zakládá u převodu prohlížeč -- včetně částky. PIS pak
 // platí částku z řádku, takže bez kontroly šlo převodem zaplatit libovolně málo. Akce (lístky
@@ -198,13 +216,21 @@ export async function checkRowPrice({ SB, KEY, tbl, row }) {
   if (!row) return { ok: false, error: 'row not found' };
   const base = { SB, KEY, amount: row.amount, currency: row.currency || 'CZK' };
   if (tbl === 'bookings') {
-    if (String(row.type || '') === 'online') return checkPrice({ ...base, kind: 'coachOnline', bankOnly: true, coachProfileId: row.coach_id, discounts: (String(row.credit_used || '') === 'student') ? [0.1, 0.2] : null });
+    if (String(row.type || '') === 'online') {
+      const r = await checkPrice({ ...base, kind: 'coachOnline', bankOnly: true, coachProfileId: row.coach_id, discounts: (String(row.credit_used || '') === 'student') ? [0.1, 0.2] : null });
+      if (!r.ok) return r;
+      return checkOnlineCountry({ SB, KEY, coachId: row.coach_id, buyerId: row.paid_by || row.student_id });
+    }
     return checkPrice({ ...base, kind: 'coachPrivate', strict: true, coachProfileId: row.coach_id, slotId: row.slot_id, memberId: row.student_id, discounts: (String(row.credit_used || '') === 'student') ? [0.1, 0.2] : null });
   }
   if (tbl === 'gym_bookings') return checkPrice({ ...base, kind: 'gymDropin', gymId: row.gym_id });
   if (tbl === 'merch_orders') return checkPrice({ ...base, kind: 'merch', merchId: row.merch_id, qty: row.qty });
   if (tbl === 'gym_memberships') {
-    if (!row.gym_id) return checkPrice({ ...base, kind: 'coachPlan', bankOnly: true, coachProfileId: row.coach_id, planName: row.plan_name, months: row.months });
+    if (!row.gym_id) {
+      const r = await checkPrice({ ...base, kind: 'coachPlan', bankOnly: true, coachProfileId: row.coach_id, planName: row.plan_name, months: row.months });
+      if (!r.ok) return r;
+      return checkOnlineCountry({ SB, KEY, coachId: row.coach_id, buyerId: row.paid_by || row.student_id });
+    }
     return checkPrice({ ...base, kind: 'gymMembership', gymId: row.gym_id, months: row.months });
   }
   return { ok: true };
