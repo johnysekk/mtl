@@ -57,6 +57,8 @@ export default async function handler(req, res) {
 
     // Platba za permanentku (poslední po jejím založení).
     const tx = ((await sbGet(`transactions?gym_id=eq.${q(m.gym_id)}&member_id=eq.${q(me)}&type=eq.membership&created_at=gte.${q(new Date(start - DAY).toISOString())}&order=created_at.desc&limit=1&select=id,gross_amount,refund_amount,currency,payment_intent,payment_method,mtl_fee,mtl_fee_refunded,commission_status,created_at`)) || [])[0] || null;
+    // Hotovost v provozovně = smlouva uzavřená osobně, ne na dálku: právo na odstoupení nevzniká.
+    if (tx && String(tx.payment_method || '') === 'cash') return res.status(400).json({ ok: false, error: 'Permanentka byla zaplacena v hotovosti přímo v klubu — odstoupení do 14 dnů se na ni nevztahuje.' });
     const gross = tx ? (Number(tx.gross_amount) || 0) : Math.round((Number(m.amount) || 0) * 100);
     const already = tx ? (Number(tx.refund_amount) || 0) : 0;
     const cur = (tx && tx.currency) || m.currency || 'CZK';

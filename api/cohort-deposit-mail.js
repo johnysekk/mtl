@@ -76,7 +76,7 @@ export default async function handler(req, res) {
     if (mem.student_id) return res.status(200).json({ ok: true, sent: false, reason: 'app user' });
     if (mem.deposit_mail_at) return res.status(200).json({ ok: true, sent: false, reason: 'already sent' });
 
-    const gymRec = coh.gym_id ? (await sbGet(`gyms?id=eq.${encodeURIComponent(coh.gym_id)}&select=name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal`))[0] : null;
+    const gymRec = coh.gym_id ? (await sbGet(`gyms?id=eq.${encodeURIComponent(coh.gym_id)}&select=name,legal_name,org_form,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal`))[0] : null;
     const gymName = (gymRec && gymRec.name) || '';
     let ownerEmail = '';
     if (coh.owner_id) { const op = (await sbGet(`profiles?id=eq.${encodeURIComponent(coh.owner_id)}&select=email`))[0]; ownerEmail = (op && op.email) || ''; }
@@ -125,7 +125,8 @@ export default async function handler(req, res) {
       cohortDepositHtml(
         mem.name, coh.name || 'Kurz', gymName, money(deposit),
         remainder > 0 ? money(remainder) : '', coh.start_date || '',
-        appUrl + '/?myclass=' + encodeURIComponent(cmId)
+        appUrl + '/?myclass=' + encodeURIComponent(cmId),
+        !!(gymRec && gymRec.org_form === 'nonprofit')
       ),
       { from: '"' + fromName + '" <' + MAIL_ADDR + '>', replyTo: ownerEmail || undefined, attachments }
     );

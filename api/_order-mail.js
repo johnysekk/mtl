@@ -53,14 +53,16 @@ export function withdrawalText(kind, en) {
              'This is a leisure service provided on a specific date, so the 14-day right of withdrawal does not apply (Section 1837(j) of the Czech Civil Code). You can cancel the booking in the app under the cancellation terms shown with it.'],
     pass:   ['Od smlouvy můžeš odstoupit do 14 dnů od nákupu, a to tlačítkem „Odstoupit od smlouvy“ v appce (Moje členství). Pokud permanentka na tvou žádost začala běžet hned, zaplatíš poměrnou část za dny, kdy běžela; zbytek ti prodávající vrátí do 14 dnů.',
              'You can withdraw within 14 days of purchase with the "Withdraw from contract" button in the app (My memberships). If the pass started right away at your request, you pay a proportionate part for the days it ran; the rest is refunded within 14 days.'],
-    club:   ['Jde o členství ve spolku. Odstoupení podle § 1829 OZ se na něj nepoužije; ukončení členství a vrácení příspěvku se řídí stanovami spolku.',
-             'This is a membership in an association. The statutory right of withdrawal does not apply; ending the membership and any refund follow the association\'s statutes.'],
+    club:   ['Ukončení členství a případné vrácení členského příspěvku se řídí stanovami spolku.',
+             'Ending the membership and any refund of the membership fee follow the association\'s statutes.'],
+    clubother: ['Zrušení a případné vrácení platby se řídí podmínkami spolku uvedenými v appce.',
+             'Cancellation and any refund follow the association\'s terms shown in the app.'],
     online: ['Od smlouvy můžeš odstoupit do 14 dnů tlačítkem „Odstoupit od smlouvy“ v appce (Moje online objednávky). Dokud kouč službu nedodá, vrátí se ti 100 %; u balíčku se vrací poměr nedodaných kusů. Úplným dodáním služby právo na odstoupení zaniká (udělil/a jsi k tomu souhlas uvedený níže).',
              'You can withdraw within 14 days with the "Withdraw from contract" button in the app (My online orders). Until the coach delivers, you get 100 % back; for a package, the undelivered share. Once the service is fully delivered, the right of withdrawal ends (you gave the consent shown below).'],
     plan:   ['Od smlouvy můžeš odstoupit do 14 dnů od první platby tlačítkem „Odstoupit od smlouvy“ v appce (Moje členství) — zaplatíš poměrnou část za dny, kdy předplatné běželo, zbytek se vrátí. Předplatné se obnovuje každý měsíc a můžeš ho kdykoli zrušit ke konci zaplaceného měsíce.',
              'You can withdraw within 14 days of the first payment with the "Withdraw from contract" button in the app (My memberships) — you pay for the days it ran, the rest is refunded. The subscription renews monthly and you can cancel any time at the end of the paid month.'],
-    onsite: ['Nákup proběhl osobně u poskytovatele (v hotovosti), nejde tedy o smlouvu uzavřenou na dálku a zákonné právo odstoupit do 14 dnů se na něj nevztahuje. Případné vrácení se řídí podmínkami poskytovatele.',
-             'This purchase was made in person with the provider (cash), so it is not a distance contract and the statutory 14-day right of withdrawal does not apply. Any refund follows the provider\'s terms.'],
+    onsite: ['Nákup proběhl osobně v hotovosti v provozovně poskytovatele. Nejde o smlouvu uzavřenou na dálku, právo odstoupit do 14 dnů se proto nepoužije a zaplacená částka se nevrací.',
+             'This purchase was paid in cash in person at the provider\'s premises. It is not a distance contract, so the 14-day right of withdrawal does not apply and the amount paid is not refunded.'],
     goods:  ['Od kupní smlouvy můžeš odstoupit do 14 dnů od převzetí zboží; zboží vrátíš prodávajícímu a peníze dostaneš zpět do 14 dnů od odstoupení.',
              'You can withdraw from the purchase within 14 days of receiving the goods; return them to the seller and you get your money back within 14 days.'],
   };
@@ -105,10 +107,12 @@ export async function sendOrderMail(txId) {
     else if (type === 'membership') kind = (!tx.gym_id && tx.coach_id) ? 'plan' : (nonprofit ? 'club' : 'pass');
     else if (type === 'merch') kind = 'goods';
     if (kind === 'plan') online = true;
-    // Hotovost na místě: zákon odstoupení u nákupu v provozovně nedává. U permanentky ho ale appka
-    // nabízí všem stejně (tlačítko v Mých členstvích, 14 dní, poměrná část) -- e-mail musí říkat
-    // totéž co appka, jinak by si odporovaly. Bez práva na odstoupení zůstává jen zboží koupené na místě.
-    if (pm === 'cash' && kind === 'goods') kind = 'onsite';
+    // Hotovost na místě (provozovna poskytovatele) = smlouva uzavřená osobně, ne na dálku: bez práva
+    // na odstoupení. Appka u takové permanentky tlačítko „Odstoupit od smlouvy" neukazuje.
+    if (pm === 'cash' && (kind === 'goods' || kind === 'pass')) kind = 'onsite';
+    // SPOLEK: žádné řeči o ochraně spotřebitele -- členský příspěvek ani služby spolku se tak
+    // neposuzují. Jen odkaz na stanovy / podmínky spolku.
+    if (nonprofit && kind !== 'club') kind = 'clubother';
     // Obnovu předplatného (invoice.paid) vylučuje volající (renewal) -- jednorázová permanentka
     // nebo nové členství po vypršení se potvrzuje vždy znovu.
     if (!booking && kind === 'online' && tx.payment_intent) booking = await one(`bookings?payment_intent=eq.${q(tx.payment_intent)}&select=qty,online_format`);
@@ -133,8 +137,10 @@ export async function sendOrderMail(txId) {
     ].join('');
     const body = `<p style="font-size:14px;line-height:1.5;margin:0 0 12px;">${en ? `Hi ${esc(who.name || '')}, this confirms your order.` : `Ahoj ${esc(who.name || '')}, potvrzujeme tvou objednávku.`}</p>
       <table style="width:100%;border-collapse:collapse;">${rows}</table>
-      <p style="font-size:12.5px;color:#555;line-height:1.5;margin:12px 0;">${en ? 'The seller is the provider named above, a business. Martial Training Lab only mediates the order and payment.' : 'Prodávajícím je výše uvedený poskytovatel jako podnikatel. Martial Training Lab objednávku a platbu jen zprostředkovává.'}</p>
-      <div style="background:#f5f2ee;border-radius:10px;padding:12px 14px;font-size:13px;line-height:1.55;margin:12px 0;"><b>${en ? 'Right of withdrawal' : 'Odstoupení od smlouvy'}</b><br>${esc(withdrawalText(kind, en))}</div>
+      <p style="font-size:12.5px;color:#555;line-height:1.5;margin:12px 0;">${nonprofit
+        ? (en ? 'The provider is the association named above. Martial Training Lab only mediates the payment.' : 'Poskytovatelem je výše uvedený spolek. Martial Training Lab platbu jen zprostředkovává.')
+        : (en ? 'The seller is the provider named above, a business. Martial Training Lab only mediates the order and payment.' : 'Prodávajícím je výše uvedený poskytovatel jako podnikatel. Martial Training Lab objednávku a platbu jen zprostředkovává.')}</p>
+      <div style="background:#f5f2ee;border-radius:10px;padding:12px 14px;font-size:13px;line-height:1.55;margin:12px 0;"><b>${nonprofit ? (en ? 'Cancellation and refunds' : 'Zrušení a vrácení') : (en ? 'Right of withdrawal' : 'Odstoupení od smlouvy')}</b><br>${esc(withdrawalText(kind, en))}</div>
       ${consentText ? `<div style="border:1px solid #eee;border-radius:10px;padding:12px 14px;font-size:12.5px;line-height:1.55;margin:12px 0;"><b>${en ? 'Your consent' : 'Tvůj souhlas'}</b> (${esc(dt(consent.accepted_at, en))})<br>„${esc(consentText)}“</div>` : ''}
       <p style="margin:16px 0 0;"><a href="${APP_URL}" style="display:inline-block;background:#141414;color:#fff;text-decoration:none;padding:11px 16px;border-radius:10px;font-weight:700;font-size:14px;">${en ? 'Open the app' : 'Otevřít appku'}</a></p>`;
     const subj = (isTest ? '[TEST] ' : '') + (en ? 'Order confirmation — ' : 'Potvrzení objednávky — ') + label;

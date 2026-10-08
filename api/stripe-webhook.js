@@ -183,7 +183,7 @@ function cohortDokladPdf(o){
     }catch(e){ reject(e); }
   });
 }
-function cohortDepositHtml(name, courseName, gymName, depositTxt, remainderTxt, startTxt) {
+function cohortDepositHtml(name, courseName, gymName, depositTxt, remainderTxt, startTxt, _appUrl, nonprofit) {
   // Czech has vocative declension ('Petr' -> 'Petře'); getting it wrong reads worse than omitting,
   // so we greet without the name. (name kept in the signature for callers / future localisation.)
   const hi = 'Ahoj,';
@@ -196,7 +196,9 @@ function cohortDepositHtml(name, courseName, gymName, depositTxt, remainderTxt, 
     ${startTxt ? `<p style="font-size:14px;line-height:1.6;">Začátek: <b>${_esc(_czDate(startTxt))}</b></p>` : ''}
     ${remainderTxt ? `<p style="font-size:14px;line-height:1.6;color:#555;">Zbytek 1. měsíce (<b>${_esc(remainderTxt)}</b>) doplatíš na místě přímo v klubu (kartou, QR nebo hotově — dle klubu).</p>` : ''}
     <p style="font-size:13px;line-height:1.6;color:#555;margin-top:18px;">Těšíme se na tebe na tréninku! S dotazy ke kurzu se obrať přímo na svůj klub.</p>
-    <div style="background:#fff;border-radius:10px;padding:12px 14px;font-size:12.5px;line-height:1.55;color:#444;margin-top:14px;"><b>Potvrzení objednávky</b><br>Prodávajícím je ${gymName ? ('<b>' + _esc(gymName) + '</b>') : 'klub'} jako podnikatel; jeho identifikační údaje najdeš na přiloženém dokladu. Martial Training Lab objednávku a platbu jen zprostředkovává.<br><br><b>Odstoupení od smlouvy:</b> ${_esc(_wdText('dated', false))}</div>
+    <div style="background:#fff;border-radius:10px;padding:12px 14px;font-size:12.5px;line-height:1.55;color:#444;margin-top:14px;"><b>Potvrzení objednávky</b><br>${nonprofit
+      ? ('Poskytovatelem je spolek ' + (gymName ? ('<b>' + _esc(gymName) + '</b>') : '') + '; jeho údaje najdeš na přiloženém dokladu. Martial Training Lab platbu jen zprostředkovává.<br><br><b>Zrušení a vrácení:</b> ' + _esc(_wdText('clubother', false)))
+      : ('Prodávajícím je ' + (gymName ? ('<b>' + _esc(gymName) + '</b>') : 'klub') + ' jako podnikatel; jeho identifikační údaje najdeš na přiloženém dokladu. Martial Training Lab objednávku a platbu jen zprostředkovává.<br><br><b>Odstoupení od smlouvy:</b> ' + _esc(_wdText('dated', false)))}</div>
     <p style="font-size:12px;color:#aaa;line-height:1.6;margin-top:24px;">Tenhle e-mail ti přišel, protože ses přihlásil/a do kurzu${gymName ? (' u ' + _esc(gymName)) : ''}.</p>
   </div></body></html>`;
 }
@@ -968,7 +970,7 @@ export default async function handler(req, res) {
             } catch (e) { console.error('cohort student notif', e.message); }
             if (mem && mem.email && coh && !mem.student_id) {  // app users get the doklad in-app, no e-mail
               let gymName = ''; let gymRec = null;
-              try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(coh.gym_id)}&select=name,legal_name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal`); gymRec = (g && g[0]) || null; gymName = (gymRec && gymRec.name) || ''; } catch (e) {}
+              try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(coh.gym_id)}&select=name,legal_name,org_form,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal`); gymRec = (g && g[0]) || null; gymName = (gymRec && gymRec.name) || ''; } catch (e) {}
               let ownerEmail = '';
               try { if (coh.owner_id) { const op = await sbGet(`profiles?id=eq.${encodeURIComponent(coh.owner_id)}&select=email`); ownerEmail = (op && op[0] && op[0].email) || ''; } } catch (e) {}
               const cur2 = (coh.currency || cur || 'CZK');
@@ -985,7 +987,7 @@ export default async function handler(req, res) {
                 const _dokBuf = _snapPdf ? _snapPdf.buffer : await cohortDokladPdf({ gym: gymRec, gymName: gymName, buyer: (mem.name || mem.email || ''), item: ((coh.name || 'Kurz') + ' — záloha'), amount: amount, cur: cur2, ref: pi || '', date: _czDate(new Date().toISOString().slice(0,10)) });
                 _dokAtt = [{ filename: 'MTL-potvrzeni-o-platbe.pdf', content: _dokBuf.toString('base64') }];
               } catch (e) { console.error('cohort doklad pdf', e.message); }
-              await sendResend(mem.email, (coh.name || 'Kurz') + ' \u2014 z\u00E1loha p\u0159ijata', cohortDepositHtml(mem.name, coh.name || 'Kurz', gymName, money(amount), remainder > 0 ? money(remainder) : '', coh.start_date || '', ((process.env.APP_URL || process.env.PUBLIC_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '') + '/?myclass=' + encodeURIComponent(cmId))), { from: '"' + fromName + '" <' + MAIL_ADDR + '>', replyTo: ownerEmail || undefined, attachments: _dokAtt });
+              await sendResend(mem.email, (coh.name || 'Kurz') + ' \u2014 z\u00E1loha p\u0159ijata', cohortDepositHtml(mem.name, coh.name || 'Kurz', gymName, money(amount), remainder > 0 ? money(remainder) : '', coh.start_date || '', ((process.env.APP_URL || process.env.PUBLIC_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '') + '/?myclass=' + encodeURIComponent(cmId)), !!(gymRec && gymRec.org_form === 'nonprofit')), { from: '"' + fromName + '" <' + MAIL_ADDR + '>', replyTo: ownerEmail || undefined, attachments: _dokAtt });
             }
             try { await cohortCapiPurchase(coh, cmId, (mem && mem.email) || '', amount, cur, (mem && mem.fbp) || '', (mem && mem.fbc) || ''); } catch (e) {}
           } catch (e) { console.error('cohort confirm', e.message); }
