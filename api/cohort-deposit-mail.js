@@ -13,6 +13,7 @@
 // Idempotent: refuses to send twice for the same member (cohort_members.deposit_mail_at).
 
 import { sendResend, cohortDepositHtml, cohortDokladPdf } from './stripe-webhook.js';
+import { dokladPdfFor } from './_doklad-pdf.js';
 import { isTestMode } from './_config.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
@@ -100,7 +101,13 @@ export default async function handler(req, res) {
     let testMode = false; try { testMode = await isTestMode(); } catch (e) {}
     if (!(testMode && coh.owner_id !== FOUNDER_UUID)) {
       try {
-        const buf = await cohortDokladPdf({
+        // Doklad ze SNÍMKU (stejný jako v appce): poslední platba QR k tomuto kurzu ve výši zálohy.
+        let _snap = null;
+        try {
+          const _txr = await sbGet(`transactions?cohort_id=eq.${encodeURIComponent(coh.id)}&payment_method=eq.qr&gross_amount=eq.${Math.round(Number(deposit || 0) * 100)}&order=created_at.desc&limit=1&select=id`);
+          if (_txr && _txr[0]) _snap = await dokladPdfFor({ transactionId: _txr[0].id });
+        } catch (e) {}
+        const buf = _snap ? _snap.buffer : await cohortDokladPdf({
           gym: gymRec, gymName, buyer: (mem.name || mem.email || ''),
           item: ((coh.name || 'Kurz') + ' — záloha'), amount: deposit, cur,
           ref: 'QR/' + String(cmId).slice(0, 8), date: _czDate(new Date().toISOString().slice(0, 10)),

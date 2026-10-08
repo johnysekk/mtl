@@ -18,6 +18,7 @@ const RESEND_KEY = process.env.RESEND_API_KEY || process.env.RESEND_KEY;
 const MAIL_FROM = process.env.MAIL_FROM || process.env.INVITE_FROM || 'Martial Training Lab <no-reply@martialtraininglab.com>';
 const APP_URL = (process.env.APP_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '');
 const q = encodeURIComponent;
+import { dokladPdfFor } from './_doklad-pdf.js';
 
 async function sb(path, init = {}) {
   const r = await fetch(`${SB}/rest/v1/${path}`, { ...init, headers: { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json', ...(init.prefer ? { Prefer: init.prefer } : {}) } });
@@ -30,9 +31,9 @@ const money = (minor, cur, en) => (Math.round(Number(minor) || 0) / 100).toLocal
 const dt = (v, en) => { try { return new Date(v).toLocaleString(en ? 'en-GB' : 'cs-CZ', { timeZone: 'Europe/Prague', day: 'numeric', month: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch (e) { return String(v || ''); } };
 const addr = (r, p = '') => [r[p + 'billing_line1'], r[p + 'billing_line2'], [r[p + 'billing_postal'], r[p + 'billing_city']].filter(Boolean).join(' '), r[p + 'billing_country']].filter(Boolean).join(', ');
 
-async function sendMail(to, subject, html) {
+async function sendMail(to, subject, html, attachments) {
   if (!RESEND_KEY || !to) return { ok: false, reason: !RESEND_KEY ? 'no RESEND_API_KEY' : 'no recipient' };
-  const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: 'Bearer ' + RESEND_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: MAIL_FROM, to: [to], subject, html }) });
+  const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: 'Bearer ' + RESEND_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: MAIL_FROM, to: [to], subject, html, ...(attachments && attachments.length ? { attachments } : {}) }) });
   const j = await r.json().catch(() => ({}));
   return { ok: r.ok, id: j && j.id, error: r.ok ? null : (j && (j.message || j.name)) };
 }
@@ -137,7 +138,10 @@ export async function sendOrderMail(txId) {
       ${consentText ? `<div style="border:1px solid #eee;border-radius:10px;padding:12px 14px;font-size:12.5px;line-height:1.55;margin:12px 0;"><b>${en ? 'Your consent' : 'Tvůj souhlas'}</b> (${esc(dt(consent.accepted_at, en))})<br>„${esc(consentText)}“</div>` : ''}
       <p style="margin:16px 0 0;"><a href="${APP_URL}" style="display:inline-block;background:#141414;color:#fff;text-decoration:none;padding:11px 16px;border-radius:10px;font-weight:700;font-size:14px;">${en ? 'Open the app' : 'Otevřít appku'}</a></p>`;
     const subj = (isTest ? '[TEST] ' : '') + (en ? 'Order confirmation — ' : 'Potvrzení objednávky — ') + label;
-    const out = await sendMail(who.email, subj, shell(en ? 'Order confirmation' : 'Potvrzení objednávky', body, en));
+    // DOKLAD V PŘÍLOZE -- ten samý, co je v appce (snímek z tabulky doklady).
+    let att = [];
+    try { const pdf = await dokladPdfFor({ transactionId: tx.id, paymentIntent: tx.payment_intent, en }); if (pdf) att = [{ filename: pdf.filename, content: pdf.buffer.toString('base64') }]; } catch (e) { console.error('[order-mail] pdf', e.message); }
+    const out = await sendMail(who.email, subj, shell(en ? 'Order confirmation' : 'Potvrzení objednávky', body + (att.length ? `<p style="font-size:12.5px;color:#555;margin:10px 0 0;">${en ? 'Your receipt is attached as PDF.' : 'Doklad o platbě máš v příloze (PDF).'}</p>` : ''), en), att);
     if (!out.ok) { try { await sb(`transactions?id=eq.${q(tx.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ order_mail_at: null }) }); } catch (e) {} }
     return out;
   } catch (e) { console.error('[order-mail]', e.message); return { ok: false, reason: e.message }; }

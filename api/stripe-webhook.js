@@ -11,6 +11,7 @@
 import Stripe from 'stripe';
 import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil, onlineRate as _mtlOnline } from './_rate.js';
 import { sendOrderMailForPi, withdrawalText as _wdText } from './_order-mail.js';
+import { dokladPdfFor } from './_doklad-pdf.js';
 import crypto from 'crypto';
 import PDFDocument from 'pdfkit';
 import { isTestMode } from './_config.js';
@@ -979,7 +980,9 @@ export default async function handler(req, res) {
               let _testDok = false; try { _testDok = await isTestMode(); } catch (e) {}
               if (!(_testDok && coh && coh.owner_id !== FOUNDER_UUID)) // test mode: doklad only for the founder's own club
               try {
-                const _dokBuf = await cohortDokladPdf({ gym: gymRec, gymName: gymName, buyer: (mem.name || mem.email || ''), item: ((coh.name || 'Kurz') + ' — záloha'), amount: amount, cur: cur2, ref: pi || '', date: _czDate(new Date().toISOString().slice(0,10)) });
+                // Doklad ze SNÍMKU (stejný jako v appce); stará verze jen když snímek ještě není.
+                const _snapPdf = pi ? await dokladPdfFor({ paymentIntent: pi }) : null;
+                const _dokBuf = _snapPdf ? _snapPdf.buffer : await cohortDokladPdf({ gym: gymRec, gymName: gymName, buyer: (mem.name || mem.email || ''), item: ((coh.name || 'Kurz') + ' — záloha'), amount: amount, cur: cur2, ref: pi || '', date: _czDate(new Date().toISOString().slice(0,10)) });
                 _dokAtt = [{ filename: 'MTL-potvrzeni-o-platbe.pdf', content: _dokBuf.toString('base64') }];
               } catch (e) { console.error('cohort doklad pdf', e.message); }
               await sendResend(mem.email, (coh.name || 'Kurz') + ' \u2014 z\u00E1loha p\u0159ijata', cohortDepositHtml(mem.name, coh.name || 'Kurz', gymName, money(amount), remainder > 0 ? money(remainder) : '', coh.start_date || '', ((process.env.APP_URL || process.env.PUBLIC_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '') + '/?myclass=' + encodeURIComponent(cmId))), { from: '"' + fromName + '" <' + MAIL_ADDR + '>', replyTo: ownerEmail || undefined, attachments: _dokAtt });
