@@ -1,3 +1,4 @@
+import { pragueMonth } from './_tz.js';
 // /api/mtl-revenue — FOUNDER-ONLY: real MTL commission revenue from the transactions ledger
 // via the SERVICE ROLE (bypasses RLS). This is the platform's true profit — the sum of real
 // mtl_fee minus mtl_fee_refunded — the same way a gym owner reads their real net, not an estimate.
@@ -76,7 +77,7 @@ export default async function handler(req, res) {
     rows = rows.filter(t => t.type !== 'course');
     const months = {};
     rows.forEach(t => {
-      const ym = (t.created_at || '').slice(0, 7);
+      const ym = t.created_at ? pragueMonth(new Date(t.created_at)) : '';
       if (!ym) return;
       const cur = t.currency || 'CZK';
       const m = months[ym] = months[ym] || {};

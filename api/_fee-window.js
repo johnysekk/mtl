@@ -1,3 +1,4 @@
+import { pragueMonth } from './_tz.js';
 // /api/_fee-window.js — VRACÍ SE PROVIZE MTL?
 //
 // Pravidlo (stejné pro kartu i převod/QR/hotovost):
@@ -32,7 +33,9 @@ async function get(path) {
 export async function feeRefundableForTx(tx) {
   try {
     if (!tx || !tx.created_at) return true;
-    const ym = String(tx.created_at).slice(0, 7), ymd = String(tx.created_at).slice(0, 10);
+    // Měsíc podle pražského času (stejně jako commission_month); den pro denní doklady zůstává
+    // jako v unified-doklad-cron (okno dne v UTC), aby se shodoval s jeho period_month.
+    const ym = tx.commission_month || pragueMonth(new Date(tx.created_at)), ymd = String(tx.created_at).slice(0, 10);
     let col = null, id = null;
     if (tx.organization_id && tx.paid_to === 'organization') { col = 'organization_id'; id = tx.organization_id; }
     else if (tx.coach_id && (tx.paid_to === 'coach' || !tx.gym_id)) { col = 'coach_id'; id = tx.coach_id; }
@@ -92,7 +95,7 @@ async function sessionForPI(pi) {
 //   opts.dispute = true  -> vrácení po sporu podaném studentem: platí jen pravidlo dokladu.
 export async function feeRefundableForPI(pi, opts = {}) {
   if (!pi) return true;
-  const t = ((await get(`transactions?payment_intent=eq.${q(pi)}&select=created_at,gym_id,coach_id,organization_id,paid_to&limit=1`)) || [])[0];
+  const t = ((await get(`transactions?payment_intent=eq.${q(pi)}&select=created_at,commission_month,gym_id,coach_id,organization_id,paid_to&limit=1`)) || [])[0];
   if (!(await feeRefundableForTx(t))) return false;
   if (opts.dispute) return true;
   const ses = await sessionForPI(pi);
