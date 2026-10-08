@@ -1,4 +1,4 @@
-// /api/fx-sync.js  — Vercel Cron (schedule daily, e.g. "0 15 * * 1-5" after ECB ~16:00 CET)
+// /api/fx-sync.js  — Vercel Cron "30 15 * * 1-5" (UTC) = 16:30 SEČ / 17:30 SELČ, po zveřejnění kurzů ECB (~16:00 SEČ)
 // Fetches ECB euro reference rates SERVER-SIDE (no CORS issue) and caches them in fx_rates.
 // ECB feed is public, no key, no rate limit (but slow) -> call once/day only.
 import { createClient } from '@supabase/supabase-js';
