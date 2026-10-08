@@ -427,7 +427,12 @@ export default async function handler(req, res) {
       if (!_trusted && coach.cash_blocked) return res.status(403).json({ error: 'cash blocked' });
       rate = ladderRate(coach);
       // ONLINE KOUČING (rezervace typu online): vlastní sazba 1 / 0,75 / 0,5 % a žádná akvizice.
-      let _isOnl = (type === 'coach_online');
+      let _isOnl = (type === 'coach_online') || (type === 'membership' && !gym_id);   // předplatné kouče je online
+      if (type === 'membership' && !gym_id) {
+        let _pn = null; if (source_booking_id) { try { const _mr = ((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(source_booking_id)}&select=plan_name`)) || [])[0]; _pn = _mr && _mr.plan_name; } catch (e) {} }
+        const _pc = await checkPrice({ SB: process.env.SUPABASE_URL, KEY: process.env.SUPABASE_SERVICE_ROLE_KEY, kind: 'coachPlan', amount: (Number(gross_amount) || 0) / 100, currency: currency || 'CZK', coachProfileId: coach_id, planName: _pn });
+        if (!_pc.ok) return res.status(400).json({ error: _pc.error || 'Částka neodpovídá nabídce kouče' });
+      }
       if (!_isOnl && type === 'coach_1to1' && /^\d+$/.test(String(source_booking_id || ''))) {
         try { const _ob = ((await _wsbGet(`bookings?id=eq.${encodeURIComponent(source_booking_id)}&select=type`)) || [])[0]; _isOnl = !!(_ob && _ob.type === 'online'); } catch (e) {}
       }

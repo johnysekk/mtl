@@ -84,7 +84,7 @@ export default async function handler(req, res) {
       const end = m.period_end ? new Date(m.period_end).getTime() : start + 30 * DAY;
       const pr = prorata(gross, start, Math.max(end, start + DAY));
       if (pr) { refund = Math.max(0, pr.unused - (tx ? (Number(tx.refund_amount) || 0) : 0)); keep = pr.keep; usedDays = pr.usedDays; totalDays = pr.totalDays; }
-      method = 'card';   // předplatné je jen kartou
+      method = (subId && pi && !String(pi).startsWith('pis')) ? 'card' : 'transfer';   // převodem placené předplatné vrací kouč převodem
     }
     if (!(Date.now() - start <= WINDOW_DAYS * DAY)) return res.status(400).json({ ok: false, error: 'Lhůta 14 dnů na odstoupení už uplynula.' });
     // Opakované odstoupení zastaví kontrola stavu výš (zrušená objednávka / ukončené předplatné).

@@ -100,6 +100,13 @@ export async function checkPrice(opts) {
       if (num(c.rate_online) > 0 && defCur === cur) allowed.push(num(c.rate_online));
       Object.values(parseJson(c.discipline_rates_online, {}) || {}).forEach((v) => { if (num(v) > 0 && defCur === cur) allowed.push(num(v)); });
       if (!allowed.length) return { ok: false, error: 'Cena neodpovídá aktuální nabídce kouče.' };
+    } else if (opts.kind === 'coachPlan') {
+      // Měsíční online předplatné kouče: cena a měna musí patřit k plánu v online_plans.
+      const c = ((await sb(`profiles?id=eq.${q(String(opts.coachProfileId || ''))}&select=online_plans,currency_online,currency`)) || [])[0];
+      if (!c) return { ok: false, error: 'coach not found' };
+      const defCur = String(c.currency_online || c.currency || 'CZK').toUpperCase();
+      parseJson(c.online_plans, []).forEach((p) => { if (p && num(p.price) > 0 && String(p.cur || defCur).toUpperCase() === cur && (!opts.planName || String(p.name || '') === String(opts.planName))) allowed.push(num(p.price)); });
+      if (!allowed.length) return { ok: false, error: 'Předplatné neodpovídá aktuální nabídce kouče.' };
     } else if (opts.kind === 'gymDropin') {
       const g = ((await sb(`gyms?id=eq.${q(String(opts.gymId || ''))}&select=dropin_price,currency,dropin_plans`)) || [])[0];
       if (!g) return { ok: false, error: 'gym not found' };
@@ -170,7 +177,7 @@ export async function checkRowPrice({ SB, KEY, tbl, row }) {
   if (tbl === 'gym_bookings') return checkPrice({ ...base, kind: 'gymDropin', gymId: row.gym_id });
   if (tbl === 'merch_orders') return checkPrice({ ...base, kind: 'merch', merchId: row.merch_id, qty: row.qty });
   if (tbl === 'gym_memberships') {
-    if (!row.gym_id) return { ok: false, error: 'Online předplatné jde zaplatit jen kartou.' };
+    if (!row.gym_id) return checkPrice({ ...base, kind: 'coachPlan', coachProfileId: row.coach_id, planName: row.plan_name });
     return checkPrice({ ...base, kind: 'gymMembership', gymId: row.gym_id, months: row.months });
   }
   return { ok: true };
