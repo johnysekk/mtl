@@ -9,6 +9,7 @@
 //
 // Stránkování a hledání se dělá TADY, ne v prohlížeči. Klub s tisíci členy by jinak stahoval
 // celou historii souhlasů jen proto, aby z ní ukázal dvacet řádků.
+import { resolveParties, partyFor } from './_consent-party.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -166,16 +167,18 @@ export default async function handler(req, res) {
           requested_at: e ? e.created_at : null,
           requested_ip: (e && scope === 'mtl') ? e.requested_ip : null, requested_ua: (e && scope === 'mtl') ? e.requested_ua : null,
           approved_ip: (e && scope === 'mtl') ? e.approved_ip : null, approved_ua: (e && scope === 'mtl') ? e.approved_ua : null,
-          gym_name: gn[w.gym_id] || null,
+          gym_name: gn[w.gym_id] || null, gym_id: w.gym_id || null,
           body_hash: w.body_hash || null,
           file_url: w.terms_file_url || null, file_hash: w.terms_file_hash || null,
         };
       }).concat(appRows).concat(cohRows).sort((x, y) => String(y.accepted_at || '').localeCompare(String(x.accepted_at || '')));
+      // Vůči komu: klub (poskytovatel). U přihlášek a kurzů je to ten klub, za který se volá.
+      try { const _gp = await resolveParties(sbGet, merged.map((r) => r.gym_id || (scope === 'gym' ? gymId : null))); merged.forEach((r) => { const k = r.gym_id || (scope === 'gym' ? gymId : null); r.party = (k && _gp[k]) || null; }); } catch (e) {}
       return res.status(200).json({ ok: true, rows: merged, total: total + appRows.length + cohRows.length, page, per });
     }
 
     // ── ostatní souhlasy (consent_acceptances) ────────────────────────────────────────────
-    let f = 'consent_acceptances?select=id,user_id,user_name,user_email,kind,scope,version,lang,version_id,body_hash,accepted_at,ip,user_agent';
+    let f = 'consent_acceptances?select=id,user_id,user_name,user_email,kind,scope,version,lang,version_id,body_hash,accepted_at,ip,user_agent,meta';
     if (scope === 'coach') f += `&scope=eq.${encodeURIComponent(uid)}`;
     if (scope === 'mtl') {
       const branch = String(q.branch || 'all');
@@ -185,7 +188,7 @@ export default async function handler(req, res) {
     }
     if (ids) f += `&user_id=in.(${ids.map(encodeURIComponent).join(',')})`;
 
-    const total = await sbCount(f.replace('select=id,user_id,user_name,user_email,kind,scope,version,lang,version_id,body_hash,accepted_at,ip,user_agent', 'select=id'));
+    const total = await sbCount(f.replace('select=id,user_id,user_name,user_email,kind,scope,version,lang,version_id,body_hash,accepted_at,ip,user_agent,meta', 'select=id'));
     const acc = await sbGet(`${f}&order=accepted_at.desc&limit=${per}&offset=${from}`);
 
     // Jména a znění se dotahují jen pro tuhle stránku, ne pro celou historii.
@@ -202,10 +205,11 @@ export default async function handler(req, res) {
       (vs || []).forEach(v => { vmap[v.id] = v; });
     }
 
+    let _parties = {}; try { _parties = await resolveParties(sbGet, (acc || []).map((a) => a.scope)); } catch (e) {}
     const rows = (acc || []).map(a => {
       const v = a.version_id ? vmap[a.version_id] : null;
       return {
-        id: a.id, kind: a.kind, version: a.version, lang: a.lang,
+        id: a.id, kind: a.kind, version: a.version, lang: a.lang, party: partyFor(a, _parties),
         // Jméno ZE SNÍMKU souhlasu; živý profil jen u starších řádků, které snímek nemají.
         who: a.user_name || a.user_email || names[a.user_id] || '—', accepted_at: a.accepted_at,
         body_text: (v && v.body_text) || null,

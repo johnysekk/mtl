@@ -1,3 +1,4 @@
+import { resolveParties, partyFor } from './_consent-party.js';
 // /api/my-consents — vrátí souhlasy PŘIHLÁŠENÉHO uživatele i s přesným zněním, které viděl.
 //
 // Proč přes server a ne z prohlížeče: consent_acceptances a consent_versions jsou pod RLS
@@ -38,7 +39,7 @@ export default async function handler(req, res) {
     const uid = user && user.id;
     if (!uid) return res.status(401).json({ error: 'no user' });
 
-    const acc = await sbGet(`consent_acceptances?user_id=eq.${encodeURIComponent(uid)}&select=id,kind,scope,version,lang,version_id,body_hash,accepted_at,ip,user_agent&order=accepted_at.desc&limit=500`);
+    const acc = await sbGet(`consent_acceptances?user_id=eq.${encodeURIComponent(uid)}&select=id,kind,scope,version,lang,version_id,body_hash,accepted_at,ip,user_agent,meta&order=accepted_at.desc&limit=500`);
 
     // Znění po dávkách -- jedna verze pokrývá klidně stovky přijetí, takže se text nestahuje
     // dokola pro každý řádek zvlášť.
@@ -50,10 +51,11 @@ export default async function handler(req, res) {
       (vs || []).forEach(v => { vmap[v.id] = v; });
     }
 
+    let _parties = {}; try { _parties = await resolveParties(sbGet, (acc || []).map((x) => x.scope)); } catch (e) {}
     const consents = (acc || []).map(a => {
       const v = a.version_id ? vmap[a.version_id] : null;
       return {
-        id: a.id, kind: a.kind, scope: a.scope || null, version: a.version, lang: a.lang,
+        id: a.id, kind: a.kind, scope: a.scope || null, version: a.version, lang: a.lang, party: partyFor(a, _parties),
         accepted_at: a.accepted_at, ip: a.ip || null, user_agent: a.user_agent || null,
         body_text: (v && v.body_text) || null,
         // Když se hash přijetí liší od hashe uložené verze, text pod tou verzí se změnil bez
@@ -70,8 +72,9 @@ export default async function handler(req, res) {
       const gs = await sbGet(`gyms?id=in.(${gids.map(encodeURIComponent).join(',')})&select=id,name,legal_name`);
       (gs || []).forEach(g => { gmap[g.id] = g.legal_name || g.name || ''; });
     }
+    let _wp = {}; try { _wp = await resolveParties(sbGet, gids); } catch (e) {}
     const waivers = (wav || []).map(w => ({
-      id: w.id, gym_id: w.gym_id, gym_name: gmap[w.gym_id] || '',
+      id: w.id, gym_id: w.gym_id, gym_name: gmap[w.gym_id] || '', party: _wp[w.gym_id] || null,
       version: w.version, title: w.body_title || null, body_text: w.body_text || null,
       accepted_at: w.accepted_at, guardian_name: w.guardian_name || null, student_name: w.student_name || null,
     }));
