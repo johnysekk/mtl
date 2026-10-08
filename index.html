@@ -10777,8 +10777,10 @@ const _ONL_CONSENT_PLAN_EN='I ask for the subscription to start right away and I
 // Kouč s vypnutým „Umožnit zakoupit i studentům z jiných zemí" (profiles.online_intl) prodává
 // online jen kupujícím ze své země (billing_country = daňový domicil, jinak country_code).
 // Stejné pravidlo hlídá server (_price-check.js checkOnlineCountry). Neznámá země neblokuje.
-function _ccName(cc){ cc=String(cc||'').toUpperCase(); try{ const h=(typeof MTL_COUNTRIES!=='undefined'?MTL_COUNTRIES:[]).filter(x=>x[0]===cc)[0]; if(h) return LANG==='en'?h[2]:h[1]; }catch(e){} return cc; }
-function _myBuyerCC(){ try{ if(!currentUser) return ''; const v=currentUser.country_code||currentUser.residence_country||''; if(v) return String(v).toUpperCase(); return String((typeof _ccOf==='function'?_ccOf(currentUser.country||''):'')||'').toUpperCase(); }catch(e){ return ''; } }
+// Název země: _ccName() níž v souboru (MTL_COUNTRIES v jazyce appky).
+// BYDLIŠTĚ Z REGISTRACE (residence_country) = země zákazníka pro prodej online. Přesun účtu
+// v Nastavení mění jen country_code (kde se v appce pohybuje), bydliště zůstává.
+function _myBuyerCC(){ try{ if(!currentUser) return ''; const v=currentUser.residence_country||currentUser.country_code||''; if(v) return String(v).toUpperCase(); return String((typeof _ccOf==='function'?_ccOf(currentUser.country||''):'')||'').toUpperCase(); }catch(e){ return ''; } }
 async function _olIntlBlock(c){
   const coachId=c.profileId||c.id; if(currentUser && String(coachId)===String(currentUser.id)) return null;
   let intl=c.onlineIntl, ccc=String(c.billingCC||'').toUpperCase();
@@ -10788,7 +10790,7 @@ async function _olIntlBlock(c){
   if(!ccc || !scc || ccc===scc) return null;
   return { coachCC:ccc, buyerCC:scc };
 }
-function _olIntlMsg(b){ const EN=LANG==='en'; return EN?('This coach sells online coaching only to students from '+_ccName(b.coachCC)+'. Your profile is set to '+_ccName(b.buyerCC)+'.'):('Tento kouč prodává online koučink jen studentům z této země: '+_ccName(b.coachCC)+'. Ty máš v profilu zemi '+_ccName(b.buyerCC)+'.'); }
+function _olIntlMsg(b){ const EN=LANG==='en'; return EN?('This coach sells online coaching only to students from '+_ccName(b.coachCC)+'. Your country of residence (from registration) is '+_ccName(b.buyerCC)+'.'):('Tento kouč prodává online koučink jen studentům z této země: '+_ccName(b.coachCC)+'. Tvoje země bydliště (z registrace) je '+_ccName(b.buyerCC)+'.'); }
 function _olIntlDialog(b){
   const EN=LANG==='en';
   const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;z-index:100070;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;';
@@ -10874,7 +10876,10 @@ function _onlineBuyGate(c, o){
     ov.querySelector('#obgGo').onclick=()=>{
       if(!ov.querySelector('#obgCk').checked){ toast(EN?'⚠️ Tick the consent to continue':'⚠️ Pro pokračování zaškrtni souhlas'); return; }
       const price=Number(terms[selM]&&terms[selM][selC])||0; if(!(price>0)){ toast('⚠️'); return; }
-      try{ if(typeof _recordConsent==='function') _recordConsent(isPlan?'online_plan_start':'online_service_start', ONLINE_START_CONSENT_VERSION, LANG, ctext, { coach_id:coachId, label:o.label||'', desc:(o.desc||null), price:price, currency:selC, months:(isPlan?selM:null), days:o.days||null, seller:p.legal_name||p.name||null, seller_ico:p.tax_id||null }, coachId); }catch(e){}
+      // Snímek celého zobrazeného shrnutí (služba, popis, cena, platba, prodávající, poučení
+      // o odstoupení) + země kupujícího, jak ji měl v tu chvíli v profilu.
+      let _shown=''; try{ _shown=String((ov.firstElementChild&&ov.firstElementChild.innerText)||'').replace(/\n{3,}/g,'\n\n').trim(); }catch(e){}
+      try{ if(typeof _recordConsent==='function') _recordConsent(isPlan?'online_plan_start':'online_service_start', ONLINE_START_CONSENT_VERSION, LANG, ctext, { coach_id:coachId, label:o.label||'', desc:(o.desc||null), price:price, currency:selC, months:(isPlan?selM:null), days:o.days||null, seller:p.legal_name||p.name||null, seller_ico:p.tax_id||null, buyer_country:(_myBuyerCC()||null) }, coachId, _shown); }catch(e){}
       done({ cur:selC, price:price, months:selM });
     };
   });
@@ -25010,7 +25015,7 @@ function openCashRecord(prov){
     if(!sid){ toast(EN?'Select a student first':'Nejd\u0159\u00edv vyber studenta'); return; }
     const amount_minor=Math.round(a*100);
     const fee_minor=Math.round(amount_minor*rate);
-    const month=new Date().toISOString().slice(0,7);
+    const month=_pragueMonth();
     // Kouc na recepci prijima SOUKROMKU, ne vstup do klubu -- drive se zapisovala jako drop_in.
     const type=(t==='memb')?'membership':(_isCoach?'coach_1to1':'drop_in');
     // Co a kdy -- do snimku dokladu (Jednorazovy vstup · Super deti, termin lekce).
@@ -25592,7 +25597,7 @@ function _guestMemb(plan){
       var amount_minor=Math.round(price*100); var fee_minor=Math.round(amount_minor*rate);
       var btns=[$('gmQrSave'),$('gmCashSave')]; btns.forEach(function(b){ if(b) b.disabled=true; });
       try{
-        var txr={ gym_id:g.id, member_id:null, coach_id:plan.coach||null, paid_to:'gym', gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:cur, type:'membership', months:(parseInt(plan&&plan.months,10)||1), payment_method:method, commission_status:'pending', commission_month:new Date().toISOString().slice(0,7), cash_payer_name:nnm, acq_source:'direct' };
+        var txr={ gym_id:g.id, member_id:null, coach_id:plan.coach||null, paid_to:'gym', gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:cur, type:'membership', months:(parseInt(plan&&plan.months,10)||1), payment_method:method, commission_status:'pending', commission_month:_pragueMonth(), cash_payer_name:nnm, acq_source:'direct' };
         var r1=await _recordCashTx(txr);
         if(r1&&r1.error){ toast('\u26a0\ufe0f '+r1.error.message); btns.forEach(function(b){ if(b) b.disabled=false; }); return; }
         var nd=new Date(); nd.setMonth(nd.getMonth()+(parseInt(plan.months,10)||1));   /* 1 = monthly (unchanged); 3/6/12 = one-time term */
@@ -26079,7 +26084,7 @@ function _guestCash(occ, method){
     let email=($('gcEmail')&&$('gcEmail').value.trim())||null;
     const amount_minor=Math.round((pr.dp||0)*100);
     const fee_minor=Math.round(amount_minor*rate);
-    const month=new Date().toISOString().slice(0,7);
+    const month=_pragueMonth();
     const tok='g'+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
     const _proceed=async function(_nm,_em){ if(_nm) name=_nm; if(_em && !email) email=_em;
     // Patří ten e-mail někomu s účtem? Platí to samé co u členství: shoda e-mailu není důkaz
@@ -26171,7 +26176,7 @@ function _recpMembPay(pi){
     const nm=(sel.selectedOptions[0]&&sel.selectedOptions[0].getAttribute('data-name'))||null;
     var _refSel=(typeof _rmRefSel==='function')?_rmRefSel():null; var _eff=(typeof _rmEffPrice==='function')?_rmEffPrice():price;
     const amount_minor=Math.round(_eff*100); const fee_minor=Math.round(amount_minor*rate);
-    const month=new Date().toISOString().slice(0,7);
+    const month=_pragueMonth();
     const btns=[$('rmQrSave'),$('rmCashSave')]; btns.forEach(function(b){ if(b){ b.disabled=true; } });
     try{
       const txr={ gym_id:g.id, member_id:sid, coach_id:plan.coach||null, paid_to:'gym', gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:cur, type:'membership', months:(parseInt(plan&&plan.months,10)||1), payment_method:method, commission_status:'pending', commission_month:month, cash_payer_name:nm, acq_source:'direct' };
@@ -26499,7 +26504,7 @@ async function _askAttendedAfterConfirm(b, g){
 async function _qrcConfirm(id, kind, ok, drops, membs){
   var _rer=window._qrcRerender||function(){ _recpQrConfirm(window._qrcOpts); };
   const g=_recGym; if(!g) return; const EN=LANG==='en'; const cur=g.currency||'CZK'; const sym=_curSym(cur);
-  const rate=_recRate(); const month=new Date().toISOString().slice(0,7);
+  const rate=_recRate(); const month=_pragueMonth();
   try{
     if(kind==='dropin'){
       let b=(drops||[]).find(function(x){ return String(x.id)===String(id); }); if(!b){ try{ const r=await supaClient.from('gym_bookings').select('*').eq('id',id).single(); b=(r&&r.data)||null; }catch(e){} } if(!b){ toast(EN?'\u26a0\ufe0f Reservation not found':'\u26a0\ufe0f Rezervace nenalezena'); return _rer(); } if(ok && (b.status==='active'||b.status==='completed'||b.status==='unpaid_void')){ toast(EN?'Already handled':'Ji\u017e vy\u0159\u00edzeno', 1); return _rer(); }
@@ -29458,7 +29463,7 @@ async function loadGymManageBookings(){
       let _hidM=''; try{ _hidM=sessionStorage.getItem('mtl_ep_hint_off_'+_myGymData.id)||''; }catch(e){}
       // Jednorázový úklid po předchozí verzi, která schovávala na celý měsíc.
       try{ localStorage.removeItem('mtl_ep_hint_off_'+_myGymData.id); }catch(e){}
-      const _nowM=new Date().toISOString().slice(0,7);
+      const _nowM=_pragueMonth();
       // DIAGNOSTIKA PRO ZAKLADATELE. Pruh má čtyři podmínky a když nevyjde jedna, nezobrazí se
       // nic a není poznat proč. Zakladateli se místo něj ukáže, která to byla.
       try{
@@ -29645,7 +29650,7 @@ async function loadGymManageBookings(){
         try{ await navigator.clipboard.writeText(_u); toast(LANG==='en'?'\u2705 Club link copied':'\u2705 Odkaz klubu zkop\u00edrov\u00e1n'); }catch(e){ prompt(LANG==='en'?'Copy the link:':'Zkop\u00edruj odkaz:', _u); } }; }
     { const _x=$('epHintX'); if(_x) _x.onclick=function(){
         // Schová se do konce měsíce; prvního se ukáže znovu s novými čísly.
-        try{ sessionStorage.setItem('mtl_ep_hint_off_'+_myGymData.id, new Date().toISOString().slice(0,7)); }catch(e){}
+        try{ sessionStorage.setItem('mtl_ep_hint_off_'+_myGymData.id, _pragueMonth()); }catch(e){}
         // Staré měsíční skrytí zahodit, ať se pruh vrátí i těm, kdo ho jednou zavřeli.
         try{ localStorage.removeItem('mtl_ep_hint_off_'+_myGymData.id); }catch(e){}
         const _r=$('epHintRow'); if(_r) _r.remove();
@@ -30945,7 +30950,12 @@ function _gaRenderCardStatus(){
 const RECEIVER_DECL_VERSION=2;
 const RECEIVER_DECL_CS='Prohlašuji, že tento bankovní účet patří mně / mé entitě a jsem odpovědný/á za případné zdanění tohoto příjmu, pokud mi tato povinnost vzniká.';
 const RECEIVER_DECL_EN='I declare this bank account belongs to me / my entity and I am responsible for any taxation of this income, where such an obligation applies to me.';
-function _recordConsent(kind, version, lang, body_text, meta, scope){ try{ if(typeof currentUser==='undefined'||!currentUser) return; fetch('/api/record-consent',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ user_id: currentUser.id, kind: kind, version: String(version), lang: lang, body_text: body_text, meta: meta||null, scope: scope||null }) }).catch(function(){}); }catch(e){} }
+// OBRAZOVKA SOUHLASU. Při každém kliknutí si appka zapamatuje text okna (nejvzdálenější pevně
+// umístěný předek: dialog / list), ve kterém se klikalo. _recordConsent ho přiloží k souhlasu,
+// pokud volající nepředal vlastní snímek -- takže se uloží vše, co člověk u zaškrtávátka viděl,
+// u všech souhlasů včetně budoucích, bez úprav každého místa zvlášť.
+(function(){ try{ document.addEventListener('click', function(e){ try{ let el=e.target, box=null; for(let i=0; el && el.nodeType===1 && el!==document.body && i<60; i++, el=el.parentElement){ const cs=getComputedStyle(el); if(cs.position==='fixed' || (el.classList && el.classList.contains('sheet'))) box=el; } if(box){ window._consentCtx={ at:Date.now(), text:String(box.innerText||'').replace(/\n{3,}/g,'\n\n').trim().slice(0,20000) }; } }catch(_e){} }, true); }catch(e){} })();
+function _recordConsent(kind, version, lang, body_text, meta, scope, shown){ try{ if(typeof currentUser==='undefined'||!currentUser) return; if(!shown){ try{ const _cx=window._consentCtx; if(_cx && _cx.text && (Date.now()-_cx.at)<180000) shown=_cx.text; }catch(_e){} } fetch('/api/record-consent',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ user_id: currentUser.id, kind: kind, version: String(version), lang: lang, body_text: body_text, meta: meta||null, scope: scope||null, shown: shown||null }) }).catch(function(){}); }catch(e){} }
 function openGymReq(existingCount){
   if(!currentUser){ toast(L('⚠️ Nejprve se přihlas')); return; }
   const nm=document.getElementById('grName'), ct=document.getElementById('grCity'), wy=document.getElementById('grWhy');
@@ -34960,13 +34970,13 @@ async function openGymOrigins(gymId, gymName, range){
   // Období: konkrétní měsíc (2026-09), celý rok (2026) nebo od začátku (all). Výchozí je
   // tenhle měsíc, stejně jako v Přehledu -- aby se dvě obrazovky o stejných penězích
   // neptaly na jiné období.
-  if(!_gymMonth){ const _d=new Date(); _gymMonth=_d.getFullYear()+'-'+String(_d.getMonth()+1).padStart(2,'0'); }
+  if(!_gymMonth){ _gymMonth=_pragueMonth(); }
   const _bounds=function(r){
     if(r==='all') return { from:'1970-01-01T00:00:00Z', to:null };
-    if(/^\d{4}$/.test(r)) return { from:r+'-01-01T00:00:00Z', to:(Number(r)+1)+'-01-01T00:00:00Z' };
+    if(/^\d{4}$/.test(r)) return { from:_pragueMonthStartISO(r+'-01'), to:_pragueMonthStartISO((Number(r)+1)+'-01') };
     const y=Number(r.slice(0,4)), m=Number(r.slice(5,7));
     const nm=(m===12)?((y+1)+'-01'):(y+'-'+String(m+1).padStart(2,'0'));
-    return { from:r+'-01T00:00:00Z', to:nm+'-01T00:00:00Z' };
+    return { from:_pragueMonthStartISO(r), to:_pragueMonthStartISO(nm) };   // hranice v pražském čase
   };
   const _bd=_bounds(_gymMonth);
   const since=_bd.from, until=_bd.to;
@@ -35599,7 +35609,7 @@ async function renderFounderDash(){
   // opravdu naúčtovalo. Je to měření, ne odhad; ARR z něj je pak projekce téhož čísla, ne sazby.
   const _prevYm=(function(){ const d=new Date(); d.setMonth(d.getMonth()-1); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); })();
   const _memPrev=window._fdFee(['membership'], _prevYm);
-  const mtlMemMo=_memPrev||window._fdFee(['membership'], (new Date()).toISOString().slice(0,7)), mtlARR=mtlMemMo*12;
+  const mtlMemMo=_memPrev||window._fdFee(['membership'], _pragueMonth()), mtlARR=mtlMemMo*12;
   const oneOffNet = coachNet + mtlDrop;
   _fdData = { Bact, GBact, activeMem, coaches };
   if(!_fdMonth){ const d=new Date(); _fdMonth=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; }
@@ -35821,7 +35831,7 @@ function openGymStripeSwap(gymId, gymName){
   document.body.appendChild(ov); const close=()=>ov.remove(); ov.onclick=(e)=>{ if(e.target===ov && !_ovHasForm(ov)) close(); }; ov.querySelector('#gsCancel').onclick=close;
   ov.querySelector('#gsGo').onclick=async()=>{ const _cc=await pickCountry(_guessCC()); if(!_cc) return; const btn=ov.querySelector('#gsGo'); btn.disabled=true; btn.textContent=L('Vytvářím...'); try{ const r=await fetch(`/api/create-gym?gymProfileId=${encodeURIComponent(currentUser.id)}&country=${_cc}&gymId=${encodeURIComponent(gymId)}`); const j=await r.json(); if(j.error){ toast('⚠️ '+j.error); btn.disabled=false; btn.textContent=LANG==='en'?'Connect new account →':'Připojit nový účet →'; return; } window.location.href=j.url; }catch(e){ toast(L('⚠️ Chyba připojení Stripe')); btn.disabled=false; } };
 }
-let _acMonth=new Date().toISOString().slice(0,7); let _acFilter=null; let _acType='all';
+let _acMonth=_pragueMonth(); let _acFilter=null; let _acType='all';
 function _openCommissionDoklad(d){
   d=d||{};
   var EN=LANG==='en';
@@ -36060,7 +36070,7 @@ async function openMtlCommissions(scope){
   if(!months.length){ body.innerHTML='<p style="color:var(--light);font-size:13px;text-align:center;padding:40px;">'+(EN?'No commissions yet.':'Zat\u00edm \u017e\u00e1dn\u00e9 provize.')+'</p>'; return; }
   const _MO=EN?['January','February','March','April','May','June','July','August','September','October','November','December']:['Leden','\u00danor','B\u0159ezen','Duben','Kv\u011bten','\u010cerven','\u010cervenec','Srpen','Z\u00e1\u0159\u00ed','\u0158\u00edjen','Listopad','Prosinec'];
   const _mName=function(mk){ const p=String(mk).split('-'); return (_MO[(parseInt(p[1],10)||1)-1]||mk)+' '+p[0]; };
-  const _curM=new Date().toISOString().slice(0,7);
+  const _curM=_pragueMonth();
   // Příznak selhání si načteme sami: přehled se dá otevřít i bez toho, aby se předtím
   // vykreslil pruh v dashboardu, který ho jinak nastavuje.
   try{
@@ -36456,6 +36466,7 @@ function showConsentDoc(kind, idx){
     +((c.ident && c.ident.ip)?row(EN?'IP address':'IP adresa', c.ident.ip):'')
     +((c.ident && c.ident.ua)?row(EN?'Device / browser':'Za\u0159\u00edzen\u00ed / prohl\u00ed\u017ee\u010d', (typeof _uaShort==='function')?_uaShort(c.ident.ua):c.ident.ua):'')
     +(c.body_hash?row(EN?'Text fingerprint':'Otisk zn\u011bn\u00ed', String(c.body_hash).slice(0,16)):'')
+    +(c.shown_hash?row(EN?'Screen fingerprint':'Otisk obrazovky', String(c.shown_hash).slice(0,16)):'')
     +((c.file_url && !c.app)?('<div class="row"><span>'+(EN?'Document (as available then)':'Dokument (jak byl k dispozici)')+'</span><strong><a href="'+esc(c.file_url)+'" target="_blank" rel="noopener">PDF</a></strong></div>'):'')
     +(c.file_hash?row(EN?'Document fingerprint':'Otisk dokumentu', String(c.file_hash).slice(0,16)):'')
     +(c.version?row(EN?'Version':'Verze', c.version):'')
@@ -36473,7 +36484,11 @@ function showConsentDoc(kind, idx){
     +'</div>'
     // Celé znění až na rozkliknutí -- nahoře je doklad (kdo, kdy, odkud), text je dlouhý.
     +'<details class="full"><summary>'+(EN?'Show the full wording':'Zobrazit cel\u00e9 zn\u011bn\u00ed')+'</summary>'
-    +'<div class="body">'+((c.app||c.plain)?esc(c.body_text||'').replace(/\n/g,'<br>'):_consentSafeHtml(c.body_text||''))+'</div>'
+    // CELÁ OBRAZOVKA, na které byl souhlas udělen (vše, co bylo vidět u zaškrtávátka), a pod ní
+    // znění dokumentu / prohlášení. Obojí je snímek z okamžiku souhlasu s vlastním otiskem.
+    +(c.shown_text?('<div style="font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#888;margin:12px 0 4px;">'+(EN?'Screen at the moment of consent':'Obrazovka v okam\u017eiku souhlasu')+'</div><pre>'+esc(c.shown_text)+'</pre>'
+      +(c.body_text?('<div style="font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#888;margin:14px 0 4px;">'+(EN?'Wording of the document / declaration':'Zn\u011bn\u00ed dokumentu / prohl\u00e1\u0161en\u00ed')+'</div>'):'')):'')
+    +(c.body_text?('<div class="body">'+((c.app||c.plain)?esc(c.body_text||'').replace(/\n/g,'<br>'):_consentSafeHtml(c.body_text||''))+'</div>'):'')
     +'<p class="note">'+(EN?'This is the exact wording shown at the moment of acceptance.':'Toto je p\u0159esn\u00e9 zn\u011bn\u00ed, kter\u00e9 bylo zobrazeno v okam\u017eiku odsouhlasen\u00ed.')+'</p></details>'
     +'</body></html>');
   var ov=document.getElementById('consDocOv'); if(ov) ov.remove();
@@ -36882,7 +36897,7 @@ async function openClubOrgList(){
     try{ const { data:os }=await supaClient.from('organizations').select('id,name,abbr,city,kind,status').in('id',ids);
       (os||[]).forEach(o=>{ om[o.id]=o; }); }catch(e){}
   }
-  const _d=v=>{ try{ return new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ'); }catch(e){ return ''; } };
+  const _d=v=>{ try{ return new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ',{ timeZone:'Europe/Prague' }); }catch(e){ return ''; } };
   const _btn='<button id="_colFind" style="width:100%;padding:12px;border-radius:12px;border:1px dashed var(--border);background:none;color:var(--mid);font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;margin-top:10px;">\u{1F3C5} '+(EN?'Join an association':'P\u0159ipojit se k asociaci / federaci')+'</button>';
 
   body.innerHTML=(rows.length?rows.map(function(r){
@@ -36924,7 +36939,7 @@ async function openClubOrgHistory(){
   const oids=[...new Set(rows.map(r=>r.organization_id).filter(Boolean))];
   const om={};
   try{ const { data:os }=await supaClient.from('organizations').select('id,name,abbr').in('id',oids); (os||[]).forEach(o=>{ om[o.id]=o; }); }catch(e){}
-  const _d=v=>{ try{ return new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ'); }catch(e){ return ''; } };
+  const _d=v=>{ try{ return new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ',{ timeZone:'Europe/Prague' }); }catch(e){ return ''; } };
   box.innerHTML=rows.map(function(r){
     const o=om[r.organization_id]||{};
     const _od=r.confirmed_at?_d(r.confirmed_at):(r.created_at?_d(r.created_at):'');
@@ -37090,7 +37105,7 @@ async function openClubOrgPanel(ocId){
   { const t=new Date();
     feeNow=fees.find(function(f){ return new Date(f.period_from+'T00:00:00')<=t && new Date(String(f.period_to).slice(0,10)+'T23:59:59')>=t; })||null; }
 
-  const _d=v=>{ try{ return new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ'); }catch(e){ return ''; } };
+  const _d=v=>{ try{ return new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ',{ timeZone:'Europe/Prague' }); }catch(e){ return ''; } };
   const _valid = oc.valid_until && new Date(String(oc.valid_until).slice(0,10)+'T23:59:59')>=new Date();
   const _paidOk = !!oc.fee_paid_at && _valid;
   const _member = _paidOk && oc.status==='active';
@@ -39004,7 +39019,7 @@ async function renderOrgDocs(org, box){
       rows=data||[];
     }
   }catch(e){}
-  const _d=v=>{ try{ return new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ'); }catch(e){ return ''; } };
+  const _d=v=>{ try{ return new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ',{ timeZone:'Europe/Prague' }); }catch(e){ return ''; } };
   // doklady.amount je v HALÉŘÍCH (stejně jako transactions.gross_amount), takže se dělí stem --
   // jinak z 1 700 Kč bylo 170 000 Kč.
   const _amt=r=>(Number(r&&r.amount||0)/100);
@@ -39248,13 +39263,13 @@ function openAccounting(filter, title){
   // neukázalo by doklady, které jsou vždycky za jeden subjekt. Volání bez cíle je vždycky chyba
   // volajícího, ne stav, který má uživatel vidět.
   if(!filter || (!filter.gymId && !filter.coachId)){ console.warn('[MTL] openAccounting bez cile — ignoruji'); return; }
-  _acFilter=filter||{}; _acType='all'; _acMonth=new Date().toISOString().slice(0,7); if($('acTitle')) $('acTitle').textContent=title||(LANG==='en'?'Accounting export':'Podklady pro účetní'); openSheet('shAccounting'); loadAccounting(); }
+  _acFilter=filter||{}; _acType='all'; _acMonth=_pragueMonth(); if($('acTitle')) $('acTitle').textContent=title||(LANG==='en'?'Accounting export':'Podklady pro účetní'); openSheet('shAccounting'); loadAccounting(); }
 function acShiftMonth(d){ const p=_acMonth.split('-').map(Number); const dt=new Date(Date.UTC(p[0], p[1]-1+d, 1)); _acMonth=dt.toISOString().slice(0,7); loadAccounting(); }
 function _acTypeLabel(t){ const en=LANG==='en'; const map={ coach_1to1:en?'1:1 lesson':'Lekce 1:1', coach_inperson:en?'1:1 lesson':'Lekce 1:1', coach_online:en?'Online 1:1':'Online 1:1', online:en?'Online 1:1':'Online 1:1', inperson:en?'1:1 lesson':'Lekce 1:1', drop_in:(en?'Drop-in':'Jednorázový vstup'), membership:en?'Membership':'Členství', event_ticket:en?'Event':'Akce', course:en?'Course':'Kurz', merch:en?'Merch':'Zboží' }; return map[t]||(en?'Other':'Ostatní'); }
 function _acRowLabel(r){ const c=Number(r&&r._cap)||1; if(r&&r.type==='coach_inperson') return (LANG==='en'?('Lesson 1:'+c):('Lekce 1:'+c)); if(r&&r.type==='coach_online') return ('Online 1:'+c); return _acTypeLabel(r?r.type:''); }
 async function loadAccounting(){
   const body=$('acBody'); if(!body) return; body.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${L('Načítám...')}</p>`;
-  const p=_acMonth.split('-').map(Number); const start=new Date(Date.UTC(p[0],p[1]-1,1)).toISOString(); const end=new Date(Date.UTC(p[0],p[1],1)).toISOString();
+  const p=_acMonth.split('-').map(Number); const _nx=(p[1]===12)?((p[0]+1)+'-01'):(p[0]+'-'+String(p[1]+1).padStart(2,'0')); const start=_pragueMonthStartISO(_acMonth); const end=_pragueMonthStartISO(_nx);   // hranice měsíce v pražském čase
   const mLbl=new Date(Date.UTC(p[0],p[1]-1,1)).toLocaleDateString(LANG==='en'?'en-GB':'cs-CZ',{month:'long',year:'numeric'}); if($('acMonthLbl')) $('acMonthLbl').textContent=mLbl;
   let q=supaClient.from('transactions').select('*').gte('created_at',start).lt('created_at',end).order('created_at',{ascending:false});
   if(_acFilter.payeeAccount) q=q.eq('payee_account',_acFilter.payeeAccount);
@@ -39662,7 +39677,7 @@ async function renderCoachGymSection(coachId){
     ]);
     const drops=rb.data||[], mems=rm.data||[];
     if(!drops.length && !mems.length){ sec.innerHTML=''; return; }
-    const ym=new Date().toISOString().slice(0,7);
+    const ym=_pragueMonth();
     const inM=x=>(x.created_at||'').slice(0,7)===ym;
     const _cgP=!!(currentUser&&currentUser.partner); const dropEarn=drops.reduce((s,b)=>s+(b.amount||0)*(b.gym_keep_pct!=null?b.gym_keep_pct:(_cgP?0.99:0.965)),0);
     const dropsM=drops.filter(inM); const dropEarnM=dropsM.reduce((s,b)=>s+(b.amount||0)*(b.gym_keep_pct!=null?b.gym_keep_pct:(_cgP?0.99:0.965)),0);
@@ -39695,8 +39710,8 @@ async function renderCoachGymSection(coachId){
 async function _csFillNetHero(coachId){
   const box=$('csNetHero'); if(!box) return;
   try{
-    const now=new Date(); const ym=now.toISOString().slice(0,7);
-    const lm=new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth()-1, 1)).toISOString().slice(0,7);
+    const now=new Date(); const ym=_pragueMonth(now);
+    const lm=(function(){ const p=ym.split('-').map(Number); const t=p[0]*12+(p[1]-1)-1; return Math.floor(t/12)+'-'+String((t%12)+1).padStart(2,'0'); })();
     const since=new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth()-1, 1)).toISOString().slice(0,10);
     const { data }=await supaClient.from('transactions').select('gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,stripe_fee,created_at,currency').eq('coach_id',coachId).is('gym_id',null).gte('created_at',since);
     const rows=data||[]; if(!rows.length){ box.style.display='none'; return; }
@@ -40097,7 +40112,7 @@ async function renderCoachDash(){
     + '<div style="font-size:10.5px;color:var(--light);line-height:1.45;padding:4px 6px 2px;">'+(EN?'Counts since this feature went live; grows as students discover you on MTL.':'Počítá se od spuštění této funkce; roste, jak tě studenti nacházejí na MTL.')+'</div>';
   const magnetAcc = HDR('🧲',(EN?'Brought via the MTL App':'Přivedeno přes MTL appku'),'') + wrap(magnetRows);
   try{ const { data:_cc } = await supaClient.from('profiles').select('account_suspended,cash_blocked,commission_failed_at,commission_next_retry,commission_card_brand,commission_card_last4').eq('id',currentUser.id).single(); window._myCoachComm=_cc||null; }catch(e){ window._myCoachComm=null; }
-  let _ccCoachHtml=''; try{ if(typeof _cashCard==='function') _ccCoachHtml=await _cashCard('coach',currentUser.id,new Date().toISOString().slice(0,7),window._myCoachComm); }catch(e){}
+  let _ccCoachHtml=''; try{ if(typeof _cashCard==='function') _ccCoachHtml=await _cashCard('coach',currentUser.id,_pragueMonth(),window._myCoachComm); }catch(e){}
   box.innerHTML=(typeof _commissionBanner==='function'?_commissionBanner(window._myCoachComm,'coach'):'')+_ccCoachHtml+'<select id="cdMonthSel" style="width:100%;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:\'DM Sans\';background:#fff;margin-bottom:10px;">'+monthOpts+'</select>'
     +heroHtml+cardsHtml+note
     +'<div id="cdStats">'+ipAccHtml+moneyAcc('🌐','Online',on)+discAcc+studentsAcc+growthAcc+relAcc+magnetAcc+'<div id="cdTrend"></div></div>'+btnsHtml;
@@ -41615,6 +41630,12 @@ async function _ensureStripeCountry(){
   return (currentUser&&(currentUser.stripe_country||currentUser.country))||null;
 }
 function _regionCur(){ try{ return _epPrice().currency; }catch(e){ return 'CZK'; } }
+// JEDNOTNÝ ČAS PLATFORMY: měsíc (YYYY-MM) podle pražského času, ne UTC -- stejně jako server
+// (_tz.js). Jinak by platba 1. v měsíci po půlnoci padla do předchozího měsíce.
+function _pragueMonth(d){ try{ const p={}; new Intl.DateTimeFormat('en-CA',{ timeZone:'Europe/Prague', year:'numeric', month:'2-digit' }).formatToParts(d instanceof Date?d:new Date(d||Date.now())).forEach(function(x){ p[x.type]=x.value; }); return p.year+'-'+p.month; }catch(e){ return new Date().toISOString().slice(0,7); } }
+// Začátek měsíce YYYY-MM v pražském čase jako UTC ISO (pro dotazy created_at >= / <).
+function _pragueOffsetMs(t){ try{ const p={}; new Intl.DateTimeFormat('en-US',{ timeZone:'Europe/Prague', hourCycle:'h23', year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' }).formatToParts(new Date(t)).forEach(function(x){ p[x.type]=x.value; }); return Date.UTC(+p.year,+p.month-1,+p.day,+p.hour,+p.minute,+p.second)-t; }catch(e){ return 0; } }
+function _pragueMonthStartISO(ym){ const a=String(ym).split('-').map(Number); const g=Date.UTC(a[0], (a[1]||1)-1, 1); return new Date(g-_pragueOffsetMs(g)).toISOString(); }
 function _curSym(c){ c=String(c||'').toUpperCase(); var M={CZK:'Kč',EUR:'€',USD:'$',GBP:'£',CHF:'Fr.',PLN:'zł',SEK:'kr',DKK:'kr',NOK:'kr',HUF:'Ft',RON:'lei',CAD:'CAD',AUD:'AUD',NZD:'NZD'}; return M[c]||c||'Kč'; }
 function _curOptsHTML(sel){ sel=String(sel||'').toUpperCase(); var L=[['CZK','CZK Kč'],['EUR','EUR €'],['USD','USD $'],['GBP','GBP £'],['CHF','CHF Fr.'],['PLN','PLN zł'],['SEK','SEK kr'],['DKK','DKK kr'],['NOK','NOK kr'],['HUF','HUF Ft'],['RON','RON lei'],['CAD','CAD $'],['AUD','AUD $'],['NZD','NZD $']]; return L.map(function(c){ return '<option value="'+c[0]+'"'+(c[0]===sel?' selected':'')+'>'+c[1]+'</option>'; }).join(''); }
 // One delegated listener instead of wiring the toggle at each of the five places that render this
@@ -48876,34 +48897,31 @@ function _olLM(){ return window._olLastMain || (window._olLastMain={}); }
 // Přepínač „Umožnit zakoupit online koučing i studentům z jiných zemí". Zapnutí jde přes
 // bránu s vysvětlením daní (místo plnění u živých online lekcí = stát zákazníka, OSS) a kouč
 // to potvrdí; potvrzení se uloží se zněním (consent_acceptances, kind online_intl_ack).
-const ONLINE_INTL_ACK_VERSION='1';
+const ONLINE_INTL_ACK_VERSION='3';
 function _olMyCC(){ const v=String((currentUser&&(currentUser.billing_country||currentUser.country_code))||'').toUpperCase(); return v; }
 function _olIntlInit(){
   const ck=$('editOnlineIntl'); if(!ck) return;
   const EN=LANG==='en', cc=_olMyCC(), cn=cc?_ccName(cc):(EN?'your country':'tvoje země');
   const l=$('editOnlineIntlLbl'), sub=$('editOnlineIntlSub');
   if(l) l.textContent=EN?('Allow students from countries other than '+cn+' to buy online coaching'):('Umožnit zakoupit online koučing i studentům z jiných zemí'+(cc?(' (mimo '+cn+')'):''));
-  if(sub) sub.textContent=EN?('Off: only students from '+cn+' can buy. Your offer stays visible to everyone.'):(cc?('Vypnuto: koupit si můžou jen studenti, kteří mají v profilu zemi '+cn+'. Nabídku uvidí všichni.'):'Vypnuto: koupit si můžou jen studenti z tvé země. Nabídku uvidí všichni.');
+  if(sub) sub.textContent=EN?('Off: only students residing in '+cn+' (as registered) can buy. Your offer stays visible to everyone.'):(cc?('Vypnuto: koupit si můžou jen studenti s bydlištěm v zemi '+cn+' (podle registrace). Nabídku uvidí všichni.'):'Vypnuto: koupit si můžou jen studenti z tvé země. Nabídku uvidí všichni.');
   ck.checked=(currentUser && currentUser.online_intl===true);
   ck.onchange=async function(){ if(!this.checked) return; const ok=await _olIntlGate(); if(!ok) this.checked=false; };
 }
 function _olIntlGate(){
   return new Promise(resolve=>{
     const EN=LANG==='en';
+    // ŽÁDNÉ DAŇOVÉ RADY: MTL není daňový poradce. Jen fakt, odpovědnost a co appka dává jako podklad.
     const pts=EN?[
       'Students from other countries will be able to buy your online services and subscriptions.',
-      'Taxes: since 2025, live online lessons and subscriptions with calls sold to consumers in another EU country are taxed in the customer\'s country — from the first euro, the €10,000 threshold does not apply to them. A VAT payer handles it through OSS; a non-payer through registration in that country or the EU small-business scheme (EU SME). Individual feedback (e.g. a video review) is taxed in your country.',
-      'Outside the EU (e.g. United Kingdom, Switzerland, USA) the rules of that country apply.',
-      'Business customers with a VAT ID: reverse charge, they pay the VAT themselves.',
-      'MTL puts the customer\'s country on every receipt. You are responsible for paying the taxes — we recommend discussing it with a tax advisor.'
+      'Selling to customers in other countries can have tax and other legal consequences in the customer\'s country (for example VAT). Assessing and meeting them is up to you — MTL does not provide tax advice.',
+      'With every online order we record the customer\'s country of residence from their registration.'
     ]:[
       'Online služby a předplatné si u tebe budou moct koupit i studenti z jiných zemí.',
-      'Daně: od roku 2025 se živé online lekce a předplatné s hovory prodané spotřebitelům z jiné země EU daní ve státě zákazníka — od prvního eura, limit 10 000 € se na ně nevztahuje. Plátce DPH to řeší přes OSS, neplátce registrací v dané zemi nebo režimem malých podniků EU (EU SME). Individuální zpětná vazba (např. rozbor videa) se daní u tebe.',
-      'Mimo EU (např. Velká Británie, Švýcarsko, USA) platí pravidla dané země.',
-      'Firemní zákazník s DIČ: přenesená daňová povinnost, DPH si odvede sám.',
-      'MTL na každém dokladu uvede zemi zákazníka. Za odvod daní odpovídáš ty — doporučujeme to probrat s daňovým poradcem.'
+      'Prodej zákazníkům z jiných zemí může mít daňové a další právní dopady v zemi zákazníka (například DPH). Jejich posouzení a splnění je na tobě — MTL daňové poradenství neposkytuje.',
+      'Ke každé online objednávce ukládáme zemi bydliště zákazníka z jeho registrace.'
     ];
-    const ack=EN?'I understand, and I am responsible for taxes in my customers\' countries.':'Rozumím a za daně v zemích zákazníků odpovídám sám/sama.';
+    const ack=EN?'I understand that I am responsible for taxes and other obligations in my customers\' countries.':'Rozumím, že za daně a další povinnosti v zemích zákazníků odpovídám já.';
     const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;z-index:100070;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center;';
     ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px 18px 0 0;padding:20px;max-height:88vh;overflow-y:auto;font-family:'DM Sans';">
       <div style="font-size:17px;font-weight:800;color:#141414;margin-bottom:10px;">🌍 ${EN?'Selling online coaching abroad':'Prodej online koučinku do jiných zemí'}</div>
@@ -50914,10 +50932,10 @@ async function showReceipt(b){
     const html=`<!doctype html><html><head><meta charset="utf-8"><title>${EN?'Payment confirmation':'Potvrzení o platbě'}</title>`
       +`<style>body{font-family:-apple-system,Arial,sans-serif;color:#1a1a1a;max-width:600px;margin:30px auto;padding:0 20px;line-height:1.5}h1{font-size:22px;margin:0 0 2px;letter-spacing:.04em}.muted{color:#777;font-size:13px}.row{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #eee;font-size:14px}.row span:first-child{color:#777}.tot{font-weight:700;font-size:16px;border-top:2px solid #1a1a1a;margin-top:8px;padding-top:10px;border-bottom:none}.note{font-size:11px;color:#999;margin-top:26px;line-height:1.6;border-top:1px solid #eee;padding-top:12px}.btn{margin-top:22px;padding:12px 20px;background:#1a1a1a;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer}@media print{.btn{display:none}}</style></head><body>`
       +`<h1>${EN?'Payment confirmation':'Potvrzení o platbě'}</h1>`
-      +(b.doklad_no?`<div class="muted">${esc(b.doklad_no)}${b.issued_at?(' \u00b7 '+(EN?'issued ':'vystaveno ')+new Date(b.issued_at).toLocaleDateString(EN?'en-GB':'cs-CZ')):''}</div>`:'')+(_wasTest?`<div style="margin-top:12px;padding:9px 12px;background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font-size:12px;font-weight:700;">\ud83e\uddea ${EN?'TEST MODE — not a formal tax document; no actual transaction took place':'TESTOVACÍ REŽIM — nejde o formální daňový doklad a k žádné skutečné transakci nedošlo'}</div>`:'')
+      +(b.doklad_no?`<div class="muted">${esc(b.doklad_no)}${b.issued_at?(' \u00b7 '+(EN?'issued ':'vystaveno ')+new Date(b.issued_at).toLocaleDateString(EN?'en-GB':'cs-CZ',{ timeZone:'Europe/Prague' })):''}</div>`:'')+(_wasTest?`<div style="margin-top:12px;padding:9px 12px;background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font-size:12px;font-weight:700;">\ud83e\uddea ${EN?'TEST MODE — not a formal tax document; no actual transaction took place':'TESTOVACÍ REŽIM — nejde o formální daňový doklad a k žádné skutečné transakci nedošlo'}</div>`:'')
       +`<div style="margin-top:22px">`
       +`<div class="row"><span>${EN?'Provider (seller)':'Poskytovatel (prodejce)'}</span><strong>${esc(seller)}</strong></div>`
-      +`<div class="row"><span>${EN?'Issue date':'Datum vystaven\u00ed'}</span><strong>${(function(){ try{ return _dkS.issued_at?new Date(_dkS.issued_at).toLocaleDateString(EN?'en-GB':'cs-CZ'):''; }catch(e){ return ''; } })()}</strong></div>`
+      +`<div class="row"><span>${EN?'Issue date':'Datum vystaven\u00ed'}</span><strong>${(function(){ try{ return _dkS.issued_at?new Date(_dkS.issued_at).toLocaleDateString(EN?'en-GB':'cs-CZ',{ timeZone:'Europe/Prague' }):''; }catch(e){ return ''; } })()}</strong></div>`
       +(_discPct>0?`<div class="row"><span>${EN?'Price before discount':'Cena p\u0159ed slevou'}</span><span>${fmt(_listAmt)} ${sym}</span></div><div class="row"><span>${EN?'Referral discount':'Referral sleva'}</span><span>\u2212${_discPct} %</span></div>`:'')
       +(sellerIco?`<div class="row"><span>${EN?'Reg. number':'IČO'}</span><strong>${esc(sellerIco)}</strong></div>`:'')
       +(sellerDic?`<div class="row"><span>${EN?'VAT ID':'DIČ'}</span><strong>${esc(sellerDic)}</strong></div>`:'')
@@ -51015,7 +51033,7 @@ function _txNetEff(r){ const eG=(r.gross_amount||0)-(r.refund_amount||0); const 
 function _net13Since(){ const d=new Date(); d.setMonth(d.getMonth()-12); d.setDate(1); return d.toISOString().slice(0,10); }
 function _netSym(c){ return _curSym(c); }
 function _netFmt(v,c){ const _d=2; try{ return (Number(v)||0).toLocaleString(LANG==='en'?'en-US':'cs-CZ',{minimumFractionDigits:_d,maximumFractionDigits:_d})+' '+_netSym(c); }catch(e){ return ((Number(v)||0).toFixed(_d))+' '+_netSym(c); } }
-function _curMonthKey(){ return new Date().toISOString().slice(0,7); }
+function _curMonthKey(){ return _pragueMonth(); }
 async function _fetchMyTx(force){
   // 5 minut místo 1. Transakce se nemění po vteřinách a přehled se otevírá opakovaně -- minutová
   // platnost znamenala, že skoro každé otevření platilo plnou cenu dotazu znovu.
@@ -51203,7 +51221,7 @@ async function openFullDash(){
   if(n.hasGym) dashChips+='<button class="mdActBtn" data-act="gymdash" style="'+Chip+'">🏛️ '+(EN?'Club dashboard':'Přehled klubu')+'</button>';
   let acts='<div style="display:flex;gap:9px;">'+dashChips+'</div>';
   $('mdActions').innerHTML=acts;
-  try{ const _ym=new Date().toISOString().slice(0,7); let _ccH=''; if(n.hasCoach && typeof _cashCard==='function'){ _ccH+=await _cashCard('coach',currentUser.id,_ym,currentUser); } if(n.hasGym && typeof _cashCard==='function'){ const _g=(window._myGyms&&window._myGyms[0])||((typeof _myGymData!=='undefined')?_myGymData:null); if(_g) _ccH+=await _cashCard('gym',_g.id,_ym,_g); } const _mc=$('mdCash'); if(_mc) _mc.innerHTML=_ccH; }catch(e){}
+  try{ const _ym=_pragueMonth(); let _ccH=''; if(n.hasCoach && typeof _cashCard==='function'){ _ccH+=await _cashCard('coach',currentUser.id,_ym,currentUser); } if(n.hasGym && typeof _cashCard==='function'){ const _g=(window._myGyms&&window._myGyms[0])||((typeof _myGymData!=='undefined')?_myGymData:null); if(_g) _ccH+=await _cashCard('gym',_g.id,_ym,_g); } const _mc=$('mdCash'); if(_mc) _mc.innerHTML=_ccH; }catch(e){}
   $('mdActions').querySelectorAll('.mdActBtn').forEach(b=>{ b.onclick=()=>{ const a=b.dataset.act;
     if(a==='coachdash'){ openCoachDash(); }
     else if(a==='gymteamdash'){ try{ closeSheet('shMoneyDash'); }catch(e){} if(typeof openGymTeamDash==='function') openGymTeamDash(); }
