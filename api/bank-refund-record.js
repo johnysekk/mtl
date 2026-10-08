@@ -41,10 +41,20 @@ export default async function handler(req, res) {
 
     let tx = null, consumed = false;
     if (kind === 'membership') {
-      const m = ((await sb(`gym_memberships?id=eq.${q(id)}&select=gym_id,student_id,created_at`)) || [])[0];
+      const m = ((await sb(`gym_memberships?id=eq.${q(id)}&select=gym_id,student_id,created_at,paid_to,coach_id`)) || [])[0];
       if (!m) return res.status(404).json({ ok: false, error: 'membership not found' });
+      if (!m.gym_id && m.paid_to === 'coach') {
+        // ONLINE PŘEDPLATNÉ KOUČE (bez klubu): vrací jen ten kouč, kterému šly peníze.
+        if (String(m.coach_id) !== String(me)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        let _wtx = null;
+        if (b.withdrawal_id) { const w = ((await sb(`withdrawal_requests?id=eq.${q(String(b.withdrawal_id))}&membership_id=eq.${q(id)}&select=transaction_id`)) || [])[0]; if (w && w.transaction_id) _wtx = w.transaction_id; }
+        tx = ((await sb(_wtx
+          ? `transactions?id=eq.${q(_wtx)}&payment_method=in.(cash,qr,pis)&select=id,gym_id,member_id,created_at,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,commission_status,months`
+          : `transactions?coach_id=eq.${q(m.coach_id)}&member_id=eq.${q(m.student_id)}&type=eq.membership&payment_method=in.(cash,qr,pis)&order=created_at.desc&limit=1&select=id,gym_id,member_id,created_at,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,commission_status,months`)) || [])[0];
+      } else {
       if (!(await isGymBoss(m.gym_id, me))) return res.status(403).json({ ok: false, error: 'forbidden' });
       tx = ((await sb(`transactions?gym_id=eq.${q(m.gym_id)}&member_id=eq.${q(m.student_id)}&type=eq.membership&payment_method=in.(cash,qr,pis)&order=created_at.desc&limit=1&select=id,gym_id,member_id,created_at,gross_amount,refund_amount,mtl_fee,mtl_fee_refunded,commission_status`)) || [])[0];
+      }
     } else if (kind === 'private') {
       const bk = ((await sb(`bookings?id=eq.${q(id)}&select=coach_id,training_date,training_time,type,fulfilled,checked_in_at,student_confirmed`)) || [])[0];
       if (!bk || String(bk.coach_id) !== String(me)) return res.status(403).json({ ok: false, error: 'forbidden' });

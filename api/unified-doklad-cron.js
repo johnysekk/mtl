@@ -226,8 +226,8 @@ function buildSnap(kind, entityId, ownerId, identity, period, cur, data, ME, buy
   snap[kind === 'gym' ? 'gym_id' : (kind === 'organization' ? 'organization_id' : 'coach_id')] = entityId;
   return snap;
 }
-function _supLines(s, lang){ const T=_t(lang); return [s.sup_name, s.sup_address, s.sup_ico ? (T.regno+': ' + s.sup_ico) : '', s.sup_dic ? (T.vatid+': ' + s.sup_dic) : '', s.sup_country ? (T.country + ': ' + _ccName(s.sup_country, lang)) : '', s.sup_phone ? (T.phone+': ' + s.sup_phone) : '', s.sup_email ? ('E-mail: ' + s.sup_email) : ''].filter(Boolean); }
-function _custLines(s, lang){ const T=_t(lang); return [s.cust_name || '\u2014', s.cust_trade_name ? ((s.organization_id ? T.inMtlOrg : (s.gym_id ? T.inMtlGym : T.inMtlCoach)) + ': ' + s.cust_trade_name) : '', s.cust_address, s.cust_ico ? (T.regno+': ' + s.cust_ico) : '', s.cust_dic ? (T.vatid+': ' + s.cust_dic) : '', s.cust_country ? (T.country + ': ' + _ccName(s.cust_country, lang)) : '', s.cust_phone ? (T.phone+': ' + s.cust_phone) : '', s.cust_email ? ('E-mail: ' + s.cust_email) : ''].filter(Boolean); }
+function _supLines(s, lang){ const T=_t(lang); return [s.sup_name, s.sup_address, s.sup_country ? _ccName(s.sup_country, lang) : '', s.sup_ico ? (T.regno+': ' + s.sup_ico) : '', s.sup_dic ? (T.vatid+': ' + s.sup_dic) : '', s.sup_phone ? (T.phone+': ' + s.sup_phone) : '', s.sup_email ? ('E-mail: ' + s.sup_email) : ''].filter(Boolean); }
+function _custLines(s, lang){ const T=_t(lang); return [s.cust_name || '\u2014', s.cust_trade_name ? ((s.organization_id ? T.inMtlOrg : (s.gym_id ? T.inMtlGym : T.inMtlCoach)) + ': ' + s.cust_trade_name) : '', s.cust_address, s.cust_country ? _ccName(s.cust_country, lang) : '', s.cust_ico ? (T.regno+': ' + s.cust_ico) : '', s.cust_dic ? (T.vatid+': ' + s.cust_dic) : '', s.cust_phone ? (T.phone+': ' + s.cust_phone) : '', s.cust_email ? ('E-mail: ' + s.cust_email) : ''].filter(Boolean); }
 function _howCharged(s, lang){
   const T=_t(lang); const parts = [];
   if (s.bank_amount > 0) parts.push(T.howBank(_money(s.bank_amount, s.currency, lang), _czDate(s.charged_at, lang)));
