@@ -20,6 +20,7 @@ import { checkPrice } from './_price-check.js';
 import { isTestMode } from './_config.js';
 import { approveMemberAppOnPayment, cohortPayer } from './_member-app.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
+import { pragueMonth } from './_tz.js';
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -324,7 +325,7 @@ export default async function handler(req, res) {
     let rate, row, cur;
     let _creditRow = null;   // {memberId,id,sc} to consume after a successful insert (referral-credit redemption)
     const _wantCredit = (credit === 'student' && member_id && ['coach_1to1', 'drop_in'].includes(type));
-    const month = new Date().toISOString().slice(0, 7);
+    const month = pragueMonth();   // měsíc provize podle pražského času (ne UTC)
     // Kdyz klubove plneni vyplaci kouc ze svého klubového účtu, doklad zní na jeho payout_
     // identitu. Deklarace nad vetvemi, protoze doklad se vystavuje az za nimi.
     let _dokladPayoutCoach = null;

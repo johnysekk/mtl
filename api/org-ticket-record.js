@@ -15,6 +15,7 @@ import { orgRate } from './_rate.js';
 import { isTestMode } from './_config.js';
 
 import { vatMode, vatRateFor } from './_vat.js';
+import { pragueMonth } from './_tz.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -157,7 +158,7 @@ export default async function handler(req, res) {
     const rate = orgRate(org, evType);
     const gross = Math.round(Number(amount));
     const fee = Math.round(gross * rate);
-    const month = new Date().toISOString().slice(0, 7);
+    const month = pragueMonth();
 
     const tx = await sb('transactions', {
       method: 'POST', prefer: 'return=representation',

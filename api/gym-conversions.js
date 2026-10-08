@@ -1,4 +1,5 @@
 // /api/gym-conversions — server-side aggregation of a gym's MTL conversion funnel.
+import { pragueMonth } from './_tz.js';
 // Returns only computed numbers (not raw rows), so it's light regardless of volume.
 // Security: caller sends their Supabase access token; we verify it and confirm gym ownership.
 // viewer_id (gym_views) === student_id (purchases) === profiles.id, so we can attribute
@@ -145,7 +146,7 @@ export default async function handler(req, res) {
     let acqFee = 0, broughtIds = new Set(), broughtNet = 0;
     // Měsíční čísla vedle celkových: zbytek panelu je za tenhle měsíc, takže samotné „celkem"
     // se s ním nedalo srovnat.
-    const _mStart = new Date().toISOString().slice(0, 7) + '-01';
+    const _mStart = pragueMonth() + '-01';
     let acqFeeMonth = 0, broughtNetMonth = 0;
     try {
       const txAcq = await pagedGet(`transactions?gym_id=eq.${gymId}&acq_source=eq.mtl_discovery&select=member_id,mtl_fee,mtl_fee_refunded,created_at`);

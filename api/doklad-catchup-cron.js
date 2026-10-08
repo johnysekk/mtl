@@ -1,3 +1,4 @@
+import { pragueMonth, shiftMonth } from './_tz.js';
 // /api/doklad-catchup-cron.js — dovystaví doklady o provizi za STARŠÍ období.
 //
 // PROČ: unified-doklad-cron vystavuje doklad vždy jen za PŘEDCHOZÍ měsíc. Od sql-49 navíc
@@ -13,13 +14,9 @@ const APP = process.env.APP_URL || 'https://app.martialtraininglab.com';
 const SECRET = process.env.CRON_SECRET || '';
 
 function prevMonths(n) {
-  const out = [];
-  const d = new Date();
-  d.setUTCDate(1);
-  for (let i = 1; i <= n; i++) {
-    d.setUTCMonth(d.getUTCMonth() - 1);
-    out.push(d.toISOString().slice(0, 7));
-  }
+  // Předchozí měsíce podle pražského času (stejně jako commission_month).
+  const out = [], cur = pragueMonth();
+  for (let i = 1; i <= n; i++) out.push(shiftMonth(cur, -i));
   return out;
 }
 

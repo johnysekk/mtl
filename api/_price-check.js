@@ -201,7 +201,9 @@ export async function checkOnlineCountry({ SB, KEY, coachId, buyerId }) {
     const c = rows.find((r) => String(r.id) === String(coachId)), s = rows.find((r) => String(r.id) === String(buyerId));
     if (!c || !s || c.online_intl === true || String(coachId) === String(buyerId)) return { ok: true };
     const cc = String(c.billing_country || c.country_code || '').trim().toUpperCase();
-    const sc = String(s.country_code || s.residence_country || '').trim().toUpperCase();
+    // Země kupujícího = bydliště z registrace (residence_country); country_code se mění přesunem
+    // účtu v appce a o bydlišti nic neříká. Jen u starých profilů bez bydliště záložně country_code.
+    const sc = String(s.residence_country || s.country_code || '').trim().toUpperCase();
     if (!cc || !sc || cc === sc) return { ok: true };
     return { ok: false, error: `Tento kouč prodává online koučink jen studentům ze své země (${cc}).` };
   } catch (e) { return { ok: true }; }

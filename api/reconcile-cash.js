@@ -14,6 +14,7 @@
 // ReferenceError, tedy prave ta zachranna sit, ktera ma chytat vypadky record-cash.js, nefungovala
 // nikdy. Stejna rodina chyby jako _wsbGet v record-cash.js.
 import { ladderRate as _mtlLadder, acquisitionRate as _mtlAcq } from './_rate.js';
+import { pragueMonth } from './_tz.js';
 
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -91,7 +92,7 @@ export default async function handler(req, res) {
         const gross = Math.round(Number(b.amount || 0) * 100);
         if (!(gross > 0)) { out.skipped++; continue; }
         let _creditRow = null;
-        const month = (b.created_at ? new Date(b.created_at) : new Date()).toISOString().slice(0, 7);
+        const month = pragueMonth(b.created_at ? new Date(b.created_at) : new Date());
         const type = 'drop_in';
         let row;
         if (b.paid_to === 'coach' && b.coach_id) {

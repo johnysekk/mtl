@@ -38,7 +38,7 @@ export default async function handler(req, res) {
   try {
     let body = req.body;
     if (typeof body === 'string') { try { body = JSON.parse(body); } catch (e) { body = {}; } }
-    const { user_id, kind, version, lang, body_text, meta, scope } = body || {};
+    const { user_id, kind, version, lang, body_text, meta, scope, shown } = body || {};
     if (!user_id || !kind || version == null || !body_text) {
       return res.status(400).json({ error: 'user_id, kind, version, body_text required' });
     }
@@ -79,7 +79,16 @@ export default async function handler(req, res) {
       if (pr && pr[0]) { _uname = pr[0].name || null; _uemail = pr[0].email || null; }
     } catch (e) { console.error('[record-consent] profil', e.message); }
     const _meta = meta || {};
-    if (versionMismatch) _meta.__version_hash_mismatch = versionMismatch;
+    if (versionMismatch) {
+      _meta.__version_hash_mismatch = versionMismatch;
+      // Znění, které člověk OPRAVDU viděl, se liší od uloženého pod touto verzí (typicky text
+      // se jménem dítěte, názvem akce nebo podmínkami konkrétní akce). Bez tohohle by se jako
+      // důkaz ukazovalo znění z PRVNÍHO přijetí -- tedy cizí text. Uloží se přímo k přijetí.
+      _meta.body_text_shown = String(body_text);
+    }
+    // CELÁ OBRAZOVKA, na které člověk souhlas udělil (shrnutí objednávky, prohlášení se jménem
+    // dítěte, údaje účtu…) -- snímek k tomuto přijetí s vlastním otiskem. Patří do „Celého znění“.
+    if (shown) { _meta.shown_text = String(shown).slice(0, 20000); _meta.shown_hash = sha256(_meta.shown_text); }
     const row = {
       user_id, kind, scope: _scope, version, lang: _lang, version_id: versionId, body_hash,
       user_name: _uname, user_email: _uemail,

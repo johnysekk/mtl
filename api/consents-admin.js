@@ -32,6 +32,7 @@ async function sbCount(path) {
   } catch (e) { return 0; }
 }
 
+const _mt = (a) => { try { const m = typeof a.meta === 'string' ? JSON.parse(a.meta) : a.meta; return m || {}; } catch (e) { return {}; } };
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type, x-access-token');
@@ -213,9 +214,11 @@ export default async function handler(req, res) {
         id: a.id, kind: a.kind, version: a.version, lang: a.lang, party: partyFor(a, _parties),
         // Jméno ZE SNÍMKU souhlasu; živý profil jen u starších řádků, které snímek nemají.
         who: a.user_name || a.user_email || names[a.user_id] || '—', accepted_at: a.accepted_at,
-        body_text: (v && v.body_text) || null,
+        // Znění přesně tak, jak ho člověk viděl: když se lišilo od verze, je uložené u přijetí.
+        body_text: (_mt(a).body_text_shown) || (v && v.body_text) || null,
+        shown_text: _mt(a).shown_text || null, shown_hash: _mt(a).shown_hash || null,
         file_url: (v && v.file_url) || null, file_hash: (v && v.file_hash) || null,
-        hash_mismatch: !!(v && v.body_hash && a.body_hash && v.body_hash !== a.body_hash),
+        hash_mismatch: !_mt(a).body_text_shown && !!(v && v.body_hash && a.body_hash && v.body_hash !== a.body_hash),
         ident: (function(){ const p = names['_p_' + a.user_id] || {}; const mtl = scope === 'mtl';
           return { name: a.user_name || p.name || null, email: a.user_email || p.email || null, phone: mtl ? (p.phone || null) : null, account: a.user_id || null,
                    birth: mtl ? (p.birthdate || null) : null, ip: mtl ? (a.ip || null) : null, ua: mtl ? (a.user_agent || null) : null }; })(),

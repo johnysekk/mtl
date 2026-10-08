@@ -7,6 +7,7 @@
 // POST { user_id } → { url } | { settled: true } | { error }
 
 import { makePayToken } from './commission-pay-now.js';
+import { pragueMonth } from './_tz.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -33,7 +34,7 @@ const sbGet = async (path) => {
 const OWNER_COL = { gym: 'gym_id', coach: 'coach_id', org: 'organization_id' };
 async function owes(kind, id) {
   const col = OWNER_COL[kind];
-  const cm = new Date().toISOString().slice(0, 7);
+  const cm = pragueMonth();
   const rows = await sbGet(`transactions?${col}=eq.${encodeURIComponent(id)}&commission_status=in.(pending,failed)&commission_month=lte.${cm}&payment_method=in.(cash,qr,pis)&select=mtl_fee,mtl_fee_refunded`);
   return (rows || []).reduce((a, r) => a + Math.max(0, (Number(r.mtl_fee) || 0) - (Number(r.mtl_fee_refunded) || 0)), 0);
 }
@@ -68,7 +69,7 @@ export default async function handler(req, res) {
     }
     if (!best) return res.status(200).json({ ok: true, settled: true });
 
-    const ym = new Date().toISOString().slice(0, 7);
+    const ym = pragueMonth();
     return res.status(200).json({
       ok: true,
       // VRATIT SE TAM, ODKUD CLOVEK PRISEL. Odkaz se skladal natvrdo z APP_URL, takze kdo

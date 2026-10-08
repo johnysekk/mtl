@@ -22,6 +22,7 @@ async function sbGet(path) {
   catch (e) { return []; }
 }
 
+const _mt = (a) => { try { const m = typeof a.meta === 'string' ? JSON.parse(a.meta) : a.meta; return m || {}; } catch (e) { return {}; } };
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'authorization, content-type, x-access-token');
@@ -60,11 +61,13 @@ export default async function handler(req, res) {
       return {
         id: a.id, kind: a.kind, scope: a.scope || null, version: a.version, lang: a.lang, party: partyFor(a, _parties),
         accepted_at: a.accepted_at, ip: a.ip || null, user_agent: a.user_agent || null,
-        body_text: (v && v.body_text) || null,
+        // Znění přesně tak, jak ho člověk viděl: když se lišilo od verze, je uložené u přijetí.
+        body_text: (_mt(a).body_text_shown) || (v && v.body_text) || null,
+        shown_text: _mt(a).shown_text || null, shown_hash: _mt(a).shown_hash || null,
         file_url: (v && v.file_url) || null, file_hash: (v && v.file_hash) || null,
         // Když se hash přijetí liší od hashe uložené verze, text pod tou verzí se změnil bez
         // navýšení čísla. Nezamlčovat -- ať je na dokladu vidět, že znění není jisté.
-        hash_mismatch: !!(v && v.body_hash && a.body_hash && v.body_hash !== a.body_hash),
+        hash_mismatch: !_mt(a).body_text_shown && !!(v && v.body_hash && a.body_hash && v.body_hash !== a.body_hash),
       };
     });
 

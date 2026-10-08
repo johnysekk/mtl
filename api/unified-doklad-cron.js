@@ -16,6 +16,7 @@ import PDFDocument from 'pdfkit';
 import { DEJAVU_CZ } from './_dejavu-cz.js';
 import { isTestMode, minChargeFor } from './_config.js';
 import { introFreeFor } from './_rate.js';
+import { pragueMonth } from './_tz.js';
 const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 const SB  = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -400,7 +401,7 @@ export default async function handler(req, res) {
     period = d; dayStart = d + 'T00:00:00';
     dayEnd = new Date(new Date(d + 'T00:00:00Z').getTime() + 86400000).toISOString().slice(0, 10) + 'T00:00:00';
   } else {
-    period = (q.month && /^\d{4}-\d{2}$/.test(q.month)) ? q.month : prevMonth(new Date().toISOString().slice(0, 7));
+    period = (q.month && /^\d{4}-\d{2}$/.test(q.month)) ? q.month : prevMonth(pragueMonth());
   }
   let ME = {}; try { const _ps = await sb('platform_settings?id=eq.1&select=*'); ME = (_ps && _ps[0]) || {}; } catch (e) {}
   let issued = 0, skipped = 0, deferred = 0;

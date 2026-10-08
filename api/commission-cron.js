@@ -27,6 +27,7 @@ import { minChargeFor } from './_config.js';
 const APP = process.env.APP_URL || 'https://app.martialtraininglab.com';
 
 import { isTestMode } from './_config.js';
+import { pragueMonth } from './_tz.js';
 const SB  = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const GRACE_DAYS = 14;
@@ -134,7 +135,7 @@ async function dueSumFor(kind, id) {
   try {
     const col = ({ gym: 'gym_id', coach: 'coach_id', org: 'organization_id' })[kind];
     if (!col) return {};
-    const cm = new Date().toISOString().slice(0, 7);
+    const cm = pragueMonth();
     const rows = await sb(`transactions?${col}=eq.${encodeURIComponent(id)}&commission_status=in.(pending,failed)&commission_month=lte.${cm}&payment_method=in.(cash,qr,pis)&select=mtl_fee,mtl_fee_refunded,currency`);
     const by = {};
     (rows || []).forEach((r) => {
@@ -203,7 +204,7 @@ export default async function handler(req, res) {
 // Minima jsou v _config.js, ať se obě strany (strhávání i vystavení dokladu) nerozejdou.
 const belowMin = (amount, cur) => amount < minChargeFor(cur);
 let deferredMin = 0;
-  const curMonth = now.toISOString().slice(0, 7);
+  const curMonth = pragueMonth(now);
   let marked = 0, markErr = null;
   let collected = 0, failed = 0, suspended = 0, lifted = 0;
 

@@ -19,6 +19,7 @@ import { approveMemberAppOnPayment, cohortPayer } from './_member-app.js';
 const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 import { DEJAVU_CZ } from './_dejavu-cz.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
+import { pragueMonth } from './_tz.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 export const config = { api: { bodyParser: false } };
@@ -528,7 +529,7 @@ async function recordTransaction(acct, pi, fields) {
       // typu plateb nic nemeni a stary radek bez toho sloupce se cte jako jeden mesic.
       ...(fields.months != null ? { months: Math.max(1, parseInt(fields.months, 10) || 1) } : {}),
       cohort_id: fields.cohort_id || null,
-      payment_method: 'stripe', commission_status: 'collected', commission_month: new Date().toISOString().slice(0,7),
+      payment_method: 'stripe', commission_status: 'collected', commission_month: pragueMonth(),
       status: 'paid', created_at: new Date().toISOString(),
     });
     // INSERT neprosel = transakci mezitim zapsal /api/session a doklad vystavuje on. Druhe cislo
@@ -775,7 +776,7 @@ export default async function handler(req, res) {
             // Stejný rozsah, jaký spočítala platební stránka (commission-pay-now): pending
             // i failed. V denním režimu cron řádky na 'failed' nepřepisuje, takže samotné
             // 'failed' by doplatek nespároval a provize by se strhla ještě jednou.
-            const _curM = new Date().toISOString().slice(0, 7);
+            const _curM = pragueMonth();
             const _flt = `${col}=eq.${encodeURIComponent(m.owner_id)}&commission_status=in.(pending,failed)` +
               `&commission_month=lte.${_curM}&payment_method=in.(cash,qr,pis)` +
               (cur ? `&currency=ilike.${encodeURIComponent(cur)}` : '');

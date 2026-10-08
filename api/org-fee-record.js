@@ -12,6 +12,7 @@
 import { isTestMode } from './_config.js';
 
 import { vatMode, vatRateFor, needVatBeforePay } from './_vat.js';
+import { pragueMonth } from './_tz.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -233,7 +234,7 @@ export default async function handler(req, res) {
         type: 'org_fee', status: 'completed',
         // Provize je nulova, takze neni co vybirat -- rovnou uzavreno, aby commission-cron
         // nepocital nuly a nechodily prazdne vyzvy.
-        commission_status: 'collected', commission_month: new Date().toISOString().slice(0, 7),
+        commission_status: 'collected', commission_month: pragueMonth(),
         // HALERE, jako vsude jinde v transactions.gross_amount. Drive se sem ukladala cela
         // koruna, takze prehled organizace ukazoval stonasobne mensi vybrane penize.
         gross_amount: Math.round(Number(amount) * 100), currency: String(currency).toUpperCase(),
