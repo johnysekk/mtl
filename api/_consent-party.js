@@ -34,8 +34,15 @@ export async function resolveParties(sbGet, scopes) {
   return out;
 }
 
+// Podmínky platby z účtu (PIS) jsou smlouva mezi plátcem a FINBRICKS, ne MTL ani poskytovatelem.
+export const FINBRICKS_PARTY = {
+  role: 'third', kind: 'finbricks', name: 'Finbricks s.r.o.', ico: '10669205',
+  address: 'Václavské náměstí 796/42, 110 00 Praha 1',
+};
+
 // Strana pro jeden záznam souhlasu (consent_acceptances).
 export function partyFor(row, parties) {
+  if (row && row.kind === 'finbricks_terms') return FINBRICKS_PARTY;
   const m = (row && row.meta) || {};
   if (m.seller) return { role: 'provider', kind: 'coach', name: m.seller, ico: m.seller_ico || null, address: (row.scope && parties[row.scope] && parties[row.scope].address) || null, snapshot: true };
   if (!row || !row.scope) return MTL_PARTY;
