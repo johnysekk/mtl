@@ -429,14 +429,22 @@ export default async function handler(req, res) {
       // ONLINE KOUČING (rezervace typu online): vlastní sazba 1 / 0,75 / 0,5 % a žádná akvizice.
       let _isOnl = (type === 'coach_online') || (type === 'membership' && !gym_id);   // předplatné kouče je online
       if (type === 'membership' && !gym_id) {
-        let _pn = null; if (source_booking_id) { try { const _mr = ((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(source_booking_id)}&select=plan_name`)) || [])[0]; _pn = _mr && _mr.plan_name; } catch (e) {} }
-        const _pc = await checkPrice({ SB: process.env.SUPABASE_URL, KEY: process.env.SUPABASE_SERVICE_ROLE_KEY, kind: 'coachPlan', amount: (Number(gross_amount) || 0) / 100, currency: currency || 'CZK', coachProfileId: coach_id, planName: _pn });
+        let _pn = null, _pmo = Math.max(1, parseInt(months, 10) || 1); if (source_booking_id) { try { const _mr = ((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(source_booking_id)}&select=plan_name,months`)) || [])[0]; _pn = _mr && _mr.plan_name; if (_mr && _mr.months) _pmo = Math.max(1, parseInt(_mr.months, 10) || 1); } catch (e) {} }
+        const _pc = await checkPrice({ SB: process.env.SUPABASE_URL, KEY: process.env.SUPABASE_SERVICE_ROLE_KEY, kind: 'coachPlan', bankOnly: ['qr', 'pis'].includes(String(payment_method || '')), amount: (Number(gross_amount) || 0) / 100, currency: currency || 'CZK', coachProfileId: coach_id, planName: _pn, months: _pmo });
         if (!_pc.ok) return res.status(400).json({ error: _pc.error || 'Částka neodpovídá nabídce kouče' });
       }
       if (!_isOnl && type === 'coach_1to1' && /^\d+$/.test(String(source_booking_id || ''))) {
         try { const _ob = ((await _wsbGet(`bookings?id=eq.${encodeURIComponent(source_booking_id)}&select=type`)) || [])[0]; _isOnl = !!(_ob && _ob.type === 'online'); } catch (e) {}
       }
       if (_isOnl) rate = _mtlOnline({ partner: coach.partner, score: coach.coach_ref_score, bankai: coach.bankai_eligible });
+      // ONLINE SLUŽBA (potvrzení QR / převodu koučem): cena jen z online nabídky kouče, v měně účtu.
+      // Řádek rezervace i s částkou zapisuje prohlížeč studenta, takže bez kontroly šlo převodem
+      // zaplatit méně a kouč by potvrdil (a provize se počítala z) nižší částky.
+      if (_isOnl && type !== 'membership') {
+        const _pc = await checkPrice({ SB: process.env.SUPABASE_URL, KEY: process.env.SUPABASE_SERVICE_ROLE_KEY, kind: 'coachOnline', bankOnly: ['qr', 'pis'].includes(String(payment_method || '')),
+          amount: (Number(gross_amount) || 0) / 100, currency: currency || 'CZK', coachProfileId: coach_id, discounts: (credit === 'student') ? [0.1, 0.2] : null });
+        if (!_pc.ok) return res.status(400).json({ error: _pc.error || 'Částka neodpovídá online nabídce kouče' });
+      }
       // OSOBNÍ SOUKROMKA (recepce kouče, potvrzení QR): jen ceny z ceníku kouče -- základní,
       // disciplína, slot 1:N, nebo zvýhodněná, když platí její podmínka (člen klubu / méně
       // vytížený čas). Libovolnou částku zapsat nejde, stejně jako při rezervaci v appce.

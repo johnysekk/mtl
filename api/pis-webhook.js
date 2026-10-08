@@ -118,8 +118,8 @@ async function pisSideEffects(rec, tbl) {
     } else if (tbl === 'gym_memberships' && !rec.gym_id && rec.coach_id) {
       const who = rec.student_name || 'Student'; const _a = (rec.amount != null) ? (rec.amount + ' ' + (rec.currency || 'CZK')) : '';
       await sb.from('notifications').insert({ user_id: rec.coach_id, type: 'system', read: false, data: JSON.stringify({ kind: 'online_plan_new', membership_id: rec.id, student_id: rec.student_id || null,
-        msg_cs: '🌐 ' + who + ' zaplatil/a převodem předplatné „' + (rec.plan_name || '') + '“' + (_a ? (' (' + _a + ')') : '') + ' na 1 měsíc. Neobnovuje se samo — další měsíc zaplatí znovu.',
-        msg_en: '🌐 ' + who + ' paid the subscription "' + (rec.plan_name || '') + '"' + (_a ? (' (' + _a + ')') : '') + ' by bank transfer for 1 month. It does not renew by itself.' }),
+        msg_cs: '🌐 ' + who + ' zaplatil/a převodem předplatné „' + (rec.plan_name || '') + '“' + (_a ? (' (' + _a + ')') : '') + ' na ' + (function(n){n=Math.max(1,parseInt(n,10)||1);return n===1?'1 měsíc':(n<5?n+' měsíce':n+' měsíců');})(rec.months) + '. Neobnovuje se samo — po skončení zaplatí znovu.',
+        msg_en: '🌐 ' + who + ' paid the subscription "' + (rec.plan_name || '') + '"' + (_a ? (' (' + _a + ')') : '') + ' by bank transfer for ' + (function(n){n=Math.max(1,parseInt(n,10)||1);return n+(n===1?' month':' months');})(rec.months) + '. It does not renew by itself.' }),
         message: '🌐 ' + who + ' zaplatil/a převodem předplatné „' + (rec.plan_name || '') + '“.' });
     } else {
       const g = await sb.from('gyms').select('owner_id').eq('id', rec.gym_id).maybeSingle();
@@ -223,7 +223,7 @@ export default async function handler(req, res) {
       try {
         const _buyerId = (tbl === 'event_tickets') ? rec.buyer_id : rec.student_id;
         const notifData = (tbl === 'gym_memberships')
-          ? { kind: 'payment_confirmed', auto: true, gym_id: rec.gym_id, goto: 'memberships', item: rec.plan_name || '', ...((!rec.gym_id && rec.paid_to === 'coach') ? { sk: 'online' } : {}) }
+          ? { kind: 'payment_confirmed', auto: true, gym_id: rec.gym_id, goto: 'memberships', item: rec.plan_name || '', ...((!rec.gym_id && rec.paid_to === 'coach') ? { sk: 'online', months: Math.max(1, parseInt(rec.months, 10) || 1), until: _patch.period_end || null } : {}) }
           : (tbl === 'bookings')
           ? { kind: 'payment_confirmed', auto: true, goto: 'bookings' }
           : (tbl === 'event_tickets')

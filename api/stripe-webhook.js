@@ -893,9 +893,21 @@ export default async function handler(req, res) {
           }
           try {
             // Přijetí za člena u spolku: platba činí rozhodnutí klubu účinným (_member-app.js).
-            await approveMemberAppOnPayment({ gymId: m.gym_id, studentId: m.student_id || m.member_id || null });
-            if (_pi) await recordTransaction(event.account, _pi, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id, plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side', acq_source: _acqSrcFrom(m), acq_months: (m.mtl_acq_months ? parseInt(m.mtl_acq_months,10) : null), base_rate: (m.mtl_base_rate ? parseFloat(m.mtl_base_rate) : null) });
+            if (m.mtl_online !== '1') await approveMemberAppOnPayment({ gymId: m.gym_id, studentId: m.student_id || m.member_id || null });
+            // ONLINE PŘEDPLATNÉ KOUČE NA 3/6/12 MĚSÍCŮ (jednorázově kartou): platba patří kouči,
+            // bez klubu a bez akvizice -- stejně jako měsíční předplatné níž.
+            if (_pi) await recordTransaction(event.account, _pi, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id || null, plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side', acq_source: _acqSrcFrom(m), acq_months: (m.mtl_acq_months ? parseInt(m.mtl_acq_months,10) : null), base_rate: (m.mtl_base_rate ? parseFloat(m.mtl_base_rate) : null), months: _mo, ...(m.mtl_online === '1' ? { coach_id: m.coach_id || null, paid_to: 'coach', acq_source: 'direct' } : {}) });
           } catch (e) { console.error('record one-time membership', e.message); }
+          if (m.mtl_online === '1' && m.coach_id && m.membership_id) {
+            try {
+              const _om = (await sbGet(`gym_memberships?id=eq.${encodeURIComponent(m.membership_id)}&select=student_name,plan_name,amount,currency`))[0] || {};
+              const _amt = `${Number(_om.amount || 0).toLocaleString('cs-CZ')} ${String(_om.currency || m.mtl_currency || 'CZK').toUpperCase()}`;
+              const _endCs = _end.toLocaleDateString('cs-CZ'), _endEn = _end.toLocaleDateString('en-GB');
+              const _cs = `🌐 Nový předplatitel: ${_om.student_name || 'Student'} si předplatil/a „${_om.plan_name || m.mtl_plan || ''}" na ${_mo} měsíců za ${_amt} (jednorázově kartou). Platí do ${_endCs}, samo se neobnovuje.`;
+              const _en = `🌐 New subscriber: ${_om.student_name || 'A student'} bought "${_om.plan_name || m.mtl_plan || ''}" for ${_mo} months, ${_amt} (one-off card payment). Active until ${_endEn}, it does not renew.`;
+              await sbPost('notifications', { user_id: m.coach_id, type: 'system', read: false, data: JSON.stringify({ kind: 'online_plan_new', membership_id: m.membership_id, student_id: m.student_id || null, msg_cs: _cs, msg_en: _en }), message: _cs });
+            } catch (e) { console.error('online plan notify', e.message); }
+          }
         }
         else {
           // MEMBERSHIP (subscription): link the subscription to the row + record the FIRST payment NOW,

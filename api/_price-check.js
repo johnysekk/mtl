@@ -29,6 +29,26 @@ function matches(paid, allowed, cur) {
   return allowed.some((a) => a > 0 && Math.abs(num(paid) - a) <= eps);
 }
 
+// ONLINE NABÍDKA VE VÍCE MĚNÁCH. Položka má hlavní cenu (price + cur) a ruční ceny v dalších
+// měnách (prices: { EUR: 20, USD: 22 }). Předplatné má navíc delší varianty placené jednorázově
+// (terms: { "3": { CZK: 1350, EUR: 54 }, "6": {...}, "12": {...} }) -- cena za celé období.
+export function offerPrices(o, defCur) {
+  const out = {};
+  if (!o) return out;
+  const pm = parseJson(o.prices, {}) || {};
+  Object.keys(pm).forEach((k) => { const v = num(pm[k]); if (v > 0) out[String(k).toUpperCase()] = v; });
+  if (num(o.price) > 0) out[String(o.cur || defCur || 'CZK').toUpperCase()] = num(o.price);
+  return out;
+}
+export function planTermPrices(p, months, defCur) {
+  const mo = Math.max(1, parseInt(months, 10) || 1);
+  if (mo === 1) return offerPrices(p, defCur);
+  const t = (parseJson(p && p.terms, {}) || {})[String(mo)] || {};
+  const out = {};
+  Object.keys(t).forEach((k) => { const v = num(t[k]); if (v > 0) out[String(k).toUpperCase()] = v; });
+  return out;
+}
+
 // Vrátí { ok } nebo { ok:false, error }. opts = { SB, KEY, kind, amount, currency, ... }
 export async function checkPrice(opts) {
   const sb = sbFactory(opts.SB, opts.KEY);
@@ -77,7 +97,7 @@ export async function checkPrice(opts) {
       }
       if (!allowed.length) return { ok: false, error: 'Kouč nemá nastavenou cenu soukromé lekce.' };
       // Uplatněný referral kredit: student platí o 10 / 20 % méně (rozdíl nese poskytovatel).
-      if (Array.isArray(opts.discounts)) { const base0 = allowed.slice(); opts.discounts.forEach((d) => base0.forEach((p) => allowed.push(roundCur(p * (1 - d), cur)))); }
+      if (Array.isArray(opts.discounts)) { const base0 = allowed.slice(); opts.discounts.forEach((d) => base0.forEach((p) => { allowed.push(roundCur(p * (1 - d), cur)); allowed.push(Math.floor(p * (1 - d))); })); }   // appka u převodu zaokrouhluje dolů (Math.floor)
     } else if (opts.kind === 'coachPrivate') {
       const cid = String(opts.coachProfileId || '');
       const c = ((await sb(`profiles?id=eq.${q(cid)}&select=rate_inperson,currency_inperson,currency,discipline_rates,private_offers`)) || [])[0];
@@ -96,16 +116,23 @@ export async function checkPrice(opts) {
       if (!c) return { ok: false, error: 'coach not found' };
       const defCur = String(c.currency_online || c.currency || 'CZK').toUpperCase();
       const tiers = parseJson(c.online_services, []);
-      (Array.isArray(tiers) ? tiers : []).forEach((t) => { if (t && num(t.price) > 0 && String(t.cur || defCur).toUpperCase() === cur) allowed.push(num(t.price)); });
+      // Převod (PIS / QR) jde jen v měně účtu kouče = hlavní měna online.
+      if (opts.bankOnly && cur !== defCur) return { ok: false, error: `Převodem lze platit jen v ${defCur}.` };
+      (Array.isArray(tiers) ? tiers : []).forEach((t) => { const pm = offerPrices(t, defCur); if (pm[cur] > 0) allowed.push(pm[cur]); });
       if (num(c.rate_online) > 0 && defCur === cur) allowed.push(num(c.rate_online));
       Object.values(parseJson(c.discipline_rates_online, {}) || {}).forEach((v) => { if (num(v) > 0 && defCur === cur) allowed.push(num(v)); });
       if (!allowed.length) return { ok: false, error: 'Cena neodpovídá aktuální nabídce kouče.' };
+      // Uplatněný referral kredit: student platí o 10 / 20 % méně.
+      if (Array.isArray(opts.discounts)) { const base0 = allowed.slice(); opts.discounts.forEach((d) => base0.forEach((p) => { allowed.push(roundCur(p * (1 - d), cur)); allowed.push(Math.floor(p * (1 - d))); })); }   // appka u převodu zaokrouhluje dolů (Math.floor)
     } else if (opts.kind === 'coachPlan') {
       // Měsíční online předplatné kouče: cena a měna musí patřit k plánu v online_plans.
       const c = ((await sb(`profiles?id=eq.${q(String(opts.coachProfileId || ''))}&select=online_plans,currency_online,currency`)) || [])[0];
       if (!c) return { ok: false, error: 'coach not found' };
       const defCur = String(c.currency_online || c.currency || 'CZK').toUpperCase();
-      parseJson(c.online_plans, []).forEach((p) => { if (p && num(p.price) > 0 && String(p.cur || defCur).toUpperCase() === cur && (!opts.planName || String(p.name || '') === String(opts.planName))) allowed.push(num(p.price)); });
+      // Varianta: 1 měsíc = měsíční cena (prices), 3/6/12 měsíců = cena za celé období (terms).
+      const mo = Math.max(1, parseInt(opts.months, 10) || 1);
+      if (opts.bankOnly && cur !== defCur) return { ok: false, error: `Převodem lze platit jen v ${defCur}.` };
+      parseJson(c.online_plans, []).forEach((p) => { if (!p || (opts.planName && String(p.name || '') !== String(opts.planName))) return; const pm = planTermPrices(p, mo, defCur); if (pm[cur] > 0) allowed.push(pm[cur]); });
       if (!allowed.length) return { ok: false, error: 'Předplatné neodpovídá aktuální nabídce kouče.' };
     } else if (opts.kind === 'gymDropin') {
       const g = ((await sb(`gyms?id=eq.${q(String(opts.gymId || ''))}&select=dropin_price,currency,dropin_plans`)) || [])[0];
@@ -171,13 +198,13 @@ export async function checkRowPrice({ SB, KEY, tbl, row }) {
   if (!row) return { ok: false, error: 'row not found' };
   const base = { SB, KEY, amount: row.amount, currency: row.currency || 'CZK' };
   if (tbl === 'bookings') {
-    if (String(row.type || '') === 'online') return checkPrice({ ...base, kind: 'coachOnline', coachProfileId: row.coach_id });
+    if (String(row.type || '') === 'online') return checkPrice({ ...base, kind: 'coachOnline', bankOnly: true, coachProfileId: row.coach_id, discounts: (String(row.credit_used || '') === 'student') ? [0.1, 0.2] : null });
     return checkPrice({ ...base, kind: 'coachPrivate', strict: true, coachProfileId: row.coach_id, slotId: row.slot_id, memberId: row.student_id, discounts: (String(row.credit_used || '') === 'student') ? [0.1, 0.2] : null });
   }
   if (tbl === 'gym_bookings') return checkPrice({ ...base, kind: 'gymDropin', gymId: row.gym_id });
   if (tbl === 'merch_orders') return checkPrice({ ...base, kind: 'merch', merchId: row.merch_id, qty: row.qty });
   if (tbl === 'gym_memberships') {
-    if (!row.gym_id) return checkPrice({ ...base, kind: 'coachPlan', coachProfileId: row.coach_id, planName: row.plan_name });
+    if (!row.gym_id) return checkPrice({ ...base, kind: 'coachPlan', bankOnly: true, coachProfileId: row.coach_id, planName: row.plan_name, months: row.months });
     return checkPrice({ ...base, kind: 'gymMembership', gymId: row.gym_id, months: row.months });
   }
   return { ok: true };

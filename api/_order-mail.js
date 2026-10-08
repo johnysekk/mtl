@@ -60,8 +60,10 @@ export function withdrawalText(kind, en) {
              'Cancellation and any refund follow the association\'s terms shown in the app.'],
     online: ['Od smlouvy můžeš odstoupit do 14 dnů tlačítkem „Odstoupit od smlouvy“ v appce (Moje online objednávky). Dokud kouč službu nedodá, vrátí se ti 100 %; u balíčku se vrací poměr nedodaných kusů. Úplným dodáním služby právo na odstoupení zaniká (udělil/a jsi k tomu souhlas uvedený níže).',
              'You can withdraw within 14 days with the "Withdraw from contract" button in the app (My online orders). Until the coach delivers, you get 100 % back; for a package, the undelivered share. Once the service is fully delivered, the right of withdrawal ends (you gave the consent shown below).'],
-    planbank: ['Od smlouvy můžeš odstoupit do 14 dnů od platby tlačítkem „Odstoupit od smlouvy“ v appce (Moje permanentky a členství) — zaplatíš poměrnou část za dny, kdy předplatné běželo, zbytek ti kouč vrátí převodem. Předplatné placené převodem se neobnovuje: na další měsíc ho zaplatíš znovu.',
-             'You can withdraw within 14 days of the payment with the "Withdraw from contract" button in the app (My passes & memberships) — you pay for the days it ran, the coach transfers the rest back. Paid by bank transfer, the subscription does not renew: you pay again for the next month.'],
+    planbank: ['Od smlouvy můžeš odstoupit do 14 dnů od platby tlačítkem „Odstoupit od smlouvy“ v appce (Moje permanentky a členství) — zaplatíš poměrnou část za dny, kdy předplatné běželo, zbytek ti kouč vrátí převodem. Předplatné placené převodem se neobnovuje: po skončení zaplaceného období ho zaplatíš znovu.',
+             'You can withdraw within 14 days of the payment with the "Withdraw from contract" button in the app (My passes & memberships) — you pay for the days it ran, the coach transfers the rest back. Paid by bank transfer, the subscription does not renew: when the paid period ends you pay again.'],
+    planonce: ['Od smlouvy můžeš odstoupit do 14 dnů od platby tlačítkem „Odstoupit od smlouvy“ v appce (Moje permanentky a členství) — zaplatíš poměrnou část za dny, kdy předplatné běželo, zbytek se vrátí na kartu. Předplatné je zaplacené jednorázově na celé období a samo se neobnovuje.',
+             'You can withdraw within 14 days of the payment with the "Withdraw from contract" button in the app (My passes & memberships) — you pay for the days it ran, the rest is refunded to your card. The subscription is paid once for the whole period and does not renew.'],
     plan:   ['Od smlouvy můžeš odstoupit do 14 dnů od první platby tlačítkem „Odstoupit od smlouvy“ v appce (Moje permanentky a členství) — zaplatíš poměrnou část za dny, kdy předplatné běželo, zbytek se vrátí. Předplatné se obnovuje každý měsíc a můžeš ho kdykoli zrušit ke konci zaplaceného měsíce.',
              'You can withdraw within 14 days of the first payment with the "Withdraw from contract" button in the app (My passes & memberships) — you pay for the days it ran, the rest is refunded. The subscription renews monthly and you can cancel any time at the end of the paid month.'],
     onsite: ['Nákup proběhl osobně v hotovosti v provozovně poskytovatele. Nejde o smlouvu uzavřenou na dálku, právo odstoupit do 14 dnů se proto nepoužije a zaplacená částka se nevrací.',
@@ -110,7 +112,8 @@ export async function sendOrderMail(txId) {
     else if (type === 'membership') kind = (!tx.gym_id && tx.coach_id) ? 'plan' : (nonprofit ? 'club' : 'pass');
     else if (type === 'merch') kind = 'goods';
     if (kind === 'plan') online = true;
-    const wdKind = (kind === 'plan' && ['qr', 'pis'].includes(pm)) ? 'planbank' : null;
+    const planMo = Math.max(1, parseInt(tx.months, 10) || 1);
+    const wdKind = (kind === 'plan' && ['qr', 'pis'].includes(pm)) ? 'planbank' : ((kind === 'plan' && planMo > 1) ? 'planonce' : null);
     // Hotovost na místě (provozovna poskytovatele) = smlouva uzavřená osobně, ne na dálku: bez práva
     // na odstoupení. Appka u takové permanentky tlačítko „Odstoupit od smlouvy" neukazuje.
     if (pm === 'cash' && (kind === 'goods' || kind === 'pass')) kind = 'onsite';
@@ -146,7 +149,7 @@ export async function sendOrderMail(txId) {
     const rows = [
       row(en ? 'Service' : 'Služba', esc(label) + (booking && Number(booking.qty) > 1 ? ` (${booking.qty} ${en ? 'pcs' : 'ks'})` : '')),
       desc ? `<tr><td colspan="2" style="padding:8px 0;border-bottom:1px solid #eee;font-size:12.5px;color:#555;line-height:1.5;white-space:pre-line;"><span style="display:block;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#999;margin-bottom:3px;">${descHead}</span>${esc(desc)}</td></tr>` : '',
-      row(en ? 'Price' : 'Cena', esc(money(tx.gross_amount, tx.currency, en)) + (kind === 'plan' ? (en ? ' / month' : ' / měsíc') : '')),
+      row(en ? 'Price' : 'Cena', esc(money(tx.gross_amount, tx.currency, en)) + (kind === 'plan' ? (planMo > 1 ? (en ? ` for ${planMo} months` : ` za ${planMo} ${planMo < 5 ? 'měsíce' : 'měsíců'}`) : (en ? ' / month' : ' / měsíc')) : '')),
       (dok && dok.session_at) ? row(en ? 'Date' : 'Termín', esc(dok.session_at)) : '',
       (dok && dok.participant_name) ? row(en ? 'Participant' : 'Účastník', esc(dok.participant_name)) : '',
       row(en ? 'Ordered' : 'Objednáno', esc(dt(tx.created_at, en))),

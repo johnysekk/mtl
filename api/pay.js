@@ -1,7 +1,7 @@
 import Stripe from 'stripe';
 import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor } from './_rate.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
-import { checkPrice } from './_price-check.js';
+import { checkPrice, offerPrices, planTermPrices } from './_price-check.js';
 const _PC = (kind, extra) => ({ SB: _SUPA_URL, KEY: _SUPA_KEY, kind, ...extra });
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -207,7 +207,8 @@ async function coachCheckout(req, res) {
     let tiers = []; try { const _src = p.online_services; tiers = typeof _src === 'string' ? JSON.parse(_src) : (_src || []); } catch (e) {}
     let dro = {}; try { dro = typeof p.discipline_rates_online === 'string' ? JSON.parse(p.discipline_rates_online) : (p.discipline_rates_online || {}); } catch (e) {}
     const okPairs = [];
-    (Array.isArray(tiers) ? tiers : []).forEach((t) => okPairs.push([Number(t && t.price), String((t && t.cur) || defCur).toUpperCase()]));
+    // Každý balíček může mít ruční ceny ve více měnách (prices) -- povolená je kterákoli z nich.
+    (Array.isArray(tiers) ? tiers : []).forEach((t) => { const pm = offerPrices(t, defCur); Object.keys(pm).forEach((cu) => okPairs.push([pm[cu], cu])); });
     if (Number(p.rate_online) > 0) okPairs.push([Number(p.rate_online), defCur]);
     Object.values(dro || {}).forEach((v) => { if (Number(v) > 0) okPairs.push([Number(v), defCur]); });
     const C = String(currency || 'CZK').toUpperCase();
@@ -215,8 +216,8 @@ async function coachCheckout(req, res) {
       return res.status(400).json({ error: 'Cena neodpovídá aktuální nabídce kouče. Obnov jeho profil a zkus to znovu.' });
     }
     const _tl = Array.isArray(tiers) ? tiers : [];
-    const _tq = _tl.find((t) => t && Number(t.price) === rate && String(t.cur || defCur).toUpperCase() === C && String(t.label || '') === String(fmt || ''))
-             || _tl.find((t) => t && Number(t.price) === rate && String(t.cur || defCur).toUpperCase() === C);
+    const _tq = _tl.find((t) => t && offerPrices(t, defCur)[C] === rate && String(t.label || '') === String(fmt || ''))
+             || _tl.find((t) => t && offerPrices(t, defCur)[C] === rate);
     _onlQty = Math.max(1, Math.min(50, parseInt(_tq && _tq.qty, 10) || 1));
   }
 
@@ -809,23 +810,29 @@ async function partnerCheckout(req, res) {
 async function onlinePlanCheckout(req, res) {
   const membershipId = String(req.query.membershipId || '');
   if (!membershipId) return res.status(400).json({ error: 'Chybí membershipId' });
-  const mb = ((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(membershipId)}&select=id,coach_id,student_id,paid_by,plan_name,amount,currency,status,gym_id,paid_to`)) || [])[0];
+  const mb = ((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(membershipId)}&select=id,coach_id,student_id,paid_by,plan_name,amount,currency,status,gym_id,paid_to,months`)) || [])[0];
   if (!mb || mb.gym_id || mb.paid_to !== 'coach' || !mb.coach_id) return res.status(400).json({ error: 'Předplatné nenalezeno' });
   if (String(mb.status) !== 'pending') return res.status(400).json({ error: 'Předplatné už není k zaplacení' });
-  const p = ((await _wsbGet(`profiles?id=eq.${encodeURIComponent(mb.coach_id)}&select=id,name,stripe_account,online_plans,account_suspended&limit=1`)) || [])[0];
+  const p = ((await _wsbGet(`profiles?id=eq.${encodeURIComponent(mb.coach_id)}&select=id,name,stripe_account,online_plans,currency_online,currency,account_suspended&limit=1`)) || [])[0];
   if (!p || !p.stripe_account) return res.status(400).json({ error: 'Kouč nemá nastavené platby kartou' });
   if (p.account_suspended) return res.status(400).json({ error: 'Účet kouče je pozastavený' });
   const acct = String(p.stripe_account).trim();
   if (!(await _assertAcctReady(acct, res))) return;
   let plans = []; try { plans = typeof p.online_plans === 'string' ? JSON.parse(p.online_plans) : (p.online_plans || []); } catch (e) {}
-  const defCur = String(mb.currency || 'CZK').toUpperCase();
-  const plan = (Array.isArray(plans) ? plans : []).find((x) => x && String(x.name || '') === String(mb.plan_name || '')
-    && Number(x.price) === Number(mb.amount) && String(x.cur || defCur).toUpperCase() === defCur);
-  if (!plan || !(Number(plan.price) > 0)) return res.status(400).json({ error: 'Předplatné neodpovídá aktuální nabídce kouče. Obnov jeho profil a zkus to znovu.' });
+  const mainCur = String(p.currency_online || p.currency || 'CZK').toUpperCase();
+  const cur = String(mb.currency || mainCur).toUpperCase();
+  // VARIANTA: 1 měsíc = předplatné obnovované kartou; 3/6/12 měsíců = JEDNORÁZOVÁ platba za celé
+  // období, nic se neobnovuje (stejně jako delší permanentka v klubu). Cena i měna se berou
+  // z nabídky kouče (prices / terms), řádek dodá jen název, variantu a zvolenou měnu.
+  const months = Math.max(1, parseInt(mb.months, 10) || 1);
+  if (![1, 3, 6, 12].includes(months)) return res.status(400).json({ error: 'Neplatná délka předplatného.' });
+  const plan = (Array.isArray(plans) ? plans : []).find((x) => x && String(x.name || '') === String(mb.plan_name || ''));
+  const price = plan ? Number(planTermPrices(plan, months, mainCur)[cur] || 0) : 0;
+  if (!plan || !(price > 0) || Math.abs(price - Number(mb.amount)) > 0.005) return res.status(400).json({ error: 'Předplatné neodpovídá aktuální nabídce kouče. Obnov jeho profil a zkus to znovu.' });
 
-  const cur = String(plan.cur || defCur).toUpperCase();
-  const unit = (cur === 'CZK') ? Math.round(Number(plan.price)) * 100 : Math.round(Number(plan.price) * 100);
-  const pct = Math.round((await onlineRateFor(_wsbGet, mb.coach_id)) * 10000) / 100;   // procenta, 2 desetinná
+  const unit = (cur === 'CZK') ? Math.round(price) * 100 : Math.round(price * 100);
+  const rate = await onlineRateFor(_wsbGet, mb.coach_id);
+  const pct = Math.round(rate * 10000) / 100;   // procenta, 2 desetinná
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
   const meta = {
@@ -834,13 +841,30 @@ async function onlinePlanCheckout(req, res) {
     mtl_plan: String(plan.name || 'Online předplatné').slice(0, 120), mtl_currency: cur, mtl_income: 'main',
     paid_by: String(mb.paid_by || ''), coach_name: String(p.name || '').slice(0, 120),
   };
-  const session = await stripe.checkout.sessions.create({
-    mode: 'subscription',
-    line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: `${String(plan.name || 'Online předplatné').slice(0, 100)} — ${String(p.name || 'Kouč').slice(0, 60)}` }, unit_amount: unit, recurring: { interval: 'month' } }, quantity: 1 }],
-    subscription_data: { application_fee_percent: pct, metadata: meta },
-    metadata: meta,
-    success_url: `${proto}://${host}/?platba=ok&online_plan=1&coach=${encodeURIComponent(mb.coach_id)}&mb=${encodeURIComponent(mb.id)}&session={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${proto}://${host}/`,
-  }, { stripeAccount: acct });
+  const success_url = `${proto}://${host}/?platba=ok&online_plan=1&coach=${encodeURIComponent(mb.coach_id)}&mb=${encodeURIComponent(mb.id)}&session={CHECKOUT_SESSION_ID}`;
+  const pname = `${String(plan.name || 'Online předplatné').slice(0, 90)}${months > 1 ? ` (${months} měs.)` : ''} — ${String(p.name || 'Kouč').slice(0, 60)}`;
+  let session;
+  if (months > 1) {
+    // Provize jednou z celé částky (application_fee_amount), stejně jako delší permanentka v klubu.
+    const m1 = { ...meta, mtl_membership_kind: 'one_time', mtl_months: String(months) };
+    const fee = Math.round(unit * rate);
+    session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: pname }, unit_amount: unit }, quantity: 1 }],
+      payment_intent_data: { ...(fee > 0 ? { application_fee_amount: fee } : {}), metadata: m1 },
+      metadata: m1,
+      success_url,
+      cancel_url: `${proto}://${host}/`,
+    }, { stripeAccount: acct });
+  } else {
+    session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: pname }, unit_amount: unit, recurring: { interval: 'month' } }, quantity: 1 }],
+      subscription_data: { application_fee_percent: pct, metadata: meta },
+      metadata: meta,
+      success_url,
+      cancel_url: `${proto}://${host}/`,
+    }, { stripeAccount: acct });
+  }
   res.redirect(303, session.url);
 }

@@ -151,8 +151,8 @@ export async function pisSideEffects(rec, tbl){
       // Online předplatné kouče zaplacené převodem: kouči podrobná notifikace s proklikem do Předplatitelů.
       const who=rec.student_name||'Student'; const _a=(rec.amount!=null)?(rec.amount+' '+(rec.currency||'CZK')):'';
       await sb.from('notifications').insert({ user_id:rec.coach_id, type:'system', read:false, data:JSON.stringify({ kind:'online_plan_new', membership_id:rec.id, student_id:rec.student_id||null,
-        msg_cs:'🌐 '+who+' zaplatil/a převodem předplatné „'+(rec.plan_name||'')+'“'+(_a?(' ('+_a+')'):'')+' na 1 měsíc. Neobnovuje se samo — další měsíc zaplatí znovu.',
-        msg_en:'🌐 '+who+' paid the subscription "'+(rec.plan_name||'')+'"'+(_a?(' ('+_a+')'):'')+' by bank transfer for 1 month. It does not renew by itself.' }),
+        msg_cs:'🌐 '+who+' zaplatil/a převodem předplatné „'+(rec.plan_name||'')+'“'+(_a?(' ('+_a+')'):'')+' na '+(function(n){n=Math.max(1,parseInt(n,10)||1);return n===1?'1 měsíc':(n<5?n+' měsíce':n+' měsíců');})(rec.months)+'. Neobnovuje se samo — po skončení zaplatí znovu.',
+        msg_en:'🌐 '+who+' paid the subscription "'+(rec.plan_name||'')+'"'+(_a?(' ('+_a+')'):'')+' by bank transfer for '+(function(n){n=Math.max(1,parseInt(n,10)||1);return n+(n===1?' month':' months');})(rec.months)+'. It does not renew by itself.' }),
         message:'🌐 '+who+' zaplatil/a převodem předplatné „'+(rec.plan_name||'')+'“.' });
     }
     else { const g=await sb.from('gyms').select('owner_id').eq('id',rec.gym_id).maybeSingle(); const ownerId=g.data&&g.data.owner_id;
@@ -226,7 +226,7 @@ export async function pisSettle(rec, tbl, status){
           }
           // auto:true => the bank confirmed it (PIS), not the club. The client renderer builds the visible text from these fields.
           let nd;
-          if(tbl==='gym_memberships'){ let _sk='membership'; try{ const { data:_go }=await sb.from('gyms').select('org_form').eq('id',rec.gym_id).maybeSingle(); _sk=((rec.paid_to==='coach')||!(_go&&_go.org_form==='nonprofit'))?'pass':'membership'; }catch(e){} if(!rec.gym_id && rec.paid_to==='coach') _sk='online'; nd={ kind:'payment_confirmed', sk:_sk, auto:true, goto:'memberships', gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.plan_name||'') }; }
+          if(tbl==='gym_memberships'){ let _sk='membership'; try{ const { data:_go }=await sb.from('gyms').select('org_form').eq('id',rec.gym_id).maybeSingle(); _sk=((rec.paid_to==='coach')||!(_go&&_go.org_form==='nonprofit'))?'pass':'membership'; }catch(e){} if(!rec.gym_id && rec.paid_to==='coach') _sk='online'; nd={ kind:'payment_confirmed', sk:_sk, auto:true, goto:'memberships', gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.plan_name||''), ...(_sk==='online'?{ months:Math.max(1, parseInt(rec.months,10)||1) }:{}) }; }
           else if(tbl==='bookings'){ nd={ kind:'payment_confirmed', auto:true, goto:'bookings', amount:_amt, date:_dte, time:_tme, coach:(rec.coach_name||'') }; }
           else if(tbl==='event_tickets'){ nd={ kind:'payment_confirmed', auto:true, goto:'tickets', event_id:rec.event_id, gym_name:_gname, amount:_amt, qty:(_oQty||1), tiers:_oTiers }; }
           else if(tbl==='merch_orders'){ nd={ kind:'payment_confirmed', auto:true, goto:'merch', merch_id:rec.merch_id, gym_id:rec.gym_id, gym_name:_gname, amount:_amt, item:(rec.item_name||'') }; }
