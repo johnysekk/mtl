@@ -6,6 +6,7 @@
 
 import PDFDocument from 'pdfkit';
 import { DEJAVU_CZ } from './_dejavu-cz.js';
+import { itemLabelEn } from './_sell-kind.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -43,7 +44,7 @@ export function dokladPdfFromRow(dk, en) {
       row(en ? 'Address' : 'Sídlo', dk.sup_address);
       row(en ? 'Customer' : 'Odběratel', buyer);
       row(en ? 'Participant' : 'Účastník', participant);
-      row(en ? 'Item' : 'Položka', String(dk.item_label || '').trim() || (en ? 'Payment' : 'Platba'));
+      row(en ? 'Item' : 'Položka', (en ? itemLabelEn(String(dk.item_label || '').trim()) : String(dk.item_label || '').trim()) || (en ? 'Payment' : 'Platba'));
       if (sDate) row(en ? 'Session date' : 'Termín lekce', (d(sDate + 'T12:00:00') || sDate) + (sTime ? ' ' + sTime : ''));
       if (isCard) row(en ? 'Payment ref (Stripe)' : 'Reference platby (Stripe)', dk.payment_intent);
       if (isPayer) { row(en ? 'Net amount' : 'Základ daně', fmt(base) + ' ' + sym); row((en ? 'VAT ' : 'DPH ') + rate + '%', fmt(vat) + ' ' + sym); }

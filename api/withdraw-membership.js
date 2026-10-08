@@ -49,6 +49,7 @@ export default async function handler(req, res) {
     const m = ((await sbGet(`gym_memberships?id=eq.${q(mid)}&select=id,gym_id,gym_name,student_id,plan_name,months,amount,currency,status,created_at,stripe_subscription,paid_to,coach_id`)) || [])[0];
     if (!m || String(m.student_id) !== String(me)) return res.status(404).json({ ok: false, error: 'Permanentka nenalezena.' });
     if (!['active', 'cancelling'].includes(String(m.status))) return res.status(400).json({ ok: false, error: 'Permanentka už neběží.' });
+    if (!m.gym_id && m.paid_to === 'coach') return res.status(400).json({ ok: false, error: 'Online předplatné se odstupuje v sekci Moje permanentky a členství tlačítkem u předplatného.' });
     if ((await sellKindFor(sbGet, { gymId: m.gym_id, paidTo: m.paid_to })) !== 'pass') return res.status(400).json({ ok: false, error: 'U členství ve spolku se odstoupení do 14 dnů nepoužije — vrácení řeší stanovy.' });
     const start = new Date(m.created_at).getTime();
     if (!(Date.now() - start <= 14 * DAY)) return res.status(400).json({ ok: false, error: 'Lhůta 14 dnů na odstoupení už uplynula — ukončení se řídí pravidly klubu.' });

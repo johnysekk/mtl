@@ -67,7 +67,7 @@ function _billAddr(row, prefix) {
 // Pise se do snimku pri vystaveni. Driv tam byl jen nazev tarifu, nebo u banky syrovy typ "drop_in".
 function _dokItemLabel(type, name, sk) {
   // sk = 'membership' | 'pass' (z _sell-kind.js podle prodávajícího); bez něj „Členství" jako dřív.
-  const T = { membership: (sk === 'pass' ? 'Permanentka' : 'Členství'), drop_in: 'Jednorázový vstup', coach_inperson: 'Soukromá lekce 1:1', coach_1to1: 'Soukromá lekce 1:1',
+  const T = { membership: (sk === 'online' ? 'Online předplatné' : sk === 'pass' ? 'Permanentka' : 'Členství'), drop_in: 'Jednorázový vstup', coach_inperson: 'Soukromá lekce 1:1', coach_1to1: 'Soukromá lekce 1:1',
     coach_online: 'Online lekce', event_ticket: 'Vstupenka', event: 'Vstupenka', merch: 'Zboží', course: (sk === 'members' ? 'Kurz pro členy' : 'Kurz') };
   const t = T[String(type || '')] || '';
   const n = String(name || '').trim();
