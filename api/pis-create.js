@@ -130,6 +130,40 @@ async function whoFromToken(req) {
   } catch (e) { return null; }
 }
 
+// ARCHIV PODMÍNEK FINBRICKS. Odkaz v souhlasu vede na .../terms/actual/..., tedy na „aktuální"
+// verzi -- po změně podmínek by na stejné adrese byl jiný dokument a nešlo by doložit, s čím
+// člověk souhlasil. Proto se PDF při první platbě dané verze jednou stáhne do našeho úložiště
+// (bucket legal-archive) a k verzi znění se uloží odkaz na kopii a její otisk (SHA-256).
+// Jednou denně se pak porovná, jestli Finbricks na stejné adrese nevyměnil dokument -- pak je
+// potřeba zvýšit verzi souhlasu (FBX_TERMS.version v appce), jinak by nové souhlasy ukazovaly
+// na starou kopii. Selhání archivu nikdy nezastaví platbu.
+async function archiveTermsFile(versionId, text) {
+  try {
+    const m = String(text || '').match(/https?:\/\/\S+?\.pdf/i);
+    if (!versionId || !m) return;
+    const url = m[0];
+    const cur = (await sb.from('consent_versions').select('file_url,file_hash,file_checked_at').eq('id', versionId).maybeSingle()).data;
+    if (!cur) return;   // sloupce ještě nejsou (SQL neproběhlo) -- nic nedělat
+    const day = 24 * 3600 * 1000;
+    if (cur.file_hash && cur.file_checked_at && (Date.now() - new Date(cur.file_checked_at).getTime() < day)) return;
+    const r = await fetch(url);
+    if (!r.ok) { console.error('[terms-archive] fetch', r.status, url); return; }
+    const buf = Buffer.from(await r.arrayBuffer());
+    const hash = crypto.createHash('sha256').update(buf).digest('hex');
+    if (cur.file_hash) {
+      // Už archivováno: jen kontrola, jestli se dokument na adrese nezměnil.
+      if (cur.file_hash !== hash) console.error('[terms-archive] DOKUMENT SE ZMĚNIL bez nové verze souhlasu -- zvyš FBX_TERMS.version', url);
+      await sb.from('consent_versions').update({ file_checked_at: new Date().toISOString() }).eq('id', versionId);
+      return;
+    }
+    const path = `finbricks/${hash.slice(0, 16)}.pdf`;
+    const up = await sb.storage.from('legal-archive').upload(path, buf, { contentType: 'application/pdf', upsert: true });
+    if (up.error) { console.error('[terms-archive] upload', up.error.message); return; }
+    const pub = sb.storage.from('legal-archive').getPublicUrl(path);
+    await sb.from('consent_versions').update({ file_url: (pub && pub.data && pub.data.publicUrl) || null, file_hash: hash, file_checked_at: new Date().toISOString() }).eq('id', versionId);
+  } catch (e) { console.error('[terms-archive]', e && e.message); }
+}
+
 async function recordFbxConsent(req, row, tbl, terms, paymentId) {
   const kind = 'finbricks_terms';
   const version = String(terms.version || '').trim();
@@ -160,6 +194,7 @@ async function recordFbxConsent(req, row, tbl, terms, paymentId) {
     versionId = (ins.data && ins.data.id) || null;
   }
 
+  await archiveTermsFile(versionId, text);
   const r = await sb.from('consent_acceptances').insert({
     user_id: userId, kind, scope: null, version, lang, version_id: versionId, body_hash: hash,
     ip: psuIpFrom(req), user_agent: req.headers['user-agent'] || null,

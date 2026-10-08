@@ -203,6 +203,7 @@ export default async function handler(req, res) {
     if (vids.length) {
       const vs = await sbGet(`consent_versions?id=in.(${vids.map(encodeURIComponent).join(',')})&select=id,body_text,body_hash`);
       (vs || []).forEach(v => { vmap[v.id] = v; });
+      try { const fv = await sbGet(`consent_versions?id=in.(${vids.map(encodeURIComponent).join(',')})&select=id,file_url,file_hash`); (fv || []).forEach(f => { if (vmap[f.id]) { vmap[f.id].file_url = f.file_url; vmap[f.id].file_hash = f.file_hash; } }); } catch (e) {}
     }
 
     let _parties = {}; try { _parties = await resolveParties(sbGet, (acc || []).map((a) => a.scope)); } catch (e) {}
@@ -213,6 +214,7 @@ export default async function handler(req, res) {
         // Jméno ZE SNÍMKU souhlasu; živý profil jen u starších řádků, které snímek nemají.
         who: a.user_name || a.user_email || names[a.user_id] || '—', accepted_at: a.accepted_at,
         body_text: (v && v.body_text) || null,
+        file_url: (v && v.file_url) || null, file_hash: (v && v.file_hash) || null,
         hash_mismatch: !!(v && v.body_hash && a.body_hash && v.body_hash !== a.body_hash),
         ident: (function(){ const p = names['_p_' + a.user_id] || {}; const mtl = scope === 'mtl';
           return { name: a.user_name || p.name || null, email: a.user_email || p.email || null, phone: mtl ? (p.phone || null) : null, account: a.user_id || null,

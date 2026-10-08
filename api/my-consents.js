@@ -49,6 +49,9 @@ export default async function handler(req, res) {
       const chunk = vids.slice(i, i + 50).map(encodeURIComponent).join(',');
       const vs = await sbGet(`consent_versions?id=in.(${chunk})&select=id,kind,version,lang,body_text,body_hash`);
       (vs || []).forEach(v => { vmap[v.id] = v; });
+      // Archivovaná kopie dokumentu, na který znění odkazuje (podmínky Finbricks). Zvlášť a v try:
+      // bez SQL sloupce by jinak spadl celý dotaz.
+      try { const fv = await sbGet(`consent_versions?id=in.(${chunk})&select=id,file_url,file_hash`); (fv || []).forEach(f => { if (vmap[f.id]) { vmap[f.id].file_url = f.file_url; vmap[f.id].file_hash = f.file_hash; } }); } catch (e) {}
     }
 
     let _parties = {}; try { _parties = await resolveParties(sbGet, (acc || []).map((x) => x.scope)); } catch (e) {}
@@ -58,6 +61,7 @@ export default async function handler(req, res) {
         id: a.id, kind: a.kind, scope: a.scope || null, version: a.version, lang: a.lang, party: partyFor(a, _parties),
         accepted_at: a.accepted_at, ip: a.ip || null, user_agent: a.user_agent || null,
         body_text: (v && v.body_text) || null,
+        file_url: (v && v.file_url) || null, file_hash: (v && v.file_hash) || null,
         // Když se hash přijetí liší od hashe uložené verze, text pod tou verzí se změnil bez
         // navýšení čísla. Nezamlčovat -- ať je na dokladu vidět, že znění není jisté.
         hash_mismatch: !!(v && v.body_hash && a.body_hash && v.body_hash !== a.body_hash),
