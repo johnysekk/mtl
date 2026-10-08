@@ -59,7 +59,9 @@ export default async function handler(req, res) {
   let deleted = 0;
   for (let i = 0; i < del.length; i += 100) {
     const chunk = del.slice(i, i + 100);
-    try { await sb(`consent_acceptances?id=in.(${chunk.map(q).join(',')})`, { method: 'DELETE', prefer: 'return=minimal' }); deleted += chunk.length; }
+    // Souhlasy jsou chráněné triggerem proti změně i smazání. Mazat smí jen funkce
+    // prune_consent_acceptances (sql/consent-prune.sql), a jen tyto tři druhy.
+    try { const n = await sb('rpc/prune_consent_acceptances', { method: 'POST', body: JSON.stringify({ p_ids: chunk.map(String) }) }); deleted += Number(n) || 0; }
     catch (e) { console.error('[consent-prune]', e.message); }
   }
   return res.status(200).json({ ok: true, checked: (rows || []).length, kept, deleted });
