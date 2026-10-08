@@ -1166,6 +1166,7 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
           </select>
         </div>
         <div id="editOnlineCurs" style="background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:10px 12px;margin-bottom:12px;"></div>
+        <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:11px 12px;margin-bottom:12px;"><input type="checkbox" id="editOnlineIntl" style="width:19px;height:19px;accent-color:#0a8f5b;cursor:pointer;flex-shrink:0;margin-top:1px;"><span><span id="editOnlineIntlLbl" style="display:block;font-size:13.5px;font-weight:700;color:var(--dark);line-height:1.35;"></span><span id="editOnlineIntlSub" style="display:block;font-size:11.5px;color:var(--light);line-height:1.45;margin-top:3px;"></span></span></label>
         <textarea id="editOnlineDesc" placeholder="Jak online koučink probíhá — např. pošleš video, do 48 h dostaneš rozbor (nepovinné, zobrazí se nad nabídkou)" style="width:100%;min-height:60px;padding:11px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';margin-bottom:12px;resize:vertical;box-sizing:border-box;"></textarea>
         <div style="font-size:13px;font-weight:800;color:var(--dark);margin:6px 0 2px;">Jednorázová služba</div>
         <p style="font-size:12px;color:var(--light);line-height:1.45;margin:0 0 8px;">Cokoli, co student zaplatí jednou: rozbor videa, tréninkový plán, konzultace. Pojmenuj si to po svém, nastav počet a cenu. Když přidáš další měny, nastavíš cenu v každé z nich.</p>
@@ -6951,6 +6952,8 @@ function _mapCoachRow(c){
       loc: c.city || '',
       country: c.country || null,
       countryCode: c.country_code || null,
+      onlineIntl: (c.online_intl===undefined ? undefined : (c.online_intl===true)),   // prodej online i do jiných zemí
+      billingCC: (c.billing_country||c.country_code||null),
       avail: c.avail_status || 'available',
       privOffers: (function(){ try{ return (typeof c.private_offers==='string')?JSON.parse(c.private_offers):(c.private_offers||null); }catch(e){ return null; } })(),
       gym: c.gym || '',
@@ -10596,6 +10599,7 @@ function renderOffers(c){
   if(c.avail==='holiday') html = `<div style="background:linear-gradient(135deg,#0a8f5b,#0d6e6e);color:#fff;border-radius:12px;padding:14px 16px;margin-bottom:12px;font-size:13px;line-height:1.5;font-weight:600;">${L('🌴 Tento kouč je na dovolené. Dej si ho do oblíbených ❤️ a dáme ti vědět, jakmile bude zase volný.')}</div>` + html;
   else if(c.avail==='booked') html = `<div style="background:var(--dark);color:#fff;border-radius:12px;padding:14px 16px;margin-bottom:12px;font-size:13px;line-height:1.5;font-weight:600;">${L('🔒 Tento kouč je teď plně obsazený. Dej si ho do oblíbených ❤️ a dáme ti vědět, jakmile se uvolní.')}</div>` + html;
   box.innerHTML = html;
+  if(_olViewC && !isSelf) _olIntlMark(c, box);
   if(_olViewC){
     _olPaint(box, _olViewC, _olMainC);
     box.querySelectorAll('.ol-cbtn').forEach(b=>{ b.onclick=(e)=>{ e.stopPropagation(); window._olCurPref=window._olCurPref||{}; window._olCurPref[String(c.profileId||c.id)]=b.dataset.c; _olPaint(box, b.dataset.c, _olMainC); }; });
@@ -10769,6 +10773,42 @@ const _ONL_CONSENT_SERVICE_CS='Žádám o zahájení služby před uplynutím 14
 const _ONL_CONSENT_SERVICE_EN='I ask for the service to start before the 14-day withdrawal period ends and I acknowledge that I lose the right of withdrawal once the service has been fully provided.';
 const _ONL_CONSENT_PLAN_CS='Žádám o zahájení předplatného hned a beru na vědomí, že při odstoupení do 14 dnů zaplatím poměrnou část za dny, kdy předplatné běželo.';
 const _ONL_CONSENT_PLAN_EN='I ask for the subscription to start right away and I acknowledge that if I withdraw within 14 days I pay a proportionate part for the days it was running.';
+// ── ONLINE KOUČINK DO JINÝCH ZEMÍ ──
+// Kouč s vypnutým „Umožnit zakoupit i studentům z jiných zemí" (profiles.online_intl) prodává
+// online jen kupujícím ze své země (billing_country = daňový domicil, jinak country_code).
+// Stejné pravidlo hlídá server (_price-check.js checkOnlineCountry). Neznámá země neblokuje.
+function _ccName(cc){ cc=String(cc||'').toUpperCase(); try{ const h=(typeof MTL_COUNTRIES!=='undefined'?MTL_COUNTRIES:[]).filter(x=>x[0]===cc)[0]; if(h) return LANG==='en'?h[2]:h[1]; }catch(e){} return cc; }
+function _myBuyerCC(){ try{ if(!currentUser) return ''; const v=currentUser.country_code||currentUser.residence_country||''; if(v) return String(v).toUpperCase(); return String((typeof _ccOf==='function'?_ccOf(currentUser.country||''):'')||'').toUpperCase(); }catch(e){ return ''; } }
+async function _olIntlBlock(c){
+  const coachId=c.profileId||c.id; if(currentUser && String(coachId)===String(currentUser.id)) return null;
+  let intl=c.onlineIntl, ccc=String(c.billingCC||'').toUpperCase();
+  if(intl===undefined || !ccc){ try{ const { data }=await supaClient.from('profiles').select('*').eq('id',coachId).single(); if(data){ intl=(data.online_intl===true); ccc=String(data.billing_country||data.country_code||'').toUpperCase(); c.onlineIntl=intl; c.billingCC=ccc; } }catch(e){} }
+  if(intl===true) return null;
+  const scc=_myBuyerCC();
+  if(!ccc || !scc || ccc===scc) return null;
+  return { coachCC:ccc, buyerCC:scc };
+}
+function _olIntlMsg(b){ const EN=LANG==='en'; return EN?('This coach sells online coaching only to students from '+_ccName(b.coachCC)+'. Your profile is set to '+_ccName(b.buyerCC)+'.'):('Tento kouč prodává online koučink jen studentům z této země: '+_ccName(b.coachCC)+'. Ty máš v profilu zemi '+_ccName(b.buyerCC)+'.'); }
+function _olIntlDialog(b){
+  const EN=LANG==='en';
+  const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;z-index:100070;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px;';
+  ov.innerHTML=`<div style="background:#fff;width:100%;max-width:420px;border-radius:16px;padding:20px;font-family:'DM Sans';">
+    <div style="font-size:16px;font-weight:800;color:#141414;margin-bottom:8px;">🌍 ${EN?'Not available in your country':'Ve tvé zemi nedostupné'}</div>
+    <p style="font-size:13.5px;color:var(--dark);line-height:1.5;margin:0 0 14px;">${escapeHtml(_olIntlMsg(b))}</p>
+    <button id="oidOk" style="width:100%;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';">OK</button></div>`;
+  document.body.appendChild(ov);
+  ov.querySelector('#oidOk').onclick=()=>ov.remove(); ov.onclick=(e)=>{ if(e.target===ov) ov.remove(); };
+}
+// Na profilu kouče: když student nesmí koupit, ukáže se to rovnou u online nabídky a tlačítka se vypnou.
+async function _olIntlMark(c, box){
+  try{
+    const b=await _olIntlBlock(c); if(!b) return;
+    const btns=box.querySelectorAll('.offer-tier,.offer-plan,.offer-tier-disc'); if(!btns.length) return;
+    btns.forEach(x=>{ x.disabled=true; x.style.opacity='.45'; x.style.cursor='not-allowed'; });
+    const det=btns[0].closest('.offer-detail');
+    if(det && !det.querySelector('.ol-intl-note')){ const n=document.createElement('div'); n.className='ol-intl-note'; n.style.cssText='font-size:12.5px;font-weight:600;color:#9A5B00;background:#FFF7E0;border:1px solid #F0E0A8;border-radius:10px;padding:9px 11px;margin-bottom:10px;line-height:1.45;'; n.textContent='🌍 '+_olIntlMsg(b); det.insertBefore(n, det.firstChild); }
+  }catch(e){}
+}
 function _olMonthsTxt(m, en){ m=Number(m)||1; if(en) return m+' '+(m===1?'month':'months'); return m===1?'1 měsíc':(m<5?(m+' měsíce'):(m+' měsíců')); }
 // Vrací Promise: false (zpět) nebo { cur, price, months } -- měnu a variantu, kterou si student
 // v shrnutí vybral. o.terms = { 1:{CUR:cena}, 3:{...} } (předplatné) nebo o.prices (služba).
@@ -10776,6 +10816,7 @@ function _olMonthsTxt(m, en){ m=Number(m)||1; if(en) return m+' '+(m===1?'month'
 function _onlineBuyGate(c, o){
   return new Promise(async (resolve)=>{
     const EN=LANG==='en', coachId=c.profileId||c.id, isPlan=o.kind==='plan';
+    { const _ib=await _olIntlBlock(c); if(_ib){ _olIntlDialog(_ib); resolve(false); return; } }
     const mainC=String(c.currencyOnline||o.cur||'CZK').toUpperCase();
     let terms = o.terms || { 1: (o.prices && Object.keys(o.prices).length) ? o.prices : { [String(o.cur||mainC).toUpperCase()]: Number(o.price)||0 } };
     if(o.bank){ const t2={}; Object.keys(terms).forEach(m=>{ const v=Number(terms[m]&&terms[m][mainC])||0; if(v>0) t2[m]={ [mainC]:v }; }); terms=t2; }
@@ -26176,26 +26217,9 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom, _dpick){
     // 220 a na QR mu naskocilo 250. Cena kouce se prebiji taky: vybral si ji clovek.
     if(_dpick && Number(_dpick.price)>=0){ _dp=Number(_dpick.price)||0; }
     price=_dp; label=(occ&&occ.name)||(EN?'Drop-in':'Drop-in'); try{ if(occ&&occ.date){ var _dObj=new Date(occ.date); if(!isNaN(_dObj.getTime())){ var _ds=_dObj.toLocaleDateString(EN?'en-GB':'cs-CZ',{weekday:'long',day:'numeric',month:'numeric'}); label += (EN?(' on '+_ds+(occ.time?(' '+occ.time):'')):(' konající se v '+_ds+(occ.time?(' '+occ.time):''))); } } }catch(e){} disc=(occ&&occ.disc)||(parseDisc(g.disciplines)[0]||null); lvl=(occ&&occ.level&&occ.level!=='all')?occ.level:null;
-    if(occ&&occ.coach){ try{ let { data:_cpr }=await supaClient.from('profiles').select('id,name,payment_mode,receiver_id_type,receiver_id_value,receiver_name,payout_receiver_id_type,payout_receiver_id_value,payout_receiver_name,payout_receiver_declared_at,payout_legal_name,referral_optin,pis_test').eq('id', occ.coach).single();
-      // Skupinovka je klubové plnění -> účet režimu klub, ne ten od soukromek.
-      if(_cpr) _cpr=Object.assign({}, _cpr, _recvOf(_cpr, true));
-      // Trenér inkasuje na sebe, ale účet režimu klub nevyplnil. Bez fallbacku se platba
-      // nenabídne, takže je potřeba říct proč -- jinak je to mrtvé tlačítko.
-      if(_cpr && (typeof _isQrProv==='function' && _isQrProv(_cpr)) && (!_cpr.receiver_id_value || !_cpr.payout_legal_name)){
-        // Účet BEZ fakturační identity je horší než nic: peníze by přišly jedné entitě
-        // a doklad by zněl na druhou. Platba se proto nenabídne, dokud není obojí.
-        _cpr.receiver_id_value=null;
-        toast(LANG==='en'
-          ? '\u26a0\ufe0f This class cannot be paid yet \u2014 the coach has not finished the club-mode account and billing details.'
-          : '\u26a0\ufe0f Tuhle lekci zat\u00edm nejde zaplatit \u2014 tren\u00e9r nem\u00e1 dokon\u010den\u00fd \u00fa\u010det a fakturac\u010dn\u00ed \u00fadaje pro re\u017eim klub.', 6000);
-      }
-      if(_cpr && (typeof _isQrProv==='function' && _isQrProv(_cpr)) && _cpr.receiver_id_value){ // id a pis_test MUSÍ projít dál. Bez nich _pisAllowed nepozná, že má kouč pískoviště zapnuté,
-          // a platbu z účtu zamítne -- proto u drop-inu placeného koučovi PIS nešel, i když v adminu
-          // zapnutý byl. U platby klubu se tenhle objekt nestaví, tak se to tam neprojevilo.
-          _qrPayeeObj={ id:_cpr.id, coach_id:_cpr.id, pis_test:_cpr.pis_test,
-            payment_mode:_cpr.payment_mode,
-            receiver_id_type:_cpr.receiver_id_type, receiver_id_value:_cpr.receiver_id_value,
-            receiver_name:_cpr.receiver_name, currency:cur, name:_cpr.name, referral_optin:_cpr.referral_optin }; _qrPaidTo='coach'; _qrPayeeCoach=occ.coach; } }catch(e){} }
+    // Skupinovou lekci inkasuje VŽDY klub (autonomní kouči zrušeni 3. 10. 2026). Dřív tu převod
+    // přesměroval platbu na účet trenéra lekce, když ho měl vyplněný v režimu klub -- Stripe cesta
+    // (resolveGymPayee) to měla vypnuté už dřív, převod ne.
     { var _qrRefOptin=(_qrPaidTo==='coach' && _qrPayeeObj) ? _qrPayeeObj.referral_optin : g.referral_optin; if(currentUser && _qrRefOptin!==false && (await _qrLiveCredit(currentUser.id))){ _qrRefD=0.20; try{ const { data:_pb } = await supaClient.from('gym_bookings').select('status').eq('gym_id', g.id).eq('student_id', currentUser.id).limit(20); if(_pb && _pb.some(b=>b.status!=='refunded'&&b.status!=='cancelled')) _qrRefD=0.10; }catch(e){ _qrRefD=0.10; } const _ccOk=await _askCreditChoice((currentUser.student_credits||1), _qrRefD, price, cur); if(_ccOk){ _qrCredit='student'; price=Math.floor(price*(1-_qrRefD)); } else { _qrRefD=0; } } }
   }
   if(!price){ toast(EN?'\u26a0\ufe0f No price set':'\u26a0\ufe0f Nen\u00ed nastaven\u00e1 cena'); return; }
@@ -48849,6 +48873,56 @@ function _showPriceBreakdownUnused(inputId, breakId){
 // Stav editoru (lazy, ať funguje i když se kód nahoře v souboru nedoběhl).
 function _olXC(){ return window._olXCur || (window._olXCur={ edit:[], ca:[] }); }
 function _olLM(){ return window._olLastMain || (window._olLastMain={}); }
+// Přepínač „Umožnit zakoupit online koučing i studentům z jiných zemí". Zapnutí jde přes
+// bránu s vysvětlením daní (místo plnění u živých online lekcí = stát zákazníka, OSS) a kouč
+// to potvrdí; potvrzení se uloží se zněním (consent_acceptances, kind online_intl_ack).
+const ONLINE_INTL_ACK_VERSION='1';
+function _olMyCC(){ const v=String((currentUser&&(currentUser.billing_country||currentUser.country_code))||'').toUpperCase(); return v; }
+function _olIntlInit(){
+  const ck=$('editOnlineIntl'); if(!ck) return;
+  const EN=LANG==='en', cc=_olMyCC(), cn=cc?_ccName(cc):(EN?'your country':'tvoje země');
+  const l=$('editOnlineIntlLbl'), sub=$('editOnlineIntlSub');
+  if(l) l.textContent=EN?('Allow students from countries other than '+cn+' to buy online coaching'):('Umožnit zakoupit online koučing i studentům z jiných zemí'+(cc?(' (mimo '+cn+')'):''));
+  if(sub) sub.textContent=EN?('Off: only students from '+cn+' can buy. Your offer stays visible to everyone.'):(cc?('Vypnuto: koupit si můžou jen studenti, kteří mají v profilu zemi '+cn+'. Nabídku uvidí všichni.'):'Vypnuto: koupit si můžou jen studenti z tvé země. Nabídku uvidí všichni.');
+  ck.checked=(currentUser && currentUser.online_intl===true);
+  ck.onchange=async function(){ if(!this.checked) return; const ok=await _olIntlGate(); if(!ok) this.checked=false; };
+}
+function _olIntlGate(){
+  return new Promise(resolve=>{
+    const EN=LANG==='en';
+    const pts=EN?[
+      'Students from other countries will be able to buy your online services and subscriptions.',
+      'Taxes: since 2025, live online lessons and subscriptions with calls sold to consumers in another EU country are taxed in the customer\'s country — from the first euro, the €10,000 threshold does not apply to them. A VAT payer handles it through OSS; a non-payer through registration in that country or the EU small-business scheme (EU SME). Individual feedback (e.g. a video review) is taxed in your country.',
+      'Outside the EU (e.g. United Kingdom, Switzerland, USA) the rules of that country apply.',
+      'Business customers with a VAT ID: reverse charge, they pay the VAT themselves.',
+      'MTL puts the customer\'s country on every receipt. You are responsible for paying the taxes — we recommend discussing it with a tax advisor.'
+    ]:[
+      'Online služby a předplatné si u tebe budou moct koupit i studenti z jiných zemí.',
+      'Daně: od roku 2025 se živé online lekce a předplatné s hovory prodané spotřebitelům z jiné země EU daní ve státě zákazníka — od prvního eura, limit 10 000 € se na ně nevztahuje. Plátce DPH to řeší přes OSS, neplátce registrací v dané zemi nebo režimem malých podniků EU (EU SME). Individuální zpětná vazba (např. rozbor videa) se daní u tebe.',
+      'Mimo EU (např. Velká Británie, Švýcarsko, USA) platí pravidla dané země.',
+      'Firemní zákazník s DIČ: přenesená daňová povinnost, DPH si odvede sám.',
+      'MTL na každém dokladu uvede zemi zákazníka. Za odvod daní odpovídáš ty — doporučujeme to probrat s daňovým poradcem.'
+    ];
+    const ack=EN?'I understand, and I am responsible for taxes in my customers\' countries.':'Rozumím a za daně v zemích zákazníků odpovídám sám/sama.';
+    const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;z-index:100070;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center;';
+    ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px 18px 0 0;padding:20px;max-height:88vh;overflow-y:auto;font-family:'DM Sans';">
+      <div style="font-size:17px;font-weight:800;color:#141414;margin-bottom:10px;">🌍 ${EN?'Selling online coaching abroad':'Prodej online koučinku do jiných zemí'}</div>
+      <ul style="margin:0 0 12px;padding-left:18px;font-size:13px;color:var(--dark);line-height:1.5;">${pts.map(t=>`<li style="margin-bottom:6px;">${escapeHtml(t)}</li>`).join('')}</ul>
+      <label style="display:flex;gap:10px;align-items:flex-start;font-size:13px;font-weight:600;color:var(--dark);line-height:1.45;cursor:pointer;margin-bottom:14px;"><input type="checkbox" id="oigCk" style="width:18px;height:18px;flex:none;margin-top:1px;"><span>${escapeHtml(ack)}</span></label>
+      <div style="display:flex;gap:8px;"><button id="oigNo" style="flex:1;padding:13px;background:var(--surf);border:1px solid var(--border);border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';color:var(--dark);">${EN?'Back':'Zpět'}</button>
+      <button id="oigGo" style="flex:1.5;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'Allow':'Povolit'}</button></div></div>`;
+    document.body.appendChild(ov);
+    const done=v=>{ try{ ov.remove(); }catch(e){} resolve(v); };
+    ov.querySelector('#oigNo').onclick=()=>done(false);
+    ov.onclick=(e)=>{ if(e.target===ov) done(false); };
+    ov.querySelector('#oigGo').onclick=()=>{
+      if(!ov.querySelector('#oigCk').checked){ toast(EN?'⚠️ Tick the confirmation to continue':'⚠️ Pro pokračování zaškrtni potvrzení'); return; }
+      try{ if(typeof _recordConsent==='function') _recordConsent('online_intl_ack', ONLINE_INTL_ACK_VERSION, LANG, pts.join('\n')+'\n\n'+ack, { coach_country:_olMyCC()||null }); }catch(e){}
+      toast(EN?'✓ Allowed — save prices to confirm':'✓ Povoleno — potvrď uložením cen',1);
+      done(true);
+    };
+  });
+}
 function _olGroup(cid){ return /^edit/.test(String(cid||'')) ? 'edit' : 'ca'; }
 function _olMainSel(grp){ return $(grp==='edit'?'editCurrencyOnline':'caCurrencyOnline'); }
 function _olMainCur(grp){ const s=_olMainSel(grp); return ((s&&s.value)||'CZK').toUpperCase(); }
@@ -49341,6 +49415,7 @@ async function fillRateEditor(){
   if($('editOnlineDesc')) $('editOnlineDesc').value = currentUser.online_desc || '';
   if($('editInpersonDesc')) $('editInpersonDesc').value = currentUser.inperson_desc || '';
   renderTiers('editOnlineTiers', parseTiers(currentUser.online_services));
+  try{ _olIntlInit(); }catch(e){}
   try{ var _edOnT=$('editOnlineToggle'); if(_edOnT){ var _edHasOn=false; try{ var _et=parseTiers(currentUser.online_services); _edHasOn=!!(_et&&_et.length); if(_parsePlans(currentUser.online_plans).length) _edHasOn=true; }catch(e){} try{ var _dro=currentUser.discipline_rates_online; if(typeof _dro==='string') _dro=JSON.parse(_dro); if(_dro&&Object.keys(_dro).length) _edHasOn=true; }catch(e){} _edOnT.checked=_edHasOn; _editOnlineVis(_edHasOn); _edOnT.onchange=function(){ _editOnlineVis(this.checked); }; } }catch(e){}
   renderSpecChips('editSpecs', parseSpecs(currentUser.specializations));
   renderLangChips('editLangs', parseLangs(currentUser.languages));
@@ -49656,7 +49731,7 @@ $('btnSaveRates').onclick=async()=>{
     const _droObj={}; (currentUser.disciplines||[]).forEach(d=>{ if(d===_mainChk)return; const el=$('dro_'+d); if(el){ const v=parseInt(el.value)||0; if(v>0) _droObj[d]=v; } }); const _droJSON = (_onlineOff || !Object.keys(_droObj).length) ? null : JSON.stringify(_droObj);
     const _dsObj={}; (currentUser.disciplines||[]).forEach(d=>{ const fe=$('dsf_'+d), ye=$('dsy_'+d); const f=(fe&&fe.value!=='')?parseInt(fe.value):null; const y=(ye&&ye.value!=='')?parseInt(ye.value):null; if((f!=null&&!isNaN(f))||(y!=null&&!isNaN(y))){ _dsObj[d]={}; if(f!=null&&!isNaN(f))_dsObj[d].fights=f; if(y!=null&&!isNaN(y))_dsObj[d].years=y; } });
     const _mainD = ($('editMainDisc') && $('editMainDisc').value) || currentUser.main_discipline || ((currentUser.disciplines||[])[0]) || null;
-    const { error } = await supaClient.from('profiles').update({ rate_inperson: rateIn, rate_online: rateOn, currency: currIn, currency_inperson: currIn, currency_online: currOn, online_services: tiers.length?tiers:null, online_plans: _onlineOff ? null : (_plans.length?_plans:null), online_format: tiers[0]?tiers[0].label:null, online_desc: _onlineOff ? null : ($('editOnlineDesc').value.trim() || null), inperson_desc: $('editInpersonDesc').value.trim() || null, specializations: JSON.stringify(collectSpecs('editSpecs')), languages: JSON.stringify(collectLangs('editLangs')), discipline_rates: _drJSON, discipline_rates_online: _droJSON, main_discipline: _mainD }).eq('id', currentUser.id);
+    const { error } = await supaClient.from('profiles').update({ rate_inperson: rateIn, rate_online: rateOn, currency: currIn, currency_inperson: currIn, currency_online: currOn, online_services: tiers.length?tiers:null, online_plans: _onlineOff ? null : (_plans.length?_plans:null), online_intl: !!($('editOnlineIntl')&&$('editOnlineIntl').checked), online_format: tiers[0]?tiers[0].label:null, online_desc: _onlineOff ? null : ($('editOnlineDesc').value.trim() || null), inperson_desc: $('editInpersonDesc').value.trim() || null, specializations: JSON.stringify(collectSpecs('editSpecs')), languages: JSON.stringify(collectLangs('editLangs')), discipline_rates: _drJSON, discipline_rates_online: _droJSON, main_discipline: _mainD }).eq('id', currentUser.id);
     currentUser.discipline_rates = _drObj; currentUser.discipline_rates_online = _droObj; currentUser.main_discipline = _mainD; currentUser.disc_stats = _dsObj;
     if(error){ console.error('Save rates error:', error); toast('⚠️ '+(error.message||(LANG==='en'?'Error saving prices':'Chyba při ukládání cen'))); btn.textContent=L('Uložit ceny'); btn.disabled=false; return; }
     currentUser.rate_inperson = rateIn;
@@ -49666,6 +49741,7 @@ $('btnSaveRates').onclick=async()=>{
     currentUser.currency_online = currOn;
     currentUser.online_services = tiers.length?tiers:null;
     currentUser.online_plans = _onlineOff ? null : (_plans.length?_plans:null);
+    currentUser.online_intl = !!($('editOnlineIntl')&&$('editOnlineIntl').checked);
     currentUser.specializations = JSON.stringify(collectSpecs('editSpecs'));
     currentUser.languages = JSON.stringify(collectLangs('editLangs'));
     // Zvýhodněné ceny se ukládají spolu s ostatními (ne zvláštním tlačítkem).
