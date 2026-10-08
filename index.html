@@ -48893,7 +48893,7 @@ function _fxConv(amount, from, to, fx){
 function _olMinFor(cur){ cur=String(cur||'').toUpperCase(); if(typeof MIN_RATE_ONLINE!=='undefined' && MIN_RATE_ONLINE[cur]) return MIN_RATE_ONLINE[cur]; const v=_fxConv(200,'CZK',cur,window._fxCache||null); return v?Math.ceil(v):0; }
 function _olSave(pct){ return (pct>0) ? `<span style="font-size:11px;font-weight:700;color:var(--green);background:#F0FBF0;border-radius:6px;padding:2px 7px;margin-left:6px;white-space:nowrap;">${LANG==='en'?'save':'ušetří'} ${pct}%</span>` : ''; }
 function _olInp(cls, cur, val, w, off){ return `<label style="display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--mid);${off?'opacity:.5;':''}" ${off?`title="${LANG==='en'?'Cannot be charged by bank transfer':'Nelze účtovat bankovním převodem'}"`:''}><span style="font-weight:800;min-width:28px;${off?'text-decoration:line-through;':''}">${cur}</span><input class="${cls}" data-cur="${cur}" type="number" min="0" inputmode="numeric" value="${val>0?val:''}" ${off?'disabled':''} style="width:${w||76}px;padding:8px 4px;border:1.5px solid var(--border);border-radius:9px;font-size:13px;font-family:'DM Sans';box-sizing:border-box;${off?'text-decoration:line-through;background:var(--surf);':''}"></label>`; }
-function _olFxBtn(grp){ const m=_olMainCur(grp); return `<button type="button" class="ol-fx" style="background:none;border:none;color:var(--blue);font-size:12px;font-weight:700;cursor:pointer;padding:4px 0;font-family:'DM Sans';text-align:left;">≈ ${LANG==='en'?('Fill empty prices from '+m+' at the exchange rate (ECB)'):('Dopočítat prázdné ceny z '+m+' podle kurzu měn (ECB)')}</button>`; }
+function _olFxBtn(grp, terms){ const m=_olMainCur(grp); return `<button type="button" class="ol-fx" style="background:none;border:none;color:var(--blue);font-size:12px;font-weight:700;cursor:pointer;padding:4px 0;font-family:'DM Sans';text-align:left;">≈ ${terms?(LANG==='en'?('Fill empty option prices — same saving as in '+m):('Dopočítat prázdné ceny variant — se stejnou úsporou jako v '+m)):(LANG==='en'?('Fill empty prices from '+m+' at the exchange rate (ECB)'):('Dopočítat prázdné ceny z '+m+' podle kurzu měn (ECB)'))}</button>`; }
 
 // Řádek měn nad nabídkou: hlavní měna + přidané měny (čipy s ×) + výběr „+ přidat měnu".
 function _olRenderCurBar(grp){
@@ -48959,13 +48959,23 @@ async function _olFillFx(node, grp){
   const hasBase=(Number(node._prices[main])>0) || terms.some(m=>Number(node._terms[m]&&node._terms[m][main])>0);
   if(!hasBase){ toast(EN?('⚠️ Fill in the '+main+' price first — the other currencies are calculated from it at the current exchange rate.'):('⚠️ Nejdřív vyplň cenu v '+main+' — z ní se ostatní měny dopočítají podle aktuálního kurzu.'), 4500); return; }
   const fx=await _loadFx(); if(!fx){ toast(EN?'⚠️ Exchange rates could not be loaded right now. Enter the prices by hand or try again shortly.':'⚠️ Kurzy měn se teď nepodařilo načíst. Ceny vyplň ručně nebo to zkus za chvíli.', 4500); return; }
-  let n=0;
+  let n=0, nr=0;
   const fill=(map)=>{ const base=Number(map[main])||0; if(!(base>0)) return; ex.forEach(c=>{ if(Number(map[c])>0) return; const v=_fxConv(base, main, c, fx); if(v){ map[c]=Math.max(1, Math.round(v)); n++; } }); };
   fill(node._prices);
-  terms.forEach(m=>fill(node._terms[m]=node._terms[m]||{}));
+  // Varianty: cena v přidané měně = měsíční cena v té měně × počet měsíců × stejný poměr slevy
+  // jako v hlavní měně, takže úspora sedí ve všech měnách. Bez měsíční ceny v té měně kurzem.
+  terms.forEach(m=>{
+    const t=node._terms[m]=node._terms[m]||{}; const tMain=Number(t[main])||0, moMain=Number(node._prices[main])||0;
+    if(!(tMain>0)) return;
+    const ratio=(moMain>0)?(tMain/(moMain*m)):null;
+    ex.forEach(c=>{ if(Number(t[c])>0) return; const moC=Number(node._prices[c])||0;
+      const v=(ratio && moC>0) ? (moC*m*ratio) : _fxConv(tMain, main, c, fx);
+      if(v){ t[c]=Math.max(1, Math.round(v)); n++; if(ratio && moC>0) nr++; } });
+  });
   if(node.classList.contains('tier-wrap')) _olPaintTier(node, grp); else _olPaintPlan(node, grp);
   let d=''; try{ if(fx.date){ const dt=new Date(fx.date+'T12:00:00'); if(!isNaN(dt.getTime())) d=dt.toLocaleDateString(EN?'en-GB':'cs-CZ'); } }catch(e){}
-  if(n) toast(EN?('✓ Calculated from '+main+' at the European Central Bank rate'+(d?(' of '+d):'')+'. Check the prices and round them as you like.'):('✓ Dopočítáno z '+main+' podle kurzu Evropské centrální banky'+(d?(' ze dne '+d):'')+'. Zkontroluj ceny a případně je zaokrouhli.'), 4500);
+  if(n && nr===n) toast(EN?('✓ Option prices filled with the same saving as in '+main+'. Check them and round as you like.'):('✓ Ceny variant doplněny se stejnou úsporou jako v '+main+'. Zkontroluj je a případně zaokrouhli.'), 4500);
+  else if(n) toast(EN?('✓ Calculated from '+main+' at the European Central Bank rate'+(d?(' of '+d):'')+(nr?', options with the same saving as in '+main:'')+'. Check the prices and round them as you like.'):('✓ Dopočítáno z '+main+' podle kurzu Evropské centrální banky'+(d?(' ze dne '+d):'')+(nr?', varianty se stejnou úsporou jako v '+main:'')+'. Zkontroluj ceny a případně je zaokrouhli.'), 4500);
   else toast(EN?'All currencies already have a price. Only empty fields are filled — your prices are never overwritten.':'Všechny měny už cenu mají. Dopočítávají se jen prázdná pole — tvoje ceny se nepřepisují.', 4500);
 }
 
@@ -49068,9 +49078,10 @@ function _olPaintPlan(node, grp){
     const on=!!node._termOn[m], v=node._terms[m]||{};
     return `<div class="opl-term" data-m="${m}" style="border-top:1px dashed var(--border);padding:6px 0;">
       <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:var(--dark);cursor:pointer;"><input type="checkbox" class="opl-ton" ${on?'checked':''} style="width:17px;height:17px;accent-color:#0a8f5b;"> ${m} ${EN?'months':'měsíců'} <span class="opl-tsave"></span></label>
-      <div class="opl-tp" style="display:${on?'flex':'none'};flex-wrap:wrap;gap:6px 10px;align-items:center;margin-top:6px;">${curs.map(c=>_olInp('opl-tprice', c, v[c], 84, (c!==main && _tierCurBankOnly()))).join('')}<span style="font-size:11.5px;color:var(--light);">${EN?'price for the whole '+m+' months':'cena za celých '+m+' měsíců'}</span></div>
+      <div class="opl-tp" style="display:${on?'flex':'none'};flex-wrap:wrap;gap:6px 10px;align-items:center;margin-top:6px;">${curs.map(c=>`<span style="display:inline-flex;align-items:center;gap:5px;">${_olInp('opl-tprice', c, v[c], 84, (c!==main && _tierCurBankOnly()))}<span class="opl-tcs" data-cur="${c}" style="font-size:11px;font-weight:700;white-space:nowrap;"></span></span>`).join('')}<span style="font-size:11.5px;color:var(--light);flex-basis:100%;">${EN?'price for the whole '+m+' months':'cena za celých '+m+' měsíců'}</span></div>
     </div>`;
-  }).join('');
+  }).join('') + ((ex.length && !_tierCurBankOnly()) ? `<div class="opl-tfx" style="border-top:1px dashed var(--border);padding-top:4px;">${_olFxBtn(grp, true)}</div>` : '');
+  { const tfb=tb.querySelector('.opl-tfx .ol-fx'); if(tfb) tfb.onclick=()=>_olFillFx(node, grp); }
   tb.querySelectorAll('.opl-term').forEach(row=>{
     const m=parseInt(row.dataset.m,10);
     row.querySelector('.opl-ton').onchange=function(){ node._termOn[m]=this.checked; row.querySelector('.opl-tp').style.display=this.checked?'flex':'none'; _olPlanSavings(node, grp); };
@@ -49078,15 +49089,24 @@ function _olPaintPlan(node, grp){
   });
   _olPlanSavings(node, grp);
 }
-// Úspora varianty proti měsíční ceně (v hlavní měně) -- kouč ji vidí hned při psaní ceny.
+// Úspora varianty proti měsíční ceně -- U KAŽDÉ MĚNY ZVLÁŠŤ (student vidí úsporu ve své měně).
+// Když se úspora v přidané měně liší od hlavní o 2 a víc procentních bodů, je oranžová
+// s poznámkou, kolik je v hlavní měně -- ať kouč nemá v každé měně nechtěně jinou slevu.
 function _olPlanSavings(node, grp){
-  const main=_olMainCur(grp), mo=Number(node._prices&&node._prices[main])||0;
+  const EN=LANG==='en', main=_olMainCur(grp);
+  const pctOf=(c,m)=>{ const mo=Number(node._prices&&node._prices[c])||0, tp=Number(node._terms&&node._terms[m]&&node._terms[m][c])||0; return (mo>0&&tp>0)?Math.round((1-tp/(mo*m))*100):null; };
   node.querySelectorAll('.opl-term').forEach(row=>{
-    const m=parseInt(row.dataset.m,10), el=row.querySelector('.opl-tsave'); if(!el) return;
-    const tp=Number(node._terms&&node._terms[m]&&node._terms[m][main])||0;
-    if(!(node._termOn&&node._termOn[m]) || !(mo>0) || !(tp>0)){ el.innerHTML=''; return; }
-    const pct=Math.round((1-tp/(mo*m))*100);
-    el.innerHTML = pct>0 ? _olSave(pct) : (pct<0?`<span style="font-size:11px;font-weight:700;color:var(--red);">${LANG==='en'?'more than monthly':'dráž než měsíčně'}</span>`:'');
+    const m=parseInt(row.dataset.m,10), on=!!(node._termOn&&node._termOn[m]);
+    const hdr=row.querySelector('.opl-tsave'); if(hdr) hdr.innerHTML='';
+    const pm=pctOf(main,m);
+    row.querySelectorAll('.opl-tcs').forEach(el=>{
+      const c=el.dataset.cur, p=on?pctOf(c,m):null;
+      if(p===null){ el.textContent=''; return; }
+      if(p<0){ el.style.color='var(--red)'; el.textContent=EN?'more than monthly':'dráž než měsíčně'; return; }
+      const off=(c!==main && pm!==null && Math.abs(p-pm)>=2);
+      el.style.color=off?'#B76E00':'var(--green)';
+      el.textContent=(p>0?((EN?'save ':'ušetří ')+p+' %'):(EN?'no saving':'bez úspory'))+(off?(EN?(' ('+main+': '+pm+' %)'):(' (v '+main+' '+pm+' %)')):'');
+    });
   });
 }
 function _addPlanRow(containerId, p){
