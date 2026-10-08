@@ -45,6 +45,13 @@ export default async function handler(req, res){
 }
 
 // ── 1) Begin: create/reuse a Stripe Customer and open a Checkout Session in setup mode ──
+// Země do Stripe jako ISO kód (v MTL bývá „Česko", „Slovensko"...).
+function _cc(v) {
+  const t = String(v || '').trim(); if (!t) return '';
+  if (/^[A-Za-z]{2}$/.test(t)) return t.toUpperCase();
+  const m = { 'česko': 'CZ', 'česká republika': 'CZ', 'czechia': 'CZ', 'czech republic': 'CZ', 'slovensko': 'SK', 'slovakia': 'SK', 'německo': 'DE', 'germany': 'DE', 'rakousko': 'AT', 'austria': 'AT', 'polsko': 'PL', 'poland': 'PL', 'francie': 'FR', 'france': 'FR' };
+  return m[t.toLowerCase()] || '';
+}
 async function startSetup(req, res){
   const { kind = 'gym', id, userId, email } = req.query;
   if(!id) return res.status(400).json({ error: 'Chybí id' });
@@ -66,6 +73,27 @@ async function startSetup(req, res){
     customer = c.id;
     try{ await _sbPatch(`${table}?id=eq.${encodeURIComponent(id)}`, { commission_card_customer: customer }); }catch(e){}
   }
+
+  // FAKTURAČNÍ ÚDAJE PODNIKATELE NA ZÁKAZNÍKA VE STRIPE. Karta na provizi patří podnikateli, takže
+  // Stripe (potvrzení o platbě, platby provize) má nést jeho právní název, adresu, IČO a DIČ --
+  // stejné údaje, které už má v MTL (doklad o provizi z nich vystavuje MTL). Checkout v režimu
+  // uložení karty pole pro DIČ nenabízí (to umí jen platba / předplatné), proto se vyplní odsud.
+  try {
+    const r = (await _sbGet(`${table}?id=eq.${encodeURIComponent(id)}&select=*`))[0] || {};
+    const legal = r.legal_name || r.name || '';
+    const addr = { line1: r.billing_line1 || undefined, line2: r.billing_line2 || undefined, city: r.billing_city || undefined, postal_code: r.billing_postal || undefined, country: _cc(r.billing_country) || undefined };
+    const upd = { ...(legal ? { name: String(legal).slice(0, 250) } : {}), ...((addr.line1 || addr.city) ? { address: addr } : {}),
+      ...((r.invoice_email || email) ? { email: String(r.invoice_email || email) } : {}),
+      metadata: { mtl_kind: String(kind), mtl_id: String(id), mtl_user: String(userId || ''), ico: String(r.tax_id || r.ico || ''), dic: String(r.vat_id || r.dic || '') } };
+    await stripe.customers.update(customer, upd);
+    const dic = String(r.vat_id || r.dic || '').replace(/\s+/g, '').toUpperCase();
+    if (/^[A-Z]{2}[0-9A-Z]{2,13}$/.test(dic)) {
+      const have = await stripe.customers.listTaxIds(customer, { limit: 10 });
+      if (!((have && have.data) || []).some((t) => String(t.value).toUpperCase() === dic)) {
+        try { await stripe.customers.createTaxId(customer, { type: dic.startsWith('GB') ? 'gb_vat' : 'eu_vat', value: dic }); } catch (e) { console.error('setup-card taxid', e.message); }
+      }
+    }
+  } catch (e) { console.error('setup-card billing', e.message); }
 
   const session = await stripe.checkout.sessions.create({
     mode: 'setup',
