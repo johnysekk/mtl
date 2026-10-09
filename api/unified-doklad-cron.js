@@ -124,6 +124,7 @@ const _L = {
         kOrg:'organizace', kGym:'klub', kCoachPayout:'kou\u010d \u00b7 re\u017eim klub', kCoach:'kou\u010d',
         mStripe:'Stripe (karta)', mPis:'Platba z banky', mQr:'QR platba', mCash:'Hotovost',
         test:'\u{1F9EA} TESTOVAC\u00cd RE\u017dIM \u2014 nejde o form\u00e1ln\u00ed da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo',
+        forWhom:(n,ico,ent)=>'Odb\u011bratel: <b>'+n+'</b>'+(ico?(', I\u010cO '+ico):'')+(ent?(' \u00b7 '+ent):'')+'.',
         hello:'Dobr\u00fd den', attached:(no,per,tot)=>'v p\u0159\u00edloze pos\u00edl\u00e1me doklad '+no+' o provizi MTL za obdob\u00ed <b>'+per+'</b> \u2014 celkem <b>'+tot+'</b>.',
         introTitle:'P\u0159ehled zprost\u0159edkovan\u00fdch plateb', introFee:'Provize MTL', introNone:(u)=>'Za toto obdob\u00ed nebyla \u00fa\u010dtov\u00e1na \u017e\u00e1dn\u00e1 provize'+(u?(' \u2014 zav\u00e1d\u011bc\u00ed obdob\u00ed plat\u00ed do '+u+'.'):'.')+' Nejde o da\u0148ov\u00fd doklad.',
         subjDoklad:'Doklad o provizi MTL', subjIntro:'P\u0159ehled zprost\u0159edkovan\u00fdch plateb' },
@@ -136,12 +137,14 @@ const _L = {
         kOrg:'organisation', kGym:'club', kCoachPayout:'coach \u00b7 club mode', kCoach:'coach',
         mStripe:'Stripe (card)', mPis:'Bank payment', mQr:'QR payment', mCash:'Cash',
         test:'\u{1F9EA} TEST MODE \u2014 not a formal tax document; no actual transaction took place',
+        forWhom:(n,ico,ent)=>'Customer: <b>'+n+'</b>'+(ico?(', reg. no. '+ico):'')+(ent?(' \u00b7 '+ent):'')+'.',
         hello:'Hello', attached:(no,per,tot)=>'please find attached receipt '+no+' for the MTL commission for <b>'+per+'</b> \u2014 total <b>'+tot+'</b>.',
         introTitle:'Summary of intermediated payments', introFee:'MTL commission', introNone:(u)=>'No commission was charged for this period'+(u?(' \u2014 the introductory period runs until '+u+'.'):'.')+' This is not a tax document.',
         subjDoklad:'MTL commission receipt', subjIntro:'Summary of intermediated payments' },
 };
 function _t(lang){ return _L[lang === 'en' ? 'en' : 'cs']; }
 function _methodLabel(m, lang){ const T=_t(lang); return m==='stripe'?T.mStripe:(m==='pis'?T.mPis:(m==='qr'?T.mQr:(m==='cash'?T.mCash:(m||'\u2014')))); }
+function _itemLabel(i, lang){ return _methodLabel(i.method, lang) + (i.acq ? (lang === 'en' ? ' \u00b7 acquisition (new member from MTL)' : ' \u00b7 akvizice (nov\u00fd \u010dlen z MTL)') : ''); }
 function _pct(r, lang){ return r!=null ? (Math.round(r*1000)/10).toString().replace('.', lang==='en'?'.':',')+' %' : '\u2014'; }
 function _money(minor, cur, lang){ return (Number(minor||0)/100).toFixed(2).replace('.', lang==='en'?'.':',')+' '+String(cur||'').toUpperCase(); }
 function esc(x){ return String(x==null?'':x).replace(/[<>&"]/g,function(c){ return c==='<'?'&lt;':c==='>'?'&gt;':c==='&'?'&amp;':'&quot;'; }); }
@@ -239,7 +242,7 @@ function _howCharged(s, lang){
 function dokladHtml(s, lang){
   const T=_t(lang); const items = s.line_items || []; const cur = s.currency;
   const th = 'padding:8px 10px;font-size:11px;color:#666;font-weight:700;';
-  const rows = items.map(function(i){ return '<tr><td style="padding:7px 10px;border-bottom:1px solid #eee;">'+esc(_methodLabel(i.method, lang))+'</td><td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:center;">'+_pct(i.rate, lang)+'</td><td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:center;">'+(i.count||0)+'</td><td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:right;">'+_money(i.gross,cur,lang)+'</td><td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:right;">'+_money(i.fee,cur,lang)+'</td></tr>'; }).join('');
+  const rows = items.map(function(i){ return '<tr><td style="padding:7px 10px;border-bottom:1px solid #eee;">'+esc(_itemLabel(i, lang))+'</td><td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:center;">'+_pct(i.rate, lang)+'</td><td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:center;">'+(i.count||0)+'</td><td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:right;">'+_money(i.gross,cur,lang)+'</td><td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:right;">'+_money(i.fee,cur,lang)+'</td></tr>'; }).join('');
   let vat = '';
   if (s.sup_vat_payer) { const rate = s.sup_vat_rate || 21; const base = s.amount / (1 + rate / 100); vat = '<tr><td>'+T.base+'</td><td style="text-align:right;">'+_money(base,cur,lang)+'</td></tr><tr><td>'+T.vat+' '+rate+' %</td><td style="text-align:right;">'+_money(s.amount - base,cur,lang)+'</td></tr>'; }
   else vat = '<tr><td colspan="2" style="font-size:11px;color:#666;padding-top:6px;">'+T.notVat+'</td></tr>';
@@ -292,7 +295,7 @@ function dokladPdf(s, lang){
       y = doc.y + 4; doc.moveTo(50,y).lineTo(545,y).strokeColor('#dddddd').stroke(); y += 6;
       (s.line_items || []).forEach(function(it){
         doc.fontSize(10).fillColor('#111111');
-        doc.text(_methodLabel(it.method, lang), cols[0], y, { width:135 });
+        doc.text(_itemLabel(it, lang), cols[0], y, { width:135 });
         doc.text(_pct(it.rate, lang), cols[1], y, { width:70, align:'center' });
         doc.text(String(it.count || 0), cols[2], y, { width:70, align:'center' });
         doc.text(_money(it.gross, cur, lang), cols[3], y, { width:105, align:'right' });
@@ -322,8 +325,12 @@ function dokladMailHtml(s, hasPdf, lang){
   if (!hasPdf) return dokladHtml(s, lang);
   return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.6;">'
     + (s.test_mode ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:14px;">'+T.test+'</div>' : '')
-    + '<p style="margin:0 0 10px;">' + T.hello + (s.cust_name ? (', ' + esc(s.cust_trade_name || s.cust_name)) : '') + ',</p>'
+    // OSLOVENÍ: doklad zní na právní subjekt (odběratel = právní název + IČO), ne na název klubu
+    // v appce. Česky se právní jméno do oslovení neskloňuje dobře („Dobrý den, Petr Haiser"), proto
+    // neutrální pozdrav a komu doklad patří stojí věcně ve větě pod ním.
+    + '<p style="margin:0 0 10px;">' + T.hello + ',</p>'
     + '<p style="margin:0 0 10px;">' + T.attached(esc(_dokNo(s.id)), esc(periodLabelL(s.period_month, lang)), esc(_money(s.amount, s.currency, lang))) + '</p>'
+    + (s.cust_name ? ('<p style="margin:0 0 10px;">' + T.forWhom(esc(s.cust_name), s.cust_ico ? esc(s.cust_ico) : '', s.cust_trade_name ? ((s.organization_id ? T.inMtlOrg : (s.gym_id ? T.inMtlGym : T.inMtlCoach)) + ' \u201e' + esc(s.cust_trade_name) + '\u201c') : '') + '</p>') : '')
     + '<p style="margin:0 0 10px;color:#666;font-size:13px;">' + esc(_howCharged(s, lang)) + ' ' + T.noRequest + '</p>'
     + '<p style="margin:18px 0 0;color:#888;font-size:12px;">' + esc(s.sup_name || 'Martial Training Lab') + (s.sup_email ? (' \u00b7 ' + esc(s.sup_email)) : '') + (s.sup_phone ? (' \u00b7 ' + esc(s.sup_phone)) : '') + '</p></div>';
 }
@@ -417,7 +424,7 @@ export default async function handler(req, res) {
     const _dailyFilter = preview
       ? `created_at=gte.${dayStart}&created_at=lt.${dayEnd}`
       : `commission_collected_at=gte.${dayStart}&commission_collected_at=lt.${dayEnd}`;
-    const tx = await sb(`transactions?select=gym_id,coach_id,organization_id,paid_to,payee_kind,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method&commission_status=in.(collected${preview?',pending,failed':''})&${DAILY?_dailyFilter:`commission_month=eq.${period}`}&mtl_fee=gt.0&limit=50000`);
+    const tx = await sb(`transactions?select=gym_id,coach_id,organization_id,paid_to,payee_kind,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method,acq_source,base_rate&commission_status=in.(collected${preview?',pending,failed':''})&${DAILY?_dailyFilter:`commission_month=eq.${period}`}&mtl_fee=gt.0&limit=50000`);
 
     // ── DOKLAD AŽ PO STRŽENÍ ────────────────────────────────────────────────────────────
     // Doklad se vystavuje na UHRAZENOU provizi. Karetní provize je vybraná hned při platbě,
@@ -469,8 +476,11 @@ export default async function handler(req, res) {
       const net = (t.mtl_fee || 0) - (t.mtl_fee_refunded || 0);
       if (net === 0) return;
       b.total += net;
-      const key = (t.payment_method || '?') + '|' + (t.mtl_rate != null ? String(t.mtl_rate) : 'na');
-      const e = (b.rates[key] = b.rates[key] || { method: t.payment_method || null, rate: (t.mtl_rate != null ? Number(t.mtl_rate) : null), fee: 0, count: 0, gross: 0 });
+      // AKVIZIČNÍ PROVIZE (první platba člena, kterého přivedlo MTL) zvlášť a s popisem -- jinak
+      // na dokladu stál řádek „Platba z banky 10 %" a nebylo poznat, proč je sazba jiná.
+      const acq = (t.acq_source === 'mtl_discovery' || t.acq_source === 'mtl_ads') && t.mtl_rate != null && (t.base_rate != null ? Number(t.mtl_rate) > Number(t.base_rate) + 1e-9 : Number(t.mtl_rate) >= 0.05);   // bez base_rate: sazby žebříčku jsou max 2,5 %, akvizice 5 / 10 %
+      const key = (t.payment_method || '?') + '|' + (t.mtl_rate != null ? String(t.mtl_rate) : 'na') + (acq ? '|acq' : '');
+      const e = (b.rates[key] = b.rates[key] || { method: t.payment_method || null, rate: (t.mtl_rate != null ? Number(t.mtl_rate) : null), acq: acq || undefined, fee: 0, count: 0, gross: 0 });
       e.fee += net; e.count += 1; e.gross += (t.gross_amount || 0);
     };
     for (const t of (tx || [])) {
