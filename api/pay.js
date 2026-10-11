@@ -768,6 +768,18 @@ async function partnerCheckout(req, res) {
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
 
+  // NA KOHO SE FAKTURUJE. EP si kupuje člověk, ale platit ho může jeho klub (spolek / s.r.o.)
+  // nebo on sám jako kouč (IČO). Volba z appky: bill=coach | bill=gym:<id>. Klub musí patřit
+  // kupujícímu. Volba jede v metadatech předplatného, takže každá faktura (i obnovy) jde na
+  // stejný subjekt -- ep-doklad ji dostane přes webhook.
+  let billGym = null;
+  { const _b = String(req.query.bill || '');
+    if (_b.indexOf('gym:') === 0) {
+      const g = (await _wsbGet(`gyms?id=eq.${encodeURIComponent(_b.slice(4))}&owner_id=eq.${encodeURIComponent(userId)}&select=id`))[0];
+      if (!g) return res.status(403).json({ error: 'Tenhle klub ti nepatří' });
+      billGym = g.id;
+    } }
+
   // Region = country of the provider's connected Stripe account (authoritative for what we charge).
   // Fall back to cached stripe_country / profile country if no account is retrievable yet.
   let cc = '';
@@ -792,11 +804,14 @@ async function partnerCheckout(req, res) {
       const EU = ['AT','BE','BG','CY','CZ','DE','DK','EE','ES','FI','FR','GR','HR','HU','IE','IT',
                   'LT','LU','LV','MT','NL','PL','PT','RO','SE','SI','SK'];
       const home = String(_ps.home_country || 'CZ').toUpperCase();
-      const p2 = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(userId)}&select=vat_id,billing_country,country_code,vat_verified_id`))[0] || {};
-      const bc = String(p2.billing_country || p2.country_code || cc || home).toUpperCase();
+      // DIČ a země toho, KDO platí: klub, nebo kouč sám.
+      const p2 = billGym
+        ? ((await _wsbGet(`gyms?id=eq.${encodeURIComponent(billGym)}&select=vat_id,billing_country,country,vat_verified_id`))[0] || {})
+        : ((await _wsbGet(`profiles?id=eq.${encodeURIComponent(userId)}&select=vat_id,billing_country,country_code,vat_verified_id`))[0] || {});
+      const bc = String(p2.billing_country || p2.country_code || p2.country || cc || home).toUpperCase();
       const euForeign = bc && bc !== home && EU.indexOf(bc) >= 0 && EU.indexOf(home) >= 0;
       if (euForeign) {
-        const _why = await _foreignVatGate('profiles', userId, Object.assign({}, p2, { billing_country: bc }), home, _ps.dic);
+        const _why = await _foreignVatGate(billGym ? 'gyms' : 'profiles', billGym || userId, Object.assign({}, p2, { billing_country: bc }), home, _ps.dic);
         if (_why) return res.redirect(303, `${proto}://${host}/?partner_sub=${_why}`);
       }
     }
@@ -821,8 +836,8 @@ async function partnerCheckout(req, res) {
     line_items: [
       { price_data: { currency: tier.currency, product_data: { name: 'Exclusive MTL Partner — coach & gym rates' + (_epYear ? ' (yearly)' : '') }, unit_amount: Math.round(_epAmount*100), recurring: { interval: _epInterval } }, quantity: 1 },
     ],
-    subscription_data: { metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'', ep_currency: tier.currency, ep_amount: String(_epAmount), ep_month: String(tier.amount), ep_interval: _epYear ? 'year' : 'month' } },
-    metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'', ep_month: String(tier.amount), ep_interval: _epYear ? 'year' : 'month' },
+    subscription_data: { metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'', ep_currency: tier.currency, ep_amount: String(_epAmount), ep_month: String(tier.amount), ep_interval: _epYear ? 'year' : 'month', ep_bill_gym: billGym || '' } },
+    metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'', ep_month: String(tier.amount), ep_interval: _epYear ? 'year' : 'month', ep_bill_gym: billGym || '' },
     success_url: `${proto}://${host}/?partner_sub=ok&session={CHECKOUT_SESSION_ID}`,
     cancel_url: `${proto}://${host}/`,
   }, { apiVersion: '2024-09-30.acacia' });

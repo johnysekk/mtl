@@ -138,6 +138,20 @@ export default async function handler(req, res) {
         billing_country: o.billing_country || o.country, country_code: null,
         invoice_email: o.invoice_email || o.contact_email, email: o.contact_email || pr.email, phone: o.contact_phone || pr.phone };
     }
+    // EP PLACENÝ KLUBEM: odběratelem je klub (volba při nákupu, metadata předplatného ep_bill_gym).
+    // Klub musí patřit kupujícímu; jinak se fakturuje jako dřív na kouče.
+    let billGym = null;
+    if (!orgId && b.bill_gym_id) {
+      const g = (await sb(`gyms?id=eq.${encodeURIComponent(b.bill_gym_id)}&owner_id=eq.${encodeURIComponent(uid)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,vat_verified_id,`
+        + `billing_line1,billing_line2,billing_city,billing_postal,billing_country,country,invoice_email,contact_email,billing_phone,contact_phone`))[0];
+      if (g) {
+        billGym = g.id;
+        pr = { id: pr.id, lang: pr.lang, name: g.name, legal_name: g.legal_name, tax_id: g.tax_id, vat_id: g.vat_id, vat_payer: g.vat_payer, vat_verified_id: g.vat_verified_id,
+          billing_line1: g.billing_line1, billing_line2: g.billing_line2, billing_city: g.billing_city, billing_postal: g.billing_postal,
+          billing_country: g.billing_country || g.country, country_code: null,
+          invoice_email: g.invoice_email || g.contact_email || pr.invoice_email, email: g.contact_email || pr.email, phone: g.billing_phone || g.contact_phone || pr.phone };
+      }
+    }
 
     const custAddr = [pr.billing_line1, pr.billing_line2, [pr.billing_postal, pr.billing_city].filter(Boolean).join(' ')]
       .filter(Boolean).join(', ');
@@ -167,7 +181,7 @@ export default async function handler(req, res) {
       const _norm = String(custDic).replace(/\s+/g, '').toUpperCase();
       const vv = await viesCheck(_norm, custCountry, ME.dic);
       if (vv.ok && vv.valid) {
-        try { await sb(`${orgId ? 'organizations' : 'profiles'}?id=eq.${encodeURIComponent(orgId || uid)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' },
+        try { await sb(`${orgId ? 'organizations' : (billGym ? 'gyms' : 'profiles')}?id=eq.${encodeURIComponent(orgId || billGym || uid)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' },
           body: JSON.stringify({ vat_verified_id: _norm, vat_verified_at: new Date().toISOString(), vat_vies_ref: vv.ref || null }) }); } catch (e) {}
       } else if (vv.ok || String(pr.vat_verified_id || '').toUpperCase() !== _norm) {
         vatProblem = vv.ok ? 'invalid' : 'unverified'; custDic = null;
@@ -208,6 +222,7 @@ export default async function handler(req, res) {
 
     const row = {
       owner_id: uid, coach_id: orgId ? null : uid, organization_id: orgId,
+      gym_id: billGym,          // EP placený klubem: doklad patří i do dokladů toho klubu
       period_month: period, currency: cur, amount: amountMinor,
       pi_id: b.invoice_id || null,
       kind: KIND,

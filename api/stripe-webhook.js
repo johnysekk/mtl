@@ -47,7 +47,7 @@ async function _platformSubOwner(inv) {
   let md = (inv.subscription_details && inv.subscription_details.metadata)
         || (inv.parent && inv.parent.subscription_details && inv.parent.subscription_details.metadata) || {};
   if (!md.mtl_payment_type) { try { md = (await stripe.subscriptions.retrieve(subId)).metadata || {}; } catch (e) { md = {}; } }
-  if (md.mtl_payment_type === 'partner_sub' && md.user_id) return { uid: md.user_id, org: null };
+  if (md.mtl_payment_type === 'partner_sub' && md.user_id) return { uid: md.user_id, org: null, billGym: md.ep_bill_gym || null };
   if (md.mtl_payment_type === 'supplier_sub' && md.org_id) {
     let uid = md.user_id || null;
     if (!uid) { const o = await sbGet(`organizations?id=eq.${encodeURIComponent(md.org_id)}&select=owner_id&limit=1`); uid = o && o[0] && o[0].owner_id; }
@@ -1255,7 +1255,7 @@ export default async function handler(req, res) {
         if (_ow) {
           const _line = (inv.lines && inv.lines.data && inv.lines.data[0]) || null;
           await _callEpDoklad({
-            invoice_id: inv.id, user_id: _ow.uid, org_id: _ow.org,
+            invoice_id: inv.id, user_id: _ow.uid, org_id: _ow.org, bill_gym_id: _ow.billGym || null,
             amount: (inv.amount_paid != null ? inv.amount_paid : inv.total) / 100,
             currency: inv.currency, test_mode: !inv.livemode,
             period_start: _line && _line.period ? new Date(_line.period.start * 1000).toISOString() : null,
@@ -1313,7 +1313,7 @@ export default async function handler(req, res) {
           if (_ow) {
             const _line = (inv.lines && inv.lines.data && inv.lines.data[0]) || null;
             await _callEpDoklad({
-              unpaid: true, invoice_id: inv.id, user_id: _ow.uid, org_id: _ow.org,
+              unpaid: true, invoice_id: inv.id, user_id: _ow.uid, org_id: _ow.org, bill_gym_id: _ow.billGym || null,
               amount: (inv.amount_due != null ? inv.amount_due : inv.total) / 100,
               currency: inv.currency, test_mode: !inv.livemode,
               pay_url: inv.hosted_invoice_url || null,
