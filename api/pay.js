@@ -3,6 +3,7 @@ import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor } fro
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { checkPrice, offerPrices, planTermPrices, checkOnlineCountry } from './_price-check.js';
 import { vatMode } from './_vat.js';
+import { viesCheck } from './tax-verify.js';
 const _PC = (kind, extra) => ({ SB: _SUPA_URL, KEY: _SUPA_KEY, kind, ...extra });
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -730,6 +731,22 @@ const EP_FOUNDING_CZK = 499;
 const EP_LIST_CZK = 699;
 const EP_YEAR_MONTHS = 10;
 
+// DIČ ZAHRANIČNÍHO ODBĚRATELE MUSÍ BÝT PLATNÉ VE VIES, ne jen vyplněné. Přenesení daně smíme
+// použít, jen když máme platnost ověřenou (čl. 18 odst. 1 písm. a) nařízení 282/2011) -- a
+// musíme to umět doložit. Proto se ukládá, KTERÉ DIČ a KDY prošlo, a číslo konzultace VIES
+// (vat_vies_ref, když má MTL DIČ). Při výpadku VIES projde jen DIČ, které už jednou ověřené je.
+// Vrací null (projde) nebo důvod pro návrat do appky: need_vat | vat_invalid | vies_down.
+async function _foreignVatGate(table, id, rec, home, mtlDic) {
+  const vat = String(rec.vat_id || '').replace(/\s+/g, '').toUpperCase();
+  if (!vat) return 'need_vat';
+  const bc = String(rec.billing_country || rec.country_code || rec.country || '').toUpperCase();
+  const v = await viesCheck(vat, bc, mtlDic);
+  if (!v.ok) return (String(rec.vat_verified_id || '').toUpperCase() === vat) ? null : 'vies_down';
+  if (!v.valid) return 'vat_invalid';
+  await _wsbPatch(`${table}?id=eq.${encodeURIComponent(id)}`, { vat_verified_id: vat, vat_verified_at: new Date().toISOString(), vat_vies_ref: v.ref || null });
+  return null;
+}
+
 async function epTierForCountry(cc) {
   // Kolik zakladajicich mist jeste zbyva. Pocitaji se vsichni aktivni partneri, i rucne udeleni.
   let taken = 0;
@@ -770,16 +787,17 @@ async function partnerCheckout(req, res) {
   // EU museli řešit režim OSS (místem plnění je jeho stát). Tomu se vyhýbáme: předplatné
   // se bez DIČ nezaloží, takže nevznikne platba, ke které nejde vystavit doklad.
   try {
-    const _ps = (await _wsbGet('platform_settings?id=eq.1&select=require_vat_foreign,home_country'))[0] || {};
+    const _ps = (await _wsbGet('platform_settings?id=eq.1&select=require_vat_foreign,home_country,dic'))[0] || {};
     if (_ps.require_vat_foreign) {
       const EU = ['AT','BE','BG','CY','CZ','DE','DK','EE','ES','FI','FR','GR','HR','HU','IE','IT',
                   'LT','LU','LV','MT','NL','PL','PT','RO','SE','SI','SK'];
       const home = String(_ps.home_country || 'CZ').toUpperCase();
-      const p2 = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(userId)}&select=vat_id,billing_country,country_code`))[0] || {};
+      const p2 = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(userId)}&select=vat_id,billing_country,country_code,vat_verified_id`))[0] || {};
       const bc = String(p2.billing_country || p2.country_code || cc || home).toUpperCase();
       const euForeign = bc && bc !== home && EU.indexOf(bc) >= 0 && EU.indexOf(home) >= 0;
-      if (euForeign && !String(p2.vat_id || '').trim()) {
-        return res.redirect(303, `${proto}://${host}/?partner_sub=need_vat`);
+      if (euForeign) {
+        const _why = await _foreignVatGate('profiles', userId, Object.assign({}, p2, { billing_country: bc }), home, _ps.dic);
+        if (_why) return res.redirect(303, `${proto}://${host}/?partner_sub=${_why}`);
       }
     }
   } catch (e) { console.error('[ep] vat gate', e.message); }
@@ -839,7 +857,7 @@ async function supplierCheckout(req, res) {
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
 
-  const org = (await _wsbGet(`organizations?id=eq.${encodeURIComponent(orgId)}&select=id,owner_id,kind,status,name,vat_id,billing_country,country,contact_email,invoice_email,supplier_sub`))[0];
+  const org = (await _wsbGet(`organizations?id=eq.${encodeURIComponent(orgId)}&select=id,owner_id,kind,status,name,vat_id,vat_verified_id,billing_country,country,contact_email,invoice_email,supplier_sub`))[0];
   if (!org || org.kind !== 'supplier') return res.status(404).json({ error: 'Dodavatel nenalezen' });
   if (org.status !== 'approved') return res.status(403).json({ error: 'Profil dodavatele je pozastavený nebo zamítnutý.' });
   if (org.supplier_sub) return res.redirect(303, `${proto}://${host}/?supplier_sub=active`);
@@ -847,14 +865,15 @@ async function supplierCheckout(req, res) {
   // DIČ U ZAHRANIČNÍHO DODAVATELE -- stejná brána jako u EP (require_vat_foreign).
   let _ps = {};
   try {
-    _ps = (await _wsbGet('platform_settings?id=eq.1&select=require_vat_foreign,home_country,vat_payer,vat_rate'))[0] || {};
+    _ps = (await _wsbGet('platform_settings?id=eq.1&select=require_vat_foreign,home_country,vat_payer,vat_rate,dic'))[0] || {};
     if (_ps.require_vat_foreign) {
       const EU = ['AT','BE','BG','CY','CZ','DE','DK','EE','ES','FI','FR','GR','HR','HU','IE','IT',
                   'LT','LU','LV','MT','NL','PL','PT','RO','SE','SI','SK'];
       const home = String(_ps.home_country || 'CZ').toUpperCase();
       const bc = String(org.billing_country || org.country || home).toUpperCase();
-      if (bc && bc !== home && EU.indexOf(bc) >= 0 && EU.indexOf(home) >= 0 && !String(org.vat_id || '').trim()) {
-        return res.redirect(303, `${proto}://${host}/?supplier_sub=need_vat`);
+      if (bc && bc !== home && EU.indexOf(bc) >= 0 && EU.indexOf(home) >= 0) {
+        const _why = await _foreignVatGate('organizations', org.id, Object.assign({}, org, { billing_country: bc }), home, _ps.dic);
+        if (_why) return res.redirect(303, `${proto}://${host}/?supplier_sub=${_why}`);
       }
     }
   } catch (e) { console.error('[supplier] vat gate', e.message); }

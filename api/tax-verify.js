@@ -46,6 +46,39 @@ export function aresAddr(j) {
   } catch (e) { return null; }
 }
 
+// OVĚŘENÍ DIČ VE VIES -- sdílí ho tenhle endpoint (nápověda ve formulářích) i brána před
+// platbou v pay.js. requester = DIČ MTL: s ním VIES vrátí číslo konzultace (requestIdentifier),
+// úřední doklad o tom, že jsme platnost ověřili (čl. 18 odst. 1 nařízení 282/2011).
+// Vrací { ok, valid, name, address, ref } nebo { ok:false, error } při výpadku VIES.
+export async function viesCheck(rawId, ccOpt, requester) {
+  const raw = String(rawId || '').replace(/\s+/g, '').toUpperCase();
+  let cc = '', num = '';
+  if (ccOpt && !/^[A-Z]{2}/.test(raw)) { cc = String(ccOpt).toUpperCase().replace(/[^A-Z]/g, ''); num = raw.replace(/[^0-9A-Z]/g, ''); }
+  else { cc = raw.slice(0, 2).replace(/[^A-Z]/g, ''); num = raw.slice(2).replace(/[^0-9A-Z]/g, ''); }
+  if (cc === 'GR') cc = 'EL';
+  if (cc.length !== 2 || !num) return { ok: true, valid: false, reason: 'format' };
+  const body = { countryCode: cc, vatNumber: num };
+  const rq = String(requester || '').replace(/\s+/g, '').toUpperCase();
+  if (/^[A-Z]{2}[0-9A-Z]+$/.test(rq)) { body.requesterMemberStateCode = rq.slice(0, 2); body.requesterNumber = rq.slice(2); }
+  let vr;
+  try {
+    vr = await fetch('https://ec.europa.eu/taxation_customs/vies/rest-api/check-vat-number', {
+      method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(body),
+    });
+  } catch (e) { return { ok: false, error: 'vies unreachable' }; }
+  if (!vr.ok) return { ok: false, error: 'vies ' + vr.status };
+  let vj = {}; try { vj = await vr.json(); } catch (e) {}
+  // VIES sometimes reports a transient member-state outage; surface it as "can't verify".
+  if (vj && vj.userError && vj.userError !== 'VALID' && vj.userError !== 'INVALID') return { ok: false, error: 'vies ' + vj.userError };
+  return {
+    ok: true, valid: !!vj.valid,
+    name: (vj.name && vj.name !== '---') ? vj.name : null,
+    address: (vj.address && vj.address !== '---') ? vj.address : null,
+    ref: vj.requestIdentifier || null,
+    source: 'vies',
+  };
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -81,32 +114,7 @@ export default async function handler(req, res) {
     }
 
     // ── EU VAT via VIES ──
-    let cc = '', num = '';
-    if (req.query && req.query.cc) { cc = String(req.query.cc).toUpperCase().replace(/[^A-Z]/g, ''); num = raw.replace(/[^0-9A-Z]/g, ''); }
-    else { cc = raw.slice(0, 2).replace(/[^A-Z]/g, ''); num = raw.slice(2).replace(/[^0-9A-Z]/g, ''); }
-    if (cc.length !== 2 || !num) return res.status(200).json({ ok: true, valid: false, reason: 'format' });
-
-    let vr;
-    try {
-      vr = await fetch('https://ec.europa.eu/taxation_customs/vies/rest-api/check-vat-number', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify({ countryCode: cc, vatNumber: num }),
-      });
-    } catch (e) { return res.status(200).json({ ok: false, error: 'vies unreachable' }); }
-    if (!vr.ok) return res.status(200).json({ ok: false, error: 'vies ' + vr.status });
-    let vj = {}; try { vj = await vr.json(); } catch (e) {}
-    // VIES sometimes reports a transient member-state outage; surface it as "can't verify".
-    if (vj && vj.userError && vj.userError !== 'VALID' && vj.userError !== 'INVALID') {
-      return res.status(200).json({ ok: false, error: 'vies ' + vj.userError });
-    }
-    return res.status(200).json({
-      ok: true,
-      valid: !!vj.valid,
-      name: (vj.name && vj.name !== '---') ? vj.name : null,
-      address: (vj.address && vj.address !== '---') ? vj.address : null,
-      source: 'vies',
-    });
+    return res.status(200).json(await viesCheck(raw, req.query && req.query.cc));
   } catch (e) {
     return res.status(200).json({ ok: false, error: e.message || 'error' });
   }
