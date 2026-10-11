@@ -117,7 +117,7 @@ function periodLabelL(p, lang) {
   } catch (e) { return p; }
 }
 const _L = {
-  cs: { title:'Faktura \u2014 provize MTL', issued:'Vystaveno', period:'Obdob\u00ed', supplier:'Dodavatel', customer:'Odb\u011bratel',
+  cs: { title:'Faktura \u2014 provize MTL', issued:'Vystaveno', duzp:'Datum uskute\u010dn\u011bn\u00ed pln\u011bn\u00ed', period:'Obdob\u00ed', supplier:'Dodavatel', customer:'Odb\u011bratel',
         regno:'I\u010cO', vatid:'DI\u010c', register:'Zaps\u00e1no v obchodn\u00edm rejst\u0159\u00edku', phone:'Tel.', country:'St\u00e1t', inMtlOrg:'Organizace v MTL', inMtlGym:'Klub v MTL', inMtlCoach:'Kou\u010d v MTL',
         method:'Forma platby', rate:'Sazba', count:'Plateb', volume:'Objem plateb', fee:'Provize', base:'Z\u00e1klad dan\u011b', vat:'DPH', notVat:'Dodavatel nen\u00ed pl\u00e1tcem DPH.',
         total:'Celkem', payments:'Zprost\u0159edkovan\u00fdch plateb', vol:'objem',
@@ -128,7 +128,7 @@ const _L = {
         hello:'Dobr\u00fd den', attached:(no,per,tot)=>'v p\u0159\u00edloze pos\u00edl\u00e1me fakturu '+no+' za provizi MTL za obdob\u00ed <b>'+per+'</b> \u2014 celkem <b>'+tot+'</b>.',
         introTitle:'P\u0159ehled zprost\u0159edkovan\u00fdch plateb', introFee:'Provize MTL', introNone:(u)=>'Za toto obdob\u00ed nebyla \u00fa\u010dtov\u00e1na \u017e\u00e1dn\u00e1 provize'+(u?(' \u2014 zav\u00e1d\u011bc\u00ed obdob\u00ed plat\u00ed do '+u+'.'):'.')+' Nejde o da\u0148ov\u00fd doklad.',
         subjDoklad:'Faktura \u2014 provize MTL', subjIntro:'P\u0159ehled zprost\u0159edkovan\u00fdch plateb' },
-  en: { title:'Invoice \u2014 MTL commission', issued:'Issued', period:'Period', supplier:'Supplier', customer:'Customer',
+  en: { title:'Invoice \u2014 MTL commission', issued:'Issued', duzp:'Date of supply', period:'Period', supplier:'Supplier', customer:'Customer',
         regno:'Reg. number', vatid:'VAT ID', register:'Commercial register', phone:'Phone', country:'Country', inMtlOrg:'Organisation in MTL', inMtlGym:'Club in MTL', inMtlCoach:'Coach in MTL',
         method:'Payment form', rate:'Rate', count:'Payments', volume:'Volume', fee:'Commission', base:'Tax base', vat:'VAT', notVat:'The supplier is not a VAT payer.',
         total:'Total', payments:'Payments intermediated', vol:'volume',
@@ -206,6 +206,14 @@ async function loadBuyer(kind, entityId, ownerId, bp) {
 // ── SNÍMEK ───────────────────────────────────────────────────────────────────────────────
 // Jediný popis dokladu. Z něj se ukládá řádek, kreslí PDF, tělo e-mailu i zobrazení v appce --
 // dřív měl každý z nich jiný obsah a appka ukazovala nejchudší verzi.
+// DUZP faktury za provizi: poslední den účtovaného měsíce (YYYY-MM), u denního období ten den.
+function _duzpOf(period) {
+  const p = String(period || '');
+  if (/^\d{4}-\d{2}-\d{2}$/.test(p)) return p;
+  const m = /^(\d{4})-(\d{2})$/.exec(p); if (!m) return null;
+  const last = new Date(Date.UTC(Number(m[1]), Number(m[2]), 0)).getUTCDate();
+  return `${m[1]}-${m[2]}-${String(last).padStart(2, '0')}`;
+}
 function buildSnap(kind, entityId, ownerId, identity, period, cur, data, ME, buyer, testMode) {
   const items = Object.values(data.rates || {});
   const bank = items.filter(i => i.method !== 'stripe').reduce((a, i) => a + i.fee, 0);
@@ -215,6 +223,8 @@ function buildSnap(kind, entityId, ownerId, identity, period, cur, data, ME, buy
   const snap = { period_month: period, currency: cur, amount: data.total, bank_amount: bank, stripe_amount: strp, line_items: items,
     // Nestržená část v okamžiku vystavení (0 = uhrazeno celé). Viz _statusText.
     due_amount: Math.max(0, Math.round(data.due || 0)),
+    // DUZP: souhrnná faktura za měsíc -> poslední den toho měsíce (u denního režimu ten den).
+    duzp: _duzpOf(period),
     status: 'issued', kind: 'unified', owner_id: ownerId, charged_at: new Date().toISOString(), test_mode: !!testMode,
     billing_identity: (kind === 'coach') ? (identity || 'own') : null,
     cust_name: legal, cust_trade_name: (B.name && B.name !== legal) ? B.name : null,
@@ -274,11 +284,17 @@ function _statusText(s, lang){
   return { paid: false,
     head: (en ? 'AMOUNT DUE: ' : 'K ÚHRADĚ: ') + _money(P.due, cur, lang) + (dd ? ((en ? ' — due ' : ' — splatnost ') + dd) : ''),
     body: (parts.length ? ((en ? 'Already paid: ' : 'Už uhrazeno: ') + parts.join('; ') + '. ') : '')
-          + (s.due_date
-            ? (en ? 'The remaining amount could not be charged to the saved card. We will try again automatically; you can also pay it right away in the app (Payments & commission) or via the Pay now link in the e-mail.'
-                  : 'Zbývající částku se nepodařilo strhnout z uložené karty. Zkusíme to znovu automaticky; uhradit ji můžeš i hned v appce (Platby a provize) nebo tlačítkem Zaplatit hned v e-mailu.')
-            : (en ? 'The remaining amount is below the minimum for a card charge; it will be charged to the saved card together with the next commission. There is nothing to pay manually.'
-                  : 'Zbývající částka je pod minimem pro platbu kartou; strhneme ji z uložené karty spolu s další provizí. Ručně není potřeba nic platit.')) };
+          + _dueText(s, en) };
+}
+// Text nestržené části podle důvodu (due_reason; u starších snímků podle due_date).
+function _dueText(s, en){
+  const r = s.due_reason || (s.due_date ? 'failed' : 'below_min');
+  if (r === 'failed') return en ? 'The remaining amount could not be charged to the saved card. We will try again automatically; you can also pay it right away in the app (Payments & commission) or via the Pay now button in the e-mail.'
+                                : 'Zbývající částku se nepodařilo strhnout z uložené karty. Zkusíme to znovu automaticky; uhradit ji můžeš i hned v appce (Platby a provize) nebo tlačítkem Zaplatit hned v e-mailu.';
+  if (r === 'no_card') return en ? 'There is no saved payment card to charge the remaining amount. Add one in Payments & commission, or pay right away via the Pay now button in the e-mail.'
+                                 : 'Zbývající částku nebylo z čeho strhnout — chybí uložená platební karta. Doplň ji v Platby a provize, nebo zaplať hned tlačítkem Zaplatit hned v e-mailu.';
+  return en ? 'The remaining amount is below the minimum for a card charge; it will be charged to the saved card together with the next commission. There is nothing to pay manually.'
+            : 'Zbývající částka je pod minimem pro platbu kartou; strhneme ji z uložené karty spolu s další provizí. Ručně není potřeba nic platit.';
 }
 function _statusBoxHtml(s, lang){
   const st = _statusText(s, lang);
@@ -299,7 +315,7 @@ function dokladHtml(s, lang){
   return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:680px;margin:0 auto;color:#1a1a1a;">'
     + (s.test_mode ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:12px;">'+T.test+'</div>' : '')
     + '<h2 style="margin:0 0 4px;">'+T.title+'</h2>'
-    + '<div style="font-size:13px;color:#555;">'+(s.id?(esc(_dokNo(s.id))+' \u00b7 '):'')+T.issued+' '+esc(_czDate(s.charged_at, lang))+' \u00b7 '+T.period+' '+esc(periodLabelL(s.period_month, lang))+' \u00b7 '+esc(_kindLabel(s, lang))+'</div>'
+    + '<div style="font-size:13px;color:#555;">'+(s.id?(esc(_dokNo(s.id))+' \u00b7 '):'')+T.issued+' '+esc(_czDate(s.charged_at, lang))+(s.duzp?(' \u00b7 '+T.duzp+' '+esc(_czDate(s.duzp+'T12:00:00Z', lang))):'')+' \u00b7 '+T.period+' '+esc(periodLabelL(s.period_month, lang))+' \u00b7 '+esc(_kindLabel(s, lang))+'</div>'
     + _statusBoxHtml(s, lang)
     + '<div style="display:flex;flex-wrap:wrap;gap:24px;margin:18px 0 6px;">'+col(T.supplier, _supLines(s, lang))+col(T.customer, _custLines(s, lang))+'</div>'
     + '<table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:12px;"><thead><tr style="background:#f5f2ee;"><th style="'+th+'text-align:left;">'+T.method+'</th><th style="'+th+'">'+T.rate+'</th><th style="'+th+'">'+T.count+'</th><th style="'+th+'text-align:right;">'+T.volume+'</th><th style="'+th+'text-align:right;">'+T.fee+'</th></tr></thead><tbody>'+rows+'</tbody></table>'
@@ -324,7 +340,7 @@ function dokladPdf(s, lang){
       }
       doc.fontSize(22).fillColor('#E11111').text('MTL', 50, doc.y);
       doc.moveDown(0.15).fontSize(15).fillColor('#111111').text(T.title);
-      doc.moveDown(0.1).fontSize(10).fillColor('#555555').text((s.id ? (_dokNo(s.id) + '  \u00b7  ') : '') + T.issued + ' ' + _czDate(s.charged_at, lang) + '  \u00b7  ' + T.period + ' ' + periodLabelL(s.period_month, lang) + '  \u00b7  ' + _kindLabel(s, lang));
+      doc.moveDown(0.1).fontSize(10).fillColor('#555555').text((s.id ? (_dokNo(s.id) + '  \u00b7  ') : '') + T.issued + ' ' + _czDate(s.charged_at, lang) + (s.duzp ? ('  \u00b7  ' + T.duzp + ' ' + _czDate(s.duzp + 'T12:00:00Z', lang)) : '') + '  \u00b7  ' + T.period + ' ' + periodLabelL(s.period_month, lang) + '  \u00b7  ' + _kindLabel(s, lang));
       doc.moveDown(0.7);
       { // STAV ÚHRADY -- rámeček hned pod hlavičkou
         const st = _statusText(s, lang);
@@ -498,41 +514,64 @@ export default async function handler(req, res) {
     // VÝJIMKA: částky pod minimem Stripe zůstávají 'pending' schválně a čekají, až přeteče.
     // Ty se ignorují, jinak by doklad nevznikl nikdy.
     const _minFor = (cur) => minChargeFor(cur);   // minima jsou v _config.js
-    const _waiting = {};   // 'kind:id:mena' -> nestržená částka
-    // FAKTURA VZNIKÁ V DEN STRŽENÍ (6. den následujícího měsíce), ať stržení projde, nebo ne.
-    // commission-cron strhává v 8:00 UTC, tenhle cron běží v 8:30 UTC (vercel.json), takže
-    // výsledek stržení už zná: prošlo -> faktura „Uhrazeno v plné výši"; neprošlo (nebo chybí
-    // karta) -> faktura s částkou „K úhradě". Pozdější úhrada (opakované stržení i „Zaplatit
-    // hned") už fakturu nemění -- vystaví se k ní „Doklad o uhrazené provizi MTL" (_receipt.js).
-    // Před 6. dnem se na stržení čeká (dřív by faktura vznikla jen s karetní částí).
+    // ── KDY VZNIKÁ FAKTURA ─────────────────────────────────────────────────────────────
+    // Před dnem stržení (6. den následujícího měsíce) se čeká, dokud je v období nestržená
+    // provize nad minimum -- jinak by faktura vznikla jen s karetní částí.
+    // Ode dne stržení se NEČEKÁ NA ČAS, ale na VÝSLEDEK stržení u každého subjektu zvlášť:
+    //   - všechno stržené ('collected')                 -> faktura „Uhrazeno v plné výši"
+    //   - stržení neprošlo ('failed')                    -> faktura s částkou „K úhradě"
+    //   - subjekt nemá kartu (nejde strhnout)            -> faktura s částkou „K úhradě"
+    //   - zbytek pod minimem karty                       -> faktura, zbytek „strhne se s další provizí"
+    //   - 'pending' nad minimum A karta je               -> commission-cron se k subjektu ještě
+    //     nedostal (běží dřív, ale může běžet déle nebo vynechat běh) -> počká se na příští běh.
+    // Pořadí cronů ani letní/zimní čas tak o ničem nerozhodují. Pozdější úhrada fakturu nemění,
+    // vystaví se k ní „Doklad o uhrazené provizi MTL" (_receipt.js).
     const CHARGE_DAY = 6;
     const _pastCutoff = !DAILY && /^\d{4}-\d{2}$/.test(String(period))
       && pragueDate() >= (shiftMonth(period, 1) + '-' + String(CHARGE_DAY).padStart(2, '0'));
+    const _waiting = {};   // 'kind:id[|payout]:mena' -> { pending, failed }
+    const _ent = {};       // 'kind:id' -> { card, failed_at }
     let _unpaidRows = [];
+    const _wkey = (o, cur) => o.kind + ':' + o.id + (o.kind === 'coach' && o.identity === 'payout' ? '|payout' : '') + ':' + cur;
     if (!DAILY && !preview) {
       try {
-        const unpaid = await sb(`transactions?select=gym_id,coach_id,organization_id,paid_to,payee_kind,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method,acq_source,base_rate&commission_status=in.(pending,failed)&commission_month=eq.${period}&mtl_fee=gt.0&limit=50000`);
+        const unpaid = await sb(`transactions?select=gym_id,coach_id,organization_id,paid_to,payee_kind,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method,acq_source,base_rate,commission_status&commission_status=in.(pending,failed)&commission_month=eq.${period}&mtl_fee=gt.0&limit=50000`);
         _unpaidRows = unpaid || [];
         (unpaid || []).forEach(r => {
           const net = (Number(r.mtl_fee) || 0) - (Number(r.mtl_fee_refunded) || 0);
           if (net <= 0) return;
-          const cur = String(r.currency || 'czk').toLowerCase();
-          // Stejné klíče jako u vystavování: komu provize patří.
-          const keys = [];
-          if (r.gym_id) keys.push('gym:' + r.gym_id);
-          if (r.organization_id) keys.push('organization:' + r.organization_id);
-          if (r.coach_id) keys.push('coach:' + r.coach_id);
-          keys.forEach(k => { const kk = k + ':' + cur; _waiting[kk] = (_waiting[kk] || 0) + net; });
+          const o = commissionOwner(r); if (!o) return;     // stejné vlastnictví jako na faktuře
+          const k = _wkey(o, String(r.currency || 'czk').toLowerCase());
+          const w = (_waiting[k] = _waiting[k] || { pending: 0, failed: 0 });
+          if (r.commission_status === 'failed') w.failed += net; else w.pending += net;
         });
+        // Karta a hodiny selhání subjektů, které mají nestrženou provizi.
+        const ids = { gym: new Set(), coach: new Set(), organization: new Set() };
+        Object.keys(_waiting).forEach(k => { const [kind, idp] = k.split(':'); ids[kind] && ids[kind].add(idp.replace(/\|payout$/, '')); });
+        const tbl = { gym: 'gyms', coach: 'profiles', organization: 'organizations' };
+        for (const kind of Object.keys(ids)) {
+          const list = [...ids[kind]]; if (!list.length) continue;
+          const rows = await sb(`${tbl[kind]}?id=in.(${list.join(',')})&select=id,commission_card_pm,commission_failed_at`) || [];
+          rows.forEach(x => { _ent[kind + ':' + x.id] = { card: !!x.commission_card_pm, failed_at: x.commission_failed_at || null }; });
+        }
       } catch (e) { console.error('[doklad] kontrola nestržených:', e.message); }
     }
-    // true = ještě se čeká na stržení, doklad se nevystaví
+    // true = ještě se čeká na stržení, faktura se dnes nevystaví
     const _holdFor = (kind, entityId, cur) => {
       if (DAILY || preview) return false;
-      const id = String(entityId || '').replace(/\|payout$/, '');
-      const amt = _waiting[kind + ':' + id + ':' + String(cur || 'czk').toLowerCase()] || 0;
-      // Od dne stržení se nečeká: co se nestrhlo, jde na fakturu jako „K úhradě".
-      return amt >= _minFor(cur) && !_pastCutoff;
+      const w = _waiting[kind + ':' + String(entityId || '') + ':' + String(cur || 'czk').toLowerCase()];
+      if (!w) return false;
+      const min = _minFor(cur);
+      if (!_pastCutoff) return (w.pending + w.failed) >= min;
+      const e = _ent[kind + ':' + String(entityId || '').replace(/\|payout$/, '')] || {};
+      return w.pending >= min && !!e.card;
+    };
+    // Proč zůstala část faktury nestržená -- jde do faktury (due_reason) a řídí její text.
+    const _dueReason = (kind, entityId) => {
+      const e = _ent[kind + ':' + String(entityId || '').replace(/\|payout$/, '')] || {};
+      if (e.failed_at) return 'failed';
+      if (!e.card) return 'no_card';
+      return 'below_min';
     };
 
     // Posbírat diagnostiku hned tady -- tx a buckety jsou lokální pro tenhle blok a u návratové
@@ -613,7 +652,7 @@ export default async function handler(req, res) {
       // Jeden doklad na subjekt + období + měnu. U kouče ZVLÁŠŤ za každou identitu: vlastní 1:1 a
       // režim klub jsou dva plátci -- dřív druhý doklad narazil na první a nevznikl.
       // Nestržená provize za tohle období -> doklad počká na příští běh.
-      if (_holdFor(kind, entityId, cur)) { deferred++; return; }
+      if (_holdFor(kind, entityId + (_payout ? '|payout' : ''), cur)) { deferred++; return; }
       const _idf = (kind === 'coach') ? (_payout ? '&billing_identity=eq.payout' : '&or=(billing_identity.is.null,billing_identity.eq.own)') : '';
       const ex = await sb(`commission_doklady?select=id&${col}=eq.${entityId}&period_month=eq.${period}&currency=ilike.${encodeURIComponent(cur)}&kind=eq.unified${_idf}&limit=1`);
       if (ex && ex.length) { skipped++; return; }
@@ -640,26 +679,25 @@ export default async function handler(req, res) {
       }
 
       const snap = buildSnap(kind, entityId, ownerId, identity, period, cur, data, ME, buyer, _TESTMODE);
-      // SPLATNOST nestržené části = den, kdy by se účet pozastavil (14 dní od prvního selhání
-      // stržení, stejně jako v commission-cron). Bez selhání (jen částka pod minimem karty)
-      // splatnost není -- strhne se s další provizí.
+      // DŮVOD A SPLATNOST nestržené části. Selhání stržení -> splatnost = den pozastavení účtu
+      // (14 dní od prvního selhání, jako v commission-cron). Chybí karta -> splatnost 14 dní od
+      // vystavení. Pod minimem karty -> bez splatnosti, strhne se s další provizí.
       if (snap.due_amount > 0) {
-        try {
-          const _t = kind === 'gym' ? 'gyms' : (kind === 'organization' ? 'organizations' : 'profiles');
-          const _fr = (await sb(`${_t}?id=eq.${encodeURIComponent(entityId)}&select=commission_failed_at&limit=1`))[0];
-          if (_fr && _fr.commission_failed_at) snap.due_date = pragueDate(new Date(Date.parse(_fr.commission_failed_at) + 14 * 86400000));
-        } catch (e) {}
+        snap.due_reason = _dueReason(kind, entityId);
+        const _e = _ent[kind + ':' + entityId] || {};
+        if (snap.due_reason === 'failed' && _e.failed_at) snap.due_date = pragueDate(new Date(Date.parse(_e.failed_at) + 14 * 86400000));
+        else if (snap.due_reason === 'no_card') snap.due_date = pragueDate(new Date(Date.now() + 14 * 86400000));
       }
       let _ins;
       try { _ins = await sb('commission_doklady', { method: 'POST', prefer: 'return=representation', body: JSON.stringify(snap) }); }
       catch (e) {
         // Databáze bez nových sloupců (SQL ještě nespuštěné): doklad se vystaví bez nich,
         // ne vůbec. Jiná chyba jde dál jako dřív.
-        if (!/sup_register|vat_mode|vat_note|due_amount|due_date/.test(String(e && e.message))) throw e;
+        if (!/sup_register|vat_mode|vat_note|due_amount|due_date|due_reason|duzp/.test(String(e && e.message))) throw e;
         console.warn('[doklad] commission_doklady: chybi novy sloupec -- spust sql/doklad-register.sql');
         // Neuhrazenou fakturu bez sloupců due_* vystavit nejde -- vypadala by jako uhrazená.
         if (snap.due_amount > 0) { deferred++; return; }
-        delete snap.sup_register; delete snap.vat_mode; delete snap.vat_note; delete snap.due_amount; delete snap.due_date;
+        delete snap.sup_register; delete snap.vat_mode; delete snap.vat_note; delete snap.due_amount; delete snap.due_date; delete snap.due_reason; delete snap.duzp;
         _ins = await sb('commission_doklady', { method: 'POST', prefer: 'return=representation', body: JSON.stringify(snap) });
       }
       const row = Array.isArray(_ins) ? _ins[0] : _ins;
@@ -688,7 +726,7 @@ export default async function handler(req, res) {
 
       // Neuhrazená faktura: v e-mailu tlačítko „Zaplatit hned" (stejný odkaz jako ve výzvě
       // z commission-cron). Jen do těla mailu -- do snímku se neukládá.
-      if (snap.due_amount > 0 && snap.due_date) {
+      if (snap.due_amount > 0 && (snap.due_reason === 'failed' || snap.due_reason === 'no_card')) {
         try { snap._payLink = `${(process.env.APP_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '')}/pay-commission?token=${makePayToken(kind === 'organization' ? 'org' : kind, entityId, pragueMonth())}`; } catch (e) {}
       }
       // E-MAIL na fakturační adresu ze snímku -- stejnou, jaká je na dokladu.

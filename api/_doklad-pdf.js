@@ -40,6 +40,8 @@ export function dokladPdfFromRow(dk, en) {
       const row = (l, v, bold) => { if (v == null || v === '') return; const y = doc.y; doc.fontSize(11).fillColor('#777777').text(l, 50, y, { width: 220 }); const yl = doc.y; doc.fillColor('#1a1a1a').fontSize(bold ? 13 : 11).text(String(v), 280, y, { width: 265, align: 'right' }); doc.y = Math.max(yl, doc.y) + 5; doc.moveTo(50, doc.y - 2).lineTo(545, doc.y - 2).strokeColor('#eeeeee').stroke(); };
       row(en ? 'Provider (seller)' : 'Poskytovatel (prodejce)', dk.sup_name || '');
       row(en ? 'Issue date' : 'Datum vystavení', d(dk.issued_at));
+      // DUZP jen u plátce DPH (povinný údaj daňového dokladu); ze snímku, u starších dokladů chybí.
+      if (dk.duzp && dk.sup_vat_payer) { const _m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(dk.duzp)); if (_m) row(en ? 'Date of supply' : 'Datum uskutečnění plnění', en ? (+_m[3] + '/' + (+_m[2]) + '/' + _m[1]) : (+_m[3] + '. ' + (+_m[2]) + '. ' + _m[1])); }
       row(en ? 'Reg. number' : 'IČO', dk.sup_ico);
       row(en ? 'VAT ID' : 'DIČ', dk.sup_dic);
       row(en ? 'Address' : 'Sídlo', dk.sup_address);

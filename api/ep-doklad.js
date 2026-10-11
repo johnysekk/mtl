@@ -47,6 +47,16 @@ async function _mail(to, subject, html) {
   catch (e) { console.error('[ep-doklad] mail', e.message); }
 }
 // Faktura za EP do e-mailu. Stejný obsah a stejný rámeček stavu jako v appce.
+function _d(ymd, en) { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(ymd || '')); if (!m) return String(ymd || ''); return en ? (Number(m[3]) + '/' + Number(m[2]) + '/' + m[1]) : (Number(m[3]) + '. ' + Number(m[2]) + '. ' + m[1]); }
+// Období předplatného od–do. Stripe dává konec jako začátek dalšího období, proto o den míň.
+function _perRange(r, en) {
+  try {
+    const li = Array.isArray(r.line_items) ? r.line_items[0] : null;
+    if (!li || !li.period_start || !li.period_end) return r.period_month;
+    const end = new Date(new Date(li.period_end).getTime() - 86400000).toISOString();
+    return _d(String(li.period_start).slice(0, 10), en) + ' – ' + _d(end.slice(0, 10), en);
+  } catch (e) { return r.period_month; }
+}
 function _epInvoiceHtml(r, en, payUrl) {
   const esc = (x) => String(x == null ? '' : x).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[c]);
   const m = (minor) => _amt(Number(minor || 0) / 100, r.currency, en ? 'en' : 'cs');
@@ -62,7 +72,7 @@ function _epInvoiceHtml(r, en, payUrl) {
   const note = vatNoteFor(r.vat_mode, r.vat_note, en ? 'en' : 'cs');
   return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:620px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.55;">'
     + '<h2 style="margin:0 0 4px;">' + (en ? 'Invoice — Exclusive Partner subscription' : 'Faktura — předplatné Exclusive Partner') + '</h2>'
-    + '<div style="font-size:13px;color:#555;">MTL-' + r.id + ' · ' + (en ? 'Period ' : 'Období ') + esc(r.period_month) + '</div>' + box
+    + '<div style="font-size:13px;color:#555;">MTL-' + r.id + (r.duzp ? (' · ' + (en ? 'Date of supply ' : 'Datum uskutečnění plnění ') + esc(_d(r.duzp, en))) : '') + ' · ' + (en ? 'Subscription period ' : 'Období předplatného ') + esc(_perRange(r, en)) + '</div>' + box
     + '<table style="width:100%;font-size:13px;"><tr><td style="vertical-align:top;width:50%;"><div style="font-size:11px;color:#888;text-transform:uppercase;">' + (en ? 'Supplier' : 'Dodavatel') + '</div>' + sup + '</td><td style="vertical-align:top;"><div style="font-size:11px;color:#888;text-transform:uppercase;">' + (en ? 'Customer' : 'Odběratel') + '</div>' + cust + '</td></tr></table>'
     + '<p style="margin-top:14px;"><b>' + (en ? 'Exclusive MTL Partner — subscription ' : 'Exclusive MTL Partner — předplatné ') + esc(r.period_month) + ':</b> ' + esc(m(r.amount)) + '</p>'
     + (note ? '<p style="font-size:12px;color:#555;">' + esc(note) + '</p>' : '')
@@ -166,6 +176,8 @@ export default async function handler(req, res) {
       charged_at: new Date().toISOString(),
       issued_at: new Date().toISOString(),
       test_mode: !!b.test_mode,
+      // DUZP: předplatné se platí předem -> den, od kterého běží zaplacené období.
+      duzp: String(b.period_start || new Date().toISOString()).slice(0, 10),
       // Neuhrazená faktura (stržení předplatného selhalo): celá částka „K úhradě".
       due_amount: b.unpaid ? amountMinor : 0,
       // Pole, ne JSON.stringify -- jinak se do jsonb uložil řetězec a appka z něj nečetla položku.
@@ -193,10 +205,10 @@ export default async function handler(req, res) {
       ins = await sb('commission_doklady', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(row) });
     } catch (e) {
       // Bez sloupce sup_register (SQL ještě nespuštěné) se doklad vystaví bez něj, ne vůbec.
-      if (!/sup_register|due_amount/.test(String(e && e.message))) throw e;
+      if (!/sup_register|due_amount|duzp/.test(String(e && e.message))) throw e;
       // Neuhrazenou fakturu bez sloupce due_amount vystavit nejde -- vypadala by jako uhrazená.
       if (row.due_amount > 0) return res.status(200).json({ ok: true, deferred: 'run_sql_doklad_register' });
-      delete row.sup_register; delete row.due_amount;
+      delete row.sup_register; delete row.due_amount; delete row.duzp;
       ins = await sb('commission_doklady', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(row) });
     }
     const id = (ins && ins[0] && ins[0].id) || null;
