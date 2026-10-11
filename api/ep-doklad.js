@@ -10,7 +10,8 @@
 // Interní endpoint: POST { intSecret, invoice_id, user_id, org_id?, amount, currency, period_start,
 //                          period_end, test_mode }   (org_id = profil dodavatele)
 
-import { vatMode, vatNoteFor } from './_vat.js';
+import { vatMode, vatNoteFor, isEU } from './_vat.js';
+import { viesCheck } from './tax-verify.js';
 import { issueReceipts, receiptMailHtml, receiptTitle, docNo } from './_receipt.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
@@ -59,7 +60,7 @@ function _perRange(r, en) {
     return _d(String(li.period_start).slice(0, 10), en) + ' – ' + _d(end.slice(0, 10), en);
   } catch (e) { return r.period_month; }
 }
-function _epInvoiceHtml(r, en, payUrl, sup) {
+function _epInvoiceHtml(r, en, payUrl, isSup) {
   const esc = (x) => String(x == null ? '' : x).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[c]);
   const m = (minor) => _amt(Number(minor || 0) / 100, r.currency, en ? 'en' : 'cs');
   const due = Number(r.due_amount) > 0;
@@ -73,10 +74,10 @@ function _epInvoiceHtml(r, en, payUrl, sup) {
   const cust = [r.cust_name, r.cust_address, r.cust_ico ? ((en ? 'Reg. number: ' : 'IČO: ') + r.cust_ico) : '', r.cust_dic ? ((en ? 'VAT ID: ' : 'DIČ: ') + r.cust_dic) : ''].filter(Boolean).map(esc).join('<br>');
   const note = vatNoteFor(r.vat_mode, r.vat_note, en ? 'en' : 'cs');
   return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:620px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.55;">'
-    + '<h2 style="margin:0 0 4px;">' + (sup ? (en ? 'Invoice — MTL supplier profile subscription' : 'Faktura — předplatné profilu dodavatele MTL') : (en ? 'Invoice — Exclusive Partner subscription' : 'Faktura — předplatné Exclusive Partner')) + '</h2>'
+    + '<h2 style="margin:0 0 4px;">' + (isSup ? (en ? 'Invoice — MTL supplier profile subscription' : 'Faktura — předplatné profilu dodavatele MTL') : (en ? 'Invoice — Exclusive Partner subscription' : 'Faktura — předplatné Exclusive Partner')) + '</h2>'
     + '<div style="font-size:13px;color:#555;">' + esc(r.doc_no || ('MTL-' + r.id)) + (r.duzp ? (' · ' + (en ? 'Date of supply ' : 'Datum uskutečnění plnění ') + esc(_d(r.duzp, en))) : '') + ' · ' + (en ? 'Subscription period ' : 'Období předplatného ') + esc(_perRange(r, en)) + '</div>' + box
     + '<table style="width:100%;font-size:13px;"><tr><td style="vertical-align:top;width:50%;"><div style="font-size:11px;color:#888;text-transform:uppercase;">' + (en ? 'Supplier' : 'Dodavatel') + '</div>' + sup + '</td><td style="vertical-align:top;"><div style="font-size:11px;color:#888;text-transform:uppercase;">' + (en ? 'Customer' : 'Odběratel') + '</div>' + cust + '</td></tr></table>'
-    + '<p style="margin-top:14px;"><b>' + (sup ? (en ? 'MTL supplier profile — subscription ' : 'Profil dodavatele MTL — předplatné ') : (en ? 'Exclusive MTL Partner — subscription ' : 'Exclusive MTL Partner — předplatné ')) + esc(r.period_month) + ':</b> ' + esc(m(r.amount)) + '</p>'
+    + '<p style="margin-top:14px;"><b>' + (isSup ? (en ? 'MTL supplier profile — subscription ' : 'Profil dodavatele MTL — předplatné ') : (en ? 'Exclusive MTL Partner — subscription ' : 'Exclusive MTL Partner — předplatné ')) + esc(r.period_month) + ':</b> ' + esc(m(r.amount)) + '</p>'
     + (note ? '<p style="font-size:12px;color:#555;">' + esc(note) + '</p>' : '')
     + '</div>';
 }
@@ -126,13 +127,13 @@ export default async function handler(req, res) {
     // Odběratel: fakturační identita poskytovatele -- u dodavatele jeho organizace (stejné
     // sloupce), jazyk e-mailu podle majitele.
     let pr = (await sb(`profiles?id=eq.${encodeURIComponent(uid)}&select=id,name,email,phone,legal_name,`
-      + `tax_id,vat_id,vat_payer,billing_line1,billing_line2,billing_city,billing_postal,billing_country,country_code,invoice_email,lang`))[0];
+      + `tax_id,vat_id,vat_payer,vat_verified_id,billing_line1,billing_line2,billing_city,billing_postal,billing_country,country_code,invoice_email,lang`))[0];
     if (!pr) return res.status(404).json({ error: 'user_not_found' });
     if (orgId) {
-      const o = (await sb(`organizations?id=eq.${encodeURIComponent(orgId)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,`
+      const o = (await sb(`organizations?id=eq.${encodeURIComponent(orgId)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,vat_verified_id,`
         + `billing_line1,billing_line2,billing_city,billing_postal,billing_country,country,invoice_email,contact_email,contact_phone`))[0];
       if (!o) return res.status(404).json({ error: 'org_not_found' });
-      pr = { id: pr.id, lang: pr.lang, name: o.name, legal_name: o.legal_name, tax_id: o.tax_id, vat_id: o.vat_id, vat_payer: o.vat_payer,
+      pr = { id: pr.id, lang: pr.lang, name: o.name, legal_name: o.legal_name, tax_id: o.tax_id, vat_id: o.vat_id, vat_payer: o.vat_payer, vat_verified_id: o.vat_verified_id,
         billing_line1: o.billing_line1, billing_line2: o.billing_line2, billing_city: o.billing_city, billing_postal: o.billing_postal,
         billing_country: o.billing_country || o.country, country_code: null,
         invoice_email: o.invoice_email || o.contact_email, email: o.contact_email || pr.email, phone: o.contact_phone || pr.phone };
@@ -156,8 +157,25 @@ export default async function handler(req, res) {
       require_vat_foreign: !!ps.require_vat_foreign,
     };
 
+    // DIČ ZNOVU VE VIES PŘED KAŽDOU FAKTUROU. Brána v pay.js ho ověří při nákupu, jenže
+    // předplatné běží měsíce a DIČ mezitím může zaniknout. Přenesení daně smíme uplatnit jen
+    // s DIČ platným v den plnění (čl. 18 nařízení 282/2011), proto se ověří u každé faktury
+    // a uloží se kdy (vat_verified_*). Neplatné = jako bez DIČ. VIES mimo provoz = platí
+    // poslední úspěšné ověření téhož DIČ; když žádné není, jako bez DIČ.
+    let custDic = pr.vat_id || null, vatProblem = null;
+    if (custDic && custCountry !== ME.country && isEU(custCountry) && isEU(ME.country)) {
+      const _norm = String(custDic).replace(/\s+/g, '').toUpperCase();
+      const vv = await viesCheck(_norm, custCountry, ME.dic);
+      if (vv.ok && vv.valid) {
+        try { await sb(`${orgId ? 'organizations' : 'profiles'}?id=eq.${encodeURIComponent(orgId || uid)}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' },
+          body: JSON.stringify({ vat_verified_id: _norm, vat_verified_at: new Date().toISOString(), vat_vies_ref: vv.ref || null }) }); } catch (e) {}
+      } else if (vv.ok || String(pr.vat_verified_id || '').toUpperCase() !== _norm) {
+        vatProblem = vv.ok ? 'invalid' : 'unverified'; custDic = null;
+      }
+    }
+
     // Status odberatele (ICO) na rezim nema vliv: rozhoduje zeme a DIC, proto se uz nepredava.
-    const V = _vatForEp(ME.country, custCountry, pr.vat_id, ME.vat_payer);
+    const V = _vatForEp(ME.country, custCountry, custDic, ME.vat_payer);
 
     // OSS NECHCEME. Odběratel z jiné země EU bez DIČ = doklad se nevystaví, stejně jako to
     // dělá doklad za provizi (require_vat_foreign). Platba zůstává evidovaná a doklad
@@ -166,10 +184,16 @@ export default async function handler(req, res) {
       try {
         await sb('notifications', { method: 'POST', headers: { Prefer: 'return=minimal' },
           body: JSON.stringify({ user_id: uid, type: 'system', read: false,
-            message: '⚠️ Faktura za ' + (orgId ? 'profil dodavatele' : 'Exclusive MTL Partner') + ' zatím nevystavena — doplň DIČ (VAT ID), ať ji můžeme vystavit podle EU pravidel.',
-            data: JSON.stringify({ kind: 'doklad_vat_needed', needs: 'vat_id', period: String(b.period_start || '').slice(0,7),
+            message: '⚠️ Faktura za ' + (orgId ? 'profil dodavatele' : 'Exclusive MTL Partner') + ' za ' + String(b.period_start || '').slice(0,7) + ' zatím nevystavena — '
+              + (vatProblem === 'invalid' ? ('tvoje DIČ ' + pr.vat_id + ' už není platné v evropském registru VIES. Oprav ho ve fakturačních údajích, ať ji můžeme vystavit podle EU pravidel.')
+                : vatProblem === 'unverified' ? ('tvoje DIČ teď nešlo ověřit v registru VIES (výpadek). Zkontroluj ho ve fakturačních údajích.')
+                : 'doplň DIČ (VAT ID) ve fakturačních údajích, ať ji můžeme vystavit podle EU pravidel.'),
+            data: JSON.stringify({ kind: 'doklad_vat_needed', needs: 'vat_id', reason: vatProblem || 'missing', org_id: orgId, period: String(b.period_start || '').slice(0,7),
               amount, currency: cur,
-              msg_en: '⚠️ The ' + (orgId ? 'supplier profile' : 'Exclusive MTL Partner') + ' invoice is not issued yet — add your VAT ID so we can issue it under EU rules.' }) }) });
+              msg_en: '⚠️ The ' + (orgId ? 'supplier profile' : 'Exclusive MTL Partner') + ' invoice for ' + String(b.period_start || '').slice(0,7) + ' is not issued yet — '
+                + (vatProblem === 'invalid' ? ('your VAT ID ' + pr.vat_id + ' is no longer valid in the EU VIES register. Fix it in your billing details so we can issue it under EU rules.')
+                  : vatProblem === 'unverified' ? 'your VAT ID could not be checked in VIES right now (outage). Check it in your billing details.'
+                  : 'add your VAT ID in your billing details so we can issue it under EU rules.') }) }) });
       } catch (e) {}
       return res.status(200).json({ ok: true, deferred: 'vat_id_required' });
     }
@@ -202,7 +226,7 @@ export default async function handler(req, res) {
       // odběratel
       cust_name: pr.legal_name || pr.name || '—',
       cust_trade_name: (pr.name && pr.name !== pr.legal_name) ? pr.name : null,
-      cust_ico: pr.tax_id || null, cust_dic: pr.vat_id || null,
+      cust_ico: pr.tax_id || null, cust_dic: custDic,
       cust_address: custAddr || null, cust_vat_payer: !!pr.vat_payer,
       cust_country: custCountry, cust_email: pr.invoice_email || pr.email || null, cust_phone: pr.phone || null,
       // dodavatel

@@ -23,6 +23,47 @@ import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { pragueMonth } from './_tz.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+// Adresa appky pro interní volání (ep-doklad). DŘÍV NEBYLA DEFINOVANÁ: `${APP_URL}` spadlo na
+// ReferenceError, try/catch ho spolkl a faktura za EP ani za dodavatele nevznikla nikdy.
+const APP_URL = (process.env.APP_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '');
+
+// KOMU PATŘÍ FAKTURA ZA PŘEDPLATNÉ NA ÚČTU MTL (EP, profil dodavatele). Dřív se hledalo podle
+// profiles.partner_sub / organizations.supplier_sub -- jenže ty zapisuje checkout.session.completed
+// a Stripe posílá první invoice.paid často DŘÍV. Pak se vlastník nenašel a faktura za první
+// měsíc nevznikla vůbec. Metadata nese už samo předplatné (subscription_data.metadata v pay.js),
+// takže se bere odtud; DB je jen záloha pro starší předplatná bez metadat.
+// Id předplatného: v novějších verzích API Stripe přesunul z invoice.subscription do parent.
+function _invSubId(inv) {
+  const pick = (x) => (typeof x === 'string' ? x : (x && x.id) || null);
+  const line = (inv.lines && inv.lines.data && inv.lines.data[0]) || {};
+  return pick(inv.subscription)
+    || pick(inv.parent && inv.parent.subscription_details && inv.parent.subscription_details.subscription)
+    || pick(line.subscription)
+    || pick(line.parent && line.parent.subscription_item_details && line.parent.subscription_item_details.subscription);
+}
+async function _platformSubOwner(inv) {
+  const subId = _invSubId(inv); if (!subId) return null;
+  let md = (inv.subscription_details && inv.subscription_details.metadata)
+        || (inv.parent && inv.parent.subscription_details && inv.parent.subscription_details.metadata) || {};
+  if (!md.mtl_payment_type) { try { md = (await stripe.subscriptions.retrieve(subId)).metadata || {}; } catch (e) { md = {}; } }
+  if (md.mtl_payment_type === 'partner_sub' && md.user_id) return { uid: md.user_id, org: null };
+  if (md.mtl_payment_type === 'supplier_sub' && md.org_id) {
+    let uid = md.user_id || null;
+    if (!uid) { const o = await sbGet(`organizations?id=eq.${encodeURIComponent(md.org_id)}&select=owner_id&limit=1`); uid = o && o[0] && o[0].owner_id; }
+    return uid ? { uid, org: md.org_id } : null;
+  }
+  if (md.mtl_payment_type) return null;                     // jiné předplatné na účtu MTL
+  const w = await sbGet(`profiles?partner_sub=eq.${encodeURIComponent(subId)}&select=id&limit=1`);
+  if (w && w[0]) return { uid: w[0].id, org: null };
+  const so = await sbGet(`organizations?supplier_sub=eq.${encodeURIComponent(subId)}&select=id,owner_id&limit=1`);
+  return (so && so[0]) ? { uid: so[0].owner_id, org: so[0].id } : null;
+}
+// ep-doklad volá webhook interně; neúspěch musí být v logu, ne potichu ztracený doklad.
+async function _callEpDoklad(body) {
+  const r = await fetch(`${APP_URL}/api/ep-doklad`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(Object.assign({ intSecret: process.env.PIS_INTERNAL_SECRET }, body)) });
+  if (!r.ok) console.error('ep-doklad', r.status, (await r.text()).slice(0, 300));
+}
 export const config = { api: { bodyParser: false } };
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
@@ -1097,7 +1138,8 @@ export default async function handler(req, res) {
           // CENA SE ULOZI K PROFILU. Stripe si ji drzi u predplatneho, takze klub plati porad
           // svou -- ale v MTL nebylo nikde videt, kdo ma zakladajicich 500 a kdo cenikovych
           // 1000. V Adminu se to bez toho nedalo zjistit jinak nez otevrenim Stripe.
-          const _paid = (typeof s.amount_total === 'number') ? Math.round(s.amount_total / 100) : null;
+          // Cena se ukládá MĚSÍČNÍ (ep_month), i u ročního EP -- ceník a Admin pracují s měsíční.
+          const _paid = m.ep_month ? Number(m.ep_month) : ((typeof s.amount_total === 'number') ? Math.round(s.amount_total / 100) : null);
           const _pcur = String(s.currency || 'czk').toUpperCase();
           await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, {
             partner: true, partner_sub: sub || null, stripe_customer: cust || null,
@@ -1105,7 +1147,18 @@ export default async function handler(req, res) {
           });
           await rerateGymMemberships(uid, 3); // existující členství → 3 % od příští faktury (Exclusive Partner)
           await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Byla ti udělena sazba Exclusive MTL Partner — od teď je provize MTL 0,5 % a akviziční pouze 5 %. 🥊' });
-          await sbPost('notifications', { user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'system', read: false, message: `⭐ Nový Exclusive MTL Partner (user ${uid}).` });
+          // ZAKLADATELI: kdo, za kolik a s prouklikem (klub → správa EP klubu, jinak profil).
+          try {
+            const _p = ((await sbGet(`profiles?id=eq.${encodeURIComponent(uid)}&select=name,email,coach_status`)) || [])[0] || {};
+            const _g = ((await sbGet(`gyms?owner_id=eq.${encodeURIComponent(uid)}&select=id,name&limit=1`)) || [])[0] || null;
+            const _yr = m.ep_interval === 'year';
+            const _amt = _paid ? (_paid.toLocaleString('cs-CZ') + ' ' + (_pcur === 'CZK' ? 'Kč' : _pcur) + '/měs. bez DPH' + (_yr ? ' (roční předplatné)' : '')) : '';
+            await sbPost('notifications', { user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'system', read: false,
+              data: JSON.stringify({ kind: 'new_provider', what: 'partner', user_id: uid, gym_id: _g ? _g.id : null }),
+              message: '⭐ Nový Exclusive MTL Partner: ' + (_p.name || _p.email || 'bez jména')
+                + (_g ? (' · klub ' + (_g.name || '')) : (_p.coach_status === 'approved' ? ' · kouč' : ''))
+                + (_p.email && _p.name ? (' · ' + _p.email) : '') + (_amt ? (' · ' + _amt) : '') + '.' });
+          } catch (e) { console.error('ep founder notif', e.message); }
         }
       } else if (m.mtl_payment_type === 'supplier_sub') {
         // PROFIL DODAVATELE ZAPLACEN -> zobrazí se klubům, koučům a pořadatelům (organizations.supplier_sub).
@@ -1195,26 +1248,16 @@ export default async function handler(req, res) {
       // DOKLAD ZA EP PŘEDPLATNÉ. Faktura od Stripe není doklad od MTL, takže si ho
       // vystavujeme sami (ep-doklad) -- pro účetnictví poskytovatele i pro dotace.
       try {
-        const _subId = typeof inv.subscription === 'string' ? inv.subscription : (inv.subscription && inv.subscription.id);
-        if (_subId && !event.account) {           // EP běží na platformním účtu, ne na connected
-          const _who = await sbGet(`profiles?partner_sub=eq.${encodeURIComponent(_subId)}&select=id&limit=1`);
-          let _uid = _who && _who[0] && _who[0].id, _org = null;
-          // Profil dodavatele: stejná faktura, odběratel je organizace.
-          if (!_uid) { const _so = await sbGet(`organizations?supplier_sub=eq.${encodeURIComponent(_subId)}&select=id,owner_id&limit=1`); if (_so && _so[0]) { _org = _so[0].id; _uid = _so[0].owner_id; } }
-          if (_uid) {
-            const _line = (inv.lines && inv.lines.data && inv.lines.data[0]) || null;
-            await fetch(`${APP_URL}/api/ep-doklad`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                intSecret: process.env.PIS_INTERNAL_SECRET,
-                invoice_id: inv.id, user_id: _uid, org_id: _org,
-                amount: (inv.amount_paid != null ? inv.amount_paid : inv.total) / 100,
-                currency: inv.currency, test_mode: !inv.livemode,
-                period_start: _line && _line.period ? new Date(_line.period.start * 1000).toISOString() : null,
-                period_end: _line && _line.period ? new Date(_line.period.end * 1000).toISOString() : null,
-              }),
-            });
-          }
+        const _ow = event.account ? null : await _platformSubOwner(inv);   // EP běží na platformním účtu, ne na connected
+        if (_ow) {
+          const _line = (inv.lines && inv.lines.data && inv.lines.data[0]) || null;
+          await _callEpDoklad({
+            invoice_id: inv.id, user_id: _ow.uid, org_id: _ow.org,
+            amount: (inv.amount_paid != null ? inv.amount_paid : inv.total) / 100,
+            currency: inv.currency, test_mode: !inv.livemode,
+            period_start: _line && _line.period ? new Date(_line.period.start * 1000).toISOString() : null,
+            period_end: _line && _line.period ? new Date(_line.period.end * 1000).toISOString() : null,
+          });
         }
       } catch (e) { console.error('ep doklad', e.message); }
 
@@ -1261,25 +1304,19 @@ export default async function handler(req, res) {
       // jednou -- další neúspěšné pokusy už ji mají, ep-doklad hlídá invoice_id). Až Stripe
       // platbu později strhne (invoice.paid), vznikne k ní samostatné potvrzení o úhradě;
       // vystavená faktura se nemění. Stejný postup jako u provize.
-      if (sub && !event.account) {
+      if (!event.account) {
         try {
-          const _who = await sbGet(`profiles?partner_sub=eq.${encodeURIComponent(sub)}&select=id&limit=1`);
-          let _uid = _who && _who[0] && _who[0].id, _org = null;
-          if (!_uid) { const _so = await sbGet(`organizations?supplier_sub=eq.${encodeURIComponent(sub)}&select=id,owner_id&limit=1`); if (_so && _so[0]) { _org = _so[0].id; _uid = _so[0].owner_id; } }
-          if (_uid) {
+          const _ow = await _platformSubOwner(inv);
+          if (_ow) {
             const _line = (inv.lines && inv.lines.data && inv.lines.data[0]) || null;
-            await fetch(`${APP_URL}/api/ep-doklad`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                intSecret: process.env.PIS_INTERNAL_SECRET, unpaid: true,
-                invoice_id: inv.id, user_id: _uid, org_id: _org,
-                amount: (inv.amount_due != null ? inv.amount_due : inv.total) / 100,
-                currency: inv.currency, test_mode: !inv.livemode,
-                pay_url: inv.hosted_invoice_url || null,
-                next_attempt: inv.next_payment_attempt ? new Date(inv.next_payment_attempt * 1000).toISOString() : null,
-                period_start: _line && _line.period ? new Date(_line.period.start * 1000).toISOString() : null,
-                period_end: _line && _line.period ? new Date(_line.period.end * 1000).toISOString() : null,
-              }),
+            await _callEpDoklad({
+              unpaid: true, invoice_id: inv.id, user_id: _ow.uid, org_id: _ow.org,
+              amount: (inv.amount_due != null ? inv.amount_due : inv.total) / 100,
+              currency: inv.currency, test_mode: !inv.livemode,
+              pay_url: inv.hosted_invoice_url || null,
+              next_attempt: inv.next_payment_attempt ? new Date(inv.next_payment_attempt * 1000).toISOString() : null,
+              period_start: _line && _line.period ? new Date(_line.period.start * 1000).toISOString() : null,
+              period_end: _line && _line.period ? new Date(_line.period.end * 1000).toISOString() : null,
             });
           }
         } catch (e) { console.error('ep unpaid doklad', e.message); }
