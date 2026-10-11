@@ -87,13 +87,13 @@ async function _issueDokladBank({ transactionId, gymId, coachId, clubMode, custo
     let sup = null, ownerId = null;
 
     if (gymId && !coachId) {
-      sup = (await _wsbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,owner_id`))[0] || null;
+      sup = (await _wsbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,owner_id,timezone`))[0] || null;
       ownerId = sup && sup.owner_id;
     } else if (coachId) {
       // clubMode urcuje volajici: v record-cash jde klubove plneni klubovou vetvi a pozna
       // se tim, ze se prijemce prepnul na koucuv klubovy ucet. Z gym_id to poznat nejde,
       // protoze koucova vetev zapisuje gym_id vzdy null.
-      const p = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,payout_legal_name,payout_tax_id,payout_vat_id,payout_vat_payer,payout_vat_rate,payout_billing_line1,payout_billing_line2,payout_billing_city,payout_billing_postal`))[0] || null;
+      const p = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,timezone,payout_legal_name,payout_tax_id,payout_vat_id,payout_vat_payer,payout_vat_rate,payout_billing_line1,payout_billing_line2,payout_billing_city,payout_billing_postal`))[0] || null;
       if (p) {
         sup = clubMode
           ? { legal_name: p.payout_legal_name, name: p.payout_legal_name,
@@ -102,7 +102,7 @@ async function _issueDokladBank({ transactionId, gymId, coachId, clubMode, custo
               // Adresa se sklada z rozpadu s prefixem payout_; billing_address je jen
               // zaloha pro radky z doby pred rozpadem.
               billing_line1: p.payout_billing_line1, billing_line2: p.payout_billing_line2,
-              billing_city: p.payout_billing_city, billing_postal: p.payout_billing_postal }
+              billing_city: p.payout_billing_city, billing_postal: p.payout_billing_postal, timezone: p.timezone }
           : p;
       }
       ownerId = coachId;
@@ -127,9 +127,7 @@ async function _issueDokladBank({ transactionId, gymId, coachId, clubMode, custo
     if (no && typeof no === 'object') no = Array.isArray(no) ? no[0] : Object.values(no)[0];
     if (!no) return null;
 
-    await sb('doklady', {
-      method: 'POST', prefer: 'return=minimal',
-      body: JSON.stringify({
+    const _dkRow = {
         doklad_no: String(no), series_key: key,
         transaction_id: transactionId,
         sup_name: sup.legal_name || sup.name || null,
@@ -145,8 +143,13 @@ async function _issueDokladBank({ transactionId, gymId, coachId, clubMode, custo
         currency: String(currency || 'CZK').toUpperCase(),
         payment_method: paymentMethod || null, test_mode: !!testMode,
         session_at: sessionAt || null,   // termin lekce pri vystaveni; presun ho uz nezmeni
-      }),
-    });
+    };
+    // PÁSMO DODAVATELE do snímku (datum dokladu se pak ukazuje v jeho místním čase). Kdyby
+    // sloupec sup_tz v databázi ještě nebyl, zápis se zopakuje bez něj -- číslo už je vydané
+    // a doklad nesmí kvůli tomu propadnout.
+    const _supTz = (sup && sup.timezone) || null;
+    try { await sb('doklady', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify(_supTz ? { ..._dkRow, sup_tz: _supTz } : _dkRow) }); }
+    catch (e) { if (_supTz && /sup_tz/.test(String(e && e.message))) await sb('doklady', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify(_dkRow) }); else throw e; }
     return String(no);
   } catch (e) { console.error('_issueDokladBank', e && e.message); return null; }
 }
@@ -170,11 +173,15 @@ async function sb(path, opts = {}) {
 }
 
 const ALLOWED_TYPES = ['drop_in', 'membership', 'custom', 'event_ticket', 'coach_1to1', 'course'];
-function ladderRate(profile) {
-  // cash/qr/pis = BANK-TRANSFER track. Single source of truth in _rate.js: same EP/FP/ladder as
-  // Stripe (Bankai is Stripe-only, so the bank track floors at Shikai).
-  if (!profile) return 0.025;  // base na bankovní koleji (bylo 0.035, pak 0.03)
-  return _mtlRate('qr_bank', { partner: profile.partner, founding: profile.founding, score: profile.coach_ref_score, bankai: profile.bankai_eligible, org: _hasOrgRate(profile) });
+function ladderRate(profile, entityMode) {
+  // KOLEJ URČUJE SUBJEKT, NE ZPŮSOB PLATBY. Hotovost se účtuje podle koleje poskytovatele:
+  // klub / kouč v režimu Stripe platí i z hotovosti stripe sazbu, v režimu převod bankovní
+  // (stejně jako reconcile-cash a appka). Dřív tu byla natvrdo bankovní kolej, takže Stripe
+  // klub platil z hotovosti víc, než mu appka ukazovala. Sazba (EP / Shikai / Bankai) je účtu.
+  // Stejně jako reconcile-cash (_railOf): bankovní kolej jen u režimu 'qr_bank'.
+  const rail = entityMode === 'qr_bank' ? 'qr_bank' : 'stripe';
+  if (!profile) return rail === 'stripe' ? 0.02 : 0.025;
+  return _mtlRate(rail, { partner: profile.partner, founding: profile.founding, score: profile.coach_ref_score, bankai: profile.bankai_eligible, org: _hasOrgRate(profile) });
 }
 
 
@@ -338,7 +345,7 @@ export default async function handler(req, res) {
 
     if (provider === 'gym') {
       // gym pays out -> gym owner authorizes, rate from owner profile
-      const gyms = await sb(`gyms?id=eq.${gym_id}&select=id,owner_id,currency,account_suspended,terms_text,terms_file_url,org_form,stripe_account,created_at,billing_country`);
+      const gyms = await sb(`gyms?id=eq.${gym_id}&select=id,owner_id,currency,account_suspended,terms_text,terms_file_url,org_form,stripe_account,payment_mode,created_at,billing_country`);
       const gym = gyms && gyms[0];
       if (!gym) return res.status(404).json({ error: 'gym not found' });
       if (!_trusted && gym.owner_id !== uid) return res.status(403).json({ error: 'not your gym' });
@@ -357,7 +364,7 @@ export default async function handler(req, res) {
       const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,created_at,referral_optin,billing_country,org_rate_until`);
       const ownerProf = (owners && owners[0]) || {};
       if (!ownerProf.id) ownerProf.id = gym.owner_id;
-      rate = ladderRate(ownerProf);
+      rate = ladderRate(ownerProf, gym.payment_mode || (gym.stripe_account ? 'stripe' : 'qr_bank'));
       cur = currency || gym.currency || 'czk';
       const _cc = (_wantCredit && ownerProf.referral_optin !== false) ? await findStudentCredit(member_id) : null;
       if (_cc) _creditRow = { memberId: member_id, id: _cc.id, sc: _cc.sc };
@@ -420,13 +427,13 @@ export default async function handler(req, res) {
       // org_rate_until CHYBELO: sazbova funkce pak nevedela, ze je kouc clenem asociace, a
       // uctovala zakladni 2,5 % misto 1,5 %. V appce se pritom cetl tentyz sloupec, takze
       // "Tvoje provize 1,5 % -- clenem asociace" slibovalo neco jineho, nez se strhlo.
-      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,org_rate_until,account_suspended,cash_blocked,created_at,referral_optin,billing_country,gym_payout_account,stripe_account`);
+      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,org_rate_until,account_suspended,cash_blocked,created_at,referral_optin,billing_country,gym_payout_account,payment_mode,stripe_account`);
       const coach = cs && cs[0];
       if (!coach) return res.status(404).json({ error: 'coach not found' });
       if (!_trusted && coach.id !== uid) return res.status(403).json({ error: 'not your account' });
       if (!_trusted && coach.account_suspended) return res.status(403).json({ error: 'account suspended' });
       if (!_trusted && coach.cash_blocked) return res.status(403).json({ error: 'cash blocked' });
-      rate = ladderRate(coach);
+      rate = ladderRate(coach, coach.payment_mode || (coach.stripe_account ? 'stripe' : 'qr_bank'));
       // ONLINE KOUČING (rezervace typu online): vlastní sazba 1 / 0,75 / 0,5 % a žádná akvizice.
       let _isOnl = (type === 'coach_online') || (type === 'membership' && !gym_id);   // předplatné kouče je online
       if (type === 'membership' && !gym_id) {

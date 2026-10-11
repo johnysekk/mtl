@@ -98,7 +98,7 @@ export default async function handler(req, res) {
         if (b.paid_to === 'coach' && b.coach_id) {
           const cs = await sb(`profiles?id=eq.${b.coach_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,created_at,gym_payout_account,stripe_account,referral_optin,payment_mode`);
           const coach = cs && cs[0]; if (!coach) { out.skipped++; continue; }
-          const rate = ladderRate(coach, coach.payment_mode);
+          const rate = ladderRate(coach, coach.payment_mode || (coach.stripe_account ? 'stripe' : 'qr_bank'));
           const _cc = (b.credit_used === 'student' && b.student_id && coach.referral_optin !== false) ? await findStudentCredit(b.student_id) : null;
           if (_cc) _creditRow = { memberId: b.student_id, id: _cc.id, sc: _cc.sc };
           const _acq = _cc ? null : await acquisitionRate(b.acq_source, type, coach, b.student_id, 'coach_id', b.coach_id);
@@ -113,7 +113,8 @@ export default async function handler(req, res) {
           const gym = gyms && gyms[0]; if (!gym) { out.skipped++; continue; }
           const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,created_at,referral_optin,payment_mode`);
           const ownerProf = (owners && owners[0]) || { id: gym.owner_id };
-          const rate = ladderRate(ownerProf, gym.payment_mode || ownerProf.payment_mode);
+          // Kolej KLUBU -- režim je u každého subjektu zvlášť, majitelův (kouč) se nepřebírá.
+          const rate = ladderRate(ownerProf, gym.payment_mode || (gym.stripe_account ? 'stripe' : 'qr_bank'));
           const _cc = (b.credit_used === 'student' && b.student_id && ownerProf.referral_optin !== false) ? await findStudentCredit(b.student_id) : null;
           if (_cc) _creditRow = { memberId: b.student_id, id: _cc.id, sc: _cc.sc };
           const _acq = _cc ? null : await acquisitionRate(b.acq_source, type, ownerProf, b.student_id, 'gym_id', b.gym_id);

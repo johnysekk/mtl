@@ -8,6 +8,7 @@
 //
 // DŮLEŽITÉ: webhook musí číst RAW body (proto bodyParser:false), jinak selže ověření podpisu.
 
+import { issueReceipts, receiptMailHtml } from './_receipt.js';
 import Stripe from 'stripe';
 import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil, onlineRate as _mtlOnline } from './_rate.js';
 import { sendOrderMailForPi, withdrawalText as _wdText } from './_order-mail.js';
@@ -710,9 +711,10 @@ async function _paynowNotify(m, s, settled) {
   // Faktura už existovala jako neuhrazená -> říct, že je tím uhrazená, a prokliknout na ni.
   // Jinak faktura teprve vznikne (_paynowDoklad) a přijde e-mailem.
   const _st = Array.isArray(settled) ? settled : [];
-  const _nos = _st.map((d) => 'MTL-' + d.id).join(', ');
-  const msg = `\u2705 Provize MTL uhrazena${who}: ${money('cs')}. ${vis} ` + (_st.length ? `Faktura ${_nos} je tím uhrazená.` : 'Faktura o provizi ti přijde e-mailem, jakmile bude vystavená.');
-  const msgEn = `\u2705 MTL commission paid${who}: ${money('en')}. ${visEn} ` + (_st.length ? `Invoice ${_nos} is now paid.` : 'The commission invoice will arrive by e-mail once it is issued.');
+  const _nos = _st.map((d) => 'MTL-' + d.ref_doklad_id).join(', ');
+  const _rcs = _st.map((d) => 'MTL-' + d.id).join(', ');
+  const msg = `\u2705 Provize MTL uhrazena${who}: ${money('cs')}. ${vis} ` + (_st.length ? `Faktura ${_nos} je tím uhrazená — potvrzení o úhradě ${_rcs} ti přišlo e-mailem.` : 'Faktura o provizi ti přijde e-mailem, jakmile bude vystavená.');
+  const msgEn = `\u2705 MTL commission paid${who}: ${money('en')}. ${visEn} ` + (_st.length ? `Invoice ${_nos} is now paid — payment receipt ${_rcs} was sent by e-mail.` : 'The commission invoice will arrive by e-mail once it is issued.');
   await sbPost('notifications', {
     user_id: ownerId, type: 'system', read: false,
     // S uhrazenou fakturou vede proklik rovnou na ni (doklad_unified + doklad_id).
@@ -791,15 +793,19 @@ export default async function handler(req, res) {
             const _rows = (await sbGet(`transactions?${_flt}&select=commission_month`)) || [];
             await sbPatch('transactions', _flt,
               { commission_status: 'collected', commission_collected_at: new Date().toISOString() });
-            // Faktury vystavené jako neuhrazené (po uzávěrce 13. dne) jsou tímhle uhrazené.
+            // Faktury vystavené jako neuhrazené (po uzávěrce 13. dne) se NEMĚNÍ -- k těm, které
+            // tahle platba uhradila, se vystaví samostatné potvrzení o úhradě (_receipt.js).
             let _settled = [];
             if (_rows.length) {
               try {
-                const _s = await sbPatch('commission_doklady',
-                  `${col}=eq.${encodeURIComponent(m.owner_id)}&kind=eq.unified&due_amount=gt.0&settled_at=is.null` + (cur ? `&currency=ilike.${encodeURIComponent(cur)}` : ''),
-                  { settled_at: new Date().toISOString() }, 'return=representation');
-                _settled = Array.isArray(_s) ? _s : [];
-              } catch (e) { console.error('[commission_paynow] settle', e && e.message); }
+                _settled = await issueReceipts(`${col}=eq.${encodeURIComponent(m.owner_id)}&kind=eq.unified` + (cur ? `&currency=ilike.${encodeURIComponent(cur)}` : ''), {
+                  method: 'card_paynow', noNotify: true,   // zprávu pošle _paynowNotify (jedna za platbu)
+                  mail: async (to, inv, r) => {
+                    let en = false; try { const p = ((await sbGet(`profiles?id=eq.${encodeURIComponent(inv.owner_id || inv.coach_id)}&select=lang`)) || [])[0]; en = !!(p && p.lang === 'en'); } catch (e) {}
+                    await sendResend(to, en ? `Payment receipt MTL-${r.id} — invoice MTL-${inv.id}` : `Potvrzení o úhradě MTL-${r.id} — faktura MTL-${inv.id}`, receiptMailHtml(inv, r, en));
+                  },
+                });
+              } catch (e) { console.error('[commission_paynow] receipt', e && e.message); }
             }
             const tbl = ({ gym: 'gyms', coach: 'profiles', org: 'organizations' })[m.owner_kind];
             await sbPatch(tbl, `id=eq.${encodeURIComponent(m.owner_id)}`,
@@ -1206,6 +1212,32 @@ export default async function handler(req, res) {
     } else if (event.type === 'invoice.payment_failed') {
       const inv = event.data.object;
       const sub = typeof inv.subscription === 'string' ? inv.subscription : (inv.subscription && inv.subscription.id);
+      // EP: PŘEDPLATNÉ SE NEPODAŘILO STRHNOUT. Vystaví se faktura s částkou „K úhradě" (jen
+      // jednou -- další neúspěšné pokusy už ji mají, ep-doklad hlídá invoice_id). Až Stripe
+      // platbu později strhne (invoice.paid), vznikne k ní samostatné potvrzení o úhradě;
+      // vystavená faktura se nemění. Stejný postup jako u provize.
+      if (sub && !event.account) {
+        try {
+          const _who = await sbGet(`profiles?partner_sub=eq.${encodeURIComponent(sub)}&select=id&limit=1`);
+          const _uid = _who && _who[0] && _who[0].id;
+          if (_uid) {
+            const _line = (inv.lines && inv.lines.data && inv.lines.data[0]) || null;
+            await fetch(`${APP_URL}/api/ep-doklad`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                intSecret: process.env.PIS_INTERNAL_SECRET, unpaid: true,
+                invoice_id: inv.id, user_id: _uid,
+                amount: (inv.amount_due != null ? inv.amount_due : inv.total) / 100,
+                currency: inv.currency, test_mode: !inv.livemode,
+                pay_url: inv.hosted_invoice_url || null,
+                next_attempt: inv.next_payment_attempt ? new Date(inv.next_payment_attempt * 1000).toISOString() : null,
+                period_start: _line && _line.period ? new Date(_line.period.start * 1000).toISOString() : null,
+                period_end: _line && _line.period ? new Date(_line.period.end * 1000).toISOString() : null,
+              }),
+            });
+          }
+        } catch (e) { console.error('ep unpaid doklad', e.message); }
+      }
       if (sub) {
         await sbPatch('gym_memberships', `stripe_subscription=eq.${encodeURIComponent(sub)}`, { payment_status: 'past_due', payment_failed_at: new Date().toISOString(), last_invoice_url: inv.hosted_invoice_url || null });
         try { const mem = (await sbGet(`gym_memberships?stripe_subscription=eq.${encodeURIComponent(sub)}&select=*`))[0]; if (mem && (mem.student_id || mem.member_id)) await sbPost('notifications', { user_id: mem.student_id || mem.member_id, type: 'system', read: false, data: JSON.stringify({ kind: 'membership_payment_failed', url: inv.hosted_invoice_url || '', gym_id: mem.gym_id, msg_en: '\u26a0\ufe0f The payment for your membership ' + (mem.plan_name || '') + ' failed. Update your card or pay via the link in the app.' }), message: '⚠️ Platba členství ' + (mem.plan_name || '') + ' se nezdařila. Aktualizuj kartu / zaplať odkaz v appce.' }); } catch (e) { console.error('notify failed pay', e.message); }

@@ -24,6 +24,7 @@ import Stripe from 'stripe';
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 import { makePayToken } from './commission-pay-now.js';
 import { minChargeFor } from './_config.js';
+import { issueReceipts, receiptMailHtml } from './_receipt.js';
 const APP = process.env.APP_URL || 'https://app.martialtraininglab.com';
 
 import { isTestMode } from './_config.js';
@@ -98,29 +99,17 @@ const notify = (user_id, kind, message, extra = {}) =>
 function prevMonth(ym) { const [y, m] = ym.split('-').map(Number); return new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 7); }
 
 // FAKTURA VYSTAVENÁ JAKO NEUHRAZENÁ (stržení neprošlo do uzávěrky 13. dne, viz
-// unified-doklad-cron) se po úspěšném stržení označí jako uhrazená (settled_at) a majitel
-// dostane zprávu s proklikem rovnou na tu fakturu. Stržení bere všechny uzavřené měsíce dané
-// měny, takže tím je uhrazená každá taková faktura subjektu v té měně. Obsah faktury (snímek)
-// se nemění -- jen se k ní připíše datum úhrady.
+// unified-doklad-cron) se NEMĚNÍ. Po úspěšném stržení se k ní vystaví samostatné POTVRZENÍ
+// O ÚHRADĚ (api/_receipt.js) a pošle se e-mailem i zprávou v appce. Stržení bere všechny
+// uzavřené měsíce dané měny, takže potvrzení dostane každá taková faktura subjektu v té měně.
 async function settleInvoices(col, id, cur, ownerId) {
-  let rows = [];
-  try {
-    rows = await sb(`commission_doklady?${col}=eq.${encodeURIComponent(id)}&kind=eq.unified&due_amount=gt.0&settled_at=is.null&currency=ilike.${encodeURIComponent(cur)}`,
-      { method: 'PATCH', prefer: 'return=representation', body: JSON.stringify({ settled_at: new Date().toISOString() }) }) || [];
-  } catch (e) { console.error('[commission] settle', col, id, e.message); return []; }
-  if (!ownerId) return rows;
-  for (const d of rows) {
-    const amt = (Number(d.due_amount || 0) / 100).toFixed(2);
-    const C = String(d.currency || cur).toUpperCase();
-    const cs = amt.replace('.', ',') + ' ' + (C === 'CZK' ? 'Kč' : C), en = amt + ' ' + C;
-    try {
-      await notify(ownerId, 'doklad_unified',
-        `✅ Faktura MTL-${d.id} (provize za ${d.period_month}) je uhrazená — zbývajících ${cs} jsme strhli z uložené karty.`,
-        { doklad_id: d.id, period: d.period_month, currency: C, gym_id: d.gym_id || null, coach_id: d.coach_id || null, organization_id: d.organization_id || null,
-          msg_en: `✅ Invoice MTL-${d.id} (commission for ${d.period_month}) is paid — the remaining ${en} was charged to your saved card.` });
-    } catch (e) {}
-  }
-  return rows;
+  return issueReceipts(`${col}=eq.${encodeURIComponent(id)}&kind=eq.unified&currency=ilike.${encodeURIComponent(cur)}`, {
+    method: 'card_on_file', notifyUserId: ownerId,
+    mail: async (to, inv, r) => {
+      let en = false; try { const p = (await sb(`profiles?id=eq.${ownerId}&select=lang`))[0]; en = !!(p && p.lang === 'en'); } catch (e) {}
+      await sendEmail(to, en ? `Payment receipt MTL-${r.id} — invoice MTL-${inv.id}` : `Potvrzení o úhradě MTL-${r.id} — faktura MTL-${inv.id}`, receiptMailHtml(inv, r, en));
+    },
+  });
 }
 
 // Odkaz „Zaplatit hned" do e-mailu o selhání. Vede na /pay-commission?token=..., kde si
