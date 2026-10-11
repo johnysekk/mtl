@@ -24,7 +24,7 @@ import Stripe from 'stripe';
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 import { makePayToken } from './commission-pay-now.js';
 import { minChargeFor } from './_config.js';
-import { issueReceipts, receiptMailHtml } from './_receipt.js';
+import { issueReceipts, receiptMailHtml, receiptTitle } from './_receipt.js';
 const APP = process.env.APP_URL || 'https://app.martialtraininglab.com';
 
 import { isTestMode } from './_config.js';
@@ -98,7 +98,7 @@ const notify = (user_id, kind, message, extra = {}) =>
   sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id, type: 'system', read: false, data: JSON.stringify({ kind, ...extra }), message }) });
 function prevMonth(ym) { const [y, m] = ym.split('-').map(Number); return new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 7); }
 
-// FAKTURA VYSTAVENÁ JAKO NEUHRAZENÁ (stržení neprošlo do uzávěrky 13. dne, viz
+// FAKTURA VYSTAVENÁ JAKO NEUHRAZENÁ (stržení 6. dne neprošlo, viz
 // unified-doklad-cron) se NEMĚNÍ. Po úspěšném stržení se k ní vystaví samostatné POTVRZENÍ
 // O ÚHRADĚ (api/_receipt.js) a pošle se e-mailem i zprávou v appce. Stržení bere všechny
 // uzavřené měsíce dané měny, takže potvrzení dostane každá taková faktura subjektu v té měně.
@@ -107,7 +107,7 @@ async function settleInvoices(col, id, cur, ownerId) {
     method: 'card_on_file', notifyUserId: ownerId,
     mail: async (to, inv, r) => {
       let en = false; try { const p = (await sb(`profiles?id=eq.${ownerId}&select=lang`))[0]; en = !!(p && p.lang === 'en'); } catch (e) {}
-      await sendEmail(to, en ? `Payment receipt MTL-${r.id} — invoice MTL-${inv.id}` : `Potvrzení o úhradě MTL-${r.id} — faktura MTL-${inv.id}`, receiptMailHtml(inv, r, en));
+      await sendEmail(to, `${receiptTitle(inv.kind, en)} MTL-${r.id} — ${en ? 'invoice' : 'faktura'} MTL-${inv.id}`, receiptMailHtml(inv, r, en));
     },
   });
 }

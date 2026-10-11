@@ -499,14 +499,15 @@ export default async function handler(req, res) {
     // Ty se ignorují, jinak by doklad nevznikl nikdy.
     const _minFor = (cur) => minChargeFor(cur);   // minima jsou v _config.js
     const _waiting = {};   // 'kind:id:mena' -> nestržená částka
-    // UZÁVĚRKA FAKTURY. Na stržení se čeká jen do 13. dne následujícího měsíce (stržení 6.,
-    // opakování 9. a 12.). Pak se faktura vystaví i tak -- s nestrženou částkou jako „K úhradě".
-    // Fakturu za plnění podnikateli v jiném státě EU je nutné vystavit do 15. dne následujícího
-    // měsíce a účetní případ (pohledávka) vzniká plněním, ne zaplacením. Dřív se čekalo bez
-    // konce: kdo měl prošlou kartu, nedostal fakturu vůbec.
-    const INVOICE_CUTOFF_DAY = 13;
+    // FAKTURA VZNIKÁ V DEN STRŽENÍ (6. den následujícího měsíce), ať stržení projde, nebo ne.
+    // commission-cron strhává v 8:00 UTC, tenhle cron běží v 8:30 UTC (vercel.json), takže
+    // výsledek stržení už zná: prošlo -> faktura „Uhrazeno v plné výši"; neprošlo (nebo chybí
+    // karta) -> faktura s částkou „K úhradě". Pozdější úhrada (opakované stržení i „Zaplatit
+    // hned") už fakturu nemění -- vystaví se k ní „Doklad o uhrazené provizi MTL" (_receipt.js).
+    // Před 6. dnem se na stržení čeká (dřív by faktura vznikla jen s karetní částí).
+    const CHARGE_DAY = 6;
     const _pastCutoff = !DAILY && /^\d{4}-\d{2}$/.test(String(period))
-      && pragueDate() >= (shiftMonth(period, 1) + '-' + String(INVOICE_CUTOFF_DAY).padStart(2, '0'));
+      && pragueDate() >= (shiftMonth(period, 1) + '-' + String(CHARGE_DAY).padStart(2, '0'));
     let _unpaidRows = [];
     if (!DAILY && !preview) {
       try {
@@ -530,7 +531,7 @@ export default async function handler(req, res) {
       if (DAILY || preview) return false;
       const id = String(entityId || '').replace(/\|payout$/, '');
       const amt = _waiting[kind + ':' + id + ':' + String(cur || 'czk').toLowerCase()] || 0;
-      // Po uzávěrce se nečeká: faktura vznikne s nestrženou částkou jako „K úhradě".
+      // Od dne stržení se nečeká: co se nestrhlo, jde na fakturu jako „K úhradě".
       return amt >= _minFor(cur) && !_pastCutoff;
     };
 

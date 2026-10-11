@@ -23,6 +23,12 @@ async function post(table, body, prefer) {
   if (!r.ok) throw new Error(`${table}: ${(await r.text()).slice(0, 200)}`);
   const t = await r.text(); return t ? JSON.parse(t) : null;
 }
+// NÁZEV DOKLADU podle toho, co uhrazuje. Provize: „Doklad o uhrazené provizi MTL" /
+// „Receipt for paid MTL commission"; předplatné EP obdobně.
+export function receiptTitle(refKind, en) {
+  if (refKind === 'partner_sub') return en ? 'Receipt for paid Exclusive Partner subscription' : 'Doklad o uhrazeném předplatném Exclusive Partner';
+  return en ? 'Receipt for paid MTL commission' : 'Doklad o uhrazené provizi MTL';
+}
 const money = (minor, cur, en) => {
   const C = String(cur || 'CZK').toUpperCase();
   const v = (Number(minor || 0) / 100).toLocaleString(en ? 'en-GB' : 'cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -68,8 +74,8 @@ export async function issueReceipts(filter, opts = {}) {
       const uid = opts.notifyUserId || d.owner_id || d.coach_id;
       if (uid && !opts.noNotify) {
         const what = d.kind === 'partner_sub' ? ['předplatné Exclusive Partner', 'Exclusive Partner subscription'] : ['provize MTL', 'MTL commission'];
-        const cs = `✅ Faktura MTL-${d.id} (${what[0]}, ${d.period_month}) je uhrazená: ${money(r.amount, r.currency, false)}. Vystavili jsme k ní potvrzení o úhradě MTL-${r.id}.`;
-        const en = `✅ Invoice MTL-${d.id} (${what[1]}, ${d.period_month}) is paid: ${money(r.amount, r.currency, true)}. Payment receipt MTL-${r.id} has been issued.`;
+        const cs = `✅ Faktura MTL-${d.id} (${what[0]}, ${d.period_month}) je uhrazená: ${money(r.amount, r.currency, false)}. Vystavili jsme k ní ${receiptTitle(d.kind, false)} MTL-${r.id}.`;
+        const en = `✅ Invoice MTL-${d.id} (${what[1]}, ${d.period_month}) is paid: ${money(r.amount, r.currency, true)}. ${receiptTitle(d.kind, true)} MTL-${r.id} has been issued.`;
         try {
           await post('notifications', { user_id: uid, type: 'system', read: false, message: cs,
             data: JSON.stringify({ kind: 'doklad_unified', doklad_id: r.id, gym_id: d.gym_id || null, coach_id: d.coach_id || null,
@@ -93,7 +99,7 @@ export function receiptMailHtml(inv, r, en) {
   const cust = [r.cust_name, r.cust_address, r.cust_ico ? ((en ? 'Reg. number: ' : 'IČO: ') + r.cust_ico) : '', r.cust_dic ? ((en ? 'VAT ID: ' : 'DIČ: ') + r.cust_dic) : ''].filter(Boolean).map(esc).join('<br>');
   return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:620px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.55;">'
     + (r.test_mode ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial;padding:9px 12px;margin-bottom:12px;">' + (en ? 'TEST MODE — no actual transaction took place' : 'TESTOVACÍ REŽIM — k žádné skutečné transakci nedošlo') + '</div>' : '')
-    + '<h2 style="margin:0 0 4px;">' + (en ? 'Payment receipt' : 'Potvrzení o úhradě') + '</h2>'
+    + '<h2 style="margin:0 0 4px;">' + esc(receiptTitle(r.ref_kind || inv.kind, en)) + '</h2>'
     + '<div style="font-size:13px;color:#555;">MTL-' + r.id + ' · ' + (en ? 'Issued ' : 'Vystaveno ') + d(r.issued_at) + '</div>'
     + '<div style="margin:14px 0;padding:11px 14px;border-radius:10px;background:#EAF7EE;border:1.5px solid #A8E6C0;color:#0E6B3A;">'
     + '<div style="font-weight:800;font-size:14px;">' + (en ? 'PAID: ' : 'UHRAZENO: ') + esc(money(r.amount, r.currency, en)) + '</div>'

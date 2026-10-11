@@ -8,7 +8,7 @@
 //
 // DŮLEŽITÉ: webhook musí číst RAW body (proto bodyParser:false), jinak selže ověření podpisu.
 
-import { issueReceipts, receiptMailHtml } from './_receipt.js';
+import { issueReceipts, receiptMailHtml, receiptTitle } from './_receipt.js';
 import Stripe from 'stripe';
 import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil, onlineRate as _mtlOnline } from './_rate.js';
 import { sendOrderMailForPi, withdrawalText as _wdText } from './_order-mail.js';
@@ -713,8 +713,8 @@ async function _paynowNotify(m, s, settled) {
   const _st = Array.isArray(settled) ? settled : [];
   const _nos = _st.map((d) => 'MTL-' + d.ref_doklad_id).join(', ');
   const _rcs = _st.map((d) => 'MTL-' + d.id).join(', ');
-  const msg = `\u2705 Provize MTL uhrazena${who}: ${money('cs')}. ${vis} ` + (_st.length ? `Faktura ${_nos} je tím uhrazená — potvrzení o úhradě ${_rcs} ti přišlo e-mailem.` : 'Faktura o provizi ti přijde e-mailem, jakmile bude vystavená.');
-  const msgEn = `\u2705 MTL commission paid${who}: ${money('en')}. ${visEn} ` + (_st.length ? `Invoice ${_nos} is now paid — payment receipt ${_rcs} was sent by e-mail.` : 'The commission invoice will arrive by e-mail once it is issued.');
+  const msg = `\u2705 Provize MTL uhrazena${who}: ${money('cs')}. ${vis} ` + (_st.length ? `Faktura ${_nos} je tím uhrazená — Doklad o uhrazené provizi MTL ${_rcs} ti přišel e-mailem.` : 'Faktura o provizi ti přijde e-mailem, jakmile bude vystavená.');
+  const msgEn = `\u2705 MTL commission paid${who}: ${money('en')}. ${visEn} ` + (_st.length ? `Invoice ${_nos} is now paid — Receipt for paid MTL commission ${_rcs} was sent by e-mail.` : 'The commission invoice will arrive by e-mail once it is issued.');
   await sbPost('notifications', {
     user_id: ownerId, type: 'system', read: false,
     // S uhrazenou fakturou vede proklik rovnou na ni (doklad_unified + doklad_id).
@@ -793,7 +793,7 @@ export default async function handler(req, res) {
             const _rows = (await sbGet(`transactions?${_flt}&select=commission_month`)) || [];
             await sbPatch('transactions', _flt,
               { commission_status: 'collected', commission_collected_at: new Date().toISOString() });
-            // Faktury vystavené jako neuhrazené (po uzávěrce 13. dne) se NEMĚNÍ -- k těm, které
+            // Faktury vystavené jako neuhrazené (stržení 6. dne neprošlo) se NEMĚNÍ -- k těm, které
             // tahle platba uhradila, se vystaví samostatné potvrzení o úhradě (_receipt.js).
             let _settled = [];
             if (_rows.length) {
@@ -802,7 +802,7 @@ export default async function handler(req, res) {
                   method: 'card_paynow', noNotify: true,   // zprávu pošle _paynowNotify (jedna za platbu)
                   mail: async (to, inv, r) => {
                     let en = false; try { const p = ((await sbGet(`profiles?id=eq.${encodeURIComponent(inv.owner_id || inv.coach_id)}&select=lang`)) || [])[0]; en = !!(p && p.lang === 'en'); } catch (e) {}
-                    await sendResend(to, en ? `Payment receipt MTL-${r.id} — invoice MTL-${inv.id}` : `Potvrzení o úhradě MTL-${r.id} — faktura MTL-${inv.id}`, receiptMailHtml(inv, r, en));
+                    await sendResend(to, `${receiptTitle(inv.kind, en)} MTL-${r.id} — ${en ? 'invoice' : 'faktura'} MTL-${inv.id}`, receiptMailHtml(inv, r, en));
                   },
                 });
               } catch (e) { console.error('[commission_paynow] receipt', e && e.message); }

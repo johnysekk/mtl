@@ -36,11 +36,12 @@ export async function getStripe() {
   return new Stripe(key);
 }
 
-// MINIMÁLNÍ ČÁSTKA PRO STRŽENÍ PROVIZE Z KARTY.
-// Stripe nepřijme platbu pod svým minimem (u korun 15 Kč). Držet se přesně na hraně se
-// nevyplácí: poplatek za transakci by z takové částky snědl většinu a každý pokus u hranice
-// riskuje odmítnutí. Proto se čeká, až dluh přeteče přes ~20 Kč (a ekvivalent v dalších
-// měnách). Do té doby zůstane provize 'pending' a přičte se k dalšímu měsíci.
-// Používá commission-cron (kdy strhnout) i unified-doklad-cron (kdy počkat s dokladem).
-export const MIN_CHARGE = { czk: 2000, eur: 100, usd: 100, gbp: 100, pln: 400, huf: 40000, chf: 100, sek: 1200, dkk: 800, nok: 1200 };
-export const minChargeFor = (cur) => MIN_CHARGE[String(cur || 'czk').toLowerCase()] || 100;
+// MINIMÁLNÍ ČÁSTKA PRO STRŽENÍ PROVIZE Z KARTY: 50 Kč a zaokrouhlený ekvivalent v ostatních
+// měnách (podle kurzu ECB, podzim 2026). Pod touhle částkou se provize nestrhává -- zůstane
+// 'pending', přičte se k dalšímu měsíci a strhne se, až minimum přeteče. Stripe sám bere od
+// 15 Kč, ale u malých částek by jeho poplatek snědl většinu a každé stržení je pro poskytovatele
+// další položka na výpisu. Částky v haléřích / centech (u HUF ve fillérech).
+// Používá commission-cron (kdy strhnout, upozornění před stržením) i unified-doklad-cron.
+export const MIN_CHARGE = { czk: 5000, eur: 200, usd: 235, gbp: 175, chf: 190, pln: 870, huf: 80000, sek: 2300, dkk: 1500, nok: 2400 };
+// Měna mimo seznam: 2 jednotky (řádově 50 Kč u CAD/AUD/NZD apod.).
+export const minChargeFor = (cur) => MIN_CHARGE[String(cur || 'czk').toLowerCase()] || 200;

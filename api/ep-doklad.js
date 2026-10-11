@@ -9,7 +9,7 @@
 //                          period_end, test_mode }
 
 import { vatMode, vatNoteFor } from './_vat.js';
-import { issueReceipts, receiptMailHtml } from './_receipt.js';
+import { issueReceipts, receiptMailHtml, receiptTitle } from './_receipt.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -100,7 +100,7 @@ export default async function handler(req, res) {
             method: 'stripe_invoice', notifyUserId: uid, paidAt: new Date().toISOString(),
             mail: async (to, inv, r) => {
               let en = false; try { const p = (await sb(`profiles?id=eq.${encodeURIComponent(uid)}&select=lang`))[0]; en = !!(p && p.lang === 'en'); } catch (e) {}
-              await _mail(to, en ? `Payment receipt MTL-${r.id} — invoice MTL-${inv.id}` : `Potvrzení o úhradě MTL-${r.id} — faktura MTL-${inv.id}`, receiptMailHtml(inv, r, en));
+              await _mail(to, `${receiptTitle(inv.kind, en)} MTL-${r.id} — ${en ? 'invoice' : 'faktura'} MTL-${inv.id}`, receiptMailHtml(inv, r, en));
             },
           });
           return res.status(200).json({ ok: true, receipt: (rc[0] && rc[0].id) || null, invoice: ex[0].id });
