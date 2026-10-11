@@ -723,9 +723,12 @@ async function membershipCheckout(req, res) {
 // neuctuji: dokud nemame poskytovatele mimo CR, uctuje se vsem v korunach a appka pod cenou
 // ukaze prepocet kurzem ECB. Az se zapnou, musi se zaroven doresit ulozeni zamcene ceny
 // (profiles.partner_price/partner_currency) a u USA i stat, ktery dnes nikde nemame.
-const EP_SPOTS = 50;
-const EP_FOUNDING_CZK = 500;
-const EP_LIST_CZK = 1000;
+// Bez DPH, rozhodnuto 11. 10. 2026: prvních 20 (napříč světem, počítají se i ručně udělená EP)
+// 499 Kč, pak 699 Kč. Roční předplatné = EP_YEAR_MONTHS měsíců. Musí souhlasit s index.html.
+const EP_SPOTS = 20;
+const EP_FOUNDING_CZK = 499;
+const EP_LIST_CZK = 699;
+const EP_YEAR_MONTHS = 10;
 
 async function epTierForCountry(cc) {
   // Kolik zakladajicich mist jeste zbyva. Pocitaji se vsichni aktivni partneri, i rucne udeleni.
@@ -784,19 +787,24 @@ async function partnerCheckout(req, res) {
   // e-mail, renewal -- can be seen the next morning rather than in a month.
   let _epDaily = false;
   try { const { isTestMode } = await import('./_config.js'); _epDaily = await isTestMode(); } catch (e) {}
-  const _epInterval = _epDaily ? 'day' : 'month';
+  // Roční EP (volba z appky; cena = EP_YEAR_MONTHS × měsíční, počítá server).
+  const _epYear = String(req.query.interval || '') === 'year';
+  const _epInterval = _epDaily ? 'day' : (_epYear ? 'year' : 'month');
+  const _epAmount = _epYear ? tier.amount * EP_YEAR_MONTHS : tier.amount;
 
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
     payment_method_types: ['card'],
-    billing_address_collection: 'required',
-    tax_id_collection: { enabled: true, required: 'if_supported' },
+    // BEZ DIČ A ADRESY NA STRIPE. Fakturační údaje (název, IČO, DIČ, sídlo) má MTL u účtu,
+    // fakturu z nich dělá ep-doklad a DIČ u zahraničních hlídá brána výš (require_vat_foreign).
+    // required:'if_supported' chtělo DIČ povinně -- český neplátce DPH tak nemohl zaplatit.
+    billing_address_collection: 'auto',
     client_reference_id: userId,
     line_items: [
-      { price_data: { currency: tier.currency, product_data: { name: 'Exclusive MTL Partner — coach & gym rates' }, unit_amount: Math.round(tier.amount*100), recurring: { interval: _epInterval } }, quantity: 1 },
+      { price_data: { currency: tier.currency, product_data: { name: 'Exclusive MTL Partner — coach & gym rates' + (_epYear ? ' (yearly)' : '') }, unit_amount: Math.round(_epAmount*100), recurring: { interval: _epInterval } }, quantity: 1 },
     ],
-    subscription_data: { metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'', ep_currency: tier.currency, ep_amount: String(tier.amount) } },
-    metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'' },
+    subscription_data: { metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'', ep_currency: tier.currency, ep_amount: String(_epAmount), ep_month: String(tier.amount), ep_interval: _epYear ? 'year' : 'month' } },
+    metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'', ep_month: String(tier.amount), ep_interval: _epYear ? 'year' : 'month' },
     success_url: `${proto}://${host}/?partner_sub=ok&session={CHECKOUT_SESSION_ID}`,
     cancel_url: `${proto}://${host}/`,
   }, { apiVersion: '2024-09-30.acacia' });
@@ -812,7 +820,7 @@ async function partnerCheckout(req, res) {
 // 199 Kč pro prvních SUPPLIER_SPOTS zaplacených dodavatelů (zůstane jim -- Stripe drží cenu
 // u předplatného, supplier_price se uloží při zaplacení), pak 299 Kč. Roční = 10 měsíců.
 // Musí souhlasit se SUPPLIER_* v index.html.
-const SUPPLIER_SPOTS = 50, SUPPLIER_FOUNDING_CZK = 199, SUPPLIER_LIST_CZK = 299;
+const SUPPLIER_SPOTS = 20, SUPPLIER_FOUNDING_CZK = 199, SUPPLIER_LIST_CZK = 299;
 async function supplierTier() {
   let taken = 0;
   try {
@@ -867,8 +875,10 @@ async function supplierCheckout(req, res) {
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
     payment_method_types: ['card'],
-    billing_address_collection: 'required',
-    tax_id_collection: { enabled: true, required: 'if_supported' },
+    // BEZ DIČ A ADRESY NA STRIPE. Fakturační údaje (název, IČO, DIČ, sídlo) má MTL u účtu,
+    // fakturu z nich dělá ep-doklad a DIČ u zahraničních hlídá brána výš (require_vat_foreign).
+    // required:'if_supported' chtělo DIČ povinně -- český neplátce DPH tak nemohl zaplatit.
+    billing_address_collection: 'auto',
     client_reference_id: String(userId || org.owner_id),
     customer_email: (org.invoice_email || org.contact_email || undefined),
     line_items: [

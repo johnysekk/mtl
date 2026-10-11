@@ -1,17 +1,21 @@
 // /api/student-card.js — KARTA STUDENTA MTL.
 //
 // Student ukáže u dodavatele (fyzio, výživa, foto…) QR ze své karty a dostane slevu, kterou si
-// dodavatel zadal v profilu. QR je STÁLÝ (žádné 90s tokeny jako u check-inu), aby šel ukázat
-// i bez dat v mobilu: odkaz ?karta=<id>.<podpis>. Podpis je HMAC na serveru, takže z cizího
-// ID profilu se platná karta vyrobit nedá.
+// dodavatel zadal v profilu.
 //
-//   GET ?mine=1  (Bearer)          -> { ok, token, active, basis }       vlastní karta
-//   GET ?t=<token>[&org=<id>]      -> { ok, valid, name, photo, active, basis, since, recorded }
+// QR SE MĚNÍ KAŽDÝCH 30 S A FUNGUJE BEZ DAT. Jako u ověřovacích aplikací (TOTP): telefon
+// studenta si jednou stáhne klíč své karty a kód z něj počítá sám, z času -- internet k tomu
+// nepotřebuje. Odkaz je ?karta=<id>.<krok>.<kód>; server klíč odvodí z tajemství a ID, kód
+// přepočítá a přijme jen krok ±STEP_SLACK (2 minuty na rozjeté hodiny). Snímek obrazovky
+// tak za pár minut neplatí a bez klíče se karta vyrobit nedá.
+//
+//   GET ?mine=1  (Bearer)          -> { ok, key, step, active, basis }   klíč vlastní karty
+//   GET ?t=<kód z QR>[&org=<id>]   -> { ok, valid, expired, name, photo, active, basis, since, recorded }
 //        s Bearer majitele zveřejněného dodavatele se ověření zapíše jako uplatněná sleva
 //        do org_views (source 'card', engaged) -- dodavatel to vidí ve svém přehledu.
 //
 // Aktivní = platné členství v klubu, nebo trénink (docházka / lekce s koučem) za posledních
-// 30 dní. Dodavatel vidí jen jméno, fotku a jestli je karta aktivní -- nic dalšího.
+// ACTIVE_DAYS dní. Dodavatel vidí jen jméno, fotku a jestli je karta aktivní -- nic dalšího.
 import crypto from 'crypto';
 import { pragueDate } from './_tz.js';
 
@@ -22,13 +26,19 @@ const q = encodeURIComponent;
 const svc = { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const sign = (uid) => crypto.createHmac('sha256', SECRET).update('card:' + String(uid).toLowerCase()).digest('base64url').slice(0, 22);
-const makeCardToken = (uid) => `${uid}.${sign(uid)}`;
-function readToken(t) {
-  const m = /^([0-9a-f-]{36})\.([A-Za-z0-9_-]{22})$/i.exec(String(t || '').trim());
+const ACTIVE_DAYS = 15;
+const STEP_MS = 30000, STEP_SLACK = 4;
+// Klíč karty: odvozený, nikde se neukládá. Stejný výpočet kódu dělá appka (_scardCode v index.html).
+const cardKey = (uid) => crypto.createHmac('sha256', SECRET).update('cardkey:' + String(uid).toLowerCase()).digest();
+const codeFor = (key, step) => crypto.createHmac('sha256', key).update(String(step)).digest('base64url').slice(0, 12);
+// Vrací { uid } (platný), { expired:true } nebo null.
+function readCode(t) {
+  const m = /^([0-9a-f-]{36})\.(\d{1,12})\.([A-Za-z0-9_-]{12})$/i.exec(String(t || '').trim());
   if (!m || !UUID.test(m[1])) return null;
-  const a = Buffer.from(sign(m[1])), b = Buffer.from(m[2]);
-  return (a.length === b.length && crypto.timingSafeEqual(a, b)) ? m[1].toLowerCase() : null;
+  const uid = m[1].toLowerCase(), step = Number(m[2]);
+  const a = Buffer.from(codeFor(cardKey(uid), step)), b = Buffer.from(m[3]);
+  if (!(a.length === b.length && crypto.timingSafeEqual(a, b))) return null;
+  return (Math.abs(step - Math.floor(Date.now() / STEP_MS)) <= STEP_SLACK) ? { uid } : { expired: true };
 }
 
 async function sb(path) {
@@ -41,11 +51,11 @@ async function whoami(req) {
   try { const r = await fetch(`${SB}/auth/v1/user`, { headers: { apikey: KEY, Authorization: `Bearer ${tok}` } }); if (!r.ok) return null; const u = await r.json(); return (u && u.id) || null; } catch (e) { return null; }
 }
 
-// Proč je karta aktivní: 'member' (platné členství), 'trained' (trénink za 30 dní), jinak null.
+// Proč je karta aktivní: 'member' (platné členství), 'trained' (trénink za ACTIVE_DAYS dní), jinak null.
 async function activity(uid) {
   const m = await sb(`gym_memberships?student_id=eq.${q(uid)}&status=in.(active,cancelling)&select=id&limit=1`);
   if (m && m.length) return 'member';
-  const since = pragueDate(new Date(Date.now() - 30 * 86400000));
+  const since = pragueDate(new Date(Date.now() - ACTIVE_DAYS * 86400000));
   const a = await sb(`gym_attendance?student_id=eq.${q(uid)}&class_date=gte.${since}&select=id&limit=1`);
   if (a && a.length) return 'trained';
   const b = await sb(`bookings?student_id=eq.${q(uid)}&status=eq.active&training_date=gte.${since}&training_date=lte.${pragueDate()}&select=id&limit=1`);
@@ -65,11 +75,13 @@ export default async function handler(req, res) {
       const me = await whoami(req);
       if (!me) return res.status(401).json({ ok: false, error: 'login' });
       const basis = await activity(me);
-      return res.status(200).json({ ok: true, token: makeCardToken(me), active: !!basis, basis });
+      return res.status(200).json({ ok: true, key: cardKey(me).toString('base64url'), step: Math.floor(Date.now() / STEP_MS), active: !!basis, basis });
     }
 
-    const uid = readToken(Q.t);
-    if (!uid) return res.status(200).json({ ok: true, valid: false });
+    const rc = readCode(Q.t);
+    if (!rc) return res.status(200).json({ ok: true, valid: false });
+    if (rc.expired) return res.status(200).json({ ok: true, valid: false, expired: true });
+    const uid = rc.uid;
     const p = ((await sb(`profiles?id=eq.${q(uid)}&select=name,photo_url,photo_thumb,created_at,account_suspended`)) || [])[0];
     if (!p || p.account_suspended) return res.status(200).json({ ok: true, valid: false });
     const basis = await activity(uid);
