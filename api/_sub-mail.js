@@ -46,10 +46,14 @@ export async function subMail(who, what, until) {
         : ['Předplatné skončilo — ' + product, who.orgId ? 'Profil dodavatele se v MTL přestal zobrazovat. Údaje zůstávají uložené; po novém zaplacení v appce se profil hned ukáže.' : 'Už nejsi Exclusive MTL Partner, od další faktury platí standardní sazby. Předplatné si v appce můžeš kdykoliv obnovit.'],
     }[what];
     if (!T) return;
+    // Stejná stavba jako e-mail k faktuře za provizi: oslovení, věcný text, patička s kontaktem MTL.
+    // Bez velkého nadpisu -- ten už je v předmětu.
+    const ps = ((await sbGet('platform_settings?id=eq.1&select=name,contact_email,contact_phone')) || [])[0] || {};
     const html = '<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.6;">'
-      + '<h2 style="margin:0 0 10px;">' + esc(T[0]) + '</h2><p>' + T[1] + '</p>'
-      + '<p><a href="' + APP + '/" style="display:inline-block;padding:11px 20px;background:#E63946;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;">' + (en ? 'Open MTL' : 'Otevřít MTL') + '</a></p>'
-      + '<p style="font-size:12px;color:#888;">Martial Training Lab</p></div>';
+      + '<p style="margin:0 0 10px;">' + (en ? 'Hello' : 'Dobrý den') + ',</p>'
+      + '<p style="margin:0 0 10px;">' + T[1] + '</p>'
+      + '<p style="margin:14px 0;"><a href="' + APP + '/" style="display:inline-block;padding:11px 20px;background:#E63946;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;">' + (en ? 'Open MTL' : 'Otevřít MTL') + '</a></p>'
+      + '<p style="margin:18px 0 0;color:#888;font-size:12px;">' + esc(ps.name || 'Martial Training Lab') + (ps.contact_email ? (' · ' + esc(ps.contact_email)) : '') + (ps.contact_phone ? (' · ' + esc(ps.contact_phone)) : '') + '</p></div>';
     await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: 'Bearer ' + RESEND, 'Content-Type': 'application/json' },
       body: JSON.stringify({ from: MAIL_FROM, to: [to], subject: T[0], html }) });
   } catch (e) { console.error('[sub-mail]', e.message); }
