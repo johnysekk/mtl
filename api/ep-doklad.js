@@ -26,7 +26,8 @@ const sb = async (path, opts = {}) => {
 };
 
 // DAŇOVÝ REŽIM. Rozhoduje v tomhle pořadí:
-//   1) MTL není plátce DPH  -> na dokladu žádná DPH, ať je odběratel kdekoli
+//   1) MTL není plátce DPH  -> doma a mimo EU bez DPH; odběratel v jiném státě EU s DIČ
+//      -> přenesená daňová povinnost (MTL je identifikovaná osoba, § 6i), bez DIČ jako bod 4
 //   2) odběratel v ČR       -> česká DPH (status odběratele na tom nic nemění)
 //   3) odběratel v EU s DIČ -> přenesená daňová povinnost, daň odvede on
 //   4) odběratel v EU bez DIČ -> nelze účtovat českou DPH: místem plnění je jeho zem
@@ -78,6 +79,7 @@ export default async function handler(req, res) {
       ico: ps.ico || null, dic: ps.dic || null, address: ps.sidlo || null,
       vat_payer: !!ps.vat_payer, vat_rate: (ps.vat_rate != null ? ps.vat_rate : null),
       phone: ps.contact_phone || null, email: ps.contact_email || null,
+      register: (ps.register_entry && String(ps.register_entry).trim()) || null,
       country: String(ps.home_country || 'CZ').toUpperCase(),
       require_vat_foreign: !!ps.require_vat_foreign,
     };
@@ -125,13 +127,20 @@ export default async function handler(req, res) {
       // DPH jen u domácího plnění. U ostatních režimů nula a důvod je v vat_note.
       sup_vat_payer: ME.vat_payer, sup_vat_rate: (V.mode === 'domestic' ? ME.vat_rate : 0),
       sup_phone: ME.phone, sup_email: ME.email, sup_country: ME.country,
+      sup_register: ME.register,   // spisová značka (§ 435 OZ)
       // daňový režim
       vat_mode: V.mode, vat_note: V.note,
     };
 
-    const ins = await sb('commission_doklady', {
-      method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(row),
-    });
+    let ins;
+    try {
+      ins = await sb('commission_doklady', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(row) });
+    } catch (e) {
+      // Bez sloupce sup_register (SQL ještě nespuštěné) se doklad vystaví bez něj, ne vůbec.
+      if (!/sup_register/.test(String(e && e.message))) throw e;
+      delete row.sup_register;
+      ins = await sb('commission_doklady', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(row) });
+    }
     const id = (ins && ins[0] && ins[0].id) || null;
 
     // Poskytovatel se to má dozvědět stejně jako u dokladu za provizi.

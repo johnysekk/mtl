@@ -7,6 +7,7 @@
 import PDFDocument from 'pdfkit';
 import { DEJAVU_CZ } from './_dejavu-cz.js';
 import { itemLabelEn } from './_sell-kind.js';
+import { vatNoteFor } from './_vat.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -19,7 +20,7 @@ export function dokladPdfFromRow(dk, en) {
   return new Promise((resolve, reject) => {
     try {
       const fmt = (n) => { const v = Math.round((Number(n) || 0) * 100) / 100; return v.toLocaleString(en ? 'en-US' : 'cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
-      const d = (v) => { try { return v ? new Date(v).toLocaleDateString(en ? 'en-GB' : 'cs-CZ', { timeZone: 'Europe/Prague' }) : ''; } catch (e) { return ''; } };
+      const d = (v) => { try { return v ? new Date(v).toLocaleDateString(en ? 'en-GB' : 'cs-CZ', { timeZone: (dk && dk.sup_tz) || 'Europe/Prague' }) : ''; } catch (e) { return ''; } };
       const cur = dk.currency || 'CZK', sym = SYM(cur);
       const amt = (Number(dk.amount) || 0) / 100;
       const isPayer = !!dk.sup_vat_payer, rate = isPayer ? (dk.sup_vat_rate != null ? Number(dk.sup_vat_rate) : 21) : 0;
@@ -50,8 +51,11 @@ export function dokladPdfFromRow(dk, en) {
       if (isPayer) { row(en ? 'Net amount' : 'Základ daně', fmt(base) + ' ' + sym); row((en ? 'VAT ' : 'DPH ') + rate + '%', fmt(vat) + ' ' + sym); }
       else row(en ? 'VAT' : 'DPH', '0 ' + sym);
       row(en ? 'Total' : 'Celkem', fmt(amt) + ' ' + sym, true);
-      if (!isPayer) doc.moveDown(0.3).fontSize(10).fillColor('#444444').text(en ? 'The provider is not a VAT payer.' : 'Poskytovatel není plátcem DPH.', 50);
-      if (dk.vat_note) doc.moveDown(0.2).fontSize(9.5).fillColor('#444444').text(String(dk.vat_note), 50);
+      // Věta o režimu ze snímku má přednost (říká víc, např. přenesenou daň u neplátce);
+      // obecná věta jen tam, kde snímek režim nenese -- dřív se tiskly obě pod sebou.
+      const _vn = dk.vat_note ? vatNoteFor(dk.vat_mode, dk.vat_note, en ? 'en' : 'cs') : null;
+      if (!isPayer && !_vn) doc.moveDown(0.3).fontSize(10).fillColor('#444444').text(en ? 'The provider is not a VAT payer.' : 'Poskytovatel není plátcem DPH.', 50);
+      if (_vn) doc.moveDown(0.2).fontSize(9.5).fillColor('#444444').text(String(_vn), 50);
       doc.moveDown(1.2).fontSize(9).fillColor('#999999').text(en
         ? 'A valid proof of payment for your records. The seller of the service is the provider named above — MTL is the platform that facilitated the payment. Need a formal tax invoice? Request it from the provider. Generated via MTL.'
         : 'Platné potvrzení o zaplacení pro tvé účely. Prodejcem služby je výše uvedený poskytovatel — MTL je platforma, která platbu zprostředkovala. Potřebuješ formální daňový doklad (fakturu)? Vyžádej si ho u poskytovatele. Vygenerováno přes MTL.', 50, doc.y, { width: 495 });

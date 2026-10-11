@@ -17,6 +17,7 @@ import { DEJAVU_CZ } from './_dejavu-cz.js';
 import { isTestMode, minChargeFor } from './_config.js';
 import { introFreeFor } from './_rate.js';
 import { pragueMonth } from './_tz.js';
+import { vatMode, vatNoteFor } from './_vat.js';
 const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 const SB  = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -116,7 +117,7 @@ function periodLabelL(p, lang) {
 }
 const _L = {
   cs: { title:'Doklad o provizi MTL', issued:'Vystaveno', period:'Obdob\u00ed', supplier:'Dodavatel', customer:'Odb\u011bratel',
-        regno:'I\u010cO', vatid:'DI\u010c', phone:'Tel.', country:'St\u00e1t', inMtlOrg:'Organizace v MTL', inMtlGym:'Klub v MTL', inMtlCoach:'Kou\u010d v MTL',
+        regno:'I\u010cO', vatid:'DI\u010c', register:'Zaps\u00e1no v obchodn\u00edm rejst\u0159\u00edku', phone:'Tel.', country:'St\u00e1t', inMtlOrg:'Organizace v MTL', inMtlGym:'Klub v MTL', inMtlCoach:'Kou\u010d v MTL',
         method:'Forma platby', rate:'Sazba', count:'Plateb', volume:'Objem plateb', fee:'Provize', base:'Z\u00e1klad dan\u011b', vat:'DPH', notVat:'Dodavatel nen\u00ed pl\u00e1tcem DPH.',
         total:'Celkem', payments:'Zprost\u0159edkovan\u00fdch plateb', vol:'objem', noRequest:'Nejde o v\u00fdzvu k platb\u011b.',
         howBank:(m,d)=>'Provize z hotovosti, QR a plateb z banky ('+m+') byla str\u017eena z ulo\u017een\u00e9 platebn\u00ed karty dne '+d+'.',
@@ -129,7 +130,7 @@ const _L = {
         introTitle:'P\u0159ehled zprost\u0159edkovan\u00fdch plateb', introFee:'Provize MTL', introNone:(u)=>'Za toto obdob\u00ed nebyla \u00fa\u010dtov\u00e1na \u017e\u00e1dn\u00e1 provize'+(u?(' \u2014 zav\u00e1d\u011bc\u00ed obdob\u00ed plat\u00ed do '+u+'.'):'.')+' Nejde o da\u0148ov\u00fd doklad.',
         subjDoklad:'Doklad o provizi MTL', subjIntro:'P\u0159ehled zprost\u0159edkovan\u00fdch plateb' },
   en: { title:'MTL commission receipt', issued:'Issued', period:'Period', supplier:'Supplier', customer:'Customer',
-        regno:'Reg. number', vatid:'VAT ID', phone:'Phone', country:'Country', inMtlOrg:'Organisation in MTL', inMtlGym:'Club in MTL', inMtlCoach:'Coach in MTL',
+        regno:'Reg. number', vatid:'VAT ID', register:'Commercial register', phone:'Phone', country:'Country', inMtlOrg:'Organisation in MTL', inMtlGym:'Club in MTL', inMtlCoach:'Coach in MTL',
         method:'Payment form', rate:'Rate', count:'Payments', volume:'Volume', fee:'Commission', base:'Tax base', vat:'VAT', notVat:'The supplier is not a VAT payer.',
         total:'Total', payments:'Payments intermediated', vol:'volume', noRequest:'This is not a request for payment.',
         howBank:(m,d)=>'Commission on cash, QR and bank payments ('+m+') was charged to the saved payment card on '+d+'.',
@@ -224,13 +225,24 @@ function buildSnap(kind, entityId, ownerId, identity, period, cur, data, ME, buy
     sup_name: ME.name || 'Martial Training Lab s.r.o.', sup_ico: ME.ico || null, sup_dic: ME.dic || null, sup_address: ME.sidlo || null,
     sup_vat_payer: !!ME.vat_payer, sup_vat_rate: (ME.vat_rate != null ? ME.vat_rate : null),
     sup_phone: ME.contact_phone || null, sup_email: ME.contact_email || null,
+    // Zápis v obchodním rejstříku (spisová značka) -- údaj obchodní listiny podle § 435 OZ.
+    sup_register: (ME.register_entry && String(ME.register_entry).trim()) || null,
     // Stát dodavatele do snímku -- stejně jako u odběratele (MTL: platform_settings.home_country).
     sup_country: String(ME.home_country || ME.country || 'CZ').toUpperCase(),
     gym_id: null, coach_id: null, organization_id: null };
   snap[kind === 'gym' ? 'gym_id' : (kind === 'organization' ? 'organization_id' : 'coach_id')] = entityId;
+  // DAŇOVÝ REŽIM ze společné funkce (_vat.js) -- stejně jako doklad za EP. Dřív doklad o provizi
+  // znal jen "plátce / neplátce": plátce účtoval českou DPH i slovenskému klubu s DIČ a neplátce
+  // psal "není plátcem DPH" i tam, kde je identifikovanou osobou a daň odvede odběratel.
+  // Provize je služba podnikateli (každý poskytovatel má IČO) -> kind 'service'.
+  let V = vatMode(snap.sup_country, snap.cust_country, snap.cust_dic, { kind: 'service', supIsVatPayer: snap.sup_vat_payer });
+  // need_vat sem dojde jen s vypnutou bránou require_vat_foreign (jinak se doklad odloží).
+  // Pak doklad vznikne jako dřív, bez věty o režimu, kterou nejde doložit.
+  if (V.mode === 'need_vat') V = snap.sup_vat_payer ? { mode: 'domestic', note: null } : { mode: 'no_vat_supplier', note: 'Dodavatel není plátcem DPH.' };
+  snap.vat_mode = V.mode; snap.vat_note = V.note || null;
   return snap;
 }
-function _supLines(s, lang){ const T=_t(lang); return [s.sup_name, s.sup_address, s.sup_country ? _ccName(s.sup_country, lang) : '', s.sup_ico ? (T.regno+': ' + s.sup_ico) : '', s.sup_dic ? (T.vatid+': ' + s.sup_dic) : '', s.sup_phone ? (T.phone+': ' + s.sup_phone) : '', s.sup_email ? ('E-mail: ' + s.sup_email) : ''].filter(Boolean); }
+function _supLines(s, lang){ const T=_t(lang); return [s.sup_name, s.sup_address, s.sup_country ? _ccName(s.sup_country, lang) : '', s.sup_ico ? (T.regno+': ' + s.sup_ico) : '', s.sup_dic ? (T.vatid+': ' + s.sup_dic) : '', s.sup_register ? (T.register+': ' + s.sup_register) : '', s.sup_phone ? (T.phone+': ' + s.sup_phone) : '', s.sup_email ? ('E-mail: ' + s.sup_email) : ''].filter(Boolean); }
 function _custLines(s, lang){ const T=_t(lang); return [s.cust_name || '\u2014', s.cust_trade_name ? ((s.organization_id ? T.inMtlOrg : (s.gym_id ? T.inMtlGym : T.inMtlCoach)) + ': ' + s.cust_trade_name) : '', s.cust_address, s.cust_country ? _ccName(s.cust_country, lang) : '', s.cust_ico ? (T.regno+': ' + s.cust_ico) : '', s.cust_dic ? (T.vatid+': ' + s.cust_dic) : '', s.cust_phone ? (T.phone+': ' + s.cust_phone) : '', s.cust_email ? ('E-mail: ' + s.cust_email) : ''].filter(Boolean); }
 function _howCharged(s, lang){
   const T=_t(lang); const parts = [];
@@ -239,13 +251,17 @@ function _howCharged(s, lang){
   return parts.join(' ');
 }
 
+// DPH NA DOKLADU: rozpis základu a daně jen u domácího plnění plátce. Starší snímky bez
+// vat_mode se chovají jako dřív (plátce = rozpis). Jinak věta o režimu ze snímku.
+function _vatShow(s){ return !!s.sup_vat_payer && (!s.vat_mode || s.vat_mode === 'domestic'); }
+function _vatText(s, lang){ const T=_t(lang); return vatNoteFor(s.vat_mode, s.vat_note, lang) || (s.sup_vat_payer ? '' : T.notVat); }
 function dokladHtml(s, lang){
   const T=_t(lang); const items = s.line_items || []; const cur = s.currency;
   const th = 'padding:8px 10px;font-size:11px;color:#666;font-weight:700;';
   const rows = items.map(function(i){ return '<tr><td style="padding:7px 10px;border-bottom:1px solid #eee;">'+esc(_itemLabel(i, lang))+'</td><td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:center;">'+_pct(i.rate, lang)+'</td><td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:center;">'+(i.count||0)+'</td><td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:right;">'+_money(i.gross,cur,lang)+'</td><td style="padding:7px 10px;border-bottom:1px solid #eee;text-align:right;">'+_money(i.fee,cur,lang)+'</td></tr>'; }).join('');
   let vat = '';
-  if (s.sup_vat_payer) { const rate = s.sup_vat_rate || 21; const base = s.amount / (1 + rate / 100); vat = '<tr><td>'+T.base+'</td><td style="text-align:right;">'+_money(base,cur,lang)+'</td></tr><tr><td>'+T.vat+' '+rate+' %</td><td style="text-align:right;">'+_money(s.amount - base,cur,lang)+'</td></tr>'; }
-  else vat = '<tr><td colspan="2" style="font-size:11px;color:#666;padding-top:6px;">'+T.notVat+'</td></tr>';
+  if (_vatShow(s)) { const rate = s.sup_vat_rate || 21; const base = s.amount / (1 + rate / 100); vat = '<tr><td>'+T.base+'</td><td style="text-align:right;">'+_money(base,cur,lang)+'</td></tr><tr><td>'+T.vat+' '+rate+' %</td><td style="text-align:right;">'+_money(s.amount - base,cur,lang)+'</td></tr>'; }
+  else { const _vt=_vatText(s, lang); vat = _vt ? ('<tr><td colspan="2" style="font-size:11px;color:#666;padding-top:6px;">'+esc(_vt)+'</td></tr>') : ''; }
   const cnt = items.reduce((a, i) => a + (i.count || 0), 0), vol = items.reduce((a, i) => a + (i.gross || 0), 0);
   const col = function(lbl, lines){ return '<div style="flex:1;min-width:220px;font-size:13px;line-height:1.55;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:4px;">'+lbl+'</div>'+lines.map(function(l,ix){ return ix===0?('<b>'+esc(l)+'</b>'):esc(l); }).join('<br>')+'</div>'; };
   return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:680px;margin:0 auto;color:#1a1a1a;">'
@@ -303,10 +319,10 @@ function dokladPdf(s, lang){
         y = doc.y + 5; doc.moveTo(50,y).lineTo(545,y).strokeColor('#eeeeee').stroke(); y += 5;
       });
       doc.y = y + 4;
-      if (s.sup_vat_payer) {
+      if (_vatShow(s)) {
         const rate = s.sup_vat_rate || 21; const base = s.amount / (1 + rate / 100);
         doc.fontSize(10).fillColor('#555555').text(T.base + ': ' + _money(base, cur, lang) + '   \u00b7   ' + T.vat + ' ' + rate + ' %: ' + _money(s.amount - base, cur, lang), 50, doc.y, { width:495 });
-      } else doc.fontSize(9).fillColor('#777777').text(T.notVat, 50, doc.y, { width:495 });
+      } else { const _vt=_vatText(s, lang); if (_vt) doc.fontSize(9).fillColor('#777777').text(_vt, 50, doc.y, { width:495 }); }
       doc.moveDown(0.5);
       const yT = doc.y;
       doc.fontSize(13).fillColor('#111111').text(T.total, 50, yT, { width:230 });
@@ -551,7 +567,16 @@ export default async function handler(req, res) {
       }
 
       const snap = buildSnap(kind, entityId, ownerId, identity, period, cur, data, ME, buyer, _TESTMODE);
-      const _ins = await sb('commission_doklady', { method: 'POST', prefer: 'return=representation', body: JSON.stringify(snap) });
+      let _ins;
+      try { _ins = await sb('commission_doklady', { method: 'POST', prefer: 'return=representation', body: JSON.stringify(snap) }); }
+      catch (e) {
+        // Databáze bez nových sloupců (SQL ještě nespuštěné): doklad se vystaví bez nich,
+        // ne vůbec. Jiná chyba jde dál jako dřív.
+        if (!/sup_register|vat_mode|vat_note/.test(String(e && e.message))) throw e;
+        console.warn('[doklad] commission_doklady: chybi novy sloupec -- spust sql/doklad-register.sql');
+        delete snap.sup_register; delete snap.vat_mode; delete snap.vat_note;
+        _ins = await sb('commission_doklady', { method: 'POST', prefer: 'return=representation', body: JSON.stringify(snap) });
+      }
       const row = Array.isArray(_ins) ? _ins[0] : _ins;
       snap.id = row && row.id;
       issued++;

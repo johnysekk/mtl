@@ -29,7 +29,27 @@ export function vatMode(supCountry, custCountry, custDic, opts = {}) {
   const sc = String(supCountry || 'CZ').toUpperCase();
   const cc = String(custCountry || sc).toUpperCase();
 
-  if (!supIsVatPayer) return { mode: 'no_vat_supplier', note: 'Dodavatel není plátcem DPH.', rate: 0 };
+  // NEPLATCE NENI "BEZ DPH VSUDE". Ceska osoba povinna k dani, ktera neni platce, se pri
+  // sluzbe podnikateli v jinem state EU stava identifikovanou osobou (§ 6i ZDPH): neodvadi
+  // ceskou dan, ale dan odvede prijemce a plneni jde do souhrnneho hlaseni. Proto se u
+  // neplatce resi totez co u platce -- jen domaci plneni zustava bez DPH. Vyjimky stejne:
+  // osvobozeny clensky prispevek (na nej se § 6i nevztahuje) a vstup na akci (misto konani).
+  if (!supIsVatPayer) {
+    const noVat = { mode: 'no_vat_supplier', note: 'Dodavatel není plátcem DPH.', rate: 0 };
+    if (kind === 'membership' && opts.feeExempt) return noVat;
+    if (kind === 'event') return noVat;
+    if (cc === sc || !isEU(cc) || !isEU(sc)) return noVat;   // doma nebo mimo EU: bez DPH
+    if (custDic) {
+      return { mode: 'reverse_charge', rate: 0,
+        note: 'Dodavatel není plátcem DPH (identifikovaná osoba). Daň odvede příjemce plnění (reverse charge, čl. 196 směrnice 2006/112/ES).' };
+    }
+    if (kind === 'electronic') {
+      return { mode: 'oss_pending', rate: 0,
+        note: 'Odběratel bez DIČ v jiném státě EU — doklad prověří účetní.' };
+    }
+    return { mode: 'need_vat', rate: 0,
+      note: 'Odběratel v jiném státě EU bez DIČ — bez něj nelze určit daňový režim.' };
+  }
 
   // CLENSKY PRISPEVEK SPOLKU VLASTNIM CLENUM je podle § 61 písm. a) zákona o DPH plnění
   // osvobozené od daně bez nároku na odpočet. Pak se rezim neresi vubec: neni co prenaset,
@@ -90,4 +110,21 @@ export function needVatBeforePay(supCountry, custCountry, custDic, feeExempt) {
   if (cc === sc) return false;                         // domaci plneni
   if (!isEU(cc)) return false;                         // mimo EU se DIC neuplatnuje
   return !String(custDic || '').trim();
+}
+
+// TEXT POZNAMKY V JAZYCE DOKLADU. Snimek nese ceskou vetu (vat_note); anglicky doklad
+// ji podle rezimu prelozi. Kdyz rezim neni znamy (starsi snimky), vrati se puvodni veta.
+const _NOTE_EN = {
+  no_vat_supplier: 'The supplier is not a VAT payer.',
+  reverse_charge: 'VAT to be accounted for by the recipient (reverse charge, Art. 196 of Directive 2006/112/EC).',
+  reverse_charge_np: 'The supplier is not a VAT payer (identified person). VAT to be accounted for by the recipient (reverse charge, Art. 196 of Directive 2006/112/EC).',
+  oss_pending: 'Customer in another EU state without a VAT ID — under review by the accountant.',
+  need_vat: 'Customer in another EU state without a VAT ID — the VAT treatment cannot be determined.',
+  outside_eu: 'Supply outside the EU — no Czech VAT (Section 9 of the Czech VAT Act).',
+  exempt_membership: 'VAT exempt — supply in return for a membership fee to own members (Section 61(a) of the Czech VAT Act).',
+};
+export function vatNoteFor(mode, note, lang) {
+  if (lang !== 'en') return note || null;
+  if (mode === 'reverse_charge' && /identifikovan/.test(String(note || ''))) return _NOTE_EN.reverse_charge_np;
+  return _NOTE_EN[mode] || note || null;
 }
