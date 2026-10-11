@@ -1,6 +1,7 @@
 import Stripe from 'stripe';
 import { feeRefundableForPI } from './_fee-window.js';
 import { prorata } from './_prorata.js';
+import { subMail } from './_sub-mail.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '');
@@ -51,6 +52,7 @@ export default async function handler(req, res) {
     const me = await whoami(req);
     if (!me) return res.status(401).json({ error: 'Nejsi přihlášený' });
     const memberOp = String(immediate) !== '1';   // ke konci období nebo obnovení
+    let mtlSub = null;                             // { userId } EP / { orgId } dodavatel -- kvůli e-mailu
     if (gymAccount) {
       if (!(await isPayee(me, gymAccount))) {
         const own = (await sb(`gym_memberships?stripe_subscription=eq.${q(subscriptionId)}&or=(student_id.eq.${q(me)},paid_by.eq.${q(me)})&select=id&limit=1`)) || [];
@@ -61,6 +63,7 @@ export default async function handler(req, res) {
       const ep = (await sb(`profiles?id=eq.${q(me)}&partner_sub=eq.${q(subscriptionId)}&select=id&limit=1`)) || [];
       const sup = ep.length ? [] : ((await sb(`organizations?owner_id=eq.${q(me)}&supplier_sub=eq.${q(subscriptionId)}&select=id&limit=1`)) || []);
       if (!ep.length && !sup.length) return res.status(403).json({ error: 'Tohle předplatné měnit nemůžeš' });
+      mtlSub = ep.length ? { userId: me } : { orgId: sup[0].id };
     }
     const opts = gymAccount ? { stripeAccount: gymAccount } : undefined;
 
@@ -103,11 +106,16 @@ export default async function handler(req, res) {
       sub = await stripe.subscriptions.update(subscriptionId, { cancel_at_period_end: true }, opts);
     }
 
+    // Novější verze API Stripe drží konec období u položky předplatného, ne u předplatného.
+    const _pe = sub.current_period_end || (sub.items && sub.items.data && sub.items.data[0] && sub.items.data[0].current_period_end) || null;
+    // EP / dodavatel: potvrzení e-mailem (zrušení s datem konce, nebo obnovení). Konec samotný
+    // hlásí webhook (customer.subscription.deleted).
+    if (mtlSub && String(immediate) !== '1') await subMail(mtlSub, String(resume) === '1' ? 'resume' : 'cancel', _pe);
     res.status(200).json({
       ok: true,
       status: sub.status,
       cancel_at_period_end: sub.cancel_at_period_end || false,
-      current_period_end: sub.current_period_end || null,
+      current_period_end: _pe,
       refunded, refundId, currency, used_days: usedDays, total_days: totalDays,
     });
   } catch (err) {

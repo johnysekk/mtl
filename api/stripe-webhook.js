@@ -10,6 +10,7 @@
 
 import { issueReceipts, receiptMailHtml, receiptTitle, docNo } from './_receipt.js';
 import Stripe from 'stripe';
+import { subMail } from './_sub-mail.js';
 import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil, onlineRate as _mtlOnline } from './_rate.js';
 import { sendOrderMailForPi, withdrawalText as _wdText } from './_order-mail.js';
 import { dokladPdfFor } from './_doklad-pdf.js';
@@ -1228,6 +1229,7 @@ export default async function handler(req, res) {
           if (o.owner_id) await sbPost('notifications', { user_id: o.owner_id, type: 'system', read: false,
             data: JSON.stringify({ kind: 'supplier_ended', org_id: o.id, org_name: o.name || '' }),
             message: '🧰 Předplatné profilu dodavatele ' + (o.name || '') + ' skončilo — profil se klubům přestal zobrazovat. Údaje zůstávají; po novém zaplacení se profil ukáže zase.' });
+          await subMail({ orgId: o.id }, 'ended');
         }
       } catch (e) { console.error('supplier ended', e.message); }
       const rows = await sbGet(`profiles?partner_sub=eq.${encodeURIComponent(sub.id)}&select=id`);
@@ -1235,6 +1237,7 @@ export default async function handler(req, res) {
       if (uid) {
         await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: false, partner_sub: null });
         await rerateGymMemberships(uid, 5); // zpět na 5 % od příští faktury
+        await subMail({ userId: uid }, 'ended');
         await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_ended' }), message: '⭐ Teď už nejsi Exclusive MTL Partner. Děkujeme za tvoji přízeň! Provize se vrátila na standard 3,5 % (dle MTL Ligy případně 3 % nebo 2 %).' });
       }
     } else if (event.type === 'charge.dispute.created') {
