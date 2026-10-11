@@ -38,6 +38,10 @@ const sb = async (path, opts = {}) => {
 // Rezim urcuje spolecna funkce v _vat.js -- stejna pro doklad za EP, za clensky poplatek
 // federace i za listek. Drive tahle logika zila jen tady a doklad organizace zadny rezim
 // nenesl. Predplatne EP je elektronicky poskytovana sluzba, proto kind 'electronic'.
+function _amt(v, cur, lang) {
+  try { return Number(v).toLocaleString(lang === 'en' ? 'en-GB' : 'cs-CZ', { minimumFractionDigits: 0, maximumFractionDigits: 2 }) + ' ' + (String(cur).toUpperCase() === 'CZK' ? 'Kč' : String(cur).toUpperCase()); }
+  catch (e) { return v + ' ' + cur; }
+}
 function _vatForEp(supCountry, custCountry, custDic, supIsVatPayer) {
   return vatMode(supCountry, custCountry, custDic, { kind: 'electronic', supIsVatPayer });
 }
@@ -104,17 +108,21 @@ export default async function handler(req, res) {
 
     const period = String(b.period_start || new Date().toISOString()).slice(0, 7);
     const label = 'Exclusive MTL Partner — předplatné ' + period;
+    // ČÁSTKA V HALÉŘÍCH/CENTECH, stejně jako každý jiný řádek commission_doklady (doklad o
+    // provizi). Webhook posílá celé koruny (amount_paid/100); dřív se uložily tak, jak přišly,
+    // a appka (dělí stovkou) by ukázala 5,00 Kč místo 500 Kč.
+    const amountMinor = Math.round(amount * 100);
 
     const row = {
       owner_id: uid, coach_id: uid,
-      period_month: period, currency: cur, amount,
+      period_month: period, currency: cur, amount: amountMinor,
       pi_id: b.invoice_id || null,
       kind: 'partner_sub',
       status: (V.mode === 'oss_pending' ? 'review' : 'issued'),   // OSS ruční kontrola
       charged_at: new Date().toISOString(),
       issued_at: new Date().toISOString(),
       test_mode: !!b.test_mode,
-      line_items: JSON.stringify([{ label, amount, currency: cur,
+      line_items: JSON.stringify([{ label, amount: amountMinor, currency: cur,
         period_start: b.period_start || null, period_end: b.period_end || null }]),
       // odběratel
       cust_name: pr.legal_name || pr.name || '—',
@@ -147,8 +155,11 @@ export default async function handler(req, res) {
     try {
       await sb('notifications', { method: 'POST', headers: { Prefer: 'return=minimal' },
         body: JSON.stringify({ user_id: uid, type: 'system', read: false,
-          message: '🧾 Doklad za Exclusive MTL Partner (' + period + ') je připravený',
-          data: JSON.stringify({ kind: 'ep_doklad', doklad_id: id, period, amount, currency: cur }) }) });
+          // kind 'doklad_unified' -- stejná notifikace jako u dokladu o provizi: proklik otevře
+          // rovnou tenhle doklad (showCommissionDoklad). Dřív 'ep_doklad', na který appka neuměla kliknout.
+          message: '🧾 Exclusive MTL Partner za ' + period + ': ' + _amt(amount, cur, 'cs') + ' uhrazeno kartou. Doklad je vystavený.',
+          data: JSON.stringify({ kind: 'doklad_unified', doklad_id: id, coach_id: uid, period, amount: amountMinor, currency: cur,
+            msg_en: '🧾 Exclusive MTL Partner for ' + period + ': ' + _amt(amount, cur, 'en') + ' paid by card. The receipt has been issued.' }) }) });
     } catch (e) {}
 
     return res.status(200).json({ ok: true, id, vat_mode: V.mode });

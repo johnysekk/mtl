@@ -23,6 +23,10 @@ export const isEU = (cc) => EU.indexOf(String(cc || '').toUpperCase()) >= 0;
 //                 Zadne DIC, zadna prenesena povinnost -- proto se jen prevezme rezim
 //                 poradatele. Kdo pora akci v jine zemi, resi tamni registraci sam; appka
 //                 mu do toho nemluvi a hlavne mu doklad nezmeni na neco, co neplati.
+// PŘENESENÁ DAŇ. „Daň odvede zákazník" je zákonem předepsaná věta (§ 29 ZDPH, čl. 226
+// bod 11a směrnice: „reverse charge"); druhá půlka jen lidsky říká, co to pro odběratele
+// znamená -- trenér ze Slovenska jinak neví, co s tím.
+const RC_NOTE = 'Daň odvede zákazník (reverse charge) — DPH přizná odběratel ve svém státě, dodavatel ji neúčtuje.';
 export function vatMode(supCountry, custCountry, custDic, opts = {}) {
   const kind = String(opts.kind || 'service');
   const supIsVatPayer = !!opts.supIsVatPayer;
@@ -41,7 +45,7 @@ export function vatMode(supCountry, custCountry, custDic, opts = {}) {
     if (cc === sc || !isEU(cc) || !isEU(sc)) return noVat;   // doma nebo mimo EU: bez DPH
     if (custDic) {
       return { mode: 'reverse_charge', rate: 0,
-        note: 'Dodavatel není plátcem DPH (identifikovaná osoba). Daň odvede příjemce plnění (reverse charge, čl. 196 směrnice 2006/112/ES).' };
+        note: 'Dodavatel není plátcem DPH. ' + RC_NOTE };
     }
     if (kind === 'electronic') {
       return { mode: 'oss_pending', rate: 0,
@@ -72,7 +76,7 @@ export function vatMode(supCountry, custCountry, custDic, opts = {}) {
   if (isEU(cc)) {
     if (custDic) {
       return { mode: 'reverse_charge', rate: 0,
-        note: 'Daň odvede příjemce plnění (reverse charge, čl. 196 směrnice 2006/112/ES).' };
+        note: RC_NOTE };
     }
     if (kind === 'electronic') {
       return { mode: 'oss_pending', rate: 0,
@@ -116,8 +120,8 @@ export function needVatBeforePay(supCountry, custCountry, custDic, feeExempt) {
 // ji podle rezimu prelozi. Kdyz rezim neni znamy (starsi snimky), vrati se puvodni veta.
 const _NOTE_EN = {
   no_vat_supplier: 'The supplier is not a VAT payer.',
-  reverse_charge: 'VAT to be accounted for by the recipient (reverse charge, Art. 196 of Directive 2006/112/EC).',
-  reverse_charge_np: 'The supplier is not a VAT payer (identified person). VAT to be accounted for by the recipient (reverse charge, Art. 196 of Directive 2006/112/EC).',
+  reverse_charge: 'Reverse charge — VAT is accounted for by the customer in their own country; the supplier does not charge it.',
+  reverse_charge_np: 'The supplier is not a VAT payer. Reverse charge — VAT is accounted for by the customer in their own country; the supplier does not charge it.',
   oss_pending: 'Customer in another EU state without a VAT ID — under review by the accountant.',
   need_vat: 'Customer in another EU state without a VAT ID — the VAT treatment cannot be determined.',
   outside_eu: 'Supply outside the EU — no Czech VAT (Section 9 of the Czech VAT Act).',
@@ -125,6 +129,6 @@ const _NOTE_EN = {
 };
 export function vatNoteFor(mode, note, lang) {
   if (lang !== 'en') return note || null;
-  if (mode === 'reverse_charge' && /identifikovan/.test(String(note || ''))) return _NOTE_EN.reverse_charge_np;
+  if (mode === 'reverse_charge' && /není plátcem/.test(String(note || ''))) return _NOTE_EN.reverse_charge_np;
   return _NOTE_EN[mode] || note || null;
 }
