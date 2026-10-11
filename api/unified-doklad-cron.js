@@ -291,6 +291,8 @@ function _dueText(s, en){
   const r = s.due_reason || (s.due_date ? 'failed' : 'below_min');
   if (r === 'failed') return en ? 'The remaining amount could not be charged to the saved card. We will try again automatically; you can also pay it right away in the app (Payments & commission) or via the Pay now button in the e-mail.'
                                 : 'Zbývající částku se nepodařilo strhnout z uložené karty. Zkusíme to znovu automaticky; uhradit ji můžeš i hned v appce (Platby a provize) nebo tlačítkem Zaplatit hned v e-mailu.';
+  if (r === 'not_charged') return en ? 'The remaining amount has not been charged yet. We will charge it to the saved card automatically; you can also pay it right away in the app (Payments & commission) or via the Pay now button in the e-mail.'
+                                     : 'Zbývající částka zatím nebyla stržena. Strhneme ji z uložené karty automaticky; uhradit ji můžeš i hned v appce (Platby a provize) nebo tlačítkem Zaplatit hned v e-mailu.';
   if (r === 'no_card') return en ? 'There is no saved payment card to charge the remaining amount. Add one in Payments & commission, or pay right away via the Pay now button in the e-mail.'
                                  : 'Zbývající částku nebylo z čeho strhnout — chybí uložená platební karta. Doplň ji v Platby a provize, nebo zaplať hned tlačítkem Zaplatit hned v e-mailu.';
   return en ? 'The remaining amount is below the minimum for a card charge; it will be charged to the saved card together with the next commission. There is nothing to pay manually.'
@@ -524,9 +526,14 @@ export default async function handler(req, res) {
     //   - zbytek pod minimem karty                       -> faktura, zbytek „strhne se s další provizí"
     //   - 'pending' nad minimum A karta je               -> commission-cron se k subjektu ještě
     //     nedostal (běží dřív, ale může běžet déle nebo vynechat běh) -> počká se na příští běh.
+    //   - pozastavený účet (commission-cron ho nestrhává)  -> faktura s částkou „K úhradě"
+    // POJISTKA: 15. den následujícího měsíce se faktura vystaví VŽDY (lhůta pro fakturu do EU),
+    // i kdyby stržení z jakéhokoli neznámého důvodu neproběhlo -- zbytek jako „K úhradě".
     // Pořadí cronů ani letní/zimní čas tak o ničem nerozhodují. Pozdější úhrada fakturu nemění,
     // vystaví se k ní „Doklad o uhrazené provizi MTL" (_receipt.js).
-    const CHARGE_DAY = 6;
+    const CHARGE_DAY = 6, LAST_DAY = 15;
+    const _pastLast = !DAILY && /^\d{4}-\d{2}$/.test(String(period))
+      && pragueDate() >= (shiftMonth(period, 1) + '-' + String(LAST_DAY).padStart(2, '0'));
     const _pastCutoff = !DAILY && /^\d{4}-\d{2}$/.test(String(period))
       && pragueDate() >= (shiftMonth(period, 1) + '-' + String(CHARGE_DAY).padStart(2, '0'));
     const _waiting = {};   // 'kind:id[|payout]:mena' -> { pending, failed }
@@ -551,8 +558,9 @@ export default async function handler(req, res) {
         const tbl = { gym: 'gyms', coach: 'profiles', organization: 'organizations' };
         for (const kind of Object.keys(ids)) {
           const list = [...ids[kind]]; if (!list.length) continue;
-          const rows = await sb(`${tbl[kind]}?id=in.(${list.join(',')})&select=id,commission_card_pm,commission_failed_at`) || [];
-          rows.forEach(x => { _ent[kind + ':' + x.id] = { card: !!x.commission_card_pm, failed_at: x.commission_failed_at || null }; });
+          const rows = await sb(`${tbl[kind]}?id=in.(${list.join(',')})&select=id,commission_card_pm,commission_card_customer,commission_failed_at,account_suspended`) || [];
+          // Karta = obojí, co commission-cron ke stržení potřebuje (zákazník i platební metoda).
+          rows.forEach(x => { _ent[kind + ':' + x.id] = { card: !!(x.commission_card_pm && x.commission_card_customer), failed_at: x.commission_failed_at || null, suspended: !!x.account_suspended }; });
         }
       } catch (e) { console.error('[doklad] kontrola nestržených:', e.message); }
     }
@@ -563,14 +571,19 @@ export default async function handler(req, res) {
       if (!w) return false;
       const min = _minFor(cur);
       if (!_pastCutoff) return (w.pending + w.failed) >= min;
+      if (_pastLast) return false;                       // pojistka: 15. den už se nečeká
       const e = _ent[kind + ':' + String(entityId || '').replace(/\|payout$/, '')] || {};
+      if (e.suspended) return false;                     // pozastavený účet se nestrhává
       return w.pending >= min && !!e.card;
     };
     // Proč zůstala část faktury nestržená -- jde do faktury (due_reason) a řídí její text.
-    const _dueReason = (kind, entityId) => {
+    const _dueReason = (kind, entityId, wkey, cur) => {
       const e = _ent[kind + ':' + String(entityId || '').replace(/\|payout$/, '')] || {};
-      if (e.failed_at) return 'failed';
+      if (e.failed_at || e.suspended) return 'failed';   // pozastavení vzniká z neuhrazené provize
       if (!e.card) return 'no_card';
+      // Nestrženo nad minimum, karta je, selhání není: stržení neproběhlo (pojistka 15. dne).
+      const w = (_waiting[wkey] && _waiting[wkey].pending) || 0;
+      if (w >= _minFor(cur) && !e.suspended) return 'not_charged';
       return 'below_min';
     };
 
@@ -683,10 +696,10 @@ export default async function handler(req, res) {
       // (14 dní od prvního selhání, jako v commission-cron). Chybí karta -> splatnost 14 dní od
       // vystavení. Pod minimem karty -> bez splatnosti, strhne se s další provizí.
       if (snap.due_amount > 0) {
-        snap.due_reason = _dueReason(kind, entityId);
+        snap.due_reason = _dueReason(kind, entityId, kind + ':' + entityId + (_payout ? '|payout' : '') + ':' + String(cur || 'czk').toLowerCase(), cur);
         const _e = _ent[kind + ':' + entityId] || {};
         if (snap.due_reason === 'failed' && _e.failed_at) snap.due_date = pragueDate(new Date(Date.parse(_e.failed_at) + 14 * 86400000));
-        else if (snap.due_reason === 'no_card') snap.due_date = pragueDate(new Date(Date.now() + 14 * 86400000));
+        else if (snap.due_reason === 'no_card' || snap.due_reason === 'not_charged' || (snap.due_reason === 'failed' && !_e.failed_at)) snap.due_date = pragueDate(new Date(Date.now() + 14 * 86400000));
       }
       let _ins;
       try { _ins = await sb('commission_doklady', { method: 'POST', prefer: 'return=representation', body: JSON.stringify(snap) }); }
@@ -726,7 +739,7 @@ export default async function handler(req, res) {
 
       // Neuhrazená faktura: v e-mailu tlačítko „Zaplatit hned" (stejný odkaz jako ve výzvě
       // z commission-cron). Jen do těla mailu -- do snímku se neukládá.
-      if (snap.due_amount > 0 && (snap.due_reason === 'failed' || snap.due_reason === 'no_card')) {
+      if (snap.due_amount > 0 && snap.due_reason !== 'below_min') {
         try { snap._payLink = `${(process.env.APP_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '')}/pay-commission?token=${makePayToken(kind === 'organization' ? 'org' : kind, entityId, pragueMonth())}`; } catch (e) {}
       }
       // E-MAIL na fakturační adresu ze snímku -- stejnou, jaká je na dokladu.
