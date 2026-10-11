@@ -673,7 +673,7 @@ const _MISS = {
   terms: ['provozní řád a pravidla klubu', 'club rules'], statutes: ['stanovy (u spolku povinné)', 'statutes (required for a non-profit)'],
 };
 
-async function _paynowNotify(m, s) {
+async function _paynowNotify(m, s, settled) {
   const kind = m.owner_kind, id = String(m.owner_id);
   let ownerId = null, gym = null, name = '';
   if (kind === 'gym') {
@@ -707,11 +707,17 @@ async function _paynowNotify(m, s) {
     vis = 'Organizace je zase aktivní.'; visEn = 'The organization is active again.';
   }
   const who = name ? (' (' + name + ')') : '';
-  const msg = `\u2705 Provize MTL uhrazena${who}: ${money('cs')}. ${vis} Doklad o provizi ti přijde e-mailem, jakmile bude vystavený.`;
-  const msgEn = `\u2705 MTL commission paid${who}: ${money('en')}. ${visEn} The commission receipt will arrive by e-mail once it is issued.`;
+  // Faktura už existovala jako neuhrazená -> říct, že je tím uhrazená, a prokliknout na ni.
+  // Jinak faktura teprve vznikne (_paynowDoklad) a přijde e-mailem.
+  const _st = Array.isArray(settled) ? settled : [];
+  const _nos = _st.map((d) => 'MTL-' + d.id).join(', ');
+  const msg = `\u2705 Provize MTL uhrazena${who}: ${money('cs')}. ${vis} ` + (_st.length ? `Faktura ${_nos} je tím uhrazená.` : 'Faktura o provizi ti přijde e-mailem, jakmile bude vystavená.');
+  const msgEn = `\u2705 MTL commission paid${who}: ${money('en')}. ${visEn} ` + (_st.length ? `Invoice ${_nos} is now paid.` : 'The commission invoice will arrive by e-mail once it is issued.');
   await sbPost('notifications', {
     user_id: ownerId, type: 'system', read: false,
-    data: JSON.stringify({ kind: 'commission_cleared', gym_id: kind === 'gym' ? id : null, coach_id: kind === 'coach' ? id : null,
+    // S uhrazenou fakturou vede proklik rovnou na ni (doklad_unified + doklad_id).
+    data: JSON.stringify({ kind: _st.length ? 'doklad_unified' : 'commission_cleared', doklad_id: _st.length ? _st[0].id : null,
+      gym_id: kind === 'gym' ? id : null, coach_id: kind === 'coach' ? id : null,
       organization_id: kind === 'org' ? id : null, msg_cs: msg, msg_en: msgEn }),
     message: en ? msgEn : msg,
   });
@@ -785,11 +791,21 @@ export default async function handler(req, res) {
             const _rows = (await sbGet(`transactions?${_flt}&select=commission_month`)) || [];
             await sbPatch('transactions', _flt,
               { commission_status: 'collected', commission_collected_at: new Date().toISOString() });
+            // Faktury vystavené jako neuhrazené (po uzávěrce 13. dne) jsou tímhle uhrazené.
+            let _settled = [];
+            if (_rows.length) {
+              try {
+                const _s = await sbPatch('commission_doklady',
+                  `${col}=eq.${encodeURIComponent(m.owner_id)}&kind=eq.unified&due_amount=gt.0&settled_at=is.null` + (cur ? `&currency=ilike.${encodeURIComponent(cur)}` : ''),
+                  { settled_at: new Date().toISOString() }, 'return=representation');
+                _settled = Array.isArray(_s) ? _s : [];
+              } catch (e) { console.error('[commission_paynow] settle', e && e.message); }
+            }
             const tbl = ({ gym: 'gyms', coach: 'profiles', org: 'organizations' })[m.owner_kind];
             await sbPatch(tbl, `id=eq.${encodeURIComponent(m.owner_id)}`,
               { commission_failed_at: null, commission_next_retry: null, account_suspended: false, cash_blocked: false });
             if (_rows.length) {
-              try { await _paynowNotify(m, s); } catch (e) { console.error('[commission_paynow] notify', e && e.message); }
+              try { await _paynowNotify(m, s, _settled); } catch (e) { console.error('[commission_paynow] notify', e && e.message); }
               try { await _paynowDoklad(m, _rows, _curM); } catch (e) { console.error('[commission_paynow] doklad', e && e.message); }
             }
           }
@@ -1266,9 +1282,9 @@ async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, custo
     if (!transactionId && !paymentIntent) return null;
     let sup = null;
     if (gymId) {
-      sup = (await sbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,owner_id`))[0] || null;
+      sup = (await sbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,owner_id,timezone`))[0] || null;
     } else if (coachId) {
-      sup = (await sbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal`))[0] || null;
+      sup = (await sbGet(`profiles?id=eq.${encodeURIComponent(coachId)}&select=legal_name,name,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal,timezone`))[0] || null;
     }
     if (!sup) return null;
     const ico = String(sup.tax_id || '').replace(/\s/g, '');
@@ -1310,6 +1326,7 @@ async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, custo
         sup_name: sup.legal_name || sup.name || null,
         sup_ico: ico, sup_dic: sup.vat_id || null, sup_address: _billAddr(sup) || null,
         sup_vat_payer: !!sup.vat_payer, sup_vat_rate: (sup.vat_rate != null ? sup.vat_rate : null),
+        sup_tz: sup.timezone || null,   // pásmo dodavatele (datum dokladu v jeho místním čase)
         cust_name: customerName || null, cust_email: customerEmail || null,
         participant_name: ((participantName && String(participantName).trim() &&
           String(participantName).trim() !== String(customerName || '').trim()) ? String(participantName).trim() : null),

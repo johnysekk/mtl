@@ -27,7 +27,7 @@ import { minChargeFor } from './_config.js';
 const APP = process.env.APP_URL || 'https://app.martialtraininglab.com';
 
 import { isTestMode } from './_config.js';
-import { pragueMonth } from './_tz.js';
+import { pragueMonth, pragueDate } from './_tz.js';
 const SB  = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const GRACE_DAYS = 14;
@@ -96,6 +96,32 @@ const czDate = (iso) => { try { const d = new Date(iso); return d.getUTCDate() +
 const notify = (user_id, kind, message, extra = {}) =>
   sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id, type: 'system', read: false, data: JSON.stringify({ kind, ...extra }), message }) });
 function prevMonth(ym) { const [y, m] = ym.split('-').map(Number); return new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 7); }
+
+// FAKTURA VYSTAVENÁ JAKO NEUHRAZENÁ (stržení neprošlo do uzávěrky 13. dne, viz
+// unified-doklad-cron) se po úspěšném stržení označí jako uhrazená (settled_at) a majitel
+// dostane zprávu s proklikem rovnou na tu fakturu. Stržení bere všechny uzavřené měsíce dané
+// měny, takže tím je uhrazená každá taková faktura subjektu v té měně. Obsah faktury (snímek)
+// se nemění -- jen se k ní připíše datum úhrady.
+async function settleInvoices(col, id, cur, ownerId) {
+  let rows = [];
+  try {
+    rows = await sb(`commission_doklady?${col}=eq.${encodeURIComponent(id)}&kind=eq.unified&due_amount=gt.0&settled_at=is.null&currency=ilike.${encodeURIComponent(cur)}`,
+      { method: 'PATCH', prefer: 'return=representation', body: JSON.stringify({ settled_at: new Date().toISOString() }) }) || [];
+  } catch (e) { console.error('[commission] settle', col, id, e.message); return []; }
+  if (!ownerId) return rows;
+  for (const d of rows) {
+    const amt = (Number(d.due_amount || 0) / 100).toFixed(2);
+    const C = String(d.currency || cur).toUpperCase();
+    const cs = amt.replace('.', ',') + ' ' + (C === 'CZK' ? 'Kč' : C), en = amt + ' ' + C;
+    try {
+      await notify(ownerId, 'doklad_unified',
+        `✅ Faktura MTL-${d.id} (provize za ${d.period_month}) je uhrazená — zbývajících ${cs} jsme strhli z uložené karty.`,
+        { doklad_id: d.id, period: d.period_month, currency: C, gym_id: d.gym_id || null, coach_id: d.coach_id || null, organization_id: d.organization_id || null,
+          msg_en: `✅ Invoice MTL-${d.id} (commission for ${d.period_month}) is paid — the remaining ${en} was charged to your saved card.` });
+    } catch (e) {}
+  }
+  return rows;
+}
 
 // Odkaz „Zaplatit hned" do e-mailu o selhání. Vede na /pay-commission?token=..., kde si
 // poskytovatel dluh uhradí kartou, aniž by čekal na další pokus cronu.
@@ -175,6 +201,91 @@ function payDueBlock(en, sumsByCur, ym, suspendAt, retryAt) {
       : `Rozpad jednotlivých plateb najdeš v appce v Platby a provize. Doklad vystavíme po úhradě. Pokud je částka podle tebe špatná, odpověz na tento e-mail nebo napiš na ${MTL_ID.email} ještě před uvedeným datem — do vyřešení pozastavení odložíme.`)
     + '</p>';
 }
+
+// ═══ UPOZORNĚNÍ PŘED STRŽENÍM ═══════════════════════════════════════════════════════════════
+// Dva dny před stržením (4. den v měsíci, stržení je 6.) dostane každý, komu se bude strhávat
+// naakumulovaná provize z hotovosti / QR / převodu, zprávu v appce i e-mail: kdy, kolik, z jaké
+// karty a za který subjekt (klub / kouč / organizace). Bez toho se mu jednou měsíčně strhne
+// z karty částka, o které předem nevěděl -- a reklamace u banky je pak první, co ho napadne.
+// Počítá se stejně jako stržení: stejné filtry na transakce, stejné vlastnictví, stejné minimum.
+// Řádky 'failed' se nepočítají -- o těch už člověk ví z výzvy k úhradě a běží na nich opakování.
+const PRE_NOTICE_DAY = 4, CHARGE_DAY = 6;
+const belowMinStatic = (amount, cur) => amount < minChargeFor(cur);
+const _MON_CS = ['leden','únor','březen','duben','květen','červen','červenec','srpen','září','říjen','listopad','prosinec'];
+const _MON_EN = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const _MON_CS_GEN = ['ledna','února','března','dubna','května','června','července','srpna','září','října','listopadu','prosince'];
+const _monGen = (ym) => { const [y, m] = String(ym).split('-').map(Number); return _MON_CS_GEN[m - 1] + ' ' + y; };
+const _monL = (ym, en) => { const [y, m] = String(ym).split('-').map(Number); return (en ? _MON_EN : _MON_CS)[m - 1] + ' ' + y; };
+const _amtL = (minor, cur, en) => { const C = String(cur).toUpperCase(); const v = (Number(minor) / 100).toLocaleString(en ? 'en-GB' : 'cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); return v + ' ' + (C === 'CZK' && !en ? 'Kč' : C); };
+async function preChargeNotice(curMonth, isDaily) {
+  const out = { sent: 0 };
+  const rows = await sb(`transactions?select=gym_id,coach_id,organization_id,paid_to,currency,mtl_fee,mtl_fee_refunded,commission_month&payment_method=in.(cash,qr,pis)&commission_status=eq.pending&commission_month=lt.${curMonth}&mtl_fee=gt.0&limit=20000`) || [];
+  const acc = {};   // 'gym:<id>' -> { cur -> { sum, months:Set } }
+  const put = (key, t) => {
+    const net = (Number(t.mtl_fee) || 0) - (Number(t.mtl_fee_refunded) || 0); if (net <= 0) return;
+    const cur = String(t.currency || 'czk').toLowerCase();
+    const a = (acc[key] = acc[key] || {}); const b = (a[cur] = a[cur] || { sum: 0, months: new Set() });
+    b.sum += net; b.months.add(String(t.commission_month || ''));
+  };
+  for (const t of rows) {
+    // STEJNÉ VLASTNICTVÍ JAKO PŘI STRŽENÍ (viz sběr byGym / byCoach / byOrg níž).
+    if (t.gym_id && (!t.paid_to || t.paid_to === 'gym') && !isDaily('gym', t.gym_id)) put('gym:' + t.gym_id, t);
+    if (t.paid_to === 'coach' && t.coach_id && !isDaily('coach', t.coach_id)) put('coach:' + t.coach_id, t);
+    if (t.organization_id && (!t.paid_to || t.paid_to === 'organization') && !isDaily('org', t.organization_id)) put('org:' + t.organization_id, t);
+  }
+  const ids = { gym: [], coach: [], org: [] };
+  Object.keys(acc).forEach((k) => { const [kind, id] = k.split(':'); ids[kind].push(id); });
+  const load = async (table, list, cols) => {
+    if (!list.length) return {};
+    let r = null;
+    try { r = await sb(`${table}?id=in.(${list.join(',')})&select=${cols},commission_card_pm,commission_card_last4,commission_card_brand`); }
+    catch (e) { r = await sb(`${table}?id=in.(${list.join(',')})&select=${cols},commission_card_pm`); }
+    const m = {}; (r || []).forEach((x) => { m[x.id] = x; }); return m;
+  };
+  const G = await load('gyms', ids.gym, 'id,name,legal_name,owner_id');
+  const P = await load('profiles', ids.coach, 'id,name,legal_name');
+  const O = await load('organizations', ids.org, 'id,name,legal_name,owner_id');
+  const ym = curMonth, [Y, M] = ym.split('-').map(Number);
+  const dCs = CHARGE_DAY + '. ' + M + '. ' + Y, dEn = CHARGE_DAY + ' ' + _MON_EN[M - 1] + ' ' + Y;
+  const prev = prevMonth(curMonth);
+  for (const key of Object.keys(acc)) {
+    const [kind, id] = key.split(':');
+    const e = kind === 'gym' ? G[id] : (kind === 'coach' ? P[id] : O[id]);
+    if (!e) continue;
+    const ownerId = kind === 'coach' ? id : e.owner_id;
+    if (!ownerId) continue;
+    const legal = (e.legal_name && e.legal_name !== e.name) ? (' (' + e.legal_name + ')') : '';
+    const whoCs = kind === 'gym' ? ('u klubu ' + (e.name || '') + legal) : (kind === 'org' ? ('u organizace ' + (e.name || '') + legal) : ('u tvého profilu kouče' + (e.legal_name ? (' (' + e.legal_name + ')') : '')));
+    const whoEn = kind === 'gym' ? ('for the club ' + (e.name || '') + legal) : (kind === 'org' ? ('for the organisation ' + (e.name || '') + legal) : ('for your coach profile' + (e.legal_name ? (' (' + e.legal_name + ')') : '')));
+    const card = e.commission_card_pm ? (e.commission_card_last4 ? ('•••• ' + e.commission_card_last4) : '') : null;
+    for (const cur of Object.keys(acc[key])) {
+      const b = acc[key][cur];
+      const amount = Math.round(b.sum);
+      if (belowMinStatic(amount, cur)) continue;   // pod minimem karty se nestrhává -> není o čem psát
+      // Jeden měsíc -> „za říjen 2026"; víc měsíců (starší nestržené) -> „za období do konce října 2026".
+      const _ms = [...b.months].filter(Boolean).sort(); const _one = _ms.length === 1 ? _ms[0] : null;
+      const _last = _ms.length ? _ms[_ms.length - 1] : prev;
+      const perCs = _one ? ('za ' + _monL(_one, false)) : ('za období do konce ' + _monGen(_last));
+      const perEn = _one ? ('for ' + _monL(_one, true)) : ('for the period up to the end of ' + _monL(_last, true));
+      const data = { gym_id: kind === 'gym' ? id : null, coach_id: kind === 'coach' ? id : null, organization_id: kind === 'org' ? id : null,
+        name: e.name || null, amount, currency: cur.toUpperCase(), no_card: card === null, charge_date: `${Y}-${String(M).padStart(2, '0')}-${String(CHARGE_DAY).padStart(2, '0')}` };
+      let cs, en, subjCs, subjEn;
+      if (card !== null) {
+        cs = `\u{1F4B3} Dne ${dCs} se strhne naakumulovaná provize MTL ${perCs} ${whoCs}: ${_amtL(amount, cur, false)}, z uložené karty${card ? ' ' + card : ''}. Nic nemusíš dělat; jen ať je karta platná a má krytí.`;
+        en = `\u{1F4B3} On ${dEn} the accrued MTL commission ${perEn} ${whoEn} will be charged: ${_amtL(amount, cur, true)}, to your saved card${card ? ' ' + card : ''}. Nothing to do — just make sure the card is valid and funded.`;
+        subjCs = `Provize MTL se strhne ${dCs}: ${_amtL(amount, cur, false)}`; subjEn = `MTL commission will be charged on ${dEn}: ${_amtL(amount, cur, true)}`;
+      } else {
+        cs = `⚠️ Dne ${dCs} se má strhnout naakumulovaná provize MTL ${perCs} ${whoCs}: ${_amtL(amount, cur, false)} — ale nemáš uloženou platební kartu. Doplň ji v Platby a provize, jinak stržení selže.`;
+        en = `⚠️ On ${dEn} the accrued MTL commission ${perEn} ${whoEn} is due to be charged: ${_amtL(amount, cur, true)} — but there is no saved payment card. Add one in Payments & commission, otherwise the charge will fail.`;
+        subjCs = `Provize MTL ${dCs}: chybí platební karta`; subjEn = `MTL commission on ${dEn}: payment card missing`;
+      }
+      try { await notify(ownerId, 'commission_upcoming', cs, { ...data, msg_en: en }); out.sent++; } catch (err) {}
+      try { await notifyMail(ownerId, subjCs, `<p>${cs}</p><p><a href="${APP}">Otevřít MTL → Provize vůči MTL</a></p>`, subjEn, `<p>${en}</p><p><a href="${APP}">Open MTL → Commissions to MTL</a></p>`); } catch (err) {}
+    }
+  }
+  return out;
+}
+
 export default async function handler(req, res) {
   await loadMtlIdentity();   // kdo částku žádá — na výzvu k úhradě i do e-mailu
   if (!SB || !KEY) return res.status(500).json({ error: 'env not set' });
@@ -225,6 +336,13 @@ let deferredMin = 0;
   // The wide fetch takes the running month too; rows belonging to anybody NOT on daily are
   // dropped again during grouping, so nothing changes for them.
   const monthOp = (TEST || dailyGyms.size || dailyCoaches.size || dailyOrgs.size) ? 'lte' : 'lt';
+
+  // Upozornění 2 dny před stržením. Ručně: ?prenotice=1 (pro test, bez ohledu na den).
+  let preNotice = null;
+  if (!TEST && (pragueDate().slice(8, 10) === String(PRE_NOTICE_DAY).padStart(2, '0') || (req.query && req.query.prenotice === '1'))) {
+    try { preNotice = await preChargeNotice(curMonth, (k, id) => k === 'gym' ? gymDaily(id) : (k === 'coach' ? coachDaily(id) : orgDaily(id))); }
+    catch (e) { preNotice = { error: String(e && e.message || e).slice(0, 200) }; console.error('[commission] prenotice', e && e.message); }
+  }
 
   try {
     // ---- gather unpaid cash/qr commission, grouped by gym + currency ----
@@ -361,6 +479,7 @@ let deferredMin = 0;
             // (unified-doklad-cron o pul hodiny pozdeji): castka, jak byla strzena, a proklik primo
             // na doklad. Driv prisly dve zpravy za tutez provizi a obe vedly na stejne misto.
             collected++;
+            await settleInvoices('gym_id', gid, cur, g.owner_id);
           } else {
             anyFail = true;
             if (!gymDaily(gid)) await sb(`transactions?gym_id=eq.${gid}&or=(paid_to.is.null,paid_to.eq.gym)&payment_method=in.(cash,qr,pis)&commission_status=eq.pending&currency=ilike.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
@@ -469,6 +588,7 @@ let deferredMin = 0;
             // (unified-doklad-cron o pul hodiny pozdeji): castka, jak byla strzena, a proklik primo
             // na doklad. Driv prisly dve zpravy za tutez provizi a obe vedly na stejne misto.
             collected++;
+            await settleInvoices('coach_id', cid, cur, cid);
           } else {
             anyFail = true;
             if (!coachDaily(cid)) await sb(`transactions?coach_id=eq.${cid}&paid_to=eq.coach&payment_method=in.(cash,qr,pis)&commission_status=eq.pending&currency=ilike.${encodeURIComponent(cur)}&commission_month=lt.${curMonth}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ commission_status: 'failed' }) });
@@ -574,6 +694,7 @@ let deferredMin = 0;
             });
             marked += (r && r.length) || 0;
             collected++;
+            await settleInvoices('organization_id', oid, cur, o.owner_id);
           } else { anyFail = true; }
         }
         if (anyCharge && !anyFail) {
@@ -648,7 +769,7 @@ let deferredMin = 0;
         body: JSON.stringify({ commission_cron_last: _stamp }) });
     } catch (e) { console.error('[commission] stamp', e.message); }
 
-    return res.status(200).json({ ok: true, at: new Date().toISOString(), billDay, test: TEST,
+    return res.status(200).json({ ok: true, at: new Date().toISOString(), billDay, test: TEST, preNotice,
       collected, failed, suspended, lifted, marked, deferredMin, markErr,
       mailFails: mailFails.slice(0, 20), skipped: skipped.slice(0, 50) });
   } catch (e) {

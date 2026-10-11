@@ -98,10 +98,10 @@ export default async function handler(req, res) {
       try {
         await sb('notifications', { method: 'POST', headers: { Prefer: 'return=minimal' },
           body: JSON.stringify({ user_id: uid, type: 'system', read: false,
-            message: '⚠️ Doklad za Exclusive MTL Partner zatím nevystaven — doplň DIČ (VAT ID), ať ho můžeme vystavit podle EU pravidel.',
+            message: '⚠️ Faktura za Exclusive MTL Partner zatím nevystavena — doplň DIČ (VAT ID), ať ji můžeme vystavit podle EU pravidel.',
             data: JSON.stringify({ kind: 'doklad_vat_needed', needs: 'vat_id', period: String(b.period_start || '').slice(0,7),
               amount, currency: cur,
-              msg_en: '⚠️ The Exclusive MTL Partner receipt is not issued yet — add your VAT ID so we can issue it under EU rules.' }) }) });
+              msg_en: '⚠️ The Exclusive MTL Partner invoice is not issued yet — add your VAT ID so we can issue it under EU rules.' }) }) });
       } catch (e) {}
       return res.status(200).json({ ok: true, deferred: 'vat_id_required' });
     }
@@ -157,9 +157,9 @@ export default async function handler(req, res) {
         body: JSON.stringify({ user_id: uid, type: 'system', read: false,
           // kind 'doklad_unified' -- stejná notifikace jako u dokladu o provizi: proklik otevře
           // rovnou tenhle doklad (showCommissionDoklad). Dřív 'ep_doklad', na který appka neuměla kliknout.
-          message: '🧾 Exclusive MTL Partner za ' + period + ': ' + _amt(amount, cur, 'cs') + ' uhrazeno kartou. Doklad je vystavený.',
+          message: '🧾 Exclusive MTL Partner za ' + period + ': ' + _amt(amount, cur, 'cs') + ' uhrazeno kartou. Faktura je vystavená.',
           data: JSON.stringify({ kind: 'doklad_unified', doklad_id: id, coach_id: uid, period, amount: amountMinor, currency: cur,
-            msg_en: '🧾 Exclusive MTL Partner for ' + period + ': ' + _amt(amount, cur, 'en') + ' paid by card. The receipt has been issued.' }) }) });
+            msg_en: '🧾 Exclusive MTL Partner for ' + period + ': ' + _amt(amount, cur, 'en') + ' paid by card. The invoice has been issued.' }) }) });
     } catch (e) {}
 
     return res.status(200).json({ ok: true, id, vat_mode: V.mode });
