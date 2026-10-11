@@ -2,6 +2,7 @@ import Stripe from 'stripe';
 import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor } from './_rate.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { checkPrice, offerPrices, planTermPrices, checkOnlineCountry } from './_price-check.js';
+import { vatMode } from './_vat.js';
 const _PC = (kind, extra) => ({ SB: _SUPA_URL, KEY: _SUPA_KEY, kind, ...extra });
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -807,9 +808,21 @@ async function partnerCheckout(req, res) {
 // Předplatné profilu dodavatele na PLATFORMOVÉM účtu MTL -- stejná cesta jako EP (partnerCheckout):
 // Stripe Checkout v režimu subscription, webhook (mtl_payment_type 'supplier_sub') zapíše
 // organizations.supplier_sub a profil se tím zobrazí, faktura jde přes ep-doklad (kind 'supplier_sub').
-// CENA JE JEN TADY (server), z adresy se bere jen volba měsíc/rok. Zakládající cena platí tomu,
-// kdo ji zaplatil (supplier_price se uloží při zaplacení), dokud předplatné sám nezruší.
-const SUPPLIER_PRICE_CZK = { month: 149, year: 1490 };
+// CENA JE JEN TADY (server), z adresy se bere jen volba měsíc/rok. Ceny jsou BEZ DPH: zakládající
+// 199 Kč pro prvních SUPPLIER_SPOTS zaplacených dodavatelů (zůstane jim -- Stripe drží cenu
+// u předplatného, supplier_price se uloží při zaplacení), pak 299 Kč. Roční = 10 měsíců.
+// Musí souhlasit se SUPPLIER_* v index.html.
+const SUPPLIER_SPOTS = 50, SUPPLIER_FOUNDING_CZK = 199, SUPPLIER_LIST_CZK = 299;
+async function supplierTier() {
+  let taken = 0;
+  try {
+    const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/organizations?select=id&kind=eq.supplier&supplier_sub=not.is.null`, {
+      headers: { apikey: process.env.SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`, Prefer: 'count=exact' },
+    });
+    taken = Number(String(r.headers.get('content-range') || '').split('/')[1] || 0) || 0;
+  } catch (e) { taken = 0; }
+  return (taken < SUPPLIER_SPOTS) ? SUPPLIER_FOUNDING_CZK : SUPPLIER_LIST_CZK;
+}
 
 async function supplierCheckout(req, res) {
   const { orgId, userId } = req.query;
@@ -824,8 +837,9 @@ async function supplierCheckout(req, res) {
   if (org.supplier_sub) return res.redirect(303, `${proto}://${host}/?supplier_sub=active`);
 
   // DIČ U ZAHRANIČNÍHO DODAVATELE -- stejná brána jako u EP (require_vat_foreign).
+  let _ps = {};
   try {
-    const _ps = (await _wsbGet('platform_settings?id=eq.1&select=require_vat_foreign,home_country'))[0] || {};
+    _ps = (await _wsbGet('platform_settings?id=eq.1&select=require_vat_foreign,home_country,vat_payer,vat_rate'))[0] || {};
     if (_ps.require_vat_foreign) {
       const EU = ['AT','BE','BG','CY','CZ','DE','DK','EE','ES','FI','FR','GR','HR','HU','IE','IT',
                   'LT','LU','LV','MT','NL','PL','PT','RO','SE','SI','SK'];
@@ -840,7 +854,15 @@ async function supplierCheckout(req, res) {
   // Testovací režim strhává denně (stejně jako EP), ať je celý cyklus vidět hned druhý den.
   let _daily = false;
   try { const { isTestMode } = await import('./_config.js'); _daily = await isTestMode(); } catch (e) {}
-  const amount = SUPPLIER_PRICE_CZK[interval];
+  const _m = await supplierTier();
+  const net = interval === 'year' ? _m * 10 : _m;
+  // DPH NAVÍC jen když je MTL plátce a jde o domácí plnění (stejný režim, jaký pak napíše
+  // faktura -- ep-doklad, _vat.js). Dnes MTL plátce není, takže cena bez DPH = konečná.
+  let amount = net;
+  try {
+    const V = vatMode(String(_ps.home_country || 'CZ').toUpperCase(), String(org.billing_country || org.country || _ps.home_country || 'CZ').toUpperCase(), org.vat_id, { kind: 'electronic', supIsVatPayer: !!_ps.vat_payer });
+    if (_ps.vat_payer && V.mode === 'domestic') amount = Math.round(net * (1 + (Number(_ps.vat_rate) || 21) / 100) * 100) / 100;
+  } catch (e) {}
 
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
@@ -853,8 +875,8 @@ async function supplierCheckout(req, res) {
       { price_data: { currency: 'czk', product_data: { name: 'MTL — profil dodavatele (' + (org.name || '') + ')' },
         unit_amount: Math.round(amount * 100), recurring: { interval: _daily ? 'day' : interval } }, quantity: 1 },
     ],
-    subscription_data: { metadata: { mtl_payment_type: 'supplier_sub', org_id: String(org.id), user_id: String(org.owner_id), sup_amount: String(amount), sup_interval: interval } },
-    metadata: { mtl_payment_type: 'supplier_sub', org_id: String(org.id), user_id: String(org.owner_id), sup_interval: interval },
+    subscription_data: { metadata: { mtl_payment_type: 'supplier_sub', org_id: String(org.id), user_id: String(org.owner_id), sup_amount: String(amount), sup_net: String(net), sup_interval: interval } },
+    metadata: { mtl_payment_type: 'supplier_sub', org_id: String(org.id), user_id: String(org.owner_id), sup_interval: interval, sup_net: String(net) },
     success_url: `${proto}://${host}/?supplier_sub=ok&session={CHECKOUT_SESSION_ID}`,
     cancel_url: `${proto}://${host}/`,
   }, { apiVersion: '2024-09-30.acacia' });

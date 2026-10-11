@@ -1114,7 +1114,8 @@ export default async function handler(req, res) {
         const sub = typeof s.subscription === 'string' ? s.subscription : (s.subscription && s.subscription.id);
         const cust = typeof s.customer === 'string' ? s.customer : (s.customer && s.customer.id);
         if (orgId) {
-          const _paid = (typeof s.amount_total === 'number') ? Math.round(s.amount_total / 100) : null;
+          // Cena BEZ DPH (sup_net) -- tou se řídí ceník; DPH se případně přičítá při platbě.
+          const _paid = m.sup_net ? Number(m.sup_net) : ((typeof s.amount_total === 'number') ? Math.round(s.amount_total / 100) : null);
           await sbPatch('organizations', `id=eq.${encodeURIComponent(orgId)}`, {
             supplier_sub: sub || null, supplier_customer: cust || null, supplier_cancelling: false, supplier_period_end: null,
             supplier_interval: (m.sup_interval === 'year' ? 'year' : 'month'),
