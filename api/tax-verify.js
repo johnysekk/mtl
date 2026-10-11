@@ -31,6 +31,21 @@ export function aresRegister(j) {
   return null;
 }
 
+// SÍDLO Z ARES rozložené do polí formuláře (ulice, část obce, PSČ, obec). Bere se oficiální
+// textová adresa z rejstříku („Jankovcova 1522/53, Holešovice, 17000 Praha 7") -- je to přesně
+// to, co má být na dokladu. Formulář ho jen nabídne/doplní, uloží ho až poskytovatel.
+export function aresAddr(j) {
+  try {
+    const t = String((j && j.sidlo && j.sidlo.textovaAdresa) || '').trim();
+    const parts = t.split(',').map((x) => x.trim()).filter(Boolean);
+    if (parts.length < 2) return null;
+    const m = /^(\d{3})\s?(\d{2})\s+(.+)$/.exec(parts[parts.length - 1]);
+    if (!m) return null;
+    return { line1: parts[0], line2: parts.slice(1, -1).join(', '), postal: m[1] + ' ' + m[2], city: m[3],
+      country: String((j.sidlo && j.sidlo.kodStatu) || 'CZ').toUpperCase() };
+  } catch (e) { return null; }
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -60,6 +75,7 @@ export default async function handler(req, res) {
         address: (j.sidlo && (j.sidlo.textovaAdresa || null)) || null,
         dic: j.dic || null,
         register: aresRegister(j),
+        addr: aresAddr(j),
         source: 'ares',
       });
     }
