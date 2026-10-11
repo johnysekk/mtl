@@ -121,11 +121,12 @@ export default async function handler(req, res) {
   try {
     // partner = platba Exclusive Partnera směrem k MTL; tu pozastavení blokovat nesmí,
     // jinak by se poskytovatel nedostal z dluhu ven.
-    if (type !== 'partner' && !(await _assertNotSuspended(req, res))) return;
+    if (type !== 'partner' && type !== 'supplier' && !(await _assertNotSuspended(req, res))) return;
     if (type === 'coach')      return await coachCheckout(req, res);
     if (type === 'gym')        return await gymCheckout(req, res);
     if (type === 'membership') return await membershipCheckout(req, res);
     if (type === 'partner')    return await partnerCheckout(req, res);
+    if (type === 'supplier')   return await supplierCheckout(req, res);
     if (type === 'event')      return await eventCheckout(req, res);
     if (type === 'online_plan') return await onlinePlanCheckout(req, res);
     return res.status(400).json({ error: 'Neznámý type: ' + type });
@@ -796,6 +797,65 @@ async function partnerCheckout(req, res) {
     subscription_data: { metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'', ep_currency: tier.currency, ep_amount: String(tier.amount) } },
     metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'' },
     success_url: `${proto}://${host}/?partner_sub=ok&session={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${proto}://${host}/`,
+  }, { apiVersion: '2024-09-30.acacia' });
+
+  res.redirect(303, session.url);
+}
+
+// ───────────────────────── DODAVATEL (organizations.kind='supplier') ─────────────────────────
+// Předplatné profilu dodavatele na PLATFORMOVÉM účtu MTL -- stejná cesta jako EP (partnerCheckout):
+// Stripe Checkout v režimu subscription, webhook (mtl_payment_type 'supplier_sub') zapíše
+// organizations.supplier_sub a profil se tím zobrazí, faktura jde přes ep-doklad (kind 'supplier_sub').
+// CENA JE JEN TADY (server), z adresy se bere jen volba měsíc/rok. Zakládající cena platí tomu,
+// kdo ji zaplatil (supplier_price se uloží při zaplacení), dokud předplatné sám nezruší.
+const SUPPLIER_PRICE_CZK = { month: 149, year: 1490 };
+
+async function supplierCheckout(req, res) {
+  const { orgId, userId } = req.query;
+  if (!orgId) return res.status(400).json({ error: 'Chybí orgId' });
+  const interval = (String(req.query.interval || 'month') === 'year') ? 'year' : 'month';
+  const host = req.headers.host;
+  const proto = host && host.includes('localhost') ? 'http' : 'https';
+
+  const org = (await _wsbGet(`organizations?id=eq.${encodeURIComponent(orgId)}&select=id,owner_id,kind,status,name,vat_id,billing_country,country,contact_email,invoice_email,supplier_sub`))[0];
+  if (!org || org.kind !== 'supplier') return res.status(404).json({ error: 'Dodavatel nenalezen' });
+  if (org.status !== 'approved') return res.status(403).json({ error: 'Profil dodavatele je pozastavený nebo zamítnutý.' });
+  if (org.supplier_sub) return res.redirect(303, `${proto}://${host}/?supplier_sub=active`);
+
+  // DIČ U ZAHRANIČNÍHO DODAVATELE -- stejná brána jako u EP (require_vat_foreign).
+  try {
+    const _ps = (await _wsbGet('platform_settings?id=eq.1&select=require_vat_foreign,home_country'))[0] || {};
+    if (_ps.require_vat_foreign) {
+      const EU = ['AT','BE','BG','CY','CZ','DE','DK','EE','ES','FI','FR','GR','HR','HU','IE','IT',
+                  'LT','LU','LV','MT','NL','PL','PT','RO','SE','SI','SK'];
+      const home = String(_ps.home_country || 'CZ').toUpperCase();
+      const bc = String(org.billing_country || org.country || home).toUpperCase();
+      if (bc && bc !== home && EU.indexOf(bc) >= 0 && EU.indexOf(home) >= 0 && !String(org.vat_id || '').trim()) {
+        return res.redirect(303, `${proto}://${host}/?supplier_sub=need_vat`);
+      }
+    }
+  } catch (e) { console.error('[supplier] vat gate', e.message); }
+
+  // Testovací režim strhává denně (stejně jako EP), ať je celý cyklus vidět hned druhý den.
+  let _daily = false;
+  try { const { isTestMode } = await import('./_config.js'); _daily = await isTestMode(); } catch (e) {}
+  const amount = SUPPLIER_PRICE_CZK[interval];
+
+  const session = await stripe.checkout.sessions.create({
+    mode: 'subscription',
+    payment_method_types: ['card'],
+    billing_address_collection: 'required',
+    tax_id_collection: { enabled: true, required: 'if_supported' },
+    client_reference_id: String(userId || org.owner_id),
+    customer_email: (org.invoice_email || org.contact_email || undefined),
+    line_items: [
+      { price_data: { currency: 'czk', product_data: { name: 'MTL — profil dodavatele (' + (org.name || '') + ')' },
+        unit_amount: Math.round(amount * 100), recurring: { interval: _daily ? 'day' : interval } }, quantity: 1 },
+    ],
+    subscription_data: { metadata: { mtl_payment_type: 'supplier_sub', org_id: String(org.id), user_id: String(org.owner_id), sup_amount: String(amount), sup_interval: interval } },
+    metadata: { mtl_payment_type: 'supplier_sub', org_id: String(org.id), user_id: String(org.owner_id), sup_interval: interval },
+    success_url: `${proto}://${host}/?supplier_sub=ok&session={CHECKOUT_SESSION_ID}`,
     cancel_url: `${proto}://${host}/`,
   }, { apiVersion: '2024-09-30.acacia' });
 

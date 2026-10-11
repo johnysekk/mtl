@@ -1107,6 +1107,28 @@ export default async function handler(req, res) {
           await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Byla ti udělena sazba Exclusive MTL Partner — od teď je provize MTL 0,5 % a akviziční pouze 5 %. 🥊' });
           await sbPost('notifications', { user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'system', read: false, message: `⭐ Nový Exclusive MTL Partner (user ${uid}).` });
         }
+      } else if (m.mtl_payment_type === 'supplier_sub') {
+        // PROFIL DODAVATELE ZAPLACEN -> zobrazí se klubům, koučům a pořadatelům (organizations.supplier_sub).
+        // Stejně jako EP: cena se uloží k organizaci, ať je v Adminu vidět, kdo platí zakládající cenu.
+        const orgId = m.org_id;
+        const sub = typeof s.subscription === 'string' ? s.subscription : (s.subscription && s.subscription.id);
+        const cust = typeof s.customer === 'string' ? s.customer : (s.customer && s.customer.id);
+        if (orgId) {
+          const _paid = (typeof s.amount_total === 'number') ? Math.round(s.amount_total / 100) : null;
+          await sbPatch('organizations', `id=eq.${encodeURIComponent(orgId)}`, {
+            supplier_sub: sub || null, supplier_customer: cust || null, supplier_cancelling: false, supplier_period_end: null,
+            supplier_interval: (m.sup_interval === 'year' ? 'year' : 'month'),
+            ...(_paid ? { supplier_price: _paid, supplier_currency: String(s.currency || 'czk').toUpperCase() } : {}),
+          });
+          const _o = ((await sbGet(`organizations?id=eq.${encodeURIComponent(orgId)}&select=owner_id,name`)) || [])[0] || {};
+          const _uid = _o.owner_id || m.user_id || null;
+          if (_uid) await sbPost('notifications', { user_id: _uid, type: 'system', read: false,
+            data: JSON.stringify({ kind: 'supplier_live', org_id: orgId, org_name: _o.name || '' }),
+            message: '🧰 Profil dodavatele ' + (_o.name || '') + ' je zveřejněný — kluby, kouči a pořadatelé ho teď najdou v sekci Dodavatelé. Faktura za předplatné přijde e-mailem.' });
+          await sbPost('notifications', { user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'system', read: false,
+            data: JSON.stringify({ kind: 'new_provider', what: 'supplier', org_id: orgId }),
+            message: '🧰 Dodavatel zaplatil a je zveřejněný: ' + (_o.name || orgId) + '. Zkontroluj profil.' });
+        }
       } else if (m.mtl_payment_type === 'event_ticket') {
         // Event ticket (direct charge on payee account) — backstop confirm if user closed tab before redirect
         if (m.ticket_id) {
@@ -1143,6 +1165,17 @@ export default async function handler(req, res) {
     } else if (event.type === 'customer.subscription.deleted') {
       // Exclusive MTL Partner zrušen / neuhrazen → vypni partner sazby
       const sub = event.data.object;
+      // Profil dodavatele: předplatné skončilo -> profil se přestane zobrazovat (nic se nemaže,
+      // po novém zaplacení se ukáže zase).
+      try {
+        const _so = (await sbGet(`organizations?supplier_sub=eq.${encodeURIComponent(sub.id)}&select=id,owner_id,name`)) || [];
+        for (const o of _so) {
+          await sbPatch('organizations', `id=eq.${encodeURIComponent(o.id)}`, { supplier_sub: null, supplier_cancelling: false, supplier_period_end: null });
+          if (o.owner_id) await sbPost('notifications', { user_id: o.owner_id, type: 'system', read: false,
+            data: JSON.stringify({ kind: 'supplier_ended', org_id: o.id, org_name: o.name || '' }),
+            message: '🧰 Předplatné profilu dodavatele ' + (o.name || '') + ' skončilo — profil se klubům přestal zobrazovat. Údaje zůstávají; po novém zaplacení se profil ukáže zase.' });
+        }
+      } catch (e) { console.error('supplier ended', e.message); }
       const rows = await sbGet(`profiles?partner_sub=eq.${encodeURIComponent(sub.id)}&select=id`);
       const uid = rows[0] && rows[0].id;
       if (uid) {
@@ -1164,14 +1197,16 @@ export default async function handler(req, res) {
         const _subId = typeof inv.subscription === 'string' ? inv.subscription : (inv.subscription && inv.subscription.id);
         if (_subId && !event.account) {           // EP běží na platformním účtu, ne na connected
           const _who = await sbGet(`profiles?partner_sub=eq.${encodeURIComponent(_subId)}&select=id&limit=1`);
-          const _uid = _who && _who[0] && _who[0].id;
+          let _uid = _who && _who[0] && _who[0].id, _org = null;
+          // Profil dodavatele: stejná faktura, odběratel je organizace.
+          if (!_uid) { const _so = await sbGet(`organizations?supplier_sub=eq.${encodeURIComponent(_subId)}&select=id,owner_id&limit=1`); if (_so && _so[0]) { _org = _so[0].id; _uid = _so[0].owner_id; } }
           if (_uid) {
             const _line = (inv.lines && inv.lines.data && inv.lines.data[0]) || null;
             await fetch(`${APP_URL}/api/ep-doklad`, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 intSecret: process.env.PIS_INTERNAL_SECRET,
-                invoice_id: inv.id, user_id: _uid,
+                invoice_id: inv.id, user_id: _uid, org_id: _org,
                 amount: (inv.amount_paid != null ? inv.amount_paid : inv.total) / 100,
                 currency: inv.currency, test_mode: !inv.livemode,
                 period_start: _line && _line.period ? new Date(_line.period.start * 1000).toISOString() : null,
@@ -1228,14 +1263,15 @@ export default async function handler(req, res) {
       if (sub && !event.account) {
         try {
           const _who = await sbGet(`profiles?partner_sub=eq.${encodeURIComponent(sub)}&select=id&limit=1`);
-          const _uid = _who && _who[0] && _who[0].id;
+          let _uid = _who && _who[0] && _who[0].id, _org = null;
+          if (!_uid) { const _so = await sbGet(`organizations?supplier_sub=eq.${encodeURIComponent(sub)}&select=id,owner_id&limit=1`); if (_so && _so[0]) { _org = _so[0].id; _uid = _so[0].owner_id; } }
           if (_uid) {
             const _line = (inv.lines && inv.lines.data && inv.lines.data[0]) || null;
             await fetch(`${APP_URL}/api/ep-doklad`, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 intSecret: process.env.PIS_INTERNAL_SECRET, unpaid: true,
-                invoice_id: inv.id, user_id: _uid,
+                invoice_id: inv.id, user_id: _uid, org_id: _org,
                 amount: (inv.amount_due != null ? inv.amount_due : inv.total) / 100,
                 currency: inv.currency, test_mode: !inv.livemode,
                 pay_url: inv.hosted_invoice_url || null,

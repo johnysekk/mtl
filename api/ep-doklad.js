@@ -1,15 +1,17 @@
-// /api/ep-doklad.js — doklad za zaplacené Exclusive Partner předplatné.
+// /api/ep-doklad.js — doklad za zaplacené předplatné na účtu MTL: Exclusive Partner (profil)
+// a profil dodavatele (organizace, kind 'supplier_sub'). Obojí stejná faktura, liší se odběratel
+// a název položky.
 //
 // Za provizi vystavuje doklad unified-doklad-cron. Za EP se dosud nevystavovalo nic: klub
 // měl jen fakturu od Stripe, kde dodavatelem není MTL. Pro účetnictví ani pro dotace to
 // nestačí -- klub potřebuje doklad od toho, komu platí.
 //
 // Volá se ze stripe-webhooku při invoice.paid na partnerském předplatném.
-// Interní endpoint: POST { intSecret, invoice_id, user_id, amount, currency, period_start,
-//                          period_end, test_mode }
+// Interní endpoint: POST { intSecret, invoice_id, user_id, org_id?, amount, currency, period_start,
+//                          period_end, test_mode }   (org_id = profil dodavatele)
 
 import { vatMode, vatNoteFor } from './_vat.js';
-import { issueReceipts, receiptMailHtml, receiptTitle } from './_receipt.js';
+import { issueReceipts, receiptMailHtml, receiptTitle, docNo } from './_receipt.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -57,7 +59,7 @@ function _perRange(r, en) {
     return _d(String(li.period_start).slice(0, 10), en) + ' – ' + _d(end.slice(0, 10), en);
   } catch (e) { return r.period_month; }
 }
-function _epInvoiceHtml(r, en, payUrl) {
+function _epInvoiceHtml(r, en, payUrl, sup) {
   const esc = (x) => String(x == null ? '' : x).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[c]);
   const m = (minor) => _amt(Number(minor || 0) / 100, r.currency, en ? 'en' : 'cs');
   const due = Number(r.due_amount) > 0;
@@ -71,10 +73,10 @@ function _epInvoiceHtml(r, en, payUrl) {
   const cust = [r.cust_name, r.cust_address, r.cust_ico ? ((en ? 'Reg. number: ' : 'IČO: ') + r.cust_ico) : '', r.cust_dic ? ((en ? 'VAT ID: ' : 'DIČ: ') + r.cust_dic) : ''].filter(Boolean).map(esc).join('<br>');
   const note = vatNoteFor(r.vat_mode, r.vat_note, en ? 'en' : 'cs');
   return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:620px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.55;">'
-    + '<h2 style="margin:0 0 4px;">' + (en ? 'Invoice — Exclusive Partner subscription' : 'Faktura — předplatné Exclusive Partner') + '</h2>'
-    + '<div style="font-size:13px;color:#555;">MTL-' + r.id + (r.duzp ? (' · ' + (en ? 'Date of supply ' : 'Datum uskutečnění plnění ') + esc(_d(r.duzp, en))) : '') + ' · ' + (en ? 'Subscription period ' : 'Období předplatného ') + esc(_perRange(r, en)) + '</div>' + box
+    + '<h2 style="margin:0 0 4px;">' + (sup ? (en ? 'Invoice — MTL supplier profile subscription' : 'Faktura — předplatné profilu dodavatele MTL') : (en ? 'Invoice — Exclusive Partner subscription' : 'Faktura — předplatné Exclusive Partner')) + '</h2>'
+    + '<div style="font-size:13px;color:#555;">' + esc(r.doc_no || ('MTL-' + r.id)) + (r.duzp ? (' · ' + (en ? 'Date of supply ' : 'Datum uskutečnění plnění ') + esc(_d(r.duzp, en))) : '') + ' · ' + (en ? 'Subscription period ' : 'Období předplatného ') + esc(_perRange(r, en)) + '</div>' + box
     + '<table style="width:100%;font-size:13px;"><tr><td style="vertical-align:top;width:50%;"><div style="font-size:11px;color:#888;text-transform:uppercase;">' + (en ? 'Supplier' : 'Dodavatel') + '</div>' + sup + '</td><td style="vertical-align:top;"><div style="font-size:11px;color:#888;text-transform:uppercase;">' + (en ? 'Customer' : 'Odběratel') + '</div>' + cust + '</td></tr></table>'
-    + '<p style="margin-top:14px;"><b>' + (en ? 'Exclusive MTL Partner — subscription ' : 'Exclusive MTL Partner — předplatné ') + esc(r.period_month) + ':</b> ' + esc(m(r.amount)) + '</p>'
+    + '<p style="margin-top:14px;"><b>' + (sup ? (en ? 'MTL supplier profile — subscription ' : 'Profil dodavatele MTL — předplatné ') : (en ? 'Exclusive MTL Partner — subscription ' : 'Exclusive MTL Partner — předplatné ')) + esc(r.period_month) + ':</b> ' + esc(m(r.amount)) + '</p>'
     + (note ? '<p style="font-size:12px;color:#555;">' + esc(note) + '</p>' : '')
     + '</div>';
 }
@@ -95,6 +97,8 @@ export default async function handler(req, res) {
       return res.status(403).json({ error: 'forbidden' });
     }
     const uid = b.user_id;
+    const orgId = b.org_id || null;                       // profil dodavatele
+    const KIND = orgId ? 'supplier_sub' : 'partner_sub';
     const amount = Number(b.amount || 0);
     const cur = String(b.currency || 'CZK').toUpperCase();
     if (!uid || !(amount > 0)) return res.status(400).json({ error: 'bad_input' });
@@ -103,14 +107,14 @@ export default async function handler(req, res) {
     // FAKTURA UŽ JE A BYLA NEUHRAZENÁ (předplatné se napoprvé nepodařilo strhnout) a teď přišla
     // platba -> faktura se NEMĚNÍ, vystaví se k ní potvrzení o úhradě (_receipt.js).
     if (b.invoice_id) {
-      const ex = await sb(`commission_doklady?select=id,due_amount&pi_id=eq.${encodeURIComponent(b.invoice_id)}&kind=eq.partner_sub&limit=1`);
+      const ex = await sb(`commission_doklady?select=id,due_amount&pi_id=eq.${encodeURIComponent(b.invoice_id)}&kind=eq.${KIND}&limit=1`);
       if (ex && ex.length) {
         if (!b.unpaid && Number(ex[0].due_amount) > 0) {
-          const rc = await issueReceipts(`pi_id=eq.${encodeURIComponent(b.invoice_id)}&kind=eq.partner_sub`, {
+          const rc = await issueReceipts(`pi_id=eq.${encodeURIComponent(b.invoice_id)}&kind=eq.${KIND}`, {
             method: 'stripe_invoice', notifyUserId: uid, paidAt: new Date().toISOString(),
             mail: async (to, inv, r) => {
               let en = false; try { const p = (await sb(`profiles?id=eq.${encodeURIComponent(uid)}&select=lang`))[0]; en = !!(p && p.lang === 'en'); } catch (e) {}
-              await _mail(to, `${receiptTitle(inv.kind, en)} MTL-${r.id} — ${en ? 'invoice' : 'faktura'} MTL-${inv.id}`, receiptMailHtml(inv, r, en));
+              await _mail(to, `${receiptTitle(inv.kind, en)} ${docNo(r)}`, receiptMailHtml(inv, r, en));
             },
           });
           return res.status(200).json({ ok: true, receipt: (rc[0] && rc[0].id) || null, invoice: ex[0].id });
@@ -119,10 +123,20 @@ export default async function handler(req, res) {
       }
     }
 
-    // Odběratel: fakturační identita poskytovatele.
-    const pr = (await sb(`profiles?id=eq.${encodeURIComponent(uid)}&select=id,name,email,phone,legal_name,`
+    // Odběratel: fakturační identita poskytovatele -- u dodavatele jeho organizace (stejné
+    // sloupce), jazyk e-mailu podle majitele.
+    let pr = (await sb(`profiles?id=eq.${encodeURIComponent(uid)}&select=id,name,email,phone,legal_name,`
       + `tax_id,vat_id,vat_payer,billing_line1,billing_line2,billing_city,billing_postal,billing_country,country_code,invoice_email,lang`))[0];
     if (!pr) return res.status(404).json({ error: 'user_not_found' });
+    if (orgId) {
+      const o = (await sb(`organizations?id=eq.${encodeURIComponent(orgId)}&select=id,name,legal_name,tax_id,vat_id,vat_payer,`
+        + `billing_line1,billing_line2,billing_city,billing_postal,billing_country,country,invoice_email,contact_email,contact_phone`))[0];
+      if (!o) return res.status(404).json({ error: 'org_not_found' });
+      pr = { id: pr.id, lang: pr.lang, name: o.name, legal_name: o.legal_name, tax_id: o.tax_id, vat_id: o.vat_id, vat_payer: o.vat_payer,
+        billing_line1: o.billing_line1, billing_line2: o.billing_line2, billing_city: o.billing_city, billing_postal: o.billing_postal,
+        billing_country: o.billing_country || o.country, country_code: null,
+        invoice_email: o.invoice_email || o.contact_email, email: o.contact_email || pr.email, phone: o.contact_phone || pr.phone };
+    }
 
     const custAddr = [pr.billing_line1, pr.billing_line2, [pr.billing_postal, pr.billing_city].filter(Boolean).join(' ')]
       .filter(Boolean).join(', ');
@@ -152,26 +166,27 @@ export default async function handler(req, res) {
       try {
         await sb('notifications', { method: 'POST', headers: { Prefer: 'return=minimal' },
           body: JSON.stringify({ user_id: uid, type: 'system', read: false,
-            message: '⚠️ Faktura za Exclusive MTL Partner zatím nevystavena — doplň DIČ (VAT ID), ať ji můžeme vystavit podle EU pravidel.',
+            message: '⚠️ Faktura za ' + (orgId ? 'profil dodavatele' : 'Exclusive MTL Partner') + ' zatím nevystavena — doplň DIČ (VAT ID), ať ji můžeme vystavit podle EU pravidel.',
             data: JSON.stringify({ kind: 'doklad_vat_needed', needs: 'vat_id', period: String(b.period_start || '').slice(0,7),
               amount, currency: cur,
-              msg_en: '⚠️ The Exclusive MTL Partner invoice is not issued yet — add your VAT ID so we can issue it under EU rules.' }) }) });
+              msg_en: '⚠️ The ' + (orgId ? 'supplier profile' : 'Exclusive MTL Partner') + ' invoice is not issued yet — add your VAT ID so we can issue it under EU rules.' }) }) });
       } catch (e) {}
       return res.status(200).json({ ok: true, deferred: 'vat_id_required' });
     }
 
     const period = String(b.period_start || new Date().toISOString()).slice(0, 7);
-    const label = 'Exclusive MTL Partner — předplatné ' + period;
+    const label = (orgId ? 'Profil dodavatele MTL — předplatné ' : 'Exclusive MTL Partner — předplatné ') + period;
+    const PRODUCT = orgId ? 'profil dodavatele MTL' : 'Exclusive MTL Partner', PRODUCT_EN = orgId ? 'MTL supplier profile' : 'Exclusive MTL Partner';
     // ČÁSTKA V HALÉŘÍCH/CENTECH, stejně jako každý jiný řádek commission_doklady (doklad o
     // provizi). Webhook posílá celé koruny (amount_paid/100); dřív se uložily tak, jak přišly,
     // a appka (dělí stovkou) by ukázala 5,00 Kč místo 500 Kč.
     const amountMinor = Math.round(amount * 100);
 
     const row = {
-      owner_id: uid, coach_id: uid,
+      owner_id: uid, coach_id: orgId ? null : uid, organization_id: orgId,
       period_month: period, currency: cur, amount: amountMinor,
       pi_id: b.invoice_id || null,
-      kind: 'partner_sub',
+      kind: KIND,
       status: (V.mode === 'oss_pending' ? 'review' : 'issued'),   // OSS ruční kontrola
       charged_at: new Date().toISOString(),
       issued_at: new Date().toISOString(),
@@ -212,6 +227,7 @@ export default async function handler(req, res) {
       ins = await sb('commission_doklady', { method: 'POST', headers: { Prefer: 'return=representation' }, body: JSON.stringify(row) });
     }
     const id = (ins && ins[0] && ins[0].id) || null;
+    const docNoStr = (ins && ins[0] && ins[0].doc_no) || ('MTL-' + id);   // číslo přidělila databáze
 
     // Poskytovatel se to má dozvědět stejně jako u dokladu za provizi.
     try {
@@ -220,20 +236,20 @@ export default async function handler(req, res) {
           // kind 'doklad_unified' -- stejná notifikace jako u dokladu o provizi: proklik otevře
           // rovnou tenhle doklad (showCommissionDoklad). Dřív 'ep_doklad', na který appka neuměla kliknout.
           message: b.unpaid
-            ? ('⚠️ Předplatné Exclusive MTL Partner za ' + period + ' (' + _amt(amount, cur, 'cs') + ') se nepodařilo strhnout z karty. Faktura je vystavená s částkou k úhradě; Stripe platbu zkusí znovu, zaplatit můžeš i hned odkazem ve faktuře.')
-            : ('🧾 Exclusive MTL Partner za ' + period + ': ' + _amt(amount, cur, 'cs') + ' uhrazeno kartou. Faktura je vystavená.'),
-          data: JSON.stringify({ kind: 'doklad_unified', doklad_id: id, coach_id: uid, period, amount: amountMinor, currency: cur,
+            ? ('⚠️ Předplatné ' + PRODUCT + ' za ' + period + ' (' + _amt(amount, cur, 'cs') + ') se nepodařilo strhnout z karty. Faktura je vystavená s částkou k úhradě; Stripe platbu zkusí znovu, zaplatit můžeš i hned odkazem ve faktuře.')
+            : ('🧾 ' + (orgId ? 'Profil dodavatele MTL' : PRODUCT) + ' za ' + period + ': ' + _amt(amount, cur, 'cs') + ' uhrazeno kartou. Faktura je vystavená.'),
+          data: JSON.stringify({ kind: 'doklad_unified', doklad_id: id, coach_id: orgId ? null : uid, organization_id: orgId, period, amount: amountMinor, currency: cur,
             msg_en: b.unpaid
-              ? ('⚠️ The Exclusive MTL Partner subscription for ' + period + ' (' + _amt(amount, cur, 'en') + ') could not be charged to your card. The invoice has been issued with the amount due; Stripe will retry, or you can pay right away via the link in the invoice.')
-              : ('🧾 Exclusive MTL Partner for ' + period + ': ' + _amt(amount, cur, 'en') + ' paid by card. The invoice has been issued.') }) }) });
+              ? ('⚠️ The ' + PRODUCT_EN + ' subscription for ' + period + ' (' + _amt(amount, cur, 'en') + ') could not be charged to your card. The invoice has been issued with the amount due; Stripe will retry, or you can pay right away via the link in the invoice.')
+              : ('🧾 ' + PRODUCT_EN + ' for ' + period + ': ' + _amt(amount, cur, 'en') + ' paid by card. The invoice has been issued.') }) }) });
     } catch (e) {}
 
     // E-MAIL s fakturou (dřív žádný -- faktura za EP byla jen v appce).
     try {
       const en = pr.lang === 'en';
       if (row.cust_email && id) await _mail(row.cust_email,
-        (en ? 'Invoice MTL-' + id + ' — Exclusive Partner ' : 'Faktura MTL-' + id + ' — Exclusive Partner ') + period,
-        _epInvoiceHtml(Object.assign({}, row, { id }), en, b.unpaid ? (b.pay_url || null) : null));
+        (en ? 'Invoice ' + docNoStr + ' — ' + PRODUCT_EN + ' ' : 'Faktura ' + docNoStr + ' — ' + PRODUCT + ' ') + period,
+        _epInvoiceHtml(Object.assign({}, row, { id, doc_no: docNoStr }), en, b.unpaid ? (b.pay_url || null) : null, !!orgId));
     } catch (e) {}
 
     return res.status(200).json({ ok: true, id, vat_mode: V.mode });

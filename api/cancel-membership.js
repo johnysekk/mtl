@@ -19,7 +19,7 @@ const q = encodeURIComponent;
 // OVĚŘENÍ (dřív žádné: kdokoli s číslem předplatného ho mohl zrušit a nechat si vrátit peníze):
 //   • příjemce platby (majitel / správce klubu s tímhle Stripe účtem, kouč s vlastním účtem) -- vše;
 //   • člen, kterému předplatné patří (nebo kdo za něj platí) -- jen zrušení ke konci období a obnovení;
-//   • Exclusive Partner (předplatné na účtu MTL, bez gymAccount) -- jen své vlastní předplatné.
+//   • Exclusive Partner a profil dodavatele (předplatné na účtu MTL, bez gymAccount) -- jen své vlastní.
 
 async function sb(path) {
   const r = await fetch(`${SB}/rest/v1/${path}`, { headers: { apikey: KEY, Authorization: `Bearer ${KEY}` } });
@@ -57,8 +57,10 @@ export default async function handler(req, res) {
         if (!own.length || !memberOp) return res.status(403).json({ error: 'Tohle předplatné měnit nemůžeš' });
       }
     } else {
+      // Předplatné na účtu MTL: Exclusive Partner (profil) nebo profil dodavatele (organizace).
       const ep = (await sb(`profiles?id=eq.${q(me)}&partner_sub=eq.${q(subscriptionId)}&select=id&limit=1`)) || [];
-      if (!ep.length) return res.status(403).json({ error: 'Tohle předplatné měnit nemůžeš' });
+      const sup = ep.length ? [] : ((await sb(`organizations?owner_id=eq.${q(me)}&supplier_sub=eq.${q(subscriptionId)}&select=id&limit=1`)) || []);
+      if (!ep.length && !sup.length) return res.status(403).json({ error: 'Tohle předplatné měnit nemůžeš' });
     }
     const opts = gymAccount ? { stripeAccount: gymAccount } : undefined;
 

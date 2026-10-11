@@ -79,7 +79,8 @@ export default async function handler(req, res) {
       co.forEach(c => { if (c.coach_id) ids.add(c.coach_id); });
     };
     const addOrgOwners = async () => {
-      (await sbGet('organizations?select=owner_id')).forEach(o => { if (o.owner_id) ids.add(o.owner_id); });
+      // Dodavatelé (kind 'supplier') nejsou poskytovatelé -- zprávy o provizích a platbách se jich netýkají.
+      (await sbGet('organizations?kind=neq.supplier&select=owner_id')).forEach(o => { if (o.owner_id) ids.add(o.owner_id); });
     };
 
     if (audience === 'coaches') await addCoaches();
