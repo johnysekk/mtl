@@ -11,6 +11,7 @@
 import { issueReceipts, receiptMailHtml, receiptTitle, docNo } from './_receipt.js';
 import Stripe from 'stripe';
 import { subMail } from './_sub-mail.js';
+import { rerateOwner } from './gym-rerate.js';
 import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil, onlineRate as _mtlOnline } from './_rate.js';
 import { sendOrderMailForPi, withdrawalText as _wdText } from './_order-mail.js';
 import { dokladPdfFor } from './_doklad-pdf.js';
@@ -315,22 +316,6 @@ async function clawbackAmbassador(pi, fraction) {
 // Přepíše application_fee_percent na VŠECH aktivních membership subscriptions
 // gymů vlastněných daným uživatelem (Partner: 4 %, jinak 5 %). Aplikuje se na
 // BUDOUCÍ faktury; minulé zůstávají. Nemění, co platí člen — jen MTL cut.
-async function rerateGymMemberships(ownerId, pct) {
-  try {
-    const gyms = await sbGet(`gyms?owner_id=eq.${encodeURIComponent(ownerId)}&select=id,stripe_account`);
-    for (const g of gyms || []) {
-      if (!g.stripe_account) continue;
-      const mems = await sbGet(`gym_memberships?gym_id=eq.${encodeURIComponent(g.id)}&status=in.(active,cancelling)&select=stripe_subscription`);
-      for (const m of mems || []) {
-        if (!m.stripe_subscription) continue;
-        try {
-          await stripe.subscriptions.update(m.stripe_subscription, { application_fee_percent: pct }, { stripeAccount: g.stripe_account });
-        } catch (e) { console.error('rerate sub', m.stripe_subscription, e.message); }
-      }
-    }
-  } catch (e) { console.error('rerateGymMemberships', e); }
-}
-
 function rawBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -1146,8 +1131,10 @@ export default async function handler(req, res) {
             partner: true, partner_sub: sub || null, stripe_customer: cust || null,
             ...(_paid ? { partner_price: _paid, partner_currency: _pcur } : {}),
           });
-          await rerateGymMemberships(uid, 3); // existující členství → 3 % od příští faktury (Exclusive Partner)
-          await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Byla ti udělena sazba Exclusive MTL Partner — od teď je provize MTL 0,5 % a akviziční pouze 5 %. 🥊' });
+          // Existující členství klubů a online předplatné → sazba EP od příští faktury. Stejné
+          // pravidlo jako všude jinde (gym-rerate.js / _rate.js); dřív tu bylo natvrdo 3 %.
+          try { await rerateOwner(uid); } catch (e) { console.error('ep rerate', e.message); }
+          await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Jsi Exclusive MTL Partner — od teď je provize MTL z každé platby 0,5 %, z člena, který tě najde v appce, 5 % a z člena z reklamy MTL 10 %. Platí i pro stávající členství od jejich příští platby. 🥊' });
           // ZAKLADATELI: kdo, za kolik a s prouklikem (klub → správa EP klubu, jinak profil).
           try {
             const _p = ((await sbGet(`profiles?id=eq.${encodeURIComponent(uid)}&select=name,email,coach_status`)) || [])[0] || {};
@@ -1225,7 +1212,7 @@ export default async function handler(req, res) {
       try {
         const _so = (await sbGet(`organizations?supplier_sub=eq.${encodeURIComponent(sub.id)}&select=id,owner_id,name`)) || [];
         for (const o of _so) {
-          await sbPatch('organizations', `id=eq.${encodeURIComponent(o.id)}`, { supplier_sub: null, supplier_cancelling: false, supplier_period_end: null });
+          await sbPatch('organizations', `id=eq.${encodeURIComponent(o.id)}`, { supplier_sub: null, supplier_cancelling: false, supplier_period_end: null, supplier_renews_at: null });
           if (o.owner_id) await sbPost('notifications', { user_id: o.owner_id, type: 'system', read: false,
             data: JSON.stringify({ kind: 'supplier_ended', org_id: o.id, org_name: o.name || '' }),
             message: '🧰 Předplatné profilu dodavatele ' + (o.name || '') + ' skončilo — profil se klubům přestal zobrazovat. Údaje zůstávají; po novém zaplacení se profil ukáže zase.' });
@@ -1235,10 +1222,11 @@ export default async function handler(req, res) {
       const rows = await sbGet(`profiles?partner_sub=eq.${encodeURIComponent(sub.id)}&select=id`);
       const uid = rows[0] && rows[0].id;
       if (uid) {
-        await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: false, partner_sub: null });
-        await rerateGymMemberships(uid, 5); // zpět na 5 % od příští faktury
+        await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: false, partner_sub: null, partner_renews_at: null, partner_cancelling: false, partner_period_end: null });
+        // Zpět na vlastní sazbu (základ / Shikai / Bankai / organizace) -- dřív natvrdo 5 %.
+        try { await rerateOwner(uid); } catch (e) { console.error('ep end rerate', e.message); }
         await subMail({ userId: uid }, 'ended');
-        await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_ended' }), message: '⭐ Teď už nejsi Exclusive MTL Partner. Děkujeme za tvoji přízeň! Provize se vrátila na standard 3,5 % (dle MTL Ligy případně 3 % nebo 2 %).' });
+        await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_ended' }), message: '⭐ Teď už nejsi Exclusive MTL Partner. Díky za přízeň! Provize se vrátila na tvou vlastní sazbu: základ 2 % u plateb kartou a 2,5 % u převodu, nižší se Shikai, Bankai nebo sazbou organizace. Z člena z appky 10 %, z reklamy MTL 25 %.' });
       }
     } else if (event.type === 'charge.dispute.created') {
       const d = event.data.object;
@@ -1254,6 +1242,15 @@ export default async function handler(req, res) {
         const _ow = event.account ? null : await _platformSubOwner(inv);   // EP běží na platformním účtu, ne na connected
         if (_ow) {
           const _line = (inv.lines && inv.lines.data && inv.lines.data[0]) || null;
+          // DALŠÍ PLATBA: konec právě zaplaceného období = den příštího stržení. Appka ho ukazuje
+          // ve správě předplatného (EP v Platby a provize, dodavatel v profilu dodavatele).
+          try {
+            const _pe = _line && _line.period && _line.period.end ? new Date(_line.period.end * 1000).toISOString() : null;
+            if (_pe) {
+              if (_ow.org) await sbPatch('organizations', `id=eq.${encodeURIComponent(_ow.org)}`, { supplier_renews_at: _pe });
+              else await sbPatch('profiles', `id=eq.${encodeURIComponent(_ow.uid)}`, { partner_renews_at: _pe });
+            }
+          } catch (e) { console.error('renews_at', e.message); }
           await _callEpDoklad({
             invoice_id: inv.id, user_id: _ow.uid, org_id: _ow.org, bill_gym_id: _ow.billGym || null,
             amount: (inv.amount_paid != null ? inv.amount_paid : inv.total) / 100,
