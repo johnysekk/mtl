@@ -36904,11 +36904,16 @@ function _caShow(ix){
 // stejne jako klub; do te doby je ve stavu 'pending' a nema pristup k nicemu.
 // Zamerne kratka prihlaska: identita + fakturacni udaje + kontakt. Nic o treninku, protoze
 // organizace zadny neprodava.
+// VÍC ORGANIZACÍ NA JEDEN ÚČET (federace + dodavatel apod.) -- stejný princip jako u klubů:
+// window._myOrgs = všechny, _orgMine = ta vybraná (window._selectedOrgId / localStorage
+// 'mtl_sel_org'), přepíná se v _orgSwitch(). Zbytek appky pracuje s _orgMine jako dřív.
 let _orgMine=null;
 async function loadMyOrg(){
   if(!currentUser||!currentUser.id) return null;
-  try{ const { data }=await supaClient.from('organizations').select('*').eq('owner_id',currentUser.id).order('created_at',{ascending:false}).limit(1);
-    _orgMine=(data&&data[0])||null; }catch(e){ _orgMine=null; }
+  try{ const { data }=await supaClient.from('organizations').select('*').eq('owner_id',currentUser.id).order('created_at',{ascending:false}).limit(50);
+    window._myOrgs=data||[];
+    let _sel=window._selectedOrgId; if(!_sel){ try{ _sel=localStorage.getItem('mtl_sel_org'); }catch(e){} }
+    _orgMine=(_sel && window._myOrgs.find(function(x){ return String(x.id)===String(_sel); })) || window._myOrgs[0] || null; }catch(e){ _orgMine=null; window._myOrgs=[]; }
   // Postranni panel v dashmode se ridi timhle: skupina Organizace se ukaze jen u SCHVALENE.
   // Cekajici prihlaska do panelu nepatri -- neni v ni co delat.
   try{
@@ -38377,8 +38382,19 @@ const SUPPLIER_CATS=[
   ['travel','✈️','Cestování a campy','Travel & camps'],
   ['other','\u{1F9E9}','Jiné','Other']
 ];
-// Cena jen k zobrazení -- účtuje server (SUPPLIER_PRICE_CZK v api/pay.js), z adresy jde jen měsíc/rok.
-const SUPPLIER_PRICE={ month:149, year:1490 };
+// CENA DODAVATELE bez DPH -- stejný model jako EP: zakládající pro prvních SUPPLIER_SPOTS
+// zaplacených dodavatelů (zůstane jim, dokud nezruší), pak ceníková. Roční = 10 měsíců.
+// Jen k zobrazení -- účtuje server (api/pay.js, supplierCheckout), z adresy jde jen měsíc/rok.
+const SUPPLIER_SPOTS=50, SUPPLIER_FOUNDING_CZK=199, SUPPLIER_LIST_CZK=299;
+let SUPPLIER_PRICE={ month:SUPPLIER_FOUNDING_CZK, year:SUPPLIER_FOUNDING_CZK*10, founding:true };
+async function _supEnsurePrice(){
+  try{
+    const { count }=await supaClient.from('organizations').select('id',{count:'exact',head:true}).eq('kind','supplier').not('supplier_sub','is',null);
+    const _f=(count||0)<SUPPLIER_SPOTS, m=_f?SUPPLIER_FOUNDING_CZK:SUPPLIER_LIST_CZK;
+    SUPPLIER_PRICE={ month:m, year:m*10, founding:_f };
+  }catch(e){}
+  return SUPPLIER_PRICE;
+}
 const SUPPLIER_MAX_CATS=2;
 function _supCat(k){ return SUPPLIER_CATS.find(function(c){ return c[0]===k; })||null; }
 function _supCatLbl(k){ const c=_supCat(k); if(!c) return String(k||''); return c[1]+' '+(LANG==='en'?c[3]:c[2]); }
@@ -38583,11 +38599,21 @@ window.addEventListener('focus', function(){
 });
 
 
-async function openOrgPicker(){
+// Přepnutí organizace -- vybere ji, přenačte a překreslí panel; obsah se řídí _orgMine.
+async function _orgSwitch(id){
+  window._selectedOrgId=id; try{ localStorage.setItem('mtl_sel_org', id); }catch(e){}
+  await loadMyOrg();
+  try{ if(typeof buildDashSide==='function' && document.body.classList.contains('dashmode')) buildDashSide(); }catch(e){}
+}
+// opts.add = jen přidat novou (z obrazovky organizace). Kdo má jednu a nepřidává, jde rovnou do ní.
+async function openOrgPicker(opts){
+  opts=opts||{};
   const EN=LANG==='en';
   if(!currentUser){ toast(L('\u26a0\ufe0f Nejprve se p\u0159ihlas')); return; }
   await loadMyOrg();
-  if(_orgMine){ return openOrgApply(); }
+  try{ await _supEnsurePrice(); }catch(e){}
+  const _mine=window._myOrgs||[];
+  if(_mine.length===1 && !opts.add){ return openOrgApply(); }
   let ov=document.getElementById('orgPickerOv'); if(ov) ov.remove();
   ov=document.createElement('div'); ov.id='orgPickerOv';
   ov.style.cssText='position:fixed;inset:0;z-index:100010;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center;';
@@ -38597,8 +38623,16 @@ async function openOrgPicker(){
       <div style="font-size:12.5px;color:var(--mid);line-height:1.55;margin-top:4px;">${desc}</div>
     </button>`;
   };
-  ov.innerHTML=`<div style="background:var(--bg);width:100%;max-width:520px;border-radius:20px 20px 0 0;padding:20px 18px calc(env(safe-area-inset-bottom,0px) + 20px);">
-    <div style="font-family:'Bebas Neue';font-size:22px;letter-spacing:.03em;color:var(--dark);margin-bottom:4px;">${EN?'What kind of organization?':'Jak\u00e1 organizace?'}</div>
+  const _stLbl=function(o){ return o.status==='pending'?(EN?'waiting for approval':'\u010dek\u00e1 na schv\u00e1len\u00ed'):(o.status==='rejected'?(EN?'rejected':'zam\u00edtnuto'):(o.status==='suspended'?(EN?'suspended':'pozastaveno'):'')); };
+  const _list=(!opts.add && _mine.length>1)?(`<div style="font-family:'Bebas Neue';font-size:22px;letter-spacing:.03em;color:var(--dark);margin-bottom:8px;">${EN?'Your organizations':'Tvoje organizace'}</div>`
+    +_mine.map(function(o){ const on=_orgMine && String(_orgMine.id)===String(o.id);
+      return '<button class="orgMinePick" data-id="'+escapeHtml(String(o.id))+'" style="width:100%;text-align:left;padding:13px 14px;margin-bottom:8px;border-radius:12px;cursor:pointer;font-family:inherit;font-size:14px;font-weight:700;'
+        +(on?'background:var(--dark);color:#fff;border:1px solid var(--dark);':'background:var(--surf);color:var(--dark);border:1px solid var(--border);')+'">'
+        +escapeHtml(o.name||'')+'<span style="font-size:11.5px;font-weight:600;opacity:.75;"> \u00b7 '+_orgKindLbl(o.kind)+(_stLbl(o)?(' \u00b7 '+_stLbl(o)):'')+'</span>'+(on?'<span style="float:right;">\u2713</span>':'')+'</button>'; }).join('')
+    +`<div style="font-size:12px;font-weight:800;color:var(--light);text-transform:uppercase;letter-spacing:.04em;margin:14px 0 8px;">${EN?'Add another':'P\u0159idat dal\u0161\u00ed'}</div>`):'';
+  ov.innerHTML=`<div style="background:var(--bg);width:100%;max-width:520px;border-radius:20px 20px 0 0;padding:20px 18px calc(env(safe-area-inset-bottom,0px) + 20px);max-height:90vh;overflow-y:auto;">
+    ${_list}
+    ${_list?'':`<div style="font-family:'Bebas Neue';font-size:22px;letter-spacing:.03em;color:var(--dark);margin-bottom:4px;">${_mine.length?(EN?'Add another organization':'P\u0159idat dal\u0161\u00ed organizaci'):(EN?'What kind of organization?':'Jak\u00e1 organizace?')}</div>`}
     <div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:14px;">${EN?'MTL approves federations and promoters by hand. A supplier profile goes live once the subscription is paid.':'Federace a po\u0159adatele schvaluje MTL ru\u010dn\u011b. Profil dodavatele se zobraz\u00ed po zaplacen\u00ed p\u0159edplatn\u00e9ho.'}</div>
     ${card('federation','\u{1F3C5}', EN?'Association / federation':'Asociace / federace',
       EN?'Umbrella for clubs \u2014 you confirm which clubs belong to you, set the rules of your sport and run your own championships and seminars. Clubs show your badge on their profile.'
@@ -38607,14 +38641,16 @@ async function openOrgPicker(){
       EN?'Expos, fight nights, seminars. You sell tickets, not training \u2014 no schedule, no memberships.'
         :'Veletrhy, galave\u010dery, semin\u00e1\u0159e. Prod\u00e1v\u00e1\u0161 vstupenky, ne tr\u00e9ninky \u2014 \u017e\u00e1dn\u00fd rozvrh, \u017e\u00e1dn\u00e1 \u010dlenstv\u00ed.')}
     ${card('supplier','\u{1F9F0}', EN?'Supplier':'Dodavatel',
-      EN?'Ring, club apparel, gear, accounting\u2026 Clubs, coaches and organizers find you in the Suppliers section. '+SUPPLIER_PRICE.month+' CZK/month or '+SUPPLIER_PRICE.year+' CZK/year, no commission.'
-        :'Ring, oble\u010den\u00ed pro kluby, vybaven\u00ed, \u00fa\u010detnictv\u00ed\u2026 Kluby, kou\u010dov\u00e9 a po\u0159adatel\u00e9 t\u011b najdou v sekci Dodavatel\u00e9. '+SUPPLIER_PRICE.month+' K\u010d m\u011bs\u00ed\u010dn\u011b nebo '+SUPPLIER_PRICE.year.toLocaleString('cs-CZ')+' K\u010d ro\u010dn\u011b, bez provize.')}
+      EN?('Ring, club apparel, gear, accounting\u2026 Clubs, coaches and organizers find you in the Suppliers section. '+SUPPLIER_PRICE.month+' CZK/month excl. VAT'+(SUPPLIER_PRICE.founding?' (founding price)':'')+', no commission.')
+        :('Ring, oble\u010den\u00ed pro kluby, vybaven\u00ed, \u00fa\u010detnictv\u00ed\u2026 Kluby, kou\u010dov\u00e9 a po\u0159adatel\u00e9 t\u011b najdou v sekci Dodavatel\u00e9. '+SUPPLIER_PRICE.month+' K\u010d m\u011bs\u00ed\u010dn\u011b bez DPH'+(SUPPLIER_PRICE.founding?' (zakl\u00e1daj\u00edc\u00ed cena)':'')+', bez provize.'))}
     <button id="orgPickCancel" style="width:100%;padding:13px;background:none;border:none;color:var(--mid);font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;margin-top:2px;">${EN?'Cancel':'Zru\u0161it'}</button>
   </div>`;
   document.body.appendChild(ov);
   ov.querySelector('#orgPickCancel').onclick=function(){ ov.remove(); };
   ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
-  ov.querySelectorAll('.orgPick').forEach(function(b){ b.onclick=function(){ const k=b.dataset.k; ov.remove(); openOrgApply(k); }; });
+  // Nová organizace se zakládá vždy jako nová -- i když už nějakou máš (opts.new).
+  ov.querySelectorAll('.orgPick').forEach(function(b){ b.onclick=function(){ const k=b.dataset.k; ov.remove(); openOrgApply(k, { new:true }); }; });
+  ov.querySelectorAll('.orgMinePick').forEach(function(b){ b.onclick=async function(){ ov.remove(); await _orgSwitch(b.dataset.id); openOrgApply(); }; });
 }
 
 // DOKLADY, KTERÉ ASOCIACE VYSTAVILA KLUBŮM. Stejný obsah jako historie dokladů u klubu --
@@ -39601,12 +39637,16 @@ async function renderOrgDocs(org, box){
       +(r.item_label||'')+'\n'+fmtPrice(_amt(r),r.currency||'CZK')+' '+_curSym(r.currency||'CZK'));
   }; });
 }
-async function openOrgApply(kind){
+async function openOrgApply(kind, opts){
+  opts=opts||{};
   if(!_adultGate('org')) return;
   // Seznam otevřených zemí musí být k dispozici, jinak zůstane výběr zemí neúplný.
   try{ if(typeof ensureOpenCountries==='function'){ await ensureOpenCountries(); if(typeof _fillCountrySelects==='function') _fillCountrySelects(true); } }catch(e){}
   const EN=LANG==='en';
   await loadMyOrg();
+  try{ await _supEnsurePrice(); }catch(e){}
+  // NOVÁ organizace vedle stávající: formulář jede jako pro nového (zavřením se vrátí vybraná).
+  if(opts.new) _orgMine=null;
   // Typ urcuje vybrany drive; u uz podane prihlasky se prebira z ni a nemeni se.
   const _kind=(_orgMine&&_orgMine.kind)||kind||'promotion';
   const _isFed=(_kind==='federation');
@@ -39624,9 +39664,13 @@ async function openOrgApply(kind){
   const _approved=(o.status==='approved');
   // Popis se sklada zvlast, aby sel dat nad tlacitka -- v sablone byl az za nimi a nikdo si
   // ho nespojil s tim, co ta organizace vlastne je.
+  // Cena: zakládající (prvních SUPPLIER_SPOTS) zůstane, dokud předplatné nezruší; pak ceníková.
+  const _supPriceTxt=EN
+    ? (SUPPLIER_PRICE.month+' CZK/month or '+SUPPLIER_PRICE.year.toLocaleString('en-GB')+' CZK/year, excl. VAT'+(SUPPLIER_PRICE.founding?(' \u2014 founding price for the first '+SUPPLIER_SPOTS+' suppliers, yours for as long as you stay; then '+SUPPLIER_LIST_CZK+' CZK'):''))
+    : (SUPPLIER_PRICE.month+' K\u010d m\u011bs\u00ed\u010dn\u011b nebo '+SUPPLIER_PRICE.year.toLocaleString('cs-CZ')+' K\u010d ro\u010dn\u011b, bez DPH'+(SUPPLIER_PRICE.founding?(' \u2014 zakl\u00e1daj\u00edc\u00ed cena pro prvn\u00edch '+SUPPLIER_SPOTS+' dodavatel\u016f, z\u016fstane ti, dokud p\u0159edplatn\u00e9 nezru\u0161\u00ed\u0161; potom '+SUPPLIER_LIST_CZK+' K\u010d'):''));
   const _orgNote=`<p style="font-size:12.5px;color:var(--mid);line-height:1.55;margin:0 0 14px;">${_isSup
-      ? (EN?('For companies supplying clubs, coaches and event organizers. Your profile shows in the Suppliers section once the subscription is paid ('+SUPPLIER_PRICE.month+' CZK/month or '+SUPPLIER_PRICE.year+' CZK/year). Nothing is sold through MTL, so there is no commission.')
-           :('Pro firmy, kter\u00e9 dod\u00e1vaj\u00ed klub\u016fm, kou\u010d\u016fm a po\u0159adatel\u016fm. Profil se zobraz\u00ed v sekci Dodavatel\u00e9 po zaplacen\u00ed p\u0159edplatn\u00e9ho ('+SUPPLIER_PRICE.month+' K\u010d m\u011bs\u00ed\u010dn\u011b nebo '+SUPPLIER_PRICE.year.toLocaleString('cs-CZ')+' K\u010d ro\u010dn\u011b). P\u0159es MTL nic neprod\u00e1v\u00e1\u0161, tak\u017ee \u017e\u00e1dn\u00e1 provize.'))
+      ? (EN?('For companies supplying clubs, coaches and event organizers. Your profile shows in the Suppliers section once the subscription is paid ('+_supPriceTxt+'). Nothing is sold through MTL, so there is no commission.')
+           :('Pro firmy, kter\u00e9 dod\u00e1vaj\u00ed klub\u016fm, kou\u010d\u016fm a po\u0159adatel\u016fm. Profil se zobraz\u00ed v sekci Dodavatel\u00e9 po zaplacen\u00ed p\u0159edplatn\u00e9ho ('+_supPriceTxt+'). P\u0159es MTL nic neprod\u00e1v\u00e1\u0161, tak\u017ee \u017e\u00e1dn\u00e1 provize.'))
       : _isFed
       ? (EN?'Umbrella for clubs. After approval you confirm which clubs belong to you and can run your own events. Every application is approved by MTL by hand.'
            :'Zast\u0159e\u0161uje kluby. Po schv\u00e1len\u00ed potvrzuje\u0161, kter\u00e9 kluby k tob\u011b pat\u0159\u00ed, a m\u016f\u017ee\u0161 po\u0159\u00e1dat vlastn\u00ed akce. Ka\u017edou p\u0159ihl\u00e1\u0161ku schvaluje MTL ru\u010dn\u011b.')
@@ -39644,8 +39688,8 @@ async function openOrgApply(kind){
       ? `<div style="background:#E8F5EE;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:13px;color:#006040;line-height:1.5;">\u2705 ${EN?'Published \u2014 clubs, coaches and organizers see you in the Suppliers section.':'Zve\u0159ejn\u011bno \u2014 kluby, kou\u010dov\u00e9 a po\u0159adatel\u00e9 t\u011b vid\u00ed v sekci Dodavatel\u00e9.'}${_price?('<br><span style="font-size:12.5px;">'+(EN?'Subscription: ':'P\u0159edplatn\u00e9: ')+_price+'</span>'):''}${o.supplier_cancelling?('<br><span style="font-size:12.5px;color:#8a5a00;">'+(EN?'Cancelled \u2014 visible until ':'Zru\u0161eno \u2014 zobrazuje se do ')+_pe+'</span>'):''}</div>`
         + _b('supStatsBtn','\u{1F4CA} '+(EN?'Dashboard \u2014 who viewed and contacted you':'P\u0159ehled \u2014 kdo t\u011b vid\u011bl a kontaktoval'))
       : `<div style="background:#FFF4E5;border:1px solid #F0D9B5;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:13px;color:#7A4A00;line-height:1.5;">\u23F3 ${EN?'Your profile is ready but not shown yet. It goes live as soon as the subscription is paid.':'Profil je hotov\u00fd, ale zat\u00edm se nezobrazuje. Zve\u0159ejn\u00ed se, jakmile zaplat\u00ed\u0161 p\u0159edplatn\u00e9.'}</div>`
-        + _b('supPayM',(EN?'Pay ':'Zaplatit ')+SUPPLIER_PRICE.month+(EN?' CZK / month':' K\u010d / m\u011bs\u00edc'),true)
-        + _b('supPayY',(EN?'Pay ':'Zaplatit ')+SUPPLIER_PRICE.year.toLocaleString(EN?'en-GB':'cs-CZ')+(EN?' CZK / year (2 months free)':' K\u010d / rok (2 m\u011bs\u00edce zdarma)')))
+        + _b('supPayM',(EN?'Pay ':'Zaplatit ')+SUPPLIER_PRICE.month+(EN?' CZK / month (excl. VAT)':' K\u010d / m\u011bs\u00edc (bez DPH)'),true)
+        + _b('supPayY',(EN?'Pay ':'Zaplatit ')+SUPPLIER_PRICE.year.toLocaleString(EN?'en-GB':'cs-CZ')+(EN?' CZK / year (2 months free, excl. VAT)':' K\u010d / rok (2 m\u011bs\u00edce zdarma, bez DPH)')))
       + _b('supPrevBtn','\u{1F441}\ufe0f '+(EN?'Preview my profile':'N\u00e1hled m\u00e9ho profilu'))
       + _b('supDokBtn','\u{1F9FE} '+(EN?'Subscription invoices':'Faktury za p\u0159edplatn\u00e9'))
       + (_live?_b('supCancelBtn',o.supplier_cancelling?('\u21A9\uFE0F '+(EN?'Renew subscription':'Obnovit p\u0159edplatn\u00e9')):(EN?'Cancel subscription':'Zru\u0161it p\u0159edplatn\u00e9')):'');
@@ -39721,7 +39765,17 @@ ${_orgMine&&_orgMine.id?`<button id="orgSetToggle" style="width:100%;box-sizing:
   </div>`;
   try{ if(!_sheetParent['shOrgApply']) _sheetParent['shOrgApply']='shMe'; }catch(e){}
   try{ openSheet('shOrgApply'); }catch(e){}
-  ov.querySelector('#_orgClose').onclick=function(){ try{ closeSheet('shOrgApply'); }catch(e){ ov.remove(); } };
+  ov.querySelector('#_orgClose').onclick=function(){ try{ closeSheet('shOrgApply'); }catch(e){ ov.remove(); } if(opts.new) loadMyOrg(); };
+  // Víc organizací: přepnout / přidat další (stejně jako přepínač klubů).
+  if(_orgMine && _orgMine.id){
+    const _n=(window._myOrgs||[]).length;
+    const _bar=document.createElement('div'); _bar.style.cssText='display:flex;gap:8px;margin:4px 0 0;';
+    _bar.innerHTML=(_n>1?('<button id="orgSwBtn" style="flex:1;padding:11px;background:none;border:1px dashed var(--border);border-radius:12px;color:var(--mid);font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">\u21C4 '+(EN?('Switch organization ('+_n+')'):('P\u0159epnout organizaci ('+_n+')'))+'</button>'):'')
+      +'<button id="orgAddBtn" style="flex:1;padding:11px;background:none;border:1px dashed var(--border);border-radius:12px;color:var(--mid);font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">+ '+(EN?'Another organization':'Dal\u0161\u00ed organizace')+'</button>';
+    _bar.style.margin='0 0 12px'; const _host=ov.querySelector('.shdr'); if(_host && _host.nextElementSibling) _host.nextElementSibling.insertBefore(_bar, _host.nextElementSibling.firstChild);
+    { const x=_bar.querySelector('#orgSwBtn'); if(x) x.onclick=function(){ openOrgPicker(); }; }
+    { const x=_bar.querySelector('#orgAddBtn'); if(x) x.onclick=function(){ openOrgPicker({ add:true }); }; }
+  }
   try{ _attachAddrSuggest('orgBillingLine1', function(){ return ($('orgBillingCity')&&$('orgBillingCity').value)||''; },
     function(p){
       if($('orgBillingLine1')) $('orgBillingLine1').value=p.line1||'';
@@ -39840,20 +39894,22 @@ ${_orgMine&&_orgMine.id?`<button id="orgSetToggle" style="width:100%;box-sizing:
       // dostane notifikaci a profil si projde dodatečně. Federace a pořadatel čekají na schválení.
       const _orgSave=function(r){ return (_orgMine&&_orgMine.id) ? supaClient.from('organizations').update(r).eq('id',_orgMine.id)
         : supaClient.from('organizations').insert(Object.assign(_isSup?{ status:'approved', approved_at:new Date().toISOString() }:{ status:'pending' }, { pis_test:true }, r)).select('id'); };
-      let { error:_oe }=await _orgSave(row);
+      let { data:_od, error:_oe }=await _orgSave(row);
       // Bez sloupce register_entry (SQL ještě nespuštěné) se uloží zbytek.
-      if(_oe && /register_entry/.test(String(_oe.message||''))){ delete row.register_entry; ({ error:_oe }=await _orgSave(row)); }
+      if(_oe && /register_entry/.test(String(_oe.message||''))){ delete row.register_entry; ({ data:_od, error:_oe }=await _orgSave(row)); }
       if(_oe && /supplier_cats/.test(String(_oe.message||''))){ throw new Error(EN?'Database not ready (supplier.sql)':'Datab\u00e1ze nen\u00ed p\u0159ipraven\u00e1 (supplier.sql)'); }
       if(_oe) throw _oe;
+      const _newId=(!_orgMine && _od && _od[0] && _od[0].id) || null;
       // MTL musi vedet, ze je co schvalovat -- jinak prihlaska lezi, dokud si ji nekdo nevsimne.
       // Hlasit zakladateli jen NOVOU prihlasku, ne kazdou pozdejsi upravu udaju.
       if(!_orgMine) { try{
-        if(_isSup){ const { data:_new }=await supaClient.from('organizations').select('id').eq('owner_id',currentUser.id).eq('kind','supplier').order('created_at',{ascending:false}).limit(1);
-          await _notifyFounderNew('supplier', row.name, (_cats.map(_supCatLbl).join(', '))+' \u00b7 I\u010cO '+(row.tax_id||''), { org_id:(_new&&_new[0]&&_new[0].id)||null }); }
+        if(_isSup) await _notifyFounderNew('supplier', row.name, (_cats.map(_supCatLbl).join(', '))+' \u00b7 I\u010cO '+(row.tax_id||''), { org_id:_newId });
         else await _notifyFounderNew('org', row.name, (_isFed?'federace':'po\u0159adatel')+' \u00b7 I\u010cO '+(row.tax_id||''));
       }catch(e){} }
       toast(_isSup&&!_orgMine?(EN?'\u2705 Profile created \u2014 pay the subscription to publish it':'\u2705 Profil zalo\u017een \u2014 zve\u0159ejn\u00ed se po zaplacen\u00ed p\u0159edplatn\u00e9ho'):(EN?'\u2705 Submitted':'\u2705 Odesl\u00e1no'));
-      await loadMyOrg(); openOrgApply();
+      // Nově založená organizace se rovnou vybere (u víc organizací by jinak zůstala ta stará).
+      if(_newId) await _orgSwitch(_newId); else await loadMyOrg();
+      openOrgApply();
     }catch(e){ sb.disabled=false; toast('\u26a0\ufe0f '+(e.message||'error')); }
   };
 }
@@ -48984,7 +49040,9 @@ function buildDashSide(){
           +(window._clubOrgCount?('<div class="dsItem" data-act="cluborgs">🏅 <span>'+(LANG==='en'?'Associations':'Členství v asociaci')+'</span></div>'):'')
           +'<div class="dsItem" data-act="set">⚙️ <span>'+(LANG==='en'?'Club settings':'Nastavení klubu')+'</span></div>'
         +'</div>'):'')
-        +((window._orgApproved)?('<div class="dsGroup" data-grp="org">🏢 <span>'+((LANG==='en'?'Organization':'Organizace')+' '+(window._orgApproved.abbr||window._orgApproved.name||'')).trim()+'</span><span class="dsArr" style="transform:rotate(-90deg);">▾</span></div>'
+        +((window._orgApproved)?('<div class="dsGroup" data-grp="org">'+(window._orgApproved.kind==='supplier'?'\u{1F9F0}':'🏢')+' <span>'+(((window._orgApproved.kind==='supplier')?(LANG==='en'?'Supplier':'Dodavatel'):(LANG==='en'?'Organization':'Organizace'))+' '+(window._orgApproved.abbr||window._orgApproved.name||'')).trim()+'</span>'
+          +(((window._myOrgs||[]).length>1)?('<button id="dsOrgSwitch" title="'+(LANG==='en'?'Switch organization':'Přepnout organizaci')+'" style="margin-left:6px;background:var(--surf);border:1px solid var(--border);border-radius:7px;font-size:11px;padding:1px 6px;cursor:pointer;font-family:\'DM Sans\';">\u21C4</button>'):'')
+          +'<span class="dsArr" style="transform:rotate(-90deg);">▾</span></div>'
           +'<div class="dsSub" id="dsSubOrg" style="display:none;">'
             +'<div class="dsItem" data-act="orgdash">\u{1F4CA} <span>'+(LANG==='en'?'Dashboard':'P\u0159ehled')+'</span></div>'
             +((window._orgApproved.kind!=='supplier')?('<div class="dsItem" data-act="orgevents">🎤 <span>'+(LANG==='en'?'Events':'Akce')+'</span></div>'):'')
@@ -49036,6 +49094,7 @@ function buildDashSide(){
       sb.querySelectorAll('.dsItem').forEach(el=>el.onclick=()=>{ sb.querySelectorAll('.dsItem').forEach(x=>x.classList.remove('on')); el.classList.add('on'); _dashGo(el.dataset.act); });
       // Přepínač klubu sedí v hlavičce skupiny, takže klik nesmí skupinu zároveň rozbalit.
       { const _sw=sb.querySelector('#dsGymSwitch'); if(_sw) _sw.onclick=function(e){ e.stopPropagation(); _dsOpenGymSwitch(); }; }
+      { const _sw=sb.querySelector('#dsOrgSwitch'); if(_sw) _sw.onclick=function(e){ e.stopPropagation(); openOrgPicker(); }; }
     
 }
 
