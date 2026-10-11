@@ -1,4 +1,4 @@
-// /api/student-card.js — KARTA STUDENTA MTL.
+// /api/student-card.js — KARTA MTL (dříve „Karta studenta“). Slouží i jako QR účtu na recepci.
 //
 // Student ukáže u dodavatele (fyzio, výživa, foto…) QR ze své karty a dostane slevu, kterou si
 // dodavatel zadal v profilu.
