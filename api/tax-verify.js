@@ -7,6 +7,30 @@
 // VIES REST: https://ec.europa.eu/taxation_customs/vies/rest-api/check-vat-number  (POST)
 // ARES REST: https://ares.gov.cz/ekonomicke-subjekty-v-be/rest/ekonomicke-subjekty/{ico}  (GET)
 
+// ÚDAJ O ZÁPISU (§ 435 OZ) pro doklady. Veřejný rejstřík (obchodní, spolkový, nadační, ...)
+// dává ARES jako spisovou značku „L 1234/KSBR"; na doklad patří „L 1234 vedená u Krajského
+// soudu v Brně". Kdo ve veřejném rejstříku není a má živnost, uvádí zápis v živnostenském
+// rejstříku. Neznámý kód soudu zůstane, jak ho ARES vrátil -- nic se nedomýšlí.
+const COURTS = {
+  MSPH: 'Městského soudu v Praze', KSPH: 'Krajského soudu v Praze',
+  KSCB: 'Krajského soudu v Českých Budějovicích', KSPL: 'Krajského soudu v Plzni',
+  KSUL: 'Krajského soudu v Ústí nad Labem', KSHK: 'Krajského soudu v Hradci Králové',
+  KSBR: 'Krajského soudu v Brně', KSOS: 'Krajského soudu v Ostravě',
+};
+export function aresRegister(j) {
+  try {
+    const vr = (Array.isArray(j && j.dalsiUdaje) ? j.dalsiUdaje : []).find((x) => x && x.spisovaZnacka);
+    if (vr) {
+      const m = /^\s*([A-Za-z]{1,3}\s*\d+)\s*\/\s*([A-Z]{4})\s*$/.exec(String(vr.spisovaZnacka));
+      if (m && COURTS[m[2]]) return m[1].replace(/\s+/, ' ') + ' vedená u ' + COURTS[m[2]];
+      return String(vr.spisovaZnacka).trim();
+    }
+    const reg = (j && j.seznamRegistraci) || {};
+    if (reg.stavZdrojeRzp === 'AKTIVNI') return String(j.pravniForma || '') === '101' ? 'Fyzická osoba zapsaná v živnostenském rejstříku' : 'Zapsáno v živnostenském rejstříku';
+  } catch (e) {}
+  return null;
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -35,6 +59,7 @@ export default async function handler(req, res) {
         name: j.obchodniJmeno || null,
         address: (j.sidlo && (j.sidlo.textovaAdresa || null)) || null,
         dic: j.dic || null,
+        register: aresRegister(j),
         source: 'ares',
       });
     }

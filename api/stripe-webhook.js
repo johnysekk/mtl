@@ -8,7 +8,7 @@
 //
 // DŮLEŽITÉ: webhook musí číst RAW body (proto bodyParser:false), jinak selže ověření podpisu.
 
-import { issueReceipts, receiptMailHtml, receiptTitle } from './_receipt.js';
+import { issueReceipts, receiptMailHtml, receiptTitle, docNo } from './_receipt.js';
 import Stripe from 'stripe';
 import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil, onlineRate as _mtlOnline } from './_rate.js';
 import { sendOrderMailForPi, withdrawalText as _wdText } from './_order-mail.js';
@@ -711,8 +711,8 @@ async function _paynowNotify(m, s, settled) {
   // Faktura už existovala jako neuhrazená -> říct, že je tím uhrazená, a prokliknout na ni.
   // Jinak faktura teprve vznikne (_paynowDoklad) a přijde e-mailem.
   const _st = Array.isArray(settled) ? settled : [];
-  const _nos = _st.map((d) => 'MTL-' + d.ref_doklad_id).join(', ');
-  const _rcs = _st.map((d) => 'MTL-' + d.id).join(', ');
+  const _nos = _st.map((d) => (Array.isArray(d.line_items) ? d.line_items.map((x) => x.doc_no || ('MTL-' + x.ref)).join(', ') : '')).join(', ');
+  const _rcs = _st.map((d) => docNo(d)).join(', ');
   const msg = `\u2705 Provize MTL uhrazena${who}: ${money('cs')}. ${vis} ` + (_st.length ? `Faktura ${_nos} je tím uhrazená — Doklad o uhrazené provizi MTL ${_rcs} ti přišel e-mailem.` : 'Faktura o provizi ti přijde e-mailem, jakmile bude vystavená.');
   const msgEn = `\u2705 MTL commission paid${who}: ${money('en')}. ${visEn} ` + (_st.length ? `Invoice ${_nos} is now paid — Receipt for paid MTL commission ${_rcs} was sent by e-mail.` : 'The commission invoice will arrive by e-mail once it is issued.');
   await sbPost('notifications', {
@@ -796,13 +796,22 @@ export default async function handler(req, res) {
             // Faktury vystavené jako neuhrazené (stržení 6. dne neprošlo) se NEMĚNÍ -- k těm, které
             // tahle platba uhradila, se vystaví samostatné potvrzení o úhradě (_receipt.js).
             let _settled = [];
-            if (_rows.length) {
+            // Platba zaplatila i měsíc, který ještě nemá fakturu -> úhradu uvede ta nová faktura
+            // (vystaví ji _paynowDoklad níž) a doklad o úhradě se nevystavuje. Jinak jeden doklad.
+            let _newMonth = false;
+            try {
+              for (const _m of [...new Set(_rows.map((r) => String(r.commission_month || '')).filter(Boolean))]) {
+                const _iv = await sbGet(`commission_doklady?${col}=eq.${encodeURIComponent(m.owner_id)}&period_month=eq.${_m}&kind=eq.unified` + (cur ? `&currency=ilike.${encodeURIComponent(cur)}` : '') + '&select=id&limit=1');
+                if (!(_iv && _iv.length)) { _newMonth = true; break; }
+              }
+            } catch (e) {}
+            if (_rows.length && !_newMonth) {
               try {
                 _settled = await issueReceipts(`${col}=eq.${encodeURIComponent(m.owner_id)}&kind=eq.unified` + (cur ? `&currency=ilike.${encodeURIComponent(cur)}` : ''), {
                   method: 'card_paynow', noNotify: true,   // zprávu pošle _paynowNotify (jedna za platbu)
                   mail: async (to, inv, r) => {
                     let en = false; try { const p = ((await sbGet(`profiles?id=eq.${encodeURIComponent(inv.owner_id || inv.coach_id)}&select=lang`)) || [])[0]; en = !!(p && p.lang === 'en'); } catch (e) {}
-                    await sendResend(to, `${receiptTitle(inv.kind, en)} MTL-${r.id} — ${en ? 'invoice' : 'faktura'} MTL-${inv.id}`, receiptMailHtml(inv, r, en));
+                    await sendResend(to, `${receiptTitle(inv.kind, en)} ${docNo(r)}`, receiptMailHtml(inv, r, en));
                   },
                 });
               } catch (e) { console.error('[commission_paynow] receipt', e && e.message); }
@@ -1365,6 +1374,7 @@ async function issueDoklad({ transactionId, paymentIntent, gymId, coachId, custo
         item_label: itemLabel || null,
         amount: Math.round(Number(amount) || 0), currency: String(currency || 'CZK').toUpperCase(),
         payment_method: paymentMethod || null, test_mode: !!testMode,
+        session_at: sessionAt || null,   // termín lekce při vystavení (sql/doklad-issue-session.sql)
       } }),
     });
     if (!_issRes.ok) {
