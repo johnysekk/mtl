@@ -10,9 +10,11 @@
 // tak za pár minut neplatí a bez klíče se karta vyrobit nedá.
 //
 //   GET ?mine=1  (Bearer)          -> { ok, key, step, active, basis }   klíč vlastní karty
-//   GET ?t=<kód z QR>[&org=<id>]   -> { ok, valid, expired, name, photo, active, basis, since, recorded }
-//        s Bearer majitele zveřejněného dodavatele se ověření zapíše jako uplatněná sleva
-//        do org_views (source 'card', engaged) -- dodavatel to vidí ve svém přehledu.
+//   GET ?t=<kód z QR>[&org=<id>]   -> { ok, valid, expired, name, photo, active, basis, since, canRedeem, recorded }
+//        canRedeem: ověřuje majitel (jednoho) zveřejněného dodavatele -- appka se ho zeptá,
+//        jestli slevu opravdu uplatnil.
+//   GET ?t=…&redeem=1 (Bearer)     -> totéž + zápis uplatněné slevy do org_views (source 'card',
+//        engaged) -- dodavatel to vidí ve svém přehledu. Jen po potvrzení, ne při každém skenu.
 //
 // Aktivní = platné členství v klubu, nebo trénink (docházka / lekce s koučem) za posledních
 // ACTIVE_DAYS dní. Dodavatel vidí jen jméno, fotku a jestli je karta aktivní -- nic dalšího.
@@ -86,13 +88,15 @@ export default async function handler(req, res) {
     if (!p || p.account_suspended) return res.status(200).json({ ok: true, valid: false });
     const basis = await activity(uid);
 
-    // Uplatnění slevy: ověřuje majitel zveřejněného dodavatele (ne student sám sebe).
-    let recorded = false;
+    // Uplatnění slevy: ověřuje majitel zveřejněného dodavatele (ne student sám sebe). Zapisuje
+    // se až po potvrzení dodavatelem (redeem=1) -- sken sám o sobě slevu neznamená.
+    let recorded = false, canRedeem = false;
     const me = await whoami(req);
     if (me && String(me) !== uid) {
       let orgs = (await sb(`organizations?owner_id=eq.${q(me)}&kind=eq.supplier&status=eq.approved&supplier_sub=not.is.null&select=id`)) || [];
       if (Q.org) orgs = orgs.filter((o) => String(o.id) === String(Q.org));
-      if (orgs.length === 1) {
+      canRedeem = orgs.length === 1;
+      if (canRedeem && String(Q.redeem || '') === '1') {
         const r = await fetch(`${SB}/rest/v1/org_views?on_conflict=organization_id,viewer_id,view_date`, {
           method: 'POST',
           headers: { ...svc, Prefer: 'resolution=merge-duplicates,return=minimal' },
@@ -103,7 +107,7 @@ export default async function handler(req, res) {
     }
     return res.status(200).json({
       ok: true, valid: true, name: p.name || '', photo: p.photo_url || p.photo_thumb || null,
-      active: !!basis, basis, since: p.created_at ? String(p.created_at).slice(0, 4) : null, recorded,
+      active: !!basis, basis, since: p.created_at ? String(p.created_at).slice(0, 4) : null, canRedeem, recorded,
     });
   } catch (e) {
     return res.status(200).json({ ok: false, error: String((e && e.message) || e) });
