@@ -27524,13 +27524,21 @@ async function _saveMtlBilling(){
 }
 async function openCommissionDoklady(gymId, onlyKind, orgId){
   const EN = LANG === 'en';
-  // onlyKind 'partner_sub' = jen doklady za předplatné EP (tlačítko v okně Exclusive Partner).
-  // Ty jsou vždy na účtu člověka (coach_id), nikdy na klubu. 'supplier_sub' = předplatné profilu
-  // dodavatele, vedené na organizaci (orgId).
+  // onlyKind 'partner_sub' = jen doklady za předplatné EP. EP se fakturuje buď kouči, nebo jeho
+  // klubu (ep-doklad.js: coach_id = majitel vždy, gym_id = klub, když platí klub). Proto u EP:
+  //   gymId = id klubu  -> jen doklady fakturované na ten klub (Platby klubu)
+  //   gymId = 'me'      -> jen doklady fakturované na kouče (Platby kouče)
+  //   gymId = null      -> všechny moje (okno Exclusive Partner)
+  // 'supplier_sub' = předplatné profilu dodavatele, vedené na organizaci (orgId).
+  const _epScope = (onlyKind==='partner_sub' && !orgId) ? (gymId || null) : null;
   if(onlyKind==='partner_sub' || orgId) gymId=null;
   else gymId = gymId || (typeof _myGymData !== 'undefined' && _myGymData && _myGymData.id) || (typeof _acFilter !== 'undefined' && _acFilter && _acFilter.gymId) || null;
   let rows = [];
-  try{ let _q = supaClient.from('commission_doklady').select('*'); _q = orgId ? _q.eq('organization_id', orgId) : (gymId ? _q.eq('gym_id', gymId) : _q.eq('coach_id', currentUser.id)); if(onlyKind) _q=_q.or('kind.eq.'+onlyKind+',and(kind.eq.payment_receipt,ref_kind.eq.'+onlyKind+')'); const { data } = await _q.order('charged_at', { ascending:false }); rows = data || []; }catch(e){}
+  try{ let _q = supaClient.from('commission_doklady').select('*');
+    _q = orgId ? _q.eq('organization_id', orgId)
+      : (_epScope==='me' ? _q.eq('coach_id', currentUser.id).is('gym_id', null)
+      : (_epScope ? _q.eq('gym_id', _epScope)
+      : (gymId ? _q.eq('gym_id', gymId) : _q.eq('coach_id', currentUser.id)))); if(onlyKind) _q=_q.or('kind.eq.'+onlyKind+',and(kind.eq.payment_receipt,ref_kind.eq.'+onlyKind+')'); const { data } = await _q.order('charged_at', { ascending:false }); rows = data || []; }catch(e){}
   window.__comDok = {}; rows.forEach(function(d){ window.__comDok[d.id]=d; });
   let ov = document.getElementById('comDokOv');
   if(!ov){ ov = document.createElement('div'); ov.id='comDokOv'; ov.style.cssText='position:fixed;inset:0;z-index:380;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;'; ov.onclick=function(e){ if(e.target===ov && !_ovHasForm(ov)) ov.remove(); }; document.body.appendChild(ov); }
@@ -39808,9 +39816,15 @@ async function _stripeEmbed(url){
   ov.querySelector('#stripeEmbX').onclick=close;
   try{
     const r=await fetch(url+(url.indexOf('?')>=0?'&':'?')+'embed=1');
-    const j=await r.json().catch(function(){ return {}; });
+    const _raw=await r.text().catch(function(){ return ''; });
+    let j={}; try{ j=JSON.parse(_raw)||{}; }catch(e){ j={}; }
     if(j && j.redirect){ close(); _checkoutBack(j.redirect); return; }
-    if(!r.ok || !j || !j.clientSecret){ close(); toast('\u26a0\ufe0f '+((j&&j.error)||(EN?'Payment could not start':'Platbu se nepoda\u0159ilo spustit'))); return; }
+    // CHYBA SERVERU UKÁZAT CELOU: dřív jen „Platbu se nepodařilo spustit" a z toho nešlo poznat,
+    // jestli spadla funkce (Vercel vrací text, ne JSON), nebo Stripe odmítl parametry.
+    if(!r.ok || !j || !j.clientSecret){ close();
+      const _det=(j&&j.error) ? j.error : ((EN?'server error ':'chyba serveru ')+r.status+(_raw?(': '+String(_raw).replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim().slice(0,140)):''));
+      console.error('[checkout]', r.status, _raw);
+      toast('\u26a0\ufe0f '+(EN?'Payment could not start — ':'Platbu se nepoda\u0159ilo spustit — ')+_det, 1); return; }
     if(!j.publishableKey){ close(); fallback(); return; }
     const S=await _loadStripeJs();
     if(!document.getElementById('stripeEmbOv')) return;          // mezitím zavřeno
@@ -52729,12 +52743,14 @@ async function _openFinance(mode){
     box.innerHTML='<div style="'+lbl+'">'+(EN?'Receipts & exports':'Doklady & v\u00fdkazy')+'</div>'
       +'<button id="mgDokladyBtn" style="'+bs+'background:#F5F2EE;color:var(--dark);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;gap:8px;">\ud83e\uddfe '+(EN?'Receipts issued to students':'V\u0161echny doklady svěřenc\u016fm')+'</button>'
       +'<button id="mgAccBtn" style="'+bs+'background:#EEF4FF;color:var(--blue);border:1px solid #CFE0FF;">\ud83d\udcd2 '+(EN?'Accounting export (for your accountant)':'Podklady pro \u00fa\u010detn\u00ed (export)')+'</button>'
-      +'<button id="mgStudConsBtn" style="'+bs+'background:#F5F2EE;color:var(--dark);border:1px solid var(--border);">\u270D\ufe0f '+(EN?'Student consents':'Souhlasy svěřenc\u016f')+'</button>'+'<button id="mgMtlCommBtn" style="'+bs+'background:var(--surf);color:var(--dark);border:1px solid var(--border);">\ud83e\uddfe '+(EN?'Commissions & receipts to MTL':'Provize a doklady v\u016f\u010di MTL')+'</button>'
+      +'<button id="mgStudConsBtn" style="'+bs+'background:#F5F2EE;color:var(--dark);border:1px solid var(--border);">\u270D\ufe0f '+(EN?'Student consents':'Souhlasy svěřenc\u016f')+'</button>'+'<button id="mgMtlCommBtn" style="'+bs+'background:var(--surf);color:var(--dark);border:1px solid var(--border);">\ud83e\uddfe '+(EN?'Commissions & receipts to MTL':'Provize a doklady v\u016f\u010di MTL')+'</button>'+'<button id="mgEpDokBtn" style="'+bs+'background:var(--surf);color:var(--dark);border:1px solid var(--border);">\u2b50 '+(EN?'Exclusive Partner invoices':'Doklady za Exclusive Partner')+'</button>'
       +(_hasCoachStripe?('<div style="'+lbl+'margin-top:14px;">'+(EN?'Payouts':'V\u00fdplaty')+'</div>'+'<button id="mgCoachStripeBtn" style="'+bs+'background:#635BFF;color:#fff;border:none;">\ud83d\udcb3 '+(EN?'Open my Stripe \u2014 balance & payouts \u2192':'Otev\u0159\u00edt m\u016fj Stripe \u2014 z\u016fstatek a vyplacen\u00ed \u2192')+'</button>'):'');
     if($('mgDokladyBtn')) $('mgDokladyBtn').onclick=()=>{ openSheet('shClubDoklady'); _loadClubDoklady('coach'); };
     if($('mgAccBtn')) $('mgAccBtn').onclick=()=>openAccounting({ coachId: currentUser.id, paidTo:'coach' }, (EN?'Accounting \u00b7 ':'Podklady \u00b7 ')+(currentUser.name||''));
     if($('mgStudConsBtn')) $('mgStudConsBtn').onclick=()=>openEntityConsents({ coach:true });
     if($('mgMtlCommBtn')) $('mgMtlCommBtn').onclick=()=>openMtlCommissions({ coachId: currentUser.id });
+    // Faktury za EP placené kouči samotným (EP placené klubem jsou v Platbách toho klubu).
+    if($('mgEpDokBtn')) $('mgEpDokBtn').onclick=()=>openCommissionDoklady('me','partner_sub');
     if($('mgCoachStripeBtn')) $('mgCoachStripeBtn').onclick=()=>openMyStripe(null, true);
     return;
   }
@@ -52743,6 +52759,7 @@ async function _openFinance(mode){
     +'<button id="mgDokladyBtn" style="'+bs+'background:#F5F2EE;color:var(--dark);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;gap:8px;">\ud83e\uddfe '+(EN?'Receipts issued to students':'V\u0161echny doklady svěřenc\u016fm')+'</button>'
     +'<button id="mgAccBtn" style="'+bs+'background:#EEF4FF;color:var(--blue);border:1px solid #CFE0FF;">\ud83d\udcd2 '+(EN?'Accounting export (for your accountant)':'Podklady pro \u00fa\u010detn\u00ed (export)')+'</button>'
       +'<button id="mgMtlCommBtn" style="'+bs+'background:var(--surf);color:var(--dark);border:1px solid var(--border);">\ud83e\uddfe '+(EN?'Commissions & receipts to MTL':'Provize a doklady v\u016f\u010di MTL')+'</button>'
+      +'<button id="mgEpDokBtn" style="'+bs+'background:var(--surf);color:var(--dark);border:1px solid var(--border);">\u2b50 '+(EN?'Exclusive Partner invoices':'Doklady za Exclusive Partner')+'</button>'
     +(g.stripe_account?(
       '<div style="'+lbl+'margin-top:14px;">'+(EN?'Payouts':'V\u00fdplaty')+'</div>'
       +'<button id="mgStripeBtn" style="'+bs+'background:#635BFF;color:#fff;border:none;">\ud83d\udcb3 '+(EN?'Open club Stripe \u2014 balance & payouts \u2192':'Otev\u0159\u00edt Stripe klubu \u2014 z\u016fstatek a vyplacen\u00ed \u2192')+'</button>'
@@ -52753,6 +52770,8 @@ async function _openFinance(mode){
   // ktery lide odsouhlasuji. Tady zustava jen obsluha pro pripad starsiho rozvrzeni.
   if($('mgStudConsBtn')) $('mgStudConsBtn').onclick=()=>openEntityConsents({ gymId: g.id });
   if($('mgMtlCommBtn')) $('mgMtlCommBtn').onclick=()=>openMtlCommissions({ gymId: g.id, gymName: g.name||'' });
+  // Faktury za EP, které platí tenhle klub (fakturační subjekt zvolený při objednání EP).
+  if($('mgEpDokBtn')) $('mgEpDokBtn').onclick=()=>openCommissionDoklady(g.id,'partner_sub');
   if($('mgAccBtn')) $('mgAccBtn').onclick=()=>openAccounting({ payeeAccount: g.stripe_account, gymId: g.id }, (EN?'Accounting \u00b7 ':'Podklady \u00b7 ')+(g.name||''));
   if($('mgStripeBtn')) $('mgStripeBtn').onclick=()=>openMyStripe(g.id);
   if($('mgStripeSwapBtn')) $('mgStripeSwapBtn').onclick=()=>openGymStripeSwap(g.id, g.name);
