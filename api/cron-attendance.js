@@ -242,7 +242,7 @@ async function handler(req, res) {
           }
           if (b.coach_reminder_sent === false && !coachMuted.has(b.coach_id)) {
             const pk = await sbPatch('bookings', `id=eq.${b.id}&or=(coach_reminder_sent.is.null,coach_reminder_sent.eq.false)`, { coach_reminder_sent: true });
-            if (pk.ok) { await sbPost('notifications', { user_id: b.coach_id, type: 'system', read: false, data: JSON.stringify({ kind: 'coach_lesson_reminder', student: b.student_name || null, date: b.training_date, time: b.training_time || '', amount: b.amount, currency: b.currency, online: (b.type === 'online') }), message: `⏰ Lekce s ${b.student_name || 'studentem'} brzy (${b.training_date} ${b.training_time || ''}).` }); created++; }
+            if (pk.ok) { await sbPost('notifications', { user_id: b.coach_id, type: 'system', read: false, data: JSON.stringify({ kind: 'coach_lesson_reminder', student: b.student_name || null, date: b.training_date, time: b.training_time || '', amount: b.amount, currency: b.currency, online: (b.type === 'online') }), message: `⏰ Lekce s ${b.student_name || 'svěřencem'} brzy (${b.training_date} ${b.training_time || ''}).` }); created++; }
           }
         }
       }

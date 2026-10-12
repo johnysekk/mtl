@@ -133,8 +133,8 @@ export default async function handler(req, res) {
     try { await notify(me, { kind: 'withdrawal_done', withdrawal_id: row.id || null, conf_id: confId, transaction_id: txId, msg_cs: sCs, msg_en: sEn }, sCs); } catch (e) {}
     if (coachId) {
       const cCs = status === 'refunded'
-        ? `↩️ ${who.name || 'Student'} odstoupil/a od ${what} „${label}" (zákonná lhůta 14 dnů). Studentovi se vrátilo ${fmt(refund, cur)}${kind === 'plan' ? ' a předplatné je ukončené' : ''}.`
-        : `↩️ ${who.name || 'Student'} odstoupil/a od ${what} „${label}" (zákonná lhůta 14 dnů). Vrať mu prosím ${fmt(refund, cur)} převodem do 14 dnů.`;
+        ? `↩️ ${who.name || 'Svěřenec'} odstoupil/a od ${what} „${label}" (zákonná lhůta 14 dnů). Svěřenci se vrátilo ${fmt(refund, cur)}${kind === 'plan' ? ' a předplatné je ukončené' : ''}.`
+        : `↩️ ${who.name || 'Svěřenec'} odstoupil/a od ${what} „${label}" (zákonná lhůta 14 dnů). Vrať mu prosím ${fmt(refund, cur)} převodem do 14 dnů.`;
       const cEn = status === 'refunded'
         ? `↩️ ${who.name || 'A student'} withdrew from "${label}" (14-day statutory period). ${fmtEn(refund, cur)} was refunded${kind === 'plan' ? ' and the subscription has ended' : ''}.`
         : `↩️ ${who.name || 'A student'} withdrew from "${label}" (14-day statutory period). Please transfer ${fmtEn(refund, cur)} back within 14 days.`;

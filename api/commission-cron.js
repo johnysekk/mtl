@@ -24,7 +24,7 @@ import Stripe from 'stripe';
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 import { makePayToken } from './commission-pay-now.js';
 import { minChargeFor } from './_config.js';
-import { issueReceipts, receiptMailHtml, receiptTitle } from './_receipt.js';
+import { issueReceipts, receiptMailHtml, receiptTitle, docNo } from './_receipt.js';
 const APP = process.env.APP_URL || 'https://app.martialtraininglab.com';
 
 import { isTestMode } from './_config.js';
@@ -98,16 +98,28 @@ const notify = (user_id, kind, message, extra = {}) =>
   sb('notifications', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({ user_id, type: 'system', read: false, data: JSON.stringify({ kind, ...extra }), message }) });
 function prevMonth(ym) { const [y, m] = ym.split('-').map(Number); return new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 7); }
 
-// FAKTURA VYSTAVENÁ JAKO NEUHRAZENÁ (stržení 6. dne neprošlo, viz
-// unified-doklad-cron) se NEMĚNÍ. Po úspěšném stržení se k ní vystaví samostatné POTVRZENÍ
-// O ÚHRADĚ (api/_receipt.js) a pošle se e-mailem i zprávou v appce. Stržení bere všechny
-// uzavřené měsíce dané měny, takže potvrzení dostane každá taková faktura subjektu v té měně.
+// PÁROVÁNÍ STRŽENÍ K FAKTURÁM. Stržení bere všechny uzavřené měsíce dané měny, takže může
+// zaplatit i zbytek starší faktury (pod minimem, nebo po neúspěšném stržení). Faktury se nikdy
+// nemění; kam se ta úhrada zapíše:
+//   - stržení zaplatilo i měsíc, který ještě fakturu NEMÁ (běžné 6. dne) -> uvede to ta nová
+//     faktura v rámečku úhrady (unified-doklad-cron, paid_other). Žádný další doklad.
+//   - stržení zaplatilo jen už vyfakturované měsíce (opakovaný pokus 9., 12. ...) -> jeden
+//     „Doklad o uhrazené provizi MTL" se seznamem zaplacených faktur (_receipt.js).
+let RUN_START = new Date().toISOString();
 async function settleInvoices(col, id, cur, ownerId) {
+  try {
+    const rows = await sb(`transactions?${col}=eq.${encodeURIComponent(id)}&currency=ilike.${encodeURIComponent(cur)}&commission_collected_at=gte.${RUN_START}&select=commission_month&limit=5000`) || [];
+    const months = [...new Set(rows.map((r) => String(r.commission_month || '')).filter(Boolean))];
+    for (const m of months) {
+      const inv = await sb(`commission_doklady?${col}=eq.${encodeURIComponent(id)}&period_month=eq.${m}&kind=eq.unified&currency=ilike.${encodeURIComponent(cur)}&select=id&limit=1`);
+      if (!(inv && inv.length)) return [];   // nový měsíc bez faktury -> úhradu uvede jeho faktura
+    }
+  } catch (e) { console.error('[commission] pairing', e.message); }
   return issueReceipts(`${col}=eq.${encodeURIComponent(id)}&kind=eq.unified&currency=ilike.${encodeURIComponent(cur)}`, {
     method: 'card_on_file', notifyUserId: ownerId,
     mail: async (to, inv, r) => {
       let en = false; try { const p = (await sb(`profiles?id=eq.${ownerId}&select=lang`))[0]; en = !!(p && p.lang === 'en'); } catch (e) {}
-      await sendEmail(to, `${receiptTitle(inv.kind, en)} MTL-${r.id} — ${en ? 'invoice' : 'faktura'} MTL-${inv.id}`, receiptMailHtml(inv, r, en));
+      await sendEmail(to, `${receiptTitle(inv.kind, en)} ${docNo(r)}`, receiptMailHtml(inv, r, en));
     },
   });
 }
@@ -289,6 +301,7 @@ export default async function handler(req, res) {
   }
 
   const now = new Date();
+  RUN_START = now.toISOString();   // od kdy se počítají stržení tohoto běhu (párování k fakturám)
   const billDay = now.getUTCDate() >= 6;
   // Ruční dobití: /api/commission-cron?force=1&gym=<id> strhne hned, bez ohledu na den
   // v mesici. Pouziva to appka po doplneni DIC, aby poskytovatel necekal na dalsi beh.
@@ -504,7 +517,7 @@ let deferredMin = 0;
         if (overdue) {
           if (g.payment_mode === 'qr_bank' && !g.account_suspended) {
             await sb(`gyms?id=eq.${gid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ account_suspended: true }) });
-            await notify(g.owner_id, 'account_suspended', `🚫 Účet byl pozastaven kvůli neuhrazené provizi MTL. Gym je skrytý a nelze ho používat (tebou ani studenty), dokud provizi neuhradíš (aktualizuj kartu).`, { gym_id: gid, msg_en: `🚫 The account was suspended because of an unpaid MTL commission. The club is hidden and can't be used (by you or students) until the commission is paid (update your card).` });
+            await notify(g.owner_id, 'account_suspended', `🚫 Účet byl pozastaven kvůli neuhrazené provizi MTL. Gym je skrytý a nelze ho používat (tebou ani tvými svěřenci), dokud provizi neuhradíš (aktualizuj kartu).`, { gym_id: gid, msg_en: `🚫 The account was suspended because of an unpaid MTL commission. The club is hidden and can't be used (by you or students) until the commission is paid (update your card).` });
             suspended++;
           } else if (g.payment_mode !== 'qr_bank' && g.takes_cash && !g.cash_blocked) {
             await sb(`gyms?id=eq.${gid}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ cash_blocked: true }) });

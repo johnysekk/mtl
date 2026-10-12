@@ -250,7 +250,7 @@ export default async function handler(req, res) {
             // Po třech dnech: ať o tom ví obě strany i my. Jednou -- claim_reminded se posune.
             if (remindedAt && remindedAt > Date.parse(H24)) continue;
             await note(target, 'qr_unconfirmed',
-              `\u26a0\ufe0f U\u017e t\u0159i dny nen\u00ed potvrzen\u00e1 platba p\u0159evodem (${what}, ${amount}). Potvr\u010f ji, nebo odm\u00edtni \u2014 student na to \u010dek\u00e1.`,
+              `\u26a0\ufe0f U\u017e t\u0159i dny nen\u00ed potvrzen\u00e1 platba p\u0159evodem (${what}, ${amount}). Potvr\u010f ji, nebo odm\u00edtni \u2014 svěřenec na to \u010dek\u00e1.`,
               `\u26a0\ufe0f A bank payment has been waiting for your confirmation for three days (${what}, ${amount}). Confirm or reject it \u2014 the student is waiting.`, { tbl: t.tbl, row_id: String(r.id), for_provider: true });
             await note(r.student_id, 'qr_unconfirmed',
               `\u26a0\ufe0f Tvoje platba p\u0159evodem (${what}, ${amount}) nen\u00ed t\u0159i dny potvrzen\u00e1. V Nadch\u00e1zej\u00edc\u00edch ji m\u016f\u017ee\u0161 p\u0159ipomenout nebo uzav\u0159\u00edt s potvrzen\u00edm.`,

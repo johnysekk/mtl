@@ -205,7 +205,7 @@ export async function checkOnlineCountry({ SB, KEY, coachId, buyerId }) {
     // účtu v appce a o bydlišti nic neříká. Jen u starých profilů bez bydliště záložně country_code.
     const sc = String(s.residence_country || s.country_code || '').trim().toUpperCase();
     if (!cc || !sc || cc === sc) return { ok: true };
-    return { ok: false, error: `Tento kouč prodává online koučink jen studentům ze své země (${cc}).` };
+    return { ok: false, error: `Tento kouč prodává online koučink jen sportovcům ze své země (${cc}).` };
   } catch (e) { return { ok: true }; }
 }
 

@@ -723,7 +723,7 @@ async function _paynowNotify(m, s, settled) {
   if (gym) {
     const miss = _gymMissing(gym);
     if (!miss.length) {
-      vis = 'Klub je zase vidět v hledání a studenti u něj můžou platit.';
+      vis = 'Klub je zase vidět v hledání a sportovci u něj můžou platit.';
       visEn = 'The club is visible in search again and students can pay.';
     } else {
       vis = 'V hledání se klub ukáže, až bude hotové: ' + miss.map((k) => (_MISS[k] || [k])[0]).join(', ') + '.';
@@ -962,7 +962,7 @@ export default async function handler(req, res) {
               const _om = (await sbGet(`gym_memberships?id=eq.${encodeURIComponent(m.membership_id)}&select=student_name,plan_name,amount,currency`))[0] || {};
               const _amt = `${Number(_om.amount || 0).toLocaleString('cs-CZ')} ${String(_om.currency || m.mtl_currency || 'CZK').toUpperCase()}`;
               const _endCs = _end.toLocaleDateString('cs-CZ'), _endEn = _end.toLocaleDateString('en-GB');
-              const _cs = `🌐 Nový předplatitel: ${_om.student_name || 'Student'} si předplatil/a „${_om.plan_name || m.mtl_plan || ''}" na ${_mo} měsíců za ${_amt} (jednorázově kartou). Platí do ${_endCs}, samo se neobnovuje.`;
+              const _cs = `🌐 Nový předplatitel: ${_om.student_name || 'Svěřenec'} si předplatil/a „${_om.plan_name || m.mtl_plan || ''}" na ${_mo} měsíců za ${_amt} (jednorázově kartou). Platí do ${_endCs}, samo se neobnovuje.`;
               const _en = `🌐 New subscriber: ${_om.student_name || 'A student'} bought "${_om.plan_name || m.mtl_plan || ''}" for ${_mo} months, ${_amt} (one-off card payment). Active until ${_endEn}, it does not renew.`;
               await sbPost('notifications', { user_id: m.coach_id, type: 'system', read: false, data: JSON.stringify({ kind: 'online_plan_new', membership_id: m.membership_id, student_id: m.student_id || null, msg_cs: _cs, msg_en: _en }), message: _cs });
             } catch (e) { console.error('online plan notify', e.message); }
@@ -980,7 +980,7 @@ export default async function handler(req, res) {
             try {
               const _om = (await sbGet(`gym_memberships?id=eq.${encodeURIComponent(m.membership_id)}&select=student_name,plan_name,amount,currency`))[0] || {};
               const _amt = `${Number(_om.amount || 0).toLocaleString('cs-CZ')} ${String(_om.currency || m.mtl_currency || 'CZK').toUpperCase()}`;
-              const _cs = `🌐 Nový předplatitel: ${_om.student_name || 'Student'} si předplatil/a „${_om.plan_name || m.mtl_plan || ''}" za ${_amt} měsíčně. Předplatné se obnovuje každý měsíc kartou.`;
+              const _cs = `🌐 Nový předplatitel: ${_om.student_name || 'Svěřenec'} si předplatil/a „${_om.plan_name || m.mtl_plan || ''}" za ${_amt} měsíčně. Předplatné se obnovuje každý měsíc kartou.`;
               const _en = `🌐 New subscriber: ${_om.student_name || 'A student'} subscribed to "${_om.plan_name || m.mtl_plan || ''}" for ${_amt} a month. It renews monthly by card.`;
               await sbPost('notifications', { user_id: m.coach_id, type: 'system', read: false, data: JSON.stringify({ kind: 'online_plan_new', membership_id: m.membership_id, student_id: m.student_id || null, msg_cs: _cs, msg_en: _en }), message: _cs });
             } catch (e) { console.error('online plan notify', e.message); }
