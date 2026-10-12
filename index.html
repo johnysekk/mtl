@@ -670,8 +670,14 @@ body.gate-pending #bootSplash{animation:none !important;opacity:1 !important;}
 
 .pull-spinner{width:24px;height:24px;border:3px solid var(--border);border-top-color:var(--red);border-radius:50%;animation:pullspin .6s linear infinite}
 @keyframes pullspin{to{transform:rotate(360deg)}}
-.pull-arrow{font-size:20px;color:var(--red);transition:transform .2s}
-.pull-arrow.flip{transform:rotate(180deg)}
+#pullRefresh{position:absolute;left:0;right:0;top:0;height:0;display:flex;align-items:center;justify-content:center;overflow:hidden;z-index:0;color:var(--mid);pointer-events:none}
+#pullRing{transition:opacity .15s}
+#pullRefresh.ptr-ready #pullRing{color:var(--dark)}
+#pullRefresh.ptr-busy #pullRing{animation:pullspin .7s linear infinite}
+#pullRefresh.ptr-busy #pullRing circle{stroke-dashoffset:16 !important}
+.ptr-anim{transition:transform .34s cubic-bezier(.2,.8,.2,1) !important}
+.app > .nav{position:relative;z-index:6}
+.app > .hdr{position:relative;z-index:6;background:var(--bg)}
   
 .bday{flex:1;padding:10px 0;border:1.5px solid var(--border);border-radius:10px;background:var(--surf);color:var(--mid);font-weight:700;font-size:13px;cursor:pointer;font-family:'DM Sans'}
 .bday.on{background:var(--dark);color:#fff;border-color:var(--dark)}
@@ -795,9 +801,8 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
   
 <div class="app" id="app">
   
-  <div id="pullRefresh" style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:center;height:0;overflow:hidden;transition:height .2s;z-index:5;">
-    <div id="pullIndicator" class="pull-arrow">↓</div>
-  </div>
+  <!-- Pull-to-refresh jako Instagram: obsah pod hlavičkou sjede dolů a v mezeře se kreslí kroužek. -->
+  <div id="pullRefresh" aria-hidden="true"><svg id="pullRing" width="26" height="26" viewBox="0 0 26 26"><circle cx="13" cy="13" r="10" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-dasharray="62.8" stroke-dashoffset="62.8"/></svg></div>
 
 <div class="toast" id="toast"></div>
 <div id="acctStateBar" style="display:none;position:fixed;top:0;left:0;right:0;z-index:95;padding:8px 14px;font-size:12.5px;font-weight:700;line-height:1.35;text-align:center;box-shadow:0 1px 6px rgba(0,0,0,.12);box-sizing:border-box;"></div>
@@ -1303,8 +1308,6 @@ body.dashmode .mtlRatePct{font-size:20px!important;}
     <div class="sec-lbl" style="margin-top:24px;">Účet</div>
     <div class="prow-group">
       <div class="prow" id="meSettings"><div class="prow-l"><div class="prow-icon" style="background:#F5F2EE;">⚙️</div><div class="prow-lbl">Nastavení</div></div><span class="prow-arr">›</span></div>
-      <!-- Obnovit bylo v hlavičce; tam teď zůstávají jen ikony, které něco hlásí (zvonek, klub, oblíbené). -->
-      <div class="prow" id="btnRefresh"><div class="prow-l"><div class="prow-icon" id="btnRefreshIco" style="background:#F5F2EE;">🔄</div><div class="prow-lbl">Obnovit data</div></div><span class="prow-arr">›</span></div>
       <div class="prow" id="meLogout"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">🚪</div><div class="prow-lbl" style="color:var(--red);">Odhlásit se</div></div><span class="prow-arr">›</span></div>
     </div>
   </div>
@@ -3120,7 +3123,6 @@ const I18N = { en: {
   "Lekce":"Lessons",
   "Recenze":"Reviews",
   "Rezervovat":"Book",
-  "Obnovit data":"Refresh data",
   "Chci trénovat":"Let's train",
   "Tvůj přehled":"Your overview",
   "Tento měsíc":"This month",
@@ -10281,6 +10283,7 @@ fc.addEventListener('touchstart',e=>{
 
 fc.addEventListener('touchmove',e=>{
   if(!isDragging) return;
+  if(window._ptrActive){ e.preventDefault(); if(dragX){ dragX=0; applyDrag(0); } return; }
   const dx=e.touches[0].clientX-dragStartX;
   const dy=e.touches[0].clientY-e.touches[0].clientY;
   e.preventDefault();
@@ -10291,7 +10294,7 @@ fc.addEventListener('touchmove',e=>{
 // Po dotyku prohlížeč ještě dopálí myší události; ty se do 700 ms ignorují, ať se profil
 // neotevře dvakrát.
 let _deckTouchAt=0;
-fc.addEventListener('touchend',()=>{ isDragging=false; _deckTouchAt=Date.now(); finishDrag(true); });
+fc.addEventListener('touchend',()=>{ isDragging=false; _deckTouchAt=Date.now(); if(window._ptrActive){ dragX=0; applyDrag(0); return; } finishDrag(true); });
 
 let mDown=false,mSX=0;
 fc.addEventListener('mousedown',e=>{ if(Date.now()-_deckTouchAt<700) return; mDown=true; mSX=e.clientX; dragX=0; document.addEventListener('mousemove',onMM); document.addEventListener('mouseup',onMU); });
@@ -33121,49 +33124,67 @@ function setAvatar(url){
   }
 }
 
-  // Pull to refresh — hlavní obrazovka
-let pullStartY=0, pulling=false, pullDist=0;
-
-document.querySelector('.app').addEventListener('touchstart',(e)=>{
-  const anySheetOpen=SHEETS.some(s=>$(s) && $(s).classList.contains('open'));
-  if(anySheetOpen) return;
-  pullStartY=e.touches[0].clientY;
-  pulling=true;
-},{passive:true});
-
-document.querySelector('.app').addEventListener('touchmove',(e)=>{
-  if(!pulling) return;
-  pullDist=e.touches[0].clientY-pullStartY;
-  if(pullDist>0 && pullDist<120){
-    $('pullRefresh').style.height=Math.min(pullDist,60)+'px';
-    const ind=$('pullIndicator');
-    ind.className='pull-arrow';
-    ind.textContent='↓';
-    if(pullDist>70) ind.classList.add('flip');
-  }
-},{passive:true});
-
-document.querySelector('.app').addEventListener('touchend',async()=>{
-  if(!pulling) return;
-  pulling=false;
-  if(pullDist>70){
-    // spustit spinner
-    const ind=$('pullIndicator');
-    ind.className='pull-spinner';
-    ind.textContent='';
-    $('pullRefresh').style.height='60px';
-    await loadCoaches();
-    await updateNotifBadge();
-    if(currentUser && currentUser.role==='founder') await updateAdminBadge();
-    if(currentUser){
-      const { data: prof } = await supaClient.from('profiles').select('*').eq('id', currentUser.id).single();
-      if(prof){ currentUser=prof; updateRoleUI(); fillUserProfile(); try{ _syncTimezone(); }catch(e){} try{ _claimCohorts(); }catch(e){} try{ _claimTickets(); }catch(e){} }
-    }
-    toast(L('✅ Obnoveno'));
-  }
-  $('pullRefresh').style.height='0px';
-  pullDist=0;
-},{passive:true});
+  // PULL TO REFRESH -- hlavní obrazovka, pohyb jako Instagram/Facebook. Hlavička i spodní lišta
+// stojí, obsah mezi nimi sjede za prstem dolů (gumově -- čím dál, tím pomaleji) a v mezeře se
+// dokresluje kroužek. Za prahem se kroužek doplní (na Androidu lehké cvaknutí), po puštění obsah
+// zůstane kousek dole a kroužek se točí, dokud se data nenačtou; pak obsah plynule vyjede zpět.
+// Směr se zamkne po prvních pixelech: vodorovný tah patří kartě v decku, svislý obnovení.
+// Posluchače běží v capture fázi, aby se karta dozvěděla, že tah převzalo obnovení, dřív než se pohne.
+(function(){
+  const app=document.querySelector('.app'); if(!app) return;
+  const MAX=130, TH=64, HOLD=56;
+  let y0=0, x0=0, on=false, lock=null, d=0, busy=false, ready=false, els=[];
+  const ptr=$('pullRefresh'), ring=ptr&&ptr.querySelector('circle');
+  const _targets=function(){
+    const out=[]; const h=app.querySelector(':scope > .hdr'); let el=h?h.nextElementSibling:null;
+    while(el && !el.classList.contains('nav')){ if(el.id!=='pullRefresh' && el.id!=='toast' && getComputedStyle(el).display!=='none') out.push(el); el=el.nextElementSibling; }
+    return out;
+  };
+  const _paint=function(v, anim){
+    els.forEach(function(e){ e.classList.toggle('ptr-anim', !!anim); e.style.transform=v?('translateY('+v+'px)'):''; });
+    if(ptr){ ptr.style.transition=anim?'height .34s cubic-bezier(.2,.8,.2,1)':''; ptr.style.height=v+'px'; }
+  };
+  const _ring=function(p){ if(!ring) return; ring.style.strokeDashoffset=String(62.8*(1-Math.min(1,p)*0.82)); ring.parentNode.style.transform='rotate('+Math.round(p*270)+'deg)'; ring.parentNode.style.opacity=String(Math.min(1,p*1.6)); };
+  const _blocked=function(){
+    if(busy || document.body.classList.contains('dashmode')) return true;
+    if(SHEETS.some(function(s){ return $(s) && $(s).classList.contains('open'); })) return true;
+    const ev=$('eventsView'); if(ev && ev.style.display!=='none' && ev.scrollTop>0) return true;
+    return false;
+  };
+  app.addEventListener('touchstart',function(e){
+    window._ptrActive=false; on=false; lock=null; d=0; ready=false;
+    if(_blocked() || e.touches.length!==1) return;
+    if(e.target && e.target.closest && e.target.closest('.hdr,.nav')) return;
+    y0=e.touches[0].clientY; x0=e.touches[0].clientX; on=true;
+  },{passive:true, capture:true});
+  app.addEventListener('touchmove',function(e){
+    if(!on) return;
+    const dy=e.touches[0].clientY-y0, dx=e.touches[0].clientX-x0;
+    if(!lock){ if(Math.abs(dy)<8 && Math.abs(dx)<8) return; lock=(dy>0 && Math.abs(dy)>Math.abs(dx)*1.4)?'v':'h'; if(lock==='h'){ on=false; return; }
+      window._ptrActive=true; els=_targets();
+      const h=app.querySelector(':scope > .hdr'); if(ptr && h) ptr.style.top=(h.offsetTop+h.offsetHeight)+'px'; if(ptr) ptr.classList.remove('ptr-busy','ptr-ready'); }
+    d=dy>0 ? MAX*(1-Math.exp(-dy/220)) : 0;
+    _paint(d,false); _ring(d/TH);
+    const r=d>=TH; if(r && !ready){ try{ if(navigator.vibrate) navigator.vibrate(8); }catch(_e){} }
+    ready=r; if(ptr) ptr.classList.toggle('ptr-ready', r);
+  },{passive:true, capture:true});
+  const _end=async function(){
+    if(!on) return; on=false;
+    if(lock!=='v'){ window._ptrActive=false; return; }
+    if(!ready){ _paint(0,true); setTimeout(function(){ window._ptrActive=false; }, 0); return; }
+    busy=true; _paint(HOLD,true); _ring(1); if(ptr) ptr.classList.add('ptr-busy');
+    const t0=Date.now();
+    try{ if(typeof window.doAppRefresh==='function') await window.doAppRefresh({ silent:true }); }catch(_e){}
+    try{ if(typeof _deckMode!=='undefined' && _deckMode==='events'){ const ev=$('eventsView'); if(ev && typeof renderEventsAsync==='function'){ window._evIdx=0; await renderEventsAsync(ev); } } }catch(_e){}
+    // Kroužek se točí aspoň chvilku -- bleskové zmizení působí, jako by se nic nestalo.
+    const w=650-(Date.now()-t0); if(w>0) await new Promise(function(r){ setTimeout(r,w); });
+    if(ptr) ptr.classList.remove('ptr-busy','ptr-ready');
+    _paint(0,true); _ring(0);
+    setTimeout(function(){ els.forEach(function(e){ e.classList.remove('ptr-anim'); }); busy=false; window._ptrActive=false; }, 360);
+  };
+  app.addEventListener('touchend',_end,{passive:true, capture:true});
+  app.addEventListener('touchcancel',_end,{passive:true, capture:true});
+})();
 
   // Pull to refresh — notifikace se spinnerem
 let notifPullStart=0, notifPulling=false, notifPullDist=0;
@@ -34472,8 +34493,9 @@ async function updateNotifBadge(){
   } catch(e){ console.error(e); toast(L('⚠️ Chyba')); }
 };
 
-  async function doAppRefresh(){
-  toast(L('⟳ Obnovuji...'));
+  async function doAppRefresh(opts){
+  const _silent=!!(opts&&opts.silent);   // pull-to-refresh: zpětnou vazbu dává kroužek, ne toast
+  if(!_silent) toast(L('⟳ Obnovuji...'));
   try{ await supaClient.auth.refreshSession(); }catch(e){}
   const _sheetOpen = !!document.querySelector('.sheet.open');
   if(!_sheetOpen){ await loadCoaches(); if(typeof updateCoachSummary==='function') await updateCoachSummary(); }
@@ -34494,20 +34516,9 @@ async function updateNotifBadge(){
   try{ var _ao=document.querySelector('[id^="shAmb"].open'); if(_ao && typeof openAmbassadorDashboard==='function') await openAmbassadorDashboard(); }catch(e){}
   if($('shNotif').classList.contains('open')) loadNotifications();
   if(document.body.classList.contains('dashmode') && typeof buildDashSide==='function') buildDashSide();
-  toast('✅ Obnoveno');
+  if(!_silent) toast(L('✅ Obnoveno'));
   }
   window.doAppRefresh=doAppRefresh;
-  $('btnRefresh').onclick=async()=>{
-  if(window._refreshBusy) return;
-  var _now=Date.now();
-  if(_now-(window._lastRefreshAt||0) < 6000){ toast(LANG==='en'?'⏳ Just refreshed — give it a sec':'⏳ Právě obnoveno — chvilku počkej'); return; }
-  window._lastRefreshAt=_now; window._refreshBusy=true;
-  const btn=$('btnRefreshIco')||$('btnRefresh');
-  btn.style.transition='transform .6s';
-  btn.style.transform='rotate(360deg)';
-  try{ await doAppRefresh(); }catch(e){} finally{ window._refreshBusy=false; }
-  setTimeout(()=>{ btn.style.transform='rotate(0deg)'; btn.style.transition='none'; }, 600);
-};
 
   // Admin tlačítko
 if($('grSubmit')) $('grSubmit').onclick=submitGymReq;
