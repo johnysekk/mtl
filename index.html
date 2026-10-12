@@ -9380,19 +9380,9 @@ document.addEventListener('click', function(e){
 function _termsBannerHidden(gid){ try{ return localStorage.getItem('mtl_terms_banner_off_'+gid)==='1'; }catch(e){ return false; } }
 // Zrcadlo orgRate() z _rate.js. Kdyz menis jedno, musíš obojí -- appka nesmi ukazovat jinou
 // sazbu, nez jakou server strhne.
+//   federation 0 % ze vseho (poplatky, skoleni, souteze, fight nights)
 //   promotion  1 % ze vseho
-//   federation 1 % ze souteze a fight night, jinak 0 % (vzdelavani trenéru nezdanujeme)
-//   zavadeci nula (intro_free_until) prebiji obojí
-const ORG_PAID_EVENT_TYPES=['fight_night','competition'];
-function orgRate(org, eventType){
-  if(!org) return 0.01;
-  if(org.intro_free_until){
-    const end=new Date(String(org.intro_free_until)+'T23:59:59');
-    if(!isNaN(end.getTime()) && end.getTime()>=Date.now()) return 0;
-  }
-  if(org.kind==='federation') return ORG_PAID_EVENT_TYPES.indexOf(String(eventType||''))>=0 ? 0.01 : 0;
-  return 0.01;
-}
+function orgRate(org){ return (org && org.kind==='federation') ? 0 : 0.01; }
 function _gymHasTerms(g){ return !!(g && typeof g.terms_text==='string' && g.terms_text.trim()); }
 // SPOLEK POTREBUJE I DOKUMENT. Kdo se stava clenem spolku, musi mit k dispozici stanovy
 // a souhlasit s nimi -- podminky treninku (urazy, zdravotni zpusobilost, storno) jsou vedle
@@ -13389,7 +13379,7 @@ async function doEventCheckout(ev, tier, _confirmed, _minorOk, _qty, _cartIn, _w
     // ORGANIZACE JAKO PŘÍJEMCE. Akci pořádá i federace nebo promotér a ta nemá gym_id --
     // příjemce se dohledával jen mezi koučem a klubem, takže lístek nešlo zaplatit vůbec
     // („Tato akce zatím nepřijímá platby"). Organizace je samostatný příjemce: vlastní
-    // účet, vlastní doklad, provize 1 % ze soutěží (viz orgRate v api/_rate.js).
+    // účet, vlastní doklad, sazba organizace (svaz 0 %, pořadatel 1 % -- viz orgRate v api/_rate.js).
     if(!_evPayee && ev.organization_id){ const { data:o } = await supaClient.from('organizations').select('id,name,payment_mode,stripe_account,receiver_id_type,receiver_id_value,receiver_name,currency,account_suspended,commission_card_status,pis_test').eq('id', ev.organization_id).single();
       if(o){
         if(o.account_suspended){ toast(LANG==='en'?'⚠️ This organizer cannot take payments right now':'⚠️ Tento pořadatel teď nemůže přijímat platby'); return; }
@@ -13495,7 +13485,7 @@ async function _evtQrConfirm(ticketId, ok){
   const ev=(window._mineHosted||[]).find(function(x){ return String(x.id)===String(t.event_id); }); if(!ev) return;
   try{
     if(!ok){ await _qrRequeue('event_tickets', ticketId, (t&&t.buyer_id)||null, (ev&&ev.title)||null); toast(EN?'Marked as not arrived \u2014 the student was told to check the payment; the spot is held for another 30 minutes':'Ozna\u010deno jako nedorazilo \u2014 svěřenec dostal zpr\u00e1vu, a\u0165 platbu zkontroluje; m\u00edsto dr\u017e\u00edme je\u0161t\u011b 30 minut',1); renderMyEvManage(); return; }
-    // AKCE ORGANIZACE SE ÚČTUJE JÍ. Vlastní doklad, vlastní řada, provize podle typu akce --
+    // AKCE ORGANIZACE SE ÚČTUJE JÍ. Vlastní doklad, vlastní řada, sazba organizace --
     // proto vlastní koncový bod, ne record-cash (ten zná jen klub a kouče).
     if(!ev.payout_coach_id && !ev.gym_id && ev.organization_id){
       const _amtMinor=Math.round((t.amount||0)*100);
@@ -37863,22 +37853,14 @@ async function openAdminOrgs(mode){
     if(!o) return;
     const reason = approve ? null : (prompt(EN?'Reason (the applicant will see it):':'D\u016fvod (\u017eadatel ho uvid\u00ed):')||'').trim();
     if(!approve && reason===null) return;
-    // Zavadeci nula. Vychozi nabidka 6 mesicu, ale zadat jde cokoli vcetne nuly.
-    let _introUntil=null;
-    if(approve){
-      const _m=prompt(EN?'Months with 0 % commission (0 = none):':'Kolik m\u011bs\u00edc\u016f 0 % provize (0 = \u017e\u00e1dn\u00e1):','6');
-      if(_m===null) return;
-      const _n=Math.max(0, parseInt(_m,10)||0);
-      if(_n>0){ const d=new Date(); d.setMonth(d.getMonth()+_n); _introUntil=d.toISOString().slice(0,10); }
-    }
     try{
       await supaClient.from('organizations').update(approve
-        ? { status:'approved', approved_at:new Date().toISOString(), approved_by:currentUser.id, reject_reason:null, intro_free_until:_introUntil }
+        ? { status:'approved', approved_at:new Date().toISOString(), approved_by:currentUser.id, reject_reason:null }
         : { status:'rejected', reject_reason:reason||null }).eq('id', o.id);
       // Zadatel se to musi dozvedet, jinak ceka na neco, co uz je rozhodnute.
       try{ await supaClient.from('notifications').insert(_bi({ user_id:o.owner_id, type:'system', read:false,
         data:JSON.stringify({ kind:'org_decision' }),
-        message:''}, function(EN){ return EN ? (approve ? ('\u2705 The organisation '+(o.name||'')+' was approved. You can create events.'+(_introUntil?(' 0 % commission until '+new Date(_introUntil).toLocaleDateString('en-GB')+'.'):'')) : ('\u274C The application of the organisation '+(o.name||'')+' was declined.'+(reason?(' Reason: '+reason):''))) : (approve ? ('\u2705 Organizace '+(o.name||'')+' byla schv\u00e1lena. M\u016f\u017ee\u0161 vytv\u00e1\u0159et akce.'+(_introUntil?(' Provize 0 % do '+new Date(_introUntil).toLocaleDateString('cs-CZ')+'.'):''))
+        message:''}, function(EN){ return EN ? (approve ? ('\u2705 The organisation '+(o.name||'')+' was approved. You can create events.') : ('\u274C The application of the organisation '+(o.name||'')+' was declined.'+(reason?(' Reason: '+reason):''))) : (approve ? ('\u2705 Organizace '+(o.name||'')+' byla schv\u00e1lena. M\u016f\u017ee\u0161 vytv\u00e1\u0159et akce.')
                          : ('\u274C P\u0159ihl\u00e1\u0161ka organizace '+(o.name||'')+' byla zam\u00edtnuta.'+(reason?(' D\u016fvod: '+reason):''))); })); }catch(e){}
       openAdminOrgs((window._aoF&&window._aoF.status==='pending')?'pending':'all');
     }catch(e){ toast('\u26a0\ufe0f '+(e.message||'error')); }
@@ -37942,7 +37924,6 @@ async function openAdminOrgDetail(org){
     (document.querySelector('.app')||document.body).appendChild(ov); }
   const _isFounder=!!(currentUser && (currentUser.role==='founder' || currentUser.id===FOUNDER_UUID));
   const _dt=function(v){ try{ return v?new Date(v).toLocaleString(EN?'en-GB':'cs-CZ'):''; }catch(e){ return ''; } };
-  const _dd=function(v){ try{ return v?new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ'):''; }catch(e){ return ''; } };
   // Chybějící údaj se ukáže červeně: bez něj nejde vystavit doklad, takže prázdno se nesmí
   // ztratit mezi pomlčkami. Stejné pravidlo jako u klubu.
   const _row=function(ico,lbl,val){
@@ -37957,7 +37938,6 @@ async function openAdminOrgDetail(org){
               rejected:['#FDECEC','#8a1c1c',EN?'rejected':'zam\u00edtnuto'], suspended:['var(--surf)','var(--mid)',EN?'suspended':'pozastaveno'] }[st]||['var(--surf)','var(--mid)',String(st||'')];
     return '<span style="font-size:11px;background:'+m[0]+';color:'+m[1]+';padding:3px 9px;border-radius:8px;white-space:nowrap;">'+m[2]+'</span>';
   };
-  const _intro=!!(org.intro_free_until && new Date(String(org.intro_free_until)+'T23:59:59')>=new Date());
   const _mode=org.payment_mode||null;
   const _modeLbl=(_mode==='stripe')?'Stripe':((_mode==='qr_bank')?(EN?'bank transfer':'bankovn\u00ed p\u0159evod'):(EN?'not set':'nenastaveno'));
   const _card=(org.commission_card_status==='active')
@@ -37981,11 +37961,9 @@ async function openAdminOrgDetail(org){
     +((_isFounder && org.kind!=='supplier')?('<div style="background:#1f2937;border:1px solid #FFD54A;border-radius:12px;padding:11px 13px;margin-bottom:16px;">'
       +'<div style="font-size:12.5px;font-weight:800;color:#FFD54A;">\u26a1 '+(EN?'Organization rate':'Sazba organizace')+'</div>'
       +'<div style="font-size:11.5px;color:#cbd5e1;margin-top:3px;line-height:1.55;">'
-        +(EN?'Competitions and fight nights ':'Sout\u011b\u017ee a fight nights ')+(_intro?'0 %':'1 %')
-        +' \u00b7 '+(EN?'fees and courses ':'poplatky a \u0161kolen\u00ed ')+'0 %'
+        +((org.kind==='federation')?(EN?'0 % on everything':'0 % ze v\u0161eho'):(EN?'1 % of ticket sales':'1 % z prodeje l\u00edstk\u016f'))
         +' \u00b7 '+_modeLbl
-        +(_intro?('<br><span style="opacity:.8;">'+(EN?'0 % until ':'0 % do ')+_dd(org.intro_free_until)+'</span>'):'')
-        +'<br><span style="opacity:.8;">'+(EN?'Commission card: ':'Karta na provizi: ')+escapeHtml(_card)+'</span>'
+        +(orgRate(org)>0?('<br><span style="opacity:.8;">'+(EN?'Commission card: ':'Karta na provizi: ')+escapeHtml(_card)+'</span>'):'')
       +'</div>'
       +'<label style="display:flex;align-items:center;gap:8px;margin-top:9px;padding-top:8px;border-top:1px solid rgba(255,255,255,.14);cursor:pointer;">'
         +'<input type="checkbox" id="aodDaily"'+(org.commission_daily?' checked':'')+' style="width:16px;height:16px;cursor:pointer;">'
@@ -38270,24 +38248,35 @@ async function openFindOrg(){
   ov.querySelector('#_foClose').onclick=function(){ ov.remove(); };
   ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
   const box=ov.querySelector('#_foList');
-  let _t=null;
-  ov.querySelector('#_foQ').oninput=function(e){
-    clearTimeout(_t); const q=(e.target.value||'').trim();
-    if(q.length<2){ box.innerHTML=''; return; }
-    _t=setTimeout(async function(){
-      let rows=[];
-      try{ const { data }=await supaClient.from('organizations').select('id,name,abbr,city')
-        .eq('kind','federation').eq('status','approved')
-        .or('name.ilike.%'+q+'%,abbr.ilike.%'+q+'%').limit(8); rows=data||[]; }catch(e){}
-      box.innerHTML=rows.length?rows.map(function(o){
-        return '<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);">'
-          +'<span style="font-size:12px;font-weight:800;background:#EDE7FF;color:#5B3FB0;border-radius:8px;padding:3px 9px;">'+escapeHtml(o.abbr||'')+'</span>'
-          +'<div style="flex:1;min-width:0;font-size:13.5px;color:var(--dark);">'+escapeHtml(o.name||'')+'<span style="color:var(--light);"> \u00b7 '+escapeHtml(o.city||'')+'</span></div>'
-          +'<button class="foAsk" data-id="'+o.id+'" data-n="'+escapeHtml(o.name||'')+'" style="background:var(--dark);color:#fff;border:none;border-radius:9px;font-size:12px;font-weight:700;padding:6px 12px;cursor:pointer;font-family:inherit;">'+(EN?'Request':'Po\u017e\u00e1dat')+'</button></div>';
-      }).join(''):('<p style="font-size:12.5px;color:var(--light);padding:8px 0;">'+(EN?'Nothing found.':'Nic nenalezeno.')+'</p>');
-      box.querySelectorAll('.foAsk').forEach(function(b){ b.onclick=function(){ _foConfirm(b.dataset.id, b.dataset.n, ov); }; });
-    }, 350);
+  // CELÝ SEZNAM HNED, NE AŽ PO PSANÍ. Svazů jsou desítky, ne tisíce -- klub, který zkratku
+  // nezná, by ho jinak nenašel. Nejdřív svazy z jeho země, pak ostatní; psaní jen filtruje.
+  box.innerHTML='<p style="font-size:12.5px;color:var(--light);padding:8px 0;">'+(EN?'Loading…':'Načítám…')+'</p>';
+  let all=[], mine={};
+  try{ const { data }=await supaClient.from('organizations').select('id,name,abbr,city,country,billing_country')
+    .eq('kind','federation').eq('status','approved').order('name').limit(500); all=data||[]; }catch(e){}
+  try{ const { data }=await supaClient.from('organization_clubs').select('organization_id,status')
+    .eq('gym_id',_myGymData.id).in('status',['pending','active']); (data||[]).forEach(function(r){ mine[r.organization_id]=r.status; }); }catch(e){}
+  const cc=String(_myGymData.billing_country||_myGymData.country_code||'').toUpperCase();
+  const _occ=function(o){ return String(o.country||o.billing_country||'').toUpperCase(); };
+  all.sort(function(a,b){ const x=(_occ(a)===cc)?0:1, y=(_occ(b)===cc)?0:1; return (x-y)||String(a.name||'').localeCompare(String(b.name||''),'cs'); });
+  const _norm=function(t){ return String(t||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,''); };
+  const paint=function(q){
+    const n=_norm(q);
+    const rows=n?all.filter(function(o){ return _norm(o.name).indexOf(n)>=0 || _norm(o.abbr).indexOf(n)>=0 || _norm(o.city).indexOf(n)>=0; }):all;
+    box.innerHTML=rows.length?rows.map(function(o){
+      const st=mine[o.id];
+      const act=st
+        ? '<span style="font-size:12px;font-weight:700;color:'+(st==='active'?'#006040':'#9A5B00')+';white-space:nowrap;">'+(st==='active'?(EN?'Member':'Člen'):(EN?'Pending':'Čeká'))+'</span>'
+        : '<button class="foAsk" data-id="'+o.id+'" data-n="'+escapeHtml(o.name||'')+'" style="background:var(--dark);color:#fff;border:none;border-radius:9px;font-size:12px;font-weight:700;padding:6px 12px;cursor:pointer;font-family:inherit;">'+(EN?'Request':'Požádat')+'</button>';
+      return '<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);">'
+        +'<span style="font-size:12px;font-weight:800;background:#EDE7FF;color:#5B3FB0;border-radius:8px;padding:3px 9px;">'+escapeHtml(o.abbr||'')+'</span>'
+        +'<div style="flex:1;min-width:0;font-size:13.5px;color:var(--dark);">'+escapeHtml(o.name||'')+(o.city?('<span style="color:var(--light);"> · '+escapeHtml(o.city)+'</span>'):'')+'</div>'
+        +act+'</div>';
+    }).join(''):('<p style="font-size:12.5px;color:var(--light);padding:8px 0;">'+(EN?'Nothing found.':'Nic nenalezeno.')+'</p>');
+    box.querySelectorAll('.foAsk').forEach(function(b){ b.onclick=function(){ _foConfirm(b.dataset.id, b.dataset.n, ov); }; });
   };
+  paint('');
+  ov.querySelector('#_foQ').oninput=function(e){ paint((e.target.value||'').trim()); };
 }
 // PROFIL ASOCIACE OČIMA KLUBU. Soukromý -- otevře ho jen klub, který je členem nebo o členství
 // požádal. Není to stav vztahu na jednom řádku, ale místo, kde klub najde všechno: kdo asociace
@@ -40461,9 +40450,9 @@ function _orgPayMissing(o){
   if(!mode) miss.push('paymode');
   else if(mode==='stripe'){ if(!o.stripe_account) miss.push('stripe'); }
   else if(!o.receiver_id_value || !o.receiver_name) miss.push('iban');
-  // KARTA JE PODMÍNKA VÝBĚRU PENĚZ. Na bankovní koleji peníze přes MTL neprojdou, takže
-  // provizi (1 % ze soutěží) nelze vzít odjinud než z uložené karty.
-  if(mode!=='stripe' && o.commission_card_status!=='active') miss.push('card');
+  // KARTA JE PODMÍNKA VÝBĚRU PENĚZ -- ale jen když je co strhávat. Na bankovní koleji peníze
+  // přes MTL neprojdou, provizi nelze vzít odjinud než z uložené karty. Svaz má 0 %, kartu nepotřebuje.
+  if(mode!=='stripe' && orgRate(o)>0 && o.commission_card_status!=='active') miss.push('card');
   ORG_BILLING_FIELDS.forEach(function(f){ if((f in o) && !String(o[f]||'').trim()) miss.push(f); });
   return miss;
 }
@@ -40503,7 +40492,7 @@ async function openOrgFinance(org){
   const rowS="width:100%;box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 15px;background:var(--surf);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;color:var(--dark);cursor:pointer;font-family:'DM Sans';margin-bottom:10px;";
   const _mode=(org.payment_mode||null);
   const _modeLbl=(_mode==='stripe')?'Stripe':((_mode==='qr_bank')?(EN?'Bank transfer':'Bankovní převod'):(EN?'Not set':'Nenastaveno'));
-  const _intro=!!(org.intro_free_until && new Date(String(org.intro_free_until)+'T23:59:59')>=new Date());
+  const _fed=(org.kind==='federation');
   const _miss=_orgPayMissing(org);
   const _RAIL={paymode:1,stripe:1,iban:1,card:1};
   const _needRail=_miss.some(function(k){ return _RAIL[k]; });
@@ -40517,18 +40506,13 @@ async function openOrgFinance(org){
       +(_needBill?('<button id="opGoBill" style="padding:8px 12px;background:#fff;border:1px solid #FCD9A8;border-radius:9px;font-size:12px;font-weight:800;color:#9a5a00;cursor:pointer;font-family:inherit;">🧾 '+(EN?'Billing details':'Fakturační údaje')+'</button>'):'')
     +'</div></div>'):'';
   // ── sazba ─────────────────────────────────────────────────────────────────────────────
-  const _rateRow=function(lbl,val){ return '<div style="display:flex;justify-content:space-between;gap:12px;"><span>'+lbl+'</span><b>'+val+'</b></div>'; };
   const _rateCard='<div style="background:linear-gradient(135deg,#0A7A4F,#005A3C);color:#fff;border-radius:14px;padding:13px 16px;margin-bottom:14px;box-shadow:0 2px 10px rgba(0,96,64,.18);">'
     +'<div style="font-size:11.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:rgba(255,255,255,.75);margin-bottom:5px;">'+(EN?'Your MTL commission':'Vaše provize MTL')+'</div>'
-    +'<div class="mtlRatePct" style="font-size:26px;font-weight:800;line-height:1;">'+(_intro?'0 %':'1 %')+'</div>'
+    +'<div class="mtlRatePct" style="font-size:26px;font-weight:800;line-height:1;">'+(_fed?'0 %':'1 %')+'</div>'
     +'<div style="font-size:12px;color:rgba(255,255,255,.85);margin-top:7px;line-height:1.4;">'
-      +(_intro?(EN?'Introductory period — nothing is charged until ':'Zaváděcí období — do ')+String(org.intro_free_until).slice(0,10)+(EN?'':' se neúčtuje nic')
-             :(EN?'Competitions and fight nights · taken from each payment through MTL':'Soutěže a fight nights · strženo z každé platby přes MTL'))+'</div>'
-    +'<div style="font-size:12.5px;line-height:1.9;margin-top:8px;padding-top:7px;border-top:1px solid rgba(255,255,255,.18);">'
-      +_rateRow((EN?'Membership fees':'Členské poplatky'),'0 %')
-      +_rateRow((EN?'Courses and seminars':'Školení a semináře'),'0 %')
-      +_rateRow((EN?'Competitions and fight nights':'Soutěže a fight nights'),(_intro?'0 %':'1 %'))
-    +'</div></div>';
+      +(_fed?(EN?'Free for federations — membership fees, courses, competitions and fight nights. Card fees are charged by Stripe, not MTL.':'Pro svazy zdarma — členské poplatky, školení, soutěže i fight nights. Poplatek za kartu účtuje Stripe, ne MTL.')
+            :(EN?'Of every ticket sold through MTL':'Z každého lístku prodaného přes MTL'))+'</div>'
+    +'</div>';
   // ── účet a karta ──────────────────────────────────────────────────────────────────────
   // Účet není další položka k naklikání, je to údaj k té koleji nad ním -- proto bez rámečku,
   // odsazený, těsně pod řádkem režimu.
@@ -40551,7 +40535,7 @@ async function openOrgFinance(org){
     +_lbl(EN?'How you get paid':'Jak přijímáte platby')
     +'<button id="opRowMode" style="'+rowS+'"><span>🔁 '+(EN?'Payment mode':'Režim plateb')+'</span><span style="display:flex;align-items:center;gap:8px;"><span style="color:var(--mid);font-weight:700;font-size:13px;">'+_modeLbl+'</span><span style="color:var(--red);font-weight:700;">›</span></span></button>'
     +((_mode==='qr_bank')?(_rcv
-      +'<button id="opRowCard" style="'+rowS+'"><span>💳 '+(EN?'Commission card':'Karta na provizi')+'</span><span style="display:flex;align-items:center;gap:8px;"><span style="color:'+((org.commission_card_status==='active')?'var(--mid)':'#b3261e')+';font-weight:700;font-size:13px;">'+escapeHtml(_cardLbl)+'</span><span style="color:var(--red);font-weight:700;">›</span></span></button>'):'')
+      +(_fed?'':'<button id="opRowCard" style="'+rowS+'"><span>💳 '+(EN?'Commission card':'Karta na provizi')+'</span><span style="display:flex;align-items:center;gap:8px;"><span style="color:'+((org.commission_card_status==='active')?'var(--mid)':'#b3261e')+';font-weight:700;font-size:13px;">'+escapeHtml(_cardLbl)+'</span><span style="color:var(--red);font-weight:700;">›</span></span></button>')):'')
     +'<button id="opRowBill" style="'+rowS+'"><span>🧾 '+(EN?'Billing details':'Fakturační údaje')+'</span><span style="color:var(--red);font-weight:700;">›</span></button>'
     // E-MAIL ORGANIZACE, NE OSOBNÍ. Stripe posílá potvrzení o uložené kartě na adresu, kterou
     // mu dáme. Dřív to byl bez výjimky e-mail účtu, kterým se člověk registroval -- federace
@@ -40688,7 +40672,7 @@ function openOrgPayMode(org){
     +'<label style="display:flex;gap:9px;align-items:flex-start;padding:12px;border:1.5px solid '+((mode==='qr_bank')?'var(--red)':'var(--border)')+';border-radius:12px;margin-bottom:8px;cursor:pointer;">'
       +'<input type="radio" name="opPayMode" value="qr_bank"'+((mode==='qr_bank')?' checked':'')+' style="margin-top:2px;">'
       +'<div><div style="font-weight:700;font-size:14.5px;margin-bottom:5px;">🏦 '+(EN?'Bank transfer':'Bankovní převod')+'</div>'
-      +'<div style="font-size:12.5px;color:var(--mid);line-height:1.45;">'+(EN?'Clubs pay membership fees by transfer or QR straight to your account. The MTL commission (competitions only) is charged monthly from a saved card.':'Kluby platí členské poplatky převodem nebo QR přímo na váš účet. Provizi MTL (jen ze soutěží) strhneme měsíčně z uložené karty.')+'</div></div></label>'
+      +'<div style="font-size:12.5px;color:var(--mid);line-height:1.45;">'+(EN?('Clubs pay membership fees by transfer or QR straight to your account. '+((org.kind==='federation')?'No MTL commission.':'The MTL commission (1 %) is charged monthly from a saved card.')):('Kluby platí členské poplatky převodem nebo QR přímo na váš účet. '+((org.kind==='federation')?'Bez provize MTL.':'Provizi MTL (1 %) strhneme měsíčně z uložené karty.')))+'</div></div></label>'
     +'<label style="display:flex;gap:9px;align-items:flex-start;padding:12px;border:1.5px dashed var(--border);border-radius:12px;margin-bottom:14px;opacity:.6;cursor:not-allowed;">'
       +'<input type="radio" disabled style="margin-top:2px;">'
       +'<div><div style="font-weight:700;font-size:14.5px;margin-bottom:5px;">💳 Stripe · '+(EN?'coming soon':'připravujeme')+'</div>'
@@ -40850,19 +40834,11 @@ async function openOrgApply(kind, opts){
       + (_live?_b('supCancelBtn',o.supplier_cancelling?('\u21A9\uFE0F '+(EN?'Renew subscription':'Obnovit p\u0159edplatn\u00e9')):(EN?'Cancel subscription':'Zru\u0161it p\u0159edplatn\u00e9')):'');
   }
   else if(o.status==='approved'){
-    // Sazba i konec zavadeciho obdobi patri organizaci pred oci, ne do adminu. Kdo neví,
-    // kdy mu nula skonci, dozvi se to az z prvni strzené provize.
-    const _r=orgRate(o,'fight_night'), _r0=orgRate(o,'seminar');
-    const _pct=v=>(Math.round(v*1000)/10)+' %';
+    // Sazba patri organizaci pred oci, ne do adminu.
     const _sazba=(o.kind==='federation')
-      ? (EN?('Commission: '+_pct(_r)+' on competitions and fight nights, '+_pct(_r0)+' on seminars and courses.')
-           :('Provize: '+_pct(_r)+' ze sout\u011b\u017e\u00ed a fight nights, '+_pct(_r0)+' ze semin\u00e1\u0159\u016f a \u0161kolen\u00ed.'))
-      : (EN?('Commission: '+_pct(_r)+' of ticket sales.'):('Provize: '+_pct(_r)+' z prodeje l\u00edstk\u016f.'));
-    const _intro=o.intro_free_until
-      ? (EN?(' 0 % until '+new Date(o.intro_free_until).toLocaleDateString('en-GB')+'.')
-           :(' 0 % do '+new Date(o.intro_free_until).toLocaleDateString('cs-CZ')+'.'))
-      : '';
-    head=`<div style="background:#E8F5EE;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:13px;color:#006040;line-height:1.5;">\u2705 ${EN?'Approved. You can create events.':'Schv\u00e1leno. M\u016f\u017ee\u0161 vytv\u00e1\u0159et akce.'}<br><span style="font-size:12.5px;">${_sazba}${_intro}</span>
+      ? (EN?'No MTL commission — free for federations.':'Bez provize MTL \u2014 pro svazy zdarma.')
+      : (EN?'Commission: 1 % of ticket sales.':'Provize: 1 % z prodeje l\u00edstk\u016f.');
+    head=`<div style="background:#E8F5EE;border:1px solid #A8E6C0;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:13px;color:#006040;line-height:1.5;">\u2705 ${EN?'Approved. You can create events.':'Schv\u00e1leno. M\u016f\u017ee\u0161 vytv\u00e1\u0159et akce.'}<br><span style="font-size:12.5px;">${_sazba}</span>
       <div style="font-size:11.5px;color:#0a7a4f;margin-top:6px;">${EN?'Details in Payments & commission.':'Podrobnosti v Platby a provize.'}</div></div>
     <button id="orgStatsBtn" style="width:100%;box-sizing:border-box;padding:14px 16px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:14px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:'DM Sans';margin-bottom:10px;text-align:center;">\u{1F4CA} ${EN?'Dashboard':'P\u0159ehled'}</button>
         ${_isFed?`<button id="orgClubsBtn" style="width:100%;box-sizing:border-box;padding:14px 16px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:14px;font-size:14.5px;font-weight:800;cursor:pointer;font-family:'DM Sans';margin-bottom:10px;text-align:center;">\u{1F3C5} ${EN?'Member clubs':'\u010clensk\u00e9 kluby'}</button>`:'<div style="height:4px;"></div>'}
