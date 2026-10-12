@@ -674,7 +674,6 @@ body.gate-pending #bootSplash{animation:none !important;opacity:1 !important;}
   }
 }
 
-.pull-spinner{width:24px;height:24px;border:3px solid var(--border);border-top-color:var(--red);border-radius:50%;animation:pullspin .6s linear infinite}
 @keyframes pullspin{to{transform:rotate(360deg)}}
 .ptr{position:absolute;left:0;right:0;top:0;height:0;display:flex;align-items:center;justify-content:center;overflow:hidden;z-index:0;color:var(--mid);pointer-events:none}
 .ptr svg{transition:opacity .15s}
@@ -33033,9 +33032,12 @@ function setAvatar(url){
 //   refresh() async, načte data znovu
 //   scroller host je sám scrollovací (sheet): svislý tah se pak nesmí předat do scrollu,
 //            jinak by se na iOS přidalo vlastní pružení
+// ZNOVU NAČÍST NEJDŘÍV ZA 8 s. Další stažení v té době kroužkem jen zatočí a nic nestahuje --
+// opakované tahání tak nenadělá dotazy do databáze (a poplatky za přenos dat).
+const PTR_COOLDOWN=8000;
 function _ptrBind(o){
   const MAX=130, TH=64, HOLD=56;
-  let y0=0, x0=0, on=false, lock=null, d=0, busy=false, ready=false, els=[];
+  let y0=0, x0=0, on=false, lock=null, d=0, busy=false, ready=false, els=[], last=0;
   const ptr=o.ptr, ring=ptr&&ptr.querySelector('circle');
   const _paint=function(v, anim){
     els.forEach(function(e){ e.classList.toggle('ptr-anim', !!anim); e.style.transform=v?('translateY('+v+'px)'):''; });
@@ -33046,11 +33048,17 @@ function _ptrBind(o){
     window._ptrActive=false; on=false; lock=null; d=0; ready=false;
     if(busy || document.body.classList.contains('dashmode') || o.blocked() || e.touches.length!==1) return;
     const h=o.hdr(); if(h && e.target && h.contains(e.target)) return;
+    // Prst na seznamu, který má vlastní scroll a není nahoře -> to je scrollování, ne obnovení.
+    for(let el=e.target; el && el!==o.host; el=el.parentElement){ if(el.scrollTop>0) return; }
     y0=e.touches[0].clientY; x0=e.touches[0].clientX; on=true;
   },{passive:true, capture:true});
   o.host.addEventListener('touchmove',function(e){
     if(!on) return;
     const dy=e.touches[0].clientY-y0, dx=e.touches[0].clientX-x0;
+    // iOS: tah dolů nahoře v sheetu zastavit hned od prvního pixelu. Kdyby se čekalo na zámek
+    // směru, Safari by mezitím rozjel vlastní pružení a další pohyby už zastavit nejde --
+    // obsah by pak jen gumově poskočil a kroužek by se neukázal.
+    if(o.scroller && !lock && dy>0 && dy>=Math.abs(dx) && e.cancelable) e.preventDefault();
     if(!lock){ if(Math.abs(dy)<8 && Math.abs(dx)<8) return; lock=(dy>0 && Math.abs(dy)>Math.abs(dx)*1.4)?'v':'h'; if(lock==='h'){ on=false; return; }
       window._ptrActive=true; els=o.targets();
       const h=o.hdr(); if(ptr && h) ptr.style.top=(h.offsetTop+h.offsetHeight)+'px'; if(ptr) ptr.classList.remove('ptr-busy','ptr-ready'); }
@@ -33066,11 +33074,14 @@ function _ptrBind(o){
     if(!ready){ _paint(0,true); setTimeout(function(){ window._ptrActive=false; }, 0); return; }
     busy=true; _paint(HOLD,true); _ring(1); if(ptr) ptr.classList.add('ptr-busy');
     const t0=Date.now();
-    try{ await o.refresh(); }catch(_e){}
+    if(t0-last>PTR_COOLDOWN){ last=t0; try{ await o.refresh(); }catch(_e){} }
+    // Obnovení mohlo obsah vykreslit znovu (nové prvky bez posunu) -- posunout i ty, ať kroužek
+    // do konce točení nepřekrývá obsah.
+    els=o.targets(); _paint(HOLD,false);
     // Kroužek se točí aspoň chvilku -- bleskové zmizení působí, jako by se nic nestalo.
     const w=650-(Date.now()-t0); if(w>0) await new Promise(function(r){ setTimeout(r,w); });
     if(ptr) ptr.classList.remove('ptr-busy','ptr-ready');
-    els=o.targets(); _paint(0,true); _ring(0);
+    _paint(0,true); _ring(0);
     setTimeout(function(){ els.forEach(function(e){ e.classList.remove('ptr-anim'); e.style.transform=''; }); busy=false; window._ptrActive=false; }, 360);
   };
   o.host.addEventListener('touchend',_end,{passive:true, capture:true});
@@ -33097,7 +33108,8 @@ function _ptrBind(o){
     }
   });
 })();
-// Profil kouče a klubu: stejné gesto, když je profil nahoře. Načte jen ten profil znovu.
+// Sheety (profily, notifikace, zprávy, přehledy): stejné gesto, když je sheet nahoře. Načte znovu
+// jen ten sheet.
 // Spodní lišta s cenou (.pf-bar) zůstává stát, sjíždí obsah mezi ní a hlavičkou.
 (function(){
   const _flat=function(el){
@@ -33116,6 +33128,18 @@ function _ptrBind(o){
       refresh:refresh
     });
   };
+  _sheet('shNotif', function(){ return loadNotifications(); });
+  _sheet('shMsgs', function(){ return loadConversations(); });
+  _sheet('shCoachDash', function(){ return renderCoachDash(); });
+  _sheet('shGymTeamDash', function(){ return renderGymTeamDash(); });
+  _sheet('shGymManage', function(){ return loadGymManageBookings(); });
+  _sheet('shMoneyDash', function(){ return openFullDash(); });
+  _sheet('shFounderDash', function(){ return renderFdReal(); });
+  _sheet('shEventView', async function(){
+    const ev=window._evViewing; if(!ev || !ev.id) return;
+    const { data } = await supaClient.from('events').select('*').eq('id', ev.id).single();
+    await openEventView(data || ev);
+  });
   _sheet('shGymProfile', async function(){
     const g=window._gpOpen; if(!g || !g.id) return;
     window._gymViewSrc=(window._curGymOpenSrc && window._curGymOpenSrc.gym===g.id && window._curGymOpenSrc.src) || null;
@@ -33128,39 +33152,6 @@ function _ptrBind(o){
   });
 })();
 
-  // Pull to refresh — notifikace se spinnerem
-let notifPullStart=0, notifPulling=false, notifPullDist=0;
-const notifSheet=$('shNotif');
-
-notifSheet.addEventListener('touchstart',(e)=>{
-  if(notifSheet.scrollTop>0) return;
-  notifPullStart=e.touches[0].clientY;
-  notifPulling=true;
-},{passive:true});
-
-notifSheet.addEventListener('touchmove',(e)=>{
-  if(!notifPulling) return;
-  notifPullDist=e.touches[0].clientY-notifPullStart;
-  if(notifPullDist>0 && notifPullDist<120){
-    $('notifList').style.transform=`translateY(${Math.min(notifPullDist,70)}px)`;
-    $('notifList').style.transition='none';
-  }
-},{passive:true});
-
-notifSheet.addEventListener('touchend',async()=>{
-  if(!notifPulling) return;
-  notifPulling=false;
-  $('notifList').style.transition='transform .2s';
-  if(notifPullDist>70){
-    // ukaž spinner nahoře v seznamu
-    $('notifList').innerHTML='<div style="display:flex;justify-content:center;padding:24px;"><div class="pull-spinner"></div></div>';
-    $('notifList').style.transform='translateY(0)';
-    await loadNotifications();
-  } else {
-    $('notifList').style.transform='translateY(0)';
-  }
-  notifPullDist=0;
-},{passive:true});
 
 // Messages
 
@@ -34437,10 +34428,18 @@ async function updateNotifBadge(){
   async function doAppRefresh(opts){
   const _silent=!!(opts&&opts.silent);   // pull-to-refresh: zpětnou vazbu dává kroužek, ne toast
   if(!_silent) toast(L('⟳ Obnovuji...'));
-  try{ await supaClient.auth.refreshSession(); }catch(e){}
+  // Pull-to-refresh session neobnovuje: supabase-js si token obnovuje sám a tady by to byl
+  // další požadavek, na který se čeká, než se vůbec začne načítat.
+  if(!_silent){ try{ await supaClient.auth.refreshSession(); }catch(e){} }
   const _sheetOpen = !!document.querySelector('.sheet.open');
-  if(!_sheetOpen){ await loadCoaches(); if(typeof updateCoachSummary==='function') await updateCoachSummary(); }
-  await updateNotifBadge();
+  // NEJDŘÍV TO, CO JE VIDĚT: deck a odznak notifikací, souběžně. Na tohle čeká kroužek.
+  // Dřív šlo všech ~10 dotazů za sebou (profil, výdělky, přehledy…) a kroužek se točil
+  // několik sekund, i když se deck načetl hned.
+  await Promise.all([
+    _sheetOpen ? null : (async function(){ await loadCoaches(); if(typeof updateCoachSummary==='function') await updateCoachSummary(); })(),
+    updateNotifBadge()
+  ]);
+  const _rest=(async function(){
   if(currentUser && currentUser.role==='founder') await updateAdminBadge();
   if(currentUser){
     const { data: prof } = await supaClient.from('profiles').select('*').eq('id', currentUser.id).single();
@@ -34457,7 +34456,11 @@ async function updateNotifBadge(){
   try{ var _ao=document.querySelector('[id^="shAmb"].open'); if(_ao && typeof openAmbassadorDashboard==='function') await openAmbassadorDashboard(); }catch(e){}
   if($('shNotif').classList.contains('open')) loadNotifications();
   if(document.body.classList.contains('dashmode') && typeof buildDashSide==='function') buildDashSide();
-  if(!_silent) toast(L('✅ Obnoveno'));
+  })().catch(function(){});
+  // Pull-to-refresh: zbytek (profil, výdělky, otevřené přehledy) doběhne na pozadí.
+  if(_silent) return;
+  await _rest;
+  toast(L('✅ Obnoveno'));
   }
   window.doAppRefresh=doAppRefresh;
 
