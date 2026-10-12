@@ -1222,7 +1222,7 @@ export default async function handler(req, res) {
       const sub = event.data.object;
       // PROČ A KDY SKONČILO -- do e-mailu i notifikace. Stripe pošle tuhle událost v okamžiku konce:
       // u zrušeného předplatného s koncem zaplaceného období, u neuhrazeného po posledním pokusu.
-      const _endInfo = { reason: (sub.cancellation_details && sub.cancellation_details.reason) || null, endedAt: sub.ended_at || sub.canceled_at || null };
+      const _endInfo = { reason: (sub.cancellation_details && sub.cancellation_details.reason) || null, endedAt: sub.ended_at || sub.canceled_at || null, test: sub.livemode === false };
       const _whyCs = _endInfo.reason === 'payment_failed' ? ' Platbu za další období se nepodařilo strhnout z karty ani po opakovaných pokusech.'
         : (_endInfo.reason === 'cancellation_requested' ? ' Předplatné jsi zrušil/a, proto skončilo s koncem zaplaceného období.' : '');
       const _whyEn = _endInfo.reason === 'payment_failed' ? ' The payment for the next period could not be charged to your card, not even after repeated attempts.'

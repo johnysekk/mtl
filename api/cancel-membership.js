@@ -110,7 +110,7 @@ export default async function handler(req, res) {
     const _pe = sub.current_period_end || (sub.items && sub.items.data && sub.items.data[0] && sub.items.data[0].current_period_end) || null;
     // EP / dodavatel: potvrzení e-mailem (zrušení s datem konce, nebo obnovení). Konec samotný
     // hlásí webhook (customer.subscription.deleted).
-    if (mtlSub && String(immediate) !== '1') await subMail(mtlSub, String(resume) === '1' ? 'resume' : 'cancel', _pe);
+    if (mtlSub && String(immediate) !== '1') await subMail(mtlSub, String(resume) === '1' ? 'resume' : 'cancel', _pe, { test: sub.livemode === false });
     res.status(200).json({
       ok: true,
       status: sub.status,

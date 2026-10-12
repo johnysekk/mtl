@@ -82,7 +82,12 @@ export async function subMail(who, what, until, info) {
     // Stejná stavba jako e-mail k faktuře za provizi: oslovení, věcný text, patička s kontaktem MTL.
     // Bez velkého nadpisu -- ten už je v předmětu.
     const ps = ((await sbGet('platform_settings?id=eq.1&select=name,contact_email,contact_phone')) || [])[0] || {};
+    // TESTOVACÍ REŽIM: EP i profil dodavatele se v testu obnovují DENNĚ (pay.js), ať je celý cyklus
+    // vidět druhý den. Zrušené předplatné tak skončí do 24 hodin -- bez téhle věty to vypadá jako chyba.
+    const testNote = I.test ? ('<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:12px;">'
+      + (en ? 'TEST MODE — in test, subscriptions renew every day instead of every month, so a cancelled one ends within 24 hours.' : 'TESTOVACÍ REŽIM — v testu se předplatné obnovuje každý den místo každý měsíc, takže zrušené skončí do 24 hodin.') + '</div>') : '';
     const html = '<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.6;">'
+      + testNote
       + '<p style="margin:0 0 10px;">' + (en ? 'Hello' : 'Dobrý den') + ',</p>'
       + (what === 'ended' ? T[1] : P(T[1]))
       + '<p style="margin:14px 0;"><a href="' + APP + '/?go=' + (who.orgId ? 'supplier' : 'partner') + '" style="display:inline-block;padding:11px 20px;background:#E63946;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;">'
