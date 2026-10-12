@@ -723,7 +723,7 @@ async function _paynowNotify(m, s, settled) {
   if (gym) {
     const miss = _gymMissing(gym);
     if (!miss.length) {
-      vis = 'Klub je zase vidět v hledání a sportovci u něj můžou platit.';
+      vis = 'Klub je zase vidět v hledání a dá se u něj platit.';
       visEn = 'The club is visible in search again and students can pay.';
     } else {
       vis = 'V hledání se klub ukáže, až bude hotové: ' + miss.map((k) => (_MISS[k] || [k])[0]).join(', ') + '.';
