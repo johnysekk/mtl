@@ -77,10 +77,13 @@ async function issueOrgDoklad(oc, org, amount, currency, method, testMode, trans
     if (no && typeof no === 'object') no = Array.isArray(no) ? no[0] : Object.values(no)[0];
     if (!no) return null;
 
-    // Odběratel: klub v MTL, nebo klub vedený jen asociací. Údaje se OPISUJÍ -- pozdější
-    // změna názvu nebo adresy nesmí přepsat už vystavený doklad.
+    // Odběratel: klub v MTL, klub vedený jen asociací, nebo členský svaz (member_org_id --
+    // jeho údaje do ext_* propisuje spouštěč z jeho organizace). Údaje se OPISUJÍ -- pozdější
+    // změna názvu nebo adresy nesmí přepsat už vystavený doklad. DIČ a zemi z ext_* je potřeba
+    // znát kvůli režimu DPH (přeshraniční plnění), stejně jako je kontroluje appka před platbou.
     let cust = { name: oc.ext_legal_name || oc.ext_name || null, email: oc.ext_email || oc.guest_email || null,
-                 ico: oc.ext_tax_id || null, address: oc.ext_address || null, dic: null, country: null };
+                 ico: oc.ext_tax_id || null, address: oc.ext_address || null,
+                 dic: oc.ext_vat_id || null, country: oc.ext_country || null };
     if (oc.gym_id) {
       const g = (await sb(`gyms?id=eq.${encodeURIComponent(oc.gym_id)}&select=name,legal_name,tax_id,vat_id,billing_line1,billing_line2,billing_city,billing_postal,invoice_email,billing_country,country_code`))[0];
       if (g) cust = { name: g.legal_name || g.name || null, email: g.invoice_email || null,
@@ -98,7 +101,7 @@ async function issueOrgDoklad(oc, org, amount, currency, method, testMode, trans
     // nevystavi a klub se vyzve k doplneni DIC (stejne jako u provizi MTL); s vypnutou se
     // vystavi domaci rezim, protoze bez DIC se odberatel bere jako osoba nepovinna k dani.
     if (V.mode === 'need_vat') {
-      if (requireVatForeign) return { needVat: true, custName: cust.name, custId: (oc.gym_id || null) };
+      if (requireVatForeign) return { needVat: true, custName: cust.name, custId: (oc.gym_id || null), custOrg: (oc.member_org_id || null) };
       V.mode = 'domestic';
       V.note = 'Odběratel bez DIČ — účtováno v režimu státu dodavatele.';
     }
@@ -168,6 +171,10 @@ export default async function handler(req, res) {
         if (_g) { _custCC = _g.billing_country || _g.country_code || null; _custDic = _g.vat_id || null; _custOwner = _g.owner_id || null; _custName = _g.name || null; }
       } else {
         _custCC = oc.ext_country || null; _custDic = oc.ext_vat_id || null; _custName = oc.ext_name || null;
+        if (oc.member_org_id) {
+          const _m = (await sb(`organizations?id=eq.${encodeURIComponent(oc.member_org_id)}&select=owner_id`))[0];
+          _custOwner = (_m && _m.owner_id) || null;
+        }
       }
       const _supCC0 = String(org.billing_country || org.country || 'CZ').toUpperCase();
       if (needVatBeforePay(_supCC0, _custCC, _custDic, !!org.fee_vat_exempt)) {
@@ -256,8 +263,10 @@ export default async function handler(req, res) {
     // jinak klub ceka na doklad, ktery nikdy neprijde.
     if (no && typeof no === 'object' && no.needVat) {
       try {
-        if (no.custId) {
-          const g = (await sb(`gyms?id=eq.${encodeURIComponent(no.custId)}&select=owner_id,name`))[0];
+        const _need = no.custId ? (await sb(`gyms?id=eq.${encodeURIComponent(no.custId)}&select=owner_id,name`))[0]
+                    : (no.custOrg ? (await sb(`organizations?id=eq.${encodeURIComponent(no.custOrg)}&select=owner_id,name`))[0] : null);
+        {
+          const g = _need;
           if (g && g.owner_id) await sb('notifications', { method: 'POST', prefer: 'return=minimal',
             body: JSON.stringify({ user_id: g.owner_id, type: 'system', read: false,
               data: JSON.stringify({ kind: 'need_vat', organization_id: org.id }),

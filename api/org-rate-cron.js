@@ -88,18 +88,22 @@ export default async function handler(req, res) {
     // 3) Připomenutí 14 dní předem. Jednou -- opakované by bylo otravné a klub o tom ví.
     const soon = new Date(); soon.setDate(soon.getDate() + 14);
     const soonStr = soon.toISOString().slice(0, 10);
-    const ending = await sb(`organization_clubs?status=eq.active&valid_until=eq.${soonStr}&select=id,gym_id,organization_id,valid_until`);
+    const ending = await sb(`organization_clubs?status=eq.active&valid_until=eq.${soonStr}&select=id,gym_id,member_org_id,organization_id,valid_until`);
     for (const r of (ending || [])) {
-      if (!r.gym_id) continue;   // klub mimo MTL nemá kam dostat zprávu
+      if (!r.gym_id && !r.member_org_id) continue;   // klub mimo MTL nemá kam dostat zprávu
       try {
-        const g = (await sb(`gyms?id=eq.${r.gym_id}&select=owner_id`))[0];
+        // Členský svaz (member_org_id) dostane zprávu taky, jen bez sazby -- ta patří klubům.
+        const g = r.gym_id ? (await sb(`gyms?id=eq.${r.gym_id}&select=owner_id`))[0]
+                           : (await sb(`organizations?id=eq.${r.member_org_id}&select=owner_id`))[0];
         const o = (await sb(`organizations?id=eq.${r.organization_id}&select=name,abbr`))[0];
         if (!g || !g.owner_id) continue;
         const d = new Date(r.valid_until).toLocaleDateString('cs-CZ');
+        const _on = (o && (o.abbr || o.name)) || null;
         await sb('notifications', { method: 'POST', prefer: 'return=minimal',
           body: JSON.stringify({ user_id: g.owner_id, type: 'system', read: false,
-            data: JSON.stringify({ kind: 'org_expiring', oc_id: r.id, msg_en: `\u23F3 Membership in ${(o && (o.abbr || o.name)) || 'the association'} ends ${new Date(r.valid_until).toLocaleDateString('en-GB')}. After that day you lose the 1.5 % rate.` }),
-            message: `\u23F3 Členství v ${(o && (o.abbr || o.name)) || 'asociaci'} končí ${d}. Po tomto dni ztrácíš sazbu 1,5 %.` }) });
+            data: JSON.stringify({ kind: 'org_expiring', oc_id: r.id, member_org_id: r.member_org_id || null,
+              msg_en: `\u23F3 Membership in ${_on || 'the association'} ends ${new Date(r.valid_until).toLocaleDateString('en-GB')}.` + (r.gym_id ? ' After that day you lose the 1.5 % rate.' : ' Pay the fee for the next period to stay a member.') }),
+            message: `\u23F3 Členství v ${_on || 'asociaci'} končí ${d}.` + (r.gym_id ? ' Po tomto dni ztrácíš sazbu 1,5 %.' : ' Zaplať poplatek na další období, ať zůstaneš členem.') }) });
         out.reminders++;
       } catch (e) {}
     }

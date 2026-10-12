@@ -65,7 +65,7 @@ const DISC = {
   muay_thai: 'Muay Thai', bjj: 'Brazilské jiu-jitsu', mma: 'MMA', boxing: 'Box',
   kickboxing: 'Kickbox', judo: 'Judo', karate: 'Karate', wrestling: 'Zápas',
   taekwondo: 'Taekwondo', aikido: 'Aikido', kung_fu: 'Kung-fu', krav_maga: 'Krav Maga',
-  sambo: 'Sambo', capoeira: 'Capoeira', grappling: 'Grappling'
+  sambo: 'Sambo', capoeira: 'Capoeira', grappling: 'Grappling', bare_knuckle: 'Bare-knuckle'
 };
 function discLabel(d) { return DISC[d] || String(d || '').replace(/_/g, ' '); }
 

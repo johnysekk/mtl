@@ -47,6 +47,13 @@ export function vatMode(supCountry, custCountry, custDic, opts = {}) {
       return { mode: 'reverse_charge', rate: 0,
         note: 'Dodavatel není plátcem DPH. ' + RC_NOTE };
     }
+    // Pod limitem 10 000 EUR (opts.b2cSmall, spočítá _oss.js) je místem plnění ČR -- neplátce
+    // fakturuje bez DPH jako doma. Nad limitem místo plnění u zákazníka (OSS).
+    // Na faktuře stačí „není plátcem“ jako u domácí -- zdůvodnění limitu zákon na dokladu
+    // nevyžaduje a odběratele nezajímá. Režim drží vat_mode (počítá se z něj limit v _oss.js).
+    if (kind === 'electronic' && opts.b2cSmall) {
+      return { mode: 'b2c_eu_small', rate: 0, note: 'Dodavatel není plátcem DPH.' };
+    }
     if (kind === 'electronic') {
       return { mode: 'oss_pending', rate: 0,
         note: 'Odběratel bez DIČ v jiném státě EU — doklad prověří účetní.' };
@@ -78,6 +85,9 @@ export function vatMode(supCountry, custCountry, custDic, opts = {}) {
       return { mode: 'reverse_charge', rate: 0,
         note: RC_NOTE };
     }
+    if (kind === 'electronic' && opts.b2cSmall) {
+      return { mode: 'b2c_eu_small', rate: null, note: null };     // plátce: česká DPH jako doma
+    }
     if (kind === 'electronic') {
       return { mode: 'oss_pending', rate: 0,
         note: 'Odběratel bez DIČ v jiném státě EU — místem plnění je jeho stát (režim OSS). Doklad prověří účetní.' };
@@ -94,7 +104,7 @@ export function vatMode(supCountry, custCountry, custDic, opts = {}) {
 
 // Sazba, kterou ma doklad ukazat: vlastni sazba dodavatele jen u domaciho rezimu, jinak nula.
 export function vatRateFor(mode, supRate) {
-  return (mode === 'domestic') ? (supRate != null ? supRate : null) : 0;
+  return (mode === 'domestic' || mode === 'b2c_eu_small') ? (supRate != null ? supRate : null) : 0;
 }
 
 // BRANA PRED PLATBOU. Prehranicni plneni v ramci EU se bez DIC odberatele nesmi vubec
@@ -112,7 +122,7 @@ export function needVatBeforePay(supCountry, custCountry, custDic, feeExempt) {
   const cc = String(custCountry || '').toUpperCase();
   if (!cc) return false;                               // zemi neznam -> nelze rozhodnout
   if (cc === sc) return false;                         // domaci plneni
-  if (!isEU(cc)) return false;                         // mimo EU se DIC neuplatnuje
+  if (!isEU(cc) || !isEU(sc)) return false;           // mimo EU (odberatel i dodavatel) se DIC neuplatnuje
   return !String(custDic || '').trim();
 }
 
@@ -123,6 +133,8 @@ const _NOTE_EN = {
   reverse_charge: 'Reverse charge — VAT is accounted for by the customer in their own country; the supplier does not charge it.',
   reverse_charge_np: 'The supplier is not a VAT payer. Reverse charge — VAT is accounted for by the customer in their own country; the supplier does not charge it.',
   oss_pending: 'Customer in another EU state without a VAT ID — under review by the accountant.',
+  // Starší snímky b2c_eu_small nesly i větu o limitu -- vydaný doklad se nemění, anglicky ji dál přeloží.
+  b2c_eu_small_legacy: 'The supplier is not a VAT payer. Place of supply: Czech Republic — cross-border electronic services to EU consumers did not exceed EUR 10,000 (Art. 59c of Directive 2006/112/EC).',
   need_vat: 'Customer in another EU state without a VAT ID — the VAT treatment cannot be determined.',
   outside_eu: 'Supply outside the EU — no Czech VAT (Section 9 of the Czech VAT Act).',
   exempt_membership: 'VAT exempt — supply in return for a membership fee to own members (Section 61(a) of the Czech VAT Act).',
@@ -130,5 +142,6 @@ const _NOTE_EN = {
 export function vatNoteFor(mode, note, lang) {
   if (lang !== 'en') return note || null;
   if (mode === 'reverse_charge' && /není plátcem/.test(String(note || ''))) return _NOTE_EN.reverse_charge_np;
+  if (mode === 'b2c_eu_small') return /Místo plnění/.test(String(note || '')) ? _NOTE_EN.b2c_eu_small_legacy : (note ? _NOTE_EN.no_vat_supplier : null);
   return _NOTE_EN[mode] || note || null;
 }

@@ -119,7 +119,7 @@ export default async function handler(req, res) {
     const discCount = {};
     sBk.forEach(b => { if(b.discipline) discCount[b.discipline] = (discCount[b.discipline]||0)+1; });
     sGa.forEach(a => { if(a && a.discipline) discCount[a.discipline] = (discCount[a.discipline]||0)+1; });
-    const DLBL = { bjj:'BJJ', mma:'MMA', muay_thai:'Muay Thai', boxing:'Box', kickboxing:'Kickbox', wrestling:'Wrestling', judo:'Judo', karate:'Karate', taekwondo:'Taekwondo', krav_maga:'Krav Maga', sambo:'Sambo', luta_livre:'Luta Livre', sanda:'Sanda', capoeira:'Capoeira', aikido:'Aikido', kung_fu:'Kung Fu' };
+    const DLBL = { bjj:'BJJ', mma:'MMA', muay_thai:'Muay Thai', boxing:'Box', kickboxing:'Kickbox', wrestling:'Wrestling', judo:'Judo', karate:'Karate', taekwondo:'Taekwondo', krav_maga:'Krav Maga', bare_knuckle:'Bare-knuckle', sambo:'Sambo', luta_livre:'Luta Livre', sanda:'Sanda', capoeira:'Capoeira', aikido:'Aikido', kung_fu:'Kung Fu' };
     const dlabel = d => DLBL[d] || String(d||'').replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase());
     const DTIERS = [[5,'🔥'],[25,'🔥'],[100,'🏆'],[500,'💎']];
     Object.keys(discCount).sort((x,y)=>discCount[y]-discCount[x]).slice(0,6).forEach(d => {

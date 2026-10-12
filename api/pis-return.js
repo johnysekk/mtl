@@ -291,11 +291,16 @@ async function settleOrgFee(ocId){
               // Klub mimo MTL nemá gym_id -- jméno pak z ext_name, upozornění klubu nemá komu jít.
               const g=oc.gym_id ? (await sb.from('gyms').select('owner_id,name').eq('id',oc.gym_id).maybeSingle()).data : null;
               const _du=new Date(_until).toLocaleDateString('cs-CZ');
+              // Členský svaz: potvrzení platby jeho majiteli, s prokliknutím na jeho členství.
+              const _mo=oc.member_org_id ? (await sb.from('organizations').select('owner_id').eq('id',oc.member_org_id).maybeSingle()).data : null;
+              if(_mo && _mo.owner_id) await sb.from('notifications').insert({ user_id:_mo.owner_id, type:'system', read:false,
+                data:JSON.stringify({ kind:'org_fee_paid', org_id:oc.organization_id, oc_id:oc.id, member_org_id:oc.member_org_id, msg_en:'\u2705 '+((org&&(org.abbr||org.name))||'')+' membership fee paid. Membership is valid until '+new Date(_until).toLocaleDateString('en-GB')+'.' }),
+                message:'\u2705 \u010clensk\u00fd poplatek '+((org&&(org.abbr||org.name))||'')+' zaplacen. \u010clenstv\u00ed plat\u00ed do '+_du+'.' });
               if(g && g.owner_id) await sb.from('notifications').insert({ user_id:g.owner_id, type:'system', read:false,
                 data:JSON.stringify({ kind:'org_fee_paid', org_id:oc.organization_id, msg_en:'\u2705 '+((org&&(org.abbr||org.name))||'')+' membership fee paid. Membership is valid until '+new Date(_until).toLocaleDateString('en-GB')+' and the club has the 1.5 % rate.' }),
                 message:'\u2705 \u010clensk\u00fd poplatek '+((org&&(org.abbr||org.name))||'')+' zaplacen. \u010clenstv\u00ed plat\u00ed do '+_du+' a klub m\u00e1 sazbu 1,5 %.' });
               if(org && org.owner_id) await sb.from('notifications').insert({ user_id:org.owner_id, type:'system', read:false,
-                data:JSON.stringify({ kind:'org_fee_in', gym_id:oc.gym_id, msg_en:'\u{1F3E6} '+((g&&g.name)||oc.ext_name||'A club')+' paid the membership fee. Membership until '+new Date(_until).toLocaleDateString('en-GB')+'.' }),
+                data:JSON.stringify({ kind:'org_fee_in', gym_id:oc.gym_id, org_id:oc.organization_id, msg_en:'\u{1F3E6} '+((g&&g.name)||oc.ext_name||'A club')+' paid the membership fee. Membership until '+new Date(_until).toLocaleDateString('en-GB')+'.' }),
                 message:'\u{1F3E6} '+((g&&g.name)||oc.ext_name||'Klub')+' zaplatil \u010dlensk\u00fd poplatek. \u010clenstv\u00ed do '+_du+'.' });
             }
 }
