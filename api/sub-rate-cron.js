@@ -22,7 +22,7 @@
 // They were four different rules once. That was the bug.
 // =============================================================================
 import Stripe from 'stripe';
-import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, onlineRate as _mtlOnline } from './_rate.js';
+import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, onlineRate as _mtlOnline, withStoreFee } from './_rate.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
@@ -64,6 +64,8 @@ async function subRateFor(stripe, acct, subId, sub, ladderPct) {
 }
 
 async function applySubRate(stripe, acct, subId, sub, ladderPct) {
+  // Online předplatné koupené v nativní appce nese i poplatek obchodu (mtl_native, _rate.js).
+  ladderPct = withStoreFee(ladderPct, sub);
   const want = await subRateFor(stripe, acct, subId, sub, ladderPct);
   if (want === null) return false;
   const cur = (sub.application_fee_percent != null) ? Number(sub.application_fee_percent) : null;

@@ -1,9 +1,10 @@
 import Stripe from 'stripe';
-import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor } from './_rate.js';
+import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor, orgRate, nativePrice, nativeRate, STORE_COST } from './_rate.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { checkPrice, offerPrices, planTermPrices, checkOnlineCountry } from './_price-check.js';
 import { vatMode } from './_vat.js';
 import { viesCheck } from './tax-verify.js';
+import { b2cSmallState } from './_oss.js';
 const _PC = (kind, extra) => ({ SB: _SUPA_URL, KEY: _SUPA_KEY, kind, ...extra });
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -187,11 +188,16 @@ async function coachCheckout(req, res) {
 
   const isCZK = String(currency || 'CZK').toUpperCase() === 'CZK';
   const unitAmount     = isCZK ? Math.floor(rate * STUDENT_MARKUP) * 100 : Math.round(rate * STUDENT_MARKUP * 100);
-  const applicationFee = Math.round(rate * COMMISSION * 100); // exact pct (was floored to whole CZK -> under-charged)
+  let applicationFee = Math.round(rate * COMMISSION * 100); // exact pct (was floored to whole CZK -> under-charged)
 
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
   const isOnline = String(online) === '1';
+  // Nákup v nativní appce (App Store / Google Play): cena s přirážkou na poplatek obchodu a MTL si
+  // ten poplatek strhne navíc. Jen u online koučinku a jen u kouče, který to má zapnuté (_rate.js).
+  const isNative = isOnline && String(req.query.native || '') === '1';
+  const NP = (v) => (isNative ? nativePrice(v) : v);
+  let _storeFee = 0;
   let _onlQty = 1;   // počet kusů balíčku online služby -- bere se z nabídky kouče, ne z adresy
 
   // OSOBNÍ SOUKROMKA: cena proti slotu / ceníku kouče / soukromým nabídkám.
@@ -204,26 +210,32 @@ async function coachCheckout(req, res) {
   // tak, jak přišly, takže šlo zaplatit libovolnou částku. Povolené dvojice cena + měna: balíčky
   // (každý ve své měně; starší bez měny = měna online), rate_online a ceny po disciplínách v měně online.
   if (isOnline) {
-    const p = ((await _wsbGet(`profiles?id=eq.${encodeURIComponent(String(coachProfileId || ''))}&select=online_services,rate_online,currency_online,currency,discipline_rates_online,stripe_account&limit=1`)) || [])[0];
+    const p = ((await _wsbGet(`profiles?id=eq.${encodeURIComponent(String(coachProfileId || ''))}&select=online_services,rate_online,currency_online,currency,discipline_rates_online,stripe_account,online_native&limit=1`)) || [])[0];
     if (!p || String(p.stripe_account || '').trim() !== String(coachId).trim()) return res.status(400).json({ error: 'Kouč nenalezen' });
+    if (isNative && p.online_native !== true) return res.status(400).json({ error: 'Tento kouč online koučink v mobilní aplikaci nenabízí.' });
     const defCur = String(p.currency_online || p.currency || 'CZK').toUpperCase();
     let tiers = []; try { const _src = p.online_services; tiers = typeof _src === 'string' ? JSON.parse(_src) : (_src || []); } catch (e) {}
     let dro = {}; try { dro = typeof p.discipline_rates_online === 'string' ? JSON.parse(p.discipline_rates_online) : (p.discipline_rates_online || {}); } catch (e) {}
     const okPairs = [];
     // Každý balíček může mít ruční ceny ve více měnách (prices) -- povolená je kterákoli z nich.
-    (Array.isArray(tiers) ? tiers : []).forEach((t) => { const pm = offerPrices(t, defCur); Object.keys(pm).forEach((cu) => okPairs.push([pm[cu], cu])); });
-    if (Number(p.rate_online) > 0) okPairs.push([Number(p.rate_online), defCur]);
-    Object.values(dro || {}).forEach((v) => { if (Number(v) > 0) okPairs.push([Number(v), defCur]); });
+    (Array.isArray(tiers) ? tiers : []).forEach((t) => { const pm = offerPrices(t, defCur); Object.keys(pm).forEach((cu) => okPairs.push([NP(pm[cu]), cu])); });
+    if (Number(p.rate_online) > 0) okPairs.push([NP(Number(p.rate_online)), defCur]);
+    Object.values(dro || {}).forEach((v) => { if (Number(v) > 0) okPairs.push([NP(Number(v)), defCur]); });
     const C = String(currency || 'CZK').toUpperCase();
     if (!okPairs.some(([pr, cu]) => pr === rate && cu === C)) {
       return res.status(400).json({ error: 'Cena neodpovídá aktuální nabídce kouče. Obnov jeho profil a zkus to znovu.' });
     }
     const _tl = Array.isArray(tiers) ? tiers : [];
-    const _tq = _tl.find((t) => t && offerPrices(t, defCur)[C] === rate && String(t.label || '') === String(fmt || ''))
-             || _tl.find((t) => t && offerPrices(t, defCur)[C] === rate);
+    const _tq = _tl.find((t) => t && NP(offerPrices(t, defCur)[C]) === rate && String(t.label || '') === String(fmt || ''))
+             || _tl.find((t) => t && NP(offerPrices(t, defCur)[C]) === rate);
     _onlQty = Math.max(1, Math.min(50, parseInt(_tq && _tq.qty, 10) || 1));
     const _cc = await checkOnlineCountry({ SB: _SUPA_URL, KEY: _SUPA_KEY, coachId: coachProfileId, buyerId: payerId || studentId });
     if (!_cc.ok) return res.status(400).json({ error: _cc.error });
+    // Náklad obchodu (10 % + 21 % DPH) z toho, co student opravdu platí, + provize ze zbytku.
+    if (isNative) {
+      _storeFee = Math.round(unitAmount * STORE_COST);
+      applicationFee = Math.round(rate * 100 * COMMISSION * (1 - STORE_COST)) + _storeFee;
+    }
   }
 
   let successUrl;
@@ -260,6 +272,8 @@ async function coachCheckout(req, res) {
       online_qty: String(_onlQty),
       coach_name: coachName || '',
       discipline: disc || '',
+      mtl_native: isNative ? '1' : '',
+      mtl_store_fee: String(_storeFee),
     },
     line_items: [
       { price_data: { currency: cur, product_data: { name: productName }, unit_amount: unitAmount }, quantity: 1 },
@@ -275,6 +289,8 @@ async function coachCheckout(req, res) {
         coach_pct: (STUDENT_MARKUP - COMMISSION).toFixed(2),
         commission_pct: COMMISSION.toFixed(2),
         coach_name: coachName || '',
+        mtl_native: isNative ? '1' : '',
+        mtl_store_fee: String(_storeFee),   // část application fee, která patří obchodu s aplikacemi
       },
     },
     success_url: successUrl,
@@ -394,6 +410,7 @@ async function eventCheckout(req, res) {
   // poslal prohlížeč: upravený odkaz zaplatil za lístek 1 Kč nebo snížil provizi. Teď se
   // částka sečte z rezervovaných lístků objednávky a účet musí patřit pořadateli té akce.
   let P = parseInt(amount, 10);
+  let _payOrg = null;   // organizace, které peníze za lístek jdou -- pak platí její sazba, ne žebříček
   if (ticketId) {
     const _t = ((await _wsbGet(`event_tickets?id=eq.${encodeURIComponent(ticketId)}&select=order_id,event_id`)) || [])[0];
     if (!_t) return res.status(404).json({ error: 'Lístek nenalezen' });
@@ -409,7 +426,7 @@ async function eventCheckout(req, res) {
     try {
       if (_ev.payout_coach_id) { const pr = ((await _wsbGet(`profiles?id=eq.${encodeURIComponent(_ev.payout_coach_id)}&select=stripe_account,gym_payout_account`)) || [])[0] || {}; if (pr.gym_payout_account) _acc.add(pr.gym_payout_account); if (pr.stripe_account) _acc.add(pr.stripe_account); }
       if (_ev.gym_id) { const g = ((await _wsbGet(`gyms?id=eq.${encodeURIComponent(_ev.gym_id)}&select=stripe_account`)) || [])[0] || {}; if (g.stripe_account) _acc.add(g.stripe_account); }
-      if (_ev.organization_id) { const o = ((await _wsbGet(`organizations?id=eq.${encodeURIComponent(_ev.organization_id)}&select=stripe_account`)) || [])[0] || {}; if (o.stripe_account) _acc.add(o.stripe_account); }
+      if (_ev.organization_id) { const o = ((await _wsbGet(`organizations?id=eq.${encodeURIComponent(_ev.organization_id)}&select=stripe_account,kind`)) || [])[0] || {}; if (o.stripe_account) { _acc.add(o.stripe_account); if (String(o.stripe_account) === String(gymAccount)) _payOrg = o; } }
     } catch (e) {}
     if (_acc.size && !_acc.has(String(gymAccount))) return res.status(400).json({ error: 'Účet neodpovídá pořadateli akce' });
   }
@@ -423,10 +440,15 @@ async function eventCheckout(req, res) {
   const MK = 1.00;
   // Rate: client _ladderRate (EP 0.5% / FP / ladder), server resolve as backstop. No partner override.
   // Sazba vždy ze serveru. Z adresy (take=) by si ji kupující mohl snížit.
+  // Akce ORGANIZACE: sazba organizace (svaz 0 %, pořadatel 1 %). Dřív sem padala do žebříčku,
+  // ten účet organizace nenašel a vzala se sazba z adresy (typicky 2 % autora akce).
   let TAKE = NaN;
-  try { TAKE = await resolveRate(_wsbGet, { gymAccount, mode: 'stripe' }); }
-  catch (e) { console.error('pay.event rate resolve failed:', e.message); TAKE = NaN; }
-  if (!(TAKE >= 0.005 && TAKE <= 0.10)) { const _t2 = take ? parseFloat(take) : NaN; TAKE = (_t2 >= 0.005 && _t2 <= 0.10) ? _t2 : 0.03; }
+  if (_payOrg) TAKE = orgRate(_payOrg);
+  else {
+    try { TAKE = await resolveRate(_wsbGet, { gymAccount, mode: 'stripe' }); }
+    catch (e) { console.error('pay.event rate resolve failed:', e.message); TAKE = NaN; }
+    if (!(TAKE >= 0.005 && TAKE <= 0.10)) { const _t2 = take ? parseFloat(take) : NaN; TAKE = (_t2 >= 0.005 && _t2 <= 0.10) ? _t2 : 0.03; }
+  }
   const isCZK = cur === 'czk';
   const unit = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);
   const fee  = Math.round(P * TAKE * 100); // exact pct (was floored to whole CZK)
@@ -445,7 +467,7 @@ async function eventCheckout(req, res) {
       // bez uctu v MTL je to jedina adresa, kterou o nem mame.
       ...(buyerEmail ? { customer_email: String(buyerEmail).trim() } : {}),
       payment_intent_data: {
-        application_fee_amount: (fee * Q),
+        ...(fee > 0 ? { application_fee_amount: (fee * Q) } : {}),   // svaz: bez provize MTL
         description: `${eventTitle || 'Event'}${tierName ? ' [' + tierName + ']' : ''} (MTL event ticket)`,
         metadata: {
           mtl_payment_type: 'event_ticket',
@@ -735,13 +757,16 @@ const EP_YEAR_MONTHS = 10;
 // použít, jen když máme platnost ověřenou (čl. 18 odst. 1 písm. a) nařízení 282/2011) -- a
 // musíme to umět doložit. Proto se ukládá, KTERÉ DIČ a KDY prošlo, a číslo konzultace VIES
 // (vat_vies_ref, když má MTL DIČ). Při výpadku VIES projde jen DIČ, které už jednou ověřené je.
-// Vrací null (projde) nebo důvod pro návrat do appky: need_vat | vat_invalid | vies_down.
+// Vrací null (projde) nebo důvod pro návrat do appky: need_vat (nad limitem bez DIČ) | vat_invalid.
+// BEZ DIČ: spotřebitel. Pod limitem 10 000 EUR (_oss.js) se smí prodat -- faktura půjde bez DPH
+// s místem plnění v ČR. Nad limitem (OSS) až s DIČ. Výpadek VIES nebrání: režim rozhodne
+// faktura (ep-doklad ověřuje znovu), a když DIČ neprojde, bere se jako bez DIČ.
 async function _foreignVatGate(table, id, rec, home, mtlDic) {
   const vat = String(rec.vat_id || '').replace(/\s+/g, '').toUpperCase();
-  if (!vat) return 'need_vat';
+  if (!vat) { let st = null; try { st = await b2cSmallState(_wsbGet); } catch (e) {} return (st && st.fits(0)) ? null : 'need_vat'; }
   const bc = String(rec.billing_country || rec.country_code || rec.country || '').toUpperCase();
   const v = await viesCheck(vat, bc, mtlDic);
-  if (!v.ok) return (String(rec.vat_verified_id || '').toUpperCase() === vat) ? null : 'vies_down';
+  if (!v.ok) return null;
   if (!v.valid) return 'vat_invalid';
   await _wsbPatch(`${table}?id=eq.${encodeURIComponent(id)}`, { vat_verified_id: vat, vat_verified_at: new Date().toISOString(), vat_vies_ref: v.ref || null });
   return null;
@@ -759,6 +784,26 @@ async function epTierForCountry(cc) {
   } catch (e) { taken = 0; }
   const amount = (taken < EP_SPOTS) ? EP_FOUNDING_CZK : EP_LIST_CZK;
   return { currency: 'czk', amount };
+}
+
+// ───────────────────────── VLOŽENÝ CHECKOUT (EP, dodavatel) ─────────────────────────
+// S ?embed=1 se platba neotevírá na stránce Stripe, ale uvnitř MTL (Stripe Embedded Checkout,
+// ui_mode 'embedded'). Server pak vrací JSON místo přesměrování: { clientSecret, publishableKey },
+// a když platba nemůže začít (DIČ, už aktivní), { redirect } se stejnou adresou, kam by šel
+// redirect -- appka ji zpracuje stejně jako návrat ze Stripe. Bez embed=1 vše jako dřív.
+function _isEmbed(req) { return String(req.query.embed || '') === '1'; }
+function _checkoutEnd(req, okUrl, cancelUrl) {
+  return _isEmbed(req)
+    ? { ui_mode: 'embedded', return_url: okUrl }
+    : { success_url: okUrl, cancel_url: cancelUrl };
+}
+function _sendCheckout(req, res, session) {
+  if (_isEmbed(req)) return res.status(200).json({ clientSecret: session.client_secret, publishableKey: process.env.STRIPE_PUBLISHABLE_KEY || null });
+  return res.redirect(303, session.url);
+}
+function _goBack(req, res, url) {
+  if (_isEmbed(req)) return res.status(200).json({ redirect: url });
+  return res.redirect(303, url);
 }
 
 async function partnerCheckout(req, res) {
@@ -795,9 +840,9 @@ async function partnerCheckout(req, res) {
   } catch(e){}
   const tier = await epTierForCountry(cc);   // ceka na zjisteni, kolik zakladajicich mist zbyva
 
-  // DIČ U ZAHRANIČNÍHO POSKYTOVATELE JE PODMÍNKA. Bez něj bychom u odběratele z jiné země
-  // EU museli řešit režim OSS (místem plnění je jeho stát). Tomu se vyhýbáme: předplatné
-  // se bez DIČ nezaloží, takže nevznikne platba, ke které nejde vystavit doklad.
+  // ZAHRANIČNÍ ODBĚRATEL Z EU. S platným DIČ (VIES) = přenesení daňové povinnosti. Bez DIČ jen
+  // dokud MTL nepřekročí limit 10 000 EUR pro přeshraniční elektronické služby (_oss.js), pak
+  // DIČ chceme. Rozhoduje _foreignVatGate.
   try {
     const _ps = (await _wsbGet('platform_settings?id=eq.1&select=require_vat_foreign,home_country,dic'))[0] || {};
     if (_ps.require_vat_foreign) {
@@ -812,7 +857,7 @@ async function partnerCheckout(req, res) {
       const euForeign = bc && bc !== home && EU.indexOf(bc) >= 0 && EU.indexOf(home) >= 0;
       if (euForeign) {
         const _why = await _foreignVatGate(billGym ? 'gyms' : 'profiles', billGym || userId, Object.assign({}, p2, { billing_country: bc }), home, _ps.dic);
-        if (_why) return res.redirect(303, `${proto}://${host}/?partner_sub=${_why}`);
+        if (_why) return _goBack(req, res, `${proto}://${host}/?partner_sub=${_why}`);
       }
     }
   } catch (e) { console.error('[ep] vat gate', e.message); }
@@ -838,11 +883,10 @@ async function partnerCheckout(req, res) {
     ],
     subscription_data: { metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'', ep_currency: tier.currency, ep_amount: String(_epAmount), ep_month: String(tier.amount), ep_interval: _epYear ? 'year' : 'month', ep_bill_gym: billGym || '' } },
     metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'', ep_month: String(tier.amount), ep_interval: _epYear ? 'year' : 'month', ep_bill_gym: billGym || '' },
-    success_url: `${proto}://${host}/?partner_sub=ok&session={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${proto}://${host}/`,
+    ..._checkoutEnd(req, `${proto}://${host}/?partner_sub=ok&session={CHECKOUT_SESSION_ID}`, `${proto}://${host}/`),
   }, { apiVersion: '2024-09-30.acacia' });
 
-  res.redirect(303, session.url);
+  _sendCheckout(req, res, session);
 }
 
 // ───────────────────────── DODAVATEL (organizations.kind='supplier') ─────────────────────────
@@ -875,7 +919,7 @@ async function supplierCheckout(req, res) {
   const org = (await _wsbGet(`organizations?id=eq.${encodeURIComponent(orgId)}&select=id,owner_id,kind,status,name,vat_id,vat_verified_id,billing_country,country,contact_email,invoice_email,supplier_sub`))[0];
   if (!org || org.kind !== 'supplier') return res.status(404).json({ error: 'Dodavatel nenalezen' });
   if (org.status !== 'approved') return res.status(403).json({ error: 'Profil dodavatele je pozastavený nebo zamítnutý.' });
-  if (org.supplier_sub) return res.redirect(303, `${proto}://${host}/?supplier_sub=active`);
+  if (org.supplier_sub) return _goBack(req, res, `${proto}://${host}/?supplier_sub=active`);
 
   // DIČ U ZAHRANIČNÍHO DODAVATELE -- stejná brána jako u EP (require_vat_foreign).
   let _ps = {};
@@ -888,7 +932,7 @@ async function supplierCheckout(req, res) {
       const bc = String(org.billing_country || org.country || home).toUpperCase();
       if (bc && bc !== home && EU.indexOf(bc) >= 0 && EU.indexOf(home) >= 0) {
         const _why = await _foreignVatGate('organizations', org.id, Object.assign({}, org, { billing_country: bc }), home, _ps.dic);
-        if (_why) return res.redirect(303, `${proto}://${host}/?supplier_sub=${_why}`);
+        if (_why) return _goBack(req, res, `${proto}://${host}/?supplier_sub=${_why}`);
       }
     }
   } catch (e) { console.error('[supplier] vat gate', e.message); }
@@ -921,11 +965,10 @@ async function supplierCheckout(req, res) {
     ],
     subscription_data: { metadata: { mtl_payment_type: 'supplier_sub', org_id: String(org.id), user_id: String(org.owner_id), sup_amount: String(amount), sup_net: String(net), sup_interval: interval } },
     metadata: { mtl_payment_type: 'supplier_sub', org_id: String(org.id), user_id: String(org.owner_id), sup_interval: interval, sup_net: String(net) },
-    success_url: `${proto}://${host}/?supplier_sub=ok&session={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${proto}://${host}/`,
+    ..._checkoutEnd(req, `${proto}://${host}/?supplier_sub=ok&session={CHECKOUT_SESSION_ID}`, `${proto}://${host}/`),
   }, { apiVersion: '2024-09-30.acacia' });
 
-  res.redirect(303, session.url);
+  _sendCheckout(req, res, session);
 }
 
 // ───────────────────────── ONLINE: MĚSÍČNÍ PŘEDPLATNÉ KOUČE ─────────────────────────
@@ -941,8 +984,11 @@ async function onlinePlanCheckout(req, res) {
   const mb = ((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(membershipId)}&select=id,coach_id,student_id,paid_by,plan_name,amount,currency,status,gym_id,paid_to,months`)) || [])[0];
   if (!mb || mb.gym_id || mb.paid_to !== 'coach' || !mb.coach_id) return res.status(400).json({ error: 'Předplatné nenalezeno' });
   if (String(mb.status) !== 'pending') return res.status(400).json({ error: 'Předplatné už není k zaplacení' });
-  const p = ((await _wsbGet(`profiles?id=eq.${encodeURIComponent(mb.coach_id)}&select=id,name,stripe_account,online_plans,currency_online,currency,account_suspended&limit=1`)) || [])[0];
+  const p = ((await _wsbGet(`profiles?id=eq.${encodeURIComponent(mb.coach_id)}&select=id,name,stripe_account,online_plans,currency_online,currency,account_suspended,online_native&limit=1`)) || [])[0];
   if (!p || !p.stripe_account) return res.status(400).json({ error: 'Kouč nemá nastavené platby kartou' });
+  // Nativní appka: cena s přirážkou na poplatek obchodu (viz coachCheckout a _rate.js).
+  const isNative = String(req.query.native || '') === '1';
+  if (isNative && p.online_native !== true) return res.status(400).json({ error: 'Tento kouč online koučink v mobilní aplikaci nenabízí.' });
   if (p.account_suspended) return res.status(400).json({ error: 'Účet kouče je pozastavený' });
   const acct = String(p.stripe_account).trim();
   if (!(await _assertAcctReady(acct, res))) return;
@@ -955,13 +1001,15 @@ async function onlinePlanCheckout(req, res) {
   const months = Math.max(1, parseInt(mb.months, 10) || 1);
   if (![1, 3, 6, 12].includes(months)) return res.status(400).json({ error: 'Neplatná délka předplatného.' });
   const plan = (Array.isArray(plans) ? plans : []).find((x) => x && String(x.name || '') === String(mb.plan_name || ''));
-  const price = plan ? Number(planTermPrices(plan, months, mainCur)[cur] || 0) : 0;
+  const _webPrice = plan ? Number(planTermPrices(plan, months, mainCur)[cur] || 0) : 0;
+  const price = isNative ? nativePrice(_webPrice) : _webPrice;
   if (!plan || !(price > 0) || Math.abs(price - Number(mb.amount)) > 0.005) return res.status(400).json({ error: 'Předplatné neodpovídá aktuální nabídce kouče. Obnov jeho profil a zkus to znovu.' });
 
   const _cc = await checkOnlineCountry({ SB: _SUPA_URL, KEY: _SUPA_KEY, coachId: mb.coach_id, buyerId: mb.paid_by || mb.student_id });
   if (!_cc.ok) return res.status(400).json({ error: _cc.error });
   const unit = (cur === 'CZK') ? Math.round(price) * 100 : Math.round(price * 100);
-  const rate = await onlineRateFor(_wsbGet, mb.coach_id);
+  const _rateWeb = await onlineRateFor(_wsbGet, mb.coach_id);
+  const rate = isNative ? nativeRate(_rateWeb) : _rateWeb;
   const pct = Math.round(rate * 10000) / 100;   // procenta, 2 desetinná
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
@@ -970,6 +1018,8 @@ async function onlinePlanCheckout(req, res) {
     coach_id: String(mb.coach_id), student_id: String(mb.student_id || ''), gym_id: '',
     mtl_plan: String(plan.name || 'Online předplatné').slice(0, 120), mtl_currency: cur, mtl_income: 'main',
     paid_by: String(mb.paid_by || ''), coach_name: String(p.name || '').slice(0, 120),
+    // Přepočty sazby (webhook, noční cron, gym-rerate) podle tohohle přidávají poplatek obchodu.
+    ...(isNative ? { mtl_native: '1' } : {}),
   };
   const success_url = `${proto}://${host}/?platba=ok&online_plan=1&coach=${encodeURIComponent(mb.coach_id)}&mb=${encodeURIComponent(mb.id)}&session={CHECKOUT_SESSION_ID}`;
   const pname = `${String(plan.name || 'Online předplatné').slice(0, 90)}${months > 1 ? ` (${months} měs.)` : ''} — ${String(p.name || 'Kouč').slice(0, 60)}`;

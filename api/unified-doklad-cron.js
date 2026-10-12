@@ -15,9 +15,10 @@
 import PDFDocument from 'pdfkit';
 import { DEJAVU_CZ } from './_dejavu-cz.js';
 import { isTestMode, minChargeFor } from './_config.js';
-import { introFreeFor } from './_rate.js';
+import { introFreeFor, STORE_COST } from './_rate.js';
 import { pragueMonth, pragueDate, shiftMonth } from './_tz.js';
 import { makePayToken } from './commission-pay-now.js';
+import { undocumentedUnpaid, docNo as _docNoOf } from './_receipt.js';
 import { vatMode, vatNoteFor } from './_vat.js';
 const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 const SB  = process.env.SUPABASE_URL;
@@ -142,12 +143,18 @@ const _L = {
 };
 function _t(lang){ return _L[lang === 'en' ? 'en' : 'cs']; }
 function _methodLabel(m, lang){ const T=_t(lang); return m==='stripe'?T.mStripe:(m==='pis'?T.mPis:(m==='qr'?T.mQr:(m==='cash'?T.mCash:(m||'\u2014')))); }
-function _itemLabel(i, lang){ return _methodLabel(i.method, lang) + (i.acq ? (lang === 'en' ? ' \u00b7 acquisition (new member from MTL)' : ' \u00b7 akvizice (nov\u00fd \u010dlen z MTL)') : ''); }
+// NÁKLAD OBCHODU S APLIKACEMI (online koučink koupený v nativní appce) je vlastní řádek -- není
+// to provize MTL, ale poplatek Apple / Google (10 %) a DPH, kterou z něj MTL odvádí (21 %).
+function _itemLabel(i, lang){
+  if (i.store) return lang === 'en' ? 'App Store / Google Play fee (10 % + 21 % VAT) · online coaching bought in the mobile app' : 'Poplatek App Store / Google Play (10 % + 21 % DPH) · online koučink koupený v mobilní aplikaci';
+  return _methodLabel(i.method, lang) + (i.acq ? (lang === 'en' ? ' \u00b7 acquisition (new member from MTL)' : ' \u00b7 akvizice (nov\u00fd \u010dlen z MTL)') : ''); }
 function _pct(r, lang){ return r!=null ? (Math.round(r*1000)/10).toString().replace('.', lang==='en'?'.':',')+' %' : '\u2014'; }
 function _money(minor, cur, lang){ return (Number(minor||0)/100).toFixed(2).replace('.', lang==='en'?'.':',')+' '+String(cur||'').toUpperCase(); }
 function esc(x){ return String(x==null?'':x).replace(/[<>&"]/g,function(c){ return c==='<'?'&lt;':c==='>'?'&gt;':c==='&'?'&amp;':'&quot;'; }); }
 function _czDate(d, lang){ try{ const x=new Date(d); return lang==='en' ? (x.getUTCDate()+' '+EN_MONTHS[x.getUTCMonth()]+' '+x.getUTCFullYear()) : (x.getUTCDate()+'. '+(x.getUTCMonth()+1)+'. '+x.getUTCFullYear()); }catch(e){ return String(d||''); } }
-function _dokNo(id){ return 'MTL-' + id; }
+// ČÍSLO DOKLADU: uložené při vystavení (doc_no, MTL-2026-000041 -- přiděluje databáze).
+// Starší doklady bez doc_no se zobrazují postaru jako MTL-<id>.
+function _dokNo(s){ return (s && typeof s === 'object') ? (s.doc_no || ('MTL-' + (s.id != null ? s.id : 'X'))) : ('MTL-' + s); }
 // Země jménem, v jazyce dokladu. Ukládá se dvoupísmenný kód; překlad až při vykreslení,
 // aby PDF pro zahraniční klub neříkalo "Stát: SK", ale "Country: Slovakia".
 const CC_NAMES = {
@@ -278,6 +285,7 @@ function _statusText(s, lang){
     return { paid: true,
       head: en ? 'PAID IN FULL' : 'UHRAZENO V PLNÉ VÝŠI',
       body: (parts.length ? ((en ? 'The amount has already been charged: ' : 'Částka už byla stržena: ') + parts.join(en ? '; ' : '; ') + '. ') : '')
+            + _paidOtherText(s, lang)
             + (en ? 'This is not a request for payment — there is nothing to pay.' : 'Nejde o výzvu k platbě — není co platit.') };
   }
   const dd = s.due_date ? _czDate(s.due_date + 'T12:00:00Z', lang) : '';
@@ -285,6 +293,15 @@ function _statusText(s, lang){
     head: (en ? 'AMOUNT DUE: ' : 'K ÚHRADĚ: ') + _money(P.due, cur, lang) + (dd ? ((en ? ' — due ' : ' — splatnost ') + dd) : ''),
     body: (parts.length ? ((en ? 'Already paid: ' : 'Už uhrazeno: ') + parts.join('; ') + '. ') : '')
           + _dueText(s, en) };
+}
+// ÚHRADA STARŠÍCH FAKTUR TÍMTO STRŽENÍM (paid_other) -- informace o platbě, ne položka faktury.
+function _paidOtherText(s, lang) {
+  const en = lang === 'en'; const list = Array.isArray(s.paid_other) ? s.paid_other : [];
+  if (!list.length) return '';
+  const why = (r) => r === 'below_min' ? (en ? 'not charged earlier, below the 50 CZK minimum for a card charge' : 'dříve nestrženo, nedosáhlo minima 50 Kč pro platbu kartou')
+                                      : (en ? 'outstanding after an unsuccessful charge' : 'doplatek po neúspěšném stržení');
+  const items = list.map((o) => (en ? 'invoice ' : 'faktura ') + o.doc_no + ' (' + periodLabelL(o.period, lang) + ') ' + _money(o.amount, s.currency, lang) + ' — ' + why(o.reason));
+  return (en ? 'The same charge also paid the remainder of older invoices: ' : 'Stejným stržením byl uhrazen i zbytek starších faktur: ') + items.join('; ') + '. ';
 }
 // Text nestržené části podle důvodu (due_reason; u starších snímků podle due_date).
 function _dueText(s, en){
@@ -312,12 +329,12 @@ function dokladHtml(s, lang){
   let vat = '';
   if (_vatShow(s)) { const rate = s.sup_vat_rate || 21; const base = s.amount / (1 + rate / 100); vat = '<tr><td>'+T.base+'</td><td style="text-align:right;">'+_money(base,cur,lang)+'</td></tr><tr><td>'+T.vat+' '+rate+' %</td><td style="text-align:right;">'+_money(s.amount - base,cur,lang)+'</td></tr>'; }
   else { const _vt=_vatText(s, lang); vat = _vt ? ('<tr><td colspan="2" style="font-size:11px;color:#666;padding-top:6px;">'+esc(_vt)+'</td></tr>') : ''; }
-  const cnt = items.reduce((a, i) => a + (i.count || 0), 0), vol = items.reduce((a, i) => a + (i.gross || 0), 0);
+  const cnt = items.filter((i) => !i.store).reduce((a, i) => a + (i.count || 0), 0), vol = items.reduce((a, i) => a + (i.store ? (i.cut || 0) : (i.gross || 0)), 0);
   const col = function(lbl, lines){ return '<div style="flex:1;min-width:220px;font-size:13px;line-height:1.55;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:4px;">'+lbl+'</div>'+lines.map(function(l,ix){ return ix===0?('<b>'+esc(l)+'</b>'):esc(l); }).join('<br>')+'</div>'; };
   return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:680px;margin:0 auto;color:#1a1a1a;">'
     + (s.test_mode ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:12px;">'+T.test+'</div>' : '')
     + '<h2 style="margin:0 0 4px;">'+T.title+'</h2>'
-    + '<div style="font-size:13px;color:#555;">'+(s.id?(esc(_dokNo(s.id))+' \u00b7 '):'')+T.issued+' '+esc(_czDate(s.charged_at, lang))+(s.duzp?(' \u00b7 '+T.duzp+' '+esc(_czDate(s.duzp+'T12:00:00Z', lang))):'')+' \u00b7 '+T.period+' '+esc(periodLabelL(s.period_month, lang))+' \u00b7 '+esc(_kindLabel(s, lang))+'</div>'
+    + '<div style="font-size:13px;color:#555;">'+(s.id?(esc(_dokNo(s))+' \u00b7 '):'')+T.issued+' '+esc(_czDate(s.charged_at, lang))+(s.duzp?(' \u00b7 '+T.duzp+' '+esc(_czDate(s.duzp+'T12:00:00Z', lang))):'')+' \u00b7 '+T.period+' '+esc(periodLabelL(s.period_month, lang))+' \u00b7 '+esc(_kindLabel(s, lang))+'</div>'
     + _statusBoxHtml(s, lang)
     + '<div style="display:flex;flex-wrap:wrap;gap:24px;margin:18px 0 6px;">'+col(T.supplier, _supLines(s, lang))+col(T.customer, _custLines(s, lang))+'</div>'
     + '<table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:12px;"><thead><tr style="background:#f5f2ee;"><th style="'+th+'text-align:left;">'+T.method+'</th><th style="'+th+'">'+T.rate+'</th><th style="'+th+'">'+T.count+'</th><th style="'+th+'text-align:right;">'+T.volume+'</th><th style="'+th+'text-align:right;">'+T.fee+'</th></tr></thead><tbody>'+rows+'</tbody></table>'
@@ -342,7 +359,7 @@ function dokladPdf(s, lang){
       }
       doc.fontSize(22).fillColor('#E11111').text('MTL', 50, doc.y);
       doc.moveDown(0.15).fontSize(15).fillColor('#111111').text(T.title);
-      doc.moveDown(0.1).fontSize(10).fillColor('#555555').text((s.id ? (_dokNo(s.id) + '  \u00b7  ') : '') + T.issued + ' ' + _czDate(s.charged_at, lang) + (s.duzp ? ('  \u00b7  ' + T.duzp + ' ' + _czDate(s.duzp + 'T12:00:00Z', lang)) : '') + '  \u00b7  ' + T.period + ' ' + periodLabelL(s.period_month, lang) + '  \u00b7  ' + _kindLabel(s, lang));
+      doc.moveDown(0.1).fontSize(10).fillColor('#555555').text((s.id ? (_dokNo(s) + '  \u00b7  ') : '') + T.issued + ' ' + _czDate(s.charged_at, lang) + (s.duzp ? ('  \u00b7  ' + T.duzp + ' ' + _czDate(s.duzp + 'T12:00:00Z', lang)) : '') + '  \u00b7  ' + T.period + ' ' + periodLabelL(s.period_month, lang) + '  \u00b7  ' + _kindLabel(s, lang));
       doc.moveDown(0.7);
       { // STAV ÚHRADY -- rámeček hned pod hlavičkou
         const st = _statusText(s, lang);
@@ -391,7 +408,8 @@ function dokladPdf(s, lang){
       doc.text(_money(s.amount, cur, lang), 315, yT, { width:230, align:'right' });
       doc.y = Math.max(doc.y, yT) + 10;
       const items = s.line_items || [];
-      doc.fontSize(9).fillColor('#555555').text(T.payments + ': ' + items.reduce((a, i) => a + (i.count || 0), 0) + '  \u00b7  ' + T.vol + ' ' + _money(items.reduce((a, i) => a + (i.gross || 0), 0), cur, lang), 50, doc.y, { width:495 });
+      const _its = items.filter((i) => !i.store);   // řádek obchodu počítá tytéž platby jako řádek provize
+      doc.fontSize(9).fillColor('#555555').text(T.payments + ': ' + _its.reduce((a, i) => a + (i.count || 0), 0) + '  \u00b7  ' + T.vol + ' ' + _money(items.reduce((a, i) => a + (i.store ? (i.cut || 0) : (i.gross || 0)), 0), cur, lang), 50, doc.y, { width:495 });
       doc.end();
     }catch(e){ reject(e); }
   });
@@ -406,7 +424,7 @@ function dokladMailHtml(s, hasPdf, lang){
     // v appce. Česky se právní jméno do oslovení neskloňuje dobře („Dobrý den, Petr Haiser"), proto
     // neutrální pozdrav a komu doklad patří stojí věcně ve větě pod ním.
     + '<p style="margin:0 0 10px;">' + T.hello + ',</p>'
-    + '<p style="margin:0 0 10px;">' + T.attached(esc(_dokNo(s.id)), esc(periodLabelL(s.period_month, lang)), esc(_money(s.amount, s.currency, lang))) + '</p>'
+    + '<p style="margin:0 0 10px;">' + T.attached(esc(_dokNo(s)), esc(periodLabelL(s.period_month, lang)), esc(_money(s.amount, s.currency, lang))) + '</p>'
     + (s.cust_name ? ('<p style="margin:0 0 10px;">' + T.forWhom(esc(s.cust_name), s.cust_ico ? esc(s.cust_ico) : '', s.cust_trade_name ? ((s.organization_id ? T.inMtlOrg : (s.gym_id ? T.inMtlGym : T.inMtlCoach)) + ' \u201e' + esc(s.cust_trade_name) + '\u201c') : '') + '</p>') : '')
     + _statusBoxHtml(s, lang)
     + ((!_statusText(s, lang).paid && s._payLink) ? ('<p style="margin:14px 0;"><a href="' + s._payLink + '" style="display:inline-block;padding:12px 22px;background:#E63946;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;">' + (lang === 'en' ? 'Pay now' : 'Zaplatit hned') + '</a></p>') : '')
@@ -502,7 +520,7 @@ export default async function handler(req, res) {
     const _dailyFilter = preview
       ? `created_at=gte.${dayStart}&created_at=lt.${dayEnd}`
       : `commission_collected_at=gte.${dayStart}&commission_collected_at=lt.${dayEnd}`;
-    const tx = await sb(`transactions?select=gym_id,coach_id,organization_id,paid_to,payee_kind,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method,acq_source,base_rate&commission_status=in.(collected${preview?',pending,failed':''})&${DAILY?_dailyFilter:`commission_month=eq.${period}`}&mtl_fee=gt.0&limit=50000`);
+    const tx = await sb(`transactions?select=gym_id,coach_id,organization_id,paid_to,payee_kind,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method,acq_source,base_rate,store_fee&commission_status=in.(collected${preview?',pending,failed':''})&${DAILY?_dailyFilter:`commission_month=eq.${period}`}&mtl_fee=gt.0&limit=50000`);
 
     // ── DOKLAD AŽ PO STRŽENÍ ────────────────────────────────────────────────────────────
     // Doklad se vystavuje na UHRAZENOU provizi. Karetní provize je vybraná hned při platbě,
@@ -542,7 +560,7 @@ export default async function handler(req, res) {
     const _wkey = (o, cur) => o.kind + ':' + o.id + (o.kind === 'coach' && o.identity === 'payout' ? '|payout' : '') + ':' + cur;
     if (!DAILY && !preview) {
       try {
-        const unpaid = await sb(`transactions?select=gym_id,coach_id,organization_id,paid_to,payee_kind,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method,acq_source,base_rate,commission_status&commission_status=in.(pending,failed)&commission_month=eq.${period}&mtl_fee=gt.0&limit=50000`);
+        const unpaid = await sb(`transactions?select=gym_id,coach_id,organization_id,paid_to,payee_kind,currency,mtl_fee,mtl_fee_refunded,mtl_rate,gross_amount,payment_method,acq_source,base_rate,store_fee,commission_status&commission_status=in.(pending,failed)&commission_month=eq.${period}&mtl_fee=gt.0&limit=50000`);
         _unpaidRows = unpaid || [];
         (unpaid || []).forEach(r => {
           const net = (Number(r.mtl_fee) || 0) - (Number(r.mtl_fee_refunded) || 0);
@@ -600,12 +618,23 @@ export default async function handler(req, res) {
       const net = (t.mtl_fee || 0) - (t.mtl_fee_refunded || 0);
       if (net === 0) return;
       b.total += net;
+      // Nativní nákup: z application fee je část náklad obchodu (store_fee) -- jde na vlastní
+      // řádek. Při vrácení peněz se obě části krátí stejným poměrem jako celá application fee.
+      const _sfAll = Number(t.store_fee) || 0;
+      const _sf = _sfAll > 0 ? Math.min(net, Math.round(_sfAll * (t.mtl_fee ? net / t.mtl_fee : 1))) : 0;
+      if (_sf !== 0) {
+        const es = (b.rates.store = b.rates.store || { method: 'stripe', store: true, rate: STORE_COST, fee: 0, count: 0, gross: 0, cut: 0 });
+        es.fee += _sf; es.count += 1; es.gross += (t.gross_amount || 0); es.cut += _sfAll;   // cut: o kolik je základ provize nižší než platba
+      }
+      const _cn = net - _sf;
+      if (_cn === 0) return;
       // AKVIZIČNÍ PROVIZE (první platba člena, kterého přivedlo MTL) zvlášť a s popisem -- jinak
       // na dokladu stál řádek „Platba z banky 10 %" a nebylo poznat, proč je sazba jiná.
       const acq = (t.acq_source === 'mtl_discovery' || t.acq_source === 'mtl_ads') && t.mtl_rate != null && (t.base_rate != null ? Number(t.mtl_rate) > Number(t.base_rate) + 1e-9 : Number(t.mtl_rate) >= 0.05);   // bez base_rate: sazby žebříčku jsou max 2,5 %, akvizice 5 / 10 %
       const key = (t.payment_method || '?') + '|' + (t.mtl_rate != null ? String(t.mtl_rate) : 'na') + (acq ? '|acq' : '');
       const e = (b.rates[key] = b.rates[key] || { method: t.payment_method || null, rate: (t.mtl_rate != null ? Number(t.mtl_rate) : null), acq: acq || undefined, fee: 0, count: 0, gross: 0 });
-      e.fee += net; e.count += 1; e.gross += (t.gross_amount || 0);
+      // Základ provize u nativního nákupu = cena po odečtení nákladu obchodu.
+      e.fee += _cn; e.count += 1; e.gross += (t.gross_amount || 0) - _sfAll;
     };
     for (const t of (tx || [])) {
       const cur = (t.currency || 'czk').toLowerCase();
@@ -701,20 +730,39 @@ export default async function handler(req, res) {
         if (snap.due_reason === 'failed' && _e.failed_at) snap.due_date = pragueDate(new Date(Date.parse(_e.failed_at) + 14 * 86400000));
         else if (snap.due_reason === 'no_card' || snap.due_reason === 'not_charged' || (snap.due_reason === 'failed' && !_e.failed_at)) snap.due_date = pragueDate(new Date(Date.now() + 14 * 86400000));
       }
+      // ÚHRADA STARŠÍCH FAKTUR TÍMTO STRŽENÍM. Když stržení provize za tenhle měsíc zaplatilo
+      // i zbytek starší faktury (částka pod minimem, doplatek po neúspěšném stržení), uvede to
+      // tahle faktura v rámečku úhrady -- mimo položky a mimo součet (DUZP i položky zůstávají
+      // čistě za tenhle měsíc). Starší faktura se nemění; jako „uhrazenou" ji pozná appka podle
+      // tohoto odkazu. Bere se jen faktura, za jejíž měsíc už nic nestrženého nezbývá.
+      if (!DAILY && !preview && !(snap.due_amount > 0)) {
+        try {
+          const _olds = await undocumentedUnpaid(`${col}=eq.${entityId}&kind=eq.unified&currency=ilike.${encodeURIComponent(cur)}&period_month=lt.${period}${_idf}`);
+          const _paid = [];
+          for (const o of _olds) {
+            const _left = await sb(`transactions?${col}=eq.${entityId}&commission_month=eq.${o.period_month}&currency=ilike.${encodeURIComponent(cur)}&commission_status=in.(pending,failed)&mtl_fee=gt.0&select=gym_id,coach_id,organization_id,paid_to,payee_kind,mtl_fee,mtl_fee_refunded&limit=1000`) || [];
+            const _mine = _left.filter((t) => { const ow = commissionOwner(t); return ow && ow.kind === kind && String(ow.id) === String(entityId) && (kind !== 'coach' || (ow.identity === 'payout') === _payout); });
+            if (_mine.length) continue;
+            _paid.push({ ref: o.id, doc_no: _docNoOf(o), period: o.period_month, amount: Number(o.due_amount) || 0, reason: o.due_reason || (o.due_date ? 'failed' : 'below_min') });
+          }
+          if (_paid.length) snap.paid_other = _paid;
+        } catch (e) { console.error('[doklad] parovani', e.message); }
+      }
       let _ins;
       try { _ins = await sb('commission_doklady', { method: 'POST', prefer: 'return=representation', body: JSON.stringify(snap) }); }
       catch (e) {
         // Databáze bez nových sloupců (SQL ještě nespuštěné): doklad se vystaví bez nich,
         // ne vůbec. Jiná chyba jde dál jako dřív.
-        if (!/sup_register|vat_mode|vat_note|due_amount|due_date|due_reason|duzp/.test(String(e && e.message))) throw e;
+        if (!/sup_register|vat_mode|vat_note|due_amount|due_date|due_reason|duzp|paid_other/.test(String(e && e.message))) throw e;
         console.warn('[doklad] commission_doklady: chybi novy sloupec -- spust sql/doklad-register.sql');
         // Neuhrazenou fakturu bez sloupců due_* vystavit nejde -- vypadala by jako uhrazená.
         if (snap.due_amount > 0) { deferred++; return; }
-        delete snap.sup_register; delete snap.vat_mode; delete snap.vat_note; delete snap.due_amount; delete snap.due_date; delete snap.due_reason; delete snap.duzp;
+        delete snap.sup_register; delete snap.vat_mode; delete snap.vat_note; delete snap.due_amount; delete snap.due_date; delete snap.due_reason; delete snap.duzp; delete snap.paid_other;
         _ins = await sb('commission_doklady', { method: 'POST', prefer: 'return=representation', body: JSON.stringify(snap) });
       }
       const row = Array.isArray(_ins) ? _ins[0] : _ins;
       snap.id = row && row.id;
+      snap.doc_no = (row && row.doc_no) || null;   // číslo přidělila databáze při vložení
       issued++;
       // Kdo dostane víc zpráv naráz, musí poznat, která je která: klub/organizace jménem, kouč identitou.
       const _nm = ((kind === 'gym' || kind === 'organization') && buyer && buyer.name) ? (' \u2014 ' + buyer.name)
@@ -752,9 +800,9 @@ export default async function handler(req, res) {
         let _att = [];
         try {
           const _buf = await dokladPdf(snap, _lang);
-          _att = [{ filename: `${_dokNo(snap.id || 'X')}-${_lang === 'en' ? 'commission' : 'provize'}-${String(period).replace(/-/g,'')}.pdf`, content: _buf.toString('base64') }];
+          _att = [{ filename: `${_dokNo(snap)}-${_lang === 'en' ? 'commission' : 'provize'}-${String(period).replace(/-/g,'')}.pdf`, content: _buf.toString('base64') }];
         } catch (e) { console.error('doklad pdf', e.message); }
-        sent = await sendEmail(em, `${_TESTMODE ? '[TEST] ' : ''}${_t(_lang).subjDoklad} ${_dokNo(snap.id || '')} \u2014 ${_lang === 'en' ? periodLabelL(period, 'en') : periodShort(period)}${_nmL}`, dokladMailHtml(snap, _att.length > 0, _lang), _att);
+        sent = await sendEmail(em, `${_TESTMODE ? '[TEST] ' : ''}${_t(_lang).subjDoklad} ${_dokNo(snap)} \u2014 ${_lang === 'en' ? periodLabelL(period, 'en') : periodShort(period)}${_nmL}`, dokladMailHtml(snap, _att.length > 0, _lang), _att);
       }
       if (sent && sent.ok) mailDiag.sent++; else { mailDiag.failed++; mailDiag.lastError = (sent && sent.error) || 'nezn\u00e1m\u00e1 chyba'; }
     }

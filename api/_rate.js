@@ -120,30 +120,51 @@ export async function onlineRateFor(sbGet, ownerId) {
   return onlineRate({ partner: p.partner, score: p.coach_ref_score, bankai: p.bankai_eligible });
 }
 
+// ── ONLINE KOUČINK V NATIVNÍ APPCE (App Store / Google Play) ─────────────────────────────────
+// Online koučink je pro Apple i Google digitální služba: když se koupí v nativní appce, berou si
+// z ceny poplatek i při vlastní platební bráně (EU, malý vývojář: 10 %, Apple od 1. 10. 2026,
+// Google od 30. 6. 2026). Ten poplatek platí MTL obchodu, a protože je to služba ze zahraničí
+// (Irsko), přiznává k němu MTL českou DPH 21 % a jako neplátce si ji neodečte. Skutečný náklad
+// je tedy 10 % × 1,21 = 12,1 % z ceny v appce.
+// Kouč si v nastavení online zapíná „Nabízet v mobilní aplikaci" (profiles.online_native); pak
+// v nativní appce platí cena s přirážkou a MTL si náklad obchodu strhne navíc ke své provizi
+// (jedna application fee). Kouč dostane STEJNĚ jako za stejný nákup na webu.
+// Zrcadlo v index.html (MTL_STORE_COST).
+export const STORE_FEE = 0.10;    // poplatek obchodu
+export const STORE_VAT = 0.21;    // DPH, kterou z něj MTL odvede (přenesená povinnost, bez odpočtu)
+export const STORE_COST = Math.round(STORE_FEE * (1 + STORE_VAT) * 10000) / 10000;   // 0,121
+// Cena v nativní appce: aby po odečtení 12,1 % zbyla webová cena. +12,1 % z webové ceny by
+// nestačilo -- poplatek se počítá z vyšší ceny v appce (500 Kč -> 569 Kč, ne 561 Kč).
+// Zaokrouhleno nahoru na celé.
+export function nativePrice(p) {
+  const v = Number(p) || 0;
+  return v > 0 ? Math.ceil(v / (1 - STORE_COST) - 1e-9) : v;
+}
+// Podíl MTL z nativní ceny: náklad obchodu + běžná provize z toho, co zbyde. Kouč tak dostane
+// (1 - STORE_COST)(1 - r) z nativní ceny = (1 - r) z webové.
+export function nativeRate(r) {
+  return 1 - (1 - STORE_COST) * (1 - (Number(r) || 0));
+}
+// Totéž pro application_fee_percent předplatného (procenta, 2 desetinná místa). Volá se ve
+// všech místech, která sazbu předplatného přepočítávají -- jinak by noční přepočet vrátil
+// nativnímu předplatnému webovou sazbu a poplatek obchodu by zaplatilo MTL ze svého.
+export function withStoreFee(pct, sub) {
+  const md = (sub && sub.metadata) || {};
+  if (md.mtl_native !== '1' || pct == null) return pct;
+  return Math.round(nativeRate(Number(pct) / 100) * 10000) / 100;
+}
+
 // ── ORGANIZACE ───────────────────────────────────────────────────────────────────────────
 // Organizace nejde po zebricku. Ten je stavěný na opakovaný prodej treninku -- Shikai i Bankai
 // se odemykaji poctem privatek nebo clenstvi, coz poradatel akci nikdy mit nebude. Sazba je
-// proto pevna a odviji se od toho, CO organizace prodava:
-//   promotion  -- 1 % ze vseho. Rezim plateb je u nej natvrdo Stripe.
-//   federation -- 1 % ze souteze a fight nights, 0 % ze skoleni, seminaru, kempu a zkousek.
-//                 Vzdelavani trenéru roste cely ekosystem, tak ho nezdanujeme.
-// Zavadeci nula (intro_free_until) prebiji obojí, stejne jako u zeme v platform_config.
-const ORG_PAID_EVENT_TYPES = ['fight_night', 'competition'];
-
-export function orgRate(org, eventType) {
-  if (!org) return 0.01;
-  // Zavadeci obdobi: do uvedeneho dne VCETNE se neuctuje nic.
-  if (org.intro_free_until) {
-    const end = new Date(String(org.intro_free_until) + 'T23:59:59');
-    if (!isNaN(end.getTime()) && end.getTime() >= Date.now()) return 0;
-  }
-  if (org.kind === 'federation') {
-    return ORG_PAID_EVENT_TYPES.includes(String(eventType || '')) ? 0.01 : 0;
-  }
-  return 0.01;   // promotion
+// proto pevna a odviji se od toho, KDO organizace je:
+//   federation -- 0 % ze vseho: clenske poplatky, skoleni, souteze i fight nights. Svaz privadi
+//                 cele sve clenske kluby a MTL vydela na jejich treninku, ne na svazu.
+//   promotion  -- 1 % ze vseho. Komercni poradatel na akcich vydelava. Rezim plateb je natvrdo Stripe.
+export function orgRate(org) {
+  return (org && org.kind === 'federation') ? 0 : 0.01;
 }
 
-// Resolve the profile of whoever owns the money (ownerId, or via gymId / gym stripe_account).
 export async function resolveOwner(sbGet, { ownerId, gymId, gymAccount }) {
   let oid = ownerId;
   // Země z PŘIHLÁŠKY POSKYTOVATELE, ne z registrace do appky. Klub má vlastní billing_country --

@@ -1,5 +1,5 @@
 import Stripe from 'stripe';
-import { ladderRate, hasOrgRate, onlineRate } from './_rate.js';
+import { ladderRate, hasOrgRate, onlineRate, withStoreFee } from './_rate.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -57,6 +57,8 @@ async function subRateFor(stripe, acct, subId, sub, ladderPct) {
 
 // Apply it. Returns true if the rate actually changed.
 async function applySubRate(stripe, acct, subId, sub, ladderPct) {
+  // Online předplatné koupené v nativní appce nese i poplatek obchodu (mtl_native, _rate.js).
+  ladderPct = withStoreFee(ladderPct, sub);
   const want = await subRateFor(stripe, acct, subId, sub, ladderPct);
   if (want === null) return false;                                  // undecidable -> leave alone
   const cur = (sub.application_fee_percent != null) ? Number(sub.application_fee_percent) : null;

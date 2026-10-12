@@ -12,7 +12,7 @@ import { issueReceipts, receiptMailHtml, receiptTitle, docNo } from './_receipt.
 import Stripe from 'stripe';
 import { subMail } from './_sub-mail.js';
 import { rerateOwner } from './gym-rerate.js';
-import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil, onlineRate as _mtlOnline } from './_rate.js';
+import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil, onlineRate as _mtlOnline, withStoreFee, STORE_COST } from './_rate.js';
 import { sendOrderMailForPi, withdrawalText as _wdText } from './_order-mail.js';
 import { dokladPdfFor } from './_doklad-pdf.js';
 import crypto from 'crypto';
@@ -407,6 +407,8 @@ async function subRateFor(stripe, acct, subId, sub, ladderPct) {
 
 // Apply it. Returns true if the rate actually changed.
 async function applySubRate(stripe, acct, subId, sub, ladderPct) {
+  // Online předplatné koupené v nativní appce nese i poplatek obchodu (mtl_native, _rate.js).
+  ladderPct = withStoreFee(ladderPct, sub);
   const want = await subRateFor(stripe, acct, subId, sub, ladderPct);
   if (want === null) return false;                                  // undecidable -> leave alone
   const cur = (sub.application_fee_percent != null) ? Number(sub.application_fee_percent) : null;
@@ -466,6 +468,9 @@ async function recordTransaction(acct, pi, fields) {
       return { status: 'exists', gross: _existing.gross_amount };
     }
     let gross = fields.gross != null ? fields.gross : null, stripeFee = null, mtlFee = null, net = null, currency = fields.currency || null, chargeId = null;
+    // Nákup v nativní appce: část application fee je náklad obchodu (_rate.js STORE_COST). Pozná se
+    // z metadat platby (jednorázově) nebo ho předá volající (předplatné -- metadata má subscription).
+    let _native = fields.native === true;
     if (acct) {
       try {
         let ch = null;
@@ -473,6 +478,7 @@ async function recordTransaction(acct, pi, fields) {
           ch = await stripe.charges.retrieve(pi, { expand: ['balance_transaction'] }, { stripeAccount: acct });
         } else {
           const intent = await stripe.paymentIntents.retrieve(pi, { expand: ['latest_charge.balance_transaction'] }, { stripeAccount: acct });
+          if (intent && intent.metadata && intent.metadata.mtl_native === '1') _native = true;
           ch = intent && intent.latest_charge;
           if (typeof ch === 'string') ch = await stripe.charges.retrieve(ch, { expand: ['balance_transaction'] }, { stripeAccount: acct });
         }
@@ -520,10 +526,16 @@ async function recordTransaction(acct, pi, fields) {
         }
       } catch (e) { console.error('recordTransaction fee', e.message); }
     }
+    // ROZDĚLENÍ APPLICATION FEE u nativního nákupu: store_fee = náklad obchodu (12,1 % z toho, co
+    // student zaplatil), zbytek je provize MTL. mtl_rate je pak sazba PROVIZE ze základu po odečtení
+    // nákladu obchodu -- stejná jako na webu, takže na dokladu sedí do stejného řádku.
+    const storeFee = (_native && gross > 0 && mtlFee > 0) ? Math.min(mtlFee, Math.round(gross * STORE_COST)) : 0;
+    const _commBase = (gross || 0) - storeFee;
+    const mtlRate = (_commBase > 0 && (mtlFee - storeFee) > 0) ? Math.round(((mtlFee - storeFee) / _commBase) * 10000) / 10000 : 0;
     if (_existing) {
       // Radek bez penez (ulozeny driv, kdyz Stripe data nevydal): doplnit castky, nic jineho neprepisovat.
       if (gross == null) return { status: 'no-charge-data', payId: pi };
-      await sbPatch('transactions', `payment_intent=eq.${encodeURIComponent(pi)}`, { charge_id: chargeId, gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, net_amount: net, currency });
+      await sbPatch('transactions', `payment_intent=eq.${encodeURIComponent(pi)}`, { charge_id: chargeId, gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, net_amount: net, currency, ...(storeFee > 0 ? { store_fee: storeFee, mtl_rate: mtlRate } : {}) });
       const _dnU = await issueStripeDokladForPi(pi, { slotId: fields.slot_id || null });
       return { status: 'updated', gross, stripeFee, mtlFee, net, dokladNo: _dnU };
     }
@@ -549,7 +561,8 @@ async function recordTransaction(acct, pi, fields) {
       // Plátce zvlášť od účastníka -- stejná dvojice, jakou zapisuje record-cash.js.
       // Bez toho doklad neví, na koho má znít Odběratel a koho uvést jako Účastníka.
       paid_by: fields.paid_by || null, paid_by_name: fields.paid_by_name || null,
-      gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, mtl_rate: ((gross>0 && (mtlFee)>0) ? Math.round((((mtlFee)/gross))*10000)/10000 : 0), mtl_fee_refunded: 0, net_amount: net, currency,
+      gross_amount: gross, stripe_fee: stripeFee, mtl_fee: mtlFee, mtl_rate: mtlRate, mtl_fee_refunded: 0, net_amount: net, currency,
+      ...(storeFee > 0 ? { store_fee: storeFee } : {}),
       ...(fields.acq_months != null ? { acq_months: fields.acq_months } : {}),
       ...(fields.base_rate != null ? { base_rate: fields.base_rate } : {}),
       income_class: fields.income_class || null,
@@ -989,7 +1002,7 @@ export default async function handler(req, res) {
             const invId = typeof s.invoice === 'string' ? s.invoice : (s.invoice && s.invoice.id);
             let payId = null;
             if (invId) { const invObj = await stripe.invoices.retrieve(invId, { stripeAccount: event.account }); payId = (typeof invObj.payment_intent === 'string' ? invObj.payment_intent : (invObj.payment_intent && invObj.payment_intent.id)) || (typeof invObj.charge === 'string' ? invObj.charge : (invObj.charge && invObj.charge.id)); }
-            if (payId) await recordTransaction(event.account, payId, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id || null, ...(m.mtl_online === '1' ? { coach_id: m.coach_id || null, paid_to: 'coach', acq_source: 'direct' } : {}), plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side', acq_source: _acqSrcFrom(m), acq_months: (m.mtl_acq_months ? parseInt(m.mtl_acq_months,10) : null), base_rate: (m.mtl_base_rate ? parseFloat(m.mtl_base_rate) : null) });
+            if (payId) await recordTransaction(event.account, payId, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id || null, ...(m.mtl_online === '1' ? { coach_id: m.coach_id || null, paid_to: 'coach', acq_source: 'direct', native: m.mtl_native === '1' } : {}), plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side', acq_source: _acqSrcFrom(m), acq_months: (m.mtl_acq_months ? parseInt(m.mtl_acq_months,10) : null), base_rate: (m.mtl_base_rate ? parseFloat(m.mtl_base_rate) : null) });
           } catch (e) { console.error('record membership at checkout', e.message); }
         }
       } else if (m.mtl_payment_type === 'cohort_deposit') {
@@ -1207,16 +1220,26 @@ export default async function handler(req, res) {
     } else if (event.type === 'customer.subscription.deleted') {
       // Exclusive MTL Partner zrušen / neuhrazen → vypni partner sazby
       const sub = event.data.object;
+      // PROČ A KDY SKONČILO -- do e-mailu i notifikace. Stripe pošle tuhle událost v okamžiku konce:
+      // u zrušeného předplatného s koncem zaplaceného období, u neuhrazeného po posledním pokusu.
+      const _endInfo = { reason: (sub.cancellation_details && sub.cancellation_details.reason) || null, endedAt: sub.ended_at || sub.canceled_at || null };
+      const _whyCs = _endInfo.reason === 'payment_failed' ? ' Platbu za další období se nepodařilo strhnout z karty ani po opakovaných pokusech.'
+        : (_endInfo.reason === 'cancellation_requested' ? ' Předplatné jsi zrušil/a, proto skončilo s koncem zaplaceného období.' : '');
+      const _whyEn = _endInfo.reason === 'payment_failed' ? ' The payment for the next period could not be charged to your card, not even after repeated attempts.'
+        : (_endInfo.reason === 'cancellation_requested' ? ' You cancelled it, so it ended when the paid period ran out.' : '');
       // Profil dodavatele: předplatné skončilo -> profil se přestane zobrazovat (nic se nemaže,
       // po novém zaplacení se ukáže zase).
       try {
         const _so = (await sbGet(`organizations?supplier_sub=eq.${encodeURIComponent(sub.id)}&select=id,owner_id,name`)) || [];
         for (const o of _so) {
           await sbPatch('organizations', `id=eq.${encodeURIComponent(o.id)}`, { supplier_sub: null, supplier_cancelling: false, supplier_period_end: null, supplier_renews_at: null });
-          if (o.owner_id) await sbPost('notifications', { user_id: o.owner_id, type: 'system', read: false,
-            data: JSON.stringify({ kind: 'supplier_ended', org_id: o.id, org_name: o.name || '' }),
-            message: '🧰 Předplatné profilu dodavatele ' + (o.name || '') + ' skončilo — profil se klubům přestal zobrazovat. Údaje zůstávají; po novém zaplacení se profil ukáže zase.' });
-          await subMail({ orgId: o.id }, 'ended');
+          if (o.owner_id) {
+            const _cs = '🧰 Předplatné profilu dodavatele ' + (o.name || '') + ' skončilo.' + _whyCs + ' Kluby, kouči ani pořadatelé tě v sekci Dodavatelé nenajdou a sleva s Kartou MTL se studentům nezobrazuje. Nic se nesmazalo — po novém zaplacení se profil ukáže do minuty.';
+            const _en = '🧰 The subscription for the supplier profile ' + (o.name || '') + ' has ended.' + _whyEn + ' Clubs, coaches and organizers no longer find you under Suppliers and students no longer see your MTL Card discount. Nothing was deleted — pay again and the profile goes live within a minute.';
+            await sbPost('notifications', { user_id: o.owner_id, type: 'system', read: false,
+              data: JSON.stringify({ kind: 'supplier_ended', org_id: o.id, org_name: o.name || '', reason: _endInfo.reason, msg_cs: _cs, msg_en: _en }), message: _cs });
+          }
+          await subMail({ orgId: o.id }, 'ended', null, _endInfo);
         }
       } catch (e) { console.error('supplier ended', e.message); }
       const rows = await sbGet(`profiles?partner_sub=eq.${encodeURIComponent(sub.id)}&select=id`);
@@ -1225,7 +1248,7 @@ export default async function handler(req, res) {
         await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: false, partner_sub: null, partner_renews_at: null, partner_cancelling: false, partner_period_end: null });
         // Zpět na vlastní sazbu (základ / Shikai / Bankai / organizace) -- dřív natvrdo 5 %.
         try { await rerateOwner(uid); } catch (e) { console.error('ep end rerate', e.message); }
-        await subMail({ userId: uid }, 'ended');
+        await subMail({ userId: uid }, 'ended', null, _endInfo);
         await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_ended' }), message: '⭐ Teď už nejsi Exclusive MTL Partner. Díky za přízeň! Provize se vrátila na tvou vlastní sazbu: základ 2 % u plateb kartou a 2,5 % u převodu, nižší se Shikai, Bankai nebo sazbou organizace. Z člena z appky 10 %, z reklamy MTL 25 %.' });
       }
     } else if (event.type === 'charge.dispute.created') {
@@ -1295,7 +1318,7 @@ export default async function handler(req, res) {
             _subLadder = _ladder / 100;
             await applySubRate(stripe, event.account, sub, _so2, _ladder);
           }
-        }catch(e){ console.error('acq drop', e.message); } if (ipi && mem) await recordTransaction(event.account, ipi, { renewal: true, type: 'membership',  income_class: _incClass, member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency , acq_source: (_subWasAcq ? 'mtl_discovery' : null), acq_months: (_subWasAcq ? 1 : null), base_rate: (_subLadder != null ? _subLadder : null) }); } catch (e) { console.error('record membership', e.message); }
+        }catch(e){ console.error('acq drop', e.message); } if (ipi && mem) await recordTransaction(event.account, ipi, { renewal: true, native: (((inv.subscription_details || {}).metadata || {}).mtl_native === '1'), type: 'membership',  income_class: _incClass, member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency , acq_source: (_subWasAcq ? 'mtl_discovery' : null), acq_months: (_subWasAcq ? 1 : null), base_rate: (_subLadder != null ? _subLadder : null) }); } catch (e) { console.error('record membership', e.message); }
       }
     } else if (event.type === 'invoice.payment_failed') {
       const inv = event.data.object;
