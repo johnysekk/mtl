@@ -3623,7 +3623,6 @@ const I18N = { en: {
   "Napsat zprávu →":"Send a message →",
   "Smart kalendář":"Smart calendar",
   "Mám zájem →":"I'm interested →",
-  "Kouč je registrovaný a má ověřené IČO v rejstříku. Kvalitu koučování MTL neposuzuje.":"A coach is registered and their Reg. number was checked against the register. MTL does not assess coaching quality.",
   "Cenové rozpětí / hod":"Price range / hr",
   "✅ Přiznávám — napravím to":"✅ I admit it — I'll make it right",
   "Zobrazení koučů":"Coach display",
@@ -6037,9 +6036,6 @@ const NOTIF_T = {
     ? `🎁 Your invited coach ${d.who||''} got their first booking! You’ve earned 2 lessons at 0% commission.`
     : `🎁 Tvůj pozvaný kouč ${d.who||''} dostal první rezervaci! Máš 2 lekce s 0% provizí.`,
   coach_ref_qualified: (d)=>{ var sc=d.score||0, en=LANG==='en'; var t=sc>=5?(en?'5 active — Bankai (MTL fee 2%) needs 10 privates / 20 members.':'5 aktivních — na Bankai (provize 2 %) ještě 10 soukromek / 20 permanentek/členství.'):sc>=2?(en?'Shikai unlocked!':'Shikai odemčen!'):(en?('You have '+sc+' active — closer to Shikai/Bankai.'):('Máš '+sc+' aktivních — blíž k Shikai/Bankai.')); return (en?('Your referred coach '+(d.who||'')+' is now active! +1 in the MTL League. '):('Tvůj pozvaný kouč '+(d.who||'')+' je teď aktivní! +1 do MTL Ligy. '))+t; },
-  cert_verified: (d)=> LANG==='en'
-    ? `☑️ Your Reg. number was checked against the register.`
-    : `☑️ Tvoje IČO jsme ověřili v rejstříku.`,
   gym_dropin_rescheduled: (d)=> LANG==='en'
     ? `🔄 ${d.student||'A student'} moved their drop-in from ${d.oldDate} ${d.oldTime||''} to ${d.newDate} ${d.newTime}.`
     : `🔄 ${d.student||'Student'} přesunul jednorázovou lekci z ${d.oldDate} ${d.oldTime||''} na ${d.newDate} ${d.newTime}.`,
@@ -6930,6 +6926,7 @@ function _mapCoachRow(c){
       countryCode: c.country_code || null,
       onlineIntl: (c.online_intl===undefined ? undefined : (c.online_intl===true)),   // prodej online i do jiných zemí
       billingCC: (c.billing_country||c.country_code||null),
+      regVerified: c.reg_verified||null,   // 'ares' | 'vies' | null -- api/reg-verify.js
       avail: c.avail_status || 'available',
       privOffers: (function(){ try{ return (typeof c.private_offers==='string')?JSON.parse(c.private_offers):(c.private_offers||null); }catch(e){ return null; } })(),
       gym: c.gym || '',
@@ -7483,6 +7480,27 @@ function _trustCardHtml(items){
   return '<div class="pf-trust"><div class="pf-trust-h">'+(EN?'Booking through MTL':'Rezervace přes MTL')+'</div><div class="pf-trust-g">'
     +items.map(function(it){ return '<button type="button" class="pf-trust-i" data-k="'+it.k+'"><span class="ic"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+(_TRUST_IC[it.ic||it.k]||'')+'</svg></span><span style="min-width:0;"><b>'+it.t+'</b><small>'+it.s+'</small></span></button>'; }).join('')
     +'</div>'+items.map(function(it){ return '<div class="pf-trust-d" data-k="'+it.k+'">'+it.d+'</div>'; }).join('')+'</div>';
+}
+// OVĚŘENÍ V REJSTŘÍKU. Ověřuje a ukládá server (api/reg-verify.js); appka ho jen spustí po
+// uložení údajů a jednou sama u účtu, kde ještě nikdy neproběhlo (reg_checked_at prázdné).
+async function _regVerify(kind, id){
+  if(!id || !currentUser) return null;
+  try{ const tok=await _freshTok(); if(!tok) return null;
+    const r=await fetch('/api/reg-verify?kind='+kind+'&id='+encodeURIComponent(id), { headers:{ Authorization:'Bearer '+tok } });
+    return await r.json().catch(function(){ return null; }); }catch(e){ return null; }
+}
+// Čtvrtá dlaždice karty „Rezervace přes MTL". Ověřené IČO / DIČ jen u toho, komu to server
+// opravdu ověřil (ARES u českých, VIES u ostatních z EU). Ostatním dlaždice, která platí pro
+// každého: doklad s údaji poskytovatele ke každé platbě.
+function _trustRegItem(src, EN, who){
+  const q=(who==='coach')?(EN?'coaching quality':'kvalitu koučování'):(EN?'training quality':'kvalitu tréninků');
+  const tail=EN?(' MTL does not assess '+q+' — look at the profile, photos and reviews before you book.'):(' MTL neposuzuje '+q+' — před rezervací mrkni na profil, fotky a recenze.');
+  if(src==='ares') return { k:'ico', t:(EN?'Verified Reg. No.':'Ověřené IČO'), s:(EN?'checked in ARES (CZ)':'ověřeno v rejstříku ARES'),
+    d:(EN?'The provider\'s Reg. number and legal name were checked in the Czech business register ARES.':'IČO a právní název poskytovatele jsme ověřili v českém rejstříku ARES.')+tail };
+  if(src==='vies') return { k:'ico', t:(EN?'Verified VAT ID':'Ověřené DIČ'), s:(EN?'checked in EU VIES':'ověřeno v registru EU (VIES)'),
+    d:(EN?'The provider\'s VAT ID is valid in the EU register VIES and matches their legal name.':'DIČ poskytovatele je platné v evropském registru VIES a sedí k jeho právnímu názvu.')+tail };
+  return { k:'ico', t:(EN?'Receipt every time':'Doklad ke každé platbě'), s:(EN?'with the provider\'s details':'s údaji poskytovatele'),
+    d:(EN?'Every payment comes with a receipt stating the provider\'s legal name, registration number and address.':'Ke každé platbě dostaneš doklad s právním názvem, registračním číslem a sídlem poskytovatele.')+tail };
 }
 function _trustBind(root){
   if(!root) return;
@@ -10276,8 +10294,7 @@ function openProfile(coachObj){
         d:(_EN?'After booking, add the session to Google / Apple / any calendar in one tap.':'Po rezervaci si hodinu přidáš do Google / Apple / jiného kalendáře jedním klepnutím.') },
       _fd ? { k:'ico', t:(_EN?'MTL Founder':'Zakladatel MTL'), s:(_EN?'built MTL':'stojí za MTL'),
               d:(_EN?'<b>MTL Founder:</b> His vision is to spread combat sports and martial arts wherever they can reach.':'<b>MTL Zakladatel:</b> Jeho vizí je šířit bojové sporty a bojová umění všude, kam to jde.') }
-          : { k:'ico', t:(_EN?'Verified Reg. No.':'Ověřené IČO'), s:(_EN?'checked in the register':'kontrola v rejstříku'),
-              d:(_EN?'Every provider on MTL has had their Reg. number checked against the public register. MTL does not assess coaching quality — look at the profile, video and reviews before you book.':'Každý poskytovatel na MTL má ověřené IČO v rejstříku. Kvalitu koučování MTL neposuzuje — před rezervací mrkni na profil, video a recenze.') }
+          : _trustRegItem(c.regVerified, _EN, 'coach')
     ];
     const _pt=$('profTrust'); if(_pt){ _pt.innerHTML=_trustCardHtml(items); _trustBind(_pt); }
   }
@@ -15870,8 +15887,7 @@ async function openGymProfile(g){
       d:(_EN?'Something came up? Move your booking to another date — once, at least 6 h ahead, no cancellation fee.':'Něco ti do toho vlezlo? Přesuň si rezervaci na jiný termín — jednou a nejpozději 6 h předem, bez storna.') },
     { k:'cal', t:(_EN?'Smart calendar':'Smart kalendář'), s:(_EN?'Google or Apple in one tap':'Google i Apple jedním klepnutím'),
       d:(_EN?'After booking, add the class to Google / Apple calendar in one tap.':'Po rezervaci si lekci přidáš do Google / Apple kalendáře jedním klepnutím.') },
-    { k:'ico', t:(_EN?'Verified Reg. No.':'Ověřené IČO'), s:(_EN?'checked in the register':'kontrola v rejstříku'),
-      d:(_EN?'Every provider on MTL has had their Reg. number checked against the public register. MTL does not assess training quality — look at the photos, schedule and reviews.':'Každý poskytovatel na MTL má IČO ověřené v rejstříku. Kvalitu tréninků MTL neposuzuje — mrkni na fotky, rozvrh a recenze.') }
+    _trustRegItem(g.reg_verified, _EN, 'gym')
   ];
   _trustItems[0].d=_payD
     +((_np&&plansAll.length)?`<div style="margin-top:7px;"><b>${_EN?'Membership fee:':'Členský příspěvek:'}</b> ${_EN?'Under the association\'s statutes the membership fee is generally not refunded; any refund is decided by the association.':'Členský příspěvek se podle stanov spolku zpravidla nevrací; o případném vrácení rozhoduje spolek.'}</div>`:'')
@@ -18208,6 +18224,11 @@ async function checkGymOwnership(){
   }catch(e){ console.warn('co-owner gyms', e); }
   window._myGyms = approved;
   try{ if(window._refreshPayEntry) window._refreshPayEntry(); }catch(e){}
+  // Ověření v rejstříku pro kluby a kouče, kteří vznikli dřív, než se výsledek ukládal.
+  try{
+    approved.forEach(function(g){ if(g && g.tax_id && !g.reg_checked_at && g.reg_checked_at!==undefined) _regVerify('gym', g.id); });
+    if(currentUser.tax_id && !currentUser.reg_checked_at && currentUser.reg_checked_at!==undefined && _isCoachUser()) _regVerify('coach', currentUser.id);
+  }catch(e){}
   try{
     window._auditGymSet = window._auditGymSet || new Set();
     approved.forEach(function(g){ if(g && g._isCoOwner) window._auditGymSet.add(String(g.id)); });
@@ -29423,6 +29444,7 @@ async function saveGymManage(){
   // Databáze bez sloupce register_entry (SQL ještě nespuštěné): ulož zbytek, ne nic.
   if(error && /register_entry/.test(String(error.message||''))){ delete patch.register_entry; ({ error } = await supaClient.from('gyms').update(patch).eq('id', _myGymData.id)); }
   if(!error) _auditLog(_myGymData.id,'settings_changed',null,null);
+  if(!error) _regVerify('gym', _myGymData.id);
   // „TypeError: Load failed" je Safari pro požadavek, na který nepřišla žádná odpověď (výpadek
   // spojení, přerušené načítání). Databáze nic neodmítla -- jen se to nedostalo na server.
   if(error && /load failed|failed to fetch|networkerror/i.test(String(error.message||''))){
@@ -32476,6 +32498,7 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
     }
     newGym = _gymIns.data; error = _gymIns.error;
     if(error){ toast('⚠️ '+error.message); btn.textContent=L('Odeslat přihlášku klubu →'); btn.disabled=false; return; }
+    if(newGym && newGym.id) _regVerify('gym', newGym.id);
     if(newGym && newGym.id){
       // Zakladatel se o novem klubu dozvi hned, ne az z databaze.
       // Soft signal: once an operator crosses 10 clubs, ping the founder ONCE per new threshold
@@ -48753,6 +48776,7 @@ $('btnSubmitCoachApp').onclick=async()=>{
       // v obou případech se pak zobrazí tomu, kdo u poskytovatele zaplatil.
       contact_phone:(_pubPh||null), contact_email:(_pubEm||null) }).eq('id', currentUser.id);
     if(_caUpErr) throw _caUpErr;
+    _regVerify('coach', currentUser.id);
     // PŘIHLÁŠKA KOUČE PLATBY NEŘEŠÍ (CA_STEPS=2) -- režim i účet se nastavují až po přihlášení.
     // Dřív tu zůstala větev, která brala režim předvyplněný z profilu (např. z klubu) a přepsala
     // jím profil i s prázdnými poli účtu ze skrytého kroku. Nic se tu nezapisuje.
@@ -49339,8 +49363,8 @@ const SUP_FAQ=[
    '<b>Younger children</b> cannot have their own account (the age varies by country, usually under 15) — add your child under <b>Me → Family</b>. You book and pay for them, and you see their attendance, level and stats. Once they reach the age, you can move those stats across to their own teenage account.<br><br><b>An older child — a teenager</b> (usually 15+, depending on the country) can have an account, but while they are a minor they need your consent to train. They link their account to yours, you approve it — and they can then ask you to pay for a session or a membership.']},
 
   {q:['Prověřuje MTL kouče a kluby?','Does MTL vet coaches and clubs?'], a:[
-   'Než může kdokoli přijímat platby, ověříme mu IČO v rejstříku — víš tedy, s kým obchoduješ. Kvalitu koučování ale neposuzujeme a neudělujeme žádné odznaky: to by znamenalo, že za někoho ručíme. Rozhodni se podle profilu, videa a recenzí, a když ti záleží na kvalifikaci, zeptej se kouče přímo.',
-   'Before anyone can take payments we check their company number against the public register, so you know who you are dealing with. We do not assess coaching quality and award no badges: that would mean vouching for someone. Judge by the profile, the video and the reviews, and if qualifications matter, ask the coach directly.']},
+   'Každý poskytovatel musí zadat právní název a IČO (u zahraničních registrační číslo), které stojí na každém dokladu. Českým poskytovatelům je ověřujeme v rejstříku ARES, ostatním z EU DIČ v registru VIES — ověření vidíš v jejich profilu. Kvalitu koučování ale neposuzujeme a neudělujeme žádné odznaky: to by znamenalo, že za někoho ručíme. Rozhodni se podle profilu, videa a recenzí, a když ti záleží na kvalifikaci, zeptej se kouče přímo.',
+   'Every provider must enter their legal name and registration number, which appear on every receipt. For Czech providers we check them in the ARES register, for others in the EU their VAT ID in VIES — you see the verification on their profile. We do not assess coaching quality and award no badges: that would mean vouching for someone. Judge by the profile, the video and the reviews, and if qualifications matter, ask the coach directly.']},
 
   {q:['Kdo ručí za trénink? Je to bezpečné?','Who is responsible for the training?'], a:[
    'Trénink vede kouč nebo klub na vlastní odpovědnost — MTL je zprostředkovatel, ne pořadatel. Bojové sporty a bojová umění nesou riziko zranění; před prvním tréninkem řekni koučovi o zdravotních omezeních. Nezletilí potřebují souhlas zákonného zástupce.',
@@ -51828,7 +51852,7 @@ async function renderCoachBilling(){
     const upd={}; Object.keys(_u0).forEach(function(k){ upd[_billMode+k]=_u0[k]; });
     try{ let { error }=await supaClient.from('profiles').update(upd).eq('id',currentUser.id);
       if(error && /register_entry/.test(String(error.message||''))){ delete upd[_billMode+'register_entry']; ({ error }=await supaClient.from('profiles').update(upd).eq('id',currentUser.id)); }
-      if(error) throw error; Object.assign(currentUser,upd); toast(EN?'✓ Saved':'✓ Uloženo'); }catch(e){ toast('⚠️ '+(e.message||'')); }
+      if(error) throw error; Object.assign(currentUser,upd); toast(EN?'✓ Saved':'✓ Uloženo'); _regVerify('coach', currentUser.id); }catch(e){ toast('⚠️ '+(e.message||'')); }
     btn.disabled=false; btn.textContent=_o; };
 }
 function setupDangerZone(){
