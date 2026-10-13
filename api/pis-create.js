@@ -104,7 +104,7 @@ function pickBankUrl(links) {
 // samostatny soubor a skoncilo to tim, ze se v nem opakovaly chyby, ktere tady uz davno
 // vyresene byly -- specificke je jen prihlaseni, adresy a tvar tela.
 // (crypto se importuje nahoře na řádku 21 -- druhý import by shodil celou funkci)
-import { fbxCall, psuIpFrom, FBX_SANDBOX, FBX_MAX_SANDBOX, MERCHANT_ID as FBX_MERCHANT } from './_fbx.js';
+import { fbxCall, fbxNow, psuIpFrom, FBX_MAX_SANDBOX } from './_fbx.js';
 import { checkRowPrice } from './_price-check.js';
 const _PC_SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, ''), _PC_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -249,7 +249,9 @@ function _fbxOrigin(req) {
   } catch (e) { return ''; }
 }
 async function fbxCreate(sb, req, body) {
-  if (!FBX_MERCHANT) return { error: 'FINBRICKS_MERCHANT_ID not configured' };
+  // Prostředí (sandbox / ostré) podle globálního Testovacího režimu.
+  const C = await fbxNow();
+  if (!C.ok) return { error: 'Finbricks ' + C.env + ' nemá nastavené klíče' };
   const rowId = String(body.bookingId || '');
   if (!rowId) return { error: 'no id' };
 
@@ -311,12 +313,12 @@ async function fbxCreate(sb, req, body) {
   const real = Number((tbl === 'organization_clubs' ? orgFeeAmount : row.amount) || body.amount || 0);
   if (!(real > 0)) return { error: 'bad amount' };
   // Sandbox ma strop 1 Kc; na radku zustava skutecna castka, aby se do uctovani nepropsala koruna.
-  const amount = FBX_SANDBOX ? Math.min(real, FBX_MAX_SANDBOX) : real;
+  const amount = C.sandbox ? Math.min(real, FBX_MAX_SANDBOX) : real;
 
   const mtid = crypto.randomUUID();
   const payerId = row.student_id || row.buyer_id || row.member_id || null;
   const payload = {
-    merchantId: FBX_MERCHANT,
+    merchantId: C.merchant,
     merchantTransactionId: mtid,
     amount,
     creditorAccountIban: String(iban).replace(/\s+/g, ''),
@@ -337,11 +339,11 @@ async function fbxCreate(sb, req, body) {
   const opts = { psuIp: psuIpFrom(req), psuUa: req.headers['user-agent'] || 'MTL/1.0', lang: (body.lang === 'en' ? 'en' : 'cs') };
   const FLOW = (process.env.FINBRICKS_FLOW || 'ecommerce').toLowerCase();
   let r = (FLOW === 'platform') ? { ok: false, data: { code: 308 } }
-                                : await fbxCall('POST', '/ecommerce/transaction/init', payload, opts);
+                                : await fbxCall(C, 'POST', '/ecommerce/transaction/init', payload, opts);
   if (!r.ok && r.data && [308, 300, 302].includes(r.data.code)) {
     const p2 = { ...payload, totalPrice: payload.amount };
     delete p2.amount; delete p2.shoppingCartUrl;
-    r = await fbxCall('POST', '/transaction/platform/init', p2, opts);
+    r = await fbxCall(C, 'POST', '/transaction/platform/init', p2, opts);
   }
   // Platba se zadává VŽDY jako okamžitá (INST): appka ji potvrzuje hned podle stavu z banky.
   // Běžná platba by dorazila až další pracovní den -- to je pro rezervaci k ničemu, takže se

@@ -121,7 +121,7 @@ const RESEND = process.env.RESEND_API_KEY;
 const MAIL_FROM = process.env.INVITE_FROM || 'Martial Training Lab <no-reply@martialtraininglab.com>';
 const MAIL_ADDR = (MAIL_FROM.match(/<([^>]+)>/) || [])[1] || 'no-reply@martialtraininglab.com';
 function _esc(x) { return String(x == null ? '' : x).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
-async function sendResend(to, subject, html, opts) {
+export async function sendResend(to, subject, html, opts) {
   if (!RESEND || !to) return;
   try {
     const body = { from: (opts && opts.from) || MAIL_FROM, to: [to], subject, html };
@@ -189,7 +189,7 @@ async function cohortStripeFee(pi, acct){
     return Math.round(sFee) / 100;
   }catch(e){ console.error('cohortStripeFee', e.message); return 0; }
 }
-function cohortDokladPdf(o){
+export function cohortDokladPdf(o){
   return new Promise((resolve, reject) => {
     try{
       const rec = o.gym || {};
@@ -229,7 +229,7 @@ function cohortDokladPdf(o){
     }catch(e){ reject(e); }
   });
 }
-function cohortDepositHtml(name, courseName, gymName, depositTxt, remainderTxt, startTxt, _appUrl, nonprofit) {
+export function cohortDepositHtml(name, courseName, gymName, depositTxt, remainderTxt, startTxt, _appUrl, nonprofit) {
   // Czech has vocative declension ('Petr' -> 'Petře'); getting it wrong reads worse than omitting,
   // so we greet without the name. (name kept in the signature for callers / future localisation.)
   const hi = 'Ahoj,';
@@ -442,7 +442,7 @@ async function notifyPaidForMinor(m, item, amount, currency) {
 // JEDINY zapis Stripe transakce. Vola ho webhook i /api/session (zaloha pri navratu studenta).
 // Session mela driv vlastni chudsi kopii, takze podle toho, kdo vyhral, v transakci chybely
 // dropin_plan_id, proof_checked, platce, payee, acq_months nebo disciplina.
-export // PŮVOD ČLENA Z METADAT. pay.js posílá jen příznak mtl_acq='1' (ne název zdroje), zatímco
+// PŮVOD ČLENA Z METADAT. pay.js posílá jen příznak mtl_acq='1' (ne název zdroje), zatímco
 // sloupec transactions.acq_source a _rate.js pracují s hodnotou 'mtl_discovery' -- kdyby se
 // uložila jednička, kontrola „akvizice jen za první platbu" by ji nepoznala.
 function _acqSrcFrom(m) {
@@ -457,7 +457,7 @@ function _acqSrcFrom(m) {
   } catch (e) {}
   return null;
 }
-async function recordTransaction(acct, pi, fields) {
+export async function recordTransaction(acct, pi, fields) {
   if (!pi) return { status: 'no-pi' };
   try {
     const ex = await sbGet(`transactions?payment_intent=eq.${encodeURIComponent(pi)}&select=id,gross_amount`);

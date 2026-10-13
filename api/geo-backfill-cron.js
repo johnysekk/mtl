@@ -1,4 +1,4 @@
-// /api/geo-backfill-cron.js — doplní chybějící souřadnice klubům a akcím.
+// /api/geo-backfill-cron.js — doplní chybějící souřadnice klubům a organizacím.
 //
 // PROČ: klub bez zeměpisného bodu (city_lat/city_lng) nemá vzdálenost. Deck řadí podle
 // vzdálenosti, takže takový klub propadá na konec a v „3 km od tebe" se vůbec neobjeví.
@@ -27,8 +27,9 @@ const sbPatch = async (path, body) => {
   return r.ok;
 };
 
-async function geocode(q) {
-  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q);
+async function geocode(q, cc) {
+  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q)
+    + (cc ? '&countrycodes=' + encodeURIComponent(String(cc).toLowerCase()) : '');
   const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
   if (!r.ok) { console.error('[geo-backfill] nominatim', r.status, q.slice(0, 60)); return null; }
   const d = await r.json();
@@ -65,7 +66,28 @@ export default async function handler(req, res) {
       else failed++;
     }
 
-    return res.status(200).json({ ok: true, checked: (gyms || []).length, done, failed });
+    // ORGANIZACE (hlavně dodavatelé -- řadí se podle vzdálenosti): bod ze sídla. Dělí se o stejný
+    // strop 20 dotazů za běh; sloupce city_lat/city_lng přidává org-geo.sql.
+    const left = Math.max(0, 20 - (gyms || []).length);
+    const orgs = left ? await sbGet('organizations?select=id,name,billing_line1,billing_city,city,billing_country,country'
+      + '&city_lat=is.null&billing_city=not.is.null&limit=' + left) : [];
+    for (const o of (orgs || [])) {
+      const cc = o.billing_country || o.country || '';
+      const city = o.billing_city || o.city || '';
+      const tries = [[o.billing_line1, city].filter(Boolean).join(', '), city].filter((x) => x && x.length > 2);
+      let hit = null;
+      for (const q of tries) {
+        hit = await geocode(q, cc);
+        await sleep(1000);
+        if (hit) break;
+      }
+      if (!hit) { failed++; console.log('[geo-backfill] org nenalezena:', o.id, o.name); continue; }
+      const ok = await sbPatch(`organizations?id=eq.${encodeURIComponent(o.id)}`, { city_lat: hit.lat, city_lng: hit.lng });
+      if (ok) { done++; console.log('[geo-backfill] org doplněna:', o.id, o.name, hit.lat, hit.lng); }
+      else failed++;
+    }
+
+    return res.status(200).json({ ok: true, checked: (gyms || []).length + (orgs || []).length, done, failed });
   } catch (e) {
     console.error('[geo-backfill]', (e && e.message) || e);
     return res.status(500).json({ error: (e && e.message) || 'error', done, failed });

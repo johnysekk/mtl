@@ -32,18 +32,21 @@ async function neoToken() {
 // ── FINBRICKS: SEZNAM BANK ───────────────────────────────────────────────────────────────
 // Stejny endpoint jako u Neonomics, jen jiny zdroj. Appka se nemeni.
 import { createClient } from '@supabase/supabase-js';
-import { fbxCall, MERCHANT_ID as FBX_MERCHANT, FBX_BASE } from './_fbx.js';
+import { fbxCall, fbxNow } from './_fbx.js';
+import { isTestMode } from './_config.js';
 
 const _sbCfg = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
 
 async function fbxBanks(country) {
+  const C = await fbxNow();
+  if (!C.ok) return { list: [], total: 0, error: 'Finbricks ' + C.env + ' nemá nastavené klíče' };
   // Bez IBANu platce prijme /transaction/platform/init jen banky, ktere resi vyber uctu na sve
   // strane; ostatni vraci 266. MOCK_COBS je sandboxovy simulator -- jedina banka, kde se da
   // v testu platbu dokoncit.
   const PLATFORM_OK = ['MBANK', 'RAIFFEISEN', 'UNICREDIT', 'MOCK_COBS'];
-  const path = `/status/bankInfo?merchantId=${encodeURIComponent(FBX_MERCHANT)}&countryCode=${encodeURIComponent(country)}`
+  const path = `/status/bankInfo?merchantId=${encodeURIComponent(C.merchant)}&countryCode=${encodeURIComponent(country)}`
     + '&domesticPaymentSupported=true&enabledForMerchant=true';
-  const r = await fbxCall('GET', path, null);
+  const r = await fbxCall(C, 'GET', path, null);
   if (!r.ok) {
     const d = r.data || {};
     console.error('[pis-aspsps/fbx]', r.status, JSON.stringify(d));
@@ -59,7 +62,7 @@ async function fbxBanks(country) {
       country: b.countryCode || country,
       bankId: b.paymentProvider,
       bic: b.bic || null,
-      logo: b.logoUrl ? (String(b.logoUrl).startsWith('http') ? b.logoUrl : (FBX_BASE.replace('api.', 'cdn.') + b.logoUrl)) : null,
+      logo: b.logoUrl ? (String(b.logoUrl).startsWith('http') ? b.logoUrl : (C.base.replace('api.', 'cdn.') + b.logoUrl)) : null,
       psu_types: ['personal'],
     }))
     .sort((a, b) => {
@@ -80,8 +83,9 @@ export default async function handler(req, res) {
     if (String((cfg.data && cfg.data.pis_provider) || 'finbricks') === 'finbricks' && FBX_COUNTRIES.includes(cc)) {
       // Kdyz seznam prijde prazdny, appka rekne "platba z uctu tu neni dostupna" -- a bez
       // duvodu se nepozna, jestli Finbricks nic nevratil, nebo spadlo volani. Duvod jde s tim.
+      // `test` = globální Testovací režim: appka podle něj ukáže jen Mock Cobs, nebo jen ostré banky.
       const _out = await fbxBanks(cc);
-      return res.status(200).json({ aspsps: _out.list, provider: 'finbricks', total: _out.total, error: _out.error || null });
+      return res.status(200).json({ aspsps: _out.list, provider: 'finbricks', test: await isTestMode(), total: _out.total, error: _out.error || null });
     }
   } catch (e) { console.error('[pis-aspsps/fbx]', e && e.message); }
 
@@ -107,7 +111,7 @@ export default async function handler(req, res) {
         psu_types: ['personal']
       }));
 
-    return res.status(200).json({ aspsps: banks });
+    return res.status(200).json({ aspsps: banks, provider: 'neonomics', test: await isTestMode() });
   } catch (e) {
     return res.status(500).json({ error: e.message, aspsps: [] });
   }

@@ -138,6 +138,10 @@ export async function pisSideEffects(rec, tbl){
         try{ globalThis.__mtlRecordCash={ status:_rc.status, text:String(_t).slice(0,300), url:APP_URL+'/api/record-cash' }; }catch(_e){}
       } else { try{ globalThis.__mtlRecordCash={ status:_rc.status, ok:true }; }catch(_e){} }
       } }catch(e){ console.error('[pis] record-cash throw', e && e.message); }
+  // ZÁLOHA KURZU Z ÚČTU: stejný e-mail se zálohou a dokladem jako u karty a QR. Host bez účtu
+  // dřív nedostal nic -- jen toast po návratu z banky. Odeslání hlídá cohort-deposit-mail
+  // (deposit_mail_at), takže opakovaný návrat nic nezdvojí.
+  if(_cohort){ try{ await fetch(APP_URL+'/api/cohort-deposit-mail',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ internal:true, intSecret:process.env.PIS_INTERNAL_SECRET, cohort_member_id:rec.id }) }); }catch(e){ console.error('[pis] deposit mail', e && e.message); } }
   if(_event){ try{ await fetch(APP_URL+'/api/ticket-email',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ ticketId:rec.id }) }); }catch(e){} }
   try{ if(_event){ let target=(_evP==='coach')?_evC:null; if(!target && _evOrg){ const o=await sb.from('organizations').select('owner_id').eq('id',_evOrg).maybeSingle(); target=o.data&&o.data.owner_id; } if(!target && _evG){ const g=await sb.from('gyms').select('owner_id').eq('id',_evG).maybeSingle(); target=g.data&&g.data.owner_id; } if(target) await sb.from('notifications').insert({ user_id:target, type:'booking', read:false, message:'\ud83c\udf9f\ufe0f Nov\u00fd prodej vstupenky (p\u0159evodem): '+(rec.buyer_name||'Z\u00e1kazn\u00edk'), data:JSON.stringify({ kind:'pis_payment_in', event_id:rec.event_id, student:(rec.buyer_name||''), amt:(rec.amount!=null?String(rec.amount):''), sym:(rec.currency||'CZK') }) }); }
     else if(_coach1){
@@ -309,7 +313,24 @@ async function settleOrgFee(ocId){
 // Stejna adresa jako u Neonomics. Finbricks se pozna podle parametru ?mtid=; telu callbacku
 // se neveri -- stav si overime vlastnim podepsanym dotazem. Zauctovani pak dela pisSettle,
 // tedy tatáž funkce jako u Neonomics.
-import { fbxCall, fbxOutcome, MERCHANT_ID as FBX_MERCHANT } from './_fbx.js';
+import { fbxCall, fbxOutcome, fbxNow, fbxOther } from './_fbx.js';
+
+// STAV PLATBY Z PROSTŘEDÍ, VE KTERÉM VZNIKLA. Prostředí (sandbox / ostré) volí Testovací režim;
+// platba založená těsně před jeho přepnutím ale žije v tom druhém. Nejdřív aktuální, při
+// neúspěchu druhé. Vrací { C, r } -- C se pak použije i pro opakované dotazy.
+async function fbxStatus(mtid, C0){
+  const path=function(C){ return '/transaction/platform/status?merchantId='+encodeURIComponent(C.merchant)+'&merchantTransactionId='+encodeURIComponent(mtid); };
+  if(C0) return { C:C0, r:await fbxCall(C0, 'GET', path(C0), null) };
+  const now=await fbxNow();
+  const list=[now, fbxOther(now)].filter(function(C){ return C.ok; });
+  let last={ C:null, r:{ ok:false, status:0, data:{ message:'Finbricks nemá nastavené klíče' } } };
+  for(const C of list){
+    const r=await fbxCall(C, 'GET', path(C), null);
+    if(r.ok) return { C, r };
+    if(!last.C) last={ C, r };
+  }
+  return last;
+}
 
 // Návrat z banky u členského poplatku. Platba je vedená na organization_clubs.fee_payment_intent.
 // Po zaúčtování se tam zapíše "paid:<mtid>" -- další návrat (callback, dotaz appky) pak
@@ -329,12 +350,11 @@ async function fbxReturnOrgFee(req, res, mtid, wantsHtml){
   if(!oc) return wantsHtml ? back('fbx=unknown') : res.status(200).json({ ok:true, note:'unknown mtid' });
   if(done) return wantsHtml ? back('fbx=ok') : res.status(200).json({ ok:true, paid:true, table:'organization_clubs', id:oc.id });
 
-  const path='/transaction/platform/status?merchantId='+encodeURIComponent(FBX_MERCHANT)+'&merchantTransactionId='+encodeURIComponent(mtid);
-  let r=await fbxCall('GET', path, null);
+  let { C, r }=await fbxStatus(mtid);
   let out=fbxOutcome(r.data);
-  for(let i=0; i<2 && !out.final; i++){
+  for(let i=0; i<2 && !out.final && C; i++){
     await new Promise(function(ok){ setTimeout(ok, 1500); });
-    r=await fbxCall('GET', path, null);
+    ({ r }=await fbxStatus(mtid, C));
     out=fbxOutcome(r.data);
   }
   if(!out.final) return wantsHtml ? back('fbx=pending&mtid='+encodeURIComponent(mtid)) : res.status(200).json({ ok:true, status:out.code, final:false });
@@ -354,7 +374,6 @@ async function fbxReturn(req, res, mtid){
   const _wantJson=String((req.query&&req.query.json)||'')==='1';
   const wantsHtml=!_wantJson && String(req.headers.accept||'').includes('text/html');
   const back=function(q){ res.setHeader('Location', _backTo(req)+'/?'+q); return res.status(302).end(); };
-  if(!FBX_MERCHANT) return res.status(500).json({ error:'FINBRICKS_MERCHANT_ID not configured' });
   const TBL=['gym_bookings','gym_memberships','bookings','event_tickets','cohort_members','merch_orders'];
   let tbl=null, rec=null;
   for(const t of TBL){
@@ -362,16 +381,19 @@ async function fbxReturn(req, res, mtid){
     if(r.data){ tbl=t; rec=r.data; break; }
   }
   if(!rec) return await fbxReturnOrgFee(req, res, mtid, wantsHtml);
+  // KURZ: zpátky na stránku kurzu, ne na přihlášení do appky. Zaplaceno = stejná děkovná
+  // obrazovka jako po kartě (?deposit=ok), host i přihlášený.
+  const backC=(tbl==='cohort_members' && rec.cohort_id) ? function(q){ return back('cohort='+encodeURIComponent(rec.cohort_id)+'&'+q); } : back;
+  const okQ=(tbl==='cohort_members' && rec.cohort_id) ? ('deposit=ok&cm='+encodeURIComponent(rec.id)) : 'fbx=ok';
 
-  const path='/transaction/platform/status?merchantId='+encodeURIComponent(FBX_MERCHANT)+'&merchantTransactionId='+encodeURIComponent(mtid);
   // BANKA POTVRZUJE S MALYM ZPOZDENIM. Hned po navratu je stav casto jeste OPENED a platba
   // se za vterinu zmeni na COMPLETED -- doptat se jednou navic je levnejsi nez poslat cloveka
   // pryc s "platba se zpracovava" a cekat, az se vrati sam.
-  let r=await fbxCall('GET', path, null);
+  let { C, r }=await fbxStatus(mtid);
   let out=fbxOutcome(r.data);
-  for(let i=0; i<2 && !out.final; i++){
+  for(let i=0; i<2 && !out.final && C; i++){
     await new Promise(function(res){ setTimeout(res, 1500); });
-    r=await fbxCall('GET', path, null);
+    ({ r }=await fbxStatus(mtid, C));
     out=fbxOutcome(r.data);
   }
 
@@ -380,12 +402,12 @@ async function fbxReturn(req, res, mtid){
     const recovery=r.data && r.data.transactionRecoveryUrl;
     if(recovery){ try{ await sb.from(tbl).update({ pis_recovery_url:recovery }).eq('id', rec.id); }catch(e){} }
     // mtid jde s sebou: appka se muze doptat sama, az banka stav dopise.
-    return wantsHtml ? back('fbx=pending&mtid='+encodeURIComponent(mtid)) : res.status(200).json({ ok:true, status:out.code, final:false, recoveryUrl:recovery||null });
+    return wantsHtml ? backC('fbx=pending&mtid='+encodeURIComponent(mtid)) : res.status(200).json({ ok:true, status:out.code, final:false, recoveryUrl:recovery||null });
   }
   if(out.paid){
     try{ await pisSettle(rec, tbl, out.code); }
     catch(e){ console.error('[pis-return/fbx] settle', tbl, rec.id, e && e.message);
-      return wantsHtml ? back('fbx=err') : res.status(500).json({ error:'settle failed', detail:String((e&&e.message)||e), table:tbl, id:rec.id }); }
+      return wantsHtml ? backC('fbx=err') : res.status(500).json({ error:'settle failed', detail:String((e&&e.message)||e), table:tbl, id:rec.id }); }
     // OVERIT, ZE PENIZE SKUTECNE DOSLY DO UCETNICTVI. Zauctovani bezi v pisSettle a jeho
     // chyby konci v logu, ktery nikdo necte. Odpoved proto rovnou rekne, jestli k platbe
     // existuje transakce a doklad -- bez toho se hledalo naslepo.
@@ -397,10 +419,10 @@ async function fbxReturn(req, res, mtid){
       if(_tx){ const d=await sb.from('doklady').select('doklad_no').eq('transaction_id', _tx).limit(1);
         _dok=(d.data&&d.data[0]&&d.data[0].doklad_no)||null; }
     }catch(e){}
-    return wantsHtml ? back('fbx=ok') : res.status(200).json({ ok:true, status:out.code, paid:true, table:tbl, id:rec.id, transakce:_tx, doklad:_dok, zauctovani:_rcDiag });
+    return wantsHtml ? backC(okQ) : res.status(200).json({ ok:true, status:out.code, paid:true, table:tbl, id:rec.id, transakce:_tx, doklad:_dok, zauctovani:_rcDiag });
   }
   if(out.failed){ try{ await sb.from(tbl).update({ status:'cancelled', pis_failed_at:new Date().toISOString() }).eq('id', rec.id); }catch(e){} }
-  return wantsHtml ? back('fbx=fail') : res.status(200).json({ ok:true, status:out.code, paid:false });
+  return wantsHtml ? backC('fbx=fail') : res.status(200).json({ ok:true, status:out.code, paid:false });
 }
 
 export default async function handler(req, res){

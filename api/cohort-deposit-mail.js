@@ -1,4 +1,5 @@
-// /api/cohort-deposit-mail — sends the course-deposit e-mail after the OWNER confirms a QR payment.
+// /api/cohort-deposit-mail — sends the course-deposit e-mail after the OWNER confirms a QR payment,
+// or after the bank confirms a pay-by-bank (PIS) deposit (pis-return calls it server-to-server).
 //
 // The Stripe rail already sends this from stripe-webhook.js on checkout.session.completed. The QR
 // rail is confirmed by hand in the owner's browser, and a browser can neither send mail nor build
@@ -9,7 +10,9 @@
 // legally-relevant document would drift, and the whole point is that both rails send the SAME thing.
 //
 // POST { cohort_member_id, token }  ->  { ok, sent }
-// Security: the caller must own the cohort's club (same ownership test the roster uses).
+//   Security: the caller must own the cohort's club (same ownership test the roster uses).
+// POST { cohort_member_id, internal:true, intSecret }  -- PIS: platbu potvrdila banka, ne majitel.
+//   Dřív host, který zálohu zaplatil z účtu, nedostal vůbec nic: ani e-mail, ani doklad.
 // Idempotent: refuses to send twice for the same member (cohort_members.deposit_mail_at).
 
 import { sendResend, cohortDepositHtml, cohortDokladPdf } from './stripe-webhook.js';
@@ -46,15 +49,19 @@ export default async function handler(req, res) {
     if (!SB || !KEY) return res.status(500).json({ ok: false, error: 'server not configured' });
     const b = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
     const cmId = b.cohort_member_id;
-    const token = req.headers['x-access-token'] || b.token || ((req.headers.authorization || '').replace(/^Bearer\s+/i, ''));
     if (!cmId) return res.status(400).json({ ok: false, error: 'no cohort_member_id' });
-    if (!token) return res.status(401).json({ ok: false, error: 'no token' });
-
-    // who is calling
-    const ures = await fetch(`${SB}/auth/v1/user`, { headers: { apikey: KEY, Authorization: `Bearer ${token}` } });
-    if (!ures.ok) return res.status(401).json({ ok: false, error: 'bad token' });
-    const uid = (await ures.json() || {}).id;
-    if (!uid) return res.status(401).json({ ok: false, error: 'no user' });
+    const internal = b.internal === true && !!process.env.PIS_INTERNAL_SECRET && b.intSecret === process.env.PIS_INTERNAL_SECRET;
+    const method = internal ? 'pis' : 'qr';
+    let uid = null;
+    if (!internal) {
+      const token = req.headers['x-access-token'] || b.token || ((req.headers.authorization || '').replace(/^Bearer\s+/i, ''));
+      if (!token) return res.status(401).json({ ok: false, error: 'no token' });
+      // who is calling
+      const ures = await fetch(`${SB}/auth/v1/user`, { headers: { apikey: KEY, Authorization: `Bearer ${token}` } });
+      if (!ures.ok) return res.status(401).json({ ok: false, error: 'bad token' });
+      uid = (await ures.json() || {}).id;
+      if (!uid) return res.status(401).json({ ok: false, error: 'no user' });
+    }
 
     const mem = (await sbGet(`cohort_members?id=eq.${encodeURIComponent(cmId)}&select=id,cohort_id,name,email,tier,status,student_id,deposit_mail_at`))[0];
     if (!mem) return res.status(404).json({ ok: false, error: 'member not found' });
@@ -63,12 +70,14 @@ export default async function handler(req, res) {
     if (!coh) return res.status(404).json({ ok: false, error: 'cohort not found' });
 
     // caller must own the club (or be the cohort owner) -- same test the roster endpoints use
-    let owns = coh.owner_id === uid;
-    if (!owns && coh.gym_id) {
-      const g = (await sbGet(`gyms?id=eq.${encodeURIComponent(coh.gym_id)}&select=owner_id`))[0];
-      owns = !!(g && g.owner_id === uid);
+    if (!internal) {
+      let owns = coh.owner_id === uid;
+      if (!owns && coh.gym_id) {
+        const g = (await sbGet(`gyms?id=eq.${encodeURIComponent(coh.gym_id)}&select=owner_id`))[0];
+        owns = !!(g && g.owner_id === uid);
+      }
+      if (!owns) return res.status(403).json({ ok: false, error: 'not owner' });
     }
-    if (!owns) return res.status(403).json({ ok: false, error: 'not owner' });
 
     // Nothing to send to: an app user already has the doklad in-app, exactly like the Stripe rail
     // (stripe-webhook.js gates on !mem.student_id for the same reason).
@@ -101,16 +110,19 @@ export default async function handler(req, res) {
     let testMode = false; try { testMode = await isTestMode(); } catch (e) {}
     if (!(testMode && coh.owner_id !== FOUNDER_UUID)) {
       try {
-        // Doklad ze SNÍMKU (stejný jako v appce): poslední platba QR k tomuto kurzu ve výši zálohy.
+        // Doklad ze SNÍMKU (stejný jako v appce). PIS: transakce té přihlášky (source_booking_id);
+        // QR: poslední platba QR k tomuto kurzu ve výši zálohy.
         let _snap = null;
         try {
-          const _txr = await sbGet(`transactions?cohort_id=eq.${encodeURIComponent(coh.id)}&payment_method=eq.qr&gross_amount=eq.${Math.round(Number(deposit || 0) * 100)}&order=created_at.desc&limit=1&select=id`);
+          const _txr = await sbGet(method === 'pis'
+            ? `transactions?source_booking_id=eq.${encodeURIComponent(cmId)}&order=created_at.desc&limit=1&select=id`
+            : `transactions?cohort_id=eq.${encodeURIComponent(coh.id)}&payment_method=eq.qr&gross_amount=eq.${Math.round(Number(deposit || 0) * 100)}&order=created_at.desc&limit=1&select=id`);
           if (_txr && _txr[0]) _snap = await dokladPdfFor({ transactionId: _txr[0].id });
         } catch (e) {}
         const buf = _snap ? _snap.buffer : await cohortDokladPdf({
           gym: gymRec, gymName, buyer: (mem.name || mem.email || ''),
           item: ((coh.name || 'Kurz') + ' — záloha'), amount: deposit, cur,
-          ref: 'QR/' + String(cmId).slice(0, 8), date: _czDate(new Date().toISOString().slice(0, 10)),
+          ref: (method === 'pis' ? 'PIS/' : 'QR/') + String(cmId).slice(0, 8), date: _czDate(new Date().toISOString().slice(0, 10)),
         });
         attachments = [{ filename: 'MTL-potvrzeni-o-platbe.pdf', content: buf.toString('base64') }];
       } catch (e) { console.error('cohort doklad pdf', e.message); }

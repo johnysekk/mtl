@@ -631,8 +631,9 @@ export default async function handler(req, res) {
     }
     // Potvrzení objednávky e-mailem u KAŽDÉ platby (jednotně). Na dálku (převod / QR / PIS) je to
     // povinnost podle § 1824 OZ; u hotovosti na místě je to potvrzení navíc se správným poučením.
-    // Záloha kurzu přes QR: potvrzení je součástí e-mailu se zálohou (cohort-deposit-mail) -- jeden e-mail.
-    let _skipMail = false;
+    // Záloha kurzu přes QR nebo z účtu (PIS): potvrzení je součástí e-mailu se zálohou
+    // (cohort-deposit-mail, u PIS ho volá pis-return) -- jeden e-mail.
+    let _skipMail = (type === 'course' && String(payment_method || '') === 'pis' && b.income_class === 'cohort_deposit');
     if (type === 'course' && String(payment_method || '') === 'qr' && b.cohort_member_id) {
       try { const _cp = await _wsbGet(`cohort_payments?cohort_member_id=eq.${encodeURIComponent(b.cohort_member_id)}&select=id&limit=1`); _skipMail = !(_cp && _cp.length); } catch (e) {}
     }

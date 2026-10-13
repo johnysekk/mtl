@@ -11,26 +11,48 @@
 //      dvakrat (JSON.stringify muze poradi klicu zachovat, ale mezery a escapovani ne).
 //   2) `uri` je cesta VCETNE query retezce, bez domeny.
 //
+// PROSTŘEDÍ VOLÍ GLOBÁLNÍ TESTOVACÍ REŽIM (platform_config.test_mode, přepínač v Adminu):
+//   zapnutý  -> sandbox Finbricks (jen simulátor Mock Cobs, žádné skutečné peníze)
+//   vypnutý  -> ostrý Finbricks
+// Jiný přepínač platby z účtu nemá. Kdyby test a prostředí šly nastavit zvlášť, mohl by
+// „test" poslat skutečné peníze nebo ostrý provoz nabízet sandboxové banky.
+//
 // ENV (Vercel, NIKDY do gitu):
-//   FINBRICKS_ENV          sandbox | production   (default sandbox)
-//   FINBRICKS_MERCHANT_ID  UUID z administrace
-//   FINBRICKS_PRIVATE_KEY  privatni klic v PEM (PKCS#8, 4096 bit) -- radky oddelene \n
+//   FINBRICKS_SANDBOX_MERCHANT_ID / FINBRICKS_SANDBOX_PRIVATE_KEY   klíče pro testovací režim
+//   FINBRICKS_PROD_MERCHANT_ID    / FINBRICKS_PROD_PRIVATE_KEY      klíče pro ostrý provoz
+//   FINBRICKS_MERCHANT_ID / FINBRICKS_PRIVATE_KEY + FINBRICKS_ENV   dosavadní jedna sada; použije
+//       se pro prostředí z FINBRICKS_ENV (výchozí sandbox), když jeho vlastní dvojice chybí
+//   Privátní klíč v PEM (PKCS#8, 4096 bit), řádky oddělené \n.
 
 import crypto from 'crypto';
+import { isTestMode } from './_config.js';
 
-const ENV = (process.env.FINBRICKS_ENV || 'sandbox').toLowerCase();
-export const FBX_BASE = (ENV === 'production')
-  ? 'https://api.finbricks.com'
-  : 'https://api.sandbox.finbricks.com';
-export const FBX_SANDBOX = (ENV !== 'production');
-export const MERCHANT_ID = process.env.FINBRICKS_MERCHANT_ID || '';
+const LEGACY_ENV = (process.env.FINBRICKS_ENV || 'sandbox').toLowerCase() === 'production' ? 'production' : 'sandbox';
+
+// { env, sandbox, base, merchant, key, ok } pro 'sandbox' | 'production'.
+export function fbxConf(env) {
+  const sandbox = env !== 'production';
+  const pre = sandbox ? 'FINBRICKS_SANDBOX_' : 'FINBRICKS_PROD_';
+  const legacy = (sandbox ? 'sandbox' : 'production') === LEGACY_ENV;
+  const merchant = process.env[pre + 'MERCHANT_ID'] || (legacy ? (process.env.FINBRICKS_MERCHANT_ID || '') : '');
+  const key = process.env[pre + 'PRIVATE_KEY'] || (legacy ? (process.env.FINBRICKS_PRIVATE_KEY || '') : '');
+  return {
+    env: sandbox ? 'sandbox' : 'production', sandbox,
+    base: sandbox ? 'https://api.sandbox.finbricks.com' : 'https://api.finbricks.com',
+    merchant, key, ok: !!(merchant && key),
+  };
+}
+// Prostředí pro novou platbu nebo seznam bank: podle Testovacího režimu.
+export async function fbxNow() { return fbxConf((await isTestMode()) ? 'sandbox' : 'production'); }
+// Druhé prostředí -- dotaz na stav platby, která vznikla před přepnutím režimu.
+export function fbxOther(C) { return fbxConf(C.sandbox ? 'production' : 'sandbox'); }
 
 // SANDBOX MA STROP 1 CZK. Kdyz se posle vic, banka platbu odmitne a clovek nepozna proc.
 export const FBX_MAX_SANDBOX = 1;
 
-function privateKey() {
-  const raw = process.env.FINBRICKS_PRIVATE_KEY || '';
-  if (!raw) throw new Error('FINBRICKS_PRIVATE_KEY not configured');
+function privateKey(C) {
+  const raw = C.key || '';
+  if (!raw) throw new Error('Finbricks ' + C.env + ': private key not configured');
   // Ve Vercelu se vicerakove promenne casto ulozi s literalnim \n -- prelozit zpatky.
   return raw.includes('\\n') ? raw.replace(/\\n/g, '\n') : raw;
 }
@@ -39,24 +61,24 @@ const b64u = (buf) => Buffer.from(buf).toString('base64')
   .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
 // Detached JWS nad {"uri":..,"body":..}
-export function fbxSign(uri, bodyString) {
-  if (!MERCHANT_ID) throw new Error('FINBRICKS_MERCHANT_ID not configured');
-  const header = { typ: 'JWT', alg: 'RS256', kid: MERCHANT_ID };
+export function fbxSign(C, uri, bodyString) {
+  if (!C.merchant) throw new Error('Finbricks ' + C.env + ': merchant id not configured');
+  const header = { typ: 'JWT', alg: 'RS256', kid: C.merchant };
   const payload = JSON.stringify({ uri, body: bodyString || '' });
   const h = b64u(JSON.stringify(header));
   const p = b64u(payload);
-  const sig = crypto.sign('RSA-SHA256', Buffer.from(h + '.' + p), privateKey());
+  const sig = crypto.sign('RSA-SHA256', Buffer.from(h + '.' + p), privateKey(C));
   return h + '..' + b64u(sig);   // payload vynechan = detached
 }
 
-// Jedno misto, kde se vola Finbricks. Vraci { ok, status, data }.
+// Jedno misto, kde se vola Finbricks. C = prostredi z fbxNow / fbxConf. Vraci { ok, status, data }.
 //
 // PSU-IP-Address a PSU-User-Agent jsou od 14. 11. 2025 povinne: banky je chteji kvuli
 // auditni stope. Musi to byt VEREJNA IP koncoveho uzivatele, ne nase serverova a ne
 // lokalni rozsah -- proto se prebira z pozadavku prohlizece a posila dal.
-export async function fbxCall(method, path, body, opts = {}) {
+export async function fbxCall(C, method, path, body, opts = {}) {
   const bodyString = (body == null) ? '' : JSON.stringify(body);
-  const sig = fbxSign(path, bodyString);
+  const sig = fbxSign(C, path, bodyString);
   const headers = {
     'JWS-Signature': sig,
     'Correlation-ID': opts.correlationId || crypto.randomUUID(),
@@ -66,7 +88,7 @@ export async function fbxCall(method, path, body, opts = {}) {
   if (opts.psuUa) headers['PSU-User-Agent'] = opts.psuUa;
   if (opts.lang) headers['Accept-Language'] = opts.lang;
 
-  const r = await fetch(FBX_BASE + path, {
+  const r = await fetch(C.base + path, {
     method,
     headers,
     ...(bodyString ? { body: bodyString } : {}),
