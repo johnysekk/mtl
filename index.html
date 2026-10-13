@@ -9064,7 +9064,7 @@ function _offerAbroad(kind){
 // se select('*') to bylo tiché, ve výčtu by to shodilo celý dotaz). Do výčtu proto nepatří.
 // PROVOZNI RAD PATRI DO VYBERU. _mtlPayReady se pta na terms_text/terms_file_url/org_form,
 // jenze deck je nenacital -- test je videl prazdne a klub s vyplnenym radem z decku zmizel.
-const GYM_DECK_COLS = 'id,name,city,country,city_lat,city_lng,photos,disciplines,dropin_price,membership_price,owner_id,currency,venue_type,schedule,capacity,payment_mode,stripe_account,receiver_id_value,commission_card_status,account_suspended,cert_level,created_at,description,status,suspended,deleted_at,receiver_name,takes_cash,legal_name,tax_id,billing_city,billing_country,charges_enabled,billing_line1,billing_postal,trial_classes,terms_text,terms_file_url,member_app_file_url,org_form,sponsors';   // trial_classes: odznak „1. trénink zdarma" v decku
+const GYM_DECK_COLS = 'id,name,city,country,city_lat,city_lng,photos,disciplines,dropin_price,membership_price,owner_id,currency,venue_type,schedule,capacity,payment_mode,stripe_account,receiver_id_value,commission_card_status,account_suspended,cert_level,created_at,description,status,suspended,deleted_at,receiver_name,takes_cash,legal_name,tax_id,billing_city,billing_country,charges_enabled,billing_line1,billing_postal,trial_classes,terms_text,terms_file_url,member_app_file_url,org_form,sponsors,memb_calendar';   // trial_classes: odznak „1. trénink zdarma" v decku
 // ═══ UMÍ PRODÁVAT ══════════════════════════════════════════════════════════════════════
 // Jedna podmínka pro kouče, klub i organizaci. Dřív existovala jen pro kouče (_coachNotReady)
 // a hlídala pouze výplatní kanál; kluby se v decku ukazovaly i bez možnosti zaplatit, takže
@@ -9210,7 +9210,7 @@ function _mapGymRow(g){
     photo: gymFirstPhoto(g.photos)||'',
     city: g.city||'', country: g.country||'', countryCode:(g.country_code||'').toUpperCase(),
     disciplines: parseDisc(g.disciplines),
-    dropin: g.dropin_price||0, memb: g.membership_price||0, ownerId:g.owner_id||null, ownerPartner:false,
+    dropin: g.dropin_price||0, memb: (_membModeMissing(g)?0:(g.membership_price||0)), ownerId:g.owner_id||null, ownerPartner:false,
     currency: g.currency||'CZK', venue_type: g.venue_type||null, levels: _gymLevels(g.schedule), coords };
 }
 async function loadMoreGyms(){
@@ -9223,7 +9223,9 @@ async function loadMoreGyms(){
       const _or=_deckCountryOr(_cc);
       if(_or) q=q.or(_or); }
     const from = _gymOffset + _GYM_PAGE;
-    const { data } = await q.order('created_at',{ascending:false}).range(from, from + _GYM_PAGE - 1);
+    let { data, error:_qe } = await q.order('created_at',{ascending:false}).range(from, from + _GYM_PAGE - 1);
+    // Databáze bez sloupce memb_calendar (sql/memb-calendar.sql ještě neběželo): deck nesmí zůstat prázdný.
+    if(_qe && /memb_calendar/.test(String(_qe.message||''))){ let q2=supaClient.from('gyms').select(GYM_DECK_COLS.replace(',memb_calendar','')).eq('status','approved'); { const _cc=(_deckAbroad && window._deckCountryPick) ? _ccOf(window._deckCountryPick) : (!_deckAbroad ? _deckHomeCC() : null); const _or=_deckCountryOr(_cc); if(_or) q2=q2.or(_or); } ({ data }=await q2.order('created_at',{ascending:false}).range(from, from + _GYM_PAGE - 1)); }
     if(!data || !data.length){ _gymExhausted = true; _gymLoadingMore = false; try{ _offerAbroad('gyms'); }catch(e){} return false; }
     if(data.length < _GYM_PAGE) _gymExhausted = true;
     _gymOffset = from;
@@ -9323,7 +9325,9 @@ async function ensureGymsLoaded(force){
     { const _cc=(_deckAbroad && window._deckCountryPick) ? _ccOf(window._deckCountryPick) : (!_deckAbroad ? _deckHomeCC() : null);
       const _or=_deckCountryOr(_cc);
       if(_or) _q=_q.or(_or); }
-    const { data } = await _q.order('created_at',{ascending:false}).range(0, _GYM_PAGE - 1);
+    let { data, error:_qe } = await _q.order('created_at',{ascending:false}).range(0, _GYM_PAGE - 1);
+    // Databáze bez sloupce memb_calendar (sql/memb-calendar.sql ještě neběželo): deck nesmí zůstat prázdný.
+    if(_qe && /memb_calendar/.test(String(_qe.message||''))){ let q2=supaClient.from('gyms').select(GYM_DECK_COLS.replace(',memb_calendar','')).eq('status','approved'); { const _cc=(_deckAbroad && window._deckCountryPick) ? _ccOf(window._deckCountryPick) : (!_deckAbroad ? _deckHomeCC() : null); const _or=_deckCountryOr(_cc); if(_or) q2=q2.or(_or); } ({ data }=await q2.order('created_at',{ascending:false}).range(0, _GYM_PAGE - 1)); }
     // Klub bez možnosti zaplatit do decku nepatří -- student by doklikal k rezervaci
     // a nedostal se dál.
     try{ const _ids=(data||[]).map(function(x){ return x.id; }); if(_ids.length){ const { data:_oc }=await supaClient.from('gym_cohorts').select('gym_id').in('gym_id',_ids).eq('status','open'); const _os=new Set((_oc||[]).map(function(x){ return String(x.gym_id); })); (data||[]).forEach(function(x){ if(_os.has(String(x.id))) x._openCourse=true; }); } }catch(e){}
@@ -16771,7 +16775,11 @@ function _ownLink(kind){ try{
   var cid=(currentUser&&currentUser.coach_status==='approved')?(currentUser.profileId||currentUser.id):null;
   // Klub má veřejnou stránku: ukáže rozvrh, ceník a trenéry i tomu, kdo appku nemá, a tlačítko
   // na ní vede do appky s ?own=1&club=.
-  if(kind!=='coach' && gid) return _appOrigin()+'/api/club-public?club='+gid;
+  if(kind!=='coach' && gid){
+    // Vlastní adresa klubu (/klub/<slug>), když si ji klub nastavil; jinak stránka podle id.
+    var _sg=(_myGymData && String(_myGymData.id)===String(gid) && _myGymData.slug) || null;
+    return _sg ? (_appOrigin()+'/klub/'+encodeURIComponent(_sg)) : (_appOrigin()+'/api/club-public?club='+gid);
+  }
   var base=_appOrigin()+'/?own=1';
   if(cid) base+='&coach='+cid;
   // Jeden odkaz, obě funkce: původ nákupu (own) i body za doporučení (ref). Veřejná stránka
@@ -17121,20 +17129,24 @@ async function subscribeGymMembership(g, plan, _child, _cleared){
   const _term = _planTerm(plan, g, _actEnd);
   // Měsíční předplatné kartou: v řádku i v adrese je plná měsíční cena. První (neúplný) měsíc
   // v kalendářním režimu přidá server jako jednorázovou položku (api/pay.js, calSubPlan).
-  const _isSub = ((parseInt(plan.months,10)||1)===1 && !plan.once);
-  const _payAmt = (_isSub && _term.calendar) ? _term.full : _term.price;
-  // Platné členství sahá dál než do příštího měsíce: Stripe neumí předplatné ukotvit tak daleko
-  // (a zkušební dobu, kterou by člověku ukázal jako „zdarma", nechceme). Zapne si ho později.
+  let _isSub = ((parseInt(plan.months,10)||1)===1 && !plan.once);
+  // Platné členství sahá dál než do příštího měsíce: předplatné kartou ještě nejde ukotvit
+  // (Stripe kotvu dál než o jedno období nedovolí). Místo slepé uličky se další navazující
+  // období zaplatí jednorázově; automatické strhávání si člověk zapne později.
+  let _laterNote='';
   if(_isSub && _term.calendar && _term.sub && _term.sub.kind==='later'){
     const _fd=function(x){ return new Date(String(x).slice(0,10)+'T12:00:00').toLocaleDateString(LANG==='en'?'en-GB':'cs-CZ'); };
-    toast(LANG==='en'?('Your current membership is valid until '+_fd(_term.activeEnd)+'. You can switch on the card subscription that follows on from '+_fd(_term.sub.from)+'.'):('Tvoje současné členství platí do '+_fd(_term.activeEnd)+'. Předplatné kartou, které na něj naváže, si můžeš zapnout od '+_fd(_term.sub.from)+'.'), 1);
-    return;
+    _isSub=false;
+    _laterNote=LANG==='en'
+      ? (' Your current membership is valid until '+_fd(_term.activeEnd)+', so you pay the next period once now. Automatic card payments can be switched on from '+_fd(_term.sub.from)+'.')
+      : (' Tvoje sou\u010dasn\u00e9 \u010dlenstv\u00ed plat\u00ed do '+_fd(_term.activeEnd)+', tak\u017ee dal\u0161\u00ed obdob\u00ed zaplat\u00ed\u0161 te\u010f jednor\u00e1zov\u011b. Automatick\u00e9 str\u017e\u00e1v\u00e1n\u00ed kartou si m\u016f\u017ee\u0161 zapnout od '+_fd(_term.sub.from)+'.');
   }
+  const _payAmt = (_isSub && _term.calendar) ? _term.full : _term.price;
   const _cur1 = plan._cur||g.currency||'CZK';
   const _memPriceTxt = fmtPrice((_isSub && _term.calendar) ? _term.full : _term.price, _cur1)+' '+_curSym(_cur1);
   if(!confirm((LANG==='en'
-    ? `${_mTerm(g).ask}${g.name} (${plan.name})${_forTxt}? ${_term.calendar ? _calChargeNote(_term, _cur1, _isSub).trim() : _memChargeSentence(plan, _memPriceTxt)}`
-    : `${_mTerm(g).ask}${g.name} (${plan.name})${_forTxt}? ${_term.calendar ? _calChargeNote(_term, _cur1, _isSub).trim() : _memChargeSentence(plan, _memPriceTxt)}`)+_prTxt)) return;
+    ? `${_mTerm(g).ask}${g.name} (${plan.name})${_forTxt}? ${_term.calendar ? (_calChargeNote(_term, _cur1, _isSub).trim()+_laterNote) : _memChargeSentence(plan, _memPriceTxt)}`
+    : `${_mTerm(g).ask}${g.name} (${plan.name})${_forTxt}? ${_term.calendar ? (_calChargeNote(_term, _cur1, _isSub).trim()+_laterNote) : _memChargeSentence(plan, _memPriceTxt)}`)+_prTxt)) return;
   toast(L('💳 Přesměrovávám na platbu...'));
   try {
     const { data: mb, error } = await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0,
@@ -17154,7 +17166,7 @@ async function subscribeGymMembership(g, plan, _child, _cleared){
     { const _lid=plan.lead||payee.coachId||null; const _lnm=plan.lead?(plan.leadName||null):(payee.coachId?payee.name:null); if(_lid){ try{ await supaClient.from('gym_memberships').update({ lead_coach_id:_lid, lead_coach_name:_lnm }).eq('id', mb.id); }catch(e){} } }
     let _gymOwnerPartner=false, _ownerFounding=false, _ownerScore=0, _ownerBankai=false, _ownerOrg=false; try{ const _ppid=(payee&&payee.coachId)||g.owner_id; if(_ppid){ const { data: ow } = await supaClient.from('profiles').select('partner, founding, coach_ref_score,bankai_eligible,org_rate_until').eq('id', _ppid).single(); _ownerOrg=!!(ow&&ow.org_rate_until&&new Date(String(ow.org_rate_until).slice(0,10)+'T23:59:59')>=new Date()); _gymOwnerPartner=!!(ow&&ow.partner); _ownerFounding=!!(ow&&ow.founding); _ownerScore=(ow&&ow.coach_ref_score)||0; _ownerBankai=!!(ow&&ow.bankai_eligible); } }catch(e){}
     try{ if(mb&&mb.id) await supaClient.from('gym_memberships').update({gym_keep_pct:((typeof _gymOwnerPartner!=='undefined'&&_gymOwnerPartner)||(typeof _gp!=='undefined'&&_gp))?0.99:((typeof _ownerScore!=='undefined'&&_ownerScore>=10)?0.98:((typeof _ownerScore!=='undefined'&&_ownerScore>=3)?0.97:0.965))}).eq('id',mb.id); }catch(e){}
-    const url = `/api/pay?type=membership&once=${(plan&&plan.once)?1:0}&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&planName=${encodeURIComponent(plan.name||'Membership')}&amount=${_payAmt||0}&currency=${plan._cur||g.currency||'CZK'}&interval=month&months=${parseInt(plan.months,10)||1}${(_term.endsOn && !(_isSub && _term.calendar))?('&endsOn='+encodeURIComponent(_term.endsOn)):''}&membershipId=${encodeURIComponent(mb.id)}&gymId=${encodeURIComponent(g.id)}&studentId=${encodeURIComponent(_payFor||currentUser.id)}&income=${encodeURIComponent(plan.income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&access=${encodeURIComponent(_planAccess(plan).join(','))}&disc=${encodeURIComponent(plan.disc||'')}&partner=${_gymOwnerPartner?1:0}&fee=${(_ladderRate('stripe',{partner:_gymOwnerPartner,score:_ownerScore,bankai:_ownerBankai})*100)}&acq=${encodeURIComponent(_acqSrc(g))}${(window._gymRef && window._gymRef.gym===g.id && (g.member_ref_pct||0)>0) ? ('&refPct='+g.member_ref_pct+'&refUser='+encodeURIComponent(window._gymRef.ref||'')) : ''}`;
+    const url = `/api/pay?type=membership&once=${((plan&&plan.once)||_laterNote)?1:0}&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&planName=${encodeURIComponent(plan.name||'Membership')}&amount=${_payAmt||0}&currency=${plan._cur||g.currency||'CZK'}&interval=month&months=${parseInt(plan.months,10)||1}${(_term.endsOn && !(_isSub && _term.calendar))?('&endsOn='+encodeURIComponent(_term.endsOn)):''}&membershipId=${encodeURIComponent(mb.id)}&gymId=${encodeURIComponent(g.id)}&studentId=${encodeURIComponent(_payFor||currentUser.id)}&income=${encodeURIComponent(plan.income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&access=${encodeURIComponent(_planAccess(plan).join(','))}&disc=${encodeURIComponent(plan.disc||'')}&partner=${_gymOwnerPartner?1:0}&fee=${(_ladderRate('stripe',{partner:_gymOwnerPartner,score:_ownerScore,bankai:_ownerBankai})*100)}&acq=${encodeURIComponent(_acqSrc(g))}${(window._gymRef && window._gymRef.gym===g.id && (g.member_ref_pct||0)>0) ? ('&refPct='+g.member_ref_pct+'&refUser='+encodeURIComponent(window._gymRef.ref||'')) : ''}`;
     setTimeout(()=>{ window.location.href = url; }, 500);
   } catch(e){ console.error('subscribeGymMembership', e); toast('⚠️ '+e.message); }
 }
@@ -19802,7 +19814,7 @@ function _recpBuyResolve(club, buy){
   try{
     if(typeof buy==='string' && buy.indexOf('cls:')===0){ try{ var _oc=JSON.parse(buy.slice(4)); _recpDropinConfirm(club, { name:_oc.n, date:_oc.d, time:_oc.t, level:_oc.lvl, coach:_oc.coach||null }); }catch(e){ if(typeof openGymProfile==='function') openGymProfile(club); } return; }
     if(buy==='d' || buy==='dropin'){ if(typeof openGymProfile==='function'){ window._gymViewSrc='reception'; openGymProfile(gym); } return; }
-    const plans=(typeof gymMembPlans==='function'?gymMembPlans(gym):[])||[]; const idx=parseInt(buy,10);
+    const plans=gymOfferPlans(gym)||[]; const idx=parseInt(buy,10);
     if(!isNaN(idx) && plans[idx] && typeof subscribeGymMembership==='function'){ try{ window._curGymOpenSrc={gym:club.id, src:'reception'}; }catch(e){} subscribeGymMembership(club, plans[idx]); return; }
     if(typeof openGymProfile==='function'){ window._gymViewSrc='reception'; openGymProfile(gym); }
   }catch(e){ try{ if(typeof openGymProfile==='function') openGymProfile(club); }catch(_e){} }
@@ -23767,6 +23779,13 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData, { subject:
       <div style="font-size:14.5px;font-weight:800;color:var(--dark);margin-bottom:3px;">🔗 ${LANG==='en'?'Your club link · no acquisition fee':'Odkaz klubu \u00b7 bez akvizi\u010dn\u00ed provize'}</div>
       <div style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:10px;">${LANG==='en'?'For new people you bring in yourself — Instagram bio, website, posters, friends. Whoever comes through it is yours, not MTL’s acquisition: no 10 % acquisition fee, only the normal commission. It opens your public club page.':'Pro nov\u00e9 lidi, kter\u00e9 p\u0159ivede\u0161 ty \u2014 bio na Instagramu, web, plak\u00e1t, kamar\u00e1di. Kdo p\u0159ijde p\u0159es n\u011bj, je tv\u016fj, ne akvizice MTL: \u017e\u00e1dn\u00e1 akvizi\u010dn\u00ed provize 10 %, jen b\u011b\u017en\u00e1 provize. Otev\u0159e ve\u0159ejnou str\u00e1nku klubu.'}</div>
       ${(g.org_form==='nonprofit')?`<div style="font-size:12px;color:#9A5B00;background:#FFF8E6;border:1px solid #F0DFA8;border-radius:10px;padding:9px 11px;line-height:1.5;margin-bottom:10px;">${LANG==='en'?'Do not use it for your existing association members — add them above instead, otherwise they would have to submit a new membership application in the app.':'Na st\u00e1vaj\u00edc\u00ed \u010dleny spolku ho nepou\u017e\u00edvej \u2014 p\u0159enes je naho\u0159e, jinak by v appce museli pod\u00e1vat novou p\u0159ihl\u00e1\u0161ku.'}</div>`:''}
+      <div style="font-size:11px;font-weight:800;color:var(--light);letter-spacing:.04em;text-transform:uppercase;margin:2px 0 6px;">${LANG==='en'?'Your own address':'Vlastn\u00ed adresa'}</div>
+      <div style="display:flex;align-items:center;border:1.5px solid var(--border);border-radius:11px;overflow:hidden;margin-bottom:6px;background:var(--surf);">
+        <span style="padding:11px 0 11px 11px;font-size:13px;color:var(--mid);white-space:nowrap;">${escapeHtml(String(_appOrigin()).replace(/^https?:\/\//,''))}/klub/</span>
+        <input id="mgSlug" value="${escapeHtml(g.slug||'')}" placeholder="${LANG==='en'?'your-club':'tvuj-klub'}" autocapitalize="off" autocomplete="off" spellcheck="false" style="flex:1;min-width:0;padding:11px 11px 11px 1px;border:none;background:transparent;font-size:14px;font-weight:700;font-family:inherit;color:var(--dark);outline:none;">
+      </div>
+      <p id="mgSlugMsg" style="font-size:11.5px;color:var(--light);line-height:1.45;margin:0 0 8px;">${LANG==='en'?'Lowercase letters, numbers and dashes, 3–40 characters. Changing it later breaks links you already shared.':'Mal\u00e1 p\u00edsmena, \u010d\u00edslice a poml\u010dky, 3\u201340 znak\u016f. Pozd\u011bj\u0161\u00ed zm\u011bna rozbije u\u017e rozeslan\u00e9 odkazy.'}</p>
+      <button id="mgSlugSave" type="button" style="width:100%;padding:11px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:11px;font-weight:700;font-size:13px;cursor:pointer;font-family:inherit;margin-bottom:8px;">${LANG==='en'?'Save address':'Ulo\u017eit adresu'}</button>
       <button onclick="(function(){var l=_ownLink('gym');try{navigator.clipboard.writeText(l);}catch(e){}toast(LANG==='en'?'Link copied':'Odkaz zkop\u00edrov\u00e1n');})()" style="width:100%;padding:12px;background:#0f2233;color:#fff;border:none;border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';">📋 ${LANG==='en'?'Copy link':'Zkop\u00edrovat odkaz'}</button>
     </div>
     </div></details>
@@ -23928,6 +23947,7 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData, { subject:
   document.querySelectorAll('.orgFormBtn').forEach(b=>b.onclick=()=>{ _gymOrgForm=b.dataset.v; setOrgFormUI(); renderPlansEditor(); loadGymManageBookings(); });
   document.querySelectorAll('.mgMembModeBtn').forEach(b=>b.onclick=()=>{ const w=$('mgMembMode'); if(w) w.dataset.v=b.dataset.v; _mgMembModeUI(); });
   try{ if($('mgMembProrate')) $('mgMembProrate').onchange=_mgMembModeUI; _mgMembModeUI(); }catch(e){}
+  try{ _mgSlugWire(); }catch(e){}
   // Prouzek musi vest primo do te sekce, jinak je to jen vycitka bez cesty ven.
   // Dokument s podminkami: nahrani, hash a vypis toho, co uz je nahrane.
   { const _cur=$('mgTermsFileCur');
@@ -25794,7 +25814,7 @@ function openCashRecord(prov){
   // Kouč na recepci: JEN ceny z jeho ceníku (základní, disciplína, zvýhodněná, když platí podmínka).
   // Libovolná částka zapsat nejde -- server (record-cash) to ověřuje stejně jako rezervaci.
   let classes=_isCoach?_coachCashOpts(g,false):((typeof _todayGymClasses==='function'?_todayGymClasses(g):[])||[]);
-  const plans=_isCoach?[]:((typeof gymMembPlans==='function'?gymMembPlans(g):[])||[]);
+  const plans=_isCoach?[]:(gymOfferPlans(g)||[]);
   let html='';
   html+='<p style="font-size:11px;color:var(--light);margin:0 0 4px;">'+(EN?'Who paid':'Kdo zaplatil')+'</p>';
   html+='<div style="display:flex;gap:6px;margin-bottom:10px;">';
@@ -25962,7 +25982,7 @@ function _recBuildOffers(box){
   if(!_recGym){ box.innerHTML=''; return; }
   const EN=LANG==='en'; const cur=_recGym.currency||'CZK';
   const base=_appOrigin()+'/?club='+encodeURIComponent(_recGym.id);
-  let h=''; const plans=gymMembPlans(_recGym)||[];
+  let h=''; const plans=gymOfferPlans(_recGym)||[];
   var _offSM=(typeof _mtlPayMode==='function'&&_mtlPayMode(_recGym)==='qr_bank');
   if(plans.length){
     h+='<div style="font-size:11px;font-weight:800;color:var(--dark);text-transform:uppercase;letter-spacing:.04em;margin:2px 0 6px;">'+(EN?'Memberships':'Permanentky')+'</div>';
@@ -26009,7 +26029,7 @@ function openMemberQR(){
   var list=$('recList'); var g=_recGym; if(!list||!g) return;
   var EN=LANG==='en'; var cur=g.currency||'CZK'; var sym=_curSym(cur);
   var base=_appOrigin()+'/?club='+encodeURIComponent(g.id);
-  var plans=(typeof gymMembPlans==='function'?gymMembPlans(g):[])||[];
+  var plans=gymOfferPlans(g)||[];
   var h='<button id="recBackBtn" style="background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:8px 12px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:12px;">‹ '+(EN?'Back':'Zpět')+'</button>';
   h+='<div style="font-weight:800;font-size:16px;color:var(--dark);margin-bottom:2px;">📲 '+(EN?'Student with app':'Platba svěřence s aplikací')+'</div>';
   h+='<p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:12px;">'+(EN?'The student scans the QR and buys a visit / membership in their own app.':'Svěřenec naskenuje QR a koupí si vstup / permanentku ve své appce.')+'</p>';
@@ -26479,7 +26499,7 @@ function openGuestDropin(fm){
   html+='<p style="font-size:12px;color:var(--light);margin-bottom:10px;">'+(window._recGuestFM==='cash'?(LANG==='en'?'Pick the class — paid in cash.':'Vyber lekci — platba v hotovosti.'):(window._recGuestFM==='qr'?(LANG==='en'?'Pick the class — pay by QR.':'Vyber lekci — platba přes QR.'):(LANG==='en'?'Pick the class, then choose how to pay.':'Vyber lekci, pak zvol způsob platby.')))+'</p>';
   if(!_recTodayClasses.length){ html+='<p style="color:var(--light);padding:10px;">'+(LANG==='en'?'No classes scheduled today.':'Dnes nejsou žádné lekce v rozvrhu.')+'</p>'; }
   else { html+=_recTodayClasses.map((o,i)=>{ const pr=_recPrice(o); const who=o.coachName?(' · '+escapeHtml(o.coachName)):''; return '<button class="recGuestClsBtn" data-i="'+i+'" style="display:block;width:100%;text-align:left;border:1px solid var(--border);border-radius:12px;padding:11px 12px;margin-bottom:8px;background:var(--surf);cursor:pointer;"><div style="font-weight:700;font-size:14px;color:var(--dark);">'+escapeHtml(o.name||(LANG==='en'?'Class':'Lekce'))+'</div><div style="font-size:12px;color:var(--mid);margin-top:2px;">'+(o.time||'')+who+' · '+fmtPrice(pr.dp*gdMul(_recGymOwnerPartner),pr.dcur)+' '+symf(pr.dcur)+'</div></button>'; }).join(''); }
-  var _gmPlans=(typeof gymMembPlans==='function'?gymMembPlans(g):[])||[];
+  var _gmPlans=gymOfferPlans(g)||[];
   if(_gmPlans.length){
     html+='<div style="font-size:11px;font-weight:800;color:var(--dark);text-transform:uppercase;letter-spacing:.04em;margin:12px 0 6px;">'+(LANG==='en'?'Memberships':'Permanentky')+'</div>';
     html+=_gmPlans.map(function(pl,pi){ return '<button class="recGuestMembBtn" data-i="'+pi+'" type="button" style="display:flex;justify-content:space-between;align-items:center;width:100%;box-sizing:border-box;border:1px solid var(--border);border-radius:10px;padding:11px;margin-bottom:8px;background:#fff;cursor:pointer;font-family:inherit;"><span style="font-size:13px;font-weight:700;">'+escapeHtml(pl.name||(LANG==='en'?'Membership':'Permanentka'))+'</span><span style="font-size:12px;color:var(--mid);white-space:nowrap;">'+fmtPrice(pl.price||0,g.currency||'CZK')+' '+_curSym(g.currency||'CZK')+'</span></button>'; }).join('');
@@ -26969,7 +26989,7 @@ function _recpMembPay(pi){
   const g=_recGym; const list=$('recList'); if(!g||!list) return;
   const EN=LANG==='en'; const cur=g.currency||'CZK'; const sym=_curSym(cur);
   const rate=_recRate();
-  const plans=(typeof gymMembPlans==='function'?gymMembPlans(g):[])||[];
+  const plans=gymOfferPlans(g)||[];
   const plan=plans[+pi]; if(!plan){ toast('\u26a0\ufe0f'); return; }
   if(!_planSellable(plan, (typeof _myGymData!=='undefined'?_myGymData:null))) return;
   // Cena a konec období jako při nákupu v appce (_planTerm / _membPeriodEnd). V kalendářním
@@ -28135,17 +28155,15 @@ function _planCovered(g, plan){
   // Stejná logika jako při rezervaci (planCovers): vybrané lekce mají přednost, jinak úrovně.
   return sch.some(function(c){ return planCovers(plan, c.level||'all', c); });
 }
-function gymSellablePlans(g){ return gymMembPlans(g).filter(function(p){ return _planCovered(g, p); }); }
+// NABÍDKA ČLENSTVÍ, jak ji vidí členové a recepce. Spolek, který ještě nevybral, jak se členství
+// počítá (Nastavení klubu → Ceny & členství), členství nenabízí vůbec -- nikde se neukáže.
+// Editor v nastavení dál pracuje s gymMembPlans (tam se nabídka připravuje).
+function gymOfferPlans(g){ return _membModeMissing(g) ? [] : gymMembPlans(g); }
+function gymSellablePlans(g){ return gymOfferPlans(g).filter(function(p){ return _planCovered(g, p); }); }
 function _planSellable(plan, g){
-  // Spolek, který ještě nevybral, jak se členství počítá, ho neprodává (server to hlídá taky).
-  if(_membModeMissing(g)){
-    const _own=!!(currentUser && g && String(g.owner_id)===String(currentUser.id));
-    toast(LANG==='en'
-      ? (_own?'\u26a0\ufe0f Choose how membership periods work first: Club settings \u2192 Pricing & membership.':'This club has not finished setting up its membership yet \u2014 it cannot be bought for now.')
-      : (_own?'\u26a0\ufe0f Nejd\u0159\u00edv vyber, jak se \u010dlenstv\u00ed po\u010d\u00edt\u00e1: Nastaven\u00ed klubu \u2192 Ceny & \u010dlenstv\u00ed.':'Klub je\u0161t\u011b nedokon\u010dil nastaven\u00ed \u010dlenstv\u00ed \u2014 zat\u00edm ho nejde koupit.'), 1);
-    if(_own){ try{ _openMembMode(g.id); }catch(e){} }
-    return false;
-  }
+  // Pojistka: nabídka se u spolku bez vybraného režimu vůbec nezobrazuje (gymOfferPlans),
+  // sem se tak dostane jen ze starého odkazu. Server nákup odmítne taky.
+  if(_membModeMissing(g)) return false;
   if(g && (_planAccess(plan).length || (plan&&plan.classes&&plan.classes.length)) && !_planCovered(g, plan)){
     toast(LANG==='en' ? 'This plan currently has no class in the club\u2019s schedule \u2014 it cannot be bought.'
                       : 'Na tuhle polo\u017eku te\u010f v rozvrhu klubu nen\u00ed \u017e\u00e1dn\u00e1 lekce \u2014 koupit ji nejde.');
@@ -28193,6 +28211,34 @@ function _mgMembModeUI(){
   if(ph){ ph.style.display=(v==='cal')?'block':'none'; ph.textContent = on
     ? (EN?'On: someone paying on 13 Oct pays only for 13–31 Oct.':'Zapnuto: kdo zaplatí 13. 10., platí jen za 13.–31. 10.')
     : (EN?'Off: someone paying on 13 Oct pays for the whole of October.':'Vypnuto: kdo zaplatí 13. 10., platí celý říjen.'); }
+}
+// VLASTNÍ ADRESA KLUBU (/klub/<slug>). Ukládá se hned (ne přes „Uložit změny"), jedinečnost
+// hlídá databáze (unikátní index) -- obsazenou adresu odmítne. Diakritika a mezery se převedou.
+const _SLUG_RESERVED=['admin','api','app','mtl','martialtraininglab','klub','club','www','help','podpora','support','test','dashboard','pay'];
+function _slugify(v){ return String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40).replace(/-+$/,''); }
+function _mgSlugWire(){
+  const inp=$('mgSlug'), btn=$('mgSlugSave'), msg=$('mgSlugMsg'); if(!inp||!btn) return; const EN=LANG==='en';
+  const say=function(t,c){ if(msg){ msg.textContent=t; msg.style.color=c||'var(--light)'; } };
+  inp.addEventListener('blur', function(){ inp.value=_slugify(inp.value); });
+  btn.onclick=async function(){
+    const v=_slugify(inp.value); inp.value=v;
+    if(v && !/^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])$/.test(v)){ say(EN?'3–40 characters: lowercase letters, numbers, dashes.':'3\u201340 znak\u016f: mal\u00e1 p\u00edsmena, \u010d\u00edslice, poml\u010dky.','var(--red)'); return; }
+    if(v && _SLUG_RESERVED.indexOf(v)>=0){ say(EN?'This address is reserved, pick another one.':'Tahle adresa je vyhrazen\u00e1, vyber jinou.','var(--red)'); return; }
+    if((v||null)===((_myGymData&&_myGymData.slug)||null)){ say(EN?'No change.':'Beze zm\u011bny.'); return; }
+    if(_myGymData && _myGymData.slug && !confirm(EN?'Links with the old address will stop working. Change it?':'Odkazy se starou adresou p\u0159estanou fungovat. Zm\u011bnit?')) return;
+    btn.disabled=true;
+    try{
+      const { error }=await supaClient.from('gyms').update({ slug:(v||null) }).eq('id',_myGymData.id);
+      if(error){
+        if(String(error.code)==='23505' || /duplicate|unique/i.test(String(error.message||''))) say(EN?'This address is already taken.':'Tahle adresa u\u017e je obsazen\u00e1.','var(--red)');
+        else say('\u26a0\ufe0f '+(error.message||''),'var(--red)');
+        return;
+      }
+      _myGymData.slug=v||null;
+      say(v?((EN?'Saved: ':'Ulo\u017eeno: ')+String(_appOrigin()).replace(/^https?:\/\//,'')+'/klub/'+v):(EN?'Removed, the link uses the club ID again.':'Odstran\u011bno, odkaz je zase podle ID klubu.'),'#0a8f5b');
+    }catch(e){ say('\u26a0\ufe0f '+(e.message||''),'var(--red)'); }
+    finally{ btn.disabled=false; }
+  };
 }
 // Proklik do režimu členství (z upozornění i z hlášky při pokusu o nákup u vlastního klubu).
 function _openMembMode(gymId){
@@ -37574,13 +37620,23 @@ async function openMtlCommissions(scope){
       // (jednou vs. 12 měsíců) -- se stejnou ikonou to majitel nemá jak rozlišit.
       const _isAds=(t.acq_source==='mtl_ads');
       const _acqIco=_isAds?' \ud83d\udce3':' \ud83e\uddf2';
+      // Člověk z MTL, ale tahle platba už jde za běžnou sazbu: stejná ikona, jen zešedlá -- je
+      // vidět, odkud člověk je, a zároveň že se z něj už nic navíc neplatí.
+      const _fromMtl=(t.acq_source==='mtl_discovery' || _isAds);
+      const _greyIco=' <span title="'+(EN?(_isAds?'From MTL advertising \u2014 this payment is at your normal rate':'Found you in the app \u2014 this payment is at your normal rate'):(_isAds?'Z reklamy MTL \u2014 tahle platba u\u017e za b\u011b\u017enou sazbu':'Na\u0161el t\u011b v appce \u2014 tahle platba u\u017e za b\u011b\u017enou sazbu'))+'" style="filter:grayscale(1);opacity:.4;">'+(_isAds?'\ud83d\udce3':'\ud83e\uddf2')+'</span>';
       // SMÍCHANÁ SAZBA SE NEZOBRAZUJE. „3 %" je průměr, který nikde neexistuje: ve skutečnosti
       // je první měsíc za akviziční sazbu a zbytek za běžnou. Ukáže se tedy rozpad, ne průměr.
       // Akviziční sazba je 10 % (objev v appce) nebo 25 % (reklama); běžná se vezme z
       // base_rate, a když chybí, dopočítá se ze zbytku platby.
       // Běžná sazba se BERE, nedopočítává. Dopočet vyrobil čísla jako „2,4 %", která
       // v žebříčku neexistují; když base_rate chybí, radši se nepojmenuje vůbec.
-      const _acqTier=_isAds?0.25:0.10;
+      // Akviziční sazba: objev v appce 10 % (EP 5 %), reklama 25 % (EP 10 %). Platba, která
+      // přesně odpovídá jedné z nich, je celá za akviziční sazbu -- „1. měsíc + zbytek" jen
+      // u členství na víc měsíců. Dřív se počítalo jen s 10 %, takže jednorázová lekce EP za
+      // 5 % vyšla jako „1. měsíc 10 % + zbytek".
+      const _tiers=_isAds?[0.25,0.10]:[0.10,0.05];
+      const _acqTier=(typeof currentUser!=='undefined' && currentUser && currentUser.partner)?_tiers[1]:_tiers[0];
+      const _atTier=(_rn!=null) && _tiers.some(function(x){ return Math.abs(_rn-x)<0.0005; });
       const _baseShown=(_br!=null)?_br:null;
       const _pctTxt=function(x){ return (Math.round(x*1000)/10).toString().replace('.', EN?'.':',')+' %'; };
       // ROZPAD SE POZNÁ PODLE SAZBY, NE PODLE `months`. Ten u starších řádků chybí a padal na
@@ -37588,14 +37644,14 @@ async function openMtlCommissions(scope){
       // NIŽŠÍ než akviziční, je to jistě smíchané: akvizice za první měsíc, zbytek běžně.
       let _rTxt=null;
       if(_rn!=null){
-        if(!_isAcq) _rTxt=_pctTxt(_rn);
+        if(!_isAcq || _atTier || t.type!=='membership') _rTxt=_pctTxt(_rn);
         else if(_rn < _acqTier-0.0005)
           _rTxt=(EN
             ? ('1st month '+_pctTxt(_acqTier)+' + rest '+(_baseShown!=null?_pctTxt(_baseShown):'your normal rate'))
             : ('1. m\u011bs\u00edc '+_pctTxt(_acqTier)+' + zbytek '+(_baseShown!=null?_pctTxt(_baseShown):'b\u011b\u017enou sazbou')));
         else _rTxt=_pctTxt(_rn);
       }
-      const _r=(_rTxt!=null)?(' \u00b7 '+_rTxt+(_isAcq?_acqIco:'')):'';
+      const _r=(_rTxt!=null)?(' \u00b7 '+_rTxt+(_isAcq?_acqIco:(_fromMtl?_greyIco:''))):'';
       // Když známe obě sazby, vypíšou se; když ne, řekne se aspoň princip. Bez čísel je to
       // pořád lepší než holé „3 %", u kterého nikdo nepozná, z čeho vyšlo.
       const _rNote=_blend
@@ -37637,8 +37693,10 @@ async function openMtlCommissions(scope){
       + (function(){
           // Dvě vysvětlivky, každá jen když se v seznamu opravdu vyskytuje.
           const _rows=(m.rows||[]);
-          const _anyAds=_rows.some(function(t){ return t.acq_source==='mtl_ads'; });
-          const _anyFind=_hasAcq && _rows.some(function(t){ return t.acq_source!=='mtl_ads'; });
+          const _acqOn=function(t){ return (parseInt(t.acq_months,10)||0)>0; };
+          const _anyAds=_rows.some(function(t){ return t.acq_source==='mtl_ads' && _acqOn(t); });
+          const _anyFind=_hasAcq && _rows.some(function(t){ return t.acq_source!=='mtl_ads' && _acqOn(t); });
+          const _anyGrey=_rows.some(function(t){ return (t.acq_source==='mtl_discovery'||t.acq_source==='mtl_ads') && !((parseInt(t.acq_months,10)||0)>0); });
           const _st='<div style="font-size:11px;color:var(--light);line-height:1.5;padding:8px 2px 0;">';
           return (_anyFind?(_st+'\ud83e\uddf2 '
               + (EN ? 'One-off finder\u2019s fee for a member who found you in the app. Their next payments go at your normal rate.'
@@ -37647,6 +37705,10 @@ async function openMtlCommissions(scope){
             + (_anyAds?(_st+'\ud83d\udce3 '
               + (EN ? 'A student who came from paid MTL advertising. The higher rate applies to their membership for 12 months.'
                     : '\u010clov\u011bk, kter\u00fd p\u0159i\u0161el z placen\u00e9 reklamy MTL. Vy\u0161\u0161\u00ed sazba plat\u00ed na jeho \u010dlenstv\u00ed 12 m\u011bs\u00edc\u016f.')
+              +'</div>'):'')
+            + (_anyGrey?(_st+'<span style="filter:grayscale(1);opacity:.4;">\ud83e\uddf2</span> <span style="filter:grayscale(1);opacity:.4;">\ud83d\udce3</span> '
+              + (EN ? 'Greyed out: a member who came through MTL, but this payment is already at your normal rate.'
+                    : 'Zešedlé: člověk, který přišel přes MTL, ale tahle platba už jde za tvou běžnou sazbu.')
               +'</div>'):'')
             // Zpusoby platby: ikony u radku byly bez vysvetleni a 💸 vedle 🏛️ se plete.
             // Ukaze se jen to, co je v seznamu opravdu videt.
