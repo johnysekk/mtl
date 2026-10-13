@@ -148,6 +148,11 @@ export default async function handler(req, res) {
       if (hostKind === 'coach' && hostId) {
         const r = await sbGet(`profiles?id=eq.${encodeURIComponent(hostId)}&select=pis_test`);
         pisTest = !!(r && r[0] && r[0].pis_test);
+      } else if (hostKind === 'organization' && hostId) {
+        // Akce federace / promotéra: dřív se testovací režim nečetl vůbec a platba z účtu se
+        // na veřejné stránce nenabídla.
+        const r = await sbGet(`organizations?id=eq.${encodeURIComponent(hostId)}&select=pis_test`);
+        pisTest = !!(r && r[0] && r[0].pis_test);
       } else if (ev.gym_id) {
         const r = await sbGet(`gyms?id=eq.${encodeURIComponent(ev.gym_id)}&select=pis_test`);
         pisTest = !!(r && r[0] && r[0].pis_test);
