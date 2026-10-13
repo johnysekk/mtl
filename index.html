@@ -23607,7 +23607,7 @@ async function renderGymManage(){
   box.innerHTML = `
     <!-- Výzva k platbám JE PŘED podmínkami: bez koleje a karty klub nebere rezervace vůbec,
          zatímco podmínky jsou doporučení. Naléhavější věc má být výš. -->
-${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData, { subject:'gym', gymId:(_myGymData&&_myGymData.id)||'', gymName:(_myGymData&&_myGymData.name)||'' }):''}${(typeof _commissionBanner==='function')?_commissionBanner():''}
+${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData, { subject:'gym', gymId:(_myGymData&&_myGymData.id)||'', gymName:(_myGymData&&_myGymData.name)||'' }):''}${(typeof _commissionBanner==='function')?_commissionBanner():''}${_obWindowStrip(_myGymData)}
     <!-- Jantarové „Doporučujeme doplnit podmínky" odebráno: podmínky jsou teď podmínka prodeje
          a hlásí je výzva nad tím, spolu s kolejí a kartou. Doporučení a povinnost vedle sebe
          jen matou. -->
@@ -27524,6 +27524,8 @@ function _provSuspended(){
 function _showSuspendedGate(){
   const EN=LANG==='en';
   const s=_provSuspended(); if(!s) return;
+  // Ruční pozastavení z Adminu: místo platební obrazovky důvod a návod, jak ho zrušit.
+  if(s.row.suspend_manual && s.row.account_suspended){ _showManualSuspension({ entity:s.kind, id:s.row.id, name:s.row.name, reason:s.row.suspend_reason, howto:s.row.suspend_howto, at:s.row.suspended_at }); return; }
   const f=s.row.commission_failed_at;
   let due='';
   try{ if(f) due=new Date(new Date(f).getTime()+14*86400000).toLocaleDateString(EN?'en-GB':'cs-CZ',{day:'numeric',month:'numeric'}); }catch(e){}
@@ -27584,6 +27586,16 @@ function _commissionBanner(row, kind){
   const cardBtn = '<button onclick="openCommissionCard(\''+kind+'\')" style="margin-top:8px;padding:9px 14px;background:#fff;color:#b91c1c;border:1px solid #b91c1c;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';">'+(EN?'Update card':'Aktualizovat kartu')+'</button>';
   const btn = payNowBtn + cardBtn;
   const wrap = function(title, body){ return '<div style="background:#FEF2F2;border:1px solid #FCA5A5;border-radius:12px;padding:12px 14px;margin-bottom:14px;"><div style="font-size:13px;font-weight:800;color:#b91c1c;margin-bottom:4px;">'+title+'</div><div style="font-size:12px;color:#b91c1c;line-height:1.5;">'+body+'</div>'+retryLine+btn+'</div>'; };
+  if(g.account_suspended && g.suspend_manual){
+    window._manSuspInfo={ entity:kind, id:g.id, name:g.name, reason:g.suspend_reason, howto:g.suspend_howto, at:g.suspended_at };
+    // Bez tlačítek „Zaplatit": ruční pozastavení úhrada provize nezruší.
+    const wrapM=function(title, body){ return '<div style="background:#FEF2F2;border:1px solid #FCA5A5;border-radius:12px;padding:12px 14px;margin-bottom:14px;"><div style="font-size:13px;font-weight:800;color:#b91c1c;margin-bottom:4px;">'+title+'</div><div style="font-size:12px;color:#b91c1c;line-height:1.5;">'+body+'</div></div>'; };
+    return wrapM('\u26d4 '+(EN?'Suspended by MTL':'Pozastaveno administr\u00e1torem MTL'),
+      (EN?(_entP+' is hidden and nothing new can be booked or bought. '):(_entP+' je skryt\u00fd a nejde u n\u011bj nic nov\u00e9ho rezervovat ani koupit. '))
+      +'<br><b>'+(EN?'Reason: ':'D\u016fvod: ')+'</b>'+escapeHtml(g.suspend_reason||'\u2014')
+      +(g.suspend_howto?('<br><b>'+(EN?'How to lift it: ':'Jak pozastaven\u00ed zru\u0161it: ')+'</b>'+escapeHtml(g.suspend_howto)):'')
+      +'<br><button onclick="_showManualSuspension(window._manSuspInfo)" style="margin-top:8px;padding:9px 14px;background:#fff;color:#b91c1c;border:1px solid #b91c1c;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Details':'Podrobnosti')+'</button>');
+  }
   if(g.account_suspended) return wrap('\ud83d\udeab '+(EN?'Account paused \u2014 unpaid commission':'\u00da\u010det pozastaven \u2014 neuhrazen\u00e1 provize'), (EN?_entP+' is hidden and bookings are blocked until the MTL commission is paid.':_entP+' je skryt\u00fd a rezervace jsou zablokovan\u00e9, dokud neuhrad\u00ed\u0161 provizi MTL.'));
   if(g.cash_blocked) return wrap('\ud83d\udeab '+(EN?'Cash recording paused':'Zaznamen\u00e1v\u00e1n\u00ed hotovosti pozastaveno'), (EN?'Unpaid cash commission. Stripe still works; pay to re-enable cash.':'Neuhrazen\u00e1 provize z hotovosti. Stripe b\u011b\u017e\u00ed d\u00e1l; cash odbloku\u0161 \u00fahradou.'));
   if(g.commission_failed_at){
@@ -28216,6 +28228,134 @@ function _mgMembModeUI(){
   if(ph){ ph.style.display=(v==='cal')?'block':'none'; ph.textContent = on
     ? (EN?'On: someone paying on 13 Oct pays only for 13–31 Oct.':'Zapnuto: kdo zaplatí 13. 10., platí jen za 13.–31. 10.')
     : (EN?'Off: someone paying on 13 Oct pays for the whole of October.':'Vypnuto: kdo zaplatí 13. 10., platí celý říjen.'); }
+}
+// OKNO NOVÉHO KLUBU (api/_rate.js GYM_ONBOARDING_DAYS = 14 od založení): kdo u klubu v té době
+// poprvé zaplatí, je klubu vlastní -- akviziční provize se neúčtuje. Pruh ve Správě klubu s datem
+// konce; jde odkřížkovat (pamatuje si to zařízení, pro každý klub zvlášť).
+const GYM_ONBOARDING_DAYS=14;
+function _obWindowEnd(g){ try{ if(!g||!g.created_at) return null; const e=new Date(new Date(g.created_at).getTime()+GYM_ONBOARDING_DAYS*86400000); return (e>new Date())?e:null; }catch(e){ return null; } }
+function _obWindowStrip(g){
+  const end=_obWindowEnd(g); if(!end) return '';
+  try{ if(localStorage.getItem('mtl_obwin_x_'+g.id)) return ''; }catch(e){}
+  const EN=LANG==='en'; const d=end.toLocaleDateString(EN?'en-GB':'cs-CZ',{ day:'numeric', month:'numeric', year:'numeric' });
+  return '<div id="obWinStrip" style="position:relative;background:#EAF7EF;border:1px solid #BFE5CC;border-radius:12px;padding:11px 38px 11px 13px;margin-bottom:14px;">'
+    +'<button onclick="try{localStorage.setItem(\'mtl_obwin_x_'+g.id+'\',\'1\')}catch(e){} var x=document.getElementById(\'obWinStrip\'); if(x) x.remove();" aria-label="'+(EN?'Close':'Zav\u0159\u00edt')+'" style="position:absolute;top:6px;right:6px;width:28px;height:28px;border:none;background:none;color:#0e6b3d;font-size:17px;cursor:pointer;">\u2715</button>'
+    +'<div style="font-size:13px;font-weight:800;color:#0e6b3d;margin-bottom:3px;">\ud83c\udf81 '+(EN?('Bring your members in by '+d):('P\u0159enes sv\u00e9 \u010dleny do '+d))+'</div>'
+    +'<div style="font-size:12px;color:#14532d;line-height:1.5;">'+(EN
+      ?('Until '+d+' (14 days from creating the club) nobody who pays you for the first time counts as found by MTL \u2014 no acquisition fee. After that, use your club link for people you bring in yourself.')
+      :('Do '+d+' (14 dn\u00ed od zalo\u017een\u00ed klubu) se z nikoho, kdo u tebe poprv\u00e9 zaplat\u00ed, neplat\u00ed akvizi\u010dn\u00ed provize \u2014 v\u0161ichni jsou tvoji vlastn\u00ed. Potom u\u017e jen p\u0159es Odkaz klubu.'))+'</div>'
+    +'<button onclick="(function(){var l=_ownLink(\'gym\');try{navigator.clipboard.writeText(l);}catch(e){}toast(LANG===\'en\'?\'Link copied\':\'Odkaz zkop\u00edrov\u00e1n\');})()" style="margin-top:8px;padding:8px 12px;background:#0e6b3d;color:#fff;border:none;border-radius:9px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;">\ud83d\udd17 '+(EN?'Copy club link':'Zkop\u00edrovat odkaz klubu')+'</button>'
+    +'</div>';
+}
+// ── PROKLIKY POSKYTOVATELE: fakturační údaje, správa, ruční pozastavení ─────────────────────
+// Vybere klub podle id (majitel víc klubů) a vrátí true, když ho má.
+function _selectMyGym(gymId){ try{ const g=(window._myGyms||[]).filter(function(x){ return String(x.id)===String(gymId); })[0]; if(g){ _myGymData=g; window._myGymData=g; window._selectedGymId=g.id; return true; } }catch(e){} return false; }
+// Fakturační údaje klubu / kouče a v nich první chybějící pole (DAC7 upomínky, e-mail ?go=billing).
+async function _openProviderBilling(kind, id, missing){
+  const first=(Array.isArray(missing)&&missing[0])||'';
+  if(kind==='gym'){
+    if(id) _selectMyGym(id);
+    window._gmInitTab=1; openSheet('shGymManage'); if(typeof renderGymManage==='function') await renderGymManage();
+    setTimeout(function(){ try{
+      if(typeof window._gmShowTab==='function') window._gmShowTab(1);
+      if(typeof _gmSetShow==='function') _gmSetShow('club');
+      const el=$('mgLegalName'); const det=el&&el.closest('details.setSec'); const sm=det&&det.querySelector('summary');
+      if(sm && !document.querySelector('.setSecOv')) sm.click();
+      setTimeout(function(){ try{ const f=$(({ country:'mgCountry', ico:'mgTaxId', address:'mgBillingLine1' })[first]||'mgLegalName'); if(f){ f.scrollIntoView({behavior:'smooth',block:'center'}); f.focus(); } }catch(_){} }, 300);
+    }catch(e){} }, 600);
+    return;
+  }
+  if(typeof openCoachSettings==='function') openCoachSettings();
+  setTimeout(function(){ try{
+    const lb=$('csLblBilling'); const sm=lb&&lb.closest('summary'); if(sm && !document.querySelector('.csSecOv')) sm.click();
+  }catch(e){} }, 500);
+}
+// Správa klubu / nastavení kouče (po obnovení účtu).
+function _openProviderHome(kind, id){
+  try{
+    if(kind==='gym'){ if(id) _selectMyGym(id); openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage(); }
+    else if(kind==='coach'){ if(typeof openCoachSettings==='function') openCoachSettings(); }
+    else { openSheet('shProfile'); }
+  }catch(e){}
+}
+// Admin: profil poskytovatele s tlačítkem Pozastavit (upozornění z DAC7 po 60 dnech).
+async function _openAdminEntity(kind, id, name){
+  try{
+    if(kind==='gym'){ if(typeof openGymStats==='function') openGymStats(id, name||'', true); }
+    else if(kind==='coach'){ if(typeof openCoachStats==='function') openCoachStats(id, name||'', true); }
+    else { const { data:o }=await supaClient.from('organizations').select('*').eq('id',id).maybeSingle(); if(o && typeof openAdminOrgDetail==='function') openAdminOrgDetail(o); }
+  }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
+}
+// Vysvětlení ručního pozastavení: kdo, kdy, proč a jak ho zrušit (z notifikace, e-mailu i pruhu).
+function _showManualSuspension(d){
+  const EN=LANG==='en'; d=d||{};
+  const ent=({ gym:(EN?'Club':'Klub'), coach:(EN?'Coach profile':'Profil kou\u010de'), org:(EN?'Organization':'Organizace') })[d.entity]||'';
+  let when=''; try{ if(d.at) when=new Date(d.at).toLocaleString(EN?'en-GB':'cs-CZ',{ day:'numeric', month:'numeric', year:'numeric', hour:'2-digit', minute:'2-digit' }); }catch(e){}
+  let ov=document.getElementById('shManSusp'); if(!ov){ ov=document.createElement('div'); ov.id='shManSusp'; ov.className='sheet'; document.body.appendChild(ov); }
+  const row=function(t,v){ return '<div style="margin-bottom:12px;"><div style="font-size:11px;font-weight:800;color:var(--light);letter-spacing:.04em;text-transform:uppercase;margin-bottom:3px;">'+t+'</div><div style="font-size:14px;color:var(--dark);line-height:1.55;white-space:pre-wrap;">'+escapeHtml(v)+'</div></div>'; };
+  ov.innerHTML='<div class="shdr"><div class="shdr-title">\u26d4 '+(EN?'Suspended by MTL':'Pozastaveno administr\u00e1torem MTL')+'</div><button class="btn-close" onclick="closeSheet(\'shManSusp\')">\u2715</button></div>'
+    +'<div style="padding:18px 16px;">'
+    +row(EN?'What':'Co', ent+(d.name?(' '+d.name):'')+(when?(' \u00b7 '+when):''))
+    +row(EN?'Reason':'D\u016fvod', d.reason||'\u2014')
+    +row(EN?'How to lift the suspension':'Jak pozastaven\u00ed zru\u0161it', d.howto||(EN?'Contact us \u2014 reply to the e-mail or write to support.':'Ozvi se n\u00e1m \u2014 odpov\u011bz na e-mail nebo napi\u0161 podpo\u0159e.'))
+    +'<div style="font-size:12.5px;color:var(--mid);line-height:1.55;background:var(--surf);border:1px solid var(--border);border-radius:11px;padding:10px 12px;">'
+      +(EN?'While suspended it is hidden in the app and nothing new can be booked or bought. Card subscriptions already running continue, and your data, schedule and members stay unchanged.'
+          :'Po dobu pozastaven\u00ed nen\u00ed v appce vid\u011bt a nejde u n\u011bj nic nov\u00e9ho rezervovat ani koupit. U\u017e b\u011b\u017e\u00edc\u00ed p\u0159edplatn\u00e9 kartou b\u011b\u017e\u00ed d\u00e1l a data, rozvrh i \u010dlenov\u00e9 z\u016fst\u00e1vaj\u00ed beze zm\u011bny.')
+    +'</div>'
+    +(d.entity!=='org'?('<button onclick="closeSheet(\'shManSusp\'); _openProviderBilling(\''+(d.entity==='gym'?'gym':'coach')+'\', \''+escapeHtml(String(d.id||''))+'\')" style="width:100%;margin-top:14px;padding:13px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Billing details':'Faktura\u010dn\u00ed \u00fadaje')+'</button>'):'')
+    +'</div>';
+  try{ _dashBackAdd(ov); }catch(e){}
+  openSheet('shManSusp');
+}
+// ADMIN: POZASTAVIT / OBNOVIT poskytovatele (klub, kouč, organizace). Důvod povinný, „Jak zrušit"
+// nepovinné. Zápis, notifikaci i e-mail dělá server (api/admin-suspend.js, jen founder).
+function _admSuspHtml(kind, row){
+  const EN=LANG==='en'; row=row||{}; const on=!!(row.account_suspended || row.coach_status==='suspended');
+  const man=!!row.suspend_manual;
+  return '<div style="background:'+(on?'#FDECEC':'var(--surf)')+';border:1px solid '+(on?'#F3C0C0':'var(--border)')+';border-radius:12px;padding:11px 13px;margin:12px 0;">'
+    +'<div style="font-size:12.5px;font-weight:800;color:'+(on?'#8a1c1c':'var(--dark)')+';">'+(on?('\u26d4 '+(EN?'Suspended':'Pozastaveno')+(man?'':(row.coach_status==='suspended'?'':(EN?' \u2014 unpaid commission':' \u2014 neuhrazen\u00e1 provize')))):('\u2705 '+(EN?'Active':'Aktivn\u00ed')))+'</div>'
+    +((on&&row.suspend_reason)?('<div style="font-size:12px;color:var(--mid);margin-top:4px;line-height:1.5;"><b>'+(EN?'Reason: ':'D\u016fvod: ')+'</b>'+escapeHtml(row.suspend_reason)+'</div>'):'')
+    +((on&&row.suspend_howto)?('<div style="font-size:12px;color:var(--mid);margin-top:2px;line-height:1.5;"><b>'+(EN?'How to lift: ':'Jak zru\u0161it: ')+'</b>'+escapeHtml(row.suspend_howto)+'</div>'):'')
+    +'<button class="admSuspBtn" data-kind="'+kind+'" data-id="'+escapeHtml(String(row.id||''))+'" data-name="'+escapeHtml(String(row.name||''))+'" data-on="'+((on&&(man||row.coach_status==='suspended'))?1:0)+'" style="margin-top:9px;width:100%;padding:11px;border-radius:10px;border:1.5px solid '+((on&&(man||row.coach_status==='suspended'))?'#0a8f5b':'#b91c1c')+';background:#fff;color:'+((on&&(man||row.coach_status==='suspended'))?'#0a8f5b':'#b91c1c')+';font-size:13px;font-weight:800;cursor:pointer;font-family:inherit;">'
+      +((on&&(man||row.coach_status==='suspended'))?(EN?'Lift the suspension':'Zru\u0161it pozastaven\u00ed'):(EN?'\u26d4 Suspend':'\u26d4 Pozastavit'))+'</button>'
+    +((on&&!man&&row.coach_status!=='suspended')?('<div style="font-size:11px;color:var(--light);margin-top:5px;line-height:1.45;">'+(EN?'Paused by the system for unpaid commission \u2014 it lifts itself once paid.':'Pozastaveno syst\u00e9mem kv\u016fli neuhrazen\u00e9 provizi \u2014 zru\u0161\u00ed se samo po \u00fahrad\u011b.')+'</div>'):'')
+    +'</div>';
+}
+function _admSuspWire(box, after){
+  try{ (box||document).querySelectorAll('.admSuspBtn').forEach(function(b){ b.onclick=function(){ _admSuspDialog(b.dataset.kind, b.dataset.id, b.dataset.name, b.dataset.on==='1', after); }; }); }catch(e){}
+}
+function _admSuspDialog(kind, id, name, isOn, after){
+  const EN=LANG==='en';
+  const call=async function(body){
+    const t=(typeof _freshTok==='function')?await _freshTok():null;
+    const r=await fetch('/api/admin-suspend',{ method:'POST', headers:{ 'Content-Type':'application/json', 'x-access-token':t||'' }, body:JSON.stringify(body) });
+    const j=await r.json().catch(function(){ return {}; }); if(!r.ok) throw new Error(j.error||('HTTP '+r.status)); return j;
+  };
+  if(isOn){
+    if(!confirm(EN?('Lift the suspension of '+name+'? They get a notification and an e-mail.'):('Zru\u0161it pozastaven\u00ed '+name+'? Dostane notifikaci i e-mail.'))) return;
+    call({ action:'restore', kind:kind, id:id }).then(function(){ toast(EN?'\u2705 Suspension lifted':'\u2705 Pozastaven\u00ed zru\u0161eno', 1); if(after) after(); }).catch(function(e){ toast('\u26a0\ufe0f '+e.message, 1); });
+    return;
+  }
+  const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;z-index:100070;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:18px;';
+  const TA='width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;resize:vertical;margin-bottom:10px;';
+  ov.innerHTML='<div style="background:#fff;border-radius:18px;max-width:480px;width:100%;padding:20px;font-family:inherit;">'
+    +'<div style="font-size:17px;font-weight:800;color:var(--dark);margin-bottom:4px;">\u26d4 '+(EN?'Suspend ':'Pozastavit ')+escapeHtml(name||'')+'</div>'
+    +'<div style="font-size:12px;color:var(--mid);line-height:1.5;margin-bottom:12px;">'+(EN?'Hidden in the app, nothing new can be booked or bought; running card subscriptions continue. They get a notification and an e-mail with the reason and how to lift it.':'Zmiz\u00ed z appky a nep\u016fjde u n\u011bj nic nov\u00e9ho rezervovat ani koupit; b\u011b\u017e\u00edc\u00ed p\u0159edplatn\u00e9 kartou b\u011b\u017e\u00ed d\u00e1l. Dostane notifikaci i e-mail s d\u016fvodem a s t\u00edm, jak pozastaven\u00ed zru\u0161it.')+'</div>'
+    +'<label style="display:block;font-size:12px;font-weight:800;color:var(--dark);margin-bottom:4px;">'+(EN?'Reason (required, they will see it)':'D\u016fvod (povinn\u00fd, uvid\u00ed ho)')+'</label>'
+    +'<textarea id="asReason" rows="3" maxlength="600" style="'+TA+'" placeholder="'+(EN?'E.g. missing details for the DAC7 report after two reminders':'Nap\u0159. chyb\u011bj\u00edc\u00ed \u00fadaje pro hl\u00e1\u0161en\u00ed DAC7 ani po dvou upom\u00ednk\u00e1ch')+'"></textarea>'
+    +'<label style="display:block;font-size:12px;font-weight:800;color:var(--dark);margin-bottom:4px;">'+(EN?'How to lift the suspension (optional)':'Jak pozastaven\u00ed zru\u0161it (nepovinn\u00e9)')+'</label>'
+    +'<textarea id="asHow" rows="3" maxlength="1200" style="'+TA+'" placeholder="'+(EN?'E.g. add your address and company ID in Billing details and let us know':'Nap\u0159. dopl\u0148 adresu a I\u010cO ve Faktura\u010dn\u00edch \u00fadaj\u00edch a dej n\u00e1m v\u011bd\u011bt')+'"></textarea>'
+    +'<div style="display:flex;gap:8px;margin-top:4px;"><button id="asCancel" style="flex:1;padding:12px;background:var(--surf);border:1px solid var(--border);border-radius:11px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--dark);">'+(EN?'Back':'Zp\u011bt')+'</button>'
+    +'<button id="asGo" style="flex:1.4;padding:12px;background:#b91c1c;color:#fff;border:none;border-radius:11px;font-weight:800;cursor:pointer;font-family:inherit;">'+(EN?'Suspend':'Pozastavit')+'</button></div></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#asCancel').onclick=function(){ ov.remove(); };
+  ov.querySelector('#asGo').onclick=function(){
+    const reason=ov.querySelector('#asReason').value.trim(), howto=ov.querySelector('#asHow').value.trim();
+    if(!reason){ ov.querySelector('#asReason').focus(); toast(EN?'\u26a0\ufe0f The reason is required':'\u26a0\ufe0f D\u016fvod je povinn\u00fd'); return; }
+    const b=ov.querySelector('#asGo'); b.disabled=true; b.textContent='\u2026';
+    call({ action:'suspend', kind:kind, id:id, reason:reason, howto:howto }).then(function(){ ov.remove(); toast(EN?'\u26d4 Suspended \u2014 notification and e-mail sent':'\u26d4 Pozastaveno \u2014 notifikace i e-mail odesl\u00e1ny', 1); if(after) after(); })
+      .catch(function(e){ b.disabled=false; b.textContent=(EN?'Suspend':'Pozastavit'); toast('\u26a0\ufe0f '+e.message, 1); });
+  };
 }
 // VLASTNÍ ADRESA KLUBU (/klub/<slug>). Ukládá se hned (ne přes „Uložit změny"), jedinečnost
 // hlídá databáze (unikátní index) -- obsazenou adresu odmítne. Diakritika a mezery se převedou.
@@ -32850,7 +32990,9 @@ if($('btnSubmitGymApp')) $('btnSubmitGymApp').onclick = async ()=>{
       if(!_gla) _gla=_billAddrFromFields('gymBilling'); const _gvp=!!($('gymVatPayer')&&$('gymVatPayer').checked); const _gvr=parseFloat($('gymVatRate')&&$('gymVatRate').value); const _gu={}; if(_gt) _gu.tax_id=_gt; if(_gvt) _gu.vat_id=_gvt; if(_gln) _gu.legal_name=_gln; /* billing_address se neuklada -- sklada se pri cteni z rozpadu */ _gu.vat_payer=_gvp; if(_gvp&&isFinite(_gvr)&&_gvr>=0) _gu.vat_rate=_gvr; const _np=!!($('gymNonprofit')&&$('gymNonprofit').checked); _gu.org_form=_np?'nonprofit':'profit'; const _gle=!!($('gymLegalEntity')&&$('gymLegalEntity').checked); _gu.legal_entity=_gle; if(!_gle) _gu.org_form='profit'; if(Object.keys(_gu).length) await supaClient.from('gyms').update(_gu).eq('id', newGym.id); }catch(e){} }
 
     try {
-      const _gd=(_gymDisc&&_gymDisc.length)?_gymDisc:[defaultDiscipline()]; const _gdl=_gd.map(x=>disciplineLabel(x)).join(', '); const _gid=(newGym&&newGym.id)||null; try{ if(_gid) await supaClient.from('notifications').insert({ user_id: currentUser.id, type:'system', read:false, data: JSON.stringify({ kind:'own_student_link', target:'gym' }), message:'⚠️ DŮLEŽITÉ: Abys ze svých stávajících členů neplatil MTL akviziční poplatek 10 %, pošli jim tento odkaz, než si u tebe rezervují trénink.' }); }catch(e){}
+      const _gd=(_gymDisc&&_gymDisc.length)?_gymDisc:[defaultDiscipline()]; const _gdl=_gd.map(x=>disciplineLabel(x)).join(', '); const _gid=(newGym&&newGym.id)||null; try{ if(_gid) await supaClient.from('notifications').insert({ user_id: currentUser.id, type:'system', read:false, data: JSON.stringify({ kind:'own_student_link', target:'gym', gym_id:_gid,
+            msg_en:'⚠️ IMPORTANT: for the first 14 days (until '+new Date(Date.now()+GYM_ONBOARDING_DAYS*86400000).toLocaleDateString('en-GB')+') nobody who pays your club for the first time costs you the MTL acquisition fee \u2014 bring your existing members in now. After that, send them your club link before they book, so you don\u2019t pay the 10 % acquisition fee for them.' }),
+          message:'⚠️ DŮLEŽITÉ: Prvních 14 dní (do '+new Date(Date.now()+GYM_ONBOARDING_DAYS*86400000).toLocaleDateString('cs-CZ')+') se z nikoho, kdo u tvého klubu poprvé zaplatí, neplatí akviziční poplatek MTL — přenes teď své stávající členy. Potom jim před rezervací pošli tento odkaz, abys za ně neplatil akviziční poplatek 10 %.' }); }catch(e){}
       if(!(await _founderMutesNewListing())) await supaClient.from('notifications').insert(_bi({
         user_id: FOUNDER_UUID, type:'system', read:false,
         data: JSON.stringify({ kind:'new_listing', target_type:'gym', target_id:_gid, target_name:name, disc:_gdl }),
@@ -34081,10 +34223,14 @@ async function loadNotifications(append){
     const isCoachRefAdmin = false; /* referral EP grants removed — rewards are Shikai/Bankai */
     // beta_pending sem musí být přidané, jinak se notifikace vykreslí jako neklikatelná a obsluha
   // se vůbec nenapojí -- větev, která má otevřít admin, pak nemá kdo spustit.
-  const clickable = k==='memb_mode_needed' || k==='event_cohost_invite' || k==='event_cohost_accepted' || k==='event_cohost_declined' || k==='event_cohost_left' || k==='event_cohost_removed' || k==='oss_threshold' || k==='commission_upcoming' || k==='family_payreq_offer' || k==='ref_joined' || k==='minor_course_req' || k==='migration_request' || k==='withdrawal_done' || k==='online_withdrawal' || k==='online_plan_new' || k==='online_piece_done' || k==='online_plan_qr' || k==='online_plan_active' || k==='withdrawal_request' || k==='minor_member_app' || k==='minor_waiver' || k==='family_request' || k==='autonomy_sunset' || k==='dropin_bank_cancelled' || k==='bug_report' || k==='milestone' || k==='address_from_club' || k==='address_request' || k==='class_cancelled' || k==='trial_booked' || k==='pis_creditor_outage' || (String(k||'').indexOf('kid_share')===0) || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed' || k==='support_ticket' || k==='class_reminder' || k==='fav_added_coach' || k==='fav_added_gym' || isCoachLessonRem || isStudResched || k==='coach_pay_ok' || k==='coach_qr_intent' || k==='qr_unconfirmed' || k==='event_qr_intent' || k==='walkin_drop' || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='org_expiring' || k==='beta_pending' || k==='minor_waiver_req' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked' || k==='commission_no_card' || k==='commission_suspended' || k==='new_provider' || k==='supplier_live' || k==='supplier_ended';
+  const clickable = k==='memb_mode_needed' || k==='dac7_data_needed' || k==='dac7_overdue' || k==='admin_suspended' || k==='admin_restored' || k==='event_cohost_invite' || k==='event_cohost_accepted' || k==='event_cohost_declined' || k==='event_cohost_left' || k==='event_cohost_removed' || k==='oss_threshold' || k==='commission_upcoming' || k==='family_payreq_offer' || k==='ref_joined' || k==='minor_course_req' || k==='migration_request' || k==='withdrawal_done' || k==='online_withdrawal' || k==='online_plan_new' || k==='online_piece_done' || k==='online_plan_qr' || k==='online_plan_active' || k==='withdrawal_request' || k==='minor_member_app' || k==='minor_waiver' || k==='family_request' || k==='autonomy_sunset' || k==='dropin_bank_cancelled' || k==='bug_report' || k==='milestone' || k==='address_from_club' || k==='address_request' || k==='class_cancelled' || k==='trial_booked' || k==='pis_creditor_outage' || (String(k||'').indexOf('kid_share')===0) || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed' || k==='support_ticket' || k==='class_reminder' || k==='fav_added_coach' || k==='fav_added_gym' || isCoachLessonRem || isStudResched || k==='coach_pay_ok' || k==='coach_qr_intent' || k==='qr_unconfirmed' || k==='event_qr_intent' || k==='walkin_drop' || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='org_expiring' || k==='beta_pending' || k==='minor_waiver_req' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked' || k==='commission_no_card' || k==='commission_suspended' || k==='new_provider' || k==='supplier_live' || k==='supplier_ended';
     let linkLabel = L('Otevřít ›');
     if(k==='payment_confirmed'){ var _pcd={}; try{ _pcd=JSON.parse(n.data||'{}'); }catch(e){} var _gg=_pcd.goto; linkLabel = (_pcd.for_other && _gg!=='courses') ? (LANG==='en'?'Receipt ›':'Doklad ›') : (_gg==='dropin'||_gg==='bookings') ? (LANG==='en'?'Booking details ›':'Detail rezervace ›') : (_gg==='tickets') ? (LANG==='en'?'my ticket ›':'moje vstupenka ›') : (_gg==='courses') ? (LANG==='en'?'my course ›':'můj kurz ›') : (_gg==='merch') ? (LANG==='en'?'view ›':'zobrazit ›') : (LANG==='en'?'details ›':'detail ›'); } else if(k==='qr_intent') linkLabel = LANG==='en'?'To confirm ›':'K potvrzení ›'; else if(k==='qr_released'||k==='qr_reservation_expired') linkLabel = LANG==='en'?'Book again ›':'Rezervovat znovu ›'; else if(k==='qr_requeued') linkLabel = LANG==='en'?'Pay again ›':'Zaplatit znovu ›'; else if(k==='sounding_ask') linkLabel = LANG==='en'?'Answer ›':'Odpovědět ›'; else if(k==='cover_needed') linkLabel = LANG==='en'?'Take the cover ›':'Vzít záskok ›'; else if(k==='cover_filled'||k==='cover_filled_owner') linkLabel = LANG==='en'?'View ›':'Zobrazit ›'; else if(k==='doklad_vat_needed') linkLabel = LANG==='en'?'Add VAT ID ›':'Doplnit DIČ ›'; else if(k==='course_new') linkLabel = LANG==='en'?'Course details ›':'Detail kurzu ›'; else if(k==='slot_demand') linkLabel = LANG==='en'?'Open my diary ›':'Otevřít diář ›'; else if(k==='cohort_month_due') linkLabel = LANG==='en'?'Pay now ›':'Doplatit ›'; else if(k==='cohort_month_collect') linkLabel = LANG==='en'?'Open roster ›':'Otevřít roster ›'; else if(k==='cohort_deposit_paid') linkLabel = LANG==='en'?'View roster ›':'Otevřít účastníky ›'; else if(k==='cohort_qr_claim') linkLabel = LANG==='en'?'View roster ›':'Otevřít účastníky ›'; else if(k==='cohort_deposit_mine') linkLabel = LANG==='en'?'My course ›':'Můj kurz ›';
       else if(k==='memb_mode_needed') linkLabel = LANG==='en'?'Choose the mode ›':'Vybrat režim ›';
+      else if(k==='dac7_data_needed') linkLabel = LANG==='en'?'Add the details ›':'Doplnit údaje ›';
+      else if(k==='dac7_overdue') linkLabel = LANG==='en'?'Open the profile ›':'Otevřít profil ›';
+      else if(k==='admin_suspended') linkLabel = LANG==='en'?'Details ›':'Podrobnosti ›';
+      else if(k==='admin_restored') linkLabel = LANG==='en'?'Open ›':'Otevřít ›';
       else if(k==='doklad_unified') linkLabel = LANG==='en'?'Open the invoice ›':'Otevřít doklad ›';
       else if(k==='trial_booked') linkLabel = LANG==='en'?'Open attendance ›':'Otevřít docházku ›';
       // Nový poskytovatel: u organizace to znamená ke SCHVÁLENÍ, u kouče a klubu jen na profil.
@@ -34627,6 +34773,10 @@ async function loadNotifications(append){
           } else if(_d.organization_id){ openMtlCommissions({ organizationId:_d.organization_id, orgName:_d.name||'' }); }
           else { openMtlCommissions({ coachId: currentUser.id }); }
         }catch(e){} }
+        else if(k==='dac7_data_needed'){ try{ const _d=JSON.parse(n.data||'{}'); closeSheet('shNotif'); _openProviderBilling(_d.entity, _d.id, _d.missing); }catch(e){} }
+        else if(k==='dac7_overdue'){ try{ const _d=JSON.parse(n.data||'{}'); closeSheet('shNotif'); _openAdminEntity(_d.entity, _d.id, _d.name); }catch(e){} }
+        else if(k==='admin_suspended'){ try{ const _d=JSON.parse(n.data||'{}'); closeSheet('shNotif'); _showManualSuspension(_d); }catch(e){} }
+        else if(k==='admin_restored'){ try{ const _d=JSON.parse(n.data||'{}'); closeSheet('shNotif'); _openProviderHome(_d.entity, _d.id); }catch(e){} }
         else if(k==='memb_mode_needed'){ try{ const _d=JSON.parse(n.data||'{}'); _openMembMode(_d.gym_id||null); }catch(e){ _openMembMode(null); } }
         else if(k==='commission_failed'||k==='account_suspended'||k==='cash_blocked'||k==='commission_no_card'||k==='commission_suspended'){ try{
           let _d={}; try{ _d=JSON.parse(n.data||'{}'); }catch(e){}
@@ -35932,7 +36082,7 @@ async function loadAdminCoachList(){
       list.appendChild(el);
     });
     list.querySelectorAll('.adminCoachDash').forEach(b=>b.onclick=()=>openCoachStats(b.dataset.id, b.dataset.name, true));
-    list.querySelectorAll('.adminRestore').forEach(b=>b.onclick=async()=>{ await toggleCoachSuspend(b.dataset.id, 'suspended', b.dataset.name); });
+    list.querySelectorAll('.adminRestore').forEach(b=>b.onclick=()=>_admSuspDialog('coach', b.dataset.id, b.dataset.name, true, function(){ try{ loadCoaches(); loadAdminCoachList(); }catch(e){} }));
     list.querySelectorAll('.adminRevoke').forEach(b=>b.onclick=()=>revokeCoachCert(b.dataset.id, b.dataset.name));
   }
 }
@@ -36108,7 +36258,8 @@ async function _renderGymAnalyticsInner(gymId, box){
         <input type="checkbox" id="fdGymDaily" ${gym?.commission_daily?'checked':''} style="width:16px;height:16px;cursor:pointer;">
         <span style="font-size:11.5px;color:#cbd5e1;">${LANG==='en'?'Charge daily instead of monthly (testing)':'Strh\u00e1vat provizi denn\u011b m\u00edsto m\u011bs\u00ed\u010dn\u011b (testov\u00e1n\u00ed)'}</span>
       </label>
-    </div>` : ''}
+    </div>
+    ${_admSuspHtml('gym', gym)}` : ''}
     ${_isFounder ? `
     <div class="sec-lbl">${LANG==='en'?'Club details':'Údaje o klubu'}</div>
     <div class="prow-group" style="margin-bottom:16px;">
@@ -36182,6 +36333,8 @@ async function _renderGymAnalyticsInner(gymId, box){
     </div>` : ''}
   `;
 
+  // Pozastavit / zrušit pozastavení (founder) -- po akci se přehled klubu překreslí.
+  _admSuspWire(box, function(){ try{ renderGymAnalytics(gymId, box.id); }catch(e){} });
   // Founder-only. Writes to the column both crons read, so the whole chain -- charge, receipt,
   // email -- can be watched the next morning instead of on the 1st.
   try{
@@ -38206,15 +38359,16 @@ async function openAdminOrgDetail(org){
     +'<div style="font-size:13px;color:var(--mid);margin-bottom:14px;">'
       +_orgKindLbl(org.kind)
       +(org.city?(' \u00b7 '+escapeHtml(org.city)):'')+' \u00b7 '+_stPill(org.status)+'</div>'
-    // Dodavatel: místo sazby předplatné, obory a vypínač zobrazení (ručně se neschvaluje, founder
-    // ho může dodatečně pozastavit -- profil zmizí, předplatné se tím neruší).
+    // Pozastavení (founder) -- stejné u všech druhů organizací; dodavatel tím zmizí ze seznamu
+    // Dodavatelů, předplatné se neruší.
+    +(_isFounder?_admSuspHtml('org', org):'')
+    // Dodavatel: místo sazby předplatné a obory.
     +((_isFounder && org.kind==='supplier')?('<div style="background:#1f2937;border:1px solid #FFD54A;border-radius:12px;padding:11px 13px;margin-bottom:16px;">'
       +'<div style="font-size:12.5px;font-weight:800;color:#FFD54A;">\u{1F9F0} '+(EN?'Supplier':'Dodavatel')+'</div>'
       +'<div style="font-size:11.5px;color:#cbd5e1;margin-top:3px;line-height:1.55;">'
         +(org.supplier_sub?((EN?'Subscription active':'P\u0159edplatn\u00e9 b\u011b\u017e\u00ed')+(org.supplier_price?(' \u00b7 '+org.supplier_price+' '+(org.supplier_currency||'CZK')+'/'+(org.supplier_interval==='year'?(EN?'year':'rok'):(EN?'month':'m\u011bs.'))):'')+(org.supplier_cancelling?(' \u00b7 '+(EN?'cancelling':'ru\u0161\u00ed se')):'')):(EN?'Not paid \u2014 not shown':'Nezaplaceno \u2014 nezobrazuje se'))
         +'<br><span style="opacity:.8;">'+escapeHtml(_supCatsOf(org).map(_supCatLbl).join(' \u00b7 ')||'\u2014')+'</span>'
       +'</div>'
-      +'<button id="aodSupToggle" style="margin-top:9px;padding:8px 12px;border-radius:9px;border:1px solid rgba(255,255,255,.3);background:none;color:#fff;font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">'+(org.status==='suspended'?(EN?'Show again':'Znovu zobrazit'):(EN?'Hide (suspend)':'Skr\u00fdt (pozastavit)'))+'</button>'
       +'</div>'):'')
     +((_isFounder && org.kind!=='supplier')?('<div style="background:#1f2937;border:1px solid #FFD54A;border-radius:12px;padding:11px 13px;margin-bottom:16px;">'
       +'<div style="font-size:12.5px;font-weight:800;color:#FFD54A;">\u26a1 '+(EN?'Organization rate':'Sazba organizace')+'</div>'
@@ -38266,17 +38420,8 @@ async function openAdminOrgDetail(org){
       +(org.description?_row('\u{1F4DD}',(EN?'Description':'Popis'),org.description):'')
     +'</div>'
     +'</div>';
-  { const _st2=ov.querySelector('#aodSupToggle');
-    if(_st2) _st2.onclick=async function(){
-      const _toS=(org.status!=='suspended');
-      if(_toS && !confirm(EN?'Hide this supplier? Clubs will stop seeing the profile; the subscription is not cancelled.':'Skr\u00fdt dodavatele? Kluby profil p\u0159estanou vid\u011bt; p\u0159edplatn\u00e9 se t\u00edm neru\u0161\u00ed.')) return;
-      try{ const { error }=await supaClient.from('organizations').update({ status:_toS?'suspended':'approved' }).eq('id',org.id); if(error) throw error;
-        try{ await supaClient.from('notifications').insert(_bi({ user_id:org.owner_id, type:'system', read:false, data:JSON.stringify({ kind:'supplier_ended', org_id:org.id, org_name:org.name||'' }), message:'' }, function(EN2){ return _toS
-          ? (EN2?('\u26a0\ufe0f MTL has hidden the supplier profile '+(org.name||'')+'. Contact us for details.'):('\u26a0\ufe0f MTL skryl profil dodavatele '+(org.name||'')+'. Pro podrobnosti n\u00e1s kontaktuj.'))
-          : (EN2?('\u2705 The supplier profile '+(org.name||'')+' is visible again.'):('\u2705 Profil dodavatele '+(org.name||'')+' je znovu vid\u011bt.')); })); }catch(e){}
-        openAdminOrgDetail(org);
-      }catch(e){ toast('\u26a0\ufe0f '+((e&&e.message)||'')); }
-    }; }
+  // Pozastavit / zrušit pozastavení (founder) -- u každé organizace, dodavatele i pořadatele.
+  _admSuspWire(ov, function(){ try{ supaClient.from('organizations').select('*').eq('id',org.id).maybeSingle().then(function(r){ if(r&&r.data) openAdminOrgDetail(r.data); }); }catch(e){} });
   try{ if(!_sheetParent['shAdminOrgDet']) _sheetParent['shAdminOrgDet']='shAdminOrgs'; }catch(e){}
   try{ openSheet('shAdminOrgDet'); }catch(e){}
   ov.querySelector('#_aodClose').onclick=function(){ try{ closeSheet('shAdminOrgDet'); }catch(e){ ov.remove(); } };
@@ -42964,13 +43109,13 @@ async function _renderCoachAnalyticsInner(coachId, box){
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">⚠️</div><div class="prow-lbl">${L('Otevřené žádosti o refund')}</div></div><span class="prow-val" style="${refundRequests>0?'color:var(--red);':''}">${refundRequests}</span></div>
       <div class="prow"><div class="prow-l"><div class="prow-icon" style="background:#FEECEC;">↩️</div><div class="prow-lbl">${L('Vráceno (online)')}</div></div><span class="prow-val">${onlineRefunded}</span></div>
     </div>
-    <button id="csSuspend" style="display:${(prof?.coach_status==='approved'||prof?.coach_status==='suspended')?'block':'none'};width:100%;margin-top:16px;padding:13px;background:${prof?.coach_status==='approved'?'#FEECEC':'#F0FBF0'};color:${prof?.coach_status==='approved'?'var(--red)':'var(--green)'};border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${prof?.coach_status==='approved'?L('⛔ Pozastavit kouče'):L('✅ Obnovit kouče')}</button>
+    ${(currentUser&&currentUser.role==='founder'&&(prof?.coach_status==='approved'||prof?.coach_status==='suspended'))?_admSuspHtml('coach', Object.assign({}, prof||{}, { id:coachId })):''}
   `;
   // napoj tlačítka
   const op=$('csOpenProfile'); if(op) op.onclick=()=>openProfileById(coachId);
   if(typeof renderCoachGymSection==='function') renderCoachGymSection(coachId);
   const ms=$('csMessage'); if(ms) ms.onclick=()=>messageCoachAsFounder(coachId);
-  const sus=$('csSuspend'); if(sus) sus.onclick=()=>toggleCoachSuspend(coachId, prof?.coach_status, prof?.name);
+  _admSuspWire($(containerId), function(){ try{ renderCoachAnalytics(coachId, containerId); loadAdminCoachList(); }catch(e){} });
   const tIp=$('csTabIp'), tOn=$('csTabOn'), pIp=$('csPanelIp'), pOn=$('csPanelOn');
   function csShowTab(ip){ if(!pIp||!pOn) return; pIp.style.display=ip?'block':'none'; pOn.style.display=ip?'none':'block';
     if(tIp){ tIp.style.background=ip?'var(--dark)':'var(--surf)'; tIp.style.color=ip?'#fff':'var(--dark)'; tIp.style.border=ip?'none':'1px solid var(--border)'; }
@@ -42992,28 +43137,6 @@ async function _renderCoachAnalyticsInner(coachId, box){
       }catch(e){ _cd.checked=!on; toast('⚠️ '+((e&&e.message)||'')); }
     };
   }catch(e){}
-}
-
-async function toggleCoachSuspend(coachId, status, name){
-  const suspend = status==='approved';
-  if(suspend){
-    if(!confirm(LANG==='en'?`Suspend coach ${name||''}? They'll disappear from the listing and can't be booked.`:`Pozastavit kouče ${name||''}? Zmizí z nabídky a nepůjde u něj rezervovat.`)) return;
-    const reason = (prompt(LANG==='en'?'Reason for suspension (required — the coach will see it):':'Důvod pozastavení (povinné — uvidí ho kouč):','')||'').trim();
-    if(!reason){ toast(L('⚠️ Důvod je povinný')); return; }
-    const { error } = await supaClient.from('profiles').update({ coach_status:'suspended', suspend_reason: reason }).eq('id', coachId);
-    if(error){ toast('⚠️ '+error.message+(LANG==='en'?' — missing suspend_reason column?':' — chybí sloupec suspend_reason?')); return; }
-    await supaClient.from('notifications').insert({ user_id: coachId, type:'system', read:false, data: JSON.stringify({ kind:'coach_suspended', reason }), message:`⛔ Tvůj kouč profil byl pozastaven administrátorem MTL. Důvod: ${reason} — ozvi se nám pro vyřešení.` });
-    toast(L('⛔ Kouč pozastaven'));
-  } else {
-    if(!confirm(LANG==='en'?`Restore coach ${name||''}? They'll return to the listing.`:`Obnovit kouče ${name||''}? Vrátí se do nabídky.`)) return;
-    const { error } = await supaClient.from('profiles').update({ coach_status:'approved', suspend_reason: null }).eq('id', coachId);
-    if(error){ toast('⚠️ '+error.message); return; }
-    await supaClient.from('notifications').insert({ user_id: coachId, type:'system', read:false, data: JSON.stringify({ kind:'coach_restored' }), message:'✅ Tvůj kouč profil byl obnoven. Jsi opět v nabídce!' });
-    toast(L('✅ Kouč obnoven'));
-  }
-  loadCoaches();
-  renderCoachAnalytics(coachId, 'coachStatsBody');
-  loadAdminCoachList();
 }
 
 async function openProfileById(coachId){
@@ -54835,6 +54958,21 @@ async function showPaidPopup(){
     const EN=LANG==='en';
     toast(_vatGateMsg(_pv, EN), 1);
     setTimeout(function(){ try{ if(typeof _openBillingSection==='function') _openBillingSection(); }catch(e){} }, 600);
+    return;
+  }
+  // ODKAZY Z E-MAILŮ POSKYTOVATELI (_provider-mail.js): ?go=billing -> fakturační údaje klubu /
+  // kouče (DAC7 žádost a upomínky), ?go=suspended -> důvod ručního pozastavení a jak ho zrušit.
+  if(params.get('go')==='billing' || params.get('go')==='suspended'){
+    const _go=params.get('go'), _k=params.get('k')||'', _id=params.get('id')||'';
+    history.replaceState({},'',location.pathname);
+    let _t=0; while(!currentUser && _t<25){ await new Promise(r=>setTimeout(r,200)); _t++; }
+    if(currentUser) setTimeout(async function(){ try{
+      if(_go==='billing'){ if(_k==='gym' && typeof checkGymOwnership==='function') await checkGymOwnership(); _openProviderBilling(_k, _id); return; }
+      const _tbl=({ gym:'gyms', coach:'profiles', org:'organizations' })[_k]; if(!_tbl||!_id) return;
+      const { data:_r }=await supaClient.from(_tbl).select('*').eq('id',_id).maybeSingle();
+      if(_r && _r.account_suspended && _r.suspend_manual) _showManualSuspension({ entity:_k, id:_id, name:_r.name, reason:_r.suspend_reason, howto:_r.suspend_howto, at:_r.suspended_at });
+      else toast(LANG==='en'?'\u2705 This account is not suspended (any more).':'\u2705 \u00da\u010det u\u017e nen\u00ed pozastaven\u00fd.', 1);
+    }catch(e){} }, 1200);
     return;
   }
   // ODKAZ Z E-MAILU O PŘEDPLATNÉM (_sub-mail.js): ?go=supplier -> profil dodavatele,
