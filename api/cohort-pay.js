@@ -294,6 +294,9 @@ export default async function handler(req, res) {
       if (a != null && a < 18) return res.status(403).json({ ok: false, error: 'Přihlášku za mladistvého podává zákonný zástupce — ať tě přihlásí ve své appce volbou „Pro moje dítě".', minor: true });
     } else if (!b.adult_ok) {
       return res.status(400).json({ ok: false, error: 'Potvrď, že je ti 18 let nebo víc. Za mladšího přihlášku podává zákonný zástupce.' });
+    } else if (b.birthdate && _age(b.birthdate) != null && _age(b.birthdate) < 18) {
+      // Host zadal datum narození (místo zaškrtávátka „je mi 18"): ověří se i tady.
+      return res.status(400).json({ ok: false, error: 'Pod 18 let podává přihlášku rodič nebo zákonný zástupce — zvol „Pro moje dítě".', minor: true });
     }
     // ZNĚNÍ SOUHLASŮ, jak je člověk viděl: podmínky kurzu (text + otisk), souhlas zástupce,
     // provozní řád (otisk), marketing (zvlášť, nepovinný). Ukládá se k přihlášce.
