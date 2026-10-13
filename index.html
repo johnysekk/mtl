@@ -16779,12 +16779,71 @@ function _ownLink(kind){ try{
   try{ if(currentUser && currentUser.referral_code) base+='&ref='+encodeURIComponent(currentUser.referral_code); }catch(e){}
   return base;
 }catch(e){ return _appOrigin()+'/?own=1'; } }
+// ── KALENDÁŘNÍ MĚSÍC vs. 30 DNÍ OD ZAPLACENÍ ──────────────────────────────────────────────
+// Zrcadlo api/_memb-term.js (měníš jedno, měň obojí; server cenu i konec ověřuje sám).
+// gyms.memb_calendar: true / false, null = podle typu klubu (spolek = kalendářní měsíc).
+// Kalendářní měsíc: období končí posledním dnem měsíce, první platba uprostřed měsíce je jen
+// za zbývající dny, kdo má ještě platné členství, začíná dnem po jeho konci.
+function _membCalendar(g){ if(!g) return false; if(g.memb_calendar===true) return true; if(g.memb_calendar===false) return false; return g.org_form==='nonprofit'; }
+function _pragueYMD(d){ const p={}; new Intl.DateTimeFormat('en-CA',{ timeZone:'Europe/Prague', year:'numeric', month:'2-digit', day:'2-digit' }).formatToParts(d instanceof Date?d:new Date(d||Date.now())).forEach(function(x){ p[x.type]=x.value; }); return [Number(p.year),Number(p.month),Number(p.day)]; }
+function _calTerm(full, months, start){
+  const mo=Math.max(1, parseInt(months,10)||1); const ymd=_pragueYMD(start||new Date()); const y=ymd[0], m=ymd[1], d=ymd[2];
+  const dim=new Date(Date.UTC(y,m,0)).getUTCDate(); const frac=(dim-d+1)/dim;
+  const price = d===1 ? Number(full) : Math.round((Number(full)/mo)*(mo-1+frac));
+  const t=y*12+(m-1)+(mo-1); const ey=Math.floor(t/12), em=(t%12)+1; const pd=function(n){ return String(n).padStart(2,'0'); };
+  return { price:price, endsOn: ey+'-'+pd(em)+'-'+pd(new Date(Date.UTC(ey,em,0)).getUTCDate()), partial: d!==1 };
+}
+// Konec platného členství člověka (nebo jeho dítěte) u klubu -- od něj se v kalendářním režimu
+// počítá další období. null = nic platného.
+async function _membActiveEnd(gymId, sid, childName){
+  try{ let q=supaClient.from('gym_memberships').select('period_end').eq('gym_id',gymId).eq('student_id',sid).in('status',['active','cancelling']);
+    q = childName ? q.eq('child_name', childName) : q.is('child_name', null);
+    const { data }=await q.not('period_end','is',null).order('period_end',{ascending:false}).limit(1);
+    const pe=data&&data[0]&&data[0].period_end; return (pe && new Date(pe).getTime()>Date.now()) ? pe : null; }catch(e){ return null; }
+}
+// Věta k potvrzení u kalendářního režimu: kolik teď, za jaké období a co dál.
+function _calChargeNote(term, cur, isSub){
+  if(!term || !term.calendar) return '';
+  const EN=LANG==='en'; const sym=_curSym(cur); const end=new Date(term.endsOn+'T12:00:00').toLocaleDateString(EN?'en-GB':'cs-CZ');
+  const now=fmtPrice(term.price,cur)+' '+sym, full=fmtPrice(term.full,cur)+' '+sym;
+  if(isSub && term.deferred){
+    const ae=new Date(term.activeEnd).toLocaleDateString(EN?'en-GB':'cs-CZ');
+    return EN?(' You pay nothing now: it follows on from your current membership (valid until '+ae+'). Then '+full+' on the 1st of every month'+(term.partial?' (the first month only for the days left).':'.'))
+             :(' Teď neplatíš nic: navazuje na tvoje současné členství (platí do '+ae+'). Potom '+full+' vždy 1. v měsíci'+(term.partial?' (první měsíc jen za zbývající dny).':'.'));
+  }
+  if(isSub) return term.partial
+    ? (EN?(' Now you pay '+now+' for the rest of this month (until '+end+'), then '+full+' on the 1st of every month.'):(' Teď zaplatíš '+now+' za zbytek měsíce (do '+end+'), potom '+full+' vždy 1. v měsíci.'))
+    : (EN?(' It runs by calendar month: '+full+' on the 1st of every month.'):(' Platí po kalendářních měsících: '+full+' vždy 1. v měsíci.'));
+  return EN?(' Valid until '+end+'.'+(term.partial?' The first month is charged only for the days left.':'')):(' Platí do '+end+'.'+(term.partial?' První měsíc se platí jen za zbývající dny.':''));
+}
+// 23:59:59 daného dne v Praze (letní / zimní čas) -- zrcadlo pragueEndOfDay v api/_memb-term.js.
+function _pragueEndOfDay(ymd){ const p=String(ymd).slice(0,10).split('-').map(Number); const guess=Date.UTC(p[0],p[1]-1,p[2],12,0,0); const h=Number(new Intl.DateTimeFormat('en-GB',{ timeZone:'Europe/Prague', hour:'2-digit', hour12:false }).format(new Date(guess))); return new Date(Date.UTC(p[0],p[1]-1,p[2],23,59,59)-(h-12)*3600000); }
+// Konec období, které obsluha na recepci právě prodala (hotově / QR). Zrcadlo membPeriodEnd
+// v api/_memb-term.js: pevné datum konce plánu > kalendářní měsíc > N měsíců od konce platného
+// členství (nebo od teď).
+function _membPeriodEnd(plan, g, activeEnd){
+  const mo=Math.max(1, parseInt(plan&&plan.months,10)||1); const now=new Date();
+  if(plan && plan.ends_on){ const f=_pragueEndOfDay(plan.ends_on); if(f>now) return f; }
+  if(_membCalendar(g)) return _pragueEndOfDay(_calTerm(Number(plan&&plan.price)||0, mo, _calStart(activeEnd)).endsOn);
+  const ae=activeEnd?new Date(activeEnd):null; const e=new Date((ae && ae>now)?ae.getTime():now.getTime()); e.setMonth(e.getMonth()+mo); return e;
+}
+// Od kdy: den po konci platného členství (activeEnd), jinak teď.
+function _calStart(activeEnd){ const n=Date.now(); const e=activeEnd?new Date(activeEnd).getTime():0; return (e && e>n) ? new Date(e+1000) : new Date(n); }
 // A term plan with a fixed end date charges for what is left, if the club asked for that. Whole
 // months, rounded up, never more than the full price and never zero.
-function _planTerm(plan){
+// g + activeEnd: kalendářní režim klubu (viz _membCalendar) -- cena za zbývající dny a konec
+// posledním dnem měsíce. Pevné datum konce plánu má přednost.
+function _planTerm(plan, g, activeEnd){
   const months = Math.max(1, parseInt(plan && plan.months, 10) || 1);
   const full = Number(plan && plan.price) || 0;
-  const out = { price: full, endsOn: null, monthsLeft: months };
+  const out = { price: full, endsOn: null, monthsLeft: months, calendar:false };
+  if(plan && !plan.ends_on && _membCalendar(g)){
+    const st=_calStart(activeEnd); const ct=_calTerm(full, months, st);
+    out.price=ct.price; out.endsOn=ct.endsOn; out.calendar=true; out.partial=ct.partial; out.full=full;
+    // Předplatné kartou začne až v dalším měsíci (navazuje na platné členství): teď se nic nestrhne.
+    const a=_pragueYMD(st), b=_pragueYMD(new Date()); out.deferred=(a[0]!==b[0]||a[1]!==b[1]); out.activeEnd=activeEnd||null;
+    return out;
+  }
   if(months <= 1 || !plan || !plan.ends_on) return out;
   const end = new Date(plan.ends_on + 'T00:00:00');
   if(isNaN(end.getTime())) return out;
@@ -17031,8 +17090,10 @@ async function subscribeGymMembership(g, plan, _child, _cleared){
   if(!_cleared){ return gymTermsGate(g, ()=>subscribeGymMembership(g, plan, _child, true), true); }
   const _fw=(_child&&_child.shared)?{ id:_child.holder_id, name:_child.holder_name||'' }:null;
   // Obchodní klub: poučení o odstoupení do 14 dnů + žádost o zahájení hned (u spolku ne).
+  // Kalendářní režim: další období navazuje na platné členství (zaplatit říjen 28. září = celý říjen).
+  const _actEnd = _membCalendar(g) ? await _membActiveEnd(g.id, (_payFor||currentUser.id), (_child&&_child.name)||null) : null;
   if(g && _sellKindOf(g, plan)==='pass'){
-    const _t0=_planTerm(plan); const _cur0=plan._cur||g.currency||'CZK';
+    const _t0=_planTerm(plan, g, _actEnd); const _cur0=plan._cur||g.currency||'CZK';
     if(!(await _wdGate(g, plan, fmtPrice(_t0.price,_cur0)+' '+_curSym(_cur0), _t0.price, _cur0))) return;
   }
   // Spolek: před platbou jasně říct, že členský příspěvek se zpravidla nevrací (bez řečí o spotřebiteli).
@@ -17043,11 +17104,16 @@ async function subscribeGymMembership(g, plan, _child, _cleared){
   const _forTxt = _child ? (LANG==='en'?` for ${_child.name}`:` pro ${_child.name}`) : '';
   const _prTxt = (_child && plan.parentReq) ? (LANG==='en'?'\n\n⚠️ A parent must be present at the lesson.':'\n\n⚠️ Na lekci musí být přítomen rodič.') : '';
   // A 3/6/12-month plan is a ONE-TIME purchase that expires — it must not claim to bill monthly.
-  const _term = _planTerm(plan);
-  const _memPriceTxt = fmtPrice(_term.price, plan._cur||g.currency)+' '+_curSym(plan._cur||g.currency||'CZK');
+  const _term = _planTerm(plan, g, _actEnd);
+  // Měsíční předplatné kartou: v řádku i v adrese je plná měsíční cena. První (neúplný) měsíc
+  // v kalendářním režimu přidá server jako jednorázovou položku (api/pay.js, calSubPlan).
+  const _isSub = ((parseInt(plan.months,10)||1)===1 && !plan.once);
+  const _payAmt = (_isSub && _term.calendar) ? _term.full : _term.price;
+  const _cur1 = plan._cur||g.currency||'CZK';
+  const _memPriceTxt = fmtPrice((_isSub && _term.calendar) ? _term.full : _term.price, _cur1)+' '+_curSym(_cur1);
   if(!confirm((LANG==='en'
-    ? `${_mTerm(g).ask}${g.name} (${plan.name})${_forTxt}? ${_memChargeSentence(plan, _memPriceTxt)}`
-    : `${_mTerm(g).ask}${g.name} (${plan.name})${_forTxt}? ${_memChargeSentence(plan, _memPriceTxt)}`)+_prTxt)) return;
+    ? `${_mTerm(g).ask}${g.name} (${plan.name})${_forTxt}? ${_term.calendar ? _calChargeNote(_term, _cur1, _isSub).trim() : _memChargeSentence(plan, _memPriceTxt)}`
+    : `${_mTerm(g).ask}${g.name} (${plan.name})${_forTxt}? ${_term.calendar ? _calChargeNote(_term, _cur1, _isSub).trim() : _memChargeSentence(plan, _memPriceTxt)}`)+_prTxt)) return;
   toast(L('💳 Přesměrovávám na platbu...'));
   try {
     const { data: mb, error } = await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0,
@@ -17056,7 +17122,7 @@ async function subscribeGymMembership(g, plan, _child, _cleared){
       // mladistvého a členství se zapsalo platícímu.
       gym_id: g.id, gym_name: g.name||'Gym', student_id: (_payFor||currentUser.id), student_name: ((window._payOnBehalf&&window._payOnBehalf.name)||currentUser.name||'Student'), paid_to: payee.coachId?'coach':'gym',
       paid_by: (_payFor?currentUser.id:null), paid_by_name: (_payFor?(currentUser.name||null):null),
-      amount: _term.price||0, currency: (plan._cur||g.currency||'CZK'), status:'pending', acq_source: _acqSrc(g),
+      amount: _payAmt||0, currency: (plan._cur||g.currency||'CZK'), status:'pending', acq_source: _acqSrc(g),
       plan_name: plan.name||null, plan_access: JSON.stringify(_planAccess(plan)), plan_classes: ((plan.classes&&plan.classes.length)?JSON.stringify(plan.classes):null)
     }).select().single();
     if(error){ toast('⚠️ '+error.message); return; }
@@ -17067,7 +17133,7 @@ async function subscribeGymMembership(g, plan, _child, _cleared){
     { const _lid=plan.lead||payee.coachId||null; const _lnm=plan.lead?(plan.leadName||null):(payee.coachId?payee.name:null); if(_lid){ try{ await supaClient.from('gym_memberships').update({ lead_coach_id:_lid, lead_coach_name:_lnm }).eq('id', mb.id); }catch(e){} } }
     let _gymOwnerPartner=false, _ownerFounding=false, _ownerScore=0, _ownerBankai=false, _ownerOrg=false; try{ const _ppid=(payee&&payee.coachId)||g.owner_id; if(_ppid){ const { data: ow } = await supaClient.from('profiles').select('partner, founding, coach_ref_score,bankai_eligible,org_rate_until').eq('id', _ppid).single(); _ownerOrg=!!(ow&&ow.org_rate_until&&new Date(String(ow.org_rate_until).slice(0,10)+'T23:59:59')>=new Date()); _gymOwnerPartner=!!(ow&&ow.partner); _ownerFounding=!!(ow&&ow.founding); _ownerScore=(ow&&ow.coach_ref_score)||0; _ownerBankai=!!(ow&&ow.bankai_eligible); } }catch(e){}
     try{ if(mb&&mb.id) await supaClient.from('gym_memberships').update({gym_keep_pct:((typeof _gymOwnerPartner!=='undefined'&&_gymOwnerPartner)||(typeof _gp!=='undefined'&&_gp))?0.99:((typeof _ownerScore!=='undefined'&&_ownerScore>=10)?0.98:((typeof _ownerScore!=='undefined'&&_ownerScore>=3)?0.97:0.965))}).eq('id',mb.id); }catch(e){}
-    const url = `/api/pay?type=membership&once=${(plan&&plan.once)?1:0}&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&planName=${encodeURIComponent(plan.name||'Membership')}&amount=${_term.price||0}&currency=${plan._cur||g.currency||'CZK'}&interval=month&months=${parseInt(plan.months,10)||1}${_term.endsOn?('&endsOn='+encodeURIComponent(_term.endsOn)):''}&membershipId=${encodeURIComponent(mb.id)}&gymId=${encodeURIComponent(g.id)}&studentId=${encodeURIComponent(_payFor||currentUser.id)}&income=${encodeURIComponent(plan.income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&access=${encodeURIComponent(_planAccess(plan).join(','))}&disc=${encodeURIComponent(plan.disc||'')}&partner=${_gymOwnerPartner?1:0}&fee=${(_ladderRate('stripe',{partner:_gymOwnerPartner,score:_ownerScore,bankai:_ownerBankai})*100)}&acq=${encodeURIComponent(_acqSrc(g))}${(window._gymRef && window._gymRef.gym===g.id && (g.member_ref_pct||0)>0) ? ('&refPct='+g.member_ref_pct+'&refUser='+encodeURIComponent(window._gymRef.ref||'')) : ''}`;
+    const url = `/api/pay?type=membership&once=${(plan&&plan.once)?1:0}&founding=${_ownerFounding?1:0}&gymAccount=${encodeURIComponent(payee.account)}&gymName=${encodeURIComponent(g.name||'')}&planName=${encodeURIComponent(plan.name||'Membership')}&amount=${_payAmt||0}&currency=${plan._cur||g.currency||'CZK'}&interval=month&months=${parseInt(plan.months,10)||1}${(_term.endsOn && !(_isSub && _term.calendar))?('&endsOn='+encodeURIComponent(_term.endsOn)):''}&membershipId=${encodeURIComponent(mb.id)}&gymId=${encodeURIComponent(g.id)}&studentId=${encodeURIComponent(_payFor||currentUser.id)}&income=${encodeURIComponent(plan.income||'side')}&memberName=${encodeURIComponent(currentUser.name||'')}&payee=${encodeURIComponent(payee.name||'')}&access=${encodeURIComponent(_planAccess(plan).join(','))}&disc=${encodeURIComponent(plan.disc||'')}&partner=${_gymOwnerPartner?1:0}&fee=${(_ladderRate('stripe',{partner:_gymOwnerPartner,score:_ownerScore,bankai:_ownerBankai})*100)}&acq=${encodeURIComponent(_acqSrc(g))}${(window._gymRef && window._gymRef.gym===g.id && (g.member_ref_pct||0)>0) ? ('&refPct='+g.member_ref_pct+'&refUser='+encodeURIComponent(window._gymRef.ref||'')) : ''}`;
     setTimeout(()=>{ window.location.href = url; }, 500);
   } catch(e){ console.error('subscribeGymMembership', e); toast('⚠️ '+e.message); }
 }
@@ -23727,7 +23793,10 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData, { subject:
     <p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:8px;">${LANG==='en'?'Offer one or more monthly plans. Each plan lets members freely book the class levels it covers.':'Nabídni jednu nebo víc měsíčních variant. Každá umožní členům zdarma rezervovat lekce úrovní, které pokrývá.'}</p>
     <div id="mgPlans"></div>
     <button id="mgAddPlan" style="width:100%;padding:11px;background:var(--bg);border:1px dashed var(--border);border-radius:10px;font-weight:600;color:var(--dark);cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">+ ${LANG==='en'?'Add plan':'Přidat variantu'}</button>
-    
+    <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:13.5px;font-weight:600;color:var(--dark);margin:10px 0 4px;line-height:1.4;"><input type="checkbox" id="mgMembCalendar" ${_membCalendar(g)?'checked':''} style="width:18px;height:18px;flex-shrink:0;margin-top:1px;"> ${LANG==='en'?'Runs by calendar month':'Platí na kalendářní měsíc'}</label>
+    <p style="font-size:11.5px;color:var(--light);line-height:1.55;margin:0 0 18px;">${LANG==='en'
+      ? 'On: every period ends on the last day of the month (e.g. 1–30 Sep). Someone joining mid-month pays only for the days left, card subscriptions renew on the 1st, and paying ahead follows on from the current period. Off: a month from the day of payment. Associations have it on by default.'
+      : 'Zapnuto: období končí vždy posledním dnem měsíce (např. 1.–30. 9.). Kdo začne uprostřed měsíce, platí jen za zbývající dny, předplatné kartou se strhává vždy 1. a platba dopředu navazuje na současné období. Vypnuto: měsíc ode dne zaplacení. Spolky to mají zapnuté automaticky.'}</p>
 
     <div class="sec-lbl">${LANG==='en'?'Member referral':'Referral pro členy'}</div>
     <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:13.5px;font-weight:600;color:var(--dark);margin-bottom:8px;line-height:1.4;"><input type="checkbox" id="mgMemberRefEnable" ${((_myGymData.member_ref_pct||0)>0)?'checked':''} onchange="var w=document.getElementById('mgMemberRefWrap');if(w)w.style.display=this.checked?'block':'none';if(!this.checked){var pe=document.getElementById('mgMemberRefPct');if(pe)pe.value='';}" style="width:18px;height:18px;flex-shrink:0;margin-top:1px;"> ${LANG==='en'?'First-month discount for new members brought by your existing members?':'Sleva první měsíc pro nové členy, které přivedou stávající členové?'}</label>
@@ -26308,13 +26377,14 @@ function _guestMemb(plan){
   const g=_recGym; const list=$('recList'); if(!g||!list||!plan) return;
   if(!_planSellable(plan, (typeof _myGymData!=='undefined'?_myGymData:null))) return;
   const EN=LANG==='en'; const cur=g.currency||'CZK'; const sym=_curSym(cur);
-  const price=plan.price||0; const rate=_recRate(); const fee=Math.round(price*rate*100)/100;
+  // Cena a konec jako při nákupu v appce: pevné datum konce plánu, kalendářní měsíc (spolek), jinak N měsíců.
+  const _gmTerm=_planTerm(plan, g, null); const price=_gmTerm.price; const rate=_recRate();
   const qrMode=(typeof _mtlPayMode==='function'&&_mtlPayMode(g)==='qr_bank') && !!g.receiver_id_value;
   const takesCash=!!(g.takes_cash);
   let h='';
   h+='<button id="recBackBtn" style="background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:8px 12px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:12px;">\u2039 '+(EN?'Back':'Zp\u011bt')+'</button>';
   h+='<div style="font-weight:800;font-size:16px;color:var(--dark);margin-bottom:2px;">\ud83c\udf9f\ufe0f '+(EN?'Membership':'Permanentka')+'</div>';
-  h+='<div style="font-size:13px;color:var(--mid);margin-bottom:8px;">'+escapeHtml(plan.name||'')+' \u00b7 '+fmtPrice(price,cur)+' '+sym+(EN?' / mo':' / m\u011bs')+'</div>';
+  h+='<div style="font-size:13px;color:var(--mid);margin-bottom:8px;">'+escapeHtml(plan.name||'')+' \u00b7 '+fmtPrice(price,cur)+' '+sym+(_gmTerm.endsOn?(' \u00b7 '+(EN?'until ':'do ')+new Date(_gmTerm.endsOn+'T12:00:00').toLocaleDateString(EN?'en-GB':'cs-CZ')):((parseInt(plan.months,10)||1)>1?'':(EN?' / mo':' / m\u011bs')))+'</div>';
   h+='<p style="font-size:12px;color:#B26A00;font-weight:700;line-height:1.5;margin-bottom:10px;">'+(EN?'For a membership an e-mail is required \u2014 we send a link to create the account and manage the membership.':'U permanentky je e-mail povinn\u00fd \u2014 po\u0161leme odkaz k zalo\u017een\u00ed \u00fa\u010dtu a spr\u00e1v\u011b \u010dlenstv\u00ed.')+'</p>';
   h+='<input id="gmName" placeholder="'+(EN?'Full name':'Cel\u00e9 jm\u00e9no')+'" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;margin-bottom:8px;">';
   h+='<input id="gmEmail" type="email" inputmode="email" placeholder="'+(EN?'E-mail (required)':'E-mail (povinn\u00fd)')+'" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:inherit;margin-bottom:10px;">';
@@ -26368,7 +26438,7 @@ function _guestMemb(plan){
         var txr={ gym_id:g.id, member_id:null, coach_id:plan.coach||null, paid_to:'gym', gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:cur, type:'membership', months:(parseInt(plan&&plan.months,10)||1), payment_method:method, commission_status:'pending', commission_month:_pragueMonth(), cash_payer_name:nnm, acq_source:'direct' };
         var r1=await _recordCashTx(txr);
         if(r1&&r1.error){ toast('\u26a0\ufe0f '+r1.error.message); btns.forEach(function(b){ if(b) b.disabled=false; }); return; }
-        var nd=new Date(); nd.setMonth(nd.getMonth()+(parseInt(plan.months,10)||1));   /* 1 = monthly (unchanged); 3/6/12 = one-time term */
+        var nd=_membPeriodEnd(plan, g, null);
         await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:(_acct?_acct.id:null), student_name:nnm, guest_email:(_acct?null:v.email), guest_name:(_acct?null:nnm), guest_phone:(_acct?null:(v.phone||null)), guest_token:(_acct?null:tok), paid_to:'gym', coach_id:plan.coach||null, amount:price, currency:cur, status:'active', period_end:nd.toISOString(), plan_name:plan.name||null, plan_access:JSON.stringify(_planAccess(plan)), discipline:plan.disc||null, acq_source:'direct' });
         try{ await supaClient.auth.signInWithOtp({ email:v.email, options:{ shouldCreateUser:true, emailRedirectTo: location.origin } }); }catch(e){}
         try{ if(g.id) await _notifyGymDesk(g.id, g.owner_id, function(EN){ var LANG=EN?'en':'cs'; return ((EN?('Walk-in membership: '+nnm+' ('+(plan.name||'')+')'):('Walk-in permanentka: '+nnm+' ('+(plan.name||'')+')'))); }); }catch(e){}
@@ -26885,14 +26955,20 @@ function _recpMembPay(pi){
   const plans=(typeof gymMembPlans==='function'?gymMembPlans(g):[])||[];
   const plan=plans[+pi]; if(!plan){ toast('\u26a0\ufe0f'); return; }
   if(!_planSellable(plan, (typeof _myGymData!=='undefined'?_myGymData:null))) return;
-  const price=plan.price||0; const fee=Math.round(price*rate*100)/100;
+  // Cena a konec období jako při nákupu v appce (_planTerm / _membPeriodEnd). V kalendářním
+  // režimu záleží na tom, do kdy má vybraný člen platné členství -- přepočítá se po jeho výběru.
+  let _rmActEnd=null, _rmTerm=_planTerm(plan, g, null), price=_rmTerm.price;
   const qrMode=(typeof _mtlPayMode==='function'&&_mtlPayMode(g)==='qr_bank');
   const hasRecv=!!g.receiver_id_value;
+  const _rmPriceTxt=function(){ return fmtPrice(price,cur)+' '+sym+(_rmTerm.calendar?(' \u00b7 '+(EN?'until ':'do ')+new Date(_rmTerm.endsOn+'T12:00:00').toLocaleDateString(EN?'en-GB':'cs-CZ')):(_rmTerm.endsOn?'':(EN?' / mo':' / m\u011bs'))); };
+  const _rmMo=Math.max(1, parseInt(plan.months,10)||1);
   let h='';
   h+='<button id="recBackBtn" style="background:var(--surf);border:1px solid var(--border);border-radius:10px;padding:8px 12px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:\'DM Sans\';margin-bottom:12px;">\u2039 '+(EN?'Back':'Zp\u011bt')+'</button>';
   h+='<div style="font-weight:800;font-size:16px;color:var(--dark);margin-bottom:2px;">\ud83c\udf9f\ufe0f '+escapeHtml(plan.name||(EN?'Membership':'Permanentka'))+'</div>';
-  h+='<div style="font-size:14px;color:#006040;font-weight:800;margin-bottom:8px;">'+fmtPrice(price,cur)+' '+sym+(EN?' / mo':' / m\u011bs')+'</div>';
-  h+='<p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:12px;">'+(EN?'Pick the member, take payment, and we activate/extend their membership by 1 month.':'Vyber \u010dlena, vezmi platbu a my mu aktivujeme/prodlou\u017e\u00edme '+(_sellKind({gym:_myGymData})==='pass'?'permanentku':'\u010dlenstv\u00ed')+' o 1 m\u011bs\u00edc.')+'</p>';
+  h+='<div id="rmPrice" style="font-size:14px;color:#006040;font-weight:800;margin-bottom:8px;">'+_rmPriceTxt()+'</div>';
+  h+='<p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:12px;">'+(_rmTerm.calendar
+    ? (EN?'Pick the member and take payment. It runs by calendar month: the period follows on from their current membership and ends on the last day of the month; a part month is charged only for the days left.':'Vyber \u010dlena a vezmi platbu. Plat\u00ed po kalend\u00e1\u0159n\u00edch m\u011bs\u00edc\u00edch: obdob\u00ed navazuje na jeho platn\u00e9 '+(_sellKind({gym:_myGymData})==='pass'?'permanentku':'\u010dlenstv\u00ed')+' a kon\u010d\u00ed posledn\u00edm dnem m\u011bs\u00edce, ne\u00fapln\u00fd m\u011bs\u00edc se plat\u00ed jen za zb\u00fdvaj\u00edc\u00ed dny.')
+    : (EN?('Pick the member, take payment, and we activate/extend their membership'+(_rmTerm.endsOn?'.':(' by '+_rmMo+(_rmMo===1?' month.':' months.')))):('Vyber \u010dlena, vezmi platbu a my mu aktivujeme/prodlou\u017e\u00edme '+(_sellKind({gym:_myGymData})==='pass'?'permanentku':'\u010dlenstv\u00ed')+(_rmTerm.endsOn?('.'):(' o '+_rmMo+(_rmMo===1?' m\u011bs\u00edc.':(_rmMo<5?' m\u011bs\u00edce.':' m\u011bs\u00edc\u016f.')))))))+'</p>';
   h+='<p style="font-size:11px;color:var(--light);margin:0 0 4px;">'+(EN?'Member':'\u010clen')+'</p>';
   h+='<select id="rmMember" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:\'DM Sans\';margin-bottom:10px;background:var(--surf);color:var(--dark);">';
   h+='<option value="">'+(EN?'\u2014 Select member \u2014':'\u2014 Vyber \u010dlena \u2014')+'</option>';
@@ -26924,7 +27000,10 @@ function _recpMembPay(pi){
   function _rmEffPrice(){ var d=_rmDiscount(); return d?Math.round(price*(1-d.pct/100)*100)/100:price; }
   function _rmQrRegen(){ if(!qrMode) return; try{ var qb=$('rmQrBox'); if(!qb) return; var mn=(($('rmMember')&&$('rmMember').selectedOptions[0]&&$('rmMember').selectedOptions[0].getAttribute('data-name'))||''); var pl=(mn?mn+' - ':'')+(plan.name||'Membership'); var payload=(typeof _bankQrPayload==='function')?_bankQrPayload(g, _rmEffPrice(), pl):null; qb.innerHTML=''; if(payload && window.QRCode){ new QRCode(qb,{ text:payload, width:200, height:200, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } }catch(e){} }
   function _rmRefresh(){ var note=$('rmRefNote'); var refWrap=$('rmRefByWrap'); var ep=_rmEffPrice(); if(refWrap) refWrap.style.display=_rmCredit?'none':''; if(note){ if(_rmCredit){ note.style.display='block'; note.textContent=(EN?('🎁 Referral reward -'+_rmCredit.pct+'% applied: member pays '+fmtPrice(ep,cur)+' '+sym+' this period.'):('🎁 Odměna za doporučení -'+_rmCredit.pct+' %: člen platí '+fmtPrice(ep,cur)+' '+sym+' toto období.')); } else { var r=_rmRefSel(); if(r){ note.style.display='block'; note.textContent=(EN?('Referral -'+r.pct+'%: member pays '+fmtPrice(ep,cur)+' '+sym+'; '+r.name+' gets -'+r.pct+'% next period.'):('Doporučení -'+r.pct+' %: člen platí '+fmtPrice(ep,cur)+' '+sym+'; '+r.name+' dostane -'+r.pct+' % příště.')); } else { note.style.display='none'; } } } _rmQrRegen(); }
-  async function _rmCheckCredit(){ _rmCredit=null; var sel=$('rmMember'); var sid=sel&&sel.value; if(sid){ try{ const { data } = await supaClient.from('gym_member_ref_credits').select('id,pct').eq('gym_id',g.id).eq('referrer_id',sid).eq('status','pending').order('created_at',{ascending:true}).limit(1); if(data&&data.length){ _rmCredit={ id:data[0].id, pct:data[0].pct }; } }catch(e){} } _rmRefresh(); }
+  async function _rmCheckCredit(){ _rmCredit=null; var sel=$('rmMember'); var sid=sel&&sel.value;
+    // Kalendářní režim: cena podle toho, do kdy má člen zaplaceno (navazuje na to).
+    if(_membCalendar(g)){ _rmActEnd=sid?await _membActiveEnd(g.id, sid, null):null; _rmTerm=_planTerm(plan, g, _rmActEnd); price=_rmTerm.price; var _rp=$('rmPrice'); if(_rp) _rp.textContent=_rmPriceTxt(); }
+    if(sid){ try{ const { data } = await supaClient.from('gym_member_ref_credits').select('id,pct').eq('gym_id',g.id).eq('referrer_id',sid).eq('status','pending').order('created_at',{ascending:true}).limit(1); if(data&&data.length){ _rmCredit={ id:data[0].id, pct:data[0].pct }; } }catch(e){} } _rmRefresh(); }
   async function _doMembPay(method){
     const sel=$('rmMember'); const sid=(sel&&sel.value)||''; if(!sid){ toast(EN?'\u26a0\ufe0f Select a member':'\u26a0\ufe0f Vyber \u010dlena'); return; }
     const nm=(sel.selectedOptions[0]&&sel.selectedOptions[0].getAttribute('data-name'))||null;
@@ -26939,9 +27018,9 @@ function _recpMembPay(pi){
       var _d2=(typeof _rmDiscount==='function')?_rmDiscount():null;
       if(_d2 && _d2.kind==='redeem' && _rmCredit && _rmCredit.id){ try{ await supaClient.from('gym_member_ref_credits').update({ status:'used', used_at:new Date().toISOString() }).eq('id',_rmCredit.id); }catch(e){} }
       else if(_d2 && _d2.kind==='refer' && _refSel && _refSel.id && _refSel.id!==sid){ try{ var _rtk=(typeof _freshTok==='function')?await _freshTok():null; await fetch('/api/reward-referrer',{ method:'POST', headers:{ 'Content-Type':'application/json', 'x-access-token':_rtk||'' }, body: JSON.stringify({ refUser:_refSel.id, refPct:_refSel.pct, gymId:g.id }) }); }catch(e){} }
-      var base=Date.now(); var existed=false;
-      try{ const { data:ex } = await supaClient.from('gym_memberships').select('id,period_end,status').eq('gym_id',g.id).eq('student_id',sid).eq('plan_name',plan.name||null).in('status',['active','cancelling']).order('period_end',{ascending:false}).limit(1); if(ex&&ex.length){ existed=true; var pe=ex[0].period_end?new Date(ex[0].period_end).getTime():base; if(pe<base) pe=base; var nd=new Date(pe); nd.setMonth(nd.getMonth()+1); await supaClient.from('gym_memberships').update({ status:'active', period_end:nd.toISOString(), cancelled_at:null }).eq('id',ex[0].id); } }catch(e){}
-      if(!existed){ try{ var nd2=new Date(base); nd2.setMonth(nd2.getMonth()+1); await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:sid, student_name:nm||'Student', paid_to:'gym', coach_id:plan.coach||null, amount:price, currency:cur, status:'active', period_end:nd2.toISOString(), plan_name:plan.name||null, plan_access:JSON.stringify(_planAccess(plan)), discipline:plan.disc||null, acq_source:'direct' }); }catch(e){} }
+      var existed=false;
+      try{ const { data:ex } = await supaClient.from('gym_memberships').select('id,period_end,status').eq('gym_id',g.id).eq('student_id',sid).eq('plan_name',plan.name||null).in('status',['active','cancelling']).order('period_end',{ascending:false}).limit(1); if(ex&&ex.length){ existed=true; var nd=_membPeriodEnd(plan, g, _membCalendar(g)?_rmActEnd:ex[0].period_end); await supaClient.from('gym_memberships').update({ status:'active', period_end:nd.toISOString(), cancelled_at:null }).eq('id',ex[0].id); } }catch(e){}
+      if(!existed){ try{ var nd2=_membPeriodEnd(plan, g, _rmActEnd); await supaClient.from('gym_memberships').insert({ attr_src:_attrGet(), months:(parseInt(plan&&plan.months,10)||1), expiry_warned:0, gym_id:g.id, gym_name:g.name||'Gym', student_id:sid, student_name:nm||'Student', paid_to:'gym', coach_id:plan.coach||null, amount:price, currency:cur, status:'active', period_end:nd2.toISOString(), plan_name:plan.name||null, plan_access:JSON.stringify(_planAccess(plan)), discipline:plan.disc||null, acq_source:'direct' }); }catch(e){} }
       toast((EN?'\u2705 Confirmed':'\u2705 Potvrzeno'), 1);
       openReception(g.id, g.name);
     }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); btns.forEach(function(b){ if(b) b.disabled=false; }); }
@@ -26964,10 +27043,18 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom, _dpick){
   if(currentUser && await _hasOpenQrReservation(currentUser.id)){ toast(EN?('\u26a0\ufe0f You have '+QR_OPEN_MAX+' reservations waiting to be paid \u2014 settle one before booking another.'):('M\u00e1\u0161 '+QR_OPEN_MAX+' rezervace \u010dekaj\u00edc\u00ed na \u00fahradu \u2014 nejd\u0159\u00edv jednu vy\u0159e\u0161.')); return; }
   const cur=((kind==='memb')?((plan&&plan._cur)||g.currency):g.currency)||'CZK'; const sym=_curSym(cur);
   let price=0, label='', disc=null, lvl=null;
-  if(kind==='memb'){ price=(plan&&plan.price)||0; label=(plan&&plan.name)||(EN?'Membership':'Permanentka'); disc=(plan&&plan.disc)||null; }
-  let _mbRefBy=null, _mbRefPct=0, _mbRefCreditId=null;
-  if(kind==='memb' && window._gymRef && window._gymRef.gym===g.id && (g.member_ref_pct||0)>0 && window._gymRef.ref && window._gymRef.ref!==currentUser.id){ try{ const { data:_rm } = await supaClient.from('gym_memberships').select('id').eq('student_id', window._gymRef.ref).eq('gym_id', g.id).in('status',['active','cancelling']).limit(1); if(_rm && _rm.length){ _mbRefBy=window._gymRef.ref; _mbRefPct=g.member_ref_pct; price=Math.round(price*(1-g.member_ref_pct/100)); } }catch(e){} }
-  if(kind==='memb' && !_mbRefBy && currentUser){ try{ const { data:_pc } = await supaClient.from('gym_member_ref_credits').select('id,pct').eq('gym_id',g.id).eq('referrer_id',currentUser.id).eq('status','pending').order('created_at',{ascending:true}).limit(1); if(_pc && _pc.length && (_pc[0].pct||0)>0){ _mbRefCreditId=_pc[0].id; price=Math.round(price*(1-_pc[0].pct/100)); } }catch(e){} }
+  let _mbRefBy=null, _mbRefPct=0, _mbRefCreditId=null, _qrTerm=null;
+  // ČLENSTVÍ / PERMANENTKA: cena stejně jako u karty (_planTerm) -- pevné datum konce plánu,
+  // kalendářní měsíc (spolek: zbytek měsíce, navazuje na platné členství), jinak cena plánu.
+  // Dřív tu bylo `if(...){...} else {drop-in}` za druhou podmínkou, takže člen s doporučením
+  // dostal na QR cenu drop-inu.
+  if(kind==='memb'){
+    label=(plan&&plan.name)||(EN?'Membership':'Permanentka'); disc=(plan&&plan.disc)||null;
+    if(g && !g._coachPlan && plan){ const _ae=_membCalendar(g)?await _membActiveEnd(g.id, _stuId, (_child&&_child.name)||null):null; _qrTerm=_planTerm(plan, g, _ae); price=_qrTerm.price; }
+    else price=(plan&&plan.price)||0;
+    if(window._gymRef && window._gymRef.gym===g.id && (g.member_ref_pct||0)>0 && window._gymRef.ref && window._gymRef.ref!==currentUser.id){ try{ const { data:_rm } = await supaClient.from('gym_memberships').select('id').eq('student_id', window._gymRef.ref).eq('gym_id', g.id).in('status',['active','cancelling']).limit(1); if(_rm && _rm.length){ _mbRefBy=window._gymRef.ref; _mbRefPct=g.member_ref_pct; price=Math.round(price*(1-g.member_ref_pct/100)); } }catch(e){} }
+    if(!_mbRefBy && currentUser){ try{ const { data:_pc } = await supaClient.from('gym_member_ref_credits').select('id,pct').eq('gym_id',g.id).eq('referrer_id',currentUser.id).eq('status','pending').order('created_at',{ascending:true}).limit(1); if(_pc && _pc.length && (_pc[0].pct||0)>0){ _mbRefCreditId=_pc[0].id; price=Math.round(price*(1-_pc[0].pct/100)); } }catch(e){} }
+  }
   else {
     let _dp=g.dropin_price||0;
     if(occ&&occ.coach){ try{ const { data:_cp }=await supaClient.from('gym_coach_pricing').select('dropin_price,currency').eq('gym_id',g.id).eq('coach_id',occ.coach).eq('status','approved').maybeSingle(); if(_cp&&_cp.dropin_price){ _dp=_cp.dropin_price; } }catch(e){} }
@@ -27054,7 +27141,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom, _dpick){
   ov.innerHTML='<div style="background:#fff;border-radius:18px;padding:22px;max-width:340px;width:100%;text-align:center;font-family:\'DM Sans\';">'
     +'<div style="font-size:16px;font-weight:800;margin-bottom:2px;">\ud83d\udcf2 '+(EN?'Pay by bank QR':'Zaplať bankovním QR')+'</div>'
     +'<div style="font-size:13px;color:var(--mid);margin-bottom:4px;">'+escapeHtml(label)+'</div>'
-    +'<div style="font-size:15px;color:#006040;font-weight:800;margin-bottom:4px;">'+fmtPrice(price,cur)+' '+sym+'</div>'+(_pisOn?'<button id="oqrPisBtn" style="width:100%;padding:13px;background:#635BFF;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';margin:6px 0;">🏦 '+(EN?'Pay from bank':'Zaplatit z účtu')+'</button>':'')+'<div id="oqrQrWrap"'+(_pisOn?' style="display:none;"':'')+'>'+'<div id="oqrCd" data-exp="'+(Date.now()+30*60000)+'" style="font-size:12px;font-weight:800;color:#9a5a00;margin-bottom:12px;">…</div>'
+    +'<div style="font-size:15px;color:#006040;font-weight:800;margin-bottom:4px;">'+fmtPrice(price,cur)+' '+sym+'</div>'+((_qrTerm&&_qrTerm.calendar)?('<div style="font-size:12px;color:var(--mid);line-height:1.45;margin-bottom:8px;">'+escapeHtml(_calChargeNote(_qrTerm, cur, false).trim())+'</div>'):'')+(_pisOn?'<button id="oqrPisBtn" style="width:100%;padding:13px;background:#635BFF;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';margin:6px 0;">🏦 '+(EN?'Pay from bank':'Zaplatit z účtu')+'</button>':'')+'<div id="oqrQrWrap"'+(_pisOn?' style="display:none;"':'')+'>'+'<div id="oqrCd" data-exp="'+(Date.now()+30*60000)+'" style="font-size:12px;font-weight:800;color:#9a5a00;margin-bottom:12px;">…</div>'
     +'<div id="oqrBox" style="display:flex;justify-content:center;align-items:center;margin-bottom:12px;min-height:120px;"></div>'    +'<p style="font-size:11px;color:var(--light);line-height:1.4;margin:0 0 10px;text-align:center;">'+((/iP(hone|ad|od)/.test(navigator.userAgent||''))?(EN?'Quick QR save - double-tap it → “Save Image”.':'Rychlé uložení QR - 2x klepni → „Uložit obrázek“.'):(EN?'Double-tap the QR to save it to your gallery.':'Dvojím ťuknutím QR uložíš do galerie.'))+'</p>'
     +'<p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:6px;">'+(EN?'Scan with your banking app and send the payment. If you don\u2019t send it and tap \u201cI\u2019ve paid\u201d within 30 minutes, your '+(kind==='memb'?'membership ':'')+'reservation is automatically released to other students.':'Naskenuj bankovn\u00ed aplikac\u00ed a po\u0161li platbu. Pokud do 30 minut nepošleš a neodklepneš \u201eZaplaceno\u201c, tvoje rezervace'+(kind==='memb'?' permanentky':'')+' se automaticky uvolní pro další zájemce.')+'</p>'
     
@@ -27277,11 +27364,11 @@ async function _qrcConfirm(id, kind, ok, drops, membs){
       if(!ok){ await supaClient.from('gym_memberships').update({ status:'ended', cancelled_at:new Date().toISOString(), period_end:new Date().toISOString() }).eq('id',id); toast(EN?'Voided':'Zru\u0161eno'); return _rer(); }
       const amount_minor=Math.round((m.amount||0)*100); const fee_minor=Math.round(amount_minor*rate);
           // The owner is confirming a bank/cash membership. Its length comes from the plan the
-          // member picked (plan_name): 1 = the normal monthly term, 3/6/12 = a one-time term that
-          // expires at the end. Fall back to 1 month if the plan is gone.
-          var _pmMonths=1;
-          try{ var _pl=(gymMembPlans(g)||[]).find(function(x){ return String(x.name)===String(m.plan_name); }); if(_pl) _pmMonths=parseInt(_pl.months,10)||1; }catch(e){}
-          var nd=new Date(); nd.setMonth(nd.getMonth()+_pmMonths);
+          // member picked (plan_name): pevné datum konce, kalendářní měsíc (navazuje na platné
+          // členství), jinak N měsíců. Plán zmizel -> 1 měsíc (řádek nese months).
+          var _pl=null; try{ _pl=(gymMembPlans(g)||[]).find(function(x){ return String(x.name)===String(m.plan_name); })||null; }catch(e){}
+          var _pmAe=(_membCalendar(g) && m.student_id)?await _membActiveEnd(g.id, m.student_id, m.child_name||null):null;
+          var nd=_membPeriodEnd(_pl||{ months:(parseInt(m.months,10)||1), price:m.amount }, g, _pmAe);
           const _upM=await supaClient.from('gym_memberships').update({ status:'active', period_end:nd.toISOString() }).eq('id',id); if(_upM&&_upM.error){ toast('\u26a0\ufe0f '+(_upM.error.message||'')); return _rer(); }
       const _txM=await _recordCashTx({ gym_id:g.id, member_id:m.student_id||null, coach_id:m.coach_id||null, paid_to:'gym', gross_amount:amount_minor, stripe_fee:0, mtl_fee:fee_minor, refund_amount:0, mtl_fee_refunded:0, currency:m.currency||cur, type:'membership', months:(parseInt(m&&m.months,10)||1), payment_method:'qr', commission_status:'pending', commission_month:month, cash_payer_name:m.student_name||null, guest_email:m.guest_email||null, acq_source:m.acq_source||'direct' }); if(_txM&&_txM.error){ toast('\u26a0\ufe0f '+(EN?'Confirmed, but the bookkeeping write failed \u2014 ':'Potvrzeno, ale zápis do účetnictví selhal \u2014 ')+(_txM.error.message||'')); } try{ if(m.ref_by && (m.ref_pct||0)>0){ var _rtk=(typeof _freshTok==='function')?await _freshTok():null; await fetch('/api/reward-referrer',{ method:'POST', headers:{ 'Content-Type':'application/json', 'x-access-token':_rtk||'' }, body: JSON.stringify({ refUser:m.ref_by, refPct:m.ref_pct, gymId:g.id }) }); } }catch(e){} try{ if(m.ref_credit_id){ await supaClient.from('gym_member_ref_credits').update({ status:'used', used_at:new Date().toISOString() }).eq('id',m.ref_credit_id); } }catch(e){}
       try{ if(m&&m.student_id){ await supaClient.from('notifications').insert({ user_id:m.student_id, type:'booking', read:false, message:(LANG==='en'?'\u2705 Payment confirmed':'\u2705 Platba potvrzena'), data:JSON.stringify({ kind:'payment_confirmed', gym:g.id, gym_name:(g.name||''), amount:(fmtPrice(m.amount||0, m.currency||cur)+' '+_curSym(m.currency||cur)), item:(m.plan_name||''), goto:'memberships' }) }); } }catch(e){}
@@ -29492,6 +29579,13 @@ async function saveGymManage(){
   } else if(_myGymData && _myGymData.org_form){
     patch.org_form=_myGymData.org_form;
   }
+  // KALENDÁŘNÍ MĚSÍC: null = podle typu klubu (spolek ano). Ukládá se jen odchylka od výchozího,
+  // takže změna typu klubu výchozí stav posune. Bez změny se sloupec vůbec neposílá.
+  if($('mgMembCalendar')){
+    const _calDef=((patch.org_form||(_myGymData&&_myGymData.org_form))==='nonprofit');
+    const _calOn=!!$('mgMembCalendar').checked; const _calVal=(_calOn===_calDef)?null:_calOn;
+    if(_calVal!==((_myGymData&&_myGymData.memb_calendar)??null)){ patch.memb_calendar=_calVal; }
+  }
   const _gdesc = ($('mgDescription')&&$('mgDescription').value.trim())||null; patch.description=_gdesc;
 
   // Vybavení: zapisuje se jen když je sekce vykreslená, ať uložení z jiné záložky nic nesmaže.
@@ -29560,6 +29654,11 @@ async function saveGymManage(){
   let { error } = await supaClient.from('gyms').update(patch).eq('id', _myGymData.id);
   // Databáze bez sloupce register_entry (SQL ještě nespuštěné): ulož zbytek, ne nic.
   if(error && /register_entry/.test(String(error.message||''))){ delete patch.register_entry; ({ error } = await supaClient.from('gyms').update(patch).eq('id', _myGymData.id)); }
+  // Totéž pro kalendářní měsíc (sql/memb-calendar.sql). Zbytek se uloží, přepínač ne -- a řekne se to.
+  let _calSkipped=false;
+  if(error && /memb_calendar/.test(String(error.message||''))){ delete patch.memb_calendar; _calSkipped=true; ({ error } = await supaClient.from('gyms').update(patch).eq('id', _myGymData.id)); }
+  if(!error && ('memb_calendar' in patch)) _myGymData.memb_calendar=patch.memb_calendar;
+  if(!error && _calSkipped) toast(LANG==='en'?'\u26a0\ufe0f Saved, except the calendar-month setting (the database is not updated yet).':'\u26a0\ufe0f Uloženo, jen bez kalendářního měsíce (databáze ještě není aktualizovaná).', 1);
   if(!error) _auditLog(_myGymData.id,'settings_changed',null,null);
   if(!error) _regVerify('gym', _myGymData.id);
   // „TypeError: Load failed" je Safari pro požadavek, na který nepřišla žádná odpověď (výpadek
@@ -32985,7 +33084,7 @@ function setAvatar(url){
   if(url){
     av.style.backgroundImage=`url('${url}')`;
     av.textContent='';
-    if(rm) rm.style.display='block';
+    if(rm) rm.style.display='inline-flex';   // jako ostatní tři tlačítka (.me-av-chip) -- s 'block' text ujel nahoru
   } else {
     av.style.backgroundImage='';
     av.textContent='🧑';
