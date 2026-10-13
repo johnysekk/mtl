@@ -16781,17 +16781,31 @@ function _ownLink(kind){ try{
 }catch(e){ return _appOrigin()+'/?own=1'; } }
 // ── KALENDÁŘNÍ MĚSÍC vs. 30 DNÍ OD ZAPLACENÍ ──────────────────────────────────────────────
 // Zrcadlo api/_memb-term.js (měníš jedno, měň obojí; server cenu i konec ověřuje sám).
-// gyms.memb_calendar: true / false, null = podle typu klubu (spolek = kalendářní měsíc).
-// Kalendářní měsíc: období končí posledním dnem měsíce, první platba uprostřed měsíce je jen
-// za zbývající dny, kdo má ještě platné členství, začíná dnem po jeho konci.
-function _membCalendar(g){ if(!g) return false; if(g.memb_calendar===true) return true; if(g.memb_calendar===false) return false; return g.org_form==='nonprofit'; }
+// gyms.memb_calendar: true = kalendářní měsíc, false = měsíc od zaplacení, null = nevybráno
+// (spolek pak členství neprodává, klub podnikatele počítá od zaplacení). gyms.memb_prorate:
+// platba uprostřed měsíce jen za zbývající dny (výchozí vypnuto = celý měsíc).
+// Kalendářní měsíc: období končí posledním dnem měsíce, kdo má ještě platné členství, začíná
+// dnem po jeho konci.
+function _membCalendar(g){ return !!(g && g.memb_calendar===true); }
+function _membModeMissing(g){ return !!(g && g.org_form==='nonprofit' && g.memb_calendar==null); }
+function _membProrate(g){ return _membCalendar(g) && g.memb_prorate===true; }
 function _pragueYMD(d){ const p={}; new Intl.DateTimeFormat('en-CA',{ timeZone:'Europe/Prague', year:'numeric', month:'2-digit', day:'2-digit' }).formatToParts(d instanceof Date?d:new Date(d||Date.now())).forEach(function(x){ p[x.type]=x.value; }); return [Number(p.year),Number(p.month),Number(p.day)]; }
-function _calTerm(full, months, start){
+function _calTerm(full, months, start, prorate){
   const mo=Math.max(1, parseInt(months,10)||1); const ymd=_pragueYMD(start||new Date()); const y=ymd[0], m=ymd[1], d=ymd[2];
-  const dim=new Date(Date.UTC(y,m,0)).getUTCDate(); const frac=(dim-d+1)/dim;
-  const price = d===1 ? Number(full) : Math.round((Number(full)/mo)*(mo-1+frac));
+  const dim=new Date(Date.UTC(y,m,0)).getUTCDate(); const frac=(dim-d+1)/dim; const part=!!prorate && d!==1;
+  const price = part ? Math.round((Number(full)/mo)*(mo-1+frac)) : Number(full);
   const t=y*12+(m-1)+(mo-1); const ey=Math.floor(t/12), em=(t%12)+1; const pd=function(n){ return String(n).padStart(2,'0'); };
-  return { price:price, endsOn: ey+'-'+pd(em)+'-'+pd(new Date(Date.UTC(ey,em,0)).getUTCDate()), partial: d!==1 };
+  return { price:price, endsOn: ey+'-'+pd(em)+'-'+pd(new Date(Date.UTC(ey,em,0)).getUTCDate()), partial: part, midMonth: d!==1 };
+}
+// Předplatné kartou v kalendářním režimu -- zrcadlo calSubPlan v api/_memb-term.js (jen druh a
+// od kdy; částky a kotvu počítá server). plain / first / anchor / later (+ from = od kdy půjde).
+function _calSubPlan(activeEnd){
+  const st=_calStart(activeEnd), s=_pragueYMD(st), n=_pragueYMD(new Date());
+  const ny=n[1]===12?n[0]+1:n[0], nm=n[1]===12?1:n[1]+1;
+  if(s[0]===n[0] && s[1]===n[1]) return { kind: s[2]===1?'plain':'first' };
+  if(s[2]===1 && s[0]===ny && s[1]===nm) return { kind:'anchor' };
+  let fy=s[0], fm=s[1]; if(s[2]===1){ fm-=1; if(fm===0){ fm=12; fy-=1; } }
+  return { kind:'later', from: fy+'-'+String(fm).padStart(2,'0')+'-01' };
 }
 // Konec platného členství člověka (nebo jeho dítěte) u klubu -- od něj se v kalendářním režimu
 // počítá další období. null = nic platného.
@@ -16804,17 +16818,18 @@ async function _membActiveEnd(gymId, sid, childName){
 // Věta k potvrzení u kalendářního režimu: kolik teď, za jaké období a co dál.
 function _calChargeNote(term, cur, isSub){
   if(!term || !term.calendar) return '';
-  const EN=LANG==='en'; const sym=_curSym(cur); const end=new Date(term.endsOn+'T12:00:00').toLocaleDateString(EN?'en-GB':'cs-CZ');
-  const now=fmtPrice(term.price,cur)+' '+sym, full=fmtPrice(term.full,cur)+' '+sym;
-  if(isSub && term.deferred){
-    const ae=new Date(term.activeEnd).toLocaleDateString(EN?'en-GB':'cs-CZ');
-    return EN?(' You pay nothing now: it follows on from your current membership (valid until '+ae+'). Then '+full+' on the 1st of every month'+(term.partial?' (the first month only for the days left).':'.'))
-             :(' Teď neplatíš nic: navazuje na tvoje současné členství (platí do '+ae+'). Potom '+full+' vždy 1. v měsíci'+(term.partial?' (první měsíc jen za zbývající dny).':'.'));
+  const EN=LANG==='en'; const sym=_curSym(cur); const _d=function(x){ return new Date(String(x).slice(0,10)+'T12:00:00').toLocaleDateString(EN?'en-GB':'cs-CZ'); };
+  const end=_d(term.endsOn), now=fmtPrice(term.price,cur)+' '+sym, full=fmtPrice(term.full,cur)+' '+sym; const k=(term.sub&&term.sub.kind)||'';
+  if(isSub){
+    if(k==='anchor') return EN?(' You pay nothing now: it follows on from your current membership (valid until '+_d(term.activeEnd)+'). Then '+full+' on the 1st of every month.')
+                           :(' Teď neplatíš nic: navazuje na tvoje současné členství (platí do '+_d(term.activeEnd)+'). Potom '+full+' vždy 1. v měsíci.');
+    if(k==='first') return term.partial
+      ? (EN?(' Now you pay '+now+' for the rest of this month (until '+end+'), then '+full+' on the 1st of every month.'):(' Teď zaplatíš '+now+' za zbytek měsíce (do '+end+'), potom '+full+' vždy 1. v měsíci.'))
+      : (EN?(' Now you pay '+now+' for this month (until '+end+'), then '+full+' on the 1st of every month.'):(' Teď zaplatíš '+now+' za tento měsíc (do '+end+'), potom '+full+' vždy 1. v měsíci.'));
+    return EN?(' It runs by calendar month: '+full+' on the 1st of every month.'):(' Platí po kalendářních měsících: '+full+' vždy 1. v měsíci.');
   }
-  if(isSub) return term.partial
-    ? (EN?(' Now you pay '+now+' for the rest of this month (until '+end+'), then '+full+' on the 1st of every month.'):(' Teď zaplatíš '+now+' za zbytek měsíce (do '+end+'), potom '+full+' vždy 1. v měsíci.'))
-    : (EN?(' It runs by calendar month: '+full+' on the 1st of every month.'):(' Platí po kalendářních měsících: '+full+' vždy 1. v měsíci.'));
-  return EN?(' Valid until '+end+'.'+(term.partial?' The first month is charged only for the days left.':'')):(' Platí do '+end+'.'+(term.partial?' První měsíc se platí jen za zbývající dny.':''));
+  return EN?(' Valid until '+end+'.'+(term.partial?' The first month is charged only for the days left.':(term.midMonth?' The first month is charged in full, even mid-month.':'')))
+           :(' Platí do '+end+'.'+(term.partial?' První měsíc se platí jen za zbývající dny.':(term.midMonth?' První měsíc se platí celý, i když začíná v jeho průběhu.':'')));
 }
 // 23:59:59 daného dne v Praze (letní / zimní čas) -- zrcadlo pragueEndOfDay v api/_memb-term.js.
 function _pragueEndOfDay(ymd){ const p=String(ymd).slice(0,10).split('-').map(Number); const guess=Date.UTC(p[0],p[1]-1,p[2],12,0,0); const h=Number(new Intl.DateTimeFormat('en-GB',{ timeZone:'Europe/Prague', hour:'2-digit', hour12:false }).format(new Date(guess))); return new Date(Date.UTC(p[0],p[1]-1,p[2],23,59,59)-(h-12)*3600000); }
@@ -16838,10 +16853,9 @@ function _planTerm(plan, g, activeEnd){
   const full = Number(plan && plan.price) || 0;
   const out = { price: full, endsOn: null, monthsLeft: months, calendar:false };
   if(plan && !plan.ends_on && _membCalendar(g)){
-    const st=_calStart(activeEnd); const ct=_calTerm(full, months, st);
-    out.price=ct.price; out.endsOn=ct.endsOn; out.calendar=true; out.partial=ct.partial; out.full=full;
-    // Předplatné kartou začne až v dalším měsíci (navazuje na platné členství): teď se nic nestrhne.
-    const a=_pragueYMD(st), b=_pragueYMD(new Date()); out.deferred=(a[0]!==b[0]||a[1]!==b[1]); out.activeEnd=activeEnd||null;
+    const ct=_calTerm(full, months, _calStart(activeEnd), _membProrate(g));
+    out.price=ct.price; out.endsOn=ct.endsOn; out.calendar=true; out.partial=ct.partial; out.midMonth=ct.midMonth; out.full=full;
+    out.activeEnd=activeEnd||null; out.sub=_calSubPlan(activeEnd);   // jen pro předplatné kartou
     return out;
   }
   if(months <= 1 || !plan || !plan.ends_on) return out;
@@ -17109,6 +17123,13 @@ async function subscribeGymMembership(g, plan, _child, _cleared){
   // v kalendářním režimu přidá server jako jednorázovou položku (api/pay.js, calSubPlan).
   const _isSub = ((parseInt(plan.months,10)||1)===1 && !plan.once);
   const _payAmt = (_isSub && _term.calendar) ? _term.full : _term.price;
+  // Platné členství sahá dál než do příštího měsíce: Stripe neumí předplatné ukotvit tak daleko
+  // (a zkušební dobu, kterou by člověku ukázal jako „zdarma", nechceme). Zapne si ho později.
+  if(_isSub && _term.calendar && _term.sub && _term.sub.kind==='later'){
+    const _fd=function(x){ return new Date(String(x).slice(0,10)+'T12:00:00').toLocaleDateString(LANG==='en'?'en-GB':'cs-CZ'); };
+    toast(LANG==='en'?('Your current membership is valid until '+_fd(_term.activeEnd)+'. You can switch on the card subscription that follows on from '+_fd(_term.sub.from)+'.'):('Tvoje současné členství platí do '+_fd(_term.activeEnd)+'. Předplatné kartou, které na něj naváže, si můžeš zapnout od '+_fd(_term.sub.from)+'.'), 1);
+    return;
+  }
   const _cur1 = plan._cur||g.currency||'CZK';
   const _memPriceTxt = fmtPrice((_isSub && _term.calendar) ? _term.full : _term.price, _cur1)+' '+_curSym(_cur1);
   if(!confirm((LANG==='en'
@@ -20877,6 +20898,16 @@ function _cohWhoHtml(EN, d){
   const li=(typeof currentUser!=='undefined' && currentUser);
   const _lim=!!(d && (d.age_min!=null || d.age_max!=null));
   const IN='width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:16px;margin-bottom:8px;font-family:inherit;';
+  // DATUM NAROZENÍ JEN JEDNOU. Potřebuje ho kurz s věkovým omezením a přihláška za člena u spolku;
+  // obojí bere tohle pole (dřív chtěla přihláška za člena druhé). Kdo ho má v profilu, nezadává ho.
+  // Když se ptáme na datum, zaškrtávátko „je mi 18" je zbytečné -- věk se spočítá.
+  const _needDob=_lim || !!(d && d.gym_org_form==='nonprofit');
+  const _dobHtml=(_needDob && !(li && currentUser.birthdate))
+    ? ('<label style="display:block;font-size:11.5px;font-weight:700;color:var(--mid);margin:8px 0 4px;">'+(EN?'Your date of birth':'Tvoje datum narozen\u00ed')+'</label><input id="cohMeDob" type="date" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:16px;font-family:inherit;">'
+      +'<div style="font-size:11px;color:var(--light);line-height:1.45;margin-top:4px;">'+(li
+        ?(EN?'You do not have it in your profile yet \u2014 it will be saved there too (it cannot be changed later).':'V profilu ho zat\u00edm nem\u00e1\u0161 \u2014 ulo\u017e\u00ed se ti i tam (pozd\u011bji u\u017e nejde zm\u011bnit).')
+        :(EN?'Under 18, the parent or guardian applies \u2014 choose \u201cFor my child\u201d.':'Za mlad\u0161\u00edho ne\u017e 18 let pod\u00e1v\u00e1 p\u0159ihl\u00e1\u0161ku rodi\u010d nebo z\u00e1konn\u00fd z\u00e1stupce \u2014 zvol \u201ePro moje d\u00edt\u011b\u201c.'))+'</div>')
+    : '';
   return '<div id="cohWho" style="margin:2px 0 12px;">'
     +'<div style="font-size:12px;font-weight:800;color:var(--mid);margin-bottom:6px;">'+(EN?'Who is the application for?':'Pro koho je p\u0159ihl\u00e1\u0161ka?')+'</div>'
     +'<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:4px;">'
@@ -20884,10 +20915,8 @@ function _cohWhoHtml(EN, d){
       +'<button type="button" class="cohWhoBtn" data-w="kid" style="padding:10px 6px;border:none;border-radius:9px;font-size:13px;font-weight:800;cursor:pointer;font-family:inherit;">\ud83e\uddd2 '+(EN?'For my child':'Pro moje d\u00edt\u011b')+'</button>'
     +'</div>'
     +'<div id="cohWhoMe" style="margin-top:8px;">'
-      +(li?'<div id="cohMinorWarn" style="display:none;font-size:12.5px;color:#9A5B00;background:#FFF8E6;border:1px solid #F0DFA8;border-radius:10px;padding:9px 11px;line-height:1.5;"></div>'
-          :('<label style="display:flex;gap:9px;align-items:flex-start;font-size:12.5px;line-height:1.45;cursor:pointer;"><input type="checkbox" id="cohAdultOk" style="width:17px;height:17px;flex-shrink:0;margin-top:1px;"><span>'+(EN?'I am 18 or older. (For someone younger, the parent or guardian applies \u2014 choose \u201cFor my child\u201d.)':'Je mi 18 let nebo v\u00edc. (Za mlad\u0161\u00edho pod\u00e1v\u00e1 p\u0159ihl\u00e1\u0161ku rodi\u010d nebo z\u00e1konn\u00fd z\u00e1stupce \u2014 zvol \u201ePro moje d\u00edt\u011b\u201c.)')+'</span></label>'
-            // Kurz s věkovým omezením: host musí uvést datum narození, ověří se rozmezí.
-            +(_lim?('<label style="display:block;font-size:11.5px;font-weight:700;color:var(--mid);margin:8px 0 4px;">'+(EN?'Your date of birth':'Tvoje datum narozen\u00ed')+'</label><input id="cohMeDob" type="date" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:16px;font-family:inherit;">'):'')))
+      +(li?('<div id="cohMinorWarn" style="display:none;font-size:12.5px;color:#9A5B00;background:#FFF8E6;border:1px solid #F0DFA8;border-radius:10px;padding:9px 11px;line-height:1.5;"></div>'+_dobHtml)
+          :(_dobHtml||('<label style="display:flex;gap:9px;align-items:flex-start;font-size:12.5px;line-height:1.45;cursor:pointer;"><input type="checkbox" id="cohAdultOk" style="width:17px;height:17px;flex-shrink:0;margin-top:1px;"><span>'+(EN?'I am 18 or older. (For someone younger, the parent or guardian applies \u2014 choose \u201cFor my child\u201d.)':'Je mi 18 let nebo v\u00edc. (Za mlad\u0161\u00edho pod\u00e1v\u00e1 p\u0159ihl\u00e1\u0161ku rodi\u010d nebo z\u00e1konn\u00fd z\u00e1stupce \u2014 zvol \u201ePro moje d\u00edt\u011b\u201c.)')+'</span></label>')))
     +'</div>'
     +'<div id="cohWhoKid" style="display:none;margin-top:8px;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:10px 12px;">'
       +(li?('<select id="cohKidSel" style="'+IN+'background:#fff;"><option value="">'+(EN?'Loading your family\u2026':'Na\u010d\u00edt\u00e1m Rodinu\u2026')+'</option></select>'):'')
@@ -20911,13 +20940,10 @@ async function _cohWhoInit(ov, d){
     ov.querySelector('#cohWhoMe').style.display=(w==='me')?'':'none';
     ov.querySelector('#cohWhoKid').style.display=(w==='kid')?'':'none';
     const sn=ov.querySelector('#cohSName'); if(sn) sn.placeholder=(w==='kid')?(EN?'Your full name (parent / guardian)':'Tvoje jm\u00e9no a p\u0159\u00edjmen\u00ed (rodi\u010d / z\u00e1stupce)'):(EN?'Full name':'Jm\u00e9no a p\u0159\u00edjmen\u00ed');
-    // U spolku: datum narození a zástupce v přihlášce za člena -- u dítěte je bere z výběru výše
-    const md=ov.querySelector('#cohMaData'); if(md) md.dataset.kidmode=(w==='kid')?'1':'';
-    if(md){ const ch=ov.querySelector('#cohMemberApp'); md.style.display=(ch&&ch.checked&&w!=='kid')?'block':'none'; }
     _cohKidAppInfo(ov);
   };
   // U spolku se v přihlášce za člena ukáže, za koho a kdo ji podává -- pevně, bez úprav.
-  ['#cohKidSel','#cohKidName','#cohKidDob','#cohSName','#cohSEmail','#cohSPhone','#cohMemberApp','#cohMaBirth'].forEach(function(q){ const el=ov.querySelector(q); if(el){ el.addEventListener('change', function(){ _cohKidAppInfo(ov); }); el.addEventListener('input', function(){ _cohKidAppInfo(ov); }); } });
+  ['#cohKidSel','#cohKidName','#cohKidDob','#cohSName','#cohSEmail','#cohSPhone','#cohMemberApp','#cohMeDob'].forEach(function(q){ const el=ov.querySelector(q); if(el){ el.addEventListener('change', function(){ _cohKidAppInfo(ov); }); el.addEventListener('input', function(){ _cohKidAppInfo(ov); }); } });
   ov.querySelectorAll('.cohWhoBtn').forEach(function(b){ b.onclick=function(){ set(b.dataset.w); }; });
   set(_kidsOnly?'kid':'me');
   // Přihlášený mladistvý se sám nepřihlašuje
@@ -20955,35 +20981,29 @@ async function _cohWhoInit(ov, d){
     // Otevřeno ze žádosti mladistvého: rovnou „Pro moje dítě" a on vybraný.
     if(window._cohPresetKid){ const _pk=window._cohPresetKid; window._cohPresetKid=null; if(opts.some(function(o){ return o.v===_pk; })){ try{ set('kid'); }catch(e){} sel.value=_pk; sync(); try{ sel.dispatchEvent(new Event('change')); }catch(e){} } } }
 }
+// Datum narození účastníka „Pro mě": z profilu, jinak z jediného pole ve formuláři.
+function _cohMyDob(ov){ if(typeof currentUser!=='undefined' && currentUser && currentUser.birthdate) return String(currentUser.birthdate).slice(0,10); return ((ov.querySelector('#cohMeDob')||{}).value)||''; }
 function _cohKidAppInfo(ov){
-  const EN=LANG==='en'; const md=ov.querySelector('#cohMaData'); if(!md) return;
-  let box=ov.querySelector('#cohMaKidInfo');
-  const ch=ov.querySelector('#cohMemberApp');
-  if(!(ch&&ch.checked)){ if(box) box.style.display='none'; return; }
+  // ÚDAJE V PŘIHLÁŠCE uvnitř rozbalené „Přihlášky za člena klubu" -- co přesně klub dostane.
+  const EN=LANG==='en'; const box=ov.querySelector('#cohMaInfo'); if(!box) return;
+  const fd=function(v){ if(!v) return '—'; const t=new Date(String(v).slice(0,10)+'T00:00:00'); return isNaN(t)?v:(t.getDate()+'. '+(t.getMonth()+1)+'. '+t.getFullYear()); };
+  const g=((ov.querySelector('#cohSName')||{}).value||'').trim(), em=((ov.querySelector('#cohSEmail')||{}).value||'').trim(), ph=((ov.querySelector('#cohSPhone')||{}).value||'').trim();
+  const hd=function(t){ return '<div style="font-size:11px;font-weight:800;color:#7a4f00;letter-spacing:.04em;margin-bottom:3px;">'+t+'</div>'; };
   if(ov._cohWho!=='kid'){
-    // Pro mě: souhrn toho, co přihláška klubu předá (datum narození se vyplňuje níž).
-    if(!box){ box=document.createElement('div'); box.id='cohMaKidInfo'; box.style.cssText='margin:-4px 0 12px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--surf);font-size:12.5px;line-height:1.6;color:var(--dark);'; md.parentNode.insertBefore(box, md); }
-    const nm0=((ov.querySelector('#cohSName')||{}).value||'').trim(), em0=((ov.querySelector('#cohSEmail')||{}).value||'').trim(), ph0=((ov.querySelector('#cohSPhone')||{}).value||'').trim(), bd0=((ov.querySelector('#cohMaBirth')||{}).value||'');
-    const fd0=function(v){ if(!v) return '\u2014'; const t=new Date(String(v).slice(0,10)+'T00:00:00'); return isNaN(t)?v:(t.getDate()+'. '+(t.getMonth()+1)+'. '+t.getFullYear()); };
-    box.style.display='block';
-    box.innerHTML='<div style="font-size:11px;font-weight:800;color:var(--mid);letter-spacing:.04em;margin-bottom:3px;">'+(EN?'APPLICATION DATA':'\u00daDAJE V P\u0158IHL\u00c1\u0160CE')+'</div>'
-      +'<div>\ud83d\udc64 <b>'+escapeHtml(nm0||'\u2014')+'</b> \u00b7 '+(EN?'born ':'nar. ')+escapeHtml(fd0(bd0))+'</div>'
-      +'<div>\u2709\ufe0f '+escapeHtml(em0||'\u2014')+' \u00b7 \ud83d\udcde '+escapeHtml(ph0||'\u2014')+'</div>'
-      +'<div style="font-size:11px;color:var(--light);margin-top:3px;">'+(EN?'From your details above.':'P\u0159evzato z tv\u00fdch \u00fadaj\u016f v\u00fd\u0161e.')+'</div>';
+    box.innerHTML=hd(EN?'APPLICATION DATA':'ÚDAJE V PŘIHLÁŠCE')
+      +'<div>👤 <b>'+escapeHtml(g||'—')+'</b> · '+(EN?'born ':'nar. ')+escapeHtml(fd(_cohMyDob(ov)))+'</div>'
+      +'<div>✉️ '+escapeHtml(em||'—')+' · 📞 '+escapeHtml(ph||'—')+'</div>'
+      +'<div style="font-size:11px;opacity:.75;margin-top:3px;">'+(EN?'Taken from your details above.':'Převzato z tvých údajů výše.')+'</div>';
     return;
   }
-  if(!box){ box=document.createElement('div'); box.id='cohMaKidInfo'; box.style.cssText='margin:-4px 0 12px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--surf);font-size:12.5px;line-height:1.6;color:var(--dark);'; md.parentNode.insertBefore(box, md); }
   let name='', dob='';
   const sel=ov.querySelector('#cohKidSel');
   if(sel && sel.value && sel.value!=='other'){ const o=(ov._cohKids||[]).find(function(x){ return x.v===sel.value; }); if(o){ name=o.name; dob=o.dob; } }
   if(!name){ name=((ov.querySelector('#cohKidName')||{}).value||'').trim(); dob=((ov.querySelector('#cohKidDob')||{}).value||''); }
-  const g=((ov.querySelector('#cohSName')||{}).value||'').trim(), em=((ov.querySelector('#cohSEmail')||{}).value||'').trim(), ph=((ov.querySelector('#cohSPhone')||{}).value||'').trim();
-  const fd=function(v){ if(!v) return '\u2014'; const t=new Date(String(v).slice(0,10)+'T00:00:00'); return isNaN(t)?v:(t.getDate()+'. '+(t.getMonth()+1)+'. '+t.getFullYear()); };
-  box.style.display='block';
-  box.innerHTML='<div style="font-size:11px;font-weight:800;color:var(--mid);letter-spacing:.04em;margin-bottom:3px;">'+(EN?'APPLICATION FOR':'P\u0158IHL\u00c1\u0160KA ZA')+'</div>'
-    +'<div>\ud83e\uddd2 <b>'+escapeHtml(name||'\u2014')+'</b> \u00b7 '+(EN?'born ':'nar. ')+escapeHtml(fd(dob))+'</div>'
-    +'<div>\ud83d\udc64 '+(EN?'Legal guardian: ':'Z\u00e1konn\u00fd z\u00e1stupce: ')+'<b>'+escapeHtml(g||'\u2014')+'</b>'+((em||ph)?(' \u00b7 '+escapeHtml([em,ph].filter(Boolean).join(' \u00b7 '))):'')+'</div>'
-    +'<div style="font-size:11px;color:var(--light);margin-top:3px;">'+(EN?'Taken from \u201cWho is the application for?\u201d and your details above.':'P\u0159evzato z \u201ePro koho je p\u0159ihl\u00e1\u0161ka\u201c a tv\u00fdch \u00fadaj\u016f v\u00fd\u0161e.')+'</div>';
+  box.innerHTML=hd(EN?'APPLICATION FOR':'PŘIHLÁŠKA ZA')
+    +'<div>🧒 <b>'+escapeHtml(name||'—')+'</b> · '+(EN?'born ':'nar. ')+escapeHtml(fd(dob))+'</div>'
+    +'<div>👤 '+(EN?'Legal guardian: ':'Zákonný zástupce: ')+'<b>'+escapeHtml(g||'—')+'</b>'+((em||ph)?(' · '+escapeHtml([em,ph].filter(Boolean).join(' · '))):'')+'</div>'
+    +'<div style="font-size:11px;opacity:.75;margin-top:3px;">'+(EN?'Taken from “Who is the application for?” and your details above.':'Převzato z „Pro koho je přihláška“ a tvých údajů výše.')+'</div>';
 }
 // Kdo je účastník -- pole do /api/cohort-pay. null + hláška = nejde odeslat.
 function _cohWhoGet(ov){
@@ -20991,10 +21011,15 @@ function _cohWhoGet(ov){
   if(w==='me'){
     if(ov._cohMinor) return { err:(EN?'Under 18 \u2014 your parent or guardian signs you up.':'Pod 18 let t\u011b p\u0159ihla\u0161uje rodi\u010d nebo z\u00e1konn\u00fd z\u00e1stupce.') };
     const ad=ov.querySelector('#cohAdultOk'); if(ad && !ad.checked) return { err:(EN?'Confirm you are 18 or older':'Potvr\u010f, \u017ee je ti 18 let nebo v\u00edc') };
+    const d=ov._cohD||{}; const myDob=_cohMyDob(ov)||null;
+    // Pole s datem narození místo zaškrtávátka „je mi 18": věk se ověří z data.
+    if(ov.querySelector('#cohMeDob')){
+      const a0=myDob?_famAge(myDob):null;
+      if(a0==null || a0<0 || a0>110) return { err:(EN?'Fill in your date of birth':'Vypl\u0148 datum narozen\u00ed') };
+      if(a0<18) return { err:(EN?'Under 18 \u2014 the parent or guardian applies: choose \u201cFor my child\u201d':'Pod 18 let pod\u00e1v\u00e1 p\u0159ihl\u00e1\u0161ku rodi\u010d nebo z\u00e1konn\u00fd z\u00e1stupce \u2014 zvol \u201ePro moje d\u00edt\u011b\u201c') };
+    }
     // Věkové omezení kurzu
-    const d=ov._cohD||{}; let myDob=null;
     if(d.age_min!=null || d.age_max!=null){
-      myDob=(typeof currentUser!=='undefined' && currentUser && currentUser.birthdate)?String(currentUser.birthdate).slice(0,10):(((ov.querySelector('#cohMeDob')||{}).value)||((ov.querySelector('#cohMaBirth')||{}).value)||null);
       const a=myDob?_famAge(myDob):null;
       if(a==null) return { err:(EN?'This course has an age limit \u2014 fill in your date of birth':'Kurz m\u00e1 v\u011bkov\u00e9 omezen\u00ed \u2014 vypl\u0148 datum narozen\u00ed') };
       if(!_cohAgeOk(d,a)) return { err:(EN?('This course is for age '+_cohAgeTxt(d,EN)+'.'):('Kurz je pro v\u011bk '+_cohAgeTxt(d,EN)+'.')) };
@@ -21150,7 +21175,21 @@ async function openCohortSignup(cohortId, fromColdLink){
         +'<select id="cohSPhoneCC" style="flex:0 0 auto;box-sizing:border-box;padding:12px 6px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;background:#fff;color:var(--dark);">'+_phoneCCOptions()+'</select>'
         +'<input id="cohSPhone" type="tel" value="'+escapeHtml(((typeof currentUser!=='undefined'&&currentUser)?(currentUser.phone||''):''))+'" placeholder="'+(EN?'Phone':'Telefon')+'" style="flex:1;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;">'
       +'</div>'+'<input id="cohHp" name="cohort_note2" type="text" tabindex="-1" autocomplete="off" aria-hidden="true" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;">'
+      // POŘADÍ: každý dokument a hned pod ním jeho potvrzení -- podmínky, provozní řád, přihláška
+      // za člena (spolek), nakonec nepovinný marketing.
       +'<details style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:12px;"><summary style="font-size:12px;font-weight:700;cursor:pointer;">'+(EN?'Terms & data protection':'Podmínky & ochrana údajů')+'</summary>'+layers+'</details>'
+      +'<label style="display:flex;gap:9px;align-items:flex-start;font-size:12px;color:var(--dark);line-height:1.45;margin-bottom:8px;cursor:pointer;"><input id="cohConsent" type="checkbox" style="margin-top:2px;flex-shrink:0;"><span id="cohConsentTxt">'+(EN?'I agree to the course terms above and acknowledge the processing of personal data.':'Souhlas\u00edm s podm\u00ednkami kurzu v\u00fd\u0161e a beru na v\u011bdom\u00ed zpracov\u00e1n\u00ed osobn\u00edch \u00fadaj\u016f.')+'</span></label>'
+      +'<div id="cohConsentErr" style="display:none;font-size:12px;color:var(--red);font-weight:700;margin:-4px 0 8px;">'+(EN?'You must agree to the terms to continue.':'Pro pokra\u010dov\u00e1n\u00ed mus\u00ed\u0161 souhlasit s podm\u00ednkami.')+'</div>'
+      // Provozní řád: text klubu a/nebo nahraný dokument (u spolku stanovy) -- odkaz na obojí.
+      +((d.club_has_rules||d.club_rules_text)?('<label style="display:flex;gap:9px;align-items:flex-start;font-size:12px;color:var(--dark);line-height:1.45;margin-bottom:8px;cursor:pointer;"><input id="cohRules" type="checkbox" style="margin-top:2px;flex-shrink:0;"><span><span id="cohRulesTxt">'+((d.gym_org_form==='nonprofit')
+          ?(EN?'I have read the club\u2019s internal rules and will follow them.':'Sezn\u00e1mil(a) jsem se s provozn\u00edm \u0159\u00e1dem klubu a budu ho dodr\u017eovat.')
+          :(EN?'I have read the club\u2019s internal rules and will follow them.':'Sezn\u00e1mil(a) jsem se s provozn\u00edm \u0159\u00e1dem klubu a budu ho dodr\u017eovat.'))+'</span>'
+        // Odkazy pod větou, každý zvlášť jako tlačítko -- vedle sebe v textu splývaly.
+        +((d.club_rules_text||d.club_rules_file_url)?'<span style="display:flex;flex-wrap:wrap;gap:6px;margin-top:7px;">':'')
+        +(d.club_rules_text?('<a href="#" id="cohRulesOpen" style="display:inline-flex;align-items:center;gap:5px;padding:6px 10px;border:1px solid var(--border);border-radius:9px;background:#fff;color:var(--blue);font-weight:700;font-size:12px;text-decoration:none;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">\ud83d\udcdc '+escapeHtml(d.club_rules_title||(EN?'Internal rules':'Provozn\u00ed \u0159\u00e1d'))+'</a>'):'')
+        +(d.club_rules_file_url?('<a href="'+escapeHtml(d.club_rules_file_url)+'" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:5px;padding:6px 10px;border:1px solid var(--border);border-radius:9px;background:#fff;color:var(--blue);font-weight:700;font-size:12px;text-decoration:none;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">\ud83d\udcc4 '+escapeHtml(d.club_rules_file_name||(EN?'Rules document (PDF)':'Dokument k provozn\u00edmu \u0159\u00e1du (PDF)'))+'</a>'):'')
+        +((d.club_rules_text||d.club_rules_file_url)?'</span>':'')
+        +'</span></label>'):'')
       // PŘIHLÁŠKA ZA ČLENA U SPOLKU. Nezdržuje přihlášení do kurzu: je to odkaz na znění
       // a jedno zaškrtnutí navíc. Kdo projde kurzem, nemusí to potvrzovat znovu, až si
       // bude kupovat běžné členství -- přihláška už podaná je.
@@ -21165,41 +21204,14 @@ async function openCohortSignup(cohortId, fromColdLink){
         +'<div style="font-size:11.5px;color:#7a4f00;line-height:1.5;margin-top:8px;border-top:1px dashed #E8C24A;padding-top:7px;">'
         +escapeHtml(_memberAppDecision(d, 'deposit', EN))
         +'</div>'
+        // Údaje, které klub v přihlášce dostane (_cohKidAppInfo) -- přímo v přihlášce.
+        +'<div id="cohMaInfo" style="margin-top:9px;padding:9px 11px;border:1px solid #E8C24A;border-radius:9px;background:#fff;font-size:12.5px;line-height:1.6;color:var(--dark);"></div>'
         +'</details>'
         +'<label style="display:flex;gap:9px;align-items:flex-start;font-size:12px;color:var(--dark);line-height:1.45;margin-bottom:12px;cursor:pointer;"><input id="cohMemberApp" type="checkbox" style="margin-top:2px;flex-shrink:0;"><span>'
         +(EN?('I have read the full application and I apply for membership of '+escapeHtml(d.gym_name||'the club'))
             :('Seznámil jsem se s celým obsahem p\u0159ihl\u00e1\u0161ky a \u017e\u00e1d\u00e1m o p\u0159ijet\u00ed za \u010dlena klubu '+escapeHtml(d.gym_name||'')))
-        +'</span></label>'
-        // ÚDAJE ČLENA. Klub je potřebuje do seznamu členů (jméno, datum narození) a u
-        // nezletilého zákonného zástupce. Ukáže se, až když člověk o členství žádá.
-        +'<div id="cohMaData" style="display:none;margin:-4px 0 12px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:#fff;">'
-          // Přihlášený s datem narození v profilu ho nezadává znovu -- vezme se z profilu.
-          // Kdo ho v profilu nemá (starší účty), vyplní ho tady a uloží se mu i do profilu.
-          +(((typeof currentUser!=='undefined'&&currentUser&&currentUser.birthdate))
-            ? ('<input id="cohMaBirth" type="hidden" value="'+escapeHtml(String(currentUser.birthdate).slice(0,10))+'">'
-               +'<div style="font-size:12.5px;color:var(--dark);margin-bottom:8px;">\ud83c\udf82 '+(EN?'Date of birth: ':'Datum narozen\u00ed: ')+'<b>'+(function(){ const t=new Date(String(currentUser.birthdate).slice(0,10)+'T00:00:00'); return isNaN(t)?escapeHtml(String(currentUser.birthdate)):(t.getDate()+'. '+(t.getMonth()+1)+'. '+t.getFullYear()); })()+'</b> <span style="color:var(--light);">'+(EN?'(from your profile)':'(z tv\u00e9ho profilu)')+'</span></div>')
-            : ('<label style="display:block;font-size:11.5px;font-weight:700;color:var(--mid);margin-bottom:4px;">'+(EN?'Date of birth':'Datum narozen\u00ed')+'</label>'
-               +'<input id="cohMaBirth" type="date" value="" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:16px;margin-bottom:8px;">'
-               +((typeof currentUser!=='undefined'&&currentUser)?('<div style="font-size:11px;color:var(--light);margin:-4px 0 8px;">'+(EN?'You do not have it in your profile yet \u2014 it will be saved there too (it cannot be changed later).':'V profilu ho zat\u00edm nem\u00e1\u0161 \u2014 ulo\u017e\u00ed se ti i tam (pozd\u011bji u\u017e nejde zm\u011bnit).')+'</div>'):'')))
-          +'<div id="cohMaGuard" style="display:none;">'
-            +'<div style="font-size:11.5px;color:var(--mid);line-height:1.45;margin-bottom:6px;">'+(EN?'Under 18 the application is made by a parent or guardian \u2014 choose \u201cFor my child\u201d above.':'Pod 18 let pod\u00e1v\u00e1 p\u0159ihl\u00e1\u0161ku rodi\u010d nebo z\u00e1konn\u00fd z\u00e1stupce \u2014 naho\u0159e zvol \u201ePro moje d\u00edt\u011b\u201c.')+'<span style=\"display:none\">'+('p\u0159ihl\u00e1\u0161ku pod\u00e1v\u00e1 rodi\u010d nebo z\u00e1konn\u00fd z\u00e1stupce.')+'</div>'
-            +'<input id="cohMaGName" type="hidden" placeholder="'+(EN?'Parent/guardian full name':'Jm\u00e9no a p\u0159\u00edjmen\u00ed z\u00e1konn\u00e9ho z\u00e1stupce')+'" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:16px;margin-bottom:8px;">'
-            +'<input id="cohMaGContact" type="hidden" placeholder="'+(EN?'Their phone or e-mail':'Jeho telefon nebo e-mail')+'" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-size:16px;">'
-          +'</div>'
-        +'</div>') : '')
-      +'<label style="display:flex;gap:9px;align-items:flex-start;font-size:12px;color:var(--dark);line-height:1.45;margin-bottom:8px;cursor:pointer;"><input id="cohConsent" type="checkbox" style="margin-top:2px;flex-shrink:0;"><span id="cohConsentTxt">'+(EN?'I agree to the course terms above and acknowledge the processing of personal data.':'Souhlas\u00edm s podm\u00ednkami kurzu v\u00fd\u0161e a beru na v\u011bdom\u00ed zpracov\u00e1n\u00ed osobn\u00edch \u00fadaj\u016f.')+'</span></label>'
-      +'<div id="cohConsentErr" style="display:none;font-size:12px;color:var(--red);font-weight:700;margin:-4px 0 8px;">'+(EN?'You must agree to the terms to continue.':'Pro pokra\u010dov\u00e1n\u00ed mus\u00ed\u0161 souhlasit s podm\u00ednkami.')+'</div>'
-      // Provozní řád: text klubu a/nebo nahraný dokument (u spolku stanovy) -- odkaz na obojí.
-      +((d.club_has_rules||d.club_rules_text)?('<label style="display:flex;gap:9px;align-items:flex-start;font-size:12px;color:var(--dark);line-height:1.45;margin-bottom:8px;cursor:pointer;"><input id="cohRules" type="checkbox" style="margin-top:2px;flex-shrink:0;"><span><span id="cohRulesTxt">'+((d.gym_org_form==='nonprofit')
-          ?(EN?'I have read the club\u2019s internal rules and will follow them.':'Sezn\u00e1mil(a) jsem se s provozn\u00edm \u0159\u00e1dem klubu a budu ho dodr\u017eovat.')
-          :(EN?'I have read the club\u2019s internal rules and will follow them.':'Sezn\u00e1mil(a) jsem se s provozn\u00edm \u0159\u00e1dem klubu a budu ho dodr\u017eovat.'))+'</span>'
-        // Odkazy pod větou, každý zvlášť jako tlačítko -- vedle sebe v textu splývaly.
-        +((d.club_rules_text||d.club_rules_file_url)?'<span style="display:flex;flex-wrap:wrap;gap:6px;margin-top:7px;">':'')
-        +(d.club_rules_text?('<a href="#" id="cohRulesOpen" style="display:inline-flex;align-items:center;gap:5px;padding:6px 10px;border:1px solid var(--border);border-radius:9px;background:#fff;color:var(--blue);font-weight:700;font-size:12px;text-decoration:none;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">\ud83d\udcdc '+escapeHtml(d.club_rules_title||(EN?'Internal rules':'Provozn\u00ed \u0159\u00e1d'))+'</a>'):'')
-        +(d.club_rules_file_url?('<a href="'+escapeHtml(d.club_rules_file_url)+'" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:5px;padding:6px 10px;border:1px solid var(--border);border-radius:9px;background:#fff;color:var(--blue);font-weight:700;font-size:12px;text-decoration:none;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">\ud83d\udcc4 '+escapeHtml(d.club_rules_file_name||(EN?'Rules document (PDF)':'Dokument k provozn\u00edmu \u0159\u00e1du (PDF)'))+'</a>'):'')
-        +((d.club_rules_text||d.club_rules_file_url)?'</span>':'')
-        +'</span></label>'):'')
-      +'<label style="display:flex;gap:9px;align-items:flex-start;font-size:12px;color:var(--mid);line-height:1.45;margin-bottom:14px;cursor:pointer;"><input id="cohMkt" type="checkbox" style="margin-top:2px;flex-shrink:0;"><span id="cohMktTxt">'+(EN?'I want to let the provider measure ad conversions more accurately and turn on marketing cookies. (Optional)':'Chci umo\u017enit poskytovateli p\u0159esn\u011bji m\u011b\u0159it konverze z reklam a zapnout marketingov\u00e9 cookies. (Nepovinn\u00e9)')+'</span></label>'
+        +'</span></label>') : '')
+      +'<label style="display:flex;gap:9px;align-items:flex-start;font-size:12px;color:var(--mid);line-height:1.45;margin-bottom:14px;cursor:pointer;"><input id="cohMkt" type="checkbox" style="margin-top:2px;flex-shrink:0;"><span id="cohMktTxt">'+(EN?'I want to let the provider measure ad conversions more accurately and turn on marketing cookies. (Optional, but recommended)':'Chci umo\u017enit poskytovateli p\u0159esn\u011bji m\u011b\u0159it konverze z reklam a zapnout marketingov\u00e9 cookies. (Nepovinn\u00e9, ale doporu\u010deno)')+'</span></label>'
       +'<button id="cohPayBtn" style="width:100%;padding:15px;background:var(--red);color:#fff;border:none;border-radius:13px;font-size:15px;font-weight:800;cursor:pointer;">'+(EN?'Pay deposit ':'Zaplatit zálohu ')+fmtPrice(d.deposit_amount||0,cur)+' '+_curSym(cur)+'</button>'
       +'<div id="cohSErr" style="display:none;margin-top:10px;padding:10px 12px;background:#FEECEC;border:1px solid #F3C9C0;border-radius:10px;color:var(--red);font-size:13px;font-weight:700;text-align:center;"></div>'
       +'<p style="font-size:10px;color:var(--light);text-align:center;margin-top:10px;line-height:1.5;">'+((typeof currentUser!=='undefined'&&currentUser)?(EN?'Signed in \u2014 the course will be added to your account.':'P\u0159ihl\u00e1\u0161en \u2014 kurz se p\u0159id\u00e1 pod tv\u016fj \u00fa\u010det.'):((d&&d.payment_mode==='qr_bank')?(EN?'Payment by bank transfer / QR. No app account needed now.':'Platba bankovním převodem / QR. Účet v appce teď nepotřebuješ.'):(EN?'Secure payment via Stripe. No app account needed now.':'Bezpečná platba přes Stripe. Účet v appce teď nepotřebuješ.')))+'</p>'));
@@ -21208,14 +21220,6 @@ async function openCohortSignup(cohortId, fromColdLink){
     if(wb) wb.onclick=function(){ _cohJoinWaitlist(d, ov, wb); };
     return;
   }
-  { const _mc=ov.querySelector('#cohMemberApp'), _md=ov.querySelector('#cohMaData'), _mb=ov.querySelector('#cohMaBirth'), _mg=ov.querySelector('#cohMaGuard');
-    const _sync=function(){
-      // U přihlášky za dítě se datum narození a zástupce berou z bloku „Pro koho".
-      if(_md) _md.style.display=(_mc&&_mc.checked&&_md.dataset.kidmode!=='1')?'block':'none';
-      const a=(_mb&&_mb.value)?_famAge(_mb.value):null;
-      if(_mg) _mg.style.display=(a!=null && a<18)?'block':'none';
-    };
-    if(_mc) _mc.addEventListener('change', _sync); if(_mb) _mb.addEventListener('change', _sync); _sync(); }
   const cc=ov.querySelector('#cohConsent');
   if(cc) cc.onchange=function(){ if(cc.checked){ var _ce=ov.querySelector('#cohConsentErr'); if(_ce) _ce.style.display='none'; } };
   // Měření reklam až po SAMOSTATNÉM marketingovém souhlasu (dřív se pixel zapínal souhlasem s podmínkami).
@@ -21244,7 +21248,7 @@ async function openCohortSignup(cohortId, fromColdLink){
     var ph=(ov.querySelector('#cohSPhone')&&ov.querySelector('#cohSPhone').value.trim())||'';
     if(ph){ var _cc=(ov.querySelector('#cohSPhoneCC')&&ov.querySelector('#cohSPhoneCC').value)||''; if(_cc && ph.charAt(0)!=='+') ph=_cc+' '+ph; }
     const tierEl=ov.querySelector('input[name="cohTier"]:checked'); const tier=tierEl?tierEl.value:'regular';
-    if(!cc||!cc.checked){ var _ce=ov.querySelector('#cohConsentErr'); if(_ce) _ce.style.display='block'; if(cc){ try{ cc.focus(); }catch(e){} } toast(EN?'Please agree to the terms':'Odsouhlas prosím podmínky'); return; } try{ if(typeof _recordConsent==='function') _recordConsent('provider_marketing', LEGAL_VERSION, LANG, (LANG==='en'?PROVIDER_MKT_EN:PROVIDER_MKT_CS), { channel:'cohort_signup', cohort_id:(d&&d.id)||null }); }catch(e){}
+    if(!cc||!cc.checked){ var _ce=ov.querySelector('#cohConsentErr'); if(_ce) _ce.style.display='block'; if(cc){ try{ cc.focus(); }catch(e){} } toast(EN?'Please agree to the terms':'Odsouhlas prosím podmínky'); return; }
     if(!nm||!em||!ph){ toast(EN?'Name, email and phone are required':'Jméno, email a telefon jsou povinné'); return; }
     const _who=_cohWhoGet(ov); if(_who.err){ toast('\u26a0\ufe0f '+_who.err); return; }
     { const rr=ov.querySelector('#cohRules'); if(rr && !rr.checked){ try{ rr.focus(); }catch(e){} toast(EN?'\u26a0\ufe0f Confirm the club\u2019s internal rules':'\u26a0\ufe0f Potvr\u010f provozn\u00ed \u0159\u00e1d klubu'); return; } }
@@ -21257,6 +21261,10 @@ async function openCohortSignup(cohortId, fromColdLink){
         marketing:!!(mk&&mk.checked), marketing_text:((ov.querySelector('#cohMktTxt')||{}).textContent||''),
         guardian_text:(ov._cohWho==='kid'?gtxt:'') } }); }
     ov._cohWhoBody=_who.body; ov._cohKid=_who.kid||null;
+    // Přihlášený bez data narození v profilu ho tady vyplnil: uloží se mu i do profilu (jen poprvé).
+    { const _bdp=((ov.querySelector('#cohMeDob')||{}).value)||'';
+      if(!ov._cohKid && _bdp && typeof currentUser!=='undefined' && currentUser && !currentUser.birthdate){
+        try{ const { error:_be }=await supaClient.from('profiles').update({ birthdate:_bdp }).eq('id',currentUser.id).is('birthdate',null); if(!_be) currentUser.birthdate=_bdp; }catch(e){} } }
     // U spolku je přihláška povinná: bez členství nemá klub co prodávat jako činnost pro členy.
     {
       const _maChk=ov.querySelector('#cohMemberApp');
@@ -21268,7 +21276,7 @@ async function openCohortSignup(cohortId, fromColdLink){
       // Přihláška bez účtu musí jít spárovat a klub ji musí mít do seznamu členů:
       // celé jméno, e-mail, datum narození, u nezletilého zákonný zástupce.
       if(d && d.gym_org_form==='nonprofit' && _maChk && _maChk.checked && !ov._cohKid){
-        const _bd=(ov.querySelector('#cohMaBirth')&&ov.querySelector('#cohMaBirth').value)||'';
+        const _bd=_cohMyDob(ov);
         const _age=_bd?_famAge(_bd):null;
         let _bad=null;
         if(nm.split(/\s+/).filter(Boolean).length<2) _bad=EN?'Enter your full name (first and last)':'Vypl\u0148 cel\u00e9 jm\u00e9no (jm\u00e9no i p\u0159\u00edjmen\u00ed)';
@@ -21276,9 +21284,6 @@ async function openCohortSignup(cohortId, fromColdLink){
         else if(!_bd || _age==null || _age<0 || _age>110) _bad=EN?'Enter your date of birth':'Vypl\u0148 datum narozen\u00ed';
         else if(_age<18) _bad=EN?'Under 18 \u2014 the parent or guardian applies: choose \u201cFor my child\u201d':'Pod 18 let pod\u00e1v\u00e1 p\u0159ihl\u00e1\u0161ku rodi\u010d nebo z\u00e1konn\u00fd z\u00e1stupce \u2014 zvol \u201ePro moje d\u00edt\u011b\u201c';
         if(_bad){ toast('\u26a0\ufe0f '+_bad); return; }
-        if(typeof currentUser!=='undefined' && currentUser && !currentUser.birthdate && _bd){
-          try{ const { error:_be }=await supaClient.from('profiles').update({ birthdate:_bd }).eq('id',currentUser.id).is('birthdate',null); if(!_be) currentUser.birthdate=_bd; }catch(e){}
-        }
       }
     }
     // PŘIHLÁŠKA ZA ČLENA U SPOLKU: ukládá se rovnou při odeslání kurzu, takže se k tomu
@@ -21292,10 +21297,11 @@ async function openCohortSignup(cohortId, fromColdLink){
           student_id: (typeof currentUser!=='undefined'&&currentUser) ? currentUser.id : null,
           // Přihláška za dítě: přihláška je dítěte, zákonný zástupce je ten, kdo vyplňuje.
           applicant_name: (ov._cohKid?ov._cohKid.name:nm), applicant_email: em, applicant_phone: ph,
-          applicant_birth: (ov._cohKid?ov._cohKid.dob:((ov.querySelector('#cohMaBirth')&&ov.querySelector('#cohMaBirth').value)||null)),
-          is_minor: (ov._cohKid?true:(function(){ const v=ov.querySelector('#cohMaBirth')&&ov.querySelector('#cohMaBirth').value; const a=v?_famAge(v):null; return a!=null && a<18; })()),
-          guardian_name: (ov._cohKid?nm:((ov.querySelector('#cohMaGName')&&ov.querySelector('#cohMaGName').value.trim())||null)),
-          guardian_contact: (ov._cohKid?([em,ph].filter(Boolean).join(' \u00b7 ')):((ov.querySelector('#cohMaGContact')&&ov.querySelector('#cohMaGContact').value.trim())||null)),
+          // „Pro mě" podává jen dospělý (ověřeno výš), zástupce je jen u přihlášky za dítě.
+          applicant_birth: (ov._cohKid?ov._cohKid.dob:(_cohMyDob(ov)||null)),
+          is_minor: !!ov._cohKid,
+          guardian_name: (ov._cohKid?nm:null),
+          guardian_contact: (ov._cohKid?([em,ph].filter(Boolean).join(' \u00b7 ')):null),
           consent_at: new Date().toISOString(),
           consent_version: (typeof LEGAL_VERSION!=='undefined'?LEGAL_VERSION:null),
           app_type: (d.member_app_type||null), app_text: (_memberAppConfirmText(Object.assign({}, d, { name:d.gym_name||'' }), EN)+(function(){ try{ const _l=_ma.closest('label'); return _l?('\n\n\u2611 '+_l.textContent.trim()):''; }catch(e){ return ''; } })()),
@@ -21304,6 +21310,9 @@ async function openCohortSignup(cohortId, fromColdLink){
         });
       }
     }catch(e){ console.error('member application', e); }
+    // Marketingový souhlas jen když ho člověk opravdu zaškrtl, se zněním, které viděl. (Dřív se
+    // zapsal pokaždé, když odsouhlasil podmínky -- i bez zaškrtnutého marketingu.)
+    try{ const _mk0=ov.querySelector('#cohMkt'); if(_mk0 && _mk0.checked && typeof _recordConsent==='function') _recordConsent('provider_marketing', LEGAL_VERSION, LANG, ((ov.querySelector('#cohMktTxt')||{}).textContent||''), { channel:'cohort_signup', cohort_id:(d&&d.id)||null }); }catch(e){}
     pb.disabled=true; pb.textContent=(EN?'Redirecting...':'Přesměrovávám...');
     var _fb=_cohFb();
     var _lev='cl_'+Date.now()+'_'+Math.random().toString(36).slice(2,8);
@@ -23789,14 +23798,20 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData, { subject:
     <div id="mgDropinPlans"></div>
     <button id="mgAddDropin" style="width:100%;padding:11px;background:var(--bg);border:1px dashed var(--border);border-radius:11px;font-size:13px;font-weight:700;color:var(--mid);cursor:pointer;font-family:'DM Sans';margin-bottom:18px;">+ ${LANG==='en'?'Add price':'Přidat cenu'}</button>
 
+    <div class="sec-lbl">${LANG==='en'?'How the period runs':'Jak se počítá období'}</div>
+    <div id="mgMembMode" data-v="${g.memb_calendar===true?'cal':(g.memb_calendar===false?'pay':'')}" style="display:flex;gap:8px;margin-bottom:6px;">
+      <button type="button" class="mgMembModeBtn" data-v="cal" style="flex:1;padding:11px 6px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';border:1.5px solid var(--border);background:transparent;color:var(--mid);line-height:1.3;">📅 ${LANG==='en'?'Calendar month':'Kalendářní měsíc'}<br><span style="font-size:11px;font-weight:600;opacity:.8;">${LANG==='en'?'1st – last day':'1. – poslední den'}</span></button>
+      <button type="button" class="mgMembModeBtn" data-v="pay" style="flex:1;padding:11px 6px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';border:1.5px solid var(--border);background:transparent;color:var(--mid);line-height:1.3;">🔁 ${LANG==='en'?'A month from payment':'Měsíc od zaplacení'}<br><span style="font-size:11px;font-weight:600;opacity:.8;">${LANG==='en'?'e.g. 13 Oct – 12 Nov':'např. 13. 10. – 12. 11.'}</span></button>
+    </div>
+    <p id="mgMembModeWarn" style="display:none;font-size:12px;font-weight:700;color:var(--red);line-height:1.45;margin:0 0 8px;">${LANG==='en'?'⚠️ Pick one. Until you do, nobody can buy a membership.':'⚠️ Vyber jednu možnost. Dokud ji nevybereš, členství nikdo nekoupí.'}</p>
+    <p id="mgMembModeHint" style="font-size:11.5px;color:var(--light);line-height:1.55;margin:0 0 8px;"></p>
+    <label id="mgMembProrateRow" style="display:none;align-items:flex-start;gap:10px;cursor:pointer;font-size:13.5px;font-weight:600;color:var(--dark);margin:4px 0 4px;line-height:1.4;"><input type="checkbox" id="mgMembProrate" ${g.memb_prorate===true?'checked':''} style="width:18px;height:18px;flex-shrink:0;margin-top:1px;"> ${LANG==='en'?'When someone pays mid-month, charge only the part of the month that is left?':'Při úhradě členství v průběhu měsíce vybírat jen poměrnou část za daný měsíc?'}</label>
+    <p id="mgMembProrateHint" style="display:none;font-size:11.5px;color:var(--light);line-height:1.55;margin:0 0 8px;"></p>
+    <div style="height:10px;"></div>
     <div class="sec-lbl">${LANG==='en'?'Plans':(_sellKind({gym:g})==='pass'?'Varianty permanentek':'Varianty členství')}</div>
     <p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:8px;">${LANG==='en'?'Offer one or more monthly plans. Each plan lets members freely book the class levels it covers.':'Nabídni jednu nebo víc měsíčních variant. Každá umožní členům zdarma rezervovat lekce úrovní, které pokrývá.'}</p>
     <div id="mgPlans"></div>
     <button id="mgAddPlan" style="width:100%;padding:11px;background:var(--bg);border:1px dashed var(--border);border-radius:10px;font-weight:600;color:var(--dark);cursor:pointer;font-family:'DM Sans';margin-bottom:8px;">+ ${LANG==='en'?'Add plan':'Přidat variantu'}</button>
-    <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:13.5px;font-weight:600;color:var(--dark);margin:10px 0 4px;line-height:1.4;"><input type="checkbox" id="mgMembCalendar" ${_membCalendar(g)?'checked':''} style="width:18px;height:18px;flex-shrink:0;margin-top:1px;"> ${LANG==='en'?'Runs by calendar month':'Platí na kalendářní měsíc'}</label>
-    <p style="font-size:11.5px;color:var(--light);line-height:1.55;margin:0 0 18px;">${LANG==='en'
-      ? 'On: every period ends on the last day of the month (e.g. 1–30 Sep). Someone joining mid-month pays only for the days left, card subscriptions renew on the 1st, and paying ahead follows on from the current period. Off: a month from the day of payment. Associations have it on by default.'
-      : 'Zapnuto: období končí vždy posledním dnem měsíce (např. 1.–30. 9.). Kdo začne uprostřed měsíce, platí jen za zbývající dny, předplatné kartou se strhává vždy 1. a platba dopředu navazuje na současné období. Vypnuto: měsíc ode dne zaplacení. Spolky to mají zapnuté automaticky.'}</p>
 
     <div class="sec-lbl">${LANG==='en'?'Member referral':'Referral pro členy'}</div>
     <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:13.5px;font-weight:600;color:var(--dark);margin-bottom:8px;line-height:1.4;"><input type="checkbox" id="mgMemberRefEnable" ${((_myGymData.member_ref_pct||0)>0)?'checked':''} onchange="var w=document.getElementById('mgMemberRefWrap');if(w)w.style.display=this.checked?'block':'none';if(!this.checked){var pe=document.getElementById('mgMemberRefPct');if(pe)pe.value='';}" style="width:18px;height:18px;flex-shrink:0;margin-top:1px;"> ${LANG==='en'?'First-month discount for new members brought by your existing members?':'Sleva první měsíc pro nové členy, které přivedou stávající členové?'}</label>
@@ -23911,6 +23926,8 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData, { subject:
   setOrgFormUI();
   box.querySelectorAll('.partnerLearnBtn').forEach(b=>b.onclick=openPartnerInfo);
   document.querySelectorAll('.orgFormBtn').forEach(b=>b.onclick=()=>{ _gymOrgForm=b.dataset.v; setOrgFormUI(); renderPlansEditor(); loadGymManageBookings(); });
+  document.querySelectorAll('.mgMembModeBtn').forEach(b=>b.onclick=()=>{ const w=$('mgMembMode'); if(w) w.dataset.v=b.dataset.v; _mgMembModeUI(); });
+  try{ if($('mgMembProrate')) $('mgMembProrate').onchange=_mgMembModeUI; _mgMembModeUI(); }catch(e){}
   // Prouzek musi vest primo do te sekce, jinak je to jen vycitka bez cesty ven.
   // Dokument s podminkami: nahrani, hash a vypis toho, co uz je nahrane.
   { const _cur=$('mgTermsFileCur');
@@ -26967,7 +26984,7 @@ function _recpMembPay(pi){
   h+='<div style="font-weight:800;font-size:16px;color:var(--dark);margin-bottom:2px;">\ud83c\udf9f\ufe0f '+escapeHtml(plan.name||(EN?'Membership':'Permanentka'))+'</div>';
   h+='<div id="rmPrice" style="font-size:14px;color:#006040;font-weight:800;margin-bottom:8px;">'+_rmPriceTxt()+'</div>';
   h+='<p style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:12px;">'+(_rmTerm.calendar
-    ? (EN?'Pick the member and take payment. It runs by calendar month: the period follows on from their current membership and ends on the last day of the month; a part month is charged only for the days left.':'Vyber \u010dlena a vezmi platbu. Plat\u00ed po kalend\u00e1\u0159n\u00edch m\u011bs\u00edc\u00edch: obdob\u00ed navazuje na jeho platn\u00e9 '+(_sellKind({gym:_myGymData})==='pass'?'permanentku':'\u010dlenstv\u00ed')+' a kon\u010d\u00ed posledn\u00edm dnem m\u011bs\u00edce, ne\u00fapln\u00fd m\u011bs\u00edc se plat\u00ed jen za zb\u00fdvaj\u00edc\u00ed dny.')
+    ? (EN?'Pick the member and take payment. It runs by calendar month: the period follows on from their current membership and ends on the last day of the month'+(_membProrate(g)?'; a part month is charged only for the days left.':'; a month started midway is charged in full.'):('Vyber \u010dlena a vezmi platbu. Plat\u00ed po kalend\u00e1\u0159n\u00edch m\u011bs\u00edc\u00edch: obdob\u00ed navazuje na jeho platn\u00e9 '+(_sellKind({gym:_myGymData})==='pass'?'permanentku':'\u010dlenstv\u00ed')+' a kon\u010d\u00ed posledn\u00edm dnem m\u011bs\u00edce, '+(_membProrate(g)?'ne\u00fapln\u00fd m\u011bs\u00edc se plat\u00ed jen za zb\u00fdvaj\u00edc\u00ed dny.':'m\u011bs\u00edc na\u010dat\u00fd v pr\u016fb\u011bhu se plat\u00ed cel\u00fd.')))
     : (EN?('Pick the member, take payment, and we activate/extend their membership'+(_rmTerm.endsOn?'.':(' by '+_rmMo+(_rmMo===1?' month.':' months.')))):('Vyber \u010dlena, vezmi platbu a my mu aktivujeme/prodlou\u017e\u00edme '+(_sellKind({gym:_myGymData})==='pass'?'permanentku':'\u010dlenstv\u00ed')+(_rmTerm.endsOn?('.'):(' o '+_rmMo+(_rmMo===1?' m\u011bs\u00edc.':(_rmMo<5?' m\u011bs\u00edce.':' m\u011bs\u00edc\u016f.')))))))+'</p>';
   h+='<p style="font-size:11px;color:var(--light);margin:0 0 4px;">'+(EN?'Member':'\u010clen')+'</p>';
   h+='<select id="rmMember" style="width:100%;box-sizing:border-box;padding:11px;border:1.5px solid var(--border);border-radius:10px;font-size:14px;font-family:\'DM Sans\';margin-bottom:10px;background:var(--surf);color:var(--dark);">';
@@ -28120,6 +28137,15 @@ function _planCovered(g, plan){
 }
 function gymSellablePlans(g){ return gymMembPlans(g).filter(function(p){ return _planCovered(g, p); }); }
 function _planSellable(plan, g){
+  // Spolek, který ještě nevybral, jak se členství počítá, ho neprodává (server to hlídá taky).
+  if(_membModeMissing(g)){
+    const _own=!!(currentUser && g && String(g.owner_id)===String(currentUser.id));
+    toast(LANG==='en'
+      ? (_own?'\u26a0\ufe0f Choose how membership periods work first: Club settings \u2192 Pricing & membership.':'This club has not finished setting up its membership yet \u2014 it cannot be bought for now.')
+      : (_own?'\u26a0\ufe0f Nejd\u0159\u00edv vyber, jak se \u010dlenstv\u00ed po\u010d\u00edt\u00e1: Nastaven\u00ed klubu \u2192 Ceny & \u010dlenstv\u00ed.':'Klub je\u0161t\u011b nedokon\u010dil nastaven\u00ed \u010dlenstv\u00ed \u2014 zat\u00edm ho nejde koupit.'), 1);
+    if(_own){ try{ _openMembMode(g.id); }catch(e){} }
+    return false;
+  }
   if(g && (_planAccess(plan).length || (plan&&plan.classes&&plan.classes.length)) && !_planCovered(g, plan)){
     toast(LANG==='en' ? 'This plan currently has no class in the club\u2019s schedule \u2014 it cannot be bought.'
                       : 'Na tuhle polo\u017eku te\u010f v rozvrhu klubu nen\u00ed \u017e\u00e1dn\u00e1 lekce \u2014 koupit ji nejde.');
@@ -28151,7 +28177,39 @@ function togglePlanAccess(i,v){
   else { a=a.filter(x=>x!=='all'); if(a.includes(v)) a=a.filter(x=>x!==v); else a.push(v); }
   p.access=a; p.kids=a.includes('kids'); renderPlansEditor();
 }
+// REŽIM ČLENSTVÍ v Nastavení klubu → Ceny & členství. Klub podnikatele bez volby = měsíc od
+// zaplacení; spolek musí vybrat sám (do té doby se členství neprodává -- _membModeMissing).
+function _mgMembModeUI(){
+  const w=$('mgMembMode'); if(!w) return; const EN=LANG==='en';
+  const np=((typeof _gymOrgForm!=='undefined'&&_gymOrgForm)||(_myGymData&&_myGymData.org_form))==='nonprofit';
+  let v=w.dataset.v||''; if(!v && !np) v='pay';
+  w.querySelectorAll('.mgMembModeBtn').forEach(function(b){ const on=b.dataset.v===v; b.style.background=on?'var(--dark)':'transparent'; b.style.color=on?'#fff':'var(--mid)'; b.style.borderColor=on?'var(--dark)':(!v&&np?'var(--red)':'var(--border)'); });
+  const warn=$('mgMembModeWarn'); if(warn) warn.style.display=(!v && np)?'block':'none';
+  const hint=$('mgMembModeHint'); if(hint) hint.textContent = v==='cal'
+    ? (EN?'Every period ends on the last day of the month. Card subscriptions renew on the 1st; paying ahead follows on from the current period.':'Každé období končí posledním dnem měsíce. Předplatné kartou se strhává vždy 1. v měsíci, platba dopředu navazuje na současné období.')
+    : (v==='pay' ? (EN?'The period runs a month from the day of payment.':'Období běží měsíc ode dne zaplacení.') : '');
+  const pr=$('mgMembProrateRow'), ph=$('mgMembProrateHint'), on=!!($('mgMembProrate')&&$('mgMembProrate').checked);
+  if(pr) pr.style.display=(v==='cal')?'flex':'none';
+  if(ph){ ph.style.display=(v==='cal')?'block':'none'; ph.textContent = on
+    ? (EN?'On: someone paying on 13 Oct pays only for 13–31 Oct.':'Zapnuto: kdo zaplatí 13. 10., platí jen za 13.–31. 10.')
+    : (EN?'Off: someone paying on 13 Oct pays for the whole of October.':'Vypnuto: kdo zaplatí 13. 10., platí celý říjen.'); }
+}
+// Proklik do režimu členství (z upozornění i z hlášky při pokusu o nákup u vlastního klubu).
+function _openMembMode(gymId){
+  try{
+    if(gymId){ const _g=(window._myGyms||[]).filter(function(x){ return String(x.id)===String(gymId); })[0]; if(_g){ _myGymData=_g; window._myGymData=_g; window._selectedGymId=_g.id; } }
+    window._gmInitTab=1; openSheet('shGymManage'); if(typeof renderGymManage==='function') renderGymManage();
+    setTimeout(function(){ try{
+      if(typeof window._gmShowTab==='function') window._gmShowTab(1);
+      if(typeof _gmSetShow==='function') _gmSetShow('pay');
+      const el=$('mgMembMode'); const det=el&&el.closest('details.setSec'); const sm=det&&det.querySelector('summary');
+      if(sm && !document.querySelector('.setSecOv')) sm.click();
+      setTimeout(function(){ try{ const e2=$('mgMembMode'); if(e2) e2.scrollIntoView({behavior:'smooth',block:'center'}); }catch(_){} }, 250);
+    }catch(e){} }, 600);
+  }catch(e){}
+}
 function setOrgFormUI(){
+  try{ _mgMembModeUI(); }catch(e){}
   document.querySelectorAll('.orgFormBtn').forEach(b=>{ const on=b.dataset.v===_gymOrgForm; b.style.background=on?'var(--dark)':'transparent'; b.style.color=on?'#fff':'var(--mid)'; b.style.borderColor=on?'var(--dark)':'var(--border)'; });
   const h=$('orgFormHint'); if(h) h.textContent = _gymOrgForm==='nonprofit'
     ? (LANG==='en'?'Non-profit (association / club).':'Nezisková organizace / spolek.')
@@ -29579,12 +29637,22 @@ async function saveGymManage(){
   } else if(_myGymData && _myGymData.org_form){
     patch.org_form=_myGymData.org_form;
   }
-  // KALENDÁŘNÍ MĚSÍC: null = podle typu klubu (spolek ano). Ukládá se jen odchylka od výchozího,
-  // takže změna typu klubu výchozí stav posune. Bez změny se sloupec vůbec neposílá.
-  if($('mgMembCalendar')){
-    const _calDef=((patch.org_form||(_myGymData&&_myGymData.org_form))==='nonprofit');
-    const _calOn=!!$('mgMembCalendar').checked; const _calVal=(_calOn===_calDef)?null:_calOn;
-    if(_calVal!==((_myGymData&&_myGymData.memb_calendar)??null)){ patch.memb_calendar=_calVal; }
+  // REŽIM ČLENSTVÍ (kalendářní měsíc / od zaplacení) a poměrná první platba. Posílá se jen
+  // změna; u klubu podnikatele je nevybráno totéž co „od zaplacení".
+  if($('mgMembMode')){
+    const _np=((patch.org_form||(_myGymData&&_myGymData.org_form))==='nonprofit');
+    const _sel=$('mgMembMode').dataset.v||'';
+    const _mc=_sel==='cal'?true:(_sel==='pay'?false:null);
+    // Spolek s nabídkou členství bez vybraného režimu: neukládat, ať se to nedá přehlédnout.
+    if(_np && _mc===null && Array.isArray(plans) && plans.length){
+      toast(LANG==='en'?'\u26a0\ufe0f First choose how the membership period runs (calendar month / a month from payment).':'\u26a0\ufe0f Nejd\u0159\u00edv vyber, jak se po\u010d\u00edt\u00e1 obdob\u00ed \u010dlenstv\u00ed (kalend\u00e1\u0159n\u00ed m\u011bs\u00edc / m\u011bs\u00edc od zaplacen\u00ed).', 1);
+      try{ $('mgMembMode').scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){}
+      return;
+    }
+    const _st=(_myGymData&&_myGymData.memb_calendar)??null;
+    if(_mc!==_st && !(!_np && _mc===false && _st===null)) patch.memb_calendar=_mc;
+    const _pr=(_mc===true) && !!($('mgMembProrate')&&$('mgMembProrate').checked);
+    if(_pr!==(!!(_myGymData&&_myGymData.memb_prorate===true))) patch.memb_prorate=_pr;
   }
   const _gdesc = ($('mgDescription')&&$('mgDescription').value.trim())||null; patch.description=_gdesc;
 
@@ -29656,9 +29724,10 @@ async function saveGymManage(){
   if(error && /register_entry/.test(String(error.message||''))){ delete patch.register_entry; ({ error } = await supaClient.from('gyms').update(patch).eq('id', _myGymData.id)); }
   // Totéž pro kalendářní měsíc (sql/memb-calendar.sql). Zbytek se uloží, přepínač ne -- a řekne se to.
   let _calSkipped=false;
-  if(error && /memb_calendar/.test(String(error.message||''))){ delete patch.memb_calendar; _calSkipped=true; ({ error } = await supaClient.from('gyms').update(patch).eq('id', _myGymData.id)); }
+  if(error && /memb_calendar|memb_prorate/.test(String(error.message||''))){ delete patch.memb_calendar; delete patch.memb_prorate; _calSkipped=true; ({ error } = await supaClient.from('gyms').update(patch).eq('id', _myGymData.id)); }
   if(!error && ('memb_calendar' in patch)) _myGymData.memb_calendar=patch.memb_calendar;
-  if(!error && _calSkipped) toast(LANG==='en'?'\u26a0\ufe0f Saved, except the calendar-month setting (the database is not updated yet).':'\u26a0\ufe0f Uloženo, jen bez kalendářního měsíce (databáze ještě není aktualizovaná).', 1);
+  if(!error && ('memb_prorate' in patch)) _myGymData.memb_prorate=patch.memb_prorate;
+  if(!error && _calSkipped) toast(LANG==='en'?'\u26a0\ufe0f Saved, except how the membership period runs (the database is not updated yet).':'\u26a0\ufe0f Uloženo, jen bez režimu členství (databáze ještě není aktualizovaná).', 1);
   if(!error) _auditLog(_myGymData.id,'settings_changed',null,null);
   if(!error) _regVerify('gym', _myGymData.id);
   // „TypeError: Load failed" je Safari pro požadavek, na který nepřišla žádná odpověď (výpadek
@@ -33961,9 +34030,10 @@ async function loadNotifications(append){
     const isCoachRefAdmin = false; /* referral EP grants removed — rewards are Shikai/Bankai */
     // beta_pending sem musí být přidané, jinak se notifikace vykreslí jako neklikatelná a obsluha
   // se vůbec nenapojí -- větev, která má otevřít admin, pak nemá kdo spustit.
-  const clickable = k==='event_cohost_invite' || k==='event_cohost_accepted' || k==='event_cohost_declined' || k==='event_cohost_left' || k==='event_cohost_removed' || k==='oss_threshold' || k==='commission_upcoming' || k==='family_payreq_offer' || k==='ref_joined' || k==='minor_course_req' || k==='migration_request' || k==='withdrawal_done' || k==='online_withdrawal' || k==='online_plan_new' || k==='online_piece_done' || k==='online_plan_qr' || k==='online_plan_active' || k==='withdrawal_request' || k==='minor_member_app' || k==='minor_waiver' || k==='family_request' || k==='autonomy_sunset' || k==='dropin_bank_cancelled' || k==='bug_report' || k==='milestone' || k==='address_from_club' || k==='address_request' || k==='class_cancelled' || k==='trial_booked' || k==='pis_creditor_outage' || (String(k||'').indexOf('kid_share')===0) || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed' || k==='support_ticket' || k==='class_reminder' || k==='fav_added_coach' || k==='fav_added_gym' || isCoachLessonRem || isStudResched || k==='coach_pay_ok' || k==='coach_qr_intent' || k==='qr_unconfirmed' || k==='event_qr_intent' || k==='walkin_drop' || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='org_expiring' || k==='beta_pending' || k==='minor_waiver_req' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked' || k==='commission_no_card' || k==='commission_suspended' || k==='new_provider' || k==='supplier_live' || k==='supplier_ended';
+  const clickable = k==='memb_mode_needed' || k==='event_cohost_invite' || k==='event_cohost_accepted' || k==='event_cohost_declined' || k==='event_cohost_left' || k==='event_cohost_removed' || k==='oss_threshold' || k==='commission_upcoming' || k==='family_payreq_offer' || k==='ref_joined' || k==='minor_course_req' || k==='migration_request' || k==='withdrawal_done' || k==='online_withdrawal' || k==='online_plan_new' || k==='online_piece_done' || k==='online_plan_qr' || k==='online_plan_active' || k==='withdrawal_request' || k==='minor_member_app' || k==='minor_waiver' || k==='family_request' || k==='autonomy_sunset' || k==='dropin_bank_cancelled' || k==='bug_report' || k==='milestone' || k==='address_from_club' || k==='address_request' || k==='class_cancelled' || k==='trial_booked' || k==='pis_creditor_outage' || (String(k||'').indexOf('kid_share')===0) || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed' || k==='support_ticket' || k==='class_reminder' || k==='fav_added_coach' || k==='fav_added_gym' || isCoachLessonRem || isStudResched || k==='coach_pay_ok' || k==='coach_qr_intent' || k==='qr_unconfirmed' || k==='event_qr_intent' || k==='walkin_drop' || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='org_expiring' || k==='beta_pending' || k==='minor_waiver_req' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked' || k==='commission_no_card' || k==='commission_suspended' || k==='new_provider' || k==='supplier_live' || k==='supplier_ended';
     let linkLabel = L('Otevřít ›');
     if(k==='payment_confirmed'){ var _pcd={}; try{ _pcd=JSON.parse(n.data||'{}'); }catch(e){} var _gg=_pcd.goto; linkLabel = (_pcd.for_other && _gg!=='courses') ? (LANG==='en'?'Receipt ›':'Doklad ›') : (_gg==='dropin'||_gg==='bookings') ? (LANG==='en'?'Booking details ›':'Detail rezervace ›') : (_gg==='tickets') ? (LANG==='en'?'my ticket ›':'moje vstupenka ›') : (_gg==='courses') ? (LANG==='en'?'my course ›':'můj kurz ›') : (_gg==='merch') ? (LANG==='en'?'view ›':'zobrazit ›') : (LANG==='en'?'details ›':'detail ›'); } else if(k==='qr_intent') linkLabel = LANG==='en'?'To confirm ›':'K potvrzení ›'; else if(k==='qr_released'||k==='qr_reservation_expired') linkLabel = LANG==='en'?'Book again ›':'Rezervovat znovu ›'; else if(k==='qr_requeued') linkLabel = LANG==='en'?'Pay again ›':'Zaplatit znovu ›'; else if(k==='sounding_ask') linkLabel = LANG==='en'?'Answer ›':'Odpovědět ›'; else if(k==='cover_needed') linkLabel = LANG==='en'?'Take the cover ›':'Vzít záskok ›'; else if(k==='cover_filled'||k==='cover_filled_owner') linkLabel = LANG==='en'?'View ›':'Zobrazit ›'; else if(k==='doklad_vat_needed') linkLabel = LANG==='en'?'Add VAT ID ›':'Doplnit DIČ ›'; else if(k==='course_new') linkLabel = LANG==='en'?'Course details ›':'Detail kurzu ›'; else if(k==='slot_demand') linkLabel = LANG==='en'?'Open my diary ›':'Otevřít diář ›'; else if(k==='cohort_month_due') linkLabel = LANG==='en'?'Pay now ›':'Doplatit ›'; else if(k==='cohort_month_collect') linkLabel = LANG==='en'?'Open roster ›':'Otevřít roster ›'; else if(k==='cohort_deposit_paid') linkLabel = LANG==='en'?'View roster ›':'Otevřít účastníky ›'; else if(k==='cohort_qr_claim') linkLabel = LANG==='en'?'View roster ›':'Otevřít účastníky ›'; else if(k==='cohort_deposit_mine') linkLabel = LANG==='en'?'My course ›':'Můj kurz ›';
+      else if(k==='memb_mode_needed') linkLabel = LANG==='en'?'Choose the mode ›':'Vybrat režim ›';
       else if(k==='doklad_unified') linkLabel = LANG==='en'?'Open the invoice ›':'Otevřít doklad ›';
       else if(k==='trial_booked') linkLabel = LANG==='en'?'Open attendance ›':'Otevřít docházku ›';
       // Nový poskytovatel: u organizace to znamená ke SCHVÁLENÍ, u kouče a klubu jen na profil.
@@ -34506,6 +34576,7 @@ async function loadNotifications(append){
           } else if(_d.organization_id){ openMtlCommissions({ organizationId:_d.organization_id, orgName:_d.name||'' }); }
           else { openMtlCommissions({ coachId: currentUser.id }); }
         }catch(e){} }
+        else if(k==='memb_mode_needed'){ try{ const _d=JSON.parse(n.data||'{}'); _openMembMode(_d.gym_id||null); }catch(e){ _openMembMode(null); } }
         else if(k==='commission_failed'||k==='account_suspended'||k==='cash_blocked'||k==='commission_no_card'||k==='commission_suspended'){ try{
           let _d={}; try{ _d=JSON.parse(n.data||'{}'); }catch(e){}
           if(_d.gym_id){
@@ -49456,8 +49527,6 @@ const PARTNER_TERMS_VERSION = '2026-10-06'; // zmena: cl. 4.5 rodinne lekce -- p
 //  // dokument B má vlastní verzi -- mění se nezávisle na A
 const MARKETING_CONSENT_CS='Souhlasím s marketingovými cookies a měřením reklam přes Meta (Facebook) Pixel a Conversions API — MTL může nastavit cookies (_fbp/_fbc) a sdílet hashované identifikátory s Metou pro měření a cílení kampaní. Souhlas mohu kdykoli odvolat.';
 const MARKETING_CONSENT_EN='I consent to marketing cookies and ad measurement via the Meta (Facebook) Pixel and Conversions API — MTL may set cookies (_fbp/_fbc) and share hashed identifiers with Meta to measure and target campaigns. I can withdraw this consent at any time.';
-const PROVIDER_MKT_CS='Souhlasím s podmínkami kurzu, zpracováním údajů a marketingem/trackingem poskytovatele výše.';
-const PROVIDER_MKT_EN='I agree to the cohort terms, the data processing, and the provider marketing/tracking described above.';
 const LEGAL_CONTACT = 'support@martialtraininglab.com';
 function _lp(t){ return `<p style="font-size:13px;line-height:1.7;color:var(--dark);margin:0 0 12px;">${t}</p>`; }
 function _lh(t){ return `<div style="font-size:14px;font-weight:800;color:var(--dark);margin:16px 0 6px;">${t}</div>`; }
