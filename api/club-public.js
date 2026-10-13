@@ -73,20 +73,38 @@ const FONTS = '<link rel="preconnect" href="https://fonts.googleapis.com">'
   + '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
   + '<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">';
 
+// Vlastní adresa klubu: /klub/<slug> (vercel.json přepíše na ?slug=). Malá písmena, číslice, pomlčky.
+const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])$/;
+
 export default async function handler(req, res) {
-  const id = (req.query && (req.query.club || req.query.id)) || '';
+  const q0 = req.query || {};
+  const slug = String(q0.slug || '').toLowerCase();
+  const id = q0.club || q0.id || '';
   const origin = 'https://' + (req.headers['x-forwarded-host'] || req.headers.host || 'app.martialtraininglab.com');
 
-  if (!id) {
+  // JEN ZNÁMÉ PARAMETRY. Každá jiná adresa je pro CDN nová, takže robot s náhodnými parametry
+  // (?club=X&x=123) by obcházel mezipaměť a každý požadavek by šel do databáze. Neznámé
+  // parametry (i fbclid / utm z Instagramu a Facebooku) se přesměrují na čistou adresu --
+  // bez dotazu do databáze, a přesměrování si CDN taky podrží.
+  { const _ok = new Set(['club', 'id', 'slug']);
+    if (Object.keys(q0).some((k) => !_ok.has(k))) {
+      const clean = slug ? ('/klub/' + encodeURIComponent(slug)) : ('/api/club-public?club=' + encodeURIComponent(String(id)));
+      res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400');
+      res.setHeader('Location', clean);
+      return res.status(301).end();
+    } }
+
+  if (!id && !(slug && SLUG_RE.test(slug))) {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.status(400).send('<!doctype html><meta charset="utf-8"><p>Chybí klub.</p>');
   }
 
   // Vyjmenovat sloupce se nevyplatilo: stačí jeden, který se jinak jmenuje, a PostgREST
   // odmítne celý dotaz -- stránka pak vyjde prázdná a není vidět proč.
-  const gr = await sbGet(`gyms?id=eq.${encodeURIComponent(id)}&select=*&limit=1`);
+  const gr = slug ? await sbGet(`gyms?slug=eq.${encodeURIComponent(slug)}&select=*&limit=1`)
+                  : await sbGet(`gyms?id=eq.${encodeURIComponent(id)}&select=*&limit=1`);
   const g = gr && gr[0];
-  if (!g) console.log('[club-public] klub nenalezen nebo dotaz selhal:', id);
+  if (!g) console.log('[club-public] klub nenalezen nebo dotaz selhal:', id || slug);
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
 
@@ -114,14 +132,15 @@ export default async function handler(req, res) {
   const photos = parseJson(g.photos, []) || [];
   const discs = parseJson(g.disciplines, []) || [];
   const schedule = parseJson(g.schedule, []) || [];
-  const plans = parseJson(g.membership_plans, []) || [];
+  // Spolek, který ještě nevybral, jak se členství počítá, ho nenabízí (stejně jako appka).
+  const plans = (g.org_form === 'nonprofit' && g.memb_calendar == null) ? [] : (parseJson(g.membership_plans, []) || []);
   const cur = g.currency || 'CZK';
 
   // Trenéři: jen ti, kteří u klubu opravdu jsou. Jméno a nic víc -- kontakty patří do appky,
   // ne na veřejnou stránku.
   let coaches = [], ownerRef = '';
   try {
-    const links = await sbGet(`gym_coaches?gym_id=eq.${encodeURIComponent(id)}&status=eq.active&select=coach_id&limit=40`);
+    const links = await sbGet(`gym_coaches?gym_id=eq.${encodeURIComponent(g.id)}&status=eq.active&select=coach_id&limit=40`);
     const ids = [...new Set((links || []).map(l => l.coach_id).filter(Boolean))];
     if (g.owner_id) ids.push(g.owner_id);
     if (ids.length) {
@@ -136,7 +155,7 @@ export default async function handler(req, res) {
   // gyms žádný sloupec s průměrem nenese -- appka si ho počítá z gym_ratings a my taky.
   let nRat = 0, avg = null;
   try {
-    const rr = await sbGet(`gym_ratings?gym_id=eq.${encodeURIComponent(id)}&select=rating&limit=500`);
+    const rr = await sbGet(`gym_ratings?gym_id=eq.${encodeURIComponent(g.id)}&select=rating&limit=500`);
     const vals = (rr || []).map(r => Number(r.rating)).filter(v => v > 0);
     nRat = vals.length;
     if (nRat) avg = vals.reduce((a, b) => a + b, 0) / nRat;
@@ -151,7 +170,7 @@ export default async function handler(req, res) {
   // Napsané recenze. Hvězdičky samy o sobě nikoho nepřesvědčí, věta od člena ano.
   let reviews = [];
   try {
-    const rv = await sbGet(`gym_ratings?gym_id=eq.${encodeURIComponent(id)}&select=rating,comment,student_name,created_at&order=created_at.desc&limit=30`);
+    const rv = await sbGet(`gym_ratings?gym_id=eq.${encodeURIComponent(g.id)}&select=rating,comment,student_name,created_at&order=created_at.desc&limit=30`);
     reviews = (rv || [])
       .filter(r => r && r.comment && String(r.comment).trim().length > 2)
       .slice(0, 6)
@@ -232,7 +251,7 @@ export default async function handler(req, res) {
 <meta property="og:type" content="website">
 <meta property="og:title" content="${esc(title)}">
 <meta property="og:description" content="${esc(desc)}">
-<meta property="og:url" content="${esc(origin + '/api/club-public?club=' + g.id)}">
+<meta property="og:url" content="${esc(origin + (g.slug ? ('/klub/' + g.slug) : ('/api/club-public?club=' + g.id)))}">
 ${hero ? `<meta property="og:image" content="${esc(hero)}">` : ''}
 <meta name="twitter:card" content="${hero ? 'summary_large_image' : 'summary'}">
 <meta name="theme-color" content="#0c0c0c">
