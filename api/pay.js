@@ -3,6 +3,7 @@ import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor, orgR
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { checkPrice, offerPrices, planTermPrices, checkOnlineCountry } from './_price-check.js';
 import { vatMode } from './_vat.js';
+import { membCalendar, membActiveEnd, calTerm, calStart, calSubPlan } from './_memb-term.js';
 import { viesCheck } from './tax-verify.js';
 import { b2cSmallState } from './_oss.js';
 const _PC = (kind, extra) => ({ SB: _SUPA_URL, KEY: _SUPA_KEY, kind, ...extra });
@@ -517,27 +518,50 @@ async function membershipCheckout(req, res) {
 
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
 
-  // CENA PROTI CENÍKU ČLENSTVÍ KLUBU (membership_plans). Více měsíců = násobek / poměrná část.
-  { const _pc = await checkPrice(_PC('gymMembership', { amount: parseInt(amount, 10), currency, gymId: _skGym || gymId })); if (!_pc.ok) return res.status(400).json({ error: _pc.error }); }
+  const _once = String(_q0.once || '') === '1';
+  const _moQ = Math.max(1, parseInt(months, 10) || 1);
+  // KALENDÁŘNÍ MĚSÍC (spolek, nebo klub, který si ho zapnul -- _memb-term.js). Cenu i konec
+  // počítá server: jednorázově = zbytek měsíce / období do posledního dne N-tého měsíce,
+  // předplatné = měsíční cena, první platba jen za zbývající dny a obnovy vždy 1.
+  // _cal = { one: { price, endsOn } } nebo { sub: calSubPlan(...) }, jinak null.
+  let _cal = null, _calChild = null;
   // CENA, POČET MĚSÍCŮ A KONEC MUSÍ PATŘIT K TOMUTÉŽ PLÁNU. Dřív šlo zaplatit měsíční cenu
   // s months=12 (nebo endsOn=2099-12-31) a webhook podle toho nastavil platnost.
   try {
-    const _g = ((await _wsbGet(`gyms?id=eq.${encodeURIComponent(_skGym || gymId || '')}&select=membership_plans,membership_price`)) || [])[0] || {};
+    // select=*: sloupec memb_calendar dokud neproběhne sql/memb-calendar.sql neexistuje a výčet by shodil celý dotaz.
+    const _g = ((await _wsbGet(`gyms?id=eq.${encodeURIComponent(_skGym || gymId || '')}&select=*`)) || [])[0] || {};
     let _pl = []; try { _pl = typeof _g.membership_plans === 'string' ? JSON.parse(_g.membership_plans) : (_g.membership_plans || []); } catch (e) {}
     if (!(Array.isArray(_pl) && _pl.length) && Number(_g.membership_price) > 0) _pl = [{ price: Number(_g.membership_price), months: 1 }];
-    const _amt = parseInt(amount, 10), _mo = Math.max(1, parseInt(months, 10) || 1), _end = endsOn ? String(endsOn).slice(0, 10) : '';
+    const _amt = parseInt(amount, 10), _mo = _moQ, _end = endsOn ? String(endsOn).slice(0, 10) : '';
+    const _isCal = membCalendar(_g);
+    let _actEnd = null;
+    if (_isCal) {
+      try { if (membershipId) _calChild = (((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(membershipId)}&select=child_name`)) || [])[0] || {}).child_name || null; } catch (e) {}
+      _actEnd = await membActiveEnd(_wsbGet, { gymId: _skGym || gymId, studentId, childName: _calChild, excludeId: membershipId });
+    }
     const _hit = (_pl || []).some((p) => {
       const pm = Math.max(1, parseInt(p && p.months, 10) || 1); if (pm !== _mo) return false;
-      if (_end && String((p && p.ends_on) || '').slice(0, 10) !== _end) return false;
       const full = Number(p && p.price) || 0; if (!(full > 0)) return false;
+      // Kalendářní režim (plán bez pevného konce): předplatné za měsíční cenu, jednorázově
+      // přesně to, co spočítá server. Při půlnoci na přelomu dne se může lišit -- pak obnovit.
+      if (_isCal && !p.ends_on) {
+        if (pm === 1 && !_once) { if (Math.abs(full - _amt) < 1) { _cal = { sub: calSubPlan(full, _actEnd) }; return true; } return false; }
+        const ct = calTerm(full, pm, calStart(_actEnd));
+        if (Math.abs(ct.price - _amt) < 1) { _cal = { one: ct }; return true; }
+        return false;
+      }
+      if (_end && String((p && p.ends_on) || '').slice(0, 10) !== _end) return false;
       if (Math.abs(full - _amt) < 1) return true;
       if (pm > 1 && p.prorate) { for (let L = 1; L <= pm; L++) if (Math.abs(Math.round((full / pm) * L) - _amt) < 1) return true; }
       return false;
     });
     if (!_hit) return res.status(400).json({ error: 'Členství neodpovídá aktuální nabídce klubu. Obnov stránku a zkus to znovu.' });
   } catch (e) { return res.status(400).json({ error: 'Nepodařilo se ověřit nabídku klubu.' }); }
+  // CENA A MĚNA PROTI CENÍKU ČLENSTVÍ KLUBU (membership_plans; kalendářní ceny umí taky).
+  { const _pc = await checkPrice(_PC('gymMembership', { amount: parseInt(amount, 10), currency, gymId: _skGym || gymId, months: _moQ, studentId, childName: _calChild, excludeId: membershipId })); if (!_pc.ok) return res.status(400).json({ error: _pc.error }); }
 
-  const P = parseInt(amount, 10);
+  const P = (_cal && _cal.one) ? _cal.one.price : parseInt(amount, 10);
+  const _endsOn = (_cal && _cal.one) ? _cal.one.endsOn : endsOn;
   const cur = String(currency).toLowerCase();
   const ivl = interval === 'year' ? 'year' : 'month';
   if (!(await _assertAcctReady(gymAccount, res))) return;
@@ -625,9 +649,9 @@ async function membershipCheckout(req, res) {
   // kurzovne"), the member pays once, and the membership simply expires at the end. Renewing a
   // 6-month term automatically would be wrong (and a refund/dispute magnet).
   // Commission: charged ONCE on the whole amount (Petr's call), via application_fee_amount.
-  const _months = Math.max(1, parseInt(months, 10) || 1);
+  const _months = _moQ;
   // Jednorázově i měsíc (once=1): klub nabízí „Měsíční (jednorázově)" -- bez předplatného.
-  if (_months > 1 || String((req.query || {}).once || '') === '1') {
+  if (_months > 1 || _once) {
     const _amtMinor = Math.round(P * 100);
     const _feePct = FEE_NOW;
     const _feeMinor = Math.round(_amtMinor * (_feePct / 100));
@@ -635,7 +659,7 @@ async function membershipCheckout(req, res) {
       mtl_payment_type: 'membership',
       mtl_membership_kind: 'one_time',
       mtl_months: String(_months),
-      ...(endsOn ? { mtl_ends_on: String(endsOn) } : {}),
+      ...(_endsOn ? { mtl_ends_on: String(_endsOn) } : {}),
       gym_id: gymId || '',
       student_id: studentId || '',
       membership_id: membershipId || '',
@@ -659,7 +683,7 @@ async function membershipCheckout(req, res) {
         tax_id_collection: { enabled: true },
         metadata: _meta,
         line_items: [
-          { price_data: { currency: cur, product_data: { name: `${_skLbl} · ${planName || _skLbl} (${_months} měs.) — ${gymName || ''}` }, unit_amount: _amtMinor }, quantity: 1 }
+          { price_data: { currency: cur, product_data: { name: `${_skLbl} · ${planName || _skLbl} (${_cal && _cal.one ? `do ${_dmy(_cal.one.endsOn)}` : `${_months} měs.`}) — ${gymName || ''}` }, unit_amount: _amtMinor }, quantity: 1 }
         ],
         payment_intent_data: {
           ...(_feeMinor > 0 ? { application_fee_amount: _feeMinor } : {}),
@@ -674,7 +698,29 @@ async function membershipCheckout(req, res) {
     return res.redirect(303, _s1.url);
   }
 
-  const session = await stripe.checkout.sessions.create(
+  // KALENDÁŘNÍ MĚSÍC U PŘEDPLATNÉHO: obnovy vždy 1. (billing_cycle_anchor), první měsíc jen za
+  // zbývající dny -- jako jednorázová položka na první faktuře, aby částka přesně seděla s tím,
+  // co appka ukázala (Stripe by si poměr počítal po sekundách). Provize (application_fee_percent)
+  // se počítá z celé faktury, tedy i z té položky. Kdo má ještě platné členství, teď neplatí nic
+  // a první platba přijde v den, kdy navazuje (calSubPlan v _memb-term.js).
+  const _cs = _cal && _cal.sub;
+  const _subLines = [
+    { price_data: { currency: cur, product_data: { name: `${_skLbl} · ${planName || _skLbl} — ${gymName || 'MTL Gym'}` }, unit_amount: Math.round(P * 100), recurring: { interval: ivl } }, quantity: 1 },
+  ];
+  const _subTiming = {};
+  if (_cs && _cs.kind === 'prorate') {
+    _subLines.push({ price_data: { currency: cur, product_data: { name: `${_skLbl} · ${planName || _skLbl} — zbytek měsíce (do ${_dmy(_cs.endsOn)})` }, unit_amount: Math.round(_cs.chargeNow * 100) }, quantity: 1 });
+    Object.assign(_subTiming, { billing_cycle_anchor: _cs.anchor, proration_behavior: 'none' });
+  } else if (_cs && _cs.kind === 'anchor') {
+    Object.assign(_subTiming, { billing_cycle_anchor: _cs.anchor, proration_behavior: 'none' });
+  } else if (_cs && _cs.kind === 'trial') {
+    Object.assign(_subTiming, { trial_end: _cs.trialEnd });
+  } else if (_cs && _cs.kind === 'trial_prorate') {
+    Object.assign(_subTiming, { trial_end: _cs.trialEnd, billing_cycle_anchor: _cs.anchor, proration_behavior: 'create_prorations' });
+  }
+  const _subMeta = (_cs && _cs.kind !== 'plain') ? { mtl_calendar: '1' } : {};
+
+  const _mkSession = (timing) => stripe.checkout.sessions.create(
     {
       mode: 'subscription',
       payment_method_types: ['card'],
@@ -692,12 +738,12 @@ async function membershipCheckout(req, res) {
         mtl_ref_user: _refUserOk,
         mtl_ref_pct: String(refPctN || 0),
       },
-      line_items: [
-        { price_data: { currency: cur, product_data: { name: `${_skLbl} · ${planName || _skLbl} — ${gymName || 'MTL Gym'}` }, unit_amount: Math.round(P * 100), recurring: { interval: ivl } }, quantity: 1 },
-      ],
+      line_items: _subLines,
       subscription_data: {
         application_fee_percent: FEE_NOW,
+        ...timing,
         metadata: {
+          ..._subMeta,
           // mtl_acq   = this membership is inside the MTL acquisition window
           // mtl_acq_pct  = the acquisition rate for THIS provider (10, or 5 for an EP)
           // mtl_acq_base = the rate to fall back to once the window is over
@@ -732,9 +778,20 @@ async function membershipCheckout(req, res) {
     },
     { stripeAccount: gymAccount }
   );
+  let session;
+  try { session = await _mkSession(_subTiming); }
+  catch (e) {
+    // Zkušební doba + kotva naráz (starší členství končí uprostřed měsíce) -- kdyby ji Stripe
+    // odmítl, aspoň zkušební doba do konce platného členství; obnova pak v ten den v měsíci.
+    if (!(_cs && _cs.kind === 'trial_prorate')) throw e;
+    console.error('pay.membership trial+anchor refused:', e.message);
+    session = await _mkSession({ trial_end: _cs.trialEnd });
+  }
 
   res.redirect(303, session.url);
 }
+// 2026-09-30 -> 30. 9. 2026 (do názvu položky ve Stripe).
+function _dmy(ymd) { const [y, m, d] = String(ymd || '').slice(0, 10).split('-').map(Number); return (y && m && d) ? `${d}. ${m}. ${y}` : String(ymd || ''); }
 
 // ───────────────────────── Exclusive MTL Partner (localized price by region, platform account) ─────────────────────────
 // Localized EP price by the provider's region. Mirrors _epRegion() in index.html.

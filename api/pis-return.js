@@ -11,6 +11,7 @@
 // set are Neonomics-specific.
 import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
+import { membEndForRow } from './_memb-term.js';
 
 const ENVN = (process.env.NEONOMICS_ENV || 'sandbox').toLowerCase();
 const AUTH_BASE = 'https://' + ENVN + '.neonomics.io/auth/realms/' + ENVN + '/protocol/openid-connect/token';
@@ -175,9 +176,9 @@ export async function pisSettle(rec, tbl, status){
         // nema co porovnat, takze takove clenstvi nikdy samo nevyprsi -- ani rocni za 16 000.
         const _upd={ status:_paidStatus, pis_status:status };
         if(tbl==='gym_memberships'){
-          const _mo=Math.max(1, parseInt(rec.months,10)||1);
-          const _pe=new Date(); _pe.setMonth(_pe.getMonth()+_mo);
-          _upd.period_end=_pe.toISOString();
+          // Konec podle plánu klubu: pevné datum konce, kalendářní měsíc (spolek), jinak N měsíců od teď.
+          const _pe=await membEndForRow(sb, rec);
+          _upd.period_end=_pe.end.toISOString();
         }
         // Objednávka může nést víc lístků na jednu platbu -- překlopit je všechny, jinak by
         // zbytek zůstal viset jako rezervace a release-cron by je uvolnil, přestože jsou

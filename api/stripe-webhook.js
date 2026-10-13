@@ -23,6 +23,7 @@ const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 import { DEJAVU_CZ } from './_dejavu-cz.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { pragueMonth } from './_tz.js';
+import { pragueEndOfDay } from './_memb-term.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 // Adresa appky pro interní volání (ep-doklad). DŘÍV NEBYLA DEFINOVANÁ: `${APP_URL}` spadlo na
@@ -952,7 +953,7 @@ export default async function handler(req, res) {
           const _mo = Math.max(1, parseInt(m.mtl_months || '1', 10) || 1);
           let _end = new Date(); _end.setMonth(_end.getMonth() + _mo);
           if (m.mtl_ends_on) {
-            const _fixed = new Date(String(m.mtl_ends_on) + 'T23:59:59Z');
+            const _fixed = pragueEndOfDay(m.mtl_ends_on);   // konec dne v Praze, ne v UTC
             if (!isNaN(_fixed.getTime()) && _fixed > new Date()) _end = _fixed;
           }
           const _pi = typeof s.payment_intent === 'string' ? s.payment_intent : (s.payment_intent && s.payment_intent.id);
@@ -1287,7 +1288,10 @@ export default async function handler(req, res) {
       const sub = typeof inv.subscription === 'string' ? inv.subscription : (inv.subscription && inv.subscription.id);
       if (sub) {
         let periodEnd = null;
-        try { const line = inv.lines && inv.lines.data && inv.lines.data[0]; if (line && line.period && line.period.end) periodEnd = new Date(line.period.end * 1000).toISOString(); } catch (e) {}
+        // Nejpozdější konec ze všech řádků faktury. U kalendářního měsíce má první faktura navíc
+        // jednorázovou položku „zbytek měsíce", jejíž období končí hned -- první řádek by tak
+        // nastavil konec členství na teď.
+        try { ((inv.lines && inv.lines.data) || []).forEach((line) => { if (line && line.period && line.period.end) { const _e = new Date(line.period.end * 1000).toISOString(); if (!periodEnd || _e > periodEnd) periodEnd = _e; } }); } catch (e) {}
         const patch = { status: 'active', payment_status: 'ok', payment_failed_at: null, last_invoice_url: null };
         if (periodEnd) patch.period_end = periodEnd;
         await sbPatch('gym_memberships', `stripe_subscription=eq.${encodeURIComponent(sub)}`, patch);
@@ -1298,7 +1302,7 @@ export default async function handler(req, res) {
         try{
           const _so2 = await stripe.subscriptions.retrieve(sub, { stripeAccount: event.account });
           let _subWasAcq=false, _subLadder=null;
-        try{ const _smd=(_so2&&_so2.metadata)||{}; if(_smd.mtl_acq==='1'){ const _invs=await stripe.invoices.list({ subscription: sub, status:'paid', limit:3 }, { stripeAccount: event.account }); _subWasAcq = (((_invs&&_invs.data)||[]).length <= 2); } }catch(e){}
+        try{ const _smd=(_so2&&_so2.metadata)||{}; if(_smd.mtl_acq==='1'){ const _invs=await stripe.invoices.list({ subscription: sub, status:'paid', limit:3 }, { stripeAccount: event.account }); _subWasAcq = (((_invs&&_invs.data)||[]).filter((i)=>(i.amount_paid||0)>0).length <= 2); } }catch(e){}
           const _mem2 = (await sbGet(`gym_memberships?stripe_subscription=eq.${encodeURIComponent(sub)}&select=gym_id,coach_id,paid_to`))[0];
           let _ownerId = null;
           if (_mem2 && _mem2.paid_to === 'coach' && _mem2.coach_id) _ownerId = _mem2.coach_id;

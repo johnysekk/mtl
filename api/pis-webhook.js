@@ -17,6 +17,7 @@
 
 import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
+import { membEndForRow } from './_memb-term.js';
 
 const APP_ID = process.env.ENABLE_APP_ID;
 const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
@@ -202,20 +203,10 @@ export default async function handler(req, res) {
       // 3/6/12-month terms the length has to come from the plan the member picked.
       const _patch = { status: _paidStatus, pis_status: status };
       if (tbl === 'gym_memberships') {
-        let _mo = Math.max(1, parseInt(rec.months, 10) || 0);
-        if (!(_mo > 1)) {
-          try {
-            const g = await sb.from('gyms').select('membership_plans').eq('id', rec.gym_id).maybeSingle();
-            let plans = g && g.data && g.data.membership_plans;
-            if (typeof plans === 'string') plans = JSON.parse(plans);
-            const hit = Array.isArray(plans) ? plans.find(p => p && String(p.name) === String(rec.plan_name)) : null;
-            if (hit) _mo = Math.max(1, parseInt(hit.months, 10) || 1);
-          } catch (e) { /* fall back to 1 month */ }
-        }
-        if (!(_mo >= 1)) _mo = 1;
-        const _end = new Date(); _end.setMonth(_end.getMonth() + _mo);
-        _patch.months = _mo;
-        _patch.period_end = _end.toISOString();
+        // Konec podle plánu klubu: pevné datum konce, kalendářní měsíc (spolek), jinak N měsíců od teď.
+        const _pe = await membEndForRow(sb, rec);
+        _patch.months = _pe.months;
+        _patch.period_end = _pe.end.toISOString();
         _patch.payment_status = 'paid';
       }
       await sb.from(tbl).update(_patch).eq('id', rec.id);

@@ -10,6 +10,8 @@
 // gymMembership (membership_plans), event (ticket_tiers), merch (gym_merch). Kurzy (cohort-pay) a
 // převod (pis-create) si cenu už počítají ze své tabulky samy.
 
+import { membCalendar, membActiveEnd, calTerm, calStart } from './_memb-term.js';
+
 const q = encodeURIComponent;
 
 function sbFactory(SB, KEY) {
@@ -143,18 +145,34 @@ export async function checkPrice(opts) {
       // Doplatek grace vstupů = násobek drop-in ceny: povol 1..N × cena.
       if (num(g.dropin_price) > 0 && defCur === cur) { for (let n = 1; n <= 20; n++) allowed.push(roundCur(num(g.dropin_price) * n, cur)); }
     } else if (opts.kind === 'gymMembership') {
-      const g = ((await sb(`gyms?id=eq.${q(String(opts.gymId || ''))}&select=membership_plans,membership_price,membership_name,currency`)) || [])[0];
+      // select=*: sloupec memb_calendar dokud neproběhne sql/memb-calendar.sql neexistuje a výčet by shodil celý dotaz.
+      const g = ((await sb(`gyms?id=eq.${q(String(opts.gymId || ''))}&select=*`)) || [])[0];
       if (!g) return { ok: false, error: 'gym not found' };
       const defCur = String(g.currency || 'CZK').toUpperCase();
       if (defCur !== cur) return { ok: false, error: 'currency mismatch' };
       let plans = parseJson(g.membership_plans, []);
       if (!(Array.isArray(plans) && plans.length) && num(g.membership_price) > 0) plans = [{ price: num(g.membership_price), months: 1 }];
       const wantMo = opts.months != null ? Math.max(1, parseInt(opts.months, 10) || 1) : null;   // počet měsíců musí patřit k plánu
+      // Kalendářní měsíc (_memb-term.js): cena za zbytek měsíce od dneška, nebo od konce platného
+      // členství člověka u klubu (navazuje na něj).
+      const cal = membCalendar(g);
+      const actEnd = cal ? await membActiveEnd(sb, { gymId: opts.gymId, studentId: opts.studentId, childName: opts.childName, excludeId: opts.excludeId }) : null;
       (plans || []).forEach((p) => {
         const full = num(p.price); const months = Math.max(1, parseInt(p.months, 10) || 1);
         if (wantMo !== null && months !== wantMo) return;
         if (full > 0) { allowed.push(full); if (months > 1 && p.prorate) { for (let L = 1; L <= months; L++) allowed.push(roundCur((full / months) * L, cur)); } }
+        if (full > 0 && cal && !p.ends_on) { allowed.push(calTerm(full, months, new Date()).price); if (actEnd) allowed.push(calTerm(full, months, calStart(actEnd)).price); }
       });
+      // SLEVA ZA DOPORUČENÍ (převod / QR): nový člen přes odkaz člena (ref_pct, nejvýš member_ref_pct
+      // klubu), nebo doporučující člen uplatňuje svůj kredit (gym_member_ref_credits téhož klubu).
+      // Appka zaokrouhluje Math.round. Bez toho převod se slevou neprošel kontrolou ceny.
+      const refPcts = [];
+      if (num(opts.refPct) > 0 && num(g.member_ref_pct) > 0) refPcts.push(Math.min(num(opts.refPct), num(g.member_ref_pct)));
+      if (opts.refCreditId) {
+        const rc = ((await sb(`gym_member_ref_credits?id=eq.${q(String(opts.refCreditId))}&select=pct,gym_id`)) || [])[0];
+        if (rc && String(rc.gym_id) === String(opts.gymId) && num(rc.pct) > 0) refPcts.push(num(rc.pct));
+      }
+      if (refPcts.length) { const base0 = allowed.slice(); refPcts.forEach((r) => base0.forEach((a) => allowed.push(Math.round(a * (1 - r / 100))))); }
     } else if (opts.kind === 'event') {
       const ev = ((await sb(`events?id=eq.${q(String(opts.eventId || ''))}&select=ticket_price,ticket_tiers,currency`)) || [])[0];
       if (!ev) return { ok: false, error: 'event not found' };
@@ -233,7 +251,7 @@ export async function checkRowPrice({ SB, KEY, tbl, row }) {
       if (!r.ok) return r;
       return checkOnlineCountry({ SB, KEY, coachId: row.coach_id, buyerId: row.paid_by || row.student_id });
     }
-    return checkPrice({ ...base, kind: 'gymMembership', gymId: row.gym_id, months: row.months });
+    return checkPrice({ ...base, kind: 'gymMembership', gymId: row.gym_id, months: row.months, studentId: row.student_id, childName: row.child_name, excludeId: row.id, refPct: row.ref_pct, refCreditId: row.ref_credit_id });
   }
   return { ok: true };
 }
