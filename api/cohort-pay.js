@@ -307,6 +307,8 @@ export default async function handler(req, res) {
       at: new Date().toISOString(),
       terms: _termsTxt ? { text: _termsTxt, hash: _wh(_termsTxt), checkbox: String(_cs.terms_checkbox || '').slice(0, 500) } : null,
       guardian: forChild ? { text: String(_cs.guardian_text || '').slice(0, 1000), name: name } : null,
+      // Prohlášení „je mi 18 let" (účastník za sebe) -- znění, jak ho viděl.
+      adult: (!forChild && _cs.adult_text) ? { text: String(_cs.adult_text).slice(0, 500) } : null,
       rules: _cs.rules_accepted ? { hash: null, checkbox: String(_cs.rules_checkbox || '').slice(0, 500) } : null,
       marketing: !!_cs.marketing,
       marketing_text: _cs.marketing ? String(_cs.marketing_text || '').slice(0, 500) : null,
