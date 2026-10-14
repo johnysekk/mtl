@@ -146,7 +146,8 @@ function _methodLabel(m, lang){ const T=_t(lang); return m==='stripe'?T.mStripe:
 // NÁKLAD OBCHODU S APLIKACEMI (online koučink koupený v nativní appce) je vlastní řádek -- není
 // to provize MTL, ale poplatek Apple / Google (10 %) a DPH, kterou z něj MTL odvádí (21 %).
 function _itemLabel(i, lang){
-  if (i.store) return lang === 'en' ? 'App Store / Google Play fee (10 % + 21 % VAT) · online coaching bought in the mobile app' : 'Poplatek App Store / Google Play (10 % + 21 % DPH) · online koučink koupený v mobilní aplikaci';
+  if (i.store) return (lang === 'en' ? 'App Store / Google Play fee (10 % + 21 % VAT) · online coaching bought in the mobile app' : 'Poplatek App Store / Google Play (10 % + 21 % DPH) · online koučink koupený v mobilní aplikaci')
+    + ((i.method && i.method !== 'stripe') ? (' \u00b7 ' + _methodLabel(i.method, lang)) : '');
   return _methodLabel(i.method, lang) + (i.acq ? (lang === 'en' ? ' \u00b7 acquisition (new member from MTL)' : ' \u00b7 akvizice (nov\u00fd \u010dlen z MTL)') : ''); }
 function _pct(r, lang){ return r!=null ? (Math.round(r*1000)/10).toString().replace('.', lang==='en'?'.':',')+' %' : '\u2014'; }
 function _money(minor, cur, lang){ return (Number(minor||0)/100).toFixed(2).replace('.', lang==='en'?'.':',')+' '+String(cur||'').toUpperCase(); }
@@ -643,7 +644,11 @@ export default async function handler(req, res) {
       const _sfAll = Number(t.store_fee) || 0;
       const _sf = _sfAll > 0 ? Math.min(net, Math.round(_sfAll * (t.mtl_fee ? net / t.mtl_fee : 1))) : 0;
       if (_sf !== 0) {
-        const es = (b.rates.store = b.rates.store || { method: 'stripe', store: true, rate: STORE_COST, fee: 0, count: 0, gross: 0, cut: 0 });
+        // Kolej náklad obchodu určuje stejně jako u provize: u karty je už stržený při platbě
+        // (stripe_amount), u převodu / platby z banky se strhává s měsíční provizí (bank_amount).
+        const _sm = (t.payment_method === 'stripe' || !t.payment_method) ? 'stripe' : t.payment_method;
+        const _sk = _sm === 'stripe' ? 'store' : ('store|' + _sm);
+        const es = (b.rates[_sk] = b.rates[_sk] || { method: _sm, store: true, rate: STORE_COST, fee: 0, count: 0, gross: 0, cut: 0 });
         es.fee += _sf; es.count += 1; es.gross += (t.gross_amount || 0); es.cut += _sfAll;   // cut: o kolik je základ provize nižší než platba
       }
       const _cn = net - _sf;

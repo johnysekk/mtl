@@ -14,6 +14,7 @@
 // Rate: BANK track - EP 1%, else base 3.5% / Shikai 3% at coach_ref_score>=2. No Bankai.
 // Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
 
+import { STORE_COST } from './_rate.js';
 import { onlineRate as _mtlOnline, ladderRate as _mtlRate, acquisitionRate as _mtlAcq, introFreeFor as _introFree, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil } from './_rate.js';
 import { sendOrderMail } from './_order-mail.js';
 import { checkPrice } from './_price-check.js';
@@ -436,9 +437,16 @@ export default async function handler(req, res) {
       rate = ladderRate(coach, coach.payment_mode || (coach.stripe_account ? 'stripe' : 'qr_bank'));
       // ONLINE KOUČING (rezervace typu online): vlastní sazba 1 / 0,75 / 0,5 % a žádná akvizice.
       let _isOnl = (type === 'coach_online') || (type === 'membership' && !gym_id);   // předplatné kouče je online
+      // NÁKUP V NATIVNÍ APPCE (převodem / z banky): řádek rezervace nebo předplatného nese mtl_native.
+      // Cena je pak s přirážkou obchodu a MTL si náklad obchodu (12,1 %) účtuje navíc k provizi --
+      // stejně jako u karty, jen se strhne s měsíční provizí. Bere se z řádku, ne z požadavku.
+      let _natRow = false;
+      if (source_booking_id && (type === 'membership' ? !gym_id : true)) {
+        try { const _nr = ((await _wsbGet(`${type === 'membership' ? 'gym_memberships' : 'bookings'}?id=eq.${encodeURIComponent(source_booking_id)}&select=mtl_native`)) || [])[0]; _natRow = !!(_nr && _nr.mtl_native === true); } catch (e) {}
+      }
       if (type === 'membership' && !gym_id) {
         let _pn = null, _pmo = Math.max(1, parseInt(months, 10) || 1); if (source_booking_id) { try { const _mr = ((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(source_booking_id)}&select=plan_name,months`)) || [])[0]; _pn = _mr && _mr.plan_name; if (_mr && _mr.months) _pmo = Math.max(1, parseInt(_mr.months, 10) || 1); } catch (e) {} }
-        const _pc = await checkPrice({ SB: process.env.SUPABASE_URL, KEY: process.env.SUPABASE_SERVICE_ROLE_KEY, kind: 'coachPlan', bankOnly: ['qr', 'pis'].includes(String(payment_method || '')), amount: (Number(gross_amount) || 0) / 100, currency: currency || 'CZK', coachProfileId: coach_id, planName: _pn, months: _pmo });
+        const _pc = await checkPrice({ SB: process.env.SUPABASE_URL, KEY: process.env.SUPABASE_SERVICE_ROLE_KEY, kind: 'coachPlan', native: _natRow, bankOnly: ['qr', 'pis'].includes(String(payment_method || '')), amount: (Number(gross_amount) || 0) / 100, currency: currency || 'CZK', coachProfileId: coach_id, planName: _pn, months: _pmo });
         if (!_pc.ok) return res.status(400).json({ error: _pc.error || 'Částka neodpovídá nabídce kouče' });
       }
       if (!_isOnl && type === 'coach_1to1' && /^\d+$/.test(String(source_booking_id || ''))) {
@@ -449,7 +457,7 @@ export default async function handler(req, res) {
       // Řádek rezervace i s částkou zapisuje prohlížeč studenta, takže bez kontroly šlo převodem
       // zaplatit méně a kouč by potvrdil (a provize se počítala z) nižší částky.
       if (_isOnl && type !== 'membership') {
-        const _pc = await checkPrice({ SB: process.env.SUPABASE_URL, KEY: process.env.SUPABASE_SERVICE_ROLE_KEY, kind: 'coachOnline', bankOnly: ['qr', 'pis'].includes(String(payment_method || '')),
+        const _pc = await checkPrice({ SB: process.env.SUPABASE_URL, KEY: process.env.SUPABASE_SERVICE_ROLE_KEY, kind: 'coachOnline', native: _natRow, bankOnly: ['qr', 'pis'].includes(String(payment_method || '')),
           amount: (Number(gross_amount) || 0) / 100, currency: currency || 'CZK', coachProfileId: coach_id, discounts: (credit === 'student') ? [0.1, 0.2] : null });
         if (!_pc.ok) return res.status(400).json({ error: _pc.error || 'Částka neodpovídá online nabídce kouče' });
       }
@@ -474,9 +482,15 @@ export default async function handler(req, res) {
       // Země z přihlášky poskytovatele: u klubu jeho vlastní, u kouče z profilu. Majitel může
       // bydlet jinde, než odkud fakturuje klub -- doklad zní na klub, tak rozhoduje jeho země.
       const _intro = await _introFree(_wsbGet, (coach && coach.billing_country));
-      let mtl_fee = (_cc || _intro) ? 0 : Math.round(gross * (_acqR != null ? _acqR : rate));
+      // Nativní nákup: provize se počítá ze základu po odečtení nákladu obchodu (kouč tak dostane
+      // stejně jako za nákup na webu) a náklad obchodu se přičte -- i při kreditu nebo zaváděcí
+      // nule, protože Applu / Googlu ho MTL zaplatí vždy.
+      const _storeFee = (_isOnl && _natRow && gross > 0) ? Math.round(gross * STORE_COST) : 0;
+      const _commBase = gross - _storeFee;
+      let mtl_fee = (_cc || _intro) ? 0 : Math.round(_commBase * (_acqR != null ? _acqR : rate));
       // Podlaha jen u PIS a jen když se opravdu něco účtuje -- uplatněný kredit zůstává nulový.
-      if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, gross));
+      if (mtl_fee > 0 && payment_method === 'pis') mtl_fee = Math.max(mtl_fee, await _pisMinFee(currency, _commBase));
+      mtl_fee += _storeFee;
       const _effRate = (_cc || _intro) ? 0 : (_acqR != null ? _acqR : rate); // per-tx rate -> doklad can itemise by tier
       // Rozklad na akvizici a běžnou sazbu. Bez těchhle dvou sloupců nechá export pro účetní pět
       // sloupců prázdných (akviz. měsíců/sazba/částka, běžná sazba/částka) -- _sp() se z nich počítá
@@ -492,9 +506,9 @@ export default async function handler(req, res) {
         session_at_issue: session_at_issue || null,
         paid_to: 'coach', payee_account: (coach.gym_payout_account || coach.stripe_account || null),
         payee_id: coach.id, payee_kind: 'profile',
-        gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, acq_months: _acqMonths, base_rate: _baseRate, months: _monthsCol, refund_amount: 0, mtl_fee_refunded: 0,
+        gross_amount: gross, stripe_fee: 0, mtl_fee, mtl_rate: _effRate, ...(_storeFee > 0 ? { store_fee: _storeFee } : {}), acq_months: _acqMonths, base_rate: _baseRate, months: _monthsCol, refund_amount: 0, mtl_fee_refunded: 0,
         currency: cur, type, status: 'paid', payment_method, cohort_id: cohort_id || null, income_class: income_class || null,
-        commission_status: _cc ? 'collected' : 'pending', commission_month: month,
+        commission_status: (_cc && !_storeFee) ? 'collected' : 'pending', commission_month: month,   // náklad obchodu se strhne i při kreditu
         cash_payer_name: cash_payer_name || null, acq_source: acq_source || 'direct',
         // KDO PLATBU PRIJAL. Drive se ukladalo jen `cash_payer_name` = kdo platil; kdo penize
         // vzal u pultu, se nikam nezapsalo, takze pri nesrovnalosti v kase nebylo co dohledat.
