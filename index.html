@@ -6900,8 +6900,10 @@ function _mapCoachRow(c){
     const symOf = x => _curSym(x);
     const currSymbol = symOf(currIn);
     // hlavní cena = in-person, jinak online
-    // V nativní appce u kouče s „Nabízet v mobilní aplikaci" je online cena s přirážkou obchodu.
-    const mainRate = c.rate_inperson || ((c.online_native===true && _isNativeApp()) ? _nativePrice(c.rate_online) : c.rate_online) || 0;
+    // V nativní appce u kouče s „Nabízet v mobilní aplikaci" je online cena s přirážkou obchodu;
+    // u kouče, jehož online koučink se v appce koupit nedá, se online cena neukazuje vůbec.
+    const _olNatOk = !_isNativeApp() || (c.online_native===true && c.payment_mode!=='qr_bank');
+    const mainRate = c.rate_inperson || (_olNatOk ? (_isNativeApp() ? _nativePrice(c.rate_online) : c.rate_online) : 0) || 0;
     const mainCurr = c.rate_inperson ? currIn : currOn;
 
     return {
@@ -10700,7 +10702,12 @@ function renderOffers(c){
   // měnami v data-p a _olPaint je přepíše do měny, kterou si student vybere přepínačem.
   const _plansEff = (c.onlinePlans||[]);
   let _olViewC=null, _olMainC=null;
-  if(c.rateOnline || _plansEff.length){
+  // NATIVNÍ APPKA: online nabídka kouče, kterou tu koupit nejde (přepínač „Nabízet v mobilní
+  // aplikaci" vypnutý, nebo kouč bere jen převod), se vůbec neukazuje -- žádná vypnutá tlačítka
+  // ani vysvětlování. Neznámý stav přepínače se dočte (_olNativeResolve) a pak se překreslí.
+  const _olHas = !!(c.rateOnline || _plansEff.length);
+  const _olNatHide = _olHas && !isSelf && _isNativeApp() && (c.onlineNative!==true || c.payment_mode==='qr_bank');
+  if(_olHas && !_olNatHide){
     const mainC=_olMainC=String(c.currencyOnline||'CZK').toUpperCase();
     // Nativní appka + kouč to má zapnuté: všechny online ceny s přirážkou na poplatek obchodu.
     const NP=_olNativeOn(c) ? _nativeMap : (m=>m);
@@ -10754,12 +10761,12 @@ function renderOffers(c){
       : pr(_minMap(_plansEff.map(p=>NP(_offerPrices(p, mainC)))), LANG==='en'?' / mo':' / měs.', LANG==='en'?'from ':'od ');
     html += offerCard('online', '🌐', L('Online coaching'), headPrice, detail, JSON.stringify(tiers));
   }
-  if(!html) html = `<p style="font-size:13px;color:var(--light);">${L('Kouč zatím nemá nastavenou nabídku.')}</p>`;
+  if(!html && !_olNatHide) html = `<p style="font-size:13px;color:var(--light);">${L('Kouč zatím nemá nastavenou nabídku.')}</p>`;
   if(c.avail==='holiday') html = `<div style="background:linear-gradient(135deg,#0a8f5b,#0d6e6e);color:#fff;border-radius:12px;padding:14px 16px;margin-bottom:12px;font-size:13px;line-height:1.5;font-weight:600;">${L('🌴 Tento kouč je na dovolené. Dej si ho do oblíbených ❤️ a dáme ti vědět, jakmile bude zase volný.')}</div>` + html;
   else if(c.avail==='booked') html = `<div style="background:var(--dark);color:#fff;border-radius:12px;padding:14px 16px;margin-bottom:12px;font-size:13px;line-height:1.5;font-weight:600;">${L('🔒 Tento kouč je teď plně obsazený. Dej si ho do oblíbených ❤️ a dáme ti vědět, jakmile se uvolní.')}</div>` + html;
   box.innerHTML = html;
   if(_olViewC && !isSelf) _olIntlMark(c, box);
-  if(_olViewC && !isSelf) _olNativeMark(c, box);
+  if(_olNatHide && c.onlineNative===undefined) _olNativeResolve(c);
   if(_olViewC){
     _olPaint(box, _olViewC, _olMainC);
     box.querySelectorAll('.ol-cbtn').forEach(b=>{ b.onclick=(e)=>{ e.stopPropagation(); window._olCurPref=window._olCurPref||{}; window._olCurPref[String(c.profileId||c.id)]=b.dataset.c; _olPaint(box, b.dataset.c, _olMainC); }; });
@@ -10999,19 +11006,11 @@ async function _olNativeAllowed(c){
 }
 function _olNativeMsg(bank){ const EN=LANG==='en';
   return bank ? (EN?'In the mobile app, online coaching can only be paid by card. This coach takes bank transfers only.':'V mobilní aplikaci jde online koučink platit jen kartou. Tento kouč přijímá jen převod.')
-              : (EN?'This coach\'s online coaching cannot be bought in the mobile app yet.':'Online koučink tohoto kouče se v mobilní aplikaci zatím koupit nedá.'); }
-// Na profilu kouče: v nativní appce, kde se online koupit nedá, se tlačítka vypnou a řekne se proč.
-async function _olNativeMark(c, box){
-  try{
-    if(!_isNativeApp()) return;
-    const _was=c.onlineNative;
-    const ok=await _olNativeAllowed(c);
-    if(ok){ if(_was===undefined) renderOffers(c); return; }   // ceny se vykreslily bez přirážky -> znovu
-    const btns=box.querySelectorAll('.offer-tier,.offer-plan,.offer-tier-disc'); if(!btns.length) return;
-    btns.forEach(function(x){ x.disabled=true; x.style.opacity='.45'; x.style.cursor='not-allowed'; });
-    const det=btns[0].closest('.offer-detail');
-    if(det && !det.querySelector('.ol-native-note')){ const n=document.createElement('div'); n.className='ol-native-note'; n.style.cssText='font-size:12.5px;font-weight:600;color:#9A5B00;background:#FFF7E0;border:1px solid #F0E0A8;border-radius:10px;padding:9px 11px;margin-bottom:10px;line-height:1.45;'; n.textContent='📱 '+_olNativeMsg(false); det.insertBefore(n, det.firstChild); }
-  }catch(e){}
+              : (EN?'This coach\'s online coaching cannot be bought in the mobile app.':'Online koučink tohoto kouče se v mobilní aplikaci koupit nedá.'); }
+// Na profilu kouče v nativní appce: řádek z decku nemusí nést online_native -- dočte se a když kouč
+// online v appce nabízí, nabídka se vykreslí.
+async function _olNativeResolve(c){
+  try{ if(await _olNativeAllowed(c)) renderOffers(c); }catch(e){}
 }
 function _olMonthsTxt(m, en){ m=Number(m)||1; if(en) return m+' '+(m===1?'month':'months'); return m===1?'1 měsíc':(m<5?(m+' měsíce'):(m+' měsíců')); }
 // Vrací Promise: false (zpět) nebo { cur, price, months } -- měnu a variantu, kterou si student
@@ -27746,11 +27745,11 @@ function _comDokStatus(dk, money, dt){
     const _li=(Array.isArray(dk.line_items)?dk.line_items[0]:null)||{};
     return { unpaid:true, failed:true, payUrl:_li.pay_url||null, paid:false,
       head:(EN?'AMOUNT DUE: ':'K \u00daHRAD\u011a: ')+money(dk.due_amount),
-      body:EN?'The subscription could not be charged to your card. Stripe will retry automatically; you can also pay right away.':'P\u0159edplatn\u00e9 se nepoda\u0159ilo strhnout z karty. Stripe platbu zkus\u00ed znovu automaticky; zaplatit m\u016f\u017ee\u0161 i hned.' };
+      body:EN?'The subscription could not be charged to your card. We will retry automatically; you can also pay right away.':'P\u0159edplatn\u00e9 se nepoda\u0159ilo strhnout z karty. Platbu zkus\u00edme strhnout znovu automaticky; zaplatit m\u016f\u017ee\u0161 i hned.' };
   }
   if(dk.kind==='partner_sub'||dk.kind==='supplier_sub') return { paid:true, head:EN?'PAID IN FULL':'UHRAZENO V PLNÉ VÝŠI',
-    body:EN?('The amount was paid by card (Stripe) on '+dt(dk.charged_at)+'. This is not a request for payment — there is nothing to pay.')
-           :('Částka byla uhrazena kartou (Stripe) dne '+dt(dk.charged_at)+'. Nejde o výzvu k platbě — není co platit.') };
+    body:EN?('The amount was paid by payment card on '+dt(dk.charged_at)+'. This is not a request for payment.')
+           :('Částka byla uhrazena platební kartou dne '+dt(dk.charged_at)+'. Nejde o výzvu k platbě.') };
   const due=Math.max(0, Number(dk.due_amount)||0);
   const bankPaid=Math.max(0,(Number(dk.bank_amount)||0)-due), stripePaid=Math.max(0, Number(dk.stripe_amount)||0);
   const parts=[];
@@ -27763,7 +27762,7 @@ function _comDokStatus(dk, money, dt){
     return (EN?'invoice ':'faktura ')+(o.doc_no||_dokladNo(o.ref))+' ('+_perLbl(o.period)+') '+money(o.amount)+' \u2014 '+why; });
   const _poT=_po.length?((EN?'The same charge also paid the remainder of older invoices: ':'Stejn\u00fdm str\u017een\u00edm byl uhrazen i zbytek star\u0161\u00edch faktur: ')+_po.join('; ')+'. '):'';
   if(!due) return { paid:true, head:EN?'PAID IN FULL':'UHRAZENO V PLNÉ VÝŠI',
-    body:(parts.length?((EN?'The amount has already been charged: ':'Částka už byla stržena: ')+parts.join('; ')+'. '):'')+_poT+(EN?'This is not a request for payment — there is nothing to pay.':'Nejde o výzvu k platbě — není co platit.') };
+    body:(parts.length?((EN?'The amount has already been charged: ':'Částka už byla stržena: ')+parts.join('; ')+'. '):'')+_poT+(EN?'This is not a request for payment.':'Nejde o výzvu k platbě.') };
   const dd=dk.due_date?dt(dk.due_date+'T12:00:00Z'):'';
   // Důvod nestržené části (due_reason; starší snímky podle due_date) -- stejné texty jako v e-mailu/PDF.
   const _rs=dk.due_reason || (dk.due_date?'failed':'below_min');
@@ -27815,12 +27814,15 @@ function _comDokHtml(dk, opts){
     const isSupSub = dk.kind==='supplier_sub';
     _st=_comDokStatus(dk, money, dt);
     const stBox='<div class="st '+(_st.paid?'ok':'due')+'"><div class="sth">'+esc(_st.head)+'</div><div class="stb">'+esc(_st.body)+'</div></div>';
+    // ÚDAJE DOKLADU v přehledné mřížce (číslo, data, období) -- místo jednoho řádku s tečkami.
+    const facts=function(list){ return '<div class="facts">'+list.filter(function(x){ return x && x[1]; }).map(function(x){ return '<div class="fr"><span>'+esc(x[0])+'</span><b>'+esc(x[1])+'</b></div>'; }).join('')+'</div>'; };
+    const _duzpV=dk.duzp?dt(dk.duzp+'T12:00:00Z'):'';
     if(dk.kind==='payment_receipt'){
       body='<h1>'+esc(_receiptTitle(dk.ref_kind))+'</h1>'
         +(dk.test_mode?'<div class="test">\u{1F9EA} '+(EN?'TEST MODE \u2014 no actual transaction took place':'TESTOVAC\u00cd RE\u017dIM \u2014 k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo')+'</div>':'')
-        +'<div class="meta">'+esc(_dokladNo(dk))+' \u00b7 '+(EN?'Issued ':'Vystaveno ')+esc(dt(dk.issued_at||dk.charged_at))+'</div>'
-        +stBox
         +'<div class="cols">'+col(EN?'Supplier':'Dodavatel', sup)+col(EN?'Customer':'Odb\u011bratel', cust)+'</div>'
+        +facts([[EN?'Document no.':'\u010c\u00edslo dokladu', _dokladNo(dk)], [EN?'Issued':'Datum vystaven\u00ed', dt(dk.issued_at||dk.charged_at)]])
+        +stBox
         +'<table class="it"><thead><tr><th>'+(EN?'Invoice paid':'Uhrazen\u00e1 faktura')+'</th><th>'+(EN?'Period':'Obdob\u00ed')+'</th><th class="r">'+(EN?'Amount paid':'Uhrazeno')+'</th></tr></thead><tbody>'
         +_rcptItems(dk).map(function(it){ return '<tr><td>'+esc(it.doc_no||_dokladNo(it.ref))+'</td><td>'+esc(_perLbl(it.period))+'</td><td class="r">'+money(it.amount)+'</td></tr>'; }).join('')
         +'</tbody></table>'
@@ -27834,31 +27836,36 @@ function _comDokHtml(dk, opts){
       const _epPer=(function(){ try{ if(!_it.period_start||!_it.period_end) return per; const a=new Date(_it.period_start), b=new Date(new Date(_it.period_end).getTime()-86400000); return dt(a.toISOString())+' \u2013 '+dt(b.toISOString()); }catch(e){ return per; } })();
       body='<h1>'+(isSupSub?(EN?'Invoice \u2014 MTL supplier profile subscription':'Faktura \u2014 p\u0159edplatn\u00e9 profilu dodavatele MTL'):(EN?'Invoice \u2014 Exclusive Partner subscription':'Faktura \u2014 p\u0159edplatn\u00e9 Exclusive Partner'))+'</h1>'
         +(dk.test_mode?'<div class="test">\u{1F9EA} '+(EN?'TEST MODE \u2014 not a formal tax document; no actual transaction took place':'TESTOVAC\u00cd RE\u017dIM \u2014 nejde o form\u00e1ln\u00ed da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo')+'</div>':'')
-        +'<div class="meta">'+esc(_dokladNo(dk))+' \u00b7 '+(EN?'Issued ':'Vystaveno ')+esc(dt(dk.issued_at||dk.charged_at))+(dk.duzp?(' \u00b7 '+(EN?'Date of supply ':'Datum uskute\u010dn\u011bn\u00ed pln\u011bn\u00ed ')+esc(dt(dk.duzp+'T12:00:00Z'))):'')+' \u00b7 '+(EN?'Subscription period ':'Obdob\u00ed p\u0159edplatn\u00e9ho ')+esc(_epPer)+'</div>'
-        +stBox
         +'<div class="cols">'+col(EN?'Supplier':'Dodavatel', sup)+col(EN?'Customer':'Odb\u011bratel', cust)+'</div>'
+        +facts([[EN?'Invoice no.':'\u010c\u00edslo faktury', _dokladNo(dk)], [EN?'Issued':'Datum vystaven\u00ed', dt(dk.issued_at||dk.charged_at)],
+                [EN?'Subscription period':'Obdob\u00ed p\u0159edplatn\u00e9ho', _epPer], [EN?'Date of supply':'DUZP', _duzpV],
+                [EN?'Payment method':'Zp\u016fsob \u00fahrady', (_st&&_st.paid)?(EN?'Payment card':'Platebn\u00ed karta'):'']])
+        +stBox
         +'<table class="it"><thead><tr><th>'+(EN?'Item':'Polo\u017eka')+'</th><th class="r">'+(EN?'Amount':'\u010c\u00e1stka')+'</th></tr></thead><tbody><tr><td>'+esc(_lbl)+'</td><td class="r">'+money(dk.amount)+'</td></tr></tbody></table>'
         +'<table class="sum">'+vat+'<tr class="tot"><td>'+(EN?'Total':'Celkem')+'</td><td class="r">'+money(dk.amount)+'</td></tr></table>';
     } else
     body='<h1>'+(EN?'Invoice \u2014 MTL commission':'Faktura \u2014 provize MTL')+'</h1>'
       +(dk.test_mode?'<div class="test">\u{1F9EA} '+(EN?'TEST MODE \u2014 not a formal tax document; no actual transaction took place':'TESTOVAC\u00cd RE\u017dIM \u2014 nejde o form\u00e1ln\u00ed da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo')+'</div>':'')
-      +'<div class="meta">'+esc(_dokladNo(dk))+' \u00b7 '+(EN?'Issued ':'Vystaveno ')+esc(dt(dk.charged_at))+(dk.duzp?(' \u00b7 '+(EN?'Date of supply ':'Datum uskute\u010dn\u011bn\u00ed pln\u011bn\u00ed ')+esc(dt(dk.duzp+'T12:00:00Z'))):'')+' \u00b7 '+(EN?'Period ':'Obdob\u00ed ')+esc(per)+' \u00b7 '+esc(kindLbl)+'</div>'
-      +stBox
       +'<div class="cols">'+col(EN?'Supplier':'Dodavatel', sup)+col(EN?'Customer':'Odb\u011bratel', cust)+'</div>'
+      +facts([[EN?'Invoice no.':'\u010c\u00edslo faktury', _dokladNo(dk)], [EN?'Issued':'Datum vystaven\u00ed', dt(dk.charged_at)],
+              [EN?'Period':'Obdob\u00ed', per], [EN?'Date of supply':'DUZP', _duzpV], [EN?'Billed as':'Fakturov\u00e1no za', kindLbl]])
+      +stBox
       +'<table class="it"><thead><tr><th>'+(EN?'Payment form':'Forma platby')+'</th><th class="c">'+(EN?'Rate':'Sazba')+'</th><th class="c">'+(EN?'Payments':'Plateb')+'</th><th class="r">'+(EN?'Volume':'Objem plateb')+'</th><th class="r">'+(EN?'Commission':'Provize')+'</th></tr></thead><tbody>'+rows+'</tbody></table>'
       +'<table class="sum">'+vat+'<tr class="tot"><td>'+(EN?'Total':'Celkem')+'</td><td class="r">'+money(dk.amount)+'</td></tr></table>'
       +'<div class="note2">'+(EN?'Payments intermediated: ':'Zprost\u0159edkovan\u00fdch plateb: ')+'<b>'+cnt+'</b> \u00b7 '+(EN?'volume ':'objem ')+'<b>'+money(vol)+'</b></div>';
   }
   const _html='<html><head><meta charset="utf-8"><title>'+(hasSnap?esc(_dokladNo(dk)):'')+'</title><style>'
     +'body{font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;max-width:700px;margin:24px auto;padding:0 18px;line-height:1.5;}'
-    +'h1{font-size:20px;margin:0 0 4px;}.meta{font-size:13px;color:#555;margin-bottom:6px;}'
+    +'h1{font-size:20px;margin:0 0 4px;}'
     +'.test{margin:10px 0;padding:9px 12px;background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font-size:12px;font-weight:700;}'
     +'.cols{display:flex;flex-wrap:wrap;gap:24px;margin:18px 0 8px;}.col{flex:1;min-width:220px;font-size:13px;line-height:1.55;}.lbl{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:4px;}'
     +'table{width:100%;border-collapse:collapse;}.it{margin-top:12px;font-size:13px;}.it th{background:#f5f2ee;padding:8px 10px;font-size:11px;color:#666;text-align:left;}.it td{padding:7px 10px;border-bottom:1px solid #eee;}'
     +'.c{text-align:center !important;}.r{text-align:right !important;}.sum{margin-top:4px;font-size:14px;}.sum td{padding:7px 0;}.tot td{font-weight:800;font-size:16px;border-top:2px solid #333;}'
     +'.note2{margin-top:10px;font-size:12px;color:#555;}.note{font-size:12px;color:#555;margin-top:10px;line-height:1.55;}'
-    +'.st{margin:12px 0 4px;padding:11px 14px;border-radius:10px;border:1.5px solid;}.st.ok{background:#EAF7EE;border-color:#A8E6C0;color:#0E6B3A;}.st.due{background:#FFF4E5;border-color:#F0C674;color:#8a5a00;}'
-    +'.sth{font-weight:800;font-size:14px;letter-spacing:.02em;}.stb{font-size:12.5px;line-height:1.5;margin-top:3px;}</style></head><body>'+(opts.preview?('<div style="font-size:11px;font-weight:800;color:#999;letter-spacing:.05em;margin-bottom:10px;">'+(EN?'PREVIEW \u2014 sample amounts':'N\u00c1HLED \u2014 \u010d\u00e1stky jsou uk\u00e1zkov\u00e9')+'</div>'):'')+body+'</body></html>';
+    +'.facts{display:grid;grid-template-columns:1fr 1fr;column-gap:28px;margin:14px 0 4px;font-size:13px;border-top:1px solid #e6e6e6;}.fr{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid #eee;}.fr span{color:#777;}.fr b{font-weight:600;text-align:right;}'
+    +'@media (max-width:520px){.facts{grid-template-columns:1fr;}}'
+    +'.st{margin:12px 0 4px;padding:7px 12px;border-radius:8px;border:1px solid;}.st.ok{background:#EAF7EE;border-color:#A8E6C0;color:#0E6B3A;}.st.due{background:#FFF4E5;border-color:#F0C674;color:#8a5a00;}'
+    +'.sth{font-weight:800;font-size:12.5px;letter-spacing:.02em;}.stb{font-size:12px;line-height:1.45;margin-top:1px;}</style></head><body>'+(opts.preview?('<div style="font-size:11px;font-weight:800;color:#999;letter-spacing:.05em;margin-bottom:10px;">'+(EN?'PREVIEW \u2014 sample amounts':'N\u00c1HLED \u2014 \u010d\u00e1stky jsou uk\u00e1zkov\u00e9')+'</div>'):'')+body+'</body></html>';
   return { html:_html, st:_st, hasSnap:hasSnap };
 }
 async function showCommissionDoklad(id){
