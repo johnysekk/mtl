@@ -972,11 +972,23 @@ async function supplierCheckout(req, res) {
   // předchozí majitel organizace): nové jde založit hned, první platba se strhne až v den, kdy staré
   // skončí. Profil tak běží bez přerušení a nikdo neplatí dvakrát. Stripe dovolí začátek nejvýš
   // jedno období dopředu -- dřív to nejde a appka řekne, od kdy ano.
-  let _anchor = null;
+  // PŘEVZETÍ: po převodu s volbou „dál platí dosavadní majitel" běží předplatné z cizí karty a
+  // nekončí. Nový majitel ho převezme stejně -- jeho předplatné začne v den další platby toho
+  // starého a staré se po zaplacení nastaví ke konci období (webhook, replaces_sub).
+  let _anchor = null, _replaces = null;
   if (org.supplier_sub) {
+    const _now = Math.floor(Date.now() / 1000);
     const _pe = org.supplier_period_end ? Math.floor(new Date(org.supplier_period_end).getTime() / 1000) : 0;
-    if (!(org.supplier_cancelling && _pe > Math.floor(Date.now() / 1000) + 60)) return _goBack(req, res, `${proto}://${host}/?supplier_sub=active`);
-    _anchor = _pe;
+    const _foreign = !!(org.supplier_sub_by && String(org.supplier_sub_by) !== String(org.owner_id));
+    if (org.supplier_cancelling && _pe > _now + 60) _anchor = _pe;
+    else if (!org.supplier_cancelling && _foreign) {
+      try {
+        const _s = await stripe.subscriptions.retrieve(org.supplier_sub);
+        const _cpe = _s.current_period_end || (_s.items && _s.items.data && _s.items.data[0] && _s.items.data[0].current_period_end) || 0;
+        if (['active', 'trialing', 'past_due'].includes(_s.status) && _cpe > _now + 60) { _anchor = _cpe; _replaces = org.supplier_sub; }
+      } catch (e) { console.error('[supplier] takeover', e.message); }
+    }
+    if (!_anchor) return _goBack(req, res, `${proto}://${host}/?supplier_sub=active`);
   }
 
   // DIČ U ZAHRANIČNÍHO DODAVATELE -- stejná brána jako u EP (require_vat_foreign).
@@ -1027,7 +1039,8 @@ async function supplierCheckout(req, res) {
     ],
     subscription_data: { metadata: { mtl_payment_type: 'supplier_sub', org_id: String(org.id), user_id: String(org.owner_id), sup_amount: String(amount), sup_net: String(net), sup_interval: interval },
       ...(_anchor ? { billing_cycle_anchor: _anchor, proration_behavior: 'none' } : {}) },
-    metadata: { mtl_payment_type: 'supplier_sub', org_id: String(org.id), user_id: String(org.owner_id), sup_interval: interval, sup_net: String(net) },
+    metadata: { mtl_payment_type: 'supplier_sub', org_id: String(org.id), user_id: String(org.owner_id), sup_interval: interval, sup_net: String(net),
+      ...(_anchor ? { sup_anchor: String(_anchor) } : {}), ...(_replaces ? { replaces_sub: _replaces } : {}) },
     ..._checkoutEnd(req, `${proto}://${host}/?supplier_sub=ok&session={CHECKOUT_SESSION_ID}`, `${proto}://${host}/`),
   }, { apiVersion: '2024-09-30.acacia' });
 

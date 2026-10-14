@@ -1184,12 +1184,41 @@ export default async function handler(req, res) {
           try { if (m.user_id) await sbPatch('organizations', `id=eq.${encodeURIComponent(orgId)}`, { supplier_sub_by: m.user_id }); } catch (e) { console.error('supplier_sub_by', e.message); }
           const _o = ((await sbGet(`organizations?id=eq.${encodeURIComponent(orgId)}&select=owner_id,name`)) || [])[0] || {};
           const _uid = _o.owner_id || m.user_id || null;
+          // PŘEVZETÍ předplatného, které platil někdo jiný (po převodu organizace): staré se teď
+          // nastaví ke konci období -- naposledy se z cizí karty strhlo to, co už je zaplacené.
+          let _oldEnd = null;
+          if (m.replaces_sub) {
+            try {
+              const _old = await stripe.subscriptions.retrieve(m.replaces_sub);
+              if (!_old.cancel_at_period_end && ['active', 'trialing', 'past_due'].includes(_old.status)) {
+                const _u = await stripe.subscriptions.update(m.replaces_sub, { cancel_at_period_end: true });
+                _oldEnd = _u.current_period_end || (_u.items && _u.items.data && _u.items.data[0] && _u.items.data[0].current_period_end) || null;
+                const _payer = (_old.metadata && _old.metadata.user_id) || null;
+                if (_payer && String(_payer) !== String(_uid)) {
+                  const _pl = (((await sbGet(`profiles?id=eq.${encodeURIComponent(_payer)}&select=lang`)) || [])[0] || {}).lang;
+                  const _d = _oldEnd ? new Date(_oldEnd * 1000).toLocaleDateString(_pl === 'en' ? 'en-GB' : 'cs-CZ', { timeZone: 'Europe/Prague' }) : '';
+                  const _cs = '🧰 Nový majitel organizace ' + (_o.name || '') + ' převzal předplatné profilu dodavatele na svou kartu. Z tvé karty se už nic dalšího nestrhne' + (_d ? ('; období, které jsi zaplatil/a, končí ' + _d) : '') + '.';
+                  const _en = '🧰 The new owner of ' + (_o.name || '') + ' took the supplier profile subscription over on their card. Nothing more will be charged to your card' + (_d ? ('; the period you paid for ends ' + _d) : '') + '.';
+                  await sbPost('notifications', { user_id: _payer, type: 'system', read: false, message: _cs,
+                    data: JSON.stringify({ kind: 'sup_paidfor', target: 'payer', org_id: orgId, org_name: _o.name || '', msg_cs: _cs, msg_en: _en }) });
+                }
+              }
+            } catch (e) { console.error('supplier takeover', e.message); }
+          }
+          // Navazující předplatné (začíná až koncem toho starého): profil už je zveřejněný, nic se
+          // nestrhlo -- zpráva to musí říct, ne „je zveřejněný".
+          const _anc = m.sup_anchor ? Number(m.sup_anchor) : 0;
+          const _ancD = _anc ? new Date(_anc * 1000).toLocaleDateString('cs-CZ', { timeZone: 'Europe/Prague' }) : '';
           if (_uid) await sbPost('notifications', { user_id: _uid, type: 'system', read: false,
             data: JSON.stringify({ kind: 'supplier_live', org_id: orgId, org_name: _o.name || '' }),
-            message: '🧰 Profil dodavatele ' + (_o.name || '') + ' je zveřejněný — kluby, kouči a pořadatelé ho teď najdou v sekci Dodavatelé. Faktura za předplatné přijde e-mailem.' });
+            message: _anc
+              ? ('🧰 Předplatné profilu dodavatele ' + (_o.name || '') + ' teď platíš ze své karty. První platba se strhne ' + _ancD + ', profil běží bez přerušení. Faktura přijde e-mailem po každé platbě.')
+              : ('🧰 Profil dodavatele ' + (_o.name || '') + ' je zveřejněný — kluby, kouči a pořadatelé ho teď najdou v sekci Dodavatelé. Faktura za předplatné přijde e-mailem.') });
           await sbPost('notifications', { user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'system', read: false,
             data: JSON.stringify({ kind: 'new_provider', what: 'supplier', org_id: orgId }),
-            message: '🧰 Dodavatel zaplatil a je zveřejněný: ' + (_o.name || orgId) + '. Zkontroluj profil.' });
+            message: _anc
+              ? ('🧰 Dodavatel ' + (_o.name || orgId) + ': založeno navazující předplatné (první platba ' + _ancD + ').')
+              : ('🧰 Dodavatel zaplatil a je zveřejněný: ' + (_o.name || orgId) + '. Zkontroluj profil.') });
         }
       } else if (m.mtl_payment_type === 'event_ticket') {
         // Event ticket (direct charge on payee account) — backstop confirm if user closed tab before redirect

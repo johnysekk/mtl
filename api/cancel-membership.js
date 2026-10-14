@@ -20,7 +20,41 @@ const q = encodeURIComponent;
 // OVĚŘENÍ (dřív žádné: kdokoli s číslem předplatného ho mohl zrušit a nechat si vrátit peníze):
 //   • příjemce platby (majitel / správce klubu s tímhle Stripe účtem, kouč s vlastním účtem) -- vše;
 //   • člen, kterému předplatné patří (nebo kdo za něj platí) -- jen zrušení ke konci období a obnovení;
-//   • Exclusive Partner a profil dodavatele (předplatné na účtu MTL, bez gymAccount) -- jen své vlastní.
+//   • Exclusive Partner (předplatné na účtu MTL, bez gymAccount) -- jen své vlastní.
+//   • Profil dodavatele: ten, kdo ho platí (jeho karta) -- zrušení i obnovení; majitel organizace,
+//     který ho neplatí (po převodu s volbou „dál platí dosavadní majitel") -- jen zrušení ke konci
+//     období. Stav zrušení zapisuje server (platící už organizaci nevlastní a nemůže ji měnit) a
+//     druhá strana dostane notifikaci s proklikem.
+
+async function sbPost(path, body) {
+  const r = await fetch(`${SB}/rest/v1/${path}`, { method: 'POST', headers: { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(await r.text());
+}
+async function sbPatch(path, body) {
+  const r = await fetch(`${SB}/rest/v1/${path}`, { method: 'PATCH', headers: { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(await r.text());
+}
+const czD = (unix, en) => { try { return new Date(unix * 1000).toLocaleDateString(en ? 'en-GB' : 'cs-CZ', { timeZone: 'Europe/Prague' }); } catch (e) { return ''; } };
+// Profil dodavatele placený někým jiným než majitelem: druhá strana se o zrušení / obnovení dozví.
+async function supOtherSide(S, resume, pe) {
+  if (String(S.owner) === String(S.payer)) return;
+  const toId = S.isPayer ? S.owner : S.payer;
+  const actor = ((await sb(`profiles?id=eq.${q(S.isPayer ? S.payer : S.owner)}&select=name,email`)) || [])[0] || {};
+  const lang = (((await sb(`profiles?id=eq.${q(toId)}&select=lang`)) || [])[0] || {}).lang;
+  const who = actor.name || actor.email || '', en = lang === 'en', d = pe ? czD(pe, en) : '';
+  let cs, enT;
+  if (S.isPayer) {
+    cs = resume ? `🧰 ${who} znovu obnovil/a předplatné profilu dodavatele ${S.name} — dál ho platí ze své karty. Kdykoli ho můžeš převzít na svou kartu v Profilu dodavatele.`
+      : `🧰 ${who} zastavil/a placení předplatného profilu dodavatele ${S.name} ze své karty. Profil poběží ${d ? ('do ' + d) : 'do konce zaplaceného období'}. Aby běžel dál bez přerušení, založ si v Profilu dodavatele vlastní navazující předplatné — první platba se strhne až ${d || 'v den, kdy to staré skončí'}.`;
+    enT = resume ? `🧰 ${who} renewed the supplier profile subscription for ${S.name} — they keep paying it from their card. You can take it over on your card at any time in Supplier profile.`
+      : `🧰 ${who} stopped paying the supplier profile subscription for ${S.name} from their card. The profile runs ${d ? ('until ' + d) : 'until the end of the paid period'}. To keep it running without a break, set up your own follow-on subscription in Supplier profile — your card is first charged only ${d ? ('on ' + d) : 'when the old one ends'}.`;
+  } else {
+    cs = `🧰 Majitel organizace ${S.name} zrušil předplatné profilu dodavatele, které platíš. Z tvé karty se už nic dalšího nestrhne; zaplacené období končí ${d || 'na konci období'}.`;
+    enT = `🧰 The owner of ${S.name} cancelled the supplier profile subscription you pay for. Nothing more will be charged to your card; the paid period ends ${d || 'at the end of the period'}.`;
+  }
+  await sbPost('notifications', { user_id: toId, type: 'system', read: false, message: cs,
+    data: JSON.stringify({ kind: 'sup_paidfor', target: S.isPayer ? 'owner' : 'payer', org_id: S.orgId, org_name: S.name, msg_cs: cs, msg_en: enT }) });
+}
 
 async function sb(path) {
   const r = await fetch(`${SB}/rest/v1/${path}`, { headers: { apikey: KEY, Authorization: `Bearer ${KEY}` } });
@@ -61,15 +95,20 @@ export default async function handler(req, res) {
     } else {
       // Předplatné na účtu MTL: Exclusive Partner (profil) nebo profil dodavatele (organizace).
       const ep = (await sb(`profiles?id=eq.${q(me)}&partner_sub=eq.${q(subscriptionId)}&select=id&limit=1`)) || [];
-      const sup = ep.length ? [] : ((await sb(`organizations?owner_id=eq.${q(me)}&supplier_sub=eq.${q(subscriptionId)}&select=id&limit=1`)) || []);
+      const sup = ep.length ? [] : ((await sb(`organizations?supplier_sub=eq.${q(subscriptionId)}&select=id,name,owner_id,supplier_sub_by&limit=1`)) || []);
       if (!ep.length && !sup.length) return res.status(403).json({ error: 'Tohle předplatné měnit nemůžeš' });
-      mtlSub = ep.length ? { userId: me } : { orgId: sup[0].id };
-      // Po převodu organizace: předplatné dodavatele platí karta PŘEDCHOZÍHO majitele. Nový ho nesmí
-      // obnovit (strhávalo by se jemu) -- založí si vlastní (pay.js, navazující předplatné).
-      if (sup.length) {
-        try { const _md = (await stripe.subscriptions.retrieve(subscriptionId)).metadata || {};
-          if (_md.user_id && String(_md.user_id) !== String(me)) return res.status(403).json({ error: 'Tohle předplatné platí předchozí majitel. Založ si vlastní.' }); }
-        catch (e) { console.error('supplier sub owner', e.message); }
+      if (ep.length) mtlSub = { userId: me };
+      else {
+        // Kdo platí: metadata předplatného (user_id při založení), jinak supplier_sub_by, jinak majitel.
+        const o = sup[0];
+        let payer = o.supplier_sub_by || o.owner_id;
+        try { const _md = (await stripe.subscriptions.retrieve(subscriptionId)).metadata || {}; if (_md.user_id) payer = _md.user_id; }
+        catch (e) { console.error('supplier sub payer', e.message); }
+        const isOwner = String(o.owner_id) === String(me), isPayer = String(payer) === String(me);
+        if (!isOwner && !isPayer) return res.status(403).json({ error: 'Tohle předplatné měnit nemůžeš' });
+        // Majitel, který nic neplatí: smí jen zrušit ke konci období. Obnovit by znamenalo strhávat cizí kartu.
+        if (!isPayer && (String(resume) === '1' || !memberOp)) return res.status(403).json({ error: 'Tohle předplatné platí předchozí majitel. Obnovit ho může jen on; ty si v Profilu dodavatele můžeš založit vlastní navazující.' });
+        mtlSub = { orgId: o.id, sup: { orgId: o.id, name: o.name || '', owner: o.owner_id, payer, isPayer } };
       }
     }
     const opts = gymAccount ? { stripeAccount: gymAccount } : undefined;
@@ -118,6 +157,12 @@ export default async function handler(req, res) {
     // EP / dodavatel: potvrzení e-mailem (zrušení s datem konce, nebo obnovení). Konec samotný
     // hlásí webhook (customer.subscription.deleted).
     if (mtlSub && String(immediate) !== '1') await subMail(mtlSub, String(resume) === '1' ? 'resume' : 'cancel', _pe, { test: sub.livemode === false });
+    if (mtlSub && mtlSub.sup && String(immediate) !== '1') {
+      const _res = String(resume) === '1';
+      try { await sbPatch(`organizations?id=eq.${q(mtlSub.sup.orgId)}`, { supplier_cancelling: !_res, supplier_period_end: (!_res && _pe) ? new Date(_pe * 1000).toISOString() : null }); }
+      catch (e) { console.error('supplier state', e.message); }
+      try { await supOtherSide(mtlSub.sup, _res, _pe); } catch (e) { console.error('supplier other side', e.message); }
+    }
     res.status(200).json({
       ok: true,
       status: sub.status,

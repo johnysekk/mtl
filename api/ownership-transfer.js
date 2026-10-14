@@ -2,12 +2,17 @@
 //
 // POST { action, ... }   (přihlášený uživatel; token v x-access-token nebo Authorization)
 //   request { kind:'gym', id, to }          majitel klubu -> aktivní spolumajitel (to = id profilu)
-//   request { kind:'org', id, email }       majitel organizace -> libovolný účet MTL podle e-mailu
+//   request { kind:'org', id, email, sub_offer }   majitel organizace -> libovolný účet MTL podle e-mailu;
+//                                           sub_offer = dosavadní majitel nabízí, že předplatné profilu
+//                                           dodavatele bude dál platit ze své karty
 //   get     { id }                          podrobnosti převodu (příjemce, odesílatel, founder)
-//   accept  { id }                          příjemce převezme -- teprve tady se vlastnictví mění
+//   accept  { id, sub_choice }              příjemce převezme -- teprve tady se vlastnictví mění;
+//                                           u dodavatele s běžícím předplatným vybere keep / own / cancel
 //   decline { id }                          příjemce odmítne
 //   cancel  { id }                          odesílatel žádost stáhne
-//   admin   { kind, id, to | email, keep_old }   founder převede rovnou, bez potvrzení
+//   admin   { kind, id, to | email, keep_old, sub_choice }   founder převede rovnou, bez potvrzení
+//   paying  {}                              předplatná profilu dodavatele, která volající platí za
+//                                           organizace, které už nevlastní (Správa účtu)
 //
 // CO SE PŘI PŘEVODU DĚJE (execute):
 //   * owner_id na nového majitele. Zakladatel (gyms.founder_id) se nemění.
@@ -15,8 +20,12 @@
 //     zatěžovat. Nový majitel přidá svou (Platby a provize).
 //   * Klub: nový majitel přestane být spolumajitelem (je majitel); předchozí se jím stane
 //     (keep_old), dokud ho nový neodebere. Záznam jde do historie klubu (gym_audit).
-//   * Dodavatel: předplatné profilu platí karta předchozího majitele -- nastaví se ke zrušení
-//     na konci období. Profil do té doby běží, pak ho nový majitel zaplatí ze svého účtu.
+//   * Dodavatel s běžícím předplatným profilu -- podle volby nového majitele (sub_choice):
+//       keep   dál platí karta dosavadního majitele (jen když to sám nabídl). Zastavit ho může
+//              kdykoli on (Správa účtu) i nový majitel; nový ho může převzít na svou kartu (pay.js).
+//       own    staré se ukončí ke konci období a nový majitel si hned založí navazující (první
+//              platba v den konce, profil běží bez přerušení).
+//       cancel staré doběhne a skončí.
 //   * Stripe účet a fakturační údaje patří klubu / organizaci (právnímu subjektu), ne člověku:
 //     zůstávají. Nový majitel je dostane v notifikaci ke kontrole.
 //   * Oba dostanou notifikaci v appce a e-mail s proklikem.
@@ -41,8 +50,9 @@ async function entityOf(kind, id) {
     return g ? { kind, id: g.id, name: g.name || 'Klub', owner_id: g.owner_id, gone: !!g.deleted_at } : null;
   }
   if (kind === 'org') {
-    const o = await one(`organizations?id=eq.${q(id)}&select=id,name,owner_id,kind,supplier_sub`);
-    return o ? { kind, id: o.id, name: o.name || 'Organizace', owner_id: o.owner_id, orgKind: o.kind, supplier_sub: o.supplier_sub || null } : null;
+    const o = await one(`organizations?id=eq.${q(id)}&select=id,name,owner_id,kind,supplier_sub,supplier_cancelling,supplier_sub_by`);
+    return o ? { kind, id: o.id, name: o.name || 'Organizace', owner_id: o.owner_id, orgKind: o.kind, supplier_sub: o.supplier_sub || null,
+      supplier_cancelling: !!o.supplier_cancelling, payer: o.supplier_sub_by || o.owner_id } : null;
   }
   return null;
 }
@@ -66,9 +76,17 @@ async function supStripeEnd(subId) {
     return pe ? new Date(pe * 1000).toISOString() : null;
   } catch (e) { return null; }
 }
+// Co může nový majitel s předplatným dodavatele udělat. Zrušené (dobíhající) jde jen nahradit
+// vlastním nebo nechat doběhnout; „dál platí dosavadní majitel" jen když to sám nabídl a pořád platí on.
+function subChoices(E, X) {
+  if (!E || E.orgKind !== 'supplier' || !E.supplier_sub) return [];
+  if (E.supplier_cancelling) return ['own', 'cancel'];
+  const keep = X ? (X.sub_offer && String(E.payer) === String(X.from_user)) : true;
+  return keep ? ['keep', 'own', 'cancel'] : ['own', 'cancel'];
+}
 
-// VLASTNÍ PŘEVOD. E = entityOf, fromId = dosavadní majitel, toId = nový.
-async function execute(E, fromId, toId, keepOld, actorId, byAdmin) {
+// VLASTNÍ PŘEVOD. E = entityOf, fromId = dosavadní majitel, toId = nový, subChoice viz výš.
+async function execute(E, fromId, toId, keepOld, actorId, byAdmin, subChoice) {
   const table = E.kind === 'gym' ? 'gyms' : 'organizations';
   await sbWrite('PATCH', `${table}?id=eq.${q(E.id)}`, Object.assign({ owner_id: toId }, CARD_OFF));
   let subEnd = null;
@@ -83,6 +101,11 @@ async function execute(E, fromId, toId, keepOld, actorId, byAdmin) {
     }
     try { await sbWrite('POST', 'gym_audit', { gym_id: E.id, actor_id: actorId, action: 'owner_transferred', target_id: toId, meta: { from: fromId, to: toId, by_admin: !!byAdmin, keep_old: !!keepOld } }); }
     catch (e) { console.error('[ownership-transfer] audit', e.message); }
+  } else if (E.supplier_sub && subChoice === 'keep') {
+    // Na Stripe se nic nemění. Jen se zapamatuje, kdo platí (u předplatných z doby před sloupcem
+    // supplier_sub_by chybí) -- podle toho ho dosavadní majitel najde ve Správě účtu.
+    subEnd = await supStripeEnd(E.supplier_sub);   // příští platba z jeho karty
+    try { await sbWrite('PATCH', `organizations?id=eq.${q(E.id)}&supplier_sub_by=is.null`, { supplier_sub_by: E.payer || fromId }); } catch (e) {}
   } else if (E.supplier_sub) {
     try {
       const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -93,43 +116,69 @@ async function execute(E, fromId, toId, keepOld, actorId, byAdmin) {
       await sbWrite('PATCH', `organizations?id=eq.${q(E.id)}`, { supplier_cancelling: true, supplier_period_end: subEnd });
       // Kdo ho platí (u předplatných z doby před sloupcem supplier_sub_by chybí) -- zvlášť, ať
       // chybějící sloupec nezastaví zbytek.
-      try { await sbWrite('PATCH', `organizations?id=eq.${q(E.id)}&supplier_sub_by=is.null`, { supplier_sub_by: fromId }); } catch (e) {}
+      try { await sbWrite('PATCH', `organizations?id=eq.${q(E.id)}&supplier_sub_by=is.null`, { supplier_sub_by: E.payer || fromId }); } catch (e) {}
     } catch (e) { console.error('[ownership-transfer] supplier sub', e.message); }
   }
   return { subEnd };
 }
 
-// Oznámení o dokončeném převodu oběma stranám.
-async function notifyDone(E, from, to, keepOld, byAdmin, subEnd) {
+// Oznámení o dokončeném převodu oběma stranám. choice = sub_choice (jen dodavatel s předplatným).
+async function notifyDone(E, from, to, keepOld, byAdmin, subEnd, choice) {
   const isGym = E.kind === 'gym', isSup = E.orgKind === 'supplier';
   const now = new Date().toISOString();
+  const fromNm = from ? (from.name || from.email) : '—', toNm = to ? (to.name || to.email) : '—';
   for (const side of ['to', 'from']) {
     const P = side === 'to' ? to : from; if (!P) continue;
     const en = P.lang === 'en';
+    const d = subEnd ? czDate(subEnd, en) : '';
     const what = isGym ? (en ? 'the club' : 'klubu') : (en ? 'the organization' : 'organizace');
     const by = byAdmin ? (en ? 'The MTL administrator transferred' : 'Administrátor MTL převedl') : null;
+    // Věta o předplatném profilu dodavatele podle volby.
+    let subCs = '', subEn = '';
+    if (isSup && choice) {
+      if (side === 'to') {
+        if (choice === 'keep') {
+          subCs = ` Předplatné profilu dodavatele dál platí ${fromNm} ze své karty${d ? (' (další platba ' + d + ')') : ''}. Kdykoli ho můžeš převzít na svou kartu — naváže bez přerušení — nebo zrušit, obojí v Profilu dodavatele. Když ho ${fromNm} zastaví, dáme ti vědět.`;
+          subEn = ` The supplier profile subscription is still paid by ${fromNm} from their card${d ? (' (next payment ' + d + ')') : ''}. You can take it over on your card at any time — it continues without a break — or cancel it, both in Supplier profile. If ${fromNm} stops it, we will let you know.`;
+        } else if (choice === 'own') {
+          subCs = ` Předplatné, které platil/a ${fromNm}, skončí ${d || 'na konci zaplaceného období'}. Pokud jsi navazující předplatné na svou kartu ještě nedokončil/a, založ ho v Profilu dodavatele — první platba se strhne až ${d || 'v den, kdy to staré skončí'} a profil poběží bez přerušení.`;
+          subEn = ` The subscription paid by ${fromNm} ends ${d || 'at the end of the paid period'}. If you have not finished your own follow-on subscription yet, set it up in Supplier profile — your card is first charged only ${d ? ('on ' + d) : 'when the old one ends'} and the profile keeps running.`;
+        } else {
+          subCs = ` Předplatné profilu dodavatele skončí ${d || 'na konci zaplaceného období'}; potom se profil přestane zobrazovat. Znovu ho můžeš kdykoli zaplatit v Profilu dodavatele.`;
+          subEn = ` The supplier profile subscription ends ${d || 'at the end of the paid period'}; after that the profile is no longer shown. You can pay for it again at any time in Supplier profile.`;
+        }
+      } else if (choice === 'keep') {
+        subCs = ` Předplatné profilu dodavatele dál platíš ze své karty${d ? (' (další platba ' + d + ')') : ''}, i když organizaci už nevlastníš. Zastavit ho můžeš kdykoli: Správa účtu → Předplatné, které platíš za jiné.`;
+        subEn = ` You keep paying the supplier profile subscription from your card${d ? (' (next payment ' + d + ')') : ''}, even though you no longer own the organization. You can stop it at any time: Account & privacy → Subscriptions you pay for others.`;
+      } else {
+        subCs = ` Tvoje předplatné profilu dodavatele se už neobnoví${d ? (' (zaplacené období končí ' + d + ')') : ''}.`;
+        subEn = ` Your supplier profile subscription will not renew${d ? (' (the paid period ends ' + d + ')') : ''}.`;
+      }
+    }
     let cs, enT;
     if (side === 'to') {
-      cs = `🔑 ${by ? (by + ' na tebe vlastnictví ' + what + ' ' + E.name) : ('Jsi nový majitel ' + what + ' ' + E.name)} (dosud ${from ? from.name || from.email : '—'}).`
+      cs = `🔑 ${by ? (by + ' na tebe vlastnictví ' + what + ' ' + E.name) : ('Jsi nový majitel ' + what + ' ' + E.name)} (dosud ${fromNm}).`
         + (isSup ? '' : ' Odpojili jsme kartu na provizi předchozího majitele — přidej svou v Platby a provize, jinak provizi nepůjde strhnout.')
-        + (isSup ? (' Předplatné profilu dodavatele platil předchozí majitel a skončí' + (subEnd ? (' ' + czDate(subEnd)) : ' na konci zaplaceného období') + '. Založ si hned vlastní (Profil dodavatele) — první platba se z tvé karty strhne až v den, kdy to staré skončí, a profil poběží bez přerušení.') : '')
+        + subCs
         + ' Zkontroluj fakturační údaje' + (isSup ? '.' : ' a Stripe účet — platby kartou chodí na účet, který je připojený.');
-      enT = `🔑 ${by ? (by + ' ownership of ' + what + ' ' + E.name + ' to you') : ('You are the new owner of ' + what + ' ' + E.name)} (previously ${from ? from.name || from.email : '—'}).`
+      enT = `🔑 ${by ? (by + ' ownership of ' + what + ' ' + E.name + ' to you') : ('You are the new owner of ' + what + ' ' + E.name)} (previously ${fromNm}).`
         + (isSup ? '' : ' We disconnected the previous owner\'s commission card — add yours in Payments & commission, otherwise the commission cannot be charged.')
-        + (isSup ? (' The supplier profile subscription was paid by the previous owner and ends' + (subEnd ? (' ' + czDate(subEnd, true)) : ' at the end of the paid period') + '. Set up your own now (Supplier profile) — your card is first charged only on the day the old one ends, and the profile keeps running without a break.') : '')
+        + subEn
         + ' Check the billing details' + (isSup ? '.' : ' and the Stripe account — card payments go to the account that is connected.');
     } else {
-      cs = `🔑 ${by ? (by + ' vlastnictví ' + what + ' ' + E.name + ' na ' + (to.name || to.email)) : ((isGym ? 'Klub ' : 'Organizaci ') + E.name + ' teď vlastní ' + (to.name || to.email))}.`
-        + (isSup ? ' Tvoje předplatné profilu dodavatele se už neobnoví.' : ' Tvoje karta na provizi byla odpojena.')
+      cs = `🔑 ${by ? (by + ' vlastnictví ' + what + ' ' + E.name + ' na ' + toNm) : ((isGym ? 'Klub ' : 'Organizaci ') + E.name + ' teď vlastní ' + toNm)}.`
+        + (isSup ? subCs : ' Tvoje karta na provizi byla odpojena.')
         + (isGym ? (keepOld ? ' Zůstáváš spolumajitelem, dokud tě nový majitel neodebere.' : ' Ke klubu už nemáš přístup.') : ' K organizaci už nemáš přístup.');
-      enT = `🔑 ${by ? (by + ' ownership of ' + what + ' ' + E.name + ' to ' + (to.name || to.email)) : ((isGym ? 'The club ' : 'The organization ') + E.name + ' is now owned by ' + (to.name || to.email))}.`
-        + (isSup ? ' Your supplier profile subscription will not renew.' : ' Your commission card was disconnected.')
+      enT = `🔑 ${by ? (by + ' ownership of ' + what + ' ' + E.name + ' to ' + toNm) : ((isGym ? 'The club ' : 'The organization ') + E.name + ' is now owned by ' + toNm)}.`
+        + (isSup ? subEn : ' Your commission card was disconnected.')
         + (isGym ? (keepOld ? ' You stay a co-owner until the new owner removes you.' : ' You no longer have access to the club.') : ' You no longer have access to the organization.');
     }
-    await providerNotify(P.id, { kind: 'owner_xfer_done', side, entity: E.kind, id: E.id, name: E.name, supplier: isSup, by_admin: !!byAdmin, at: now, msg_cs: cs, msg_en: enT });
+    await providerNotify(P.id, { kind: 'owner_xfer_done', side, entity: E.kind, id: E.id, name: E.name, supplier: isSup, sub_choice: choice || null, by_admin: !!byAdmin, at: now, msg_cs: cs, msg_en: enT });
+    // Proklik: kdo dál platí za cizí organizaci, jde do Správy účtu (tam ho zastaví); ostatní do subjektu.
+    const url = (side === 'from' && isSup && choice === 'keep') ? `${APP}/?go=paidfor` : `${APP}/?go=xferdone&k=${q(E.kind)}&id=${q(E.id)}&s=${side}`;
     await providerMail(P.email, en ? `Ownership transferred: ${E.name}` : `Převod vlastnictví: ${E.name}`,
       [en ? 'Hello,' : 'Dobrý den,', esc(en ? enT : cs)],
-      { text: en ? 'Open in the app' : 'Otevřít v appce', url: `${APP}/?go=xferdone&k=${q(E.kind)}&id=${q(E.id)}&s=${side}` });
+      { text: en ? 'Open in the app' : 'Otevřít v appce', url });
   }
 }
 
@@ -149,6 +198,23 @@ export default async function handler(req, res) {
 
     let b = req.body || {}; if (typeof b === 'string') { try { b = JSON.parse(b); } catch (e) { b = {}; } }
     const action = String(b.action || '');
+
+    // ── PŘEDPLATNÁ, KTERÁ PLATÍM ZA CIZÍ ORGANIZACI ─────────────────────────────────────
+    // Po převodu s volbou „dál platí dosavadní majitel" (keep). Zastavit / obnovit ho jde přes
+    // /api/cancel-membership (ověří, že platí volající).
+    if (action === 'paying') {
+      const rows = (await sbGet(`organizations?supplier_sub_by=eq.${q(me)}&owner_id=neq.${q(me)}&supplier_sub=not.is.null`
+        + `&select=id,name,owner_id,supplier_sub,supplier_cancelling,supplier_period_end,supplier_renews_at,supplier_price,supplier_currency,supplier_interval`)) || [];
+      const items = [];
+      for (const o of rows) {
+        const ow = o.owner_id ? await prof(o.owner_id) : null;
+        items.push({ id: o.id, name: o.name || '', owner_name: ow ? (ow.name || ow.email || '') : '', sub: o.supplier_sub,
+          cancelling: !!o.supplier_cancelling, end: o.supplier_cancelling ? (o.supplier_period_end || await supStripeEnd(o.supplier_sub)) : null,
+          next: o.supplier_cancelling ? null : (o.supplier_renews_at || await supStripeEnd(o.supplier_sub)),
+          price: o.supplier_price || null, currency: o.supplier_currency || 'CZK', interval: o.supplier_interval || 'month' });
+      }
+      return res.status(200).json({ ok: true, items });
+    }
 
     // ── ŽÁDOST MAJITELE ────────────────────────────────────────────────────────────────
     if (action === 'request' || action === 'admin') {
@@ -174,24 +240,34 @@ export default async function handler(req, res) {
 
       if (action === 'admin') {
         const keepOld = kind === 'gym' ? b.keep_old !== false : false;
-        await sbWrite('POST', 'ownership_transfers', { kind, entity_id: id, entity_name: E.name, from_user: E.owner_id, to_user: to.id, status: 'accepted', keep_old: keepOld, by_admin: true, decided_at: new Date().toISOString() });
-        const r = await execute(E, E.owner_id, to.id, keepOld, me, true);
-        await notifyDone(E, from, to, keepOld, true, r.subEnd);
+        // Founder rozhoduje sám; „dál platí dosavadní karta" jde i bez nabídky (platící to v Správě
+        // účtu kdykoli zastaví a dostane o tom notifikaci).
+        const ch = subChoices(E, null);
+        const subChoice = ch.length ? (ch.includes(String(b.sub_choice)) ? String(b.sub_choice) : 'own') : null;
+        await sbWrite('POST', 'ownership_transfers', { kind, entity_id: id, entity_name: E.name, from_user: E.owner_id, to_user: to.id, status: 'accepted', keep_old: keepOld, by_admin: true, decided_at: new Date().toISOString(),
+          ...(subChoice ? { sub_choice: subChoice } : {}) });
+        const r = await execute(E, E.owner_id, to.id, keepOld, me, true, subChoice);
+        await notifyDone(E, from, to, keepOld, true, r.subEnd, subChoice);
         return res.status(200).json({ ok: true, to_name: to.name || to.email });
       }
 
+      // Nabídnout „budu dál platit ze své karty" může jen ten, kdo předplatné opravdu platí.
+      const subOffer = !!(b.sub_offer && E.orgKind === 'supplier' && E.supplier_sub && !E.supplier_cancelling && String(E.payer) === String(me));
       const ins = await fetch(`${SB}/rest/v1/ownership_transfers`, { method: 'POST',
         headers: { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json', Prefer: 'return=representation' },
-        body: JSON.stringify({ kind, entity_id: id, entity_name: E.name, from_user: me, to_user: to.id, keep_old: true }) });
+        body: JSON.stringify({ kind, entity_id: id, entity_name: E.name, from_user: me, to_user: to.id, keep_old: true, ...(subOffer ? { sub_offer: true } : {}) }) });
       if (!ins.ok) { const t = await ins.text().catch(() => ''); throw new Error('insert ' + ins.status + ' ' + t.slice(0, 160)); }
       const X = (await ins.json())[0];
       const en = to.lang === 'en';
       const fromNm = (from && (from.name || from.email)) || '';
       const isSup = E.orgKind === 'supplier';
-      const cs = `🔑 ${fromNm} ti chce předat vlastnictví ${kind === 'gym' ? 'klubu' : 'organizace'} ${E.name}. Převezmeš ${kind === 'gym' ? 'klub' : 'organizaci'} se vším, včetně provizí MTL a dokladů`
-        + (isSup ? ' a předplatného profilu dodavatele' : '') + '. Podívej se na podrobnosti a převzetí potvrď nebo odmítni (platí ' + EXPIRE_DAYS + ' dní).';
-      const enT = `🔑 ${fromNm} wants to transfer ownership of ${kind === 'gym' ? 'the club' : 'the organization'} ${E.name} to you. You take it over with everything, including MTL commission and receipts`
-        + (isSup ? ' and the supplier profile subscription' : '') + '. Check the details and accept or decline (valid for ' + EXPIRE_DAYS + ' days).';
+      const hasSub = isSup && !!E.supplier_sub;
+      const cs = `🔑 ${fromNm} ti chce předat vlastnictví ${kind === 'gym' ? 'klubu' : 'organizace'} ${E.name}. Převezmeš ${kind === 'gym' ? 'klub' : 'organizaci'} se vším, včetně provizí MTL a dokladů.`
+        + (hasSub ? (subOffer ? ` ${fromNm} nabízí, že bude předplatné profilu dodavatele dál platit ze své karty — při převzetí si vybereš, jestli to přijmeš, založíš si vlastní, nebo ho necháš skončit.` : ' Při převzetí si vybereš, jestli si založíš vlastní navazující předplatné profilu dodavatele, nebo ho necháš skončit.') : '')
+        + ' Podívej se na podrobnosti a převzetí potvrď nebo odmítni (platí ' + EXPIRE_DAYS + ' dní).';
+      const enT = `🔑 ${fromNm} wants to transfer ownership of ${kind === 'gym' ? 'the club' : 'the organization'} ${E.name} to you. You take it over with everything, including MTL commission and receipts.`
+        + (hasSub ? (subOffer ? ` ${fromNm} offers to keep paying the supplier profile subscription from their card — when you accept, you choose whether to take that, set up your own, or let it end.` : ' When you accept, you choose whether to set up your own follow-on supplier profile subscription or let it end.') : '')
+        + ' Check the details and accept or decline (valid for ' + EXPIRE_DAYS + ' days).';
       await providerNotify(to.id, { kind: 'owner_xfer_request', xfer_id: X.id, entity: kind, id, name: E.name, from_name: fromNm, msg_cs: cs, msg_en: enT });
       await providerMail(to.email, en ? `Ownership transfer: ${E.name}` : `Předání vlastnictví: ${E.name}`,
         [en ? 'Hello,' : 'Dobrý den,', esc(en ? enT : cs)], { text: en ? 'View and decide' : 'Zobrazit a rozhodnout', url: xferLink(X.id) });
@@ -212,7 +288,8 @@ export default async function handler(req, res) {
     if (action === 'get') {
       const subEnd = (E && E.supplier_sub) ? await supStripeEnd(E.supplier_sub) : null;
       return res.status(200).json({ ok: true, role, transfer: { id: X.id, kind: X.kind, status: X.status, created_at: X.created_at, decided_at: X.decided_at, entity_id: X.entity_id },
-        entity: E ? { name: E.name, supplier: E.orgKind === 'supplier', sub_end: subEnd } : { name: X.entity_name },
+        entity: E ? { name: E.name, supplier: E.orgKind === 'supplier', sub_end: subEnd, sub_cancelling: !!E.supplier_cancelling,
+          sub_choices: X.status === 'pending' ? subChoices(E, X) : [], sub_choice: X.sub_choice || null } : { name: X.entity_name },
         from_name: from ? (from.name || from.email) : '', to_name: to ? (to.name || to.email) : '' });
     }
     if (X.status !== 'pending') return res.status(409).json({ error: ({ accepted: 'Převod už proběhl', declined: 'Převod byl odmítnut', cancelled: 'Žádost byla stažena', expired: 'Žádost vypršela' })[X.status] || 'Žádost už neplatí' });
@@ -243,10 +320,18 @@ export default async function handler(req, res) {
         return res.status(409).json({ error: 'Majitel se mezitím změnil -- žádost už neplatí' });
       }
       if (X.kind === 'gym' && !(await activeCoOwner(X.entity_id, me))) return res.status(409).json({ error: 'Už nejsi spolumajitel klubu -- převzít ho nejde' });
-      await sbWrite('PATCH', `ownership_transfers?id=eq.${q(xid)}`, { status: 'accepted', decided_at: new Date().toISOString() });
-      const r = await execute(E, X.from_user, me, X.keep_old, me, false);
-      await notifyDone(E, from, to, X.keep_old, false, r.subEnd);
-      return res.status(200).json({ ok: true, kind: X.kind, entity_id: X.entity_id });
+      // Předplatné profilu dodavatele: volba je povinná a musí odpovídat dnešnímu stavu (mezitím ho
+      // dosavadní majitel mohl zrušit -- pak už „dál platí on" nejde).
+      const ch = subChoices(E, X);
+      let subChoice = null;
+      if (ch.length) {
+        subChoice = String(b.sub_choice || '');
+        if (!ch.includes(subChoice)) return res.status(400).json({ error: 'Vyber, co bude s předplatným profilu dodavatele' });
+      }
+      await sbWrite('PATCH', `ownership_transfers?id=eq.${q(xid)}`, { status: 'accepted', decided_at: new Date().toISOString(), ...(subChoice ? { sub_choice: subChoice } : {}) });
+      const r = await execute(E, X.from_user, me, X.keep_old, me, false, subChoice);
+      await notifyDone(E, from, to, X.keep_old, false, r.subEnd, subChoice);
+      return res.status(200).json({ ok: true, kind: X.kind, entity_id: X.entity_id, sub_choice: subChoice });
     }
     return res.status(400).json({ error: 'unknown action' });
   } catch (e) {

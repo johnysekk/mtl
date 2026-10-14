@@ -370,9 +370,13 @@ export default async function handler(req, res) {
     const docNoStr = (ins && ins[0] && ins[0].doc_no) || ('MTL-' + id);   // číslo přidělila databáze
 
     // Poskytovatel se to má dozvědět stejně jako u dokladu za provizi.
-    try {
+    // Po převodu organizace s volbou „dál platí dosavadní majitel" platí někdo jiný než majitel --
+    // dozví se oba (platící kvůli své kartě, majitel kvůli svému profilu a dokladům).
+    let _notifTo = [uid];
+    if (orgId) { try { const _ow = ((await sb(`organizations?id=eq.${encodeURIComponent(orgId)}&select=owner_id`)) || [])[0]; if (_ow && _ow.owner_id && String(_ow.owner_id) !== String(uid)) _notifTo.push(_ow.owner_id); } catch (e) {} }
+    for (const _nu of _notifTo) try {
       await sb('notifications', { method: 'POST', headers: { Prefer: 'return=minimal' },
-        body: JSON.stringify({ user_id: uid, type: 'system', read: false,
+        body: JSON.stringify({ user_id: _nu, type: 'system', read: false,
           // kind 'doklad_unified' -- stejná notifikace jako u dokladu o provizi: proklik otevře
           // rovnou tenhle doklad (showCommissionDoklad). Dřív 'ep_doklad', na který appka neuměla kliknout.
           message: b.unpaid
