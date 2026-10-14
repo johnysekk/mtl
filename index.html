@@ -13479,8 +13479,9 @@ async function _eventQrPay(ev, tier, payee, payeeKind, _qty, _cartIn, _whoIn){
   const pb=ov.querySelector('#evqrPaid'); if(pb) pb.onclick=async function(){
     pb.disabled=true; pb.textContent='\u2026';
     try{ if(ticketId){ await supaClient.from('event_tickets').update({ status:'paid_claimed', claimed_at:new Date().toISOString() }).eq('id',ticketId); } }catch(e){}
-    _pairAttach(_pvs, 'event_tickets', ticketId);
+    const _pairP=_pairAttach(_pvs, 'event_tickets', ticketId);
     try{ if(ev.created_by){ await supaClient.from('notifications').insert(_bi({ user_id:ev.created_by, type:'system', read:false, data:JSON.stringify({ kind:'event_qr_intent', event_id:ev.id, title:ev.title }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('\ud83d\udcf2 '+sName+(EN?(' claims they paid for "'+(ev.title||'event')+'" (QR). Confirm in event management.'):(' tvrd\u00ed, \u017ee zaplatil za \u201e'+(ev.title||'akci')+'\u201c (QR). Potvrď ve spr\u00e1v\u011b akce.'))); })); } }catch(e){}
+    if((await _pairP)==='scheduled') toast(_pairAutoMsg(EN?'Ticket reserved':'L\u00edstek rezervov\u00e1n'), 1); else
     toast(EN?'\u2705 Ticket reserved \u00b7 organizer will confirm':'\u2705 L\u00edstek rezervov\u00e1n \u00b7 po\u0159adatel potvrd\u00ed', 1);
     close(); try{ closeSheet('shEventView'); }catch(e){}
   };
@@ -13726,7 +13727,7 @@ async function _coach1to1QrPay(c, payee, opts){
     pb.disabled=true; pb.textContent='\u2026';
     // Kdo zaplatil QR kódem bez toho, aby předtím zkoušel banku, tu ještě rezervaci nemá.
     await _ensureBooking('qr');
-    _pairAttach(_pvs, 'bookings', bookingId);
+    const _pairP=_pairAttach(_pvs, 'bookings', bookingId);
     // Seznam k potvrzeni u kouce chce ZAROVEN payment_method='qr'. Bez nej rezervace v seznamu
     // nebyla, kouc nemel co potvrdit a student ji nevidel ani v nadchazejicich.
     try{ if(bookingId){ await supaClient.from('bookings')
@@ -13750,6 +13751,7 @@ async function _coach1to1QrPay(c, payee, opts){
           ? ('\ud83d\udcf2 '+sName+' says they sent '+_amt+' by transfer for '+_what+' \u2014 '+_when+'. Confirm it once the money lands; the slot stays held until you do.')
           : ('\ud83d\udcf2 '+sName+' tvrd\u00ed, \u017ee poslal '+_amt+' p\u0159evodem za '+_what+' \u2014 '+_when+'. A\u017e pen\u00edze doraz\u00ed, potvr\u010f to; do t\u00e9 doby je term\u00edn dr\u017een\u00fd.');
       })); }catch(e){}
+    if((await _pairP)==='scheduled') toast(_pairAutoMsg(EN?'Lesson reserved':'Lekce rezervov\u00e1na'), 1); else
     toast(EN?'\u2705 Lesson reserved \u00b7 coach will confirm':'\u2705 Lekce rezervov\u00e1na \u00b7 kou\u010d potvrd\u00ed', 1);
     close();
   };
@@ -14455,7 +14457,7 @@ async function _reopenPendingQr(tbl,id){
   const payload=(typeof _bankQrPayload==='function')?_bankQrPayload(payee, amount, msg, _pvs):null;
   _payQrOverlay(payload, amount, currency, function(){
     try{ supaClient.from(tbl).update({ status:'paid_claimed', claimed_at:new Date().toISOString() }).eq('id',id).then(function(){ _renderPendingQr(); }); }catch(e){}
-    _pairAttach(_pvs, tbl, id);
+    return _pairAttach(_pvs, tbl, id);
   });
 }
 
@@ -14475,7 +14477,8 @@ function _payQrOverlay(payload, amount, currency, onClaim){
   const box=ov.querySelector('#_repayQrBox');
   if(box){ if(payload && window.QRCode){ new QRCode(box,{ text:payload, width:200, height:200, correctLevel:(QRCode.CorrectLevel?QRCode.CorrectLevel.M:undefined) }); } else { box.innerHTML='<div style="font-size:12px;color:var(--light);padding:20px;">'+(EN?'QR unavailable \u2014 pay manually':'QR nedostupn\u00e9 \u2014 zaplať ru\u010dn\u011b')+'</div>'; } }
   ov.querySelector('#_repayClose').onclick=function(){ ov.remove(); };
-  ov.querySelector('#_repayPaid').onclick=function(){ try{ onClaim&&onClaim(); }catch(e){} ov.remove(); toast(EN?'Thanks \u2014 the provider will confirm it':'D\u00edky \u2014 poskytovatel to potvrd\u00ed',1); };
+  ov.querySelector('#_repayPaid').onclick=function(){ let _r=null; try{ _r=onClaim&&onClaim(); }catch(e){} ov.remove();
+    Promise.resolve(_r).then(function(st){ toast(st==='scheduled'?_pairAutoMsg(EN?'Thanks':'D\u00edky'):(EN?'Thanks \u2014 the provider will confirm it':'D\u00edky \u2014 poskytovatel to potvrd\u00ed'),1); }); };
 }
 
 async function _coachChatLocked(coachId){
@@ -26883,11 +26886,16 @@ async function _pairReserve(payee, amount, cur){
     return (j && j.vs) ? String(j.vs) : null;
   }catch(e){ return null; }
 }
+// Vrací Promise se stavem ('scheduled' = platba se potvrdí sama), jinak null. Volající ho čekat
+// nemusí; čeká na něj jen hláška po „Zaplaceno", ať neslibuje ruční potvrzení, když není potřeba.
 function _pairAttach(vs, tbl, id){
-  if(!vs || !tbl || !id) return;
-  (async function(){ try{ const t=(typeof _freshTok==='function')?await _freshTok():null; if(!t) return;
-    await fetch('/api/pairing',{ method:'POST', headers:{ 'Content-Type':'application/json', 'x-access-token':t }, body:JSON.stringify({ action:'attach', vs:String(vs), tbl:tbl, id:String(id) }) }); }catch(e){} })();
+  if(!vs || !tbl || !id) return Promise.resolve(null);
+  return (async function(){ try{ const t=(typeof _freshTok==='function')?await _freshTok():null; if(!t) return null;
+    const r=await fetch('/api/pairing',{ method:'POST', headers:{ 'Content-Type':'application/json', 'x-access-token':t }, body:JSON.stringify({ action:'attach', vs:String(vs), tbl:tbl, id:String(id) }) });
+    const j=await r.json().catch(function(){ return {}; }); return (j && j.status) || null; }catch(e){ return null; } })();
 }
+// Hláška po „Zaplaceno" u platby, kterou potvrdí párování (bez čekání na klub / kouče).
+function _pairAutoMsg(what){ const EN=LANG==='en'; return '\u2705 '+what+(EN?' \u00b7 we confirm the payment automatically as soon as it arrives':' \u00b7 platbu potvrd\u00edme automaticky, jakmile doraz\u00ed na \u00fa\u010det'); }
 // vs: variabilní symbol (párování) -- jen u CZK QR (SPAYD X-VS).
 function _bankQrPayload(g, amount, msg, vs){
   try{
@@ -27211,7 +27219,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom, _dpick){
     }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return null; }
   }
   const msg=sName+(disc?(' - '+disc):'')+(lvl?(' - '+lvl):((kind==='memb'&&label)?(' - '+label):''));
-  const _pvs=await _pairReserve(_qrPayeeObj, price, cur);
+  const _pvs=await _pairReserve(_qrPayeeObj, price, cur); let _pairP=null;
   const payload=(typeof _bankQrPayload==='function')?_bankQrPayload(_qrPayeeObj, price, msg, _pvs):null;
   const _pisIban=String((_qrPayeeObj&&_qrPayeeObj.receiver_id_value)||(g&&g.receiver_id_value)||'').replace(/\s+/g,'');
   const _pisCountry=_ibanCC(_pisIban);
@@ -27286,7 +27294,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom, _dpick){
   var _bx2=ov.querySelector('#oqrBox'); if(_bx2){ _bx2.style.cursor='pointer'; _bx2.ondblclick=function(){ try{ var cv=_bx2.querySelector('canvas'); var im=_bx2.querySelector('img'); var blob=null; if(cv&&cv.toDataURL){ var durl=cv.toDataURL('image/png'); var bs=atob(durl.split(',')[1]); var n=bs.length, u8=new Uint8Array(n); while(n--){ u8[n]=bs.charCodeAt(n); } blob=new Blob([u8],{type:'image/png'}); } if(!blob){ return; } var file=null; try{ file=new File([blob],'MTL-platba-QR.png',{type:'image/png'}); }catch(e){} if(file && navigator.canShare && navigator.canShare({files:[file]})){ navigator.share({files:[file], title:'MTL platba QR'}).catch(function(){}); } else { var url=URL.createObjectURL(blob); var a=document.createElement('a'); a.href=url; a.download='MTL-platba-QR.png'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(function(){ try{ URL.revokeObjectURL(url); }catch(e){} },1500); } }catch(e){} }; } if(pb) pb.onclick=async function(){
     pb.disabled=true; pb.textContent='\u2026';
     { const _iid=await _ensureIntent(); if(!_iid){ pb.disabled=false; pb.textContent='\u2713 '+(EN?'I\u2019ve paid':'Zaplaceno'); return; }
-      _pairAttach(_pvs, kind==='memb'?'gym_memberships':'gym_bookings', _iid); }
+      _pairP=_pairAttach(_pvs, kind==='memb'?'gym_memberships':'gym_bookings', _iid); }
     try{
       if(kind!=='memb'){
         const _cl={ status:'paid_claimed', payment_method:'qr', claimed_at:new Date().toISOString() };
@@ -27305,6 +27313,7 @@ async function _onlineQrPay(g, occ, _child, kind, plan, _forWhom, _dpick){
       }
     }catch(e){}
     try{ if(g && g._coachPlan && _qrPayeeCoach){ const _a=fmtPrice(price,cur)+' '+sym; await supaClient.from('notifications').insert({ user_id:_qrPayeeCoach, type:'system', read:false, data:JSON.stringify({ kind:'online_plan_qr', student:sName, plan:label, msg_cs:'📲 '+sName+' tvrdí, že ti převodem zaplatil/a předplatné „'+label+'“ ('+_a+'). Zkontroluj účet a potvrď platbu v Předplatitelích.', msg_en:'📲 '+sName+' says they paid the subscription "'+label+'" ('+_a+') by bank transfer. Check your account and confirm it under Subscribers.' }), message:'📲 '+sName+' tvrdí, že zaplatil/a předplatné „'+label+'“.' }); } else if(_qrPaidTo==='coach' && _qrPayeeCoach){ await supaClient.from('notifications').insert(_bi({ user_id:_qrPayeeCoach, type:'booking', read:false, data:JSON.stringify({ kind:'coach_qr_intent', student:sName }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return ('\ud83d\udcf2 '+sName+(EN?(' claims they paid for '+label+' (QR). Confirm in your diary.'):(' tvrd\u00ed, \u017ee zaplatil za '+label+' (QR). Potvr\u010f v di\u00e1\u0159i.'))); })); } else if(g.owner_id){ const realtime=(g.confirm_mode==='realtime'); const m=realtime?(EN?(sName+' claims they paid for '+label+' (QR).'):(sName+' tvrd\u00ed, \u017ee zaplatil za '+label+' (QR).')):(EN?(sName+' reserved '+label+' (QR).'):(sName+' si rezervoval '+label+' (QR).')); await supaClient.from('notifications').insert(_bi({ user_id:g.owner_id, type:'booking', read:false, data:JSON.stringify({ kind:'qr_intent', student:sName, gym:g.id, gym_name:g.name||'', what:label, occ:{ date:(occ&&occ.date)||null, time:(occ&&occ.time)||null, name:(occ&&occ.name)||null }, confirm_mode:(g.confirm_mode||'') }), message:''}, function(EN){ var LANG=EN?'en':'cs', EN2=EN, _EN=EN; return (realtime?(EN?(sName+' claims they paid for '+label+' (QR).'):(sName+' tvrd\u00ed, \u017ee zaplatil za '+label+' (QR).')):(EN?(sName+' reserved '+label+' (QR).'):(sName+' si rezervoval '+label+' (QR).'))); })); } }catch(e){}
+    if(_pairP && (await _pairP)==='scheduled') toast(_pairAutoMsg((kind==='memb' && g && g._coachPlan)?(EN?'Subscription reserved':'P\u0159edplatn\u00e9 rezervov\u00e1no'):(kind==='memb')?(EN?'Membership reserved':(_mwG(g).One+' rezervov\u00e1no')):(EN?'Spot reserved':'M\u00edsto rezervov\u00e1no')), 1); else
     toast((kind==='memb' && g && g._coachPlan)?(EN?'\u2705 Subscription reserved \u00b7 the coach will confirm the payment':'\u2705 P\u0159edplatn\u00e9 rezervov\u00e1no \u00b7 kou\u010d potvrd\u00ed platbu'):(kind==='memb')?(EN?('\u2705 Membership reserved \u00b7 '+(g.name||'the klub')+' will confirm the payment'):('\u2705 '+_mwG(g).One+' rezervov\u00e1no \u00b7 '+(g.name||'gym')+' potvrd\u00ed platbu')):(EN?('\u2705 Spot reserved \u00b7 '+(g.name||'the klub')+' will confirm the payment'):('\u2705 M\u00edsto rezervov\u00e1no \u00b7 '+(g.name||'gym')+' potvrd\u00ed platbu')), 1);
     close(); if(!(g && g._coachPlan)){ try{ openGymProfile(g); }catch(e){} }
   };
@@ -37308,10 +37317,26 @@ async function openAdminPairing(){
           +'<button class="_apTog" data-i="'+i+'" style="flex:1;padding:9px;border:1px solid var(--border);border-radius:9px;background:#fff;font-weight:700;cursor:pointer;font-family:inherit;font-size:12.5px;color:'+(a.active?'var(--red)':'#0a8f5b')+';">'+(a.active?'Vypnout':'Zapnout')+'</button></div></div>'; }).join('')
       +'<div style="font-size:12px;font-weight:800;color:var(--dark);margin:14px 0 6px;">Přidat účet</div>'
       +'<input id="_apIban" placeholder="IBAN (CZ…)" style="'+IN+'"><input id="_apUntil" type="date" value="'+plus180+'" style="'+IN+'"><input id="_apNote" placeholder="Poznámka (nepovinné)" style="'+IN+'">'
-      +'<button id="_apAdd" style="width:100%;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:11px;font-weight:800;cursor:pointer;font-family:inherit;">Zapnout párování pro tenhle účet</button>';
+      +'<button id="_apAdd" style="width:100%;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:11px;font-weight:800;cursor:pointer;font-family:inherit;">Zapnout párování pro tenhle účet</button>'
+      // TEST BEZ PENĚZ (jen Testovací režim): sandboxová platba z Mock Cobs, 1 Kč, s VS z QR na účet
+      // párování. V testu se páruje jen podle VS, takže se rezervace po spárování potvrdí sama.
+      +'<div style="font-size:12px;font-weight:800;color:var(--dark);margin:20px 0 6px;">\u{1F9EA} Test bez peněz (jen Testovací režim)</div>'
+      +'<p style="font-size:12px;color:var(--mid);line-height:1.5;margin:0 0 8px;">Zaplať v appce QR za cokoli u klubu s účtem pro párování a klikni „Zaplaceno“. VS najdeš ve Finbricks → Pairing payments (Párovací ID). Tady pošleš 1 Kč z Mock Cobs s tímhle VS na účet klubu a pak zkontroluješ stav.</p>'
+      +'<input id="_apVs" inputmode="numeric" placeholder="VS / Párovací ID (např. 100004)" style="'+IN+'">'
+      +'<div style="display:flex;gap:6px;"><button id="_apTest" style="flex:1;padding:11px;background:#fff;color:var(--dark);border:1px solid var(--border);border-radius:11px;font-weight:800;cursor:pointer;font-family:inherit;">Poslat 1 Kč z Mock Cobs</button>'
+      +'<button id="_apCheck" style="flex:1;padding:11px;background:#fff;color:var(--dark);border:1px solid var(--border);border-radius:11px;font-weight:800;cursor:pointer;font-family:inherit;">Zkontrolovat stav</button></div>'
+      +'<div id="_apOut" style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-top:8px;"></div>';
     const list=j.accounts||[];
     body.querySelectorAll('._apRenew').forEach(function(b){ b.onclick=async function(){ const a=list[+b.dataset.i]; b.disabled=true; try{ paint(await api({ action:'account_save', iban:a.iban, active:true, valid_until:plus180, note:a.note, renew:true })); toast('✅'); }catch(e){ b.disabled=false; toast('⚠️ '+e.message,1); } }; });
     body.querySelectorAll('._apTog').forEach(function(b){ b.onclick=async function(){ const a=list[+b.dataset.i]; b.disabled=true; try{ paint(await api({ action:'account_save', iban:a.iban, active:!a.active, valid_until:a.valid_until, note:a.note })); }catch(e){ b.disabled=false; toast('⚠️ '+e.message,1); } }; });
+    const _vs=function(){ return (body.querySelector('#_apVs').value||'').replace(/\D/g,''); };
+    const _out=function(t){ const o=body.querySelector('#_apOut'); if(o) o.textContent=t; };
+    body.querySelector('#_apTest').onclick=async function(){ const v=_vs(); if(!v){ toast('⚠️ Zadej VS'); return; }
+      try{ const j=await api({ action:'test_incoming', vs:v }); location.href=j.url; }catch(e){ _out('⚠️ '+e.message); } };
+    body.querySelector('#_apCheck').onclick=async function(){ const v=_vs(); if(!v){ toast('⚠️ Zadej VS'); return; }
+      try{ const j=await api({ action:'check', vs:v });
+        const _m={ paired:'✅ Spárováno — platba se v MTL potvrdila.', already:'✅ Už bylo spárováno a potvrzeno.', unpaired:'⏳ Zatím nespárováno — Finbricks platbu na účtu ještě nenašel.', mismatch:'⚠️ Spárováno, ale nesedí částka nebo měna.', error:'⚠️ Dotaz na Finbricks selhal.' }[j.result] || ('Stav: '+(j.status||j.result));
+        _out(_m+(j.last_error?(' ('+j.last_error+')'):'')); }catch(e){ _out('⚠️ '+e.message); } };
     body.querySelector('#_apAdd').onclick=async function(){ const ib=(body.querySelector('#_apIban').value||'').replace(/\s+/g,'').toUpperCase(); if(!ib){ toast('⚠️ Zadej IBAN'); return; }
       try{ paint(await api({ action:'account_save', iban:ib, active:true, valid_until:body.querySelector('#_apUntil').value, note:body.querySelector('#_apNote').value, renew:true })); toast('✅ Párování zapnuto'); }catch(e){ toast('⚠️ '+e.message,1); } };
   };
@@ -55640,6 +55665,8 @@ async function showPaidPopup(){
   // kouče (DAC7 žádost a upomínky), ?go=suspended -> důvod ručního pozastavení a jak ho zrušit.
   // ODKAZY Z E-MAILU O PŘEDÁNÍ VLASTNICTVÍ (/api/ownership-transfer): ?go=xfer&id= -> žádost
   // k rozhodnutí, ?go=xferdone&k=&id=&s= -> po převodu (nový majitel rovnou ke kartě na provizi).
+  // Návrat z testovací platby Mock Cobs (Admin → Párování plateb → Test bez peněz).
+  if(params.get('pairtest')){ const _pv=params.get('pairtest'); setTimeout(function(){ try{ if(currentUser){ openAdminPairing().then(function(){ const i=document.getElementById('_apVs'); if(i) i.value=_pv; }); toast('🧪 Testovací platba odeslaná — klikni na „Zkontrolovat stav“ (párování může chvíli trvat).', 1); } }catch(e){} }, 1500); }
   if(params.get('go')==='paidfor'){ setTimeout(function(){ try{ if(currentUser) openPaidFor(); }catch(e){} }, 1200); }
   if(params.get('go')==='xfer' || params.get('go')==='xferdone'){
     const _go=params.get('go'), _id=params.get('id')||'', _k=params.get('k')||'', _s=params.get('s')||'';
