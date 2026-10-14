@@ -91,7 +91,9 @@ export default async function handler(req, res) {
 
     // ---- Pass 2: expire abandoned pending_offline membership intents -----------------------
     const cutoff = new Date(Date.now() - STALE_HOURS * 3600 * 1000).toISOString();
-    const stale = await sb(`gym_memberships?status=eq.pending_offline&created_at=lt.${encodeURIComponent(cutoff)}&select=id&limit=3000`);
+    // Kromě těch, které hlídá párování plateb (pairing_id): převod může jít přes víkend a párování
+    // čeká 4 dny. Když skončí bez peněz, značku smaže a příští běh členství ukončí.
+    const stale = await sb(`gym_memberships?status=eq.pending_offline&pairing_id=is.null&created_at=lt.${encodeURIComponent(cutoff)}&select=id&limit=3000`);
     for (const m of (stale || [])) {
       await sb(`gym_memberships?id=eq.${m.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'ended' }) });
       expired++;
@@ -237,7 +239,9 @@ export default async function handler(req, res) {
         { tbl: 'gym_bookings', sel: 'id,student_id,gym_id,gym_name,class_name,class_date,class_time,amount,currency,claimed_at,claim_reminded', what: r => (r.class_name || 'lekce') + ' ' + (r.class_date || '') },
       ];
       for (const t of stale) {
-        const rows2 = await sb(`${t.tbl}?payment_method=eq.qr&status=eq.paid_claimed&claimed_at=lt.${encodeURIComponent(H24)}&select=${t.sel}`);
+        // Platbu, kterou hlídá párování (pairing_id), poskytovatel potvrzovat nemusí -- nepřipomíná se.
+        // Když párování skončí bez peněz, značka zmizí a připomínka přijde hned při dalším běhu.
+        const rows2 = await sb(`${t.tbl}?payment_method=eq.qr&status=eq.paid_claimed&pairing_id=is.null&claimed_at=lt.${encodeURIComponent(H24)}&select=${t.sel}`);
         for (const r of (rows2 || [])) {
           const claimedAt = new Date(r.claimed_at || 0).getTime();
           const remindedAt = r.claim_reminded ? new Date(r.claim_reminded).getTime() : 0;
