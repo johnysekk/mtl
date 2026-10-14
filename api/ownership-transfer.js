@@ -160,11 +160,13 @@ async function notifyDone(E, from, to, keepOld, byAdmin, subEnd, choice) {
       cs = `🔑 ${by ? (by + ' na tebe vlastnictví ' + what + ' ' + E.name) : ('Jsi nový majitel ' + what + ' ' + E.name)} (dosud ${fromNm}).`
         + (isSup ? '' : ' Odpojili jsme kartu na provizi předchozího majitele — přidej svou v Platby a provize, jinak provizi nepůjde strhnout.')
         + subCs
-        + ' Zkontroluj fakturační údaje' + (isSup ? '.' : ' a Stripe účet — platby kartou chodí na účet, který je připojený.');
+        + (isSup ? ' Zkontroluj fakturační údaje.'
+          : (' Fakturační údaje, Stripe a bankovní účet zůstávají, jak je nastavil(a) ' + fromNm + '. ' + (isGym ? 'Pokud byl klub vedený' : 'Pokud byla organizace vedená') + ' na jeho/její IČO, přepiš fakturační údaje na sebe a připoj vlastní Stripe a bankovní účet — jinak budou platby kartou i převodem chodit dál jemu/jí.'));
       enT = `🔑 ${by ? (by + ' ownership of ' + what + ' ' + E.name + ' to you') : ('You are the new owner of ' + what + ' ' + E.name)} (previously ${fromNm}).`
         + (isSup ? '' : ' We disconnected the previous owner\'s commission card — add yours in Payments & commission, otherwise the commission cannot be charged.')
         + subEn
-        + ' Check the billing details' + (isSup ? '.' : ' and the Stripe account — card payments go to the account that is connected.');
+        + (isSup ? ' Check the billing details.'
+          : (' Billing details, the Stripe account and the bank account stay as ' + fromNm + ' set them. If the ' + (isGym ? 'club' : 'organization') + ' ran on their own company ID, replace the billing details with yours and connect your own Stripe and bank account — otherwise card and transfer payments keep going to them.'));
     } else {
       cs = `🔑 ${by ? (by + ' vlastnictví ' + what + ' ' + E.name + ' na ' + toNm) : ((isGym ? 'Klub ' : 'Organizaci ') + E.name + ' teď vlastní ' + toNm)}.`
         + (isSup ? subCs : ' Tvoje karta na provizi byla odpojena.')
