@@ -118,7 +118,7 @@ function periodLabelL(p, lang) {
   } catch (e) { return p; }
 }
 const _L = {
-  cs: { title:'Faktura \u2014 provize MTL', issued:'Vystaveno', duzp:'Datum uskute\u010dn\u011bn\u00ed pln\u011bn\u00ed', period:'Obdob\u00ed', supplier:'Dodavatel', customer:'Odb\u011bratel',
+  cs: { title:'Faktura \u2014 provize MTL', docNo:'\u010c\u00edslo faktury', issued:'Datum vystaven\u00ed', duzp:'DUZP', period:'Obdob\u00ed', billedAs:'Fakturov\u00e1no za', supplier:'Dodavatel', customer:'Odb\u011bratel',
         regno:'I\u010cO', vatid:'DI\u010c', register:'Zaps\u00e1no v obchodn\u00edm rejst\u0159\u00edku', phone:'Tel.', country:'St\u00e1t', inMtlOrg:'Organizace v MTL', inMtlGym:'Klub v MTL', inMtlCoach:'Kou\u010d v MTL',
         method:'Forma platby', rate:'Sazba', count:'Plateb', volume:'Objem plateb', fee:'Provize', base:'Z\u00e1klad dan\u011b', vat:'DPH', notVat:'Dodavatel nen\u00ed pl\u00e1tcem DPH.',
         total:'Celkem', payments:'Zprost\u0159edkovan\u00fdch plateb', vol:'objem',
@@ -129,7 +129,7 @@ const _L = {
         hello:'Dobr\u00fd den', attached:(no,per,tot)=>'v p\u0159\u00edloze pos\u00edl\u00e1me fakturu '+no+' za provizi MTL za obdob\u00ed <b>'+per+'</b> \u2014 celkem <b>'+tot+'</b>.',
         introTitle:'P\u0159ehled zprost\u0159edkovan\u00fdch plateb', introFee:'Provize MTL', introNone:(u)=>'Za toto obdob\u00ed nebyla \u00fa\u010dtov\u00e1na \u017e\u00e1dn\u00e1 provize'+(u?(' \u2014 zav\u00e1d\u011bc\u00ed obdob\u00ed plat\u00ed do '+u+'.'):'.')+' Nejde o da\u0148ov\u00fd doklad.',
         subjDoklad:'Faktura \u2014 provize MTL', subjIntro:'P\u0159ehled zprost\u0159edkovan\u00fdch plateb' },
-  en: { title:'Invoice \u2014 MTL commission', issued:'Issued', duzp:'Date of supply', period:'Period', supplier:'Supplier', customer:'Customer',
+  en: { title:'Invoice \u2014 MTL commission', docNo:'Invoice no.', issued:'Issued', duzp:'Date of supply', period:'Period', billedAs:'Billed as', supplier:'Supplier', customer:'Customer',
         regno:'Reg. number', vatid:'VAT ID', register:'Commercial register', phone:'Phone', country:'Country', inMtlOrg:'Organisation in MTL', inMtlGym:'Club in MTL', inMtlCoach:'Coach in MTL',
         method:'Payment form', rate:'Rate', count:'Payments', volume:'Volume', fee:'Commission', base:'Tax base', vat:'VAT', notVat:'The supplier is not a VAT payer.',
         total:'Total', payments:'Payments intermediated', vol:'volume',
@@ -286,7 +286,7 @@ function _statusText(s, lang){
       head: en ? 'PAID IN FULL' : 'UHRAZENO V PLNÉ VÝŠI',
       body: (parts.length ? ((en ? 'The amount has already been charged: ' : 'Částka už byla stržena: ') + parts.join(en ? '; ' : '; ') + '. ') : '')
             + _paidOtherText(s, lang)
-            + (en ? 'This is not a request for payment — there is nothing to pay.' : 'Nejde o výzvu k platbě — není co platit.') };
+            + (en ? 'This is not a request for payment.' : 'Nejde o výzvu k platbě.') };
   }
   const dd = s.due_date ? _czDate(s.due_date + 'T12:00:00Z', lang) : '';
   return { paid: false,
@@ -318,9 +318,19 @@ function _dueText(s, en){
 function _statusBoxHtml(s, lang){
   const st = _statusText(s, lang);
   const c = st.paid ? { bg:'#EAF7EE', bd:'#A8E6C0', fg:'#0E6B3A' } : { bg:'#FFF4E5', bd:'#F0C674', fg:'#8a5a00' };
-  return '<div style="margin:14px 0 4px;padding:11px 14px;border-radius:10px;background:'+c.bg+';border:1.5px solid '+c.bd+';color:'+c.fg+';">'
-    + '<div style="font-weight:800;font-size:14px;letter-spacing:.02em;">'+esc(st.head)+'</div>'
-    + '<div style="font-size:12.5px;line-height:1.5;margin-top:3px;">'+esc(st.body)+'</div></div>';
+  return '<div style="margin:12px 0 4px;padding:7px 12px;border-radius:8px;background:'+c.bg+';border:1px solid '+c.bd+';color:'+c.fg+';">'
+    + '<div style="font-weight:800;font-size:12.5px;letter-spacing:.02em;">'+esc(st.head)+'</div>'
+    + '<div style="font-size:12px;line-height:1.45;margin-top:1px;">'+esc(st.body)+'</div></div>';
+}
+// ÚDAJE FAKTURY (číslo, data, období, za koho) -- dvojice popisek / hodnota, stejně v e-mailu i PDF.
+function _factsList(s, lang){
+  const T=_t(lang);
+  return [[T.docNo, s.id ? _dokNo(s) : ''], [T.issued, _czDate(s.charged_at, lang)], [T.period, periodLabelL(s.period_month, lang)],
+          [T.duzp, s.duzp ? _czDate(s.duzp+'T12:00:00Z', lang) : ''], [T.billedAs, _kindLabel(s, lang)]].filter(function(x){ return x[1]; });
+}
+function _factsHtml(s, lang){
+  return '<table style="width:100%;border-collapse:collapse;font-size:13px;margin:14px 0 4px;">'+_factsList(s, lang).map(function(x){
+    return '<tr><td style="padding:5px 0;color:#777;border-bottom:1px solid #eee;">'+esc(x[0])+'</td><td style="padding:5px 0;text-align:right;font-weight:600;border-bottom:1px solid #eee;">'+esc(x[1])+'</td></tr>'; }).join('')+'</table>';
 }
 function dokladHtml(s, lang){
   const T=_t(lang); const items = s.line_items || []; const cur = s.currency;
@@ -334,9 +344,9 @@ function dokladHtml(s, lang){
   return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:680px;margin:0 auto;color:#1a1a1a;">'
     + (s.test_mode ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:12px;">'+T.test+'</div>' : '')
     + '<h2 style="margin:0 0 4px;">'+T.title+'</h2>'
-    + '<div style="font-size:13px;color:#555;">'+(s.id?(esc(_dokNo(s))+' \u00b7 '):'')+T.issued+' '+esc(_czDate(s.charged_at, lang))+(s.duzp?(' \u00b7 '+T.duzp+' '+esc(_czDate(s.duzp+'T12:00:00Z', lang))):'')+' \u00b7 '+T.period+' '+esc(periodLabelL(s.period_month, lang))+' \u00b7 '+esc(_kindLabel(s, lang))+'</div>'
-    + _statusBoxHtml(s, lang)
     + '<div style="display:flex;flex-wrap:wrap;gap:24px;margin:18px 0 6px;">'+col(T.supplier, _supLines(s, lang))+col(T.customer, _custLines(s, lang))+'</div>'
+    + _factsHtml(s, lang)
+    + _statusBoxHtml(s, lang)
     + '<table style="width:100%;border-collapse:collapse;font-size:13px;margin-top:12px;"><thead><tr style="background:#f5f2ee;"><th style="'+th+'text-align:left;">'+T.method+'</th><th style="'+th+'">'+T.rate+'</th><th style="'+th+'">'+T.count+'</th><th style="'+th+'text-align:right;">'+T.volume+'</th><th style="'+th+'text-align:right;">'+T.fee+'</th></tr></thead><tbody>'+rows+'</tbody></table>'
     + '<table style="width:100%;border-collapse:collapse;font-size:14px;margin-top:4px;">'+vat+'<tr style="font-weight:800;"><td style="border-top:2px solid #333;padding-top:8px;">'+T.total+'</td><td style="text-align:right;border-top:2px solid #333;padding-top:8px;">'+_money(s.amount,cur,lang)+'</td></tr></table>'
     + '<div style="margin-top:10px;font-size:12px;color:#555;">'+T.payments+': <b>'+cnt+'</b> \u00b7 '+T.vol+' <b>'+_money(vol,cur,lang)+'</b></div>'
@@ -359,20 +369,7 @@ function dokladPdf(s, lang){
       }
       doc.fontSize(22).fillColor('#E11111').text('MTL', 50, doc.y);
       doc.moveDown(0.15).fontSize(15).fillColor('#111111').text(T.title);
-      doc.moveDown(0.1).fontSize(10).fillColor('#555555').text((s.id ? (_dokNo(s) + '  \u00b7  ') : '') + T.issued + ' ' + _czDate(s.charged_at, lang) + (s.duzp ? ('  \u00b7  ' + T.duzp + ' ' + _czDate(s.duzp + 'T12:00:00Z', lang)) : '') + '  \u00b7  ' + T.period + ' ' + periodLabelL(s.period_month, lang) + '  \u00b7  ' + _kindLabel(s, lang));
-      doc.moveDown(0.7);
-      { // STAV ÚHRADY -- rámeček hned pod hlavičkou
-        const st = _statusText(s, lang);
-        const c = st.paid ? { bg:'#EAF7EE', bd:'#A8E6C0', fg:'#0E6B3A' } : { bg:'#FFF4E5', bd:'#F0C674', fg:'#8a5a00' };
-        const y0 = doc.y;
-        doc.fontSize(9.5);
-        const hBody = doc.heightOfString(st.body, { width: 475 });
-        const hBox = 14 + 15 + hBody + 10;
-        doc.rect(50, y0, 495, hBox).fillAndStroke(c.bg, c.bd);
-        doc.fillColor(c.fg).fontSize(12).text(st.head, 60, y0 + 9, { width: 475 });
-        doc.fontSize(9.5).text(st.body, 60, doc.y + 2, { width: 475 });
-        doc.y = y0 + hBox + 14; doc.x = 50;
-      }
+      doc.moveDown(0.9);
       const yTop = doc.y;
       const colText = function(x, label, lines){
         doc.fontSize(9).fillColor('#888888').text(label, x, yTop, { width:230 });
@@ -381,7 +378,30 @@ function dokladPdf(s, lang){
       };
       const yL = colText(50, T.supplier.toUpperCase(), _supLines(s, lang));
       const yR = colText(315, T.customer.toUpperCase(), _custLines(s, lang));
-      doc.y = Math.max(yL, yR) + 18;
+      doc.y = Math.max(yL, yR) + 16;
+      { // ÚDAJE FAKTURY ve dvou sloupcích: vlevo číslo, období, za koho; vpravo data
+        const F = _factsList(s, lang), right = [T.issued, T.duzp];
+        const Lc = F.filter(function(x){ return right.indexOf(x[0]) < 0; }), Rc = F.filter(function(x){ return right.indexOf(x[0]) >= 0; });
+        const yF = doc.y; doc.moveTo(50, yF).lineTo(545, yF).strokeColor('#e6e6e6').stroke();
+        let yEnd = yF;
+        [[Lc, 50], [Rc, 315]].forEach(function(pair){ pair[0].forEach(function(f, i){ const x = pair[1], yy = yF + 5 + i * 18;
+          doc.fontSize(8.5).fillColor('#777777').text(f[0], x, yy + 0.5, { width: 105, lineBreak: false });
+          doc.fontSize(9).fillColor('#111111').text(f[1], x + 105, yy, { width: 125, align: 'right', lineBreak: false });
+          doc.moveTo(x, yy + 14).lineTo(x + 230, yy + 14).strokeColor('#eeeeee').stroke(); yEnd = Math.max(yEnd, yy + 14); }); });
+        doc.y = yEnd + 12; doc.x = 50;
+      }
+      { // STAV ÚHRADY -- malý rámeček pod údaji faktury
+        const st = _statusText(s, lang);
+        const c = st.paid ? { bg:'#EAF7EE', bd:'#A8E6C0', fg:'#0E6B3A' } : { bg:'#FFF4E5', bd:'#F0C674', fg:'#8a5a00' };
+        const y0 = doc.y;
+        doc.fontSize(8.5);
+        const hBody = doc.heightOfString(st.body, { width: 479 });
+        const hBox = 8 + 12 + hBody + 7;
+        doc.rect(50, y0, 495, hBox).lineWidth(0.8).fillAndStroke(c.bg, c.bd); doc.lineWidth(1);
+        doc.fillColor(c.fg).fontSize(10).text(st.head, 58, y0 + 6, { width: 479 });
+        doc.fontSize(8.5).text(st.body, 58, doc.y + 1, { width: 479 });
+        doc.y = y0 + hBox + 14; doc.x = 50;
+      }
       const cols = [50, 190, 260, 330, 440];
       const head = [T.method, T.rate, T.count, T.volume, T.fee];
       let y = doc.y;
