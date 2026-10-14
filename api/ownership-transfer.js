@@ -12,7 +12,7 @@
 //   cancel  { id }                          odesílatel žádost stáhne
 //   admin   { kind, id, to | email, keep_old, sub_choice }   founder převede rovnou, bez potvrzení
 //   paying  {}                              předplatná profilu dodavatele, která volající platí za
-//                                           organizace, které už nevlastní (Správa účtu)
+//                                           organizace, které už nevlastní (Platby a provize)
 //
 // CO SE PŘI PŘEVODU DĚJE (execute):
 //   * owner_id na nového majitele. Zakladatel (gyms.founder_id) se nemění.
@@ -22,7 +22,7 @@
 //     (keep_old), dokud ho nový neodebere. Záznam jde do historie klubu (gym_audit).
 //   * Dodavatel s běžícím předplatným profilu -- podle volby nového majitele (sub_choice):
 //       keep   dál platí karta dosavadního majitele (jen když to sám nabídl). Zastavit ho může
-//              kdykoli on (Správa účtu) i nový majitel; nový ho může převzít na svou kartu (pay.js).
+//              kdykoli on (Platby a provize) i nový majitel; nový ho může převzít na svou kartu (pay.js).
 //       own    staré se ukončí ke konci období a nový majitel si hned založí navazující (první
 //              platba v den konce, profil běží bez přerušení).
 //       cancel staré doběhne a skončí.
@@ -103,7 +103,7 @@ async function execute(E, fromId, toId, keepOld, actorId, byAdmin, subChoice) {
     catch (e) { console.error('[ownership-transfer] audit', e.message); }
   } else if (E.supplier_sub && subChoice === 'keep') {
     // Na Stripe se nic nemění. Jen se zapamatuje, kdo platí (u předplatných z doby před sloupcem
-    // supplier_sub_by chybí) -- podle toho ho dosavadní majitel najde ve Správě účtu.
+    // supplier_sub_by chybí) -- podle toho ho dosavadní majitel najde v Platby a provize.
     subEnd = await supStripeEnd(E.supplier_sub);   // příští platba z jeho karty
     try { await sbWrite('PATCH', `organizations?id=eq.${q(E.id)}&supplier_sub_by=is.null`, { supplier_sub_by: E.payer || fromId }); } catch (e) {}
   } else if (E.supplier_sub) {
@@ -148,8 +148,8 @@ async function notifyDone(E, from, to, keepOld, byAdmin, subEnd, choice) {
           subEn = ` The supplier profile subscription ends ${d || 'at the end of the paid period'}; after that the profile is no longer shown. You can pay for it again at any time in Supplier profile.`;
         }
       } else if (choice === 'keep') {
-        subCs = ` Předplatné profilu dodavatele dál platíš ze své karty${d ? (' (další platba ' + d + ')') : ''}, i když organizaci už nevlastníš. Zastavit ho můžeš kdykoli: Správa účtu → Předplatné, které platíš za jiné.`;
-        subEn = ` You keep paying the supplier profile subscription from your card${d ? (' (next payment ' + d + ')') : ''}, even though you no longer own the organization. You can stop it at any time: Account & privacy → Subscriptions you pay for others.`;
+        subCs = ` Předplatné profilu dodavatele dál platíš ze své karty${d ? (' (další platba ' + d + ')') : ''}, i když organizaci už nevlastníš. Zastavit ho můžeš kdykoli: Platby a provize → Předplatné, které platíš za jiné.`;
+        subEn = ` You keep paying the supplier profile subscription from your card${d ? (' (next payment ' + d + ')') : ''}, even though you no longer own the organization. You can stop it at any time: Payments & commission → Subscriptions you pay for others.`;
       } else {
         subCs = ` Tvoje předplatné profilu dodavatele se už neobnoví${d ? (' (zaplacené období končí ' + d + ')') : ''}.`;
         subEn = ` Your supplier profile subscription will not renew${d ? (' (the paid period ends ' + d + ')') : ''}.`;

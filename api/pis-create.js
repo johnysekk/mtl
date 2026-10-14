@@ -318,7 +318,14 @@ async function fbxCreate(sb, req, body) {
     cohPlan = await cohortPisPlan(sb, row, body.amount);
     if (cohPlan.error) return { error: cohPlan.error, code: cohPlan.code || null };
   }
-  const real = Number(cohPlan ? cohPlan.amount : ((tbl === 'organization_clubs' ? orgFeeAmount : row.amount) || body.amount || 0));
+  // Lístky: celá objednávka (víc kusů / variant), ne jen první lístek -- zaplacením se překlápí
+  // všechny lístky objednávky (pis-return), tak se musí zaplatit všechny.
+  let orderTotal = null;
+  if (tbl === 'event_tickets' && row.order_id) {
+    const sib = (await sb.from('event_tickets').select('amount').eq('order_id', row.order_id)).data || [];
+    orderTotal = Math.round(sib.reduce((a, t) => a + Number(t.amount || 0), 0) * 100) / 100;
+  }
+  const real = Number(cohPlan ? cohPlan.amount : (orderTotal != null ? orderTotal : ((tbl === 'organization_clubs' ? orgFeeAmount : row.amount) || body.amount || 0)));
   if (!(real > 0)) return { error: 'bad amount' };
   // Sandbox ma strop 1 Kc; na radku zustava skutecna castka, aby se do uctovani nepropsala koruna.
   const amount = C.sandbox ? Math.min(real, FBX_MAX_SANDBOX) : real;
