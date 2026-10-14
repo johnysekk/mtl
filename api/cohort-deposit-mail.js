@@ -22,7 +22,6 @@ import { isTestMode } from './_config.js';
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const svc = { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' };
-const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 const MAIL_ADDR = ((process.env.MAIL_FROM || process.env.INVITE_FROM || 'no-reply@martialtraininglab.com').match(/<([^>]+)>/) || [])[1]
   || 'no-reply@martialtraininglab.com';
 
@@ -79,10 +78,11 @@ export default async function handler(req, res) {
       if (!owns) return res.status(403).json({ ok: false, error: 'not owner' });
     }
 
-    // Nothing to send to: an app user already has the doklad in-app, exactly like the Stripe rail
-    // (stripe-webhook.js gates on !mem.student_id for the same reason).
-    if (!mem.email) return res.status(200).json({ ok: true, sent: false, reason: 'no email' });
-    if (mem.student_id) return res.status(200).json({ ok: true, sent: false, reason: 'app user' });
+    // E-MAIL DOSTANE KAŽDÝ ZÁKAZNÍK -- s účtem i bez, v testu i naostro (stejně jako u karty,
+    // stripe-webhook). Uživatel s účtem bez e-mailu v přihlášce: e-mail z jeho profilu.
+    let toMail = mem.email || '';
+    if (!toMail && mem.student_id) { const sp = (await sbGet(`profiles?id=eq.${encodeURIComponent(mem.student_id)}&select=email`))[0]; toMail = (sp && sp.email) || ''; }
+    if (!toMail) return res.status(200).json({ ok: true, sent: false, reason: 'no email' });
     if (mem.deposit_mail_at) return res.status(200).json({ ok: true, sent: false, reason: 'already sent' });
 
     const gymRec = coh.gym_id ? (await sbGet(`gyms?id=eq.${encodeURIComponent(coh.gym_id)}&select=name,legal_name,org_form,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal`))[0] : null;
@@ -105,34 +105,33 @@ export default async function handler(req, res) {
     const remainder = Math.max(0, tierPrice - deposit);
     const money = (x) => Math.round(x) + ' ' + cur;
 
-    // doklad PDF -- same test-mode gate as the Stripe rail (test mode: founder's own club only)
+    // Doklad PDF v testu i naostro. V testu jen snímek (nese označení TESTOVACÍ REŽIM); náhradní
+    // verze bez snímku testovací označení nemá, takže se v testu nepřikládá.
     let attachments;
     let testMode = false; try { testMode = await isTestMode(); } catch (e) {}
-    if (!(testMode && coh.owner_id !== FOUNDER_UUID)) {
+    try {
+      // Doklad ze SNÍMKU (stejný jako v appce). PIS: transakce té přihlášky (source_booking_id);
+      // QR: poslední platba QR k tomuto kurzu ve výši zálohy.
+      let _snap = null;
       try {
-        // Doklad ze SNÍMKU (stejný jako v appce). PIS: transakce té přihlášky (source_booking_id);
-        // QR: poslední platba QR k tomuto kurzu ve výši zálohy.
-        let _snap = null;
-        try {
-          const _txr = await sbGet(method === 'pis'
-            ? `transactions?source_booking_id=eq.${encodeURIComponent(cmId)}&order=created_at.desc&limit=1&select=id`
-            : `transactions?cohort_id=eq.${encodeURIComponent(coh.id)}&payment_method=eq.qr&gross_amount=eq.${Math.round(Number(deposit || 0) * 100)}&order=created_at.desc&limit=1&select=id`);
-          if (_txr && _txr[0]) _snap = await dokladPdfFor({ transactionId: _txr[0].id });
-        } catch (e) {}
-        const buf = _snap ? _snap.buffer : await cohortDokladPdf({
-          gym: gymRec, gymName, buyer: (mem.name || mem.email || ''),
-          item: ((coh.name || 'Kurz') + ' — záloha'), amount: deposit, cur,
-          ref: (method === 'pis' ? 'PIS/' : 'QR/') + String(cmId).slice(0, 8), date: _czDate(new Date().toISOString().slice(0, 10)),
-        });
-        attachments = [{ filename: 'MTL-potvrzeni-o-platbe.pdf', content: buf.toString('base64') }];
-      } catch (e) { console.error('cohort doklad pdf', e.message); }
-    }
+        const _txr = await sbGet(method === 'pis'
+          ? `transactions?source_booking_id=eq.${encodeURIComponent(cmId)}&order=created_at.desc&limit=1&select=id`
+          : `transactions?cohort_id=eq.${encodeURIComponent(coh.id)}&payment_method=eq.qr&gross_amount=eq.${Math.round(Number(deposit || 0) * 100)}&order=created_at.desc&limit=1&select=id`);
+        if (_txr && _txr[0]) _snap = await dokladPdfFor({ transactionId: _txr[0].id });
+      } catch (e) {}
+      const buf = _snap ? _snap.buffer : testMode ? null : await cohortDokladPdf({
+        gym: gymRec, gymName, buyer: (mem.name || mem.email || ''),
+        item: ((coh.name || 'Kurz') + ' — záloha'), amount: deposit, cur,
+        ref: (method === 'pis' ? 'PIS/' : 'QR/') + String(cmId).slice(0, 8), date: _czDate(new Date().toISOString().slice(0, 10)),
+      });
+      if (buf) attachments = [{ filename: 'MTL-potvrzeni-o-platbe.pdf', content: buf.toString('base64') }];
+    } catch (e) { console.error('cohort doklad pdf', e.message); }
 
     const appUrl = (process.env.APP_URL || process.env.PUBLIC_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '');
     const fromName = (gymName || 'Martial Training Lab').replace(/["<>]/g, '');
 
     await sendResend(
-      mem.email,
+      toMail,
       (coh.name || 'Kurz') + ' \u2014 z\u00E1loha p\u0159ijata',
       cohortDepositHtml(
         mem.name, coh.name || 'Kurz', gymName, money(deposit),

@@ -66,15 +66,16 @@ export default async function handler(req, res) {
       else failed++;
     }
 
-    // ORGANIZACE (hlavně dodavatelé -- řadí se podle vzdálenosti): bod ze sídla. Dělí se o stejný
-    // strop 20 dotazů za běh; sloupce city_lat/city_lng přidává org-geo.sql.
+    // ORGANIZACE (hlavně dodavatelé -- řadí se podle vzdálenosti): bod z provozovny, bez vlastní
+    // provozovny ze sídla. Dělí se o stejný strop 20 dotazů za běh; sloupce přidává org-geo.sql.
     const left = Math.max(0, 20 - (gyms || []).length);
-    const orgs = left ? await sbGet('organizations?select=id,name,billing_line1,billing_city,city,billing_country,country'
-      + '&city_lat=is.null&billing_city=not.is.null&limit=' + left) : [];
+    const orgs = left ? await sbGet('organizations?select=id,name,address,billing_line1,billing_city,city,billing_country,country'
+      + '&city_lat=is.null&city=not.is.null&limit=' + left) : [];
     for (const o of (orgs || [])) {
       const cc = o.billing_country || o.country || '';
-      const city = o.billing_city || o.city || '';
-      const tries = [[o.billing_line1, city].filter(Boolean).join(', '), city].filter((x) => x && x.length > 2);
+      const city = (o.address ? o.city : (o.billing_city || o.city)) || '';
+      const street = o.address || o.billing_line1 || '';
+      const tries = [[street, city].filter(Boolean).join(', '), city].filter((x) => x && x.length > 2);
       let hit = null;
       for (const q of tries) {
         hit = await geocode(q, cc);

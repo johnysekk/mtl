@@ -3,7 +3,7 @@ import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor, orgR
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { checkPrice, offerPrices, planTermPrices, checkOnlineCountry } from './_price-check.js';
 import { vatMode } from './_vat.js';
-import { membCalendar, membActiveEnd, calTerm, calStart, calSubPlan } from './_memb-term.js';
+import { membCalendar, membModeMissing, membProrate, membActiveEnd, calTerm, calStart, calSubPlan } from './_memb-term.js';
 import { viesCheck } from './tax-verify.js';
 import { b2cSmallState } from './_oss.js';
 const _PC = (kind, extra) => ({ SB: _SUPA_URL, KEY: _SUPA_KEY, kind, ...extra });
@@ -520,9 +520,9 @@ async function membershipCheckout(req, res) {
 
   const _once = String(_q0.once || '') === '1';
   const _moQ = Math.max(1, parseInt(months, 10) || 1);
-  // KALENDÁŘNÍ MĚSÍC (spolek, nebo klub, který si ho zapnul -- _memb-term.js). Cenu i konec
-  // počítá server: jednorázově = zbytek měsíce / období do posledního dne N-tého měsíce,
-  // předplatné = měsíční cena, první platba jen za zbývající dny a obnovy vždy 1.
+  // KALENDÁŘNÍ MĚSÍC (režim klubu -- _memb-term.js). Cenu i konec počítá server: jednorázově =
+  // období do posledního dne N-tého měsíce (první měsíc celý, nebo poměrně podle klubu),
+  // předplatné = měsíční cena, první měsíc jednorázovou položkou a obnovy vždy 1.
   // _cal = { one: { price, endsOn } } nebo { sub: calSubPlan(...) }, jinak null.
   let _cal = null, _calChild = null;
   // CENA, POČET MĚSÍCŮ A KONEC MUSÍ PATŘIT K TOMUTÉŽ PLÁNU. Dřív šlo zaplatit měsíční cenu
@@ -533,7 +533,9 @@ async function membershipCheckout(req, res) {
     let _pl = []; try { _pl = typeof _g.membership_plans === 'string' ? JSON.parse(_g.membership_plans) : (_g.membership_plans || []); } catch (e) {}
     if (!(Array.isArray(_pl) && _pl.length) && Number(_g.membership_price) > 0) _pl = [{ price: Number(_g.membership_price), months: 1 }];
     const _amt = parseInt(amount, 10), _mo = _moQ, _end = endsOn ? String(endsOn).slice(0, 10) : '';
-    const _isCal = membCalendar(_g);
+    // Spolek bez vybraného režimu členství neprodává (Nastavení klubu → Ceny & členství).
+    if (membModeMissing(_g)) return res.status(400).json({ error: 'Klub ještě nenastavil, jak členství počítá (kalendářní měsíc / měsíc od zaplacení). Do té doby ho nejde koupit.' });
+    const _isCal = membCalendar(_g), _prorate = membProrate(_g);
     let _actEnd = null;
     if (_isCal) {
       try { if (membershipId) _calChild = (((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(membershipId)}&select=child_name`)) || [])[0] || {}).child_name || null; } catch (e) {}
@@ -545,8 +547,8 @@ async function membershipCheckout(req, res) {
       // Kalendářní režim (plán bez pevného konce): předplatné za měsíční cenu, jednorázově
       // přesně to, co spočítá server. Při půlnoci na přelomu dne se může lišit -- pak obnovit.
       if (_isCal && !p.ends_on) {
-        if (pm === 1 && !_once) { if (Math.abs(full - _amt) < 1) { _cal = { sub: calSubPlan(full, _actEnd) }; return true; } return false; }
-        const ct = calTerm(full, pm, calStart(_actEnd));
+        if (pm === 1 && !_once) { if (Math.abs(full - _amt) < 1) { _cal = { sub: calSubPlan(full, _actEnd, null, _prorate) }; return true; } return false; }
+        const ct = calTerm(full, pm, calStart(_actEnd), _prorate);
         if (Math.abs(ct.price - _amt) < 1) { _cal = { one: ct }; return true; }
         return false;
       }
@@ -557,6 +559,10 @@ async function membershipCheckout(req, res) {
     });
     if (!_hit) return res.status(400).json({ error: 'Členství neodpovídá aktuální nabídce klubu. Obnov stránku a zkus to znovu.' });
   } catch (e) { return res.status(400).json({ error: 'Nepodařilo se ověřit nabídku klubu.' }); }
+  // Platné členství sahá dál než do příštího měsíce: předplatné kartou zatím zapnout nejde.
+  if (_cal && _cal.sub && _cal.sub.kind === 'later') {
+    return res.status(400).json({ error: `Tvoje současné členství platí do ${_dmy(String(_cal.sub.activeEnd || '').slice(0, 10))}. Předplatné kartou, které na něj naváže, si můžeš zapnout od ${_dmy(_cal.sub.from)}.` });
+  }
   // CENA A MĚNA PROTI CENÍKU ČLENSTVÍ KLUBU (membership_plans; kalendářní ceny umí taky).
   { const _pc = await checkPrice(_PC('gymMembership', { amount: parseInt(amount, 10), currency, gymId: _skGym || gymId, months: _moQ, studentId, childName: _calChild, excludeId: membershipId })); if (!_pc.ok) return res.status(400).json({ error: _pc.error }); }
 
@@ -698,29 +704,25 @@ async function membershipCheckout(req, res) {
     return res.redirect(303, _s1.url);
   }
 
-  // KALENDÁŘNÍ MĚSÍC U PŘEDPLATNÉHO: obnovy vždy 1. (billing_cycle_anchor), první měsíc jen za
-  // zbývající dny -- jako jednorázová položka na první faktuře, aby částka přesně seděla s tím,
-  // co appka ukázala (Stripe by si poměr počítal po sekundách). Provize (application_fee_percent)
-  // se počítá z celé faktury, tedy i z té položky. Kdo má ještě platné členství, teď neplatí nic
-  // a první platba přijde v den, kdy navazuje (calSubPlan v _memb-term.js).
+  // KALENDÁŘNÍ MĚSÍC U PŘEDPLATNÉHO: obnovy vždy 1. (billing_cycle_anchor). Tento měsíc (celý,
+  // nebo jen zbývající dny, když to má klub zapnuté) je jednorázová položka na první faktuře, aby
+  // částka přesně seděla s tím, co appka ukázala. Provize (application_fee_percent) se počítá
+  // z celé faktury, tedy i z té položky. Kdo má platné členství do konce měsíce, teď neplatí nic
+  // a první platba přijde 1. dne, kdy navazuje (calSubPlan v _memb-term.js).
   const _cs = _cal && _cal.sub;
   const _subLines = [
     { price_data: { currency: cur, product_data: { name: `${_skLbl} · ${planName || _skLbl} — ${gymName || 'MTL Gym'}` }, unit_amount: Math.round(P * 100), recurring: { interval: ivl } }, quantity: 1 },
   ];
   const _subTiming = {};
-  if (_cs && _cs.kind === 'prorate') {
-    _subLines.push({ price_data: { currency: cur, product_data: { name: `${_skLbl} · ${planName || _skLbl} — zbytek měsíce (do ${_dmy(_cs.endsOn)})` }, unit_amount: Math.round(_cs.chargeNow * 100) }, quantity: 1 });
+  if (_cs && _cs.kind === 'first') {
+    _subLines.push({ price_data: { currency: cur, product_data: { name: `${_skLbl} · ${planName || _skLbl} — ${_cs.partial ? 'zbytek měsíce' : 'tento měsíc'} (do ${_dmy(_cs.endsOn)})` }, unit_amount: Math.round(_cs.chargeNow * 100) }, quantity: 1 });
     Object.assign(_subTiming, { billing_cycle_anchor: _cs.anchor, proration_behavior: 'none' });
   } else if (_cs && _cs.kind === 'anchor') {
     Object.assign(_subTiming, { billing_cycle_anchor: _cs.anchor, proration_behavior: 'none' });
-  } else if (_cs && _cs.kind === 'trial') {
-    Object.assign(_subTiming, { trial_end: _cs.trialEnd });
-  } else if (_cs && _cs.kind === 'trial_prorate') {
-    Object.assign(_subTiming, { trial_end: _cs.trialEnd, billing_cycle_anchor: _cs.anchor, proration_behavior: 'create_prorations' });
   }
   const _subMeta = (_cs && _cs.kind !== 'plain') ? { mtl_calendar: '1' } : {};
 
-  const _mkSession = (timing) => stripe.checkout.sessions.create(
+  const session = await stripe.checkout.sessions.create(
     {
       mode: 'subscription',
       payment_method_types: ['card'],
@@ -741,7 +743,7 @@ async function membershipCheckout(req, res) {
       line_items: _subLines,
       subscription_data: {
         application_fee_percent: FEE_NOW,
-        ...timing,
+        ..._subTiming,
         metadata: {
           ..._subMeta,
           // mtl_acq   = this membership is inside the MTL acquisition window
@@ -778,16 +780,6 @@ async function membershipCheckout(req, res) {
     },
     { stripeAccount: gymAccount }
   );
-  let session;
-  try { session = await _mkSession(_subTiming); }
-  catch (e) {
-    // Zkušební doba + kotva naráz (starší členství končí uprostřed měsíce) -- kdyby ji Stripe
-    // odmítl, aspoň zkušební doba do konce platného členství; obnova pak v ten den v měsíci.
-    if (!(_cs && _cs.kind === 'trial_prorate')) throw e;
-    console.error('pay.membership trial+anchor refused:', e.message);
-    session = await _mkSession({ trial_end: _cs.trialEnd });
-  }
-
   res.redirect(303, session.url);
 }
 // 2026-09-30 -> 30. 9. 2026 (do názvu položky ve Stripe).
@@ -973,10 +965,19 @@ async function supplierCheckout(req, res) {
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
 
-  const org = (await _wsbGet(`organizations?id=eq.${encodeURIComponent(orgId)}&select=id,owner_id,kind,status,name,vat_id,vat_verified_id,billing_country,country,contact_email,invoice_email,supplier_sub`))[0];
+  const org = (await _wsbGet(`organizations?id=eq.${encodeURIComponent(orgId)}&select=*`))[0];
   if (!org || org.kind !== 'supplier') return res.status(404).json({ error: 'Dodavatel nenalezen' });
   if (org.status !== 'approved') return res.status(403).json({ error: 'Profil dodavatele je pozastavený nebo zamítnutý.' });
-  if (org.supplier_sub) return _goBack(req, res, `${proto}://${host}/?supplier_sub=active`);
+  // NAVAZUJÍCÍ PŘEDPLATNÉ. Běží předplatné, které se na konci období ukončí (zrušené, nebo ho platil
+  // předchozí majitel organizace): nové jde založit hned, první platba se strhne až v den, kdy staré
+  // skončí. Profil tak běží bez přerušení a nikdo neplatí dvakrát. Stripe dovolí začátek nejvýš
+  // jedno období dopředu -- dřív to nejde a appka řekne, od kdy ano.
+  let _anchor = null;
+  if (org.supplier_sub) {
+    const _pe = org.supplier_period_end ? Math.floor(new Date(org.supplier_period_end).getTime() / 1000) : 0;
+    if (!(org.supplier_cancelling && _pe > Math.floor(Date.now() / 1000) + 60)) return _goBack(req, res, `${proto}://${host}/?supplier_sub=active`);
+    _anchor = _pe;
+  }
 
   // DIČ U ZAHRANIČNÍHO DODAVATELE -- stejná brána jako u EP (require_vat_foreign).
   let _ps = {};
@@ -997,6 +998,10 @@ async function supplierCheckout(req, res) {
   // Testovací režim strhává denně (stejně jako EP), ať je celý cyklus vidět hned druhý den.
   let _daily = false;
   try { const { isTestMode } = await import('./_config.js'); _daily = await isTestMode(); } catch (e) {}
+  if (_anchor) {
+    const _max = Math.floor(Date.now() / 1000) + (_daily ? 86400 : (interval === 'year' ? 365 : 28) * 86400);
+    if (_anchor > _max) return _goBack(req, res, `${proto}://${host}/?supplier_sub=later&at=${encodeURIComponent(new Date((_anchor - (interval === 'year' ? 365 : 28) * 86400) * 1000).toISOString())}`);
+  }
   const _m = await supplierTier();
   const net = interval === 'year' ? _m * 10 : _m;
   // DPH NAVÍC jen když je MTL plátce a jde o domácí plnění (stejný režim, jaký pak napíše
@@ -1020,7 +1025,8 @@ async function supplierCheckout(req, res) {
       { price_data: { currency: 'czk', product_data: { name: 'MTL — profil dodavatele (' + (org.name || '') + ')' },
         unit_amount: Math.round(amount * 100), recurring: { interval: _daily ? 'day' : interval } }, quantity: 1 },
     ],
-    subscription_data: { metadata: { mtl_payment_type: 'supplier_sub', org_id: String(org.id), user_id: String(org.owner_id), sup_amount: String(amount), sup_net: String(net), sup_interval: interval } },
+    subscription_data: { metadata: { mtl_payment_type: 'supplier_sub', org_id: String(org.id), user_id: String(org.owner_id), sup_amount: String(amount), sup_net: String(net), sup_interval: interval },
+      ...(_anchor ? { billing_cycle_anchor: _anchor, proration_behavior: 'none' } : {}) },
     metadata: { mtl_payment_type: 'supplier_sub', org_id: String(org.id), user_id: String(org.owner_id), sup_interval: interval, sup_net: String(net) },
     ..._checkoutEnd(req, `${proto}://${host}/?supplier_sub=ok&session={CHECKOUT_SESSION_ID}`, `${proto}://${host}/`),
   }, { apiVersion: '2024-09-30.acacia' });

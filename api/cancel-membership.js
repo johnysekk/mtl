@@ -64,6 +64,13 @@ export default async function handler(req, res) {
       const sup = ep.length ? [] : ((await sb(`organizations?owner_id=eq.${q(me)}&supplier_sub=eq.${q(subscriptionId)}&select=id&limit=1`)) || []);
       if (!ep.length && !sup.length) return res.status(403).json({ error: 'Tohle předplatné měnit nemůžeš' });
       mtlSub = ep.length ? { userId: me } : { orgId: sup[0].id };
+      // Po převodu organizace: předplatné dodavatele platí karta PŘEDCHOZÍHO majitele. Nový ho nesmí
+      // obnovit (strhávalo by se jemu) -- založí si vlastní (pay.js, navazující předplatné).
+      if (sup.length) {
+        try { const _md = (await stripe.subscriptions.retrieve(subscriptionId)).metadata || {};
+          if (_md.user_id && String(_md.user_id) !== String(me)) return res.status(403).json({ error: 'Tohle předplatné platí předchozí majitel. Založ si vlastní.' }); }
+        catch (e) { console.error('supplier sub owner', e.message); }
+      }
     }
     const opts = gymAccount ? { stripeAccount: gymAccount } : undefined;
 

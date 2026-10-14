@@ -19,7 +19,6 @@ import crypto from 'crypto';
 import PDFDocument from 'pdfkit';
 import { isTestMode } from './_config.js';
 import { approveMemberAppOnPayment, cohortPayer } from './_member-app.js';
-const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 import { DEJAVU_CZ } from './_dejavu-cz.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { pragueMonth } from './_tz.js';
@@ -1053,7 +1052,11 @@ export default async function handler(req, res) {
                 if (_sid) await sbPost('notifications', { user_id: _sid, type: 'system', read: false, data: JSON.stringify({ kind: 'cohort_deposit_mine', cohort_id: cohId || null, cohort_member_id: cmId || null, cohort_name: coh.name || '', msg_en: '\u2705 Course deposit' + (coh.name ? (' "' + coh.name + '"') : '') + ' received. Your spot is reserved.' }), message: '\u2705 Z\u00E1loha za kurz' + (coh.name ? (' "' + coh.name + '"') : '') + ' p\u0159ijata. M\u00EDsto m\u00E1\u0161 rezervovan\u00E9.' });
               }
             } catch (e) { console.error('cohort student notif', e.message); }
-            if (mem && mem.email && coh && !mem.student_id) {  // app users get the doklad in-app, no e-mail
+            // E-MAIL SE ZÁLOHOU A DOKLADEM DOSTANE KAŽDÝ ZÁKAZNÍK -- s účtem i bez, v testu i naostro.
+            // Uživatel s účtem bez e-mailu v přihlášce: e-mail z jeho profilu.
+            let _toMail = (mem && mem.email) || '';
+            if (!_toMail && mem && mem.student_id) { try { const _sp2 = await sbGet(`profiles?id=eq.${encodeURIComponent(mem.student_id)}&select=email`); _toMail = (_sp2 && _sp2[0] && _sp2[0].email) || ''; } catch (e) {} }
+            if (_toMail && coh) {
               let gymName = ''; let gymRec = null;
               try { const g = await sbGet(`gyms?id=eq.${encodeURIComponent(coh.gym_id)}&select=name,legal_name,org_form,tax_id,vat_id,vat_payer,vat_rate,billing_line1,billing_line2,billing_city,billing_postal`); gymRec = (g && g[0]) || null; gymName = (gymRec && gymRec.name) || ''; } catch (e) {}
               let ownerEmail = '';
@@ -1065,14 +1068,14 @@ export default async function handler(req, res) {
               const fromName = (gymName || 'Martial Training Lab').replace(/["<>]/g, '');
               let _dokAtt = undefined;
               let _testDok = false; try { _testDok = await isTestMode(); } catch (e) {}
-              if (!(_testDok && coh && coh.owner_id !== FOUNDER_UUID)) // test mode: doklad only for the founder's own club
               try {
-                // Doklad ze SNÍMKU (stejný jako v appce); stará verze jen když snímek ještě není.
+                // Doklad ze SNÍMKU (stejný jako v appce, v testu s označením TESTOVACÍ REŽIM); stará
+                // verze jen naostro, když snímek ještě není -- ta testovací označení nemá.
                 const _snapPdf = pi ? await dokladPdfFor({ paymentIntent: pi }) : null;
-                const _dokBuf = _snapPdf ? _snapPdf.buffer : await cohortDokladPdf({ gym: gymRec, gymName: gymName, buyer: (mem.name || mem.email || ''), item: ((coh.name || 'Kurz') + ' — záloha'), amount: amount, cur: cur2, ref: pi || '', date: _czDate(new Date().toISOString().slice(0,10)) });
-                _dokAtt = [{ filename: 'MTL-potvrzeni-o-platbe.pdf', content: _dokBuf.toString('base64') }];
+                const _dokBuf = _snapPdf ? _snapPdf.buffer : _testDok ? null : await cohortDokladPdf({ gym: gymRec, gymName: gymName, buyer: (mem.name || mem.email || ''), item: ((coh.name || 'Kurz') + ' — záloha'), amount: amount, cur: cur2, ref: pi || '', date: _czDate(new Date().toISOString().slice(0,10)) });
+                if (_dokBuf) _dokAtt = [{ filename: 'MTL-potvrzeni-o-platbe.pdf', content: _dokBuf.toString('base64') }];
               } catch (e) { console.error('cohort doklad pdf', e.message); }
-              await sendResend(mem.email, (coh.name || 'Kurz') + ' \u2014 z\u00E1loha p\u0159ijata', cohortDepositHtml(mem.name, coh.name || 'Kurz', gymName, money(amount), remainder > 0 ? money(remainder) : '', coh.start_date || '', ((process.env.APP_URL || process.env.PUBLIC_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '') + '/?myclass=' + encodeURIComponent(cmId)), !!(gymRec && gymRec.org_form === 'nonprofit')), { from: '"' + fromName + '" <' + MAIL_ADDR + '>', replyTo: ownerEmail || undefined, attachments: _dokAtt });
+              await sendResend(_toMail, (coh.name || 'Kurz') + ' \u2014 z\u00E1loha p\u0159ijata', cohortDepositHtml(mem.name, coh.name || 'Kurz', gymName, money(amount), remainder > 0 ? money(remainder) : '', coh.start_date || '', ((process.env.APP_URL || process.env.PUBLIC_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '') + '/?myclass=' + encodeURIComponent(cmId)), !!(gymRec && gymRec.org_form === 'nonprofit')), { from: '"' + fromName + '" <' + MAIL_ADDR + '>', replyTo: ownerEmail || undefined, attachments: _dokAtt });
             }
             try { await cohortCapiPurchase(coh, cmId, (mem && mem.email) || '', amount, cur, (mem && mem.fbp) || '', (mem && mem.fbc) || ''); } catch (e) {}
           } catch (e) { console.error('cohort confirm', e.message); }
@@ -1176,6 +1179,9 @@ export default async function handler(req, res) {
             supplier_interval: (m.sup_interval === 'year' ? 'year' : 'month'),
             ...(_paid ? { supplier_price: _paid, supplier_currency: String(s.currency || 'czk').toUpperCase() } : {}),
           });
+          // KDO PŘEDPLATNÉ PLATÍ (jeho karta). Po převodu organizace ho appka novému majiteli nenabídne
+          // obnovit -- strhávalo by se předchozímu. Zvlášť, ať chybějící sloupec nezastaví zveřejnění.
+          try { if (m.user_id) await sbPatch('organizations', `id=eq.${encodeURIComponent(orgId)}`, { supplier_sub_by: m.user_id }); } catch (e) { console.error('supplier_sub_by', e.message); }
           const _o = ((await sbGet(`organizations?id=eq.${encodeURIComponent(orgId)}&select=owner_id,name`)) || [])[0] || {};
           const _uid = _o.owner_id || m.user_id || null;
           if (_uid) await sbPost('notifications', { user_id: _uid, type: 'system', read: false,
@@ -1264,7 +1270,8 @@ export default async function handler(req, res) {
       // vystavujeme sami (ep-doklad) -- pro účetnictví poskytovatele i pro dotace.
       try {
         const _ow = event.account ? null : await _platformSubOwner(inv);   // EP běží na platformním účtu, ne na connected
-        if (_ow) {
+        // Nulová faktura (navazující předplatné se začátkem v budoucnu) není platba -- bez dokladu.
+        if (_ow && Number(inv.amount_paid != null ? inv.amount_paid : inv.total) > 0) {
           const _line = (inv.lines && inv.lines.data && inv.lines.data[0]) || null;
           // DALŠÍ PLATBA: konec právě zaplaceného období = den příštího stržení. Appka ho ukazuje
           // ve správě předplatného (EP v Platby a provize, dodavatel v profilu dodavatele).

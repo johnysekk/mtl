@@ -91,6 +91,8 @@ export async function sendOrderMail(txId) {
       let cm = null;
       if (tx.payment_intent) { const cp = await one(`cohort_payments?stripe_pi=eq.${q(tx.payment_intent)}&select=cohort_member_id`); if (cp) cm = await one(`cohort_members?id=eq.${q(cp.cohort_member_id)}&select=email,name`); }
       if (!cm && tx.payment_intent) cm = await one(`cohort_members?pis_payment_id=eq.${q(tx.payment_intent)}&select=email,name`);
+      // Doplatek / další měsíc z účtu: transakce nese id platby v source_booking_id (pis-return).
+      if (!cm && tx.source_booking_id) cm = await one(`cohort_members?pis_payment_id=eq.${q(tx.source_booking_id)}&select=email,name`);
       if (cm && cm.email) who = { email: cm.email, name: cm.name || '', lang: null };
     }
     if (!who || !who.email) return { ok: true, skipped: 'no email' };

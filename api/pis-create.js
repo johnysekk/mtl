@@ -106,6 +106,7 @@ function pickBankUrl(links) {
 // (crypto se importuje nahoře na řádku 21 -- druhý import by shodil celou funkci)
 import { fbxCall, fbxNow, psuIpFrom, FBX_MAX_SANDBOX } from './_fbx.js';
 import { checkRowPrice } from './_price-check.js';
+import { cohortPisPlan } from './_cohort-pis.js';
 const _PC_SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, ''), _PC_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 const PIS_TABLES = ['gym_bookings', 'gym_memberships', 'bookings', 'event_tickets', 'cohort_members', 'merch_orders'];
@@ -310,7 +311,14 @@ async function fbxCreate(sb, req, body) {
   }
   if (!iban) return { error: 'payee has no IBAN' };
 
-  const real = Number((tbl === 'organization_clubs' ? orgFeeAmount : row.amount) || body.amount || 0);
+  // KURZ: co a za kolik určí server (záloha / doplatek 1. měsíce / další měsíce) -- přihláška
+  // vlastní částku nemá a dřív se platilo, kolik poslala appka.
+  let cohPlan = null;
+  if (tbl === 'cohort_members') {
+    cohPlan = await cohortPisPlan(sb, row, body.amount);
+    if (cohPlan.error) return { error: cohPlan.error, code: cohPlan.code || null };
+  }
+  const real = Number(cohPlan ? cohPlan.amount : ((tbl === 'organization_clubs' ? orgFeeAmount : row.amount) || body.amount || 0));
   if (!(real > 0)) return { error: 'bad amount' };
   // Sandbox ma strop 1 Kc; na radku zustava skutecna castka, aby se do uctovani nepropsala koruna.
   const amount = C.sandbox ? Math.min(real, FBX_MAX_SANDBOX) : real;
@@ -367,7 +375,14 @@ async function fbxCreate(sb, req, body) {
     // Vlastní sloupec: návrat z banky podle něj vztah najde (pis-return, fbxReturn).
     await sb.from(tbl).update({ fee_payment_intent: mtid }).eq('id', row.id);
   } else {
-    await sb.from(tbl).update({ pis_payment_id: mtid, pis_provider: 'finbricks', pis_started_at: new Date().toISOString() }).eq('id', rowId);
+    const _st = { pis_payment_id: mtid, pis_provider: 'finbricks', pis_started_at: new Date().toISOString() };
+    if (cohPlan) {
+      // Co se platí, si návrat z banky přečte z řádku. Bez sloupců (cohort-pis-purpose.sql) aspoň id platby.
+      const r = await sb.from(tbl).update({ ..._st, pis_status: null, pis_purpose: cohPlan.purpose, pis_months: cohPlan.months, pis_amount: cohPlan.amount }).eq('id', rowId);
+      if (r.error) { console.error('[pis-create] cohort plan', r.error.message); await sb.from(tbl).update(_st).eq('id', rowId); }
+    } else {
+      await sb.from(tbl).update(_st).eq('id', rowId);
+    }
   }
   // Záznam souhlasu nesmí shodit už založenou platbu -- chyba jde jen do logu.
   try { await recordFbxConsent(req, row, tbl, terms, mtid); } catch (e) { console.error('[pis-create/consent]', e && e.message); }
@@ -388,6 +403,7 @@ export default async function handler(req, res) {
       bookingId,
       gymName, gymIban,
       amount, currency = 'CZK',
+      test_amount,            // sandbox Neonomics: malá testovací částka z appky (ostrý provoz ji ignoruje)
       vs,
       message,
       bankId,                 // NEW: base64 bank id from /api/pis-aspsps (index.html now sends it)
@@ -445,6 +461,12 @@ export default async function handler(req, res) {
         const _pc = await checkRowPrice({ SB: _PC_SB, KEY: _PC_KEY, tbl: _nTbl, row: _nRow });
         if (!_pc.ok) return res.status(400).json({ error: _pc.error || 'Cena neodpovídá nabídce', code: 'price_mismatch' });
         _nAmount = Number(_nRow.amount) || 0; _nCur = _nRow.currency || currency;
+        // Kurz: částku i účel určí server (viz _cohort-pis.js).
+        if (_nTbl === 'cohort_members') {
+          const _pl = await cohortPisPlan(sb, _nRow, amount);
+          if (_pl.error) return res.status(400).json({ error: _pl.error, code: _pl.code || null });
+          _nAmount = _pl.amount; _nCur = _pl.currency; _nRow._plan = _pl;
+        }
       }
       if (!_nIban) return res.status(400).json({ error: 'payee has no IBAN' });
       if (!(_nAmount > 0)) return res.status(400).json({ error: 'bad amount' });
@@ -473,7 +495,7 @@ export default async function handler(req, res) {
       creditorName: nordicSafe(gymName || 'Klub', 70) || 'Klub',
       // Sandbox (DNB) nehýbe skutečnými penězi a appka v testu posílá malou testovací částku --
       // tu necháváme. Ostrý provoz platí vždy částku z databáze.
-      instrumentedAmount: String((ENVN === 'sandbox' && Number(amount) > 0) ? Number(amount) : _nAmount),
+      instrumentedAmount: String((ENVN === 'sandbox' && Number(test_amount) > 0) ? Number(test_amount) : _nAmount),
       currency: String(_nCur || 'CZK').toUpperCase(),
       remittanceInformationUnstructured: remit,
       endToEndIdentification: e2e,
@@ -556,7 +578,11 @@ export default async function handler(req, res) {
           .update({ fee_payment_intent: paymentId }).eq('id', String(bookingId).slice(7));
       } else {
         const tbl = (kind === 'memb') ? 'gym_memberships' : (kind === 'coach1') ? 'bookings' : (kind === 'event') ? 'event_tickets' : (kind === 'cohort') ? 'cohort_members' : (kind === 'merch') ? 'merch_orders' : 'gym_bookings';
-        if (paymentId) await sb.from(tbl).update({ pis_payment_id: paymentId, pis_status: status }).eq('id', bookingId);
+        if (paymentId) {
+          const _pl = (tbl === 'cohort_members' && _nRow && _nRow._plan) || null;
+          const r = await sb.from(tbl).update(_pl ? { pis_payment_id: paymentId, pis_status: status, pis_purpose: _pl.purpose, pis_months: _pl.months, pis_amount: _pl.amount } : { pis_payment_id: paymentId, pis_status: status }).eq('id', bookingId);
+          if (_pl && r.error) await sb.from(tbl).update({ pis_payment_id: paymentId, pis_status: status }).eq('id', bookingId);
+        }
       }
     } catch (e) { /* non-fatal */ }
 

@@ -171,7 +171,60 @@ export async function pisSideEffects(rec, tbl){
 // notifikace, clenstvi nedostalo datum konce a listky z jedne objednavky se neprepnuly.
 //
 // rec: radek objednavky, tbl: jeji tabulka, status: stav od banky (jen do pis_status).
+// DOPLATEK 1. MĚSÍCE A DALŠÍ MĚSÍCE KURZU Z ÚČTU. Co a za kolik se platilo, určil při založení
+// platby server (pis-create, _cohort-pis.js) a zapsal k přihlášce (pis_purpose / pis_months /
+// pis_amount). Zaúčtuje se stejně jako u karty (stripe-webhook cohort_first_month / cohort_month):
+// člen se zapíše, přičtou se měsíce i částka, vznikne transakce s dokladem (a potvrzení e-mailem
+// z record-cash) a oba dostanou notifikaci. Dřív se každá platba kurzu z účtu brala jako záloha:
+// doplatek se nezaúčtoval vůbec a zapsaný člen spadl zpátky na „záloha zaplacena".
+async function settleCohortPaid(rec, status){
+  const mtid=rec.pis_payment_id; if(!mtid) return;
+  // JEN JEDNOU: návrat z banky, dotaz appky i opakovaný callback můžou přijít naráz. Kdo první
+  // přepíše pis_status na 'settled', ten zaúčtovává.
+  const cl=await sb.from('cohort_members').update({ pis_status:'settled' }).eq('id',rec.id).eq('pis_payment_id',mtid)
+    .or('pis_status.is.null,pis_status.neq.settled').select('id,paid_amount,months_paid');
+  if(!(cl.data && cl.data.length)) return;
+  const cur0=cl.data[0];
+  const purpose=rec.pis_purpose, n=Math.max(1, parseInt(rec.pis_months,10)||1), amt=Math.round(Number(rec.pis_amount||0)*100)/100;
+  const co=(await sb.from('gym_cohorts').select('gym_id,name,currency,months,start_date').eq('id',rec.cohort_id).maybeSingle()).data||{};
+  const cur=co.currency||'CZK', total=Math.max(1, Number(co.months||1));
+  let payer=''; try{ if(rec.paid_by){ const _pp=await sb.from('profiles').select('name').eq('id',rec.paid_by).maybeSingle(); payer=(_pp.data&&_pp.data.name)||''; } else if(rec.for_child && rec.guardian_name){ payer=rec.guardian_name; } }catch(e){}
+  // Měsíce: doplatek 1. měsíce pokrývá n měsíců od začátku, další platba n měsíců navíc.
+  const prevM=Math.max(0, Number(cur0.months_paid||0));
+  const fromM=(purpose==='first_month')?1:(prevM+1);
+  const newM=Math.min(total, (purpose==='first_month')?n:(prevM+n));
+  // Transakce + doklad + potvrzení e-mailem (record-cash). source_booking_id = id platby: každá
+  // platba kurzu má vlastní transakci, ne jednu na přihlášku.
+  let fee=0;
+  try{
+    const _rc=await fetch(APP_URL+'/api/record-cash',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({
+      internal:true, intSecret:process.env.PIS_INTERNAL_SECRET, provider:'gym', gym_id:co.gym_id||null, member_id:rec.student_id||null, cohort_member_id:rec.id,
+      gross_amount:Math.round(amt*100), currency:cur, type:'course', payment_method:'pis', cash_payer_name:(payer||rec.name||null), participant_name:(rec.name||null),
+      paid_by:rec.paid_by||null, paid_by_name:(payer||null), cohort_id:rec.cohort_id||null, income_class:(purpose==='first_month'?'cohort_first_month':'cohort_month'),
+      months:n, acq_source:rec.attribution||'direct', source_booking_id:mtid }) });
+    const _rt=await _rc.text(); let _rj={}; try{ _rj=JSON.parse(_rt); }catch(e){}
+    if(!_rc.ok){ console.error('[pis] cohort record-cash', _rc.status, _rt.slice(0,300), 'row='+rec.id); try{ globalThis.__mtlRecordCash={ status:_rc.status, text:String(_rt).slice(0,300) }; }catch(_e){} }
+    fee=Number(_rj.mtl_fee||0)/100;
+  }catch(e){ console.error('[pis] cohort record-cash throw', e && e.message); }
+  try{ await sb.from('cohort_payments').insert({ cohort_member_id:rec.id, cohort_id:rec.cohort_id||null, kind:purpose, amount:amt, months:n, currency:cur, mtl_fee:fee, payment_method:'pis', stripe_pi:mtid, status:'paid' }); }
+  catch(e){ console.error('[pis] cohort payment row', e && e.message); }
+  await sb.from('cohort_members').update({ status:'enrolled', paid_amount:Math.round((Number(cur0.paid_amount||0)+amt)*100)/100, months_paid:newM }).eq('id',rec.id);
+  // NOTIFIKACE. Rozsah měsíců („2.–3. měsíc"), ať je jasné, co přesně je zaplacené.
+  const range=(n>1)?(fromM+'.–'+(fromM+n-1)+'.'):(fromM+'.');
+  const _amtTxt=amt+' '+cur;
+  const nd={ kind:'payment_confirmed', auto:true, goto:'courses', what:purpose, months_range:range, cohort_id:rec.cohort_id, member_id:rec.id, amount:_amtTxt, item:(co.name||''), start:(co.start_date||null), payer:(payer||''), participant:(rec.name||'') };
+  try{
+    if(rec.student_id) await sb.from('notifications').insert({ user_id:rec.student_id, type:'booking', read:false, message:'✅ '+(co.name||'')+' · '+_amtTxt, data:JSON.stringify(nd) });
+    if(rec.paid_by && String(rec.paid_by)!==String(rec.student_id||'')) await sb.from('notifications').insert({ user_id:rec.paid_by, type:'booking', read:false, message:'✅ '+(co.name||'')+' · '+_amtTxt, data:JSON.stringify(Object.assign({}, nd, { for_other:true })) });
+    if(co.gym_id){ const g=await sb.from('gyms').select('owner_id').eq('id',co.gym_id).maybeSingle(); const ownerId=g.data&&g.data.owner_id;
+      if(ownerId) await sb.from('notifications').insert({ user_id:ownerId, type:'booking', read:false, message:'🎓 Platba kurzu (převodem): '+(rec.name||''),
+        data:JSON.stringify({ kind:'pis_payment_in', cohort_id:rec.cohort_id, what:purpose, months_range:range, student:(rec.name||''), payer:(payer||''), for_child:!!rec.for_child, course:(co.name||''), amt:String(amt), sym:cur }) }); }
+  }catch(e){ console.error('[pis] cohort notif', e && e.message); }
+}
+
 export async function pisSettle(rec, tbl, status){
+      // Kurz: doplatek a další měsíce mají vlastní zaúčtování; záloha jde dál jako dosud.
+      if(tbl==='cohort_members' && rec && rec.pis_purpose && rec.pis_purpose!=='deposit') return settleCohortPaid(rec, status);
       const _paidStatus=(tbl==='event_tickets'||tbl==='merch_orders')?'paid':(tbl==='cohort_members')?'deposit_paid':'active';
       if(rec && rec.status!==_paidStatus){
         // Clenstvi potrebuje i datum konce. Vsech osm ostatnich cest, ktere clenstvi aktivuji,
@@ -193,7 +246,7 @@ export async function pisSettle(rec, tbl, status){
         // záloha nezapsala do cohort_payments ani do paid_amount (bez povšimnutí, celé to bylo v try).
         let _cohDep=0, _cohCur='CZK';
         if(tbl==='cohort_members'){ try{ const _cd=await sb.from('gym_cohorts').select('deposit_amount,currency').eq('id',rec.cohort_id).maybeSingle(); _cohDep=Number((_cd.data&&_cd.data.deposit_amount)||0); _cohCur=(_cd.data&&_cd.data.currency)||'CZK'; }catch(e){} }
-        if(tbl==='cohort_members'){ try{ const _exC=await sb.from('cohort_payments').select('id').eq('cohort_member_id',rec.id).eq('kind','deposit').limit(1); if(!(_exC.data&&_exC.data.length)){ const _prevC=Number(rec.paid_amount||0); await sb.from('cohort_members').update({ paid_amount: Math.round((_prevC+Number(_cohDep||0))*100)/100, months_paid:1 }).eq('id',rec.id); await sb.from('cohort_payments').insert({ cohort_member_id:rec.id, cohort_id:rec.cohort_id||null, kind:'deposit', amount:Number(_cohDep||0), currency:_cohCur||'CZK', mtl_fee: Math.round(Number(_cohDep||0)*0.03*100)/100, payment_method:'pis', status:'paid' }); } }catch(e){} }
+        if(tbl==='cohort_members'){ try{ const _exC=await sb.from('cohort_payments').select('id').eq('cohort_member_id',rec.id).eq('kind','deposit').limit(1); if(!(_exC.data&&_exC.data.length)){ const _prevC=Number(rec.paid_amount||0); await sb.from('cohort_members').update({ paid_amount: Math.round((_prevC+Number(_cohDep||0))*100)/100 }).eq('id',rec.id); await sb.from('cohort_payments').insert({ cohort_member_id:rec.id, cohort_id:rec.cohort_id||null, kind:'deposit', amount:Number(_cohDep||0), currency:_cohCur||'CZK', mtl_fee: Math.round(Number(_cohDep||0)*0.03*100)/100, payment_method:'pis', status:'paid' }); } }catch(e){} }
         if(tbl==='bookings' && rec.slot_id){ try{ await sb.from('slots').update({ booked:true }).eq('id',rec.slot_id); }catch(e){} }
         try{ const _buyerId=(tbl==='event_tickets')?rec.buyer_id:rec.student_id;
           const _cur=(rec.currency||'CZK'); let _amt=(rec.amount!=null)?(rec.amount+' '+_cur):'';
@@ -384,7 +437,11 @@ async function fbxReturn(req, res, mtid){
   // KURZ: zpátky na stránku kurzu, ne na přihlášení do appky. Zaplaceno = stejná děkovná
   // obrazovka jako po kartě (?deposit=ok), host i přihlášený.
   const backC=(tbl==='cohort_members' && rec.cohort_id) ? function(q){ return back('cohort='+encodeURIComponent(rec.cohort_id)+'&'+q); } : back;
-  const okQ=(tbl==='cohort_members' && rec.cohort_id) ? ('deposit=ok&cm='+encodeURIComponent(rec.id)) : 'fbx=ok';
+  // Kurz: stejné děkovné obrazovky jako po kartě -- záloha, doplatek 1. měsíce (zapsán), další měsíc.
+  const _cp=(tbl==='cohort_members' && rec.cohort_id) ? (rec.pis_purpose || (['deposit_paid','enrolled'].includes(String(rec.status||''))?'':'deposit')) : '';
+  const okQ=(_cp==='deposit') ? ('deposit=ok&cm='+encodeURIComponent(rec.id))
+    : (_cp==='first_month') ? ('firstmonth=ok&m='+encodeURIComponent(String(rec.pis_months||1))+'&cm='+encodeURIComponent(rec.id))
+    : (_cp==='month') ? ('monthpaid=ok&cm='+encodeURIComponent(rec.id)) : 'fbx=ok';
 
   // BANKA POTVRZUJE S MALYM ZPOZDENIM. Hned po navratu je stav casto jeste OPENED a platba
   // se za vterinu zmeni na COMPLETED -- doptat se jednou navic je levnejsi nez poslat cloveka
@@ -419,7 +476,7 @@ async function fbxReturn(req, res, mtid){
       if(_tx){ const d=await sb.from('doklady').select('doklad_no').eq('transaction_id', _tx).limit(1);
         _dok=(d.data&&d.data[0]&&d.data[0].doklad_no)||null; }
     }catch(e){}
-    return wantsHtml ? backC(okQ) : res.status(200).json({ ok:true, status:out.code, paid:true, table:tbl, id:rec.id, transakce:_tx, doklad:_dok, zauctovani:_rcDiag });
+    return wantsHtml ? backC(okQ) : res.status(200).json({ ok:true, status:out.code, paid:true, table:tbl, id:rec.id, deposit_thanks:okQ.indexOf('deposit=ok')===0, transakce:_tx, doklad:_dok, zauctovani:_rcDiag });
   }
   if(out.failed){ try{ await sb.from(tbl).update({ status:'cancelled', pis_failed_at:new Date().toISOString() }).eq('id', rec.id); }catch(e){} }
   return wantsHtml ? backC('fbx=fail') : res.status(200).json({ ok:true, status:out.code, paid:false });
@@ -472,7 +529,7 @@ export default async function handler(req, res){
         if(!rec){ const m=await sb.from('gym_memberships').select('id,status,student_id,gym_id,plan_name,amount,currency,coach_id,acq_source,student_name,months,paid_by,paid_by_name,child_name').eq('pis_payment_id',paymentId).maybeSingle(); if(m.data){ rec=m.data; tbl='gym_memberships'; } }
         if(!rec){ const c=await sb.from('bookings').select('id,status,student_id,coach_id,amount,currency,coach_name,training_date,training_time,slot_id,acq_source,credit_used,paid_by').eq('pis_payment_id',paymentId).maybeSingle(); if(c.data){ rec=c.data; tbl='bookings'; } }
         if(!rec){ const e=await sb.from('event_tickets').select('id,status,buyer_id,event_id,amount,currency,buyer_name,order_id,paid_by,paid_by_name,attendee_name').eq('pis_payment_id',paymentId).maybeSingle(); if(e.data){ rec=e.data; tbl='event_tickets'; } }
-        if(!rec){ const co=await sb.from('cohort_members').select('id,status,student_id,cohort_id,name,attribution,paid_by,for_child,guardian_name,email').eq('pis_payment_id',paymentId).maybeSingle(); if(co.data){ rec=co.data; tbl='cohort_members'; } }
+        if(!rec){ const co=await sb.from('cohort_members').select('*').eq('pis_payment_id',paymentId).maybeSingle(); if(co.data){ rec=co.data; tbl='cohort_members'; } }
         if(!rec){ const mo=await sb.from('merch_orders').select('id,status,student_id,gym_id,coach_id,merch_id,item_name,amount,currency,buyer_name').eq('pis_payment_id',paymentId).maybeSingle(); if(mo.data){ rec=mo.data; tbl='merch_orders'; } }
         // Zauctovani je spolecne pro vsechny poskytovatele (viz pisSettle).
         await pisSettle(rec, tbl, status);

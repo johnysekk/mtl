@@ -1,134 +1,79 @@
-// /api/partner-revenue.js  —  Founder-only: exact NET revenue from Exclusive MTL Partner ($49/mo) subscriptions.
-// Reads every partner_sub subscription's PAID invoices and sums the real settled amounts
-// from Stripe balance transactions (gross / fee / net), grouped by settlement currency.
+// /api/partner-revenue.js — PŘÍJMY MTL Z PŘEDPLATNÉHO: Exclusive Partner (EP) a profil dodavatele (SP).
+// JEN FOUNDER (ověřený token). Dřív endpoint nic neověřoval a kdokoli dostal jména, e-maily, IČO,
+// DIČ, sídla a tržby všech partnerů.
 //
-// ENV required (Vercel project settings):
-//   STRIPE_SECRET_KEY            (platform secret key — the account that bills the $49/mo)
-//   SUPABASE_SERVICE_ROLE_KEY    (service role; bypasses RLS to read profiles.partner_sub)
-//   SUPABASE_URL                 (optional; defaults to the MTL project URL below)
+// ZDROJ = VYSTAVENÉ DOKLADY (commission_doklady, kind partner_sub / supplier_sub), ne dnešní stav
+// profilů. Dřív se braly jen profily, které předplatné mají TEĎ -- kdo skončil, zmizel i se všemi
+// minulými platbami, a dodavatelé chyběli úplně. Každá faktura nese id faktury Stripe (pi_id);
+// u zaplacené se ze Stripe dočte skutečně připsaná částka a poplatek (balance transaction).
+// Odběratel, IČO, DIČ a adresa v exportu jsou OTISK z dokladu -- nikdy dnešní údaje z profilu.
 //
-// ESM module (this Vercel project uses "export default" handlers).
-
+// GET ?month=YYYY-MM (podle data vystavení dokladu)
 import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
+import { isTestMode } from './_config.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-
-// Sloupec billing_address je dropnuty. Jednoradkovy tvar se sklada z rozpadu
-// billing_line1/line2/city/postal -- stejne jako _billAddr v ostatnich souborech.
-function _billAddr(row) {
-  if (!row) return null;
-  const g = (k) => (row[k] == null ? '' : String(row[k]).trim());
-  const zip = g('billing_postal'), city = g('billing_city');
-  const parts = [g('billing_line1'), g('billing_line2'), ((zip ? zip + ' ' : '') + city).trim()].filter(Boolean);
-  return parts.length ? parts.join(', ') : null;
-}
-const supa = createClient(
-  process.env.SUPABASE_URL || 'https://iqeovcvchtyfwtyzpqrh.supabase.co',
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+const supa = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+const FOUNDER = process.env.FOUNDER_UUID || '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+const KINDS = ['partner_sub', 'supplier_sub'];
+const r2 = (x) => Math.round(Number(x || 0) * 100) / 100;
 
 export default async function handler(req, res) {
   res.setHeader('Content-Type', 'application/json');
   try {
-    if (!process.env.STRIPE_SECRET_KEY || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
-      return res.status(200).json({ ok: false, error: 'server not configured' });
-    }
+    if (!process.env.STRIPE_SECRET_KEY || !process.env.SUPABASE_SERVICE_ROLE_KEY) return res.status(200).json({ ok: false, error: 'server not configured' });
+    const tok = req.headers['x-access-token'] || String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!tok) return res.status(401).json({ ok: false, error: 'no token' });
+    const { data: u, error: ue } = await supa.auth.getUser(tok);
+    if (ue || !u || !u.user || u.user.id !== FOUNDER) return res.status(403).json({ ok: false, error: 'forbidden' });
 
-    // 1) Gather all partner subscription IDs from Supabase.
-    const { data: profs, error: dbErr } = await supa
-      .from('profiles')
-      .select('id, name, email, partner_sub, legal_name, tax_id, vat_id, billing_line1, billing_line2, billing_city, billing_postal, invoice_email')
-      .not('partner_sub', 'is', null);
-    if (dbErr) return res.status(200).json({ ok: false, error: dbErr.message });
-
-    const subs = (profs || []).filter(p => p.partner_sub);
-
-    // Optional ?month=YYYY-MM filter (by invoice creation date).
-    const month = (req.query && req.query.month) || '';
-    let createdFilter = null;
+    // Testovací doklady jen v Testovacím režimu (a naopak) -- jinak by se míchaly s ostrými.
+    let test = false; try { test = await isTestMode(); } catch (e) {}
+    const month = String((req.query && req.query.month) || '');
+    let q = supa.from('commission_doklady').select('*').in('kind', KINDS).eq('test_mode', test);
     if (/^\d{4}-\d{2}$/.test(month)) {
       const [y, m] = month.split('-').map(Number);
-      const gte = Math.floor(Date.UTC(y, m - 1, 1) / 1000);
-      const lte = Math.floor(Date.UTC(y, m, 1) / 1000) - 1;
-      createdFilter = { gte, lte };
+      q = q.gte('charged_at', new Date(Date.UTC(y, m - 1, 1)).toISOString()).lt('charged_at', new Date(Date.UTC(y, m, 1)).toISOString());
+    }
+    const { data: invs, error } = await q.order('charged_at', { ascending: true }).limit(5000);
+    if (error) return res.status(200).json({ ok: false, error: error.message });
+
+    // Zaplacená = bez dlužné částky, nebo uhrazená pozdějším dokladem o úhradě.
+    const paidLater = new Set();
+    if ((invs || []).some((d) => Number(d.due_amount) > 0)) {
+      const { data: rc } = await supa.from('commission_doklady').select('ref_doklad_id,line_items').eq('kind', 'payment_receipt').in('ref_kind', KINDS).limit(5000);
+      (rc || []).forEach((r) => {
+        if (r.ref_doklad_id) paidLater.add(Number(r.ref_doklad_id));
+        (Array.isArray(r.line_items) ? r.line_items : []).forEach((it) => { if (it && it.ref != null) paidLater.add(Number(it.ref)); });
+      });
     }
 
-    const byCurrency = {}; // CUR -> { gross, fee, net, count }
-    let _curP = null; const partnersRows = [];
-    const add = (cur, g, f, n) => {
-      const c = (cur || 'usd').toUpperCase();
-      if (!byCurrency[c]) byCurrency[c] = { gross: 0, fee: 0, net: 0, count: 0 };
-      byCurrency[c].gross += g;
-      byCurrency[c].fee += f;
-      byCurrency[c].net += n;
-      byCurrency[c].count += 1;
-      if (_curP) { if (!_curP[c]) _curP[c] = { gross: 0, fee: 0, net: 0, count: 0 }; _curP[c].gross += g; _curP[c].fee += f; _curP[c].net += n; _curP[c].count += 1; }
-    };
-
+    const byKind = { ep: {}, sp: {} };
+    const subs = { ep: new Set(), sp: new Set() };
+    const rows = [];
     let payments = 0;
-
-    // 2) For each subscription, walk its PAID invoices and read the real balance transaction.
-    for (const p of subs) {
-      _curP = {};
-      let starting_after;
-      for (let page = 0; page < 20; page++) {
-        let inv;
+    for (const d of (invs || [])) {
+      if (Number(d.due_amount) > 0 && !paidLater.has(Number(d.id))) continue;   // nezaplaceno = není příjem
+      const k = d.kind === 'supplier_sub' ? 'sp' : 'ep';
+      subs[k].add(k === 'sp' ? String(d.organization_id) : String(d.coach_id));
+      // Skutečně připsáno a poplatek: faktura Stripe -> platba -> balance transaction.
+      let cur = String(d.currency || 'CZK').toUpperCase(), gross = r2(Number(d.amount || 0) / 100), fee = 0, net = gross, exact = false;
+      if (d.pi_id && String(d.pi_id).startsWith('in_')) {
         try {
-          inv = await stripe.invoices.list({
-            subscription: p.partner_sub,
-            status: 'paid',
-            limit: 100,
-            ...(createdFilter ? { created: createdFilter } : {}),
-            ...(starting_after ? { starting_after } : {}),
-          });
-        } catch (e) {
-          break; // subscription not found / no access — skip this partner
-        }
-        for (const i of (inv.data || [])) {
-          const chargeId = typeof i.charge === 'string' ? i.charge : (i.charge && i.charge.id);
-          if (!chargeId) {
-            // No charge object (e.g. $0 invoice) — count gross only.
-            add(i.currency, (i.amount_paid || 0) / 100, 0, (i.amount_paid || 0) / 100);
-            payments += 1;
-            continue;
-          }
-          let bt = null;
-          try {
-            const ch = await stripe.charges.retrieve(chargeId, { expand: ['balance_transaction'] });
-            bt = ch.balance_transaction;
-          } catch (e) { /* ignore */ }
-
-          if (bt && typeof bt === 'object') {
-            // Settled amounts in the SETTLEMENT currency — the real money MTL received.
-            add(bt.currency, (bt.amount || 0) / 100, (bt.fee || 0) / 100, (bt.net || 0) / 100);
-          } else {
-            // Fallback: charge currency gross, no exact fee available.
-            add(i.currency, (i.amount_paid || 0) / 100, 0, (i.amount_paid || 0) / 100);
-          }
-          payments += 1;
-        }
-        if (!inv.has_more) break;
-        starting_after = inv.data[inv.data.length - 1].id;
+          const inv = await stripe.invoices.retrieve(d.pi_id, { expand: ['charge.balance_transaction'] });
+          const bt = inv && inv.charge && typeof inv.charge === 'object' ? inv.charge.balance_transaction : null;
+          if (bt && typeof bt === 'object') { cur = String(bt.currency).toUpperCase(); gross = r2(bt.amount / 100); fee = r2(bt.fee / 100); net = r2(bt.net / 100); exact = true; }
+        } catch (e) { /* bez Stripe zůstane částka z dokladu */ }
       }
-      if (_curP) { Object.keys(_curP).forEach(c => { _curP[c].gross = Math.round(_curP[c].gross*100)/100; _curP[c].fee = Math.round(_curP[c].fee*100)/100; _curP[c].net = Math.round(_curP[c].net*100)/100; }); partnersRows.push({ id: p.id, name: p.name || '', legal_name: p.legal_name || '', tax_id: p.tax_id || '', vat_id: p.vat_id || '', billing_address: _billAddr(p) || '', invoice_email: p.invoice_email || p.email || '', partner_sub: p.partner_sub, byCur: _curP }); _curP = null; }
+      const b = byKind[k][cur] || (byKind[k][cur] = { gross: 0, fee: 0, net: 0, count: 0 });
+      b.gross = r2(b.gross + gross); b.fee = r2(b.fee + fee); b.net = r2(b.net + net); b.count += 1;
+      payments += 1;
+      rows.push({ doc_no: d.doc_no || ('MTL-' + d.id), issued_at: d.issued_at || d.charged_at, kind: k, period: d.period_month || null,
+        cust_name: d.cust_name || '', cust_ico: d.cust_ico || '', cust_dic: d.cust_dic || '', cust_address: d.cust_address || '', cust_country: d.cust_country || '',
+        invoiced: r2(Number(d.amount || 0) / 100), invoiced_currency: String(d.currency || 'CZK').toUpperCase(), currency: cur, gross, fee, net, exact });
     }
-
-    // round to 2 decimals
-    Object.keys(byCurrency).forEach(c => {
-      byCurrency[c].gross = Math.round(byCurrency[c].gross * 100) / 100;
-      byCurrency[c].fee = Math.round(byCurrency[c].fee * 100) / 100;
-      byCurrency[c].net = Math.round(byCurrency[c].net * 100) / 100;
-    });
-
-    return res.status(200).json({
-      ok: true,
-      month: month || 'all',
-      partners: subs.length,
-      payments,
-      byCurrency,
-      partnersRows,
-    });
+    return res.status(200).json({ ok: true, month: month || 'all', test, partners: subs.ep.size, suppliers: subs.sp.size, payments, byKind, rows });
   } catch (e) {
     return res.status(200).json({ ok: false, error: e.message || 'error' });
   }

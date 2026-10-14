@@ -89,6 +89,11 @@ async function execute(E, fromId, toId, keepOld, actorId, byAdmin) {
       const s = await stripe.subscriptions.update(E.supplier_sub, { cancel_at_period_end: true });
       const pe = s.current_period_end || (s.items && s.items.data && s.items.data[0] && s.items.data[0].current_period_end) || null;
       subEnd = pe ? new Date(pe * 1000).toISOString() : null;
+      // Appka podle toho novému majiteli nabídne navazující předplatné (pay.js).
+      await sbWrite('PATCH', `organizations?id=eq.${q(E.id)}`, { supplier_cancelling: true, supplier_period_end: subEnd });
+      // Kdo ho platí (u předplatných z doby před sloupcem supplier_sub_by chybí) -- zvlášť, ať
+      // chybějící sloupec nezastaví zbytek.
+      try { await sbWrite('PATCH', `organizations?id=eq.${q(E.id)}&supplier_sub_by=is.null`, { supplier_sub_by: fromId }); } catch (e) {}
     } catch (e) { console.error('[ownership-transfer] supplier sub', e.message); }
   }
   return { subEnd };
@@ -107,11 +112,11 @@ async function notifyDone(E, from, to, keepOld, byAdmin, subEnd) {
     if (side === 'to') {
       cs = `🔑 ${by ? (by + ' na tebe vlastnictví ' + what + ' ' + E.name) : ('Jsi nový majitel ' + what + ' ' + E.name)} (dosud ${from ? from.name || from.email : '—'}).`
         + (isSup ? '' : ' Odpojili jsme kartu na provizi předchozího majitele — přidej svou v Platby a provize, jinak provizi nepůjde strhnout.')
-        + (isSup ? (' Předplatné profilu dodavatele platil předchozí majitel a skončí' + (subEnd ? (' ' + czDate(subEnd)) : ' na konci zaplaceného období') + '; potom ho zaplať ze svého účtu, jinak se profil skryje.') : '')
+        + (isSup ? (' Předplatné profilu dodavatele platil předchozí majitel a skončí' + (subEnd ? (' ' + czDate(subEnd)) : ' na konci zaplaceného období') + '. Založ si hned vlastní (Profil dodavatele) — první platba se z tvé karty strhne až v den, kdy to staré skončí, a profil poběží bez přerušení.') : '')
         + ' Zkontroluj fakturační údaje' + (isSup ? '.' : ' a Stripe účet — platby kartou chodí na účet, který je připojený.');
       enT = `🔑 ${by ? (by + ' ownership of ' + what + ' ' + E.name + ' to you') : ('You are the new owner of ' + what + ' ' + E.name)} (previously ${from ? from.name || from.email : '—'}).`
         + (isSup ? '' : ' We disconnected the previous owner\'s commission card — add yours in Payments & commission, otherwise the commission cannot be charged.')
-        + (isSup ? (' The supplier profile subscription was paid by the previous owner and ends' + (subEnd ? (' ' + czDate(subEnd, true)) : ' at the end of the paid period') + '; then pay it from your account, otherwise the profile is hidden.') : '')
+        + (isSup ? (' The supplier profile subscription was paid by the previous owner and ends' + (subEnd ? (' ' + czDate(subEnd, true)) : ' at the end of the paid period') + '. Set up your own now (Supplier profile) — your card is first charged only on the day the old one ends, and the profile keeps running without a break.') : '')
         + ' Check the billing details' + (isSup ? '.' : ' and the Stripe account — card payments go to the account that is connected.');
     } else {
       cs = `🔑 ${by ? (by + ' vlastnictví ' + what + ' ' + E.name + ' na ' + (to.name || to.email)) : ((isGym ? 'Klub ' : 'Organizaci ') + E.name + ' teď vlastní ' + (to.name || to.email))}.`
