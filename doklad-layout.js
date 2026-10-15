@@ -324,15 +324,13 @@ export function statusBoxHtml(st) {
     + '<div style="font-weight:800;font-size:12.5px;letter-spacing:.02em;">' + esc(st.head) + '</div>'
     + '<div style="font-size:12px;line-height:1.45;margin-top:2px;">' + esc(st.body) + '</div></div>';
 }
-// opts.fragment = jen tělo dokladu (do e-mailu), jinak celá stránka (appka, tisk).
-export function renderHtml(m, opts) {
-  opts = opts || {};
+// Celá stránka dokladu (appka, tisk). Do e-mailu se doklad nevkládá -- jde jako PDF v příloze.
+export function renderHtml(m) {
   const align = (a) => a === 'r' ? 'right' : (a === 'c' ? 'center' : 'left');
   let b = '';
   if (m.preview) b += '<div style="font-size:11px;font-weight:800;color:#999;letter-spacing:.05em;margin-bottom:10px;">' + esc(_t(m.lang).preview) + '</div>';
   if (m.test) b += '<div style="margin:0 0 12px;padding:9px 12px;background:' + C.test.bg + ';border:1px solid ' + C.test.bd + ';border-radius:8px;color:' + C.test.fg + ';font-size:12px;font-weight:700;">🧪 ' + esc(m.test) + '</div>';
-  // Logo stejným písmem jako v appce (Bebas Neue). V appce je načtené; v e-mailu ho načte jen část
-  // klientů (Apple Mail), jinde zaskočí Impact -- také úzké tučné písmo.
+  // Logo stejným písmem jako v appce (Bebas Neue, načte se v hlavičce stránky).
   if (m.brand) b += '<div style="font-family:\'Bebas Neue\',Impact,\'Arial Narrow\',sans-serif;font-weight:400;font-size:36px;line-height:1;color:' + BRAND + ';letter-spacing:.06em;margin:0 0 6px;">MTL</div>';
   b += '<h1 style="font-size:20px;margin:0 0 4px;line-height:1.3;">' + esc(m.title) + '</h1>';
   if (m.parties) b += '<div style="display:flex;flex-wrap:wrap;gap:12px 24px;margin:18px 0 8px;">' + m.parties.map((p) =>
@@ -354,7 +352,6 @@ export function renderHtml(m, opts) {
   (m.notes || []).forEach((n) => { b += '<div style="margin-top:10px;font-size:12px;color:' + C.mid + ';line-height:1.55;">' + esc(n) + '</div>'; });
   const font = m.brand ? '<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&display=swap" rel="stylesheet">' : '';
   const body = '<div style="font-family:Arial,Helvetica,sans-serif;color:' + C.ink + ';max-width:700px;margin:0 auto;line-height:1.5;">' + b + '</div>';
-  if (opts.fragment) return font + body;
   return '<!doctype html><html lang="' + (_isEn(m.lang) ? 'en' : 'cs') + '"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(m.docTitle || m.title) + '</title>' + font
     + '<style>body{margin:0;padding:24px 18px;background:#fff;}.mtl-f{flex:0 0 calc(50% - 14px)!important;min-width:0!important;}@media (max-width:560px){.mtl-f{flex:1 1 100%!important;}}@media print{body{padding:0;}}</style></head><body>' + body + '</body></html>';
 }
