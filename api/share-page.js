@@ -39,9 +39,13 @@ function fromPrice(base, tiers) {
 }
 function day(d, cs) { try { return new Date(d).toLocaleDateString(cs ? 'cs-CZ' : 'en-GB', { day: 'numeric', month: 'numeric', year: 'numeric', timeZone: 'Europe/Prague' }); } catch (e) { return ''; } }
 
+// Mezistránka vypadá stejně jako úvod appky (pozadí, logo MTL, „Načítám…"), ať přechod do appky
+// neblikne tmavou stránkou. Náhled pro sítě dělají jen OG tagy v hlavičce; název kurzu / akce
+// v těle je jen pro prohlížeč bez JavaScriptu.
 function page(o) {
   return `<!doctype html><html lang="${o.cs ? 'cs' : 'en'}"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#F5F2EE">
 <title>${esc(o.title)}</title>
 <meta name="description" content="${esc(o.desc)}">
 <meta property="og:type" content="website">
@@ -53,10 +57,22 @@ ${o.image ? `<meta property="og:image" content="${esc(o.image)}">` : ''}
 <meta name="twitter:card" content="${o.image ? 'summary_large_image' : 'summary'}">
 <link rel="canonical" href="${esc(o.canonical)}">
 <meta http-equiv="refresh" content="0;url=${esc(o.target)}">
-<style>body{margin:0;font-family:Arial,Helvetica,sans-serif;background:#0b0b0b;color:#fff;display:flex;min-height:100vh;align-items:center;justify-content:center;text-align:center;padding:24px;box-sizing:border-box}a{color:#F4D87A;font-weight:700}</style>
-</head><body><div><div style="font-size:20px;font-weight:800;margin-bottom:8px;">${esc(o.title)}</div>
-<a href="${esc(o.target)}">${o.cs ? 'Pokračovat' : 'Continue'} ›</a></div>
-<script>location.replace(${JSON.stringify(o.target)});</script></body></html>`;
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@600;700&display=swap" rel="stylesheet">
+<style>html,body{margin:0;height:100%;background:#F5F2EE}
+body{display:flex;align-items:center;justify-content:center;flex-direction:column;padding-bottom:calc(5vh + env(safe-area-inset-bottom,0px));box-sizing:border-box}
+#lg{opacity:0;transition:opacity .3s ease;display:flex;flex-direction:column;align-items:center;position:relative}
+.m{font-family:'Bebas Neue',sans-serif;font-size:clamp(42px,13vw,62px);letter-spacing:.06em;color:#E8001D;line-height:1}
+.b{font-family:'DM Sans',sans-serif;font-size:13.5px;font-weight:700;letter-spacing:.16em;color:#111;margin-top:9px}
+.r{position:absolute;top:100%;left:50%;transform:translateX(-50%);margin-top:26px;display:flex;align-items:center;gap:9px;white-space:nowrap;font-family:'DM Sans',sans-serif;font-size:13px;color:#555;font-weight:600}
+.s{width:16px;height:16px;border:2.5px solid #E0DDD8;border-top-color:#E8001D;border-radius:50%;animation:sp .8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+noscript a{font-family:Arial,sans-serif;color:#E8001D;font-weight:700;margin-top:70px}</style>
+</head><body><div id="lg"><div class="m">MTL</div><div class="b">Be More.</div>
+<div class="r"><div class="s"></div>${o.cs ? 'Načítám…' : 'Loading…'}</div></div>
+<noscript><a href="${esc(o.target)}">${esc(o.title)} ›</a></noscript>
+<script>(function(){var v=function(){var e=document.getElementById('lg');if(e)e.style.opacity='1';};try{if(document.fonts&&document.fonts.ready)document.fonts.ready.then(v);}catch(e){}setTimeout(v,700);})();
+location.replace(${JSON.stringify(o.target)});</script></body></html>`;
 }
 
 const OWNER = { club: { tbl: 'gyms', sel: 'id,slug,name,city,country,photos,owner_id' }, coach: { tbl: 'profiles', sel: 'id,slug,name,city,country,coach_status,referral_code' },

@@ -1,8 +1,8 @@
 // MTL — /api/come-of-age-cron
 //
 // is_minor se nastavilo jednou při registraci a nikdy nepřepočítalo. Klient to od TBC řeší při
-// vstupu, jenže kdo appku neotevře, zůstane v databázi mladistvý — a serverové cesty
-// (guardian-consent.js a spol.) se řídí databází, ne tím, co si myslí prohlížeč. Proto i tady.
+// vstupu, jenže kdo appku neotevře, zůstane v databázi mladistvý — a serverové cesty se řídí
+// databází, ne tím, co si myslí prohlížeč. Proto i tady.
 //
 // Běží jednou v noci. Najde účty, které mají is_minor a datum narození starší osmnácti let,
 // a překlopí je: příznak pryč, žádosti o úhradu pryč, aktivní vazba na zástupce ukončená.
