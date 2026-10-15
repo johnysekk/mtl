@@ -73,7 +73,7 @@ const FONTS = '<link rel="preconnect" href="https://fonts.googleapis.com">'
   + '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
   + '<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">';
 
-// Vlastní adresa klubu: /klub/<slug> (vercel.json přepíše na ?slug=). Malá písmena, číslice, pomlčky.
+// Vlastní adresa klubu: /club/<slug> (vercel.json přepíše na ?slug=). Malá písmena, číslice, pomlčky.
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])$/;
 
 export default async function handler(req, res) {
@@ -88,7 +88,7 @@ export default async function handler(req, res) {
   // bez dotazu do databáze, a přesměrování si CDN taky podrží.
   { const _ok = new Set(['club', 'id', 'slug']);
     if (Object.keys(q0).some((k) => !_ok.has(k))) {
-      const clean = slug ? ('/klub/' + encodeURIComponent(slug)) : ('/api/club-public?club=' + encodeURIComponent(String(id)));
+      const clean = slug ? ('/club/' + encodeURIComponent(slug)) : ('/api/club-public?club=' + encodeURIComponent(String(id)));
       res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400');
       res.setHeader('Location', clean);
       return res.status(301).end();
@@ -251,7 +251,7 @@ export default async function handler(req, res) {
 <meta property="og:type" content="website">
 <meta property="og:title" content="${esc(title)}">
 <meta property="og:description" content="${esc(desc)}">
-<meta property="og:url" content="${esc(origin + (g.slug ? ('/klub/' + g.slug) : ('/api/club-public?club=' + g.id)))}">
+<meta property="og:url" content="${esc(origin + (g.slug ? ('/club/' + g.slug) : ('/api/club-public?club=' + g.id)))}">
 ${hero ? `<meta property="og:image" content="${esc(hero)}">` : ''}
 <meta name="twitter:card" content="${hero ? 'summary_large_image' : 'summary'}">
 <meta name="theme-color" content="#0c0c0c">
