@@ -1,5 +1,5 @@
 import Stripe from 'stripe';
-import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor, orgRate, nativePrice, nativeRate, STORE_COST, EP_TIERS, EP_TIER_ORDER, EP_TIER_NAMES, EP_YEAR_MONTHS, EP_DEFAULT_TIER, epTierKey, epTierOf } from './_rate.js';
+import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor, orgRate, nativePrice, nativeRate, STORE_COST, EP_TIERS, EP_TIER_ORDER, EP_TIER_NAMES, EP_YEAR_MONTHS, EP_DEFAULT_TIER, epTierKey, epTierOf, epCurrencyFor, epAmount } from './_rate.js';
 import { applyEpUpgrade, notifyEpDowngradeScheduled } from './_ep.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { checkPrice, offerPrices, planTermPrices, checkOnlineCountry } from './_price-check.js';
@@ -728,8 +728,8 @@ function _dmy(ymd) { const [y, m, d] = String(ymd || '').slice(0, 10).split('-')
 
 // ───────────────────────── Exclusive MTL Partner (předplatné na účtu MTL) ─────────────────────────
 // CENA JE JEN TADY, z ceníku EP_TIERS v _rate.js. Z appky přijde jen stupeň, měsíc/rok a na koho
-// je faktura. Ceny bez DPH, v korunách -- zahraniční ceny podle měny se nastaví, až budou
-// poskytovatelé mimo ČR. Roční = EP_YEAR_MONTHS měsíců.
+// je faktura. Ceny bez DPH, v Kč pro odběratele z Česka, v EUR pro ostatní (podle země toho, na
+// koho jde faktura). Běžící předplatné si měnu drží. Roční = EP_YEAR_MONTHS měsíců.
 // ZAKLÁDAJÍCÍ CENA je u stupně (Chūnin 10 míst, Kage 5). Místo drží každý, kdo má stupeň
 // v profiles.ep_founding -- i když mezitím přešel na jiný stupeň; uvolní ho až úplné zrušení EP.
 // Kdo už ji u stupně má, dostane ji znovu i po vyčerpání míst.
@@ -742,11 +742,11 @@ async function _epFoundingTaken(tier) {
     return Number(String(r.headers.get('content-range') || '').split('/')[1]) || 0;
   } catch (e) { return Infinity; }
 }
-async function epPriceFor(tier, prof) {
-  const T = EP_TIERS[tier];
+async function epPriceFor(tier, prof, currency) {
+  const T = EP_TIERS[tier], cur = String(currency || 'CZK').toUpperCase();
   const has = Array.isArray(prof && prof.ep_founding) && prof.ep_founding.indexOf(tier) >= 0;
-  const founding = !!T.foundingCzk && (has || (await _epFoundingTaken(tier)) < T.foundingSpots);
-  return { currency: 'czk', amount: founding ? T.foundingCzk : T.czk, founding };
+  const founding = !!T.founding && (has || (await _epFoundingTaken(tier)) < T.foundingSpots);
+  return { currency: cur.toLowerCase(), amount: epAmount(tier, cur, founding), founding };
 }
 // Přihlášený uživatel z tokenu (Authorization: Bearer). EP se kupuje a mění jen za sebe.
 async function _authUser(req) {
@@ -833,13 +833,17 @@ async function partnerCheckout(req, res) {
   // nebo on sám jako kouč (IČO). Volba z appky: bill=coach | bill=gym:<id>. Klub musí patřit
   // kupujícímu. Volba jede v metadatech předplatného, takže každá faktura (i obnovy) jde na
   // stejný subjekt -- ep-doklad ji dostane přes webhook.
-  let billGym = null;
+  let billGym = null, billCC = '';
   { const _b = String(req.query.bill || '');
     if (_b.indexOf('gym:') === 0) {
-      const g = (await _wsbGet(`gyms?id=eq.${encodeURIComponent(_b.slice(4))}&owner_id=eq.${encodeURIComponent(userId)}&select=id`))[0];
+      const g = (await _wsbGet(`gyms?id=eq.${encodeURIComponent(_b.slice(4))}&owner_id=eq.${encodeURIComponent(userId)}&select=id,billing_country`))[0];
       if (!g) return res.status(403).json({ error: 'Tenhle klub ti nepatří' });
-      billGym = g.id;
+      billGym = g.id; billCC = g.billing_country || '';
+    } else {
+      billCC = ((await _wsbGet(`profiles?id=eq.${encodeURIComponent(userId)}&select=billing_country`))[0] || {}).billing_country || '';
     } }
+  // MĚNA podle země toho, na koho jde faktura (Česko Kč, jinak EUR) -- stejně jako v appce.
+  const epCur = epCurrencyFor(billCC);
 
   // Země připojeného účtu Stripe (pro DIČ bránu níž a metadata), náhradou země z profilu.
   let cc = '';
@@ -852,7 +856,7 @@ async function partnerCheckout(req, res) {
     }
     if(!cc) cc = String(prof.country || '').toUpperCase();
   } catch(e){}
-  const price = await epPriceFor(tier, prof);
+  const price = await epPriceFor(tier, prof, epCur);
 
   // ZAHRANIČNÍ ODBĚRATEL Z EU. S platným DIČ (VIES) = přenesení daňové povinnosti. Bez DIČ jen
   // dokud MTL nepřekročí limit 10 000 EUR pro přeshraniční elektronické služby (_oss.js), pak
@@ -933,6 +937,7 @@ async function partnerChange(req, res) {
   const product = typeof item.price.product === 'string' ? item.price.product : item.price.product.id;
   const rec = { interval: item.price.recurring.interval, interval_count: item.price.recurring.interval_count || 1 };
   const baseMd = Object.assign({}, sub.metadata || {});
+  const subCur = String(item.price.currency || 'czk').toUpperCase();   // předplatné si měnu drží
   // Roční podle předplatného samotného; testovací režim strhává denně, tam rozhoduje volba z nákupu.
   const yearly = rec.interval === 'year' || (rec.interval === 'day' && baseMd.ep_interval === 'year');
   const amountOf = (monthCzk) => Math.round((yearly ? monthCzk * EP_YEAR_MONTHS : monthCzk) * 100);
@@ -940,7 +945,7 @@ async function partnerChange(req, res) {
   const pendingDown = !!epTierKey(prof.partner_tier_next);
   // Částka, kterou předplatné stálo před naplánovaným přechodem dolů -- vrací se přesně ta.
   // Bez čekajícího přechodu je to prostě dnešní cena položky.
-  const prevUnit = !pendingDown ? item.price.unit_amount : Number(baseMd.ep_prev_amount) > 0 ? Number(baseMd.ep_prev_amount) : amountOf(Number(prof.partner_price) > 0 ? Number(prof.partner_price) : (await epPriceFor(cur, prof)).amount);
+  const prevUnit = !pendingDown ? item.price.unit_amount : Number(baseMd.ep_prev_amount) > 0 ? Number(baseMd.ep_prev_amount) : amountOf(Number(prof.partner_price) > 0 ? Number(prof.partner_price) : (await epPriceFor(cur, prof, subCur)).amount);
   const pfx = `profiles?id=eq.${encodeURIComponent(uid)}&partner_sub=eq.${encodeURIComponent(sub.id)}`;
   const clearDown = { ep_tier_next: '', ep_month_next: '', ep_founding_next: '', ep_prev_amount: '' };
 
@@ -955,7 +960,7 @@ async function partnerChange(req, res) {
     const frac = (pe > ps) ? Math.max(0, Math.min(1, (pe - prorDate) / (pe - ps))) : 0;
     const out = [];
     for (const t of EP_TIER_ORDER.slice(EP_TIER_ORDER.indexOf(cur) + 1)) {
-      const pr = await epPriceFor(t, prof);
+      const pr = await epPriceFor(t, prof, subCur);
       out.push({ tier: t, month: pr.amount, founding: pr.founding, due: Math.max(0, Math.round((amountOf(pr.amount) - prevUnit) * frac)) / 100 });
     }
     return res.status(200).json({ ok: true, tier: cur, currency: String(item.price.currency || 'czk').toUpperCase(), upgrades: out });
@@ -973,7 +978,7 @@ async function partnerChange(req, res) {
   const want = epTierKey(String(req.query.tier || ''));
   if (!want) return res.status(400).json({ error: 'Neznámý stupeň.' });
   if (want === cur) return res.status(400).json({ error: 'Tenhle stupeň už máš.' });
-  const price = await epPriceFor(want, prof);
+  const price = await epPriceFor(want, prof, subCur);
   const up = EP_TIER_ORDER.indexOf(want) > EP_TIER_ORDER.indexOf(cur);
 
   if (!up) {
@@ -1034,7 +1039,7 @@ async function partnerChange(req, res) {
     return res.status(402).json({ error: 'Platba rozdílu kartou neprošla' + (why ? (' (' + why + ')') : '') + '. Stupeň zůstává ' + EP_TIER_NAMES[cur] + '.' });
   }
   // Zaplaceno hned -> stupeň se zapíše teď (webhook to pak už nezmění).
-  await applyEpUpgrade(uid, want, { founding: price.founding, month: price.amount, subId: sub.id });
+  await applyEpUpgrade(uid, want, { founding: price.founding, month: price.amount, subId: sub.id, currency: subCur });
   try { await stripe.subscriptions.update(sub.id, { metadata: Object.assign({ ep_tier: want, ep_month: String(price.amount), ep_founding: price.founding ? '1' : (baseMd.ep_founding || '') }, clearPending) }); } catch (e) { console.error('[ep] upgrade md', e.message); }
   return res.status(200).json({ ok: true, tier: want, next: null, month: price.amount });
 }

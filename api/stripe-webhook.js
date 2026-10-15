@@ -1189,13 +1189,13 @@ export default async function handler(req, res) {
               const _live = await stripe.subscriptions.retrieve(_ow.subId).catch(() => null);
               const _lmd = (_live && _live.metadata) || {};
               if (_live && ['active', 'trialing', 'past_due'].indexOf(_live.status) >= 0 && _lmd.ep_tier_pending === _md.ep_tier_pending) {
-                await applyEpUpgrade(_ow.uid, _md.ep_tier_pending, { founding: _md.ep_founding_pending === '1', month: _md.ep_month_pending, subId: _ow.subId });
+                await applyEpUpgrade(_ow.uid, _md.ep_tier_pending, { founding: _md.ep_founding_pending === '1', month: _md.ep_month_pending, subId: _ow.subId, currency: inv.currency });
                 await stripe.subscriptions.update(_ow.subId, { metadata: { ep_tier: _md.ep_tier_pending, ep_month: _md.ep_month_pending || '',
                   ep_founding: _md.ep_founding_pending === '1' ? '1' : (_lmd.ep_founding || ''), ep_tier_pending: '', ep_month_pending: '', ep_founding_pending: '' } });
               }
             } else if (inv.billing_reason === 'subscription_cycle') {
               const _to = await applyEpDowngrade(_ow.uid, _ln0 && _ln0.period ? new Date(_ln0.period.start * 1000).toISOString() : null,
-                { month: _md.ep_month_next || null, founding: _md.ep_founding_next === '1', subId: _ow.subId });
+                { month: _md.ep_month_next || null, founding: _md.ep_founding_next === '1', subId: _ow.subId, currency: inv.currency });
               if (_to) await stripe.subscriptions.update(_ow.subId, { metadata: { ep_tier: _to, ep_month: _md.ep_month_next || '',
                 ep_founding: _md.ep_founding_next === '1' ? '1' : '', ep_tier_next: '', ep_month_next: '', ep_founding_next: '', ep_prev_amount: '' } });
             }

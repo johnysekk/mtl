@@ -53,7 +53,7 @@ export function epPerks(tier, en) {
 }
 const _name = (t) => EP_TIER_NAMES[t] || EP_TIER_NAMES[EP_DEFAULT_TIER];
 const _d = (iso, en) => { try { return new Date(iso).toLocaleDateString(en ? 'en-GB' : 'cs-CZ', { timeZone: 'Europe/Prague' }); } catch (e) { return String(iso || '').slice(0, 10); } };
-const _money = (amt, en) => en ? (Number(amt).toLocaleString('en-GB') + ' CZK') : (Number(amt).toLocaleString('cs-CZ') + ' Kč');
+const _money = (amt, en, cur) => { const c = String(cur || 'CZK').toUpperCase(); return Number(amt).toLocaleString(en ? 'en-GB' : 'cs-CZ') + (c === 'CZK' ? (en ? ' CZK' : ' Kč') : (c === 'EUR' ? ' €' : (' ' + c))); };
 
 async function _who(uid) {
   const p = ((await sbGet(`profiles?id=eq.${encodeURIComponent(uid)}&select=name,email,coach_status`)) || [])[0] || {};
@@ -113,14 +113,14 @@ export async function activatePartner(s) {
     `⭐ Jsi Exclusive MTL Partner ${_name(tier)}: ${epPerks(tier, false)}. Platí i pro stávající členství od jejich příští platby. Stupeň změníš kdykoli v nabídce Exclusive Partner. 🥊`,
     `⭐ You are an Exclusive MTL Partner ${_name(tier)}: ${epPerks(tier, true)}. Existing memberships switch at their next payment. You can change your tier any time under Exclusive Partner. 🥊`,
     { tier });
-  await _notifyFounder(uid, `⭐ Nový Exclusive MTL Partner ${_name(tier)}: {who}` + (paid ? (` · ${_money(paid, false)}/měs. bez DPH` + (founding ? ' (zakládající cena)' : '') + (yr ? ', roční předplatné' : '')) : '') + '.');
+  await _notifyFounder(uid, `⭐ Nový Exclusive MTL Partner ${_name(tier)}: {who}` + (paid ? (` · ${_money(paid, false, pcur)}/měs. bez DPH` + (founding ? ' (zakládající cena)' : '') + (yr ? ', roční předplatné' : '')) : '') + '.');
   return true;
 }
 
 // PŘECHOD NA VYŠŠÍ STUPEŇ PO ZAPLACENÍ ROZDÍLU. Volá pay.js hned po úspěšném stržení a webhook
 // u faktury za přechod (když banka chtěla platbu potvrdit). Jen nahoru a jen u téhož předplatného:
 // opožděný nebo opakovaný webhook tak nevrátí starší stupeň ani nezapne EP po jeho konci.
-export async function applyEpUpgrade(uid, tier, { founding, month, subId } = {}) {
+export async function applyEpUpgrade(uid, tier, { founding, month, subId, currency } = {}) {
   tier = epTierKey(tier); if (!uid || !tier || !subId) return false;
   const cur = ((await sbGet(`profiles?id=eq.${encodeURIComponent(uid)}&select=ep_founding,partner_tier,partner_sub`)) || [])[0];
   if (!cur || cur.partner_sub !== subId) return false;
@@ -128,7 +128,7 @@ export async function applyEpUpgrade(uid, tier, { founding, month, subId } = {})
   const rows = await sbPatch(`profiles?id=eq.${encodeURIComponent(uid)}&partner_sub=eq.${encodeURIComponent(subId)}&${cur.partner_tier ? `partner_tier=eq.${encodeURIComponent(cur.partner_tier)}` : 'partner_tier=is.null'}`, {
     partner: true, partner_tier: tier, partner_tier_next: null, partner_tier_from: null,
     ep_founding: _withFounding(cur.ep_founding, tier, !!founding),
-    ...(month ? { partner_price: Number(month), partner_currency: 'CZK' } : {}),
+    ...(month ? { partner_price: Number(month), partner_currency: String(currency || 'CZK').toUpperCase() } : {}),
   }, true);
   if (!rows.length) return false;
   try { await rerateOwner(uid); } catch (e) { console.error('ep up rerate', e.message); }
@@ -136,7 +136,7 @@ export async function applyEpUpgrade(uid, tier, { founding, month, subId } = {})
     `⭐ Přešel jsi na Exclusive MTL Partner ${_name(tier)}: ${epPerks(tier, false)}. Rozdíl za zbytek období je zaplacený a faktura vystavená; stávající členství se přepnou od jejich příští platby.`,
     `⭐ You moved up to Exclusive MTL Partner ${_name(tier)}: ${epPerks(tier, true)}. The difference for the rest of the period is paid and invoiced; existing memberships switch at their next payment.`,
     { tier });
-  await _notifyFounder(uid, `⬆️ Exclusive Partner {who} přešel na ${_name(tier)}` + (month ? ` · ${_money(month, false)}/měs. bez DPH` : '') + '.');
+  await _notifyFounder(uid, `⬆️ Exclusive Partner {who} přešel na ${_name(tier)}` + (month ? ` · ${_money(month, false, currency)}/měs. bez DPH` : '') + '.');
   return true;
 }
 
@@ -151,7 +151,7 @@ export async function notifyEpDowngradeScheduled(uid, from, to, atIso) {
 
 // NIŽŠÍ STUPEŇ NASTAL (webhook při zaplacení první faktury nového období).
 // Zakládající cenu nižšího stupně (founding) si člověk drží od chvíle, kdy přechod nastal.
-export async function applyEpDowngrade(uid, periodStartIso, { month, founding, subId } = {}) {
+export async function applyEpDowngrade(uid, periodStartIso, { month, founding, subId, currency } = {}) {
   const p = ((await sbGet(`profiles?id=eq.${encodeURIComponent(uid)}&select=partner_tier,partner_tier_next,partner_tier_from,partner_sub,ep_founding`)) || [])[0];
   const to = p && epTierKey(p.partner_tier_next);
   if (!to || !subId || p.partner_sub !== subId) return null;
@@ -160,7 +160,7 @@ export async function applyEpDowngrade(uid, periodStartIso, { month, founding, s
   const T = EP_TIERS[to];
   const rows = await sbPatch(`profiles?id=eq.${encodeURIComponent(uid)}&partner_sub=eq.${encodeURIComponent(subId)}&partner_tier_next=eq.${to}`, {
     partner_tier: to, partner_tier_next: null, partner_tier_from: null, ep_founding: _withFounding(p.ep_founding, to, !!founding),
-    ...(month ? { partner_price: Number(month), partner_currency: 'CZK' } : {}),
+    ...(month ? { partner_price: Number(month), partner_currency: String(currency || 'CZK').toUpperCase() } : {}),
   }, true);
   if (!rows.length) return null;
   try { await rerateOwner(uid); } catch (e) { console.error('ep down rerate', e.message); }

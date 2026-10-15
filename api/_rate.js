@@ -43,21 +43,30 @@ const ACQ_RATE = 0.10;         // objev v appce, jednorázově (bez EP)
 
 // ── STUPNĚ EXCLUSIVE PARTNERA ──────────────────────────────────────────────────────────────
 // Jediný ceník EP. Zrcadlo je v index.html (EP_TIERS) -- když měníš jedno, měň obojí.
-//              provize  akvizice  reklama MTL  partneři  cena/měs   zakládající cena
-//   Genin       0,75 %   5 %       20 %          3         499 Kč    --
-//   Chūnin      0,5 %    3 %       10 %          6         799 Kč    499 Kč pro prvních 10
-//   Jōnin       0,25 %   2 %       10 %         10       1 699 Kč    --
-//   Kage        0 %      0 %       10 %         20       4 999 Kč    3 999 Kč pro prvních 5
+//              provize  akvizice  reklama MTL  partneři  cena/měs           zakládající cena
+//   Genin       0,75 %   5 %       20 %          3         499 Kč / 20 €     --
+//   Chūnin      0,5 %    3 %       10 %          6         799 Kč / 32 €     499 Kč / 20 € pro prvních 10
+//   Jōnin       0,25 %   2 %       10 %         10       1 699 Kč / 69 €     --
+//   Kage        0 %      0 %       10 %         20       4 999 Kč / 199 €    3 999 Kč / 159 € pro prvních 5
 // Provize platí stejně na kartě i na převodu. Poplatek obchodu (12,1 % v nativní appce) EP
-// neodpouští -- ten MTL platí Apple / Googlu. Ceny bez DPH, v korunách; zahraniční ceny se
-// nastaví ručně podle měny, až budou poskytovatelé mimo ČR. Roční předplatné = EP_YEAR_MONTHS
-// měsíců. Zakládající cenu drží člověk u stupně (profiles.ep_founding), dokud EP úplně nezruší.
+// neodpouští -- ten MTL platí Apple / Googlu. Ceny bez DPH, pevně v měně (ne přepočet kurzem):
+// v korunách pro odběratele z Česka, v eurech pro všechny ostatní (epCurrencyFor). Zakládající
+// místa jsou společná pro obě měny. Roční předplatné = EP_YEAR_MONTHS měsíců. Zakládající cenu
+// drží člověk u stupně (profiles.ep_founding), dokud EP úplně nezruší.
 export const EP_TIERS = {
-  genin:  { rate: 0.0075, acq: 0.05, ads: 0.20, partners: 3,  czk: 499 },
-  chunin: { rate: 0.005,  acq: 0.03, ads: 0.10, partners: 6,  czk: 799,  foundingCzk: 499,  foundingSpots: 10 },
-  jonin:  { rate: 0.0025, acq: 0.02, ads: 0.10, partners: 10, czk: 1699 },
-  kage:   { rate: 0,      acq: 0,    ads: 0.10, partners: 20, czk: 4999, foundingCzk: 3999, foundingSpots: 5 },
+  genin:  { rate: 0.0075, acq: 0.05, ads: 0.20, partners: 3,  price: { CZK: 499,  EUR: 20 } },
+  chunin: { rate: 0.005,  acq: 0.03, ads: 0.10, partners: 6,  price: { CZK: 799,  EUR: 32 },  founding: { CZK: 499,  EUR: 20 },  foundingSpots: 10 },
+  jonin:  { rate: 0.0025, acq: 0.02, ads: 0.10, partners: 10, price: { CZK: 1699, EUR: 69 } },
+  kage:   { rate: 0,      acq: 0,    ads: 0.10, partners: 20, price: { CZK: 4999, EUR: 199 }, founding: { CZK: 3999, EUR: 159 }, foundingSpots: 5 },
 };
+// Měna EP podle země toho, na koho jde faktura (klub nebo kouč, billing_country): Česko a bez
+// vyplněné země koruny, jinak eura. Zrcadlo _epCurFor v index.html.
+export function epCurrencyFor(cc) { const c = String(cc || '').trim().toUpperCase(); return (!c || c === 'CZ') ? 'CZK' : 'EUR'; }
+// Měsíční cena stupně v měně (zakládající, když ji člověk u stupně má nebo dostane).
+export function epAmount(tier, cur, founding) {
+  const T = EP_TIERS[tier]; const c = String(cur || 'CZK').toUpperCase();
+  return (founding && T.founding) ? T.founding[c] : T.price[c];
+}
 export const EP_TIER_ORDER = ['genin', 'chunin', 'jonin', 'kage'];
 export const EP_YEAR_MONTHS = 10;
 export const EP_TIER_NAMES = { genin: 'Genin', chunin: 'Chūnin', jonin: 'Jōnin', kage: 'Kage' };
