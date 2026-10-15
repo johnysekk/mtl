@@ -6,6 +6,7 @@ import { vatMode } from './_vat.js';
 import { membCalendar, membModeMissing, membProrate, membActiveEnd, calTerm, calStart, calSubPlan } from './_memb-term.js';
 import { viesCheck } from './tax-verify.js';
 import { b2cSmallState } from './_oss.js';
+import { ensurePmDomain } from './_pm-domain.js';
 const _PC = (kind, extra) => ({ SB: _SUPA_URL, KEY: _SUPA_KEY, kind, ...extra });
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -294,11 +295,10 @@ async function coachCheckout(req, res) {
         mtl_store_fee: String(_storeFee),   // část application fee, která patří obchodu s aplikacemi
       },
     },
-    success_url: successUrl,
-    cancel_url: `${proto}://${host}/`,
+    ..._checkoutEnd(req, successUrl, `${proto}://${host}/`),
   }, { stripeAccount: coachId });
 
-  res.redirect(303, session.url);
+  return _sendCheckout(req, res, session, coachId);
 }
 
 // ───────────────────────── GYM drop-in (direct charge) ─────────────────────────
@@ -329,7 +329,7 @@ async function gymCheckout(req, res) {
   let _acqMonths = 0, _baseRate = null;
   try {
     const _txType = (String(merch) === '1') ? 'merch' : ((String(grace) === '1' || String(guest) === '1') ? 'other' : 'drop_in');
-    const _brk = await effectiveRateBreakdown(_wsbGet, { gymAccount, mode: 'stripe', type: _txType, acqSource: acq, memberId: studentId, scopeCol: 'gym_id', scopeId: gymId, months: (Math.max(1, parseInt(months, 10) || 1)) });
+    const _brk = await effectiveRateBreakdown(_wsbGet, { gymAccount, mode: 'stripe', type: _txType, acqSource: acq, memberId: studentId, scopeCol: 'gym_id', scopeId: gymId, months: 1 });
     TAKE = _brk.rate; _acqMonths = _brk.acqMonths; _baseRate = _brk.baseRate;
   } catch (e) {
     console.error('pay.gym effectiveRate failed:', e.message);
@@ -387,19 +387,19 @@ async function gymCheckout(req, res) {
           mtl_list_amount: String(Math.round(P * 100)),
         },
       },
-      success_url: (String(merch)==='1')
+      ..._checkoutEnd(req, (String(merch)==='1')
         ? `${proto}://${host}/?merch_pay=ok&merchid=${encodeURIComponent(merchId || '')}&qty=${encodeURIComponent(qty || '1')}&variant=${encodeURIComponent(variant || '')}&gym=${encodeURIComponent(gymId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`
         : (String(grace)==='1')
         ? `${proto}://${host}/?grace_pay=ok&gracegym=${encodeURIComponent(gymId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`
         : (String(guest)==='1')
         ? `${proto}://${host}/?guest_drop=ok&booking=${encodeURIComponent(bookingId || '')}&acct=${encodeURIComponent(gymAccount)}&token=${encodeURIComponent(token || '')}&session={CHECKOUT_SESSION_ID}`
         : `${proto}://${host}/?gym_pay=ok&booking=${encodeURIComponent(bookingId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${proto}://${host}/`,
+        `${proto}://${host}/`),
     },
     { stripeAccount: gymAccount }
   );
 
-  res.redirect(303, session.url);
+  return _sendCheckout(req, res, session, gymAccount);
 }
 
 // ───────────────────────── GYM membership (direct charge subscription) ─────────────────────────
@@ -495,12 +495,11 @@ async function eventCheckout(req, res) {
         gym_id: gymId || '',
         payout_coach_id: payoutCoachId || '',
       },
-      success_url: `${proto}://${host}/?event_pay=ok&ticket=${encodeURIComponent(ticketId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${proto}://${host}/`,
+      ..._checkoutEnd(req, `${proto}://${host}/?event_pay=ok&ticket=${encodeURIComponent(ticketId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`, `${proto}://${host}/`),
     },
     { stripeAccount: gymAccount } // DIRECT CHARGE on the chosen payee account (gym or coach)
   );
-  res.redirect(303, session.url);
+  return _sendCheckout(req, res, session, gymAccount);
 }
 
 async function membershipCheckout(req, res) {
@@ -653,12 +652,11 @@ async function membershipCheckout(req, res) {
           ...(_feeMinor > 0 ? { application_fee_amount: _feeMinor } : {}),
           metadata: _meta,
         },
-        success_url: `${proto}://${host}/?gym_sub=ok&membership=${encodeURIComponent(membershipId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${proto}://${host}/`,
+        ..._checkoutEnd(req, `${proto}://${host}/?gym_sub=ok&membership=${encodeURIComponent(membershipId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`, `${proto}://${host}/`),
       },
       { stripeAccount: gymAccount }
     );
-    return res.redirect(303, _s1.url);
+    return _sendCheckout(req, res, _s1, gymAccount);
   }
 
   // KALENDÁŘNÍ MĚSÍC U PŘEDPLATNÉHO: obnovy vždy 1. (billing_cycle_anchor). Tento měsíc (celý,
@@ -727,12 +725,11 @@ async function membershipCheckout(req, res) {
           member_name: memberName || '',
         },
       },
-      success_url: `${proto}://${host}/?gym_sub=ok&membership=${encodeURIComponent(membershipId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${proto}://${host}/`,
+      ..._checkoutEnd(req, `${proto}://${host}/?gym_sub=ok&membership=${encodeURIComponent(membershipId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`, `${proto}://${host}/`),
     },
     { stripeAccount: gymAccount }
   );
-  res.redirect(303, session.url);
+  return _sendCheckout(req, res, session, gymAccount);
 }
 // 2026-09-30 -> 30. 9. 2026 (do názvu položky ve Stripe).
 function _dmy(ymd) { const [y, m, d] = String(ymd || '').slice(0, 10).split('-').map(Number); return (y && m && d) ? `${d}. ${m}. ${y}` : String(ymd || ''); }
@@ -787,19 +784,26 @@ async function epTierForCountry(cc) {
   return { currency: 'czk', amount };
 }
 
-// ───────────────────────── VLOŽENÝ CHECKOUT (EP, dodavatel) ─────────────────────────
+// ───────────────────────── VLOŽENÝ CHECKOUT (všechny platby kartou z appky) ─────────────────────────
 // S ?embed=1 se platba neotevírá na stránce Stripe, ale uvnitř MTL (Stripe Embedded Checkout,
-// ui_mode 'embedded'). Server pak vrací JSON místo přesměrování: { clientSecret, publishableKey },
-// a když platba nemůže začít (DIČ, už aktivní), { redirect } se stejnou adresou, kam by šel
-// redirect -- appka ji zpracuje stejně jako návrat ze Stripe. Bez embed=1 vše jako dřív.
+// ui_mode 'embedded'): EP, dodavatel i všechny platby studentů poskytovatelům. Server vrací JSON
+// místo přesměrování: { clientSecret, publishableKey, stripeAccount } -- stripeAccount u přímých
+// plateb na účet klubu / kouče (direct charge), Stripe.js se s ním musí inicializovat. Když platba
+// nemůže začít (DIČ, už aktivní), { redirect } se stejnou adresou, kam by šel redirect. Bez
+// publishable key se založí klasická stránka Stripe a vrátí se { url }.
+// Bez embed=1 vše jako dřív (přesměrování) -- tak to jede z QR na recepci, který se skenuje mobilem.
 function _isEmbed(req) { return String(req.query.embed || '') === '1'; }
 function _checkoutEnd(req, okUrl, cancelUrl) {
-  return _isEmbed(req)
+  return (_isEmbed(req) && process.env.STRIPE_PUBLISHABLE_KEY)
     ? { ui_mode: 'embedded', return_url: okUrl }
     : { success_url: okUrl, cancel_url: cancelUrl };
 }
-function _sendCheckout(req, res, session) {
-  if (_isEmbed(req)) return res.status(200).json({ clientSecret: session.client_secret, publishableKey: process.env.STRIPE_PUBLISHABLE_KEY || null });
+async function _sendCheckout(req, res, session, stripeAccount) {
+  if (session.ui_mode === 'embedded') {
+    await ensurePmDomain(stripe, req.headers.host, stripeAccount);   // Apple Pay / Google Pay ve vloženém formuláři
+    return res.status(200).json({ clientSecret: session.client_secret, publishableKey: process.env.STRIPE_PUBLISHABLE_KEY, stripeAccount: stripeAccount || null });
+  }
+  if (_isEmbed(req)) return res.status(200).json({ url: session.url });
   return res.redirect(303, session.url);
 }
 function _goBack(req, res, url) {
@@ -887,7 +891,7 @@ async function partnerCheckout(req, res) {
     ..._checkoutEnd(req, `${proto}://${host}/?partner_sub=ok&session={CHECKOUT_SESSION_ID}`, `${proto}://${host}/`),
   }, { apiVersion: '2024-09-30.acacia' });
 
-  _sendCheckout(req, res, session);
+  return _sendCheckout(req, res, session);
 }
 
 // ───────────────────────── DODAVATEL (organizations.kind='supplier') ─────────────────────────
@@ -996,7 +1000,7 @@ async function supplierCheckout(req, res) {
     ..._checkoutEnd(req, `${proto}://${host}/?supplier_sub=ok&session={CHECKOUT_SESSION_ID}`, `${proto}://${host}/`),
   }, { apiVersion: '2024-09-30.acacia' });
 
-  _sendCheckout(req, res, session);
+  return _sendCheckout(req, res, session);
 }
 
 // ───────────────────────── ONLINE: MĚSÍČNÍ PŘEDPLATNÉ KOUČE ─────────────────────────
@@ -1061,8 +1065,7 @@ async function onlinePlanCheckout(req, res) {
       line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: pname }, unit_amount: unit }, quantity: 1 }],
       payment_intent_data: { ...(fee > 0 ? { application_fee_amount: fee } : {}), metadata: m1 },
       metadata: m1,
-      success_url,
-      cancel_url: `${proto}://${host}/`,
+      ..._checkoutEnd(req, success_url, `${proto}://${host}/`),
     }, { stripeAccount: acct });
   } else {
     session = await stripe.checkout.sessions.create({
@@ -1070,9 +1073,8 @@ async function onlinePlanCheckout(req, res) {
       line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: pname }, unit_amount: unit, recurring: { interval: 'month' } }, quantity: 1 }],
       subscription_data: { application_fee_percent: pct, metadata: meta },
       metadata: meta,
-      success_url,
-      cancel_url: `${proto}://${host}/`,
+      ..._checkoutEnd(req, success_url, `${proto}://${host}/`),
     }, { stripeAccount: acct });
   }
-  res.redirect(303, session.url);
+  return _sendCheckout(req, res, session, acct);
 }

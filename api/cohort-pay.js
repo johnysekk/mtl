@@ -2,13 +2,28 @@
 // POST { cohort_id, name, email, phone, tier, consent_version, attribution }
 //  -> creates a cohort_members lead, then a Stripe Checkout for the deposit charged DIRECTLY to the
 //     cohort owner's connected account with MTL's application_fee (3.5%). No MTL login needed.
-//  -> { ok, url, cohort_member_id }
+//  -> { ok, url, cohort_member_id }   (s embed:true místo url { clientSecret, publishableKey, stripeAccount })
 import Stripe from 'stripe';
 import { resolveRate } from './_rate.js';
+import { ensurePmDomain } from './_pm-domain.js';
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const _SUPA = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const _KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const COMMISSION = 0.03;  // Stripe-track base (cohorts charge via Stripe). Was 0.035 = old ladder.
+
+// VLOŽENÝ CHECKOUT (jako pay.js): s { embed: true } platba proběhne uvnitř MTL a místo adresy
+// stránky Stripe se vrací clientSecret + stripeAccount (přímá platba na účet klubu / kouče).
+// Bez embed (QR k doplatku, který se skenuje mobilem) dál { url }.
+function _end(b, okUrl, cancelUrl) {
+  return (b && b.embed === true && process.env.STRIPE_PUBLISHABLE_KEY)
+    ? { ui_mode: 'embedded', return_url: okUrl }
+    : { success_url: okUrl, cancel_url: cancelUrl };
+}
+async function _out(req, session, acct) {
+  if (session.ui_mode !== 'embedded') return { url: session.url };
+  await ensurePmDomain(stripe, req.headers.host, acct);   // Apple Pay / Google Pay ve vloženém formuláři
+  return { clientSecret: session.client_secret, publishableKey: process.env.STRIPE_PUBLISHABLE_KEY, stripeAccount: acct };
+}
 
 async function sbGet(path) {
   try { const r = await fetch(_SUPA + '/rest/v1/' + path, { headers: { apikey: _KEY, Authorization: 'Bearer ' + _KEY } }); return r.ok ? await r.json() : []; } catch (e) { return []; }
@@ -163,14 +178,13 @@ export default async function handler(req, res) {
         payment_method_types: ['card'],
         billing_address_collection: 'required',
         tax_id_collection: { enabled: true },
-        success_url: `${proto}://${host}/?cohort=${encodeURIComponent(mem.cohort_id)}&firstmonth=ok&m=${_nM}&cm=${encodeURIComponent(cmId)}&session={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${proto}://${host}/?cohortpay=${encodeURIComponent(cmId)}`,
+        ..._end(b, `${proto}://${host}/?cohort=${encodeURIComponent(mem.cohort_id)}&firstmonth=ok&m=${_nM}&cm=${encodeURIComponent(cmId)}&session={CHECKOUT_SESSION_ID}`, `${proto}://${host}/?cohortpay=${encodeURIComponent(cmId)}`),
         customer_email: mem.email || undefined,
         metadata: { mtl_payment_type: 'cohort_first_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_currency: cur, mtl_welcome: wz ? '1' : '0', mtl_rate: String(rate), mtl_months: String(_nM) },
         line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: `${coh.name || 'Course'} - ${_nM > 1 ? ('1.-' + _nM + '. mesic') : '1. mesic (doplatek)'}` }, unit_amount: unit }, quantity: 1 }],
         payment_intent_data: { application_fee_amount: fee, metadata: { mtl_payment_type: 'cohort_first_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_rate: String(rate), mtl_welcome: wz ? '1' : '0', mtl_months: String(_nM) } }
       }, { stripeAccount: coh.stripe_account });
-      return res.status(200).json({ ok: true, url: session.url, remainder, months: _nM, amount: _due });
+      return res.status(200).json({ ok: true, ...(await _out(req, session, coh.stripe_account)), remainder, months: _nM, amount: _due });
     }
 
     // Month 2+ of a multi-month course: a FULL monthly (tier) payment, like an on-site payer buying
@@ -211,14 +225,13 @@ export default async function handler(req, res) {
         payment_method_types: ['card'],
         billing_address_collection: 'required',
         tax_id_collection: { enabled: true },
-        success_url: `${proto}://${host}/?cohort=${encodeURIComponent(mem.cohort_id)}&monthpaid=ok&cm=${encodeURIComponent(cmId)}&session={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${proto}://${host}/?cohortpay=${encodeURIComponent(cmId)}`,
+        ..._end(b, `${proto}://${host}/?cohort=${encodeURIComponent(mem.cohort_id)}&monthpaid=ok&cm=${encodeURIComponent(cmId)}&session={CHECKOUT_SESSION_ID}`, `${proto}://${host}/?cohortpay=${encodeURIComponent(cmId)}`),
         customer_email: mem.email || undefined,
         metadata: { mtl_payment_type: 'cohort_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_currency: cur, mtl_welcome: wz ? '1' : '0', mtl_rate: String(rate), mtl_month: String(lastMonth), mtl_months: String(_nM) },
         line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: `${coh.name || 'Course'} - ${_nM > 1 ? (nextMonth + '.-' + lastMonth + '. mesic') : (nextMonth + '. mesic')} z ${totalMonths}` }, unit_amount: unit }, quantity: 1 }],
         payment_intent_data: { application_fee_amount: fee, metadata: { mtl_payment_type: 'cohort_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_rate: String(rate), mtl_welcome: wz ? '1' : '0', mtl_month: String(lastMonth), mtl_months: String(_nM) } }
       }, { stripeAccount: coh.stripe_account });
-      return res.status(200).json({ ok: true, url: session.url, amount: _due, month: nextMonth, lastMonth, months: _nM, totalMonths });
+      return res.status(200).json({ ok: true, ...(await _out(req, session, coh.stripe_account)), amount: _due, month: nextMonth, lastMonth, months: _nM, totalMonths });
     }
 
     // „ZAPLATIL(A) JSEM" k QR záloze. Přihláška přes QR drží místo jen 30 minut ('reserved');
@@ -470,7 +483,7 @@ export default async function handler(req, res) {
       payment_method_types: ['card'],
       billing_address_collection: 'required',
       tax_id_collection: { enabled: true },
-      success_url, cancel_url,
+      ..._end(b, success_url, cancel_url),
       customer_email: email,
       metadata: { mtl_payment_type: 'cohort_deposit', cohort_id: String(cohortId), cohort_member_id: String(memberId || ''), mtl_currency: cur, tier, mtl_welcome: wz ? '1' : '0', mtl_rate: String(rate) },
       line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: `${c.name || 'Course'} — ${b.gym_name || ''} (deposit)`.trim() }, unit_amount: unitAmount }, quantity: 1 }],
@@ -480,7 +493,7 @@ export default async function handler(req, res) {
       }
     }, { stripeAccount: c.stripe_account });
 
-    return res.status(200).json({ ok: true, url: session.url, cohort_member_id: memberId });
+    return res.status(200).json({ ok: true, ...(await _out(req, session, c.stripe_account)), cohort_member_id: memberId });
   } catch (e) {
     console.error('cohort-pay', e);
     return res.status(500).json({ ok: false, error: String(e && e.message || e) });
