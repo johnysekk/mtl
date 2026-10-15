@@ -291,14 +291,19 @@ export default async function handler(req, res) {
     if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
     let b = req.body || {}; if (typeof b === 'string') { try { b = JSON.parse(b); } catch (e) { b = {}; } }
 
-    // NOTIFIKACE OD FINBRICKS: jen spouštěč, pravdu si server zjistí sám.
+    // NOTIFIKACE OD FINBRICKS (webhook, adresu jim posíláme e-mailem): jen spouštěč, pravdu si
+    // server zjistí sám podepsaným dotazem na /payment/pairing/status. Proto se JWS notifikace
+    // nemusí ověřovat -- z těla se bere jen id párování. Finbricks čeká 202 Accepted a svoje
+    // x-request-id zpátky. Ostatní kategorie (resultCodeChange u plateb z účtu, výpadky) se
+    // zatím jen potvrdí.
     if (String(q.notify || '') === '1') {
+      const xr = req.headers['x-request-id']; if (xr) res.setHeader('x-request-id', String(xr));
       const ids = [...idsIn(b, new Set())].slice(0, 50);
       for (const id of ids) {
         const p = (await sb.from('payment_pairings').select('*').eq('id', id).eq('status', 'scheduled').maybeSingle()).data;
         if (p) { try { await checkOne(p); } catch (e) { console.error('[pairing] notify', id, e && e.message); } }
       }
-      return res.status(200).json({ ok: true });
+      return res.status(202).json({ ok: true });
     }
 
     const me = await who(req);
