@@ -247,7 +247,13 @@ export default async function handler(req, res) {
         finishPairingAt: finish,
       }] });
       const f = firstPay(r.data);
-      const ok = r.ok && f && String(f.scheduleStatus || '').toUpperCase() === 'SCHEDULED';
+      // Co Finbricks vrací: dokumentace má u schedule `scheduleStatus` SCHEDULED / FAILED, ale
+      // zároveň píše, že schedule „vrací UNPAIRED", když platba hned nenašel -- tedy
+      // `paymentPairingStatus`. Dřív se bralo jen SCHEDULED, takže párování, které Finbricks
+      // přijal (UNPAIRED), MTL zapsalo jako 'failed': student dostal „klub potvrdí", klub
+      // „potvrď" a cron se na stav nikdy nezeptal. Teď: přijato je všechno kromě chyby.
+      const sst = String((f && (f.scheduleStatus || f.paymentPairingStatus)) || '').toUpperCase();
+      const ok = r.ok && !!f && ['SCHEDULED', 'UNPAIRED', 'PAIRED'].includes(sst);
       await sb.from('payment_pairings').update({ tbl, row_id: id, fbx_env: C.env, finish_at: finish,
         status: ok ? 'scheduled' : 'failed', scheduled_at: ok ? new Date().toISOString() : null,
         last_error: ok ? null : (JSON.stringify((f && f.reason) || r.data || { http: r.status }).slice(0, 500)) }).eq('id', p.id);
@@ -262,6 +268,8 @@ export default async function handler(req, res) {
       // Lístky jedné objednávky jsou jedna platba -- značku dostanou všechny.
       if (tbl === 'event_tickets' && row.order_id) await sb.from('event_tickets').update({ pairing_id: p.id }).eq('order_id', row.order_id);
       if (mk.error) console.error('[pairing] mark', tbl, id, mk.error.message);
+      // Platba už na účtu je (zaplaceno dřív, než klikl „Zaplaceno") -> potvrdit hned.
+      if (sst === 'PAIRED') { const p2 = (await sb.from('payment_pairings').select('*').eq('id', p.id).maybeSingle()).data; if (p2) await checkOne(p2); }
       return res.status(200).json({ ok: true, status: 'scheduled' });
     }
 
