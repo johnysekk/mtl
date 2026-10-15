@@ -1,4 +1,6 @@
-// /api/share-page — HEZKÉ ODKAZY NA KURZ A AKCI: /course/<slug> a /event/<slug> (vercel.json).
+// /api/share-page — HEZKÉ ODKAZY NA KURZ A AKCI. V adrese je vždy pořadatel (vercel.json):
+//   /club/<klub>/course/<kurz>, /club/<klub>/event/<akce>, /coach/<kouč>/event/<akce>,
+//   /organization/<organizace>/event/<akce>
 //
 // Vrací malou HTML stránku s náhledem (OG tagy: název, termín, místo, cena, plakát) a člověka
 // hned pošle na stávající přihlášku kurzu (/?cohort=<id>) nebo nákup lístků (/?event=<id>).
@@ -6,8 +8,9 @@
 // u odkazu na jednostránkovou appku ukáže jen obecné MTL. Přihláška ani nákup se tu nestaví
 // podruhé.
 //
-// Adresa (slug) se tvoří automaticky z názvu (sql/share-links.sql). Sledovací parametry
-// z odkazu (src, utm_*, fbclid, gclid) jdou dál do appky, ať se zdroj přihlášky nepoztrácí.
+// Adresy se tvoří automaticky z názvů (sql/share-links.sql). Stará adresa pořadatele (po ruční
+// změně) se přesměruje na novou (slug_history). Sledovací parametry z odkazu (src, utm_*,
+// fbclid, gclid) jdou dál do appky, ať se zdroj přihlášky nepoztrácí.
 const _SUPA = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const _KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])$/;
@@ -57,46 +60,71 @@ ${o.image ? `<meta property="og:image" content="${esc(o.image)}">` : ''}
 <script>location.replace(${JSON.stringify(o.target)});</script></body></html>`;
 }
 
+const OWNER = { club: { tbl: 'gyms', sel: 'id,slug,name,city,country,photos' }, coach: { tbl: 'profiles', sel: 'id,slug,name,city,country,coach_status' },
+  organization: { tbl: 'organizations', sel: 'id,slug,name' } };
+
 export default async function handler(req, res) {
   const q = req.query || {};
-  const kind = String(q.kind || ''), slug = String(q.slug || '').toLowerCase();
+  const ok = String(q.ok || ''), owner = String(q.owner || '').toLowerCase(), kind = String(q.kind || ''), slug = String(q.slug || '').toLowerCase();
   const origin = 'https://' + (req.headers['x-forwarded-host'] || req.headers.host || 'app.martialtraininglab.com');
+  const home = () => { res.setHeader('Cache-Control', 'public, max-age=60'); res.setHeader('Location', origin + '/'); return res.status(302).end(); };
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  if (!['course', 'event'].includes(kind) || !SLUG_RE.test(slug)) { res.setHeader('Location', origin + '/'); return res.status(302).end(); }
+  const valid = OWNER[ok] && SLUG_RE.test(owner) && SLUG_RE.test(slug) && (kind === 'event' || (kind === 'course' && ok === 'club'));
+  if (!valid) return home();
   // Sledovací parametry dál do appky.
   const pass = Object.keys(q).filter((k) => PASS.test(k)).map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(String(q[k]).slice(0, 200))).join('&');
   try {
+    // Pořadatel podle adresy; stará adresa -> přesměrování na novou.
+    let own = (await sbGet(`${OWNER[ok].tbl}?slug=eq.${encodeURIComponent(owner)}&select=${OWNER[ok].sel}&limit=1`))[0];
+    if (!own) {
+      const hs = (await sbGet(`slug_history?kind=eq.${ok}&old_slug=eq.${encodeURIComponent(owner)}&select=entity_id&limit=1`))[0];
+      const nw = hs ? (await sbGet(`${OWNER[ok].tbl}?id=eq.${encodeURIComponent(hs.entity_id)}&select=slug&limit=1`))[0] : null;
+      if (nw && nw.slug && nw.slug !== owner) {
+        res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400');
+        res.setHeader('Location', origin + '/' + ok + '/' + nw.slug + '/' + kind + '/' + slug + (pass ? '?' + pass : ''));
+        return res.status(301).end();
+      }
+      return home();
+    }
     let o = null;
+    const csOf = (country) => !country || ['CZ', 'SK'].includes(String(country).toUpperCase());
     if (kind === 'course') {
-      const c = (await sbGet(`gym_cohorts?slug=eq.${encodeURIComponent(slug)}&select=id,gym_id,name,discipline,start_date,months,price_regular,price_tiers,currency,description,poster&limit=1`))[0];
+      const c = (await sbGet(`gym_cohorts?gym_id=eq.${encodeURIComponent(own.id)}&slug=eq.${encodeURIComponent(slug)}&select=id,name,start_date,price_regular,price_tiers,currency,description,poster&limit=1`))[0];
       if (c) {
-        const g = c.gym_id ? (await sbGet(`gyms?id=eq.${encodeURIComponent(c.gym_id)}&select=name,city,country,photos`))[0] : null;
-        const cs = !g || !g.country || ['CZ', 'SK'].includes(String(g.country).toUpperCase());
+        const cs = csOf(own.country);
         const price = money(fromPrice(c.price_regular, c.price_tiers), c.currency, cs);
-        const bits = [g && g.name, g && g.city, c.start_date ? ((cs ? 'od ' : 'from ') + day(c.start_date, cs)) : '', price ? ((cs ? 'od ' : 'from ') + price + (cs ? ' / měs.' : ' / month')) : ''].filter(Boolean);
+        const bits = [own.name, own.city, c.start_date ? ((cs ? 'od ' : 'from ') + day(c.start_date, cs)) : '', price ? ((cs ? 'od ' : 'from ') + price + (cs ? ' / měs.' : ' / month')) : ''].filter(Boolean);
         o = { cs, title: c.name || (cs ? 'Kurz' : 'Course'),
           desc: bits.join(' · ') + (c.description ? (' — ' + String(c.description).replace(/\s+/g, ' ').slice(0, 160)) : ''),
-          image: httpUrl(c.poster) || photoOf(g && g.photos),
+          image: httpUrl(c.poster) || photoOf(own.photos),
           target: origin + '/?cohort=' + encodeURIComponent(c.id) + (pass ? '&' + pass : '') };
       }
     } else {
-      const e = (await sbGet(`events?slug=eq.${encodeURIComponent(slug)}&select=id,gym_id,title,description,poster,city,country,venue,starts_at,ticket_price,ticket_tiers,currency&limit=1`))[0];
+      // Akce pořadatele: organizace > klub > kouč (stejně jako jedinečnost adresy v databázi).
+      const scope = ok === 'organization' ? `organization_id=eq.${own.id}`
+        : ok === 'club' ? `gym_id=eq.${own.id}&organization_id=is.null`
+        : `created_by=eq.${own.id}&gym_id=is.null&organization_id=is.null`;
+      const e = (await sbGet(`events?${scope}&slug=eq.${encodeURIComponent(slug)}&select=id,title,description,poster,city,country,venue,starts_at,ticket_price,ticket_tiers,currency&limit=1`))[0];
       if (e) {
-        const cs = !e.country || ['CZ', 'SK'].includes(String(e.country).toUpperCase());
+        const cs = csOf(e.country);
         const price = money(fromPrice(e.ticket_price, e.ticket_tiers), e.currency, cs);
-        const bits = [e.starts_at ? day(e.starts_at, cs) : '', [e.venue, e.city].filter(Boolean).join(', '), price ? ((cs ? 'vstupenky od ' : 'tickets from ') + price) : ''].filter(Boolean);
+        const bits = [own.name, e.starts_at ? day(e.starts_at, cs) : '', [e.venue, e.city].filter(Boolean).join(', '), price ? ((cs ? 'vstupenky od ' : 'tickets from ') + price) : ''].filter(Boolean);
         o = { cs, title: e.title || (cs ? 'Akce' : 'Event'),
           desc: bits.join(' · ') + (e.description ? (' — ' + String(e.description).replace(/\s+/g, ' ').slice(0, 160)) : ''),
-          image: httpUrl(e.poster),
+          image: httpUrl(e.poster) || photoOf(own.photos),
           target: origin + '/?event=' + encodeURIComponent(e.id) + (pass ? '&' + pass : '') };
       }
     }
-    if (!o) { res.setHeader('Cache-Control', 'public, max-age=60'); res.setHeader('Location', origin + '/'); return res.status(302).end(); }
-    o.canonical = origin + '/' + kind + '/' + slug;
+    // Kurz / akce nenalezena: na stránku pořadatele (klub / kouč), jinak do appky.
+    if (!o) {
+      if (ok === 'club' || ok === 'coach') { res.setHeader('Cache-Control', 'public, max-age=60'); res.setHeader('Location', origin + '/' + ok + '/' + own.slug); return res.status(302).end(); }
+      return home();
+    }
+    o.canonical = origin + '/' + ok + '/' + own.slug + '/' + kind + '/' + slug;
     res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=600');
     return res.status(200).send(page(o));
   } catch (err) {
     console.error('[share-page]', err && err.message);
-    res.setHeader('Location', origin + '/'); return res.status(302).end();
+    return home();
   }
 }

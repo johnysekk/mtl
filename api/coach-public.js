@@ -60,6 +60,12 @@ export default async function handler(req, res) {
   const rows = slug ? await sbGet(`profiles?slug=eq.${encodeURIComponent(slug)}&select=*&limit=1`)
                     : await sbGet(`profiles?id=eq.${encodeURIComponent(id)}&select=*&limit=1`);
   const c = rows && rows[0];
+  // Stará adresa (kouč si ji změnil) -> trvalé přesměrování na novou (sql/share-links.sql).
+  if (!c && slug) {
+    const hs = await sbGet(`slug_history?kind=eq.coach&old_slug=eq.${encodeURIComponent(slug)}&select=entity_id&limit=1`);
+    const nw = hs && hs[0] ? (await sbGet(`profiles?id=eq.${encodeURIComponent(hs[0].entity_id)}&select=slug&limit=1`))[0] : null;
+    if (nw && nw.slug && nw.slug !== slug) { res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400'); res.setHeader('Location', '/coach/' + encodeURIComponent(nw.slug)); return res.status(301).end(); }
+  }
   // Jen schválený a nepozastavený kouč. Odkaz v biu na neaktivní profil škodí kouči i MTL.
   if (!c || c.coach_status !== 'approved' || c.account_suspended) return notFound(res, origin);
 
