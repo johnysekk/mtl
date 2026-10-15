@@ -11,6 +11,10 @@ async function sbGet(path) { try { const r = await fetch(`${SB}/rest/v1/${path}`
 async function sbPatch(path, body) { try { await fetch(`${SB}/rest/v1/${path}`, { method: 'PATCH', headers: { ...H, 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify(body) }); } catch (e) {} }
 
 export default async function handler(req, res) {
+  // JEN VERCEL CRON. Bez tajného klíče by úlohu spustil kdokoli, kdo zná adresu.
+  const _cron = (process.env.CRON_SECRET || '').trim();
+  if (!_cron) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+  if (String(req.headers.authorization || '') !== `Bearer ${_cron}`) return res.status(401).json({ error: 'unauthorized' });
   try {
     // Only providers who can even reach Bankai (score>=5) matter; others gate out on score first.
     const cands = await sbGet(`profiles?coach_ref_score=gte.5&select=id,bankai_eligible&limit=5000`);

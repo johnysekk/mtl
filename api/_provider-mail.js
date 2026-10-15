@@ -65,4 +65,4 @@ export async function providerMail(to, subject, paras, btn) {
   } catch (e) { console.error('[provider-mail]', e.message); }
 }
 
-export const FOUNDER_UUID = process.env.FOUNDER_UUID || '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+export const FOUNDER_UUID = (process.env.FOUNDER_UUID || '').trim();

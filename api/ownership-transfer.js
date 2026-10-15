@@ -17,7 +17,8 @@
 // CO SE PŘI PŘEVODU DĚJE (execute):
 //   * owner_id na nového majitele. Zakladatel (gyms.founder_id) se nemění.
 //   * KARTA NA PROVIZI SE ODPOJÍ: je to karta předchozího majitele a nikdo jiný ji nesmí
-//     zatěžovat. Nový majitel přidá svou (Platby a provize).
+//     zatěžovat. Nový majitel přidá svou (klub: Nastavení klubu → Režim plateb a výplatní účet,
+//     organizace: Platby a provize organizace).
 //   * Klub: nový majitel přestane být spolumajitelem (je majitel); předchozí se jím stane
 //     (keep_old), dokud ho nový neodebere. Záznam jde do historie klubu (gym_audit).
 //   * Dodavatel s běžícím předplatným profilu -- podle volby nového majitele (sub_choice):
@@ -158,12 +159,12 @@ async function notifyDone(E, from, to, keepOld, byAdmin, subEnd, choice) {
     let cs, enT;
     if (side === 'to') {
       cs = `🔑 ${by ? (by + ' na tebe vlastnictví ' + what + ' ' + E.name) : ('Jsi nový majitel ' + what + ' ' + E.name)} (dosud ${fromNm}).`
-        + (isSup ? '' : ' Odpojili jsme kartu na provizi předchozího majitele — přidej svou v Platby a provize, jinak provizi nepůjde strhnout.')
+        + (isSup ? '' : (' Odpojili jsme kartu na provizi předchozího majitele — přidej svou v ' + (isGym ? 'Nastavení klubu → Režim plateb a výplatní účet' : 'Platby a provize organizace → Karta na provizi') + ', jinak provizi nepůjde strhnout.'))
         + subCs
         + (isSup ? ' Zkontroluj fakturační údaje.'
           : (' Fakturační údaje, Stripe a bankovní účet zůstávají, jak je nastavil(a) ' + fromNm + '. ' + (isGym ? 'Pokud byl klub vedený' : 'Pokud byla organizace vedená') + ' na jeho/její IČO, přepiš fakturační údaje na sebe a připoj vlastní Stripe a bankovní účet — jinak budou platby kartou i převodem chodit dál jemu/jí.'));
       enT = `🔑 ${by ? (by + ' ownership of ' + what + ' ' + E.name + ' to you') : ('You are the new owner of ' + what + ' ' + E.name)} (previously ${fromNm}).`
-        + (isSup ? '' : ' We disconnected the previous owner\'s commission card — add yours in Payments & commission, otherwise the commission cannot be charged.')
+        + (isSup ? '' : (' We disconnected the previous owner\'s commission card — add yours in ' + (isGym ? 'Club settings → Payment mode and payout account' : 'the organisation\'s Payments & commission → Commission card') + ', otherwise the commission cannot be charged.'))
         + subEn
         + (isSup ? ' Check the billing details.'
           : (' Billing details, the Stripe account and the bank account stay as ' + fromNm + ' set them. If the ' + (isGym ? 'club' : 'organization') + ' ran on their own company ID, replace the billing details with yours and connect your own Stripe and bank account — otherwise card and transfer payments keep going to them.'));

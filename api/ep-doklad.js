@@ -10,9 +10,10 @@
 // Interní endpoint: POST { intSecret, invoice_id, user_id, org_id?, amount, currency, period_start,
 //                          period_end, test_mode }   (org_id = profil dodavatele)
 
-import PDFDocument from 'pdfkit';
-import { DEJAVU_CZ } from './_dejavu-cz.js';
-import { vatMode, vatNoteFor, isEU } from './_vat.js';
+import { vatMode, isEU } from './_vat.js';
+// Obsah a vzhled faktury (appka, e-mail, PDF) je jen v /doklad-layout.js.
+import { mtlModel, mtlStatus, renderHtml, statusBoxHtml, subPeriod, money, esc as _esc } from '../doklad-layout.js';
+import { mtlDokladPdf } from './_doklad-pdf.js';
 import { viesCheck } from './tax-verify.js';
 import { b2cSmallState, OSS_LIMIT_CZK, OSS_WARN_SHARE } from './_oss.js';
 import { issueReceipts, receiptMailHtml, receiptTitle, docNo } from './_receipt.js';
@@ -53,138 +54,31 @@ async function _mail(to, subject, html, attachments) {
     body: JSON.stringify(Object.assign({ from: MAIL_FROM, to: [to], subject, html }, (attachments && attachments.length) ? { attachments } : {})) }); }
   catch (e) { console.error('[ep-doklad] mail', e.message); }
 }
-// TEXTY E-MAILU A PDF -- stejná stavba jako faktura za provizi (unified-doklad-cron): krátký
-// dopis, rámeček stavu úhrady, faktura v příloze jako PDF.
-const _T = (en, isSup) => en ? {
-  title: isSup ? 'Invoice — MTL supplier profile subscription' : 'Invoice — Exclusive Partner subscription',
-  item: isSup ? 'MTL supplier profile — subscription' : 'Exclusive MTL Partner — subscription',
-  period: 'Subscription period', supplier: 'Supplier', customer: 'Customer',
-  colItem: 'Item', colPeriod: 'Period', colAmount: 'Amount', total: 'Total', base: 'Tax base', vat: 'VAT', regno: 'Reg. number', vatid: 'VAT ID', reg: 'Commercial register',
+// DOPIS K FAKTUŘE (tělo e-mailu). Faktura sama je v příloze jako PDF z /doklad-layout.js;
+// rámeček stavu úhrady je tentýž jako na faktuře.
+const _T = (en) => en ? {
   hello: 'Hello', attached: (no, per, amt) => 'attached is invoice <b>' + no + '</b> for the period ' + per + ', amount <b>' + amt + '</b>.',
-  forWhom: (n, ico) => 'Customer: <b>' + n + '</b>' + (ico ? (', Reg. number ' + ico) : '') + '.',
-  paidHead: 'PAID IN FULL', paidBody: (d) => 'The amount was paid by payment card' + (d ? (' on ' + d) : '') + '. This is not a request for payment.',
-  dueHead: 'AMOUNT DUE: ', dueBody: 'The subscription could not be charged to your card. We will retry automatically; you can also pay right away.', pay: 'Pay now',
-  docNo: 'Invoice no.', issuedL: 'Issued', duzpL: 'Date of supply', method: 'Payment method', card: 'Payment card',
+  forWhom: (n, ico) => 'Customer: <b>' + n + '</b>' + (ico ? (', Reg. number ' + ico) : '') + '.', pay: 'Pay now',
 } : {
-  title: isSup ? 'Faktura — předplatné profilu dodavatele MTL' : 'Faktura — předplatné Exclusive Partner',
-  item: isSup ? 'Profil dodavatele MTL — předplatné' : 'Exclusive MTL Partner — předplatné',
-  period: 'Období předplatného', supplier: 'Dodavatel', customer: 'Odběratel',
-  colItem: 'Položka', colPeriod: 'Období', colAmount: 'Částka', total: 'Celkem', base: 'Základ daně', vat: 'DPH', regno: 'IČO', vatid: 'DIČ', reg: 'Zapsáno v obchodním rejstříku',
   hello: 'Dobrý den', attached: (no, per, amt) => 'v příloze posíláme fakturu <b>' + no + '</b> za období ' + per + ', částka <b>' + amt + '</b>.',
-  forWhom: (n, ico) => 'Odběratel: <b>' + n + '</b>' + (ico ? (', IČO ' + ico) : '') + '.',
-  paidHead: 'UHRAZENO V PLNÉ VÝŠI', paidBody: (d) => 'Částka byla uhrazena platební kartou' + (d ? (' dne ' + d) : '') + '. Nejde o výzvu k platbě.',
-  dueHead: 'K ÚHRADĚ: ', dueBody: 'Předplatné se nepodařilo strhnout z karty. Platbu zkusíme strhnout znovu automaticky; zaplatit můžeš i hned.', pay: 'Zaplatit hned',
-  docNo: 'Číslo faktury', issuedL: 'Datum vystavení', duzpL: 'DUZP', method: 'Způsob úhrady', card: 'Platební karta',
+  forWhom: (n, ico) => 'Odběratel: <b>' + n + '</b>' + (ico ? (', IČO ' + ico) : '') + '.', pay: 'Zaplatit hned',
 };
-const _esc = (x) => String(x == null ? '' : x).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[c]);
-const _supL = (r, T) => [r.sup_name, r.sup_address, r.sup_ico ? (T.regno + ': ' + r.sup_ico) : '', r.sup_dic ? (T.vatid + ': ' + r.sup_dic) : '', r.sup_register ? (T.reg + ': ' + r.sup_register) : ''].filter(Boolean);
-const _custL = (r, T) => [r.cust_name, r.cust_address, r.cust_ico ? (T.regno + ': ' + r.cust_ico) : '', r.cust_dic ? (T.vatid + ': ' + r.cust_dic) : ''].filter(Boolean);
-// E-mail k faktuře: dopis + stav úhrady (+ tlačítko k úhradě), faktura je v příloze.
-function _epMailHtml(r, en, payUrl, isSup) {
-  const T = _T(en, isSup), m = (minor) => _amt(Number(minor || 0) / 100, r.currency, en ? 'en' : 'cs');
-  const due = Number(r.due_amount) > 0;
-  const box = due
-    ? '<div style="margin:14px 0;padding:11px 14px;border-radius:10px;background:#FFF4E5;border:1.5px solid #F0C674;color:#8a5a00;"><div style="font-weight:800;">' + T.dueHead + _esc(m(r.due_amount)) + '</div><div style="font-size:12.5px;margin-top:3px;">' + T.dueBody + '</div></div>'
-    : '<div style="margin:14px 0;padding:8px 12px;border-radius:8px;background:#EAF7EE;border:1px solid #A8E6C0;color:#0E6B3A;"><div style="font-weight:800;font-size:12.5px;">' + T.paidHead + '</div><div style="font-size:12px;margin-top:1px;">' + T.paidBody(_dIss(r, en)) + '</div></div>';
+const _payBtn = (url, T) => url ? ('<p style="margin:14px 0;"><a href="' + _esc(url) + '" style="display:inline-block;padding:12px 22px;background:#E63946;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;">' + T.pay + '</a></p>') : '';
+function _epMailHtml(r, en, payUrl) {
+  const T = _T(en), lang = en ? 'en' : 'cs', st = mtlStatus(r, lang), test = mtlModel(r, lang).test;
   return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.6;">'
-    + (r.test_mode ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:14px;">' + (en ? 'TEST MODE — not a real invoice' : 'TESTOVACÍ REŽIM — nejde o skutečnou fakturu') + '</div>' : '')
+    + (test ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:14px;">' + _esc(test) + '</div>' : '')
     + '<p style="margin:0 0 10px;">' + T.hello + ',</p>'
-    + '<p style="margin:0 0 10px;">' + T.attached(_esc(r.doc_no), _esc(_perRange(r, en)), _esc(m(r.amount))) + '</p>'
+    + '<p style="margin:0 0 10px;">' + T.attached(_esc(r.doc_no), _esc(subPeriod(r, lang)), _esc(money(r.amount, r.currency, lang))) + '</p>'
     + (r.cust_name ? ('<p style="margin:0 0 10px;">' + T.forWhom(_esc(r.cust_name), r.cust_ico ? _esc(r.cust_ico) : '') + '</p>') : '')
-    + box
-    + ((due && payUrl) ? ('<p style="margin:14px 0;"><a href="' + _esc(payUrl) + '" style="display:inline-block;padding:12px 22px;background:#E63946;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;">' + T.pay + '</a></p>') : '')
+    + statusBoxHtml(st)
+    + (st.unpaid ? _payBtn(payUrl, T) : '')
     + '<p style="margin:18px 0 0;color:#888;font-size:12px;">' + _esc(r.sup_name || 'Martial Training Lab') + (r.sup_email ? (' · ' + _esc(r.sup_email)) : '') + (r.sup_phone ? (' · ' + _esc(r.sup_phone)) : '') + '</p></div>';
 }
-// PDF faktury -- stejné rozvržení jako PDF faktury za provizi.
-function _epPdf(r, en, isSup) {
-  const T = _T(en, isSup), cur = r.currency, money = (minor) => _amt(Number(minor || 0) / 100, cur, en ? 'en' : 'cs');
-  return new Promise((resolve, reject) => {
-    try {
-      const doc = new PDFDocument({ size: 'A4', margin: 50 });
-      const chunks = []; doc.on('data', (d) => chunks.push(d)); doc.on('end', () => resolve(Buffer.concat(chunks))); doc.on('error', reject);
-      doc.registerFont('cz', DEJAVU_CZ); doc.font('cz');
-      if (r.test_mode) {
-        const ty = doc.y; doc.rect(50, ty, 495, 24).fillAndStroke('#FDECEC', '#F3C0C0');
-        doc.fillColor('#8a1c1c').fontSize(9).text(en ? 'TEST MODE — not a real invoice' : 'TESTOVACÍ REŽIM — nejde o skutečnou fakturu', 58, ty + 8, { width: 479, align: 'center', lineBreak: false });
-        doc.y = ty + 38; doc.x = 50;
-      }
-      doc.fontSize(22).fillColor('#E11111').text('MTL', 50, doc.y);
-      doc.moveDown(0.15).fontSize(15).fillColor('#111111').text(T.title);
-      doc.moveDown(0.9);
-      const yTop = doc.y;
-      const col = (x, label, lines) => { doc.fontSize(9).fillColor('#888888').text(label, x, yTop, { width: 230 });
-        lines.forEach((l, ix) => { if (ix === 0) doc.fontSize(11).fillColor('#111111').text(l, x, doc.y, { width: 230 }); else doc.fontSize(10).fillColor('#555555').text(l, x, doc.y, { width: 230 }); });
-        return doc.y; };
-      const yL = col(50, T.supplier.toUpperCase(), _supL(r, T)), yR = col(315, T.customer.toUpperCase(), _custL(r, T));
-      doc.y = Math.max(yL, yR) + 16;
-      // ÚDAJE FAKTURY v mřížce dvou sloupců (popisek vlevo, hodnota vpravo), ne jeden řádek s tečkami.
-      { const L = [[T.docNo, String(r.doc_no || '')], [T.period, _perRange(r, en)], [T.method, Number(r.due_amount) > 0 ? '' : T.card]].filter((x) => x[1]);
-        const Rr = [[T.issuedL, _dIss(r, en)], [T.duzpL, r.duzp ? _d(r.duzp, en) : '']].filter((x) => x[1]);
-        const yF = doc.y; doc.moveTo(50, yF).lineTo(545, yF).strokeColor('#e6e6e6').stroke();
-        let yEnd = yF;
-        [[L, 50], [Rr, 315]].forEach(([list, x]) => list.forEach((f, i) => { const yy = yF + 5 + i * 18;
-          doc.fontSize(8.5).fillColor('#777777').text(f[0], x, yy + 0.5, { width: 105, lineBreak: false });
-          doc.fontSize(9).fillColor('#111111').text(f[1], x + 105, yy, { width: 125, align: 'right', lineBreak: false });
-          doc.moveTo(x, yy + 14).lineTo(x + 230, yy + 14).strokeColor('#eeeeee').stroke(); yEnd = Math.max(yEnd, yy + 14); }));
-        doc.y = yEnd + 12; doc.x = 50; }
-      { const due = Number(r.due_amount) > 0, c = due ? { bg: '#FFF4E5', bd: '#F0C674', fg: '#8a5a00' } : { bg: '#EAF7EE', bd: '#A8E6C0', fg: '#0E6B3A' };
-        const head = due ? (T.dueHead + money(r.due_amount)) : T.paidHead, body = due ? T.dueBody : T.paidBody(_dIss(r, en));
-        const y0 = doc.y; doc.fontSize(8.5); const hB = doc.heightOfString(body, { width: 479 }), hBox = 8 + 12 + hB + 7;
-        doc.rect(50, y0, 495, hBox).lineWidth(0.8).fillAndStroke(c.bg, c.bd); doc.lineWidth(1);
-        doc.fillColor(c.fg).fontSize(10).text(head, 58, y0 + 6, { width: 479 });
-        doc.fontSize(8.5).text(body, 58, doc.y + 1, { width: 479 });
-        doc.y = y0 + hBox + 14; doc.x = 50; }
-      let y = doc.y; doc.fontSize(9).fillColor('#888888');
-      doc.text(T.colItem, 50, y, { width: 250 }); doc.text(T.colPeriod, 300, y, { width: 140, align: 'center' }); doc.text(T.colAmount, 440, y, { width: 105, align: 'right' });
-      y = doc.y + 4; doc.moveTo(50, y).lineTo(545, y).strokeColor('#dddddd').stroke(); y += 6;
-      doc.fontSize(10).fillColor('#111111');
-      doc.text(T.item, 50, y, { width: 250 }); doc.text(_perRange(r, en), 300, y, { width: 140, align: 'center' }); doc.text(money(r.amount), 440, y, { width: 105, align: 'right' });
-      y = doc.y + 5; doc.moveTo(50, y).lineTo(545, y).strokeColor('#eeeeee').stroke(); doc.y = y + 9;
-      const rate = Number(r.sup_vat_rate) || 0;
-      if (rate > 0) { const base = Number(r.amount) / (1 + rate / 100);
-        doc.fontSize(10).fillColor('#555555').text(T.base + ': ' + money(base) + '   ·   ' + T.vat + ' ' + rate + ' %: ' + money(Number(r.amount) - base), 50, doc.y, { width: 495 }); }
-      else { const note = vatNoteFor(r.vat_mode, r.vat_note, en ? 'en' : 'cs'); if (note) doc.fontSize(9).fillColor('#777777').text(note, 50, doc.y, { width: 495 }); }
-      doc.moveDown(0.5);
-      const yT = doc.y; doc.fontSize(13).fillColor('#111111').text(T.total, 50, yT, { width: 230 }); doc.text(money(r.amount), 315, yT, { width: 230, align: 'right' });
-      doc.end();
-    } catch (e) { reject(e); }
-  });
-}
-// Faktura za EP do e-mailu. Stejný obsah a stejný rámeček stavu jako v appce.
-// Datum vystavení faktury (Praha).
-function _dIss(r, en) { try { return new Date(r.issued_at || r.charged_at || Date.now()).toLocaleDateString(en ? 'en-GB' : 'cs-CZ', { timeZone: 'Europe/Prague' }); } catch (e) { return ''; } }
-function _d(ymd, en) { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(ymd || '')); if (!m) return String(ymd || ''); return en ? (Number(m[3]) + '/' + Number(m[2]) + '/' + m[1]) : (Number(m[3]) + '. ' + Number(m[2]) + '. ' + m[1]); }
-// Období předplatného od–do. Stripe dává konec jako začátek dalšího období, proto o den míň.
-function _perRange(r, en) {
-  try {
-    const li = Array.isArray(r.line_items) ? r.line_items[0] : null;
-    if (!li || !li.period_start || !li.period_end) return r.period_month;
-    const end = new Date(new Date(li.period_end).getTime() - 86400000).toISOString();
-    return _d(String(li.period_start).slice(0, 10), en) + ' – ' + _d(end.slice(0, 10), en);
-  } catch (e) { return r.period_month; }
-}
-function _epInvoiceHtml(r, en, payUrl, isSup) {
-  const esc = (x) => String(x == null ? '' : x).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[c]);
-  const m = (minor) => _amt(Number(minor || 0) / 100, r.currency, en ? 'en' : 'cs');
-  const due = Number(r.due_amount) > 0;
-  const box = due
-    ? '<div style="margin:14px 0;padding:11px 14px;border-radius:10px;background:#FFF4E5;border:1.5px solid #F0C674;color:#8a5a00;"><div style="font-weight:800;">' + (en ? 'AMOUNT DUE: ' : 'K ÚHRADĚ: ') + esc(m(r.due_amount)) + '</div><div style="font-size:12.5px;margin-top:3px;">'
-      + (en ? 'The subscription could not be charged to your card. We will retry automatically; you can also pay right away.' : 'Předplatné se nepodařilo strhnout z karty. Platbu zkusíme strhnout znovu automaticky; zaplatit můžeš i hned.') + '</div></div>'
-      + (payUrl ? '<p><a href="' + esc(payUrl) + '" style="display:inline-block;padding:12px 22px;background:#E63946;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;">' + (en ? 'Pay now' : 'Zaplatit hned') + '</a></p>' : '')
-    : '<div style="margin:14px 0;padding:8px 12px;border-radius:8px;background:#EAF7EE;border:1px solid #A8E6C0;color:#0E6B3A;"><div style="font-weight:800;font-size:12.5px;">' + (en ? 'PAID IN FULL' : 'UHRAZENO V PLNÉ VÝŠI') + '</div><div style="font-size:12px;margin-top:1px;">'
-      + (en ? ('The amount was paid by payment card on ' + _dIss(r, en) + '. This is not a request for payment.') : ('Částka byla uhrazena platební kartou dne ' + _dIss(r, en) + '. Nejde o výzvu k platbě.')) + '</div></div>';
-  const sup = [r.sup_name, r.sup_address, r.sup_ico ? ((en ? 'Reg. number: ' : 'IČO: ') + r.sup_ico) : '', r.sup_dic ? ((en ? 'VAT ID: ' : 'DIČ: ') + r.sup_dic) : '', r.sup_register ? ((en ? 'Commercial register: ' : 'Zapsáno v obchodním rejstříku: ') + r.sup_register) : ''].filter(Boolean).map(esc).join('<br>');
-  const cust = [r.cust_name, r.cust_address, r.cust_ico ? ((en ? 'Reg. number: ' : 'IČO: ') + r.cust_ico) : '', r.cust_dic ? ((en ? 'VAT ID: ' : 'DIČ: ') + r.cust_dic) : ''].filter(Boolean).map(esc).join('<br>');
-  const note = vatNoteFor(r.vat_mode, r.vat_note, en ? 'en' : 'cs');
-  return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:620px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.55;">'
-    + '<h2 style="margin:0 0 4px;">' + (isSup ? (en ? 'Invoice — MTL supplier profile subscription' : 'Faktura — předplatné profilu dodavatele MTL') : (en ? 'Invoice — Exclusive Partner subscription' : 'Faktura — předplatné Exclusive Partner')) + '</h2>'
-    + '<table style="width:100%;font-size:13px;border-collapse:collapse;margin:8px 0;">' + [[en ? 'Invoice no.' : 'Číslo faktury', r.doc_no || ('MTL-' + r.id)], [en ? 'Issued' : 'Datum vystavení', _dIss(r, en)],
-        [en ? 'Date of supply' : 'DUZP', r.duzp ? _d(r.duzp, en) : ''], [en ? 'Subscription period' : 'Období předplatného', _perRange(r, en)]].filter((x) => x[1])
-        .map((x) => '<tr><td style="padding:5px 0;color:#777;border-bottom:1px solid #eee;">' + esc(x[0]) + '</td><td style="padding:5px 0;text-align:right;font-weight:600;border-bottom:1px solid #eee;">' + esc(x[1]) + '</td></tr>').join('') + '</table>' + box
-    + '<table style="width:100%;font-size:13px;"><tr><td style="vertical-align:top;width:50%;"><div style="font-size:11px;color:#888;text-transform:uppercase;">' + (en ? 'Supplier' : 'Dodavatel') + '</div>' + sup + '</td><td style="vertical-align:top;"><div style="font-size:11px;color:#888;text-transform:uppercase;">' + (en ? 'Customer' : 'Odběratel') + '</div>' + cust + '</td></tr></table>'
-    + '<p style="margin-top:14px;"><b>' + (isSup ? (en ? 'MTL supplier profile — subscription ' : 'Profil dodavatele MTL — předplatné ') : (en ? 'Exclusive MTL Partner — subscription ' : 'Exclusive MTL Partner — předplatné ')) + esc(r.period_month) + ':</b> ' + esc(m(r.amount)) + '</p>'
-    + (note ? '<p style="font-size:12px;color:#555;">' + esc(note) + '</p>' : '')
-    + '</div>';
+// Bez PDF (vytvoření selhalo) jde celá faktura v těle e-mailu -- tentýž obsah jako v appce.
+function _epInvoiceHtml(r, en, payUrl) {
+  const lang = en ? 'en' : 'cs';
+  return renderHtml(mtlModel(r, lang), { fragment: true }) + (mtlStatus(r, lang).unpaid ? _payBtn(payUrl, _T(en)) : '');
 }
 function _amt(v, cur, lang) {
   try { return Number(v).toLocaleString(lang === 'en' ? 'en-GB' : 'cs-CZ', { minimumFractionDigits: 0, maximumFractionDigits: 2 }) + ' ' + (String(cur).toUpperCase() === 'CZK' ? 'Kč' : String(cur).toUpperCase()); }
@@ -220,7 +114,7 @@ export default async function handler(req, res) {
             method: 'stripe_invoice', notifyUserId: uid, paidAt: new Date().toISOString(),
             mail: async (to, inv, r) => {
               let en = false; try { const p = (await sb(`profiles?id=eq.${encodeURIComponent(uid)}&select=lang`))[0]; en = !!(p && p.lang === 'en'); } catch (e) {}
-              await _mail(to, `${receiptTitle(inv.kind, en)} ${docNo(r)}`, receiptMailHtml(inv, r, en));
+              await _mail(to, `${receiptTitle(inv.kind, en)} ${docNo(r)}`, receiptMailHtml(r, en));
             },
           });
           return res.status(200).json({ ok: true, receipt: (rc[0] && rc[0].id) || null, invoice: ex[0].id });
@@ -407,13 +301,13 @@ export default async function handler(req, res) {
       const en = pr.lang === 'en';
       const _r = Object.assign({}, row, { id, doc_no: docNoStr });
       let _att = [];
-      try { const _buf = await _epPdf(_r, en, !!orgId);
+      try { const _buf = await mtlDokladPdf(_r, en ? 'en' : 'cs');
         _att = [{ filename: docNoStr + '-' + (orgId ? (en ? 'supplier-profile' : 'profil-dodavatele') : 'exclusive-partner') + '-' + String(period).replace(/-/g, '') + '.pdf', content: _buf.toString('base64') }];
       } catch (e) { console.error('[ep-doklad] pdf', e.message); }
       // Bez PDF (selhalo) jde faktura celá v těle e-mailu, ať o ni odběratel nepřijde.
       if (row.cust_email && id) await _mail(row.cust_email,
         ((row.test_mode ? '[TEST] ' : '') + (en ? 'Invoice ' + docNoStr + ' — ' + PRODUCT_EN + ' ' : 'Faktura ' + docNoStr + ' — ' + PRODUCT + ' ')) + period,
-        _att.length ? _epMailHtml(_r, en, b.unpaid ? (b.pay_url || null) : null, !!orgId) : _epInvoiceHtml(_r, en, b.unpaid ? (b.pay_url || null) : null, !!orgId), _att);
+        _att.length ? _epMailHtml(_r, en, b.unpaid ? (b.pay_url || null) : null) : _epInvoiceHtml(_r, en, b.unpaid ? (b.pay_url || null) : null), _att);
     } catch (e) {}
 
     // HLÍDÁNÍ LIMITU: zakladateli přijde upozornění, když tahle faktura posunula letošní součet
@@ -425,7 +319,7 @@ export default async function handler(req, res) {
         if (hit) {
           const fmt = (v) => Math.round(v).toLocaleString('cs-CZ');
           await sb('notifications', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({
-            user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'system', read: false,
+            user_id: (process.env.FOUNDER_UUID || '').trim(), type: 'system', read: false,
             data: JSON.stringify({ kind: 'oss_threshold', level: hit, year: b2c.year, total_czk: Math.round(after), limit_czk: OSS_LIMIT_CZK }),
             message: (hit === 'limit' ? '🚨 ' : '⚠️ ') + 'Přeshraniční prodeje spotřebitelům v EU (EP a dodavatelé bez DIČ) za rok ' + b2c.year + ': ' + fmt(after) + ' Kč z limitu ' + fmt(OSS_LIMIT_CZK) + ' Kč (10 000 EUR). '
               + (hit === 'limit' ? 'Limit je překročený — další prodeje bez DIČ appka zastaví a je potřeba registrace do OSS.' : 'Blíží se limit — po jeho překročení bude potřeba registrace do OSS.') }) });

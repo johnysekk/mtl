@@ -6,6 +6,10 @@ const _SUPA = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/re
 const _KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 export default async function handler(req, res) {
+  // JEN VERCEL CRON. Bez tajného klíče by úlohu spustil kdokoli, kdo zná adresu.
+  const _cron = (process.env.CRON_SECRET || '').trim();
+  if (!_cron) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+  if (String(req.headers.authorization || '') !== `Bearer ${_cron}`) return res.status(401).json({ error: 'unauthorized' });
   try {
     const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
     const url = _SUPA + '/rest/v1/provider_applications'

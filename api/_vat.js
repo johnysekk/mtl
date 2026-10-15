@@ -126,22 +126,5 @@ export function needVatBeforePay(supCountry, custCountry, custDic, feeExempt) {
   return !String(custDic || '').trim();
 }
 
-// TEXT POZNAMKY V JAZYCE DOKLADU. Snimek nese ceskou vetu (vat_note); anglicky doklad
-// ji podle rezimu prelozi. Kdyz rezim neni znamy (starsi snimky), vrati se puvodni veta.
-const _NOTE_EN = {
-  no_vat_supplier: 'The supplier is not a VAT payer.',
-  reverse_charge: 'Reverse charge — VAT is accounted for by the customer in their own country; the supplier does not charge it.',
-  reverse_charge_np: 'The supplier is not a VAT payer. Reverse charge — VAT is accounted for by the customer in their own country; the supplier does not charge it.',
-  oss_pending: 'Customer in another EU state without a VAT ID — under review by the accountant.',
-  // Starší snímky b2c_eu_small nesly i větu o limitu -- vydaný doklad se nemění, anglicky ji dál přeloží.
-  b2c_eu_small_legacy: 'The supplier is not a VAT payer. Place of supply: Czech Republic — cross-border electronic services to EU consumers did not exceed EUR 10,000 (Art. 59c of Directive 2006/112/EC).',
-  need_vat: 'Customer in another EU state without a VAT ID — the VAT treatment cannot be determined.',
-  outside_eu: 'Supply outside the EU — no Czech VAT (Section 9 of the Czech VAT Act).',
-  exempt_membership: 'VAT exempt — supply in return for a membership fee to own members (Section 61(a) of the Czech VAT Act).',
-};
-export function vatNoteFor(mode, note, lang) {
-  if (lang !== 'en') return note || null;
-  if (mode === 'reverse_charge' && /není plátcem/.test(String(note || ''))) return _NOTE_EN.reverse_charge_np;
-  if (mode === 'b2c_eu_small') return /Místo plnění/.test(String(note || '')) ? _NOTE_EN.b2c_eu_small_legacy : (note ? _NOTE_EN.no_vat_supplier : null);
-  return _NOTE_EN[mode] || note || null;
-}
+// TEXT POZNAMKY V JAZYCE DOKLADU je v /doklad-layout.js (jedno místo pro všechny doklady).
+export { vatNoteFor } from '../doklad-layout.js';

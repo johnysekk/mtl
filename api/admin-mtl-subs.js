@@ -10,7 +10,7 @@ import { createClient } from '@supabase/supabase-js';
 import { isTestMode } from './_config.js';
 
 const supa = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-const FOUNDER = process.env.FOUNDER_UUID || '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+const FOUNDER = (process.env.FOUNDER_UUID || '').trim();
 const KINDS = ['partner_sub', 'supplier_sub'];
 
 export default async function handler(req, res) {

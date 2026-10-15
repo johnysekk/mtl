@@ -35,7 +35,7 @@ async function sbRpc(fn, args) {
 }
 
 // Genuine welcome 0% — same logic as pay.js: provider inside their welcome window pays no MTL fee.
-const _WELCOME_FOUNDER = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+const _WELCOME_FOUNDER = (process.env.FOUNDER_UUID || '').trim();
 async function isWelcomeZero(acct) {
   if (!acct) return false;
   try {

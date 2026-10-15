@@ -119,7 +119,7 @@ async function settleInvoices(col, id, cur, ownerId) {
     method: 'card_on_file', notifyUserId: ownerId,
     mail: async (to, inv, r) => {
       let en = false; try { const p = (await sb(`profiles?id=eq.${ownerId}&select=lang`))[0]; en = !!(p && p.lang === 'en'); } catch (e) {}
-      await sendEmail(to, `${receiptTitle(inv.kind, en)} ${docNo(r)}`, receiptMailHtml(inv, r, en));
+      await sendEmail(to, `${receiptTitle(inv.kind, en)} ${docNo(r)}`, receiptMailHtml(r, en));
     },
   });
 }
@@ -174,7 +174,19 @@ async function dueSumFor(kind, id) {
     return by;
   } catch (e) { return {}; }
 }
-function payDueBlock(en, sumsByCur, ym, suspendAt, retryAt) {
+// KDE TO V APPCE JE (ověřeno v index.html). Karta na provizi a režim plateb jsou u každého
+// subjektu zvlášť; v Nastavení → Platby & provize je jen sazba a Exclusive Partner.
+function cardWhere(kind, en) {
+  if (kind === 'org') return en ? 'the organisation’s Payments &amp; commission → Commission card' : 'Platby a provize organizace → Karta na provizi';
+  if (kind === 'gym') return en ? 'Club settings → Payment mode and payout account' : 'Nastavení klubu → Režim plateb a výplatní účet';
+  return en ? 'Coach settings → Payment mode and payout account' : 'Nastavení kouče → Režim plateb a výplatní účet';
+}
+function commWhere(kind, en) {
+  if (kind === 'org') return en ? 'the organisation’s Payments &amp; commission → Commissions &amp; receipts to MTL' : 'Platby a provize organizace → Provize a doklady vůči MTL';
+  if (kind === 'gym') return en ? 'Club settings → Finance &amp; receipts → Commissions &amp; receipts to MTL' : 'Nastavení klubu → Finance a doklady → Provize a doklady vůči MTL';
+  return en ? 'Coach settings → Finance &amp; receipts → Commissions &amp; receipts to MTL' : 'Nastavení kouče → Finance a doklady → Provize a doklady vůči MTL';
+}
+function payDueBlock(en, sumsByCur, ym, suspendAt, retryAt, kind) {
   const amounts = Object.keys(sumsByCur || {}).map(function (c) {
     return (Math.round(sumsByCur[c]) / 100).toLocaleString(en ? 'en-GB' : 'cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + c.toUpperCase();
   }).join(' + ');
@@ -198,8 +210,8 @@ function payDueBlock(en, sumsByCur, ym, suspendAt, retryAt) {
     + '</table>'
     + `<p style="font-size:12px;color:#666;line-height:1.6;">`
     + (en
-      ? `The breakdown of individual payments is in the app under Payments &amp; commission. A receipt follows once the amount is settled. If you believe the amount is wrong, reply to this e-mail or write to ${MTL_ID.email} before the date above — we will pause the suspension while we look into it.`
-      : `Rozpad jednotlivých plateb najdeš v appce v Platby a provize. Doklad vystavíme po úhradě. Pokud je částka podle tebe špatná, odpověz na tento e-mail nebo napiš na ${MTL_ID.email} ještě před uvedeným datem — do vyřešení pozastavení odložíme.`)
+      ? `The breakdown of individual payments is in the app under ${commWhere(kind, true)}. A receipt follows once the amount is settled. If you believe the amount is wrong, reply to this e-mail or write to ${MTL_ID.email} before the date above — we will pause the suspension while we look into it.`
+      : `Rozpad jednotlivých plateb najdeš v appce v ${commWhere(kind, false)}. Doklad vystavíme po úhradě. Pokud je částka podle tebe špatná, odpověz na tento e-mail nebo napiš na ${MTL_ID.email} ještě před uvedeným datem — do vyřešení pozastavení odložíme.`)
     + '</p>';
 }
 
@@ -276,8 +288,8 @@ async function preChargeNotice(curMonth, isDaily) {
         en = `\u{1F4B3} On ${dEn} the accrued MTL commission ${perEn} ${whoEn} will be charged: ${_amtL(amount, cur, true)}, to your saved card${card ? ' ' + card : ''}. Nothing to do — just make sure the card is valid and funded.`;
         subjCs = `Provize MTL se strhne ${dCs}: ${_amtL(amount, cur, false)}`; subjEn = `MTL commission will be charged on ${dEn}: ${_amtL(amount, cur, true)}`;
       } else {
-        cs = `⚠️ Dne ${dCs} se má strhnout naakumulovaná provize MTL ${perCs} ${whoCs}: ${_amtL(amount, cur, false)} — ale nemáš uloženou platební kartu. Doplň ji v Platby a provize, jinak stržení selže.`;
-        en = `⚠️ On ${dEn} the accrued MTL commission ${perEn} ${whoEn} is due to be charged: ${_amtL(amount, cur, true)} — but there is no saved payment card. Add one in Payments & commission, otherwise the charge will fail.`;
+        cs = `⚠️ Dne ${dCs} se má strhnout naakumulovaná provize MTL ${perCs} ${whoCs}: ${_amtL(amount, cur, false)} — ale nemáš uloženou platební kartu. Doplň ji v ${cardWhere(kind, false)}, jinak stržení selže.`;
+        en = `⚠️ On ${dEn} the accrued MTL commission ${perEn} ${whoEn} is due to be charged: ${_amtL(amount, cur, true)} — but there is no saved payment card. Add one in ${cardWhere(kind, true).replace(/&amp;/g, '&')}, otherwise the charge will fail.`;
         subjCs = `Provize MTL ${dCs}: chybí platební karta`; subjEn = `MTL commission on ${dEn}: payment card missing`;
       }
       try { await notify(ownerId, 'commission_upcoming', cs, { ...data, msg_en: en }); out.sent++; } catch (err) {}
@@ -496,9 +508,9 @@ let deferredMin = 0;
             const _dueSum=await dueSumFor('gym', gid);
             const _pl=payNowLink('gym', gid, curMonth);
             await notifyMail(g.owner_id, 'Provizi MTL se nepodařilo strhnout',
-              'Zkusíme to znovu za tři dny. Můžeš ji ale uhradit hned.' + payDueBlock(false, _dueSum, curMonth, _suspendAt, _retryAt) + payNowBlock(_pl, false) + 'Zkontroluj prosím i platební kartu v Platby a provize.',
+              'Zkusíme to znovu za tři dny. Můžeš ji ale uhradit hned.' + payDueBlock(false, _dueSum, curMonth, _suspendAt, _retryAt, 'gym') + payNowBlock(_pl, false) + 'Zkontroluj prosím i platební kartu v ' + cardWhere('gym', false) + '.',
               'We could not charge the MTL commission',
-              'We will try again in three days. You can also pay it right away.' + payDueBlock(true, _dueSum, curMonth, _suspendAt, _retryAt) + payNowBlock(_pl, true) + 'Please check your payment card in Payments &amp; commission.'); } await notify(g.owner_id, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, účet bude pozastaven.`, { gym_id: gid, msg_en: `⚠️ Charging the MTL commission to your card failed. Update your card — next attempt in 3 days. If it isn't paid within 2 weeks, the account will be suspended.` });
+              'We will try again in three days. You can also pay it right away.' + payDueBlock(true, _dueSum, curMonth, _suspendAt, _retryAt, 'gym') + payNowBlock(_pl, true) + 'Please check your payment card in ' + cardWhere('gym', true) + '.'); } await notify(g.owner_id, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, účet bude pozastaven.`, { gym_id: gid, msg_en: `⚠️ Charging the MTL commission to your card failed. Update your card — next attempt in 3 days. If it isn't paid within 2 weeks, the account will be suspended.` });
             // V APPCE, NEJEN MAILEM. Selhání provize chodilo jen e-mailem -- kdo si ho nevšiml,
             // nevěděl nic až do pozastavení účtu. Notifikace vede na výzvu s tlačítky.
             await notify(g.owner_id, 'commission_failed',
@@ -604,7 +616,7 @@ let deferredMin = 0;
           { const _retryAt=retryAfter(); const _suspendAt=new Date(Date.parse((c&&c.commission_failed_at)||new Date().toISOString())+14*86400000).toISOString();
             const _dueSum=await dueSumFor('coach', cid);
             const _pl=payNowLink('coach', cid, curMonth);
-            await notifyMail(cid, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Můžeš ji ale uhradit hned.' + payDueBlock(false, _dueSum, curMonth, _suspendAt, _retryAt) + payNowBlock(_pl, false) + 'Zkontroluj prosím i platební kartu v Platby a provize.', 'We could not charge the MTL commission', 'We will try again in three days. You can also pay it right away.' + payDueBlock(true, _dueSum, curMonth, _suspendAt, _retryAt) + payNowBlock(_pl, true) + 'Please check your payment card in Payments &amp; commission.'); } await notify(cid, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, zaznamenávání hotovosti se pozastaví.`, { coach_id: cid, msg_en: `⚠️ Charging the MTL commission to your card failed. Update your card — next attempt in 3 days. If it isn't paid within 2 weeks, recording cash will be paused.` });
+            await notifyMail(cid, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Můžeš ji ale uhradit hned.' + payDueBlock(false, _dueSum, curMonth, _suspendAt, _retryAt, 'coach') + payNowBlock(_pl, false) + 'Zkontroluj prosím i platební kartu v ' + cardWhere('coach', false) + '.', 'We could not charge the MTL commission', 'We will try again in three days. You can also pay it right away.' + payDueBlock(true, _dueSum, curMonth, _suspendAt, _retryAt, 'coach') + payNowBlock(_pl, true) + 'Please check your payment card in ' + cardWhere('coach', true) + '.'); } await notify(cid, 'commission_failed', `⚠️ Stržení provize MTL z karty selhalo. Aktualizuj kartu — další pokus za 3 dny. Pokud neuhradíš do 2 týdnů, zaznamenávání hotovosti se pozastaví.`, { coach_id: cid, msg_en: `⚠️ Charging the MTL commission to your card failed. Update your card — next attempt in 3 days. If it isn't paid within 2 weeks, recording cash will be paused.` });
             // V APPCE, NEJEN MAILEM. Selhání provize chodilo jen e-mailem -- kdo si ho nevšiml,
             // nevěděl nic až do pozastavení účtu. Notifikace vede na výzvu s tlačítky.
             await notify(cid, 'commission_failed',
@@ -711,7 +723,7 @@ let deferredMin = 0;
           if (o.owner_id) { const _retryAt=retryAfter(); const _suspendAt=new Date(Date.parse((o&&o.commission_failed_at)||new Date().toISOString())+14*86400000).toISOString();
             const _dueSum=await dueSumFor('org', oid);
             const _pl=payNowLink('org', oid, curMonth);
-            await notifyMail(o.owner_id, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Můžeš ji ale uhradit hned.' + payDueBlock(false, _dueSum, curMonth, _suspendAt, _retryAt) + payNowBlock(_pl, false) + 'Zkontroluj prosím i platební kartu v Platby a provize.', 'We could not charge the MTL commission', 'We will try again in three days. You can also pay it right away.' + payDueBlock(true, _dueSum, curMonth, _suspendAt, _retryAt) + payNowBlock(_pl, true) + 'Please check your payment card in Payments &amp; commission.'); } await notify(o.owner_id, 'commission_failed', `⚠️ Provizi MTL se nepodařilo strhnout. Zkusíme to znovu za tři dny.`, { organization_id: oid, msg_en: `⚠️ We could not charge the MTL commission. We'll try again in three days.` });
+            await notifyMail(o.owner_id, 'Provizi MTL se nepodařilo strhnout', 'Zkusíme to znovu za tři dny. Můžeš ji ale uhradit hned.' + payDueBlock(false, _dueSum, curMonth, _suspendAt, _retryAt, 'org') + payNowBlock(_pl, false) + 'Zkontroluj prosím i platební kartu v ' + cardWhere('org', false) + '.', 'We could not charge the MTL commission', 'We will try again in three days. You can also pay it right away.' + payDueBlock(true, _dueSum, curMonth, _suspendAt, _retryAt, 'org') + payNowBlock(_pl, true) + 'Please check your payment card in ' + cardWhere('org', true) + '.'); } await notify(o.owner_id, 'commission_failed', `⚠️ Provizi MTL se nepodařilo strhnout. Zkusíme to znovu za tři dny.`, { organization_id: oid, msg_en: `⚠️ We could not charge the MTL commission. We'll try again in three days.` });
             // V APPCE, NEJEN MAILEM. Selhání provize chodilo jen e-mailem -- kdo si ho nevšiml,
             // nevěděl nic až do pozastavení účtu. Notifikace vede na výzvu s tlačítky.
             await notify(o.owner_id, 'commission_failed',
@@ -724,7 +736,7 @@ let deferredMin = 0;
       // Karta chybí: bez ní se nedá strhnout nic a organizace o tom musí vědět dřív,
       // než jí to zastaví prodej lístků.
       if (billDay && !(o.commission_card_customer && o.commission_card_pm) && o.owner_id) {
-        await notifyMail(o.owner_id, 'Doplň platební kartu pro provizi MTL', 'Bez karty nejde provizi z hotovosti a QR plateb strhnout. Doplň ji v Platby a provize.', 'Add a payment card for the MTL commission', 'Without a card we cannot charge the commission on cash and QR payments. Add it in Payments & commission.'); await notify(o.owner_id, 'commission_no_card', `Doplň platební kartu pro provizi MTL, jinak se pozastaví prodej lístků.`, { organization_id: oid, msg_en: `Add a payment card for the MTL commission, otherwise ticket sales will be paused.` });
+        await notifyMail(o.owner_id, 'Doplň platební kartu pro provizi MTL', 'Bez karty nejde provizi z hotovosti a QR plateb strhnout. Doplň ji v ' + cardWhere('org', false) + '.', 'Add a payment card for the MTL commission', 'Without a card we cannot charge the commission on cash and QR payments. Add it in ' + cardWhere('org', true) + '.'); await notify(o.owner_id, 'commission_no_card', `Doplň platební kartu pro provizi MTL, jinak se pozastaví prodej lístků.`, { organization_id: oid, msg_en: `Add a payment card for the MTL commission, otherwise ticket sales will be paused.` });
       }
       // ---- POZASTAVENÍ po dvou týdnech neuhrazené provize ----
       // PODLE KOLEJE, STEJNĚ JAKO U KLUBU. Dřív se nastavovalo account_suspended i

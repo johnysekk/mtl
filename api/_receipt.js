@@ -10,6 +10,10 @@
 // Doklad je řádek v commission_doklady s kind 'payment_receipt'; line_items vyjmenují uhrazené
 // faktury (ref = id faktury), ref_doklad_id = první z nich. Faktura se uvede nejvýš jednou.
 
+// Název dokladu, číslo a částky -- stejné jako na dokladu (/doklad-layout.js).
+import { receiptTitle, docNo, money, mtlModel, renderHtml } from '../doklad-layout.js';
+export { receiptTitle, docNo };
+
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const H = () => ({ apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' });
@@ -23,22 +27,6 @@ async function post(table, body, prefer) {
   if (!r.ok) throw new Error(`${table}: ${(await r.text()).slice(0, 200)}`);
   const t = await r.text(); return t ? JSON.parse(t) : null;
 }
-// NÁZEV DOKLADU podle toho, co uhrazuje. Provize: „Doklad o uhrazené provizi MTL" /
-// „Receipt for paid MTL commission"; předplatné EP obdobně.
-export function receiptTitle(refKind, en) {
-  if (refKind === 'partner_sub') return en ? 'Receipt for paid Exclusive Partner subscription' : 'Doklad o uhrazeném předplatném Exclusive Partner';
-  if (refKind === 'supplier_sub') return en ? 'Receipt for paid MTL supplier profile subscription' : 'Doklad o uhrazeném předplatném profilu dodavatele MTL';
-  return en ? 'Receipt for paid MTL commission' : 'Doklad o uhrazené provizi MTL';
-}
-const money = (minor, cur, en) => {
-  const C = String(cur || 'CZK').toUpperCase();
-  const v = (Number(minor || 0) / 100).toLocaleString(en ? 'en-GB' : 'cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return v + ' ' + (C === 'CZK' && !en ? 'Kč' : C);
-};
-
-// Číslo dokladu: uložené při vystavení (doc_no), u starších postaru MTL-<id>.
-export const docNo = (d) => (d && d.doc_no) || ('MTL-' + (d && d.id));
-
 // NEUHRAZENÉ A DOSUD NEZDOKUMENTOVANÉ FAKTURY. Faktura s due_amount > 0 je „zdokumentovaná",
 // když ji uvádí doklad o úhradě (line_items[].ref) nebo pozdější faktura v rámečku úhrady
 // (paid_other[].ref). Faktura sama se nikdy nemění -- stav úhrady říkají jen tyhle odkazy.
@@ -102,8 +90,8 @@ export async function issueReceipts(filter, opts = {}) {
   const nos = inv.map(docNo).join(', ');
   const uid = opts.notifyUserId || d.owner_id || d.coach_id;
   if (uid && !opts.noNotify) {
-    const cs = `✅ Uhrazeno ${money(total, d.currency, false)} — ${inv.length > 1 ? 'faktury' : 'faktura'} ${nos}. Vystavili jsme ${receiptTitle(d.kind, false)} ${docNo(r)}.`;
-    const en = `✅ Paid ${money(total, d.currency, true)} — ${inv.length > 1 ? 'invoices' : 'invoice'} ${nos}. ${receiptTitle(d.kind, true)} ${docNo(r)} has been issued.`;
+    const cs = `✅ Uhrazeno ${money(total, d.currency, 'cs')} — ${inv.length > 1 ? 'faktury' : 'faktura'} ${nos}. Vystavili jsme ${receiptTitle(d.kind, false)} ${docNo(r)}.`;
+    const en = `✅ Paid ${money(total, d.currency, 'en')} — ${inv.length > 1 ? 'invoices' : 'invoice'} ${nos}. ${receiptTitle(d.kind, true)} ${docNo(r)} has been issued.`;
     try {
       await post('notifications', { user_id: uid, type: 'system', read: false, message: cs,
         data: JSON.stringify({ kind: 'doklad_unified', doklad_id: r.id, gym_id: d.gym_id || null, coach_id: d.coach_id || null,
@@ -116,25 +104,5 @@ export async function issueReceipts(filter, opts = {}) {
   return [r];
 }
 
-// E-mail s dokladem o úhradě (HTML = samotný dokument; v appce jde vytisknout do PDF).
-export function receiptMailHtml(inv, r, en) {
-  const esc = (x) => String(x == null ? '' : x).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[c]);
-  const d = (iso) => { try { const x = new Date(iso); return en ? x.toLocaleDateString('en-GB', { timeZone: 'Europe/Prague' }) : x.toLocaleDateString('cs-CZ', { timeZone: 'Europe/Prague' }); } catch (e) { return ''; } };
-  const sup = [r.sup_name, r.sup_address, r.sup_ico ? ((en ? 'Reg. number: ' : 'IČO: ') + r.sup_ico) : '', r.sup_dic ? ((en ? 'VAT ID: ' : 'DIČ: ') + r.sup_dic) : '',
-    r.sup_register ? ((en ? 'Commercial register: ' : 'Zapsáno v obchodním rejstříku: ') + r.sup_register) : ''].filter(Boolean).map(esc).join('<br>');
-  const cust = [r.cust_name, r.cust_address, r.cust_ico ? ((en ? 'Reg. number: ' : 'IČO: ') + r.cust_ico) : '', r.cust_dic ? ((en ? 'VAT ID: ' : 'DIČ: ') + r.cust_dic) : ''].filter(Boolean).map(esc).join('<br>');
-  const items = (Array.isArray(r.line_items) ? r.line_items : []).map((it) =>
-    '<tr><td style="padding:6px 0;border-bottom:1px solid #eee;">' + esc((en ? 'Invoice ' : 'Faktura ') + (it.doc_no || ('MTL-' + it.ref))) + (it.period ? (' · ' + esc(it.period)) : '') + '</td>'
-    + '<td style="padding:6px 0;border-bottom:1px solid #eee;text-align:right;">' + esc(money(it.amount, r.currency, en)) + '</td></tr>').join('');
-  return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:620px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.55;">'
-    + (r.test_mode ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial;padding:9px 12px;margin-bottom:12px;">' + (en ? 'TEST MODE — no actual transaction took place' : 'TESTOVACÍ REŽIM — k žádné skutečné transakci nedošlo') + '</div>' : '')
-    + '<h2 style="margin:0 0 4px;">' + esc(receiptTitle(r.ref_kind || (inv && inv.kind), en)) + '</h2>'
-    + '<div style="font-size:13px;color:#555;">' + esc(docNo(r)) + ' · ' + (en ? 'Issued ' : 'Vystaveno ') + d(r.issued_at) + '</div>'
-    + '<div style="margin:14px 0;padding:11px 14px;border-radius:10px;background:#EAF7EE;border:1.5px solid #A8E6C0;color:#0E6B3A;">'
-    + '<div style="font-weight:800;font-size:14px;">' + (en ? 'PAID: ' : 'UHRAZENO: ') + esc(money(r.amount, r.currency, en)) + '</div>'
-    + '<div style="font-size:12.5px;margin-top:3px;">' + (en ? ('Payment received on ' + d(r.charged_at) + '. This is not a request for payment.') : ('Platba přijata dne ' + d(r.charged_at) + '. Nejde o výzvu k platbě.')) + '</div></div>'
-    + '<table style="width:100%;font-size:13px;border-collapse:collapse;margin-bottom:14px;"><tr><th style="text-align:left;font-size:11px;color:#888;">' + (en ? 'Invoices paid' : 'Uhrazené faktury') + '</th><th style="text-align:right;font-size:11px;color:#888;">' + (en ? 'Amount' : 'Částka') + '</th></tr>' + items + '</table>'
-    + '<table style="width:100%;font-size:13px;"><tr><td style="vertical-align:top;width:50%;"><div style="font-size:11px;color:#888;text-transform:uppercase;">' + (en ? 'Supplier' : 'Dodavatel') + '</div>' + sup + '</td>'
-    + '<td style="vertical-align:top;"><div style="font-size:11px;color:#888;text-transform:uppercase;">' + (en ? 'Customer' : 'Odběratel') + '</div>' + cust + '</td></tr></table>'
-    + '</div>';
-}
+// E-mail s dokladem o úhradě: tělo = samotný doklad, tentýž obsah a vzhled jako v appce.
+export function receiptMailHtml(r, en) { return renderHtml(mtlModel(r, en ? 'en' : 'cs'), { fragment: true }); }

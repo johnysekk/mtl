@@ -15,9 +15,8 @@
 //   Dřív host, který zálohu zaplatil z účtu, nedostal vůbec nic: ani e-mail, ani doklad.
 // Idempotent: refuses to send twice for the same member (cohort_members.deposit_mail_at).
 
-import { sendResend, cohortDepositHtml, cohortDokladPdf } from './stripe-webhook.js';
+import { sendResend, cohortDepositHtml } from './stripe-webhook.js';
 import { dokladPdfFor } from './_doklad-pdf.js';
-import { isTestMode } from './_config.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -31,10 +30,6 @@ async function sbGet(path) {
 }
 async function sbPatch(path, body) {
   try { await fetch(`${SB}/rest/v1/${path}`, { method: 'PATCH', headers: { ...svc, Prefer: 'return=minimal' }, body: JSON.stringify(body) }); } catch (e) {}
-}
-function _czDate(iso) {
-  try { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); if (!m) return String(iso || ''); return parseInt(m[3], 10) + '. ' + parseInt(m[2], 10) + '. ' + m[1]; }
-  catch (e) { return String(iso || ''); }
 }
 
 export default async function handler(req, res) {
@@ -108,7 +103,6 @@ export default async function handler(req, res) {
     // Doklad PDF v testu i naostro. V testu jen snímek (nese označení TESTOVACÍ REŽIM); náhradní
     // verze bez snímku testovací označení nemá, takže se v testu nepřikládá.
     let attachments;
-    let testMode = false; try { testMode = await isTestMode(); } catch (e) {}
     try {
       // Doklad ze SNÍMKU (stejný jako v appce). PIS: transakce té přihlášky (source_booking_id);
       // QR: poslední platba QR k tomuto kurzu ve výši zálohy.
@@ -119,11 +113,7 @@ export default async function handler(req, res) {
           : `transactions?cohort_id=eq.${encodeURIComponent(coh.id)}&payment_method=eq.qr&gross_amount=eq.${Math.round(Number(deposit || 0) * 100)}&order=created_at.desc&limit=1&select=id`);
         if (_txr && _txr[0]) _snap = await dokladPdfFor({ transactionId: _txr[0].id });
       } catch (e) {}
-      const buf = _snap ? _snap.buffer : testMode ? null : await cohortDokladPdf({
-        gym: gymRec, gymName, buyer: (mem.name || mem.email || ''),
-        item: ((coh.name || 'Kurz') + ' — záloha'), amount: deposit, cur,
-        ref: (method === 'pis' ? 'PIS/' : 'QR/') + String(cmId).slice(0, 8), date: _czDate(new Date().toISOString().slice(0, 10)),
-      });
+      const buf = _snap ? _snap.buffer : null;   // bez snímku žádný doklad -- neskládá se z dnešních dat
       if (buf) attachments = [{ filename: 'MTL-potvrzeni-o-platbe.pdf', content: buf.toString('base64') }];
     } catch (e) { console.error('cohort doklad pdf', e.message); }
 

@@ -13,7 +13,7 @@ import { resolveParties, partyFor } from './_consent-party.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+const FOUNDER_UUID = (process.env.FOUNDER_UUID || '').trim();
 const svc = { apikey: SKEY, Authorization: `Bearer ${SKEY}`, 'Content-Type': 'application/json' };
 
 // Druhy souhlasů podle toho, KDO je dává. Podle toho se dělí větve u MTL.

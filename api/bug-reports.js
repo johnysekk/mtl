@@ -10,7 +10,7 @@
 
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const FOUNDER = process.env.FOUNDER_UUID || '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+const FOUNDER = (process.env.FOUNDER_UUID || '').trim();
 
 async function sb(path, init = {}) {
   const r = await fetch(`${SB}/rest/v1/${path}`, {

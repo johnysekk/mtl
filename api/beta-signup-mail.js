@@ -14,7 +14,7 @@ const svc = { apikey: KEY, Authorization: `Bearer ${KEY}`, 'Content-Type': 'appl
 const RESEND = process.env.RESEND_API_KEY;
 const MAIL_FROM = process.env.MAIL_FROM || 'MTL <noreply@martialtraininglab.com>';
 const APP = process.env.APP_URL || 'https://app.martialtraininglab.com';
-const FOUNDER = process.env.FOUNDER_UUID || '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+const FOUNDER = (process.env.FOUNDER_UUID || '').trim();
 
 async function sbGet(path) {
   const r = await fetch(`${SB}/rest/v1/${path}`, { headers: svc });

@@ -11,7 +11,7 @@ import Stripe from 'stripe';
 import { ladderRate as _mtlLadder } from './_rate.js';
 import { feeRefundableForPI } from './_fee-window.js';
 
-const FOUNDER_ID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+const FOUNDER_ID = (process.env.FOUNDER_UUID || '').trim();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = process.env.SUPABASE_URL;
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;

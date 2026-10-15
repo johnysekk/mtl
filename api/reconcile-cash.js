@@ -79,6 +79,10 @@ async function consumeStudentCredit(memberId, creditRowId, sc) {
 }
 
 export default async function handler(req, res) {
+  // JEN VERCEL CRON. Bez tajného klíče by úlohu spustil kdokoli, kdo zná adresu.
+  const _cron = (process.env.CRON_SECRET || '').trim();
+  if (!_cron) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+  if (String(req.headers.authorization || '') !== `Bearer ${_cron}`) return res.status(401).json({ error: 'unauthorized' });
   if (!SB || !KEY) return res.status(500).json({ error: 'env not set' });
   const out = { scanned: 0, backfilled: 0, already: 0, skipped: 0, errors: [] };
   try {

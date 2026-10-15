@@ -18,7 +18,7 @@ async function sbInsert(table, row) {
   return Array.isArray(j) ? j[0] : j;
 }
 
-const FOUNDER = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+const FOUNDER = (process.env.FOUNDER_UUID || '').trim();
 async function sbGet(path) {
   try { const r = await fetch(_SUPA + '/rest/v1/' + path, { headers: { apikey: _KEY, Authorization: 'Bearer ' + _KEY } }); return r.ok ? await r.json() : []; } catch (e) { return []; }
 }
@@ -46,6 +46,12 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(204).end();
   if (req.method !== 'POST') return res.status(405).json({ ok: false, error: 'Method not allowed' });
   if (!(await _rlAllow('provider-apply', _rlIp(req), 6, 10))) return res.status(429).json({ ok: false, error: 'Too many requests' });
+  // REGISTRACE POSKYTOVATELŮ ZAVŘENÁ (Admin → platform_config.providers_open): přihlášku
+  // nepřijímat, ať se nesbírají lidé, kteří by profil stejně nedokončili (zámek v databázi).
+  {
+    const cfg = (await sbGet('platform_config?id=eq.1&select=providers_open'))[0];
+    if (cfg && cfg.providers_open === false) return res.status(403).json({ ok: false, closed: true, error: 'Registrace klubů a koučů je zatím uzavřená.' });
+  }
 
   try {
     const b = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});

@@ -16,10 +16,8 @@ import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil
 import { sendOrderMailForPi, withdrawalText as _wdText } from './_order-mail.js';
 import { dokladPdfFor } from './_doklad-pdf.js';
 import crypto from 'crypto';
-import PDFDocument from 'pdfkit';
 import { isTestMode } from './_config.js';
 import { approveMemberAppOnPayment, cohortPayer } from './_member-app.js';
-import { DEJAVU_CZ } from './_dejavu-cz.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { pragueMonth } from './_tz.js';
 import { pragueEndOfDay } from './_memb-term.js';
@@ -131,103 +129,6 @@ export async function sendResend(to, subject, html, opts) {
   } catch (e) { console.error('resend', e.message); }
 }
 function _czDate(iso){ try{ const m=String(iso||'').match(/^(\d{4})-(\d{2})-(\d{2})/); if(!m) return String(iso||''); return parseInt(m[3],10)+'. '+parseInt(m[2],10)+'. '+m[1]; }catch(e){ return String(iso||''); } }
-function cohortDokladHtml(o){
-  o = o || {}; const rec = o.gym || {};
-  const seller = _esc(rec.legal_name || rec.name || o.gymName || 'Poskytovatel');
-  const c = String(o.cur || 'CZK').toUpperCase();
-  const sym = c === 'CZK' ? 'Kč' : (c === 'EUR' ? '€' : (c === 'USD' ? '$' : c));
-  const isPayer = !!rec.vat_payer;
-  const rate = isPayer ? (rec.vat_rate != null ? Number(rec.vat_rate) : 21) : 0;
-  const amt = Math.round((Number(o.amount) || 0) * 100) / 100;
-  const base = isPayer ? Math.round((amt / (1 + rate / 100)) * 100) / 100 : amt;
-  const vat = isPayer ? Math.round((amt - base) * 100) / 100 : 0;
-  const fmt = (n) => { const v = Math.round((Number(n) || 0) * 100) / 100; try { return v.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); } catch (e) { return v.toFixed(2); } };
-  const row = (l, v, strong) => `<tr><td style="padding:6px 0;color:#555;font-size:13px;">${l}</td><td style="padding:6px 0;text-align:right;font-size:13px;${strong ? 'font-weight:700;color:#1a1a1a;' : ''}">${v}</td></tr>`;
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Potvrzení o platbě</title></head>`
-    + `<body style="font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;max-width:600px;margin:24px auto;padding:0 20px;line-height:1.5;">`
-    + `<div style="font-size:22px;font-weight:800;letter-spacing:.04em;color:#E11;">MTL</div>`
-    + `<div style="color:#777;font-size:13px;margin-bottom:18px;">Potvrzení o platbě</div>`
-    + `<table style="width:100%;border-collapse:collapse;">`
-    + row('Poskytovatel (prodejce)', seller, true)
-    + row('Datum vystavení', _esc(_czDate(o.issued || new Date().toISOString().slice(0,10))), true)
-    + (o.providerContact ? row('Kontakt na poskytovatele', _esc(o.providerContact), true) : '')
-    + (rec.tax_id ? row('IČO', _esc(rec.tax_id), true) : '')
-    + (rec.vat_id ? row('DIČ', _esc(rec.vat_id), true) : '')
-    + (_billAddr(rec) ? row('Sídlo', _esc(_billAddr(rec)), true) : '')
-    + row('Odběratel', _esc(o.buyer || ''), true)
-    + (o.participant ? row('Účastník', _esc(o.participant), true) : '')
-    + row('Položka', _esc(o.item || ''), true)
-    + row('Termín lekce', _esc(_czDate(o.date || '')), true)
-    + (o.ref ? row('Reference platby (Stripe)', _esc(o.ref), true) : '')
-    + (isPayer
-        ? (row('Základ daně', fmt(base) + ' ' + sym) + row('DPH ' + rate + '%', fmt(vat) + ' ' + sym) + row('Celkem', fmt(amt) + ' ' + sym, true))
-        : row('Celkem', fmt(amt) + ' ' + sym, true))
-    + `</table>`
-    + (isPayer ? '' : `<div style="font-size:12px;color:#777;margin-top:10px;">Poskytovatel není plátcem DPH.</div>`)
-    + `<div style="font-size:11px;color:#999;line-height:1.6;margin-top:18px;border-top:1px solid #eee;padding-top:12px;">Platný doklad o platbě pro tvou evidenci. Prodejcem služby je výše uvedený poskytovatel — MTL je platforma, která platbu zprostředkovala. Potřebuješ formální fakturu? Vyžádej si ji u poskytovatele.</div>`
-    + `</body></html>`;
-}
-// Same payment confirmation as cohortDokladHtml, but rendered to a real PDF (attached to the mail).
-// Uses an embedded DejaVu subset so Czech diacritics render (standard PDF fonts can't). Returns a Buffer.
-// Exact Stripe fee for a direct charge, straight from the connected account's balance_transaction
-// (bt.fee_details -> type 'stripe_fee'). Direct charges: bt.fee is combined, so we split off the
-// application fee. Returns MAJOR units in the charge currency. No estimates.
-async function cohortStripeFee(pi, acct){
-  if (!pi || !acct) return 0;
-  try{
-    let ch = null;
-    if (String(pi).startsWith('ch_')) { ch = await stripe.charges.retrieve(pi, { expand: ['balance_transaction'] }, { stripeAccount: acct }); }
-    else { const intent = await stripe.paymentIntents.retrieve(pi, { expand: ['latest_charge.balance_transaction'] }, { stripeAccount: acct }); ch = intent && intent.latest_charge; if (typeof ch === 'string') ch = await stripe.charges.retrieve(ch, { expand: ['balance_transaction'] }, { stripeAccount: acct }); }
-    if (!ch || typeof ch !== 'object') return 0;
-    let bt = ch.balance_transaction;
-    if (typeof bt === 'string') { try { bt = await stripe.balanceTransactions.retrieve(bt, { stripeAccount: acct }); } catch (e) {} }
-    if (!bt || typeof bt !== 'object') return 0;
-    let sFee = 0, aFee = 0;
-    if (Array.isArray(bt.fee_details)) { for (const fd of bt.fee_details) { if (fd.type === 'stripe_fee') sFee += fd.amount; else if (fd.type === 'application_fee') aFee += fd.amount; } }
-    if (sFee === 0 && aFee === 0) { aFee = ch.application_fee_amount || 0; sFee = (bt.fee || 0) - aFee; }
-    return Math.round(sFee) / 100;
-  }catch(e){ console.error('cohortStripeFee', e.message); return 0; }
-}
-export function cohortDokladPdf(o){
-  return new Promise((resolve, reject) => {
-    try{
-      const rec = o.gym || {};
-      const seller = rec.legal_name || rec.name || o.gymName || 'Poskytovatel';
-      const c = String(o.cur || 'CZK').toUpperCase();
-      const sym = c === 'CZK' ? 'Kč' : (c === 'EUR' ? '€' : (c === 'USD' ? '$' : c));
-      const isPayer = !!rec.vat_payer;
-      const rate = isPayer ? (rec.vat_rate != null ? Number(rec.vat_rate) : 21) : 0;
-      const amt = Math.round((Number(o.amount) || 0) * 100) / 100;
-      const base = isPayer ? Math.round((amt / (1 + rate / 100)) * 100) / 100 : amt;
-      const vat = isPayer ? Math.round((amt - base) * 100) / 100 : 0;
-      const fmt = (n) => { const v = Math.round((Number(n) || 0) * 100) / 100; try { return v.toLocaleString('cs-CZ', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); } catch (e) { return v.toFixed(2); } };
-      const doc = new PDFDocument({ size: 'A4', margin: 50 });
-      const chunks = []; doc.on('data', d => chunks.push(d)); doc.on('end', () => resolve(Buffer.concat(chunks))); doc.on('error', reject);
-      doc.registerFont('cz', DEJAVU_CZ); doc.font('cz');
-      doc.fontSize(22).fillColor('#E11111').text('MTL');
-      doc.moveDown(0.15).fontSize(11).fillColor('#777777').text('Potvrzení o platbě');
-      doc.moveDown(1);
-      const row = (l, v) => { const y = doc.y; doc.fontSize(11).fillColor('#555555').text(l, 50, y, { width: 230 }); const after = doc.y; doc.fillColor('#111111').text(String(v == null ? '' : v), 315, y, { width: 230, align: 'right' }); doc.y = Math.max(after, doc.y) + 4; };
-      row('Poskytovatel (prodejce)', seller);
-      row('Datum vystavení', _czDate(o.issued || new Date().toISOString().slice(0,10)));
-      if (o.providerContact) row('Kontakt na poskytovatele', o.providerContact);
-      if (rec.tax_id) row('IČO', rec.tax_id);
-      if (rec.vat_id) row('DIČ', rec.vat_id);
-      if (_billAddr(rec)) row('Sídlo', _billAddr(rec));
-      row('Odběratel', o.buyer || '');
-      if (o.participant) row('Účastník', o.participant);
-      row('Položka', o.item || '');
-      row('Termín lekce', _czDate(o.date || ''));
-      if (o.ref) row('Reference platby (Stripe)', o.ref);
-      doc.moveDown(0.3);
-      if (isPayer) { row('Základ daně', fmt(base) + ' ' + sym); row('DPH ' + rate + '%', fmt(vat) + ' ' + sym); }
-      const yT = doc.y; doc.fontSize(13).fillColor('#111111').text('Celkem', 50, yT, { width: 230 }); doc.text(fmt(amt) + ' ' + sym, 315, yT, { width: 230, align: 'right' }); doc.y += 8;
-      if (!isPayer) { doc.moveDown(0.3).fontSize(10).fillColor('#777777').text('Poskytovatel není plátcem DPH.', 50); }
-      doc.moveDown(1.2).fontSize(9).fillColor('#999999').text('Platný doklad o platbě pro tvou evidenci. Prodejcem služby je výše uvedený poskytovatel — MTL je platforma, která platbu zprostředkovala. Potřebuješ formální fakturu? Vyžádej si ji u poskytovatele.', 50, doc.y, { width: 495 });
-      doc.end();
-    }catch(e){ reject(e); }
-  });
-}
 export function cohortDepositHtml(name, courseName, gymName, depositTxt, remainderTxt, startTxt, _appUrl, nonprofit) {
   // Czech has vocative declension ('Petr' -> 'Petře'); getting it wrong reads worse than omitting,
   // so we greet without the name. (name kept in the signature for callers / future localisation.)
@@ -619,7 +520,7 @@ let _ECO_CFG = null;
 async function _ecoCfg() {
   if (_ECO_CFG) return _ECO_CFG;
   try {
-    const rows = await sbGet('profiles?id=eq.7e08d4bb-0efa-47ae-bd6a-85e9bd04400c&select=mtl_eco_pixel,mtl_eco_capi_token');
+    const rows = await sbGet('profiles?id=eq.'+encodeURIComponent((process.env.FOUNDER_UUID || '').trim())+'&select=mtl_eco_pixel,mtl_eco_capi_token');
     const f = rows && rows[0];
     _ECO_CFG = (f && f.mtl_eco_pixel && f.mtl_eco_capi_token) ? { pixel: f.mtl_eco_pixel, token: f.mtl_eco_capi_token } : { pixel: '', token: '' };
   } catch (e) { _ECO_CFG = { pixel: '', token: '' }; }
@@ -851,7 +752,7 @@ export default async function handler(req, res) {
                   method: 'card_paynow', noNotify: true,   // zprávu pošle _paynowNotify (jedna za platbu)
                   mail: async (to, inv, r) => {
                     let en = false; try { const p = ((await sbGet(`profiles?id=eq.${encodeURIComponent(inv.owner_id || inv.coach_id)}&select=lang`)) || [])[0]; en = !!(p && p.lang === 'en'); } catch (e) {}
-                    await sendResend(to, `${receiptTitle(inv.kind, en)} ${docNo(r)}`, receiptMailHtml(inv, r, en));
+                    await sendResend(to, `${receiptTitle(inv.kind, en)} ${docNo(r)}`, receiptMailHtml(r, en));
                   },
                 });
               } catch (e) { console.error('[commission_paynow] receipt', e && e.message); }
@@ -1067,12 +968,10 @@ export default async function handler(req, res) {
               const money = (x) => Math.round(x) + ' ' + cur2;
               const fromName = (gymName || 'Martial Training Lab').replace(/["<>]/g, '');
               let _dokAtt = undefined;
-              let _testDok = false; try { _testDok = await isTestMode(); } catch (e) {}
               try {
-                // Doklad ze SNÍMKU (stejný jako v appce, v testu s označením TESTOVACÍ REŽIM); stará
-                // verze jen naostro, když snímek ještě není -- ta testovací označení nemá.
+                // Doklad jen ze SNÍMKU (stejný jako v appce, /doklad-layout.js).
                 const _snapPdf = pi ? await dokladPdfFor({ paymentIntent: pi }) : null;
-                const _dokBuf = _snapPdf ? _snapPdf.buffer : _testDok ? null : await cohortDokladPdf({ gym: gymRec, gymName: gymName, buyer: (mem.name || mem.email || ''), item: ((coh.name || 'Kurz') + ' — záloha'), amount: amount, cur: cur2, ref: pi || '', date: _czDate(new Date().toISOString().slice(0,10)) });
+                const _dokBuf = _snapPdf ? _snapPdf.buffer : null;   // bez snímku žádný doklad -- neskládá se z dnešních dat
                 if (_dokBuf) _dokAtt = [{ filename: 'MTL-potvrzeni-o-platbe.pdf', content: _dokBuf.toString('base64') }];
               } catch (e) { console.error('cohort doklad pdf', e.message); }
               await sendResend(_toMail, (coh.name || 'Kurz') + ' \u2014 z\u00E1loha p\u0159ijata', cohortDepositHtml(mem.name, coh.name || 'Kurz', gymName, money(amount), remainder > 0 ? money(remainder) : '', coh.start_date || '', ((process.env.APP_URL || process.env.PUBLIC_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '') + '/?myclass=' + encodeURIComponent(cmId)), !!(gymRec && gymRec.org_form === 'nonprofit')), { from: '"' + fromName + '" <' + MAIL_ADDR + '>', replyTo: ownerEmail || undefined, attachments: _dokAtt });
@@ -1158,7 +1057,7 @@ export default async function handler(req, res) {
             const _g = ((await sbGet(`gyms?owner_id=eq.${encodeURIComponent(uid)}&select=id,name&limit=1`)) || [])[0] || null;
             const _yr = m.ep_interval === 'year';
             const _amt = _paid ? (_paid.toLocaleString('cs-CZ') + ' ' + (_pcur === 'CZK' ? 'Kč' : _pcur) + '/měs. bez DPH' + (_yr ? ' (roční předplatné)' : '')) : '';
-            await sbPost('notifications', { user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'system', read: false,
+            await sbPost('notifications', { user_id: (process.env.FOUNDER_UUID || '').trim(), type: 'system', read: false,
               data: JSON.stringify({ kind: 'new_provider', what: 'partner', user_id: uid, gym_id: _g ? _g.id : null }),
               message: '⭐ Nový Exclusive MTL Partner: ' + (_p.name || _p.email || 'bez jména')
                 + (_g ? (' · klub ' + (_g.name || '')) : (_p.coach_status === 'approved' ? ' · kouč' : ''))
@@ -1214,7 +1113,7 @@ export default async function handler(req, res) {
             message: _anc
               ? ('🧰 Předplatné profilu dodavatele ' + (_o.name || '') + ' teď platíš ze své karty. První platba se strhne ' + _ancD + ', profil běží bez přerušení. Faktura přijde e-mailem po každé platbě.')
               : ('🧰 Profil dodavatele ' + (_o.name || '') + ' je zveřejněný — kluby, kouči a pořadatelé ho teď najdou v sekci Dodavatelé. Faktura za předplatné přijde e-mailem.') });
-          await sbPost('notifications', { user_id: '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c', type: 'system', read: false,
+          await sbPost('notifications', { user_id: (process.env.FOUNDER_UUID || '').trim(), type: 'system', read: false,
             data: JSON.stringify({ kind: 'new_provider', what: 'supplier', org_id: orgId }),
             message: _anc
               ? ('🧰 Dodavatel ' + (_o.name || orgId) + ': založeno navazující předplatné (první platba ' + _ancD + ').')

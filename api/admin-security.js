@@ -4,7 +4,7 @@
 // browser can't read them directly — this endpoint is the gated window in.
 const SB    = process.env.SUPABASE_URL;
 const SKEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const FOUNDER_UUID = '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
+const FOUNDER_UUID = (process.env.FOUNDER_UUID || '').trim();
 
 async function sb(path, opts = {}) {
   const r = await fetch(`${SB}/rest/v1/${path}`, {

@@ -39,6 +39,10 @@ async function geocode(q, cc) {
 }
 
 export default async function handler(req, res) {
+  // JEN VERCEL CRON. Bez tajného klíče by úlohu spustil kdokoli, kdo zná adresu.
+  const _cron = (process.env.CRON_SECRET || '').trim();
+  if (!_cron) return res.status(500).json({ error: 'CRON_SECRET not configured' });
+  if (String(req.headers.authorization || '') !== `Bearer ${_cron}`) return res.status(401).json({ error: 'unauthorized' });
   let done = 0, failed = 0;
   try {
     // Nejdřív adresa, pak město, pak jen země: čím přesnější, tím lepší, ale i hrubý bod
