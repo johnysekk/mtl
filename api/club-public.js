@@ -104,12 +104,6 @@ export default async function handler(req, res) {
   const gr = slug ? await sbGet(`gyms?slug=eq.${encodeURIComponent(slug)}&select=*&limit=1`)
                   : await sbGet(`gyms?id=eq.${encodeURIComponent(id)}&select=*&limit=1`);
   const g = gr && gr[0];
-  // Stará adresa (klub si ji změnil) -> trvalé přesměrování na novou (sql/share-links.sql).
-  if (!g && slug) {
-    const hs = await sbGet(`slug_history?kind=eq.club&old_slug=eq.${encodeURIComponent(slug)}&select=entity_id&limit=1`);
-    const nw = hs && hs[0] ? (await sbGet(`gyms?id=eq.${encodeURIComponent(hs[0].entity_id)}&select=slug&limit=1`))[0] : null;
-    if (nw && nw.slug && nw.slug !== slug) { res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400'); res.setHeader('Location', '/club/' + encodeURIComponent(nw.slug)); return res.status(301).end(); }
-  }
   if (!g) console.log('[club-public] klub nenalezen nebo dotaz selhal:', id || slug);
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');

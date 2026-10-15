@@ -8,9 +8,8 @@
 // u odkazu na jednostránkovou appku ukáže jen obecné MTL. Přihláška ani nákup se tu nestaví
 // podruhé.
 //
-// Adresy se tvoří automaticky z názvů (sql/share-links.sql). Stará adresa pořadatele (po ruční
-// změně) se přesměruje na novou (slug_history). Sledovací parametry z odkazu (src, utm_*,
-// fbclid, gclid) jdou dál do appky, ať se zdroj přihlášky nepoztrácí.
+// Adresy se tvoří automaticky z názvů a nemění se (sql/share-links.sql). Sledovací parametry
+// z odkazu (src, utm_*, fbclid, gclid) jdou dál do appky, ať se zdroj přihlášky nepoztrácí.
 const _SUPA = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const _KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])$/;
@@ -74,18 +73,9 @@ export default async function handler(req, res) {
   // Sledovací parametry dál do appky.
   const pass = Object.keys(q).filter((k) => PASS.test(k)).map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(String(q[k]).slice(0, 200))).join('&');
   try {
-    // Pořadatel podle adresy; stará adresa -> přesměrování na novou.
-    let own = (await sbGet(`${OWNER[ok].tbl}?slug=eq.${encodeURIComponent(owner)}&select=${OWNER[ok].sel}&limit=1`))[0];
-    if (!own) {
-      const hs = (await sbGet(`slug_history?kind=eq.${ok}&old_slug=eq.${encodeURIComponent(owner)}&select=entity_id&limit=1`))[0];
-      const nw = hs ? (await sbGet(`${OWNER[ok].tbl}?id=eq.${encodeURIComponent(hs.entity_id)}&select=slug&limit=1`))[0] : null;
-      if (nw && nw.slug && nw.slug !== owner) {
-        res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400');
-        res.setHeader('Location', origin + '/' + ok + '/' + nw.slug + '/' + kind + '/' + slug + (pass ? '?' + pass : ''));
-        return res.status(301).end();
-      }
-      return home();
-    }
+    // Pořadatel podle adresy.
+    const own = (await sbGet(`${OWNER[ok].tbl}?slug=eq.${encodeURIComponent(owner)}&select=${OWNER[ok].sel}&limit=1`))[0];
+    if (!own) return home();
     let o = null;
     const csOf = (country) => !country || ['CZ', 'SK'].includes(String(country).toUpperCase());
     if (kind === 'course') {
