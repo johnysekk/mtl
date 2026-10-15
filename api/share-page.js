@@ -96,7 +96,10 @@ export default async function handler(req, res) {
     if (!own) return home();
     let o = null;
     const ownQ = await ownerParams(ok, own);
-    const tail = [ownQ, pass].filter(Boolean).join('&');
+    // share= hezká adresa: appka si parametry uloží a adresní řádek vrátí na ni (_shareUrlDone),
+    // takže návštěvník vidí a kopíruje jen hezký odkaz -- a ten zase vede sem.
+    const sharePath = '/' + ok + '/' + own.slug + '/' + kind + '/' + slug;
+    const tail = [ownQ, pass, 'share=' + encodeURIComponent(sharePath)].filter(Boolean).join('&');
     const csOf = (country) => !country || ['CZ', 'SK'].includes(String(country).toUpperCase());
     if (kind === 'course') {
       const c = (await sbGet(`gym_cohorts?gym_id=eq.${encodeURIComponent(own.id)}&slug=eq.${encodeURIComponent(slug)}&select=id,name,start_date,price_regular,price_tiers,currency,description,poster&limit=1`))[0];
@@ -130,7 +133,7 @@ export default async function handler(req, res) {
       if (ok === 'club' || ok === 'coach') { res.setHeader('Cache-Control', 'public, max-age=60'); res.setHeader('Location', origin + '/' + ok + '/' + own.slug); return res.status(302).end(); }
       return home();
     }
-    o.canonical = origin + '/' + ok + '/' + own.slug + '/' + kind + '/' + slug;
+    o.canonical = origin + sharePath;
     res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=600');
     return res.status(200).send(page(o));
   } catch (err) {
