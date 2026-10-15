@@ -94,7 +94,7 @@ export function rcptItems(dk) {
 
 // ── TEXTY ────────────────────────────────────────────────────────────────────────────────────
 const TX = {
-  cs: { supplier: 'Dodavatel', customer: 'Odběratel', provider: 'Poskytovatel (prodejce)', participant: 'Účastník',
+  cs: { supplier: 'Dodavatel', customer: 'Odběratel', provider: 'Poskytovatel služby', participant: 'Účastník',
     invNo: 'Číslo faktury', docNo: 'Číslo dokladu', issued: 'Datum vystavení', duzp: 'Datum uskutečnění plnění',
     period: 'Období', subPeriod: 'Období předplatného', billedAs: 'Fakturováno za', method: 'Způsob úhrady', card: 'Platební karta',
     session: 'Termín lekce', payRef: 'Reference platby (Stripe)',
@@ -114,9 +114,9 @@ const TX = {
     preview: 'NÁHLED — částky jsou ukázkové',
     noSnapT: 'Tenhle doklad nemá snímek',
     noSnap: 'Nebudeme ho skládat z dnešních dat — nebyl by to doklad, který byl vystaven. Částky najdeš v účetnictví.',
-    studentNote: 'Platné potvrzení o zaplacení pro tvé účely. Prodejcem služby je výše uvedený poskytovatel — MTL je platforma, která platbu zprostředkovala. Potřebuješ formální daňový doklad (fakturu)? Vyžádej si ho u poskytovatele. Vygenerováno přes MTL.',
+    studentNote: 'Platné potvrzení o zaplacení pro tvé účely. Poskytovatel služby je uveden výše. MTL platbu jen zprostředkovává. Potřebuješ formální daňový doklad (fakturu)? Vyžádej si ho u poskytovatele. Vygenerováno přes MTL.',
     payment: 'Platba', invoice: 'faktura', invoices: 'faktury' },
-  en: { supplier: 'Supplier', customer: 'Customer', provider: 'Provider (seller)', participant: 'Participant',
+  en: { supplier: 'Supplier', customer: 'Customer', provider: 'Service provider', participant: 'Participant',
     invNo: 'Invoice no.', docNo: 'Document no.', issued: 'Issued', duzp: 'Date of supply',
     period: 'Period', subPeriod: 'Subscription period', billedAs: 'Billed as', method: 'Payment method', card: 'Payment card',
     session: 'Session date', payRef: 'Payment ref (Stripe)',
@@ -136,7 +136,7 @@ const TX = {
     preview: 'PREVIEW — sample amounts',
     noSnapT: 'This receipt has no snapshot',
     noSnap: 'We will not rebuild it from today’s data — that would not be the document that was issued. The amounts are in Accounting.',
-    studentNote: 'A valid proof of payment for your records. The seller of the service is the provider named above — MTL is the platform that facilitated the payment. Need a formal tax invoice? Request it from the provider. Generated via MTL.',
+    studentNote: 'A valid proof of payment for your records. The service provider is named above. MTL only mediates the payment. Need a formal tax invoice? Request it from the provider. Generated via MTL.',
     payment: 'Payment', invoice: 'invoice', invoices: 'invoices' },
 };
 const _t = (lang) => TX[_isEn(lang) ? 'en' : 'cs'];
@@ -255,8 +255,9 @@ export function mtlModel(dk, lang, opts) {
     // Období od–do; Stripe dává konec jako začátek dalšího období, proto o den méně.
     const per = subPeriod(dk, lang);
     m.facts = [[T.invNo, docNo(dk)], [T.issued, D(dk.issued_at || dk.charged_at)], [T.subPeriod, per], [T.duzp, duzp], [T.method, m.status.paid ? T.card : '']];
-    // Položka: česky přesně podle snímku, anglicky druh + měsíc.
-    const label = en ? ((isSup ? T.iSup : T.iEp) + ' ' + String(dk.period_month || '')) : (li.label || ((isSup ? T.iSup : T.iEp) + ' ' + String(dk.period_month || '')));
+    // Položka podle snímku (česky label, anglicky label_en -- má ho doklad od stupňů EP); starší
+    // doklady bez anglického názvu: druh + měsíc.
+    const label = en ? (li.label_en || ((isSup ? T.iSup : T.iEp) + ' ' + String(dk.period_month || ''))) : (li.label || ((isSup ? T.iSup : T.iEp) + ' ' + String(dk.period_month || '')));
     m.table = { cols: [{ t: T.item, w: 3 }, { t: T.subPeriod, a: 'c', w: 2 }, { t: T.amount, a: 'r', w: 1.4 }], rows: [[label, per, M(dk.amount)]] };
   } else {
     m.title = T.tCommission;
