@@ -2,16 +2,22 @@
 //
 // Student zaplatí QR převodem, Finbricks hlídá výpis účtu příjemce a jakmile platba s naším
 // variabilním symbolem a částkou dorazí, MTL ji potvrdí samo (stejné zaúčtování jako platba
-// z účtu: pisSettle s kolejí 'qr'). Klub / kouč nemusí nic odklikávat. Páruje se KAŽDÁ CZK QR
-// platba, jejíž příjemce má zapnuté „Automaticky potvrzovat platbu přes vygenerovaný QR kód"
-// (pairing_on, výchozí zapnuto). Účet příjemce se připojuje ve Finbricks; MTL ho neeviduje.
+// z účtu: pisSettle s kolejí 'qr'). Klub / kouč nemusí nic odklikávat.
 //
-// POST { action, ... }
-//   reserve  { iban, amount, currency }        přihlášený: VS do QR (Finbricks se nevolá, nic
-//                                               se neplatí). Vrací { vs } nebo { vs: null }.
-//   attach   { vs, tbl, id }                    přihlášený: „Zaplaceno" -- ověří řádek, cenu
-//                                               a příjemce, pošle Finbricks požadavek na párování
-//                                               a zapíše pairing_id na řádek platby
+// PÁRUJE SE JEN, KDYŽ: platba je v CZK, příjemce má zapnuté „Automaticky potvrzovat platbu přes
+// vygenerovaný QR kód" (pairing_on) A má PLATNĚ PŘIPOJENÝ účet (pairing_links), na který platba
+// jde. Účet si příjemce připojuje sám v Nastavení plateb: přihlásí se přes Finbricks do banky
+// (jen čtení pohybů -- AISP, max. 180 dní). Bez toho QR + ruční potvrzení jako dosud.
+// (Finbricks přijme párování i na nepřipojený účet a pak ho nikdy nespáruje -- proto ta brána.)
+//
+// POST { action, ... }   (přihlášený)
+//   reserve      { iban, amount, currency }     VS do QR, jen na připojený účet. { vs } / { vs: null }
+//   attach       { vs, tbl, id }                „Zaplaceno" -- ověří řádek, cenu, příjemce
+//                                               a připojení, pošle Finbricks požadavek na párování
+//   link_status  { kind, id }                   stav připojení účtu subjektu (gym / coach / org)
+//   link_banks   { kind, id }                   banky, přes které jde účet připojit
+//   link_start   { kind, id, provider }         -> { url } přihlášení do banky (Finbricks)
+//   link_check   { kind, id }                   po návratu z banky: platnost a účty z Finbricks
 //
 // TESTOVACÍ REŽIM: QR i párování jsou na 1 Kč. Mock Cobs Finbricks pro párování NEPODPORUJE
 // (chyba 10003), takže se testuje skutečným převodem 1 Kč na skutečný účet připojený
@@ -19,9 +25,10 @@
 // POST ?notify=1    notifikace od Finbricks (adresa se nastavuje v jejich administraci). Tělu
 //                   nevěříme -- bere se z něj jen id párování a stav si server zjistí sám
 //                   podepsaným dotazem na Finbricks.
-// GET  ?cron=1      (CRON_SECRET) dotaz na stav otevřených párování a úklid.
+// GET  ?cron=1      (CRON_SECRET) stav otevřených párování, úklid, jednou denně obnova
+//                   připojení účtů z Finbricks + upozornění před koncem a po konci platnosti.
 import { createClient } from '@supabase/supabase-js';
-import { fbxConf, fbxNow, fbxCall, FBX_MAX_SANDBOX } from './_fbx.js';
+import { fbxConf, fbxNow, fbxCall, psuIpFrom, FBX_MAX_SANDBOX } from './_fbx.js';
 import { isTestMode } from './_config.js';
 import { checkRowPrice } from './_price-check.js';
 import { cohortPisPlan } from './_cohort-pis.js';
@@ -32,6 +39,9 @@ const TABLES = ['gym_bookings', 'gym_memberships', 'bookings', 'event_tickets', 
 const PAID = ['paid', 'active', 'deposit_paid', 'enrolled', 'converted', 'completed'];
 const GONE = ['released', 'expired', 'cancelled', 'refunded', 'ended', 'removed', 'declined'];
 const FINISH_DAYS = 4;          // převod může trvat přes víkend
+const LINK_WARN_DAYS = 14;      // upozornění před koncem připojení účtu
+const APP = (process.env.APP_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '');
+const KINDS = ['gym', 'coach', 'org'];
 const iban = (v) => String(v || '').replace(/\s+/g, '').toUpperCase();
 const r2 = (x) => Math.round(Number(x || 0) * 100) / 100;
 
@@ -44,22 +54,101 @@ async function who(req) {
 // Příjemce řádku VŽDY z databáze (komu platba patří), nikdy z prohlížeče: jeho IBANy a jestli
 // má zapnuté „Automaticky potvrzovat platbu přes vygenerovaný QR kód" (pairing_on, výchozí zapnuto).
 async function payeeOf(tbl, row) {
-  const out = []; let on = true;
+  const out = []; let on = true, ent = null;
   const add = (v) => { const x = iban(v); if (x && out.indexOf(x) < 0) out.push(x); };
-  const gym = async (id) => { const g = (await sb.from('gyms').select('receiver_id_value,pairing_on').eq('id', id).maybeSingle()).data; if (g) { add(g.receiver_id_value); on = g.pairing_on !== false; } };
-  const coach = async (id) => { const c = (await sb.from('profiles').select('receiver_id_value,payout_receiver_id_value,pairing_on').eq('id', id).maybeSingle()).data; if (c) { add(c.receiver_id_value); add(c.payout_receiver_id_value); on = c.pairing_on !== false; } };
+  const gym = async (id) => { const g = (await sb.from('gyms').select('receiver_id_value,pairing_on').eq('id', id).maybeSingle()).data; if (g) { add(g.receiver_id_value); on = g.pairing_on !== false; ent = { kind: 'gym', id: String(id) }; } };
+  const coach = async (id) => { const c = (await sb.from('profiles').select('receiver_id_value,payout_receiver_id_value,pairing_on').eq('id', id).maybeSingle()).data; if (c) { add(c.receiver_id_value); add(c.payout_receiver_id_value); on = c.pairing_on !== false; ent = { kind: 'coach', id: String(id) }; } };
   if (tbl === 'event_tickets') {
     const ev = (await sb.from('events').select('gym_id,payout_coach_id,organization_id').eq('id', row.event_id).maybeSingle()).data;
     if (ev && ev.payout_coach_id) await coach(ev.payout_coach_id);
     else if (ev && ev.gym_id) await gym(ev.gym_id);
-    else if (ev && ev.organization_id) { const o = (await sb.from('organizations').select('receiver_id_value,pairing_on').eq('id', ev.organization_id).maybeSingle()).data; if (o) { add(o.receiver_id_value); on = o.pairing_on !== false; } }
+    else if (ev && ev.organization_id) { const o = (await sb.from('organizations').select('receiver_id_value,pairing_on').eq('id', ev.organization_id).maybeSingle()).data; if (o) { add(o.receiver_id_value); on = o.pairing_on !== false; ent = { kind: 'org', id: String(ev.organization_id) }; } }
   } else if (tbl === 'cohort_members') {
     const co = (await sb.from('gym_cohorts').select('gym_id').eq('id', row.cohort_id).maybeSingle()).data;
     if (co && co.gym_id) await gym(co.gym_id);
   } else if (tbl === 'merch_orders' && row.coach_id) await coach(row.coach_id);   // merch kouče jde kouči (jako v pis-return)
   else if (row.gym_id) await gym(row.gym_id);
   else if (row.coach_id) await coach(row.coach_id);
-  return { ibans: out, on };
+  return { ibans: out, on, ent };
+}
+
+// ── PŘIPOJENÍ ÚČTU K PÁROVÁNÍ (pairing_links) ──────────────────────────────────────────
+const nowIso = () => new Date().toISOString();
+// Platné připojení subjektu, které pokrývá daný účet (prostředí = sandbox / production).
+async function linkCovers(ent, ib, env) {
+  if (!ent || !ib) return false;
+  const l = (await sb.from('pairing_links').select('status,valid_to,ibans').eq('ent_kind', ent.kind).eq('ent_id', ent.id).eq('fbx_env', env).maybeSingle()).data;
+  return !!(l && l.status === 'active' && l.valid_to && new Date(l.valid_to).getTime() > Date.now() && (l.ibans || []).includes(ib));
+}
+// Subjekt, jeho majitel, název a výplatní účty. Null, když ho přihlášený nespravuje.
+async function entityOf(kind, id, me) {
+  if (!KINDS.includes(kind) || !id) return null;
+  const add = (arr, v) => { const x = iban(v); if (x && arr.indexOf(x) < 0) arr.push(x); return arr; };
+  if (kind === 'gym') {
+    const g = (await sb.from('gyms').select('id,name,owner_id,receiver_id_value,pairing_on').eq('id', id).maybeSingle()).data;
+    if (!g || (me && String(g.owner_id) !== String(me))) return null;
+    return { kind, id: String(g.id), owner: g.owner_id, name: g.name || 'Klub', ibans: add([], g.receiver_id_value), on: g.pairing_on !== false };
+  }
+  if (kind === 'coach') {
+    const c = (await sb.from('profiles').select('id,name,receiver_id_value,payout_receiver_id_value,pairing_on').eq('id', id).maybeSingle()).data;
+    if (!c || (me && String(c.id) !== String(me))) return null;
+    return { kind, id: String(c.id), owner: c.id, name: c.name || 'Kouč', ibans: add(add([], c.receiver_id_value), c.payout_receiver_id_value), on: c.pairing_on !== false };
+  }
+  const o = (await sb.from('organizations').select('id,name,owner_id,receiver_id_value,pairing_on').eq('id', id).maybeSingle()).data;
+  if (!o || (me && String(o.owner_id) !== String(me))) return null;
+  return { kind, id: String(o.id), owner: o.owner_id, name: o.name || 'Organizace', ibans: add([], o.receiver_id_value), on: o.pairing_on !== false };
+}
+// Stav pro appku: none | pending | active | mismatch (připojený účet není výplatní) | expired | error
+function linkView(l, e) {
+  if (!l) return { state: 'none', need: e.ibans };
+  const live = l.status === 'active' && l.valid_to && new Date(l.valid_to).getTime() > Date.now();
+  const state = live ? (e.ibans.some((x) => (l.ibans || []).includes(x)) ? 'active' : 'mismatch')
+    : (l.status === 'active' ? 'expired' : l.status);
+  return { state, provider: l.provider, bank: l.bank_name, valid_to: l.valid_to, ibans: l.ibans || [], need: e.ibans, error: l.last_error || null };
+}
+// Platnost a účty VŽDY z Finbricks: /auth/token (validTo), /account/list (IBANy).
+async function linkRefresh(l, psu) {
+  const C = fbxConf(l.fbx_env);
+  const q = `merchantId=${encodeURIComponent(C.merchant)}&clientId=${encodeURIComponent(l.client_id)}`;
+  const t = await fbxCall(C, 'GET', `/auth/token?${q}&provider=${encodeURIComponent(l.provider || '')}`, null);
+  const upd = { checked_at: nowIso(), updated_at: nowIso() };
+  if (!t.ok) { upd.last_error = 'token HTTP ' + t.status + ' ' + JSON.stringify(t.data || '').slice(0, 300); await sb.from('pairing_links').update(upd).eq('ent_kind', l.ent_kind).eq('ent_id', l.ent_id).eq('fbx_env', l.fbx_env); return { ...l, ...upd }; }
+  const recs = (Array.isArray(t.data) ? t.data : []).filter((x) => String(x.scope || '').indexOf('AISP') >= 0);
+  const best = recs.sort((a, b) => String(b.validTo).localeCompare(String(a.validTo)))[0];
+  if (!best || new Date(best.validTo).getTime() <= Date.now()) {
+    // Žádné platné přihlášení: buď ho banka / uživatel zrušil nebo vypršelo, nebo se nedokončilo.
+    upd.status = (l.status === 'active' || l.status === 'expired') ? 'expired' : 'error';
+    upd.last_error = l.status === 'pending' ? 'Přihlášení do banky se nedokončilo' : null;
+  } else {
+    upd.status = 'active'; upd.valid_to = best.validTo; upd.last_error = null;
+    const a = await fbxCall(C, 'GET', `/account/list?${q}&paymentProvider=${encodeURIComponent(l.provider || best.provider || '')}`, null,
+      { psuIp: (psu && psu.ip) || '88.205.47.1', psuUa: (psu && psu.ua) || 'MTL/1.0' });
+    if (a.ok && a.data && Array.isArray(a.data.accounts)) {
+      upd.ibans = a.data.accounts.map((x) => iban(x && x.identification && x.identification.iban)).filter(Boolean);
+    } else upd.last_error = 'account/list HTTP ' + a.status + ' ' + JSON.stringify(a.data || '').slice(0, 300);
+    // Nové připojení / obnova: upozornění se zase pošlou až u nového konce.
+    if (!l.valid_to || String(l.valid_to) !== String(best.validTo)) { upd.warned_at = null; upd.expired_noted_at = null; }
+  }
+  await sb.from('pairing_links').update(upd).eq('ent_kind', l.ent_kind).eq('ent_id', l.ent_id).eq('fbx_env', l.fbx_env);
+  return { ...l, ...upd };
+}
+// Notifikace majiteli: před koncem a po konci připojení. Proklik rovnou do Nastavení plateb.
+async function linkNote(l, e, kind) {
+  if (!e || !e.owner) return;
+  const until = l.valid_to ? new Date(l.valid_to) : null;
+  const dCs = until ? until.toLocaleDateString('cs-CZ', { timeZone: 'Europe/Prague' }) : '';
+  const dEn = until ? until.toLocaleDateString('en-GB', { timeZone: 'Europe/Prague' }) : '';
+  const who = (e.kind === 'gym' ? 'klubu ' : e.kind === 'org' ? 'organizace ' : '') + e.name;
+  const whoEn = (e.kind === 'gym' ? 'club ' : e.kind === 'org' ? 'organisation ' : '') + e.name;
+  const acc = (l.ibans || [])[0] || '';
+  const cs = kind === 'expiring'
+    ? `🏦 Připojení účtu ${acc} k párování plateb (${who}) vyprší ${dCs}. Obnov ho v Nastavení plateb (přihlásíš se do banky, zabere to minutu) — jinak budeš QR platby zase potvrzovat ručně.`
+    : `⚠️ Připojení účtu ${acc} k párování plateb (${who}) vypršelo${dCs ? ' ' + dCs : ''}. QR platby se teď potvrzují ručně, dokud účet v Nastavení plateb znovu nepřipojíš.`;
+  const en = kind === 'expiring'
+    ? `🏦 The connection of account ${acc} for payment matching (${whoEn}) expires on ${dEn}. Renew it in Payment settings (log in to your bank, takes a minute) — otherwise you will confirm QR payments by hand again.`
+    : `⚠️ The connection of account ${acc} for payment matching (${whoEn}) has expired${dEn ? ' on ' + dEn : ''}. QR payments are confirmed by hand until you reconnect the account in Payment settings.`;
+  await sb.from('notifications').insert({ user_id: e.owner, type: 'system', read: false, message: cs,
+    data: JSON.stringify({ kind: 'pairing_link', state: kind, ent_kind: e.kind, ent_id: e.id, until: l.valid_to || null, msg_cs: cs, msg_en: en }) });
 }
 
 // Částka, kterou má student za řádek zaplatit -- z ceníku / řádku, stejně jako u platby z účtu.
@@ -162,6 +251,28 @@ async function cron() {
   const old = new Date(now - 2 * 86400e3).toISOString();
   const cl = await sb.from('payment_pairings').delete().eq('status', 'reserved').lt('created_at', old).select('id');
   res.cleaned = (cl.data || []).length;
+  // 3) PŘIPOJENÍ ÚČTŮ: jednou denně platnost a účty z Finbricks, upozornění 14 dní před koncem
+  //    a po konci (každé jednou za období platnosti).
+  res.links = 0; res.linkNotes = 0;
+  const day = new Date(now - 20 * 3600e3).toISOString();
+  const links = (await sb.from('pairing_links').select('*').in('status', ['active', 'pending']).or(`checked_at.is.null,checked_at.lt."${day}"`).limit(200)).data || [];
+  for (const l0 of links) {
+    if (l0.status === 'pending' && now - new Date(l0.updated_at).getTime() < 3600e3) continue;   // ještě se vrací z banky
+    try { await linkRefresh(l0); res.links++; } catch (e) { console.error('[pairing] link', l0.ent_kind, l0.ent_id, e && e.message); }
+  }
+  const warnLim = new Date(now + LINK_WARN_DAYS * 86400e3).toISOString();
+  const soon = (await sb.from('pairing_links').select('*').eq('status', 'active').is('warned_at', null).lte('valid_to', warnLim).gt('valid_to', new Date(now).toISOString())).data || [];
+  for (const l of soon) {
+    const e = await entityOf(l.ent_kind, l.ent_id, null);
+    if (e && e.on) { await linkNote(l, e, 'expiring'); res.linkNotes++; }
+    await sb.from('pairing_links').update({ warned_at: nowIso() }).eq('ent_kind', l.ent_kind).eq('ent_id', l.ent_id).eq('fbx_env', l.fbx_env);
+  }
+  const gone = (await sb.from('pairing_links').select('*').is('expired_noted_at', null).or(`status.eq.expired,and(status.eq.active,valid_to.lte."${new Date(now).toISOString()}")`)).data || [];
+  for (const l of gone) {
+    const e = await entityOf(l.ent_kind, l.ent_id, null);
+    if (e && e.on) { await linkNote(l, e, 'expired'); res.linkNotes++; }
+    await sb.from('pairing_links').update({ status: 'expired', expired_noted_at: nowIso() }).eq('ent_kind', l.ent_kind).eq('ent_id', l.ent_id).eq('fbx_env', l.fbx_env);
+  }
   return res;
 }
 
@@ -196,6 +307,10 @@ export default async function handler(req, res) {
     if (action === 'reserve') {
       const ib = iban(b.iban), amount = r2(b.amount), cur = String(b.currency || 'CZK').toUpperCase();
       if (cur !== 'CZK' || !(amount > 0) || !/^CZ\d{22}$/.test(ib)) return res.status(200).json({ ok: true, vs: null });
+      // Jen na účet s platným připojením k párování (kterýkoli subjekt) -- jinak VS nemá smysl.
+      { const C0 = await fbxNow();
+        const ln = await sb.from('pairing_links').select('ent_id', { count: 'exact', head: true }).eq('fbx_env', C0.env).eq('status', 'active').gt('valid_to', nowIso()).contains('ibans', [ib]);
+        if (!(ln.count > 0)) return res.status(200).json({ ok: true, vs: null }); }
       // Pojistka proti zahlcení: nejvýš 20 nepoužitých VS na člověka za hodinu.
       const since = new Date(Date.now() - 3600e3).toISOString();
       const n = await sb.from('payment_pairings').select('id', { count: 'exact', head: true }).eq('user_id', me).eq('status', 'reserved').gte('created_at', since);
@@ -224,14 +339,14 @@ export default async function handler(req, res) {
       if (String(amt.currency).toUpperCase() !== 'CZK' || Math.abs(amt.amount - Number(p.amount)) > 0.005) return res.status(400).json({ error: 'Částka v QR neodpovídá platbě' });
       const payee = await payeeOf(tbl, row);
       if (!payee.ibans.includes(iban(p.iban))) return res.status(400).json({ error: 'Účet v QR nepatří příjemci platby' });
-      // Příjemce si automatické potvrzování vypnul -> potvrzuje ručně.
-      if (!payee.on) {
-        await sb.from('payment_pairings').update({ status: 'cancelled', tbl, row_id: id, last_error: 'payee turned pairing off' }).eq('id', p.id);
-        return res.status(200).json({ ok: true, status: 'off' });
-      }
-
       const C = await fbxNow();
       if (!C.ok) return res.status(500).json({ error: 'Finbricks ' + C.env + ' nemá nastavené klíče' });
+      // Příjemce si automatické potvrzování vypnul, nebo nemá platně připojený účet, na který
+      // platba jde -> potvrzuje ručně.
+      if (!payee.on || !(await linkCovers(payee.ent, iban(p.iban), C.env))) {
+        await sb.from('payment_pairings').update({ status: 'cancelled', tbl, row_id: id, last_error: payee.on ? 'account not connected' : 'payee turned pairing off' }).eq('id', p.id);
+        return res.status(200).json({ ok: true, status: 'off' });
+      }
       const finish = new Date(Date.now() + FINISH_DAYS * 86400e3).toISOString();
       const r = await fbxCall(C, 'POST', '/payment/pairing/schedule', { merchantId: C.merchant, payments: [{
         uniquePaymentPairingId: String(p.id),
@@ -267,6 +382,50 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, status: 'scheduled' });
     }
 
+    // ── PŘIPOJENÍ ÚČTU K PÁROVÁNÍ (Nastavení plateb klubu / kouče / organizace) ───────────
+    if (action === 'link_status' || action === 'link_banks' || action === 'link_start' || action === 'link_check') {
+      const e = await entityOf(String(b.kind || ''), String(b.id || ''), me);
+      if (!e) return res.status(403).json({ error: 'forbidden' });
+      const C = await fbxNow();
+      if (!C.ok) return res.status(500).json({ error: 'Finbricks ' + C.env + ' nemá nastavené klíče' });
+      const key = { ent_kind: e.kind, ent_id: e.id, fbx_env: C.env };
+      const cur = async () => (await sb.from('pairing_links').select('*').match(key).maybeSingle()).data;
+      const psu = { ip: psuIpFrom(req), ua: req.headers['user-agent'] || 'MTL/1.0' };
+
+      if (action === 'link_status') return res.status(200).json({ ok: true, env: C.env, ...linkView(await cur(), e) });
+
+      if (action === 'link_check') {
+        const l = await cur();
+        if (!l) return res.status(200).json({ ok: true, env: C.env, ...linkView(null, e) });
+        return res.status(200).json({ ok: true, env: C.env, ...linkView(await linkRefresh(l, psu), e) });
+      }
+
+      if (action === 'link_banks') {
+        const r = await fbxCall(C, 'GET', `/status/bankInfo?merchantId=${encodeURIComponent(C.merchant)}&countryCode=CZ&enabledForMerchant=true`, null);
+        if (!r.ok) return res.status(400).json({ error: 'Finbricks ' + r.status + ': ' + JSON.stringify(r.data || '').slice(0, 200) });
+        // Banka výplatního účtu nahoru (podle kódu banky v IBANu -> BIC).
+        const BIC = { '0100': 'KOMB', '0300': 'CEKO', '0600': 'AGBA', '0800': 'GIBA', '2010': 'FIOB', '2250': 'CTAS', '2700': 'BACX', '3030': 'AIRA', '5500': 'RZBC', '5800': 'JTBP', '6100': 'EQBK', '6210': 'BREX' };
+        const mine = e.ibans.map((x) => BIC[x.slice(4, 8)]).filter(Boolean);
+        const banks = (Array.isArray(r.data) ? r.data : []).filter((x) => x && x.paymentProvider && String(x.paymentProvider).toUpperCase() !== 'MOCK_COBS')
+          .map((x) => ({ provider: x.paymentProvider, name: x.bankName || x.paymentProvider, logo: x.logoUrl ? (String(x.logoUrl).startsWith('http') ? x.logoUrl : (C.base.replace('api.', 'cdn.') + x.logoUrl)) : null,
+            mine: mine.includes(String(x.bic || '').slice(0, 4).toUpperCase()) }))
+          .sort((a, c) => (Number(c.mine) - Number(a.mine)) || a.name.localeCompare(c.name, 'cs'));
+        return res.status(200).json({ ok: true, env: C.env, banks, need: e.ibans });
+      }
+
+      // link_start: přihlášení do banky (AISP = jen čtení pohybů), clientId = subjekt.
+      const provider = String(b.provider || '').trim();
+      if (!/^[A-Z0-9_]{2,50}$/.test(provider)) return res.status(400).json({ error: 'Vyber banku' });
+      const clientId = e.kind + '-' + e.id;
+      const r = await fbxCall(C, 'POST', '/v2/auth/authenticate', { merchantId: C.merchant, clientId, paymentProvider: provider, scope: 'AISP',
+        callbackUrl: APP + '/?pairlink=' + encodeURIComponent(e.kind + '.' + e.id) }, { psuIp: psu.ip, psuUa: psu.ua, lang: 'cs' });
+      if (!r.ok || !r.data || !r.data.redirectUrl) return res.status(400).json({ error: 'Finbricks: ' + JSON.stringify(r.data || { http: r.status }).slice(0, 300) });
+      const prev = await cur();
+      await sb.from('pairing_links').upsert({ ...key, client_id: clientId, provider, bank_name: String(b.bank_name || provider).slice(0, 80),
+        // Obnova platného připojení: dokud se nevrátí z banky, staré platí dál.
+        status: (prev && prev.status === 'active') ? 'active' : 'pending', updated_at: nowIso() }, { onConflict: 'ent_kind,ent_id,fbx_env' });
+      return res.status(200).json({ ok: true, url: r.data.redirectUrl });
+    }
     return res.status(400).json({ error: 'unknown action' });
   } catch (e) {
     console.error('[pairing]', e && e.message);
