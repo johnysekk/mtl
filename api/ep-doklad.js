@@ -228,12 +228,17 @@ export default async function handler(req, res) {
 
     const period = String(b.period_start || new Date().toISOString()).slice(0, 7);
     // Stupeň EP do názvu položky (b.ep_tier posílá webhook). b.change = faktura za přechod na
-    // vyšší stupeň: doplatek rozdílu za zbytek zaplaceného období.
+    // vyšší stupeň: doplatek rozdílu za zbytek zaplaceného období. b.change === 'year' = přechod
+    // z měsíční na roční platbu: roční cena minus nevyčerpané dny měsíce, jedna částka.
     const _tn = (!orgId && EP_TIER_NAMES[b.ep_tier]) ? (' ' + EP_TIER_NAMES[b.ep_tier]) : '';
+    const _dd = (iso, en) => { try { return new Date(iso).toLocaleDateString(en ? 'en-GB' : 'cs-CZ', { timeZone: 'Europe/Prague' }); } catch (e) { return String(iso || '').slice(0, 10); } };
+    const _yr = (en) => _dd(b.period_start, en) + ' – ' + _dd(b.period_end, en);
     const label = orgId ? ('Profil dodavatele MTL — předplatné ' + period)
-      : (b.change ? ('Exclusive MTL Partner — přechod na' + _tn + ', doplatek za zbytek období ' + period) : ('Exclusive MTL Partner' + _tn + ' — předplatné ' + period));
+      : (b.change === 'year' ? ('Exclusive MTL Partner' + _tn + ' — roční předplatné ' + _yr(false) + ', po odečtení nevyčerpaných dnů měsíčního předplatného')
+      : (b.change ? ('Exclusive MTL Partner — přechod na' + _tn + ', doplatek za zbytek období ' + period) : ('Exclusive MTL Partner' + _tn + ' — předplatné ' + period)));
     const labelEn = orgId ? null
-      : (b.change ? ('Exclusive MTL Partner — upgrade to' + _tn + ', difference for the rest of the period ' + period) : ('Exclusive MTL Partner' + _tn + ' — subscription ' + period));
+      : (b.change === 'year' ? ('Exclusive MTL Partner' + _tn + ' — yearly subscription ' + _yr(true) + ', less the unused days of the monthly subscription')
+      : (b.change ? ('Exclusive MTL Partner — upgrade to' + _tn + ', difference for the rest of the period ' + period) : ('Exclusive MTL Partner' + _tn + ' — subscription ' + period)));
     const PRODUCT = orgId ? 'profil dodavatele MTL' : ('Exclusive MTL Partner' + _tn), PRODUCT_EN = orgId ? 'MTL supplier profile' : ('Exclusive MTL Partner' + _tn);
     // ČÁSTKA V HALÉŘÍCH/CENTECH, stejně jako každý jiný řádek commission_doklady (doklad o
     // provizi). Webhook posílá celé koruny (amount_paid/100); dřív se uložily tak, jak přišly,

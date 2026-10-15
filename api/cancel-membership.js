@@ -114,6 +114,17 @@ export default async function handler(req, res) {
     const opts = gymAccount ? { stripeAccount: gymAccount } : undefined;
 
     let sub; let refunded = 0, refundId = null, currency = null, usedDays = null, totalDays = null;
+    // EP s naplánovaným přechodem z roční na měsíční platbu řídí plán předplatného (pay.js) a Stripe
+    // pak zrušení přímo na předplatném odmítne. Rušení přechod ruší taky: plán se nejdřív uvolní.
+    if (mtlSub && String(resume) !== '1') {
+      try {
+        const _s = await stripe.subscriptions.retrieve(subscriptionId);
+        if (_s && _s.schedule) {
+          await stripe.subscriptionSchedules.release(typeof _s.schedule === 'string' ? _s.schedule : _s.schedule.id);
+          if ((_s.metadata || {}).ep_interval_next) await stripe.subscriptions.update(subscriptionId, { metadata: { ep_interval_next: '' } });
+        }
+      } catch (e) { console.error('release schedule', e.message); }
+    }
     if (String(resume) === '1') {
       sub = await stripe.subscriptions.update(subscriptionId, { cancel_at_period_end: false }, opts);
     } else if (String(immediate) === '1') {

@@ -149,6 +149,45 @@ export async function notifyEpDowngradeScheduled(uid, from, to, atIso) {
   await _notifyFounder(uid, `⬇️ Exclusive Partner {who} přejde od ${_d(atIso, false)} z ${_name(from)} na ${_name(to)}.`);
 }
 
+// PŘECHOD Z MĚSÍČNÍ NA ROČNÍ PLATBU ZAPLACEN. Volá pay.js hned po stržení a webhook u faktury za
+// přechod (když banka chtěla platbu potvrdit). Proběhne jednou: kdo první smaže z předplatného
+// ep_interval_pending, ten zapíše roční interval do metadat a pošle zprávy.
+export async function finishEpYearly(uid, subId, { paid, currency } = {}) {
+  let s = null; try { s = await stripe.subscriptions.retrieve(String(subId)); } catch (e) { return false; }
+  const md = (s && s.metadata) || {};
+  if (md.ep_interval_pending !== 'year' || ['active', 'trialing', 'past_due'].indexOf(s.status) < 0) return false;
+  const it = s.items && s.items.data && s.items.data[0];
+  const unit = it && it.price ? it.price.unit_amount : 0;
+  const cur = String(currency || (it && it.price && it.price.currency) || 'czk').toUpperCase();
+  try { await stripe.subscriptions.update(s.id, { metadata: { ep_interval: 'year', ep_amount: String(unit / 100), ep_interval_pending: '' } }); }
+  catch (e) { console.error('ep yearly md', e.message); return false; }
+  const peS = s.current_period_end || (it && it.current_period_end) || null;
+  const pe = peS ? new Date(peS * 1000).toISOString() : null;
+  if (pe) await sbPatch(`profiles?id=eq.${encodeURIComponent(uid)}&partner_sub=eq.${encodeURIComponent(subId)}`, { partner_renews_at: pe });
+  const tier = epTierKey(md.ep_tier) || EP_DEFAULT_TIER;
+  const pd = (paid != null) ? Number(paid) : null;
+  await _notify(uid, 'ep_interval_year',
+    `💳 Exclusive MTL Partner ${_name(tier)} teď platíš ročně: ${_money(unit / 100, false, cur)} za rok bez DPH (10 měsíců, 2 zdarma).`
+      + (pd != null ? ` Z karty se strhlo ${_money(pd, false, cur)} — roční cena minus nevyčerpané dny měsíčního předplatného.` : '')
+      + ` Fakturu najdeš ve Fakturách za předplatné.` + (pe ? ` Další platba ${_d(pe, false)}.` : ''),
+    `💳 You now pay for Exclusive MTL Partner ${_name(tier)} yearly: ${_money(unit / 100, true, cur)} a year excl. VAT (10 months, 2 free).`
+      + (pd != null ? ` ${_money(pd, true, cur)} was charged — the yearly price minus the unused days of your monthly subscription.` : '')
+      + ` The invoice is under Subscription invoices.` + (pe ? ` Next payment ${_d(pe, true)}.` : ''),
+    { tier, interval: 'year' });
+  await _notifyFounder(uid, `🔁 Exclusive Partner {who} přešel na roční platbu · ${_money(unit / 100, false, cur)}/rok bez DPH.`);
+  return true;
+}
+
+// PŘECHOD Z ROČNÍ NA MĚSÍČNÍ PLATBU NAPLÁNOVÁN (pay.js). Platí od konce zaplaceného roku.
+export async function notifyEpMonthlyScheduled(uid, tier, { month, currency, atIso } = {}) {
+  const t = epTierKey(tier) || EP_DEFAULT_TIER;
+  await _notify(uid, 'ep_interval_month_scheduled',
+    `🗓️ Od ${_d(atIso, false)} platíš Exclusive MTL Partner ${_name(t)} měsíčně: ${_money(month, false, currency)}/měs bez DPH, první měsíční platba ${_d(atIso, false)}. Do té doby běží zaplacený rok a nic se z něj nevrací. Přechod můžeš do té doby zrušit v nabídce Exclusive Partner.`,
+    `🗓️ From ${_d(atIso, true)} you pay for Exclusive MTL Partner ${_name(t)} monthly: ${_money(month, true, currency)}/mo excl. VAT, first monthly payment on ${_d(atIso, true)}. Until then your paid year runs on and nothing from it is refunded. You can cancel the change until then under Exclusive Partner.`,
+    { tier: t, interval: 'month', at: atIso });
+  await _notifyFounder(uid, `🔁 Exclusive Partner {who} přejde od ${_d(atIso, false)} z roční na měsíční platbu (${_money(month, false, currency)}/měs).`);
+}
+
 // NIŽŠÍ STUPEŇ NASTAL (webhook při zaplacení první faktury nového období).
 // Zakládající cenu nižšího stupně (founding) si člověk drží od chvíle, kdy přechod nastal.
 export async function applyEpDowngrade(uid, periodStartIso, { month, founding, subId, currency } = {}) {

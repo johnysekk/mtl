@@ -1,6 +1,6 @@
 import Stripe from 'stripe';
 import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor, orgRate, nativePrice, nativeRate, STORE_COST, EP_TIERS, EP_TIER_ORDER, EP_TIER_NAMES, EP_YEAR_MONTHS, EP_DEFAULT_TIER, epTierKey, epTierOf, epCurrencyFor, epAmount } from './_rate.js';
-import { applyEpUpgrade, notifyEpDowngradeScheduled } from './_ep.js';
+import { applyEpUpgrade, notifyEpDowngradeScheduled, finishEpYearly, notifyEpMonthlyScheduled } from './_ep.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { checkPrice, offerPrices, planTermPrices, checkOnlineCountry } from './_price-check.js';
 import { vatMode } from './_vat.js';
@@ -919,6 +919,13 @@ async function partnerCheckout(req, res) {
 // DOLŮ platí od konce zaplaceného období (u ročního od konce roku): cena předplatného se
 // přepne hned bez doplatku a vratky, takže příští obnova už je za nižší stupeň; stupeň a sazby
 // se změní až se zaplacením té obnovy (webhook). Do té doby jde přechod zrušit.
+// MĚSÍČNÍ <-> ROČNÍ PLATBA (&interval=year | &interval=month | &cancel_interval=1), stupeň zůstává:
+//   * na roční HNED: nové roční období začíná dnes, nevyčerpané celé dny měsíce se odečtou
+//     (Stripe: billing_cycle_anchor now + always_invoice) -- faktura za přechod jako u stupně;
+//   * na měsíční OD KONCE ZAPLACENÉHO ROKU: plán předplatného (subscription schedule) se dvěma
+//     fázemi -- do konce roku roční cena, pak měsíční. Do té doby jde přechod zrušit (plán se uvolní).
+// Změna stupně a změna intervalu se nepotkají: dokud čeká jedna, druhá nejde (jinak by plán
+// a přechod dolů přepisovaly cenu jeden druhému).
 // Ručně udělené EP (bez předplatného) se tudy nemění -- to řeší founder v Adminu.
 async function partnerChange(req, res) {
   const _preview = String(req.query.preview || '') === '1';   // jen spočítat doplatky, nic neměnit (GET)
@@ -952,19 +959,40 @@ async function partnerChange(req, res) {
   // DOPLATEK PO CELÝCH DNECH. Stripe sám počítá zbytek období po sekundách; proto se mu předá
   // proration_date = začátek dnešního dne předplatného (dny se počítají od hodiny, kdy předplatné
   // začalo). Doplatek je pak rozdíl cen × zbývající celé dny ÷ dny období, dnešek celý za novou cenu.
-  const ps = sub.current_period_start, pe = sub.current_period_end;
+  const ps = sub.current_period_start || item.current_period_start, pe = sub.current_period_end || item.current_period_end;
   const prorDate = ps + Math.floor(Math.max(0, Math.floor(Date.now() / 1000) - ps) / 86400) * 86400;
+  const frac = (pe > ps) ? Math.max(0, Math.min(1, (pe - prorDate) / (pe - ps))) : 0;   // zbývající část období po celých dnech
+  const peIso = new Date(pe * 1000).toISOString();
+
+  // NAPLÁNOVANÝ PŘECHOD NA MĚSÍČNÍ PLATBU = plán předplatného, který založila tahle cesta.
+  let sched = null;
+  if (sub.schedule) {
+    try { sched = typeof sub.schedule === 'string' ? await stripe.subscriptionSchedules.retrieve(sub.schedule) : sub.schedule; } catch (e) { console.error('[ep] schedule', e.message); }
+  }
+  const pendingMonthly = !!(sched && (sched.metadata || {}).ep_switch === 'month' && ['active', 'not_started'].indexOf(sched.status) >= 0);
+  // Ceny pro přechod mezi intervaly ze dnešní ceny předplatného (drží zakládající i starší ceník).
+  const yearUnit = item.price.unit_amount * EP_YEAR_MONTHS;
+  const monthUnit = Math.round(item.price.unit_amount / EP_YEAR_MONTHS);
 
   // NÁHLED DOPLATKŮ pro tlačítka „Přejít hned" -- stejný výpočet jako Stripe, bez volání Stripe.
+  // Plus interval: měsíční -> kolik se strhne za přechod na roční; roční -> měsíční cena po roce.
   if (_preview) {
-    const frac = (pe > ps) ? Math.max(0, Math.min(1, (pe - prorDate) / (pe - ps))) : 0;
     const out = [];
     for (const t of EP_TIER_ORDER.slice(EP_TIER_ORDER.indexOf(cur) + 1)) {
       const pr = await epPriceFor(t, prof, subCur);
       out.push({ tier: t, month: pr.amount, founding: pr.founding, due: Math.max(0, Math.round((amountOf(pr.amount) - prevUnit) * frac)) / 100 });
     }
-    return res.status(200).json({ ok: true, tier: cur, currency: String(item.price.currency || 'czk').toUpperCase(), upgrades: out });
+    return res.status(200).json({ ok: true, tier: cur, currency: subCur, upgrades: out,
+      interval: yearly ? 'year' : 'month', interval_next: pendingMonthly ? 'month' : null, period_end: peIso,
+      ...(yearly ? { month_amount: monthUnit / 100 }
+        : { year_amount: yearUnit / 100, year_due: Math.max(0, yearUnit - Math.round(item.price.unit_amount * frac)) / 100 }) });
   }
+
+  const ivWant = String(req.query.interval || '');
+  if (ivWant === 'year' || ivWant === 'month' || String(req.query.cancel_interval || '') === '1') {
+    return partnerInterval(req, res, { uid, cur, sub, item, sched, pendingMonthly, pendingDown, yearly, rec, product, prorDate, peIso, yearUnit, monthUnit, subCur, ivWant });
+  }
+  if (pendingMonthly) return res.status(409).json({ error: `Máš naplánovaný přechod na měsíční platbu od ${new Date(pe * 1000).toLocaleDateString('cs-CZ', { timeZone: 'Europe/Prague' })}. Stupeň změníš, až ho zrušíš nebo až proběhne.` });
 
   // ZRUŠENÍ NAPLÁNOVANÉHO PŘECHODU DOLŮ: cena předplatného zpět, bez doplatku.
   if (String(req.query.cancel_downgrade || '') === '1') {
@@ -1042,6 +1070,90 @@ async function partnerChange(req, res) {
   await applyEpUpgrade(uid, want, { founding: price.founding, month: price.amount, subId: sub.id, currency: subCur });
   try { await stripe.subscriptions.update(sub.id, { metadata: Object.assign({ ep_tier: want, ep_month: String(price.amount), ep_founding: price.founding ? '1' : (baseMd.ep_founding || '') }, clearPending) }); } catch (e) { console.error('[ep] upgrade md', e.message); }
   return res.status(200).json({ ok: true, tier: want, next: null, month: price.amount });
+}
+
+// MĚSÍČNÍ <-> ROČNÍ PLATBA EP (volá partnerChange, který už ověřil přihlášení a běžící předplatné).
+async function partnerInterval(req, res, c) {
+  const { uid, cur, sub, item, sched, pendingMonthly, pendingDown, yearly, rec, product, prorDate, peIso, yearUnit, monthUnit, subCur, ivWant } = c;
+  const _dt = (iso) => new Date(iso).toLocaleDateString('cs-CZ', { timeZone: 'Europe/Prague' });
+  const daily = rec.interval === 'day';     // testovací režim: období je den, interval se nemění, jen cena
+  const recFor = (iv) => (daily ? rec : { interval: iv, interval_count: 1 });
+
+  // ZRUŠENÍ NAPLÁNOVANÉHO PŘECHODU NA MĚSÍČNÍ: plán se uvolní, předplatné jede dál ročně.
+  if (String(req.query.cancel_interval || '') === '1') {
+    if (pendingMonthly) {
+      try { await stripe.subscriptionSchedules.release(sched.id); }
+      catch (e) { console.error('[ep] release', e.message); return res.status(502).json({ error: 'Přechod se nepodařilo zrušit: ' + e.message }); }
+      try { await stripe.subscriptions.update(sub.id, { metadata: { ep_interval_next: '' } }); } catch (e) {}
+    }
+    return res.status(200).json({ ok: true, interval: 'year', interval_next: null });
+  }
+  if (pendingDown) return res.status(409).json({ error: `Máš naplánovaný přechod na nižší stupeň od ${_dt(peIso)}. Platbu přepneš, až ho zrušíš nebo až proběhne.` });
+
+  // ROČNÍ -> MĚSÍČNÍ od konce zaplaceného roku.
+  if (ivWant === 'month') {
+    if (!yearly) return res.status(400).json({ error: 'Už platíš měsíčně.' });
+    if (pendingMonthly) return res.status(200).json({ ok: true, interval: 'year', interval_next: 'month', from: peIso });
+    if (sub.schedule) return res.status(409).json({ error: 'Předplatné má jiný naplánovaný plán. Napiš nám prosím.' });
+    let sc = null;
+    try {
+      const np = await stripe.prices.create({ currency: item.price.currency, product, unit_amount: monthUnit, recurring: recFor('month') });
+      sc = await stripe.subscriptionSchedules.create({ from_subscription: sub.id });
+      const p0 = sc.phases[0];
+      await stripe.subscriptionSchedules.update(sc.id, {
+        end_behavior: 'release',
+        metadata: { ep_switch: 'month', user_id: uid },
+        phases: [
+          { items: p0.items.map((i) => ({ price: typeof i.price === 'string' ? i.price : i.price.id, quantity: i.quantity || 1 })),
+            start_date: p0.start_date, end_date: p0.end_date, proration_behavior: 'none' },
+          // Po uplynutí jedné měsíční iterace se plán uvolní a předplatné běží měsíčně samo.
+          { items: [{ price: np.id, quantity: 1 }], iterations: 1, proration_behavior: 'none',
+            metadata: { ep_interval: 'month', ep_amount: String(monthUnit / 100), ep_interval_next: '' } },
+        ],
+      });
+    } catch (e) {
+      console.error('[ep] to monthly', e.message);
+      if (sc && sc.id) { try { await stripe.subscriptionSchedules.release(sc.id); } catch (e2) {} }
+      return res.status(502).json({ error: 'Přechod se nepodařil: ' + e.message });
+    }
+    try { await stripe.subscriptions.update(sub.id, { metadata: { ep_interval_next: 'month' } }); } catch (e) {}
+    await notifyEpMonthlyScheduled(uid, cur, { month: monthUnit / 100, currency: subCur, atIso: peIso });
+    return res.status(200).json({ ok: true, interval: 'year', interval_next: 'month', from: peIso, month_amount: monthUnit / 100 });
+  }
+
+  // MĚSÍČNÍ -> ROČNÍ hned. Nové roční období začíná dnes, nevyčerpané celé dny měsíce se odečtou.
+  if (yearly) return res.status(400).json({ error: 'Už platíš ročně.' });
+  const clearPending = { ep_interval_pending: '' };
+  await stripe.subscriptions.update(sub.id, { metadata: { ep_interval_pending: 'year' } });
+  let upd;
+  try {
+    const np = await stripe.prices.create({ currency: item.price.currency, product, unit_amount: yearUnit, recurring: recFor('year') });
+    upd = await stripe.subscriptions.update(sub.id, {
+      items: [{ id: item.id, price: np.id }],
+      billing_cycle_anchor: 'now',
+      proration_behavior: 'always_invoice',
+      proration_date: prorDate,
+      payment_behavior: 'pending_if_incomplete',
+      expand: ['latest_invoice.payment_intent'],
+    });
+  } catch (e) {
+    console.error('[ep] to yearly', e.message);
+    try { await stripe.subscriptions.update(sub.id, { metadata: clearPending }); } catch (e2) {}
+    return res.status(402).json({ error: 'Přechod se nepodařil: ' + e.message });
+  }
+  const inv = upd.latest_invoice && typeof upd.latest_invoice === 'object' ? upd.latest_invoice : null;
+  const pi = inv && inv.payment_intent && typeof inv.payment_intent === 'object' ? inv.payment_intent : null;
+  if (upd.pending_update) {
+    if (pi && pi.status === 'requires_action' && process.env.STRIPE_PUBLISHABLE_KEY) {
+      return res.status(200).json({ ok: false, requires_action: true, clientSecret: pi.client_secret, publishableKey: process.env.STRIPE_PUBLISHABLE_KEY, interval: 'year' });
+    }
+    try { if (inv && inv.id) await stripe.invoices.voidInvoice(inv.id); } catch (e) { console.error('[ep] void', e.message); }
+    try { await stripe.subscriptions.update(sub.id, { metadata: clearPending }); } catch (e) {}
+    const why = (pi && pi.last_payment_error && pi.last_payment_error.message) || '';
+    return res.status(402).json({ error: 'Platba kartou neprošla' + (why ? (' (' + why + ')') : '') + '. Dál platíš měsíčně.' });
+  }
+  await finishEpYearly(uid, sub.id, { paid: inv ? (inv.amount_paid || 0) / 100 : null, currency: subCur });
+  return res.status(200).json({ ok: true, interval: 'year', interval_next: null, year_amount: yearUnit / 100 });
 }
 
 // ───────────────────────── DODAVATEL (organizations.kind='supplier') ─────────────────────────

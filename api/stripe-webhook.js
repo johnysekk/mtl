@@ -12,7 +12,7 @@ import { issueReceipts, receiptMail, receiptTitle, docNo } from './_receipt.js';
 import Stripe from 'stripe';
 import { subMail } from './_sub-mail.js';
 import { rerateOwner } from './gym-rerate.js';
-import { activatePartner, applyEpUpgrade, applyEpDowngrade } from './_ep.js';
+import { activatePartner, applyEpUpgrade, applyEpDowngrade, finishEpYearly } from './_ep.js';
 import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil, onlineRate as _mtlOnline, withStoreFee, STORE_COST, epTierOf as _epTierOf } from './_rate.js';
 import { sendOrderMailForPi, withdrawalText as _wdText } from './_order-mail.js';
 import { dokladPdfFor } from './_doklad-pdf.js';
@@ -1193,6 +1193,9 @@ export default async function handler(req, res) {
                 await stripe.subscriptions.update(_ow.subId, { metadata: { ep_tier: _md.ep_tier_pending, ep_month: _md.ep_month_pending || '',
                   ep_founding: _md.ep_founding_pending === '1' ? '1' : (_lmd.ep_founding || ''), ep_tier_pending: '', ep_month_pending: '', ep_founding_pending: '' } });
               }
+            } else if (inv.billing_reason === 'subscription_update' && _md.ep_interval_pending === 'year') {
+              // Přechod z měsíční na roční platbu zaplacený po potvrzení bankou (pay.js ho nedočkal).
+              await finishEpYearly(_ow.uid, _ow.subId, { paid: (inv.amount_paid || 0) / 100, currency: inv.currency });
             } else if (inv.billing_reason === 'subscription_cycle') {
               const _to = await applyEpDowngrade(_ow.uid, _ln0 && _ln0.period ? new Date(_ln0.period.start * 1000).toISOString() : null,
                 { month: _md.ep_month_next || null, founding: _md.ep_founding_next === '1', subId: _ow.subId, currency: inv.currency });
@@ -1203,7 +1206,10 @@ export default async function handler(req, res) {
           try { const _pp = ((await sbGet(`profiles?id=eq.${encodeURIComponent(_ow.uid)}&select=partner,partner_tier`)) || [])[0]; _epTier = _epTierOf(_pp); } catch (e) {}
         }
         if (_ow && Number(inv.amount_paid != null ? inv.amount_paid : inv.total) > 0) {
-          const _line = (inv.lines && inv.lines.data && inv.lines.data[0]) || null;
+          // Řádek s nejpozdějším koncem = období, za které se platí. U přechodu na roční platbu je na
+          // faktuře i zápočet nevyčerpaných dnů měsíce, který končí starým koncem měsíce -- podle
+          // prvního řádku by další platba i období na dokladu vyšly špatně.
+          const _line = ((inv.lines && inv.lines.data) || []).reduce((a, l) => ((l && l.period && (!a || l.period.end > a.period.end)) ? l : a), null);
           // DALŠÍ PLATBA: konec právě zaplaceného období = den příštího stržení. Appka ho ukazuje
           // ve správě předplatného (EP v Platby a provize, dodavatel v profilu dodavatele).
           try {
@@ -1217,7 +1223,10 @@ export default async function handler(req, res) {
             invoice_id: inv.id, user_id: _ow.uid, org_id: _ow.org, bill_gym_id: _ow.billGym || null,
             amount: (inv.amount_paid != null ? inv.amount_paid : inv.total) / 100,
             currency: inv.currency, test_mode: !inv.livemode,
-            ep_tier: _epTier, change: inv.billing_reason === 'subscription_update',
+            // Faktura za přechod: 'tier' = doplatek za vyšší stupeň, 'year' = přechod na roční platbu.
+            // Jiná faktura se subscription_update (třeba první měsíční po ročním) je běžné předplatné.
+            ep_tier: _epTier, change: (!_ow.org && inv.billing_reason === 'subscription_update')
+              ? ((_ow.md || {}).ep_interval_pending === 'year' ? 'year' : ((_ow.md || {}).ep_tier_pending ? 'tier' : false)) : false,
             period_start: _line && _line.period ? new Date(_line.period.start * 1000).toISOString() : null,
             period_end: _line && _line.period ? new Date(_line.period.end * 1000).toISOString() : null,
           });
@@ -1275,7 +1284,8 @@ export default async function handler(req, res) {
           const _ow = await _platformSubOwner(inv);
           // Neprošlý doplatek za přechod EP na vyšší stupeň fakturu nedělá: přechod se bez
           // zaplacení neprovede (pay.js, pending_if_incomplete) a dlužit tedy není co.
-          if (_ow && inv.billing_reason !== 'subscription_update') {
+          const _pmd = (_ow && _ow.md) || {};
+          if (_ow && !(inv.billing_reason === 'subscription_update' && (_pmd.ep_tier_pending || _pmd.ep_interval_pending))) {
             const _line = (inv.lines && inv.lines.data && inv.lines.data[0]) || null;
             const _umd = _ow.md || {};
             await _callEpDoklad({
