@@ -12889,13 +12889,10 @@ async function _attrPanel(table, col, id, cur){
 }
 
 function _evShareSheet(ev){
-  // Jeden odkaz, který jde všude: /event/<adresa> s náhledem (název, termín, plakát). Klepnutí
-  // ho rovnou zkopíruje (když adresu už známe -- schránka chce klepnutí, ne čekání na dotaz)
-  // a otevře okno s QR a možností adresu změnit. Nikdy systémová nabídka sdílení: sebere
-  // člověku kontrolu nad tím, kam odkaz půjde, a na desktopu se často neotevře vůbec.
-  let copied=false;
-  if(ev && ev.slug){ try{ navigator.clipboard.writeText(_appOrigin()+'/event/'+ev.slug); copied=true; }catch(e){} }
-  _shareLinkDialog('event', ev.id, ev.title||'', copied);
+  // Jeden odkaz, který jde všude: /<pořadatel>/event/<adresa> s náhledem (název, termín, plakát).
+  // Okno s odkazem, QR a kopírováním -- nikdy systémová nabídka sdílení: sebere člověku kontrolu
+  // nad tím, kam odkaz půjde, a na desktopu se často neotevře vůbec.
+  _shareLinkDialog('event', ev.id, ev.title||'');
 }
 
 
@@ -22403,14 +22400,21 @@ async function _cohEdit(cohortId){
   }catch(e){}
 }
 function _cohShowLink(cohortId, name){ _shareLinkDialog('course', cohortId, name); }
-// HEZKÝ ODKAZ NA KURZ / AKCI: /course/<adresa>, /event/<adresa> (api/share-page.js). Adresa se
-// tvoří sama z názvu (sql/share-links.sql); tady se zkopíruje, ukáže QR a dá se změnit.
-// copied: odkaz už je ve schránce (sdílení akce kopíruje hned po klepnutí).
-async function _shareLinkDialog(kind, id, name, copied){
+// HEZKÝ ODKAZ NA KURZ / AKCI s pořadatelem v adrese (api/share-page.js). Adresy se tvoří samy
+// z názvů (sql/share-links.sql); tady se odkaz zkopíruje, ukáže QR a adresa kurzu / akce se dá změnit.
+async function _shareLinkDialog(kind, id, name){
   const EN=LANG==='en';
   const table=(kind==='course')?'gym_cohorts':'events';
-  let slug=null; try{ const { data }=await supaClient.from(table).select('slug').eq('id',id).maybeSingle(); slug=(data&&data.slug)||null; }catch(e){}
-  const urlOf=function(sl){ return sl ? (_appOrigin()+'/'+kind+'/'+sl) : (_appOrigin()+'/?'+(kind==='course'?'cohort':'event')+'='+encodeURIComponent(id)); };
+  // V adrese je pořadatel: /club/<klub>/course/<kurz>, /club|coach|organization/<…>/event/<akce>.
+  let slug=null, ok=null, own=null;
+  try{
+    const { data:r }=await supaClient.from(table).select(kind==='course'?'slug,gym_id':'slug,gym_id,organization_id,created_by').eq('id',id).maybeSingle();
+    if(r){ slug=r.slug||null;
+      const o=r.organization_id?['organization','organizations',r.organization_id]:(r.gym_id?['club','gyms',r.gym_id]:(r.created_by?['coach','profiles',r.created_by]:null));
+      if(o){ ok=o[0]; const { data:ow }=await supaClient.from(o[1]).select('slug').eq('id',o[2]).maybeSingle(); own=(ow&&ow.slug)||null; } }
+  }catch(e){}
+  const pre=(ok&&own)?('/'+ok+'/'+own+'/'+kind+'/'):null;
+  const urlOf=function(sl){ return (sl&&pre) ? (_appOrigin()+pre+sl) : (_appOrigin()+'/?'+(kind==='course'?'cohort':'event')+'='+encodeURIComponent(id)); };
   let url=urlOf(slug);
   const host=String(_appOrigin()).replace(/^https?:\/\//,'');
   const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100000;display:flex;align-items:center;justify-content:center;padding:20px;';
@@ -22419,12 +22423,12 @@ async function _shareLinkDialog(kind, id, name, copied){
     +'<div style="font-size:13px;color:var(--mid);margin-bottom:14px;">'+escapeHtml(name||'')+'</div>'
     +'<div id="shlQr" style="display:flex;justify-content:center;margin-bottom:12px;"></div>'
     +'<div id="shlUrl" style="font-size:12px;font-weight:700;color:var(--dark);word-break:break-all;margin-bottom:8px;">'+escapeHtml(url)+'</div>'
-    +'<button id="shlCopy" style="width:100%;padding:11px;background:#fff;color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:12px;">'+(copied?('✅ '+(EN?'Copied':'Zkopírováno')):('📋 '+(EN?'Copy link':'Zkopírovat odkaz')))+'</button>'
+    +'<button id="shlCopy" style="width:100%;padding:11px;background:#fff;color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:12px;">'+'📋 '+(EN?'Copy link':'Zkopírovat odkaz')+'</button>'
     +'<p style="font-size:11px;color:var(--mid);line-height:1.5;margin:0 0 14px;">'+(kind==='course'
       ?(EN?'Use this link/QR in your Meta ad, bio or posts. People sign up and pay without an app account; shared links show the course name, date and poster.':'Odkaz/QR dej do Meta reklamy, bia nebo příspěvků. Lidé se přihlásí a zaplatí bez účtu v appce; sdílený odkaz ukáže název kurzu, termín a plakát.')
       :(EN?'One link for everywhere — shared links show the event name, date and poster.':'Jeden odkaz pro všechno — sdílený odkaz ukáže název akce, termín a plakát.'))+'</p>'
-    +(slug?('<div style="text-align:left;margin-bottom:14px;"><div style="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:5px;">'+(EN?'Link address':'Adresa odkazu')+'</div>'
-      +'<div style="display:flex;align-items:center;border:1.5px solid var(--border);border-radius:11px;overflow:hidden;background:#fff;"><span style="padding:10px 0 10px 10px;font-size:12px;color:var(--mid);white-space:nowrap;">'+escapeHtml(host)+'/'+kind+'/</span>'
+    +((slug&&pre)?('<div style="text-align:left;margin-bottom:14px;"><div style="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:5px;">'+(EN?'Link address':'Adresa odkazu')+'</div>'
+      +'<div style="display:flex;align-items:center;border:1.5px solid var(--border);border-radius:11px;overflow:hidden;background:#fff;"><span style="padding:10px 0 10px 10px;font-size:12px;color:var(--mid);white-space:nowrap;">'+escapeHtml(host+pre)+'</span>'
       +'<input id="shlSlug" value="'+escapeHtml(slug)+'" maxlength="40" style="flex:1;min-width:0;border:none;outline:none;padding:10px 8px 10px 0;font-size:13px;font-family:inherit;"></div>'
       +'<button id="shlSlugSave" style="margin-top:7px;padding:8px 14px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Save address':'Uložit adresu')+'</button>'
       +'<div id="shlSlugMsg" style="font-size:11.5px;color:var(--light);margin-top:5px;line-height:1.45;">'+(EN?'Made from the name automatically. Changing it breaks links already shared.':'Vytvořila se z názvu sama. Změna rozbije už sdílené odkazy.')+'</div></div>'):'')
@@ -22437,7 +22441,7 @@ async function _shareLinkDialog(kind, id, name, copied){
   const cb=ov.querySelector('#shlCopy'); cb.onclick=async function(){
     try{ await navigator.clipboard.writeText(url); }catch(e){ try{ const t=document.createElement('textarea'); t.value=url; t.style.position='fixed'; t.style.opacity='0'; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); }catch(_e){} }
     cb.textContent='✅ '+(EN?'Copied':'Zkopírováno'); setTimeout(function(){ try{ cb.textContent='📋 '+(EN?'Copy link':'Zkopírovat odkaz'); }catch(e){} }, 1800); };
-  if(slug) _slugWire({ input:'shlSlug', btn:'shlSlugSave', msg:'shlSlugMsg', table:table, id:id, prefix:kind, required:true, cur:function(){ return slug; },
+  if(slug&&pre) _slugWire({ input:'shlSlug', btn:'shlSlugSave', msg:'shlSlugMsg', table:table, id:id, prefix:pre.slice(1,-1), required:true, cur:function(){ return slug; },
     onSaved:function(v){ slug=v; url=urlOf(v); const u=ov.querySelector('#shlUrl'); if(u) u.textContent=url; paintQr(); } });
 }
 async function openCoachMembersAtGym(gymId, gymName){
@@ -28614,7 +28618,7 @@ function _slugWire(o){
     finally{ btn.disabled=false; }
   };
 }
-function _mgSlugWire(){ if(!_myGymData) return; _slugWire({ input:'mgSlug', btn:'mgSlugSave', msg:'mgSlugMsg', table:'gyms', id:_myGymData.id, prefix:'club', cur:function(){ return (_myGymData&&_myGymData.slug)||null; }, onSaved:function(v){ _myGymData.slug=v; } }); }
+function _mgSlugWire(){ if(!_myGymData) return; _slugWire({ input:'mgSlug', btn:'mgSlugSave', msg:'mgSlugMsg', required:true, table:'gyms', id:_myGymData.id, prefix:'club', cur:function(){ return (_myGymData&&_myGymData.slug)||null; }, onSaved:function(v){ _myGymData.slug=v; } }); }
 
 // Proklik do režimu členství (z upozornění i z hlášky při pokusu o nákup u vlastního klubu).
 function _openMembMode(gymId){
@@ -52734,7 +52738,7 @@ function openCoachSettings(){
       +'<input id="csSlug" value="'+escapeHtml(currentUser.slug||'')+'" placeholder="'+(EN?'your-name':'tvoje-jmeno')+'" autocapitalize="off" autocomplete="off" spellcheck="false" style="flex:1;min-width:0;padding:11px 11px 11px 1px;border:none;background:transparent;font-size:14px;font-weight:700;font-family:inherit;color:var(--dark);outline:none;"></div>'
       +'<p id="csSlugMsg" style="font-size:11.5px;color:var(--light);line-height:1.45;margin:0 0 8px;">'+(EN?'Lowercase letters, numbers and dashes, 3–40 characters. Changing it later breaks links you already shared.':'Mal\u00e1 p\u00edsmena, \u010d\u00edslice a poml\u010dky, 3\u201340 znak\u016f. Pozd\u011bj\u0161\u00ed zm\u011bna rozbije u\u017e rozeslan\u00e9 odkazy.')+'</p>'
       +'<button id="csSlugSave" type="button" style="width:100%;padding:11px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:11px;font-weight:700;font-size:13px;cursor:pointer;font-family:inherit;margin-bottom:8px;">'+(EN?'Save address':'Ulo\u017eit adresu')+'</button>';
-    _slugWire({ input:'csSlug', btn:'csSlugSave', msg:'csSlugMsg', table:'profiles', id:currentUser.id, prefix:'coach', cur:function(){ return currentUser.slug||null; }, onSaved:function(v){ currentUser.slug=v; } }); } }catch(e){}
+    _slugWire({ input:'csSlug', btn:'csSlugSave', msg:'csSlugMsg', required:true, table:'profiles', id:currentUser.id, prefix:'coach', cur:function(){ return currentUser.slug||null; }, onSaved:function(v){ currentUser.slug=v; } }); } }catch(e){}
   // Firemní kontakt kouče. Soukromé číslo (phone) sem nepatří -- to se zadává kvůli potvrzení
   // rezervace a na veřejný profil nemá co dělat. Telefon a e-mail se zapínají zvlášť.
   try{
