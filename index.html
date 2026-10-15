@@ -23019,7 +23019,7 @@ function _epCancelRatesHtml(){
   const pc=function(r){ return ((Math.round(r*10000)/100)+'').replace('.', EN?'.':',')+' %'; };
   const both=(bS===bB)?pc(bS):(EN?(pc(bS)+' by card, '+pc(bB)+' by bank transfer'):(pc(bS)+' u plateb kartou, '+pc(bB)+' u převodu'));
   const _t=_epTierOf(u)||'chunin', T=EP_TIERS[_t];
-  const price=(u.partner_price?_epCzk(u.partner_price):_epPriceOf(_t).label);
+  const price=(u.partner_price?_epMoney(u.partner_price, u.partner_currency):_epPriceOf(_t).label);
   const end=u.partner_renews_at?new Date(u.partner_renews_at).toLocaleDateString(EN?'en-GB':'cs-CZ'):'';
   const li=function(t){ return '• '+t+'<br>'; };
   return '<div style="background:#FFF4E5;border:1px solid #F5D9A8;border-radius:12px;padding:14px;margin-bottom:14px;font-size:13px;color:#7a4a00;line-height:1.65;">'
@@ -30765,17 +30765,17 @@ async function loadGymManageBookings(){
                     + (typeof cohMtlL==='number'?cohMtlL:0);
       // SROVNÁNÍ SE STUPNI EP. Pro každý stupeň: jeho sazba a akvizice z TĚCHŽE plateb (stejná
       // funkce jako rozpad v Provizích, ať obě obrazovky ukážou totéž) + paušál. Ukáže se ten
-      // nejlevnější. Paušál je v korunách; klub účtující v jiné měně potřebuje přepočet kurzem
-      // ECB -- bez kurzu se radši neporovnává vůbec.
-      const _cCur=(_myGymData.currency||'CZK').toUpperCase();
+      // nejlevnější. Paušál je v měně EP klubu (Kč / EUR podle jeho fakturační země); když klub
+      // účtuje v jiné měně, přepočte se kurzem ECB -- bez kurzu se radši neporovnává vůbec.
+      const _cCur=(_myGymData.currency||'CZK').toUpperCase(), _pCur=_epCurFor(_myGymData.billing_country);
       if(typeof _epEnsureSpots==='function'){ try{ await _epEnsureSpots(); }catch(e){} }
       let _fxR=1;
-      if(_cCur!=='CZK'){ const _fx=await _loadFx(); const _c=_fxFromCZK(1, _cCur, _fx); _fxR=(_c!=null)?_c:null; }
+      if(_cCur!==_pCur){ const _fx=await _loadFx(); const _c=_fxConv(1, _pCur, _cCur, _fx); _fxR=(_c!=null)?_c:null; }
       let _epCost=null, _epBestT=null;
       if(_fxR!=null){
         EP_TIER_ORDER.forEach(function(_t){
           let _v=0; try{ (_txM||[]).forEach(function(t){ _v += _epFeeForTx(t, _t); }); }catch(e){}
-          const _c=_epPriceOf(_t).amount*_fxR + _v;
+          const _c=_epPriceOf(_t, undefined, _pCur).amount*_fxR + _v;
           if(_epCost==null || _c<_epCost){ _epCost=_c; _epBestT=_t; }
         });
       }
@@ -36572,7 +36572,7 @@ async function _epBillPaint(cta){
           +(EN?'Reg. ':'IČO ')+escapeHtml(o.ico)+(o.dic?(' · '+(EN?'VAT ':'DIČ ')+escapeHtml(o.dic)):'')
           +'<div style="font-size:11px;color:var(--mid);margin-top:4px;">'+(o.v==='coach'?(EN?'Change in Coach settings → Billing details.':'Změníš v Nastavení kouče → Fakturační údaje.'):(EN?'Change in Club settings → Billing details.':'Změníš v Nastavení klubu → Fakturační údaje.'))+'</div></div>'; })()
     +'<div style="font-size:11px;color:var(--light);line-height:1.45;">'+(EN?'Every invoice for this subscription goes to the one you pick.':'Na vybraný subjekt půjdou všechny faktury za toto předplatné.')+'</div>';
-  box.querySelectorAll('.piBillOpt').forEach(function(b){ b.onclick=function(){ window._epBill=b.getAttribute('data-v'); _epBillPaint(cta); }; });
+  box.querySelectorAll('.piBillOpt').forEach(function(b){ b.onclick=function(){ window._epBill=b.getAttribute('data-v'); _epBillPaint(cta).then(function(){ if(typeof window._epOnBill==='function') window._epOnBill(); }); }; });
 }
 async function openGymEpManage(gymId, monthKey){
   if(!currentUser || currentUser.role!=='founder'){ toast('⚠️'); return; }
@@ -37776,8 +37776,11 @@ async function openMtlCommissions(scope){
   // aktuální cena: používá ji úvodní odstavec i rozpad po měsících.
   const _epT=_epTierKey(scope.epTier)||'chunin', _ET=EP_TIERS[_epT];
   if(typeof _epEnsureSpots==='function'){ try{ await _epEnsureSpots(); }catch(e){} }
-  const _epFlatNow=_epPriceOf(_epT).amount;
-  const _epFlatLbl=(typeof fmtPrice==='function')?(fmtPrice(_epFlatNow,'CZK')+' K\u010d'):(_epFlatNow+' K\u010d');
+  // Měna EP toho, čí provize to jsou (klub / kouč podle fakturační země): Kč nebo EUR.
+  const _epPCur=_epCurFor(((scope.gymId&&_myGymData&&_myGymData.id===scope.gymId)?_myGymData:currentUser||{}).billing_country);
+  const _epFlatNow=_epPriceOf(_epT, undefined, _epPCur).amount;
+  const _epFlatLbl=_epMoney(_epFlatNow, _epPCur);
+  try{ await _loadFx(); }catch(e){}
   // SAZBA TOHOHLE POSKYTOVATELE, ne obecných 2,5 %. Kdo je v asociaci nebo má Bankai, platí
   // míň a věta „0,5 % místo 2,5 %" by mu lhala. Bere se ze žebříčku podle jeho koleje.
   let _epMineRate=0.025;
@@ -37973,7 +37976,7 @@ async function openMtlCommissions(scope){
           +(_epCmp?(function(){
               const _var=(m.rows||[]).reduce(function(a,t){ return a+_epFor(t).fee; },0);
               // Paušál z jednoho místa (_epPrice), ne natvrdo 1000.
-              const _flat=(String(m.cur||'CZK').toUpperCase()==='CZK')?_epFlatNow:null;
+              const _flat=_fxConv(_epFlatNow, _epPCur, m.cur||'CZK', window._fxCache);   // null = chybí kurz
               const _ep=_var+(_flat||0);
               // ÚSPORA JE TO, CO KLUB ZAJÍMÁ. Dřív tu svítila jen celková částka s EP a rozdíl
               // si musel spočítat sám -- a protože je vedle přeškrtnuté současné provize,
@@ -44300,18 +44303,19 @@ function closeMemberDetail(){ const o=$('memberDetailOv'); if(o) o.classList.rem
 // ═══ STUPNĚ EXCLUSIVE PARTNERA ══════════════════════════════════════════════════════════════
 // Zrcadlo EP_TIERS v api/_rate.js -- když měníš jedno, měň obojí. Server si cenu i sazbu při
 // každé platbě spočítá sám (pay.js, _rate.js); tohle jen ukazuje, co člověk dostane.
-//              provize  akvizice  reklama MTL  partneři  cena/měs   zakládající cena
-//   Genin       0,75 %   5 %       20 %          3         499 Kč    --
-//   Chūnin      0,5 %    3 %       10 %          6         799 Kč    499 Kč pro prvních 10
-//   Jōnin       0,25 %   2 %       10 %         10       1 699 Kč    --
-//   Kage        0 %      0 %       10 %         20       4 999 Kč    3 999 Kč pro prvních 5
-// Ceny bez DPH, v korunách. Roční předplatné = EP_YEAR_MONTHS měsíců. Zakládající cenu drží
-// člověk u stupně (profiles.ep_founding), dokud EP úplně nezruší -- i po přechodu jinam a zpět.
+//              provize  akvizice  reklama MTL  partneři  cena/měs           zakládající cena
+//   Genin       0,75 %   5 %       20 %          3         499 Kč / 20 €     --
+//   Chūnin      0,5 %    3 %       10 %          6         799 Kč / 32 €     499 Kč / 20 € pro prvních 10
+//   Jōnin       0,25 %   2 %       10 %         10       1 699 Kč / 69 €     --
+//   Kage        0 %      0 %       10 %         20       4 999 Kč / 199 €    3 999 Kč / 159 € pro prvních 5
+// Ceny bez DPH, pevně v měně: Kč pro odběratele z Česka, EUR pro ostatní (země toho, na koho jde
+// faktura). Roční předplatné = EP_YEAR_MONTHS měsíců. Zakládající cenu drží člověk u stupně
+// (profiles.ep_founding), dokud EP úplně nezruší -- i po přechodu jinam a zpět.
 const EP_TIERS = {
-  genin:  { rate:0.0075, acq:0.05, ads:0.20, partners:3,  czk:499,  name:'Genin',  kanji:'下忍' },
-  chunin: { rate:0.005,  acq:0.03, ads:0.10, partners:6,  czk:799,  foundingCzk:499,  foundingSpots:10, name:'Chūnin', kanji:'中忍' },
-  jonin:  { rate:0.0025, acq:0.02, ads:0.10, partners:10, czk:1699, name:'Jōnin',  kanji:'上忍' },
-  kage:   { rate:0,      acq:0,    ads:0.10, partners:20, czk:4999, foundingCzk:3999, foundingSpots:5, name:'Kage', kanji:'影' },
+  genin:  { rate:0.0075, acq:0.05, ads:0.20, partners:3,  price:{ CZK:499,  EUR:20 },  name:'Genin',  kanji:'下忍' },
+  chunin: { rate:0.005,  acq:0.03, ads:0.10, partners:6,  price:{ CZK:799,  EUR:32 },  founding:{ CZK:499,  EUR:20 },  foundingSpots:10, name:'Chūnin', kanji:'中忍' },
+  jonin:  { rate:0.0025, acq:0.02, ads:0.10, partners:10, price:{ CZK:1699, EUR:69 },  name:'Jōnin',  kanji:'上忍' },
+  kage:   { rate:0,      acq:0,    ads:0.10, partners:20, price:{ CZK:4999, EUR:199 }, founding:{ CZK:3999, EUR:159 }, foundingSpots:5, name:'Kage', kanji:'影' },
 };
 const EP_TIER_ORDER = ['genin','chunin','jonin','kage'];
 const EP_YEAR_MONTHS = 10;
@@ -44324,7 +44328,21 @@ function _epName(t){ return (EP_TIERS[t] || EP_TIERS.chunin).name; }
 function _epAcqRate(v){ const t=_epTierKey(v); return t ? EP_TIERS[t].acq : 0.10; }
 function _epAdsRate(v){ const t=_epTierKey(v); return t ? EP_TIERS[t].ads : 0; }
 function _epPct(r){ const v=Math.round(r*10000)/100; return (v+'').replace('.', LANG==='en'?'.':',')+' %'; }
-function _epCzk(a){ return Number(a||0).toLocaleString(LANG==='en'?'en-GB':'cs-CZ')+(LANG==='en'?' CZK':' Kč'); }
+// Měna EP: Česko (a nevyplněná země) Kč, jinak EUR -- zrcadlo epCurrencyFor v _rate.js.
+function _epCurFor(cc){ const c=String(cc||'').trim().toUpperCase(); return (!c || c==='CZ') ? 'CZK' : 'EUR'; }
+// Měna, ve které člověk EP platí nebo bude platit: běžící předplatné si ji drží, jinak podle
+// toho, na koho má jít faktura (volba v nabídce, náhradou fakturační země profilu).
+function _epCurNow(){
+  const u=(typeof currentUser!=='undefined')?currentUser:null;
+  if(u && u.partner && u.partner_sub && u.partner_currency) return String(u.partner_currency).toUpperCase()==='EUR'?'EUR':'CZK';
+  const o=(window._epBillOpts||[]).find(function(x){ return x.v===window._epBill; });
+  return _epCurFor(o ? o.cc : (u && u.billing_country));
+}
+function _epMoney(a, cur){
+  const c=String(cur||'CZK').toUpperCase(), n=Number(a||0);
+  const v=n.toLocaleString(LANG==='en'?'en-GB':'cs-CZ', (n%1)?{ minimumFractionDigits:2, maximumFractionDigits:2 }:{ maximumFractionDigits:0 });
+  return c==='EUR' ? (v+' €') : (v+(LANG==='en'?' CZK':' Kč'));
+}
 // Kolik zakládajících míst u stupně zbývá (Chūnin 10, Kage 5). Místo drží každý, kdo má stupeň
 // v ep_founding. Zapamatuje se na sezení; force=true načte znovu.
 async function _epEnsureSpots(force){
@@ -44339,14 +44357,15 @@ async function _epEnsureSpots(force){
 }
 // Měsíční cena stupně pro člověka: zakládající, když ji u stupně už drží nebo ještě zbývá místo.
 // Dokud počet míst neznáme, slibuje se zakládající -- server ji při platbě stejně ověří.
-function _epPriceOf(t, u){
+function _epPriceOf(t, u, cur){
   const T=EP_TIERS[t] || EP_TIERS.chunin;
   if(u===undefined) u=(typeof currentUser!=='undefined')?currentUser:null;
+  cur=(String(cur||_epCurNow()).toUpperCase()==='EUR')?'EUR':'CZK';
   const has=!!(u && Array.isArray(u.ep_founding) && u.ep_founding.indexOf(t)>=0);
   const left=(window._epFoundLeft||{})[t];
-  const founding=!!T.foundingCzk && (has || left==null || left>0);
-  const a=founding ? T.foundingCzk : T.czk;
-  return { amount:a, currency:'CZK', founding:founding, label:_epCzk(a) };
+  const founding=!!T.founding && (has || left==null || left>0);
+  const a=founding ? T.founding[cur] : T.price[cur];
+  return { amount:a, currency:cur, founding:founding, label:_epMoney(a, cur) };
 }
 // Co by člověk platil MTL měsíčně při obratu `turn` (Kč) a sazbě `rate`: provize + paušál.
 // Akvizice se v odhadu nepočítá -- je jednorázová a podle stupně ještě levnější.
@@ -44365,7 +44384,8 @@ function _epPaysFrom(t, nowRate){
     const need=(pT-o.price)/(o.rate-T.rate);
     if(need>best.from) best={ from:need, vs:o.key, dp:pT-o.price, dr:o.rate-T.rate };
   }
-  best.from=Math.ceil(best.from/1000)*1000;
+  const _step=(_epCurNow()==='EUR')?50:1000;            // zaokrouhlení nahoru: Kč na tisíce, € na padesátky
+  best.from=Math.ceil(best.from/_step)*_step;
   return best;
 }
 // Nejlevnější volba při obratu `turn`: klíč stupně, nebo null (bez EP vyjde levněji).
@@ -44415,6 +44435,13 @@ async function _loadFx(){
   if(window._fxCache) return window._fxCache;
   try{ const { data }=await supaClient.from('fx_rates').select('data').eq('id','ecb-latest').single(); if(data&&data.data){ window._fxCache=(typeof data.data==='string'?JSON.parse(data.data):data.data); return window._fxCache; } }catch(e){}
   return null;
+}
+// Částka z měny `from` do měny `to` přes kurz ECB (null, když kurz chybí).
+function _fxConv(amount, from, to, fx){
+  from=String(from||'CZK').toUpperCase(); to=String(to||'CZK').toUpperCase();
+  if(from===to) return amount;
+  const oneFrom=(from==='CZK')?1:_fxFromCZK(1, from, fx), oneTo=(to==='CZK')?1:_fxFromCZK(1, to, fx);
+  return (oneFrom && oneTo) ? amount/oneFrom*oneTo : null;
 }
 function _fxFromCZK(czk, cur, fx){
   try{
@@ -44593,7 +44620,7 @@ async function openRateCalc(){
   const inp='width:100%;box-sizing:border-box;border:1.5px solid var(--border);border-radius:12px;font-family:\'DM Sans\';';
   ov.innerHTML='<div class="shdr"><div class="shdr-title">'+(EN?'WHAT EP COSTS AT MY TURNOVER':'CO MĚ EP STOJÍ PŘI MÉM OBRATU')+'</div><button class="btn-close" id="rcCloseX">✕</button></div>'
     +'<div style="padding:14px 18px 44px;max-width:620px;margin:0 auto;">'
-      +'<div style="font-size:12.5px;color:var(--mid);margin-bottom:10px;">'+(EN?'Monthly turnover through MTL (CZK)':'Měsíční obrat přes MTL (Kč)')+'</div>'
+      +'<div style="font-size:12.5px;color:var(--mid);margin-bottom:10px;">'+(EN?'Monthly turnover through MTL':'Měsíční obrat přes MTL')+' ('+(_epCurNow()==='EUR'?'€':(EN?'CZK':'Kč'))+')</div>'
       +'<input id="rcPrice" type="number" min="0" inputmode="decimal" placeholder="'+(EN?'e.g. 100000':'např. 100000')+'" style="'+inp+'padding:13px;font-size:18px;font-weight:700;text-align:center;">'
       +'<input id="rcAcq" type="number" min="0" inputmode="decimal" placeholder="'+(EN?'of that, first payments of people who found you in the app':'z toho první platby lidí, co tě našli v appce')+'" style="'+inp+'padding:12px 14px;margin-top:9px;font-size:15px;background:var(--surf);color:var(--dark);">'
       +'<div style="font-size:11.5px;color:var(--light);margin:5px 2px 14px;line-height:1.5;">'+(EN
@@ -44606,8 +44633,9 @@ async function openRateCalc(){
   // Zavření vrátí zpátky na nabídku partnerství, odkud se kalkulačka otevírá.
   try{ if(!_sheetParent['shRateCalc']) _sheetParent['shRateCalc']='shPartnerInfo'; }catch(e){}
   try{ await _epEnsureSpots(); }catch(e){}
-  // Předvyplněný průměrný obrat za 3 měsíce, když nějaký je.
-  try{ const t=await _epTurnover(); if(t>0 && $('rcPrice')) $('rcPrice').value=String(t); }catch(e){}
+  // Předvyplněný průměrný obrat za 3 měsíce (v měně nabídky; z Kč do eur kurzem ECB).
+  try{ await _loadFx(); const t=await _epTurnover(); const c=_epCurNow(); const v=(c==='CZK')?t:_fxFromCZK(t, c, window._fxCache);
+    if(v>0 && $('rcPrice')) $('rcPrice').value=String(Math.round(v)); }catch(e){}
   renderRateCalc();
   try{ openSheet('shRateCalc'); }catch(e){ ov.classList.add('open'); }
   setTimeout(function(){ if($('rcPrice')) $('rcPrice').focus(); },150);
@@ -44624,7 +44652,7 @@ function renderRateCalc(){
     .concat(EP_TIER_ORDER.map(function(t){ const T=EP_TIERS[t]; return { key:t, name:T.name+' ('+_epPct(T.rate)+')', fee:plain*T.rate, acqFee:acq*T.acq, flat:_epPriceOf(t).amount }; }));
   rows.forEach(function(r){ r.total=r.fee+r.acqFee+r.flat; });
   const best=rows.reduce(function(a,r){ return r.total<a.total-0.5?r:a; }, rows[0]);
-  const r0=function(v){ return Math.round(v).toLocaleString(EN?'en-GB':'cs-CZ')+(EN?' CZK':' Kč'); };
+  const r0=function(v){ return _epMoney(Math.round(v), _epCurNow()); };
   body.innerHTML=rows.map(function(r){
     const on=(r===best), cur=(r.key && r.key===mine);
     const save=rows[0].total-r.total;
@@ -44701,6 +44729,7 @@ async function openPartnerInfo(){
   try{ openSheet('shPartnerInfo'); }catch(e){ ov.classList.add('open'); }
   if(window._epIv!=='year') window._epIv='month';
   try{ await _epEnsureSpots(true); }catch(e){}
+  try{ await _loadFx(); }catch(e){}
   const turn=await _epTurnover().catch(function(){ return null; });
   _epPaintInfo(turn);
 }
@@ -44709,7 +44738,10 @@ function _epPaintInfo(turn){
   const mine=_epTierOf(u), paid=!!(mine && u.partner_sub), next=_epTierKey(u.partner_tier_next);
   const native=(typeof _isNativeApp==='function') && _isNativeApp();
   const nowRate=_epOwnRate();
-  const rec=(turn!=null && turn>0) ? _epBestAt(turn, nowRate) : null;
+  // Měna nabídky (Kč / EUR) a obrat v ní -- obrat se počítá v Kč, do eur se přepočte kurzem ECB.
+  const cur=_epCurNow();
+  const turnC=(turn==null) ? null : (cur==='CZK' ? turn : (function(){ const v=_fxFromCZK(turn, cur, window._fxCache); return v==null?null:Math.round(v); })());
+  const rec=(turnC!=null && turnC>0) ? _epBestAt(turnC, nowRate) : null;
   const yr=(window._epIv==='year') && !paid;
   const _d=function(v){ try{ return new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ'); }catch(e){ return ''; } };
   // STAV: dnešní stupeň, naplánovaný přechod dolů, zrušení ke konci období.
@@ -44731,15 +44763,17 @@ function _epPaintInfo(turn){
   // OBRAT + MĚSÍČNĚ/ROČNĚ (roční jen u nového předplatného; běžící si interval drží).
   const top=$('piTop');
   if(top){
-    top.innerHTML=(turn!=null && turn>0
-        ? ('<div style="background:#fff;border:1px solid var(--border);border-radius:12px;padding:9px 13px;font-size:13.5px;color:var(--dark);">📊 '+(EN?'Your turnover through MTL: ':'Tvůj obrat přes MTL: ')+'<b>~'+_epCzk(turn)+(EN?' / mo':' / měs')+'</b> <span style="color:var(--light);">('+(EN?'average of 3 months':'průměr za 3 měsíce')+')</span></div>')
+    top.innerHTML=(turnC!=null && turnC>0
+        ? ('<div style="background:#fff;border:1px solid var(--border);border-radius:12px;padding:9px 13px;font-size:13.5px;color:var(--dark);">📊 '+(EN?'Your turnover through MTL: ':'Tvůj obrat přes MTL: ')+'<b>~'+_epMoney(turnC, cur)+(EN?' / mo':' / měs')+'</b> <span style="color:var(--light);">('+(EN?'average of 3 months':'průměr za 3 měsíce')+')</span></div>')
         : '')
       +(paid?'':('<div class="epIv"><button data-iv="month" class="'+(yr?'':'on')+'">'+(EN?'Monthly':'Měsíčně')+'</button><button data-iv="year" class="'+(yr?'on':'')+'">'+(EN?'Yearly · 2 months free':'Ročně · 2 měsíce zdarma')+'</button></div>'));
     top.querySelectorAll('.epIv button').forEach(function(b){ b.onclick=function(){ window._epIv=b.getAttribute('data-iv'); _epPaintInfo(turn); }; });
   }
   // NA KOHO FAKTURA: jen u nového předplatného (běžící ji má pevně danou).
   const anc=$('piBillAnchor');
-  if(anc){ const _ob=$('piBill'); if(paid || native){ if(_ob) _ob.remove(); } else if(!_ob) _epBillPaint(anc); }
+  // Volba odběratele mění měnu (Kč / EUR) -> po načtení i po každé změně se karty překreslí.
+  window._epOnBill=function(){ _epPaintInfo(turn); };
+  if(anc){ const _ob=$('piBill'); if(paid || native){ if(_ob) _ob.remove(); } else if(!_ob) _epBillPaint(anc).then(function(){ _epPaintInfo(turn); }); }
   // KARTY
   const TAG={ genin:EN?'For smaller clubs':'Pro menší kluby', chunin:EN?'For growing clubs':'Pro rostoucí kluby', jonin:EN?'For big clubs':'Pro velké kluby', kage:EN?'No commission · for several clubs too':'Bez provize · i pro víc klubů' };
   const row=$('piRow'); if(!row) return;
@@ -44771,8 +44805,8 @@ function _epPaintInfo(turn){
       +'<div class="epBody">'
         +'<div class="epName">'+T.name+'</div><div class="epTag">'+TAG[t]+'</div>'
         +(P.founding?'<div class="epRib">'+(EN?'Founding price':'Zakládající cena')+'</div>':'')
-        +'<div class="epPrice"'+(P.founding?' style="margin-top:6px;"':'')+'>'+_epCzk(amt)+' <small>/ '+(yr?(EN?'year':'rok'):(EN?'mo':'měs'))+'</small></div>'
-        +(P.founding?('<div class="epWas">'+(EN?'normally ':'běžně ')+'<s>'+_epCzk(yr?T.czk*EP_YEAR_MONTHS:T.czk)+'</s> · '+(EN?'the price stays yours until you cancel EP':'cena ti zůstane, dokud EP nezrušíš')+'</div>'):'')
+        +'<div class="epPrice"'+(P.founding?' style="margin-top:6px;"':'')+'>'+_epMoney(amt, cur)+' <small>/ '+(yr?(EN?'year':'rok'):(EN?'mo':'měs'))+'</small></div>'
+        +(P.founding?('<div class="epWas">'+(EN?'normally ':'běžně ')+'<s>'+_epMoney(yr?T.price[cur]*EP_YEAR_MONTHS:T.price[cur], cur)+'</s> · '+(EN?'the price stays yours until you cancel EP':'cena ti zůstane, dokud EP nezrušíš')+'</div>'):'')
         +((T.foundingSpots && left!=null)?('<div class="epSpots">'+(left>0?(EN?(left+' of '+T.foundingSpots+' founding places left'):('Zbývá '+left+' z '+T.foundingSpots+' zakládajících míst')):(EN?'Founding places are taken':'Zakládající místa jsou obsazená'))
           +(holds?(EN?' · one of them is yours':' · jedno z nich máš ty'):'')+'</div>'):'')
         +'<ul class="epList">'
@@ -44782,8 +44816,8 @@ function _epPaintInfo(turn){
           +'<li><span>'+(EN?'Partners on the card':'Partneři na kartě')+'</span><b>'+(t==='kage'?(EN?'10 + 10 on the profile':'10 + 10 v profilu'):T.partners)+'</b></li>'
         +'</ul>'
         +'<div class="epBe">'+(be==null?(EN?'Does not pay off against your current rate':'Proti tvé dnešní sazbě se nevyplatí')
-          :((EN?'Pays off from turnover ':'Vyplatí se od obratu ')+'<b>'+_epCzk(be.from)+(EN?' / mo':' / měs')+'</b>'
-            +'<div style="font-size:11px;margin-top:3px;opacity:.85;">= '+_epCzk(be.dp)+(be.vs?(EN?' more fee':' paušálu navíc'):(EN?' fee':' paušál'))+' ÷ '+_epPct(be.dr)+(EN?' lower commission, against ':' nižší provize, proti ')
+          :((EN?'Pays off from turnover ':'Vyplatí se od obratu ')+'<b>'+_epMoney(be.from, cur)+(EN?' / mo':' / měs')+'</b>'
+            +'<div style="font-size:11px;margin-top:3px;opacity:.85;">= '+_epMoney(be.dp, cur)+(be.vs?(EN?' more fee':' paušálu navíc'):(EN?' fee':' paušál'))+' ÷ '+_epPct(be.dr)+(EN?' lower commission, against ':' nižší provize, proti ')
               +(be.vs?_epName(be.vs):((EN?'your current rate ':'tvé dnešní sazbě ')+_epPct(nowRate)))+'</div>'))+'</div>'
         +(btn?('<button class="epBtn" data-t="'+t+'"'+(dis?' disabled':'')+'>'+btn+'</button>'):'')
       +'</div></div>';
@@ -44822,9 +44856,9 @@ async function _epPreview(row){
     const j=await r.json(); if(!j || !j.ok) return;
     window._epDue={};
     (j.upgrades||[]).forEach(function(x){
-      window._epDue[x.tier]=x.due;
+      window._epDue[x.tier]=_epMoney(x.due, j.currency);
       const b=row.querySelector('.epBtn[data-t="'+x.tier+'"]'); if(!b || b.disabled) return;
-      const amt=Number(x.due).toLocaleString(EN?'en-GB':'cs-CZ',{ minimumFractionDigits:2, maximumFractionDigits:2 })+(EN?' CZK':' K\u010d');
+      const amt=_epMoney(x.due, j.currency);
       b.textContent=EN?('Switch now \u00b7 pay '+amt):('P\u0159ej\u00edt hned \u00b7 dopla\u0165 '+amt);
     });
   }catch(e){}
@@ -44850,7 +44884,7 @@ async function _epChange(t, cancelDown){
     const P=_epPriceOf(t);
     const _d=function(v){ try{ return new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ'); }catch(e){ return ''; } };
     const msg=up
-      ? (function(){ const d=(window._epDue||{})[t]; const amt=(d!=null)?(Number(d).toLocaleString(EN?'en-GB':'cs-CZ',{ minimumFractionDigits:2, maximumFractionDigits:2 })+(EN?' CZK':' Kč')):null;
+      ? (function(){ const amt=(window._epDue||{})[t]||null;
           return EN?('Move up to '+_epName(t)+' now? The card on the subscription is charged '+(amt||'the difference')+' for the rest of the paid period; from the next period you pay '+P.label+'/mo excl. VAT.')
                    :('Přejít hned na '+_epName(t)+'? Z karty u předplatného se strhne '+(amt||'rozdíl')+' za zbytek zaplaceného období; od dalšího období platíš '+P.label+'/měs bez DPH.'); })()
       : (EN?('Move down to '+_epName(t)+' from '+_d(u.partner_renews_at)+'? Until then you keep '+_epName(mine)+'; no refund for the current period. You can cancel the change until then.'):('Přejít na '+_epName(t)+' od '+_d(u.partner_renews_at)+'? Do té doby ti zůstává '+_epName(mine)+', za běžící období se nic nevrací. Přechod můžeš do té doby zrušit.'));
@@ -44884,7 +44918,7 @@ async function _epChange(t, cancelDown){
 // Stav EP z databáze do currentUser (po nákupu / přechodu) a překreslení karet, které ho ukazují.
 async function _epReloadMe(){
   if(!currentUser) return;
-  try{ const { data }=await supaClient.from('profiles').select('partner,partner_tier,partner_tier_next,partner_tier_from,partner_sub,partner_price,partner_renews_at,partner_cancelling,partner_period_end,ep_founding').eq('id',currentUser.id).maybeSingle();
+  try{ const { data }=await supaClient.from('profiles').select('partner,partner_tier,partner_tier_next,partner_tier_from,partner_sub,partner_price,partner_currency,partner_renews_at,partner_cancelling,partner_period_end,ep_founding').eq('id',currentUser.id).maybeSingle();
     if(data) Object.assign(currentUser, data); }catch(e){}
   try{ if($('partnerBadge')){ $('partnerBadge').style.display=currentUser.partner?'block':'none'; if(currentUser.partner) $('partnerBadge').innerHTML=epRatesCardHTML(true,true); } }catch(e){}
   try{ const _pb=document.getElementById('payEpBox'); if(_pb) _paintEpManage(_pb); }catch(e){}
@@ -44893,7 +44927,7 @@ async function _epReloadMe(){
 function _epTrackSubscribe(){
   if(window._epSubFired || !currentUser) return; window._epSubFired=true;
   try{ const a=Number(currentUser.partner_price)||_epPriceOf(_epTierOf(currentUser)||'chunin').amount;
-    _mtlEcoTrack('Subscribe',{ value:a, currency:'CZK', user_type:'provider', content_name:'Exclusive Partner '+_epName(_epTierOf(currentUser)) }); }catch(e){}
+    _mtlEcoTrack('Subscribe',{ value:a, currency:String(currentUser.partner_currency||_epCurNow()).toUpperCase(), user_type:'provider', content_name:'Exclusive Partner '+_epName(_epTierOf(currentUser)) }); }catch(e){}
 }
 function _pickCancelMode(mname, ctx){
   ctx=ctx||{};
