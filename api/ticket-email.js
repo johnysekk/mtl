@@ -1,5 +1,6 @@
 import PDFDocument from 'pdfkit';
 import { DEJAVU_CZ } from './_dejavu-cz.js';
+import { BEBAS } from './_bebas.js';
 // MTL — /api/ticket-email  (ESM, same style as pay.js / profile-badges.js)
 // Sends the buyer their event ticket as an email with a scannable QR (encodes /?etk=<ticketId>).
 // Called fire-and-forget from the app right after a ticket becomes paid (free RSVP or card).
@@ -37,7 +38,10 @@ async function ticketPdf(t, ev, appUrl, venue, dt) {
       doc.on('error', () => resolve(null));
       try { doc.registerFont('cz', DEJAVU_CZ); doc.font('cz'); } catch (e) {}
 
-      doc.fontSize(22).fillColor('#E11111').text('MTL');
+      // Logo písmem appky (Bebas Neue) a její červenou.
+      try { doc.registerFont('brand', BEBAS); doc.font('brand'); } catch (e) {}
+      doc.fontSize(30).fillColor('#E8001D').text('MTL', { characterSpacing: 1.6 });
+      try { doc.font('cz'); } catch (e) {}
       doc.moveDown(0.1).fontSize(9).fillColor('#888888').text('MARTIAL TRAINING LAB');
       doc.moveDown(1.2).fontSize(20).fillColor('#111111').text(String(ev.title || 'Event'));
       if (dt) doc.moveDown(0.3).fontSize(11).fillColor('#555555').text(dt);
