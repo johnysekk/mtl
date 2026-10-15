@@ -12889,19 +12889,13 @@ async function _attrPanel(table, col, id, cur){
 }
 
 function _evShareSheet(ev){
-  // Jeden odkaz, který jde všude. Dřív tu byla nabídka devíti kanálů, kde si pořadatel musel
-  // vybrat, kam odkaz dá, JEŠTĚ NEŽ ho někam dal -- a pro každé místo si vzít jiný. Appka si zdroj
-  // přebere sama, takže ta volba nic nepřidávala a jen zdržovala u tlačítka, které má prostě
-  // zkopírovat odkaz.
-  const EN=LANG==='en';
-  const link=_appOrigin()+'/?event='+encodeURIComponent(ev.id);
-  const msg=(EN?('🥊 '+(ev.title||'Event')+' — tickets: '):('🥊 '+(ev.title||'Akce')+' — lístky: '));
-  // Sdílet = zkopírovat. Nikdy neotvírat systémovou nabídku sdílení: sebere to člověku kontrolu
-  // nad tím, kam odkaz půjde, přidá krok navíc a na desktopu se často neotevře vůbec.
-  (async function(){
-    try{ await navigator.clipboard.writeText(link); }catch(e){}
-    toast(EN?'✅ Link copied':'✅ Odkaz zkopírován');
-  })();
+  // Jeden odkaz, který jde všude: /event/<adresa> s náhledem (název, termín, plakát). Klepnutí
+  // ho rovnou zkopíruje (když adresu už známe -- schránka chce klepnutí, ne čekání na dotaz)
+  // a otevře okno s QR a možností adresu změnit. Nikdy systémová nabídka sdílení: sebere
+  // člověku kontrolu nad tím, kam odkaz půjde, a na desktopu se často neotevře vůbec.
+  let copied=false;
+  if(ev && ev.slug){ try{ navigator.clipboard.writeText(_appOrigin()+'/event/'+ev.slug); copied=true; }catch(e){} }
+  _shareLinkDialog('event', ev.id, ev.title||'', copied);
 }
 
 
@@ -16850,13 +16844,13 @@ function _ownLink(kind){ try{
   // Klub má veřejnou stránku: ukáže rozvrh, ceník a trenéry i tomu, kdo appku nemá, a tlačítko
   // na ní vede do appky s ?own=1&club=.
   if(kind!=='coach' && gid){
-    // Vlastní adresa klubu (/klub/<slug>), když si ji klub nastavil; jinak stránka podle id.
+    // Vlastní adresa klubu (/club/<slug>), když si ji klub nastavil; jinak stránka podle id.
     var _sg=(_myGymData && String(_myGymData.id)===String(gid) && _myGymData.slug) || null;
-    return _sg ? (_appOrigin()+'/klub/'+encodeURIComponent(_sg)) : (_appOrigin()+'/api/club-public?club='+gid);
+    return _sg ? (_appOrigin()+'/club/'+encodeURIComponent(_sg)) : (_appOrigin()+'/api/club-public?club='+gid);
   }
   // Kouč: veřejná stránka (api/coach-public.js) -- ukáže nabídku i tomu, kdo appku nemá, a
   // tlačítko na ní vede do appky s ?own=1&coach= (bez akviziční provize).
-  if(kind==='coach' && cid) return (currentUser && currentUser.slug) ? (_appOrigin()+'/kouc/'+encodeURIComponent(currentUser.slug)) : (_appOrigin()+'/api/coach-public?coach='+cid);
+  if(kind==='coach' && cid) return (currentUser && currentUser.slug) ? (_appOrigin()+'/coach/'+encodeURIComponent(currentUser.slug)) : (_appOrigin()+'/api/coach-public?coach='+cid);
   var base=_appOrigin()+'/?own=1';
   if(cid) base+='&coach='+cid;
   // Jeden odkaz, obě funkce: původ nákupu (own) i body za doporučení (ref). Veřejná stránka
@@ -22408,19 +22402,43 @@ async function _cohEdit(cohortId){
     var _cb=$('cohSave'); if(_cb) _cb.textContent=(EN?'Save changes':'Uložit změny');
   }catch(e){}
 }
-function _cohShowLink(cohortId, name){
+function _cohShowLink(cohortId, name){ _shareLinkDialog('course', cohortId, name); }
+// HEZKÝ ODKAZ NA KURZ / AKCI: /course/<adresa>, /event/<adresa> (api/share-page.js). Adresa se
+// tvoří sama z názvu (sql/share-links.sql); tady se zkopíruje, ukáže QR a dá se změnit.
+// copied: odkaz už je ve schránce (sdílení akce kopíruje hned po klepnutí).
+async function _shareLinkDialog(kind, id, name, copied){
   const EN=LANG==='en';
-  const url=_appOrigin()+'/?cohort='+encodeURIComponent(cohortId);
+  const table=(kind==='course')?'gym_cohorts':'events';
+  let slug=null; try{ const { data }=await supaClient.from(table).select('slug').eq('id',id).maybeSingle(); slug=(data&&data.slug)||null; }catch(e){}
+  const urlOf=function(sl){ return sl ? (_appOrigin()+'/'+kind+'/'+sl) : (_appOrigin()+'/?'+(kind==='course'?'cohort':'event')+'='+encodeURIComponent(id)); };
+  let url=urlOf(slug);
+  const host=String(_appOrigin()).replace(/^https?:\/\//,'');
   const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100000;display:flex;align-items:center;justify-content:center;padding:20px;';
-  ov.innerHTML='<div style="background:#fff;border-radius:18px;padding:22px;max-width:360px;width:100%;text-align:center;"><div style="font-size:16px;font-weight:800;margin-bottom:4px;">'+(EN?'Signup link':'Odkaz na přihlášení')+'</div><div style="font-size:13px;color:var(--mid);margin-bottom:14px;">'+((name||'')+'')+'</div><div id="cohQrBox" style="display:flex;justify-content:center;margin-bottom:12px;"></div><div style="font-size:10px;color:var(--light);word-break:break-all;margin-bottom:8px;">'+url+'</div><button id="cohLinkCopy" style="width:100%;padding:11px;background:#fff;color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:12px;">\ud83d\udccb '+(EN?'Copy link':'Zkop\u00edrovat odkaz')+'</button><p style="font-size:11px;color:var(--mid);line-height:1.5;margin-bottom:14px;">'+(EN?'Use this link/QR in your Meta ad. People sign up and pay the deposit without an app account.':'Tento odkaz/QR dej do Meta reklamy. Lidé se přihlásí a zaplatí zálohu bez účtu v appce.')+'</p><button id="cohLinkClose" style="width:100%;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:11px;font-weight:700;cursor:pointer;">'+(EN?'Done':'Hotovo')+'</button></div>';
+  ov.innerHTML='<div style="background:#fff;border-radius:18px;padding:22px;max-width:380px;width:100%;text-align:center;max-height:92vh;overflow:auto;">'
+    +'<div style="font-size:16px;font-weight:800;margin-bottom:4px;">'+(kind==='course'?(EN?'Signup link':'Odkaz na přihlášení'):(EN?'Ticket link':'Odkaz na lístky'))+'</div>'
+    +'<div style="font-size:13px;color:var(--mid);margin-bottom:14px;">'+escapeHtml(name||'')+'</div>'
+    +'<div id="shlQr" style="display:flex;justify-content:center;margin-bottom:12px;"></div>'
+    +'<div id="shlUrl" style="font-size:12px;font-weight:700;color:var(--dark);word-break:break-all;margin-bottom:8px;">'+escapeHtml(url)+'</div>'
+    +'<button id="shlCopy" style="width:100%;padding:11px;background:#fff;color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:12px;">'+(copied?('✅ '+(EN?'Copied':'Zkopírováno')):('📋 '+(EN?'Copy link':'Zkopírovat odkaz')))+'</button>'
+    +'<p style="font-size:11px;color:var(--mid);line-height:1.5;margin:0 0 14px;">'+(kind==='course'
+      ?(EN?'Use this link/QR in your Meta ad, bio or posts. People sign up and pay without an app account; shared links show the course name, date and poster.':'Odkaz/QR dej do Meta reklamy, bia nebo příspěvků. Lidé se přihlásí a zaplatí bez účtu v appce; sdílený odkaz ukáže název kurzu, termín a plakát.')
+      :(EN?'One link for everywhere — shared links show the event name, date and poster.':'Jeden odkaz pro všechno — sdílený odkaz ukáže název akce, termín a plakát.'))+'</p>'
+    +(slug?('<div style="text-align:left;margin-bottom:14px;"><div style="font-size:12px;font-weight:700;color:var(--mid);margin-bottom:5px;">'+(EN?'Link address':'Adresa odkazu')+'</div>'
+      +'<div style="display:flex;align-items:center;border:1.5px solid var(--border);border-radius:11px;overflow:hidden;background:#fff;"><span style="padding:10px 0 10px 10px;font-size:12px;color:var(--mid);white-space:nowrap;">'+escapeHtml(host)+'/'+kind+'/</span>'
+      +'<input id="shlSlug" value="'+escapeHtml(slug)+'" maxlength="40" style="flex:1;min-width:0;border:none;outline:none;padding:10px 8px 10px 0;font-size:13px;font-family:inherit;"></div>'
+      +'<button id="shlSlugSave" style="margin-top:7px;padding:8px 14px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:10px;font-size:12.5px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Save address':'Uložit adresu')+'</button>'
+      +'<div id="shlSlugMsg" style="font-size:11.5px;color:var(--light);margin-top:5px;line-height:1.45;">'+(EN?'Made from the name automatically. Changing it breaks links already shared.':'Vytvořila se z názvu sama. Změna rozbije už sdílené odkazy.')+'</div></div>'):'')
+    +'<button id="shlClose" style="width:100%;padding:12px;background:var(--dark);color:#fff;border:none;border-radius:11px;font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Done':'Hotovo')+'</button></div>';
   document.body.appendChild(ov);
   const close=function(){ ov.remove(); }; ov.onclick=function(e){ if(e.target===ov && !_ovHasForm(ov)) close(); };
-  ov.querySelector('#cohLinkClose').onclick=close;
-  { const _cb=ov.querySelector('#cohLinkCopy'); if(_cb) _cb.onclick=async function(){
-      try{ await navigator.clipboard.writeText(url); }catch(e){ try{ const _t=document.createElement('textarea'); _t.value=url; _t.style.position='fixed'; _t.style.opacity='0'; document.body.appendChild(_t); _t.select(); document.execCommand('copy'); _t.remove(); }catch(_){ prompt(EN?'Copy this link:':'Zkop\u00edruj odkaz:', url); return; } }
-      _cb.textContent='\u2705 '+(EN?'Copied':'Zkop\u00edrov\u00e1no'); setTimeout(function(){ try{ _cb.textContent='\ud83d\udccb '+(EN?'Copy link':'Zkop\u00edrovat odkaz'); }catch(e){} }, 1800); }; }
-  const box=ov.querySelector('#cohQrBox');
-  try{ if(window.QRCode && box){ new QRCode(box,{text:url,width:200,height:200}); } }catch(e){}
+  ov.querySelector('#shlClose').onclick=close;
+  const paintQr=function(){ const box=ov.querySelector('#shlQr'); if(!box) return; box.innerHTML=''; try{ if(window.QRCode){ new QRCode(box,{ text:url, width:200, height:200 }); } }catch(e){} };
+  paintQr();
+  const cb=ov.querySelector('#shlCopy'); cb.onclick=async function(){
+    try{ await navigator.clipboard.writeText(url); }catch(e){ try{ const t=document.createElement('textarea'); t.value=url; t.style.position='fixed'; t.style.opacity='0'; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); }catch(_e){} }
+    cb.textContent='✅ '+(EN?'Copied':'Zkopírováno'); setTimeout(function(){ try{ cb.textContent='📋 '+(EN?'Copy link':'Zkopírovat odkaz'); }catch(e){} }, 1800); };
+  if(slug) _slugWire({ input:'shlSlug', btn:'shlSlugSave', msg:'shlSlugMsg', table:table, id:id, prefix:kind, required:true, cur:function(){ return slug; },
+    onSaved:function(v){ slug=v; url=urlOf(v); const u=ov.querySelector('#shlUrl'); if(u) u.textContent=url; paintQr(); } });
 }
 async function openCoachMembersAtGym(gymId, gymName){
   const me=currentUser&&currentUser.id; if(!me) return;
@@ -23872,7 +23890,7 @@ ${(typeof _payMethodBanner==='function')?_payMethodBanner(_myGymData, { subject:
       ${(g.org_form==='nonprofit')?`<div style="font-size:12px;color:#9A5B00;background:#FFF8E6;border:1px solid #F0DFA8;border-radius:10px;padding:9px 11px;line-height:1.5;margin-bottom:10px;">${LANG==='en'?'Do not use it for your existing association members — add them above instead, otherwise they would have to submit a new membership application in the app.':'Na st\u00e1vaj\u00edc\u00ed \u010dleny spolku ho nepou\u017e\u00edvej \u2014 p\u0159enes je naho\u0159e, jinak by v appce museli pod\u00e1vat novou p\u0159ihl\u00e1\u0161ku.'}</div>`:''}
       <div style="font-size:11px;font-weight:800;color:var(--light);letter-spacing:.04em;text-transform:uppercase;margin:2px 0 6px;">${LANG==='en'?'Your own address':'Vlastn\u00ed adresa'}</div>
       <div style="display:flex;align-items:center;border:1.5px solid var(--border);border-radius:11px;overflow:hidden;margin-bottom:6px;background:var(--surf);">
-        <span style="padding:11px 0 11px 11px;font-size:13px;color:var(--mid);white-space:nowrap;">${escapeHtml(String(_appOrigin()).replace(/^https?:\/\//,''))}/klub/</span>
+        <span style="padding:11px 0 11px 11px;font-size:13px;color:var(--mid);white-space:nowrap;">${escapeHtml(String(_appOrigin()).replace(/^https?:\/\//,''))}/club/</span>
         <input id="mgSlug" value="${escapeHtml(g.slug||'')}" placeholder="${LANG==='en'?'your-club':'tvuj-klub'}" autocapitalize="off" autocomplete="off" spellcheck="false" style="flex:1;min-width:0;padding:11px 11px 11px 1px;border:none;background:transparent;font-size:14px;font-weight:700;font-family:inherit;color:var(--dark);outline:none;">
       </div>
       <p id="mgSlugMsg" style="font-size:11.5px;color:var(--light);line-height:1.45;margin:0 0 8px;">${LANG==='en'?'Lowercase letters, numbers and dashes, 3–40 characters. Changing it later breaks links you already shared.':'Mal\u00e1 p\u00edsmena, \u010d\u00edslice a poml\u010dky, 3\u201340 znak\u016f. Pozd\u011bj\u0161\u00ed zm\u011bna rozbije u\u017e rozeslan\u00e9 odkazy.'}</p>
@@ -28022,11 +28040,11 @@ function _comDokHtml(dk, opts){
         +(dk.test_mode?'<div class="test">\u{1F9EA} '+(EN?'TEST MODE \u2014 no actual transaction took place':'TESTOVAC\u00cd RE\u017dIM \u2014 k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo')+'</div>':'')
         +'<div class="cols">'+col(EN?'Supplier':'Dodavatel', sup)+col(EN?'Customer':'Odb\u011bratel', cust)+'</div>'
         +facts([[EN?'Document no.':'\u010c\u00edslo dokladu', _dokladNo(dk)], [EN?'Issued':'Datum vystaven\u00ed', dt(dk.issued_at||dk.charged_at)]])
-        +stBox
         +'<table class="it"><thead><tr><th>'+(EN?'Invoice paid':'Uhrazen\u00e1 faktura')+'</th><th>'+(EN?'Period':'Obdob\u00ed')+'</th><th class="r">'+(EN?'Amount paid':'Uhrazeno')+'</th></tr></thead><tbody>'
         +_rcptItems(dk).map(function(it){ return '<tr><td>'+esc(it.doc_no||_dokladNo(it.ref))+'</td><td>'+esc(_perLbl(it.period))+'</td><td class="r">'+money(it.amount)+'</td></tr>'; }).join('')
         +'</tbody></table>'
-        +'<table class="sum"><tr class="tot"><td>'+(EN?'Total paid':'Uhrazeno celkem')+'</td><td class="r">'+money(dk.amount)+'</td></tr></table>';
+        +'<table class="sum"><tr class="tot"><td>'+(EN?'Total paid':'Uhrazeno celkem')+'</td><td class="r">'+money(dk.amount)+'</td></tr></table>'
+        +stBox;
     } else if(isEP){
       const _it=(items[0]||{});
       const _lbl=isSupSub
@@ -28038,20 +28056,20 @@ function _comDokHtml(dk, opts){
         +(dk.test_mode?'<div class="test">\u{1F9EA} '+(EN?'TEST MODE \u2014 not a formal tax document; no actual transaction took place':'TESTOVAC\u00cd RE\u017dIM \u2014 nejde o form\u00e1ln\u00ed da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo')+'</div>':'')
         +'<div class="cols">'+col(EN?'Supplier':'Dodavatel', sup)+col(EN?'Customer':'Odb\u011bratel', cust)+'</div>'
         +facts([[EN?'Invoice no.':'\u010c\u00edslo faktury', _dokladNo(dk)], [EN?'Issued':'Datum vystaven\u00ed', dt(dk.issued_at||dk.charged_at)],
-                [EN?'Subscription period':'Obdob\u00ed p\u0159edplatn\u00e9ho', _epPer], [EN?'Date of supply':'DUZP', _duzpV],
+                [EN?'Subscription period':'Obdob\u00ed p\u0159edplatn\u00e9ho', _epPer], [EN?'Date of supply':'Datum uskute\u010dn\u011bn\u00ed pln\u011bn\u00ed', _duzpV],
                 [EN?'Payment method':'Zp\u016fsob \u00fahrady', (_st&&_st.paid)?(EN?'Payment card':'Platebn\u00ed karta'):'']])
-        +stBox
         +'<table class="it"><thead><tr><th>'+(EN?'Item':'Polo\u017eka')+'</th><th class="r">'+(EN?'Amount':'\u010c\u00e1stka')+'</th></tr></thead><tbody><tr><td>'+esc(_lbl)+'</td><td class="r">'+money(dk.amount)+'</td></tr></tbody></table>'
-        +'<table class="sum">'+vat+'<tr class="tot"><td>'+(EN?'Total':'Celkem')+'</td><td class="r">'+money(dk.amount)+'</td></tr></table>';
+        +'<table class="sum">'+vat+'<tr class="tot"><td>'+(EN?'Total':'Celkem')+'</td><td class="r">'+money(dk.amount)+'</td></tr></table>'
+        +stBox;   // stav úhrady pod „Celkem“
     } else
     body='<h1>'+(EN?'Invoice \u2014 MTL commission':'Faktura \u2014 provize MTL')+'</h1>'
       +(dk.test_mode?'<div class="test">\u{1F9EA} '+(EN?'TEST MODE \u2014 not a formal tax document; no actual transaction took place':'TESTOVAC\u00cd RE\u017dIM \u2014 nejde o form\u00e1ln\u00ed da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo')+'</div>':'')
       +'<div class="cols">'+col(EN?'Supplier':'Dodavatel', sup)+col(EN?'Customer':'Odb\u011bratel', cust)+'</div>'
       +facts([[EN?'Invoice no.':'\u010c\u00edslo faktury', _dokladNo(dk)], [EN?'Issued':'Datum vystaven\u00ed', dt(dk.charged_at)],
-              [EN?'Period':'Obdob\u00ed', per], [EN?'Date of supply':'DUZP', _duzpV], [EN?'Billed as':'Fakturov\u00e1no za', kindLbl]])
-      +stBox
+              [EN?'Period':'Obdob\u00ed', per], [EN?'Date of supply':'Datum uskute\u010dn\u011bn\u00ed pln\u011bn\u00ed', _duzpV], [EN?'Billed as':'Fakturov\u00e1no za', kindLbl]])
       +'<table class="it"><thead><tr><th>'+(EN?'Payment form':'Forma platby')+'</th><th class="c">'+(EN?'Rate':'Sazba')+'</th><th class="c">'+(EN?'Payments':'Plateb')+'</th><th class="r">'+(EN?'Volume':'Objem plateb')+'</th><th class="r">'+(EN?'Commission':'Provize')+'</th></tr></thead><tbody>'+rows+'</tbody></table>'
       +'<table class="sum">'+vat+'<tr class="tot"><td>'+(EN?'Total':'Celkem')+'</td><td class="r">'+money(dk.amount)+'</td></tr></table>'
+      +stBox
       +'<div class="note2">'+(EN?'Payments intermediated: ':'Zprost\u0159edkovan\u00fdch plateb: ')+'<b>'+cnt+'</b> \u00b7 '+(EN?'volume ':'objem ')+'<b>'+money(vol)+'</b></div>';
   }
   const _html='<html><head><meta charset="utf-8"><title>'+(hasSnap?esc(_dokladNo(dk)):'')+'</title><style>'
@@ -28064,7 +28082,7 @@ function _comDokHtml(dk, opts){
     +'.note2{margin-top:10px;font-size:12px;color:#555;}.note{font-size:12px;color:#555;margin-top:10px;line-height:1.55;}'
     +'.facts{display:grid;grid-template-columns:1fr 1fr;column-gap:28px;margin:14px 0 4px;font-size:13px;border-top:1px solid #e6e6e6;}.fr{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid #eee;}.fr span{color:#777;}.fr b{font-weight:600;text-align:right;}'
     +'@media (max-width:520px){.facts{grid-template-columns:1fr;}}'
-    +'.st{margin:12px 0 4px;padding:7px 12px;border-radius:8px;border:1px solid;}.st.ok{background:#EAF7EE;border-color:#A8E6C0;color:#0E6B3A;}.st.due{background:#FFF4E5;border-color:#F0C674;color:#8a5a00;}'
+    +'.st{margin:14px 0 4px;padding:7px 12px;border-radius:8px;border:1px solid;}.st.ok{background:#EAF7EE;border-color:#A8E6C0;color:#0E6B3A;}.st.due{background:#FFF4E5;border-color:#F0C674;color:#8a5a00;}'
     +'.sth{font-weight:800;font-size:12.5px;letter-spacing:.02em;}.stb{font-size:12px;line-height:1.45;margin-top:1px;}</style></head><body>'+(opts.preview?('<div style="font-size:11px;font-weight:800;color:#999;letter-spacing:.05em;margin-bottom:10px;">'+(EN?'PREVIEW \u2014 sample amounts':'N\u00c1HLED \u2014 \u010d\u00e1stky jsou uk\u00e1zkov\u00e9')+'</div>'):'')+body+'</body></html>';
   return { html:_html, st:_st, hasSnap:hasSnap };
 }
@@ -28566,17 +28584,18 @@ function _admSuspDialog(kind, id, name, isOn, after){
       .catch(function(e){ b.disabled=false; b.textContent=(EN?'Suspend':'Pozastavit'); toast('\u26a0\ufe0f '+e.message, 1); });
   };
 }
-// VLASTNÍ ADRESA KLUBU (/klub/<slug>). Ukládá se hned (ne přes „Uložit změny"), jedinečnost
+// VLASTNÍ ADRESA KLUBU (/club/<slug>). Ukládá se hned (ne přes „Uložit změny"), jedinečnost
 // hlídá databáze (unikátní index) -- obsazenou adresu odmítne. Diakritika a mezery se převedou.
 const _SLUG_RESERVED=['admin','api','app','mtl','martialtraininglab','klub','club','www','help','podpora','support','test','dashboard','pay'];
 function _slugify(v){ return String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40).replace(/-+$/,''); }
-// o = { input, btn, msg, table:'gyms'|'profiles', id, cur, prefix:'klub'|'kouc', onSaved(v) }
+// o = { input, btn, msg, table:'gyms'|'profiles'|'gym_cohorts'|'events', id, cur, prefix:'club'|'coach'|'course'|'event', onSaved(v), required }
 function _slugWire(o){
   const inp=$(o.input), btn=$(o.btn), msg=$(o.msg); if(!inp||!btn) return; const EN=LANG==='en';
   const say=function(t,c){ if(msg){ msg.textContent=t; msg.style.color=c||'var(--light)'; } };
   inp.addEventListener('blur', function(){ inp.value=_slugify(inp.value); });
   btn.onclick=async function(){
     const v=_slugify(inp.value); inp.value=v; const cur=(typeof o.cur==='function'?o.cur():o.cur)||null;
+    if(!v && o.required){ say(EN?'The link needs an address.':'Odkaz adresu mít mus\u00ed.','var(--red)'); return; }
     if(v && !/^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])$/.test(v)){ say(EN?'3–40 characters: lowercase letters, numbers, dashes.':'3–40 znaků: malá písmena, číslice, pomlčky.','var(--red)'); return; }
     if(v && _SLUG_RESERVED.indexOf(v)>=0){ say(EN?'This address is reserved, pick another one.':'Tahle adresa je vyhrazená, vyber jinou.','var(--red)'); return; }
     if((v||null)===cur){ say(EN?'No change.':'Beze změny.'); return; }
@@ -28595,7 +28614,7 @@ function _slugWire(o){
     finally{ btn.disabled=false; }
   };
 }
-function _mgSlugWire(){ if(!_myGymData) return; _slugWire({ input:'mgSlug', btn:'mgSlugSave', msg:'mgSlugMsg', table:'gyms', id:_myGymData.id, prefix:'klub', cur:function(){ return (_myGymData&&_myGymData.slug)||null; }, onSaved:function(v){ _myGymData.slug=v; } }); }
+function _mgSlugWire(){ if(!_myGymData) return; _slugWire({ input:'mgSlug', btn:'mgSlugSave', msg:'mgSlugMsg', table:'gyms', id:_myGymData.id, prefix:'club', cur:function(){ return (_myGymData&&_myGymData.slug)||null; }, onSaved:function(v){ _myGymData.slug=v; } }); }
 
 // Proklik do režimu členství (z upozornění i z hlášky při pokusu o nákup u vlastního klubu).
 function _openMembMode(gymId){
@@ -52708,14 +52727,14 @@ function openCoachSettings(){
     ? 'Whoever comes through this link is your client, not someone MTL brought you \u2014 you do not pay the 10 % acquisition fee on them. The normal commission stays. It works for new people too, not only the ones you already train. It opens your public page with your offer \u2014 put it in your bio or on your website; its button leads into the app.'
     : 'Kdo p\u0159ijde p\u0159es tenhle odkaz, je tv\u016fj klient, ne akvizice MTL \u2014 neplat\u00ed\u0161 z n\u011bj akvizi\u010dn\u00ed provizi 10 %. B\u011b\u017en\u00e1 provize z\u016fst\u00e1v\u00e1. Funguje i pro \u00fapln\u011b nov\u00e9 lidi, nejen pro ty, kter\u00e9 u\u017e tr\u00e9nuje\u0161. Otev\u0159e tvou ve\u0159ejnou str\u00e1nku s nab\u00eddkou \u2014 jde ji vlo\u017eit do bia nebo na web a tla\u010d\u00edtko na n\u00ed vede do appky.');
   try{ var _ocb=$('csOwnStudentCopy'); if(_ocb){ _ocb.textContent=(LANG==='en'?'📋 Copy link':'📋 Zkopírovat odkaz'); _ocb.onclick=function(){ var _ocl=_ownLink('coach'); try{ navigator.clipboard.writeText(_ocl); }catch(e){} toast(LANG==='en'?'✅ Link copied':'✅ Odkaz zkopírován'); }; } }catch(e){}
-  // Vlastní adresa veřejné stránky kouče (/kouc/<slug>), stejně jako u klubu.
+  // Vlastní adresa veřejné stránky kouče (/coach/<slug>), stejně jako u klubu.
   try{ const _sb=$('csSlugBox'); if(_sb && currentUser){ const EN=LANG==='en';
     _sb.innerHTML='<div style="font-size:11px;font-weight:800;color:var(--light);letter-spacing:.04em;text-transform:uppercase;margin:2px 0 6px;">'+(EN?'Your own address':'Vlastn\u00ed adresa')+'</div>'
-      +'<div style="display:flex;align-items:center;border:1.5px solid var(--border);border-radius:11px;overflow:hidden;margin-bottom:6px;background:#fff;"><span style="padding:11px 0 11px 11px;font-size:13px;color:var(--mid);white-space:nowrap;">'+escapeHtml(String(_appOrigin()).replace(/^https?:\/\//,''))+'/kouc/</span>'
+      +'<div style="display:flex;align-items:center;border:1.5px solid var(--border);border-radius:11px;overflow:hidden;margin-bottom:6px;background:#fff;"><span style="padding:11px 0 11px 11px;font-size:13px;color:var(--mid);white-space:nowrap;">'+escapeHtml(String(_appOrigin()).replace(/^https?:\/\//,''))+'/coach/</span>'
       +'<input id="csSlug" value="'+escapeHtml(currentUser.slug||'')+'" placeholder="'+(EN?'your-name':'tvoje-jmeno')+'" autocapitalize="off" autocomplete="off" spellcheck="false" style="flex:1;min-width:0;padding:11px 11px 11px 1px;border:none;background:transparent;font-size:14px;font-weight:700;font-family:inherit;color:var(--dark);outline:none;"></div>'
       +'<p id="csSlugMsg" style="font-size:11.5px;color:var(--light);line-height:1.45;margin:0 0 8px;">'+(EN?'Lowercase letters, numbers and dashes, 3–40 characters. Changing it later breaks links you already shared.':'Mal\u00e1 p\u00edsmena, \u010d\u00edslice a poml\u010dky, 3\u201340 znak\u016f. Pozd\u011bj\u0161\u00ed zm\u011bna rozbije u\u017e rozeslan\u00e9 odkazy.')+'</p>'
       +'<button id="csSlugSave" type="button" style="width:100%;padding:11px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:11px;font-weight:700;font-size:13px;cursor:pointer;font-family:inherit;margin-bottom:8px;">'+(EN?'Save address':'Ulo\u017eit adresu')+'</button>';
-    _slugWire({ input:'csSlug', btn:'csSlugSave', msg:'csSlugMsg', table:'profiles', id:currentUser.id, prefix:'kouc', cur:function(){ return currentUser.slug||null; }, onSaved:function(v){ currentUser.slug=v; } }); } }catch(e){}
+    _slugWire({ input:'csSlug', btn:'csSlugSave', msg:'csSlugMsg', table:'profiles', id:currentUser.id, prefix:'coach', cur:function(){ return currentUser.slug||null; }, onSaved:function(v){ currentUser.slug=v; } }); } }catch(e){}
   // Firemní kontakt kouče. Soukromé číslo (phone) sem nepatří -- to se zadává kvůli potvrzení
   // rezervace a na veřejný profil nemá co dělat. Telefon a e-mail se zapínají zvlášť.
   try{
