@@ -314,7 +314,7 @@ export function studentModel(dk, lang, opts) {
 
 // ── HTML ─────────────────────────────────────────────────────────────────────────────────────
 // Jen inline styly, takže stejné HTML funguje v appce, při tisku i v těle e-mailu.
-const BRAND = '#E11111';
+const BRAND = '#E8001D';   // červená appky (index.html --red)
 const C = { ink: '#1a1a1a', mid: '#555', lbl: '#777', line: '#e6e6e6', line2: '#eee', head: '#f5f2ee',
   ok: { bg: '#EAF7EE', bd: '#A8E6C0', fg: '#0E6B3A' }, due: { bg: '#FFF4E5', bd: '#F0C674', fg: '#8a5a00' }, test: { bg: '#FDECEC', bd: '#F3C0C0', fg: '#8a1c1c' } };
 export function statusBoxHtml(st) {
@@ -331,7 +331,9 @@ export function renderHtml(m, opts) {
   let b = '';
   if (m.preview) b += '<div style="font-size:11px;font-weight:800;color:#999;letter-spacing:.05em;margin-bottom:10px;">' + esc(_t(m.lang).preview) + '</div>';
   if (m.test) b += '<div style="margin:0 0 12px;padding:9px 12px;background:' + C.test.bg + ';border:1px solid ' + C.test.bd + ';border-radius:8px;color:' + C.test.fg + ';font-size:12px;font-weight:700;">🧪 ' + esc(m.test) + '</div>';
-  if (m.brand) b += '<div style="font-family:Arial,Helvetica,sans-serif;font-size:28px;line-height:1;color:' + BRAND + ';letter-spacing:.02em;margin:0 0 6px;">MTL</div>';
+  // Logo stejným písmem jako v appce (Bebas Neue). V appce je načtené; v e-mailu ho načte jen část
+  // klientů (Apple Mail), jinde zaskočí Impact -- také úzké tučné písmo.
+  if (m.brand) b += '<div style="font-family:\'Bebas Neue\',Impact,\'Arial Narrow\',sans-serif;font-weight:400;font-size:36px;line-height:1;color:' + BRAND + ';letter-spacing:.06em;margin:0 0 6px;">MTL</div>';
   b += '<h1 style="font-size:20px;margin:0 0 4px;line-height:1.3;">' + esc(m.title) + '</h1>';
   if (m.parties) b += '<div style="display:flex;flex-wrap:wrap;gap:12px 24px;margin:18px 0 8px;">' + m.parties.map((p) =>
     '<div style="flex:1;min-width:220px;font-size:13px;line-height:1.55;"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:4px;">' + esc(p.label) + '</div>'
@@ -350,9 +352,10 @@ export function renderHtml(m, opts) {
   }
   b += statusBoxHtml(m.status);
   (m.notes || []).forEach((n) => { b += '<div style="margin-top:10px;font-size:12px;color:' + C.mid + ';line-height:1.55;">' + esc(n) + '</div>'; });
+  const font = m.brand ? '<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&display=swap" rel="stylesheet">' : '';
   const body = '<div style="font-family:Arial,Helvetica,sans-serif;color:' + C.ink + ';max-width:700px;margin:0 auto;line-height:1.5;">' + b + '</div>';
-  if (opts.fragment) return body;
-  return '<!doctype html><html lang="' + (_isEn(m.lang) ? 'en' : 'cs') + '"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(m.docTitle || m.title) + '</title>'
+  if (opts.fragment) return font + body;
+  return '<!doctype html><html lang="' + (_isEn(m.lang) ? 'en' : 'cs') + '"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>' + esc(m.docTitle || m.title) + '</title>' + font
     + '<style>body{margin:0;padding:24px 18px;background:#fff;}.mtl-f{flex:0 0 calc(50% - 14px)!important;min-width:0!important;}@media (max-width:560px){.mtl-f{flex:1 1 100%!important;}}@media print{body{padding:0;}}</style></head><body>' + body + '</body></html>';
 }
 
@@ -374,7 +377,13 @@ export function renderPdf(m, deps) {
         box(y, h, C.test); doc.fillColor(C.test.fg).text(S(m.test), X + 8, y + 7, { width: W - 16, align: 'center' });
         doc.y = y + h + 12;
       }
-      if (m.brand) { doc.fontSize(22).fillColor(BRAND).text('MTL', X, doc.y, { width: W }); doc.moveDown(0.15); }
+      // Logo písmem appky (Bebas Neue, deps.brandFont); bez něj základním písmem.
+      if (m.brand) {
+        if (deps.brandFont) { doc.registerFont('brand', deps.brandFont); doc.font('brand'); }
+        doc.fontSize(30).fillColor(BRAND).text('MTL', X, doc.y, { width: W, characterSpacing: 1.6 });
+        if (deps.brandFont) doc.font(deps.font ? 'cz' : 'Helvetica');
+        doc.moveDown(0.15);
+      }
       doc.fontSize(16).fillColor('#111111').text(S(m.title), X, doc.y, { width: W });
       doc.moveDown(0.8);
       if (m.parties) {

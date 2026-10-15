@@ -44380,16 +44380,25 @@ function _epOwnRate(){
   const _org=!!(u.org_rate_until && new Date(String(u.org_rate_until).slice(0,10)+'T23:59:59')>=new Date());
   return _ladderRate(_ownerRail(), { partner:null, founding:u.founding, score:u.coach_ref_score, bankai:u.bankai_eligible, org:_org });
 }
-// PRŮMĚRNÝ MĚSÍČNÍ OBRAT za poslední 3 měsíce (lekce kouče, online i všechny jeho kluby), Kč.
-// Z něj se počítá doporučený stupeň. Zapamatuje se na sezení.
+// PRŮMĚRNÝ MĚSÍČNÍ OBRAT za poslední 3 měsíce (lekce kouče, online i všechny jeho kluby), v Kč.
+// Platby v jiné měně (klub v eurech) se přepočtou kurzem ECB -- ceny EP jsou v korunách.
+// Z obratu se počítá doporučený stupeň. Zapamatuje se na sezení.
 async function _epTurnover(){
   if(window._epTurnCache!=null) return window._epTurnCache;
   if(!currentUser) return null;
   const since=new Date(Date.now()-90*86400000).toISOString();
-  let gmv=0;
-  try{ const { data }=await supaClient.from('transactions').select('gross_amount').eq('coach_id',currentUser.id).is('gym_id',null).neq('status','refunded').gte('created_at',since); (data||[]).forEach(function(t){ gmv+=(t.gross_amount||0)/100; }); }catch(e){}
+  let rows=[];
+  try{ const { data }=await supaClient.from('transactions').select('gross_amount,currency').eq('coach_id',currentUser.id).is('gym_id',null).neq('status','refunded').gte('created_at',since); rows=rows.concat(data||[]); }catch(e){}
   try{ const gids=(window._myGyms||[]).map(function(g){ return g.id; }).filter(Boolean);
-    if(gids.length){ const { data }=await supaClient.from('transactions').select('gross_amount').in('gym_id',gids).neq('status','refunded').gte('created_at',since); (data||[]).forEach(function(t){ gmv+=(t.gross_amount||0)/100; }); } }catch(e){}
+    if(gids.length){ const { data }=await supaClient.from('transactions').select('gross_amount,currency').in('gym_id',gids).neq('status','refunded').gte('created_at',since); rows=rows.concat(data||[]); } }catch(e){}
+  let fx=null; if(rows.some(function(t){ return String(t.currency||'CZK').toUpperCase()!=='CZK'; })){ try{ fx=await _loadFx(); }catch(e){} }
+  let gmv=0;
+  rows.forEach(function(t){
+    const cur=String(t.currency||'CZK').toUpperCase(), v=(t.gross_amount||0)/100;
+    if(cur==='CZK'){ gmv+=v; return; }
+    const one=_fxFromCZK(1, cur, fx);                 // kolik jednotek měny je 1 Kč
+    if(one) gmv+=v/one;                               // bez kurzu se platba nezapočte (radši méně než nesmysl)
+  });
   window._epTurnCache=Math.round(gmv/3);
   return window._epTurnCache;
 }
@@ -44665,7 +44674,10 @@ function _epCss(){
     +'.epIv{display:inline-flex;background:var(--surf);border:1px solid var(--border);border-radius:11px;padding:3px;gap:3px;}'
     +'.epIv button{border:none;background:none;padding:8px 13px;border-radius:9px;font-family:inherit;font-size:13px;font-weight:700;color:var(--mid);cursor:pointer;}'
     +'.epIv button.on{background:#fff;color:var(--dark);box-shadow:0 1px 3px rgba(0,0,0,.08);}'
-    +'@media (max-width:820px){#piRow{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;gap:12px;padding:4px 18px 10px;margin:0 -18px;-webkit-overflow-scrolling:touch;}.epCard{flex:0 0 78%;scroll-snap-align:center;}}';
+    // Podle šířky OBRAZOVKY APPKY, ne okna prohlížeče: appka na webu běží v úzkém sloupci
+    // i na širokém monitoru a 4 karty se do něj nevejdou.
+    +'#piWrap{container-type:inline-size;}'
+    +'@container (max-width:820px){#piRow{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;gap:12px;padding:4px 18px 10px;margin:0 -18px;-webkit-overflow-scrolling:touch;}.epCard{flex:0 0 78%;scroll-snap-align:center;}}';
   document.head.appendChild(st);
 }
 function closePartnerInfo(){ try{ closeSheet('shPartnerInfo'); }catch(e){ const o=document.getElementById('shPartnerInfo'); if(o) o.classList.remove('open'); } }
@@ -44676,7 +44688,7 @@ async function openPartnerInfo(){
   if(!ov){ ov=document.createElement('div'); ov.id='shPartnerInfo'; ov.className='sheet'; ov.style.zIndex='96';
     (document.querySelector('.app')||document.body).appendChild(ov); }
   ov.innerHTML='<div class="shdr"><div class="shdr-title">⭐ EXCLUSIVE MTL PARTNER</div><button class="btn-close" id="piCloseX">✕</button></div>'
-    +'<div style="padding:14px 18px 44px;max-width:1180px;margin:0 auto;">'
+    +'<div id="piWrap" style="padding:14px 18px 44px;max-width:1180px;margin:0 auto;">'
       +'<p style="font-size:14px;color:var(--mid);margin:0 0 12px;line-height:1.5;">'+(EN?'Lower commission, partners on your club card and promotion by MTL. Prices excl. VAT. You can change your tier any time.':'Nižší provize, partneři na kartě klubu a reklama od MTL. Ceny bez DPH. Stupeň změníš kdykoli.')+'</p>'
       +'<div id="piState"></div>'
       +'<div id="piTop" style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:14px;"></div>'
