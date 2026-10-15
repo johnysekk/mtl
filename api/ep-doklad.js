@@ -48,11 +48,16 @@ const sb = async (path, opts = {}) => {
 // nenesl. Predplatne EP je elektronicky poskytovana sluzba, proto kind 'electronic'.
 const RESEND = process.env.RESEND_API_KEY;
 const MAIL_FROM = process.env.MAIL_FROM || 'MTL <noreply@martialtraininglab.com>';
+// Každé neodeslání do logu (Vercel → Logs): chybějící klíč, adresa, i odmítnutí od Resendu.
+// Dřív se odpověď Resendu nečetla, takže odmítnutý e-mail vypadal jako odeslaný.
 async function _mail(to, subject, html, attachments) {
-  if (!RESEND || !to) return;
-  try { await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: 'Bearer ' + RESEND, 'Content-Type': 'application/json' },
-    body: JSON.stringify(Object.assign({ from: MAIL_FROM, to: [to], subject, html }, (attachments && attachments.length) ? { attachments } : {})) }); }
-  catch (e) { console.error('[ep-doklad] mail', e.message); }
+  if (!RESEND) { console.error('[ep-doklad] mail: chybí RESEND_API_KEY'); return; }
+  if (!to) { console.error('[ep-doklad] mail: odběratel nemá e-mail', subject); return; }
+  try {
+    const r = await fetch('https://api.resend.com/emails', { method: 'POST', headers: { Authorization: 'Bearer ' + RESEND, 'Content-Type': 'application/json' },
+      body: JSON.stringify(Object.assign({ from: MAIL_FROM, to: [to], subject, html }, (attachments && attachments.length) ? { attachments } : {})) });
+    if (!r.ok) console.error('[ep-doklad] mail', to, r.status, (await r.text().catch(() => '')).slice(0, 300));
+  } catch (e) { console.error('[ep-doklad] mail', to, e.message); }
 }
 // DOPIS K FAKTUŘE (tělo e-mailu). Faktura sama je v příloze jako PDF z /doklad-layout.js;
 // rámeček stavu úhrady je tentýž jako na faktuře.
@@ -308,7 +313,8 @@ export default async function handler(req, res) {
       if (row.cust_email && id) await _mail(row.cust_email,
         ((row.test_mode ? '[TEST] ' : '') + (en ? 'Invoice ' + docNoStr + ' — ' + PRODUCT_EN + ' ' : 'Faktura ' + docNoStr + ' — ' + PRODUCT + ' ')) + period,
         _att.length ? _epMailHtml(_r, en, b.unpaid ? (b.pay_url || null) : null) : _epInvoiceHtml(_r, en, b.unpaid ? (b.pay_url || null) : null), _att);
-    } catch (e) {}
+      else console.error('[ep-doklad] e-mail neodeslán: cust_email=' + (row.cust_email || '—') + ' id=' + (id || '—'));
+    } catch (e) { console.error('[ep-doklad] e-mail', (e && e.message) || e); }
 
     // HLÍDÁNÍ LIMITU: zakladateli přijde upozornění, když tahle faktura posunula letošní součet
     // přes 80 % a přes 100 % limitu. Notifikace s proklikem do Adminu.
