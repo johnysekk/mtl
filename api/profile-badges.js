@@ -5,12 +5,12 @@
 // a few headline counts). No email, no payments, no dates, no member identities.
 //
 // ENV required (Vercel project settings):
-//   SUPABASE_URL                  = https://iqeovcvchtyfwtyzpqrh.supabase.co
+//   SUPABASE_URL                  = adresa projektu Supabase (ostrý / testovací)
 //   SUPABASE_SERVICE_ROLE_KEY     = <service role key>   (server-only, never shipped to client)
 //
 // GET /api/profile-badges?token=MTL3X9KQ2
 
-const SUPABASE_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL || process.env.SUPABASE_PROJECT_URL || 'https://iqeovcvchtyfwtyzpqrh.supabase.co';
+const SUPABASE_URL = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SECRET || process.env.SERVICE_ROLE_KEY || process.env.SUPABASE_KEY;
 
 // ---- level math (mirror of index.html: K=2.7, cap 80) ----
@@ -51,7 +51,7 @@ export default async function handler(req, res) {
     if(me.deleted_at || me.deactivated_at){ res.status(410).json({ error: 'gone' }); return; }
     const id = me.id;
     const isCoach = me.coach_status === 'approved';
-    const isFounder = (id === '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c');
+    const isFounder = (!!process.env.FOUNDER_UUID && id === process.env.FOUNDER_UUID.trim());
     let isAmbassador = false; try { const v = me.verify_disciplines ? (typeof me.verify_disciplines==='string'?JSON.parse(me.verify_disciplines):me.verify_disciplines) : []; isAmbassador = Array.isArray(v) && v.length>0; } catch(e){}
 
     // 2) STUDENT — physical 1:1 confirmed + gym attendances

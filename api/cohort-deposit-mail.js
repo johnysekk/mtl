@@ -117,7 +117,7 @@ export default async function handler(req, res) {
       if (buf) attachments = [{ filename: 'MTL-potvrzeni-o-platbe.pdf', content: buf.toString('base64') }];
     } catch (e) { console.error('cohort doklad pdf', e.message); }
 
-    const appUrl = (process.env.APP_URL || process.env.PUBLIC_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '');
+    const appUrl = (process.env.APP_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '');
     const fromName = (gymName || 'Martial Training Lab').replace(/["<>]/g, '');
 
     await sendResend(

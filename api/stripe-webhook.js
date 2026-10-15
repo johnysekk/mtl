@@ -226,12 +226,12 @@ function rawBody(req) {
   });
 }
 
-// ── Event ticket email (Resend). Needs env: RESEND_API_KEY, optional TICKET_EMAIL_FROM, PUBLIC_URL ──
+// ── Event ticket email (Resend). Needs env: RESEND_API_KEY, optional TICKET_EMAIL_FROM, APP_URL ──
 async function sendTicketEmail(s, m) {
   const key = process.env.RESEND_API_KEY; if (!key) return;
   const email = (s.customer_details && s.customer_details.email) || s.customer_email; if (!email) return;
   const qtok = m.qr_token || ''; const evId = m.mtl_event_id || ''; if (!qtok || !evId) return;
-  const origin = process.env.PUBLIC_URL || 'https://app.martialtraininglab.com';
+  const origin = APP_URL;
   const checkinUrl = `${origin}/?evcheckin=1&ev=${encodeURIComponent(evId)}&tok=${encodeURIComponent(qtok)}`;
   const qrImg = `https://api.qrserver.com/v1/create-qr-code/?size=320x320&margin=8&data=${encodeURIComponent(checkinUrl)}`;
   const title = m.mtl_event || 'your event';
@@ -974,7 +974,7 @@ export default async function handler(req, res) {
                 const _dokBuf = _snapPdf ? _snapPdf.buffer : null;   // bez snímku žádný doklad -- neskládá se z dnešních dat
                 if (_dokBuf) _dokAtt = [{ filename: 'MTL-potvrzeni-o-platbe.pdf', content: _dokBuf.toString('base64') }];
               } catch (e) { console.error('cohort doklad pdf', e.message); }
-              await sendResend(_toMail, (coh.name || 'Kurz') + ' \u2014 z\u00E1loha p\u0159ijata', cohortDepositHtml(mem.name, coh.name || 'Kurz', gymName, money(amount), remainder > 0 ? money(remainder) : '', coh.start_date || '', ((process.env.APP_URL || process.env.PUBLIC_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '') + '/?myclass=' + encodeURIComponent(cmId)), !!(gymRec && gymRec.org_form === 'nonprofit')), { from: '"' + fromName + '" <' + MAIL_ADDR + '>', replyTo: ownerEmail || undefined, attachments: _dokAtt });
+              await sendResend(_toMail, (coh.name || 'Kurz') + ' \u2014 z\u00E1loha p\u0159ijata', cohortDepositHtml(mem.name, coh.name || 'Kurz', gymName, money(amount), remainder > 0 ? money(remainder) : '', coh.start_date || '', (APP_URL + '/?myclass=' + encodeURIComponent(cmId)), !!(gymRec && gymRec.org_form === 'nonprofit')), { from: '"' + fromName + '" <' + MAIL_ADDR + '>', replyTo: ownerEmail || undefined, attachments: _dokAtt });
             }
             try { await cohortCapiPurchase(coh, cmId, (mem && mem.email) || '', amount, cur, (mem && mem.fbp) || '', (mem && mem.fbc) || ''); } catch (e) {}
           } catch (e) { console.error('cohort confirm', e.message); }

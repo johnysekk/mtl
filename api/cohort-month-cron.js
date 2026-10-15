@@ -16,6 +16,7 @@
 
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const APP = (process.env.APP_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '');
 
 async function sb(path, opts) {
   const r = await fetch(`${SB}/rest/v1/${path}`, {
@@ -101,7 +102,7 @@ export default async function handler(req, res) {
         const seen = await sb(`cohort_month_nudges?nudge_key=eq.${encodeURIComponent(key)}&select=id`);
         if (seen && seen.length) { skipped++; continue; }
 
-        const payLink = `https://app.martialtraininglab.com/?cohortpay=${encodeURIComponent(mem.id)}`;
+        const payLink = `${APP}/?cohortpay=${encodeURIComponent(mem.id)}`;
 
         // student in-app nudge (only if they have a profile)
         if (mem.student_id) {

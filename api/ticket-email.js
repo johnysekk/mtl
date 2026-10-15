@@ -65,7 +65,7 @@ export default async function handler(req, res) {
       (req.body && (typeof req.body === 'string' ? JSON.parse(req.body || '{}').ticketId : req.body.ticketId));
     if (!ticketId) { res.status(400).json({ error: 'missing ticketId' }); return; }
 
-    const SUPABASE_URL = process.env.SUPABASE_URL || 'https://iqeovcvchtyfwtyzpqrh.supabase.co';
+    const SUPABASE_URL = _RL_SUPA;
     const SERVICE_KEY =
       process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY ||
       process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SECRET ||

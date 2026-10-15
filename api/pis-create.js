@@ -2,7 +2,7 @@
 // MTL never holds funds. Initiates a DOMESTIC transfer to the gym's IBAN and returns the bank auth URL.
 //
 // ENV (Vercel, NEVER commit): NEONOMICS_CLIENT_ID, NEONOMICS_SECRET_ID, NEONOMICS_ENV,
-//   PIS_RETURN_URL (default https://app.martialtraininglab.com/api/pis-return),
+//   PIS_RETURN_URL (default APP_URL + /api/pis-return),
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 //
 // Flow (verified from docs.neonomics.io 2026-07-16):
@@ -24,7 +24,7 @@ import { createClient } from '@supabase/supabase-js';
 const ENVN = (process.env.NEONOMICS_ENV || 'sandbox').toLowerCase();
 const AUTH_BASE = 'https://' + ENVN + '.neonomics.io/auth/realms/' + ENVN + '/protocol/openid-connect/token';
 const ICS_BASE  = 'https://' + ENVN + '.neonomics.io/ics/v3';
-const RETURN_URL = process.env.PIS_RETURN_URL || 'https://app.martialtraininglab.com/api/pis-return';
+const RETURN_URL = process.env.PIS_RETURN_URL || ((process.env.APP_URL || 'https://app.martialtraininglab.com').replace(/\/+$/, '') + '/api/pis-return');
 const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 // Neonomics lists three usable DNB sandbox SSNs: 31125461118, 31125453913, 31125461037.
 // If one test customer's sandbox account is in a bad state, the next one is a free thing to try,
