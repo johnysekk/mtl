@@ -5825,6 +5825,7 @@ const NOTIF_T = {
   online_plan_new: (d)=> LANG==='en' ? (d.msg_en||'') : (d.msg_cs||''),
   online_piece_done: (d)=> LANG==='en' ? (d.msg_en||'') : (d.msg_cs||''),
   online_plan_qr: (d)=> LANG==='en' ? (d.msg_en||'') : (d.msg_cs||''),
+  pairing_link: (d)=> LANG==='en' ? (d.msg_en||'') : (d.msg_cs||''),
   online_plan_active: (d)=> LANG==='en' ? (d.msg_en||'') : (d.msg_cs||''),
   migration_request: (d)=>{ const dob=d&&d.dob?(function(v){ const t=new Date(String(v).slice(0,10)+'T00:00:00'); return isNaN(t)?v:(t.getDate()+'. '+(t.getMonth()+1)+'. '+t.getFullYear()); })(d.dob):'';
     return LANG==='en'
@@ -26919,6 +26920,104 @@ function _pairAttach(vs, tbl, id){
     const j=await r.json().catch(function(){ return {}; }); return (j && j.status) || null; }catch(e){ return null; } })();
 }
 // Hláška po „Zaplaceno" u platby, kterou potvrdí párování (bez čekání na klub / kouče).
+// ── PŘIPOJENÍ ÚČTU K PÁROVÁNÍ (Nastavení plateb) ───────────────────────────────────────────
+// Klub / kouč / organizace se přes Finbricks přihlásí do své banky (jen čtení pohybů, 180 dní).
+// Bez platného připojení účtu, na který platby chodí, se nepáruje: QR + ruční potvrzení.
+// Platnost a připojené účty jsou vždy z Finbricks (/api/pairing link_*).
+async function _pairApi(body){
+  const t=await _freshTok();
+  const r=await fetch('/api/pairing',{ method:'POST', headers:{ 'Content-Type':'application/json', 'x-access-token':t||'' }, body:JSON.stringify(body) });
+  const j=await r.json().catch(function(){ return {}; });
+  if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+  return j;
+}
+function _pairLinkHtml(j, kind, id){
+  const EN=LANG==='en';
+  const d=function(x){ try{ return new Date(x).toLocaleDateString(EN?'en-GB':'cs-CZ'); }catch(e){ return ''; } };
+  const left=j.valid_to?Math.ceil((new Date(j.valid_to).getTime()-Date.now())/864e5):null;
+  const btn=function(label, primary){ return '<button class="_plGo" style="width:100%;margin-top:8px;padding:10px;background:'+(primary?'var(--dark)':'#fff')+';color:'+(primary?'#fff':'var(--dark)')+';border:'+(primary?'none':'1px solid var(--border)')+';border-radius:10px;font-size:13px;font-weight:800;cursor:pointer;font-family:inherit;">\ud83c\udfe6 '+label+'</button>'; };
+  const box=function(bg,bd,col,txt){ return '<div style="background:'+bg+';border:1px solid '+bd+';border-radius:10px;padding:9px 11px;font-size:12px;line-height:1.5;color:'+col+';">'+txt+'</div>'; };
+  const acc=escapeHtml((j.ibans||[]).join(', '));
+  const need=escapeHtml((j.need||[]).join(', '));
+  const sandbox=(j.env==='sandbox')?('<div style="font-size:11px;color:#8a1c1c;margin-top:6px;">\ud83e\uddea '+(EN?'Test mode \u2014 connection to the Finbricks sandbox':'Testovac\u00ed re\u017eim \u2014 p\u0159ipojen\u00ed k sandboxu Finbricks')+'</div>'):'';
+  if(j.state==='active'){
+    const soon=(left!==null && left<=14);
+    return box(soon?'#FFF7ED':'#F0FBF0', soon?'#FCD9A8':'#CDEBD6', soon?'#9a5a00':'#067647',
+        '<b>\u2713 '+(EN?'Account connected':'\u00da\u010det p\u0159ipojen')+'</b>'+(j.bank?(' \u00b7 '+escapeHtml(j.bank)):'')+'<br>'+acc
+        +'<br>'+(EN?'Valid until ':'Plat\u00ed do ')+'<b>'+d(j.valid_to)+'</b>'+(soon?(EN?(' \u2014 '+left+' days left, renew it'):(' \u2014 zb\u00fdv\u00e1 '+left+' dn\u00ed, obnov ho')):''))
+      +btn(EN?'Renew the connection (another 180 days)':'Obnovit p\u0159ipojen\u00ed (dal\u0161\u00edch 180 dn\u00ed)', soon)+sandbox;
+  }
+  if(j.state==='mismatch') return box('#FFF7ED','#FCD9A8','#9a5a00',
+      '<b>\u26a0\ufe0f '+(EN?'The connected account is not your payout account':'P\u0159ipojen\u00fd \u00fa\u010det nen\u00ed tv\u016fj v\u00fdplatn\u00ed')+'</b><br>'
+      +(EN?'Connected: ':'P\u0159ipojeno: ')+(acc||'\u2014')+'<br>'+(EN?'Payments go to: ':'Platby chod\u00ed na: ')+(need||'\u2014')+'<br>'
+      +(EN?'QR payments are confirmed by hand until you connect the account they go to.':'QR platby potvrzuje\u0161 ru\u010dn\u011b, dokud nep\u0159ipoj\u00ed\u0161 \u00fa\u010det, na kter\u00fd chod\u00ed.'))
+    +btn(EN?'Connect the payout account':'P\u0159ipojit v\u00fdplatn\u00ed \u00fa\u010det', true)+sandbox;
+  if(j.state==='expired') return box('#FDECEC','#F3C0C0','#8a1c1c',
+      '<b>'+(EN?'Connection expired':'P\u0159ipojen\u00ed vypr\u0161elo')+'</b>'+(j.valid_to?(' '+d(j.valid_to)):'')+'<br>'
+      +(EN?'QR payments are confirmed by hand again. Reconnect the account to have them confirmed automatically.':'QR platby se zase potvrzuj\u00ed ru\u010dn\u011b. P\u0159ipoj \u00fa\u010det znovu a budou se potvrzovat samy.'))
+    +btn(EN?'Reconnect the account':'P\u0159ipojit \u00fa\u010det znovu', true)+sandbox;
+  // none / pending / error
+  return '<div style="font-size:12px;color:var(--mid);line-height:1.5;">'
+      +(j.state==='error'?('<div style="color:#8a1c1c;font-weight:700;margin-bottom:4px;">\u26a0\ufe0f '+escapeHtml(j.error||(EN?'The connection was not completed':'P\u0159ipojen\u00ed se nedokon\u010dilo'))+'</div>'):'')
+      +(EN?'Not connected yet \u2014 QR payments are confirmed by hand. You log in to your bank via Finbricks and allow read-only access to the account movements (180 days). MTL cannot send any payment from it.'
+          :'Zat\u00edm nep\u0159ipojeno \u2014 QR platby potvrzuje\u0161 ru\u010dn\u011b. P\u0159ihl\u00e1s\u00ed\u0161 se p\u0159es Finbricks do sv\u00e9 banky a povol\u00ed\u0161 jen \u010dten\u00ed pohyb\u016f na \u00fa\u010dtu (180 dn\u00ed). Pos\u00edlat z n\u011bj MTL nic nem\u016f\u017ee.')
+      +(need?('<br>'+(EN?'Account: ':'\u00da\u010det: ')+need):'')
+      +'</div>'+btn(EN?'Connect the account for payment matching':'P\u0159ipojit \u00fa\u010det pro p\u00e1rov\u00e1n\u00ed plateb', true)+sandbox;
+}
+async function _pairLinkBox(host, kind, id){
+  if(!host) return;
+  const EN=LANG==='en';
+  host.innerHTML='<div style="font-size:12px;color:var(--light);">\u2026</div>';
+  try{
+    const j=await _pairApi({ action:'link_status', kind:kind, id:String(id) });
+    host.innerHTML=_pairLinkHtml(j, kind, id);
+    const b=host.querySelector('._plGo'); if(b) b.onclick=function(){ _pairLinkConnect(kind, id); };
+  }catch(e){ host.innerHTML='<div style="font-size:12px;color:#8a1c1c;">\u26a0\ufe0f '+escapeHtml(e.message||'')+'</div>'; }
+}
+// Výběr banky -> přihlášení přes Finbricks. Banka výplatního účtu je nahoře.
+async function _pairLinkConnect(kind, id){
+  const EN=LANG==='en';
+  let j; try{ j=await _pairApi({ action:'link_banks', kind:kind, id:String(id) }); }catch(e){ toast('\u26a0\ufe0f '+(e.message||''),1); return; }
+  const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100050;display:flex;align-items:center;justify-content:center;padding:18px;';
+  ov.innerHTML='<div style="background:#fff;border-radius:16px;max-width:420px;width:100%;max-height:86vh;overflow:auto;padding:20px;font-family:\'DM Sans\';">'
+    +'<div style="font-size:17px;font-weight:800;color:var(--dark);margin-bottom:6px;">\ud83c\udfe6 '+(EN?'Which bank is the account in?':'Ve kter\u00e9 bance je \u00fa\u010det?')+'</div>'
+    +'<div style="font-size:12.5px;color:var(--mid);line-height:1.5;margin-bottom:12px;">'+(EN?'You will log in to the bank and allow read-only access to account movements for 180 days. Connect the account your payments go to':'P\u0159ihl\u00e1s\u00ed\u0161 se do banky a povol\u00ed\u0161 jen \u010dten\u00ed pohyb\u016f na \u00fa\u010dtu na 180 dn\u00ed. P\u0159ipoj \u00fa\u010det, na kter\u00fd ti chod\u00ed platby')+((j.need&&j.need.length)?(': <b>'+escapeHtml(j.need.join(', '))+'</b>'):'')+'.</div>'
+    +((j.banks||[]).length?(j.banks.map(function(b,i){ return '<button class="_plBank" data-i="'+i+'" style="width:100%;display:flex;align-items:center;gap:10px;text-align:left;padding:12px;margin-bottom:8px;border:1px solid '+(b.mine?'#0a8f5b':'var(--border)')+';border-radius:12px;background:'+(b.mine?'#F0FBF0':'var(--surf)')+';font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;color:var(--dark);">'
+        +(b.logo?('<img src="'+escapeHtml(b.logo)+'" alt="" style="width:26px;height:26px;object-fit:contain;flex-shrink:0;">'):'')+'<span style="flex:1;">'+escapeHtml(b.name)+'</span>'+(b.mine?('<span style="font-size:11px;color:#0a8f5b;">'+(EN?'your account':'tv\u016fj \u00fa\u010det')+'</span>'):'')+'</button>'; }).join(''))
+      :('<p style="font-size:13px;color:var(--light);">'+(EN?'No bank available.':'\u017d\u00e1dn\u00e1 banka nen\u00ed k dispozici.')+'</p>'))
+    +'<button class="_plX" style="width:100%;padding:11px;background:none;border:none;color:var(--mid);font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Close':'Zav\u0159\u00edt')+'</button></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('._plX').onclick=function(){ ov.remove(); };
+  ov.onclick=function(e){ if(e.target===ov) ov.remove(); };
+  ov.querySelectorAll('._plBank').forEach(function(btn){ btn.onclick=async function(){ const b=j.banks[Number(btn.dataset.i)]; if(!b) return;
+    btn.disabled=true; btn.style.opacity='.6';
+    try{ const r=await _pairApi({ action:'link_start', kind:kind, id:String(id), provider:b.provider, bank_name:b.name }); location.href=r.url; }
+    catch(e){ btn.disabled=false; btn.style.opacity=''; toast('\u26a0\ufe0f '+(e.message||''),1); } }; });
+}
+// Otevře Nastavení plateb subjektu (návrat z banky, proklik z notifikace).
+async function _pairOpenSettings(kind, id){
+  try{
+    if(kind==='org'){ const { data }=await supaClient.from('organizations').select('*').eq('id',id).maybeSingle(); if(data && typeof openOrgFinance==='function') openOrgFinance(data); return; }
+    if(typeof openCommissionCard==='function') openCommissionCard(kind, kind==='gym'?{ gymId:id }:{});
+  }catch(e){}
+}
+// Návrat z banky (?pairlink=kind.id): stav z Finbricks, hláška a zpátky do Nastavení plateb.
+async function _pairLinkReturn(v){
+  const EN=LANG==='en'; const i=String(v||'').indexOf('.'); if(i<1) return;
+  const kind=v.slice(0,i), id=v.slice(i+1);
+  let waits=0;
+  while(!((typeof currentUser!=='undefined' && currentUser && currentUser.id) && (kind!=='gym' || (window._myGyms && window._myGyms.length) || (typeof _myGymData!=='undefined' && _myGymData)))){
+    if(++waits>60) return; await new Promise(function(r){ setTimeout(r,200); });
+  }
+  try{
+    const j=await _pairApi({ action:'link_check', kind:kind, id:id });
+    const d=j.valid_to?new Date(j.valid_to).toLocaleDateString(EN?'en-GB':'cs-CZ'):'';
+    toast(j.state==='active'?((EN?'\u2705 Account connected \u2014 QR payments now confirm themselves (until ':'\u2705 \u00da\u010det p\u0159ipojen \u2014 QR platby se te\u010f potvrzuj\u00ed samy (do ')+d+')')
+      : j.state==='mismatch'?(EN?'\u26a0\ufe0f Connected, but it is not the account your payments go to':'\u26a0\ufe0f P\u0159ipojeno, ale nen\u00ed to \u00fa\u010det, na kter\u00fd ti chod\u00ed platby')
+      : (EN?'\u26a0\ufe0f The account was not connected':'\u26a0\ufe0f \u00da\u010det se nep\u0159ipojil')+(j.error?(' ('+j.error+')'):''), 1);
+  }catch(e){ toast('\u26a0\ufe0f '+(e.message||''),1); }
+  _pairOpenSettings(kind, id);
+}
 function _pairAutoMsg(what){ const EN=LANG==='en'; return '\u2705 '+what+(EN?' \u00b7 we confirm the payment automatically as soon as it arrives':' \u00b7 platbu potvrd\u00edme automaticky, jakmile doraz\u00ed na \u00fa\u010det'); }
 // vs: variabilní symbol (párování) -- jen u CZK QR (SPAYD X-VS).
 function _bankQrPayload(g, amount, msg, vs){
@@ -34330,7 +34429,7 @@ async function loadNotifications(append){
     const isCoachRefAdmin = false; /* referral EP grants removed — rewards are Shikai/Bankai */
     // beta_pending sem musí být přidané, jinak se notifikace vykreslí jako neklikatelná a obsluha
   // se vůbec nenapojí -- větev, která má otevřít admin, pak nemá kdo spustit.
-  const clickable = k==='owner_xfer_request' || k==='owner_xfer_done' || k==='sup_paidfor' || k==='owner_xfer_declined' || k==='owner_xfer_cancelled' || k==='memb_mode_needed' || k==='dac7_data_needed' || k==='dac7_overdue' || k==='admin_suspended' || k==='admin_restored' || k==='event_cohost_invite' || k==='event_cohost_accepted' || k==='event_cohost_declined' || k==='event_cohost_left' || k==='event_cohost_removed' || k==='oss_threshold' || k==='commission_upcoming' || k==='family_payreq_offer' || k==='ref_joined' || k==='minor_course_req' || k==='migration_request' || k==='withdrawal_done' || k==='online_withdrawal' || k==='online_plan_new' || k==='online_piece_done' || k==='online_plan_qr' || k==='online_plan_active' || k==='withdrawal_request' || k==='minor_member_app' || k==='minor_waiver' || k==='family_request' || k==='autonomy_sunset' || k==='dropin_bank_cancelled' || k==='bug_report' || k==='milestone' || k==='address_from_club' || k==='address_request' || k==='class_cancelled' || k==='trial_booked' || k==='pis_creditor_outage' || (String(k||'').indexOf('kid_share')===0) || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed' || k==='support_ticket' || k==='class_reminder' || k==='fav_added_coach' || k==='fav_added_gym' || isCoachLessonRem || isStudResched || k==='coach_pay_ok' || k==='coach_qr_intent' || k==='qr_unconfirmed' || k==='event_qr_intent' || k==='walkin_drop' || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='org_expiring' || k==='beta_pending' || k==='minor_waiver_req' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked' || k==='commission_no_card' || k==='commission_suspended' || k==='new_provider' || k==='supplier_live' || k==='supplier_ended';
+  const clickable = k==='pairing_link' || k==='owner_xfer_request' || k==='owner_xfer_done' || k==='sup_paidfor' || k==='owner_xfer_declined' || k==='owner_xfer_cancelled' || k==='memb_mode_needed' || k==='dac7_data_needed' || k==='dac7_overdue' || k==='admin_suspended' || k==='admin_restored' || k==='event_cohost_invite' || k==='event_cohost_accepted' || k==='event_cohost_declined' || k==='event_cohost_left' || k==='event_cohost_removed' || k==='oss_threshold' || k==='commission_upcoming' || k==='family_payreq_offer' || k==='ref_joined' || k==='minor_course_req' || k==='migration_request' || k==='withdrawal_done' || k==='online_withdrawal' || k==='online_plan_new' || k==='online_piece_done' || k==='online_plan_qr' || k==='online_plan_active' || k==='withdrawal_request' || k==='minor_member_app' || k==='minor_waiver' || k==='family_request' || k==='autonomy_sunset' || k==='dropin_bank_cancelled' || k==='bug_report' || k==='milestone' || k==='address_from_club' || k==='address_request' || k==='class_cancelled' || k==='trial_booked' || k==='pis_creditor_outage' || (String(k||'').indexOf('kid_share')===0) || k==='kidxfer' || k==='kidxfer_done' || k==='kidxfer_reversed' || k==='support_ticket' || k==='class_reminder' || k==='fav_added_coach' || k==='fav_added_gym' || isCoachLessonRem || isStudResched || k==='coach_pay_ok' || k==='coach_qr_intent' || k==='qr_unconfirmed' || k==='event_qr_intent' || k==='walkin_drop' || k==='org_linked' || k==='org_accepted' || k==='org_fee' || k==='org_invite' || k==='org_fee_paid' || k==='org_join' || k==='org_fee_in' || k==='org_join_req' || k==='org_removed' || k==='org_left' || k==='org_expiring' || k==='beta_pending' || k==='minor_waiver_req' || k==='came_of_age' || k==='family_active' || k==='minor_waiver_done' || k==='pay_request' || k==='resched_conf' || k==='cancel_conf' || isMembExpired || isMembExpiring || isMembRenewing || isCohortEnded || ['refund_request','dispute'].includes(n.type) || isBookingConfirm || isCoachInperson || isCoachOnline || isOnlineDone || isMtlContact || isFavAvail || isDiscReq || isSlotOpen || isMembCancel || isMembMine || isDropMine || isTicketMine || isExcused || isPartnerGranted || isPartnerCancelSched || isGymClassAdded || isGymRatePrompt || isEpCancelled || isAttendReminder || isAmbApp || isAmbGranted || isCoachRefAdmin || k==='cohort_deposit_mine' || k==='cert_recommend' || k==='new_listing' || k==='schedule_perm_on' || k==='coach_pricing_request' || k==='coach_pricing_approved' || k==='coach_pricing_rejected' || k==='gym_team_joined' || k==='coach_avail' || k==='membership_payment_failed' || k==='gym_team_approved' || k==='gym_join_request' || k==='gym_recep_left' || k==='gym_recep_removed' || k==='merch_order' || k==='merch_fulfilled' || k==='gym_member_joined' || k==='gym_member_joined_coach' || isGymClassAttendee || k==='own_student_link' || k==='payment_confirmed' || k==='qr_intent' || k==='qr_released' || k==='qr_reservation_expired' || k==='qr_requeued' || k==='sounding_ask' || k==='cover_needed' || k==='cover_filled' || k==='cover_filled_owner' || k==='pis_payment_in' || k==='gym_dropin_booked' || k==='doklad_vat_needed' || k==='doklad_unified' || k==='course_new' || k==='slot_demand' || k==='cohort_month_due' || k==='cohort_month_collect' || k==='cohort_deposit_paid' || k==='cohort_deposit_mine' || k==='cohort_qr_claim' || k==='commission_collected' || k==='commission_cleared' || k==='commission_failed' || k==='account_suspended' || k==='cash_blocked' || k==='commission_no_card' || k==='commission_suspended' || k==='new_provider' || k==='supplier_live' || k==='supplier_ended';
     // Data notifikace i pro štítky odkazu (class_cancelled, coach_qr_intent, qr_unconfirmed...).
     // Dřív tu _pd nebylo -- žilo jen v obsluze kliknutí níž -- a štítek padal na ReferenceError.
     var _pd={}; try{ _pd=JSON.parse(n.data||'{}')||{}; }catch(e){ _pd={}; }
@@ -34398,6 +34497,7 @@ async function loadNotifications(append){
     else if(k==='migration_request') linkLabel = (LANG==='en'?'Open transfer requests ›':'Otev\u0159\u00edt \u017e\u00e1dosti o p\u0159enos ›');
     else if(k==='withdrawal_done') linkLabel = (LANG==='en'?'Withdrawal confirmation ›':'Potvrzen\u00ed o odstoupen\u00ed ›');
     else if(k==='online_withdrawal') linkLabel = (LANG==='en'?'Open online orders ›':'Otev\u0159\u00edt online objedn\u00e1vky ›');
+    else if(k==='pairing_link') linkLabel = _pd.ent_kind==='org' ? (LANG==='en'?'Organisation payments ›':'Platby organizace ›') : (LANG==='en'?'Payment settings ›':'Nastavení plateb ›');
     else if(k==='online_plan_qr') linkLabel = _pd.auto ? (LANG==='en'?'Subscribers ›':'Předplatitelé ›') : (LANG==='en'?'Confirm the payment ›':'Potvrdit platbu ›');
     else if(k==='online_plan_active') linkLabel = (LANG==='en'?'My passes & memberships ›':'Moje permanentky a členství ›');
     else if(k==='online_piece_done') linkLabel = (LANG==='en'?'Open my online orders ›':'Otev\u0159\u00edt moje online objedn\u00e1vky ›');
@@ -34516,6 +34616,8 @@ async function loadNotifications(append){
         if(k==='minor_course_req'){ try{ const _cd=JSON.parse(n.data||'{}'); _cd._nid=n.id; _openMinorCourseReq(_cd); }catch(e){} return; }
         if(k==='migration_request'){ try{ closeSheet('shNotif'); }catch(e){} try{ if(typeof openMigrationRequests==='function') openMigrationRequests(); }catch(e){} return; }
         if(k==='online_plan_qr'){ try{ closeSheet('shNotif'); }catch(e){} try{ openOnline('coach'); }catch(e){} return; }
+        // Připojení účtu k párování končí / skončilo -> rovnou do Nastavení plateb toho subjektu.
+        if(k==='pairing_link'){ try{ closeSheet('shNotif'); }catch(e){} _pairOpenSettings(_pd.ent_kind, _pd.ent_id); return; }
         if(k==='online_plan_active'){ try{ closeSheet('shNotif'); }catch(e){} try{ window._membTab='online'; openSheet('shMemberships'); loadMyMemberships(); }catch(e){} return; }
         if(k==='online_piece_done'){ try{ closeSheet('shNotif'); }catch(e){} try{ openOnline('student'); }catch(e){} return; }
         if(k==='online_withdrawal' || k==='online_plan_new'){ try{ closeSheet('shNotif'); }catch(e){} try{ openOnline('coach'); }catch(e){} return; }
@@ -41441,7 +41543,7 @@ async function openOrgFinance(org){
        +(org.takes_cash?(' · '+(EN?'cash on site':'hotovost na místě')):'')+'</div>'
       // Automatické potvrzování převodů (párování plateb) -- ukládá se hned po kliknutí.
       +(('pairing_on' in org)?('<label style="display:flex;gap:9px;align-items:flex-start;cursor:pointer;font-size:13px;font-weight:600;color:var(--dark);margin:0 4px 12px 17px;"><input id="_ofPair" type="checkbox"'+(org.pairing_on===false?'':' checked')+' style="margin-top:2px;width:17px;height:17px;flex-shrink:0;"><span>'+(EN?'Confirm payments made with the generated QR code automatically':'Automaticky potvrzovat platbu p\u0159es vygenerovan\u00fd QR k\u00f3d')
-        +'<span style="display:block;font-size:11.5px;font-weight:400;color:var(--mid);line-height:1.45;margin-top:2px;">'+(EN?'When a QR transfer arrives in your account, MTL confirms it by itself \u2014 you don\u2019t tick anything. Works for payments to an account connected for payment matching. Off = you confirm incoming payments by hand.':'Jakmile QR platba p\u0159evodem doraz\u00ed na tv\u016fj \u00fa\u010det, MTL ji potvrd\u00ed samo \u2014 nic neodklik\u00e1v\u00e1\u0161. Funguje u plateb na \u00fa\u010det p\u0159ipojen\u00fd k p\u00e1rov\u00e1n\u00ed plateb. Vypnuto = mus\u00ed\u0161 potvrzovat p\u0159\u00edchoz\u00ed platby ru\u010dn\u011b.')+'</span></span></label>'):''))
+        +'<span style="display:block;font-size:11.5px;font-weight:400;color:var(--mid);line-height:1.45;margin-top:2px;">'+(EN?'When a QR transfer arrives in your account, MTL confirms it by itself \u2014 you don\u2019t tick anything. Works for payments to an account connected for payment matching. Off = you confirm incoming payments by hand.':'Jakmile QR platba p\u0159evodem doraz\u00ed na tv\u016fj \u00fa\u010det, MTL ji potvrd\u00ed samo \u2014 nic neodklik\u00e1v\u00e1\u0161. Funguje u plateb na \u00fa\u010det p\u0159ipojen\u00fd k p\u00e1rov\u00e1n\u00ed plateb. Vypnuto = mus\u00ed\u0161 potvrzovat p\u0159\u00edchoz\u00ed platby ru\u010dn\u011b.')+'</span></span></label><div id="_ofPairLink" style="margin:-4px 4px 12px 43px;"></div>'):''))
     : '';
   const _docEmail=org.invoice_email||org.contact_email||'';
   const _cardLbl=(org.commission_card_status==='active')
@@ -41475,9 +41577,11 @@ async function openOrgFinance(org){
   try{ if(!_sheetParent['shOrgFinance']) _sheetParent['shOrgFinance']='shOrgApply'; }catch(e){}
   try{ openSheet('shOrgFinance'); }catch(e){}
   ov.querySelector('#_ofClose').onclick=function(){ try{ closeSheet('shOrgFinance'); }catch(e){ ov.remove(); } };
-  { const _pc=ov.querySelector('#_ofPair'); if(_pc) _pc.onchange=async function(){ const on=!!_pc.checked;
+  { const _pc=ov.querySelector('#_ofPair'), _pl=ov.querySelector('#_ofPairLink');
+    const _pr=function(){ if(!_pl) return; if(_pc.checked) _pairLinkBox(_pl, 'org', org.id); else _pl.innerHTML=''; };
+    if(_pc){ _pr(); _pc.onchange=async function(){ const on=!!_pc.checked; _pr();
       try{ const { error }=await supaClient.from('organizations').update({ pairing_on:on }).eq('id',org.id); if(error) throw error; org.pairing_on=on; toast(EN?'\u2705 Saved':'\u2705 Ulo\u017eeno'); }
-      catch(e){ _pc.checked=!on; toast('\u26a0\ufe0f '+((e&&e.message)||e)); } }; }
+      catch(e){ _pc.checked=!on; _pr(); toast('\u26a0\ufe0f '+((e&&e.message)||e)); } }; } }
   { const b=ov.querySelector('#opRowMode'); if(b) b.onclick=function(){ openOrgPayMode(org); }; }
   { const b=ov.querySelector('#opGoMode'); if(b) b.onclick=function(){ openOrgPayMode(org); }; }
   { const b=ov.querySelector('#opRowCard'); if(b) b.onclick=function(){
@@ -55647,6 +55751,8 @@ async function showPaidPopup(){
   // kouče (DAC7 žádost a upomínky), ?go=suspended -> důvod ručního pozastavení a jak ho zrušit.
   // ODKAZY Z E-MAILU O PŘEDÁNÍ VLASTNICTVÍ (/api/ownership-transfer): ?go=xfer&id= -> žádost
   // k rozhodnutí, ?go=xferdone&k=&id=&s= -> po převodu (nový majitel rovnou ke kartě na provizi).
+  // Návrat z banky po připojení účtu k párování plateb (Nastavení plateb).
+  if(params.get('pairlink')){ const _pl=params.get('pairlink'); try{ const _u=new URL(location.href); _u.searchParams.delete('pairlink'); _u.searchParams.delete('clientId'); history.replaceState(null,'',_u.pathname+(_u.search||'')+_u.hash); }catch(e){} setTimeout(function(){ _pairLinkReturn(_pl); }, 800); }
   if(params.get('go')==='paidfor'){ setTimeout(function(){ try{ if(currentUser) openPaidFor(); }catch(e){} }, 1200); }
   if(params.get('go')==='xfer' || params.get('go')==='xferdone'){
     const _go=params.get('go'), _id=params.get('id')||'', _k=params.get('k')||'', _s=params.get('s')||'';
@@ -56620,6 +56726,7 @@ function openCommissionCard(kind, opts){ opts=opts||{}; var _acctOnly=!!opts.acc
       // se, až existuje sloupec pairing_on (payment-pairing.sql) -- jinak by uložení spadlo.
       +(('pairing_on' in g)?('<label style="display:flex;gap:9px;align-items:flex-start;cursor:pointer;font-size:13.5px;font-weight:600;color:var(--dark);margin-bottom:10px;"><input id="pmPair" type="checkbox"'+(g.pairing_on===false?'':' checked')+' style="margin-top:2px;width:17px;height:17px;flex-shrink:0;"><span>'+(EN?'Confirm payments made with the generated QR code automatically':'Automaticky potvrzovat platbu p\u0159es vygenerovan\u00fd QR k\u00f3d')
         +'<span style="display:block;font-size:11.5px;font-weight:400;color:var(--mid);line-height:1.45;margin-top:2px;">'+(EN?'When a QR transfer arrives in your account, MTL confirms it by itself \u2014 you don\u2019t tick anything. Works for payments to an account connected for payment matching. Off = you confirm incoming payments by hand.':'Jakmile QR platba p\u0159evodem doraz\u00ed na tv\u016fj \u00fa\u010det, MTL ji potvrd\u00ed samo \u2014 nic neodklik\u00e1v\u00e1\u0161. Funguje u plateb na \u00fa\u010det p\u0159ipojen\u00fd k p\u00e1rov\u00e1n\u00ed plateb. Vypnuto = mus\u00ed\u0161 potvrzovat p\u0159\u00edchoz\u00ed platby ru\u010dn\u011b.')+'</span></span></label>'):'')
+      +(('pairing_on' in g)?'<div id="pmPairLink" style="margin:-4px 0 12px 26px;"></div>':'')
       +ttl(EN?'Commission card':'Karta ke stržení provize')
       +cardBox+cardEmailInp
       +'<button id="pmCard" style="width:100%;padding:13px 14px;background:var(--dark);color:#fff;border:none;border-radius:11px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit;margin-bottom:10px;">'+(has?(EN?'💳 Change payment card':'💳 Změnit platební kartu'):(EN?'💳 Add payment card':'💳 Přidat platební kartu'))+'</button>'
@@ -56679,6 +56786,8 @@ function openCommissionCard(kind, opts){ opts=opts||{}; var _acctOnly=!!opts.acc
   var cb=ov.querySelector('#pmCard'); if(cb) cb.onclick=function(){ _pmStash(); _startCardSetup(kind, g.id, (g.invoice_email||g.contact_email||'')); };
   var cbs=ov.querySelector('#pmCardS'); if(cbs) cbs.onclick=async function(){ _pmStash(); try{ await supaClient.from(_isCoach?'profiles':'gyms').update({takes_cash:true, payment_mode:mode}).eq('id', g.id); g.takes_cash=true; }catch(e){} _startCardSetup(kind, g.id, (g.invoice_email||g.contact_email||'')); };
   var sck=ov.querySelector('#pmStripeCash'); if(sck) sck.onchange=function(){ var _in=ov.querySelector('#pmStripeCashInner'); if(_in) _in.style.display=this.checked?'block':'none'; };
+  // Připojení účtu k párování: jen když je zaškrtnuté automatické potvrzování.
+  try{ var _pp0=ov.querySelector('#pmPair'), _ppl=ov.querySelector('#pmPairLink'); if(_pp0 && _ppl){ var _ppr=function(){ if(_pp0.checked) _pairLinkBox(_ppl, (_isCoach?'coach':'gym'), g.id); else _ppl.innerHTML=''; }; _pp0.addEventListener('change', _ppr); _ppr(); } }catch(e){}
   try{ ['#pmRVal','#pmRName'].forEach(function(sel){ var el=ov.querySelector(sel); if(el) el.addEventListener('input', function(){ var _v=(ov.querySelector('#pmRVal')||{}).value||''; var _n=((ov.querySelector('#pmRName')||{}).value||'').trim(); var _chg=(_v!==(g[_RV]||''))||(_n!==(g[_RN]||'')); var _d=ov.querySelector('#pmDecl'); if(_d && g[_RD]) _d.checked=!_chg; }); }); }catch(e){}
       ov.querySelector('#pmSave').onclick=async function(){
     var mSel=ov.querySelector('input[name="pmMode"]:checked'); var m=(_acctOnly && mode)?mode:(mSel?mSel.value:'');
