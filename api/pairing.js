@@ -414,14 +414,23 @@ export default async function handler(req, res) {
       const provider = String(b.provider || '').trim();
       if (!/^[A-Z0-9_]{2,50}$/.test(provider)) return res.status(400).json({ error: 'Vyber banku' });
       const clientId = e.kind + '-' + e.id;
-      const r = await fbxCall(C, 'POST', '/v2/auth/authenticate', { merchantId: C.merchant, clientId, paymentProvider: provider, scope: 'AISP',
+      // POKUS (15. 10. 2026): Backoffice „Přidat účet" volá POST /backoffice/v3/merchants/{merchantId}/
+      // bank-accounts/authenticate (s přihlášením uživatele Backoffice, Bearer) a jen takhle
+      // připojený účet párování bere. Zkouší se, jestli ho brána vezme i s naším podpisem (JWS).
+      // Odpověď se uloží do last_error, ať je vidět, co Finbricks řekl. Když ne -> AIS jako dosud.
+      const bo = await fbxCall(C, 'POST', `/backoffice/v3/merchants/${encodeURIComponent(C.merchant)}/bank-accounts/authenticate`,
+        { paymentProvider: provider }, { psuIp: psu.ip, psuUa: psu.ua, lang: 'cs' });
+      const boNote = 'backoffice ' + bo.status + ' ' + JSON.stringify(bo.data || '').slice(0, 300);
+      console.log('[pairing] backoffice authenticate', boNote);
+      const viaBo = bo.ok && bo.data && bo.data.redirectUrl;
+      const r = viaBo ? bo : await fbxCall(C, 'POST', '/v2/auth/authenticate', { merchantId: C.merchant, clientId, paymentProvider: provider, scope: 'AISP',
         callbackUrl: APP + '/?pairlink=' + encodeURIComponent(e.kind + '.' + e.id) }, { psuIp: psu.ip, psuUa: psu.ua, lang: 'cs' });
-      if (!r.ok || !r.data || !r.data.redirectUrl) return res.status(400).json({ error: 'Finbricks: ' + JSON.stringify(r.data || { http: r.status }).slice(0, 300) });
+      if (!r.ok || !r.data || !r.data.redirectUrl) return res.status(400).json({ error: 'Finbricks: ' + JSON.stringify(r.data || { http: r.status }).slice(0, 300), backoffice: boNote });
       const prev = await cur();
-      await sb.from('pairing_links').upsert({ ...key, client_id: clientId, provider, bank_name: String(b.bank_name || provider).slice(0, 80),
+      await sb.from('pairing_links').upsert({ ...key, client_id: viaBo ? 'backoffice' : clientId, provider, bank_name: String(b.bank_name || provider).slice(0, 80),
         // Obnova platného připojení: dokud se nevrátí z banky, staré platí dál.
-        status: (prev && prev.status === 'active') ? 'active' : 'pending', updated_at: nowIso() }, { onConflict: 'ent_kind,ent_id,fbx_env' });
-      return res.status(200).json({ ok: true, url: r.data.redirectUrl });
+        status: (prev && prev.status === 'active') ? 'active' : 'pending', last_error: boNote, updated_at: nowIso() }, { onConflict: 'ent_kind,ent_id,fbx_env' });
+      return res.status(200).json({ ok: true, url: r.data.redirectUrl, via: viaBo ? 'backoffice' : 'ais', backoffice: boNote });
     }
     return res.status(400).json({ error: 'unknown action' });
   } catch (e) {
