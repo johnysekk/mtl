@@ -4,16 +4,20 @@
 // variabilním symbolem a částkou dorazí, MTL ji potvrdí samo (stejné zaúčtování jako platba
 // z účtu: pisSettle s kolejí 'qr'). Klub / kouč nemusí nic odklikávat.
 //
-// PÁRUJE SE JEN, KDYŽ: platba je v CZK, příjemce má zapnuté „Automaticky potvrzovat platbu přes
-// vygenerovaný QR kód" (pairing_on) A má PLATNĚ PŘIPOJENÝ účet (pairing_links), na který platba
-// jde. Účet si příjemce připojuje sám v Nastavení plateb: přihlásí se přes Finbricks do banky
-// (jen čtení pohybů -- AISP, max. 180 dní). Bez toho QR + ruční potvrzení jako dosud.
-// (Finbricks přijme párování i na nepřipojený účet a pak ho nikdy nespáruje -- proto ta brána.)
+// PÁRUJE SE JEN, KDYŽ: platba je v CZK a příjemce má zapnuté „Automaticky potvrzovat platbu přes
+// vygenerovaný QR kód" (pairing_on). Účet musí být připojený k párování ve Finbricks Backoffice
+// („Přidat účet" -- souhlas + přihlášení do banky). Připojení přes AIS API (/v2/auth/authenticate)
+// párování NEBERE (ověřeno 15. 10. 2026) a veřejné API pro „Přidat účet" není. Nepřipojený účet
+// Finbricks sám odmítne (chyba 10000) -> 'failed' -> QR + ruční potvrzení jako dosud.
+//
+// PŘIPOJENÍ ÚČTU Z APPKY (link_*, pairing_links) -- ROZPRACOVANÉ, TESTUJE SE: klub se přihlásí
+// do banky přes AIS API. Párování takové připojení zatím nebere (10000), proto na něm párování
+// NEZÁVISÍ -- rozhoduje odpověď Finbricks. Až bude známé správné volání, mění se jen link_start.
 //
 // POST { action, ... }   (přihlášený)
-//   reserve      { iban, amount, currency }     VS do QR, jen na připojený účet. { vs } / { vs: null }
-//   attach       { vs, tbl, id }                „Zaplaceno" -- ověří řádek, cenu, příjemce
-//                                               a připojení, pošle Finbricks požadavek na párování
+//   reserve      { iban, amount, currency }     VS do QR (Finbricks se nevolá). { vs } / { vs: null }
+//   attach       { vs, tbl, id }                „Zaplaceno" -- ověří řádek, cenu a příjemce
+//                                               a pošle Finbricks požadavek na párování
 //   link_status  { kind, id }                   stav připojení účtu subjektu (gym / coach / org)
 //   link_banks   { kind, id }                   banky, přes které jde účet připojit
 //   link_start   { kind, id, provider }         -> { url } přihlášení do banky (Finbricks)
@@ -54,32 +58,26 @@ async function who(req) {
 // Příjemce řádku VŽDY z databáze (komu platba patří), nikdy z prohlížeče: jeho IBANy a jestli
 // má zapnuté „Automaticky potvrzovat platbu přes vygenerovaný QR kód" (pairing_on, výchozí zapnuto).
 async function payeeOf(tbl, row) {
-  const out = []; let on = true, ent = null;
+  const out = []; let on = true;
   const add = (v) => { const x = iban(v); if (x && out.indexOf(x) < 0) out.push(x); };
-  const gym = async (id) => { const g = (await sb.from('gyms').select('receiver_id_value,pairing_on').eq('id', id).maybeSingle()).data; if (g) { add(g.receiver_id_value); on = g.pairing_on !== false; ent = { kind: 'gym', id: String(id) }; } };
-  const coach = async (id) => { const c = (await sb.from('profiles').select('receiver_id_value,payout_receiver_id_value,pairing_on').eq('id', id).maybeSingle()).data; if (c) { add(c.receiver_id_value); add(c.payout_receiver_id_value); on = c.pairing_on !== false; ent = { kind: 'coach', id: String(id) }; } };
+  const gym = async (id) => { const g = (await sb.from('gyms').select('receiver_id_value,pairing_on').eq('id', id).maybeSingle()).data; if (g) { add(g.receiver_id_value); on = g.pairing_on !== false; } };
+  const coach = async (id) => { const c = (await sb.from('profiles').select('receiver_id_value,payout_receiver_id_value,pairing_on').eq('id', id).maybeSingle()).data; if (c) { add(c.receiver_id_value); add(c.payout_receiver_id_value); on = c.pairing_on !== false; } };
   if (tbl === 'event_tickets') {
     const ev = (await sb.from('events').select('gym_id,payout_coach_id,organization_id').eq('id', row.event_id).maybeSingle()).data;
     if (ev && ev.payout_coach_id) await coach(ev.payout_coach_id);
     else if (ev && ev.gym_id) await gym(ev.gym_id);
-    else if (ev && ev.organization_id) { const o = (await sb.from('organizations').select('receiver_id_value,pairing_on').eq('id', ev.organization_id).maybeSingle()).data; if (o) { add(o.receiver_id_value); on = o.pairing_on !== false; ent = { kind: 'org', id: String(ev.organization_id) }; } }
+    else if (ev && ev.organization_id) { const o = (await sb.from('organizations').select('receiver_id_value,pairing_on').eq('id', ev.organization_id).maybeSingle()).data; if (o) { add(o.receiver_id_value); on = o.pairing_on !== false; } }
   } else if (tbl === 'cohort_members') {
     const co = (await sb.from('gym_cohorts').select('gym_id').eq('id', row.cohort_id).maybeSingle()).data;
     if (co && co.gym_id) await gym(co.gym_id);
   } else if (tbl === 'merch_orders' && row.coach_id) await coach(row.coach_id);   // merch kouče jde kouči (jako v pis-return)
   else if (row.gym_id) await gym(row.gym_id);
   else if (row.coach_id) await coach(row.coach_id);
-  return { ibans: out, on, ent };
+  return { ibans: out, on };
 }
 
 // ── PŘIPOJENÍ ÚČTU K PÁROVÁNÍ (pairing_links) ──────────────────────────────────────────
 const nowIso = () => new Date().toISOString();
-// Platné připojení subjektu, které pokrývá daný účet (prostředí = sandbox / production).
-async function linkCovers(ent, ib, env) {
-  if (!ent || !ib) return false;
-  const l = (await sb.from('pairing_links').select('status,valid_to,ibans').eq('ent_kind', ent.kind).eq('ent_id', ent.id).eq('fbx_env', env).maybeSingle()).data;
-  return !!(l && l.status === 'active' && l.valid_to && new Date(l.valid_to).getTime() > Date.now() && (l.ibans || []).includes(ib));
-}
 // Subjekt, jeho majitel, název a výplatní účty. Null, když ho přihlášený nespravuje.
 async function entityOf(kind, id, me) {
   if (!KINDS.includes(kind) || !id) return null;
@@ -197,17 +195,20 @@ async function checkOne(p) {
   const r = await fbxCall(C, 'GET', `/payment/pairing/status?uniquePaymentPairingId=${encodeURIComponent(String(p.id))}&merchantId=${encodeURIComponent(C.merchant)}`, null);
   await sb.from('payment_pairings').update({ checked_at: new Date().toISOString() }).eq('id', p.id);
   if (!r.ok || !r.data) { await sb.from('payment_pairings').update({ last_error: 'status HTTP ' + r.status }).eq('id', p.id); return 'error'; }
-  const st = String(r.data.paymentPairingStatus || '').toUpperCase();
+  // Dokumentace má odpověď ploše ({ paymentPairingStatus }), ale příklad chyby v poli payments[] --
+  // bere se obojí.
+  const d = firstPay(r.data) || {};
+  const st = String(d.paymentPairingStatus || '').toUpperCase();
   if (st === 'PAIRED') {
     // Pojistka: dorazilo v CZK a aspoň tolik, kolik mělo.
-    const f = Array.isArray(r.data.foundPaymentData) ? r.data.foundPaymentData[0] : null;
+    const f = Array.isArray(d.foundPaymentData) ? d.foundPaymentData[0] : (d.foundPaymentData || null);
     const fa = f && f.amount; if (!p.test_mode && fa && (String(fa.currency || 'CZK').toUpperCase() !== 'CZK' || Number(fa.value) + 0.005 < Number(p.amount))) {
       await sb.from('payment_pairings').update({ status: 'failed', last_error: 'amount/currency mismatch ' + JSON.stringify(fa) }).eq('id', p.id); await unmark(p); return 'mismatch';
     }
     return settle(p);
   }
   if (st === 'EXPIRED' || st === 'CANCELLED' || st === 'FAILED') {
-    await sb.from('payment_pairings').update({ status: st.toLowerCase(), last_error: st === 'FAILED' ? JSON.stringify(r.data.reason || null) : null }).eq('id', p.id).eq('status', 'scheduled');
+    await sb.from('payment_pairings').update({ status: st.toLowerCase(), last_error: st === 'FAILED' ? JSON.stringify(d.reason || null) : null }).eq('id', p.id).eq('status', 'scheduled');
     await unmark(p);
     return st.toLowerCase();
   }
@@ -307,10 +308,6 @@ export default async function handler(req, res) {
     if (action === 'reserve') {
       const ib = iban(b.iban), amount = r2(b.amount), cur = String(b.currency || 'CZK').toUpperCase();
       if (cur !== 'CZK' || !(amount > 0) || !/^CZ\d{22}$/.test(ib)) return res.status(200).json({ ok: true, vs: null });
-      // Jen na účet s platným připojením k párování (kterýkoli subjekt) -- jinak VS nemá smysl.
-      { const C0 = await fbxNow();
-        const ln = await sb.from('pairing_links').select('ent_id', { count: 'exact', head: true }).eq('fbx_env', C0.env).eq('status', 'active').gt('valid_to', nowIso()).contains('ibans', [ib]);
-        if (!(ln.count > 0)) return res.status(200).json({ ok: true, vs: null }); }
       // Pojistka proti zahlcení: nejvýš 20 nepoužitých VS na člověka za hodinu.
       const since = new Date(Date.now() - 3600e3).toISOString();
       const n = await sb.from('payment_pairings').select('id', { count: 'exact', head: true }).eq('user_id', me).eq('status', 'reserved').gte('created_at', since);
@@ -341,10 +338,10 @@ export default async function handler(req, res) {
       if (!payee.ibans.includes(iban(p.iban))) return res.status(400).json({ error: 'Účet v QR nepatří příjemci platby' });
       const C = await fbxNow();
       if (!C.ok) return res.status(500).json({ error: 'Finbricks ' + C.env + ' nemá nastavené klíče' });
-      // Příjemce si automatické potvrzování vypnul, nebo nemá platně připojený účet, na který
-      // platba jde -> potvrzuje ručně.
-      if (!payee.on || !(await linkCovers(payee.ent, iban(p.iban), C.env))) {
-        await sb.from('payment_pairings').update({ status: 'cancelled', tbl, row_id: id, last_error: payee.on ? 'account not connected' : 'payee turned pairing off' }).eq('id', p.id);
+      // Příjemce si automatické potvrzování vypnul -> potvrzuje ručně. (Nepřipojený účet odmítne
+      // až Finbricks chybou 10000 -> 'failed' níž.)
+      if (!payee.on) {
+        await sb.from('payment_pairings').update({ status: 'cancelled', tbl, row_id: id, last_error: 'payee turned pairing off' }).eq('id', p.id);
         return res.status(200).json({ ok: true, status: 'off' });
       }
       const finish = new Date(Date.now() + FINISH_DAYS * 86400e3).toISOString();
