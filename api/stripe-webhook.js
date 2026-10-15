@@ -1158,7 +1158,7 @@ export default async function handler(req, res) {
         // Zpět na vlastní sazbu (základ / Shikai / Bankai / organizace) -- dřív natvrdo 5 %.
         try { await rerateOwner(uid); } catch (e) { console.error('ep end rerate', e.message); }
         await subMail({ userId: uid }, 'ended', null, _endInfo);
-        await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_ended' }), message: '⭐ Teď už nejsi Exclusive MTL Partner. Díky za přízeň! Provize se vrátila na tvou vlastní sazbu: základ 2 % u plateb kartou a 2,5 % u převodu, nižší se Shikai, Bankai nebo sazbou organizace. Z člena z appky 10 %, z reklamy MTL 25 %.' });
+        await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_ended' }), message: '⭐ Teď už nejsi Exclusive MTL Partner. Díky za přízeň! Provize se vrátila na tvou vlastní sazbu: základ 2 % u plateb kartou a 2,5 % u převodu, nižší se Shikai, Bankai nebo sazbou organizace. Z člena z appky 10 %. Reklama od MTL a partneři na kartě klubu jsou jen pro Exclusive Partnery: klub z reklamy vypadne a partneři se skryjí (nesmažou).' });
       }
     } else if (event.type === 'charge.dispute.created') {
       const d = event.data.object;

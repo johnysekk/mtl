@@ -36,11 +36,10 @@
 //   • ORGANICKÝ OBJEV (mtl_discovery) — člověk si klub našel sám v appce. MTL za ten příchod
 //     nic nezaplatilo, jen ho zprostředkovalo, takže JEDNORÁZOVĚ a levně.
 //   • REKLAMA (mtl_ads) — MTL za ten klik zaplatilo z vlastní kapsy. Proto OPAKOVANĚ, dokud
-//     ten člověk u poskytovatele platí; jinak by se kampaň nezaplatila.
-// EP má u obojího nižší sazbu podle stupně (EP_TIERS).
+//     ten člověk u poskytovatele platí; jinak by se kampaň nezaplatila. Reklama od MTL je jen
+//     pro kluby s EP (meta-feed.js), sazba podle stupně (EP_TIERS). Bez EP se neúčtuje vůbec.
+// EP má i objev v appce levnější podle stupně.
 const ACQ_RATE = 0.10;         // objev v appce, jednorázově (bez EP)
-const ADS_RATE = 0.25;         // z reklamy MTL, JEN ČLENSTVÍ, po dobu okna níž (bez EP)
-// EP má obě sazby podle stupně -- viz EP_TIERS níž.
 
 // ── STUPNĚ EXCLUSIVE PARTNERA ──────────────────────────────────────────────────────────────
 // Jediný ceník EP. Zrcadlo je v index.html (EP_TIERS) -- když měníš jedno, měň obojí.
@@ -255,12 +254,11 @@ export async function gymOnboardingUntil(sbGet, gymId) {
     return (Date.now() < until.getTime()) ? until.toISOString() : null;
   } catch (e) { return null; }
 }
-// Akviziční sazby podle stupně EP. Bez EP 10 % / 25 %. Nulová sazba (Kage) = akvizice se neúčtuje.
-// Reklama MTL: program je jen pro EP (od Genina), jenže člověk může přijít z obecné kampaně MTL
-// i ke klubu bez EP -- tam platí 25 %.
+// Akviziční sazby podle stupně EP. Bez EP objev v appce 10 % a reklama nic (program je jen pro
+// EP). Nulová sazba (Kage) = akvizice se neúčtuje.
 function _acqRates(ownerPartner) {
   const t = epTierKey(ownerPartner);
-  return t ? { acq: EP_TIERS[t].acq, ads: EP_TIERS[t].ads } : { acq: ACQ_RATE, ads: ADS_RATE };
+  return t ? { acq: EP_TIERS[t].acq, ads: EP_TIERS[t].ads } : { acq: ACQ_RATE, ads: 0 };
 }
 export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, memberId, scopeCol, scopeId }) {
   // Nový klub v okně převodu členů: žádná akvizice.
@@ -276,6 +274,7 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
   // REKLAMA SE ÚČTUJE Z KAŽDÉ PLATBY toho člověka, ne jen z první. Nehledá se tedy žádná
   // předchozí transakce -- právě tím se liší od organického objevu.
   if (acqSource === 'mtl_ads') {
+    if (!(R.ads > 0)) return null;                      // bez EP reklama od MTL neběží
     // JEN ČLENSTVÍ. Jednorázový vstup za 200 Kč by dal 50 Kč, což nestojí za vysvětlování,
     // a členství je zároveň to, co má hodnotu pro klub i pro MTL.
     if (type !== 'membership') return null;
@@ -321,7 +320,7 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
           );
           if (att && att.length) return null;
         }
-        return R.ads > 0 ? { rate: R.ads, months: ADS_WINDOW_MONTHS } : null;
+        return { rate: R.ads, months: ADS_WINDOW_MONTHS };
       }
 
       // Okno běží od první platby z reklamy v tomhle období.
@@ -330,10 +329,10 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
       if (Date.now() > end.getTime()) return null;              // okno vypršelo
       const left = Math.max(0, Math.ceil((end.getTime() - Date.now()) / MS_MONTH));
       if (left <= 0) return null;
-      return R.ads > 0 ? { rate: R.ads, months: Math.min(ADS_WINDOW_MONTHS, left) } : null;
+      return { rate: R.ads, months: Math.min(ADS_WINDOW_MONTHS, left) };
     } catch (e) {
       // Výpadek databáze nesmí cenu zdražit ani zlevnit: bereme celé okno.
-      return R.ads > 0 ? { rate: R.ads, months: ADS_WINDOW_MONTHS } : null;
+      return { rate: R.ads, months: ADS_WINDOW_MONTHS };
     }
   }
 

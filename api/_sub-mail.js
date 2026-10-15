@@ -71,11 +71,11 @@ export async function subMail(who, what, until, info) {
         : (en
           ? ['Exclusive MTL Partner ended',
              P('Your Exclusive MTL Partner subscription ended' + (eds ? (' on <b>' + eds + '</b>') : '') + '.' + (why ? (' ' + why) : ''))
-             + P('<b>What this means:</b> commission is back on your own rate from now on — base 2 % for card payments and 2.5 % for transfers, lower with Shikai, Bankai or an organization rate. A member found through the app costs 10 % of the first payment, from MTL ads 25 %.')
+             + P('<b>What this means:</b> commission is back on your own rate from now on — base 2 % for card payments and 2.5 % for transfers, lower with Shikai, Bankai or an organization rate. A member found through the app costs 10 % of the first payment. Promotion by MTL is only for Exclusive Partners, so your club drops out of MTL ads; partners on your club card are hidden (not deleted).')
              + P('You can subscribe again in the app at any time; the partner rate applies from the next payment.')]
           : ['Exclusive MTL Partner skončil',
              P('Předplatné Exclusive MTL Partner skončilo' + (eds ? (' <b>' + eds + '</b>') : '') + '.' + (why ? (' ' + why) : ''))
-             + P('<b>Co to znamená:</b> od teď platíš provizi podle své vlastní sazby — základ 2 % u plateb kartou a 2,5 % u převodu, nižší se Shikai, Bankai nebo sazbou organizace. Člen, kterého ti najde appka, stojí 10 % z první platby, z reklamy MTL 25 %.')
+             + P('<b>Co to znamená:</b> od teď platíš provizi podle své vlastní sazby — základ 2 % u plateb kartou a 2,5 % u převodu, nižší se Shikai, Bankai nebo sazbou organizace. Člen, kterého ti najde appka, stojí 10 % z první platby. Reklama od MTL je jen pro Exclusive Partnery, tvůj klub z ní vypadne; partneři na kartě klubu se skryjí (nesmažou).')
              + P('Předplatné si v appce můžeš kdykoliv obnovit, partnerská sazba pak platí od další platby.')]),
     }[what];
     if (!T) return;
