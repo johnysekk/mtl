@@ -59,8 +59,26 @@ ${o.image ? `<meta property="og:image" content="${esc(o.image)}">` : ''}
 <script>location.replace(${JSON.stringify(o.target)});</script></body></html>`;
 }
 
-const OWNER = { club: { tbl: 'gyms', sel: 'id,slug,name,city,country,photos' }, coach: { tbl: 'profiles', sel: 'id,slug,name,city,country,coach_status' },
-  organization: { tbl: 'organizations', sel: 'id,slug,name' } };
+const OWNER = { club: { tbl: 'gyms', sel: 'id,slug,name,city,country,photos,owner_id' }, coach: { tbl: 'profiles', sel: 'id,slug,name,city,country,coach_status,referral_code' },
+  organization: { tbl: 'organizations', sel: 'id,slug,name,owner_id' } };
+
+// VLASTNÍ ODKAZ POŘADATELE -- stejně jako tlačítko na stránce klubu / kouče (club-public.js,
+// coach-public.js): own=1&club= / own=1&coach= odpouští akviziční provizi (kdo přišel přes
+// odkaz klubu, je jeho, ne akvizice MTL; appka -> localStorage mtl_owngym_ / mtl_owncoach_, 60 dní)
+// a ref= je doporučovací kód majitele (Shikai / Bankai: mtl_ref_pending -> profiles.referred_by).
+// Organizace own nemá (akviziční provize se jí netýká), jen ref majitele.
+async function ownerParams(ok, own) {
+  let ref = '';
+  try {
+    if (ok === 'coach') ref = own.referral_code || '';
+    else if (own.owner_id) ref = ((await sbGet(`profiles?id=eq.${encodeURIComponent(own.owner_id)}&select=referral_code&limit=1`))[0] || {}).referral_code || '';
+  } catch (e) {}
+  const p = [];
+  if (ok === 'club') p.push('own=1', 'club=' + encodeURIComponent(own.id));
+  if (ok === 'coach') p.push('own=1', 'coach=' + encodeURIComponent(own.id));
+  if (ref) p.push('ref=' + encodeURIComponent(ref));
+  return p.join('&');
+}
 
 export default async function handler(req, res) {
   const q = req.query || {};
@@ -77,6 +95,8 @@ export default async function handler(req, res) {
     const own = (await sbGet(`${OWNER[ok].tbl}?slug=eq.${encodeURIComponent(owner)}&select=${OWNER[ok].sel}&limit=1`))[0];
     if (!own) return home();
     let o = null;
+    const ownQ = await ownerParams(ok, own);
+    const tail = [ownQ, pass].filter(Boolean).join('&');
     const csOf = (country) => !country || ['CZ', 'SK'].includes(String(country).toUpperCase());
     if (kind === 'course') {
       const c = (await sbGet(`gym_cohorts?gym_id=eq.${encodeURIComponent(own.id)}&slug=eq.${encodeURIComponent(slug)}&select=id,name,start_date,price_regular,price_tiers,currency,description,poster&limit=1`))[0];
@@ -87,7 +107,7 @@ export default async function handler(req, res) {
         o = { cs, title: c.name || (cs ? 'Kurz' : 'Course'),
           desc: bits.join(' · ') + (c.description ? (' — ' + String(c.description).replace(/\s+/g, ' ').slice(0, 160)) : ''),
           image: httpUrl(c.poster) || photoOf(own.photos),
-          target: origin + '/?cohort=' + encodeURIComponent(c.id) + (pass ? '&' + pass : '') };
+          target: origin + '/?cohort=' + encodeURIComponent(c.id) + (tail ? '&' + tail : '') };
       }
     } else {
       // Akce pořadatele: organizace > klub > kouč (stejně jako jedinečnost adresy v databázi).
@@ -102,7 +122,7 @@ export default async function handler(req, res) {
         o = { cs, title: e.title || (cs ? 'Akce' : 'Event'),
           desc: bits.join(' · ') + (e.description ? (' — ' + String(e.description).replace(/\s+/g, ' ').slice(0, 160)) : ''),
           image: httpUrl(e.poster) || photoOf(own.photos),
-          target: origin + '/?event=' + encodeURIComponent(e.id) + (pass ? '&' + pass : '') };
+          target: origin + '/?event=' + encodeURIComponent(e.id) + (tail ? '&' + tail : '') };
       }
     }
     // Kurz / akce nenalezena: na stránku pořadatele (klub / kouč), jinak do appky.
