@@ -1,5 +1,6 @@
 import Stripe from 'stripe';
-import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor, orgRate, nativePrice, nativeRate, STORE_COST } from './_rate.js';
+import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor, orgRate, nativePrice, nativeRate, STORE_COST, EP_TIERS, EP_TIER_ORDER, EP_TIER_NAMES, EP_YEAR_MONTHS, EP_DEFAULT_TIER, epTierKey, epTierOf } from './_rate.js';
+import { applyEpUpgrade, notifyEpDowngradeScheduled } from './_ep.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { checkPrice, offerPrices, planTermPrices, checkOnlineCountry } from './_price-check.js';
 import { vatMode } from './_vat.js';
@@ -19,13 +20,19 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 // ════════════════════════════════════════════════════════════════════════
 
 const GYM_STUDENT_MARKUP = 1.00;  // no markup
-const GYM_MTL_TAKE       = 0.02;   // drop-in: Stripe track base 2 % (bylo 3 %)
-const MEMB_MTL_PERCENT   = 3;       // membership: Stripe track base 3% (was 3.5 = the old ladder)
 
 const _SUPA_URL = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, ''), _SUPA_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 async function _wsbGet(path){
   if(!_SUPA_URL || !_SUPA_KEY) return [];
   try{ const r = await fetch(_SUPA_URL.replace(/\/+$/,'') + '/rest/v1/' + path, { headers:{ apikey:_SUPA_KEY, Authorization:'Bearer '+_SUPA_KEY } }); return r.ok ? await r.json() : []; }catch(e){ return []; }
+}
+// PATCH, který vrátí, jestli se opravdu zapsal (aspoň jeden řádek). Pro zápisy, na kterých
+// závisí peníze (přechod EP): když selže, nesmí se pokračovat ve Stripe.
+async function _wsbPatchOk(path, body){
+  if(!_SUPA_URL || !_SUPA_KEY) return false;
+  try{ const r = await fetch(_SUPA_URL + '/rest/v1/' + path, { method:'PATCH', headers:{ apikey:_SUPA_KEY, Authorization:'Bearer '+_SUPA_KEY, 'Content-Type':'application/json', Prefer:'return=representation' }, body: JSON.stringify(body) });
+    if(!r.ok){ console.error('wsbPatchOk', r.status, (await r.text()).slice(0,200)); return false; }
+    const j = await r.json(); return Array.isArray(j) && j.length > 0; }catch(e){ console.error('wsbPatchOk', e.message); return false; }
 }
 async function _wsbPatch(path, body){
   if(!_SUPA_URL || !_SUPA_KEY) return;
@@ -126,11 +133,12 @@ export default async function handler(req, res) {
   try {
     // partner = platba Exclusive Partnera směrem k MTL; tu pozastavení blokovat nesmí,
     // jinak by se poskytovatel nedostal z dluhu ven.
-    if (type !== 'partner' && type !== 'supplier' && !(await _assertNotSuspended(req, res))) return;
+    if (type !== 'partner' && type !== 'partner_change' && type !== 'supplier' && !(await _assertNotSuspended(req, res))) return;
     if (type === 'coach')      return await coachCheckout(req, res);
     if (type === 'gym')        return await gymCheckout(req, res);
     if (type === 'membership') return await membershipCheckout(req, res);
     if (type === 'partner')    return await partnerCheckout(req, res);
+    if (type === 'partner_change') return await partnerChange(req, res);
     if (type === 'supplier')   return await supplierCheckout(req, res);
     if (type === 'event')      return await eventCheckout(req, res);
     if (type === 'online_plan') return await onlinePlanCheckout(req, res);
@@ -149,7 +157,7 @@ async function coachCheckout(req, res) {
   const payerName = String(req.query.payerName || '').slice(0, 120);
   const {
     coachId, coachName, amount, currency = 'CZK', slotId, online,
-    coachProfileId, fmt, commission, nomarkup, credit, studentId, disc, markup, refDisc, acq,
+    coachProfileId, fmt, nomarkup, credit, studentId, disc, markup, refDisc, acq,
   } = req.query;
 
   if (!coachId || !amount) return res.status(400).json({ error: 'Chybí coachId nebo amount' });
@@ -164,7 +172,7 @@ async function coachCheckout(req, res) {
   //   * the fallback itself was 10%, not the base rate.
   // Legitimate range: 0.01 (EP) .. 0.10 (the coach-1:1 ACQUISITION fee, which the client
   // DOES send here as Math.max(comm, partner?0.05:0.10)). Fallback = Stripe base 3%.
-  // Server-side single source: ladder + acquisition via _rate.js (client 'commission' only a fallback).
+  // Server-side single source: ladder + acquisition via _rate.js (nothing from the URL).
   let COMMISSION;
   try {
     // Online koučing: vlastní sazba (1 / 0,75 / 0,5 %) a bez akvizice. Osobní lekce: žebříček + akvizice.
@@ -172,8 +180,10 @@ async function coachCheckout(req, res) {
       ? await onlineRateFor(_wsbGet, coachProfileId)
       : await effectiveRate(_wsbGet, { ownerId: coachProfileId, mode: 'stripe', type: 'coach_1to1', acqSource: acq, memberId: studentId, scopeCol: 'coach_id', scopeId: coachProfileId });
   } catch (e) {
+    // Sazba jen ze serveru. Dřív se při výpadku databáze vzala sazba z adresy (commission=),
+    // kterou si kupující může přepsat -- platba radši nezačne.
     console.error('pay.coach effectiveRate failed:', e.message);
-    COMMISSION = (commission && parseFloat(commission) >= 0.005 && parseFloat(commission) <= 0.10) ? parseFloat(commission) : 0.02;   // fallback = base Stripe (bylo 0.03)
+    return res.status(503).json({ error: 'Platbu teď nejde spustit (nepodařilo se ověřit sazbu). Zkus to prosím za chvíli.' });
   }
   let MK = 1.00; // no markup — student pays exactly the listed price
   let STUDENT_MARKUP = MK;
@@ -281,7 +291,7 @@ async function coachCheckout(req, res) {
       { price_data: { currency: cur, product_data: { name: productName }, unit_amount: unitAmount }, quantity: 1 },
     ],
     payment_intent_data: {
-      application_fee_amount: applicationFee,
+      ...(applicationFee > 0 ? { application_fee_amount: applicationFee } : {}),   // EP Kage: 0 %
       metadata: {
         credit_type: credit || 'none',
         mtl_credit_row: _credRow || '',      // set ONLY when server-verified; the webhook consumes it
@@ -305,7 +315,7 @@ async function coachCheckout(req, res) {
 async function gymCheckout(req, res) {
   const {
     gymAccount, gymName, className, amount, currency = 'CZK', bookingId,
-    income, memberName, payee, disc, level, partner, guest, token, founding, credit, refDisc, take,
+    income, memberName, payee, disc, level, guest, token, credit, refDisc,
     gymId, studentId, coachId, grace, merch, merchId, qty, variant, merchName, acq,
   } = req.query;
 
@@ -320,11 +330,10 @@ async function gymCheckout(req, res) {
     if (!_pc.ok) return res.status(400).json({ error: _pc.error });
   }
   const cur = String(currency).toLowerCase();
-  const isPartner = (String(partner) === '1');
   const MK   = 1.00;
   let STUDENT_MK = MK;
   // Server-side single source: ladder + acquisition via _rate.js. Merch/grace/guest are not drop-ins
-  // so they never get the acquisition fee. Client 'take' is only a fallback if resolve fails.
+  // so they never get the acquisition fee. Nothing from the URL.
   let TAKE;
   let _acqMonths = 0, _baseRate = null;
   try {
@@ -332,8 +341,9 @@ async function gymCheckout(req, res) {
     const _brk = await effectiveRateBreakdown(_wsbGet, { gymAccount, mode: 'stripe', type: _txType, acqSource: acq, memberId: studentId, scopeCol: 'gym_id', scopeId: gymId, months: 1 });
     TAKE = _brk.rate; _acqMonths = _brk.acqMonths; _baseRate = _brk.baseRate;
   } catch (e) {
+    // Sazba jen ze serveru (dřív záloha z adresy take=, kterou si kupující může přepsat).
     console.error('pay.gym effectiveRate failed:', e.message);
-    TAKE = (take && parseFloat(take) >= 0.005 && parseFloat(take) <= 0.10) ? parseFloat(take) : GYM_MTL_TAKE;
+    return res.status(503).json({ error: 'Platbu teď nejde spustit (nepodařilo se ověřit sazbu). Zkus to prosím za chvíli.' });
   }
   const _credRow = (String(credit) === 'student') ? await verifyStudentCredit(studentId) : null;
   if (_credRow) {
@@ -366,7 +376,7 @@ async function gymCheckout(req, res) {
         { price_data: { currency: cur, product_data: { name: `${String(merch)==='1' ? 'Zboží' : 'Jednorázový vstup'} · ${className || 'Lekce'} — ${gymName || 'MTL Gym'}` }, unit_amount: unitAmount }, quantity: 1 },
       ],
       payment_intent_data: {
-        application_fee_amount: applicationFee,
+        ...(applicationFee > 0 ? { application_fee_amount: applicationFee } : {}),   // EP Kage: 0 %
         description: `${String(merch)==='1' ? 'Zboží' : 'Jednorázový vstup'} · ${className || 'Lekce'} — ${gymName || 'MTL Gym'}`,
         metadata: {
           mtl_payment_type: (String(merch)==='1'?'merch':'drop_in'),
@@ -405,7 +415,7 @@ async function gymCheckout(req, res) {
 // ───────────────────────── GYM membership (direct charge subscription) ─────────────────────────
 // ───────────────────────── EVENT TICKET (flat 6% = 3% markup + 3% cut, no partner discount) ─────────────────────────
 async function eventCheckout(req, res) {
-  const { gymAccount, eventTitle, tierName, amount, currency = 'CZK', ticketId, buyerName, buyerEmail, qty, qrToken, eventId, founding, partner, disc, gymId, payoutCoachId, take } = req.query;
+  const { gymAccount, eventTitle, tierName, amount, currency = 'CZK', ticketId, buyerName, buyerEmail, qty, qrToken, eventId, disc, gymId, payoutCoachId } = req.query;
   if (!gymAccount || !amount) return res.status(400).json({ error: 'Chybí gymAccount nebo amount' });
   // ČÁSTKA A ÚČET ZE SERVERU, NE Z ADRESY. Dřív šla částka i sazba MTL do Stripe tak, jak je
   // poslal prohlížeč: upravený odkaz zaplatil za lístek 1 Kč nebo snížil provizi. Teď se
@@ -448,7 +458,8 @@ async function eventCheckout(req, res) {
   else {
     try { TAKE = await resolveRate(_wsbGet, { gymAccount, mode: 'stripe' }); }
     catch (e) { console.error('pay.event rate resolve failed:', e.message); TAKE = NaN; }
-    if (!(TAKE >= 0.005 && TAKE <= 0.10)) { const _t2 = take ? parseFloat(take) : NaN; TAKE = (_t2 >= 0.005 && _t2 <= 0.10) ? _t2 : 0.03; }
+    // Sazba jen ze serveru (0–30 %; EP Kage má 0 %). Dřív se při chybě vzala z adresy (take=).
+    if (!(TAKE >= 0 && TAKE <= 0.30)) return res.status(503).json({ error: 'Platbu teď nejde spustit (nepodařilo se ověřit sazbu). Zkus to prosím za chvíli.' });
   }
   const isCZK = cur === 'czk';
   const unit = isCZK ? Math.floor(P * MK) * 100 : Math.round(P * MK * 100);
@@ -511,7 +522,7 @@ async function membershipCheckout(req, res) {
   const _skLbl = sellLabel(await sellKindFor(_wsbGet, { gymId: _skGym, paidTo: _skPaidTo }), 'cs');
   const {
     gymAccount, gymName, planName, amount, currency = 'CZK', interval = 'month', months, endsOn,
-    membershipId, income, memberName, payee, disc, access, partner, founding, acq, fee,
+    membershipId, income, memberName, payee, disc, access, acq,
     gymId, studentId,
   } = req.query;
 
@@ -570,40 +581,21 @@ async function membershipCheckout(req, res) {
   const cur = String(currency).toLowerCase();
   const ivl = interval === 'year' ? 'year' : 'month';
   if (!(await _assertAcctReady(gymAccount, res))) return;
-  // owner's MTL League tier rate (Shikai 3% / Bankai 2%), passed from the client and range-validated.
-  // Rate in PERCENT. Client sends its _ladderRate (EP 0.5% / FP / ladder); resolve server-side if
-  // invalid. No partner override -> EP 0.5% honoured. Acquisition (below) still stacks on top.
-  let FEE_PCT = fee ? parseFloat(fee) : NaN;
-  if (!(FEE_PCT >= 0.5 && FEE_PCT <= 10)) {
-    try { FEE_PCT = (await resolveRate(_wsbGet, { gymAccount, mode: 'stripe' })) * 100; }
-    catch (e) { console.error('pay.membership rate resolve failed:', e.message); FEE_PCT = MEMB_MTL_PERCENT; }
-  }
-  // MTL acquisition fee: when the app DEMONSTRABLY brought this member (organic deck/search
-  // discovery, acq=mtl_discovery), MTL takes 10% for the first 2 months, then a webhook drops
-  // it to the normal rate (a finder's fee for the acquisition). Monthly subs only.
-  const MTL_ACQ_PERCENT = 10;
-  // NOTE: this used to also require String(partner) !== '1', which excluded an EP from the
-  // acquisition fee entirely - making the "EP pays half" branch below DEAD CODE and billing
-  // an EP acquisition at their normal 1%. EP pays HALF the acquisition fee, not none.
-  const _isAcq = (String(acq) === 'mtl_discovery' && ivl === 'month');
-  // EP perk: HALF the acquisition fee (5%) vs 10% for standard providers; after the window the webhook drops to mtl_acq_base (EP=1%).
-  let FEE_NOW = _isAcq ? (String(partner)==='1' ? (MTL_ACQ_PERCENT/2) : MTL_ACQ_PERCENT) : FEE_PCT;
-  // A term plan is one payment covering N months, but only the first two ever carry the
-  // acquisition fee -- so the rate has to be blended over the months it is actually owed for.
-  // A monthly plan has months=1 and comes out of this unchanged.
-  let _acqMonthsM = 0, _baseRateM = null;
-  try {
-    const _moM = Math.max(1, parseInt(months, 10) || 1);
-    const _brkM = await effectiveRateBreakdown(_wsbGet, {
-      gymAccount, mode: 'stripe', type: 'membership', acqSource: acq,
-      memberId: studentId, scopeCol: 'gym_id', scopeId: gymId, months: _moM
-    });
-    if (_brkM && typeof _brkM.rate === 'number') {
-      FEE_NOW = _brkM.rate * 100;
-      _acqMonthsM = _brkM.acqMonths || 0;
-      _baseRateM = _brkM.baseRate;
-    }
-  } catch (e) { console.error('pay.membership blended rate failed:', e.message); }
+  // SAZBA JEN ZE SERVERU (_rate.js): žebříček / stupeň EP + akvizice, u delšího období rozložená
+  // na měsíce, kterých se akvizice týká. Dřív přišla z adresy (fee=) a server ji jen hlídal
+  // rozsahem 0,5–10 % -- kupující si ji tak mohl snížit a nulová sazba (EP Kage) by neprošla.
+  // Když se sazbu nepodaří zjistit, platba nezačne (handler vrátí chybu) -- žádná náhradní sazba.
+  const _brkM = await effectiveRateBreakdown(_wsbGet, {
+    gymAccount, mode: 'stripe', type: 'membership', acqSource: acq,
+    memberId: studentId, scopeCol: 'gym_id', scopeId: gymId, months: Math.max(1, parseInt(months, 10) || 1)
+  });
+  const FEE_NOW = _brkM.rate * 100;
+  const _baseRateM = _brkM.baseRate;
+  const FEE_PCT = _baseRateM * 100;                      // sazba po skončení akvizice
+  const _acqMonthsM = _brkM.acqMonths || 0;
+  // Předplatné je v akvizičním okně jen tehdy, když akvizice opravdu padla (první členství
+  // u klubu, ne u Kage). Dřív stačilo acq=mtl_discovery v adrese.
+  const _isAcq = (String(acq) === 'mtl_discovery' && ivl === 'month' && _acqMonthsM > 0);
 
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
@@ -700,7 +692,7 @@ async function membershipCheckout(req, res) {
         metadata: {
           ..._subMeta,
           // mtl_acq   = this membership is inside the MTL acquisition window
-          // mtl_acq_pct  = the acquisition rate for THIS provider (10, or 5 for an EP)
+          // mtl_acq_pct  = the acquisition rate for THIS provider (10, or by EP tier)
           // mtl_acq_base = the rate to fall back to once the window is over
           // Storing the rate itself means the webhook and the cron never have to re-derive
           // it (and never have to know whether the provider is an EP).
@@ -734,22 +726,47 @@ async function membershipCheckout(req, res) {
 // 2026-09-30 -> 30. 9. 2026 (do názvu položky ve Stripe).
 function _dmy(ymd) { const [y, m, d] = String(ymd || '').slice(0, 10).split('-').map(Number); return (y && m && d) ? `${d}. ${m}. ${y}` : String(ymd || ''); }
 
-// ───────────────────────── Exclusive MTL Partner (localized price by region, platform account) ─────────────────────────
-// Localized EP price by the provider's region. Mirrors _epRegion() in index.html.
-// SK is a cheaper EUR tier than the EU default; both are EUR, so we MUST key on COUNTRY, not currency.
-// CENA PARTNERSTVI. Musi souhlasit s _epPrice() v index.html.
-//   zakladajici cena  500 CZK -- pro prvnich EP_SPOTS partneru, plati jim, dokud nezrusi
-//   ceníková cena    1000 CZK
-// Zahranicni pasma (eurozona 20/40 EUR, USA 25/50 USD) jsou pripravena, ale zatim se
-// neuctuji: dokud nemame poskytovatele mimo CR, uctuje se vsem v korunach a appka pod cenou
-// ukaze prepocet kurzem ECB. Az se zapnou, musi se zaroven doresit ulozeni zamcene ceny
-// (profiles.partner_price/partner_currency) a u USA i stat, ktery dnes nikde nemame.
-// Bez DPH, rozhodnuto 11. 10. 2026: prvních 20 (napříč světem, počítají se i ručně udělená EP)
-// 499 Kč, pak 699 Kč. Roční předplatné = EP_YEAR_MONTHS měsíců. Musí souhlasit s index.html.
-const EP_SPOTS = 20;
-const EP_FOUNDING_CZK = 499;
-const EP_LIST_CZK = 699;
-const EP_YEAR_MONTHS = 10;
+// ───────────────────────── Exclusive MTL Partner (předplatné na účtu MTL) ─────────────────────────
+// CENA JE JEN TADY, z ceníku EP_TIERS v _rate.js. Z appky přijde jen stupeň, měsíc/rok a na koho
+// je faktura. Ceny bez DPH, v korunách -- zahraniční ceny podle měny se nastaví, až budou
+// poskytovatelé mimo ČR. Roční = EP_YEAR_MONTHS měsíců.
+// ZAKLÁDAJÍCÍ CENA je u stupně (Chūnin 10 míst, Kage 5). Místo drží každý, kdo má stupeň
+// v profiles.ep_founding -- i když mezitím přešel na jiný stupeň; uvolní ho až úplné zrušení EP.
+// Kdo už ji u stupně má, dostane ji znovu i po vyčerpání míst.
+async function _epFoundingTaken(tier) {
+  try {
+    const r = await fetch(`${_SUPA_URL}/rest/v1/profiles?select=id&limit=1&ep_founding=cs.%7B${encodeURIComponent(tier)}%7D`, {
+      headers: { apikey: _SUPA_KEY, Authorization: `Bearer ${_SUPA_KEY}`, Prefer: 'count=exact' },
+    });
+    if (!r.ok) return Infinity;            // nevíme -> zakládající cenu neslibujeme
+    return Number(String(r.headers.get('content-range') || '').split('/')[1]) || 0;
+  } catch (e) { return Infinity; }
+}
+async function epPriceFor(tier, prof) {
+  const T = EP_TIERS[tier];
+  const has = Array.isArray(prof && prof.ep_founding) && prof.ep_founding.indexOf(tier) >= 0;
+  const founding = !!T.foundingCzk && (has || (await _epFoundingTaken(tier)) < T.foundingSpots);
+  return { currency: 'czk', amount: founding ? T.foundingCzk : T.czk, founding };
+}
+// Přihlášený uživatel z tokenu (Authorization: Bearer). EP se kupuje a mění jen za sebe.
+async function _authUser(req) {
+  const tok = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  if (!tok || !_SUPA_URL || !_SUPA_KEY) return null;
+  try {
+    const r = await fetch(`${_SUPA_URL}/auth/v1/user`, { headers: { apikey: _SUPA_KEY, Authorization: `Bearer ${tok}` } });
+    if (!r.ok) return null;
+    const u = await r.json();
+    return (u && u.id) ? u : null;
+  } catch (e) { return null; }
+}
+// Běží předplatné EP? (aktivní, zkušební, nebo čeká na zaplacení obnovy)
+async function _epLiveSub(subId) {
+  if (!subId) return null;
+  try {
+    const sub = await stripe.subscriptions.retrieve(String(subId));
+    return (['active', 'trialing', 'past_due'].indexOf(sub.status) >= 0) ? sub : null;
+  } catch (e) { return null; }
+}
 
 // DIČ ZAHRANIČNÍHO ODBĚRATELE MUSÍ BÝT PLATNÉ VE VIES, ne jen vyplněné. Přenesení daně smíme
 // použít, jen když máme platnost ověřenou (čl. 18 odst. 1 písm. a) nařízení 282/2011) -- a
@@ -768,20 +785,6 @@ async function _foreignVatGate(table, id, rec, home, mtlDic) {
   if (!v.valid) return 'vat_invalid';
   await _wsbPatch(`${table}?id=eq.${encodeURIComponent(id)}`, { vat_verified_id: vat, vat_verified_at: new Date().toISOString(), vat_vies_ref: v.ref || null });
   return null;
-}
-
-async function epTierForCountry(cc) {
-  // Kolik zakladajicich mist jeste zbyva. Pocitaji se vsichni aktivni partneri, i rucne udeleni.
-  let taken = 0;
-  try {
-    const r = await fetch(`${process.env.SUPABASE_URL}/rest/v1/profiles?select=id&partner=is.true`, {
-      headers: { apikey: process.env.SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`, Prefer: 'count=exact' },
-    });
-    const cr = r.headers.get('content-range') || '';
-    taken = Number(String(cr).split('/')[1] || 0) || 0;
-  } catch (e) { taken = 0; }
-  const amount = (taken < EP_SPOTS) ? EP_FOUNDING_CZK : EP_LIST_CZK;
-  return { currency: 'czk', amount };
 }
 
 // ───────────────────────── VLOŽENÝ CHECKOUT (všechny platby kartou z appky) ─────────────────────────
@@ -812,11 +815,19 @@ function _goBack(req, res, url) {
 }
 
 async function partnerCheckout(req, res) {
-  const { userId, email } = req.query;
-  if (!userId) return res.status(400).json({ error: 'Chybí userId' });
+  // Kupuje se jen za sebe: uživatel z přihlášení, ne z adresy.
+  const user = await _authUser(req);
+  if (!user) return res.status(401).json({ error: 'Přihlášení vypršelo. Přihlas se znovu a zkus to ještě jednou.' });
+  const userId = user.id;
+  // Stupeň z appky; starší appka ho neposílá -> Chūnin (dosavadní EP).
+  const tier = epTierKey(String(req.query.tier || '')) || EP_DEFAULT_TIER;
 
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
+
+  const prof = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(userId)}&select=partner_sub,ep_founding,stripe_account,gym_payout_account,country`))[0] || {};
+  // UŽ BĚŽÍCÍ EP: stupeň se mění přechodem (type=partner_change), druhé předplatné by platil dvakrát.
+  if (await _epLiveSub(prof.partner_sub)) return _goBack(req, res, `${proto}://${host}/?partner_sub=already`);
 
   // NA KOHO SE FAKTURUJE. EP si kupuje člověk, ale platit ho může jeho klub (spolek / s.r.o.)
   // nebo on sám jako kouč (IČO). Volba z appky: bill=coach | bill=gym:<id>. Klub musí patřit
@@ -830,20 +841,18 @@ async function partnerCheckout(req, res) {
       billGym = g.id;
     } }
 
-  // Region = country of the provider's connected Stripe account (authoritative for what we charge).
-  // Fall back to cached stripe_country / profile country if no account is retrievable yet.
+  // Země připojeného účtu Stripe (pro DIČ bránu níž a metadata), náhradou země z profilu.
   let cc = '';
   try {
-    const prof = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(userId)}&select=stripe_account,gym_payout_account,country`))[0] || {};
     let acct = prof.stripe_account || prof.gym_payout_account || '';
-    if(!acct){ const g=(await _wsbGet(`gyms?owner_id=eq.${encodeURIComponent(userId)}&select=stripe_account&limit=1`))[0]; if(g) acct=g.stripe_account||g.gym_payout_account||''; }
+    if(!acct){ const g=(await _wsbGet(`gyms?owner_id=eq.${encodeURIComponent(userId)}&select=stripe_account&limit=1`))[0]; if(g) acct=g.stripe_account||''; }
     if(acct){
       try{ const a=await stripe.accounts.retrieve(String(acct)); cc=String(a.country||'').toUpperCase(); }catch(e){}
-      if(cc){ _wsbPatch(`profiles?id=eq.${encodeURIComponent(userId)}`, { stripe_country: cc }); } // cache for client display; no-op until ep-pricing.sql adds the column
+      if(cc){ _wsbPatch(`profiles?id=eq.${encodeURIComponent(userId)}`, { stripe_country: cc }); }
     }
     if(!cc) cc = String(prof.country || '').toUpperCase();
   } catch(e){}
-  const tier = await epTierForCountry(cc);   // ceka na zjisteni, kolik zakladajicich mist zbyva
+  const price = await epPriceFor(tier, prof);
 
   // ZAHRANIČNÍ ODBĚRATEL Z EU. S platným DIČ (VIES) = přenesení daňové povinnosti. Bez DIČ jen
   // dokud MTL nepřekročí limit 10 000 EUR pro přeshraniční elektronické služby (_oss.js), pak
@@ -873,7 +882,10 @@ async function partnerCheckout(req, res) {
   // Roční EP (volba z appky; cena = EP_YEAR_MONTHS × měsíční, počítá server).
   const _epYear = String(req.query.interval || '') === 'year';
   const _epInterval = _epDaily ? 'day' : (_epYear ? 'year' : 'month');
-  const _epAmount = _epYear ? tier.amount * EP_YEAR_MONTHS : tier.amount;
+  const _epAmount = _epYear ? price.amount * EP_YEAR_MONTHS : price.amount;
+  const md = { mtl_payment_type: 'partner_sub', user_id: userId, ep_tier: tier, ep_founding: price.founding ? '1' : '',
+    ep_country: cc || '', ep_currency: price.currency, ep_amount: String(_epAmount), ep_month: String(price.amount),
+    ep_interval: _epYear ? 'year' : 'month', ep_bill_gym: billGym || '' };
 
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
@@ -883,15 +895,143 @@ async function partnerCheckout(req, res) {
     // required:'if_supported' chtělo DIČ povinně -- český neplátce DPH tak nemohl zaplatit.
     billing_address_collection: 'auto',
     client_reference_id: userId,
+    ...(user.email ? { customer_email: user.email } : {}),
     line_items: [
-      { price_data: { currency: tier.currency, product_data: { name: 'Exclusive MTL Partner — coach & gym rates' + (_epYear ? ' (yearly)' : '') }, unit_amount: Math.round(_epAmount*100), recurring: { interval: _epInterval } }, quantity: 1 },
+      { price_data: { currency: price.currency, product_data: { name: 'Exclusive MTL Partner' }, unit_amount: Math.round(_epAmount*100), recurring: { interval: _epInterval } }, quantity: 1 },
     ],
-    subscription_data: { metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'', ep_currency: tier.currency, ep_amount: String(_epAmount), ep_month: String(tier.amount), ep_interval: _epYear ? 'year' : 'month', ep_bill_gym: billGym || '' } },
-    metadata: { mtl_payment_type: 'partner_sub', user_id: userId, ep_country: cc||'', ep_month: String(tier.amount), ep_interval: _epYear ? 'year' : 'month', ep_bill_gym: billGym || '' },
+    subscription_data: { metadata: md },
+    metadata: md,
     ..._checkoutEnd(req, `${proto}://${host}/?partner_sub=ok&session={CHECKOUT_SESSION_ID}`, `${proto}://${host}/`),
   }, { apiVersion: '2024-09-30.acacia' });
 
   return _sendCheckout(req, res, session);
+}
+
+// ───────────────────────── PŘECHOD MEZI STUPNI EP ─────────────────────────
+// POST /api/pay?type=partner_change&tier=<stupeň>  |  &cancel_downgrade=1
+// NAHORU platí hned: Stripe dopočítá rozdíl za zbytek zaplaceného období a strhne ho z karty
+// u předplatného (faktura za přechod -> doklad ep-doklad). Když banka chce platbu potvrdit,
+// vrátí se clientSecret a appka ji potvrdí přes Stripe.js; stupeň pak zapíše webhook.
+// DOLŮ platí od konce zaplaceného období (u ročního od konce roku): cena předplatného se
+// přepne hned bez doplatku a vratky, takže příští obnova už je za nižší stupeň; stupeň a sazby
+// se změní až se zaplacením té obnovy (webhook). Do té doby jde přechod zrušit.
+// Ručně udělené EP (bez předplatného) se tudy nemění -- to řeší founder v Adminu.
+async function partnerChange(req, res) {
+  const _preview = String(req.query.preview || '') === '1';   // jen spočítat doplatky, nic neměnit (GET)
+  if (req.method !== 'POST' && !_preview) return res.status(405).json({ error: 'POST' });
+  const user = await _authUser(req);
+  if (!user) return res.status(401).json({ error: 'Přihlášení vypršelo. Přihlas se znovu a zkus to ještě jednou.' });
+  const uid = user.id;
+  const prof = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(uid)}&select=partner,partner_tier,partner_tier_next,partner_tier_from,partner_sub,partner_price,ep_founding`))[0] || {};
+  const cur = epTierOf(prof);
+  const sub = cur ? await _epLiveSub(prof.partner_sub) : null;
+  if (!sub) return res.status(409).json({ error: 'Stupeň jde měnit jen u placeného předplatného Exclusive Partner.' });
+  if (sub.cancel_at_period_end) return res.status(409).json({ error: 'Předplatné je zrušené ke konci období. Nejdřív ho obnov, pak stupeň změníš.' });
+  if (sub.status === 'past_due') return res.status(409).json({ error: 'Poslední platba předplatného neprošla. Až se zaplatí, stupeň změníš.' });
+  const item = sub.items && sub.items.data && sub.items.data[0];
+  if (!item || !item.price || !item.price.recurring) return res.status(409).json({ error: 'Předplatné nemá položku k úpravě.' });
+  const product = typeof item.price.product === 'string' ? item.price.product : item.price.product.id;
+  const rec = { interval: item.price.recurring.interval, interval_count: item.price.recurring.interval_count || 1 };
+  const baseMd = Object.assign({}, sub.metadata || {});
+  // Roční podle předplatného samotného; testovací režim strhává denně, tam rozhoduje volba z nákupu.
+  const yearly = rec.interval === 'year' || (rec.interval === 'day' && baseMd.ep_interval === 'year');
+  const amountOf = (monthCzk) => Math.round((yearly ? monthCzk * EP_YEAR_MONTHS : monthCzk) * 100);
+  const priceData = (unit) => ({ currency: item.price.currency, product, unit_amount: unit, recurring: rec });
+  const pendingDown = !!epTierKey(prof.partner_tier_next);
+  // Částka, kterou předplatné stálo před naplánovaným přechodem dolů -- vrací se přesně ta.
+  // Bez čekajícího přechodu je to prostě dnešní cena položky.
+  const prevUnit = !pendingDown ? item.price.unit_amount : Number(baseMd.ep_prev_amount) > 0 ? Number(baseMd.ep_prev_amount) : amountOf(Number(prof.partner_price) > 0 ? Number(prof.partner_price) : (await epPriceFor(cur, prof)).amount);
+  const pfx = `profiles?id=eq.${encodeURIComponent(uid)}&partner_sub=eq.${encodeURIComponent(sub.id)}`;
+  const clearDown = { ep_tier_next: '', ep_month_next: '', ep_founding_next: '', ep_prev_amount: '' };
+
+  // NÁHLED DOPLATKŮ pro tlačítka „Přejít hned": Stripe účtuje rozdíl cen za zbývající čas
+  // zaplaceného období (po sekundách) -- totéž se tu spočítá bez volání Stripe. U stupňů nahoru.
+  if (_preview) {
+    const now = Math.floor(Date.now() / 1000), ps = sub.current_period_start, pe = sub.current_period_end;
+    const frac = (pe > ps) ? Math.max(0, Math.min(1, (pe - now) / (pe - ps))) : 0;
+    const out = [];
+    for (const t of EP_TIER_ORDER.slice(EP_TIER_ORDER.indexOf(cur) + 1)) {
+      const pr = await epPriceFor(t, prof);
+      out.push({ tier: t, month: pr.amount, founding: pr.founding, due: Math.max(0, Math.round((amountOf(pr.amount) - prevUnit) * frac)) / 100 });
+    }
+    return res.status(200).json({ ok: true, tier: cur, currency: String(item.price.currency || 'czk').toUpperCase(), upgrades: out });
+  }
+
+  // ZRUŠENÍ NAPLÁNOVANÉHO PŘECHODU DOLŮ: cena předplatného zpět, bez doplatku.
+  if (String(req.query.cancel_downgrade || '') === '1') {
+    if (pendingDown) {
+      await stripe.subscriptions.update(sub.id, { items: [{ id: item.id, price_data: priceData(prevUnit) }], proration_behavior: 'none', metadata: clearDown });
+      await _wsbPatchOk(pfx, { partner_tier_next: null, partner_tier_from: null });
+    }
+    return res.status(200).json({ ok: true, tier: cur, next: null });
+  }
+
+  const want = epTierKey(String(req.query.tier || ''));
+  if (!want) return res.status(400).json({ error: 'Neznámý stupeň.' });
+  if (want === cur) return res.status(400).json({ error: 'Tenhle stupeň už máš.' });
+  const price = await epPriceFor(want, prof);
+  const up = EP_TIER_ORDER.indexOf(want) > EP_TIER_ORDER.indexOf(cur);
+
+  if (!up) {
+    // DOLŮ od konce období. Nejdřív databáze (kdyby zápis selhal, cena se nemění), pak Stripe.
+    // Zakládající místo nižšího stupně se zapíše až s přechodem (webhook), ne teď -- jinak by šlo
+    // místo zabrat naplánováním a zrušením přechodu.
+    const atIso = new Date(sub.current_period_end * 1000).toISOString();
+    if (!(await _wsbPatchOk(pfx, { partner_tier_next: want, partner_tier_from: atIso }))) return res.status(500).json({ error: 'Přechod se nepodařilo uložit, zkus to znovu.' });
+    try {
+      await stripe.subscriptions.update(sub.id, { items: [{ id: item.id, price_data: priceData(amountOf(price.amount)) }], proration_behavior: 'none',
+        metadata: { ep_tier: cur, ep_tier_next: want, ep_month_next: String(price.amount), ep_founding_next: price.founding ? '1' : '',
+          ep_prev_amount: String(pendingDown ? prevUnit : item.price.unit_amount) } });
+    } catch (e) {
+      await _wsbPatchOk(pfx, { partner_tier_next: pendingDown ? prof.partner_tier_next : null, partner_tier_from: pendingDown ? prof.partner_tier_from : null });
+      console.error('[ep] downgrade', e.message);
+      return res.status(502).json({ error: 'Přechod se nepodařil: ' + e.message });
+    }
+    await notifyEpDowngradeScheduled(uid, cur, want, atIso);
+    return res.status(200).json({ ok: true, tier: cur, next: want, from: atIso, month: price.amount });
+  }
+
+  // NAHORU. Čekal-li přechod dolů, cena předplatného už je snížená -- nejdřív zpět, jinak by
+  // Stripe za zbytek období odečetl nižší částku, než člověk zaplatil.
+  if (pendingDown) {
+    await stripe.subscriptions.update(sub.id, { items: [{ id: item.id, price_data: priceData(prevUnit) }], proration_behavior: 'none', metadata: clearDown });
+    await _wsbPatchOk(pfx, { partner_tier_next: null, partner_tier_from: null });
+  }
+  // Co se zapíše po zaplacení rozdílu (webhook to čte z metadat předplatného).
+  const clearPending = { ep_tier_pending: '', ep_month_pending: '', ep_founding_pending: '' };
+  await stripe.subscriptions.update(sub.id, { metadata: { ep_tier_pending: want, ep_month_pending: String(price.amount), ep_founding_pending: price.founding ? '1' : '' } });
+  let upd;
+  try {
+    // Čekající změna (pending_if_incomplete) bere jen hotovou cenu, ne price_data.
+    const np = await stripe.prices.create(priceData(amountOf(price.amount)));
+    upd = await stripe.subscriptions.update(sub.id, {
+      items: [{ id: item.id, price: np.id }],   // id položky se změnou ceny nemění
+      proration_behavior: 'always_invoice',
+      payment_behavior: 'pending_if_incomplete',
+      expand: ['latest_invoice.payment_intent'],
+    });
+  } catch (e) {
+    console.error('[ep] upgrade', e.message);
+    try { await stripe.subscriptions.update(sub.id, { metadata: clearPending }); } catch (e2) {}
+    return res.status(402).json({ error: 'Přechod se nepodařil: ' + e.message });
+  }
+  const inv = upd.latest_invoice && typeof upd.latest_invoice === 'object' ? upd.latest_invoice : null;
+  const pi = inv && inv.payment_intent && typeof inv.payment_intent === 'object' ? inv.payment_intent : null;
+  if (upd.pending_update) {
+    // Rozdíl se nestrhl. Banka chce potvrzení -> appka ho otevře (stupeň pak zapíše webhook).
+    if (pi && pi.status === 'requires_action' && process.env.STRIPE_PUBLISHABLE_KEY) {
+      return res.status(200).json({ ok: false, requires_action: true, clientSecret: pi.client_secret, publishableKey: process.env.STRIPE_PUBLISHABLE_KEY, tier: want });
+    }
+    // Karta neprošla: fakturu za přechod zrušit, ať ji Stripe nestrhne později bez vědomí člověka.
+    try { if (inv && inv.id) await stripe.invoices.voidInvoice(inv.id); } catch (e) { console.error('[ep] void', e.message); }
+    try { await stripe.subscriptions.update(sub.id, { metadata: clearPending }); } catch (e) {}
+    const why = (pi && pi.last_payment_error && pi.last_payment_error.message) || '';
+    return res.status(402).json({ error: 'Platba rozdílu kartou neprošla' + (why ? (' (' + why + ')') : '') + '. Stupeň zůstává ' + EP_TIER_NAMES[cur] + '.' });
+  }
+  // Zaplaceno hned -> stupeň se zapíše teď (webhook to pak už nezmění).
+  await applyEpUpgrade(uid, want, { founding: price.founding, month: price.amount, subId: sub.id });
+  try { await stripe.subscriptions.update(sub.id, { metadata: Object.assign({ ep_tier: want, ep_month: String(price.amount), ep_founding: price.founding ? '1' : (baseMd.ep_founding || '') }, clearPending) }); } catch (e) { console.error('[ep] upgrade md', e.message); }
+  return res.status(200).json({ ok: true, tier: want, next: null, month: price.amount });
 }
 
 // ───────────────────────── DODAVATEL (organizations.kind='supplier') ─────────────────────────
