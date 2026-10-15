@@ -17,8 +17,8 @@
 //                                               VS na účet příjemce -- test bez skutečných peněz
 //   check { vs }                                autor platby (nebo founder): stav párování hned
 //
-// TESTOVACÍ REŽIM: platba z účtu má v sandboxu strop 1 Kč, takže se párování posílá BEZ ČÁSTKY
-// (Finbricks ji má nepovinnou) a páruje se jen podle VS. V ostrém provozu vždy s částkou.
+// TESTOVACÍ REŽIM: sandbox má strop 1 Kč, takže se párování posílá na 1 Kč (QR v Testovacím
+// režimu je taky na 1 Kč). V ostrém provozu vždy se skutečnou částkou.
 // POST ?notify=1    notifikace od Finbricks (adresa se nastavuje v jejich administraci). Tělu
 //                   nevěříme -- bere se z něj jen id párování a stav si server zjistí sám
 //                   podepsaným dotazem na Finbricks.
@@ -240,7 +240,8 @@ export default async function handler(req, res) {
       const finish = new Date(Date.now() + FINISH_DAYS * 86400e3).toISOString();
       const r = await fbxCall(C, 'POST', '/payment/pairing/schedule', { merchantId: C.merchant, payments: [{
         uniquePaymentPairingId: String(p.id),
-        ...(C.sandbox ? {} : { amount: { value: Number(p.amount), currency: 'CZK' } }),   // sandbox: jen podle VS
+        // Sandbox: 1 Kč (strop sandboxu, stejně jako QR v Testovacím režimu a platba z Mock Cobs).
+        amount: { value: C.sandbox ? Number(FBX_MAX_SANDBOX) : Number(p.amount), currency: 'CZK' },
         creditor: { accountIdentification: { value: iban(p.iban), type: 'IBAN' } },
         remittanceInformation: { structured: { reference: 'VS:' + String(p.id) } },
         finishPairingAt: finish,
