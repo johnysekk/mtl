@@ -13,7 +13,7 @@
 // v celem souboru nebyl jediny import. Kazdy pokus o dopsani zapomenute QR platby proto skoncil
 // ReferenceError, tedy prave ta zachranna sit, ktera ma chytat vypadky record-cash.js, nefungovala
 // nikdy. Stejna rodina chyby jako _wsbGet v record-cash.js.
-import { ladderRate as _mtlLadder, acquisitionRate as _mtlAcq } from './_rate.js';
+import { ladderRate as _mtlLadder, acquisitionRate as _mtlAcq, epTierOf as _epTierOf, hasOrgRate as _hasOrgRate } from './_rate.js';
 import { pragueMonth } from './_tz.js';
 
 const SB = process.env.SUPABASE_URL;
@@ -39,7 +39,8 @@ function _railOf(mode) { return (String(mode || '') === 'qr_bank') ? 'qr_bank' :
 function ladderRate(profile, mode) {
   const _rail = _railOf(mode);
   if (!profile) return (_rail === 'qr_bank') ? 0.025 : 0.02;
-  return _mtlLadder(_rail, { partner: profile.partner, founding: profile.founding, score: profile.coach_ref_score, bankai: profile.bankai_eligible });
+  // org CHYBĚL: člen asociace tu dostal základ místo 1,5 % (record-cash ho počítá správně).
+  return _mtlLadder(_rail, { partner: _epTierOf(profile), founding: profile.founding, score: profile.coach_ref_score, bankai: profile.bankai_eligible, org: _hasOrgRate(profile) });
 }
 
 // ODSTRANENO: welcomeKillSwitch(), welcomeCapReached() a isWelcomeZeroReadOnly(). Uvitaci okno
@@ -53,7 +54,7 @@ function ladderRate(profile, mode) {
 // file was written to prevent. It now delegates to _rate.js like record-cash.js does, so there is one
 // rule and one place to change it.
 async function acquisitionRate(acq, type, payee, memberId, scopeCol, scopeId) {
-  const r = await _mtlAcq(sb, { acqSource: acq, type, ownerPartner: payee && payee.partner, memberId, scopeCol, scopeId });
+  const r = await _mtlAcq(sb, { acqSource: acq, type, ownerPartner: _epTierOf(payee), memberId, scopeCol, scopeId });
   // _rate.js returns { rate, months } for memberships so a multi-month payment can be blended.
   // A backfilled bank sale is one period, so the rate alone is what matters here.
   if (r && typeof r === 'object') return (typeof r.rate === 'number') ? r.rate : null;
@@ -100,7 +101,7 @@ export default async function handler(req, res) {
         const type = 'drop_in';
         let row;
         if (b.paid_to === 'coach' && b.coach_id) {
-          const cs = await sb(`profiles?id=eq.${b.coach_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,created_at,gym_payout_account,stripe_account,referral_optin,payment_mode`);
+          const cs = await sb(`profiles?id=eq.${b.coach_id}&select=id,partner,partner_tier,founding,coach_ref_score,bankai_eligible,org_rate_until,created_at,gym_payout_account,stripe_account,referral_optin,payment_mode`);
           const coach = cs && cs[0]; if (!coach) { out.skipped++; continue; }
           const rate = ladderRate(coach, coach.payment_mode || (coach.stripe_account ? 'stripe' : 'qr_bank'));
           const _cc = (b.credit_used === 'student' && b.student_id && coach.referral_optin !== false) ? await findStudentCredit(b.student_id) : null;
@@ -115,7 +116,7 @@ export default async function handler(req, res) {
         } else {
           const gyms = await sb(`gyms?id=eq.${b.gym_id}&select=id,owner_id,currency,stripe_account,account_suspended,created_at,payment_mode`);
           const gym = gyms && gyms[0]; if (!gym) { out.skipped++; continue; }
-          const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,created_at,referral_optin,payment_mode`);
+          const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,partner_tier,founding,coach_ref_score,bankai_eligible,org_rate_until,created_at,referral_optin,payment_mode`);
           const ownerProf = (owners && owners[0]) || { id: gym.owner_id };
           // Kolej KLUBU -- režim je u každého subjektu zvlášť, majitelův (kouč) se nepřebírá.
           const rate = ladderRate(ownerProf, gym.payment_mode || (gym.stripe_account ? 'stripe' : 'qr_bank'));

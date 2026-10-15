@@ -182,7 +182,7 @@ export default async function handler(req, res) {
         customer_email: mem.email || undefined,
         metadata: { mtl_payment_type: 'cohort_first_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_currency: cur, mtl_welcome: wz ? '1' : '0', mtl_rate: String(rate), mtl_months: String(_nM) },
         line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: `${coh.name || 'Course'} - ${_nM > 1 ? ('1.-' + _nM + '. mesic') : '1. mesic (doplatek)'}` }, unit_amount: unit }, quantity: 1 }],
-        payment_intent_data: { application_fee_amount: fee, metadata: { mtl_payment_type: 'cohort_first_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_rate: String(rate), mtl_welcome: wz ? '1' : '0', mtl_months: String(_nM) } }
+        payment_intent_data: { ...(fee > 0 ? { application_fee_amount: fee } : {}), metadata: { mtl_payment_type: 'cohort_first_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_rate: String(rate), mtl_welcome: wz ? '1' : '0', mtl_months: String(_nM) } }
       }, { stripeAccount: coh.stripe_account });
       return res.status(200).json({ ok: true, ...(await _out(req, session, coh.stripe_account)), remainder, months: _nM, amount: _due });
     }
@@ -229,7 +229,7 @@ export default async function handler(req, res) {
         customer_email: mem.email || undefined,
         metadata: { mtl_payment_type: 'cohort_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_currency: cur, mtl_welcome: wz ? '1' : '0', mtl_rate: String(rate), mtl_month: String(lastMonth), mtl_months: String(_nM) },
         line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: `${coh.name || 'Course'} - ${_nM > 1 ? (nextMonth + '.-' + lastMonth + '. mesic') : (nextMonth + '. mesic')} z ${totalMonths}` }, unit_amount: unit }, quantity: 1 }],
-        payment_intent_data: { application_fee_amount: fee, metadata: { mtl_payment_type: 'cohort_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_rate: String(rate), mtl_welcome: wz ? '1' : '0', mtl_month: String(lastMonth), mtl_months: String(_nM) } }
+        payment_intent_data: { ...(fee > 0 ? { application_fee_amount: fee } : {}), metadata: { mtl_payment_type: 'cohort_month', cohort_id: String(mem.cohort_id), cohort_member_id: String(cmId), mtl_rate: String(rate), mtl_welcome: wz ? '1' : '0', mtl_month: String(lastMonth), mtl_months: String(_nM) } }
       }, { stripeAccount: coh.stripe_account });
       return res.status(200).json({ ok: true, ...(await _out(req, session, coh.stripe_account)), amount: _due, month: nextMonth, lastMonth, months: _nM, totalMonths });
     }
@@ -488,7 +488,7 @@ export default async function handler(req, res) {
       metadata: { mtl_payment_type: 'cohort_deposit', cohort_id: String(cohortId), cohort_member_id: String(memberId || ''), mtl_currency: cur, tier, mtl_welcome: wz ? '1' : '0', mtl_rate: String(rate) },
       line_items: [{ price_data: { currency: cur.toLowerCase(), product_data: { name: `${c.name || 'Course'} — ${b.gym_name || ''} (deposit)`.trim() }, unit_amount: unitAmount }, quantity: 1 }],
       payment_intent_data: {
-        application_fee_amount: applicationFee,
+        ...(applicationFee > 0 ? { application_fee_amount: applicationFee } : {}),   // EP Kage: 0 %
         metadata: { mtl_payment_type: 'cohort_deposit', cohort_id: String(cohortId), cohort_member_id: String(memberId || ''), mtl_rate: String(rate), mtl_welcome: wz ? '1' : '0' }
       }
     }, { stripeAccount: c.stripe_account });

@@ -22,7 +22,7 @@
 // They were four different rules once. That was the bug.
 // =============================================================================
 import Stripe from 'stripe';
-import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, onlineRate as _mtlOnline, withStoreFee } from './_rate.js';
+import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, onlineRate as _mtlOnline, withStoreFee, epTierOf as _epTierOf } from './_rate.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
@@ -86,7 +86,7 @@ function ladderOf(p) {
   // profiles.org_rate NEEXISTUJE (viz hasOrgRate v _rate.js -- rozhoduje datum org_rate_until)
   // a v selectu níž se ani nenačítal. Členovi asociace tedy vyšel základ 2 % místo 1,5 %
   // a tenhle cron mu tu vyšší sazbu ještě sám nastavil na předplatné.
-  return _mtlLadder('stripe', { partner: p.partner, org: _hasOrgRate(p), score: p.coach_ref_score, bankai: p.bankai_eligible }) * 100;
+  return _mtlLadder('stripe', { partner: _epTierOf(p), org: _hasOrgRate(p), score: p.coach_ref_score, bankai: p.bankai_eligible }) * 100;
 }
 
 export default async function handler(req, res) {
@@ -126,7 +126,7 @@ export default async function handler(req, res) {
         if (!ownerId) { out.skipped++; continue; }
 
         if (profCache[ownerId] === undefined) {
-          profCache[ownerId] = (await sbGet(`profiles?id=eq.${ownerId}&select=partner,org_rate_until,coach_ref_score,bankai_eligible,stripe_account,gym_payout_account`))[0] || null;
+          profCache[ownerId] = (await sbGet(`profiles?id=eq.${ownerId}&select=partner,partner_tier,org_rate_until,coach_ref_score,bankai_eligible,stripe_account,gym_payout_account`))[0] || null;
         }
         const p = profCache[ownerId];
         if (!p) { out.skipped++; continue; }
@@ -135,7 +135,7 @@ export default async function handler(req, res) {
 
         const sub = await stripe.subscriptions.retrieve(m.stripe_subscription, { stripeAccount: acct });
         // Online předplatné kouče má vlastní sazbu (1 / 0,75 / 0,5 %), ne žebříček klubu.
-        const _want = (sub && sub.metadata && sub.metadata.mtl_online === '1') ? _mtlOnline({ partner: p.partner, score: p.coach_ref_score, bankai: p.bankai_eligible }) * 100 : ladderOf(p);
+        const _want = (sub && sub.metadata && sub.metadata.mtl_online === '1') ? _mtlOnline({ partner: _epTierOf(p), score: p.coach_ref_score, bankai: p.bankai_eligible }) * 100 : ladderOf(p);
         if (await applySubRate(stripe, acct, m.stripe_subscription, sub, _want)) out.fixed++;
       } catch (e) {
         out.errors.push(`${m.stripe_subscription}: ${e.message}`);

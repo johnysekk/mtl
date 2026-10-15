@@ -12,7 +12,8 @@ import { issueReceipts, receiptMailHtml, receiptTitle, docNo } from './_receipt.
 import Stripe from 'stripe';
 import { subMail } from './_sub-mail.js';
 import { rerateOwner } from './gym-rerate.js';
-import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil, onlineRate as _mtlOnline, withStoreFee, STORE_COST } from './_rate.js';
+import { activatePartner, applyEpUpgrade, applyEpDowngrade } from './_ep.js';
+import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil, onlineRate as _mtlOnline, withStoreFee, STORE_COST, epTierOf as _epTierOf } from './_rate.js';
 import { sendOrderMailForPi, withdrawalText as _wdText } from './_order-mail.js';
 import { dokladPdfFor } from './_doklad-pdf.js';
 import crypto from 'crypto';
@@ -46,7 +47,7 @@ async function _platformSubOwner(inv) {
   let md = (inv.subscription_details && inv.subscription_details.metadata)
         || (inv.parent && inv.parent.subscription_details && inv.parent.subscription_details.metadata) || {};
   if (!md.mtl_payment_type) { try { md = (await stripe.subscriptions.retrieve(subId)).metadata || {}; } catch (e) { md = {}; } }
-  if (md.mtl_payment_type === 'partner_sub' && md.user_id) return { uid: md.user_id, org: null, billGym: md.ep_bill_gym || null };
+  if (md.mtl_payment_type === 'partner_sub' && md.user_id) return { uid: md.user_id, org: null, billGym: md.ep_bill_gym || null, md, subId };
   if (md.mtl_payment_type === 'supplier_sub' && md.org_id) {
     let uid = md.user_id || null;
     if (!uid) { const o = await sbGet(`organizations?id=eq.${encodeURIComponent(md.org_id)}&select=owner_id&limit=1`); uid = o && o[0] && o[0].owner_id; }
@@ -54,7 +55,7 @@ async function _platformSubOwner(inv) {
   }
   if (md.mtl_payment_type) return null;                     // jiné předplatné na účtu MTL
   const w = await sbGet(`profiles?partner_sub=eq.${encodeURIComponent(subId)}&select=id&limit=1`);
-  if (w && w[0]) return { uid: w[0].id, org: null };
+  if (w && w[0]) return { uid: w[0].id, org: null, md, subId };
   const so = await sbGet(`organizations?supplier_sub=eq.${encodeURIComponent(subId)}&select=id,owner_id&limit=1`);
   return (so && so[0]) ? { uid: so[0].owner_id, org: so[0].id } : null;
 }
@@ -142,9 +143,9 @@ export function cohortDepositHtml(name, courseName, gymName, depositTxt, remaind
     ${startTxt ? `<p style="font-size:14px;line-height:1.6;">Začátek: <b>${_esc(_czDate(startTxt))}</b></p>` : ''}
     ${remainderTxt ? `<p style="font-size:14px;line-height:1.6;color:#555;">Zbytek 1. měsíce (<b>${_esc(remainderTxt)}</b>) doplatíš na místě přímo v klubu (kartou, QR nebo hotově — dle klubu).</p>` : ''}
     <p style="font-size:13px;line-height:1.6;color:#555;margin-top:18px;">Těšíme se na tebe na tréninku! S dotazy ke kurzu se obrať přímo na svůj klub.</p>
-    <div style="background:#fff;border-radius:10px;padding:12px 14px;font-size:12.5px;line-height:1.55;color:#444;margin-top:14px;"><b>Potvrzení objednávky</b><br>${nonprofit
-      ? ('Poskytovatelem je spolek ' + (gymName ? ('<b>' + _esc(gymName) + '</b>') : '') + '; jeho údaje najdeš na přiloženém dokladu. Martial Training Lab platbu jen zprostředkovává.<br><br><b>Zrušení a vrácení:</b> ' + _esc(_wdText('clubother', false)))
-      : ('Prodávajícím je ' + (gymName ? ('<b>' + _esc(gymName) + '</b>') : 'klub') + ' jako podnikatel; jeho identifikační údaje najdeš na přiloženém dokladu. Martial Training Lab objednávku a platbu jen zprostředkovává.<br><br><b>Odstoupení od smlouvy:</b> ' + _esc(_wdText('dated', false)))}</div>
+    <div style="background:#fff;border-radius:10px;padding:12px 14px;font-size:12.5px;line-height:1.55;color:#444;margin-top:14px;"><b>Potvrzení objednávky</b><br>Poskytovatel služby: ${gymName ? ('<b>' + _esc(gymName) + '</b>') : 'klub'}, jeho údaje najdeš na přiloženém dokladu. MTL platbu jen zprostředkovává.<br><br>${nonprofit
+      ? ('<b>Zrušení a vrácení:</b> Zrušení a případné vrácení platby se řídí podmínkami poskytovatele.')
+      : ('<b>Odstoupení od smlouvy:</b> ' + _esc(_wdText('dated', false)))}</div>
     <p style="font-size:12px;color:#aaa;line-height:1.6;margin-top:24px;">Tenhle e-mail ti přišel, protože ses přihlásil/a do kurzu${gymName ? (' u ' + _esc(gymName)) : ''}.</p>
   </div></body></html>`;
 }
@@ -1032,38 +1033,9 @@ export default async function handler(req, res) {
           try { const _cd3 = ((await sbGet(`gym_cohorts?id=eq.${encodeURIComponent(cohId)}&select=discipline`)) || [])[0]; if (_cd3 && _cd3.discipline) await payGymAmbassador(_cd3.discipline, amount, cur, s.id, pi); } catch (e) { console.error('cohort amb month', e.message); }
         }
       } else if (m.mtl_payment_type === 'partner_sub') {
-        // Exclusive MTL Partner subscription zaplacena → zapni partner sazby
-        const uid = m.user_id || s.client_reference_id;
-        const sub = typeof s.subscription === 'string' ? s.subscription : (s.subscription && s.subscription.id);
-        const cust = typeof s.customer === 'string' ? s.customer : (s.customer && s.customer.id);
-        if (uid) {
-          // CENA SE ULOZI K PROFILU. Stripe si ji drzi u predplatneho, takze klub plati porad
-          // svou -- ale v MTL nebylo nikde videt, kdo ma zakladajicich 500 a kdo cenikovych
-          // 1000. V Adminu se to bez toho nedalo zjistit jinak nez otevrenim Stripe.
-          // Cena se ukládá MĚSÍČNÍ (ep_month), i u ročního EP -- ceník a Admin pracují s měsíční.
-          const _paid = m.ep_month ? Number(m.ep_month) : ((typeof s.amount_total === 'number') ? Math.round(s.amount_total / 100) : null);
-          const _pcur = String(s.currency || 'czk').toUpperCase();
-          await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, {
-            partner: true, partner_sub: sub || null, stripe_customer: cust || null,
-            ...(_paid ? { partner_price: _paid, partner_currency: _pcur } : {}),
-          });
-          // Existující členství klubů a online předplatné → sazba EP od příští faktury. Stejné
-          // pravidlo jako všude jinde (gym-rerate.js / _rate.js); dřív tu bylo natvrdo 3 %.
-          try { await rerateOwner(uid); } catch (e) { console.error('ep rerate', e.message); }
-          await sbPost('notifications', { user_id: uid, type: 'system', read: false, data: JSON.stringify({ kind: 'partner_granted' }), message: '⭐ Jsi Exclusive MTL Partner — od teď je provize MTL z každé platby 0,5 %, z člena, který tě najde v appce, 5 % a z člena z reklamy MTL 10 %. Platí i pro stávající členství od jejich příští platby. 🥊' });
-          // ZAKLADATELI: kdo, za kolik a s prouklikem (klub → správa EP klubu, jinak profil).
-          try {
-            const _p = ((await sbGet(`profiles?id=eq.${encodeURIComponent(uid)}&select=name,email,coach_status`)) || [])[0] || {};
-            const _g = ((await sbGet(`gyms?owner_id=eq.${encodeURIComponent(uid)}&select=id,name&limit=1`)) || [])[0] || null;
-            const _yr = m.ep_interval === 'year';
-            const _amt = _paid ? (_paid.toLocaleString('cs-CZ') + ' ' + (_pcur === 'CZK' ? 'Kč' : _pcur) + '/měs. bez DPH' + (_yr ? ' (roční předplatné)' : '')) : '';
-            await sbPost('notifications', { user_id: (process.env.FOUNDER_UUID || '').trim(), type: 'system', read: false,
-              data: JSON.stringify({ kind: 'new_provider', what: 'partner', user_id: uid, gym_id: _g ? _g.id : null }),
-              message: '⭐ Nový Exclusive MTL Partner: ' + (_p.name || _p.email || 'bez jména')
-                + (_g ? (' · klub ' + (_g.name || '')) : (_p.coach_status === 'approved' ? ' · kouč' : ''))
-                + (_p.email && _p.name ? (' · ' + _p.email) : '') + (_amt ? (' · ' + _amt) : '') + '.' });
-          } catch (e) { console.error('ep founder notif', e.message); }
-        }
+        // Exclusive MTL Partner zaplacen -> stupeň, sazby, zprávy (_ep.js; jen jednou, i když
+        // to stihne dřív /api/session při návratu z platby).
+        await activatePartner(s);
       } else if (m.mtl_payment_type === 'supplier_sub') {
         // PROFIL DODAVATELE ZAPLACEN -> zobrazí se klubům, koučům a pořadatelům (organizations.supplier_sub).
         // Stejně jako EP: cena se uloží k organizaci, ať je v Adminu vidět, kdo platí zakládající cenu.
@@ -1180,7 +1152,9 @@ export default async function handler(req, res) {
       const rows = await sbGet(`profiles?partner_sub=eq.${encodeURIComponent(sub.id)}&select=id`);
       const uid = rows[0] && rows[0].id;
       if (uid) {
-        await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: false, partner_sub: null, partner_renews_at: null, partner_cancelling: false, partner_period_end: null });
+        // Úplné zrušení EP: stupeň pryč a zakládající místa se uvolní (drží se jen do zrušení).
+        await sbPatch('profiles', `id=eq.${encodeURIComponent(uid)}`, { partner: false, partner_sub: null, partner_renews_at: null, partner_cancelling: false, partner_period_end: null,
+          partner_tier: null, partner_tier_next: null, partner_tier_from: null, ep_founding: [], partner_price: null, partner_currency: null });
         // Zpět na vlastní sazbu (základ / Shikai / Bankai / organizace) -- dřív natvrdo 5 %.
         try { await rerateOwner(uid); } catch (e) { console.error('ep end rerate', e.message); }
         await subMail({ userId: uid }, 'ended', null, _endInfo);
@@ -1199,6 +1173,34 @@ export default async function handler(req, res) {
       try {
         const _ow = event.account ? null : await _platformSubOwner(inv);   // EP běží na platformním účtu, ne na connected
         // Nulová faktura (navazující předplatné se začátkem v budoucnu) není platba -- bez dokladu.
+        // EP: PŘECHOD MEZI STUPNI. Faktura za přechod nahoru (billing_reason subscription_update)
+        // zapíše vyšší stupeň -- důležité, když banka chtěla platbu potvrdit a pay.js ji nedočkal.
+        // První zaplacená obnova po naplánovaném přechodu dolů (subscription_cycle) zapíše nižší.
+        // Musí to být PŘED dokladem, ať doklad nese stupeň, za který se platí.
+        let _epTier = null;
+        if (_ow && !_ow.org) {
+          const _md = _ow.md || {};
+          const _ln0 = (inv.lines && inv.lines.data && inv.lines.data[0]) || null;
+          try {
+            if (inv.billing_reason === 'subscription_update' && _md.ep_tier_pending) {
+              // Jen když tenhle přechod pořád čeká na předplatném, které běží. Opožděný nebo
+              // opakovaný webhook (Stripe zkouší až 3 dny) nesmí vrátit starší stupeň.
+              const _live = await stripe.subscriptions.retrieve(_ow.subId).catch(() => null);
+              const _lmd = (_live && _live.metadata) || {};
+              if (_live && ['active', 'trialing', 'past_due'].indexOf(_live.status) >= 0 && _lmd.ep_tier_pending === _md.ep_tier_pending) {
+                await applyEpUpgrade(_ow.uid, _md.ep_tier_pending, { founding: _md.ep_founding_pending === '1', month: _md.ep_month_pending, subId: _ow.subId });
+                await stripe.subscriptions.update(_ow.subId, { metadata: { ep_tier: _md.ep_tier_pending, ep_month: _md.ep_month_pending || '',
+                  ep_founding: _md.ep_founding_pending === '1' ? '1' : (_lmd.ep_founding || ''), ep_tier_pending: '', ep_month_pending: '', ep_founding_pending: '' } });
+              }
+            } else if (inv.billing_reason === 'subscription_cycle') {
+              const _to = await applyEpDowngrade(_ow.uid, _ln0 && _ln0.period ? new Date(_ln0.period.start * 1000).toISOString() : null,
+                { month: _md.ep_month_next || null, founding: _md.ep_founding_next === '1', subId: _ow.subId });
+              if (_to) await stripe.subscriptions.update(_ow.subId, { metadata: { ep_tier: _to, ep_month: _md.ep_month_next || '',
+                ep_founding: _md.ep_founding_next === '1' ? '1' : '', ep_tier_next: '', ep_month_next: '', ep_founding_next: '', ep_prev_amount: '' } });
+            }
+          } catch (e) { console.error('ep tier change', e.message); }
+          try { const _pp = ((await sbGet(`profiles?id=eq.${encodeURIComponent(_ow.uid)}&select=partner,partner_tier`)) || [])[0]; _epTier = _epTierOf(_pp); } catch (e) {}
+        }
         if (_ow && Number(inv.amount_paid != null ? inv.amount_paid : inv.total) > 0) {
           const _line = (inv.lines && inv.lines.data && inv.lines.data[0]) || null;
           // DALŠÍ PLATBA: konec právě zaplaceného období = den příštího stržení. Appka ho ukazuje
@@ -1214,6 +1216,7 @@ export default async function handler(req, res) {
             invoice_id: inv.id, user_id: _ow.uid, org_id: _ow.org, bill_gym_id: _ow.billGym || null,
             amount: (inv.amount_paid != null ? inv.amount_paid : inv.total) / 100,
             currency: inv.currency, test_mode: !inv.livemode,
+            ep_tier: _epTier, change: inv.billing_reason === 'subscription_update',
             period_start: _line && _line.period ? new Date(_line.period.start * 1000).toISOString() : null,
             period_end: _line && _line.period ? new Date(_line.period.end * 1000).toISOString() : null,
           });
@@ -1246,14 +1249,14 @@ export default async function handler(req, res) {
             // org_rate_until musí být v selectu: sazba z asociace se pozná jen podle toho data
             // (sloupec profiles.org_rate neexistuje). Bez něj vyšel členovi asociace základ 2 %
             // místo 1,5 % a webhook mu tu vyšší sazbu nastavil na předplatné.
-            const _op = (await sbGet(`profiles?id=eq.${_ownerId}&select=partner,org_rate_until,coach_ref_score,bankai_eligible`))[0] || {};
+            const _op = (await sbGet(`profiles?id=eq.${_ownerId}&select=partner,partner_tier,org_rate_until,coach_ref_score,bankai_eligible`))[0] || {};
             const _sc = _op.coach_ref_score || 0;
             // Delegováno na _rate.js. Tady dřív seděla vlastní kopie žebříčku s vlastními čísly, a přesně
             // ta se rozešla: EP mělo 1 % místo 0,5 % a founding se neřešil vůbec, takže každý běh zvedal
             // sazbu tomu, komu ji gym-rerate.js právě snížil. Jedno pravidlo, jedno místo.
-            let _ladder = _mtlLadder('stripe', { partner: _op.partner, org: _hasOrgRate(_op), score: _sc, bankai: _op.bankai_eligible }) * 100;
+            let _ladder = _mtlLadder('stripe', { partner: _epTierOf(_op), org: _hasOrgRate(_op), score: _sc, bankai: _op.bankai_eligible }) * 100;
             // Online předplatné kouče: vlastní online sazba, žádná akvizice.
-            if (((_so2 && _so2.metadata) || {}).mtl_online === '1') _ladder = _mtlOnline({ partner: _op.partner, score: _sc, bankai: _op.bankai_eligible }) * 100;
+            if (((_so2 && _so2.metadata) || {}).mtl_online === '1') _ladder = _mtlOnline({ partner: _epTierOf(_op), score: _sc, bankai: _op.bankai_eligible }) * 100;
             _subLadder = _ladder / 100;
             await applySubRate(stripe, event.account, sub, _so2, _ladder);
           }
@@ -1269,9 +1272,13 @@ export default async function handler(req, res) {
       if (!event.account) {
         try {
           const _ow = await _platformSubOwner(inv);
-          if (_ow) {
+          // Neprošlý doplatek za přechod EP na vyšší stupeň fakturu nedělá: přechod se bez
+          // zaplacení neprovede (pay.js, pending_if_incomplete) a dlužit tedy není co.
+          if (_ow && inv.billing_reason !== 'subscription_update') {
             const _line = (inv.lines && inv.lines.data && inv.lines.data[0]) || null;
+            const _umd = _ow.md || {};
             await _callEpDoklad({
+              ep_tier: _ow.org ? null : (_umd.ep_tier_next || _umd.ep_tier || null),
               unpaid: true, invoice_id: inv.id, user_id: _ow.uid, org_id: _ow.org, bill_gym_id: _ow.billGym || null,
               amount: (inv.amount_due != null ? inv.amount_due : inv.total) / 100,
               currency: inv.currency, test_mode: !inv.livemode,

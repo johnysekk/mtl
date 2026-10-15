@@ -1,5 +1,5 @@
 import Stripe from 'stripe';
-import { ladderRate, hasOrgRate, onlineRate, withStoreFee } from './_rate.js';
+import { ladderRate, hasOrgRate, onlineRate, withStoreFee, epTierOf } from './_rate.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -75,13 +75,13 @@ async function applySubRate(stripe, acct, subId, sub, ladderPct) {
 // stejnou funkci.
 export async function rerateOwner(owner) {
   if (!owner) throw new Error('missing owner');
-  const prof = (await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=coach_ref_score,partner,founding,bankai_eligible,org_rate_until`))[0];
+  const prof = (await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=coach_ref_score,partner,partner_tier,founding,bankai_eligible,org_rate_until`))[0];
   if (!prof) throw new Error('owner not found');
 
   const score = prof.coach_ref_score || 0;
   // Single source of truth -- a local copy of the ladder had drifted: EP was billed 1% instead
   // of 0.5% and founding was not handled at all, so every run raised a Founding Partner's rate.
-  const pct = ladderRate('stripe', { partner: prof.partner, founding: prof.founding, score, bankai: prof.bankai_eligible, org: hasOrgRate(prof) }) * 100;
+  const pct = ladderRate('stripe', { partner: epTierOf(prof), founding: prof.founding, score, bankai: prof.bankai_eligible, org: hasOrgRate(prof) }) * 100;
 
   let rerated = 0;
   // ONLINE PŘEDPLATNÉ KOUČE (gym_id = null, paid_to = coach): vlastní online sazba na účtu kouče.
@@ -89,7 +89,7 @@ export async function rerateOwner(owner) {
     const _oacct = ((await sbGet(`profiles?id=eq.${encodeURIComponent(owner)}&select=stripe_account`)) || [])[0];
     const _oa = _oacct && _oacct.stripe_account ? String(_oacct.stripe_account).trim() : null;
     if (_oa) {
-      const _opct = onlineRate({ partner: prof.partner, score, bankai: prof.bankai_eligible }) * 100;
+      const _opct = onlineRate({ partner: epTierOf(prof), score, bankai: prof.bankai_eligible }) * 100;
       const _om = await sbGet(`gym_memberships?gym_id=is.null&paid_to=eq.coach&coach_id=eq.${encodeURIComponent(owner)}&status=in.(active,cancelling)&select=stripe_subscription`);
       for (const m of _om || []) {
         if (!m.stripe_subscription) continue;

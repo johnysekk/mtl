@@ -11,6 +11,7 @@
 //                          period_end, test_mode }   (org_id = profil dodavatele)
 
 import { vatMode, isEU } from './_vat.js';
+import { EP_TIER_NAMES } from './_rate.js';
 // Obsah a vzhled faktury (appka, e-mail, PDF) je jen v /doklad-layout.js.
 import { mtlModel, mtlStatus, renderHtml, statusBoxHtml, subPeriod, money, esc as _esc } from '../doklad-layout.js';
 import { mtlDokladPdf } from './_doklad-pdf.js';
@@ -227,8 +228,14 @@ export default async function handler(req, res) {
     }
 
     const period = String(b.period_start || new Date().toISOString()).slice(0, 7);
-    const label = (orgId ? 'Profil dodavatele MTL — předplatné ' : 'Exclusive MTL Partner — předplatné ') + period;
-    const PRODUCT = orgId ? 'profil dodavatele MTL' : 'Exclusive MTL Partner', PRODUCT_EN = orgId ? 'MTL supplier profile' : 'Exclusive MTL Partner';
+    // Stupeň EP do názvu položky (b.ep_tier posílá webhook). b.change = faktura za přechod na
+    // vyšší stupeň: doplatek rozdílu za zbytek zaplaceného období.
+    const _tn = (!orgId && EP_TIER_NAMES[b.ep_tier]) ? (' ' + EP_TIER_NAMES[b.ep_tier]) : '';
+    const label = orgId ? ('Profil dodavatele MTL — předplatné ' + period)
+      : (b.change ? ('Exclusive MTL Partner — přechod na' + _tn + ', doplatek za zbytek období ' + period) : ('Exclusive MTL Partner' + _tn + ' — předplatné ' + period));
+    const labelEn = orgId ? null
+      : (b.change ? ('Exclusive MTL Partner — upgrade to' + _tn + ', difference for the rest of the period ' + period) : ('Exclusive MTL Partner' + _tn + ' — subscription ' + period));
+    const PRODUCT = orgId ? 'profil dodavatele MTL' : ('Exclusive MTL Partner' + _tn), PRODUCT_EN = orgId ? 'MTL supplier profile' : ('Exclusive MTL Partner' + _tn);
     // ČÁSTKA V HALÉŘÍCH/CENTECH, stejně jako každý jiný řádek commission_doklady (doklad o
     // provizi). Webhook posílá celé koruny (amount_paid/100); dřív se uložily tak, jak přišly,
     // a appka (dělí stovkou) by ukázala 5,00 Kč místo 500 Kč.
@@ -249,7 +256,7 @@ export default async function handler(req, res) {
       // Neuhrazená faktura (stržení předplatného selhalo): celá částka „K úhradě".
       due_amount: b.unpaid ? amountMinor : 0,
       // Pole, ne JSON.stringify -- jinak se do jsonb uložil řetězec a appka z něj nečetla položku.
-      line_items: [{ label, amount: amountMinor, currency: cur,
+      line_items: [{ label, ...(labelEn ? { label_en: labelEn } : {}), amount: amountMinor, currency: cur,
         period_start: b.period_start || null, period_end: b.period_end || null,
         pay_url: b.unpaid ? (b.pay_url || null) : undefined, next_attempt: b.unpaid ? (b.next_attempt || null) : undefined }],
       // odběratel

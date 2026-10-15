@@ -1,5 +1,6 @@
 import Stripe from 'stripe';
 import { recordTransaction as recordStripeTransaction } from './stripe-webhook.js';
+import { activatePartner } from './_ep.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -90,6 +91,19 @@ export default async function handler(req, res) {
       }
     } catch (e) { _cred = { consumed: false, reason: 'exception: ' + e.message }; }
 
+    // EXCLUSIVE PARTNER ZAPLACEN: když webhook ještě nedorazil, zapne se EP tady (_ep.js zapíše
+    // jen jednou). Rozhoduje Stripe (zaplacená session na účtu MTL), ne appka -- dřív si appka
+    // partner = true zapisovala do profilu sama.
+    let _ep = null;
+    try {
+      if (!gymAccount && (session.metadata || {}).mtl_payment_type === 'partner_sub' && session.status === 'complete' && session.payment_status === 'paid') {
+        await activatePartner(session);
+        const _uid = (session.metadata || {}).user_id || session.client_reference_id;
+        const _pr = _uid ? ((await sbGet(`profiles?id=eq.${encodeURIComponent(_uid)}&select=partner,partner_tier`)) || [])[0] : null;
+        _ep = _pr ? { partner: !!_pr.partner, tier: _pr.partner_tier || null } : null;
+      }
+    } catch (e) { console.error('ep activate', e.message); }
+
     // Renewal date, so the membership row can say WHEN it renews rather than only that it does.
     let _periodEnd = null;
     try {
@@ -103,6 +117,7 @@ export default async function handler(req, res) {
 
     res.status(200).json({
       _cred,
+      ep: _ep,
       periodEnd: _periodEnd,
       paymentIntent: session.payment_intent || null,
       subscription: session.subscription || null,

@@ -3,7 +3,7 @@
 // lesson, membership, event or course. Two layers:
 //   - ladderRate(): the EP/FP/Shikai/Bankai ladder (what the owner pays ongoing).
 //   - acquisitionRate(): the finder's fee MTL takes when the APP demonstrably brought the member
-//     (first paid lesson / first 2 membership months). EP pays HALF (5% vs 10%).
+//     (first paid lesson / first membership month). EP pays less, by tier (EP_TIERS).
 //   - effectiveRate(): the actual per-tx rate = max(ladder, acquisition).
 // No silent 3% fallback: resolvers throw if the owner can't be found, so an overcharge surfaces.
 
@@ -37,11 +37,43 @@
 //     nic nezaplatilo, jen ho zprostředkovalo, takže JEDNORÁZOVĚ a levně.
 //   • REKLAMA (mtl_ads) — MTL za ten klik zaplatilo z vlastní kapsy. Proto OPAKOVANĚ, dokud
 //     ten člověk u poskytovatele platí; jinak by se kampaň nezaplatila.
-// EP má u obojího poloviční sazbu.
-const ACQ_RATE = 0.10;         // objev v appce, jednorázově
-const ACQ_RATE_EP = 0.05;      // objev v appce, EP
-const ADS_RATE = 0.25;         // z reklamy MTL, JEN ČLENSTVÍ, po dobu okna níž
-const ADS_RATE_EP = 0.10;      // z reklamy MTL, EP
+// EP má u obojího nižší sazbu podle stupně (EP_TIERS).
+const ACQ_RATE = 0.10;         // objev v appce, jednorázově (bez EP)
+const ADS_RATE = 0.25;         // z reklamy MTL, JEN ČLENSTVÍ, po dobu okna níž (bez EP)
+// EP má obě sazby podle stupně -- viz EP_TIERS níž.
+
+// ── STUPNĚ EXCLUSIVE PARTNERA ──────────────────────────────────────────────────────────────
+// Jediný ceník EP. Zrcadlo je v index.html (EP_TIERS) -- když měníš jedno, měň obojí.
+//              provize  akvizice  reklama MTL  partneři  cena/měs   zakládající cena
+//   Genin       0,75 %   5 %       20 %          3         499 Kč    --
+//   Chūnin      0,5 %    3 %       10 %          6         799 Kč    499 Kč pro prvních 10
+//   Jōnin       0,25 %   2 %       10 %         10       1 699 Kč    --
+//   Kage        0 %      0 %       10 %         20       4 999 Kč    3 999 Kč pro prvních 5
+// Provize platí stejně na kartě i na převodu. Poplatek obchodu (12,1 % v nativní appce) EP
+// neodpouští -- ten MTL platí Apple / Googlu. Ceny bez DPH, v korunách; zahraniční ceny se
+// nastaví ručně podle měny, až budou poskytovatelé mimo ČR. Roční předplatné = EP_YEAR_MONTHS
+// měsíců. Zakládající cenu drží člověk u stupně (profiles.ep_founding), dokud EP úplně nezruší.
+export const EP_TIERS = {
+  genin:  { rate: 0.0075, acq: 0.05, ads: 0.20, partners: 3,  czk: 499 },
+  chunin: { rate: 0.005,  acq: 0.03, ads: 0.10, partners: 6,  czk: 799,  foundingCzk: 499,  foundingSpots: 10 },
+  jonin:  { rate: 0.0025, acq: 0.02, ads: 0.10, partners: 10, czk: 1699 },
+  kage:   { rate: 0,      acq: 0,    ads: 0.10, partners: 20, czk: 4999, foundingCzk: 3999, foundingSpots: 5 },
+};
+export const EP_TIER_ORDER = ['genin', 'chunin', 'jonin', 'kage'];
+export const EP_YEAR_MONTHS = 10;
+export const EP_TIER_NAMES = { genin: 'Genin', chunin: 'Chūnin', jonin: 'Jōnin', kage: 'Kage' };
+// Ručně udělené EP (partner = true bez stupně) je Chūnin -- sazba dosavadního EP.
+export const EP_DEFAULT_TIER = 'chunin';
+// Hodnota → klíč stupně, nebo null. Bere klíč stupně i staré true.
+export function epTierKey(v) {
+  if (v === true) return EP_DEFAULT_TIER;
+  return (typeof v === 'string' && EP_TIERS[v]) ? v : null;
+}
+// Stupeň z profilu (partner + partner_tier), nebo null, když EP nemá.
+export function epTierOf(p) {
+  if (!p || !p.partner) return null;
+  return epTierKey(p.partner_tier) || EP_DEFAULT_TIER;
+}
 // JAK DLOUHO SE REKLAMA ÚČTUJE. Ne navždy: MTL zaplatilo za ZÍSKÁNÍ člena, ne za jeho život.
 // Okno je KALENDÁŘNÍ, běží od první platby z reklamy. Přerušené členství ho tedy neprodlužuje:
 // kdo platí 3 měsíce, dva vynechá a pak platí další 3, zaplatí vyšší sazbu ze šesti plateb,
@@ -53,7 +85,7 @@ const ADS_WINDOW_MONTHS = 12;
 const ADS_GAP_MONTHS = 6;
 
 // mode: 'stripe' (Stripe track) | anything else (QR/bank/cash/pis track)
-// o: { partner, founding, score, bankai }
+// o: { partner, founding, score, bankai, org } -- partner = stupeň EP (epTierOf), ne jen true
 // Má poskytovatel právě teď sazbu z členství v asociaci? Datum, ne příznak -- členství
 // vyprší samo a nikdo ho nemusí odklikávat. Používá se všude, kde se sazba počítá.
 export function hasOrgRate(profile) {
@@ -79,7 +111,7 @@ export function ladderRate(mode, o) {
   //   Shikai              1,5 %     2,0 %       ref_score >= 2
   //   Bankai              1,0 %     1,25 %      ref_score >= 5 + výkonnostní brána
   //   Organizace          1,5 %     1,5 %       schválená organizace, MTL ji potvrzuje ručně
-  //   EP                  0,5 %     0,5 %       platí 1000/měs (nebo uděleno zdarma na začátku)
+  //   EP                  0,75 / 0,5 / 0,25 / 0 %  podle stupně (EP_TIERS výš)
   //
   // Banka je dražší než Stripe schválně: tam si provizi bereš rovnou z platby, tady ji musíš
   // strhnout klubu z karty -- to může selhat, upomínat, končit pozastavením účtu. Ten rozdíl
@@ -90,34 +122,36 @@ export function ladderRate(mode, o) {
   // udělené zdarma, tedy partner=true bez partner_sub. Parametr `founding` se schválně nemaže
   // ze signatury ani ze selectů: sloupec v DB zůstává a ignorovat ho je bezpečnější než honit
   // jeho odstranění napříč šesti soubory kvůli něčemu, co se nepoužívá.
-  if (o.partner) return 0.005;                                   // EP
-  if (o.org) return 0.015;                                       // schválená organizace, obě koleje
+  // VYHRÁVÁ NEJNIŽŠÍ SAZBA (stejně jako zrcadlo v index.html).
   const s = o.score || 0;
-  if (mode === 'stripe') {
-    if (s >= 5 && o.bankai) return 0.01;                         // Bankai
-    return (s >= 2) ? 0.015 : 0.02;                              // Shikai / base
-  }
-  if (s >= 5 && o.bankai) return 0.0125;                         // Bankai na bance
-  return (s >= 2) ? 0.02 : 0.025;                                // Shikai / base
+  const stripe = (mode === 'stripe');
+  const cand = [stripe ? 0.02 : 0.025];                          // základ
+  if (s >= 2) cand.push(stripe ? 0.015 : 0.02);                  // Shikai
+  if (s >= 5 && o.bankai) cand.push(stripe ? 0.01 : 0.0125);     // Bankai
+  if (o.org) cand.push(0.015);                                   // schválená organizace, obě koleje
+  const ep = epTierKey(o.partner);
+  if (ep) cand.push(EP_TIERS[ep].rate);                          // EP podle stupně
+  return Math.min.apply(null, cand);
 }
 
 
 // ── ONLINE KOUČING ───────────────────────────────────────────────────────────────────────
 // Online sekce (jednorázová služba i měsíční předplatné) má VLASTNÍ, nižší sazbu, stejnou na
 // obou kolejích, a NEMÁ akvizici (jako kurzy a vstupenky):
-//   base 1 %  ·  Shikai 0,75 %  ·  Bankai 0,5 %  ·  EP 0,5 %
+//   base 1 %  ·  Shikai 0,75 %  ·  Bankai 0,5 %  ·  EP podle stupně, když je nižší
+// (Genin 0,75 % tak online nic nezlepší, Jōnin 0,25 % a Kage 0 % ano).
 // Shikai/Bankai podle stejného ref_score a bankai_eligible jako zbytek žebříčku. Organizace
 // (1,5 %) tu nic nezlepší -- online základ 1 % je nižší, vyhrává lepší sazba.
 export function onlineRate(o) {
   o = o || {};
-  if (o.partner) return 0.005;                                   // EP
   const s = o.score || 0;
-  if (s >= 5 && o.bankai) return 0.005;                          // Bankai
-  return (s >= 2) ? 0.0075 : 0.01;                               // Shikai / base
+  const ladder = (s >= 5 && o.bankai) ? 0.005 : ((s >= 2) ? 0.0075 : 0.01);   // Bankai / Shikai / base
+  const ep = epTierKey(o.partner);
+  return ep ? Math.min(ladder, EP_TIERS[ep].rate) : ladder;
 }
 export async function onlineRateFor(sbGet, ownerId) {
   const p = await resolveOwner(sbGet, { ownerId });
-  return onlineRate({ partner: p.partner, score: p.coach_ref_score, bankai: p.bankai_eligible });
+  return onlineRate({ partner: p.partner, score: p.coach_ref_score, bankai: p.bankai_eligible });   // p.partner = stupeň (resolveOwner)
 }
 
 // ── ONLINE KOUČINK V NATIVNÍ APPCE (App Store / Google Play) ─────────────────────────────────
@@ -182,10 +216,13 @@ export async function resolveOwner(sbGet, { ownerId, gymId, gymAccount }) {
     }
   }
   if (!oid) throw new Error('resolveOwner: no owner (ownerId/gymId/gymAccount all unresolved)');
-  let p = (await sbGet(`profiles?id=eq.${encodeURIComponent(oid)}&select=id,partner,founding,coach_ref_score,bankai_eligible,org_rate_until,billing_country`))[0];
+  let p = (await sbGet(`profiles?id=eq.${encodeURIComponent(oid)}&select=id,partner,partner_tier,founding,coach_ref_score,bankai_eligible,org_rate_until,billing_country`))[0];
   if (!p) throw new Error('resolveOwner: owner profile not found');
+  // partner = STUPEŇ EP (genin / chunin / jonin / kage) nebo null. Všechno, co sazbu počítá
+  // z výsledku resolveOwner, tak dostane stupeň, ne jen „je partner".
+  p = Object.assign({}, p, { partner: epTierOf(p) });
   // Země klubu má přednost před zemí majitele.
-  if (gymCC) p = Object.assign({}, p, { billing_country: gymCC });
+  if (gymCC) p.billing_country = gymCC;
   return p;
 }
 
@@ -204,7 +241,7 @@ export async function resolveRate(sbGet, { ownerId, gymId, gymAccount, mode }) {
 // Acquisition finder's fee, or null if it doesn't apply. Only when acqSource === 'mtl_discovery'
 // AND it is their FIRST one of that kind here: first membership, first drop-in, first 1:1.
 // (Was: membership = first 2 months. Single charge now -- see the header.) Window is bounded by counting prior COMPLETED tx of this type for this member at
-// this provider (Stripe + cash together). ownerPartner => EP pays half.
+// this provider (Stripe + cash together). ownerPartner = stupeň EP => sazba podle EP_TIERS.
 // OKNO NOVÉHO KLUBU: prvních 14 dní od založení klubu se do MTL převádějí jeho stálí členové.
 // Kdokoli se v tu dobu přidá, je klubu vlastní (direct) -- bez ohledu na to, jak přišel -- a
 // poplatek za přivedení se neúčtuje. Jediné místo s tou délkou; appka i server se ptají sem.
@@ -218,6 +255,13 @@ export async function gymOnboardingUntil(sbGet, gymId) {
     return (Date.now() < until.getTime()) ? until.toISOString() : null;
   } catch (e) { return null; }
 }
+// Akviziční sazby podle stupně EP. Bez EP 10 % / 25 %. Nulová sazba (Kage) = akvizice se neúčtuje.
+// Reklama MTL: program je jen pro EP (od Genina), jenže člověk může přijít z obecné kampaně MTL
+// i ke klubu bez EP -- tam platí 25 %.
+function _acqRates(ownerPartner) {
+  const t = epTierKey(ownerPartner);
+  return t ? { acq: EP_TIERS[t].acq, ads: EP_TIERS[t].ads } : { acq: ACQ_RATE, ads: ADS_RATE };
+}
 export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, memberId, scopeCol, scopeId }) {
   // Nový klub v okně převodu členů: žádná akvizice.
   if (scopeCol === 'gym_id' && scopeId && (acqSource === 'mtl_discovery' || acqSource === 'mtl_ads')) {
@@ -227,6 +271,7 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
   // sazbou jako organický objev; rozdíl je jen ve zdroji, aby se dalo doložit, odkud přišel
   // (a u reklamy je ten nárok nejsilnější -- MTL za ten klik opravdu zaplatilo).
   if ((acqSource !== 'mtl_discovery' && acqSource !== 'mtl_ads') || !memberId) return null;
+  const R = _acqRates(ownerPartner);
 
   // REKLAMA SE ÚČTUJE Z KAŽDÉ PLATBY toho člověka, ne jen z první. Nehledá se tedy žádná
   // předchozí transakce -- právě tím se liší od organického objevu.
@@ -276,7 +321,7 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
           );
           if (att && att.length) return null;
         }
-        return { rate: (ownerPartner ? ADS_RATE_EP : ADS_RATE), months: ADS_WINDOW_MONTHS };
+        return R.ads > 0 ? { rate: R.ads, months: ADS_WINDOW_MONTHS } : null;
       }
 
       // Okno běží od první platby z reklamy v tomhle období.
@@ -285,13 +330,14 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
       if (Date.now() > end.getTime()) return null;              // okno vypršelo
       const left = Math.max(0, Math.ceil((end.getTime() - Date.now()) / MS_MONTH));
       if (left <= 0) return null;
-      return { rate: (ownerPartner ? ADS_RATE_EP : ADS_RATE), months: Math.min(ADS_WINDOW_MONTHS, left) };
+      return R.ads > 0 ? { rate: R.ads, months: Math.min(ADS_WINDOW_MONTHS, left) } : null;
     } catch (e) {
       // Výpadek databáze nesmí cenu zdražit ani zlevnit: bereme celé okno.
-      return { rate: (ownerPartner ? ADS_RATE_EP : ADS_RATE), months: ADS_WINDOW_MONTHS };
+      return R.ads > 0 ? { rate: R.ads, months: ADS_WINDOW_MONTHS } : null;
     }
   }
 
+  if (!(R.acq > 0)) return null;                        // Kage: akvizice se neúčtuje
   let max;
   if (type === 'membership') max = 1;                   // CHANGED: was 2 (first two months)
   else if (type === 'drop_in' || type === 'coach_1to1') max = 1;
@@ -318,7 +364,7 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
       // ('paid' i historicke 'completed') a oba typy koleji.
       const prior = await sbGet(`transactions?select=id&member_id=eq.${encodeURIComponent(memberId)}&gym_id=eq.${encodeURIComponent(scopeId)}&type=eq.membership&status=in.(paid,completed)&limit=1`);
       if (prior && prior.length) return null;           // not their first membership here
-      return { rate: (ownerPartner ? ACQ_RATE_EP : ACQ_RATE), months: 1 };
+      return { rate: R.acq, months: 1 };
     }
     // A 1:1 lesson is written under THREE names: pay.js asks for coach_1to1, the bank rail writes
     // coach_1to1, and Stripe writes coach_inperson or coach_online because it keeps the distinction
@@ -327,7 +373,7 @@ export async function acquisitionRate(sbGet, { acqSource, type, ownerPartner, me
     const _1to1 = (type === 'coach_1to1' || type === 'coach_inperson' || type === 'coach_online');
     const _typeQ = _1to1 ? 'type=in.(coach_1to1,coach_inperson,coach_online)' : `type=eq.${encodeURIComponent(type)}`;
     const prior = await sbGet(`transactions?select=id&member_id=eq.${encodeURIComponent(memberId)}&${_typeQ}&${scopeCol}=eq.${encodeURIComponent(scopeId)}&status=in.(paid,completed)`);
-    if (!prior || prior.length < max) return ownerPartner ? ACQ_RATE_EP : ACQ_RATE;
+    if (!prior || prior.length < max) return R.acq;
   } catch (e) {}
   return null;
 }

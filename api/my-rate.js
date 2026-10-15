@@ -3,7 +3,7 @@
 // asks here: we read the caller's CONDITIONS from profiles (partner=EP, founding=FP,
 // coach_ref_score -> Shikai/Bankai, bankai_eligible) and run the SAME _rate.js ladder the charge
 // paths use, so the displayed % is exactly the charged %.
-import { ladderRate, hasOrgRate } from './_rate.js';
+import { ladderRate, hasOrgRate, epTierOf, EP_TIER_NAMES } from './_rate.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const SKEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -26,21 +26,21 @@ export default async function handler(req, res) {
     const uid = user && user.id;
     if (!uid) return res.status(401).json({ error: 'no user' });
 
-    const p = (await (await fetch(`${SB}/rest/v1/profiles?id=eq.${encodeURIComponent(uid)}&select=partner,founding,coach_ref_score,bankai_eligible,org_rate_until`, { headers: svc })).json())[0] || {};
-    const cond = { partner: !!p.partner, founding: !!p.founding, score: p.coach_ref_score || 0, bankai: !!p.bankai_eligible, org: hasOrgRate(p) };
+    const p = (await (await fetch(`${SB}/rest/v1/profiles?id=eq.${encodeURIComponent(uid)}&select=partner,partner_tier,founding,coach_ref_score,bankai_eligible,org_rate_until`, { headers: svc })).json())[0] || {};
+    const cond = { partner: epTierOf(p), founding: !!p.founding, score: p.coach_ref_score || 0, bankai: !!p.bankai_eligible, org: hasOrgRate(p) };
     const rate = ladderRate(mode, cond);
 
     // Founding Partner is gone from the ladder; the early perk is a free EP instead. The column
     // stays in the DB and is simply not consulted, which is why it is no longer selected here.
     let tier;
-    if (cond.partner) tier = 'EP';
+    if (cond.partner) tier = 'EP ' + EP_TIER_NAMES[cond.partner];
     else if (cond.org) tier = 'Členem asociace';
     else if (cond.score >= 5 && cond.bankai) tier = 'Bankai';
     else if (cond.score >= 2) tier = 'Shikai';
     else tier = 'base';
 
     // conditions surfaced so the UI can show WHY (and what unlocks the next tier) from one source
-    return res.status(200).json({ ok: true, mode, rate, pct: Math.round(rate * 1000) / 10, tier, conditions: cond });
+    return res.status(200).json({ ok: true, mode, rate, pct: Math.round(rate * 10000) / 100, tier, conditions: cond });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
