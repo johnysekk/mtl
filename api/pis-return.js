@@ -425,7 +425,8 @@ async function fbxReturnOrgFee(req, res, mtid, wantsHtml){
   return wantsHtml ? back('fbx=fail') : res.status(200).json({ ok:true, status:out.code, paid:false });
 }
 
-async function fbxReturn(req, res, mtid){
+// Exportováno i pro /api/fbx-notify (webhook): stejné ověření stavu a zaúčtování jako návrat z banky.
+export async function fbxReturn(req, res, mtid){
   // ?json=1 vynuti vypis misto presmerovani -- prohlizec se hlasi jako HTML, takze bez toho
   // se na odpoved neda podivat jinak nez pres curl.
   const _wantJson=String((req.query&&req.query.json)||'')==='1';

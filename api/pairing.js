@@ -27,9 +27,7 @@
 // TESTOVACÍ REŽIM: QR i párování jsou na 1 Kč. Mock Cobs Finbricks pro párování NEPODPORUJE
 // (chyba 10003), takže se testuje skutečným převodem 1 Kč na skutečný účet připojený
 // v sandboxu Finbricks (sandbox pracuje s živými daty). V ostrém provozu vždy plná částka.
-// POST ?notify=1    notifikace od Finbricks (adresa se nastavuje v jejich administraci). Tělu
-//                   nevěříme -- bere se z něj jen id párování a stav si server zjistí sám
-//                   podepsaným dotazem na Finbricks.
+// Notifikace od Finbricks chodí na /api/fbx-notify, ten volá pairingNotify().
 // GET  ?cron=1      (CRON_SECRET) stav otevřených párování, úklid, jednou denně obnova
 //                   připojení účtů z Finbricks + upozornění před koncem a po konci platnosti.
 import { createClient } from '@supabase/supabase-js';
@@ -225,13 +223,12 @@ async function cancelAtFbx(p, why) {
   await unmark(p);
 }
 
-// Všechna id párování v těle notifikace (tvar notifikace Finbricks zatím neznáme -- hledá se
-// klíč uniquePaymentPairingId kdekoli v těle).
-function idsIn(x, out) {
-  if (!x || typeof x !== 'object') return out;
-  if (Array.isArray(x)) { x.forEach((y) => idsIn(y, out)); return out; }
-  Object.keys(x).forEach((k) => { if (k === 'uniquePaymentPairingId' && /^\d+$/.test(String(x[k]))) out.add(String(x[k])); else idsIn(x[k], out); });
-  return out;
+// NOTIFIKACE OD FINBRICKS (/api/fbx-notify): jen spouštěč -- stav se ověří podepsaným dotazem.
+export async function pairingNotify(ids) {
+  for (const id of (ids || []).slice(0, 50)) {
+    const p = (await sb.from('payment_pairings').select('*').eq('id', String(id)).eq('status', 'scheduled').maybeSingle()).data;
+    if (p) { try { await checkOne(p); } catch (e) { console.error('[pairing] notify', id, e && e.message); } }
+  }
 }
 
 // ── CRON ──────────────────────────────────────────────────────────────────────────────────
@@ -290,21 +287,6 @@ export default async function handler(req, res) {
     }
     if (req.method !== 'POST') return res.status(405).json({ error: 'POST only' });
     let b = req.body || {}; if (typeof b === 'string') { try { b = JSON.parse(b); } catch (e) { b = {}; } }
-
-    // NOTIFIKACE OD FINBRICKS (webhook, adresu jim posíláme e-mailem): jen spouštěč, pravdu si
-    // server zjistí sám podepsaným dotazem na /payment/pairing/status. Proto se JWS notifikace
-    // nemusí ověřovat -- z těla se bere jen id párování. Finbricks čeká 202 Accepted a svoje
-    // x-request-id zpátky. Ostatní kategorie (resultCodeChange u plateb z účtu, výpadky) se
-    // zatím jen potvrdí.
-    if (String(q.notify || '') === '1') {
-      const xr = req.headers['x-request-id']; if (xr) res.setHeader('x-request-id', String(xr));
-      const ids = [...idsIn(b, new Set())].slice(0, 50);
-      for (const id of ids) {
-        const p = (await sb.from('payment_pairings').select('*').eq('id', id).eq('status', 'scheduled').maybeSingle()).data;
-        if (p) { try { await checkOne(p); } catch (e) { console.error('[pairing] notify', id, e && e.message); } }
-      }
-      return res.status(202).json({ ok: true });
-    }
 
     const me = await who(req);
     if (!me) return res.status(401).json({ error: 'not signed in' });
