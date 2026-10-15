@@ -24,7 +24,7 @@ import Stripe from 'stripe';
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 import { makePayToken } from './commission-pay-now.js';
 import { minChargeFor } from './_config.js';
-import { issueReceipts, receiptMailHtml, receiptTitle, docNo } from './_receipt.js';
+import { issueReceipts, receiptMail, receiptTitle, docNo } from './_receipt.js';
 const APP = process.env.APP_URL || 'https://app.martialtraininglab.com';
 
 import { isTestMode } from './_config.js';
@@ -48,13 +48,13 @@ async function sb(path, opts = {}) {
 // nema smysl: penize a pozastaveni patri do mailu.
 const RESEND = process.env.RESEND_API_KEY;
 const MAIL_FROM = process.env.MAIL_FROM || 'MTL <noreply@martialtraininglab.com>';
-async function sendEmail(to, subject, html) {
+async function sendEmail(to, subject, html, attachments) {
   if (!RESEND || !to) return;
   try {
     await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + RESEND, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: MAIL_FROM, to: [to], subject, html }),
+      body: JSON.stringify(Object.assign({ from: MAIL_FROM, to: [to], subject, html }, (attachments && attachments.length) ? { attachments } : {})),
     });
   } catch (e) { console.error('commission email', e.message); }
 }
@@ -119,7 +119,8 @@ async function settleInvoices(col, id, cur, ownerId) {
     method: 'card_on_file', notifyUserId: ownerId,
     mail: async (to, inv, r) => {
       let en = false; try { const p = (await sb(`profiles?id=eq.${ownerId}&select=lang`))[0]; en = !!(p && p.lang === 'en'); } catch (e) {}
-      await sendEmail(to, `${receiptTitle(inv.kind, en)} ${docNo(r)}`, receiptMailHtml(r, en));
+      const _rm = await receiptMail(r, en, inv.kind);
+      await sendEmail(to, `${receiptTitle(inv.kind, en)} ${docNo(r)}`, _rm.html, _rm.attachments);
     },
   });
 }

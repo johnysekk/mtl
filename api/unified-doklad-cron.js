@@ -124,6 +124,7 @@ const _L = {
         test:'\u{1F9EA} TESTOVAC\u00cd RE\u017dIM \u2014 nejde o form\u00e1ln\u00ed da\u0148ov\u00fd doklad a k \u017e\u00e1dn\u00e9 skute\u010dn\u00e9 transakci nedo\u0161lo',
         forWhom:(n,ico,ent)=>'Odb\u011bratel: <b>'+n+'</b>'+(ico?(', I\u010cO '+ico):'')+(ent?(' \u00b7 '+ent):'')+'.',
         hello:'Dobr\u00fd den', attached:(no,per,tot)=>'v p\u0159\u00edloze pos\u00edl\u00e1me fakturu '+no+' za provizi MTL za obdob\u00ed <b>'+per+'</b> \u2014 celkem <b>'+tot+'</b>.',
+        inApp:(no,per,tot)=>'vystavili jsme fakturu '+no+' za provizi MTL za obdob\u00ed <b>'+per+'</b> \u2014 celkem <b>'+tot+'</b>. PDF se te\u010f nepoda\u0159ilo p\u0159ipojit; fakturu najde\u0161 v appce MTL v Platby a provize \u2192 Faktury.',
         introTitle:'P\u0159ehled zprost\u0159edkovan\u00fdch plateb', introFee:'Provize MTL', introNone:(u)=>'Za toto obdob\u00ed nebyla \u00fa\u010dtov\u00e1na \u017e\u00e1dn\u00e1 provize'+(u?(' \u2014 zav\u00e1d\u011bc\u00ed obdob\u00ed plat\u00ed do '+u+'.'):'.')+' Nejde o da\u0148ov\u00fd doklad.',
         subjDoklad:'Faktura \u2014 provize MTL', subjIntro:'P\u0159ehled zprost\u0159edkovan\u00fdch plateb' },
   en: { period:'Period', regno:'Reg. number', inMtlOrg:'Organisation in MTL', inMtlGym:'Club in MTL', inMtlCoach:'Coach in MTL',
@@ -131,6 +132,7 @@ const _L = {
         test:'\u{1F9EA} TEST MODE \u2014 not a formal tax document; no actual transaction took place',
         forWhom:(n,ico,ent)=>'Customer: <b>'+n+'</b>'+(ico?(', reg. no. '+ico):'')+(ent?(' \u00b7 '+ent):'')+'.',
         hello:'Hello', attached:(no,per,tot)=>'please find attached invoice '+no+' for the MTL commission for <b>'+per+'</b> \u2014 total <b>'+tot+'</b>.',
+        inApp:(no,per,tot)=>'we have issued invoice '+no+' for the MTL commission for <b>'+per+'</b> \u2014 total <b>'+tot+'</b>. The PDF could not be attached this time; you will find the invoice in the MTL app under Payments and commission \u2192 Invoices.',
         introTitle:'Summary of intermediated payments', introFee:'MTL commission', introNone:(u)=>'No commission was charged for this period'+(u?(' \u2014 the introductory period runs until '+u+'.'):'.')+' This is not a tax document.',
         subjDoklad:'Invoice \u2014 MTL commission', subjIntro:'Summary of intermediated payments' },
 };
@@ -225,14 +227,13 @@ function buildSnap(kind, entityId, ownerId, identity, period, cur, data, ME, buy
 }
 function dokladMailHtml(s, hasPdf, lang){
   const T=_t(lang);
-  if (!hasPdf) return renderHtml(mtlModel(s, lang), { fragment: true });
   return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.6;">'
     + (s.test_mode ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:14px;">'+T.test+'</div>' : '')
     // OSLOVENÍ: doklad zní na právní subjekt (odběratel = právní název + IČO), ne na název klubu
     // v appce. Česky se právní jméno do oslovení neskloňuje dobře („Dobrý den, Petr Haiser"), proto
     // neutrální pozdrav a komu doklad patří stojí věcně ve větě pod ním.
     + '<p style="margin:0 0 10px;">' + T.hello + ',</p>'
-    + '<p style="margin:0 0 10px;">' + T.attached(esc(_dokNo(s)), esc(periodLabelL(s.period_month, lang)), esc(_money(s.amount, s.currency, lang))) + '</p>'
+    + '<p style="margin:0 0 10px;">' + (hasPdf ? T.attached : T.inApp)(esc(_dokNo(s)), esc(periodLabelL(s.period_month, lang)), esc(_money(s.amount, s.currency, lang))) + '</p>'
     + (s.cust_name ? ('<p style="margin:0 0 10px;">' + T.forWhom(esc(s.cust_name), s.cust_ico ? esc(s.cust_ico) : '', s.cust_trade_name ? ((s.organization_id ? T.inMtlOrg : (s.gym_id ? T.inMtlGym : T.inMtlCoach)) + ' \u201e' + esc(s.cust_trade_name) + '\u201c') : '') + '</p>') : '')
     + statusBoxHtml(mtlStatus(s, lang))
     + ((!mtlStatus(s, lang).paid && s._payLink) ? ('<p style="margin:14px 0;"><a href="' + s._payLink + '" style="display:inline-block;padding:12px 22px;background:#E63946;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;">' + (lang === 'en' ? 'Pay now' : 'Zaplatit hned') + '</a></p>') : '')

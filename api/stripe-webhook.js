@@ -8,7 +8,7 @@
 //
 // DŮLEŽITÉ: webhook musí číst RAW body (proto bodyParser:false), jinak selže ověření podpisu.
 
-import { issueReceipts, receiptMailHtml, receiptTitle, docNo } from './_receipt.js';
+import { issueReceipts, receiptMail, receiptTitle, docNo } from './_receipt.js';
 import Stripe from 'stripe';
 import { subMail } from './_sub-mail.js';
 import { rerateOwner } from './gym-rerate.js';
@@ -753,7 +753,8 @@ export default async function handler(req, res) {
                   method: 'card_paynow', noNotify: true,   // zprávu pošle _paynowNotify (jedna za platbu)
                   mail: async (to, inv, r) => {
                     let en = false; try { const p = ((await sbGet(`profiles?id=eq.${encodeURIComponent(inv.owner_id || inv.coach_id)}&select=lang`)) || [])[0]; en = !!(p && p.lang === 'en'); } catch (e) {}
-                    await sendResend(to, `${receiptTitle(inv.kind, en)} ${docNo(r)}`, receiptMailHtml(r, en));
+                    const _rm = await receiptMail(r, en, inv.kind);
+                    await sendResend(to, `${receiptTitle(inv.kind, en)} ${docNo(r)}`, _rm.html, { attachments: _rm.attachments });
                   },
                 });
               } catch (e) { console.error('[commission_paynow] receipt', e && e.message); }

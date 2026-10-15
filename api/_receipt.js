@@ -11,7 +11,8 @@
 // faktury (ref = id faktury), ref_doklad_id = první z nich. Faktura se uvede nejvýš jednou.
 
 // Název dokladu, číslo a částky -- stejné jako na dokladu (/doklad-layout.js).
-import { receiptTitle, docNo, money, mtlModel, renderHtml } from '../doklad-layout.js';
+import { receiptTitle, docNo, money, mtlModel, esc } from '../doklad-layout.js';
+import { mtlDokladPdf } from './_doklad-pdf.js';
 export { receiptTitle, docNo };
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
@@ -104,5 +105,22 @@ export async function issueReceipts(filter, opts = {}) {
   return [r];
 }
 
-// E-mail s dokladem o úhradě: tělo = samotný doklad, tentýž obsah a vzhled jako v appce.
-export function receiptMailHtml(r, en) { return renderHtml(mtlModel(r, en ? 'en' : 'cs'), { fragment: true }); }
+// E-MAIL S DOKLADEM O ÚHRADĚ: krátký dopis a doklad jako PDF v příloze -- stejně jako faktura.
+// Doklad do těla e-mailu nepatří (písmo i vzhled tam každá pošta rozbije jinak). Když se PDF
+// nepodaří vytvořit, dopis odkáže do appky. Vrací { html, attachments } pro Resend.
+export async function receiptMail(r, en, refKind) {
+  const lang = en ? 'en' : 'cs', no = esc(docNo(r)), amt = esc(money(r.amount, r.currency, lang)), title = receiptTitle(refKind, lang);
+  let attachments = [];
+  try { const buf = await mtlDokladPdf(r, lang); attachments = [{ filename: String(docNo(r)).replace(/[^A-Za-z0-9-]/g, '') + '.pdf', content: buf.toString('base64') }]; }
+  catch (e) { console.error('[receipt] pdf', e.message); }
+  const test = mtlModel(r, lang).test;
+  const line = attachments.length
+    ? (en ? ('attached is <b>' + esc(title) + '</b> ' + no + ', amount <b>' + amt + '</b>.') : ('v příloze posíláme <b>' + esc(title.charAt(0).toLowerCase() + title.slice(1)) + '</b> ' + no + ', částka <b>' + amt + '</b>.'))
+    : (en ? ('we have issued <b>' + esc(title) + '</b> ' + no + ', amount <b>' + amt + '</b>. The PDF could not be attached this time; you will find it in the MTL app under Payments and commission → Invoices.')
+          : ('vystavili jsme <b>' + esc(title.charAt(0).toLowerCase() + title.slice(1)) + '</b> ' + no + ', částka <b>' + amt + '</b>. PDF se teď nepodařilo připojit; najdeš ho v appce MTL v Platby a provize → Faktury.'));
+  const html = '<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.6;">'
+    + (test ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:14px;">' + esc(test) + '</div>' : '')
+    + '<p style="margin:0 0 10px;">' + (en ? 'Hello' : 'Dobrý den') + ',</p><p style="margin:0 0 10px;">' + line + '</p>'
+    + '<p style="margin:18px 0 0;color:#888;font-size:12px;">' + esc(r.sup_name || 'Martial Training Lab') + (r.sup_email ? (' · ' + esc(r.sup_email)) : '') + (r.sup_phone ? (' · ' + esc(r.sup_phone)) : '') + '</p></div>';
+  return { html, attachments };
+}

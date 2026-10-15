@@ -13,11 +13,11 @@
 import { vatMode, isEU } from './_vat.js';
 import { EP_TIER_NAMES } from './_rate.js';
 // Obsah a vzhled faktury (appka, e-mail, PDF) je jen v /doklad-layout.js.
-import { mtlModel, mtlStatus, renderHtml, statusBoxHtml, subPeriod, money, esc as _esc } from '../doklad-layout.js';
+import { mtlModel, mtlStatus, statusBoxHtml, subPeriod, money, esc as _esc } from '../doklad-layout.js';
 import { mtlDokladPdf } from './_doklad-pdf.js';
 import { viesCheck } from './tax-verify.js';
 import { b2cSmallState, OSS_LIMIT_CZK, OSS_WARN_SHARE } from './_oss.js';
-import { issueReceipts, receiptMailHtml, receiptTitle, docNo } from './_receipt.js';
+import { issueReceipts, receiptMail, receiptTitle, docNo } from './_receipt.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '').replace(/\/rest\/v1\/?$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -61,30 +61,28 @@ async function _mail(to, subject, html, attachments) {
   } catch (e) { console.error('[ep-doklad] mail', to, e.message); }
 }
 // DOPIS K FAKTUŘE (tělo e-mailu). Faktura sama je v příloze jako PDF z /doklad-layout.js;
-// rámeček stavu úhrady je tentýž jako na faktuře.
+// rámeček stavu úhrady je tentýž jako na faktuře. Když se PDF nepodaří vytvořit, dopis odkáže
+// do appky (faktura do těla e-mailu nepatří -- písmo i vzhled tam každá pošta rozbije jinak).
 const _T = (en) => en ? {
   hello: 'Hello', attached: (no, per, amt) => 'attached is invoice <b>' + no + '</b> for the period ' + per + ', amount <b>' + amt + '</b>.',
+  inApp: (no, per, amt) => 'we have issued invoice <b>' + no + '</b> for the period ' + per + ', amount <b>' + amt + '</b>. The PDF could not be attached this time; you will find the invoice in the MTL app under Payments and commission → Invoices.',
   forWhom: (n, ico) => 'Customer: <b>' + n + '</b>' + (ico ? (', Reg. number ' + ico) : '') + '.', pay: 'Pay now',
 } : {
   hello: 'Dobrý den', attached: (no, per, amt) => 'v příloze posíláme fakturu <b>' + no + '</b> za období ' + per + ', částka <b>' + amt + '</b>.',
+  inApp: (no, per, amt) => 'vystavili jsme fakturu <b>' + no + '</b> za období ' + per + ', částka <b>' + amt + '</b>. PDF se teď nepodařilo připojit; fakturu najdeš v appce MTL v Platby a provize → Faktury.',
   forWhom: (n, ico) => 'Odběratel: <b>' + n + '</b>' + (ico ? (', IČO ' + ico) : '') + '.', pay: 'Zaplatit hned',
 };
 const _payBtn = (url, T) => url ? ('<p style="margin:14px 0;"><a href="' + _esc(url) + '" style="display:inline-block;padding:12px 22px;background:#E63946;color:#fff;text-decoration:none;border-radius:10px;font-weight:700;">' + T.pay + '</a></p>') : '';
-function _epMailHtml(r, en, payUrl) {
+function _epMailHtml(r, en, payUrl, hasPdf) {
   const T = _T(en), lang = en ? 'en' : 'cs', st = mtlStatus(r, lang), test = mtlModel(r, lang).test;
   return '<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#1a1a1a;font-size:14px;line-height:1.6;">'
     + (test ? '<div style="background:#FDECEC;border:1px solid #F3C0C0;border-radius:8px;color:#8a1c1c;font:700 12px/1.4 Arial,sans-serif;padding:9px 12px;margin-bottom:14px;">' + _esc(test) + '</div>' : '')
     + '<p style="margin:0 0 10px;">' + T.hello + ',</p>'
-    + '<p style="margin:0 0 10px;">' + T.attached(_esc(r.doc_no), _esc(subPeriod(r, lang)), _esc(money(r.amount, r.currency, lang))) + '</p>'
+    + '<p style="margin:0 0 10px;">' + (hasPdf ? T.attached : T.inApp)(_esc(r.doc_no), _esc(subPeriod(r, lang)), _esc(money(r.amount, r.currency, lang))) + '</p>'
     + (r.cust_name ? ('<p style="margin:0 0 10px;">' + T.forWhom(_esc(r.cust_name), r.cust_ico ? _esc(r.cust_ico) : '') + '</p>') : '')
     + statusBoxHtml(st)
     + (st.unpaid ? _payBtn(payUrl, T) : '')
     + '<p style="margin:18px 0 0;color:#888;font-size:12px;">' + _esc(r.sup_name || 'Martial Training Lab') + (r.sup_email ? (' · ' + _esc(r.sup_email)) : '') + (r.sup_phone ? (' · ' + _esc(r.sup_phone)) : '') + '</p></div>';
-}
-// Bez PDF (vytvoření selhalo) jde celá faktura v těle e-mailu -- tentýž obsah jako v appce.
-function _epInvoiceHtml(r, en, payUrl) {
-  const lang = en ? 'en' : 'cs';
-  return renderHtml(mtlModel(r, lang), { fragment: true }) + (mtlStatus(r, lang).unpaid ? _payBtn(payUrl, _T(en)) : '');
 }
 function _amt(v, cur, lang) {
   try { return Number(v).toLocaleString(lang === 'en' ? 'en-GB' : 'cs-CZ', { minimumFractionDigits: 0, maximumFractionDigits: 2 }) + ' ' + (String(cur).toUpperCase() === 'CZK' ? 'Kč' : String(cur).toUpperCase()); }
@@ -120,7 +118,8 @@ export default async function handler(req, res) {
             method: 'stripe_invoice', notifyUserId: uid, paidAt: new Date().toISOString(),
             mail: async (to, inv, r) => {
               let en = false; try { const p = (await sb(`profiles?id=eq.${encodeURIComponent(uid)}&select=lang`))[0]; en = !!(p && p.lang === 'en'); } catch (e) {}
-              await _mail(to, `${receiptTitle(inv.kind, en)} ${docNo(r)}`, receiptMailHtml(r, en));
+              const _rm = await receiptMail(r, en, inv.kind);
+              await _mail(to, `${receiptTitle(inv.kind, en)} ${docNo(r)}`, _rm.html, _rm.attachments);
             },
           });
           return res.status(200).json({ ok: true, receipt: (rc[0] && rc[0].id) || null, invoice: ex[0].id });
@@ -316,10 +315,9 @@ export default async function handler(req, res) {
       try { const _buf = await mtlDokladPdf(_r, en ? 'en' : 'cs');
         _att = [{ filename: docNoStr + '-' + (orgId ? (en ? 'supplier-profile' : 'profil-dodavatele') : 'exclusive-partner') + '-' + String(period).replace(/-/g, '') + '.pdf', content: _buf.toString('base64') }];
       } catch (e) { console.error('[ep-doklad] pdf', e.message); }
-      // Bez PDF (selhalo) jde faktura celá v těle e-mailu, ať o ni odběratel nepřijde.
       if (row.cust_email && id) await _mail(row.cust_email,
         ((row.test_mode ? '[TEST] ' : '') + (en ? 'Invoice ' + docNoStr + ' — ' + PRODUCT_EN + ' ' : 'Faktura ' + docNoStr + ' — ' + PRODUCT + ' ')) + period,
-        _att.length ? _epMailHtml(_r, en, b.unpaid ? (b.pay_url || null) : null) : _epInvoiceHtml(_r, en, b.unpaid ? (b.pay_url || null) : null), _att);
+        _epMailHtml(_r, en, b.unpaid ? (b.pay_url || null) : null, _att.length > 0), _att);
       else console.error('[ep-doklad] e-mail neodeslán: cust_email=' + (row.cust_email || '—') + ' id=' + (id || '—'));
     } catch (e) { console.error('[ep-doklad] e-mail', (e && e.message) || e); }
 
