@@ -12,27 +12,22 @@
 //   attach   { vs, tbl, id }                    přihlášený: „Zaplaceno" -- ověří řádek, cenu
 //                                               a příjemce, pošle Finbricks požadavek na párování
 //                                               a zapíše pairing_id na řádek platby
-//   test_incoming { vs }                        jen Testovací režim, autor platby (nebo founder):
-//                                               sandboxová platba z účtu (Mock Cobs, 1 Kč) s tímhle
-//                                               VS na účet příjemce -- test bez skutečných peněz
-//   check { vs }                                autor platby (nebo founder): stav párování hned
 //
-// TESTOVACÍ REŽIM: sandbox má strop 1 Kč, takže se párování posílá na 1 Kč (QR v Testovacím
-// režimu je taky na 1 Kč). V ostrém provozu vždy se skutečnou částkou.
+// TESTOVACÍ REŽIM: QR i párování jsou na 1 Kč. Mock Cobs Finbricks pro párování NEPODPORUJE
+// (chyba 10003), takže se testuje skutečným převodem 1 Kč na skutečný účet připojený
+// v sandboxu Finbricks (sandbox pracuje s živými daty). V ostrém provozu vždy plná částka.
 // POST ?notify=1    notifikace od Finbricks (adresa se nastavuje v jejich administraci). Tělu
 //                   nevěříme -- bere se z něj jen id párování a stav si server zjistí sám
 //                   podepsaným dotazem na Finbricks.
 // GET  ?cron=1      (CRON_SECRET) dotaz na stav otevřených párování a úklid.
-import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
-import { fbxConf, fbxNow, fbxCall, psuIpFrom, FBX_MAX_SANDBOX } from './_fbx.js';
+import { fbxConf, fbxNow, fbxCall, FBX_MAX_SANDBOX } from './_fbx.js';
 import { isTestMode } from './_config.js';
 import { checkRowPrice } from './_price-check.js';
 import { cohortPisPlan } from './_cohort-pis.js';
 import { pisSettle } from './pis-return.js';
 
 const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-const FOUNDER = process.env.FOUNDER_UUID || '7e08d4bb-0efa-47ae-bd6a-85e9bd04400c';
 const TABLES = ['gym_bookings', 'gym_memberships', 'bookings', 'event_tickets', 'cohort_members', 'merch_orders'];
 const PAID = ['paid', 'active', 'deposit_paid', 'enrolled', 'converted', 'completed'];
 const GONE = ['released', 'expired', 'cancelled', 'refunded', 'ended', 'removed', 'declined'];
@@ -240,7 +235,7 @@ export default async function handler(req, res) {
       const finish = new Date(Date.now() + FINISH_DAYS * 86400e3).toISOString();
       const r = await fbxCall(C, 'POST', '/payment/pairing/schedule', { merchantId: C.merchant, payments: [{
         uniquePaymentPairingId: String(p.id),
-        // Sandbox: 1 Kč (strop sandboxu, stejně jako QR v Testovacím režimu a platba z Mock Cobs).
+        // Sandbox: 1 Kč -- stejně jako QR v Testovacím režimu (skutečný převod 1 Kč na připojený účet).
         amount: { value: C.sandbox ? Number(FBX_MAX_SANDBOX) : Number(p.amount), currency: 'CZK' },
         creditor: { accountIdentification: { value: iban(p.iban), type: 'IBAN' } },
         remittanceInformation: { structured: { reference: 'VS:' + String(p.id) } },
@@ -248,10 +243,9 @@ export default async function handler(req, res) {
       }] });
       const f = firstPay(r.data);
       // Co Finbricks vrací: dokumentace má u schedule `scheduleStatus` SCHEDULED / FAILED, ale
-      // zároveň píše, že schedule „vrací UNPAIRED", když platba hned nenašel -- tedy
-      // `paymentPairingStatus`. Dřív se bralo jen SCHEDULED, takže párování, které Finbricks
-      // přijal (UNPAIRED), MTL zapsalo jako 'failed': student dostal „klub potvrdí", klub
-      // „potvrď" a cron se na stav nikdy nezeptal. Teď: přijato je všechno kromě chyby.
+      // u /status píše, že schedule „vrací UNPAIRED", když platbu hned nenajde -- tedy
+      // `paymentPairingStatus`. Přijaté je proto SCHEDULED, UNPAIRED i PAIRED; FAILED a chyba
+      // (např. 10003 nepodporovaná banka) ne -> platba se potvrzuje ručně.
       const sst = String((f && (f.scheduleStatus || f.paymentPairingStatus)) || '').toUpperCase();
       const ok = r.ok && !!f && ['SCHEDULED', 'UNPAIRED', 'PAIRED'].includes(sst);
       await sb.from('payment_pairings').update({ tbl, row_id: id, fbx_env: C.env, finish_at: finish,
@@ -271,36 +265,6 @@ export default async function handler(req, res) {
       // Platba už na účtu je (zaplaceno dřív, než klikl „Zaplaceno") -> potvrdit hned.
       if (sst === 'PAIRED') { const p2 = (await sb.from('payment_pairings').select('*').eq('id', p.id).maybeSingle()).data; if (p2) await checkOne(p2); }
       return res.status(200).json({ ok: true, status: 'scheduled' });
-    }
-
-    // ── TEST BEZ PENĚZ A OKAMŽITÝ STAV (jen vlastní platba) ──────────────────────────────
-    if (action === 'test_incoming' || action === 'check') {
-      if (!/^\d+$/.test(String(b.vs || ''))) return res.status(400).json({ error: 'bad request' });
-      const p = (await sb.from('payment_pairings').select('*').eq('id', String(b.vs)).maybeSingle()).data;
-      if (!p || (String(p.user_id) !== String(me) && String(me) !== FOUNDER)) return res.status(404).json({ error: 'Párování neexistuje' });
-      if (action === 'check') {
-        const out = p.status === 'scheduled' ? await checkOne(p) : p.status;
-        const now = (await sb.from('payment_pairings').select('status,last_error').eq('id', p.id).maybeSingle()).data || {};
-        return res.status(200).json({ ok: true, result: out, status: now.status, tbl: p.tbl || null, last_error: now.last_error || null });
-      }
-      if (!(await isTestMode())) return res.status(400).json({ error: 'Jen v Testovacím režimu' });
-      if (p.status !== 'scheduled') return res.status(400).json({ error: 'Párování není ve stavu „čeká“ (' + p.status + ')' });
-      if (p.fbx_env !== 'sandbox') return res.status(400).json({ error: 'Párování běží v ostrém Finbricks — test jen v sandboxu' });
-      const C = fbxConf('sandbox');
-      if (!C.ok) return res.status(500).json({ error: 'Finbricks sandbox nemá nastavené klíče' });
-      const APP = process.env.APP_URL || 'https://app.martialtraininglab.com';
-      const payload = { merchantId: C.merchant, merchantTransactionId: crypto.randomUUID(), amount: FBX_MAX_SANDBOX,
-        creditorAccountIban: iban(p.iban), creditorName: 'MTL test', variableSymbol: String(p.id),
-        description: 'MTL test parovani ' + p.id, initiatorName: 'Martial Training Lab', instructionPriority: 'INST',
-        callbackUrl: APP + '/?pairtest=' + p.id, shoppingCartUrl: APP + '/', paymentProvider: 'MOCK_COBS' };
-      const opts = { psuIp: psuIpFrom(req), psuUa: req.headers['user-agent'] || 'MTL/1.0', lang: 'cs' };
-      let r = await fbxCall(C, 'POST', '/ecommerce/transaction/init', payload, opts);
-      if (!r.ok && r.data && [308, 300, 302].includes(r.data.code)) {
-        const p2 = { ...payload, totalPrice: payload.amount }; delete p2.amount; delete p2.shoppingCartUrl;
-        r = await fbxCall(C, 'POST', '/transaction/platform/init', p2, opts);
-      }
-      if (!r.ok || !r.data || !r.data.redirectUrl) return res.status(400).json({ error: 'Finbricks: ' + JSON.stringify(r.data || { http: r.status }).slice(0, 300) });
-      return res.status(200).json({ ok: true, url: r.data.redirectUrl });
     }
 
     return res.status(400).json({ error: 'unknown action' });
