@@ -1,4 +1,5 @@
 import { rerateOwner } from './gym-rerate.js';
+import { repriceEpForRefDisc } from './_ep.js';
 // /api/bankai-cron.js — maintains profiles.bankai_eligible for the Bankai perf-gate.
 // Given coach_ref_score>=5 (the referral threshold, checked at rate-compute time), a provider
 // is Bankai-eligible if EITHER: >=10 taught privates (transactions type=coach_1to1 for this
@@ -34,9 +35,18 @@ export default async function handler(req, res) {
         // for a money fix to not work. A Stripe subscription locks its application_fee_percent at
         // creation, so without this the reward reaches nobody who is already a member.
         try { await rerateOwner(p.id); } catch (e) { console.error('rerate', e && e.message); }
+        // Bankai zlevní i Exclusive Partnera o 50 % od další platby (_ep.js).
+        try { await repriceEpForRefDisc(p.id); } catch (e) { console.error('ep ref disc', e && e.message); }
       }
     }
-    res.status(200).json({ ok: true, checked: (cands || []).length, changed });
+    // Sleva z EP za Shikai/Bankai u všech běžících předplatných (i u těch, kdo EP koupili
+    // dřív, než slevu dostali). Kdo ji už má, toho repriceEpForRefDisc hned pustí.
+    let epRepriced = 0;
+    try {
+      const eps = await sbGet(`profiles?partner_sub=not.is.null&coach_ref_score=gte.2&select=id&limit=2000`);
+      for (const e of eps || []) { try { if (await repriceEpForRefDisc(e.id)) epRepriced++; } catch (x) { console.error('ep ref disc', x && x.message); } }
+    } catch (e) {}
+    res.status(200).json({ ok: true, checked: (cands || []).length, changed, epRepriced });
   } catch (err) {
     console.error('bankai-cron', err);
     res.status(500).json({ error: err.message });

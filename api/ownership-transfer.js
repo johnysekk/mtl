@@ -61,6 +61,16 @@ async function activeCoOwner(gymId, userId) {
   const r = await sbGet(`gym_coaches?gym_id=eq.${q(gymId)}&coach_id=eq.${q(userId)}&co_owner=eq.true&status=eq.active&select=id&limit=1`);
   return !!(r && r.length);
 }
+// BRÁNA NA 4. KLUB (sql/club-gate.sql): klub nad tři smí mít jen schválený řetězec (chain_verified).
+// Databáze to hlídá u založení z appky; převod klubu jde přes server, proto se kontroluje tady --
+// ať nový majitel dostane srozumitelnou zprávu. Founder (převod v Adminu) smí vždy.
+async function overGymCap(userId) {
+  const p = await one(`profiles?id=eq.${q(userId)}&select=chain_verified`);
+  if (p && p.chain_verified) return false;
+  const g = (await sbGet(`gyms?owner_id=eq.${q(userId)}&deleted_at=is.null&select=id`)) || [];
+  return g.length >= 3;
+}
+const GYM_CAP_MSG = 'Nový majitel už má 3 kluby. Čtvrtý a další klub mu nejdřív musí schválit MTL — požádá o to v appce (Žádost o 4. klub).';
 async function profileByEmail(email) {
   const e = String(email || '').trim().toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return null;
@@ -237,6 +247,7 @@ export default async function handler(req, res) {
       if (action === 'request' && kind === 'gym' && !(await activeCoOwner(id, to.id))) {
         return res.status(400).json({ error: 'Klub jde předat jen aktivnímu spolumajiteli. Nejdřív ho v Týmu udělej spolumajitelem.' });
       }
+      if (action === 'request' && kind === 'gym' && (await overGymCap(to.id))) return res.status(409).json({ error: GYM_CAP_MSG });
       const from = await prof(E.owner_id);
       // Rozpracovaná žádost k tomuhle klubu / organizaci se nahrazuje novou.
       await sbWrite('PATCH', `ownership_transfers?kind=eq.${q(kind)}&entity_id=eq.${q(id)}&status=eq.pending`, { status: 'cancelled', decided_at: new Date().toISOString() });
@@ -323,6 +334,7 @@ export default async function handler(req, res) {
         return res.status(409).json({ error: 'Majitel se mezitím změnil -- žádost už neplatí' });
       }
       if (X.kind === 'gym' && !(await activeCoOwner(X.entity_id, me))) return res.status(409).json({ error: 'Už nejsi spolumajitel klubu -- převzít ho nejde' });
+      if (X.kind === 'gym' && (await overGymCap(me))) return res.status(409).json({ error: 'Už máš 3 kluby. Čtvrtý a další ti nejdřív musí schválit MTL — požádej o to v appce (Žádost o 4. klub), pak převzetí dokonči.' });
       // Předplatné profilu dodavatele: volba je povinná a musí odpovídat dnešnímu stavu (mezitím ho
       // dosavadní majitel mohl zrušit -- pak už „dál platí on" nejde).
       const ch = subChoices(E, X);

@@ -62,10 +62,23 @@ export const EP_TIERS = {
 // Měna EP podle země toho, na koho jde faktura (klub nebo kouč, billing_country): Česko a bez
 // vyplněné země koruny, jinak eura. Zrcadlo _epCurFor v index.html.
 export function epCurrencyFor(cc) { const c = String(cc || '').trim().toUpperCase(); return (!c || c === 'CZ') ? 'CZK' : 'EUR'; }
-// Měsíční cena stupně v měně (zakládající, když ji člověk u stupně má nebo dostane).
-export function epAmount(tier, cur, founding) {
+// SLEVA Z EP ZA PŘIVEDENÉ POSKYTOVATELE: Shikai (2 aktivní přivedení) 20 %, Bankai (5) 50 %
+// z ceny předplatného na každém stupni, i ze zakládající ceny. Stejná podmínka jako sazba
+// v ladderRate (Bankai = skóre 5 a bankai_eligible). Shikai/Bankai se nedá ztratit
+// (coach_ref_score jen roste), sleva tedy platí natrvalo. Zrcadlo _epRefDisc v index.html.
+export const EP_REF_DISC = { shikai: 0.2, bankai: 0.5 };
+export function epRefDisc(p) {
+  const s = Number(p && p.coach_ref_score) || 0;
+  if (s >= 5 && p.bankai_eligible) return EP_REF_DISC.bankai;
+  if (s >= 2) return EP_REF_DISC.shikai;
+  return 0;
+}
+// Měsíční cena stupně v měně (zakládající, když ji člověk u stupně má nebo dostane), po slevě
+// Shikai/Bankai (disc 0 | 0,2 | 0,5), zaokrouhlená na celé Kč / €.
+export function epAmount(tier, cur, founding, disc) {
   const T = EP_TIERS[tier]; const c = String(cur || 'CZK').toUpperCase();
-  return (founding && T.founding) ? T.founding[c] : T.price[c];
+  const base = (founding && T.founding) ? T.founding[c] : T.price[c];
+  return disc > 0 ? Math.round(base * (1 - disc)) : base;
 }
 export const EP_TIER_ORDER = ['genin', 'chunin', 'jonin', 'kage'];
 export const EP_YEAR_MONTHS = 10;

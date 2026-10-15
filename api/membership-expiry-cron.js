@@ -1,4 +1,6 @@
 import { sellKind } from './_sell-kind.js';
+import Stripe from 'stripe';
+import { attRenewalPass } from './_att-disc.js';
 // /api/membership-expiry-cron — end memberships whose paid period has run out.
 //
 // WHY THIS EXISTS
@@ -230,7 +232,38 @@ export default async function handler(req, res) {
       console.error('renewal reminders', e.message);
     }
 
-    return res.status(200).json({ ok: true, checked: (rows || []).length, ended, warned, renewWarned, notified: notified.length });
+    // ---- SLEVA ZA DOCHÁZKU u předplatného kartou (_att-disc.js) -----------------------------
+    // 2 dny před obnovou: kdo splnil docházku u permanentky se zapnutou slevou, má příští platbu
+    // nižší (záporná položka na faktuře ve Stripe). Zprávu dostane každý, komu pravidlo platí --
+    // i ten, komu kousek chyběl, ať ví, kolik a proč.
+    let att = null;
+    try {
+      const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+      // Čtení při chybě vyhazuje (řádek se přeskočí a zkusí se zítra); zápis vrací, jestli řádek změnil.
+      const sbGet = (path) => sb(path);
+      const sbPatch = async (path, body) => { try { const r = await sb(path, { method: 'PATCH', body: JSON.stringify(body) }); return Array.isArray(r) && r.length > 0; } catch (e) { console.error('att patch', e.message); return false; } };
+      const fmt = (v, cur, en) => Number(v).toLocaleString(en ? 'en-GB' : 'cs-CZ') + (String(cur || 'CZK').toUpperCase() === 'CZK' ? (en ? ' CZK' : ' Kč') : (String(cur).toUpperCase() === 'EUR' ? ' €' : ' ' + cur));
+      const notify = async (m, g, r) => {
+        const cur = m.currency || g.currency || 'CZK';
+        const when = new Date(m.period_end).toLocaleDateString('cs-CZ', { timeZone: 'Europe/Prague' });
+        const whenEn = new Date(m.period_end).toLocaleDateString('en-GB', { timeZone: 'Europe/Prague' });
+        const who = m.child_name ? ` (${m.child_name})` : '';
+        const pctTxt = String(r.pct).replace('.', ',');
+        const plan = m.plan_name ? ` ${m.plan_name}` : '';
+        const cs = r.amount
+          ? `🎯 Docházka ${pctTxt} %${who}: z ${r.reserved} rezervovaných tréninků jsi odchodil(a) ${r.attended}. Další platba${plan} v ${g.name || m.gym_name || 'klubu'} (${when}) bude o ${fmt(r.amount, cur)} nižší: ${fmt(Math.max(0, (Number(m.amount) || 0) - r.amount), cur)} místo ${fmt(m.amount, cur)}.`
+          : `📊 Docházka ${pctTxt} %${who}: z ${r.reserved} rezervovaných tréninků jsi odchodil(a) ${r.attended}. Na slevu ${fmt(r.rule.amt * Math.max(1, parseInt(m.months, 10) || 1), cur)} v ${g.name || m.gym_name || 'klubu'} bylo potřeba aspoň ${r.rule.pct} % a ${r.need} rezervací — příští platba (${when}) je v plné výši. V dalším období to jde znovu.`;
+        const en = r.amount
+          ? `🎯 Attendance ${r.pct}%${who}: you attended ${r.attended} of ${r.reserved} booked sessions. Your next payment${plan} at ${g.name || m.gym_name || 'the club'} (${whenEn}) is ${fmt(r.amount, cur, true)} lower: ${fmt(Math.max(0, (Number(m.amount) || 0) - r.amount), cur, true)} instead of ${fmt(m.amount, cur, true)}.`
+          : `📊 Attendance ${r.pct}%${who}: you attended ${r.attended} of ${r.reserved} booked sessions. The ${fmt(r.rule.amt * Math.max(1, parseInt(m.months, 10) || 1), cur, true)} discount at ${g.name || m.gym_name || 'the club'} needed at least ${r.rule.pct}% and ${r.need} bookings — the next payment (${whenEn}) is in full. You can earn it next period.`;
+        if (!r.amount && !r.reserved) return;              // bez jediné rezervace nic neposílat
+        await sb('notifications', { method: 'POST', body: JSON.stringify({ user_id: m.student_id, type: 'system', read: false, message: cs,
+          data: JSON.stringify({ kind: 'memb_att_disc', gym_id: m.gym_id, membership_id: m.id, amount: r.amount || 0, pct: r.pct, msg_cs: cs, msg_en: en }) }) });
+      };
+      att = await attRenewalPass({ sbGet, sbPatch, stripe, notify });
+    } catch (e) { console.error('att renewal pass', e.message); }
+
+    return res.status(200).json({ ok: true, checked: (rows || []).length, ended, warned, renewWarned, notified: notified.length, att });
   } catch (e) {
     console.error('membership-expiry-cron', e.message);
     return res.status(500).json({ ok: false, error: e.message });

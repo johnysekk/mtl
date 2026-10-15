@@ -1,4 +1,5 @@
 import { rerateOwner } from './gym-rerate.js';
+import { repriceEpForRefDisc } from './_ep.js';
 // /api/referral-cron.js
 // Daily job: award +2 referral points to BOTH the invitee and the referrer (and +10 XP to
 // the referrer, computed in the app from referral_rewarded), only once the invitee has
@@ -214,14 +215,21 @@ export default async function handler(req, res) {
         // for a money fix to not work. A Stripe subscription locks its application_fee_percent at
         // creation, so without this the reward reaches nobody who is already a member.
         try { await rerateOwner(c.referred_by); } catch (e) { console.error('rerate', e && e.message); }
-        let msg = `\uD83C\uDF89 Tv\u016Fj pozvan\u00FD gym ${c.name || ''} je te\u010F aktivn\u00ED! +1 bod do MTL Ligy \uD83C\uDFC6 \u2014 m\u00E1\u0161 ${newScore} aktivn\u00EDch p\u0159iveden\u00FDch. \uD83E\uDD4A`;
-        // Milestones must match the REAL ladder in _ladderRate: Shikai at 2, Bankai at 5
-        // (+ the performance gate, Stripe only). They used to fire at 3 and 10 - the old
-        // ladder - so a referrer was congratulated a referral late. Fee-only wording: we
-        // never show a "you keep X%" figure.
-        if (newScore === 2) msg = `\uD83D\uDDE1\uFE0F 2 aktivn\u00ED p\u0159iveden\u00ED! Odemkl jsi SHIKAI \u2014 provize MTL ti klesla. \uD83E\uDD4A`;
-        else if (newScore === 5) msg = `\uD83D\uDD25 5 aktivn\u00EDch p\u0159iveden\u00FDch! M\u00E1\u0161 na BANKAI (provize 2 %) \u2014 ve Stripe re\u017Eimu a po spln\u011Bn\u00ED v\u00FDkonu (10 soukromek nebo 25 \u010Dlenstv\u00ED). \uD83C\uDFC6`;
-        await sb(`notifications`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: c.referred_by, type: 'referral', read: false, data: JSON.stringify({ kind: 'coach_ref_qualified', who: c.name || '', score: newScore }), message: msg }]) });
+        // Shikai (2) zlevní i Exclusive Partnera o 20 % od další platby (_ep.js). Bankai (50 %)
+        // přecení bankai-cron, až potvrdí bankai_eligible.
+        if (newScore === 2) { try { await repriceEpForRefDisc(c.referred_by); } catch (e) { console.error('ep ref disc', e && e.message); } }
+        // Milníky podle skutečného žebříčku (_rate.js ladderRate): Shikai od 2, Bankai od 5.
+        const _nm = c.name || '';
+        let msg = `🎉 Tvůj pozvaný poskytovatel ${_nm} je teď aktivní — máš ${newScore} aktivních přivedených. Na Shikai potřebuješ 2, na Bankai 5. 🥊`;
+        let msgEn = `🎉 ${_nm || 'The provider you invited'} is now active — you have ${newScore} active referrals. Shikai needs 2, Bankai 5. 🥊`;
+        if (newScore === 2) {
+          msg = `🗡️ ${_nm} je aktivní — máš 2 aktivní přivedené a odemkl jsi SHIKAI: provize MTL 1,5 % (kartou) / 2 % (převodem) a Exclusive Partner o 20 % levněji, natrvalo. Další 3 aktivní a máš Bankai. 🥊`;
+          msgEn = `🗡️ ${_nm || 'Your invite'} is active — 2 active referrals unlock SHIKAI: MTL commission 1.5% (card) / 2% (transfer) and Exclusive Partner 20% cheaper, for good. 3 more active and you reach Bankai. 🥊`;
+        } else if (newScore === 5) {
+          msg = `🔥 ${_nm} je aktivní — máš 5 aktivních přivedených a do zítřka se ti zapne BANKAI: provize MTL 1 % (kartou) / 1,25 % (převodem) a Exclusive Partner o 50 % levněji, natrvalo. 🏆`;
+          msgEn = `🔥 ${_nm || 'Your invite'} is active — 5 active referrals: BANKAI switches on by tomorrow: MTL commission 1% (card) / 1.25% (transfer) and Exclusive Partner 50% cheaper, for good. 🏆`;
+        }
+        await sb(`notifications`, { method: 'POST', prefer: 'return=minimal', body: JSON.stringify([{ user_id: c.referred_by, type: 'referral', read: false, data: JSON.stringify({ kind: 'coach_ref_qualified', who: _nm, score: newScore, msg_cs: msg, msg_en: msgEn }), message: msg }]) });
         gymActivated++;
       }
     } catch (e) { /* don't block the response */ }

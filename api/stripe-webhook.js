@@ -13,6 +13,7 @@ import Stripe from 'stripe';
 import { subMail } from './_sub-mail.js';
 import { rerateOwner } from './gym-rerate.js';
 import { activatePartner, applyEpUpgrade, applyEpDowngrade, finishEpYearly } from './_ep.js';
+import { attDiscLabel } from './_att-disc.js';
 import { ladderRate as _mtlLadder, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil, onlineRate as _mtlOnline, withStoreFee, STORE_COST, epTierOf as _epTierOf } from './_rate.js';
 import { sendOrderMailForPi, withdrawalText as _wdText } from './_order-mail.js';
 import { dokladPdfFor } from './_doklad-pdf.js';
@@ -472,6 +473,8 @@ export async function recordTransaction(acct, pi, fields) {
       // typu plateb nic nemeni a stary radek bez toho sloupce se cte jako jeden mesic.
       ...(fields.months != null ? { months: Math.max(1, parseInt(fields.months, 10) || 1) } : {}),
       cohort_id: fields.cohort_id || null,
+      // Sleva za docházku (_att-disc.js), v měně platby -- doklad ji uvede v názvu položky.
+      ...(fields.att_disc > 0 ? { att_disc: fields.att_disc } : {}),
       payment_method: 'stripe', commission_status: 'collected', commission_month: pragueMonth(),
       status: 'paid', created_at: new Date().toISOString(),
     });
@@ -871,7 +874,7 @@ export default async function handler(req, res) {
             if (m.mtl_online !== '1') await approveMemberAppOnPayment({ gymId: m.gym_id, studentId: m.student_id || m.member_id || null });
             // ONLINE PŘEDPLATNÉ KOUČE NA 3/6/12 MĚSÍCŮ (jednorázově kartou): platba patří kouči,
             // bez klubu a bez akvizice -- stejně jako měsíční předplatné níž.
-            if (_pi) await recordTransaction(event.account, _pi, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id || null, plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side', acq_source: _acqSrcFrom(m), acq_months: (m.mtl_acq_months ? parseInt(m.mtl_acq_months,10) : null), base_rate: (m.mtl_base_rate ? parseFloat(m.mtl_base_rate) : null), months: _mo, ...(m.mtl_online === '1' ? { coach_id: m.coach_id || null, paid_to: 'coach', acq_source: 'direct' } : {}) });
+            if (_pi) await recordTransaction(event.account, _pi, { type: 'membership', att_disc: (Number(m.mtl_att_disc) > 0 ? Number(m.mtl_att_disc) : null), member_id: m.student_id || m.member_id, gym_id: m.gym_id || null, plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side', acq_source: _acqSrcFrom(m), acq_months: (m.mtl_acq_months ? parseInt(m.mtl_acq_months,10) : null), base_rate: (m.mtl_base_rate ? parseFloat(m.mtl_base_rate) : null), months: _mo, ...(m.mtl_online === '1' ? { coach_id: m.coach_id || null, paid_to: 'coach', acq_source: 'direct' } : {}) });
           } catch (e) { console.error('record one-time membership', e.message); }
           if (m.mtl_online === '1' && m.coach_id && m.membership_id) {
             try {
@@ -891,6 +894,19 @@ export default async function handler(req, res) {
           // Přijetí za člena i u předplatného -- dřív jen u jednorázového členství.
           await approveMemberAppOnPayment({ gymId: m.gym_id, studentId: m.student_id || m.member_id || null });
           if (m.membership_id && sub) { try { await sbPatch('gym_memberships', `id=eq.${encodeURIComponent(m.membership_id)}`, { stripe_subscription: sub, status: 'active' }); } catch (e) { console.error('link sub', e.message); } }
+          // SLEVA ZA DOCHÁZKU na první platbu, která přijde až s kotvou (pay.js, mtl_att_mode 'next'):
+          // záporná položka čeká na tu fakturu. Jen jednou -- Stripe hlásí událost i opakovaně.
+          if (sub && m.mtl_att_mode === 'next' && Number(m.mtl_att_disc) > 0) {
+            try {
+              const _cust = typeof s.customer === 'string' ? s.customer : (s.customer && s.customer.id);
+              const _ex = await stripe.invoiceItems.list({ customer: _cust, pending: true, limit: 20 }, { stripeAccount: event.account });
+              if (!((_ex && _ex.data) || []).some((x) => x.metadata && x.metadata.mtl_att_disc && x.subscription === sub)) {
+                await stripe.invoiceItems.create({ customer: _cust, subscription: sub, currency: String(m.mtl_currency || 'czk').toLowerCase(), amount: -Math.round(Number(m.mtl_att_disc) * 100),
+                  description: `Sleva za docházku (${String(m.mtl_att_pct || '').replace('.', ',')} %)`, metadata: { mtl_att_disc: String(m.mtl_att_disc), mtl_att_pct: String(m.mtl_att_pct || ''), membership_id: m.membership_id || '' } },
+                  { stripeAccount: event.account });
+              }
+            } catch (e) { console.error('att disc next', e.message); }
+          }
           // ONLINE PŘEDPLATNÉ KOUČE: kouči podrobná notifikace s proklikem do jeho online sekce (Předplatitelé).
           if (m.mtl_online === '1' && m.coach_id && m.membership_id) {
             try {
@@ -905,7 +921,7 @@ export default async function handler(req, res) {
             const invId = typeof s.invoice === 'string' ? s.invoice : (s.invoice && s.invoice.id);
             let payId = null;
             if (invId) { const invObj = await stripe.invoices.retrieve(invId, { stripeAccount: event.account }); payId = (typeof invObj.payment_intent === 'string' ? invObj.payment_intent : (invObj.payment_intent && invObj.payment_intent.id)) || (typeof invObj.charge === 'string' ? invObj.charge : (invObj.charge && invObj.charge.id)); }
-            if (payId) await recordTransaction(event.account, payId, { type: 'membership', member_id: m.student_id || m.member_id, gym_id: m.gym_id || null, ...(m.mtl_online === '1' ? { coach_id: m.coach_id || null, paid_to: 'coach', acq_source: 'direct', native: m.mtl_native === '1' } : {}), plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side', acq_source: _acqSrcFrom(m), acq_months: (m.mtl_acq_months ? parseInt(m.mtl_acq_months,10) : null), base_rate: (m.mtl_base_rate ? parseFloat(m.mtl_base_rate) : null) });
+            if (payId) await recordTransaction(event.account, payId, { type: 'membership', att_disc: (m.mtl_att_mode === 'coupon' && Number(m.mtl_att_disc) > 0 ? Number(m.mtl_att_disc) : null), member_id: m.student_id || m.member_id, gym_id: m.gym_id || null, ...(m.mtl_online === '1' ? { coach_id: m.coach_id || null, paid_to: 'coach', acq_source: 'direct', native: m.mtl_native === '1' } : {}), plan: m.mtl_plan || 'Membership', currency: m.mtl_currency || 'CZK', income_class: m.mtl_income || 'side', acq_source: _acqSrcFrom(m), acq_months: (m.mtl_acq_months ? parseInt(m.mtl_acq_months,10) : null), base_rate: (m.mtl_base_rate ? parseFloat(m.mtl_base_rate) : null) });
           } catch (e) { console.error('record membership at checkout', e.message); }
         }
       } else if (m.mtl_payment_type === 'cohort_deposit') {
@@ -1270,7 +1286,7 @@ export default async function handler(req, res) {
             _subLadder = _ladder / 100;
             await applySubRate(stripe, event.account, sub, _so2, _ladder);
           }
-        }catch(e){ console.error('acq drop', e.message); } if (ipi && mem) await recordTransaction(event.account, ipi, { renewal: true, native: (((inv.subscription_details || {}).metadata || {}).mtl_native === '1'), type: 'membership',  income_class: _incClass, member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency , acq_source: (_subWasAcq ? 'mtl_discovery' : null), acq_months: (_subWasAcq ? 1 : null), base_rate: (_subLadder != null ? _subLadder : null) }); } catch (e) { console.error('record membership', e.message); }
+        }catch(e){ console.error('acq drop', e.message); } if (ipi && mem) await recordTransaction(event.account, ipi, { renewal: true, att_disc: (((inv.lines && inv.lines.data) || []).reduce((a, l) => a + ((l && l.amount < 0 && l.metadata && l.metadata.mtl_att_disc) ? -l.amount : 0), 0) / 100) || null, native: (((inv.subscription_details || {}).metadata || {}).mtl_native === '1'), type: 'membership',  income_class: _incClass, member_id: mem.student_id || mem.member_id, gym_id: mem.gym_id, coach_id: mem.coach_id, plan: mem.plan_name || 'Membership', currency: inv.currency , acq_source: (_subWasAcq ? 'mtl_discovery' : null), acq_months: (_subWasAcq ? 1 : null), base_rate: (_subLadder != null ? _subLadder : null) }); } catch (e) { console.error('record membership', e.message); }
       }
     } else if (event.type === 'invoice.payment_failed') {
       const inv = event.data.object;
@@ -1344,7 +1360,7 @@ function _dokItemLabel(type, name, sk) {
 export async function issueStripeDokladForPi(pi, hint) {
   try {
     if (!pi) return null;
-    const tx = ((await sbGet(`transactions?payment_intent=eq.${encodeURIComponent(pi)}&select=id,gross_amount,currency,member_id,coach_id,gym_id,plan,type,paid_by_name,test_mode&limit=1`)) || [])[0];
+    const tx = ((await sbGet(`transactions?payment_intent=eq.${encodeURIComponent(pi)}&select=*&limit=1`)) || [])[0];
     if (!tx || tx.gross_amount == null) return null;
     const ex = (await sbGet(`doklady?or=(payment_intent.eq.${encodeURIComponent(pi)},transaction_id.eq.${tx.id})&select=doklad_no&limit=1`)) || [];
     if (ex.length) return String(ex[0].doklad_no);
@@ -1366,7 +1382,7 @@ export async function issueStripeDokladForPi(pi, hint) {
       customerName: tx.paid_by_name || (_cust && _cust.name) || null,
       customerEmail: (_cust && _cust.email) || null,
       participantName: (_cust && _cust.name) || null,
-      itemLabel: _dokItemLabel(tx.type, tx.plan, (tx.type === 'membership') ? await sellKindFor(sbGet, { gymId: tx.gym_id, paidTo: tx.paid_to }) : null), amount: tx.gross_amount,
+      itemLabel: _dokItemLabel(tx.type, tx.plan, (tx.type === 'membership') ? await sellKindFor(sbGet, { gymId: tx.gym_id, paidTo: tx.paid_to }) : null) + attDiscLabel(tx.att_disc, tx.currency), amount: tx.gross_amount,
       currency: tx.currency, paymentMethod: 'stripe', testMode: !!tx.test_mode,
     });
   } catch (e) { console.error('issueStripeDokladForPi', e && e.message); return null; }

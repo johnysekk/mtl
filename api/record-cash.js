@@ -15,13 +15,14 @@
 // Env: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
 
 import { STORE_COST } from './_rate.js';
-import { onlineRate as _mtlOnline, ladderRate as _mtlRate, acquisitionRate as _mtlAcq, introFreeFor as _introFree, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil } from './_rate.js';
+import { onlineRate as _mtlOnline, ladderRate as _mtlRate, acquisitionRate as _mtlAcq, introFreeFor as _introFree, hasOrgRate as _hasOrgRate, gymOnboardingUntil as _gymObUntil, epTierOf as _epTierOf } from './_rate.js';
 import { sendOrderMail } from './_order-mail.js';
 import { checkPrice } from './_price-check.js';
 import { isTestMode } from './_config.js';
 import { approveMemberAppOnPayment, cohortPayer } from './_member-app.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { pragueMonth } from './_tz.js';
+import { attDiscLabel } from './_att-disc.js';
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -182,7 +183,7 @@ function ladderRate(profile, entityMode) {
   // Stejně jako reconcile-cash (_railOf): bankovní kolej jen u režimu 'qr_bank'.
   const rail = entityMode === 'qr_bank' ? 'qr_bank' : 'stripe';
   if (!profile) return rail === 'stripe' ? 0.02 : 0.025;
-  return _mtlRate(rail, { partner: profile.partner, founding: profile.founding, score: profile.coach_ref_score, bankai: profile.bankai_eligible, org: _hasOrgRate(profile) });
+  return _mtlRate(rail, { partner: _epTierOf(profile), founding: profile.founding, score: profile.coach_ref_score, bankai: profile.bankai_eligible, org: _hasOrgRate(profile) });
 }
 
 
@@ -252,7 +253,7 @@ function _toCzkMinor(amountMinor, cur, rates) {
 // (counts Stripe + cash together, so a member already past the window isn't re-charged 10% on cash).
 async function acquisitionRate(acq, type, payee, memberId, scopeCol, scopeId, ladder, periods) {
   // Delegates to the single source of truth in _rate.js.
-  const r = await _mtlAcq(sb, { acqSource: acq, type, ownerPartner: payee && payee.partner, memberId, scopeCol, scopeId });
+  const r = await _mtlAcq(sb, { acqSource: acq, type, ownerPartner: _epTierOf(payee), memberId, scopeCol, scopeId });
   if (r == null) return null;
   if (typeof r === 'number') return r;
   // FIXED. This used to take r.rate and throw r.months away, on the assumption that cash and QR are
@@ -307,7 +308,7 @@ export default async function handler(req, res) {
   if (!SB || !KEY) return res.status(500).json({ error: 'env not set' });
   try {
     const b = (typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body) || {};
-    const { token, gym_id, coach_id, member_id, paid_by, paid_by_name, participant_name, item_name, session_at_issue, gross_amount, currency, type, payment_method, cash_payer_name, acq_source, credit, source_booking_id, cohort_id, income_class, months, dropin_plan_id, proof_checked } = b;
+    const { token, gym_id, coach_id, member_id, paid_by, paid_by_name, participant_name, item_name, session_at_issue, gross_amount, currency, type, payment_method, cash_payer_name, acq_source, credit, source_booking_id, cohort_id, income_class, months, dropin_plan_id, proof_checked, att_disc } = b;
     // trusted internal call (PIS server-side confirm) — reuses ALL the commission logic, no user token
     const _trusted = !!(b.internal && b.intSecret && process.env.PIS_INTERNAL_SECRET && b.intSecret === process.env.PIS_INTERNAL_SECRET);
     const provider = b.provider === 'coach' ? 'coach' : 'gym';
@@ -362,7 +363,7 @@ export default async function handler(req, res) {
             message: 'Klub nema vyplnena pravidla treninku a podminky. Doplnte je v Nastaveni klubu; do te doby nelze prijimat platby.' });
         }
       }
-      const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,created_at,referral_optin,billing_country,org_rate_until`);
+      const owners = await sb(`profiles?id=eq.${gym.owner_id}&select=id,partner,partner_tier,founding,coach_ref_score,bankai_eligible,created_at,referral_optin,billing_country,org_rate_until`);
       const ownerProf = (owners && owners[0]) || {};
       if (!ownerProf.id) ownerProf.id = gym.owner_id;
       rate = ladderRate(ownerProf, gym.payment_mode || (gym.stripe_account ? 'stripe' : 'qr_bank'));
@@ -428,7 +429,7 @@ export default async function handler(req, res) {
       // org_rate_until CHYBELO: sazbova funkce pak nevedela, ze je kouc clenem asociace, a
       // uctovala zakladni 2,5 % misto 1,5 %. V appce se pritom cetl tentyz sloupec, takze
       // "Tvoje provize 1,5 % -- clenem asociace" slibovalo neco jineho, nez se strhlo.
-      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,founding,coach_ref_score,bankai_eligible,org_rate_until,account_suspended,cash_blocked,created_at,referral_optin,billing_country,gym_payout_account,payment_mode,stripe_account`);
+      const cs = await sb(`profiles?id=eq.${coach_id}&select=id,partner,partner_tier,founding,coach_ref_score,bankai_eligible,org_rate_until,account_suspended,cash_blocked,created_at,referral_optin,billing_country,gym_payout_account,payment_mode,stripe_account`);
       const coach = cs && cs[0];
       if (!coach) return res.status(404).json({ error: 'coach not found' });
       if (!_trusted && coach.id !== uid) return res.status(403).json({ error: 'not your account' });
@@ -452,7 +453,7 @@ export default async function handler(req, res) {
       if (!_isOnl && type === 'coach_1to1' && /^\d+$/.test(String(source_booking_id || ''))) {
         try { const _ob = ((await _wsbGet(`bookings?id=eq.${encodeURIComponent(source_booking_id)}&select=type`)) || [])[0]; _isOnl = !!(_ob && _ob.type === 'online'); } catch (e) {}
       }
-      if (_isOnl) rate = _mtlOnline({ partner: coach.partner, score: coach.coach_ref_score, bankai: coach.bankai_eligible });
+      if (_isOnl) rate = _mtlOnline({ partner: _epTierOf(coach), score: coach.coach_ref_score, bankai: coach.bankai_eligible });
       // ONLINE SLUŽBA (potvrzení QR / převodu koučem): cena jen z online nabídky kouče, v měně účtu.
       // Řádek rezervace i s částkou zapisuje prohlížeč studenta, takže bez kontroly šlo převodem
       // zaplatit méně a kouč by potvrdil (a provize se počítala z) nižší částky.
@@ -578,7 +579,7 @@ export default async function handler(req, res) {
       const _custName = row.paid_by_name || row.cash_payer_name || _memberName || _partName || null;
       // Termin lekce ZAFIXOVANY TED: z rezervace, ke ktere platba patri (soukromka nebo vstup).
       // Termin lekce a nazev polozky ZAFIXOVANE TED, z rezervace, ke ktere platba patri.
-      let _sessAt = session_at_issue || null, _itemName = (item_name && String(item_name).trim()) || null;
+      let _sessAt = session_at_issue || null, _itemName = (item_name && String(item_name).trim()) || null, _attDiscDok = (type === 'membership' ? (Number(att_disc) || 0) : 0);
       const _isUuid = (v) => /^[0-9a-f-]{36}$/i.test(String(v || ''));
       if (source_booking_id) {
         try {
@@ -591,8 +592,8 @@ export default async function handler(req, res) {
             if (_gb && _gb.class_date && !_sessAt) _sessAt = String(_gb.class_date).slice(0, 10) + (_gb.class_time ? ' ' + _gb.class_time : '');
             if (_gb) _itemName = _gb.class_name || _itemName;
           } else if (type === 'membership' && _isUuid(source_booking_id)) {
-            const _gm = ((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(source_booking_id)}&select=plan_name`)) || [])[0];
-            if (_gm) _itemName = _gm.plan_name || _itemName;
+            const _gm = ((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(source_booking_id)}&select=plan_name,att_disc`)) || [])[0];
+            if (_gm) { _itemName = _gm.plan_name || _itemName; _attDiscDok = Number(_gm.att_disc) || _attDiscDok; }
           } else if (type === 'merch' && _isUuid(source_booking_id)) {
             const _mo = ((await _wsbGet(`merch_orders?id=eq.${encodeURIComponent(source_booking_id)}&select=item_name,variant`)) || [])[0];
             if (_mo) _itemName = (_mo.item_name || '') + (_mo.variant ? ' (' + _mo.variant + ')' : '');
@@ -625,7 +626,8 @@ export default async function handler(req, res) {
         customerName: _custName,
         customerEmail: null,
         participantName: _partName,
-        itemLabel: _dokItemLabel(type, _itemName, (type === 'membership') ? await sellKindFor(_wsbGet, { gymId: row.gym_id, paidTo: row.paid_to }) : (type === 'course' ? _courseSk : null)),
+        // Sleva za docházku (_att-disc.js) z řádku členství -- v názvu položky, stejně jako u karty.
+        itemLabel: _dokItemLabel(type, _itemName, (type === 'membership') ? await sellKindFor(_wsbGet, { gymId: row.gym_id, paidTo: row.paid_to }) : (type === 'course' ? _courseSk : null)) + attDiscLabel(_attDiscDok, row.currency),
         amount: row.gross_amount,
         currency: row.currency,
         paymentMethod: row.payment_method,

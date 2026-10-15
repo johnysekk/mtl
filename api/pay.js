@@ -1,6 +1,6 @@
 import Stripe from 'stripe';
-import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor, orgRate, nativePrice, nativeRate, STORE_COST, EP_TIERS, EP_TIER_ORDER, EP_TIER_NAMES, EP_YEAR_MONTHS, EP_DEFAULT_TIER, epTierKey, epTierOf, epCurrencyFor, epAmount } from './_rate.js';
-import { applyEpUpgrade, notifyEpDowngradeScheduled, finishEpYearly, notifyEpMonthlyScheduled } from './_ep.js';
+import { resolveRate, effectiveRate, effectiveRateBreakdown, onlineRateFor, orgRate, nativePrice, nativeRate, STORE_COST, EP_TIERS, EP_TIER_ORDER, EP_TIER_NAMES, EP_YEAR_MONTHS, EP_DEFAULT_TIER, epTierKey, epTierOf, epCurrencyFor, epAmount, epRefDisc } from './_rate.js';
+import { applyEpUpgrade, notifyEpDowngradeScheduled, finishEpYearly, notifyEpMonthlyScheduled, epScheduleMonthly } from './_ep.js';
 import { sellKind, sellLabel, sellKindFor } from './_sell-kind.js';
 import { checkPrice, offerPrices, planTermPrices, checkOnlineCountry } from './_price-check.js';
 import { vatMode } from './_vat.js';
@@ -8,6 +8,7 @@ import { membCalendar, membModeMissing, membProrate, membActiveEnd, calTerm, cal
 import { viesCheck } from './tax-verify.js';
 import { b2cSmallState } from './_oss.js';
 import { ensurePmDomain } from './_pm-domain.js';
+import { attDiscForPurchase, attProgress } from './_att-disc.js';
 const _PC = (kind, extra) => ({ SB: _SUPA_URL, KEY: _SUPA_KEY, kind, ...extra });
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -133,7 +134,8 @@ export default async function handler(req, res) {
   try {
     // partner = platba Exclusive Partnera směrem k MTL; tu pozastavení blokovat nesmí,
     // jinak by se poskytovatel nedostal z dluhu ven.
-    if (type !== 'partner' && type !== 'partner_change' && type !== 'supplier' && !(await _assertNotSuspended(req, res))) return;
+    if (type !== 'partner' && type !== 'partner_change' && type !== 'supplier' && type !== 'att_disc' && !(await _assertNotSuspended(req, res))) return;
+    if (type === 'att_disc')   return await attDiscInfo(req, res);
     if (type === 'coach')      return await coachCheckout(req, res);
     if (type === 'gym')        return await gymCheckout(req, res);
     if (type === 'membership') return await membershipCheckout(req, res);
@@ -578,6 +580,19 @@ async function membershipCheckout(req, res) {
 
   const P = (_cal && _cal.one) ? _cal.one.price : parseInt(amount, 10);
   const _endsOn = (_cal && _cal.one) ? _cal.one.endsOn : endsOn;
+  // SLEVA ZA DOCHÁZKU (_att-disc.js): spočítá ji server sám, z adresy nic. Navazující období
+  // po splněné docházce v předchozím. Jednorázově = nižší cena položky; předplatné = sleva na
+  // první platbu (kupón na účtu klubu), nebo -- když první platba přijde až později (kotva na
+  // konec platného členství) -- záporná položka na tu fakturu (zakládá webhook).
+  let _att = null;
+  try {
+    // Člen JEN z řádku členství (ten zakládá appka za přihlášeného), ne z adresy -- jinak by si
+    // kdokoli vzal slevu za cizí docházku. Řádek musí ještě čekat na platbu.
+    const _mrA = membershipId ? (((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(membershipId)}&select=student_id,child_name,gym_id,status`)) || [])[0] || null) : null;
+    const _gA = (_mrA && _mrA.status === 'pending' && _mrA.gym_id) ? (((await _wsbGet(`gyms?id=eq.${encodeURIComponent(_mrA.gym_id)}&select=id,membership_plans,currency`)) || [])[0] || null) : null;
+    const _r = _gA ? await attDiscForPurchase(_wsbGet, { gym: _gA, studentId: _mrA.student_id, childName: _mrA.child_name || null, newMonths: _moQ, price: P, excludeId: membershipId }) : null;
+    if (_r && _r.ok && _r.amount > 0) _att = _r;
+  } catch (e) { console.error('att disc', e.message); }
   const cur = String(currency).toLowerCase();
   const ivl = interval === 'year' ? 'year' : 'month';
   if (!(await _assertAcctReady(gymAccount, res))) return;
@@ -609,7 +624,9 @@ async function membershipCheckout(req, res) {
   const _months = _moQ;
   // Jednorázově i měsíc (once=1): klub nabízí „Měsíční (jednorázově)" -- bez předplatného.
   if (_months > 1 || _once) {
-    const _amtMinor = Math.round(P * 100);
+    const _D1 = _att ? Math.min(_att.amount, P) : 0;
+    if (_att && membershipId) await _wsbPatch(`gym_memberships?id=eq.${encodeURIComponent(membershipId)}`, { att_disc: _D1, att_disc_from: _att.prevId, att_disc_for: _att.prevEnd, amount: P - _D1 });
+    const _amtMinor = Math.round((P - _D1) * 100);
     const _feePct = FEE_NOW;
     const _feeMinor = Math.round(_amtMinor * (_feePct / 100));
     const _meta = {
@@ -626,9 +643,10 @@ async function membershipCheckout(req, res) {
       gym_name: gymName || '',
       mtl_payee: payee || gymName || '',
       mtl_disc: disc || '',
-      mtl_base: String(P),
+      mtl_base: String(P - _D1),
       mtl_currency: cur,
       member_name: memberName || '',
+      ...(_D1 ? { mtl_att_disc: String(_D1), mtl_att_pct: String(_att.pct) } : {}),
     };
     const _s1 = await stripe.checkout.sessions.create(
       {
@@ -638,13 +656,16 @@ async function membershipCheckout(req, res) {
         tax_id_collection: { enabled: true },
         metadata: _meta,
         line_items: [
-          { price_data: { currency: cur, product_data: { name: `${_skLbl} · ${planName || _skLbl} (${_cal && _cal.one ? `do ${_dmy(_cal.one.endsOn)}` : `${_months} měs.`}) — ${gymName || ''}` }, unit_amount: _amtMinor }, quantity: 1 }
+          { price_data: { currency: cur, product_data: { name: `${_skLbl} · ${planName || _skLbl} (${_cal && _cal.one ? `do ${_dmy(_cal.one.endsOn)}` : `${_months} měs.`}) — ${gymName || ''}${_D1 ? ` · sleva za docházku −${_D1} ${cur === 'czk' ? 'Kč' : cur.toUpperCase()}` : ''}` }, unit_amount: _amtMinor }, quantity: 1 }
         ],
         payment_intent_data: {
           ...(_feeMinor > 0 ? { application_fee_amount: _feeMinor } : {}),
           metadata: _meta,
         },
         ..._checkoutEnd(req, `${proto}://${host}/?gym_sub=ok&membership=${encodeURIComponent(membershipId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`, `${proto}://${host}/`),
+        // Se slevou za docházku platí platba jen 31 minut -- tak dlouho drží slevu jen tenhle řádek
+        // (_att-disc.js ATT_HOLD_MIN), aby se nedala zaplatit dvakrát.
+        ...(_D1 ? { expires_at: Math.floor(Date.now() / 1000) + 31 * 60 } : {}),
       },
       { stripeAccount: gymAccount }
     );
@@ -668,6 +689,21 @@ async function membershipCheckout(req, res) {
     Object.assign(_subTiming, { billing_cycle_anchor: _cs.anchor, proration_behavior: 'none' });
   }
   const _subMeta = (_cs && _cs.kind !== 'plain') ? { mtl_calendar: '1' } : {};
+  // Sleva za docházku u předplatného: na první platbu. Strhává-li se hned (běžně nebo zbytek
+  // měsíce), kupón „jednou"; když první platba přijde až s kotvou, položku přidá webhook.
+  let _attMeta = {}, _discounts = null;
+  if (_att) {
+    const _firstNow = (_cs && _cs.kind === 'first') ? _cs.chargeNow : ((_cs && _cs.kind === 'anchor') ? 0 : P);
+    const _D2 = Math.min(_att.amount, _firstNow > 0 ? _firstNow : P);
+    if (_D2 > 0) {
+      if (_firstNow > 0) {
+        const _cp = await stripe.coupons.create({ amount_off: Math.round(_D2 * 100), currency: cur, duration: 'once', max_redemptions: 1, name: 'Sleva za docházku' }, { stripeAccount: gymAccount });
+        _discounts = [{ coupon: _cp.id }];
+      }
+      _attMeta = { mtl_att_disc: String(_D2), mtl_att_pct: String(_att.pct), mtl_att_mode: _firstNow > 0 ? 'coupon' : 'next' };
+      if (membershipId) await _wsbPatch(`gym_memberships?id=eq.${encodeURIComponent(membershipId)}`, { att_disc: _D2, att_disc_from: _att.prevId, att_disc_for: _att.prevEnd });
+    }
+  }
 
   const session = await stripe.checkout.sessions.create(
     {
@@ -684,8 +720,11 @@ async function membershipCheckout(req, res) {
         mtl_disc: disc || '',
         mtl_base: String(P),
         mtl_currency: cur,
+        ..._attMeta,
       },
       line_items: _subLines,
+      ...(_discounts ? { discounts: _discounts } : {}),
+      ...(_attMeta.mtl_att_disc ? { expires_at: Math.floor(Date.now() / 1000) + 31 * 60 } : {}),
       subscription_data: {
         application_fee_percent: FEE_NOW,
         ..._subTiming,
@@ -723,6 +762,42 @@ async function membershipCheckout(req, res) {
   );
   return _sendCheckout(req, res, session, gymAccount);
 }
+// SLEVA ZA DOCHÁZKU -- co appka ukáže (_att-disc.js; cenu stejně počítá server při platbě).
+// GET ?type=att_disc&gymId=&months=[&child=][&member=]  -> sleva na navazující období
+// GET ?type=att_disc&membershipId=&progress=1            -> průběh v běžícím období
+// Za sebe (a za účet, za který platí -- paid_by), nebo za člena klubu, když se ptá majitel / tým.
+async function attDiscInfo(req, res) {
+  const user = await _authUser(req);
+  if (!user) return res.status(401).json({ error: 'Přihlášení vypršelo.' });
+  const q0 = req.query || {};
+  const staffOf = async (gymId) => {
+    const g = ((await _wsbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=owner_id`)) || [])[0];
+    if (g && g.owner_id === user.id) return true;
+    const t = (await _wsbGet(`gym_coaches?gym_id=eq.${encodeURIComponent(gymId)}&coach_id=eq.${encodeURIComponent(user.id)}&status=eq.active&select=coach_id&limit=1`)) || [];
+    return t.length > 0;
+  };
+  if (String(q0.progress || '') === '1') {
+    const row = ((await _wsbGet(`gym_memberships?id=eq.${encodeURIComponent(String(q0.membershipId || ''))}&select=*`)) || [])[0];
+    if (!row || !row.gym_id) return res.status(404).json({ error: 'not found' });
+    if (row.student_id !== user.id && row.paid_by !== user.id && !(await staffOf(row.gym_id))) return res.status(403).json({ error: 'forbidden' });
+    const g = ((await _wsbGet(`gyms?id=eq.${encodeURIComponent(row.gym_id)}&select=id,membership_plans,currency`)) || [])[0];
+    const pr = g ? await attProgress(_wsbGet, { gym: g, row }) : null;
+    const next = (row.att_eval_for && row.period_end && Date.parse(row.att_eval_for) === Date.parse(row.period_end)) ? (Number(row.att_disc_next) || 0) : null;
+    return res.status(200).json({ ok: true, progress: pr, next, currency: row.currency || (g && g.currency) || 'CZK' });
+  }
+  const gymId = String(q0.gymId || '');
+  const member = String(q0.member || '') || user.id;
+  if (member !== user.id && !(await staffOf(gymId))) {
+    // Zástupce platící za mladistvého: u klubu už za něj aspoň jednou platil (paid_by).
+    const pb = (await _wsbGet(`gym_memberships?gym_id=eq.${encodeURIComponent(gymId)}&student_id=eq.${encodeURIComponent(member)}&paid_by=eq.${encodeURIComponent(user.id)}&select=id&limit=1`)) || [];
+    if (!pb.length) return res.status(403).json({ error: 'forbidden' });
+  }
+  const g = ((await _wsbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=id,membership_plans,currency`)) || [])[0];
+  if (!g) return res.status(404).json({ error: 'gym not found' });
+  const r = await attDiscForPurchase(_wsbGet, { gym: g, studentId: member, childName: q0.child ? String(q0.child) : null,
+    newMonths: q0.months, price: Number(q0.price) || 0, excludeId: q0.excludeId ? String(q0.excludeId) : null });
+  return res.status(200).json({ ok: true, disc: r ? { ok: r.ok, amount: r.amount, would: r.would, pct: r.pct, reserved: r.reserved, attended: r.attended, need: r.need, rulePct: r.rule.pct, prevId: r.prevId, prevEnd: r.prevEnd, plan: r.plan } : null, currency: g.currency || 'CZK' });
+}
 // 2026-09-30 -> 30. 9. 2026 (do názvu položky ve Stripe).
 function _dmy(ymd) { const [y, m, d] = String(ymd || '').slice(0, 10).split('-').map(Number); return (y && m && d) ? `${d}. ${m}. ${y}` : String(ymd || ''); }
 
@@ -742,11 +817,13 @@ async function _epFoundingTaken(tier) {
     return Number(String(r.headers.get('content-range') || '').split('/')[1]) || 0;
   } catch (e) { return Infinity; }
 }
+// prof potřebuje ep_founding, coach_ref_score a bankai_eligible (sleva Shikai/Bankai, _rate.js).
 async function epPriceFor(tier, prof, currency) {
   const T = EP_TIERS[tier], cur = String(currency || 'CZK').toUpperCase();
   const has = Array.isArray(prof && prof.ep_founding) && prof.ep_founding.indexOf(tier) >= 0;
   const founding = !!T.founding && (has || (await _epFoundingTaken(tier)) < T.foundingSpots);
-  return { currency: cur.toLowerCase(), amount: epAmount(tier, cur, founding), founding };
+  const disc = epRefDisc(prof);
+  return { currency: cur.toLowerCase(), amount: epAmount(tier, cur, founding, disc), founding, disc };
 }
 // Přihlášený uživatel z tokenu (Authorization: Bearer). EP se kupuje a mění jen za sebe.
 async function _authUser(req) {
@@ -825,7 +902,7 @@ async function partnerCheckout(req, res) {
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
 
-  const prof = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(userId)}&select=partner_sub,ep_founding,stripe_account,gym_payout_account,country`))[0] || {};
+  const prof = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(userId)}&select=partner_sub,ep_founding,coach_ref_score,bankai_eligible,stripe_account,gym_payout_account,country`))[0] || {};
   // UŽ BĚŽÍCÍ EP: stupeň se mění přechodem (type=partner_change), druhé předplatné by platil dvakrát.
   if (await _epLiveSub(prof.partner_sub)) return _goBack(req, res, `${proto}://${host}/?partner_sub=already`);
 
@@ -889,7 +966,7 @@ async function partnerCheckout(req, res) {
   const _epAmount = _epYear ? price.amount * EP_YEAR_MONTHS : price.amount;
   const md = { mtl_payment_type: 'partner_sub', user_id: userId, ep_tier: tier, ep_founding: price.founding ? '1' : '',
     ep_country: cc || '', ep_currency: price.currency, ep_amount: String(_epAmount), ep_month: String(price.amount),
-    ep_interval: _epYear ? 'year' : 'month', ep_bill_gym: billGym || '' };
+    ep_interval: _epYear ? 'year' : 'month', ep_bill_gym: billGym || '', ep_ref_disc: price.disc ? String(price.disc) : '' };
 
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
@@ -933,7 +1010,7 @@ async function partnerChange(req, res) {
   const user = await _authUser(req);
   if (!user) return res.status(401).json({ error: 'Přihlášení vypršelo. Přihlas se znovu a zkus to ještě jednou.' });
   const uid = user.id;
-  const prof = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(uid)}&select=partner,partner_tier,partner_tier_next,partner_tier_from,partner_sub,partner_price,ep_founding`))[0] || {};
+  const prof = (await _wsbGet(`profiles?id=eq.${encodeURIComponent(uid)}&select=partner,partner_tier,partner_tier_next,partner_tier_from,partner_sub,partner_price,ep_founding,coach_ref_score,bankai_eligible`))[0] || {};
   const cur = epTierOf(prof);
   const sub = cur ? await _epLiveSub(prof.partner_sub) : null;
   if (!sub) return res.status(409).json({ error: 'Stupeň jde měnit jen u placeného předplatného Exclusive Partner.' });
@@ -1095,27 +1172,8 @@ async function partnerInterval(req, res, c) {
     if (!yearly) return res.status(400).json({ error: 'Už platíš měsíčně.' });
     if (pendingMonthly) return res.status(200).json({ ok: true, interval: 'year', interval_next: 'month', from: peIso });
     if (sub.schedule) return res.status(409).json({ error: 'Předplatné má jiný naplánovaný plán. Napiš nám prosím.' });
-    let sc = null;
-    try {
-      const np = await stripe.prices.create({ currency: item.price.currency, product, unit_amount: monthUnit, recurring: recFor('month') });
-      sc = await stripe.subscriptionSchedules.create({ from_subscription: sub.id });
-      const p0 = sc.phases[0];
-      await stripe.subscriptionSchedules.update(sc.id, {
-        end_behavior: 'release',
-        metadata: { ep_switch: 'month', user_id: uid },
-        phases: [
-          { items: p0.items.map((i) => ({ price: typeof i.price === 'string' ? i.price : i.price.id, quantity: i.quantity || 1 })),
-            start_date: p0.start_date, end_date: p0.end_date, proration_behavior: 'none' },
-          // Po uplynutí jedné měsíční iterace se plán uvolní a předplatné běží měsíčně samo.
-          { items: [{ price: np.id, quantity: 1 }], iterations: 1, proration_behavior: 'none',
-            metadata: { ep_interval: 'month', ep_amount: String(monthUnit / 100), ep_interval_next: '' } },
-        ],
-      });
-    } catch (e) {
-      console.error('[ep] to monthly', e.message);
-      if (sc && sc.id) { try { await stripe.subscriptionSchedules.release(sc.id); } catch (e2) {} }
-      return res.status(502).json({ error: 'Přechod se nepodařil: ' + e.message });
-    }
+    try { await epScheduleMonthly(sub, monthUnit, uid); }
+    catch (e) { console.error('[ep] to monthly', e.message); return res.status(502).json({ error: 'Přechod se nepodařil: ' + e.message }); }
     try { await stripe.subscriptions.update(sub.id, { metadata: { ep_interval_next: 'month' } }); } catch (e) {}
     await notifyEpMonthlyScheduled(uid, cur, { month: monthUnit / 100, currency: subCur, atIso: peIso });
     return res.status(200).json({ ok: true, interval: 'year', interval_next: 'month', from: peIso, month_amount: monthUnit / 100 });

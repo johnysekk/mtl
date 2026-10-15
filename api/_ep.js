@@ -3,7 +3,7 @@
 //   * přechod na vyšší stupeň (pay.js partner_change, a webhook, když banka chtěla potvrzení),
 //   * přechod na nižší stupeň na konci období (webhook při zaplacení obnovy).
 // Ceník je v _rate.js (EP_TIERS). Tady se jen zapisuje, CO kdo má, a posílají se zprávy.
-import { EP_TIERS, EP_TIER_NAMES, EP_DEFAULT_TIER, epTierKey } from './_rate.js';
+import { EP_TIERS, EP_TIER_NAMES, EP_DEFAULT_TIER, EP_YEAR_MONTHS, epTierKey, epTierOf, epAmount, epRefDisc } from './_rate.js';
 import { rerateOwner } from './gym-rerate.js';
 import Stripe from 'stripe';
 
@@ -175,6 +175,102 @@ export async function finishEpYearly(uid, subId, { paid, currency } = {}) {
       + ` The invoice is under Subscription invoices.` + (pe ? ` Next payment ${_d(pe, true)}.` : ''),
     { tier, interval: 'year' });
   await _notifyFounder(uid, `🔁 Exclusive Partner {who} přešel na roční platbu · ${_money(unit / 100, false, cur)}/rok bez DPH.`);
+  return true;
+}
+
+// PLÁN „OD KONCE ROKU MĚSÍČNĚ" (subscription schedule): do konce zaplaceného roku dnešní cena,
+// pak měsíční za monthUnit (haléře/centy). Po jedné měsíční iteraci se plán uvolní a předplatné
+// běží měsíčně samo. Volá pay.js (přechod na měsíční) a repriceEpForRefDisc (nová cena po slevě).
+// Při chybě plán uvolní a vyhodí výjimku.
+// Jen interval a počet: cena načtená ze Stripe nese i prázdná pole (meter, trial_period_days…),
+// která by prices.create odmítl.
+const _rec = (r) => ({ interval: r.interval, interval_count: r.interval_count || 1 });
+async function _monthPrice(it, monthUnit) {
+  const product = typeof it.price.product === 'string' ? it.price.product : it.price.product.id;
+  const rec = it.price.recurring || {};
+  return stripe.prices.create({ currency: it.price.currency, product, unit_amount: monthUnit,
+    recurring: rec.interval === 'day' ? _rec(rec) : { interval: 'month', interval_count: 1 } });   // test: denně
+}
+const _phases = (p0, priceId, monthUnit) => [
+  { items: p0.items.map((i) => ({ price: typeof i.price === 'string' ? i.price : i.price.id, quantity: i.quantity || 1 })),
+    start_date: p0.start_date, end_date: p0.end_date, proration_behavior: 'none' },
+  { items: [{ price: priceId, quantity: 1 }], iterations: 1, proration_behavior: 'none',
+    metadata: { ep_interval: 'month', ep_amount: String(monthUnit / 100), ep_interval_next: '' } },
+];
+export async function epScheduleMonthly(sub, monthUnit, uid) {
+  const it = sub.items.data[0];
+  let sc = null;
+  try {
+    const np = await _monthPrice(it, monthUnit);
+    sc = await stripe.subscriptionSchedules.create({ from_subscription: sub.id });
+    await stripe.subscriptionSchedules.update(sc.id, { end_behavior: 'release', metadata: { ep_switch: 'month', user_id: uid }, phases: _phases(sc.phases[0], np.id, monthUnit) });
+  } catch (e) {
+    if (sc && sc.id) { try { await stripe.subscriptionSchedules.release(sc.id); } catch (e2) {} }
+    throw e;
+  }
+}
+
+// SLEVA Z EP ZA SHIKAI / BANKAI (20 / 50 %, _rate.js) U BĚŽÍCÍHO PŘEDPLATNÉHO. Volá referral-cron
+// (skóre přivedených vzrostlo) a bankai-cron (Bankai potvrzený). Nová cena platí od další platby,
+// běžící období se nepřepočítává. Jen dolů: kdo už platí stejně nebo méně, nic se nemění.
+// Naplánovaný přechod dolů dostane slevu taky (cena příštího období i částka pro jeho zrušení);
+// naplánovaný přechod na měsíční platbu se založí znovu s měsíční cenou po slevě.
+export async function repriceEpForRefDisc(uid) {
+  const p = ((await sbGet(`profiles?id=eq.${encodeURIComponent(uid)}&select=partner,partner_tier,partner_tier_next,partner_sub,ep_founding,coach_ref_score,bankai_eligible`)) || [])[0];
+  const tier = epTierOf(p);
+  if (!tier || !p.partner_sub) return false;
+  const disc = epRefDisc(p); if (!disc) return false;
+  const s = await _live(p.partner_sub);
+  if (!s || s.cancel_at_period_end) return false;
+  const md = s.metadata || {};
+  if ((Number(md.ep_ref_disc) || 0) >= disc) return false;                       // tuhle slevu už má
+  const it = s.items && s.items.data && s.items.data[0]; if (!it || !it.price) return false;
+  const cur = String(it.price.currency || 'czk').toUpperCase();
+  const rec = it.price.recurring || {};
+  const yearly = rec.interval === 'year' || (rec.interval === 'day' && md.ep_interval === 'year');
+  const mult = yearly ? EP_YEAR_MONTHS : 1;
+  const has = (t) => Array.isArray(p.ep_founding) && p.ep_founding.indexOf(t) >= 0;
+  const monthNow = epAmount(tier, cur, has(tier), disc);
+  const next = epTierKey(p.partner_tier_next);
+  const mNext = next ? epAmount(next, cur, md.ep_founding_next === '1' || has(next), disc) : null;
+  const newUnit = (next ? mNext : monthNow) * mult * 100;
+  const oldUnit = it.price.unit_amount;
+  const metadata = { ep_ref_disc: String(disc), ep_month: String(monthNow),
+    ...(next ? { ep_month_next: String(mNext), ep_prev_amount: String(Math.min(Number(md.ep_prev_amount) || Infinity, monthNow * mult * 100)) } : {}) };
+  const product = typeof it.price.product === 'string' ? it.price.product : it.price.product.id;
+  let from = null, newShown = null, oldShown = null, per = yearly ? 'year' : 'month';
+  try {
+    if (s.schedule) {
+      // Naplánovaný přechod na měsíční: roční období doběhne, měsíční cena se sníží.
+      const scId = typeof s.schedule === 'string' ? s.schedule : s.schedule.id;
+      const sc = await stripe.subscriptionSchedules.retrieve(scId);
+      if ((sc.metadata || {}).ep_switch !== 'month') return false;
+      const mUnit = monthNow * 100, mOld = Math.round(oldUnit / EP_YEAR_MONTHS);
+      if (mUnit >= mOld) { await stripe.subscriptions.update(s.id, { metadata: { ep_ref_disc: String(disc) } }); return false; }
+      // Plán se upraví na místě (ne uvolnit a založit znovu): když úprava selže, přechod na
+      // měsíční zůstane, jak byl -- jen bez slevy, a zkusí se to při dalším běhu.
+      const np = await _monthPrice(it, mUnit);
+      await stripe.subscriptionSchedules.update(scId, { phases: _phases(sc.phases[0], np.id, mUnit) });
+      await stripe.subscriptions.update(s.id, { metadata: Object.assign({ ep_interval_next: 'month' }, metadata) });
+      newShown = mUnit / 100; oldShown = mOld / 100; per = 'month';
+    } else {
+      if (newUnit >= oldUnit) { await stripe.subscriptions.update(s.id, { metadata: { ep_ref_disc: String(disc) } }); return false; }
+      const np = await stripe.prices.create({ currency: it.price.currency, product, unit_amount: newUnit, recurring: _rec(rec) });
+      await stripe.subscriptions.update(s.id, { items: [{ id: it.id, price: np.id }], proration_behavior: 'none', metadata });
+      newShown = newUnit / 100; oldShown = oldUnit / 100;
+    }
+  } catch (e) { console.error('ep ref disc', e.message); return false; }
+  const peS = s.current_period_end || it.current_period_end || null;
+  from = peS ? new Date(peS * 1000).toISOString() : null;
+  if (!next) await sbPatch(`profiles?id=eq.${encodeURIComponent(uid)}&partner_sub=eq.${encodeURIComponent(s.id)}`, { partner_price: monthNow });
+  const lvl = disc >= 0.5 ? 'Bankai' : 'Shikai';
+  const pct = Math.round(disc * 100);
+  const perCs = per === 'year' ? '/rok' : '/měs', perEn = per === 'year' ? '/year' : '/mo';
+  await _notify(uid, 'ep_ref_disc',
+    `🎉 Máš ${lvl}: Exclusive MTL Partner ${_name(next || tier)} ti ${from ? `od další platby (${_d(from, false)})` : 'od další platby'} zlevní o ${pct} % — ${_money(newShown, false, cur)}${perCs} místo ${_money(oldShown, false, cur)}${perCs} bez DPH. Sleva ti zůstává natrvalo, sčítá se se zakládající cenou a platí i po změně stupně.`,
+    `🎉 You reached ${lvl}: Exclusive MTL Partner ${_name(next || tier)} gets ${pct}% cheaper ${from ? `from your next payment (${_d(from, true)})` : 'from your next payment'} — ${_money(newShown, true, cur)}${perEn} instead of ${_money(oldShown, true, cur)}${perEn} excl. VAT. The discount stays for good, adds up with the founding price and applies after a tier change too.`,
+    { tier: next || tier, disc });
+  await _notifyFounder(uid, `🎉 Exclusive Partner {who} má ${lvl}: EP o ${pct} % levněji od další platby (${_money(newShown, false, cur)}${perCs}).`);
   return true;
 }
 

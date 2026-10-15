@@ -12,6 +12,7 @@
 
 import { membCalendar, membModeMissing, membProrate, membActiveEnd, calTerm, calStart } from './_memb-term.js';
 import { nativePrice } from './_rate.js';
+import { attDiscForPurchase } from './_att-disc.js';
 
 const q = encodeURIComponent;
 
@@ -169,6 +170,18 @@ export async function checkPrice(opts) {
         if (full > 0) { allowed.push(full); if (months > 1 && p.prorate) { for (let L = 1; L <= months; L++) allowed.push(roundCur((full / months) * L, cur)); } }
         if (full > 0 && cal && !p.ends_on) { allowed.push(calTerm(full, months, new Date(), pro).price); if (actEnd) allowed.push(calTerm(full, months, calStart(actEnd), pro).price); }
       });
+      // SLEVA ZA DOCHÁZKU (_att-disc.js): řádek ji nese (att_disc + att_disc_from), server ji
+      // spočítá znovu. Pak platí jen ceny po té slevě; nesedí-li, řádek neprojde.
+      if (num(opts.attDisc) > 0) {
+        // Výpadek databáze tady slevu NEPUSTÍ (vnější catch by platbu propustil s částkou z prohlížeče).
+        let ad = null;
+        try { ad = await attDiscForPurchase(sb, { gym: g, studentId: opts.studentId, childName: opts.childName, newMonths: wantMo || 1, excludeId: opts.excludeId }); }
+        catch (e) { return { ok: false, error: 'Slevu za docházku teď nejde ověřit. Zkus to za chvíli.' }; }
+        if (!ad || !ad.ok || (opts.attFrom && String(opts.attFrom) !== String(ad.prevId))) return { ok: false, error: 'Sleva za docházku už neplatí. Obnov stránku a zkus to znovu.' };
+        const D = num(opts.attDisc);
+        allowed = allowed.filter((a) => Math.abs(Math.min(ad.amount, a) - D) < 0.01).map((a) => roundCur(a - D, cur));
+        if (!allowed.length) return { ok: false, error: 'Sleva za docházku nesedí s nabídkou klubu. Obnov stránku a zkus to znovu.' };
+      }
     } else if (opts.kind === 'event') {
       const ev = ((await sb(`events?id=eq.${q(String(opts.eventId || ''))}&select=ticket_price,ticket_tiers,currency`)) || [])[0];
       if (!ev) return { ok: false, error: 'event not found' };
@@ -247,7 +260,7 @@ export async function checkRowPrice({ SB, KEY, tbl, row }) {
       if (!r.ok) return r;
       return checkOnlineCountry({ SB, KEY, coachId: row.coach_id, buyerId: row.paid_by || row.student_id });
     }
-    return checkPrice({ ...base, kind: 'gymMembership', gymId: row.gym_id, months: row.months, studentId: row.student_id, childName: row.child_name, excludeId: row.id });
+    return checkPrice({ ...base, kind: 'gymMembership', gymId: row.gym_id, months: row.months, studentId: row.student_id, childName: row.child_name, excludeId: row.id, attDisc: row.att_disc, attFrom: row.att_disc_from });
   }
   return { ok: true };
 }
