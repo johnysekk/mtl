@@ -14356,6 +14356,28 @@ async function _renderPendingQr(){
   tick(); window._pendQrTimer=setInterval(tick,1000);
 }
 
+// KOMU PATŘÍ NEPOTVRZENÁ PLATBA PŘEVODEM: 1:1 kouč, vstup klub (majitel), lístek pořadatel akce
+// (events.created_by -- ten dostává i hlášení o zaplacení a potvrzuje ve Správě akcí). Lístek
+// dřív nehledal nikoho: řádek nenese ani kouče, ani klub, takže Připomenout hlásilo
+// „Poskytovatele se nepodařilo najít". Vrací { id, what } nebo null.
+async function _qrProviderOf(r){
+  let what=(r.title||'')+(r.sub?(' \u00b7 '+r.sub):'');
+  if(r.tbl==='event_tickets'){
+    if(!r.event_id) return null;
+    const { data:_e }=await supaClient.from('events').select('created_by,title').eq('id',r.event_id).maybeSingle();
+    if(_e && _e.title) what=(LANG==='en'?'ticket \u00b7 ':'l\u00edstek \u00b7 ')+_e.title;
+    return (_e && _e.created_by) ? { id:_e.created_by, what:what } : null;
+  }
+  let target=r.coach_id||null;
+  if(!target && r.gym_id){ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',r.gym_id).maybeSingle(); target=(_g&&_g.owner_id)||null; }
+  return target ? { id:target, what:what } : null;
+}
+// Kde to poskytovatel potvrzuje -- do textu notifikace (proklik vede tamtéž).
+function _qrConfirmWhere(tbl, EN){
+  if(tbl==='event_tickets') return EN?'in Event management':'ve Správě akcí';
+  if(tbl==='gym_bookings') return EN?'in Payments to confirm':'v Úhradách k potvrzení';
+  return EN?'in your Coach overview':'v Přehledu kouče';
+}
 // Připomenutí poskytovateli. Jednou za 24 h, ať se z toho nestane bušení.
 async function _qrNudgeProvider(tbl,id){
   const r=(window._pendQrRows||{})[tbl+':'+id]; if(!r) return;
@@ -14363,15 +14385,14 @@ async function _qrNudgeProvider(tbl,id){
   const _left=_qrNudgeLeft(r);
   if(_left){ toast(EN?('You can remind again in '+_left+' h.'):('P\u0159ipomenout m\u016f\u017ee\u0161 zas za '+_left+' h.')); return; }
   try{
-    let target=r.coach_id||null;
-    if(!target && r.gym_id){ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',r.gym_id).maybeSingle(); target=(_g&&_g.owner_id)||null; }
-    if(!target){ toast(EN?'\u26a0\ufe0f Could not find the provider':'\u26a0\ufe0f Poskytovatele se nepoda\u0159ilo naj\u00edt'); return; }
+    const _pv=await _qrProviderOf(r);
+    if(!_pv){ toast(EN?'\u26a0\ufe0f Could not find the provider':'\u26a0\ufe0f Poskytovatele se nepoda\u0159ilo naj\u00edt'); return; }
+    const target=_pv.id, what=_pv.what;
     const who=(currentUser&&currentUser.name)||(EN?'A student':'Svěřenec');
-    const what=(r.title||'')+(r.sub?(' \u00b7 '+r.sub):'');
-    await supaClient.from('notifications').insert(_bi({ user_id:target, type:'system', read:false, data:JSON.stringify({ kind:'qr_unconfirmed', tbl:tbl, row_id:String(id), for_provider:true }), message:'' },
+    await supaClient.from('notifications').insert(_bi({ user_id:target, type:'system', read:false, data:JSON.stringify({ kind:'qr_unconfirmed', tbl:tbl, row_id:String(id), event_id:(r.event_id||null), for_provider:true }), message:'' },
       function(EN2){ return EN2
-        ? ('\u23f3 '+who+' says they paid for '+what+' by transfer and is waiting for your confirmation. Confirm or reject it in Reception.')
-        : ('\u23f3 '+who+' tvrd\u00ed, \u017ee zaplatil p\u0159evodem za '+what+', a \u010dek\u00e1 na potvrzen\u00ed. Potvr\u010f nebo odm\u00edtni v Recepci.'); }));
+        ? ('\u23f3 '+who+' says they paid for '+what+' by transfer and is waiting for your confirmation. Confirm or reject it '+_qrConfirmWhere(tbl,true)+'.')
+        : ('\u23f3 '+who+' tvrd\u00ed, \u017ee zaplatil p\u0159evodem za '+what+', a \u010dek\u00e1 na potvrzen\u00ed. Potvr\u010f nebo odm\u00edtni '+_qrConfirmWhere(tbl,false)+'.'); }));
     await supaClient.from(tbl).update({ claim_reminded:new Date().toISOString() }).eq('id',id);
     toast(EN?'\u2705 Reminder sent':'\u2705 P\u0159ipom\u00ednka odesl\u00e1na',1);
   }catch(e){ toast('\u26a0\ufe0f '+e.message); }
@@ -14472,12 +14493,11 @@ async function _withdrawPendingQr(tbl,id){
     // peníze čekat. Nezaplacená nikoho neobtěžuje, tam se nic neposílá.
     if(_wasClaimed){
       try{
-        let target=r.coach_id||null;
-        if(!target && r.gym_id){ const { data:_g }=await supaClient.from('gyms').select('owner_id').eq('id',r.gym_id).maybeSingle(); target=(_g&&_g.owner_id)||null; }
-        if(target){
+        const _pv=await _qrProviderOf(r);
+        if(_pv){
+          const target=_pv.id, what=_pv.what;
           const who=(currentUser&&currentUser.name)||(EN?'A student':'Svěřenec');
-          const what=(r.title||'')+(r.sub?(' \u00b7 '+r.sub):'');
-          await supaClient.from('notifications').insert(_bi({ user_id:target, type:'system', read:false, data:JSON.stringify({ kind:'qr_unconfirmed', tbl:tbl, row_id:String(id), for_provider:true }), message:'' },
+          await supaClient.from('notifications').insert(_bi({ user_id:target, type:'system', read:false, data:JSON.stringify({ kind:'qr_unconfirmed', tbl:tbl, row_id:String(id), event_id:(r.event_id||null), for_provider:true }), message:'' },
             function(EN2){ return EN2
               ? ('\u2139\ufe0f '+who+' cancelled a reservation they had marked as paid ('+what+'). The spot is free again \u2014 check whether the money arrived; if it did, agree with them on how to proceed.')
               : ('\u2139\ufe0f '+who+' zru\u0161il rezervaci, kterou ozna\u010dil za zaplacenou ('+what+'). M\u00edsto je zase voln\u00e9 \u2014 zkontroluj, jestli platba nedorazila; pokud ano, doporu\u010dujeme domluvit se na dal\u0161\u00edm postupu.'); }));
@@ -30961,10 +30981,13 @@ async function loadGymManageBookings(){
     html += drops.slice(0,20).map(b=>`<div style="padding:8px 0;border-bottom:1px solid var(--border);font-size:14px;"><div style="display:flex;justify-content:space-between;"><span>${b.student_name||(LANG==='en'?'Student':'Svěřenec')}${b.class_name?' · '+b.class_name:''}${b.class_date?' · '+_dt(b.class_date)+' '+(b.class_time||''):''}</span><strong>${fmtPrice((b.amount||0)*(b.gym_keep_pct!=null?b.gym_keep_pct:(isEP?0.99:0.965)), b.currency)} ${sym}</strong></div>${(b.payment_intent && b.status!=='cancelled' && b.status!=='refunded')?`<button class="gymOwnerRefundBtn" data-id="${b.id}" data-pi="${b.payment_intent}" data-amt="${b.amount}" data-curr="${b.currency||'CZK'}" data-gym="${b.gym_id}" data-student="${(b.student_name||'').replace(/"/g,'')}" style="margin-top:6px;padding:6px 11px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'↩ Refund student':'↩ Vrátit svěřenci'}</button>`:''}</div>`).join('');
   }
   if(!html) html=`<p style="color:var(--light);font-size:13px;">${LANG==='en'?'No bookings yet.':'Zatím žádné rezervace.'}</p>`;
-  if(html && !/No bookings yet|žádné rezervace/.test(html)){ html += `<button id="gymCsvBtn" style="width:100%;padding:12px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-top:14px;">${LANG==='en'?'⬇ Export for accountant (CSV)':'⬇ Export pro účetní (CSV)'}</button><p style="font-size:11px;color:var(--light);line-height:1.5;margin-top:8px;">${LANG==='en'?'Summary of your MTL activity (estimate). Your Stripe Dashboard is the authoritative source for tax.':'Souhrn tvé MTL aktivity (odhad). Závazný zdroj pro daňe je tvůj Stripe Dashboard.'}</p>`; }
+  // PODKLADY PRO ÚČETNÍ ze skutečných transakcí (hrubá částka, poplatek Stripe, provize MTL, připsáno,
+  // číslo dokladu). Dřív tu bylo vlastní CSV, které čísla dopočítávalo ze staré přirážky a odhadu
+  // provize a poplatek Stripe neznalo vůbec.
+  if(html && !/No bookings yet|žádné rezervace/.test(html)){ html += `<button id="gymCsvBtn" style="width:100%;padding:12px;background:var(--surf);color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-size:13.5px;font-weight:700;cursor:pointer;font-family:'DM Sans';margin-top:14px;">${LANG==='en'?'📊 Accounting export':'📊 Podklady pro účetní'}</button>`; }
   box.innerHTML=html;
   box.querySelectorAll('.gymOwnerRefundBtn').forEach(btn=>btn.onclick=()=>gymOwnerRefund(btn));
-  { const _g=box.querySelector('#gymCsvBtn'); if(_g) _g.onclick=()=>exportGymCsv(); }
+  { const _g=box.querySelector('#gymCsvBtn'); if(_g) _g.onclick=()=>openAccounting({ payeeAccount:_myGymData.stripe_account||undefined, gymId:_myGymData.id }, (LANG==='en'?'Accounting — ':'Podklady — ')+(_myGymData.name||'')); }
 }
 function evCurrent(){ const l=window._evFiltered||[]; return l[window._evIdx||0]||null; }
 function evNextCard(){ const l=window._evFiltered||[]; if((window._evIdx||0)<l.length){ window._evIdx=(window._evIdx||0)+1; evRenderSwipe(); } }
@@ -34175,7 +34198,9 @@ async function loadNotifications(append){
     else if(k==='coach_pay_ok') linkLabel = LANG==='en'?'Upcoming lessons ›':'Nadcházející lekce ›';
     else if(k==='coach_qr_intent') linkLabel = _pd.auto ? (LANG==='en'?'Booking ›':'Rezervace ›') : (LANG==='en'?'To confirm ›':'K potvrzení ›');   // auto = hlídá párování, nic se nepotvrzuje
     // Nepotvrzená platba převodem: poskytovatele pošli tam, kde se potvrzuje, studenta k jeho rezervaci.
-    else if(k==='qr_unconfirmed') linkLabel = (_pd.tbl==='gym_bookings' && _pd.for_provider)
+    else if(k==='qr_unconfirmed') linkLabel = (_pd.tbl==='event_tickets' && _pd.for_provider)
+      ? (LANG==='en'?'Event management ›':'Správa akce ›')
+      : (_pd.tbl==='gym_bookings' && _pd.for_provider)
       ? (LANG==='en'?'Payments to confirm ›':'Úhrady k potvrzení ›')
       : (_pd.for_provider ? (LANG==='en'?'To confirm ›':'K potvrzení ›') : (LANG==='en'?'Upcoming lessons ›':'Nadcházející lekce ›'));
     else if(k==='event_qr_intent') linkLabel = LANG==='en'?'Event management ›':'Správa akce ›';
@@ -34524,7 +34549,10 @@ async function loadNotifications(append){
           else if(_pd.kind==='qr_unconfirmed' || k==='qr_unconfirmed'){
             // Poskytovatel: 1:1 se potvrzuje v Přehledu kouče, vstup do klubu v Recepci.
             // Student: ve svých Nadcházejících, kde má Připomenout / Vyřešit.
-            if(_pd.for_provider && _pd.tbl==='gym_bookings'){
+            if(_pd.for_provider && _pd.tbl==='event_tickets'){
+              // Lístek potvrzuje pořadatel ve Správě akcí (sekce „QR platby k potvrzení").
+              try{ openSheet('shMyEvManage'); if(typeof renderMyEvManage==='function') renderMyEvManage(); }catch(e){}
+            } else if(_pd.for_provider && _pd.tbl==='gym_bookings'){
               // Vstup do klubu se potvrzuje v DOCHÁZCE u dané lekce (záložka „Úhrady k potvrzení"),
               // ne v Recepci -- ta jen ukazuje QR k zaplacení.
               try{ window._caTab='pay'; if(typeof openGymManage==='function') openGymManage(); else openSheet('shGymManage'); }catch(e){}
@@ -40366,18 +40394,21 @@ async function _stripeEmbed(src, opt){
   const go=function(u){ leaving=true; close(); location.href=u; };
   const fail=function(m){ close(); if(typeof opt.onError==='function'){ try{ opt.onError(m); }catch(e){} } else toast(m, 1); };
   ov.querySelector('#stripeEmbX').onclick=close;
-  let r=null, _raw='', j={};
+  let r=null, _raw='', j={}, _json=false;
   try{
     if(isUrl){
       r=await fetch(src+(src.indexOf('?')>=0?'&':'?')+'embed=1');
       _raw=await r.text().catch(function(){ return ''; });
-      try{ j=JSON.parse(_raw)||{}; }catch(e){ j={}; }
+      try{ j=JSON.parse(_raw)||{}; _json=true; }catch(e){ j={}; }
     } else {
       j=(await src(true))||{};
     }
   }catch(e){ j={ error:(e&&e.message)||'' }; }
   if(!ov.isConnected) return;                                     // zavřel dřív, než server odpověděl
   if(j._handled){ leaving=true; close(); return; }
+  // Server, který vložené platby ještě nezná (starší nasazená verze), odpoví přesměrováním na
+  // stránku Stripe a fetch vrátí její HTML. Pak se platba otevře klasicky, nehlásí se chyba.
+  if(isUrl && r && r.ok && !_json){ console.warn('[checkout] server bez vložené platby -- otevírám stránku Stripe'); go(src); return; }
   if(j.redirect){ leaving=true; close(); _checkoutBack(j.redirect); return; }
   if(j.url){ go(j.url); return; }
   // CHYBA SERVERU UKÁZAT CELOU: dřív jen „Platbu se nepodařilo spustit" a z toho nešlo poznat,
@@ -41955,7 +41986,7 @@ async function loadAccounting(){
   if(_acType!=='all') rows=rows.filter(r=>(r.type||'')===_acType);
   const cur=(rows[0].currency||'czk').toUpperCase(); const sym=_curSym(cur); const dec=2; const f=v=>(v/100).toLocaleString(LANG==='en'?'en-GB':'cs-CZ',{minimumFractionDigits:dec,maximumFractionDigits:dec})+' '+sym;
   let tG=0,tS=0,tM=0,tN=0,tMoff=0; const byType={};
-  rows.forEach(r=>{ const ref=r.refund_amount||0, mref=r.mtl_fee_refunded||0; const eG=(r.gross_amount||0)-ref; const eM=(r.mtl_fee||0)-mref; const st=r.stripe_fee||0; const eN=eG-st-eM; r._eG=eG; r._eM=eM; r._st=st; r._eN=eN; r._ref=ref; tG+=eG; tS+=st; tM+=eM; tN+=eN; if(r.payment_method==='cash'||r.payment_method==='qr') tMoff+=eM; const t=_acRowLabel(r); if(!byType[t]) byType[t]={n:0,g:0,nt:0}; byType[t].n++; byType[t].g+=eG; byType[t].nt+=eN; });
+  rows.forEach(r=>{ const ref=r.refund_amount||0, mref=r.mtl_fee_refunded||0; const eG=(r.gross_amount||0)-ref; const eM=(r.mtl_fee||0)-mref; const st=r.stripe_fee||0; const eN=eG-st-eM; r._eG=eG; r._eM=eM; r._st=st; r._eN=eN; r._ref=ref; tG+=eG; tS+=st; tM+=eM; tN+=eN; if(r.payment_method==='cash'||r.payment_method==='qr'||r.payment_method==='pis') tMoff+=eM; const t=_acRowLabel(r); if(!byType[t]) byType[t]={n:0,g:0,nt:0}; byType[t].n++; byType[t].g+=eG; byType[t].nt+=eN; });
   const cats=Object.keys(byType).map(t=>`<div style="display:flex;justify-content:space-between;font-size:13px;padding:7px 0;border-bottom:1px solid var(--border);"><span style="color:var(--mid);">${t} (${byType[t].n})</span><span style="font-weight:700;">${f(byType[t].g)}</span></div>`).join('');
   // Potvrzení o změně termínu k dokladům tohohle subjektu -- stejně jako je vidí student.
   // Poskytovatel je druhá strana té změny a v podkladech mu chybělo.
@@ -42017,9 +42048,18 @@ async function loadAccounting(){
   const _tsf=$('acTypeSel'); if(_tsf) _tsf.onchange=function(){ _acType=_tsf.value; loadAccounting(); };
 }
 function _acDisclaimer(){ const en=LANG==='en'; return `<div style="background:#FFF8E6;border:1px solid #F0DFA8;border-radius:12px;padding:13px 14px;margin-top:16px;font-size:12px;line-height:1.6;color:#7A5B00;">`+(en?`\uD83D\uDCC5 <b>Generate next month's export at the start of the following month</b>, so it contains everything (incl. late refunds).<br><br>\u2696\uFE0F These figures combine Stripe data with the cash/QR payments you confirmed, <b>and we take no responsibility for their accuracy</b> and recommend handing them to your accountant. Figures are records, not tax advice; VAT/tax with your accountant.`:`\uD83D\uDCC5 <b>Výpis za daný měsíc doporučujeme generovat až na začátku dalšího měsíce</b>, ať obsahuje vše.<br><br>\u2696\uFE0F Jde o podklady, ne daňové poradenství; DPH/daně řeš s účetní.`)+`</div>`; }
-function _acExportCsv(rows, cur, mLbl){ const num=v=>_czMoney(v); const esc=v=>{ const x=String(v==null?'':v); return /["\n;]/.test(x)?('"'+x.replace(/"/g,'""')+'"'):x; }; const pmL=function(m){return ({stripe:'Stripe',cash:'Hotovost',qr:'QR',pis:'Platba z banky'})[m]||'Stripe';}; // PIS je bankovní kolej stejně jako QR a hotovost -- provizi si MTL strhává z karty, ne z platby.
+// PODKLADY PRO ÚČETNÍ (CSV). Na každý řádek: hrubá částka po refundu, poplatek Stripe, provize MTL,
+// kolik se opravdu připsalo na účet a číslo dokladu, který dostal plátce. Připsáno: u karty
+// (Stripe, terminál) se poplatek i provize strhnou z platby rovnou; u převodu, QR, platby z banky
+// a hotovosti přijde celá částka a provizi MTL fakturuje a strhává zvlášť (doklad o provizi).
+async function _acExportCsv(rows, cur, mLbl){ const num=v=>_czMoney(v); const esc=v=>{ const x=String(v==null?'':v); return /["\n;]/.test(x)?('"'+x.replace(/"/g,'""')+'"'):x; }; const pmL=function(m){return ({stripe:'Stripe',card_present:'Karta (terminal)',cash:'Hotovost',qr:'QR',pis:'Platba z banky'})[m]||'Stripe';};
+  const _cardRail=function(r){ return !r.payment_method || r.payment_method==='stripe' || r.payment_method==='card_present'; };
+  const _dno={};
+  try{ const _ids=rows.map(function(r){ return r.id; }).filter(Boolean);
+    for(let i=0;i<_ids.length;i+=100){ const { data }=await supaClient.from('doklady').select('transaction_id,doklad_no').in('transaction_id', _ids.slice(i,i+100)); (data||[]).forEach(function(d){ if(d.doklad_no) _dno[String(d.transaction_id)]=d.doklad_no; }); }
+  }catch(e){} // PIS je bankovní kolej stejně jako QR a hotovost -- provizi si MTL strhává z karty, ne z platby.
   // Dřív spadl do větve 'auto (Stripe)', takže doklad tvrdil, že se strhla automaticky, a to je lež.
-  const csL=function(r){ if(r.payment_method==='stripe') return 'auto (Stripe)'; return ({pending:'k uhrade 6.',collected:'uhrazeno',failed:'selhalo'})[r.commission_status]||'k uhrade 6.'; }; const acqL=function(r){ const a=r.acq_source||'direct'; return a==='mtl_discovery' ? 'MTL objeveni' : (a==='referral' ? 'Doporuceni' : 'Vlastni'); };
+  const csL=function(r){ if(_cardRail(r)) return 'auto (Stripe)'; return ({pending:'k uhrade 6.',collected:'uhrazeno',failed:'selhalo'})[r.commission_status]||'k uhrade 6.'; }; const acqL=function(r){ const a=r.acq_source||'direct'; return a==='mtl_discovery' ? 'MTL objeveni' : (a==='referral' ? 'Doporuceni' : 'Vlastni'); };
   const _sp=function(r){
     const am=parseInt(r.acq_months,10)||0, gross=Number(r._eG)||0, fee=Number(r._eM)||0;
     if(!am || r.base_rate==null) return { am:'', ar:'', aa:'', br:'', ba:'' };
@@ -42032,7 +42072,7 @@ function _acExportCsv(rows, cur, mLbl){ const num=v=>_czMoney(v); const esc=v=>{
     const pc=function(x){ return ((Math.round(x*1000)/10)+'').replace('.',',')+' %'; };
     return { am:String(cov)+'/'+mo, ar:pc(acqRate), aa:num(acqAmt), br:pc(base), ba:num(baseAmt) };
   };
-  const H=['Datum','Typ','Zpusob platby','Zdroj clena','ID clena','Plan','Hrube','Stripe fee','Akviz. mesicu','Akviz. sazba','Akviz. castka','Bezna sazba','Bezna castka','Provize MTL celkem','Provize stav','Net','Mena','Status']; const out=[H.join(';')]; rows.forEach(r=>{ out.push([ _ymdOf(r.created_at), _acRowLabel(r), pmL(r.payment_method), acqL(r), (r.member_id?String(r.member_id).slice(0,8):''), r.plan||'', num(r._eG), num(r._st), (function(){ const x=_sp(r); return x.am; })(), (function(){ const x=_sp(r); return x.ar; })(), (function(){ const x=_sp(r); return x.aa; })(), (function(){ const x=_sp(r); return x.br; })(), (function(){ const x=_sp(r); return x.ba; })(), num(r._eM), csL(r), num(r._eN), (r.currency||'czk').toUpperCase(), r.status||'paid' ].map(esc).join(';')); }); const blob=new Blob(['\uFEFF'+out.join('\n')],{type:'text/csv;charset=utf-8;'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='MTL_podklady_'+_acMonth+'.csv'; a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000); }
+  const H=['Datum','Typ','Zpusob platby','Zdroj clena','ID clena','Plan','Hrube','Stripe fee','Akviz. mesicu','Akviz. sazba','Akviz. castka','Bezna sazba','Bezna castka','Provize MTL celkem','Provize stav','Net','Pripsano na ucet','Cislo dokladu','Mena','Status']; const out=[H.join(';')]; rows.forEach(r=>{ out.push([ _ymdOf(r.created_at), _acRowLabel(r), pmL(r.payment_method), acqL(r), (r.member_id?String(r.member_id).slice(0,8):''), r.plan||'', num(r._eG), num(r._st), (function(){ const x=_sp(r); return x.am; })(), (function(){ const x=_sp(r); return x.ar; })(), (function(){ const x=_sp(r); return x.aa; })(), (function(){ const x=_sp(r); return x.br; })(), (function(){ const x=_sp(r); return x.ba; })(), num(r._eM), csL(r), num(r._eN), num(_cardRail(r) ? r._eN : r._eG), (_dno[String(r.id)]||''), (r.currency||'czk').toUpperCase(), r.status||'paid' ].map(esc).join(';')); }); const blob=new Blob(['\uFEFF'+out.join('\n')],{type:'text/csv;charset=utf-8;'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='MTL_podklady_'+_acMonth+'.csv'; a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000); }
 // ── Stripe Connect: fully-supported countries where a non-resident platform CAN auto-deduct an
 // application fee on direct charges. Brazil is excluded (Stripe blocks app fees for non-BR platforms);
 // Thailand, Mexico, Malaysia are excluded for launch (local rules block automatic app-fee deduction —
@@ -53943,63 +53983,7 @@ async function showReceipt(b){
     ov.querySelector('#_dokPrint').onclick=function(){ try{ _dif.contentWindow.focus(); _dif.contentWindow.print(); }catch(e){} };
   }catch(e){ console.error('showReceipt', e); toast('⚠️ '+e.message); }
 }
-async function exportGymCsv(){
-  try{
-    if(!_myGymData || !_myGymData.id){ toast('⚠️'); return; }
-    const gid=_myGymData.id; const curr=(_myGymData.currency||'CZK'); const EN=LANG==='en';
-    const esc=v=>{ const t=String(v==null?'':v); return /[",\n;]/.test(t)?'"'+t.replace(/"/g,'""')+'"':t; };
-    const { data: drops } = await supaClient.from('gym_bookings').select('*').eq('gym_id', gid);
-    const { data: mems } = await supaClient.from('gym_memberships').select('*').eq('gym_id', gid);
-    const hdr=[EN?'Date':'Datum',EN?'Student':'Svěřenec',EN?'Type':'Typ',EN?'Discipline':'Disciplina',EN?'Gross':'Hrube',EN?'MTL fee':'MTL poplatek',EN?'MTL %':'MTL %',EN?'Net':'Ciste',EN?'Currency':'Mena'];
-    const lines=[hdr.join(';')]; let tG=0,tF=0,tN=0;
-    (drops||[]).filter(b=>b.status!=='cancelled'&&b.status!=='refunded').forEach(b=>{
-      const amt=b.amount||0; const keep=(b.gym_keep_pct!=null?b.gym_keep_pct:0.97); const markup=keep>=0.98?1.02:1.03; const gross=Math.round(amt*markup*100)/100; const net=Math.round(amt*keep*100)/100; const fee=Math.round((gross-net)*100)/100; const pct=gross>0?Math.round(fee/gross*1000)/10:0; tG+=gross;tF+=fee;tN+=net;
-      lines.push([esc(b.class_date||_ymdOf(b.created_at)||''),esc(b.student_name||''),(EN?'Drop-in':'Jednorázový vstup'),esc(b.discipline||''),_czNum(gross),_czNum(fee),_czNum(pct),_czNum(net),esc(b.currency||curr)].join(';'));
-    });
-    (mems||[]).filter(m=>m.status==='active'||m.status==='cancelling').forEach(m=>{
-      const amt=m.amount||0; const keep=(m.gym_keep_pct!=null?m.gym_keep_pct:0.965); const net=Math.round(amt*keep*100)/100; const fee=Math.round((amt-net)*100)/100; const pct=amt>0?Math.round(fee/amt*1000)/10:0; tG+=amt;tF+=fee;tN+=net;
-      lines.push([esc((m.period_end||'').slice(0,10)),esc(m.student_name||''),EN?'Membership (monthly)':'Clenstvi (mesicne)',esc(m.discipline||''),_czNum(amt),_czNum(fee),_czNum(pct),_czNum(net),esc(m.currency||curr)].join(';'));
-    });
-    lines.push('');
-    lines.push([esc(EN?'TOTAL':'CELKEM'),'','','',_czNum(tG),_czNum(tF),'',_czNum(tN),esc(curr)].join(';'));
-    lines.push('');
-    lines.push(esc(EN?'Summary of MTL activity (estimate). Drop-ins are individual transactions; memberships show the current monthly rate. Your Stripe Dashboard is the authoritative source for tax and actual recurring charges.':'Souhrn MTL aktivity (odhad). Jednorázové vstupy jsou jednotlive transakce; clenstvi ukazuje aktualni mesicni sazbu. Zavazny zdroj pro dane a skutecne opakovane platby je tvuj Stripe Dashboard.'));
-    const csv='\ufeff'+lines.join('\n'); const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
-    const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=(EN?'mtl-club-accounting-':'mtl-klub-ucetnictvi-')+new Date().toISOString().slice(0,10)+'.csv';
-    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
-    toast(EN?'✓ CSV exported':'✓ CSV vyexportováno');
-  }catch(e){ console.error('exportGymCsv', e); toast('⚠️ '+e.message); }
-}
 function exportCoachGymCsv(){ /* old stale CSV thrown away - now routes to the unified accounting export, identical to klub owner + coach (pulls real Stripe numbers from transactions) */ try{ openAccounting({ coachId: currentUser.id, gymId: _gtdGym, paidTo: 'coach' }, (LANG==='en'?'Accounting - ':'Podklady - ')+(_gtdGymName||'')); }catch(e){ toast('⚠️ '+(e&&e.message||'')); } }
-function exportCoachCsv(rows, curr){
-  try{
-    const esc=v=>{ const t=String(v==null?'':v); return /[",\n;]/.test(t) ? '"'+t.replace(/"/g,'""')+'"' : t; };
-    const EN=LANG==='en';
-    const hdr=[EN?'Date':'Datum',EN?'Student':'Svěřenec',EN?'Type':'Typ',EN?'Discipline':'Disciplina',EN?'Gross':'Hrube',EN?'MTL fee':'MTL poplatek',EN?'MTL %':'MTL %',EN?'Net':'Ciste',EN?'Currency':'Mena'];
-    const lines=[hdr.join(';')];
-    let tG=0,tF=0,tN=0;
-    (rows||[]).forEach(b=>{
-      const amt=b.amount||0; const keep=(b.coach_keep_pct!=null?b.coach_keep_pct:myKeepPct());
-      const markup=keep>=0.99?1.00:1.00; const gross=Math.round(amt*markup*100)/100;
-      const net=Math.round(amt*keep*100)/100; const fee=Math.round((gross-net)*100)/100;
-      const pct=gross>0?Math.round(fee/gross*1000)/10:0;
-      tG+=gross; tF+=fee; tN+=net;
-      const date=b.training_date||_ymdOf(b.created_at)||'';
-      const type=b.type==='online'?'Online':'1:1';
-      lines.push([esc(date),esc(b.student_name||''),esc(type),esc(b.discipline||''),_czNum(gross),_czNum(fee),_czNum(pct),_czNum(net),esc(b.currency||curr||'CZK')].join(';'));
-    });
-    lines.push('');
-    lines.push([esc(EN?'TOTAL':'CELKEM'),'','','',_czNum(tG),_czNum(tF),'',_czNum(tN),esc(curr||'CZK')].join(';'));
-    lines.push('');
-    lines.push(esc(EN?'Gross = total paid by the student. Net = your earnings. MTL fee = MTL platform total. Estimate from MTL data; your Stripe Dashboard is the authoritative source for tax/accounting.':'Hrube = celkem zaplatil svěřenec. Ciste = tvuj vydelek. MTL poplatek = celkem MTL. Odhad z dat MTL; zavazny zdroj pro dane/ucetnictvi je tvuj Stripe Dashboard.'));
-    const csv='\ufeff'+lines.join('\n');
-    const blob=new Blob([csv],{type:'text/csv;charset=utf-8;'});
-    const url=URL.createObjectURL(blob); const a=document.createElement('a');
-    a.href=url; a.download=(EN?'mtl-accounting-':'mtl-ucetnictvi-')+new Date().toISOString().slice(0,10)+'.csv';
-    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
-    toast(EN?'✓ CSV exported':'✓ CSV vyexportováno');
-  }catch(e){ console.error('exportCoachCsv', e); toast('⚠️ '+e.message); }
-}
 
 window._myNetCache = window._myNetCache || null;
 function _txNetEff(r){ const eG=(r.gross_amount||0)-(r.refund_amount||0); const eM=(r.mtl_fee||0)-(r.mtl_fee_refunded||0); const st=r.stripe_fee||0; return Math.max(0, eG-st-eM); }
