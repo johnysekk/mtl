@@ -44353,15 +44353,20 @@ function _epPriceOf(t, u){
 function _epCostAt(turn, rate, flat){ return turn*rate + (flat||0); }
 // Od jakého měsíčního obratu se stupeň vyplatí: musí být levnější než bez EP i než každý
 // stupeň s vyšší sazbou (za cenu, kterou by za něj člověk opravdu platil). null = nikdy.
+// Vrací { from, vs, dp, dr }: obrat (zaokrouhlený nahoru na tisíce), proti čemu je hranice
+// nejvyšší (null = proti dnešní sazbě bez EP, jinak klíč stupně), rozdíl paušálů a rozdíl sazeb.
+// Výpočet: rozdíl paušálů ÷ rozdíl provizí -- od toho obratu ušetřená provize zaplatí paušál navíc.
 function _epPaysFrom(t, nowRate){
   const T=EP_TIERS[t], pT=_epPriceOf(t).amount;
-  const opts=[{ rate:nowRate, price:0 }].concat(EP_TIER_ORDER.filter(function(o){ return EP_TIERS[o].rate>T.rate; }).map(function(o){ return { rate:EP_TIERS[o].rate, price:_epPriceOf(o).amount }; }));
-  let need=0;
+  const opts=[{ key:null, rate:nowRate, price:0 }].concat(EP_TIER_ORDER.filter(function(o){ return EP_TIERS[o].rate>T.rate; }).map(function(o){ return { key:o, rate:EP_TIERS[o].rate, price:_epPriceOf(o).amount }; }));
+  let best={ from:0, vs:null, dp:pT, dr:nowRate-T.rate };
   for(const o of opts){
     if(o.rate<=T.rate){ if(pT>o.price) return null; continue; }
-    need=Math.max(need, (pT-o.price)/(o.rate-T.rate));
+    const need=(pT-o.price)/(o.rate-T.rate);
+    if(need>best.from) best={ from:need, vs:o.key, dp:pT-o.price, dr:o.rate-T.rate };
   }
-  return Math.ceil(need/1000)*1000;
+  best.from=Math.ceil(best.from/1000)*1000;
+  return best;
 }
 // Nejlevnější volba při obratu `turn`: klíč stupně, nebo null (bez EP vyjde levněji).
 function _epBestAt(turn, nowRate){
@@ -44640,7 +44645,7 @@ function _epCss(){
     +'.epCard.mine{border:2px solid #171717;}'
     +'.epArt{aspect-ratio:1473/1068;position:relative;background:#0c0c0c;}'
     +'.epKanji{position:absolute;right:12px;top:10px;font-size:22px;color:rgba(244,216,122,.8);text-shadow:0 1px 6px rgba(0,0,0,.8);font-family:"Noto Serif JP","Hiragino Mincho ProN",serif;}'
-    +'.epRib{position:absolute;left:10px;top:10px;background:#F4D87A;color:#171717;font-size:10.5px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;border-radius:7px;padding:4px 8px;}'
+    +'.epRib{display:inline-block;align-self:flex-start;margin-top:10px;background:#F4D87A;color:#171717;font-size:10.5px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;border-radius:7px;padding:4px 8px;}'
     +'.epFlag{position:absolute;left:0;right:0;bottom:0;background:rgba(12,12,12,.82);color:#F4D87A;font-size:12px;font-weight:800;text-align:center;padding:6px 10px;}'
     +'.epBody{padding:14px 16px 16px;display:flex;flex-direction:column;flex:1;}'
     +'.epName{font-family:"Bebas Neue",Impact,sans-serif;font-size:30px;letter-spacing:.03em;line-height:1;color:var(--dark);}'
@@ -44678,7 +44683,7 @@ async function openPartnerInfo(){
       +'<div id="piBillWrap" style="max-width:560px;"><div id="piBillAnchor"></div></div>'
       +'<div id="piRow"><p style="color:var(--light);font-size:13px;">'+(EN?'Loading…':'Načítám…')+'</p></div>'
       +'<p id="piNote" style="font-size:12px;color:var(--light);margin-top:16px;line-height:1.55;"></p>'
-      +'<div id="piMore" style="max-width:560px;"></div>'
+      +'<div id="piMore" style="display:flex;flex-wrap:wrap;gap:10px;margin-top:10px;"></div>'
     +'</div>';
   const _px=ov.querySelector('#piCloseX'); if(_px) _px.onclick=function(){ closePartnerInfo(); };
   try{ openSheet('shPartnerInfo'); }catch(e){ ov.classList.add('open'); }
@@ -44741,50 +44746,51 @@ function _epPaintInfo(turn){
       const up=EP_TIER_ORDER.indexOf(t)>EP_TIER_ORDER.indexOf(mine);
       if(u.partner_cancelling){ btn=EN?('Switch to '+T.name):('Přejít na '+T.name); dis=true; }
       else if(up){
-        // Odhad doplatku: rozdíl měsíčních cen × zbývající část období (u ročního ×10).
-        // Roční předplatné se pozná podle vzdálenosti příští platby (víc než ~40 dní).
-        let est=null; try{ const end=Date.parse(u.partner_renews_at||''); const curM=Number(u.partner_price)||_epPriceOf(mine).amount;
-          const yrly=(end-Date.now())>40*86400000, per=yrly?365*86400000:30.44*86400000;
-          if(end>Date.now()) est=Math.max(0, Math.round((P.amount-curM)*(yrly?EP_YEAR_MONTHS:1)*Math.min(1,(end-Date.now())/per))); }catch(e){}
-        btn=(EN?('Switch now'+(est!=null?(' · ~'+_epCzk(est)):'')):('Přejít hned'+(est!=null?(' · doplátíš ~'+_epCzk(est)):'')));
+        // Přesný doplatek (rozdíl cen za zbytek zaplaceného období) doplní _epPreview ze serveru.
+        btn=EN?'Switch now':'Přejít hned';
       } else btn=EN?('Switch from '+_d(u.partner_renews_at)):('Přejít od '+_d(u.partner_renews_at));
     }
     else btn=EN?('Choose '+T.name):('Vybrat '+T.name);
     return '<div class="epCard'+(isRec?' rec':'')+(isMine?' mine':'')+'" data-t="'+t+'">'
       +'<div class="epArt">'+_epArtImg(t)
-        +(P.founding?'<div class="epRib">'+(EN?'Founding price':'Zakládající cena')+'</div>':'')
         +'<div class="epKanji">'+T.kanji+'</div>'
         +(isMine?('<div class="epFlag">★ '+(EN?'Your tier':'Tvůj stupeň')+'</div>'):(isRec?('<div class="epFlag">★ '+(EN?'Your tier by turnover':'Tvůj stupeň podle obratu')+'</div>'):''))
       +'</div>'
       +'<div class="epBody">'
         +'<div class="epName">'+T.name+'</div><div class="epTag">'+TAG[t]+'</div>'
-        +'<div class="epPrice">'+_epCzk(amt)+' <small>/ '+(yr?(EN?'year':'rok'):(EN?'mo':'měs'))+'</small></div>'
+        +(P.founding?'<div class="epRib">'+(EN?'Founding price':'Zakládající cena')+'</div>':'')
+        +'<div class="epPrice"'+(P.founding?' style="margin-top:6px;"':'')+'>'+_epCzk(amt)+' <small>/ '+(yr?(EN?'year':'rok'):(EN?'mo':'měs'))+'</small></div>'
         +(P.founding?('<div class="epWas">'+(EN?'normally ':'běžně ')+'<s>'+_epCzk(yr?T.czk*EP_YEAR_MONTHS:T.czk)+'</s> · '+(EN?'the price stays yours until you cancel EP':'cena ti zůstane, dokud EP nezrušíš')+'</div>'):'')
-        +((T.foundingSpots && !holds && left!=null)?('<div class="epSpots">'+(left>0?(EN?(left+' of '+T.foundingSpots+' founding places left'):('Zbývá '+left+' z '+T.foundingSpots+' zakládajících míst')):(EN?'Founding places are taken':'Zakládající místa jsou obsazená'))+'</div>'):'')
+        +((T.foundingSpots && left!=null)?('<div class="epSpots">'+(left>0?(EN?(left+' of '+T.foundingSpots+' founding places left'):('Zbývá '+left+' z '+T.foundingSpots+' zakládajících míst')):(EN?'Founding places are taken':'Zakládající místa jsou obsazená'))
+          +(holds?(EN?' · one of them is yours':' · jedno z nich máš ty'):'')+'</div>'):'')
         +'<ul class="epList">'
           +'<li><span>'+(EN?'Commission':'Provize')+'</span><b>'+_epPct(T.rate)+'</b></li>'
           +'<li><span>'+(EN?'Acquisition':'Akvizice')+'</span><b>'+_epPct(T.acq)+'</b></li>'
           +'<li><span>'+(EN?'Promotion by MTL':'Reklama od MTL')+'</span><b>'+_epPct(T.ads)+'</b></li>'
           +'<li><span>'+(EN?'Partners on the card':'Partneři na kartě')+'</span><b>'+(t==='kage'?(EN?'10 + 10 on the profile':'10 + 10 v profilu'):T.partners)+'</b></li>'
         +'</ul>'
-        +'<div class="epBe">'+(be==null?(EN?'Does not pay off against your current rate':'Proti tvé dnešní sazbě se nevyplatí'):((EN?'Pays off from turnover ':'Vyplatí se od obratu ')+'<b>'+_epCzk(be)+(EN?' / mo':' / měs')+'</b>'))+'</div>'
+        +'<div class="epBe">'+(be==null?(EN?'Does not pay off against your current rate':'Proti tvé dnešní sazbě se nevyplatí')
+          :((EN?'Pays off from turnover ':'Vyplatí se od obratu ')+'<b>'+_epCzk(be.from)+(EN?' / mo':' / měs')+'</b>'
+            +'<div style="font-size:11px;margin-top:3px;opacity:.85;">= '+_epCzk(be.dp)+(be.vs?(EN?' more fee':' paušálu navíc'):(EN?' fee':' paušál'))+' ÷ '+_epPct(be.dr)+(EN?' lower commission, against ':' nižší provize, proti ')
+              +(be.vs?_epName(be.vs):((EN?'your current rate ':'tvé dnešní sazbě ')+_epPct(nowRate)))+'</div>'))+'</div>'
         +(btn?('<button class="epBtn" data-t="'+t+'"'+(dis?' disabled':'')+'>'+btn+'</button>'):'')
       +'</div></div>';
   }).join('');
   row.querySelectorAll('.epBtn').forEach(function(b){ if(b.disabled) return; b.onclick=function(){ const t=b.getAttribute('data-t'); if(paid) _epChange(t); else _epBuy(t); }; });
+  if(paid && !u.partner_cancelling && !native) _epPreview(row);
   // Mobil: karta pro tebe doprostřed.
   // Znovu po chvíli: sheet se otevírá animací a písmo se dotahuje, první měření bývá posunuté.
   const _ctr=function(){ try{ const c=row.querySelector('.epCard[data-t="'+center+'"]'); if(c && row.scrollWidth>row.clientWidth){ row.scrollLeft=(c.getBoundingClientRect().left-row.getBoundingClientRect().left+row.scrollLeft)-(row.clientWidth-c.clientWidth)/2; } }catch(e){} };
   requestAnimationFrame(_ctr); setTimeout(_ctr, 350);
   const note=$('piNote');
   if(note) note.innerHTML=(EN
-    ? ('Commission is charged on payments through MTL; EP covers all your clubs, lessons and events together. “Pays off from” is worked out from your current rate ('+_epPct(nowRate)+') and leaves out acquisition. Moving up applies at once (you pay the difference for the rest of the period), moving down from the next period. The app-store fee in the mobile app (12.1 %) stays with every tier. EP is a B2B service: a VAT-registered business in another EU country is invoiced without VAT (reverse charge).')
-    : ('Provize se počítá z plateb přes MTL; EP platí pro všechny tvoje kluby, lekce i akce dohromady. „Vyplatí se od“ počítá appka z tvé dnešní sazby ('+_epPct(nowRate)+') a bez akvizice. Přechod nahoru platí hned (doplátíš rozdíl za zbytek období), přechod dolů od dalšího období. Poplatek obchodu v mobilní appce (12,1 %) zůává u všech stupňů. EP je B2B služba.'));
+    ? ('Commission is charged on payments through MTL; EP covers all your clubs, lessons and events together. “Pays off from” is the monthly turnover from which the tier costs you less than your current rate without EP ('+_epPct(nowRate)+') and than every cheaper tier: fee difference ÷ commission difference. It differs per person because it depends on their own rate. Acquisition is left out. Moving up applies at once (you pay the difference for the rest of the period), moving down from the next period. The app-store fee in the mobile app (12.1 %) stays with every tier. EP is a B2B service: a VAT-registered business in another EU country is invoiced without VAT (reverse charge).')
+    : ('Provize se počítá z plateb přes MTL; EP platí pro všechny tvoje kluby, lekce i akce dohromady. „Vyplatí se od“ je měsíční obrat, od kterého tě stupeň vyjde levněji než tvoje dnešní sazba bez EP ('+_epPct(nowRate)+') i než každý levnější stupeň: rozdíl paušálů ÷ rozdíl provizí. Proto je u každého jiný -- záleží na jeho sazbě (Shikai, Bankai, asociace, kolej). Akvizice se v něm nepočítá. Přechod nahoru platí hned (doplatíš rozdíl za zbytek období), přechod dolů od dalšího období. Poplatek obchodu v mobilní appce (12,1 %) zůstává u všech stupňů. EP je B2B služba.'));
   // DALŠÍ AKCE: kalkulačka, faktury, zrušení; v nativní appce místo nákupu věta.
   const more=$('piMore');
   if(more){
-    const b=function(id,txt){ return '<button id="'+id+'" style="width:100%;margin-top:10px;padding:13px;background:#fff;color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-weight:700;font-size:14px;cursor:pointer;font-family:inherit;">'+txt+'</button>'; };
-    more.innerHTML=(native?_nativeNoSubHtml().replace('class="native-nosub"','class="native-nosub" data-ep="1"'):'')
+    const b=function(id,txt){ return '<button id="'+id+'" style="flex:1 1 220px;padding:13px;background:#fff;color:var(--dark);border:1.5px solid var(--border);border-radius:12px;font-weight:700;font-size:14px;cursor:pointer;font-family:inherit;">'+txt+'</button>'; };
+    more.innerHTML=(native?('<div style="flex:1 1 100%;">'+_nativeNoSubHtml().replace('class="native-nosub"','class="native-nosub" data-ep="1"')+'</div>'):'')
       +b('piCalc','📊 '+(EN?'Calculate for my turnover':'Spočítat pro můj obrat'))
       +(mine?b('piDoklad','🧾 '+(EN?'Invoices':'Faktury za předplatné')):'')
       +((paid && !u.partner_cancelling && !native)?b('piCancel',EN?'Cancel Exclusive Partner':'Zrušit Exclusive Partnera'):'')
@@ -44794,6 +44800,22 @@ function _epPaintInfo(turn){
     const x=$('piCancel'); if(x) x.onclick=function(){ openEPCancel(); };
     const r=$('piReact'); if(r) r.onclick=async function(){ await doEPReactivate(); _epPaintInfo(turn); };
   }
+}
+// PŘESNÝ DOPLATEK za přechod nahoru (server: rozdíl cen za zbývající čas zaplaceného období,
+// stejně jako ho strhne Stripe). Doplní se do tlačítek a do potvrzení.
+async function _epPreview(row){
+  const EN=LANG==='en';
+  try{
+    const r=await fetch('/api/pay?type=partner_change&preview=1', { headers:{ Authorization:'Bearer '+((await _freshTok())||'') } });
+    const j=await r.json(); if(!j || !j.ok) return;
+    window._epDue={};
+    (j.upgrades||[]).forEach(function(x){
+      window._epDue[x.tier]=x.due;
+      const b=row.querySelector('.epBtn[data-t="'+x.tier+'"]'); if(!b || b.disabled) return;
+      const amt=Number(x.due).toLocaleString(EN?'en-GB':'cs-CZ',{ minimumFractionDigits:2, maximumFractionDigits:2 })+(EN?' CZK':' K\u010d');
+      b.textContent=EN?('Switch now \u00b7 pay '+amt):('P\u0159ej\u00edt hned \u00b7 dopla\u0165 '+amt);
+    });
+  }catch(e){}
 }
 // NÁKUP stupně (nové předplatné). Přihlášení jde v hlavičce -- server kupuje jen za přihlášeného.
 function _epBuy(t){
@@ -44816,7 +44838,9 @@ async function _epChange(t, cancelDown){
     const P=_epPriceOf(t);
     const _d=function(v){ try{ return new Date(v).toLocaleDateString(EN?'en-GB':'cs-CZ'); }catch(e){ return ''; } };
     const msg=up
-      ? (EN?('Move up to '+_epName(t)+' now? The card on the subscription is charged the difference for the rest of the paid period; from the next period you pay '+P.label+'/mo excl. VAT.'):('Přejít hned na '+_epName(t)+'? Z karty u předplatného se strhne rozdíl za zbytek zaplaceného období; od dalšího období platíš '+P.label+'/měs bez DPH.'))
+      ? (function(){ const d=(window._epDue||{})[t]; const amt=(d!=null)?(Number(d).toLocaleString(EN?'en-GB':'cs-CZ',{ minimumFractionDigits:2, maximumFractionDigits:2 })+(EN?' CZK':' Kč')):null;
+          return EN?('Move up to '+_epName(t)+' now? The card on the subscription is charged '+(amt||'the difference')+' for the rest of the paid period; from the next period you pay '+P.label+'/mo excl. VAT.')
+                   :('Přejít hned na '+_epName(t)+'? Z karty u předplatného se strhne '+(amt||'rozdíl')+' za zbytek zaplaceného období; od dalšího období platíš '+P.label+'/měs bez DPH.'); })()
       : (EN?('Move down to '+_epName(t)+' from '+_d(u.partner_renews_at)+'? Until then you keep '+_epName(mine)+'; no refund for the current period. You can cancel the change until then.'):('Přejít na '+_epName(t)+' od '+_d(u.partner_renews_at)+'? Do té doby ti zůstává '+_epName(mine)+', za běžící období se nic nevrací. Přechod můžeš do té doby zrušit.'));
     if(!confirm(msg)) return;
   }
