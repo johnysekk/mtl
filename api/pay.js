@@ -944,11 +944,15 @@ async function partnerChange(req, res) {
   const pfx = `profiles?id=eq.${encodeURIComponent(uid)}&partner_sub=eq.${encodeURIComponent(sub.id)}`;
   const clearDown = { ep_tier_next: '', ep_month_next: '', ep_founding_next: '', ep_prev_amount: '' };
 
-  // NÁHLED DOPLATKŮ pro tlačítka „Přejít hned": Stripe účtuje rozdíl cen za zbývající čas
-  // zaplaceného období (po sekundách) -- totéž se tu spočítá bez volání Stripe. U stupňů nahoru.
+  // DOPLATEK PO CELÝCH DNECH. Stripe sám počítá zbytek období po sekundách; proto se mu předá
+  // proration_date = začátek dnešního dne předplatného (dny se počítají od hodiny, kdy předplatné
+  // začalo). Doplatek je pak rozdíl cen × zbývající celé dny ÷ dny období, dnešek celý za novou cenu.
+  const ps = sub.current_period_start, pe = sub.current_period_end;
+  const prorDate = ps + Math.floor(Math.max(0, Math.floor(Date.now() / 1000) - ps) / 86400) * 86400;
+
+  // NÁHLED DOPLATKŮ pro tlačítka „Přejít hned" -- stejný výpočet jako Stripe, bez volání Stripe.
   if (_preview) {
-    const now = Math.floor(Date.now() / 1000), ps = sub.current_period_start, pe = sub.current_period_end;
-    const frac = (pe > ps) ? Math.max(0, Math.min(1, (pe - now) / (pe - ps))) : 0;
+    const frac = (pe > ps) ? Math.max(0, Math.min(1, (pe - prorDate) / (pe - ps))) : 0;
     const out = [];
     for (const t of EP_TIER_ORDER.slice(EP_TIER_ORDER.indexOf(cur) + 1)) {
       const pr = await epPriceFor(t, prof);
@@ -1007,6 +1011,7 @@ async function partnerChange(req, res) {
     upd = await stripe.subscriptions.update(sub.id, {
       items: [{ id: item.id, price: np.id }],   // id položky se změnou ceny nemění
       proration_behavior: 'always_invoice',
+      proration_date: prorDate,
       payment_behavior: 'pending_if_incomplete',
       expand: ['latest_invoice.payment_intent'],
     });
