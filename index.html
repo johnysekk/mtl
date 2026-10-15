@@ -14281,8 +14281,6 @@ async function _renderPendingQr(){
               :('Jakmile pen\u00edze doraz\u00ed na \u00fa\u010det '+({'klub':'klubu','kou\u010d':'kou\u010de','organiz\u00e1tor':'organiz\u00e1tora'}[_qrWho(r)]||_qrWho(r))+', platba se potvrd\u00ed sama \u2014 nic dal\u0161\u00edho ned\u011bl\u00e1\u0161.'))
           +'</div>'
           +'<div style="display:flex;gap:6px;margin-top:9px;">'
-          // Testovací režim: platba z Mock Cobs s VS téhle platby -- ověření párování bez peněz.
-          +(window._TEST_MODE?('<button onclick="_pairTestPay(\''+r.pair+'\')" style="flex:1;padding:9px;background:#fff;color:var(--dark);border:1px dashed #C9A227;border-radius:9px;font-size:12px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">\ud83e\uddea '+(EN?'Test: pay from Mock Cobs':'Test: zaplatit z Mock Cobs')+'</button>'):'')
           +_btn('_withdrawPendingQr', (EN?'Cancel':'Zru\u0161it'), false)+'</div>')
       : claimed
       ? ('<div style="font-size:11.5px;color:var(--mid);line-height:1.5;margin-top:7px;">'
@@ -17564,7 +17562,6 @@ async function loadMyMemberships(){
         ${m.pairing_id
           // Hlídá párování plateb: potvrdí se samo, jakmile peníze dorazí -- klub nic neodklikává.
           ? `<div style="font-size:12px;font-weight:700;color:#0a8f5b;margin-bottom:9px;line-height:1.45;">✓ ${LANG==='en'?'Paid · confirms automatically as soon as the money reaches the club’s account':'Zaplaceno · potvrdí se samo, jakmile peníze dorazí na účet klubu'}</div>`
-            +(window._TEST_MODE?`<button onclick="_pairTestPay('${m.pairing_id}')" style="width:100%;padding:10px;margin-bottom:8px;background:#fff;color:var(--dark);border:1px dashed #C9A227;border-radius:10px;font-size:13px;font-weight:800;cursor:pointer;font-family:'DM Sans';">🧪 ${LANG==='en'?'Test: pay from Mock Cobs':'Test: zaplatit z Mock Cobs'}</button>`:'')
           : `<div style="font-size:12px;font-weight:700;color:#9a5a00;margin-bottom:9px;">⏳ ${LANG==='en'?'Awaiting the club to confirm your payment':'Čeká na potvrzení úhrady klubem'}</div>`}
         <button class="pendMembCancel" data-id="${m.id}" style="width:100%;padding:10px;background:#fff;color:var(--red);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Cancel':'Zrušit'}</button>
       </div>`;
@@ -26922,42 +26919,6 @@ function _pairAttach(vs, tbl, id){
     const j=await r.json().catch(function(){ return {}; }); return (j && j.status) || null; }catch(e){ return null; } })();
 }
 // Hláška po „Zaplaceno" u platby, kterou potvrdí párování (bez čekání na klub / kouče).
-// TEST BEZ PENĚZ (jen Testovací režim): u platby, kterou hlídá párování, pošle sandboxovou platbu
-// z Mock Cobs (1 Kč) s jejím VS na účet příjemce. V sandboxu se páruje jen podle VS, takže se
-// rezervace po spárování potvrdí sama -- přesně jako když dorazí skutečný převod.
-async function _pairTestPay(vs){
-  const EN=LANG==='en';
-  try{
-    const t=await _freshTok();
-    const r=await fetch('/api/pairing',{ method:'POST', headers:{ 'Content-Type':'application/json', 'x-access-token':t||'' }, body:JSON.stringify({ action:'test_incoming', vs:String(vs) }) });
-    const j=await r.json().catch(function(){ return {}; });
-    if(!r.ok || !j.url) throw new Error(j.error||('HTTP '+r.status));
-    location.href=j.url;
-  }catch(e){ toast('\u26a0\ufe0f '+(e.message||''),1); }
-}
-// Po návratu z Mock Cobs: ptá se Finbricks na stav (hned a pak 10x po 15 s), dál už to dohlídá
-// cron. Otevře to, kde platba visí: čekající permanentku v Permanentkách, ostatní v Nadcházejících.
-async function _pairTestWatch(vs){
-  const EN=LANG==='en'; let opened=false;
-  const show=function(tbl){ try{
-    if(tbl==='gym_memberships'){ openSheet('shMemberships'); loadMyMemberships(); }
-    else { openSheet('shBookings'); if(typeof _upTab==='function') _upTab('skup'); }
-  }catch(e){} };
-  toast(EN?'🧪 Test payment sent — waiting for Finbricks to find it on the account…':'🧪 Testovací platba odeslaná — čekám, až ji Finbricks najde na účtu…', 1);
-  for(let i=0;i<11;i++){
-    if(i) await new Promise(function(res){ setTimeout(res, 15000); });
-    try{
-      const t=await _freshTok();
-      const r=await fetch('/api/pairing',{ method:'POST', headers:{ 'Content-Type':'application/json', 'x-access-token':t||'' }, body:JSON.stringify({ action:'check', vs:String(vs) }) });
-      const j=await r.json().catch(function(){ return {}; });
-      if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
-      if(!opened){ opened=true; show(j.tbl); }
-      if(j.status==='paired'){ toast(EN?'✅ Paired — the payment confirmed itself':'✅ Spárováno — platba se potvrdila sama', 1); show(j.tbl); return; }
-      if(j.status!=='scheduled'){ toast('⚠️ '+(EN?'Pairing ended: ':'Párování skončilo: ')+j.status+(j.last_error?(' ('+j.last_error+')'):''), 1); return; }
-    }catch(e){ toast('⚠️ '+(e.message||''),1); return; }
-  }
-  toast(EN?'⏳ Not paired yet — the server keeps checking every 15 minutes.':'⏳ Zatím nespárováno — server to dál kontroluje každých 15 minut.', 1);
-}
 function _pairAutoMsg(what){ const EN=LANG==='en'; return '\u2705 '+what+(EN?' \u00b7 we confirm the payment automatically as soon as it arrives':' \u00b7 platbu potvrd\u00edme automaticky, jakmile doraz\u00ed na \u00fa\u010det'); }
 // vs: variabilní symbol (párování) -- jen u CZK QR (SPAYD X-VS).
 function _bankQrPayload(g, amount, msg, vs){
@@ -55686,9 +55647,6 @@ async function showPaidPopup(){
   // kouče (DAC7 žádost a upomínky), ?go=suspended -> důvod ručního pozastavení a jak ho zrušit.
   // ODKAZY Z E-MAILU O PŘEDÁNÍ VLASTNICTVÍ (/api/ownership-transfer): ?go=xfer&id= -> žádost
   // k rozhodnutí, ?go=xferdone&k=&id=&s= -> po převodu (nový majitel rovnou ke kartě na provizi).
-  // Návrat z testovací platby Mock Cobs (tlačítko 🧪 u čekající platby, jen Testovací režim):
-  // appka sama hlídá, až Finbricks platbu na účtu najde.
-  if(params.get('pairtest')){ const _pv=params.get('pairtest'); setTimeout(function(){ try{ if(currentUser) _pairTestWatch(_pv); }catch(e){} }, 1500); }
   if(params.get('go')==='paidfor'){ setTimeout(function(){ try{ if(currentUser) openPaidFor(); }catch(e){} }, 1200); }
   if(params.get('go')==='xfer' || params.get('go')==='xferdone'){
     const _go=params.get('go'), _id=params.get('id')||'', _k=params.get('k')||'', _s=params.get('s')||'';
