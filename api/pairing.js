@@ -22,6 +22,7 @@
 //   link_banks   { kind, id }                   banky, přes které jde účet připojit
 //   link_start   { kind, id, provider }         -> { url } přihlášení do banky (Finbricks)
 //   link_check   { kind, id }                   po návratu z banky: platnost a účty z Finbricks
+//   link_remove  { kind, id }                   odpojit: zrušit přihlášení u Finbricks (/auth/revoke) a smazat
 //
 // TESTOVACÍ REŽIM: QR i párování jsou na 1 Kč. Mock Cobs Finbricks pro párování NEPODPORUJE
 // (chyba 10003), takže se testuje skutečným převodem 1 Kč na skutečný účet připojený
@@ -345,14 +346,30 @@ export default async function handler(req, res) {
         return res.status(200).json({ ok: true, status: 'off' });
       }
       const finish = new Date(Date.now() + FINISH_DAYS * 86400e3).toISOString();
-      const r = await fbxCall(C, 'POST', '/payment/pairing/schedule', { merchantId: C.merchant, payments: [{
+      const pay = {
         uniquePaymentPairingId: String(p.id),
         // Sandbox: 1 Kč -- stejně jako QR v Testovacím režimu (skutečný převod 1 Kč na připojený účet).
         amount: { value: C.sandbox ? Number(FBX_MAX_SANDBOX) : Number(p.amount), currency: 'CZK' },
         creditor: { accountIdentification: { value: iban(p.iban), type: 'IBAN' } },
         remittanceInformation: { structured: { reference: 'VS:' + String(p.id) } },
         finishPairingAt: finish,
-      }] });
+      };
+      let r = await fbxCall(C, 'POST', '/payment/pairing/schedule', { merchantId: C.merchant, payments: [pay] });
+      // POKUS (15. 10. 2026): účet připojený z appky (pairing_links, AIS pod naším clientId)
+      // párování bez clientId nenajde -> 10000. Zkusí se znovu s clientId (dokumentace ho
+      // u párování neuvádí). Výsledek obou pokusů jde do last_error a do logu.
+      let tryNote = null;
+      const errCode = (d) => { const x = firstPay(d) || {}; return Number((d && d.code) || (x.reason && x.reason.code) || 0); };
+      if (errCode(r.data) === 10000) {
+        const ln = (await sb.from('pairing_links').select('client_id').eq('fbx_env', C.env).eq('status', 'active').neq('client_id', 'backoffice').contains('ibans', [iban(p.iban)]).limit(1)).data;
+        const cid = ln && ln[0] && ln[0].client_id;
+        if (cid) {
+          const r2 = await fbxCall(C, 'POST', '/payment/pairing/schedule', { merchantId: C.merchant, clientId: cid, payments: [{ ...pay, clientId: cid }] });
+          tryNote = 'with clientId ' + cid + ': ' + r2.status + ' ' + JSON.stringify(r2.data || '').slice(0, 300);
+          console.log('[pairing] schedule retry', tryNote);
+          r = r2;
+        }
+      }
       const f = firstPay(r.data);
       // Co Finbricks vrací: dokumentace má u schedule `scheduleStatus` SCHEDULED / FAILED, ale
       // u /status píše, že schedule „vrací UNPAIRED", když platbu hned nenajde -- tedy
@@ -362,7 +379,7 @@ export default async function handler(req, res) {
       const ok = r.ok && !!f && ['SCHEDULED', 'UNPAIRED', 'PAIRED'].includes(sst);
       await sb.from('payment_pairings').update({ tbl, row_id: id, fbx_env: C.env, finish_at: finish,
         status: ok ? 'scheduled' : 'failed', scheduled_at: ok ? new Date().toISOString() : null,
-        last_error: ok ? null : (JSON.stringify((f && f.reason) || r.data || { http: r.status }).slice(0, 500)) }).eq('id', p.id);
+        last_error: ok ? (tryNote ? ('OK ' + tryNote).slice(0, 500) : null) : ((tryNote ? 'retry ' + tryNote : JSON.stringify((f && f.reason) || r.data || { http: r.status })).slice(0, 500)) }).eq('id', p.id);
       if (!ok) { console.error('[pairing] schedule', r.status, JSON.stringify(r.data)); return res.status(200).json({ ok: true, status: 'failed' }); }
       // Značka na řádku platby: appka podle ní mluví o automatickém potvrzení a cron nepřipomíná.
       // Kurz navíc: co se platí (záloha / doplatek / měsíce) si zaúčtování čte z přihlášky -- stejně
@@ -380,7 +397,7 @@ export default async function handler(req, res) {
     }
 
     // ── PŘIPOJENÍ ÚČTU K PÁROVÁNÍ (Nastavení plateb klubu / kouče / organizace) ───────────
-    if (action === 'link_status' || action === 'link_banks' || action === 'link_start' || action === 'link_check') {
+    if (action === 'link_status' || action === 'link_banks' || action === 'link_start' || action === 'link_check' || action === 'link_remove') {
       const e = await entityOf(String(b.kind || ''), String(b.id || ''), me);
       if (!e) return res.status(403).json({ error: 'forbidden' });
       const C = await fbxNow();
@@ -395,6 +412,17 @@ export default async function handler(req, res) {
         const l = await cur();
         if (!l) return res.status(200).json({ ok: true, env: C.env, ...linkView(null, e) });
         return res.status(200).json({ ok: true, env: C.env, ...linkView(await linkRefresh(l, psu), e) });
+      }
+
+      if (action === 'link_remove') {
+        const l = await cur();
+        if (l && l.client_id && l.client_id !== 'backoffice') {
+          // Přihlášení k bance zrušit i u Finbricks, ne jen u nás.
+          const rv = await fbxCall(C, 'DELETE', `/auth/revoke?merchantId=${encodeURIComponent(C.merchant)}&clientId=${encodeURIComponent(l.client_id)}${l.provider ? '&provider=' + encodeURIComponent(l.provider) : ''}`, null);
+          if (!rv.ok && rv.status !== 404) console.error('[pairing] revoke', rv.status, JSON.stringify(rv.data));
+        }
+        await sb.from('pairing_links').delete().match(key);
+        return res.status(200).json({ ok: true, env: C.env, ...linkView(null, e) });
       }
 
       if (action === 'link_banks') {
