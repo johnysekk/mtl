@@ -512,7 +512,7 @@ async function membershipCheckout(req, res) {
   const _skLbl = sellLabel(await sellKindFor(_wsbGet, { gymId: _skGym, paidTo: _skPaidTo }), 'cs');
   const {
     gymAccount, gymName, planName, amount, currency = 'CZK', interval = 'month', months, endsOn,
-    membershipId, income, memberName, payee, disc, access, partner, refPct, refUser, founding, acq, fee,
+    membershipId, income, memberName, payee, disc, access, partner, founding, acq, fee,
     gymId, studentId,
   } = req.query;
 
@@ -609,46 +609,6 @@ async function membershipCheckout(req, res) {
   const host = req.headers.host;
   const proto = host && host.includes('localhost') ? 'http' : 'https';
 
-  // Gym member referral: new member gets a one-time first-month discount.
-  // Coupon is created on the CONNECTED account (charges are direct on the gym).
-  // GATE: the referrer must CURRENTLY be an active member of this gym; otherwise no referral at all
-  // (no discount for the new member, and no reward for the referrer -> we also drop refUser below).
-  let discounts;
-  // refPct arrives from the CLIENT URL. It used to be clamped only to <=100, which meant a
-  // student could append refPct=100&refUser=<any active member> and buy the membership free,
-  // with the gym eating the whole discount. The only legitimate value is the gym's own
-  // configured member_ref_pct - so clamp to it server-side, and zero when referral is off.
-  let refPctN = parseInt(refPct, 10) || 0;
-  let _refUserOk = refUser || '';
-  // Bez klubu nebo bez doporučujícího žádná sleva -- dřív stačilo vynechat gymId a omezení na
-  // member_ref_pct se přeskočilo, takže šlo poslat refPct=100 a mít členství zdarma.
-  // Doporučit sám sebe taky nejde.
-  if (!gymId || !refUser || String(refUser) === String(studentId || '')) { refPctN = 0; _refUserOk = ''; }
-  if (refPctN > 0 && gymId) {
-    try {
-      const _gRow = (await _wsbGet(`gyms?id=eq.${encodeURIComponent(gymId)}&select=member_ref_pct`))[0];
-      const _maxP = (_gRow && parseInt(_gRow.member_ref_pct, 10)) || 0;
-      refPctN = Math.min(refPctN, _maxP);          // referral off (0) kills it entirely
-    } catch (e) { refPctN = 0; }                   // cannot verify -> no discount (never guess with money)
-  }
-  if (refPctN > 0 && refUser && gymId) {
-    let _refActive = false;
-    try {
-      const _rm = await _wsbGet(`gym_memberships?student_id=eq.${encodeURIComponent(refUser)}&gym_id=eq.${encodeURIComponent(gymId)}&status=in.(active,cancelling)&select=id&limit=1`);
-      _refActive = !!(_rm && _rm[0]);
-    } catch (e) {}
-    if (!_refActive) { refPctN = 0; _refUserOk = ''; }   // referrer not an active member -> kill the referral
-  }
-  if (refPctN > 0 && refPctN <= 100) {
-    try {
-      const coupon = await stripe.coupons.create(
-        { percent_off: refPctN, duration: 'once', name: `MTL referral -${refPctN}%` },
-        { stripeAccount: gymAccount }
-      );
-      discounts = [{ coupon: coupon.id }];
-    } catch (e) { console.error('referral coupon failed', e && e.message); }
-  }
-
   // ── MULTI-MONTH MEMBERSHIP = ONE-TIME PAYMENT ────────────────────────────────────────────
   // Monthly plans (months = 1, the default) stay exactly as they were: a Stripe subscription
   // that renews. A 3/6/12-month plan is NOT a subscription — a club sells a term ("pololetni
@@ -678,8 +638,6 @@ async function membershipCheckout(req, res) {
       mtl_base: String(P),
       mtl_currency: cur,
       member_name: memberName || '',
-      mtl_ref_user: _refUserOk,
-      mtl_ref_pct: String(refPctN || 0),
     };
     const _s1 = await stripe.checkout.sessions.create(
       {
@@ -695,7 +653,6 @@ async function membershipCheckout(req, res) {
           ...(_feeMinor > 0 ? { application_fee_amount: _feeMinor } : {}),
           metadata: _meta,
         },
-        ...(discounts ? { discounts } : {}),
         success_url: `${proto}://${host}/?gym_sub=ok&membership=${encodeURIComponent(membershipId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
         cancel_url: `${proto}://${host}/`,
       },
@@ -737,8 +694,6 @@ async function membershipCheckout(req, res) {
         mtl_disc: disc || '',
         mtl_base: String(P),
         mtl_currency: cur,
-        mtl_ref_user: _refUserOk,
-        mtl_ref_pct: String(refPctN || 0),
       },
       line_items: _subLines,
       subscription_data: {
@@ -770,12 +725,9 @@ async function membershipCheckout(req, res) {
           mtl_base: String(P),
           mtl_currency: cur,
           member_name: memberName || '',
-          mtl_ref_user: _refUserOk,
-          mtl_ref_pct: String(refPctN || 0),
         },
       },
-      ...(discounts ? { discounts } : {}),
-      success_url: `${proto}://${host}/?gym_sub=ok&membership=${encodeURIComponent(membershipId || '')}&acct=${encodeURIComponent(gymAccount)}&refuser=${encodeURIComponent(refUser || '')}&refpct=${encodeURIComponent(refPctN || 0)}&session={CHECKOUT_SESSION_ID}`,
+      success_url: `${proto}://${host}/?gym_sub=ok&membership=${encodeURIComponent(membershipId || '')}&acct=${encodeURIComponent(gymAccount)}&session={CHECKOUT_SESSION_ID}`,
       cancel_url: `${proto}://${host}/`,
     },
     { stripeAccount: gymAccount }

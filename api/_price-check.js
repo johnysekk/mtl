@@ -169,16 +169,6 @@ export async function checkPrice(opts) {
         if (full > 0) { allowed.push(full); if (months > 1 && p.prorate) { for (let L = 1; L <= months; L++) allowed.push(roundCur((full / months) * L, cur)); } }
         if (full > 0 && cal && !p.ends_on) { allowed.push(calTerm(full, months, new Date(), pro).price); if (actEnd) allowed.push(calTerm(full, months, calStart(actEnd), pro).price); }
       });
-      // SLEVA ZA DOPORUČENÍ (převod / QR): nový člen přes odkaz člena (ref_pct, nejvýš member_ref_pct
-      // klubu), nebo doporučující člen uplatňuje svůj kredit (gym_member_ref_credits téhož klubu).
-      // Appka zaokrouhluje Math.round. Bez toho převod se slevou neprošel kontrolou ceny.
-      const refPcts = [];
-      if (num(opts.refPct) > 0 && num(g.member_ref_pct) > 0) refPcts.push(Math.min(num(opts.refPct), num(g.member_ref_pct)));
-      if (opts.refCreditId) {
-        const rc = ((await sb(`gym_member_ref_credits?id=eq.${q(String(opts.refCreditId))}&select=pct,gym_id`)) || [])[0];
-        if (rc && String(rc.gym_id) === String(opts.gymId) && num(rc.pct) > 0) refPcts.push(num(rc.pct));
-      }
-      if (refPcts.length) { const base0 = allowed.slice(); refPcts.forEach((r) => base0.forEach((a) => allowed.push(Math.round(a * (1 - r / 100))))); }
     } else if (opts.kind === 'event') {
       const ev = ((await sb(`events?id=eq.${q(String(opts.eventId || ''))}&select=ticket_price,ticket_tiers,currency`)) || [])[0];
       if (!ev) return { ok: false, error: 'event not found' };
@@ -257,7 +247,7 @@ export async function checkRowPrice({ SB, KEY, tbl, row }) {
       if (!r.ok) return r;
       return checkOnlineCountry({ SB, KEY, coachId: row.coach_id, buyerId: row.paid_by || row.student_id });
     }
-    return checkPrice({ ...base, kind: 'gymMembership', gymId: row.gym_id, months: row.months, studentId: row.student_id, childName: row.child_name, excludeId: row.id, refPct: row.ref_pct, refCreditId: row.ref_credit_id });
+    return checkPrice({ ...base, kind: 'gymMembership', gymId: row.gym_id, months: row.months, studentId: row.student_id, childName: row.child_name, excludeId: row.id });
   }
   return { ok: true };
 }
