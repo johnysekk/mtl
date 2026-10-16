@@ -309,7 +309,7 @@ async function handler(req, res) {
         const pk = await sbPatch('profiles', `id=eq.${pr.id}`, {
           name: 'Smazaný uživatel', photo_url: null, bio: null, emoji: null,
           phone: null, contact_phone: null, contact_email: null, billing_phone: null, invoice_email: null,
-          health_note: null, health_share: [], health_consent_at: null, guardian_email: null, guardian_name: null, guardian_phone: null,
+          health_note: null, guardian_email: null, guardian_name: null, guardian_phone: null,
           children: null, coach_status: 'deleted', purged_at: new Date().toISOString(),
         });
         if (!pk.ok) { console.error('purge profile', pr.id, pk.status); continue; }
