@@ -4774,7 +4774,7 @@ function _openKidHealth(idx){
   };
   ov.querySelector('#khSave').onclick=()=>apply((ov.querySelector('#khInput').value||'').trim());
   ov.querySelector('#khClear').onclick=()=>apply('');
-  _healthShareMount(ov.querySelector('#khShare'));
+  _healthShareMount(ov.querySelector('#khShare'), _kidKey(_myChildren()[idx]||{}), (_myChildren()[idx]||{}).name||'');
 }
 function _openAddKid(){
   const EN=LANG==='en';
@@ -5455,38 +5455,41 @@ async function _healthProviders(){
   try{ if(coaches.size){ const { data }=await supaClient.from('profiles').select('id,name').in('id',[...coaches]); (data||[]).forEach(function(c){ out.push({ key:'coach:'+c.id, id:c.id, name:c.name||'Kouč', kind:'coach' }); }); } }catch(e){}
   return out.sort(function(a,b){ return String(a.name).localeCompare(String(b.name)); });
 }
-function _healthShareList(){ try{ const v=currentUser.health_share; const a=(typeof v==='string')?JSON.parse(v||'[]'):(v||[]); return Array.isArray(a)?a:[]; }catch(e){ return []; } }
-// Seznam poskytovatelů s přepínačem sdílení (do okna vlastní i dětské poznámky).
-async function _healthShareMount(box){
-  if(!box) return; const EN=LANG==='en';
-  box.innerHTML='<div style="font-size:12px;color:var(--light);">'+(EN?'Loading providers…':'Načítám poskytovatele…')+'</div>';
+// SDÍLENÍ POZNÁMKY S POSKYTOVATELEM -- stejně jako datum narození a adresa (birthdate_shares,
+// address_shares): přepínač u každého klubu / kouče, každá osoba (já, každé dítě) zvlášť.
+// Řádek v health_shares + záznam souhlasu vůči tomu poskytovateli (scope = jeho id).
+async function _healthShareMount(box, personKey, kidName){
+  if(!box) return; const EN=LANG==='en'; personKey=personKey||'self';
+  box.innerHTML='<div style="font-size:12px;color:var(--light);">'+(EN?'Loading…':'Načítám…')+'</div>';
   const list=await _healthProviders();
-  const on=new Set(_healthShareList());
-  const head='<div style="font-size:11px;font-weight:800;color:var(--light);letter-spacing:.04em;text-transform:uppercase;margin:4px 0 6px;">'+(EN?'Share with':'Sdílet s')+'</div>';
-  if(!list.length){ box.innerHTML=head+'<div style="font-size:12.5px;color:var(--mid);line-height:1.45;">'+(EN?'Once you pay for a training or service, the provider appears here and you can switch sharing on.':'Až si zaplatíš trénink nebo službu, poskytovatel se tu objeví a sdílení s ním zapneš.')+'</div>'; return; }
-  box.innerHTML=head+list.map(function(p){ return '<label style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid var(--border);cursor:pointer;">'
-    +'<span style="font-size:13.5px;color:var(--dark);font-weight:600;">'+(p.kind==='gym'?'🏛️ ':'🥊 ')+escapeHtml(p.name)+'</span>'
-    +'<input class="hsTog" data-k="'+escapeHtml(p.key)+'" data-id="'+escapeHtml(p.id)+'" data-n="'+escapeHtml(p.name)+'" type="checkbox"'+(on.has(p.key)?' checked':'')+' style="width:19px;height:19px;flex-shrink:0;"></label>'; }).join('')
-    +'<div style="font-size:11.5px;color:var(--light);line-height:1.45;margin-top:7px;">'+(EN?'Only providers with sharing on see the note, and only for their own lessons.':'Poznámku vidí jen poskytovatelé se zapnutým sdílením, a to jen u svých lekcí.')+'</div>';
+  let on=new Set();
+  try{ const { data }=await supaClient.from('health_shares').select('gym_id,coach_id').eq('owner_id',currentUser.id).eq('person_key',personKey);
+    (data||[]).forEach(function(r){ on.add(r.gym_id?('gym:'+r.gym_id):('coach:'+r.coach_id)); }); }catch(e){}
+  const head='<div style="font-size:11px;font-weight:800;color:var(--light);letter-spacing:.04em;text-transform:uppercase;margin:2px 0 2px;">'+(EN?'Show the health note to':'Zobrazovat zdravotní omezení')+'</div>';
+  if(!list.length){ box.innerHTML=head+'<div style="font-size:11.5px;color:var(--light);line-height:1.4;margin-top:4px;">'+(EN?'Once you pay for a training or service, the club or coach appears here and you can choose to show them the note.':'Až si zaplatíš trénink nebo službu, klub nebo kouč se tu objeví a poznámku mu můžeš zobrazit.')+'</div>'; return; }
+  box.innerHTML=head+list.map(function(c){ return '<label style="display:flex;align-items:center;gap:12px;padding:7px 0;cursor:pointer;"><span style="flex:1;font-size:13px;font-weight:700;color:var(--dark);">'+escapeHtml(c.name)+'</span><input type="checkbox" class="tglIn hsTog" data-k="'+escapeHtml(c.key)+'" data-id="'+escapeHtml(c.id)+'" data-n="'+escapeHtml(c.name)+'" '+(on.has(c.key)?'checked':'')+'><span class="toggle"></span></label>'; }).join('')
+    +'<div style="font-size:11px;color:var(--light);line-height:1.4;">'+(kidName?(EN?('Applies to '+kidName+' only. The club or coach sees it only for their own lessons.'):('Platí jen pro '+kidName+'. Klub nebo kouč ji vidí jen u svých lekcí.')):(EN?'Applies to you only. The club or coach sees it only for their own lessons.':'Platí jen pro tebe. Klub nebo kouč ji vidí jen u svých lekcí.'))+'</div>';
   box.querySelectorAll('.hsTog').forEach(function(t){ t.onchange=async function(){
     const want=t.checked; t.disabled=true;
+    const kind=t.dataset.k.split(':')[0], pid=t.dataset.id;
+    const whoEn=kidName?('the health note about my child '+kidName):'my health note';
+    const whoCs=kidName?('zdravotního omezení mého dítěte '+kidName):'mého zdravotního omezení';
     const body=want
-      ? (EN?'I switch on sharing of health information (mine and that of my children with an unlocked section) with this provider; it will see it for its own lessons.':'Zapínám sdílení údajů o zdravotním stavu (svých a svých dětí s odemčenou sekcí) s tímto poskytovatelem; uvidí je u svých lekcí.')
-      : (EN?'I switch off sharing of health information with this provider.':'Vypínám sdílení údajů o zdravotním stavu s tímto poskytovatelem.');
-    const ok=await _recordConsentNow(want?'health_share':'health_share_off', body, { provider:t.dataset.n||null, provider_kind:t.dataset.k.split(':')[0] }, t.dataset.id, body+'\n\n'+(t.dataset.n||''));
+      ? (EN?('I switch on showing '+whoEn+' to this provider; it sees it for its own lessons.'):('Zapínám zobrazování '+whoCs+' tomuto poskytovateli; uvidí ho u svých lekcí.'))
+      : (EN?('I switch off showing '+whoEn+' to this provider.'):('Vypínám zobrazování '+whoCs+' tomuto poskytovateli.'));
+    // Nejdřív souhlas (otisk vůči poskytovateli), pak samotné sdílení.
+    const ok=await _recordConsentNow(want?'health_share':'health_share_off', body, { provider:t.dataset.n||null, provider_kind:kind, person_key:personKey, child_name:kidName||null }, pid, body+'\n\n'+(t.dataset.n||''));
     if(!ok){ t.checked=!want; t.disabled=false; toast(EN?'⚠️ Could not save — try again.':'⚠️ Nepodařilo se uložit — zkus to znovu.'); return; }
-    const cur=new Set(_healthShareList()); if(want) cur.add(t.dataset.k); else cur.delete(t.dataset.k);
-    const arr=[...cur];
-    try{ const { error }=await supaClient.from('profiles').update({ health_share:arr }).eq('id', currentUser.id); if(error) throw error; currentUser.health_share=arr; }
-    catch(e){ t.checked=!want; toast('⚠️ '+(e.message||'')); }
+    try{
+      const row={ owner_id:currentUser.id, person_key:personKey, gym_id:(kind==='gym'?pid:null), coach_id:(kind==='coach'?pid:null) };
+      let q;
+      if(want) q=await supaClient.from('health_shares').insert(row);
+      else { q=supaClient.from('health_shares').delete().eq('owner_id',currentUser.id).eq('person_key',personKey); q=await (kind==='gym'?q.eq('gym_id',pid):q.eq('coach_id',pid)); }
+      if(q.error && !(want && String(q.error.code)==='23505')) throw q.error;
+    }catch(e){ t.checked=!want; toast('⚠️ '+(e.message||'')); }
     t.disabled=false;
-    toast(want?(EN?'✅ Sharing on':'✅ Sdílení zapnuté'):(EN?'✅ Sharing off':'✅ Sdílení vypnuté'));
   }; });
 }
-// Bump this whenever the ticket clickwrap wording below changes. record-consent.js stores the exact
-// wording ONCE per (kind, scope, version, lang) and refuses to let it change under a version that is
-// already in use -- it flags a hash mismatch instead. So the version is not decoration: it is what
-// keeps an old acceptance meaning what it said at the time.
 const TICKET_CONSENT_VERSION='2026-08-v1';
 const GUARDIAN_CONSENT_CS='Prohlašuji, že jsem zákonný zástupce tohoto nezletilého a souhlasím se správou jeho účtu, tréninkových dat a se zastupováním nezletilého v rámci podmínek MTL.';
 const GUARDIAN_CONSENT_EN='I declare that I am the legal guardian of this minor and consent to managing their account and training data and to acting on the minor\u2019s behalf under the MTL terms.';
@@ -19765,16 +19768,19 @@ async function loadHealthNotes(){
   try{
     const me=currentUser.id; const today=new Date().toISOString().slice(0,10);
     const ids=new Set(); const up={};
-    // SDÍLENÍ: poznámka je vidět jen poskytovateli, se kterým ho člověk zapnul (profiles.health_share).
+    // SDÍLENÍ: poznámka je vidět jen poskytovateli, se kterým ho člověk zapnul (tabulka health_shares).
     // U soukromé lekce je poskytovatelem kouč sám, u lekce v klubu ten klub.
     const keysBy={}; const _key=function(sid, k){ (keysBy[sid]=keysBy[sid]||new Set()).add(k); };
     try{ const { data:bk }=await supaClient.from('bookings').select('student_id,training_date').eq('coach_id',me).eq('status','active').gte('training_date',today); (bk||[]).forEach(b=>{ if(b.student_id){ ids.add(b.student_id); _key(b.student_id, 'coach:'+me); if(!up[b.student_id]||b.training_date<up[b.student_id]) up[b.student_id]=b.training_date; } }); }catch(e){}
     const kidBk = [];
     try{ const { data:gb }=await supaClient.from('gym_bookings').select('student_id,class_date,child_name,gym_id').eq('coach_id',me).eq('status','active').gte('class_date',today); (gb||[]).forEach(b=>{ if(!b.student_id) return; if(b.child_name){ kidBk.push({ parent:b.student_id, kid:b.child_name, date:b.class_date, key:'gym:'+b.gym_id }); ids.add(b.student_id); return; } ids.add(b.student_id); _key(b.student_id, 'gym:'+b.gym_id); if(b.class_date&&(!up[b.student_id]||b.class_date<up[b.student_id])) up[b.student_id]=b.class_date; }); }catch(e){}
     if(!ids.size){ box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${LANG==='en'?'No upcoming students.':'Žádní nadcházející svěřenci.'}</p>`; return; }
-    const { data:profs }=await supaClient.from('profiles').select('id,name,health_note,health_note_updated,children,health_consent_at,health_share').in('id',[...ids]);
-    const _sh=function(x){ try{ const a=(typeof x.health_share==='string')?JSON.parse(x.health_share||'[]'):(x.health_share||[]); return new Set(Array.isArray(a)?a:[]); }catch(e){ return new Set(); } };
-    const wn=(profs||[]).filter(x=>x.health_note&&x.health_note.trim()&&x.health_consent_at&&[...(keysBy[x.id]||[])].some(function(k){ return _sh(x).has(k); }));
+    const { data:profs }=await supaClient.from('profiles').select('id,name,health_note,health_note_updated,children,health_consent_at').in('id',[...ids]);
+    // Sdílení (health_shares): klíč „majitel|osoba|klub/kouč".
+    const shared=new Set();
+    try{ const { data:hs }=await supaClient.from('health_shares').select('owner_id,person_key,gym_id,coach_id').in('owner_id',[...ids]);
+      (hs||[]).forEach(function(r){ shared.add(r.owner_id+'|'+r.person_key+'|'+(r.gym_id?('gym:'+r.gym_id):('coach:'+r.coach_id))); }); }catch(e){}
+    const wn=(profs||[]).filter(x=>x.health_note&&x.health_note.trim()&&x.health_consent_at&&[...(keysBy[x.id]||[])].some(function(k){ return shared.has(x.id+'|self|'+k); }));
     // Children come out as rows of their own, named after the child rather than the parent, so a
     // coach reading the list sees who is actually on the mat.
     const byId={}; (profs||[]).forEach(x=>{ byId[x.id]=x; });
@@ -19785,7 +19791,7 @@ async function loadHealthNotes(){
       const par=byId[kb.parent]; if(!par) return;
       let kids=[]; try{ kids = par.children ? (typeof par.children==='string'?JSON.parse(par.children):par.children) : []; }catch(e){ kids=[]; }
       const k=(Array.isArray(kids)?kids:[]).find(function(x){ return x && x.name===kb.kid; });
-      if(!k || !k.health || !String(k.health).trim() || !k.health_consent_at || !_sh(par).has(kb.key)) return;
+      if(!k || !k.health || !String(k.health).trim() || !k.health_consent_at || !shared.has(kb.parent+'|'+_kidKey(k)+'|'+kb.key)) return;
       const rowId='kid:'+kb.parent+':'+kb.kid;
       up[rowId]=kb.date;
       wn.push({ id:rowId, name:kb.kid+' ('+(LANG==='en'?'child of ':'d\u00edt\u011b \u2014 ')+(par.name||'')+')', health_note:k.health, health_note_updated:k.health_at||null });
@@ -34350,7 +34356,7 @@ function _openMyHealth(){
   document.body.appendChild(ov); const close=()=>ov.remove(); ov.onclick=(e)=>{ if(e.target===ov && !_ovHasForm(ov)) close(); }; ov.querySelector('#hnCancel').onclick=close;
   const apply=async(note)=>{ try{ await supaClient.from('profiles').update({ health_note: note||null, health_note_updated:new Date().toISOString() }).eq('id', currentUser.id); }catch(e){ toast('⚠️ '+e.message); return; } currentUser.health_note=note||null; const el=$('meHealthVal'); if(el) el.textContent=note?(LANG==='en'?'Set':'Vyplněno'):''; close(); toast(L('✅ Uloženo')); };
   ov.querySelector('#hnSave').onclick=()=>{ const v=(ov.querySelector('#hnInput').value||'').trim().slice(0,500); apply(v); };
-  _healthShareMount(ov.querySelector('#hnShare'));
+  _healthShareMount(ov.querySelector('#hnShare'), 'self', '');
   ov.querySelector('#hnClear').onclick=()=>apply('');
 }
 const _mhc=$('btnHealthNotes'); if(_mhc) _mhc.onclick=()=>{ openSheet('shHealthNotes'); loadHealthNotes(); };
