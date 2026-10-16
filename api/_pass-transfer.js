@@ -14,6 +14,7 @@
 import Stripe from 'stripe';
 import { feeRefundableForPI } from './_fee-window.js';
 import { prorata } from './_prorata.js';
+import { sellKind } from './_sell-kind.js';
 
 const SB = (process.env.SUPABASE_URL || '').replace(/\/+$/, '');
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -57,7 +58,7 @@ export function deadlineFor(fromYmd, nowMs = Date.now()) {
 // Běžící permanentky „jen na tyto lekce", které lekci cid obsahují a platí i po jejím konci.
 export async function passHolders(gymId, cid, fromYmd) {
   const rows = (await sbGet(`gym_memberships?gym_id=eq.${q(gymId)}&status=in.(active,cancelling)&plan_classes=not.is.null`
-    + `&select=id,student_id,student_name,child_name,plan_name,plan_classes,period_end,currency,amount&limit=2000`)) || [];
+    + `&select=id,student_id,student_name,child_name,plan_name,plan_classes,period_end,currency,amount,paid_to&limit=2000`)) || [];
   return rows.filter((m) => parseArr(m.plan_classes).indexOf(cid) >= 0 && (!m.period_end || String(m.period_end).slice(0, 10) >= String(fromYmd)));
 }
 
@@ -157,6 +158,16 @@ async function _refundBody(row, { auto, nowIso }, st) {
   return { refund: refund / 100, currency: cur, status, method };
 }
 
+// Permanentka / členství platí místo ukončené lekce na vybrané lekce (plan_classes).
+async function movePlanClasses(membershipId, fromCid, to) {
+  const m = ((await sbGet(`gym_memberships?id=eq.${q(membershipId)}&select=id,plan_classes`)) || [])[0];
+  if (!m) throw new Error('membership not found');
+  const wasString = typeof m.plan_classes === 'string';
+  const cls = parseArr(m.plan_classes).filter((x) => x !== fromCid);
+  to.forEach((x) => { if (cls.indexOf(x) < 0) cls.push(x); });
+  await sb(`gym_memberships?id=eq.${q(m.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ plan_classes: wasString ? JSON.stringify(cls) : cls }) });
+}
+
 // Souhlas s přesunem: permanentka platí místo ukončené lekce na vybrané lekce.
 export async function applyTransfer(row, text) {
   const nowIso = new Date().toISOString();
@@ -167,10 +178,7 @@ export async function applyTransfer(row, text) {
   const claimed = ((await sb(`pass_transfers?id=eq.${q(row.id)}&decision=is.null`, { method: 'PATCH', prefer: 'return=representation',
     body: JSON.stringify({ decision: 'transfer', decided_at: nowIso, decided_auto: false, decision_text: text }) })) || [])[0];
   if (!claimed) return false;
-  const wasString = typeof m.plan_classes === 'string';
-  const cls = parseArr(m.plan_classes).filter((x) => x !== row.from_cid);
-  to.forEach((x) => { if (cls.indexOf(x) < 0) cls.push(x); });
-  try { await sb(`gym_memberships?id=eq.${q(m.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ plan_classes: wasString ? JSON.stringify(cls) : cls }) }); }
+  try { await movePlanClasses(m.id, row.from_cid, to); }
   catch (e) {
     // Permanentka se nepřepsala: rozhodnutí uvolnit, ať jde zvolit znovu (přesun i vrácení).
     try { await sb(`pass_transfers?id=eq.${q(row.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ decision: null, decided_at: null, decision_text: null }) }); } catch (e2) {}
@@ -194,11 +202,31 @@ export async function applyTransfer(row, text) {
 // nabídky permanentek klubu (plán na ukončenou lekci platí na náhradní, bez ní zmizí).
 export async function offerForEndedClass({ gym, cid, fromName, fromYmd, toCids, toNames, note }) {
   const holders = await passHolders(gym.id, cid, fromYmd);
-  const out = { offered: [], refunded: [], errors: [] };
+  const out = { offered: [], refunded: [], moved: [], kept: [], errors: [] };
   const deadline = deadlineFor(fromYmd);
+  const orgForm = ((await sbGet(`gyms?id=eq.${q(gym.id)}&select=org_form`)) || [{}])[0]?.org_form || null;
   for (const m of holders) {
     const who = m.child_name ? `${m.child_name} (${m.student_name || ''})` : (m.student_name || 'Člen');
     try {
+      // SPOLEK: členský příspěvek není platba za lekci -- nic se nevrací ani nenabízí (o vrácení
+      // rozhodují stanovy). Členství se na vybrané lekce přesune samo, člen dostane zprávu.
+      if (sellKind({ orgForm, paidTo: m.paid_to }) === 'membership') {
+        const txt = toCids.length
+          ? `Lekce ${fromName} v ${gym.name} od ${dCz(fromYmd)} končí.${note ? ' Důvod: ' + note + '.' : ''} Tvoje členství${m.plan_name ? ' „' + m.plan_name + '"' : ''} teď místo ní platí na: ${toNames}.`
+          : `Lekce ${fromName} v ${gym.name} od ${dCz(fromYmd)} končí.${note ? ' Důvod: ' + note + '.' : ''} Tvoje členství${m.plan_name ? ' „' + m.plan_name + '"' : ''} se tím nemění; o případném vrácení příspěvku rozhoduje spolek podle stanov.`;
+        const txtEn = toCids.length
+          ? `The class ${fromName} at ${gym.name} ends on ${dCz(fromYmd)}.${note ? ' Reason: ' + note + '.' : ''} Your membership${m.plan_name ? ' “' + m.plan_name + '”' : ''} now covers: ${toNames} instead.`
+          : `The class ${fromName} at ${gym.name} ends on ${dCz(fromYmd)}.${note ? ' Reason: ' + note + '.' : ''} Your membership${m.plan_name ? ' “' + m.plan_name + '”' : ''} stays as it is; any refund of the fee is up to the association under its statutes.`;
+        const ins0 = ((await sb('pass_transfers?on_conflict=membership_id,from_cid', { method: 'POST', prefer: 'return=representation,resolution=ignore-duplicates', body: JSON.stringify({
+          gym_id: gym.id, membership_id: String(m.id), student_id: m.student_id, student_name: m.student_name || null, child_name: m.child_name || null, plan_name: m.plan_name || null,
+          from_cid: cid, from_name: fromName, ends_from: fromYmd, to_cids: toCids, to_names: toNames || null, deadline, offer_text: txt, note: note || null,
+          decision: toCids.length ? 'transfer' : 'kept', decided_at: new Date().toISOString(), decided_auto: true }) })) || [])[0];
+        if (!ins0) continue;
+        if (toCids.length) await movePlanClasses(m.id, cid, toCids);
+        await notify(m.student_id, 'pass_transfer_done', `🔁 ${txt}`, `🔁 ${txtEn}`, { transfer_id: ins0.id, gym_id: gym.id, gym_name: gym.name || '', choice: toCids.length ? 'transfer' : 'kept' });
+        (toCids.length ? out.moved : out.kept).push(who);
+        continue;
+      }
       const offerCs = toCids.length
         ? `Lekce ${fromName} v ${gym.name} od ${dCz(fromYmd)} končí.${note ? ' Důvod: ' + note + '.' : ''} Klub nabízí, že tvoje permanentka${m.plan_name ? ' „' + m.plan_name + '"' : ''} bude místo ní platit na: ${toNames}. Můžeš souhlasit s přesunem, nebo si nechat vrátit nevyčerpanou část. Když se do ${dCz(deadline)} nerozhodneš, peníze ti vrátíme.`
         : `Lekce ${fromName} v ${gym.name} od ${dCz(fromYmd)} končí a klub za ni nemá náhradu.`;
