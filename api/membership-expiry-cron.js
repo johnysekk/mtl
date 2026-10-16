@@ -1,6 +1,7 @@
 import { sellKind } from './_sell-kind.js';
 import Stripe from 'stripe';
 import { attRenewalPass, attReq, attSummary } from './_att-disc.js';
+import { expireOffers } from './_pass-transfer.js';
 // /api/membership-expiry-cron — end memberships whose paid period has run out.
 //
 // WHY THIS EXISTS
@@ -264,8 +265,11 @@ export default async function handler(req, res) {
       };
       att = await attRenewalPass({ sbGet, sbPatch, stripe, notify });
     } catch (e) { console.error('att renewal pass', e.message); }
+    // Permanentky na ukončenou lekci: kdo se do termínu nerozhodl, dostane peníze zpět.
+    let passRefunds = 0;
+    try { passRefunds = await expireOffers(); } catch (e) { console.error('pass transfer expiry', e.message); }
 
-    return res.status(200).json({ ok: true, checked: (rows || []).length, ended, warned, renewWarned, notified: notified.length, att });
+    return res.status(200).json({ ok: true, checked: (rows || []).length, ended, warned, renewWarned, notified: notified.length, att, passRefunds });
   } catch (e) {
     console.error('membership-expiry-cron', e.message);
     return res.status(500).json({ ok: false, error: e.message });

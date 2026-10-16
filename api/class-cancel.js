@@ -11,17 +11,22 @@
 //   • členové s rezervací        → rezervace se uvolní
 // Každý přihlášený dostane notifikaci s proklikem.
 //
-//   POST { action:'preview', gym_id, occ:{date,time,name} }
-//   POST { action:'cancel',  gym_id, occ:{date,time,name,coach}, mode:'advance'|'forgot', note, choices:{bookingId:'refund'|'move'} }
+//   POST { action:'preview', gym_id, occ:{date,time,name,cid} }
+//   POST { action:'cancel',  gym_id, occ:{date,time,name,cid,coach}, mode:'advance'|'forgot', note, choices:{bookingId:'refund'|'move'} }
+// Termín se páruje přes `cid` lekce (class_id v tabulkách) + datum. Bez cid (lekce mimo rozvrh)
+// postaru podle času a názvu.
 //
 // UKONČENÍ LEKCE (smazání jednorázové, nebo opakovaná „tento a všechny další termíny"): rozvrh
 // zkrátí appka (opakovaná dostane `until`, jednorázová zmizí), tady se vyřeší každý, kdo je na
 // některý z rušených termínů přihlášený -- stejně jako při zrušení jednoho termínu.
-//   POST { action:'end_preview', gym_id, cls:{name,once,date,time,slots}, from:'YYYY-MM-DD' }
-//   POST { action:'end',         gym_id, cls:{...}, from, note, choices:{bookingId:'refund'|'move'} }
+//   POST { action:'end_preview', gym_id, cls:{cid,name,once,date,time,slots}, from:'YYYY-MM-DD' }
+//   POST { action:'end',         gym_id, cls:{...}, from, note, choices:{bookingId:'refund'|'move'}, transfer_to:[cid…] }
+// Permanentky „jen na tyto lekce" napojené na ukončenou opakovanou lekci: end_preview je vrátí
+// (passes), end jejich držitelům nabídne přesun na lekce transfer_to, nebo vrácení (_pass-transfer.js).
 
 import Stripe from 'stripe';
 import { feeRefundableForPI, feeRefundableForTx, bankFeeRefundable } from './_fee-window.js';
+import { passHolders, offerForEndedClass } from './_pass-transfer.js';
 
 const SB = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -65,11 +70,19 @@ function dCz(date, time) {
   try { const d = new Date(String(date) + 'T00:00:00Z'); return `${d.getUTCDate()}. ${d.getUTCMonth() + 1}.${time ? ' ' + time : ''}`; } catch (e) { return String(date || ''); }
 }
 
+const cidOf = (o) => { const c = String((o && o.cid) || '').trim(); return /^[A-Za-z0-9_-]{1,40}$/.test(c) ? c : null; };
+
+// Hodnota do or=(…) PostgRESTu: v uvozovkách (čas má dvojtečku, název může mít čárku).
+const pq = (v) => '"' + String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+// S cid i řádky bez class_id (spouštěč je k rozvrhu nepřiřadil) -- ty postaru podle času a názvu.
+const legacyOr = (cid, time, name) => '&or=' + q(`(class_id.eq.${pq(cid)},and(class_id.is.null${time != null ? `,class_time.eq.${pq(time)}` : ''}${name ? `,class_name.eq.${pq(name)}` : ''}))`);
+
 async function loadAffected(gym, occ) {
-  const f = `gym_id=eq.${q(gym.id)}&class_date=eq.${q(occ.date)}&class_time=eq.${q(occ.time || '')}`
-    + (occ.name ? `&class_name=eq.${q(occ.name)}` : '&or=(class_name.is.null,class_name.eq.)');
+  const cid = cidOf(occ);
+  const f = `gym_id=eq.${q(gym.id)}&class_date=eq.${q(occ.date)}` + (cid ? legacyOr(cid, occ.time || '', occ.name || null) :
+    `&class_time=eq.${q(occ.time || '')}` + (occ.name ? `&class_name=eq.${q(occ.name)}` : '&or=(class_name.is.null,class_name.eq.)'));
   const bookings = (await sb(`gym_bookings?${f}&status=in.(active,paid_claimed,reserved,pending)&select=*`)) || [];
-  const resv = (await sb(`gym_class_reservations?${f}&select=id,student_id,student_name,child_name,status,class_date,class_time`)) || [];
+  const resv = (await sb(`gym_class_reservations?${f}&select=id,student_id,student_name,child_name,status,class_date,class_time,class_id`)) || [];
   return split(bookings, resv);
 }
 // Rezervace, které jsou jen držením místa k zaplacenému vstupu, se ukazují u vstupu, ne zvlášť.
@@ -81,20 +94,23 @@ function split(bookings, resv) {
 
 // Všechny rezervace na termíny lekce od data `from` (včetně). Opakovaná lekce: jen dny a časy
 // jejích termínů (dvě lekce téhož názvu v jiný čas zůstanou netknuté); jednorázová: její datum.
+// S cid: všechny termíny té lekce od data (i její další verze -- appka ukončí všechny).
 async function loadAffectedFrom(gym, cls, from) {
   const name = String(cls.name || '').trim();
-  const nf = name ? `&class_name=eq.${q(name)}` : '&or=(class_name.is.null,class_name.eq.)';
+  const cid = cidOf(cls);
+  const nf = cid ? legacyOr(cid, null, name || null) : name ? `&class_name=eq.${q(name)}` : '&or=(class_name.is.null,class_name.eq.)';
   const df = cls.once ? `&class_date=eq.${q(cls.date || '')}` : `&class_date=gte.${q(from)}`;
   const f = `gym_id=eq.${q(gym.id)}${df}${nf}`;
   const slots = (Array.isArray(cls.slots) ? cls.slots : []).map((x) => `${Number(x.day)}@${String(x.time || '').slice(0, 5)}`);
   const hit = (r) => {
     const t = String(r.class_time || '').slice(0, 5);
+    if (cid && r.class_id) return !cls.once || String(r.class_date) >= String(from);
     if (cls.once) return String(r.class_date) >= String(from) && t === String(cls.time || '').slice(0, 5);
     const dow = new Date(String(r.class_date) + 'T12:00:00Z').getUTCDay();
     return slots.includes(`${dow}@${t}`);
   };
   const bookings = ((await sb(`gym_bookings?${f}&status=in.(active,paid_claimed,reserved,pending)&select=*`)) || []).filter(hit);
-  const resv = ((await sb(`gym_class_reservations?${f}&select=id,student_id,student_name,child_name,status,class_date,class_time`)) || []).filter(hit);
+  const resv = ((await sb(`gym_class_reservations?${f}&select=id,student_id,student_name,child_name,status,class_date,class_time,class_id`)) || []).filter(hit);
   return split(bookings, resv);
 }
 
@@ -123,20 +139,34 @@ export default async function handler(req, res) {
     if (!isEnd && !occ.date) return res.status(400).json({ error: 'occ.date required' });
     if (isEnd && (!/^\d{4}-\d{2}-\d{2}$/.test(from) || (cls.once ? !cls.date : !(Array.isArray(cls.slots) && cls.slots.length))))
       return res.status(400).json({ error: 'cls + from required' });
-    const gym = ((await sb(`gyms?id=eq.${q(b.gym_id)}&select=id,name,owner_id,stripe_account,currency`)) || [])[0];
+    const gym = ((await sb(`gyms?id=eq.${q(b.gym_id)}&select=id,name,owner_id,stripe_account,currency,schedule`)) || [])[0];
     if (!gym) return res.status(404).json({ error: 'gym not found' });
     if (!(await canManage(gym, me))) return res.status(403).json({ error: 'forbidden' });
 
     const aff = isEnd ? await loadAffectedFrom(gym, cls, from) : await loadAffected(gym, occ);
+    const endCid = (isEnd && !cls.once) ? cidOf(cls) : null;
+    const holders = endCid ? await passHolders(gym.id, endCid, from) : [];
 
     if (b.action === 'preview' || b.action === 'end_preview') {
       return res.status(200).json({ ok: true,
         bookings: aff.bookings.map((x) => ({ id: x.id, kind: kindOf(x), name: x.child_name || x.student_name || x.guest_name || 'Student',
           has_account: !!x.student_id, amount: x.amount, currency: x.currency || gym.currency || 'CZK', method: x.payment_method || null,
           date: x.class_date || null, time: x.class_time || null })),
-        members: aff.members.map((r) => ({ id: r.id, name: r.child_name || r.student_name || 'Člen', date: r.class_date || null, time: r.class_time || null })) });
+        members: aff.members.map((r) => ({ id: r.id, name: r.child_name || r.student_name || 'Člen', date: r.class_date || null, time: r.class_time || null })),
+        passes: holders.map((m) => ({ id: m.id, name: m.child_name ? `${m.child_name} (${m.student_name || ''})` : (m.student_name || 'Člen'), plan: m.plan_name || null, period_end: m.period_end || null })) });
     }
     if (b.action !== 'cancel' && b.action !== 'end') return res.status(400).json({ error: 'unknown action' });
+    // Náhradní lekce pro permanentky -- ověřit dřív, než se cokoli vyřídí.
+    const xfer = { to: [], names: '' };
+    if (b.action === 'end' && endCid && holders.length) {
+      let arr = []; try { arr = typeof gym.schedule === 'string' ? JSON.parse(gym.schedule || '[]') : (gym.schedule || []); if (typeof arr === 'string') arr = JSON.parse(arr); } catch (e) { arr = []; }
+      const today = new Date().toISOString().slice(0, 10);
+      const live = (Array.isArray(arr) ? arr : []).filter((c) => c && !c.once && c.cid && c.cid !== endCid && !(c.until && c.until < today));
+      const want = Array.isArray(b.transfer_to) ? b.transfer_to.map(String) : [];
+      xfer.to = [...new Set(want.filter((x) => live.some((c) => c.cid === x)))];
+      xfer.names = xfer.to.map((x) => String((live.find((c) => c.cid === x) || {}).name || '').trim()).filter(Boolean).join(', ');
+      if (!xfer.to.length && live.length) return res.status(400).json({ error: 'Vyber lekce, na které permanentky nabídneš přesunout.' });
+    }
 
     const ctx = {
       gym, me, choices: b.choices || {},
@@ -153,10 +183,11 @@ export default async function handler(req, res) {
       // Termín je zrušený (rozvrh ho ukáže jako zrušený, nejde na něj nic koupit).
       // Bez spoléhání na unikátní index (v databázi není -- upsert s on_conflict padal): najít
       // záznam termínu a přepsat, jinak založit.
-      const f = `gym_id=eq.${q(gym.id)}&class_date=eq.${q(occ.date)}` +
+      const cid = cidOf(occ);
+      const f = `gym_id=eq.${q(gym.id)}&class_date=eq.${q(occ.date)}` + (cid ? legacyOr(cid, occ.time || '', occ.name || null) :
         (occ.time ? `&class_time=eq.${q(occ.time)}` : '&class_time=is.null') +
-        (occ.name ? `&class_name=eq.${q(occ.name)}` : '&class_name=is.null');
-      const row = { gym_id: gym.id, class_date: occ.date, class_time: occ.time || null, class_name: occ.name || null,
+        (occ.name ? `&class_name=eq.${q(occ.name)}` : '&class_name=is.null'));
+      const row = { gym_id: gym.id, class_date: occ.date, class_time: occ.time || null, class_name: occ.name || null, class_id: cid,
         coach_id: occ.coach || null, status: 'cancelled', reason: ctx.mode, logged_by: me };
       const ex = (await sb(`gym_class_log?${f}&select=id&limit=1`)) || [];
       if (ex[0]) await sb(`gym_class_log?id=eq.${q(ex[0].id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify(row) });
@@ -168,10 +199,14 @@ export default async function handler(req, res) {
       const keys = [...new Set(aff.bookings.concat(aff.resv).map((r) => `${r.class_date}|${String(r.class_time || '')}`))].sort();
       for (const k of keys) {
         const [d, t] = k.split('|');
-        const o = { date: d, time: t, name: String(cls.name || '').trim() || null };
+        const o = { date: d, time: t, name: String(cls.name || '').trim() || null, cid: cidOf(cls) };
         const on = (r) => String(r.class_date) === d && String(r.class_time || '') === t;
         await settle(ctx, o, { bookings: aff.bookings.filter(on), resv: aff.resv.filter(on), members: aff.members.filter(on) }, out);
       }
+      // Permanentky na tuhle lekci: nabídka přesunu na lekce, které klub vybral (jen běžící
+      // opakované lekce téhož klubu), nebo rovnou vrácení, když náhrada není.
+      if (endCid && holders.length)
+        out.passes = await offerForEndedClass({ gym, cid: endCid, fromName: String(cls.name || '').trim() || 'lekce', fromYmd: from, toCids: xfer.to, toNames: xfer.names, note: ctx.note });
     }
     return res.status(200).json({ ok: true, result: out });
   } catch (e) {
@@ -196,7 +231,7 @@ async function settle(ctx, occ, aff, out) {
     const who = bk.child_name || bk.student_name || bk.guest_name || 'Student';
     const amt = Number(bk.amount || 0), cur = bk.currency || gym.currency || 'CZK';
     const money = `${amt} ${cur === 'CZK' ? 'Kč' : cur}`;
-    const base = { gym_id: gym.id, gym_name: gym.name, booking_id: bk.id, class_name: cls, class_date: occ.date, class_time: occ.time || '' };
+    const base = { gym_id: gym.id, gym_name: gym.name, booking_id: bk.id, class_name: cls, class_id: occ.cid || bk.class_id || null, class_date: occ.date, class_time: occ.time || '' };
     try {
       if (k === 'trial') {
         await sb(`gym_bookings?id=eq.${q(bk.id)}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'cancelled', club_cancelled_at: nowIso }) });
@@ -271,7 +306,7 @@ async function settle(ctx, occ, aff, out) {
     await notify(r.student_id,
       `${headCs}${reasonCs} Tvoje rezervace se uvolnila, členství se tím nemění.`,
       `${headEn}${reasonEn} Your reservation was released; your membership is not affected.`,
-      { choice: 'member', gym_id: gym.id, gym_name: gym.name, class_name: cls, class_date: occ.date, class_time: occ.time || '' });
+      { choice: 'member', gym_id: gym.id, gym_name: gym.name, class_name: cls, class_id: occ.cid || null, class_date: occ.date, class_time: occ.time || '' });
   }
 }
 

@@ -113,27 +113,29 @@ async function handler(req, res) {
           const h = Number(t[0]), m = Number(t[1] || 0);
           if (isNaN(h)) continue;
           const diff = (mins - (h * 60 + m)) / 60;
-          if (diff >= 2 && diff <= 12 && remindable(c, date, h * 60 + m, gym.timezone)) due.push({ c, time: sl.time });
+          if (diff >= 2 && diff <= 12 && remindable(c, date, h * 60 + m, gym.timezone)) due.push({ c, time: sl.time, cid: c.cid || null });
         }
       }
       if (!due.length) continue;
 
-      const att = await sbGet(`gym_attendance?gym_id=eq.${gym.id}&class_date=eq.${date}&select=class_name,class_time`);
-      const attSet = new Set((att || []).map(a => `${a.class_time}|${a.class_name || ''}`));
-      const rem = await sbGet(`attend_reminders?gym_id=eq.${gym.id}&class_date=eq.${date}&select=class_name,class_time`);
-      const remSet = new Set((rem || []).map(r => `${r.class_time}|${r.class_name || ''}`));
+      // Termín = cid lekce (přejmenování ani posun času ho neodpojí); bez cid postaru čas + název.
+      const K = (cid, t, n) => (cid ? `#${cid}` : `${String(t || '').slice(0, 5)}|${n || ''}`);
+      const att = await sbGet(`gym_attendance?gym_id=eq.${gym.id}&class_date=eq.${date}&select=class_name,class_time,class_id`);
+      const attSet = new Set((att || []).map(a => K(a.class_id, a.class_time, a.class_name)));
+      const rem = await sbGet(`attend_reminders?gym_id=eq.${gym.id}&class_date=eq.${date}&select=class_name,class_time,class_id`);
+      const remSet = new Set((rem || []).map(r => K(r.class_id, r.class_time, r.class_name)));
 
       for (const d of due) {
         const c = d.c, t0 = d.time;   // čas KONKRÉTNÍHO termínu, ne základní čas lekce
-        const key = `${t0}|${c.name || ''}`;
+        const key = K(d.cid, t0, c.name);
         if (attSet.has(key) || remSet.has(key)) continue;
         const coachId = c.coach || gym.owner_id;
         // marker (unique) → sdílený dedup s client-side; konflikt = už připomenuto
-        const mk = await sbPost('attend_reminders', { gym_id: gym.id, coach_id: coachId, class_name: c.name || null, class_date: date, class_time: t0 || null });
+        const mk = await sbPost('attend_reminders', { gym_id: gym.id, coach_id: coachId, class_name: c.name || null, class_id: d.cid, class_date: date, class_time: t0 || null });
         if (!mk.ok) continue;
         await sbPost('notifications', {
           user_id: coachId, type: 'system', read: false,
-          data: JSON.stringify({ kind: 'attend_reminder', gym_id: gym.id, gym_name: gym.name || '', className: c.name || '', date, time: t0 || '', day: dow }),
+          data: JSON.stringify({ kind: 'attend_reminder', gym_id: gym.id, gym_name: gym.name || '', className: c.name || '', cid: d.cid, date, time: t0 || '', day: dow }),
           message: `📋 Doplň docházku na proběhlou lekci ${c.name || ''} (${t0 || ''}).`,
         });
         created++;

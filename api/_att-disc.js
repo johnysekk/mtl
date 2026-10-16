@@ -98,8 +98,9 @@ function slotsOf(c) {
   if (c && !Array.isArray(c.slots) && c.day != null && c.time) return [{ day: Number(c.day), time: c.time }];
   return (c && Array.isArray(c.slots) ? c.slots : []).filter((x) => x && x.day != null && x.time).map((x) => ({ day: Number(x.day), time: x.time }));
 }
-// Klíč lekce pro „jen tyto lekce" v permanentce -- stejně jako _clsKey v appce.
-const clsKey = (c) => `${String((c && c.name) || '').trim()}|${slotsOf(c).map((x) => `${x.day}@${x.time || ''}`).join(',')}`;
+// „Jen tyto lekce" v permanentce = seznam cid lekcí (stejně jako _clsKey v appce).
+const clsKey = (c) => String((c && c.cid) || '');
+
 // Pokrývá permanentka (řádek členství: plan_access, plan_classes, discipline, child_name) lekci?
 // Stejně jako seznam lidí v docházce lekce (index.html openClassAttendance _covers + planCovers).
 function covers(row, c) {
@@ -108,7 +109,7 @@ function covers(row, c) {
   const cls = parseArr(row.plan_classes);
   const acc = parseArr(row.plan_access); const access = acc.length ? acc : ['all'];
   const lvl = c.level || 'all';
-  const ok = cls.length ? cls.indexOf(clsKey(c)) >= 0 : (access.indexOf('all') >= 0 || access.indexOf(lvl) >= 0);
+  const ok = cls.length ? cls.indexOf(clsKey(c)) >= 0 && !!clsKey(c) : (access.indexOf('all') >= 0 || access.indexOf(lvl) >= 0);
   if (!ok) return false;
   if (lvl === 'kids' && !row.child_name && access.indexOf('kids') < 0) return false;
   if (row.discipline && (c.disc || null) !== row.discipline) return false;
@@ -126,15 +127,17 @@ export async function attStats(sbGet, { gym, row, from, to }) {
   const ch = child ? `child_name=eq.${enc(child)}` : 'child_name=is.null';
   const rng = `class_date=gte.${ymd(from)}&class_date=lt.${ymd(to)}`;
   // Docházka celého klubu v okně (podle ní se pozná, že lekce proběhla) a záznamy o lekcích.
-  const all = (await sbGet(`gym_attendance?gym_id=eq.${enc(gym.id)}&${rng}&marked_by=not.is.null&select=class_date,class_time,class_name,student_id,child_name,marked_by&limit=20000`)) || [];
-  const log = (await sbGet(`gym_class_log?gym_id=eq.${enc(gym.id)}&${rng}&select=class_date,class_time,class_name,status&limit=5000`)) || [];
-  const K = (d, t, n) => `${String(d).slice(0, 10)}|${t5(t)}|${nm(n)}`;
+  const all = (await sbGet(`gym_attendance?gym_id=eq.${enc(gym.id)}&${rng}&marked_by=not.is.null&select=class_date,class_time,class_name,class_id,student_id,child_name,marked_by&limit=20000`)) || [];
+  const log = (await sbGet(`gym_class_log?gym_id=eq.${enc(gym.id)}&${rng}&select=class_date,class_time,class_name,class_id,status&limit=5000`)) || [];
+  // Termín = datum + cid lekce (bez cid -- lekce mimo rozvrh -- postaru čas + název).
+  const K = (d, cid, t, n) => (cid ? `${String(d).slice(0, 10)}|#${cid}` : `${String(d).slice(0, 10)}|${t5(t)}|${nm(n)}`);
+  const RK = (r) => K(r.class_date, r.class_id, r.class_time, r.class_name);
   const held = new Set(), cancelled = new Set();
-  all.forEach((a) => held.add(K(a.class_date, a.class_time, a.class_name)));
-  log.forEach((l) => { const k = K(l.class_date, l.class_time, l.class_name); if (l.status === 'cancelled') cancelled.add(k); else if (l.status === 'held') held.add(k); });
+  all.forEach((a) => held.add(RK(a)));
+  log.forEach((l) => { const k = RK(l); if (l.status === 'cancelled') cancelled.add(k); else if (l.status === 'held') held.add(k); });
   // Docházka člena, kterou zapsal klub (ne on sám).
   const mine = all.filter((a) => String(a.student_id) === String(sid) && (a.child_name || null) === child && String(a.marked_by) !== String(sid));
-  const mineFull = new Set(mine.map((a) => K(a.class_date, a.class_time, a.class_name)));
+  const mineFull = new Set(mine.map(RK));
   const mineSlot = new Set(mine.map((a) => `${String(a.class_date).slice(0, 10)}|${t5(a.class_time)}`));
   out.visits = new Set(mine.map((a) => `${String(a.class_date).slice(0, 10)}|${t5(a.class_time)}`)).size;
   const sched = parseArr(gym.schedule).filter((c) => covers(row, c));
@@ -145,7 +148,7 @@ export async function attStats(sbGet, { gym, row, from, to }) {
       const times = c.once ? (String(c.date || '').slice(0, 10) === d ? [c.time] : [])
         : (((c.since && d < c.since) || (c.until && d > c.until)) ? [] : slotsOf(c).filter((x) => x.day === dow).map((x) => x.time));
       for (const tm of times) {
-        const k = K(d, tm, c.name);
+        const k = K(d, c.cid, tm, c.name);
         if (cancelled.has(k) || !held.has(k)) continue;           // zrušená, nebo bez jediného zápisu
         out.expected++;
         if (mineFull.has(k) || mineSlot.has(`${d}|${t5(tm)}`)) out.attended++;

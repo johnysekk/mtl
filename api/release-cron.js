@@ -57,7 +57,7 @@ export default async function handler(req, res) {
   try {
     // ---- Pass 1: auto-release unpaid QR drop-in reservations 30 min after reservation --------------
     const yest = new Date(Date.now() - 36 * 3600 * 1000).toISOString().slice(0, 10);
-    const rows = await sb(`gym_bookings?payment_method=eq.qr&status=eq.reserved&pis_payment_id=is.null&class_date=gte.${yest}&select=requeued_at,id,gym_id,student_id,student_name,class_name,class_date,class_time,created_at&limit=3000`);
+    const rows = await sb(`gym_bookings?payment_method=eq.qr&status=eq.reserved&pis_payment_id=is.null&class_date=gte.${yest}&select=requeued_at,id,gym_id,student_id,student_name,class_name,class_id,class_date,class_time,created_at&limit=3000`);
 
     const gymIds = [...new Set((rows || []).map(r => r.gym_id).filter(Boolean))];
     const tzMap = {};
@@ -78,7 +78,7 @@ export default async function handler(req, res) {
 
       await sb(`gym_bookings?id=eq.${b.id}`, { method: 'PATCH', prefer: 'return=minimal', body: JSON.stringify({ status: 'released' }) });
       try {
-        await sb(`gym_class_reservations?gym_id=eq.${encodeURIComponent(b.gym_id)}&student_id=eq.${encodeURIComponent(b.student_id)}&class_date=eq.${encodeURIComponent(b.class_date)}&class_time=eq.${encodeURIComponent(b.class_time || '')}&class_name=eq.${encodeURIComponent(b.class_name || '')}`, { method: 'DELETE', prefer: 'return=minimal' });
+        await sb(`gym_class_reservations?gym_id=eq.${encodeURIComponent(b.gym_id)}&student_id=eq.${encodeURIComponent(b.student_id)}&class_date=eq.${encodeURIComponent(b.class_date)}${b.class_id ? `&class_id=eq.${encodeURIComponent(b.class_id)}` : `&class_time=eq.${encodeURIComponent(b.class_time || '')}&class_name=eq.${encodeURIComponent(b.class_name || '')}`}`, { method: 'DELETE', prefer: 'return=minimal' });
       } catch (e) {}
       try {
         if (b.student_id) {

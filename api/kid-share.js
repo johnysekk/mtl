@@ -263,15 +263,15 @@ export default async function handler(req, res) {
       }
 
       if (b.action === 'release') {
-        const rv = ((await sb(`gym_class_reservations?id=eq.${q(String(b.reservation_id || ''))}&student_id=eq.${q(row.holder_id)}&child_name=eq.${q(row.kid_name)}&select=gym_id,class_name,class_date,class_time`)) || [])[0];
+        const rv = ((await sb(`gym_class_reservations?id=eq.${q(String(b.reservation_id || ''))}&student_id=eq.${q(row.holder_id)}&child_name=eq.${q(row.kid_name)}&select=gym_id,class_name,class_id,class_date,class_time`)) || [])[0];
         if (!rv) return res.status(404).json({ error: 'reservation_not_found' });
         await sb(`gym_class_reservations?id=eq.${q(String(b.reservation_id))}`, { method: 'DELETE', prefer: 'return=minimal' });
-        const dup = (await sb(`gym_excuses?gym_id=eq.${q(rv.gym_id)}&student_id=eq.${q(row.holder_id)}&child_name=eq.${q(row.kid_name)}&class_date=eq.${q(rv.class_date)}&class_time=eq.${q(rv.class_time)}&select=id&limit=1`)) || [];
+        const dup = (await sb(`gym_excuses?gym_id=eq.${q(rv.gym_id)}&student_id=eq.${q(row.holder_id)}&child_name=eq.${q(row.kid_name)}&class_date=eq.${q(rv.class_date)}${rv.class_id ? `&class_id=eq.${q(rv.class_id)}` : `&class_time=eq.${q(rv.class_time)}`}&select=id&limit=1`)) || [];
         if (!dup.length) {
           const hp0 = await profile(row.holder_id, 'name');
           await sb('gym_excuses', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({
             gym_id: rv.gym_id, student_id: row.holder_id, student_name: (hp0 && hp0.name) || null,
-            class_name: rv.class_name, class_date: rv.class_date, class_time: rv.class_time,
+            class_name: rv.class_name, class_id: rv.class_id || null, class_date: rv.class_date, class_time: rv.class_time,
             reason_key: null, note: String(b.reason || '').slice(0, 300) || null, child_name: row.kid_name, source: 'membership' }) });
         }
         const hp = await profile(row.holder_id, 'lang');
@@ -282,14 +282,14 @@ export default async function handler(req, res) {
       }
 
       if (b.action === 'excuse') {
-        const bk = ((await sb(`gym_bookings?id=eq.${q(String(b.booking_id || ''))}&student_id=eq.${q(row.holder_id)}&child_name=eq.${q(row.kid_name)}&select=gym_id,class_name,class_date,class_time`)) || [])[0];
+        const bk = ((await sb(`gym_bookings?id=eq.${q(String(b.booking_id || ''))}&student_id=eq.${q(row.holder_id)}&child_name=eq.${q(row.kid_name)}&select=gym_id,class_name,class_id,class_date,class_time`)) || [])[0];
         if (!bk) return res.status(404).json({ error: 'booking_not_found' });
-        const dup = (await sb(`gym_excuses?gym_id=eq.${q(bk.gym_id)}&student_id=eq.${q(row.holder_id)}&child_name=eq.${q(row.kid_name)}&class_date=eq.${q(bk.class_date)}&class_time=eq.${q(bk.class_time)}&select=id&limit=1`)) || [];
+        const dup = (await sb(`gym_excuses?gym_id=eq.${q(bk.gym_id)}&student_id=eq.${q(row.holder_id)}&child_name=eq.${q(row.kid_name)}&class_date=eq.${q(bk.class_date)}${bk.class_id ? `&class_id=eq.${q(bk.class_id)}` : `&class_time=eq.${q(bk.class_time)}`}&select=id&limit=1`)) || [];
         if (!dup.length) {
           const hp0 = await profile(row.holder_id, 'name');
           await sb('gym_excuses', { method: 'POST', prefer: 'return=minimal', body: JSON.stringify({
             gym_id: bk.gym_id, student_id: row.holder_id, student_name: (hp0 && hp0.name) || null,
-            class_name: bk.class_name, class_date: bk.class_date, class_time: bk.class_time,
+            class_name: bk.class_name, class_id: bk.class_id || null, class_date: bk.class_date, class_time: bk.class_time,
             reason_key: null, note: String(b.reason || '').slice(0, 300) || null, child_name: row.kid_name, source: 'dropin' }) });
           const hp = await profile(row.holder_id, 'lang');
           await notify(row.holder_id, 'kid_share_excused',
