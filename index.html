@@ -4742,13 +4742,16 @@ async function _saveKidTrophy(i, url){
 function _openKidHealth(idx){
   const EN=LANG==='en';
   const kids=_myChildren(); const k=kids[idx]; if(!k) return;
+  // Zamčená sekce dítěte: nejdřív okno s poučením a souhlasem zástupce.
+  if(!k.health_consent_at){ _healthUnlock(idx, function(){ _openKidHealth(idx); }); return; }
   const cur=k.health||'';
   const ov=document.createElement('div');
   ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;display:flex;align-items:'+(window.innerHeight>780?'center':'flex-end')+';justify-content:center;overflow:auto;padding:16px;box-sizing:border-box;';
   ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px;padding:20px;">
     <div style="font-size:17px;font-weight:800;margin-bottom:6px;color:var(--dark);">\ud83e\ude79 ${EN?'Health note (optional)':'Zdravotn\u00ed omezen\u00ed (nepovinn\u00e9 uv\u00e1d\u011bt)'}</div>
-    <div style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:10px;">${escapeHtml(k.name||'')} \u00b7 ${EN?'Visible only to the coach of their lessons. You can remove short-term ones once healed.':'Uvid\u00ed jen kou\u010d jeho lekc\u00ed. Kr\u00e1tkodob\u00e1 vyl\u00e9\u010den\u00e1 m\u016f\u017ee\u0161 odebrat.'}</div>
+    <div style="font-size:12px;color:var(--light);line-height:1.5;margin-bottom:10px;">${escapeHtml(k.name||'')} \u00b7 ${EN?'Only providers you switch sharing on for see it, and only for their own lessons. You can remove short-term ones once healed.':'Uvid\u00ed jen poskytovatel\u00e9, u kter\u00fdch sd\u00edlen\u00ed zapne\u0161, a jen u sv\u00fdch lekc\u00ed. Kr\u00e1tkodob\u00e1 vyl\u00e9\u010den\u00e1 m\u016f\u017ee\u0161 odebrat.'}</div>
     <textarea id="khInput" rows="4" maxlength="500" placeholder="${EN?'Injuries or conditions, including past ones if still relevant':'Zran\u011bn\u00ed/onemocn\u011bn\u00ed, i historick\u00e1, pokud jsou st\u00e1le relevantn\u00ed'}" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:12px;font-size:15px;font-family:'DM Sans';resize:vertical;">${escapeHtml(cur)}</textarea>
+    <div id="khShare" style="margin-top:12px;"></div>
     <div style="display:flex;gap:10px;margin-top:14px;">
       <button id="khClear" style="flex:1;padding:13px;background:#FEECEC;color:var(--red);border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'No longer applies':'Ji\u017e nem\u00e1'}</button>
       <button id="khSave" style="flex:2;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${EN?'Save':'Ulo\u017eit'}</button>
@@ -4771,6 +4774,7 @@ function _openKidHealth(idx){
   };
   ov.querySelector('#khSave').onclick=()=>apply((ov.querySelector('#khInput').value||'').trim());
   ov.querySelector('#khClear').onclick=()=>apply('');
+  _healthShareMount(ov.querySelector('#khShare'));
 }
 function _openAddKid(){
   const EN=LANG==='en';
@@ -5284,7 +5288,7 @@ function renderMyKids(){
         <div style="margin-top:6px;">
           ${_kidBtn('kidTrophy', i, '\ud83d\uddbc\ufe0f '+(k.trophy_img?(EN?'Change image':'Zm\u011bnit obr\u00e1zek'):(EN?'Add a picture':'P\u0159idat obr\u00e1zek')))}
           ${beltN?'':beltsBtn}
-          ${(k.health&&String(k.health).trim())?'':_kidBtn('kidHealth', i, '\ud83e\ude79 '+(EN?'Health note (optional)':'Zdravotn\u00ed omezen\u00ed (nepovinn\u00e9)'))}
+          ${(k.health&&String(k.health).trim())?'':(k.health_consent_at ? _kidBtn('kidHealth', i, '\ud83e\ude79 '+(EN?'Health note (optional)':'Zdravotn\u00ed omezen\u00ed (nepovinn\u00e9)')) : _kidBtn('kidHealth', i, '\ud83d\udd12 '+(EN?'Health note \u2014 locked':'Zdravotn\u00ed omezen\u00ed \u2014 zam\u010deno'), 'opacity:.5;'))}
           ${_kidBtn('kidAddr', i, '\ud83c\udfe0 '+(EN?'Home address':'Adresa bydli\u0161t\u011b'))}
           ${_kidBtn('kidCare', i, '\ud83d\udc6a '+(EN?'Share care with a close person':'Sd\u00edlet p\u00e9\u010di s bl\u00edzkou osobou'))}
           ${_kidBtn('kidXfer', i, '\ud83e\udd1d '+(EN?'Transfer to another guardian':'P\u0159edat jin\u00e9mu z\u00e1konn\u00e9mu z\u00e1stupci'))}
@@ -5368,6 +5372,117 @@ function renderMyKids(){
   box.querySelectorAll('.kidRestore').forEach(b=>b.onclick=()=>restoreChild(+b.dataset.i));
 }
 const KID_CONSENT_VERSION='2026-06-v1';
+// ZDRAVOTNÍ ÚDAJE (čl. 9 GDPR). Sekce je po registraci ZAMČENÁ. Odemkne se v okně s poučením
+// a zaškrtávátkem; souhlas se uloží i se zněním, které člověk viděl (consent_acceptances, otisk,
+// neměnný). Pak u každého poskytovatele, u kterého zaplatil trénink nebo službu, sdílení zapne /
+// vypne -- každá změna je další záznam, vůči tomu poskytovateli (scope = jeho id), takže ho vidí
+// člověk, poskytovatel i MTL. Kouč / klub vidí poznámku jen tam, kde je sdílení zapnuté.
+// Při změně znění zvýšit verzi -- record-consent jinak hlásí nesoulad.
+const HEALTH_CONSENT_VERSION='2026-10-16';
+function _healthUnlockTexts(kidName){
+  const EN=LANG==='en';
+  if(kidName) return EN
+    ? { notice:'Health information about my child '+kidName+' is sensitive personal data, and I am aware that by unlocking the option to enter it I consent to it being shared with the providers I pay for a training or service with and for whom I switch sharing on in the list in this section.',
+        box:'As the legal guardian I consent to sharing health information about my child with the providers I choose' }
+    : { notice:'Údaje o zdravotním stavu mého dítěte '+kidName+' patří mezi citlivé osobní údaje a jsem si vědom toho, že odemknutím možnosti je zadat souhlasím s jejich sdílením s poskytovateli, u kterých si zaplatím trénink nebo službu a sdílení u nich zapnu v seznamu této sekce.',
+        box:'Jako zákonný zástupce souhlasím se sdílením údajů o zdravotním stavu svého dítěte s poskytovateli, které si zvolím' };
+  return EN
+    ? { notice:'Information about my health is sensitive personal data, and I am aware that by unlocking the option to enter it I consent to it being shared with the providers I pay for a training or service with and for whom I switch sharing on in the list in this section.',
+        box:'I consent to sharing information about my health with the providers I choose' }
+    : { notice:'Údaje o mém zdravotním stavu patří mezi citlivé osobní údaje a jsem si vědom toho, že odemknutím možnosti je zadat souhlasím s jejich sdílením s poskytovateli, u kterých si zaplatím trénink nebo službu a sdílení u nich zapnu v seznamu této sekce.',
+        box:'Souhlasím se sdílením údajů o mém zdravotním stavu s poskytovateli, které si zvolím' };
+}
+// Souhlas, na jehož uložení se ČEKÁ (bez uloženého souhlasu se sekce neodemkne / sdílení nezapne).
+async function _recordConsentNow(kind, body_text, meta, scope, shown){
+  try{
+    const tk=await _freshTok();
+    const r=await fetch('/api/record-consent',{ method:'POST', headers:{'Content-Type':'application/json', Authorization:'Bearer '+(tk||'')},
+      body:JSON.stringify({ kind:kind, version:HEALTH_CONSENT_VERSION, lang:LANG, body_text:body_text, meta:meta||null, scope:scope||null, shown:shown||null }) });
+    const j=await r.json().catch(function(){ return {}; });
+    return !!(r.ok && j.ok);
+  }catch(e){ return false; }
+}
+// Okno s poučením a zaškrtávátkem. kidIdx = index dítěte, null = vlastní sekce. then() po odemknutí.
+function _healthUnlock(kidIdx, then){
+  const EN=LANG==='en';
+  const kid=(kidIdx!=null)?(_myChildren()[kidIdx]||null):null;
+  if(kidIdx!=null && !kid) return;
+  const T=_healthUnlockTexts(kid?(kid.name||''):'');
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:210;display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;';
+  ov.innerHTML='<div style="background:#fff;width:100%;max-width:440px;border-radius:18px;padding:20px;font-family:\'DM Sans\';">'
+    +'<div style="font-size:17px;font-weight:800;color:var(--dark);margin-bottom:10px;">🔒 '+(kid?(EN?'Health information of ':'Zdravotní údaje — ')+escapeHtml(kid.name||''):(EN?'Health information':'Zdravotní údaje'))+'</div>'
+    +'<div id="huNotice" style="font-size:13.5px;color:var(--dark);line-height:1.55;background:var(--surf);border:1px solid var(--border);border-radius:12px;padding:12px 13px;margin-bottom:12px;">„'+escapeHtml(T.notice)+'“</div>'
+    +'<label style="display:flex;gap:10px;align-items:flex-start;font-size:13.5px;font-weight:700;color:var(--dark);line-height:1.45;cursor:pointer;margin-bottom:14px;"><input id="huBox" type="checkbox" style="width:18px;height:18px;margin-top:1px;flex-shrink:0;"><span id="huBoxTxt">'+escapeHtml(T.box)+'</span></label>'
+    +'<button id="huGo" disabled style="width:100%;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-weight:800;font-size:14px;cursor:pointer;font-family:inherit;opacity:.4;">'+(EN?'Unlock':'Odemknout')+'</button>'
+    +'<button id="huNo" style="width:100%;margin-top:8px;padding:11px;background:none;border:none;color:var(--mid);font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Not now':'Teď ne')+'</button></div>';
+  document.body.appendChild(ov);
+  const box=ov.querySelector('#huBox'), go=ov.querySelector('#huGo');
+  box.onchange=function(){ go.disabled=!box.checked; go.style.opacity=box.checked?'1':'.4'; };
+  ov.querySelector('#huNo').onclick=function(){ ov.remove(); };
+  go.onclick=async function(){
+    if(!box.checked) return;
+    go.disabled=true; go.textContent=(EN?'Saving…':'Ukládám…');
+    const at=new Date().toISOString();
+    // Otisk: poučení + znění zaškrtávátka (body) a celé okno (shown). Bez uloženého souhlasu se neodemyká.
+    const body=T.notice+'\n\n[x] '+T.box;
+    const ok=await _recordConsentNow(kid?'health_unlock_child':'health_unlock', body, kid?{ child_name:kid.name||null }:null, null, body);
+    if(!ok){ toast(EN?'⚠️ The consent could not be saved — try again.':'⚠️ Souhlas se nepodařilo uložit — zkus to znovu.'); go.disabled=false; go.textContent=(EN?'Unlock':'Odemknout'); return; }
+    try{
+      if(kid){ const arr=_myChildren(); arr[kidIdx].health_consent_at=at; const { error }=await supaClient.from('profiles').update({ children: JSON.stringify(arr) }).eq('id', currentUser.id); if(error) throw error; currentUser.children=arr; }
+      else { const { error }=await supaClient.from('profiles').update({ health_consent_at:at }).eq('id', currentUser.id); if(error) throw error; currentUser.health_consent_at=at; }
+    }catch(e){ toast('⚠️ '+(e.message||'')); go.disabled=false; go.textContent=(EN?'Unlock':'Odemknout'); return; }
+    ov.remove(); try{ _paintHealthRow(); }catch(e){} if(typeof then==='function') then();
+  };
+}
+function _paintHealthRow(){
+  const row=document.getElementById('meHealth'), v=document.getElementById('meHealthVal'); if(!row) return;
+  const locked=!(currentUser && currentUser.health_consent_at);
+  row.style.opacity=locked?'.5':'1';
+  if(v) v.textContent=locked?('🔒 '+(LANG==='en'?'Locked':'Zamčeno')):(currentUser.health_note?(LANG==='en'?'Set':'Vyplněno'):'');
+}
+// Poskytovatelé, u kterých člověk (nebo za své dítě) zaplatil trénink nebo službu.
+async function _healthProviders(){
+  const me=currentUser&&currentUser.id; if(!me) return [];
+  const gyms=new Set(), coaches=new Set();
+  const add=function(set, rows, f){ (rows||[]).forEach(function(r){ if(r && r[f]) set.add(String(r[f])); }); };
+  try{ const { data }=await supaClient.from('gym_memberships').select('gym_id').or('student_id.eq.'+me+',paid_by.eq.'+me); add(gyms, data, 'gym_id'); }catch(e){}
+  try{ const { data }=await supaClient.from('gym_bookings').select('gym_id,status').eq('student_id', me).neq('status','cancelled'); add(gyms, data, 'gym_id'); }catch(e){}
+  try{ const { data }=await supaClient.from('cohort_members').select('gym_id').eq('student_id', me); add(gyms, data, 'gym_id'); }catch(e){}
+  try{ const { data }=await supaClient.from('bookings').select('coach_id,status').eq('student_id', me).neq('status','cancelled'); add(coaches, data, 'coach_id'); }catch(e){}
+  const out=[];
+  try{ if(gyms.size){ const { data }=await supaClient.from('gyms').select('id,name').in('id',[...gyms]); (data||[]).forEach(function(g){ out.push({ key:'gym:'+g.id, id:g.id, name:g.name||'Klub', kind:'gym' }); }); } }catch(e){}
+  try{ if(coaches.size){ const { data }=await supaClient.from('profiles').select('id,name').in('id',[...coaches]); (data||[]).forEach(function(c){ out.push({ key:'coach:'+c.id, id:c.id, name:c.name||'Kouč', kind:'coach' }); }); } }catch(e){}
+  return out.sort(function(a,b){ return String(a.name).localeCompare(String(b.name)); });
+}
+function _healthShareList(){ try{ const v=currentUser.health_share; const a=(typeof v==='string')?JSON.parse(v||'[]'):(v||[]); return Array.isArray(a)?a:[]; }catch(e){ return []; } }
+// Seznam poskytovatelů s přepínačem sdílení (do okna vlastní i dětské poznámky).
+async function _healthShareMount(box){
+  if(!box) return; const EN=LANG==='en';
+  box.innerHTML='<div style="font-size:12px;color:var(--light);">'+(EN?'Loading providers…':'Načítám poskytovatele…')+'</div>';
+  const list=await _healthProviders();
+  const on=new Set(_healthShareList());
+  const head='<div style="font-size:11px;font-weight:800;color:var(--light);letter-spacing:.04em;text-transform:uppercase;margin:4px 0 6px;">'+(EN?'Share with':'Sdílet s')+'</div>';
+  if(!list.length){ box.innerHTML=head+'<div style="font-size:12.5px;color:var(--mid);line-height:1.45;">'+(EN?'Once you pay for a training or service, the provider appears here and you can switch sharing on.':'Až si zaplatíš trénink nebo službu, poskytovatel se tu objeví a sdílení s ním zapneš.')+'</div>'; return; }
+  box.innerHTML=head+list.map(function(p){ return '<label style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid var(--border);cursor:pointer;">'
+    +'<span style="font-size:13.5px;color:var(--dark);font-weight:600;">'+(p.kind==='gym'?'🏛️ ':'🥊 ')+escapeHtml(p.name)+'</span>'
+    +'<input class="hsTog" data-k="'+escapeHtml(p.key)+'" data-id="'+escapeHtml(p.id)+'" data-n="'+escapeHtml(p.name)+'" type="checkbox"'+(on.has(p.key)?' checked':'')+' style="width:19px;height:19px;flex-shrink:0;"></label>'; }).join('')
+    +'<div style="font-size:11.5px;color:var(--light);line-height:1.45;margin-top:7px;">'+(EN?'Only providers with sharing on see the note, and only for their own lessons.':'Poznámku vidí jen poskytovatelé se zapnutým sdílením, a to jen u svých lekcí.')+'</div>';
+  box.querySelectorAll('.hsTog').forEach(function(t){ t.onchange=async function(){
+    const want=t.checked; t.disabled=true;
+    const body=want
+      ? (EN?'I switch on sharing of health information (mine and that of my children with an unlocked section) with this provider; it will see it for its own lessons.':'Zapínám sdílení údajů o zdravotním stavu (svých a svých dětí s odemčenou sekcí) s tímto poskytovatelem; uvidí je u svých lekcí.')
+      : (EN?'I switch off sharing of health information with this provider.':'Vypínám sdílení údajů o zdravotním stavu s tímto poskytovatelem.');
+    const ok=await _recordConsentNow(want?'health_share':'health_share_off', body, { provider:t.dataset.n||null, provider_kind:t.dataset.k.split(':')[0] }, t.dataset.id, body+'\n\n'+(t.dataset.n||''));
+    if(!ok){ t.checked=!want; t.disabled=false; toast(EN?'⚠️ Could not save — try again.':'⚠️ Nepodařilo se uložit — zkus to znovu.'); return; }
+    const cur=new Set(_healthShareList()); if(want) cur.add(t.dataset.k); else cur.delete(t.dataset.k);
+    const arr=[...cur];
+    try{ const { error }=await supaClient.from('profiles').update({ health_share:arr }).eq('id', currentUser.id); if(error) throw error; currentUser.health_share=arr; }
+    catch(e){ t.checked=!want; toast('⚠️ '+(e.message||'')); }
+    t.disabled=false;
+    toast(want?(EN?'✅ Sharing on':'✅ Sdílení zapnuté'):(EN?'✅ Sharing off':'✅ Sdílení vypnuté'));
+  }; });
+}
 // Bump this whenever the ticket clickwrap wording below changes. record-consent.js stores the exact
 // wording ONCE per (kind, scope, version, lang) and refuses to let it change under a version that is
 // already in use -- it flags a hash mismatch instead. So the version is not decoration: it is what
@@ -6185,8 +6300,8 @@ const NOTIF_T = {
       }
     }catch(e){}
     const _hint = _hintOnce
-      ? (EN2 ? ' Any injuries or health limits? Add them in your profile \u2014 only your coach sees them.'
-             : ' M\u00e1\u0161 zran\u011bn\u00ed nebo zdravotn\u00ed omezen\u00ed? Dopl\u0148 je v profilu, uvid\u00ed je jen tv\u016fj kou\u010d.')
+      ? (EN2 ? ' Any injuries or health limits? You can add them in your profile (Health limits) and choose which providers see them.'
+             : ' M\u00e1\u0161 zran\u011bn\u00ed nebo zdravotn\u00ed omezen\u00ed? M\u016f\u017ee\u0161 je doplnit v profilu (Zdravotn\u00ed omezen\u00ed) a vybrat, kte\u0159\u00ed poskytovatel\u00e9 je uvid\u00ed.')
       : '';
     const g = d.goto||'';
     if(g==='dropin')  return (EN2?`✅ Booked: ${d.item||'class'}${_when}${_amt}${_at}.${_paid}${_hint} See you at the club!`:`✅ Zarezervováno: ${d.item||'lekce'}${_when}${_amt}${_at}.${_paid}${_hint} Uvidíme se v klubu!`);
@@ -19650,12 +19765,16 @@ async function loadHealthNotes(){
   try{
     const me=currentUser.id; const today=new Date().toISOString().slice(0,10);
     const ids=new Set(); const up={};
-    try{ const { data:bk }=await supaClient.from('bookings').select('student_id,training_date').eq('coach_id',me).eq('status','active').gte('training_date',today); (bk||[]).forEach(b=>{ if(b.student_id){ ids.add(b.student_id); if(!up[b.student_id]||b.training_date<up[b.student_id]) up[b.student_id]=b.training_date; } }); }catch(e){}
+    // SDÍLENÍ: poznámka je vidět jen poskytovateli, se kterým ho člověk zapnul (profiles.health_share).
+    // U soukromé lekce je poskytovatelem kouč sám, u lekce v klubu ten klub.
+    const keysBy={}; const _key=function(sid, k){ (keysBy[sid]=keysBy[sid]||new Set()).add(k); };
+    try{ const { data:bk }=await supaClient.from('bookings').select('student_id,training_date').eq('coach_id',me).eq('status','active').gte('training_date',today); (bk||[]).forEach(b=>{ if(b.student_id){ ids.add(b.student_id); _key(b.student_id, 'coach:'+me); if(!up[b.student_id]||b.training_date<up[b.student_id]) up[b.student_id]=b.training_date; } }); }catch(e){}
     const kidBk = [];
-    try{ const { data:gb }=await supaClient.from('gym_bookings').select('student_id,class_date,child_name').eq('coach_id',me).eq('status','active').gte('class_date',today); (gb||[]).forEach(b=>{ if(!b.student_id) return; if(b.child_name){ kidBk.push({ parent:b.student_id, kid:b.child_name, date:b.class_date }); ids.add(b.student_id); return; } ids.add(b.student_id); if(b.class_date&&(!up[b.student_id]||b.class_date<up[b.student_id])) up[b.student_id]=b.class_date; }); }catch(e){}
+    try{ const { data:gb }=await supaClient.from('gym_bookings').select('student_id,class_date,child_name,gym_id').eq('coach_id',me).eq('status','active').gte('class_date',today); (gb||[]).forEach(b=>{ if(!b.student_id) return; if(b.child_name){ kidBk.push({ parent:b.student_id, kid:b.child_name, date:b.class_date, key:'gym:'+b.gym_id }); ids.add(b.student_id); return; } ids.add(b.student_id); _key(b.student_id, 'gym:'+b.gym_id); if(b.class_date&&(!up[b.student_id]||b.class_date<up[b.student_id])) up[b.student_id]=b.class_date; }); }catch(e){}
     if(!ids.size){ box.innerHTML=`<p style="text-align:center;color:var(--light);padding:30px;">${LANG==='en'?'No upcoming students.':'Žádní nadcházející svěřenci.'}</p>`; return; }
-    const { data:profs }=await supaClient.from('profiles').select('id,name,health_note,health_note_updated,children').in('id',[...ids]);
-    const wn=(profs||[]).filter(x=>x.health_note&&x.health_note.trim());
+    const { data:profs }=await supaClient.from('profiles').select('id,name,health_note,health_note_updated,children,health_consent_at,health_share').in('id',[...ids]);
+    const _sh=function(x){ try{ const a=(typeof x.health_share==='string')?JSON.parse(x.health_share||'[]'):(x.health_share||[]); return new Set(Array.isArray(a)?a:[]); }catch(e){ return new Set(); } };
+    const wn=(profs||[]).filter(x=>x.health_note&&x.health_note.trim()&&x.health_consent_at&&[...(keysBy[x.id]||[])].some(function(k){ return _sh(x).has(k); }));
     // Children come out as rows of their own, named after the child rather than the parent, so a
     // coach reading the list sees who is actually on the mat.
     const byId={}; (profs||[]).forEach(x=>{ byId[x.id]=x; });
@@ -19666,7 +19785,7 @@ async function loadHealthNotes(){
       const par=byId[kb.parent]; if(!par) return;
       let kids=[]; try{ kids = par.children ? (typeof par.children==='string'?JSON.parse(par.children):par.children) : []; }catch(e){ kids=[]; }
       const k=(Array.isArray(kids)?kids:[]).find(function(x){ return x && x.name===kb.kid; });
-      if(!k || !k.health || !String(k.health).trim()) return;
+      if(!k || !k.health || !String(k.health).trim() || !k.health_consent_at || !_sh(par).has(kb.key)) return;
       const rowId='kid:'+kb.parent+':'+kb.kid;
       up[rowId]=kb.date;
       wn.push({ id:rowId, name:kb.kid+' ('+(LANG==='en'?'child of ':'d\u00edt\u011b \u2014 ')+(par.name||'')+')', health_note:k.health, health_note_updated:k.health_at||null });
@@ -34223,15 +34342,17 @@ $('meEdit1').onclick=async()=>{
   const el=document.querySelector('#meEdit1 .prow-val'); if(el) el.textContent=n;
   toast(L('✅ Jméno změněno'));
 };
-const _mh=$('meHealth'); if(_mh) _mh.onclick=()=>{
+const _mh=$('meHealth'); if(_mh) _mh.onclick=()=>{ if(!currentUser.health_consent_at){ _healthUnlock(null, function(){ _openMyHealth(); }); return; } _openMyHealth(); };
+function _openMyHealth(){
   const cur=currentUser.health_note||'';
   const ov=document.createElement('div'); ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;display:flex;align-items:'+(window.innerHeight>780?'center':'flex-end')+';justify-content:center;overflow:auto;padding:16px;box-sizing:border-box;';
-  ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px;padding:20px;"><div style="font-size:17px;font-weight:800;margin-bottom:6px;color:var(--dark);">${LANG==='en'?'Health note (optional)':'Zdravotní omezení (nepovinné uvádět)'}</div><div style="font-size:12px;color:var(--light);line-height:1.4;margin-bottom:10px;">${LANG==='en'?'Visible only to the coach of your lessons. You can remove short-term ones once healed.':'Uvidí jen kouč tvých lekcí. Krátkodobá vyléčená můžeš odebrat.'}</div><textarea id="hnInput" rows="4" maxlength="500" placeholder="${LANG==='en'?'Injuries or conditions, including past ones if still relevant':'Zranění/onemocnění, i historická, pokud jsou stále relevantní'}" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';line-height:1.5;resize:vertical;margin-bottom:12px;">${cur.replace(/</g,'&lt;')}</textarea><div style="display:flex;gap:8px;"><button id="hnClear" style="flex:1;padding:13px;background:#FEECEC;color:var(--red);border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'No longer have it':'Již nemám'}</button><button id="hnSave" style="flex:1.4;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Save':'Uložit'}</button></div><button id="hnCancel" style="width:100%;margin-top:8px;padding:11px;background:transparent;border:none;color:var(--light);font-weight:600;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Cancel':'Zrušit'}</button></div>`;
+  ov.innerHTML=`<div style="background:#fff;width:100%;max-width:480px;border-radius:18px;padding:20px;"><div style="font-size:17px;font-weight:800;margin-bottom:6px;color:var(--dark);">${LANG==='en'?'Health note (optional)':'Zdravotní omezení (nepovinné uvádět)'}</div><div style="font-size:12px;color:var(--light);line-height:1.4;margin-bottom:10px;">${LANG==='en'?'Only providers you switch sharing on for see it, and only for their own lessons. You can remove short-term ones once healed.':'Uvidí jen poskytovatelé, u kterých sdílení zapneš, a jen u svých lekcí. Krátkodobá vyléčená můžeš odebrat.'}</div><textarea id="hnInput" rows="4" maxlength="500" placeholder="${LANG==='en'?'Injuries or conditions, including past ones if still relevant':'Zranění/onemocnění, i historická, pokud jsou stále relevantní'}" style="width:100%;box-sizing:border-box;padding:12px;border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-family:'DM Sans';line-height:1.5;resize:vertical;margin-bottom:12px;">${cur.replace(/</g,'&lt;')}</textarea><div id="hnShare" style="margin-bottom:14px;"></div><div style="display:flex;gap:8px;"><button id="hnClear" style="flex:1;padding:13px;background:#FEECEC;color:var(--red);border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'No longer have it':'Již nemám'}</button><button id="hnSave" style="flex:1.4;padding:13px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Save':'Uložit'}</button></div><button id="hnCancel" style="width:100%;margin-top:8px;padding:11px;background:transparent;border:none;color:var(--light);font-weight:600;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Cancel':'Zrušit'}</button></div>`;
   document.body.appendChild(ov); const close=()=>ov.remove(); ov.onclick=(e)=>{ if(e.target===ov && !_ovHasForm(ov)) close(); }; ov.querySelector('#hnCancel').onclick=close;
   const apply=async(note)=>{ try{ await supaClient.from('profiles').update({ health_note: note||null, health_note_updated:new Date().toISOString() }).eq('id', currentUser.id); }catch(e){ toast('⚠️ '+e.message); return; } currentUser.health_note=note||null; const el=$('meHealthVal'); if(el) el.textContent=note?(LANG==='en'?'Set':'Vyplněno'):''; close(); toast(L('✅ Uloženo')); };
   ov.querySelector('#hnSave').onclick=()=>{ const v=(ov.querySelector('#hnInput').value||'').trim().slice(0,500); apply(v); };
+  _healthShareMount(ov.querySelector('#hnShare'));
   ov.querySelector('#hnClear').onclick=()=>apply('');
-};
+}
 const _mhc=$('btnHealthNotes'); if(_mhc) _mhc.onclick=()=>{ openSheet('shHealthNotes'); loadHealthNotes(); };
 const _bchn=$('btnCloseHealthNotes'); if(_bchn) _bchn.onclick=()=>closeSheet('shHealthNotes');
 
@@ -38624,7 +38745,11 @@ const CONSENT_LBL = {
   finbricks_terms:      ['Finbricks terms (bank payment)','Podmínky Finbricks (platba z účtu)'],
   residence_declaration:['Country of residence declaration','Prohlášení o zemi bydliště'],
   online_intl_ack:      ['Selling online coaching abroad','Prodej online koučinku do jiných zemí'],
-  online_native_ack:    ['Online coaching in the mobile app','Online koučink v mobilní aplikaci']
+  online_native_ack:    ['Online coaching in the mobile app','Online koučink v mobilní aplikaci'],
+  health_unlock:        ['Health information: unlocked',  'Zdravotní údaje: odemknutí'],
+  health_unlock_child:  ['Child\u2019s health information: unlocked', 'Zdravotní údaje dítěte: odemknutí'],
+  health_share:         ['Health information: sharing on', 'Zdravotní údaje: sdílení zapnuto'],
+  health_share_off:     ['Health information: sharing off', 'Zdravotní údaje: sdílení vypnuto']
 };
 const CONSENT_DESC = {
   online_service_start: ['The buyer asked for the coach to start before the 14 days ran out and took note of when the right of withdrawal ends.', 'Kupující požádal o zahájení před uplynutím 14 dnů a vzal na vědomí, kdy právo na odstoupení zaniká.'],
@@ -38647,7 +38772,11 @@ const CONSENT_DESC = {
   minor_private:        ['Guardian agreeing to 1:1 lessons.',       'Souhlas zástupce se soukromými lekcemi.'],
   event_consent:        ['Terms of a specific event.',              'Podmínky konkrétní akce.'],
   ticket_terms:         ['Terms attached to a ticket purchase.',    'Podmínky u koupě vstupenky.'],
-  gym_terms:            ['Rules of a specific club.',               'Pravidla konkrétního klubu.']
+  gym_terms:            ['Rules of a specific club.',               'Pravidla konkrétního klubu.'],
+  health_unlock:        ['Consent to share health information with the providers you choose.', 'Souhlas se sdílením zdravotních údajů s poskytovateli, které si zvolíš.'],
+  health_unlock_child:  ['Guardian\u2019s consent to share a child\u2019s health information with chosen providers.', 'Souhlas zástupce se sdílením zdravotních údajů dítěte s vybranými poskytovateli.'],
+  health_share:         ['Sharing of health information switched on for this provider.', 'Sdílení zdravotních údajů s tímto poskytovatelem zapnuto.'],
+  health_share_off:     ['Sharing of health information switched off for this provider.', 'Sdílení zdravotních údajů s tímto poskytovatelem vypnuto.']
 };
 function _consentLbl(k){ const l=CONSENT_LBL[k]; return l?l[LANG==='en'?0:1]:String(k||'').replace(/_/g,' '); }
 function _consentDesc(k){ const d=CONSENT_DESC[k]; return d?d[LANG==='en'?0:1]:''; }
@@ -52102,7 +52231,7 @@ function fillUserProfile(){
   // Jméno
   const nameEl = document.querySelector('#meEdit1 .prow-val');
   if(nameEl && currentUser.name) nameEl.textContent = currentUser.name;
-  const _mhv=document.querySelector('#meHealthVal'); if(_mhv) _mhv.textContent=currentUser.health_note?(LANG==='en'?'Set':'Vyplněno'):'';
+  try{ _paintHealthRow(); }catch(e){}
   // fighter row — visible when the user is a fighter OR has a pending record awaiting their approval
   (function(){
     const _mf=$('meFighter'); if(!_mf) return;
