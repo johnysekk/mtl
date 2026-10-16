@@ -2294,6 +2294,7 @@ input[type="date"]::-webkit-date-and-time-value{ text-align:left; }
     <div class="sgrp">
       <div class="srow" id="sTerms"><div class="srow-l"><div class="sicon" style="background:#F5F2EE;">📄</div><div class="slbl">Podmínky &amp; zřeknutí se odpovědnosti</div></div><div class="sval">›</div></div>
       <div class="srow" id="sPrivacy"><div class="srow-l"><div class="sicon" style="background:#F5F2EE;">🔒</div><div class="slbl">Ochrana osobních údajů (GDPR)</div></div><div class="sval">›</div></div>
+      <div class="srow" id="sCookies"><div class="srow-l"><div class="sicon" style="background:#F5F2EE;">🍪</div><div class="slbl" id="sCookiesLbl">Cookies a měření</div></div><div class="sval">›</div></div>
     </div>
     </div>
 </div>
@@ -3516,6 +3517,7 @@ const I18N = { en: {
   "Právní":"Legal",
   "Podmínky & zřeknutí se odpovědnosti":"Terms & Disclaimer",
   "Ochrana osobních údajů (GDPR)":"Privacy & data protection (GDPR)",
+  "Cookies a měření":"Cookies & measurement",
   "Souhlasím s těmito dokumenty:":"I agree to these documents:",
   "📄 Podmínky & zřeknutí se odpovědnosti":"📄 Terms & Disclaimer",
   "🔒 Zásady ochrany osobních údajů (GDPR)":"🔒 Privacy Policy (GDPR)",
@@ -14226,7 +14228,8 @@ async function _cohDepositConfirm(memberId){
     const _mt=await _freshTok();
     fetch('/api/cohort-deposit-mail',{ method:'POST', headers:{'Content-Type':'application/json','x-access-token':_mt}, body:JSON.stringify({ cohort_member_id:memberId }) });
   }catch(e){}
-  try{ fetch('/api/cohort-capi',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ cohort_id:window._crCohortId, event:'Purchase', event_id:'cp_'+memberId, value:dep, currency:cur, email:m.email||undefined, phone:m.phone||undefined, fbp:m.fbp||undefined, fbc:m.fbc||undefined }) }); }catch(e){}
+  // Konverze do pixelu poskytovatele: server si sám ověří marketingový souhlas z přihlášky a zaplacenou zálohu.
+  try{ fetch('/api/cohort-capi',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ cohort_id:window._crCohortId, event:'Purchase', cohort_member_id:memberId }) }); }catch(e){}
   // Tell the STUDENT their deposit landed. The Stripe path already does this from the webhook
   // (kind 'cohort_deposit_mine'); on the QR path nobody told them anything -- they paid, the club
   // confirmed, and their side stayed silent. Same kind + same wording, so both rails read alike.
@@ -17095,12 +17098,21 @@ async function _attDiscFetch(g, plan, child, memberId, price){
     const j=await r.json(); return (j && j.ok && j.disc) ? j.disc : null;
   }catch(e){ return null; }
 }
-// Shrnutí pro texty: „8 tréninků, 1 absence" (bez procent).
+// Shrnutí pro texty -- jen to, co pravidlo klubu počítá: „1 absence" (Max. absence), nebo
+// „8 tréninků" (Min. tréninků). Stejné tvary jako na serveru (_att-disc.js attSummary / attReq).
+function _attPl(n, abs, EN){
+  if(EN) return n+' '+(abs?('absence'+(n===1?'':'s')):('session'+(n===1?'':'s')));
+  return n+' '+(abs?(n===1?'absence':(n>=2&&n<=4?'absence':'absenc\u00ed')):(n===1?'tr\u00e9nink':(n>=2&&n<=4?'tr\u00e9ninky':'tr\u00e9nink\u016f')));
+}
 function _attGot(d, EN){
   if(!d) return '';
-  const v=Number(d.visits)||0, a=Number(d.absences)||0;
-  return EN ? (v+' session'+(v===1?'':'s')+', '+a+' absence'+(a===1?'':'s'))
-            : (v+'× trénink, '+a+' '+(a===1?'absence':(a>=2&&a<=4?'absence':'absencí')));
+  const abs=(d.allowAbs!=null);
+  return _attPl(Number(abs?d.absences:d.visits)||0, abs, EN);
+}
+function _attReq(d, EN){
+  if(!d) return '';
+  const abs=(d.allowAbs!=null);
+  return (abs?'max. ':'min. ')+_attPl(Number(abs?d.allowAbs:d.needVisits)||0, abs, EN);
 }
 function _attDiscLine(d, cur, EN){
   if(!d || !d.ok) return '';
@@ -17439,12 +17451,13 @@ async function _membAttPaint(el, mid){
     const j=await r.json(); if(!j || !j.ok || !j.progress) return;
     const p=j.progress, cur=j.currency||'CZK', sym=_curSym(cur);
     const until=new Date(p.until).toLocaleDateString(EN?'en-GB':'cs-CZ');
-    const chip=function(lbl, val, good){ return '<div style="flex:1;background:'+(good?'#E8F5EE':'var(--surf)')+';border:1px solid '+(good?'#A8E6C0':'var(--border)')+';border-radius:10px;padding:7px 9px;">'
-      +'<div style="font-size:10.5px;color:var(--mid);font-weight:700;">'+lbl+'</div><div style="font-size:15px;font-weight:800;color:'+(good?'#067647':'var(--dark)')+';">'+val+'</div></div>'; };
-    let chips='';
-    if(p.needVisits!=null) chips+=chip(EN?'Sessions':'Tréninky', p.visits+' / '+p.needVisits, p.visits>=p.needVisits);
-    if(p.allowAbs!=null) chips+=chip(EN?'Absences (max)':'Absence (nejvýš)', p.absences+' / '+p.allowAbs, p.absences<=p.allowAbs);
-    const req=[p.needVisits!=null?(EN?('at least '+p.needVisits+' sessions'):('aspoň '+p.needVisits+'× trénink')):'', p.allowAbs!=null?(EN?('at most '+p.allowAbs+' absences'):('nejvýš '+p.allowAbs+' '+((p.allowAbs>=1&&p.allowAbs<=4)?'absence':'absencí'))):''].filter(Boolean).join(EN?' and ':' a ');
+    const chip=function(lbl, val, good){ return '<div style="flex:1;background:'+(good?'#E8F5EE':'var(--surf)')+';border:1px solid '+(good?'#A8E6C0':'var(--border)')+';border-radius:10px;padding:8px 10px;font-size:13px;color:var(--mid);font-weight:700;">'
+      +lbl+': <span style="font-size:15px;font-weight:800;color:'+(good?'#067647':'var(--dark)')+';">'+val+'</span></div>'; };
+    // Jen pravidlo, které klub vybral: „Max. absence: 1 / 2", nebo „Min. tréninků: 6 / 8".
+    const _abs=(p.allowAbs!=null);
+    const chips=_abs ? chip(EN?'Max. absences':'Max. absence', p.absences+' / '+p.allowAbs, p.absences<=p.allowAbs)
+                     : chip(EN?'Min. sessions':'Min. tr\u00e9nink\u016f', p.visits+' / '+p.needVisits, p.visits>=p.needVisits);
+    const req=_attReq(p, EN);
     let msg;
     if(j.next!=null && j.next>0) msg=EN?('✅ Done — your next payment is '+fmtPrice(j.next,cur)+' '+sym+' lower.'):('✅ Splněno — další platba bude o '+fmtPrice(j.next,cur)+' '+sym+' nižší.');
     else if(j.next===0) msg=EN?'This period did not reach the discount; the next one starts fresh.':'V tomhle období na slevu nedosáhlo; v dalším to jde znovu.';
@@ -17454,7 +17467,7 @@ async function _membAttPaint(el, mid){
       +'<div style="font-size:12.5px;font-weight:800;color:var(--dark);margin-bottom:6px;">🎯 '+(EN?'Attendance discount':'Sleva za docházku')+'</div>'
       +'<div style="display:flex;gap:8px;">'+chips+'</div>'
       +'<div style="font-size:11.5px;color:var(--mid);line-height:1.45;margin-top:7px;">'+msg+'</div>'
-      +'<div style="font-size:10.5px;color:var(--light);line-height:1.4;margin-top:3px;">'+(EN?'Absence = a class of your pass that took place and you were not marked present (an excused class too). Attendance is recorded by the club.':'Absence = proběhlá lekce tvé permanentky, na které nemáš zapsanou docházku (i omluvená). Docházku zapisuje klub.')+'</div>'
+      +'<div style="font-size:10.5px;color:var(--light);line-height:1.4;margin-top:3px;">'+(_abs?(EN?'Absence = a class of your pass that took place and you were not marked present (an excused class too). Attendance is recorded by the club.':'Absence = proběhlá lekce tvé permanentky, na které nemáš zapsanou docházku (i omluvená). Docházku zapisuje klub.'):(EN?'Sessions = every attendance of yours at the club, recorded by the club.':'Tr\u00e9nink = ka\u017ed\u00e1 tvoje doch\u00e1zka v klubu, zapisuje ji klub.'))+'</div>'
       +'</div>';
   }catch(e){}
 }
@@ -18759,22 +18772,18 @@ function _classSlots(c){
   return c.slots.filter(function(s){ return s && s.day!=null && s.time; })
     .map(function(s){ return { day:Number(s.day), time:s.time, dur:(s.dur!=null?Number(s.dur):_cd) }; });
 }
-// JEDINÝ TVAR, KTERÝ SE DO gyms.schedule ZAPISUJE (sjednoceno 16. 10. 2026). Každé uložení rozvrhu
-// (Rozvrh majitele, rozvrh trenéra, Nastavení klubu) jde přes tohle:
+// JEDINÝ TVAR, KTERÝ SE DO gyms.schedule ZAPISUJE (sjednoceno 16. 10. 2026). Rozvrh ukládá jen
+// „Uložit" v Rozvrhu (majitel i trenér) a jde to přes tohle:
 //   * opakovaná lekce: termíny JEN v `slots`; staré day / time / extraSlots / date pryč -- vedle
 //     slots by zestárly a četl by se z nich špatný čas;
 //   * jednorázová lekce (once): date + time, bez slots / day / extraSlots;
-//   * prázdný název = název úrovně, VŽDY česky (ne podle jazyka appky): název je klíč rezervací,
-//     docházky, zrušených termínů i permanentek na vybrané lekce a nesmí se měnit podle toho,
-//     kdo a v jakém jazyce rozvrh uložil.
-function _schedLvlName(level){
-  const o=(typeof CLASS_LEVELS!=='undefined'?CLASS_LEVELS:[]).find(function(x){ return x.v===level; });
-  return o ? o.cs : ((level && level!=='all') ? String(level) : 'Všichni');
-}
+//   * název se jen ořízne. Bez názvu lekce uložit nejde (saveScheduleOnly) -- název je klíč
+//     rezervací, docházky, zrušených termínů i permanentek na vybrané lekce, takže ho zadává člověk
+//     a appka si ho nevymýšlí.
 function _schedNorm(c){
   if(!c) return c;
   const out=Object.assign({}, c);
-  out.name=(c.name && String(c.name).trim()) ? String(c.name).trim() : _schedLvlName(c.level||'all');
+  out.name=String(c.name||'').trim();
   if(c.once){ delete out.slots; delete out.day; delete out.extraSlots; }
   else {
     out.slots=_classSlots(c).map(function(x){ return { day:Number(x.day), time:x.time, dur:Number(x.dur)||60 }; });
@@ -18783,6 +18792,28 @@ function _schedNorm(c){
   return out;
 }
 function _schedNormAll(arr){ return (arr||[]).filter(Boolean).map(_schedNorm); }
+// Lekce jako text s klíči v pevném pořadí -- k porovnání, jestli se lekce změnila.
+function _schedCanon(c){
+  const srt=function(v){ if(Array.isArray(v)) return v.map(srt); if(v && typeof v==='object'){ const o={}; Object.keys(v).sort().forEach(function(k){ o[k]=srt(v[k]); }); return o; } return v; };
+  return JSON.stringify(srt(c));
+}
+// TŘÍCESTNÉ SLOUČENÍ ROZVRHU. base = rozvrh, jak ho appka naposledy načetla / uložila; mine = co je
+// v appce teď; fresh = co je v databázi teď (mohl ho mezitím změnit trenér). Výsledek = fresh, ze
+// kterého zmizí lekce, které tady člověk smazal nebo upravil, a přibudou jeho nové a upravené verze
+// (upravená zůstane na místě té původní). Lekce, na které tady nikdo nesáhl, zůstanou, jak jsou
+// v databázi -- i když je mezitím změnil někdo jiný.
+function _schedMerge(base, mine, fresh){
+  const ck=_schedCanon;
+  const baseSet=new Set(base.map(ck)), mineSet=new Set(mine.map(ck));
+  const removed=new Set(base.filter(function(c){ return !mineSet.has(ck(c)); }).map(ck));
+  const repl={};
+  mine.forEach(function(c,k){ if(baseSet.has(ck(c))) return; const b=base[k]; if(b && removed.has(ck(b)) && !repl[ck(b)]) repl[ck(b)]=c; });
+  const out=[];
+  fresh.forEach(function(c){ const k=ck(c); if(removed.has(k)){ if(repl[k]) out.push(repl[k]); } else out.push(c); });
+  const have=new Set(out.map(ck));
+  mine.forEach(function(c){ if(!baseSet.has(ck(c)) && !have.has(ck(c))){ out.push(c); have.add(ck(c)); } });
+  return out;
+}
 // Jednorázová lekce -> opakovaná: z data a času udělá první termín ve `slots`, staré day/time/date pryč.
 function _toRecurring(it){
   if(!it) return;
@@ -21365,11 +21396,14 @@ async function openCohortSignup(cohortId, fromColdLink){
     // Marketingový souhlas jen když ho člověk opravdu zaškrtl, se zněním, které viděl. (Dřív se
     // zapsal pokaždé, když odsouhlasil podmínky -- i bez zaškrtnutého marketingu.)
     try{ const _mk0=ov.querySelector('#cohMkt'); if(_mk0 && _mk0.checked && typeof _recordConsent==='function') _recordConsent('provider_marketing', LEGAL_VERSION, LANG, ((ov.querySelector('#cohMktTxt')||{}).textContent||''), { channel:'cohort_signup', cohort_id:(d&&d.id)||null }); }catch(e){}
+    // Souhlas s měřením si stránka pamatuje přes přesměrování na platbu: děkovací stránka pustí
+    // pixel poskytovatele jen tomu, kdo ho tady zaškrtl.
+    try{ const _mk1=ov.querySelector('#cohMkt'); if(_mk1 && _mk1.checked) localStorage.setItem('mtl_coh_mkt_'+cohortId,'1'); else localStorage.removeItem('mtl_coh_mkt_'+cohortId); }catch(e){}
     pb.disabled=true; pb.textContent=(EN?'Loading…':'Načítám…');
     var _fb=_cohFb();
     var _lev='cl_'+Date.now()+'_'+Math.random().toString(36).slice(2,8);
     try{ if(window.fbq) fbq('track','Lead',{},{eventID:_lev}); }catch(e){}
-    if(ov.querySelector('#cohMkt') && ov.querySelector('#cohMkt').checked){ try{ fetch('/api/cohort-capi',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ cohort_id:cohortId, event:'Lead', event_id:_lev, email:em, phone:ph, fbp:_fb.fbp, fbc:_fb.fbc, event_source_url:location.href }) }); }catch(e){} }
+    if(ov.querySelector('#cohMkt') && ov.querySelector('#cohMkt').checked){ try{ fetch('/api/cohort-capi',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ cohort_id:cohortId, event:'Lead', consent:true, event_id:_lev, email:em, phone:ph, fbp:_fb.fbp, fbc:_fb.fbc, event_source_url:location.href }) }); }catch(e){} }
     try{
       if(d && d.payment_mode==='qr_bank'){ return _cohDepositQr(cohortId, d, { name:nm, email:em, phone:ph, tier:tier, who:(ov._cohWhoBody||{}) }, _fb, pb); }
       // Tělo jednou (atribuce se čte jen jednou) -- s embed:true vložená platba, bez něj stránka Stripe.
@@ -21402,7 +21436,8 @@ async function _cohThankYou(cohortId, cm){
     return;
   }
   let d=null; try{ const r=await fetch('/api/cohort-public?cohort='+encodeURIComponent(cohortId)); const j=await r.json(); if(j&&j.ok) d=j.cohort; }catch(e){}
-  if(d && d.meta_pixel){ _cohInjectPixel(d.meta_pixel); var _pev='cp_'+(cm||cohortId); try{ if(window.fbq) fbq('track','Purchase',{ value:(d.deposit_amount||0), currency:(d.currency||'CZK') },{eventID:_pev}); }catch(e){} }
+  let _mkOk=false; try{ _mkOk=localStorage.getItem('mtl_coh_mkt_'+cohortId)==='1'; localStorage.removeItem('mtl_coh_mkt_'+cohortId); }catch(e){}
+  if(d && d.meta_pixel && _mkOk){ _cohInjectPixel(d.meta_pixel); var _pev='cp_'+(cm||cohortId); try{ if(window.fbq) fbq('track','Purchase',{ value:(d.deposit_amount||0), currency:(d.currency||'CZK') },{eventID:_pev}); }catch(e){} }
   let ov=document.getElementById('cohSignupOv'); if(ov) ov.remove();
   ov=document.createElement('div'); ov.id='cohSignupOv'; ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100001;display:flex;align-items:center;justify-content:center;padding:18px;';
   ov.innerHTML='<div style="max-width:420px;text-align:center;background:#fff;border-radius:18px;box-shadow:0 12px 40px rgba(0,0,0,.25);padding:26px 22px;box-sizing:border-box;width:100%;max-height:92vh;overflow-y:auto;"><div style="font-size:46px;margin-bottom:10px;">✅</div><div style="font-family:\'Bebas Neue\';font-size:30px;color:var(--dark);">'+(EN?'Deposit paid!':'Záloha zaplacena!')+'</div><p style="font-size:14px;color:var(--mid);line-height:1.55;margin:10px 0 20px;">'+(EN?('Your spot is reserved'+(d?(' for '+(d.name||'the course')):'')+'. You pay the rest of month 1 at the gym. See you on the mats!'):('Místo máš rezervované'+(d?(' na '+(d.name||'kurz')):'')+'. Zbytek 1. měsíce doplatíš na místě. Ahoj na tréninku!'))+'</p><button onclick="document.getElementById(\'cohSignupOv\').remove();location.href=\'/\';" style="padding:13px 22px;background:var(--dark);color:#fff;border:none;border-radius:12px;font-weight:700;cursor:pointer;">'+(EN?'Done':'Hotovo')+'</button></div>';
@@ -24862,18 +24897,17 @@ async function resetOccOverride(occ){
 // mode 'advance' = předem; 'forgot' = zpětně („zapomněli jsme ji zrušit"). Ukáže, kdo je na
 // termín přihlášený a co se s kým stane; u platby převodem/QR/hotově volí klub vrátit / přesun.
 // Všechno provede server (/api/class-cancel) a každému pošle notifikaci.
-async function _openCancelOccurrence(gid, occ, mode){
+// Seznam přihlášených na rušené termíny (zrušení jednoho termínu i ukončení lekce). U převodu /
+// QR / hotovosti volí klub vrátit / jiný termín (radio cxc_<id>). withDate: u každého řádku datum.
+function _cxRowsHtml(bk, mem, withDate){
   const EN=LANG==='en';
-  const call=async function(body){ const tok=await _freshTok(); const r=await fetch('/api/class-cancel',{ method:'POST', headers:{'Content-Type':'application/json', Authorization:'Bearer '+(tok||'')}, body:JSON.stringify(body) }); const j=await r.json().catch(function(){ return {}; }); if(!r.ok||!j.ok) throw new Error(j.error||('HTTP '+r.status)); return j; };
-  let pv; try{ pv=await call({ action:'preview', gym_id:gid, occ:{ date:occ.date, time:occ.time, name:occ.name } }); }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
-  const bk=pv.bookings||[], mem=pv.members||[];
-  const _dd=new Date(occ.date); const when=(_dd.getDate()+'. '+(_dd.getMonth()+1)+'.')+(occ.time?(' '+occ.time):'');
   const money=function(x){ return fmtPrice(x.amount||0, x.currency)+' '+_curSym(x.currency||'CZK'); };
   const mLbl=function(m){ return m==='cash'?(EN?'cash':'hotov\u011b'):m==='pis'?(EN?'bank (Finbricks)':'z \u00fa\u010dtu (Finbricks)'):m==='qr'?(EN?'QR transfer':'QR p\u0159evodem'):(m||''); };
   const row=function(inner){ return '<div style="padding:10px 0;border-bottom:1px solid var(--border);font-size:13px;color:var(--dark);">'+inner+'</div>'; };
   let list='';
+  const dt=function(x){ if(!withDate || !x.date) return ''; const d=new Date(x.date+'T12:00:00'); return ' \u00b7 '+(typeof dowShort==='function'?dowShort()[d.getDay()]+' ':'')+d.getDate()+'. '+(d.getMonth()+1)+'.'+(x.time?(' '+String(x.time).slice(0,5)):''); };
   bk.forEach(function(x){
-    const nm='<b>'+escapeHtml(x.name)+'</b>';
+    const nm='<b>'+escapeHtml(x.name)+'</b>'+escapeHtml(dt(x));
     if(x.kind==='card') list+=row(nm+' \u00b7 '+money(x)+' '+(EN?'by card':'kartou')+'<div style="font-size:12px;color:#0E7A4A;margin-top:3px;">'+(EN?'Refunded 100 % automatically.':'Vr\u00e1t\u00ed se automaticky 100 %.')+'</div>');
     else if(x.kind==='bank') list+=row(nm+' \u00b7 '+money(x)+' '+mLbl(x.method)
       +'<div style="display:flex;gap:6px;margin-top:6px;"><label style="flex:1;display:flex;gap:6px;align-items:center;font-size:12px;cursor:pointer;"><input type="radio" name="cxc_'+x.id+'" value="move" checked> '+(EN?'Offer another time':'Nab\u00eddnout jin\u00fd term\u00edn')+'</label>'
@@ -24882,7 +24916,34 @@ async function _openCancelOccurrence(gid, occ, mode){
     else if(x.kind==='trial') list+=row(nm+' \u00b7 '+(EN?'free trial':'zku\u0161ebn\u00ed tr\u00e9nink zdarma')+'<div style="font-size:12px;color:#0E7A4A;margin-top:3px;">'+(EN?'Gets the free trial back.':'N\u00e1rok na zku\u0161ebn\u00ed se mu vr\u00e1t\u00ed.')+'</div>');
     else list+=row(nm+' \u00b7 '+(EN?'unpaid booking':'nezaplacen\u00e1 rezervace')+'<div style="font-size:12px;color:var(--mid);margin-top:3px;">'+(EN?'Cancelled, nothing to pay.':'Zru\u0161\u00ed se, nic neplat\u00ed.')+'</div>');
   });
-  mem.forEach(function(r){ list+=row('<b>'+escapeHtml(r.name)+'</b> \u00b7 '+(EN?'member':'\u010dlen')+'<div style="font-size:12px;color:var(--mid);margin-top:3px;">'+(EN?'Reservation released, membership unchanged.':('Rezervace se uvoln\u00ed, '+(_sellKind({gym:_myGymData})==='pass'?'permanentka':'\u010dlenstv\u00ed')+' se nem\u011bn\u00ed.'))+'</div>'); });
+  mem.forEach(function(r){ list+=row('<b>'+escapeHtml(r.name)+'</b>'+escapeHtml(dt(r))+' \u00b7 '+(EN?'member':'\u010dlen')+'<div style="font-size:12px;color:var(--mid);margin-top:3px;">'+(EN?'Reservation released, membership unchanged.':('Rezervace se uvoln\u00ed, '+(_sellKind({gym:_myGymData})==='pass'?'permanentka':'\u010dlenstv\u00ed')+' se nem\u011bn\u00ed.'))+'</div>'); });
+  return list;
+}
+// Shrnutí po zrušení / ukončení: co se komu stalo a co musí klub udělat sám.
+function _cxResultPopup(res, title, after){
+  const EN=LANG==='en';
+  const mLbl=function(m){ return m==='cash'?(EN?'cash':'hotov\u011b'):m==='pis'?(EN?'bank (Finbricks)':'z \u00fa\u010dtu (Finbricks)'):m==='qr'?(EN?'QR transfer':'QR p\u0159evodem'):(m||''); };
+  // Co musí klub udělat sám: vrátit peníze za převod / QR / hotovost.
+  const br=res.bank_refund||[];
+  const lines=[];
+  if((res.refunded_card||[]).length) lines.push((EN?'Card refunds sent automatically: ':'Kartou vr\u00e1ceno automaticky: ')+res.refunded_card.join(', '));
+  if((res.moved||[]).length) lines.push((EN?'Offered another time: ':'Nab\u00eddnut jin\u00fd term\u00edn: ')+res.moved.join(', '));
+  if((res.trials||[]).length) lines.push((EN?'Free trial returned: ':'Zku\u0161ebn\u00ed vr\u00e1cen: ')+res.trials.join(', '));
+  if(res.members) lines.push((EN?'Member reservations released: ':'Uvoln\u011bn\u00e9 rezervace \u010dlen\u016f: ')+res.members);
+  if((res.errors||[]).length) lines.push('\u26a0\ufe0f '+(EN?'Failed: ':'Nepoda\u0159ilo se: ')+res.errors.map(function(e){ return e.name; }).join(', '));
+  const todo=br.length?('\n\n'+(EN?'RETURN THE MONEY YOURSELF:':'VRA\u0164 PEN\u00cdZE S\u00c1M:')+'\n'+br.map(function(x){ return '\u2022 '+x.name+' \u2014 '+fmtPrice(x.amount||0,x.currency)+' '+_curSym(x.currency||'CZK')+' ('+mLbl(x.method)+')'; }).join('\n')
+    +'\n'+(EN?'MTL does not hold transfer payments. The commission on them is cancelled.':'MTL platby p\u0159evodem nedr\u017e\u00ed. Provize z nich se ru\u0161\u00ed.')):'';
+  _minorInfoPopup(title, escapeHtml((lines.join('\n')||(EN?'Nobody was booked.':'Nikdo nebyl p\u0159ihl\u00e1\u0161en\u00fd.'))+todo).replace(/\n/g,'<br>'), 'OK', after||null);
+}
+// /api/class-cancel (zrušení termínu i ukončení lekce).
+async function _cxCall(body){ const tok=await _freshTok(); const r=await fetch('/api/class-cancel',{ method:'POST', headers:{'Content-Type':'application/json', Authorization:'Bearer '+(tok||'')}, body:JSON.stringify(body) }); const j=await r.json().catch(function(){ return {}; }); if(!r.ok||!j.ok) throw new Error(j.error||('HTTP '+r.status)); return j; }
+async function _openCancelOccurrence(gid, occ, mode){
+  const EN=LANG==='en';
+  const call=_cxCall;
+  let pv; try{ pv=await call({ action:'preview', gym_id:gid, occ:{ date:occ.date, time:occ.time, name:occ.name } }); }catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); return; }
+  const bk=pv.bookings||[], mem=pv.members||[];
+  const _dd=new Date(occ.date); const when=(_dd.getDate()+'. '+(_dd.getMonth()+1)+'.')+(occ.time?(' '+occ.time):'');
+  const list=_cxRowsHtml(bk, mem, false);
   const n=bk.length+mem.length;
   const ov=document.createElement('div');
   ov.style.cssText='position:fixed;inset:0;z-index:100060;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:18px;';
@@ -24905,17 +24966,7 @@ async function _openCancelOccurrence(gid, occ, mode){
     catch(e){ toast('\u26a0\ufe0f '+(e.message||'')); btn.disabled=false; btn.textContent=(EN?'Try again':'Zkusit znovu'); return; }
     ov.remove();
     try{ window._cancelledOcc=window._cancelledOcc||new Set(); window._cancelledOcc.add(`${occ.date}|${occ.time||''}|${occ.name||''}`); }catch(e){}
-    // Co musí klub udělat sám: vrátit peníze za převod / QR / hotovost.
-    const br=res.bank_refund||[];
-    const lines=[];
-    if((res.refunded_card||[]).length) lines.push((EN?'Card refunds sent automatically: ':'Kartou vr\u00e1ceno automaticky: ')+res.refunded_card.join(', '));
-    if((res.moved||[]).length) lines.push((EN?'Offered another time: ':'Nab\u00eddnut jin\u00fd term\u00edn: ')+res.moved.join(', '));
-    if((res.trials||[]).length) lines.push((EN?'Free trial returned: ':'Zku\u0161ebn\u00ed vr\u00e1cen: ')+res.trials.join(', '));
-    if(res.members) lines.push((EN?'Member reservations released: ':'Uvoln\u011bn\u00e9 rezervace \u010dlen\u016f: ')+res.members);
-    if((res.errors||[]).length) lines.push('\u26a0\ufe0f '+(EN?'Failed: ':'Nepoda\u0159ilo se: ')+res.errors.map(function(e){ return e.name; }).join(', '));
-    const todo=br.length?('\n\n'+(EN?'RETURN THE MONEY YOURSELF:':'VRA\u0164 PEN\u00cdZE S\u00c1M:')+'\n'+br.map(function(x){ return '\u2022 '+x.name+' \u2014 '+fmtPrice(x.amount||0,x.currency)+' '+_curSym(x.currency||'CZK')+' ('+mLbl(x.method)+')'; }).join('\n')
-      +'\n'+(EN?'MTL does not hold transfer payments. The commission on them is cancelled.':'MTL platby p\u0159evodem nedr\u017e\u00ed. Provize z nich se ru\u0161\u00ed.')):'';
-    _minorInfoPopup(EN?'Class cancelled':'Term\u00edn zru\u0161en', escapeHtml((lines.join('\n')||(EN?'Nobody was booked.':'Nikdo nebyl p\u0159ihl\u00e1\u0161en\u00fd.'))+todo).replace(/\n/g,'<br>'), 'OK', function(){ try{ openClassAttendance(occ); }catch(e){} });
+    _cxResultPopup(res, EN?'Class cancelled':'Term\u00edn zru\u0161en', function(){ try{ openClassAttendance(occ); }catch(e){} });
   };
 }
 async function _notifOpenAttendance(gymId, occ){
@@ -28652,24 +28703,46 @@ function _dpOpenForm(idx){
 function _planAttNorm(a){
   if(!a) return null;
   const n=function(v){ return (v===''||v==null||!isFinite(Number(v)))?null:Math.max(0, Math.floor(Number(v))); };
-  const out={ on:!!a.on, amt:Math.max(0, parseFloat(a.amt)||0), maxAbs:n(a.maxAbs), minVisits:n(a.minVisits) };
+  // JEDNO pravidlo: Max. absence (kind 'abs', výchozí), nebo Min. tréninků (kind 'visits').
+  const kind=(a.kind==='visits')?'visits':'abs';
+  const out={ on:!!a.on, amt:Math.max(0, parseFloat(a.amt)||0), kind:kind, maxAbs:(kind==='abs'?n(a.maxAbs):null), minVisits:(kind==='visits'?n(a.minVisits):null) };
   if(out.minVisits===0) out.minVisits=null;
   return (out.on || out.amt || out.maxAbs!=null || out.minVisits!=null) ? out : null;
 }
+// Kolik termínů týdně permanentka pokrývá (opakované lekce v rozvrhu). Víc než ATT_WIDE_WEEKLY =
+// „široká" permanentka: absence by se počítala z každé z nich, takže se hodí Min. tréninků.
+const ATT_WIDE_WEEKLY=4;
+function _planWeeklySlots(p){
+  try{ return _gymRecurring(_myGymData).filter(function(c){ return !c.once && planCovers(p, c.level||'all', c); })
+    .reduce(function(t,c){ return t+((_classSlots(c)||[]).length); }, 0); }catch(e){ return 0; }
+}
 function _planAttHtml(p, i, cur){
   const EN=LANG==='en', a=p.att||{}, on=!!a.on, mo=parseInt(p.months,10)||1, sym=_curSym(cur);
-  const inp=function(f, v, ph){ return '<input class="planAttF" data-i="'+i+'" data-f="'+f+'" type="number" min="0" inputmode="numeric" value="'+escapeHtml(v==null?'':String(v))+'" placeholder="'+ph+'" style="width:100%;box-sizing:border-box;padding:8px;border:1.5px solid var(--border);border-radius:9px;font-family:\'DM Sans\';font-size:13px;">'; };
+  const kind=(a.kind==='visits')?'visits':'abs';
+  const wk=_planWeeklySlots(p);
+  const inp=function(f, v, ph){ return '<input class="planAttF" data-i="'+i+'" data-f="'+f+'" type="number" min="0" max="999" inputmode="numeric" value="'+escapeHtml(v==null?'':String(v))+'" placeholder="'+ph+'" style="width:100%;box-sizing:border-box;padding:8px;border:1.5px solid var(--border);border-radius:9px;font-family:\'DM Sans\';font-size:13px;">'; };
   const lbl=function(t){ return '<div style="font-size:10.5px;color:var(--mid);font-weight:600;margin-bottom:3px;">'+t+'</div>'; };
+  const rb=function(v, t){ return '<label style="flex:1;display:flex;align-items:center;justify-content:center;gap:6px;padding:7px 6px;border:1.5px solid '+(kind===v?'var(--dark)':'var(--border)')+';border-radius:9px;font-size:12px;font-weight:700;cursor:pointer;background:'+(kind===v?'var(--surf)':'#fff')+';">'
+    +'<input class="planAttKind" data-i="'+i+'" type="radio" name="patk_'+i+'" value="'+v+'"'+(kind===v?' checked':'')+' style="margin:0;">'+t+'</label>'; };
+  const warn=(kind==='abs' && wk>ATT_WIDE_WEEKLY)
+    ? '<div style="font-size:11.5px;color:#9A5B00;background:#FFF6E5;border-radius:9px;padding:8px 10px;margin-top:8px;line-height:1.45;">⚠️ '+(EN?('This pass covers '+wk+' classes a week. An absence counts for every one of them the member skips — Min. sessions fits better.'):('Tahle permanentka pokrývá '+wk+' lekcí týdně. Absence se počítá z každé, na kterou člen nepřijde — líp sedí Min. tréninků.'))+'</div>'
+    : '';
   return '<div style="border:1px solid var(--border);background:#fff;border-radius:11px;padding:9px 11px;margin:8px 0;">'
     +'<label style="display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:700;cursor:pointer;color:var(--dark);"><input class="planAttOn" data-i="'+i+'" type="checkbox" '+(on?'checked':'')+' style="width:16px;height:16px;">🎯 '+(EN?'Attendance discount':'Sleva za docházku')+'</label>'
-    +(on?('<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">'
+    +(on?('<div style="display:flex;gap:6px;margin-top:8px;">'+rb('abs', EN?'Max. absences':'Max. absence')+rb('visits', EN?'Min. sessions':'Min. tréninků')+'</div>'
+      +'<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;">'
         +'<div style="flex:1 1 90px;">'+lbl((EN?'Discount per month':'Sleva za měsíc')+' ('+sym+')')+inp('amt', a.amt, cur==='CZK'?'100':'5')+'</div>'
-        +'<div style="flex:1 1 90px;">'+lbl(EN?'Max absences / month':'Nejvýš absencí / měsíc')+inp('maxAbs', a.maxAbs, '2')+'</div>'
-        +'<div style="flex:1 1 90px;">'+lbl(EN?'Min. sessions / month':'Aspoň tréninků / měsíc')+inp('minVisits', a.minVisits, '8')+'</div>'
-      +'</div>'
-      +'<div style="font-size:10.5px;color:var(--light);line-height:1.5;margin-top:7px;">'+(EN
-        ? ('Fill in at least one of the two. An absence is a class of this pass that took place and the member was not marked present (an excused class is an absence too); a class where you recorded nobody at all does not count. Sessions are every attendance at your club.'+(mo>1?(' For this '+mo+'-month pass: '+mo+' × the numbers and '+mo+' × the discount, over its whole validity.'):'')+' Card subscriptions are checked 2 days before renewal, other payments when the next period is bought (up to 7 days after the end). Members see their progress in the app.')
-        : ('Vyplň aspoň jedno z obou. Absence = proběhlá lekce téhle permanentky, na které člen nemá docházku (omluvená je taky absence); lekce, u které jsi nezapsal nikoho, se nepočítá. Tréninky = veškerá docházka člena v klubu.'+(mo>1?(' U '+mo+'měsíční permanentky: čísla i sleva × '+mo+', za celou dobu platnosti.'):'')+' Předplatné kartou se vyhodnotí 2 dny před obnovou, jiné platby při koupi dalšího období (do 7 dní po konci). Člen vidí v appce, jak na tom je.'))+'</div>'):'')
+        +(kind==='abs'
+          ? '<div style="flex:1 1 90px;">'+lbl(EN?'Max. absences / month':'Max. absence / měsíc')+inp('maxAbs', a.maxAbs, '2')+'</div>'
+          : '<div style="flex:1 1 90px;">'+lbl(EN?'Min. sessions / month':'Min. tréninků / měsíc')+inp('minVisits', a.minVisits, '8')+'</div>')
+      +'</div>'+warn
+      +'<div style="font-size:10.5px;color:var(--light);line-height:1.5;margin-top:7px;">'+(kind==='abs'
+        ? (EN?'An absence is a class of this pass that took place and the member was not marked present (an excused class is an absence too). A class where you recorded nobody at all does not count.'
+             :'Absence = proběhlá lekce téhle permanentky, na které člen nemá docházku (omluvená je taky absence). Lekce, u které jsi nezapsal nikoho, se nepočítá.')
+        : (EN?'Sessions are every attendance of the member at your club, recorded by you or your coaches.'
+             :'Tréninky = veškerá docházka člena v klubu, kterou zapíšeš ty nebo tví trenéři.'))
+        +(mo>1?(EN?(' For this '+mo+'-month pass the number and the discount are × '+mo+', for the whole period.'):(' U '+mo+'měsíční permanentky jsou číslo i sleva × '+mo+', za celou dobu platnosti.')):'')
+      +'</div>'):'')
     +'</div>';
 }
 function renderPlansEditor(){
@@ -28779,7 +28852,11 @@ function renderPlansEditor(){
   box.querySelectorAll('.planAddTag').forEach(el=>el.onclick=()=>addCustomPlanTag(+el.dataset.i));
   box.querySelectorAll('.planIncome').forEach(el=>el.onclick=()=>{ _gymPlans[+el.dataset.i].income=el.dataset.v; renderPlansEditor(); });
   box.querySelectorAll('.planMemberCat').forEach(el=>el.oninput=()=>{ _gymPlans[+el.dataset.i].member_cat=el.value; });
-  box.querySelectorAll('.planAttOn').forEach(el=>el.onchange=()=>{ const it=_gymPlans[+el.dataset.i]; it.att=Object.assign({ amt:'', maxAbs:2, minVisits:'' }, it.att||{}, { on:!!el.checked }); renderPlansEditor(); });
+  box.querySelectorAll('.planAttOn').forEach(el=>el.onchange=()=>{ const it=_gymPlans[+el.dataset.i];
+    // Výchozí pravidlo: Max. absence; u široké permanentky (víc než ATT_WIDE_WEEKLY lekcí týdně) Min. tréninků.
+    const _wide=_planWeeklySlots(it)>ATT_WIDE_WEEKLY;
+    it.att=Object.assign({ amt:'', kind:(_wide?'visits':'abs'), maxAbs:(_wide?'':2), minVisits:(_wide?8:'') }, it.att||{}, { on:!!el.checked }); renderPlansEditor(); });
+  box.querySelectorAll('.planAttKind').forEach(el=>el.onchange=()=>{ const it=_gymPlans[+el.dataset.i]; it.att=Object.assign({ on:true, amt:'' }, it.att||{}, { kind:el.value }); renderPlansEditor(); });
   box.querySelectorAll('.planAttF').forEach(el=>el.oninput=()=>{ const it=_gymPlans[+el.dataset.i]; it.att=Object.assign({ on:true, amt:'', maxAbs:'', minVisits:'' }, it.att||{}); it.att[el.dataset.f]=el.value; });
   box.querySelectorAll('details.planCard').forEach(d=>d.addEventListener('toggle',()=>{ window._planOpen=window._planOpen||{}; window._planOpen[d.dataset.pid]=d.open; }));
   box.querySelectorAll('.planCoach').forEach(el=>el.onchange=()=>{ const it=_gymPlans[+el.dataset.i]; it.coach=el.value||null; const c=_gymTeamCoaches.find(x=>x.id===el.value); it.coachName=c?c.name:null; });
@@ -28802,6 +28879,7 @@ function renderPlansEditor(){
   box.querySelectorAll('.planAgeMax').forEach(el=>el.oninput=()=>{ _gymPlans[+el.dataset.i].ageMax=el.value===''?null:(parseInt(el.value)||0); });
   box.querySelectorAll('.planParentReq').forEach(el=>el.onchange=()=>{ _gymPlans[+el.dataset.i].parentReq=el.checked; });
 }
+// Vrací true, když se rozvrh uložil (false = kontrola nebo zápis neprošly, appka už ukázala proč).
 async function saveScheduleOnly(_onlyIdx){
   if(!_schedGym()) return;
   // Capacity is now REQUIRED per class. It used to be optional with gyms.capacity as a fallback —
@@ -28847,6 +28925,25 @@ async function saveScheduleOnly(_onlyIdx){
         : `⚠️ Vyplň max. kapacitu u lekce „${(_c.name||levelLabel(_c.level||'all'))}" (${_clsWhen(_c)})`);
       return;
     } }
+  // NÁZEV JE POVINNÝ. Appka ho nedoplňuje -- skočí na prázdné pole té lekce.
+  {
+    const _t1=_rcToday();
+    const _pend=window._rcPending||{};
+    const _noName=_gymSchedule.findIndex(function(c,i){ if(!c || (c.until && c.until<_t1) || (c.once && c.date && c.date<_t1)) return false;
+      const n=(_pend[i] && _pend[i].name!=null) ? _pend[i].name : c.name; return !String(n||'').trim(); });
+    if(_noName>=0){
+      const _cl=_gymSchedule[_noName]||{};
+      toast(LANG==='en' ? `\u26a0\ufe0f Name the class (${_clsWhen(_cl)||levelLabel(_cl.level||'all')})` : `\u26a0\ufe0f Vypl\u0148 n\u00e1zev lekce (${_clsWhen(_cl)||levelLabel(_cl.level||'all')})`);
+      try{
+        if(_cl.once){ window._osOpenIdx=_noName; }
+        else { window._rcOpen=true; window._rcOpenLesson=_noName; }
+        renderScheduleEditor();
+        setTimeout(function(){ const el=document.querySelector((_cl.once?'.osgName':'.rcName[data-i="'+_noName+'"]')); const tgt=_cl.once?(function(){ const G=(window._osGroupList||[]).findIndex(function(g){ return g.items.indexOf(_noName)>=0; }); return G>=0?document.querySelector('.osgName[data-g="'+G+'"]'):null; })():el;
+          if(tgt){ tgt.style.borderColor='var(--red)'; try{ tgt.focus(); tgt.scrollIntoView({behavior:'smooth',block:'center'}); }catch(e){} } },80);
+      }catch(e){}
+      return;
+    }
+  }
   {
     const _t2=_rcToday();
     const _noLvl=_gymSchedule.findIndex(c=> c && !(c.until && c.until<_t2) && !(c.once && c.date && c.date<_t2) && !c.level);
@@ -28876,8 +28973,10 @@ async function saveScheduleOnly(_onlyIdx){
   // DO DATABÁZE JDE VŽDY VYČIŠTĚNÝ ROZVRH (_schedNorm) a editor pak drží přesně to, co je uložené.
   // Dřív se vyčištěná verze připravila, ale poslal se syrový _gymSchedule: zůstávaly prázdné názvy
   // a staré day/time vedle slots, a podle toho, kdo naposled uložil, se lekce jmenovala jinak.
-  const _norm=_schedNormAll(_gymSchedule);
-  const _clsNm=function(c){ return String((c&&c.name)||_schedLvlName((c&&c.level)||'all')).trim().toLowerCase(); };
+  let _norm=_schedNormAll(_gymSchedule);
+  // Otevřená opakovaná lekce zůstane otevřená i po sloučení (indexy se můžou posunout).
+  const _openCk=(window._rcOpenLesson!=null && _gymSchedule[window._rcOpenLesson]) ? _schedCanon(_schedNorm(_gymSchedule[window._rcOpenLesson])) : null;
+  const _clsNm=function(c){ return String((c&&c.name)||'').trim().toLowerCase(); };
   // Názvy opakovaných lekcí před uložením -- nová sada lekcí (nový název) dostane nabídku vlastní
   // permanentky. Podle názvu, ne podle termínů: úprava času u stávající lekce nabídku nevyvolá.
   let _namesBefore=null;
@@ -28887,6 +28986,13 @@ async function saveScheduleOnly(_onlyIdx){
     const { error } = await (async function(){
     const _g=_schedGym();
     if(!window._csEditGym){
+      // MAJITEL: do databáze jde AKTUÁLNÍ rozvrh + jen to, co majitel od posledního načtení změnil.
+      // Dřív se zapsal celý rozvrh z paměti appky a smazal lekci, kterou mezitím přidal nebo upravil
+      // trenér z jiného zařízení.
+      const _parse=function(x){ try{ const a=(typeof x==='string')?JSON.parse(x||'[]'):(x||[]); return Array.isArray(a)?a:[]; }catch(e){ return []; } };
+      const { data:gg, error:e1 } = await supaClient.from('gyms').select('schedule').eq('id', _g.id).single();
+      if(e1) return { error:{ message:(LANG==='en'?'Could not load the current schedule — try again.':'Nepodařilo se načíst aktuální rozvrh — zkus to znovu.') } };
+      _norm=_schedMerge(_schedNormAll(_parse(_g.schedule)), _norm, _schedNormAll(_parse(gg&&gg.schedule)));
       return supaClient.from('gyms').update({ schedule: JSON.stringify(_norm) }).eq('id', _g.id);
     }
     // Režim trenéra: přečti aktuální rozvrh, nech v něm cizí lekce a nahraď jen vlastní.
@@ -28905,6 +29011,7 @@ async function saveScheduleOnly(_onlyIdx){
   })();
     if(error){ toast('⚠️ '+error.message); return; }
     _schedReplaceInPlace(_gymSchedule, _norm);
+    if(_openCk){ const _oi=_norm.findIndex(function(c){ return _schedCanon(c)===_openCk; }); window._rcOpenLesson=(_oi>=0)?_oi:null; }
     _schedGym().schedule=JSON.stringify(_norm);
     toast(LANG==='en'?'✅ Class saved':'✅ Lekce uložena');
     _schedEdit=-1; renderScheduleEditor();
@@ -28931,7 +29038,9 @@ async function saveScheduleOnly(_onlyIdx){
       const _nc=(!window._csEditGym && _namesBefore) ? _gymSchedule.find(function(c){ return c && !c.once && (_classSlots(c)||[]).length && !_namesBefore.has(_clsNm(c)); }) : null;
       if(_nc) _offerPlanForClass(_schedGym(), _nc);
     }catch(e){}
+    return true;
   }catch(e){ toast('⚠️ '+(e.message||'error')); }
+  return false;
 }
 // PERMANENTKA NA NOVOU SADU OPAKOVANÝCH LEKCÍ. Po uložení nové opakované lekce v Rozvrhu se nabídne
 // permanentka, která v základu platí JEN na ni (plan.classes = klíč lekce se všemi jejími termíny).
@@ -29038,7 +29147,8 @@ function _occPanel(c,i){
     +(EN?'This class repeats weekly. Name, time, capacity and the rest live in <strong>Recurring classes</strong> \u2014 here you handle just this date: attendance, a stand-in coach or cancelling this one occurrence, all under <strong>Attendance</strong> above.'
         :'Tato lekce se opakuje t\u00fddn\u011b. N\u00e1zev, \u010das, kapacitu a zbytek nastav\u00ed\u0161 v <strong>Opakovan\u00fdch lekc\u00edch</strong> \u2014 tady \u0159e\u0161\u00ed\u0161 jen tenhle term\u00edn: doch\u00e1zku, n\u00e1hradn\u00edho kou\u010de nebo zru\u0161en\u00ed jednoho term\u00ednu, v\u0161e pod <strong>Doch\u00e1zkou</strong> v\u00fd\u0161e.')
     +'<button class="schToRecur" data-i="'+i+'" style="width:100%;margin-top:10px;padding:10px;background:var(--surf);color:var(--dark);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">\ud83d\udd01 '
-    +(EN?'Edit in Recurring classes':'Upravit v Opakovan\u00fdch lekc\u00edch')+'</button></div>';
+    +(EN?'Edit in Recurring classes':'Upravit v Opakovan\u00fdch lekc\u00edch')+'</button>'
+    +'<button class="schEndOcc" data-i="'+i+'" data-d="'+escapeHtml(String(c.date||''))+'" data-t="'+escapeHtml(String(c.time||''))+'" style="width:100%;margin-top:8px;padding:10px;background:#fff;color:var(--red);border:1px solid var(--border);border-radius:10px;font-size:13px;font-weight:800;cursor:pointer;font-family:\'DM Sans\';">\ud83d\uddd1\ufe0f '+(EN?'Cancel this date / end the class':'Zru\u0161it term\u00edn / ukon\u010dit lekci')+'</button></div>';
 }
 // Add another weekly session to the SAME recurring class: clone every template field onto a fresh
 // row (a new day/time the owner then sets), so a 1x/week class becomes 2x/week without re-typing.
@@ -29107,22 +29217,169 @@ async function _schDeletePastOnce(i){
   _gymSchedule.splice(i,1); try{ _rcShiftAfterDelete(i); }catch(e){} _schedEdit=-1; renderScheduleEditor();
   try{ if(typeof saveScheduleOnly==='function') await saveScheduleOnly(); }catch(e){}
 }
-function _schDeleteClass(i){
-  const c=_gymSchedule[i]; if(!c) return; const EN=LANG==='en';
-  if(c.once){ _gymSchedule.splice(i,1); _rcShiftAfterDelete(i); _schedEdit=-1; renderScheduleEditor(); return; }
-  const _nm=(c.name||levelLabel(c.level||'all'))+' \u00b7 '+_clsWhen(c);
-  const _msg=EN
-    ? ('Delete the recurring class "'+_nm+'"?\n\nOK = remove it and ALL upcoming occurrences.\nCancel = keep it (you can cancel a single date from Attendance).')
-    : ('Smazat opakovanou lekci \u201e'+_nm+'"?\n\nOK = smazat ji i V\u0160ECHNY nadch\u00e1zej\u00edc\u00ed term\u00edny.\nZru\u0161it = ponechat (jednotliv\u00fd term\u00edn zru\u0161\u00ed\u0161 v Doch\u00e1zce).');
-  // Které permanentky/členství tím přijdou o poslední lekci (a zmizí z nabídky)?
-  let _lost=[];
+// Které permanentky / členství přijdou o poslední lekci, když z rozvrhu zmizí lekce s indexy `gone`.
+function _schLostPlans(gone){
   try{ const _before=Object.assign({}, _myGymData, { schedule:_gymSchedule });
-    const _after=Object.assign({}, _myGymData, { schedule:_gymSchedule.filter(function(_x,_k){ return _k!==i; }) });
-    _lost=gymMembPlans(_myGymData).filter(function(p){ return _planCovered(_before,p) && !_planCovered(_after,p); }).map(function(p){ return p.name||''; }); }catch(e){}
-  if(!confirm(_msg+(_lost.length?(EN?('\n\n\u26a0\ufe0f After this, '+_lost.join(', ')+' will have no class and will be hidden from the offer.'):('\n\n\u26a0\ufe0f Potom u\u017e '+_lost.join(', ')+' nebude m\u00edt \u017e\u00e1dnou lekci a skryje se z nab\u00eddky.')):''))) return;
-  _gymSchedule.splice(i,1); _rcShiftAfterDelete(i); _schedEdit=-1; renderScheduleEditor();
-  // Uložit hned: smazání je samo o sobě hotová změna, „ulož pro potvrzení" mátlo.
-  try{ saveScheduleOnly(); }catch(e){}
+    const _after=Object.assign({}, _myGymData, { schedule:_gymSchedule.filter(function(_x,_k){ return gone.indexOf(_k)<0; }) });
+    return gymMembPlans(_myGymData).filter(function(p){ return _planCovered(_before,p) && !_planCovered(_after,p); }).map(function(p){ return p.name||''; }); }catch(e){ return []; }
+}
+function _schLostHtml(lost){
+  if(!lost.length) return ''; const EN=LANG==='en';
+  return '<div style="font-size:12px;color:#9A5B00;background:#FFF6E5;border-radius:10px;padding:9px 11px;margin-top:10px;line-height:1.45;">⚠️ '
+    +escapeHtml(EN?('After this, '+lost.join(', ')+' will have no class and will be hidden from the offer.'):('Potom už '+lost.join(', ')+' nebude mít žádnou lekci a skryje se z nabídky.'))+'</div>';
+}
+function _schDayLbl(ymd, time){
+  const d=new Date(ymd+'T12:00:00'); return dowShort()[d.getDay()]+' '+d.getDate()+'. '+(d.getMonth()+1)+'.'+(time?(' '+String(time).slice(0,5)):'');
+}
+// Proběhla lekce `c` někdy před dnem `ymd` (od `since`, nejvýš rok zpátky)? Když ne, není co
+// zachovat a ukončená lekce se z rozvrhu prostě smaže.
+function _schRanBefore(c, ymd){
+  const now=new Date(); const today=_rcToday(); const hh=String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+  const slots=_classSlots(c)||[]; if(!slots.length) return false;
+  const d=new Date(now); d.setDate(d.getDate()-366);
+  if(c.since){ const s0=new Date(c.since+'T12:00:00'); if(s0>d) d.setTime(s0.getTime()); }
+  for(let k=0;k<400;k++){
+    const y=_rcYmd(d); if(y>=ymd || y>today) return false;
+    if(!(c.until && y>c.until)){
+      const ok=slots.some(function(sl){ return Number(sl.day)===d.getDay() && (y<today || String(sl.time||'')<=hh); });
+      if(ok) return true;
+    }
+    d.setDate(d.getDate()+1);
+  }
+  return false;
+}
+// ZOBRAZENÍ ROZVRHU DOPŘEDU: nejvýš 3 měsíce od dneška (posouvá se samo s časem).
+const SCHED_AHEAD_DAYS=92;
+function _schedHorizon(){ const d=new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate()+SCHED_AHEAD_DAYS); return d; }
+
+// SMAZAT / UKONČIT LEKCI (jako v Google Kalendáři). Opakovaná: „Jen tento termín" (= zrušení
+// jednoho termínu, lekce běží dál) nebo „Tento a všechny další" (lekce tímhle termínem končí:
+// dostane `until`, proběhlé termíny zůstávají v evidenci; když ještě nikdy neproběhla, smaže se).
+// Jednorázová: smaže se. V obou případech se nejdřív vyřeší každý, kdo je na rušené termíny
+// přihlášený (vrácení / jiný termín / uvolnění + notifikace s proklikem -- /api/class-cancel).
+async function _schDeleteClass(i, preset){
+  const c=_gymSchedule[i]; if(!c) return; const EN=LANG==='en';
+  const g=_schedGym(); if(!g) return;
+  if(c.once) return _schRemoveOnce([i]);
+  const nm=String(c.name||'').trim();
+  // Termíny v příštích 3 měsících (jako v Rozvrhu).
+  let occs=[]; try{ occs=upcomingClasses([c], SCHED_AHEAD_DAYS).filter(function(o){ return !o.cancelled; }); }catch(e){ occs=[]; }
+  if(!occs.length){
+    // Lekce bez nadcházejícího termínu: rovnou ukončit (nebo smazat, pokud nikdy neproběhla).
+    if(!confirm(EN?('Remove "'+nm+'" from the schedule? Past classes stay on record.'):('Odebrat „'+nm+'“ z rozvrhu? Proběhlé lekce zůstávají v evidenci.'))) return;
+    await _schEndApply(i, _rcToday()); return;
+  }
+  const sel=(preset && occs.find(function(o){ return o.date===preset.date && String(o.time||'')===String(preset.time||''); })) || occs[0];
+  const lost=_schLostPlans([i]);
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;z-index:100060;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:18px;';
+  const box='background:#fff;border-radius:18px;max-width:460px;width:100%;max-height:90vh;overflow:auto;padding:22px;font-family:\'DM Sans\';';
+  const opt=function(v,t,sub,on){ return '<label style="display:flex;gap:10px;align-items:flex-start;padding:11px 12px;border:1.5px solid var(--border);border-radius:12px;margin-top:8px;cursor:pointer;">'
+    +'<input type="radio" name="sdMode" value="'+v+'"'+(on?' checked':'')+' style="margin-top:3px;"><span><span style="font-size:14px;font-weight:800;color:var(--dark);">'+t+'</span>'
+    +'<span style="display:block;font-size:12px;color:var(--mid);margin-top:2px;line-height:1.4;">'+sub+'</span></span></label>'; };
+  ov.innerHTML='<div style="'+box+'">'
+    +'<div style="font-size:17px;font-weight:800;color:var(--dark);margin-bottom:2px;">🗑️ '+(EN?'Delete class':'Smazat lekci')+' „'+escapeHtml(nm)+'“</div>'
+    +'<div style="font-size:12.5px;color:var(--mid);margin-bottom:10px;">'+escapeHtml(_clsWhen(c))+'</div>'
+    +'<div style="font-size:11px;color:var(--mid);font-weight:700;margin-bottom:3px;">'+(EN?'Date':'Termín')+'</div>'
+    +'<select id="sdOcc" style="width:100%;box-sizing:border-box;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:inherit;font-size:14px;background:#fff;">'
+      +occs.map(function(o,k){ return '<option value="'+k+'"'+(o===sel?' selected':'')+'>'+escapeHtml(_schDayLbl(o.date,o.time))+'</option>'; }).join('')+'</select>'
+    +opt('one', EN?'Only this date':'Jen tento termín', EN?'This one date is cancelled, the class goes on.':'Zruší se jeden termín, lekce běží dál.', false)
+    +opt('rest', EN?'This and all following':'Tento a všechny další', EN?'The class ends with this date. Past classes stay on record.':'Lekce tímhle termínem končí. Proběhlé lekce zůstávají v evidenci.', true)
+    +'<div id="sdLost">'+_schLostHtml(lost)+'</div>'
+    +'<button id="sdGo" style="width:100%;margin-top:14px;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-weight:800;font-size:14px;cursor:pointer;font-family:inherit;">'+(EN?'Continue':'Pokračovat')+'</button>'
+    +'<button id="sdNo" style="width:100%;margin-top:8px;padding:11px;background:none;border:none;color:var(--mid);font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Back':'Zpět')+'</button></div>';
+  document.body.appendChild(ov);
+  const mode=function(){ const r=ov.querySelector('input[name="sdMode"]:checked'); return r?r.value:'rest'; };
+  ov.querySelectorAll('input[name="sdMode"]').forEach(function(r){ r.onchange=function(){ ov.querySelector('#sdLost').innerHTML=(mode()==='rest')?_schLostHtml(lost):''; }; });
+  ov.querySelector('#sdNo').onclick=function(){ ov.remove(); };
+  ov.querySelector('#sdGo').onclick=async function(){
+    const o=occs[+ov.querySelector('#sdOcc').value]||sel;
+    if(mode()==='one'){ ov.remove(); return _openCancelOccurrence(g.id, { date:o.date, time:o.time, name:o.name, coach:o.coach||null }, 'advance'); }
+    const btn=this; btn.disabled=true; btn.textContent=(EN?'Loading…':'Načítám…');
+    const cls={ name:nm, once:false, slots:_classSlots(c).map(function(x){ return { day:Number(x.day), time:x.time }; }) };
+    let pv; try{ pv=await _cxCall({ action:'end_preview', gym_id:g.id, cls:cls, from:o.date }); }catch(e){ toast('⚠️ '+(e.message||'')); btn.disabled=false; btn.textContent=(EN?'Continue':'Pokračovat'); return; }
+    ov.remove();
+    _schConfirmEnd({ title:(EN?'End class':'Ukončit lekci')+' „'+nm+'“', sub:(EN?('From '+_schDayLbl(o.date,o.time)+' on the class is gone. Past classes stay on record.'):('Od '+_schDayLbl(o.date,o.time)+' lekce už nebude. Proběhlé termíny zůstávají v evidenci.')),
+      pv:pv, lost:lost, go:async function(note, choices){
+        // Nejdřív rozvrh (když se neuloží, nic se neruší), pak přihlášení na rušené termíny.
+        if(!(await _schEndApply(i, o.date, c))) throw new Error(EN?'The schedule was not saved — fix the notice above and try again.':'Rozvrh se neuložil — oprav upozornění a zkus to znovu.');
+        return ((await _cxCall({ action:'end', gym_id:g.id, cls:cls, from:o.date, note:note, choices:choices })).result)||{};
+      } });
+  };
+}
+// Ukončí opakovanou lekci k dni `from` (poslední den = den předtím). Nikdy neproběhla -> smaže se.
+// Uloží rozvrh; když uložení neprojde (např. jiná lekce nemá název), vrátí rozvrh, jak byl, a vrátí false.
+async function _schEndApply(i, from, ref){
+  let k=i; if(ref && _gymSchedule[k]!==ref){ k=_gymSchedule.indexOf(ref); if(k<0) return false; }
+  const c=_gymSchedule[k]; if(!c) return false;
+  return _schApplyOrRevert(function(){
+    try{ const p=window._rcPending||{}; delete p[k]; }catch(e){}
+    if(!_schRanBefore(c, from)){ _gymSchedule.splice(k,1); _rcShiftAfterDelete(k); }
+    else { const d=new Date(from+'T12:00:00'); d.setDate(d.getDate()-1); c.until=_rcYmd(d); if(window._rcOpenLesson===k) window._rcOpenLesson=null; }
+  });
+}
+async function _schApplyOrRevert(change){
+  const snap=_gymSchedule.map(function(c){ return c; }), snapC=_gymSchedule.map(function(c){ try{ return JSON.parse(JSON.stringify(c)); }catch(e){ return c; } });
+  change();
+  _schedEdit=-1; renderScheduleEditor();
+  const ok=!!(await saveScheduleOnly());
+  if(!ok){
+    // Původní objekty i jejich obsah zpět (indexy, rozpracované změny i otevřená lekce sedí dál).
+    snap.forEach(function(o,ix){ if(o && typeof o==='object'){ Object.keys(o).forEach(function(k2){ delete o[k2]; }); Object.assign(o, snapC[ix]); } });
+    _schedReplaceInPlace(_gymSchedule, snap); renderScheduleEditor();
+  }
+  return ok;
+}
+// Smazání jednorázové lekce (jednoho nebo všech jejích termínů).
+async function _schRemoveOnce(idxs){
+  const EN=LANG==='en'; const g=_schedGym(); if(!g) return;
+  const items=idxs.map(function(ix){ return _gymSchedule[ix]; }).filter(Boolean); if(!items.length) return;
+  const nm=String(items[0].name||'').trim();
+  const pv={ bookings:[], members:[] };
+  const saved=items.filter(function(c){ return c.date && c.time && String(c.name||'').trim(); });  // jen uložené termíny můžou mít rezervace
+  try{ for(const c of saved){ const r=await _cxCall({ action:'end_preview', gym_id:g.id, cls:{ name:String(c.name).trim(), once:true, date:c.date, time:c.time }, from:c.date }); pv.bookings=pv.bookings.concat(r.bookings||[]); pv.members=pv.members.concat(r.members||[]); } }
+  catch(e){ toast('⚠️ '+(e.message||'')); return; }
+  const lost=_schLostPlans(idxs);
+  _schConfirmEnd({ title:(EN?'Delete one-off class':'Smazat jednorázovou lekci')+(nm?(' „'+nm+'“'):''),
+    sub:items.map(function(c){ return c.date?_schDayLbl(c.date,c.time):(EN?'no date':'bez data'); }).join(' · '),
+    pv:pv, lost:lost, go:async function(note, choices){
+      // Nejdřív rozvrh (když se neuloží, nic se neruší), pak přihlášení na smazané termíny.
+      const ok=await _schApplyOrRevert(function(){ items.forEach(function(c){ const k=_gymSchedule.indexOf(c); if(k>=0){ _gymSchedule.splice(k,1); _rcShiftAfterDelete(k); } }); });
+      if(!ok) throw new Error(EN?'The schedule was not saved — fix the notice above and try again.':'Rozvrh se neuložil — oprav upozornění a zkus to znovu.');
+      const out={ refunded_card:[], bank_refund:[], moved:[], trials:[], unpaid:[], members:0, errors:[] };
+      for(const c of saved){
+        const r=(await _cxCall({ action:'end', gym_id:g.id, cls:{ name:String(c.name).trim(), once:true, date:c.date, time:c.time }, from:c.date, note:note, choices:choices })).result||{};
+        Object.keys(out).forEach(function(k){ if(Array.isArray(out[k])) out[k]=out[k].concat(r[k]||[]); else out[k]+=(r[k]||0); });
+      }
+      return out;
+    } });
+}
+// Potvrzení s přehledem přihlášených na rušené termíny (u převodu volba vrátit / jiný termín).
+function _schConfirmEnd(o){
+  const EN=LANG==='en';
+  const bk=(o.pv&&o.pv.bookings)||[], mem=(o.pv&&o.pv.members)||[]; const n=bk.length+mem.length;
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;z-index:100060;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:18px;';
+  ov.innerHTML='<div style="background:#fff;border-radius:18px;max-width:460px;width:100%;max-height:90vh;overflow:auto;padding:22px;font-family:\'DM Sans\';">'
+    +'<div style="font-size:17px;font-weight:800;color:var(--dark);margin-bottom:4px;">🚫 '+escapeHtml(o.title)+'</div>'
+    +'<div style="font-size:12.5px;color:var(--mid);margin-bottom:12px;line-height:1.45;">'+escapeHtml(o.sub||'')+'</div>'
+    +(n?('<div style="font-size:11.5px;font-weight:800;color:var(--light);letter-spacing:.04em;text-transform:uppercase;">'+(EN?'Booked':'Přihlášení')+' · '+n+'</div>'+_cxRowsHtml(bk, mem, true))
+       :('<div style="font-size:13px;color:var(--mid);background:var(--surf);border-radius:10px;padding:11px;">'+(EN?'Nobody is booked on these dates.':'Na rušené termíny nikdo není přihlášený.')+'</div>'))
+    +_schLostHtml(o.lost||[])
+    +(n?('<textarea id="cxNote" rows="2" maxlength="300" placeholder="'+(EN?'Reason for the students (optional)':'Důvod pro svěřence (nepovinné)')+'" style="width:100%;box-sizing:border-box;margin-top:12px;padding:10px;border:1.5px solid var(--border);border-radius:10px;font-family:inherit;font-size:14px;"></textarea>'):'')
+    +'<button id="cxGo" style="width:100%;margin-top:12px;padding:13px;background:var(--red);color:#fff;border:none;border-radius:12px;font-weight:800;font-size:14px;cursor:pointer;font-family:inherit;">'
+      +(n?((EN?'Confirm and notify ':'Potvrdit a dát vědět ')+'('+n+')'):(EN?'Confirm':'Potvrdit'))+'</button>'
+    +'<button id="cxNo" style="width:100%;margin-top:8px;padding:11px;background:none;border:none;color:var(--mid);font-weight:700;cursor:pointer;font-family:inherit;">'+(EN?'Back':'Zpět')+'</button></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#cxNo').onclick=function(){ ov.remove(); };
+  ov.querySelector('#cxGo').onclick=async function(){
+    const btn=this; btn.disabled=true; btn.textContent=(EN?'Working…':'Probíhá…');
+    const choices={}; bk.forEach(function(x){ if(x.kind==='bank'){ const c=ov.querySelector('input[name="cxc_'+x.id+'"]:checked'); choices[x.id]=c?c.value:'move'; } });
+    const note=(ov.querySelector('#cxNote')&&ov.querySelector('#cxNote').value||'').trim();
+    let res; try{ res=await o.go(note, choices); }catch(e){ toast('⚠️ '+(e.message||'')); btn.disabled=false; btn.textContent=(EN?'Try again':'Zkusit znovu'); return; }
+    ov.remove();
+    if(n) _cxResultPopup(res||{}, EN?'Done':'Hotovo');
+  };
 }
 // A running course whose sessions already happened must not have its past re-drawn. Now that
 // course sessions carry ATTENDANCE (keyed date|time|name, same as normal classes), changing the
@@ -29232,7 +29489,7 @@ function _onceBlockHtml(){
       +'<span style="font-size:11px;color:var(--light);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+escapeHtml(_sum)+'</span><span style="margin-left:auto;font-size:12px;color:var(--light);">\u25be</span></summary>'
       +'<div style="padding:2px 13px 13px;">'
       // společné údaje pro všechny termíny
-      +'<div style="display:flex;gap:8px;margin-bottom:8px;"><div style="flex:1;"><div style="'+_lab+'">'+(EN?'Name':'N\u00e1zev')+'</div><input class="osgName" data-g="'+gi+'" type="text" value="'+escapeHtml(String(c.name||''))+'" placeholder="'+escapeHtml(String(title))+'" style="'+_inp+'"></div>'
+      +'<div style="display:flex;gap:8px;margin-bottom:8px;"><div style="flex:1;"><div style="'+_lab+'">'+(EN?'Name *':'N\u00e1zev *')+'</div><input class="osgName" data-g="'+gi+'" type="text" maxlength="60" value="'+escapeHtml(String(c.name||''))+'" placeholder="'+(EN?'e.g. Sparring':'nap\u0159. Sparring')+'" style="'+_inp+'"></div>'
       +'<div style="width:100px;"><div style="'+_lab+'">'+(EN?'Capacity *':'Kapacita *')+'</div><input class="osgCap" data-g="'+gi+'" type="number" min="1" max="200" inputmode="numeric" value="'+(c.cap!=null?c.cap:'')+'" style="'+_inp+'"></div></div>'
       +'<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">'
         +'<div style="flex:1 1 45%;min-width:140px;"><div style="'+_lab+'">'+(EN?'Level *':'\u00darove\u0148 *')+'</div><select class="osgLevel" data-g="'+gi+'" style="'+_inp+'background:#fff;">'
@@ -29277,11 +29534,8 @@ function _onceBlockWire(box){
     if(c.date){ const d=new Date(c.date+'T00:00:00'); d.setDate(d.getDate()+7); cp.date=_rcYmd(d); } else cp.date='';
     delete cp.id; cp.created_at=new Date().toISOString();
     _gymSchedule.push(cp); window._osOpenIdx=_gymSchedule.length-1; renderScheduleEditor(); }; });
-  box.querySelectorAll('.osDel').forEach(function(el){ el.onclick=async function(){ const i=+el.dataset.i; _gymSchedule.splice(i,1); _rcShiftAfterDelete(i); window._osOpenIdx=(i>0?i-1:null); renderScheduleEditor(); try{ await saveScheduleOnly(); }catch(e){} }; });
-  box.querySelectorAll('.osDelAll').forEach(function(el){ el.onclick=async function(){ const G=(window._osGroupList||[])[+el.dataset.g]; if(!G) return;
-    if(!confirm(LANG==='en'?'Delete this one-off class (all its dates)?':'Smazat tuhle jednor\u00e1zovou lekci (v\u0161echny jej\u00ed term\u00edny)?')) return;
-    G.items.slice().sort(function(a,b){ return b-a; }).forEach(function(ix){ _gymSchedule.splice(ix,1); _rcShiftAfterDelete(ix); });
-    renderScheduleEditor(); try{ await saveScheduleOnly(); }catch(e){} }; });
+  box.querySelectorAll('.osDel').forEach(function(el){ el.onclick=function(){ _schRemoveOnce([+el.dataset.i]); }; });
+  box.querySelectorAll('.osDelAll').forEach(function(el){ el.onclick=function(){ const G=(window._osGroupList||[])[+el.dataset.g]; if(G) _schRemoveOnce(G.items.slice()); }; });
   box.querySelectorAll('.osSave').forEach(function(el){ el.onclick=function(){ saveScheduleOnly(); }; });
 }
 function _recurBlockHtml(days){
@@ -29323,8 +29577,8 @@ function _recurBlockHtml(days){
       +'</summary>'
       +'<div style="padding:2px 13px 13px;">'
       +'<div style="display:flex;gap:8px;margin-bottom:8px;">'
-        +'<div style="flex:1;"><div style="'+_lab+'">'+(EN?'Name':'Název')+'</div>'
-          +'<input class="rcName" data-i="'+i+'" type="text" value="'+escapeHtml(String(_pv(i,'name',c.name||'')))+'" placeholder="'+escapeHtml(String(title))+'" style="'+_inp+'"></div>'
+        +'<div style="flex:1;"><div style="'+_lab+'">'+(EN?'Name *':'Název *')+'</div>'
+          +'<input class="rcName" data-i="'+i+'" type="text" maxlength="60" value="'+escapeHtml(String(_pv(i,'name',c.name||'')))+'" placeholder="'+(EN?'e.g. Beginners':'např. Začátečníci')+'" style="'+_inp+'"></div>'
         +'<div style="width:120px;"><div style="'+_lab+'">'+(EN?'Capacity *':'Kapacita *')+'</div>'
           +'<input class="rcCap" data-i="'+i+'" type="number" min="1" max="200" inputmode="numeric" value="'+(c.cap!=null?c.cap:'')+'" style="'+_inp+'"></div>'
       +'</div>'
@@ -29527,13 +29781,15 @@ function renderScheduleEditor(){
       ${c.once?`<label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;cursor:pointer;margin-top:8px;"><input type="checkbox" class="schOnceMemb" data-i="${i}" ${c.memb===true?'checked':''} style="width:17px;height:17px;"> ${LANG==='en'?'Also valid for passes/memberships':(_sellKind({gym:_myGymData})==='pass'?'Plat\u00ed i pro permanentky':'Plat\u00ed i pro \u010dlenstv\u00ed')}</label><div style="font-size:11px;color:var(--light);margin:2px 0 0 25px;line-height:1.4;">${LANG==='en'?'Off = drop-in only (e.g. a seminar). On = holders whose plan covers this level or class book it as usual.':'Vypnut\u00e9 = jen jednor\u00e1zov\u00fd vstup (nap\u0159. semin\u00e1\u0159). Zapnut\u00e9 = kdo m\u00e1 polo\u017eku na tuhle \u00farove\u0148 nebo lekci, rezervuje si ji jako obvykle.'}</div>`:''}${c.once?`<div style="font-size:11px;color:var(--light);margin-top:3px;">${LANG==='en'?'Only this date':'Jen tento den'}: ${c.date||'—'}</div>`:''}<button class="schSaveCls" data-i="${i}" style="width:100%;margin-top:10px;padding:11px;background:var(--dark);color:#fff;border:none;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;">💾 ${LANG==='en'?'Save class':'Uložit lekci'}</button>
     </div>`;
   const rangeLbl=`${weekDates[0].getDate()}.${weekDates[0].getMonth()+1}. – ${weekDates[6].getDate()}.${weekDates[6].getMonth()+1}.`;
+  // Dopředu nejvýš 3 měsíce od dneška (_schedHorizon); dny za tím se ukazují prázdné.
+  const _hz=_schedHorizon(); const _canNext=new Date(monday.getFullYear(),monday.getMonth(),monday.getDate()+7)<=_hz;
   let html=`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
       <button id="schPrev" style="width:38px;height:38px;border-radius:50%;border:1px solid var(--border);background:var(--surf);font-size:18px;cursor:pointer;">‹</button>
       <div style="font-family:'Bebas Neue';font-size:19px;letter-spacing:.03em;">${rangeLbl}</div>
-      <button id="schNext" style="width:38px;height:38px;border-radius:50%;border:1px solid var(--border);background:var(--surf);font-size:18px;cursor:pointer;">›</button>
+      <button id="schNext" ${_canNext?'':'disabled'} style="width:38px;height:38px;border-radius:50%;border:1px solid var(--border);background:var(--surf);font-size:18px;cursor:${_canNext?'pointer':'default'};opacity:${_canNext?'1':'.35'};">›</button>
     </div>
     <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-bottom:14px;">`;
-  weekDates.forEach(d=>{ const jd=d.getDay(); const _dymd=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); const cnt=_gymSchedule.filter(c=> c && (c.once ? (c.date===_dymd) : (_classSlots(c).some(function(s){return Number(s.day)===jd;}) && (!c.since || _dymd>=c.since) && (!c.until || _dymd<=c.until)))).length; const sel=jd===_schedSelDow;
+  weekDates.forEach(d=>{ const jd=d.getDay(); const _beyond=d>_hz; const _dymd=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); const cnt=_beyond?0:_gymSchedule.filter(c=> c && (c.once ? (c.date===_dymd) : (_classSlots(c).some(function(s){return Number(s.day)===jd;}) && (!c.since || _dymd>=c.since) && (!c.until || _dymd<=c.until)))).length; const sel=jd===_schedSelDow;
     html+=`<button class="schDayCell" data-dow="${jd}" style="display:flex;flex-direction:column;align-items:center;gap:2px;padding:7px 0;border:1px solid ${sel?'var(--dark)':'var(--border)'};border-radius:10px;background:${sel?'var(--dark)':'#fff'};color:${sel?'#fff':'var(--dark)'};cursor:pointer;font-family:'DM Sans';">
       <span style="font-size:10px;font-weight:700;${sel?'':'color:var(--light);'}">${days[jd]}</span>
       <span style="font-size:15px;font-weight:800;">${d.getDate()}</span>
@@ -29545,9 +29801,9 @@ function renderScheduleEditor(){
   // Dřív se hledal jen PRVNÍ termín toho dne, takže druhý nebyl
   // v rozvrhu vidět vůbec -- ale připomínka na něj přišla a docházka se zapisovala pod jeho
   // časem. Odtud „dvě verze téže lekce": rozvrh ukazoval 18:00, notifikace mluvila o 9:00.
-  const idxs=[];
+  const idxs=[]; const _selBeyond=_selDate>_hz;
   _gymSchedule.forEach(function(c,i){
-    if(!c) return;
+    if(!c || _selBeyond) return;
     // JEDNORÁZOVÁ LEKCE patří ke svému datu (nemá dny v týdnu). Bez tohohle v rozvrhu ani
     // v docházce nebyla vidět -- uložená byla, jen ji den nenašel.
     if(c.once){ if(c.date===_selYmd) idxs.push({ c:c, i:i, _t:c.time, _dur:c.dur }); return; }
@@ -29563,7 +29819,7 @@ function renderScheduleEditor(){
       <div style="font-weight:800;font-size:14px;letter-spacing:.02em;">${days[_schedSelDow]} <span style="color:var(--light);font-weight:600;">(${idxs.length})</span></div>
       ${_selPast?`<span style="font-size:12px;color:var(--light);font-weight:600;">🔒 ${LANG==='en'?'Past — read only':'Proběhlé — jen čtení'}</span>`:`<button id="schAddSel" style="font-size:13px;font-weight:700;color:#fff;background:var(--blue);border:none;border-radius:9px;padding:7px 13px;cursor:pointer;">+ ${LANG==='en'?'Add a class':'Přidat lekci'}</button>`}
     </div>`;
-  if(!idxs.length) html+=`<div style="font-size:13px;color:var(--light);padding:6px 0 10px;">${LANG==='en'?'No classes on this day.':'V tento den žádné lekce.'}</div>`;
+  if(!idxs.length) html+=`<div style="font-size:13px;color:var(--light);padding:6px 0 10px;">${_selBeyond?(LANG==='en'?'The schedule shows 3 months ahead.':'Rozvrh ukazuje 3 měsíce dopředu.'):(LANG==='en'?'No classes on this day.':'V tento den žádné lekce.')}</div>`;
   // Jedna lekce může mít v tomtéž dni dvě karty (dva termíny). Editace se ale smí rozbalit
   // jen u jedné, jinak by se formulář vykreslil dvakrát a psalo by se do stejné lekce ze dvou
   // míst naráz.
@@ -29575,7 +29831,7 @@ function renderScheduleEditor(){
         <button class="schAtt" data-i="${i}" data-t="${_t||''}" data-dur="${_dur||''}" style="flex-shrink:0;padding:5px 9px;background:#EEF2F6;color:#1E6FD9;border:none;border-radius:8px;font-size:11px;font-weight:700;cursor:pointer;font-family:'DM Sans';white-space:nowrap;">📋 ${(typeof _mtlPayMode==='function'&&_mtlPayMode(_schedGym())==='qr_bank')?(LANG==='en'?'Attendance & Payments':'Docházka & Úhrady'):(LANG==='en'?'Attendance':'Docházka')}</button>
         ${(_cPast&&c.once&&_schEnteredAfterStart(c))?`<button class="schPastDel" data-i="${i}" style="flex-shrink:0;padding:5px 9px;background:#FEECEC;color:var(--red);border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:'DM Sans';">${LANG==='en'?'Delete':'Smazat'}</button>`:''}<span style="color:var(--light);font-size:14px;flex-shrink:0;">${_cPast?'🔒':(open?'▴':'✎')}</span>
       </div>
-      ${open ? (c.once ? (_cPast?'':editFields(c,i)) : _occPanel(Object.assign({}, c, {time:_t, dur:_dur}), i)) : ''}
+      ${open ? (c.once ? (_cPast?'':editFields(c,i)) : _occPanel(Object.assign({}, c, {time:_t, dur:_dur, date:_selYmd}), i)) : ''}
     </div>`; });
   const _selYMD=`${_selDate.getFullYear()}-${String(_selDate.getMonth()+1).padStart(2,'0')}-${String(_selDate.getDate()).padStart(2,'0')}`;
   const _cohOcc=(window._gymCohortOcc&&window._gymCohortOcc[_selYMD])||[];
@@ -29667,7 +29923,7 @@ function renderScheduleEditor(){
   };
   box.querySelectorAll('.rcSaveOne').forEach(function(b){ b.onclick=function(){ window._rcOpenLesson=+b.dataset.i; _rcSaveAll(); }; });
   if($('schPrev')) $('schPrev').onclick=()=>{ _schedWeek--; renderScheduleEditor(); };
-  if($('schNext')) $('schNext').onclick=()=>{ _schedWeek++; renderScheduleEditor(); };
+  if($('schNext')) $('schNext').onclick=()=>{ if(!_canNext) return; _schedWeek++; renderScheduleEditor(); };
   box.querySelectorAll('.schDayCell').forEach(el=>el.onclick=()=>{ _schedSelDow=+el.dataset.dow; _schedEdit=-1; renderScheduleEditor(); });
   if($('schAddSel')) $('schAddSel').onclick=()=>{
     // ŽÁDNÝ PŘEDVOLENÝ DEN ANI ČAS. Dřív se nová lekce založila rovnou na vybraný den v 18:00
@@ -29708,6 +29964,7 @@ function renderScheduleEditor(){
   box.querySelectorAll('.schLead').forEach(el=>el.onchange=()=>{ const it=_gymSchedule[+el.dataset.i]; const oid=(_schedGym()&&_schedGym().owner_id)||(currentUser&&currentUser.id); it.leader=el.value||oid; if(it.leader===oid){ it.leaderName=(currentUser&&currentUser.name)||(LANG==='en'?'Owner':'Majitel'); } else { const cc=_gymTeamCoaches.find(x=>x.id===it.leader); it.leaderName=cc?cc.name:null; } renderScheduleEditor(); });
   box.querySelectorAll('.schDel').forEach(el=>el.onclick=()=>_schDeleteClass(+el.dataset.i));
   box.querySelectorAll('.rcDel').forEach(el=>el.onclick=()=>_schDeleteClass(+el.dataset.i));
+  box.querySelectorAll('.schEndOcc').forEach(el=>el.onclick=(ev)=>{ ev.stopPropagation(); _schDeleteClass(+el.dataset.i, { date:el.dataset.d, time:el.dataset.t }); });
   box.querySelectorAll('.schSaveCls').forEach(el=>el.onclick=()=>{
     const i=+el.dataset.i;
     // Sync this class's capacity from the DOM first: a pre-filled value the owner never TOUCHED
@@ -29842,7 +30099,7 @@ async function saveGymManage(){
   { const _bad=plans.find(function(p){ return p.att && p.att.on && !(p.att.amt>0); });
     if(_bad){ toast(LANG==='en'?('⚠️ '+_bad.name+': enter the attendance discount amount, or switch it off'):('⚠️ '+_bad.name+': vyplň výši slevy za docházku, nebo ji vypni'), 1); return; }
     const _bad2=plans.find(function(p){ return p.att && p.att.on && p.att.maxAbs==null && !(p.att.minVisits>0); });
-    if(_bad2){ toast(LANG==='en'?('⚠️ '+_bad2.name+': fill in max absences or min. sessions for the attendance discount'):('⚠️ '+_bad2.name+': u slevy za docházku vyplň nejvýš absencí, nebo aspoň tréninků'), 1); return; } }
+    if(_bad2){ toast(LANG==='en'?('⚠️ '+_bad2.name+': fill in '+(_bad2.att.kind==='visits'?'Min. sessions':'Max. absences')+' for the attendance discount'):('⚠️ '+_bad2.name+': u slevy za docházku vyplň '+(_bad2.att.kind==='visits'?'Min. tréninků':'Max. absence')), 1); return; } }
   const first = plans[0]||null;
   const termsTitle = ($('mgTermsTitle')&&$('mgTermsTitle').value.trim())||null;
   let termsText = ($('mgTermsText')&&$('mgTermsText').value.trim())||null;
@@ -29853,37 +30110,9 @@ async function saveGymManage(){
     if(!_wc.ok){ toast('⚠️ '+_wc.why); try{ const _ta=$('mgTermsText'); if(_ta){ _ta.focus(); _ta.scrollIntoView({behavior:'smooth',block:'center'}); } }catch(e){} return; }
     termsText=_wc.text;
   }
-  {
-    const _t2=_rcToday();
-    const _noLvl=_gymSchedule.findIndex(c=> c && !(c.until && c.until<_t2) && !(c.once && c.date && c.date<_t2) && !c.level);
-    if(_noLvl>=0){
-      const _cl=_gymSchedule[_noLvl]||{};
-      toast(LANG==='en'
-        ? `\u26a0\ufe0f Pick a level for "${(_cl.name||'')}" (${_clsWhen(_cl)})`
-        : `\u26a0\ufe0f Vyber \u00farove\u0148 u lekce \u201e${(_cl.name||'')}" (${_clsWhen(_cl)})`);
-      return;
-    }
-  }
-  // KAŽDÁ LEKCE MUSÍ MÍT ASPOŇ JEDEN TERMÍN (den + čas). Bez toho nejde uložit -- jinak by
-  // v rozvrhu ležela lekce, kterou nikdo neuvidí a která mate při každé další úpravě.
-  {
-    const _t3=_rcToday();
-    const _noSlot=_gymSchedule.findIndex(function(c){ return c && !c.once && !(c.until && c.until<_t3) && !_classSlots(c).length; });
-    if(_noSlot>=0){
-      const _cl=_gymSchedule[_noSlot]||{};
-      toast(LANG==='en' ? `\u26a0\ufe0f Pick a day and time for \u201e${(_cl.name||'')}\u201c`
-                        : `\u26a0\ufe0f Vyber den a \u010das u lekce \u201e${(_cl.name||'')}\u201c`);
-      try{ window._rcOpen=true; window._rcOpenLesson=_noSlot; renderScheduleEditor(); }catch(e){}
-      return;
-    }
-  }
-  // Rozepsané změny v editoru opakovaných lekcí (název, čas) se uloží i tímhle tlačítkem -- dřív se
-  // propsaly jen přes „Uložit" u lekce a uložení nastavení je tiše zahodilo.
-  try{ _rcApplyPending(); }catch(e){}
-  // POJISTKA PŘED ULOŽENÍM: dva termíny téže lekce v jednom dni se do databáze nedostanou.
-  try{ const _rm=_dedupeAllSlots(); if(_rm) console.log('[rozvrh] slouceno duplicitnich terminu:', _rm); }catch(e){}
-  // Stejný vyčištěný tvar jako u uložení z Rozvrhu (_schedNorm).
-  const sched = JSON.stringify(_schedNormAll(_gymSchedule));
+  // ROZVRH SE TADY NEUKLÁDÁ. Ukládá ho jen „Uložit" v Rozvrhu (saveScheduleOnly). Dřív tohle
+  // tlačítko posílalo celý rozvrh z paměti appky: přepsalo lekci, kterou mezitím přidal trenér
+  // z jiného zařízení, a uložení třeba fakturačního e-mailu blokovala chyba v rozvrhu.
   let _curSel = ($('mgCurrency')&&$('mgCurrency').value) || _myGymData.currency || 'CZK';
   // CURRENCY LOCK: once a club has taken ANY payment, its currency is fixed -- changing it would break
   // reconciliation, doklady and history. Only checked when a change is actually attempted (no latency otherwise).
@@ -29931,7 +30160,7 @@ async function saveGymManage(){
         : null),
       member_app_text: (($('mgMemberAppText') && $('mgMemberAppText').value.trim()) || null),
       member_app_type: (($('mgMemberAppType') && $('mgMemberAppType').value.trim()) || null),
-      membership_plans:JSON.stringify(plans), membership_name:first?first.name:null, membership_price:first?first.price:null, schedule:sched, terms_title:termsTitle, terms_text:termsText };
+      membership_plans:JSON.stringify(plans), membership_name:first?first.name:null, membership_price:first?first.price:null, terms_title:termsTitle, terms_text:termsText };
   // FORMA ORGANIZACE SE ZAPISUJE JEN Z VYKRESLENÉHO PŘEPÍNAČE. `_gymOrgForm` je globál:
   // držel hodnotu z klubu, který byl otevřený naposledy, a uložení nastavení JINÉHO klubu
   // mu ji tiše přepsalo -- odtud spolky tam, kde nikdo spolek nezaškrtl.
@@ -30039,7 +30268,7 @@ async function saveGymManage(){
     toast(LANG==='en'?'\u26a0\ufe0f No connection to the server \u2014 nothing was saved. Try again.':'\u26a0\ufe0f Spojen\u00ed se serverem selhalo \u2014 nic se neulo\u017eilo. Zkus to znovu.'); return; }
   if(error){ toast('⚠️ '+error.message); return; }
   if((termsText||'').trim()){ const _ch=(termsText!==_oldWaiverText)||!(_myGymData.waiver_version); if(_ch){ const _nv=(_myGymData.waiver_version||0)+1; const _h=_waiverHash((termsTitle||'')+'|'+termsText); try{ await supaClient.from('waiver_versions').insert({ gym_id:_myGymData.id, version:_nv, title:termsTitle||null, body:termsText, body_hash:_h, author_confirmed:true }); await supaClient.from('gyms').update({ waiver_version:_nv, waiver_author_confirmed_at:new Date().toISOString() }).eq('id', _myGymData.id); _myGymData.waiver_version=_nv; }catch(e){ console.warn('waiver ver', e); } } }
-  _myGymData.dropin_price=dropin; _myGymData.membership_plans=JSON.stringify(plans); _myGymData.membership_name=first?first.name:null; _myGymData.membership_price=first?first.price:null; _myGymData.schedule=sched; try{ _schedReplaceInPlace(_gymSchedule, JSON.parse(sched)); }catch(e){} _myGymData.terms_title=termsTitle; _myGymData.terms_text=termsText; _myGymData.org_form=_gymOrgForm; 
+  _myGymData.dropin_price=dropin; _myGymData.membership_plans=JSON.stringify(plans); _myGymData.membership_name=first?first.name:null; _myGymData.membership_price=first?first.price:null; _myGymData.terms_title=termsTitle; _myGymData.terms_text=termsText; _myGymData.org_form=_gymOrgForm; 
   toast(LANG==='en'?'✅ Saved':'✅ Uloženo');
   try{ var _sov=document.querySelector('.setSecOv'); if(_sov&&_sov._close) _sov._close(); }catch(e){}
 }
@@ -32450,7 +32679,7 @@ const RECEIVER_DECL_EN='I declare this bank account belongs to me / my entity an
 // pokud volající nepředal vlastní snímek -- takže se uloží vše, co člověk u zaškrtávátka viděl,
 // u všech souhlasů včetně budoucích, bez úprav každého místa zvlášť.
 (function(){ try{ document.addEventListener('click', function(e){ try{ let el=e.target, box=null; for(let i=0; el && el.nodeType===1 && el!==document.body && i<60; i++, el=el.parentElement){ const cs=getComputedStyle(el); if(cs.position==='fixed' || (el.classList && el.classList.contains('sheet'))) box=el; } if(box){ window._consentCtx={ at:Date.now(), text:String(box.innerText||'').replace(/\n{3,}/g,'\n\n').trim().slice(0,20000) }; } }catch(_e){} }, true); }catch(e){} })();
-function _recordConsent(kind, version, lang, body_text, meta, scope, shown){ try{ if(typeof currentUser==='undefined'||!currentUser) return; if(!shown){ try{ const _cx=window._consentCtx; if(_cx && _cx.text && (Date.now()-_cx.at)<180000) shown=_cx.text; }catch(_e){} } fetch('/api/record-consent',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ user_id: currentUser.id, kind: kind, version: String(version), lang: lang, body_text: body_text, meta: meta||null, scope: scope||null, shown: shown||null }) }).catch(function(){}); }catch(e){} }
+function _recordConsent(kind, version, lang, body_text, meta, scope, shown){ try{ if(typeof currentUser==='undefined'||!currentUser) return; if(!shown){ try{ const _cx=window._consentCtx; if(_cx && _cx.text && (Date.now()-_cx.at)<180000) shown=_cx.text; }catch(_e){} } Promise.resolve(_freshTok()).then(function(_tk){ return fetch('/api/record-consent',{ method:'POST', headers:{'Content-Type':'application/json', Authorization:'Bearer '+(_tk||'')}, body:JSON.stringify({ kind: kind, version: String(version), lang: lang, body_text: body_text, meta: meta||null, scope: scope||null, shown: shown||null }) }); }).catch(function(){}); }catch(e){} }
 function openGymReq(existingCount){
   if(!currentUser){ toast(L('⚠️ Nejprve se přihlas')); return; }
   const nm=document.getElementById('grName'), ct=document.getElementById('grCity'), wy=document.getElementById('grWhy');
@@ -50751,6 +50980,7 @@ if($('btnCloseTerms')) $('btnCloseTerms').onclick=()=>closeSheet('shTerms');
 if($('btnClosePrivacy')) $('btnClosePrivacy').onclick=()=>closeSheet('shPrivacy');
 if($('sTerms')) $('sTerms').onclick=openTerms;
 if($('sPrivacy')) $('sPrivacy').onclick=openPrivacy;
+if($('sCookies')) $('sCookies').onclick=function(){ _cookieBanner(true); };
 const SUP_FAQ=[
   {q:['Co v MTL najdu?','What can I find in the MTL app?'], a:[
    'Místa, kde se trénuje, lidi, kteří tě naučí, a bojové akce. Dole máš pět záložek:<br><br><b>🏛️ {V}</b> — skupinovky, permanentky, kurzy<br><b>🧑‍🏫 {R}</b> — soukromky 1:1 i online<br><b>🥊 Akce</b> — turnaje, semináře a vstupenky<br><b>💬 Zprávy</b> — tvoje konverzace<br><b>👤 Já</b> — tvoje rezervace, doklady a statistiky<br><br>Appka je zdarma — platíš jen za trénink.<br><br><span style="color:var(--mid);font-size:12.5px;">Nabídku vidíš ve své zemi. Do jiné země se můžeš podívat dvakrát denně — vybereš si ji ze seznamu a načte se jen ta.</span>',
@@ -50909,9 +51139,12 @@ if($('supSend')) $('supSend').onclick=()=>submitSupport();
 // Cookie / consent banner — professional, granular (necessary always-on, marketing opt-in).
 // Sets mtl_cookie_ok (decided) + mtl_cookie_marketing (1/0). The MTL Ecosystem Pixel fires only
 // when mtl_cookie_marketing==='1'. Strictly-necessary (functional) cookies need no consent.
-(function(){
+// Volbu jde kdykoli změnit v Nastavení → Cookies a měření (_cookieBanner(true)): odvolání souhlasu
+// musí být stejně snadné jako jeho udělení (čl. 7 odst. 3 GDPR).
+function _cookieBanner(force){
   let decided=false; try{ decided=localStorage.getItem('mtl_cookie_ok')==='1'; }catch(e){}
-  if(decided) return;
+  if(decided && !force) return;
+  { const _old=document.getElementById('mtlCookieBar'); if(_old) _old.remove(); }
   const cs=(localStorage.getItem('mtl_lang')==='cs');
   function setConsent(marketing){ var _prev=null; try{ _prev=localStorage.getItem('mtl_cookie_marketing'); }catch(e){} try{ localStorage.setItem('mtl_cookie_ok','1'); localStorage.setItem('mtl_cookie_marketing', marketing?'1':'0'); }catch(e){} try{ var _new=marketing?'1':'0'; if(_prev!==_new && typeof _recordConsent==='function' && typeof currentUser!=='undefined' && currentUser) _recordConsent('marketing', LEGAL_VERSION, LANG, (LANG==='en'?MARKETING_CONSENT_EN:MARKETING_CONSENT_CS), { action: marketing?'grant':'withdraw', channel:'cookie_banner' }); }catch(e){} }
   const wrap=document.createElement('div');
@@ -50951,7 +51184,10 @@ if($('supSend')) $('supSend').onclick=()=>submitSupport();
   card.querySelector('#ckNec').onclick=function(){ setConsent(false); done(); };
   card.querySelector('#ckSettingsLink').onclick=function(e){ e.preventDefault(); var s=card.querySelector('#ckSettings'), sv=card.querySelector('#ckSaveWrap'); var open=s.style.display!=='none'; s.style.display=open?'none':'block'; sv.style.display=open?'none':'inline'; };
   card.querySelector('#ckSave').onclick=function(e){ e.preventDefault(); var m=card.querySelector('#ckMkt'); setConsent(!!(m&&m.checked)); done(); };
-})();
+  // Z Nastavení: rovnou otevřené volby s tím, co platí teď.
+  if(force){ try{ card.querySelector('#ckSettings').style.display='block'; card.querySelector('#ckSaveWrap').style.display='inline'; card.querySelector('#ckMkt').checked=(localStorage.getItem('mtl_cookie_marketing')==='1'); }catch(e){} }
+}
+_cookieBanner(false);
 (function(){ async function _run(){ try{ var ref=new URLSearchParams(location.search).get('ref'); if(ref){ var _s=await supaClient.auth.getSession(); var _li=!!(_s&&_s.data&&_s.data.session); if(!_li){ try{ localStorage.setItem('mtl_ref_pending', ref); }catch(e){} } try{ localStorage.setItem('mtl_gym_ref', JSON.stringify({code:ref,ts:Date.now()})); }catch(e){} if(_li && _s.data.session.user){ try{ supaClient.from('profiles').update({pending_gym_ref:ref, pending_gym_ref_at:new Date().toISOString()}).eq('id',_s.data.session.user.id); }catch(e){} } } }catch(e){} try{ var _fam=new URLSearchParams(location.search).get('family'); if(_fam){ var _sf=await supaClient.auth.getSession(); var _lif=!!(_sf&&_sf.data&&_sf.data.session); // Token si schovat VŽDY. Tenhle kód běží při načtení stránky, kdy currentUser ještě není
         // naplněný -- _consumeFamilyInvite hned na prvním řádku vypadne na !me a odkaz neudělá nic.
         // Vyzvedne se v enterApp přes _famPendingCheck, kde už profil existuje.
